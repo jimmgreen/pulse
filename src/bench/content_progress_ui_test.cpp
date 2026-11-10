@@ -29,6 +29,17 @@ int RunContentProgressUiTest(int argc, char** argv) {
     s.hwnd=CreateWindowExW(0,wc.lpszClassName,L"",WS_OVERLAPPEDWINDOW,0,0,1100,720,nullptr,nullptr,wc.hInstance,nullptr);
     if(!s.hwnd || !s.compositor.Init(s.hwnd)) return 2;
     s.renderer.SetCompositor(&s.compositor);
+    auto status_content_right = [&](const ui::WindowViewModel& vm, const D2D1_RECT_F& rect, float scale) {
+        return vm.layout_controls.visible
+            ? std::max(rect.left, ui::PaneLayoutStripBounds(vm, rect, scale, s.compositor.DwriteFactory(), s.compositor.SmallFormat()).left - 4 * scale)
+            : rect.right;
+    };
+    auto progress_span = [&](const ui::StatusBarMetrics& metrics, const D2D1_RECT_F& rect, float scale) {
+        const float right = std::max(rect.left, metrics.content_right - metrics.pad);
+        const float left = std::min(right, metrics.ai_chip.right > metrics.ai_chip.left
+            ? metrics.ai_chip.right + 12 * scale : rect.left + metrics.pad);
+        return D2D1::RectF(left, metrics.bar.top, right, metrics.bar.bottom);
+    };
     s.window_tabs.EnsureDefault(); s.pane=s.window_tabs.Active()->FocusedPane();
     auto* tab=ActiveTab(s);
     if (GetEnvironmentVariableW(L"PULSE_TEST_TITLE_LAYOUT", nullptr, 0)) return RunTitleLayoutProbe(s);
@@ -129,8 +140,53 @@ int RunContentProgressUiTest(int argc, char** argv) {
         s.renderer.SetCompositor(nullptr); s.compositor.Shutdown(); DestroyWindow(s.hwnd); s.hwnd=nullptr;
         CoUninitialize(); return failures ? 1:0;
     }
-    const bool pill_only = argc > 1 && std::string_view(argv[1]) == "--operation-pill-only";
+    const bool pill_150 = argc > 1 && std::string_view(argv[1]) == "--operation-pill-150";
+    const bool pill_only = pill_150 || (argc > 1 && std::string_view(argv[1]) == "--operation-pill-only");
     const bool update_only = argc > 1 && std::string_view(argv[1]) == "--update-only";
+    auto check_status_layout_bounds = [&] {
+        for (float probe_scale : {1.0f, 1.5f}) {
+            s.compositor.RecreateTextFormats(probe_scale);
+            for (int width : {0, 16, 32, 64, 96, 160, 360}) for (bool ai : {false, true}) for (bool query : {false, true}) {
+                ui::WindowViewModel probe;
+                probe.status.ai_state = ai ? ui::StatusAiState::Idle : ui::StatusAiState::Hidden;
+                probe.status.ai_label = L"AI";
+                probe.status.query_active = probe.status.query_cancellable = query;
+                probe.status.query_text = L"Search progress";
+                probe.status.task_is_update = !query;
+                probe.status.task_text = L"Download progress";
+                const auto bounds = D2D1::RectF(0, 0, width * probe_scale, 720 * probe_scale);
+                const auto metrics = ui::MakeStatusBarMetrics(probe, bounds, probe_scale, 24 * probe_scale,
+                    s.compositor.DwriteFactory(), s.compositor.SmallFormat());
+                const auto span = progress_span(metrics, bounds, probe_scale);
+                const float end = query ? metrics.cancel_search.right : metrics.task.right;
+                bool fits = metrics.content_right >= bounds.left && metrics.content_right <= bounds.right &&
+                    std::isfinite(metrics.task.left) && std::isfinite(metrics.task.right) &&
+                    metrics.task.left >= span.left && metrics.task.right >= metrics.task.left &&
+                    end <= span.right && std::abs((metrics.task.left + end - span.left - span.right) * .5f) < .1f;
+                if (query) {
+                    fits &= metrics.cancel_search.left >= metrics.task.right &&
+                        metrics.cancel_search.right >= metrics.cancel_search.left;
+                    if (metrics.cancel_search.right > metrics.cancel_search.left) {
+                        fits &= ui::StatusBarHitRegion(probe, bounds,
+                            (metrics.cancel_search.left + metrics.cancel_search.right) * .5f,
+                            (metrics.cancel_search.top + metrics.cancel_search.bottom) * .5f,
+                            probe_scale, 24 * probe_scale, &s.compositor) == ui::HitTestResult::StatusBarCancelSearch;
+                    }
+                }
+                if (!fits) std::cout << "    width=" << width << " scale=" << probe_scale << " ai=" << ai << " query=" << query
+                    << " span=" << span.left << ":" << span.right << " task=" << metrics.task.left << ":" << metrics.task.right
+                    << " end=" << end << std::endl;
+                check(fits, "progress fits between AI and layout controls without negative or overlapping targets");
+            }
+        }
+        s.compositor.RecreateTextFormats(s.scale);
+    };
+    if (argc > 1 && std::string_view(argv[1]) == "--status-layout-only") {
+        check_status_layout_bounds();
+        s.renderer.SetCompositor(nullptr); s.compositor.Shutdown(); DestroyWindow(s.hwnd); s.hwnd=nullptr;
+        CoUninitialize(); return failures ? 1 : 0;
+    }
+    if (!pill_only && !update_only) check_status_layout_bounds();
     if (!update_only && !pill_only) {
     const auto output=std::filesystem::absolute(L"../bench_data/content-progress-ui");
     std::filesystem::create_directories(output);
@@ -148,8 +204,12 @@ int RunContentProgressUiTest(int argc, char** argv) {
                 vm.tooltip_y=metrics.cancel_search.top;
             }
             if(vm.status.query_active) {
-                check(std::abs((metrics.task.left+metrics.cancel_search.right)/2-(rect.left+rect.right)/2)<0.1f,
-                    "search progress and cancel icon are centered together");
+                const float content_right = status_content_right(vm, rect, scale);
+                const auto span = progress_span(metrics, rect, scale);
+                check(std::abs(metrics.content_right - content_right) < 0.1f &&
+                    std::abs((metrics.task.left+metrics.cancel_search.right)/2-(span.left+span.right)/2)<0.1f &&
+                    metrics.task.left >= span.left && metrics.cancel_search.right <= span.right,
+                    "search progress and cancel icon are centered together before the layout strip");
                 const float available=metrics.task.right-metrics.task.left-112*scale;
                 check(ui::MeasureTextWidth(s.compositor.DwriteFactory(),s.compositor.SmallFormat(),vm.status.query_text)<=available,
                     "query label and progress track fit at requested width and DPI");
@@ -165,8 +225,9 @@ int RunContentProgressUiTest(int argc, char** argv) {
             const auto theme=ui::MakeTheme(dark,ui::HexColor(0x0078D4));
             s.compositor.Dc()->BeginDraw(); s.renderer.Render(vm,rect,theme);
             check(SUCCEEDED(s.compositor.Dc()->EndDraw()),"actual content renderer completes");
-            if(scale==1.0f) {
-                const auto file=output/(std::wstring(label)+L"-"+std::to_wstring(width)+(dark ? L"-dark.png":L"-light.png"));
+            if(scale==1.0f || std::wstring_view(label)==L"known") {
+                const auto file=output/(std::wstring(label)+L"-"+std::to_wstring(width)+
+                    (scale>1.0f ? L"-150" : L"")+(dark ? L"-dark.png":L"-light.png"));
                 check(s.compositor.SaveSnapshot(file.c_str()),"content query progress screenshot saved");
             }
         }
@@ -260,10 +321,13 @@ int RunContentProgressUiTest(int argc, char** argv) {
                         "download uses actual ratio; unknown length and installation stages stay indeterminate");
                     const auto metrics = ui::MakeStatusBarMetrics(update_vm, rect, scale, 24 * scale,
                         s.compositor.DwriteFactory(), s.compositor.SmallFormat());
-                    check(metrics.task.left >= rect.left && metrics.task.right <= rect.right &&
+                    const float content_right = status_content_right(update_vm, rect, scale);
+                    const auto span = progress_span(metrics, rect, scale);
+                    check(std::abs(metrics.content_right - content_right) < 0.1f &&
+                          metrics.task.left >= span.left && metrics.task.right <= span.right &&
                           metrics.task.right > metrics.task.left &&
-                          std::abs((metrics.task.left + metrics.task.right) / 2 - rect.right / 2) < 0.1f,
-                        "update label and progress group remain centered and bounded at narrow widths and DPI");
+                          std::abs((metrics.task.left + metrics.task.right) / 2 - (span.left + span.right) / 2) < 0.1f,
+                        "update label and progress group remain centered in the available status area at narrow widths and DPI");
                     check(ui::StatusBarHitRegion(update_vm, rect, (metrics.task.left + metrics.task.right) / 2,
                         metrics.bar.top + 1, scale, 24 * scale, &s.compositor) == ui::HitTestResult::StatusBar,
                         "update progress is not a file-operation click target");
@@ -271,6 +335,13 @@ int RunContentProgressUiTest(int argc, char** argv) {
                     s.compositor.Dc()->BeginDraw();
                     s.renderer.Render(update_vm, rect, theme);
                     check(SUCCEEDED(s.compositor.Dc()->EndDraw()), "actual update status-bar renderer completes");
+                    if (std::wstring_view(language) == L"zh-CN" && std::wstring_view(phase) == L"downloading" &&
+                        (width == 360 || width == 1100)) {
+                        const auto image = update_output / (L"representative-" + std::to_wstring(width) +
+                            (settings ? L"-settings" : L"-normal") + (scale > 1.0f ? L"-150" : L"-100") +
+                            (dark ? L"-dark.png" : L"-light.png"));
+                        check(s.compositor.SaveSnapshot(image.c_str()), "representative update DPI/theme screenshot saved");
+                    }
                     if (settings && scale == 1.0f && width == 1100 && dark) {
                         const auto image = update_output / (std::wstring(language) + L"-" + phase + L".png");
                         check(s.compositor.SaveSnapshot(image.c_str()), "update settings screenshot saved");
@@ -309,9 +380,10 @@ int RunContentProgressUiTest(int argc, char** argv) {
         l10n::SetLanguage(L"zh-CN");   // the update loop above ends in en-US
         const auto output = std::filesystem::absolute(L"../bench_data/content-progress-ui");
         std::filesystem::create_directories(output);
-        s.scale = 1.0f; s.compositor.RecreateTextFormats(1.0f); s.renderer.SetScale(1.0f);
-        auto rect = D2D1::RectF(0, 0, 1100, 720);
-        s.compositor.Resize(1100, 720);
+        const float scale = pill_150 ? 1.5f : 1.0f;
+        s.scale = scale; s.compositor.RecreateTextFormats(scale); s.renderer.SetScale(scale);
+        auto rect = D2D1::RectF(0, 0, 1100 * scale, 720 * scale);
+        s.compositor.Resize(static_cast<UINT>(rect.right), static_cast<UINT>(rect.bottom));
         for (const bool dark : {true, false}) {
             const auto theme = ui::MakeTheme(dark, ui::HexColor(0x6474C7));
             auto base = app::BuildWindowViewModel(*s.pane, s.sidebar, true, false, dark, &s.places);
@@ -321,7 +393,7 @@ int RunContentProgressUiTest(int argc, char** argv) {
                 s.compositor.Dc()->BeginDraw(); s.renderer.Render(vm, rect, theme);
                 const bool drawn = SUCCEEDED(s.compositor.Dc()->EndDraw());
                 if (name) {
-                    const auto file = output / (std::wstring(L"pill-") + name + (dark ? L"-dark.png" : L"-light.png"));
+                    const auto file = output / (std::wstring(L"pill-") + name + (pill_150 ? L"-150" : L"") + (dark ? L"-dark.png" : L"-light.png"));
                     check(drawn && s.compositor.SaveSnapshot(file.c_str()), "operation pill screenshot saved");
                 }
             };
@@ -336,63 +408,79 @@ int RunContentProgressUiTest(int argc, char** argv) {
             frame(paused, L"paused");
             int resume_hits = 0;
             for (float x = 0; x < rect.right; ++x) {
-                const auto pill_hit = s.renderer.HitTest(paused, rect, x, rect.bottom - 12);
+                const auto pill_hit = s.renderer.HitTest(paused, rect, x, rect.bottom - 12 * scale);
                 if (pill_hit.region == ui::HitTestResult::StatusBarTask && pill_hit.sub_index == 2) ++resume_hits;
             }
             check(resume_hits > 0, "paused pill exposes resume action index 2");
             const auto wide_rect = rect;
-            rect.right = 360;
-            s.compositor.Resize(360, 720);
+            rect.right = 360 * scale;
+            s.compositor.Resize(static_cast<UINT>(rect.right), static_cast<UINT>(rect.bottom));
             frame(paused, L"paused-narrow");
             int narrow_resume = 0;
             for (float x = 0; x < rect.right; ++x) {
-                const auto pill_hit = s.renderer.HitTest(paused, rect, x, rect.bottom - 12);
+                const auto pill_hit = s.renderer.HitTest(paused, rect, x, rect.bottom - 12 * scale);
                 if (pill_hit.region == ui::HitTestResult::StatusBarTask && pill_hit.sub_index == 2) ++narrow_resume;
             }
             check(narrow_resume > 0, "narrow paused pill retains a bounded resume target");
             rect = wide_rect;
-            s.compositor.Resize(1100, 720);
+            s.compositor.Resize(static_cast<UINT>(rect.right), static_cast<UINT>(rect.bottom));
             auto done = base;
             done.status.task_text = L"\x5df2\x590d\x5236 12 \x4e2a\x9879\x76ee";
             done.status.task_can_undo = done.status.task_can_open = true;
             frame(done, nullptr);
             Sleep(650);   // past the finish pop
             frame(done, L"done");
-            // Scan the bar: 撤销 then 打开, both inside the operation pill.
-            const float y = rect.bottom - 12.0f;
+            // The pill follows counts/history; 定位 precedes 撤销 in the current layout.
+            const float y = rect.bottom - 12.0f * scale;
             float undo_x = -1, open_x = -1;
             int plain = 0;
-            for (float x = rect.right * 0.48f; x < rect.right; x += 1.0f) {
+            const auto done_bounds = s.renderer.TaskPillRect();
+            bool done_bounds_match = true;
+            for (float x = 0; x < rect.right; x += 1.0f) {
                 const auto area = s.renderer.HitTest(done, rect, x, y);
+                done_bounds_match &= (area.region == ui::HitTestResult::StatusBarTask) == ui::ContainsPt(done_bounds, x, y);
                 if (area.region != ui::HitTestResult::StatusBarTask) continue;
                 if (area.sub_index == 0 && undo_x < 0) undo_x = x;
                 else if (area.sub_index == 1 && open_x < 0) open_x = x;
                 else if (area.sub_index < 0) ++plain;
             }
-            check(undo_x > 0 && open_x > undo_x && plain > 0,
-                  "finished pill: undo and open have their own targets, the rest opens details");
+            check(done_bounds_match && open_x >= done_bounds.left && undo_x > open_x && undo_x < done_bounds.right && plain > 0,
+                  "finished pill: locate precedes undo with separate semantic targets, the rest opens details");
             if (dark) {
                 Sleep(12050);
                 frame(done, L"done-compact");
                 int compact_hits = 0, compact_actions = 0;
+                const auto compact_bounds = s.renderer.TaskPillRect();
+                bool compact_bounds_match = true;
                 for (float x = 0; x < rect.right; ++x) {
                     const auto pill_hit = s.renderer.HitTest(done, rect, x, y);
+                    compact_bounds_match &= (pill_hit.region == ui::HitTestResult::StatusBarTask) == ui::ContainsPt(compact_bounds, x, y);
                     if (pill_hit.region == ui::HitTestResult::StatusBarTask) {
                         ++compact_hits;
                         if (pill_hit.sub_index >= 0) ++compact_actions;
                     }
                 }
-                check(compact_hits > 0 && compact_hits <= 32 && compact_actions == 0,
+                check(compact_hits > 0 && compact_bounds_match && compact_actions == 0 &&
+                      compact_bounds.left >= rect.left && compact_bounds.right <= status_content_right(done, rect, scale) &&
+                      compact_bounds.right - compact_bounds.left < done_bounds.right - done_bounds.left,
                       "after 12 seconds a clickable icon remains without stale action targets");
-                rect.right = 360;
-                s.compositor.Resize(360, 720);
+                rect.right = 360 * scale;
+                s.compositor.Resize(static_cast<UINT>(rect.right), static_cast<UINT>(rect.bottom));
                 frame(done, L"done-compact-narrow");
                 int narrow_compact = 0;
-                for (float x = 0; x < rect.right; ++x)
-                    if (s.renderer.HitTest(done, rect, x, y).region == ui::HitTestResult::StatusBarTask) ++narrow_compact;
-                check(narrow_compact > 0 && narrow_compact <= 32, "compact narrow pill matches visible icon bounds");
+                const auto narrow_bounds = s.renderer.TaskPillRect();
+                bool narrow_bounds_match = true;
+                for (float x = 0; x < rect.right; ++x) {
+                    const auto narrow_hit = s.renderer.HitTest(done, rect, x, y);
+                    narrow_bounds_match &= (narrow_hit.region == ui::HitTestResult::StatusBarTask) == ui::ContainsPt(narrow_bounds, x, y);
+                    if (narrow_hit.region == ui::HitTestResult::StatusBarTask) ++narrow_compact;
+                }
+                check(narrow_compact > 0 && narrow_bounds_match && narrow_bounds.left >= rect.left &&
+                      narrow_bounds.right <= status_content_right(done, rect, scale) &&
+                      std::abs((narrow_bounds.right - narrow_bounds.left) - (compact_bounds.right - compact_bounds.left)) < 0.1f,
+                      "compact narrow pill matches visible icon bounds and retains the same icon-only width");
                 rect = wide_rect;
-                s.compositor.Resize(1100, 720);
+                s.compositor.Resize(static_cast<UINT>(rect.right), static_cast<UINT>(rect.bottom));
                 frame(running, nullptr);
                 frame(done, nullptr);
             }
@@ -406,8 +494,10 @@ int RunContentProgressUiTest(int argc, char** argv) {
             frame(running, nullptr);
             frame(no_undo, nullptr);
             int undo_hits = 0;
-            for (float x = rect.right * 0.48f; x < rect.right; x += 1.0f)
-                if (s.renderer.HitTest(no_undo, rect, x, y).sub_index == 0) ++undo_hits;
+            for (float x = 0; x < rect.right; x += 1.0f) {
+                const auto no_undo_hit = s.renderer.HitTest(no_undo, rect, x, y);
+                if (no_undo_hit.region == ui::HitTestResult::StatusBarTask && no_undo_hit.sub_index == 0) ++undo_hits;
+            }
             check(undo_hits == 0, "no undo target when the operation cannot be undone");
             auto bad = base;
             bad.status.task_text = L"2 \x9879\x672a\x6210\x529f \x00b7 \x70b9\x51fb\x67e5\x770b";
@@ -418,11 +508,14 @@ int RunContentProgressUiTest(int argc, char** argv) {
             Sleep(650);
             frame(bad, L"partial");
             int bad_actions = 0, bad_task = 0;
-            for (float x = rect.right * 0.48f; x < rect.right; x += 1.0f) {
+            const auto bad_bounds = s.renderer.TaskPillRect();
+            bool bad_bounds_match = true;
+            for (float x = 0; x < rect.right; x += 1.0f) {
                 const auto area = s.renderer.HitTest(bad, rect, x, y);
+                bad_bounds_match &= (area.region == ui::HitTestResult::StatusBarTask) == ui::ContainsPt(bad_bounds, x, y);
                 if (area.region == ui::HitTestResult::StatusBarTask) { ++bad_task; if (area.sub_index >= 0) ++bad_actions; }
             }
-            check(bad_task > 0 && bad_actions == 0, "partial-failure pill opens the list, no actions");
+            check(bad_task > 0 && bad_actions == 0 && bad_bounds_match, "partial-failure pill opens the list across its visible bounds, no actions");
             frame(running, nullptr);   // reset the finish edge for the next theme
         }
     }

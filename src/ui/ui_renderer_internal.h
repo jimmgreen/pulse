@@ -2116,7 +2116,8 @@ StatusBarMetrics MakeStatusBarMetrics(const WindowViewModel& vm, const D2D1_RECT
     // The AI chip (Pulse 助手) takes the far left; the status text starts
     // right of it.
     D2D1_RECT_F rect = full;
-    rect.right -= PaneLayoutStripWidth(vm, full.right-full.left, scale, factory, small_format) + (vm.layout_controls.visible ? 12*scale : 0);
+    rect.right = std::max(rect.left, rect.right - PaneLayoutStripWidth(vm, full.right-full.left, scale, factory, small_format) -
+        (vm.layout_controls.visible ? 12*scale : 0));
     m.content_left = m.pad;
     if (vm.status.ai_state != StatusAiState::Hidden) {
         // Widths measured in the small face, scaled to the chip's 12.5 DIP.
@@ -2176,13 +2177,21 @@ StatusBarMetrics MakeStatusBarMetrics(const WindowViewModel& vm, const D2D1_RECT
                              rect.right - m.right_reserved, m.bar.bottom);
     }
     if (centered_progress) {
-        const float cancel_width = vm.status.query_cancellable ? 30.0f * scale : 0.0f;
-        const float width = std::min(std::max(0.0f, rect.right - rect.left - 2.0f * (m.undo_chip.right > m.undo_chip.left ? m.content_left : m.pad)),
+        // Progress owns the span between the AI chip and the layout controls.
+        // Keep cancellation ahead of optional text/track space on very narrow bars.
+        const float progress_right = std::max(rect.left, rect.right - m.pad);
+        const float progress_left = std::min(progress_right, std::max(rect.left + m.pad, m.content_left));
+        const float progress_available = progress_right - progress_left;
+        const float cancel_target = vm.status.query_cancellable ? std::min(22.0f * scale, progress_available) : 0.0f;
+        const float cancel_gap = vm.status.query_cancellable
+            ? std::min(8.0f * scale, progress_available - cancel_target) : 0.0f;
+        const float cancel_width = cancel_target + cancel_gap;
+        const float width = std::min(progress_available,
             MeasureTextWidth(factory, small_format, vm.status.query_active ? vm.status.query_text : vm.status.task_text) + 112.0f * scale + cancel_width);
-        const float left = (rect.left + rect.right - width) * 0.5f;
-        m.task = D2D1::RectF(left, m.bar.top, left + width - cancel_width, m.bar.bottom);
+        const float left = progress_left + (progress_available - width) * 0.5f;
+        m.task = D2D1::RectF(left, m.bar.top, std::max(left, left + width - cancel_width), m.bar.bottom);
         if (vm.status.query_cancellable)
-            m.cancel_search = D2D1::RectF(m.task.right + 8.0f * scale, m.bar.top + 2.0f * scale,
+            m.cancel_search = D2D1::RectF(m.task.right + cancel_gap, m.bar.top + 2.0f * scale,
                 left + width, m.bar.bottom - 2.0f * scale);
     }
     // HTML order: AI, item count, optional selection count, history, flexible trailing area.
