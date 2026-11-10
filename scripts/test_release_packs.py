@@ -43,28 +43,51 @@ class ReleaseGate(unittest.TestCase):
             raise AssertionError(args)
         return ''
 
-    def test_catalog_is_complete_and_tag_bound(self):
+    def test_catalog_is_complete_and_independent(self):
         root = Path(__file__).resolve().parents[1]
         header = root / 'src/app/pack_catalog_generated.h'
-        # Bound to the release being built, so a version bump needs no edit here.
+        # Independent pack versions survive a main application version bump.
         tag = 'v' + (root / 'version.txt').read_text(encoding='utf-8').strip()
         packs = catalog(header, 'jimmgreen/pulse', tag)
         self.assertEqual({p['id'] for p in packs}, {'ffmpeg', 'images', 'raw'})
         self.assertEqual(sum(len(p['files']) for p in packs), 16)
+        for pack in packs:
+            self.assertEqual(pack['release_tag'], 'pack-' + pack['id'] + '-' + pack['version'])
+        self.assertEqual(catalog(header, 'jimmgreen/pulse', 'v99.0.0'), packs)
         media = next(p for p in packs if p['id'] == 'ffmpeg')
         self.assertEqual(media['release_tag'], 'pack-ffmpeg-' + media['version'])
         self.assertEqual(media['files'][0]['download_name'], media['files'][0]['name'] + '.lzms')
         with self.assertRaises(ValueError):
-            catalog(header, 'jimmgreen/pulse', 'wrong-tag')
-        with self.assertRaises(ValueError):
             catalog(header, 'other/repo', tag)
         original = header.read_text(encoding='utf-8')
-        for replacement in ['arbitrary-release', 'pack-images-1.0.5', 'pack-ffmpeg-9.9.9']:
+        raw = next(p for p in packs if p['id'] == 'raw')
+        replacements = [(media['release_tag'], replacement) for replacement in
+                        ['arbitrary-release', 'pack-images-1.0.5', 'pack-ffmpeg-9.9.9']]
+        replacements.append((raw['release_tag'], 'pack-raw-9.9.9'))
+        for release_tag, replacement in replacements:
             with self.subTest(replacement=replacement), tempfile.TemporaryDirectory() as directory:
                 changed = Path(directory) / 'catalog.h'
-                changed.write_text(original.replace(media['release_tag'], replacement), encoding='utf-8')
+                changed.write_text(original.replace(release_tag, replacement), encoding='utf-8')
                 with self.assertRaises(ValueError):
                     catalog(changed, 'jimmgreen/pulse', tag)
+
+    def test_target_bound_catalog_rejects_wrong_target(self):
+        root = Path(__file__).resolve().parents[1]
+        original = (root / 'src/app/pack_catalog_generated.h').read_text(encoding='utf-8')
+        repository = 'jimmgreen/pulse'
+        tag = 'v-target-bound-fixture'
+        prefix = 'https://github.com/' + repository + '/releases/download/'
+        raw = next(pack for pack in catalog(root / 'src/app/pack_catalog_generated.h', repository, tag)
+                   if pack['id'] == 'raw')
+        independent_url = prefix + raw['release_tag'] + '/'
+        self.assertEqual(original.count(independent_url), 1)
+        with tempfile.TemporaryDirectory() as directory:
+            header = Path(directory) / 'target-bound-catalog.h'
+            header.write_text(original.replace(independent_url, prefix + tag + '/'), encoding='utf-8')
+            packs = catalog(header, repository, tag)
+            self.assertEqual(next(pack for pack in packs if pack['id'] == 'raw')['release_tag'], tag)
+            with self.assertRaisesRegex(ValueError, 'Catalog release URL does not match target: raw'):
+                catalog(header, repository, 'wrong-tag')
 
     def test_new_draft_can_copy_verified_published_bundle(self):
         ensure(self.packs, 'test/repo', 'v1', 'source', gh=self.gh)
@@ -79,6 +102,21 @@ class ReleaseGate(unittest.TestCase):
         self.assertIn(('pack-ffmpeg-1', 'ffmpeg.lzms'), self.downloads)
         self.assertNotIn(('source', 'ffmpeg.lzms'), self.downloads)
         self.assertEqual(self.uploads, 1)
+
+    def test_all_independent_packs_work_across_main_versions(self):
+        for pack in self.packs:
+            pack['release_tag'] = 'pack-' + pack['id'] + '-' + pack['version']
+            name = pack['files'][0]['download_name']
+            self.remote[pack['release_tag']] = {name: self.assets[name]}
+        self.remote['v2'] = {}
+        self.draft_sources.add('v2')
+        for tag in ['v1', 'v2']:
+            with self.subTest(tag=tag):
+                ensure(self.packs, 'test/repo', tag, gh=self.gh)
+                self.assertEqual(len(self.remote[tag]), 6)
+        self.assertEqual(self.uploads, 2)
+        for pack in self.packs:
+            self.assertEqual(self.downloads.count((pack['release_tag'], pack['files'][0]['download_name'])), 2)
 
     def test_independent_draft_and_bad_hash_fail_before_upload(self):
         self.packs[0]['release_tag'] = 'pack-ffmpeg-1'

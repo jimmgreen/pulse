@@ -28,5 +28,5 @@ inline constexpr PackFile kRawPackFiles[] = {
     {L"raw_r.dll", 2180096, L"d55bb88c6b43f5ed17a001f99b139253a2e2d4cfbff289a30ef1b493a3f79c98", 732750, L"a39c3be4c36199efff1e0b991f2e4d66a009d17080ff7483d2629e8f28cf3fc9", L"raw-raw_r.dll.lzms"},
     {L"THIRD-PARTY-NOTICES.txt", 53926, L"54bed68b3f940a25ffea55679f35973058f5f29c2c5ab77537754adfd0704f82", 17466, L"f056e02cafd33b95e943162fd67ace3931ba09f90e5e6680e1912f738c4bbb09", L"raw-THIRD-PARTY-NOTICES.txt.lzms"},
 };
-inline constexpr PackRelease kRawPackRelease{L"raw", L"1.0.2", L"https://github.com/jimmgreen/pulse/releases/download/v1.0.59/", kRawPackFiles, std::size(kRawPackFiles)};
+inline constexpr PackRelease kRawPackRelease{L"raw", L"1.0.2", L"https://github.com/jimmgreen/pulse/releases/download/pack-raw-1.0.2/", kRawPackFiles, std::size(kRawPackFiles)};
 

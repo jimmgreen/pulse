@@ -7,6 +7,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
+& python (Join-Path $repo 'scripts/test_release_packs.py')
+if ($LASTEXITCODE -ne 0) { throw 'Release pack catalog validation failed before compilation' }
 $build = [IO.Path]::GetFullPath((Join-Path $repo $BuildDir))
 if (-not $build.StartsWith($repo + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'BuildDir must be inside the repository'
