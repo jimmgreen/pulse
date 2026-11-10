@@ -2087,11 +2087,18 @@ int wmain(int argc, wchar_t** argv) {
               tarResult.text.find(L"\tnotes.txt\n") != std::wstring::npos,
               L"tar lists through the system libarchive (archiveint.dll)");
         std::vector<unsigned char> junk(4096, 0x01);
-        Check(WriteBytes(path(L"broken.7z"), junk), L"create damaged 7z fixture");
+        Check(WriteBytes(path(L"broken.zip"), junk), L"create damaged ZIP fixture");
         Result junkResult;
-        Check(host.Request(path(L"broken.7z"), junkResult) &&
-              junkResult.response.kind == ipc::PreviewContentKind::Hex,
+        Check(host.Request(path(L"broken.zip"), junkResult) && junkResult.response.status == 0 &&
+              junkResult.response.kind == ipc::PreviewContentKind::Hex && !junkResult.text.empty(),
               L"a file that is not an archive keeps the hex fallback");
+        // 7z/RAR use the archive plugin, not the native archive/hex fallback.
+        Check(WriteBytes(path(L"broken.7z"), junk), L"create damaged 7z fixture");
+        Result pluginResult;
+        Check(host.Request(path(L"broken.7z"), pluginResult) &&
+              pluginResult.error == L"archive-plugin-required" && pluginResult.response.status != 0 &&
+              pluginResult.response.kind != ipc::PreviewContentKind::Hex && pluginResult.text.empty(),
+              L"7z without the archive plugin reports the required plugin instead of hex");
     }
 
     Check(WriteEmfFixture(path(L"shapes.emf")), L"create EMF fixture");
@@ -2175,6 +2182,8 @@ int wmain(int argc, wchar_t** argv) {
     DeleteFileW(path(L"shapes.emf").c_str());
     DeleteFileW(path(L"clip.emf").c_str());
     DeleteFileW(path(L"broken.svg").c_str());
+    DeleteFileW(path(L"broken.zip").c_str());
+    DeleteFileW(path(L"broken.7z").c_str());
     DeleteFileW(path(L"settings.lpm").c_str());
     DeleteFileW(path(L"utf8.txt").c_str());
     DeleteFileW(path(L"utf16le.txt").c_str());

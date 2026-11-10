@@ -594,7 +594,8 @@ int main(int argc, char** argv) {
             steps.push(std::move(no_action));
             c.Send(Request(17, "tools/call", CallParams("run_actions", steps_args(std::move(steps)))));
         }
-        Check(c.Response(17, r) && ToolErrorIs(r, "invalid_args") && ToolText(r).find("action is required") != std::string::npos,
+        Check(c.Response(17, r) && ToolErrorIs(r, "invalid_args") && ToolText(r).find("steps[0].action") != std::string::npos &&
+              ToolText(r).find("action identifier of 1..64 bytes") != std::string::npos,
               "run_actions: a step without action is refused, naming it");
         {
             json::Value steps = json::Value::Array();
@@ -603,8 +604,47 @@ int main(int argc, char** argv) {
             steps.push(std::move(odd));
             c.Send(Request(18, "tools/call", CallParams("run_actions", steps_args(std::move(steps)))));
         }
-        Check(c.Response(18, r) && ToolErrorIs(r, "invalid_args") && ToolText(r).find("put the action's arguments in args") != std::string::npos,
-              "run_actions: a stray member in a step is refused with a hint to use args");
+        Check(c.Response(18, r) && ToolErrorIs(r, "invalid_args") && ToolText(r).find("steps[0]: unknown member path") != std::string::npos,
+              "run_actions: a stray member in a step is refused, naming its path");
+        // Keep the shared action envelope's authority boundary covered over real MCP pipes.
+        auto invalid_step = [&](int id, json::Value value, const char* reason) {
+            json::Value steps = json::Value::Array();
+            steps.push(std::move(value));
+            c.Send(Request(id, "tools/call", CallParams("run_actions", steps_args(std::move(steps)))));
+            const bool rejected = c.Response(id, r) && ToolErrorIs(r, "invalid_args") &&
+                                  ToolText(r).find(reason) != std::string::npos;
+            if (!rejected) std::printf("  action envelope response: %s\n", json::Serialize(r).c_str());
+            return rejected;
+        };
+        bool invalid_ids = true;
+        int boundary_id = 100;
+        for (const json::Value& action : {json::Value(nullptr), json::Value(""), json::Value(std::string(65, 'x'))}) {
+            json::Value value = json::Value::Object();
+            value.set("action", action);
+            invalid_ids = invalid_step(boundary_id++, std::move(value), "steps[0].action") && invalid_ids;
+        }
+        Check(invalid_ids, "run_actions: null, empty and oversized action identifiers are refused at their path");
+        {
+            json::Value value = step("nav.back");
+            value.set("args", "not an object");
+            Check(invalid_step(boundary_id++, std::move(value), "steps[0].args must be an object"),
+                  "run_actions: non-object step args are refused at their path");
+        }
+        bool authority_rejected = true;
+        for (const char* claim : {"principal", "caller", "owner", "package", "ticket", "capability", "client"}) {
+            json::Value value = step("nav.back");
+            value.set("args", Args({{claim, "claimed-authority"}}));
+            authority_rejected = invalid_step(boundary_id++, std::move(value),
+                                              "steps[0].args cannot supply caller identity or capability authority") &&
+                                 authority_rejected;
+        }
+        Check(authority_rejected, "run_actions: step arguments cannot claim caller identity or capability authority");
+        bool package_rejected = true;
+        for (const char* action : {"workflow.run", "extensions.list", "resources.read"})
+            package_rejected = invalid_step(boundary_id++, step(action),
+                                            "steps[0]: package-bound workflows and resources are not AI actions") &&
+                               package_rejected;
+        Check(package_rejected, "run_actions: package-bound workflows and resources cannot bypass the action envelope");
         {
             json::Value steps = json::Value::Array();
             for (int i = 0; i < 13; ++i) steps.push(step("nav.back"));
