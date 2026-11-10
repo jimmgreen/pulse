@@ -13,7 +13,7 @@ int main() {
     static_assert(WindowEffectFromId(L"") == WindowEffect::MicaAlt);
     static_assert(WindowEffectFromId(L"unknown") == WindowEffect::MicaAlt);
     int failures = 0, checks = 0;
-    for (unsigned build : {0u, 9600u, 19045u, 22000u, 22620u, 22621u, 26100u}) {
+    for (unsigned build : {0u, 9600u, 19045u, 20348u, 22000u, 22620u, 22621u, 26100u}) {
         for (auto effect : {WindowEffect::None, WindowEffect::Acrylic, WindowEffect::Mica, WindowEffect::MicaAlt}) {
             for (bool modern : {false, true}) {
 #ifdef PULSE_MATERIAL_BASELINE
