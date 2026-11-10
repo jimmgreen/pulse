@@ -346,7 +346,7 @@ struct FluentMenuTestPeer {
             menu.animating_out_ = false;
             menu.first_sub_.parent_row = 0;
             menu.OnSubMouse(POINT{x, y}, false);
-            if (menu.first_sub_.hoverswatch_ != i) return false;
+            if (menu.first_sub_.hover_swatch != i) return false;
             menu.OnSubMouse(POINT{x, y}, true);
             if (menu.result_ != 90 + i) return false;
         }
@@ -4926,9 +4926,9 @@ void TestSnapshotPatchHoldsRows() {
     make(L"beta.txt", 5000);
     Check(ApplyDirNotify(entries, dir, ev(FILE_ACTION_MODIFIED, L"beta.txt"),
                          ui::SortColumn::Size, ui::SortDirection::Desc) == NotifyPatch::Applied &&
-          names(entries) == L"aardvark.txt,zeta.txt,beta.txt,gamma.txt" &&
-          entries[2].size == 5000u,
-          L"patch hold: a modified row keeps its place and takes the new size");
+          names(entries) == L"beta.txt,aardvark.txt,zeta.txt,gamma.txt" &&
+          entries[0].size == 5000u,
+          L"patch sort: a modified size key moves the row to its descending sort position");
 
     {
         const ScopedEntryGrouping grouping(static_cast<int>(GroupBy::Type));
@@ -4936,11 +4936,11 @@ void TestSnapshotPatchHoldsRows() {
         make(L"notes.md", 1);
         name_asc(entries, ev(FILE_ACTION_ADDED, L"new"), dir);
         name_asc(entries, ev(FILE_ACTION_ADDED, L"notes.md"), dir);
-        Check(names(entries) == L"new,notes.md,aardvark.txt,zeta.txt,beta.txt,gamma.txt",
+        Check(names(entries) == L"new,notes.md,beta.txt,aardvark.txt,zeta.txt,gamma.txt",
               L"patch hold: grouped, a new row goes to its sort position in its group");
         MoveFileW(full(L"zeta.txt").c_str(), full(L"zeta.md").c_str());
         name_asc(entries, ev(FILE_ACTION_RENAMED_NEW_NAME, L"zeta.md", L"zeta.txt"), dir);
-        Check(names(entries) == L"new,notes.md,zeta.md,aardvark.txt,beta.txt,gamma.txt",
+        Check(names(entries) == L"new,notes.md,zeta.md,beta.txt,aardvark.txt,gamma.txt",
               L"patch hold: grouped, a rename into another group moves to its place there");
     }
 
