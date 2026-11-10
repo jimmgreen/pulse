@@ -49,6 +49,30 @@ def validate(path, entry):
         raise ValueError(f'Packed hash mismatch: {path.name}')
 
 
+def verify_independent(packs, repository, key, expected_version, gh=None):
+    matches = [pack for pack in packs if pack['id'] == key]
+    if len(matches) != 1:
+        raise ValueError(f'Expected exactly one catalog pack: {key}')
+    pack = matches[0]
+    if pack['version'] != expected_version:
+        raise ValueError(f'Catalog pack version does not match expected version: {key}')
+    tag = f'pack-{key}-{expected_version}'
+    if pack['release_tag'] != tag:
+        raise ValueError('Independent release must match the catalog pack and version')
+    gh = gh or (lambda *args: subprocess.run(['gh', *args], check=True, capture_output=True, text=True).stdout)
+    state = json.loads(gh('release', 'view', tag, '--repo', repository, '--json', 'isDraft'))
+    if state.get('isDraft') is not False:
+        raise ValueError('Independent pack release must be published')
+    with tempfile.TemporaryDirectory(prefix='pulse-verify-independent-pack-') as temporary:
+        directory = Path(temporary)
+        for entry in pack['files']:
+            name = entry['download_name']
+            gh('release', 'download', tag, '--repo', repository,
+               '--pattern', name, '--dir', str(directory))
+            validate(directory / name, entry)
+    return pack
+
+
 def ensure(packs, repository, tag, source_tag=None, asset_directory=None, gh=None):
     gh = gh or (lambda *args: subprocess.run(['gh', *args], check=True, capture_output=True, text=True).stdout)
     state = json.loads(gh('release', 'view', tag, '--repo', repository, '--json', 'isDraft'))
@@ -101,11 +125,27 @@ def ensure(packs, repository, tag, source_tag=None, asset_directory=None, gh=Non
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repository', default='jimmgreen/pulse')
-    parser.add_argument('--tag', required=True)
+    parser.add_argument('--tag')
     parser.add_argument('--source-tag')
     parser.add_argument('--asset-directory', type=Path)
+    parser.add_argument('--verify-independent', choices=['raw'])
+    parser.add_argument('--expected-pack-version')
     parser.add_argument('--catalog', type=Path, default=Path(__file__).resolve().parents[1] / 'src/app/pack_catalog_generated.h')
     args = parser.parse_args()
+    if args.verify_independent:
+        if not args.expected_pack_version:
+            parser.error('--verify-independent requires --expected-pack-version')
+        if args.tag or args.source_tag or args.asset_directory:
+            parser.error('--verify-independent does not accept staging arguments')
+        packs = catalog(args.catalog, args.repository, '')
+        pack = verify_independent(packs, args.repository, args.verify_independent, args.expected_pack_version)
+        print(f"Verified {len(pack['files'])} published {pack['release_tag']} pack files; "
+              'engine was not rebuilt; no assets uploaded or published')
+        return
+    if not args.tag:
+        parser.error('--tag is required for pack staging')
+    if args.expected_pack_version:
+        parser.error('--expected-pack-version requires --verify-independent')
     packs = catalog(args.catalog, args.repository, args.tag)
     ensure(packs, args.repository, args.tag, args.source_tag, args.asset_directory)
     print(f"Verified {sum(len(p['files']) for p in packs)} remote pack files and {len(packs)} manifests for {args.tag}")

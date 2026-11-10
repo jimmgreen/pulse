@@ -2,8 +2,10 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
-from ensure_release_packs import catalog, ensure
+from unittest.mock import patch
+from ensure_release_packs import catalog, ensure, main, verify_independent
 
 
 class ReleaseGate(unittest.TestCase):
@@ -22,8 +24,10 @@ class ReleaseGate(unittest.TestCase):
         self.corrupt_uploaded = False
         self.draft_sources = set()
         self.downloads = []
+        self.calls = []
 
     def gh(self, *args):
+        self.calls.append(args)
         command, tag = args[1:3]
         if command == 'view':
             return json.dumps({'isDraft': tag == 'v1' or tag in self.draft_sources})
@@ -42,6 +46,106 @@ class ReleaseGate(unittest.TestCase):
         else:
             raise AssertionError(args)
         return ''
+
+    def published_raw(self):
+        raw = next(pack for pack in self.packs if pack['id'] == 'raw')
+        raw['release_tag'] = 'pack-raw-' + raw['version']
+        assets = {raw['files'][0]['download_name']: self.assets['raw.lzms']}
+        for name in ['raw_r.dll', 'THIRD-PARTY-NOTICES.txt']:
+            blob = (name + '-fixture').encode()
+            download = name + '.lzms'
+            assets[download] = blob
+            raw['files'].append(dict(name=name, size=100, sha256='a' * 64,
+                packed_size=len(blob), packed_sha256=hashlib.sha256(blob).hexdigest(),
+                download_name=download))
+        self.remote[raw['release_tag']] = assets
+        return raw
+
+    def assert_read_only(self):
+        self.assertEqual(self.uploads, 0)
+        self.assertTrue(all(call[0] == 'release' and call[1] in ['view', 'download']
+                            for call in self.calls))
+
+    def test_verify_independent_published_raw_is_read_only(self):
+        raw = self.published_raw()
+        self.assertEqual(verify_independent(self.packs, 'test/repo', 'raw', '1', gh=self.gh), raw)
+        self.assertEqual(self.downloads,
+                         [(raw['release_tag'], entry['download_name']) for entry in raw['files']])
+        self.assertEqual(len(self.calls), 4)
+        self.assert_read_only()
+
+    def test_verify_independent_rejects_wrong_version_and_tag_before_remote(self):
+        raw = self.published_raw()
+        with self.assertRaisesRegex(ValueError, 'expected version'):
+            verify_independent(self.packs, 'test/repo', 'raw', '2', gh=self.gh)
+        raw['release_tag'] = 'v1'
+        with self.assertRaisesRegex(ValueError, 'catalog pack and version'):
+            verify_independent(self.packs, 'test/repo', 'raw', '1', gh=self.gh)
+        self.assertEqual(self.calls, [])
+        self.assert_read_only()
+
+    def test_verify_independent_rejects_draft_before_download(self):
+        raw = self.published_raw()
+        self.draft_sources.add(raw['release_tag'])
+        with self.assertRaisesRegex(ValueError, 'must be published'):
+            verify_independent(self.packs, 'test/repo', 'raw', '1', gh=self.gh)
+        self.assertEqual(self.downloads, [])
+        self.assert_read_only()
+
+    def test_verify_independent_rejects_bad_hash_size_and_missing_asset(self):
+        raw = self.published_raw()
+        name = raw['files'][-1]['download_name']
+        original = self.remote[raw['release_tag']][name]
+        for blob in [b'x' * len(original), b'x', None]:
+            with self.subTest(blob=blob):
+                if blob is None:
+                    del self.remote[raw['release_tag']][name]
+                else:
+                    self.remote[raw['release_tag']][name] = blob
+                with self.assertRaises((ValueError, KeyError)):
+                    verify_independent(self.packs, 'test/repo', 'raw', '1', gh=self.gh)
+                self.assert_read_only()
+
+    def test_verify_independent_cli_never_stages(self):
+        self.published_raw()
+        def gh_run(command, **kwargs):
+            self.assertEqual(command[0], 'gh')
+            return SimpleNamespace(stdout=self.gh(*command[1:]))
+        with patch('sys.argv', ['ensure_release_packs.py', '--verify-independent', 'raw',
+                               '--expected-pack-version', '1']), \
+                patch('ensure_release_packs.catalog', return_value=self.packs), \
+                patch('ensure_release_packs.subprocess.run', side_effect=gh_run), \
+                patch('ensure_release_packs.ensure') as stage, patch('builtins.print') as output:
+            main()
+        stage.assert_not_called()
+        self.assertEqual(len(self.calls), 4)
+        self.assert_read_only()
+        self.assertIn('engine was not rebuilt; no assets uploaded or published', output.call_args.args[0])
+
+    def test_staging_cli_preserves_ensure_path(self):
+        with patch('sys.argv', ['ensure_release_packs.py', '--tag', 'v1', '--source-tag', 'source']), \
+                patch('ensure_release_packs.catalog', return_value=self.packs) as read_catalog, \
+                patch('ensure_release_packs.verify_independent') as verify, \
+                patch('ensure_release_packs.ensure') as stage, patch('builtins.print'):
+            main()
+        self.assertEqual(read_catalog.call_args.args[1:], ('jimmgreen/pulse', 'v1'))
+        stage.assert_called_once_with(self.packs, 'jimmgreen/pulse', 'v1', 'source', None)
+        verify.assert_not_called()
+
+    def test_verify_independent_cli_rejects_staging_arguments(self):
+        for arguments in [[], ['--tag', 'v1'], ['--source-tag', 'source'],
+                          ['--asset-directory', '.']]:
+            args = ['ensure_release_packs.py', '--verify-independent', 'raw']
+            if arguments:
+                args += ['--expected-pack-version', '1', *arguments]
+            with self.subTest(arguments=arguments), patch('sys.argv', args), \
+                    patch('sys.stderr'), patch('ensure_release_packs.catalog') as read_catalog, \
+                    patch('ensure_release_packs.ensure') as stage:
+                with self.assertRaises(SystemExit) as error:
+                    main()
+                self.assertEqual(error.exception.code, 2)
+                read_catalog.assert_not_called()
+                stage.assert_not_called()
 
     def test_catalog_is_complete_and_independent(self):
         root = Path(__file__).resolve().parents[1]

@@ -11,6 +11,11 @@ on:
         description: Pack version (e.g. 1.0.0)
         required: true
         default: '1.0.0'
+      reuse_published:
+        description: Verify the existing published pack without rebuilding or publishing
+        type: boolean
+        required: false
+        default: false
   push:
     tags: ['pack-raw-[0-9]*']
 
@@ -22,7 +27,30 @@ env:
   VCPKG_COMMIT: d46283cf33cf5de7bd88e12156ce03882be1f179
 
 jobs:
+  verify_published:
+    name: Verify published RAW pack (no rebuild)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.reuse_published }}
+    runs-on: windows-2022
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify published RAW pack (no rebuild)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RAW_PACK_VERSION: ${{ inputs.pack_version }}
+        run: |
+          python scripts/ensure_release_packs.py --repository '${{ github.repository }}' --verify-independent raw --expected-pack-version "$env:RAW_PACK_VERSION"
+          if ($LASTEXITCODE) { throw "Published RAW pack verification failed ($LASTEXITCODE)" }
+          'Verified published RAW pack; engine was not rebuilt; no assets uploaded or published.' >> $env:GITHUB_STEP_SUMMARY
+
   build:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.reuse_published }}
     runs-on: windows-2022
     timeout-minutes: 120
     defaults:
@@ -124,7 +152,7 @@ jobs:
 
   publish:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/pack-raw-')
+    if: ${{ startsWith(github.ref, 'refs/tags/pack-raw-') && (github.event_name != 'workflow_dispatch' || !inputs.reuse_published) }}
     runs-on: windows-2022
     permissions:
       contents: write
