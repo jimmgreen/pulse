@@ -1,5 +1,7 @@
 #include "../app/extensions/store/installed_store.h"
 #include "../app/extensions/store/install_transaction.h"
+#include "../app/extensions/package_signature.h"
+#include "../app/extensions/resource_settings.h"
 #include "extension_package_fixture.h"
 #include <condition_variable>
 #include <iostream>
@@ -22,6 +24,10 @@ void Write(const fs::path& path, std::string_view bytes) {
 std::string Read(const fs::path& path) { std::ifstream in(path, std::ios::binary); return {std::istreambuf_iterator<char>(in), {}}; }
 VerifiedPackage Package(const Key& key, int count, const std::string& name) {
     Fixture fixture(key, count, Pe(), "test.archive", name); VerifiedPackage out; std::string error;
+    if (!Verify(fixture, out, error)) throw std::runtime_error(error); return out;
+}
+VerifiedPackage CustomPackage(const Key& key, int count, std::string dll, const std::string& id, const std::string& name) {
+    Fixture fixture(key, count, std::move(dll), id, name); VerifiedPackage out; std::string error;
     if (!Verify(fixture, out, error)) throw std::runtime_error(error); return out;
 }
 void Install(const fs::path& root, const VerifiedPackage& package) {
@@ -176,6 +182,185 @@ int wmain() {
         Check(recovery.WaitForPhase(failed_gen, InstalledStorePhase::Failed, std::chrono::seconds(10)), "worker converts exception to failure");
         const auto recovered = recovery.Refresh(root);
         Check(recovery.WaitForPhase(recovered, InstalledStorePhase::Ready, std::chrono::seconds(10)), "worker accepts work after exception");
+        {
+            StoreGcResult gc;
+            Check(GcInstalledStore(base / L"gc-missing" / L"child", gc, error) && gc == StoreGcResult{} &&
+                !fs::exists(base / L"gc-missing"),
+                "GcInstalledStore on missing root is a safe no-op without creating directories", error);
+            Check(!GcInstalledStore(L"relative-gc", gc, error),
+                "GcInstalledStore rejects relative store path", error);
+
+            const auto gc_root = Root(L"gc-store");
+            Write(gc_root / L"crash-disabled.txt", "keep-crash-disabled\n");
+            Write(gc_root / L"native-crashed.txt", "keep-native-crashed\n");
+            auto pe1 = Pe(), pe2 = Pe(), pe3 = Pe();
+            pe1[500] = 1; pe2[500] = 2; pe3[500] = 3;
+            const auto v1 = CustomPackage(key, 1, pe1, "test.archive", "V1");
+            const auto v2 = CustomPackage(key, 1, pe2, "test.archive", "V2");
+            const auto v3 = CustomPackage(key, 1, pe3, "test.archive", "V3");
+            const auto m1 = CustomPackage(key, 3, pe1, "test.multi", "M1");
+            const auto m2 = CustomPackage(key, 3, pe2, "test.multi", "M2");
+            const auto m3 = CustomPackage(key, 3, pe3, "test.multi", "M3");
+            Install(gc_root, v1); Install(gc_root, v2); Install(gc_root, v3);
+            Install(gc_root, m1); Install(gc_root, m2); Install(gc_root, m3);
+            const std::string rot_sidecar = "{\"rotation\":1}";
+            const auto v1_rot = gc_root / L"versions" / (v1.Revision() + ".rotation.json");
+            Write(v1_rot, rot_sidecar);
+            const auto saved_reg = Read(gc_root / L"registry.json");
+            const auto saved_pol = Read(gc_root / L"signature-policy.json");
+
+            const auto v1_json = gc_root / L"versions" / (v1.Revision() + ".json");
+            const auto v1_sig = gc_root / L"versions" / (v1.Revision() + ".sig.json");
+            const auto pe1_dll = gc_root / L"binaries" / (v1.Declaration().native->sha256 + ".dll");
+            const auto m1_dir = gc_root / L"packages" / m1.Revision();
+            const uint64_t m1_ver_bytes = fs::file_size(gc_root / L"versions" / (m1.Revision() + ".json")) +
+                fs::file_size(gc_root / L"versions" / (m1.Revision() + ".sig.json"));
+            uint64_t expected_second_sweep = fs::file_size(v1_json) + fs::file_size(v1_sig) +
+                fs::file_size(v1_rot) + fs::file_size(pe1_dll);
+            for (const auto& entry : fs::directory_iterator(m1_dir)) expected_second_sweep += fs::file_size(entry.path());
+
+            HANDLE lock_sig = CreateFileW(v1_sig.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+            HANDLE lock_dll = CreateFileW(pe1_dll.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+            HANDLE lock_pkg = CreateFileW((m1_dir / L"test.dll").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+            const bool locks_open = lock_sig != INVALID_HANDLE_VALUE && lock_dll != INVALID_HANDLE_VALUE && lock_pkg != INVALID_HANDLE_VALUE;
+            const bool first_gc = locks_open && GcInstalledStore(gc_root, gc, error);
+            if (lock_sig != INVALID_HANDLE_VALUE) CloseHandle(lock_sig);
+            if (lock_dll != INVALID_HANDLE_VALUE) CloseHandle(lock_dll);
+            if (lock_pkg != INVALID_HANDLE_VALUE) CloseHandle(lock_pkg);
+            Check(first_gc && gc.removed_versions == 1 && gc.removed_binaries == 0 && gc.removed_packages == 0 &&
+                gc.skipped_locked == 3 && gc.reclaimed_bytes == m1_ver_bytes &&
+                fs::exists(v1_json) && fs::exists(v1_sig) && fs::exists(v1_rot) &&
+                fs::exists(pe1_dll) && fs::exists(m1_dir / L"test.dll") && fs::exists(m1_dir / L"data1.txt"),
+                "GcInstalledStore skips locked version/binary/package groups without partial deletion", error);
+
+            StoreGcResult gc2;
+            Check(GcInstalledStore(gc_root, gc2, error) &&
+                gc2.removed_versions == 1 && gc2.removed_binaries == 1 && gc2.removed_packages == 1 &&
+                gc2.skipped_locked == 0 && gc2.reclaimed_bytes == expected_second_sweep &&
+                !fs::exists(v1_json) && !fs::exists(v1_sig) && !fs::exists(v1_rot) &&
+                !fs::exists(pe1_dll) && !fs::exists(m1_dir),
+                "GcInstalledStore sweeps orphaned versions, rotation sidecar, binaries, and multi-file packages once unlocked", error);
+            Check(fs::exists(gc_root / L"versions" / (v2.Revision() + ".json")) &&
+                fs::exists(gc_root / L"versions" / (v3.Revision() + ".json")) &&
+                fs::exists(gc_root / L"binaries" / (v2.Declaration().native->sha256 + ".dll")) &&
+                fs::exists(gc_root / L"binaries" / (v3.Declaration().native->sha256 + ".dll")) &&
+                fs::exists(gc_root / L"packages" / m2.Revision() / L"test.dll") &&
+                fs::exists(gc_root / L"packages" / m3.Revision() / L"test.dll") &&
+                Read(gc_root / L"registry.json") == saved_reg &&
+                Read(gc_root / L"signature-policy.json") == saved_pol &&
+                Read(gc_root / L"crash-disabled.txt") == "keep-crash-disabled\n" &&
+                Read(gc_root / L"native-crashed.txt") == "keep-native-crashed\n",
+                "GcInstalledStore preserves activeRevision, previousRevision, registry, policy, and crash markers");
+
+            StoreGcResult gc3;
+            Check(GcInstalledStore(gc_root, gc3, error) && gc3 == StoreGcResult{},
+                "GcInstalledStore is idempotent when no orphans remain", error);
+
+            Check(ReviewStoreChange(gc_root, "test.archive", StoreChangeAction::Uninstall, review, error) &&
+                CommitStoreChange(gc_root, review, {true, false, false}, cancel, result, error),
+                "uninstall test.archive before GC sweep", error);
+            StoreGcResult gc4;
+            Check(GcInstalledStore(gc_root, gc4, error) &&
+                gc4.removed_versions == 2 && gc4.removed_binaries == 2 && gc4.removed_packages == 0 &&
+                !fs::exists(gc_root / L"binaries" / (v2.Declaration().native->sha256 + ".dll")) &&
+                !fs::exists(gc_root / L"binaries" / (v3.Declaration().native->sha256 + ".dll")) &&
+                fs::exists(gc_root / L"packages" / m3.Revision() / L"test.dll"),
+                "GcInstalledStore reclaims uninstalled package revisions while keeping remaining packages", error);
+        }
+        {
+            const auto HexStem = [](std::string_view id) {
+                constexpr wchar_t digits[] = L"0123456789abcdef";
+                std::wstring stem = L"pkg-";
+                for (unsigned char c : id) {
+                    stem += digits[c >> 4];
+                    stem += digits[c & 15];
+                }
+                return stem;
+            };
+            const auto empty_data_root = base / L"empty-purge-root";
+            fs::create_directory(empty_data_root);
+            const auto missing_purge = pulse::extensions::PurgeOwnSettings(empty_data_root.wstring(), "test.archive");
+            Check(missing_purge.get_bool("ok") && missing_purge.find("data") &&
+                !missing_purge.find("data")->get_bool("deleted") &&
+                !fs::exists(empty_data_root / L"extension-settings"),
+                "PurgeOwnSettings is idempotent and creates no directory when extension-settings is absent");
+
+            const auto purge_data_root = base / L"purge-data-root";
+            fs::create_directory(purge_data_root);
+            const auto purge_store = purge_data_root / L"extensions";
+            fs::create_directory(purge_store);
+            Write(purge_store / L"signature-policy.json", Policy(key.publisher));
+            const auto other_pkg = CustomPackage(key, 1, Pe(), "test.other", "Other");
+            Install(purge_store, native);
+            Install(purge_store, other_pkg);
+
+            const auto w1 = pulse::extensions::WriteOwnSetting(
+                purge_data_root.wstring(), "test.archive", "theme", std::string("dark"), 0, [] { return true; });
+            const auto w2 = pulse::extensions::WriteOwnSetting(
+                purge_data_root.wstring(), "test.other", "mode", std::string("fast"), 0, [] { return true; });
+            const auto archive_settings = purge_data_root / L"extension-settings" / (HexStem("test.archive") + L".json");
+            const auto archive_lock = purge_data_root / L"extension-settings" / (HexStem("test.archive") + L".lock");
+            const auto other_settings = purge_data_root / L"extension-settings" / (HexStem("test.other") + L".json");
+            Check(w1.get_bool("ok") && w2.get_bool("ok") && fs::exists(archive_settings) && fs::exists(other_settings),
+                "WriteOwnSetting persists per-package settings under data_root/extension-settings");
+
+            InstalledStoreService purge_service;
+            const auto prep_keep = purge_service.PrepareChange(purge_store, "test.archive", StoreChangeAction::Uninstall);
+            Check(purge_service.WaitForPhase(prep_keep, InstalledStorePhase::AwaitingConfirmation, std::chrono::seconds(10)) &&
+                purge_service.Confirm(prep_keep, {true, false, false}) &&
+                purge_service.WaitForPhase(prep_keep, InstalledStorePhase::Changed, std::chrono::seconds(10)) &&
+                !purge_service.GetSnapshot().purged_package_id.has_value() &&
+                fs::exists(archive_settings),
+                "Uninstall with default purge_data == false retains extension-settings file and reports no purged_package_id");
+            const auto kept_read = pulse::extensions::ReadOwnSettings(purge_data_root.wstring(), "test.archive");
+            int64_t kept_version = -1;
+            Check(kept_read.get_bool("ok") && kept_read.find("data") &&
+                kept_read.find("data")->find("version") && kept_read.find("data")->find("version")->get_int(kept_version) &&
+                kept_version == 1 && kept_read.find("data")->find("values") &&
+                kept_read.find("data")->find("values")->get_string("theme") == "dark",
+                "Retained settings remain readable after default uninstall");
+
+            Install(purge_store, native);
+            const auto prep_purge = purge_service.PrepareChange(purge_store, "test.archive", StoreChangeAction::Uninstall);
+            Check(purge_service.WaitForPhase(prep_purge, InstalledStorePhase::AwaitingConfirmation, std::chrono::seconds(10)) &&
+                purge_service.Confirm(prep_purge, {true, false, false, true}) &&
+                purge_service.WaitForPhase(prep_purge, InstalledStorePhase::Changed, std::chrono::seconds(10)),
+                "Uninstall with purge_data == true commits through InstalledStoreService");
+            const auto purged_snap = purge_service.GetSnapshot();
+            Check(purged_snap.purged_package_id == std::optional<std::string>{"test.archive"} &&
+                !fs::exists(archive_settings) && !fs::exists(archive_lock) && fs::exists(other_settings),
+                "Uninstall with purge_data == true deletes target settings + lock, preserves other packages, and reports purged_package_id");
+            const auto reset_read = pulse::extensions::ReadOwnSettings(purge_data_root.wstring(), "test.archive");
+            const auto other_read = pulse::extensions::ReadOwnSettings(purge_data_root.wstring(), "test.other");
+            int64_t reset_version = -1;
+            Check(reset_read.get_bool("ok") && reset_read.find("data") &&
+                reset_read.find("data")->find("version") && reset_read.find("data")->find("version")->get_int(reset_version) &&
+                reset_version == 0 && other_read.get_bool("ok") &&
+                other_read.find("data")->find("values")->get_string("mode") == "fast",
+                "Purged package settings reset to empty version 0 while sibling package settings remain intact");
+
+            std::vector<std::wstring> trusted;
+            pulse::extensions::GrantPublishTrust(trusted, key.publisher.id, "test.archive");
+            pulse::extensions::GrantPublishTrust(trusted, other.publisher.id, "test.archive");
+            pulse::extensions::GrantPublishTrust(trusted, "", "test.archive");
+            trusted.push_back(L"test.archive");
+            pulse::extensions::GrantPublishTrust(trusted, key.publisher.id, "test.other");
+            pulse::extensions::GrantPublishTrust(trusted, "", "test.other");
+            const size_t removed_trust = pulse::extensions::RevokePublishTrustForPackage(trusted, *purged_snap.purged_package_id);
+            Check(removed_trust == 4 &&
+                !pulse::extensions::IsPublishTrusted(trusted, key.publisher.id, "test.archive") &&
+                !pulse::extensions::IsPublishTrusted(trusted, other.publisher.id, "test.archive") &&
+                !pulse::extensions::IsPublishTrusted(trusted, "", "test.archive") &&
+                pulse::extensions::IsPublishTrusted(trusted, key.publisher.id, "test.other") &&
+                pulse::extensions::IsPublishTrusted(trusted, "", "test.other") &&
+                trusted.size() == 2,
+                "RevokePublishTrustForPackage removes signed, rotated, unsigned, and legacy trust only for uninstalled package");
+
+            const auto next_refresh = purge_service.Refresh(purge_store);
+            Check(purge_service.WaitForPhase(next_refresh, InstalledStorePhase::Ready, std::chrono::seconds(10)) &&
+                !purge_service.GetSnapshot().purged_package_id.has_value(),
+                "Subsequent Refresh clears snapshot.purged_package_id");
+        }
         std::cout << passed << " passed, " << failed << " failed\n";
         return failed ? 1 : 0;
     } catch (const std::exception& e) { std::cout << "[FAIL] exception: " << e.what() << '\n'; return 1; }

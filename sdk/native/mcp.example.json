@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "pulse-native-author": {
+      "command": "python",
+      "args": [
+        "-u",
+        "C:/path/to/pulse-sdk/tools/extensions/native_author_mcp.py",
+        "--workspace",
+        "C:/path/to/pulse-author-workspace",
+        "--sdk-root",
+        "C:/path/to/pulse-sdk"
+      ],
+      "env": {
+        "PULSE_PLUGIN_HARNESS": "C:/path/to/pulse-sdk/bin/pulse_plugin_harness.exe"
+      }
+    }
+  }
+}

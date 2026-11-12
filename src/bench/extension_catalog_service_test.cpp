@@ -101,7 +101,7 @@ int main() {
             Check("stopped service cannot refresh or cancel into new work", production.Refresh({}) == 1 && production.Cancel() == 1);
         }
         {
-            Gate gate({{CatalogFetchStatus::Online, "first"}, {CatalogFetchStatus::Offline, "cached"},
+            Gate gate({{CatalogFetchStatus::Online, "2026-11-09T00:00:00Z"}, {CatalogFetchStatus::Offline, "2026-11-10T00:00:00Z"},
                 {CatalogFetchStatus::Failed, "network_failure"}, {CatalogFetchStatus::Online, "empty", true},
                 {CatalogFetchStatus::Cancelled, "cancelled"}, {CatalogFetchStatus::Online, "throws", false, false, true},
                 {CatalogFetchStatus::Online, "recovered"}});
@@ -115,20 +115,22 @@ int main() {
             gate.Release(1);
             Check("online result published", Finish(service, first, CatalogServiceState::Online));
             const auto retained = service.GetSnapshot();
-            Check("online result is immutable shared snapshot", retained.result && retained.result->catalog.generated == "first" && retained.result->catalog.extensions.size() == 1);
-            const auto offline = service.Refresh({}); gate.WaitCalls(2); gate.Release(2);
+            Check("online result is immutable shared snapshot", retained.result && retained.result->catalog.generated == "2026-11-09T00:00:00Z" && retained.result->catalog.extensions.size() == 1);
+            const auto offline = service.Refresh({});
+            Check("refresh keeps the previous verified catalog while network is blocked",service.GetSnapshot().state==CatalogServiceState::Loading && service.GetSnapshot().result==retained.result);
+            gate.WaitCalls(2); gate.Release(2);
             Check("offline status and cache marker published", Finish(service, offline, CatalogServiceState::Offline) && service.GetSnapshot().result && service.GetSnapshot().result->offline);
             const auto failed_generation = service.Refresh({}); gate.WaitCalls(3); gate.Release(3);
-            Check("failed fetch clears old data and retains diagnostic", Finish(service, failed_generation, CatalogServiceState::Failed) && !service.GetSnapshot().result && service.GetSnapshot().error == "network_failure");
+            Check("failed refresh retains verified old data and diagnostic", Finish(service, failed_generation, CatalogServiceState::Failed) && service.GetSnapshot().result && service.GetSnapshot().result->catalog.generated=="2026-11-10T00:00:00Z" && service.GetSnapshot().error == "network_failure");
             const auto empty = service.Refresh({}); gate.WaitCalls(4); gate.Release(4);
             Check("empty verified catalog is successful online data", Finish(service, empty, CatalogServiceState::Online) && service.GetSnapshot().result && service.GetSnapshot().result->catalog.extensions.empty());
             const auto cancelled = service.Refresh({}); gate.WaitCalls(5); gate.Release(5);
-            Check("operation cancelled status published without result", Finish(service, cancelled, CatalogServiceState::Cancelled) && !service.GetSnapshot().result && service.GetSnapshot().error == "cancelled");
+            Check("operation cancellation preserves last verified catalog", Finish(service, cancelled, CatalogServiceState::Cancelled) && service.GetSnapshot().result && service.GetSnapshot().result->catalog.extensions.empty() && service.GetSnapshot().error == "cancelled");
             const auto exception = service.Refresh({}); gate.WaitCalls(6); gate.Release(6);
             Check("fetch exception contained as failure", Finish(service, exception, CatalogServiceState::Failed) && service.GetSnapshot().error.find("synthetic fetch exception") != std::string::npos);
             const auto recovered = service.Refresh({}); gate.WaitCalls(7); gate.Release(7);
             Check("worker survives exception and later refresh succeeds", Finish(service, recovered, CatalogServiceState::Online) && service.GetSnapshot().result->catalog.generated == "recovered");
-            Check("previous shared snapshot survives replacement", retained.result && retained.result->catalog.generated == "first" && retained.generation == first);
+            Check("previous shared snapshot survives replacement", retained.result && retained.result->catalog.generated == "2026-11-09T00:00:00Z" && retained.generation == first);
             Check("all sequential fetches run on one serial worker", gate.Calls() == 7 && gate.MaximumActive() == 1);
         }
         {
@@ -210,6 +212,55 @@ int main() {
             destroyer.join();
             Check("destructor safely joins cancelled late-returning worker", finished && destroyed && gate.Calls() == 1 && gate.Cancelled(0));
             Check("retained stop snapshot remains valid after destruction", stopped.state == CatalogServiceState::Cancelled && !stopped.result && stopped.error == "catalog_service_stopped");
+        }
+        {
+            Gate gate({{CatalogFetchStatus::Online,"2026-11-11T00:00:00Z"},{CatalogFetchStatus::Offline,"2026-11-10T00:00:00Z"}});
+            CatalogService service(gate.Operation());
+            const auto first=service.Refresh({});gate.WaitCalls(1);gate.Release(1);
+            Check("retained ordering fixture starts online",Finish(service,first,CatalogServiceState::Online));
+            const auto retained=service.GetSnapshot().result;
+            const auto next=service.Refresh({});gate.WaitCalls(2);gate.Release(2);
+            Check("older final offline result cannot replace newer verified retained snapshot",Finish(service,next,CatalogServiceState::Offline) && service.GetSnapshot().result==retained && service.GetSnapshot().error=="catalog_rollback_rejected_against_retained");
+        }
+        {
+            Gate gate({{CatalogFetchStatus::Failed,"slow_network_failure"}});
+            auto network=gate.Operation();
+            CatalogService service(CatalogService::ProgressiveFetchOperation([&](const std::filesystem::path& path,
+                const std::atomic<bool>& cancelled,CatalogSnapshot& out,std::string& error,const CatalogCacheReady& ready) {
+                CatalogSnapshot cached;cached.catalog.generated="2026-11-11T00:00:00Z";cached.offline=true;
+                ready(cached);
+                return network(path,cancelled,out,error);
+            }));
+            const auto generation=service.Refresh(L"verified-cache");
+            Check("cache-first publication precedes blocked network completion",gate.WaitCalls(1));
+            const auto cached=service.GetSnapshot();
+            Check("loading publishes verified cache while network remains blocked",cached.generation==generation && cached.state==CatalogServiceState::Loading && cached.result && cached.result->catalog.generated=="2026-11-11T00:00:00Z");
+            Check("intermediate cache publication advances displayed-index revision",cached.revision>=2);
+            gate.Release(1);
+            Check("slow failed refresh keeps the early verified snapshot",Finish(service,generation,CatalogServiceState::Failed) && service.GetSnapshot().result==cached.result && service.GetSnapshot().revision>cached.revision);
+        }
+        {
+            std::mutex mutex;std::condition_variable changed;
+            bool entered=false,released=false,late_finished=false;
+            CatalogService service(CatalogService::ProgressiveFetchOperation([&](const std::filesystem::path&,
+                const std::atomic<bool>&,CatalogSnapshot&,std::string&,const CatalogCacheReady& ready) {
+                CatalogSnapshot cached;cached.catalog.generated="2026-11-11T00:00:00Z";ready(cached);
+                {
+                    std::unique_lock lock(mutex);entered=true;changed.notify_all();
+                    changed.wait_for(lock,5s,[&]{return released;});
+                }
+                ready(cached); // deliberately non-cooperative, late intermediate publication
+                {std::lock_guard lock(mutex);late_finished=true;} changed.notify_all();
+                return CatalogFetchStatus::Cancelled;
+            }));
+            service.Refresh(L"cancel-cache");
+            {std::unique_lock lock(mutex);Check("cache cancellation fixture enters worker",changed.wait_for(lock,5s,[&]{return entered;}));}
+            const auto retained=service.GetSnapshot().result;
+            const auto cancelled=service.Cancel();
+            {std::lock_guard lock(mutex);released=true;} changed.notify_all();
+            {std::unique_lock lock(mutex);Check("late cache callback completes after cancellation",changed.wait_for(lock,5s,[&]{return late_finished;}));}
+            const auto snapshot=service.GetSnapshot();
+            Check("cancelled generation rejects late cache publication",snapshot.generation==cancelled && snapshot.state==CatalogServiceState::Cancelled && snapshot.result==retained);
         }
         {
             bool rejected = false;

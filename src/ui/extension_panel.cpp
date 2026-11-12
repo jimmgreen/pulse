@@ -92,7 +92,7 @@ struct ExtensionPanel::Impl {
         // The tree owns its viewports; a second panel scrollbar has no content to move.
         return spec.tree ? 0.0f : (std::max)(0.0f, ContentBottom() - Height());
     }
-    D2D1_RECT_F CloseRect() const { return spec.content_only ? D2D1_RECT_F{} : D2D1_RECT_F{Width() - 44.0f * scale, 0, Width(), 36.0f * scale}; }
+    D2D1_RECT_F CloseRect() const { return spec.content_only ? D2D1_RECT_F{} : D2D1_RECT_F{Width() - 46.0f * scale, 0, Width(), 36.0f * scale}; }
     D2D1_RECT_F ButtonRect(size_t index) const {
         if (index >= button_bounds.size()) return {};
         auto rect = button_bounds[index];
@@ -743,6 +743,9 @@ bool ExtensionPanel::RequestTreeData(const std::string& id, const std::string& o
 }
 bool ExtensionPanel::SetTreeStates(const std::vector<extensions::UiStateEntry>& values) {
     return IsOpen() && impl_->tree.SetStates(values);
+}
+bool ExtensionPanel::CommitTreeUserState(const std::string& key, const std::string& value) {
+    return IsOpen() && impl_->tree.CommitUserState(key, value);
 }
 bool ExtensionPanel::UpdateTree(const extensions::UiTree& tree) {
     if (!IsOpen() || !impl_->spec.tree || !impl_->tree.UpdateTree(tree)) return false;

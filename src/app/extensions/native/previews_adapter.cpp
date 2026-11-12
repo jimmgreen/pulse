@@ -1,14 +1,17 @@
 #include "previews_adapter.h"
+#include "crash_guard.h"
 #include "ui_model.h"
+#include "worker_budget.h"
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <mutex>
-#include <thread>
 #include <stdexcept>
 #include <string_view>
-#include <limits>
+#include <thread>
+#include <utility>
 #include "../../../preview_host/archive_serialization.h"
 namespace pulse::extensions::native {
 namespace {
@@ -132,36 +135,67 @@ struct PreviewsAdapter::State : std::enable_shared_from_this<State> {
     HWND owner;
     DWORD thread = GetCurrentThreadId();
     std::function<bool()> live;
-    bool closed = false;
+    std::function<void()> wake;
+    std::string package_id;
+    std::atomic<bool> closed{false};
     std::atomic<unsigned> workers{0};
+    std::atomic<size_t> queued_count{0};
+    std::atomic<uint64_t> waiter_id{0};
     uint64_t next_sequence = 0;
     std::map<uint64_t, Provider> providers;
     std::map<uint64_t, std::shared_ptr<Job>> surfaces;
     std::vector<std::weak_ptr<Job>> running;
-    State(HWND window, std::function<bool()> check) : owner(window), live(std::move(check)) {}
-    bool Ready() const { return owner && !closed && GetCurrentThreadId() == thread && live && live(); }
+    State(HWND window, std::function<bool()> check, std::function<void()> on_wake, std::string pkg_id)
+        : owner(window), live(std::move(check)), wake(std::move(on_wake)), package_id(std::move(pkg_id)) {}
+    ~State() { UnregisterPoolWaiter(); }
+    void UnregisterPoolWaiter() noexcept {
+        const uint64_t id = waiter_id.exchange(0, std::memory_order_acq_rel);
+        if (id != 0) GlobalPreviewWorkerPool().UnregisterWaiter(id);
+    }
+    void NotifyWake() const noexcept {
+        if (!wake) return;
+        try { wake(); } catch (...) {}
+    }
+    bool Ready() const { return owner && !closed.load(std::memory_order_relaxed) && GetCurrentThreadId() == thread && live && live(); }
+    size_t CountUnstarted() const noexcept {
+        size_t count = 0;
+        for (const auto& [surface, job] : surfaces) {
+            (void)surface;
+            if (!job->started && !job->done && !job->cancelled.load(std::memory_order_acquire)) ++count;
+        }
+        return count;
+    }
     void CancelSurface(uint64_t surface) {
         auto it = surfaces.find(surface); if (it == surfaces.end()) return;
-        it->second->cancelled = true; InvalidateRect(it->second->notify, nullptr, FALSE); surfaces.erase(it);
+        it->second->cancelled = true;
+        if (it->second->notify) InvalidateRect(it->second->notify, nullptr, FALSE);
+        surfaces.erase(it);
+        queued_count.store(CountUnstarted(), std::memory_order_seq_cst);
     }
     void Close() {
-        if (closed) return;
-        closed = true;
-        for (auto& [surface, job] : surfaces) { (void)surface; job->cancelled = true; InvalidateRect(job->notify, nullptr, FALSE); }
+        if (closed.load(std::memory_order_relaxed)) return;
+        closed.store(true, std::memory_order_release);
+        queued_count.store(0, std::memory_order_seq_cst);
+        UnregisterPoolWaiter();
+        for (auto& [surface, job] : surfaces) {
+            (void)surface;
+            job->cancelled = true;
+            if (job->notify) InvalidateRect(job->notify, nullptr, FALSE);
+        }
         for (auto& weak : running) if (auto job = weak.lock()) job->cancelled = true;
         surfaces.clear(); providers.clear();
     }
-    void Start(const std::shared_ptr<Job>& job) {
-        if (job->started || workers >= 2 || job->cancelled) return;
+    void StartWithPermit(const std::shared_ptr<Job>& job, WorkerPermit permit) {
         std::erase_if(running, [](const auto& weak) { return weak.expired(); }); running.push_back(job);
         auto self = shared_from_this();
         job->started = true; ++workers;
         try {
-            std::thread([self, job] {
+            std::thread([self, job, permit = std::move(permit)]() mutable {
                 job->worker = GetCurrentThreadId();
                 PulseStatus status = PULSE_ERROR_STATE;
                 try {
                     if (!job->cancelled) {
+                        const crash_guard::CallScope call_scope(self->package_id.c_str());
                         PulsePreviewRequest request{sizeof(request), {job->utf8.data(), static_cast<uint32_t>(job->utf8.size())},
                             job->modified, job->size, job->pixels, job.get(), Job::Cancelled, Job::Publish};
                         status = job->provider.callback(job->provider.user, &request);
@@ -171,9 +205,44 @@ struct PreviewsAdapter::State : std::enable_shared_from_this<State> {
                   if (job->error != PULSE_OK || job->cancelled) job->result.reset(); }
                 job->done = true;
                 --self->workers;
-                InvalidateRect(job->notify, nullptr, FALSE);
+                permit.Release();
+                if (job->notify) InvalidateRect(job->notify, nullptr, FALSE);
+                self->NotifyWake();
             }).detach();
-        } catch (...) { --workers; job->error = PULSE_ERROR_INITIALIZATION; job->done = true; }
+        } catch (...) {
+            --workers;
+            job->error = PULSE_ERROR_INITIALIZATION;
+            job->done = true;
+            permit.Release();
+            NotifyWake();
+        }
+    }
+    void StartPending() {
+        if (closed.load(std::memory_order_relaxed)) {
+            queued_count.store(0, std::memory_order_seq_cst);
+            return;
+        }
+        std::vector<std::shared_ptr<Job>> pending;
+        for (const auto& [surface, job] : surfaces) {
+            (void)surface;
+            if (job->started || job->done) continue;
+            if (job->cancelled.load(std::memory_order_acquire)) continue;
+            pending.push_back(job);
+        }
+        if (pending.empty()) {
+            queued_count.store(0, std::memory_order_seq_cst);
+            return;
+        }
+        std::sort(pending.begin(), pending.end(), [](const auto& a, const auto& b) { return a->sequence > b->sequence; });
+        queued_count.store(pending.size(), std::memory_order_seq_cst);
+        for (const auto& job : pending) {
+            if (job->started || job->done || job->cancelled.load(std::memory_order_acquire)) continue;
+            if (workers.load(std::memory_order_acquire) >= kMaxSessionPreviewWorkers || closed.load(std::memory_order_relaxed)) break;
+            auto permit = GlobalPreviewWorkerPool().TryAcquire();
+            if (!permit) break;
+            StartWithPermit(job, std::move(permit));
+        }
+        queued_count.store(CountUnstarted(), std::memory_order_seq_cst);
     }
     static PulseStatus PULSE_CALL Register(void* context, const PulsePreviewProvider* source, PulsePreviewProviderId* out) {
         if (out) *out = 0;
@@ -196,16 +265,18 @@ struct PreviewsAdapter::State : std::enable_shared_from_this<State> {
     static PulseStatus PULSE_CALL Unregister(void* context, PulsePreviewProviderId id) {
         auto* self = static_cast<State*>(context);
         if (!self || !id) return PULSE_ERROR_ARGUMENT;
-        if (GetCurrentThreadId() != self->thread || self->closed) return PULSE_ERROR_STATE;
+        if (GetCurrentThreadId() != self->thread || self->closed.load(std::memory_order_relaxed)) return PULSE_ERROR_STATE;
         const auto provider = self->providers.find(id);
         if (provider == self->providers.end()) return PULSE_ERROR_STATE;
         provider->second.retiring = true;
         for (auto it = self->surfaces.begin(); it != self->surfaces.end();) {
             if (it->second->provider.id == id) {
-                it->second->cancelled = true; InvalidateRect(it->second->notify, nullptr, FALSE);
+                it->second->cancelled = true;
+                if (it->second->notify) InvalidateRect(it->second->notify, nullptr, FALSE);
                 it = self->surfaces.erase(it);
             } else ++it;
         }
+        self->queued_count.store(self->CountUnstarted(), std::memory_order_seq_cst);
         bool active = false;
         for (auto& weak : self->running) if (auto job = weak.lock(); job && job->provider.id == id) {
             job->cancelled = true; active = active || !job->done;
@@ -215,25 +286,45 @@ struct PreviewsAdapter::State : std::enable_shared_from_this<State> {
         return PULSE_OK;
     }
 };
-PreviewsAdapter::PreviewsAdapter(HWND owner, std::function<bool()> live) : state_(std::make_shared<State>(owner, std::move(live))) {
+PreviewsAdapter::PreviewsAdapter(HWND owner, std::function<bool()> live,
+                                 std::function<void()> wake, std::string package_id)
+    : state_(std::make_shared<State>(owner, std::move(live), std::move(wake), std::move(package_id))) {
     std::erase_if(State::registry, [](const auto& weak) { return weak.expired(); }); State::registry.push_back(state_);
+    std::weak_ptr<State> weak = state_;
+    state_->waiter_id.store(
+        GlobalPreviewWorkerPool().RegisterWaiter([weak]() noexcept {
+            if (const auto s = weak.lock()) {
+                if (!s->closed.load(std::memory_order_acquire) &&
+                    s->queued_count.load(std::memory_order_seq_cst) > 0) {
+                    s->NotifyWake();
+                }
+            }
+        }),
+        std::memory_order_release);
 }
-PreviewsAdapter::~PreviewsAdapter() { Close(); }
+PreviewsAdapter::~PreviewsAdapter() {
+    Close();
+    if (state_) state_->UnregisterPoolWaiter();
+}
 void PreviewsAdapter::Close() noexcept { state_->Close(); }
 void PreviewsAdapter::Poll() noexcept {
     try {
         if (GetCurrentThreadId() != state_->thread) return;
         if (!state_->Ready()) { state_->Close(); return; }
-        std::vector<std::shared_ptr<State::Job>> pending;
-        for (const auto& [surface, job] : state_->surfaces) {
-            (void)surface;
-            if (!job->started && !job->cancelled) pending.push_back(job);
+        if (!state_->closed.load(std::memory_order_relaxed) && !state_->surfaces.empty()) {
+            state_->StartPending();
+        } else {
+            state_->queued_count.store(0, std::memory_order_seq_cst);
         }
-        std::sort(pending.begin(), pending.end(), [](const auto& a, const auto& b) { return a->sequence > b->sequence; });
-        for (const auto& job : pending) state_->Start(job);
     } catch (...) { state_->Close(); }
 }
 bool PreviewsAdapter::CallbackActive() const noexcept { return state_->workers != 0; }
+size_t PreviewsAdapter::ActiveWorkerCount() const noexcept {
+    return state_->workers.load(std::memory_order_acquire);
+}
+size_t PreviewsAdapter::QueuedCount() const noexcept {
+    return state_->queued_count.load(std::memory_order_acquire);
+}
 PulseStatus PreviewsAdapter::Query(uint32_t version, void* out, uint32_t size) const noexcept {
     if (version != PULSE_PREVIEW_VERSION_1) return PULSE_ERROR_ABI;
     if (!out || size < sizeof(PulsePreviewV1)) return PULSE_ERROR_ARGUMENT;
@@ -276,7 +367,7 @@ PreviewResponse PreviewsAdapter::Request(HWND owner, const std::wstring& path, u
                     job = std::make_shared<State::Job>(); job->path = path; job->utf8 = utf8; job->modified = modified; job->size = size;
                     job->pixels = pixels; job->sequence = ++state->next_sequence; job->provider = provider; job->notify = notify ? notify : owner; state->surfaces[surface] = job;
                 }
-                state->Start(job);
+                if (!job->started && !job->done) state->StartPending();
                 if (!job->done) return {PreviewStatus::Pending, {}, PULSE_OK};
                 std::lock_guard lock(job->mutex);
                 return {job->error == PULSE_OK ? PreviewStatus::Ready : PreviewStatus::Failed, job->result, job->error};

@@ -12,8 +12,9 @@ enum class CatalogServiceState { Idle, Loading, Online, Offline, Failed, Cancell
 struct CatalogServiceSnapshot {
     CatalogServiceState state = CatalogServiceState::Idle;
     uint64_t generation = 0;
-    std::shared_ptr<const CatalogSnapshot> result; // Only Online/Offline has a result.
+    std::shared_ptr<const CatalogSnapshot> result; // Verified data may remain visible during Loading or Failed refresh.
     std::string error; // Diagnostic, not localized UI text.
+    uint64_t revision=0; // Every publication changes this; guards displayed item indices.
 };
 
 // Single serial worker, latest-generation wins. Refresh/Cancel/GetSnapshot/Stop
@@ -32,10 +33,10 @@ public:
     CatalogService(const CatalogService&) = delete;
     CatalogService& operator=(const CatalogService&) = delete;
 
-    // Advances generation, immediately publishes Loading with no retained result,
+    // Advances generation, immediately publishes Loading while retaining the verified result,
     // cancels active work, and replaces (never appends to) the pending request.
     uint64_t Refresh(const std::filesystem::path& cache_file);
-    // Advances generation, clears pending, cancels active, publishes Cancelled.
+    // Advances generation, clears pending, cancels active, retains verified data as Cancelled.
     uint64_t Cancel();
     CatalogServiceSnapshot GetSnapshot() const;
     // Idempotent, non-joining. First call advances generation and publishes
@@ -47,13 +48,16 @@ public:
     using FetchOperation = std::function<CatalogFetchStatus(const std::filesystem::path&,
         const std::atomic<bool>&, CatalogSnapshot&, std::string&)>;
     explicit CatalogService(FetchOperation fetch);
+    using ProgressiveFetchOperation = std::function<CatalogFetchStatus(const std::filesystem::path&,
+        const std::atomic<bool>&, CatalogSnapshot&, std::string&, const CatalogCacheReady&)>;
+    explicit CatalogService(ProgressiveFetchOperation fetch);
     // Test-only: waits for terminal target state OR supersession (generation >
     // target), with a finite deadline. Does not perform network/file I/O.
     bool WaitForGeneration(uint64_t generation, std::chrono::milliseconds timeout);
 #endif
 private:
     using Operation = std::function<CatalogFetchStatus(const std::filesystem::path&,
-        const std::atomic<bool>&, CatalogSnapshot&, std::string&)>;
+        const std::atomic<bool>&, CatalogSnapshot&, std::string&, const CatalogCacheReady&)>;
     struct Request {
         std::filesystem::path cache_file;
         uint64_t generation;

@@ -46,6 +46,8 @@ class DirectoriesAdapter final {
     std::optional<DirectoryTreeTransferSource> ResolveTreeTransferSource(PulseDirectoryId id,
         uint64_t snapshot, uint64_t entry) const noexcept;
     bool CallbackActive() const noexcept;
+    bool HasPendingWatchStart() const noexcept;
+    void SetWake(std::function<void()> wake, std::string package_id = {}) noexcept;
     void Poll() noexcept;
     struct Impl;
 

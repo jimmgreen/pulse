@@ -1,4 +1,4 @@
-"""Detached manifest signatures using Windows CNG; no private-key generation CLI."""
+"""Detached manifest signatures and publisher key rotation proofs using Windows CNG."""
 import argparse
 import ctypes
 import hashlib
@@ -10,6 +10,7 @@ import tempfile
 import time
 
 PREFIX = b'Pulse.Extension.Manifest.Signature\0v1\0'
+ROTATION_PREFIX = b'Pulse.Extension.Publisher.Rotation\0v1\0'
 ALGORITHM = 'RSA-PKCS1-SHA256'
 
 
@@ -39,6 +40,13 @@ def hex_bytes(value):
 def fingerprint(value):
     if not isinstance(value, str) or len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
         raise ValueError('Fingerprint must be 64 lowercase hexadecimal characters')
+    return value
+
+
+def valid_package_id(value):
+    if (not isinstance(value, str) or not 1 <= len(value) <= 64 or
+            any(not ('a' <= c <= 'z' or 'A' <= c <= 'Z' or '0' <= c <= '9' or c in '._-') for c in value)):
+        raise ValueError('Invalid package identifier')
     return value
 
 
@@ -90,6 +98,9 @@ class Cng:
     def import_key(self, blob, private=False):
         if len(blob) > 8192:
             raise ValueError('Key exceeds size limit')
+        if self.key:
+            self.dll.BCryptDestroyKey(self.key)
+            self.key = ctypes.c_void_p()
         buffer = ctypes.create_string_buffer(blob)
         self.check(self.dll.BCryptImportKeyPair(self.algorithm, None, 'RSAFULLPRIVATEBLOB' if private else 'RSAPUBLICBLOB', ctypes.byref(self.key), buffer, len(blob), 0))
 
@@ -101,11 +112,11 @@ class Cng:
         self.check(self.dll.BCryptExportKey(self.key, None, kind, result, size.value, ctypes.byref(size), 0))
         return result.raw[:size.value]
 
-    def signature(self, manifest, signature=None):
+    def signature(self, manifest, signature=None, domain=PREFIX):
         class Padding(ctypes.Structure):
             _fields_ = [('algorithm', ctypes.c_wchar_p)]
         padding = Padding('SHA256')
-        digest = hashlib.sha256(PREFIX + manifest).digest()
+        digest = hashlib.sha256(domain + manifest).digest()
         digest_buffer = ctypes.create_string_buffer(digest)
         if signature is not None:
             signature_buffer = ctypes.create_string_buffer(signature)
@@ -146,6 +157,26 @@ def policy_keys(policy):
     return keys
 
 
+def verify_with_public_key(manifest, signature, public_key_blob):
+    if len(manifest) > 65536:
+        raise ValueError('Manifest exceeds size limit')
+    exact(signature, ('formatVersion', 'algorithm', 'publisher', 'signature'))
+    if type(signature['formatVersion']) is not int or signature['formatVersion'] != 1 or signature['algorithm'] != ALGORITHM:
+        raise ValueError('unsupported_signature_format')
+    blob = public_blob(public_key_blob)
+    pin = hashlib.sha256(blob).hexdigest()
+    if signature['publisher'] != pin:
+        raise ValueError('publisher_key_mismatch')
+    sig = hex_bytes(signature['signature'])
+    cng = Cng()
+    try:
+        cng.import_key(blob)
+        cng.signature(manifest, sig)
+    finally:
+        cng.close()
+    return {'signed': True, 'trusted': True, 'publisher': pin}
+
+
 def verify(manifest, signature=None, policy=None):
     if len(manifest) > 65536:
         raise ValueError('Manifest exceeds size limit')
@@ -159,14 +190,73 @@ def verify(manifest, signature=None, policy=None):
         raise ValueError('unsupported_signature_format')
     if not isinstance(signature['publisher'], str) or signature['publisher'] not in keys:
         raise ValueError('unknown_publisher')
-    sig = hex_bytes(signature['signature'])
+    return verify_with_public_key(manifest, signature, keys[signature['publisher']])
+
+
+def rotation_message(package_id, old_publisher, new_publisher):
+    return package_id.encode('ascii') + b'\0' + old_publisher.encode('ascii') + b'\0' + new_publisher.encode('ascii')
+
+
+def rotate(package_id, old_private, old_public, new_public):
+    valid_package_id(package_id)
+    old_pub = public_blob(old_public)
+    new_pub = public_blob(new_public)
+    old_pin = hashlib.sha256(old_pub).hexdigest()
+    new_pin = hashlib.sha256(new_pub).hexdigest()
+    if old_pin == new_pin:
+        raise ValueError('Rotation requires a distinct new public key')
     cng = Cng()
     try:
-        cng.import_key(keys[signature['publisher']])
-        cng.signature(manifest, sig)
+        cng.import_key(old_private, True)
+        exported_old = public_blob(cng.export())
+        if hashlib.sha256(exported_old).hexdigest() != old_pin:
+            raise ValueError('Old private key does not match old public key')
+        sig = cng.signature(rotation_message(package_id, old_pin, new_pin), domain=ROTATION_PREFIX)
     finally:
         cng.close()
-    return {'signed': True, 'trusted': True, 'publisher': signature['publisher']}
+    return {
+        'formatVersion': 1,
+        'algorithm': ALGORITHM,
+        'id': package_id,
+        'oldPublisher': old_pin,
+        'oldPublicKey': old_pub.hex(),
+        'newPublisher': new_pin,
+        'newPublicKey': new_pub.hex(),
+        'signature': sig.hex(),
+    }
+
+
+def verify_rotation(package_id, old_public_key_hex, new_public_key_hex, rotation_doc):
+    valid_package_id(package_id)
+    old_pub = public_blob(hex_bytes(old_public_key_hex))
+    new_pub = public_blob(hex_bytes(new_public_key_hex))
+    old_pin = hashlib.sha256(old_pub).hexdigest()
+    new_pin = hashlib.sha256(new_pub).hexdigest()
+    if old_pin == new_pin:
+        raise ValueError('rotation_same_publisher')
+    required = {'formatVersion', 'algorithm', 'id', 'oldPublisher', 'newPublisher', 'signature'}
+    optional = {'oldPublicKey', 'newPublicKey'}
+    if (not isinstance(rotation_doc, dict) or not required <= set(rotation_doc) or
+            set(rotation_doc) - (required | optional)):
+        raise ValueError('Invalid rotation proof fields')
+    if type(rotation_doc['formatVersion']) is not int or rotation_doc['formatVersion'] != 1 or rotation_doc['algorithm'] != ALGORITHM:
+        raise ValueError('unsupported_rotation_format')
+    if (rotation_doc['id'] != package_id or
+            fingerprint(rotation_doc['oldPublisher']) != old_pin or
+            fingerprint(rotation_doc['newPublisher']) != new_pin):
+        raise ValueError('rotation_identity_mismatch')
+    if 'oldPublicKey' in rotation_doc and hex_bytes(rotation_doc['oldPublicKey']) != old_pub:
+        raise ValueError('rotation_old_key_mismatch')
+    if 'newPublicKey' in rotation_doc and hex_bytes(rotation_doc['newPublicKey']) != new_pub:
+        raise ValueError('rotation_new_key_mismatch')
+    sig = hex_bytes(rotation_doc['signature'])
+    cng = Cng()
+    try:
+        cng.import_key(old_pub)
+        cng.signature(rotation_message(package_id, old_pin, new_pin), sig, domain=ROTATION_PREFIX)
+    finally:
+        cng.close()
+    return {'valid': True, 'id': package_id, 'oldPublisher': old_pin, 'newPublisher': new_pin}
 
 
 def atomic_write(path, data):
@@ -194,7 +284,7 @@ def atomic_write(path, data):
             temporary.unlink(missing_ok=True)
 
 
-def main():
+def main(argv=None):
     import package_store as store
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -210,15 +300,27 @@ def main():
     untrust = commands.add_parser('untrust')
     untrust.add_argument('--store', type=Path, required=True)
     untrust.add_argument('--fingerprint', required=True)
+    rotate_parser = commands.add_parser('rotate')
+    rotate_parser.add_argument('--id', required=True)
+    rotate_parser.add_argument('--old-private-key', type=Path, required=True)
+    rotate_parser.add_argument('--old-public-key', type=Path, required=True)
+    rotate_parser.add_argument('--new-public-key', type=Path, required=True)
+    rotate_parser.add_argument('--output', type=Path, required=True)
+    verify_rot = commands.add_parser('verify-rotation')
+    verify_rot.add_argument('rotation', type=Path)
+    verify_rot.add_argument('--id', required=True)
+    verify_rot.add_argument('--old-public-key', type=Path, required=True)
+    verify_rot.add_argument('--new-public-key', type=Path, required=True)
     verification = commands.add_parser('verify')
     verification.add_argument('manifest', type=Path)
     verification.add_argument('--signature', type=Path)
     verification.add_argument('--policy', type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.command == 'sign':
         result = sign(store.read_bytes(args.manifest, 65536), store.read_bytes(args.private_key, 8192))
         with args.output.open('x', encoding='utf-8') as stream:
             json.dump(result, stream, indent=2)
+            stream.write('\n')
         print(json.dumps({'signed': True, 'publisher': result['publisher']}))
     elif args.command == 'trust':
         fingerprint(args.fingerprint)
@@ -249,6 +351,25 @@ def main():
             atomic_write(path, (json.dumps(policy, indent=2) + '\n').encode('utf-8'))
         print(json.dumps({'untrustedPublisher': pin, 'requireSigned': policy['requireSigned'],
                           'reloadRequired': True}))
+    elif args.command == 'rotate':
+        proof = rotate(
+            args.id,
+            store.read_bytes(args.old_private_key, 8192),
+            store.read_bytes(args.old_public_key, 8192),
+            store.read_bytes(args.new_public_key, 8192),
+        )
+        with args.output.open('x', encoding='utf-8') as stream:
+            json.dump(proof, stream, indent=2)
+            stream.write('\n')
+        print(json.dumps({'rotated': True, 'id': proof['id'], 'oldPublisher': proof['oldPublisher'], 'newPublisher': proof['newPublisher']}))
+    elif args.command == 'verify-rotation':
+        result = verify_rotation(
+            args.id,
+            store.read_bytes(args.old_public_key, 8192).hex(),
+            store.read_bytes(args.new_public_key, 8192).hex(),
+            parse(store.read_bytes(args.rotation, 16384)),
+        )
+        print(json.dumps(result))
     else:
         result = verify(store.read_bytes(args.manifest, 65536), parse(store.read_bytes(args.signature, 16384)) if args.signature else None, parse(store.read_bytes(args.policy, 65536)) if args.policy else None)
         print(json.dumps(result))

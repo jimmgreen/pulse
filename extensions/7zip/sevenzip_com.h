@@ -11,12 +11,127 @@
 #include <oleauto.h>
 #include <atomic>
 #include <cstdint>
-
-extern "C" __declspec(dllimport) HRESULT WINAPI CreateObject(const GUID*, const GUID*, void**);
-extern "C" __declspec(dllimport) HRESULT WINAPI GetHandlerProperty2(unsigned, PROPID, PROPVARIANT*);
-extern "C" __declspec(dllimport) HRESULT WINAPI GetNumberOfFormats(unsigned*);
+#include <filesystem>
+#include <mutex>
+#include <string>
 
 namespace sevenzip {
+namespace dyn {
+struct Api {
+    HMODULE sevenzip = nullptr;
+    HMODULE oleaut = nullptr;
+    HMODULE ole = nullptr;
+    DWORD load_error = 0;
+    HRESULT(WINAPI* create_object)(const GUID*, const GUID*, void**) = nullptr;
+    HRESULT(WINAPI* get_handler_property2)(unsigned, PROPID, PROPVARIANT*) = nullptr;
+    HRESULT(WINAPI* get_number_of_formats)(unsigned*) = nullptr;
+    BSTR(WINAPI* sys_alloc_string)(const OLECHAR*) = nullptr;
+    void(WINAPI* sys_free_string)(BSTR) = nullptr;
+    UINT(WINAPI* sys_string_len)(BSTR) = nullptr;
+    UINT(WINAPI* sys_string_byte_len)(BSTR) = nullptr;
+    HRESULT(WINAPI* prop_variant_clear)(PROPVARIANT*) = nullptr;
+};
+
+inline void AnchorSymbol() noexcept {}
+
+inline const Api& Get() noexcept {
+    static std::once_flag once;
+    static Api api{};
+    std::call_once(once, []() noexcept {
+        api.oleaut = LoadLibraryExW(L"oleaut32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (api.oleaut) {
+            api.sys_alloc_string = reinterpret_cast<decltype(api.sys_alloc_string)>(GetProcAddress(api.oleaut, "SysAllocString"));
+            api.sys_free_string = reinterpret_cast<decltype(api.sys_free_string)>(GetProcAddress(api.oleaut, "SysFreeString"));
+            api.sys_string_len = reinterpret_cast<decltype(api.sys_string_len)>(GetProcAddress(api.oleaut, "SysStringLen"));
+            api.sys_string_byte_len = reinterpret_cast<decltype(api.sys_string_byte_len)>(GetProcAddress(api.oleaut, "SysStringByteLen"));
+        }
+        api.ole = LoadLibraryExW(L"ole32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (api.ole) {
+            api.prop_variant_clear = reinterpret_cast<decltype(api.prop_variant_clear)>(GetProcAddress(api.ole, "PropVariantClear"));
+        }
+        HMODULE self = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(&AnchorSymbol), &self) || !self) {
+            api.load_error = GetLastError();
+            return;
+        }
+        std::wstring buffer(MAX_PATH, L'\0');
+        DWORD len = 0;
+        for (;;) {
+            len = GetModuleFileNameW(self, buffer.data(), static_cast<DWORD>(buffer.size()));
+            if (len == 0) {
+                api.load_error = GetLastError();
+                return;
+            }
+            if (len < buffer.size()) {
+                buffer.resize(len);
+                break;
+            }
+            if (buffer.size() >= 32768) {
+                api.load_error = ERROR_FILENAME_EXCED_RANGE;
+                return;
+            }
+            buffer.resize(buffer.size() * 2);
+        }
+        const auto dll_path = std::filesystem::path(buffer).parent_path() / L"7z.dll";
+        api.sevenzip = LoadLibraryExW(dll_path.c_str(), nullptr,
+                                      LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!api.sevenzip) {
+            api.load_error = GetLastError();
+            return;
+        }
+        api.create_object = reinterpret_cast<decltype(api.create_object)>(GetProcAddress(api.sevenzip, "CreateObject"));
+        api.get_handler_property2 = reinterpret_cast<decltype(api.get_handler_property2)>(GetProcAddress(api.sevenzip, "GetHandlerProperty2"));
+        api.get_number_of_formats = reinterpret_cast<decltype(api.get_number_of_formats)>(GetProcAddress(api.sevenzip, "GetNumberOfFormats"));
+        if (!api.create_object || !api.get_handler_property2 || !api.get_number_of_formats) {
+            api.load_error = ERROR_PROC_NOT_FOUND;
+        }
+    });
+    return api;
+}
+
+inline bool IsLoaded() noexcept {
+    const auto& api = Get();
+    return api.sevenzip && api.create_object && api.get_handler_property2 && api.get_number_of_formats;
+}
+inline DWORD LoadError() noexcept {
+    return Get().load_error;
+}
+inline HRESULT CreateObject(const GUID* cls, const GUID* iid, void** out) noexcept {
+    const auto& api = Get();
+    return api.create_object ? api.create_object(cls, iid, out) : E_NOTIMPL;
+}
+inline HRESULT GetHandlerProperty2(unsigned index, PROPID prop, PROPVARIANT* value) noexcept {
+    const auto& api = Get();
+    return api.get_handler_property2 ? api.get_handler_property2(index, prop, value) : E_NOTIMPL;
+}
+inline HRESULT GetNumberOfFormats(unsigned* count) noexcept {
+    const auto& api = Get();
+    return api.get_number_of_formats ? api.get_number_of_formats(count) : E_NOTIMPL;
+}
+inline BSTR AllocBstr(const wchar_t* text) noexcept {
+    const auto& api = Get();
+    return api.sys_alloc_string ? api.sys_alloc_string(text ? text : L"") : nullptr;
+}
+inline UINT BstrLen(BSTR value) noexcept {
+    const auto& api = Get();
+    return value && api.sys_string_len ? api.sys_string_len(value) : 0;
+}
+inline UINT BstrByteLen(BSTR value) noexcept {
+    const auto& api = Get();
+    return value && api.sys_string_byte_len ? api.sys_string_byte_len(value) : 0;
+}
+inline HRESULT ClearPropVariant(PROPVARIANT* value) noexcept {
+    if (!value) return E_POINTER;
+    const auto& api = Get();
+    if (api.prop_variant_clear) return api.prop_variant_clear(value);
+    if (value->vt == VT_BSTR && value->bstrVal && api.sys_free_string) {
+        api.sys_free_string(value->bstrVal);
+    }
+    PropVariantInit(value);
+    return S_OK;
+}
+} // namespace dyn
 using UInt32 = unsigned int;
 using UInt64 = unsigned long long;
 using Int32 = int;
@@ -103,7 +218,7 @@ struct ISetProperties : IUnknown {
 struct Variant {
     PROPVARIANT value{};
     Variant() { PropVariantInit(&value); }
-    ~Variant() { PropVariantClear(&value); }
+    ~Variant() { dyn::ClearPropVariant(&value); }
     Variant(const Variant&) = delete;
     Variant& operator=(const Variant&) = delete;
 };

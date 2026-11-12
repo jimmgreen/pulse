@@ -1,4 +1,5 @@
 #include "runtime.h"
+#include "icon_registry.h"
 #include "developer_cli.h"
 #include "audit_diagnostics_cli.h"
 #include "development_reload.h"
@@ -25,6 +26,7 @@ struct RuntimePackage {
     std::string revision;
     bool trust_revoked = false;
     std::wstring native_path;
+    std::string publisher_id;
 };
 std::vector<RuntimePackage> packages;
 authorization::Registry callers;
@@ -32,11 +34,19 @@ bool identities_ready = false;
 std::unordered_map<uintptr_t, authorization::OwnerHandle> owners;
 bool SyncCallers() {
     std::vector<authorization::PackageState> states;
-    for (size_t i = 0; i < packages.size(); ++i)
+    std::vector<std::string> active_packages;
+    for (size_t i = 0; i < packages.size(); ++i) {
         states.push_back({{i, packages[i].manifest.id, packages[i].revision, packages[i].generation}, packages[i].enabled});
+        if (packages[i].enabled && !packages[i].trust_revoked) {
+            active_packages.push_back(packages[i].manifest.id);
+            SyncManifestIcons(packages[i].manifest);
+        }
+    }
+    icons::GlobalRegistry().ClearManifestIconsForMissingPackages(active_packages);
     identities_ready = callers.SyncPackages(states);
     if (identities_ready) return true;
     callers.SyncPackages({});
+    icons::GlobalRegistry().ClearManifestIconsForMissingPackages({});
     return false;
 }
 bool package_store_mode = false;
@@ -164,6 +174,14 @@ size_t PackageCount() { return packages.size(); }
 const Manifest* PackageManifest(size_t package) {
     return package < packages.size() ? &packages[package].manifest : nullptr;
 }
+std::string PackagePublisherId(size_t package) {
+    return package < packages.size() ? packages[package].publisher_id : std::string{};
+}
+std::wstring PackagePublishTrustKey(size_t package) {
+    return package < packages.size()
+        ? FormatPublishTrustKey(packages[package].publisher_id, packages[package].manifest.id)
+        : std::wstring{};
+}
 std::wstring PackageNativePath(size_t package) {
     return package < packages.size() ? packages[package].native_path : std::wstring{};
 }
@@ -260,6 +278,7 @@ StartupResult PrepareStartup(int argc, wchar_t** argv) {
             for (size_t i = 0; i < loaded.packages.size(); ++i) {
                 RuntimePackage entry{std::move(loaded.packages[i]), true, ++manifest_generation, loaded.revisions[i]};
                 if (i < loaded.native_paths.size()) entry.native_path = std::move(loaded.native_paths[i]);
+                if (i < loaded.publisher_ids.size()) entry.publisher_id = std::move(loaded.publisher_ids[i]);
                 next.push_back(std::move(entry));
             }
             packages = std::move(next);

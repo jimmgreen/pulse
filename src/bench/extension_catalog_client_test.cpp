@@ -99,6 +99,26 @@ std::string Index(std::string_view date) {
     return "{\n \"formatVersion\":1, \"generated\":\"" + std::string(date) +
         "\", \"publishers\":[], \"extensions\":[]\n}\n";
 }
+std::string IndexWithMeta(std::string_view generated, std::string_view expires, uint64_t sequence) {
+    std::string s = "{\n \"formatVersion\":1, \"generated\":\"" + std::string(generated) + "\"";
+    if (!expires.empty()) s += ", \"expires\":\"" + std::string(expires) + "\"";
+    if (sequence > 0) s += ", \"sequence\":" + std::to_string(sequence);
+    s += ", \"publishers\":[], \"extensions\":[]\n}\n";
+    return s;
+}
+void BackdateFileHours(const std::filesystem::path& path, uint64_t hours) {
+    HANDLE h = CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    Require(h != INVALID_HANDLE_VALUE);
+    FILETIME now_ft{};
+    GetSystemTimeAsFileTime(&now_ft);
+    const uint64_t now = (static_cast<uint64_t>(now_ft.dwHighDateTime) << 32) | now_ft.dwLowDateTime;
+    const uint64_t past = now - hours * 3600ull * 10000000ull;
+    FILETIME past_ft{static_cast<DWORD>(past & 0xffffffffu), static_cast<DWORD>(past >> 32)};
+    const BOOL ok = SetFileTime(h, nullptr, nullptr, &past_ft);
+    CloseHandle(h);
+    Require(ok != FALSE);
+}
 int passed = 0, failed = 0;
 void Check(const char* name, bool ok) { std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", name); ok ? ++passed : ++failed; }
 size_t TempCount(const std::filesystem::path& root) {
@@ -131,6 +151,23 @@ int main() {
         Check("transport receives independent limits", good.limits == std::vector<uint64_t>{kMaxCatalogBytes, kMaxCatalogSignatureBytes});
         const auto old_cache = Bytes(cache);
         Check("single cache stores exact original byte strings", old_cache.substr(20) == old_index + old_sig && TempCount(directory.path) == 0);
+        bool published=false,published_before_network=true;
+        size_t publications=0;
+        Fake slow_offline;
+        slow_offline.on_read=[&](size_t) {published_before_network &= published;};
+        const auto early_status=testing::FetchCatalogWithValidator(cache,cancelled,snapshot,error,slow_offline.Reader(),validate,{},
+            [&](const CatalogSnapshot& early) {
+                ++publications;published=early.index_bytes==old_index && early.signature_bytes==old_sig && early.offline && early.cache_persisted;
+            });
+        Check("verified cache is published before the first slow network attempt",early_status==CatalogFetchStatus::Offline && publications==1 && published && published_before_network);
+        const auto damaged_cache=directory.path/L"damaged-early.cache";
+        auto damaged=old_cache;damaged[25]^=1;Write(damaged_cache,damaged);
+        Fake invalid_early;size_t invalid_publications=0;
+        Check("invalid signature cache is never published early",testing::FetchCatalogWithValidator(damaged_cache,cancelled,snapshot,error,invalid_early.Reader(),validate,{},
+            [&](const CatalogSnapshot&){++invalid_publications;})==CatalogFetchStatus::Failed && invalid_publications==0);
+        Fake no_cache_early;size_t absent_publications=0;
+        Check("no-cache failure does not fabricate early data",testing::FetchCatalogWithValidator({},cancelled,snapshot,error,no_cache_early.Reader(),validate,{},
+            [&](const CatalogSnapshot&){++absent_publications;})==CatalogFetchStatus::Failed && absent_publications==0);
         Fake offline;
         Check("network failure uses reverified offline cache", fetch(offline, cache) == CatalogFetchStatus::Offline && snapshot.offline &&
             snapshot.catalog.generated == "2026-11-09T00:00:00Z" && snapshot.source.empty() && !snapshot.diagnostic.empty());
@@ -227,6 +264,91 @@ int main() {
             Fake reparse_write{{{newer}, {new_sig}}};
             Check("reparse cache leaf not replaced on persistence", fetch(reparse_write, symlink) == CatalogFetchStatus::Online && !snapshot.cache_persisted && Bytes(cache) == new_cache);
         } else std::printf("[SKIP] symlink fixture unavailable: %lu\n", GetLastError());
+        {
+            const auto fresh_cache = directory.path / L"freshness.cache";
+            const auto future_idx = IndexWithMeta("2026-11-10T00:00:00Z", "2099-12-31", 5);
+            const auto future_sig = key.Sign(future_idx);
+            Fake online_future{{{future_idx}, {future_sig}}};
+            Check("non-expired catalog reports expired=false and sequence",
+                fetch(online_future, fresh_cache) == CatalogFetchStatus::Online &&
+                !snapshot.expired && !snapshot.stale_offline && snapshot.catalog.sequence == 5);
+            Fake offline_fresh;
+            Check("fresh offline cache reports cache_age_hours=0 and stale_offline=false",
+                fetch(offline_fresh, fresh_cache) == CatalogFetchStatus::Offline &&
+                !snapshot.expired && !snapshot.stale_offline && snapshot.cache_age_hours < 2 &&
+                snapshot.diagnostic.find("cache_age_hours=") != std::string::npos);
+            BackdateFileHours(fresh_cache, 200);
+            bool early_stale_seen = false;
+            Fake offline_stale;
+            const auto stale_status = testing::FetchCatalogWithValidator(
+                fresh_cache, cancelled, snapshot, error, offline_stale.Reader(), validate, {},
+                [&](const CatalogSnapshot& early) {
+                    early_stale_seen = early.stale_offline && early.cache_age_hours >= 199 &&
+                        early.diagnostic.find("stale_offline_cache") != std::string::npos;
+                });
+            Check("offline cache older than 168h remains usable with stale_offline diagnostic",
+                stale_status == CatalogFetchStatus::Offline && early_stale_seen &&
+                snapshot.offline && snapshot.stale_offline && snapshot.cache_age_hours >= 199 &&
+                snapshot.diagnostic.find("stale_offline_cache") != std::string::npos &&
+                snapshot.diagnostic.find("cache_age_hours=") != std::string::npos);
+
+            const auto exp_cache = directory.path / L"expired.cache";
+            const auto exp_idx = IndexWithMeta("2020-01-01T00:00:00Z", "2020-01-02", 1);
+            const auto exp_sig = key.Sign(exp_idx);
+            Fake online_exp{{{exp_idx}, {exp_sig}}};
+            Check("past expires date marks online snapshot expired",
+                fetch(online_exp, exp_cache) == CatalogFetchStatus::Online &&
+                snapshot.expired && snapshot.diagnostic.find("catalog_expired:2020-01-02") != std::string::npos);
+            Fake offline_exp;
+            Check("past expires date marks offline snapshot expired",
+                fetch(offline_exp, exp_cache) == CatalogFetchStatus::Offline &&
+                snapshot.expired && snapshot.diagnostic.find("catalog_expired:2020-01-02") != std::string::npos);
+
+            const auto anchor_cache = directory.path / L"anchor-guard.cache";
+            auto anchor_file = anchor_cache;
+            anchor_file += L".anchor";
+            const auto seq10_idx = IndexWithMeta("2026-11-10T00:00:00Z", "2099-12-31", 10);
+            const auto seq10_sig = key.Sign(seq10_idx);
+            Fake seed_anchor{{{seq10_idx}, {seq10_sig}}};
+            Check("online fetch writes high-watermark anchor file",
+                fetch(seed_anchor, anchor_cache) == CatalogFetchStatus::Online &&
+                std::filesystem::exists(anchor_file));
+            const auto older_gen_idx = IndexWithMeta("2026-11-09T00:00:00Z", "2099-12-31", 10);
+            const auto older_gen_sig = key.Sign(older_gen_idx);
+            const auto older_seq_idx = IndexWithMeta("2026-11-10T00:00:00Z", "2099-12-31", 9);
+            const auto older_seq_sig = key.Sign(older_seq_idx);
+            const auto newer_seq_idx = IndexWithMeta("2026-11-10T00:00:00Z", "2099-12-31", 11);
+            const auto newer_seq_sig = key.Sign(newer_seq_idx);
+
+            // Prepare a valid older cache file via temporary cache path to test disk cache rollback vs anchor.
+            const auto stage_old_cache = directory.path / L"stage-old.cache";
+            Fake stage_old{{{older_seq_idx}, {older_seq_sig}}};
+            Require(fetch(stage_old, stage_old_cache) == CatalogFetchStatus::Online);
+            const auto older_seq_cache_bytes = Bytes(stage_old_cache);
+
+            // Delete primary cache file; anchor alone must block both generated and sequence rollback.
+            std::filesystem::remove(anchor_cache);
+            pulse::app::SetUpdateSource(pulse::app::UpdateSource::GitHub);
+            Fake rb_gen{{{older_gen_idx}, {older_gen_sig}}};
+            Check("anchor blocks online generated rollback after cache deletion",
+                fetch(rb_gen, anchor_cache) == CatalogFetchStatus::Failed &&
+                error.find("catalog_rollback_rejected") != std::string::npos &&
+                !std::filesystem::exists(anchor_cache));
+            Fake rb_seq{{{older_seq_idx}, {older_seq_sig}}};
+            Check("anchor blocks online sequence rollback after cache deletion",
+                fetch(rb_seq, anchor_cache) == CatalogFetchStatus::Failed &&
+                error.find("catalog_rollback_rejected") != std::string::npos);
+            Write(anchor_cache, older_seq_cache_bytes);
+            Fake rb_disk;
+            Check("anchor rejects replayed older cache file on disk",
+                fetch(rb_disk, anchor_cache) == CatalogFetchStatus::Failed &&
+                error.find("cache_rollback_rejected") != std::string::npos);
+            std::filesystem::remove(anchor_cache);
+            Fake advance_seq{{{newer_seq_idx}, {newer_seq_sig}}};
+            Check("anchor permits monotonic sequence advance after cache deletion",
+                fetch(advance_seq, anchor_cache) == CatalogFetchStatus::Online &&
+                snapshot.cache_persisted && snapshot.catalog.sequence == 11);
+        }
         pulse::app::SetUpdateSource(pulse::app::UpdateSource::Automatic);
         std::printf("Catalog client tests: %d passed, %d failed\n", passed, failed);
         return failed ? 1 : 0;

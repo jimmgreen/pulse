@@ -1,4 +1,5 @@
 #include "directories_adapter.h"
+#include "crash_guard.h"
 #include "../../../fs/fs_enum.h"
 #include "../../../fs/fs_watch.h"
 #include <algorithm>
@@ -125,22 +126,49 @@ struct WorkerState {
     std::atomic<bool> closed{false};
     std::atomic<unsigned> active{0};
     std::mutex mutex;
+    std::function<void()> wake;
     std::vector<Result> results;
     std::unordered_map<uint64_t, WatchSignal> signals;
+    void NotifyWake() {
+        std::function<void()> on_wake;
+        {
+            std::lock_guard lock(mutex);
+            if (!closed) on_wake = wake;
+        }
+        if (on_wake) {
+            try { on_wake(); } catch (...) {}
+        }
+    }
     void Complete(Result result) {
-        std::lock_guard lock(mutex);
-        std::erase_if(results, [](const Result &pending) { return pending.job->cancelled.load(); });
-        if (!closed && !result.job->cancelled) results.push_back(std::move(result));
+        std::function<void()> on_wake;
+        {
+            std::lock_guard lock(mutex);
+            std::erase_if(results, [](const Result &pending) { return pending.job->cancelled.load(); });
+            if (!closed && !result.job->cancelled) {
+                results.push_back(std::move(result));
+                on_wake = wake;
+            }
+        }
+        if (on_wake) {
+            try { on_wake(); } catch (...) {}
+        }
     }
     void Signal(uint64_t id, bool armed, bool overflow) {
-        std::lock_guard lock(mutex);
-        if (closed) return;
-        const auto found = signals.find(id);
-        if (found == signals.end()) return;
-        auto &signal = found->second;
-        signal.armed = signal.armed || armed;
-        signal.invalidated = signal.invalidated || !armed;
-        signal.overflow = signal.overflow || (!armed && overflow);
+        std::function<void()> on_wake;
+        {
+            std::lock_guard lock(mutex);
+            if (closed) return;
+            const auto found = signals.find(id);
+            if (found == signals.end()) return;
+            auto &signal = found->second;
+            signal.armed = signal.armed || armed;
+            signal.invalidated = signal.invalidated || !armed;
+            signal.overflow = signal.overflow || (!armed && overflow);
+            on_wake = wake;
+        }
+        if (on_wake) {
+            try { on_wake(); } catch (...) {}
+        }
     }
 };
 Result Run(const std::shared_ptr<Job> &job) {
@@ -235,6 +263,7 @@ struct DirectoriesAdapter::Impl {
     };
     CallerBinding caller;
     DirectoriesBackend backend;
+    std::string package_id;
     const DWORD thread = GetCurrentThreadId();
     bool closed = false, polling = false;
     unsigned callbacks = 0;
@@ -396,6 +425,7 @@ struct DirectoriesAdapter::Impl {
         }
         watches.emplace(id, std::move(watch));
         *output = id;
+        workers->NotifyWake();
         return PULSE_OK;
     }
     PulseStatus Cancel(uint64_t id) {
@@ -483,7 +513,10 @@ struct DirectoriesAdapter::Impl {
             directories.erase(directory); reply.directory_id = 0;
         }
         ++callbacks;
-        try { request.callback(request.user, &reply); } catch (...) { Close(); }
+        try {
+            const crash_guard::CallScope call_scope(package_id.c_str());
+            request.callback(request.user, &reply);
+        } catch (...) { Close(); }
         --callbacks;
     }
     void Change(uint64_t id, uint32_t kind, bool overflow = false, const char *error = nullptr) {
@@ -497,7 +530,10 @@ struct DirectoriesAdapter::Impl {
         if (error) change.error = {error, static_cast<uint32_t>(std::strlen(error))};
         const auto callback = watch.callback; void *const user = watch.user;
         ++callbacks;
-        try { callback(user, &change); } catch (...) { Close(); }
+        try {
+            const crash_guard::CallScope call_scope(package_id.c_str());
+            callback(user, &change);
+        } catch (...) { Close(); }
         --callbacks;
     }
     void Poll() {
@@ -671,6 +707,20 @@ std::optional<DirectoryTreeTransferSource> DirectoriesAdapter::ResolveTreeTransf
     } catch (...) { return std::nullopt; }
 }
 bool DirectoriesAdapter::CallbackActive() const noexcept { return impl_ && impl_->callbacks != 0; }
+bool DirectoriesAdapter::HasPendingWatchStart() const noexcept {
+    if (!impl_ || impl_->closed || GetCurrentThreadId() != impl_->thread) return false;
+    for (const auto &[id, watch] : impl_->watches) {
+        (void)id;
+        if (!watch.ready && !watch.failed) return true;
+    }
+    return false;
+}
+void DirectoriesAdapter::SetWake(std::function<void()> wake, std::string package_id) noexcept {
+    if (!impl_ || GetCurrentThreadId() != impl_->thread) return;
+    impl_->package_id = std::move(package_id);
+    std::lock_guard lock(impl_->workers->mutex);
+    impl_->workers->wake = std::move(wake);
+}
 void DirectoriesAdapter::Poll() noexcept {
     const auto keep_alive = impl_;
     try { if (keep_alive) keep_alive->Poll(); } catch (...) { if (keep_alive) keep_alive->Close(); }

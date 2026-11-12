@@ -27,6 +27,13 @@ enum class Id {
     HeroTitle, HeroDetail, AutoSaved, ModeTitle, ModeDesc, MenuShows, ModeSmartDesc, ModeFolderDesc, ModeHereDesc,
     LocationTitle, LocationFixedDesc, QuickFormatTitle, QuickFormatDesc, QuickLevelTitle, QuickLevelDesc,
     RememberTitle, RememberDesc, RarNote,
+    MenuSection, PlacementTitle, PlacementDesc, PlacementTop, PlacementTopDesc, PlacementSub, PlacementSubDesc,
+    CommandsTitle, CommandsDesc, CmdExtractSwitch, CmdQuickSwitch, HintSmart, HintFolder, HintHere, HintFixed, HintFixedHere, HintQuick, HintTar,
+    DialogCaption, StepUnpack, StepWrite, NoteUnpack, NoteWrite, NoteCompress, SafeUnchanged, SafeNoArchive,
+    DetailWrongPassword, DetailDamaged, ActionRetry, ActionPassword, RememberSwitch, RememberSwitchDesc,
+    ResultExtracted, ResultCompressed, ResultItems, ResultTook,
+    TestOkDetail, StatFiles, StatUnpacked, StatRatio, StatFormat, StatTime, StatCount, StatRatioValue, StatSeconds, Done,
+    ErrWorkerCrashed, ErrWorkerTimedOut, ErrWorkerMemory, DetailWorkerIsolated,
 };
 const char* Get(Id id);                       // UTF-8
 std::string Format(Id id, const std::string& name);  // replaces {name}

@@ -1,1 +1,122 @@
-{"apiVersion":1,"id":"pulse.7zip","name":"7-Zip","resources":["settings.own"]}
+{
+  "apiVersion": 1,
+  "id": "pulse.7zip",
+  "name": "7-Zip",
+  "resources": ["settings.own"],
+  "contributes": {
+    "commands": [
+      {
+        "id": "extract",
+        "title": {
+          "zh": "智能解压",
+          "en": "Smart extract",
+          "tw": "智慧解壓縮"
+        },
+        "detail": {
+          "zh": "解压到 {stem}\\，单层直接放出",
+          "en": "To {stem}\\, or as is if single",
+          "tw": "解壓縮到 {stem}\\，單層直接放出"
+        },
+        "group": "7-Zip",
+        "submenu": false,
+        "icon": "extract",
+        "kinds": ["files"],
+        "minSelection": 1,
+        "maxSelection": 64,
+        "extensions": [
+          ".7z", ".zip", ".rar", ".tar", ".gz", ".tgz", ".xz", ".txz",
+          ".bz2", ".tbz2", ".tbz", ".lzma", ".z", ".iso", ".cab", ".wim",
+          ".arj", ".lzh", ".lha", ".cpio", ".rpm", ".deb", ".001", ".zipx",
+          ".jar", ".apk", ".msi", ".vhd", ".vhdx", ".dmg", ".udf", ".squashfs"
+        ]
+      },
+      {
+        "id": "extract-to",
+        "title": {
+          "zh": "解压到…",
+          "en": "Extract to…",
+          "tw": "解壓縮到…"
+        },
+        "group": "7-Zip",
+        "submenu": false,
+        "icon": "extract",
+        "kinds": ["files"],
+        "minSelection": 1,
+        "maxSelection": 64,
+        "extensions": [
+          ".7z", ".zip", ".rar", ".tar", ".gz", ".tgz", ".xz", ".txz",
+          ".bz2", ".tbz2", ".tbz", ".lzma", ".z", ".iso", ".cab", ".wim",
+          ".arj", ".lzh", ".lha", ".cpio", ".rpm", ".deb", ".001", ".zipx",
+          ".jar", ".apk", ".msi", ".vhd", ".vhdx", ".dmg", ".udf", ".squashfs"
+        ]
+      },
+      {
+        "id": "test-archive",
+        "title": {
+          "zh": "测试压缩包",
+          "en": "Test archive",
+          "tw": "測試壓縮檔"
+        },
+        "group": "7-Zip",
+        "submenu": false,
+        "icon": "default",
+        "kinds": ["files"],
+        "minSelection": 1,
+        "maxSelection": 64,
+        "extensions": [
+          ".7z", ".zip", ".rar", ".tar", ".gz", ".tgz", ".xz", ".txz",
+          ".bz2", ".tbz2", ".tbz", ".lzma", ".z", ".iso", ".cab", ".wim",
+          ".arj", ".lzh", ".lha", ".cpio", ".rpm", ".deb", ".001", ".zipx",
+          ".jar", ".apk", ".msi", ".vhd", ".vhdx", ".dmg", ".udf", ".squashfs"
+        ]
+      },
+      {
+        "id": "quick-compress",
+        "title": {
+          "zh": "快速压缩为 7z",
+          "en": "Quick compress to 7z",
+          "tw": "快速壓縮為 7z"
+        },
+        "detail": {
+          "zh": "保存为 {base}.7z · 标准",
+          "en": "Saves {base}.7z · Normal",
+          "tw": "儲存為 {base}.7z · 標準"
+        },
+        "group": "7-Zip",
+        "submenu": false,
+        "icon": "archive",
+        "kinds": ["files", "directories"],
+        "minSelection": 1,
+        "maxSelection": 4096
+      },
+      {
+        "id": "add-to-archive",
+        "title": {
+          "zh": "添加到压缩包…",
+          "en": "Add to archive…",
+          "tw": "加入壓縮檔…"
+        },
+        "group": "7-Zip",
+        "submenu": false,
+        "icon": "archive",
+        "kinds": ["files", "directories"],
+        "minSelection": 1,
+        "maxSelection": 4096
+      },
+      {
+        "id": "checksums",
+        "title": {
+          "zh": "计算校验值",
+          "en": "Compute checksums",
+          "tw": "計算校驗值"
+        },
+        "group": "7-Zip",
+        "submenu": false,
+        "icon": "default",
+        "kinds": ["files"],
+        "minSelection": 1,
+        "maxSelection": 64
+      }
+    ]
+  }
+}

@@ -9,7 +9,20 @@
 
 namespace engine {
 
-enum class Status { Ok, Cancelled, NeedPassword, WrongPassword, Unsupported, InvalidArchive, IoError, LimitReached, InvalidInput };
+enum class Status {
+    Ok,
+    Cancelled,
+    NeedPassword,
+    WrongPassword,
+    Unsupported,
+    InvalidArchive,
+    IoError,
+    LimitReached,
+    InvalidInput,
+    WorkerCrashed,
+    WorkerTimedOut,
+    WorkerMemoryLimit
+};
 
 struct Entry {
     std::wstring path;      // archive-relative, '\' separators
@@ -38,13 +51,41 @@ using Report = std::function<void(const Progress&)>;
 // Returns false to cancel. `retry` is true after a wrong password.
 using AskPassword = std::function<bool(bool retry, std::wstring& password)>;
 
+struct Budget {
+    uint64_t max_total_bytes = 64ull << 30;
+    uint64_t max_single_bytes = 32ull << 30;
+    uint64_t min_free_disk_bytes = 256ull << 20;
+    size_t max_entries = 500000;
+    size_t max_path_bytes = 64u << 20;
+    uint32_t max_duration_ms = 0;
+    bool expand_wrappers = true;
+
+    static constexpr Budget PreviewBudget() noexcept {
+        Budget budget;
+        budget.max_total_bytes = 32ull << 20;
+        budget.max_single_bytes = 32ull << 20;
+        budget.min_free_disk_bytes = 256ull << 20;
+        budget.max_entries = 65536;
+        budget.max_path_bytes = 8u << 20;
+        budget.max_duration_ms = 8000;
+        budget.expand_wrappers = true;
+        return budget;
+    }
+    static constexpr Budget DefaultExtractBudget() noexcept {
+        return Budget{};
+    }
+};
+
+constexpr Budget PreviewBudget() noexcept { return Budget::PreviewBudget(); }
+constexpr Budget DefaultExtractBudget() noexcept { return Budget::DefaultExtractBudget(); }
+
 // Formats 7z.dll can open, as "name: ext ext ..." lines (diagnostics, settings page).
 std::vector<std::wstring> SupportedFormats();
 // Lowercase dotted extensions the context-menu commands register (at most 32).
 std::vector<std::string> ArchiveExtensions();
 
 Listing List(const std::wstring& path, const Cancelled& cancelled, const AskPassword& password,
-             size_t max_entries = SIZE_MAX);
+             size_t max_entries = SIZE_MAX, const Budget& budget = Budget::PreviewBudget());
 
 struct ExtractResult {
     Status status = Status::IoError;
@@ -54,7 +95,8 @@ struct ExtractResult {
 // Into an existing empty directory. Never overwrites, never follows or creates
 // links. test_only: decode and check every item, write nothing.
 ExtractResult Extract(const std::wstring& path, const std::wstring& destination, bool test_only,
-                      const Cancelled& cancelled, const Report& report, const AskPassword& password);
+                      const Cancelled& cancelled, const Report& report, const AskPassword& password,
+                      const Budget& budget = Budget::DefaultExtractBudget());
 
 enum class Format { SevenZip, Zip, Tar, TarGz, TarXz, TarBz2 };
 struct CreateOptions {
@@ -89,4 +131,6 @@ std::vector<HashResult> Hash(const std::vector<std::wstring>& files, const Cance
 
 // Archive-relative name check shared by extraction and tests.
 bool SafeRelativePath(const std::wstring& path);
+// Stops any warm background worker process held by the client (no-op in-process).
+void ShutdownWorkers() noexcept;
 } // namespace engine

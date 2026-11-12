@@ -1,3 +1,4 @@
+#include <windows.h>
 #include "settings.h"
 #include "engine.h"
 #include "text.h"
@@ -20,6 +21,13 @@ bool LocalAbsolute(std::string_view path) {
         path[1] == ':' && (path[2] == '\\' || path[2] == '/');
 }
 bool Digit(const std::string& value, char max) { return value.size() == 1 && value[0] >= '0' && value[0] <= max; }
+constexpr int kCommandCount = 6;  // plugin.cpp Command order
+constexpr int kAllCommands = (1 << kCommandCount) - 1;
+int HexDigit(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; }
+std::string Hex2(int value) {
+    constexpr char kDigits[] = "0123456789abcdef";
+    return {kDigits[(value >> 4) & 15], kDigits[value & 15]};
+}
 } // namespace
 
 struct Settings::State {
@@ -33,7 +41,8 @@ struct Settings::State {
     PulseResourcesRequestId request = 0;
     // Saved values, as the page shows them.
     std::map<std::string, std::string> values{{"mode", "0"}, {"location", "0"}, {"folder", ""}, {"format", "0"},
-                                              {"level", "3"}, {"remember", "true"}};
+                                              {"level", "3"}, {"remember", "true"}, {"placement", "0"},
+                                              {"commands", Hex2(kAllCommands)}};
     bool loading = false, saving = false, loaded = false, dirty = false;
     pulse::sdk::Subscription browse, edits;
     ~State() {
@@ -54,26 +63,41 @@ struct Settings::State {
     }
     std::string Encoded() const {
         const auto& v = values;
-        return "3\n" + v.at("mode") + "\n" + v.at("location") + "\n" + v.at("format") + "\n" + v.at("level") + "\n" +
-               (v.at("remember") == "false" ? "0" : "1") + "\n" + v.at("folder");
+        return "4\n" + v.at("mode") + "\n" + v.at("location") + "\n" + v.at("format") + "\n" + v.at("level") + "\n" +
+               (v.at("remember") == "false" ? "0" : "1") + "\n" + v.at("placement") + "\n" + v.at("commands") + "\n" + v.at("folder");
     }
     void Decode(const PulseSettings& settings) {
         for (uint32_t i = 0; i < settings.count; ++i) {
             if (Copy(settings.values[i].key) != kKey) continue;
             const auto value = Copy(settings.values[i].value);
-            // "3\n<mode 0-2>\n<location 0-1>\n<format 0-5>\n<level 0-5>\n<remember 0-1>\n<folder>"
-            if (value.size() >= 12 && value.compare(0, 2, "3\n") == 0 && value[3] == '\n' && value[5] == '\n' && value[7] == '\n' &&
+            // v3: "3\n<mode 0-2>\n<location 0-1>\n<format 0-5>\n<level 0-5>\n<remember 0-1>\n<folder>"
+            // v4: the same, then "<placement 0-1>\n<commands, 2 hex digits>\n" before <folder>.
+            const bool v3 = value.compare(0, 2, "3\n") == 0, v4 = value.compare(0, 2, "4\n") == 0;
+            if (value.size() >= 12 && (v3 || v4) && value[3] == '\n' && value[5] == '\n' && value[7] == '\n' &&
                 value[9] == '\n' && value[11] == '\n' && value[2] >= '0' && value[2] <= '2' && (value[4] == '0' || value[4] == '1') &&
                 value[6] >= '0' && value[6] <= '5' && value[8] >= '0' && value[8] <= '5' && (value[10] == '0' || value[10] == '1')) {
+                size_t folder = 12;
+                if (v4) {
+                    if (value.size() < 17 || (value[12] != '0' && value[12] != '1') || value[13] != '\n' || value[16] != '\n') continue;
+                    const int high = HexDigit(value[14]), low = HexDigit(value[15]);
+                    if (high < 0 || low < 0 || ((high << 4) | low) > kAllCommands) continue;
+                    values["placement"].assign(1, value[12]);
+                    values["commands"] = value.substr(14, 2);
+                    folder = 17;
+                }
                 values["mode"].assign(1, value[2]);
                 values["location"].assign(1, value[4]);
                 values["format"].assign(1, value[6]);
                 values["level"].assign(1, value[8]);
                 values["remember"] = value[10] == '1' ? "true" : "false";
-                values["folder"] = value.substr(12);
+                values["folder"] = value.substr(folder);
             }
         }
         version = settings.version;
+    }
+    int Commands() const {
+        const auto& hex = values.at("commands");
+        return hex.size() == 2 && HexDigit(hex[0]) >= 0 && HexDigit(hex[1]) >= 0 ? (HexDigit(hex[0]) << 4) | HexDigit(hex[1]) : kAllCommands;
     }
     void Load() {
         if (request) return;
@@ -128,7 +152,24 @@ struct Settings::State {
         bool save = false;
         for (uint32_t i = 0; i < batch.count; ++i) {
             const auto key = Copy(batch.changes[i].key), value = Copy(batch.changes[i].value);
-            if ((key == "mode" && Digit(value, '2')) || (key == "location" && Digit(value, '1')) ||
+            // Radios report "true" for the one picked: mode0..2, location0..1, placement0..1.
+            const auto radio = [&](const char* group, char max) {
+                const std::string prefix(group);
+                if (key.size() != prefix.size() + 1 || key.compare(0, prefix.size(), prefix) != 0 || value != "true" ||
+                    key.back() < '0' || key.back() > max) return false;
+                values[prefix].assign(1, key.back());
+                return true;
+            };
+            if (radio("mode", '2') || radio("location", '1') || radio("placement", '1')) {
+                save = true;
+                Derive();
+            } else if (key.size() == 4 && key.compare(0, 3, "cmd") == 0 && key[3] >= '0' && key[3] < '0' + kCommandCount &&
+                       (value == "true" || value == "false")) {
+                const int bit = 1 << (key[3] - '0');
+                values["commands"] = Hex2(value == "true" ? Commands() | bit : Commands() & ~bit);
+                save = true;
+                Derive();
+            } else if ((key == "mode" && Digit(value, '2')) || (key == "location" && Digit(value, '1')) ||
                 (key == "format" && Digit(value, '5')) || (key == "level" && Digit(value, '5')) ||
                 (key == "remember" && (value == "true" || value == "false"))) {
                 values[key] = value;
@@ -167,6 +208,14 @@ struct Settings::State {
         Set("modedesc", text::Get(mode == 0 ? T::ModeSmartDesc : mode == 1 ? T::ModeFolderDesc : T::ModeHereDesc));
         Set("quickdesc", text::Format(T::QuickFormatDesc, kFormatNames[format]));
         Set("fixed", fixed ? "true" : "false");
+        const auto first = fixed && !values["folder"].empty() ? T::CmdFixed : mode == 1 ? T::CmdFolder : mode == 2 ? T::CmdHere : T::CmdSmart;
+        Set("menushows", text::Format(T::MenuShows, text::Get(first)));
+        // One radio per choice: exactly the saved one is on.
+        for (const auto& [group, count] : {std::pair<const char*, int>{"mode", 3}, {"location", 2}, {"placement", 2}})
+            for (int i = 0; i < count; ++i)
+                Set(group + std::to_string(i), values[group][0] - '0' == i ? "true" : "false");
+        const int shown = Commands();
+        for (int i = 0; i < kCommandCount; ++i) Set("cmd" + std::to_string(i), (shown >> i) & 1 ? "true" : "false");
     }
     PulseStatus Create() {
         using pulse::sdk::ModelNode;
@@ -193,10 +242,6 @@ struct Settings::State {
             return ModelNode(PULSE_UI_MODEL_GROUP, id).Bool(&N::bordered, true).Int(&N::gap, 14).Children(std::move(children));
         };
         const auto ready = [](ModelNode node) { return node.String(&N::enabled_binding, "state.ready"); };
-        const auto select = [&](const char* id, const char* state, std::vector<std::string> options) {
-            return ready(ModelNode(PULSE_UI_MODEL_SELECT, id).String(&N::state, state).Options(std::move(options))
-                .Int(&N::min_width, 220).Int(&N::max_width, 220));
-        };
         std::vector<std::string> levels;
         for (const auto id : {T::Level0, T::Level1, T::Level3, T::Level5, T::Level7, T::Level9}) levels.push_back(text::Get(id));
 
@@ -204,11 +249,30 @@ struct Settings::State {
             section("hero-title", text::Get(T::HeroTitle)),
             caption("hero-detail", text::Format(T::HeroDetail, std::to_string(engine::SupportedFormats().size()))),
             ModelNode(PULSE_UI_MODEL_TEXT, "settings-status").String(&N::binding, "state.status").String(&N::role, "caption")}).Int(&N::gap, 2);
+        // A titled choice: the title over its description, then one radio per option, each with a caption.
+        const auto choices = [&](const std::string& id, const std::string& title, const std::string& description,
+                                 std::vector<std::pair<std::string, std::string>> options) {
+            std::vector<ModelNode> children{ModelNode(PULSE_UI_MODEL_TEXT, (id + "-title").c_str()).String(&N::text, title)};
+            if (!description.empty()) children.push_back(caption((id + "-desc").c_str(), description));
+            for (size_t i = 0; i < options.size(); ++i) {
+                const auto key = id + std::to_string(i);
+                std::vector<ModelNode> option{
+                    ready(ModelNode(PULSE_UI_MODEL_RADIO, (key + "-input").c_str()).String(&N::text, options[i].first).String(&N::state, key))};
+                if (!options[i].second.empty()) option.push_back(caption((key + "-caption").c_str(), options[i].second));
+                children.push_back(ModelNode(PULSE_UI_MODEL_STACK, (key + "-option").c_str()).Int(&N::gap, 0).Children(std::move(option)));
+            }
+            return ModelNode(PULSE_UI_MODEL_STACK, (id + "-choices").c_str()).Int(&N::gap, 8).Children(std::move(children));
+        };
         auto extract = card("extract-card", {
-            row("mode", text::Get(T::ModeTitle), text::Get(T::ModeDesc), "state.modedesc",
-                select("mode-input", "mode", {text::Get(T::ModeSmart), text::Get(T::ModeFolder), text::Get(T::ModeHere)})),
-            row("location", text::Get(T::LocationTitle), text::Get(T::LocationFixedDesc), nullptr,
-                select("location-input", "location", {text::Get(T::LocationBeside), text::Get(T::LocationFixed)})),
+            choices("mode", text::Get(T::ModeTitle), text::Get(T::ModeDesc), {
+                {text::Get(T::ModeSmart), text::Get(T::ModeSmartDesc)},
+                {text::Get(T::ModeFolder), text::Get(T::ModeFolderDesc)},
+                {text::Get(T::ModeHere), text::Get(T::ModeHereDesc)}}),
+            ModelNode(PULSE_UI_MODEL_TEXT, "menu-shows").String(&N::binding, "state.menushows").String(&N::role, "caption"),
+            ModelNode(PULSE_UI_MODEL_DIVIDER, "extract-divider"),
+            choices("location", text::Get(T::LocationTitle), {}, {
+                {text::Get(T::LocationBeside), {}},
+                {text::Get(T::LocationFixed), text::Get(T::LocationFixedDesc)}}),
             ModelNode(PULSE_UI_MODEL_STACK, "folder-row").String(&N::orientation, "horizontal").Int(&N::gap, 8)
                 .String(&N::visible_binding, "state.fixed").Children({
                     ready(ModelNode(PULSE_UI_MODEL_TEXT_INPUT, "folder-input").String(&N::text, text::Get(T::LocationFixed))
@@ -225,15 +289,48 @@ struct Settings::State {
         auto passwords = card("password-card", {
             row("remember", text::Get(T::RememberTitle), text::Get(T::RememberDesc), nullptr,
                 ready(ModelNode(PULSE_UI_MODEL_SWITCH, "remember-input").String(&N::state, "remember").Int(&N::min_width, 48).Int(&N::max_width, 48)))});
+        std::vector<ModelNode> menu_rows{
+            choices("placement", text::Get(T::PlacementTitle), text::Get(T::PlacementDesc), {
+                {text::Get(T::PlacementTop), text::Get(T::PlacementTopDesc)},
+                {text::Get(T::PlacementSub), text::Get(T::PlacementSubDesc)}}),
+            ModelNode(PULSE_UI_MODEL_DIVIDER, "menu-divider"),
+            ModelNode(PULSE_UI_MODEL_TEXT, "commands-title").String(&N::text, text::Get(T::CommandsTitle)),
+            caption("commands-desc", text::Get(T::CommandsDesc))};
+        const T kCommandTitles[kCommandCount] = {T::CmdExtractSwitch, T::CmdTo, T::CmdTest, T::CmdQuickSwitch, T::CmdAdd, T::CmdHash};
+        for (int i = 0; i < kCommandCount; ++i) {
+            const auto key = "cmd" + std::to_string(i);
+            menu_rows.push_back(row(key, text::Get(kCommandTitles[i]), {}, nullptr,
+                ready(ModelNode(PULSE_UI_MODEL_SWITCH, (key + "-input").c_str()).String(&N::state, key).Int(&N::min_width, 48).Int(&N::max_width, 48))));
+        }
+        auto menu = card("menu-card", std::move(menu_rows));
         auto content = ModelNode(PULSE_UI_MODEL_STACK, "settings-content").Int(&N::gap, 12).Children({
             hero, section("extract-title", text::Get(T::SettingsExtractSection)), extract,
             section("compress-title", text::Get(T::SettingsCompressSection)), compress,
+            section("menu-title", text::Get(T::MenuSection)), menu,
             section("password-title", text::Get(T::SettingsPasswordSection)), passwords,
             caption("rar-note", text::Get(T::RarNote))});
+        // The engine's formats for the store's 支持格式 view: writable ones carry "(+)".
+        std::string formats_rw, formats_ro;
+        for (const auto& line : engine::SupportedFormats()) {
+            const auto name = line.substr(0, line.find(L':'));
+            std::string utf8(static_cast<size_t>(WideCharToMultiByte(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), nullptr, 0, nullptr, nullptr)), '\0');
+            if (!utf8.empty()) WideCharToMultiByte(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), utf8.data(), static_cast<int>(utf8.size()), nullptr, nullptr);
+            for (auto& c : utf8) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            auto& target = line.size() >= 3 && line.compare(line.size() - 3, 3, L"(+)") == 0 ? formats_rw : formats_ro;
+            if (!utf8.empty()) target += (target.empty() ? "" : ",") + utf8;
+        }
         auto tree = ModelTree(ModelNode(PULSE_UI_MODEL_SCROLL_VIEW, "settings-root").Children({content}))
+            .State("formats_rw", formats_rw).State("formats_ro", formats_ro)
             .State("mode", "0").State("location", "0").State("folder", "").State("format", "0").State("level", "3")
             .State("remember", "true").State("fixed", "false").State("status", text::Get(T::AutoSaved)).State("ready", "false")
-            .State("modedesc", text::Get(T::ModeSmartDesc)).State("quickdesc", "").Command("browse");
+            .State("modedesc", text::Get(T::ModeSmartDesc)).State("quickdesc", "")
+            .State("menushows", text::Format(T::MenuShows, text::Get(T::CmdSmart)))
+            .State("mode0", "true").State("mode1", "false").State("mode2", "false")
+            .State("location0", "true").State("location1", "false")
+            .State("placement0", "true").State("placement1", "false")
+            .State("placement", "0").State("commands", Hex2(kAllCommands))
+            .State("cmd0", "true").State("cmd1", "true").State("cmd2", "true").State("cmd3", "true").State("cmd4", "true").State("cmd5", "true")
+            .Command("browse");
         auto result = pages.create(pages.context, View(text::Get(T::SettingsTitle)), &tree.Build(), &page);
         if (result != PULSE_OK) return result;
         result = pages.query(pages.context, page, View(PULSE_UI_MODEL_INTERFACE), PULSE_UI_MODEL_VERSION, &model, sizeof(model));
@@ -266,3 +363,5 @@ std::string Settings::FixedFolder() const { return state_->values.at("location")
 int Settings::Format() const { return state_->values.at("format")[0] - '0'; }
 int Settings::Level() const { return state_->values.at("level")[0] - '0'; }
 bool Settings::RememberPasswords() const { return state_->values.at("remember") != "false"; }
+bool Settings::MenuSubmenu() const { return state_->values.at("placement") == "1"; }
+bool Settings::CommandShown(int index) const { return index >= 0 && index < kCommandCount && ((state_->Commands() >> index) & 1); }

@@ -4,9 +4,9 @@
 #include <cstring>
 namespace native_ui_fixture {
 // Independent frozen v1 expectations: never derive these from the private UiNodeType order.
-inline constexpr const char *kExpectedTypeNames[] = {"stack", "grid", "group", "scrollView", "text", "button", "textInput", "checkbox", "select", "progress", "divider", "tabs", "tab", "", "switch", "radio", "slider", "segmented", "badge", "tag", "infoBar", "splitButton", "menuButton", "", "", "emptyState", "virtualList", "tree", "dataTable", "", "", "splitPane", "", "", "", "", "", "", "", "", ""};
+inline constexpr const char *kExpectedTypeNames[] = {"stack", "grid", "group", "scrollView", "text", "button", "textInput", "checkbox", "select", "progress", "divider", "tabs", "tab", "", "switch", "radio", "slider", "segmented", "badge", "tag", "infoBar", "splitButton", "menuButton", "", "", "emptyState", "virtualList", "tree", "dataTable", "", "", "splitPane", "", "", "", "", "", "", "", "", "", "canvas"};
 static_assert(sizeof(kExpectedTypeNames) / sizeof(kExpectedTypeNames[0]) == PULSE_UI_MODEL_COUNT);
-inline constexpr std::array<uint32_t, 27> kSupportedTypes{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 31};
+inline constexpr std::array<uint32_t, 28> kSupportedTypes{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 31, 41};
 inline constexpr std::array<uint32_t, 14> kRemovedTypes{13, 23, 24, 29, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40};
 inline uint32_t NextType(uint32_t type) {
     for (size_t i = 0; i < kSupportedTypes.size(); ++i)
@@ -27,6 +27,7 @@ struct Model {
     PulseUiModelNode root{}, wrapper{};
     std::array<PulseUiModelNode, 2> children{};
     std::array<PulseStringView, 3> options{S("First"), S("Second"), S("Third")};
+    std::array<PulseStringView, 2> canvas_ops{S("viewbox 120 64"), S("rect 4 4 112 56 6 accent none 1.5")};
     std::array<PulseStringView, 6> commands{S("run"), S("menu"), S("close"), S("filter"), S("sort"), S("row")};
     std::array<PulseUiState, 5> states{{{S("text"), S("Native input")},
                                         {S("flag"), S("true")},
@@ -104,6 +105,11 @@ struct Model {
         if (type == PULSE_UI_MODEL_SPLIT_PANE) {
             root.children.count = 2;
             root.state = T("ratio");
+        }
+        if (type == PULSE_UI_MODEL_CANVAS) {
+            root.options = {1, canvas_ops.data(), static_cast<uint32_t>(canvas_ops.size())};
+            root.min_height = {1, 64};
+            root.bordered = {1, 1};
         }
 
 

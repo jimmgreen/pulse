@@ -71,7 +71,8 @@
       "scope": "current loaded ordinary directory; opaque snapshot/owner/package handles; only own tasks",
       "callbacks": "deferred until initiating function returns, owner UI thread, borrowed typed reply",
       "cancellation": "cancel_request suppresses pending callback; does not cancel an already submitted task; use task_cancel",
-      "resourceDeclarationPolicy": "Installation disclosure only; native code runs in process without per-call permission gates."
+      "resourceDeclarationPolicy": "Installation disclosure only; native code runs in process without per-call permission gates.",
+      "stabilityTier": "frozen"
     },
     {
       "name": "pulse.resources",
@@ -115,7 +116,8 @@
         "nativeModel": "build-extensions/native-resources-test-01.log: 36 PASS",
         "hostInspector": "build-extensions/native-inspector-ui-01/report.json: 18 PASS, three captures, unchanged files, CAS conflict verified"
       },
-      "resourceDeclarationPolicy": "Installation disclosure only; native code runs in process without per-call permission gates."
+      "resourceDeclarationPolicy": "Installation disclosure only; native code runs in process without per-call permission gates.",
+      "stabilityTier": "frozen"
     },
     {
       "name": "pulse.ui.events",
@@ -138,7 +140,8 @@
       "ime": "preedit omitted",
       "updateSemantics": "Successful tree update discards old pending batches, retains surviving key and all-key subscriptions, retires deleted-key tokens; update inside callback stops remaining old-batch listeners",
       "reentrancy": "callback state writes queue a later batch, never recursive",
-      "cancellation": "unsubscribe/close invalidate queued delivery; pulse.ui.unsubscribe shares token domain"
+      "cancellation": "unsubscribe/close invalidate queued delivery; pulse.ui.unsubscribe shares token domain",
+      "stabilityTier": "experimental"
     },
     {
       "name": "pulse.dispatch",
@@ -154,7 +157,8 @@
       },
       "ordering": "callback may begin before post returns; callbacks are not nested",
       "cancellation": "OK guarantees callback cannot subsequently begin; STATE is not permission to free running userdata",
-      "shutdown": "host stop suppresses pending work; plugin must join producers before destroy returns; context lives through destroy"
+      "shutdown": "host stop suppresses pending work; plugin must join producers before destroy returns; context lives through destroy",
+      "stabilityTier": "frozen"
     },
     {
       "name": "pulse.ui.model",
@@ -279,11 +283,15 @@
         {
           "name": "PULSE_UI_MODEL_SPLIT_PANE",
           "value": 31
+        },
+        {
+          "name": "PULSE_UI_MODEL_CANVAS",
+          "value": 41
         }
       ],
       "headerContract": {
-        "sha256": "6dab4e8b05cf1fc1551ccdf9e75cecd6fc142ddefe512aa4043b7fb85583e689",
-        "text": "#ifndef PULSE_NATIVE_UI_MODEL_H\n#define PULSE_NATIVE_UI_MODEL_H\n#include \"ui.h\"\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#pragma pack(push, 8)\n#define PULSE_UI_MODEL_INTERFACE \"pulse.ui.model\"\n#define PULSE_UI_MODEL_VERSION 1u\n/* General-purpose controls backed by the existing renderer. All borrowed arrays/strings are\n   copied synchronously. Optional fields use present=0/1; absent preserves host defaults.\n   UTF-8 byte budget 65536; nodes 128/depth8; menus128/depth4; total data rows4096/depth8.\n   This C ABI uses the same property semantics as the existing UiTree contract.\n   Structure submission uses a temporary in-memory DOM for shared validation, never\n   JSON text serialization/parsing. High-frequency set_states remains typed directly. */\ntypedef struct PulseUiModelString { uint32_t present; PulseStringView value; } PulseUiModelString;\ntypedef struct PulseUiModelBool { uint32_t present; uint32_t value; } PulseUiModelBool;\ntypedef struct PulseUiModelInt { uint32_t present; int64_t value; } PulseUiModelInt;\ntypedef struct PulseUiModelStrings { uint32_t present; const PulseStringView* data; uint32_t count; } PulseUiModelStrings;\nenum {\n    PULSE_UI_MODEL_STACK = 0,\n    PULSE_UI_MODEL_GRID = 1,\n    PULSE_UI_MODEL_GROUP = 2,\n    PULSE_UI_MODEL_SCROLL_VIEW = 3,\n    PULSE_UI_MODEL_TEXT = 4,\n    PULSE_UI_MODEL_BUTTON = 5,\n    PULSE_UI_MODEL_TEXT_INPUT = 6,\n    PULSE_UI_MODEL_CHECKBOX = 7,\n    PULSE_UI_MODEL_SELECT = 8,\n    PULSE_UI_MODEL_PROGRESS = 9,\n    PULSE_UI_MODEL_DIVIDER = 10,\n    PULSE_UI_MODEL_TABS = 11,\n    PULSE_UI_MODEL_TAB = 12,\n    PULSE_UI_MODEL_SWITCH = 14,\n    PULSE_UI_MODEL_RADIO = 15,\n    PULSE_UI_MODEL_SLIDER = 16,\n    PULSE_UI_MODEL_SEGMENTED = 17,\n    PULSE_UI_MODEL_BADGE = 18,\n    PULSE_UI_MODEL_TAG = 19,\n    PULSE_UI_MODEL_INFO_BAR = 20,\n    PULSE_UI_MODEL_SPLIT_BUTTON = 21,\n    PULSE_UI_MODEL_MENU_BUTTON = 22,\n    PULSE_UI_MODEL_EMPTY_STATE = 25,\n    PULSE_UI_MODEL_VIRTUAL_LIST = 26,\n    PULSE_UI_MODEL_TREE = 27,\n    PULSE_UI_MODEL_DATA_TABLE = 28,\n    PULSE_UI_MODEL_SPLIT_PANE = 31,\n    /* Reserved holes are invalid types; COUNT is the numeric range upper bound. */\n    PULSE_UI_MODEL_COUNT = 41\n};\ntypedef struct PulseUiModelMenuItem PulseUiModelMenuItem;\ntypedef struct PulseUiModelMenus { uint32_t present; const PulseUiModelMenuItem* data; uint32_t count; } PulseUiModelMenus;\nstruct PulseUiModelMenuItem {\n    uint32_t size;\n    PulseUiModelString id, text, command, glyph, shortcut;\n    PulseUiModelBool enabled, checked, separator;\n    PulseUiModelMenus children;\n};\ntypedef struct PulseUiModelRow PulseUiModelRow;\ntypedef struct PulseUiModelRows { uint32_t present; const PulseUiModelRow* data; uint32_t count; } PulseUiModelRows;\nstruct PulseUiModelRow {\n    uint32_t size;\n    PulseStringView id;\n    PulseUiModelString text, glyph, command;\n    PulseUiModelStrings cells;\n    PulseUiModelRows children;\n    PulseUiModelBool expanded, enabled;\n};\ntypedef struct PulseUiModelColumn { uint32_t size; PulseStringView id, text; PulseUiModelInt width; } PulseUiModelColumn;\ntypedef struct PulseUiModelColumns { uint32_t present; const PulseUiModelColumn* data; uint32_t count; } PulseUiModelColumns;\ntypedef struct PulseUiModelValidation {\n    uint32_t size;\n    PulseUiModelBool required;\n    PulseUiModelInt min_length, max_length;\n    PulseStringView message;\n} PulseUiModelValidation;\n/* Reserved actual UiTree provider shape. Non-null data_source is UNAVAILABLE until\n   owner-scoped provider/resolver integration is implemented; no fake static fallback. */\ntypedef struct PulseUiModelDataSource {\n    uint32_t size;\n    PulseStringView source;\n    PulseUiModelInt page_size;\n    PulseUiModelString filter_state, sort_state, status_state, error_state, progress_state;\n} PulseUiModelDataSource;\ntypedef struct PulseUiModelNode PulseUiModelNode;\ntypedef struct PulseUiModelNodes { uint32_t present; const PulseUiModelNode* data; uint32_t count; } PulseUiModelNodes;\nstruct PulseUiModelNode {\n    uint32_t size, type;\n    PulseStringView id;\n    PulseUiModelString text;\n    PulseUiModelString command;\n    PulseUiModelString binding;\n    PulseUiModelString state;\n    PulseUiModelString orientation;\n    PulseUiModelString placeholder;\n    PulseUiModelString glyph;\n    PulseUiModelString keycap;\n    PulseUiModelString detail;\n    PulseUiModelString message;\n    PulseUiModelString color;\n    PulseUiModelString close_command;\n    PulseUiModelString enabled_binding;\n    PulseUiModelString visible_binding;\n    PulseUiModelString role;\n    PulseUiModelString alignment;\n    PulseUiModelString badge_text;\n    PulseUiModelString status;\n    PulseUiModelString trailing_glyph;\n    PulseUiModelString summary;\n    PulseUiModelString filter_text;\n    PulseUiModelString filter_command;\n    PulseUiModelString sort_command;\n    PulseUiModelString modified;\n    PulseUiModelString file_type;\n    PulseUiModelString file_size;\n    PulseUiModelString helper;\n    PulseUiModelString count_label;\n    PulseUiModelString action_text;\n    PulseUiModelString center_text;\n    PulseUiModelString right_text;\n    PulseUiModelString kind;\n    PulseUiModelBool checked;\n    PulseUiModelBool enabled;\n    PulseUiModelBool visible;\n    PulseUiModelBool icon_only;\n    PulseUiModelBool bordered;\n    PulseUiModelBool selected;\n    PulseUiModelBool current;\n    PulseUiModelBool separator;\n    PulseUiModelBool dot;\n    PulseUiModelBool move_intent;\n    PulseUiModelBool expanded;\n    PulseUiModelBool cut;\n    PulseUiModelBool missing;\n    PulseUiModelBool ready;\n    PulseUiModelInt value;\n    PulseUiModelInt columns;\n    PulseUiModelInt gap;\n    PulseUiModelInt min_height;\n    PulseUiModelInt min_width;\n    PulseUiModelInt max_width;\n    PulseUiModelInt max_height;\n    PulseUiModelInt flex;\n    PulseUiModelInt stops;\n    PulseUiModelInt item_count;\n    PulseUiModelInt capacity;\n    PulseUiModelInt free_bytes;\n    PulseUiModelInt total_bytes;\n    PulseUiModelNodes children;\n    PulseUiModelStrings options, tag_colors;\n    PulseUiModelMenus menu, actions;\n    PulseUiModelRows rows;\n    PulseUiModelColumns data_columns; /* DataTable columns; integer columns belongs to Grid. */\n    const PulseUiModelValidation* validation;\n    const PulseUiModelDataSource* data_source;\n};\ntypedef struct PulseUiModelDataOperation { uint32_t size; PulseStringView target, operation; } PulseUiModelDataOperation;\ntypedef struct PulseUiModelAction {\n    uint32_t size;\n    PulseStringView id;\n    const PulseUiState* updates;\n    uint32_t update_count;\n    PulseUiModelStrings validate;\n    const PulseUiModelDataOperation* data_operation; /* Non-null returns UNAVAILABLE. */\n} PulseUiModelAction;\ntypedef struct PulseUiModelTree {\n    uint32_t size;\n    const PulseUiModelNode* root;\n    const PulseUiState* states;\n    uint32_t state_count;\n    const PulseUiModelAction* actions;\n    uint32_t action_count;\n    const PulseStringView* commands; /* Declared native callback IDs, <=128; separate from local actions. */\n    uint32_t command_count;\n} PulseUiModelTree;\ntypedef struct PulseUiModelV1 {\n    uint32_t size, version;\n    void* context;\n    PulseStatus (PULSE_CALL *create)(void*, PulseStringView title, const PulseUiModelTree*, uint64_t* panel);\n    PulseStatus (PULSE_CALL *update)(void*, uint64_t panel, const PulseUiModelTree*);\n    PulseStatus (PULSE_CALL *subscribe_command)(void*, uint64_t panel, PulseStringView command,\n        PulseUiClickFn callback, void* user, uint64_t* subscription);\n    PulseStatus (PULSE_CALL *set_states)(void*, uint64_t panel, const PulseUiState*, uint32_t count);\n    /* needed excludes terminator. Null buffer/capacity 0 queries size. No partial copy. */\n    PulseStatus (PULSE_CALL *get_state)(void*, uint64_t panel, PulseStringView key, char* buffer,\n        uint32_t capacity, uint32_t* needed);\n    PulseStatus (PULSE_CALL *unsubscribe)(void*, uint64_t subscription);\n    PulseStatus (PULSE_CALL *close)(void*, uint64_t panel);\n    /* Callback user pointers belong to the plugin; unsubscribe/close invalidate them synchronously.\n       Panel/subscription IDs are never reused. No exception may cross this ABI.\n       Updates validate atomically, retain existing state keys and registrations by command ID.\n       callback's string argument is command ID (including menu/close/filter/sort/row),\n       not node ID. Local actions mutate state and never invoke native callbacks.\n       context.* bindings are UNAVAILABLE until an owner resolver is connected. */\n} PulseUiModelV1;\n#pragma pack(pop)\n#ifdef __cplusplus\n}\n#endif\n#endif\n"
+        "sha256": "eccde987c16a7c5a02b1fd9bfa64d265745c1bdb99a58514a439a0d844fe4a27",
+        "text": "#ifndef PULSE_NATIVE_UI_MODEL_H\n#define PULSE_NATIVE_UI_MODEL_H\n#include \"ui.h\"\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#pragma pack(push, 8)\n#define PULSE_UI_MODEL_INTERFACE \"pulse.ui.model\"\n#define PULSE_UI_MODEL_VERSION 1u\n/* General-purpose controls backed by the existing renderer. All borrowed arrays/strings are\n   copied synchronously. Optional fields use present=0/1; absent preserves host defaults.\n   UTF-8 byte budget 65536; nodes 128/depth8; menus128/depth4; total data rows4096/depth8.\n   This C ABI uses the same property semantics as the existing UiTree contract.\n   Structure submission uses a temporary in-memory DOM for shared validation, never\n   JSON text serialization/parsing. High-frequency set_states remains typed directly. */\ntypedef struct PulseUiModelString { uint32_t present; PulseStringView value; } PulseUiModelString;\ntypedef struct PulseUiModelBool { uint32_t present; uint32_t value; } PulseUiModelBool;\ntypedef struct PulseUiModelInt { uint32_t present; int64_t value; } PulseUiModelInt;\ntypedef struct PulseUiModelStrings { uint32_t present; const PulseStringView* data; uint32_t count; } PulseUiModelStrings;\nenum {\n    PULSE_UI_MODEL_STACK = 0,\n    PULSE_UI_MODEL_GRID = 1,\n    PULSE_UI_MODEL_GROUP = 2,\n    PULSE_UI_MODEL_SCROLL_VIEW = 3,\n    PULSE_UI_MODEL_TEXT = 4,\n    PULSE_UI_MODEL_BUTTON = 5,\n    PULSE_UI_MODEL_TEXT_INPUT = 6,\n    PULSE_UI_MODEL_CHECKBOX = 7,\n    PULSE_UI_MODEL_SELECT = 8,\n    PULSE_UI_MODEL_PROGRESS = 9,\n    PULSE_UI_MODEL_DIVIDER = 10,\n    PULSE_UI_MODEL_TABS = 11,\n    PULSE_UI_MODEL_TAB = 12,\n    PULSE_UI_MODEL_SWITCH = 14,\n    PULSE_UI_MODEL_RADIO = 15,\n    PULSE_UI_MODEL_SLIDER = 16,\n    PULSE_UI_MODEL_SEGMENTED = 17,\n    PULSE_UI_MODEL_BADGE = 18,\n    PULSE_UI_MODEL_TAG = 19,\n    PULSE_UI_MODEL_INFO_BAR = 20,\n    PULSE_UI_MODEL_SPLIT_BUTTON = 21,\n    PULSE_UI_MODEL_MENU_BUTTON = 22,\n    PULSE_UI_MODEL_EMPTY_STATE = 25,\n    PULSE_UI_MODEL_VIRTUAL_LIST = 26,\n    PULSE_UI_MODEL_TREE = 27,\n    PULSE_UI_MODEL_DATA_TABLE = 28,\n    PULSE_UI_MODEL_SPLIT_PANE = 31,\n    PULSE_UI_MODEL_CANVAS = 41,\n    /* Reserved holes are invalid types; COUNT is the numeric range upper bound. */\n    PULSE_UI_MODEL_COUNT = 42\n};\ntypedef struct PulseUiModelMenuItem PulseUiModelMenuItem;\ntypedef struct PulseUiModelMenus { uint32_t present; const PulseUiModelMenuItem* data; uint32_t count; } PulseUiModelMenus;\nstruct PulseUiModelMenuItem {\n    uint32_t size;\n    PulseUiModelString id, text, command, glyph, shortcut;\n    PulseUiModelBool enabled, checked, separator;\n    PulseUiModelMenus children;\n};\ntypedef struct PulseUiModelRow PulseUiModelRow;\ntypedef struct PulseUiModelRows { uint32_t present; const PulseUiModelRow* data; uint32_t count; } PulseUiModelRows;\nstruct PulseUiModelRow {\n    uint32_t size;\n    PulseStringView id;\n    PulseUiModelString text, glyph, command;\n    PulseUiModelStrings cells;\n    PulseUiModelRows children;\n    PulseUiModelBool expanded, enabled;\n};\ntypedef struct PulseUiModelColumn { uint32_t size; PulseStringView id, text; PulseUiModelInt width; } PulseUiModelColumn;\ntypedef struct PulseUiModelColumns { uint32_t present; const PulseUiModelColumn* data; uint32_t count; } PulseUiModelColumns;\ntypedef struct PulseUiModelValidation {\n    uint32_t size;\n    PulseUiModelBool required;\n    PulseUiModelInt min_length, max_length;\n    PulseStringView message;\n} PulseUiModelValidation;\n/* Reserved actual UiTree provider shape. Non-null data_source is UNAVAILABLE until\n   owner-scoped provider/resolver integration is implemented; no fake static fallback. */\ntypedef struct PulseUiModelDataSource {\n    uint32_t size;\n    PulseStringView source;\n    PulseUiModelInt page_size;\n    PulseUiModelString filter_state, sort_state, status_state, error_state, progress_state;\n} PulseUiModelDataSource;\ntypedef struct PulseUiModelNode PulseUiModelNode;\ntypedef struct PulseUiModelNodes { uint32_t present; const PulseUiModelNode* data; uint32_t count; } PulseUiModelNodes;\nstruct PulseUiModelNode {\n    uint32_t size, type;\n    PulseStringView id;\n    PulseUiModelString text;\n    PulseUiModelString command;\n    PulseUiModelString binding;\n    PulseUiModelString state;\n    PulseUiModelString orientation;\n    PulseUiModelString placeholder;\n    PulseUiModelString glyph;\n    PulseUiModelString keycap;\n    PulseUiModelString detail;\n    PulseUiModelString message;\n    PulseUiModelString color;\n    PulseUiModelString close_command;\n    PulseUiModelString enabled_binding;\n    PulseUiModelString visible_binding;\n    PulseUiModelString role;\n    PulseUiModelString alignment;\n    PulseUiModelString badge_text;\n    PulseUiModelString status;\n    PulseUiModelString trailing_glyph;\n    PulseUiModelString summary;\n    PulseUiModelString filter_text;\n    PulseUiModelString filter_command;\n    PulseUiModelString sort_command;\n    PulseUiModelString modified;\n    PulseUiModelString file_type;\n    PulseUiModelString file_size;\n    PulseUiModelString helper;\n    PulseUiModelString count_label;\n    PulseUiModelString action_text;\n    PulseUiModelString center_text;\n    PulseUiModelString right_text;\n    PulseUiModelString kind;\n    PulseUiModelBool checked;\n    PulseUiModelBool enabled;\n    PulseUiModelBool visible;\n    PulseUiModelBool icon_only;\n    PulseUiModelBool bordered;\n    PulseUiModelBool selected;\n    PulseUiModelBool current;\n    PulseUiModelBool separator;\n    PulseUiModelBool dot;\n    PulseUiModelBool move_intent;\n    PulseUiModelBool expanded;\n    PulseUiModelBool cut;\n    PulseUiModelBool missing;\n    PulseUiModelBool ready;\n    PulseUiModelInt value;\n    PulseUiModelInt columns;\n    PulseUiModelInt gap;\n    PulseUiModelInt min_height;\n    PulseUiModelInt min_width;\n    PulseUiModelInt max_width;\n    PulseUiModelInt max_height;\n    PulseUiModelInt flex;\n    PulseUiModelInt stops;\n    PulseUiModelInt item_count;\n    PulseUiModelInt capacity;\n    PulseUiModelInt free_bytes;\n    PulseUiModelInt total_bytes;\n    PulseUiModelNodes children;\n    PulseUiModelStrings options, tag_colors;\n    PulseUiModelMenus menu, actions;\n    PulseUiModelRows rows;\n    PulseUiModelColumns data_columns; /* DataTable columns; integer columns belongs to Grid. */\n    const PulseUiModelValidation* validation;\n    const PulseUiModelDataSource* data_source;\n};\ntypedef struct PulseUiModelDataOperation { uint32_t size; PulseStringView target, operation; } PulseUiModelDataOperation;\ntypedef struct PulseUiModelAction {\n    uint32_t size;\n    PulseStringView id;\n    const PulseUiState* updates;\n    uint32_t update_count;\n    PulseUiModelStrings validate;\n    const PulseUiModelDataOperation* data_operation; /* Non-null returns UNAVAILABLE. */\n} PulseUiModelAction;\ntypedef struct PulseUiModelTree {\n    uint32_t size;\n    const PulseUiModelNode* root;\n    const PulseUiState* states;\n    uint32_t state_count;\n    const PulseUiModelAction* actions;\n    uint32_t action_count;\n    const PulseStringView* commands; /* Declared native callback IDs, <=128; separate from local actions. */\n    uint32_t command_count;\n} PulseUiModelTree;\ntypedef struct PulseUiModelV1 {\n    uint32_t size, version;\n    void* context;\n    PulseStatus (PULSE_CALL *create)(void*, PulseStringView title, const PulseUiModelTree*, uint64_t* panel);\n    PulseStatus (PULSE_CALL *update)(void*, uint64_t panel, const PulseUiModelTree*);\n    PulseStatus (PULSE_CALL *subscribe_command)(void*, uint64_t panel, PulseStringView command,\n        PulseUiClickFn callback, void* user, uint64_t* subscription);\n    PulseStatus (PULSE_CALL *set_states)(void*, uint64_t panel, const PulseUiState*, uint32_t count);\n    /* needed excludes terminator. Null buffer/capacity 0 queries size. No partial copy. */\n    PulseStatus (PULSE_CALL *get_state)(void*, uint64_t panel, PulseStringView key, char* buffer,\n        uint32_t capacity, uint32_t* needed);\n    PulseStatus (PULSE_CALL *unsubscribe)(void*, uint64_t subscription);\n    PulseStatus (PULSE_CALL *close)(void*, uint64_t panel);\n    /* Callback user pointers belong to the plugin; unsubscribe/close invalidate them synchronously.\n       Panel/subscription IDs are never reused. No exception may cross this ABI.\n       Updates validate atomically, retain existing state keys and registrations by command ID.\n       callback's string argument is command ID (including menu/close/filter/sort/row),\n       not node ID. Local actions mutate state and never invoke native callbacks.\n       context.* bindings are UNAVAILABLE until an owner resolver is connected. */\n} PulseUiModelV1;\n#pragma pack(pop)\n#ifdef __cplusplus\n}\n#endif\n#endif\n"
       },
       "constraintSchema": "ui-model.schema.json",
       "fieldMapping": "C snake_case fields map to existing UiTree camelCase; data_columns maps DataTable columns; optional present=0 means absent. Header declares every field and borrowed array type.",
@@ -304,7 +312,8 @@
         "context.* bindings",
         "non-null action.data_operation"
       ],
-      "validationStatus": "27 general-purpose types represented; does not assert every interaction or theme/DPI capture passed"
+      "validationStatus": "28 general-purpose types represented; does not assert every interaction or theme/DPI capture passed",
+      "stabilityTier": "experimental"
     },
     {
       "name": "pulse.ui.data",
@@ -376,7 +385,8 @@
         "non-null action.data_operation"
       ],
       "documentation": "sdk/native/README.md",
-      "validationStatus": "Published author contract; host functional/UI verification requires separate evidence and is not implied by this catalog"
+      "validationStatus": "Published author contract; host functional/UI verification requires separate evidence and is not implied by this catalog",
+      "stabilityTier": "experimental"
     },
     {
       "name": "pulse.directories",
@@ -451,7 +461,8 @@
       "cancellation": "close/cancel/unwatch immediately suppress future callbacks; an on-stack callback may finish. Stop does not wait for filesystem I/O on UI thread.",
       "shutdown": "No exceptions cross ABI. Context remains valid through plugin destroy and expires afterwards.",
       "documentation": "sdk/native/README.md",
-      "validationStatus": "Author contract only; functional/UI acceptance requires separate host evidence"
+      "validationStatus": "Author contract only; functional/UI acceptance requires separate host evidence",
+      "stabilityTier": "frozen"
     },
     {
       "name": "pulse.context",
@@ -500,7 +511,8 @@
         "arbitrary context.* pulse.ui.model resolver bindings"
       ],
       "documentation": "sdk/native/README.md",
-      "validationStatus": "Author contract only; functional/UI acceptance requires separate host evidence"
+      "validationStatus": "Author contract only; functional/UI acceptance requires separate host evidence",
+      "stabilityTier": "frozen"
     },
     {
       "name": "pulse.fileops",
@@ -624,7 +636,8 @@
       "validationStatus": "Author contract only; real host operation acceptance requires separate behavior evidence",
       "sourceSnapshot": "submit_entries accepts only unique ordinary non-reparse file entry IDs from the exact current snapshot; size and modified time are revalidated during worker preparation. Refresh or either handle closing before task submission cancels preparation/confirmation.",
       "resultLifetime": "Native accepted requests retain their exact task result until terminal get consumes it or the attachment closes; owner/package-bound retention is bounded by the 32-request attachment limit.",
-      "treeTransfer": "submit_directory_tree accepts one ordinary folder from the exact current snapshot and copies it to a new root named after its source leaf. Limits: 128 directories, 512 files, 1 MiB of plan paths. get_item returns each file's relative path and terminal result. Directories remain visible even if a later file fails; no rollback is implied."
+      "treeTransfer": "submit_directory_tree accepts one ordinary folder from the exact current snapshot and copies it to a new root named after its source leaf. Limits: 128 directories, 512 files, 1 MiB of plan paths. get_item returns each file's relative path and terminal result. Directories remain visible even if a later file fails; no rollback is implied.",
+      "stabilityTier": "frozen"
     },
     {
       "name": "pulse.ui.mount",
@@ -659,20 +672,23 @@
         "native tab contributions",
         "arbitrary toolbar UI surfaces (command buttons use pulse.commands)",
         "desktop surfaces"
-      ]
+      ],
+      "stabilityTier": "experimental"
     },
     {
       "name": "pulse.commands",
-      "version": 1,
+      "version": 2,
       "header": "include/pulse/commands.h",
       "status": "developer-preview",
       "operations": [
         "register_command",
-        "unregister_command"
+        "unregister_command",
+        "update_command",
+        "set_command_flags"
       ],
       "headerContract": {
-        "sha256": "3386f018530ac1bfb55a74dd6c848d633fc0040b9516f0333ab156f0adadcf38",
-        "text": "#ifndef PULSE_NATIVE_COMMANDS_H\n#define PULSE_NATIVE_COMMANDS_H\n#include \"context.h\"\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#define PULSE_COMMANDS_INTERFACE_NAME \"pulse.commands\"\n#define PULSE_COMMANDS_VERSION_1 1u\n#pragma pack(push, 8)\ntypedef uint64_t PulseCommandId;\nenum { PULSE_COMMAND_FILES = 1u, PULSE_COMMAND_DIRECTORIES = 2u };\nenum { PULSE_COMMAND_CTRL = 1u, PULSE_COMMAND_SHIFT = 2u, PULSE_COMMAND_ALT = 4u };\nenum { PULSE_COMMAND_ICON_DEFAULT = 0u, PULSE_COMMAND_ICON_ARCHIVE = 1u, PULSE_COMMAND_ICON_EXTRACT = 2u };\ntypedef void(PULSE_CALL *PulseCommandFn)(void*, PulseCommandId, const PulseContextSelectionSnapshot*);\ntypedef struct PulseCommandDescriptor {\n    uint32_t size;\n    PulseStringView id; /* Package-local ASCII [A-Za-z0-9._-], 1..64 bytes. */\n    PulseStringView title; /* UTF-8, 1..128 bytes; copied during registration. */\n    uint32_t icon;\n    uint32_t kinds; /* Allowed entry kinds. Every selected entry must match. */\n    uint32_t min_selection;\n    uint32_t max_selection; /* 0..4096; must be >= min_selection. */\n    const PulseStringView* extensions; /* Lowercase dotted extensions; <=32, each <=32 bytes. */\n    uint32_t extension_count; /* 0: unrestricted. Otherwise only matching files. */\n    uint32_t exclude_extensions; /* 0 include list, 1 exclude list. */\n    uint32_t virtual_key; /* 0 or A..Z / 0..9 / F1..F24. No process-global hotkey. */\n    uint32_t modifiers; /* CTRL/SHIFT/ALT; a letter/digit requires CTRL or ALT. */\n    PulseCommandFn invoke;\n    void* user;\n} PulseCommandDescriptor;\ntypedef struct PulseCommandsV1 {\n    uint32_t size;\n    uint32_t version;\n    void* context;\n    PulseStatus(PULSE_CALL *register_command)(void*, const PulseCommandDescriptor*, PulseCommandId*);\n    PulseStatus(PULSE_CALL *unregister_command)(void*, PulseCommandId);\n} PulseCommandsV1;\n/* UI thread only; <=32 commands per attachment. Register during plugin entry so\n   menus can discover commands without activating/opening a plugin panel. Entry\n   must return promptly. IDs are never reused; stop invalidates menu callbacks.\n   Host rechecks conditions at invocation, captures loaded selection through\n   pulse.context and borrows the snapshot through callback return. Copy before\n   starting worker work. Callbacks must return promptly; no exceptions cross ABI.\n   Duplicate IDs or shortcuts in the same owner are rejected. Built-in shortcuts\n   take precedence; text editors do not dispatch plugin shortcuts. */\n#pragma pack(pop)\n#ifdef __cplusplus\n}\n#endif\n#endif\n"
+        "sha256": "dac5340a0ec86b509922d5d75b2fe4746045bac89162178fa6d19d6526b243ee",
+        "text": "#ifndef PULSE_NATIVE_COMMANDS_H\n#define PULSE_NATIVE_COMMANDS_H\n#include \"context.h\"\n#include <stddef.h>\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#define PULSE_COMMANDS_INTERFACE_NAME \"pulse.commands\"\n#define PULSE_COMMANDS_VERSION_1 1u\n#define PULSE_COMMANDS_VERSION_2 2u\n#define PULSE_COMMAND_ALL_FLAGS 63u\n#pragma pack(push, 8)\ntypedef uint64_t PulseCommandId;\nenum { PULSE_COMMAND_FILES = 1u, PULSE_COMMAND_DIRECTORIES = 2u, PULSE_COMMAND_BACKGROUND = 4u };\nenum { PULSE_COMMAND_CTRL = 1u, PULSE_COMMAND_SHIFT = 2u, PULSE_COMMAND_ALT = 4u };\nenum { PULSE_COMMAND_ICON_DEFAULT = 0u, PULSE_COMMAND_ICON_ARCHIVE = 1u, PULSE_COMMAND_ICON_EXTRACT = 2u };\ntypedef void(PULSE_CALL *PulseCommandFn)(void*, PulseCommandId, const PulseContextSelectionSnapshot*);\ntypedef struct PulseCommandDescriptor {\n    uint32_t size;\n    PulseStringView id; /* Package-local ASCII [A-Za-z0-9._-], 1..64 bytes. */\n    PulseStringView title; /* UTF-8, 1..128 bytes; copied during registration. */\n    uint32_t icon; /* Built-in PULSE_ICON_* (0..67) or custom PulseIconId (>= PULSE_ICON_CUSTOM_MIN). */\n    uint32_t kinds; /* Allowed entry kinds (FILES | DIRECTORIES | BACKGROUND). */\n    uint32_t min_selection; /* 0 allowed when PULSE_COMMAND_BACKGROUND is set. */\n    uint32_t max_selection; /* 0..4096; must be >= min_selection. */\n    const PulseStringView* extensions; /* Lowercase dotted extensions; <=32, each <=32 bytes. */\n    uint32_t extension_count; /* 0: unrestricted. Otherwise only matching files. */\n    uint32_t exclude_extensions; /* 0 include list, 1 exclude list. */\n    uint32_t virtual_key; /* 0 or A..Z / 0..9 / F1..F24. No process-global hotkey. */\n    uint32_t modifiers; /* CTRL/SHIFT/ALT; a letter/digit requires CTRL or ALT. */\n    PulseCommandFn invoke;\n    void* user;\n    /* Optional, read only when size covers them (older descriptors end at user). */\n    PulseStringView detail; /* UTF-8, 0..160 bytes: a second line under the title in the\n                               context menu, saying what the command will produce.\n                               \"{stem}\" = the single selected entry's name without its last\n                               extension (the line is hidden for 2+ entries);\n                               \"{base}\" = \"{stem}\" for one entry, else the selection folder's name. */\n    PulseStringView group; /* UTF-8, 0..32 bytes: commands of one package sharing a group are\n                              listed together in the context menu under this caption. */\n    uint32_t flags; /* Combination of PULSE_COMMAND_* presentation/visibility flags. */\n    /* Optional V3 fields, read only when size >= sizeof(PulseCommandDescriptor). */\n    PulseStringView icon_name; /* UTF-8, 0..96 bytes: built-in icon name or package custom icon id; overrides icon when non-empty. */\n    uint32_t group_icon; /* Optional icon ID for submenu header when PULSE_COMMAND_GROUP_SUBMENU is set. */\n    uint32_t reserved_v3;\n} PulseCommandDescriptor;\nenum {\n    PULSE_COMMAND_GROUP_SUBMENU = 1u,\n    PULSE_COMMAND_PRIMARY = 2u,\n    PULSE_COMMAND_SEPARATOR_BEFORE = 4u,\n    PULSE_COMMAND_SEPARATOR_AFTER = 8u,\n    PULSE_COMMAND_HIDDEN = 16u,\n    PULSE_COMMAND_CHECKED = 32u\n};\n/* Descriptors from SDKs before detail/group/flags end here. */\n#define PULSE_COMMAND_DESCRIPTOR_SIZE_V1 ((uint32_t)offsetof(PulseCommandDescriptor, detail))\n/* Descriptors from SDKs before icon_name/group_icon end here. */\n#define PULSE_COMMAND_DESCRIPTOR_SIZE_V2 ((uint32_t)offsetof(PulseCommandDescriptor, icon_name))\ntypedef struct PulseCommandsV1 {\n    uint32_t size;\n    uint32_t version;\n    void* context;\n    PulseStatus(PULSE_CALL *register_command)(void*, const PulseCommandDescriptor*, PulseCommandId*);\n    PulseStatus(PULSE_CALL *unregister_command)(void*, PulseCommandId);\n} PulseCommandsV1;\ntypedef struct PulseCommandsV2 {\n    uint32_t size;\n    uint32_t version;\n    void* context;\n    PulseStatus(PULSE_CALL *register_command)(void*, const PulseCommandDescriptor*, PulseCommandId*);\n    PulseStatus(PULSE_CALL *unregister_command)(void*, PulseCommandId);\n    PulseStatus(PULSE_CALL *update_command)(void*, PulseCommandId, const PulseCommandDescriptor*);\n    PulseStatus(PULSE_CALL *set_command_flags)(void*, PulseCommandId, uint32_t);\n} PulseCommandsV2;\n/* UI thread only; <=32 commands per attachment. Register during plugin entry so\n   menus can discover commands without activating/opening a plugin panel. Entry\n   must return promptly. IDs are never reused; stop invalidates menu callbacks.\n   Host rechecks conditions at invocation, captures loaded selection through\n   pulse.context and borrows the snapshot through callback return. Copy before\n   starting worker work. Callbacks must return promptly; no exceptions cross ABI.\n   Duplicate IDs or shortcuts in the same owner are rejected. Built-in shortcuts\n   take precedence; text editors do not dispatch plugin shortcuts. */\n#pragma pack(pop)\n#ifdef __cplusplus\n}\n#endif\n#endif\n"
       },
       "thread": "Owner UI thread; register during plugin entry, before panel activation",
       "limits": {
@@ -681,17 +697,34 @@
         "extensions": 32,
         "extensionBytes": 32
       },
-      "icons": [
-        "default",
-        "archive",
-        "extract"
+      "supportedVersions": [
+        {
+          "version": 1,
+          "table": "PulseCommandsV1",
+          "operations": [
+            "register_command",
+            "unregister_command"
+          ]
+        },
+        {
+          "version": 2,
+          "table": "PulseCommandsV2",
+          "operations": [
+            "register_command",
+            "unregister_command",
+            "update_command",
+            "set_command_flags"
+          ]
+        }
       ],
-      "conditions": "Selection count range, allowed file/directory kinds and lowercase dotted extension include/exclude list; every selected entry must match",
+      "icons": "All 68 built-in StoreIcon IDs (0..67), custom PulseIconsV1 / contributes.icons IDs (>= 0x10000), or icon_name resolution",
+      "conditions": "Selection count range, allowed file/directory/background kinds, lowercase dotted extension include/exclude list, and runtime show/hide/checked/separator/primary flags",
       "invocation": "Host rechecks conditions and captures current loaded selection before invoking; snapshot strings/arrays borrowed only through callback return",
       "shortcuts": "Owner main UI only, not global hotkeys; built-in shortcuts take precedence; editors do not dispatch plugin shortcuts; duplicate owner shortcuts rejected",
-      "toolbar": "Stable native:package:command identity persists in existing toolbar_tools; menu tokens are transient",
+      "toolbar": "Stable native:package:command identity persists in existing toolbar_tools; menu tokens are transient; update_command and set_command_flags preserve command IDs",
       "lifecycle": "Unregister/stop invalidates tokens; IDs never reused; host waits for active callbacks before unloading",
-      "documentation": "sdk/native/README.md"
+      "documentation": "sdk/native/README.md",
+      "stabilityTier": "frozen"
     },
     {
       "name": "pulse.preview",
@@ -744,7 +777,8 @@
         "non-null action.data_operation"
       ],
       "documentation": "sdk/native/README.md",
-      "validationStatus": "P1.3 archive/bitmap/UI-model host acceptance recorded in implementation roadmap; extraction tasks remain separate"
+      "validationStatus": "P1.3 archive/bitmap/UI-model host acceptance recorded in implementation roadmap; extraction tasks remain separate",
+      "stabilityTier": "frozen"
     },
     {
       "name": "pulse.tasks",
@@ -758,8 +792,8 @@
         "release"
       ],
       "headerContract": {
-        "sha256": "b237523c8395d030a3b40e80e46b66618d5ef6d28d53bc1c2395a3467772fc92",
-        "text": "#ifndef PULSE_NATIVE_TASKS_H\n#define PULSE_NATIVE_TASKS_H\n#include \"abi.h\"\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#define PULSE_TASKS_INTERFACE_NAME \"pulse.tasks\"\n#define PULSE_TASKS_VERSION_1 1u\n#pragma pack(push, 8)\ntypedef uint64_t PulseTaskId;\ntypedef uint32_t PulseTaskState;\nenum { PULSE_TASK_RUNNING = 0u, PULSE_TASK_CANCELLING = 1u,\n       PULSE_TASK_COMPLETED = 2u, PULSE_TASK_PARTIAL = 3u,\n       PULSE_TASK_FAILED = 4u, PULSE_TASK_CANCELLED = 5u };\ntypedef struct PulseTaskProgress {\n    uint32_t size, percent;\n    uint64_t completed_items, total_items, completed_bytes, total_bytes;\n    PulseStringView error, current_item;\n} PulseTaskProgress;\ntypedef struct PulseTaskContext {\n    PulseTaskId id;\n    void* context;\n    PulseStatus(PULSE_CALL *report)(void*, const PulseTaskProgress*);\n    uint32_t(PULSE_CALL *cancelled)(void*);\n} PulseTaskContext;\ntypedef PulseTaskState(PULSE_CALL *PulseTaskWorkFn)(void*, const PulseTaskContext*);\ntypedef void(PULSE_CALL *PulseTaskCancelFn)(void*, PulseTaskId);\ntypedef struct PulseTaskDescriptor {\n    uint32_t size;\n    PulseStringView title, type;\n    PulseTaskWorkFn work;\n    void* user;\n    PulseTaskCancelFn on_cancel;\n} PulseTaskDescriptor;\ntypedef struct PulseTaskSnapshot {\n    uint32_t size;\n    PulseTaskId id;\n    PulseTaskState state;\n    PulseTaskProgress progress;\n} PulseTaskSnapshot;\ntypedef void(PULSE_CALL *PulseTaskSnapshotFn)(void*, const PulseTaskSnapshot*);\ntypedef struct PulseTasksV1 {\n    uint32_t size, version;\n    void* context;\n    PulseStatus(PULSE_CALL *create)(void*, const PulseTaskDescriptor*, PulseTaskId*);\n    PulseStatus(PULSE_CALL *cancel)(void*, PulseTaskId);\n    PulseStatus(PULSE_CALL *get)(void*, PulseTaskId, PulseTaskSnapshotFn, void*);\n    PulseStatus(PULSE_CALL *release)(void*, PulseTaskId);\n} PulseTasksV1;\n/* create/cancel: owner UI thread. Title/type: 1..128 UTF-8 bytes, copied.\n   At most16 retained tasks, two concurrent host-owned workers; others queued.\n   work returns COMPLETED/PARTIAL/FAILED/CANCELLED; return is final. report is\n   any-thread, synchronously copies error (<=4096 UTF-8 bytes) and progress.\n   Current item <=32768 UTF-8 bytes. Percent UINT32_MAX means indeterminate;\n   otherwise 0..100, completed <= totals, monotonic completed counters/percent.\n   Report/context are valid only until work returns: join own reporting threads.\n   get/release are UI-thread only. get borrows strings through its callback.\n   Keep userdata until get observes terminal/release succeeds or plugin destroy;\n   work must not free it, since on_cancel may still be pending. Oldest terminal\n   tasks may be evicted when creating at capacity; IDs are never reused.\n   Terminal state is immutable; report remains valid during cancellation cleanup until work returns; the\n   cancellation flag is independent of progress. A FAILED return preserves\n   cleanup diagnostics rather than being replaced with CANCELLED.\n   cancel signals once; optional on_cancel is delivered on owner UI Poll, at\n   most once, and must return promptly. Keep userdata through task completion\n   and any cancellation callback, or through destroy. No exceptions cross ABI.\n   Stop cancels queued/running work; host keeps DLL loaded until work and UI\n   cancellation callbacks return. Cancellation is cooperative, not rollback. */\n#pragma pack(pop)\n#ifdef __cplusplus\n}\n#endif\n#endif\n"
+        "sha256": "168642587f9b4e1d9dfc3a4dfef98e03e3740eb9dd9e34f6f46ff9919d991315",
+        "text": "#ifndef PULSE_NATIVE_TASKS_H\n#define PULSE_NATIVE_TASKS_H\n#include \"abi.h\"\n#include <stddef.h>\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#define PULSE_TASKS_INTERFACE_NAME \"pulse.tasks\"\n#define PULSE_TASKS_VERSION_1 1u\n#pragma pack(push, 8)\ntypedef uint64_t PulseTaskId;\ntypedef uint32_t PulseTaskState;\nenum { PULSE_TASK_RUNNING = 0u, PULSE_TASK_CANCELLING = 1u,\n       PULSE_TASK_COMPLETED = 2u, PULSE_TASK_PARTIAL = 3u,\n       PULSE_TASK_FAILED = 4u, PULSE_TASK_CANCELLED = 5u };\n/* A button the host shows once the task has ended (retry, open, ...). */\ntypedef struct PulseTaskAction {\n    uint32_t size, flags; /* PULSE_TASK_ACTION_PRIMARY: the default button. */\n    PulseStringView id;   /* ASCII [A-Za-z0-9._-], 1..64 bytes; passed back to on_action. */\n    PulseStringView text; /* UTF-8, 1..64 bytes. */\n} PulseTaskAction;\nenum { PULSE_TASK_ACTION_PRIMARY = 1u };\ntypedef struct PulseTaskProgress {\n    uint32_t size, percent;\n    uint64_t completed_items, total_items, completed_bytes, total_bytes;\n    PulseStringView error, current_item;\n    /* Optional, read only when size covers them (older reports end at current_item). */\n    uint32_t step; /* 1-based index into the descriptor's steps; 0 keeps the last one. */\n    uint32_t action_count; /* <=3 actions, shown when the task has ended. */\n    uint64_t linked_operation; /* A host file operation this task is waiting on (for example\n                                  a staging commit's task_id): the host shows this task's\n                                  progress in its place. 0 = none. */\n    PulseStringView note; /* UTF-8, 0..256 bytes: a footer hint (\"nothing changes until ...\"). */\n    PulseStringView detail; /* UTF-8, 0..1024 bytes: explains the error (may hold line breaks), or\n                               on COMPLETED the result notice's second line. */\n    PulseStringView assurance; /* UTF-8, 0..256 bytes: what stayed safe after a failure. */\n    const PulseTaskAction* actions;\n    PulseStringView log; /* UTF-8, 0..2048 bytes: diagnostics shown in a monospace block and\n                            included when the user copies the failure's details. */\n    PulseStringView result; /* UTF-8, 0..256 bytes: on COMPLETED, a notice (\"Extracted to X\") with\n                               open and undo buttons; empty shows none. */\n    PulseStringView result_path; /* UTF-8, 0..32768 bytes: the folder or file the task produced;\n                                    the notice's open button shows it. */\n} PulseTaskProgress;\n#define PULSE_TASK_PROGRESS_SIZE_V1 ((uint32_t)offsetof(PulseTaskProgress, step))\ntypedef struct PulseTaskContext {\n    PulseTaskId id;\n    void* context;\n    PulseStatus(PULSE_CALL *report)(void*, const PulseTaskProgress*);\n    uint32_t(PULSE_CALL *cancelled)(void*);\n} PulseTaskContext;\ntypedef PulseTaskState(PULSE_CALL *PulseTaskWorkFn)(void*, const PulseTaskContext*);\ntypedef void(PULSE_CALL *PulseTaskCancelFn)(void*, PulseTaskId);\ntypedef void(PULSE_CALL *PulseTaskActionFn)(void*, PulseTaskId, PulseStringView);\ntypedef struct PulseTaskDescriptor {\n    uint32_t size;\n    PulseStringView title, type;\n    PulseTaskWorkFn work;\n    void* user;\n    PulseTaskCancelFn on_cancel;\n    /* Optional, read only when size covers them (older descriptors end at on_cancel). */\n    PulseStringView source, destination; /* UTF-8, 0..1024 bytes: the route line. */\n    const PulseStringView* steps; /* <=3 step names (UTF-8, 1..64 bytes), shown in order. */\n    uint32_t step_count;\n    PulseTaskActionFn on_action; /* Called with action_user, never user. */\n    void* action_user; /* Must stay valid until plugin destroy: actions outlive release. */\n} PulseTaskDescriptor;\n#define PULSE_TASK_DESCRIPTOR_SIZE_V1 ((uint32_t)offsetof(PulseTaskDescriptor, source))\ntypedef struct PulseTaskSnapshot {\n    uint32_t size;\n    PulseTaskId id;\n    PulseTaskState state;\n    PulseTaskProgress progress;\n} PulseTaskSnapshot;\ntypedef void(PULSE_CALL *PulseTaskSnapshotFn)(void*, const PulseTaskSnapshot*);\ntypedef struct PulseTasksV1 {\n    uint32_t size, version;\n    void* context;\n    PulseStatus(PULSE_CALL *create)(void*, const PulseTaskDescriptor*, PulseTaskId*);\n    PulseStatus(PULSE_CALL *cancel)(void*, PulseTaskId);\n    PulseStatus(PULSE_CALL *get)(void*, PulseTaskId, PulseTaskSnapshotFn, void*);\n    PulseStatus(PULSE_CALL *release)(void*, PulseTaskId);\n} PulseTasksV1;\n/* create/cancel: owner UI thread. Title/type: 1..128 UTF-8 bytes, copied.\n   At most16 retained tasks, two concurrent host-owned workers; others queued.\n   work returns COMPLETED/PARTIAL/FAILED/CANCELLED; return is final. report is\n   any-thread, synchronously copies error (<=4096 UTF-8 bytes) and progress.\n   Current item <=32768 UTF-8 bytes. Percent UINT32_MAX means indeterminate;\n   otherwise 0..100, completed <= totals, monotonic completed counters/percent.\n   Report/context are valid only until work returns: join own reporting threads.\n   get/release are UI-thread only. get borrows strings through its callback.\n   Keep userdata until get observes terminal/release succeeds or plugin destroy;\n   work must not free it, since on_cancel may still be pending. Oldest terminal\n   tasks may be evicted when creating at capacity; IDs are never reused.\n   Terminal state is immutable; report remains valid during cancellation cleanup until work returns; the\n   cancellation flag is independent of progress. A FAILED return preserves\n   cleanup diagnostics rather than being replaced with CANCELLED.\n   cancel signals once; optional on_cancel is delivered on owner UI Poll, at\n   most once, and must return promptly. Keep userdata through task completion\n   and any cancellation callback, or through destroy. No exceptions cross ABI.\n   Stop cancels queued/running work; host keeps DLL loaded until work and UI\n   cancellation callbacks return. Cancellation is cooperative, not rollback.\n   Actions come from the last report before the task ended. on_action runs on the\n   owner UI thread when the user picks one (at most once per ended task, never after\n   stop) and may create tasks; it must return promptly. */\n#pragma pack(pop)\n#ifdef __cplusplus\n}\n#endif\n#endif\n"
       },
       "thread": "create/cancel/get/release and cancellation callbacks use owner UI thread; work uses host workers; progress report is any-thread and never calls host UI backend",
       "limits": {
@@ -784,7 +818,8 @@
       "lifetime": "Keep userdata until get observes terminal, release succeeds, or destroy. Close cancels; DLL remains loaded until workers, cancellation callbacks and UI terminal publication finish. get strings borrowed only through callback",
       "retention": "release terminal records explicitly; create at capacity may evict oldest terminal; IDs never reused",
       "validationStatus": "Task lifecycle and host acceptance are recorded in the implementation roadmap; output staging and commit remain separate",
-      "documentation": "sdk/native/README.md"
+      "documentation": "sdk/native/README.md",
+      "stabilityTier": "frozen"
     },
     {
       "name": "pulse.staging",
@@ -815,7 +850,8 @@
       "commit": "Join writers before commit. Host validates nonempty ordinary tree, rejects reparse points and repeated commit, then confirms and submits standard file operations. Snapshot task_id identifies submitted operation; acceptance is not completion.",
       "lifetime": "Borrowed callback strings expire on return. Finish writers before release. Close blocks create/commit/choose; get/cancel/release remain valid through destroy. Close never removes writer output; remaining cleanup starts after destroy.",
       "cleanup": "ID-only asynchronous release for unsubmitted or terminal stage; successful cleanup removes the ID. Cancel is cooperative and not rollback.",
-      "documentation": "sdk/native/README.md"
+      "documentation": "sdk/native/README.md",
+      "stabilityTier": "frozen"
     },
     {
       "name": "pulse.settings.pages",
@@ -841,21 +877,26 @@
       "persistence": "Use existing pulse.resources settings_get/settings_set with expected_version. Acceptance is not save completion; version_conflict never overwrites. Reload current revision, retain draft and require explicit retry",
       "sample": "Archive destination and future compression format/level preferences; compression remains unimplemented",
       "validationStatus": "P1.6 settings lifecycle and real-host persistence/conflict/theme/scroll acceptance recorded in the implementation roadmap",
-      "documentation": "sdk/native/README.md"
+      "documentation": "sdk/native/README.md",
+      "stabilityTier": "frozen"
     },
     {
       "name": "pulse.dialogs",
-      "version": 1,
+      "version": 2,
       "header": "include/pulse/dialogs.h",
       "status": "developer-preview",
       "operations": [
         "show",
         "set_states",
-        "close"
+        "close",
+        "subscribe_command",
+        "unsubscribe_command",
+        "update_model",
+        "get_state"
       ],
       "headerContract": {
-        "sha256": "4c6a92ca753bd35c438c6f50b97103f14ff7fe4e0879c94d2004838618250e6c",
-        "text": "#ifndef PULSE_NATIVE_DIALOGS_H\n#define PULSE_NATIVE_DIALOGS_H\n#include \"ui_model.h\"\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#define PULSE_DIALOGS_INTERFACE_NAME \"pulse.dialogs\"\n#define PULSE_DIALOGS_VERSION_1 1u\n#define PULSE_DIALOG_NO_BUTTON 0xFFFFFFFFu\n#pragma pack(push, 8)\nenum { PULSE_DIALOG_BUTTON_STANDARD = 0, PULSE_DIALOG_BUTTON_PRIMARY = 1, PULSE_DIALOG_BUTTON_DANGER = 2 };\ntypedef struct PulseDialogButton {\n    uint32_t size;\n    uint32_t kind;\n    PulseStringView id;\n    PulseStringView text;\n} PulseDialogButton;\ntypedef struct PulseDialogRequest {\n    uint32_t size;\n    uint32_t width;\n    uint32_t height;\n    uint32_t default_button;\n    uint32_t cancel_button;\n    uint32_t button_count;\n    PulseStringView title;\n    PulseStringView message;\n    const PulseDialogButton* buttons;\n    const PulseUiModelTree* model;\n} PulseDialogRequest;\ntypedef void (PULSE_CALL *PulseDialogStateChanged)(void* user, uint64_t dialog, const PulseUiState* changes, uint32_t count);\ntypedef void (PULSE_CALL *PulseDialogClosed)(void* user, uint64_t dialog, PulseStatus status, PulseStringView button,\n    const PulseUiState* states, uint32_t count);\ntypedef struct PulseDialogsV1 {\n    uint32_t size, version;\n    void* context;\n    PulseStatus(PULSE_CALL *show)(void*, const PulseDialogRequest*, PulseDialogStateChanged, PulseDialogClosed,\n        void* user, uint64_t* dialog);\n    PulseStatus(PULSE_CALL *set_states)(void*, uint64_t dialog, const PulseUiState* states, uint32_t count);\n    PulseStatus(PULSE_CALL *close)(void*, uint64_t dialog);\n} PulseDialogsV1;\n/* A host-drawn modal dialog over the owner window: title, optional message, an\n   optional UI-model form and 1-3 footer buttons. UI thread only; show returns\n   at once and the owner window stays disabled until the dialog closes. One\n   dialog per package session; a second show returns STATE.\n   width: DIP, 0 = 480, clamped 360-720. height: form area DIP, 0 = 240 with a\n   model and 0 without; clamped to 640. Title 1-128 UTF-8 bytes, message up to\n   2048, button ids 1-64 and texts 1-32. default_button answers Enter;\n   cancel_button answers Esc and the close button (PULSE_DIALOG_NO_BUTTON: they\n   close with status STATE and an empty button id). The model is copied and\n   validated like pulse.ui.model; text inputs with kind \"password\" mask their\n   text. Model commands are unavailable: use states and the footer buttons.\n   state_changed (optional) reports form edits; set_states may update the form\n   from it or later. closed runs exactly once with every declared state, status\n   OK and the pressed button id, unless the session stops first: then no callback\n   runs. All borrowed values are valid only during the callback. Keep userdata\n   until closed returns or the session stops. close(dialog) answers like the\n   cancel button. */\n#pragma pack(pop)\n#ifdef __cplusplus\n}\n#endif\n#endif\n"
+        "sha256": "19d6eef77e85c3541cd0b6fe4c6c84df45f7767b6f87877f79c326bb816dfa0b",
+        "text": "#ifndef PULSE_NATIVE_DIALOGS_H\n#define PULSE_NATIVE_DIALOGS_H\n#include \"ui_model.h\"\n#include <stddef.h>\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#define PULSE_DIALOGS_INTERFACE_NAME \"pulse.dialogs\"\n#define PULSE_DIALOGS_VERSION_1 1u\n#define PULSE_DIALOGS_VERSION_2 2u\n#define PULSE_DIALOG_NO_BUTTON 0xFFFFFFFFu\n#define PULSE_DIALOG_ICON_EXT_FLAG 0x40000000u\n#pragma pack(push, 8)\nenum { PULSE_DIALOG_BUTTON_STANDARD = 0, PULSE_DIALOG_BUTTON_PRIMARY = 1, PULSE_DIALOG_BUTTON_DANGER = 2 };\ntypedef struct PulseDialogButton {\n    uint32_t size;\n    uint32_t kind;\n    PulseStringView id;\n    PulseStringView text;\n} PulseDialogButton;\ntypedef struct PulseDialogRequest {\n    uint32_t size;\n    uint32_t width;\n    uint32_t height;\n    uint32_t default_button;\n    uint32_t cancel_button;\n    uint32_t button_count;\n    PulseStringView title;\n    PulseStringView message;\n    const PulseDialogButton* buttons;\n    const PulseUiModelTree* model;\n    /* Optional, read only when size covers them (older requests end at model). */\n    PulseStringView heading; /* UTF-8, 0..128 bytes: a large line above the message;\n                                title then only names the window. */\n    uint32_t icon; /* PULSE_DIALOG_ICON_*: drawn before the heading. */\n    uint32_t subject_kind; /* PULSE_DIALOG_SUBJECT_*: a card naming what the dialog is about. */\n    PulseStringView subject; /* UTF-8, 0..260 bytes: the card's name line. */\n    PulseStringView subject_detail; /* UTF-8, 0..256 bytes: the card's second line. */\n    PulseStringView footnote; /* UTF-8, 0..256 bytes: a hint left of the buttons. */\n    uint32_t footnote_icon; /* PULSE_DIALOG_ICON_* before the footnote. */\n} PulseDialogRequest;\n#define PULSE_DIALOG_REQUEST_SIZE_V1 ((uint32_t)offsetof(PulseDialogRequest, heading))\nenum { PULSE_DIALOG_ICON_NONE = 0u, PULSE_DIALOG_ICON_KEY = 1u, PULSE_DIALOG_ICON_ARCHIVE = 2u,\n       PULSE_DIALOG_ICON_CHECKSUM = 3u, PULSE_DIALOG_ICON_INFO = 4u, PULSE_DIALOG_ICON_WARNING = 5u,\n       PULSE_DIALOG_ICON_FOLDER = 6u, PULSE_DIALOG_ICON_LOCK = 7u };\nenum { PULSE_DIALOG_SUBJECT_NONE = 0u, PULSE_DIALOG_SUBJECT_FILE = 1u, PULSE_DIALOG_SUBJECT_FOLDER = 2u,\n       PULSE_DIALOG_SUBJECT_ARCHIVE = 3u };\ntypedef void (PULSE_CALL *PulseDialogStateChanged)(void* user, uint64_t dialog, const PulseUiState* changes, uint32_t count);\ntypedef void (PULSE_CALL *PulseDialogClosed)(void* user, uint64_t dialog, PulseStatus status, PulseStringView button,\n    const PulseUiState* states, uint32_t count);\ntypedef void (PULSE_CALL *PulseDialogCommandFn)(void* user, uint64_t dialog, PulseStringView command);\ntypedef struct PulseDialogsV1 {\n    uint32_t size, version;\n    void* context;\n    PulseStatus(PULSE_CALL *show)(void*, const PulseDialogRequest*, PulseDialogStateChanged, PulseDialogClosed,\n        void* user, uint64_t* dialog);\n    PulseStatus(PULSE_CALL *set_states)(void*, uint64_t dialog, const PulseUiState* states, uint32_t count);\n    PulseStatus(PULSE_CALL *close)(void*, uint64_t dialog);\n} PulseDialogsV1;\ntypedef struct PulseDialogsV2 {\n    uint32_t size, version;\n    void* context;\n    PulseStatus(PULSE_CALL *show)(void*, const PulseDialogRequest*, PulseDialogStateChanged, PulseDialogClosed,\n        void* user, uint64_t* dialog);\n    PulseStatus(PULSE_CALL *set_states)(void*, uint64_t dialog, const PulseUiState* states, uint32_t count);\n    PulseStatus(PULSE_CALL *close)(void*, uint64_t dialog);\n    PulseStatus(PULSE_CALL *subscribe_command)(void*, uint64_t dialog, PulseStringView command,\n        PulseDialogCommandFn callback, void* user, uint64_t* subscription);\n    PulseStatus(PULSE_CALL *unsubscribe_command)(void*, uint64_t subscription);\n    PulseStatus(PULSE_CALL *update_model)(void*, uint64_t dialog, const PulseUiModelTree* model);\n    PulseStatus(PULSE_CALL *get_state)(void*, uint64_t dialog, PulseStringView key, char* buffer,\n        uint32_t capacity, uint32_t* needed);\n} PulseDialogsV2;\n/* A host-drawn modal dialog over the owner window: title, optional message, an\n   optional UI-model form and 1-3 footer buttons. UI thread only; show returns\n   at once and the owner window stays disabled via PickerOwnerGuard until the\n   dialog closes. One dialog per package session; a second show returns STATE.\n   width: DIP, 0 = 480, clamped 360-720. height: form area DIP, 0 = 240 with a\n   model and 0 without; clamped to 640. Title 1-128 UTF-8 bytes, message up to\n   2048, button ids 1-64 and texts 1-32. default_button answers Enter;\n   cancel_button answers Esc and the close button (PULSE_DIALOG_NO_BUTTON: they\n   close with status STATE and an empty button id). The model is copied and\n   validated like pulse.ui.model; text inputs with kind \"password\" mask their\n   text. V1 rejects declared model commands with UNAVAILABLE; V2 enables\n   declared model commands via subscribe_command/unsubscribe_command, dynamic\n   tree replacement via update_model (retaining matching state values and\n   command subscriptions), and synchronous state reads via get_state. Nested\n   pulse.pickers calls while a dialog is open automatically parent to the dialog\n   window. state_changed (optional) reports form edits; set_states may update\n   the form from it or later. closed runs exactly once with every declared\n   state, status OK and the pressed button id, unless the session stops first:\n   then no callback runs. All borrowed values are valid only during the\n   callback. Keep userdata until closed returns or the session stops.\n   close(dialog) answers like the cancel button. */\n#pragma pack(pop)\n#ifdef __cplusplus\n}\n#endif\n#endif\n"
       },
       "thread": "Owner UI thread for all calls and callbacks; show returns at once and the dialog answers later",
       "limits": {
@@ -867,12 +908,140 @@
           360,
           720
         ],
-        "formHeightDip": 640
+        "formHeightDip": 640,
+        "commandSubscriptions": 32
       },
-      "presentation": "Host-drawn Fluent modal over the owner window: title, optional message, optional UI-model form, 1-3 footer buttons (standard/primary/danger). Text inputs with kind password are masked.",
-      "lifetime": "Model and strings copied by show. closed runs exactly once with every declared state unless the session stops first; borrowed values expire at callback return.",
+      "supportedVersions": [
+        {
+          "version": 1,
+          "table": "PulseDialogsV1",
+          "operations": [
+            "show",
+            "set_states",
+            "close"
+          ]
+        },
+        {
+          "version": 2,
+          "table": "PulseDialogsV2",
+          "operations": [
+            "show",
+            "set_states",
+            "close",
+            "subscribe_command",
+            "unsubscribe_command",
+            "update_model",
+            "get_state"
+          ]
+        }
+      ],
+      "presentation": "Host-drawn Fluent modal over the owner window guarded by PickerOwnerGuard: title, optional message, optional UI-model form, 1-3 footer buttons (standard/primary/danger). Text inputs with kind password are masked. V1 rejects declared model commands with UNAVAILABLE; V2 supports non-closing in-dialog command callbacks (subscribe_command/unsubscribe_command), dynamic model updates (update_model), synchronous state queries (get_state), and automatic nested picker parenting.",
+      "lifetime": "Model and strings copied by show/update_model. closed runs exactly once with every declared state unless the session stops first; borrowed values expire at callback return.",
       "sample": "extensions/7zip: password prompt, compression options and checksum results",
-      "documentation": "sdk/native/include/pulse/dialogs.h"
+      "documentation": "sdk/native/include/pulse/dialogs.h",
+      "stabilityTier": "frozen"
+    },
+    {
+      "name": "pulse.icons",
+      "version": 1,
+      "header": "include/pulse/icons.h",
+      "status": "developer-preview",
+      "operations": [
+        "register_icon",
+        "update_icon",
+        "unregister_icon",
+        "resolve_builtin"
+      ],
+      "headerContract": {
+        "sha256": "cbc6a95d807b7143fd793d38f59ed9a4f95e749697458996fe2f3ca24818b96a",
+        "text": "#ifndef PULSE_NATIVE_ICONS_H\n#define PULSE_NATIVE_ICONS_H\n#include \"abi.h\"\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#define PULSE_ICONS_INTERFACE_NAME \"pulse.icons\"\n#define PULSE_ICONS_VERSION_1 1u\n#define PULSE_ICON_BUILTIN_MAX 67u\n#define PULSE_ICON_CUSTOM_MIN 0x10000u\n#pragma pack(push, 8)\ntypedef uint32_t PulseIconId;\nenum {\n    PULSE_ICON_DEFAULT = 0u,\n    PULSE_ICON_ARCHIVE = 1u,\n    PULSE_ICON_EXTRACT = 2u,\n    PULSE_ICON_SEARCH = 3u,\n    PULSE_ICON_BOX = 4u,\n    PULSE_ICON_EXTRACT_TO = 5u,\n    PULSE_ICON_ADD_ARCHIVE = 6u,\n    PULSE_ICON_TEST = 7u,\n    PULSE_ICON_HASH = 8u,\n    PULSE_ICON_GEAR = 9u,\n    PULSE_ICON_FOLDER = 10u,\n    PULSE_ICON_FILE = 11u,\n    PULSE_ICON_CHEVRON_RIGHT = 12u,\n    PULSE_ICON_CHEVRON_DOWN = 13u,\n    PULSE_ICON_CHEVRON_UP = 14u,\n    PULSE_ICON_MORE = 15u,\n    PULSE_ICON_CHECK = 16u,\n    PULSE_ICON_SHIELD = 17u,\n    PULSE_ICON_BADGE = 18u,\n    PULSE_ICON_LOCK = 19u,\n    PULSE_ICON_EYE = 20u,\n    PULSE_ICON_COPY = 21u,\n    PULSE_ICON_CUT = 22u,\n    PULSE_ICON_RENAME = 23u,\n    PULSE_ICON_TRASH = 24u,\n    PULSE_ICON_PROPERTIES = 25u,\n    PULSE_ICON_OPEN = 26u,\n    PULSE_ICON_OPEN_WITH = 27u,\n    PULSE_ICON_PATH = 28u,\n    PULSE_ICON_UNDO = 29u,\n    PULSE_ICON_CLOSE = 30u,\n    PULSE_ICON_PLUS = 31u,\n    PULSE_ICON_MINUS = 32u,\n    PULSE_ICON_SQUARE = 33u,\n    PULSE_ICON_BACK = 34u,\n    PULSE_ICON_FORWARD = 35u,\n    PULSE_ICON_UP = 36u,\n    PULSE_ICON_REFRESH = 37u,\n    PULSE_ICON_IMAGE = 38u,\n    PULSE_ICON_CAMERA = 39u,\n    PULSE_ICON_FILM = 40u,\n    PULSE_ICON_TEXT_SEARCH = 41u,\n    PULSE_ICON_SPARKLE = 42u,\n    PULSE_ICON_PUZZLE = 43u,\n    PULSE_ICON_PALETTE = 44u,\n    PULSE_ICON_LIST_VIEW = 45u,\n    PULSE_ICON_TABS = 46u,\n    PULSE_ICON_POWER = 47u,\n    PULSE_ICON_DUPLICATE = 48u,\n    PULSE_ICON_CUBE = 49u,\n    PULSE_ICON_LINES = 50u,\n    PULSE_ICON_KEYBOARD = 51u,\n    PULSE_ICON_INFO = 52u,\n    PULSE_ICON_WARN = 53u,\n    PULSE_ICON_SIDEBAR = 54u,\n    PULSE_ICON_PANES = 55u,\n    PULSE_ICON_CONTRAST = 56u,\n    PULSE_ICON_DOWNLOAD = 57u,\n    PULSE_ICON_CLOUD_OFF = 58u,\n    PULSE_ICON_DRAG = 59u,\n    PULSE_ICON_SORT = 60u,\n    PULSE_ICON_FILTER = 61u,\n    PULSE_ICON_NEW_FOLDER = 62u,\n    PULSE_ICON_STAR = 63u,\n    PULSE_ICON_PC = 64u,\n    PULSE_ICON_DISK = 65u,\n    PULSE_ICON_CHEVRON_LEFT = 66u,\n    PULSE_ICON_KEY = 67u\n};\nenum {\n    PULSE_ICON_DRAW_STROKE = 1u,\n    PULSE_ICON_DRAW_FILL = 2u,\n    PULSE_ICON_DRAW_CLOSED = 4u\n};\nenum {\n    PULSE_ICON_COLOR_INHERIT = 0u,\n    PULSE_ICON_COLOR_ACCENT = 1u,\n    PULSE_ICON_COLOR_SUCCESS = 2u,\n    PULSE_ICON_COLOR_WARNING = 3u,\n    PULSE_ICON_COLOR_DANGER = 4u,\n    PULSE_ICON_COLOR_RGB = 5u\n};\ntypedef struct PulseIconLayer {\n    uint32_t size;\n    uint32_t draw_flags; /* Non-zero combination of PULSE_ICON_DRAW_* flags. */\n    PulseStringView path_data; /* SVG path commands M L H V C S A Z, 1..2048 bytes. */\n    uint32_t color_role; /* PULSE_ICON_COLOR_*; RGB uses 0xAARRGGBB or 0x00RRGGBB in argb. */\n    uint32_t argb;\n    uint32_t stroke_width_milli; /* 0 = host default (~1350 milli-DIP); else 250..8000. */\n    uint32_t opacity_milli; /* 0 = 1000 (opaque); else 1..1000. */\n} PulseIconLayer;\ntypedef struct PulseIconDescriptor {\n    uint32_t size;\n    uint32_t view_box_milli; /* 0 = 16000 (16x16 grid); else 4000..1024000. */\n    PulseStringView name; /* Optional package-local ASCII [A-Za-z0-9._-], 0..64 bytes. */\n    const PulseIconLayer* layers; /* 1..32 layers; total path bytes <= 8192. */\n    uint32_t layer_count;\n    uint32_t reserved;\n} PulseIconDescriptor;\ntypedef struct PulseIconsV1 {\n    uint32_t size;\n    uint32_t version;\n    void* context;\n    PulseStatus(PULSE_CALL *register_icon)(void*, const PulseIconDescriptor*, PulseIconId*);\n    PulseStatus(PULSE_CALL *update_icon)(void*, PulseIconId, const PulseIconDescriptor*);\n    PulseStatus(PULSE_CALL *unregister_icon)(void*, PulseIconId);\n    PulseStatus(PULSE_CALL *resolve_builtin)(void*, PulseStringView, PulseIconId*);\n} PulseIconsV1;\n/* UI thread only; <=64 dynamic icons per plugin session. Returned PulseIconId values\n   (>= PULSE_ICON_CUSTOM_MIN) work in pulse.commands, pulse.dialogs, toolbar pins,\n   and UiTree glyphs (\"icon:#<id>\" or \"icon:<package>/<name>\"). */\n#pragma pack(pop)\n#ifdef __cplusplus\n}\n#endif\n#endif\n"
+      },
+      "thread": "Owner UI thread for all calls",
+      "limits": {
+        "dynamicIconsPerSession": 64,
+        "layersPerIcon": 16,
+        "pathBytesPerLayer": 4096,
+        "totalPathBytes": 16384
+      },
+      "presentation": "68 built-in Fluent StoreIcon vectors (0..67) plus multi-layer SVG path vector icons (M L H V C S A Z) with semantic theme colors (inherit, accent, success, warning, danger, RGB) cached per D2D factory",
+      "lifetime": "Descriptor strings and layer arrays copied synchronously; dynamic icons unregistered automatically when session closes",
+      "documentation": "sdk/native/include/pulse/icons.h",
+      "stabilityTier": "experimental"
+    },
+    {
+      "name": "pulse.diagnostics",
+      "version": 1,
+      "header": "include/pulse/diagnostics.h",
+      "status": "developer-preview",
+      "operations": [
+        "get_last_error",
+        "clear_last_error"
+      ],
+      "headerContract": {
+        "sha256": "efd701f2926133acf187beac8c5ca0a8c32cfa5f559e61065ef6a04ae4d207f1",
+        "text": "#ifndef PULSE_NATIVE_DIAGNOSTICS_H\n#define PULSE_NATIVE_DIAGNOSTICS_H\n#include \"abi.h\"\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#define PULSE_DIAGNOSTICS_INTERFACE_NAME \"pulse.diagnostics\"\n#define PULSE_DIAGNOSTICS_VERSION_1 1u\n#pragma pack(push, 8)\n/* Per-session structured error record for native host interfaces (pulse.ui.model,\n   pulse.dialogs, pulse.settings.pages, pulse.pickers, pulse.workbench, etc.).\n   UI thread only. Failed calls overwrite the session's last error and advance\n   the monotonic sequence counter; successful calls leave the previous failure\n   intact until clear_last_error() is called. When no error has been recorded\n   (or after clear_last_error), status is PULSE_OK, sequence is 0, and string\n   views are empty. All PulseStringView fields in PulseDiagnosticInfo are\n   borrowed only for the duration of PulseDiagnosticFn; copy before returning.\n   No C++ exception may cross this ABI. */\ntypedef struct PulseDiagnosticInfo {\n    uint32_t size;\n    PulseStatus status;\n    uint64_t sequence;\n    PulseStringView interface_name;\n    PulseStringView operation;\n    PulseStringView subject;\n    PulseStringView field;\n    PulseStringView message;\n} PulseDiagnosticInfo;\n\ntypedef void(PULSE_CALL *PulseDiagnosticFn)(void* user, const PulseDiagnosticInfo* info);\n\ntypedef struct PulseDiagnosticsV1 {\n    uint32_t size, version;\n    void* context;\n    PulseStatus(PULSE_CALL *get_last_error)(void* context, PulseDiagnosticFn callback, void* user);\n    PulseStatus(PULSE_CALL *clear_last_error)(void* context);\n} PulseDiagnosticsV1;\n#pragma pack(pop)\n#ifdef __cplusplus\n}\n#endif\n#endif\n"
+      },
+      "thread": "Owner UI thread for all calls and synchronous callbacks",
+      "presentation": "Per-session structured failure record (status, monotonic sequence, interface_name, operation, subject, field, message) populated by pulse.ui.model, pulse.dialogs, pulse.settings.pages, pulse.pickers, and pulse.workbench.",
+      "lifetime": "get_last_error invokes callback synchronously; borrowed PulseStringView slices expire when callback returns. Successful host calls preserve the prior failure until clear_last_error.",
+      "documentation": "sdk/native/include/pulse/diagnostics.h",
+      "stabilityTier": "experimental"
+    },
+    {
+      "name": "pulse.pickers",
+      "version": 1,
+      "header": "include/pulse/pickers.h",
+      "status": "developer-preview",
+      "operations": [
+        "open_files",
+        "save_file",
+        "pick_folders",
+        "quick_pick",
+        "cancel"
+      ],
+      "headerContract": {
+        "sha256": "103b59a0289caf0096f00e35dc53b6ff6e8759e3c83438b2a463ca855a5fbf46",
+        "text": "#ifndef PULSE_NATIVE_PICKERS_H\n#define PULSE_NATIVE_PICKERS_H\n#include \"abi.h\"\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#define PULSE_PICKERS_INTERFACE_NAME \"pulse.pickers\"\n#define PULSE_PICKERS_VERSION_1 1u\n#pragma pack(push, 8)\ntypedef uint64_t PulsePickerRequestId;\n\nenum {\n    PULSE_PICKER_ACCEPTED = 0u,\n    PULSE_PICKER_CANCELLED = 1u,\n    PULSE_PICKER_FAILED = 2u\n};\n\nenum {\n    PULSE_PICKER_FLAG_NONE = 0u,\n    PULSE_PICKER_FLAG_MULTISELECT = 1u,\n    PULSE_PICKER_FLAG_SHOW_HIDDEN = 2u,\n    PULSE_PICKER_FLAG_NO_OVERWRITE_PROMPT = 4u,\n    PULSE_PICKER_ALL_FLAGS = 7u\n};\n\nenum {\n    PULSE_QUICK_PICK_ITEM_NONE = 0u,\n    PULSE_QUICK_PICK_ITEM_SELECTED = 1u,\n    PULSE_QUICK_PICK_ITEM_DISABLED = 2u,\n    PULSE_QUICK_PICK_ITEM_ALL_FLAGS = 3u\n};\n\ntypedef struct PulsePickerFilter {\n    uint32_t size;\n    uint32_t reserved;\n    PulseStringView label;   /* UTF-8, 1..128 bytes (\"Archives\"). */\n    PulseStringView pattern; /* UTF-8, 1..256 bytes (\"*.zip;*.7z\" or \"*.*\"). */\n} PulsePickerFilter;\n\ntypedef struct PulseOpenFilesRequest {\n    uint32_t size;\n    uint32_t flags;\n    uint32_t default_filter_index;\n    uint32_t filter_count; /* 0..32 */\n    PulseStringView title;        /* UTF-8, 0..128 bytes; empty uses host default. */\n    PulseStringView ok_label;     /* UTF-8, 0..64 bytes; empty uses host default. */\n    PulseStringView initial_path; /* UTF-8, 0..32768 bytes; optional directory. */\n    const PulsePickerFilter* filters;\n} PulseOpenFilesRequest;\n\ntypedef struct PulseSaveFileRequest {\n    uint32_t size;\n    uint32_t flags;\n    uint32_t default_filter_index;\n    uint32_t filter_count; /* 0..32 */\n    PulseStringView title;             /* UTF-8, 0..128 bytes. */\n    PulseStringView ok_label;          /* UTF-8, 0..64 bytes. */\n    PulseStringView initial_path;      /* UTF-8, 0..32768 bytes; optional directory. */\n    PulseStringView default_name;      /* UTF-8, 0..255 bytes; optional file name. */\n    PulseStringView default_extension; /* UTF-8, 0..32 bytes without leading dot (\"sha256\"). */\n    const PulsePickerFilter* filters;\n} PulseSaveFileRequest;\n\ntypedef struct PulsePickFoldersRequest {\n    uint32_t size;\n    uint32_t flags;\n    PulseStringView title;        /* UTF-8, 0..128 bytes. */\n    PulseStringView ok_label;     /* UTF-8, 0..64 bytes. */\n    PulseStringView initial_path; /* UTF-8, 0..32768 bytes; optional directory. */\n} PulsePickFoldersRequest;\n\ntypedef struct PulseQuickPickItem {\n    uint32_t size;\n    uint32_t flags; /* PULSE_QUICK_PICK_ITEM_* */\n    PulseStringView id;       /* ASCII [A-Za-z0-9._:/-], 1..128 bytes, unique per request. */\n    PulseStringView title;    /* UTF-8, 1..256 bytes. */\n    PulseStringView detail;   /* UTF-8, 0..256 bytes; optional secondary description. */\n    PulseStringView glyph;    /* UTF-8, 0..128 bytes; optional glyph or \"icon:...\" token. */\n    PulseStringView shortcut; /* UTF-8, 0..64 bytes; optional keycap hint. */\n} PulseQuickPickItem;\n\ntypedef struct PulseQuickPickRequest {\n    uint32_t size;\n    uint32_t flags;      /* Reserved, must be 0. */\n    uint32_t item_count; /* 1..512 */\n    uint32_t reserved;\n    PulseStringView title;         /* UTF-8, 0..128 bytes. */\n    PulseStringView placeholder;   /* UTF-8, 0..128 bytes; search box hint. */\n    PulseStringView initial_query; /* UTF-8, 0..128 bytes; optional prefilled filter. */\n    const PulseQuickPickItem* items;\n} PulseQuickPickRequest;\n\ntypedef struct PulsePickerResult {\n    uint32_t size;\n    uint32_t outcome; /* PULSE_PICKER_ACCEPTED / CANCELLED / FAILED */\n    PulsePickerRequestId request_id;\n    uint32_t filter_index;\n    uint32_t path_count;\n    const PulseStringView* paths; /* UTF-8 paths when outcome == ACCEPTED for file/folder pickers. */\n    PulseStringView selected_id;  /* Chosen item id when outcome == ACCEPTED for quick_pick. */\n    PulseStringView error;        /* UTF-8 diagnostic when outcome == FAILED. */\n} PulsePickerResult;\n\ntypedef void(PULSE_CALL *PulsePickerResultFn)(void* user, const PulsePickerResult* result);\n\n/* UI-thread API. Requests validate and copy all borrowed inputs synchronously,\n   return immediately, and present the modal picker on a subsequent UI turn\n   parented to the session's active modal window (an open pulse.dialogs window if\n   present, otherwise the owner window) guarded by PickerOwnerGuard. At most one\n   picker or quick_pick request may be active per session (busy returns STATE).\n   cancel(request_id) dismisses an active request as PULSE_PICKER_CANCELLED.\n   PulsePickerResultFn runs at most once on the UI thread with borrowed views,\n   unless the session stops first: stopping cancels any open picker and suppresses\n   the callback. Keep userdata alive until callback returns or session destroy. */\ntypedef struct PulsePickersV1 {\n    uint32_t size, version;\n    void* context;\n    PulseStatus(PULSE_CALL *open_files)(void* context, const PulseOpenFilesRequest* request,\n        PulsePickerResultFn callback, void* user, PulsePickerRequestId* request_id);\n    PulseStatus(PULSE_CALL *save_file)(void* context, const PulseSaveFileRequest* request,\n        PulsePickerResultFn callback, void* user, PulsePickerRequestId* request_id);\n    PulseStatus(PULSE_CALL *pick_folders)(void* context, const PulsePickFoldersRequest* request,\n        PulsePickerResultFn callback, void* user, PulsePickerRequestId* request_id);\n    PulseStatus(PULSE_CALL *quick_pick)(void* context, const PulseQuickPickRequest* request,\n        PulsePickerResultFn callback, void* user, PulsePickerRequestId* request_id);\n    PulseStatus(PULSE_CALL *cancel)(void* context, PulsePickerRequestId request_id);\n} PulsePickersV1;\n#pragma pack(pop)\n#ifdef __cplusplus\n}\n#endif\n#endif\n"
+      },
+      "thread": "Owner UI thread for all calls and callbacks; launch returns immediately and presents on a subsequent UI turn",
+      "limits": {
+        "activePickersPerSession": 1,
+        "filters": 32,
+        "quickPickItems": 512,
+        "pathUtf8Bytes": 32768
+      },
+      "presentation": "Standard Win32 file/save/folder pickers and host-drawn Fluent QuickPick popup (with Pinyin + substring filtering, built-in/custom icons, and shortcut hints), parented to the open pulse.dialogs modal if present or the owner window via PickerOwnerGuard.",
+      "lifetime": "Request inputs copied synchronously; callback runs at most once with outcome ACCEPTED, CANCELLED, or FAILED unless session stops first (which cancels open pickers and suppresses pending callbacks).",
+      "documentation": "sdk/native/include/pulse/pickers.h",
+      "stabilityTier": "experimental"
+    },
+    {
+      "name": "pulse.workbench",
+      "version": 1,
+      "header": "include/pulse/workbench.h",
+      "status": "developer-preview",
+      "operations": [
+        "show_snack",
+        "show_notice",
+        "reveal_path",
+        "show_text_diff",
+        "set_clipboard_text"
+      ],
+      "headerContract": {
+        "sha256": "e2eaccf15d43f8f170ddff3f766a96bb5e055ff21ea64b130e0473bed72ab479",
+        "text": "#ifndef PULSE_NATIVE_WORKBENCH_H\n#define PULSE_NATIVE_WORKBENCH_H\n#include \"abi.h\"\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#define PULSE_WORKBENCH_INTERFACE_NAME \"pulse.workbench\"\n#define PULSE_WORKBENCH_VERSION_1 1u\n#pragma pack(push, 8)\ntypedef uint64_t PulseNotificationId;\n\nenum {\n    PULSE_NOTICE_INFO = 0u,\n    PULSE_NOTICE_SUCCESS = 1u,\n    PULSE_NOTICE_WARNING = 2u,\n    PULSE_NOTICE_ERROR = 3u\n};\n\nenum {\n    PULSE_SNACK_FLAG_NONE = 0u,\n    PULSE_SNACK_FLAG_REPLACE = 1u,\n    PULSE_SNACK_ALL_FLAGS = 1u\n};\n\nenum {\n    PULSE_NAVIGATE_CURRENT_TAB = 0u,\n    PULSE_NAVIGATE_NEW_TAB = 1u,\n    PULSE_NAVIGATE_REVEAL_ITEM = 2u\n};\n\ntypedef struct PulseWorkbenchAction {\n    uint32_t size;\n    uint32_t reserved;\n    PulseStringView id;    /* ASCII [A-Za-z0-9._-], 1..64 bytes. */\n    PulseStringView label; /* UTF-8, 1..64 bytes. */\n} PulseWorkbenchAction;\n\ntypedef struct PulseSnackRequest {\n    uint32_t size;\n    uint32_t flags;       /* PULSE_SNACK_FLAG_* */\n    uint32_t kind;        /* PULSE_NOTICE_* */\n    uint32_t duration_ms; /* 0 = host default (5000 ms), clamped 1500..15000. */\n    PulseStringView text;   /* UTF-8, 1..256 bytes. */\n    PulseStringView detail; /* UTF-8, 0..256 bytes. */\n    const PulseWorkbenchAction* actions;\n    uint32_t action_count; /* 0..2 */\n    uint32_t reserved;\n} PulseSnackRequest;\n\ntypedef struct PulseNoticeRequest {\n    uint32_t size;\n    uint32_t kind;          /* PULSE_NOTICE_* */\n    PulseStringView title;   /* UTF-8, 1..128 bytes. */\n    PulseStringView message; /* UTF-8, 1..1024 bytes. */\n    const PulseWorkbenchAction* actions;\n    uint32_t action_count; /* 0..2 */\n    uint32_t reserved;\n} PulseNoticeRequest;\n\ntypedef void(PULSE_CALL *PulseWorkbenchActionFn)(void* user, PulseNotificationId id, PulseStringView action_id);\n\n/* UI-thread host workbench integration: capsule snacks, persistent corner action\n   cards, path navigation / item selection reveal, built-in side-by-side text diff\n   viewer, and clipboard text write. Borrowed inputs are copied synchronously.\n   Optional notification action callbacks run at most once on the UI thread when\n   the user clicks an action button while the session remains active; stopping\n   the session invalidates pending action tokens. Keep action userdata valid\n   until plugin destroy if actions are supplied. */\ntypedef struct PulseWorkbenchV1 {\n    uint32_t size, version;\n    void* context;\n    PulseStatus(PULSE_CALL *show_snack)(void* context, const PulseSnackRequest* request,\n        PulseWorkbenchActionFn on_action, void* user, PulseNotificationId* out_id);\n    PulseStatus(PULSE_CALL *show_notice)(void* context, const PulseNoticeRequest* request,\n        PulseWorkbenchActionFn on_action, void* user, PulseNotificationId* out_id);\n    PulseStatus(PULSE_CALL *reveal_path)(void* context, PulseStringView path, uint32_t mode);\n    PulseStatus(PULSE_CALL *show_text_diff)(void* context, PulseStringView left_path, PulseStringView right_path);\n    PulseStatus(PULSE_CALL *set_clipboard_text)(void* context, PulseStringView text);\n} PulseWorkbenchV1;\n#pragma pack(pop)\n#ifdef __cplusplus\n}\n#endif\n#endif\n"
+      },
+      "thread": "Owner UI thread for all calls and optional notification action callbacks",
+      "limits": {
+        "actionsPerNotification": 2,
+        "retainedActionTokens": 64,
+        "snackTextBytes": 256,
+        "noticeMessageBytes": 1024
+      },
+      "presentation": "Capsule snacks, corner notice cards with optional action buttons, current-tab/new-tab/selection path reveal, built-in side-by-side text diff viewer, and clipboard UTF-8 text write.",
+      "lifetime": "Inputs copied synchronously; optional action callback fires at most once while session remains active; stopping session invalidates pending action tokens.",
+      "documentation": "sdk/native/include/pulse/workbench.h",
+      "stabilityTier": "experimental"
     }
   ],
   "statusCodes": {
@@ -1031,7 +1200,7 @@
     "tools": [
       {
         "name": "native_sdk_describe",
-        "description": "Read SDK interface summaries, examples and build requirements. Supply interface to retrieve one complete header contract.",
+        "description": "Read SDK interface summaries, packable templates, ABI samples, and build requirements. Supply interface to retrieve one complete header contract.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1047,7 +1216,7 @@
       },
       {
         "name": "native_project_create",
-        "description": "Copy one public SDK example into a new author workspace project. Existing files are never replaced.",
+        "description": "Create a new packable C++ plugin project in the author workspace from a public SDK template with a unique package identity. Existing files are never replaced.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1059,6 +1228,16 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 32768
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "displayName": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
             }
           },
           "required": [
@@ -1070,7 +1249,7 @@
       },
       {
         "name": "native_project_build",
-        "description": "Configure and build a workspace C++ project with CMake/Ninja and public SDK headers. Returns compiler diagnostics; no Pulse private libraries.",
+        "description": "Configure and build a workspace C++ project with CMake/Ninja (Debug, RelWithDebInfo, or Release) and public SDK headers. Returns DLLs, PDB symbols, and debugger attach guidance; no Pulse private libraries.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1078,6 +1257,14 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 32768
+            },
+            "config": {
+              "type": "string",
+              "enum": [
+                "Debug",
+                "RelWithDebInfo",
+                "Release"
+              ]
             }
           },
           "required": [
@@ -1146,7 +1333,7 @@
       },
       {
         "name": "native_host_diagnose",
-        "description": "Compare this Pulse host native SDK catalog with the author SDK; return version mismatch diagnostics without loading a plugin.",
+        "description": "Compare this Pulse host native SDK catalog, sdkPreview, interface versions, and x64 build toolchain with the author SDK without loading a plugin.",
         "inputSchema": {
           "type": "object",
           "properties": {},
@@ -1156,7 +1343,7 @@
       },
       {
         "name": "native_host_run",
-        "description": "Launch the configured host with an isolated author profile and test store. Returns the process ID and log path; launch acceptance does not certify plugin loading or UI behavior.",
+        "description": "Launch the configured host with an isolated author profile and test store. Returns the process ID, profile path, and log path; launch acceptance does not certify plugin loading or UI behavior.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1167,6 +1354,114 @@
           "required": [
             "allowNative"
           ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "native_host_stop",
+        "description": "Cooperatively close an isolated test host previously launched in this author workspace so locked plugin DLLs can be rebuilt or reinstalled safely.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pid": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "profile": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32768
+            }
+          },
+          "required": [
+            "pid"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "native_plugin_test",
+        "description": "Run offline manifest/PE64 ABI static checks and headless lifecycle + command smoke tests (via pulse_plugin_harness.exe when available) without launching the GUI host.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32768
+            },
+            "library": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32768
+            },
+            "invokeCommands": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32768
+              },
+              "maxItems": 32
+            },
+            "smokeCommands": {
+              "type": "boolean"
+            },
+            "selection": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32768
+              },
+              "maxItems": 63
+            },
+            "directory": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32768
+            },
+            "omitExperimentalUi": {
+              "type": "boolean"
+            },
+            "strictResources": {
+              "type": "boolean"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 60000
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "native_host_logs",
+        "description": "Read structured startup status, persistent extension-audit records, and crash attribution logs from an isolated workspace profile and test store, with external paths and host environment redacted.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "profile": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32768
+            },
+            "packageId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "maxEvents": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          },
+          "required": [],
           "additionalProperties": false
         }
       }
@@ -1202,5 +1497,80 @@
     "description": "Capabilities disclosed at installation; declarations do not gate individual native calls. Instance lifecycle and handle ownership remain enforced."
   },
   "resourceDeclarationPolicy": "Installation disclosure only; native code runs in process without per-call permission gates.",
-  "sdkPreview": 3
+  "sdkPreview": 3,
+  "stability": {
+    "sdkPreview": 3,
+    "abiMajor": 1,
+    "coreEntryAbi": {
+      "stabilityTier": "frozen",
+      "abiMajor": 1,
+      "abiVersionMacro": "PULSE_ABI_VERSION_1",
+      "sdkPreviewMacro": "PULSE_SDK_PREVIEW",
+      "entrypoint": "PulsePluginEntryV1",
+      "previewExport": "PulsePluginSdkPreview",
+      "symbols": [
+        "PulseHostV1",
+        "PulsePluginV1",
+        "PulsePluginEntryV1",
+        "PulsePluginEntryV1Fn",
+        "PulsePluginSdkPreview",
+        "PulseStringView",
+        "PulseStatus"
+      ]
+    },
+    "prefixTableRule": "Append-only struct-prefix evolution (V1 <= V2 <= V3 <= V4): existing fields preserve identical index, name, type, size, and byte offset; new fields append strictly at the tail with monotonically increasing struct size and version.",
+    "experimentalSurfaceRule": "Opt-in UI surface not yet covered by binary freeze; plugins must handle query_interface returning PULSE_ERROR_UNAVAILABLE or PULSE_ERROR_ABI (C++ std::nullopt fallback) gracefully.",
+    "tiers": {
+      "frozen": {
+        "count": 12,
+        "interfaces": [
+          "pulse.files",
+          "pulse.resources",
+          "pulse.dispatch",
+          "pulse.directories",
+          "pulse.context",
+          "pulse.fileops",
+          "pulse.commands",
+          "pulse.preview",
+          "pulse.tasks",
+          "pulse.staging",
+          "pulse.settings.pages",
+          "pulse.dialogs"
+        ],
+        "binaryFreezeCandidate": true
+      },
+      "experimental": {
+        "count": 8,
+        "interfaces": [
+          "pulse.ui.model",
+          "pulse.ui.events",
+          "pulse.ui.data",
+          "pulse.ui.mount",
+          "pulse.icons",
+          "pulse.diagnostics",
+          "pulse.pickers",
+          "pulse.workbench"
+        ],
+        "binaryFreezeCandidate": false
+      }
+    }
+  },
+  "supportPolicy": {
+    "abiMajor": 1,
+    "supportedApiVersions": [
+      1
+    ],
+    "deprecationWindow": {
+      "minMinorReleases": 2,
+      "minDays": 180
+    },
+    "emergencyRevocation": {
+      "channels": [
+        "revokedPackages",
+        "revokedRevisions"
+      ],
+      "scope": "Immediate revocation reserved exclusively for active security vulnerabilities, memory corruption, or host-crashing defects."
+    },
+    "policyDocument": "docs/extensions-sdk-lifecycle-and-support.md"
+  }
 }

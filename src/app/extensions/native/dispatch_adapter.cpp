@@ -1,8 +1,10 @@
 #include "dispatch_adapter.h"
+#include "crash_guard.h"
 #include <atomic>
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <string>
 #include <utility>
 #include <windows.h>
 
@@ -26,6 +28,7 @@ struct DispatchAdapter::State : std::enable_shared_from_this<State> {
     };
     const DWORD thread = GetCurrentThreadId();
     std::function<bool()> alive;
+    std::string package_id;
     std::mutex mutex;
     HWND window = nullptr;
     bool closed = false, notified = false;
@@ -86,6 +89,7 @@ struct DispatchAdapter::State : std::enable_shared_from_this<State> {
             active.store(true);
         }
         try {
+            const crash_guard::CallScope call_scope(package_id.c_str());
             work.callback(work.user);
         } catch (...) {
         }
@@ -158,8 +162,10 @@ struct DispatchAdapter::State : std::enable_shared_from_this<State> {
         }
     }
 };
-DispatchAdapter::DispatchAdapter(std::function<bool()> alive) : state_(std::make_shared<State>()) {
+DispatchAdapter::DispatchAdapter(std::function<bool()> alive, std::string package_id)
+    : state_(std::make_shared<State>()) {
     state_->alive = std::move(alive);
+    state_->package_id = std::move(package_id);
     state_->Create();
 }
 DispatchAdapter::~DispatchAdapter() { Close(); }

@@ -143,6 +143,14 @@ PackageStoreResult LoadPackageStore(const std::wstring& directory) {
                 return Failure("Cannot inspect package signature.");
             }
             if (!VerifyPackageSignature(bytes, signature, signature_policy, error)) return Failure(entry.id + ": " + error);
+            std::string publisher_id;
+            if (!signature.empty()) {
+                json::Value signed_value;
+                if (!json::Parse(signature, signed_value, nullptr, {16384, 4}) ||
+                    !publish_trust_detail::ValidPublisherPin(signed_value.get_string("publisher")))
+                    return Failure(entry.id + ": invalid signature publisher.");
+                publisher_id = signed_value.get_string("publisher");
+            }
             auto parsed = ParseManifest(bytes);
             if (!parsed) return Failure(entry.id + ": " + parsed.error);
             if (parsed.manifest->id != entry.id || parsed.manifest->name != entry.name)
@@ -162,6 +170,7 @@ PackageStoreResult LoadPackageStore(const std::wstring& directory) {
             result.revisions.push_back(entry.revision);
             result.manifest_bytes.push_back(bytes);
             result.signatures.push_back(signature);
+            result.publisher_ids.push_back(std::move(publisher_id));
             result.native_paths.push_back(std::move(native_path));
         }
         return result;

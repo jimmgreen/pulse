@@ -13,7 +13,7 @@ std::string_view UiNodeTypeName(UiNodeType type) {
         "badge",         "tag",         "infoBar",        "splitButton", "menuButton",    "sidebarItem",
         "breadcrumb",    "emptyState",  "virtualList",    "tree",        "dataTable",     "trayCard",
         "commandSearch", "splitPane",   "sidebarSection", "driveItem",   "paneHeader",    "fileRow",
-        "stagingTray",   "stagingItem", "statusBar",      "tooltip",     "titleBarButton"};
+        "stagingTray",   "stagingItem", "statusBar",      "tooltip",     "titleBarButton", "canvas"};
     static_assert(std::size(names) == static_cast<size_t>(UiNodeType::Count));
     return static_cast<size_t>(type) < std::size(names) ? names[static_cast<size_t>(type)]
                                                         : std::string_view{};
@@ -501,6 +501,9 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
         if (t == UiNodeType::TitleBarButton) {
             allow({"role", "command", "glyph"});
         }
+        if (t == UiNodeType::Canvas) {
+            allow({"options", "detail", "state", "color", "bordered", "command"});
+        }
         if (t == UiNodeType::TextInput || t == UiNodeType::CommandSearch) {
             allow({"validation"});
         }
@@ -683,7 +686,7 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
                 return fail(path + ".options", "expected 1..64 strings");
             }
             for (const auto& item : options->items()) {
-                if (!item.is_string() || item.as_string().size() > 128 ||
+                if (!item.is_string() || item.as_string().size() > (t == UiNodeType::Canvas ? 1024u : 128u) ||
                     item.as_string().find('\0') != std::string::npos) {
                     return fail(path + ".options", "invalid option");
                 }
@@ -693,8 +696,8 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
         if (choice && n.options.empty()) {
             return fail(path + ".options", "required");
         }
-        if (t == UiNodeType::Group && !v.find("bordered")) {
-            n.bordered = false;  // plain heading unless the group asks to be a card
+        if ((t == UiNodeType::Group || t == UiNodeType::Canvas) && !v.find("bordered")) {
+            n.bordered = false;  // plain heading/canvas unless explicitly bordered
         }
         if (t == UiNodeType::Slider && !n.options.empty() && n.options.size() != static_cast<size_t>(n.stops)) {
             return fail(path + ".options", "one caption per stop");

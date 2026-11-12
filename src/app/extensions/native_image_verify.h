@@ -12,6 +12,7 @@ inline constexpr size_t kMaxNativeImageBytes = 64 * 1024 * 1024;
 // Pure bounded structural validation, shared by memory-only package verification
 // and the disk verifier. Does not load or execute image code.
 bool ValidateNativeImageBytes(std::string_view bytes);
+bool ValidateNativeExecutableBytes(std::string_view bytes);
 
 // Never executes image code. Success transfers a read-only handle opened with
 // FILE_SHARE_READ only; keep it open throughout module loading and execution.

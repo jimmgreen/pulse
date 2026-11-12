@@ -12,17 +12,20 @@
 
 使用 `pack MANIFEST --output PACKAGE.pulse-ext` 生成可分发的 v2 原生包；其中包含 manifest、绑定哈希的 metadata、入口 DLL 及可选 `native.files` 声明的私有 DLL 和资源。`verify PACKAGE.pulse-ext` 校验而不执行，`install PACKAGE.pulse-ext --allow-native` 从同一份已验证快照写入内容寻址存储。直接 manifest 安装仍可用于开发；旧声明式执行字段会明确报错。
 
-在 x64 Visual Studio 开发终端，从解压 SDK 根目录运行：
+从仓库根目录或解压 SDK 根目录可直接创建独立工程、自动发现 MSVC x64 工具链完成构建、离线打包并执行零 GUI 契约与生命周期冒烟验证（无需预先手动激活 `vcvars64.bat` 或启动 GUI `pulse.exe`）：
 
 ```powershell
-cmake -S examples/native/rename-panel -B build-rename -G Ninja -DCMAKE_BUILD_TYPE=Release -DPULSE_SDK_INCLUDE="$PWD/sdk/native/include"
-cmake --build build-rename
+python tools/extensions/pulse_ext.py --json new C:/PulseAuthor/my-rename --id com.example.rename --name "Example Rename" --template rename-panel
+python tools/extensions/pulse_ext.py --json build C:/PulseAuthor/my-rename --config Release
+python tools/extensions/pulse_ext.py --json test C:/PulseAuthor/my-rename --smoke-commands --strict-resources
 python tools/extensions/test_native_sdk.py --sdk-root "$PWD" --work "$PWD/verification"
 ```
 
+面向 AI 编码代理（Antigravity、Claude Code、Cursor、Codex）的五步闭环剧本、ABI 黄金法则、`resources` 映射表与故障排查见 `sdk/native/AGENTS.md`，配套代理技能见 `sdk/native/skills/pulse-plugin-author/SKILL.md`，stdio MCP 配置模板见 `sdk/native/mcp.example.json`。对于解析不受信任输入或需要崩溃/内存隔离的场景，推荐采用 `sdk/native/samples/sandboxed-worker` 演示的 Stage D 进程外模式：主进程内仅保留轻薄的 `pulse.commands` + `pulse.tasks` 桥接 DLL，通过 `native.files` 携带零 GUI 依赖的辅助 `worker.exe`，并在受限 Win32 Job Object（`ActiveProcessLimit = 1`、进程内存上限、`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`、`PROCESS_CREATION_CHILD_PROCESS_RESTRICTED`、显式单管道句柄继承）中以帧式命名管道完成计算与合作取消。
+
 示例仅链接自身代码和系统 CRT，不链接 Pulse 内部库。`PulsePluginEntryV1` 是插件入口，`PulsePluginSdkPreview` 是必需的预览号导出，按 `size/version` 协商 `PulseHostV1` 和 `PulsePluginV1`。公开结构仅含固定宽度字段、借用字符串和函数指针，不传 STL 对象或跨 CRT 释放内存。
 
-**SDK 预览号**：当前为 `3`，机器发现字段为 `sdkPreview`。1.0 之前接口可以在预览之间直接变化，`abi.h` 里的 `PULSE_SDK_PREVIEW` 标明当前预览。每个插件在文件作用域写一次 `PULSE_PLUGIN_SDK_PREVIEW()`（导出 `PulsePluginSdkPreview`）；没写、或用别的预览编译的插件，宿主在调用入口之前就拒绝加载并返回 `PULSE_ERROR_SDK_PREVIEW`，调试输出会写明双方的预览号。换 SDK 后重新编译即可。
+**SDK 预览号与信任边界**：当前 `PULSE_SDK_PREVIEW` 为 `3`，机器发现字段为 `sdkPreview`。1.0 之前接口可以在预览之间直接变化，`abi.h` 里的 `PULSE_SDK_PREVIEW` 标明当前预览。每个插件在文件作用域写一次 `PULSE_PLUGIN_SDK_PREVIEW()`（导出 `PulsePluginSdkPreview`）；没写、或用别的预览编译的插件，宿主在调用入口之前就拒绝加载并返回 `PULSE_ERROR_SDK_PREVIEW`，调试输出会写明双方的预览号。换 SDK 后重新编译即可。注意：Windows `LoadLibraryExW` 在宿主检查 `PulsePluginSdkPreview` 导出前就已映射 DLL 映像并可能执行 `DllMain` 与 TLS 回调，因此预览号检查只是 **ABI 兼容性检查**，绝非安全沙箱；仅对已审阅源码或受信任签名的插件授予 `--allow-native`。
 
 ```cpp
 PULSE_PLUGIN_SDK_PREVIEW()
@@ -49,7 +52,7 @@ extern "C" __declspec(dllexport) PulseStatus PULSE_CALL PulsePluginEntryV1(const
 
 ## 已提供的接口
 
-`pulse.ui.model` V1 是唯一 UI 接口，提供 create/update/subscribe_command/set_states/get_state/unsubscribe/close，公开 27 种通用控件。旧 pulse.ui 查询与宿主外壳模型已移除。选择列表使用 Select，大数据列表使用 VirtualList。公开编号保留空洞，不能用 COUNT 遍历有效控件；机器清单的 nodeTypes 是有效集合。
+`pulse.ui.model` V1 是唯一 UI 接口，提供 create/update/subscribe_command/set_states/get_state/unsubscribe/close，公开 28 种通用控件（含 `PULSE_UI_MODEL_CANVAS` 2D 矢量绘图画布）。旧 pulse.ui 查询与宿主外壳模型已移除。选择列表使用 Select，大数据列表使用 VirtualList。公开编号保留空洞，不能用 COUNT 遍历有效控件；机器清单的 nodeTypes 是有效集合。控件 `glyph` 字段支持 `"icon:<name>"` 或 `"icon:#<id>"` 直接渲染内置或插件注册的矢量图标。
 
 结构提交同步复制，通过临时内存 DOM 验证，不经 JSON 文本传输。最多128节点、深度8、32个状态键、每值1024 UTF-8字节。更新保留已有状态和仍声明的命令订阅。data_source、context.* 和 action.data_operation 仍返回 UNAVAILABLE。输入事件、挂载与分页数据分别使用 events、mount、data。预览2插件须用预览3重新编译。
 
@@ -71,17 +74,17 @@ extern "C" __declspec(dllexport) PulseStatus PULSE_CALL PulsePluginEntryV1(const
 
 ## 原生命令与选择
 
-通过 [commands.h](include/pulse/commands.h) 查询 `pulse.commands` V1，在 `PulsePluginEntryV1` 中注册，每 attachment 最多32项；入口应及时返回，菜单发现不要求先打开插件面板。图标支持 default、archive、extract。条件支持选择数量范围、文件/目录类型以及小写带点扩展名的包含或排除列表，每个选中条目均须符合条件。扩展名最多32项，每项32字节。
+`manifest.json` 支持可选 `contributes.icons`（最多 32 个自定义多图层 SVG Path 矢量图标）与 `contributes.commands`（`id`、`title`、可选 `icon`/`groupIcon`/`primary`/`separatorBefore`/`separatorAfter`/`hidden`/`checked`/`shortcut` 及 `"background"` 空白目录右键类型，最多 32 项）声明静态元数据，使宿主在零加载状态下于命令面板和右键菜单展示入口，并在首次触发时激活 DLL。动态矢量图标可通过 [icons.h](include/pulse/icons.h) 查询 `pulse.icons` V1 注册/更新/注销；动态命令则通过 [commands.h](include/pulse/commands.h) 查询 `pulse.commands` V1/V2，在 `PulsePluginEntryV1` 中注册，支持 `update_command` 与 `set_command_flags`（如 `PULSE_COMMAND_HIDDEN` 动态显隐、`PULSE_COMMAND_CHECKED` 勾选态）且保持命令 ID 与工具栏固定标识不变。图标支持全部 68 个内置 Fluent 矢量图标（`PULSE_ICON_*` `0..67` 或名称）及插件自定义矢量图标。条件支持选择数量范围、文件/目录/空白目录背景（`PULSE_COMMAND_BACKGROUND`）类型以及小写带点扩展名的包含或排除列表。扩展名最多 32 项，每项 32 字节。
 
 命令出现在宿主菜单中，可按稳定标识 `native:package:command` 保存到现有 `toolbar_tools` 工具栏配置。菜单 token 仅当前实例有效，停用或注销后失效。快捷键仅在所属宿主主界面派发，内置快捷键优先，文本编辑器不派发插件快捷键；同 owner 的重复命令标识或快捷键拒绝注册。宿主在调用时重新检查条件，并把最新已加载选择传给命令回调；停用等待在栈回调结束后卸载。
 
 `PulseContextV1.get_selection` 同步回调提供当前目录、条目的绝对路径、名称、目录标志和 `selection_revision`，只读取已加载快照，不访问磁盘。普通目录未选中时成功返回零条，仍含目录。最多4096条、合计4 MiB UTF-8；超限返回 UNAVAILABLE，不截断。加载期间返回 STATE，不支持的虚拟/内容视图返回 STATE 或 UNAVAILABLE。回调字符串和数组仅在回调期间借用，后台任务须先复制；不允许递归读取。停止会抑制后续回调，当前回调可完成。
 
-[sdk/native/samples/archive](samples/archive/plugin.cpp) 演示“解压到此处”“解压到…”和“添加到压缩包…”命令的注册与选择传递。两个提取命令已接入公开同卷暂存提交（P1.5已验收），压缩命令已接入真实7z/ZIP创建与宿主发布； `verify-archive` 已在源码中接入后台真实解压到私有临时目录并清理，P1.4已通过真实宿主验收。归档预览读取器见 `archive_reader.cpp`；P1.5提取提交已通过真实宿主验收，压缩创建已通过P1.10本地路径范围验收。
+[sdk/native/samples/archive](samples/archive/plugin.cpp) 是 SDK 多文件归档参考样例，演示“解压到此处”“解压到…”和“添加到压缩包…”命令注册、选择传递、预览读取器（`archive_reader.cpp`）、后台任务（P1.4）、同卷暂存提交（P1.5）、设置页（P1.6）以及本地路径 7z/ZIP 写入参考（P1.10）。主仓库另提供独立官方 `extensions/7zip/` 扩展候选，通过 [dialogs.h](include/pulse/dialogs.h)（`pulse.dialogs` V1 宿主自绘 Fluent 模态对话框，支持 `password` 掩码表单与 1–3 个底部按钮）对接官方 7-Zip 26.00 `7z.dll`，支持加密归档、分卷、tar 变体与校验和计算。
 
 ## 预览提供者（P1.3 已验收）
 
-通过 [preview.h](include/pulse/preview.h) 查询 `pulse.preview` V1，在入口的 owner UI 线程调用 `register_provider` / `unregister_provider`。每实例最多16个提供者，扩展名为2–32字节的小写带点 ASCII，如 `.7z`、`.rar`。这是新增接口，当前 `PULSE_SDK_PREVIEW` 仍为2。
+通过 [preview.h](include/pulse/preview.h) 查询 `pulse.preview` V1，在入口的 owner UI 线程调用 `register_provider` / `unregister_provider`。每实例最多 16 个提供者，扩展名为 2–32 字节的小写带点 ASCII，如 `.7z`、`.rar`。当前 `PULSE_SDK_PREVIEW` 为 `3`。
 
 宿主在后台线程执行提供者，每实例最多同时运行2次；共享 userdata 必须同步，建议每次回调创建独立读取器。此回调不在 UI 线程，禁止直接调用 UI 接口。循环读取时检查 `request->cancelled(request->context)` 并及时返回。宿主在选择变化或停用后丢弃旧结果，等待全部提供者返回后才卸载 DLL；插件若不合作返回，卸载也需继续等待。
 
@@ -135,7 +138,7 @@ UI 已统一为 pulse.ui.model。原生命令贡献与多文件包已提供；�
 
 ## Manifest 当前字段
 
-只接受 apiVersion、id、name、resources 和 native；commands、toolbar、palette、workflows、panel、runtime 均已移除并明确报错。UI 由 DLL 通过公开 UI 接口创建。模板可暂不含 native，打包前由 native-manifest 注入 DLL 哈希和入口信息。原生包正常打开与启停由宿主管理，插件自定义命令通过 `pulse.commands` 在入口注册。可选 `native.files` 声明相邻私有 DLL 和资源的文件名与哈希，使用 `native-manifest --file PATH` 生成；整包升级和回退见 [打包文档](../../docs/native-packages.md)。
+只接受 `apiVersion`、`id`、`name`、`resources`、`contributes` 和 `native`；旧声明式 `commands`、`toolbar`、`palette`、`workflows`、`panel`、`runtime` 均已移除并明确报错。可选 `contributes.commands` 提供零加载静态命令发现，动态命令通过 `pulse.commands` 在入口注册，模态对话框通过 `pulse.dialogs`（[dialogs.h](include/pulse/dialogs.h)）展示，主页面与设置页由 DLL 通过公开 UI 接口创建。模板可暂不含 `native`，打包前由 `native-manifest` 注入 DLL 哈希和入口信息。可选 `native.files` 声明相邻私有 DLL 和资源的文件名与哈希，使用 `native-manifest --file PATH` 生成；整包升级、发布者连续性校验、`package_signing.py rotate` 密钥轮换、回退以及 `pulse_ext.py gc` 孤立版本清理见 [打包文档](../../docs/native-packages.md)。
 
 `pulse.preview.unregister_provider` 分两阶段完成：调用即撤下提供者并取消工作，之后不再开始新请求；仍有回调运行时返回 `PULSE_ERROR_STATE`。此时必须保留 userdata，在 UI 线程重试至 `PULSE_OK` 后释放，或一直保留到 `destroy`。返回 STATE 不表示回调已停止，不得提前释放读取器或回调共享状态。
 
@@ -215,9 +218,16 @@ auto status = model.create(model.context, View("Example"), &tree.Build(), &panel
 
 P1.8 UI API 收敛已完成（SDK 预览3）；P1.9 旧压缩下载包已移除；P1.10真实压缩创建已验收，格式和级别为实际任务偏好。本阶段没有引入 JavaScript 运行时。
 
-## ABI 1.0 冻结与弃用规则（预览期规则草案）
+## ABI 1.0 冻结分层与弃用规则
 
-当前仍为 SDK 预览3；ABI version 1 是入口协议版本，不表示 SDK 1.0 已发布或 ABI 已冻结。`abi/windows-x64-msvc-preview3.json` 是当前预览快照，预览之间仍可变更，宿主继续拒绝不同预览号的插件。正式1.0冻结必须另行发布明确版本、支持平台及经审查的基线，不能通过重新生成本文件宣告完成。
+当前仍为 SDK 预览3（`PULSE_SDK_PREVIEW = 3`）；ABI version 1 是入口协议版本。公开面在 `api-catalog.json` 中显式划分为两档稳定性层级（完整契约、兼容性矩阵、至少 2 个次版本且 180 天的弃用窗口与迁移剧本见 [生命周期、支持窗口与迁移策略][lifecycle-policy]）：
+
+- **`frozen`（核心入口 ABI + 12 个宿主服务接口）**：核心入口（`PulseHostV1`、`PulsePluginV1`、`PulsePluginEntryV1`、`PulseStringView`、`PulseStatus`）以及 `pulse.files`、`pulse.resources`、`pulse.dispatch`、`pulse.directories`、`pulse.context`、`pulse.fileops`（V1–V4 前缀演进）、`pulse.commands`（V1–V2 前缀演进）、`pulse.preview`、`pulse.tasks`、`pulse.staging`、`pulse.settings.pages`、`pulse.dialogs`（V1–V2 前缀演进，V2 新增对话框内命令订阅 `subscribe_command`、`update_model` 与 `get_state`）纳入 1.x 二进制冻结基线，仅允许按结构体前缀追加字段或新增接口名演进。
+- **`experimental`（8 个声明/保留式 UI、诊断与工作台接口）**：`pulse.ui.model`、`pulse.ui.events`、`pulse.ui.data`、`pulse.ui.mount`、`pulse.icons`、`pulse.diagnostics`（`diagnostics.h` 会话级结构化节点/字段错误诊断）、`pulse.pickers`（`pickers.h` 通用打开/保存/选目录及带拼音匹配的 QuickPick）、`pulse.workbench`（`workbench.h` 胶囊提示、通知卡片、路径定位、内置文本对比与剪贴板写入）仍处于交互与布局收敛阶段，尚未纳入二进制冻结；查询此类接口时必须处理 `PULSE_ERROR_UNAVAILABLE` / `PULSE_ERROR_ABI`（`std::nullopt`）并优雅回退到 `frozen` 命令/任务流程。
+
+`abi/windows-x64-msvc-preview3.json` 是当前预览快照，宿主继续拒绝不同预览号的插件。正式1.0冻结（`PULSE_SDK_PREVIEW = 0`）必须另行发布明确版本、支持平台及经审查的基线，不能通过重新生成本文件宣告完成。
+
+[lifecycle-policy]: ../../docs/extensions-sdk-lifecycle-and-support.md
 
 未来1.0在明确支持的 Windows x64/MSVC ABI 范围内保持已发布接口名、版本、错误码和枚举数值，以及类型宽度、对齐、字段顺序/偏移、函数签名、调用约定和所有权/线程/取消语义。既有字段不可删除、重排或改变类型/偏移；仅当接口实现明确支持按调用方 size 读取和写入、忽略未知尾部且验证旧宿主降级时，才允许在尾部追加字段。当前头中存在要求准确 sizeof 的接口，不能仅因有 size 字段就假定支持协商；未验证协商的扩展使用新接口和新结构。破坏性变更必须使用新的接口名，不能仅提高同名接口查询版本来替换旧契约；旧接口继续提供。调用方遵守所查询接口的 size/version 契约，缺少新接口时明确降级或返回 unavailable。未知枚举值必须按各接口契约处理，不能当成功。
 

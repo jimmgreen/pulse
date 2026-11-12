@@ -16,7 +16,7 @@ constexpr UINT_PTR kDevelopmentTimer = 0x455844;
 std::set<HWND> monitoring_owners;
 }
 bool StartPackageMonitoring(HWND window) {
-    if (!PackageStoreMode() && !DevelopmentMode()) return true;
+    if (!DevelopmentMode()) return true;
     if (monitoring_owners.contains(window)) return true;
     if (!SetTimer(window, kDevelopmentTimer, 100, nullptr)) return false;
     if (!StartDevelopmentReload()) { KillTimer(window, kDevelopmentTimer); return false; }

@@ -42,6 +42,9 @@ def main():
     payload['bin/Pulse.NativePreview.exe'] = pe64(args.host)
     payload['bin/pulse_shell.exe'] = pe64(args.host.parent / 'pulse_shell.exe')
     payload['bin/lumatext.dll'] = pe64(args.host.parent / 'lumatext.dll')
+    harness_candidate = args.host.parent / 'pulse_plugin_harness.exe'
+    if harness_candidate.is_file():
+        payload['bin/pulse_plugin_harness.exe'] = pe64(harness_candidate)
     notices = args.host.parent / 'licenses/LumaText'
     for path in notices.iterdir():
         if path.is_symlink() or not path.is_file():
@@ -53,6 +56,7 @@ def main():
         payload[f'tools/extensions/{name}'] = (root / 'tools/extensions' / name).read_bytes()
     report = dict(formatVersion=1, delivery='trusted-native-developer-preview',
                   productionInstaller=False, experimentalScriptHostIncluded=False,
+                  compatibility=manifest.get('compatibility'),
                   sourceSdkSha256=sha(args.source_sdk.read_bytes()),
                   files={name: sha(data) for name, data in payload.items()})
     args.output.parent.mkdir(parents=True, exist_ok=True)

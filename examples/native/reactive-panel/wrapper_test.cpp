@@ -1,8 +1,11 @@
 #include <pulse/client.hpp>
-#include <cstdio>
+#include <array>
 #include <atomic>
-#include <thread>
+#include <cstdio>
+#include <map>
 #include <string_view>
+#include <thread>
+#include <vector>
 namespace {
 struct CommandHost {
     PulseCommandDescriptor descriptor{};
@@ -20,30 +23,71 @@ struct CommandHost {
     void Invoke() { PulseContextSelectionSnapshot snapshot{}; descriptor.invoke(descriptor.user, 42, &snapshot); }
 };
 struct TaskHost {
+    static constexpr size_t kMaxRetained = 64;
+    struct Record {
+        PulseTaskDescriptor descriptor{};
+        PulseTaskState state = PULSE_TASK_RUNNING;
+    };
     PulseTaskDescriptor descriptor{};
     PulseTaskState state = PULSE_TASK_RUNNING;
     PulseStatus create_result = PULSE_OK, get_result = PULSE_OK, release_result = PULSE_OK;
     bool synchronous = false;
+    bool multi_id = false;
+    PulseTaskId next_id = 100;
+    std::map<PulseTaskId, Record> records;
     int releases = 0, cancels = 0;
     static PulseStatus PULSE_CALL Create(void* p, const PulseTaskDescriptor* d, PulseTaskId* id) {
         auto& h = *static_cast<TaskHost*>(p);
         if (h.create_result != PULSE_OK) return h.create_result;
+        if (h.multi_id) {
+            if (h.records.size() >= kMaxRetained) return PULSE_ERROR_UNAVAILABLE;
+            const PulseTaskId assigned = ++h.next_id;
+            *id = assigned;
+            auto& entry = h.records[assigned];
+            entry.descriptor = *d;
+            entry.state = PULSE_TASK_RUNNING;
+            if (h.synchronous) {
+                PulseTaskContext context{}; context.id = assigned;
+                entry.state = d->work(d->user, &context);
+            }
+            return PULSE_OK;
+        }
         h.descriptor = *d; *id = 9;
         if (h.synchronous) { PulseTaskContext context{}; context.id = *id; h.state = d->work(d->user, &context); }
         return PULSE_OK;
     }
     static PulseStatus PULSE_CALL Cancel(void* p, PulseTaskId id) {
         auto& h = *static_cast<TaskHost*>(p); ++h.cancels;
+        if (h.multi_id) {
+            const auto it = h.records.find(id);
+            if (it == h.records.end()) return PULSE_ERROR_STATE;
+            if (it->second.descriptor.on_cancel) it->second.descriptor.on_cancel(it->second.descriptor.user, id);
+            return PULSE_OK;
+        }
         h.descriptor.on_cancel(h.descriptor.user, id); return PULSE_OK;
     }
     static PulseStatus PULSE_CALL Get(void* p, PulseTaskId id, PulseTaskSnapshotFn fn, void* user) {
         auto& h = *static_cast<TaskHost*>(p);
         if (h.get_result != PULSE_OK) return h.get_result;
+        if (h.multi_id) {
+            const auto it = h.records.find(id);
+            if (it == h.records.end()) return PULSE_ERROR_STATE;
+            PulseTaskSnapshot snapshot{}; snapshot.size = sizeof(snapshot); snapshot.id = id; snapshot.state = it->second.state;
+            fn(user, &snapshot); return PULSE_OK;
+        }
         PulseTaskSnapshot snapshot{}; snapshot.size = sizeof(snapshot); snapshot.id = id; snapshot.state = h.state;
         fn(user, &snapshot); return PULSE_OK;
     }
-    static PulseStatus PULSE_CALL Release(void* p, PulseTaskId) {
-        auto& h = *static_cast<TaskHost*>(p); ++h.releases; return h.release_result;
+    static PulseStatus PULSE_CALL Release(void* p, PulseTaskId id) {
+        auto& h = *static_cast<TaskHost*>(p);
+        if (h.multi_id) {
+            const auto it = h.records.find(id);
+            if (it == h.records.end()) return PULSE_ERROR_STATE;
+            ++h.releases;
+            if (h.release_result == PULSE_OK) h.records.erase(it);
+            return h.release_result;
+        }
+        ++h.releases; return h.release_result;
     }
     PulseTasksV1 Api() { return {sizeof(PulseTasksV1), 1, this, Create, Cancel, Get, Release}; }
 };
@@ -96,6 +140,35 @@ template<class Check> void TestOwnership(Check check) {
     tasks.create_result = PULSE_OK; tasks.synchronous = true;
     group.Start("throw", "test", [](const PulseTaskContext&) -> PulseTaskState { throw 1; }, {}, &id);
     check(tasks.state == PULSE_TASK_FAILED && group.Collect() == 1, "work exception becomes failed terminal task");
+
+    tasks.multi_id = true;
+    tasks.synchronous = true;
+    std::vector<std::weak_ptr<std::array<uint8_t, 512>>> burst_weaks;
+    bool burst_started = true;
+    for (size_t i = 0; i < 24; ++i) {
+        auto payload = std::make_shared<std::array<uint8_t, 512>>();
+        (*payload)[0] = static_cast<uint8_t>(i);
+        burst_weaks.push_back(payload);
+        PulseTaskId burst_id = 0;
+        if (group.Start("burst", "test", [payload](const PulseTaskContext&) {
+                return (*payload)[0] < 24 ? PULSE_TASK_COMPLETED : PULSE_TASK_FAILED;
+            }, {}, &burst_id) != PULSE_OK || burst_id == 0) {
+            burst_started = false;
+        }
+    }
+    bool all_retained_before_collect = burst_weaks.size() == 24;
+    for (const auto& item : burst_weaks) {
+        if (item.expired()) all_retained_before_collect = false;
+    }
+    check(burst_started && group.Pending() == 24 && tasks.records.size() == 24 && all_retained_before_collect,
+          "more than 20 fast completed tasks stay retained without premature eviction");
+    const size_t collected = group.Collect();
+    bool all_freed_after_collect = true;
+    for (const auto& item : burst_weaks) {
+        if (!item.expired()) all_freed_after_collect = false;
+    }
+    check(collected == 24 && group.Pending() == 0 && tasks.records.empty() && all_freed_after_collect,
+          "delayed Collect after >20 fast tasks releases every slot and frees all captures");
 }
 bool Equals(PulseStringView value, std::string_view expected) {
     return std::string_view(value.data ? value.data : "", value.length) == expected;

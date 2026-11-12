@@ -229,6 +229,55 @@ class SignatureTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(policy_path.read_bytes(), b'{"formatVersion":1}')
 
+    def test_key_rotation_proof_and_cli_roundtrip(self):
+        cng = signing.Cng()
+        try:
+            cng.check(cng.dll.BCryptGenerateKeyPair(cng.algorithm, ctypes.byref(cng.key), 2048, 0))
+            cng.check(cng.dll.BCryptFinalizeKeyPair(cng.key, 0))
+            new_private, new_public = cng.export(True), cng.export()
+        finally:
+            cng.close()
+        new_pin = hashlib.sha256(new_public).hexdigest()
+        proof = signing.rotate('signed', self.private, self.public, new_public)
+        verified = signing.verify_rotation('signed', self.public.hex(), new_public.hex(), proof)
+        self.assertTrue(verified['valid'])
+        self.assertEqual(verified['oldPublisher'], self.pin)
+        self.assertEqual(verified['newPublisher'], new_pin)
+
+        with self.assertRaisesRegex(ValueError, 'rotation_identity_mismatch'):
+            signing.verify_rotation('other.pkg', self.public.hex(), new_public.hex(), proof)
+        with self.assertRaises((ValueError, RuntimeError)):
+            signing.verify_rotation('signed', self.public.hex(), new_public.hex(), dict(proof, signature='00' * 256))
+        with self.assertRaisesRegex(ValueError, 'distinct new public key'):
+            signing.rotate('signed', self.private, self.public, self.public)
+        with self.assertRaises(ValueError):
+            signing.rotate('signed', new_private, self.public, new_public)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_priv = root / 'old-priv.blob'
+            old_pub = root / 'old-pub.blob'
+            new_pub = root / 'new-pub.blob'
+            rot_file = root / 'rotation.json'
+            old_priv.write_bytes(self.private)
+            old_pub.write_bytes(self.public)
+            new_pub.write_bytes(new_public)
+            script = Path(signing.__file__)
+
+            def run(*args):
+                return subprocess.run([sys.executable, str(script), *map(str, args)], capture_output=True, timeout=30)
+
+            res = run('rotate', '--id', 'com.acme.plugin', '--old-private-key', old_priv,
+                      '--old-public-key', old_pub, '--new-public-key', new_pub, '--output', rot_file)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            res_verify = run('verify-rotation', rot_file, '--id', 'com.acme.plugin',
+                             '--old-public-key', old_pub, '--new-public-key', new_pub)
+            self.assertEqual(res_verify.returncode, 0, res_verify.stderr)
+            self.assertTrue(json.loads(res_verify.stdout)['valid'])
+            res_wrong = run('verify-rotation', rot_file, '--id', 'com.acme.wrong',
+                            '--old-public-key', old_pub, '--new-public-key', new_pub)
+            self.assertNotEqual(res_wrong.returncode, 0)
+
 
 if __name__ == '__main__':
     unittest.main()

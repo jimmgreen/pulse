@@ -1,6 +1,8 @@
 #include "module.h"
+#include "crash_guard.h"
 #include "../native_image_verify.h"
 #include <filesystem>
+#include <utility>
 namespace pulse::extensions::native {
 Module::Module() noexcept : thread_(GetCurrentThreadId()) {}
 Module::~Module() { Close(); }
@@ -49,10 +51,16 @@ PulseStatus Module::Load(const std::wstring& path, const PulseHostV1& host) {
         ((package_dependencies_ || (verified_file_ == INVALID_HANDLE_VALUE && package_locks_.empty())) ? LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR : 0);
     library_ = LoadLibraryExW(path.c_str(), nullptr, search);
     if (!library_) return PULSE_ERROR_LOAD;
-    // Before 1.0 the SDK changes between previews: refuse a plugin built
-    // against another one before any of its entry code runs.
+    // Note: DllMain and TLS callbacks have already executed in-process inside
+    // LoadLibraryExW above. PulsePluginSdkPreview is a pre-entry ABI/SDK
+    // compatibility gate before invoking PulsePluginEntryV1, NOT a pre-execution
+    // security sandbox.
     const auto preview = reinterpret_cast<PulsePluginSdkPreviewFn>(GetProcAddress(library_, "PulsePluginSdkPreview"));
-    const uint32_t built = preview ? preview() : 0;
+    uint32_t built = 0;
+    if (preview) {
+        const crash_guard::CallScope call_scope(package_id_.c_str());
+        built = preview();
+    }
     if (built != PULSE_SDK_PREVIEW) {
         const auto message = "Pulse extension native: built against SDK preview " + std::to_string(built) +
             (preview ? ", this Pulse requires preview " : " (export missing), this Pulse requires preview ") + std::to_string(PULSE_SDK_PREVIEW) +
@@ -64,14 +72,26 @@ PulseStatus Module::Load(const std::wstring& path, const PulseHostV1& host) {
     const auto entry = reinterpret_cast<PulsePluginEntryV1Fn>(GetProcAddress(library_, "PulsePluginEntryV1"));
     if (!entry) { FreeLibrary(library_); library_ = nullptr; return PULSE_ERROR_ENTRY; }
     host_ = host;
+    host_.size = sizeof(PulseHostV1);
     plugin_ = {}; plugin_.size = sizeof(plugin_); plugin_.version = PULSE_ABI_VERSION_1;
     invoking_ = true;
-    const auto status = entry(&host_, &plugin_);
+    PulseStatus status = PULSE_ERROR_STATE;
+    {
+        const crash_guard::CallScope call_scope(package_id_.c_str());
+        status = entry(&host_, &plugin_);
+    }
     invoking_ = false;
     const bool valid = plugin_.size >= sizeof(PulsePluginV1) && plugin_.version == PULSE_ABI_VERSION_1 &&
         plugin_.instance && plugin_.activate && plugin_.deactivate && plugin_.destroy;
     if (status != PULSE_OK || !valid) {
-        if (plugin_.instance && plugin_.destroy) { invoking_ = true; plugin_.destroy(plugin_.instance); invoking_ = false; }
+        if (plugin_.instance && plugin_.destroy) {
+            invoking_ = true;
+            {
+                const crash_guard::CallScope call_scope(package_id_.c_str());
+                plugin_.destroy(plugin_.instance);
+            }
+            invoking_ = false;
+        }
         plugin_ = {}; host_ = {};
         FreeLibrary(library_); library_ = nullptr;
         return status == PULSE_OK ? PULSE_ERROR_ABI : status;
@@ -82,12 +102,21 @@ PulseStatus Module::Activate() {
     if (thread_ != GetCurrentThreadId() || invoking_ || !library_) return PULSE_ERROR_STATE;
     if (active_) return PULSE_OK;
     invoking_ = true;
-    const auto status = plugin_.activate(plugin_.instance);
+    PulseStatus status = PULSE_ERROR_STATE;
+    {
+        const crash_guard::CallScope call_scope(package_id_.c_str());
+        status = plugin_.activate(plugin_.instance);
+    }
     invoking_ = false;
     if (status == PULSE_OK) active_ = true;
     else {
         // Failed activation must also release any partially registered work.
-        invoking_ = true; plugin_.deactivate(plugin_.instance); invoking_ = false;
+        invoking_ = true;
+        {
+            const crash_guard::CallScope call_scope(package_id_.c_str());
+            plugin_.deactivate(plugin_.instance);
+        }
+        invoking_ = false;
     }
     return status;
 }
@@ -95,14 +124,24 @@ PulseStatus Module::Deactivate() {
     if (thread_ != GetCurrentThreadId() || invoking_) return PULSE_ERROR_STATE;
     if (!active_) return PULSE_OK;
     active_ = false;
-    invoking_ = true; plugin_.deactivate(plugin_.instance); invoking_ = false;
+    invoking_ = true;
+    {
+        const crash_guard::CallScope call_scope(package_id_.c_str());
+        plugin_.deactivate(plugin_.instance);
+    }
+    invoking_ = false;
     return PULSE_OK;
 }
 PulseStatus Module::Close() {
     if (thread_ != GetCurrentThreadId() || invoking_) return PULSE_ERROR_STATE;
     Deactivate();
     if (library_) {
-        invoking_ = true; plugin_.destroy(plugin_.instance); invoking_ = false;
+        invoking_ = true;
+        {
+            const crash_guard::CallScope call_scope(package_id_.c_str());
+            plugin_.destroy(plugin_.instance);
+        }
+        invoking_ = false;
         plugin_ = {}; host_ = {};
         // Contract requires all plugin threads/callbacks stopped before return
         // from destroy. This is controlled shutdown, not arbitrary hot unload.

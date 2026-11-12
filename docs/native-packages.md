@@ -2,9 +2,15 @@
 
 Native packages load a trusted Windows x64 DLL inside the Pulse process. They have the process user's privileges; resource declarations are displayed at installation, not checked as per-call permissions. Review the source and binary provenance before explicitly consenting. `describe_extension_api`, manifest validation, SDK discovery and manifest generation never grant execution authority.
 
+**Trust boundary (`LoadLibraryExW` and `PULSE_SDK_PREVIEW`)**: When activating an enabled native package, Windows `LoadLibraryExW` maps the DLL image and may execute `DllMain` and TLS callbacks **before** Pulse queries `PulsePluginSdkPreview` (`PULSE_SDK_PREVIEW = 3`). Consequently, the SDK preview export check is an **ABI compatibility check**, never a security sandbox against untrusted native binaries.
+
+**Stability tiers (`frozen` vs `experimental`)**: `sdk/native/api-catalog.json` partitions the Native SDK into **`frozen`** (Core Entry ABI + 12 host service interfaces: `pulse.files`, `pulse.resources`, `pulse.dispatch`, `pulse.directories`, `pulse.context`, `pulse.fileops`, `pulse.commands`, `pulse.preview`, `pulse.tasks`, `pulse.staging`, `pulse.settings.pages`, `pulse.dialogs`) and **`experimental`** (4 UI surfaces: `pulse.ui.model`, `pulse.ui.events`, `pulse.ui.data`, `pulse.ui.mount`, which require `PULSE_ERROR_UNAVAILABLE` / `std::nullopt` fallback). For the full 1.0 freeze matrix, `>= 2` minor releases & `>= 180` days deprecation policy, emergency revocation (`revokedPackages` / `revokedRevisions`), out-of-process worker migration, and `Draining` → `RestartRequired` recovery rules, see [SDK Lifecycle, Compatibility, Deprecation & Migration Policy][lifecycle-policy].
+
+[lifecycle-policy]: extensions-sdk-lifecycle-and-support.md
+
 ## Manifest contract
 
-The manifest accepts apiVersion, id, name, resources and native. Legacy commands, toolbar, palette, workflows, panel and runtime fields are rejected. A template may omit native until native-manifest binds its DLL. Native package declarations use:
+The manifest accepts `apiVersion`, `id`, `name`, `resources`, `contributes`, and `native`. Legacy declarative `commands`, `toolbar`, `palette`, `workflows`, `panel`, and `runtime` fields are rejected. Optional `contributes.commands` (`[{"id", "title", "icon?", "shortcut?"}]`, up to 32 entries) provides zero-load static command discovery so Pulse can display package commands in menus and the command palette before loading the DLL, activating the package on first invocation; dynamic selection-gated commands continue to register through `pulse.commands`. A template may omit `native` until `native-manifest` binds its DLL. Native package declarations use:
 
 ```json
 "native": {
@@ -17,19 +23,22 @@ The manifest accepts apiVersion, id, name, resources and native. Legacy commands
 
 The `native` object is closed: the four fields above are required; an optional `files` array declares 1–63 additional DLLs or resources. Each item is exactly `{ "path": "7z.dll", "sha256": "<64 lowercase hex>" }`. Paths must be flat ASCII filenames (letters, digits, dot, underscore, hyphen), start with a letter or digit, and contain at most 128 bytes. Trailing dots, Windows device names, manifest.json/package.json and case-insensitive duplicates (including the entry DLL) are rejected. Omit files for a single-DLL package; an empty array is rejected. `library` is one ASCII filename matching `[A-Za-z0-9][A-Za-z0-9._-]{0,123}\.dll`; paths, alternate streams, uppercase extensions and traversal are rejected. Windows device stems `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9` and `LPT1`–`LPT9` are rejected case-insensitively, including names such as `CON.extra.dll`. `sha256` is exactly 64 lowercase hexadecimal digits. JavaScript `runtime` and `runtime.invoke` have been removed and are rejected; executable packages use `native`. The DLL must be a regular non-reparse file, at most 64 MiB, with an x64 PE32+ DLL header. These structural checks do not prove that the DLL implements the ABI or that its code is trustworthy; activation additionally requires the public `PulsePluginEntryV1` ABI.
 
-Multi-file packages support private DLL dependencies and resource files. Every declared file is hash-verified at installation, enable/rollback, host discovery and again before loading; DLL files also require an x64 PE header. The loader holds file and ancestor-directory handles until unload. Fully verified multi-file packages use `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`; no process-wide search path is changed. Native code remains trusted in-process code, not isolated.
+Multi-file packages support private DLL dependencies, isolated worker executables (`.exe`) and resource files. Every declared file is hash-verified at installation, enable/rollback, host discovery and again before loading; `.dll` and `.exe` files also require matching x64 PE32+ DLL/executable headers. The loader holds file and ancestor-directory handles until unload. Fully verified multi-file packages use `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`; no process-wide search path is changed. Native code remains trusted in-process code unless the extension delegates risky decoding to a Job-Object-governed worker sidecar (as `pulse.7zip` does with `pulse_7zip_worker.exe`).
 
 ## Author and install
 
-Build a native SDK example or a plugin using the published `sdk/native/include/pulse` headers. Put the DLL in the desired package directory. The generation command reads an ordinary manifest template, computes the DLL hash, validates the result with the target host and atomically creates a new manifest beside the DLL. It never loads the DLL and refuses to overwrite an existing output:
+Scaffold a new project from one of the 8 packable templates (`pulse_ext.py new DEST --id PACKAGE_ID --name NAME --template rename-panel`) or build an existing project using `sdk/native/include/pulse` (`PULSE_SDK_PREVIEW = 3`). Put the DLL in the desired package directory. `native-manifest` reads an ordinary manifest template, computes the DLL hash, validates the result with the target host and atomically creates a new manifest beside the DLL. It never loads the DLL and refuses to overwrite an existing output:
 
 ```powershell
-python tools/extensions/pulse_ext.py --pulse build/pulse.exe --json native-manifest examples/native/rename-panel/manifest.json --library C:/packages/rename/plugin.dll --output C:/packages/rename/manifest.json
-python tools/extensions/pulse_ext.py --pulse build/pulse.exe --json install C:/packages/rename/manifest.json --allow-native
-python tools/extensions/pulse_ext.py --pulse build/pulse.exe --json enable PACKAGE_ID --allow-native
+python tools/extensions/pulse_ext.py --pulse build/pulse.exe --json new C:/packages/my-rename --id com.example.rename --name "Example Rename" --template rename-panel
+cmake -S C:/packages/my-rename -B C:/packages/my-rename/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build C:/packages/my-rename/build
+python tools/extensions/pulse_ext.py --pulse build/pulse.exe --json native-manifest C:/packages/my-rename/manifest.json --library C:/packages/my-rename/build/com_example_rename_lower.dll --output C:/packages/my-rename/build/manifest.json
+python tools/extensions/pulse_ext.py --pulse build/pulse.exe --json install C:/packages/my-rename/build/manifest.json --allow-native --accept-capabilities
+python tools/extensions/pulse_ext.py --pulse build/pulse.exe --json enable com.example.rename --allow-native
 ```
 
-Use the manifest's `id` for `PACKAGE_ID`. `--json` returns structured success/error objects, including generated manifest and binary hashes. The default store is `%LOCALAPPDATA%/Pulse/extensions`; add `--store C:/absolute/local/store` to every lifecycle command for an isolated store. Installation starts a new package disabled. Enabling is a separate explicit action. None of these authoring commands launches Pulse's normal UI or immediately invokes a plugin. Normal Pulse startup discovers this store; opening an enabled native package from the command palette activates its DLL. For an explicit store, `pulse_ext.py run --store STORE` uses the existing `--extension-store` host option and verifies enabled binaries before launching. It does not require an additional native startup flag or bypass prior installation/enable consent. Test instances use their isolated `PULSE_TEST_DATA_DIR/extensions` store and do not fall back to the user store.
+Use the manifest's `id` for `PACKAGE_ID`. `--json` returns structured success/error objects, including generated manifest and binary hashes. The default store is `%LOCALAPPDATA%/Pulse/extensions`; add `--store C:/absolute/local/store` to every lifecycle command for an isolated store. Installation starts a new package disabled. Enabling is a separate explicit action. None of these authoring commands launches Pulse's normal UI or immediately invokes a plugin. Normal Pulse startup discovers this store; opening an enabled native package from the command palette (or invoking one of its `contributes.commands` entries) activates its DLL. For an explicit store, `pulse_ext.py run --store STORE --profile PROFILE` uses `--extension-store` + `--test-instance`, verifies enabled binaries before launching, and records `extension-host-instance.json` so `pulse_ext.py stop-host --pid <PID> --profile PROFILE` can cooperatively close that isolated host without force-killing unrelated Pulse windows. Test instances use their isolated `PULSE_TEST_DATA_DIR/extensions` store and do not fall back to the user store.
 
 Old archives containing declarative execution fields are rejected. Native packages use format v2 for a distributable archive containing exactly `manifest.json`, `package.json`, the entry DLL and all declared additional files. Native installation accepts either the archive or a manifest beside its DLL:
 
@@ -59,24 +68,42 @@ python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json in
 python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json enable PACKAGE_ID --store C:/PulseAuthor/signed-store --allow-native
 ```
 
-`verify` must report both integrity verification and a trusted signature. Trust does not activate a DLL. `--require-signed` applies to the whole chosen store; do not use a production store for this walkthrough. Rotate keys by trusting the new fingerprint, distributing and verifying a newly signed release, then using `untrust --store STORE --fingerprint OLD_SHA256`. Removing trust does not unload an already running DLL; restart the host.
+`verify` must report both integrity verification and a trusted signature. Trust does not activate a DLL. `--require-signed` applies to the whole chosen store; do not use a production store for this walkthrough.
 
-Publish the immutable `.pulse-ext`, detached signature, public key/fingerprint, license notices, source/build instructions, matching SDK preview number and release notes through the author's chosen release channel. Include the tested host version and actual interaction/cleanup results. There is no SDK upload command, plugin marketplace or automatic external publication. Installation and rollback select immutable manifest revisions; changing an installed package requires a host restart. For local unsigned development use an isolated store without a required-signature policy, then perform signed-package verification before distribution.
+### Publisher continuity & cryptographic key rotation (`rotate`)
 
-## Upgrade, rollback and removal
+Both the GUI store installer and CLI `install`/`rollback` enforce **publisher continuity** across revisions of an installed package ID:
 
-Generate a new manifest for the rebuilt DLL, then call `install` again with the same package ID and `--allow-native`. Every native installation, enable and rollback requires this explicit consent, including installation of a new DLL hash. `--accept-capabilities` remains a separate acknowledgement when a manifest upgrade adds declared capabilities; it does not substitute for native execution consent.
+1. **Signed → unsigned downgrade is rejected**: If `versions/<activeRevision>.sig.json` exists, an unsigned upgrade is rejected with `installed_publisher_mismatch`.
+2. **Cross-publisher takeover is rejected by default**: If `oldPublisher != newPublisher`, CLI `install` fails with `installed_publisher_mismatch` unless a valid cryptographic rotation proof (`--rotation ROTATION.json`) or an explicit override (`--allow-publisher-change`) is provided:
+   ```powershell
+   python tools/extensions/package_signing.py rotate --id PACKAGE_ID --old-private-key C:/Signing/old_priv.blob --old-public-key C:/Signing/old_pub.blob --new-public-key C:/Signing/new_pub.blob --output C:/packages/rotation.json
+   python tools/extensions/package_signing.py trust --store C:/PulseAuthor/signed-store --public-key C:/Signing/new_pub.blob --fingerprint NEW_PUBLISHER_SHA256 --require-signed
+   python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json install C:/packages/rename-v2.pulse-ext --store C:/PulseAuthor/signed-store --signature C:/packages/rename-v2.sig.json --rotation C:/packages/rotation.json --allow-native
+   python tools/extensions/package_signing.py untrust --store C:/PulseAuthor/signed-store --fingerprint OLD_PUBLISHER_SHA256
+   ```
+   `rotate` signs `Pulse.Extension.Publisher.Rotation\0v1\0<id>\0<oldPublisher>\0<newPublisher>` with the old private key; the new publisher must already be trusted in `signature-policy.json`.
+3. **Explicit override resets enabled state**: When `--allow-publisher-change` is supplied **without** a valid `--rotation` proof, the replacement revision is stored with `enabled: false` (never silently inheriting active execution state from the previous publisher). Removing trust does not unload an already running DLL; restart the host.
+
+Publish the immutable `.pulse-ext`, detached signature, public key/fingerprint, license notices, source/build instructions, matching SDK preview number (`3`) and release notes through the author's chosen release channel. Include the tested host version and actual interaction/cleanup results. There is no SDK upload command, plugin marketplace or automatic external publication. Installation and rollback select immutable manifest revisions; changing an installed package requires a host restart. For local unsigned development use an isolated store without a required-signature policy, then perform signed-package verification before distribution.
+
+## Upgrade, rollback, removal and garbage collection (`gc`)
+
+Generate a new manifest for the rebuilt DLL, then call `install` again with the same package ID and `--allow-native`. Every native installation, enable and rollback requires this explicit consent, including installation of a new DLL hash. `--accept-capabilities` remains a separate acknowledgement when a manifest upgrade (or `rollback` to an older revision with broader `resources` / `contributes.commands`) expands declared capabilities; omitting it fails with `capability_confirmation_required`.
 
 ```powershell
-python tools/extensions/pulse_ext.py --pulse build/pulse.exe --json install C:/packages/rename-v2/manifest.json --allow-native
-python tools/extensions/pulse_ext.py --pulse build/pulse.exe --json rollback PACKAGE_ID --allow-native
+python tools/extensions/pulse_ext.py --pulse build/pulse.exe --json install C:/packages/rename-v2/manifest.json --allow-native --accept-capabilities
+python tools/extensions/pulse_ext.py --pulse build/pulse.exe --json rollback PACKAGE_ID --allow-native --accept-capabilities
 python tools/extensions/pulse_ext.py --json disable PACKAGE_ID
 python tools/extensions/pulse_ext.py --json uninstall PACKAGE_ID
+python tools/extensions/pulse_ext.py --json gc --store C:/PulseAuthor/extensions
 ```
 
-Upgrades preserve the package's enabled state and retain one `previousRevision` pointer. Rollback swaps active and previous manifest revisions after validating the target signature, identity and every file hash; a missing or damaged target file leaves the registry unchanged. Restart Pulse after changing an enabled native package: a loaded DLL is not hot-replaced. Deactivation/shutdown must cancel and join plugin workers and remove callbacks before unloading, as required by the native ABI.
+Upgrades preserve the package's enabled state (when publisher continuity holds) and retain one `previousRevision` pointer. Rollback swaps active and previous manifest revisions after validating the target signature, publisher continuity, capability delta, identity and every file hash; a missing or damaged target file leaves the registry unchanged. Restart Pulse after changing an enabled native package: a loaded DLL is not hot-replaced. Deactivation/shutdown must cancel and join plugin workers and remove callbacks before unloading, as required by the native ABI.
 
-Disable and uninstall do not require an intact DLL, so a damaged package can be removed from activation. Disabled missing or corrupt packages do not block management of other packages. Uninstall removes the registry entry but retains immutable revisions and binaries; it does not attempt to delete a loaded DLL.
+Disable and uninstall do not require an intact DLL, so a damaged package can be removed from activation. Disabled missing or corrupt packages do not block management of other packages. Uninstall removes the registry entry while keeping immutable files untouched until explicit garbage collection.
+
+`pulse_ext.py gc [--store STORE]` acquires `.registry.lock`, computes the live reachability set from every registered package's `activeRevision` and `previousRevision`, and deletes unreferenced files/directories under `versions/`, `binaries/`, and `packages/`. Any DLL or sidecar currently mapped/locked by a running Pulse instance is safely skipped and reported in `gc.skipped`; `registry.json` and `signature-policy.json` are always preserved.
 
 CLI enable/disable changes persistent registry state and takes effect on the next startup. Palette enable/disable changes the current process only; it does not persist to the registry. Each `(owner window, package)` has a separate native session. Two active packages in one window can be opened, closed and disabled independently. Loaded modules retain their startup revision until restart, including after an external upgrade or rollback.
 
@@ -89,9 +116,11 @@ The existing `formatVersion: 1` registry remains unchanged. A package points to 
 ```text
 extensions/
   registry.json
+  signature-policy.json                (optional)
   .registry.lock
   versions/<manifest-sha256>.json
   versions/<manifest-sha256>.sig.json  (optional)
+  versions/<manifest-sha256>.rotation.json (optional)
   binaries/<binary-sha256>.dll       (single DLL)
   packages/<manifest-sha256>/<name> (multi-file package)
 ```
@@ -119,7 +148,7 @@ Discovery, validation and a successful build are not execution or UI verificatio
 
 ## Archive reference sample
 
-The source-only `sdk/native/samples/archive` loads the real 7-Zip engine and registers extract/add-to-archive command entries using the selected file types. The extraction commands now use host-owned same-volume staging and commit; P1.5 real-host acceptance has passed. The add-to-archive command remains a labelled demonstration and does not create archives. The verify-archive task now performs real extraction to a private temporary directory, reports progress and removes temporary output; its installed-package host acceptance has passed. The staged publication path passed P1.5 acceptance independently of that verification evidence. Supply an x64 7-Zip distribution with `7z.dll`, `License.txt` and `NOTICE.txt`; SDK bundles do not redistribute that binary. Build with `cmake -S sdk/native/samples/archive -B archive-build -G Ninja -DPULSE_7ZIP_DIR=C:/7zip`, then `cmake --build archive-build` in an x64 MSVC environment. Generate its manifest beside the DLL:
+The source-only `sdk/native/samples/archive` loads the real 7-Zip engine and registers extract/add-to-archive command entries using the selected file types. The extraction commands use host-owned same-volume staging and commit (P1.5 real-host acceptance passed), `verify-archive` performs real extraction to a private temporary directory with progress and cleanup (P1.4 passed), and `archive_writer.cpp` provides a local-path 7z/ZIP archive writer reference (P1.10 accepted). For full encrypted archives, split volumes, tar variants, checksums, and `pulse.dialogs` password/compression modals, see the separate official `extensions/7zip/` candidate below. Supply an x64 7-Zip distribution with `7z.dll`, `License.txt` and `NOTICE.txt`; SDK bundles do not redistribute that binary. Build with `cmake -S sdk/native/samples/archive -B archive-build -G Ninja -DPULSE_7ZIP_DIR=C:/7zip`, then `cmake --build archive-build` in an x64 MSVC environment. Generate its manifest beside the DLL:
 
 ```powershell
 python tools/extensions/pulse_ext.py --pulse build/pulse.exe --json native-manifest sdk/native/samples/archive/manifest.json --library archive-build/pulse_archive.dll --file archive-build/7z.dll --file archive-build/License.txt --file archive-build/NOTICE.txt --output archive-build/manifest.json
@@ -200,7 +229,7 @@ auto status = model.create(model.context, View("Example"), &tree.Build(), &panel
 
 压缩包样例的设置树、引擎状态树、UI 订阅、命令和后台任务已迁移；目录工作台的模型与订阅也已迁移。定向 wrapper_test 共 28 项通过。真实宿主证据：`build-extensions/p17-settings-host-final`（安装/升级/回退与设置持久化）、`build-extensions/p17-archive-host`（真实 2 GiB 解压取消、停用排空、发布/冲突/撤销重做）、`build-extensions/p17-workbench-host`（18 项，通过应用内截图核对）。
 
-P1.8 UI API 收敛已完成（SDK 预览3）；P1.9 旧压缩下载包已移除；此处记录的 SDK archive 样例压缩创建仍未实现，格式和级别是未来功能的持久化偏好。本阶段没有引入 JavaScript 运行时。下述独立官方 7-Zip 扩展实现了真实压缩，不应与旧样例混淆。
+P1.8 UI API 收敛已完成（`PULSE_SDK_PREVIEW` 为 `3`）；P1.9 旧压缩下载包已移除；`sdk/native/samples/archive` 包含本地 7z/ZIP 创建参考（P1.10），而加密归档、分卷、tar 变体与模态对话框交互位于下述独立官方 `extensions/7zip` 扩展，不应将两者混淆。本阶段没有引入 JavaScript 运行时。
 
 ## Host-drawn dialogs and official 7-Zip candidate (2026-11-09)
 
@@ -208,7 +237,7 @@ P1.8 UI API 收敛已完成（SDK 预览3）；P1.9 旧压缩下载包已移除�
 
 `default_button` handles Enter unless the input is composing or Ctrl/Shift is held; `cancel_button` handles Esc and the close button. `PULSE_DIALOG_NO_BUTTON` closes with STATE and an empty button id. The optional state callback reports edits; `set_states` can update the form. `closed` reports all declared state values once on normal completion. Borrowed strings/states must be copied during callbacks; keep callback userdata alive until closure or session stop. Session stop destroys the dialog without calling `closed`, so a worker waiting for an answer must also poll task cancellation. UI-model commands are unavailable inside this form; use states and footer buttons. Text inputs with kind `password` mask their text. Owner-disabled modal prompts defer automatic operation-progress popups so progress does not obscure the prompt.
 
-The separate source at `extensions/7zip/` uses only public native SDK interfaces for commands, previews, tasks, settings, dialogs and staged publication. Its real engine is official 7-Zip 26.00 `7z.dll`; no NanaZip-exclusive codecs are promised. It supports smart/same-folder/chosen-destination extraction, archive testing, real archive creation (7z/zip/tar and compressed tar variants), encrypted archives, split volumes and CRC32/SHA-1/SHA-256. The old `sdk/native/samples/archive` demonstration is unchanged. New DLLs require regenerating the native manifest, repacking and resigning; a catalog signature never replaces verification of the downloaded package and its detached signature. Current candidate and verification limits are recorded in `docs/extension-store-7zip-handoff.md`; no public release is implied.
+The separate source at `extensions/7zip/` uses only public native SDK interfaces for commands, previews, tasks, settings, dialogs and staged publication. Its real engine is official 7-Zip 26.00 `7z.dll`; no NanaZip-exclusive codecs are promised. It supports smart/same-folder/chosen-destination extraction, archive testing, real archive creation (7z/zip/tar and compressed tar variants), encrypted archives, split volumes and CRC32/SHA-1/SHA-256, whereas `sdk/native/samples/archive` remains a compact SDK reference sample. New DLLs require regenerating the native manifest, repacking and resigning; a catalog signature never replaces verification of the downloaded package and its detached signature. Current candidate and verification limits are recorded in `docs/extension-store-7zip-handoff.md`; no public release is implied.
 
 Staging currently limits a commit to 4,096 top-level entries, 2,000,000 total entries and 1 GiB of accumulated UTF-8 path bytes (not file-content bytes). It rejects reparse or inaccessible entries. This enlarged counting budget does not promise bounded extraction size or free space, and million-entry publication performance has not been established. Normal release is asynchronous cleanup, not proof that the stage has already disappeared; cancellation never undoes already published output.
 
@@ -224,7 +253,7 @@ Publisher trust must already be explicitly configured in `signature-policy.json`
 
 All cooperating policy writers, including the Python trust/untrust commands, use `.registry.lock`. The last byte comparison before atomic replacement detects intervening policy changes, but is not a compare-and-swap against a non-cooperating local process changing policy in the final read/rename gap. This does not establish protection from arbitrary same-user edits to the store. Store paths reject volume roots, reparse ancestors, relative/dot traversal and Win32 trailing-dot/space aliases before provisioning.
 
-Payload files and exact manifest/signature bytes use flushed exclusive temporary files. Multi-file payloads are published as a complete revision directory. Existing immutable files are checked, not overwritten/repaired; unexpected members are rejected. Verified files and policy stay write/delete-locked through registry commit. Open descendant handles can temporarily prevent a Windows directory rename; payload publication uses a cancellation-aware, bounded retry (at most 900 ms waiting), not permission repair. Permanent failure leaves the registry unchanged. Registry replacement is the commit point; cancellation before it does not activate a package. Already published, verified immutable revisions may remain for retry/rollback, and externally locked temporary files can prevent best-effort cleanup. Crash/power-loss recovery and garbage collection are not yet implemented. Successful changes return `restart_required` instead of hot-loading native code.
+Payload files and exact manifest/signature bytes use flushed exclusive temporary files. Multi-file payloads are published as a complete revision directory. Existing immutable files are checked, not overwritten/repaired; unexpected members are rejected. Verified files and policy stay write/delete-locked through registry commit. Open descendant handles can temporarily prevent a Windows directory rename; payload publication uses a cancellation-aware, bounded retry (at most 900 ms waiting), not permission repair. Permanent failure leaves the registry unchanged. Registry replacement is the commit point; cancellation before it does not activate a package. Already published, verified immutable revisions may remain for retry/rollback, and externally locked temporary files can prevent best-effort cleanup; use `pulse_ext.py gc [--store STORE]` to reclaim unreferenced revisions, binaries and multi-file directories under `.registry.lock` (crash/power-loss journal recovery is not automatic). Successful changes return `restart_required` instead of hot-loading native code.
 
 `store/package_download.h` adds worker-only `FetchCatalogPackage`: select extension/version/publisher from one verified catalog, capture the download source once, independently retry each fixed-size/hash asset using the existing GitHub release mirrors, reset partial buffers, reject sticky overflow and stop fallback on cancellation. After both complete it invokes the archive verifier; failure preserves the previous output. This API authenticates downloaded bytes, not user authorization, and writes nothing to the store.
 

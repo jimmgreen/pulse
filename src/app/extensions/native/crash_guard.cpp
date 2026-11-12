@@ -5,9 +5,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <filesystem>
 #include <optional>
-#include <string>
 #include <set>
+#include <string>
 #include <utility>
 
 namespace pulse::extensions::native::crash_guard {
@@ -15,9 +16,24 @@ namespace {
 
 using Entry = std::pair<std::string, std::string>; // id, lowercase sha256
 
-constexpr size_t kSlots = 32;
+constexpr size_t kSlots = 256;
 constexpr size_t kIdBytes = 128;
 constexpr size_t kRecordBytes = kIdBytes + 72;
+
+struct ScopedTrackLock {
+    SRWLOCK& lock;
+    explicit ScopedTrackLock(SRWLOCK& value) noexcept : lock(value) { AcquireSRWLockExclusive(&lock); }
+    ~ScopedTrackLock() { ReleaseSRWLockExclusive(&lock); }
+};
+
+struct PackageTrack {
+    bool active = false;
+    size_t package = 0;
+    uint32_t refs = 0;
+    char id[kIdBytes]{};
+    char record[kRecordBytes]{};
+    DWORD record_length = 0;
+};
 
 // Read by the crash path without locks: begin/end are published last on
 // track and cleared first on forget; id/record are written only while the
@@ -25,12 +41,16 @@ constexpr size_t kRecordBytes = kIdBytes + 72;
 struct Slot {
     std::atomic<uintptr_t> begin{0}, end{0};
     size_t package = 0;
-    uint32_t refs = 0;
+    bool occupied = false;
     char id[kIdBytes]{};
     char record[kRecordBytes]{};
     DWORD record_length = 0;
 };
+
+SRWLOCK g_track_lock = SRWLOCK_INIT;
+PackageTrack g_packages[kSlots];
 Slot g_slots[kSlots];
+size_t g_next_slot = 0;
 wchar_t g_crashed_path[MAX_PATH + 64]{};
 std::wstring g_root;
 std::set<Entry> g_disabled;
@@ -39,6 +59,11 @@ std::wstring File(const wchar_t* name) { return g_root + L"\\" + name; }
 
 std::string Lower(std::string text) {
     for (char& c : text) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return text;
+}
+
+std::wstring LowerWide(std::wstring text) {
+    for (wchar_t& c : text) if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c - L'A' + L'a');
     return text;
 }
 
@@ -111,28 +136,129 @@ std::wstring Wide(const std::string& utf8) {
     return out;
 }
 
-// Runs inside the exception filter: fixed buffers, one file write, no locks.
-const char* Attribute(const void* address) noexcept {
+bool ModuleRange(HMODULE image, uintptr_t& begin, uintptr_t& end) noexcept {
+    MODULEINFO info{};
+    if (!image || !GetModuleInformation(GetCurrentProcess(), image, &info, sizeof(info)) || !info.SizeOfImage)
+        return false;
+    begin = reinterpret_cast<uintptr_t>(info.lpBaseOfDll);
+    end = begin + info.SizeOfImage;
+    return begin != 0 && end > begin;
+}
+
+PackageTrack* FindPackageLocked(size_t package) noexcept {
+    for (PackageTrack& item : g_packages) {
+        if (item.active && item.package == package) return &item;
+    }
+    return nullptr;
+}
+
+PackageTrack* EnsurePackageLocked(size_t package, bool& created) {
+    created = false;
+    if (PackageTrack* existing = FindPackageLocked(package)) return existing;
+    const auto identity = Identity(package);
+    if (!identity) return nullptr;
+    const std::string record = identity->first + "\t" + identity->second + "\n";
+    if (record.size() >= kRecordBytes) return nullptr;
+    for (PackageTrack& item : g_packages) {
+        if (item.active) continue;
+        item.active = true;
+        item.package = package;
+        item.refs = 0;
+        std::memcpy(item.id, identity->first.c_str(), identity->first.size() + 1);
+        std::memcpy(item.record, record.c_str(), record.size() + 1);
+        item.record_length = static_cast<DWORD>(record.size());
+        created = true;
+        return &item;
+    }
+    OutputDebugStringA("Pulse extension crash guard: no_free_package_slot\n");
+    return nullptr;
+}
+
+bool PublishRangeLocked(const PackageTrack& pkg, uintptr_t begin, uintptr_t end) noexcept {
+    if (!begin || end <= begin) return false;
+    for (const Slot& slot : g_slots) {
+        if (slot.occupied && slot.package == pkg.package &&
+            slot.begin.load(std::memory_order_relaxed) == begin &&
+            slot.end.load(std::memory_order_relaxed) == end) {
+            return true;
+        }
+    }
+    for (size_t offset = 0; offset < kSlots; ++offset) {
+        const size_t index = (g_next_slot + offset) % kSlots;
+        Slot& slot = g_slots[index];
+        if (slot.occupied) continue;
+        slot.package = pkg.package;
+        slot.occupied = true;
+        std::memcpy(slot.id, pkg.id, sizeof(slot.id));
+        std::memcpy(slot.record, pkg.record, sizeof(slot.record));
+        slot.record_length = pkg.record_length;
+        slot.end.store(end, std::memory_order_release);
+        slot.begin.store(begin, std::memory_order_release);
+        g_next_slot = (index + 1) % kSlots;
+        return true;
+    }
+    OutputDebugStringA("Pulse extension crash guard: no_free_slot\n");
+    return false;
+}
+
+bool SafeRelativeDllPath(const std::filesystem::path& relative) {
+    if (relative.empty() || relative.is_absolute() || relative.has_root_name() || relative.has_root_directory())
+        return false;
+    for (const auto& part : relative) {
+        if (part == L"..") return false;
+    }
+    return LowerWide(relative.extension().wstring()) == L".dll";
+}
+
+void PublishSidecarsLocked(const PackageTrack& pkg, const std::wstring& package_dir,
+                           const NativeRuntime* runtime) {
+    if (package_dir.empty() || !runtime || runtime->files.empty()) return;
+    const std::filesystem::path base = std::filesystem::path(package_dir).lexically_normal();
+    if (base.empty()) return;
+    for (const auto& file : runtime->files) {
+        const std::filesystem::path relative(Wide(file.path));
+        if (!SafeRelativeDllPath(relative)) continue;
+        const std::filesystem::path full = (base / relative).lexically_normal();
+        HMODULE module = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, full.wstring().c_str(), &module) || !module)
+            continue;
+        uintptr_t begin = 0, end = 0;
+        if (ModuleRange(module, begin, end)) PublishRangeLocked(pkg, begin, end);
+    }
+}
+
+const Slot* FindSlot(const void* address) noexcept {
     const auto at = reinterpret_cast<uintptr_t>(address);
-    for (Slot& slot : g_slots) {
+    if (!at) return nullptr;
+    for (const Slot& slot : g_slots) {
         const uintptr_t begin = slot.begin.load(std::memory_order_acquire);
         const uintptr_t end = slot.end.load(std::memory_order_acquire);
         if (!begin || at < begin || at >= end) continue;
+        return &slot;
+    }
+    return nullptr;
+}
+
+// Runs inside the exception filter: fixed buffers, one file write, no locks.
+const char* Attribute(const void* address) noexcept {
+    const Slot* slot = FindSlot(address);
+    if (!slot) return nullptr;
+    if (g_crashed_path[0] != L'\0') {
         HANDLE file = CreateFileW(g_crashed_path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
         if (file != INVALID_HANDLE_VALUE) {
             DWORD written = 0;
-            WriteFile(file, slot.record, slot.record_length, &written, nullptr);
+            WriteFile(file, slot->record, slot->record_length, &written, nullptr);
             CloseHandle(file);
         }
-        return slot.id;
     }
-    return nullptr;
+    return slot->id;
 }
 
 } // namespace
 
 std::vector<std::wstring> ApplyAtStartup(bool isolated) {
+    crash::SetActiveCallClue(&ActiveCallPackage);
     std::vector<std::wstring> newly_disabled;
     // Development hosts reload the author's build on every save; disabling it
     // after a crash would only get in the way of fixing it.
@@ -196,42 +322,78 @@ ActivationScope::~ActivationScope() {
     if (armed_) DeleteFileW(File(L"native-activating.txt").c_str());
 }
 
+bool TrackPackageModules(size_t package, HMODULE entry_image,
+                         const std::wstring& package_dir,
+                         const NativeRuntime* runtime) {
+    if (g_root.empty() || !entry_image) return false;
+    uintptr_t begin = 0, end = 0;
+    if (!ModuleRange(entry_image, begin, end)) return false;
+    ScopedTrackLock lock(g_track_lock);
+    bool created = false;
+    PackageTrack* pkg = EnsurePackageLocked(package, created);
+    if (!pkg) return false;
+    if (!PublishRangeLocked(*pkg, begin, end)) {
+        if (created) pkg->active = false;
+        return false;
+    }
+    ++pkg->refs;
+    PublishSidecarsLocked(*pkg, package_dir, runtime);
+    crash::SetFaultAttribution(&Attribute);
+    crash::SetActiveCallClue(&ActiveCallPackage);
+    return true;
+}
+
 bool TrackModule(size_t package, HMODULE image) {
-    if (g_root.empty() || !image) return false;
-    for (Slot& slot : g_slots) {
-        if (slot.refs && slot.package == package) { ++slot.refs; return true; }
+    return TrackPackageModules(package, image, {}, nullptr);
+}
+
+void RefreshPackageModules(size_t package, const std::wstring& package_dir,
+                           const NativeRuntime* runtime) {
+    if (g_root.empty() || package_dir.empty() || !runtime || runtime->files.empty()) return;
+    ScopedTrackLock lock(g_track_lock);
+    const PackageTrack* pkg = FindPackageLocked(package);
+    if (!pkg || pkg->refs == 0) return;
+    PublishSidecarsLocked(*pkg, package_dir, runtime);
+}
+
+bool TrackModuleRange(size_t package, uintptr_t begin, uintptr_t end, bool add_ref) {
+    if (!begin || end <= begin) return false;
+    ScopedTrackLock lock(g_track_lock);
+    bool created = false;
+    PackageTrack* pkg = EnsurePackageLocked(package, created);
+    if (!pkg) return false;
+    if (!created && !add_ref && pkg->refs == 0) return false;
+    if (created && !add_ref) {
+        pkg->active = false;
+        return false;
     }
-    const auto identity = Identity(package);
-    if (!identity) return false;
-    MODULEINFO info{};
-    if (!GetModuleInformation(GetCurrentProcess(), image, &info, sizeof(info)) || !info.SizeOfImage) return false;
-    for (Slot& slot : g_slots) {
-        if (slot.refs) continue;
-        const std::string record = identity->first + "\t" + identity->second + "\n";
-        if (record.size() >= kRecordBytes) return false;
-        slot.package = package;
-        slot.refs = 1;
-        memcpy(slot.id, identity->first.c_str(), identity->first.size() + 1);
-        memcpy(slot.record, record.c_str(), record.size() + 1);
-        slot.record_length = static_cast<DWORD>(record.size());
-        const auto begin = reinterpret_cast<uintptr_t>(info.lpBaseOfDll);
-        slot.end.store(begin + info.SizeOfImage, std::memory_order_release);
-        slot.begin.store(begin, std::memory_order_release);
-        return true;
+    if (!PublishRangeLocked(*pkg, begin, end)) {
+        if (created) pkg->active = false;
+        return false;
     }
-    OutputDebugStringA("Pulse extension crash guard: no_free_slot\n");
-    return false;
+    if (add_ref) ++pkg->refs;
+    crash::SetFaultAttribution(&Attribute);
+    crash::SetActiveCallClue(&ActiveCallPackage);
+    return true;
 }
 
 void ForgetModule(size_t package) {
+    ScopedTrackLock lock(g_track_lock);
+    PackageTrack* pkg = FindPackageLocked(package);
+    if (!pkg || pkg->refs == 0) return;
+    if (--pkg->refs > 0) return;
     for (Slot& slot : g_slots) {
-        if (!slot.refs || slot.package != package) continue;
-        if (--slot.refs == 0) {
-            slot.begin.store(0, std::memory_order_release);
-            slot.end.store(0, std::memory_order_release);
-        }
-        return;
+        if (!slot.occupied || slot.package != package) continue;
+        slot.begin.store(0, std::memory_order_release);
+        slot.end.store(0, std::memory_order_release);
+        slot.occupied = false;
     }
+    pkg->active = false;
+}
+
+const char* FindAttributedPackage(const void* address) noexcept {
+    const Slot* slot = FindSlot(address);
+    return slot ? slot->id : nullptr;
 }
 
 void ForgetPackageCrash(size_t package) {

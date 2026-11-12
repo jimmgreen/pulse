@@ -1,6 +1,7 @@
 #include "ui_adapter.h"
 #include "../../../common/json_value.h"
 #include "../../../ui/extension_panel.h"
+#include "diagnostics_adapter.h"
 #include "ui_model.h"
 #include "ui_data_adapter.h"
 #include <algorithm>
@@ -54,11 +55,22 @@ struct UiAdapter::State : std::enable_shared_from_this<State> {
     D2D1_COLOR_F accent{};
     float scale = 1;
     std::function<bool()> alive;
+    std::shared_ptr<DiagnosticsSink> diagnostics;
     ui::ExtensionPanel panel;
     std::unique_ptr<UiDataAdapter> data;
     uint64_t panel_id = 0;
     size_t callbacks = 0;
     std::set<std::string> buttons;
+    PulseStatus Fail(PulseStatus status, std::string_view iface, std::string_view op,
+                     std::string_view subject, std::string_view field, std::string_view msg) const {
+        if (diagnostics) diagnostics->Record(status, iface, op, subject, field, msg);
+        return status;
+    }
+    PulseStatus FailParsed(PulseStatus status, std::string_view iface, std::string_view op,
+                           std::string_view formatted, std::string_view default_subject = {}) const {
+        if (diagnostics) diagnostics->RecordParsed(status, iface, op, formatted, default_subject);
+        return status;
+    }
     struct Subscription {
         uint64_t id;
         std::string node;
@@ -323,34 +335,42 @@ struct UiAdapter::State : std::enable_shared_from_this<State> {
                                               uint64_t *handle) {
         return Guard(context, [&](State &self) -> PulseStatus {
             if (!handle)
-                return PULSE_ERROR_ARGUMENT;
+                return self.Fail(PULSE_ERROR_ARGUMENT, PULSE_UI_MODEL_INTERFACE, "create", "", "handle",
+                                 "output panel handle pointer is null");
             *handle = 0;
             if (self.panel.IsOpen())
-                return PULSE_ERROR_STATE;
+                return self.Fail(PULSE_ERROR_STATE, PULSE_UI_MODEL_INTERFACE, "create", "", "",
+                                 "a panel is already open for this session");
             std::string caption, error;
             UiTree tree;
             std::set<std::string> commands;
             if (!Text(title, caption, 128) || caption.empty())
-                return PULSE_ERROR_ARGUMENT;
+                return self.Fail(PULSE_ERROR_ARGUMENT, PULSE_UI_MODEL_INTERFACE, "create", "", "title",
+                                 "title must be 1..128 valid UTF-8 bytes");
             const auto status = ConvertUiModel(input, tree, commands, error);
             if (status != PULSE_OK)
-                return status;
-            return Show(self, caption, std::move(tree), std::move(commands), handle);
+                return self.FailParsed(status, PULSE_UI_MODEL_INTERFACE, "create", error, "model");
+            const auto shown = Show(self, caption, std::move(tree), std::move(commands), handle);
+            if (shown != PULSE_OK)
+                return self.Fail(shown, PULSE_UI_MODEL_INTERFACE, "create", "", "", "failed to create panel window");
+            return PULSE_OK;
         });
     }
     static PulseStatus PULSE_CALL UpdateModel(void *context, uint64_t panel, const PulseUiModelTree *input) {
         return Guard(context, [&](State &self) -> PulseStatus {
             if (!self.Panel(panel))
-                return PULSE_ERROR_STATE;
+                return self.Fail(PULSE_ERROR_STATE, PULSE_UI_MODEL_INTERFACE, "update", "", "panel",
+                                 "panel is not open");
             std::string error;
             UiTree tree;
             std::set<std::string> commands;
             const auto status = ConvertUiModel(input, tree, commands, error);
             if (status != PULSE_OK)
-                return status;
+                return self.FailParsed(status, PULSE_UI_MODEL_INTERFACE, "update", error, "model");
             const bool updated = [&] { PauseData pause(*self.data); return self.panel.UpdateTree(tree); }();
             if (!updated)
-                return PULSE_ERROR_STATE;
+                return self.Fail(PULSE_ERROR_STATE, PULSE_UI_MODEL_INTERFACE, "update", "", "model",
+                                 "panel rejected tree update (incompatible stateful control identity)");
             self.data->ResetBindings();
             self.RefreshStateSubscriptions();
             self.buttons = std::move(commands);
@@ -363,29 +383,40 @@ struct UiAdapter::State : std::enable_shared_from_this<State> {
     static PulseStatus PULSE_CALL Set(void *context, uint64_t panel, const PulseUiState *entries, uint32_t count) {
         return Guard(context, [&](State &self) -> PulseStatus {
             if (!self.Panel(panel))
-                return PULSE_ERROR_STATE;
+                return self.Fail(PULSE_ERROR_STATE, PULSE_UI_MODEL_INTERFACE, "set_states", "", "panel",
+                                 "panel is not open");
             std::vector<UiStateEntry> changes;
             if (!States(entries, count, changes))
-                return PULSE_ERROR_ARGUMENT;
-            return self.panel.SetTreeStates(changes) ? PULSE_OK : PULSE_ERROR_ARGUMENT;
+                return self.Fail(PULSE_ERROR_ARGUMENT, PULSE_UI_MODEL_INTERFACE, "set_states", "", "states",
+                                 "invalid state key/value or duplicate key");
+            if (!self.panel.SetTreeStates(changes))
+                return self.Fail(PULSE_ERROR_ARGUMENT, PULSE_UI_MODEL_INTERFACE, "set_states", "", "states",
+                                 "undeclared state key or value violates bound control constraints");
+            if (self.embedded && self.owner && IsWindow(self.owner))
+                InvalidateRect(self.owner, nullptr, FALSE);
+            return PULSE_OK;
         });
     }
     static PulseStatus PULSE_CALL Get(void *context, uint64_t panel, PulseStringView input, char *buffer,
                                       uint32_t capacity, uint32_t *needed) {
         return Guard(context, [&](State &self) -> PulseStatus {
             if (!self.Panel(panel))
-                return PULSE_ERROR_STATE;
+                return self.Fail(PULSE_ERROR_STATE, PULSE_UI_MODEL_INTERFACE, "get_state", "", "panel",
+                                 "panel is not open");
             std::string key;
             if (!needed || !Key(input, key) || (!buffer && capacity))
-                return PULSE_ERROR_ARGUMENT;
+                return self.Fail(PULSE_ERROR_ARGUMENT, PULSE_UI_MODEL_INTERFACE, "get_state", "", "key",
+                                 "invalid state key or output buffer arguments");
             auto value = self.panel.TreeStateValue(key);
             if (!value)
-                return PULSE_ERROR_ARGUMENT;
+                return self.Fail(PULSE_ERROR_ARGUMENT, PULSE_UI_MODEL_INTERFACE, "get_state", key, "key",
+                                 "state key is not declared in model");
             *needed = static_cast<uint32_t>(value->size());
             if (!buffer && !capacity)
                 return PULSE_OK;
             if (capacity < value->size())
-                return PULSE_ERROR_ARGUMENT;
+                return self.Fail(PULSE_ERROR_ARGUMENT, PULSE_UI_MODEL_INTERFACE, "get_state", key, "capacity",
+                                 "buffer capacity is smaller than state value length");
             if (!value->empty())
                 std::memcpy(buffer, value->data(), value->size());
             return PULSE_OK;
@@ -395,11 +426,18 @@ struct UiAdapter::State : std::enable_shared_from_this<State> {
                                             PulseUiClickFn callback, void *user, uint64_t *token) {
         return Guard(context, [&](State &self) -> PulseStatus {
             if (!self.Panel(panel))
-                return PULSE_ERROR_STATE;
+                return self.Fail(PULSE_ERROR_STATE, PULSE_UI_MODEL_INTERFACE, "subscribe_click", "", "panel",
+                                 "panel is not open");
             std::string node;
-            if (!token || !callback || !Key(input, node) || !self.buttons.contains(node) ||
-                self.subscriptions.size() + self.state_subscriptions.size() >= 128)
-                return PULSE_ERROR_ARGUMENT;
+            if (!token || !callback || !Key(input, node))
+                return self.Fail(PULSE_ERROR_ARGUMENT, PULSE_UI_MODEL_INTERFACE, "subscribe_click", "", "command",
+                                 "invalid callback, token pointer, or command identifier");
+            if (!self.buttons.contains(node))
+                return self.Fail(PULSE_ERROR_ARGUMENT, PULSE_UI_MODEL_INTERFACE, "subscribe_click", node, "command",
+                                 "command is not declared in model.commands");
+            if (self.subscriptions.size() + self.state_subscriptions.size() >= 128)
+                return self.Fail(PULSE_ERROR_ARGUMENT, PULSE_UI_MODEL_INTERFACE, "subscribe_click", node, "",
+                                 "panel subscription limit (128) reached");
             const auto id = ++next_identity;
             self.subscriptions.emplace(id, Subscription{id, node, callback, user});
             *token = id;
@@ -412,12 +450,14 @@ struct UiAdapter::State : std::enable_shared_from_this<State> {
             *token = 0;
         return Guard(context, [&](State &self) -> PulseStatus {
             if (!self.Panel(panel))
-                return PULSE_ERROR_STATE;
+                return self.Fail(PULSE_ERROR_STATE, PULSE_UI_EVENTS_INTERFACE_NAME, "subscribe_state", "", "panel",
+                                 "panel is not open");
             std::string key;
             if (!token || !callback || !sources || (sources & ~static_cast<uint32_t>(PULSE_UI_STATE_ALL)) ||
                 !Text(input, key, 64) || (!key.empty() && (!Key(input, key) || !self.panel.TreeStateValue(key))) ||
                 self.subscriptions.size() + self.state_subscriptions.size() >= 128)
-                return PULSE_ERROR_ARGUMENT;
+                return self.Fail(PULSE_ERROR_ARGUMENT, PULSE_UI_EVENTS_INTERFACE_NAME, "subscribe_state", key, "key",
+                                 "invalid state key, source mask, callback, or subscription limit reached");
             const auto id = ++next_identity;
             self.state_subscriptions.emplace(
                 id, StateSubscription{key, sources, self.panel.TreeStateRevision(), callback, user});
@@ -501,6 +541,9 @@ UiAdapter::UiAdapter(HWND owner, bool dark, D2D1_COLOR_F accent, float scale, st
     state_->data = std::make_unique<UiDataAdapter>(std::move(backend));
 }
 UiAdapter::~UiAdapter() { Stop(); }
+void UiAdapter::SetDiagnostics(std::shared_ptr<DiagnosticsSink> sink) {
+    if (state_) state_->diagnostics = std::move(sink);
+}
 PulseStatus UiAdapter::QueryEvents(uint32_t version, void *table, uint32_t size) {
     if (version != PULSE_UI_EVENTS_VERSION_1 || size != sizeof(PulseUiEventsV1) || !table)
         return PULSE_ERROR_ABI;
@@ -586,6 +629,18 @@ void UiAdapter::HideEmbedded() {
         (GetWindowLongPtrW(state_->panel.Hwnd(), GWL_STYLE) & WS_VISIBLE)) ShowWindow(state_->panel.Hwnd(), SW_HIDE);
 }
 bool UiAdapter::HasPanel(uint64_t id) const { return state_->Panel(id); }
+std::optional<std::string> UiAdapter::EmbeddedState(const std::string &key) const {
+    if (!state_->Panel(state_->panel_id)) return std::nullopt;
+    return state_->panel.TreeStateValue(key);
+}
+bool UiAdapter::CommitEmbeddedState(const std::string &key, const std::string &value) {
+    return state_->Panel(state_->panel_id) && state_->panel.CommitTreeUserState(key, value);
+}
+bool UiAdapter::ClickEmbedded(const std::string &node) {
+    if (!state_->Panel(state_->panel_id)) return false;
+    state_->Dispatch(node);
+    return true;
+}
 void UiAdapter::Stop() {
     if (state_) {
         state_->stopped = true;

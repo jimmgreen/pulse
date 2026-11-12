@@ -42,6 +42,9 @@ struct Plugin {
     std::array<pulse::sdk::CommandRegistration, static_cast<size_t>(Command::Count)> registrations;
     std::array<PulseCommandId, static_cast<size_t>(Command::Count)> ids{};
     std::array<std::string, static_cast<size_t>(Command::Count)> titles;
+    // What each command was last registered with (title, detail, placement, shown);
+    // a settings change re-registers when any of them differs.
+    std::array<std::string, static_cast<size_t>(Command::Count)> registered;
     std::vector<PulsePreviewProviderId> previews;
     std::unique_ptr<pulse::sdk::DispatchQueue> dispatch;
     std::unique_ptr<Dialogs> dialogs;
@@ -79,7 +82,9 @@ std::wstring BaseName(const std::vector<std::wstring>& paths) {
 PulseStatus PULSE_CALL Activate(void*) {
     return engine::SupportedFormats().empty() ? PULSE_ERROR_INITIALIZATION : PULSE_OK;
 }
-void PULSE_CALL Deactivate(void*) {}
+void PULSE_CALL Deactivate(void*) {
+    engine::ShutdownWorkers();
+}
 
 struct Destination {
     PulseStatus status = PULSE_ERROR_STATE;
@@ -128,7 +133,12 @@ void Run(Plugin& plugin, Command command, const PulseContextSelectionSnapshot& s
         break;
     }
     case Command::Test:
-        for (const auto& path : paths) jobs.Test(path);
+        for (const auto& path : paths) {
+            const auto fixed = settings.FixedFolder();
+            const auto destination = fixed.empty() ? Utf8(fs::path(path).parent_path().wstring()) : fixed;
+            const auto mode = ModeOf(settings);
+            jobs.Test(path, [&jobs, path, destination, mode] { jobs.Extract(path, destination, mode); });
+        }
         break;
     case Command::Quick: {
         CompressChoice choice;
@@ -146,6 +156,8 @@ void Run(Plugin& plugin, Command command, const PulseContextSelectionSnapshot& s
         source.title = paths.size() == 1 ? first : text::Format(T::SourceMore, first, std::to_string(paths.size() - 1));
         const auto folder = fs::path(paths.front()).parent_path();
         source.detail = text::Format(T::SourceSaveTo, Utf8(folder.filename().empty() ? folder.wstring() : folder.filename().wstring()));
+        std::error_code folder_error;
+        source.folder = fs::is_directory(paths.front(), folder_error);
         plugin.dialogs->ChooseCompression(source, settings.Format(), settings.Level(), {},
             [self, paths, parent](bool ok, CompressChoice choice) { if (ok) self->jobs->Compress(paths, parent, std::move(choice)); });
         break;
@@ -173,6 +185,27 @@ std::string Title(const Plugin& plugin, Command command) {
     }
 }
 
+// The context menu's second line: where Extract puts things, what Quick compress makes.
+// {stem}/{base} are filled in by the host for the current selection.
+std::string Detail(const Plugin& plugin, Command command) {
+    const auto& settings = *plugin.settings;
+    std::string detail;
+    if (command == Command::Extract) {
+        const auto fixed = settings.FixedFolder();
+        const auto mode = settings.Mode();
+        if (!fixed.empty()) detail = text::Format(mode == Settings::ExtractMode::Here ? T::HintFixedHere : T::HintFixed, fixed);
+        else detail = text::Get(mode == Settings::ExtractMode::Folder ? T::HintFolder
+                                : mode == Settings::ExtractMode::Here ? T::HintHere : T::HintSmart);
+    } else if (command == Command::Quick) {
+        static constexpr T kLevelNames[] = {T::Level0, T::Level1, T::Level3, T::Level5, T::Level7, T::Level9};
+        const int format = settings.Format();
+        if (kFormats[format] == engine::Format::Tar) detail = text::Get(T::HintTar);
+        else detail = text::Format(T::HintQuick, Utf8(engine::FormatExtension(kFormats[format])), text::Get(kLevelNames[settings.Level()]));
+    }
+    // The host takes at most 160 bytes; a long fixed folder drops the line rather than the command.
+    return detail.size() <= 160 ? detail : std::string{};
+}
+
 PulseStatus Register(Plugin& plugin, Command command) {
     static const auto archive_list = engine::ArchiveExtensions();
     static const auto archive_views = [] {
@@ -192,10 +225,25 @@ PulseStatus Register(Plugin& plugin, Command command) {
     const auto index = static_cast<size_t>(command);
     const auto& spec = kSpecs[index];
     const auto title = Title(plugin, command);
+    const auto detail = Detail(plugin, command);
+    const bool submenu = plugin.settings->MenuSubmenu();
+    const bool shown = plugin.settings->CommandShown(static_cast<int>(index));
+    plugin.registered[index] = std::string(shown ? "1" : "0") + (submenu ? "1" : "0") + '\n' + title + '\n' + detail;
+    if (!shown) {
+        // Turned off in the settings: not in the menu, the palette or the toolbar.
+        plugin.registrations[index].Reset();
+        plugin.ids[index] = 0;
+        plugin.titles[index] = title;
+        return PULSE_OK;
+    }
+    static const std::string group = text::Get(T::SettingsTitle);
     PulseCommandDescriptor descriptor{};
     descriptor.size = sizeof(descriptor);
     descriptor.id = View(spec.id);
     descriptor.title = View(title);
+    descriptor.detail = View(detail);
+    descriptor.group = View(group);
+    descriptor.flags = submenu ? PULSE_COMMAND_GROUP_SUBMENU : 0u;
     descriptor.icon = spec.icon;
     descriptor.kinds = spec.kinds;
     descriptor.min_selection = 1;
@@ -228,9 +276,11 @@ PulseStatus RegisterCommands(Plugin& plugin) {
 void Refresh(Plugin& plugin) {
     plugin.jobs->RememberPasswords(plugin.settings->RememberPasswords());
     bool changed = false;
-    for (const auto command : {Command::Extract, Command::Quick}) {
-        const auto index = static_cast<size_t>(command);
-        changed = changed || (plugin.ids[index] && plugin.titles[index] != Title(plugin, command));
+    for (size_t index = 0; index < static_cast<size_t>(Command::Count); ++index) {
+        const auto command = static_cast<Command>(index);
+        const auto signature = std::string(plugin.settings->CommandShown(static_cast<int>(index)) ? "1" : "0") +
+            (plugin.settings->MenuSubmenu() ? "1" : "0") + '\n' + Title(plugin, command) + '\n' + Detail(plugin, command);
+        changed = changed || plugin.registered[index] != signature;
     }
     // The host lists commands in registration order, so re-register all of them to keep the menu order.
     if (changed) RegisterCommands(plugin);
@@ -241,7 +291,9 @@ PulseStatus PULSE_CALL Preview(void*, const PulsePreviewRequest* request) {
         !request->path.length || request->path.length > 131072) return PULSE_ERROR_ARGUMENT;
     try {
         const auto cancelled = [&] { return request->cancelled(request->context) != 0; };
-        const auto listing = engine::List(Wide(request->path), cancelled, {}, 4096);
+        auto budget = engine::PreviewBudget();
+        budget.max_entries = 4096;
+        const auto listing = engine::List(Wide(request->path), cancelled, {}, 4096, budget);
         if (cancelled() || listing.status == engine::Status::Cancelled) return PULSE_ERROR_STATE;
         if (listing.status != engine::Status::Ok) return PULSE_ERROR_UNAVAILABLE;
         std::vector<std::string> names;
@@ -292,6 +344,7 @@ void PULSE_CALL Destroy(void* value) {
     if (plugin->dispatch) plugin->dispatch->Close();
     plugin->jobs.reset();
     plugin->settings.reset();
+    engine::ShutdownWorkers();
     delete plugin;
 }
 } // namespace

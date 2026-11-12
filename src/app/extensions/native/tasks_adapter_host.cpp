@@ -17,6 +17,13 @@ ops::OpStatus Progress(const TaskSnapshot& source) {
     value.completed_items = source.completed_items; value.total_items = source.total_items;
     value.transferred_bytes = source.completed_bytes; value.total_bytes = source.total_bytes;
     value.current_item = Wide(source.current_item); value.last_error = Wide(source.error);
+    value.external_step = source.step; value.external_linked = source.linked_operation;
+    value.external_note = Wide(source.note); value.external_detail = Wide(source.detail);
+    value.external_assurance = Wide(source.assurance);
+    value.external_log = Wide(source.log);
+    value.external_result = Wide(source.result);
+    value.external_result_path = Wide(source.result_path);
+    for (const auto& action : source.actions) value.external_actions.push_back({action.id, Wide(action.text), action.primary});
     return value;
 }
 }
@@ -28,9 +35,13 @@ TasksBackend MakeTasksBackend(HWND owner) {
         if (!app) return false;
         const auto [slot, inserted] = ids->emplace(value.id, 0);
         if (!inserted) return false;
-        const auto id = app->ops.CreateExternalTask(Wide(value.title), Wide(value.type));
+        std::vector<std::wstring> steps;
+        for (const auto& step : value.steps) steps.push_back(Wide(step));
+        const auto id = app->ops.CreateExternalTask(Wide(value.title), Wide(value.type), Wide(value.source),
+                                                    Wide(value.destination), std::move(steps));
         if (!id) { ids->erase(slot); return false; }
         slot->second = id;
+        if (value.act) app->ops.SetExternalTaskActionHandler(id, value.act);
         return true;
     };
     backend.update = [owner, ids](const TaskSnapshot& value) {

@@ -20,8 +20,10 @@ public:
     PulseStatus Activate();
     PulseStatus Deactivate();
     PulseStatus Close();
+    void SetPackageId(std::string package_id) { package_id_ = std::move(package_id); }
     bool Loaded() const noexcept { return library_ != nullptr; }
     bool Active() const noexcept { return active_; }
+    bool Invoking() const noexcept { return invoking_; }
     // The loaded image, for crash attribution only; never FreeLibrary it.
     HMODULE Library() const noexcept { return library_; }
 private:
@@ -32,6 +34,7 @@ private:
     PulseHostV1 host_{};
     PulsePluginV1 plugin_{};
     std::vector<HANDLE> package_locks_;
+    std::string package_id_;
     bool package_dependencies_ = false;
     bool active_ = false;
     bool invoking_ = false;

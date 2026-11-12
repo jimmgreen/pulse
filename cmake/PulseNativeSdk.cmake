@@ -46,18 +46,58 @@ if(TARGET pulse_crash_reporter)
             target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)
         endforeach()
     endif()
+
+    add_executable(pulse_native_runtime_overhaul_test EXCLUDE_FROM_ALL
+        "${PULSE_NATIVE_ROOT}/src/bench/native_runtime_overhaul_test.cpp"
+        "${PULSE_NATIVE_ROOT}/src/app/extensions/native/worker_budget.cpp"
+        "${PULSE_NATIVE_ROOT}/src/app/extensions/native/tasks_adapter.cpp"
+        "${PULSE_NATIVE_ROOT}/src/app/extensions/native/commands_adapter.cpp"
+        "${PULSE_NATIVE_ROOT}/src/app/extensions/native/crash_guard.cpp")
+    target_include_directories(pulse_native_runtime_overhaul_test PRIVATE "${PULSE_NATIVE_ROOT}/sdk/native/include")
+    target_compile_features(pulse_native_runtime_overhaul_test PRIVATE cxx_std_20)
+    target_compile_definitions(pulse_native_runtime_overhaul_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(pulse_native_runtime_overhaul_test PRIVATE /W4 /permissive- /utf-8)
+    target_link_libraries(pulse_native_runtime_overhaul_test PRIVATE pulse_crash_reporter psapi delayimp)
+    target_link_options(pulse_native_runtime_overhaul_test PRIVATE /DELAYLOAD:shell32.dll)
 endif()
 
 add_executable(pulse_native_commands_test
     "${PULSE_NATIVE_ROOT}/src/bench/native_sdk/commands_test.cpp"
-    "${PULSE_NATIVE_ROOT}/src/app/extensions/native/commands_adapter.cpp")
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/native/commands_adapter.cpp"
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/native/icons_adapter.cpp")
 target_include_directories(pulse_native_commands_test PRIVATE "${PULSE_NATIVE_ROOT}/sdk/native/include")
 target_compile_features(pulse_native_commands_test PRIVATE cxx_std_20)
 target_compile_definitions(pulse_native_commands_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(pulse_native_commands_test PRIVATE /W4 /permissive- /utf-8)
 
+set(_pulse_ui_svc_saved_cxx_std_libs "${CMAKE_CXX_STANDARD_LIBRARIES}")
+set(CMAKE_CXX_STANDARD_LIBRARIES "kernel32.lib")
+add_executable(pulse_native_ui_services_test
+    "${PULSE_NATIVE_ROOT}/src/bench/native_sdk/ui_services_test.cpp"
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/native/diagnostics_adapter.cpp"
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/native/dialogs_adapter.cpp"
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/native/pickers_adapter.cpp"
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/native/workbench_adapter.cpp"
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/native/ui_model.cpp"
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/ui_tree.cpp"
+    "${PULSE_NATIVE_ROOT}/src/common/json_value.cpp")
+target_include_directories(pulse_native_ui_services_test PRIVATE "${PULSE_NATIVE_ROOT}/sdk/native/include")
+target_compile_features(pulse_native_ui_services_test PRIVATE cxx_std_20)
+target_compile_definitions(pulse_native_ui_services_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(pulse_native_ui_services_test PRIVATE kernel32)
+if(MSVC)
+    target_compile_options(pulse_native_ui_services_test PRIVATE /W4 /WX /permissive- /utf-8 /EHsc)
+    target_link_options(pulse_native_ui_services_test PRIVATE
+        /NODEFAULTLIB:user32.lib
+        /NODEFAULTLIB:gdi32.lib
+        /NODEFAULTLIB:shell32.lib)
+endif()
+set(CMAKE_CXX_STANDARD_LIBRARIES "${_pulse_ui_svc_saved_cxx_std_libs}")
+unset(_pulse_ui_svc_saved_cxx_std_libs)
+
 add_executable(pulse_native_previews_test
     "${PULSE_NATIVE_ROOT}/src/bench/native_sdk/previews_test.cpp"
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/native/worker_budget.cpp"
     "${PULSE_NATIVE_ROOT}/src/app/extensions/native/previews_adapter.cpp"
     "${PULSE_NATIVE_ROOT}/src/app/extensions/native/ui_model.cpp"
     "${PULSE_NATIVE_ROOT}/src/app/extensions/ui_tree.cpp"
@@ -69,10 +109,20 @@ target_link_libraries(pulse_native_previews_test PRIVATE user32 shlwapi)
 
 add_executable(pulse_native_tasks_test
     "${PULSE_NATIVE_ROOT}/src/bench/native_sdk/tasks_test.cpp"
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/native/worker_budget.cpp"
     "${PULSE_NATIVE_ROOT}/src/app/extensions/native/tasks_adapter.cpp")
 target_compile_features(pulse_native_tasks_test PRIVATE cxx_std_20)
 target_compile_definitions(pulse_native_tasks_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(pulse_native_tasks_test PRIVATE /W4 /permissive- /utf-8)
+
+add_executable(pulse_native_worker_budget_test
+    "${PULSE_NATIVE_ROOT}/src/bench/native_worker_budget_test.cpp"
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/native/worker_budget.cpp"
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/native/tasks_adapter.cpp")
+target_include_directories(pulse_native_worker_budget_test PRIVATE "${PULSE_NATIVE_ROOT}/sdk/native/include")
+target_compile_features(pulse_native_worker_budget_test PRIVATE cxx_std_20)
+target_compile_definitions(pulse_native_worker_budget_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(pulse_native_worker_budget_test PRIVATE /W4 /WX /permissive- /utf-8)
 
 add_executable(pulse_native_staging_test
     "${PULSE_NATIVE_ROOT}/src/bench/native_sdk/staging_test.cpp"

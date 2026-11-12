@@ -11,6 +11,7 @@ inline constexpr size_t kMaxCatalogSignatureBytes = 16384;
 inline constexpr size_t kMaxCatalogPublishers = 512;
 inline constexpr size_t kMaxCatalogExtensions = 2048;
 inline constexpr size_t kMaxCatalogReleases = 8192;
+inline constexpr uint64_t kMaxCatalogSequence = 1ull << 53;
 inline constexpr std::string_view kOfficialCatalogPublisher =
     "86f9a10e981d16ac677eb11b9c45e82bf38a7e00c0d3d271e84ef9e0d7a4762b";
 
@@ -37,6 +38,8 @@ struct Extension {
 };
 struct Catalog {
     std::string generated;
+    std::string expires; // Optional YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ; empty in legacy v1 catalogs.
+    uint64_t sequence = 0; // Optional monotonic counter in [1, kMaxCatalogSequence]; 0 when absent.
     std::vector<Publisher> publishers;
     std::vector<Extension> extensions;
 };

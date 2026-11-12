@@ -31,6 +31,32 @@ bool PublicKey(const std::vector<UCHAR>& bytes){
         header.BitLength%8==0&&header.cbModulus==header.BitLength/8&&header.cbPublicExp>=1&&header.cbPublicExp<=8&&
         header.cbPrime1==0&&header.cbPrime2==0&&bytes.size()==sizeof(header)+header.cbPublicExp+header.cbModulus;
 }
+bool FieldsWithOptional(const json::Value& value,std::initializer_list<std::string_view> required,std::initializer_list<std::string_view> optional){
+    if(!value.is_object())return false;
+    for(auto key:required)if(!value.find(key))return false;
+    for(const auto& key:value.keys()){
+        if(std::find(required.begin(),required.end(),key)==required.end()&&
+           std::find(optional.begin(),optional.end(),key)==optional.end())return false;
+    }
+    return true;
+}
+bool StrictIntegerTokens(std::string_view s){
+    bool quoted=false;
+    for(size_t i=0;i<s.size();++i){
+        const char c=s[i];
+        if(quoted){if(c=='\\')++i;else if(c=='"')quoted=false;}
+        else if(c=='"')quoted=true;
+        else if(c=='-'||(c>='0'&&c<='9')){
+            while(i+1<s.size()){
+                const char next=s[i+1];
+                if(next=='.'||next=='e'||next=='E')return false;
+                if(next<'0'||next>'9')break;
+                ++i;
+            }
+        }
+    }
+    return true;
+}
 }
 bool VerifyPackageSignature(std::string_view manifest,std::string_view signature,std::string_view policy,std::string& error){
     auto fail=[&](const char* code){error=code;return false;};error.clear();
@@ -68,5 +94,72 @@ bool VerifyPackageSignature(std::string_view manifest,std::string_view signature
     BCRYPT_PKCS1_PADDING_INFO padding{BCRYPT_SHA256_ALGORITHM};
     if(BCryptVerifySignature(key.value,&padding,hash.data(),static_cast<ULONG>(hash.size()),sig.data(),static_cast<ULONG>(sig.size()),BCRYPT_PAD_PKCS1)<0)return fail("signature_invalid");
     return true;
+}
+bool VerifyPublisherRotation(std::string_view id,std::string_view old_publisher_id,std::string_view old_public_key,
+    std::string_view new_publisher_id,std::string_view new_public_key,std::string_view rotation,std::string& error){
+    auto fail=[&](const char* code){error=code;return false;};error.clear();
+    if(rotation.empty()||rotation.size()>16384)return fail("rotation_size_limit");
+    if(!publish_trust_detail::ValidPackageId(id))return fail("invalid_rotation_id");
+    if(!publish_trust_detail::ValidPublisherPin(old_publisher_id)||!publish_trust_detail::ValidPublisherPin(new_publisher_id)||
+       old_publisher_id==new_publisher_id)return fail("invalid_rotation_publisher");
+    std::vector<UCHAR> old_blob,new_blob;
+    if(!Hex(old_public_key,old_blob)||!PublicKey(old_blob)||!Hex(new_public_key,new_blob)||!PublicKey(new_blob))return fail("invalid_publisher_key");
+    if(PackageRevision(std::string_view(reinterpret_cast<const char*>(old_blob.data()),old_blob.size()))!=old_publisher_id||
+       PackageRevision(std::string_view(reinterpret_cast<const char*>(new_blob.data()),new_blob.size()))!=new_publisher_id)return fail("invalid_publisher_pin");
+    Algorithm algorithm;Key old_key,new_key;
+    if(BCryptOpenAlgorithmProvider(&algorithm.value,BCRYPT_RSA_ALGORITHM,nullptr,0)<0||
+       BCryptImportKeyPair(algorithm.value,nullptr,BCRYPT_RSAPUBLIC_BLOB,&old_key.value,old_blob.data(),static_cast<ULONG>(old_blob.size()),0)<0||
+       BCryptImportKeyPair(algorithm.value,nullptr,BCRYPT_RSAPUBLIC_BLOB,&new_key.value,new_blob.data(),static_cast<ULONG>(new_blob.size()),0)<0)return fail("invalid_publisher_key");
+    json::Value doc;
+    if(!StrictIntegerTokens(rotation)||!json::Parse(rotation,doc,nullptr,{16384,4})||
+       !FieldsWithOptional(doc,{"formatVersion","algorithm","id","oldPublisher","newPublisher","signature"},{"oldPublicKey","newPublicKey"}))
+        return fail("invalid_rotation_format");
+    int64_t version=0;const auto* v=doc.find("formatVersion");
+    if(!v||!v->get_int(version,1,1)||doc.get_string("algorithm")!="RSA-PKCS1-SHA256")return fail("unsupported_rotation_format");
+    if(doc.get_string("id")!=id||doc.get_string("oldPublisher")!=old_publisher_id||doc.get_string("newPublisher")!=new_publisher_id)
+        return fail("rotation_identity_mismatch");
+    if(const auto* ok=doc.find("oldPublicKey");ok&&(!ok->is_string()||ok->as_string()!=old_public_key))return fail("rotation_key_mismatch");
+    if(const auto* nk=doc.find("newPublicKey");nk&&(!nk->is_string()||nk->as_string()!=new_public_key))return fail("rotation_key_mismatch");
+    std::vector<UCHAR> sig;
+    if(!Hex(doc.get_string("signature"),sig)||sig.size()<256||sig.size()>512)return fail("invalid_rotation_format");
+    constexpr char prefix[]="Pulse.Extension.Publisher.Rotation\0v1\0";
+    std::string payload(prefix,sizeof(prefix)-1);
+    payload.append(id);payload.push_back('\n');
+    payload.append(old_publisher_id);payload.push_back('\n');
+    payload.append(new_publisher_id);
+    std::vector<UCHAR> hash;
+    if(!Hex(PackageRevision(payload),hash)||hash.size()!=32)return fail("rotation_hash_failed");
+    BCRYPT_PKCS1_PADDING_INFO padding{BCRYPT_SHA256_ALGORITHM};
+    if(BCryptVerifySignature(old_key.value,&padding,hash.data(),static_cast<ULONG>(hash.size()),sig.data(),static_cast<ULONG>(sig.size()),BCRYPT_PAD_PKCS1)<0)
+        return fail("rotation_signature_invalid");
+    return true;
+}
+bool VerifyPublisherRotationPolicy(std::string_view id,std::string_view old_publisher_id,std::string_view new_publisher_id,
+    std::string_view rotation,std::string_view policy,std::string& error){
+    auto fail=[&](const char* code){error=code;return false;};error.clear();
+    if(rotation.empty()||rotation.size()>16384||policy.empty()||policy.size()>65536)return fail("rotation_size_limit");
+    json::Value rules;
+    if(!json::Parse(policy,rules,nullptr,{65536,5})||!Only(rules,{"formatVersion","requireSigned","publishers"}))return fail("invalid_signature_policy");
+    int64_t version=0;const auto* v=rules.find("formatVersion");const auto* require=rules.find("requireSigned");const auto* publishers=rules.find("publishers");
+    if(!v||!v->get_int(version,1,1)||!require||!require->is_bool()||!publishers||!publishers->is_array()||publishers->size()>32)return fail("invalid_signature_policy");
+    std::set<std::string> pins;
+    std::string old_key_hex,new_key_hex;
+    for(const auto& entry:publishers->items()){
+        std::vector<UCHAR> blob;
+        if(!Only(entry,{"id","publicKey"})||!Hex(entry.get_string("publicKey"),blob)||!PublicKey(blob))return fail("invalid_publisher_key");
+        const auto pin=PackageRevision(std::string_view(reinterpret_cast<const char*>(blob.data()),blob.size()));
+        if(pin.size()!=64||entry.get_string("id")!=pin||!pins.insert(pin).second)return fail("invalid_publisher_pin");
+        if(pin==old_publisher_id)old_key_hex=entry.get_string("publicKey");
+        if(pin==new_publisher_id)new_key_hex=entry.get_string("publicKey");
+    }
+    if(new_key_hex.empty())return fail("unknown_new_publisher");
+    if(old_key_hex.empty()){
+        json::Value doc;
+        if(!StrictIntegerTokens(rotation)||!json::Parse(rotation,doc,nullptr,{16384,4}))return fail("invalid_rotation_format");
+        const auto* supplied=doc.find("oldPublicKey");
+        if(!supplied||!supplied->is_string()||supplied->as_string().empty())return fail("unknown_old_publisher");
+        old_key_hex=supplied->as_string();
+    }
+    return VerifyPublisherRotation(id,old_publisher_id,old_key_hex,new_publisher_id,new_key_hex,rotation,error);
 }
 }

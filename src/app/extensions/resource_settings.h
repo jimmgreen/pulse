@@ -11,4 +11,5 @@ json::Value ReadOwnSettings(const std::wstring &root_directory, std::string_view
 json::Value WriteOwnSetting(const std::wstring &root_directory, std::string_view package_id,
                             std::string_view key, const std::optional<std::string> &value,
                             uint64_t expected_version, const std::function<bool()> &authorized);
+json::Value PurgeOwnSettings(const std::wstring &root_directory, std::string_view package_id);
 } // namespace pulse::extensions

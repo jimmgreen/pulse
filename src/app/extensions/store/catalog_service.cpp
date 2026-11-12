@@ -5,13 +5,19 @@
 
 namespace pulse::extensions::store {
 CatalogService::CatalogService() : fetch_([](const std::filesystem::path& path,
-    const std::atomic<bool>& cancelled, CatalogSnapshot& out, std::string& error) {
-    return FetchCatalog(path, cancelled, out, error);
+    const std::atomic<bool>& cancelled, CatalogSnapshot& out, std::string& error, const CatalogCacheReady& cache_ready) {
+    return FetchCatalog(path, cancelled, out, error, app::ReadUpdateResponse, cache_ready);
 }) {
     worker_ = std::thread(&CatalogService::Run, this);
 }
 #ifdef PULSE_EXTENSION_CATALOG_SERVICE_TESTING
-CatalogService::CatalogService(FetchOperation fetch) : fetch_(std::move(fetch)) {
+CatalogService::CatalogService(FetchOperation fetch) {
+    if(!fetch) throw std::invalid_argument("missing catalog fetch operation");
+    fetch_=[operation=std::move(fetch)](const std::filesystem::path& path,const std::atomic<bool>& cancelled,
+        CatalogSnapshot& out,std::string& error,const CatalogCacheReady&) {return operation(path,cancelled,out,error);};
+    worker_=std::thread(&CatalogService::Run,this);
+}
+CatalogService::CatalogService(ProgressiveFetchOperation fetch) : fetch_(std::move(fetch)) {
     if (!fetch_) throw std::invalid_argument("missing catalog fetch operation");
     worker_ = std::thread(&CatalogService::Run, this);
 }
@@ -38,7 +44,7 @@ uint64_t CatalogService::Refresh(const std::filesystem::path& cache_file) {
         generation = snapshot_.generation + 1;
         request.generation = generation;
         pending_ = std::move(request);
-        snapshot_ = {CatalogServiceState::Loading, generation, {}, {}};
+        snapshot_ = {CatalogServiceState::Loading, generation, snapshot_.result, {}, snapshot_.revision+1};
     }
     wake_.notify_one();
     changed_.notify_all();
@@ -53,7 +59,7 @@ uint64_t CatalogService::Cancel() {
         if (pending_) pending_->cancelled->store(true);
         pending_.reset();
         generation = snapshot_.generation + 1;
-        snapshot_ = {CatalogServiceState::Cancelled, generation, {}, "cancelled"};
+        snapshot_ = {CatalogServiceState::Cancelled, generation, snapshot_.result, "cancelled",snapshot_.revision+1};
     }
     changed_.notify_all();
     return generation;
@@ -70,7 +76,7 @@ void CatalogService::Stop() {
         if (active_) active_->store(true);
         if (pending_) pending_->cancelled->store(true);
         pending_.reset();
-        snapshot_ = {CatalogServiceState::Cancelled, snapshot_.generation + 1, {}, "catalog_service_stopped"};
+        snapshot_ = {CatalogServiceState::Cancelled, snapshot_.generation + 1, {}, "catalog_service_stopped",snapshot_.revision+1};
     }
     wake_.notify_one();
     changed_.notify_all();
@@ -92,7 +98,17 @@ void CatalogService::Run() {
             CatalogSnapshot result;
             std::string error;
             const auto status = request->cancelled->load() ? CatalogFetchStatus::Cancelled :
-                fetch_(request->cache_file, *request->cancelled, result, error);
+                fetch_(request->cache_file, *request->cancelled, result, error,[&](const CatalogSnapshot& cached) {
+                    auto verified=std::make_shared<const CatalogSnapshot>(cached);
+                    {
+                        std::lock_guard lock(mutex_);
+                        if(stopping_ || request->cancelled->load() || snapshot_.generation!=request->generation) return;
+                        // Never replace a newer retained verified catalog with older disk bytes.
+                        if(snapshot_.result && snapshot_.result->catalog.generated>cached.catalog.generated) return;
+                        snapshot_.result=std::move(verified); ++snapshot_.revision;
+                    }
+                    changed_.notify_all();
+                });
             if (request->cancelled->load() || status == CatalogFetchStatus::Cancelled) {
                 completed.state = CatalogServiceState::Cancelled;
                 completed.error = "cancelled";
@@ -116,7 +132,16 @@ void CatalogService::Run() {
             active_.reset();
             // A late success (including a non-cooperative operation) never replaces
             // the state of Refresh/Cancel/Stop issued while the request was running.
-            if (!stopping_ && snapshot_.generation == request->generation) snapshot_ = std::move(completed);
+            if (!stopping_ && snapshot_.generation == request->generation) {
+                if(completed.state==CatalogServiceState::Failed || completed.state==CatalogServiceState::Cancelled) completed.result=snapshot_.result;
+                if(completed.result && snapshot_.result && completed.result->catalog.generated<snapshot_.result->catalog.generated) {
+                    completed.result=snapshot_.result;
+                    completed.state=CatalogServiceState::Offline;
+                    completed.error="catalog_rollback_rejected_against_retained";
+                }
+                completed.revision=snapshot_.revision+1;
+                snapshot_ = std::move(completed);
+            }
         }
         changed_.notify_all();
     }

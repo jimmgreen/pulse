@@ -12,31 +12,51 @@ foreach(file 7z.dll License.txt)
     configure_file("${PULSE_7ZIP_DIR}/${file}" "${CMAKE_CURRENT_BINARY_DIR}/${file}" COPYONLY)
 endforeach()
 configure_file("${CMAKE_CURRENT_LIST_DIR}/NOTICE.txt" "${CMAKE_CURRENT_BINARY_DIR}/NOTICE.txt" COPYONLY)
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/7z.lib"
-    COMMAND "${CMAKE_AR}" /nologo /machine:x64 "/def:${CMAKE_CURRENT_LIST_DIR}/7z.def" "/out:${CMAKE_CURRENT_BINARY_DIR}/7z.lib"
-    DEPENDS 7z.def VERBATIM)
-add_custom_target(pulse_7zip_import DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/7z.lib")
 
 file(GLOB PULSE_PUBLIC_HEADERS CONFIGURE_DEPENDS "${PULSE_SDK_INCLUDE}/pulse/*.h" "${PULSE_SDK_INCLUDE}/pulse/*.hpp")
-set(ENGINE_SOURCES engine.cpp)
-set(PLUGIN_SOURCES plugin.cpp text.cpp settings.cpp jobs.cpp dialogs.cpp)
 
-add_library(pulse_7zip_engine STATIC ${ENGINE_SOURCES})
-add_dependencies(pulse_7zip_engine pulse_7zip_import)
+# 7z.dll engine: linked ONLY into pulse_7zip_worker.exe (and engine_test), NEVER into pulse_7zip.dll.
+add_library(pulse_7zip_engine STATIC engine.cpp)
 target_compile_features(pulse_7zip_engine PUBLIC cxx_std_20)
 target_compile_options(pulse_7zip_engine PRIVATE /W4 /permissive- /utf-8)
 target_compile_definitions(pulse_7zip_engine PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(pulse_7zip_engine PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/7z.lib" ole32 oleaut32 uuid bcrypt)
+target_link_libraries(pulse_7zip_engine PUBLIC uuid bcrypt)
 
+# Authenticated Named Pipe transport shared by pulse_7zip.dll and pulse_7zip_worker.exe.
+add_library(pulse_7zip_ipc STATIC worker_ipc.cpp)
+target_compile_features(pulse_7zip_ipc PUBLIC cxx_std_20)
+target_compile_options(pulse_7zip_ipc PRIVATE /W4 /permissive- /utf-8)
+target_compile_definitions(pulse_7zip_ipc PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(pulse_7zip_ipc PUBLIC advapi32 bcrypt)
+
+# Out-of-process worker hosting 7z.dll under a restricted Windows Job Object.
+add_executable(pulse_7zip_worker worker_main.cpp worker.manifest)
+target_compile_options(pulse_7zip_worker PRIVATE /W4 /permissive- /utf-8)
+target_link_options(pulse_7zip_worker PRIVATE /INCREMENTAL:NO /OPT:REF)
+target_link_libraries(pulse_7zip_worker PRIVATE pulse_7zip_engine pulse_7zip_ipc)
+
+# Host-facing UI/command/preview/task extension DLL (zero 7z.dll linkage).
+set(PLUGIN_SOURCES plugin.cpp text.cpp settings.cpp jobs.cpp dialogs.cpp worker_client.cpp)
 add_library(pulse_7zip SHARED ${PLUGIN_SOURCES})
 set_source_files_properties(${PLUGIN_SOURCES} PROPERTIES OBJECT_DEPENDS "${PULSE_PUBLIC_HEADERS}")
 target_include_directories(pulse_7zip PRIVATE "${PULSE_SDK_INCLUDE}")
+target_compile_features(pulse_7zip PRIVATE cxx_std_20)
 target_compile_options(pulse_7zip PRIVATE /W4 /permissive- /utf-8)
-target_link_libraries(pulse_7zip PRIVATE pulse_7zip_engine user32 shell32)
+target_compile_definitions(pulse_7zip PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_options(pulse_7zip PRIVATE /INCREMENTAL:NO /OPT:REF)
+target_link_libraries(pulse_7zip PRIVATE pulse_7zip_ipc user32 shell32)
+add_dependencies(pulse_7zip pulse_7zip_worker)
 
-option(PULSE_7ZIP_TESTS "Build the engine round-trip test" ON)
+option(PULSE_7ZIP_TESTS "Build the engine and worker isolation tests" ON)
 if(PULSE_7ZIP_TESTS)
-    add_executable(pulse_7zip_engine_test engine_test.cpp)
+    add_executable(pulse_7zip_engine_test engine_test.cpp worker.manifest)
     target_compile_options(pulse_7zip_engine_test PRIVATE /W4 /permissive- /utf-8)
+    target_link_options(pulse_7zip_engine_test PRIVATE /INCREMENTAL:NO /OPT:REF)
     target_link_libraries(pulse_7zip_engine_test PRIVATE pulse_7zip_engine)
+
+    add_executable(pulse_7zip_worker_isolation_test worker_isolation_test.cpp worker_client.cpp worker.manifest)
+    target_compile_options(pulse_7zip_worker_isolation_test PRIVATE /W4 /permissive- /utf-8)
+    target_link_options(pulse_7zip_worker_isolation_test PRIVATE /INCREMENTAL:NO /OPT:REF)
+    target_link_libraries(pulse_7zip_worker_isolation_test PRIVATE pulse_7zip_ipc)
+    add_dependencies(pulse_7zip_worker_isolation_test pulse_7zip pulse_7zip_worker)
 endif()

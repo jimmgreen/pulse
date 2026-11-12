@@ -1,7 +1,11 @@
+#include "../app/extensions/icon_registry.h"
 #include "../app/extensions/manifest.h"
+#include "../app/extensions/native/ui_model.h"
 #include "../app/extensions/native_image_verify.h"
 #include "../app/extensions/package_store.h"
+#include "../app/extensions/ui_tree.h"
 #include "../common/json_value.h"
+#include <pulse/client.hpp>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -36,7 +40,7 @@ template<class T>
 void Put(std::string& bytes, size_t offset, const T& value) {
     std::memcpy(bytes.data() + offset, &value, sizeof(value));
 }
-std::string Image() {
+std::string Image(bool dll = true) {
     std::string bytes(1024, '\0');
     IMAGE_DOS_HEADER dos{}; dos.e_magic = IMAGE_DOS_SIGNATURE; dos.e_lfanew = 128;
     Put(bytes, 0, dos);
@@ -44,7 +48,7 @@ std::string Image() {
     IMAGE_FILE_HEADER file{};
     file.Machine = IMAGE_FILE_MACHINE_AMD64; file.NumberOfSections = 1;
     file.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER64);
-    file.Characteristics = IMAGE_FILE_DLL | IMAGE_FILE_EXECUTABLE_IMAGE;
+    file.Characteristics = (dll ? IMAGE_FILE_DLL : 0) | IMAGE_FILE_EXECUTABLE_IMAGE;
     Put(bytes, 132, file);
     IMAGE_OPTIONAL_HEADER64 optional{};
     optional.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC; optional.SizeOfImage = 8192;
@@ -136,6 +140,33 @@ void ManifestCases() {
     auto changed = native; changed.set("sha256", std::string(64, 'b'));
     Check(PackageRevision(pulse::json::Serialize(Manifest("native", native))) !=
         PackageRevision(pulse::json::Serialize(Manifest("native", changed))), "native binary hash change creates a new manifest revision");
+    {
+        std::ifstream sz_in("extensions/7zip/manifest.json", std::ios::binary);
+        std::string sz_bytes((std::istreambuf_iterator<char>(sz_in)), {});
+        const auto sz = ParseManifest(sz_bytes);
+        Check(sz && sz.manifest->id == "pulse.7zip" && sz.manifest->command_contributions_declared &&
+            sz.manifest->command_contributions.size() == 6 &&
+            sz.manifest->command_contributions[0].id == "extract" &&
+            sz.manifest->command_contributions[0].extensions.size() == 32,
+            "official 7-Zip manifest static command contributions parse cleanly");
+        auto empty_contributes = Manifest("native", native);
+        auto contributes = Value::Object();
+        contributes.set("commands", Value::Array());
+        empty_contributes.set("contributes", contributes);
+        const auto empty_parsed = ParseManifest(pulse::json::Serialize(empty_contributes));
+        Check(empty_parsed && empty_parsed.manifest->command_contributions_declared &&
+            empty_parsed.manifest->command_contributions.empty(),
+            "explicit empty contributes.commands marks static command discovery");
+        auto bad_ext = empty_contributes;
+        auto cmds = Value::Array();
+        auto cmd = Value::Object();
+        cmd.set("id", "run"); cmd.set("title", "Run");
+        auto exts = Value::Array(); exts.push(".ZIP"); cmd.set("extensions", exts);
+        cmds.push(cmd);
+        contributes.set("commands", cmds);
+        bad_ext.set("contributes", contributes);
+        Check(!ParseManifest(pulse::json::Serialize(bad_ext)), "contributes.commands rejects uppercase file extensions");
+    }
 }
 void ImageAndStoreCases() {
     Fixture fixture;
@@ -217,10 +248,183 @@ void ImageAndStoreCases() {
     Check(loaded && loaded.packages.size() == 1 && loaded.native_paths.size() == 1 && loaded.native_paths[0].empty(),
         "disabled native package never opens its missing binaries directory or DLL");
     fixture.Registry({native}); fixture.RejectStore("enabled native package rejects missing binaries directory");
+    {
+        const auto dll_bytes = Image(true);
+        const auto exe_bytes = Image(false);
+        Check(ValidateNativeImageBytes(dll_bytes) && !ValidateNativeImageBytes(exe_bytes),
+            "DLL validator accepts AMD64 PE32+ DLL and rejects executable");
+        Check(ValidateNativeExecutableBytes(exe_bytes) && !ValidateNativeExecutableBytes(dll_bytes),
+            "executable sidecar validator accepts AMD64 PE32+ executable and rejects DLL");
+        const auto dll_sha = PackageRevision(dll_bytes);
+        const auto exe_sha = PackageRevision(exe_bytes);
+        auto pkg_native = Native(dll_sha);
+        auto sidecars = Value::Array();
+        auto worker_file = Value::Object();
+        worker_file.set("path", "pulse_7zip_worker.exe");
+        worker_file.set("sha256", exe_sha);
+        sidecars.push(worker_file);
+        pkg_native.set("files", sidecars);
+        const auto pkg_manifest = Manifest("worker.pkg", pkg_native);
+        const auto pkg_entry = fixture.Entry("worker.pkg", pkg_manifest);
+        const auto rev = pkg_entry.get_string("activeRevision");
+        const auto pkg_dir = fixture.root / "packages" / rev;
+        std::filesystem::create_directories(pkg_dir);
+        fixture.Write(pkg_dir / "plugin.dll", dll_bytes);
+        fixture.Write(pkg_dir / "pulse_7zip_worker.exe", exe_bytes);
+        fixture.Registry({pkg_entry});
+        const auto ok_store = LoadPackageStore(fixture.root.wstring());
+        Check(ok_store && ok_store.packages.size() == 1, "multi-file native package accepts valid AMD64 PE32+ .exe worker sidecar");
+
+        // DLL masquerading as .exe sidecar must fail closed even when SHA-256 matches
+        auto bad_native = Native(dll_sha);
+        auto bad_sidecars = Value::Array();
+        auto bad_worker = Value::Object();
+        bad_worker.set("path", "pulse_7zip_worker.exe");
+        bad_worker.set("sha256", dll_sha);
+        bad_sidecars.push(bad_worker);
+        bad_native.set("files", bad_sidecars);
+        const auto bad_entry = fixture.Entry("worker.pkg", Manifest("worker.pkg", bad_native));
+        const auto bad_rev = bad_entry.get_string("activeRevision");
+        const auto bad_dir = fixture.root / "packages" / bad_rev;
+        std::filesystem::create_directories(bad_dir);
+        fixture.Write(bad_dir / "plugin.dll", dll_bytes);
+        fixture.Write(bad_dir / "pulse_7zip_worker.exe", dll_bytes);
+        fixture.Registry({bad_entry});
+        fixture.RejectStore("multi-file native package rejects DLL masquerading as .exe sidecar");
+    }
+}
+void IconAndCanvasContractCases() {
+    bool all_builtins = icons::kBuiltinIconNames.size() == (PULSE_ICON_BUILTIN_MAX + 1u);
+    for (uint32_t i = 0; i <= PULSE_ICON_BUILTIN_MAX; ++i) {
+        const auto resolved = icons::ResolveBuiltinIconName(icons::kBuiltinIconNames[i]);
+        all_builtins = all_builtins && resolved.has_value() && *resolved == i;
+    }
+    Check(all_builtins &&
+        icons::ResolveBuiltinIconName("compress") == static_cast<uint32_t>(PULSE_ICON_ARCHIVE) &&
+        icons::ResolveBuiltinIconName("settings") == static_cast<uint32_t>(PULSE_ICON_GEAR) &&
+        icons::ResolveBuiltinIconName("delete") == static_cast<uint32_t>(PULSE_ICON_TRASH) &&
+        icons::ResolveBuiltinIconName("extension") == static_cast<uint32_t>(PULSE_ICON_PUZZLE),
+        "all 68 built-in StoreIcon names and aliases resolve bijectively");
+
+    Check(icons::ValidateSvgPathSyntax("M 2 12 L 12 2 H 20 V 22 C 20 22 14 18 12 18 S 4 22 2 12 A 4 4 0 0 1 6 8 Z") &&
+        !icons::ValidateSvgPathSyntax("") &&
+        !icons::ValidateSvgPathSyntax("12 14") &&
+        !icons::ValidateSvgPathSyntax("L 4 4") &&
+        !icons::ValidateSvgPathSyntax("M 2 2 Q 4 4 8 8"),
+        "SVG path validator enforces bounded M/L/H/V/C/S/A/Z command grammar");
+
+    auto& reg = icons::GlobalRegistry();
+    auto icon_builder = pulse::sdk::IconBuilder("dyn-check")
+        .ViewBox(24.0)
+        .StrokePath("M 3 12 L 9 18 L 21 6", 1.8, false, PULSE_ICON_COLOR_ACCENT)
+        .FillPath("M 18 4 L 22 4 L 22 8 Z", PULSE_ICON_COLOR_SUCCESS, 0u, 0.9);
+    const auto& desc = icon_builder.Build();
+    PulseIconId dyn_id = 0;
+    Check(reg.RegisterDynamic("demo.pkg", &desc, &dyn_id) == PULSE_OK && icons::IsCustomIconId(dyn_id),
+        "dynamic multi-layer vector icon registers with custom icon ID");
+    const auto snap1 = reg.Snapshot(dyn_id);
+    Check(snap1 && snap1->layers.size() == 2 && snap1->view_box_milli == 24000u,
+        "registered custom icon snapshot preserves layers and viewBox");
+    auto updated_builder = pulse::sdk::IconBuilder("dyn-check").StrokePath("M 4 4 L 20 20");
+    const auto& updated_desc = updated_builder.Build();
+    Check(reg.UpdateDynamic("demo.pkg", dyn_id, &updated_desc) == PULSE_OK &&
+        reg.UpdateDynamic("other.pkg", dyn_id, &updated_desc) == PULSE_ERROR_STATE,
+        "dynamic icon update enforces package ownership and bumps revision");
+    const auto snap2 = reg.Snapshot(dyn_id);
+    Check(snap2 && snap2->revision > snap1->revision && snap2->layers.size() == 1,
+        "updated custom icon increments geometry cache revision");
+    Check(icons::ResolveWideIconGlyph(L"icon:sparkle") == static_cast<uint32_t>(PULSE_ICON_SPARKLE) &&
+        icons::ResolveWideIconGlyph(L"icon:#" + std::to_wstring(dyn_id)) == dyn_id &&
+        icons::ResolveWideIconGlyph(L"icon:demo.pkg/dyn-check") == dyn_id,
+        "icon glyph strings resolve built-in names, package/name, and numeric icon IDs");
+    Check(reg.UnregisterDynamic("demo.pkg", dyn_id) == PULSE_OK && !reg.Snapshot(dyn_id).has_value(),
+        "unregistering dynamic icon removes snapshot");
+
+    const auto native = Native(std::string(64, 'c'));
+    auto rich = Manifest("demo.icons", native);
+    Value contributes;
+    Check(pulse::json::Parse(R"({
+        "icons": [
+            {
+                "id": "brand",
+                "viewBox": 24,
+                "layers": [
+                    {"path": "M 4 12 L 12 4 L 20 12 L 12 20 Z", "stroke": true, "strokeWidth": 1.8, "color": "accent"},
+                    {"path": "M 10 10 L 14 10 L 14 14 L 10 14 Z", "stroke": false, "fill": true, "closed": true, "color": "#22AA88", "opacity": 0.85}
+                ]
+            }
+        ],
+        "commands": [
+            {
+                "id": "scan-here",
+                "title": {"zh": "扫描此目录", "en": "Scan Folder"},
+                "detail": "{base}",
+                "group": "Demo",
+                "groupIcon": "sparkle",
+                "submenu": true,
+                "primary": true,
+                "separatorBefore": true,
+                "separatorAfter": true,
+                "checked": true,
+                "icon": "brand",
+                "kinds": ["background"],
+                "minSelection": 0,
+                "maxSelection": 0
+            }
+        ]
+    })", contributes), "parse rich contributes fixture JSON");
+    rich.set("contributes", contributes);
+    const auto parsed_rich = ParseManifest(pulse::json::Serialize(rich));
+    Check(parsed_rich &&
+        parsed_rich.manifest->icon_contributions.size() == 1 &&
+        parsed_rich.manifest->command_contributions.size() == 1 &&
+        parsed_rich.manifest->command_contributions[0].kinds == PULSE_COMMAND_BACKGROUND &&
+        parsed_rich.manifest->command_contributions[0].icon_name == "brand" &&
+        parsed_rich.manifest->command_contributions[0].group_icon == PULSE_ICON_SPARKLE &&
+        (parsed_rich.manifest->command_contributions[0].flags &
+            (PULSE_COMMAND_GROUP_SUBMENU | PULSE_COMMAND_PRIMARY | PULSE_COMMAND_SEPARATOR_BEFORE |
+             PULSE_COMMAND_SEPARATOR_AFTER | PULSE_COMMAND_CHECKED)) ==
+            (PULSE_COMMAND_GROUP_SUBMENU | PULSE_COMMAND_PRIMARY | PULSE_COMMAND_SEPARATOR_BEFORE |
+             PULSE_COMMAND_SEPARATOR_AFTER | PULSE_COMMAND_CHECKED),
+        "manifest contributes.icons and extended context-menu command flags parse cleanly");
+    SyncManifestIcons(*parsed_rich.manifest);
+    const auto brand_id = icons::GlobalRegistry().ResolveName("demo.icons", "brand");
+    Check(brand_id.has_value() && icons::IsCustomIconId(*brand_id),
+        "SyncManifestIcons registers manifest vector icons under package namespace");
+    icons::GlobalRegistry().ClearManifestIconsForMissingPackages({});
+
+    auto canvas_node = pulse::sdk::CanvasBuilder("plot")
+        .ViewBox(200, 80)
+        .Clear("surface")
+        .Rect(4, 4, 192, 72, 8, "accent", "none", 1.5)
+        .Path("none", "accent", 2.0, "M 12 60 L 60 28 L 120 44 L 188 16")
+        .Icon("sparkle", 164, 10, 20, "warning")
+        .Text(14, 12, 80, 20, "text", 12, "left", "98%")
+        .MinHeight(80)
+        .State("series")
+        .BuildNode();
+    auto btn_node = pulse::sdk::ModelNode(PULSE_UI_MODEL_BUTTON, "act")
+        .String(&PulseUiModelNode::text, "Sparkle")
+        .String(&PulseUiModelNode::command, "run")
+        .String(&PulseUiModelNode::glyph, pulse::sdk::IconGlyph("sparkle"));
+    auto tree = pulse::sdk::ModelTree(
+        pulse::sdk::ModelNode(PULSE_UI_MODEL_STACK, "root").Children({std::move(canvas_node), std::move(btn_node)}))
+        .State("series", "circle 60 28 4 accent accent 1")
+        .Command("run");
+    UiTree converted;
+    std::set<std::string> declared_cmds;
+    std::string ui_error;
+    Check(native::ConvertUiModel(&tree.Build(), converted, declared_cmds, ui_error) == PULSE_OK &&
+        converted.root.children.size() == 2 &&
+        converted.root.children[0].type == UiNodeType::Canvas &&
+        converted.root.children[0].min_height == 80 &&
+        converted.root.children[0].options.size() == 6 &&
+        converted.root.children[1].glyph == "icon:sparkle",
+        "PULSE_UI_MODEL_CANVAS converts CanvasBuilder draw commands and icon glyph cleanly");
 }
 }
 int main() {
-    try { ManifestCases(); ImageAndStoreCases(); }
+    try { ManifestCases(); ImageAndStoreCases(); IconAndCanvasContractCases(); }
     catch (const std::exception& exception) { std::printf("[FAIL] native fixture: %s\n", exception.what()); return 1; }
     std::printf("native_contract_test: %d failed\n", failures);
     return failures ? 1 : 0;

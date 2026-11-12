@@ -22,7 +22,7 @@ bool ReadStructure(std::string_view bytes, size_t offset, T& value) {
     std::memcpy(&value, bytes.data() + offset, sizeof(T));
     return true;
 }
-bool Amd64Dll(std::string_view bytes) {
+bool Amd64Pe(std::string_view bytes, bool expect_dll) {
     IMAGE_DOS_HEADER dos{};
     if (!ReadStructure(bytes, 0, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
         dos.e_lfanew < static_cast<LONG>(sizeof(dos))) return false;
@@ -32,7 +32,8 @@ bool Amd64Dll(std::string_view bytes) {
     IMAGE_OPTIONAL_HEADER64 optional{};
     if (!ReadStructure(bytes, offset, signature) || signature != IMAGE_NT_SIGNATURE ||
         !ReadStructure(bytes, offset + sizeof(signature), file) || file.Machine != IMAGE_FILE_MACHINE_AMD64 ||
-        !(file.Characteristics & IMAGE_FILE_DLL) || !(file.Characteristics & IMAGE_FILE_EXECUTABLE_IMAGE) ||
+        static_cast<bool>(file.Characteristics & IMAGE_FILE_DLL) != expect_dll ||
+        !(file.Characteristics & IMAGE_FILE_EXECUTABLE_IMAGE) ||
         !file.NumberOfSections || file.NumberOfSections > 96 || file.SizeOfOptionalHeader < sizeof(optional) ||
         !ReadStructure(bytes, offset + sizeof(signature) + sizeof(file), optional) ||
         optional.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC || !optional.SizeOfImage ||
@@ -49,14 +50,19 @@ bool Amd64Dll(std::string_view bytes) {
     }
     return true;
 }
+enum class VerifiedKind { Data, Dll, Exe };
 }
 
 bool ValidateNativeImageBytes(std::string_view bytes) {
-    return bytes.size() <= kMaxNativeImageBytes && Amd64Dll(bytes);
+    return bytes.size() <= kMaxNativeImageBytes && Amd64Pe(bytes, true);
+}
+
+bool ValidateNativeExecutableBytes(std::string_view bytes) {
+    return bytes.size() <= kMaxNativeImageBytes && Amd64Pe(bytes, false);
 }
 
 static bool OpenVerifiedFile(const std::wstring& path, std::string_view expected_sha256,
-    HANDLE& verified_file, std::string& error, std::vector<HANDLE>* ancestor_locks, bool dll) {
+    HANDLE& verified_file, std::string& error, std::vector<HANDLE>* ancestor_locks, VerifiedKind kind) {
     verified_file = INVALID_HANDLE_VALUE;
     error.clear();
     try {
@@ -93,7 +99,7 @@ static bool OpenVerifiedFile(const std::wstring& path, std::string_view expected
             !GetFileInformationByHandle(image.value, &information) ||
             (information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
             !GetFileSizeEx(image.value, &size)) return Fail(error, "Cannot lock a regular, non-reparse native image.");
-        if (size.QuadPart < 0 || (dll && size.QuadPart == 0) || static_cast<unsigned long long>(size.QuadPart) > kMaxNativeImageBytes)
+        if (size.QuadPart < 0 || (kind != VerifiedKind::Data && size.QuadPart == 0) || static_cast<unsigned long long>(size.QuadPart) > kMaxNativeImageBytes)
             return Fail(error, "Native image must contain 1-67108864 bytes.");
         std::string bytes(static_cast<size_t>(size.QuadPart), '\0');
         size_t used = 0;
@@ -104,7 +110,8 @@ static bool OpenVerifiedFile(const std::wstring& path, std::string_view expected
             used += count;
         }
         if (PackageRevision(bytes) != expected_sha256) return Fail(error, "Native image SHA-256 does not match the manifest.");
-        if (dll && !Amd64Dll(bytes)) return Fail(error, "Native image is not a complete AMD64 PE32+ DLL.");
+        if (kind == VerifiedKind::Dll && !Amd64Pe(bytes, true)) return Fail(error, "Native image is not a complete AMD64 PE32+ DLL.");
+        if (kind == VerifiedKind::Exe && !Amd64Pe(bytes, false)) return Fail(error, "Native executable sidecar is not a complete AMD64 PE32+ executable.");
         LARGE_INTEGER start{};
         if (!SetFilePointerEx(image.value, start, nullptr, FILE_BEGIN)) return Fail(error, "Cannot rewind the verified native image.");
         if (ancestor_locks) {
@@ -125,7 +132,7 @@ static bool OpenVerifiedFile(const std::wstring& path, std::string_view expected
 }
 bool OpenVerifiedNativeImage(const std::wstring& path, std::string_view expected_sha256,
     HANDLE& verified_file, std::string& error, std::vector<HANDLE>* ancestor_locks) {
-    return OpenVerifiedFile(path, expected_sha256, verified_file, error, ancestor_locks, true);
+    return OpenVerifiedFile(path, expected_sha256, verified_file, error, ancestor_locks, VerifiedKind::Dll);
 }
 bool OpenVerifiedNativePackage(const std::wstring& entry_path, const NativeRuntime& native,
     std::vector<HANDLE>& locks, std::string& error) {
@@ -143,9 +150,11 @@ bool OpenVerifiedNativePackage(const std::wstring& entry_path, const NativeRunti
             const auto path = i == 0 ? std::filesystem::path(entry_path) : parent / file.path;
             auto extension = path.extension().wstring();
             for (auto& c : extension) if (c >= L'A' && c <= L'Z') c += L'a' - L'A';
+            const auto kind = (i == 0 || extension == L".dll") ? VerifiedKind::Dll
+                : (extension == L".exe" ? VerifiedKind::Exe : VerifiedKind::Data);
             HANDLE handle = INVALID_HANDLE_VALUE;
             std::vector<HANDLE> ancestors;
-            if (!OpenVerifiedFile(path.wstring(), file.sha256, handle, error, &ancestors, i == 0 || extension == L".dll")) {
+            if (!OpenVerifiedFile(path.wstring(), file.sha256, handle, error, &ancestors, kind)) {
                 release(); return false;
             }
             // Reserve before transfer so allocation failure cannot leak acquired locks.

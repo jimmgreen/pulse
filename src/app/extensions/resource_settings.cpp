@@ -117,6 +117,7 @@ struct Paths {
     std::vector<Handle> directories;
     std::wstring directory, target, lock;
     const char *error = "io_error";
+    bool missing_directory = false;
     bool Pin(const std::wstring &path) {
         // Deny directory writes/deletion while traversing and committing: a checked
         // ancestor cannot be renamed or changed into a junction underneath us.
@@ -138,7 +139,7 @@ struct Paths {
         directories.push_back(std::move(handle));
         return true;
     }
-    bool Prepare(const std::wstring &root, std::string_view package) {
+    bool Prepare(const std::wstring &root, std::string_view package, bool create_directory = true) {
         std::wstring absolute;
         if (!Normalize(root, absolute)) {
             error = "invalid_argument";
@@ -170,12 +171,36 @@ struct Paths {
             end = limit;
         }
         directory = absolute + (absolute.back() == L'\\' ? L"" : L"\\") + L"extension-settings";
-        if (!CreateDirectoryW(Extended(directory).c_str(), nullptr) &&
-            GetLastError() != ERROR_ALREADY_EXISTS) {
-            return false;
-        }
-        if (!Pin(directory)) {
-            return false;
+        if (!create_directory) {
+            Handle handle(CreateFileW(Extended(directory).c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+                                      nullptr, OPEN_EXISTING,
+                                      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+            if (!handle) {
+                const DWORD code = GetLastError();
+                if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
+                    missing_directory = true;
+                    return true;
+                }
+                return false;
+            }
+            BY_HANDLE_FILE_INFORMATION info{};
+            if (!GetFileInformationByHandle(handle.Get(), &info)) {
+                return false;
+            }
+            if (!(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+                (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                error = "unsafe_path";
+                return false;
+            }
+            directories.push_back(std::move(handle));
+        } else {
+            if (!CreateDirectoryW(Extended(directory).c_str(), nullptr) &&
+                GetLastError() != ERROR_ALREADY_EXISTS) {
+                return false;
+            }
+            if (!Pin(directory)) {
+                return false;
+            }
         }
         const auto stem = PackageStem(package);
         target = Extended(directory + L"\\" + stem + L".json");
@@ -415,6 +440,61 @@ json::Value WriteOwnSetting(const std::wstring &root_directory, std::string_view
     if (const auto *error = Commit(paths, content, authorized)) {
         return Error(error);
     }
+    return Success(std::move(data));
+}
+json::Value PurgeOwnSettings(const std::wstring &root_directory, std::string_view package_id) {
+    if (!Identifier(package_id)) {
+        return Error("invalid_argument");
+    }
+    std::lock_guard guard(settings_mutex);
+    Paths paths;
+    if (!paths.Prepare(root_directory, package_id, false)) {
+        return Error(paths.error);
+    }
+    if (paths.missing_directory) {
+        auto data = json::Value::Object();
+        data.set("deleted", false);
+        return Success(std::move(data));
+    }
+    bool deleted = false;
+    {
+        FileLock lock;
+        if (!lock.Acquire(paths.lock)) {
+            return Error(lock.unsafe ? "unsafe_path" : "io_error");
+        }
+        Handle target(CreateFileW(paths.target.c_str(), FILE_READ_ATTRIBUTES | DELETE,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                  OPEN_EXISTING,
+                                  FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        if (target) {
+            if (!SafeFile(target.Get())) {
+                return Error("unsafe_path");
+            }
+            FILE_DISPOSITION_INFO disposition{};
+            disposition.DeleteFile = TRUE;
+            if (!SetFileInformationByHandle(target.Get(), FileDispositionInfo, &disposition,
+                                            sizeof(disposition))) {
+                return Error("io_error");
+            }
+            deleted = true;
+        } else if (GetLastError() != ERROR_FILE_NOT_FOUND) {
+            return Error("io_error");
+        }
+    }
+    Handle lock_file(CreateFileW(paths.lock.c_str(), FILE_READ_ATTRIBUTES | DELETE, 0, nullptr,
+                                 OPEN_EXISTING,
+                                 FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (lock_file && SafeFile(lock_file.Get())) {
+        LARGE_INTEGER size{};
+        if (GetFileSizeEx(lock_file.Get(), &size) && size.QuadPart == 0) {
+            FILE_DISPOSITION_INFO disposition{};
+            disposition.DeleteFile = TRUE;
+            SetFileInformationByHandle(lock_file.Get(), FileDispositionInfo, &disposition,
+                                       sizeof(disposition));
+        }
+    }
+    auto data = json::Value::Object();
+    data.set("deleted", deleted);
     return Success(std::move(data));
 }
 } // namespace pulse::extensions

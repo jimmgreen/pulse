@@ -6,7 +6,7 @@
 #include <vector>
 namespace pulse::json { class Value; }
 namespace pulse::extensions {
-enum class UiNodeType { Stack, Grid, Group, ScrollView, Text, Button, TextInput, Checkbox, Select, Progress, Divider, Tabs, Tab, List, Switch, Radio, Slider, Segmented, Badge, Tag, InfoBar, SplitButton, MenuButton, SidebarItem, Breadcrumb, EmptyState, VirtualList, Tree, DataTable, TrayCard, CommandSearch, SplitPane, SidebarSection, DriveItem, PaneHeader, FileRow, StagingTray, StagingItem, StatusBar, Tooltip, TitleBarButton, Count };
+enum class UiNodeType { Stack, Grid, Group, ScrollView, Text, Button, TextInput, Checkbox, Select, Progress, Divider, Tabs, Tab, List, Switch, Radio, Slider, Segmented, Badge, Tag, InfoBar, SplitButton, MenuButton, SidebarItem, Breadcrumb, EmptyState, VirtualList, Tree, DataTable, TrayCard, CommandSearch, SplitPane, SidebarSection, DriveItem, PaneHeader, FileRow, StagingTray, StagingItem, StatusBar, Tooltip, TitleBarButton, Canvas, Count };
 struct UiMenuItem {
     std::string id, text, command, glyph, shortcut;
     bool enabled = true, checked = false, separator = false;

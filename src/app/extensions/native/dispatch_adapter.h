@@ -2,10 +2,11 @@
 #include "../../../../sdk/native/include/pulse/dispatch.h"
 #include <functional>
 #include <memory>
+#include <string>
 namespace pulse::extensions::native {
 class DispatchAdapter {
   public:
-    explicit DispatchAdapter(std::function<bool()> alive);
+    explicit DispatchAdapter(std::function<bool()> alive, std::string package_id = {});
     ~DispatchAdapter();
     DispatchAdapter(const DispatchAdapter &) = delete;
     DispatchAdapter &operator=(const DispatchAdapter &) = delete;

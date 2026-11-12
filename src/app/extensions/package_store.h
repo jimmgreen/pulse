@@ -15,6 +15,8 @@ struct PackageStoreResult {
     // Verified startup bytes; trust refresh must not load a newer registry revision.
     std::vector<std::string> manifest_bytes;
     std::vector<std::string> signatures;
+    // Aligned with packages: lowercase SHA-256 publisher fingerprint if signed, empty if unsigned.
+    std::vector<std::string> publisher_ids;
     // Aligned with packages; empty for declarations without a native runtime.
     std::vector<std::wstring> native_paths;
     explicit operator bool() const { return error.empty(); }

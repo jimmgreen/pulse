@@ -103,14 +103,19 @@ int main() {
         "worker partial completion remains explicit Partial");
     api.release(api.context, partial_id);
     Work queued; queued.hold = true; descriptor.user = &queued;
-    uint64_t tasks[15]{};
+    // 1 un-released terminal (`id` from line 82) is already retained; fill the remaining 63 slots to hit kMaxRetainedTasks (64).
+    uint64_t tasks[63]{};
     for (auto& task : tasks) Check(api.create(api.context, &descriptor, &task) == PULSE_OK, "bounded task admitted");
     Check(Wait([&] { return queued.entered == 2; }), "at most two workers start");
-    uint64_t extra = 0; Check(api.create(api.context, &descriptor, &extra) == PULSE_OK, "oldest terminal auto-evicted at capacity");
+    uint64_t extra = 0;
+    Check(api.create(api.context, &descriptor, &extra) == PULSE_ERROR_UNAVAILABLE, "retained task capacity rejects overflow without evicting unreleased terminal");
+    Check(api.get(api.context, id, Read::Get, &read) == PULSE_OK && read.state == PULSE_TASK_CANCELLED, "unreleased terminal task remains inspectable at capacity");
+    Check(api.release(api.context, id) == PULSE_OK, "explicit release frees one retained task slot");
+    Check(api.create(api.context, &descriptor, &extra) == PULSE_OK, "explicitly released slot admits one more task");
     Check(api.create(api.context, &descriptor, &extra) == PULSE_ERROR_UNAVAILABLE, "active task capacity rejects overflow");
-    adapter.Close(); Check(queued.cancels == 16 && adapter.CallbackActive(), "close delivers cancellation once and retains workers");
+    adapter.Close(); Check(queued.cancels == 64 && adapter.CallbackActive(), "close delivers cancellation once and retains workers");
     queued.hold = false; Check(Wait([&] { adapter.Poll(); return !adapter.CallbackActive(); }) && host.empty(), "close drains worker lifetime and releases host mappings");
-    Check(releases >= 18 && !wrong_thread, "backend release remains UI-thread only");
+    Check(releases >= 66 && !wrong_thread, "backend release remains UI-thread only");
     Work exception_work; exception_work.hold = true;
     auto throwing_backend = backend;
     throwing_backend.update = [](const TaskSnapshot&) { throw std::runtime_error("backend update"); };
@@ -124,5 +129,53 @@ int main() {
     Check(exception_work.cancels == 1 && exception_adapter.CallbackActive(), "backend exception closes and cancels without escaping noexcept poll");
     exception_work.hold = false;
     Check(Wait([&] { exception_adapter.Poll(); return !exception_adapter.CallbackActive(); }), "throwing backend release still permits worker drain");
+
+    // Descriptor/progress fields after V1: route, steps, explained failure, actions.
+    TasksAdapter rich_adapter(reinterpret_cast<HWND>(3), [] { return true; }, backend);
+    PulseTasksV1 rich{}; rich_adapter.Query(1, &rich, sizeof(rich));
+    Work v1_work; PulseTaskDescriptor v1 = descriptor; v1.user = &v1_work; v1.size = PULSE_TASK_DESCRIPTOR_SIZE_V1;
+    uint64_t v1_id = 0;
+    Check(rich.create(rich.context, &v1, &v1_id) == PULSE_OK &&
+          Wait([&] { rich_adapter.Poll(); return host.contains(v1_id) && host[v1_id].state == PULSE_TASK_COMPLETED; }) &&
+          v1_work.reports == 2 && host[v1_id].steps.empty() && !host[v1_id].act, "V1-sized descriptor still accepted without extras");
+    struct Explained {
+        std::atomic<int> rejected{0}, accepted{0};
+        static uint32_t PULSE_CALL Run(void* user, const PulseTaskContext* context) {
+            auto& self = *static_cast<Explained*>(user);
+            PulseTaskProgress v1_progress{PULSE_TASK_PROGRESS_SIZE_V1, 10, 0, 0, 0, 0, {}, {}};
+            if (context->report(context->context, &v1_progress) == PULSE_OK) ++self.accepted;
+            PulseTaskAction actions[2] = {{sizeof(PulseTaskAction), 0, Text("test"), Text("Test archive")},
+                                          {sizeof(PulseTaskAction), PULSE_TASK_ACTION_PRIMARY, Text("retry"), Text("Retry")}};
+            PulseTaskProgress progress{sizeof(progress), 20, 0, 0, 0, 0, Text("Damaged"), {}, 3, 2, 77,
+                                       Text("note"), Text("why"), Text("safe"), actions};
+            if (context->report(context->context, &progress) == PULSE_ERROR_ARGUMENT) ++self.rejected;  // step 3 of 2
+            progress.step = 2; actions[0].id = Text("bad id!");
+            if (context->report(context->context, &progress) == PULSE_ERROR_ARGUMENT) ++self.rejected;
+            actions[0].id = Text("test"); progress.log = Text("diag"); progress.result = Text("done"); progress.result_path = Text("out");
+            if (context->report(context->context, &progress) == PULSE_OK) ++self.accepted;
+            return PULSE_TASK_FAILED;
+        }
+        static void PULSE_CALL Act(void* user, uint64_t, PulseStringView action) {
+            static_cast<std::vector<std::string>*>(user)->emplace_back(action.data, action.length);
+        }
+    } explained;
+    std::vector<std::string> acted;
+    const PulseStringView steps[2] = {Text("Unpack"), Text("Write")};
+    PulseTaskDescriptor rich_descriptor{sizeof(rich_descriptor), Text("Extract"), Text("Archive"), Explained::Run, &explained, nullptr,
+                                        Text("a.7z"), Text("D:\\out"), steps, 2, Explained::Act, &acted};
+    uint64_t rich_id = 0;
+    Check(rich.create(rich.context, &rich_descriptor, &rich_id) == PULSE_OK &&
+          host[rich_id].source == "a.7z" && host[rich_id].destination == "D:\\out" && host[rich_id].steps.size() == 2 &&
+          host[rich_id].step == 1 && host[rich_id].act, "route, steps and action hook copied at create");
+    Check(Wait([&] { rich_adapter.Poll(); return host[rich_id].state == PULSE_TASK_FAILED; }) &&
+          explained.rejected == 2 && explained.accepted == 2, "V1 report accepted; out-of-range step and bad action id rejected");
+    const auto& ended = host[rich_id];
+    Check(ended.step == 2 && ended.linked_operation == 77 && ended.note == "note" && ended.detail == "why" &&
+          ended.assurance == "safe" && ended.log == "diag" && ended.result == "done" && ended.result_path == "out" && ended.actions.size() == 2 && ended.actions[1].primary && !ended.actions[0].primary,
+          "explained failure copies step, link, texts and actions");
+    host[rich_id].act("missing");
+    host[rich_id].act("retry");
+    host[rich_id].act("retry");
+    Check(acted == std::vector<std::string>{"retry"} && !wrong_thread, "only listed actions are delivered, once, on the UI thread");
     std::printf("%d PASS, %d FAIL\n", passes, failures); return failures ? 1 : 0;
 }

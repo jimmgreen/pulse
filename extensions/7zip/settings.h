@@ -24,6 +24,10 @@ public:
     int Format() const;   // 7z, zip, tar, tar.gz, tar.xz, tar.bz2
     int Level() const;    // store, fastest, fast, normal, maximum, ultra
     bool RememberPasswords() const;
+    // Context menu: the commands as one "7-Zip" submenu, and which ones are shown
+    // (bit i = Command i in plugin.cpp order).
+    bool MenuSubmenu() const;
+    bool CommandShown(int index) const;
 private:
     struct State;
     std::unique_ptr<State> state_;

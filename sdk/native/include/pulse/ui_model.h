@@ -45,8 +45,9 @@ enum {
     PULSE_UI_MODEL_TREE = 27,
     PULSE_UI_MODEL_DATA_TABLE = 28,
     PULSE_UI_MODEL_SPLIT_PANE = 31,
+    PULSE_UI_MODEL_CANVAS = 41,
     /* Reserved holes are invalid types; COUNT is the numeric range upper bound. */
-    PULSE_UI_MODEL_COUNT = 41
+    PULSE_UI_MODEL_COUNT = 42
 };
 typedef struct PulseUiModelMenuItem PulseUiModelMenuItem;
 typedef struct PulseUiModelMenus { uint32_t present; const PulseUiModelMenuItem* data; uint32_t count; } PulseUiModelMenus;

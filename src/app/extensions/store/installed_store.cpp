@@ -12,6 +12,7 @@ struct InstalledStoreService::Impl {
         std::function<decltype(ReadInstalledStore)> read = ReadInstalledStore;
         std::function<decltype(ReviewStoreChange)> review = ReviewStoreChange;
         std::function<decltype(CommitStoreChange)> commit = CommitStoreChange;
+        bool enable_gc = true;
     } operations;
     enum class Command { Refresh, Prepare, Commit };
     struct Request {
@@ -105,6 +106,15 @@ struct InstalledStoreService::Impl {
                             if (operations.commit(request.root, request.review, request.consent, *request.cancel, result, out.error)) {
                                 restart = result.restart_required;
                                 out.phase = InstalledStorePhase::Changed;
+                                if (result.changed && request.review.action == StoreChangeAction::Uninstall && request.consent.purge_data) {
+                                    out.purged_package_id = request.review.id;
+                                }
+                                if (operations.enable_gc && !request.cancel->load() &&
+                                    (request.review.action == StoreChangeAction::Uninstall || request.review.action == StoreChangeAction::Rollback)) {
+                                    StoreGcResult gc;
+                                    std::string gc_error;
+                                    GcInstalledStore(request.root, gc, gc_error);
+                                }
                             } else { out.phase = InstalledStorePhase::Failed; read = false; }
                         } else out.phase = InstalledStorePhase::Ready;
                         if (read && !request.cancel->load()) {
@@ -156,7 +166,7 @@ uint64_t InstalledStoreService::Cancel() { return impl_->Cancel(); }
 void InstalledStoreService::Stop() { impl_->Stop(); }
 InstalledStoreServiceSnapshot InstalledStoreService::GetSnapshot() const { std::lock_guard lock(impl_->mutex); return impl_->snapshot; }
 #ifdef PULSE_EXTENSION_INSTALLED_STORE_TESTING
-InstalledStoreService::InstalledStoreService(Operations ops) : impl_(std::make_unique<Impl>(Impl::Operations{std::move(ops.read), std::move(ops.review), std::move(ops.commit)})) {}
+InstalledStoreService::InstalledStoreService(Operations ops) : impl_(std::make_unique<Impl>(Impl::Operations{std::move(ops.read), std::move(ops.review), std::move(ops.commit), false})) {}
 bool InstalledStoreService::WaitForPhase(uint64_t generation, InstalledStorePhase phase, std::chrono::milliseconds timeout) {
     std::unique_lock lock(impl_->mutex);
     return impl_->changed.wait_for(lock, timeout, [&] { return impl_->snapshot.generation >= generation &&

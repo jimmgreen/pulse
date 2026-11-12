@@ -16,8 +16,10 @@ add_executable(pulse_extension_native_contract_test EXCLUDE_FROM_ALL
     src/app/extensions/package_store.cpp
     src/app/extensions/package_signature.cpp
     src/app/extensions/native_image_verify.cpp
+    src/app/extensions/native/ui_model.cpp
     src/app/extensions/ui_tree.cpp
     src/common/json_value.cpp)
+target_include_directories(pulse_extension_native_contract_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/sdk/native/include")
 target_compile_features(pulse_extension_native_contract_test PRIVATE cxx_std_20)
 target_compile_definitions(pulse_extension_native_contract_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0603)
 target_compile_options(pulse_extension_native_contract_test PRIVATE /W4 /permissive- /utf-8)

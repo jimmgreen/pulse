@@ -9,6 +9,38 @@ import re
 ROOT = Path(__file__).resolve().parents[2]
 
 
+FROZEN_INTERFACES = (
+    "pulse.files",
+    "pulse.resources",
+    "pulse.dispatch",
+    "pulse.directories",
+    "pulse.context",
+    "pulse.fileops",
+    "pulse.commands",
+    "pulse.preview",
+    "pulse.tasks",
+    "pulse.staging",
+    "pulse.settings.pages",
+    "pulse.dialogs",
+)
+
+EXPERIMENTAL_INTERFACES = (
+    "pulse.ui.model",
+    "pulse.ui.events",
+    "pulse.ui.data",
+    "pulse.ui.mount",
+    "pulse.icons",
+    "pulse.diagnostics",
+    "pulse.pickers",
+    "pulse.workbench",
+)
+
+STABILITY_TIERS = {
+    **{name: "frozen" for name in FROZEN_INTERFACES},
+    **{name: "experimental" for name in EXPERIMENTAL_INTERFACES},
+}
+
+
 def header_interface(filename, name, table_name, interface_macro, version_macro, operations, version=1):
     header = (ROOT / "sdk/native/include/pulse" / filename).read_bytes().replace(b"\r\n", b"\n")
     text = header.decode("utf-8")
@@ -33,7 +65,7 @@ def outputs():
     node_types = [{"name": name, "value": int(value)} for name, value in
                   re.findall(r"(PULSE_UI_MODEL_[A-Z_]+)\s*=\s*(\d+)", text)
                   if name != "PULSE_UI_MODEL_COUNT"]
-    if len(node_types) != 27 or "#pragma pack(push, 8)" not in text or "#pragma pack(pop)" not in text:
+    if len(node_types) != 28 or "#pragma pack(push, 8)" not in text or "#pragma pack(pop)" not in text:
         raise ValueError("Unexpected public UI model ABI")
     schema = json.loads((ROOT / "schemas/extensions/ui-model.schema.json").read_text(encoding="utf-8"))
     public_names = {''.join(part.title() if i else part.lower() for i, part in enumerate(item['name'].removeprefix('PULSE_UI_MODEL_').split('_'))) for item in node_types}
@@ -71,7 +103,7 @@ def outputs():
         "copying": "All strings/arrays copied synchronously into a temporary in-memory DOM for shared validation; no JSON text serialization/parsing; not zero-copy",
         "events": "Declared native command IDs, including menu/close/filter/sort/row, use subscribe_command; callback string is command ID, not node ID. Local actions update state without native callbacks.",
         "unavailable": ["non-null data_source", "context.* bindings", "non-null action.data_operation"],
-        "validationStatus": "27 general-purpose types represented; does not assert every interaction or theme/DPI capture passed"
+        "validationStatus": "28 general-purpose types represented; does not assert every interaction or theme/DPI capture passed"
     }
     data_header = (ROOT / "sdk/native/include/pulse/ui_data.h").read_bytes().replace(b"\r\n", b"\n")
     data_text = data_header.decode("utf-8")
@@ -207,17 +239,23 @@ def outputs():
         "documentation": "sdk/native/README.md",
         "pending": ["native tab contributions", "arbitrary toolbar UI surfaces (command buttons use pulse.commands)", "desktop surfaces"],
     })
-    commands = header_interface("commands.h", "pulse.commands", "PulseCommandsV1",
-                                "PULSE_COMMANDS_INTERFACE_NAME", "PULSE_COMMANDS_VERSION_1",
-                                ["register_command", "unregister_command"])
+    commands_v1 = header_interface("commands.h", "pulse.commands", "PulseCommandsV1",
+                                   "PULSE_COMMANDS_INTERFACE_NAME", "PULSE_COMMANDS_VERSION_1",
+                                   ["register_command", "unregister_command"])
+    commands = header_interface("commands.h", "pulse.commands", "PulseCommandsV2",
+                                "PULSE_COMMANDS_INTERFACE_NAME", "PULSE_COMMANDS_VERSION_2",
+                                ["register_command", "unregister_command", "update_command", "set_command_flags"],
+                                version=2)
     commands.update({
         "thread": "Owner UI thread; register during plugin entry, before panel activation",
         "limits": {"commandsPerAttachment": 32, "selectionEntries": 4096, "extensions": 32, "extensionBytes": 32},
-        "icons": ["default", "archive", "extract"],
-        "conditions": "Selection count range, allowed file/directory kinds and lowercase dotted extension include/exclude list; every selected entry must match",
+        "supportedVersions": [{"version": 1, "table": "PulseCommandsV1", "operations": commands_v1["operations"]},
+                              {"version": 2, "table": "PulseCommandsV2", "operations": commands["operations"]}],
+        "icons": "All 68 built-in StoreIcon IDs (0..67), custom PulseIconsV1 / contributes.icons IDs (>= 0x10000), or icon_name resolution",
+        "conditions": "Selection count range, allowed file/directory/background kinds, lowercase dotted extension include/exclude list, and runtime show/hide/checked/separator/primary flags",
         "invocation": "Host rechecks conditions and captures current loaded selection before invoking; snapshot strings/arrays borrowed only through callback return",
         "shortcuts": "Owner main UI only, not global hotkeys; built-in shortcuts take precedence; editors do not dispatch plugin shortcuts; duplicate owner shortcuts rejected",
-        "toolbar": "Stable native:package:command identity persists in existing toolbar_tools; menu tokens are transient",
+        "toolbar": "Stable native:package:command identity persists in existing toolbar_tools; menu tokens are transient; update_command and set_command_flags preserve command IDs",
         "lifecycle": "Unregister/stop invalidates tokens; IDs never reused; host waits for active callbacks before unloading",
         "documentation": "sdk/native/README.md"
     })
@@ -281,20 +319,66 @@ def outputs():
         "validationStatus": "P1.6 settings lifecycle and real-host persistence/conflict/theme/scroll acceptance recorded in the implementation roadmap",
         "documentation": "sdk/native/README.md"
     })
-    dialogs = header_interface("dialogs.h", "pulse.dialogs", "PulseDialogsV1",
-                               "PULSE_DIALOGS_INTERFACE_NAME", "PULSE_DIALOGS_VERSION_1",
-                               ["show", "set_states", "close"])
+    dialogs_v1 = header_interface("dialogs.h", "pulse.dialogs", "PulseDialogsV1",
+                                  "PULSE_DIALOGS_INTERFACE_NAME", "PULSE_DIALOGS_VERSION_1",
+                                  ["show", "set_states", "close"])
+    dialogs = header_interface("dialogs.h", "pulse.dialogs", "PulseDialogsV2",
+                               "PULSE_DIALOGS_INTERFACE_NAME", "PULSE_DIALOGS_VERSION_2",
+                               ["show", "set_states", "close", "subscribe_command",
+                                "unsubscribe_command", "update_model", "get_state"],
+                               version=2)
     dialogs.update({
         "thread": "Owner UI thread for all calls and callbacks; show returns at once and the dialog answers later",
         "limits": {"dialogsPerSession": 1, "buttons": 3, "titleUtf8Bytes": 128, "messageUtf8Bytes": 2048,
-                   "widthDip": [360, 720], "formHeightDip": 640},
-        "presentation": "Host-drawn Fluent modal over the owner window: title, optional message, optional UI-model form, 1-3 footer buttons (standard/primary/danger). Text inputs with kind password are masked.",
-        "lifetime": "Model and strings copied by show. closed runs exactly once with every declared state unless the session stops first; borrowed values expire at callback return.",
+                   "widthDip": [360, 720], "formHeightDip": 640, "commandSubscriptions": 32},
+        "supportedVersions": [{"version": 1, "table": "PulseDialogsV1", "operations": dialogs_v1["operations"]},
+                              {"version": 2, "table": "PulseDialogsV2", "operations": dialogs["operations"]}],
+        "presentation": "Host-drawn Fluent modal over the owner window guarded by PickerOwnerGuard: title, optional message, optional UI-model form, 1-3 footer buttons (standard/primary/danger). Text inputs with kind password are masked. V1 rejects declared model commands with UNAVAILABLE; V2 supports non-closing in-dialog command callbacks (subscribe_command/unsubscribe_command), dynamic model updates (update_model), synchronous state queries (get_state), and automatic nested picker parenting.",
+        "lifetime": "Model and strings copied by show/update_model. closed runs exactly once with every declared state unless the session stops first; borrowed values expire at callback return.",
         "sample": "extensions/7zip: password prompt, compression options and checksum results",
         "documentation": "sdk/native/include/pulse/dialogs.h"
     })
-    refreshed_names = ("pulse.ui", "pulse.ui.model", "pulse.ui.data", "pulse.directories", "pulse.context", "pulse.fileops", "pulse.ui.mount", "pulse.commands", "pulse.preview", "pulse.tasks", "pulse.staging", "pulse.settings.pages", "pulse.dialogs")
-    catalog["interfaces"] = [item for item in catalog["interfaces"] if item["name"] not in refreshed_names] + [model, data, directories, context, fileops, mount, commands, preview, tasks, staging, settings_pages, dialogs]
+    icons = header_interface("icons.h", "pulse.icons", "PulseIconsV1",
+                             "PULSE_ICONS_INTERFACE_NAME", "PULSE_ICONS_VERSION_1",
+                             ["register_icon", "update_icon", "unregister_icon", "resolve_builtin"])
+    icons.update({
+        "thread": "Owner UI thread for all calls",
+        "limits": {"dynamicIconsPerSession": 64, "layersPerIcon": 16, "pathBytesPerLayer": 4096, "totalPathBytes": 16384},
+        "presentation": "68 built-in Fluent StoreIcon vectors (0..67) plus multi-layer SVG path vector icons (M L H V C S A Z) with semantic theme colors (inherit, accent, success, warning, danger, RGB) cached per D2D factory",
+        "lifetime": "Descriptor strings and layer arrays copied synchronously; dynamic icons unregistered automatically when session closes",
+        "documentation": "sdk/native/include/pulse/icons.h"
+    })
+    diagnostics = header_interface("diagnostics.h", "pulse.diagnostics", "PulseDiagnosticsV1",
+                                   "PULSE_DIAGNOSTICS_INTERFACE_NAME", "PULSE_DIAGNOSTICS_VERSION_1",
+                                   ["get_last_error", "clear_last_error"])
+    diagnostics.update({
+        "thread": "Owner UI thread for all calls and synchronous callbacks",
+        "presentation": "Per-session structured failure record (status, monotonic sequence, interface_name, operation, subject, field, message) populated by pulse.ui.model, pulse.dialogs, pulse.settings.pages, pulse.pickers, and pulse.workbench.",
+        "lifetime": "get_last_error invokes callback synchronously; borrowed PulseStringView slices expire when callback returns. Successful host calls preserve the prior failure until clear_last_error.",
+        "documentation": "sdk/native/include/pulse/diagnostics.h"
+    })
+    pickers = header_interface("pickers.h", "pulse.pickers", "PulsePickersV1",
+                               "PULSE_PICKERS_INTERFACE_NAME", "PULSE_PICKERS_VERSION_1",
+                               ["open_files", "save_file", "pick_folders", "quick_pick", "cancel"])
+    pickers.update({
+        "thread": "Owner UI thread for all calls and callbacks; launch returns immediately and presents on a subsequent UI turn",
+        "limits": {"activePickersPerSession": 1, "filters": 32, "quickPickItems": 512, "pathUtf8Bytes": 32768},
+        "presentation": "Standard Win32 file/save/folder pickers and host-drawn Fluent QuickPick popup (with Pinyin + substring filtering, built-in/custom icons, and shortcut hints), parented to the open pulse.dialogs modal if present or the owner window via PickerOwnerGuard.",
+        "lifetime": "Request inputs copied synchronously; callback runs at most once with outcome ACCEPTED, CANCELLED, or FAILED unless session stops first (which cancels open pickers and suppresses pending callbacks).",
+        "documentation": "sdk/native/include/pulse/pickers.h"
+    })
+    workbench = header_interface("workbench.h", "pulse.workbench", "PulseWorkbenchV1",
+                                 "PULSE_WORKBENCH_INTERFACE_NAME", "PULSE_WORKBENCH_VERSION_1",
+                                 ["show_snack", "show_notice", "reveal_path", "show_text_diff", "set_clipboard_text"])
+    workbench.update({
+        "thread": "Owner UI thread for all calls and optional notification action callbacks",
+        "limits": {"actionsPerNotification": 2, "retainedActionTokens": 64, "snackTextBytes": 256, "noticeMessageBytes": 1024},
+        "presentation": "Capsule snacks, corner notice cards with optional action buttons, current-tab/new-tab/selection path reveal, built-in side-by-side text diff viewer, and clipboard UTF-8 text write.",
+        "lifetime": "Inputs copied synchronously; optional action callback fires at most once while session remains active; stopping session invalidates pending action tokens.",
+        "documentation": "sdk/native/include/pulse/workbench.h"
+    })
+    refreshed_names = ("pulse.ui", "pulse.ui.model", "pulse.ui.data", "pulse.directories", "pulse.context", "pulse.fileops", "pulse.ui.mount", "pulse.commands", "pulse.preview", "pulse.tasks", "pulse.staging", "pulse.settings.pages", "pulse.dialogs", "pulse.icons", "pulse.diagnostics", "pulse.pickers", "pulse.workbench")
+    catalog["interfaces"] = [item for item in catalog["interfaces"] if item["name"] not in refreshed_names] + [model, data, directories, context, fileops, mount, commands, preview, tasks, staging, settings_pages, dialogs, icons, diagnostics, pickers, workbench]
     from native_author_mcp import TOOLS
     catalog["authoring"] = {
         "mcpServer": "tools/extensions/native_author_mcp.py",
@@ -311,11 +395,65 @@ def outputs():
     catalog["resourceDeclarations"] = copy.deepcopy(schema["properties"]["resources"])
     catalog["resourceDeclarationPolicy"] = "Installation disclosure only; native code runs in process without per-call permission gates."
     for interface in catalog["interfaces"]:
+        iface_name = interface.get("name")
+        if iface_name not in STABILITY_TIERS:
+            raise ValueError("Unclassified native interface stability tier: " + str(iface_name))
+        interface["stabilityTier"] = STABILITY_TIERS[iface_name]
         for operation in interface.get("operations", []):
             if isinstance(operation, dict) and "permission" in operation:
                 operation["resourceDeclaration"] = operation.pop("permission")
         if interface["name"] in ("pulse.files", "pulse.resources"):
             interface["resourceDeclarationPolicy"] = catalog["resourceDeclarationPolicy"]
+    if {item["name"] for item in catalog["interfaces"]} != set(STABILITY_TIERS):
+        raise ValueError("Native interface catalog does not match expected 20-interface tier partition")
+    catalog["stability"] = {
+        "sdkPreview": catalog["sdkPreview"],
+        "abiMajor": 1,
+        "coreEntryAbi": {
+            "stabilityTier": "frozen",
+            "abiMajor": 1,
+            "abiVersionMacro": "PULSE_ABI_VERSION_1",
+            "sdkPreviewMacro": "PULSE_SDK_PREVIEW",
+            "entrypoint": "PulsePluginEntryV1",
+            "previewExport": "PulsePluginSdkPreview",
+            "symbols": [
+                "PulseHostV1",
+                "PulsePluginV1",
+                "PulsePluginEntryV1",
+                "PulsePluginEntryV1Fn",
+                "PulsePluginSdkPreview",
+                "PulseStringView",
+                "PulseStatus",
+            ],
+        },
+        "prefixTableRule": "Append-only struct-prefix evolution (V1 <= V2 <= V3 <= V4): existing fields preserve identical index, name, type, size, and byte offset; new fields append strictly at the tail with monotonically increasing struct size and version.",
+        "experimentalSurfaceRule": "Opt-in UI surface not yet covered by binary freeze; plugins must handle query_interface returning PULSE_ERROR_UNAVAILABLE or PULSE_ERROR_ABI (C++ std::nullopt fallback) gracefully.",
+        "tiers": {
+            "frozen": {
+                "count": len(FROZEN_INTERFACES),
+                "interfaces": list(FROZEN_INTERFACES),
+                "binaryFreezeCandidate": True,
+            },
+            "experimental": {
+                "count": len(EXPERIMENTAL_INTERFACES),
+                "interfaces": list(EXPERIMENTAL_INTERFACES),
+                "binaryFreezeCandidate": False,
+            },
+        },
+    }
+    catalog["supportPolicy"] = {
+        "abiMajor": 1,
+        "supportedApiVersions": [1],
+        "deprecationWindow": {
+            "minMinorReleases": 2,
+            "minDays": 180,
+        },
+        "emergencyRevocation": {
+            "channels": ["revokedPackages", "revokedRevisions"],
+            "scope": "Immediate revocation reserved exclusively for active security vulnerabilities, memory corruption, or host-crashing defects.",
+        },
+        "policyDocument": "docs/extensions-sdk-lifecycle-and-support.md",
+    }
     catalog["lifecycle"]["thread"] = "owner UI thread, except pulse.dispatch post/cancel and pulse.ui.data publish are any-thread"
     catalog["packageStore"] = {
         "version": 1, "architecture": "windows-x64", "manifestField": "native",
@@ -344,15 +482,29 @@ def outputs():
         "discoveryGrantsExecution": False, "documentation": "docs/native-packages.md"
     }
     catalog["pending"] = ["native model data_source/context resolver/dataOperation integration", "general-purpose host interfaces beyond published native tables", "complete interaction/theme/DPI verification of native model catalog"]
-    return {path: json.dumps(catalog, ensure_ascii=False, indent=2) + "\n",
-            ROOT / "sdk/native/ui-model.schema.json": json.dumps(constraints, ensure_ascii=False, indent=2) + "\n"}
+    return {
+        path: json.dumps(catalog, ensure_ascii=False, indent=2) + "\n",
+        ROOT / "sdk/native/ui-model.schema.json": json.dumps(constraints, ensure_ascii=False, indent=2) + "\n",
+    }
+
+
+def repository_outputs():
+    generated = outputs()
+    api_metadata_path = ROOT / "schemas/extensions/api_metadata.json"
+    if api_metadata_path.is_file():
+        catalog = json.loads(generated[ROOT / "sdk/native/api-catalog.json"])
+        api_metadata = json.loads(api_metadata_path.read_text(encoding="utf-8"))
+        api_metadata["stability"] = copy.deepcopy(catalog["stability"])
+        api_metadata["supportPolicy"] = copy.deepcopy(catalog["supportPolicy"])
+        generated[api_metadata_path] = json.dumps(api_metadata, ensure_ascii=False, indent=2) + "\n"
+    return generated
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    for path, text in outputs().items():
+    for path, text in repository_outputs().items():
         if args.check:
             if not path.exists() or path.read_text(encoding="utf-8") != text:
                 raise SystemExit("Stale native discovery: " + str(path))

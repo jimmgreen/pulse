@@ -155,19 +155,24 @@ class NativeBundleTests(unittest.TestCase):
 
     def test_native_directory_context_discovery_matches_public_contracts(self):
         catalog = bundle_native_sdk.catalog()
-        for name, filename, operations in (
-                ("pulse.directories", "directories.h", ["open", "refresh", "list", "open_entry", "watch", "unwatch", "close", "cancel"]),
-                ("pulse.context", "context.h", ["get", "subscribe", "unsubscribe", "get_selection"]),
-                ("pulse.commands", "commands.h", ["register_command", "unregister_command"]),
-                ("pulse.preview", "preview.h", ["register_provider", "unregister_provider"]),
-                ("pulse.tasks", "tasks.h", ["create", "cancel", "get", "release"])):
+        for name, filename, expected_version, operations in (
+                ("pulse.directories", "directories.h", 1, ["open", "refresh", "list", "open_entry", "watch", "unwatch", "close", "cancel"]),
+                ("pulse.context", "context.h", 1, ["get", "subscribe", "unsubscribe", "get_selection"]),
+                ("pulse.commands", "commands.h", 2, ["register_command", "unregister_command", "update_command", "set_command_flags"]),
+                ("pulse.icons", "icons.h", 1, ["register_icon", "update_icon", "unregister_icon", "resolve_builtin"]),
+                ("pulse.dialogs", "dialogs.h", 2, ["show", "set_states", "close", "subscribe_command", "unsubscribe_command", "update_model", "get_state"]),
+                ("pulse.diagnostics", "diagnostics.h", 1, ["get_last_error", "clear_last_error"]),
+                ("pulse.pickers", "pickers.h", 1, ["open_files", "save_file", "pick_folders", "quick_pick", "cancel"]),
+                ("pulse.workbench", "workbench.h", 1, ["show_snack", "show_notice", "reveal_path", "show_text_diff", "set_clipboard_text"]),
+                ("pulse.preview", "preview.h", 1, ["register_provider", "unregister_provider"]),
+                ("pulse.tasks", "tasks.h", 1, ["create", "cancel", "get", "release"])):
             with self.subTest(interface=name):
                 interface = next(item for item in catalog["interfaces"] if item["name"] == name)
                 header = bundle_native_sdk.source_bytes(bundle_native_sdk.ROOT, "sdk/native/include/pulse/" + filename)
                 self.assertEqual(interface["headerContract"]["sha256"], hashlib.sha256(header).hexdigest())
                 self.assertEqual(interface["headerContract"]["text"], header.decode("utf-8"))
                 self.assertEqual(interface["operations"], operations)
-                self.assertEqual(interface["version"], 1)
+                self.assertEqual(interface["version"], expected_version)
                 self.assertEqual(interface["status"], "developer-preview")
         directories = next(item for item in catalog["interfaces"] if item["name"] == "pulse.directories")
         self.assertEqual(directories["requestOperations"], {"PULSE_DIRECTORY_OPEN": 1, "PULSE_DIRECTORY_REFRESH": 2, "PULSE_DIRECTORY_LIST": 3, "PULSE_DIRECTORY_OPEN_ENTRY": 4})
@@ -236,6 +241,37 @@ class NativeBundleTests(unittest.TestCase):
         self.assertIn("non-null data_source", model["unavailable"])
         self.assertIn("context.* bindings", model["unavailable"])
         self.assertIn("non-null action.data_operation", model["unavailable"])
+
+    def test_compatibility_metadata_and_standalone_bundle_verifier(self):
+        import verify_sdk_bundle
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "Pulse-NativeSDK-test-windows-x64.zip"
+            manifest = bundle_native_sdk.bundle(archive)
+            compat = manifest["compatibility"]
+            expected_version = (bundle_native_sdk.ROOT / "version.txt").read_text(encoding="utf-8").strip()
+            self.assertEqual(compat["pulseVersion"], expected_version)
+            self.assertEqual(compat["sdkPreview"], 3)
+            self.assertEqual(compat["abiVersion"], 1)
+            self.assertEqual(compat["architecture"], "windows-x64")
+            self.assertEqual(compat["minWindowsBuild"], 10240)
+            self.assertEqual(compat["toolchain"]["generator"], "Ninja")
+            for required_script in (
+                "tools/extensions/project_creator.py",
+                "tools/extensions/check_docs_and_contracts.py",
+                "tools/extensions/verify_sdk_bundle.py",
+                "tools/extensions/README.md",
+            ):
+                self.assertIn(required_script, manifest["files"])
+
+            compat_report = bundle_native_sdk.compatibility_report(archive)
+            self.assertEqual(compat_report["compatibility"], compat)
+            self.assertEqual(compat_report["archiveSha256"], hashlib.sha256(archive.read_bytes()).hexdigest())
+            self.assertEqual(len(compat_report["templates"]), 8)
+
+            verified = verify_sdk_bundle.verify_bundle(archive, compile_projects=False)
+            self.assertTrue(verified["ok"], verified)
+            self.assertEqual(verified["templatesVerified"], 8)
 
 
 if __name__ == "__main__":

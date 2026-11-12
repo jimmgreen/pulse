@@ -1,12 +1,19 @@
 {
   "constants": {
     "PULSE_COMMAND_ALT": "4u",
+    "PULSE_COMMAND_BACKGROUND": "4u",
+    "PULSE_COMMAND_CHECKED": "32u",
     "PULSE_COMMAND_CTRL": "1u",
     "PULSE_COMMAND_DIRECTORIES": "2u",
     "PULSE_COMMAND_FILES": "1u",
+    "PULSE_COMMAND_GROUP_SUBMENU": "1u",
+    "PULSE_COMMAND_HIDDEN": "16u",
     "PULSE_COMMAND_ICON_ARCHIVE": "1u",
     "PULSE_COMMAND_ICON_DEFAULT": "0u",
     "PULSE_COMMAND_ICON_EXTRACT": "2u",
+    "PULSE_COMMAND_PRIMARY": "2u",
+    "PULSE_COMMAND_SEPARATOR_AFTER": "8u",
+    "PULSE_COMMAND_SEPARATOR_BEFORE": "4u",
     "PULSE_COMMAND_SHIFT": "2u",
     "PULSE_CONTEXT_ENTRY_DIRECTORY": "1u",
     "PULSE_CONTEXT_INITIAL": "1u",
@@ -16,6 +23,18 @@
     "PULSE_DIALOG_BUTTON_DANGER": "2",
     "PULSE_DIALOG_BUTTON_PRIMARY": "1",
     "PULSE_DIALOG_BUTTON_STANDARD": "0",
+    "PULSE_DIALOG_ICON_ARCHIVE": "2u",
+    "PULSE_DIALOG_ICON_CHECKSUM": "3u",
+    "PULSE_DIALOG_ICON_FOLDER": "6u",
+    "PULSE_DIALOG_ICON_INFO": "4u",
+    "PULSE_DIALOG_ICON_KEY": "1u",
+    "PULSE_DIALOG_ICON_LOCK": "7u",
+    "PULSE_DIALOG_ICON_NONE": "0u",
+    "PULSE_DIALOG_ICON_WARNING": "5u",
+    "PULSE_DIALOG_SUBJECT_ARCHIVE": "3u",
+    "PULSE_DIALOG_SUBJECT_FILE": "1u",
+    "PULSE_DIALOG_SUBJECT_FOLDER": "2u",
+    "PULSE_DIALOG_SUBJECT_NONE": "0u",
     "PULSE_DIRECTORY_ENTRY_FOLDER": "1u",
     "PULSE_DIRECTORY_ENTRY_REPARSE": "2u",
     "PULSE_DIRECTORY_INVALIDATED": "2u",
@@ -69,12 +88,108 @@
     "PULSE_FILE_TASK_FAILED": "3u",
     "PULSE_FILE_TASK_MOVED": "2u",
     "PULSE_FILE_TASK_NOT_STARTED": "0u",
+    "PULSE_ICON_ADD_ARCHIVE": "6u",
+    "PULSE_ICON_ARCHIVE": "1u",
+    "PULSE_ICON_BACK": "34u",
+    "PULSE_ICON_BADGE": "18u",
+    "PULSE_ICON_BOX": "4u",
+    "PULSE_ICON_CAMERA": "39u",
+    "PULSE_ICON_CHECK": "16u",
+    "PULSE_ICON_CHEVRON_DOWN": "13u",
+    "PULSE_ICON_CHEVRON_LEFT": "66u",
+    "PULSE_ICON_CHEVRON_RIGHT": "12u",
+    "PULSE_ICON_CHEVRON_UP": "14u",
+    "PULSE_ICON_CLOSE": "30u",
+    "PULSE_ICON_CLOUD_OFF": "58u",
+    "PULSE_ICON_COLOR_ACCENT": "1u",
+    "PULSE_ICON_COLOR_DANGER": "4u",
+    "PULSE_ICON_COLOR_INHERIT": "0u",
+    "PULSE_ICON_COLOR_RGB": "5u",
+    "PULSE_ICON_COLOR_SUCCESS": "2u",
+    "PULSE_ICON_COLOR_WARNING": "3u",
+    "PULSE_ICON_CONTRAST": "56u",
+    "PULSE_ICON_COPY": "21u",
+    "PULSE_ICON_CUBE": "49u",
+    "PULSE_ICON_CUT": "22u",
+    "PULSE_ICON_DEFAULT": "0u",
+    "PULSE_ICON_DISK": "65u",
+    "PULSE_ICON_DOWNLOAD": "57u",
+    "PULSE_ICON_DRAG": "59u",
+    "PULSE_ICON_DRAW_CLOSED": "4u",
+    "PULSE_ICON_DRAW_FILL": "2u",
+    "PULSE_ICON_DRAW_STROKE": "1u",
+    "PULSE_ICON_DUPLICATE": "48u",
+    "PULSE_ICON_EXTRACT": "2u",
+    "PULSE_ICON_EXTRACT_TO": "5u",
+    "PULSE_ICON_EYE": "20u",
+    "PULSE_ICON_FILE": "11u",
+    "PULSE_ICON_FILM": "40u",
+    "PULSE_ICON_FILTER": "61u",
+    "PULSE_ICON_FOLDER": "10u",
+    "PULSE_ICON_FORWARD": "35u",
+    "PULSE_ICON_GEAR": "9u",
+    "PULSE_ICON_HASH": "8u",
+    "PULSE_ICON_IMAGE": "38u",
+    "PULSE_ICON_INFO": "52u",
+    "PULSE_ICON_KEY": "67u",
+    "PULSE_ICON_KEYBOARD": "51u",
+    "PULSE_ICON_LINES": "50u",
+    "PULSE_ICON_LIST_VIEW": "45u",
+    "PULSE_ICON_LOCK": "19u",
+    "PULSE_ICON_MINUS": "32u",
+    "PULSE_ICON_MORE": "15u",
+    "PULSE_ICON_NEW_FOLDER": "62u",
+    "PULSE_ICON_OPEN": "26u",
+    "PULSE_ICON_OPEN_WITH": "27u",
+    "PULSE_ICON_PALETTE": "44u",
+    "PULSE_ICON_PANES": "55u",
+    "PULSE_ICON_PATH": "28u",
+    "PULSE_ICON_PC": "64u",
+    "PULSE_ICON_PLUS": "31u",
+    "PULSE_ICON_POWER": "47u",
+    "PULSE_ICON_PROPERTIES": "25u",
+    "PULSE_ICON_PUZZLE": "43u",
+    "PULSE_ICON_REFRESH": "37u",
+    "PULSE_ICON_RENAME": "23u",
+    "PULSE_ICON_SEARCH": "3u",
+    "PULSE_ICON_SHIELD": "17u",
+    "PULSE_ICON_SIDEBAR": "54u",
+    "PULSE_ICON_SORT": "60u",
+    "PULSE_ICON_SPARKLE": "42u",
+    "PULSE_ICON_SQUARE": "33u",
+    "PULSE_ICON_STAR": "63u",
+    "PULSE_ICON_TABS": "46u",
+    "PULSE_ICON_TEST": "7u",
+    "PULSE_ICON_TEXT_SEARCH": "41u",
+    "PULSE_ICON_TRASH": "24u",
+    "PULSE_ICON_UNDO": "29u",
+    "PULSE_ICON_UP": "36u",
+    "PULSE_ICON_WARN": "53u",
+    "PULSE_NAVIGATE_CURRENT_TAB": "0u",
+    "PULSE_NAVIGATE_NEW_TAB": "1u",
+    "PULSE_NAVIGATE_REVEAL_ITEM": "2u",
+    "PULSE_NOTICE_ERROR": "3u",
+    "PULSE_NOTICE_INFO": "0u",
+    "PULSE_NOTICE_SUCCESS": "1u",
+    "PULSE_NOTICE_WARNING": "2u",
     "PULSE_OK": "0",
+    "PULSE_PICKER_ACCEPTED": "0u",
+    "PULSE_PICKER_ALL_FLAGS": "7u",
+    "PULSE_PICKER_CANCELLED": "1u",
+    "PULSE_PICKER_FAILED": "2u",
+    "PULSE_PICKER_FLAG_MULTISELECT": "1u",
+    "PULSE_PICKER_FLAG_NONE": "0u",
+    "PULSE_PICKER_FLAG_NO_OVERWRITE_PROMPT": "4u",
+    "PULSE_PICKER_FLAG_SHOW_HIDDEN": "2u",
     "PULSE_PREVIEW_ARCHIVE": "1u",
     "PULSE_PREVIEW_BITMAP": "2u",
     "PULSE_PREVIEW_ENTRY_DIRECTORY": "1u",
     "PULSE_PREVIEW_ENTRY_ENCRYPTED": "2u",
     "PULSE_PREVIEW_UI_MODEL": "3u",
+    "PULSE_QUICK_PICK_ITEM_ALL_FLAGS": "3u",
+    "PULSE_QUICK_PICK_ITEM_DISABLED": "2u",
+    "PULSE_QUICK_PICK_ITEM_NONE": "0u",
+    "PULSE_QUICK_PICK_ITEM_SELECTED": "1u",
     "PULSE_RENAME_READY": "1u",
     "PULSE_RENAME_UNCHANGED": "0u",
     "PULSE_RESOURCES_AUDIT_LIST": "4",
@@ -83,6 +198,9 @@
     "PULSE_RESOURCES_STAT": "1",
     "PULSE_RESOURCE_FILE_DIRECTORY": "1u",
     "PULSE_RESOURCE_FILE_REPARSE_POINT": "2u",
+    "PULSE_SNACK_ALL_FLAGS": "1u",
+    "PULSE_SNACK_FLAG_NONE": "0u",
+    "PULSE_SNACK_FLAG_REPLACE": "1u",
     "PULSE_STAGE_CANCELLED": "7u",
     "PULSE_STAGE_COMMITTING": "2u",
     "PULSE_STAGE_COMPLETED": "4u",
@@ -91,6 +209,7 @@
     "PULSE_STAGE_PREPARING": "0u",
     "PULSE_STAGE_READY": "1u",
     "PULSE_STAGE_RUNNING": "3u",
+    "PULSE_TASK_ACTION_PRIMARY": "1u",
     "PULSE_TASK_CANCELLED": "5u",
     "PULSE_TASK_CANCELLING": "1u",
     "PULSE_TASK_COMPLETED": "2u",
@@ -107,8 +226,9 @@
     "PULSE_UI_DATA_SNAPSHOT": "0",
     "PULSE_UI_MODEL_BADGE": "18",
     "PULSE_UI_MODEL_BUTTON": "5",
+    "PULSE_UI_MODEL_CANVAS": "41",
     "PULSE_UI_MODEL_CHECKBOX": "7",
-    "PULSE_UI_MODEL_COUNT": "41",
+    "PULSE_UI_MODEL_COUNT": "42",
     "PULSE_UI_MODEL_DATA_TABLE": "28",
     "PULSE_UI_MODEL_DIVIDER": "10",
     "PULSE_UI_MODEL_EMPTY_STATE": "25",
@@ -145,11 +265,14 @@
     "abi.h",
     "commands.h",
     "context.h",
+    "diagnostics.h",
     "dialogs.h",
     "directories.h",
     "dispatch.h",
     "fileops.h",
     "files.h",
+    "icons.h",
+    "pickers.h",
     "preview.h",
     "resources.h",
     "settings_pages.h",
@@ -159,7 +282,8 @@
     "ui_data.h",
     "ui_events.h",
     "ui_model.h",
-    "ui_mount.h"
+    "ui_mount.h",
+    "workbench.h"
   ],
   "macros": {
     "PULSE_ABI_VERSION_1": [
@@ -174,10 +298,28 @@
     "PULSE_COMMANDS_VERSION_1": [
       "1u"
     ],
+    "PULSE_COMMANDS_VERSION_2": [
+      "2u"
+    ],
+    "PULSE_COMMAND_ALL_FLAGS": [
+      "63u"
+    ],
+    "PULSE_COMMAND_DESCRIPTOR_SIZE_V1": [
+      "( ( uint32_t ) offsetof ( PulseCommandDescriptor , detail ) )"
+    ],
+    "PULSE_COMMAND_DESCRIPTOR_SIZE_V2": [
+      "( ( uint32_t ) offsetof ( PulseCommandDescriptor , icon_name ) )"
+    ],
     "PULSE_CONTEXT_INTERFACE_NAME": [
       "\" pulse . context \""
     ],
     "PULSE_CONTEXT_VERSION_1": [
+      "1u"
+    ],
+    "PULSE_DIAGNOSTICS_INTERFACE_NAME": [
+      "\" pulse . diagnostics \""
+    ],
+    "PULSE_DIAGNOSTICS_VERSION_1": [
       "1u"
     ],
     "PULSE_DIALOGS_INTERFACE_NAME": [
@@ -186,8 +328,17 @@
     "PULSE_DIALOGS_VERSION_1": [
       "1u"
     ],
+    "PULSE_DIALOGS_VERSION_2": [
+      "2u"
+    ],
+    "PULSE_DIALOG_ICON_EXT_FLAG": [
+      "0x40000000u"
+    ],
     "PULSE_DIALOG_NO_BUTTON": [
       "0xFFFFFFFFu"
+    ],
+    "PULSE_DIALOG_REQUEST_SIZE_V1": [
+      "( ( uint32_t ) offsetof ( PulseDialogRequest , heading ) )"
     ],
     "PULSE_DIRECTORIES_INTERFACE_NAME": [
       "\" pulse . directories \""
@@ -223,6 +374,24 @@
       "\" pulse . files \""
     ],
     "PULSE_FILES_VERSION_1": [
+      "1u"
+    ],
+    "PULSE_ICONS_INTERFACE_NAME": [
+      "\" pulse . icons \""
+    ],
+    "PULSE_ICONS_VERSION_1": [
+      "1u"
+    ],
+    "PULSE_ICON_BUILTIN_MAX": [
+      "67u"
+    ],
+    "PULSE_ICON_CUSTOM_MIN": [
+      "0x10000u"
+    ],
+    "PULSE_PICKERS_INTERFACE_NAME": [
+      "\" pulse . pickers \""
+    ],
+    "PULSE_PICKERS_VERSION_1": [
       "1u"
     ],
     "PULSE_PLUGIN_SDK_PREVIEW": [
@@ -262,6 +431,12 @@
     "PULSE_TASKS_VERSION_1": [
       "1u"
     ],
+    "PULSE_TASK_DESCRIPTOR_SIZE_V1": [
+      "( ( uint32_t ) offsetof ( PulseTaskDescriptor , source ) )"
+    ],
+    "PULSE_TASK_PROGRESS_SIZE_V1": [
+      "( ( uint32_t ) offsetof ( PulseTaskProgress , step ) )"
+    ],
     "PULSE_UI_DATA_INTERFACE": [
       "\" pulse . ui . data \""
     ],
@@ -288,11 +463,23 @@
     ],
     "PULSE_UI_MOUNT_VERSION_1": [
       "1u"
+    ],
+    "PULSE_WORKBENCH_INTERFACE_NAME": [
+      "\" pulse . workbench \""
+    ],
+    "PULSE_WORKBENCH_VERSION_1": [
+      "1u"
     ]
   },
   "measured": {
     "constant:PULSE_COMMAND_ALT": [
       "4"
+    ],
+    "constant:PULSE_COMMAND_BACKGROUND": [
+      "4"
+    ],
+    "constant:PULSE_COMMAND_CHECKED": [
+      "32"
     ],
     "constant:PULSE_COMMAND_CTRL": [
       "1"
@@ -303,6 +490,12 @@
     "constant:PULSE_COMMAND_FILES": [
       "1"
     ],
+    "constant:PULSE_COMMAND_GROUP_SUBMENU": [
+      "1"
+    ],
+    "constant:PULSE_COMMAND_HIDDEN": [
+      "16"
+    ],
     "constant:PULSE_COMMAND_ICON_ARCHIVE": [
       "1"
     ],
@@ -311,6 +504,15 @@
     ],
     "constant:PULSE_COMMAND_ICON_EXTRACT": [
       "2"
+    ],
+    "constant:PULSE_COMMAND_PRIMARY": [
+      "2"
+    ],
+    "constant:PULSE_COMMAND_SEPARATOR_AFTER": [
+      "8"
+    ],
+    "constant:PULSE_COMMAND_SEPARATOR_BEFORE": [
+      "4"
     ],
     "constant:PULSE_COMMAND_SHIFT": [
       "2"
@@ -337,6 +539,42 @@
       "1"
     ],
     "constant:PULSE_DIALOG_BUTTON_STANDARD": [
+      "0"
+    ],
+    "constant:PULSE_DIALOG_ICON_ARCHIVE": [
+      "2"
+    ],
+    "constant:PULSE_DIALOG_ICON_CHECKSUM": [
+      "3"
+    ],
+    "constant:PULSE_DIALOG_ICON_FOLDER": [
+      "6"
+    ],
+    "constant:PULSE_DIALOG_ICON_INFO": [
+      "4"
+    ],
+    "constant:PULSE_DIALOG_ICON_KEY": [
+      "1"
+    ],
+    "constant:PULSE_DIALOG_ICON_LOCK": [
+      "7"
+    ],
+    "constant:PULSE_DIALOG_ICON_NONE": [
+      "0"
+    ],
+    "constant:PULSE_DIALOG_ICON_WARNING": [
+      "5"
+    ],
+    "constant:PULSE_DIALOG_SUBJECT_ARCHIVE": [
+      "3"
+    ],
+    "constant:PULSE_DIALOG_SUBJECT_FILE": [
+      "1"
+    ],
+    "constant:PULSE_DIALOG_SUBJECT_FOLDER": [
+      "2"
+    ],
+    "constant:PULSE_DIALOG_SUBJECT_NONE": [
       "0"
     ],
     "constant:PULSE_DIRECTORY_ENTRY_FOLDER": [
@@ -498,8 +736,284 @@
     "constant:PULSE_FILE_TASK_NOT_STARTED": [
       "0"
     ],
+    "constant:PULSE_ICON_ADD_ARCHIVE": [
+      "6"
+    ],
+    "constant:PULSE_ICON_ARCHIVE": [
+      "1"
+    ],
+    "constant:PULSE_ICON_BACK": [
+      "34"
+    ],
+    "constant:PULSE_ICON_BADGE": [
+      "18"
+    ],
+    "constant:PULSE_ICON_BOX": [
+      "4"
+    ],
+    "constant:PULSE_ICON_CAMERA": [
+      "39"
+    ],
+    "constant:PULSE_ICON_CHECK": [
+      "16"
+    ],
+    "constant:PULSE_ICON_CHEVRON_DOWN": [
+      "13"
+    ],
+    "constant:PULSE_ICON_CHEVRON_LEFT": [
+      "66"
+    ],
+    "constant:PULSE_ICON_CHEVRON_RIGHT": [
+      "12"
+    ],
+    "constant:PULSE_ICON_CHEVRON_UP": [
+      "14"
+    ],
+    "constant:PULSE_ICON_CLOSE": [
+      "30"
+    ],
+    "constant:PULSE_ICON_CLOUD_OFF": [
+      "58"
+    ],
+    "constant:PULSE_ICON_COLOR_ACCENT": [
+      "1"
+    ],
+    "constant:PULSE_ICON_COLOR_DANGER": [
+      "4"
+    ],
+    "constant:PULSE_ICON_COLOR_INHERIT": [
+      "0"
+    ],
+    "constant:PULSE_ICON_COLOR_RGB": [
+      "5"
+    ],
+    "constant:PULSE_ICON_COLOR_SUCCESS": [
+      "2"
+    ],
+    "constant:PULSE_ICON_COLOR_WARNING": [
+      "3"
+    ],
+    "constant:PULSE_ICON_CONTRAST": [
+      "56"
+    ],
+    "constant:PULSE_ICON_COPY": [
+      "21"
+    ],
+    "constant:PULSE_ICON_CUBE": [
+      "49"
+    ],
+    "constant:PULSE_ICON_CUT": [
+      "22"
+    ],
+    "constant:PULSE_ICON_DEFAULT": [
+      "0"
+    ],
+    "constant:PULSE_ICON_DISK": [
+      "65"
+    ],
+    "constant:PULSE_ICON_DOWNLOAD": [
+      "57"
+    ],
+    "constant:PULSE_ICON_DRAG": [
+      "59"
+    ],
+    "constant:PULSE_ICON_DRAW_CLOSED": [
+      "4"
+    ],
+    "constant:PULSE_ICON_DRAW_FILL": [
+      "2"
+    ],
+    "constant:PULSE_ICON_DRAW_STROKE": [
+      "1"
+    ],
+    "constant:PULSE_ICON_DUPLICATE": [
+      "48"
+    ],
+    "constant:PULSE_ICON_EXTRACT": [
+      "2"
+    ],
+    "constant:PULSE_ICON_EXTRACT_TO": [
+      "5"
+    ],
+    "constant:PULSE_ICON_EYE": [
+      "20"
+    ],
+    "constant:PULSE_ICON_FILE": [
+      "11"
+    ],
+    "constant:PULSE_ICON_FILM": [
+      "40"
+    ],
+    "constant:PULSE_ICON_FILTER": [
+      "61"
+    ],
+    "constant:PULSE_ICON_FOLDER": [
+      "10"
+    ],
+    "constant:PULSE_ICON_FORWARD": [
+      "35"
+    ],
+    "constant:PULSE_ICON_GEAR": [
+      "9"
+    ],
+    "constant:PULSE_ICON_HASH": [
+      "8"
+    ],
+    "constant:PULSE_ICON_IMAGE": [
+      "38"
+    ],
+    "constant:PULSE_ICON_INFO": [
+      "52"
+    ],
+    "constant:PULSE_ICON_KEY": [
+      "67"
+    ],
+    "constant:PULSE_ICON_KEYBOARD": [
+      "51"
+    ],
+    "constant:PULSE_ICON_LINES": [
+      "50"
+    ],
+    "constant:PULSE_ICON_LIST_VIEW": [
+      "45"
+    ],
+    "constant:PULSE_ICON_LOCK": [
+      "19"
+    ],
+    "constant:PULSE_ICON_MINUS": [
+      "32"
+    ],
+    "constant:PULSE_ICON_MORE": [
+      "15"
+    ],
+    "constant:PULSE_ICON_NEW_FOLDER": [
+      "62"
+    ],
+    "constant:PULSE_ICON_OPEN": [
+      "26"
+    ],
+    "constant:PULSE_ICON_OPEN_WITH": [
+      "27"
+    ],
+    "constant:PULSE_ICON_PALETTE": [
+      "44"
+    ],
+    "constant:PULSE_ICON_PANES": [
+      "55"
+    ],
+    "constant:PULSE_ICON_PATH": [
+      "28"
+    ],
+    "constant:PULSE_ICON_PC": [
+      "64"
+    ],
+    "constant:PULSE_ICON_PLUS": [
+      "31"
+    ],
+    "constant:PULSE_ICON_POWER": [
+      "47"
+    ],
+    "constant:PULSE_ICON_PROPERTIES": [
+      "25"
+    ],
+    "constant:PULSE_ICON_PUZZLE": [
+      "43"
+    ],
+    "constant:PULSE_ICON_REFRESH": [
+      "37"
+    ],
+    "constant:PULSE_ICON_RENAME": [
+      "23"
+    ],
+    "constant:PULSE_ICON_SEARCH": [
+      "3"
+    ],
+    "constant:PULSE_ICON_SHIELD": [
+      "17"
+    ],
+    "constant:PULSE_ICON_SIDEBAR": [
+      "54"
+    ],
+    "constant:PULSE_ICON_SORT": [
+      "60"
+    ],
+    "constant:PULSE_ICON_SPARKLE": [
+      "42"
+    ],
+    "constant:PULSE_ICON_SQUARE": [
+      "33"
+    ],
+    "constant:PULSE_ICON_STAR": [
+      "63"
+    ],
+    "constant:PULSE_ICON_TABS": [
+      "46"
+    ],
+    "constant:PULSE_ICON_TEST": [
+      "7"
+    ],
+    "constant:PULSE_ICON_TEXT_SEARCH": [
+      "41"
+    ],
+    "constant:PULSE_ICON_TRASH": [
+      "24"
+    ],
+    "constant:PULSE_ICON_UNDO": [
+      "29"
+    ],
+    "constant:PULSE_ICON_UP": [
+      "36"
+    ],
+    "constant:PULSE_ICON_WARN": [
+      "53"
+    ],
+    "constant:PULSE_NAVIGATE_CURRENT_TAB": [
+      "0"
+    ],
+    "constant:PULSE_NAVIGATE_NEW_TAB": [
+      "1"
+    ],
+    "constant:PULSE_NAVIGATE_REVEAL_ITEM": [
+      "2"
+    ],
+    "constant:PULSE_NOTICE_ERROR": [
+      "3"
+    ],
+    "constant:PULSE_NOTICE_INFO": [
+      "0"
+    ],
+    "constant:PULSE_NOTICE_SUCCESS": [
+      "1"
+    ],
+    "constant:PULSE_NOTICE_WARNING": [
+      "2"
+    ],
     "constant:PULSE_OK": [
       "0"
+    ],
+    "constant:PULSE_PICKER_ACCEPTED": [
+      "0"
+    ],
+    "constant:PULSE_PICKER_ALL_FLAGS": [
+      "7"
+    ],
+    "constant:PULSE_PICKER_CANCELLED": [
+      "1"
+    ],
+    "constant:PULSE_PICKER_FAILED": [
+      "2"
+    ],
+    "constant:PULSE_PICKER_FLAG_MULTISELECT": [
+      "1"
+    ],
+    "constant:PULSE_PICKER_FLAG_NONE": [
+      "0"
+    ],
+    "constant:PULSE_PICKER_FLAG_NO_OVERWRITE_PROMPT": [
+      "4"
+    ],
+    "constant:PULSE_PICKER_FLAG_SHOW_HIDDEN": [
+      "2"
     ],
     "constant:PULSE_PREVIEW_ARCHIVE": [
       "1"
@@ -515,6 +1029,18 @@
     ],
     "constant:PULSE_PREVIEW_UI_MODEL": [
       "3"
+    ],
+    "constant:PULSE_QUICK_PICK_ITEM_ALL_FLAGS": [
+      "3"
+    ],
+    "constant:PULSE_QUICK_PICK_ITEM_DISABLED": [
+      "2"
+    ],
+    "constant:PULSE_QUICK_PICK_ITEM_NONE": [
+      "0"
+    ],
+    "constant:PULSE_QUICK_PICK_ITEM_SELECTED": [
+      "1"
     ],
     "constant:PULSE_RENAME_READY": [
       "1"
@@ -540,6 +1066,15 @@
     "constant:PULSE_RESOURCE_FILE_REPARSE_POINT": [
       "2"
     ],
+    "constant:PULSE_SNACK_ALL_FLAGS": [
+      "1"
+    ],
+    "constant:PULSE_SNACK_FLAG_NONE": [
+      "0"
+    ],
+    "constant:PULSE_SNACK_FLAG_REPLACE": [
+      "1"
+    ],
     "constant:PULSE_STAGE_CANCELLED": [
       "7"
     ],
@@ -563,6 +1098,9 @@
     ],
     "constant:PULSE_STAGE_RUNNING": [
       "3"
+    ],
+    "constant:PULSE_TASK_ACTION_PRIMARY": [
+      "1"
     ],
     "constant:PULSE_TASK_CANCELLED": [
       "5"
@@ -612,11 +1150,14 @@
     "constant:PULSE_UI_MODEL_BUTTON": [
       "5"
     ],
+    "constant:PULSE_UI_MODEL_CANVAS": [
+      "41"
+    ],
     "constant:PULSE_UI_MODEL_CHECKBOX": [
       "7"
     ],
     "constant:PULSE_UI_MODEL_COUNT": [
-      "41"
+      "42"
     ],
     "constant:PULSE_UI_MODEL_DATA_TABLE": [
       "28"
@@ -750,6 +1291,12 @@
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
     ],
+    "field:PulseCommandDescriptor.detail": [
+      "96",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
     "field:PulseCommandDescriptor.exclude_extensions": [
       "68",
       "4",
@@ -768,11 +1315,35 @@
       "8",
       "const char *__cdecl TypeName<const struct PulseStringView*>(void)"
     ],
+    "field:PulseCommandDescriptor.flags": [
+      "128",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseCommandDescriptor.group": [
+      "112",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseCommandDescriptor.group_icon": [
+      "152",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
     "field:PulseCommandDescriptor.icon": [
       "40",
       "4",
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseCommandDescriptor.icon_name": [
+      "136",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
     ],
     "field:PulseCommandDescriptor.id": [
       "8",
@@ -806,6 +1377,12 @@
     ],
     "field:PulseCommandDescriptor.modifiers": [
       "76",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseCommandDescriptor.reserved_v3": [
+      "156",
       "4",
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
@@ -859,6 +1436,48 @@
       "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned __int64)>(void)"
     ],
     "field:PulseCommandsV1.version": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseCommandsV2.context": [
+      "8",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void*>(void)"
+    ],
+    "field:PulseCommandsV2.register_command": [
+      "16",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,const struct PulseCommandDescriptor *,unsigned __int64 *)>(void)"
+    ],
+    "field:PulseCommandsV2.set_command_flags": [
+      "40",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned __int64,unsigned int)>(void)"
+    ],
+    "field:PulseCommandsV2.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseCommandsV2.unregister_command": [
+      "24",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned __int64)>(void)"
+    ],
+    "field:PulseCommandsV2.update_command": [
+      "32",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned __int64,const struct PulseCommandDescriptor *)>(void)"
+    ],
+    "field:PulseCommandsV2.version": [
       "4",
       "4",
       "4",
@@ -1026,6 +1645,84 @@
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
     ],
+    "field:PulseDiagnosticInfo.field": [
+      "64",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseDiagnosticInfo.interface_name": [
+      "16",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseDiagnosticInfo.message": [
+      "80",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseDiagnosticInfo.operation": [
+      "32",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseDiagnosticInfo.sequence": [
+      "8",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<unsigned __int64>(void)"
+    ],
+    "field:PulseDiagnosticInfo.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDiagnosticInfo.status": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<int>(void)"
+    ],
+    "field:PulseDiagnosticInfo.subject": [
+      "48",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseDiagnosticsV1.clear_last_error": [
+      "24",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *)>(void)"
+    ],
+    "field:PulseDiagnosticsV1.context": [
+      "8",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void*>(void)"
+    ],
+    "field:PulseDiagnosticsV1.get_last_error": [
+      "16",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,void (__cdecl *)(void *,const struct PulseDiagnosticInfo *),void *)>(void)"
+    ],
+    "field:PulseDiagnosticsV1.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDiagnosticsV1.version": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
     "field:PulseDialogButton.id": [
       "8",
       "16",
@@ -1074,8 +1771,32 @@
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
     ],
+    "field:PulseDialogRequest.footnote": [
+      "128",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseDialogRequest.footnote_icon": [
+      "144",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogRequest.heading": [
+      "72",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
     "field:PulseDialogRequest.height": [
       "8",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogRequest.icon": [
+      "88",
       "4",
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
@@ -1094,6 +1815,24 @@
     ],
     "field:PulseDialogRequest.size": [
       "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogRequest.subject": [
+      "96",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseDialogRequest.subject_detail": [
+      "112",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseDialogRequest.subject_kind": [
+      "92",
       "4",
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
@@ -1141,6 +1880,66 @@
       "const char *__cdecl TypeName<unsigned int>(void)"
     ],
     "field:PulseDialogsV1.version": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogsV2.close": [
+      "32",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned __int64)>(void)"
+    ],
+    "field:PulseDialogsV2.context": [
+      "8",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void*>(void)"
+    ],
+    "field:PulseDialogsV2.get_state": [
+      "64",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned __int64,struct PulseStringView,char *,unsigned int,unsigned int *)>(void)"
+    ],
+    "field:PulseDialogsV2.set_states": [
+      "24",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned __int64,const struct PulseUiState *,unsigned int)>(void)"
+    ],
+    "field:PulseDialogsV2.show": [
+      "16",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,const struct PulseDialogRequest *,void (__cdecl *)(void *,unsigned __int64,const struct PulseUiState *,unsigned int),void (__cdecl *)(void *,unsigned __int64,int,struct PulseStringView,const struct PulseUiState *,unsigned int),void *,unsigned __int64 *)>(void)"
+    ],
+    "field:PulseDialogsV2.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogsV2.subscribe_command": [
+      "40",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned __int64,struct PulseStringView,void (__cdecl *)(void *,unsigned __int64,struct PulseStringView),void *,unsigned __int64 *)>(void)"
+    ],
+    "field:PulseDialogsV2.unsubscribe_command": [
+      "48",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned __int64)>(void)"
+    ],
+    "field:PulseDialogsV2.update_model": [
+      "56",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned __int64,const struct PulseUiModelTree *)>(void)"
+    ],
+    "field:PulseDialogsV2.version": [
       "4",
       "4",
       "4",
@@ -2046,6 +2845,366 @@
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
     ],
+    "field:PulseIconDescriptor.layer_count": [
+      "32",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseIconDescriptor.layers": [
+      "24",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<const struct PulseIconLayer*>(void)"
+    ],
+    "field:PulseIconDescriptor.name": [
+      "8",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseIconDescriptor.reserved": [
+      "36",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseIconDescriptor.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseIconDescriptor.view_box_milli": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseIconLayer.argb": [
+      "28",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseIconLayer.color_role": [
+      "24",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseIconLayer.draw_flags": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseIconLayer.opacity_milli": [
+      "36",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseIconLayer.path_data": [
+      "8",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseIconLayer.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseIconLayer.stroke_width_milli": [
+      "32",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseIconsV1.context": [
+      "8",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void*>(void)"
+    ],
+    "field:PulseIconsV1.register_icon": [
+      "16",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,const struct PulseIconDescriptor *,unsigned int *)>(void)"
+    ],
+    "field:PulseIconsV1.resolve_builtin": [
+      "40",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,struct PulseStringView,unsigned int *)>(void)"
+    ],
+    "field:PulseIconsV1.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseIconsV1.unregister_icon": [
+      "32",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned int)>(void)"
+    ],
+    "field:PulseIconsV1.update_icon": [
+      "24",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned int,const struct PulseIconDescriptor *)>(void)"
+    ],
+    "field:PulseIconsV1.version": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseNoticeRequest.action_count": [
+      "48",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseNoticeRequest.actions": [
+      "40",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<const struct PulseWorkbenchAction*>(void)"
+    ],
+    "field:PulseNoticeRequest.kind": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseNoticeRequest.message": [
+      "24",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseNoticeRequest.reserved": [
+      "52",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseNoticeRequest.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseNoticeRequest.title": [
+      "8",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseOpenFilesRequest.default_filter_index": [
+      "8",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseOpenFilesRequest.filter_count": [
+      "12",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseOpenFilesRequest.filters": [
+      "64",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<const struct PulsePickerFilter*>(void)"
+    ],
+    "field:PulseOpenFilesRequest.flags": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseOpenFilesRequest.initial_path": [
+      "48",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseOpenFilesRequest.ok_label": [
+      "32",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseOpenFilesRequest.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseOpenFilesRequest.title": [
+      "16",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulsePickFoldersRequest.flags": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulsePickFoldersRequest.initial_path": [
+      "40",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulsePickFoldersRequest.ok_label": [
+      "24",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulsePickFoldersRequest.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulsePickFoldersRequest.title": [
+      "8",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulsePickerFilter.label": [
+      "8",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulsePickerFilter.pattern": [
+      "24",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulsePickerFilter.reserved": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulsePickerFilter.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulsePickerResult.error": [
+      "48",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulsePickerResult.filter_index": [
+      "16",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulsePickerResult.outcome": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulsePickerResult.path_count": [
+      "20",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulsePickerResult.paths": [
+      "24",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<const struct PulseStringView*>(void)"
+    ],
+    "field:PulsePickerResult.request_id": [
+      "8",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<unsigned __int64>(void)"
+    ],
+    "field:PulsePickerResult.selected_id": [
+      "32",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulsePickerResult.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulsePickersV1.cancel": [
+      "48",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned __int64)>(void)"
+    ],
+    "field:PulsePickersV1.context": [
+      "8",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void*>(void)"
+    ],
+    "field:PulsePickersV1.open_files": [
+      "16",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,const struct PulseOpenFilesRequest *,void (__cdecl *)(void *,const struct PulsePickerResult *),void *,unsigned __int64 *)>(void)"
+    ],
+    "field:PulsePickersV1.pick_folders": [
+      "32",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,const struct PulsePickFoldersRequest *,void (__cdecl *)(void *,const struct PulsePickerResult *),void *,unsigned __int64 *)>(void)"
+    ],
+    "field:PulsePickersV1.quick_pick": [
+      "40",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,const struct PulseQuickPickRequest *,void (__cdecl *)(void *,const struct PulsePickerResult *),void *,unsigned __int64 *)>(void)"
+    ],
+    "field:PulsePickersV1.save_file": [
+      "24",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,const struct PulseSaveFileRequest *,void (__cdecl *)(void *,const struct PulsePickerResult *),void *,unsigned __int64 *)>(void)"
+    ],
+    "field:PulsePickersV1.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulsePickersV1.version": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
     "field:PulsePluginV1.activate": [
       "16",
       "8",
@@ -2286,6 +3445,96 @@
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
     ],
+    "field:PulseQuickPickItem.detail": [
+      "40",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseQuickPickItem.flags": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseQuickPickItem.glyph": [
+      "56",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseQuickPickItem.id": [
+      "8",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseQuickPickItem.shortcut": [
+      "72",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseQuickPickItem.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseQuickPickItem.title": [
+      "24",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseQuickPickRequest.flags": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseQuickPickRequest.initial_query": [
+      "48",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseQuickPickRequest.item_count": [
+      "8",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseQuickPickRequest.items": [
+      "64",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<const struct PulseQuickPickItem*>(void)"
+    ],
+    "field:PulseQuickPickRequest.placeholder": [
+      "32",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseQuickPickRequest.reserved": [
+      "12",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseQuickPickRequest.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseQuickPickRequest.title": [
+      "16",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
     "field:PulseRenameInput.entry": [
       "0",
       "16",
@@ -2490,6 +3739,66 @@
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
     ],
+    "field:PulseSaveFileRequest.default_extension": [
+      "80",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseSaveFileRequest.default_filter_index": [
+      "8",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseSaveFileRequest.default_name": [
+      "64",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseSaveFileRequest.filter_count": [
+      "12",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseSaveFileRequest.filters": [
+      "96",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<const struct PulsePickerFilter*>(void)"
+    ],
+    "field:PulseSaveFileRequest.flags": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseSaveFileRequest.initial_path": [
+      "48",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseSaveFileRequest.ok_label": [
+      "32",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseSaveFileRequest.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseSaveFileRequest.title": [
+      "16",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
     "field:PulseSetting.key": [
       "0",
       "16",
@@ -2561,6 +3870,60 @@
       "4",
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseSnackRequest.action_count": [
+      "56",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseSnackRequest.actions": [
+      "48",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<const struct PulseWorkbenchAction*>(void)"
+    ],
+    "field:PulseSnackRequest.detail": [
+      "32",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseSnackRequest.duration_ms": [
+      "12",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseSnackRequest.flags": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseSnackRequest.kind": [
+      "8",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseSnackRequest.reserved": [
+      "60",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseSnackRequest.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseSnackRequest.text": [
+      "16",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
     ],
     "field:PulseStageSnapshot.completed_bytes": [
       "48",
@@ -2688,6 +4051,30 @@
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
     ],
+    "field:PulseTaskAction.flags": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseTaskAction.id": [
+      "8",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseTaskAction.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseTaskAction.text": [
+      "24",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
     "field:PulseTaskContext.cancelled": [
       "24",
       "8",
@@ -2712,6 +4099,24 @@
       "8",
       "const char *__cdecl TypeName<int(__cdecl *)(void *,const struct PulseTaskProgress *)>(void)"
     ],
+    "field:PulseTaskDescriptor.action_user": [
+      "120",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void*>(void)"
+    ],
+    "field:PulseTaskDescriptor.destination": [
+      "80",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseTaskDescriptor.on_action": [
+      "112",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void(__cdecl *)(void *,unsigned __int64,struct PulseStringView)>(void)"
+    ],
     "field:PulseTaskDescriptor.on_cancel": [
       "56",
       "8",
@@ -2723,6 +4128,24 @@
       "4",
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseTaskDescriptor.source": [
+      "64",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseTaskDescriptor.step_count": [
+      "104",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseTaskDescriptor.steps": [
+      "96",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<const struct PulseStringView*>(void)"
     ],
     "field:PulseTaskDescriptor.title": [
       "8",
@@ -2748,6 +4171,24 @@
       "8",
       "const char *__cdecl TypeName<unsigned int(__cdecl *)(void *,const struct PulseTaskContext *)>(void)"
     ],
+    "field:PulseTaskProgress.action_count": [
+      "76",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseTaskProgress.actions": [
+      "136",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<const struct PulseTaskAction*>(void)"
+    ],
+    "field:PulseTaskProgress.assurance": [
+      "120",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
     "field:PulseTaskProgress.completed_bytes": [
       "24",
       "8",
@@ -2766,8 +4207,32 @@
       "8",
       "const char *__cdecl TypeName<struct PulseStringView>(void)"
     ],
+    "field:PulseTaskProgress.detail": [
+      "104",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
     "field:PulseTaskProgress.error": [
       "40",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseTaskProgress.linked_operation": [
+      "80",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<unsigned __int64>(void)"
+    ],
+    "field:PulseTaskProgress.log": [
+      "144",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseTaskProgress.note": [
+      "88",
       "16",
       "8",
       "const char *__cdecl TypeName<struct PulseStringView>(void)"
@@ -2778,8 +4243,26 @@
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
     ],
+    "field:PulseTaskProgress.result": [
+      "160",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseTaskProgress.result_path": [
+      "176",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
     "field:PulseTaskProgress.size": [
       "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseTaskProgress.step": [
+      "72",
       "4",
       "4",
       "const char *__cdecl TypeName<unsigned int>(void)"
@@ -2804,7 +4287,7 @@
     ],
     "field:PulseTaskSnapshot.progress": [
       "24",
-      "72",
+      "192",
       "8",
       "const char *__cdecl TypeName<struct PulseTaskProgress>(void)"
     ],
@@ -4206,6 +5689,78 @@
       "8",
       "const char *__cdecl TypeName<struct PulseStringView>(void)"
     ],
+    "field:PulseWorkbenchAction.id": [
+      "8",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseWorkbenchAction.label": [
+      "24",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseWorkbenchAction.reserved": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseWorkbenchAction.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseWorkbenchV1.context": [
+      "8",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void*>(void)"
+    ],
+    "field:PulseWorkbenchV1.reveal_path": [
+      "32",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,struct PulseStringView,unsigned int)>(void)"
+    ],
+    "field:PulseWorkbenchV1.set_clipboard_text": [
+      "48",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,struct PulseStringView)>(void)"
+    ],
+    "field:PulseWorkbenchV1.show_notice": [
+      "24",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,const struct PulseNoticeRequest *,void (__cdecl *)(void *,unsigned __int64,struct PulseStringView),void *,unsigned __int64 *)>(void)"
+    ],
+    "field:PulseWorkbenchV1.show_snack": [
+      "16",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,const struct PulseSnackRequest *,void (__cdecl *)(void *,unsigned __int64,struct PulseStringView),void *,unsigned __int64 *)>(void)"
+    ],
+    "field:PulseWorkbenchV1.show_text_diff": [
+      "40",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,struct PulseStringView,struct PulseStringView)>(void)"
+    ],
+    "field:PulseWorkbenchV1.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseWorkbenchV1.version": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
     "type:PulseAuditEntry": [
       "48",
       "8",
@@ -4217,7 +5772,7 @@
       "const char *__cdecl TypeName<struct PulseAuditPage>(void)"
     ],
     "type:PulseCommandDescriptor": [
-      "96",
+      "160",
       "8",
       "const char *__cdecl TypeName<struct PulseCommandDescriptor>(void)"
     ],
@@ -4235,6 +5790,11 @@
       "32",
       "8",
       "const char *__cdecl TypeName<struct PulseCommandsV1>(void)"
+    ],
+    "type:PulseCommandsV2": [
+      "48",
+      "8",
+      "const char *__cdecl TypeName<struct PulseCommandsV2>(void)"
     ],
     "type:PulseContextChangeFn": [
       "8",
@@ -4271,6 +5831,21 @@
       "8",
       "const char *__cdecl TypeName<struct PulseContextV1>(void)"
     ],
+    "type:PulseDiagnosticFn": [
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void(__cdecl *)(void *,const struct PulseDiagnosticInfo *)>(void)"
+    ],
+    "type:PulseDiagnosticInfo": [
+      "96",
+      "8",
+      "const char *__cdecl TypeName<struct PulseDiagnosticInfo>(void)"
+    ],
+    "type:PulseDiagnosticsV1": [
+      "32",
+      "8",
+      "const char *__cdecl TypeName<struct PulseDiagnosticsV1>(void)"
+    ],
     "type:PulseDialogButton": [
       "40",
       "8",
@@ -4281,8 +5856,13 @@
       "8",
       "const char *__cdecl TypeName<void(__cdecl *)(void *,unsigned __int64,int,struct PulseStringView,const struct PulseUiState *,unsigned int)>(void)"
     ],
+    "type:PulseDialogCommandFn": [
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void(__cdecl *)(void *,unsigned __int64,struct PulseStringView)>(void)"
+    ],
     "type:PulseDialogRequest": [
-      "72",
+      "152",
       "8",
       "const char *__cdecl TypeName<struct PulseDialogRequest>(void)"
     ],
@@ -4295,6 +5875,11 @@
       "40",
       "8",
       "const char *__cdecl TypeName<struct PulseDialogsV1>(void)"
+    ],
+    "type:PulseDialogsV2": [
+      "72",
+      "8",
+      "const char *__cdecl TypeName<struct PulseDialogsV2>(void)"
     ],
     "type:PulseDirectoriesV1": [
       "80",
@@ -4436,6 +6021,71 @@
       "8",
       "const char *__cdecl TypeName<struct PulseHostV1>(void)"
     ],
+    "type:PulseIconDescriptor": [
+      "40",
+      "8",
+      "const char *__cdecl TypeName<struct PulseIconDescriptor>(void)"
+    ],
+    "type:PulseIconId": [
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "type:PulseIconLayer": [
+      "40",
+      "8",
+      "const char *__cdecl TypeName<struct PulseIconLayer>(void)"
+    ],
+    "type:PulseIconsV1": [
+      "48",
+      "8",
+      "const char *__cdecl TypeName<struct PulseIconsV1>(void)"
+    ],
+    "type:PulseNoticeRequest": [
+      "56",
+      "8",
+      "const char *__cdecl TypeName<struct PulseNoticeRequest>(void)"
+    ],
+    "type:PulseNotificationId": [
+      "8",
+      "8",
+      "const char *__cdecl TypeName<unsigned __int64>(void)"
+    ],
+    "type:PulseOpenFilesRequest": [
+      "72",
+      "8",
+      "const char *__cdecl TypeName<struct PulseOpenFilesRequest>(void)"
+    ],
+    "type:PulsePickFoldersRequest": [
+      "56",
+      "8",
+      "const char *__cdecl TypeName<struct PulsePickFoldersRequest>(void)"
+    ],
+    "type:PulsePickerFilter": [
+      "40",
+      "8",
+      "const char *__cdecl TypeName<struct PulsePickerFilter>(void)"
+    ],
+    "type:PulsePickerRequestId": [
+      "8",
+      "8",
+      "const char *__cdecl TypeName<unsigned __int64>(void)"
+    ],
+    "type:PulsePickerResult": [
+      "64",
+      "8",
+      "const char *__cdecl TypeName<struct PulsePickerResult>(void)"
+    ],
+    "type:PulsePickerResultFn": [
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void(__cdecl *)(void *,const struct PulsePickerResult *)>(void)"
+    ],
+    "type:PulsePickersV1": [
+      "56",
+      "8",
+      "const char *__cdecl TypeName<struct PulsePickersV1>(void)"
+    ],
     "type:PulsePluginEntryV1Fn": [
       "8",
       "8",
@@ -4491,6 +6141,16 @@
       "8",
       "const char *__cdecl TypeName<int(__cdecl *)(void *,struct PulseStringView,unsigned int,void *,unsigned int)>(void)"
     ],
+    "type:PulseQuickPickItem": [
+      "88",
+      "8",
+      "const char *__cdecl TypeName<struct PulseQuickPickItem>(void)"
+    ],
+    "type:PulseQuickPickRequest": [
+      "72",
+      "8",
+      "const char *__cdecl TypeName<struct PulseQuickPickRequest>(void)"
+    ],
     "type:PulseRenameInput": [
       "32",
       "8",
@@ -4531,6 +6191,11 @@
       "8",
       "const char *__cdecl TypeName<struct PulseResourcesV1>(void)"
     ],
+    "type:PulseSaveFileRequest": [
+      "104",
+      "8",
+      "const char *__cdecl TypeName<struct PulseSaveFileRequest>(void)"
+    ],
     "type:PulseSetting": [
       "32",
       "8",
@@ -4545,6 +6210,11 @@
       "40",
       "8",
       "const char *__cdecl TypeName<struct PulseSettingsPagesV1>(void)"
+    ],
+    "type:PulseSnackRequest": [
+      "64",
+      "8",
+      "const char *__cdecl TypeName<struct PulseSnackRequest>(void)"
     ],
     "type:PulseStageChooseFn": [
       "8",
@@ -4591,6 +6261,16 @@
       "8",
       "const char *__cdecl TypeName<struct PulseStringView>(void)"
     ],
+    "type:PulseTaskAction": [
+      "40",
+      "8",
+      "const char *__cdecl TypeName<struct PulseTaskAction>(void)"
+    ],
+    "type:PulseTaskActionFn": [
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void(__cdecl *)(void *,unsigned __int64,struct PulseStringView)>(void)"
+    ],
     "type:PulseTaskCancelFn": [
       "8",
       "8",
@@ -4602,7 +6282,7 @@
       "const char *__cdecl TypeName<struct PulseTaskContext>(void)"
     ],
     "type:PulseTaskDescriptor": [
-      "64",
+      "128",
       "8",
       "const char *__cdecl TypeName<struct PulseTaskDescriptor>(void)"
     ],
@@ -4612,12 +6292,12 @@
       "const char *__cdecl TypeName<unsigned __int64>(void)"
     ],
     "type:PulseTaskProgress": [
-      "72",
+      "192",
       "8",
       "const char *__cdecl TypeName<struct PulseTaskProgress>(void)"
     ],
     "type:PulseTaskSnapshot": [
-      "96",
+      "216",
       "8",
       "const char *__cdecl TypeName<struct PulseTaskSnapshot>(void)"
     ],
@@ -4805,6 +6485,21 @@
       "8",
       "8",
       "const char *__cdecl TypeName<void(__cdecl *)(void *,unsigned __int64,const struct PulseUiStateBatch *)>(void)"
+    ],
+    "type:PulseWorkbenchAction": [
+      "40",
+      "8",
+      "const char *__cdecl TypeName<struct PulseWorkbenchAction>(void)"
+    ],
+    "type:PulseWorkbenchActionFn": [
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void(__cdecl *)(void *,unsigned __int64,struct PulseStringView)>(void)"
+    ],
+    "type:PulseWorkbenchV1": [
+      "56",
+      "8",
+      "const char *__cdecl TypeName<struct PulseWorkbenchV1>(void)"
     ]
   },
   "status": "preview-snapshot-not-1.0-freeze",
@@ -4851,7 +6546,13 @@
         "uint32_t virtual_key",
         "uint32_t modifiers",
         "PulseCommandFn invoke",
-        "void * user"
+        "void * user",
+        "PulseStringView detail",
+        "PulseStringView group",
+        "uint32_t flags",
+        "PulseStringView icon_name",
+        "uint32_t group_icon",
+        "uint32_t reserved_v3"
       ],
       "fields": [
         "size",
@@ -4867,7 +6568,13 @@
         "virtual_key",
         "modifiers",
         "invoke",
-        "user"
+        "user",
+        "detail",
+        "group",
+        "flags",
+        "icon_name",
+        "group_icon",
+        "reserved_v3"
       ]
     },
     "PulseCommandFn": {
@@ -4890,6 +6597,26 @@
         "context",
         "register_command",
         "unregister_command"
+      ]
+    },
+    "PulseCommandsV2": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t version",
+        "void * context",
+        "PulseStatus ( PULSE_CALL * register_command ) ( void * , const PulseCommandDescriptor * , PulseCommandId * )",
+        "PulseStatus ( PULSE_CALL * unregister_command ) ( void * , PulseCommandId )",
+        "PulseStatus ( PULSE_CALL * update_command ) ( void * , PulseCommandId , const PulseCommandDescriptor * )",
+        "PulseStatus ( PULSE_CALL * set_command_flags ) ( void * , PulseCommandId , uint32_t )"
+      ],
+      "fields": [
+        "size",
+        "version",
+        "context",
+        "register_command",
+        "unregister_command",
+        "update_command",
+        "set_command_flags"
       ]
     },
     "PulseContextChangeFn": {
@@ -4979,6 +6706,46 @@
         "get_selection"
       ]
     },
+    "PulseDiagnosticFn": {
+      "declaration": "void ( PULSE_CALL * PulseDiagnosticFn ) ( void * user , const PulseDiagnosticInfo * info )"
+    },
+    "PulseDiagnosticInfo": {
+      "declarations": [
+        "uint32_t size",
+        "PulseStatus status",
+        "uint64_t sequence",
+        "PulseStringView interface_name",
+        "PulseStringView operation",
+        "PulseStringView subject",
+        "PulseStringView field",
+        "PulseStringView message"
+      ],
+      "fields": [
+        "size",
+        "status",
+        "sequence",
+        "interface_name",
+        "operation",
+        "subject",
+        "field",
+        "message"
+      ]
+    },
+    "PulseDiagnosticsV1": {
+      "declarations": [
+        "uint32_t size , version",
+        "void * context",
+        "PulseStatus ( PULSE_CALL * get_last_error ) ( void * context , PulseDiagnosticFn callback , void * user )",
+        "PulseStatus ( PULSE_CALL * clear_last_error ) ( void * context )"
+      ],
+      "fields": [
+        "size",
+        "version",
+        "context",
+        "get_last_error",
+        "clear_last_error"
+      ]
+    },
     "PulseDialogButton": {
       "declarations": [
         "uint32_t size",
@@ -4996,6 +6763,9 @@
     "PulseDialogClosed": {
       "declaration": "void ( PULSE_CALL * PulseDialogClosed ) ( void * user , uint64_t dialog , PulseStatus status , PulseStringView button , const PulseUiState * states , uint32_t count )"
     },
+    "PulseDialogCommandFn": {
+      "declaration": "void ( PULSE_CALL * PulseDialogCommandFn ) ( void * user , uint64_t dialog , PulseStringView command )"
+    },
     "PulseDialogRequest": {
       "declarations": [
         "uint32_t size",
@@ -5007,7 +6777,14 @@
         "PulseStringView title",
         "PulseStringView message",
         "const PulseDialogButton * buttons",
-        "const PulseUiModelTree * model"
+        "const PulseUiModelTree * model",
+        "PulseStringView heading",
+        "uint32_t icon",
+        "uint32_t subject_kind",
+        "PulseStringView subject",
+        "PulseStringView subject_detail",
+        "PulseStringView footnote",
+        "uint32_t footnote_icon"
       ],
       "fields": [
         "size",
@@ -5019,7 +6796,14 @@
         "title",
         "message",
         "buttons",
-        "model"
+        "model",
+        "heading",
+        "icon",
+        "subject_kind",
+        "subject",
+        "subject_detail",
+        "footnote",
+        "footnote_icon"
       ]
     },
     "PulseDialogStateChanged": {
@@ -5040,6 +6824,31 @@
         "show",
         "set_states",
         "close"
+      ]
+    },
+    "PulseDialogsV2": {
+      "declarations": [
+        "uint32_t size , version",
+        "void * context",
+        "PulseStatus ( PULSE_CALL * show ) ( void * , const PulseDialogRequest * , PulseDialogStateChanged , PulseDialogClosed , void * user , uint64_t * dialog )",
+        "PulseStatus ( PULSE_CALL * set_states ) ( void * , uint64_t dialog , const PulseUiState * states , uint32_t count )",
+        "PulseStatus ( PULSE_CALL * close ) ( void * , uint64_t dialog )",
+        "PulseStatus ( PULSE_CALL * subscribe_command ) ( void * , uint64_t dialog , PulseStringView command , PulseDialogCommandFn callback , void * user , uint64_t * subscription )",
+        "PulseStatus ( PULSE_CALL * unsubscribe_command ) ( void * , uint64_t subscription )",
+        "PulseStatus ( PULSE_CALL * update_model ) ( void * , uint64_t dialog , const PulseUiModelTree * model )",
+        "PulseStatus ( PULSE_CALL * get_state ) ( void * , uint64_t dialog , PulseStringView key , char * buffer , uint32_t capacity , uint32_t * needed )"
+      ],
+      "fields": [
+        "size",
+        "version",
+        "context",
+        "show",
+        "set_states",
+        "close",
+        "subscribe_command",
+        "unsubscribe_command",
+        "update_model",
+        "get_state"
       ]
     },
     "PulseDirectoriesV1": {
@@ -5483,6 +7292,191 @@
         "query_interface"
       ]
     },
+    "PulseIconDescriptor": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t view_box_milli",
+        "PulseStringView name",
+        "const PulseIconLayer * layers",
+        "uint32_t layer_count",
+        "uint32_t reserved"
+      ],
+      "fields": [
+        "size",
+        "view_box_milli",
+        "name",
+        "layers",
+        "layer_count",
+        "reserved"
+      ]
+    },
+    "PulseIconId": {
+      "declaration": "uint32_t PulseIconId"
+    },
+    "PulseIconLayer": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t draw_flags",
+        "PulseStringView path_data",
+        "uint32_t color_role",
+        "uint32_t argb",
+        "uint32_t stroke_width_milli",
+        "uint32_t opacity_milli"
+      ],
+      "fields": [
+        "size",
+        "draw_flags",
+        "path_data",
+        "color_role",
+        "argb",
+        "stroke_width_milli",
+        "opacity_milli"
+      ]
+    },
+    "PulseIconsV1": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t version",
+        "void * context",
+        "PulseStatus ( PULSE_CALL * register_icon ) ( void * , const PulseIconDescriptor * , PulseIconId * )",
+        "PulseStatus ( PULSE_CALL * update_icon ) ( void * , PulseIconId , const PulseIconDescriptor * )",
+        "PulseStatus ( PULSE_CALL * unregister_icon ) ( void * , PulseIconId )",
+        "PulseStatus ( PULSE_CALL * resolve_builtin ) ( void * , PulseStringView , PulseIconId * )"
+      ],
+      "fields": [
+        "size",
+        "version",
+        "context",
+        "register_icon",
+        "update_icon",
+        "unregister_icon",
+        "resolve_builtin"
+      ]
+    },
+    "PulseNoticeRequest": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t kind",
+        "PulseStringView title",
+        "PulseStringView message",
+        "const PulseWorkbenchAction * actions",
+        "uint32_t action_count",
+        "uint32_t reserved"
+      ],
+      "fields": [
+        "size",
+        "kind",
+        "title",
+        "message",
+        "actions",
+        "action_count",
+        "reserved"
+      ]
+    },
+    "PulseNotificationId": {
+      "declaration": "uint64_t PulseNotificationId"
+    },
+    "PulseOpenFilesRequest": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t flags",
+        "uint32_t default_filter_index",
+        "uint32_t filter_count",
+        "PulseStringView title",
+        "PulseStringView ok_label",
+        "PulseStringView initial_path",
+        "const PulsePickerFilter * filters"
+      ],
+      "fields": [
+        "size",
+        "flags",
+        "default_filter_index",
+        "filter_count",
+        "title",
+        "ok_label",
+        "initial_path",
+        "filters"
+      ]
+    },
+    "PulsePickFoldersRequest": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t flags",
+        "PulseStringView title",
+        "PulseStringView ok_label",
+        "PulseStringView initial_path"
+      ],
+      "fields": [
+        "size",
+        "flags",
+        "title",
+        "ok_label",
+        "initial_path"
+      ]
+    },
+    "PulsePickerFilter": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t reserved",
+        "PulseStringView label",
+        "PulseStringView pattern"
+      ],
+      "fields": [
+        "size",
+        "reserved",
+        "label",
+        "pattern"
+      ]
+    },
+    "PulsePickerRequestId": {
+      "declaration": "uint64_t PulsePickerRequestId"
+    },
+    "PulsePickerResult": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t outcome",
+        "PulsePickerRequestId request_id",
+        "uint32_t filter_index",
+        "uint32_t path_count",
+        "const PulseStringView * paths",
+        "PulseStringView selected_id",
+        "PulseStringView error"
+      ],
+      "fields": [
+        "size",
+        "outcome",
+        "request_id",
+        "filter_index",
+        "path_count",
+        "paths",
+        "selected_id",
+        "error"
+      ]
+    },
+    "PulsePickerResultFn": {
+      "declaration": "void ( PULSE_CALL * PulsePickerResultFn ) ( void * user , const PulsePickerResult * result )"
+    },
+    "PulsePickersV1": {
+      "declarations": [
+        "uint32_t size , version",
+        "void * context",
+        "PulseStatus ( PULSE_CALL * open_files ) ( void * context , const PulseOpenFilesRequest * request , PulsePickerResultFn callback , void * user , PulsePickerRequestId * request_id )",
+        "PulseStatus ( PULSE_CALL * save_file ) ( void * context , const PulseSaveFileRequest * request , PulsePickerResultFn callback , void * user , PulsePickerRequestId * request_id )",
+        "PulseStatus ( PULSE_CALL * pick_folders ) ( void * context , const PulsePickFoldersRequest * request , PulsePickerResultFn callback , void * user , PulsePickerRequestId * request_id )",
+        "PulseStatus ( PULSE_CALL * quick_pick ) ( void * context , const PulseQuickPickRequest * request , PulsePickerResultFn callback , void * user , PulsePickerRequestId * request_id )",
+        "PulseStatus ( PULSE_CALL * cancel ) ( void * context , PulsePickerRequestId request_id )"
+      ],
+      "fields": [
+        "size",
+        "version",
+        "context",
+        "open_files",
+        "save_file",
+        "pick_folders",
+        "quick_pick",
+        "cancel"
+      ]
+    },
     "PulsePluginEntryV1Fn": {
       "declaration": "PulseStatus ( PULSE_CALL * PulsePluginEntryV1Fn ) ( const PulseHostV1 * host , PulsePluginV1 * plugin )"
     },
@@ -5607,6 +7601,48 @@
     "PulseQueryInterfaceFn": {
       "declaration": "PulseStatus ( PULSE_CALL * PulseQueryInterfaceFn ) ( void * context , PulseStringView name , uint32_t version , void * out_table , uint32_t out_size )"
     },
+    "PulseQuickPickItem": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t flags",
+        "PulseStringView id",
+        "PulseStringView title",
+        "PulseStringView detail",
+        "PulseStringView glyph",
+        "PulseStringView shortcut"
+      ],
+      "fields": [
+        "size",
+        "flags",
+        "id",
+        "title",
+        "detail",
+        "glyph",
+        "shortcut"
+      ]
+    },
+    "PulseQuickPickRequest": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t flags",
+        "uint32_t item_count",
+        "uint32_t reserved",
+        "PulseStringView title",
+        "PulseStringView placeholder",
+        "PulseStringView initial_query",
+        "const PulseQuickPickItem * items"
+      ],
+      "fields": [
+        "size",
+        "flags",
+        "item_count",
+        "reserved",
+        "title",
+        "placeholder",
+        "initial_query",
+        "items"
+      ]
+    },
     "PulseRenameInput": {
       "declarations": [
         "PulseStringView entry",
@@ -5717,6 +7753,32 @@
         "cancel_request"
       ]
     },
+    "PulseSaveFileRequest": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t flags",
+        "uint32_t default_filter_index",
+        "uint32_t filter_count",
+        "PulseStringView title",
+        "PulseStringView ok_label",
+        "PulseStringView initial_path",
+        "PulseStringView default_name",
+        "PulseStringView default_extension",
+        "const PulsePickerFilter * filters"
+      ],
+      "fields": [
+        "size",
+        "flags",
+        "default_filter_index",
+        "filter_count",
+        "title",
+        "ok_label",
+        "initial_path",
+        "default_name",
+        "default_extension",
+        "filters"
+      ]
+    },
     "PulseSetting": {
       "declarations": [
         "PulseStringView key",
@@ -5756,6 +7818,30 @@
         "create",
         "query",
         "remove"
+      ]
+    },
+    "PulseSnackRequest": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t flags",
+        "uint32_t kind",
+        "uint32_t duration_ms",
+        "PulseStringView text",
+        "PulseStringView detail",
+        "const PulseWorkbenchAction * actions",
+        "uint32_t action_count",
+        "uint32_t reserved"
+      ],
+      "fields": [
+        "size",
+        "flags",
+        "kind",
+        "duration_ms",
+        "text",
+        "detail",
+        "actions",
+        "action_count",
+        "reserved"
       ]
     },
     "PulseStageChooseFn": {
@@ -5832,6 +7918,22 @@
         "length"
       ]
     },
+    "PulseTaskAction": {
+      "declarations": [
+        "uint32_t size , flags",
+        "PulseStringView id",
+        "PulseStringView text"
+      ],
+      "fields": [
+        "size",
+        "flags",
+        "id",
+        "text"
+      ]
+    },
+    "PulseTaskActionFn": {
+      "declaration": "void ( PULSE_CALL * PulseTaskActionFn ) ( void * , PulseTaskId , PulseStringView )"
+    },
     "PulseTaskCancelFn": {
       "declaration": "void ( PULSE_CALL * PulseTaskCancelFn ) ( void * , PulseTaskId )"
     },
@@ -5855,7 +7957,12 @@
         "PulseStringView title , type",
         "PulseTaskWorkFn work",
         "void * user",
-        "PulseTaskCancelFn on_cancel"
+        "PulseTaskCancelFn on_cancel",
+        "PulseStringView source , destination",
+        "const PulseStringView * steps",
+        "uint32_t step_count",
+        "PulseTaskActionFn on_action",
+        "void * action_user"
       ],
       "fields": [
         "size",
@@ -5863,7 +7970,13 @@
         "type",
         "work",
         "user",
-        "on_cancel"
+        "on_cancel",
+        "source",
+        "destination",
+        "steps",
+        "step_count",
+        "on_action",
+        "action_user"
       ]
     },
     "PulseTaskId": {
@@ -5873,7 +7986,17 @@
       "declarations": [
         "uint32_t size , percent",
         "uint64_t completed_items , total_items , completed_bytes , total_bytes",
-        "PulseStringView error , current_item"
+        "PulseStringView error , current_item",
+        "uint32_t step",
+        "uint32_t action_count",
+        "uint64_t linked_operation",
+        "PulseStringView note",
+        "PulseStringView detail",
+        "PulseStringView assurance",
+        "const PulseTaskAction * actions",
+        "PulseStringView log",
+        "PulseStringView result",
+        "PulseStringView result_path"
       ],
       "fields": [
         "size",
@@ -5883,7 +8006,17 @@
         "completed_bytes",
         "total_bytes",
         "error",
-        "current_item"
+        "current_item",
+        "step",
+        "action_count",
+        "linked_operation",
+        "note",
+        "detail",
+        "assurance",
+        "actions",
+        "log",
+        "result",
+        "result_path"
       ]
     },
     "PulseTaskSnapshot": {
@@ -6520,6 +8653,44 @@
     },
     "PulseUiStateChangedFn": {
       "declaration": "void ( PULSE_CALL * PulseUiStateChangedFn ) ( void * user , uint64_t panel , const PulseUiStateBatch * batch )"
+    },
+    "PulseWorkbenchAction": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t reserved",
+        "PulseStringView id",
+        "PulseStringView label"
+      ],
+      "fields": [
+        "size",
+        "reserved",
+        "id",
+        "label"
+      ]
+    },
+    "PulseWorkbenchActionFn": {
+      "declaration": "void ( PULSE_CALL * PulseWorkbenchActionFn ) ( void * user , PulseNotificationId id , PulseStringView action_id )"
+    },
+    "PulseWorkbenchV1": {
+      "declarations": [
+        "uint32_t size , version",
+        "void * context",
+        "PulseStatus ( PULSE_CALL * show_snack ) ( void * context , const PulseSnackRequest * request , PulseWorkbenchActionFn on_action , void * user , PulseNotificationId * out_id )",
+        "PulseStatus ( PULSE_CALL * show_notice ) ( void * context , const PulseNoticeRequest * request , PulseWorkbenchActionFn on_action , void * user , PulseNotificationId * out_id )",
+        "PulseStatus ( PULSE_CALL * reveal_path ) ( void * context , PulseStringView path , uint32_t mode )",
+        "PulseStatus ( PULSE_CALL * show_text_diff ) ( void * context , PulseStringView left_path , PulseStringView right_path )",
+        "PulseStatus ( PULSE_CALL * set_clipboard_text ) ( void * context , PulseStringView text )"
+      ],
+      "fields": [
+        "size",
+        "version",
+        "context",
+        "show_snack",
+        "show_notice",
+        "reveal_path",
+        "show_text_diff",
+        "set_clipboard_text"
+      ]
     }
   }
 }

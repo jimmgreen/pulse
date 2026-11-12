@@ -1,12 +1,14 @@
 #pragma once
 #include "../../../../sdk/native/include/pulse/preview.h"
 #include <windows.h>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 #include "../ui_tree.h"
 namespace pulse::extensions::native {
+inline constexpr size_t kMaxSessionPreviewWorkers = 2;
 struct PreviewEntry {
     std::wstring path;
     uint64_t size = 0, packed = 0, modified = 0;
@@ -30,12 +32,15 @@ struct PreviewResponse {
 };
 class PreviewsAdapter {
 public:
-    PreviewsAdapter(HWND owner, std::function<bool()> live);
+    PreviewsAdapter(HWND owner, std::function<bool()> live,
+                    std::function<void()> wake = {}, std::string package_id = {});
     ~PreviewsAdapter();
     PulseStatus Query(uint32_t version, void* out, uint32_t size) const noexcept;
     void Close() noexcept;
     void Poll() noexcept;
     bool CallbackActive() const noexcept;
+    size_t ActiveWorkerCount() const noexcept;
+    size_t QueuedCount() const noexcept;
     static PreviewResponse Request(HWND owner, const std::wstring& path, uint64_t modified,
         uint64_t size, uint32_t pixels, uint64_t surface, HWND notify = nullptr);
     static bool Available(HWND owner, const std::wstring& path);

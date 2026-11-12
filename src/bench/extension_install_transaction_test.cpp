@@ -1,4 +1,5 @@
 #include "../app/extensions/store/install_transaction.h"
+#include "../app/extensions/package_signature.h"
 #include "../app/extensions/package_store.h"
 #include "../common/json_value.h"
 #include "extension_package_fixture.h"
@@ -28,6 +29,37 @@ VerifiedPackage Package(const Key& key, int native, const std::string& name = "T
     return package;
 }
 InstallConsent Consent(bool enable = false) { return {true, true, true, enable}; }
+std::string SignRotation(const Key& signer, std::string_view id,
+    std::string_view old_pub, std::string_view new_pub,
+    std::string_view old_key_hex = {}, std::string_view new_key_hex = {}, bool wrong_domain = false) {
+    constexpr char rot_prefix[] = "Pulse.Extension.Publisher.Rotation\0v1\0";
+    constexpr char man_prefix[] = "Pulse.Extension.Manifest.Signature\0v1\0";
+    std::string payload = wrong_domain ? std::string(man_prefix, sizeof(man_prefix) - 1)
+                                       : std::string(rot_prefix, sizeof(rot_prefix) - 1);
+    payload.append(id); payload.push_back('\n');
+    payload.append(old_pub); payload.push_back('\n');
+    payload.append(new_pub);
+    const auto hex = PackageRevision(payload);
+    std::vector<UCHAR> digest;
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        digest.push_back(static_cast<UCHAR>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+    }
+    BCRYPT_PKCS1_PADDING_INFO padding{BCRYPT_SHA256_ALGORITHM};
+    ULONG n = 0;
+    Require(BCryptSignHash(signer.key, &padding, digest.data(), static_cast<ULONG>(digest.size()), nullptr, 0, &n, BCRYPT_PAD_PKCS1) >= 0);
+    std::vector<UCHAR> sig(n);
+    Require(BCryptSignHash(signer.key, &padding, digest.data(), static_cast<ULONG>(digest.size()), sig.data(), n, &n, BCRYPT_PAD_PKCS1) >= 0);
+    Value v = Value::Object();
+    v.set("formatVersion", 1);
+    v.set("algorithm", "RSA-PKCS1-SHA256");
+    v.set("id", std::string(id));
+    v.set("oldPublisher", std::string(old_pub));
+    v.set("newPublisher", std::string(new_pub));
+    v.set("signature", Hex(sig));
+    if (!old_key_hex.empty()) v.set("oldPublicKey", std::string(old_key_hex));
+    if (!new_key_hex.empty()) v.set("newPublicKey", std::string(new_key_hex));
+    return pulse::json::Serialize(v);
+}
 bool TemporaryFiles(const fs::path& root) {
     for (const auto& item : fs::recursive_directory_iterator(root))
         if (item.path().filename().wstring().starts_with(L".install-") || item.path().filename().wstring().starts_with(L".package-install-")) return true;
@@ -175,6 +207,137 @@ int wmain() {
         Check(!retry_committed && error == "install_cancelled" && !fs::exists(retry_cancelled / L"registry.json") && !TemporaryFiles(retry_cancelled),
             "cancellation during directory retry leaves registry unchanged and cleans staged directory", error);
         cancel = false;
+        {
+            // PLG-05 & PLG-12: Verified publisher_ids from LoadPackageStore & origin-bound publish trust keys.
+            Check(loaded.publisher_ids == std::vector<std::string>{key.publisher.id},
+                "LoadPackageStore records verified SHA-256 publisher_id for signed package");
+            const auto unsigned_root = base / L"unsigned-dev-store";
+            fs::create_directories(unsigned_root / L"versions");
+            Value dev_manifest = Value::Object();
+            dev_manifest.set("apiVersion", 1); dev_manifest.set("id", "dev.local"); dev_manifest.set("name", "Dev");
+            const auto dev_bytes = pulse::json::Serialize(dev_manifest);
+            const auto dev_rev = PackageRevision(dev_bytes);
+            Write(unsigned_root / L"versions" / (dev_rev + ".json"), dev_bytes);
+            Value dev_entry = Value::Object();
+            dev_entry.set("id", "dev.local"); dev_entry.set("name", "Dev");
+            dev_entry.set("enabled", true); dev_entry.set("activeRevision", dev_rev);
+            Value dev_pkgs = Value::Array(); dev_pkgs.push(dev_entry);
+            Value dev_reg = Value::Object(); dev_reg.set("formatVersion", 1); dev_reg.set("packages", dev_pkgs);
+            Write(unsigned_root / L"registry.json", pulse::json::Serialize(dev_reg));
+            const auto unsigned_loaded = pulse::extensions::LoadPackageStore(unsigned_root.wstring());
+            Check(unsigned_loaded && unsigned_loaded.packages.size() == 1 &&
+                unsigned_loaded.publisher_ids == std::vector<std::string>{""},
+                "LoadPackageStore records empty publisher_id for unsigned local dev package", unsigned_loaded.error);
+
+            std::vector<std::wstring> trusted{L"test.archive", L"other.pkg"};
+            Check(!pulse::extensions::IsPublishTrusted(trusted, key.publisher.id, "test.archive") &&
+                !pulse::extensions::IsPublishTrusted(trusted, "", "test.archive"),
+                "legacy bare package_id never matches signed or unsigned publish trust");
+            Check(pulse::extensions::FormatPublishTrustKey("", "test.archive") == L"unsigned:test.archive" &&
+                pulse::extensions::FormatPublishTrustKey(key.publisher.id, "test.archive").size() == 65 + std::string_view("test.archive").size(),
+                "FormatPublishTrustKey formats origin-bound signed and unsigned keys");
+            Check(pulse::extensions::GrantPublishTrust(trusted, key.publisher.id, "test.archive") &&
+                pulse::extensions::IsPublishTrusted(trusted, key.publisher.id, "test.archive") &&
+                !pulse::extensions::IsPublishTrusted(trusted, other_key.publisher.id, "test.archive") &&
+                !pulse::extensions::IsPublishTrusted(trusted, "", "test.archive") &&
+                std::find(trusted.begin(), trusted.end(), L"test.archive") == trusted.end(),
+                "GrantPublishTrust binds to (publisher, id), isolates other signers/unsigned, and cleans legacy bare id");
+            pulse::extensions::GrantPublishTrust(trusted, other_key.publisher.id, "test.archive");
+            pulse::extensions::GrantPublishTrust(trusted, "", "test.archive");
+            pulse::extensions::GrantPublishTrust(trusted, key.publisher.id, "keep.pkg");
+            Check(pulse::extensions::RevokePublishTrustForOrigin(trusted, key.publisher.id, "test.archive") == 1 &&
+                !pulse::extensions::IsPublishTrusted(trusted, key.publisher.id, "test.archive") &&
+                pulse::extensions::IsPublishTrusted(trusted, other_key.publisher.id, "test.archive") &&
+                pulse::extensions::IsPublishTrusted(trusted, "", "test.archive"),
+                "RevokePublishTrustForOrigin removes only the targeted publisher entry");
+            Check(pulse::extensions::RevokePublishTrustForPackage(trusted, "test.archive") == 2 &&
+                !pulse::extensions::IsPublishTrusted(trusted, other_key.publisher.id, "test.archive") &&
+                !pulse::extensions::IsPublishTrusted(trusted, "", "test.archive") &&
+                pulse::extensions::IsPublishTrusted(trusted, key.publisher.id, "keep.pkg"),
+                "RevokePublishTrustForPackage removes all origins for target package without touching other packages");
+
+            // PLG-12: Explicit publisher key rotation verification & install transaction flow.
+            const auto valid_rot = SignRotation(key, "test.archive", key.publisher.id, other_key.publisher.id,
+                key.publisher.public_key, other_key.publisher.public_key);
+            Check(pulse::extensions::VerifyPublisherRotation("test.archive",
+                key.publisher.id, key.publisher.public_key,
+                other_key.publisher.id, other_key.publisher.public_key, valid_rot, error),
+                "VerifyPublisherRotation accepts valid old-key signature over rotation domain", error);
+            const auto wrong_signer_rot = SignRotation(other_key, "test.archive", key.publisher.id, other_key.publisher.id);
+            Check(!pulse::extensions::VerifyPublisherRotation("test.archive",
+                key.publisher.id, key.publisher.public_key,
+                other_key.publisher.id, other_key.publisher.public_key, wrong_signer_rot, error) &&
+                error == "rotation_signature_invalid",
+                "VerifyPublisherRotation rejects rotation signed by new key instead of old key", error);
+            const auto wrong_domain_rot = SignRotation(key, "test.archive", key.publisher.id, other_key.publisher.id, {}, {}, true);
+            Check(!pulse::extensions::VerifyPublisherRotation("test.archive",
+                key.publisher.id, key.publisher.public_key,
+                other_key.publisher.id, other_key.publisher.public_key, wrong_domain_rot, error) &&
+                error == "rotation_signature_invalid",
+                "VerifyPublisherRotation enforces domain separation prefix", error);
+            const auto wrong_id_rot = SignRotation(key, "other.id", key.publisher.id, other_key.publisher.id);
+            Check(!pulse::extensions::VerifyPublisherRotation("test.archive",
+                key.publisher.id, key.publisher.public_key,
+                other_key.publisher.id, other_key.publisher.public_key, wrong_id_rot, error) &&
+                error == "rotation_identity_mismatch",
+                "VerifyPublisherRotation binds package id", error);
+            const auto self_rot = SignRotation(key, "test.archive", key.publisher.id, key.publisher.id);
+            Check(!pulse::extensions::VerifyPublisherRotation("test.archive",
+                key.publisher.id, key.publisher.public_key,
+                key.publisher.id, key.publisher.public_key, self_rot, error) &&
+                error == "invalid_rotation_publisher",
+                "VerifyPublisherRotation rejects self-rotation", error);
+
+            const auto rotated_pkg = Package(other_key, 0, "Rotated Upgrade");
+            const auto untrusted_rot_root = Root(L"untrusted-rotation");
+            Check(ReviewInstall(untrusted_rot_root, first, review, error) &&
+                CommitInstall(untrusted_rot_root, first, review, Consent(), cancel, output, error),
+                "prepare untrusted rotation baseline", error);
+            Check(!ReviewInstallWithRotation(untrusted_rot_root, rotated_pkg, valid_rot, review, error) &&
+                error.find("unknown_publisher") != std::string::npos,
+                "rotation proof never bypasses signature-policy trust for new publisher", error);
+
+            Check(!ReviewInstallWithRotation(publisher_bound, other_package, valid_rot, review, error) &&
+                error == "rotation_requires_new_revision",
+                "publisher rotation requires a distinct new revision", error);
+            Check(!ReviewInstallWithRotation(publisher_bound, rotated_pkg, wrong_signer_rot, review, error) &&
+                error.find("invalid_publisher_rotation:") == 0,
+                "invalid rotation proof rejected during install review", error);
+            InstallReview rot_review;
+            Check(ReviewInstallWithRotation(publisher_bound, rotated_pkg, valid_rot, rot_review, error) &&
+                rot_review.publisher_rotated && rot_review.previous_publisher_id == key.publisher.id &&
+                rot_review.publisher_id == other_key.publisher.id,
+                "valid publisher rotation populates InstallReview::publisher_rotated and previous_publisher_id", error);
+            Check(!CommitInstallWithRotation(publisher_bound, rotated_pkg, valid_rot, {}, {}, cancel, output, error),
+                "rotated upgrade rejects empty review", error);
+            Check(!CommitInstallWithRotation(publisher_bound, rotated_pkg, valid_rot, rot_review, {false, true, true, false}, cancel, output, error) &&
+                error == "install_confirmation_required",
+                "rotated upgrade requires explicit user approval", error);
+            auto forged_review = rot_review;
+            forged_review.publisher_rotated = false;
+            Check(!CommitInstallWithRotation(publisher_bound, rotated_pkg, valid_rot, forged_review, Consent(), cancel, output, error) &&
+                error == "install_review_stale",
+                "commit rejects review that hides publisher_rotated", error);
+            Check(CommitInstallWithRotation(publisher_bound, rotated_pkg, valid_rot, rot_review, Consent(true), cancel, output, error) &&
+                output.changed && output.restart_required &&
+                Read(publisher_bound / L"versions" / (rotated_pkg.Revision() + ".rotation.json")) == valid_rot,
+                "rotated upgrade commits smoothly and persists immutable .rotation.json", error);
+            Check(ReviewInstall(publisher_bound, rotated_pkg, rot_review, error) && !rot_review.publisher_rotated &&
+                CommitInstall(publisher_bound, rotated_pkg, rot_review, Consent(), cancel, output, error) && !output.changed,
+                "subsequent same-revision install after rotation remains idempotent", error);
+
+            // Retired old publisher key in policy + on-disk versions/<new_sha>.rotation.json discovery.
+            const auto retired_root = Root(L"retired-key-rotation");
+            Check(ReviewInstall(retired_root, first, review, error) &&
+                CommitInstall(retired_root, first, review, Consent(), cancel, output, error),
+                "prepare retired-key rotation store", error);
+            Write(retired_root / L"signature-policy.json", Policy(other_key.publisher));
+            Write(retired_root / L"versions" / (rotated_pkg.Revision() + ".rotation.json"), valid_rot);
+            Check(ReviewInstall(retired_root, rotated_pkg, rot_review, error) &&
+                rot_review.publisher_rotated && rot_review.previous_publisher_id == key.publisher.id &&
+                CommitInstall(retired_root, rotated_pkg, rot_review, Consent(), cancel, output, error) && output.changed,
+                "ReviewInstall/CommitInstall discover on-disk .rotation.json even after old pin retired from policy", error);
+        }
         Check(!TemporaryFiles(base), "no transaction temporary files leaked across cases");
         std::cout << "Install transaction tests: " << passed << " passed, " << failed << " failed\n";
         return failed ? 1 : 0;

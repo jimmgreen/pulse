@@ -10,16 +10,22 @@ inline constexpr std::wstring_view kCatalogIndexUrl =
     L"https://github.com/jimmgreen/pulse-extensions/releases/download/catalog/index.json";
 inline constexpr std::wstring_view kCatalogSignatureUrl =
     L"https://github.com/jimmgreen/pulse-extensions/releases/download/catalog/index.sig.json";
+inline constexpr uint64_t kStaleOfflineCacheHours = 168;
 enum class CatalogFetchStatus { Online, Offline, Failed, Cancelled };
 struct CatalogSnapshot {
     Catalog catalog;
     std::string index_bytes, signature_bytes;
     bool offline = false;
     bool cache_persisted = false;
+    bool expired = false;
+    bool stale_offline = false;
+    uint64_t cache_age_hours = 0;
     app::UpdateSource requested_source = app::UpdateSource::Automatic;
     std::wstring source; // Actual index URL online; empty for offline cache.
     std::string diagnostic; // Failure/warning details, not localized UI text.
 };
+// Called on the fetch worker after exact cached bytes pass the normal verifier, before network I/O.
+using CatalogCacheReady = std::function<void(const CatalogSnapshot&)>;
 // Synchronous, blocking WORKER-ONLY API. Captures CurrentUpdateSource once and
 // attempts index/signature as a pair from each source; never mixes responses.
 // Empty cache_file disables caching. Otherwise it must be an absolute file path
@@ -33,7 +39,8 @@ struct CatalogSnapshot {
 // it is NOT trustworthy wall-clock freshness and cannot resist cache deletion.
 CatalogFetchStatus FetchCatalog(const std::filesystem::path& cache_file,
     const std::atomic<bool>& cancelled, CatalogSnapshot& out, std::string& error,
-    const app::UpdateResponseReader& read = app::ReadUpdateResponse);
+    const app::UpdateResponseReader& read = app::ReadUpdateResponse,
+    const CatalogCacheReady& cache_ready = {});
 
 #ifdef PULSE_EXTENSION_CATALOG_CLIENT_TESTING
 namespace testing {
@@ -44,7 +51,7 @@ using CatalogCacheHook = std::function<void(CatalogCachePoint)>;
 CatalogFetchStatus FetchCatalogWithValidator(const std::filesystem::path& cache_file,
     const std::atomic<bool>& cancelled, CatalogSnapshot& out, std::string& error,
     const app::UpdateResponseReader& read, const CatalogValidator& validate,
-    const CatalogCacheHook& hook = {});
+    const CatalogCacheHook& hook = {}, const CatalogCacheReady& cache_ready = {});
 }
 #endif
 } // namespace pulse::extensions::store

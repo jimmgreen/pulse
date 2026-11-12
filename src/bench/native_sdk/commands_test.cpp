@@ -1,11 +1,14 @@
+#include "../../app/extensions/icon_registry.h"
 #include "../../app/extensions/native/commands_adapter.h"
-#include <pulse/sdk.hpp>
+#include "../../app/extensions/native/icons_adapter.h"
+#include <pulse/client.hpp>
 #include <cstdio>
+#include <cstring>
 using namespace pulse::extensions::native;
 using pulse::sdk::View;
 struct Fixture {
-    bool live = true, invalidate_capture = false;
-    int called = 0, captures = 0;
+    bool live = true, invalidate_capture = false, empty_selection = false;
+    int called = 0, bg_called = 0, captures = 0;
     uint64_t revision = 1;
     static PulseStatus PULSE_CALL Summary(void* user, PulseContextChangeFn callback, void* context) {
         PulseContextSnapshot snapshot{}; snapshot.selection_revision = static_cast<Fixture*>(user)->revision;
@@ -16,12 +19,21 @@ struct Fixture {
         auto& self = *static_cast<Fixture*>(user);
         ++self.captures;
         const PulseContextSelectionEntry row{sizeof(row), 0, View("C:\\data\\sample.7z"), View(self.name)};
-        const PulseContextSelectionSnapshot selection{sizeof(selection), 5, View("C:\\data"), &row, 1};
+        const PulseContextSelectionSnapshot selection{
+            sizeof(selection),
+            self.revision,
+            View("C:\\data"),
+            self.empty_selection ? nullptr : &row,
+            self.empty_selection ? 0u : 1u,
+        };
         if (self.invalidate_capture) self.live = false;
         callback(context, &selection); return PULSE_OK;
     }
     static void PULSE_CALL Invoke(void* user, PulseCommandId, const PulseContextSelectionSnapshot* selection) {
-        if (selection->entry_count == 1 && selection->selection_revision == 5) ++static_cast<Fixture*>(user)->called;
+        if (selection->entry_count == 1) ++static_cast<Fixture*>(user)->called;
+    }
+    static void PULSE_CALL InvokeBg(void* user, PulseCommandId, const PulseContextSelectionSnapshot* selection) {
+        if (selection->entry_count == 0 && selection->directory.length > 0) ++static_cast<Fixture*>(user)->bg_called;
     }
 };
 int main() {
@@ -61,5 +73,131 @@ int main() {
     adapter.Close();
     check(CommandsAdapter::Entries(owner).empty() && CommandsAdapter::Invoke(owner, static_cast<int>(id)) && fixture.called == 2,
         "stop invalidates contributions and pending tokens");
+
+    {
+        Fixture v2_fix;
+        v2_fix.revision = 10;
+        PulseContextV1 v2_ctx{}; v2_ctx.context = &v2_fix; v2_ctx.get_selection = Fixture::Capture; v2_ctx.get = Fixture::Summary;
+        const auto owner2 = reinterpret_cast<HWND>(11);
+        IconsAdapter icons_adapter("demo.tools", [&] { return v2_fix.live; });
+        CommandsAdapter v2_adapter(owner2, "demo.tools", v2_ctx, [&] { return v2_fix.live; });
+
+        struct GuardedIcons {
+            PulseIconsV1 table{};
+            uint64_t canary = 0xCAFEBABECAFEBABEu;
+        } guarded_icons;
+        check(icons_adapter.Query(PULSE_ICONS_VERSION_1, &guarded_icons.table, sizeof(guarded_icons)) == PULSE_OK &&
+            guarded_icons.canary == 0xCAFEBABECAFEBABEu,
+            "pulse.icons V1 query preserves trailing caller memory");
+        PulseIconId builtin_sparkle = 0;
+        check(guarded_icons.table.resolve_builtin(guarded_icons.table.context, View("sparkle"), &builtin_sparkle) == PULSE_OK &&
+            builtin_sparkle == PULSE_ICON_SPARKLE,
+            "pulse.icons resolve_builtin resolves built-in StoreIcon IDs");
+
+        auto icon_builder = pulse::sdk::IconBuilder("plus-accent")
+            .StrokePath("M 3 12 L 21 12")
+            .StrokePath("M 12 3 L 12 21", 1.8, false, PULSE_ICON_COLOR_ACCENT);
+        pulse::sdk::IconRegistration icon_reg;
+        check(icon_reg.Register(guarded_icons.table, icon_builder.Build()) == PULSE_OK &&
+            pulse::extensions::icons::IsCustomIconId(icon_reg.Id()),
+            "IconRegistration registers custom multi-layer vector icon");
+
+        PulseCommandsV2 v2{};
+        check(v2_adapter.Query(PULSE_COMMANDS_VERSION_2, &v2, sizeof(v2)) == PULSE_OK, "PulseCommandsV2 table available");
+
+        // Legacy V2-sized descriptor (72 bytes) remains binary-compatible
+        PulseCommandDescriptor legacy_desc{};
+        legacy_desc.size = PULSE_COMMAND_DESCRIPTOR_SIZE_V2;
+        legacy_desc.id = View("legacy-v2");
+        legacy_desc.title = View("Legacy V2");
+        legacy_desc.icon = PULSE_ICON_SPARKLE;
+        legacy_desc.kinds = PULSE_COMMAND_FILES;
+        legacy_desc.min_selection = 1;
+        legacy_desc.max_selection = 4;
+        legacy_desc.invoke = Fixture::Invoke;
+        legacy_desc.user = &v2_fix;
+        PulseCommandId legacy_id = 0;
+        check(v2.register_command(v2.context, &legacy_desc, &legacy_id) == PULSE_OK,
+            "72-byte V2 command descriptor registers cleanly with extended built-in icon");
+
+        // V3 descriptor with custom icon, group_icon, presentation flags & dynamic update/show/hide
+        PulseCommandDescriptor dyn_desc{};
+        dyn_desc.size = sizeof(dyn_desc);
+        dyn_desc.id = View("toggle-tool");
+        dyn_desc.title = View("Toggle Tool");
+        dyn_desc.group = View("Tools");
+        dyn_desc.flags = PULSE_COMMAND_GROUP_SUBMENU | PULSE_COMMAND_PRIMARY | PULSE_COMMAND_SEPARATOR_BEFORE;
+        dyn_desc.icon = icon_reg.Id();
+        dyn_desc.group_icon = PULSE_ICON_GEAR;
+        dyn_desc.kinds = PULSE_COMMAND_FILES;
+        dyn_desc.min_selection = 1;
+        dyn_desc.max_selection = 8;
+        pulse::sdk::CommandRegistration dyn_reg;
+        check(dyn_reg.Register(v2, dyn_desc, [&](PulseCommandId, const PulseContextSelectionSnapshot& sel) {
+            if (sel.entry_count == 1) ++v2_fix.called;
+        }) == PULSE_OK && dyn_reg.Id() != 0, "CommandRegistration V2 registers command");
+        const PulseCommandId original_id = dyn_reg.Id();
+
+        dyn_desc.title = View("Toggle Tool (Checked)");
+        dyn_desc.flags |= PULSE_COMMAND_CHECKED;
+        dyn_desc.icon = 0;
+        dyn_desc.icon_name = View("puzzle");
+        check(dyn_reg.Update(dyn_desc) == PULSE_OK && dyn_reg.Id() == original_id,
+            "update_command mutates metadata in place while preserving PulseCommandId");
+        auto v2_rows = CommandsAdapter::Entries(owner2);
+        check(v2_rows.size() == 2 &&
+            v2_rows[1].title == "Toggle Tool (Checked)" &&
+            v2_rows[1].icon == PULSE_ICON_PUZZLE &&
+            v2_rows[1].group_icon == PULSE_ICON_GEAR &&
+            (v2_rows[1].flags & PULSE_COMMAND_CHECKED) != 0,
+            "updated command reflects new title, resolved icon_name, group_icon, and checked flag");
+
+        // Dynamic hide via set_command_flags
+        check(dyn_reg.SetFlags(dyn_desc.flags | PULSE_COMMAND_HIDDEN) == PULSE_OK, "set_command_flags sets PULSE_COMMAND_HIDDEN");
+        const auto summaries = CommandsAdapter::LivePackageCommands(owner2, "demo.tools");
+        v2_rows = CommandsAdapter::Entries(owner2);
+        check(summaries.size() == 2 && summaries[1].hidden_by_plugin && !v2_rows[1].enabled,
+            "PULSE_COMMAND_HIDDEN disables command in menu while reporting hidden_by_plugin in settings summary");
+        const int before_hidden_invoke = v2_fix.called;
+        CommandsAdapter::Invoke(owner2, static_cast<int>(original_id));
+        check(v2_fix.called == before_hidden_invoke, "hidden command cannot be invoked");
+
+        // Re-show dynamically
+        check(dyn_reg.SetFlags(dyn_desc.flags & ~static_cast<uint32_t>(PULSE_COMMAND_HIDDEN)) == PULSE_OK,
+            "set_command_flags clears PULSE_COMMAND_HIDDEN");
+        CommandsAdapter::Invoke(owner2, static_cast<int>(original_id));
+        check(v2_fix.called == before_hidden_invoke + 1, "re-shown command dispatches again");
+
+        // Background folder context menu command
+        PulseCommandDescriptor bg_desc{};
+        bg_desc.size = sizeof(bg_desc);
+        bg_desc.id = View("open-here");
+        bg_desc.title = View("Open Here");
+        bg_desc.detail = View("Folder: {base}");
+        bg_desc.icon = PULSE_ICON_FOLDER;
+        bg_desc.kinds = PULSE_COMMAND_BACKGROUND;
+        bg_desc.min_selection = 0;
+        bg_desc.max_selection = 0;
+        bg_desc.invoke = Fixture::InvokeBg;
+        bg_desc.user = &v2_fix;
+        PulseCommandId bg_id = 0;
+        check(v2.register_command(v2.context, &bg_desc, &bg_id) == PULSE_OK, "register PULSE_COMMAND_BACKGROUND command");
+        v2_rows = CommandsAdapter::Entries(owner2);
+        check(!v2_rows[2].enabled, "background-only command does not match file selection");
+
+        v2_fix.empty_selection = true;
+        ++v2_fix.revision;
+        v2_rows = CommandsAdapter::Entries(owner2);
+        check(v2_rows[2].enabled && v2_rows[2].detail == "Folder: data",
+            "background command matches empty folder selection and formats {base} folder name");
+        CommandsAdapter::Invoke(owner2, static_cast<int>(bg_id));
+        check(v2_fix.bg_called == 1, "background command invokes with empty selection and folder path");
+
+        const PulseIconId custom_id = icon_reg.Id();
+        v2_adapter.Close();
+        icons_adapter.Close();
+        check(!pulse::extensions::icons::GlobalRegistry().Snapshot(custom_id).has_value(),
+            "closing IconsAdapter unregisters session dynamic icons");
+    }
     return failures ? 1 : 0;
 }

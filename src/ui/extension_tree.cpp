@@ -693,9 +693,17 @@ struct ExtensionTreeView::Impl {
                 control.pressed_part = pressed_part;
                 control.scale = scale;
                 control.dark = dark;
-                if (node.badge_text.starts_with("state.")) {
+                if (node.badge_text.starts_with("state.") ||
+                    (node.type == UiNodeType::Canvas && !node.state.empty())) {
                     auto resolved = node;
-                    resolved.badge_text = BadgeText(node);
+                    if (node.badge_text.starts_with("state."))
+                        resolved.badge_text = BadgeText(node);
+                    if (node.type == UiNodeType::Canvas && !node.state.empty()) {
+                        if (const auto st = state.find(node.state); st != state.end() && !st->second.empty()) {
+                            if (!resolved.detail.empty()) resolved.detail.push_back('\n');
+                            resolved.detail += st->second;
+                        }
+                    }
                     successful = DrawExtensionControl(resolved, control, compositor, painter, theme) && successful;
                 } else
                     successful = DrawExtensionControl(node, control, compositor, painter, theme) && successful;
@@ -1328,6 +1336,14 @@ struct ExtensionTreeView::Impl {
             type = L"STATIC";
             style = WS_CHILD | WS_VISIBLE | SS_NOPREFIX;
             break;
+        case UiNodeType::Canvas:
+            if (!node.command.empty()) {
+                type = L"BUTTON";
+            } else {
+                type = L"STATIC";
+                style = WS_CHILD | WS_VISIBLE | SS_NOPREFIX;
+            }
+            break;
         default:
             break;
         }
@@ -1775,6 +1791,15 @@ std::vector<extensions::UiStateEntry> ExtensionTreeView::StateValues() const {
     return values;
 }
 bool ExtensionTreeView::SetState(const std::string &key, const std::string &value) { return SetStates({{key, value}}); }
+bool ExtensionTreeView::CommitUserState(const std::string &key, const std::string &value) {
+    auto lifetime = impl_;
+    auto &self = *lifetime;
+    if (!self.host || !self.state.contains(key) || !self.Valid(key, value))
+        return false;
+    if (self.AssignState(key, value, ExtensionStateSource::User))
+        Refresh();
+    return true;
+}
 bool ExtensionTreeView::SetStates(const std::vector<extensions::UiStateEntry> &changes) {
     auto lifetime = impl_;
     auto &self = *lifetime;
@@ -1855,7 +1880,8 @@ bool ExtensionTreeView::UpdateTree(const extensions::UiTree &replacement) {
     std::vector<Impl::Item> kept;
     for (auto &item : self.items) {
         auto at = actual.find(item.node->id);
-        if (at == actual.end() || at->second->type != item.node->type || at->second->options != item.node->options) {
+        if (at == actual.end() || at->second->type != item.node->type || at->second->options != item.node->options ||
+            (item.node->type == UiNodeType::Canvas && at->second->command.empty() != item.node->command.empty())) {
             DestroyWindow(item.window);
             continue;
         }

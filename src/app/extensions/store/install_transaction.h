@@ -3,14 +3,17 @@
 #include <atomic>
 #include <filesystem>
 #include <functional>
+#include <string_view>
 
 namespace pulse::extensions::store {
 struct InstallReview {
     std::wstring root;
     std::string id, revision, active_revision, publisher_id;
+    std::string previous_publisher_id;
     std::vector<std::string> added_resources;
     bool native_code = false;
     bool currently_enabled = false;
+    bool publisher_rotated = false;
 };
 struct InstallConsent {
     bool approved = false;
@@ -32,11 +35,16 @@ struct InstallResult {
 // the lock, refusing stale authorization and requiring explicit native consent.
 bool ReviewInstall(const std::filesystem::path& root, const VerifiedPackage& package,
     InstallReview& out, std::string& error);
+bool ReviewInstallWithRotation(const std::filesystem::path& root, const VerifiedPackage& package,
+    std::string_view rotation, InstallReview& out, std::string& error);
 // Registry rename is the commit point. Failure/cancellation leaves registry
 // untouched; verified immutable revisions may remain for retry/rollback. Output
 // is unchanged on failure. Same-revision installs verify existing disk bytes.
 bool CommitInstall(const std::filesystem::path& root, const VerifiedPackage& package,
     const InstallReview& review, const InstallConsent& consent,
+    const std::atomic<bool>& cancelled, InstallResult& out, std::string& error);
+bool CommitInstallWithRotation(const std::filesystem::path& root, const VerifiedPackage& package,
+    std::string_view rotation, const InstallReview& review, const InstallConsent& consent,
     const std::atomic<bool>& cancelled, InstallResult& out, std::string& error);
 #ifdef PULSE_EXTENSION_INSTALL_TRANSACTION_TESTING
 namespace testing {

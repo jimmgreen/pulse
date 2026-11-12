@@ -1,4 +1,5 @@
 #include "staging_adapter.h"
+#include "crash_guard.h"
 #include <algorithm>
 #include <atomic>
 #include <cstring>
@@ -7,6 +8,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 namespace pulse::extensions::native {
 namespace {
 std::atomic<uint64_t> next_stage{0};
@@ -108,15 +110,30 @@ struct StagingAdapter::State : std::enable_shared_from_this<State> {
     DWORD thread = GetCurrentThreadId();
     std::function<bool()> live;
     StagingBackend backend;
+    std::function<void()> wake;
+    std::string package_id;
     mutable std::mutex mutex;
     bool closed = false, cleanup = false, polling = false;
     std::atomic<unsigned> workers{0}, callbacks{0};
     std::map<uint64_t, std::shared_ptr<Stage>> stages;
-    State(HWND window, std::function<bool()> check, StagingBackend functions) : owner(window), live(std::move(check)), backend(std::move(functions)) {}
+    State(HWND window, std::function<bool()> check, StagingBackend functions,
+          std::function<void()> on_wake, std::string pkg_id)
+        : owner(window), live(std::move(check)), backend(std::move(functions)),
+          wake(std::move(on_wake)), package_id(std::move(pkg_id)) {}
+    void NotifyWake() const noexcept {
+        if (!wake) return;
+        try { wake(); } catch (...) {}
+    }
     template<class Function> bool Work(Function function) {
         auto self = shared_from_this(); ++workers;
-        try { std::thread([self, function = std::move(function)]() mutable { try { function(); } catch (...) {} --self->workers; }).detach(); return true; }
-        catch (...) { --workers; return false; }
+        try {
+            std::thread([self, function = std::move(function)]() mutable {
+                try { function(); } catch (...) {}
+                --self->workers;
+                self->NotifyWake();
+            }).detach();
+            return true;
+        } catch (...) { --workers; return false; }
     }
     static PulseStatus PULSE_CALL Choose(void* context, PulseStringView initial, PulseStageChooseFn callback, void* user) {
         try {
@@ -128,6 +145,7 @@ struct StagingAdapter::State : std::enable_shared_from_this<State> {
             try {
                 auto result = self->backend.choose_destination ? self->backend.choose_destination(text) : std::pair<PulseStatus, std::wstring>{PULSE_ERROR_UNAVAILABLE, {}};
                 auto path = result.first == PULSE_OK ? Utf8(result.second) : std::string{};
+                const crash_guard::CallScope call_scope(self->package_id.c_str());
                 callback(user, result.first, {path.data(), static_cast<uint32_t>(path.size())});
             } catch (...) { --self->callbacks; return PULSE_ERROR_STATE; }
             --self->callbacks; return PULSE_OK;
@@ -166,7 +184,10 @@ struct StagingAdapter::State : std::enable_shared_from_this<State> {
                   if (self->closed) status = PULSE_ERROR_STATE; }
                 const auto callback_path = stage->path_utf8;
                 ++self->callbacks;
-                try { callback(user, status, stage->id, status == PULSE_OK ? PulseStringView{callback_path.data(), static_cast<uint32_t>(callback_path.size())} : PulseStringView{}); } catch (...) {}
+                try {
+                    const crash_guard::CallScope call_scope(self->package_id.c_str());
+                    callback(user, status, stage->id, status == PULSE_OK ? PulseStringView{callback_path.data(), static_cast<uint32_t>(callback_path.size())} : PulseStringView{});
+                } catch (...) {}
                 --self->callbacks;
             })) { std::lock_guard lock(self->mutex); self->stages.erase(stage->id); return PULSE_ERROR_INITIALIZATION; }
             return PULSE_OK;
@@ -199,14 +220,23 @@ struct StagingAdapter::State : std::enable_shared_from_this<State> {
             { std::lock_guard lock(self->mutex); auto found = self->stages.find(id); if (found == self->stages.end()) return PULSE_ERROR_STATE; value = found->second->operation; task = found->second->task; }
             PulseStageSnapshot snapshot{sizeof(snapshot), id, task, value.state, value.percent, value.completed_items, value.total_items,
                 value.completed_bytes, value.total_bytes, {value.error.data(), static_cast<uint32_t>(value.error.size())}};
-            ++self->callbacks; try { callback(user, &snapshot); } catch (...) { --self->callbacks; return PULSE_ERROR_STATE; } --self->callbacks; return PULSE_OK;
+            ++self->callbacks;
+            try {
+                const crash_guard::CallScope call_scope(self->package_id.c_str());
+                callback(user, &snapshot);
+            } catch (...) { --self->callbacks; return PULSE_ERROR_STATE; }
+            --self->callbacks; return PULSE_OK;
         } catch (...) { return PULSE_ERROR_STATE; }
     }
     static PulseStatus PULSE_CALL Cancel(void* context, uint64_t id) {
         try { auto* self = static_cast<State*>(context); if (!self || !id) return PULSE_ERROR_ARGUMENT;
-            std::lock_guard lock(self->mutex); auto found = self->stages.find(id); if (found == self->stages.end()) return PULSE_ERROR_STATE;
-            auto& stage = *found->second; if (Terminal(stage.operation.state)) return PULSE_ERROR_STATE;
-            stage.cancel = true; SetEvent(stage.cancel_event); if (!stage.busy && !stage.submitted) stage.operation.state = PULSE_STAGE_CANCELLED; return PULSE_OK;
+            {
+                std::lock_guard lock(self->mutex); auto found = self->stages.find(id); if (found == self->stages.end()) return PULSE_ERROR_STATE;
+                auto& stage = *found->second; if (Terminal(stage.operation.state)) return PULSE_ERROR_STATE;
+                stage.cancel = true; SetEvent(stage.cancel_event); if (!stage.busy && !stage.submitted) stage.operation.state = PULSE_STAGE_CANCELLED;
+            }
+            self->NotifyWake();
+            return PULSE_OK;
         } catch (...) { return PULSE_ERROR_STATE; }
     }
     bool Clean(const std::shared_ptr<Stage>& stage) {
@@ -271,7 +301,10 @@ struct StagingAdapter::State : std::enable_shared_from_this<State> {
     void Close() { std::lock_guard lock(mutex); closed = true; for (auto& [id, stage] : stages) { (void)id; stage->cancel = true; SetEvent(stage->cancel_event);
         if (!stage->busy && !stage->submitted && !Terminal(stage->operation.state)) stage->operation.state = PULSE_STAGE_CANCELLED; } }
 };
-StagingAdapter::StagingAdapter(HWND owner, std::function<bool()> live, StagingBackend backend) : state_(std::make_shared<State>(owner, std::move(live), std::move(backend))) {}
+StagingAdapter::StagingAdapter(HWND owner, std::function<bool()> live, StagingBackend backend,
+                               std::function<void()> wake, std::string package_id)
+    : state_(std::make_shared<State>(owner, std::move(live), std::move(backend),
+                                     std::move(wake), std::move(package_id))) {}
 StagingAdapter::~StagingAdapter() { Close(); }
 PulseStatus StagingAdapter::Query(uint32_t version, void* out, uint32_t size) const noexcept {
     if (version != PULSE_STAGING_VERSION_1) return PULSE_ERROR_ABI;
@@ -286,6 +319,16 @@ bool StagingAdapter::CallbackActive() const noexcept {
     if (state_->workers || state_->callbacks) return true;
     std::lock_guard lock(state_->mutex);
     for (const auto& [id, stage] : state_->stages) { (void)id; if (stage->submitted && !Terminal(stage->operation.state)) return true; }
+    return false;
+}
+bool StagingAdapter::HasPendingWork() const noexcept {
+    if (state_->workers || state_->callbacks) return true;
+    std::lock_guard lock(state_->mutex);
+    for (const auto& [id, stage] : state_->stages) {
+        (void)id;
+        if (stage->busy || stage->prepared || (stage->submitted && !Terminal(stage->operation.state))) return true;
+        if (state_->cleanup && !stage->cleanup_attempted) return true;
+    }
     return false;
 }
 }

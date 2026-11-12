@@ -1,4 +1,6 @@
+import contextlib
 import ctypes
+import io
 import os
 import threading
 import hashlib
@@ -10,7 +12,9 @@ import sys
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import package_store as store
+import pulse_ext
 
 
 def manifest(identifier="sample", name="Sample", capability="view.refresh"):
@@ -231,6 +235,158 @@ class StoreTests(unittest.TestCase):
         (self.root / "registry.json").write_bytes(b" " * 65537)
         with self.assertRaises(store.StoreError):
             store.listing(self.root)
+
+    def test_uninstall_purge_data_optional_and_cli(self):
+        store.install(self.root, manifest(identifier="sample"))
+        store.install(self.root, manifest(identifier="other"))
+        settings_dir = self.root.parent / "extension-settings"
+        settings_dir.mkdir()
+        sample_stem = "pkg-" + b"sample".hex()
+        other_stem = "pkg-" + b"other".hex()
+        sample_json = settings_dir / (sample_stem + ".json")
+        sample_lock = settings_dir / (sample_stem + ".lock")
+        other_json = settings_dir / (other_stem + ".json")
+        sample_json.write_text('{"version":1,"values":{"k":"v"}}', encoding="utf-8")
+        sample_lock.write_bytes(b"")
+        other_json.write_text('{"version":1,"values":{"k":"keep"}}', encoding="utf-8")
+
+        kept = store.uninstall_package(self.root, "sample")
+        self.assertTrue(kept["changed"])
+        self.assertFalse(kept["purgedData"])
+        self.assertTrue(sample_json.exists())
+        self.assertTrue(other_json.exists())
+
+        store.install(self.root, manifest(identifier="sample"))
+        purged = store.uninstall_package(self.root, "sample", purge_data=True)
+        self.assertTrue(purged["changed"])
+        self.assertTrue(purged["purgedData"])
+        self.assertFalse(sample_json.exists())
+        self.assertFalse(sample_lock.exists())
+        self.assertTrue(other_json.exists())
+
+        store.install(self.root, manifest(identifier="sample"))
+        idempotent = store.uninstall_package(self.root, "sample", purge_data=True)
+        self.assertTrue(idempotent["changed"])
+        self.assertFalse(idempotent["purgedData"])
+
+        # CLI integration: uninstall without --purge-data retains settings; with --purge-data removes them.
+        store.install(self.root, manifest(identifier="cli.pkg"))
+        cli_stem = "pkg-" + b"cli.pkg".hex()
+        cli_json = settings_dir / (cli_stem + ".json")
+        cli_lock = settings_dir / (cli_stem + ".lock")
+        cli_json.write_text('{"version":1,"values":{"mode":"1"}}', encoding="utf-8")
+        cli_lock.write_bytes(b"")
+
+        out_keep = io.StringIO()
+        with contextlib.redirect_stdout(out_keep):
+            rc_keep = pulse_ext.main(["uninstall", "cli.pkg", "--store", str(self.root)])
+        self.assertEqual(rc_keep, 0)
+        self.assertFalse(json.loads(out_keep.getvalue())["update"]["purgedData"])
+        self.assertTrue(cli_json.exists())
+
+        store.install(self.root, manifest(identifier="cli.pkg"))
+        out_purge = io.StringIO()
+        with contextlib.redirect_stdout(out_purge):
+            rc_purge = pulse_ext.main(["uninstall", "cli.pkg", "--store", str(self.root), "--purge-data"])
+        self.assertEqual(rc_purge, 0)
+        self.assertTrue(json.loads(out_purge.getvalue())["update"]["purgedData"])
+        self.assertFalse(cli_json.exists())
+        self.assertFalse(cli_lock.exists())
+        self.assertTrue(other_json.exists())
+
+    def test_uninstall_purge_data_rejects_unsafe_paths(self):
+        store.install(self.root, manifest(identifier="sample"))
+        settings_dir = self.root.parent / "extension-settings"
+        settings_dir.mkdir()
+        sample_stem = "pkg-" + b"sample".hex()
+        sample_json = settings_dir / (sample_stem + ".json")
+        # Directory masquerading as settings file must be rejected before registry commit.
+        sample_json.mkdir()
+        with self.assertRaises(store.StoreError):
+            store.uninstall_package(self.root, "sample", purge_data=True)
+        self.assertEqual(len(store.listing(self.root)["packages"]), 1)
+        sample_json.rmdir()
+
+        outside = Path(self.temp.name) / "outside.json"
+        outside.write_text('{"secret":1}', encoding="utf-8")
+        if os.name == "nt":
+            junction_dir = self.root.parent / "extension-settings"
+            junction_dir.rmdir()
+            target_dir = Path(self.temp.name) / "outside-dir"
+            target_dir.mkdir()
+            (target_dir / (sample_stem + ".json")).write_text('{"secret":1}', encoding="utf-8")
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(junction_dir), str(target_dir)],
+                           check=True, capture_output=True)
+            with self.assertRaises(store.StoreError):
+                store.uninstall_package(self.root, "sample", purge_data=True)
+            self.assertTrue((target_dir / (sample_stem + ".json")).exists())
+            self.assertEqual(len(store.listing(self.root)["packages"]), 1)
+            os.rmdir(junction_dir)
+
+    def test_native_executable_sidecar_validation(self):
+        def make_pe(is_dll):
+            buf = bytearray(1024)
+            buf[:2] = b"MZ"
+            pe_off = 128
+            buf[0x3c:0x40] = pe_off.to_bytes(4, "little")
+            buf[pe_off:pe_off + 4] = b"PE\x00\x00"
+            buf[pe_off + 4:pe_off + 6] = (0x8664).to_bytes(2, "little")
+            buf[pe_off + 6:pe_off + 8] = (1).to_bytes(2, "little")
+            buf[pe_off + 20:pe_off + 22] = (240).to_bytes(2, "little")
+            chars = 0x0002 | (0x2000 if is_dll else 0)
+            buf[pe_off + 22:pe_off + 24] = chars.to_bytes(2, "little")
+            buf[pe_off + 24:pe_off + 26] = (0x20b).to_bytes(2, "little")
+            return bytes(buf)
+
+        dll_bytes = make_pe(True)
+        exe_bytes = make_pe(False)
+        dll_sha = hashlib.sha256(dll_bytes).hexdigest()
+        exe_sha = hashlib.sha256(exe_bytes).hexdigest()
+        valid_manifest = json.dumps({
+            "apiVersion": 1,
+            "id": "worker.pkg",
+            "name": "Worker Package",
+            "native": {
+                "version": 1,
+                "architecture": "windows-x64",
+                "library": "entry.dll",
+                "sha256": dll_sha,
+                "files": [{"path": "worker.exe", "sha256": exe_sha}],
+            },
+        }).encode("utf-8")
+        res = store.install(
+            self.root,
+            valid_manifest,
+            allow_native=True,
+            binary_data=dll_bytes,
+            file_data={"entry.dll": dll_bytes, "worker.exe": exe_bytes},
+        )
+        self.assertTrue(res["changed"])
+
+        # Reject DLL or plain bytes masquerading as .exe sidecar
+        for bad_exe in (dll_bytes, b"not an executable"):
+            bad_sha = hashlib.sha256(bad_exe).hexdigest()
+            bad_manifest = json.dumps({
+                "apiVersion": 1,
+                "id": "bad.worker",
+                "name": "Bad Worker",
+                "native": {
+                    "version": 1,
+                    "architecture": "windows-x64",
+                    "library": "entry.dll",
+                    "sha256": dll_sha,
+                    "files": [{"path": "worker.exe", "sha256": bad_sha}],
+                },
+            }).encode("utf-8")
+            with self.assertRaises(store.StoreError) as err:
+                store.install(
+                    self.root,
+                    bad_manifest,
+                    allow_native=True,
+                    binary_data=dll_bytes,
+                    file_data={"entry.dll": dll_bytes, "worker.exe": bad_exe},
+                )
+            self.assertEqual(err.exception.code, "invalid_native_binary")
 
 
 if __name__ == "__main__":

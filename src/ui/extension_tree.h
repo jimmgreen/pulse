@@ -36,6 +36,8 @@ class ExtensionTreeView {
     HWND NodeWindow(const std::string &id) const;
     std::optional<std::string> StateValue(const std::string &key) const;
     bool SetState(const std::string &key, const std::string &value);
+    // Host-driven edit: commits like a user change (USER source reaches subscribers).
+    bool CommitUserState(const std::string &key, const std::string &value);
     uint64_t StateRevision() const;
     bool InputComposing() const;
     // Height of the laid-out content in physical px, excluding the content inset.

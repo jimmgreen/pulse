@@ -1,5 +1,6 @@
 #include "../../app/extensions/native/dispatch_adapter.h"
 #include "../../app/extensions/native/ui_adapter.h"
+#include "../../../sdk/native/include/pulse/ui_model.h"
 #include "../../common/json_value.h"
 #include "../../common/windows_compat.h"
 #include "../../ui/extension_panel.h"

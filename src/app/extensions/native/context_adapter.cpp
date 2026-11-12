@@ -1,4 +1,5 @@
 #include "context_adapter.h"
+#include "crash_guard.h"
 #include <atomic>
 #include <cstring>
 #include <map>
@@ -33,12 +34,18 @@ struct ContextAdapter::State : std::enable_shared_from_this<State> {
     };
     CallerBinding caller;
     ContextBackend backend;
+    std::function<void()> wake;
+    std::string package_id;
     DWORD thread = GetCurrentThreadId();
     bool closed = false, active = false, initialized = false;
     uint64_t revision = 0, navigation = 0, selection = 0, view_revision = 0;
     ContextObservation current;
     std::map<uint64_t, Subscription> subscriptions;
     State(CallerBinding binding, ContextBackend functions) : caller(std::move(binding)), backend(std::move(functions)) {}
+    void NotifyWake() const noexcept {
+        if (!wake) return;
+        try { wake(); } catch (...) {}
+    }
     bool Ready() const {
         return !closed && GetCurrentThreadId() == thread && backend.live && backend.live(caller);
     }
@@ -74,7 +81,10 @@ struct ContextAdapter::State : std::enable_shared_from_this<State> {
             View(value.directory), View(value.selection_name), View(value.view_mode), value.selection_count,
             value.loading ? 1u : 0u, 0};
         active = true;
-        try { callback(user, &snapshot); } catch (...) { Close(); }
+        try {
+            const crash_guard::CallScope call_scope(package_id.c_str());
+            callback(user, &snapshot);
+        } catch (...) { Close(); }
         active = false;
     }
     void Close() { closed = true; subscriptions.clear(); }
@@ -117,7 +127,10 @@ struct ContextAdapter::State : std::enable_shared_from_this<State> {
             PulseContextSelectionSnapshot snapshot{sizeof(PulseContextSelectionSnapshot), self->selection,
                 View(value.directory), entries.data(), static_cast<uint32_t>(entries.size())};
             self->active = true;
-            try { callback(user, &snapshot); }
+            try {
+                const crash_guard::CallScope call_scope(self->package_id.c_str());
+                callback(user, &snapshot);
+            }
             catch (...) { self->Close(); self->active = false; return PULSE_ERROR_STATE; }
             self->active = false;
             return PULSE_OK;
@@ -135,6 +148,7 @@ struct ContextAdapter::State : std::enable_shared_from_this<State> {
             if (!id) return PULSE_ERROR_UNAVAILABLE;
             self->subscriptions.emplace(id, Subscription{callback, user});
             *out = id;
+            self->NotifyWake();
             return PULSE_OK;
         } catch (...) { return PULSE_ERROR_STATE; }
     }
@@ -182,10 +196,18 @@ PulseStatus ContextAdapter::Query(uint32_t version, void *table, uint32_t size) 
     if (!table || size < sizeof(PulseContextV1)) return PULSE_ERROR_ARGUMENT;
     const auto value = Table(); std::memcpy(table, &value, sizeof(value)); return PULSE_OK;
 }
+void ContextAdapter::SetWake(std::function<void()> wake, std::string package_id) noexcept {
+    if (!state_ || GetCurrentThreadId() != state_->thread) return;
+    state_->wake = std::move(wake);
+    state_->package_id = std::move(package_id);
+}
 void ContextAdapter::Poll() noexcept {
     const auto self = state_;
     try { self->Poll(); } catch (...) { self->Close(); }
 }
 void ContextAdapter::Close() noexcept { state_->Close(); }
 bool ContextAdapter::CallbackActive() const noexcept { return state_->active; }
+bool ContextAdapter::HasSubscriptions() const noexcept {
+    return state_ && !state_->closed && !state_->subscriptions.empty();
+}
 }

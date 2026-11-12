@@ -885,9 +885,9 @@ int main() {
     frozen_view.Close();
 
     SendMessageW(view.NodeWindow("next"), BM_CLICK, 0, 0);
-    auto changed_revision = second;
-    changed_revision.revision = "snapshot2";
-    completions.back()(changed_revision);
+    auto revised_page = second;
+    revised_page.revision = "snapshot2";
+    completions.back()(revised_page);
     drain();
     Check(view.StateValue("status") == "error" && view.StateValue("error") == "revision_changed",
           "append rejects a different listing revision with an explicit reason");

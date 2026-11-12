@@ -136,16 +136,18 @@ def main():
         client.notify('notifications/initialized')
         available = client.request('tools/list')['tools']
         expected = ('native_sdk_describe', 'native_project_create', 'native_project_build', 'native_package_stage',
-            'native_package_install', 'native_host_diagnose', 'native_host_run')
+            'native_package_install', 'native_host_diagnose', 'native_host_run', 'native_host_stop')
         assert tuple(item['name'] for item in available) == expected
         described = client.tool('native_sdk_describe', {})
         assert any(item['name'] == 'pulse.ui.mount' for item in described['result']['interfaces'])
+        assert 'basic' not in described['result']['templates'] and 'basic' in described['result']['abiSamples']
         project_result = client.tool('native_project_create', {'name': 'directory-workbench', 'template': 'directory-workbench'})
         assert project_result['ok'], project_result
-        report['steps'].append(dict(name='describe-and-create', ok=True))
+        report['steps'].append(dict(name='describe-and-create', ok=True, packageId=project_result['result']['packageId']))
         build_result = client.tool('native_project_build', {'project': project_result['result']['project']})
         assert build_result['ok'], build_result
-        libraries = [Path(path) for path in build_result['result']['libraries'] if Path(path).name.lower() == 'pulse_directory_workbench.dll']
+        expected_dll = project_result['result']['primaryLibrary'].lower()
+        libraries = [Path(path) for path in build_result['result']['libraries'] if Path(path).name.lower() == expected_dll]
         assert len(libraries) == 1 and libraries[0].is_file(), build_result
         report['steps'].append(dict(name='native-project-build', ok=True, librarySha256=hashlib.sha256(libraries[0].read_bytes()).hexdigest()))
         staged = client.tool('native_package_stage', {'project': project_result['result']['project'], 'library': str(libraries[0])})
@@ -163,6 +165,10 @@ def main():
         host_pid = run_info.get('processId')
         report['steps'].append(dict(name='isolated-host-launch', ok=True, processId=host_pid,
             launchOnly=True, processLog=run_info.get('processLog')))
+        stopped = client.tool('native_host_stop', {'pid': host_pid})
+        assert stopped['ok'] and stopped['result']['stop']['stopped'], stopped
+        report['steps'].append(dict(name='isolated-host-cooperative-stop', ok=True, processId=host_pid))
+        host_pid = None
         report['passed'] = True
     except Exception as error:
         report.update(passed=False, error=str(error))

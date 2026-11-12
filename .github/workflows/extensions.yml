@@ -11,6 +11,7 @@ on:
       - 'examples/native/**'
       - 'tools/extensions/**'
       - 'docs/extensions*.md'
+      - 'docs/native-packages.md'
       - 'docs/Pulse-增强包开放能力与AI协同实施方案-2026-11-03.md'
       - 'src/app/extensions/**'
       - 'src/app/actions/action_inventory.h'
@@ -24,6 +25,7 @@ on:
       - 'examples/native/**'
       - 'tools/extensions/**'
       - 'docs/extensions*.md'
+      - 'docs/native-packages.md'
       - 'docs/Pulse-增强包开放能力与AI协同实施方案-2026-11-03.md'
       - 'src/app/extensions/**'
       - 'src/app/actions/action_inventory.h'
@@ -43,6 +45,10 @@ jobs:
         run: python tools/extensions/generate_sdk.py --check
       - name: Check internal capability inventory
         run: python tools/extensions/catalog.py --check
+      - name: Check extension docs and contracts alignment
+        run: python tools/extensions/check_docs_and_contracts.py
+      - name: Verify extension release and signed catalog pipeline
+        run: python -m unittest tools/extensions/test_publish_extension_release.py
       - name: Check contract generation and tooling boundaries
         run: python -m unittest discover -s tools/extensions -p "test_*.py"
       - uses: actions/setup-node@v4

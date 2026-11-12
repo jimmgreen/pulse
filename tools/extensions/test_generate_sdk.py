@@ -9,13 +9,15 @@ import template_catalog
 class GenerationTests(unittest.TestCase):
     def test_native_manifest_contract(self):
         schema = read_json(SCHEMA)
-        self.assertEqual(set(schema["properties"]), {"apiVersion", "id", "name", "resources", "native"})
+        self.assertEqual(set(schema["properties"]), {"apiVersion", "id", "name", "resources", "native", "contributes"})
         self.assertEqual(schema["required"], ["apiVersion", "id", "name"])
         self.assertFalse(schema["additionalProperties"])
         outputs = generate(schema)
+        manifest_decl = next(line for line in outputs[TYPES].splitlines() if line.startswith("export interface ExtensionManifest "))
         for field in ("commands", "toolbar", "palette", "workflows", "runtime", "panel"):
-            self.assertNotIn(field + "?:", outputs[TYPES])
-        self.assertIn("native?: NativePackage", outputs[TYPES])
+            self.assertNotIn(field + "?:", manifest_decl)
+        self.assertIn("native?: NativePackage", manifest_decl)
+        self.assertIn("contributes?: ManifestContributions", manifest_decl)
         # Native header contracts are embedded for host/author compatibility checks.
         # Bound the discovery envelope separately from those public contracts.
         chunks = re.findall(r'R"pulse_api\((.*?)\)pulse_api"', outputs[API_HEADER], re.DOTALL)

@@ -10,5 +10,5 @@ Downloads and corresponding source: https://www.7-zip.org/download.html
 The unRAR code in 7z.dll may be used only to extract RAR archives; it must not
 be used to re-create the RAR compression algorithm.
 
-The extension's own code (pulse_7zip.dll) is part of Pulse:
+The extension's own code (pulse_7zip.dll and pulse_7zip_worker.exe) is part of Pulse:
 https://github.com/jimmgreen/pulse/tree/main/extensions/7zip

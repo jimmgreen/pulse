@@ -48,6 +48,18 @@ int main() {
     check(app::EvaluateStoreChangeReview(management, 9, 0, granted).kind == Change::Ignore, "missing management review is not authorized");
     management.review = change_review; change_review->native_code = false; change_review->added_resources.clear();
     const auto disabled_change = app::EvaluateStoreChangeReview(management, 9, 0, {});
-    check(disabled_change.kind == Change::Approve && !disabled_change.consent.native_execution && !disabled_change.consent.added_resources, "disable and uninstall do not grant execution");
+    check(disabled_change.kind == Change::Approve && !disabled_change.consent.native_execution && !disabled_change.consent.added_resources && !disabled_change.consent.purge_data, "disable and uninstall do not grant execution");
+    check(!app::EvaluateStoreChangeReview(management, 9, 0, {{"purge_data", "true"}}).consent.purge_data, "non-uninstall ignores purge_data state");
+    change_review->action = store::StoreChangeAction::Uninstall;
+    const auto uninstall_keep = app::EvaluateStoreChangeReview(management, 9, 0, {});
+    check(uninstall_keep.kind == Change::Approve && !uninstall_keep.consent.purge_data, "uninstall defaults purge_data to false without missing consent");
+    check(app::EvaluateStoreChangeReview(management, 9, 0, {{"purge_data", "false"}}).kind == Change::Approve &&
+        !app::EvaluateStoreChangeReview(management, 9, 0, {{"purge_data", "false"}}).consent.purge_data &&
+        !app::EvaluateStoreChangeReview(management, 9, 0, {{"purge_data", "1"}}).consent.purge_data,
+        "uninstall unchecked or malformed purge_data stays false");
+    const auto uninstall_purge = app::EvaluateStoreChangeReview(management, 9, 0, {{"purge_data", "true"}});
+    check(uninstall_purge.kind == Change::Approve && uninstall_purge.consent.approved && uninstall_purge.consent.purge_data &&
+        !uninstall_purge.consent.native_execution && !uninstall_purge.consent.added_resources,
+        "uninstall checked purge_data sets consent.purge_data");
     std::cout << passed << " passed, " << failed << " failed\n"; return failed ? 1 : 0;
 }

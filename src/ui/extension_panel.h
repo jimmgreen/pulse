@@ -74,6 +74,8 @@ public:
     float DpiScale() const;
     uint64_t TreeStateRevision() const;
     bool SetTreeStates(const std::vector<extensions::UiStateEntry>& values);
+    // The host acting for the user: the change reaches the owner as a USER edit.
+    bool CommitTreeUserState(const std::string& key, const std::string& value);
     // The caller must validate its complete typed/manifest tree before this transaction.
     bool UpdateTree(const extensions::UiTree& tree);
     bool RevealTreeNode(const std::string& id);

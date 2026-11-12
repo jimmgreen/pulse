@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <iterator>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 #include <windows.h>
 
 namespace pulse::extensions::native {
@@ -38,13 +40,28 @@ constexpr std::pair<uint32_t, std::string_view> kModelTypeNames[] = {
     {PULSE_UI_MODEL_TREE, "tree"},
     {PULSE_UI_MODEL_DATA_TABLE, "dataTable"},
     {PULSE_UI_MODEL_SPLIT_PANE, "splitPane"},
+    {PULSE_UI_MODEL_CANVAS, "canvas"},
 };
-static_assert(std::size(kModelTypeNames) == 27);
+static_assert(std::size(kModelTypeNames) == 28);
 constexpr std::string_view ModelTypeName(uint32_t type) {
     for (const auto &entry : kModelTypeNames)
         if (entry.first == type)
             return entry.second;
     return {};
+}
+std::string SafeIdPreview(PulseStringView view) {
+    if (!view.data || view.length == 0 || view.length > 64) return {};
+    std::string out;
+    out.reserve(view.length);
+    for (uint32_t i = 0; i < view.length; ++i) {
+        const char c = view.data[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '.' || c == '_' || c == '-')
+            out.push_back(c);
+        else
+            return {};
+    }
+    return out;
 }
 struct Rejected {
     PulseStatus status;
@@ -53,77 +70,111 @@ struct Rejected {
 struct Builder {
     size_t bytes = 0, nodes = 0, menus = 0, rows = 0;
     std::set<const void *> seen_nodes, seen_menus, seen_rows;
-    [[noreturn]] void Fail(const std::string &message, PulseStatus status = PULSE_ERROR_ARGUMENT) {
-        throw Rejected{status, message};
+    std::vector<std::string> scopes;
+
+    struct Scope {
+        Builder &builder;
+        Scope(Builder &b, std::string segment) : builder(b) { builder.scopes.push_back(std::move(segment)); }
+        ~Scope() { builder.scopes.pop_back(); }
+    };
+
+    std::string CurrentSubject() const {
+        std::string path;
+        for (const auto &seg : scopes) {
+            if (!path.empty() && !seg.empty() && seg.front() != '[')
+                path.push_back('.');
+            path += seg;
+        }
+        return path;
     }
-    std::string Text(PulseStringView view) {
-        if (view.length > 1024 || (view.length && !view.data) || view.length > 65536 - bytes)
+
+    [[noreturn]] void Fail(const std::string &message, PulseStatus status = PULSE_ERROR_ARGUMENT) {
+        const auto subject = CurrentSubject();
+        throw Rejected{status, subject.empty() ? message : (subject + ": " + message)};
+    }
+    [[noreturn]] void FailField(const char *field, const std::string &message,
+                                PulseStatus status = PULSE_ERROR_ARGUMENT) {
+        const auto subject = CurrentSubject();
+        const std::string prefix = subject.empty() ? std::string(field) : (subject + "." + field);
+        throw Rejected{status, prefix + ": " + message};
+    }
+
+    std::string Text(PulseStringView view, const char *field = nullptr) {
+        if (view.length > 1024 || (view.length && !view.data) || view.length > 65536 - bytes) {
+            if (field) FailField(field, "invalid string or total UTF-8 budget exceeded");
             Fail("invalid string or total UTF-8 budget exceeded");
+        }
         std::string text(view.data ? view.data : "", view.length);
         if (text.find('\0') != std::string::npos ||
             (!text.empty() && !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
-                                                   static_cast<int>(text.size()), nullptr, 0)))
+                                                   static_cast<int>(text.size()), nullptr, 0))) {
+            if (field) FailField(field, "invalid UTF-8 or embedded NUL");
             Fail("invalid UTF-8 or embedded NUL");
+        }
         bytes += view.length;
         return text;
     }
-    void Present(uint32_t present) {
-        if (present > 1)
+    void Present(uint32_t present, const char *field = nullptr) {
+        if (present > 1) {
+            if (field) FailField(field, "presence must be zero or one");
             Fail("presence must be zero or one");
+        }
     }
     void Field(json::Value &object, const char *name, PulseUiModelString value) {
-        Present(value.present);
+        Present(value.present, name);
         if (value.present)
-            object.set(name, Text(value.value));
+            object.set(name, Text(value.value, name));
         else if (value.value.data || value.value.length)
-            Fail(std::string(name) + ": data on absent field");
+            FailField(name, "data on absent field");
     }
     void Field(json::Value &object, const char *name, PulseUiModelBool value) {
-        Present(value.present);
+        Present(value.present, name);
         if (value.value > 1 || (!value.present && value.value))
-            Fail(std::string(name) + ": invalid boolean");
+            FailField(name, "invalid boolean");
         if (value.present)
             object.set(name, value.value != 0);
     }
     void Field(json::Value &object, const char *name, PulseUiModelInt value) {
-        Present(value.present);
+        Present(value.present, name);
         if ((!value.present && value.value) || value.value < -(int64_t{1} << 53) || value.value > (int64_t{1} << 53))
-            Fail(std::string(name) + ": invalid integer");
+            FailField(name, "invalid integer");
         if (value.present)
             object.set(name, value.value);
     }
-    template <class T> bool Array(uint32_t present, const T *data, uint32_t count, uint32_t limit) {
-        Present(present);
+    template <class T> bool Array(const char *field, uint32_t present, const T *data, uint32_t count, uint32_t limit) {
+        Present(present, field);
         if (count > limit || (count && !data) || (!present && (data || count)))
-            Fail("invalid bounded array");
+            FailField(field, "invalid bounded array");
         return present != 0;
     }
     void Strings(json::Value &object, const char *name, PulseUiModelStrings input, uint32_t limit = 64) {
-        if (!Array(input.present, input.data, input.count, limit))
+        if (!Array(name, input.present, input.data, input.count, limit))
             return;
         auto values = json::Value::Array();
         for (uint32_t i = 0; i < input.count; ++i)
-            values.push(Text(input.data[i]));
+            values.push(Text(input.data[i], name));
         object.set(name, std::move(values));
     }
-    json::Value States(const PulseUiState *entries, uint32_t count) {
+    json::Value States(const char *collection_name, const PulseUiState *entries, uint32_t count) {
         if (count > 32 || (count && !entries))
-            Fail("state/update count exceeds 32");
+            FailField(collection_name, "state/update count exceeds 32");
         auto array = json::Value::Array();
         for (uint32_t i = 0; i < count; ++i) {
+            Scope scope(*this, std::string(collection_name) + "[" + std::to_string(i) + "]");
             auto value = json::Value::Object();
-            value.set("key", Text(entries[i].key));
-            value.set("value", Text(entries[i].value));
+            value.set("key", Text(entries[i].key, "key"));
+            value.set("value", Text(entries[i].value, "value"));
             array.push(std::move(value));
         }
         return array;
     }
     void Menu(json::Value &object, const char *name, PulseUiModelMenus input, size_t depth) {
-        if (!Array(input.present, input.data, input.count, 128))
+        if (!Array(name, input.present, input.data, input.count, 128))
             return;
         auto array = json::Value::Array();
         for (uint32_t i = 0; i < input.count; ++i) {
             const auto &source = input.data[i];
+            Scope scope(*this, std::string(name) + "[" + std::to_string(i) + "]");
             if (depth > 4 || ++menus > 128 || source.size != sizeof(source) || !seen_menus.insert(&source).second)
                 Fail("menu depth/budget/cycle or invalid record size");
             auto value = json::Value::Object();
@@ -141,15 +192,16 @@ struct Builder {
         object.set(name, std::move(array));
     }
     void Rows(json::Value &object, PulseUiModelRows input, size_t depth) {
-        if (!Array(input.present, input.data, input.count, 4096))
+        if (!Array("rows", input.present, input.data, input.count, 4096))
             return;
         auto array = json::Value::Array();
         for (uint32_t i = 0; i < input.count; ++i) {
             const auto &source = input.data[i];
+            Scope scope(*this, "rows[" + std::to_string(i) + "]");
             if (depth > 8 || ++rows > 4096 || source.size != sizeof(source) || !seen_rows.insert(&source).second)
                 Fail("row depth/budget/cycle or invalid record size");
             auto value = json::Value::Object();
-            value.set("id", Text(source.id));
+            value.set("id", Text(source.id, "id"));
             Field(value, "text", source.text);
             Field(value, "glyph", source.glyph);
             Field(value, "command", source.command);
@@ -161,19 +213,25 @@ struct Builder {
                 Rows(nested, source.children, depth + 1);
                 value.set("children", *nested.find("rows"));
             } else if (source.children.count || source.children.data)
-                Fail("data on absent row children");
+                FailField("children", "data on absent row children");
             array.push(std::move(value));
         }
         object.set("rows", std::move(array));
     }
-    json::Value Node(const PulseUiModelNode &source, size_t depth) {
-        if (depth > 8 || ++nodes > 128 || source.size != sizeof(source) || ModelTypeName(source.type).empty() ||
-            !seen_nodes.insert(&source).second)
-            Fail("node depth/budget/cycle or invalid record size/type");
+    json::Value Node(const PulseUiModelNode &source, size_t depth, std::string segment) {
+        const auto id_hint = SafeIdPreview(source.id);
+        if (!id_hint.empty()) segment += "(" + id_hint + ")";
+        Scope scope(*this, std::move(segment));
+        if (source.size != sizeof(source))
+            FailField("size", "invalid node record size");
+        if (ModelTypeName(source.type).empty())
+            FailField("type", "unsupported node type");
+        if (depth > 8 || ++nodes > 128 || !seen_nodes.insert(&source).second)
+            Fail("node depth/budget/cycle exceeded");
         if (source.data_source)
-            Fail("native UI data provider is not connected", PULSE_ERROR_UNAVAILABLE);
+            FailField("data_source", "native UI data provider is not connected", PULSE_ERROR_UNAVAILABLE);
         auto value = json::Value::Object();
-        value.set("id", Text(source.id));
+        value.set("id", Text(source.id, "id"));
         value.set("type", ModelTypeName(source.type));
         // Named scalar mappings follow the existing model/schema property names exactly.
         Field(value, "text", source.text);
@@ -236,23 +294,24 @@ struct Builder {
         Field(value, "freeBytes", source.free_bytes);
         Field(value, "totalBytes", source.total_bytes);
         if (const auto *binding = value.find("binding"); binding && binding->as_string().starts_with("context."))
-            Fail("native UI context resolver is not connected", PULSE_ERROR_UNAVAILABLE);
+            FailField("binding", "native UI context resolver is not connected", PULSE_ERROR_UNAVAILABLE);
         Strings(value, "options", source.options);
         Strings(value, "tagColors", source.tag_colors);
         Menu(value, "menu", source.menu, 1);
         Menu(value, "actions", source.actions, 1);
         Rows(value, source.rows, 1);
-        if (Array(source.data_columns.present, source.data_columns.data, source.data_columns.count, 16)) {
+        if (Array("data_columns", source.data_columns.present, source.data_columns.data, source.data_columns.count, 16)) {
             if (source.columns.present)
-                Fail("integer and data columns are mutually exclusive");
+                FailField("data_columns", "integer and data columns are mutually exclusive");
             auto columns = json::Value::Array();
             for (uint32_t i = 0; i < source.data_columns.count; ++i) {
                 const auto &column = source.data_columns.data[i];
+                Scope col_scope(*this, "data_columns[" + std::to_string(i) + "]");
                 if (column.size != sizeof(column))
-                    Fail("invalid column size");
+                    FailField("size", "invalid column size");
                 auto entry = json::Value::Object();
-                entry.set("id", Text(column.id));
-                entry.set("text", Text(column.text));
+                entry.set("id", Text(column.id, "id"));
+                entry.set("text", Text(column.text, "text"));
                 Field(entry, "width", column.width);
                 columns.push(std::move(entry));
             }
@@ -260,19 +319,20 @@ struct Builder {
         }
         if (source.validation) {
             const auto &validation = *source.validation;
+            Scope val_scope(*this, "validation");
             if (validation.size != sizeof(validation))
-                Fail("invalid validation size");
+                FailField("size", "invalid validation size");
             auto entry = json::Value::Object();
             Field(entry, "required", validation.required);
             Field(entry, "minLength", validation.min_length);
             Field(entry, "maxLength", validation.max_length);
-            entry.set("message", Text(validation.message));
+            entry.set("message", Text(validation.message, "message"));
             value.set("validation", std::move(entry));
         }
-        if (Array(source.children.present, source.children.data, source.children.count, 128)) {
+        if (Array("children", source.children.present, source.children.data, source.children.count, 128)) {
             auto children = json::Value::Array();
             for (uint32_t i = 0; i < source.children.count; ++i)
-                children.push(Node(source.children.data[i], depth + 1));
+                children.push(Node(source.children.data[i], depth + 1, "children[" + std::to_string(i) + "]"));
             value.set("children", std::move(children));
         }
         return value;
@@ -287,10 +347,11 @@ PulseStatus ConvertUiModel(const PulseUiModelTree *input, UiTree &output, std::s
         if (!input || input->size != sizeof(*input) || !input->root || input->command_count > 128 ||
             (input->command_count && !input->commands) || input->action_count > 32 ||
             (input->action_count && !input->actions))
-            builder.Fail("invalid native UI tree");
+            builder.FailField("size", "invalid native UI tree");
         std::vector<std::string> command_ids;
         std::set<std::string> unique_commands;
         for (uint32_t i = 0; i < input->command_count; ++i) {
+            Builder::Scope scope(builder, "commands[" + std::to_string(i) + "]");
             auto id = builder.Text(input->commands[i]);
             if (id.empty() || id.size() > 64 ||
                 !std::all_of(id.begin(), id.end(),
@@ -304,19 +365,23 @@ PulseStatus ConvertUiModel(const PulseUiModelTree *input, UiTree &output, std::s
         }
         auto document = json::Value::Object();
         document.set("version", 1);
-        document.set("state", builder.States(input->states, input->state_count));
-        document.set("root", builder.Node(*input->root, 1));
+        document.set("state", builder.States("states", input->states, input->state_count));
+        document.set("root", builder.Node(*input->root, 1, "root"));
         if (input->action_count) {
             auto actions = json::Value::Array();
             for (uint32_t i = 0; i < input->action_count; ++i) {
                 const auto &source = input->actions[i];
+                std::string seg = "actions[" + std::to_string(i) + "]";
+                if (const auto hint = SafeIdPreview(source.id); !hint.empty()) seg += "(" + hint + ")";
+                Builder::Scope scope(builder, std::move(seg));
                 if (source.size != sizeof(source))
-                    builder.Fail("invalid action size");
+                    builder.FailField("size", "invalid action size");
                 if (source.data_operation)
-                    builder.Fail("native UI data operations are not connected", PULSE_ERROR_UNAVAILABLE);
+                    builder.FailField("data_operation", "native UI data operations are not connected",
+                                      PULSE_ERROR_UNAVAILABLE);
                 auto action = json::Value::Object();
-                action.set("id", builder.Text(source.id));
-                action.set("updates", builder.States(source.updates, source.update_count));
+                action.set("id", builder.Text(source.id, "id"));
+                action.set("updates", builder.States("updates", source.updates, source.update_count));
                 builder.Strings(action, "validate", source.validate, 128);
                 actions.push(std::move(action));
             }

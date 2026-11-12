@@ -68,7 +68,7 @@ def validate(root):
     if not {"sdk/native/include/pulse/ui_data.h", "sdk/native/README.md"}.issubset(manifest["files"]):
         raise ValueError("Missing native data authoring files")
     for name, filename in (("pulse.directories", "directories.h"), ("pulse.context", "context.h"),
-                           ("pulse.fileops", "fileops.h"), ("pulse.ui.mount", "ui_mount.h"), ("pulse.commands", "commands.h"), ("pulse.preview", "preview.h"), ("pulse.tasks", "tasks.h"), ("pulse.staging", "staging.h"), ("pulse.settings.pages", "settings_pages.h")):
+                           ("pulse.fileops", "fileops.h"), ("pulse.ui.mount", "ui_mount.h"), ("pulse.commands", "commands.h"), ("pulse.icons", "icons.h"), ("pulse.dialogs", "dialogs.h"), ("pulse.diagnostics", "diagnostics.h"), ("pulse.pickers", "pickers.h"), ("pulse.workbench", "workbench.h"), ("pulse.preview", "preview.h"), ("pulse.tasks", "tasks.h"), ("pulse.staging", "staging.h"), ("pulse.settings.pages", "settings_pages.h")):
         interface = next(item for item in catalog["interfaces"] if item["name"] == name)
         header_path = "sdk/native/include/pulse/" + filename
         if header_path not in manifest["files"]:
@@ -123,11 +123,30 @@ def main():
 #include <pulse/resources.h>
 #include <pulse/ui_events.h>
 #include <pulse/ui_mount.h>
+#include <pulse/icons.h>
+#include <pulse/dialogs.h>
+#include <pulse/diagnostics.h>
+#include <pulse/pickers.h>
+#include <pulse/workbench.h>
 #include <pulse/dispatch.h>
 struct RestoredPacking { char c; uint64_t value; };
 #pragma pack(pop)
 static_assert(offsetof(RestoredPacking, value) == 1);
 static_assert(alignof(PulseHostV1) == 8);
+static_assert(alignof(PulseIconsV1) == 8);
+static_assert(alignof(PulseDialogsV1) == 8);
+static_assert(alignof(PulseDialogsV2) == 8);
+static_assert(offsetof(PulseDialogsV2, show) == offsetof(PulseDialogsV1, show));
+static_assert(offsetof(PulseDialogsV2, set_states) == offsetof(PulseDialogsV1, set_states));
+static_assert(offsetof(PulseDialogsV2, close) == offsetof(PulseDialogsV1, close));
+static_assert(offsetof(PulseDialogsV2, subscribe_command) == sizeof(PulseDialogsV1));
+static_assert(alignof(PulseDiagnosticsV1) == 8);
+static_assert(alignof(PulsePickersV1) == 8);
+static_assert(alignof(PulseWorkbenchV1) == 8);
+static_assert(alignof(PulseCommandsV2) == 8);
+static_assert(offsetof(PulseCommandsV2, register_command) == offsetof(PulseCommandsV1, register_command));
+static_assert(offsetof(PulseCommandsV2, unregister_command) == offsetof(PulseCommandsV1, unregister_command));
+static_assert(offsetof(PulseCommandsV2, update_command) == sizeof(PulseCommandsV1));
 static_assert(alignof(PulsePreviewV1) == 8);
 static_assert(alignof(PulseStagingV1) == 8);
 static_assert(alignof(PulseSettingsPagesV1) == 8);

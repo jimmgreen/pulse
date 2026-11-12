@@ -2,6 +2,7 @@
 
 #include "manifest.h"
 #include "authorization.h"
+#include "package_signature.h"
 #include <functional>
 #include "../../common/json_value.h"
 
@@ -26,6 +27,9 @@ bool ValidateCaller(const CallerLease& caller);
 // Explicit package ownership. Startup is transactional; UI changes never access disk.
 size_t PackageCount();
 const Manifest* PackageManifest(size_t package);
+// Verified lowercase SHA-256 publisher fingerprint if signed; empty for unsigned local packages.
+std::string PackagePublisherId(size_t package);
+std::wstring PackagePublishTrustKey(size_t package);
 // Immutable startup path, paired with the native digest in PackageManifest.
 std::wstring PackageNativePath(size_t package);
 bool PackageEnabled(size_t package);

@@ -24,10 +24,12 @@ struct InstallServiceSnapshot {
     InstallServicePhase phase = InstallServicePhase::Idle;
     uint64_t generation = 0;
     std::string id, version, error;
+    std::filesystem::path local_archive_path;
     std::shared_ptr<const VerifiedPackage> package;
     // Display-only copies. Worker retains distinct originals for commit authority.
     std::shared_ptr<const PublisherTrustReview> trust_review;
     std::shared_ptr<const InstallReview> install_review;
+    bool is_local_package = false;
     bool pending_restart = false; // Sticky for this service's lifetime, even after Cancel.
     bool enabled = false; // Result of the current generation's successful installation.
 };
@@ -49,6 +51,9 @@ public:
     // work, and replaces pending work. A stopped service cannot restart.
     uint64_t Prepare(std::shared_ptr<const CatalogSnapshot> catalog,
         std::string id, std::string version);
+    uint64_t PrepareLocal(std::filesystem::path archive_path,
+        std::filesystem::path signature_path = {},
+        std::shared_ptr<const CatalogSnapshot> catalog = nullptr);
     // Accepted only once for the current generation in the corresponding awaiting
     // phase; acceptance immediately consumes that phase, preventing double clicks.
     bool ConfirmPublisherTrust(uint64_t expected_generation, bool approved);

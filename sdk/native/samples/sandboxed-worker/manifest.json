@@ -1,0 +1,27 @@
+{
+  "apiVersion": 1,
+  "id": "sample.sandboxed-worker",
+  "name": "Sandboxed Worker Checksum",
+  "resources": [
+    "context.read",
+    "operations.own"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "id": "hash-selection",
+        "title": {
+          "zh": "沙盒计算 SHA-256",
+          "en": "Compute SHA-256 in Sandboxed Worker"
+        },
+        "detail": "SHA-256 via Job-Object sidecar ({base})",
+        "kinds": [
+          "files",
+          "directories"
+        ],
+        "minSelection": 0,
+        "maxSelection": 4096
+      }
+    ]
+  }
+}

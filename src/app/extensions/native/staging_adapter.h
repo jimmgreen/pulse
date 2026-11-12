@@ -28,13 +28,15 @@ struct StagingBackend {
 };
 class StagingAdapter {
 public:
-    StagingAdapter(HWND owner, std::function<bool()> live, StagingBackend backend);
+    StagingAdapter(HWND owner, std::function<bool()> live, StagingBackend backend,
+                   std::function<void()> wake = {}, std::string package_id = {});
     ~StagingAdapter();
     PulseStatus Query(uint32_t version, void* out, uint32_t size) const noexcept;
     void Poll() noexcept;
     void Close() noexcept;
     void CleanupRemaining() noexcept;
     bool CallbackActive() const noexcept;
+    bool HasPendingWork() const noexcept;
 private:
     struct State;
     std::shared_ptr<State> state_;

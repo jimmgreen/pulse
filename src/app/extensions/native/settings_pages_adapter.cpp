@@ -1,30 +1,41 @@
 #include "settings_pages_adapter.h"
+#include "diagnostics_adapter.h"
 #include <cstring>
 namespace pulse::extensions::native {
-struct SettingsPagesAdapter::State : std::enable_shared_from_this<State> {
+struct SettingsPagesAdapter::AdapterState : std::enable_shared_from_this<AdapterState> {
     DWORD thread = GetCurrentThreadId();
     HWND owner;
     bool closed = false;
     std::function<bool()> alive;
+    std::shared_ptr<DiagnosticsSink> diagnostics;
     UiAdapter ui;
     SettingsPageDescriptor page;
-    State(HWND window, bool dark, D2D1_COLOR_F accent, float scale, std::function<bool()> live)
+    AdapterState(HWND window, bool dark, D2D1_COLOR_F accent, float scale, std::function<bool()> live)
         : owner(window), alive(std::move(live)), ui(window, dark, accent, scale, [this] { return Valid(); }) { ui.Embed(); }
     bool Valid() const { return GetCurrentThreadId() == thread && !closed && IsWindow(owner) && alive && alive(); }
     bool Has(uint64_t id) const { return Valid() && id && id == page.id && ui.HasPanel(id); }
+    PulseStatus Fail(PulseStatus status, std::string_view op, std::string_view field, std::string_view msg) const {
+        if (diagnostics) diagnostics->Record(status, PULSE_SETTINGS_PAGES_INTERFACE_NAME, op, "", field, msg);
+        return status;
+    }
     template<class F> static PulseStatus Guard(void* context, F action) noexcept {
         if (!context) return PULSE_ERROR_ARGUMENT;
-        try { auto self = static_cast<State*>(context)->shared_from_this();
+        try { auto self = static_cast<AdapterState*>(context)->shared_from_this();
             return self->Valid() ? action(*self) : PULSE_ERROR_STATE;
         } catch (...) { return PULSE_ERROR_STATE; }
     }
     static PulseStatus PULSE_CALL Create(void* context, PulseStringView title, const PulseUiModelTree* tree, uint64_t* out) {
         if (out) *out = 0;
-        return Guard(context, [&](State& self) -> PulseStatus {
-            if (!out || !tree || !title.data || !title.length || title.length > 128 || std::memchr(title.data, 0, title.length)) return PULSE_ERROR_ARGUMENT;
-            if (self.Has(self.page.id)) return PULSE_ERROR_STATE;
+        return Guard(context, [&](AdapterState& self) -> PulseStatus {
+            if (!out || !tree)
+                return self.Fail(PULSE_ERROR_ARGUMENT, "create", !out ? "page" : "model", "null model or output handle");
+            if (!title.data || !title.length || title.length > 128 || std::memchr(title.data, 0, title.length))
+                return self.Fail(PULSE_ERROR_ARGUMENT, "create", "title", "title must be 1..128 UTF-8 bytes without NUL");
+            if (self.Has(self.page.id))
+                return self.Fail(PULSE_ERROR_STATE, "create", "", "a settings page is already open for this session");
             const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, title.data, static_cast<int>(title.length), nullptr, 0);
-            if (!count) return PULSE_ERROR_ARGUMENT;
+            if (!count)
+                return self.Fail(PULSE_ERROR_ARGUMENT, "create", "title", "invalid UTF-8 in title");
             std::wstring caption(static_cast<size_t>(count), L'\0');
             MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, title.data, static_cast<int>(title.length), caption.data(), count);
             PulseUiModelV1 model{}; const auto queried = self.ui.QueryModel(1, &model, sizeof(model));
@@ -35,7 +46,7 @@ struct SettingsPagesAdapter::State : std::enable_shared_from_this<State> {
         });
     }
     static PulseStatus PULSE_CALL PageQuery(void* context, uint64_t id, PulseStringView name, uint32_t version, void* out, uint32_t size) {
-        return Guard(context, [&](State& self) -> PulseStatus {
+        return Guard(context, [&](AdapterState& self) -> PulseStatus {
             if (!self.Has(id)) return PULSE_ERROR_STATE;
             if (!name.data || !name.length || name.length > 64 || std::memchr(name.data, 0, name.length)) return PULSE_ERROR_ARGUMENT;
             const std::string value(name.data, name.length);
@@ -49,7 +60,7 @@ struct SettingsPagesAdapter::State : std::enable_shared_from_this<State> {
         });
     }
     static PulseStatus PULSE_CALL Remove(void* context, uint64_t id) {
-        return Guard(context, [&](State& self) -> PulseStatus {
+        return Guard(context, [&](AdapterState& self) -> PulseStatus {
             if (!self.Has(id)) return PULSE_ERROR_STATE;
             PulseUiModelV1 api{}; const auto status = self.ui.QueryModel(1, &api, sizeof(api));
             if (status != PULSE_OK) return status;
@@ -60,14 +71,18 @@ struct SettingsPagesAdapter::State : std::enable_shared_from_this<State> {
     }
 };
 SettingsPagesAdapter::SettingsPagesAdapter(HWND owner, bool dark, D2D1_COLOR_F accent, float scale, std::function<bool()> alive)
-    : state_(std::make_shared<State>(owner, dark, accent, scale, std::move(alive))) {}
+    : state_(std::make_shared<AdapterState>(owner, dark, accent, scale, std::move(alive))) {}
 SettingsPagesAdapter::~SettingsPagesAdapter() { Close(); }
+void SettingsPagesAdapter::SetDiagnostics(std::shared_ptr<DiagnosticsSink> sink) {
+    state_->diagnostics = sink;
+    state_->ui.SetDiagnostics(std::move(sink));
+}
 PulseStatus SettingsPagesAdapter::Query(uint32_t version, void* out, uint32_t size) const noexcept {
     try {
         if (!state_->Valid()) return PULSE_ERROR_STATE;
         if (version != PULSE_SETTINGS_PAGES_VERSION_1) return PULSE_ERROR_ABI;
         if (!out || size < sizeof(PulseSettingsPagesV1)) return PULSE_ERROR_ARGUMENT;
-        const PulseSettingsPagesV1 api{sizeof(api), PULSE_SETTINGS_PAGES_VERSION_1, state_.get(), State::Create, State::PageQuery, State::Remove};
+        const PulseSettingsPagesV1 api{sizeof(api), PULSE_SETTINGS_PAGES_VERSION_1, state_.get(), AdapterState::Create, AdapterState::PageQuery, AdapterState::Remove};
         std::memcpy(out, &api, sizeof(api)); return PULSE_OK;
     } catch (...) { return PULSE_ERROR_STATE; }
 }
@@ -79,4 +94,13 @@ void SettingsPagesAdapter::Hide() { state_->ui.HideEmbedded(); }
 void SettingsPagesAdapter::Close() { if (GetCurrentThreadId() == state_->thread) { state_->closed = true; state_->ui.Stop(); state_->page = {}; if (IsWindow(state_->owner)) InvalidateRect(state_->owner, nullptr, FALSE); } }
 bool SettingsPagesAdapter::InCallback() const { return state_->ui.InCallback(); }
 UiAdapter& SettingsPagesAdapter::Ui() { return state_->ui; }
+std::optional<std::string> SettingsPagesAdapter::State(const std::string& key) const {
+    return state_->Has(state_->page.id) ? state_->ui.EmbeddedState(key) : std::nullopt;
+}
+bool SettingsPagesAdapter::CommitState(const std::string& key, const std::string& value) {
+    return state_->Has(state_->page.id) && state_->ui.CommitEmbeddedState(key, value);
+}
+bool SettingsPagesAdapter::Click(const std::string& node) {
+    return state_->Has(state_->page.id) && state_->ui.ClickEmbedded(node);
+}
 }

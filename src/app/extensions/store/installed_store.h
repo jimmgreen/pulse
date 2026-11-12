@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -30,8 +31,16 @@ struct StoreChangeReview {
     std::vector<std::string> added_resources;
     bool operator==(const StoreChangeReview&) const = default;
 };
-struct StoreChangeConsent { bool approved = false, native_execution = false, added_resources = false; };
+struct StoreChangeConsent { bool approved = false, native_execution = false, added_resources = false, purge_data = false; };
 struct StoreChangeResult { bool changed = false, restart_required = false; };
+struct StoreGcResult {
+    size_t removed_versions = 0;
+    size_t removed_binaries = 0;
+    size_t removed_packages = 0;
+    uint64_t reclaimed_bytes = 0;
+    size_t skipped_locked = 0;
+    bool operator==(const StoreGcResult&) const = default;
+};
 // Worker-only. Uses install transaction's pinned Session and .registry.lock.
 // Snapshot verifies metadata only; Enable/Rollback verify all target payload/PE bytes.
 // Failure leaves out unchanged. Uninstall retains immutable files and trust policy.
@@ -41,6 +50,9 @@ bool ReviewStoreChange(const std::filesystem::path& root, const std::string& id,
 bool CommitStoreChange(const std::filesystem::path& root, const StoreChangeReview& review,
     const StoreChangeConsent& consent, const std::atomic<bool>& cancelled,
     StoreChangeResult& out, std::string& error);
+// Sweeps unreferenced versions/<sha>.*, binaries/<sha>.dll, and packages/<sha>/ not retained
+// by any registered package's activeRevision or previousRevision. Locked/mapped files are skipped.
+bool GcInstalledStore(const std::filesystem::path& root, StoreGcResult& out, std::string& error);
 
 enum class InstalledStorePhase { Idle, Loading, Ready, Preparing, AwaitingConfirmation, Committing, Changed, Failed, Cancelled };
 struct InstalledStoreServiceSnapshot {
@@ -48,6 +60,7 @@ struct InstalledStoreServiceSnapshot {
     InstalledStorePhase phase = InstalledStorePhase::Idle;
     std::shared_ptr<const InstalledSnapshot> installed;
     std::shared_ptr<const StoreChangeReview> review;
+    std::optional<std::string> purged_package_id;
     std::string error;
     bool pending_restart = false;
 };

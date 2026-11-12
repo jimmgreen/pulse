@@ -1,4 +1,5 @@
 #include "../app/extensions/store/catalog.h"
+#include "../app/extensions/manifest_schema.generated.h"
 #include "../app/extensions/package_revision.h"
 #include "../common/json_value.h"
 #include <cstdio>
@@ -121,6 +122,7 @@ int main() {
         Catalog result;
         std::string error;
         Check("signed catalog with pulse.7zip and all metadata", load(bytes, sig, result, error) &&
+            result.expires.empty() && result.sequence == 0 &&
             result.publishers.size() == 1 && result.publishers[0].official && result.extensions.size() == 1 &&
             result.extensions[0].id == "pulse.7zip" && result.extensions[0].name.tw == "壓縮與解壓" &&
             result.extensions[0].versions[0].package.size == 1058405 && result.extensions[0].versions[0].sdk_preview == 3 &&
@@ -172,6 +174,34 @@ int main() {
         reject("unknown category", [](Value& v) { EditExtension(v, [](Value& e) { e.set("category", "other"); }); });
         reject("unknown resource", [](Value& v) { EditRelease(v, [](Value& r) { Value a = Value::Array(); a.push("filesystem.all"); r.set("resources", a); }); });
         reject("duplicate resource", [](Value& v) { EditRelease(v, [](Value& r) { auto a = *r.find("resources"); a.push("settings.own"); r.set("resources", a); }); });
+        reject("duplicate among valid resources", [](Value& v) {
+            EditRelease(v, [](Value& r) {
+                Value a = Value::Array();
+                a.push("context.read");
+                a.push("files.open");
+                a.push("context.read");
+                r.set("resources", a);
+            });
+        });
+        reject("too many resources (>15)", [](Value& v) {
+            EditRelease(v, [](Value& r) {
+                Value a = Value::Array();
+                for (auto name : pulse::extensions::generated::kResourceDeclarations) a.push(std::string(name));
+                a.push("settings.own");
+                r.set("resources", a);
+            });
+        });
+        reject("expires before generated", [](Value& v) { v.set("expires", "2026-11-08"); });
+        reject("expires ISO timestamp before generated", [](Value& v) { v.set("expires", "2026-11-09T04:15:37Z"); });
+        reject("expires malformed", [](Value& v) { v.set("expires", "2026/12/31"); });
+        reject("expires wrong type", [](Value& v) { v.set("expires", 20261231); });
+        reject("sequence zero", [](Value& v) { v.set("sequence", 0); });
+        reject("sequence negative", [](Value& v) { v.set("sequence", -1); });
+        reject("sequence boolean", [](Value& v) { v.set("sequence", true); });
+        {
+            const auto seq_overflow = "{\"sequence\":9007199254740993," + bytes.substr(1);
+            reject_raw("sequence overflow beyond 2^53", seq_overflow);
+        }
         reject("sdk boolean", [](Value& v) { EditRelease(v, [](Value& r) { r.set("sdkPreview", true); }); });
         reject("sdk overflow", [](Value& v) { EditRelease(v, [](Value& r) { r.set("sdkPreview", 100); }); });
         reject("invalid release date", [](Value& v) { EditRelease(v, [](Value& r) { r.set("released", "2026-04-31"); }); });
@@ -224,6 +254,41 @@ int main() {
         reject("too many tags", [](Value& v) { EditExtension(v, [](Value& e) { Value tags = Value::Array(); for (int i = 0; i < 9; ++i) tags.push("tag"); e.set("tags", tags); }); });
         valid("optional traditional language absent", [](Value& v) { EditExtension(v, [](Value& e) { Value n = Value::Object(); n.set("zh", "测试"); n.set("en", "test"); e.set("description", n); }); });
         valid("empty resource list", [](Value& v) { EditRelease(v, [](Value& r) { r.set("resources", Value::Array()); }); });
+        {
+            auto root = fixture;
+            std::vector<std::string> expected;
+            EditRelease(root, [&](Value& r) {
+                Value a = Value::Array();
+                for (auto name : pulse::extensions::generated::kResourceDeclarations) {
+                    expected.emplace_back(name);
+                    a.push(expected.back());
+                }
+                r.set("resources", a);
+            });
+            const auto text = pulse::json::Serialize(root);
+            Check("all 15 generated resource declarations accepted and preserved",
+                load(text, key.Sign(text), result, error) &&
+                result.extensions[0].versions[0].resources == expected &&
+                expected.size() == 15);
+        }
+        {
+            auto root = fixture;
+            root.set("expires", "2026-12-31");
+            root.set("sequence", 42);
+            const auto text = pulse::json::Serialize(root);
+            Check("optional date expires and sequence parsed",
+                load(text, key.Sign(text), result, error) &&
+                result.expires == "2026-12-31" && result.sequence == 42);
+        }
+        {
+            auto root = fixture;
+            root.set("expires", "2026-11-09T04:15:38Z");
+            root.set("sequence", static_cast<int64_t>(kMaxCatalogSequence));
+            const auto text = pulse::json::Serialize(root);
+            Check("optional ISO expires equal to generated and max sequence parsed",
+                load(text, key.Sign(text), result, error) &&
+                result.expires == "2026-11-09T04:15:38Z" && result.sequence == kMaxCatalogSequence);
+        }
         valid("inclusive asset size and SDK limits", [](Value& v) { EditRelease(v, [](Value& r) { r.set("sdkPreview", 99); auto a = *r.find("package"); a.set("size", 256 * 1024 * 1024 + 256 * 1024); r.set("package", a); a = *r.find("signature"); a.set("size", 16384); r.set("signature", a); }); });
         valid("maximum semantic version components", [](Value& v) { EditRelease(v, [](Value& r) { r.set("version", "99999.99999.99999"); }); });
         std::printf("Catalog tests: %d passed, %d failed\n", passed, failed);

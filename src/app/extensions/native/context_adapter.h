@@ -36,9 +36,11 @@ class ContextAdapter {
     ContextAdapter &operator=(const ContextAdapter &) = delete;
     PulseContextV1 Table() const noexcept;
     PulseStatus Query(uint32_t version, void *table, uint32_t size) const noexcept;
+    void SetWake(std::function<void()> wake, std::string package_id = {}) noexcept;
     void Poll() noexcept;
     void Close() noexcept;
     bool CallbackActive() const noexcept;
+    bool HasSubscriptions() const noexcept;
   private:
     struct State;
     std::shared_ptr<State> state_;

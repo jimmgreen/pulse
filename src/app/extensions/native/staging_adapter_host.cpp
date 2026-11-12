@@ -39,10 +39,11 @@ StagingBackend MakeStagingBackend(HWND owner, CallerBinding caller) {
     backend.submit = [owner, caller](const StageSubmission& stage) -> StageSubmitResult {
         auto* app = GetAppState(owner);
         if (!app || !ValidateCallerBinding(caller)) return {};
+        const auto* manifest = PackageManifest(caller.Package().slot);
+        if (!manifest || manifest->id != caller.Package().id) return {};
         using I = l10n::StringId;
-        const std::wstring package = Wide(caller.Package().id);
-        const auto& trusted = app->appPrefs.extension_publish_trusted;
-        const bool always = std::find(trusted.begin(), trusted.end(), package) != trusted.end();
+        const std::string publisher = PackagePublisherId(caller.Package().slot);
+        const bool always = IsPublishTrusted(app->appPrefs.extension_publish_trusted, publisher, caller.Package().id);
         ui::ConfirmDialogSpec spec;
         spec.title = l10n::Get(I::ExtensionPublishTitle);
         spec.message = l10n::Get(I::ExtensionPublishMessage);
@@ -70,10 +71,9 @@ StagingBackend MakeStagingBackend(HWND owner, CallerBinding caller) {
         const auto choice = always ? ui::ConfirmChoice::Confirm
                                    : ui::ShowConfirmDialogEx(owner, spec, app->darkMode, app->accentColor);
         app = GetAppState(owner);
-        if (app && choice == ui::ConfirmChoice::Secondary) {
-            auto& list = app->appPrefs.extension_publish_trusted;
-            if (std::find(list.begin(), list.end(), package) == list.end()) list.push_back(package);
-            if (!app->isolatedTest) app->appPrefs.Save();
+        if (app && choice == ui::ConfirmChoice::Secondary && ValidateCallerBinding(caller)) {
+            if (GrantPublishTrust(app->appPrefs.extension_publish_trusted, publisher, caller.Package().id) && !app->isolatedTest)
+                app->appPrefs.Save();
         }
         if ((choice != ui::ConfirmChoice::Confirm && choice != ui::ConfirmChoice::Secondary) || !app ||
             !ValidateCallerBinding(caller) ||

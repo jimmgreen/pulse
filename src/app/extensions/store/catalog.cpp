@@ -1,4 +1,5 @@
 #include "catalog.h"
+#include "../manifest_schema.generated.h"
 #include "../package_revision.h"
 #include "../../../common/json_value.h"
 #include <algorithm>
@@ -54,12 +55,19 @@ bool IntegerTokens(std::string_view s) {
             else if (c == '"') quoted = false;
         } else if (c == '"') quoted = true;
         else if (c == '-' || (c >= '0' && c <= '9')) {
+            uint64_t magnitude = (c >= '0' && c <= '9') ? static_cast<uint64_t>(c - '0') : 0;
+            bool has_digit = c >= '0' && c <= '9';
             while (i + 1 < s.size()) {
                 const char next = s[i + 1];
                 if (next == '.' || next == 'e' || next == 'E') return false;
                 if (next < '0' || next > '9') break;
+                const uint64_t digit = static_cast<uint64_t>(next - '0');
+                if (magnitude > (kMaxCatalogSequence - digit) / 10) return false;
+                magnitude = magnitude * 10 + digit;
+                has_digit = true;
                 ++i;
             }
+            if (!has_digit) return false;
         }
     }
     return true;
@@ -184,6 +192,10 @@ bool Generated(std::string_view s) {
     return s.size() == 20 && Date(s.substr(0, 10)) && s[10] == 'T' &&
         Match(s.substr(11), "([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z");
 }
+bool Expires(std::string_view s, std::string_view generated) {
+    if (s.size() == 10) return Date(s) && s >= generated.substr(0, 10);
+    return Generated(s) && s >= generated;
+}
 bool Version(std::string_view s, std::array<int, 3>& parts) {
     if (!Match(s, R"((0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4}))")) return false;
     size_t start = 0;
@@ -206,17 +218,23 @@ bool AssetValue(const Value& v, int64_t limit, std::string_view suffix, Asset& o
 }
 bool ReleaseValue(const Value& v, Release& out, std::array<int, 3>& version) {
     int64_t sdk = 0;
+    const auto& resources = Member(v, "resources");
     if (!Fields(v, {"version", "released", "minPulse", "sdkPreview", "manifestSha256", "resources", "package", "signature", "notes"}) ||
         !Version(v.get_string("version"), version) || !Date(v.get_string("released")) ||
         !Match(v.get_string("minPulse"), R"([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,4})") ||
         !Integer(Member(v, "sdkPreview"), 1, 99, &sdk) || !Hash(v.get_string("manifestSha256")) ||
-        !Member(v, "resources").is_array() || Member(v, "resources").size() > 1 ||
+        !resources.is_array() || resources.size() > pulse::extensions::generated::kResourceDeclarations.size() ||
         !AssetValue(Member(v, "package"), 256 * 1024 * 1024 + 256 * 1024, ".pulse-ext", out.package) ||
         !AssetValue(Member(v, "signature"), 16384, ".sig.json", out.signature) ||
         !Localized(Member(v, "notes"), 600, out.notes)) return false;
-    for (const auto& resource : Member(v, "resources").items()) {
-        if (!resource.is_string() || resource.as_string() != "settings.own") return false;
-        out.resources.push_back(resource.as_string());
+    for (const auto& resource : resources.items()) {
+        if (!resource.is_string()) return false;
+        const auto& name = resource.as_string();
+        if (std::find(pulse::extensions::generated::kResourceDeclarations.begin(),
+                pulse::extensions::generated::kResourceDeclarations.end(), name) ==
+            pulse::extensions::generated::kResourceDeclarations.end()) return false;
+        if (std::find(out.resources.begin(), out.resources.end(), name) != out.resources.end()) return false;
+        out.resources.push_back(name);
     }
     out.version = v.get_string("version"); out.released = v.get_string("released");
     out.min_pulse = v.get_string("minPulse"); out.manifest_sha256 = v.get_string("manifestSha256");
@@ -288,14 +306,25 @@ bool Load(std::string_view index, std::string_view signature, std::string_view t
         signed_bytes.data(), static_cast<ULONG>(signed_bytes.size()), BCRYPT_PAD_PKCS1) < 0) return fail("catalog_signature_invalid");
     Value root;
     if (!Parse(index, root, kMaxCatalogBytes, 10) ||
-        !Fields(root, {"formatVersion", "generated", "publishers", "extensions"}) ||
+        !Fields(root, {"formatVersion", "generated", "publishers", "extensions"}, {"expires", "sequence"}) ||
         !Integer(Member(root, "formatVersion"), 1, 1) || !Generated(root.get_string("generated"))) return fail("invalid_catalog_format");
+    Catalog result;
+    result.generated = root.get_string("generated");
+    if (root.find("expires")) {
+        if (!Member(root, "expires").is_string() || !Expires(root.get_string("expires"), result.generated))
+            return fail("invalid_catalog_format");
+        result.expires = root.get_string("expires");
+    }
+    if (root.find("sequence")) {
+        int64_t sequence = 0;
+        if (!Integer(Member(root, "sequence"), 1, static_cast<int64_t>(kMaxCatalogSequence), &sequence))
+            return fail("invalid_catalog_format");
+        result.sequence = static_cast<uint64_t>(sequence);
+    }
     const auto& publishers = Member(root, "publishers");
     const auto& extensions = Member(root, "extensions");
     if (!publishers.is_array() || publishers.size() > kMaxCatalogPublishers ||
         !extensions.is_array() || extensions.size() > kMaxCatalogExtensions) return fail("catalog_entry_limit_or_type");
-    Catalog result;
-    result.generated = root.get_string("generated");
     std::set<std::string> pins, ids;
     for (const auto& value : publishers.items()) {
         Publisher publisher;

@@ -2,35 +2,43 @@
 
 目标是开发者编写自己的 DLL，使用 Pulse 的真实 UI 和可复用服务，然后安装挂载到 Pulse。当前发布为 Windows x64/MSVC/C++20 开发预览。能力边界见 [原生 SDK](../sdk/native/README.md)，规划不等于已实现接口。
 
-## 1. 选择示例并编译
+> **稳定性分层（Frozen vs Experimental）**：当前公开契约分为 **`frozen`**（核心入口 ABI 与 `pulse.files`、`pulse.resources`、`pulse.dispatch`、`pulse.directories`、`pulse.context`、`pulse.fileops`、`pulse.commands`、`pulse.preview`、`pulse.tasks`、`pulse.staging`、`pulse.settings.pages`、`pulse.dialogs` 共 12 个宿主服务接口）与 **`experimental`**（`pulse.ui.model`、`pulse.ui.events`、`pulse.ui.data`、`pulse.ui.mount`、`pulse.icons`、`pulse.diagnostics`、`pulse.pickers`、`pulse.workbench` 8 个 UI、矢量绘图、结构化诊断、通用选择器与工作台集成接口，调用方须支持 `PULSE_ERROR_UNAVAILABLE` / `std::nullopt` 优雅降级）。完整 1.0 冻结标准、兼容矩阵、弃用窗口（至少 2 个次版本且满 180 天）及跨进程 worker 迁移指南见 [生命周期、支持窗口与迁移策略][lifecycle-policy]。
 
-从匹配版本的源码 SDK 或开发预览包开始，在 x64 Visual Studio 开发终端运行：
+[lifecycle-policy]: extensions-sdk-lifecycle-and-support.md
+
+## 1. 创建独立工程并编译
+
+从匹配版本的源码 SDK（`PULSE_SDK_PREVIEW = 3`）开始，在 x64 Visual Studio 开发终端先可选运行 `doctor --toolchain` 检查 `cmake`、`ninja`、MSVC `cl.exe`（x64）与 Windows SDK，然后用 `pulse_ext.py new` 生成带独立包 ID 的完整 C++ 工程：
 
 ```powershell
-cmake -S examples/native/rename-panel -B build-rename -G Ninja -DCMAKE_BUILD_TYPE=Release -DPULSE_SDK_INCLUDE="$PWD/sdk/native/include"
-cmake --build build-rename
+python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json doctor --toolchain
+python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json new C:/PulseAuthor/my-rename --id com.example.rename --name "Example Rename" --template rename-panel
+cmake -S C:/PulseAuthor/my-rename -B C:/PulseAuthor/my-rename/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build C:/PulseAuthor/my-rename/build
 ```
 
-`rename-panel` 由插件计算名称，Pulse 负责原生确认与实际文件任务；`inspector` 自行聚合目录数据；`reactive-panel` 演示后台算法和 UI 回调。业务源码只依赖公开头，不包含 Pulse 的 AppState/私有控件类，也不链接宿主内部静态库。
+需要源码级断点与 `.pdb` 符号调试时，使用 `-B C:/PulseAuthor/my-rename/build-debug -DCMAKE_BUILD_TYPE=RelWithDebInfo`（或 `Debug`）并将 Visual Studio / VS Code (`cppvsdbg`) 附加到隔离测试宿主的 PID。`new` 支持 `examples/native/catalog.json` 中的全部 8 个可打包模板（`directory-browser`、`directory-transfer`、`directory-workbench`、`file-operations`、`inspector`、`live-data`、`reactive-panel`、`rename-panel`），自动渲染新包 `id`/`name`、CMake 目标名与 README；最小 ABI 示例 `examples/native/basic` 不含 `manifest.json`，仅作头文件编译参考。业务源码只依赖公开头，不包含 Pulse 的私有类或内部静态库。
 
 ## 2. 生成清单并打包
 
-源码 SDK 不包含宿主程序。先准备与 SDK 预览号匹配的 Pulse 宿主；下面的 C:/PulsePreview/pulse.exe 应替换为其绝对路径。命令在 SDK 解压根目录执行。输出清单和包必须尚不存在；清单必须与声明 DLL 同目录。
+源码 SDK 不包含宿主程序。先准备与 `PULSE_SDK_PREVIEW = 3` 匹配的 Pulse 宿主；下面的 `C:/PulsePreview/pulse.exe` 应替换为其绝对路径。输出清单和包必须尚不存在；清单必须与声明 DLL 同目录。
 
 ```powershell
-python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json native-manifest examples/native/rename-panel/manifest.json --library build-rename/pulse_rename_lower.dll --output build-rename/manifest.json
-python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json pack build-rename/manifest.json --output rename.pulse-ext
-python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json verify rename.pulse-ext
+python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json native-manifest C:/PulseAuthor/my-rename/manifest.json --library C:/PulseAuthor/my-rename/build/com_example_rename_lower.dll --output C:/PulseAuthor/my-rename/build/manifest.json
+python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json pack C:/PulseAuthor/my-rename/build/manifest.json --output C:/PulseAuthor/my-rename/build/com.example.rename.pulse-ext
+python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json verify C:/PulseAuthor/my-rename/build/com.example.rename.pulse-ext
 ```
 
 清单生成和验证不执行 DLL。`native.library`、架构和二进制哈希由工具与宿主校验；v2 包包含清单、metadata、入口 DLL，以及可选 `native.files` 声明的相邻私有 DLL 和资源；每个文件分别校验哈希。
 
-## 3. 安装、启用并挂载
+## 3. 安装、启用、挂载与安全停止
 
 ```powershell
-python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json install rename.pulse-ext --store C:/PulseAuthor/extensions --allow-native
-python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json enable sample.native-rename --store C:/PulseAuthor/extensions --allow-native
+python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json install C:/PulseAuthor/my-rename/build/com.example.rename.pulse-ext --store C:/PulseAuthor/extensions --allow-native --accept-capabilities
+python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json enable com.example.rename --store C:/PulseAuthor/extensions --allow-native
 python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json run --store C:/PulseAuthor/extensions --profile C:/PulseAuthor/run-1
+# 重新编译或覆盖安装锁定的 DLL 前，合作式关闭该隔离测试宿主（绝不强杀无关日常 Pulse 实例）
+python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json stop-host --pid <PID> --profile C:/PulseAuthor/run-1
 ```
 
 默认安装目录为 `%LOCALAPPDATA%/Pulse/extensions`。初次安装禁用；启用后重启 Pulse，在命令面板打开该包，DLL 才按需激活。日常使用不需要 `--extension-native` 开发参数。上述命令使用独立测试库，run 的 --profile 隔离用户配置；profile 必须为新目录，重跑时使用 run-2 等路径。返回 PID 只证明进程启动，仍须打开插件并验证交互和停用。
@@ -44,7 +52,7 @@ python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json ru
 - 验证真实文件结果、错误/取消、停用/重启和资源释放；UI 使用应用内截图。
 - SDK 编译和实际宿主验证入口见 [开发预览说明](../sdk/native/README.md)。
 
-原生 DLL 与 Pulse 同进程，应明确审阅后启用。公开 API 的参数与主体检查不构成原生代码沙箱。
+原生 DLL 与 Pulse 同进程，应明确审阅后启用。**信任边界**：宿主通过 `LoadLibraryExW` 加载 DLL 映像时，Windows 加载器在宿主检查 `PulsePluginSdkPreview` 导出之前就已映射映像并可能执行 `DllMain` 与 TLS 回调；因此预览号检查（`PULSE_SDK_PREVIEW = 3`）是 ABI 兼容性检查，而非安全沙箱。公开 API 的参数、主体与 `resources` 声明同样不构成原生代码沙箱。
 
 ## 给 AI 助手的任务模板
 
@@ -58,7 +66,7 @@ python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json ru
 输出 DLL/包/报告路径、安装挂载步骤和剩余缺口。
 ```
 
-当前已有动态数据和目录变化订阅。桌面磁贴仍需拖放与桌面承载等接口；现阶段以压缩包参考插件推动公共服务。
+当前已有动态数据和目录变化订阅。桌面磁贴仍需拖放与桌面承载等接口；现阶段以压缩包参考样例（`sdk/native/samples/archive`）与独立官方 `extensions/7zip` 扩展推动公共服务。
 
 ## AI 作者 MCP
 
@@ -68,33 +76,37 @@ python tools/extensions/pulse_ext.py --pulse C:/PulsePreview/pulse.exe --json ru
 python tools/extensions/native_author_mcp.py --workspace C:/PulseAuthor --sdk-root C:/PulseSdk --pulse C:/PulsePreview/pulse.exe
 ```
 
-需要 Python 3、MSVC x64、CMake 和 Ninja。工作目录和 SDK 根目录使用绝对路径。
+需要 Python 3、MSVC x64、CMake 3.25+ 和 Ninja。工作目录和 SDK 根目录使用绝对路径。
 
 | 工具 | 用途 |
 |---|---|
-| native_sdk_describe | 发现接口，按 interface 读取完整公开头 |
-| native_project_create | 从公开样例创建独立工程 |
-| native_project_build | 编译并返回 DLL 与真实诊断 |
-| native_package_stage | 计算哈希、生成 manifest、打包和校验 |
-| native_package_install | 安装到作者工作目录的独立测试库 |
-| native_host_diagnose | 比较宿主与 SDK 契约 |
-| native_host_run | 启动独立配置的宿主，返回 PID 和日志 |
+| `native_sdk_describe` | 发现接口（按 `interface` 读取完整公开头）、8 个可打包 `templates` 及 `abiSamples` (`["basic"]`) |
+| `native_project_create` | 基于可打包模板创建带唯一包 ID（支持可选 `id`/`displayName`，默认派生 `local.<name>`）的独立工程 |
+| `native_project_build` | 支持 `config`（`Debug` / `RelWithDebInfo` / `Release`），返回 DLL、`.pdb` 符号与调试器附加提示 |
+| `native_package_stage` | 计算哈希、生成 manifest、打包和校验 |
+| `native_package_install` | 安装到作者工作目录的独立测试库 |
+| `native_host_diagnose` | 细化对比宿主与 SDK 的 `sdkPreview`、接口版本/哈希差异及本地工具链就绪状态 |
+| `native_host_run` | 启动独立配置的宿主，记录实例元数据并返回 PID、`profile` 和日志路径 |
+| `native_host_stop` | 校验作者工作目录记录后合作式关闭隔离测试宿主并等待退出，安全释放被占用的插件 DLL |
 
-安装与运行参数需带 allowNative=true；安装可用 enable=true。构建与 CLI 串行执行，取消通知停止在途命令进程树，已返回的宿主 PID 由用户正常关闭。每次结果含命令、退出码与诊断；启动成功仍需实际打开插件验证行为。只读发现无需加载插件。
+安装与运行参数需带 `allowNative=true`；安装可用 `enable=true`。重编或覆盖安装前可调用 `native_host_stop` 合作式停止该工作区的隔离宿主（拒绝外部无关进程）。每次结果含命令、退出码与诊断；启动成功仍需实际打开插件验证行为。只读发现无需加载插件。
 
 私有 DLL 和资源文件随包发布时，使用 `native-manifest --file PATH`（可重复）；文件须与入口 DLL 同目录。AI 作者 MCP 的 `native_package_stage.files` 接收工作目录内文件路径数组。完整规则与压缩包参考样例见 [打包文档](native-packages.md#archive-reference-sample)。
 
-## 原生命令与当前选择
+## 原生命令、静态命令发现与当前选择
 
-当前 `PULSE_SDK_PREVIEW` 为2；机器发现中的 `sdkPreview` 必须与头文件一致，升级 SDK 后重新编译 DLL。在插件入口查询 `pulse.commands` 并注册命令，每实例最多32项。命令可按选择数量、文件/目录类型和扩展名包含或排除条件启用，图标为 default/archive/extract；调用时宿主重检最新选择。快捷键仅主界面生效，内置快捷键优先。固定工具栏标识 `native:package:command` 保存到现有 `toolbar_tools`，停用使瞬时菜单 token 失效。
+当前 `PULSE_SDK_PREVIEW` 为 `3`；机器发现中的 `sdkPreview` 必须与头文件一致，升级 SDK 后重新编译 DLL。
 
-命令回调直接收到借用选择快照，也可调用 `pulse.context.get_selection` 同步读取当前目录与选择路径/名称/目录标志。普通空选择返回零条和目录；最多4096条、4 MiB UTF-8，超限失败而不截断，不访问磁盘。复制数据后再启动后台工作；不要保留回调中的指针或递归读取。
+- **零加载静态命令发现（`contributes.commands`）**：`manifest.json` 支持可选 `"contributes": { "commands": [{ "id": "...", "title": "...", "icon": "default|archive|extract", "shortcut": "..." }] }`，宿主无需预先 `LoadLibraryExW` 即可在命令面板和菜单展示静态命令元数据，首次触发时按需激活 DLL。
+- **动态选择条件命令与矢量图标（`pulse.commands` V2 + `pulse.icons` V1）**：在插件入口查询 `pulse.commands`（V1/V2）并注册命令，每实例最多 32 项。命令支持文件、目录与空白背景（`PULSE_COMMAND_BACKGROUND`）右键上下文，支持 `update_command` / `set_command_flags` 动态更新与显隐切换（`PULSE_COMMAND_HIDDEN` / `CHECKED` / `SEPARATOR_*` / `PRIMARY`），并可直接使用全部 68 个内置 Fluent 矢量图标（`PULSE_ICON_*` `0..67` 或名称）及 `contributes.icons` / `pulse.icons` 注册的多图层 SVG Path 自定义矢量图标；宿主在“设置 → 扩展 → 右键菜单”中同时提供用户级平铺/子菜单/隐藏覆盖。固定工具栏标识 `native:package:command` 保存到现有 `toolbar_tools`，停用使瞬时菜单 token 失效。
 
-`sdk/native/samples/archive` 的提取命令已接入同卷暂存提交（P1.5已验收），压缩命令仍为明确标识的演示入口； `verify-archive` 已在源码中实现后台真实解压到私有临时目录并清理，P1.4已通过真实宿主验收。向用户目标目录发布输出的P1.5流程已独立验收；归档预览读取器见下节。
+命令回调直接收到借用选择快照，也可调用 `pulse.context.get_selection` 同步读取当前目录与选择路径/名称/目录标志。普通空选择返回零条和目录；最多 4096 条、4 MiB UTF-8，超限失败而不截断，不访问磁盘。复制数据后再启动后台工作；不要保留回调中的指针或递归读取。
+
+`sdk/native/samples/archive` 是 SDK 多文件参考样例：提取命令已接入同卷暂存提交（P1.5 已验收），`verify-archive` 执行后台真实解压到私有临时目录并清理（P1.4 已验收），本地路径 7z/ZIP 创建参考实现已通过 P1.10 验收；主仓库另有独立的官方 `extensions/7zip` 扩展候选，结合 `pulse.dialogs` 模态对话框（密码输入、压缩参数与校验和展示）对接官方 7-Zip 26.00 引擎。
 
 ## 预览提供者与 AI 编写约束
 
-新增 `pulse.preview` V1，当前预览号为3。在入口 UI 线程注册 `.7z` / `.rar` 等小写扩展名；宿主将读取交给工作线程，每实例最多并发2次。每次回调使用独立读取状态，周期检查取消，完成后在该回调中调用一次 `publish`。发布同步复制借用内存，回调返回后 request 和 context 全部失效；不要另开线程后保存 request，也不要从提供者调用 UI API。停用后宿主等所有回调返回才卸载 DLL。
+`pulse.preview` V1（当前 `PULSE_SDK_PREVIEW` 为 `3`）：在入口 UI 线程注册 `.7z` / `.rar` 等小写扩展名；宿主将读取交给工作线程，每实例最多并发 2 次。每次回调使用独立读取状态，周期检查取消，完成后在该回调中调用一次 `publish`。发布同步复制借用内存，回调返回后 request 和 context 全部失效；不要另开线程后保存 request，也不要从提供者调用 UI API。停用后宿主等所有回调返回才卸载 DLL。
 
 AI 工作包可直接使用以下约束：
 
@@ -150,24 +162,26 @@ get回调同步运行在调用线程；create/commit/release磁盘工作由宿�
 只写宿主stage，先结束writers再commit，等待确认和文件操作终态。
 取消提交后继续等待terminal再release，不自行删除仍被文件操作使用的目录。
 分开呈现提取与发布阶段，百分比和完成计数不倒退。
-extract-here/extract-to仅支持7z/rar；verify不发布文件，compress仍是演示。
+extract-here/extract-to仅支持7z/rar；verify不发布文件，本地7z/ZIP写入参考见P1.10，完整官方归档功能见extensions/7zip。
 P1.5确认、冲突、定位、撤销重做、暂存清理已有真实宿主证据；修改后按影响范围复验。
 ```
 
-## 插件设置页（P1.6 已验收）
+## 插件设置页与宿主模态对话框
 
 `pulse.settings.pages` V1 的create(title,tree,page)同步复制既有UI-model树，每个包会话最多一页，挂在宿主增强包设置区；所有调用和回调在owner UI线程。page也是普通panel ID；query仅提供该页专用的 `pulse.ui.model`、`pulse.ui.events` 表，独立于插件主面板，不提供mount/data。remove或停用使ID与订阅失效，专用context保留到会话destroy；回调借用文本须立即复制，userdata保留到当前回调返回。
 
+`pulse.dialogs` V1/V2（`pulse/dialogs.h`）在 owner UI 线程提供宿主自绘 Fluent 模态对话框（标题、可选正文、可选 UI-model 表单及 1–3 个底部按钮，支持 `password` 掩码输入，由 `PickerOwnerGuard` 统一管理模态焦点与父窗口禁用），每会话最多一个活动模态框；V2 新增对话框内不关闭弹窗的命令回调（`subscribe_command` / `unsubscribe_command`）、表单模型原地刷新（`update_model`）与同步状态读取（`get_state`），并可与 `pulse.pickers`（打开/保存文件、目录选择、带拼音匹配的 `quick_pick`）、`pulse.workbench`（胶囊提示、通知卡片、路径定位、内置文本对比、剪贴板）和 `pulse.diagnostics`（节点/字段级结构化错误诊断）组合完成完整向导工作流。官方 `extensions/7zip` 用其承载密码输入、压缩参数与哈希校验结果。
+
 持久化复用 `pulse.resources.settings_get/set`，接纳请求不表示保存成功，只有完成回调可显示Saved。样例以单键 `archive.preferences` 保存版本化值（`1\n格式索引\n级别索引\n目录`，总计最多1024 UTF-8字节），使用expected_version做CAS避免多字段部分保存。version_conflict不覆盖外部修改：重新get版本，保留草稿，明确要求用户再次Save；请求失败提供Reload/Save重试。停用/销毁取消未完成resource请求，不回滚已提交设置。
 
-归档页提供默认解压目录、Browse、未来压缩格式7z/zip和级别Store/Fast/Normal/Maximum。空目录表示归档所在目录；extract-to使用已保存目录作为宿主选择器初始位置，extract-here仍固定归档父目录。格式和级别仅为未来偏好，压缩命令仍是演示，不生成压缩包。引擎面板与设置页可独立存在。P1.6已通过真实页面、跨进程持久化、冲突及停用重载验收。
+归档参考页（`sdk/native/samples/archive`）提供默认解压目录、Browse、压缩格式 7z/zip 和级别 Store/Fast/Normal/Maximum。空目录表示归档所在目录；`extract-to` 使用已保存目录作为宿主选择器初始位置，`extract-here` 仍固定归档父目录；格式和级别用于样例的 P1.10 本地 7z/ZIP 创建参考，而加密归档、分卷、tar 变体与密码弹窗则位于独立官方 `extensions/7zip` 扩展。引擎面板与设置页可独立存在。P1.6 已通过真实页面、跨进程持久化、冲突及停用重载验收。
 
 ```text
 用pulse/settings_pages.h注册每实例一页原生UI-model设置，不另造窗口或HTML控件。
 在UI线程create/query/remove，通过专用query取得ui/model/events，保留主面板独立context。
 回调借用值及时复制；resource请求userdata保留到完成或取消，销毁前取消请求。
 用settings_get/set版本CAS持久化；仅完成回调报告Saved；冲突保留草稿、刷新版本并明确重试。
-默认提取目录用于extract-to初始位置，extract-here语义不变；压缩格式/级别明确是未来偏好。
+默认提取目录用于extract-to初始位置，extract-here语义不变；区分SDK归档参考样例与独立extensions/7zip。
 验证加载、失败、冲突、停用、重新打开与重启保留，不把独立构建成功当作宿主UI验收。
 ```
 
@@ -198,12 +212,12 @@ auto status = model.create(model.context, View("Example"), &tree.Build(), &panel
 
 压缩包样例的设置树、引擎状态树、UI 订阅、命令和后台任务已迁移；目录工作台的模型与订阅也已迁移。定向 wrapper_test 共 28 项通过。真实宿主证据：`build-extensions/p17-settings-host-final`（安装/升级/回退与设置持久化）、`build-extensions/p17-archive-host`（真实 2 GiB 解压取消、停用排空、发布/冲突/撤销重做）、`build-extensions/p17-workbench-host`（18 项，通过应用内截图核对）。
 
-P1.8 UI API 收敛已完成（SDK 预览3）；P1.9 旧压缩下载包已移除；压缩创建仍未实现，格式和级别是未来功能的持久化偏好。本阶段没有引入 JavaScript 运行时。
+P1.8 UI API 收敛已完成（`PULSE_SDK_PREVIEW` 为 `3`）；P1.9 旧压缩下载包已移除；`sdk/native/samples/archive` 提供本地 7z/ZIP 创建参考（P1.10），更完整的加密/分卷/tar 压缩与 `pulse.dialogs` 交互由独立官方 `extensions/7zip` 扩展提供。本阶段没有引入 JavaScript 运行时。
 
 ## 外部作者走查与发布
 
 P3.1 已由未读取 Pulse 私有源码的独立作者验证：只用解压 SDK，从空工程实现 Number Lens 数列统计插件，经交付 MCP 完成编译、打包、隔离安装启用和宿主契约核对。维护者随后通过真实宿主完成 15 项交互与停用验证，并检查浅色、深色 150% 和错误态应用内截图。此结果验证该插件的作者流程，不表示全部控件和任意插件都已验收。
 
-MCP 当前没有点击、截图或停用自动化接口；native_host_run 明确返回 loadVerified=false。作者应在实际宿主手动打开页面并验收，自动化截图验收使用维护者测试宿主探针。不要把工具启动结果当作功能通过。宿主测试探针和历史证据目录不随源码 SDK 交付。
+MCP 当前没有点击、截图或停用自动化接口；`native_host_run` 明确返回 `loadVerified=false`。作者应在实际宿主手动打开页面并验收，重编前可用 `native_host_stop`（或 `pulse_ext.py stop-host`）合作式停止隔离测试宿主。自动化截图验收使用维护者测试宿主探针；不要把工具启动结果当作功能通过。宿主测试探针和历史证据目录不随源码 SDK 交付。
 
-发布者密钥格式、签名、可信指纹配置、分发文件及升级说明见 [签名与发布](native-packages.md#signing-and-distributing-a-preview-release)。源码 SDK 不含宿主程序，也不代替发布者的密钥托管和外部发布渠道。
+发布者密钥格式、签名、发布者连续性与 `package_signing.py rotate` 密钥轮换、`pulse_ext.py gc` 旧版本清理、可信指纹配置及升级说明见 [签名与发布](native-packages.md#signing-and-distributing-a-preview-release)。源码 SDK 不含宿主程序，也不代替发布者的密钥托管和外部发布渠道。

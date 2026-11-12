@@ -2,6 +2,8 @@
 #include "text.h"
 #include <pulse/client.hpp>
 #include <windows.h>
+#include <cctype>
+#include <cstdio>
 #include <filesystem>
 #include <optional>
 #include <vector>
@@ -49,6 +51,8 @@ std::wstring StripExtension(const std::wstring& name) {
 
 struct Dialogs::Request {
     std::string title, message;
+    std::string heading, subject, subject_detail;  // the host's heading and subject card
+    uint32_t icon = PULSE_DIALOG_ICON_NONE, subject_kind = PULSE_DIALOG_SUBJECT_NONE;
     struct Button { std::string id, text; uint32_t kind; };
     std::vector<Button> buttons;
     uint32_t default_button = 0, cancel_button = PULSE_DIALOG_NO_BUTTON, width = 0, height = 0;
@@ -81,6 +85,11 @@ void Dialogs::Next() {
         spec.button_count = static_cast<uint32_t>(buttons.size());
         spec.title = View(request->title);
         spec.message = View(request->message);
+        spec.heading = View(request->heading);
+        spec.icon = request->icon;
+        spec.subject_kind = request->subject_kind;
+        spec.subject = View(request->subject);
+        spec.subject_detail = View(request->subject_detail);
         spec.buttons = buttons.data();
         spec.model = request->tree ? &request->tree->Build() : nullptr;
         current_ = request;
@@ -161,30 +170,106 @@ constexpr T kFormatNotes[] = {T::Fmt7z, T::FmtZip, T::FmtTar, T::FmtTarGz, T::Fm
 constexpr T kLevelNames[] = {T::Level0, T::Level1, T::Level3, T::Level5, T::Level7, T::Level9};
 } // namespace
 
-void Dialogs::AskPassword(const std::wstring& archive, bool retry, bool remembering,
-                          std::function<void(bool, std::wstring)> done) {
+static std::string SizeText(uint64_t bytes) {
+    const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+    double value = static_cast<double>(bytes); int unit = 0;
+    while (value >= 1024.0 && unit < 4) { value /= 1024.0; ++unit; }
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), unit == 0 ? "%.0f %s" : value < 10 ? "%.2f %s" : value < 100 ? "%.1f %s" : "%.0f %s", value, units[unit]);
+    return buffer;
+}
+static uint64_t FileBytes(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) return 0;
+    return (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+}
+static std::string FormatTag(const std::wstring& archive) {
+    auto ext = std::filesystem::path(archive).extension().wstring();
+    std::string upper;
+    if (!ext.empty())
+        for (const auto c : ext.substr(1)) upper += static_cast<char>(c < 128 ? toupper(static_cast<int>(c)) : '?');
+    return upper;
+}
+// "1.24 GB · 7Z" for the subject card.
+static std::string ArchiveFacts(const std::wstring& archive) {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    std::string facts;
+    if (GetFileAttributesExW(archive.c_str(), GetFileExInfoStandard, &data)) facts = SizeText(FileBytes(archive));
+    const auto tag = FormatTag(archive);
+    if (!tag.empty()) facts += (facts.empty() ? "" : " \xC2\xB7 ") + tag;
+    return facts;
+}
+
+void Dialogs::ShowTestResult(const std::wstring& archive, uint64_t files, uint64_t bytes, uint64_t seconds, bool can_extract,
+                             std::function<void(bool)> done) {
     auto request = std::make_shared<Request>();
-    request->title = text::Get(T::PasswordTitle);
+    const auto name = Utf8(std::filesystem::path(archive).filename().wstring());
+    request->title = text::Get(T::DialogCaption);
+    request->heading = text::Format(T::TaskTest, name);
+    request->icon = PULSE_DIALOG_ICON_ARCHIVE;
+    if (can_extract) request->buttons.push_back({"extract", text::Get(T::CmdSmart), PULSE_DIALOG_BUTTON_STANDARD});
+    request->buttons.push_back({"done", text::Get(T::Done), PULSE_DIALOG_BUTTON_PRIMARY});
+    request->default_button = can_extract ? 1 : 0;
+    request->cancel_button = can_extract ? 1 : 0;
+    request->width = 480;
+    request->height = 320;
+    const auto packed = FileBytes(archive);
+    const std::string ratio = bytes && packed
+        ? text::Format(T::StatRatioValue, {}, std::to_string(std::max<uint64_t>(1, (packed * 100 + bytes / 2) / bytes))) : "\xE2\x80\x94";
+    const std::pair<T, std::string> stats[] = {
+        {T::StatFiles, text::Format(T::StatCount, {}, Grouped(files))}, {T::StatUnpacked, SizeText(bytes)},
+        {T::StatRatio, ratio}, {T::StatFormat, FormatTag(archive)},
+        {T::StatTime, text::Format(T::StatSeconds, {}, std::to_string(std::max<uint64_t>(1, seconds)))}};
+    std::vector<ModelNode> cells;
+    for (size_t i = 0; i < std::size(stats); ++i) {
+        const auto id = "stat" + std::to_string(i);
+        cells.push_back(ModelNode(PULSE_UI_MODEL_STACK, (id + "-cell").c_str()).Int(&N::gap, 2).Children({
+            Caption((id + "-label").c_str(), text::Get(stats[i].first)),
+            ModelNode(PULSE_UI_MODEL_TEXT, (id + "-value").c_str()).String(&N::text, stats[i].second)}));
+    }
+    std::vector<ModelNode> children;
+    children.push_back(ModelNode(PULSE_UI_MODEL_INFO_BAR, "test-ok").String(&N::kind, "success")
+        .String(&N::text, text::Get(T::TestOk)).String(&N::message, text::Format(T::TestOkDetail, {}, Grouped(files))));
+    children.push_back(Card("stats", {ModelNode(PULSE_UI_MODEL_GRID, "stats-grid").Int(&N::columns, 3).Int(&N::gap, 12)
+        .Children(std::move(cells))}));
+    request->tree.emplace(ModelNode(PULSE_UI_MODEL_STACK, "test-root").Int(&N::gap, 12).Children(std::move(children)));
+    request->on_closed = [done = std::move(done)](bool ok, const std::string& button, const States&) { done(ok && button == "extract"); };
+    Enqueue(std::move(request));
+}
+
+void Dialogs::AskPassword(const std::wstring& archive, bool retry, bool remembering,
+                          std::function<void(bool, std::wstring, bool)> done) {
+    auto request = std::make_shared<Request>();
+    request->title = text::Get(T::DialogCaption);
+    request->heading = text::Get(T::PasswordTitle);
+    request->icon = PULSE_DIALOG_ICON_KEY;
+    request->message = text::Get(T::PasswordHint);
+    request->subject_kind = PULSE_DIALOG_SUBJECT_ARCHIVE;
+    request->subject = Utf8(std::filesystem::path(archive).filename().wstring());
+    request->subject_detail = ArchiveFacts(archive);
     request->buttons = {{"ok", text::Get(T::PasswordStart), PULSE_DIALOG_BUTTON_PRIMARY}, {"cancel", text::Get(T::Cancel), PULSE_DIALOG_BUTTON_STANDARD}};
     request->default_button = 0;
     request->cancel_button = 1;
     request->width = 440;
     request->height = 320;  // a ceiling: the host fits the dialog to the form
     std::vector<ModelNode> children;
-    children.push_back(ModelNode(PULSE_UI_MODEL_STACK, "password-head").Int(&N::gap, 2).Children({
-        Section("password-archive", Utf8(archive)), Caption("password-hint", text::Get(T::PasswordHint))}));
     if (retry)
         children.push_back(ModelNode(PULSE_UI_MODEL_INFO_BAR, "password-wrong").String(&N::kind, "error")
             .String(&N::message, text::Get(T::PasswordWrong)));
-    children.push_back(ModelNode(PULSE_UI_MODEL_TEXT_INPUT, "password-input").String(&N::text, text::Get(T::PasswordLabel))
-        .String(&N::placeholder, text::Get(T::PasswordLabel)).String(&N::state, "password").String(&N::kind, "password"));
-    if (remembering) children.push_back(Caption("password-memory", text::Get(T::PasswordMemory)));
+    children.push_back(ModelNode(PULSE_UI_MODEL_STACK, "password-block").Int(&N::gap, 6).Children({
+        ModelNode(PULSE_UI_MODEL_TEXT, "password-label").String(&N::text, text::Get(T::PasswordLabel)),
+        ModelNode(PULSE_UI_MODEL_TEXT_INPUT, "password-input").String(&N::text, text::Get(T::PasswordLabel))
+            .String(&N::placeholder, text::Get(T::PasswordLabel)).String(&N::state, "password").String(&N::kind, "password")}));
+    if (remembering)
+        children.push_back(Card("keep", {Row("keep", text::Get(T::RememberSwitch), text::Get(T::RememberSwitchDesc),
+                                             Switch("keep-input", "keep", text::Get(T::RememberSwitch)))}));
     request->tree.emplace(ModelNode(PULSE_UI_MODEL_STACK, "password-root").Int(&N::gap, 12).Children(std::move(children)));
-    request->tree->State("password", "");
+    request->tree->State("password", "").State("keep", remembering ? "true" : "false");
     request->on_closed = [done = std::move(done)](bool ok, const std::string& button, const States& states) {
         const auto at = states.find("password");
-        if (ok && button == "ok" && at != states.end()) done(true, Wide(at->second));
-        else done(false, {});
+        const auto keep = states.find("keep");
+        if (ok && button == "ok" && at != states.end()) done(true, Wide(at->second), keep == states.end() || keep->second != "false");
+        else done(false, {}, false);
     };
     Enqueue(std::move(request));
 }
@@ -204,7 +289,11 @@ void Dialogs::ChooseCompression(const CompressSource& source, int format, int le
                       {"zipprotect", Bool(protecting && f == 1)},
                       {"protectdesc", !protecting ? text::Get(T::ProtectOff) : f == 0 ? text::Get(T::Protect7z) : text::Get(T::ProtectZip)}};
     };
-    request->title = text::Get(T::AddTitle);
+    request->title = text::Get(T::DialogCaption);
+    request->heading = text::Get(T::AddTitle);
+    request->subject_kind = source.folder ? PULSE_DIALOG_SUBJECT_FOLDER : PULSE_DIALOG_SUBJECT_FILE;
+    request->subject = source.title;
+    request->subject_detail = source.detail;
     request->buttons = {{"start", text::Get(T::AddStart), PULSE_DIALOG_BUTTON_PRIMARY}, {"cancel", text::Get(T::Cancel), PULSE_DIALOG_BUTTON_STANDARD}};
     request->default_button = 0;
     request->cancel_button = 1;
@@ -221,8 +310,6 @@ void Dialogs::ChooseCompression(const CompressSource& source, int format, int le
     std::vector<std::string> levels;
     for (const auto id : kLevelNames) levels.push_back(text::Get(id));
     std::vector<ModelNode> children;
-    children.push_back(Card("source", {ModelNode(PULSE_UI_MODEL_STACK, "source-text").Int(&N::gap, 0).Children({
-        Section("source-title", source.title), Caption("source-detail", source.detail)})}));
     if (!error.empty())
         children.push_back(ModelNode(PULSE_UI_MODEL_INFO_BAR, "error").String(&N::kind, "error").String(&N::message, error));
     children.push_back(ModelNode(PULSE_UI_MODEL_STACK, "name-block").Int(&N::gap, 6).Children({
@@ -318,7 +405,9 @@ void Dialogs::ChooseCompression(const CompressSource& source, int format, int le
 
 void Dialogs::ShowChecksums(const std::vector<engine::HashResult>& results, std::function<void(bool)> done) {
     auto request = std::make_shared<Request>();
-    request->title = text::Get(T::HashTitle);
+    request->title = text::Get(T::DialogCaption);
+    request->heading = text::Get(T::HashTitle);
+    request->icon = PULSE_DIALOG_ICON_CHECKSUM;
     request->buttons = {{"copy", text::Get(T::HashCopyAll), PULSE_DIALOG_BUTTON_PRIMARY}, {"close", text::Get(T::Close), PULSE_DIALOG_BUTTON_STANDARD}};
     request->default_button = 0;
     request->cancel_button = 1;

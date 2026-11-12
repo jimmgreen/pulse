@@ -186,6 +186,97 @@ static int Run() {
         const auto cancelled = engine::Create({source.wstring()}, out.wstring(), L"c.7z", {}, [] { return true; }, quiet);
         Check(cancelled.status == engine::Status::Cancelled && fs::is_empty(out), "cancelled creation leaves nothing behind");
     }
+    // Streaming budgets: high-expansion nested preview, cross-layer totals, entry/path caps, and disk reserve.
+    {
+        auto out = Fresh(root, L"outbudget");
+        const auto bomb_src = Fresh(root, L"bomb-src");
+        Write(bomb_src / L"zeros.bin", std::string(34u << 20, '\0'));
+        engine::CreateOptions tgz;
+        tgz.format = engine::Format::TarGz;
+        tgz.level = 1;
+        const auto bomb_created = engine::Create({(bomb_src / L"zeros.bin").wstring()}, out.wstring(), L"bomb.tar.gz", tgz, never, quiet);
+        fs::remove_all(bomb_src);
+        Check(bomb_created.status == engine::Status::Ok && fs::file_size(out / L"bomb.tar.gz") < (1u << 20),
+              "high-expansion tar.gz fixture is compact on disk");
+
+        Fresh(root, L"tmp");
+        auto preview_budget = engine::PreviewBudget();
+        preview_budget.min_free_disk_bytes = 0;
+        const auto bomb_list = engine::List((out / L"bomb.tar.gz").wstring(), never, {}, 4096, preview_budget);
+        Check(bomb_list.status == engine::Status::LimitReached,
+              "preview List stops high-expansion tar.gz at PreviewBudget.max_total_bytes");
+        Check(fs::is_empty(root / L"tmp") && std::distance(fs::directory_iterator(out), fs::directory_iterator()) == 1,
+              "aborted nested preview leaves no .PulseZip-* or inner tar behind");
+
+        auto no_wrap = preview_budget;
+        no_wrap.expand_wrappers = false;
+        const auto outer_only = engine::List((out / L"bomb.tar.gz").wstring(), never, {}, 4096, no_wrap);
+        Check(outer_only.status == engine::Status::Ok && !outer_only.nested && outer_only.entries.size() == 1,
+              "expand_wrappers=false lists outer stream without extracting inner tar");
+
+        engine::CreateOptions plain_zip;
+        plain_zip.format = engine::Format::Zip;
+        const auto plain_created = engine::Create({source.wstring(), (root / L"single.txt").wstring()}, out.wstring(), L"plain.zip", plain_zip, never, quiet);
+        Check(plain_created.status == engine::Status::Ok, "unencrypted zip fixture is created for budget checks");
+        const auto zip_path = (out / L"plain.zip").wstring();
+        const auto tgz_path = (root / L"outtgz" / L"src.tar.gz").wstring();
+
+        auto dest = Fresh(root, L"xbudget-total");
+        auto small_total = engine::DefaultExtractBudget();
+        small_total.min_free_disk_bytes = 0;
+        small_total.max_total_bytes = 64 * 1024;
+        const auto total_hit = engine::Extract(zip_path, dest.wstring(), false, never, quiet, {}, small_total);
+        Check(total_hit.status == engine::Status::LimitReached && fs::is_empty(dest),
+              "Extract stops at small max_total_bytes and cleans partial output");
+
+        // src.tar.gz unpacks ~210 KiB inner tar + ~205 KiB final files (> 300 KiB across layers, < 300 KiB per layer).
+        dest = Fresh(root, L"xbudget-cross");
+        Fresh(root, L"tmp");
+        auto cross_layer = engine::DefaultExtractBudget();
+        cross_layer.min_free_disk_bytes = 0;
+        cross_layer.max_total_bytes = 300 * 1024;
+        const auto cross_hit = engine::Extract(tgz_path, dest.wstring(), false, never, quiet, {}, cross_layer);
+        Check(cross_hit.status == engine::Status::LimitReached && fs::is_empty(dest) && fs::is_empty(root / L"tmp"),
+              "Extract shares max_total_bytes across outer wrapper temp and final files");
+
+        dest = Fresh(root, L"xbudget-single");
+        auto small_single = engine::DefaultExtractBudget();
+        small_single.min_free_disk_bytes = 0;
+        small_single.max_single_bytes = 64 * 1024;
+        const auto single_hit = engine::Extract(zip_path, dest.wstring(), false, never, quiet, {}, small_single);
+        Check(single_hit.status == engine::Status::LimitReached && fs::is_empty(dest),
+              "Extract enforces max_single_bytes on individual files");
+
+        dest = Fresh(root, L"xbudget-entries");
+        auto small_entries = engine::DefaultExtractBudget();
+        small_entries.min_free_disk_bytes = 0;
+        small_entries.max_entries = 2;
+        const auto entries_hit = engine::Extract(zip_path, dest.wstring(), false, never, quiet, {}, small_entries);
+        const auto list_entries_hit = engine::List(zip_path, never, {}, SIZE_MAX, small_entries);
+        const auto list_truncated = engine::List(zip_path, never, {}, 2, small_entries);
+        Check(entries_hit.status == engine::Status::LimitReached && fs::is_empty(dest) &&
+              list_entries_hit.status == engine::Status::LimitReached &&
+              list_truncated.status == engine::Status::Ok && list_truncated.truncated && list_truncated.entries.size() == 2,
+              "max_entries limits untrusted item counts while preserving explicit List truncation");
+
+        dest = Fresh(root, L"xbudget-paths");
+        auto small_paths = engine::DefaultExtractBudget();
+        small_paths.min_free_disk_bytes = 0;
+        small_paths.max_path_bytes = 8;
+        const auto paths_hit = engine::Extract(zip_path, dest.wstring(), false, never, quiet, {}, small_paths);
+        Check(paths_hit.status == engine::Status::LimitReached && fs::is_empty(dest),
+              "Extract enforces cumulative max_path_bytes budget");
+
+        dest = Fresh(root, L"xbudget-disk");
+        Fresh(root, L"tmp");
+        auto low_disk = engine::DefaultExtractBudget();
+        low_disk.min_free_disk_bytes = UINT64_MAX - 1;
+        const auto disk_extract = engine::Extract(zip_path, dest.wstring(), false, never, quiet, {}, low_disk);
+        const auto disk_list = engine::List(tgz_path, never, {}, 4096, low_disk);
+        Check(disk_extract.status == engine::Status::LimitReached && fs::is_empty(dest) &&
+              disk_list.status == engine::Status::LimitReached && fs::is_empty(root / L"tmp"),
+              "min_free_disk_bytes aborts Extract and wrapper List cleanly without touching disk reserve");
+    }
     fs::remove_all(root);
     std::printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;

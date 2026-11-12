@@ -76,5 +76,80 @@
       "$ref": "resource-response.schema.json"
     },
     "resourceDeclarationPolicy": "Installation disclosure only; native code runs in process without per-call permission gates."
+  },
+  "stability": {
+    "sdkPreview": 3,
+    "abiMajor": 1,
+    "coreEntryAbi": {
+      "stabilityTier": "frozen",
+      "abiMajor": 1,
+      "abiVersionMacro": "PULSE_ABI_VERSION_1",
+      "sdkPreviewMacro": "PULSE_SDK_PREVIEW",
+      "entrypoint": "PulsePluginEntryV1",
+      "previewExport": "PulsePluginSdkPreview",
+      "symbols": [
+        "PulseHostV1",
+        "PulsePluginV1",
+        "PulsePluginEntryV1",
+        "PulsePluginEntryV1Fn",
+        "PulsePluginSdkPreview",
+        "PulseStringView",
+        "PulseStatus"
+      ]
+    },
+    "prefixTableRule": "Append-only struct-prefix evolution (V1 <= V2 <= V3 <= V4): existing fields preserve identical index, name, type, size, and byte offset; new fields append strictly at the tail with monotonically increasing struct size and version.",
+    "experimentalSurfaceRule": "Opt-in UI surface not yet covered by binary freeze; plugins must handle query_interface returning PULSE_ERROR_UNAVAILABLE or PULSE_ERROR_ABI (C++ std::nullopt fallback) gracefully.",
+    "tiers": {
+      "frozen": {
+        "count": 12,
+        "interfaces": [
+          "pulse.files",
+          "pulse.resources",
+          "pulse.dispatch",
+          "pulse.directories",
+          "pulse.context",
+          "pulse.fileops",
+          "pulse.commands",
+          "pulse.preview",
+          "pulse.tasks",
+          "pulse.staging",
+          "pulse.settings.pages",
+          "pulse.dialogs"
+        ],
+        "binaryFreezeCandidate": true
+      },
+      "experimental": {
+        "count": 8,
+        "interfaces": [
+          "pulse.ui.model",
+          "pulse.ui.events",
+          "pulse.ui.data",
+          "pulse.ui.mount",
+          "pulse.icons",
+          "pulse.diagnostics",
+          "pulse.pickers",
+          "pulse.workbench"
+        ],
+        "binaryFreezeCandidate": false
+      }
+    }
+  },
+  "supportPolicy": {
+    "abiMajor": 1,
+    "supportedApiVersions": [
+      1
+    ],
+    "deprecationWindow": {
+      "minMinorReleases": 2,
+      "minDays": 180
+    },
+    "emergencyRevocation": {
+      "channels": [
+        "revokedPackages",
+        "revokedRevisions"
+      ],
+      "scope": "Immediate revocation reserved exclusively for active security vulnerabilities, memory corruption, or host-crashing defects."
+    },
+    "policyDocument": "docs/extensions-sdk-lifecycle-and-support.md"
   }
 }
