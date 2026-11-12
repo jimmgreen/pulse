@@ -1,0 +1,6 @@
+LIBRARY PulseFileDialogAutoRuntime32
+EXPORTS
+    PulseFileDialogRuntimeQuery=_PulseFileDialogRuntimeQuery@8
+    PulseFileDialogRuntimeAutoStart=_PulseFileDialogRuntimeAutoStart@8
+    PulseFileDialogRuntimeAutoAttach=_PulseFileDialogRuntimeAutoAttach@4
+    PulseFileDialogRuntimeAutoQuery=_PulseFileDialogRuntimeAutoQuery@8

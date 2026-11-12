@@ -566,6 +566,8 @@ struct SidebarGroup {
     bool tabs_section = false;     // vertical tabs block: set apart by a divider
     // Rail mode: a count on the section's icon (网络位置: devices not seen yet), 0 = none.
     int badge_count = 0;
+    // Rail mode: the short section title (快速 / 磁盘 ...); empty falls back to header.
+    std::wstring rail_header;
 };
 
 // Vertical span a section occupies in the laid-out sidebar (header top through
@@ -1046,10 +1048,30 @@ enum class PackAction : int {
     StoreBrowse, StoreManage, StoreRefresh, StoreCancel,
     StoreItemBase = 10000, // plus the index in settings_store_view.items (stable)
     StoreInstalled = 1000, InstalledRefresh = 1001,
+    StoreInstallFromFile = 1002, StoreRestartNow = 1003,
     InstalledEnableBase = 20000, // plus displayed index in settings_store_view.installed
     InstalledDisableBase = 30000,
     InstalledUninstallBase = 40000,
     InstalledRollbackBase = 50000,
+    StoreItemSettingsBase = 60000, // plus the index in settings_store_view.items: open its settings page
+    // Store browse extras and the 7-Zip detail page (settings_layout_store.h).
+    StoreChipBase = 70000,          // + chip 0..4
+    StoreRetry = 70010, StoreSources = 70011,
+    StoreQuickMode = 70020, StoreQuickFormat, StoreQuickLevel, StoreQuickRemember,
+    StoreDetailBack = 70030, StoreDetailTabBase = 70031,   // + tab 0..3
+    StoreDetailEnable = 70040, StoreDetailMore = 70041,
+    SzModeBase = 70050,             // + 0..2
+    SzLocationBase = 70055,         // + 0..1
+    SzBrowse = 70058,
+    SzFormatBase = 70060,           // + 0..5
+    SzLevelBase = 70070,            // + 0..5
+    SzRemember = 70080,
+    SzPlacementBase = 70085,        // + 0..1
+    SzCommandBase = 70090,          // + 0..5
+    SzPreviewBase = 70100,          // + 0..1
+    SzHistoryRollback = 70110,
+    SzSource = 70400,
+    InstalledMoreBase = 80000, // plus displayed installed index; existing management menu actions
 };
 
 // A tab dragged out of another window, over this one (multi-window M7h): the
@@ -1215,6 +1237,7 @@ struct WindowViewModel {
     float drag_badge_x = 0.0f;
     float drag_badge_y = 0.0f;
     bool drag_badge_move = false; // the drop will move: badge gets an amber edge
+    bool button_pressed = false; // captured pointer is still inside the originally pressed button
     int hover_region = 0;         // numeric HitTestResult::Region
     int hover_control_index = -1;
     int hover_sub_index = -1;
@@ -1428,7 +1451,22 @@ struct WindowViewModel {
     bool settings_dialog_enabled = false, settings_dialog_conflict = false, settings_dialog_failed = false;
     bool settings_dialog_scope_expanded = false;
     bool settings_integration_restore_busy = false;
-    bool settings_dialog_can_launch = false, settings_dialog_can_enable_auto = false;
+    bool settings_dialog_can_launch = false, settings_dialog_can_launch_admin = false, settings_dialog_can_enable_auto = false;
+    struct DialogTakeoverRow {
+        std::wstring application;   // the program's friendly name, else its file name
+        std::wstring detail;        // what happened, then (after the first newline) what to do; empty: nothing to do
+        bool attention = false;
+        std::wstring file;          // executable name, shown beside a friendly name
+        std::wstring meta;          // "保存 · 合并 6 次"; the renderer appends the time
+        uint64_t last_event = 0;    // UTC FILETIME of the latest event, 0: none
+        std::wstring status;        // the status chip
+        int tone = 0;               // chip color: 0 neutral, 1 success, 2 warning, 3 danger
+        std::wstring later;         // a later success, in the success color
+        common::MenuIconRef icon;   // null: a neutral program mark
+        int group = 0;              // a caption starts each group: 1 needs reopening, 2 recent, 0 none
+    };
+    std::vector<DialogTakeoverRow> settings_dialog_records;
+    std::wstring settings_dialog_history_note;
     std::vector<DialogManagedSessionView> settings_dialog_sessions;
     bool settings_integration_enabled = false;
     bool settings_integration_folders = false;

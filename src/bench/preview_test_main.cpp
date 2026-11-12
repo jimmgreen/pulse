@@ -465,7 +465,14 @@ bool RunThumbnailCacheTests();
 bool RunThumbnailPropertiesRegression();
 bool RunThumbnailSheetRegression();
 
+#include "xls_native_test.inc"
+#include "office_native_test.inc"
+
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 3 && wcscmp(argv[1], L"--office-fixtures") == 0) return WriteOfficeNativeFixtures(argv[2]);
+    if (argc >= 3 && wcscmp(argv[1], L"--office-native") == 0) return RunOfficeNativeProbe(argc, argv);
+    if (argc == 3 && wcscmp(argv[1], L"--xls-model") == 0) return RunXlsModelTest(argv);
+    if (argc >= 3 && wcscmp(argv[1], L"--xls-native") == 0) return RunXlsNativeTest(argc, argv);
     if (argc == 2 && wcscmp(argv[1], L"--sheet-regression") == 0)
         return RunThumbnailSheetRegression() ? 0 : 1;
     if (argc == 2 && wcscmp(argv[1], L"--properties-regression") == 0)

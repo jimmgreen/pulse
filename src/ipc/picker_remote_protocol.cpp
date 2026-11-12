@@ -125,10 +125,19 @@ template <class A> void Fields(A &a, Control &v) {
 template <class A> void Fields(A &a, Place &v) { Visit(a, v.location, v.label, v.path); }
 template <class A> void Fields(A &a, Property &v) { Visit(a, v.index, v.kind, v.label, v.values); }
 template <class A> void Fields(A &a, Config &v) {
+    // Wire-only presence bit; ABI label bits never contain this marker.
+    constexpr uint32_t policy_present = 0x80000000u;
+    uint32_t labels = v.label_flags | (v.has_folder_policy ? policy_present : 0u);
     Visit(a, v.version, v.required_capabilities, v.appearance, v.open_options, v.access_policy, v.owner,
           v.initial_folder, v.filename, v.title, v.filters, v.filter_index, v.controls, v.default_extension,
-          v.save_options, v.label_flags, v.ok_button_label, v.file_name_label, v.places, v.properties,
+          v.save_options, labels, v.ok_button_label, v.file_name_label, v.places, v.properties,
           v.native_options);
+    // Preserve every legacy frame byte; this extension requires the advertised
+    // cancel-label feature and is present only when its presence bit is set.
+    v.has_folder_policy = (labels & policy_present) != 0;
+    v.label_flags = labels & ~policy_present;
+    if (v.label_flags & PULSE_PICKER_UI_V2_LABEL_CANCEL) a(v.cancel_button_label);
+    if (v.has_folder_policy) a(v.folder_policy);
 }
 template <class A> void Fields(A &a, Snapshot &v) {
     Visit(a, v.flags, v.show_id, v.generation, v.window, v.filter_index, v.folder, v.filename, v.selection, v.candidate,
@@ -151,13 +160,18 @@ bool Valid(const Control &c) {
     return true;
 }
 bool Valid(const Config &c) {
-    if (c.version != 2 || (c.required_capabilities & ~0x3fu) || (c.appearance & ~1u) || (c.open_options & ~0x7fu) ||
-        c.access_policy < 1 || c.access_policy > 3 || (c.save_options & ~0x3fu) || (c.label_flags & ~7u) ||
+    if ((c.folder_policy & ~PULSE_PICKER_UI_V2_FOLDER_ALLOW_AUTO_JUMP) ||
+        (!c.has_folder_policy && c.folder_policy)) return false;
+    if (c.version != 2 || (c.required_capabilities & ~0x3fu) || (c.appearance & ~1u) || (c.open_options & ~0xffu) ||
+        c.access_policy < 1 || c.access_policy > 3 || !SaveOptionsKnown(c.save_options) || (c.label_flags & ~15u) ||
         (c.native_options & ~PULSE_PICKER_UI_V2_NATIVE_OPTIONS_MASK) || c.filters.size() > 64 ||
         c.controls.size() > 16 || c.places.size() > 64 || c.properties.size() > 16 ||
         (c.filters.empty() ? c.filter_index != 0 : c.filter_index >= c.filters.size()))
         return false;
-    size_t units = c.initial_folder.size() + c.filename.size() + c.title.size() + c.default_extension.size() +
+    if ((!(c.label_flags & PULSE_PICKER_UI_V2_LABEL_CANCEL) && !c.cancel_button_label.empty()) ||
+        c.cancel_button_label.size() > 1024 || c.cancel_button_label.find_first_of(L"\r\n\t") != c.cancel_button_label.npos)
+        return false;
+    size_t units = c.cancel_button_label.size() + c.initial_folder.size() + c.filename.size() + c.title.size() + c.default_extension.size() +
                    c.ok_button_label.size() + c.file_name_label.size();
     for (auto &f : c.filters) {
         if (f.label.empty() || f.pattern.empty())
@@ -177,7 +191,9 @@ bool Valid(const Config &c) {
         units += p.label.size() + p.path.size();
     }
     for (auto &p : c.properties) {
-        if (p.kind < 1 || p.kind > 2 || p.values.size() > 16)
+        if (p.kind < 1 || p.kind > PULSE_PICKER_UI_V2_PROPERTY_GROUP || p.values.size() > 16 ||
+            ((p.kind == PULSE_PICKER_UI_V2_PROPERTY_SCALAR || p.kind == PULSE_PICKER_UI_V2_PROPERTY_READONLY_SCALAR) && p.values.size() != 1) ||
+            (p.kind == PULSE_PICKER_UI_V2_PROPERTY_GROUP && !p.values.empty()))
             return false;
         units += p.label.size();
         for (auto &v : p.values)
@@ -205,7 +221,7 @@ bool Valid(const Result &r) {
 }
 bool Valid(const Message &m) {
     if (!m.sequence || std::all_of(m.request_id.begin(), m.request_id.end(), [](auto b) { return !b; }) ||
-        m.kind < Kind::ValidateConfig || m.kind > Kind::Hello)
+        m.kind < Kind::ValidateConfig || m.kind > Kind::SetNavigationRoot)
         return false;
     switch (m.kind) {
     case Kind::Hello:
@@ -215,8 +231,15 @@ bool Valid(const Message &m) {
         return Valid(m.config);
     case Kind::UpdateControl:
         return Valid(m.control);
+    case Kind::UpdateText:
+        return m.text_kind >= PULSE_PICKER_UI_V2_TEXT_TITLE && m.text_kind <= PULSE_PICKER_UI_V2_TEXT_DEFAULT_EXTENSION &&
+            m.text.size() <= PULSE_PICKER_UI_V2_MAX_UNITS;
+    case Kind::SetNavigationRoot:
+        return !m.folder.empty();
     case Kind::Event:
-        return m.event.kind >= 1 && m.event.kind <= 14 && m.event.property_values.size() <= 16;
+        return m.event.kind >= 1 && m.event.kind <= PULSE_PICKER_UI_V2_EVENT_INCLUDE_ITEM && m.event.property_values.size() <= 16 &&
+            (m.event.kind != PULSE_PICKER_UI_V2_EVENT_INCLUDE_ITEM ||
+             (!m.event.proposed_folder.empty() && !m.event.control_id && !m.event.item_id && m.event.control_text.empty() && m.event.property_values.empty() && !m.event.navigation_result));
     case Kind::Overwrite:
     case Kind::ShareViolation:
         return !m.event.target.empty();
@@ -256,6 +279,12 @@ template <class A> void Payload(A &a, Message &m) {
         break;
     case Kind::Navigate:
         Visit(a, m.show_id, m.folder);
+        break;
+    case Kind::SetNavigationRoot:
+        a(m.folder);
+        break;
+    case Kind::UpdateText:
+        Visit(a, m.show_id, m.text_kind, m.text);
         break;
     case Kind::Hello:
         a(m.version);
@@ -336,7 +365,7 @@ bool Decode(std::span<const uint8_t> bytes, Message &output) {
         uint32_t magic = 0, version = 0, length = 0, kind = 0;
         Message m;
         Visit(r, magic, version, length, kind, m.sequence, m.hresult);
-        if (magic != 0x32525050 || version != 1 || length != bytes.size() || kind < 1 || kind > 14)
+        if (magic != 0x32525050 || version != 1 || length != bytes.size() || kind < 1 || kind > static_cast<uint32_t>(Kind::SetNavigationRoot))
             return false;
         m.kind = static_cast<Kind>(kind);
         for (auto &b : m.request_id)
@@ -382,9 +411,15 @@ bool FromAbi(const PulsePickerUiV2Control &a, Control &out) {
         return false;
     }
 }
-bool FromAbi(const PulsePickerUiV2Config &a, Config &out) {
+bool FromAbi(const PulsePickerUiV2Config &a, Config &out, const char** failure) {
+    const auto stage = [&](const char* value) { if (failure) *failure = value; };
+    stage("config-header");
     try {
-        if (a.size != sizeof(a) || a.reserved[0] || a.reserved[1] || a.filter_count > 64 || a.control_count > 16 ||
+        stage("config-size");
+        const bool policy = a.size == sizeof(PulsePickerUiV2FolderPolicyConfig);
+        if (a.size != sizeof(a) && a.size != sizeof(PulsePickerUiV2CancelLabelConfig) && !policy) return false;
+        stage("config-header");
+        if ((!policy && ((a.size == sizeof(PulsePickerUiV2CancelLabelConfig)) != ((a.label_flags & PULSE_PICKER_UI_V2_LABEL_CANCEL) != 0))) || a.reserved[0] || a.reserved[1] || a.filter_count > 64 || a.control_count > 16 ||
             a.place_count > 64 || a.property_count > 16 || (!a.filters && a.filter_count) ||
             (!a.controls && a.control_count) || (!a.places && a.place_count) || (!a.properties && a.property_count))
             return false;
@@ -399,10 +434,24 @@ bool FromAbi(const PulsePickerUiV2Config &a, Config &out) {
         c.save_options = a.save_options;
         c.label_flags = a.label_flags;
         c.native_options = a.native_options;
+        stage("folder-policy-tail");
+        if (policy) {
+            const auto& tail = reinterpret_cast<const PulsePickerUiV2FolderPolicyConfig&>(a);
+            if (tail.reserved || (!(a.label_flags & PULSE_PICKER_UI_V2_LABEL_CANCEL) &&
+                (tail.base.cancel_button_label.data || tail.base.cancel_button_label.units))) return false;
+            c.has_folder_policy = true;
+            c.folder_policy = tail.folder_policy;
+        }
+        stage("cancel-label-text");
+        if ((a.size == sizeof(PulsePickerUiV2CancelLabelConfig) || policy) &&
+            !Read(reinterpret_cast<const PulsePickerUiV2CancelLabelConfig&>(a).cancel_button_label, c.cancel_button_label))
+            return false;
+        stage("config-text");
         if (!Read(a.initial_folder, c.initial_folder) || !Read(a.filename, c.filename) || !Read(a.title, c.title) ||
             !Read(a.default_extension, c.default_extension) || !Read(a.ok_button_label, c.ok_button_label) ||
             !Read(a.file_name_label, c.file_name_label))
             return false;
+        stage("filters");
         for (uint32_t i = 0; i < a.filter_count; ++i) {
             auto &x = a.filters[i];
             Filter f;
@@ -410,12 +459,14 @@ bool FromAbi(const PulsePickerUiV2Config &a, Config &out) {
                 return false;
             c.filters.push_back(std::move(f));
         }
+        stage("controls");
         for (uint32_t i = 0; i < a.control_count; ++i) {
             Control x;
             if (!FromAbi(a.controls[i], x))
                 return false;
             c.controls.push_back(std::move(x));
         }
+        stage("places");
         for (uint32_t i = 0; i < a.place_count; ++i) {
             auto &x = a.places[i];
             Place p;
@@ -424,6 +475,7 @@ bool FromAbi(const PulsePickerUiV2Config &a, Config &out) {
                 return false;
             c.places.push_back(std::move(p));
         }
+        stage("properties");
         for (uint32_t i = 0; i < a.property_count; ++i) {
             auto &x = a.properties[i];
             Property p;
@@ -439,17 +491,20 @@ bool FromAbi(const PulsePickerUiV2Config &a, Config &out) {
             }
             c.properties.push_back(std::move(p));
         }
+        stage("config-value-domain");
         if (!Valid(c))
             return false;
+        stage(nullptr);
         out = std::move(c);
         return true;
     } catch (...) {
+        stage("allocation-or-exception");
         return false;
     }
 }
 bool FromAbi(const PulsePickerUiV2Event &a, Event &out) {
     try {
-        if (a.size != sizeof(a) || a.reserved[0] || a.reserved[1] || a.kind < 1 || a.kind > 14 ||
+        if (a.size != sizeof(a) || a.reserved[0] || a.reserved[1] || a.kind < 1 || a.kind > PULSE_PICKER_UI_V2_EVENT_INCLUDE_ITEM ||
             a.property_value_count > 16 || (!a.property_values && a.property_value_count))
             return false;
         Event e;
@@ -566,8 +621,10 @@ OwnedConfig::OwnedConfig(const Config &value) : value_(value) {
         properties_.push_back({sizeof(PulsePickerUiV2Property), p.index, p.kind, Text(p.label), values_[i].data(),
                                static_cast<uint32_t>(values_[i].size())});
     }
-    auto &a = abi_;
-    a.size = sizeof(a);
+    auto &a = abi_.base.base;
+    a.size = c.has_folder_policy ? sizeof(abi_) : (c.label_flags & PULSE_PICKER_UI_V2_LABEL_CANCEL) ? sizeof(abi_.base) : sizeof(a);
+    abi_.folder_policy = c.folder_policy;
+    if (c.label_flags & PULSE_PICKER_UI_V2_LABEL_CANCEL) abi_.base.cancel_button_label = Text(c.cancel_button_label);
     a.version = c.version;
     a.required_capabilities = c.required_capabilities;
     a.appearance = c.appearance;

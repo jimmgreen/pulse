@@ -61,7 +61,7 @@ class PackageTests(unittest.TestCase):
 
     def installed(self):
         image(self.build / 'pulse_launcher.exe', normal=['kernel32.dll'])
-        for name in pack.roots('x64', True)[-2:]: image(self.build / name)
+        for name in set(pack.roots('x64', True)) - set(pack.roots('x64')): image(self.build / name)
         return pack.package_installed(self.build, self.output, 'same-version', 'x64', self.repo,
                                       [(self.build / 'pulse.exe', 'pulse.exe'),
                                        (self.build / 'lumatext.dll', 'lumatext.dll')])
@@ -101,7 +101,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(pack.verify(self.output / second['directory'])['version'], 'same-version')
 
     def test_all_runtime_files_share_private_closure(self):
-        for name in pack.roots('x64', True)[-2:]: image(self.build / name)
+        for name in set(pack.roots('x64', True)) - set(pack.roots('x64')): image(self.build / name)
         image(self.build / 'pulse_launcher.exe', normal=['kernel32.dll'])
         image(self.build / 'Pulse.AI.exe', normal=['runtime-only.dll'])
         image(self.build / 'runtime-only.dll', normal=['kernel32.dll'])

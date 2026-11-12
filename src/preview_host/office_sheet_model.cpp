@@ -2,6 +2,7 @@
 // [MS-XLS] (the reading order of Apache POI HSSF's record stream).
 #include "office_sheet_model.h"
 #include "compound_file.h"
+#include "../ipc/preview_protocol.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -15,7 +16,7 @@ namespace {
 
 constexpr size_t kWorkbookBytes = 64u << 20;
 constexpr size_t kMaxSharedStrings = 1u << 17;
-constexpr size_t kMaxStringChars = 256;       // per cell: the sketch shows a few characters
+constexpr size_t kMaxStringChars = 2001; // one extra character detects the table cell limit
 constexpr size_t kMaxCells = 20000;
 constexpr int kMaxRow = 5000, kMaxCol = 256;
 
@@ -58,7 +59,7 @@ bool RecordAt(const std::vector<uint8_t>& s, size_t at, Record& r) {
 std::wstring FormatDouble(double v) {
     if (!std::isfinite(v)) return L"#NUM!";
     wchar_t buffer[48];
-    swprintf_s(buffer, L"%.10g", v);
+    swprintf_s(buffer, L"%.15g", v);
     return buffer;
 }
 
@@ -226,7 +227,11 @@ bool Blank(const std::wstring& text) {
 
 } // namespace
 
-bool ReadXlsModel(const std::wstring& path, int rows, int cols, SheetModel& model, std::wstring* error) {
+bool ReadXlsSheet(const std::wstring& path, int rows, int cols, SheetModel& model,
+                  std::wstring* error, uint32_t sheet_index, XlsWorkbookInfo& workbook) {
+    workbook = {};
+    rows = (std::clamp)(rows, 1, kMaxRow);
+    cols = (std::clamp)(cols, 1, kMaxCol);
     model = SheetModel{};
     CompoundFile cfb;
     if (!cfb.Open(path)) {
@@ -249,11 +254,11 @@ bool ReadXlsModel(const std::wstring& path, int rows, int cols, SheetModel& mode
     }
     if (r.size >= 2 && CfbU16(s, r.body) < 0x0600) biff8 = false;
 
-    // Workbook globals: codepage, encryption, shared strings, the first sheet.
+    // Workbook globals: codepage, encryption, shared strings and worksheet order.
     UINT codepage = 1252;
     std::vector<std::wstring> strings;
-    size_t sheet_at = 0;
-    bool have_sheet = false;
+    std::vector<size_t> sheet_offsets;
+    workbook.bytes_read = static_cast<uint32_t>(s.size());
     for (size_t at = r.body + r.size; RecordAt(s, at, r); at = r.body + r.size) {
         if (r.type == kEof) break;
         if (r.type == kFilePass) {
@@ -265,31 +270,53 @@ bool ReadXlsModel(const std::wstring& path, int rows, int cols, SheetModel& mode
             codepage = cp == 1200 ? 1252 : cp;   // 1200 marks BIFF8 Unicode; the value is unused then
         } else if (r.type == kSst && biff8) {
             ReadSst(s, r, strings);
-        } else if (r.type == kBoundSheet && r.size >= 6 && !have_sheet) {
+        } else if (r.type == kBoundSheet && r.size >= 8) {
             const uint8_t sheet_type = s[r.body + 5];
             if (sheet_type == 0) {    // worksheet (not chart / macro sheet)
-                sheet_at = CfbU32(s, r.body);
-                have_sheet = true;
+                if (sheet_offsets.size() >= 256) { workbook.truncated = true; continue; }
+                const size_t count = s[r.body + 6];
+                const bool wide = biff8 && (s[r.body + 7] & 1) != 0;
+                const size_t begin = r.body + (biff8 ? 8 : 7);
+                const size_t length = count * (wide ? 2 : 1);
+                if (begin + length > r.body + r.size) {
+                    SetError(error, L"xls-sheet-name");
+                    return false;
+                }
+                std::wstring name;
+                if (!biff8) name = Decode8Bit(s.data() + begin, count, codepage);
+                else for (size_t i = 0; i < count; ++i)
+                    name += wide ? static_cast<wchar_t>(CfbU16(s, begin + i * 2))
+                                 : static_cast<wchar_t>(s[begin + i]);
+                workbook.sheet_names.push_back(std::move(name));
+                sheet_offsets.push_back(CfbU32(s, r.body));
             }
         }
     }
     const auto empty_grid = [&] {
         model.grid.assign(static_cast<size_t>(rows), std::vector<std::wstring>(static_cast<size_t>(cols)));
     };
-    if (!have_sheet || !RecordAt(s, sheet_at, r) || r.type != kBof) {
-        empty_grid();
-        return true;
+    if (sheet_index >= sheet_offsets.size() ||
+        !RecordAt(s, sheet_offsets[sheet_index], r) || r.type != kBof) {
+        SetError(error, L"xls-sheet-invalid");
+        return false;
     }
 
     std::map<std::pair<int, int>, std::wstring> cells;
     const auto put = [&](size_t row, size_t col, std::wstring text) {
-        if (row >= kMaxRow || col >= kMaxCol || cells.size() >= kMaxCells || Blank(text)) return;
+        if (Blank(text)) return;
+        if (row >= kMaxRow || col >= kMaxCol || cells.size() >= kMaxCells) {
+            workbook.truncated = true;
+            return;
+        }
+        if (text.size() > 2000) { text.resize(2000); workbook.truncated = true; }
         cells[{static_cast<int>(row) + 1, static_cast<int>(col) + 1}] = std::move(text);
     };
     bool pending_string = false;       // FORMULA with a string result: STRING follows
     size_t pending_row = 0, pending_col = 0;
+    bool sheet_complete = false;
     for (size_t at = r.body + r.size; RecordAt(s, at, r); at = r.body + r.size) {
-        if (r.type == kEof || r.type == kBof) break;
+        if (r.type == kEof) { sheet_complete = true; break; }
+        if (r.type == kBof) break;
         const size_t b = r.body, end = r.body + r.size;
         const size_t row = r.size >= 4 ? CfbU16(s, b) : 0, col = r.size >= 4 ? CfbU16(s, b + 2) : 0;
         switch (r.type) {
@@ -297,6 +324,7 @@ bool ReadXlsModel(const std::wstring& path, int rows, int cols, SheetModel& mode
             if (r.size >= 10) {
                 const uint32_t index = CfbU32(s, b + 6);
                 if (index < strings.size()) put(row, col, strings[index]);
+                else workbook.truncated = true;
             }
             break;
         case kLabel:
@@ -355,6 +383,11 @@ bool ReadXlsModel(const std::wstring& path, int rows, int cols, SheetModel& mode
         pending_string = false;
     }
 
+    if (!sheet_complete) {
+        SetError(error, L"xls-sheet-incomplete");
+        return false;
+    }
+
     // Same window as the .xlsx reader: from the first non-empty row, the
     // leftmost non-empty column within the rows shown.
     if (cells.empty()) {
@@ -375,6 +408,70 @@ bool ReadXlsModel(const std::wstring& path, int rows, int cols, SheetModel& mode
         if (rr >= 0 && rr < rows && cc >= 0 && cc < cols) model.grid[rr][cc] = text;
     }
     return true;
+}
+
+bool ReadXlsModel(const std::wstring& path, int rows, int cols, SheetModel& model, std::wstring* error) {
+    XlsWorkbookInfo workbook;
+    return ReadXlsSheet(path, rows, cols, model, error, 0, workbook);
+}
+
+bool MakeXlsTable(const std::wstring& path, std::wstring& payload, uint32_t& bytes_read,
+                  uint32_t sheet_index) {
+    payload.clear();
+    bytes_read = 0;
+    SheetModel model;
+    XlsWorkbookInfo workbook;
+    if (!ReadXlsSheet(path, kMaxRow, kMaxCol, model, nullptr, sheet_index, workbook)) return false;
+    bytes_read = workbook.bytes_read;
+    const auto escape = [](const std::wstring& text) {
+        std::wstring out;
+        for (const wchar_t c : text) {
+            if (c == L'\\') out += L"\\\\";
+            else if (c == L'\t') out += L"\\t";
+            else if (c == L'\n') out += L"\\n";
+            else if (c != L'\r') out += c;
+        }
+        return out;
+    };
+    size_t rows = 0, cols = 0;
+    for (size_t r = 0; r < model.grid.size(); ++r)
+        for (size_t c = 0; c < model.grid[r].size(); ++c)
+            if (!model.grid[r][c].empty()) {
+                rows = (std::max)(rows, r + static_cast<size_t>(model.first_row));
+                cols = (std::max)(cols, c + static_cast<size_t>(model.first_col));
+            }
+    rows = (std::min)(rows, size_t{kMaxRow});
+    cols = (std::min)(cols, size_t{kMaxCol});
+    std::wstring data;
+    size_t loaded_rows = 0;
+    // Reserve enough for all sheet names and protocol metadata.
+    constexpr size_t data_limit = ipc::kPreviewMaxTableChars - 65536;
+    for (size_t r = 0; r < rows; ++r) {
+        std::wstring row = L"R";
+        for (size_t c = 0; c < cols; ++c) {
+            row += L'\t';
+            const int rr = static_cast<int>(r) + 1 - model.first_row;
+            const int cc = static_cast<int>(c) + 1 - model.first_col;
+            if (rr >= 0 && cc >= 0) row += escape(model.grid[rr][cc]);
+        }
+        row += L'\n';
+        if (data.size() + row.size() > data_limit) { workbook.truncated = true; break; }
+        data += row;
+        ++loaded_rows;
+    }
+    payload = L"PULSETBL\t1\n";
+    for (size_t i = 0; i < workbook.sheet_names.size(); ++i) {
+        const bool selected = i == sheet_index;
+        payload += L"S\txls\t" + escape(workbook.sheet_names[i]) + L"\t" +
+            std::to_wstring(selected ? cols : 0) + L"\t" +
+            std::to_wstring(selected ? loaded_rows : 0) + L"\t" +
+            (selected && workbook.truncated ? L"1" : L"0") + L"\t" +
+            (selected ? L"" : L"not-loaded") + L"\t0\n";
+        if (selected) payload += data;
+    }
+    payload += L"W\t" + std::to_wstring(workbook.sheet_names.size()) + L"\t1\t" +
+        std::to_wstring(sheet_index) + L"\n";
+    return payload.size() <= ipc::kPreviewMaxTableChars;
 }
 
 bool ReadSheetModel(const std::wstring& path, int rows, int cols, SheetModel& model, std::wstring* error) {

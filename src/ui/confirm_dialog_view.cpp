@@ -242,8 +242,7 @@ ConfirmDialogLayout LayoutConfirmDialog(const ConfirmDialogSpec& spec,
     const float text_w = width - text_x - pad;
 
     l.title_bar = Dip(scale, kTitleBar);
-    l.close = D2D1::RectF(width - Dip(scale, 44.0f), Dip(scale, 4.0f), width - Dip(scale, 4.0f),
-                          Dip(scale, 36.0f));
+    l.close = D2D1::RectF(width - Dip(scale, 46.0f), 0.0f, width, Dip(scale, 36.0f));
     l.icon = D2D1::RectF(0, 0, 0, 0);
     // The headline keeps clear of the close button.
     float y = Dip(scale, 18.0f);

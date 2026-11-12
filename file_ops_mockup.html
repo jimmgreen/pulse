@@ -1,0 +1,1183 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pulse 文件操作</title>
+<style>
+/* Layout: controls → live Pulse window with the operation dialog floating over it → status-pill state strip → spec cards. Tokens from FluentTokens.h MakeTheme. */
+:root {
+  --bg: #F3F5F1; --title: #F1F3EE; --sheet: #F7F8F4; --card: #FFFFFF; --flyout: #FFFFFF; --status: #F7F8F4; --dlg: #F9FAF7;
+  --text: #303B50; --text2: #66748A; --text3: #929CAE;
+  --hover: rgba(82,125,112,.055); --pressed: rgba(82,125,112,.09);
+  --stroke: #DCE3D9; --divider: #E5EAE3; --input: rgba(255,255,255,.9);
+  --accent: #0078D4; --accent-fg: #0067C0; --accent-soft: rgba(0,120,212,.095); --accent-soft2: rgba(0,120,212,.17); --on-accent: #FFFFFF;
+  --sel-a: rgba(0,120,212,.30); --sel-b: rgba(0,120,212,.08); --sel-line: #0078D4;
+  --folder: #BCA270; --file: #839FC4; --img: #5E9C7E; --zip: #B98A4B; --doc: #8A97AA;
+  --ok: #0F7B0F; --ok-soft: rgba(15,123,15,.10); --warn: #9D5D00; --warn-soft: rgba(157,93,0,.10); --danger: #C42B1C; --danger-soft: rgba(196,43,28,.09); --danger-fill: #C42B1C;
+  --graph-track: rgba(82,125,112,.10);
+  --shadow: 0 8px 24px rgba(48,59,80,.16), 0 1px 3px rgba(48,59,80,.10);
+  --dlg-shadow: 0 24px 64px rgba(48,59,80,.26), 0 2px 8px rgba(48,59,80,.14);
+  --win-shadow: 0 18px 50px rgba(48,59,80,.16);
+  --font: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --display: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  --icons: "Segoe Fluent Icons", "Segoe MDL2 Assets";
+  --mono: "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1A1A1A; --title: #1A1A1A; --sheet: #202020; --card: #272727; --flyout: #2B2B2B; --status: #151515; --dlg: #242424;
+    --text: #FFFFFF; --text2: rgba(255,255,255,.606); --text3: rgba(255,255,255,.40);
+    --hover: rgba(255,255,255,.08); --pressed: rgba(255,255,255,.06);
+    --stroke: rgba(255,255,255,.07); --divider: rgba(255,255,255,.06); --input: rgba(255,255,255,.06);
+    --accent: #0078D4; --accent-fg: #5AAAE6; --accent-soft: rgba(64,154,223,.17); --accent-soft2: rgba(64,154,223,.28); --on-accent: #FFFFFF;
+    --sel-a: rgba(64,154,223,.45); --sel-b: rgba(64,154,223,.12); --sel-line: #5AAAE6;
+    --folder: #FFCD70; --file: #78B0E8; --img: #7CC4A0; --zip: #E0B070; --doc: #B7C0CC;
+    --ok: #6CCB5F; --ok-soft: rgba(108,203,95,.14); --warn: #FCE100; --warn-soft: rgba(252,225,0,.12); --danger: #FF99A4; --danger-soft: rgba(255,153,164,.12);
+    --graph-track: rgba(255,255,255,.07);
+    --shadow: 0 8px 28px rgba(0,0,0,.45), 0 1px 3px rgba(0,0,0,.35);
+    --dlg-shadow: 0 28px 70px rgba(0,0,0,.6), 0 2px 8px rgba(0,0,0,.4);
+    --win-shadow: 0 18px 50px rgba(0,0,0,.45);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1A1A1A; --title: #1A1A1A; --sheet: #202020; --card: #272727; --flyout: #2B2B2B; --status: #151515; --dlg: #242424;
+  --text: #FFFFFF; --text2: rgba(255,255,255,.606); --text3: rgba(255,255,255,.40);
+  --hover: rgba(255,255,255,.08); --pressed: rgba(255,255,255,.06);
+  --stroke: rgba(255,255,255,.07); --divider: rgba(255,255,255,.06); --input: rgba(255,255,255,.06);
+  --accent: #0078D4; --accent-fg: #5AAAE6; --accent-soft: rgba(64,154,223,.17); --accent-soft2: rgba(64,154,223,.28); --on-accent: #FFFFFF;
+  --sel-a: rgba(64,154,223,.45); --sel-b: rgba(64,154,223,.12); --sel-line: #5AAAE6;
+  --folder: #FFCD70; --file: #78B0E8; --img: #7CC4A0; --zip: #E0B070; --doc: #B7C0CC;
+  --ok: #6CCB5F; --ok-soft: rgba(108,203,95,.14); --warn: #FCE100; --warn-soft: rgba(252,225,0,.12); --danger: #FF99A4; --danger-soft: rgba(255,153,164,.12);
+  --graph-track: rgba(255,255,255,.07);
+  --shadow: 0 8px 28px rgba(0,0,0,.45), 0 1px 3px rgba(0,0,0,.35);
+  --dlg-shadow: 0 28px 70px rgba(0,0,0,.6), 0 2px 8px rgba(0,0,0,.4);
+  --win-shadow: 0 18px 50px rgba(0,0,0,.45);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.5 var(--font); padding-inline: 16px; padding-block: 20px 48px; overflow-x: hidden; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; }
+button:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 1px; }
+.ic { font-family: var(--icons); font-style: normal; font-weight: normal; line-height: 1; }
+kbd { font: 11px/1 var(--font); padding: 2px 5px; border-radius: 4px; border: 1px solid var(--stroke); color: var(--text2); background: var(--hover); white-space: nowrap; }
+
+.page { max-width: 1480px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+.head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 24px; }
+.head h1 { margin: 0; font: 600 22px/1.25 var(--display); text-wrap: balance; }
+.head p { margin: 4px 0 0; color: var(--text2); max-width: 74ch; font-size: 13.5px; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+.ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ctl > span { font-size: 12px; color: var(--text2); }
+.seg { display: inline-flex; flex-wrap: wrap; background: var(--hover); border: 1px solid var(--stroke); border-radius: 7px; padding: 2px; gap: 2px; }
+.seg button { padding: 3px 10px; border-radius: 5px; font-size: 12.5px; color: var(--text2); }
+.seg button:hover { color: var(--text); background: var(--hover); }
+.seg button[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.play { height: 30px; padding: 0 14px; border-radius: 6px; background: var(--accent); color: var(--on-accent); display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
+.play:hover { filter: brightness(1.08); }
+.tryline { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--text2); }
+.tryline b { color: var(--text); font-weight: 600; }
+.stage { position: relative; width: 100%; }
+
+/* ---------- Pulse window ---------- */
+.win { position: absolute; top: 0; left: 0; width: 1180px; height: 700px; transform-origin: 0 0; display: flex; flex-direction: column; background: var(--title);
+  border: 1px solid var(--stroke); border-radius: 8px; overflow: hidden; box-shadow: var(--win-shadow); font-size: 13px; line-height: 1.35; user-select: none; }
+.titlebar { height: 48px; flex-shrink: 0; display: flex; align-items: center; }
+.brand { width: 224px; display: flex; align-items: center; gap: 8px; padding-left: 12px; flex-shrink: 0; }
+.brand b { font: 600 14px var(--display); }
+.brand .tb-ic { margin-left: auto; margin-right: 4px; }
+.tb-ic { width: 34px; height: 30px; border-radius: 6px; display: grid; place-items: center; color: var(--text2); font-size: 15px; }
+.tb-ic:hover { background: var(--hover); color: var(--text); }
+.tabs { display: flex; align-items: flex-end; align-self: stretch; gap: 2px; }
+.tab { height: 38px; width: 180px; display: flex; align-items: center; gap: 8px; padding: 0 10px 0 12px; border-radius: 8px 8px 0 0; color: var(--text2); position: relative; }
+.tab.on { background: var(--sheet); color: var(--text); }
+.tab.on::after { content: ""; position: absolute; left: 12px; bottom: 2px; width: 18px; height: 3px; border-radius: 2px; background: var(--accent); }
+.tab span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab .ic { font-size: 9px; color: var(--text3); }
+.caption { margin-left: auto; display: flex; align-items: center; height: 100%; }
+.caption .cap { width: 46px; height: 100%; display: grid; place-items: center; font-size: 10px; }
+.body { flex: 1; min-height: 0; display: flex; background: var(--sheet); }
+.sidebar { width: 224px; flex-shrink: 0; padding: 4px 8px; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.sb-h { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; color: var(--text2); font-weight: 600; font-size: 12.5px; margin-top: 4px; }
+.sb-i { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: 6px; white-space: nowrap; }
+.sb-i:hover { background: var(--hover); }
+.sb-i .ic { font-size: 14px; color: var(--accent-fg); width: 16px; text-align: center; }
+.sb-i small { margin-left: auto; color: var(--text3); font-size: 11.5px; }
+.sb-i.drop { box-shadow: inset 0 0 0 1.5px var(--accent-fg); }
+.content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.nav { height: 46px; flex-shrink: 0; display: flex; align-items: center; gap: 4px; padding: 0 8px 0 4px; }
+.navb { width: 30px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--text2); font-size: 15px; }
+.navb:hover { background: var(--hover); }
+.addr { flex: 1; height: 32px; border-radius: 6px; background: var(--input); border: 1px solid var(--stroke); display: flex; align-items: center; gap: 4px; padding: 0 10px; margin: 0 6px; white-space: nowrap; overflow: hidden; }
+.addr .cs { font-family: var(--icons); font-size: 9px; color: var(--text3); }
+.addr span:last-child { font-weight: 600; }
+.search { width: 280px; height: 32px; border-radius: 6px; background: var(--input); border: 1px solid var(--stroke); display: flex; align-items: center; gap: 8px; padding: 0 10px; color: var(--text3); }
+.toolbar { height: 44px; flex-shrink: 0; display: flex; align-items: center; gap: 2px; padding: 0 8px 4px; }
+.newbtn { height: 30px; display: flex; align-items: center; border-radius: 6px; background: var(--accent); color: var(--on-accent); margin-right: 6px; }
+.newbtn > span { display: flex; align-items: center; gap: 6px; padding: 0 10px; height: 100%; }
+.newbtn > span + span { border-left: 1px solid rgba(255,255,255,.28); padding: 0 8px; font-size: 10px; }
+.tbtn { height: 30px; min-width: 32px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center; justify-content: center; gap: 6px; }
+.tbtn .ic { font-size: 15px; color: var(--text2); }
+.tbtn:hover { background: var(--hover); }
+.tsep { width: 1px; height: 18px; background: var(--divider); margin: 0 6px; }
+.grow { flex: 1; }
+.panes { flex: 1; min-height: 0; display: flex; gap: 8px; padding: 0 8px 4px 4px; }
+.pane { flex: 1; min-width: 0; background: var(--card); border: 1px solid var(--stroke); border-radius: 8px; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+.ph { height: 38px; flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding: 0 6px 0 14px; position: relative; }
+.ph .pbar { position: absolute; left: 0; top: 11px; bottom: 11px; width: 3px; border-radius: 0 2px 2px 0; background: var(--accent); opacity: 0; }
+.pane.focused .pbar { opacity: 1; }
+.ph .pt { font-weight: 600; font-size: 13.5px; color: var(--text2); }
+.pane.focused .pt { color: var(--text); }
+.ph .pp { color: var(--text3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.badge { font-size: 11px; line-height: 18px; padding: 0 7px; border-radius: 9px; background: var(--accent-soft); color: var(--accent-fg); flex-shrink: 0; white-space: nowrap; }
+.ph .sp { flex: 1; }
+.ib { width: 28px; height: 28px; border-radius: 6px; display: grid; place-items: center; color: var(--text2); }
+.ib .ic { font-size: 14px; }
+.ch { height: 30px; flex-shrink: 0; display: grid; grid-template-columns: minmax(0,1fr) 128px 84px; align-items: center; padding: 0 12px 0 14px; color: var(--text2); font-size: 12.5px; border-bottom: 1px solid var(--divider); }
+.ch span:first-child { color: var(--accent-fg); font-weight: 600; }
+.ch .r, .row .r { text-align: right; }
+.rows { flex: 1; min-height: 0; overflow: hidden; padding: 4px 6px; display: flex; flex-direction: column; gap: 2px; position: relative; }
+.row { height: 28px; flex-shrink: 0; display: grid; grid-template-columns: minmax(0,1fr) 128px 84px; align-items: center; padding: 0 6px 0 8px; border-radius: 5px; font-variant-numeric: tabular-nums; transition: opacity .3s, transform .3s; }
+.row:hover { background: var(--hover); }
+.row.sel { background: linear-gradient(90deg, var(--sel-a), var(--sel-b)); box-shadow: inset 0 0 0 1px var(--sel-line); }
+.pane:not(.focused) .row.sel { background: var(--hover); box-shadow: none; }
+.row.flash { animation: flash 1.6s ease 2; }
+@keyframes flash { 0%, 100% { background: var(--sel-b); } 35% { background: var(--accent-soft2); box-shadow: inset 0 0 0 1.5px var(--accent-fg); } }
+.row.gone { opacity: 0; transform: translateX(-24px); height: 0; margin-top: -2px; overflow: hidden; }
+.row.ghost { opacity: .45; }
+.row .n { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.row .n span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .d, .row .s { color: var(--text2); font-size: 12.5px; white-space: nowrap; }
+.fi { width: 16px; height: 16px; flex-shrink: 0; }
+.pane.arrive { animation: arrive .45s cubic-bezier(.2,.8,.2,1); }
+@keyframes arrive { from { opacity: .3; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.locate-tag { position: absolute; right: 10px; top: 44px; z-index: 3; padding: 4px 10px; border-radius: 12px; background: var(--flyout); box-shadow: var(--shadow); font-size: 12px; color: var(--text2); display: flex; align-items: center; gap: 8px; animation: arrive .3s ease; }
+.locate-tag b { color: var(--text); font-weight: 600; }
+.locate-tag button { color: var(--accent-fg); }
+
+/* ---------- status bar & pill ---------- */
+.status { height: 28px; flex-shrink: 0; display: flex; align-items: center; gap: 16px; padding: 0 12px; background: var(--status); color: var(--text2); font-size: 12px; white-space: nowrap; position: relative; }
+.status .fill { flex: 1; }
+.ai { display: flex; align-items: center; gap: 6px; margin-left: -4px; padding: 0 8px 0 6px; height: 22px; border-radius: 11px; }
+.ai .spark { color: var(--accent-fg); font-size: 11px; }
+.ai b { color: var(--text); font-size: 11.5px; }
+.pill { height: 22px; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 9px; border-radius: 11px; background: var(--hover); color: var(--text); position: relative; overflow: hidden; transition: background .2s; }
+.pill:hover { background: var(--pressed); box-shadow: inset 0 0 0 1px var(--stroke); }
+.pill .pbody { display: flex; align-items: center; gap: 7px; height: 100%; padding-right: 6px; }
+.pill .pct { color: var(--accent-fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+.pill .ring { width: 14px; height: 14px; border-radius: 50%; -webkit-mask: radial-gradient(circle, transparent 4px, #000 4.5px); mask: radial-gradient(circle, transparent 4px, #000 4.5px); flex-shrink: 0; }
+.pill .bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--accent-fg); }
+.pill.done { background: var(--ok-soft); }
+.pill.done .okic { color: var(--ok); font-size: 11px; }
+.pill.paused { background: var(--warn-soft); }
+.pill.paused .pct { color: var(--warn); }
+.pill.need { background: var(--warn-soft); }
+.pill.need .ic { color: var(--warn); font-size: 11px; }
+.pill.fail { background: var(--danger-soft); }
+.pill.fail .ic { color: var(--danger); font-size: 11px; }
+.pill .act { height: 18px; padding: 0 8px; border-radius: 9px; color: var(--accent-fg); display: flex; align-items: center; gap: 4px; font-weight: 600; }
+.pill .act:hover { background: var(--card); }
+.pill .act .ic { font-size: 10px; color: inherit; }
+.pill .count { min-width: 16px; height: 16px; border-radius: 8px; background: var(--accent); color: var(--on-accent); font-size: 10.5px; display: grid; place-items: center; padding: 0 4px; font-weight: 600; }
+.pill.compact { padding: 0 8px; }
+.pill.compact .ptext, .pill.compact .act { display: none; }
+.pill.enter { animation: pillIn .4s cubic-bezier(.2,.8,.2,1); }
+@keyframes pillIn { 0% { transform: scale(.85); } 60% { transform: scale(1.06); } 100% { transform: none; } }
+.pill .tick { position: absolute; right: 0; bottom: 0; height: 2px; background: var(--ok); opacity: .6; }
+
+/* ---------- dialogs (own windows over Pulse) ---------- */
+.dlg { position: absolute; z-index: 20; width: 440px; background: var(--dlg); border: 1px solid var(--stroke); border-radius: 8px; box-shadow: var(--dlg-shadow); display: flex; flex-direction: column; overflow: hidden; }
+.dlg[hidden] { display: none; }
+.dlg.wide { width: 500px; }
+.dlg.mid { width: 460px; }
+.dtb { height: 40px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding-left: 14px; font-size: 12px; color: var(--text2); }
+.dtb .sp { flex: 1; }
+.dtb .cb { width: 46px; height: 36px; display: grid; place-items: center; font-size: 10px; color: var(--text); align-self: flex-start; }
+.dtb .cb:hover { background: var(--hover); }
+.dtb .cb.x:hover { background: #C42B1C; color: #fff; }
+.dbody { padding: 0 16px 12px; display: flex; flex-direction: column; gap: 8px; }
+.dtitle { font: 600 16px/1.3 var(--display); display: flex; align-items: center; gap: 8px; }
+.dtitle .ic { font-size: 16px; }
+.dtitle .ic.ok { color: var(--ok); } .dtitle .ic.bad { color: var(--danger); } .dtitle .ic.warn { color: var(--warn); }
+.route { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; color: var(--text2); font-size: 12.5px; margin-top: -2px; }
+.rchip { height: 24px; display: inline-flex; align-items: center; gap: 6px; padding: 0 8px 0 6px; border-radius: 5px; color: var(--text); max-width: 180px; }
+.rchip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rchip:hover { background: var(--hover); color: var(--accent-fg); }
+.rchip .ic { font-size: 9px; color: var(--text3); opacity: 0; }
+.rchip:hover .ic { opacity: 1; color: var(--accent-fg); }
+.route .arr { font-family: var(--icons); font-size: 10px; color: var(--text3); }
+.queue { margin-left: auto; font-size: 12px; color: var(--accent-fg); display: flex; align-items: center; gap: 4px; }
+.queue:hover { text-decoration: underline; }
+.hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-top: 2px; }
+.pctbig { font: 300 40px/1 var(--display); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.pctbig small { font-size: 18px; color: var(--text2); margin-left: 2px; }
+.hspd { text-align: right; display: flex; flex-direction: column; gap: 2px; padding-bottom: 3px; }
+.hspd b { font: 600 15px var(--display); font-variant-numeric: tabular-nums; }
+.hspd span { font-size: 12px; color: var(--text2); font-variant-numeric: tabular-nums; }
+.graph { width: 100%; height: 64px; display: block; border-radius: 4px; }
+.ditem { font-size: 12.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dsub { font-size: 12px; color: var(--text2); font-variant-numeric: tabular-nums; margin-top: -4px; }
+.details { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; padding: 10px 12px; border-radius: 6px; background: var(--hover); font-size: 12.5px; }
+.details div { display: flex; justify-content: space-between; gap: 8px; }
+.details span { color: var(--text2); }
+.details b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.dqueue { display: flex; flex-direction: column; gap: 2px; border-top: 1px solid var(--divider); padding-top: 8px; }
+.dqueue .qh { font-size: 12px; color: var(--text2); display: flex; justify-content: space-between; }
+.qrow { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 6px; border-radius: 5px; font-size: 12.5px; }
+.qrow:hover { background: var(--hover); }
+.qrow .ic { font-size: 12px; color: var(--text2); width: 16px; text-align: center; }
+.qrow span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qrow small { color: var(--text3); }
+.qrow .qx { width: 22px; height: 22px; border-radius: 4px; display: grid; place-items: center; font-size: 9px; color: var(--text2); }
+.qrow .qx:hover { background: var(--pressed); }
+.dfoot { min-height: 56px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 0 16px; border-top: 1px solid var(--divider); background: var(--sheet); position: relative; }
+.dfoot .sp { flex: 1; }
+.btn { height: 32px; padding: 0 12px; border-radius: 4px; border: 1px solid var(--stroke); background: var(--card); color: var(--text); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 13px; }
+.btn:hover { background: var(--flyout); border-color: var(--text3); }
+.btn .ic { font-size: 12px; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.danger { background: var(--danger-fill); border-color: var(--danger-fill); color: #fff; }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--text2); padding: 0 8px; }
+.btn.ghost:hover { background: var(--hover); color: var(--text); }
+.btn.icon { width: 32px; padding: 0; justify-content: center; }
+.btn[disabled] { opacity: .45; }
+.autoclose { position: absolute; left: 0; top: -1px; height: 2px; background: var(--ok); }
+.acnote { font-size: 12px; color: var(--text2); display: flex; align-items: center; gap: 6px; }
+.acnote button { color: var(--accent-fg); }
+.acnote button:hover { text-decoration: underline; }
+
+/* failure list */
+.flist { display: flex; flex-direction: column; border: 1px solid var(--divider); border-radius: 6px; overflow: hidden; }
+.frow { display: grid; grid-template-columns: 16px minmax(0,1fr) auto; gap: 4px 10px; align-items: center; padding: 8px 8px 8px 10px; border-top: 1px solid var(--divider); }
+.frow:first-child { border-top: 0; }
+.frow .nm { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.frow .why { grid-column: 2; font-size: 12px; color: var(--danger); margin-top: -2px; }
+.frow .fa { grid-row: 1 / span 2; grid-column: 3; display: flex; gap: 4px; }
+.frow.ok .why { color: var(--ok); }
+.lnk { height: 26px; padding: 0 8px; border-radius: 4px; color: var(--accent-fg); font-size: 12.5px; }
+.lnk:hover { background: var(--hover); }
+
+/* conflict */
+.cmp { display: grid; grid-template-columns: 1fr 1px 1fr; gap: 0 16px; padding: 12px 0 4px; }
+.cmp .rule { background: var(--divider); }
+.cmp .col { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.cmp .lbl { font-size: 12px; color: var(--text2); }
+.cmp .it { display: flex; align-items: center; gap: 10px; }
+.cmp .thumb { width: 40px; height: 40px; border-radius: 6px; background: var(--hover); display: grid; place-items: center; flex-shrink: 0; }
+.cmp .thumb .fi { width: 22px; height: 22px; }
+.cmp .meta { font-size: 12px; color: var(--text2); font-variant-numeric: tabular-nums; }
+.cmp .meta b { color: var(--accent-fg); font-weight: 600; }
+.cmp .tools { display: flex; gap: 2px; margin-left: -8px; }
+.choices { display: flex; flex-direction: column; gap: 2px; }
+.choice { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 2px 8px; padding: 8px 10px; border-radius: 6px; text-align: left; border: 1px solid transparent; }
+.choice:hover { background: var(--hover); border-color: var(--stroke); }
+.choice .ic { font-size: 16px; color: var(--accent-fg); grid-row: 1 / span 2; }
+.choice b { font-weight: 600; font-size: 13.5px; }
+.choice span { grid-column: 2; font-size: 12px; color: var(--text2); }
+.choice kbd { grid-row: 1 / span 2; grid-column: 3; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text); }
+.check i { width: 18px; height: 18px; border-radius: 4px; border: 1px solid var(--text2); display: grid; place-items: center; font-family: var(--icons); font-style: normal; font-size: 11px; color: transparent; }
+.check.on i { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
+/* locked */
+.owners { display: flex; flex-direction: column; gap: 6px; }
+.owner { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 6px; background: var(--hover); }
+.owner .appic { width: 32px; height: 32px; border-radius: 7px; display: grid; place-items: center; font-weight: 700; font-size: 13px; color: #fff; background: #C43E1C; flex-shrink: 0; }
+.owner div { flex: 1; min-width: 0; }
+.owner b { display: block; font-weight: 600; }
+.owner small { color: var(--text2); font-size: 12px; }
+.wait { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text2); }
+.spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--divider); border-top-color: var(--accent-fg); animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* permanent delete */
+.plist { display: flex; flex-direction: column; border: 1px solid var(--divider); border-radius: 6px; }
+.prow { display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px; border-top: 1px solid var(--divider); font-size: 12.5px; }
+.prow:first-child { border-top: 0; }
+.prow span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prow small { color: var(--text2); font-variant-numeric: tabular-nums; }
+.pwarn { display: flex; align-items: center; gap: 8px; color: var(--danger); font-size: 12.5px; }
+.ptotal { font-size: 12.5px; color: var(--text2); }
+
+/* popups */
+.menu { position: absolute; z-index: 30; min-width: 240px; background: var(--flyout); border: 1px solid var(--stroke); box-shadow: var(--shadow); border-radius: 8px; padding: 4px; }
+.menu[hidden] { display: none; }
+.mi { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: 5px; font-size: 13px; white-space: nowrap; }
+.mi:hover { background: var(--hover); }
+.mi .ic { width: 16px; text-align: center; font-size: 13px; color: var(--text2); }
+.mi .lbl { flex: 1; }
+.mi .key { color: var(--text3); font-size: 11.5px; }
+.mi .chk { width: 16px; text-align: center; font-size: 11px; color: var(--accent-fg); }
+.msep { height: 1px; background: var(--divider); margin: 4px 6px; }
+.mh { font-size: 11.5px; color: var(--text3); padding: 6px 10px 2px; }
+.hist { position: absolute; z-index: 28; width: 400px; background: var(--flyout); border: 1px solid var(--stroke); box-shadow: var(--shadow); border-radius: 10px; padding: 8px; display: flex; flex-direction: column; gap: 2px; animation: pop .16s cubic-bezier(.2,.8,.2,1); }
+.hist[hidden] { display: none; }
+@keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.hh { display: flex; align-items: center; justify-content: space-between; padding: 4px 6px 6px; }
+.hh b { font: 600 13.5px var(--display); }
+.hh button { font-size: 12px; color: var(--accent-fg); }
+.hrow { display: grid; grid-template-columns: 28px minmax(0,1fr) auto; gap: 0 10px; align-items: center; padding: 8px 6px; border-radius: 6px; }
+.hrow:hover { background: var(--hover); }
+.hic { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; background: var(--hover); color: var(--text2); grid-row: 1 / span 2; }
+.hic.ok { background: var(--ok-soft); color: var(--ok); } .hic.run { background: var(--accent-soft); color: var(--accent-fg); } .hic.bad { background: var(--danger-soft); color: var(--danger); } .hic.q { color: var(--text3); }
+.hrow .t { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hrow .m { font-size: 11.5px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.hrow .ha { grid-row: 1 / span 2; grid-column: 3; display: flex; gap: 2px; }
+.hrow .hbar { height: 3px; border-radius: 2px; background: var(--divider); overflow: hidden; margin-top: 4px; }
+.hrow .hbar i { display: block; height: 100%; background: var(--accent-fg); }
+.hrow .lnk[disabled] { color: var(--text3); }
+.hfoot { border-top: 1px solid var(--divider); margin-top: 4px; padding: 8px 6px 2px; font-size: 11.5px; color: var(--text3); display: flex; justify-content: space-between; }
+.tip { position: absolute; z-index: 40; pointer-events: none; background: var(--flyout); border: 1px solid var(--stroke); box-shadow: var(--shadow); border-radius: 6px; padding: 5px 9px; font-size: 12px; white-space: nowrap; display: flex; gap: 8px; align-items: center; opacity: 0; transition: opacity .1s; }
+.tip.on { opacity: 1; }
+.toast { position: absolute; z-index: 35; left: 50%; bottom: 44px; transform: translateX(-50%); padding: 8px 14px; border-radius: 8px; background: var(--flyout); box-shadow: var(--shadow); border: 1px solid var(--stroke); font-size: 12.5px; animation: pop .16s ease; }
+.toast[hidden] { display: none; }
+
+/* ---------- page readouts ---------- */
+.lane { display: flex; flex-direction: column; gap: 8px; }
+.lane h2 { margin: 0; font: 600 15px var(--display); }
+.lane > p { margin: 0; color: var(--text2); font-size: 12.5px; max-width: 80ch; }
+.pills { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr)); gap: 10px; }
+.pcard { background: var(--status); border: 1px solid var(--stroke); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.pcard .pl { font-size: 12px; color: var(--text2); }
+.pcard .pill { align-self: flex-start; max-width: 100%; font-size: 12px; }
+.pcard .pd { font-size: 12px; color: var(--text2); }
+.spec { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 400px), 1fr)); gap: 14px; }
+.card { background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; padding: 16px 18px; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.card h3 { margin: 0; font: 600 15px/1.3 var(--display); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.card p { margin: 0; color: var(--text2); font-size: 13px; max-width: 70ch; }
+.card ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.card li { color: var(--text2); }
+.card li b { color: var(--text); font-weight: 600; }
+.tbl { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--divider); vertical-align: top; }
+th { color: var(--text2); font-weight: 600; font-size: 12px; }
+td:first-child { white-space: nowrap; }
+td code, li code, p code { font-family: var(--mono); font-size: 11.5px; padding: 1px 4px; border-radius: 4px; background: var(--hover); color: var(--text); }
+.tag { font-size: 11px; padding: 0 6px; border-radius: 8px; line-height: 18px; white-space: nowrap; }
+.tag.has { background: var(--hover); color: var(--text2); }
+.tag.new { background: var(--accent-soft); color: var(--accent-fg); }
+.tag.eng { background: var(--warn-soft); color: var(--warn); }
+
+@media (prefers-reduced-motion: reduce) {
+  .row, .pill, .pane, .hist, .toast, .locate-tag { animation: none !important; transition: none !important; }
+  .row.flash { animation: none !important; background: var(--accent-soft2); }
+}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-folder" viewBox="0 0 16 16"><path fill="currentColor" d="M1.5 4a1.5 1.5 0 0 1 1.5-1.5h3.1c.4 0 .78.16 1.06.44L8.3 4h4.7A1.5 1.5 0 0 1 14.5 5.5v6.5a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 12z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" d="M4 1.8h5.2L12.6 5.2v9H4z"/><path fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" d="M9 1.9v3.5h3.5"/></symbol>
+    <symbol id="i-img" viewBox="0 0 16 16"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.2"/><path fill="currentColor" d="M3.5 11.5l3-3.4 2.2 2.3 1.4-1.4 2.4 2.5z"/><circle cx="10.6" cy="5.6" r="1.1" fill="currentColor"/></symbol>
+    <symbol id="i-zip" viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" d="M3.5 1.8h9v12.4h-9z"/><path stroke="currentColor" stroke-width="1.4" d="M8 2v1.2M8 4.4v1.2M8 6.8v1.2"/><rect x="6.6" y="9" width="2.8" height="2.6" rx=".6" fill="currentColor"/></symbol>
+    <symbol id="i-logo" viewBox="0 0 20 20"><rect width="20" height="20" rx="5" fill="#2B2B2B"/><path d="M3.5 10.5h3l1.6-4 2.8 8 1.8-4.5h3.8" fill="none" stroke="#5AAAE6" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+
+<div class="page">
+  <div class="head">
+    <div>
+      <h1>复制、移动、删除：做完就走，结果一键找到</h1>
+      <p>成功的任务在对话框里停 1.2 秒显示「已完成」，然后缩进状态栏。状态栏胶囊留下「定位」和「撤销」：定位会切到目标文件夹并选中刚到的文件。单击胶囊打开本次的操作记录。只有出错、冲突、文件被占用时，对话框才会留下来等你处理。</p>
+    </div>
+    <div class="controls" id="controls"></div>
+  </div>
+  <div class="tryline" id="tryline"></div>
+  <div class="stage" id="stage"><div class="win" id="win"></div></div>
+  <section class="lane">
+    <h2>状态栏胶囊的几种样子</h2>
+    <p>胶囊只在状态栏里占一格，宽度不够时按上一版布局条的让位规则收成进度环或单个图标。任何状态下单击胶囊都能回到对话框或操作记录。</p>
+    <div class="pills" id="pills"></div>
+  </section>
+  <section class="spec" id="spec"></section>
+</div>
+
+<script>
+(() => {
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const g = c => `<i class="ic">&#x${c};</i>`;
+const ICON = { folder: ['i-folder', '--folder'], file: ['i-file', '--file'], doc: ['i-file', '--doc'], img: ['i-img', '--img'], zip: ['i-zip', '--zip'] };
+const icon = k => { const [id, c] = ICON[k] || ICON.file; return `<svg class="fi" style="color:var(${c})"><use href="#${id}"/></svg>`; };
+const F = (n, d, s, k = 'file') => ({ n, d, s, k });
+
+/* ---------- folders ---------- */
+const FOLDERS = {
+  src: { name: '源代码', crumbs: ['此电脑', '新加卷 (P:)', '源代码'], items: [
+    F('产品文档', '2026-10-28 09:12', '', 'folder'), F('发布', '2026-11-05 18:40', '', 'folder'), F('品牌设计', '2026-10-19 14:03', '', 'folder'),
+    F('旧版本', '2026-08-02 10:11', '', 'folder'), F('构建缓存', '2026-11-06 09:58', '', 'folder'),
+    F('app.py', '2026-11-04 21:17', '574 B'), F('main.cpp', '2026-11-06 10:02', '978 B'), F('README.md', '2026-11-01 16:45', '225 B', 'doc'),
+    F('release-notes.md', '2026-11-05 18:22', '6.1 KB', 'doc'), F('项目计划.md', '2026-10-27 19:58', '3.4 KB', 'doc') ] },
+  photos: { name: '照片', crumbs: ['此电脑', '新加卷 (P:)', '照片'], items: [
+    F('城市夜景.jpg', '2026-09-24 19:48', '8.2 MB', 'img'), F('窗边咖啡馆.jpg', '2026-09-24 19:50', '7.4 MB', 'img'), F('海岸线航拍.jpg', '2026-09-25 08:12', '12.9 MB', 'img'),
+    F('秋日森林.jpg', '2026-10-11 16:05', '9.7 MB', 'img'), F('山湖晨雾.jpg', '2026-10-12 06:41', '8.0 MB', 'img'), F('雪山草甸.jpg', '2026-10-12 11:27', '10.1 MB', 'img') ] },
+  backup: { name: '2026-11', crumbs: ['此电脑', '新加卷 (D:)', '备份', '2026-11'], items: [
+    F('1.0.57 发布包', '2026-10-21 22:10', '', 'folder'), F('设计稿-10月.zip', '2026-10-31 18:02', '486 MB', 'zip'), F('会议记录.md', '2026-11-03 09:40', '12 KB', 'doc') ] },
+  album: { name: '2026 秋', crumbs: ['此电脑', '新加卷 (D:)', '相册', '2026 秋'], items: [
+    F('国庆-西湖', '2026-10-05 20:14', '', 'folder'), F('封面.jpg', '2026-10-06 08:30', '3.1 MB', 'img') ] },
+};
+const BASE = JSON.parse(JSON.stringify(FOLDERS));
+
+/* ---------- scenarios ---------- */
+const SC = {
+  copy: { verb: '复制', doing: '正在复制', done: '已复制', paused: '已暂停复制', icon: 'E8C8', from: 'src', to: 'backup', pick: ['品牌设计', '发布'],
+    total: 1284, bytes: 2.31, unit: 'GB', speed: 68, item: '品牌设计\\字体\\思源黑体-Bold.otf' },
+  move: { verb: '移动', doing: '正在移动', done: '已移动', paused: '已暂停移动', icon: 'E8DE', from: 'photos', to: 'album', pick: ['城市夜景.jpg', '窗边咖啡馆.jpg', '海岸线航拍.jpg', '秋日森林.jpg'],
+    total: 4, bytes: 38.2, unit: 'MB', speed: 41, item: '海岸线航拍.jpg', crossDrive: true },
+  del: { verb: '删除', doing: '正在删除', done: '已删除', paused: '已暂停删除', icon: 'E74D', from: 'src', to: null, pick: ['旧版本', '构建缓存'],
+    total: 3612, bytes: 2.08, unit: 'GB', speed: 0, item: '旧版本\\1.0.41\\pulse_x64.pdb', bin: true },
+  perm: { verb: '永久删除', doing: '正在删除', done: '已永久删除', paused: '已暂停删除', icon: 'E74D', from: 'src', to: null, pick: ['旧版本', '构建缓存'],
+    total: 3612, bytes: 2.08, unit: 'GB', speed: 0, item: '构建缓存\\obj\\x64\\Release\\ui_renderer.obj' },
+};
+const PHASES = {
+  copy: [['running', '进行中'], ['paused', '已暂停'], ['conflict', '冲突'], ['partial', '部分失败'], ['done', '完成（自动关闭）'], ['hidden', '收在状态栏']],
+  move: [['running', '进行中'], ['paused', '已暂停'], ['partial', '部分失败'], ['done', '完成（自动关闭）'], ['hidden', '收在状态栏']],
+  del: [['running', '进行中'], ['locked', '文件被占用'], ['partial', '部分失败'], ['done', '完成（自动关闭）'], ['hidden', '收在状态栏']],
+  perm: [['confirm', '确认'], ['running', '进行中'], ['done', '完成（自动关闭）']],
+};
+
+const qs = new URLSearchParams(location.search);
+const pick = (v, list, d) => list.includes(v) ? v : d;
+const S = {
+  theme: pick(qs.get('theme'), ['dark', 'light'], 'dark'),
+  sc: pick(qs.get('sc'), Object.keys(SC), 'copy'),
+  phase: qs.get('phase') || 'running',
+  p: qs.has('p') ? Math.max(0, Math.min(1, +qs.get('p'))) : .38,
+  queue: qs.has('queue') ? +qs.get('queue') : 2,
+  destOpen: qs.get('dest') === 'open',
+  detailed: qs.has('detail'), keepOpen: false, locateAfter: false,
+  dlg: true, timer: 0, samples: [], history: [], panes: ['src', 'photos'], focus: 0,
+  sel: [new Set(), new Set()], flash: [new Set(), new Set()], locateTag: null, pillCompact: false, undone: false,
+  applyRest: true, conflictIdx: 1,
+};
+document.documentElement.dataset.theme = S.theme;
+const sc = () => SC[S.sc];
+const fmt = n => n.toLocaleString('en-US');
+
+function resetScenario() {
+  stopRun();
+  for (const k in BASE) FOLDERS[k] = JSON.parse(JSON.stringify(BASE[k]));
+  const s = sc();
+  S.panes = [s.from === 'photos' ? 'src' : 'src', 'photos'];
+  if (S.destOpen && s.to) S.panes[s.from === 'photos' ? 0 : 1] = s.to;
+  S.focus = s.from === 'photos' ? 1 : 0;
+  S.sel = [new Set(), new Set()]; S.flash = [new Set(), new Set()];
+  S.sel[S.focus] = new Set(s.pick);
+  S.locateTag = null; S.pillCompact = false; S.undone = false; S._kept = false;
+  S.samples = []; seedSamples(S.p);
+  S.history = [
+    { id: 'h1', kind: 'ok', icon: 'E8C8', t: '已复制 3 个项目', m: '下载 → 设计评审 · 14.2 MB · 14:02', acts: ['locate'] },
+    { id: 'h2', kind: 'ok', icon: 'E8AC', t: '已重命名 12 个项目', m: '照片 · 13:48', acts: [] },
+  ];
+  S.dlg = true;
+}
+function seedSamples(p) {
+  S.samples = [];
+  const n = Math.round(p * 120);
+  for (let i = 0; i < n; i++) S.samples.push(speedAt(i / 120));
+}
+function speedAt(x) {
+  const s = sc();
+  if (!s.speed) return .55 + .25 * Math.sin(x * 19) + .12 * Math.sin(x * 47);
+  const warm = Math.min(1, x * 9);
+  return warm * (.72 + .16 * Math.sin(x * 13) + .09 * Math.sin(x * 41) - (x > .55 && x < .66 ? .28 : 0));
+}
+
+/* ---------- controls ---------- */
+function controlsHTML() {
+  const seg = (key, items, cur) => `<div class="seg" role="group">${items.map(([v, l]) => `<button data-ctl="${key}" data-v="${v}" aria-pressed="${String(cur) === String(v)}">${l}</button>`).join('')}</div>`;
+  return `
+    <div class="ctl"><span>操作</span>${seg('sc', [['copy', '复制'], ['move', '移动'], ['del', '删除到回收站'], ['perm', '永久删除']], S.sc)}</div>
+    <div class="ctl"><span>阶段</span>${seg('phase', PHASES[S.sc], S.phase)}</div>
+    <div class="ctl"><span>目标位置</span>${seg('dest', [['closed', '没打开'], ['open', '已在另一栏']], S.destOpen ? 'open' : 'closed')}</div>
+    <div class="ctl"><span>排队</span>${seg('queue', [[0, '无'], [2, '后面 2 个']], S.queue)}</div>
+    <div class="ctl"><span>主题</span>${seg('theme', [['dark', '深色'], ['light', '浅色']], S.theme)}</div>
+    <button class="play" data-act="demo">${g('E768')}从头演示一遍</button>`;
+}
+function tryHTML() {
+  return `<span><b>演示</b>会从 0% 跑到完成，看对话框怎么收进状态栏</span><span><b>点胶囊上的「定位」</b>：切到目标文件夹并选中新文件</span><span><b>点胶囊本身</b>：操作记录</span><span>对话框里点 <b>源 / 目标文件夹名</b>、<b>⋯</b> 看新按钮；<kbd>Esc</kbd> 收到状态栏</span>`;
+}
+
+/* ---------- window ---------- */
+function winHTML() {
+  return `
+  <div class="titlebar">
+    <div class="brand"><svg width="20" height="20"><use href="#i-logo"/></svg><b>Pulse</b><button class="tb-ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2"/><path d="M6 2.8v10.4"/></svg></button></div>
+    <div class="tabs"><div class="tab on"><svg width="14" height="14" style="color:var(--folder)"><use href="#i-folder"/></svg><span id="tabT">源代码 · 2</span>${g('E8BB')}</div><div class="tab"><svg width="14" height="14" style="color:var(--folder)"><use href="#i-folder"/></svg><span>下载</span>${g('E8BB')}</div><button class="tb-ic">${g('E710')}</button></div>
+    <div class="caption"><button class="tb-ic">${g('E713')}</button><button class="tb-ic" data-act="theme">${g('E793')}</button><span style="width:10px"></span><span class="cap">${g('E921')}</span><span class="cap">${g('E922')}</span><span class="cap">${g('E8BB')}</span></div>
+  </div>
+  <div class="body">
+    <nav class="sidebar">
+      <div class="sb-h">${g('E734')}星标项目</div>
+      <div class="sb-h">${g('E80F')}快速访问</div>
+      <div class="sb-i">${g('E81C')}最近使用</div><div class="sb-i">${g('E7F4')}桌面</div><div class="sb-i">${g('E896')}下载</div><div class="sb-i">${g('E8A5')}文档</div>
+      <div class="sb-i" id="sbBin">${g('E74D')}回收站<small id="binCount">435 项</small></div>
+      <div class="sb-h">${g('E7F8')}此电脑</div>
+      <div class="sb-i">${g('EDA2')}Win11 (C:)<small>113G / 477G</small></div>
+      <div class="sb-i">${g('EDA2')}新加卷 (D:)<small>3.5TB / 3.6TB</small></div>
+      <div class="sb-i">${g('EDA2')}新加卷 (P:)<small>3.5TB / 3.6TB</small></div>
+    </nav>
+    <div class="content">
+      <div class="nav"><button class="navb">${g('E72B')}</button><button class="navb">${g('E72A')}</button><button class="navb">${g('E74A')}</button><div class="addr" id="addr"></div><button class="navb">${g('E72C')}</button><div class="search">${g('E721')}<span id="sph">搜索</span></div></div>
+      <div class="toolbar"><div class="newbtn"><span>${g('E710')}新建</span><span>${g('E70D')}</span></div>
+        <button class="tbtn">${g('E8C6')}</button><button class="tbtn">${g('E8C8')}</button><button class="tbtn">${g('E77F')}</button><button class="tbtn">${g('E8AC')}</button><button class="tbtn">${g('E74D')}</button>
+        <span class="tsep"></span><button class="tbtn">${g('E8CB')}排序</button><button class="tbtn">${g('E71C')}筛选</button><span class="grow"></span><button class="tbtn">${g('E712')}</button></div>
+      <div class="panes" id="panes"><section class="pane" data-i="0"></section><section class="pane" data-i="1"></section></div>
+    </div>
+  </div>
+  <div class="status" id="status"></div>
+  <div class="dlg" id="dlg"></div>
+  <div class="menu" id="menu" hidden></div>
+  <div class="hist" id="hist" hidden></div>
+  <div class="toast" id="toast" hidden></div>
+  <div class="tip" id="tip"></div>`;
+}
+
+function renderPanes() {
+  $$('.pane').forEach(el => {
+    const i = +el.dataset.i, f = FOLDERS[S.panes[i]];
+    el.classList.toggle('focused', i === S.focus);
+    const isTarget = sc().to && S.panes[i] === sc().to;
+    el.innerHTML = `
+      <header class="ph"><span class="pbar"></span><span class="pt">${esc(f.name)}</span><span class="pp">${esc(f.crumbs.slice(1).join(' › '))}</span>
+        ${isTarget && !['confirm'].includes(S.phase) ? '<span class="badge">目标</span>' : ''}<span class="sp"></span>
+        <button class="ib">${g('E8FD')}</button><button class="ib">${g('E712')}</button></header>
+      <div class="ch"><span>名称 <i class="ic" style="font-size:8px">&#xE70E;</i></span><span>修改日期</span><span class="r">大小</span></div>
+      <div class="rows">${f.items.map(it => `<div class="row${S.sel[i].has(it.n) ? ' sel' : ''}${S.flash[i].has(it.n) ? ' flash' : ''}${it.gone ? ' gone' : ''}${it.ghost ? ' ghost' : ''}" data-n="${esc(it.n)}">
+        <div class="n">${icon(it.k)}<span>${esc(it.n)}</span></div><div class="d">${it.d}</div><div class="s r">${it.s}</div></div>`).join('')}</div>
+      ${S.locateTag && S.locateTag.pane === i ? `<div class="locate-tag">${g('E73E').replace('class="ic"', 'class="ic" style="color:var(--ok);font-size:11px"')}<span>选中了刚${S.locateTag.verb}来的 <b>${S.locateTag.n}</b> 项</span><button data-act="back">${g('E72B')} 返回 ${esc(S.locateTag.prev)}</button></div>` : ''}`;
+  });
+  const f = FOLDERS[S.panes[S.focus]];
+  $('#addr').innerHTML = f.crumbs.map((c, i) => `${i ? '<span class="cs">&#xE76C;</span>' : ''}<span>${esc(c)}</span>`).join('');
+  $('#sph').textContent = '搜索' + f.name;
+}
+
+/* ---------- numbers ---------- */
+function nums() {
+  const s = sc(), p = S.p;
+  const doneItems = Math.round(s.total * p), left = s.total - doneItems;
+  const leftBytes = (s.bytes * (1 - p)).toFixed(s.unit === 'GB' ? 2 : 1);
+  const cur = S.samples.length ? S.samples[S.samples.length - 1] : .7;
+  const speed = s.speed ? (s.speed * (cur / .75)).toFixed(1) + ' MB/s' : Math.round(380 * cur / .6) + ' 项/秒';
+  const eta = Math.max(1, Math.round((1 - p) * 36));
+  return { doneItems, left, leftBytes, speed, eta };
+}
+
+/* ---------- dialog ---------- */
+function graphSVG() {
+  const W = 408, H = 64, n = 120;
+  const pts = S.samples.map((v, i) => [i / (n - 1) * W, H - 4 - v * (H - 12)]);
+  const paused = S.phase === 'paused';
+  const col = paused || S.phase === 'partial' ? 'var(--text3)' : 'var(--accent-fg)';
+  let area = '', line = '', dot = '';
+  if (pts.length > 1) {
+    line = 'M' + pts.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' L');
+    area = line + ` L${pts[pts.length - 1][0].toFixed(1)} ${H} L0 ${H} Z`;
+    const e = pts[pts.length - 1];
+    dot = `<circle cx="${e[0]}" cy="${e[1]}" r="3.2" fill="${S.phase === 'done' ? 'var(--ok)' : col}"/>`;
+  }
+  return `<svg class="graph" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    <rect x="0" y="0" width="${W}" height="${H}" rx="4" fill="var(--graph-track)"/>
+    <defs><linearGradient id="ga" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${col}" stop-opacity=".35"/><stop offset="1" stop-color="${col}" stop-opacity=".04"/></linearGradient></defs>
+    ${area ? `<path d="${area}" fill="url(#ga)"/><path d="${line}" fill="none" stroke="${col}" stroke-width="1.6" vector-effect="non-scaling-stroke"/>${dot}` : ''}
+  </svg>`;
+}
+function routeHTML() {
+  const s = sc(), from = FOLDERS[s.from];
+  const chip = (key, label, tip) => `<button class="rchip" data-act="openfolder" data-k="${key}" data-tip="${tip}"><svg width="14" height="14" style="color:var(--folder)"><use href="#i-folder"/></svg><span>${esc(label)}</span>${g('E8A7')}</button>`;
+  const to = s.to ? chip(s.to, FOLDERS[s.to].name, '在新标签页打开目标文件夹') : `<span class="rchip" style="pointer-events:none"><i class="ic" style="font-size:13px;color:var(--text2)">&#xE74D;</i><span>${s.bin ? '回收站' : '不经过回收站'}</span></span>`;
+  const q = S.queue && !['done', 'partial', 'confirm'].includes(S.phase) ? `<button class="queue" data-act="queue">后面还有 ${S.queue} 个任务 ${g(S.detailed ? 'E70E' : 'E70D').replace('class="ic"', 'class="ic" style="font-size:8px"')}</button>` : '';
+  return `<div class="route">${chip(s.from, from.name, '在新标签页打开源文件夹')}<span class="arr">&#xE72A;</span>${to}${q}</div>`;
+}
+function detailsHTML() {
+  const s = sc(), n = nums();
+  return `<div class="details">
+    <div><span>已处理</span><b>${fmt(n.doneItems)} / ${fmt(s.total)}</b></div><div><span>已传输</span><b>${(s.bytes * S.p).toFixed(2)} / ${s.bytes} ${s.unit}</b></div>
+    <div><span>平均速度</span><b>${s.speed ? (s.speed * .93).toFixed(1) + ' MB/s' : '412 项/秒'}</b></div><div><span>峰值速度</span><b>${s.speed ? (s.speed * 1.31).toFixed(1) + ' MB/s' : '688 项/秒'}</b></div>
+    <div><span>已用时间</span><b>${Math.round(S.p * 36)} 秒</b></div><div><span>剩余时间</span><b>约 ${n.eta} 秒</b></div>
+  </div>
+  ${S.queue ? `<div class="dqueue"><div class="qh"><span>排队中 · 按顺序执行</span><span>同一时间只做一个</span></div>
+    <div class="qrow">${g('E8C8')}<span>复制 季度销售数据.csv 等 3 项 → 共享盘\\财务</span><small>18.4 MB</small><button class="qx" data-act="qcancel" data-tip="取消这个任务">${g('E711')}</button></div>
+    <div class="qrow">${g('E8DE')}<span>移动 截图 2026-11-05.png → 照片</span><small>612 KB</small><button class="qx" data-act="qcancel" data-tip="取消这个任务">${g('E711')}</button></div></div>` : ''}`;
+}
+function dialogRunHTML() {
+  const s = sc(), n = nums();
+  const paused = S.phase === 'paused', done = S.phase === 'done', kept = S.keepOpen || S._kept;
+  const title = done ? `${g('E73E').replace('class="ic"', 'class="ic ok"')}${s.done} ${fmt(s.total)} 个项目`
+    : paused ? s.paused : `${s.doing} ${fmt(s.total)} 个项目`;
+  const pct = done ? 100 : Math.round(S.p * 100);
+  const right = done ? `<b>用时 ${s.speed ? 34 : 9} 秒</b><span>平均 ${s.speed ? (s.speed * .93).toFixed(1) + ' MB/s' : '412 项/秒'}</span>`
+    : paused ? `<b style="color:var(--warn)">已暂停</b><span>剩余 ${fmt(n.left)} 个</span>`
+    : `<b>${n.speed}</b><span>约 ${n.eta} 秒</span>`;
+  const footer = done ? `
+      ${kept ? '' : '<span class="autoclose" id="ac" style="width:100%"></span>'}
+      <span class="acnote">${kept ? '已保持打开' : '即将收进状态栏 · <button data-act="keep">保持打开</button>'}</span><span class="sp"></span>
+      ${s.to ? `<button class="btn" data-act="locate">${g('E8B7')}定位到新文件</button>` : s.bin ? `<button class="btn" data-act="undo">${g('E7A7')}撤销</button>` : ''}
+      <button class="btn primary" data-act="close">关闭</button>`
+    : `
+      <button class="btn ghost" data-act="details">${S.detailed ? '简略信息' : '详细信息'} ${g(S.detailed ? 'E70E' : 'E70D').replace('class="ic"', 'class="ic" style="font-size:9px"')}</button>
+      <button class="btn ghost icon" data-act="more" data-tip="更多">${g('E712')}</button>
+      <span class="sp"></span>
+      ${S.sc === 'perm' ? '' : '<button class="btn" data-act="skip">跳过此项</button>'}
+      <button class="btn${paused ? ' primary' : ''}" data-act="pause">${g(paused ? 'EDDA' : 'F8AE')}${paused ? '继续' : '暂停'}</button>
+      <button class="btn" data-act="cancel">取消</button>`;
+  return `
+    <div class="dtb"><svg width="16" height="16"><use href="#i-logo"/></svg>文件操作<span class="sp"></span><button class="cb" data-act="hide" data-tip="收到状态栏，任务继续" data-key="Esc">${g('E921')}</button><button class="cb x" data-act="hide" data-tip="收到状态栏，任务继续">${g('E8BB')}</button></div>
+    <div class="dbody">
+      <div class="dtitle">${title}</div>
+      ${routeHTML()}
+      <div class="hero"><div class="pctbig">${pct}<small>%</small></div><div class="hspd">${right}</div></div>
+      ${graphSVG()}
+      <div class="ditem">${done ? `${s.to ? '已到 ' + esc(FOLDERS[s.to].crumbs.slice(1).join(' › ')) : s.bin ? '已在回收站里，可以撤销' : '已删除，无法撤销'}` : '项目：' + esc(s.item)}</div>
+      <div class="dsub">${done ? `${fmt(s.total)} 个 · ${s.bytes} ${s.unit}` : `${s.done} ${fmt(n.doneItems)} 个 · 剩余 ${fmt(n.left)} 个 (${n.leftBytes} ${s.unit})`}</div>
+      ${S.detailed && !done ? detailsHTML() : ''}
+    </div>
+    <div class="dfoot">${footer}</div>`;
+}
+function dialogPartialHTML() {
+  const s = sc();
+  const rows = S.sc === 'del'
+    ? [['旧版本\\1.0.41\\pulse.exe', '拒绝访问。需要管理员权限才能删除。', 'file'], ['旧版本\\日志\\crash-0918.dmp', '文件正被另一个程序使用。', 'file']]
+    : S.sc === 'move'
+    ? [['秋日森林.jpg', '目标磁盘空间不足（D: 剩余 210 MB）。', 'img']]
+    : [['品牌设计\\字体\\思源黑体-Heavy.otf', '拒绝访问。', 'file'], ['发布\\PulseSetup-1.0.58.exe', '文件正被另一个程序使用。', 'file']];
+  const ok = s.total - rows.length;
+  const title = S.sc === 'del' ? `已删除 ${fmt(ok)} 项，${rows.length} 项未成功` : S.sc === 'move' ? `已移动 ${ok} 项，${rows.length} 项未成功` : `已复制 ${fmt(ok)} 项，${rows.length} 项未成功`;
+  return `
+    <div class="dtb"><svg width="16" height="16"><use href="#i-logo"/></svg>文件操作<span class="sp"></span><button class="cb" data-act="hide">${g('E921')}</button><button class="cb x" data-act="close">${g('E8BB')}</button></div>
+    <div class="dbody">
+      <div class="dtitle">${g('E7BA').replace('class="ic"', 'class="ic bad"')}${title}</div>
+      ${routeHTML()}
+      <div class="dsub" style="margin-top:0">用时 34 秒 · 平均 ${s.speed ? (s.speed * .93).toFixed(1) + ' MB/s' : '412 项/秒'}</div>
+      <div class="flist">${rows.map(([n, why, k], i) => `<div class="frow" data-i="${i}">${icon(k)}<span class="nm">${esc(n)}</span>
+        <span class="fa"><button class="lnk" data-act="flocate" data-tip="在文件夹中显示这一项">定位</button><button class="lnk" data-act="fretry">重试</button></span><span class="why">${esc(why)}</span></div>`).join('')}</div>
+    </div>
+    <div class="dfoot">
+      <button class="btn ghost" data-act="copyerr" data-tip="把失败项和原因复制成文本">${g('E8C8')}复制错误信息</button><span class="sp"></span>
+      ${s.to ? '<button class="btn" data-act="locate">打开目标文件夹</button>' : ''}
+      <button class="btn primary" data-act="retryall">重试失败项</button>
+    </div>`;
+}
+function dialogConflictHTML() {
+  const total = 4, i = S.conflictIdx;
+  return `
+    <div class="dtb"><svg width="16" height="16"><use href="#i-logo"/></svg>替换或跳过文件<span class="sp"></span><button class="cb x" data-act="cancel">${g('E8BB')}</button></div>
+    <div class="dbody" style="padding:0 24px 12px">
+      <div class="dtitle">目标中已包含“release-notes.md”</div>
+      <div class="route">从 <b style="font-weight:600;color:var(--text)">源代码</b> 复制到 <b style="font-weight:600;color:var(--text)">2026-11</b><span class="queue" style="color:var(--text2);pointer-events:none">第 ${i} / ${total} 个</span></div>
+      <div class="cmp">
+        <div class="col"><span class="lbl">目标中现有的</span><div class="it"><span class="thumb">${icon('doc')}</span><div><div>release-notes.md</div><div class="meta">2026-11-01 16:45</div><div class="meta">5.8 KB</div></div></div>
+          <div class="tools"><button class="lnk" data-act="flocate">${g('E8B7').replace('class="ic"', 'class="ic" style="font-size:12px"')} 打开所在位置</button></div></div>
+        <div class="rule"></div>
+        <div class="col"><span class="lbl">复制过来的</span><div class="it"><span class="thumb">${icon('doc')}</span><div><div>release-notes.md</div><div class="meta">2026-11-05 18:22 · <b>较新</b></div><div class="meta">6.1 KB · <b>更大</b></div></div></div>
+          <div class="tools"><button class="lnk" data-act="diff">${g('E89F').replace('class="ic"', 'class="ic" style="font-size:12px"')} 对比内容</button><button class="lnk" data-act="preview">${g('E890').replace('class="ic"', 'class="ic" style="font-size:12px"')} 预览</button></div></div>
+      </div>
+      <div class="choices">
+        <button class="choice" data-act="resolve">${g('E8AB')}<b>替换</b><span>用 源代码 的版本覆盖 2026-11 的版本</span><kbd>R</kbd></button>
+        <button class="choice" data-act="resolve">${g('E8D8')}<b>跳过</b><span>不做更改，保留目标中的现有文件</span><kbd>S</kbd></button>
+        <button class="choice" data-act="resolve">${g('E8C8')}<b>保留两者</b><span>新文件命名为 “release-notes (2).md”</span><kbd>K</kbd></button>
+      </div>
+    </div>
+    <div class="dfoot" style="padding:0 24px">
+      <button class="check${S.applyRest ? ' on' : ''}" data-act="applyrest"><i>&#xE73E;</i>对其余 ${total - i} 个冲突执行相同操作</button><span class="sp"></span>
+      <button class="btn" data-act="cancel">取消</button>
+    </div>`;
+}
+function dialogLockedHTML() {
+  return `
+    <div class="dtb"><svg width="16" height="16"><use href="#i-logo"/></svg>文件正在使用<span class="sp"></span><button class="cb x" data-act="cancel">${g('E8BB')}</button></div>
+    <div class="dbody" style="padding:0 24px 12px">
+      <div class="dtitle">“演示-1.0.41.pptx”正被使用</div>
+      <div class="route">在下面的程序里关闭它，会自动继续。</div>
+      <div class="owners"><div class="owner"><span class="appic">P</span><div><b>PowerPoint</b><small>演示-1.0.41.pptx · 已打开 2 小时</small></div><button class="btn" data-act="noop">切换到程序</button></div></div>
+      <div class="wait"><span class="spin"></span>正在等待文件释放…</div>
+    </div>
+    <div class="dfoot" style="padding:0 24px">
+      <button class="btn ghost" data-act="skip">跳过此项</button><span class="sp"></span>
+      <button class="btn" data-act="noop">结束进程并重试</button><button class="btn primary" data-act="noop">立即重试</button>
+    </div>`;
+}
+function dialogPermHTML() {
+  return `
+    <div class="dtb"><svg width="16" height="16"><use href="#i-logo"/></svg>永久删除<span class="sp"></span><button class="cb x" data-act="cancel">${g('E8BB')}</button></div>
+    <div class="dbody" style="padding:0 24px 12px">
+      <div class="dtitle">永久删除这 2 个项目？</div>
+      <div class="pwarn">${g('E7BA')}不经过回收站，删除后无法撤销</div>
+      <div class="plist">
+        <div class="prow">${icon('folder')}<span>旧版本</span><small>2,904 个文件 · 1.71 GB</small></div>
+        <div class="prow">${icon('folder')}<span>构建缓存</span><small>708 个文件 · 380 MB</small></div>
+      </div>
+      <div class="ptotal">共 3,612 个文件 · 2.08 GB · 新加卷 (P:) 有回收站，可以改为移到回收站</div>
+    </div>
+    <div class="dfoot" style="padding:0 24px">
+      <button class="btn ghost" data-act="tobin">改为移到回收站</button><span class="sp"></span>
+      <button class="btn" data-act="cancel">取消</button><button class="btn danger" data-act="permgo">永久删除</button>
+    </div>`;
+}
+function renderDialog() {
+  const d = $('#dlg');
+  const ph = S.phase;
+  const show = S.dlg && ph !== 'hidden' && !(ph === 'done' && S.closed);
+  d.hidden = !show;
+  if (!show) return;
+  d.className = 'dlg' + (ph === 'conflict' ? ' wide' : ph === 'locked' ? ' mid' : '');
+  d.innerHTML = ph === 'partial' ? dialogPartialHTML() : ph === 'conflict' ? dialogConflictHTML() : ph === 'locked' ? dialogLockedHTML() : ph === 'confirm' ? dialogPermHTML() : dialogRunHTML();
+  // Centered on the main window, as Pulse positions it.
+  d.style.left = Math.round((1180 - d.offsetWidth) / 2) + 'px';
+  d.style.top = Math.round((700 - d.offsetHeight) / 2 + 10) + 'px';
+}
+
+/* ---------- status bar ---------- */
+function pillHTML(phase, opts = {}) {
+  const s = sc(), n = nums();
+  const pct = Math.round(S.p * 100);
+  const ring = (p, col) => `<span class="ring" style="background:conic-gradient(${col} 0 ${p}%, var(--divider) ${p}% 100%)"></span>`;
+  const qb = S.queue && opts.live !== false ? `<span class="count" data-tip="还有 ${S.queue} 个任务在排队">+${S.queue}</span>` : '';
+  if (phase === 'running') return `<span class="pill" data-act="pill" data-tip="打开文件操作"><span class="pbody">${ring(pct, 'var(--accent-fg)')}<span class="ptext">${s.doing} ${fmt(n.doneItems)} / ${fmt(s.total)}</span><span class="pct">${pct}%</span>${qb}</span><i class="bar" style="width:${pct}%"></i></span>`;
+  if (phase === 'paused') return `<span class="pill paused" data-act="pill"><span class="pbody">${ring(pct, 'var(--warn)')}<span class="ptext">${s.paused}</span><span class="pct">${pct}%</span></span><button class="act" data-act="pause">${g('EDDA')}继续</button></span>`;
+  if (phase === 'conflict' || phase === 'locked') return `<span class="pill need" data-act="pill"><span class="pbody">${g('E7BA')}<span class="ptext">${phase === 'conflict' ? '4 个文件重名 · 需要你选择' : '文件正在使用 · 等待中'}</span></span></span>`;
+  if (phase === 'partial') return `<span class="pill fail" data-act="pill"><span class="pbody">${g('E7BA')}<span class="ptext">${S.sc === 'move' ? 1 : 2} 项未成功 · 点击查看</span></span></span>`;
+  if (phase === 'done') {
+    if (S.undone) return `<span class="pill" data-act="pill"><span class="pbody">${g('E7A7').replace('class="ic"', 'class="ic" style="font-size:11px;color:var(--text2)"')}<span class="ptext">已撤销${s.verb}</span></span></span>`;
+    const where = s.to ? `到 ${FOLDERS[s.to].name}` : s.bin ? '到回收站' : '';
+    const label = `${s.done} ${fmt(s.total)} 个项目${where}`;
+    const acts = s.to ? `<button class="act" data-act="locate" data-tip="切到 ${esc(FOLDERS[s.to].name)} 并选中新文件">${g('E8B7')}定位</button><button class="act" data-act="undo">撤销</button>`
+      : s.bin ? `<button class="act" data-act="undo">撤销</button><button class="act" data-act="bin">回收站</button>` : '';
+    return `<span class="pill done${opts.compact ? ' compact' : ''}${opts.enter ? ' enter' : ''}" data-act="pill" data-tip="${opts.compact ? esc(label) + ' · 单击查看操作记录' : '单击查看操作记录'}"><span class="pbody">${g('E73E').replace('class="ic"', 'class="ic okic"')}<span class="ptext">${label}</span></span>${acts}</span>`;
+  }
+  return '';
+}
+function renderStatus() {
+  const f = FOLDERS[S.panes[S.focus]];
+  const ph = S.phase === 'confirm' ? '' : S.phase === 'hidden' ? 'running' : S.phase;
+  const selN = S.sel[S.focus].size;
+  $('#status').innerHTML = `<span class="ai" data-tip="Pulse 助手"><span class="spark">✦</span><b>AI</b></span>
+    <span>${f.items.filter(x => !x.gone).length} 个项目</span>${selN ? `<span>已选中 ${selN} 项</span>` : ''}
+    <span id="pillSlot">${ph ? pillHTML(ph, { compact: S.pillCompact, enter: S._enter }) : ''}</span><span class="fill"></span>
+    <span>空格 快速预览</span>`;
+  S._enter = false;
+}
+
+/* ---------- history flyout ---------- */
+function histHTML() {
+  const s = sc(), n = nums();
+  const rows = [];
+  if (['running', 'paused', 'hidden'].includes(S.phase)) {
+    rows.push(`<div class="hrow"><span class="hic run">${g(s.icon)}</span><div><div class="t">${S.phase === 'paused' ? s.paused : s.doing} ${fmt(s.total)} 个项目 · ${Math.round(S.p * 100)}%</div><div class="hbar"><i style="width:${Math.round(S.p * 100)}%"></i></div></div>
+      <span class="ha"><button class="lnk" data-act="pause">${S.phase === 'paused' ? '继续' : '暂停'}</button><button class="lnk" data-act="show">详情</button></span></div>`);
+    if (S.queue) rows.push(`<div class="hrow"><span class="hic q">${g('E8C8')}</span><div><div class="t">排队：复制 季度销售数据.csv 等 3 项</div><div class="m">→ 共享盘\\财务 · 18.4 MB</div></div><span class="ha"><button class="lnk" data-act="qcancel">取消</button></span></div>`,
+      `<div class="hrow"><span class="hic q">${g('E8DE')}</span><div><div class="t">排队：移动 截图 2026-11-05.png</div><div class="m">→ 照片 · 612 KB</div></div><span class="ha"><button class="lnk" data-act="qcancel">取消</button></span></div>`);
+  }
+  if (S.phase === 'partial') rows.push(`<div class="hrow"><span class="hic bad">${g('E7BA')}</span><div><div class="t">${s.verb}：${S.sc === 'move' ? 1 : 2} 项未成功</div><div class="m">${esc(FOLDERS[s.from].name)} → ${s.to ? esc(FOLDERS[s.to].name) : '回收站'} · 14:36</div></div><span class="ha"><button class="lnk" data-act="show">查看</button></span></div>`);
+  if (S.phase === 'done') {
+    const meta = `${esc(FOLDERS[s.from].name)} → ${s.to ? esc(FOLDERS[s.to].name) : s.bin ? '回收站' : '永久删除'} · ${s.bytes} ${s.unit} · 14:36`;
+    const acts = S.undone ? '<span class="m">已撤销</span>' : s.to ? `<button class="lnk" data-act="locate">定位</button><button class="lnk" data-act="undo">撤销</button>` : s.bin ? `<button class="lnk" data-act="undo">撤销</button>` : '';
+    rows.push(`<div class="hrow"><span class="hic ok">${g('E73E')}</span><div><div class="t">${S.undone ? '已撤销' + s.verb : `${s.done} ${fmt(s.total)} 个项目`}</div><div class="m">${meta}</div></div><span class="ha">${acts}<button class="lnk" data-act="show">详情</button></span></div>`);
+  }
+  S.history.forEach(h => rows.push(`<div class="hrow"><span class="hic ok">${g(h.icon)}</span><div><div class="t">${h.t}</div><div class="m">${h.m}</div></div><span class="ha">${h.acts.includes('locate') ? '<button class="lnk" data-act="noop">定位</button>' : ''}<button class="lnk" disabled data-tip="只能撤销最近一次操作">撤销</button></span></div>`));
+  return `<div class="hh"><b>文件操作</b><button data-act="clearhist">清除已完成</button></div>${rows.join('')}
+    <div class="hfoot"><span>只保留本次运行的记录</span><span>Ctrl+Z 撤销最近一次</span></div>`;
+}
+function toggleHist(force) {
+  const h = $('#hist');
+  const open = force !== undefined ? force : h.hidden;
+  if (!open) { h.hidden = true; return; }
+  h.innerHTML = histHTML(); h.hidden = false;
+  const p = $('#pillSlot .pill') || $('#pillSlot');
+  const r = rel(p);
+  h.style.left = Math.max(8, Math.min(1180 - 408, r.l - 20)) + 'px';
+  h.style.top = (r.t - h.offsetHeight - 8) + 'px';
+}
+
+/* ---------- geometry helpers (window is scaled) ---------- */
+const k = () => S._scale || 1;
+function rel(el) { const w = $('#win').getBoundingClientRect(), r = el.getBoundingClientRect(); return { l: (r.left - w.left) / k(), t: (r.top - w.top) / k(), w: r.width / k(), h: r.height / k() }; }
+let tipT = 0;
+function showTip(el) {
+  const tip = $('#tip'); if (!el.dataset.tip) return;
+  tip.innerHTML = `<span>${esc(el.dataset.tip)}</span>${el.dataset.key ? `<kbd>${esc(el.dataset.key)}</kbd>` : ''}`;
+  tip.classList.add('on');
+  const r = rel(el), tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = Math.max(6, Math.min(1180 - tw - 6, r.l + r.w / 2 - tw / 2)) + 'px';
+  tip.style.top = (r.t > 120 ? r.t - th - 6 : r.t + r.h + 6) + 'px';
+}
+function toast(text) {
+  const t = $('#toast'); t.innerHTML = text; t.hidden = false;
+  clearTimeout(S._toastT); S._toastT = setTimeout(() => { t.hidden = true; }, 2200);
+}
+function openMenu(anchor, html) {
+  const m = $('#menu'); m.innerHTML = html; m.hidden = false;
+  const r = rel(anchor);
+  m.style.left = Math.max(8, r.l) + 'px';
+  m.style.top = (r.t - m.offsetHeight - 6) + 'px';
+}
+function moreMenuHTML() {
+  const s = sc();
+  return `${s.to ? `<div class="mi" data-act="openfolder" data-k="${s.to}">${g('E8B7')}<span class="lbl">打开目标文件夹</span><span class="key">新标签页</span></div>` : ''}
+    <div class="mi" data-act="openfolder" data-k="${s.from}">${g('E8B7')}<span class="lbl">打开源文件夹</span><span class="key">新标签页</span></div>
+    ${s.to ? `<div class="mi" data-act="copypath">${g('E8C8')}<span class="lbl">复制目标路径</span></div>` : ''}
+    <div class="msep"></div><div class="mh">完成后</div>
+    ${s.to ? `<div class="mi" data-act="toggle-locate"><span class="chk">${S.locateAfter ? '&#x2713;' : ''}</span><span class="lbl">自动定位到新文件</span></div>` : ''}
+    <div class="mi" data-act="toggle-keep"><span class="chk">${S.keepOpen ? '&#x2713;' : ''}</span><span class="lbl">保持这个窗口打开</span></div>
+    <div class="msep"></div>
+    <div class="mi" data-act="hide">${g('E921')}<span class="lbl">收到状态栏</span><span class="key">Esc</span></div>`;
+}
+
+/* ---------- flows ---------- */
+let runT = 0;
+function stopRun() { clearInterval(runT); runT = 0; }
+function runLoop() {
+  if (runT) return;
+  runT = setInterval(() => {
+    if (S.phase !== 'running' && S.phase !== 'hidden') return;
+    S.p = Math.min(1, S.p + 1 / 120);
+    S.samples.push(speedAt(S.p));
+    if (S.p >= 1) { stopRun(); finish(); return; }
+    renderLive();
+  }, 55);
+}
+function startRun(from = 0) {
+  stopRun();
+  S.p = from; seedSamples(from);
+  S.phase = 'running'; S.dlg = true; S.closed = false; S.undone = false; S.pillCompact = false; S.locateTag = null;
+  render();
+  runLoop();
+}
+function renderLive() {
+  if (!$('#dlg').hidden && ['running', 'paused'].includes(S.phase)) {
+    const d = $('#dlg');
+    const fresh = document.createElement('div'); fresh.innerHTML = dialogRunHTML();
+    d.querySelector('.dbody').replaceWith(fresh.querySelector('.dbody'));
+  }
+  renderStatus();
+  if (!$('#hist').hidden) toggleHist(true);
+}
+function finish() {
+  const s = sc();
+  applyResult();
+  S.phase = 'done'; S.p = 1; S.closed = false; S._kept = false;
+  render();
+  if (S.keepOpen) return;
+  // 1.2 s of 已完成, the bar draining, then the card shrinks into the pill.
+  const ac = $('#ac');
+  if (ac) ac.animate([{ width: '100%' }, { width: '0%' }], { duration: 1200, easing: 'linear', fill: 'forwards' });
+  clearTimeout(S._closeT);
+  S._closeT = setTimeout(() => { if (S.phase === 'done' && !S.keepOpen) flyToPill(() => { S.closed = true; S._enter = true; render(); if (S.locateAfter) locate(); scheduleCompact(); }); }, 1200);
+}
+function scheduleCompact() {
+  clearTimeout(S._compactT);
+  S._compactT = setTimeout(() => { if (S.phase === 'done' && $('#hist').hidden) { S.pillCompact = true; renderStatus(); } }, 12000);
+}
+function flyToPill(after) {
+  const d = $('#dlg'); if (d.hidden) { after(); return; }
+  const slot = $('#pillSlot');
+  const a = rel(d), b = rel(slot.querySelector('.pill') || slot);
+  const dx = b.l + 60 - (a.l + a.w / 2), dy = b.t + 11 - (a.t + a.h / 2);
+  const anim = d.animate([
+    { transform: 'none', opacity: 1 },
+    { transform: `translate(${dx}px, ${dy}px) scale(.08)`, opacity: .2 }
+  ], { duration: matchMedia('(prefers-reduced-motion: reduce)').matches ? 1 : 340, easing: 'cubic-bezier(.4,0,.6,1)' });
+  anim.onfinish = () => { d.hidden = true; after(); };
+}
+function flyFromPill() {
+  const d = $('#dlg');
+  S.dlg = true; S.closed = false;
+  if (S.phase === 'hidden') S.phase = 'running';
+  render();
+  if (d.hidden) return;
+  const slot = $('#pillSlot');
+  const a = rel(d), b = rel(slot.querySelector('.pill') || slot);
+  const dx = b.l + 60 - (a.l + a.w / 2), dy = b.t + 11 - (a.t + a.h / 2);
+  d.animate([{ transform: `translate(${dx}px, ${dy}px) scale(.08)`, opacity: .2 }, { transform: 'none', opacity: 1 }], { duration: 260, easing: 'cubic-bezier(.2,.8,.2,1)' });
+}
+function hideDialog() {
+  if (['running', 'paused'].includes(S.phase)) {
+    flyToPill(() => { if (S.phase === 'running') S.phase = 'hidden'; S.dlg = false; render(); });
+  } else if (S.phase === 'done') { flyToPill(() => { S.closed = true; render(); scheduleCompact(); }); }
+  else { S.dlg = false; render(); }
+}
+// What the finished task leaves behind in the panes.
+function applyResult() {
+  const s = sc();
+  const from = FOLDERS[s.from];
+  const moved = from.items.filter(it => s.pick.includes(it.n));
+  if (s.to) {
+    const dest = FOLDERS[s.to];
+    moved.forEach(it => { if (!dest.items.some(x => x.n === it.n)) dest.items.push({ ...it, d: '2026-11-06 14:36', fresh: true }); });
+    // A visible destination shows the arrivals at once (selected, no navigation).
+    const pi = S.panes.indexOf(s.to);
+    if (pi >= 0) { S.sel[pi] = new Set(s.pick); S.flash[pi] = new Set(s.pick); }
+  }
+  if (S.sc !== 'copy') { from.items.forEach(it => { if (s.pick.includes(it.n)) it.gone = true; }); S.sel[S.panes.indexOf(s.from)] = new Set(); }
+  else S.sel[S.panes.indexOf(s.from)] = new Set();
+  if (s.bin) $('#binCount') && ($('#binCount').textContent = '437 项');
+}
+// 定位: the destination in a visible pane is selected there; otherwise the
+// pane that is not the source navigates to it (single pane: the current one).
+function locate() {
+  const s = sc(); if (!s.to) return;
+  let pi = S.panes.indexOf(s.to), navigated = false, prev = '';
+  if (pi < 0) {
+    pi = S.panes.indexOf(s.from) === 0 ? 1 : 0;
+    prev = FOLDERS[S.panes[pi]].name;
+    S._back = { pane: pi, key: S.panes[pi] };
+    S.panes[pi] = s.to; navigated = true;
+  }
+  S.focus = pi;
+  S.sel = [new Set(), new Set()]; S.flash = [new Set(), new Set()];
+  S.sel[pi] = new Set(s.pick); S.flash[pi] = new Set(s.pick);
+  S.locateTag = navigated ? { pane: pi, n: s.pick.length, verb: s.verb, prev } : null;
+  $('#hist').hidden = true; $('#menu').hidden = true;
+  render();
+  if (navigated) $(`.pane[data-i="${pi}"]`).classList.add('arrive');
+  setTimeout(() => { S.flash = [new Set(), new Set()]; }, 3400);
+}
+function undo() {
+  const s = sc();
+  for (const k in BASE) FOLDERS[k] = JSON.parse(JSON.stringify(BASE[k]));
+  if (s.bin) $('#binCount') && ($('#binCount').textContent = '435 项');
+  const pi = S.panes.indexOf(s.from);
+  if (pi >= 0 && S.sc !== 'copy') { S.sel[pi] = new Set(s.pick); S.flash[pi] = new Set(s.pick); }
+  S.undone = true; S.locateTag = null; S.pillCompact = false;
+  $('#hist').hidden = true;
+  render();
+  setTimeout(() => { S.flash = [new Set(), new Set()]; }, 3400);
+}
+
+function setPhase(ph) {
+  stopRun(); clearTimeout(S._closeT); clearTimeout(S._compactT);
+  resetScenario();
+  S.phase = ph; S.dlg = true; S.closed = false;
+  if (ph === 'done') { S.p = 1; seedSamples(1); applyResult(); }
+  if (ph === 'partial') { S.p = 1; seedSamples(1); }
+  if (ph === 'hidden') { S.dlg = false; }
+  if (ph === 'running' && !qs.has('p')) { S.p = .38; seedSamples(.38); }
+  render();
+  if (ph === 'done' && !S._static) finish();
+}
+
+function render() {
+  renderPanes(); renderDialog(); renderStatus();
+  $('#controls').innerHTML = controlsHTML();
+  $('#tryline').innerHTML = tryHTML();
+  $('#tabT').textContent = `${FOLDERS[S.panes[0]].name} · 2`;
+  renderPills();
+}
+function renderPills() {
+  // Static samples of every pill state, independent of the live demo.
+  const save = { sc: S.sc, p: S.p, phase: S.phase, queue: S.queue, undone: S.undone };
+  const cards = [];
+  const add = (sck, ph, p, label, desc, opts = {}) => {
+    S.sc = sck; S.p = p; S.undone = false; S.queue = opts.queue || 0;
+    cards.push(`<div class="pcard"><span class="pl">${label}</span>${pillHTML(ph, { ...opts, live: !!opts.queue })}<span class="pd">${desc}</span></div>`);
+  };
+  add('copy', 'running', .38, '进行中（对话框已收起）', '单击：对话框从胶囊里展开回来。+2 表示后面还有两个任务在排队。', { queue: 2 });
+  add('copy', 'paused', .38, '已暂停', '胶囊变琥珀色，直接给「继续」，不用打开对话框。');
+  add('copy', 'conflict', .4, '需要你决定', '冲突和文件占用会把对话框带到前面；收起后胶囊提醒你还在等。');
+  add('copy', 'partial', 1, '部分失败（现有）', '不会自动关闭。单击回到失败列表，每项可以定位或重试。');
+  add('copy', 'done', 1, '复制 / 移动完成', '「定位」切到目标并选中新文件；「撤销」只撤这一次。');
+  add('del', 'done', 1, '删除到回收站完成', '「撤销」放回原处；「回收站」打开回收站并选中它们。');
+  add('copy', 'done', 1, '12 秒后收成图标', '悬停显示完整结果，单击打开操作记录。', { compact: true });
+  Object.assign(S, save);
+  $('#pills').innerHTML = cards.join('');
+}
+
+/* ---------- events ---------- */
+document.addEventListener('click', e => {
+  const c = e.target.closest('[data-ctl]');
+  if (c) {
+    const key = c.dataset.ctl, v = c.dataset.v;
+    if (key === 'theme') { S.theme = v; document.documentElement.dataset.theme = v; render(); return; }
+    if (key === 'sc') { S.sc = v; S.phase = PHASES[v][0][0]; setPhase(S.phase); return; }
+    if (key === 'phase') { setPhase(v); return; }
+    if (key === 'dest') { S.destOpen = v === 'open'; setPhase(S.phase); return; }
+    if (key === 'queue') { S.queue = +v; render(); return; }
+    return;
+  }
+  const t = e.target.closest('[data-act]');
+  if (!t) { if (!e.target.closest('#hist')) $('#hist').hidden = true; if (!e.target.closest('#menu')) $('#menu').hidden = true; return; }
+  const act = t.dataset.act;
+  if (t.hasAttribute('disabled')) return;
+  if (act !== 'more') $('#menu').hidden = true;
+  switch (act) {
+    case 'demo': S.sc = S.sc === 'perm' ? 'copy' : S.sc; resetScenario(); startRun(0); break;
+    case 'theme': S.theme = S.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = S.theme; render(); break;
+    case 'hide': hideDialog(); break;
+    case 'close': stopRun(); clearTimeout(S._closeT); if (S.phase === 'done') { flyToPill(() => { S.closed = true; render(); }); } else { S.dlg = false; if (S.phase === 'partial') { S.closed = true; } render(); } break;
+    case 'details': case 'queue': S.detailed = !S.detailed; renderDialog(); break;
+    case 'more': { const m = $('#menu'); if (!m.hidden) { m.hidden = true; break; } openMenu(t, moreMenuHTML()); break; }
+    case 'pause':
+      if (S.phase === 'paused') { S.phase = $('#dlg').hidden ? 'hidden' : 'running'; if (S.p < 1) runLoop(); }
+      else if (S.phase === 'running' || S.phase === 'hidden') S.phase = 'paused';
+      render(); if (!$('#hist').hidden) toggleHist(true); break;
+    case 'cancel':
+      stopRun(); S.dlg = false;
+      if (S.phase !== 'confirm') { toast(`已取消${sc().verb}，已完成的 ${fmt(nums().doneItems)} 项保留`); S.phase = 'cancelled'; }
+      render();
+      break;
+    case 'skip': toast('已跳过当前项'); break;
+    case 'pill':
+      if (e.target.closest('.act')) break;
+      if (['running', 'paused', 'hidden', 'conflict', 'locked', 'partial'].includes(S.phase) && (S.phase === 'hidden' || $('#dlg').hidden)) { flyFromPill(); break; }
+      toggleHist(); break;
+    case 'show': $('#hist').hidden = true; if (S.phase === 'done') { S.closed = false; S.dlg = true; S._kept = true; render(); } else flyFromPill(); break;
+    case 'locate': if (S.phase === 'done' || S.phase === 'partial') { if (!$('#dlg').hidden) { clearTimeout(S._closeT); flyToPill(() => { S.closed = true; render(); locate(); }); } else locate(); } break;
+    case 'undo': undo(); break;
+    case 'bin': toast('打开回收站，并选中刚删除的 2 项'); break;
+    case 'back': if (S._back) { S.panes[S._back.pane] = S._back.key; S.locateTag = null; S.sel = [new Set(), new Set()]; render(); } break;
+    case 'keep': clearTimeout(S._closeT); S._kept = true; renderDialog(); break;
+    case 'toggle-locate': S.locateAfter = !S.locateAfter; toast(S.locateAfter ? '完成后会自动切到目标并选中新文件' : '完成后不自动定位'); break;
+    case 'toggle-keep': S.keepOpen = !S.keepOpen; toast(S.keepOpen ? '这次完成后窗口保持打开' : '完成后自动收进状态栏'); break;
+    case 'openfolder': toast(`在新标签页打开 <b>${esc(FOLDERS[t.dataset.k].name)}</b>，当前栏不动`); break;
+    case 'copypath': toast('已复制 D:\\备份\\2026-11'); break;
+    case 'qcancel': S.queue = Math.max(0, S.queue - 1); toast('已取消排队中的任务'); render(); if (!$('#hist').hidden) toggleHist(true); break;
+    case 'clearhist': S.history = []; toggleHist(true); break;
+    case 'flocate': toast('在新标签页打开所在文件夹，并选中这一项'); break;
+    case 'fretry': { const row = t.closest('.frow'); row.classList.add('ok'); row.querySelector('.why').textContent = '已完成'; row.querySelector('.fa').innerHTML = ''; break; }
+    case 'retryall': $$('#dlg .frow').forEach(r => { r.classList.add('ok'); r.querySelector('.why').textContent = '已完成'; r.querySelector('.fa').innerHTML = ''; }); setTimeout(() => { applyResult(); S.phase = 'done'; S.closed = false; render(); finish(); }, 600); break;
+    case 'copyerr': toast('已复制 2 条失败信息（路径 + 原因）'); break;
+    case 'diff': toast('打开「文本对比」：两个 release-notes.md 并排比较'); break;
+    case 'preview': toast('空格预览复制过来的版本'); break;
+    case 'resolve': if (S.applyRest) { S.phase = 'running'; S.dlg = true; S.p = .42; seedSamples(.42); render(); startRun(.42); } else { S.conflictIdx = Math.min(4, S.conflictIdx + 1); renderDialog(); } break;
+    case 'applyrest': S.applyRest = !S.applyRest; renderDialog(); break;
+    case 'tobin': S.sc = 'del'; resetScenario(); startRun(0); break;
+    case 'permgo': resetScenario(); startRun(0); break;
+    case 'noop': toast('沿用现有行为'); break;
+  }
+});
+document.addEventListener('mouseover', e => {
+  const el = e.target.closest('#win [data-tip]');
+  if (el && !el.contains(e.relatedTarget)) { clearTimeout(tipT); tipT = setTimeout(() => showTip(el), $('#tip').classList.contains('on') ? 0 : 380); }
+});
+document.addEventListener('mouseout', e => {
+  const el = e.target.closest('#win [data-tip]');
+  if (el && !el.contains(e.relatedTarget)) { clearTimeout(tipT); $('#tip').classList.remove('on'); }
+});
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (!$('#menu').hidden) { $('#menu').hidden = true; return; }
+  if (!$('#hist').hidden) { $('#hist').hidden = true; return; }
+  if (!$('#dlg').hidden && ['running', 'paused', 'done'].includes(S.phase)) hideDialog();
+});
+
+function fitStage() {
+  const stage = $('#stage'), win = $('#win');
+  const kk = Math.min(1, stage.clientWidth / 1182);
+  S._scale = kk;
+  win.style.transform = `scale(${kk})`;
+  win.style.left = Math.max(0, (stage.clientWidth - 1182 * kk) / 2) + 'px';
+  stage.style.height = 702 * kk + 'px';
+}
+window.addEventListener('resize', fitStage);
+
+/* ---------- spec ---------- */
+$('#spec').innerHTML = `
+<article class="card">
+  <h3>做完就走：自动关闭和状态栏</h3>
+  <p>现在成功的任务一结束对话框就消失（<code>TransferCanAutoClose</code>：没有失败项、没有错误）。改进后保留这个规则，只调整它怎么消失、消失后去哪里找。</p>
+  <ul>
+    <li><b>先停 1.2 秒</b>：标题变成「✓ 已复制 1,284 个项目」，底部一条绿色细线走完。用户看到“成功了”，不是“窗口突然没了”。</li>
+    <li><b>缩进状态栏</b>：对话框缩小飞到胶囊的位置，胶囊弹一下。下次就知道去哪里找。</li>
+    <li><b>想看就留</b>：倒计时期间点「保持打开」，或在 ⋯ 里勾「保持这个窗口打开」。</li>
+    <li><b>失败、冲突、文件占用、需要管理员权限</b>：不自动关闭，和现在一样。</li>
+    <li>运行中按 <kbd>Esc</kbd>、点最小化或关闭：收到状态栏，任务继续。单击胶囊，对话框从胶囊里展开回来。</li>
+  </ul>
+</article>
+<article class="card">
+  <h3>「定位」怎么找到结果</h3>
+  <p>现在胶囊上的「打开」只是 <code>NavigateTo(destination_dir)</code>，进去以后还得自己找刚复制的是哪几个。完成记录里已有 <code>CompletedOperation::destinations</code>，可以直接选中它们。</p>
+  <div class="tbl"><table>
+    <tr><th>情况</th><th>定位做什么</th></tr>
+    <tr><td>目标已在某一栏打开</td><td>不跳转，直接在那一栏选中新文件，闪两下，滚到可见</td></tr>
+    <tr><td>双栏，目标没打开</td><td>不是源的那一栏切到目标并选中；顶部提示「返回 原文件夹」</td></tr>
+    <tr><td>单栏</td><td>当前栏切到目标并选中，后退可回去</td></tr>
+    <tr><td>按住 Ctrl 点定位</td><td>在新标签页打开目标并选中，当前栏不动</td></tr>
+    <tr><td>移动</td><td>同上；源文件夹里那几行滑出</td></tr>
+    <tr><td>删除到回收站</td><td>没有定位，改为「撤销」和「回收站」（打开回收站并选中它们）</td></tr>
+  </table></div>
+</article>
+<article class="card">
+  <h3>对话框里新增的按钮</h3>
+  <div class="tbl"><table>
+    <tr><th>位置</th><th>按钮</th><th></th></tr>
+    <tr><td>源 → 目标</td><td>两个文件夹名可以点，在新标签页打开</td><td><span class="tag new">新增</span></td></tr>
+    <tr><td>标题下方</td><td>「后面还有 2 个任务」，展开看排队，可以逐个取消</td><td><span class="tag new">新增</span></td></tr>
+    <tr><td>底部 ⋯</td><td>打开源 / 目标文件夹、复制目标路径、完成后自动定位、完成后保持打开、收到状态栏</td><td><span class="tag new">新增</span></td></tr>
+    <tr><td>完成时</td><td>「定位到新文件」（复制 / 移动）、「撤销」（删除到回收站）、「保持打开」</td><td><span class="tag new">新增</span></td></tr>
+    <tr><td>部分失败</td><td>每项「定位」、底部「复制错误信息」</td><td><span class="tag new">新增</span></td></tr>
+    <tr><td>部分失败</td><td>每项「重试」、「重试失败项」、「打开目标文件夹」</td><td><span class="tag has">现有</span></td></tr>
+    <tr><td>冲突</td><td>「对比内容」（文本文件，打开文本对比）、「预览」、「打开所在位置」，选项旁的 R / S / K 快捷键</td><td><span class="tag new">新增</span></td></tr>
+    <tr><td>运行中</td><td>详细信息、跳过此项、暂停 / 继续、取消</td><td><span class="tag has">现有</span></td></tr>
+    <tr><td>文件占用、永久删除</td><td>切换到程序、结束进程并重试、立即重试、跳过此项；改为移到回收站</td><td><span class="tag has">现有</span></td></tr>
+  </table></div>
+</article>
+<article class="card">
+  <h3>操作记录（单击胶囊）</h3>
+  <p>队列一次只做一个任务。现在状态栏只显示当前这一个，排队的和刚做完的都看不到。</p>
+  <ul>
+    <li>正在做的：进度、暂停 / 继续、详情。</li>
+    <li>排队中的：目标和大小，可以单独取消（<code>OpsManager::CancelTask</code> 已按任务 id 取消）。</li>
+    <li>做完的：定位、撤销、详情。只有最近一次能撤销，更早的「撤销」置灰并说明原因，和 <code>CanUndoTask</code> 一致。</li>
+    <li>只保留本次运行的记录，「清除已完成」清空。</li>
+  </ul>
+</article>
+<article class="card">
+  <h3>新增文案（写入 catalog.tsv）</h3>
+  <div class="tbl"><table>
+    <tr><th>name</th><th>zh</th><th>en</th></tr>
+    <tr><td>OpLocate</td><td>定位</td><td>Show</td></tr>
+    <tr><td>OpLocateNewFiles</td><td>定位到新文件</td><td>Show new files</td></tr>
+    <tr><td>OpLocatedFormat</td><td>选中了刚%s来的 %d 项</td><td>Selected the %d items just %s</td></tr>
+    <tr><td>OpBackToFormat</td><td>返回 %s</td><td>Back to %s</td></tr>
+    <tr><td>OpKeepOpen</td><td>保持打开</td><td>Keep open</td></tr>
+    <tr><td>OpClosingSoon</td><td>即将收进状态栏</td><td>Moving to the status bar</td></tr>
+    <tr><td>OpHideToStatus</td><td>收到状态栏</td><td>Move to status bar</td></tr>
+    <tr><td>OpQueuedFormat</td><td>后面还有 %d 个任务</td><td>%d more queued</td></tr>
+    <tr><td>OpCopyDestPath</td><td>复制目标路径</td><td>Copy destination path</td></tr>
+    <tr><td>OpOpenSource</td><td>打开源文件夹</td><td>Open source folder</td></tr>
+    <tr><td>OpAfterLocate</td><td>自动定位到新文件</td><td>Show new files when done</td></tr>
+    <tr><td>OpCopyErrors</td><td>复制错误信息</td><td>Copy error details</td></tr>
+    <tr><td>OpCompareContent</td><td>对比内容</td><td>Compare contents</td></tr>
+    <tr><td>OpHistoryTitle</td><td>文件操作</td><td>File operations</td></tr>
+    <tr><td>OpUndoOnlyLatest</td><td>只能撤销最近一次操作</td><td>Only the latest operation can be undone</td></tr>
+    <tr><td>OpRecycleBinShow</td><td>回收站</td><td>Recycle Bin</td></tr>
+  </table></div>
+  <p>沿用现有：<code>OpOpenDestination</code>、<code>OpRetryFailedItems</code>、<code>OpPillFailed</code>、<code>OpSkipCurrentItem</code>、<code>OpPause</code> / <code>OpResume</code>、<code>OpDetails</code> / <code>OpSummary</code>、<code>Undo</code>、冲突和文件占用的全部文字。现有的 <code>Open</code>（打开）在胶囊上换成「定位」。</p>
+</article>
+<article class="card">
+  <h3>落到代码里的位置</h3>
+  <ul>
+    <li>对话框：<code>MakeTransferLabels</code> / <code>MakeTransferChrome</code> 加 ⋯、定位、保持打开；<code>SetAutoClose</code> 保留，成功后先进入 1.2 秒的完成态再隐藏。缩进动画由主窗口在胶囊位置补一帧回弹，对话框本身只淡出。</li>
+    <li>定位：<code>StatusBarTask</code> 的 <code>sub_index == 1</code> 从 <code>NavigateTo</code> 改为「选目标栏 → 导航 → 选中 <code>destinations</code> → 闪烁」，复用粘贴后选中新文件的那套选中和滚动。</li>
+    <li>胶囊：<code>StatusBarView</code> 加排队数、紧凑态；<code>DrawTaskPill</code> 加「定位 / 回收站」两个子按钮，<code>sub_index</code> 顺延。</li>
+    <li>操作记录：新的弹出层，数据来自 <code>DrainFinishedTasks</code> 时留下的会话列表，排队项用 <code>QueryTask</code>。</li>
+    <li>需要验证：定位时目标已被删除或改名、网络路径、移动跨盘、撤销后定位置灰、深浅主题、150% DPI、对话框在另一台显示器上时的缩进动画（不同屏时只淡出）。</li>
+  </ul>
+</article>`;
+
+/* ---------- boot ---------- */
+$('#win').innerHTML = winHTML();
+fitStage();
+S._static = qs.has('static');
+resetScenario();
+const ph0 = qs.get('phase');
+if (ph0 && PHASES[S.sc].some(p => p[0] === ph0)) S.phase = ph0; else S.phase = PHASES[S.sc][0][0];
+if (S.phase === 'done' || S.phase === 'partial') { S.p = 1; seedSamples(1); }
+if (S.phase === 'done') applyResult();
+if (S.phase === 'hidden') S.dlg = false;
+if (qs.has('closed')) S.closed = true;
+render();
+if (qs.has('locate')) { S.closed = true; render(); locate(); }
+if (qs.has('hist')) { toggleHist(true); }
+if (qs.has('menu')) { const b = $('#dlg [data-act="more"]'); if (b) openMenu(b, moreMenuHTML()); }
+if (S.phase === 'done' && !S._static && !qs.has('closed') && !qs.has('locate')) finish();
+})();
+</script>
+</body>
+</html>

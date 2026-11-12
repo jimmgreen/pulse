@@ -30,6 +30,26 @@ bool TextValid(const std::u16string& text) {
     }
     return true;
 }
+std::u16string OpenFilterPattern(std::u16string_view pattern) {
+    // Native Open ignores ASCII spaces after ';', not spaces before it.
+    // Keep whitespace-only segments unsupported and preserve the caller trace.
+    std::u16string result;
+    size_t start = 0;
+    while (start < pattern.size()) {
+        const auto end = pattern.find(u';', start);
+        auto part = pattern.substr(start, end == pattern.npos ? pattern.size() - start : end - start);
+        if (start && !part.empty()) {
+            const auto first = part.find_first_not_of(u' ');
+            if (first == part.npos) return std::u16string(pattern);
+            part.remove_prefix(first);
+        }
+        result.append(part);
+        if (end == pattern.npos) break;
+        result.push_back(u';');
+        start = end + 1;
+    }
+    return result;
+}
 bool AbsoluteDirectory(std::u16string_view path) {
     if (path.starts_with(u"\\\\?\\UNC\\")) return AbsoluteDirectory(u"\\\\" + std::u16string(path.substr(8)));
     if (path.starts_with(u"\\\\?\\")) path.remove_prefix(4);
@@ -70,8 +90,9 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
     uint32_t index = 1;
     bool types_set = false, folder_set = false, extension_set = false;
     wire::Request body;
-    bool readonly_ownership = false;
-    std::optional<std::u16string> title, ok_label, filename_label, open_extension;
+    bool readonly_ownership = false, shell_item_filter = false, save_as_item = false, save_metadata = false;
+    size_t shell_filter_index = 0;
+    std::optional<std::u16string> title, ok_label, filename_label, cancel_label, open_extension;
     for (size_t i = 0; i < calls.size(); ++i) {
         const auto& call = calls[i];
         // Native folder dialogs reject both filter setters without changing state.
@@ -89,12 +110,13 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
             // listing every file, exactly as if SetFileTypes was never called.
             if (call.filters.empty()) break;
             if (call.filters.size() > wire::kMaxFilters) return Invalid(i);
-            for (const auto& filter : call.filters) {
+            body.filters = call.filters;
+            for (auto& filter : body.filters) {
                 if (filter.label.empty() || !TextValid(filter.label) || !TextValid(filter.pattern)) return Invalid(i);
+                if (factory == DialogFactory::Open) filter.pattern = OpenFilterPattern(filter.pattern);
                 if (factory == DialogFactory::Open ? !picker_filter::OpenPattern(std::u16string_view(filter.pattern)) : !Pattern(filter.pattern))
                     return Native(NativeReason::UnsupportedFilter, i);
             }
-            body.filters = call.filters;
             // Both all-file spellings include extensionless names in Open.
             // Canonicalize only this exact form; do not approximate other globs.
             if (factory == DialogFactory::Open)
@@ -149,10 +171,12 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
         case Setting::Title:
         case Setting::OkButtonLabel:
         case Setting::FileNameLabel:
+        case Setting::CancelButtonLabel:
             if (!TextValid(call.text) || call.text.size() > 256 || call.text.find_first_of(u"\r\n\t") != call.text.npos) return Invalid(i);
             if (call.setting == Setting::Title) title = call.text;
             else if (call.setting == Setting::OkButtonLabel) ok_label = call.text;
-            else filename_label = call.text;
+            else if (call.setting == Setting::FileNameLabel) filename_label = call.text;
+            else cancel_label = call.text;
             break;
         case Setting::Place:
             if (!context.filesystem_places_owned) return Native(NativeReason::Places, i);
@@ -166,15 +190,32 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
         case Setting::ReadonlyOwnershipCollection:
             if (factory != DialogFactory::Save || call.value) return Native(NativeReason::SaveMetadata, i);
             readonly_ownership = true;
+            save_metadata = true;
             break;
         case Setting::SaveProperties:
             if (factory != DialogFactory::Save || !context.save_properties_owned) return Native(NativeReason::SaveMetadata, i);
+            save_metadata = true;
             break;
-        case Setting::SaveAsItem: return Native(NativeReason::SaveMetadata, i);
-        case Setting::ShellFilter: return Native(NativeReason::ShellFilter, i);
+        case Setting::SaveAsItem:
+            if (call.value > 1) return Invalid(i);
+            if (factory != DialogFactory::Save || policy != AccessPolicy::LocalSaveV1 ||
+                !context.filesystem_save_as_item_owned || !context.resolved_initial_directory || !context.resolved_save_as_filename)
+                return Native(NativeReason::SaveMetadata, i);
+            save_as_item = true;
+            break;
+        case Setting::ShellFilter:
+            if (call.value > 1) return Invalid(i);
+            shell_item_filter = call.value != 0; shell_filter_index = i;
+            break;
         default: return Native(NativeReason::UnknownSetting, i);
         }
     }
+    if (save_as_item && save_metadata && !context.save_properties_owned) return Native(NativeReason::SaveMetadata);
+    // SetFilter(nullptr) clears only this requirement. Earlier failed setters
+    // and independent unsupported settings still keep their original gates.
+    if (shell_item_filter && (!context.shell_item_filter_supported ||
+        (options & (FOS_ALLNONSTORAGEITEMS | FOS_SUPPORTSTREAMABLEITEMS))))
+        return Native(NativeReason::ShellFilter, shell_filter_index);
     constexpr uint32_t common = FOS_NOCHANGEDIR | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT | FOS_FORCESHOWHIDDEN | FOS_DEFAULTNOMINIMODE;
     const uint32_t allowed = common | (context.native_options_supported ? kExtendedFileDialogOptions : 0u) | (factory == DialogFactory::Save ? FOS_OVERWRITEPROMPT | FOS_NOREADONLYRETURN | FOS_NOVALIDATE | FOS_NOTESTFILECREATE :
         FOS_PICKFOLDERS | FOS_FILEMUSTEXIST | FOS_ALLOWMULTISELECT | FOS_NODEREFERENCELINKS | FOS_NOVALIDATE | FOS_OVERWRITEPROMPT);
@@ -183,7 +224,11 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
     if (FAILED(picker_shell::ValidateOptions(options))) return Invalid();
     const bool local_open = policy == AccessPolicy::LocalOpenV1 && factory == DialogFactory::Open &&
         (!(options & FOS_NOVALIDATE) || context.caller_validation_supported);
-    const bool allow_missing_open = local_open && ((options & FOS_NOVALIDATE) || (context.native_options_supported && (options & FOS_CREATEPROMPT))) && !(options & FOS_FILEMUSTEXIST) && context.open_missing_supported;
+    const bool validated_missing_open = context.open_missing_validated_supported &&
+        !(options & (FOS_NOVALIDATE | FOS_CREATEPROMPT | FOS_PICKFOLDERS));
+    const bool allow_missing_open = local_open && ((options & FOS_NOVALIDATE) ||
+        (context.native_options_supported && (options & FOS_CREATEPROMPT)) || validated_missing_open) &&
+        !(options & FOS_FILEMUSTEXIST) && context.open_missing_supported;
     if (allow_missing_open && open_extension && !open_extension->empty()) return Native(NativeReason::UnsupportedExtension);
     const bool local_save = policy == AccessPolicy::LocalSaveV1 && factory == DialogFactory::Save;
     const bool no_test_create = local_save && (options & FOS_NOTESTFILECREATE) && context.save_no_test_create_supported && !(options & FOS_NOVALIDATE);
@@ -209,12 +254,22 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
         body.initial_directory = *context.resolved_initial_directory;
         folder_set = true;
     }
+    if (save_as_item) {
+        const auto& filename = *context.resolved_save_as_filename;
+        if (!TextValid(filename)) return Invalid();
+        if (filename.find_first_of(u"\\/:*?\"<>|") != filename.npos || filename == u"." || filename == u"..")
+            return Native(NativeReason::UnsupportedFilename);
+        // Getter evidence after the complete setter sequence also represents
+        // replacement/null clearing; it is not a fabricated FileName call.
+        body.filename = filename;
+    }
     if (!folder_set) return Native(NativeReason::DefaultDirectoryPolicy);
     if (factory == DialogFactory::Save) {
-        if (!(options & FOS_OVERWRITEPROMPT) || (!caller_save && !native_save && !(options & FOS_NOREADONLYRETURN))) return Native(NativeReason::SaveContract);
+        if ((!(options & FOS_OVERWRITEPROMPT) && !(local_save && context.save_no_overwrite_supported)) ||
+            (!caller_save && !native_save && !(options & FOS_NOREADONLYRETURN))) return Native(NativeReason::SaveContract);
         body.operation = wire::Operation::SaveFile;
         body.required_capabilities = wire::Save;
-        body.options = wire::OverwritePrompt;
+        body.options = (options & FOS_OVERWRITEPROMPT) ? wire::OverwritePrompt : 0u;
     } else if (options & FOS_PICKFOLDERS) {
         if (types_set || extension_set) return Native(NativeReason::FolderFileSettings);
         body.operation = wire::Operation::PickFolder;
@@ -260,12 +315,14 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
     decision.skip_save_access_validation = caller_save;
     decision.native_save_defaults = native_save;
     decision.no_test_file_create = no_test_create;
+    decision.shell_item_filter = shell_item_filter;
+    decision.no_overwrite_prompt = factory == DialogFactory::Save && !(options & FOS_OVERWRITEPROMPT);
     decision.require_existing_save_parent = no_test_create && (options & FOS_PATHMUSTEXIST);
     decision.skip_open_access_validation = local_open && (options & FOS_NOVALIDATE);
     decision.allow_missing_open = allow_missing_open;
     decision.require_existing_open_parent = allow_missing_open && (options & FOS_PATHMUSTEXIST);
     decision.open_default_extension = std::move(open_extension);
-    decision.title = std::move(title); decision.ok_button_label = std::move(ok_label); decision.file_name_label = std::move(filename_label);
+    decision.title = std::move(title); decision.ok_button_label = std::move(ok_label); decision.file_name_label = std::move(filename_label); decision.cancel_button_label = std::move(cancel_label);
     decision.disposition = Disposition::Prepared;
     decision.request = std::move(request);
     if (local_open || local_save) {
@@ -295,8 +352,8 @@ ContractDecision PrepareFileDialogContract(DialogFactory factory, std::span<cons
 
 std::optional<wire::Message> BridgeRequestFor(const ContractDecision& decision) {
     if (decision.disposition != Disposition::Prepared || !decision.request || !decision.effective_options) return std::nullopt;
-    if (decision.native_options || (*decision.effective_options & FOS_SHAREAWARE) || decision.allow_missing_open ||
-        decision.require_existing_open_parent || decision.open_default_extension) return std::nullopt;
+    if (decision.shell_item_filter || decision.native_options || (*decision.effective_options & FOS_SHAREAWARE) || decision.allow_missing_open ||
+        decision.require_existing_open_parent || decision.open_default_extension || decision.cancel_button_label || decision.no_overwrite_prompt) return std::nullopt;
     auto message = *decision.request;
     auto* body = std::get_if<wire::Request>(&message.body);
     if (!body) return std::nullopt;

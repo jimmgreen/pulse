@@ -1,5 +1,6 @@
 #include "../ipc/picker_session.h"
 #include "picker_host_mode.h"
+#include "../picker_inprocess/picker_jump_context.h"
 #include "picker_appearance_ui.h"
 #include "../common/localization.h"
 #include "../ui/typography.h"
@@ -139,6 +140,7 @@ int Serve(wire::Channel& channel, HANDLE parent_process, DWORD pid, uint64_t own
     spec.placement_owner = owner;
     if (WaitForSingleObject(parent_process, 0) != WAIT_TIMEOUT) return 4;
 
+    picker_inprocess::AttachJumpContext(spec, pid);
     auto outcome = ui::ShowFilePickerDetailed(nullptr, spec, colors.dark, ui::HexColor(colors.accent_rgb));
     reader.Stop(); // All outstanding overlapped reads finish before response/write/destruction.
     wire::Message response;

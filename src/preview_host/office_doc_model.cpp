@@ -37,6 +37,9 @@ using Microsoft::WRL::ComPtr;
 constexpr size_t kMaxBlocks = 40;          // same budget as the .docx reader
 constexpr size_t kMaxTableRows = 8;
 constexpr size_t kMaxChars = 60000;        // text scanned for the first blocks
+constexpr size_t kDocumentChars = 2u << 20;
+constexpr size_t kDocumentBlocks = 32768;
+constexpr size_t kDocumentRows = 32768;
 constexpr size_t kWordStreamBytes = 64u << 20;
 constexpr size_t kTableStreamBytes = 32u << 20;
 constexpr size_t kRtfBytes = 8u << 20;
@@ -315,7 +318,7 @@ wchar_t CompressedChar(uint8_t byte) {
 }
 
 bool ReadText(const std::vector<uint8_t>& word, const std::vector<uint8_t>& table, uint32_t fc_clx,
-              uint32_t lcb_clx, uint32_t ccp_text, std::vector<DocChar>& text) {
+              uint32_t lcb_clx, uint32_t ccp_text, std::vector<DocChar>& text, size_t max_chars) {
     if (lcb_clx < 5 || fc_clx > table.size() || lcb_clx > table.size() - fc_clx) return false;
     size_t at = fc_clx;
     const size_t end = static_cast<size_t>(fc_clx) + lcb_clx;
@@ -325,13 +328,14 @@ bool ReadText(const std::vector<uint8_t>& word, const std::vector<uint8_t>& tabl
     if (at + 5 > end || table[at] != 2) return false;     // Pcdt
     const size_t lcb = U32(table, at + 1);
     const size_t plc = at + 5;
-    if (lcb < 4 || plc + lcb > end) return false;
+    if (lcb < 4 || (lcb - 4) % 12 != 0 || plc + lcb > end) return false;
     const size_t n = (lcb - 4) / 12;
-    const size_t limit = (std::min)(static_cast<size_t>(ccp_text), kMaxChars);
+    const size_t limit = (std::min)(static_cast<size_t>(ccp_text), max_chars);
     for (size_t i = 0; i < n && text.size() < limit; ++i) {
         const uint32_t cp0 = U32(table, plc + 4 * i);
         const uint32_t cp1 = U32(table, plc + 4 * (i + 1));
-        if (cp1 <= cp0 || cp0 >= ccp_text) continue;
+        if (cp0 != text.size() || cp1 <= cp0) return false;
+        if (cp0 >= ccp_text) break;
         const uint32_t raw = U32(table, plc + 4 * (n + 1) + 8 * i + 2);
         const bool compressed = (raw & 0x40000000u) != 0;
         const uint32_t fc = raw & 0x3FFFFFFFu;
@@ -340,16 +344,16 @@ bool ReadText(const std::vector<uint8_t>& word, const std::vector<uint8_t>& tabl
         for (size_t k = 0; k < count; ++k) {
             if (compressed) {
                 const size_t off = fc / 2 + k;
-                if (off >= word.size()) return !text.empty();
+                if (off >= word.size()) return false;
                 text.push_back({CompressedChar(word[off]), static_cast<uint32_t>(off)});
             } else {
                 const size_t off = fc + 2 * k;
-                if (off + 2 > word.size()) return !text.empty();
+                if (off + 2 > word.size()) return false;
                 text.push_back({static_cast<wchar_t>(U16(word, off)), static_cast<uint32_t>(off)});
             }
         }
     }
-    return !text.empty();
+    return text.size() == limit && !text.empty();
 }
 
 // Collects paragraphs into DocModel blocks, grouping table paragraphs into
@@ -459,8 +463,8 @@ class RtfReader {
 public:
     enum class Mode { FirstPage, Text };
     RtfReader(const std::string& data, DocModel& model, size_t max_blocks = kMaxBlocks,
-              size_t max_rows = kMaxTableRows, Mode mode = Mode::FirstPage)
-        : data_(data), model_(model), out_(model, max_blocks, max_rows), mode_(mode) {}
+              size_t max_rows = kMaxTableRows, Mode mode = Mode::FirstPage, bool input_cut = false)
+        : data_(data), model_(model), out_(model, max_blocks, max_rows), mode_(mode), input_cut_(input_cut) {}
 
     bool Truncated() const { return out_.Truncated() || (!stop_ && pos_ < data_.size()); }
 
@@ -470,10 +474,11 @@ public:
         size_t guard = 0;
         while (pos_ < data_.size() && !out_.Full() && !stop_ && ++guard < data_.size() * 2) {
             const char c = data_[pos_];
-            if (c == '{') { FlushBytes(); states_.push_back(states_.back()); ++pos_; continue; }
+            if (c == '{') { if (states_.size() >= 256) return false; FlushBytes(); states_.push_back(states_.back()); ++pos_; continue; }
             if (c == '}') {
                 FlushBytes();
-                if (states_.size() > 1) states_.pop_back();
+                if (states_.size() <= 1) return false;
+                states_.pop_back();
                 ++pos_;
                 continue;
             }
@@ -485,6 +490,7 @@ public:
             FlushBytes();
             Append(static_cast<wchar_t>(static_cast<unsigned char>(c)));
         }
+        if (!input_cut_ && pos_ == data_.size() && states_.size() != 1) return false;
         FlushBytes();
         if (!text_.empty()) EndParagraph();
         out_.Finish();
@@ -584,6 +590,11 @@ private:
         for (const char* skipped : kSkipped) {
             if (word == skipped) { states_.back().skip = true; return; }
         }
+        if (word == "bin" && has_value && value >= 0) {
+            const size_t count = static_cast<size_t>(value);
+            if (count > data_.size() - pos_) { pos_ = data_.size(); return; }
+            pos_ += count; return;
+        }
         State& state = states_.back();
         if (word == "ansicpg" && has_value && value > 0) { codepage_ = static_cast<UINT>(value); return; }
         if (word == "uc" && has_value) { state.uc = static_cast<int>((std::clamp)(value, 0L, 8L)); return; }
@@ -646,6 +657,7 @@ private:
     DocModel& model_;
     BlockBuilder out_;
     Mode mode_;
+    bool input_cut_ = false;
     std::vector<State> states_;
     std::string bytes_;
     std::wstring text_;
@@ -672,7 +684,8 @@ WordFileFormat SniffWordFile(const std::wstring& path) {
     return WordFileFormat::Unknown;
 }
 
-bool ReadDocBinaryModel(const std::wstring& path, DocModel& model, std::wstring* error) {
+bool ReadDocBinaryModel(const std::wstring& path, DocModel& model, std::wstring* error, bool* truncated) {
+    if (truncated) *truncated = false;
     model = DocModel{};
     CompoundFile cfb;
     if (!cfb.Open(path)) { SetError(error, L"doc-not-compound"); return false; }
@@ -684,7 +697,7 @@ bool ReadDocBinaryModel(const std::wstring& path, DocModel& model, std::wstring*
     if (U16(word, 0) != 0xA5EC) { SetError(error, L"doc-bad-fib"); return false; }
     if (U16(word, 2) < 101) { SetError(error, L"doc-legacy-format"); return false; }   // Word 6/95
     const uint16_t flags = U16(word, 0x0A);
-    if (flags & 0x0100) { SetError(error, L"doc-encrypted"); return false; }
+    if (flags & 0x8100) { SetError(error, L"doc-encrypted"); return false; }
     std::vector<uint8_t> table;
     if (!cfb.ReadStream((flags & 0x0200) ? L"1Table" : L"0Table", kTableStreamBytes, table)) {
         SetError(error, L"doc-no-table-stream");
@@ -699,6 +712,9 @@ bool ReadDocBinaryModel(const std::wstring& path, DocModel& model, std::wstring*
     const size_t fclcb_count_at = rg_lw + cslw * 4;
     const size_t fclcb_count = U16(word, fclcb_count_at);
     const size_t fclcb = fclcb_count_at + 2;
+    if (cslw < 4 || fclcb > word.size() || fclcb_count > (word.size() - fclcb) / 8) {
+        SetError(error, L"doc-bad-fib"); return false;
+    }
     auto pair = [&](size_t index, uint32_t& fc, uint32_t& lcb) {
         fc = lcb = 0;
         if (index >= fclcb_count) return false;
@@ -709,7 +725,7 @@ bool ReadDocBinaryModel(const std::wstring& path, DocModel& model, std::wstring*
     uint32_t fc = 0, lcb = 0;
     if (!ccp_text || !pair(33, fc, lcb)) { SetError(error, L"doc-no-text"); return false; }
     std::vector<DocChar> text;
-    if (!ReadText(word, table, fc, lcb, ccp_text, text)) { SetError(error, L"doc-no-text"); return false; }
+    if (!ReadText(word, table, fc, lcb, ccp_text, text, truncated ? kDocumentChars : kMaxChars)) { SetError(error, L"doc-no-text"); return false; }
 
     StyleSheet styles;
     if (pair(1, fc, lcb)) styles = ReadStyleSheet(table, fc, lcb);
@@ -718,7 +734,8 @@ bool ReadDocBinaryModel(const std::wstring& path, DocModel& model, std::wstring*
     if (pair(12, fc, lcb)) chpx.Load(table, fc, lcb, word, false);
     if (pair(6, fc, lcb)) ApplySection(word, table, fc, lcb, model);
 
-    BlockBuilder out(model);
+    BlockBuilder out(model, truncated ? kDocumentBlocks : kMaxBlocks, truncated ? kDocumentRows : kMaxTableRows);
+    if (truncated) *truncated = text.size() < ccp_text;
     std::wstring paragraph;
     uint32_t first_fc = 0;
     bool have_first = false;
@@ -727,7 +744,7 @@ bool ReadDocBinaryModel(const std::wstring& path, DocModel& model, std::wstring*
         return std::any_of(field_code.begin(), field_code.end(), [](bool code) { return code; });
     };
     for (const DocChar& c : text) {
-        if (out.Full()) break;
+        if (out.Full()) { if (truncated) *truncated = true; break; }
         const wchar_t ch = c.ch;
         if (ch == 0x13) { field_code.push_back(true); continue; }
         if (ch == 0x14) { if (!field_code.empty()) field_code.back() = false; continue; }
@@ -793,21 +810,27 @@ bool ReadDocBinaryModel(const std::wstring& path, DocModel& model, std::wstring*
         }
         paragraph.clear();
         have_first = false;
-        if (ch == 0x0C && !model.blocks.empty()) break;   // first page only
+        if (!truncated && ch == 0x0C && !model.blocks.empty()) break;   // first page only
     }
+    if (!paragraph.empty()) out.Paragraph(paragraph, 10.5f, false, 0);
     out.Finish();
+    if (truncated) *truncated = *truncated || out.Truncated();
     if (model.blocks.empty()) { SetError(error, L"doc-empty"); return false; }
     return true;
 }
 
-bool ReadRtfModel(const std::wstring& path, DocModel& model, std::wstring* error) {
+bool ReadRtfModel(const std::wstring& path, DocModel& model, std::wstring* error, bool* truncated) {
+    if (truncated) *truncated = false;
     model = DocModel{};
     File file;
     if (!file.Open(path)) { SetError(error, L"rtf-open-failed"); return false; }
     std::string data(static_cast<size_t>((std::min<uint64_t>)(file.Size(), kRtfBytes)), '\0');
     if (data.empty() || !file.ReadAt(0, data.data(), data.size())) { SetError(error, L"rtf-read-failed"); return false; }
-    RtfReader reader(data, model);
+    RtfReader reader(data, model, truncated ? kDocumentBlocks : kMaxBlocks,
+                     truncated ? kDocumentRows : kMaxTableRows,
+                     truncated ? RtfReader::Mode::Text : RtfReader::Mode::FirstPage, file.Size() > kRtfBytes);
     if (!reader.Run()) { SetError(error, L"rtf-not-rtf"); return false; }
+    if (truncated) *truncated = file.Size() > kRtfBytes || reader.Truncated();
     if (reader.page_w_ >= 72 && reader.page_h_ >= 72 && reader.page_w_ <= 5000 && reader.page_h_ <= 5000) {
         model.page_width = reader.page_w_;
         model.page_height = reader.page_h_;
@@ -828,7 +851,7 @@ bool ReadRtfText(const std::wstring& path, std::wstring& text, bool* truncated, 
     std::string data(static_cast<size_t>((std::min<uint64_t>)(file.Size(), kRtfBytes)), '\0');
     if (data.empty() || !file.ReadAt(0, data.data(), data.size())) { SetError(error, L"rtf-read-failed"); return false; }
     DocModel model;
-    RtfReader reader(data, model, kTextBlocks, kTextRows, RtfReader::Mode::Text);
+    RtfReader reader(data, model, kTextBlocks, kTextRows, RtfReader::Mode::Text, file.Size() > kRtfBytes);
     if (!reader.Run()) { SetError(error, L"rtf-not-rtf"); return false; }
     bool cut = file.Size() > kRtfBytes || reader.Truncated();
     for (const DocBlock& block : model.blocks) {

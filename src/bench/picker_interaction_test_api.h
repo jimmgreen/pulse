@@ -19,6 +19,7 @@ struct PickerInteractionTest {
     std::vector<std::wstring> selected_paths;
     bool selected_visible = false;
     HWND rename_edit = nullptr;
-    RECT card{}, footer{};
+    RECT card{}, footer{}, cancel{}, primary{};
+    std::wstring cancel_text;
 };
 }

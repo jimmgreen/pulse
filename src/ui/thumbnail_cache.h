@@ -108,6 +108,8 @@ public:
     void Warm();
     void Reset();
     void Evict();
+    // Caller verifies unchanged file metadata; only matching image extensions transfer.
+    void RenameImage(const std::wstring& from, const std::wstring& to, uint64_t modified, uint64_t size);
     std::shared_future<void> SuspendVolume(const std::wstring& root);
     void ResumeVolume(const std::wstring& root);
     void BeginFrame();
@@ -186,6 +188,7 @@ private:
     friend class FolderThumbnailCache;
     friend struct FolderThumbnailCacheTestAccess;
     struct Item {
+        uint32_t renamed_before_request = 0;
         bool needs_psd_refine = false;
         uint64_t upload_token = 0;
         bool upload_failed = false;

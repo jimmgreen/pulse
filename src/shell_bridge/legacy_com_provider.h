@@ -16,6 +16,6 @@ struct LegacyComDiagnostic {
 // default-extension, hook, template, reserved-pointer, reserved-DWORD, custom-data.
 using LegacyDiagnostic = std::function<void(const LegacyComDiagnostic&)>;
 // False is a pre-display bypass. Once Show is called the operation is consumed.
-bool RunLegacyComDialog(OPENFILENAMEW* input, bool save, const LegacyDialogFactory& create, BOOL& result, const LegacyDiagnostic& diagnostic = {});
-bool RunLegacyComDialog(OPENFILENAMEA* input, bool save, const LegacyDialogFactory& create, BOOL& result, const LegacyDiagnostic& diagnostic = {});
+bool RunLegacyComDialog(OPENFILENAMEW* input, bool save, const LegacyDialogFactory& create, BOOL& result, const LegacyDiagnostic& diagnostic = {}, bool verified_local_hook_host = false);
+bool RunLegacyComDialog(OPENFILENAMEA* input, bool save, const LegacyDialogFactory& create, BOOL& result, const LegacyDiagnostic& diagnostic = {}, bool verified_local_hook_host = false);
 }

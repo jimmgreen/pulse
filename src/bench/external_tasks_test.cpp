@@ -49,6 +49,29 @@ int main() {
     check(manager.Status().task_id == second && manager.RecentStatuses().front().task_id == second, "newest external terminal is visible in status and history");
     OpsManagerAuditAccess::Builtin(manager, true); OpsManagerAuditAccess::Builtin(manager, false);
     check(manager.Status().task_id == 9999, "newer builtin terminal takes display priority");
+    {
+        // A plugin task waiting on a host operation stands in for it while that runs.
+        const auto waiting = manager.CreateExternalTask(L"Extract a.7z", L"Archive", L"a.7z", L"D:\\out", {L"Unpack", L"Write"});
+        OpStatus step = progress; step.external_step = 2; step.external_linked = 9999; step.external_note = L"undoable";
+        manager.UpdateExternalTask(waiting, step);
+        OpsManagerAuditAccess::Builtin(manager, true);
+        const auto shown = manager.Status();
+        check(shown.task_id == waiting && shown.external_step == 2 && shown.source_label == L"a.7z" &&
+              shown.destination_label == L"D:\\out" && shown.external_note == L"undoable", "linked plugin task stands in for its running operation");
+        step.external_linked = 0; manager.UpdateExternalTask(waiting, step);
+        check(manager.Status().task_id == 9999, "unlinked running operation shows itself");
+        OpsManagerAuditAccess::Builtin(manager, false);
+        int calls = 0; std::string picked;
+        manager.SetExternalTaskActionHandler(waiting, [&](const std::string& action) { ++calls; picked = action; });
+        check(!manager.InvokeExternalTaskAction(waiting, "retry") && calls == 0, "actions wait until the task has ended");
+        OpStatus failed = step; failed.external_actions = {{"retry", L"Retry", true}};
+        manager.FinishExternalTask(waiting, ExternalOutcome::Failed, failed);
+        const auto final_status = manager.FinalStatus(waiting);
+        check(final_status && final_status->external_actions.size() == 1 && final_status->external_linked == 0,
+              "terminal snapshot keeps actions and drops the link");
+        check(manager.InvokeExternalTaskAction(waiting, "retry") && !manager.InvokeExternalTaskAction(waiting, "retry") &&
+              calls == 1 && picked == "retry", "an ended task's action runs once");
+    }
     for (int i = 0; i < 20; ++i) { const auto id = manager.CreateExternalTask(L"Task", L"Test"); manager.FinishExternalTask(id, ExternalOutcome::Completed); }
     check(!manager.FinalStatus(first) && manager.RecentStatuses().size() == 16, "external terminal history retains at most sixteen");
     for (int i = 0; i < 32; ++i) check(manager.CreateExternalTask(L"Task", L"Test") != 0, "external active task within bound accepted");

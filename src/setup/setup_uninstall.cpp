@@ -1,8 +1,10 @@
 #include "../common/dialog_auto_registration.h"
+#include "../common/dialog_admin_auto_task.h"
 #include "start_pin_registration.h"
 #include "setup_uninstall.h"
 #include "setup_dialog_versions.h"
 #include "setup_dialog_migration.h"
+#include "../common/dialog_auto_transaction.h"
 #include "../common/dialog_bundle.h"
 
 #include "setup_common.h"
@@ -228,15 +230,31 @@ UninstallResult RunUninstall(const UninstallRequest& req, const UninstallCallbac
         return result;
     }
 
+    if (real) {
+        const HRESULT stopped = dialog_admin_auto::Remove(app);
+        Log(L"Admin auto task removal: " + std::to_wstring(static_cast<unsigned long>(stopped)));
+        if (FAILED(stopped)) {
+            result.exit_code = kExitPrepareFailed;
+            result.error = Win32Error(HRESULT_FACILITY(stopped) == FACILITY_WIN32 ?
+                HRESULT_CODE(stopped) : static_cast<DWORD>(stopped));
+            return result;
+        }
+    }
+
     // Restore before removing DLLs, including an install-directory migration.
     if(real) {
-        DWORD restored=DisableOwnedDialogRegistration(app, dialog_auto::Inspect(), dialog_auto::DisableFor);
-        if(restored==ERROR_SUCCESS) restored=dialog_auto::DisableFor(app+L"\\"+dialog_auto::DllName);
-        if(restored==ERROR_SUCCESS) restored=dialog_auto::DisableFor(app+L"\\DialogBridge\\"+dialog_auto::DllName);
-        if (restored == ERROR_SUCCESS && FileExists(app + L"\\dialog-current.json")) {
-            dialog_bundle::BundleLease current;
-            restored = dialog_bundle::ResolveInstalledBundle(app, current);
-            if (!restored) restored = dialog_auto::DisableFor(current.Directory() + L"\\" + dialog_auto::DllName);
+        DWORD restored=ERROR_SUCCESS;
+        std::vector<dialog_auto::RegistrationTarget> targets;
+        for(const auto arch : {dialog_auto::Architecture::X64,dialog_auto::Architecture::X86}) {
+            const auto status=dialog_auto::Inspect(arch);
+            if(status.error==ERROR_NOT_SUPPORTED && arch!=dialog_auto::CurrentArchitecture) continue;
+            if(status.error) {restored=status.error;break;}
+            if(IsOwnedDialogDll(app,status.dll_path,arch)) targets.push_back({arch,status.dll_path});
+        }
+        if(!restored && !targets.empty()) {
+            const auto changed=dialog_auto::ExecuteRegistrationChange(targets,false);
+            restored=changed.error;
+            if(changed.rollback_error) Log(L"Dialog uninstall registration rollback failed: "+Win32Error(changed.rollback_error));
         }
         if(restored!=ERROR_SUCCESS) {
             result.exit_code=kExitPrepareFailed;

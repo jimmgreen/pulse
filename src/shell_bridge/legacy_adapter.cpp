@@ -33,9 +33,10 @@ bool Filter(const wchar_t* value, std::vector<char16_t>& output) {
 bool Prepare(const OPENFILENAMEW& ofn, bool save, legacy::Prepared& prepared) {
     if (ofn.lStructSize != sizeof(OPENFILENAMEW) || !ofn.lpstrFile || !ofn.nMaxFile ||
         ofn.nMaxFile > kMaxBufferUnits || ofn.nMaxFileTitle > kMaxBufferUnits ||
-        (ofn.lpstrFileTitle && !ofn.nMaxFileTitle) || ofn.lpfnHook || ofn.lpTemplateName ||
-        ofn.lpstrCustomFilter || ofn.nMaxCustFilter || ofn.pvReserved || ofn.dwReserved || ofn.FlagsEx ||
-        ofn.lCustData) return false;
+        (ofn.lpstrFileTitle && !ofn.nMaxFileTitle) || (ofn.Flags & (OFN_ENABLEHOOK | OFN_ENABLETEMPLATE | OFN_ENABLETEMPLATEHANDLE)) ||
+        ofn.lpstrCustomFilter || ofn.nMaxCustFilter || ofn.pvReserved || ofn.dwReserved || ofn.FlagsEx) return false;
+    // With all customization flags clear, native ignores hook/template pointers,
+    // hInstance and lCustData. Preserve them verbatim and never dereference them.
     std::vector<char16_t> initial;
     for (size_t i = 0; i < ofn.nMaxFile; ++i) {
         initial.push_back(static_cast<char16_t>(ofn.lpstrFile[i]));

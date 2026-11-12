@@ -74,6 +74,7 @@ void ApplyDriveVerbResult(AppState& s, const app::DriveVerbResult& result);
 void ApplyWorkspacePinLabel(std::vector<ui::FluentMenuItem>& items, AppState& s);
 std::vector<ui::FluentMenuItem> BuildFinderItemMenu(
         AppState& s, bool can_undo, const std::wstring& undo_label);
+void AppendNativeCommandRows(AppState& state, std::vector<ui::FluentMenuItem>& items);
 std::wstring CommonExtension(const app::Tab& tab,
                                     const std::vector<int>& indices);
 // Registry/COM cache key for the selection: ".ext", ":folder", ":drive", or "".

@@ -28,9 +28,11 @@ inline bool RuntimeLocalSaveContractCertified(const ContractDecision& decision) 
     namespace wire = ipc::picker;
     const auto* request = std::get_if<wire::Request>(&decision.request->body);
     const bool caller = decision.skip_save_access_validation;
-    const uint32_t required = caller ? (FOS_OVERWRITEPROMPT | FOS_NOVALIDATE) : decision.native_save_defaults ? FOS_OVERWRITEPROMPT : (FOS_OVERWRITEPROMPT | FOS_NOREADONLYRETURN | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
+    const uint32_t required = (decision.no_overwrite_prompt ? 0u : FOS_OVERWRITEPROMPT) |
+        (caller ? FOS_NOVALIDATE : decision.native_save_defaults ? 0u : (FOS_NOREADONLYRETURN | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR));
     const uint32_t optional = (decision.no_test_file_create ? FOS_NOTESTFILECREATE : 0u) | (decision.native_save_defaults ? FOS_NOREADONLYRETURN : 0u) | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR | FOS_FORCEFILESYSTEM | FOS_DONTADDTORECENT | FOS_FORCESHOWHIDDEN | FOS_DEFAULTNOMINIMODE | kExtendedFileDialogOptions;
     const auto native = *decision.effective_options;
+    if (decision.no_overwrite_prompt != ((native & FOS_OVERWRITEPROMPT) == 0)) return false;
     if ((native & FOS_ALLNONSTORAGEITEMS) && (native & FOS_FORCEFILESYSTEM)) return false;
     if (decision.native_options != (native & kExtendedFileDialogOptions)) return false;
     if (decision.require_existing_save_parent != (decision.no_test_file_create && (native & FOS_PATHMUSTEXIST))) return false;
@@ -40,7 +42,7 @@ inline bool RuntimeLocalSaveContractCertified(const ContractDecision& decision) 
     if (!request || request->operation != wire::Operation::SaveFile ||
         (native & required) != required || (native & ~(required | optional))) return false;
     const uint32_t capabilities = wire::Save | (request->filters.empty() ? 0 : wire::Filters);
-    const uint32_t options = wire::OverwritePrompt | ((native & FOS_FORCESHOWHIDDEN) ? wire::ShowHidden : 0);
+    const uint32_t options = (decision.no_overwrite_prompt ? 0u : wire::OverwritePrompt) | ((native & FOS_FORCESHOWHIDDEN) ? wire::ShowHidden : 0u);
     return request->required_capabilities == capabilities && request->options == options;
 }
 inline bool RuntimeContractCertified(const ContractDecision& decision) noexcept {
@@ -63,7 +65,7 @@ inline bool RuntimeContractCertified(const ContractDecision& decision) noexcept 
             request->options == (((native & FOS_FORCESHOWHIDDEN) ? wire::ShowHidden : 0u) | (multiple ? wire::AllowMultiSelect : 0u) | ((native & FOS_NODEREFERENCELINKS) ? wire::NoDereferenceLinks : 0u));
     }
     if (decision.validation_category == ValidationCategory::LocalOpenAccessV1) {
-        const uint32_t required = decision.allow_missing_open ? ((*decision.effective_options & FOS_CREATEPROMPT) ? FOS_CREATEPROMPT : FOS_NOVALIDATE) : FOS_FILEMUSTEXIST | ((*decision.effective_options & FOS_NOVALIDATE) ? FOS_PATHMUSTEXIST : 0u);
+        const uint32_t required = decision.allow_missing_open ? (*decision.effective_options & (FOS_CREATEPROMPT | FOS_NOVALIDATE)) : FOS_FILEMUSTEXIST | ((*decision.effective_options & FOS_NOVALIDATE) ? FOS_PATHMUSTEXIST : 0u);
         constexpr uint32_t optional = FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR | FOS_FORCEFILESYSTEM | FOS_DONTADDTORECENT | FOS_FORCESHOWHIDDEN | FOS_NODEREFERENCELINKS | FOS_ALLOWMULTISELECT | FOS_DEFAULTNOMINIMODE | FOS_NOVALIDATE | FOS_OVERWRITEPROMPT | kExtendedFileDialogOptions;
         const auto native = *decision.effective_options;
 
@@ -76,7 +78,7 @@ inline bool RuntimeContractCertified(const ContractDecision& decision) noexcept 
         const bool multiple = (native & FOS_ALLOWMULTISELECT) != 0;
         const bool skip = (native & FOS_NOVALIDATE) != 0;
         if (skip != decision.skip_open_access_validation) return false;
-        if (decision.allow_missing_open && ((!skip && !(native & FOS_CREATEPROMPT)) || (native & FOS_FILEMUSTEXIST) || (decision.open_default_extension && !decision.open_default_extension->empty()))) return false;
+        if (decision.allow_missing_open && ((native & FOS_FILEMUSTEXIST) || (decision.open_default_extension && !decision.open_default_extension->empty()))) return false;
         if (decision.require_existing_open_parent != (decision.allow_missing_open && (native & FOS_PATHMUSTEXIST))) return false;
         const uint32_t capabilities = wire::Open | (skip ? wire::ExplicitAccessPolicy : wire::LocalOpenAccessV1) |
             (filters ? wire::Filters | wire::AdvisoryFilters : 0) | (links ? wire::PreserveLinks : 0) |

@@ -49,6 +49,12 @@ int main() {
             "exact successful published receipt supplies positive authority");
         check(DeleteFileW(receipt.c_str()) != FALSE, "remove owned successful receipt");
     }
+    ready.installed_entries = config::kRoGetActivationFactory;
+    if (write(ready)) {
+        check(config::ValidateRuntimeReadyReceipt(directory.wstring(), *session) == ERROR_SUCCESS,
+            "experimental WinRT-only coverage has its own non-COM entry bit");
+        check(DeleteFileW(receipt.c_str()) != FALSE, "remove owned WinRT receipt");
+    }
     if (!failures) check(RemoveDirectoryW(directory.c_str()) != FALSE, "remove empty owned fixture");
     std::printf("%u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

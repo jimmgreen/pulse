@@ -49,8 +49,10 @@ bool String(UINT cp, const char* value, std::u16string& result) {
 bool Prepare(const OPENFILENAMEA& ofn, bool save, UINT cp, legacy::Prepared& prepared) {
     if (!ofn.lpstrFile || ofn.nMaxFile < sizeof(WORD) || ofn.nMaxFile > kMaxBytes ||
         ofn.nMaxFileTitle > kMaxBytes || (ofn.lpstrFileTitle && !ofn.nMaxFileTitle) ||
-        ofn.lpfnHook || ofn.lpTemplateName || ofn.lpstrCustomFilter || ofn.nMaxCustFilter ||
-        ofn.pvReserved || ofn.dwReserved || ofn.FlagsEx || ofn.lCustData) return false;
+        (ofn.Flags & (OFN_ENABLEHOOK | OFN_ENABLETEMPLATE | OFN_ENABLETEMPLATEHANDLE)) || ofn.lpstrCustomFilter || ofn.nMaxCustFilter ||
+        ofn.pvReserved || ofn.dwReserved || ofn.FlagsEx) return false;
+    // Decode only active string fields. Disabled customization pointers and
+    // lCustData are native-ignored metadata, not ANSI strings to inspect.
     // The native ANSI multi-select contract has a 32 KiB ceiling. Larger
     // caller contracts stay native rather than advertising Unicode capacity.
     if ((ofn.Flags & OFN_ALLOWMULTISELECT) && ofn.nMaxFile > 32768) return false;

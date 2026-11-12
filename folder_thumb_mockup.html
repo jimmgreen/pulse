@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文件夹缩略图方案</title>
+<style>
+:root{
+  --bg:#F3F5F1; --sheet:#F7F8F4; --card:#FFFFFF; --text:#303B50; --text2:#66748A; --text3:#929CAE;
+  --stroke:rgba(48,59,80,.10); --divider:rgba(48,59,80,.08); --hover:rgba(48,59,80,.05);
+  --accent:#3E8E6E; --accent-soft:rgba(62,142,110,.10); --sel-a:rgba(62,142,110,.30); --sel-b:rgba(62,142,110,.08);
+  --danger:#C42B1C; --good:#2E7D4F; --warn:#9A6A00;
+}
+:root[data-theme="dark"]{
+  --bg:#1A1A1A; --sheet:#202020; --card:#272727; --text:#FFFFFF; --text2:rgba(255,255,255,.61); --text3:rgba(255,255,255,.40);
+  --stroke:rgba(255,255,255,.07); --divider:rgba(255,255,255,.06); --hover:rgba(255,255,255,.06);
+  --accent:#6CC39C; --accent-soft:rgba(108,195,156,.12); --sel-a:rgba(108,195,156,.40); --sel-b:rgba(108,195,156,.10);
+  --danger:#FF8A7A; --good:#7ED3A0; --warn:#E8B85A;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--text);font:14px/1.5 "Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",sans-serif;}
+.wrap{max-width:1180px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:22px;font-weight:600;margin:0 0 4px}
+.sub{color:var(--text2);margin:0 0 18px;max-width:820px}
+h2{font-size:16px;font-weight:600;margin:28px 0 10px}
+.toolbar{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:center;background:var(--sheet);border:1px solid var(--stroke);border-radius:8px;padding:10px 12px;margin-bottom:12px}
+.group{display:flex;align-items:center;gap:8px}
+.group>label{color:var(--text2);font-size:12px}
+.seg{display:inline-flex;background:var(--hover);border-radius:6px;padding:2px;gap:2px;flex-wrap:wrap}
+.seg button{border:0;background:transparent;color:var(--text);font:inherit;font-size:13px;padding:4px 10px;border-radius:4px;cursor:pointer}
+.seg button:hover{background:var(--hover)}
+.seg button.on{background:var(--card);box-shadow:0 1px 2px rgba(0,0,0,.12);font-weight:600}
+input[type=range]{accent-color:var(--accent);width:160px}
+.chk{display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;user-select:none}
+.chk input{accent-color:var(--accent)}
+.pane{background:var(--sheet);border:1px solid var(--stroke);border-radius:8px;overflow:hidden}
+.pane-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--divider);font-size:13px;color:var(--text2)}
+.crumb b{color:var(--text);font-weight:600}
+.grid{display:flex;flex-wrap:wrap;gap:6px;padding:12px;min-height:200px;align-content:flex-start}
+.tile{position:relative;display:flex;flex-direction:column;align-items:center;padding:8px 6px 8px;border-radius:8px;cursor:default;border:1.5px solid transparent}
+.tile:hover{background:var(--hover)}
+.tile.sel{background:linear-gradient(180deg,var(--sel-a),var(--sel-b));}
+.tile.focus{border:1.5px dashed var(--accent)}
+.tile .icon{display:block}
+.tile .name{margin-top:4px;font-size:13px;text-align:center;line-height:1.3;word-break:break-all}
+.tile .meta{font-size:12px;color:var(--text2);text-align:center}
+.tile .cb{position:absolute;left:8px;top:8px;width:16px;height:16px;border-radius:50%;border:1.5px solid var(--text3);background:var(--card);opacity:0}
+.tile:hover .cb,.tile.sel .cb{opacity:1}
+.tile.sel .cb{background:var(--accent);border-color:var(--accent)}
+.art{position:relative;display:block}
+.pill{position:absolute;display:flex;align-items:center;border-radius:999px;background:rgba(255,255,255,.94);box-shadow:0 0 0 1px rgba(48,59,80,.12),0 1px 2px rgba(0,0,0,.14)}
+:root[data-theme="dark"] .pill{background:rgba(43,43,43,.94);box-shadow:0 0 0 1px rgba(255,255,255,.14),0 1px 2px rgba(0,0,0,.4)}
+.pill .pg{color:var(--text2)}
+.ovb{position:absolute;display:flex;align-items:center;justify-content:center}
+.ovb.plate{border-radius:50%;background:var(--card);box-shadow:0 0 0 1px var(--stroke),0 1px 3px rgba(0,0,0,.22)}
+:root[data-theme="dark"] .ovb.plate{background:#2B2B2B;box-shadow:0 0 0 1px rgba(255,255,255,.16),0 1px 3px rgba(0,0,0,.4)}
+.ovb.shell svg{filter:drop-shadow(0 1px 1px rgba(0,0,0,.25))}
+.legend{font-size:12px;color:var(--text2);padding:0 12px 10px}
+.cmp{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
+.cmp .cell{background:var(--sheet);border:1px solid var(--stroke);border-radius:8px;padding:12px 10px;display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer}
+.cmp .cell.on{outline:2px solid var(--accent);outline-offset:-1px}
+.cmp .cell:hover{background:var(--card)}
+.cell .t{font-weight:600;font-size:13px}
+.bar{width:100%;height:6px;border-radius:3px;background:var(--hover);overflow:hidden;display:flex}
+.bar i{display:block;height:100%}
+.pct{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
+.small{font-size:12px;color:var(--text2);text-align:center}
+.cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.note{background:var(--sheet);border:1px solid var(--stroke);border-radius:8px;padding:14px 16px}
+.note h3{margin:0 0 6px;font-size:14px;display:flex;align-items:center;gap:8px}
+.tag{font-size:11px;font-weight:600;padding:1px 7px;border-radius:10px;background:var(--hover);color:var(--text2)}
+.tag.rec{background:var(--accent);color:#fff}
+:root[data-theme="dark"] .tag.rec{color:#10261C}
+.note ul{margin:6px 0 0;padding-left:18px}
+.note li{margin:2px 0}
+.note .pro{color:var(--good)} .note .con{color:var(--danger)}
+code{font:12px Consolas,monospace;background:var(--hover);padding:1px 5px;border-radius:4px}
+table{border-collapse:collapse;width:100%;font-size:13px;background:var(--sheet);border:1px solid var(--stroke);border-radius:8px;overflow:hidden}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--divider);vertical-align:top}
+th{color:var(--text2);font-weight:600;font-size:12px}
+tr:last-child td{border-bottom:0}
+.dot{letter-spacing:1px}
+@media (max-width:860px){.cmp{grid-template-columns:repeat(2,minmax(0,1fr))}.cards{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+<defs>
+  <linearGradient id="g-back" x1="0" y1="44" x2="0" y2="226" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="rgb(233,174,43)"/><stop offset="1" stop-color="rgb(210,147,15)"/></linearGradient>
+  <linearGradient id="g-sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2E3A78"/><stop offset=".55" stop-color="#C2577A"/><stop offset="1" stop-color="#F6A55B"/></linearGradient>
+  <linearGradient id="g-lake" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#C46A6E"/><stop offset="1" stop-color="#2A2547"/></linearGradient>
+  <linearGradient id="g-night" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0E1430"/><stop offset="1" stop-color="#3B2A6E"/></linearGradient>
+  <linearGradient id="g-day" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8CCBF0"/><stop offset="1" stop-color="#E6F5FC"/></linearGradient>
+  <linearGradient id="g-sea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1B7FAF"/><stop offset="1" stop-color="#3FBFCB"/></linearGradient>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="rgba(196,43,28,.28)"/><rect width="2.4" height="6" fill="rgba(196,43,28,.85)"/></pattern>
+  <filter id="soft" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="5"/></filter>
+</defs>
+</svg>
+
+<div class="wrap">
+  <h1>文件夹缩略图 · 遮挡优化方案</h1>
+  <p class="sub">现在的前片从 y=110 开始（256 画布），图片卡占 y=26–130，再加上固定 124×104 的居中裁切，竖图和截图损失最大，中等图标（单卡）只能看到约六成。下面用 <code>folder_thumbnail.cpp</code> 的真实几何复刻现状，再对比四个方案。打开“显示遮挡”可以看到红色斜线标出的被遮住部分。</p>
+
+  <div class="toolbar">
+    <div class="group"><label>方案</label><div class="seg" id="segV"></div></div>
+    <div class="group"><label>图标尺寸</label><input type="range" id="size" min="48" max="240" step="4"><span id="sizeLbl" class="small" style="min-width:86px;text-align:left"></span></div>
+    <div class="group"><label>主题</label><div class="seg" id="segT"><button data-t="light">浅色</button><button data-t="dark">深色</button></div></div>
+    <label class="chk"><input type="checkbox" id="aspect">按图片比例调整卡片</label>
+    <label class="chk"><input type="checkbox" id="hatchOn">显示遮挡</label>
+    <label class="chk"><input type="checkbox" id="ovOn">显示叠加图标</label>
+  </div>
+
+  <div class="pane">
+    <div class="pane-head"><span class="crumb">D: › 素材 › <b>整理中</b></span><span style="margin-left:auto" id="viewName"></span></div>
+    <div class="grid" id="grid"></div>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <h2>同一文件夹，各方案对比 <span class="small" id="cmpFolderLbl"></span></h2>
+  <div class="group" style="margin-bottom:10px"><label>对比文件夹</label><div class="seg" id="segF"></div></div>
+  <div class="cmp" id="cmp"></div>
+  <p class="small" style="text-align:left;margin-top:8px">“主图保留”= 裁切后剩下的比例 × 没被前片挡住的比例，按 256 画布几何计算。D 显示静止 / 悬停两个数。</p>
+
+  <h2>方案说明</h2>
+  <div class="cards" id="notes"></div>
+
+  <h2>叠加图标（加密等状态）</h2>
+  <p class="sub">现在 <code>shell_icons.cpp</code> 只取 <code>SHGFI_SYSICONINDEX</code>，多数文件还走按扩展名共用的图标，所以 EFS 加密锁、企业加密软件、TortoiseGit/SVN 这类 Shell 叠加图标一个都不会出现；文件夹缩略图是整张合成图，也没有叠加层。上面网格里“财务资料”“设计稿”“pulse”“相册备份”和两份文档展示补上后的样子。</p>
+  <table>
+    <thead><tr><th style="width:150px">状态</th><th>来源</th><th style="width:120px">位置</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><b>统一状态胶囊</b></td><td>所有状态合进左下一枚小胶囊：白底（深色为 #2B2B2B）、1px 描边、高约图标的 13%（14–22 px）</td><td>文件夹：前片左下角内侧<br>文件：左下略外挂</td><td>不再各占一角；落在前片纯黄区域，不压图片；颜色只来自叠加图本身</td></tr>
+      <tr><td><b>EFS 加密</b></td><td><code>FILE_ATTRIBUTE_ENCRYPTED</code>，目录快照里已有，Pulse 自己画灰色锁</td><td>胶囊第二位</td><td>不用 COM、零延迟；用次要文字色，和云状态同一套线条图标</td></tr>
+      <tr><td><b>第三方加密 / 版本控制</b></td><td>后台用父文件夹的 <code>IShellIconOverlay::GetOverlayIndex</code> 取叠加序号，再从系统图像列表取叠加图</td><td>胶囊末尾</td><td>原图缩到胶囊内约 72%，不改色，用户仍认得；按“文件夹 + 修改时间”缓存</td></tr>
+      <tr><td><b>云状态</b></td><td>现有 <code>DrawCloudBadge</code> 的图标</td><td>胶囊第一位</td><td>OneDrive 等云盘自己的 Shell 叠加图跳过，避免两套云图标</td></tr>
+      <tr><td><b>快捷方式</b></td><td>现有 <code>DrawLinkOverlay</code></td><td>不变</td><td>系统的箭头叠加跳过</td></tr>
+    </tbody>
+  </table>
+  <p class="small" style="text-align:left;margin-top:8px">风险：叠加处理程序是第三方进程内 COM，可能卡住或崩溃。查询应放进现有 shell_host 隔离进程，或至少放在带超时的后台线程；查不到就不画，不影响图标本身。</p>
+
+  <h2>实现成本（对照现有代码）</h2>
+  <table>
+    <thead><tr><th style="width:110px">方案</th><th>要改的地方</th><th style="width:120px">缓存 / 协议</th><th style="width:90px">工作量</th></tr></thead>
+    <tbody>
+      <tr><td><b>A 低前片</b></td><td><code>Render()</code> 的前片顶边 110→146、卡片位置；<code>Card()</code> 按图片比例算卡片宽高（夹在 3:4–16:10 之间）</td><td><code>style</code> 5→6 让旧 .ftc 失效，协议不变</td><td>小</td></tr>
+      <tr><td><b>B 前置相片</b></td><td>同 A，另外把主卡挪到前片之后绘制，两张副卡只露顶部</td><td>同 A</td><td>小</td></tr>
+      <tr><td><b>E 立卡 / F 并排</b></td><td><code>Render()</code> 去掉 <code>RotateTransform</code>；前片改成梯形路径（上 10–246，下 26–230）加内阴影和上沿高光；空文件夹的 D2D 图标（<code>ui_pane_list.cpp</code> 的前片几何）同步改成透视，否则有图和没图的文件夹不像一家</td><td>同 A</td><td>小到中</td></tr>
+      <tr><td><b>D 悬停探出</b></td><td>预览进程只输出透明的卡片层；文件夹前后片改由 UI 用 D2D 矢量绘制（空文件夹图标已经这样画），悬停时用动效帧移动卡片层</td><td>位图含义变化，缓存键要区分；IPC 不加字段</td><td>中偏大</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+// ---------- sample pictures (drawn in their native pixel size) ----------
+const P = {};
+P.menu = {w:900,h:1200,svg:(()=>{
+  const rows=[["#5B9BD5","打开"],["#9A7FD1","新建窗口"],null,["#E0A33A","固定到快速访问"],["#4FB08A","复制路径"],null,["#8A96A8","属性"]];
+  let y=200,s='';
+  for(const r of rows){ if(!r){s+=`<rect x="170" y="${y+14}" width="560" height="3" fill="#3A3A3A"/>`;y+=34;continue;}
+    s+=`<rect x="180" y="${y+22}" width="46" height="46" rx="8" fill="${r[0]}"/><text x="256" y="${y+60}" font-size="44" fill="#F2F2F2" font-family="Microsoft YaHei UI,Segoe UI">${r[1]}</text>`; y+=96; }
+  return `<rect width="900" height="1200" fill="#1B1B1B"/><rect width="900" height="90" fill="#202020"/><circle cx="60" cy="45" r="14" fill="#444"/><rect x="100" y="34" width="300" height="22" rx="11" fill="#333"/>
+  <rect x="140" y="160" width="620" height="${y-120}" rx="18" fill="#2B2B2B" stroke="#3C3C3C" stroke-width="3"/>${s}
+  <rect x="140" y="${y+90}" width="620" height="300" rx="14" fill="#242424"/><rect x="180" y="${y+130}" width="380" height="22" rx="11" fill="#3A3A3A"/><rect x="180" y="${y+176}" width="280" height="22" rx="11" fill="#333"/>`;
+})()};
+P.sunset = {w:1600,h:1000,svg:`<rect width="1600" height="1000" fill="url(#g-sky)"/><circle cx="1050" cy="590" r="120" fill="#FFE3A3"/>
+  <path d="M0 640 L220 470 L380 560 L560 380 L760 560 L900 480 L1100 610 L1300 430 L1600 620 V1000 H0Z" fill="#5B3A5E"/>
+  <path d="M0 710 L300 610 L520 690 L800 600 L1100 700 L1400 620 L1600 690 V1000 H0Z" fill="#3B2847"/>
+  <rect y="760" width="1600" height="240" fill="url(#g-lake)"/><rect x="960" y="790" width="180" height="12" rx="6" fill="#FFE3A3" opacity=".7"/><rect x="1000" y="830" width="100" height="10" rx="5" fill="#FFE3A3" opacity=".5"/>`};
+P.city = {w:1000,h:1500,svg:(()=>{
+  let s=`<rect width="1000" height="1500" fill="url(#g-night)"/><circle cx="760" cy="230" r="70" fill="#F4EBC8"/>`;
+  const b=[[0,700,180],[170,420,170],[330,560,150],[470,300,190],[650,620,160],[800,480,200]];
+  let k=7;
+  for(const [x,top,w] of b){ s+=`<rect x="${x}" y="${top}" width="${w}" height="${1500-top}" fill="#161B3A"/>`;
+    for(let yy=top+40;yy<1460;yy+=60) for(let xx=x+22;xx<x+w-30;xx+=42){ k=(k*1103515245+12345)%2147483648; if(k%5<2) s+=`<rect x="${xx}" y="${yy}" width="22" height="30" fill="#F6C766" opacity="${.55+(k%4)/10}"/>`; } }
+  return s+`<rect y="1380" width="1000" height="120" fill="#0B0F24"/>`;
+})()};
+P.forest = {w:1200,h:900,svg:`<rect width="1200" height="900" fill="url(#g-day)"/><circle cx="260" cy="190" r="70" fill="#FFF6D6"/>
+  <path d="M0 520 Q300 380 600 500 T1200 470 V900 H0Z" fill="#7FB77E"/><path d="M0 640 Q350 540 700 640 T1200 610 V900 H0Z" fill="#4E9A5B"/>
+  ${[120,260,420,610,780,960,1100].map((x,i)=>`<path d="M${x} ${560+i%3*40} l70 190 h-140z" fill="#2F6E3E"/><rect x="${x-9}" y="${750+i%3*40}" width="18" height="40" fill="#5A4030"/>`).join('')}
+  <path d="M0 800 Q600 740 1200 800 V900 H0Z" fill="#3D7F47"/>`};
+P.beach = {w:1500,h:1000,svg:`<rect width="1500" height="1000" fill="#86CDF2"/><rect y="420" width="1500" height="300" fill="url(#g-sea)"/>
+  <path d="M0 700 Q400 650 800 690 T1500 670 V1000 H0Z" fill="#F1D9A6"/><path d="M0 700 Q400 650 800 690 T1500 670" stroke="#fff" stroke-width="14" fill="none" opacity=".8"/>
+  <path d="M1040 610 q90 -120 200 0z" fill="#E4573D"/><rect x="1136" y="600" width="8" height="200" fill="#6B5034"/><circle cx="300" cy="180" r="60" fill="#FFF3C4"/>
+  <rect x="200" y="300" width="160" height="16" rx="8" fill="#fff" opacity=".8"/><rect x="980" y="240" width="220" height="18" rx="9" fill="#fff" opacity=".8"/>`};
+function phone(kind){
+  const W=1080,H=2340; let s='';
+  if(kind==='chat'){
+    s=`<rect width="${W}" height="${H}" fill="#EDEFF2"/><rect width="${W}" height="250" fill="#2F7DD8"/><text x="80" y="200" font-size="64" fill="#fff" font-family="Microsoft YaHei UI">项目群</text>`;
+    let y=330; const msgs=[[0,520,2],[1,620,1],[0,700,3],[1,480,1],[0,600,2],[1,720,2],[0,420,1],[1,560,3],[0,640,2]];
+    for(const [me,w,l] of msgs){ const h=60+l*56; const x=me?W-60-w:60; s+=`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="36" fill="${me?'#95D17A':'#fff'}"/>`;
+      for(let i=0;i<l;i++) s+=`<rect x="${x+40}" y="${y+40+i*56}" width="${w-80-(i===l-1?120:0)}" height="26" rx="13" fill="${me?'#5E9B47':'#C9CED6'}"/>`; y+=h+44; }
+  } else if(kind==='settings'){
+    s=`<rect width="${W}" height="${H}" fill="#F6F6F8"/><text x="70" y="260" font-size="96" font-weight="700" fill="#111" font-family="Segoe UI">设置</text>`;
+    const c=['#3D8BF2','#F2A93D','#4CC27A','#E5534B','#8B6FE8','#2DB3C8','#F2C94C','#7A8699'];
+    let y=360; for(let g=0;g<3;g++){ s+=`<rect x="50" y="${y}" width="${W-100}" height="${3*150}" rx="36" fill="#fff"/>`;
+      for(let i=0;i<3;i++){ const yy=y+i*150; s+=`<rect x="90" y="${yy+40}" width="70" height="70" rx="18" fill="${c[(g*3+i)%8]}"/><rect x="200" y="${yy+60}" width="${380+((g+i)%3)*90}" height="30" rx="15" fill="#2B2B2B" opacity=".75"/>`; }
+      y+=3*150+70; }
+  } else {
+    s=`<rect width="${W}" height="${H}" fill="#E8EDE3"/><path d="M0 900 Q400 700 1080 1000 V1400 Q500 1200 0 1500Z" fill="#B9DDF3"/><rect x="600" y="300" width="380" height="380" rx="30" fill="#CFE6C5"/>
+    <path d="M-20 600 L1100 1800 M200 -20 L560 2400 M-20 1900 L1100 1500" stroke="#fff" stroke-width="46"/><path d="M-20 600 L1100 1800" stroke="#F7C948" stroke-width="22"/>
+    <circle cx="420" cy="1180" r="60" fill="#E5534B"/><circle cx="420" cy="1180" r="22" fill="#fff"/><rect x="60" y="2060" width="960" height="210" rx="40" fill="#fff"/><rect x="110" y="2120" width="520" height="34" rx="17" fill="#333"/><rect x="110" y="2180" width="340" height="28" rx="14" fill="#999"/>`;
+  }
+  return {w:W,h:H,svg:`<rect width="${W}" height="70" fill="rgba(0,0,0,.05)"/>`+s};
+}
+P.chat=phone('chat'); P.settings=phone('settings'); P.map=phone('map');
+const DOC = (label,color)=>({doc:true,label,color,w:124,h:104});
+P.pdf=DOC('PDF','rgb(78,128,190)'); P.cpp=DOC('CPP','rgb(70,118,186)'); P.md=DOC('MD','rgb(58,136,170)'); P.txt=DOC('TXT','rgb(96,116,190)'); P.docx=DOC('DOCX','rgb(62,140,178)'); P.xlsx=DOC('XLSX','rgb(90,122,196)');
+
+const FOLDERS = [
+  {name:'预览测试', meta:'101.5 MB', pics:['menu','sunset','city']},
+  {name:'旅行 2026', meta:'2.3 GB', pics:['sunset','beach','forest']},
+  {name:'手机截图', meta:'486 MB', pics:['chat','settings','map']},
+  {name:'合同', meta:'1.2 MB', pics:['pdf','docx','xlsx']},
+  {name:'壁纸', meta:'8.4 MB', pics:['forest']},
+  {name:'新建文件夹', meta:'空', pics:[]},
+  {name:'财务资料', meta:'36.8 MB', pics:['pdf','xlsx','docx'], ov:['efs']},
+  {name:'设计稿', meta:'1.1 GB', pics:['beach','forest','city'], ov:['dlp']},
+  {name:'pulse', meta:'412 MB', pics:['cpp','md','txt'], ov:['git']},
+  {name:'相册备份', meta:'5.6 GB', pics:['city','sunset','beach'], ov:['cloud','dlp']},
+];
+const FILES = [{name:'sunset.jpg',meta:'2.1 MB',pic:'sunset'},{name:'tower.png',meta:'3.6 MB',pic:'city'},
+  {name:'报价单.xlsx',meta:'48 KB',doc:'xlsx',ov:['efs']},{name:'方案.docx',meta:'2.3 MB',doc:'docx',ov:['dlp']}];
+
+const VARIANTS = [
+  {id:'now', short:'现状', title:'现状'},
+  {id:'a', short:'A 低前片', title:'A · 低前片'},
+  {id:'b', short:'B 前置相片', title:'B · 前置相片'},
+  {id:'d', short:'D 悬停探出', title:'D · 悬停探出'},
+  {id:'e', short:'E 立卡', title:'E · 立卡'},
+  {id:'f', short:'F 立卡并排', title:'F · 立卡并排'},
+];
+
+// ---------- geometry (256 canvas, same units as folder_thumbnail.cpp) ----------
+const BACK = 'M18 58 A14 14 0 0 1 32 44 L92 44 C96 44 99 45.4 102 48 L116 60 L224 60 A14 14 0 0 1 238 74 L238 212 A14 14 0 0 1 224 226 L32 226 A14 14 0 0 1 18 212 Z';
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const aspectOf = k => P[k].doc ? 124/104 : P[k].w/P[k].h;
+function fitCard(k, maxIW, maxIH, adaptive, fixedR){
+  const r = P[k].doc ? 124/104 : adaptive ? clamp(aspectOf(k), .75, 1.6) : fixedR;
+  let iw=maxIW, ih=iw/r; if(ih>maxIH){ih=maxIH; iw=ih*r;}
+  return {w:iw+6, h:ih+6};
+}
+function layout(v, pics, single, adaptive){
+  const L = {cards:[], front:110, above:null, glass:false, lift:false};
+  if(single) pics = pics.slice(0,1);  // medium icons decode one picture only
+  const n = pics.length;
+  if(v==='now' || v==='c'){
+    L.glass = v==='c';
+    if(single){ L.front=104; L.cards.push({k:pics[0],x:48,y:30,w:160,h:120,a:0,main:true}); }
+    else { L.front=110;
+      if(n>2) L.cards.push({k:pics[2],x:78,y:34,w:124,h:100,a:11});
+      if(n>1) L.cards.push({k:pics[1],x:54,y:34,w:124,h:100,a:-11});
+      L.cards.push({k:pics[0],x:66,y:26,w:124,h:104,a:0,main:true}); }
+    return L;
+  }
+  if(v==='a' || v==='d'){
+    L.lift = v==='d';
+    const T = single ? 140 : 146; L.front=T; const bottom=T+9;
+    if(!single){
+      if(n>2) L.cards.push({k:pics[2],x:128+24-64,y:bottom-104,w:128,h:104,a:9,side:1});
+      if(n>1) L.cards.push({k:pics[1],x:128-24-64,y:bottom-104,w:128,h:104,a:-9,side:-1});
+    }
+    const c = fitCard(pics[0], single?184:166, single?130:124, adaptive, 1.34);
+    L.cards.push({k:pics[0],x:128-c.w/2,y:bottom-c.h,w:c.w,h:c.h,a:0,main:true});
+    return L;
+  }
+  if(v==='e'){
+    const T = single ? 146 : 152; L.front=T; const bottom=T+8;
+    const c = fitCard(pics[0], single?176:150, single?132:128, adaptive, 0.8);
+    if(n>2) L.cards.push({k:pics[2],x:128+40-48,y:bottom-22-124,w:96,h:124,a:0});
+    if(n>1) L.cards.push({k:pics[1],x:128-40-48,y:bottom-12-124,w:96,h:124,a:0});
+    L.cards.push({k:pics[0],x:128-c.w/2,y:bottom-c.h,w:c.w,h:c.h,a:0,main:true});
+    return L;
+  }
+  if(v==='f'){
+    const T = single ? 146 : 152; L.front=T; const bottom=T+8;
+    if(single || n===1){ const c = fitCard(pics[0], 176, 132, adaptive, 0.8);
+      L.cards.push({k:pics[0],x:128-c.w/2,y:bottom-c.h,w:c.w,h:c.h,a:0,main:true}); return L; }
+    const w=82, h=112;
+    if(n>2) L.cards.push({k:pics[2],x:128+52-w/2,y:bottom-h,w,h,a:0});
+    L.cards.push({k:pics[1],x:(n>2?128-52:128-30)-w/2,y:bottom-h,w,h,a:0});
+    L.cards.push({k:pics[0],x:(n>2?128:128+30)-(w+8)/2,y:bottom-h-6,w:w+8,h:h+6,a:0,main:true});
+    if(n===2) L.cards.reverse();
+    return L;
+  }
+  if(v==='b'){
+    L.front=104;
+    if(n>2) L.cards.push({k:pics[2],x:152-55,y:128-90,w:110,h:90,a:7});
+    if(n>1) L.cards.push({k:pics[1],x:104-55,y:128-90,w:110,h:90,a:-7});
+    const c = fitCard(pics[0], single?176:164, single?124:118, adaptive, 1.34);
+    L.above = {k:pics[0],x:128-c.w/2,y:206-c.h,w:c.w,h:c.h,a:0,main:true};
+    return L;
+  }
+}
+// main-picture information kept = crop keep x unoccluded fraction
+function metric(v, pics, single, adaptive, hover){
+  if(!pics.length) return null;
+  const L = layout(v, pics, single, adaptive);
+  const m = L.above || L.cards.find(c=>c.main);
+  const iw=m.w-6, ih=m.h-6, rb=iw/ih, r=aspectOf(pics[0]);
+  const keep = P[pics[0]].doc ? 1 : Math.min(rb/r, r/rb);
+  let vis = L.above ? 1 : clamp((L.front-(m.y+3))/ih, 0, 1);
+  if(v==='d' && hover) vis = 1;
+  const seen = L.cards.filter(c=>!c.main && (L.front-(c.y+3))/(c.h-6) > .55).length + 1;
+  return {keep, vis, total:keep*vis, seen};
+}
+
+let uid=0;
+function picInto(k, x, y, w, h){
+  const p=P[k];
+  if(p.doc){
+    const lines=[0,1,2,3].map(i=>`<rect x="${x+9}" y="${y+40+i*12*(h/98)}" width="${w-18-(i===3?25:0)}" height="3" fill="rgb(220,224,229)"/>`).join('');
+    return `<rect x="${x}" y="${y}" width="${w}" height="${Math.min(30,h*.3)}" fill="${p.color}"/>
+      <text x="${x+8}" y="${y+Math.min(30,h*.3)*0.72}" font-size="${Math.min(16,h*.17)}" font-weight="700" fill="#fff" font-family="Segoe UI">${p.label}</text>${lines}`;
+  }
+  return `<svg x="${x}" y="${y}" width="${w}" height="${h}" viewBox="0 0 ${p.w} ${p.h}" preserveAspectRatio="xMidYMid slice">${p.svg}</svg>`;
+}
+function cardSvg(c, extraCls=''){
+  const tf = `translate(${c.x+c.w/2} ${c.y+c.h}) rotate(${c.a}) translate(${-c.w/2} ${-c.h})`;
+  return `<g transform="${tf}"><g class="${extraCls}">
+    <rect x="0" y="2" width="${c.w}" height="${c.h}" rx="4" fill="rgba(0,0,0,.255)"/>
+    <rect x="0" y="0" width="${c.w}" height="${c.h}" rx="4" fill="#fff"/>
+    ${picInto(c.k, 3, 3, c.w-6, c.h-6)}</g></g>`;
+}
+function hatchFor(c){
+  const tf = `translate(${c.x+c.w/2} ${c.y+c.h}) rotate(${c.a}) translate(${-c.w/2} ${-c.h})`;
+  return `<g transform="${tf}"><rect x="3" y="3" width="${c.w-6}" height="${c.h-6}" fill="url(#hatch)"/></g>`;
+}
+function frontPath(T){ return `M30 ${T} H226 A12 12 0 0 1 238 ${T+12} V202 A12 12 0 0 1 226 214 H30 A12 12 0 0 1 18 202 V${T+12} A12 12 0 0 1 30 ${T} Z`; }
+const BACKP = 'M26 62 A12 12 0 0 1 38 50 L92 50 C96 50 99 51.4 102 54 L114 64 L218 64 A12 12 0 0 1 230 76 L230 214 L26 214 Z';
+function roundPoly(pts, r){
+  let d=''; const n=pts.length;
+  for(let i=0;i<n;i++){
+    const p0=pts[(i+n-1)%n], p1=pts[i], p2=pts[(i+1)%n];
+    const u=(a,b)=>{const dx=a[0]-b[0], dy=a[1]-b[1], l=Math.hypot(dx,dy); return [b[0]+dx/l*r, b[1]+dy/l*r];};
+    const a=u(p0,p1), b=u(p2,p1);
+    d += `${i?'L':'M'}${a[0].toFixed(2)} ${a[1].toFixed(2)} Q${p1[0]} ${p1[1]} ${b[0].toFixed(2)} ${b[1].toFixed(2)} `;
+  }
+  return d+'Z';
+}
+// Front leaf opened toward the viewer: top edge wider than the bottom.
+const flapPath = T => roundPoly([[10,T],[246,T],[230,222],[26,222]], 11);
+function perspFolder(id, T, cards, hatch, extraCls){
+  return `<svg class="icon ${extraCls}" width="${'%S%'}" height="${'%S%'}" viewBox="0 0 256 256" style="overflow:visible">
+    <defs>
+      <linearGradient id="gf-${id}" x1="0" y1="${T}" x2="0" y2="222" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#FFEBB0"/><stop offset=".07" stop-color="#FFDA6E"/><stop offset="1" stop-color="#F6B42A"/></linearGradient>
+      <linearGradient id="gp-${id}" x1="0" y1="${T-30}" x2="0" y2="${T}" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="rgba(110,60,0,0)"/><stop offset="1" stop-color="rgba(110,60,0,.34)"/></linearGradient>
+      <clipPath id="cf-${id}"><path d="${flapPath(T)}"/></clipPath>
+      <clipPath id="cb-${id}"><rect x="0" y="0" width="256" height="${T+1}"/></clipPath>
+    </defs>
+    <ellipse cx="128" cy="224" rx="104" ry="5" fill="rgba(0,0,0,.16)" filter="url(#soft)"/>
+    <path d="${BACKP}" fill="url(#g-back)"/>
+    ${cards}
+    <rect x="26" y="${T-30}" width="204" height="31" fill="url(#gp-${id})" clip-path="url(#cb-${id})"/>
+    <path d="${flapPath(T)}" fill="url(#gf-${id})"/>
+    <path d="M21 ${T+1.4} H235" stroke="rgba(255,250,228,.95)" stroke-width="1.4"/>
+    <path d="${roundPoly([[10,T],[246,T],[230,222],[26,222]], 11)}" fill="none" stroke="rgba(150,90,0,.18)" stroke-width="1"/>
+    ${hatch}
+  </svg>`;
+}
+const PERSP = v => v==='e' || v==='f';
+function folderSvg(v, pics, size, single, adaptive, showHatch){
+  const id = 'f'+(uid++);
+  if(PERSP(v)){
+    if(!pics.length) return perspFolder(id, 100, '', '', '').replaceAll('%S%', size);
+    const L = layout(v, pics, single, adaptive);
+    const hatch = showHatch ? `<g clip-path="url(#cf-${id})">${L.cards.map(hatchFor).join('')}</g>` : '';
+    return perspFolder(id, L.front, L.cards.map(c=>cardSvg(c)).join(''), hatch, '').replaceAll('%S%', size);
+  }
+  if(!pics.length){
+    return `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 256 256"><path d="${BACK}" fill="url(#g-back)"/>
+      <path d="${frontPath(96)}" fill="url(#gf-${id})"/><defs><linearGradient id="gf-${id}" x1="0" y1="96" x2="0" y2="214" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="rgb(255,216,102)"/><stop offset="1" stop-color="rgb(255,194,51)"/></linearGradient></defs>
+      <line x1="30" y1="96.8" x2="226" y2="96.8" stroke="rgba(255,241,184,.9)" stroke-width="1.6"/></svg>`;
+  }
+  const L = layout(v, pics, single, adaptive), T=L.front;
+  const cls = c => L.lift ? (c.main ? 'lift-main' : c.side<0 ? 'lift-l' : 'lift-r') : '';
+  let s = `<svg class="icon ${L.lift?'liftable':''}" width="${size}" height="${size}" viewBox="0 0 256 256" style="overflow:visible">
+    <defs><linearGradient id="gf-${id}" x1="0" y1="${T}" x2="0" y2="214" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="rgb(255,216,102)"/><stop offset="1" stop-color="rgb(255,194,51)"/></linearGradient>
+    <clipPath id="cf-${id}"><path d="${frontPath(T)}"/></clipPath></defs>
+    <path d="${BACK}" fill="url(#g-back)"/>`;
+  s += L.cards.map(c=>cardSvg(c, cls(c))).join('');
+  if(L.glass) s += `<g clip-path="url(#cf-${id})" filter="url(#soft)">${L.cards.map(c=>cardSvg(c)).join('')}</g>`;
+  s += `<path d="${frontPath(T)}" fill="url(#gf-${id})" ${L.glass?'opacity=".74"':''}/>
+    <line x1="30" y1="${T+.8}" x2="226" y2="${T+.8}" stroke="rgba(255,241,184,.9)" stroke-width="1.6"/>`;
+  if(showHatch) s += `<g clip-path="url(#cf-${id})" class="${L.lift?'hatch-lift':''}">${L.cards.map(hatchFor).join('')}</g>`;
+  if(L.above){ const c=L.above; s += `<rect x="${c.x-1}" y="${c.y+3}" width="${c.w+2}" height="${c.h}" rx="5" fill="rgba(120,70,0,.22)"/>` + cardSvg(c); }
+  return s + `</svg>`;
+}
+function imageFileSvg(k,size){
+  const p=P[k], r=p.w/p.h; let w=size, h=size/r; if(h>size){h=size; w=size*r;}
+  return `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><g><rect x="${(size-w)/2}" y="${size-h}" width="${w}" height="${h}" rx="3" fill="#000" opacity=".12" transform="translate(0 1)"/>
+    <svg x="${(size-w)/2}" y="${size-h}" width="${w}" height="${h}" viewBox="0 0 ${p.w} ${p.h}">${p.svg}</svg></g></svg>`;
+}
+
+// ---------- overlays ----------
+// efs: Pulse draws from FILE_ATTRIBUTE_ENCRYPTED (top-right plate, no COM)
+// dlp/git: shell overlay bitmaps from IShellIconOverlay, bottom-left like Explorer
+// cloud: existing Pulse cloud badge; cloud-provider shell overlays are skipped
+const GLYPH = {
+  lock:`<rect x="5" y="10.5" width="14" height="10" rx="2.2" fill="currentColor"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" fill="none" stroke="currentColor" stroke-width="2.2"/>`,
+  cloud:`<path d="M7 18h10.5a3.8 3.8 0 0 0 .4-7.6A5.6 5.6 0 0 0 7.2 9.3 4.4 4.4 0 0 0 7 18z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/>`,
+};
+function plateBadge(kind, d, x, y){
+  const ink = kind==='efs' ? 'var(--warn)' : 'var(--text)';
+  return `<span class="ovb plate" style="left:${x}px;top:${y}px;width:${d}px;height:${d}px;color:${ink}" title="${kind==='efs'?'已加密（EFS）· Pulse 根据文件属性绘制':'仅在线可用 · Pulse 云状态角标'}">
+    <svg viewBox="0 0 24 24" width="${d*.62}" height="${d*.62}">${kind==='efs'?GLYPH.lock:GLYPH.cloud}</svg></span>`;
+}
+function shellOverlay(kind, d, x, y){
+  const art = kind==='dlp'
+    ? `<path d="M12 1.5 21 5v6.2c0 5.4-3.8 9.6-9 11.3-5.2-1.7-9-5.9-9-11.3V5z" fill="#1E9E5A" stroke="#fff" stroke-width="1.6"/><rect x="8" y="11" width="8" height="6" rx="1.2" fill="#fff"/><path d="M9.6 11V9.4a2.4 2.4 0 0 1 4.8 0V11" fill="none" stroke="#fff" stroke-width="1.6"/>`
+    : `<circle cx="12" cy="12" r="10" fill="#D93A2B" stroke="#fff" stroke-width="1.8"/><rect x="10.8" y="5.8" width="2.4" height="8" rx="1.2" fill="#fff"/><circle cx="12" cy="17.2" r="1.5" fill="#fff"/>`;
+  return `<span class="ovb shell" style="left:${x}px;top:${y}px;width:${d}px;height:${d}px" title="${kind==='dlp'?'第三方加密软件的 Shell 叠加图标':'TortoiseGit：已修改'}"><svg viewBox="0 0 24 24" width="${d}" height="${d}">${art}</svg></span>`;
+}
+const SHELL_ART = {
+  dlp:`<path d="M12 2.5 20 5.6v5.8c0 4.8-3.4 8.6-8 10.1-4.6-1.5-8-5.3-8-10.1V5.6z" fill="#23A062"/><rect x="8.6" y="11.2" width="6.8" height="5.4" rx="1" fill="#fff"/><path d="M10 11.2V9.8a2 2 0 0 1 4 0v1.4" fill="none" stroke="#fff" stroke-width="1.5"/>`,
+  git:`<circle cx="12" cy="12" r="9" fill="#D9473A"/><rect x="10.9" y="6.6" width="2.2" height="7" rx="1.1" fill="#fff"/><circle cx="12" cy="16.9" r="1.35" fill="#fff"/>`,
+};
+const PILL_TITLE = {cloud:'仅在线可用（Pulse 云状态）', efs:'已加密（EFS，按文件属性）', dlp:'第三方加密软件的 Shell 叠加图', git:'TortoiseGit：已修改'};
+// One quiet pill at the bottom-left: cloud, EFS, then shell overlays.
+function statusPill(ov, ax, ay, size, inside){
+  if(!ov || !ov.length || !S.ov) return '';
+  const order = ['cloud','efs','dlp','git'].filter(k=>ov.includes(k));
+  const d = Math.round(clamp(size*0.13, 14, 22)), g = Math.round(d*0.72);
+  const icons = order.map(k=>{
+    const art = k==='efs' ? GLYPH.lock : k==='cloud' ? GLYPH.cloud : SHELL_ART[k];
+    return `<svg viewBox="0 0 24 24" width="${g}" height="${g}" class="${k==='efs'||k==='cloud'?'pg':''}"><title>${PILL_TITLE[k]}</title>${art}</svg>`;
+  }).join('');
+  const left = inside ? ax + d*0.45 : ax - d*0.2, top = inside ? ay - d - d*0.4 : ay - d*0.85;
+  return `<span class="pill" style="left:${left}px;top:${top}px;height:${d}px;padding:0 ${Math.max(2,(d-g)/2)}px;gap:${Math.max(1,d*0.08)}px">${icons}</span>`;
+}
+// box: the artwork rect inside the S x S slot, in px
+function overlaysFor(ov, box, size){
+  if(!ov || !ov.length || !S.ov) return '';
+  const pd = Math.round(clamp(size*0.17, 16, 26)), sd = Math.round(clamp(size*0.24, 14, 44));
+  let h='', left = box.l - (size>=96 ? pd*0.15 : 0);
+  if(ov.includes('efs')) h += plateBadge('efs', pd, box.r - pd*0.85, box.t - pd*0.15);
+  if(ov.includes('cloud')){ h += plateBadge('cloud', pd, left, box.b - pd*0.85); left += pd + 2; }
+  for(const k of ov) if(k==='dlp'||k==='git'){ h += shellOverlay(k, sd, left, box.b - sd); left += sd*0.7; }
+  return h;
+}
+function docIconSvg(k,size){
+  const p=P[k], w=size*.72, h=size*.9, x=(size-w)/2, y=size-h;
+  return `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><path d="M${x} ${y+4} a4 4 0 0 1 4 -4 H${x+w*.68} L${x+w} ${y+w*.32} V${y+h-4} a4 4 0 0 1 -4 4 H${x+4} a4 4 0 0 1 -4 -4z" fill="#fff" stroke="rgba(0,0,0,.18)"/>
+    <path d="M${x+w*.68} ${y} V${y+w*.32-4} a4 4 0 0 0 4 4 H${x+w}" fill="#E8EBEF" stroke="rgba(0,0,0,.18)"/>
+    <rect x="${x+w*.12}" y="${y+h*.42}" width="${w*.6}" height="${h*.26}" rx="3" fill="${p.color}"/><text x="${x+w*.42}" y="${y+h*.6}" text-anchor="middle" font-size="${h*.13}" font-weight="700" fill="#fff" font-family="Segoe UI">${p.label}</text></svg>`;
+}
+
+// ---------- state ----------
+const qs = new URLSearchParams(location.search);
+const S = {
+  v: qs.get('v') || 'e',
+  size: +(qs.get('size')||160),
+  theme: qs.get('theme') || (matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'),
+  aspect: qs.get('aspect')!=='0',
+  hatch: qs.get('hatch')==='1',
+  cmpF: +(qs.get('f')||0),
+  ov: qs.get('ov')!=='0',
+};
+const $ = id=>document.getElementById(id);
+function modeOf(size){ return size < Math.sqrt(48*96) ? '中等图标' : size < Math.sqrt(96*240) ? '大图标' : '超大图标'; }
+function render(){
+  document.documentElement.dataset.theme = S.theme;
+  const single = modeOf(S.size)==='中等图标';
+  $('segV').innerHTML = VARIANTS.map(x=>`<button data-v="${x.id}" class="${x.id===S.v?'on':''}">${x.short}</button>`).join('');
+  [...$('segT').children].forEach(b=>b.classList.toggle('on', b.dataset.t===S.theme));
+  $('size').value=S.size; $('sizeLbl').textContent = `${S.size} px · ${modeOf(S.size)}`;
+  $('aspect').checked=S.aspect; $('hatchOn').checked=S.hatch; $('ovOn').checked=S.ov;
+  $('viewName').textContent = modeOf(S.size) + (single ? '（单卡样式）' : '（三卡堆叠）');
+  const tileW = Math.max(S.size+16, 96);
+  let g='';
+  FOLDERS.forEach((f,i)=>{
+    const cls = (i===0 ? 'tile sel focus' : 'tile') + (i===1 && qs.get('hover')==='1' ? ' force-hover' : '');
+    const k = S.size/256, anchor = PERSP(S.v) ? [26*k, 222*k] : [18*k, 214*k];
+    g += `<div class="${cls}" style="width:${tileW}px"><span class="cb"></span><span class="art">${folderSvg(S.v, f.pics, S.size, single, S.aspect, S.hatch)}${statusPill(f.ov, anchor[0], anchor[1], S.size, true)}</span><div class="name">${f.name}</div><div class="meta">${f.meta}</div></div>`;
+  });
+  FILES.forEach(f=>{
+    let art, box;
+    if(f.doc){ art = docIconSvg(f.doc, S.size); box = {l:S.size*.14, r:S.size*.86, t:S.size*.1, b:S.size}; }
+    else { art = imageFileSvg(f.pic,S.size); const p=P[f.pic], r=p.w/p.h; let w=S.size,h=S.size/r; if(h>S.size){h=S.size;w=S.size*r;} box={l:(S.size-w)/2, r:(S.size+w)/2, t:S.size-h, b:S.size}; }
+    g += `<div class="tile" style="width:${tileW}px"><span class="cb"></span><span class="art">${art}${statusPill(f.ov, box.l, box.b, S.size, false)}</span><div class="name">${f.name}</div><div class="meta">${f.meta}</div></div>`; });
+  $('grid').innerHTML = g;
+  $('legend').textContent = S.v==='d' ? '把鼠标移到文件夹上：卡片升起、副卡展开，完整露出主图。' :
+    S.v==='b' ? '主图放在前片之前，只有两张副卡在袋里露出顶部。' :
+    S.v==='e' ? '前片透视朝你翻开，卡片垂直立在袋里：主卡按比例立起，后两张错位露出上沿。' :
+    S.v==='f' ? '三张竖卡并排立着，中间一张略高在前，三张图都能看到大半。' :
+    S.v==='a' ? '前片顶边 110→146，卡片放大上移，只有白边和约 5 单位图片塞进袋里。' : '真实几何：前片 y=110，卡片 y=26–130，固定 124×104 裁切。';
+  // compare
+  $('segF').innerHTML = FOLDERS.slice(0,5).map((f,i)=>`<button data-f="${i}" class="${i===S.cmpF?'on':''}">${f.name}</button>`).join('');
+  const F = FOLDERS[S.cmpF]; const cs = Math.min(Math.max(S.size,120),180);
+  $('cmpFolderLbl').textContent = `· ${modeOf(S.size)}，示意尺寸 ${cs}px`;
+  $('cmp').innerHTML = VARIANTS.map(x=>{
+    const m = metric(x.id, F.pics, single, S.aspect, false), mh = x.id==='d' ? metric(x.id, F.pics, single, S.aspect, true) : null;
+    const pct = v=>Math.round(v*100)+'%';
+    const crop = 1-m.keep, occ = m.keep*(1-m.vis);
+    return `<div class="cell ${x.id===S.v?'on':''}" data-v="${x.id}">
+      <div class="t">${x.title}</div>${folderSvg(x.id, F.pics, cs, single, S.aspect, S.hatch)}
+      <div class="small">主图保留</div><div class="pct">${pct(m.total)}${mh?` <span class="small">→ ${pct(mh.total)}</span>`:''}</div>
+      <div class="bar"><i style="width:${m.total*100}%;background:var(--good)"></i><i style="width:${occ*100}%;background:var(--danger)"></i><i style="width:${crop*100}%;background:var(--warn)"></i></div>
+      <div class="small">遮挡 ${pct(occ)} · 裁切 ${pct(crop)}</div></div>`;
+  }).join('') ;
+  // notes
+  $('notes').innerHTML = NOTES.map(n=>`<div class="note"><h3>${n.t}${n.tag?`<span class="tag ${n.rec?'rec':''}">${n.tag}</span>`:''}</h3>
+    <div class="small" style="text-align:left">${n.d}</div><ul>${n.p.map(x=>`<li class="pro">${x}</li>`).join('')}${n.c.map(x=>`<li class="con">${x}</li>`).join('')}</ul></div>`).join('');
+}
+const NOTES = [
+  {t:'A · 低前片 + 按比例卡片', tag:'推荐先做', rec:true, d:'前片矮一截，卡片上移；主卡宽高跟随图片比例（夹在 3:4 到 16:10），竖图、截图不再被裁成横条。',
+   p:['竖版截图 51%→95%，横图照片 62%→94%（超大图标三卡）','中等图标单卡：竖版截图 35%→95%','文件夹外形、颜色、堆叠层次都不变，一眼还是文件夹','只改 preview host 里的 Render() 几何，协议和 UI 不动'],
+   c:['前片变矮后“袋子”感弱一点','手机长截图（9:19.5）仍要裁到 3:4，只到 32%→59%；下限放宽到 9:16 可到约 80%，但卡片会很窄']},
+  {t:'B · 前置相片', tag:'可读性最高', d:'主图贴在前片外面，像夹在文件夹口袋前的照片；副卡在袋里露出顶部，表示里面还有内容。',
+   p:['主图零遮挡，卡片可以更大','袋口副卡保留“这是一叠”的提示'],
+   c:['48–96 px 下黄色边缘很少，容易和图片文件混淆','主图挡住前片，整组图标偏“照片”而不是“文件夹”']},
+  {t:'D · 悬停探出', tag:'第二阶段', d:'静止时同 A；鼠标悬停时卡片升起、副卡展开，主图完整露出，移开后收回。',
+   p:['静止时保留文件夹外形，悬停时零遮挡','和现有悬停反馈一致，符合“想看才展开”'],
+   c:['要把卡片层和文件夹矢量分开绘制，涉及缓存含义和 UI 绘制','触屏和键盘焦点没有悬停，需要另配（如选中时展开）']},
+  {t:'E · 立卡', tag:'推荐（接近系统）', rec:true, d:'借鉴系统“立起来”的做法：前片带透视，上沿比下沿宽、像朝你翻开，口袋里有一层内阴影；卡片去掉 ±11° 倾斜，垂直立在袋里，后两张左右错位、只露上沿。前片顶边压到 152。',
+   p:['竖图、截图天然合适，主卡更高，保留率与 A 相当或更好','不倾斜后边缘对齐像素格，96 px 以下更清楚','和系统文件夹外观一致，用户不需要重新认'],
+   c:['横图在竖卡里会被裁，需要按比例变宽（已含在“按比例调整”里）','后两张只露上沿，作用主要是提示“有多张”']},
+  {t:'F · 立卡并排', tag:'信息量最大', d:'三张竖卡并排立着，中间一张略高略大。适合想一眼看出文件夹里是什么的场景。',
+   p:['三张图都看得到大半，不只是主图','对照片、截图文件夹尤其有用'],
+   c:['每张卡只有约 80 单位宽，96 px 以下三张都偏小','横图被裁成竖条，风景照信息损失大']},
+];
+
+document.addEventListener('click', e=>{
+  const b = e.target.closest('[data-v]'); if(b){ S.v=b.dataset.v; render(); return; }
+  const t = e.target.closest('[data-t]'); if(t){ S.theme=t.dataset.t; render(); return; }
+  const f = e.target.closest('[data-f]'); if(f){ S.cmpF=+f.dataset.f; render(); return; }
+});
+$('size').addEventListener('input', e=>{ S.size=+e.target.value; render(); });
+$('aspect').addEventListener('change', e=>{ S.aspect=e.target.checked; render(); });
+$('hatchOn').addEventListener('change', e=>{ S.hatch=e.target.checked; render(); });
+$('ovOn').addEventListener('change', e=>{ S.ov=e.target.checked; render(); });
+render();
+</script>
+<style>
+.liftable .lift-main,.liftable .lift-l,.liftable .lift-r,.liftable .hatch-lift{transition:transform .22s cubic-bezier(.2,.8,.2,1)}
+.tile:hover .liftable .lift-main,.tile.force-hover .liftable .lift-main{transform:translateY(-14px)}
+.tile:hover .liftable .lift-l,.tile.force-hover .liftable .lift-l{transform:translate(-10px,-6px) rotate(-4deg)}
+.tile:hover .liftable .lift-r,.tile.force-hover .liftable .lift-r{transform:translate(10px,-6px) rotate(4deg)}
+.tile:hover .liftable .hatch-lift,.tile.force-hover .liftable .hatch-lift{opacity:0}
+.liftable .lift-main,.liftable .lift-l,.liftable .lift-r{transform-box:fill-box;transform-origin:50% 100%}
+</style>
+</body>
+</html>

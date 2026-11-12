@@ -462,6 +462,12 @@ int RunFilePickerDialogTest(int argc, wchar_t** argv) {
             spec.filename = L"new-file";
             spec.default_extension = L"txt";
             spec.filters = {{L"Text", L"*.txt"}};
+            // Jump strip sample data (the host fills these in production).
+            spec.host_app_name = L"Microsoft Word";
+            spec.open_folders = {{fixture.root.wstring(), L"", false}, {fixture.root.parent_path().wstring(), L"", false},
+                                 {L"C:\\Windows", L"", true}};
+            spec.auto_jump_from = fixture.root.parent_path().wstring();
+            spec.app_recent_places = {{fixture.root.wstring(), L"", L"9 次"}, {fixture.root.parent_path().wstring(), L"", L"今天"}};
             auto outcome = Run(spec, [&](HWND hwnd, const std::atomic<bool>&) {
                 const HWND edit = GetDlgItem(hwnd, kFilenameId);
                 const auto observed_name = Text(edit);
@@ -474,6 +480,26 @@ int RunFilePickerDialogTest(int argc, wchar_t** argv) {
                     SetPropW(hwnd, L"Pulse.PickerTestSnapshot", snapshot);
                     Send(hwnd, WM_PAINT);
                     RemovePropW(hwnd, L"Pulse.PickerTestSnapshot");
+                    // The jump panel: Alt+D, then a typed name in the address row.
+                    Send(hwnd, WM_SYSKEYDOWN, 'D');
+                    struct Find { HWND edit = nullptr; } find;
+                    EnumChildWindows(hwnd, [](HWND child, LPARAM data) -> BOOL {
+                        wchar_t cls[16]{};
+                        GetClassNameW(child, cls, 16);
+                        if (_wcsicmp(cls, L"Edit") == 0 && IsWindowVisible(child) && GetDlgCtrlID(child) != kFilenameId) {
+                            reinterpret_cast<Find*>(data)->edit = child;
+                            return FALSE;
+                        }
+                        return TRUE;
+                    }, reinterpret_cast<LPARAM>(&find));
+                    if (find.edit) {
+                        SendMessageW(find.edit, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(L"bench"));
+                        const std::wstring jump_shot = std::wstring(snapshot) + L".jump.png";
+                        SetPropW(hwnd, L"Pulse.PickerTestSnapshot", const_cast<wchar_t*>(jump_shot.c_str()));
+                        Send(hwnd, WM_PAINT);
+                        RemovePropW(hwnd, L"Pulse.PickerTestSnapshot");
+                        SendMessageW(find.edit, WM_KEYDOWN, VK_ESCAPE, 0);
+                    }
                 }
                 return initial_name && Send(GetDlgItem(hwnd, kFilenameId), WM_KEYDOWN, VK_RETURN);
             });

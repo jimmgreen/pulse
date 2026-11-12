@@ -12,9 +12,9 @@ constexpr WindowEffect WindowEffectFromId(std::wstring_view id) noexcept {
     if (id == L"none") return WindowEffect::None;
     return WindowEffect::MicaAlt;
 }
-// All window materials currently use DWMWA_SYSTEMBACKDROP_TYPE (Windows 11 22H2).
-constexpr bool WindowEffectSupportedOnBuild(WindowEffect effect, unsigned build, bool modern = true) noexcept {
-    return effect == WindowEffect::None || (modern && build >= 22621 &&
+// Match 1.0.58 selection policy; ApplyWindowEffect separately handles DWM support.
+constexpr bool WindowEffectSupportedOnBuild(WindowEffect effect, unsigned /*build*/, bool modern = true) noexcept {
+    return effect == WindowEffect::None || (modern &&
         (effect == WindowEffect::Acrylic || effect == WindowEffect::Mica || effect == WindowEffect::MicaAlt));
 }
 inline bool WindowEffectSupported(WindowEffect effect) noexcept {

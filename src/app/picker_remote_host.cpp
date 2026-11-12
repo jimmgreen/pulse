@@ -1,6 +1,8 @@
 #include "picker_remote_host.h"
 #include "../ipc/picker_remote_protocol.h"
 #include "../ipc/picker_transport.h"
+#include "../common/picker_owner_guard.h"
+#include "../common/runtime_log.h"
 #include <objbase.h>
 #include <atomic>
 #include <deque>
@@ -14,13 +16,28 @@ namespace wire = pulse::ipc::picker::remote;
 using pulse::ipc::picker::Channel;
 using pulse::ipc::picker::PipeHandle;
 constexpr UINT kDispatch = WM_APP + 417;
+const wchar_t* OwnerStageName(PickerOwnerFailureStage stage) noexcept {
+    switch (stage) {
+    case PickerOwnerFailureStage::None: return L"accepted";
+    case PickerOwnerFailureStage::Window: return L"window";
+    case PickerOwnerFailureStage::OpenProcess: return L"open-process";
+    case PickerOwnerFailureStage::ProcessTime: return L"process-lifetime";
+    case PickerOwnerFailureStage::Session: return L"session-mismatch";
+    case PickerOwnerFailureStage::TokenIdentity: return L"token-identity";
+    case PickerOwnerFailureStage::UserMismatch: return L"user-mismatch";
+    case PickerOwnerFailureStage::IntegrityMismatch: return L"integrity-mismatch";
+    case PickerOwnerFailureStage::ForeignEnabled: return L"caller-disabled-owner-required";
+    case PickerOwnerFailureStage::WindowIdentity: return L"window-identity-changed";
+    default: return L"owner-guard";
+    }
+}
 struct Host {
     Channel channel;
+    PipeHandle parent_process;
     PulsePickerUiV2Api api{};
     PulsePickerUiV2Session session = 0;
     PipeHandle cancel{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
     HWND window = nullptr;
-    DWORD parent = 0;
     std::mutex mutex;
     std::deque<wire::Message> incoming;
     std::atomic<bool> failed{false};
@@ -143,15 +160,29 @@ void Host::Dispatch(wire::Message message) {
         hr = !hello && message.version == PULSE_PICKER_UI_V2_VERSION ? S_OK : E_INVALIDARG;
         if (SUCCEEDED(hr)) { hello = true; reply.version = api.version; reply.capabilities = api.capabilities; reply.features = api.implemented_features; }
     } else if (!hello) { Fail(); return; }
+    else if (message.kind == wire::Kind::SetNavigationRoot && (api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_NAVIGATION_ROOT)) {
+        if (!session) { PulsePickerUiV2Initialize init{sizeof(init), PULSE_PICKER_UI_V2_VERSION, {0,0}}; hr = api.Initialize(&init, &session); }
+        else hr = S_OK;
+        if (SUCCEEDED(hr)) hr = PulsePickerUiSetNavigationRootV2(session, {message.folder.data(), static_cast<uint32_t>(message.folder.size())});
+    }
     else if (message.kind == wire::Kind::ValidateConfig || message.kind == wire::Kind::Show) {
         if (showing) hr = HRESULT_FROM_WIN32(ERROR_BUSY);
         else {
-            DWORD pid = 0;
             const HWND owner = reinterpret_cast<HWND>(static_cast<uintptr_t>(message.config.owner));
-            if (owner && (!IsWindow(owner) || !GetWindowThreadProcessId(owner, &pid) || pid != parent)) hr = E_ACCESSDENIED;
+            const auto checked = ValidateRemotePickerOwner(owner, parent_process.Get(), message.kind == wire::Kind::Show);
+            if (checked.error || (owner && checked.owner_pid != checked.caller_pid)) {
+                pulse::diagnostics::runtime::TextEvent("remote_owner_preflight", {{"stage", OwnerStageName(checked.stage)}}, {
+                    {"owner_pid", checked.owner_pid}, {"caller_pid", checked.caller_pid}, {"win32", checked.error},
+                    {"failure_stage", static_cast<uint32_t>(checked.stage)}, {"showing", message.kind == wire::Kind::Show ? 1u : 0u},
+                    {"same_user", checked.identity.same_user ? 1u : 0u}, {"same_session", checked.identity.same_session ? 1u : 0u},
+                    {"caller_integrity", checked.identity.caller_integrity}, {"owner_integrity", checked.identity.owner_integrity}});
+            }
+            if (checked.error) hr = HRESULT_FROM_WIN32(checked.error);
             else {
                 if (!session) { PulsePickerUiV2Initialize init{sizeof(init), PULSE_PICKER_UI_V2_VERSION, {0,0}}; hr = api.Initialize(&init, &session); }
                 else hr = S_OK;
+                if (SUCCEEDED(hr) && !wire::ConfigSupportedByPeer(message.config, api.implemented_features))
+                    hr = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
                 if (SUCCEEDED(hr)) {
                     wire::OwnedConfig config(message.config);
                     hr = api.ValidateConfig(session, &config.Get());
@@ -178,6 +209,8 @@ void Host::Dispatch(wire::Message message) {
     } else if (message.kind == wire::Kind::Close) hr = api.Close(session, message.show_id, static_cast<HRESULT>(message.hresult));
     else if (message.kind == wire::Kind::UpdateControl) { wire::OwnedControl control(message.control); hr = api.UpdateControl(session, message.show_id, &control.Get()); }
     else if (message.kind == wire::Kind::Navigate) hr = api.Navigate(session, message.show_id, {message.folder.data(), static_cast<uint32_t>(message.folder.size())});
+    else if (message.kind == wire::Kind::UpdateText && (api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_DYNAMIC_TEXT))
+        hr = PulsePickerUiUpdateTextV2(session, message.show_id, message.text_kind, {message.text.data(), static_cast<uint32_t>(message.text.size())});
     else if (message.kind == wire::Kind::Query) {
         PulsePickerUiV2Snapshot snapshot{}; snapshot.size = sizeof(snapshot);
         hr = api.Query(session, message.show_id, message.expected_generation, &snapshot);
@@ -198,11 +231,11 @@ void Host::Dispatch(wire::Message message) {
 }
 int RunPickerRemoteHost(const std::wstring& pipe, DWORD parent_pid) {
     try {
-        Host host; host.parent = parent_pid;
+        Host host;
         if (!host.cancel) return ERROR_NOT_ENOUGH_MEMORY;
-        PipeHandle parent(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, parent_pid));
-        if (!parent) return static_cast<int>(GetLastError());
-        const auto connected = pulse::ipc::picker::Connect(pipe, parent.Get(), host.channel);
+        host.parent_process.Reset(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, parent_pid));
+        if (!host.parent_process) return static_cast<int>(GetLastError());
+        const auto connected = pulse::ipc::picker::Connect(pipe, host.parent_process.Get(), host.channel);
         if (!connected) return static_cast<int>(connected.error);
         if (FAILED(pulse::picker_inprocess::ConfigureRemoteParent(parent_pid))) return ERROR_INVALID_PARAMETER;
         if (FAILED(PulsePickerUiGetApiV2(PULSE_PICKER_UI_V2_VERSION, sizeof(host.api), &host.api))) return ERROR_NOT_SUPPORTED;

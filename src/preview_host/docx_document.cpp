@@ -516,7 +516,7 @@ size_t CountWords(std::wstring_view text) {
 bool IsDocxExtension(std::wstring_view extension) {
     std::wstring e(extension);
     for (auto& c : e) c = static_cast<wchar_t>(std::towlower(c));
-    return e == L".docx" || e == L".docm" || e == L".dotx";
+    return e == L".docx" || e == L".docm" || e == L".dotx" || e == L".dotm";
 }
 
 bool MakeDocxDocument(const std::wstring& path, std::wstring& payload, uint32_t& bytes_read,

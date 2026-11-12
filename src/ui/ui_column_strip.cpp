@@ -143,7 +143,7 @@ ColumnStripLayout MainRenderer::ColumnStripGeometry(const PaneViewModel& vm,
         out.body = pane_bounds;
         return out;
     }
-    return LayoutColumnStrip(pane_bounds, pane_bounds.top + pane_header_height_,
+    return LayoutColumnStrip(pane_bounds, pane_bounds.top + pane_header_height_ + EmbeddedPickerRecentHeight(),
                              cs.ancestors.size(), cs.has_child, cs.widths_dip, scale_,
                              cs.scroll_from_right_dip);
 }
@@ -291,7 +291,7 @@ void MainRenderer::DrawColumnStrip(const WindowViewModel& vm, const PaneViewMode
         }
         if (ancestor) dc->PopAxisAlignedClip();
     }
-    for (const StripDivider& divider : StripDividers(strip, bounds, bounds.top + pane_header_height_)) {
+    for (const StripDivider& divider : StripDividers(strip, bounds, bounds.top + pane_header_height_ + EmbeddedPickerRecentHeight())) {
         const float lx = divider.x;
         if (IsAncestorId(divider.id) && has_viewport &&
             (lx < strip.viewport.left || lx > strip.viewport.right + 0.5f)) {
@@ -506,7 +506,7 @@ bool MainRenderer::HitTestColumnStrip(const PaneViewModel& vm, const D2D1_RECT_F
         out.sub_index = -1;
         return true;
     }
-    for (const StripDivider& divider : StripDividers(strip, pane_bounds, pane_bounds.top + pane_header_height_)) {
+    for (const StripDivider& divider : StripDividers(strip, pane_bounds, pane_bounds.top + pane_header_height_ + EmbeddedPickerRecentHeight())) {
         if (y < divider.top || y >= divider.bottom) continue;
         const float lx = divider.x;
         if (!in_viewport(divider.id, lx) || (IsAncestorId(divider.id) && lx > strip.viewport.right + 0.5f))

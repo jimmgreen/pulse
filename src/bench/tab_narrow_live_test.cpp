@@ -108,7 +108,8 @@ int RunTabProbe(pulse::AppState& s, FILE* report) {
                 (r.region == ui::HitTestResult::TabScroll && r.index == 1) == right;
         };
         const bool end_arrows = arrows(after, true, false);
-        const bool end = after.scroll == after.max_scroll && after.item_rects.back().right <= after.view_right + .1f;
+        const bool end = after.scroll == after.max_scroll &&
+            after.ItemRect(crowded, crowded.tabs.size() - 1).right <= after.view_right + .1f;
         s.renderer.ScrollTabStrip(crowded, width, x, 20 * dpi, 1000);
         after = ui::TitleLayoutTestAccess::Geometry(s.renderer, crowded, width);
         const bool start_arrows = arrows(after, false, true);
@@ -123,11 +124,12 @@ int RunTabProbe(pulse::AppState& s, FILE* report) {
         const bool start = after.scroll == 0;
         crowded.tabs[5].active = false; crowded.tabs.back().active = true;
         after = ui::TitleLayoutTestAccess::Geometry(s.renderer, crowded, width);
-        const bool reveal = after.item_rects.back().left >= after.view_left && after.item_rects.back().right <= after.view_right + .1f;
+        const auto last_rect = after.ItemRect(crowded, crowded.tabs.size() - 1);
+        const bool reveal = last_rect.left >= after.view_left - .1f && last_rect.right <= after.view_right + .1f;
         const bool outside = !s.renderer.ScrollTabStrip(crowded, width, 0, 20 * dpi, -1);
         bool readable = true;
         for (size_t i = 0; i < crowded.tabs.size(); ++i)
-            readable &= after.Width(crowded, i) >= 96 * dpi && !after.icon_only[i];
+            readable &= after.Width(crowded, i) >= 96 * dpi && (i >= after.icon_only.size() || !after.icon_only[i]);
         const bool ok = moved && end && start && reveal && outside && readable;
         fprintf(report, "[%s] wheel dpi=%.1f moved=%d end=%d start=%d active_reveal=%d outside=%d readable=%d\n", ok ? "PASS" : "FAIL", dpi, moved, end, start, reveal, outside, readable);
         failures += !ok;
@@ -168,7 +170,8 @@ int RunTabProbe(pulse::AppState& s, FILE* report) {
         const float expected_plus = static_cast<float>(width) - (264.f + 64.f + 36.f) * scale;
         const auto geometry = ui::TitleLayoutTestAccess::Geometry(s.renderer, vm, static_cast<float>(width));
         bool readable = true;
-        for (size_t i = 0; i < vm.tabs.size(); ++i) readable &= geometry.Width(vm, i) >= 96 * scale && !geometry.icon_only[i];
+        for (size_t i = 0; i < vm.tabs.size(); ++i)
+            readable &= geometry.Width(vm, i) >= 96 * scale && (i >= geometry.icon_only.size() || !geometry.icon_only[i]);
         const bool filled = readable && plus >= 0 && (geometry.overflow || (tabs.size() == 12 && std::abs(plus - expected_plus) <= 3.f));
         const auto path = std::filesystem::path(output) / (L"tabs-" + std::to_wstring(width) + L"-150dpi.png");
         const bool captured = CapturePresentedFrame(s.compositor, path.wstring());

@@ -2,7 +2,9 @@
 #include "open_routing.h"
 
 #include "app_internal.h"
+#include "extension_store_ui.h"
 #include "../common/localization.h"
+#include "../common/path_utils.h"
 #include "app_messages.h"
 #include "closed_windows.h"
 #include "default_file_manager.h"
@@ -76,6 +78,43 @@ ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw, bo
     const bool explicit_window = raw == L"pulse:new-window" || raw == L"pulse:this-pc";
     const bool explicit_tab = raw == L"pulse:new-tab";
     const bool launch = activate || icon || win_e || explicit_window || explicit_tab || app::IsThisPcArgument(raw);
+    if (!launch && !reveal && !mru.shot.active && IsExtensionPackageFilePath(raw)) {
+        std::wstring unquoted = raw;
+        while (!unquoted.empty() && unquoted.front() == L'"') unquoted.erase(unquoted.begin());
+        while (!unquoted.empty() && unquoted.back() == L'"') unquoted.pop_back();
+        const wchar_t root_buf[4] = {
+            unquoted.size() >= 3 ? unquoted[0] : L'\0', L':', L'\\', L'\0'};
+        const UINT drive_type = (!fs::IsUncPath(unquoted) && unquoted.size() >= 3 &&
+                                 unquoted[1] == L':' && (unquoted[2] == L'\\' || unquoted[2] == L'/'))
+            ? GetDriveTypeW(root_buf)
+            : DRIVE_UNKNOWN;
+        const bool local_drive = (drive_type == DRIVE_FIXED || drive_type == DRIVE_REMOVABLE ||
+                                  drive_type == DRIVE_RAMDISK);
+        const DWORD attrs = local_drive ? GetFileAttributesW(unquoted.c_str()) : FILE_ATTRIBUTE_NORMAL;
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            std::vector<AppState*> pkg_windows;
+            std::vector<app::ExternalOpenWindow> pkg_snapshot;
+            app::ForEachWindowSharingCore(mru, [&](AppState& w) {
+                if (!w.hwnd) return;
+                app::ExternalOpenWindow e;
+                e.minimized = IsIconic(w.hwnd) != FALSE;
+                e.hidden = !IsWindowVisible(w.hwnd);
+                e.busy = IsBusy(w);
+                e.last_input_tick = w.last_input_tick;
+                pkg_windows.push_back(&w);
+                pkg_snapshot.push_back(e);
+            });
+            if (pkg_windows.empty()) return {ExternalOpenStatus::Failed, nullptr};
+            const auto pkg_decision = app::DecideLaunchTarget(2, pkg_snapshot, false);
+            if (pkg_decision.action == app::ExternalOpenAction::Deferred) {
+                return {ExternalOpenStatus::Deferred, nullptr};
+            }
+            AppState* pkg_target = pkg_decision.window < pkg_windows.size() ? pkg_windows[pkg_decision.window] : pkg_windows.front();
+            RevealWindow(*pkg_target);
+            OpenExtensionPackageInStore(*pkg_target, unquoted);
+            return {ExternalOpenStatus::Dispatched, pkg_target};
+        }
+    }
     const bool this_pc = launch;
     const auto* current = ActiveTab(mru);
     const std::wstring path = icon || win_e || raw == L"pulse:new-window" || explicit_tab

@@ -1,4 +1,5 @@
 #include "../dialog_launcher/managed_launch_profile.h"
+#include "../common/dialog_bundle.h"
 #include "../shell_bridge/runtime_config.h"
 #include <filesystem>
 #include <fstream>
@@ -113,6 +114,21 @@ int LaunchFixture(int argc, wchar_t** argv) {
 int wmain(int argc, wchar_t** argv) {
     std::cout << std::unitbuf;
     if (argc > 1 && std::wstring_view(argv[1]) == L"--launch-fixture") return LaunchFixture(argc, argv);
+    if(argc==5 && std::wstring_view(argv[1])==L"--capture-bundle") {
+        pulse::dialog_bundle::BundleLease bundle;
+        Check(pulse::dialog_bundle::VerifyBundle(argv[2],{},bundle)==0,"verified bundle fixture");
+        if(!bundle) return 1;
+        model::ManagedLaunchProfile captured;captured.format_version=2;
+        captured.bundle_root=bundle.Directory();captured.manifest_digest=bundle.ManifestDigest();
+        captured.host=bundle.Host();captured.runtime=bundle.Runtime();captured.target=argv[3];
+        captured.cwd=fs::path(argv[3]).parent_path().wstring();captured.control_root=argv[4];
+        const auto error=model::CaptureProfile(captured,bundle.Launcher());
+        Check(error==0 && captured.machine==bundle.Machine(),"profile architecture follows verified launcher rather than manager");
+        Check(model::ValidateProfile(captured,bundle.Launcher())==0,"cross architecture profile revalidates exact components");
+        auto altered=captured;altered.machine=bundle.Machine()==IMAGE_FILE_MACHINE_I386?IMAGE_FILE_MACHINE_AMD64:IMAGE_FILE_MACHINE_I386;
+        Check(model::ValidateProfile(altered,bundle.Launcher())!=0,"altered profile architecture rejected");
+        std::cout<<"Checks: "<<checks<<", failures: "<<failures<<'\n';return failures?1:0;
+    }
     if (argc != 1) return 2;
     model::ManagedLaunchProfile p;
 #ifdef _WIN64

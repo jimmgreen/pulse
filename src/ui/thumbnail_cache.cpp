@@ -397,6 +397,52 @@ std::wstring ThumbnailCache::Key(const std::wstring& path, uint32_t pixels,
     return path + L"\n" + std::to_wstring(pixels) + L":" + std::to_wstring(modified) +
            L":" + std::to_wstring(size) + L":" + std::to_wstring(frame_index);
 }
+void ThumbnailCache::RenameImage(const std::wstring& from, const std::wstring& to,
+                                  uint64_t modified, uint64_t size) {
+    if (from.empty() || to.empty() || from == to) return;
+    std::wstring extension(preview::DiagnosticExtension(from));
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+    if (!preview::IsImageExtension(extension) ||
+        _wcsicmp(extension.c_str(), std::wstring(preview::DiagnosticExtension(to)).c_str()) != 0) return;
+    const auto prefix = from + L"\n";
+    const auto suffix = L":" + std::to_wstring(modified) + L":" + std::to_wstring(size) + L":0";
+    std::lock_guard lock(mutex_);
+    std::vector<std::wstring> keys;
+    for (const auto& [key, item] : items_) {
+        if (key.starts_with(prefix) && key.ends_with(suffix) && !item.failed &&
+            item.kind == ipc::PreviewContentKind::Bitmap &&
+            (item.bitmap.get() || !item.pixels.empty())) keys.push_back(key);
+    }
+    std::wstring largest;
+    uint32_t edge = 0;
+    for (const auto& key : keys) {
+        const auto target = to + key.substr(from.size());
+        if (auto existing = items_.find(target); existing != items_.end()) {
+            cache_bytes_ -= existing->second.cost;
+            lru_.erase(existing->second.lru_position);
+            items_.erase(existing);
+        }
+        auto node = items_.extract(key);
+        auto& item = node.mapped();
+        // A decode already queued for the destination may still return an icon,
+        // failure or small bitmap. It predates the verified renamed artwork.
+        item.renamed_before_request = next_id_.load();
+        item.upload_token = 0;
+        *item.lru_position = target;
+        item.animation_identity = Key(to, 0, modified, size);
+        const auto current_edge = (std::max)(item.w, item.h);
+        if (largest.empty() || current_edge > edge) { largest = target; edge = current_edge; }
+        node.key() = target;
+        items_.insert(std::move(node));
+        transient_failures_.erase(key); transient_failures_.erase(target);
+    }
+    if (!largest.empty()) {
+        still_by_identity_.erase(Key(from, 0, modified, size));
+        still_by_identity_[Key(to, 0, modified, size)] = largest;
+    }
+}
+
 void ThumbnailCache::StopChildren() {
     for (uint32_t lane = 0; lane < kMaxLanes; ++lane) StopChild(lane);
 }
@@ -764,7 +810,7 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
             }
             const auto dot = path.find_last_of(L'.');
             const bool spreadsheet = direct_preview && dot != std::wstring::npos &&
-                (_wcsicmp(path.c_str() + dot, L".xlsx") == 0 || _wcsicmp(path.c_str() + dot, L".xlsm") == 0);
+                (_wcsicmp(path.c_str() + dot, L".xls") == 0 || _wcsicmp(path.c_str() + dot, L".xlsx") == 0 || _wcsicmp(path.c_str() + dot, L".xlsm") == 0);
             if (spreadsheet) {
                 // A rapid sheet switch replaces queued work for this workbook.
                 // The active worker can finish, but its old result is only cached.
@@ -1093,6 +1139,12 @@ bool ThumbnailCache::StoreResult(const Request& req, Item result) {
     std::lock_guard lock(mutex_);
     // An old decode must not remove a replacement request queued after Evict().
     if (req.epoch != epoch_.load(std::memory_order_relaxed)) return false;
+    if (const auto retained = items_.find(req.key); retained != items_.end() &&
+        retained->second.renamed_before_request && req.id < retained->second.renamed_before_request) {
+        pending_.erase(req.key);
+        repaint_.InvalidateAll();
+        return false; // Rejected pixels must not reach the persistent store either.
+    }
     if (req.interest_tracked && !WantedByWindowLocked(req.key)) { pending_.erase(req.key); return false; }
     if (req.document && !req.document->active.load()) {
         pending_.erase(req.key);

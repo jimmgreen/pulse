@@ -6,8 +6,10 @@ int wmain(int argc, wchar_t** argv) {
     if (argc != 2) { std::puts("Usage: pulse_dialog_auto_registration_test <absolute fixture DLL>"); return 2; }
     std::wstring sandbox = L"Software\\PulseDialogAutoTest_" + std::to_wstring(GetCurrentProcessId());
     HKEY isolated = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, sandbox.c_str(), 0, nullptr, 0, KEY_ALL_ACCESS, nullptr, &isolated, nullptr)) return 2;
-    if (RegOverridePredefKey(HKEY_CURRENT_USER, isolated)) { RegCloseKey(isolated); return 2; }
+    DWORD setup = RegCreateKeyExW(HKEY_CURRENT_USER, sandbox.c_str(), 0, nullptr, 0, KEY_ALL_ACCESS, nullptr, &isolated, nullptr);
+    if (setup) { std::printf("[FAIL] isolated registry creation error=%lu\n", setup); return 2; }
+    setup = RegOverridePredefKey(HKEY_CURRENT_USER, isolated);
+    if (setup) { std::printf("[FAIL] isolated registry override error=%lu\n", setup); RegCloseKey(isolated); return 2; }
     int failures = 0;
     auto check = [&](bool condition, const char* name) { std::printf("[%s] %s\n", condition ? "PASS" : "FAIL", name); if (!condition) ++failures; };
     using namespace pulse::dialog_auto;
@@ -43,7 +45,16 @@ int wmain(int argc, wchar_t** argv) {
     RegCloseKey(foreign);
     check(Enable(argv[1]) == ERROR_ALREADY_EXISTS, "preserve existing user CLSID");
     RegDeleteKeyExW(HKEY_CURRENT_USER, root, RegistryView, 0);
-    check(Enable(argv[1]) == ERROR_SUCCESS, "enable for partial recovery");
+    check(EnableIfUnclaimed(argv[1]) == ERROR_SUCCESS, "strict enable recovers the same bundle");
+    HKEY journal = nullptr;
+    check(RegOpenKeyExW(HKEY_CURRENT_USER, ConfigKey, 0, KEY_ALL_ACCESS | RegistryView, &journal) == ERROR_SUCCESS, "open isolated recovery journal");
+    const std::wstring another = std::wstring(L"C:\\OtherInstallation\\") + DllName;
+    RegSetValueExW(journal, L"DllPath", 0, REG_SZ, reinterpret_cast<const BYTE*>(another.c_str()), static_cast<DWORD>((another.size() + 1) * sizeof(wchar_t)));
+    check(EnableIfUnclaimed(argv[1]) == ERROR_ALREADY_EXISTS && Inspect().dll_path == another,
+        "strict enable refuses another journal under the mutation lock");
+    RegSetValueExW(journal, L"DllPath", 0, REG_SZ, reinterpret_cast<const BYTE*>(argv[1]), static_cast<DWORD>((wcslen(argv[1]) + 1) * sizeof(wchar_t)));
+    RegCloseKey(journal);
+    check(Inspect().enabled, "rejected strict enable leaves both registrations intact");
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\CLSID\\{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}");
     check(Enable(argv[1]) == ERROR_SUCCESS && Inspect().enabled, "recover missing second key");
     std::wstring child = std::wstring(root) + L"\\InprocServer32";

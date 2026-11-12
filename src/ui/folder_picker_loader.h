@@ -29,10 +29,18 @@ struct PickerValidation {
     std::optional<SaveConfirmationSnapshot> save_snapshot;
 };
 
+struct PickerSaveDirectories {
+    uint64_t generation = 0;
+    SaveTargetRequest request;
+    SaveDirectoryPlan plan;
+    SaveDirectoryCreation creation;
+    bool creating = false;
+};
+
 // Two bounded workers share a latest-only queue; closing never waits on a network request.
 class PickerLoader {
 public:
-    PickerLoader(HWND hwnd, UINT message, UINT validation_message = 0, UINT folder_commit_message = 0);
+    PickerLoader(HWND hwnd, UINT message, UINT validation_message = 0, UINT folder_commit_message = 0, UINT directories_message = 0);
     ~PickerLoader();
     PickerLoader(const PickerLoader&) = delete;
     PickerLoader& operator=(const PickerLoader&) = delete;
@@ -41,6 +49,9 @@ public:
                   PickerMode mode, PickerOptions options = {});
     void CreateFolder(uint64_t generation, std::wstring current, std::wstring name);
     void ValidateSave(uint64_t generation, SaveTargetRequest request);
+    void PrepareSaveDirectories(uint64_t generation, SaveTargetRequest request, uint32_t native_options,
+                                std::optional<SaveDirectoryPlan> approved = {});
+    static std::unique_ptr<PickerSaveDirectories> TakeSaveDirectories(LPARAM lparam);
     void RevalidateSave(uint64_t generation, SaveConfirmationSnapshot snapshot);
     void CheckSaveAccess(uint64_t generation, SaveConfirmationSnapshot snapshot,
                          bool after_file_ok, uint64_t ui_generation, bool require_unencrypted = false, bool skip_access_validation = false, uint32_t native_options = 0);

@@ -24,7 +24,20 @@ public:
         for (size_t f = 0; f < fields.size(); ++f) {
             auto& field = fields[f];
             ui::PickerCustomControl group; group.kind = 1; group.id = allocate(); group.state = 3; group.label = field.label; group.property_layout = 5;
+            if (field.kind == PULSE_PICKER_UI_V2_PROPERTY_GROUP ||
+                field.kind == PULSE_PICKER_UI_V2_PROPERTY_READONLY_SCALAR ||
+                field.kind == PULSE_PICKER_UI_V2_PROPERTY_READONLY_LIST) group.property_layout = 7;
             destination.push_back(group);
+            if (field.kind == PULSE_PICKER_UI_V2_PROPERTY_GROUP) continue;
+            if (field.kind == PULSE_PICKER_UI_V2_PROPERTY_READONLY_SCALAR || field.kind == PULSE_PICKER_UI_V2_PROPERTY_READONLY_LIST) {
+                for (const auto& text : field.values) {
+                    ui::PickerCustomControl value; value.kind = PULSE_PICKER_UI_V2_CONTROL_GROUP; // Existing noninteractive text/heading control.
+                    value.id = allocate(); value.has_parent = true; value.parent_id = group.id;
+                    value.label = text; value.state = 3; value.property_layout = 6;
+                    destination.push_back(std::move(value));
+                }
+                continue;
+            }
             const size_t slots = field.kind == PULSE_PICKER_UI_V2_PROPERTY_SCALAR ? 1 : PULSE_PICKER_UI_V2_MAX_PROPERTY_VALUES;
             for (size_t slot = 0; slot < slots; ++slot) {
                 ui::PickerCustomControl edit; edit.kind = 8; edit.id = allocate(); edit.has_parent = true; edit.parent_id = group.id;

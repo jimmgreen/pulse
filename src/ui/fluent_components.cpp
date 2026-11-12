@@ -647,6 +647,12 @@ void Painter::DrawGlyphWithBrush(std::wstring_view glyph, const D2D1_RECT_F& bou
     if (!compositor_) {
         return;
     }
+    if (glyph.starts_with(L"icon:")) {
+        if (auto* solid = Brush(brush)) {
+            const auto icon_bounds = command_icons::CenteredBounds(bounds, Px(16.0f));
+            if (DrawExtensionIconGlyph(dc_, glyph, icon_bounds, solid->GetColor(), theme_, Px(1.35f))) return;
+        }
+    }
     const auto command = command_icons::FromGlyph(glyph);
     if (command != command_icons::Icon::None) {
         EnsureStrokeStyle();
@@ -690,6 +696,11 @@ void Painter::DrawAliasMark(const D2D1_RECT_F& tile) {
 
 void Painter::DrawGlyphWithFormat(std::wstring_view glyph, const D2D1_RECT_F& bounds,
                                   const D2D1_COLOR_F& color, IDWriteTextFormat* format) {
+    if (glyph.starts_with(L"icon:")) {
+        const float size = format ? (std::min)(Px(20.0f), format->GetFontSize() * 1.15f) : Px(16.0f);
+        if (DrawExtensionIconGlyph(dc_, glyph, command_icons::CenteredBounds(bounds, size),
+                                   color, theme_, Px(1.35f))) return;
+    }
     const auto command = command_icons::FromGlyph(glyph);
     if (command != command_icons::Icon::None) {
         EnsureStrokeStyle();
@@ -1275,28 +1286,29 @@ void Painter::DrawCheckBox(const D2D1_RECT_F& bounds, std::wstring_view text,
 }
 
 void Painter::DrawRadioButton(const D2D1_RECT_F& bounds, std::wstring_view text,
-                              const ControlState& state) {
+                              const ControlState& state, float indicator_dip) {
     if (!theme_ || !compositor_) {
         return;
     }
-    const float indicator = Px(20.0f);
+    const float ratio = std::clamp(indicator_dip, 8.0f, 40.0f) / 20.0f;
+    const float indicator = Px(20.0f * ratio);
     const float top = bounds.top + (Height(bounds) - indicator) * 0.5f;
     const auto center = D2D1::Point2F(bounds.left + indicator * 0.5f,
                                      top + indicator * 0.5f);
     const float outer_radius = indicator * 0.5f;
     D2D1_COLOR_F border;
     D2D1_COLOR_F fill;
-    float thickness = Px(1.0f);
+    float thickness = Px(1.0f * ratio);
     if (high_contrast_) {
         border = !state.enabled ? theme_->text_disabled
                  : state.checked ? theme_->accent : theme_->stroke_input_bottom;
         fill = state.checked ? theme_->bg : theme_->fill_input;
-        thickness = state.checked ? Px(5.0f) : Px(1.0f);
+        thickness = state.checked ? Px(5.0f * ratio) : Px(1.0f * ratio);
     } else if (state.checked) {
         border = state.enabled ? theme_->accent
                                : dark_ ? Rgba(0xFFFFFF, 40) : Rgba(0x000000, 55);
         fill = dark_ ? HexColor(0x000000) : HexColor(0xFFFFFF);
-        thickness = state.hovered && !state.pressed ? Px(4.0f) : Px(5.0f);
+        thickness = state.hovered && !state.pressed ? Px(4.0f * ratio) : Px(5.0f * ratio);
     } else if (dark_) {
         border = state.enabled && !state.pressed ? Rgba(0xFFFFFF, 153)
                                                  : Rgba(0xFFFFFF, 40);
@@ -1319,8 +1331,8 @@ void Painter::DrawRadioButton(const D2D1_RECT_F& bounds, std::wstring_view text,
                      ScratchBrush(border), thickness);
     if (!state.checked && state.enabled && state.pressed) {
         const D2D1_COLOR_F pressed_ring = dark_ ? Rgba(0xFFFFFF, 40) : Rgba(0x000000, 24);
-        dc_->DrawEllipse(D2D1::Ellipse(center, Px(7.0f), Px(7.0f)),
-                         ScratchBrush(pressed_ring), Px(4.0f));
+        dc_->DrawEllipse(D2D1::Ellipse(center, Px(7.0f * ratio), Px(7.0f * ratio)),
+                         ScratchBrush(pressed_ring), Px(4.0f * ratio));
     }
     DrawText(text,
              D2D1::RectF(bounds.left + indicator + Px(8.0f), bounds.top,
@@ -1400,7 +1412,7 @@ void Painter::DrawSwitch(const D2D1_RECT_F& bounds, std::wstring_view text,
 void Painter::DrawTitleBarButton(const D2D1_RECT_F& bounds, TitleBarButtonRole role,
                                  std::wstring_view custom_glyph,
                                  const ControlState& state) {
-    if (!theme_) {
+    if (!theme_ || !dc_) {
         return;
     }
     D2D1_COLOR_F fill{};
@@ -1409,12 +1421,16 @@ void Painter::DrawTitleBarButton(const D2D1_RECT_F& bounds, TitleBarButtonRole r
     if (state.enabled && (state.hovered || state.pressed)) {
         draw_fill = true;
         if (role == TitleBarButtonRole::Close) {
-            fill = HexColor(0xC42B1C);
-            foreground = HexColor(0xFFFFFF);
+            if (high_contrast_) {
+                fill = state.pressed ? theme_->fill_pressed : theme_->fill_hover;
+                foreground = theme_->accent_text;
+            } else {
+                fill = state.pressed ? HexColor(0xB32719) : theme_->danger;
+                foreground = HexColor(0xFFFFFF);
+            }
         } else {
-            fill = high_contrast_ ? (state.pressed ? theme_->fill_pressed : theme_->fill_hover)
-                                  : dark_ ? Rgba(0xFFFFFF, state.pressed ? 7 : 10)
-                                          : Rgba(0x000000, state.pressed ? 7 : 10);
+            fill = state.pressed ? theme_->fill_pressed : theme_->fill_hover;
+            if (high_contrast_) foreground = theme_->accent_text;
         }
     } else if (state.enabled && state.checked) {
         draw_fill = true;
@@ -1430,6 +1446,15 @@ void Painter::DrawTitleBarButton(const D2D1_RECT_F& bounds, TitleBarButtonRole r
     if (role == TitleBarButtonRole::Maximize) glyph = kMaximize;
     if (role == TitleBarButtonRole::Restore) glyph = kRestore;
     if (role == TitleBarButtonRole::Close) glyph = kClose;
+    const auto command = command_icons::FromGlyph(glyph);
+    if (command != command_icons::Icon::None) {
+        EnsureStrokeStyle();
+        const auto icon_bounds = command_icons::CenteredBounds(bounds, Px(16.0f * 0.66f));
+        if (command_icons::Draw(dc_, ScratchBrush(foreground), round_stroke_.get(), command,
+                                icon_bounds)) {
+            return;
+        }
+    }
     DrawGlyphWithFormat(glyph, Inset(bounds, Px(12.0f)), foreground,
                         SmallIconFormat());
 }
@@ -1516,9 +1541,9 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
     if (spec.heading) {
         // Caption at the icon column's edge, sitting on the group's first row.
         auto caption = spec.bounds;
-        caption.left += Px(16.0f);
+        caption.left += Px(spec.group_tint ? 14.0f : 16.0f);
         caption.right -= Px(16.0f);
-        caption.top += Px(6.0f);
+        caption.top += Px(spec.group_tint ? 0.0f : 6.0f);
         if (!spec.shortcut.empty()) {
             auto detail = caption;
             const float width = MeasureTextWidth(compositor_, CaptionFormat(), spec.shortcut);
@@ -1535,7 +1560,7 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
         }
         return;
     }
-    auto item = Inset(spec.bounds, Px(6.0f));
+    auto item = Inset(spec.bounds, Px(spec.group_tint ? 4.0f : 6.0f));
     item.top = spec.bounds.top + Px(2.0f);
     item.bottom = spec.bounds.bottom - Px(2.0f);
     if (spec.state.enabled &&
@@ -1621,6 +1646,13 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
         const auto dest = D2D1::RectF(left, top, left + side, top + side);
         dc_->DrawBitmap(spec.icon_bitmap, &dest, spec.state.enabled ? 1.0f : 0.45f,
                         D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, nullptr, nullptr);
+    } else if (spec.custom_icon != 0) {
+        DrawExtensionIcon(dc_, spec.custom_icon, icon_bounds,
+                          spec.accent_glyph && spec.state.enabled ? theme_->accent : foreground,
+                          theme_, Px(1.35f));
+    } else if (spec.vector_icon != StoreIcon::None) {
+        DrawStoreIcon(dc_, ScratchBrush(spec.accent_glyph && spec.state.enabled ? theme_->accent : foreground),
+                      icon_bounds, spec.vector_icon, Px(1.35f));
     } else if (spec.has_swatch) {
         const auto center = D2D1::Point2F((icon_bounds.left + icon_bounds.right) * 0.5f,
                                          (icon_bounds.top + icon_bounds.bottom) * 0.5f);
@@ -1634,16 +1666,23 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
     } else {
         draw_glyph();
     }
-    content.left += icon_width + Px(8.0f);
+    content.left += icon_width + Px(spec.group_tint ? 10.0f : 8.0f);
     if (spec.has_submenu) {
         // Fluent chevron in a 22px column — the old shortcut-column "›" was
         // caption-sized and looked like a punctuation mark. 12px like WinUI's
         // MenuFlyoutSubItem, in step with the 13px labels.
         const float chevron = Px(22.0f);
-        DrawGlyphWithFormat(kChevronRight,
-                            D2D1::RectF(content.right - chevron, content.top,
-                                        content.right, content.bottom),
-                            foreground, MenuChevronFormat());
+        const auto arrow_bounds = D2D1::RectF(content.right - chevron, content.top,
+                                              content.right, content.bottom);
+        if (spec.vector_icon != StoreIcon::None || spec.custom_icon != 0) {
+            const float side = Px(12.0f);
+            const float x = (arrow_bounds.left + arrow_bounds.right - side) * .5f;
+            const float y = (arrow_bounds.top + arrow_bounds.bottom - side) * .5f;
+            DrawStoreIcon(dc_, ScratchBrush(foreground), D2D1::RectF(x, y, x + side, y + side),
+                          StoreIcon::ChevronRight, Px(1.35f));
+        } else {
+            DrawGlyphWithFormat(kChevronRight, arrow_bounds, foreground, MenuChevronFormat());
+        }
         content.right -= chevron + Px(4.0f);
     }
     // A flyout row may still show its current value before the chevron
@@ -1700,7 +1739,7 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
     // Long undo labels / Explorer verbs must ellipsize inside the fixed menu
     // width — they must never stretch the flyout. Labels use the 13 DIP
     // nav format, the size the file list draws names in.
-    IDWriteTextFormat* body = NavFormat();
+    IDWriteTextFormat* body = spec.primary ? SectionFormat() : NavFormat();
     IDWriteInlineObject* sign = nav_ellipsis_sign_.get() ? nav_ellipsis_sign_.get()
                                                          : ellipsis_sign_.get();
     DWRITE_WORD_WRAPPING old_wrap = DWRITE_WORD_WRAPPING_WRAP;
@@ -1741,10 +1780,39 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
             drawn = true;
         }
     }
-    if (!drawn) DrawText(spec.text, content, body, foreground);
+    // With a detail line the label takes the upper part and the caption sits
+    // under it; both ellipsize inside the same column.
+    auto label = content;
+    if (!spec.detail.empty()) {
+        const float middle = (content.top + content.bottom) * 0.5f;
+        label.top = middle - Px(spec.group_tint ? 16.0f : 19.0f);
+        label.bottom = middle + Px(spec.group_tint ? 2.0f : 1.0f);
+    }
+    if (!drawn) DrawText(spec.text, label, body, foreground);
     if (body) {
         body->SetTrimming(&old_trim, old_sign.get());
         body->SetWordWrapping(old_wrap);
+    }
+    if (!spec.detail.empty()) {
+        IDWriteTextFormat* cap = CaptionFormat();
+        DWRITE_WORD_WRAPPING cap_wrap = DWRITE_WORD_WRAPPING_WRAP;
+        DWRITE_TRIMMING cap_trim{};
+        ComPtr<IDWriteInlineObject> cap_sign;
+        if (cap) {
+            cap_wrap = cap->GetWordWrapping();
+            cap->GetTrimming(&cap_trim, &cap_sign);
+            cap->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+            cap->SetTrimming(&trim, ellipsis_sign_.get());
+        }
+        auto line = content;
+        line.top = label.bottom;
+        line.bottom = label.bottom + Px(spec.group_tint ? 16.0f : 18.0f);
+        DrawText(spec.detail, line, cap, spec.state.enabled ? theme_->text_secondary : foreground);
+        if (cap) {
+            cap->SetTrimming(&cap_trim, cap_sign.get());
+            cap->SetWordWrapping(cap_wrap);
+        }
     }
     if (spec.separator_after) {
         const float y = spec.bounds.bottom - 0.5f;
@@ -2665,6 +2733,20 @@ float Painter::MeasureBadgeWidth(std::wstring_view text) const {
     const float text_w = MeasureTextWidth(compositor_, CaptionFormat(), text);
     const float fallback = Px(12.0f) * static_cast<float>(text.size());
     return std::max(Px(28.0f), std::ceil((text_w > 0.0f ? text_w : fallback) + Px(14.0f)));
+}
+
+float Painter::MeasureMonospaceBadgeWidth(std::wstring_view text) const {
+    if (text.empty()) return 0.0f;
+    ComPtr<IDWriteTextLayout> layout;
+    if (compositor_ && SUCCEEDED(compositor_->DwriteFactory()->CreateTextLayout(
+        text.data(), static_cast<UINT32>(text.size()), compositor_->SmallFormat(), 100000.0f, 1000.0f, &layout))) {
+        layout->SetFontFamilyName(L"Consolas", {0, static_cast<UINT32>(text.size())});
+        layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        DWRITE_TEXT_METRICS metrics{};
+        if (SUCCEEDED(layout->GetMetrics(&metrics)))
+            return std::max(Px(28.0f), std::ceil(metrics.widthIncludingTrailingWhitespace + Px(14.0f) + 1.0f));
+    }
+    return std::max(Px(28.0f), Px(14.0f + 12.0f * static_cast<float>(text.size())));
 }
 
 float Painter::OmnibarHintReservePx() const {

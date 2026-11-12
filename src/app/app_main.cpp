@@ -1,6 +1,8 @@
 #include "win_e_fast_entry.h"
 #include "animation_input_budget.h"
 #include "extension_store_ui.h"
+#include "extension_store_edits.h"
+#include "extensions/native/workbench_adapter_host.h"
 #include "archive_plugin_migration.h"
 #include "frame_perf_environment.h"
 #include <filesystem>
@@ -776,6 +778,7 @@ void Render(AppState& s) {
     if (!s.workspaceRenameRoot.empty()) LayoutWorkspaceRenameOverlay(s);
     if (s.addressEditing) LayoutAddressEditor(s);
     LayoutSettingsSearch(s);
+    SyncStoreEdits(s, vm);
     if (s.filterEditing) LayoutFilterEditor(s);
     AiAssistantLayout(s);
     SyncShellWindows(s);
@@ -1505,6 +1508,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     if (s && IsUiActivityMessage(msg) && !(msg == WM_PAINT && t_pump_paint))
         NoteUiActivity(*s, hwnd, IsWindowVisible(hwnd) && !IsIconic(hwnd));
     if (s && s->notification_toast.HandleMessage(hwnd, msg, wParam, lParam)) return 0;
+    if (s && extensions::native::HandleWorkbenchActionMessage(hwnd, msg, wParam)) return 0;
     if (s && HoverPreviewMessage(*s, hwnd, msg, wParam, lParam)) return 0;
     if (s && WindowSwitcherMessage(*s, hwnd, msg, wParam, lParam)) return 0;  // M7d
     if (LRESULT overview_result = 0; s && WindowOverviewMessage(*s, hwnd, msg, wParam, lParam, overview_result))
@@ -2185,22 +2189,21 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 BlankClickDeselect(*s, at);
             return result;
         }
-        if (wParam == HTMINBUTTON) {
-            ShowWindow(hwnd, SW_MINIMIZE);
-            return 0;
-        }
-        if (wParam == HTMAXBUTTON) {
-            ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
-            return 0;
-        }
-        if (wParam == HTCLOSE) {
-            CloseMainWindow(*s);
+        if (wParam == HTMINBUTTON || wParam == HTMAXBUTTON || wParam == HTCLOSE) {
+            // Keep native nonclient hit testing (including Snap hover), but use
+            // the same captured release-to-activate path as client buttons.
+            POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            if (ScreenToClient(hwnd, &point))
+                return HandleLButtonDown(s, hwnd, WM_LBUTTONDOWN, MK_LBUTTON,
+                    MAKELPARAM(point.x, point.y));
             return 0;
         }
         break;
     }
 
     case WM_NCLBUTTONDBLCLK:
+        if (wParam == HTMINBUTTON || wParam == HTMAXBUTTON || wParam == HTCLOSE)
+            return SendMessageW(hwnd, WM_NCLBUTTONDOWN, wParam, lParam);
         // The tab strip's double click maximizes: undo its first click's deselect.
         if (s && !s->overview.open && wParam == HTCAPTION) {
             POINT at{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -2320,6 +2323,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_ACTIVATE:
         if (s && LOWORD(wParam) == WA_INACTIVE) {
+            CancelButtonPress(*s);
             CancelFileClick(*s);
             pulse::CloseSidebarPeek(*s);
         }
@@ -2348,6 +2352,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_ACTIVATEAPP:
         if (s && !wParam) {
+            CancelButtonPress(*s);
             CancelFileClick(*s);
             if (GetCapture() == hwnd) ReleaseCapture();
         }
@@ -2402,6 +2407,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_CTLCOLOREDIT: {
         if (!s) break;
+        if (HBRUSH brush = StoreEditsCtlColor(*s, reinterpret_cast<HDC>(wParam), reinterpret_cast<HWND>(lParam)))
+            return reinterpret_cast<LRESULT>(brush);
         if (HBRUSH brush = AiAssistantCtlColor(*s, reinterpret_cast<HDC>(wParam), reinterpret_cast<HWND>(lParam)))
             return reinterpret_cast<LRESULT>(brush);
         EnsureEditVisuals(*s);
@@ -2488,6 +2495,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     case WM_RECYCLE_REFUSED:
         if (s) OfferPermanentDeleteForRefused(*s);
+        return 0;
+
+    case WM_TASK_RESULT_OPEN:
+        if (s) OpenTaskResult(*s);
         return 0;
 
     case WM_TRAY_UNDO:
@@ -2985,6 +2996,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_CANCELMODE:
+        if (s) CancelButtonPress(*s);
         if (s) CancelFileClick(*s);
         if (s) s->deferredFileActivation = false;
         HandleSidebarResize(s, hwnd, msg, lParam);
@@ -4260,6 +4272,8 @@ int ShotModeMain(AppState& state, HWND hwnd) {
                     state.pane->ActiveTab()->ToggleSelect(i);
             }
         }
+        // Start asynchronous view-model reads before the screenshot settle pump.
+        Render(state);
         MSG msg{};
         for (int i = 0; i < 20; ++i) {
             while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -5560,6 +5574,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             ShowAddressSearch(state);
             ShowAddressSearchHistory(state);
         }
+        std::vector<wchar_t> store_flow(32768);
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_STORE_FLOW", store_flow.data(), static_cast<DWORD>(store_flow.size()))) {
+            extern int RunExtensionStoreFlowTest(AppState&, const wchar_t*);
+            const int result = RunExtensionStoreFlowTest(state, store_flow.data());
+            DestroyWindow(hwnd); OleUninitialize(); return result;
+        }
+#ifdef PULSE_WITH_TEST_HOOKS
+        std::vector<wchar_t> button_release_output(32768);
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_BUTTON_RELEASE", button_release_output.data(), static_cast<DWORD>(button_release_output.size()))) {
+            extern int RunButtonReleaseTest(AppState&, const wchar_t*);
+            const int result = RunButtonReleaseTest(state, button_release_output.data());
+            if (IsWindow(hwnd)) DestroyWindow(hwnd);
+            OleUninitialize(); return result;
+        }
+#endif
 #ifdef PULSE_WITH_SELFTEST
         std::vector<wchar_t> settings_interactions(32768);
         std::vector<wchar_t> quicklook_settings(32768);

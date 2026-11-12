@@ -3,6 +3,7 @@
 #include "setup_dialog_migration.h"
 #include "setup_dialog_versions.h"
 #include "setup_runtime_transaction.h"
+#include "setup_dialog_admin_task_transaction.h"
 #include "start_pin_registration.h"
 
 #include "setup_common.h"
@@ -313,7 +314,8 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
     CreateDirs(app);
     DialogLayoutMigration migration(app, real);
     RuntimeRegistrationTransaction runtime_registration(app, real);
-    FileTransaction tx(app, [&](std::wstring& failure) { return migration.Recover(failure) && runtime_registration.Recover(failure); });
+    DialogAdminTaskTransaction admin_task(app, real);
+    FileTransaction tx(app, [&](std::wstring& failure) { return migration.Recover(failure) && runtime_registration.Recover(failure) && admin_task.Recover(failure); });
     std::wstring error;
     if (!tx.Begin(error)) return Fail(kExitPrepareFailed, error);
     ctx.Phase(Phase::Extracting, L"Extracting files");
@@ -351,6 +353,8 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
     DialogVersionPlan dialog_version;
     if (!PrepareDialogVersion(app, tx.StagingDir(), files, dialog_version, error)) { tx.Abort(); return Fail(kExitPrepareFailed, error); }
     if (dialog_version.versioned) migration.SetVersionDirectory(dialog_version.relative_directory);
+    for(const auto& companion : dialog_version.companions)
+        migration.SetCompanionVersionDirectory(dialog_auto::Architecture::X86,companion.relative_directory);
     if (!WriteFileManifest(tx.StagingDir(), files)) { tx.Abort(); return Fail(kExitPrepareFailed, L"Cannot stage installed-file list."); }
     files.push_back(kFileManifestName);
     if (dialog_version.versioned) dialog_version.replacements.insert(dialog_version.replacements.end()-1, kFileManifestName);
@@ -468,9 +472,36 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
         }
         return true;
     };
+    if (!admin_task.Prepare(error)) { tx.Abort(); return Fail(kExitPrepareFailed, error); }
+    bool admin_auto_start = false;
     if (!tx.Commit(dialog_version.replacements, error, obsolete_files, [&](std::wstring& failure) {
         if (!migration.Apply(failure)) return false;
-        return !previous_directory.empty() || register_runtime(failure);
+        if (previous_directory.empty() && !register_runtime(failure)) return false;
+        if (real) {
+            bool enabled = false;
+            for (const auto architecture : {dialog_auto::Architecture::X64, dialog_auto::Architecture::X86}) {
+                const auto status = dialog_auto::Inspect(architecture);
+                if (status.error == ERROR_NOT_SUPPORTED) continue;
+                if (status.error) { failure = Win32Error(status.error); return false; }
+                enabled = enabled || (status.enabled && IsOwnedDialogDll(app, status.dll_path, architecture));
+            }
+            // Registered here, inside the rollback; started after the commit. The
+            // helper's first step reads the dialog registration, whose mutex this
+            // transaction holds until it finishes: starting it here deadlocks
+            // until the 15 s readiness wait fails the install.
+            admin_auto_start = enabled;
+            const auto configured = dialog_admin_auto::Configure(app, false);
+            Log(L"Admin auto task: enabled=" + std::to_wstring(enabled) + L" hr=" +
+                std::to_wstring(static_cast<unsigned long>(configured.error)) + L" rollback=" +
+                std::to_wstring(static_cast<unsigned long>(configured.rollback_error)) +
+                L" ready=" + std::to_wstring(configured.running));
+            if (FAILED(configured.error)) {
+                failure = Win32Error(HRESULT_FACILITY(configured.error) == FACILITY_WIN32 ?
+                    HRESULT_CODE(configured.error) : static_cast<DWORD>(configured.error));
+                return false;
+            }
+        }
+        return true;
     })) return Fail(kExitFatalInstall, error);
     tx.Finish();
     if (!previous_directory.empty()) {
@@ -601,6 +632,14 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
                 result.error = L"Disabled index service remains pending removal: " + std::to_wstring(removed.exit_code);
                 Log(result.error);
             }
+        }
+        if (admin_auto_start) {
+            // Not fatal: the logon task starts the helper at the next sign-in anyway.
+            migration.ReleaseLock();
+            const auto started = dialog_admin_auto::Configure(app, true);
+            Log(L"Admin auto task start: hr=" + std::to_wstring(static_cast<unsigned long>(started.error)) +
+                L" rollback=" + std::to_wstring(static_cast<unsigned long>(started.rollback_error)) +
+                L" ready=" + std::to_wstring(started.running));
         }
         ctx.Phase(Phase::SeedVerbs, L"Caching context-menu verbs");
         const auto seed = RunProcess(app + L"\\pulse.exe", L"--seed-shell-verbs", true, app);

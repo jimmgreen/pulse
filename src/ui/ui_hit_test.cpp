@@ -382,9 +382,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             if (IsGeneralSettingsPage(vm.settings_page)) {
                 if(vm.settings_page==11) {
                     for(int i=0;i<3;++i) if(ContainsPt(lay.startup_overview[i],x,y)) {r.region=HitTestResult::SettingsDialogManagement;r.index=20+i;return r;}
-                    const D2D1_RECT_F controls[]={lay.dialog_toggle_row,lay.dialog_retry_button,lay.dialog_export_button,lay.dialog_scope_button,lay.startup_restore_button};
-                    const int dialog_actions[]={10,11,12,13,15};
-                    for(int i=0;i<5;++i) {
+                    const D2D1_RECT_F controls[]={lay.dialog_toggle_row,lay.dialog_retry_button,lay.dialog_export_button,lay.dialog_scope_button,lay.startup_restore_button,lay.dialog_refresh_button};
+                    const int dialog_actions[]={10,11,12,13,15,4};
+                    for(int i=0;i<6;++i) {
                         const bool available=vm.settings_dialog_available && !vm.settings_dialog_busy && !vm.settings_integration_restore_busy;
                         const bool restore=vm.settings_integration_enabled || vm.settings_integration_state>=2 || vm.settings_dialog_enabled || vm.settings_dialog_conflict || vm.settings_dialog_failed || vm.settings_shell_tags;
                         if((i==3 || (available && (i!=4 || restore))) && ContainsPt(controls[i],x,y)) {
@@ -822,6 +822,10 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 if (ContainsPt(lay.update_auto_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 31; return r;
                 }
+            } else if (vm.settings_page == kSettingsPageNativeExtensions && ContainsPt(lay.native_store_crumb, x, y)) {
+                r.region = HitTestResult::SettingsPackAction;
+                r.index = static_cast<int>(PackAction::StoreBrowse);
+                return r;
             } else if (vm.settings_page == 5 || vm.settings_page == 8) {
                 const int store_target = HitTestSettingsStore(lay, vm, x, y);
                 if (store_target >= 0) {
@@ -1036,9 +1040,10 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         }
         return r;
     }
-    if (!inPeek && x >= EffectiveSidebarWidth(rect.right) && y < title_bar_height_ + toolbar_height_) {
+    if (!inPeek && x >= ToolbarLeft(rect.right) && y < title_bar_height_ +
+        (embedded_ ? NavigationHeightDip() * scale_ : toolbar_height_)) {
         const auto toolbar = ToolbarLayoutAt(rect.right,
-            NewButtonWidthPx(rect.right-EffectiveSidebarWidth(rect.right) < 600 * scale_), vm.pane.filter_expand);
+            NewButtonWidthPx(rect.right-ToolbarLeft(rect.right) < 600 * scale_), vm.pane.filter_expand);
         const HitTestResult::Region nav[] = {HitTestResult::NavBack, HitTestResult::NavForward,
             HitTestResult::NavUp, HitTestResult::NavRefresh};
         const bool searchOverlay=vm.address_searching && toolbar.merged_search;
@@ -1185,10 +1190,13 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 return r;
             }
             if (slot.kind == SidebarSlot::Rail) {
-                // Narrow rail: a folded section is one icon row; clicking it
-                // reopens the section.
+                // Narrow rail: the short title row folds the section, and a
+                // folded section's icon row reopens it. The icon row reports
+                // sub_index 2 so each row lights on its own (1 stays the
+                // wide header's title link).
                 r.region = HitTestResult::SidebarHeader;
                 r.index = slot.group;
+                r.sub_index = slot.sub == 1 ? 2 : 0;
                 if (slot.group >= 0 && slot.group < static_cast<int>(vm.sidebar.size())) {
                     r.sidebar_section = vm.sidebar[slot.group].id;
                     r.label = vm.sidebar[slot.group].header;
@@ -1384,7 +1392,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 slot.kind == SidebarSlot::Tag) {
                 if (slot.group >= 0 && slot.item >= 0) {
                     const auto& item = vm.sidebar[slot.group].items[slot.item];
-                    if (!compact && item.workspace_empty && ContainsPt(WorkspaceActionRect(slot.rc, scale_, 4), x, y)) {
+                    if (item.workspace_empty && (compact || ContainsPt(WorkspaceActionRect(slot.rc, scale_, 4), x, y))) {
                         r.region = HitTestResult::SidebarWorkspaceAction;
                         r.index = slot.run;
                         r.sub_index = 4;
@@ -1431,8 +1439,14 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     r.sidebar_section = vm.sidebar[slot.group].id;
                     r.sidebar_item = slot.item;
                     if (slot.item >= 0 &&
-                        slot.item < static_cast<int>(vm.sidebar[slot.group].items.size()))
-                        r.label = vm.sidebar[slot.group].items[slot.item].label;
+                        slot.item < static_cast<int>(vm.sidebar[slot.group].items.size())) {
+                        const auto& item = vm.sidebar[slot.group].items[slot.item];
+                        r.label = item.label;
+                        // The rail shows only the drive letter; its tooltip
+                        // carries the free space the wide row would show.
+                        if (compact && item.is_drive && !item.detail.empty())
+                            r.label += L" \x00B7 " + item.detail;
+                    }
                 }
                 return r;
             }
@@ -1544,6 +1558,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         }
         if (x < paneRc.left || x >= paneRc.right || y < paneRc.top || y >= paneRc.bottom)
             return out;
+        const auto picker_recent = EmbeddedPickerRecentRect(paneRect);
+        if (EmbeddedPickerRecentHeight() > 0 && ContainsPt(picker_recent, x, y)) return out;
         if (vm.layout_controls.zoom_index >= 0) {
             auto chip=PaneZoomChipRect(paneVm,paneRc);chip.left=std::max(chip.left,chip.right-72*scale_);
             if(ContainsPt(chip,x,y)){out.region=HitTestResult::PaneExpand;out.index=paneIndex;return out;}
@@ -1583,7 +1599,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 return out;
             }
         }
-        if (y >= paneRect.top + pane_header_height_ && paneVm.column_strip.Active()) {
+        if (y >= paneRect.top + pane_header_height_ + EmbeddedPickerRecentHeight() && paneVm.column_strip.Active()) {
             if (HitTestColumnStrip(paneVm, paneRect, x, y, out)) return out;
             paneRc = PaneBodyBounds(paneVm, paneRect);
             if (x >= paneRc.right) {
@@ -1596,9 +1612,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         }
         const float banner = PaneBannerHeight(paneVm, paneRc.right - paneRc.left, scale_, compositor_);
         if (banner > 0 && !paneVm.is_changes &&
-            y >= paneRc.top + pane_header_height_ && y < paneRc.top + pane_header_height_ + banner - 4 * scale_) {
-            const D2D1_RECT_F bar = D2D1::RectF(paneRc.left + 8 * scale_, paneRc.top + pane_header_height_,
-                paneRc.right - 8 * scale_, paneRc.top + pane_header_height_ + banner - 4 * scale_);
+            y >= paneRc.top + pane_header_height_ + EmbeddedPickerRecentHeight() && y < paneRc.top + pane_header_height_ + EmbeddedPickerRecentHeight() + banner - 4 * scale_) {
+            const D2D1_RECT_F bar = D2D1::RectF(paneRc.left + 8 * scale_, paneRc.top + pane_header_height_ + EmbeddedPickerRecentHeight(),
+                paneRc.right - 8 * scale_, paneRc.top + pane_header_height_ + EmbeddedPickerRecentHeight() + banner - 4 * scale_);
             PaneBannerParts parts;
             BuildPaneBanner(paneVm, bar, paneIndex, parts);
             const fluent::InfoBarLayout lay = painter_.LayoutInfoBar(parts.bar);
@@ -1614,8 +1630,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 return out;
             }
         }
-        const float extra = PaneExtraTop(paneVm, scale_, paneRc.right - paneRc.left, compositor_);
-        const float recentTop = paneRc.top + pane_header_height_ + banner;
+        const float extra = PaneExtraTop(paneVm, scale_, paneRc.right - paneRc.left, compositor_) + EmbeddedPickerRecentHeight();
+        const float recentTop = paneRc.top + pane_header_height_ + EmbeddedPickerRecentHeight() + banner;
         const float filterExtra = (paneVm.is_recent ? kRecentControlsDip * scale_ : 0.0f) +
                                   (paneVm.is_query_search ? kSearchFiltersDip * scale_ : 0.0f);
         const float changesTop = recentTop + filterExtra;
@@ -1686,14 +1702,14 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         if (paneVm.is_recent && y >= recentTop && y < columnTop) {
             for (int i = 0; i < 3; ++i) {
                 if (ContainsPt(RecentFilterRect(
-                        paneRc, pane_header_height_ + banner, scale_, i), x, y)) {
+                        paneRc, pane_header_height_ + EmbeddedPickerRecentHeight() + banner, scale_, i), x, y)) {
                     out.region = HitTestResult::RecentFilter;
                     out.index = i;
                     return out;
                 }
             }
             if (ContainsPt(RecentClearRect(
-                    paneRc, pane_header_height_ + banner, scale_), x, y)) {
+                    paneRc, pane_header_height_ + EmbeddedPickerRecentHeight() + banner, scale_), x, y)) {
                 out.region = HitTestResult::RecentClear;
                 out.index = paneIndex;
                 return out;
@@ -1708,11 +1724,11 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             SearchFilterChipWidthsPx(painter_, scale_, labels, widths);
             for (int i = 0; i < 5; ++i) {
                 if (ContainsPt(SearchFilterRect(
-                        paneRc, pane_header_height_ + banner, scale_, i, widths), x, y)) {
+                        paneRc, pane_header_height_ + EmbeddedPickerRecentHeight() + banner, scale_, i, widths), x, y)) {
                     out.region = HitTestResult::SearchFilter;
                     out.index = i;
                     out.control_bounds = SearchFilterRect(
-                        paneRc, pane_header_height_ + banner, scale_, i, widths);
+                        paneRc, pane_header_height_ + EmbeddedPickerRecentHeight() + banner, scale_, i, widths);
                     return out;
                 }
             }

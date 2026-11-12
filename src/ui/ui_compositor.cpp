@@ -189,6 +189,7 @@ void Compositor::Shutdown() {
     smallFormat_.reset();
     headerFormat_.reset();
     tabFormat_.reset();
+    tabActiveFormat_.reset();
     addressFormat_.reset();
     iconFormat_.reset();
     transparentComposition_ = false;
@@ -830,13 +831,14 @@ void Compositor::RecreateTextFormats(float scale) {
     // A new compositor owns no old formats: its first initialization must
     // not discard the other windows' already measured text.
     if (TextOptimizationBaselineForTest() || textFormat_.get() || fileNameFormat_.get() || smallFormat_.get() ||
-        headerFormat_.get() || tabFormat_.get() || addressFormat_.get() || iconFormat_.get())
+        headerFormat_.get() || tabFormat_.get() || tabActiveFormat_.get() || addressFormat_.get() || iconFormat_.get())
         typography::InvalidateMeasurements();
     textFormat_.reset();
     fileNameFormat_.reset();
     smallFormat_.reset();
     headerFormat_.reset();
     tabFormat_.reset();
+    tabActiveFormat_.reset();
     addressFormat_.reset();
     iconFormat_.reset();
     CreateFormat(dwriteFactory_.get(), 14.0f * scale, DWRITE_FONT_WEIGHT_NORMAL,
@@ -855,6 +857,12 @@ void Compositor::RecreateTextFormats(float scale) {
     if (tabFormat_.get()) {
         tabFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         tabFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
+    CreateFormat(dwriteFactory_.get(), 13.0f * scale, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+        typography::FontRole::Text, tabActiveFormat_);
+    if (tabActiveFormat_.get()) {
+        tabActiveFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        tabActiveFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
     CreateFormat(dwriteFactory_.get(), 14.0f * scale, DWRITE_FONT_WEIGHT_NORMAL,
         typography::FontRole::Text, addressFormat_);

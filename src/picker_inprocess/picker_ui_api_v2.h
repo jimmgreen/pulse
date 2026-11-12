@@ -25,11 +25,15 @@
 #define PULSE_PICKER_UI_V2_FEATURE_NAVIGATE 0x8000u
 #define PULSE_PICKER_UI_V2_FEATURE_SAVE_NATIVE_DEFAULTS 0x10000u
 #define PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING 0x20000u
+#define PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING_VALIDATED 0x4000000u
 #define PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_TEST_CREATE 0x40000u
 #define PULSE_PICKER_UI_V2_EVENT_PROPERTY_CHANGED 13u
 #define PULSE_PICKER_UI_V2_EVENT_NAVIGATION_COMPLETE 14u
 #define PULSE_PICKER_UI_V2_PROPERTY_SCALAR 1u
 #define PULSE_PICKER_UI_V2_PROPERTY_LIST 2u
+#define PULSE_PICKER_UI_V2_PROPERTY_READONLY_SCALAR 3u
+#define PULSE_PICKER_UI_V2_PROPERTY_READONLY_LIST 4u
+#define PULSE_PICKER_UI_V2_PROPERTY_GROUP 5u
 #define PULSE_PICKER_UI_V2_MAX_PROPERTIES 16u
 #define PULSE_PICKER_UI_V2_MAX_PROPERTY_VALUES 16u
 #define PULSE_PICKER_UI_V2_MAX_CONTROLS 16u
@@ -48,6 +52,7 @@
 #define PULSE_PICKER_UI_V2_LABEL_TITLE 0x1u
 #define PULSE_PICKER_UI_V2_LABEL_OK 0x2u
 #define PULSE_PICKER_UI_V2_LABEL_FILE_NAME 0x4u
+#define PULSE_PICKER_UI_V2_LABEL_CANCEL 0x8u
 #define PULSE_PICKER_UI_V2_CONTROL_GROUP 1u
 #define PULSE_PICKER_UI_V2_CONTROL_BUTTON 2u
 #define PULSE_PICKER_UI_V2_CONTROL_COMBO 3u
@@ -69,6 +74,26 @@
 #define PULSE_PICKER_UI_V2_FEATURE_CUSTOM_PROMINENT_CONTROL 0x100000u
 #define PULSE_PICKER_UI_V2_FEATURE_NATIVE_OPTIONS 0x200000u
 #define PULSE_PICKER_UI_V2_FEATURE_CUSTOM_SEPARATOR 0x400000u
+#define PULSE_PICKER_UI_V2_FEATURE_CANCEL_LABEL 0x800000u
+#define PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_OVERWRITE 0x1000000u
+#define PULSE_PICKER_UI_V2_FEATURE_SHELL_ITEM_FILTER 0x2000000u
+#define PULSE_PICKER_UI_V2_FEATURE_FOLDER_PROVENANCE 0x8000000u
+#define PULSE_PICKER_UI_V2_FEATURE_DYNAMIC_TEXT 0x10000000u
+#define PULSE_PICKER_UI_V2_FEATURE_DYNAMIC_ITEMS 0x20000000u
+#define PULSE_PICKER_UI_V2_FEATURE_NAVIGATION_ROOT 0x40000000u
+#define PULSE_PICKER_UI_V2_FEATURE_PROPERTY_PRESENTATION 0x80000000u
+#define PULSE_PICKER_UI_V2_TEXT_TITLE 1u
+#define PULSE_PICKER_UI_V2_TEXT_OK_LABEL 2u
+#define PULSE_PICKER_UI_V2_TEXT_FILENAME_LABEL 3u
+#define PULSE_PICKER_UI_V2_TEXT_FILENAME 4u
+#define PULSE_PICKER_UI_V2_TEXT_DEFAULT_EXTENSION 5u
+#define PULSE_PICKER_UI_V2_FOLDER_ALLOW_AUTO_JUMP 0x1u
+// Common to Open/Save/folder: caller-side IncludeItem for view enumeration only.
+// No COM pointer crosses this ABI; EVENT_INCLUDE_ITEM carries a counted path.
+// Only exact S_FALSE hides a row; any other HRESULT includes it (native oracle).
+// GetEnumFlagsForItem is unused; this never filters typed navigation/results.
+#define PULSE_PICKER_UI_V2_OPEN_SHELL_ITEM_FILTER 0x80u
+#define PULSE_PICKER_UI_V2_EVENT_INCLUDE_ITEM 15u
 #define PULSE_PICKER_UI_V2_NATIVE_OPTIONS_MASK 0xF237FBEEu
 #define PULSE_PICKER_UI_V2_DARK 0x1u
 // Deliberately distinct from FILEOPENDIALOGOPTIONS. The wrapper must map and
@@ -87,6 +112,8 @@
 #define PULSE_PICKER_UI_V2_OPEN_USE_DEFAULT_EXTENSION 0x8u
 #define PULSE_PICKER_UI_V2_OPEN_SKIP_ACCESS_VALIDATION 0x10u
 #define PULSE_PICKER_UI_V2_OPEN_ALLOW_MISSING 0x20u
+// Explicit opt-in: retain LocalOpenV1 access checks for existing files.
+#define PULSE_PICKER_UI_V2_OPEN_MISSING_VALIDATED 0x100u
 #define PULSE_PICKER_UI_V2_OPEN_REQUIRE_EXISTING_PARENT 0x40u
 #define PULSE_PICKER_UI_V2_FEATURE_OPEN_SKIP_ACCESS 0x100u
 #define PULSE_PICKER_UI_V2_FEATURE_COMPUTER_PLACE 0x200u
@@ -94,6 +121,7 @@
 #define PULSE_PICKER_UI_V2_ACCESS_LOCAL_SAVE_V1 2u
 #define PULSE_PICKER_UI_V2_ACCESS_FOLDER_V1 3u
 #define PULSE_PICKER_UI_V2_SAVE_OVERWRITE_PROMPT 0x1u
+#define PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT 0x40u
 #define PULSE_PICKER_UI_V2_SAVE_REQUIRE_UNENCRYPTED 0x2u
 #define PULSE_PICKER_UI_V2_SAVE_SKIP_ACCESS_VALIDATION 0x4u
 #define PULSE_PICKER_UI_V2_SAVE_NATIVE_DEFAULTS 0x8u
@@ -201,7 +229,7 @@ typedef struct PulsePickerUiV2Config {
     uint32_t control_count;
     uint32_t reserved[2];
     PulsePickerUiV2Text default_extension; // Extension without leading dot; Open requires OPEN_USE_DEFAULT_EXTENSION, including explicit empty.
-    uint32_t save_options; // LocalSaveV1 requires OVERWRITE_PROMPT; Open must be zero.
+    uint32_t save_options; // LocalSaveV1 requires an explicit prompt mode; NO_OVERWRITE requires its feature. Open must be zero.
     uint32_t label_flags; // Presence, including explicit empty. Legacy nonempty title still works.
     PulsePickerUiV2Text ok_button_label;
     PulsePickerUiV2Text file_name_label;
@@ -211,6 +239,25 @@ typedef struct PulsePickerUiV2Config {
     uint32_t property_count;
     uint32_t native_options; // Original FILEOPENDIALOGOPTIONS; requires FEATURE_NATIVE_OPTIONS.
 } PulsePickerUiV2Config;
+
+// Optional, feature-negotiated extension: the original v2 config and API layouts
+// remain unchanged. Only FEATURE_CANCEL_LABEL callers pass this larger size.
+// LABEL_CANCEL must be present (including explicit empty); legacy configs keep
+// sizeof(PulsePickerUiV2Config). Validate size before reading the appended text.
+typedef struct PulsePickerUiV2CancelLabelConfig {
+    PulsePickerUiV2Config base;
+    PulsePickerUiV2Text cancel_button_label;
+} PulsePickerUiV2CancelLabelConfig;
+
+// Optional FEATURE_FOLDER_PROVENANCE tail. Existing config/API layouts remain
+// frozen. Unknown/legacy callers never opt in to replacing the initial folder.
+// LABEL_CANCEL is optional here; its text must be empty when the flag is absent.
+// folder_policy only accepts FOLDER_ALLOW_AUTO_JUMP; reserved must be zero.
+typedef struct PulsePickerUiV2FolderPolicyConfig {
+    PulsePickerUiV2CancelLabelConfig base;
+    uint32_t folder_policy;
+    uint32_t reserved;
+} PulsePickerUiV2FolderPolicyConfig;
 
 // All four strings are one coherent UI snapshot; empty means no current item.
 // Selection is a single selected filesystem path (independent of typed filename).
@@ -242,7 +289,7 @@ typedef struct PulsePickerUiV2Event {
     uint64_t show_id;
     uint64_t generation;
     HWND window; // Real picker HWND on Show STA, never a proxy.
-    PulsePickerUiV2Text proposed_folder; // Only FOLDER_CHANGING; borrowed for callback.
+    PulsePickerUiV2Text proposed_folder; // FOLDER_CHANGING/NAVIGATION_COMPLETE or INCLUDE_ITEM path; borrowed.
     uint32_t control_id; // Only BUTTON_CLICKED; ID is not a window/control handle.
     uint32_t reserved[2];
     uint32_t item_id; // ITEM_SELECTED only; zero is a valid item ID.
@@ -386,6 +433,12 @@ extern "C" {
 #endif
 // Independent export; build/DEF integration is explicit, never substitutes v1.
 HRESULT WINAPI PulsePickerUiGetApiV2(uint32_t version, uint32_t size, PulsePickerUiV2Api* api);
+// Optional independent export, negotiated by FEATURE_DYNAMIC_TEXT. No v2 layout change.
+HRESULT WINAPI PulsePickerUiUpdateTextV2(PulsePickerUiV2Session session, uint64_t show_id,
+    uint32_t kind, PulsePickerUiV2Text text);
+typedef HRESULT (WINAPI* PulsePickerUiV2UpdateText)(PulsePickerUiV2Session, uint64_t, uint32_t, PulsePickerUiV2Text);
+HRESULT WINAPI PulsePickerUiSetNavigationRootV2(PulsePickerUiV2Session session, PulsePickerUiV2Text root);
+typedef HRESULT (WINAPI* PulsePickerUiV2SetNavigationRoot)(PulsePickerUiV2Session, PulsePickerUiV2Text);
 #ifdef __cplusplus
 }
 #endif

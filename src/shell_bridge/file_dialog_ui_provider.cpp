@@ -164,7 +164,18 @@ HRESULT Load(std::wstring_view input, std::shared_ptr<const FileDialogInprocessP
         !InModule(lifetime->module, reinterpret_cast<const void*>(api.UpdateControl)) ||
         ((api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_NAVIGATE) &&
          !InModule(lifetime->module, reinterpret_cast<const void*>(api.Navigate)))) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    if (provider->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_DYNAMIC_TEXT) {
+        provider->update_text = reinterpret_cast<PulsePickerUiV2UpdateText>(GetProcAddress(lifetime->module, "PulsePickerUiUpdateTextV2"));
+        if (!provider->update_text) provider->api.implemented_features &= ~PULSE_PICKER_UI_V2_FEATURE_DYNAMIC_TEXT;
+        else if (!InModule(lifetime->module, reinterpret_cast<const void*>(provider->update_text)))
+            return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    }
     provider->module_lifetime = lifetime;
+    if (provider->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_NAVIGATION_ROOT) {
+        provider->set_navigation_root = reinterpret_cast<PulsePickerUiV2SetNavigationRoot>(GetProcAddress(lifetime->module, "PulsePickerUiSetNavigationRootV2"));
+        if (!provider->set_navigation_root) provider->api.implemented_features &= ~PULSE_PICKER_UI_V2_FEATURE_NAVIGATION_ROOT;
+        else if (!InModule(lifetime->module, reinterpret_cast<const void*>(provider->set_navigation_root))) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    }
     provider->allow_unverified_proof = true;
     output = std::move(provider); return S_OK;
 }

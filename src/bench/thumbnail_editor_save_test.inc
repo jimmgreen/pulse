@@ -1,4 +1,4 @@
-    static bool EditorSaveRegression() {
+    static bool EditorSaveRegression(bool rename_only = false) {
         bool ok = true;
         const auto check = [&](bool value, const char* name) {
             std::printf("[%s] %s\n", value ? "PASS" : "FAIL", name);
@@ -8,7 +8,7 @@
         const auto directory = std::filesystem::absolute(L"bench_data") /
             (L"editor-save-live-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
         std::filesystem::create_directories(directory);
-        const auto path = directory / L"edited.bmp";
+        auto path = directory / L"edited.bmp";
         const auto temporary = directory / L"save.tmp";
         const auto bytes = [](unsigned channel) {
             BITMAPFILEHEADER file{};
@@ -71,45 +71,78 @@
                 return false;
             };
             check(write(path, 2) && metadata() && await_pixels(2), "original image decodes red pixels through actual preview host");
-            Sleep(20);
-            HANDLE writer = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-            check(writer != INVALID_HANDLE_VALUE && metadata(), "editor truncates original file and holds exclusive save handle");
-            draw();
-            bool failed = false;
-            const auto deadline = GetTickCount64() + 12000;
-            do {
+            if (rename_only) {
+                fs::DirEntry before; before.name = path.filename().wstring(); before.size = size;
+                before.mtime.dwLowDateTime = static_cast<DWORD>(modified);
+                before.mtime.dwHighDateTime = static_cast<DWORD>(modified >> 32);
+                const auto original = path;
+                ID2D1Bitmap* original_bitmap = nullptr;
                 { std::lock_guard lock(cache.mutex_);
                   const auto item = cache.items_.find(cache.Key(path.wstring(), 128, modified, size));
-                  failed = item != cache.items_.end() && item->second.failed && item->second.transient; }
-                if (!failed) Sleep(10);
-            } while (!failed && GetTickCount64() < deadline);
-            check(failed, "actual locked image decode fails with automatic retry scheduled");
-            const auto green = bytes(1); DWORD written = 0;
-            const bool saved = writer != INVALID_HANDLE_VALUE && WriteFile(writer, green.data(),
-                static_cast<DWORD>(green.size()), &written, nullptr) && written == green.size();
-            if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
-            check(saved && await_pixels(1), "overwrite close recovers green thumbnail even before snapshot metadata refresh");
-            Sleep(20);
-            check(write(temporary, 0) && ReplaceFileW(path.c_str(), temporary.c_str(), nullptr, 0, nullptr, nullptr) &&
-                metadata() && await_pixels(0), "real atomic replacement at same path displays new blue pixels");
+                  if (item != cache.items_.end()) original_bitmap = item->second.bitmap.get(); }
+                const auto next_request = cache.next_id_.load();
+                path = directory / L"renamed.bmp";
+                check(MoveFileW(original.c_str(), path.c_str()) != FALSE && metadata(), "rename actual image on disk");
+                auto after = before; after.name = path.filename().wstring();
+                fs::DirNotifyEvent event; event.action = FILE_ACTION_RENAMED_NEW_NAME;
+                event.old_name = before.name; event.name = after.name;
+                app::TransferRenamedThumbnails(directory.wstring(), {before}, {after}, {event},
+                    [&](const std::wstring& from, const std::wstring& to, uint64_t time, uint64_t bytes) {
+                        check(from == original.wstring() && to == path.wstring(), "notification paths match decoder keys");
+                        check(time == modified && bytes == size, "rename retains decoder metadata identity");
+                        cache.RenameImage(from, to, time, bytes);
+                    });
+                {
+                    std::lock_guard lock(cache.mutex_);
+                    const auto retained = cache.items_.find(cache.Key(path.wstring(), 128, modified, size));
+                    check(original_bitmap && retained != cache.items_.end() && retained->second.bitmap.get() == original_bitmap,
+                        "renamed cache retains the exact GPU bitmap decoded from original red pixels");
+                }
+                check(draw() == PreviewDrawResult::Bitmap, "renamed image draws immediately without navigation or decode");
+                bool no_request = false;
+                { std::lock_guard lock(cache.mutex_); no_request = !cache.pending_.contains(cache.Key(path.wstring(), 128, modified, size)); }
+                check(no_request && cache.next_id_.load() == next_request, "successful thumbnail transfer does not queue redundant host decode");
+            } else {
+                Sleep(20);
+                HANDLE writer = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                check(writer != INVALID_HANDLE_VALUE && metadata(), "editor truncates original file and holds exclusive save handle");
+                draw();
+                bool failed = false;
+                const auto deadline = GetTickCount64() + 12000;
+                do {
+                    { std::lock_guard lock(cache.mutex_);
+                      const auto item = cache.items_.find(cache.Key(path.wstring(), 128, modified, size));
+                      failed = item != cache.items_.end() && item->second.failed && item->second.transient; }
+                    if (!failed) Sleep(10);
+                } while (!failed && GetTickCount64() < deadline);
+                check(failed, "actual locked image decode fails with automatic retry scheduled");
+                const auto green = bytes(1); DWORD written = 0;
+                const bool saved = writer != INVALID_HANDLE_VALUE && WriteFile(writer, green.data(),
+                    static_cast<DWORD>(green.size()), &written, nullptr) && written == green.size();
+                if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+                check(saved && await_pixels(1), "overwrite close recovers green thumbnail even before snapshot metadata refresh");
+                Sleep(20);
+                check(write(temporary, 0) && ReplaceFileW(path.c_str(), temporary.c_str(), nullptr, 0, nullptr, nullptr) &&
+                    metadata() && await_pixels(0), "real atomic replacement at same path displays new blue pixels");
 
-            // A host timeout/crash can occur during saving. Inject transport failures
-            // at the cache boundary, then require a real decoder request to recover.
-            ThumbnailCache::Request req;
-            req.path = path.wstring(); req.pixels = 128; req.modified = modified; req.size = size;
-            req.key = cache.Key(req.path, 128, modified, size);
-            req.identity = cache.Key(req.path, 0, modified, size); req.epoch = cache.epoch_.load();
-            for (unsigned i = 0; i < 4; ++i) {
-                ThumbnailCache::Item error; error.failed = true; error.transient = true;
-                cache.StoreResult(req, std::move(error));
+                // A host timeout/crash can occur during saving. Inject transport failures
+                // at the cache boundary, then require a real decoder request to recover.
+                ThumbnailCache::Request req;
+                req.path = path.wstring(); req.pixels = 128; req.modified = modified; req.size = size;
+                req.key = cache.Key(req.path, 128, modified, size);
+                req.identity = cache.Key(req.path, 0, modified, size); req.epoch = cache.epoch_.load();
+                for (unsigned i = 0; i < 4; ++i) {
+                    ThumbnailCache::Item error; error.failed = true; error.transient = true;
+                    cache.StoreResult(req, std::move(error));
+                }
+                bool retryable = false;
+                { std::lock_guard lock(cache.mutex_);
+                  auto& item = cache.items_.at(req.key);
+                  retryable = item.transient && item.retry_at > GetTickCount64();
+                  item.retry_at = GetTickCount64(); } // Fast-forward backoff, not decode.
+                check(retryable, "four consecutive transport failures do not permanently suppress image thumbnail");
+                check(await_pixels(0), "real preview and GPU upload recover after four injected transport failures");
             }
-            bool retryable = false;
-            { std::lock_guard lock(cache.mutex_);
-              auto& item = cache.items_.at(req.key);
-              retryable = item.transient && item.retry_at > GetTickCount64();
-              item.retry_at = GetTickCount64(); } // Fast-forward backoff, not decode.
-            check(retryable, "four consecutive transport failures do not permanently suppress image thumbnail");
-            check(await_pixels(0), "real preview and GPU upload recover after four injected transport failures");
             cache.Reset();
         }
         std::error_code error;

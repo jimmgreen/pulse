@@ -168,7 +168,7 @@ std::mutex foreign_mutex;
 std::unordered_set<std::wstring> foreign_owners;
 struct ProcessIdentity {
     std::array<BYTE, SECURITY_MAX_SID_SIZE> user{};
-    DWORD integrity = 0;
+    DWORD integrity = 0, session = 0;
 };
 bool Identity(HANDLE process, ProcessIdentity& identity) {
     HANDLE raw = nullptr;
@@ -185,8 +185,65 @@ bool Identity(HANDLE process, ProcessIdentity& identity) {
     const BYTE count = *GetSidSubAuthorityCount(label->Label.Sid);
     if (!count) return false;
     identity.integrity = *GetSidSubAuthority(label->Label.Sid, count - 1);
-    return true;
+    return GetTokenInformation(token.Get(), TokenSessionId, &identity.session, sizeof(identity.session), &size) && size == sizeof(identity.session);
 }
+}
+namespace picker_owner_detail {
+PickerOwnerFailureStage ForeignIdentityPolicy(bool same_user, bool same_session,
+    DWORD caller_integrity, DWORD owner_integrity) noexcept {
+    if (!same_session) return PickerOwnerFailureStage::Session;
+    if (!same_user) return PickerOwnerFailureStage::UserMismatch;
+    if (caller_integrity < SECURITY_MANDATORY_MEDIUM_RID || owner_integrity > caller_integrity)
+        return PickerOwnerFailureStage::IntegrityMismatch;
+    return PickerOwnerFailureStage::None;
+}
+}
+PickerRemoteOwnerValidation ValidateRemotePickerOwner(HWND window, HANDLE authenticated_parent, bool showing) noexcept {
+    PickerRemoteOwnerValidation result;
+    const auto fail = [&](PickerOwnerFailureStage stage, DWORD error) {
+        result.stage = stage; result.error = error ? error : ERROR_GEN_FAILURE; return result;
+    };
+    if (!authenticated_parent) return fail(PickerOwnerFailureStage::OpenProcess, ERROR_INVALID_HANDLE);
+    SetLastError(ERROR_SUCCESS);
+    result.caller_pid = GetProcessId(authenticated_parent);
+    if (!result.caller_pid) return fail(PickerOwnerFailureStage::OpenProcess, GetLastError());
+    if (WaitForSingleObject(authenticated_parent, 0) != WAIT_TIMEOUT) return fail(PickerOwnerFailureStage::ProcessTime, ERROR_PROCESS_ABORTED);
+    FILETIME exit{}, kernel{}, user{};
+    if (!GetProcessTimes(authenticated_parent, &result.caller_created, &exit, &kernel, &user))
+        return fail(PickerOwnerFailureStage::ProcessTime, GetLastError());
+    ProcessIdentity host, caller;
+    if (!Identity(GetCurrentProcess(), host) || !Identity(authenticated_parent, caller))
+        return fail(PickerOwnerFailureStage::TokenIdentity, GetLastError());
+    const auto caller_policy = picker_owner_detail::ForeignIdentityPolicy(
+        EqualSid(host.user.data(), caller.user.data()) != FALSE, host.session == caller.session,
+        host.integrity, caller.integrity);
+    if (caller_policy != PickerOwnerFailureStage::None) return fail(caller_policy, ERROR_ACCESS_DENIED);
+    if (!window) return result;
+    result.owner_thread = GetWindowThreadProcessId(window, &result.owner_pid);
+    if (!result.owner_thread || !result.owner_pid || !IsWindow(window))
+        return fail(PickerOwnerFailureStage::Window, ERROR_INVALID_WINDOW_HANDLE);
+    if (result.owner_pid == GetCurrentProcessId()) return fail(PickerOwnerFailureStage::Window, ERROR_ACCESS_DENIED);
+    Handle owner(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, result.owner_pid));
+    if (!owner) return fail(PickerOwnerFailureStage::OpenProcess, GetLastError());
+    if (!GetProcessTimes(owner.Get(), &result.owner_created, &exit, &kernel, &user))
+        return fail(PickerOwnerFailureStage::ProcessTime, GetLastError());
+    ProcessIdentity target;
+    if (!Identity(owner.Get(), target)) return fail(PickerOwnerFailureStage::TokenIdentity, GetLastError());
+    auto& diagnostic = result.identity;
+    diagnostic.identity_available = diagnostic.session_available = true;
+    diagnostic.same_user = EqualSid(caller.user.data(), target.user.data()) != FALSE;
+    diagnostic.same_session = caller.session == target.session;
+    diagnostic.caller_integrity = caller.integrity; diagnostic.owner_integrity = target.integrity;
+    const auto policy = picker_owner_detail::ForeignIdentityPolicy(diagnostic.same_user, diagnostic.same_session,
+        diagnostic.caller_integrity, diagnostic.owner_integrity);
+    if (policy != PickerOwnerFailureStage::None) return fail(policy, ERROR_ACCESS_DENIED);
+    if ((showing || result.owner_pid != result.caller_pid) && IsWindowEnabled(window))
+        return fail(PickerOwnerFailureStage::ForeignEnabled, ERROR_NOT_SUPPORTED);
+    DWORD final_pid = 0;
+    if (!IsWindow(window) || GetWindowThreadProcessId(window, &final_pid) != result.owner_thread || final_pid != result.owner_pid ||
+        WaitForSingleObject(owner.Get(), 0) != WAIT_TIMEOUT || WaitForSingleObject(authenticated_parent, 0) != WAIT_TIMEOUT)
+        return fail(PickerOwnerFailureStage::WindowIdentity, ERROR_INVALID_WINDOW_HANDLE);
+    return result;
 }
 struct PickerOwnerGuard::Impl {
     static constexpr const wchar_t* Property = L"Pulse.PickerClient.OwnerGuard";
@@ -194,7 +251,9 @@ struct PickerOwnerGuard::Impl {
     bool changed = false, external = false, locked = false, marked = false;
     DWORD pid = 0, thread = 0;
     FILETIME creation{};
-    Handle process, mutex;
+    Handle process, mutex, remote_process;
+    DWORD remote_pid = 0;
+    FILETIME remote_creation{};
     std::shared_ptr<ThreadOwner> cross_thread;
     DWORD error = ERROR_SUCCESS;
     PickerOwnerFailureStage stage = PickerOwnerFailureStage::None;
@@ -205,16 +264,32 @@ struct PickerOwnerGuard::Impl {
     std::shared_ptr<ForeignLifetime> foreign_lifetime;
     explicit Impl(HWND value, DWORD remote_parent = 0) : window(value) {
         if (!window) return;
+        FILETIME validated_owner_creation{};
         stage = PickerOwnerFailureStage::Window;
         thread = GetWindowThreadProcessId(window, &pid);
         if (!thread || !pid || !IsWindow(window)) { error = ERROR_INVALID_WINDOW_HANDLE; return; }
-        if (remote_parent && (pid != remote_parent || pid == GetCurrentProcessId())) { error = ERROR_ACCESS_DENIED; return; }
+        if (remote_parent) {
+            stage = PickerOwnerFailureStage::OpenProcess;
+            remote_process.Reset(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, remote_parent));
+            if (!remote_process) { error = GetLastError(); if (!error) error = ERROR_GEN_FAILURE; return; }
+            const auto checked = ValidateRemotePickerOwner(window, remote_process.Get(), true);
+            diagnostics = checked.identity;
+            if (checked.error) { error = checked.error; stage = checked.stage; return; }
+            remote_pid = checked.caller_pid; remote_creation = checked.caller_created;
+            validated_owner_creation = checked.owner_created;
+            if (checked.owner_pid != pid || checked.owner_thread != thread) {
+                stage = PickerOwnerFailureStage::WindowIdentity; error = ERROR_INVALID_WINDOW_HANDLE; return;
+            }
+        }
         stage = PickerOwnerFailureStage::OpenProcess;
         process.Reset(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid));
         if (!process) { error = GetLastError(); if (!error) error = ERROR_GEN_FAILURE; return; }
         stage = PickerOwnerFailureStage::ProcessTime;
         FILETIME exit{}, kernel{}, user{};
         if (!GetProcessTimes(process.Get(), &creation, &exit, &kernel, &user)) { error = GetLastError(); if (!error) error = ERROR_GEN_FAILURE; return; }
+        if (remote_parent && CompareFileTime(&validated_owner_creation, &creation) != 0) {
+            error = ERROR_INVALID_DATA; return;
+        }
         external = thread != GetCurrentThreadId();
         if (external) {
             DWORD own_session = 0, owner_session = 0;
@@ -242,7 +317,7 @@ struct PickerOwnerGuard::Impl {
             // observe its own user's lower-integrity disabled window, never the
             // reverse. Same-process transitions retain their equal-IL contract.
             const bool foreign = pid != GetCurrentProcessId();
-            if (foreign ? (own.integrity < SECURITY_MANDATORY_MEDIUM_RID || other.integrity > own.integrity)
+            if (foreign ? (picker_owner_detail::ForeignIdentityPolicy(true, true, own.integrity, other.integrity) != PickerOwnerFailureStage::None)
                         : own.integrity != other.integrity) {
                 error = ERROR_ACCESS_DENIED; return;
             }
@@ -324,6 +399,10 @@ struct PickerOwnerGuard::Impl {
         if (!window) return true;
         DWORD current_pid = 0;
         FILETIME started{}, exit{}, kernel{}, user{};
+        if (remote_process && (WaitForSingleObject(remote_process.Get(), 0) != WAIT_TIMEOUT ||
+            GetProcessId(remote_process.Get()) != remote_pid ||
+            !GetProcessTimes(remote_process.Get(), &started, &exit, &kernel, &user) ||
+            CompareFileTime(&remote_creation, &started) != 0)) return false;
         return process && WaitForSingleObject(process.Get(), 0) == WAIT_TIMEOUT && IsWindow(window) &&
             GetWindowThreadProcessId(window, &current_pid) == thread && current_pid == pid &&
             GetProcessTimes(process.Get(), &started, &exit, &kernel, &user) &&
@@ -340,32 +419,44 @@ struct PickerOwnerGuard::Impl {
             (!external || (cross_thread && cross_thread->restored.load()) || !IsWindowEnabled(window)));
     }
     void RestoreBeforeDialogHide(HWND dialog) noexcept {
-        if (cross_thread) {
-            if (!error && Alive() && IsWindow(dialog) && GetWindow(dialog, GW_OWNER) == window)
-                cross_thread->Restore(false);
-            return;
-        }
-        if(error || external || !changed || GetCurrentThreadId()!=thread || !Alive() || !IsWindow(dialog)) return;
+        if(error || !Alive() || !IsWindow(dialog)) return;
         DWORD dialog_pid=0;
-        if(GetWindowThreadProcessId(dialog,&dialog_pid)!=thread || dialog_pid!=pid || GetWindow(dialog,GW_OWNER)!=window) return;
+        if(GetWindowThreadProcessId(dialog,&dialog_pid)!=GetCurrentThreadId() ||
+            dialog_pid!=GetCurrentProcessId() || GetWindow(dialog,GW_OWNER)!=window) return;
         const HWND foreground=GetForegroundWindow();
         bool was_foreground=foreground==dialog || IsChild(dialog,foreground);
         for(HWND current=foreground; !was_foreground && current; current=GetWindow(current,GW_OWNER))
             was_foreground=current==dialog;
         // Restore an enabled activation target before hiding the active popup.
         // EnableWindow sends messages, so recheck identity before touching focus.
-        changed=false;
-        EnableWindow(window,TRUE);
-        if(was_foreground && Alive() && IsWindowEnabled(window)) {
+        diagnostics.restore_attempted = true;
+        diagnostics.restore_owned_disable = changed || static_cast<bool>(cross_thread);
+        diagnostics.dialog_was_foreground = was_foreground;
+        if (cross_thread && !cross_thread->Restore(false)) return;
+        if (changed) {
+            changed=false;
+            EnableWindow(window,TRUE);
+        }
+        // Native IFileDialog also activates an originally disabled same-thread
+        // owner before hiding. Its caller retains responsibility for enabling it.
+        if(was_foreground && Alive()) {
             const HWND now=GetForegroundWindow();
             if(now==foreground || now==dialog || now==window || IsChild(dialog,now)) {
-                SetActiveWindow(window);
+                diagnostics.activation_attempted = true;
+                if (external) {
+                    // The foreground picker may hand activation back without
+                    // changing caller-owned disabled state or attaching queues.
+                    SetForegroundWindow(window);
+                } else SetActiveWindow(window);
+                // Cross-thread foreground activation may complete asynchronously;
+                // this diagnostic is an immediate observation, not a failure verdict.
+                diagnostics.activation_succeeded = GetForegroundWindow() == window;
                 // Activation synchronously calls the host's WM_ACTIVATE and
                 // WM_SETFOCUS handlers. They own focus restoration (including
                 // choosing a child control or switching to another window).
                 // A second SetFocus here overwrites that reentrant decision.
-            }
-        }
+            } else diagnostics.restore_skipped_switched = true;
+        } else if (!was_foreground) diagnostics.restore_skipped_switched = true;
     }
     ~Impl() {
         if (foreign_hook) {

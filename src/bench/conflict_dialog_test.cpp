@@ -129,14 +129,17 @@ bool SaveShot(HWND dialog, HWND tip, const std::wstring& path) {
 }
 
 // Layout in DIPs (file_operation_dialog.cpp ConflictWindow).
-constexpr float kSourcePathX = 266.5f + 100, kDestinationPathX = 24 + 100, kPathY = 82 + 90 + 8;
-constexpr float kRowX = 280;
-float RowY(int index) { return 204 + index * 56.0f + 27; }
-constexpr float kApplyY = 390 + 32;
+constexpr float kConflictHeightDip = 498.0f;
+constexpr float kSourcePathX = 250.5f + 100.0f, kDestinationPathX = 24.0f + 100.0f, kPathY = 94.0f + 43.0f;
+constexpr float kRowX = 280.0f;
+float RowY(int index) { return 223.0f + index * 67.0f + 33.5f; }
+constexpr float kApplyX = 140.0f, kApplyY = 444.0f + 16.0f;
+constexpr float kCloseX = 500.0f - 23.0f, kCloseY = 18.0f;
+bool g_dark = false;
 
 void Shot(HWND dialog, HWND tip, const wchar_t* name) {
     if (g_shots.empty()) return;
-    const std::wstring path = g_shots + L"\\conflict-" + name + L"-" + (g_scenario == 0 ? L"light" : L"dark") + L"-" +
+    const std::wstring path = g_shots + L"\\conflict-" + name + L"-" + (g_dark ? L"dark" : L"light") + L"-" +
                               std::to_wstring(static_cast<int>(Scale(dialog) * 100 + 0.5f)) + L".png";
     Check(SaveShot(dialog, tip, path), "screenshot saved");
 }
@@ -152,8 +155,8 @@ void StepTips(HWND dialog, UINT_PTR timer) {
         UpdateWindow(dialog);
         RECT client{};
         GetClientRect(dialog, &client);
-        Check(std::abs(client.bottom - static_cast<LONG>(454 * Scale(dialog))) <= 2,
-              "a lone conflict is 454 DIP tall");
+        Check(std::abs(client.bottom - static_cast<LONG>(kConflictHeightDip * Scale(dialog))) <= 2,
+              "a lone conflict is 498 DIP tall");
         Check(TipAt(tip, dialog, source_box) == g_source, "hovering the source path shows it whole");
         Check(TipAt(tip, dialog, destination_box) == g_destination,
               "hovering the destination path shows it whole");
@@ -197,15 +200,15 @@ void StepPreview(HWND dialog, UINT_PTR timer) {
     case 0: {
         RECT client{};
         GetClientRect(dialog, &client);
-        Check(std::abs(client.bottom - static_cast<LONG>(454 * Scale(dialog))) <= 2,
-              "more conflicts keep the height; the checkbox sits in the footer (454 DIP)");
+        Check(std::abs(client.bottom - static_cast<LONG>(kConflictHeightDip * Scale(dialog))) <= 2,
+              "more conflicts keep the height; the checkbox sits in the bottom row (498 DIP)");
         Shot(dialog, nullptr, L"idle");
         Key(dialog, VK_TAB);
         return;
     }
     case 2: Shot(dialog, nullptr, L"replace"); Key(dialog, VK_TAB); return;
     case 4: Shot(dialog, nullptr, L"skip"); Key(dialog, VK_TAB); return;
-    case 6: Shot(dialog, nullptr, L"keep"); Click(dialog, At(dialog, kRowX, kApplyY)); return;
+    case 6: Shot(dialog, nullptr, L"keep"); Click(dialog, At(dialog, kApplyX, kApplyY)); return;
     case 7: Shot(dialog, nullptr, L"apply"); return;
     case 8:
         KillTimer(nullptr, timer);
@@ -229,6 +232,30 @@ void StepAlt(HWND dialog, UINT_PTR timer) {
     SendMessageW(dialog, WM_SYSKEYDOWN, 'R', 1u << 29);
 }
 
+// Scenario 4 & 5: identical size and time recommends Skip; flush close button cancels.
+void StepIdenticalAndClose(HWND dialog, UINT_PTR timer) {
+    if (g_step++ < 1) return;
+    KillTimer(nullptr, timer);
+    UpdateWindow(dialog);
+    Shot(dialog, nullptr, L"identical");
+    const POINT close_pt = At(dialog, kCloseX, kCloseY);
+    if (!g_shots.empty() && g_scenario == 4) {
+        SendMessageW(dialog, WM_MOUSEMOVE, 0, MAKELPARAM(close_pt.x, close_pt.y));
+        RedrawWindow(dialog, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        Shot(dialog, nullptr, L"close-hover");
+    }
+    Click(dialog, close_pt);
+}
+
+// Scenario 6: folder conflict + S shortcut skips.
+void StepFolderSkip(HWND dialog, UINT_PTR timer) {
+    if (g_step++ < 1) return;
+    KillTimer(nullptr, timer);
+    UpdateWindow(dialog);
+    Shot(dialog, nullptr, L"folder");
+    Key(dialog, 'S');
+}
+
 void CALLBACK Step(HWND, UINT, UINT_PTR timer, DWORD) {
     HWND dialog = Dialog();
     if (!dialog || !IsWindowVisible(dialog)) {
@@ -238,12 +265,15 @@ void CALLBACK Step(HWND, UINT, UINT_PTR timer, DWORD) {
     if (g_scenario == 0) StepTips(dialog, timer);
     else if (g_scenario == 1) StepPreview(dialog, timer);
     else if (g_scenario == 2) StepKeyboard(dialog, timer);
-    else StepAlt(dialog, timer);
+    else if (g_scenario == 3) StepAlt(dialog, timer);
+    else if (g_scenario == 4 || g_scenario == 5) StepIdenticalAndClose(dialog, timer);
+    else StepFolderSkip(dialog, timer);
 }
 
 pulse::ui::ConflictDialogResult Run(HWND owner, const pulse::ops::ConflictItemInfo& conflict, bool dark) {
     g_step = 0;
     g_wait = 0;
+    g_dark = dark;
     SetTimer(nullptr, 0, g_scenario == 1 ? 300 : 250, Step);
     return pulse::ui::ShowFileConflictDialog(owner, conflict, dark, D2D1_COLOR_F{ 0.0f, 0.47f, 0.83f, 1.0f });
 }
@@ -313,6 +343,37 @@ int wmain(int argc, wchar_t** argv) {
     g_scenario = 3;
     result = Run(owner, conflict, false);
     Check(result.choice == pulse::ops::ConflictChoice::Replace, "Alt+R replaces");
+
+    // Identical size and modified time: recommends Skip, default keep-both "(2)", flush Close cancels.
+    pulse::ops::ConflictItemInfo identical{};
+    identical.source = L"C:\\Users\\Example\\Desktop\\\x9759\x529B\x8BA1\x7B97\x624B\x518C.pdf";
+    identical.destination = L"C:\\Users\\Example\\Desktop\\pulse\\\x9759\x529B\x8BA1\x7B97\x624B\x518C.pdf";
+    identical.source_size = 55ull * 512ull * 1024ull; // 27.5 MB
+    identical.destination_size = identical.source_size;
+    SYSTEMTIME local_st{ 2026, 1, 0, 14, 4, 49, 0, 0 };
+    SYSTEMTIME utc_st{};
+    TzSpecificLocalTimeToSystemTime(nullptr, &local_st, &utc_st);
+    SystemTimeToFileTime(&utc_st, &identical.source_modified);
+    identical.destination_modified = identical.source_modified;
+    identical.remaining = 1;
+    identical.type = pulse::ops::OpType::Copy;
+
+    g_scenario = 4;
+    result = Run(owner, identical, true);
+    Check(result.choice == pulse::ops::ConflictChoice::Cancel, "clicking the flush close button cancels");
+
+    g_scenario = 5;
+    result = Run(owner, identical, false);
+    Check(result.choice == pulse::ops::ConflictChoice::Cancel, "light-mode flush close button cancels");
+
+    pulse::ops::ConflictItemInfo folders = identical;
+    folders.source = L"C:\\Users\\Example\\Desktop\\assets";
+    folders.destination = L"C:\\Users\\Example\\Desktop\\pulse\\assets";
+    folders.source_is_directory = true;
+    folders.destination_is_directory = true;
+    g_scenario = 6;
+    result = Run(owner, folders, true);
+    Check(result.choice == pulse::ops::ConflictChoice::Skip, "S skips a folder conflict");
 
     DestroyWindow(owner);
     Gdiplus::GdiplusShutdown(gdiplus);

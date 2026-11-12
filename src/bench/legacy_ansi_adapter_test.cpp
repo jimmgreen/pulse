@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <thread>
 #include <cstring>
+#include <string_view>
 
 namespace {
 using namespace pulse::shell_bridge;
@@ -50,7 +51,64 @@ picker::Message Reply(const picker::Message& request, picker::Status status, std
     return {request.request_id, body};
 }
 }
-int main() {
+
+void SetIgnoredFields(Fixture& f, unsigned mask) {
+    if (mask & 1) f.ofn.lpfnHook = reinterpret_cast<LPOFNHOOKPROC>(static_cast<UINT_PTR>(1));
+    if (mask & 2) f.ofn.lpTemplateName = reinterpret_cast<decltype(f.ofn.lpTemplateName)>(static_cast<UINT_PTR>(1));
+    if (mask & 4) f.ofn.hInstance = reinterpret_cast<HINSTANCE>(static_cast<UINT_PTR>(1));
+    if (mask & 8) f.ofn.lCustData = static_cast<LPARAM>(0x1234567);
+}
+int IgnoredFieldsTest() {
+    const auto configure = [](Fixture& f, bool save) {
+        if (save) { f.ofn.Flags &= ~OFN_FILEMUSTEXIST; f.ofn.Flags |= OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOTESTFILECREATE; }
+    };
+    for (const bool save : {false, true}) {
+        for (const unsigned mask : {1u, 2u, 4u, 8u, 15u}) {
+            Fixture f; configure(f, save); SetIgnoredFields(f, mask);
+            const auto file_before = f.file; const auto title_before = f.title;
+            std::array<unsigned char, sizeof(f.ofn)> before{}; std::memcpy(before.data(), &f.ofn, before.size());
+            native_calls = 0; unsigned bridge_calls = 0; auto service = Services(true);
+            service.run_bridge = [&](const auto& request, HWND) { ++bridge_calls; return Reply(request, picker::Status::Cancelled); };
+            LegacyAnsiFileDialogAdapter adapter(service);
+            const BOOL result = save ? adapter.Save(&f.ofn) : adapter.Open(&f.ofn);
+            Check(result == FALSE && bridge_calls == 1 && native_calls == 0 && adapter.ExtendedError() == 0,
+                "ignored fields route cancellation without native callback/template handling");
+            Check(f.file == file_before && f.title == title_before && !std::memcmp(before.data(), &f.ofn, before.size()),
+                "ignored fields cancellation preserves all original pointers flags offsets and buffers");
+        }
+        for (unsigned variant = 0; variant < 7; ++variant) {
+            Fixture f; configure(f, save); SetIgnoredFields(f, 15);
+            if (variant < 2) { f.ofn.Flags |= OFN_ENABLEHOOK; if (!variant) f.ofn.lpfnHook = nullptr; }
+            else if (variant < 4) { f.ofn.Flags |= OFN_ENABLETEMPLATE; if (variant == 3) { f.ofn.hInstance = nullptr; f.ofn.lpTemplateName = nullptr; } }
+            else if (variant < 6) { f.ofn.Flags |= OFN_ENABLETEMPLATEHANDLE; if (variant == 5) f.ofn.Flags |= OFN_ENABLETEMPLATE; }
+            else f.ofn.Flags |= OFN_ENABLEHOOK | OFN_ENABLETEMPLATE;
+            const auto file_before = f.file; const auto title_before = f.title;
+            std::array<unsigned char, sizeof(f.ofn)> before{}; std::memcpy(before.data(), &f.ofn, before.size());
+            native_calls = 0; native_result = FALSE; native_error = 0x7100u + variant; unsigned bridge_calls = 0;
+            auto service = Services(true); service.run_bridge = [&](const auto& request, HWND) { ++bridge_calls; return Reply(request, picker::Status::Cancelled); };
+            LegacyAnsiFileDialogAdapter adapter(service);
+            Check((save ? adapter.Save(&f.ofn) : adapter.Open(&f.ofn)) == FALSE && native_calls == 1 && bridge_calls == 0 &&
+                adapter.ExtendedError() == native_error, "active flags including null hook keep exact native BOOL and error source");
+            Check(f.file == file_before && f.title == title_before && !std::memcmp(before.data(), &f.ofn, before.size()),
+                "active customization inputs and outputs are not normalized or touched");
+        }
+        {
+            Fixture f; configure(f, save); SetIgnoredFields(f, 15); const auto original = f.ofn;
+            const auto path = "C:\\owned\\accepted.txt"; const std::u16string wire(path, path + std::char_traits<char>::length(path));
+            native_calls = 0; unsigned bridge_calls = 0; auto service = Services(true);
+            service.run_bridge = [&](const auto& request, HWND) { ++bridge_calls; return Reply(request, picker::Status::Accepted, {wire}); };
+            LegacyAnsiFileDialogAdapter adapter(service);
+            Check((save ? adapter.Save(&f.ofn) : adapter.Open(&f.ofn)) == TRUE && bridge_calls == 1 && native_calls == 0 &&
+                std::basic_string<char>(f.file.data()) == path && adapter.ExtendedError() == 0, "ignored customization fields preserve normal accepted path commit");
+            Check(f.ofn.lpfnHook == original.lpfnHook && f.ofn.lpTemplateName == original.lpTemplateName &&
+                f.ofn.hInstance == original.hInstance && f.ofn.lCustData == original.lCustData, "accepted result does not rewrite ignored customization fields");
+        }
+    }
+    std::printf("IGNORED_FIELDS_A checks=%d failures=%d native_ui=0 sentinel_dereferences=0\n", checks, failures);
+    return failures ? 1 : 0;
+}
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--ignored-fields") return IgnoredFieldsTest();
     std::printf("ACP: %u\n", GetACP());
 #ifdef PULSE_TEST_REQUIRE_UTF8_ACP
     if (GetACP() != CP_UTF8) {
@@ -141,7 +199,7 @@ int main() {
     Check(adapter.Open(&old.ofn) == 7, "old structure size bypasses before bridge");
     Fixture hook; hook.ofn.Flags |= OFN_ENABLEHOOK;
     Check(adapter.Open(&hook.ofn) == 7, "hook flag bypasses before bridge");
-    Fixture custom; custom.ofn.lpTemplateName = MAKEINTRESOURCEA(100);
+    Fixture custom; custom.ofn.Flags |= OFN_ENABLETEMPLATE; custom.ofn.lpTemplateName = MAKEINTRESOURCEA(100);
     Check(adapter.Open(&custom.ofn) == 7, "template resource is not dereferenced and bypasses");
     Fixture flags; flags.ofn.Flags |= OFN_NOVALIDATE;
     Check(adapter.Open(&flags.ofn) == 7 && native_calls == bypass_start + 4, "unsupported flag bypasses before bridge");

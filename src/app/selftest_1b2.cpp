@@ -1025,6 +1025,41 @@ void TestBlankPaneClickNavigation() {
                 }
                 Check(open_rail_hit,
                       L"sidebar geometry: an expanded section keeps its rail row");
+                // A folded section adds its own icon row under the short title;
+                // it reports sub_index 2 so it lights apart from the title (0).
+                bool fold_row_hit = false;
+                for (float y = 0.0f; y < height_px; y += scale) {
+                    const auto hit = renderer.HitTest(folded_vm, narrow_bounds, 24.0f * scale, y);
+                    if (hit.region == ui::HitTestResult::SidebarHeader && hit.sidebar_section == 0 &&
+                        hit.sub_index == 2) {
+                        fold_row_hit = true;
+                        break;
+                    }
+                }
+                Check(fold_row_hit, L"sidebar geometry: a folded rail section has its own icon row");
+                // An empty workspace section offers "save current" on the rail
+                // instead of leaving a blank cell.
+                ui::WindowViewModel workspace_vm;
+                {
+                    ui::SidebarGroup group;
+                    group.id = 0;
+                    group.header = L"WS";
+                    group.add_action = ui::SidebarAddAction::SaveWorkspace;
+                    ui::SidebarItem empty;
+                    empty.workspace_empty = true;
+                    empty.label = L"Empty";
+                    group.items.push_back(std::move(empty));
+                    workspace_vm.sidebar.push_back(std::move(group));
+                }
+                bool save_hit = false;
+                for (float y = 0.0f; y < height_px; y += scale) {
+                    const auto hit = renderer.HitTest(workspace_vm, narrow_bounds, 24.0f * scale, y);
+                    if (hit.region == ui::HitTestResult::SidebarWorkspaceAction && hit.sub_index == 4) {
+                        save_hit = true;
+                        break;
+                    }
+                }
+                Check(save_hit, L"sidebar rail: an empty workspace section offers save current");
             }
         }
     }
@@ -4955,9 +4990,9 @@ void TestSnapshotPatchHoldsRows() {
     make(L"beta.txt", 5000);
     Check(ApplyDirNotify(entries, dir, ev(FILE_ACTION_MODIFIED, L"beta.txt"),
                          ui::SortColumn::Size, ui::SortDirection::Desc) == NotifyPatch::Applied &&
-          names(entries) == L"beta.txt,aardvark.txt,zeta.txt,gamma.txt" &&
-          entries[0].size == 5000u,
-          L"patch sort: a modified size key moves the row to its descending sort position");
+          names(entries) == L"aardvark.txt,zeta.txt,beta.txt,gamma.txt" &&
+          entries[2].size == 5000u,
+          L"patch hold: a modified row keeps its place and updates its size");
 
     {
         const ScopedEntryGrouping grouping(static_cast<int>(GroupBy::Type));
@@ -4965,11 +5000,11 @@ void TestSnapshotPatchHoldsRows() {
         make(L"notes.md", 1);
         name_asc(entries, ev(FILE_ACTION_ADDED, L"new"), dir);
         name_asc(entries, ev(FILE_ACTION_ADDED, L"notes.md"), dir);
-        Check(names(entries) == L"new,notes.md,beta.txt,aardvark.txt,zeta.txt,gamma.txt",
+        Check(names(entries) == L"new,notes.md,aardvark.txt,zeta.txt,beta.txt,gamma.txt",
               L"patch hold: grouped, a new row goes to its sort position in its group");
         MoveFileW(full(L"zeta.txt").c_str(), full(L"zeta.md").c_str());
         name_asc(entries, ev(FILE_ACTION_RENAMED_NEW_NAME, L"zeta.md", L"zeta.txt"), dir);
-        Check(names(entries) == L"new,notes.md,zeta.md,beta.txt,aardvark.txt,gamma.txt",
+        Check(names(entries) == L"new,notes.md,zeta.md,aardvark.txt,beta.txt,gamma.txt",
               L"patch hold: grouped, a rename into another group moves to its place there");
     }
 
@@ -5002,9 +5037,8 @@ void TestEntryOrderHold() {
         });
         return list;
     };
-    const auto keep = [](const std::vector<fs::DirEntry>& shown, const std::vector<fs::DirEntry>& fresh,
-                         const std::vector<EntryRename>& renames) {
-        return KeepEntryOrder(shown, fresh, renames, ui::SortColumn::Name, ui::SortDirection::Asc);
+    const auto keep = [](const std::vector<fs::DirEntry>& shown, const std::vector<fs::DirEntry>& fresh) {
+        return KeepEntryOrder(shown, fresh, ui::SortColumn::Name, ui::SortDirection::Asc);
     };
 
     const std::vector<fs::DirEntry> shown = {entry(L"alpha"), entry(L"echo"), entry(L"delta"),
@@ -5012,14 +5046,12 @@ void TestEntryOrderHold() {
     const std::vector<fs::DirEntry> fresh = sorted({entry(L"alpha", false, 42), entry(L"beta"),
                                                     entry(L"charlie"), entry(L"delta"),
                                                     entry(L"zulu")});
-    const auto held = keep(shown, fresh, {{L"echo", L"zulu"}});
-    Check(names(held) == L"alpha,charlie,zulu,delta,beta",
-          L"order hold: rows keep their place, a renamed row its old one, new rows merge in sorted");
+    const auto held = keep(shown, fresh);
+    Check(names(held) == L"alpha,charlie,delta,beta,zulu",
+          L"order hold: rows keep their place, new and renamed rows merge in sorted");
     Check(!held.empty() && held[0].size == 42u,
           L"order hold: kept rows take the fresh metadata");
-    Check(names(keep(shown, fresh, {})) == L"alpha,charlie,delta,beta,zulu",
-          L"order hold: without a rename hint the new name is just a new row");
-    Check(names(keep({}, fresh, {})) == names(fresh),
+    Check(names(keep({}, fresh)) == names(fresh),
           L"order hold: nothing shown yet means plain sort order");
 
     {
@@ -5029,11 +5061,11 @@ void TestEntryOrderHold() {
         const auto fresh_grouped = sorted({entry(L"docs", true), entry(L"new", true),
                                            entry(L"z.md"), entry(L"a.txt"), entry(L"b.txt"),
                                            entry(L"c.txt")});
-        Check(names(keep(shown_grouped, fresh_grouped, {})) == L"docs,new,z.md,b.txt,c.txt,a.txt",
+        Check(names(keep(shown_grouped, fresh_grouped)) == L"docs,new,z.md,b.txt,c.txt,a.txt",
               L"order hold: grouped, new rows merge in at their sort position");
         const auto fresh_moved = sorted({entry(L"docs", true), entry(L"a.md"), entry(L"c.txt")});
-        Check(names(keep(shown_grouped, fresh_moved, {{L"a.txt", L"a.md"}})) == L"docs,a.md,c.txt",
-              L"order hold: grouped, a rename into another group leaves its old row");
+        Check(names(keep(shown_grouped, fresh_moved)) == L"docs,a.md,c.txt",
+              L"order hold: grouped, a rename into another group merges in sorted");
     }
 
     {

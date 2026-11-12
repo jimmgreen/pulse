@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <thread>
+#include <fstream>
 
 namespace {
 namespace fs = std::filesystem;
@@ -245,8 +246,259 @@ int PublicationLocks() {
     return failures ? 1 : 0;
 }
 }
+
+std::vector<std::wstring> CopyPackage(const fs::path& package, const fs::path& staging) {
+    std::vector<std::wstring> files;
+    for (const auto& entry : fs::recursive_directory_iterator(package)) {
+        if (!entry.is_regular_file()) continue;
+        const auto relative = fs::relative(entry.path(), package);
+        files.push_back(relative.wstring());
+        const auto target = staging / relative;
+        fs::create_directories(target.parent_path());
+        fs::copy_file(entry.path(), target);
+    }
+    return files;
+}
+std::string VersionDigest(const fs::path& app, unsigned machine) {
+    pulse::dialog_bundle::BundleLease lease;
+    return pulse::dialog_bundle::ResolveInstalledBundleForMachine(app.wstring(), machine, lease) ? std::string() : lease.ManifestDigest();
+}
+bool ApplyVersionFiles(const fs::path& app, const fs::path& package, bool fail_commit = false, HANDLE* held = nullptr, bool* commit_reached = nullptr) {
+    fs::create_directories(app);
+    FileTransaction transaction(app.wstring());
+    std::wstring error;
+    if (!transaction.Begin(error)) return false;
+    auto files = CopyPackage(package, transaction.StagingDir());
+    DialogVersionPlan plan;
+    if (!PrepareDialogVersion(app.wstring(), transaction.StagingDir(), files, plan, error)) { std::fwprintf(stderr, L"prepare: %s\n", error.c_str()); return false; }
+    Check(plan.machine == IMAGE_FILE_MACHINE_AMD64 && plan.companions.size() == 1 &&
+        plan.companions[0].machine == IMAGE_FILE_MACHINE_I386 && plan.companions[0].companions.empty() &&
+        plan.replacements.back() == L"dialog-current.json" &&
+        std::find(plan.replacements.begin(), plan.replacements.end(), L"dialog-x86-current.json") != plan.replacements.end(),
+        "dual plan has typed one-level companion and primary pointer is final root commit");
+    if (!PublishDialogVersion(app.wstring(), transaction.StagingDir(), plan, error)) { std::fwprintf(stderr, L"publish: %s\n", error.c_str()); return false; }
+    std::erase(files, L".pulse-files");
+    std::string installed;
+    for (const auto& file : files) installed += WideToUtf8(file) + "\r\n";
+    if (!Write(fs::path(transaction.StagingDir()) / L".pulse-files", installed)) return false;
+    std::erase(plan.replacements, L".pulse-files");
+    plan.replacements.insert(plan.replacements.end() - 1, L".pulse-files");
+    const bool committed = transaction.Commit(plan.replacements, error, {}, [&](std::wstring& reason) {
+        if (commit_reached) *commit_reached = true;
+        if (!fail_commit) return true;
+        if (held) {
+            const auto child = app / L"DialogBridge" / Utf8ToWide(plan.companions[0].digest) / L"PulseDialogAuto32.dll";
+            *held = CreateFileW(child.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        }
+        reason = L"injected dual root commit failure";
+        return false;
+    });
+    if (committed) transaction.Finish();
+    return committed;
+}
+int DualVersions(const fs::path& a, const fs::path& b, const fs::path& c) {
+    const auto app = fs::absolute(L"bench_data") /
+        (L"dialog-dual-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    Check(ApplyVersionFiles(app, a), "install two verified immutable architecture versions");
+    if (failures) return 1;
+    const auto a64 = VersionDigest(app, IMAGE_FILE_MACHINE_AMD64), a32 = VersionDigest(app, IMAGE_FILE_MACHINE_I386);
+    const auto a_directory = app / L"DialogBridge" / Utf8ToWide(a32);
+    const auto original_manifest = Read(a_directory / L"manifest.json");
+    HANDLE old_reader = CreateFileW((a_directory / L"PulseDialogAuto32.dll").c_str(), GENERIC_READ,
+        FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    Check(!a64.empty() && !a32.empty() && a64 != a32 && old_reader != INVALID_HANDLE_VALUE, "hold actual companion member without loading synthetic image");
+    Check(ApplyVersionFiles(app, b), "upgrade both architectures while old companion remains held");
+    const auto b64 = VersionDigest(app, IMAGE_FILE_MACHINE_AMD64), b32 = VersionDigest(app, IMAGE_FILE_MACHINE_I386);
+    Check(Read(app / L".pulse-dialog-previous") == a64 && Read(app / L".pulse-dialog-x86-previous") == a32,
+        "upgrade journals independent previous markers");
+    Check(ApplyVersionFiles(app, b) && Read(app / L".pulse-dialog-x86-previous") == a32,
+        "same digest reinstall preserves companion previous marker");
+    const auto before_main = Read(app / L"dialog-current.json"), before_peer = Read(app / L"dialog-x86-current.json");
+    const auto before_marker = Read(app / L".pulse-dialog-x86-previous");
+    HANDLE new_reader = INVALID_HANDLE_VALUE;
+    Check(!ApplyVersionFiles(app, c, true, &new_reader) && new_reader != INVALID_HANDLE_VALUE,
+        "root transaction failure can hold newly published companion");
+    Check(Read(app / L"dialog-current.json") == before_main && Read(app / L"dialog-x86-current.json") == before_peer &&
+        Read(app / L".pulse-dialog-previous") == a64 && Read(app / L".pulse-dialog-x86-previous") == before_marker,
+        "rollback restores both current pointers and both previous markers");
+    if (new_reader != INVALID_HANDLE_VALUE) CloseHandle(new_reader);
+    const auto single_stage = app / L"single-stage";
+    fs::create_directories(single_stage);
+    pulse::dialog_bundle::BundleLease primary;
+    Check(pulse::dialog_bundle::ResolveInstalledBundle(b.wstring(), primary) == ERROR_SUCCESS, "resolve valid single-update source");
+    fs::copy_file(b / L"pulse.exe", single_stage / L"pulse.exe");
+    fs::copy_file(b / L"dialog-current.json", single_stage / L"dialog-current.json");
+    fs::create_directories(single_stage / L"DialogBridge");
+    fs::copy(primary.Directory(), single_stage / L"DialogBridge" / Utf8ToWide(primary.ManifestDigest()), fs::copy_options::recursive);
+    primary = {};
+    std::vector<std::wstring> single_files;
+    for (const auto& entry : fs::recursive_directory_iterator(single_stage))
+        if (entry.is_regular_file()) single_files.push_back(fs::relative(entry.path(), single_stage).wstring());
+    DialogVersionPlan single_plan; std::wstring error;
+    Check(!PrepareDialogVersion(app.wstring(), single_stage.wstring(), single_files, single_plan, error) &&
+        !fs::exists(single_stage / L".pulse-dialog-previous") && Read(app / L"dialog-x86-current.json") == before_peer,
+        "dual to single update fails before markers or installed pointers change");
+    const auto bad_stage = app / L"bad-stage";
+    auto bad_files = CopyPackage(c, bad_stage);
+    Write(bad_stage / L"dialog-x86-current.json", Read(bad_stage / L"dialog-current.json"));
+    DialogVersionPlan bad_plan;
+    Check(!PrepareDialogVersion(app.wstring(), bad_stage.wstring(), bad_files, bad_plan, error),
+        "companion pointer cannot select primary architecture");
+    const auto tampered_stage = app / L"tampered-stage";
+    auto tampered_files = CopyPackage(c, tampered_stage);
+    DialogVersionPlan tampered_plan;
+    Check(PrepareDialogVersion(app.wstring(), tampered_stage.wstring(), tampered_files, tampered_plan, error), "prepare two verified source closures for tamper check");
+    const auto tampered_file = tampered_stage / tampered_plan.companions[0].relative_directory / L"pulse.exe";
+    { std::ofstream output(tampered_file, std::ios::binary | std::ios::app); output << "tampered"; }
+    Check(!PublishDialogVersion(app.wstring(), tampered_stage.wstring(), tampered_plan, error),
+        "publication rechecks staged companion hash even when destination can be reused");
+    Check(ApplyVersionFiles(app, c), "successful dual update after complete root rollback");
+    const auto protected_peer = Read(app / L"dialog-x86-current.json");
+    Write(app / L"dialog-x86-current.json", "{}");
+    auto damaged = CleanupDialogVersionsReport(app.wstring());
+    Check(!damaged.scan_complete && damaged.deleted_directories.empty() && fs::exists(a_directory),
+        "damaged companion pointer protects all versions before cleanup");
+    Write(app / L"dialog-x86-current.json", protected_peer);
+    Write(app / L".pulse-dialog-x86-previous", "bad-marker");
+    damaged = CleanupDialogVersionsReport(app.wstring());
+    Check(!damaged.scan_complete && damaged.deleted_directories.empty(), "damaged companion previous marker protects all versions");
+    Write(app / L".pulse-dialog-x86-previous", b32);
+    auto busy = CleanupDialogVersionsReport(app.wstring());
+    Check(busy.protected_directories.size() == 4 && busy.blocked_directories.size() == 1 &&
+        Read(a_directory / L"manifest.json") == original_manifest && fs::exists(a_directory / L"PulseDialogAuto32.dll"),
+        "cleanup protects two current plus two previous and retains complete busy x86 tree");
+    if (old_reader != INVALID_HANDLE_VALUE) CloseHandle(old_reader);
+    Write(a_directory / L"personal.txt", "unknown member");
+    auto unknown = CleanupDialogVersionsReport(app.wstring());
+    Check(unknown.deleted_directories.empty() && !unknown.retained_directories.empty() && fs::exists(a_directory / L"personal.txt"),
+        "unknown companion member is never removed");
+    DeleteFileW((a_directory / L"personal.txt").c_str());
+    auto cleaned = CleanupDialogVersionsReport(app.wstring());
+    Check(cleaned.deleted_directories.size() == 1 && cleaned.protected_directories.size() == 4 && !fs::exists(a_directory) &&
+        VersionDigest(app, IMAGE_FILE_MACHINE_AMD64) == VersionDigest(c, IMAGE_FILE_MACHINE_AMD64) &&
+        VersionDigest(app, IMAGE_FILE_MACHINE_I386) == VersionDigest(c, IMAGE_FILE_MACHINE_I386),
+        "released retired companion alone is cleaned while both current architectures remain bound");
+    std::printf("dual-version failures=%d\n", failures);
+    return failures ? 1 : 0;
+}
+
+int ThinVersions(const fs::path& a, const fs::path& b, const fs::path& c) {
+    const auto app = fs::absolute(L"bench_data") /
+        (L"dialog-thin-cleanup-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    Check(ApplyVersionFiles(app, a), "install verified thin pair");
+    if (failures) return 1;
+    const auto a64 = VersionDigest(app, IMAGE_FILE_MACHINE_AMD64), a32 = VersionDigest(app, IMAGE_FILE_MACHINE_I386);
+    const auto host = app / L"DialogBridge" / Utf8ToWide(a64);
+    const auto thin = app / L"DialogBridge" / Utf8ToWide(a32);
+    HANDLE reader = CreateFileW((thin / L"PulseDialogAuto32.dll").c_str(), GENERIC_READ,
+        FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    Check(reader != INVALID_HANDLE_VALUE && ApplyVersionFiles(app, b), "upgrade thin pair while old companion is held");
+    const auto primary = Read(app / L"dialog-current.json"), companion = Read(app / L"dialog-x86-current.json");
+    Check(!ApplyVersionFiles(app, c, true) && Read(app / L"dialog-current.json") == primary &&
+        Read(app / L"dialog-x86-current.json") == companion &&
+        Read(app / L".pulse-dialog-previous") == a64 && Read(app / L".pulse-dialog-x86-previous") == a32,
+        "failed thin upgrade restores both pointers and previous pair");
+    Check(ApplyVersionFiles(app, c), "publish thin pair after rollback");
+    const auto busy = CleanupDialogVersionsReport(app.wstring());
+    Check(busy.blocked_directories.size() == 1 && busy.deleted_directories.empty() &&
+        fs::exists(host / L"pulse.exe") && fs::exists(thin / L"manifest.json"),
+        "busy thin retains its complete host dependency");
+    if (reader != INVALID_HANDLE_VALUE) CloseHandle(reader);
+    Write(thin / L"personal.txt", "unowned");
+    const auto unknown = CleanupDialogVersionsReport(app.wstring());
+    Check(unknown.deleted_directories.empty() && fs::exists(host / L"pulse.exe") && fs::exists(thin / L"personal.txt"),
+        "unknown companion file retains companion and host");
+    DeleteFileW((thin / L"personal.txt").c_str());
+    const auto valid_manifest = Read(thin / L"manifest.json");
+    Check(Write(thin / L"manifest.json", "{}"), "prepare valid JSON with missing dependency schema");
+    const auto missing_schema = CleanupDialogVersionsReport(app.wstring());
+    Check(!missing_schema.scan_complete && missing_schema.deleted_directories.empty() &&
+        fs::exists(host / L"pulse.exe") && fs::exists(thin / L"manifest.json"),
+        "missing dependency schema fails closed before deleting any host or companion");
+    Check(Write(thin / L"manifest.json", valid_manifest), "restore original manifest after missing-schema check");
+    const auto cleaned = CleanupDialogVersionsReport(app.wstring());
+    Check(cleaned.deleted_directories.size() == 2 && cleaned.deleted_directories.front() == thin.wstring() &&
+        !fs::exists(thin) && !fs::exists(host) && cleaned.protected_directories.size() == 4,
+        "retired thin deletes before host with current and previous pairs protected");
+    const auto removed = CleanupDialogVersionsReport(app.wstring(), true);
+    Check(removed.deleted_directories.size() == 4 && removed.Complete(), "uninstall removes both remaining pairs without orphaning thin bundles");
+    std::printf("thin-version failures=%d\n", failures);
+    return failures ? 1 : 0;
+}
+
+int OrphanRepair(const fs::path& old_package, const fs::path& new_package) {
+    const auto root = fs::absolute(L"bench_data") /
+        (L"orphan-repair-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    const auto app = root / L"app";
+    Check(ApplyVersionFiles(app, old_package), "install old verified dual architecture fixture");
+    if (failures) return 1;
+    const auto old64 = VersionDigest(app, IMAGE_FILE_MACHINE_AMD64), old32 = VersionDigest(app, IMAGE_FILE_MACHINE_I386);
+    const auto missing = app / L"DialogBridge" / Utf8ToWide(old32);
+    Check(IsDialogVersionDigest(old32) && missing.lexically_normal().parent_path() == (app / L"DialogBridge").lexically_normal() &&
+        app.parent_path() == root, "orphan simulation stays inside owned fixture canonical directory");
+    if (failures) return 1;
+    fs::remove_all(missing);
+    Write(app / L".pulse-dialog-previous", old64);
+    Write(app / L".pulse-dialog-x86-previous", old32);
+    const std::vector<std::wstring> names{L"dialog-current.json", L"dialog-x86-current.json", L"pulse.exe", L".pulse-files",
+        L".pulse-dialog-previous", L".pulse-dialog-x86-previous"};
+    std::vector<std::string> original;
+    for (const auto& name : names) original.push_back(Read(app / name));
+    const auto sentinel = app / L"DialogBridge" / L"unowned" / L"personal.txt";
+    fs::create_directories(sentinel.parent_path()); Write(sentinel, "unowned must stay");
+    bool reached = false;
+    Check(!ApplyVersionFiles(app, new_package, true, nullptr, &reached) && reached,
+        "orphan repair reaches transaction commit then injected failure rolls back");
+    bool restored = true;
+    for (size_t i = 0; i < names.size(); ++i) restored &= Read(app / names[i]) == original[i];
+    Check(restored && !fs::exists(missing), "failed repair restores raw pointers main file manifest and both markers");
+    Check(ApplyVersionFiles(app, new_package), "verified new dual package repairs missing old x86 version");
+    if (failures) { std::printf("orphan-repair failures=%d\n", failures); return 1; }
+    const auto new64 = VersionDigest(new_package, IMAGE_FILE_MACHINE_AMD64), new32 = VersionDigest(new_package, IMAGE_FILE_MACHINE_I386);
+    Check(VersionDigest(app, IMAGE_FILE_MACHINE_AMD64) == new64 && VersionDigest(app, IMAGE_FILE_MACHINE_I386) == new32,
+        "successful repair resolves both newly verified architectures");
+    CleanupDialogVersionsReport(app.wstring());
+    Check(VersionDigest(app, IMAGE_FILE_MACHINE_AMD64) == new64 && VersionDigest(app, IMAGE_FILE_MACHINE_I386) == new32 &&
+        fs::exists(app / L"DialogBridge" / Utf8ToWide(new64) / L"pulse.exe") && Read(sentinel) == "unowned must stay",
+        "cleanup retains both current architectures thin host and unowned files");
+    const auto damaged = root / L"damaged";
+    Check(ApplyVersionFiles(damaged, old_package), "install separate existing-directory corruption fixture");
+    const auto damaged_dir = damaged / L"DialogBridge" / Utf8ToWide(old32);
+    const auto saved = Read(damaged_dir / L"manifest.json");
+    Write(damaged_dir / L"manifest.json", saved + " ");
+    Check(!ApplyVersionFiles(damaged, new_package), "existing version with damaged manifest hash never qualifies as orphan");
+    Write(damaged_dir / L"manifest.json", saved);
+    Check(DeleteFileW((damaged_dir / L"manifest.json").c_str()) != FALSE, "prepare missing manifest inside existing version directory");
+    Check(!ApplyVersionFiles(damaged, new_package), "missing manifest inside existing directory is not an orphan pointer");
+    Write(damaged_dir / L"manifest.json", saved);
+    const auto raw_pointer = Read(damaged / L"dialog-x86-current.json");
+    Write(damaged / L"dialog-x86-current.json", "{\"schema\":1,\"directory\":\"../outside\",\"manifest_sha256\":\"" + old32 + "\"}");
+    Check(!ApplyVersionFiles(damaged, new_package), "malicious old pointer path remains rejected");
+    Write(damaged / L"dialog-x86-current.json", raw_pointer);
+    HANDLE locked = CreateFileW((damaged / L"dialog-x86-current.json").c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    Check(locked != INVALID_HANDLE_VALUE && !ApplyVersionFiles(damaged, new_package), "inaccessible old pointer does not qualify as orphan");
+    if (locked != INVALID_HANDLE_VALUE) CloseHandle(locked);
+    {
+        FileTransaction transaction(damaged.wstring());
+        std::wstring error;
+        Check(transaction.Begin(error), "begin invalid staging verification fixture");
+        auto files = CopyPackage(new_package, transaction.StagingDir());
+        const auto manifest = fs::path(transaction.StagingDir()) / L"DialogBridge" / Utf8ToWide(new32) / L"manifest.json";
+        Write(manifest, Read(manifest) + " ");
+        DialogVersionPlan plan;
+        Check(!PrepareDialogVersion(damaged.wstring(), transaction.StagingDir(), files, plan, error),
+            "orphan repair never weakens complete new staging hash verification");
+    }
+    std::wprintf(L"orphan-fixture=%s\n", root.c_str());
+    std::printf("orphan-repair failures=%d\n", failures);
+    return failures ? 1 : 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
     try {
+        if (argc == 4 && std::wstring(argv[1]) == L"--orphan-repair") return OrphanRepair(fs::absolute(argv[2]), fs::absolute(argv[3]));
+        if (argc == 5 && std::wstring(argv[1]) == L"--thin-suite") return ThinVersions(fs::absolute(argv[2]), fs::absolute(argv[3]), fs::absolute(argv[4]));
+        if (argc == 5 && std::wstring(argv[1]) == L"--dual-suite") return DualVersions(fs::absolute(argv[2]), fs::absolute(argv[3]), fs::absolute(argv[4]));
         if (argc == 5 && std::wstring(argv[1]) == L"--cleanup-report") return CleanupReports(fs::absolute(argv[2]), fs::absolute(argv[3]), fs::absolute(argv[4]));
         if (argc == 2 && std::wstring(argv[1]) == L"--publication-locks") return PublicationLocks();
         if (argc == 5 && std::wstring(argv[1]) == L"--hold") return Hold(argv[2], argv[3], argv[4]);

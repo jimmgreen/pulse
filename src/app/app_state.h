@@ -15,6 +15,7 @@
 #include "preview_selection_follow.h"
 #include "list_selection_gesture.h"
 #include "file_click_gesture.h"
+#include "button_press.h"
 #include "../ui/text_diff_window.h"
 #include "../ui/bloom_accent_picker.h"
 #include "../fs/fs_enum.h"
@@ -348,6 +349,14 @@ struct AppState : AppCoreOwner {
     uint64_t store_manage_view_generation = 0, store_manage_ui_token = 0;
     uint64_t store_view_generation = 0;
     uint64_t store_ui_token = 0;
+    // Store browse filters and the 7-Zip detail page (ExtensionStoreView mirrors them).
+    int store_category = 0;
+    std::wstring store_search;
+    bool store_detail = false;
+    int store_detail_tab = 0;
+    int store_preview_kind = 0;
+    uint64_t store_saved_at = 0; // GetTickCount64 of the last edit, for "已保存"
+    float store_level_drag = -1.0f;
     float scale = 1.0f;
     bool maximized = false;
     bool backdropActive = true;
@@ -679,6 +688,7 @@ struct AppState : AppCoreOwner {
     uint64_t operationDismissedTaskId = 0;
     uint64_t conflictUiToken = 0;
     uint64_t lockPromptTaskId = 0;   // failed op whose "file in use" prompt was shown
+    std::wstring taskResultPath;     // the plugin task result snack's 打开文件夹 target
     bool operationAutoShown = false;
     bool operationPinnedByUser = false;
     std::chrono::steady_clock::time_point operationStartedAt{};
@@ -721,6 +731,7 @@ struct AppState : AppCoreOwner {
     std::wstring groupRenameFolder;
     uint64_t groupRenameUndo = 0;
     app::FileClickGesture fileClick;
+    app::ButtonPress buttonPress;
     ULONGLONG activateClickTick = 0; // WM_MOUSEACTIVATE: that click only brings the window forward
     bool deferredFileActivation = false; // Background file press activates only if released without dragging.
     ULONGLONG hoverSelectFired = 0;  // ctxHoverSince of the hover that already selected

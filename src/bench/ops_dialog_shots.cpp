@@ -185,6 +185,9 @@ int wmain(int argc, wchar_t** argv) {
     callbacks.open_folder = [&](const std::wstring& folder) { opened.push_back(folder); };
     ops::OpSpeedGraph saved_history;
     callbacks.speed_history = [&](uint64_t) { return saved_history; };
+    uint64_t action_task = 0;
+    std::string action_id;
+    callbacks.task_action = [&](uint64_t task, const std::string& action) { action_task = task; action_id = action; };
     ui::FileOperationWindow window;
     Check(window.Create(nullptr, std::move(callbacks)), "create hidden operation window");
     const double mb = 1024.0 * 1024.0;
@@ -249,6 +252,63 @@ int wmain(int argc, wchar_t** argv) {
               "reopened completed card cannot regress to truncated callback history");
         Access::Elapsed(window, 7000, true);
         shot(L"graph_completion_dark_144dpi_reopened");
+        window.Destroy();
+        CoUninitialize();
+        return failures ? 1 : 0;
+    }
+
+    if (argc > 3 && wcscmp(argv[3], L"--plugin-task-only") == 0) {
+        // A plugin task (pulse.tasks after V1): named steps, footer hint, explained failure, actions.
+        uint64_t task = 3000;
+        for (const bool dark : {false, true}) {
+            window.SetTheme(dark, ui::HexColor(0x527D70));
+            const std::wstring suffix = dark ? L"-dark" : L"-light";
+            Access::Size(window, 144, false);
+            Access::Place(window, -4000, -4000);
+            ops::OpStatus running;
+            running.external = true; running.type = ops::OpType::External; running.active = true; running.can_pause = false;
+            running.phase = ops::OpPhase::Running; running.task_id = task++;
+            running.external_title = running.summary = L"解压 设计稿-v3.rar";
+            running.source_label = L"设计稿-v3.rar"; running.destination_label = L"下载\\设计稿-v3";
+            running.external_steps = {L"解压到临时位置", L"写入目标 · 可撤销"};
+            running.external_step = 1; running.percent = 42.0f;
+            running.total_items = 312; running.completed_items = 126; running.total_bytes = 248ull << 20; running.transferred_bytes = 101ull << 20;
+            running.current_item = L"设计稿-v3\\图层\\banner@2x.psd";
+            running.external_note = L"解压完成前目标文件夹不会改动";
+            running.speed_basis = ops::OpSpeedBasis::Bytes;
+            running.bytes_per_second = running.peak_bytes_per_second = 86.4 * mb;
+            running.eta_seconds = 12;
+            window.Update(running);
+            Access::Place(window, -4000, -4000);
+            Access::Graph(window, 0.42f, 86.4 * mb);
+            Access::Elapsed(window, 6000, false);
+            shot(L"plugin-step1" + suffix);
+            running.external_step = 2; running.percent = 96.0f; running.external_linked = 77; running.completed_items = 300; running.transferred_bytes = 238ull << 20;
+            running.external_note = L"写入后可以撤销";
+            window.Update(running);
+            Access::Place(window, -4000, -4000);
+            shot(L"plugin-step2" + suffix);
+            ops::OpStatus failed = running;
+            failed.active = false; failed.phase = ops::OpPhase::Failed; failed.external_outcome = ops::ExternalOutcome::Failed;
+            failed.external_linked = 0;
+            failed.external_log = L"Data Error : IMG_2041.HEIC\nCRC Failed · 2026-11-11 10:42:07";
+            failed.task_id = task++;
+            failed.last_error = L"压缩包已损坏：CRC 校验失败";
+            failed.external_detail = L"数据和记录的校验值不一致，可能下载不完整或磁盘出错。";
+            failed.external_assurance = L"目标文件夹没有任何改动，临时文件已清理。";
+            failed.external_actions = {{"test", L"测试压缩包", false}, {"retry", L"重试", true}};
+            window.Update(failed);
+            Access::Place(window, -4000, -4000);
+            shot(L"plugin-failed" + suffix);
+            const POINT retry = Access::FindControl(window, 41);
+            Check(retry.x >= 0, "plugin task action button is hit-testable");
+            if (retry.x >= 0) {
+                SendMessageW(Access::Handle(window), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(retry.x, retry.y));
+                SendMessageW(Access::Handle(window), WM_LBUTTONUP, 0, MAKELPARAM(retry.x, retry.y));
+            }
+            Check(action_task == failed.task_id && action_id == "retry", "plugin task action routes its id to the host");
+            action_task = 0; action_id.clear();
+        }
         window.Destroy();
         CoUninitialize();
         return failures ? 1 : 0;

@@ -8,6 +8,7 @@
 #include "typography.h"
 #include "window_helpers.h"
 #include "ui_motion.h"
+#include "store_icons.h"
 
 #include <windowsx.h>
 #include <commctrl.h>
@@ -20,6 +21,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cwctype>
 #include <deque>
 #include <map>
 #include <string>
@@ -86,15 +88,80 @@ constexpr int kHitItemSkip = 9;
 constexpr int kHitKeepOpen = 10;
 constexpr int kHitOpen = 8;
 constexpr int kHitFailRow = 20;   // + visible row
+constexpr int kHitTaskAction = 40; // + action index
+constexpr int kHitBackground = 12;
+constexpr int kHitCopyDetails = 13;
 constexpr size_t kTimeGraphPoints = ops::OpSpeedGraph::kMaxTimePoints;
 constexpr float kPi = 3.14159265f;
 
+// No graph for a plugin task without byte progress, or while a host operation writes its output.
 bool CompactTaskProgress(const ops::OpStatus& status) {
-    return status.external && status.speed_basis == ops::OpSpeedBasis::None;
+    return status.external && (status.speed_basis == ops::OpSpeedBasis::None || status.external_linked != 0);
+}
+size_t TextLines(const std::wstring& text, size_t cap) {
+    if (text.empty()) return 0;
+    return (std::min)(cap, static_cast<size_t>(std::count(text.begin(), text.end(), L'\n')) + 1);
+}
+// A plugin task with named steps shows them under the route while it runs.
+constexpr float kTaskStepsH = 28.0f;
+bool ShowsTaskSteps(const ops::OpStatus& status) {
+    return status.external && status.active && status.external_steps.size() >= 2;
+}
+// An ended plugin task that explained its failure: a callout replaces the numbers.
+bool ShowsTaskCallout(const ops::OpStatus& status) {
+    return status.external && !status.active && status.external_outcome != ops::ExternalOutcome::Completed &&
+        status.external_outcome != ops::ExternalOutcome::Cancelled &&
+        (!status.external_detail.empty() || !status.external_assurance.empty() || !status.external_actions.empty() ||
+         !status.external_log.empty());
+}
+
+constexpr float kTaskLogLineH = 16.0f;
+// Content height of the callout view: callout, assurance line, diagnostics block.
+float TaskCalloutHeight(const ops::OpStatus& status) {
+    float h = (status.source_label.empty() ? 40.0f : 58.0f) + 2.0f;
+    h += 12.0f + 20.0f + 18.0f * static_cast<float>(TextLines(status.external_detail, 2)) + 10.0f;
+    if (!status.external_assurance.empty()) h += 28.0f;
+    if (!status.external_log.empty()) h += 10.0f + 16.0f + kTaskLogLineH * static_cast<float>(TextLines(status.external_log, 3));
+    return h + 14.0f;
 }
 float TaskLayoutReduction(const ops::OpStatus& status) {
+    if (ShowsTaskCallout(status)) return kContentH - TaskCalloutHeight(status);
     return (status.external && status.source_label.empty() ? 18.0f : 0.0f) +
-        (CompactTaskProgress(status) ? 60.0f : 0.0f);
+        (CompactTaskProgress(status) ? 60.0f : 0.0f) - (ShowsTaskSteps(status) ? kTaskStepsH : 0.0f);
+}
+// A plugin task always shows its details while it runs (HTML 解压进度); it has no toggle.
+bool ShowsTransferDetails(const ops::OpStatus& status, bool detailed) {
+    return (detailed || status.external) && status.active && !CompactTaskProgress(status);
+}
+bool LooksLikeArchive(const std::wstring& label) {
+    const auto dot = label.find_last_of(L'.');
+    if (dot == std::wstring::npos) return false;
+    std::wstring ext = label.substr(dot + 1);
+    for (auto& c : ext) c = static_cast<wchar_t>(towlower(c));
+    for (const wchar_t* known : {L"7z", L"zip", L"rar", L"tar", L"gz", L"xz", L"bz2", L"tgz", L"txz", L"tbz2", L"zst",
+                                 L"iso", L"cab", L"wim", L"lzma", L"zipx", L"001"})
+        if (ext == known) return true;
+    return false;
+}
+bool CopyText(HWND owner, const std::wstring& text) {
+    if (!OpenClipboard(owner)) return false;
+    EmptyClipboard();
+    bool ok = false;
+    if (HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t))) {
+        if (auto* data = static_cast<wchar_t*>(GlobalLock(memory))) {
+            memcpy(data, text.c_str(), (text.size() + 1) * sizeof(wchar_t));
+            GlobalUnlock(memory);
+            ok = SetClipboardData(CF_UNICODETEXT, memory) != nullptr;
+        }
+        if (!ok) GlobalFree(memory);
+    }
+    CloseClipboard();
+    return ok;
+}
+// Buttons of an ended plugin task (retry, re-enter password, ...); never on a cancel.
+bool ShowsTaskActions(const ops::OpStatus& status) {
+    return status.external && !status.active && status.external_outcome != ops::ExternalOutcome::Cancelled &&
+        !status.external_actions.empty();
 }
 
 using pulse::ui::ScaleDip;
@@ -111,6 +178,9 @@ struct TransferChrome {
     D2D1_RECT_F retry{};
     D2D1_RECT_F skip{};
     D2D1_RECT_F open{};
+    D2D1_RECT_F actions[3]{};
+    D2D1_RECT_F background{};
+    D2D1_RECT_F copy_details{};
 };
 
 struct TransferLabels {
@@ -134,6 +204,11 @@ struct TransferLabels {
     std::wstring open;
     bool cancel_primary = false;
     bool cancel_retries = false;
+    // An ended plugin task's own buttons, left to right; primary = accent.
+    std::vector<std::wstring> actions;
+    int primary_action = -1;
+    bool show_background = false;   // 在后台继续 (plugin task running)
+    bool show_copy_details = false; // 复制详情 (plugin task explained failure)
 };
 
 // A pause shows from the click on: the worker reports Paused only at its next
@@ -192,10 +267,19 @@ TransferLabels MakeTransferLabels(const ops::OpStatus& status, bool detailed,
         labels.open = l10n::Get(l10n::StringId::OpOpenDestination);
     }
     if (status.external) {
-        labels.show_details = status.speed_basis != ops::OpSpeedBasis::None;
+        labels.show_details = false; // always shown while it runs
+        labels.show_background = status.active && status.phase != ops::OpPhase::Cancelling;
+        labels.show_copy_details = ShowsTaskCallout(status);
         labels.show_pause = labels.show_retry = labels.show_skip = labels.show_open = false;
         labels.cancel_retries = false;
         labels.cancel = l10n::Get(status.active ? l10n::StringId::Cancel : l10n::StringId::Close);
+        if (ShowsTaskActions(status)) {
+            for (size_t i = 0; i < status.external_actions.size() && i < 3; ++i) {
+                labels.actions.push_back(status.external_actions[i].text);
+                if (status.external_actions[i].primary && labels.primary_action < 0) labels.primary_action = static_cast<int>(i);
+            }
+            labels.cancel_primary = false;
+        }
     }
     return labels;
 }
@@ -204,7 +288,7 @@ TransferChrome MakeTransferChrome(float scale, float width, float height,
                                   const fluent::Painter& painter, const TransferLabels& labels) {
     TransferChrome chrome;
     const float title = ScaleDip(scale, kCaptionH);
-    const float caption = ScaleDip(scale, 40.0f);
+    const float caption = ScaleDip(scale, 46.0f);
     chrome.close = D2D1::RectF(width - caption, 0, width, title);
     chrome.minimize = D2D1::RectF(width - caption * 2.0f, 0, width - caption, title);
     const float footer_h = ScaleDip(scale, kFooterH);
@@ -239,6 +323,19 @@ TransferChrome MakeTransferChrome(float scale, float width, float height,
         const float retry_w = (std::max)(painter.MeasureButtonWidth(labels.retry),
                                          painter.MeasureButtonWidth(labels.retry_reserve));
         chrome.retry = D2D1::RectF(next_right - retry_w, y0, next_right, y1);
+    }
+    if (labels.show_background) {
+        const float w = painter.MeasureButtonWidth(l10n::Get(l10n::StringId::OpContinueInBackground));
+        chrome.background = D2D1::RectF(next_right - w, y0, next_right, y1);
+        next_right = chrome.background.left - gap;
+    }
+    if (labels.show_copy_details)
+        chrome.copy_details = D2D1::RectF(pad - ScaleDip(scale, 8.0f), y0,
+            pad - ScaleDip(scale, 8.0f) + painter.MeasureButtonWidth(l10n::Get(l10n::StringId::OpCopyDetails)), y1);
+    for (size_t i = labels.actions.size(); i-- > 0;) {
+        const float w = painter.MeasureButtonWidth(labels.actions[i]);
+        chrome.actions[i] = D2D1::RectF(next_right - w, y0, next_right, y1);
+        next_right = chrome.actions[i].left - gap;
     }
     const float details_x = pad - ScaleDip(scale, 8.0f);
     // The permission view has no details: 跳过此项 takes that slot, a ghost
@@ -680,13 +777,10 @@ public:
         dark_ = dark;
         accent_ = accent;
         scale_ = static_cast<float>(pulse::compat::WindowDpi(owner)) / 96.0f;
+        weight_[1] = 0.0f;
+        weight_[2] = RecommendSkip() ? 1.0f : 0.0f;
+        weight_[3] = 0.0f;
         diagnostics::runtime::Event("operation_conflict_ui_begin", {{"task", conflict.task_id}, {"token", conflict.token}});
-        diagnostics::runtime::Event("operation_conflict_icon_begin", {{"task", conflict.task_id}, {"token", conflict.token}});
-        icons_[0] = ShellTypeIcon(LeafName(conflict_.source), conflict_.source_is_directory, 32.0f * scale_);
-        icons_[1] = ShellTypeIcon(LeafName(conflict_.destination), conflict_.destination_is_directory,
-                                  32.0f * scale_);
-        diagnostics::runtime::Event("operation_conflict_icon_end", {{"task", conflict.task_id}, {"token", conflict.token},
-            {"source_icon", icons_[0] != nullptr}, {"destination_icon", icons_[1] != nullptr}});
 
         WNDCLASSEXW wc{ sizeof(wc) };
         wc.hInstance = GetModuleHandleW(nullptr);
@@ -705,7 +799,7 @@ public:
         if (!hwnd_) {
             diagnostics::runtime::Event("operation_conflict_ui_create_failed", {{"task", conflict.task_id},
                 {"token", conflict.token}, {"error", GetLastError()}}, diagnostics::runtime::Level::Error);
-            ReleaseIcons(); return result_;
+            return result_;
         }
         diagnostics::runtime::Event("operation_conflict_ui_created", {{"task", conflict.task_id}, {"token", conflict.token}});
         pulse::ui::CenterOwnedWindow(hwnd_, owner_, width, height);
@@ -724,25 +818,22 @@ public:
         if (IsWindow(hwnd_)) { HideComposedDialog(hwnd_, owner_); DestroyWindow(hwnd_); }
         hwnd_ = nullptr;
         EnableWindow(owner_, TRUE);
-        ReleaseIcons();
         diagnostics::runtime::Event("operation_conflict_ui_end", {{"task", conflict.task_id}, {"token", conflict.token},
             {"choice", static_cast<uint64_t>(result_.choice)}, {"apply_all", result_.apply_to_all}});
         return result_;
     }
 
 private:
-    // Layout in DIPs (the HTML's modal: 24 padding, 18/24 headline at 18,
-    // compare block 82-188, rows 204 / 260 / 316, 64 footer).
     static constexpr float kConflictW = 500.0f;
     static constexpr float kPad = 24.0f;
-    static constexpr float kCompareTop = 82.0f;   // labels; items +28, paths +90
-    static constexpr float kCompareH = 106.0f;
-    static constexpr float kColW = 209.5f;        // two columns, 16 gaps around a 1 px rule
-    static constexpr float kActionsTop = 204.0f;
-    static constexpr float kActionH = 54.0f;
-    static constexpr float kActionGap = 2.0f;
-    static constexpr float kFooterH = 64.0f;
-    static constexpr float kHeightDip = 454.0f;
+    static constexpr float kCompareTop = 94.0f;
+    static constexpr float kCompareH = 86.0f;
+    static constexpr float kVerdictTop = 191.0f;
+    static constexpr float kActionsTop = 223.0f;
+    static constexpr float kActionH = 67.0f;
+    static constexpr float kBottomBtnTop = 444.0f;
+    static constexpr float kBottomBtnH = 32.0f;
+    static constexpr float kHeightDip = 498.0f;
     static constexpr UINT_PTR kAnimTimer = 2;
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -765,38 +856,115 @@ private:
         return copy.substr(0, slash == 2 && copy[1] == L':' ? 3 : slash);
     }
 
+    static std::wstring UpperFileBadge(const std::wstring& name, bool directory) {
+        if (directory) return {};
+        const size_t dot = name.find_last_of(L'.');
+        if (dot == std::wstring::npos || dot == 0 || dot + 1 >= name.size()) return {};
+        const std::wstring_view ext(name.data() + dot + 1, name.size() - dot - 1);
+        if (ext.size() > 5) return {};
+        std::wstring upper;
+        upper.reserve(ext.size());
+        for (wchar_t ch : ext) {
+            if (!((ch >= L'0' && ch <= L'9') || (ch >= L'A' && ch <= L'Z') || (ch >= L'a' && ch <= L'z')))
+                return {};
+            upper.push_back(static_cast<wchar_t>(std::towupper(ch)));
+        }
+        if (upper.size() > 4) upper.resize(4);
+        return upper;
+    }
+
+    static D2D1_COLOR_F BadgeColorForExt(const std::wstring& upper) {
+        auto in = [&](std::initializer_list<const wchar_t*> list) {
+            for (const wchar_t* item : list) if (upper == item) return true;
+            return false;
+        };
+        if (upper == L"PDF") return HexColor(0xE43025);
+        if (in({L"DOC", L"DOCX", L"DOCM", L"RTF", L"ODT", L"WPS"})) return HexColor(0x2563EB);
+        if (in({L"XLS", L"XLSX", L"XLSM", L"XLSB", L"CSV", L"ODS", L"ET"})) return HexColor(0x16A34A);
+        if (in({L"PPT", L"PPTX", L"PPTM", L"ODP", L"DPS"})) return HexColor(0xEA580C);
+        if (in({L"PNG", L"JPG", L"JPEG", L"GIF", L"BMP", L"WEBP", L"SVG", L"ICO", L"HEIC", L"TIF", L"PSD"}))
+            return HexColor(0x9333EA);
+        if (in({L"MP4", L"MKV", L"AVI", L"MOV", L"WMV", L"WEBM", L"FLV", L"M4V"})) return HexColor(0xDB2777);
+        if (in({L"MP3", L"WAV", L"FLAC", L"AAC", L"OGG", L"M4A", L"WMA"})) return HexColor(0x0D9488);
+        if (in({L"ZIP", L"RAR", L"7Z", L"TAR", L"GZ", L"XZ", L"CAB", L"ISO", L"ZST"})) return HexColor(0xCA8A04);
+        if (in({L"DWG", L"DXF", L"DWF", L"DWT"})) return HexColor(0x0891B2);
+        if (in({L"EXE", L"MSI", L"BAT", L"CMD"})) return HexColor(0x65A30D);
+        if (in({L"DLL", L"SYS", L"LIB", L"OBJ"})) return HexColor(0x3B82F6);
+        if (in({L"PY", L"JS", L"TS", L"CPP", L"C", L"H", L"CS", L"RS", L"GO", L"JSON", L"XML", L"HTML", L"CSS"}))
+            return HexColor(0xD97706);
+        return HexColor(0x526071);
+    }
+
     bool ShowsApplyAll() const { return conflict_.remaining > 1; }
     float HeightDip() const { return kHeightDip; }
     size_t Ordinal() const { return (std::max)(conflict_.ordinal, static_cast<size_t>(1)); }
     size_t Total() const {
         return Ordinal() - 1 + (std::max)(conflict_.remaining, static_cast<size_t>(1));
     }
+    static ULONGLONG FileTimeTicks(const FILETIME& ft) {
+        return (static_cast<ULONGLONG>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    }
     // 较新 only when the shown times differ: within a minute both read the same.
     static bool NewerThan(const FILETIME& a, const FILETIME& b) {
-        const ULONGLONG ta = (static_cast<ULONGLONG>(a.dwHighDateTime) << 32) | a.dwLowDateTime;
-        const ULONGLONG tb = (static_cast<ULONGLONG>(b.dwHighDateTime) << 32) | b.dwLowDateTime;
+        const ULONGLONG ta = FileTimeTicks(a);
+        const ULONGLONG tb = FileTimeTicks(b);
         return ta != 0 && tb != 0 && ta > tb + 60ull * 10000000ull;
+    }
+    bool BothTimesKnown() const {
+        return FileTimeTicks(conflict_.source_modified) != 0 &&
+               FileTimeTicks(conflict_.destination_modified) != 0;
     }
     bool SourceNewer() const { return NewerThan(conflict_.source_modified, conflict_.destination_modified); }
     bool DestinationNewer() const { return NewerThan(conflict_.destination_modified, conflict_.source_modified); }
     bool Files() const { return !conflict_.source_is_directory && !conflict_.destination_is_directory; }
-
-    D2D1_RECT_F CloseRect() const { return Rect(scale_, kConflictW - 44, 4, 40, 32); }
-    static float ColumnX(int side) { return side == 0 ? kConflictW - kPad - kColW : kPad; }
-    D2D1_RECT_F PathRect(int side) const { return Rect(scale_, ColumnX(side), kCompareTop + 90, kColW, 16); }
-    D2D1_RECT_F ActionRect(int index) const {
-        return Rect(scale_, kPad - 8, kActionsTop + index * (kActionH + kActionGap), kConflictW - (kPad - 8) * 2,
-                    kActionH);
+    bool IdenticalSizeAndTime() const {
+        return Files() && conflict_.source_size == conflict_.destination_size &&
+               BothTimesKnown() && !SourceNewer() && !DestinationNewer();
     }
-    static float FooterTop() { return kHeightDip - kFooterH; }
-    D2D1_RECT_F ApplyRect() const { return Rect(scale_, kPad, FooterTop() + 16, 300, 32); }
+    bool RecommendSkip() const { return IdenticalSizeAndTime(); }
+
+    std::wstring EffectiveKeepBothName() const {
+        if (!conflict_.keep_both_name.empty()) return conflict_.keep_both_name;
+        const std::wstring leaf = LeafName(conflict_.destination);
+        if (leaf.empty()) return {};
+        if (!conflict_.destination_is_directory) {
+            const size_t dot = leaf.find_last_of(L'.');
+            if (dot != std::wstring::npos && dot > 0) {
+                return leaf.substr(0, dot) + L" (2)" + leaf.substr(dot);
+            }
+        }
+        return leaf + L" (2)";
+    }
+
+    D2D1_RECT_F CloseRect() const { return Rect(scale_, kConflictW - 46.0f, 0.0f, 46.0f, 36.0f); }
+    D2D1_RECT_F CompareCardRect() const {
+        return Rect(scale_, kPad, kCompareTop, kConflictW - kPad * 2.0f, kCompareH);
+    }
+    D2D1_RECT_F ChoicesCardRect() const {
+        return Rect(scale_, kPad, kActionsTop, kConflictW - kPad * 2.0f, kActionH * 3.0f);
+    }
+    // side 1 = existing destination (left), side 0 = incoming source (right).
+    static float ColumnX(int side) { return side == 0 ? kConflictW * 0.5f + 0.5f : kPad; }
+    static float ColumnW() { return (kConflictW - kPad * 2.0f) * 0.5f - 0.5f; }
+    D2D1_RECT_F PathRect(int side) const {
+        return Rect(scale_, ColumnX(side), kCompareTop, ColumnW(), kCompareH);
+    }
+    D2D1_RECT_F ActionRect(int index) const {
+        return Rect(scale_, kPad, kActionsTop + index * kActionH, kConflictW - kPad * 2.0f, kActionH);
+    }
     D2D1_RECT_F CancelRect() const {
         const float w = (std::max)(painter_.MeasureButtonWidth(l10n::Get(l10n::StringId::Cancel)),
-                                   ScaleDip(scale_, 80.0f));
-        const float h = painter_.MeasureButtonHeight();
+                                   ScaleDip(scale_, 96.0f));
+        const float h = ScaleDip(scale_, kBottomBtnH);
         const float right = (kConflictW - kPad) * scale_;
-        const float top = (FooterTop() + kFooterH * 0.5f) * scale_ - h * 0.5f;
+        const float top = kBottomBtnTop * scale_;
         return D2D1::RectF(right - w, top, right, top + h);
+    }
+    D2D1_RECT_F ApplyRect() const {
+        const auto cancel = CancelRect();
+        return D2D1::RectF(kPad * scale_, kBottomBtnTop * scale_,
+                           (std::max)(kPad * scale_, cancel.left - ScaleDip(scale_, 12.0f)),
+                           (kBottomBtnTop + kBottomBtnH) * scale_);
     }
 
     int Hit(float x, float y) const {
@@ -821,15 +989,20 @@ private:
         return 0;
     }
 
+    float TargetWeight(int choice_one_based) const {
+        const int preview = Preview();
+        if (preview != 0) return preview == choice_one_based ? 1.0f : 0.0f;
+        return (choice_one_based == 2 && RecommendSkip()) ? 1.0f : 0.0f;
+    }
+
     void Animate() {
         const ULONGLONG now = GetTickCount64();
         const float dt = anim_tick_ == 0 ? 16.0f : static_cast<float>((std::min)(now - anim_tick_, 100ull));
         anim_tick_ = now;
         const float k = 1.0f - std::exp(-dt / 70.0f);
-        const int preview = Preview();
         bool moving = false;
         for (int i = 1; i <= 3; ++i) {
-            const float target = preview == i ? 1.0f : 0.0f;
+            const float target = TargetWeight(i);
             weight_[i] += (target - weight_[i]) * k;
             if (std::fabs(target - weight_[i]) < 0.01f) weight_[i] = target;
             else moving = true;
@@ -858,121 +1031,332 @@ private:
             out->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             out->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         };
-        make(head_format_, typography::FontRole::Display, 18.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+        make(head_format_, typography::FontRole::Display, 20.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
         make(sub_format_, typography::FontRole::Text, 13.0f, DWRITE_FONT_WEIGHT_NORMAL);
-        make(name_format_, typography::FontRole::Text, 12.5f, DWRITE_FONT_WEIGHT_NORMAL);
-        make(body_format_, typography::FontRole::Text, 14.0f, DWRITE_FONT_WEIGHT_NORMAL);
-        make(meta_format_, typography::FontRole::Text, 12.0f, DWRITE_FONT_WEIGHT_NORMAL);
+        make(sub_strong_format_, typography::FontRole::Text, 13.0f, DWRITE_FONT_WEIGHT_MEDIUM);
+        make(size_format_, typography::FontRole::Text, 14.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+        make(choice_title_format_, typography::FontRole::Text, 14.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+        make(meta_format_, typography::FontRole::Text, 12.5f, DWRITE_FONT_WEIGHT_NORMAL);
+        make(meta_bold_format_, typography::FontRole::Text, 12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+        make(rec_badge_format_, typography::FontRole::Text, 12.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+        make(key_format_, typography::FontRole::Text, 11.5f, DWRITE_FONT_WEIGHT_MEDIUM);
+        make(file_badge_format_, typography::FontRole::Text, 7.5f, DWRITE_FONT_WEIGHT_BOLD);
     }
 
-    void ReleaseIcons() {
-        for (HICON& icon : icons_) {
-            if (icon) DestroyIcon(icon);
-            icon = nullptr;
+    struct TextSegment {
+        std::wstring text;
+        IDWriteTextFormat* format = nullptr;
+        D2D1_COLOR_F color{};
+    };
+
+    void DrawSegmentedLine(const D2D1_RECT_F& bounds, std::initializer_list<TextSegment> segments) {
+        auto* factory = compositor_.DwriteFactory();
+        if (!factory || bounds.right <= bounds.left) return;
+        float x = bounds.left;
+        for (const auto& seg : segments) {
+            if (seg.text.empty() || !seg.format) continue;
+            const float avail = bounds.right - x;
+            if (avail <= 2.0f) break;
+            const float w = TextWidth(factory, seg.format, seg.text);
+            if (w <= avail + 0.5f) {
+                painter_.DrawText(seg.text, D2D1::RectF(x, bounds.top, x + w + 2.0f, bounds.bottom),
+                                  seg.format, seg.color);
+                x += w;
+            } else {
+                DrawEllipsizedText(compositor_, seg.format, D2D1::RectF(x, bounds.top, bounds.right, bounds.bottom),
+                                   seg.text, seg.color);
+                break;
+            }
         }
     }
 
-    ID2D1Bitmap* IconBitmap(int side) {
-        if (!icon_bitmaps_[side].get()) icon_bitmaps_[side] = BitmapFromIcon(compositor_.Dc(), wic_, icons_[side]);
-        return icon_bitmaps_[side].get();
+    void DrawItemTypeIcon(const Theme& theme, const std::wstring& name, bool directory,
+                          float icon_x_dip, float icon_y_dip, bool high_contrast) {
+        auto* dc = compositor_.Dc();
+        auto factory = FactoryOf(dc);
+        if (!dc || !factory.get()) return;
+        const float s = scale_;
+        if (directory) {
+            // Clean 28x22 vector folder centered in the 28x34 icon slot.
+            auto P = [&](float px, float py) { return D2D1::Point2F((icon_x_dip + px) * s, (icon_y_dip + 5.0f + py) * s); };
+            ComPtr<ID2D1PathGeometry> back;
+            if (SUCCEEDED(factory->CreatePathGeometry(&back))) {
+                ComPtr<ID2D1GeometrySink> sink;
+                if (SUCCEEDED(back->Open(&sink))) {
+                    sink->BeginFigure(P(1.0f, 4.0f), D2D1_FIGURE_BEGIN_FILLED);
+                    const D2D1_POINT_2F pts[] = { P(10.5f, 4.0f), P(13.0f, 6.8f), P(27.0f, 6.8f),
+                                                  P(27.0f, 22.0f), P(1.0f, 22.0f) };
+                    sink->AddLines(pts, ARRAYSIZE(pts));
+                    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                    sink->Close();
+                }
+                ComPtr<ID2D1SolidColorBrush> brush;
+                if (SUCCEEDED(dc->CreateSolidColorBrush(theme.icon_folder, &brush))) {
+                    dc->FillGeometry(back.get(), brush.get());
+                }
+            }
+            painter_.FillRoundedRect(Rect(s, icon_x_dip + 1.0f, icon_y_dip + 13.0f, 26.0f, 14.0f),
+                                     ScaleDip(s, 2.5f),
+                                     high_contrast ? theme.icon_folder : MixColor(theme.icon_folder, HexColor(0xFFFFFF), 0.16f));
+            return;
+        }
+
+        // Crisp 25x34 outlined page with dog-ear fold + colored extension badge pill.
+        const float px = icon_x_dip + 2.0f;
+        const float py = icon_y_dip;
+        const float pw = 25.0f;
+        const float ph = 34.0f;
+        const float fold = 7.5f;
+        auto P = [&](float dx, float dy) { return D2D1::Point2F((px + dx) * s, (py + dy) * s); };
+        ComPtr<ID2D1PathGeometry> page;
+        ComPtr<ID2D1PathGeometry> corner;
+        if (FAILED(factory->CreatePathGeometry(&page)) || FAILED(factory->CreatePathGeometry(&corner))) return;
+        ComPtr<ID2D1GeometrySink> sink;
+        if (SUCCEEDED(page->Open(&sink))) {
+            const float r = 2.5f;
+            auto arc = [&](D2D1_POINT_2F to) {
+                sink->AddArc(D2D1::ArcSegment(to, D2D1::SizeF(r * s, r * s), 0.0f,
+                                              D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+            };
+            sink->BeginFigure(P(r, 0.0f), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(P(pw - fold, 0.0f));
+            sink->AddLine(P(pw, fold));
+            sink->AddLine(P(pw, ph - r));
+            arc(P(pw - r, ph));
+            sink->AddLine(P(r, ph));
+            arc(P(0.0f, ph - r));
+            sink->AddLine(P(0.0f, r));
+            arc(P(r, 0.0f));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink->Close();
+        }
+        sink.reset();
+        if (SUCCEEDED(corner->Open(&sink))) {
+            sink->BeginFigure(P(pw - fold, 0.0f), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(P(pw - fold, fold));
+            sink->AddLine(P(pw, fold));
+            sink->EndFigure(D2D1_FIGURE_END_OPEN);
+            sink->Close();
+        }
+        const D2D1_COLOR_F page_fill = high_contrast ? theme.bg
+            : dark_ ? WithAlpha(HexColor(0xFFFFFF), 0.032f) : HexColor(0xFFFFFF);
+        const D2D1_COLOR_F page_stroke = high_contrast ? theme.text
+            : WithAlpha(theme.text, dark_ ? 0.13f : 0.22f);
+        ComPtr<ID2D1SolidColorBrush> brush;
+        if (FAILED(dc->CreateSolidColorBrush(page_fill, &brush))) return;
+        auto style = RoundStroke(factory.get());
+        dc->FillGeometry(page.get(), brush.get());
+        brush->SetColor(page_stroke);
+        dc->DrawGeometry(page.get(), brush.get(), 1.2f * s, style.get());
+        dc->DrawGeometry(corner.get(), brush.get(), 1.1f * s, style.get());
+
+        const std::wstring badge = UpperFileBadge(name, false);
+        if (!badge.empty() && file_badge_format_.get()) {
+            const float text_w = TextWidth(compositor_.DwriteFactory(), file_badge_format_.get(), badge) / s;
+            const float bw = (std::max)(19.5f, (std::min)(26.0f, text_w + 5.5f));
+            const float bh = 10.0f;
+            const auto pill = Rect(s, icon_x_dip, py + 19.5f, bw, bh);
+            const D2D1_COLOR_F pill_fill = high_contrast ? theme.accent : BadgeColorForExt(badge);
+            painter_.FillRoundedRect(pill, ScaleDip(s, 2.0f), pill_fill);
+            painter_.DrawText(badge, pill, file_badge_format_.get(),
+                              high_contrast ? theme.accent_text : HexColor(0xFFFFFF),
+                              fluent::HorizontalAlignment::Center, pill_fill);
+        }
     }
 
-    // One side of the comparison: label, icon, name, size and time (更大 /
-    // 较新 in green after a dot), and the folder it is in.
-    void DrawCompareColumn(const Theme& theme, int side, D2D1_COLOR_F text3, D2D1_COLOR_F ok) {
-        auto* dc = compositor_.Dc();
+    // One side of the comparison card: side 1 = existing (left), side 0 = incoming (right).
+    void DrawCompareColumn(const Theme& theme, int side, D2D1_COLOR_F ok_badge, bool high_contrast) {
         const bool source = side == 0;
         const float s = scale_;
-        const float x = ColumnX(side);
-        const float y = kCompareTop;
+        const float col_x = ColumnX(side);
+        const float col_w = ColumnW();
+        const float icon_x = col_x + 16.0f;
+        const float icon_y = kCompareTop + 26.0f;
+        const float tx = col_x + 56.0f;
+        const float tw = (std::max)(20.0f, col_w - 68.0f);
         const bool moving = conflict_.type == ops::OpType::Move;
-        const l10n::StringId label = !source ? l10n::StringId::OpConflictAlreadyThere
-            : moving ? l10n::StringId::OpConflictIncomingMove : l10n::StringId::OpConflictIncomingCopy;
-        DrawEllipsizedText(compositor_, meta_format_.get(), Rect(s, x, y, kColW, 20), l10n::Get(label),
-                           theme.text_secondary);
 
-        painter_.FillRoundedRect(Rect(s, x, y + 28, 40, 40), ScaleDip(s, 6.0f),
-                                 WithAlpha(theme.text, dark_ ? 0.08f : 0.04f));
-        const auto icon = Rect(s, x + 9, y + 37, 22, 22);
-        if (ID2D1Bitmap* bitmap = IconBitmap(side))
-            dc->DrawBitmap(bitmap, icon, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-        else
-            DrawPageIcon(dc, icon.left, icon.top, s * 22.0f / 32.0f);
-
-        const std::wstring name = LeafName(source ? conflict_.source : conflict_.destination);
+        const std::wstring item_name = LeafName(source ? conflict_.source : conflict_.destination);
         const bool directory = source ? conflict_.source_is_directory : conflict_.destination_is_directory;
-        const float tx = x + 50.0f;
-        const float tw = kColW - 50.0f;
-        DrawEllipsizedText(compositor_, name_format_.get(), Rect(s, tx, y + 28, tw, 20), name, theme.text);
-        auto meta_line = [&](float row_y, const std::wstring& value, const std::wstring& badge) {
-            if (badge.empty()) {
-                DrawEllipsizedText(compositor_, meta_format_.get(), Rect(s, tx, row_y, tw, 18), value,
-                                   theme.text_secondary);
-                return;
-            }
-            const std::wstring dot = L" \x00B7 ";
-            auto* factory = compositor_.DwriteFactory();
-            const float dot_w = TextWidth(factory, meta_format_.get(), dot) / s;
-            const float badge_w = TextWidth(factory, meta_format_.get(), badge) / s;
-            const float value_w = (std::min)(TextWidth(factory, meta_format_.get(), value) / s,
-                                             (std::max)(tw - dot_w - badge_w, 0.0f));
-            DrawEllipsizedText(compositor_, meta_format_.get(), Rect(s, tx, row_y, value_w + 1, 18), value,
-                               theme.text_secondary);
-            painter_.DrawText(dot, Rect(s, tx + value_w, row_y, dot_w + 1, 18), meta_format_.get(),
-                              theme.text_secondary);
-            painter_.DrawText(badge, Rect(s, tx + value_w + dot_w, row_y, badge_w + 2, 18), meta_format_.get(), ok);
-        };
+        DrawItemTypeIcon(theme, item_name, directory, icon_x, icon_y, high_contrast);
+
+        const l10n::StringId role_id = !source ? l10n::StringId::OpConflictExistingLabel
+            : moving ? l10n::StringId::OpConflictIncomingMoveLabel
+                     : l10n::StringId::OpConflictIncomingCopyLabel;
+        const std::wstring dir_leaf = LeafName(source ? source_dir_ : destination_dir_);
+        const D2D1_COLOR_F folder_ink = high_contrast ? theme.text
+            : WithAlpha(theme.text, dark_ ? 0.72f : 0.78f);
+        DrawSegmentedLine(Rect(s, tx, kCompareTop + 13.0f, tw, 18.0f), {
+            { l10n::Get(role_id) + L" \x00B7 ", meta_format_.get(), theme.text_secondary },
+            { dir_leaf, meta_format_.get(), folder_ink },
+        });
+
         const uint64_t size = source ? conflict_.source_size : conflict_.destination_size;
         const uint64_t other = source ? conflict_.destination_size : conflict_.source_size;
         const bool larger = Files() && size > other;
+        const std::wstring size_str = directory ? l10n::Get(l10n::StringId::OpFolderKind)
+                                                : pulse::format::ByteSize(size);
+        if (larger) {
+            DrawSegmentedLine(Rect(s, tx, kCompareTop + 33.0f, tw, 20.0f), {
+                { size_str, size_format_.get(), theme.text },
+                { L" \x00B7 ", meta_format_.get(), theme.text_secondary },
+                { l10n::Get(l10n::StringId::OpLarger), rec_badge_format_.get(), ok_badge },
+            });
+        } else {
+            DrawEllipsizedText(compositor_, size_format_.get(),
+                               Rect(s, tx, kCompareTop + 33.0f, tw, 20.0f), size_str, theme.text);
+        }
+
         const bool newer = source ? SourceNewer() : DestinationNewer();
-        meta_line(y + 48, directory ? l10n::Get(l10n::StringId::OpFolderKind) : pulse::format::ByteSize(size),
-                  larger ? l10n::Get(l10n::StringId::OpLarger) : std::wstring());
-        meta_line(y + 66, pulse::format::LocalFileTime(source ? conflict_.source_modified : conflict_.destination_modified,
-                                                       l10n::Get(l10n::StringId::OpUnknown).c_str()),
-                  newer ? l10n::Get(l10n::StringId::OpNewer) : std::wstring());
-        // Cut to the column; hovering shows it whole (#55).
-        DrawEllipsizedText(compositor_, meta_format_.get(), PathRect(side), source ? source_dir_ : destination_dir_,
-                           text3);
+        const std::wstring time_str = pulse::format::LocalFileTime(
+            source ? conflict_.source_modified : conflict_.destination_modified,
+            l10n::Get(l10n::StringId::OpUnknown).c_str());
+        if (newer) {
+            DrawSegmentedLine(Rect(s, tx, kCompareTop + 54.0f, tw, 18.0f), {
+                { time_str, meta_format_.get(), theme.text_secondary },
+                { L" \x00B7 ", meta_format_.get(), theme.text_secondary },
+                { l10n::Get(l10n::StringId::OpNewer), rec_badge_format_.get(), ok_badge },
+            });
+        } else {
+            DrawEllipsizedText(compositor_, meta_format_.get(),
+                               Rect(s, tx, kCompareTop + 54.0f, tw, 18.0f), time_str, theme.text_secondary);
+        }
     }
 
-    // A choice row: glyph, title over what it will do, the shortcut at the
-    // right. Hover / focus fades in the light fill and the 3-DIP accent bar.
-    void DrawChoice(const Theme& theme, int index, const std::wstring& title, const std::wstring& detail,
-                    const wchar_t* key, D2D1_COLOR_F accent, D2D1_COLOR_F text3, bool high_contrast) {
+    std::wstring VerdictSummaryText() const {
+        using l10n::StringId;
+        if (!Files()) return l10n::Get(StringId::OpConflictFoldersSummary);
+        if (IdenticalSizeAndTime()) return l10n::Get(StringId::OpConflictSameSizeTime);
+        const bool moving = conflict_.type == ops::OpType::Move;
+        const bool src_newer = SourceNewer();
+        const bool dst_newer = DestinationNewer();
+        const bool src_larger = conflict_.source_size > conflict_.destination_size;
+        const bool dst_larger = conflict_.destination_size > conflict_.source_size;
+        if (src_newer) {
+            if (src_larger) return l10n::Get(moving ? StringId::OpConflictIncomingNewerLargerMove
+                                                    : StringId::OpConflictIncomingNewerLargerCopy);
+            if (dst_larger) return l10n::Get(moving ? StringId::OpConflictIncomingNewerSmallerMove
+                                                    : StringId::OpConflictIncomingNewerSmallerCopy);
+            return l10n::Get(moving ? StringId::OpConflictIncomingNewerSameSizeMove
+                                    : StringId::OpConflictIncomingNewerSameSizeCopy);
+        }
+        if (dst_newer) {
+            if (dst_larger) return l10n::Get(StringId::OpConflictExistingNewerLarger);
+            if (src_larger) return l10n::Get(StringId::OpConflictExistingNewerSmaller);
+            return l10n::Get(StringId::OpConflictExistingNewerSameSize);
+        }
+        if (src_larger) return l10n::Get(moving ? StringId::OpConflictIncomingLargerMove
+                                                : StringId::OpConflictIncomingLargerCopy);
+        if (dst_larger) return l10n::Get(StringId::OpConflictExistingLarger);
+        return l10n::Get(StringId::OpConflictSameSizeOnly);
+    }
+
+    void DrawVerdictRow(const Theme& theme, D2D1_COLOR_F ok_ink) {
+        auto* dc = compositor_.Dc();
+        auto factory = FactoryOf(dc);
+        if (!dc || !factory.get()) return;
+        const float s = scale_;
+        const bool same = IdenticalSizeAndTime();
+        const D2D1_COLOR_F icon_color = same ? ok_ink : WithAlpha(theme.text, dark_ ? 0.48f : 0.45f);
+        const float cx = (kPad + 7.0f) * s;
+        const float cy = (kVerdictTop + 10.0f) * s;
+        const float r = 6.5f * s;
+
+        ComPtr<ID2D1SolidColorBrush> brush;
+        if (SUCCEEDED(dc->CreateSolidColorBrush(icon_color, &brush))) {
+            auto style = RoundStroke(factory.get());
+            dc->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), r, r), brush.get(), 1.3f * s, style.get());
+            if (same) {
+                ComPtr<ID2D1PathGeometry> check;
+                ComPtr<ID2D1GeometrySink> sink;
+                if (SUCCEEDED(factory->CreatePathGeometry(&check)) && SUCCEEDED(check->Open(&sink))) {
+                    sink->BeginFigure(D2D1::Point2F(cx - 2.9f * s, cy + 0.2f * s), D2D1_FIGURE_BEGIN_HOLLOW);
+                    sink->AddLine(D2D1::Point2F(cx - 0.8f * s, cy + 2.3f * s));
+                    sink->AddLine(D2D1::Point2F(cx + 3.1f * s, cy - 2.0f * s));
+                    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                    if (SUCCEEDED(sink->Close()))
+                        dc->DrawGeometry(check.get(), brush.get(), 1.35f * s, style.get());
+                }
+            } else {
+                dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy - 2.8f * s), 0.85f * s, 0.85f * s), brush.get());
+                dc->DrawLine(D2D1::Point2F(cx, cy - 0.5f * s), D2D1::Point2F(cx, cy + 3.2f * s),
+                             brush.get(), 1.3f * s, style.get());
+            }
+        }
+        DrawEllipsizedText(compositor_, meta_format_.get(),
+                           Rect(s, kPad + 20.0f, kVerdictTop, kConflictW - kPad * 2.0f - 20.0f, 20.0f),
+                           VerdictSummaryText(), theme.text_secondary);
+    }
+
+    void DrawChoice(const Theme& theme, int index, const std::wstring& title,
+                    const std::wstring& detail_lead, const std::wstring& detail_bold,
+                    const wchar_t* key, D2D1_COLOR_F accent, D2D1_COLOR_F rec_ink,
+                    D2D1_COLOR_F text3, bool high_contrast) {
         const float s = scale_;
         const auto row = ActionRect(index);
         const float lit = weight_[index + 1];
         const bool pressed = pressed_ == index + 1 && hover_ == index + 1;
-        const bool focused = keyboard_focus_ && focus_ == index;
-        const D2D1_COLOR_F hover_fill = high_contrast ? WithAlpha(theme.text, 0.12f)
-            : dark_ ? HexColor(0xFFFFFF, 0.0605f) : HexColor(0x000000, 0.0373f);
-        const D2D1_COLOR_F press_fill = high_contrast ? WithAlpha(theme.text, 0.08f)
-            : dark_ ? HexColor(0xFFFFFF, 0.0419f) : HexColor(0x000000, 0.0241f);
-        const float radius = ScaleDip(s, 4.0f);
-        if (pressed) painter_.FillRoundedRect(row, radius, press_fill);
-        else if (lit > 0.01f) painter_.FillRoundedRect(row, radius, WithAlpha(hover_fill, hover_fill.a * lit));
-        if (lit > 0.01f) {
-            const float cy = (row.top + row.bottom) * 0.5f;
-            const auto bar = D2D1::RectF(row.left + ScaleDip(s, 2.0f), cy - ScaleDip(s, 8.0f),
-                                         row.left + ScaleDip(s, 5.0f), cy + ScaleDip(s, 8.0f));
-            painter_.FillRoundedRect(bar, ScaleDip(s, 1.5f), WithAlpha(accent, lit));
-        }
-        if (focused) painter_.StrokeRoundedRect(row, radius, theme.text, 2.0f * s);
+        const bool recommended = index == 1 && RecommendSkip();
+        const D2D1_COLOR_F bar_color = recommended ? rec_ink : accent;
 
-        const float y = kActionsTop + index * (kActionH + kActionGap);
-        const float left = kPad - 8.0f;
-        const float right = kConflictW - left;
-        DrawChoiceGlyph(compositor_.Dc(), index, (left + 14.0f) * s, (y + 17.0f) * s, s, accent);
-        DrawEllipsizedText(compositor_, body_format_.get(), Rect(s, left + 48, y + 9, right - 40 - left - 48, 20),
-                           title, theme.text);
-        DrawEllipsizedText(compositor_, meta_format_.get(), Rect(s, left + 48, y + 29, right - 40 - left - 48, 16),
-                           detail, theme.text_secondary);
-        const auto key_box = Rect(s, right - 36, y + 17, 24, 20);
-        painter_.FillRoundedRect(key_box, ScaleDip(s, 4.0f), WithAlpha(theme.text, dark_ ? 0.08f : 0.04f));
-        painter_.StrokeRoundedRect(key_box, ScaleDip(s, 4.0f), theme.stroke_divider);
-        painter_.DrawText(key, key_box, meta_format_.get(), text3,
-                          fluent::HorizontalAlignment::Center);
+        if (pressed || lit > 0.01f) {
+            const float factor = pressed ? 0.72f : lit;
+            D2D1_COLOR_F row_fill{};
+            if (high_contrast) {
+                row_fill = WithAlpha(theme.fill_selected, 0.35f * factor);
+            } else if (recommended) {
+                row_fill = WithAlpha(rec_ink, (dark_ ? 0.125f : 0.09f) * factor);
+            } else {
+                row_fill = dark_ ? HexColor(0xFFFFFF, 0.055f * factor)
+                                 : WithAlpha(HexColor(0x527D70), 0.075f * factor);
+            }
+            painter_.FillRoundedRect(row, 0.0f, row_fill);
+        }
+        if (lit > 0.01f) {
+            const auto bar = D2D1::RectF(row.left, row.top + ScaleDip(s, 10.0f),
+                                         row.left + ScaleDip(s, 3.0f), row.bottom - ScaleDip(s, 10.0f));
+            painter_.FillRoundedRect(bar, ScaleDip(s, 1.5f), WithAlpha(bar_color, lit));
+        }
+        if (index > 0) {
+            const D2D1_COLOR_F div = high_contrast ? theme.stroke_divider
+                : WithAlpha(theme.text, dark_ ? 0.075f : 0.085f);
+            painter_.FillRoundedRect(D2D1::RectF(row.left, row.top, row.right, row.top + 1.0f), 0.0f, div);
+        }
+
+        const float row_y = kActionsTop + index * kActionH;
+        const D2D1_COLOR_F glyph_color = (recommended && lit > 0.25f) ? rec_ink
+            : (lit > 0.5f ? theme.text : theme.text_secondary);
+        DrawChoiceGlyph(compositor_.Dc(), index, (kPad + 17.0f) * s, (row_y + 23.5f) * s, s, glyph_color);
+
+        const float tx = kPad + 50.0f;
+        const float key_left_dip = kConflictW - kPad - 16.0f - 22.0f;
+        const float text_w = key_left_dip - 12.0f - tx;
+        if (recommended) {
+            DrawSegmentedLine(Rect(s, tx, row_y + 12.0f, text_w, 22.0f), {
+                { title, choice_title_format_.get(), theme.text },
+                { L"  ", meta_format_.get(), theme.text_secondary },
+                { l10n::Get(l10n::StringId::OpRecommended), rec_badge_format_.get(), rec_ink },
+            });
+        } else {
+            DrawEllipsizedText(compositor_, choice_title_format_.get(),
+                               Rect(s, tx, row_y + 12.0f, text_w, 22.0f), title, theme.text);
+        }
+
+        if (!detail_bold.empty()) {
+            DrawSegmentedLine(Rect(s, tx, row_y + 35.0f, text_w, 20.0f), {
+                { detail_lead, meta_format_.get(), theme.text_secondary },
+                { detail_bold, meta_bold_format_.get(), theme.text },
+            });
+        } else {
+            DrawEllipsizedText(compositor_, meta_format_.get(),
+                               Rect(s, tx, row_y + 35.0f, text_w, 20.0f), detail_lead, theme.text_secondary);
+        }
+
+        const auto key_box = Rect(s, key_left_dip, row_y + 23.5f, 22.0f, 20.0f);
+        painter_.FillRoundedRect(key_box, ScaleDip(s, 4.0f), WithAlpha(theme.text, dark_ ? 0.06f : 0.045f));
+        painter_.StrokeRoundedRect(key_box, ScaleDip(s, 4.0f),
+                                   high_contrast ? theme.stroke_divider : WithAlpha(theme.text, dark_ ? 0.08f : 0.11f));
+        painter_.DrawText(key, key_box, key_format_.get(), text3, fluent::HorizontalAlignment::Center);
     }
 
     void Render() {
@@ -982,10 +1366,10 @@ private:
             painter_.SetCompositor(&compositor_);
             painter_.SetScale(scale_);
             CreateFormats();
-            for (auto& bitmap : icon_bitmaps_) bitmap.reset();
         }
         if (!compositor_.Dc()) return;
         if (!head_format_.get()) CreateFormats();
+        auto* dc = compositor_.Dc();
         const float s = scale_;
         const bool high_contrast = IsHighContrast();
         const Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
@@ -994,59 +1378,102 @@ private:
             : D2D1::ColorF(theme.accent.r + (1.0f - theme.accent.r) * 0.28f,
                            theme.accent.g + (1.0f - theme.accent.g) * 0.28f,
                            theme.accent.b + (1.0f - theme.accent.b) * 0.28f, 1.0f);
-        const D2D1_COLOR_F text3 = WithAlpha(theme.text, dark_ ? 0.544f : 0.446f);
+        const D2D1_COLOR_F rec_ink = high_contrast ? theme.accent
+            : dark_ ? HexColor(0x86BFA5) : HexColor(0x1B7F56);
+        const D2D1_COLOR_F verdict_ok = high_contrast ? theme.accent
+            : dark_ ? HexColor(0x6CCB5F) : HexColor(0x16823D);
+        const D2D1_COLOR_F text3 = WithAlpha(theme.text, dark_ ? 0.544f : 0.48f);
         const bool moving = conflict_.type == ops::OpType::Move;
 
         fluent::ControlState close_state{};
         close_state.hovered = hover_ == 7;
-        close_state.pressed = pressed_ == 7;
+        close_state.pressed = pressed_ == 7 && hover_ == 7;
         painter_.DrawTitleBarButton(CloseRect(), fluent::TitleBarButtonRole::Close, {}, close_state);
 
-        // Headline, then where it happened (and n / m when there are more).
-        DrawEllipsizedText(compositor_, head_format_.get(), Rect(s, kPad, 18, kConflictW - kPad - 64, 24),
+        // Headline, then route subtitle (and n / m when there are more).
+        DrawEllipsizedText(compositor_, head_format_.get(),
+                           Rect(s, kPad, 24.0f, kConflictW - kPad - 52.0f, 28.0f),
                            l10n::Get(l10n::StringId::OpConflictLead) + LeafName(conflict_.destination) +
-                               l10n::Get(l10n::StringId::OpQuoteClose), theme.text);
-        std::wstring where = l10n::Get(moving ? l10n::StringId::OpConflictMoveFrom
-                                              : l10n::StringId::OpConflictCopyFrom) +
-            LeafName(source_dir_) +
-            l10n::Get(moving ? l10n::StringId::OpConflictMoveTo : l10n::StringId::OpConflictCopyTo) +
-            LeafName(destination_dir_);
-        if (Total() > 1)
-            where += L"  \x00B7  " + l10n::Get(l10n::StringId::OpConflictCountLead) +
+                               l10n::Get(l10n::StringId::OpQuoteClose),
+                           theme.text);
+
+        std::wstring count_tail;
+        if (Total() > 1) {
+            count_tail = L"  \x00B7  " + l10n::Get(l10n::StringId::OpConflictCountLead) +
                 pulse::format::GroupedInt(Ordinal()) + l10n::Get(l10n::StringId::OpConflictCountSep) +
                 pulse::format::GroupedInt(Total()) + l10n::Get(l10n::StringId::OpConflictCountEnd);
-        DrawEllipsizedText(compositor_, sub_format_.get(), Rect(s, kPad, 46, kConflictW - kPad * 2, 20), where,
-                           theme.text_secondary);
+        }
+        DrawSegmentedLine(Rect(s, kPad, 57.0f, kConflictW - kPad * 2.0f, 20.0f), {
+            { l10n::Get(moving ? l10n::StringId::OpConflictMoveFrom : l10n::StringId::OpConflictCopyFrom),
+              sub_format_.get(), theme.text_secondary },
+            { LeafName(source_dir_), sub_strong_format_.get(), theme.text },
+            { l10n::Get(moving ? l10n::StringId::OpConflictMoveTo : l10n::StringId::OpConflictCopyTo),
+              sub_format_.get(), theme.text_secondary },
+            { LeafName(destination_dir_), sub_strong_format_.get(), theme.text },
+            { count_tail, sub_format_.get(), theme.text_secondary },
+        });
 
-        DrawCompareColumn(theme, 0, text3, accent);
-        DrawCompareColumn(theme, 1, text3, accent);
-        painter_.FillRoundedRect(Rect(s, kConflictW * 0.5f - 0.5f, kCompareTop, 1, kCompareH), 0,
-                                 theme.stroke_divider);
+        // Contained comparison card.
+        const auto cmp_card = CompareCardRect();
+        const D2D1_COLOR_F cmp_fill = high_contrast ? theme.fill_input
+            : dark_ ? HexColor(0x000000, 0.20f) : HexColor(0x000000, 0.032f);
+        painter_.FillRoundedRect(cmp_card, ScaleDip(s, 8.0f), cmp_fill);
+        if (!dark_ || high_contrast) {
+            painter_.StrokeRoundedRect(cmp_card, ScaleDip(s, 8.0f),
+                                       high_contrast ? theme.stroke_card : theme.stroke_divider);
+        }
+        DrawCompareColumn(theme, 1, rec_ink, high_contrast);
+        DrawCompareColumn(theme, 0, rec_ink, high_contrast);
+        painter_.FillRoundedRect(Rect(s, kConflictW * 0.5f - 0.5f, kCompareTop + 14.0f, 1.0f, kCompareH - 28.0f),
+                                 0.0f, high_contrast ? theme.stroke_divider : WithAlpha(theme.text, dark_ ? 0.09f : 0.10f));
+
+        // Verdict strip.
+        DrawVerdictRow(theme, verdict_ok);
+
+        // Unified rounded 3-choice card.
+        const auto choices_card = ChoicesCardRect();
+        const D2D1_COLOR_F choices_bg = high_contrast ? theme.bg
+            : dark_ ? WithAlpha(HexColor(0xFFFFFF), 0.012f) : theme.surface_card;
+        painter_.FillRoundedRect(choices_card, ScaleDip(s, 8.0f), choices_bg);
+
+        auto factory = FactoryOf(dc);
+        ComPtr<ID2D1RoundedRectangleGeometry> choices_clip;
+        bool clipped = false;
+        if (factory.get() && SUCCEEDED(factory->CreateRoundedRectangleGeometry(
+                D2D1::RoundedRect(choices_card, ScaleDip(s, 8.0f), ScaleDip(s, 8.0f)), &choices_clip)) &&
+            choices_clip.get()) {
+            dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), choices_clip.get()), nullptr);
+            clipped = true;
+        }
 
         const bool files = Files();
-        std::wstring replace_sub = l10n::Get(l10n::StringId::OpReplaceDesc);
-        if (files)
-            replace_sub = l10n::Get(l10n::StringId::OpReplaceUseLead) + pulse::format::ByteSize(conflict_.source_size) +
-                l10n::Get(l10n::StringId::OpReplaceUseMid) + pulse::format::ByteSize(conflict_.destination_size) +
-                l10n::Get(l10n::StringId::OpReplaceUseEnd);
-        const std::wstring keep_sub = conflict_.keep_both_name.empty()
+        const std::wstring replace_sub = files
+            ? l10n::Get(moving ? l10n::StringId::OpReplaceMoveSub : l10n::StringId::OpReplaceCopySub)
+            : l10n::Get(l10n::StringId::OpReplaceDesc);
+        const std::wstring skip_sub = l10n::Get(files ? l10n::StringId::OpSkipFileSub
+                                                      : l10n::StringId::OpSkipItemSub);
+        const std::wstring keep_name = EffectiveKeepBothName();
+        const std::wstring keep_lead = keep_name.empty()
             ? l10n::Get(l10n::StringId::OpKeepBothDesc)
-            : l10n::Get(l10n::StringId::OpKeepNameLead) + conflict_.keep_both_name + l10n::Get(l10n::StringId::OpQuoteClose);
-        DrawChoice(theme, 0, l10n::Get(l10n::StringId::OpReplaceShort), replace_sub, L"R", accent, text3,
-                   high_contrast);
-        DrawChoice(theme, 1, l10n::Get(l10n::StringId::OpSkipShort), l10n::Get(l10n::StringId::OpSkipDesc), L"S",
-                   accent, text3, high_contrast);
-        DrawChoice(theme, 2, l10n::Get(l10n::StringId::OpKeepBoth), keep_sub, L"K", accent, text3, high_contrast);
+            : l10n::Get(moving ? l10n::StringId::OpKeepMoveAsLead : l10n::StringId::OpKeepCopyAsLead);
 
-        // Footer: the same band as the progress window.
-        RECT client{};
-        GetClientRect(hwnd_, &client);
-        const float width = static_cast<float>(client.right);
-        const float height = static_cast<float>(client.bottom);
-        const float footer_top = FooterTop() * s;
-        painter_.FillRoundedRect(D2D1::RectF(0, footer_top, width, height), 0,
-                                 OpFooter(hwnd_, backdrop_enabled_, dark_));
-        painter_.FillRoundedRect(D2D1::RectF(0, footer_top, width, footer_top + 1.0f), 0, theme.stroke_divider);
+        DrawChoice(theme, 0, l10n::Get(l10n::StringId::OpReplaceShort), replace_sub, {}, L"R",
+                   accent, rec_ink, text3, high_contrast);
+        DrawChoice(theme, 1, l10n::Get(l10n::StringId::OpSkipShort), skip_sub, {}, L"S",
+                   accent, rec_ink, text3, high_contrast);
+        DrawChoice(theme, 2, l10n::Get(l10n::StringId::OpKeepBoth), keep_lead, keep_name, L"K",
+                   accent, rec_ink, text3, high_contrast);
+
+        if (clipped) dc->PopLayer();
+
+        painter_.StrokeRoundedRect(choices_card, ScaleDip(s, 8.0f),
+                                   high_contrast ? theme.text
+                                                 : dark_ ? WithAlpha(HexColor(0xFFFFFF), 0.09f) : theme.stroke_card);
+        if (keyboard_focus_ && focus_ >= 0 && focus_ <= 2) {
+            painter_.StrokeRoundedRect(ActionRect(focus_), ScaleDip(s, 6.0f), theme.text, 1.5f * s);
+        }
+
+        // Bottom row: apply-to-all checkbox on the left, Cancel button on the right.
         if (ShowsApplyAll()) {
             fluent::ControlState check{};
             check.checked = apply_all_;
@@ -1060,7 +1487,7 @@ private:
         }
         fluent::ControlState cancel_state{};
         cancel_state.hovered = hover_ == 6;
-        cancel_state.pressed = pressed_ == 6;
+        cancel_state.pressed = pressed_ == 6 && hover_ == 6;
         cancel_state.focused = keyboard_focus_ && focus_ == (ShowsApplyAll() ? 4 : 3);
         cancel_state.keyboard_focus = cancel_state.focused;
         painter_.DrawButton({ CancelRect(), l10n::Get(l10n::StringId::Cancel), {}, fluent::ButtonKind::Standard,
@@ -1087,14 +1514,19 @@ private:
             painter_.SetScale(scale_);
             CreateFormats();
             CreatePathTips();
+            weight_[1] = 0.0f;
+            weight_[2] = RecommendSkip() ? 1.0f : 0.0f;
+            weight_[3] = 0.0f;
             // R / S / K are shortcuts here, not text: keep a Chinese IME from
             // swallowing them as composition (they would only work with Alt).
             ImmAssociateContextEx(hwnd_, nullptr, 0);
             return 0;
         case WM_NCCALCSIZE:
             return 0;
-        case WM_NCHITTEST:
-            return pulse::ui::BorderlessHitTest(hwnd_, lparam, 40 * scale_, CloseRect());
+        case WM_NCHITTEST: {
+            const LRESULT hit = pulse::ui::BorderlessHitTest(hwnd_, lparam, 36 * scale_, CloseRect());
+            return hit >= HTLEFT && hit <= HTBOTTOMRIGHT ? HTCLIENT : hit;
+        }
         case WM_SIZE:
             if (compositor_.Dc()) compositor_.Resize(LOWORD(lparam), HIWORD(lparam));
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1261,12 +1693,14 @@ private:
     ULONGLONG anim_tick_ = 0;
     ComPtr<IDWriteTextFormat> head_format_;
     ComPtr<IDWriteTextFormat> sub_format_;
-    ComPtr<IDWriteTextFormat> name_format_;
-    ComPtr<IDWriteTextFormat> body_format_;
+    ComPtr<IDWriteTextFormat> sub_strong_format_;
+    ComPtr<IDWriteTextFormat> size_format_;
+    ComPtr<IDWriteTextFormat> choice_title_format_;
     ComPtr<IDWriteTextFormat> meta_format_;
-    HICON icons_[2] = {};
-    ComPtr<ID2D1Bitmap> icon_bitmaps_[2];
-    ComPtr<IWICImagingFactory> wic_;
+    ComPtr<IDWriteTextFormat> meta_bold_format_;
+    ComPtr<IDWriteTextFormat> rec_badge_format_;
+    ComPtr<IDWriteTextFormat> key_format_;
+    ComPtr<IDWriteTextFormat> file_badge_format_;
 };
 
 // Permanent delete: the question as the
@@ -1405,7 +1839,7 @@ private:
         (Counts().empty() ? 20.0f : 42.0f); }
     float HeightDip() const { return FooterTop() + kFooterH; }
 
-    D2D1_RECT_F CloseRect() const { return Rect(scale_, kW - 44, 4, 40, 32); }
+    D2D1_RECT_F CloseRect() const { return Rect(scale_, kW - 46, 0, 46, 36); }
     // 0 改为移到回收站 (left, flush with the text after its padding), 1 cancel, 2 delete.
     D2D1_RECT_F ButtonRect(int which) const {
         const float h = painter_.MeasureButtonHeight();
@@ -1597,8 +2031,10 @@ private:
             return 0;
         case WM_NCCALCSIZE:
             return 0;
-        case WM_NCHITTEST:
-            return pulse::ui::BorderlessHitTest(hwnd_, lparam, 40 * scale_, CloseRect());
+        case WM_NCHITTEST: {
+            const LRESULT hit = pulse::ui::BorderlessHitTest(hwnd_, lparam, 36 * scale_, CloseRect());
+            return hit >= HTLEFT && hit <= HTBOTTOMRIGHT ? HTCLIENT : hit;
+        }
         case WM_SIZE:
             if (compositor_.Dc()) compositor_.Resize(LOWORD(lparam), HIWORD(lparam));
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1804,7 +2240,7 @@ private:
     float WaitTop() const { return kListTop + ListH() + 12.0f; }
     float FooterTop() const { return WaitTop() + 20.0f + 20.0f; }
     float HeightDip() const { return FooterTop() + 64.0f; }
-    D2D1_RECT_F CloseRect() const { return Rect(scale_, kW - 44, 4, 40, 32); }
+    D2D1_RECT_F CloseRect() const { return Rect(scale_, kW - 46, 0, 46, 36); }
     float ButtonTop() const { return (FooterTop() + 32.0f) * scale_ - painter_.MeasureButtonHeight() * 0.5f; }
     float ButtonW(l10n::StringId id) const {
         return (std::max)(painter_.MeasureButtonWidth(l10n::Get(id)), ScaleDip(scale_, 80.0f));
@@ -2238,8 +2674,10 @@ private:
             return 0;
         case WM_NCCALCSIZE:
             return 0;
-        case WM_NCHITTEST:
-            return pulse::ui::BorderlessHitTest(hwnd_, lparam, 40 * scale_, CloseRect());
+        case WM_NCHITTEST: {
+            const LRESULT hit = pulse::ui::BorderlessHitTest(hwnd_, lparam, 36 * scale_, CloseRect());
+            return hit >= HTLEFT && hit <= HTBOTTOMRIGHT ? HTCLIENT : hit;
+        }
         case WM_SIZE:
             if (compositor_.Dc()) compositor_.Resize(LOWORD(lparam), HIWORD(lparam));
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -2464,6 +2902,12 @@ void FileOperationWindow::CreateCardFormats() {
     make(chip_format_, typography::FontRole::Text, 13.0f, DWRITE_FONT_WEIGHT_NORMAL);
     make(glyph_format_, typography::FontRole::Icon, 12.0f, DWRITE_FONT_WEIGHT_NORMAL);
     make(tile_glyph_format_, typography::FontRole::Icon, 18.0f, DWRITE_FONT_WEIGHT_NORMAL);
+    mono_format_.reset();
+    if (factory && SUCCEEDED(factory->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL, 12.0f * scale_, typography::LocaleName(), &mono_format_)) && mono_format_.get()) {
+        mono_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        mono_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    }
     if (glyph_format_.get()) glyph_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     if (tile_glyph_format_.get()) tile_glyph_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
 }
@@ -2964,7 +3408,7 @@ void FileOperationWindow::ResizeForDetails(bool preserve_center) {
     const int width = rect.right - rect.left;
     const int old_height = rect.bottom - rect.top;
     const float height_dip = status_.authorization != ops::AuthorizationState::None
-        ? kAuthorizationH : (detailed_ && status_.active && !CompactTaskProgress(status_) ? kDetailedH : kCollapsedH) +
+        ? kAuthorizationH : (ShowsTransferDetails(status_, detailed_) ? kDetailedH : kCollapsedH) +
             FailureBlockDip() - TaskLayoutReduction(status_);
     const int height = static_cast<int>(height_dip * scale_);
     const int y = preserve_center ? rect.top - (height - old_height) / 2 : rect.top;
@@ -2993,6 +3437,10 @@ int FileOperationWindow::HitTestControl(float x, float y) const {
             if (pulse::ui::ContainsRect(bounds, x, y)) return kHitFailRow + static_cast<int>(row);
     }
     if (labels.show_open && pulse::ui::ContainsRect(chrome.open, x, y)) return kHitOpen;
+    for (size_t i = 0; i < labels.actions.size(); ++i)
+        if (pulse::ui::ContainsRect(chrome.actions[i], x, y)) return kHitTaskAction + static_cast<int>(i);
+    if (labels.show_background && pulse::ui::ContainsRect(chrome.background, x, y)) return kHitBackground;
+    if (labels.show_copy_details && pulse::ui::ContainsRect(chrome.copy_details, x, y)) return kHitCopyDetails;
     if (labels.show_retry && labels.actions_enabled && pulse::ui::ContainsRect(chrome.retry, x, y)) return 6;
     if (labels.show_skip && labels.actions_enabled && pulse::ui::ContainsRect(chrome.skip, x, y)) return 7;
     if (labels.show_pause && pulse::ui::ContainsRect(chrome.pause, x, y)) return 3;
@@ -3210,6 +3658,39 @@ void FileOperationWindow::Render() {
             if (TransferShowsEmptyingSubtitle(status_))
                 DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, kPadX, y, content_w, h),
                                    l10n::Get(l10n::StringId::OpEmptyingSub), theme.text_secondary);
+        } else if (status_.external) {
+            // Plugin task route (HTML 解压进度): drawn chips, an archive end shows the archive tile.
+            const D2D1_COLOR_F folder = high_contrast ? theme.accent : dark_ ? HexColor(0xFFCD70) : HexColor(0xD8A43E);
+            const D2D1_COLOR_F chip = WithAlpha(theme.text, high_contrast ? 0.0f : dark_ ? 0.07f : 0.045f);
+            const bool has_destination = !status_.destination_label.empty();
+            constexpr float icon_w = 14.0f, chip_pad = 7.0f, arrow_w = 20.0f;
+            const float chrome_w = (icon_w + 5.0f + chip_pad * 2.0f) * (has_destination ? 2.0f : 1.0f) +
+                                   (has_destination ? arrow_w : 0.0f);
+            float a = TextWidth(factory, label_format_.get(), src) / s + 1.0f;
+            float b = has_destination ? TextWidth(factory, label_format_.get(), status_.destination_label) / s + 1.0f : 0.0f;
+            const float avail = (std::max)(40.0f, content_w - chrome_w);
+            if (a + b > avail) {
+                const float half = avail * 0.5f;
+                if (!has_destination) a = avail;
+                else if (a < half) b = avail - a;
+                else if (b < half) a = avail - b;
+                else { a = half; b = half; }
+            }
+            auto end = [&](float x, const std::wstring& label, float text_w) {
+                const float w = chip_pad * 2.0f + icon_w + 5.0f + text_w;
+                painter_.FillRoundedRect(Rect(s, x, y - 2.0f, w, h + 4.0f), ScaleDip(s, 5.0f), chip);
+                const auto icon = Rect(s, x + chip_pad, y + 1.0f, icon_w, icon_w);
+                if (LooksLikeArchive(label) && !high_contrast)
+                    DrawProductTile(dc, icon, ProductArt::SevenZip, theme.accent, StoreIcon::Box);
+                else DrawStoreIcon(dc, LooksLikeArchive(label) ? StoreIcon::Box : StoreIcon::Folder, icon, folder, 1.3f);
+                DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, x + chip_pad + icon_w + 5.0f, y, text_w, h), label, theme.text);
+                return x + w;
+            };
+            float x = end(kPadX, src, a);
+            if (has_destination) {
+                DrawStoreIcon(dc, StoreIcon::ChevronRight, Rect(s, x + 4.0f, y + 2.0f, 12.0f, 12.0f), text3, 1.4f);
+                end(x + arrow_w, status_.destination_label, b);
+            }
         } else if (two_ends) {
             const std::wstring arrow = L"\xE72A";
             const bool to_bin = status_.type == ops::OpType::RecycleDelete;
@@ -3311,8 +3792,49 @@ void FileOperationWindow::Render() {
     const std::wstring dot = L"  \x00B7  ";
     const std::wstring took = l10n::Get(l10n::StringId::OpTookLead) + FormatElapsed(elapsed_ms / 1000);
 
-    const float route_reduction = status_.external && status_.source_label.empty() ? 18.0f : 0.0f;
+    const bool task_steps = ShowsTaskSteps(status_);
+    const float route_reduction = (status_.external && status_.source_label.empty() ? 18.0f : 0.0f) -
+        (task_steps ? kTaskStepsH : 0.0f);
     const bool compact_progress = CompactTaskProgress(status_);
+    if (task_steps) {
+        // 1 解压到临时位置 ——— 2 写入目标: done steps carry a check, the current one is filled.
+        const float y = 58.0f - (status_.source_label.empty() ? 18.0f : 0.0f) + 2.0f;
+        const float step_dot = 16.0f;
+        const size_t count = status_.external_steps.size();
+        const size_t current = (std::max<size_t>)(status_.external_step, 1);
+        std::vector<float> label_w;
+        float total = 0.0f;
+        for (const auto& step : status_.external_steps) {
+            label_w.push_back(TextWidth(factory, label_format_.get(), step) / s + 1.0f);
+            total += step_dot + 6.0f + label_w.back();
+        }
+        const float line_w = count > 1 ? (std::max)(16.0f, (std::min)(56.0f, (content_w - total) / static_cast<float>(count - 1) - 16.0f)) : 0.0f;
+        float x = kPadX;
+        for (size_t i = 0; i < count; ++i) {
+            const bool done = i + 1 < current, on = i + 1 == current;
+            const auto circle = Rect(s, x, y, step_dot, step_dot);
+            const auto ellipse = D2D1::Ellipse(D2D1::Point2F((circle.left + circle.right) * 0.5f, (circle.top + circle.bottom) * 0.5f),
+                                               ScaleDip(s, step_dot * 0.5f - 0.5f), ScaleDip(s, step_dot * 0.5f - 0.5f));
+            ComPtr<ID2D1SolidColorBrush> brush;
+            if (SUCCEEDED(dc->CreateSolidColorBrush(done || on ? accent : text3, &brush))) {
+                if (done || on) dc->FillEllipse(ellipse, brush.get());
+                else dc->DrawEllipse(ellipse, brush.get(), ScaleDip(s, 1.2f));
+            }
+            const D2D1_COLOR_F on_accent = high_contrast ? theme.bg : HexColor(0xFFFFFF);
+            if (done) DrawStoreIcon(dc, StoreIcon::Check, Rect(s, x + 3.0f, y + 3.0f, 10.0f, 10.0f), on_accent, 2.0f);
+            else painter_.DrawText(std::to_wstring(i + 1), Rect(s, x, y - 1.0f, step_dot, step_dot + 2.0f), label_format_.get(),
+                                   on ? on_accent : text3, fluent::HorizontalAlignment::Center);
+            x += step_dot + 6.0f;
+            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, x, y - 1.0f, label_w[i], 18.0f),
+                               status_.external_steps[i], on ? theme.text : done ? theme.text_secondary : text3);
+            x += label_w[i] + 8.0f;
+            if (i + 1 < count) {
+                painter_.FillRoundedRect(Rect(s, x, y + step_dot * 0.5f - 0.75f, line_w, 1.5f), ScaleDip(s, 0.75f),
+                                         done ? accent : track);
+                x += line_w + 8.0f;
+            }
+        }
+    }
     const float hero_y = 58.0f - route_reduction;
     const float graph_top = 110.0f - route_reduction;
     const float graph_h = compact_progress ? 4.0f : 64.0f;
@@ -3349,6 +3871,52 @@ void FileOperationWindow::Render() {
             DrawEllipsizedText(compositor_, label_format_.get(),
                 Rect(s, kPadX + 24, hero_y + 22 + row_h, content_w - 24, row_h),
                 l10n::Get(l10n::StringId::OpItemPrefix) + status_.current_item, text3);
+    } else if (ShowsTaskCallout(status_)) {
+        // The plugin said what went wrong and what stayed safe (HTML 解压失败).
+        const std::wstring headline = status_.last_error.empty()
+            ? l10n::Get(status_.external_outcome == ops::ExternalOutcome::Partial ? l10n::StringId::OpPartialBadge : l10n::StringId::OpFailed)
+            : l10n::ServiceErrorText(status_.last_error);
+        std::vector<std::wstring> lines;
+        for (size_t at = 0; at <= status_.external_detail.size() && lines.size() < 2 && !status_.external_detail.empty();) {
+            const size_t end = status_.external_detail.find(L'\n', at);
+            lines.push_back(status_.external_detail.substr(at, end == std::wstring::npos ? std::wstring::npos : end - at));
+            if (end == std::wstring::npos) break;
+            at = end + 1;
+        }
+        const float box_y = hero_y + 2.0f;
+        const float box_h = 12.0f + 20.0f + 18.0f * static_cast<float>(lines.size()) + 10.0f;
+        const auto box = Rect(s, kPadX, box_y, content_w, box_h);
+        painter_.FillRoundedRect(box, ScaleDip(s, 6.0f), WithAlpha(bad_color, high_contrast ? 0.0f : dark_ ? 0.14f : 0.07f));
+        painter_.StrokeRoundedRect(box, ScaleDip(s, 6.0f), WithAlpha(bad_color, high_contrast ? 1.0f : 0.28f));
+        DrawStoreIcon(dc, StoreIcon::Warn, Rect(s, kPadX + 12.0f, box_y + 13.0f, 18.0f, 18.0f), bad_color, 1.5f);
+        const float text_x = kPadX + 40.0f, text_w = content_w - 52.0f;
+        DrawEllipsizedText(compositor_, chip_format_.get(), Rect(s, text_x, box_y + 12.0f, text_w, 20.0f), headline, theme.text);
+        for (size_t i = 0; i < lines.size(); ++i)
+            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, text_x, box_y + 32.0f + 18.0f * static_cast<float>(i), text_w, 18.0f),
+                               lines[i], theme.text_secondary);
+        float below = box_y + box_h;
+        if (!status_.external_assurance.empty()) {
+            const float y = below + 10.0f;
+            DrawStoreIcon(dc, StoreIcon::Shield, Rect(s, kPadX + 1.0f, y + 1.0f, 15.0f, 15.0f), ok_color, 1.4f);
+            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, kPadX + 23.0f, y, content_w - 23.0f, row_h),
+                               status_.external_assurance, theme.text);
+            below = y + row_h;
+        }
+        if (!status_.external_log.empty()) {
+            const size_t count = TextLines(status_.external_log, 3);
+            const auto block = Rect(s, kPadX, below + 10.0f, content_w, 16.0f + kTaskLogLineH * static_cast<float>(count));
+            painter_.FillRoundedRect(block, ScaleDip(s, 6.0f), track);
+            size_t at = 0;
+            for (size_t line = 0; line < count; ++line) {
+                const size_t end = status_.external_log.find(L'\n', at);
+                const std::wstring text = status_.external_log.substr(at, end == std::wstring::npos ? std::wstring::npos : end - at);
+                DrawEllipsizedText(compositor_, mono_format_.get() ? mono_format_.get() : label_format_.get(),
+                    Rect(s, kPadX + 10.0f, below + 18.0f + kTaskLogLineH * static_cast<float>(line), content_w - 20.0f, kTaskLogLineH),
+                    text, theme.text_secondary);
+                if (end == std::wstring::npos) break;
+                at = end + 1;
+            }
+        }
     } else if (!list_mode) {
         // --- Hero: percent on the left, speed or state on the right --------
         const D2D1_RECT_F right_box = Rect(s, dip_w - kPadX - 220.0f, hero_y + 4.0f, 220.0f, 20.0f);
@@ -3395,6 +3963,9 @@ void FileOperationWindow::Render() {
             else if (pausing) state = l10n::Get(l10n::StringId::OpPausing);
             else if (paused) state = l10n::Get(l10n::StringId::OpPaused);
             else if (waiting) state = l10n::Get(l10n::StringId::OpWaiting);
+            else if (status_.external && status_.external_linked != 0)
+                painter_.DrawText(l10n::Get(l10n::StringId::OpTaskWritingPrefix) + pulse::format::GroupedInt(item_count) +
+                                  items_suffix, right_box, speed_format_.get(), theme.text, fluent::HorizontalAlignment::Right);
             else if (status_.speed_basis == ops::OpSpeedBasis::None) state.clear();
             else if (live_speed <= 0.0) state = l10n::Get(l10n::StringId::OpEstimating);
             else painter_.DrawText(FormatSpeedText(shown_basis, live_speed), right_box, speed_format_.get(),
@@ -3403,7 +3974,8 @@ void FileOperationWindow::Render() {
                 painter_.DrawText(state, right_box, value_format_.get(), paused ? warn_color : theme.text_secondary,
                                   fluent::HorizontalAlignment::Right);
             if (!completed && !failed && !cancelling && status_.speed_basis != ops::OpSpeedBasis::None) {
-                const std::wstring sub = paused || waiting ? remain_line : time_text;
+                const std::wstring sub = status_.external && status_.external_linked != 0
+                    ? l10n::Get(l10n::StringId::OpTaskThroughPulse) : paused || waiting ? remain_line : time_text;
                 painter_.DrawText(sub, Rect(s, dip_w - kPadX - 220.0f, hero_y + 26.0f, 220.0f, 18.0f),
                                   label_format_.get(), theme.text_secondary, fluent::HorizontalAlignment::Right);
             }
@@ -3600,7 +4172,7 @@ void FileOperationWindow::Render() {
     }
 
     // --- Details: a two-column label / value list ------------------------------
-    if (detailed_ && status_.active && !authorization && !preparation_only_ && !CompactTaskProgress(status_)) {
+    if (ShowsTransferDetails(status_, detailed_) && !authorization && !preparation_only_) {
         const float top = kContentH + fail_block - TaskLayoutReduction(status_);
         painter_.FillRoundedRect(Rect(s, kPadX, top, content_w, kDetailsBlockH - 12.0f), ScaleDip(s, 6.0f),
                                  WithAlpha(theme.text, dark_ ? 0.08f : 0.04f));
@@ -3669,6 +4241,34 @@ void FileOperationWindow::Render() {
         painter_.DrawButton({ chrome.pause, labels.pause, labels.pause_glyph,
                               paused ? fluent::ButtonKind::Primary : fluent::ButtonKind::Standard,
                               pause_state });
+    }
+    if (status_.external && status_.active && !labels.show_details && !status_.external_note.empty()) {
+        const float right = (labels.show_pause ? chrome.pause.left : chrome.cancel.left) / s - 12.0f;
+        const float y = (footer_top + ScaleDip(s, kFooterH * 0.5f)) / s - 9.0f;
+        DrawStoreIcon(dc, StoreIcon::Info, Rect(s, kPadX, y + 2.0f, 14.0f, 14.0f), theme.text_secondary, 1.3f);
+        DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, kPadX + 20.0f, y, (std::max)(0.0f, right - kPadX - 20.0f), 18.0f),
+                           status_.external_note, theme.text_secondary);
+    }
+    if (labels.show_background) {
+        fluent::ControlState state{};
+        state.hovered = hover_ == kHitBackground;
+        state.pressed = pressed_ == kHitBackground;
+        painter_.DrawButton({chrome.background, l10n::Get(l10n::StringId::OpContinueInBackground), {},
+                             fluent::ButtonKind::Transparent, state});
+    }
+    if (labels.show_copy_details) {
+        fluent::ControlState state{};
+        state.hovered = hover_ == kHitCopyDetails;
+        state.pressed = pressed_ == kHitCopyDetails;
+        painter_.DrawButton({chrome.copy_details, l10n::Get(l10n::StringId::OpCopyDetails), {},
+                             fluent::ButtonKind::Transparent, state});
+    }
+    for (size_t i = 0; i < labels.actions.size(); ++i) {
+        fluent::ControlState state{};
+        state.hovered = hover_ == kHitTaskAction + static_cast<int>(i);
+        state.pressed = pressed_ == kHitTaskAction + static_cast<int>(i);
+        painter_.DrawButton({chrome.actions[i], labels.actions[i], {},
+            static_cast<int>(i) == labels.primary_action ? fluent::ButtonKind::Primary : fluent::ButtonKind::Standard, state});
     }
     if (labels.show_retry) {
         fluent::ControlState retry_state{};
@@ -3893,6 +4493,21 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
                     RequestDismiss();
                     callbacks_.locate_results(task);
                 } else if (callbacks_.open_folder) callbacks_.open_folder(status_.destination_dir);
+            } else if (hit == kHitBackground) {
+                RequestDismiss(true);
+            } else if (hit == kHitCopyDetails) {
+                std::wstring text = ExternalOperationDisplayTitle(status_);
+                for (const auto* part : {&status_.last_error, &status_.external_detail, &status_.external_log})
+                    if (!part->empty()) text += L"\r\n" + *part;
+                CopyText(hwnd_, text);
+            } else if (hit >= kHitTaskAction && hit < kHitTaskAction + 3) {
+                const size_t index = static_cast<size_t>(hit - kHitTaskAction);
+                if (index < status_.external_actions.size()) {
+                    const auto task = status_.task_id;
+                    const auto action = status_.external_actions[index].id;
+                    RequestDismiss();
+                    if (callbacks_.task_action) callbacks_.task_action(task, action);
+                }
             } else if (hit >= kHitFailRow && board_) {
                 RetryFailureRows({ board_scroll_ + static_cast<size_t>(hit - kHitFailRow) });
             } else if (hit == 3 && status_.active &&

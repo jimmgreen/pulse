@@ -71,7 +71,7 @@ struct ThrowOnCopy {
     ThrowOnCopy(const ThrowOnCopy& other) : fail(other.fail) { if (*fail) throw std::bad_alloc(); }
     HRESULT operator()(IFileDialog*, HWND) const { return E_ABORT; }
 };
-void WrappedCreation(DialogFactory factory, REFIID requested) {
+void WrappedCreation(DialogFactory factory, REFIID requested, DWORD context = CLSCTX_INPROC_SERVER) {
     Probe probe; active_probe = &probe;
     auto activation = Configuration();
     int native_shows = 0;
@@ -83,10 +83,10 @@ void WrappedCreation(DialogFactory factory, REFIID requested) {
     };
     void* output = nullptr;
     const auto clsid = factory == DialogFactory::Open ? CLSID_FileOpenDialog : CLSID_FileSaveDialog;
-    const auto hr = ActivateFileDialog(activation, clsid, nullptr, CLSCTX_INPROC_SERVER, requested, &output);
+    const auto hr = ActivateFileDialog(activation, clsid, nullptr, context, requested, &output);
     ComPtr<IUnknown> returned; returned.Attach(static_cast<IUnknown*>(output));
     Check(hr == S_OK && returned && probe.calls == 1 && probe.creations == 1, "supported activation calls original once", hr);
-    Check(probe.clsid == clsid && probe.iid == requested && probe.context == CLSCTX_INPROC_SERVER &&
+    Check(probe.clsid == clsid && probe.iid == requested && probe.context == context &&
         !probe.outer && probe.output_argument == &output, "original receives exact activation arguments");
     ComPtr<IFileDialog> dialog; if (returned) returned.As(&dialog);
     Check(dialog && Identity(returned.Get()).Get() != probe.native_identity.Get(), "supported activation returns wrapper identity");
@@ -126,7 +126,14 @@ int main() {
     Bypass(CLSID_FileOpenDialog, IID_IOleWindow, CLSCTX_INPROC_SERVER, true);
     Bypass(CLSID_FileOpenDialog, IID_IPersist, CLSCTX_INPROC_SERVER, true);
     Bypass(CLSID_FileOpenDialog, IID_IFileSaveDialog, CLSCTX_INPROC_SERVER, true);
-    Bypass(CLSID_FileOpenDialog, IID_IFileOpenDialog, CLSCTX_INPROC_SERVER | CLSCTX_DISABLE_AAA, true);
+    for (DWORD modifiers : {DWORD(CLSCTX_DISABLE_AAA), DWORD(CLSCTX_NO_CODE_DOWNLOAD), DWORD(CLSCTX_NO_FAILURE_LOG),
+        DWORD(CLSCTX_DISABLE_AAA | CLSCTX_NO_CODE_DOWNLOAD | CLSCTX_NO_FAILURE_LOG)}) {
+        WrappedCreation(DialogFactory::Open, IID_IFileOpenDialog, CLSCTX_INPROC_SERVER | modifiers);
+        WrappedCreation(DialogFactory::Save, IID_IFileSaveDialog, CLSCTX_INPROC_SERVER | modifiers);
+    }
+    Bypass(CLSID_FileOpenDialog, IID_IFileOpenDialog, CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER, true);
+    Bypass(CLSID_FileOpenDialog, IID_IFileOpenDialog, CLSCTX_INPROC_SERVER | CLSCTX_ENABLE_AAA, true);
+    Bypass(CLSID_FileOpenDialog, IID_IFileOpenDialog, CLSCTX_INPROC_SERVER | CLSCTX_NO_CUSTOM_MARSHAL, true);
     {
         Probe probe; active_probe = &probe;
         auto activation = Configuration();

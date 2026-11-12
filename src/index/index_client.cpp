@@ -41,9 +41,10 @@ std::wstring IndexClient::ExePath() {
     return ResolveIndexExecutable(sibling, InstalledServiceCommand(kServiceName), IsFile);
 }
 
-void IndexClient::Start(HWND notify, UINT status_msg, UINT search_msg, std::wstring pipe_name) {
+void IndexClient::Start(HWND notify, UINT status_msg, UINT search_msg, std::wstring pipe_name, std::wstring helper_executable) {
     Stop();
     pipe_name_ = std::move(pipe_name);
+    helper_executable_ = std::move(helper_executable);
     notify_ = notify;
     status_msg_ = status_msg;
     search_msg_ = search_msg;
@@ -211,7 +212,7 @@ bool IndexClient::SpawnHelper() {
         if (notify_ && status_msg_) PostMessageW(notify_, status_msg_, 0, 0);
         return false;
     }
-    const std::wstring exe = ExePath();
+    const std::wstring exe = helper_executable_.empty() ? ExePath() : helper_executable_;
     if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
         std::lock_guard<std::mutex> lock(mu_);
         status_ = L"找不到 Pulse.Index.exe";

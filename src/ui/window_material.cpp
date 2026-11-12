@@ -537,7 +537,7 @@ bool ApplyWindowEffect(HWND hwnd, WindowEffect effect, bool dark) noexcept {
     const DWORD corner = DWMWCP_ROUND;
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
 
-    if (IsHighContrast() || !WindowEffectSupported(effect)) {
+    if (IsHighContrast() || !compat::ModernWindows() || pulse::os::TrueWindowsBuild() < 22000) {
         effect = WindowEffect::None;
     }
 
@@ -567,7 +567,7 @@ bool ApplyWindowEffect(HWND hwnd, WindowEffect effect, bool dark) noexcept {
         DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
     }
 
-    const MARGINS margins = effect == WindowEffect::None ? MARGINS{} : MARGINS{ -1 };
+    const MARGINS margins{ -1 };
     DwmExtendFrameIntoClientArea(hwnd, &margins);
     return WindowEffectUsesBackdrop(effect) && SUCCEEDED(hr);
 }

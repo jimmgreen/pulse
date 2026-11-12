@@ -48,11 +48,6 @@ struct FoldedNameEqual {
 
 } // namespace
 
-bool SameEntrySortPosition(const fs::DirEntry& a, const fs::DirEntry& b,
-                           ui::SortColumn col, ui::SortDirection dir) {
-    return !EntryLess(a, b, col, dir) && !EntryLess(b, a, col, dir);
-}
-
 bool SameEntryGroup(const fs::DirEntry& a, const fs::DirEntry& b,
                     ui::SortColumn col, ui::SortDirection dir) {
     return GroupOrder(a, b, col, dir) == 0;
@@ -88,32 +83,21 @@ void PlaceEntryHeld(std::vector<fs::DirEntry>& entries, int slot, fs::DirEntry e
 
 std::vector<fs::DirEntry> KeepEntryOrder(const std::vector<fs::DirEntry>& shown,
                                          const std::vector<fs::DirEntry>& fresh,
-                                         const std::vector<EntryRename>& renames,
                                          ui::SortColumn col, ui::SortDirection dir) {
     // Keys view the names in `fresh`, which outlives the map.
     std::unordered_map<std::wstring_view, size_t, FoldedNameHash, FoldedNameEqual> fresh_at;
     fresh_at.reserve(fresh.size());
     for (size_t i = 0; i < fresh.size(); ++i) fresh_at.emplace(fresh[i].name, i);
-    std::unordered_map<std::wstring, std::wstring, FoldedNameHash, FoldedNameEqual> renamed_to;
-    for (const auto& rename : renames) renamed_to[rename.old_name] = rename.new_name;
 
     // Rows that keep their place, in the order shown.
     std::vector<char> used(fresh.size(), 0);
     std::vector<size_t> kept;
     kept.reserve(std::min(shown.size(), fresh.size()));
     for (const auto& row : shown) {
-        bool renamed = false;
-        auto it = fresh_at.find(row.name);
-        if (it == fresh_at.end()) {
-            const auto rename = renamed_to.find(row.name);
-            if (rename == renamed_to.end()) continue;
-            renamed = true;
-            it = fresh_at.find(rename->second);
-            if (it == fresh_at.end()) continue;
-        }
+        const auto it = fresh_at.find(row.name);
+        if (it == fresh_at.end()) continue;  // removed, or renamed: merged in sorted below
         const size_t at = it->second;
-        if (used[at] || !SameEntryGroup(row, fresh[at], col, dir) ||
-            (!renamed && !SameEntrySortPosition(row, fresh[at], col, dir))) continue;
+        if (used[at] || !SameEntryGroup(row, fresh[at], col, dir)) continue;
         used[at] = 1;
         kept.push_back(at);
     }
@@ -145,6 +129,37 @@ bool SameEntryOrder(const std::vector<fs::DirEntry>& shown,
         if (shown[i].name != fresh[i].name || !SameEntryGroup(shown[i], fresh[i], col, dir)) return false;
     }
     return true;
+}
+
+void FollowNotifyRenames(const std::vector<fs::DirNotifyEvent>& events,
+                         const std::vector<fs::DirEntry>& after,
+                         std::vector<std::wstring>& names, std::wstring& focus) {
+    if (names.empty() && focus.empty()) return;
+    const bool has_rename = std::any_of(events.begin(), events.end(), [](const fs::DirNotifyEvent& event) {
+        return event.action == FILE_ACTION_RENAMED_NEW_NAME && !event.old_name.empty();
+    });
+    if (!has_rename) return;
+    std::unordered_map<std::wstring_view, std::wstring_view, FoldedNameHash, FoldedNameEqual> present;
+    present.reserve(after.size());
+    for (const auto& entry : after) present.emplace(entry.name, entry.name);
+    const auto follow = [&](std::wstring& name) {
+        if (name.empty()) return;
+        if (const auto still = present.find(name); still != present.end()) {
+            name.assign(still->second);
+            return;
+        }
+        std::wstring current = name;
+        for (const auto& event : events) {
+            if (event.action == FILE_ACTION_RENAMED_NEW_NAME && !event.old_name.empty() &&
+                FoldedNameEqual{}(current, event.old_name)) {
+                current = event.name;
+            }
+        }
+        if (const auto landed = present.find(current); landed != present.end())
+            name.assign(landed->second);
+    };
+    for (auto& name : names) follow(name);
+    follow(focus);
 }
 
 void FollowHeldRenames(const std::vector<EntryRename>& renames,

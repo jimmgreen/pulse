@@ -52,10 +52,22 @@ REPO_LICENSES = {
     'third_party/sqlite/README.md': 'licenses/SQLite/README.md',
     'third_party/lzma/README.pulse.md': 'licenses/LZMA/README.pulse.md',
 }
+THIN_LICENSES = {key: REPO_LICENSES[key] for key in ('LICENSE', 'third_party/detours/LICENSE.md')}
+
+
+def thin_roots():
+    return ['PulseDialogLauncher.exe', 'PulseDialogAuto32.dll', 'PulseDialogAutoControl.exe',
+            'PulseFileDialogRuntimeUiProof32R8.dll', 'PulseDialogAdminAuto.exe', 'PulseFileDialogAutoRuntime32.dll']
+
+
+def host_hash(value):
+    if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value):
+        raise PackageError('thin host manifest hash')
+    return value
 
 def roots(arch, automatic=False):
     return ['PulseDialogLauncher.exe', f'PulseFileDialogRuntimeUiProof{32 if arch == "x86" else 64}R8.dll',
-            'pulse.exe', 'PulsePickerUiProof.dll', 'lumatext.dll', 'pulse_shell.exe'] + ([f'PulseDialogAuto{64 if arch == "x64" else 32}.dll', 'PulseDialogAutoControl.exe'] if automatic else [])
+            'pulse.exe', 'PulsePickerUiProof.dll', 'lumatext.dll', 'pulse_shell.exe'] + (['PulseDialogAdminAuto.exe', f'PulseFileDialogAutoRuntime{64 if arch == "x64" else 32}.dll', f'PulseDialogAuto{64 if arch == "x64" else 32}.dll', 'PulseDialogAutoControl.exe'] if automatic else [])
 
 def system(name):
     return name in SYSTEM or bool(API_SET.fullmatch(name))
@@ -101,13 +113,18 @@ def record(path, relative, role, arch=None):
         item.update(machine=pe.machine, imports=pe.normal, delay_imports=pe.delay)
     return item
 
-def plan(build, version, arch, repository, automatic=False, runtime_items=()):
+def plan(build, version, arch, repository, automatic=False, runtime_items=(), *, thin=False, host_digest=None):
     if arch not in MACHINES or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', version):
         raise PackageError('invalid architecture or version label')
     if not Path(build).is_absolute() or not Path(repository).is_absolute(): raise PackageError('absolute build/repository paths required')
+    if thin:
+        if arch != 'x86' or runtime_items: raise PackageError('thin companion requires x86 and no full runtime items')
+        host_hash(host_digest)
+    elif host_digest is not None: raise PackageError('host binding requires thin companion')
     build, repository = no_links(build), no_links(repository)
     local = entries(build)
-    pending = [(name, 'entry') for name in roots(arch, automatic)] + [(name, 'dynamic-helper') for name in DYNAMIC]
+    pending = [(name, 'entry') for name in (thin_roots() if thin else roots(arch, automatic))]
+    if not thin: pending += [(name, 'dynamic-helper') for name in DYNAMIC]
     for source, relative in runtime_items:
         safe_relative(relative)
         if not relative.startswith('licenses/'):
@@ -132,7 +149,7 @@ def plan(build, version, arch, repository, automatic=False, runtime_items=()):
                     os_dependencies.add(dependency)
                 else: pending.append((dependency, 'import'))
         except (OSError, ValueError) as error: errors.append(f'{name}: {error}')
-    for group in ('LumaText', 'PDFium'):
+    for group in (() if thin else ('LumaText', 'PDFium')):
         folder = build / 'licenses' / group
         if not folder.is_dir(): errors.append(f'missing license directory: {folder}'); continue
         no_links(folder)
@@ -143,7 +160,7 @@ def plan(build, version, arch, repository, automatic=False, runtime_items=()):
             if not path.is_file(): continue
             relative = path.relative_to(build).as_posix()
             files.append(record(path, relative, 'license')); sources[relative] = path
-    for source, relative in REPO_LICENSES.items():
+    for source, relative in (THIN_LICENSES if thin else REPO_LICENSES).items():
         path = repository / source
         try: files.append(record(path, relative, 'license')); sources[relative] = path
         except (OSError, ValueError) as error: errors.append(f'license {source}: {error}')
@@ -156,9 +173,10 @@ def plan(build, version, arch, repository, automatic=False, runtime_items=()):
             files.append(record(source, relative, 'license')); sources[relative] = source
     if errors: raise PackageError('\n'.join(errors))
     if len(files) > 512 or len({f['path'].lower() for f in files}) != len(files): raise PackageError('manifest size/case collision')
-    manifest = {'schema': 1, 'version': version, 'architecture': arch, 'contract': CONTRACT,
-                'dynamic_helpers': DYNAMIC, 'system_dependencies': sorted(os_dependencies),
+    manifest = {'schema': 3 if thin else 1, 'version': version, 'architecture': arch, 'contract': CONTRACT,
+                'dynamic_helpers': {} if thin else DYNAMIC, 'system_dependencies': sorted(os_dependencies),
                 'files': sorted(files, key=lambda f: f['path'].lower())}
+    if thin: manifest['host_bundle'] = {'manifest_sha256': host_digest}
     return manifest, sources
 
 def publish_directory(source, destination):
@@ -176,19 +194,21 @@ def publish_directory(source, destination):
             time.sleep(delays[attempt])
 
 
-def package_addressed(build, bridge, version, arch, repository, runtime_items=()):
-    """Publish a complete private schema-1 closure; never update a live bundle."""
+def package_addressed(build, bridge, version, arch, repository, runtime_items=(), *, thin=False, host_digest=None):
+    """Publish a complete private closure; never update a live bundle."""
     bridge = no_links(bridge)
     # Build in a new sibling directory, so only a fully verified bundle can
     # acquire its final name. Both paths are on the same filesystem.
-    with tempfile.TemporaryDirectory(prefix='.dialog-staging-', dir=bridge.parent) as staging:
-        candidate = Path(staging) / 'bundle'
-        package(build, candidate, version, arch, repository, automatic=True, runtime_items=runtime_items)
+    with tempfile.TemporaryDirectory(prefix='.dialog-staging-', dir=bridge) as staging:
+        candidate = Path(staging)
+        candidate.rmdir()  # package exclusively creates this reserved sibling name.
+        package(build, candidate, version, arch, repository, automatic=True, runtime_items=runtime_items,
+                thin=thin, host_digest=host_digest)
         manifest_hash = digest(candidate / 'manifest.json')
         destination = bridge / manifest_hash
         if destination.exists() or destination.is_symlink():
             existing = verify(destination)
-            if existing['schema'] != 1 or digest(destination / 'manifest.json') != manifest_hash:
+            if existing['schema'] != (3 if thin else 1) or digest(destination / 'manifest.json') != manifest_hash:
                 raise PackageError('existing content-addressed bundle mismatch')
         else:
             publish_directory(candidate, destination)
@@ -261,18 +281,40 @@ def unique_object(pairs):
         if key in result: raise PackageError(f'duplicate JSON key: {key}')
         result[key] = value
     return result
-def verify(directory, require_marker=True):
+def verify(directory, require_marker=True, *, allow_thin=True):
     directory = no_links(directory)
     manifest_path = directory / 'manifest.json'
     no_links(manifest_path)
     if manifest_path.stat().st_size > 1024 * 1024: raise PackageError('manifest bound')
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'), object_pairs_hook=unique_object)
-    if set(manifest) != {'schema', 'version', 'architecture', 'contract', 'dynamic_helpers', 'system_dependencies', 'files'} or manifest['schema'] not in (1, 2):
+    schema = manifest.get('schema')
+    thin = schema == 3
+    keys = {'schema', 'version', 'architecture', 'contract', 'dynamic_helpers', 'system_dependencies', 'files'}
+    if thin: keys.add('host_bundle')
+    if set(manifest) != keys or type(schema) is not int or schema not in (1, 2, 3):
         raise PackageError('manifest schema')
+    # A thin reference can only target a full schema-1 host. Reject a chained
+    # reference before recursion, including a malicious cycle.
+    if thin and not allow_thin: raise PackageError('thin host must be full schema 1')
     arch = manifest['architecture']
-    if arch not in MACHINES or manifest['contract'] != CONTRACT or manifest['dynamic_helpers'] != DYNAMIC:
+    if arch not in MACHINES or (thin and arch != 'x86') or manifest['contract'] != CONTRACT or manifest['dynamic_helpers'] != ({} if thin else DYNAMIC):
         raise PackageError('unknown component contract')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', manifest['version']): raise PackageError('version label')
+    if thin:
+        binding = manifest['host_bundle']
+        if not isinstance(binding, dict) or set(binding) != {'manifest_sha256'}:
+            raise PackageError('thin host binding')
+        expected_host = host_hash(binding['manifest_sha256'])
+        host = no_links(directory.parent / expected_host)
+        if digest(no_links(host / 'manifest.json')) != expected_host:
+            raise PackageError('thin host manifest hash mismatch')
+        full = verify(host, allow_thin=False)
+        if full['schema'] != 1 or full['architecture'] != 'x64':
+            raise PackageError('thin host requires full x64 schema 1')
+        if full['version'] != manifest['version']: raise PackageError('thin host version mismatch')
+        host_names = {item['path'].lower() for item in full['files']}
+        if not all(name.lower() in host_names for name in roots('x64', automatic=True)):
+            raise PackageError('thin host requires complete automatic components')
     files = manifest['files']
     if not isinstance(files, list) or not 1 <= len(files) <= 512: raise PackageError('file count')
     by_name, expected, os_dependencies = {}, {'manifest.json'}, set()
@@ -288,23 +330,38 @@ def verify(directory, require_marker=True):
         actual = record(directory / relative, relative, role, None if role == 'license' else arch)
         if actual != item: raise PackageError(f'file metadata/hash/import mismatch: {relative}')
         if role != 'license': by_name[relative.lower()] = item
-    for name in roots(arch) + list(DYNAMIC):
+    for name in (thin_roots() if thin else roots(arch) + list(DYNAMIC)):
         if name.lower() not in by_name: raise PackageError(f'missing mandatory component: {name}')
     wrong_auto = 'pulsedialogauto32.dll' if arch == 'x64' else 'pulsedialogauto64.dll'
     if wrong_auto in by_name: raise PackageError('wrong automatic component architecture name')
     auto_name = 'pulsedialogauto64.dll' if arch == 'x64' else 'pulsedialogauto32.dll'
     if (auto_name in by_name) != ('pulsedialogautocontrol.exe' in by_name):
         raise PackageError('incomplete automatic component pair')
+    admin_runtime = f'pulsefiledialogautoruntime{64 if arch == "x64" else 32}.dll'
+    wrong_admin_runtime = f'pulsefiledialogautoruntime{32 if arch == "x64" else 64}.dll'
+    if wrong_admin_runtime in by_name:
+        raise PackageError('wrong admin runtime architecture name')
+    if (admin_runtime in by_name) != ('pulsedialogadminauto.exe' in by_name):
+        raise PackageError('incomplete admin automatic component pair')
     for item in by_name.values():
         for dependency in item['imports'] + item['delay_imports']:
             if system(dependency):
                 if dependency in by_name: raise PackageError('packaged system dependency')
                 os_dependencies.add(dependency)
             elif dependency not in by_name: raise PackageError(f'unresolved packaged dependency: {dependency}')
+    if thin:
+        pending, reachable = [name.lower() for name in thin_roots()], set()
+        while pending:
+            name = pending.pop()
+            if name in reachable: continue
+            reachable.add(name)
+            item = by_name[name]
+            pending.extend(dep for dep in item['imports'] + item['delay_imports'] if not system(dep))
+        if reachable != set(by_name): raise PackageError('unrelated binary in thin companion')
     if sorted(os_dependencies) != manifest['system_dependencies']: raise PackageError('system dependency list mismatch')
-    for relative in REPO_LICENSES.values():
+    for relative in (THIN_LICENSES if thin else REPO_LICENSES).values():
         if relative.lower() not in expected: raise PackageError(f'missing mandatory license: {relative}')
-    for group in ('lumatext', 'pdfium'):
+    for group in (() if thin else ('lumatext', 'pdfium')):
         if not any(p.startswith(f'licenses/{group}/') for p in expected): raise PackageError(f'missing license group: {group}')
     if require_marker:
         marker = directory / 'VERIFIED.json'; no_links(marker)
@@ -322,12 +379,13 @@ def verify(directory, require_marker=True):
     if actual_files != expected: raise PackageError('unlisted/missing bundle files')
     return manifest
 
-def package(build, output, version, arch, repository, automatic=False, runtime_items=()):
+def package(build, output, version, arch, repository, automatic=False, runtime_items=(), *, thin=False, host_digest=None):
     output = Path(output)
     if not output.is_absolute(): raise PackageError('absolute NEW output required')
     no_links(output.parent)
     if output.exists() or output.is_symlink(): raise PackageError('output already exists; never overwrite or clean')
-    manifest, sources = plan(build, version, arch, repository, automatic, runtime_items)
+    manifest, sources = plan(build, version, arch, repository, automatic, runtime_items,
+                             thin=thin, host_digest=host_digest)
     if output.is_relative_to(Path(build).absolute()): raise PackageError('output must be outside build directory')
     output.mkdir()  # Exclusive creation; failure leaves existing data unchanged.
     # Any failure leaves an incomplete unverified directory for diagnosis.
@@ -354,13 +412,15 @@ def main():
         p.add_argument('--version', required=True)
         p.add_argument('--arch', choices=MACHINES, required=True)
         p.add_argument('--auto', action='store_true', help='include current-user architecture-matched automatic COM entry')
+        p.add_argument('--thin', action='store_true', help='x86 bridge using a sibling full x64 host bundle')
+        p.add_argument('--host-digest', help='SHA-256 address of the sibling full x64 host manifest')
         p.add_argument('--repository', type=Path, default=Path(__file__).resolve().parents[2])
         if command == 'pack': p.add_argument('--output', type=Path, required=True)
     p = sub.add_parser('verify'); p.add_argument('--directory', type=Path, required=True)
     args = parser.parse_args()
     try:
-        if args.command == 'plan': result, _ = plan(args.build, args.version, args.arch, args.repository, args.auto)
-        elif args.command == 'pack': result = package(args.build, args.output, args.version, args.arch, args.repository, args.auto)
+        if args.command == 'plan': result, _ = plan(args.build, args.version, args.arch, args.repository, args.auto, thin=args.thin, host_digest=args.host_digest)
+        elif args.command == 'pack': result = package(args.build, args.output, args.version, args.arch, args.repository, args.auto, thin=args.thin, host_digest=args.host_digest)
         else: result = verify(args.directory)
         print(json.dumps({'result': 'verified-files' if args.command != 'plan' else 'read-only-plan',
                           'architecture': result['architecture'], 'version': result['version'],

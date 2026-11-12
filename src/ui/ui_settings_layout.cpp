@@ -102,7 +102,8 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         return l;
     }
     float y = l.content_origin + pad;
-    y += 36.0f * scale;
+    l.page_heading=D2D1::RectF(l.content.left+pad,y,l.content.right-pad,y+36.0f*scale);
+    y = l.page_heading.bottom;
     y += 8.0f * scale;
     if (IsGeneralSettingsPage(vm.settings_page)) {
         y = LayoutSettingsGeneral(l, vm, scale, y, painter);
@@ -543,7 +544,11 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         const float right = (std::max)(left, l.content.right - pad);
         const float intro = painter ? painter->MeasureWrappedCaptionHeight(l10n::Get(l10n::StringId::NativeExtensionSettingsIntro), (std::max)(1.0f, right-left)) : 36.0f*scale;
         const float bottom = (std::max)(l.content.top, l.content.bottom - pad);
-        const float top = (std::min)(bottom, l.content.top + 60.0f*scale + intro + 18.0f*scale);
+        // "‹ 扩展商店": this page is the store's settings view, so a way back leads it.
+        const float crumb_w = (painter ? painter->MeasureButtonWidth(l10n::Get(l10n::StringId::StoreTitle)) : 96.0f*scale) + 8.0f*scale;
+        l.native_store_crumb = D2D1::RectF(left - 6.0f*scale, l.content.top + 58.0f*scale,
+                                           (std::min)(right, left + crumb_w), l.content.top + 84.0f*scale);
+        const float top = (std::min)(bottom, l.content.top + 88.0f*scale + intro + 18.0f*scale);
         l.native_settings_content = D2D1::RectF(left, top, right, bottom);
         l.content_h = l.content.bottom - l.content.top;
         return l;

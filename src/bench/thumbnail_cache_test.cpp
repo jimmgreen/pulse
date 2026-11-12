@@ -1,4 +1,5 @@
-﻿#include "../ui/thumbnail_cache.h"
+#include "../app/thumbnail_rename.h"
+#include "../ui/thumbnail_cache.h"
 #include "../ui/thumbnail_retry_timer.h"
 #include "../ui/thumbnail_artwork_layout.h"
 #include <cstdio>
@@ -10,6 +11,7 @@
 namespace pulse::ui {
 struct ThumbnailCacheTestAccess {
 #include "thumbnail_editor_save_test.inc"
+#include "thumbnail_rename_test.inc"
     static bool RealDownloadRetryRegression() {
         bool ok = true;
         const auto check = [&](bool value, const char* name) {
@@ -1256,3 +1258,5 @@ bool RunThumbnailEditorSaveRegression() { return pulse::ui::ThumbnailCacheTestAc
 bool RunPsdProgressiveRegression(const char* fixture) { return pulse::ui::ThumbnailCacheTestAccess::PsdProgressiveRegression(fixture); }
 
 bool RunBoundedImageRetryRegression() { return pulse::ui::ThumbnailCacheTestAccess::BoundedImageRetryRegression(); }
+
+bool RunThumbnailRenameRegression() { return pulse::ui::ThumbnailCacheTestAccess::RenameRegression(); }

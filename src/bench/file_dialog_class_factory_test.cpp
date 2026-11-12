@@ -263,17 +263,27 @@ int main() {
         Check(SUCCEEDED(hr) && dialog && !factory && probe.destroyed == 1 && dialog->Show(nullptr) == E_ABORT,
             "in-flight CreateInstance retains factory through reentrant final caller Release", hr);
     }
-    {
+    for (DWORD modifiers : {DWORD(CLSCTX_DISABLE_AAA), DWORD(CLSCTX_NO_CODE_DOWNLOAD), DWORD(CLSCTX_NO_FAILURE_LOG),
+        DWORD(CLSCTX_DISABLE_AAA | CLSCTX_NO_CODE_DOWNLOAD | CLSCTX_NO_FAILURE_LOG)}) {
         Probe probe; active = &probe; auto config = Config();
         ComPtr<IClassFactory> factory;
-        const DWORD flags = CLSCTX_INPROC_SERVER | CLSCTX_DISABLE_AAA;
+        const DWORD flags = CLSCTX_INPROC_SERVER | modifiers;
         const auto hr = ActivateFileDialogClass(config, CLSID_FileOpenDialog, flags, nullptr, IID_PPV_ARGS(&factory));
-        Check(hr == probe.get_result && probe.context == flags && factory.Get() == probe.returned_factory,
-            "additional class-context flags preserve original factory identity", hr);
+        Check(hr == S_OK && hr == probe.get_result && probe.gets == 1 && probe.context == flags && factory && factory.Get() != probe.returned_factory,
+            "whitelisted class-context modifiers preserve exact original call and wrap factory", hr);
         ComPtr<IClassFactory> other;
         const auto other_hr = ActivateFileDialogClass(config, CLSID_ShellLink, CLSCTX_INPROC_SERVER, nullptr, IID_PPV_ARGS(&other));
         Check(other_hr == probe.get_result && other.Get() == probe.returned_factory,
             "unknown class retains original class object", other_hr);
+    }
+    {
+        Probe probe; active = &probe; auto config = Config();
+        ComPtr<IClassFactory> factory;
+        const DWORD flags = CLSCTX_INPROC_SERVER | CLSCTX_NO_CUSTOM_MARSHAL;
+        const auto hr = ActivateFileDialogClass(config, CLSID_FileOpenDialog, flags, nullptr, IID_PPV_ARGS(&factory));
+        Check(probe.gets == 1 && probe.context == flags && hr == probe.get_result &&
+            (FAILED(hr) ? !factory : factory.Get() == probe.returned_factory),
+            "unverified no-custom-marshal context preserves native success or rejection", hr);
     }
     {
         std::thread worker([] {

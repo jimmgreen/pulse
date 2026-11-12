@@ -11,6 +11,9 @@
 #include <algorithm>
 #include <uiautomation.h>
 #include <wrl/client.h>
+#include <array>
+#include <cstring>
+#include <type_traits>
 
 
 void DumpOwnedMessage(HWND window) {
@@ -83,14 +86,17 @@ int DiagnosticTest() {
     const auto check=[&](bool ok,const char* label){std::printf("[%s] %s\n",ok?"PASS":"FAIL",label);if(!ok)++failures;};
     wchar_t file[8]{}; OPENFILENAMEW input{};input.lStructSize=sizeof(input);input.lpstrFile=file;input.nMaxFile=8;
     const DWORD baseline=OFN_EXPLORER|OFN_HIDEREADONLY|OFN_NOCHANGEDIR;
-    for(unsigned variant=0;variant<5;++variant){
+    for(unsigned variant=0;variant<8;++variant){
         input.Flags=baseline;input.FlagsEx=0;input.lpfnHook=nullptr;input.lCustData=0;
         const char* expected=nullptr;
         if(variant==0){input.Flags&=~OFN_EXPLORER;expected="legacy-decline-missing-explorer";}
         if(variant==1){input.Flags|=OFN_ENABLEHOOK;expected="legacy-decline-unsupported-flags";}
         if(variant==2){input.FlagsEx=1;expected="legacy-decline-flags-ex";}
-        if(variant==3){input.lCustData=1;expected="legacy-decline-custom-data";}
+        if(variant==3){input.lCustData=1;expected="legacy-decline-factory";}
         if(variant==4)expected="legacy-decline-factory";
+        if(variant==5){input.Flags|=OFN_LONGNAMES;expected="legacy-decline-factory";}
+        if(variant==6){input.Flags|=OFN_NOLONGNAMES;expected="legacy-decline-factory";}
+        if(variant==7){input.Flags|=OFN_NOTESTFILECREATE;expected="legacy-decline-factory";}
         unsigned factory_calls=0,diagnostics=0;LegacyComDiagnostic observed;
         LegacyDialogFactory factory=[&](bool,IFileDialog** out){++factory_calls;*out=nullptr;return E_ACCESSDENIED;};
         BOOL result=TRUE;
@@ -98,8 +104,8 @@ int DiagnosticTest() {
         check(!consumed&&diagnostics==1&&std::string(observed.reason)==expected,"specific decline reason emitted exactly once");
         check(observed.flags==input.Flags&&observed.flags_ex==input.FlagsEx&&observed.structure_size==sizeof(input)&&observed.max_file==8&&
             observed.presence==(variant==3?2049u:1u),"numeric input fields contain only expected sizes flags and presence");
-        check(factory_calls==(variant==4?1u:0u),"preflight bypass never activates COM factory");
-        if(variant==4)check(observed.error==E_ACCESSDENIED,"failed factory HRESULT preserved");
+        check(factory_calls==(variant>=3?1u:0u),"supported flags reach factory and unsupported preflight never activates it");
+        if(variant>=3)check(observed.error==E_ACCESSDENIED,"failed factory HRESULT preserved");
     }
     input.Flags=baseline&~OFN_EXPLORER;BOOL result=FALSE;SetLastError(ERROR_FILE_NOT_FOUND);
     check(!RunLegacyComDialog(&input,false,{},result,[](const LegacyComDiagnostic&){SetLastError(ERROR_BUSY);throw 1;})&&GetLastError()==ERROR_FILE_NOT_FOUND,"diagnostic throw and LastError mutation cannot alter bypass");
@@ -108,7 +114,56 @@ int DiagnosticTest() {
         "Save without NOCHANGEDIR retains its unverified native gate");
     std::printf("failures=%u\n",failures);return failures?1:0;
 }
+template<class O> void IgnoredComFieldsCases(bool save, unsigned& checks, unsigned& failures) {
+    using namespace pulse::shell_bridge;
+    using C = std::remove_pointer_t<decltype(O{}.lpstrFile)>;
+    const auto check = [&](bool okay, const char* text) { ++checks; if (!okay) ++failures; std::printf("[%s] %s\n", okay ? "PASS" : "FAIL", text); };
+    const auto set_fields = [](O& input, unsigned mask) {
+        if (mask & 1) input.lpfnHook = reinterpret_cast<LPOFNHOOKPROC>(static_cast<UINT_PTR>(1));
+        if (mask & 2) input.lpTemplateName = reinterpret_cast<decltype(input.lpTemplateName)>(static_cast<UINT_PTR>(1));
+        if (mask & 4) input.hInstance = reinterpret_cast<HINSTANCE>(static_cast<UINT_PTR>(1));
+        if (mask & 8) input.lCustData = static_cast<LPARAM>(0x1234567);
+    };
+    for (unsigned variant = 0; variant < 12; ++variant) {
+        const bool active = variant >= 5;
+        std::array<C, 16> file{}; std::array<C, 8> title{}; file[7] = static_cast<C>('!'); title[5] = static_cast<C>('?');
+        O input{}; input.lStructSize = sizeof(input); input.lpstrFile = file.data(); input.nMaxFile = static_cast<DWORD>(file.size());
+        input.lpstrFileTitle = title.data(); input.nMaxFileTitle = static_cast<DWORD>(title.size());
+        input.Flags = OFN_EXPLORER | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+        constexpr unsigned masks[]{1,2,4,8,15}; const unsigned mask = active ? 15 : masks[variant]; set_fields(input, mask);
+        if (active) {
+            const unsigned kind = variant - 5;
+            if (kind < 2) { input.Flags |= OFN_ENABLEHOOK; if (!kind) input.lpfnHook = nullptr; }
+            else if (kind < 4) { input.Flags |= OFN_ENABLETEMPLATE; if (kind == 3) { input.hInstance = nullptr; input.lpTemplateName = nullptr; } }
+            else if (kind < 6) { input.Flags |= OFN_ENABLETEMPLATEHANDLE; if (kind == 5) input.Flags |= OFN_ENABLETEMPLATE; }
+            else input.Flags |= OFN_ENABLEHOOK | OFN_ENABLETEMPLATE;
+        }
+        const auto file_before = file; const auto title_before = title;
+        std::array<unsigned char, sizeof(input)> before{}; std::memcpy(before.data(), &input, before.size());
+        unsigned factories = 0, diagnostics = 0; DWORD diagnostic_input_error = 0; LegacyComDiagnostic observed;
+        const LegacyDialogFactory factory = [&](bool actual_save, IFileDialog** output) { ++factories; *output = nullptr;
+            check(actual_save == save, "Open/Save factory mode preserved"); SetLastError(ERROR_ACCESS_DENIED); return E_ACCESSDENIED; };
+        BOOL result = TRUE; SetLastError(ERROR_FILE_NOT_FOUND);
+        const bool consumed = RunLegacyComDialog(&input, save, factory, result, [&](const LegacyComDiagnostic& value) { diagnostic_input_error = GetLastError(); ++diagnostics; observed = value; SetLastError(ERROR_BUSY); });
+        if (active) check(!consumed && factories == 0 && diagnostics == 1 && result == TRUE && GetLastError() == ERROR_FILE_NOT_FOUND,
+            "active hook/template including null hook stays preflight native without factory or caller-state change");
+        // CoUninitialize runs after decline and may change Win32 LastError.
+        // The factory HRESULT and diagnostic-entry error are the seam outputs;
+        // native CommDlgExtendedError preservation is tested by both adapters.
+        else check(!consumed && factories == 1 && diagnostics == 1 && result == FALSE && observed.error == E_ACCESSDENIED && diagnostic_input_error == ERROR_ACCESS_DENIED,
+            "ignored pointers reach injected factory without dereference and preserve factory failure");
+        check(file == file_before && title == title_before && !std::memcmp(before.data(), &input, before.size()),
+            "COM preflight preserves every caller field and buffer for A/W Open/Save");
+    }
+}
+int IgnoredComFieldsTest() {
+    unsigned checks = 0, failures = 0;
+    for (const bool save : {false, true}) { IgnoredComFieldsCases<OPENFILENAMEW>(save, checks, failures); IgnoredComFieldsCases<OPENFILENAMEA>(save, checks, failures); }
+    std::printf("IGNORED_FIELDS_COM checks=%u failures=%u native_ui=0 sentinel_dereferences=0\n", checks, failures);
+    return failures ? 1 : 0;
+}
 int main(int argc, char** argv) {
+    if(argc==2&&std::string(argv[1])=="--ignored-fields")return IgnoredComFieldsTest();
     if(argc==2&&std::string(argv[1])=="--diagnostic")return DiagnosticTest();
     if(argc==2&&std::string(argv[1])=="--readonly")return ReadOnlyOracle();
     if(argc==2&&std::string(argv[1])=="--writable")return ReadOnlyOracle(false);

@@ -22,7 +22,11 @@ struct Snapshot {
     HWND endpoint = nullptr;
     DWORD endpoint_pid = 0;
     bool shared_available = false;
+    bool jump_policy_available = false;
+    bool auto_jump = false, remember = false, pinyin = false, index = false;
 };
+void PublishJumpPolicy(const Snapshot& snapshot);
+void ReadJumpPolicy(Snapshot& snapshot);
 void PublishShared(const Snapshot& snapshot);
 void ReadShared(Snapshot& snapshot);
 namespace detail {
@@ -78,6 +82,7 @@ inline bool Valid(const Payload& p) {
 }
 inline void Publish(const Snapshot& snapshot) {
     PublishShared(snapshot);
+    PublishJumpPolicy(snapshot);
     static detail::Writer writer;
     if (!writer.blob || !writer.mutex) return;
     // Allocate the bounded copy off the stack before taking the writer lock.
@@ -135,7 +140,8 @@ inline Snapshot ReadMapping(const std::wstring& name) {
     return result;
 }
 }
-inline Snapshot Read() { auto result = detail::ReadMapping(detail::Name()); ReadShared(result); return result; }
+inline Snapshot Read() { auto result = detail::ReadMapping(detail::Name()); ReadShared(result); ReadJumpPolicy(result); return result; }
 }
 #include "picker_places_shared.h"
+#include "picker_jump_policy.h"
 

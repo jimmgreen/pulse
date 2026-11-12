@@ -1,6 +1,8 @@
 #pragma once
 
 #include "folder_picker_model.h"
+#include <functional>
+#include <optional>
 
 namespace pulse::ui {
 
@@ -11,7 +13,7 @@ enum class SaveTargetState {
 
 struct SaveTargetRequest {
     std::wstring directory; // absolute filesystem directory, never the process CWD
-    std::wstring filename;  // leaf; explicit no-test policy also accepts strictly parsed paths
+    std::wstring filename;  // leaf or strictly parsed path; relative paths use directory
     std::vector<PickerFilter> filters;
     size_t filter_index = 0; // zero-based, like the existing picker
     std::wstring default_extension; // original SetDefaultExtension value, without a dot
@@ -35,9 +37,33 @@ struct SaveTargetResult {
 // Complex wildcard patterns and trailing dot/space semantics require native fallback.
 SaveTargetResult ResolveSaveTarget(const SaveTargetRequest& request);
 
+// Pure filename inference for user edits only. Never rewrites the filename or
+// guesses between caller formats sharing an extension. Wildcard filters are not candidates.
+std::optional<size_t> InferSaveFilterFromFilename(std::wstring_view filename,
+    const std::vector<PickerFilter>& filters, size_t current_filter);
+
 // Attribute reads only; run off the UI thread. Never creates/truncates a file.
 // Ready is not a guarantee of write access. Confirmation cannot prevent later races.
 SaveTargetResult ValidateSaveTarget(const SaveTargetRequest& request);
+
+struct SaveDirectoryPlan {
+    DWORD error = ERROR_SUCCESS;
+    std::wstring target;
+    std::vector<std::wstring> missing; // Ordered ancestors; display all before explicit create consent.
+};
+struct SaveDirectoryCreation {
+    DWORD error = ERROR_SUCCESS;
+    std::wstring failed_path;
+    std::vector<std::wstring> created; // Explicitly created directories remain even if later FileOk is cancelled.
+};
+// Worker-only, opt-in independent directory creation. Never called by Save validation.
+// Native PATHMUSTEXIST and NOTESTFILECREATE prohibit this operation.
+SaveDirectoryPlan PlanSaveDirectories(const SaveTargetRequest& request, uint32_t native_options = 0,
+    const std::function<bool()>& cancelled = {});
+// Call only after separate user consent to approved.missing. A changed plan requires
+// renewed consent. No target file is created and no existing object is removed.
+SaveDirectoryCreation CreateSaveDirectories(const SaveTargetRequest& request, const SaveDirectoryPlan& approved,
+    uint32_t native_options = 0, const std::function<bool()>& cancelled = {});
 
 } // namespace pulse::ui
 

@@ -5,6 +5,24 @@
 
 namespace pulse::ipc::picker::remote {
 constexpr uint32_t kMaxFrame = 4 * 1024 * 1024;
+constexpr uint32_t kSaveOptionsMask = PULSE_PICKER_UI_V2_SAVE_OVERWRITE_PROMPT |
+    PULSE_PICKER_UI_V2_SAVE_REQUIRE_UNENCRYPTED | PULSE_PICKER_UI_V2_SAVE_SKIP_ACCESS_VALIDATION |
+    PULSE_PICKER_UI_V2_SAVE_NATIVE_DEFAULTS | PULSE_PICKER_UI_V2_SAVE_NO_TEST_CREATE |
+    PULSE_PICKER_UI_V2_SAVE_REQUIRE_EXISTING_PARENT | PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT;
+constexpr bool SaveOptionsKnown(uint32_t options) noexcept {
+    constexpr uint32_t contradictory = PULSE_PICKER_UI_V2_SAVE_OVERWRITE_PROMPT | PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT;
+    return !(options & ~kSaveOptionsMask) && (options & contradictory) != contradictory;
+}
+constexpr bool SaveOptionsSupportedByPeer(uint32_t options, uint32_t features) noexcept {
+    return SaveOptionsKnown(options) && (!(options & PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT) ||
+        (features & PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_OVERWRITE));
+}
+constexpr bool ConfigSupportedByPeer(uint32_t open_options, uint32_t save_options, uint32_t features) noexcept {
+    return !(open_options & ~0xffu) && SaveOptionsSupportedByPeer(save_options, features) &&
+        (!(open_options & PULSE_PICKER_UI_V2_OPEN_SHELL_ITEM_FILTER) ||
+         (features & PULSE_PICKER_UI_V2_FEATURE_SHELL_ITEM_FILTER));
+}
+
 enum class Kind : uint32_t {
     ValidateConfig = 1,
     Show,
@@ -19,7 +37,9 @@ enum class Kind : uint32_t {
     Navigate,
     Reply,
     Terminal,
-    Hello
+    Hello,
+    UpdateText,
+    SetNavigationRoot
 };
 struct Filter {
     std::wstring label, pattern;
@@ -58,12 +78,21 @@ struct Config {
     std::vector<Control> controls;
     std::wstring default_extension;
     uint32_t save_options = 0, label_flags = 0;
-    std::wstring ok_button_label, file_name_label;
+    std::wstring ok_button_label, file_name_label, cancel_button_label;
     std::vector<Place> places;
     std::vector<Property> properties;
     uint32_t native_options = 0;
+    bool has_folder_policy = false;
+    uint32_t folder_policy = 0;
     bool operator==(const Config &) const = default;
 };
+inline bool ConfigSupportedByPeer(const Config& config, uint32_t features) noexcept {
+    for (const auto& property : config.properties)
+        if (property.kind > PULSE_PICKER_UI_V2_PROPERTY_LIST && !(features & PULSE_PICKER_UI_V2_FEATURE_PROPERTY_PRESENTATION)) return false;
+    return ConfigSupportedByPeer(config.open_options, config.save_options, features) &&
+        (!(config.label_flags & PULSE_PICKER_UI_V2_LABEL_CANCEL) || (features & PULSE_PICKER_UI_V2_FEATURE_CANCEL_LABEL)) &&
+        (!config.has_folder_policy || (features & PULSE_PICKER_UI_V2_FEATURE_FOLDER_PROVENANCE));
+}
 struct Snapshot {
     uint32_t flags = 0;
     uint64_t show_id = 0, generation = 0, window = 0;
@@ -103,11 +132,13 @@ struct Message {
     uint64_t show_id = 0, expected_generation = 0, window = 0;
     uint32_t response = 0, version = 0, capabilities = 0, features = 0;
     std::wstring folder;
+    uint32_t text_kind = 0;
+    std::wstring text;
     bool operator==(const Message &) const = default;
 };
 bool Encode(const Message &, std::vector<uint8_t> &);
 bool Decode(std::span<const uint8_t>, Message &);
-bool FromAbi(const PulsePickerUiV2Config &, Config &);
+bool FromAbi(const PulsePickerUiV2Config &, Config &, const char** failure = nullptr);
 bool FromAbi(const PulsePickerUiV2Control &, Control &);
 bool FromAbi(const PulsePickerUiV2Event &, Event &);
 bool FromAbi(const PulsePickerUiV2OverwriteEvent &, Event &);
@@ -134,13 +165,13 @@ class OwnedConfig {
     std::vector<PulsePickerUiV2Place> places_;
     std::vector<std::vector<PulsePickerUiV2Text>> values_;
     std::vector<PulsePickerUiV2Property> properties_;
-    PulsePickerUiV2Config abi_{};
+    PulsePickerUiV2FolderPolicyConfig abi_{};
 
   public:
     explicit OwnedConfig(const Config &);
     OwnedConfig(const OwnedConfig &) = delete;
     OwnedConfig &operator=(const OwnedConfig &) = delete;
-    const PulsePickerUiV2Config &Get() const { return abi_; }
+    const PulsePickerUiV2Config &Get() const { return abi_.base.base; }
 };
 class OwnedEvent {
     Event value_;

@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>活动标签样式</title>
+<style>
+/* Tokens: src/ui/FluentTokens.h MakeTheme() — title #F1F3EE / sheet #F7F8F4 (dark #1A1A1A / #202020).
+   Geometry: ui_renderer.cpp drawTab + tab_shape.cpp (Chrome silhouette, top r 8, inverse shoulders r 8 + gap).
+   URL: ?v=compare|A|B|C|D &theme=light|dark &accent=sage|blue|purple|orange &hover=1 &crowd=1 &group=1 &blur=1 &zoom=150 */
+:root {
+  --page: #E6E9E3; --title: #F1F3EE; --sheet: #F7F8F4; --card: #FFFFFF;
+  --text: #303B50; --text2: #66748A; --text3: #929CAE;
+  --hover: rgba(82,125,112,.055); --stroke: #DCE3D9; --divider: #E5EAE3;
+  --edge: rgba(48,59,80,.13); --shade: rgba(48,59,80,.13);
+  --accent: #527D70; --bar: var(--accent);
+  --font: "Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+  --display: "Segoe UI Variable Display","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+  --mono: "Cascadia Mono",Consolas,ui-monospace,monospace;
+}
+:root[data-theme="dark"] {
+  --page: #111111; --title: #1A1A1A; --sheet: #202020; --card: #272727;
+  --text: #FFFFFF; --text2: rgba(255,255,255,.62); --text3: rgba(255,255,255,.40);
+  --hover: rgba(255,255,255,.07); --stroke: rgba(255,255,255,.08); --divider: rgba(255,255,255,.06);
+  --edge: rgba(255,255,255,.11); --shade: rgba(0,0,0,.55);
+  --accent: #6E9C8E; --bar: color-mix(in srgb, var(--accent) 78%, #fff);
+  color-scheme: dark;
+}
+:root[data-accent="blue"] { --accent: #0078D4; } :root[data-theme="dark"][data-accent="blue"] { --accent: #3A9BE8; }
+:root[data-accent="purple"] { --accent: #7A5BC7; } :root[data-theme="dark"][data-accent="purple"] { --accent: #9B83DE; }
+:root[data-accent="orange"] { --accent: #C8602A; } :root[data-theme="dark"][data-accent="orange"] { --accent: #E08350; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--text); font: 14px/1.45 var(--font); }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.i { width: 16px; height: 16px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+[hidden] { display: none !important; }
+
+.page { max-width: 1320px; margin: 0 auto; padding: 22px 16px 60px; display: flex; flex-direction: column; gap: 16px; }
+.page > header h1 { font: 600 24px var(--display); margin: 0; }
+.page > header p { margin: 4px 0 0; color: var(--text2); max-width: 96ch; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 9px 12px; background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; position: sticky; top: 0; z-index: 50; }
+.ctl { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text2); }
+.seg { display: inline-flex; flex-wrap: wrap; padding: 2px; gap: 2px; background: var(--hover); border-radius: 7px; }
+.seg button { height: 26px; padding: 0 10px; border-radius: 5px; font-size: 12.5px; color: var(--text2); }
+.seg button[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: 0 0 0 1px var(--stroke); }
+.ck { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 9px; border-radius: 6px; font-size: 12.5px; color: var(--text2); background: var(--hover); }
+.ck[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: 0 0 0 1px var(--stroke); }
+.ck::before { content: ""; width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--text3); }
+.ck[aria-pressed="true"]::before { background: var(--accent); border-color: var(--accent); }
+.sw { width: 16px; height: 16px; border-radius: 50%; box-shadow: 0 0 0 1px var(--stroke); }
+
+/* variant blocks */
+.block { background: var(--card); border: 1px solid var(--stroke); border-radius: 12px; overflow: hidden; }
+.bhead { display: flex; gap: 12px; align-items: baseline; padding: 12px 16px 10px; flex-wrap: wrap; }
+.bhead .tag { font: 600 12px var(--mono); padding: 1px 8px; border-radius: 6px; background: var(--hover); color: var(--text2); }
+.bhead .tag.rec { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.bhead h3 { margin: 0; font: 600 15px var(--display); }
+.bhead .rec-pill { font-size: 12px; font-weight: 600; color: var(--accent); }
+.bhead .grow { flex: 1; }
+.bhead .pick { font-size: 12.5px; color: var(--accent); }
+.bbody { display: grid; grid-template-columns: minmax(0,1fr) 300px; gap: 0; border-top: 1px solid var(--divider); }
+.bbody.single { grid-template-columns: 1fr; }
+.viewport { overflow: hidden; background: var(--sheet); position: relative; }
+.why { padding: 12px 16px; font-size: 12.5px; color: var(--text2); border-left: 1px solid var(--divider); display: flex; flex-direction: column; gap: 6px; }
+.why b { color: var(--text); font-weight: 600; }
+.why .pro::before { content: "＋ "; color: #2F7A4F; font-weight: 700; }
+.why .con::before { content: "－ "; color: #C42B1C; font-weight: 700; }
+:root[data-theme="dark"] .why .pro::before { color: #7FCB98; } :root[data-theme="dark"] .why .con::before { color: #FF99A4; }
+@media (max-width: 1000px) { .bbody { grid-template-columns: 1fr; } .why { border-left: 0; border-top: 1px solid var(--divider); } }
+
+/* scene: title bar + toolbar, 1 DIP = 1 CSS px */
+.scene { width: 1260px; background: var(--sheet); font-size: 13px; position: relative; }
+.scene.z150 { zoom: 1.5; }
+.tbar { height: 46px; background: var(--title); display: flex; align-items: stretch; position: relative; }
+.brand { display: flex; align-items: center; gap: 8px; padding-left: 12px; font: 600 15px var(--display); width: 92px; }
+.logo { width: 22px; height: 22px; border-radius: 5px; background: linear-gradient(135deg,#9B8CF0,#5A4FCF 60%,#3B2F9E); clip-path: polygon(0 18%,62% 0,100% 30%,100% 100%,0 100%); }
+.tbi { width: 34px; display: grid; place-items: center; color: var(--text2); }
+.strip { display: flex; align-items: flex-end; gap: 4px; padding-left: 8px; position: relative; }
+.tab { height: 39px; position: relative; display: flex; align-items: center; gap: 7px; padding: 0 8px 4px 10px; color: var(--text2); white-space: nowrap; flex-shrink: 0; }
+.tab .tt { overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; position: relative; z-index: 1; }
+.tab .i { position: relative; z-index: 1; }
+.tab .x { width: 18px; height: 18px; border-radius: 4px; display: grid; place-items: center; color: var(--text3); position: relative; z-index: 1; opacity: 0; }
+.tab .x .i { width: 11px; height: 11px; }
+.tab.on .x, .tab.hov .x { opacity: 1; }
+.tab .hv { position: absolute; left: 0; right: 0; top: 0; bottom: 4px; border-radius: 8px; z-index: 0; }
+.tab.hov .hv { background: var(--hover); }
+.tab .gtint { position: absolute; left: 0; right: 0; top: 0; bottom: 4px; border-radius: 8px; z-index: 0; overflow: hidden; }
+.tab .gline { position: absolute; left: 0; right: 0; top: 0; height: 2px; }
+.tab svg.bg { position: absolute; top: -14px; z-index: 0; overflow: visible; pointer-events: none; }
+.tab .bar { position: absolute; bottom: 2px; height: 3px; width: 18px; border-radius: 1.5px; z-index: 2; background: var(--bar); }
+.tab.on .tt { color: var(--text); }
+.plus { width: 34px; height: 34px; align-self: center; display: grid; place-items: center; color: var(--text2); margin-left: 4px; margin-top: 6px; }
+.tbar .sp { flex: 1; }
+.tgroup { display: flex; gap: 2px; padding: 3px; border-radius: 9px; background: var(--hover); align-self: center; margin-right: 18px; }
+.tgroup span { width: 34px; height: 30px; display: grid; place-items: center; color: var(--text); border-radius: 6px; }
+.cap { width: 46px; display: grid; place-items: center; color: var(--text2); }
+.cap .i { width: 12px; height: 12px; }
+.tool { height: 52px; display: flex; align-items: center; gap: 4px; padding: 0 10px 0 0; background: var(--sheet); }
+.fav { width: 222px; height: 52px; display: flex; align-items: center; gap: 8px; padding: 0 14px 0 16px; font-size: 14px; }
+.fav .chev { margin-left: auto; color: var(--text2); }
+.nb { width: 34px; height: 34px; display: grid; place-items: center; color: var(--text2); }
+.addr { flex: 1; height: 36px; display: flex; align-items: center; gap: 10px; padding: 0 12px; border-radius: 8px; background: var(--card); border: 1px solid var(--stroke); font-size: 14px; margin: 0 6px; }
+.addr .i.c { width: 11px; height: 11px; color: var(--text3); }
+.addr .star { margin-left: auto; color: var(--text2); }
+.srch { width: 270px; height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 12px; border-radius: 8px; background: var(--card); border: 1px solid var(--stroke); color: var(--text2); font-size: 14px; margin-left: 4px; }
+.srch kbd { margin-left: auto; font: 12px var(--font); padding: 3px 8px; border: 1px solid var(--stroke); border-radius: 12px; color: var(--text2); }
+.scene.blur .tab.on .bar { background: var(--text3); }
+
+/* zoom inspector */
+.zoomwrap { padding: 12px 16px 16px; border-top: 1px solid var(--divider); display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+.zoombox { width: 600px; height: 240px; overflow: hidden; position: relative; border-radius: 8px; border: 1px solid var(--stroke); background: var(--page); flex-shrink: 0; }
+.zoombox .scene { zoom: 3; position: absolute; }
+.zoomcap { font-size: 12.5px; color: var(--text2); max-width: 420px; display: flex; flex-direction: column; gap: 8px; }
+.zoomcap b { color: var(--text); }
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
+.note { background: var(--card); border: 1px solid var(--stroke); border-radius: 8px; padding: 11px 14px; font-size: 12.5px; color: var(--text2); }
+.note b { color: var(--text); font-weight: 600; display: block; margin-bottom: 3px; font-size: 13px; }
+.note code { font: 12px var(--mono); color: var(--text); }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="folder" viewBox="0 0 16 16"><path d="M1.5 4a1 1 0 0 1 1-1h3.4l1.6 1.6h6a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></symbol>
+  <symbol id="x" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+  <symbol id="plus" viewBox="0 0 16 16"><path d="M8 2.5v11M2.5 8h11"/></symbol>
+  <symbol id="minus" viewBox="0 0 16 16"><path d="M3 8h10"/></symbol>
+  <symbol id="square" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1"/></symbol>
+  <symbol id="sidebar" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M6 2.5v11"/></symbol>
+  <symbol id="panes" viewBox="0 0 16 16"><rect x="1.5" y="4" width="10" height="10" rx="1.5"/><path d="M4.5 4V3a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-2"/></symbol>
+  <symbol id="gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2"/><path d="M6.9 1.6h2.2l.4 1.8 1.2.7 1.8-.6 1.1 1.9-1.4 1.3v1.4l1.4 1.3-1.1 1.9-1.8-.6-1.2.7-.4 1.8H6.9l-.4-1.8-1.2-.7-1.8.6-1.1-1.9 1.4-1.3V7.3L2.4 6l1.1-1.9 1.8.6 1.2-.7z"/></symbol>
+  <symbol id="contrast" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="M8 1.5v13A6.5 6.5 0 0 0 8 1.5z" fill="currentColor"/></symbol>
+  <symbol id="star" viewBox="0 0 16 16"><path d="m8 1.8 1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.6l-3.8 2 .7-4.3-3.1-3 4.3-.6z"/></symbol>
+  <symbol id="chev-d" viewBox="0 0 16 16"><path d="m3.5 6 4.5 4.5L12.5 6"/></symbol>
+  <symbol id="chev-r" viewBox="0 0 16 16"><path d="m6 3.5 4.5 4.5L6 12.5"/></symbol>
+  <symbol id="back" viewBox="0 0 16 16"><path d="M13 8H3M7 4 3 8l4 4"/></symbol>
+  <symbol id="fwd" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4"/></symbol>
+  <symbol id="up" viewBox="0 0 16 16"><path d="M8 13V3M4 7l4-4 4 4"/></symbol>
+  <symbol id="refresh" viewBox="0 0 16 16"><path d="M13.5 8A5.5 5.5 0 1 1 11.8 4"/><path d="M12 1.5V4.5H9"/></symbol>
+  <symbol id="search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></symbol>
+</defs></svg>
+
+<div class="page">
+  <header>
+    <h1>活动标签：更明显，并和地址栏无缝衔接</h1>
+    <p>现在的活动标签只比标题栏亮约 2%（#F7F8F4 对 #F1F3EE；深色 #202020 对 #1A1A1A），辨识主要靠一圈细描边，而描边一直画到肩部，和下方地址栏的底色相接，看起来像一道折线。下面把当前样式和三个方案放在同一窗口里比较，最下方放大肩部看接缝。</p>
+  </header>
+
+  <div class="controls" id="controls">
+    <div class="ctl">视图 <div class="seg" data-k="v"><button data-v="compare">全部对比</button><button data-v="A">A 当前</button><button data-v="B">B 渐变填充</button><button data-v="C">C 推荐</button><button data-v="D">D 顶边条</button></div></div>
+    <div class="ctl">主题 <div class="seg" data-k="theme"><button data-v="light">浅色</button><button data-v="dark">深色</button></div></div>
+    <div class="ctl">强调色 <div class="seg" data-k="accent">
+      <button data-v="sage"><span class="sw" style="background:#527D70;display:inline-block;vertical-align:-3px"></span></button>
+      <button data-v="blue"><span class="sw" style="background:#0078D4;display:inline-block;vertical-align:-3px"></span></button>
+      <button data-v="purple"><span class="sw" style="background:#7A5BC7;display:inline-block;vertical-align:-3px"></span></button>
+      <button data-v="orange"><span class="sw" style="background:#C8602A;display:inline-block;vertical-align:-3px"></span></button></div></div>
+    <div class="ctl">状态
+      <button class="ck" data-t="hover">悬停旁边标签</button>
+      <button class="ck" data-t="group">标签组</button>
+      <button class="ck" data-t="crowd">标签很多</button>
+      <button class="ck" data-t="blur">窗口失焦</button>
+    </div>
+    <div class="ctl">缩放 <div class="seg" data-k="zoom"><button data-v="100">100%</button><button data-v="150">150%</button></div></div>
+  </div>
+
+  <div id="blocks" style="display:flex;flex-direction:column;gap:14px"></div>
+
+  <section class="notes">
+    <div class="note"><b>为什么推荐 C 而不是整片渐变</b>标签组已经用“组色顶边条 + 10% 组色底色”表示分组（<code>FillChromeTabAccent</code> / <code>color_rgb</code> tint）。活动标签再用强调色大面积填充，组内标签和活动标签会读成同一种信号；用户把强调色换成橙、红时整片填充也会很重。C 把辨识度放在明暗、字重和强调条上，颜色只做顶部 10% 的轻晕染。</div>
+    <div class="note"><b>接缝的解法（B、C、D 共用）</b>描边改用竖向渐变画笔：上半段保持原透明度，下 40% 渐隐到 0，肩部弧线落到地址栏那一行时已经看不见，标签和下方工作区成为一整块。D2D 的 <code>StrokeChromeTabEdge</code> 直接换成 <code>ID2D1LinearGradientBrush</code> 即可，路径不变。</div>
+    <div class="note"><b>C 的实现范围</b>只动 <code>ui_renderer.cpp</code> 的 drawTab 活动分支：①沿用已有阴影写法（FillChromeTab 偏移一层）改为四周 3 DIP 柔和投影；②顶部强调晕染 = 已有深色顶光的渐变画笔换成强调色；③描边换渐变画笔；④活动标题用 SemiBold 格式，未选中标题用 text_secondary。不改布局和宽度计算。</div>
+    <div class="note"><b>需要回归的状态</b>标签组内的活动标签（晕染和强调条改用组色）、拖动中的浮起标签（raised 分支保持不变）、多行/竖排标签（不相接时仍是卡片 + 描边）、窗口失焦（强调条变灰、晕染去掉）、高对比度（全部回退到系统色，不画渐变）、150% / 200% DPI 下描边仍取整到 1 物理像素。</div>
+  </section>
+</div>
+
+<script>
+(() => {
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const ico = id => `<svg class="i"><use href="#${id}"/></svg>`;
+const P = new URLSearchParams(location.search);
+const st = { v: P.get('v') || 'compare', theme: P.get('theme') || 'light', accent: P.get('accent') || 'sage', zoom: P.get('zoom') || '100',
+  hover: P.get('hover') === '1', group: P.get('group') === '1', crowd: P.get('crowd') === '1', blur: P.get('blur') === '1' };
+
+const VARIANTS = {
+  A: { name: '当前样式', tag: 'A', why: [
+      ['', '活动标签填充工作区底色（sheet），靠一圈 13% 不透明度的细描边和图标下 18×3 的强调条区分。'],
+      ['con', '和标题栏只差约 2% 亮度，扫一眼找不到当前标签，这正是用户反馈的问题。'],
+      ['con', '描边一直画到两侧肩部，弧线末端压在地址栏那一行的底色上，形成两道折线。'] ] },
+  B: { name: '渐变填充（你的想法）', tag: 'B', why: [
+      ['', '强调色从顶部约 24% 渐变到底部 0，底部与工作区同色；描边改为强调色并在下半段渐隐。'],
+      ['pro', '最醒目，接缝消失。'],
+      ['con', '和“标签组底色”是同一种视觉语言，开启标签组后很难分清哪个是当前标签。'],
+      ['con', '强调色由用户自选，橙、红色下整片填充偏重；失焦时也需要整片褪色。'] ] },
+  C: { name: '托起 + 渐隐描边（推荐）', tag: 'C', rec: true, why: [
+      ['', '一层很淡的四周投影把标签托离标题栏；描边下 40% 渐隐，肩部融进地址栏；顶部只留 10% 强调色晕染；活动标题加粗，其他标签文字降为次要色。'],
+      ['pro', '辨识度来自明暗、字重、强调条三重信号，不依赖颜色，色弱用户和任何强调色都适用。'],
+      ['pro', '与标签组的组色顶边条、组色底色互不冲突。'],
+      ['con', '没有 B 那么“亮眼”，但扫视时足够明确。'] ] },
+  D: { name: '顶边强调条', tag: 'D', why: [
+      ['', 'Edge / Visual Studio 式：活动标签顶部 2 DIP 强调色条，按圆角裁切；描边同样渐隐。'],
+      ['pro', '非常醒目，实现最简单（已有 FillChromeTabAccent）。'],
+      ['con', '标签组已经用顶边条表示分组颜色，两者撞车：组内的活动标签无法区分。'] ] },
+};
+
+function tabs() {
+  const base = [{ t: 'H:' }, { t: '加固方案', g: 1 }, { t: 'dist', g: 1 }, { t: 'Desktop', on: true }, { t: 'Desktop' }, { t: 'Desktop' }];
+  if (st.group) base[3].g = 1;
+  if (st.crowd) base.push({ t: 'Downloads' }, { t: 'pulse' }, { t: 'src' }, { t: 'ui' }, { t: 'bench_data' });
+  return base;
+}
+const GROUP = '#D08A2E';
+
+/* Chrome silhouette: content box w×h, convex top r=tr, inverse shoulders r=br. Origin offset (br, pad). */
+function silhouette(w, h, tr, br, pad, closed) {
+  const L = br, R = br + w, T = pad, B = pad + h;
+  let d = `M0 ${B} A${br} ${br} 0 0 0 ${L} ${B - br} L${L} ${T + tr} A${tr} ${tr} 0 0 1 ${L + tr} ${T} L${R - tr} ${T} A${tr} ${tr} 0 0 1 ${R} ${T + tr} L${R} ${B - br} A${br} ${br} 0 0 0 ${R + br} ${B}`;
+  return closed ? d + ' Z' : d;
+}
+
+let uid = 0;
+function activeSVG(v, w, h, grouped) {
+  const tr = 8, br = 12, pad = 14, id = 'g' + (++uid);
+  const W = w + br * 2, H = h + pad;
+  const dark = st.theme === 'dark';
+  const tint = grouped ? GROUP : 'var(--accent)';
+  const fill = silhouette(w, h, tr, br, pad, true), edge = silhouette(w, h, tr, br, pad, false);
+  const lg = (gid, stops) => `<linearGradient id="${gid}" gradientUnits="userSpaceOnUse" x1="0" y1="${pad}" x2="0" y2="${pad + h}">${stops.map(([o, c, a]) => `<stop offset="${o}" style="stop-color:${c};stop-opacity:${a}"/>`).join('')}</linearGradient>`;
+  let defs = '', body = '';
+  const sheet = `<path d="${fill}" style="fill:var(--sheet)"/>`;
+  const edgeColor = dark ? '#FFFFFF' : '#303B50';
+  if (v === 'A') {
+    if (dark) { defs += lg(id + 'l', [[0, '#fff', .05], [.9, '#fff', 0]]); }
+    body = sheet + (dark ? `<path d="${fill}" fill="url(#${id}l)"/>` : '') + `<path d="${edge}" fill="none" style="stroke:var(--edge)" stroke-width="1"/>`;
+  } else if (v === 'B') {
+    const a = st.blur ? 0 : (dark ? .30 : .24);
+    defs += lg(id + 'w', [[0, tint, a], [1, tint, 0]]);
+    defs += lg(id + 's', [[0, tint, st.blur ? 0 : .55], [.55, tint, st.blur ? 0 : .4], [.95, tint, 0]]);
+    defs += lg(id + 'n', [[0, edgeColor, dark ? .11 : .13], [.6, edgeColor, dark ? .11 : .13], [.95, edgeColor, 0]]);
+    body = sheet + `<path d="${fill}" fill="url(#${id}w)"/>` + `<path d="${edge}" fill="none" stroke="url(#${id}${st.blur ? 'n' : 's'})" stroke-width="1"/>`;
+  } else if (v === 'C') {
+    const a = st.blur ? 0 : (dark ? .14 : .10);
+    defs += `<filter id="${id}f" x="-20%" y="-60%" width="140%" height="160%"><feDropShadow dx="0" dy="0" stdDeviation="${dark ? 3 : 3}" flood-color="${dark ? '#000' : '#303B50'}" flood-opacity="${dark ? .6 : .2}"/></filter>`;
+    defs += lg(id + 'w', [[0, tint, a], [.6, tint, 0]]);
+    defs += lg(id + 'l', [[0, '#fff', dark ? .06 : 0], [.7, '#fff', 0]]);
+    defs += lg(id + 's', [[0, edgeColor, dark ? .14 : .17], [.55, edgeColor, dark ? .12 : .14], [.95, edgeColor, 0]]);
+    // the shadow is clipped at the sheet edge so it never darkens the toolbar row
+    defs += `<clipPath id="${id}c"><rect x="-20" y="-20" width="${W + 40}" height="${pad + h + 20}"/></clipPath>`;
+    body = `<g clip-path="url(#${id}c)"><path d="${fill}" style="fill:var(--sheet)" filter="url(#${id}f)"/></g>` + sheet +
+      `<path d="${fill}" fill="url(#${id}w)"/><path d="${fill}" fill="url(#${id}l)"/>` +
+      `<path d="${edge}" fill="none" stroke="url(#${id}s)" stroke-width="1"/>`;
+  } else if (v === 'D') {
+    defs += lg(id + 's', [[0, edgeColor, dark ? .11 : .13], [.55, edgeColor, dark ? .11 : .13], [.95, edgeColor, 0]]);
+    defs += `<clipPath id="${id}t"><path d="${fill}"/></clipPath>`;
+    body = sheet + `<path d="${edge}" fill="none" stroke="url(#${id}s)" stroke-width="1"/>` +
+      `<rect x="${br}" y="${pad}" width="${w}" height="2.5" clip-path="url(#${id}t)" style="fill:${st.blur ? 'var(--text3)' : tint}"/>`;
+  }
+  return `<svg class="bg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="left:-${br}px"><defs>${defs}</defs>${body}</svg>`;
+}
+
+function scene(v) {
+  const list = tabs();
+  const w = st.crowd ? 104 : 118, h = 39;
+  const tabsHTML = list.map((t, i) => {
+    const hov = st.hover && i === 4;
+    const g = t.g && st.group;
+    let extra = '';
+    if (g && !t.on) extra = `<span class="gtint" style="background:${GROUP}1A"><span class="gline" style="background:${GROUP};opacity:.55"></span></span>`;
+    if (g && t.on && v === 'A') extra = ''; // current: group strip drawn on top below
+    const bg = t.on ? activeSVG(v, w, h, g) : '';
+    const strong = t.on && (v === 'B' || v === 'C');
+    const iconColor = t.on ? (g ? GROUP : 'var(--accent)') : 'currentColor';
+    const topLine = g && t.on && v !== 'D' ? `<span class="gline" style="background:${GROUP};position:absolute;left:4px;right:4px;top:0;height:2px;border-radius:1px;z-index:2"></span>` : '';
+    const bar = t.on ? `<span class="bar" style="left:10px;${g ? `background:${GROUP}` : ''}"></span>` : '';
+    return `<div class="tab ${t.on ? 'on' : ''} ${hov ? 'hov' : ''}" style="width:${w}px">${bg}<span class="hv"></span>${extra}${topLine}
+      <svg class="i" style="color:${iconColor}"><use href="#folder"/></svg><span class="tt" style="${strong ? 'font-weight:600;' : ''}${v === 'C' && !t.on ? 'color:var(--text2)' : ''}">${t.t}</span>
+      <span class="x"><svg class="i"><use href="#x"/></svg></span>${bar}</div>`;
+  }).join('');
+  return `<div class="scene ${st.zoom === '150' ? 'z150' : ''} ${st.blur ? 'blur' : ''}" data-variant="${v}">
+    <div class="tbar">
+      <div class="brand"><div class="logo"></div>Pulse</div>
+      <div class="tbi">${ico('sidebar')}</div>
+      <div class="strip">${tabsHTML}<span class="plus">${ico('plus')}</span></div>
+      <div class="sp"></div>
+      <div class="tgroup"><span>${ico('panes')}</span><span>${ico('gear')}</span><span>${ico('contrast')}</span></div>
+      <div class="cap">${ico('minus')}</div><div class="cap">${ico('square')}</div><div class="cap">${ico('x')}</div>
+    </div>
+    <div class="tool">
+      <div class="fav"><svg class="i" style="color:#E3A53C;fill:#E3A53C"><use href="#star"/></svg>收藏夹<svg class="i chev"><use href="#chev-d"/></svg></div>
+      <span class="nb">${ico('back')}</span><span class="nb">${ico('fwd')}</span><span class="nb" style="color:var(--text)">${ico('up')}</span>
+      <div class="addr">此电脑<svg class="i c"><use href="#chev-r"/></svg>C:<svg class="i c"><use href="#chev-r"/></svg>Users<svg class="i c"><use href="#chev-r"/></svg>SS<svg class="i c"><use href="#chev-r"/></svg>Desktop<svg class="i c"><use href="#chev-r"/></svg><span class="star">${ico('star')}</span></div>
+      <span class="nb">${ico('refresh')}</span>
+      <div class="srch">${ico('search')}搜索全盘<kbd>Ctrl+K</kbd></div>
+    </div>
+  </div>`;
+}
+
+function block(v, withZoom) {
+  const m = VARIANTS[v];
+  const why = m.why.map(([k, t]) => `<div class="${k}">${t}</div>`).join('');
+  const zoom = withZoom ? `<div class="zoomwrap"><div class="zoombox" data-zoom="${v}">${scene(v)}</div>
+    <div class="zoomcap"><b>放大 3 倍：活动标签右肩与地址栏这一行</b><span>${v === 'A' ? '描边沿肩部弧线一直画到底，末端压在工作区底色上，与地址栏左上角之间形成一道硬折线。' : '描边在下 40% 渐隐到 0，肩部弧线落到工作区时已经看不见，标签和地址栏所在的工作区连成一整块。'}</span>
+    <span style="color:var(--text3)">切换上方“视图”看其他方案的放大；缩放 150% 可检查高 DPI 下的效果。</span></div></div>` : '';
+  return `<div class="block"><div class="bhead"><span class="tag ${m.rec ? 'rec' : ''}">${m.tag}</span><h3>${m.name}</h3>${m.rec ? '<span class="rec-pill">推荐</span>' : ''}<span class="grow"></span>
+    ${st.v === 'compare' ? `<button class="pick" data-pick="${v}">单独查看并放大接缝 →</button>` : ''}</div>
+    <div class="bbody"><div class="viewport">${scene(v)}</div><div class="why">${why}</div></div>${zoom}</div>`;
+}
+
+function positionZoom() {
+  $$('.zoombox').forEach(box => {
+    const sc = box.querySelector('.scene');
+    const on = sc.querySelector('.tab.on');
+    const z = 3 * (st.zoom === '150' ? 1.5 : 1);
+    // map the active tab's right edge to ~60% across the box, title-bar bottom to the middle
+    const tabRight = on.offsetLeft + on.offsetWidth + on.parentElement.offsetLeft;
+    sc.style.zoom = z;
+    sc.style.left = (box.clientWidth * 0.55 / z - tabRight) + 'px';
+    sc.style.top = (box.clientHeight * 0.5 / z - 46) + 'px';
+  });
+}
+
+function render() {
+  const r = document.documentElement;
+  r.dataset.theme = st.theme; r.dataset.accent = st.accent;
+  $$('.seg[data-k]').forEach(s => $$('button', s).forEach(b => b.setAttribute('aria-pressed', st[s.dataset.k] === b.dataset.v)));
+  $$('.ck[data-t]').forEach(b => b.setAttribute('aria-pressed', st[b.dataset.t]));
+  const order = st.v === 'compare' ? ['A', 'B', 'C', 'D'] : [st.v];
+  $('#blocks').innerHTML = order.map(v => block(v, st.v !== 'compare')).join('');
+  positionZoom();
+  const q = new URLSearchParams();
+  q.set('v', st.v); q.set('theme', st.theme); q.set('accent', st.accent); q.set('zoom', st.zoom);
+  for (const k of ['hover', 'group', 'crowd', 'blur']) if (st[k]) q.set(k, '1');
+  history.replaceState(null, '', '?' + q);
+}
+
+document.addEventListener('click', e => {
+  const s = e.target.closest('.seg[data-k] button');
+  if (s) { st[s.closest('.seg').dataset.k] = s.dataset.v; render(); return; }
+  const c = e.target.closest('.ck[data-t]');
+  if (c) { st[c.dataset.t] = !st[c.dataset.t]; render(); return; }
+  const p = e.target.closest('[data-pick]');
+  if (p) { st.v = p.dataset.pick; render(); window.scrollTo(0, 0); }
+});
+render();
+})();
+</script>
+</body>
+</html>

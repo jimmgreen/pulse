@@ -1,3 +1,4 @@
+#include "../common/office_preview_policy.h"
 #include "../common/volume_path.h"
 #include "edit_host.h"
 #include "FluentTokens.h"
@@ -121,7 +122,7 @@ std::wstring ExtensionLabel(const std::wstring& path) {
 int TableFileKind(const std::wstring& path) {
     const std::wstring ext = ExtensionLabel(path);
     if (ext == L"CSV" || ext == L"TSV" || ext == L"TAB" || ext == L"PSV") return 1;
-    if (ext == L"XLSX" || ext == L"XLSM") return 2;
+    if (ext == L"XLS" || ext == L"XLSX" || ext == L"XLSM") return 2;
     return 0;
 }
 
@@ -130,10 +131,10 @@ bool IsIconFile(const std::wstring& path) {
     return ext == L"ICO" || ext == L"CUR";
 }
 
-// Word documents the host converts to the block payload ("Document | System").
-bool IsDocxFile(const std::wstring& path) {
+// Office documents the host converts to the block payload ("Document | System").
+bool IsOfficeDocumentFile(const std::wstring& path) {
     const std::wstring ext = ExtensionLabel(path);
-    return ext == L"DOCX" || ext == L"DOCM" || ext == L"DOTX";
+    return preview::IsNativeOfficeDocumentExtension(L"." + ext);
 }
 
 // 12,480: digits grouped for the status pill.
@@ -240,6 +241,7 @@ void QuickPreviewWindow::ResetTextState() {
 }
 
 void QuickPreviewWindow::ResetView() {
+    doc_handler_ = false; // a new document always starts in the native reader
     native_preview_.Reset();
     if (hwnd_) KillTimer(hwnd_, kPreviewDeadlineTimer);
     preview_deadline_ = 0;
@@ -2328,7 +2330,7 @@ void QuickPreviewWindow::Render() {
         !(item_.attrs & FILE_ATTRIBUTE_DIRECTORY) && PreviewHandlerHost::CanHost(item_.path) &&
         !(kMarkdownRender && SyntaxLanguageName(L"." + ExtensionLabel(item_.path)) == L"Markdown") &&
         !(kTableView && TableFileKind(item_.path) == 2 && !table_handler_) &&
-        !(kDocView && IsDocxFile(item_.path) && !doc_handler_) &&
+        !(kDocView && IsOfficeDocumentFile(item_.path) && !doc_handler_) &&
         !(kDocView && ExtensionLabel(item_.path) == L"EPUB");
     handler_.Sync(hwnd_, full_content, item_.path, item_.attrs, generation_, item_.modified,
                   item_.size, dark_, background, foreground, use_handler,
@@ -2340,7 +2342,7 @@ void QuickPreviewWindow::Render() {
         // "Table | System" stays available over the Office preview handler.
         markdown_shown_ = true;
         toggle_kind_ = ToggleKind::TableHandler;
-    } else if (use_handler && kDocView && IsDocxFile(item_.path)) {
+    } else if (use_handler && kDocView && IsOfficeDocumentFile(item_.path)) {
         markdown_shown_ = true;
         toggle_kind_ = ToggleKind::DocHandler;
     }
@@ -2603,7 +2605,7 @@ void QuickPreviewWindow::Render() {
             // DOCX / EPUB have no source view; DOCX may switch to the handler.
             const bool document = !markdown_.DocFormat().empty();
             markdown_shown_ = !document ||
-                (markdown_.DocFormat() == L"docx" && PreviewHandlerHost::CanHost(item_.path));
+                (IsOfficeDocumentFile(item_.path) && PreviewHandlerHost::CanHost(item_.path));
             native_kind_ = NativeKind::Markdown;
             if (markdown_.IsNotebook()) toggle_kind_ = ToggleKind::NotebookSource;
             if (document) toggle_kind_ = ToggleKind::DocHandler;
@@ -2637,16 +2639,28 @@ void QuickPreviewWindow::Render() {
                 if (truncated) size += pulse::l10n::Get(pulse::l10n::StringId::Truncated).c_str();
                 parts.push_back(std::move(size));
                 SetFooterParts(std::move(parts));
-            } else if (markdown_.DocFormat() == L"docx") {
+            } else if (markdown_.DocFormat() == L"docx" || markdown_.DocFormat() == L"doc" ||
+                       markdown_.DocFormat() == L"rtf") {
                 // Word 文档  |  约 1,240 字  |  38 KB
                 const bool zh = pulse::l10n::IsChinese();
                 std::vector<std::wstring> parts;
                 parts.push_back(pulse::l10n::Get(pulse::l10n::StringId::WordDocument).c_str());
+                if (markdown_.DocFormat() != L"docx")
+                    parts.push_back(pulse::l10n::Get(pulse::l10n::StringId::PreviewNativeContentMode));
                 const std::wstring words = GroupedNumber(markdown_.WordCount());
                 parts.push_back(zh ? pulse::l10n::Cn(L"\x7EA6 ") + words + pulse::l10n::Cn(L" \x5B57") : L"about " + words + L" words");
                 std::wstring size = pulse::format::ByteSize(item_.size ? item_.size : bytes_read, true);
                 if (truncated) size += pulse::l10n::Get(pulse::l10n::StringId::Truncated).c_str();
                 parts.push_back(std::move(size));
+                SetFooterParts(std::move(parts));
+            } else if (markdown_.DocFormat() == L"ppt" || markdown_.DocFormat() == L"pptx") {
+                wchar_t page[96]{};
+                swprintf_s(page, pulse::l10n::Get(pulse::l10n::StringId::PreviewPageOf).c_str(),
+                    static_cast<unsigned>(markdown_.SectionIndex() + 1),
+                    static_cast<unsigned>((std::max)(1, markdown_.SectionCount())));
+                std::vector<std::wstring> parts{ExtensionLabel(item_.path), page,
+                    pulse::l10n::Get(pulse::l10n::StringId::PreviewNativeContentMode)};
+                if (truncated) parts.push_back(pulse::l10n::Get(pulse::l10n::StringId::Truncated_2));
                 SetFooterParts(std::move(parts));
             } else if (markdown_.DocFormat() == L"epub") {
                 // EPUB  |  第 1 / 27 章  |  author

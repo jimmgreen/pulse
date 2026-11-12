@@ -22,6 +22,9 @@ bool Ready(const std::filesystem::path&, const cfg::Session&, cfg::Ready&);
 bool LoadSession(const std::filesystem::path&, const std::wstring& expected_launcher, cfg::Session&);
 // Worker only. Exact PID/create-time/image/permission validation before mutation.
 // Never kills processes. Handshake is historical; current routing is not queried.
+// Explicit verified-profile architecture; read-only, never writes disable markers.
+DWORD InspectForMachine(const std::wstring& directory, const std::wstring& expected_launcher,
+                        WORD expected_machine, Status&) noexcept;
 DWORD Inspect(const std::wstring& directory, const std::wstring& expected_launcher,
               bool disable, Status&) noexcept;
 }

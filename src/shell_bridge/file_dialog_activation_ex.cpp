@@ -25,7 +25,7 @@ const char* Eligibility(REFCLSID clsid, IUnknown* outer, DWORD context, COSERVER
               DWORD count, MULTI_QI* results, DialogFactory& factory, const IID*& rejected) {
     if (outer) return "ex-native-aggregation";
     if (server) return "ex-native-server-info";
-    if (context != CLSCTX_INPROC_SERVER) return "ex-native-context";
+    if (!detail::InprocActivationContext(context)) return "ex-native-context";
     if (!count || count > kMaxInterfaces || !results) return "ex-native-result-array";
     if (clsid == CLSID_FileOpenDialog) factory = DialogFactory::Open;
     else if (clsid == CLSID_FileSaveDialog) factory = DialogFactory::Save;

@@ -255,7 +255,29 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
     try {
-        if (argc == 2 && std::wstring_view(argv[1]) == L"--frame-perf") {
+        if (argc == 2 && std::wstring_view(argv[1]) == L"--recent-limit") {
+            const auto source = root / L"source";
+            const auto perf = source / L"Diagnostics" / L"Perf";
+            fs::create_directories(perf);
+            for (int i = 1000; i < 1300; ++i) {
+                const auto file = perf / (L"frame-" + std::to_wstring(i) + L".log");
+                Write(file, "fixture");
+                HANDLE handle = CreateFileW(file.c_str(), FILE_WRITE_ATTRIBUTES,
+                    FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+                ULARGE_INTEGER stamp{};
+                stamp.QuadPart = 133000000000000000ull + static_cast<unsigned long long>(i) * 10000000ull;
+                FILETIME time{stamp.LowPart, stamp.HighPart};
+                const bool stamped = handle != INVALID_HANDLE_VALUE && SetFileTime(handle, nullptr, nullptr, &time);
+                if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+                if (!stamped) throw std::runtime_error("timestamp fixture failed");
+            }
+            const auto destination = root / L"export";
+            Check(!Export(source, destination), "bounded export still reports partial coverage");
+            Check(fs::exists(destination / L"Perf" / L"frame-1299.log"), "newest evidence survives file limit");
+            Check(!fs::exists(destination / L"Perf" / L"frame-1000.log"), "oldest evidence yields to newer evidence");
+            Check(Read(destination / L"diagnostics-manifest.json").find("\"complete\":false") != std::string::npos,
+                "manifest retains incomplete status");
+        } else if (argc == 2 && std::wstring_view(argv[1]) == L"--frame-perf") {
             const auto source = root / L"source";
             const auto perf = source / L"Diagnostics" / L"Perf";
             fs::create_directories(perf);

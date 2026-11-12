@@ -2826,6 +2826,13 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
     drives.icon_glyph = L"\xE977";        // this PC
     drives.navigable = true;             // the title opens This PC (#80)
     nets.icon_glyph = L"\xE968";          // network
+    // The narrow rail titles each section with a short word that fits 48dip.
+    workspaces.rail_header = l10n::Get(l10n::StringId::SidebarRailWorkspaces);
+    access.rail_header = l10n::Get(l10n::StringId::SidebarRailQuickAccess);
+    savedSearches.rail_header = l10n::Get(l10n::StringId::SidebarRailSavedSearches);
+    drives.rail_header = l10n::Get(l10n::StringId::SidebarRailDrives);
+    tags.rail_header = l10n::Get(l10n::StringId::SidebarRailTags);
+    nets.rail_header = l10n::Get(l10n::StringId::SidebarRailNetworks);
 
     tags.header = l10n::Get(l10n::StringId::SidebarTags);
     tags.add_action = ui::SidebarAddAction::CreateTag;

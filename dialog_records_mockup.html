@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>软件接管记录 · 重新设计</title>
+<style>
+/* Pulse FluentTokens.h: light / dark settings tokens */
+.light { --bg:#F3F5F1; --sheet:#F7F8F4; --card:#FFFFFF; --stroke:#DCE3D9; --divider:#E5EAE3; --text:#303B50; --text2:#66748A;
+  --hover:rgba(82,125,112,.055); --accent:#527D70; --ok:#0F7B4F; --warn:#C98A00; --bad:#C42B1C; --chip-a:.10; --kbd:rgba(48,59,80,.06); }
+.dark { --bg:#1A1A1A; --sheet:#202020; --card:#272727; --stroke:rgba(255,255,255,.045); --divider:rgba(255,255,255,.06); --text:#FFFFFF;
+  --text2:rgba(255,255,255,.6063); --hover:rgba(255,255,255,.08); --accent:#7FB3A3; --ok:#5FD4A0; --warn:#F2C14E; --bad:#FF99A4; --chip-a:.16; --kbd:rgba(255,255,255,.08); }
+* { box-sizing:border-box; }
+body { margin:0; padding:24px; background:#E9ECE6; font:14px/1.45 "Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",sans-serif; color:#303B50; }
+h1 { font-size:20px; margin:0 0 4px; font-weight:600; }
+.lead { color:#66748A; margin:0 0 20px; max-width:980px; }
+.boards { display:grid; grid-template-columns:repeat(auto-fit,minmax(520px,1fr)); gap:24px; }
+.page { background:var(--bg); color:var(--text); border-radius:12px; padding:20px; }
+.page h2 { font-size:13px; font-weight:600; color:var(--text2); margin:0 0 10px; letter-spacing:.2px; }
+.card { background:var(--card); border:1px solid var(--stroke); border-radius:8px; overflow:hidden; }
+.head { display:flex; gap:14px; align-items:flex-start; padding:16px 20px; }
+.head .ico { width:20px; height:20px; margin-top:2px; color:var(--text); flex:none; }
+.head .t { flex:1; min-width:0; }
+.head .t b { display:block; font-weight:600; }
+.head .t span { color:var(--text2); font-size:12.5px; }
+.btn { flex:none; height:32px; padding:0 14px; border-radius:6px; border:1px solid var(--stroke); background:var(--card); color:var(--text); font:inherit; font-size:13px; }
+.note { padding:0 20px 14px 54px; color:var(--text2); font-size:12.5px; }
+.row { display:grid; grid-template-columns:32px 1fr auto; column-gap:12px; padding:12px 20px 12px 20px; border-top:1px solid var(--divider); align-items:start; }
+.row:hover { background:var(--hover); }
+.app { width:32px; height:32px; border-radius:7px; display:grid; place-items:center; font-weight:700; font-size:15px; color:#fff; }
+.app.generic { background:var(--kbd); color:var(--text2); }
+.name { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.name small { font-weight:400; color:var(--text2); font-size:12px; margin-left:6px; }
+.meta { color:var(--text2); font-size:12.5px; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.detail { grid-column:2 / 4; margin-top:8px; padding:8px 10px; border-radius:6px; font-size:12.5px; background:var(--kbd); }
+.detail .why { color:var(--text); }
+.detail .how { color:var(--text2); margin-top:2px; }
+.later { grid-column:2 / 4; margin-top:6px; font-size:12px; color:var(--ok); display:flex; gap:6px; align-items:center; }
+.chip { display:inline-flex; align-items:center; gap:6px; height:22px; padding:0 9px; border-radius:11px; font-size:12px; font-weight:600; white-space:nowrap; margin-top:5px; }
+.chip i { width:6px; height:6px; border-radius:50%; background:currentColor; }
+.chip.ok { color:var(--ok); background:color-mix(in srgb, var(--ok) calc(var(--chip-a)*100%), transparent); }
+.chip.warn { color:var(--warn); background:color-mix(in srgb, var(--warn) calc(var(--chip-a)*100%), transparent); }
+.chip.bad { color:var(--bad); background:color-mix(in srgb, var(--bad) calc(var(--chip-a)*100%), transparent); }
+.chip.neutral { color:var(--text2); background:var(--kbd); }
+.group { padding:10px 20px 6px; font-size:12px; font-weight:600; color:var(--text2); border-top:1px solid var(--divider); background:var(--sheet); }
+.notes { margin-top:24px; max-width:980px; color:#303B50; }
+.notes li { margin:4px 0; }
+code { font:12px Consolas,monospace; background:rgba(48,59,80,.07); padding:1px 4px; border-radius:4px; }
+</style>
+</head>
+<body>
+<h1>设置 → 对话框接管 → 软件接管记录（重新设计）</h1>
+<p class="lead">每条记录一行：程序图标 + 友好名称（右侧小字为进程文件名），状态用彩色标签表示；一行摘要放操作、次数和最近时间。只有需要处理的记录才展开“原因 + 处理方法”。需重新打开的软件单独成组排在最前。</p>
+
+<div class="boards">
+  <section class="page light"><h2>浅色</h2><div class="card" id="light"></div></section>
+  <section class="page dark"><h2>深色</h2><div class="card" id="dark"></div></section>
+</div>
+
+<ol class="notes">
+  <li><b>名称：</b>优先注册表 <code>Applications\&lt;exe&gt;\FriendlyAppName</code>，其次版本信息 <code>FileDescription</code>，都没有时用文件名（复用 <code>app::ProgramFriendlyName</code>）。进程文件名作为灰色小字保留，方便反馈问题。</li>
+  <li><b>图标：</b>复用 <code>app::ProgramMenuIcon</code> 进程级缓存，后台线程按 32 DIP 取图标；记录只存文件名，路径在显示时由 <code>App Paths</code> 注册表或当前运行进程解析，解析不到时显示灰色通用图标（最后一行）。</li>
+  <li><b>状态标签：</b>已接管（绿）· 原生对话框（黄）· 未完成（红）· 需重新打开（黄）· 待确认（灰）。</li>
+  <li><b>时间：</b>摘要用本地时间的相对写法（“2 分钟前 / 今天 09:39 / 11 月 10 日”），不再显示 UTC 原文；悬停行时提示完整时间。</li>
+  <li>“此后已成功”的提示改成绿色小字，不再混在说明文字里。最多 12 行的规则不变。</li>
+</ol>
+
+<script>
+const rows = [
+  { group: '需要重新打开' },
+  { app: 'WeChat', name: '微信', exe: 'WeChat.exe', color: '#07C160', letter: '微', chip: ['warn', '需重新打开'],
+    meta: '运行中 · 仍加载旧接管组件', why: '当前状态：仍加载旧接管组件。', how: '请先保存工作，再完整退出此软件（包括托盘中的后台进程），然后正常重新打开。无需重启电脑。' },
+  { group: '最近记录' },
+  { app: 'Word', name: 'Microsoft Word', exe: 'WINWORD.EXE', color: '#2B579A', letter: 'W', chip: ['ok', '已接管'], meta: '保存 · 合并 6 次 · 2 分钟前' },
+  { app: 'Photoshop', name: 'Adobe Photoshop 2026', exe: 'Photoshop.exe', color: '#0B1D33', fg: '#31A8FF', letter: 'Ps', chip: ['warn', '原生对话框'],
+    meta: '打开 · 合并 2 次 · 今天 09:12', why: '该对话框请求包含暂未支持的功能。', how: '处理方法：继续使用原生对话框即可；可导出诊断反馈兼容性问题。' },
+  { app: 'Notepad', name: '记事本', exe: 'notepad.exe', color: '#2F6FB3', letter: 'N', chip: ['bad', '未完成'],
+    meta: '保存 · 1 次 · 昨天 18:02', why: '本次等待对话框组件超时。', how: '处理方法：重新尝试打开或保存；若再次出现，请导出诊断。', later: '此后已观察到同一软件的一次成功接管；此前问题记录仍保留。' },
+  { app: 'Code', name: 'Visual Studio Code', exe: 'Code.exe', color: '#0065A9', letter: '&lt;/&gt;', chip: ['ok', '已接管'], meta: '打开 · 合并 14 次 · 昨天 16:40' },
+  { app: 'Admin', name: 'Registry Editor', exe: 'regedit.exe', color: '#5C6B7A', letter: 'R', chip: ['bad', '未完成'],
+    meta: '打开 · 1 次 · 11 月 10 日', why: '这款管理员软件尚未自动接入。', how: '处理方法：检查本页的自动接管设置；若显示冲突，请导出诊断，不必自行修改系统登记。' },
+  { app: 'Unknown', name: 'tool_x64.exe', exe: '', generic: true, chip: ['neutral', '待确认'], meta: '操作类型未确认 · 1 次 · 11 月 9 日' },
+];
+const generic = '<svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M2 5.5h12"/></svg>';
+const head = `<div class="head"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 2.5h10a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z"/><path d="M5 6h6M5 8.5h6M5 11h3.5"/></svg>
+  <div class="t"><b>软件接管记录</b><span>自动记录已观察到的对话框结果。出现问题时，说明原因和处理方法；未观察到记录不代表失败。</span></div><button class="btn">检查最新记录</button></div>
+  <div class="note">显示最近 12 组软件接管记录，不记录所选文件名或内容。重复事件合并；后续成功仅说明那一次操作成功。</div>`;
+const html = head + rows.map(r => r.group ? `<div class="group">${r.group}</div>` : `
+  <div class="row" title="最近事件：2026-11-12 09:39（本地时间）">
+    <div class="app ${r.generic ? 'generic' : ''}" style="${r.generic ? '' : `background:${r.color};color:${r.fg || '#fff'}`}">${r.generic ? generic : r.letter}</div>
+    <div style="min-width:0"><div class="name">${r.name}${r.exe ? `<small>${r.exe}</small>` : ''}</div><div class="meta">${r.meta}</div></div>
+    <span class="chip ${r.chip[0]}"><i></i>${r.chip[1]}</span>
+    ${r.why ? `<div class="detail"><div class="why">${r.why}</div><div class="how">${r.how}</div></div>` : ''}
+    ${r.later ? `<div class="later"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m3 8.5 3 3 7-7"/></svg>${r.later}</div>` : ''}
+  </div>`).join('');
+document.getElementById('light').innerHTML = html;
+document.getElementById('dark').innerHTML = html;
+</script>
+</body>
+</html>

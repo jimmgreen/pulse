@@ -1,3 +1,7 @@
+#include "../common/office_preview_policy.h"
+#include "legacy_word_document.h"
+#include "presentation_document.h"
+#include "office_sheet_model.h"
 #include "pbgra_blend.h"
 #include "preview_decoders.h"
 #include "gif_decoder.h"
@@ -2231,13 +2235,16 @@ static DecodeStep RunMarkdown(const DecodeRequest& q, DecodeResult& r) {
 static bool AcceptsTable(const DecodeRequest& q) {
     return !q.is_directory && !q.offline &&
            (q.request.flags & ipc::kPreviewRequestFlagRichText) != 0 &&
-           (preview::IsTableExtension(q.extension) || preview::IsSpreadsheetExtension(q.extension));
+           (q.extension == L".xls" || preview::IsTableExtension(q.extension) || preview::IsSpreadsheetExtension(q.extension));
 }
 static DecodeStep RunTable(const DecodeRequest& q, DecodeResult& r) {
     std::wstring payload;
-    if (preview::IsSpreadsheetExtension(q.extension)) {
+    if (q.extension == L".xls" || preview::IsSpreadsheetExtension(q.extension)) {
         uint32_t bytes = 0;
-        if (!preview::MakeXlsxTable(q.path, payload, bytes, q.request.frame_index)) {
+        const bool loaded = q.extension == L".xls"
+            ? preview::MakeXlsTable(q.path, payload, bytes, q.request.frame_index)
+            : preview::MakeXlsxTable(q.path, payload, bytes, q.request.frame_index);
+        if (!loaded) {
             r.error = L"sheet-read-failed";
             return DecodeStep::Failed;
         }
@@ -2290,9 +2297,26 @@ static DecodeStep RunTree(const DecodeRequest& q, DecodeResult& r) {
     return DecodeStep::Made;
 }
 
-// DOCX and EPUB in Quick Look: converted to the Markdown block payload (EPUB
-// with chapters and contents). A document that does not convert falls
-// through to the shell preview and thumbnail providers.
+// Office Quick Look uses bounded content readers, never a system-provider
+// fallback after a read failure. EPUB keeps its existing conversion path.
+static bool AcceptsNativeOffice(const DecodeRequest& q) {
+    return !q.is_directory && !q.offline &&
+        (q.request.flags & ipc::kPreviewRequestFlagRichText) != 0 &&
+        (preview::IsLegacyWordPreviewExtension(q.extension) || preview::IsPresentationPreviewExtension(q.extension));
+}
+static DecodeStep RunNativeOffice(const DecodeRequest& q, DecodeResult& r) {
+    const bool made = preview::IsPresentationPreviewExtension(q.extension)
+        ? preview::MakePresentationDocument(q.path, r.text, r.bytes_read, r.truncated)
+        : preview::MakeLegacyWordDocument(q.path, r.text, r.bytes_read, r.truncated);
+    if (!made) {
+        r.error = L"office-native-read-failed";
+        return DecodeStep::Failed;
+    }
+    if (!r.truncated) r.error = L"office-reading";
+    r.kind = ipc::PreviewContentKind::Markdown;
+    return DecodeStep::Made;
+}
+
 static bool AcceptsDocx(const DecodeRequest& q) {
     return !q.is_directory && !q.offline &&
            (q.request.flags & ipc::kPreviewRequestFlagRichText) != 0 &&
@@ -2300,7 +2324,10 @@ static bool AcceptsDocx(const DecodeRequest& q) {
 }
 static DecodeStep RunDocx(const DecodeRequest& q, DecodeResult& r) {
     std::wstring payload;
-    if (!preview::MakeDocxDocument(q.path, payload, r.bytes_read, r.truncated)) return DecodeStep::Next;
+    if (!preview::MakeDocxDocument(q.path, payload, r.bytes_read, r.truncated)) {
+        r.error = L"docx-read-failed";
+        return DecodeStep::Failed;
+    }
     r.error = L"docx-reading";
     r.text = std::move(payload);
     r.kind = ipc::PreviewContentKind::Markdown;
@@ -2436,6 +2463,7 @@ static const preview::DecoderEntry kDecoders[] = {
     { "table",           AcceptsTable,        RunTable },
     { "notebook",        AcceptsNotebook,     RunNotebook },
     { "tree",            AcceptsTree,         RunTree },
+    { "office-native",   AcceptsNativeOffice, RunNativeOffice },
     { "docx",            AcceptsDocx,         RunDocx },
     { "epub",            AcceptsEpub,         RunEpub },
     { "psd",             AcceptsPsd,          RunPsd },

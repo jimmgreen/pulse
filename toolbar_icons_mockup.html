@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+</head>
+<body>
+<title>Pulse 工具栏图标</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: control bar → a live Pulse window drawn with the new set → states → the full set beside an inspector → the drawing rules.
+   Tokens are Pulse's own (FluentTokens.h MakeTheme, as in the repo mockups). */
+:root {
+  --bg: #F3F5F1; --title: #F1F3EE; --sheet: #F7F8F4; --card: #FFFFFF; --flyout: #FFFFFF;
+  --text: #303B50; --text2: #66748A; --text3: #929CAE;
+  --hover: rgba(82,125,112,.06); --pressed: rgba(82,125,112,.11);
+  --stroke: #DCE3D9; --divider: #E5EAE3;
+  --accent: #0078D4; --accent-fg: #0067C0; --accent-soft: rgba(0,120,212,.095); --accent-soft2: rgba(0,120,212,.17); --on-accent: #FFFFFF;
+  --grid: rgba(48,59,80,.07); --grid-strong: rgba(48,59,80,.16); --key: rgba(0,120,212,.30);
+  --shadow: 0 8px 24px rgba(48,59,80,.14), 0 1px 3px rgba(48,59,80,.10);
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --display: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --mono: "Cascadia Mono", "Cascadia Code", ui-monospace, "SF Mono", Consolas, monospace;
+  --sw: 1.75;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #1A1A1A; --title: #1A1A1A; --sheet: #202020; --card: #272727; --flyout: #2B2B2B;
+  --text: #FFFFFF; --text2: rgba(255,255,255,.62); --text3: rgba(255,255,255,.40);
+  --hover: rgba(255,255,255,.08); --pressed: rgba(255,255,255,.05);
+  --stroke: rgba(255,255,255,.08); --divider: rgba(255,255,255,.06);
+  --accent-fg: #5AAAE6; --accent-soft: rgba(64,154,223,.17); --accent-soft2: rgba(64,154,223,.28);
+  --grid: rgba(255,255,255,.06); --grid-strong: rgba(255,255,255,.15); --key: rgba(90,170,230,.38);
+  --shadow: 0 8px 28px rgba(0,0,0,.45), 0 1px 3px rgba(0,0,0,.35);
+  color-scheme: dark;
+} }
+:root[data-theme="dark"] {
+  --bg: #1A1A1A; --title: #1A1A1A; --sheet: #202020; --card: #272727; --flyout: #2B2B2B;
+  --text: #FFFFFF; --text2: rgba(255,255,255,.62); --text3: rgba(255,255,255,.40);
+  --hover: rgba(255,255,255,.08); --pressed: rgba(255,255,255,.05);
+  --stroke: rgba(255,255,255,.08); --divider: rgba(255,255,255,.06);
+  --accent-fg: #5AAAE6; --accent-soft: rgba(64,154,223,.17); --accent-soft2: rgba(64,154,223,.28);
+  --grid: rgba(255,255,255,.06); --grid-strong: rgba(255,255,255,.15); --key: rgba(90,170,230,.38);
+  --shadow: 0 8px 28px rgba(0,0,0,.45), 0 1px 3px rgba(0,0,0,.35);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font: 14px/1.5 var(--font); }
+.page { max-width: 1240px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 28px 64px; display: flex; flex-direction: column; gap: 40px; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; }
+h1 { font-size: 30px; font-weight: 600; letter-spacing: -.01em; }
+h2 { font-size: 19px; font-weight: 600; }
+h3 { font-size: 13px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: .06em; }
+p { margin: 0; max-width: 68ch; color: var(--text2); }
+code, .mono { font-family: var(--mono); font-size: 12px; }
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; border-radius: 4px; }
+
+/* ---------- head ---------- */
+.head { display: flex; flex-direction: column; gap: 10px; }
+.eyebrow { font: 600 12px/1 var(--mono); color: var(--accent-fg); letter-spacing: .04em; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; padding: 10px 12px; background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
+.ctl { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text2); }
+.seg { display: inline-flex; padding: 2px; gap: 2px; background: var(--hover); border-radius: 7px; }
+.seg button { height: 26px; padding: 0 10px; border-radius: 5px; font-size: 12.5px; color: var(--text2); }
+.seg button[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: 0 0 0 1px var(--stroke); }
+.swatch { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--card); box-shadow: 0 0 0 1px var(--stroke); }
+.swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--text); }
+.chk { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; color: var(--text2); background: var(--hover); }
+.chk[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-fg); }
+
+/* ---------- icon ---------- */
+.ic { display: block; fill: none; stroke: currentColor; stroke-width: var(--sw); stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; overflow: visible; }
+.ic .f { fill: currentColor; stroke: none; }
+.ic .ft { fill: currentColor; stroke: none; opacity: .35; }
+.ic .ds { stroke-dasharray: 2.2 2.4; }
+.duo .ic .a { stroke: var(--accent-fg); }
+.duo .ic .a.f { fill: var(--accent-fg); }
+.ic .s { fill: var(--accent-fg); stroke: none; }
+
+/* ---------- Pulse window ---------- */
+.stage { overflow-x: auto; padding: 4px 4px 12px; margin: -4px; }
+.win { min-width: 860px; border: 1px solid var(--stroke); border-radius: 10px; overflow: hidden; background: var(--title); box-shadow: var(--shadow); font-size: 13px; user-select: none; }
+.tbar { height: 44px; display: flex; align-items: flex-end; gap: 4px; padding: 0 8px; }
+.brand { height: 44px; width: 208px; display: flex; align-items: center; gap: 8px; padding-left: 8px; font-weight: 600; flex-shrink: 0; }
+.brand .logo { width: 18px; height: 18px; color: var(--accent-fg); }
+.brand .sp { flex: 1; }
+.tabs { display: flex; gap: 2px; align-items: flex-end; flex: 1; }
+.tab { height: 36px; width: 168px; display: flex; align-items: center; gap: 8px; padding: 0 10px 0 12px; border-radius: 8px 8px 0 0; color: var(--text2); position: relative; }
+.tab.on { background: var(--sheet); color: var(--text); }
+.tab.on::after { content: ""; position: absolute; left: 12px; bottom: 2px; width: 18px; height: 3px; border-radius: 2px; background: var(--accent); }
+.tab .tt { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab .folder { color: #E8A93C; }
+.caps { display: flex; height: 44px; align-items: center; margin-left: auto; }
+.caps .cap { width: 44px; height: 44px; display: grid; place-items: center; color: var(--text2); }
+.body { display: flex; background: var(--sheet); min-height: 400px; }
+.side { width: 208px; padding: 8px 6px; display: flex; flex-direction: column; gap: 1px; flex-shrink: 0; }
+.sh { font-size: 12px; font-weight: 600; color: var(--text2); padding: 10px 10px 4px; }
+.si { height: 32px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border-radius: 6px; color: var(--text); }
+.si:hover { background: var(--hover); }
+.si.on { background: var(--accent-soft); }
+.si .ic { color: var(--text2); }
+.si.on .ic { color: var(--accent-fg); }
+.si small { margin-left: auto; color: var(--text3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 0 10px 8px 4px; }
+.nav { height: 48px; display: flex; align-items: center; gap: 4px; }
+.addr { flex: 1; min-width: 0; height: 34px; display: flex; align-items: center; gap: 2px; padding: 0 8px; background: var(--card); border: 1px solid var(--stroke); border-radius: 7px; color: var(--text2); }
+.addr b { color: var(--text); font-weight: 600; }
+.addr .ic { color: var(--text3); }
+.crumb { padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+.search { width: 230px; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 10px; background: var(--card); border: 1px solid var(--stroke); border-radius: 7px; color: var(--text3); }
+.cmd { height: 44px; display: flex; align-items: center; gap: 2px; border-bottom: 1px solid var(--divider); margin-bottom: 4px; }
+.cmd .sep { width: 1px; height: 20px; background: var(--divider); margin: 0 6px; flex-shrink: 0; }
+.cmd .grow { flex: 1; }
+.tb { flex-shrink: 0; height: 32px; min-width: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 6px; border-radius: 6px; color: var(--text); white-space: nowrap; }
+.tb:hover { background: var(--hover); }
+.tb:active { background: var(--pressed); }
+.tb .lbl { display: none; font-size: 12.5px; }
+.labels .cmd .tb .lbl { display: inline; }
+.labels .cmd .tb { padding: 0 9px 0 7px; }
+.labels .cmd .views .tb .lbl { display: none; }
+.labels .cmd .views .tb { padding: 0 6px; }
+.win.labels { min-width: 1200px; }
+.tb .cv { color: var(--text3); margin-left: -2px; }
+.tb[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-fg); }
+.tb[aria-disabled="true"] { opacity: .38; }
+.tb.new { background: var(--accent); color: var(--on-accent); padding: 0 8px 0 9px; margin-right: 4px; }
+.tb.new:hover { filter: brightness(1.06); background: var(--accent); }
+.tb.new .lbl { display: inline; font-weight: 600; }
+.views { display: inline-flex; gap: 1px; padding: 2px; background: var(--hover); border-radius: 8px; }
+.views .tb { height: 28px; min-width: 30px; }
+.views .tb[aria-pressed="true"] { background: var(--card); color: var(--accent-fg); box-shadow: 0 0 0 1px var(--stroke); }
+.rows { display: flex; flex-direction: column; gap: 1px; }
+.rh, .row { display: grid; grid-template-columns: minmax(0,1fr) 150px 96px 80px; align-items: center; padding: 0 10px; height: 30px; }
+.rh { color: var(--text2); font-size: 12px; height: 28px; }
+.row { border-radius: 5px; font-variant-numeric: tabular-nums; }
+.row:hover { background: var(--hover); }
+.row.sel { background: var(--accent-soft2); }
+.row .n { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.row .n span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .d, .row .t, .row .z { color: var(--text2); font-size: 12.5px; }
+.row .z { text-align: right; }
+.rh .z { text-align: right; }
+.row .folder { color: #E8A93C; }
+.row .file { color: var(--text2); }
+.status { height: 28px; display: flex; align-items: center; gap: 16px; padding: 0 12px; font-size: 12px; color: var(--text2); background: var(--sheet); border-top: 1px solid var(--divider); }
+.status .fill { flex: 1; }
+.tip { position: fixed; z-index: 40; pointer-events: none; padding: 5px 9px; border-radius: 6px; background: var(--flyout); border: 1px solid var(--stroke); box-shadow: var(--shadow); font-size: 12px; white-space: nowrap; display: flex; gap: 8px; align-items: center; }
+.tip kbd { font: 11px var(--mono); color: var(--text2); }
+
+/* ---------- states ---------- */
+.states { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.st { background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.st .tb { pointer-events: none; }
+.st .tb.hov { background: var(--hover); }
+.st .tb.prs { background: var(--pressed); }
+.st small { color: var(--text2); font-size: 12px; }
+
+/* ---------- library ---------- */
+.lib { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 24px; align-items: start; }
+.groups { display: flex; flex-direction: column; gap: 26px; min-width: 0; }
+.group { display: flex; flex-direction: column; gap: 10px; }
+.gh { display: flex; align-items: baseline; gap: 10px; }
+.gh .count { font: 12px var(--mono); color: var(--text3); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 6px; }
+.tile { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 6px 10px; border-radius: 8px; background: var(--card); border: 1px solid transparent; text-align: center; position: relative; }
+.tile:hover { border-color: var(--stroke); }
+.tile[aria-pressed="true"] { border-color: var(--accent-fg); box-shadow: 0 0 0 1px var(--accent-fg) inset; }
+.tile .zh { font-size: 12.5px; line-height: 1.3; }
+.tile .en { font: 10.5px var(--mono); color: var(--text3); overflow-wrap: anywhere; }
+.tile .new { position: absolute; top: 6px; right: 6px; font-size: 10px; line-height: 16px; padding: 0 5px; border-radius: 8px; background: var(--accent-soft); color: var(--accent-fg); }
+.insp { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 72px); background: var(--card); border: 1px solid var(--stroke); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+.insp .ttl { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.insp .ttl b { font: 600 17px var(--display); }
+.board { position: relative; width: 100%; aspect-ratio: 1; max-width: 100%; border-radius: 8px; background: var(--sheet); overflow: hidden; color: var(--text); }
+.board svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.board .lines { fill: none; }
+.board .cl, .board .cl * { vector-effect: non-scaling-stroke; }
+.board .cl { fill: none; stroke: var(--accent-fg); stroke-width: 1px; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+.board .cl .f, .board .cl .ft, .board .cl .s { fill: none; stroke: var(--accent-fg); opacity: 1; }
+.board.skel .ic { opacity: .28; }
+.sizes { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; }
+.sz { display: flex; flex-direction: column; align-items: center; gap: 6px; font: 11px var(--mono); color: var(--text3); }
+.sz .px { padding: 6px; border-radius: 6px; background: var(--sheet); color: var(--text); }
+.row2 { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn { height: 30px; padding: 0 12px; border-radius: 6px; background: var(--hover); font-size: 12.5px; display: inline-flex; align-items: center; gap: 6px; }
+.btn:hover { background: var(--pressed); }
+.btn.pri { background: var(--accent); color: var(--on-accent); }
+.note { font-size: 12.5px; color: var(--text2); }
+.toast { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); padding: 8px 14px; border-radius: 18px; background: var(--flyout); border: 1px solid var(--stroke); box-shadow: var(--shadow); font-size: 13px; z-index: 50; }
+textarea.dump { width: 100%; height: 120px; font: 11px var(--mono); background: var(--sheet); color: var(--text); border: 1px solid var(--stroke); border-radius: 6px; padding: 8px; }
+
+/* ---------- rules ---------- */
+.rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.rule { background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.rule .demo { display: flex; gap: 10px; align-items: center; color: var(--text); }
+.rule p { font-size: 13px; }
+.rule .demo .big { width: 64px; height: 64px; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
+.kv dt { color: var(--text2); }
+.kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 980px) { .lib { grid-template-columns: minmax(0,1fr); } .insp { position: static; } }
+@media (max-width: 560px) { h1 { font-size: 24px; } .controls { position: static; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<div class="page" id="page">
+  <header class="head">
+    <div class="eyebrow">command_icons · 24 / 1.75</div>
+    <h1>Pulse 工具栏图标</h1>
+    <p>一套新的线性命令图标，参考 Files 工具栏的分组和 Fluent 线性风格，按 Pulse 现有的 24 单位网格、1.75 描边重新绘制。名称与 <code>command_icons::Icon</code> 一一对应，可以直接替换。点任意图标看网格、关键线和小尺寸效果。</p>
+  </header>
+
+  <div class="controls" role="toolbar" aria-label="预览设置">
+    <div class="ctl">主题
+      <span class="seg" id="themeSeg">
+        <button id="th-sys" data-v="sys" aria-pressed="true">跟随</button>
+        <button id="th-light" data-v="light" aria-pressed="false">浅色</button>
+        <button id="th-dark" data-v="dark" aria-pressed="false">深色</button>
+      </span>
+    </div>
+    <div class="ctl">强调色 <span id="swatches" style="display:inline-flex;gap:6px"></span></div>
+    <div class="ctl">描边
+      <span class="seg" id="swSeg">
+        <button id="sw-150" data-v="1.5" aria-pressed="false">1.5</button>
+        <button id="sw-175" data-v="1.75" aria-pressed="true">1.75</button>
+        <button id="sw-200" data-v="2" aria-pressed="false">2</button>
+      </span>
+    </div>
+    <div class="ctl">工具栏尺寸
+      <span class="seg" id="sizeSeg">
+        <button id="sz-16" data-v="16" aria-pressed="false">16</button>
+        <button id="sz-20" data-v="20" aria-pressed="true">20</button>
+        <button id="sz-24" data-v="24" aria-pressed="false">24</button>
+      </span>
+    </div>
+    <button class="chk" id="lblBtn" aria-pressed="false">显示文字</button>
+    <button class="chk" id="duoBtn" aria-pressed="false">强调色点缀</button>
+  </div>
+
+  <section style="display:flex;flex-direction:column;gap:14px">
+    <h2>放进 Pulse 窗口</h2>
+    <p>工具栏按 Files 的顺序分组：新建、剪贴板、排序筛选分组、布局。打开“显示文字”就是 Files 式的图标加文字命令栏。悬停按钮看提示。</p>
+    <div class="stage"><div class="win" id="win"></div></div>
+  </section>
+
+  <section style="display:flex;flex-direction:column;gap:14px">
+    <h2>按钮状态</h2>
+    <div class="states" id="states"></div>
+  </section>
+
+  <section class="lib">
+    <div class="groups" id="groups"></div>
+    <aside class="insp" id="insp" aria-live="polite"></aside>
+  </section>
+
+  <section style="display:flex;flex-direction:column;gap:14px">
+    <h2>绘制规则</h2>
+    <div class="rules" id="rules"></div>
+  </section>
+
+  <section style="display:flex;flex-direction:column;gap:10px">
+    <h2>导出</h2>
+    <p>复制全部图标的 SVG（JSON，键是 <code>command_icons::Icon</code> 名称），交给实现时按 <code>kCanvas = 24</code> 转成 D2D 几何。</p>
+    <div class="row2"><button class="btn pri" id="dumpBtn">复制全部 SVG</button></div>
+    <textarea class="dump" id="dump" readonly hidden aria-label="全部 SVG"></textarea>
+  </section>
+</div>
+<div class="tip" id="tip" hidden></div>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+(() => {
+/* ---------- geometry helpers (24-unit canvas) ---------- */
+const p = (d, c = '') => `<path d="${d}"${c ? ` class="${c}"` : ''}/>`;
+const c = (cx, cy, r, k = '') => `<circle cx="${cx}" cy="${cy}" r="${r}"${k ? ` class="${k}"` : ''}/>`;
+const r = (x, y, w, h, rx, k = '') => `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${rx}"${k ? ` class="${k}"` : ''}/>`;
+const dot = (cx, cy, rr = 1.25, k = '') => c(cx, cy, rr, ('f ' + k).trim());
+
+const FOLDER = p('M3.25 7.25A2.25 2.25 0 0 1 5.5 5h3.4c.53 0 1.04.21 1.41.59l1.16 1.16h7.03a2.25 2.25 0 0 1 2.25 2.25v8.5a2.25 2.25 0 0 1-2.25 2.25h-13a2.25 2.25 0 0 1-2.25-2.25Z') + p('M3.25 9.5h6.6c.53 0 1.04-.21 1.41-.59l2.16-2.16');
+const DOC = p('M7 2.75h5.88c.6 0 1.17.24 1.59.66l4.12 4.12c.42.42.66.99.66 1.59V19a2.25 2.25 0 0 1-2.25 2.25H7A2.25 2.25 0 0 1 4.75 19V5A2.25 2.25 0 0 1 7 2.75Z') + p('M13 3v4.25c0 .69.56 1.25 1.25 1.25H19');
+const FRAME = r(3.25, 4.75, 17.5, 14.5, 2.25);
+const CORNERS = p('M4 8.5V6.25A2.25 2.25 0 0 1 6.25 4H8.5') + p('M15.5 4h2.25A2.25 2.25 0 0 1 20 6.25V8.5') + p('M20 15.5v2.25A2.25 2.25 0 0 1 17.75 20H15.5') + p('M8.5 20H6.25A2.25 2.25 0 0 1 4 17.75V15.5');
+const COPY = r(3.75, 8, 12.25, 12.25, 2.25) + p('M8.25 8V5.75A2 2 0 0 1 10.25 3.75h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H16');
+const BIN = p('M4.5 6.5h15') + p('M9.5 6.5V5a1.5 1.5 0 0 1 1.5-1.5h2A1.5 1.5 0 0 1 14.5 5v1.5') + p('M6.25 6.5l.86 12.3a2 2 0 0 0 2 1.86h5.78a2 2 0 0 0 2-1.86l.86-12.3');
+const PLUS_BADGE = p('M17.5 14.5v6') + p('M14.5 17.5h6');
+const STAR = 'M12 3.7 14.56 9.08 20.46 9.85 16.14 13.94 17.23 19.8 12 16.95 6.77 19.8 7.86 13.94 3.54 9.85 9.44 9.08Z';
+const GEAR = 'M10.17 5.4 10.59 3.11A9 9 0 0 1 13.41 3.11L13.83 5.4A6.85 6.85 0 0 1 15.37 6.04L17.29 4.72A9 9 0 0 1 19.28 6.71L17.96 8.63A6.85 6.85 0 0 1 18.6 10.17L20.89 10.59A9 9 0 0 1 20.89 13.41L18.6 13.83A6.85 6.85 0 0 1 17.96 15.37L19.28 17.29A9 9 0 0 1 17.29 19.28L15.37 17.96A6.85 6.85 0 0 1 13.83 18.6L13.41 20.89A9 9 0 0 1 10.59 20.89L10.17 18.6A6.85 6.85 0 0 1 8.63 17.96L6.71 19.28A9 9 0 0 1 4.72 17.29L6.04 15.37A6.85 6.85 0 0 1 5.4 13.83L3.11 13.41A9 9 0 0 1 3.11 10.59L5.4 10.17A6.85 6.85 0 0 1 6.04 8.63L4.72 6.71A9 9 0 0 1 6.71 4.72L8.63 6.04A6.85 6.85 0 0 1 10.17 5.4Z';
+const EYE = p('M2.75 12C4.6 8.25 8 5.75 12 5.75s7.4 2.5 9.25 6.25C19.4 15.75 16 18.25 12 18.25S4.6 15.75 2.75 12Z');
+
+/* Each icon: id (= command_icons::Icon), zh, body, optional badge (knocked out at 17.5,17.5), isNew. */
+const GROUPS = [
+ { name: '导航', icons: [
+  ['Back', '后退', p('M19.25 12H5') + p('M11 5.5 4.75 12 11 18.5')],
+  ['Forward', '前进', p('M4.75 12H19') + p('M13 5.5 19.25 12 13 18.5')],
+  ['Up', '上一级', p('M12 19.25V5') + p('M5.5 11 12 4.75 18.5 11')],
+  ['Refresh', '刷新', p('M19.25 12a7.25 7.25 0 1 1-2.12-5.13L19.25 9') + p('M19.25 4.5V9h-4.5')],
+  ['Home', '主页', p('M4.25 10 12 3.75 19.75 10v8.25a2 2 0 0 1-2 2H15v-5.5a1.25 1.25 0 0 0-1.25-1.25h-3.5A1.25 1.25 0 0 0 9 14.75v5.5H6.25a2 2 0 0 1-2-2Z')],
+  ['Search', '搜索', c(10.75, 10.75, 6.5) + p('m15.5 15.5 4.25 4.25')],
+  ['AdvSearch', '高级搜索', c(10.25, 10.25, 6.25) + p('m14.75 14.75 1.5 1.5'), p('M14.25 15.25h6.5', 'a') + p('M15.75 17.75h3.5', 'a') + p('M16.75 20.25h1.5', 'a')],
+  ['History', '最近使用', p('M4.75 12a7.25 7.25 0 1 0 2.12-5.13L4.75 9') + p('M4.75 4.5V9h4.5') + p('M12 8v4.25l2.75 1.75', 'a')],
+  ['More', '更多', dot(5.75, 12, 1.4) + dot(12, 12, 1.4) + dot(18.25, 12, 1.4)],
+  ['ChevronDown', '展开', p('m6.5 9.5 5.5 5.5 5.5-5.5')],
+ ]},
+ { name: '新建与剪贴板', icons: [
+  ['Add', '新建', p('M12 4.75v14.5') + p('M4.75 12h14.5')],
+  ['FolderAdd', '新建文件夹', FOLDER, PLUS_BADGE],
+  ['FileAdd', '新建文件', DOC, PLUS_BADGE, true],
+  ['NewMarkdown', '新建 Markdown', DOC + p('M7.75 17.5v-4.5l1.75 2 1.75-2v4.5') + p('M14.5 13v4.25', 'a') + p('m13.25 16.25 1.25 1.25 1.25-1.25', 'a')],
+  ['Cut', '剪切', c(7, 17.25, 2.75) + c(17, 17.25, 2.75) + p('M8.95 15.3 18 4.75') + p('M15.05 15.3 6 4.75')],
+  ['Copy', '复制', COPY],
+  ['Paste', '粘贴', p('M8.5 5H7.25A2.25 2.25 0 0 0 5 7.25v11.5A2.25 2.25 0 0 0 7.25 21h9.5A2.25 2.25 0 0 0 19 18.75V7.25A2.25 2.25 0 0 0 16.75 5H15.5') + r(8.5, 3, 7, 4, 1.25, 'a')],
+  ['Rename', '重命名', p('M10.5 7.25H5.5A2.25 2.25 0 0 0 3.25 9.5v5a2.25 2.25 0 0 0 2.25 2.25h5') + p('M17.75 7.25h.75a2.25 2.25 0 0 1 2.25 2.25v5a2.25 2.25 0 0 1-2.25 2.25h-.75') + p('M14.25 4.25v15.5', 'a') + p('M12 4.25h4.5', 'a') + p('M12 19.75h4.5', 'a')],
+  ['BatchRename', '批量重命名', p('M3.75 7h7.5') + p('M3.75 12h7.5') + p('M3.75 17h7.5') + p('M16.5 4.25v15.5', 'a') + p('M14.25 4.25h4.5', 'a') + p('M14.25 19.75h4.5', 'a')],
+  ['CopyPath', '复制路径', COPY + p('m11.5 11.25-3.25 6', 'a')],
+  ['Send', '分享', p('M12 3.75V14') + p('m7.75 8 4.25-4.25L16.25 8') + p('M8 10.75H6.75a2 2 0 0 0-2 2v5.5a2 2 0 0 0 2 2h10.5a2 2 0 0 0 2-2v-5.5a2 2 0 0 0-2-2H16')],
+  ['Delete', '删除', BIN + p('M10.25 10.5v6') + p('M13.75 10.5v6')],
+  ['Info', '属性', c(12, 12, 8.25) + p('M12 11v5.25') + dot(12, 7.9, 1.1)],
+ ]},
+ { name: '排序与布局', icons: [
+  ['Sort', '排序', p('M7.25 4.75v14.5') + p('m4 15.75 3.25 3.5 3.25-3.5') + p('M13.25 6.5h7') + p('M13.25 12h5') + p('M13.25 17.5h3')],
+  ['Filter', '筛选', p('M4 7h16') + p('M7 12h10') + p('M10 17h4')],
+  ['GroupBy', '分组', r(3.75, 4.25, 7, 6.5, 1.75) + r(3.75, 13.25, 7, 6.5, 1.75) + p('M14 6h6.25') + p('M14 9h4') + p('M14 15h6.25') + p('M14 18h4')],
+  ['List', '详细信息', dot(5, 6.5) + dot(5, 12) + dot(5, 17.5) + p('M9 6.5h11') + p('M9 12h11') + p('M9 17.5h11')],
+  ['Grid', '图标', r(3.75, 3.75, 7, 7, 1.75) + r(13.25, 3.75, 7, 7, 1.75) + r(3.75, 13.25, 7, 7, 1.75) + r(13.25, 13.25, 7, 7, 1.75)],
+  ['Columns', '列视图', FRAME + p('M9.25 4.75v14.5') + p('M14.75 4.75v14.5')],
+  ['Compact', '紧凑', p('M4 5.5h16') + p('M4 9.83h16') + p('M4 14.17h16') + p('M4 18.5h16')],
+  ['Panel', '预览窗格', FRAME + p('M14.5 4.75v14.5') + p('M16.75 8.5h1.75', 'a') + p('M16.75 11.5h1.75', 'a')],
+  ['Sidebar', '侧栏', FRAME + p('M9.5 4.75v14.5') + p('M5.75 8.5h1.5', 'a') + p('M5.75 11.5h1.5', 'a')],
+  ['Split', '左右分屏', FRAME + p('M12 4.75v14.5')],
+  ['SplitStacked', '上下分屏', FRAME + p('M3.25 12h17.5')],
+  ['SplitThree', '三栏', FRAME + p('M12 4.75v14.5') + p('M12 12h8.75')],
+  ['SplitFour', '四宫格', FRAME + p('M12 4.75v14.5') + p('M3.25 12h17.5')],
+  ['Compare', '对比', p('M10 4.5H6.5a2.25 2.25 0 0 0-2.25 2.25v10.5A2.25 2.25 0 0 0 6.5 19.5H10') + p('M14 4.5h3.5a2.25 2.25 0 0 1 2.25 2.25v10.5a2.25 2.25 0 0 1-2.25 2.25H14') + p('M12 2.75v18.5', 'a')],
+  ['PaneExpand', '临时单栏', p('M14 4.75h5.25V10') + p('M19 5l-5.25 5.25') + p('M10 19.25H4.75V14') + p('M5 19l5.25-5.25')],
+  ['PaneRestore', '还原布局', p('M19.25 4.75 14.5 9.5') + p('M14.25 5.5v4.25h4.25') + p('M4.75 19.25 9.5 14.5') + p('M9.75 18.5v-4.25H5.5')],
+  ['Eye', '显示', EYE + c(12, 12, 3)],
+  ['EyeHidden', '隐藏的项目', EYE + c(12, 12, 3) + p('m4 4 16 16')],
+ ]},
+ { name: '选择与操作', icons: [
+  ['SelectAll', '全选', CORNERS + p('m8.25 12.25 2.5 2.5 5-5', 'a')],
+  ['Invert', '反向选择', r(4.25, 4.25, 15.5, 15.5, 2.25) + p('M19.75 6.5v11a2.25 2.25 0 0 1-2.25 2.25h-11Z', 'ft')],
+  ['SelectWild', '按规则选择', CORNERS + p('M12 8.25v7.5', 'a') + p('m8.75 10.1 6.5 3.8', 'a') + p('m15.25 10.1-6.5 3.8', 'a')],
+  ['CopyToPane', '复制到另一栏', FRAME + p('M12 4.75v14.5') + r(5.75, 9.75, 3.5, 4.5, 1) + r(14.75, 9.75, 3.5, 4.5, 1, 'a')],
+  ['MoveToPane', '移动到另一栏', FRAME + p('M12 4.75v14.5') + r(5.75, 9.75, 3.5, 4.5, 1, 'ds') + r(14.75, 9.75, 3.5, 4.5, 1, 'a')],
+  ['FolderGo', '打开所在位置', FOLDER, p('M14.5 17.5h6') + p('m18 15 2.5 2.5L18 20')],
+  ['OpenExternal', '用其他程序打开', p('M10.25 5H7a2.25 2.25 0 0 0-2.25 2.25V17A2.25 2.25 0 0 0 7 19.25h9.75A2.25 2.25 0 0 0 19 17v-3.25') + p('M13.75 4.75h5.5v5.5') + p('M19 5l-7.5 7.5')],
+  ['Zip', '压缩', r(5, 3.25, 14, 17.5, 2.25) + p('M12 3.25V5') + p('M10.75 6.5H12') + p('M12 8h1.25') + p('M10.75 9.5H12') + r(10.25, 11.5, 3.5, 4.5, 1, 'a')],
+  ['Undo', '撤销', p('M8.75 14.5 4.5 10.25 8.75 6') + p('M4.75 10.25h9.5a5 5 0 0 1 0 10H11')],
+  ['Redo', '重做', p('M15.25 14.5 19.5 10.25 15.25 6') + p('M19.25 10.25h-9.5a5 5 0 0 0 0 10H13'), null, true],
+  ['Terminal', '在终端中打开', FRAME + p('m7.25 9.5 2.75 2.5-2.75 2.5') + p('M12.5 15h4.25', 'a')],
+  ['Pin', '固定', p('M9.25 3.75h5.5') + p('M10.25 3.75v5.5L7.5 12.5h9l-2.75-3.25v-5.5') + p('M12 12.5v7.75')],
+  ['Star', '收藏', p(STAR)],
+  ['Tag', '标签', p('M3.75 5.75v5.1c0 .53.21 1.04.59 1.41l7.4 7.4a2 2 0 0 0 2.82 0l5.1-5.1a2 2 0 0 0 0-2.82l-7.4-7.4a2 2 0 0 0-1.41-.59h-5.1a2 2 0 0 0-2 2Z') + dot(8, 8, 1.3, 'a')],
+  ['Link', '链接', p('M10.5 13.5a3.75 3.75 0 0 0 5.3 0l2.95-2.95a3.75 3.75 0 1 0-5.3-5.3l-1.2 1.2') + p('M13.5 10.5a3.75 3.75 0 0 0-5.3 0l-2.95 2.95a3.75 3.75 0 1 0 5.3 5.3l1.2-1.2')],
+ ]},
+ { name: '位置与对象', icons: [
+  ['Folder', '文件夹', FOLDER],
+  ['FolderOpen', '打开的文件夹', p('M3.25 18.5V7.25A2.25 2.25 0 0 1 5.5 5h3.4c.53 0 1.04.21 1.41.59l1.16 1.16h6.03a2.25 2.25 0 0 1 2.25 2.25v2') + p('M3.6 19.1 6.1 12.4a1.75 1.75 0 0 1 1.64-1.15h12.43a.9.9 0 0 1 .84 1.22l-2.4 6.12a1.75 1.75 0 0 1-1.63 1.11H4.45a.85.85 0 0 1-.85-.6Z')],
+  ['File', '文件', DOC],
+  ['Image', '图片', FRAME + c(8.75, 9.75, 1.5) + p('m3.75 17.75 4.6-4.6a1.25 1.25 0 0 1 1.77 0l4.38 4.38') + p('m13 15.75 1.85-1.85a1.25 1.25 0 0 1 1.77 0l3.63 3.63')],
+  ['Desktop', '桌面', FRAME + r(6, 7.5, 2.75, 2.75, .75) + r(6, 12, 2.75, 2.75, .75) + p('M3.25 16.25h17.5')],
+  ['Computer', '此电脑', r(2.75, 4, 18.5, 12.5, 2) + p('M12 16.5v3.75') + p('M8.25 20.25h7.5')],
+  ['Drive', '磁盘', r(2.75, 7.25, 18.5, 9.5, 2.25) + p('M6.5 12h5') + dot(17, 12, 1.15, 'a')],
+  ['Network', '网络', r(8.25, 3.5, 7.5, 5.75, 1.5) + p('M12 9.25v6.75') + p('M5 16v-2a1.75 1.75 0 0 1 1.75-1.75h10.5A1.75 1.75 0 0 1 19 14v2') + r(2.75, 16, 4.5, 4.25, 1.25) + r(9.75, 16, 4.5, 4.25, 1.25) + r(16.75, 16, 4.5, 4.25, 1.25)],
+  ['Download', '下载', p('M12 3.75V15') + p('m7.25 10.5 4.75 4.75 4.75-4.75') + p('M5 20h14')],
+  ['Cloud', '云盘', p('M7.25 19h10a4.25 4.25 0 0 0 .7-8.44 6 6 0 0 0-11.5 1.2A3.65 3.65 0 0 0 7.25 19Z')],
+  ['Recycle', '回收站', BIN + p('M13.13 11.55A2.25 2.25 0 1 1 10.87 11.55', 'a') + p('m10.55 9.95.32 1.6 1.6-.32', 'a')],
+  ['Workspace', '工作区', r(3.25, 4.75, 9.5, 14.5, 2) + r(14.75, 4.75, 6, 6.25, 1.75) + r(14.75, 13, 6, 6.25, 1.75)],
+  ['Tray', '暂存区', p('M3.75 13.5h4.6l1.4 2.25h4.5l1.4-2.25h4.6') + p('M5.65 6.5A2 2 0 0 1 7.5 5.25h9a2 2 0 0 1 1.85 1.25l1.9 7v4.75a2 2 0 0 1-2 2H5.75a2 2 0 0 1-2-2V13.5Z')],
+ ]},
+ { name: '系统', icons: [
+  ['Settings', '设置', p(GEAR) + c(12, 12, 3)],
+  ['Sliders', '选项', p('M4 7.5h8.5') + p('M17.5 7.5H20') + c(15, 7.5, 2.25) + p('M4 16.5h2.5') + p('M11.5 16.5H20') + c(9, 16.5, 2.25)],
+  ['Lock', '锁定', r(5.25, 10.25, 13.5, 10, 2.25) + p('M8.5 10.25V7.75a3.5 3.5 0 0 1 7 0v2.5') + p('M12 14.25v2', 'a')],
+  ['Check', '完成', p('m5 12.75 4.5 4.5L19 7.75')],
+  ['Close', '关闭', p('m6.25 6.25 11.5 11.5') + p('m17.75 6.25-11.5 11.5')],
+  ['Sparkle', 'Pulse 助手', p('M11 3.5c.5 3.9 2.1 5.5 6 6-3.9.5-5.5 2.1-6 6-.5-3.9-2.1-5.5-6-6 3.9-.5 5.5-2.1 6-6Z', 's') + p('M18 14.5c.25 1.9 1 2.65 2.9 2.9-1.9.25-2.65 1-2.9 2.9-.25-1.9-1-2.65-2.9-2.9 1.9-.25 2.65-1 2.9-2.9Z', 's')],
+ ]},
+];
+const ICONS = {};
+GROUPS.forEach(g => g.icons.forEach(([id, zh, body, badge, isNew]) => { ICONS[id] = { id, zh, body, badge, isNew: !!isNew, group: g.name }; }));
+
+let uid = 0;
+function svg(id, size = 24, extra = '') {
+  const ic = ICONS[id]; if (!ic) return '';
+  let inner;
+  if (ic.badge) {
+    const m = `km${++uid}`;
+    inner = `<defs><mask id="${m}" maskUnits="userSpaceOnUse" x="-2" y="-2" width="28" height="28"><rect x="-2" y="-2" width="28" height="28" fill="#fff" stroke="none"/><circle cx="17.5" cy="17.5" r="5.4" fill="#000" stroke="none"/></mask></defs><g mask="url(#${m})">${ic.body}</g><g class="badge">${ic.badge}</g>`;
+  } else inner = ic.body;
+  return `<svg class="ic${extra ? ' ' + extra : ''}" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true">${inner}</svg>`;
+}
+function standalone(id, sw) {
+  const ic = ICONS[id];
+  const fixFill = s => s.replace(/class="f( [^"]*)?"/g, 'fill="currentColor" stroke="none"').replace(/class="ft"/g, 'fill="currentColor" stroke="none" opacity=".35"').replace(/class="s"/g, 'fill="currentColor" stroke="none"').replace(/class="ds"/g, 'stroke-dasharray="2.2 2.4"').replace(/ class="a"/g, '');
+  const body = fixFill(ic.body), badge = ic.badge ? fixFill(ic.badge) : '';
+  const inner = ic.badge
+    ? `<defs><mask id="${id}-cut" maskUnits="userSpaceOnUse" x="-2" y="-2" width="28" height="28"><rect x="-2" y="-2" width="28" height="28" fill="#fff" stroke="none"/><circle cx="17.5" cy="17.5" r="5.4" fill="#000" stroke="none"/></mask></defs><g mask="url(#${id}-cut)">${body}</g>${badge}`
+    : body;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+}
+
+/* ---------- state ---------- */
+const S = { size: 20, sw: 1.75, sel: 'Paste', grid: true, keys: false, skel: false, labels: false };
+const store = { get(k, d) { try { const v = localStorage.getItem('pti.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } }, set(k, v) { try { localStorage.setItem('pti.' + k, JSON.stringify(v)); } catch {} } };
+const $ = s => document.querySelector(s);
+const page = $('#page');
+
+/* ---------- window ---------- */
+const TB = (id, label, opts = {}) => `<button class="tb${opts.cls ? ' ' + opts.cls : ''}" data-tip="${opts.tip || label}"${opts.key ? ` data-key="${opts.key}"` : ''}${opts.pressed ? ' aria-pressed="true"' : ''}${opts.disabled ? ' aria-disabled="true"' : ''} aria-label="${label}">${svg(id, S.size)}<span class="lbl">${label}</span>${opts.caret ? svg('ChevronDown', 12, 'cv') : ''}</button>`;
+function renderWin() {
+  const z = S.size;
+  const side = [['Home', '主页'], ['Star', '收藏', '6'], ['History', '最近使用'], ['Desktop', '桌面'], ['Download', '下载'], ['Image', '图片'], ['Recycle', '回收站', '435']];
+  const drives = [['Computer', '此电脑'], ['Drive', 'Win11 (C:)', '113 G'], ['Drive', '新加卷 (P:)', '3.5 T'], ['Network', '网络'], ['Cloud', 'OneDrive']];
+  const files = [['Folder', '产品文档', '2026-10-28 09:12', '文件夹', '2 项'], ['Folder', '发布', '2026-11-05 18:40', '文件夹', '5 项'], ['Folder', '品牌设计', '2026-10-19 14:03', '文件夹', '2 项'], ['File', 'app.py', '2026-11-04 21:17', 'Python', '574 B'], ['File', 'main.cpp', '2026-11-06 10:02', 'C++', '978 B'], ['File', 'README.md', '2026-11-01 16:45', 'Markdown', '225 B'], ['File', '项目计划.md', '2026-10-27 19:58', 'Markdown', '3.4 KB']];
+  $('#win').innerHTML = `
+  <div class="tbar">
+    <div class="brand"><svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"/></svg>Pulse<span class="sp"></span><button class="tb" data-tip="侧栏" aria-label="侧栏">${svg('Sidebar', 18)}</button></div>
+    <div class="tabs">
+      <div class="tab on"><span class="folder">${svg('Folder', 16)}</span><span class="tt">源代码</span>${svg('Close', 12)}</div>
+      <div class="tab"><span class="folder">${svg('Folder', 16)}</span><span class="tt">下载</span></div>
+      <div class="tab"><span class="folder">${svg('Folder', 16)}</span><span class="tt">照片</span></div>
+      <button class="tb" data-tip="新建标签页" data-key="Ctrl+T" aria-label="新建标签页" style="margin-bottom:4px">${svg('Add', 16)}</button>
+    </div>
+    <div class="caps"><span class="cap">${svg('Settings', 16)}</span><span class="cap"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor"><path d="M0 5h10"/></svg></span><span class="cap"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor"><rect x=".5" y=".5" width="9" height="9" rx="1"/></svg></span><span class="cap">${svg('Close', 14)}</span></div>
+  </div>
+  <div class="body">
+    <nav class="side" aria-label="侧栏">
+      <div class="sh">快速访问</div>
+      ${side.map(([i, t, n], k) => `<div class="si${k === 0 ? '' : ''}">${svg(i, 18)}<span>${t}</span>${n ? `<small>${n}</small>` : ''}</div>`).join('')}
+      <div class="sh">此电脑</div>
+      ${drives.map(([i, t, n], k) => `<div class="si${k === 2 ? ' on' : ''}">${svg(i, 18)}<span>${t}</span>${n ? `<small>${n}</small>` : ''}</div>`).join('')}
+    </nav>
+    <div class="main">
+      <div class="nav">
+        ${TB('Back', '后退', { key: 'Alt+←' })}${TB('Forward', '前进', { key: 'Alt+→', disabled: true })}${TB('Up', '上一级', { key: 'Alt+↑' })}${TB('Refresh', '刷新', { key: 'F5' })}
+        <div class="addr">${svg('Drive', 16)}<span class="crumb">此电脑</span>${svg('ChevronDown', 12)}<span class="crumb">新加卷 (P:)</span>${svg('ChevronDown', 12)}<span class="crumb"><b>源代码</b></span></div>
+        <div class="search">${svg('Search', 16)}<span>搜索 源代码</span></div>
+      </div>
+      <div class="cmd">
+        ${TB('Add', '新建', { cls: 'new', caret: true, tip: '新建文件夹或文件', key: 'Ctrl+Shift+N' })}
+        ${TB('Cut', '剪切', { key: 'Ctrl+X' })}${TB('Copy', '复制', { key: 'Ctrl+C' })}${TB('Paste', '粘贴', { key: 'Ctrl+V' })}${TB('Rename', '重命名', { key: 'F2' })}${TB('Send', '分享')}${TB('Delete', '删除', { key: 'Delete' })}
+        <span class="sep"></span>
+        ${TB('Sort', '排序', { caret: true })}${TB('Filter', '筛选')}${TB('GroupBy', '分组', { caret: true })}
+        <span class="sep"></span>
+        ${TB('Undo', '撤销', { key: 'Ctrl+Z' })}${TB('Terminal', '终端')}
+        <span class="grow"></span>
+        <span class="views">${TB('List', '详细信息', { pressed: true, key: 'Ctrl+Shift+6' })}${TB('Grid', '图标', { key: 'Ctrl+Shift+2' })}${TB('Columns', '列视图')}</span>
+        ${TB('Panel', '预览窗格', { key: 'Alt+P', pressed: true })}${TB('More', '更多')}
+      </div>
+      <div class="rh"><span>名称</span><span>修改日期</span><span>类型</span><span class="z">大小</span></div>
+      <div class="rows">${files.map(([i, n, d, t, s], k) => `<div class="row${k === 4 ? ' sel' : ''}"><span class="n"><span class="${i === 'Folder' ? 'folder' : 'file'}">${svg(i, 18)}</span><span>${n}</span></span><span class="d">${d}</span><span class="t">${t}</span><span class="z">${s}</span></div>`).join('')}</div>
+    </div>
+  </div>
+  <div class="status"><span>${files.length} 个项目</span><span>已选中 1 项</span><span class="fill"></span><span>空格 快速预览</span></div>`;
+}
+
+/* ---------- states ---------- */
+function renderStates() {
+  const st = (cls, label, attr = '') => `<div class="st"><button class="tb ${cls}" ${attr} tabindex="-1" aria-label="${label}">${svg('Paste', S.size)}<span class="lbl" style="display:inline">粘贴</span></button><small>${label}</small></div>`;
+  $('#states').innerHTML = st('', '常态 · 文字色') + st('hov', '悬停 · hover 底') + st('prs', '按下 · pressed 底') + st('', '选中 · 浅强调底', 'aria-pressed="true"') + st('', '不可用 · 38%', 'aria-disabled="true"');
+}
+
+/* ---------- library ---------- */
+function renderGroups() {
+  $('#groups').innerHTML = GROUPS.map(g => `<div class="group"><div class="gh"><h3>${g.name}</h3><span class="count">${g.icons.length}</span></div><div class="tiles">${g.icons.map(([id, zh]) => `<button class="tile" id="t-${id}" data-id="${id}" aria-pressed="${id === S.sel}">${ICONS[id].isNew ? '<span class="new">新增</span>' : ''}${svg(id, 24)}<span class="zh">${zh}</span><span class="en">${id}</span></button>`).join('')}</div></div>`).join('');
+}
+function boardSvg(id) {
+  let lines = '';
+  for (let i = 0; i <= 24; i++) {
+    const strong = i === 2 || i === 22 || i === 12;
+    lines += `<path d="M${i} 0V24M0 ${i}H24" stroke="${strong ? 'var(--grid-strong)' : 'var(--grid)'}" stroke-width="${strong ? .06 : .04}"/>`;
+  }
+  const keys = `<g fill="none" stroke="var(--key)" stroke-width=".05" stroke-dasharray=".3 .25"><circle cx="12" cy="12" r="10"/><rect x="3" y="3" width="18" height="18" rx="2"/><rect x="4" y="2" width="16" height="20" rx="2"/><rect x="2" y="4" width="20" height="16" rx="2"/></g>`;
+  const ic = ICONS[id];
+  const cl = `<g class="cl">${ic.badge ? `<g>${ic.body}</g>${ic.badge}` : ic.body}</g>`;
+  return `<svg viewBox="0 0 24 24" class="lines" aria-hidden="true">${S.grid ? lines : ''}${S.keys ? keys : ''}</svg>${svg(id, 24)}${S.skel ? `<svg viewBox="0 0 24 24" aria-hidden="true">${cl}</svg>` : ''}`;
+}
+function renderInsp() {
+  const ic = ICONS[S.sel];
+  $('#insp').innerHTML = `
+    <div class="ttl"><b>${ic.zh}</b><code>Icon::${ic.id}</code></div>
+    <div class="board${S.skel ? ' skel' : ''}" id="board">${boardSvg(ic.id)}</div>
+    <div class="row2">
+      <button class="chk" id="gridBtn" aria-pressed="${S.grid}">像素网格</button>
+      <button class="chk" id="keyBtn" aria-pressed="${S.keys}">关键线</button>
+      <button class="chk" id="skelBtn" aria-pressed="${S.skel}">中心线</button>
+    </div>
+    <div class="sizes">${[16, 20, 24, 32].map(z => `<div class="sz"><span class="px">${svg(ic.id, z)}</span>${z}</div>`).join('')}</div>
+    <p class="note">${ic.badge ? '带角标：主体在右下 Ø10.8 处挖空，角标画在 Ø7 以内。' : ic.id === 'Sparkle' ? '助手图标始终用强调色填充，与现有 FillOpacity 规则一致。' : ic.id === 'Invert' ? '半边填充 35% 不透明，与现有 FillOpacity(Invert) 一致。' : ic.isNew ? '新增名称，需要在 command_icons::Icon 里加一项。' : '与 command_icons.h 里的同名图标替换即可。'}所属分组：${ic.group}。</p>
+    <div class="row2"><button class="btn pri" id="copyBtn">复制 SVG</button></div>
+    <textarea class="dump" id="one" readonly hidden aria-label="SVG 源码"></textarea>`;
+}
+
+/* ---------- rules ---------- */
+function renderRules() {
+  const demo = (body, extra = '') => `<svg viewBox="0 0 24 24" class="ic big">${body}</svg>${extra}`;
+  const grid = `<path d="M2 2h20v20H2Z" stroke="var(--key)" stroke-width=".25" stroke-dasharray=".6 .5" fill="none"/>`;
+  $('#rules').innerHTML = `
+  <div class="rule"><h3>网格</h3><div class="demo">${demo(grid + ICONS.Copy.body)}</div>
+    <dl class="kv"><dt>画布</dt><dd>24 × 24（kCanvas）</dd><dt>内容区</dt><dd>20 × 20，四周留 2</dd><dt>关键线</dt><dd>圆 Ø20 · 方 18 · 竖 16×20 · 横 20×16</dd></dl></div>
+  <div class="rule"><h3>描边与圆角</h3><div class="demo">${demo(FRAME + p('M12 4.75v14.5'))}</div>
+    <dl class="kv"><dt>描边</dt><dd>1.75，圆头圆角（kStroke）</dd><dt>外框圆角</dt><dd>2.25</dd><dt>小部件圆角</dt><dd>1 – 1.75</dd><dt>最小间距</dt><dd>两条线中心相距 ≥ 3</dd></dl></div>
+  <div class="rule"><h3>角标</h3><div class="demo">${svg('FolderAdd', 64)}${svg('FolderGo', 64)}</div>
+    <p>右下角 (17.5, 17.5) 挖空一个 Ø10.8 的圆，角标本体在 Ø7 以内。D2D 实现用 CombineWithGeometry 的 EXCLUDE 生成挖空后的主体。</p></div>
+  <div class="rule"><h3>强调色点缀</h3><div class="demo duo">${svg('Paste', 64)}${svg('Rename', 64)}</div>
+    <p>每个图标最多标一个“动作部件”（剪贴板夹子、I 形光标、勾）。默认关闭，和 Files 一样以单色为主；打开后只给这一部件上强调色。</p></div>
+  <div class="rule"><h3>像素对齐</h3><div class="demo">${svg('List', 16)}${svg('List', 20)}${svg('List', 24)}</div>
+    <p>水平和竖直的长线落在 .25 / .75 网格上，20 DIP 工具栏、125% 缩放时 1.75 描边约为 1.8 px，线的两侧都能落在整像素附近。小于 16 的地方只用简单图形（箭头、勾、关闭）。</p></div>
+  <div class="rule"><h3>和 Files 的关系</h3>
+    <p>参考了 Files 工具栏的分组顺序（新建 · 剪贴板 · 排序筛选分组 · 布局）、图标加文字的命令栏形式，以及线性 Fluent 的整体气质。所有图形都按 Pulse 的网格重新绘制，没有复制 Files 或 Fluent 图标文件里的路径。</p></div>`;
+}
+
+/* ---------- tooltip / toast ---------- */
+const tip = $('#tip'); let tipT;
+document.addEventListener('mouseover', e => {
+  const b = e.target.closest('#win [data-tip]'); clearTimeout(tipT);
+  if (!b) { tip.hidden = true; return; }
+  tipT = setTimeout(() => {
+    tip.innerHTML = `${b.dataset.tip}${b.dataset.key ? `<kbd>${b.dataset.key}</kbd>` : ''}`; tip.hidden = false;
+    const rr = b.getBoundingClientRect(), tw = tip.offsetWidth;
+    tip.style.left = Math.max(8, Math.min(innerWidth - tw - 8, rr.left + rr.width / 2 - tw / 2)) + 'px';
+    tip.style.top = (rr.bottom + 8) + 'px';
+  }, 350);
+});
+let toastT;
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, 1800); }
+async function copy(text, area) {
+  try { await navigator.clipboard.writeText(text); toast('已复制'); }
+  catch { const a = $(area); a.hidden = false; a.value = text; a.focus(); a.select(); toast('复制被拦截，已选中文本，请按 Ctrl+C'); }
+}
+
+/* ---------- controls ---------- */
+const ACCENTS = [['#0078D4', 'Windows 蓝'], ['#2E9B6E', '青绿'], ['#8A5CF5', '紫'], ['#D9622B', '橙'], ['#C2185B', '玫红']];
+function mix(hex, to, t) { const a = parseInt(hex.slice(1), 16), b = parseInt(to.slice(1), 16); const ch = s => Math.round(((a >> s) & 255) * (1 - t) + ((b >> s) & 255) * t); return `rgb(${ch(16)},${ch(8)},${ch(0)})`; }
+function isDark() { const t = document.documentElement.dataset.theme; return t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches; }
+function applyAccent(hex) {
+  const root = document.documentElement.style; const n = parseInt(hex.slice(1), 16);
+  S.accent = hex;
+  document.querySelectorAll('#swatches .swatch').forEach(s => s.setAttribute('aria-pressed', s.dataset.v === hex));
+  if (hex === '#0078D4') { ['--accent', '--accent-fg', '--accent-soft', '--accent-soft2'].forEach(k => root.removeProperty(k)); return; }
+  const rgb = `${n >> 16},${(n >> 8) & 255},${n & 255}`;
+  root.setProperty('--accent', hex);
+  if (isDark()) { root.setProperty('--accent-fg', mix(hex, '#FFFFFF', .38)); root.setProperty('--accent-soft', `rgba(${rgb},.20)`); root.setProperty('--accent-soft2', `rgba(${rgb},.32)`); }
+  else { root.setProperty('--accent-fg', mix(hex, '#000000', .14)); root.setProperty('--accent-soft', `rgba(${rgb},.095)`); root.setProperty('--accent-soft2', `rgba(${rgb},.17)`); }
+  S.accent = hex;
+  document.querySelectorAll('#swatches .swatch').forEach(s => s.setAttribute('aria-pressed', s.dataset.v === hex));
+}
+$('#swatches').innerHTML = ACCENTS.map(([h, n], i) => `<button class="swatch" id="ac-${i}" data-v="${h}" style="background:${h}" aria-label="${n}" aria-pressed="false"></button>`).join('');
+const segSet = (sel, v) => document.querySelectorAll(sel + ' button').forEach(b => b.setAttribute('aria-pressed', b.dataset.v === String(v)));
+function setTheme(v) {
+  if (v === 'sys') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v;
+  segSet('#themeSeg', v); store.set('theme', v); applyAccent(S.accent || '#0078D4');
+}
+function rerenderIcons() { renderWin(); renderStates(); renderGroups(); renderInsp(); renderRules(); }
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.closest('#themeSeg')) setTheme(b.dataset.v);
+  else if (b.closest('#swSeg')) { S.sw = +b.dataset.v; document.documentElement.style.setProperty('--sw', S.sw); segSet('#swSeg', S.sw); store.set('sw', S.sw); }
+  else if (b.closest('#sizeSeg')) { S.size = +b.dataset.v; segSet('#sizeSeg', S.size); store.set('size', S.size); renderWin(); renderStates(); }
+  else if (b.closest('#swatches')) { applyAccent(b.dataset.v); store.set('accent', b.dataset.v); }
+  else if (b.id === 'lblBtn') { S.labels = !S.labels; b.setAttribute('aria-pressed', S.labels); $('#win').classList.toggle('labels', S.labels); store.set('labels', S.labels); }
+  else if (b.id === 'duoBtn') { const on = !page.classList.contains('duo'); page.classList.toggle('duo', on); b.setAttribute('aria-pressed', on); store.set('duo', on); }
+  else if (b.classList.contains('tile')) { S.sel = b.dataset.id; document.querySelectorAll('.tile').forEach(t => t.setAttribute('aria-pressed', t === b)); renderInsp(); }
+  else if (b.id === 'gridBtn') { S.grid = !S.grid; renderInsp(); }
+  else if (b.id === 'keyBtn') { S.keys = !S.keys; renderInsp(); }
+  else if (b.id === 'skelBtn') { S.skel = !S.skel; renderInsp(); }
+  else if (b.id === 'copyBtn') copy(standalone(S.sel, S.sw), '#one');
+  else if (b.id === 'dumpBtn') { const all = {}; Object.keys(ICONS).forEach(id => all[id] = standalone(id, S.sw)); copy(JSON.stringify(all, null, 1), '#dump'); }
+});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyAccent(S.accent || '#0078D4'));
+
+/* ---------- boot ---------- */
+S.size = store.get('size', 20); S.sw = store.get('sw', 1.75); S.labels = store.get('labels', false);
+document.documentElement.style.setProperty('--sw', S.sw);
+segSet('#sizeSeg', S.size); segSet('#swSeg', S.sw);
+rerenderIcons();
+$('#win').classList.toggle('labels', S.labels); $('#lblBtn').setAttribute('aria-pressed', S.labels);
+if (store.get('duo', false)) { page.classList.add('duo'); $('#duoBtn').setAttribute('aria-pressed', 'true'); }
+S.accent = store.get('accent', '#0078D4');
+const savedTheme = store.get('theme', null);
+if (savedTheme && savedTheme !== 'sys') setTheme(savedTheme);
+else { segSet('#themeSeg', document.documentElement.dataset.theme || 'sys'); applyAccent(S.accent); }
+new MutationObserver(() => { segSet('#themeSeg', document.documentElement.dataset.theme || 'sys'); applyAccent(S.accent || '#0078D4'); })
+  .observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+})();
+</script>
+
+</body>
+</html>

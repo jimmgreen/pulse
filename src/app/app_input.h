@@ -48,6 +48,7 @@ bool PointInList(const AppState& s, int mx, int my);
 bool BlankClickDeselect(AppState& s, POINT client, bool maximize = false);
 bool RestoreBlankDeselect(AppState& s, POINT client, bool maximizing = false);
 void CancelFileClick(AppState& s);
+void CancelButtonPress(AppState& s);
 // 悬停选中 (single click mode): resting on a row selects it. True when it did.
 bool TickHoverSelect(AppState& s, ULONGLONG now);
 bool PointInHitItemName(AppState& s, const ui::WindowViewModel& vm,

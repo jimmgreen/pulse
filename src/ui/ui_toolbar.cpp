@@ -395,7 +395,7 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
     // command colour. Pressed, toggled-on, disabled and dragged buttons, and
     // the accent-filled New button, draw the whole icon in one colour.
     const D2D1_COLOR_F ink=IsHighContrast() ? theme.text_secondary : PrepareIconTones(theme,vm.dark);
-    const float left = EffectiveSidebarWidth(rect.right);
+    const float left = ToolbarLeft(rect.right);
     const bool compact = rect.right-left < 600*scale_;
     auto layout = ToolbarLayoutAt(rect.right,NewButtonWidthPx(compact),vm.pane.filter_expand);
     const bool searchOverlay=vm.address_searching && layout.merged_search;
@@ -667,6 +667,21 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                     addrRc.right - addrRc.left - 18.0f * scale_,
                     addrRc.bottom - addrRc.top);
             }
+            if (EmbeddedPickerLayout() && !vm.address_searching && !placed.empty() && strip.overflow <= 0.0f) {
+                const auto text = pulse::l10n::Get(pulse::l10n::StringId::PickerTypeToJump);
+                const float key_width = painter_.MeasureBadgeWidth(L"Ctrl L");
+                const float text_width = MeasureTextWidth(compositor_->DwriteFactory(), compositor_->AddressFormat(), text);
+                const float right = addrRc.right - (FavoritesButtonShown() ? 36.0f : 10.0f) * scale_;
+                const float hint_left = right - key_width - 6.0f * scale_ - text_width;
+                // Only use genuinely empty breadcrumb space; long paths keep their full viewport.
+                if (placed.back().rc.right + 26.0f * scale_ <= hint_left) {
+                    painter_.DrawText(text, D2D1::RectF(hint_left, addrRc.top, right - key_width - 6.0f * scale_, addrRc.bottom),
+                        compositor_->AddressFormat(), theme.text_secondary);
+                    const float top = (addrRc.top + addrRc.bottom - 22.0f * scale_) * 0.5f;
+                    painter_.DrawBadge({D2D1::RectF(right - key_width, top, right, top + 22.0f * scale_),
+                        L"Ctrl L", fluent::BadgeKind::Keycap});
+                }
+            }
         }
         if (FavoritesButtonShown() && !vm.address_editing && !vm.address_searching) {
             // ★⌄: the favorites dropdown while the 收藏栏 is hidden; filled
@@ -684,7 +699,7 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
     }
     DrawAddressSearchChrome(vm, rect.right, theme);
     MakeBrush(dc,theme.stroke_divider,brStrokeDivider_);
-    FillRect(dc,brStrokeDivider_.get(),left+margin_,title_bar_height_+44*scale_,rect.right-left-2*margin_,scale_);
+    FillRect(dc,brStrokeDivider_.get(),left+margin_,title_bar_height_+NavigationHeightDip()*scale_,rect.right-left-2*margin_,scale_);
     // Embedded hosts (the file picker) keep the address row only.
     if (embedded_) return;
     // The command row's plate: the file and pane commands, overflow, pinned

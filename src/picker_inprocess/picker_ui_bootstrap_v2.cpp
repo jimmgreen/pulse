@@ -1,3 +1,5 @@
+#include "picker_open_missing.h"
+#include "picker_dynamic_text.h"
 #include "../common/runtime_log.h"
 #include <shlobj.h>
 #include <mutex>
@@ -9,8 +11,10 @@
 #include "picker_property_panel.h"
 #include "picker_ui_environment.h"
 #include "caller_activation_scope.h"
+#include "caller_callback_invocation.h"
 #include "../common/picker_owner_guard.h"
 #include "../ui/folder_picker_dialog.h"
+#include "picker_jump_context.h"
 #include "../ui/file_save_model.h"
 #include "../ui/typography.h"
 #include "../app/picker_appearance_ui.h"
@@ -28,9 +32,9 @@
 
 namespace {
 thread_local DWORD remote_parent_pid = 0;
-void LogOwnerContext(const pulse::PickerOwnerGuard& guard, HWND owner) noexcept {
+void LogOwnerContext(const pulse::PickerOwnerGuard& guard, HWND owner, bool closed = false) noexcept {
     const auto identity = guard.Diagnostics();
-    if (!guard.Error() && (!identity.identity_available || identity.caller_integrity == identity.owner_integrity)) return;
+    if (!closed && !guard.Error() && (!identity.identity_available || identity.caller_integrity == identity.owner_integrity)) return;
     const DWORD saved = GetLastError();
     try {
         static std::once_flag once;
@@ -43,7 +47,22 @@ void LogOwnerContext(const pulse::PickerOwnerGuard& guard, HWND owner) noexcept 
         });
         DWORD pid = 0;
         const DWORD thread = owner ? GetWindowThreadProcessId(owner, &pid) : 0;
-        pulse::diagnostics::runtime::Event(guard.Error() ? "owner_guard_failed" : "owner_guard_observed", {
+        DWORD foreground_pid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &foreground_pid);
+        if (closed) pulse::diagnostics::runtime::Event("owner_focus_closed", {
+            {"owner_pid", pid}, {"foreground_pid", foreground_pid},
+            {"restore_attempted", identity.restore_attempted ? 1u : 0u},
+            {"restore_owned_disable", identity.restore_owned_disable ? 1u : 0u},
+            {"dialog_was_foreground", identity.dialog_was_foreground ? 1u : 0u},
+            {"activation_attempted", identity.activation_attempted ? 1u : 0u},
+            {"activation_succeeded", identity.activation_succeeded ? 1u : 0u},
+            {"restore_skipped_switched", identity.restore_skipped_switched ? 1u : 0u},
+            {"foreground_owner", GetForegroundWindow() == owner ? 1u : 0u},
+            {"valid", owner && IsWindow(owner) ? 1u : 0u},
+            {"same_process", pid == GetCurrentProcessId() ? 1u : 0u},
+            {"same_thread", thread == GetCurrentThreadId() ? 1u : 0u},
+            {"enabled", owner && IsWindowEnabled(owner) ? 1u : 0u}});
+        else pulse::diagnostics::runtime::Event(guard.Error() ? "owner_guard_failed" : "owner_guard_observed", {
             {"stage", static_cast<uint32_t>(guard.FailureStage())}, {"error", guard.Error()},
             {"identity_available", identity.identity_available ? 1u : 0u},
             {"session_available", identity.session_available ? 1u : 0u},
@@ -105,37 +124,46 @@ struct CallbackContext {
         if (!ActivateActCtx(activation, &cookie)) { ProofContextFailure("enter-ui-activation", GetLastError()); return HRESULT_FROM_WIN32(GetLastError()); }
         return S_OK;
     }
-    HRESULT Invoke(PulsePickerUiV2Callback callback, void* context, const PulsePickerUiV2Event& event) {
-        // WndProc dispatch may have automatic activation frames above our Show
-        // frame. Never pop the outer frame from a nested callback. Overlay the
-        // captured caller context and unwind only this callback-owned top frame.
-        pulse::picker_inprocess::CallerActivationFrame callback_frame(caller_activation);
-        if (!callback_frame.Entered()) {
-            ProofContextFailure("invoke-push-caller-activation", GetLastError());
-            return HRESULT_FROM_WIN32(ERROR_FUNCTION_FAILED);
-        }
-        const bool caller_dpi_entered = set_dpi(caller_dpi) != nullptr;
-        if (!caller_dpi_entered) ProofContextFailure("invoke-enter-caller-dpi", GetLastError());
-        const bool caller_entered = caller_dpi_entered && SetThreadUILanguage(caller_language) != 0;
-        if (caller_dpi_entered && !caller_entered) ProofContextFailure("invoke-enter-caller-language", GetLastError());
-        HRESULT hr = HRESULT_FROM_WIN32(ERROR_FUNCTION_FAILED);
-        if (caller_entered) {
-            try { hr = callback(context, &event);
-                if (event.kind == PULSE_PICKER_UI_V2_EVENT_BUTTON_CLICKED || event.kind == PULSE_PICKER_UI_V2_EVENT_ITEM_SELECTED || event.kind == PULSE_PICKER_UI_V2_EVENT_CONTROL_ACTIVATING || event.kind == PULSE_PICKER_UI_V2_EVENT_CHECK_TOGGLED) hr = S_OK;
-            } catch (...) { hr = E_FAIL; }
-            caller_language = GetThreadUILanguage();
-        }
-        const auto outgoing = set_dpi(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        if (!outgoing) {
-            ProofContextFailure("invoke-restore-ui-dpi", GetLastError());
-            return HRESULT_FROM_WIN32(ERROR_FUNCTION_FAILED);
-        }
-        caller_dpi = outgoing;
-        if (!SetThreadUILanguage(ui_language)) {
-            ProofContextFailure("invoke-restore-ui-language", GetLastError());
-            return HRESULT_FROM_WIN32(ERROR_FUNCTION_FAILED);
-        }
-        return hr;
+    pulse::picker_inprocess::CallerInvocationOutcome Invoke(PulsePickerUiV2Callback callback, void* context, const PulsePickerUiV2Event& event) {
+        using Stage = pulse::picker_inprocess::CallerInvocationStage;
+        struct Operations {
+            CallbackContext& owner;
+            pulse::picker_inprocess::CallerActivationFrame activation;
+            bool dpi_entered = false, language_entered = false;
+            explicit Operations(CallbackContext& value) : owner(value), activation(value.caller_activation) {}
+            HRESULT Failure(const char* stage) {
+                const DWORD error = GetLastError() ? GetLastError() : ERROR_FUNCTION_FAILED;
+                ProofContextFailure(stage, error); return HRESULT_FROM_WIN32(error);
+            }
+            HRESULT Step(Stage stage) {
+                switch (stage) {
+                case Stage::Push: return activation.Entered() ? S_OK : Failure("invoke-push-caller-activation");
+                case Stage::EnterDpi:
+                    dpi_entered = owner.set_dpi(owner.caller_dpi) != nullptr;
+                    return dpi_entered ? S_OK : Failure("invoke-enter-caller-dpi");
+                case Stage::EnterLanguage:
+                    language_entered = SetThreadUILanguage(owner.caller_language) != 0;
+                    return language_entered ? S_OK : Failure("invoke-enter-caller-language");
+                case Stage::RestoreDpi: {
+                    if (language_entered) owner.caller_language = GetThreadUILanguage();
+                    const auto outgoing = owner.set_dpi(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+                    if (!outgoing) return Failure("invoke-restore-ui-dpi");
+                    if (dpi_entered) owner.caller_dpi = outgoing;
+                    return S_OK;
+                }
+                case Stage::RestoreLanguage:
+                    return SetThreadUILanguage(owner.ui_language) ? S_OK : Failure("invoke-restore-ui-language");
+                case Stage::Pop: return activation.Leave() ? S_OK : Failure("invoke-pop-caller-activation");
+                default: return E_UNEXPECTED;
+                }
+            }
+        } operations(*this);
+        return pulse::picker_inprocess::InvokeCallerCallback(operations, [&] {
+            HRESULT result = callback(context, &event);
+            if (event.kind == PULSE_PICKER_UI_V2_EVENT_BUTTON_CLICKED || event.kind == PULSE_PICKER_UI_V2_EVENT_ITEM_SELECTED ||
+                event.kind == PULSE_PICKER_UI_V2_EVENT_CONTROL_ACTIVATING || event.kind == PULSE_PICKER_UI_V2_EVENT_CHECK_TOGGLED) result = S_OK;
+            return result;
+        });
     }
     ~CallbackContext() {
         if (cookie) DeactivateActCtx(0, cookie);
@@ -151,6 +179,7 @@ struct ActiveShow {
     HWND window = nullptr;
     HANDLE cancel = nullptr;
     bool shown = false, closed = false, in_callback = false, multi_select = false, local_save = false;
+    bool native_save_defaults = false;
     HRESULT close_hr = S_OK, callback_error = S_OK;
     PulsePickerUiV2Callbacks callbacks{};
     PickerDialogSnapshot snapshot;
@@ -160,6 +189,7 @@ struct ActiveShow {
     ~ActiveShow() { if (cancel) CloseHandle(cancel); }
 };
 struct Session {
+    std::wstring navigation_root;
     PulsePickerUiV2Session id = 0;
     uint64_t next_show = 1;
     pulse::picker_inprocess::Environment environment;
@@ -253,26 +283,37 @@ HRESULT CopyControl(const PulsePickerUiV2Control* input, pulse::ui::PickerCustom
 }
 HRESULT Prepare(const PulsePickerUiV2Config* input, pulse::ui::FolderPickerSpec& spec, pulse::picker_inprocess::PropertyPanel* properties = nullptr) {
     if (!input) return E_POINTER;
-    if (input->size != sizeof(*input)) return E_INVALIDARG;
+    const bool has_policy = input->size == sizeof(PulsePickerUiV2FolderPolicyConfig);
+    if (input->size != sizeof(*input) && input->size != sizeof(PulsePickerUiV2CancelLabelConfig) && !has_policy) return E_INVALIDARG;
+    const bool has_cancel = (input->label_flags & PULSE_PICKER_UI_V2_LABEL_CANCEL) != 0;
+    if (!has_policy && has_cancel != (input->size == sizeof(PulsePickerUiV2CancelLabelConfig))) return E_INVALIDARG;
+    if (has_policy) {
+        const auto& extended = *reinterpret_cast<const PulsePickerUiV2FolderPolicyConfig*>(input);
+        if (extended.reserved || (extended.folder_policy & ~PULSE_PICKER_UI_V2_FOLDER_ALLOW_AUTO_JUMP)) return E_INVALIDARG;
+        if (!has_cancel && (extended.base.cancel_button_label.data || extended.base.cancel_button_label.units)) return E_INVALIDARG;
+        spec.allow_auto_jump = (extended.folder_policy & PULSE_PICKER_UI_V2_FOLDER_ALLOW_AUTO_JUMP) != 0;
+    }
     if (input->version != PULSE_PICKER_UI_V2_VERSION || input->reserved[0] || input->reserved[1] ||
         (input->appearance & ~PULSE_PICKER_UI_V2_DARK)) return E_INVALIDARG;
     if (input->native_options & ~PULSE_PICKER_UI_V2_NATIVE_OPTIONS_MASK) return E_INVALIDARG;
     spec.native_options = input->native_options;
     if (FAILED(pulse::picker_shell::ValidateOptions(spec.native_options))) return E_INVALIDARG;
     const bool folder = input->access_policy == PULSE_PICKER_UI_V2_ACCESS_FOLDER_V1;
-    if (folder && (input->filter_count || input->default_extension.units || (input->open_options & ~(PULSE_PICKER_UI_V2_OPEN_SHOW_HIDDEN | PULSE_PICKER_UI_V2_OPEN_ALLOW_MULTI_SELECT | PULSE_PICKER_UI_V2_OPEN_NO_DEREFERENCE_LINKS)))) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    if (folder && (input->filter_count || input->default_extension.units || (input->open_options & ~(PULSE_PICKER_UI_V2_OPEN_SHOW_HIDDEN | PULSE_PICKER_UI_V2_OPEN_ALLOW_MULTI_SELECT | PULSE_PICKER_UI_V2_OPEN_NO_DEREFERENCE_LINKS | PULSE_PICKER_UI_V2_OPEN_SHELL_ITEM_FILTER)))) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
     const bool save = input->access_policy == PULSE_PICKER_UI_V2_ACCESS_LOCAL_SAVE_V1;
     spec.allow_missing_open = (input->open_options & PULSE_PICKER_UI_V2_OPEN_ALLOW_MISSING) != 0;
     spec.require_existing_open_parent = (input->open_options & PULSE_PICKER_UI_V2_OPEN_REQUIRE_EXISTING_PARENT) != 0;
-    if ((spec.allow_missing_open && (folder || save || (!(input->open_options & PULSE_PICKER_UI_V2_OPEN_SKIP_ACCESS_VALIDATION) && !(input->native_options & FOS_CREATEPROMPT)))) ||
-        (spec.require_existing_open_parent && !spec.allow_missing_open)) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    if (!pulse::picker_inprocess::MissingOpenOptionsSupported(input->open_options, input->native_options, folder, save))
+        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    spec.shell_item_filter=(input->open_options & PULSE_PICKER_UI_V2_OPEN_SHELL_ITEM_FILTER)!=0;
+    if (spec.shell_item_filter && (input->native_options & (FOS_ALLNONSTORAGEITEMS | FOS_SUPPORTSTREAMABLEITEMS))) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
     spec.allow_multiselect=(input->open_options&PULSE_PICKER_UI_V2_OPEN_ALLOW_MULTI_SELECT)!=0;
     spec.use_open_default_extension=(input->open_options&PULSE_PICKER_UI_V2_OPEN_USE_DEFAULT_EXTENSION)!=0;
     if(save && (spec.allow_multiselect || spec.use_open_default_extension || (input->open_options & PULSE_PICKER_UI_V2_OPEN_SKIP_ACCESS_VALIDATION))) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
     if ((input->required_capabilities & ~known_capabilities) ||
         (input->required_capabilities & ~capabilities) ||
         (!folder && !save && input->access_policy != PULSE_PICKER_UI_V2_ACCESS_LOCAL_OPEN_V1) ||
-        (input->open_options & ~(PULSE_PICKER_UI_V2_OPEN_SHOW_HIDDEN | PULSE_PICKER_UI_V2_OPEN_NO_DEREFERENCE_LINKS | PULSE_PICKER_UI_V2_OPEN_ALLOW_MULTI_SELECT | PULSE_PICKER_UI_V2_OPEN_USE_DEFAULT_EXTENSION | PULSE_PICKER_UI_V2_OPEN_SKIP_ACCESS_VALIDATION | PULSE_PICKER_UI_V2_OPEN_ALLOW_MISSING | PULSE_PICKER_UI_V2_OPEN_REQUIRE_EXISTING_PARENT)))
+        (input->open_options & ~(PULSE_PICKER_UI_V2_OPEN_SHOW_HIDDEN | PULSE_PICKER_UI_V2_OPEN_NO_DEREFERENCE_LINKS | PULSE_PICKER_UI_V2_OPEN_ALLOW_MULTI_SELECT | PULSE_PICKER_UI_V2_OPEN_USE_DEFAULT_EXTENSION | PULSE_PICKER_UI_V2_OPEN_SKIP_ACCESS_VALIDATION | PULSE_PICKER_UI_V2_OPEN_ALLOW_MISSING | PULSE_PICKER_UI_V2_OPEN_MISSING_VALIDATED | PULSE_PICKER_UI_V2_OPEN_REQUIRE_EXISTING_PARENT | PULSE_PICKER_UI_V2_OPEN_SHELL_ITEM_FILTER)))
         return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
     const bool caller_save = save && (input->save_options & PULSE_PICKER_UI_V2_SAVE_SKIP_ACCESS_VALIDATION);
     if (caller_save && (input->save_options & PULSE_PICKER_UI_V2_SAVE_REQUIRE_UNENCRYPTED)) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
@@ -283,7 +324,9 @@ HRESULT Prepare(const PulsePickerUiV2Config* input, pulse::ui::FolderPickerSpec&
     spec.require_unencrypted_save=(input->save_options&PULSE_PICKER_UI_V2_SAVE_REQUIRE_UNENCRYPTED)!=0;
     spec.native_save_defaults=(input->save_options&PULSE_PICKER_UI_V2_SAVE_NATIVE_DEFAULTS)!=0;
     if (caller_save && spec.native_save_defaults) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-    if (save ? ((input->save_options & ~(PULSE_PICKER_UI_V2_SAVE_REQUIRE_UNENCRYPTED | PULSE_PICKER_UI_V2_SAVE_SKIP_ACCESS_VALIDATION | PULSE_PICKER_UI_V2_SAVE_NATIVE_DEFAULTS | PULSE_PICKER_UI_V2_SAVE_NO_TEST_CREATE | PULSE_PICKER_UI_V2_SAVE_REQUIRE_EXISTING_PARENT)) != PULSE_PICKER_UI_V2_SAVE_OVERWRITE_PROMPT ||
+    const uint32_t prompt_mode = input->save_options & (PULSE_PICKER_UI_V2_SAVE_OVERWRITE_PROMPT | PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT);
+    spec.prompt_overwrite = prompt_mode != PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT;
+    if (save ? (((prompt_mode != PULSE_PICKER_UI_V2_SAVE_OVERWRITE_PROMPT && prompt_mode != PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT) || (input->save_options & ~(PULSE_PICKER_UI_V2_SAVE_REQUIRE_UNENCRYPTED | PULSE_PICKER_UI_V2_SAVE_SKIP_ACCESS_VALIDATION | PULSE_PICKER_UI_V2_SAVE_NATIVE_DEFAULTS | PULSE_PICKER_UI_V2_SAVE_NO_TEST_CREATE | PULSE_PICKER_UI_V2_SAVE_REQUIRE_EXISTING_PARENT | PULSE_PICKER_UI_V2_SAVE_OVERWRITE_PROMPT | PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT)) != 0) ||
         (input->open_options & PULSE_PICKER_UI_V2_OPEN_NO_DEREFERENCE_LINKS)) :
         (input->save_options != 0 || (!spec.use_open_default_extension && input->default_extension.units != 0))) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
     if (input->filter_count > PULSE_PICKER_UI_V2_MAX_FILTERS ||
@@ -293,7 +336,13 @@ HRESULT Prepare(const PulsePickerUiV2Config* input, pulse::ui::FolderPickerSpec&
     if (!CopyText(input->initial_folder, spec.initial_path, total) ||
         !CopyText(input->filename, spec.filename, total) || !CopyText(input->title, spec.title, total) ||
         !CopyText(input->default_extension, spec.default_extension, total)) return E_INVALIDARG;
-    if(input->label_flags&~7u) return E_INVALIDARG;
+    if(input->label_flags&~15u) return E_INVALIDARG;
+    if (has_cancel) {
+        const auto& text = reinterpret_cast<const PulsePickerUiV2CancelLabelConfig*>(input)->cancel_button_label;
+        if (text.units > 1024 || !CopyText(text, spec.cancel_button_label, total) ||
+            spec.cancel_button_label.find_first_of(L"\r\n\t") != spec.cancel_button_label.npos) return E_INVALIDARG;
+        spec.has_cancel_button_label = true;
+    }
     if((!(input->label_flags&PULSE_PICKER_UI_V2_LABEL_OK) && input->ok_button_label.units) ||
        (!(input->label_flags&PULSE_PICKER_UI_V2_LABEL_FILE_NAME) && input->file_name_label.units)) return E_INVALIDARG;
     if(input->ok_button_label.units>1024 || input->file_name_label.units>1024 ||
@@ -354,8 +403,10 @@ HRESULT Prepare(const PulsePickerUiV2Config* input, pulse::ui::FolderPickerSpec&
     for (uint32_t i = 0; i < input->property_count; ++i) {
         const auto& source = input->properties[i];
         if (source.size != sizeof(source)) return E_INVALIDARG;
-        if ((source.kind != 1 && source.kind != 2) || source.value_count > PULSE_PICKER_UI_V2_MAX_PROPERTY_VALUES ||
-            (source.value_count && !source.values) || (source.kind == 1 && source.value_count != 1)) return E_INVALIDARG;
+        if (source.kind < PULSE_PICKER_UI_V2_PROPERTY_SCALAR || source.kind > PULSE_PICKER_UI_V2_PROPERTY_GROUP ||
+            source.value_count > PULSE_PICKER_UI_V2_MAX_PROPERTY_VALUES || (source.value_count && !source.values) ||
+            ((source.kind == PULSE_PICKER_UI_V2_PROPERTY_SCALAR || source.kind == PULSE_PICKER_UI_V2_PROPERTY_READONLY_SCALAR) && source.value_count != 1) ||
+            (source.kind == PULSE_PICKER_UI_V2_PROPERTY_GROUP && source.value_count != 0)) return E_INVALIDARG;
         if (std::any_of(fields.begin(), fields.end(), [&](const auto& f) { return f.index == source.index; })) return E_INVALIDARG;
         pulse::picker_inprocess::PropertyField field; field.index = source.index; field.kind = source.kind;
         if (!CopyText(source.label, field.label, total) || field.label.empty()) return E_INVALIDARG;
@@ -386,6 +437,7 @@ uint32_t EventKind(PickerDialogEvent kind) {
     case PickerDialogEvent::TypeChanged: return PULSE_PICKER_UI_V2_EVENT_TYPE_CHANGED;
     case PickerDialogEvent::FileOk: return PULSE_PICKER_UI_V2_EVENT_FILE_OK;
     case PickerDialogEvent::ButtonClicked: return PULSE_PICKER_UI_V2_EVENT_BUTTON_CLICKED;
+    case PickerDialogEvent::IncludeItem: return PULSE_PICKER_UI_V2_EVENT_INCLUDE_ITEM;
     case PickerDialogEvent::ItemSelected: return PULSE_PICKER_UI_V2_EVENT_ITEM_SELECTED;
     case PickerDialogEvent::ControlActivating: return PULSE_PICKER_UI_V2_EVENT_CONTROL_ACTIVATING;
     case PickerDialogEvent::CheckToggled: return PULSE_PICKER_UI_V2_EVENT_CHECK_TOGGLED;
@@ -393,6 +445,14 @@ uint32_t EventKind(PickerDialogEvent kind) {
     case PickerDialogEvent::OpenDropDownSelected: return PULSE_PICKER_UI_V2_EVENT_OPEN_DROPDOWN_SELECTED;
     default: return 0;
     }
+}
+HRESULT InvocationResult(ActiveShow& frame, const pulse::picker_inprocess::CallerInvocationOutcome& result) {
+    if (result.infrastructure_result != S_OK || !result.caller_returned) {
+        frame.callback_error = FAILED(result.infrastructure_result) ? result.infrastructure_result : E_UNEXPECTED;
+        SetEvent(frame.cancel);
+        return frame.callback_error;
+    }
+    return result.caller_result;
 }
 HRESULT Dispatch(ActiveShow& frame, PickerDialogEvent kind, const std::wstring& proposed) {
     if (frame.closed || FAILED(frame.callback_error) || !frame.callbacks.callback) return frame.callback_error;
@@ -411,9 +471,18 @@ HRESULT Dispatch(ActiveShow& frame, PickerDialogEvent kind, const std::wstring& 
         event.generation = frame.snapshot.generation;
     }
     frame.in_callback = true;
-    const HRESULT hr = frame.context->Invoke(frame.callbacks.callback, frame.callbacks.context, event);
+    const HRESULT hr = InvocationResult(frame, frame.context->Invoke(frame.callbacks.callback, frame.callbacks.context, event));
     frame.in_callback = false;
     if (frame.closed) return S_OK;
+    if (event.kind == PULSE_PICKER_UI_V2_EVENT_PROPERTY_CHANGED && (hr == S_OK || hr == S_FALSE)) {
+        const HRESULT feedback = pulse::ui::SetPickerPropertyValidation(frame.window, event.control_id, hr == S_FALSE);
+        if (FAILED(feedback)) frame.callback_error = feedback;
+        return feedback;
+    }
+    // IncludeItem is not an event failure policy: native excludes only exact
+    // S_FALSE and includes even FAILED(hr)/other success codes. Preserve the
+    // callback HRESULT over RPC, but never promote it to Show's terminal status.
+    if (kind == PickerDialogEvent::IncludeItem) return hr;
     const bool vetoable = kind == PickerDialogEvent::FolderChanging || kind == PickerDialogEvent::FileOk;
     if (hr != S_OK && !(vetoable && hr == S_FALSE)) frame.callback_error = FAILED(hr) ? hr : E_UNEXPECTED;
     return FAILED(frame.callback_error) ? frame.callback_error : hr;
@@ -431,7 +500,7 @@ HRESULT Notify(ActiveShow& frame, HWND window, PickerDialogEvent kind,
     if (kind == PickerDialogEvent::Ready) frame.shown = true;
     if (frame.in_callback) {
         // The UI defers navigation before FolderChanging. Never grant a nested vetoable action.
-        if (kind == PickerDialogEvent::FolderChanging || kind == PickerDialogEvent::FileOk) return S_FALSE;
+        if (kind == PickerDialogEvent::FolderChanging || kind == PickerDialogEvent::FileOk || kind == PickerDialogEvent::IncludeItem) return S_FALSE;
         if (frame.pending.size() >= 64) {
             frame.callback_error = E_OUTOFMEMORY; SetEvent(frame.cancel); return E_OUTOFMEMORY;
         }
@@ -479,7 +548,7 @@ HRESULT NotifyOverwrite(ActiveShow& frame, HWND window, const PickerDialogSnapsh
     invocation.sharing = sharing;
     PulsePickerUiV2Event context_event{}; context_event.size = sizeof(context_event);
     frame.in_callback = true;
-    const HRESULT hr = frame.context->Invoke(InvokeOverwrite, &invocation, context_event);
+    const HRESULT hr = InvocationResult(frame, frame.context->Invoke(InvokeOverwrite, &invocation, context_event));
     frame.in_callback = false;
     if (frame.closed) return S_OK;
     if (hr != S_OK || invocation.response > PULSE_PICKER_UI_V2_OVERWRITE_REFUSE) {
@@ -618,6 +687,8 @@ HRESULT ShowCore(PulsePickerUiV2Session id, const PulsePickerUiV2Config* input,
     pulse::ui::FolderPickerSpec spec;
     pulse::picker_inprocess::PropertyPanel properties;
     HRESULT hr = Prepare(input, spec, &properties); if (FAILED(hr)) return hr;
+    spec.navigation_root = session->navigation_root;
+    if (spec.shell_item_filter && !callbacks->callback) return E_INVALIDARG;
     if(spec.allow_multiselect && (!result->paths.data || result->paths.capacity<PULSE_PICKER_UI_V2_MAX_PACKED_UNITS+1)) return E_INVALIDARG;
     const HWND owner = input->owner;
     const uint32_t requested_appearance = input->appearance;
@@ -642,7 +713,7 @@ HRESULT ShowCore(PulsePickerUiV2Session id, const PulsePickerUiV2Config* input,
     const auto colors = pulse::app::ResolveSystemPickerAppearanceColors(appearance);
     CallbackContext context;
     hr = context.Enter(env); if (FAILED(hr)) return hr;
-    ActiveShow frame; frame.native_options = spec.native_options; frame.properties = &properties; frame.multi_select=spec.allow_multiselect; frame.local_save = spec.mode == pulse::ui::PickerMode::Save; frame.context = &context; frame.callbacks = owned_callbacks; frame.output = result;
+    ActiveShow frame; frame.native_save_defaults = spec.native_save_defaults; frame.native_options = spec.native_options; frame.properties = &properties; frame.multi_select=spec.allow_multiselect; frame.local_save = spec.mode == pulse::ui::PickerMode::Save; frame.context = &context; frame.callbacks = owned_callbacks; frame.output = result;
     if (!session->next_show) return E_UNEXPECTED;
     frame.id = session->next_show++;
     frame.cancel = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -660,7 +731,7 @@ HRESULT ShowCore(PulsePickerUiV2Session id, const PulsePickerUiV2Config* input,
         event.show_id = frame.id; event.generation = frame.snapshot.generation; event.window = window;
         event.proposed_folder = {path.data(), static_cast<uint32_t>(path.size())}; event.navigation_result = result_hr;
         frame.in_callback = true;
-        const HRESULT delivered = frame.context->Invoke(frame.callbacks.callback, frame.callbacks.context, event);
+        const HRESULT delivered = InvocationResult(frame, frame.context->Invoke(frame.callbacks.callback, frame.callbacks.context, event));
         frame.in_callback = false;
         if (delivered != S_OK) { frame.callback_error = FAILED(delivered) ? delivered : E_UNEXPECTED; SetEvent(frame.cancel); }
     };
@@ -676,7 +747,9 @@ HRESULT ShowCore(PulsePickerUiV2Session id, const PulsePickerUiV2Config* input,
     });
     session->active = &frame;
     struct ActiveScope { ~ActiveScope() { session->active = nullptr; } } active_scope;
+    const auto jump_context = pulse::picker_inprocess::AttachJumpContext(spec, remote_parent_pid ? remote_parent_pid : GetCurrentProcessId());
     const auto outcome = pulse::ui::ShowFilePickerDetailed(owner, spec, colors.dark, pulse::ui::HexColor(colors.accent_rgb));
+    LogOwnerContext(owner_guard, owner, true);
     frame.window = nullptr;
     result->flags = frame.shown ? PULSE_PICKER_UI_V2_UI_SHOWN : 0u;
     result->generation = frame.snapshot.generation;
@@ -699,6 +772,7 @@ HRESULT ShowCore(PulsePickerUiV2Session id, const PulsePickerUiV2Config* input,
     if(result->paths.data) { std::copy(packed.begin(),packed.end(),result->paths.data);result->paths.data[packed.size()]=0; }
     result->paths.units=static_cast<uint32_t>(packed.size());result->path_count=static_cast<uint32_t>(outcome.result.paths.size());
     result->path.units = static_cast<uint32_t>(path.size()); result->status = PULSE_PICKER_UI_V2_ACCEPTED;
+    if (jump_context) jump_context->Accepted(path);
     result->win32_error = 0; return S_OK;
 }
 HRESULT WINAPI Show(PulsePickerUiV2Session id, const PulsePickerUiV2Config* input,
@@ -760,12 +834,38 @@ HRESULT WINAPI Shutdown(PulsePickerUiV2Session id) {
     return pulse::picker_inprocess::ReleaseEnvironment();
 }
 }
+extern "C" HRESULT WINAPI PulsePickerUiUpdateTextV2(PulsePickerUiV2Session id, uint64_t show, uint32_t kind, PulsePickerUiV2Text input) {
+    const HRESULT checked = CheckShow(id, show); if (FAILED(checked)) return checked;
+    auto& frame = *session->active;
+    if (frame.closed || FAILED(frame.callback_error) || !frame.window) return HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+    if (kind < PULSE_PICKER_UI_V2_TEXT_TITLE || kind > PULSE_PICKER_UI_V2_TEXT_DEFAULT_EXTENSION) return E_INVALIDARG;
+    try {
+        std::wstring text; uint64_t total = 0;
+        if (!CopyText(input, text, total)) return E_INVALIDARG;
+        if (!pulse::picker_inprocess::NormalizeDynamicText(kind, text, frame.local_save, frame.native_save_defaults)) return E_INVALIDARG;
+        return pulse::ui::UpdatePickerText(frame.window, kind, text);
+    } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; } catch (...) { return E_FAIL; }
+}
+extern "C" HRESULT WINAPI PulsePickerUiSetNavigationRootV2(PulsePickerUiV2Session id, PulsePickerUiV2Text input) {
+    const HRESULT checked = CheckSession(id); if (FAILED(checked)) return checked;
+    try {
+        std::wstring root; uint64_t total = 0;
+        if (!CopyText(input, root, total) || root.empty() || !UserFolderSyntax(root)) return E_INVALIDARG;
+        if (session->active) {
+            auto& frame = *session->active;
+            if (frame.closed || !frame.window || FAILED(frame.callback_error)) return HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+            const HRESULT updated = pulse::ui::SetPickerNavigationRoot(frame.window, root);
+            if (updated != S_OK) return updated;
+        }
+        session->navigation_root = std::move(root); return S_OK;
+    } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; } catch (...) { return E_FAIL; }
+}
 extern "C" HRESULT WINAPI PulsePickerUiGetApiV2(uint32_t version, uint32_t size, PulsePickerUiV2Api* api) {
     if (!api) return E_POINTER;
     if (version != PULSE_PICKER_UI_V2_VERSION || size != sizeof(*api)) return E_INVALIDARG;
     *api = {sizeof(*api), PULSE_PICKER_UI_V2_VERSION, capabilities, 0,
         Initialize, ValidateConfig, Show, GetWindow, Query, Close, Shutdown, UpdateControl,
-        PULSE_PICKER_UI_V2_FEATURE_CUSTOM_RADIO | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_CHECK | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_EDIT | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_LABELS | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_MENU | PULSE_PICKER_UI_V2_FEATURE_OPEN_DROPDOWN | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_COMBOBOX | PULSE_PICKER_UI_V2_FEATURE_MULTI_SELECT | PULSE_PICKER_UI_V2_FEATURE_OPEN_DEFAULT_EXTENSION | PULSE_PICKER_UI_V2_FEATURE_SAVE_UNENCRYPTED | PULSE_PICKER_UI_V2_FEATURE_OPEN_SKIP_ACCESS | PULSE_PICKER_UI_V2_FEATURE_FILESYSTEM_PLACES | PULSE_PICKER_UI_V2_FEATURE_COMPUTER_PLACE | PULSE_PICKER_UI_V2_FEATURE_PROPERTIES | PULSE_PICKER_UI_V2_FEATURE_SAVE_SKIP_ACCESS | PULSE_PICKER_UI_V2_FEATURE_NAVIGATE | PULSE_PICKER_UI_V2_FEATURE_SAVE_NATIVE_DEFAULTS | PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING | PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_TEST_CREATE | PULSE_PICKER_UI_V2_FEATURE_NATIVE_OPTIONS | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_PROMINENT_GROUP | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_PROMINENT_CONTROL | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_SEPARATOR, Navigate};
+        PULSE_PICKER_UI_V2_FEATURE_CUSTOM_RADIO | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_CHECK | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_EDIT | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_LABELS | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_MENU | PULSE_PICKER_UI_V2_FEATURE_OPEN_DROPDOWN | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_COMBOBOX | PULSE_PICKER_UI_V2_FEATURE_MULTI_SELECT | PULSE_PICKER_UI_V2_FEATURE_OPEN_DEFAULT_EXTENSION | PULSE_PICKER_UI_V2_FEATURE_SAVE_UNENCRYPTED | PULSE_PICKER_UI_V2_FEATURE_OPEN_SKIP_ACCESS | PULSE_PICKER_UI_V2_FEATURE_FILESYSTEM_PLACES | PULSE_PICKER_UI_V2_FEATURE_COMPUTER_PLACE | PULSE_PICKER_UI_V2_FEATURE_PROPERTIES | PULSE_PICKER_UI_V2_FEATURE_SAVE_SKIP_ACCESS | PULSE_PICKER_UI_V2_FEATURE_NAVIGATE | PULSE_PICKER_UI_V2_FEATURE_SAVE_NATIVE_DEFAULTS | PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING | PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING_VALIDATED | PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_TEST_CREATE | PULSE_PICKER_UI_V2_FEATURE_NATIVE_OPTIONS | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_PROMINENT_GROUP | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_PROMINENT_CONTROL | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_SEPARATOR | PULSE_PICKER_UI_V2_FEATURE_CANCEL_LABEL | PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_OVERWRITE | PULSE_PICKER_UI_V2_FEATURE_SHELL_ITEM_FILTER | PULSE_PICKER_UI_V2_FEATURE_FOLDER_PROVENANCE | PULSE_PICKER_UI_V2_FEATURE_DYNAMIC_TEXT | PULSE_PICKER_UI_V2_FEATURE_DYNAMIC_ITEMS | PULSE_PICKER_UI_V2_FEATURE_NAVIGATION_ROOT | PULSE_PICKER_UI_V2_FEATURE_PROPERTY_PRESENTATION, Navigate};
     return S_OK;
 }
 

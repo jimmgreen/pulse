@@ -19,14 +19,14 @@ struct PreparedDirNotifyBatch {
 // Performs drive classification and filesystem probes; call from an I/O worker.
 PreparedDirNotifyBatch PrepareDirNotifyBatch(const std::wstring& folder,
     const std::vector<fs::DirNotifyEvent>& events);
-// Pure memory application; maintains rename holds and active sort order and never probes disk.
+// Pure memory application; keeps existing rows in place within their group and never probes disk.
 NotifyPatch ApplyPreparedDirNotifyBatch(std::vector<fs::DirEntry>& entries,
     const PreparedDirNotifyBatch& prepared, ui::SortColumn col, ui::SortDirection sort_dir);
 
 bool FillDirEntry(const std::wstring& dir, const std::wstring& name, fs::DirEntry& out);
 
-// Renames keep their row within a group. New rows and modified sort keys
-// move to their comparator position (see entry_order_hold.h).
+// Existing rows (modified or renamed) keep their row within a group; new rows
+// and rows whose group changes move to their comparator position (see entry_order_hold.h).
 NotifyPatch ApplyDirNotify(std::vector<fs::DirEntry>& entries, const std::wstring& folder,
                            const fs::DirNotifyEvent& event,
                            ui::SortColumn col, ui::SortDirection sort_dir);

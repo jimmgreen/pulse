@@ -23,12 +23,17 @@ public:
     const std::wstring& Host() const noexcept;
     const std::wstring& Runtime() const noexcept;
     const std::wstring& UiProvider() const noexcept;
+    const std::wstring& AdminAutoHelper() const noexcept;
+    const std::wstring& AutoRuntime() const noexcept;
     const std::string& ManifestDigest() const noexcept;
+    const std::string& Version() const noexcept;
     unsigned Machine() const noexcept;
+    bool IsThinCompanion() const noexcept;
 private:
     std::unique_ptr<State> state_;
     friend DWORD VerifyBundle(const std::wstring&, std::string_view, BundleLease&) noexcept;
     friend DWORD ResolveInstalledBundle(const std::wstring&, BundleLease&) noexcept;
+    friend DWORD ResolveInstalledBundleForMachine(const std::wstring&, unsigned, BundleLease&) noexcept;
     friend DWORD RecheckDirectory(const BundleLease&) noexcept;
 };
 // Empty expected digest means explicit first selection. A saved profile must bind
@@ -38,6 +43,10 @@ DWORD VerifyBundle(const std::wstring& absolute_directory,
 // Resolves a bounded, strict dialog-current.json snapshot on a worker. The
 // pointer is released before return; only the selected immutable bundle is leased.
 DWORD ResolveInstalledBundle(const std::wstring& app_directory, BundleLease& output) noexcept;
+// Resolves the primary pointer first. Only an x86 companion may be selected;
+// a present but invalid primary/companion fails closed, never a flat fallback.
+DWORD ResolveInstalledBundleForMachine(const std::wstring& app_directory, unsigned machine,
+                                      BundleLease& output) noexcept;
 // Re-enumerates and rechecks file identities without changing files or loading DLLs.
 DWORD RecheckDirectory(const BundleLease&) noexcept;
 }

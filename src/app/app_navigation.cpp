@@ -1,3 +1,5 @@
+#include "thumbnail_rename.h"
+#include "../ui/ui_renderer.h"
 #include "media_props.h"
 #include "pane_layout_controls.h"
 #include "recycle_search.h"
@@ -11,6 +13,7 @@
 #include "app_window_title.h"
 // app_navigation.cpp — extracted from app_main.cpp.
 #include "app_internal.h"
+#include "extension_store_ui.h"
 #include "window_factory.h"
 #include "quick_access.h"
 #include "bitlocker_unlock.h"
@@ -1754,8 +1757,19 @@ static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool ag
                 // after opening) keeps the worker's vector: no 100k-row merge.
                 if (!app::SameEntryOrder(*tab->snapshot, *res.snapshot, tab->sort_column, tab->sort_direction))
                     listing = std::make_shared<std::vector<fs::DirEntry>>(app::KeepEntryOrder(
-                        *tab->snapshot, *res.snapshot, tab->held_renames,
-                        tab->sort_column, tab->sort_direction));
+                        *tab->snapshot, *res.snapshot, tab->sort_column, tab->sort_direction));
+            }
+            if (keep_order && !tab->held_renames.empty()) {
+                std::vector<fs::DirNotifyEvent> renames;
+                for (const auto& rename : tab->held_renames) {
+                    fs::DirNotifyEvent event; event.action = FILE_ACTION_RENAMED_NEW_NAME;
+                    event.old_name = rename.old_name; event.name = rename.new_name;
+                    renames.push_back(std::move(event));
+                }
+                app::TransferRenamedThumbnails(res.path, *tab->snapshot, *listing, renames,
+                    [&](const std::wstring& from, const std::wstring& to, uint64_t modified, uint64_t size) {
+                        s.renderer.RenameImageThumbnail(from, to, modified, size);
+                    });
             }
             tab->order_held = keep_order;
             tab->refresh_keeps_order = false;
@@ -2252,19 +2266,17 @@ static bool ApplyNotifiesToVisible(AppState& s, const std::wstring& path,
                 focus = tab->EntryAt(static_cast<size_t>(tab->selected_index)).name;
             }
         }
-        for (const auto& event : events) {
-            if (event.action != FILE_ACTION_RENAMED_NEW_NAME || event.old_name.empty()) continue;
-            for (auto& name : names) {
-                if (_wcsicmp(name.c_str(), event.old_name.c_str()) == 0) name = event.name;
-            }
-            if (_wcsicmp(focus.c_str(), event.old_name.c_str()) == 0) focus = event.name;
-        }
+        app::FollowNotifyRenames(events, *copy, names, focus);
         // Child rows of an expanded tree index past the end of the snapshot.
         const bool focus_in_snapshot = tab->selected_index >= 0 &&
             static_cast<size_t>(tab->selected_index) < tab->snapshot->size();
         app::ListingSelectionRestore selection_restore{
             std::move(names), std::move(focus), false, false,
             focus_in_snapshot ? tab->snapshot : nullptr, focus_in_snapshot ? tab->selected_index : -1};
+        app::TransferRenamedThumbnails(path, *tab->snapshot, *copy, events,
+            [&](const std::wstring& from, const std::wstring& to, uint64_t modified, uint64_t size) {
+                s.renderer.RenameImageThumbnail(from, to, modified, size);
+            });
         tab->SetSnapshot(std::move(copy));
         tab->order_held = true;
         if (!selection_restore.names.empty()) app::RestoreListingSelection(*tab, selection_restore, &pane, &s.places);
@@ -3227,7 +3239,9 @@ void OpenSelected(AppState& s, bool folder_in_new_window) {
         }
         std::wstring full = EntryFullPath(*tab, indices[0]);
         if (e.is_dir) open_folder(full);
-        else {
+        else if (e.link_target.empty() && IsExtensionPackageFilePath(full) && OpenExtensionPackageInStore(s, full)) {
+            RecordRecentOpen(s, full, app::PlaceItemKind::File);
+        } else {
             s.ops.OpenWith(full);
             RecordRecentOpen(s, full, app::PlaceItemKind::File);
         }
@@ -3257,6 +3271,10 @@ void OpenPath(AppState& s, const std::wstring& path) {
     if (attrs == INVALID_FILE_ATTRIBUTES) return;
     if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
         NavigateTo(s, path);
+    } else if ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+               IsExtensionPackageFilePath(path) &&
+               OpenExtensionPackageInStore(s, path)) {
+        RecordRecentOpen(s, path, app::PlaceItemKind::File);
     } else {
         s.ops.OpenWith(path);
         RecordRecentOpen(s, path, app::PlaceItemKind::File);

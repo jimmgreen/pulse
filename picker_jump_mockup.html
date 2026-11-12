@@ -1,0 +1,667 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light" data-accent="sage">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pulse 打开 / 保存对话框 · 跳转条</title>
+<style>
+:root {
+  --page: #E6E9E3; --title: #F1F3EE; --sheet: #F7F8F4; --card: #FFFFFF; --flyout: #FFFFFF; --dlg: #F9FAF7;
+  --text: #303B50; --text2: #66748A; --text3: #929CAE;
+  --hover: rgba(82,125,112,.06); --pressed: rgba(82,125,112,.10);
+  --stroke: #DCE3D9; --divider: #E5EAE3; --input: #FFFFFF; --input-line: rgba(130,146,134,.7);
+  --accent: #527D70; --accent-fg: #3F6B5E; --on-accent: #FFFFFF; --sel: rgba(82,125,112,.10); --sel-line: rgba(82,125,112,.42);
+  --ok: #2F7A4F; --warn: #9D5D00; --warn-soft: rgba(157,93,0,.09);
+  --danger: #C42B1C; --danger-soft: rgba(196,43,28,.07);
+  --mark: rgba(82,125,112,.18);
+  --kbd: rgba(48,59,80,.06);
+  --shadow: 0 16px 40px rgba(48,59,80,.16), 0 2px 6px rgba(48,59,80,.08);
+  --dlg-shadow: 0 30px 80px rgba(48,59,80,.30), 0 4px 14px rgba(48,59,80,.12);
+  --font: "Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+  --display: "Segoe UI Variable Display","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+  --mono: "Cascadia Mono",Consolas,ui-monospace,monospace;
+  --folder-a: #E8B84A; --folder-b: #F4CB64;
+}
+:root[data-theme="dark"] {
+  --page: #111111; --title: #1A1A1A; --sheet: #202020; --card: #272727; --flyout: #2C2C2C; --dlg: #242424;
+  --text: #FFFFFF; --text2: rgba(255,255,255,.62); --text3: rgba(255,255,255,.40);
+  --hover: rgba(255,255,255,.06); --pressed: rgba(255,255,255,.04);
+  --stroke: rgba(255,255,255,.08); --divider: rgba(255,255,255,.06); --input: rgba(255,255,255,.05); --input-line: rgba(255,255,255,.45);
+  --accent: #6E9C8E; --accent-fg: #8DBBAD; --on-accent: #10201B; --sel: rgba(110,156,142,.17); --sel-line: rgba(141,187,173,.5);
+  --ok: #7FCB98; --warn: #F2C661; --warn-soft: rgba(242,198,97,.09);
+  --danger: #FF99A4; --danger-soft: rgba(255,153,164,.09);
+  --mark: rgba(141,187,173,.26);
+  --kbd: rgba(255,255,255,.08);
+  --shadow: 0 16px 44px rgba(0,0,0,.55), 0 2px 6px rgba(0,0,0,.4);
+  --dlg-shadow: 0 30px 80px rgba(0,0,0,.65), 0 4px 14px rgba(0,0,0,.4);
+  --folder-a: #D9A740; --folder-b: #EBC05A;
+}
+:root[data-accent="blue"] { --accent: #0067C0; --accent-fg: #005FB8; --sel: rgba(0,103,192,.09); --sel-line: rgba(0,103,192,.4); --mark: rgba(0,103,192,.16); }
+:root[data-theme="dark"][data-accent="blue"] { --accent: #4CC2FF; --accent-fg: #99EBFF; --on-accent: #002A3D; --sel: rgba(76,194,255,.14); --sel-line: rgba(153,235,255,.45); --mark: rgba(76,194,255,.24); }
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--page); color: var(--text); font: 13px/1.45 var(--font); -webkit-font-smoothing: antialiased; }
+button { font: inherit; color: inherit; }
+.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ---------- page chrome ---------- */
+.top { position: sticky; top: 0; z-index: 30; display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; padding: 12px 24px;
+  background: color-mix(in srgb, var(--page) 88%, transparent); backdrop-filter: blur(12px); border-bottom: 1px solid var(--divider); }
+.top h1 { margin: 0; font: 600 15px/1.2 var(--display); display: flex; align-items: center; gap: 8px; }
+.top h1 small { font: 400 12px var(--font); color: var(--text2); }
+.sp { flex: 1; }
+.seg { display: inline-flex; background: var(--card); border: 1px solid var(--stroke); border-radius: 8px; padding: 2px; gap: 2px; }
+.seg button { border: 0; background: transparent; padding: 4px 11px; border-radius: 6px; cursor: pointer; color: var(--text2); white-space: nowrap; }
+.seg button[aria-pressed="true"] { background: var(--sel); color: var(--accent-fg); font-weight: 600; }
+.lbl { color: var(--text3); font-size: 12px; margin-right: 2px; }
+.wrap { max-width: 1240px; margin: 0 auto; padding: 22px 24px 40px; }
+.statecap { display: flex; gap: 10px; align-items: baseline; margin: 0 0 12px; }
+.statecap b { font: 600 14px var(--display); }
+.statecap span { color: var(--text2); }
+
+/* ---------- host app behind the dialog ---------- */
+.stage { position: relative; border-radius: 12px; overflow: hidden; height: 760px; box-shadow: var(--shadow);
+  background: var(--sheet); border: 1px solid var(--stroke); }
+.host { position: absolute; inset: 0; display: grid; grid-template-rows: 40px 34px 1fr; }
+.host .bar { display: flex; align-items: center; gap: 10px; padding: 0 14px; background: #2B579A; color: #fff; font-weight: 600; }
+.host[data-app="ps"] .bar { background: #0B1D33; color: #9FD3FF; }
+.host .ribbon { background: var(--title); border-bottom: 1px solid var(--divider); display: flex; gap: 18px; align-items: center; padding: 0 16px; color: var(--text2); font-size: 12px; }
+.host .doc { display: grid; place-items: start center; padding-top: 30px; background: color-mix(in srgb, var(--page) 70%, var(--sheet)); }
+.host .paper { width: 560px; height: 640px; background: var(--card); border: 1px solid var(--stroke); padding: 50px 60px; }
+.host .paper i { display: block; height: 9px; border-radius: 4px; background: var(--divider); margin: 0 0 14px; }
+.scrim { position: absolute; inset: 0; background: rgba(20,24,30,.18); }
+:root[data-theme="dark"] .scrim { background: rgba(0,0,0,.38); }
+
+/* ---------- the dialog ---------- */
+.pk { position: absolute; left: 50%; top: 50%; width: 1000px; height: 640px; transform: translate(-50%,-50%);
+  background: var(--dlg); border-radius: 10px; box-shadow: var(--dlg-shadow); border: 1px solid var(--stroke);
+  display: grid; grid-template-rows: 40px 46px auto 1fr auto; overflow: hidden; }
+.pk-title { display: flex; align-items: center; gap: 10px; padding: 0 0 0 16px; }
+.pk-title .t { font-weight: 600; }
+.appchip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px 2px 4px; border-radius: 999px; background: var(--kbd); color: var(--text2); font-size: 12px; }
+.appchip .ab { width: 16px; height: 16px; border-radius: 4px; display: grid; place-items: center; color: #fff; font: 700 10px var(--font); }
+.cap { width: 46px; height: 40px; display: grid; place-items: center; color: var(--text2); }
+
+/* nav + jump bar */
+.pk-nav { display: flex; align-items: center; gap: 4px; padding: 0 12px 0 10px; }
+.nb { width: 32px; height: 32px; border: 0; background: transparent; border-radius: 6px; display: grid; place-items: center; color: var(--text2); cursor: pointer; }
+.nb:hover { background: var(--hover); }
+.nb.off { opacity: .38; }
+.jump { position: relative; flex: 1; height: 34px; margin: 0 6px; display: flex; align-items: center; gap: 2px; padding: 0 6px 0 10px;
+  background: var(--input); border: 1px solid var(--stroke); border-bottom-color: var(--input-line); border-radius: 7px; }
+.jump.focus { border-color: var(--stroke); border-bottom: 2px solid var(--accent); padding-bottom: 0; }
+.jump .bc { display: inline-flex; align-items: center; gap: 1px; padding: 3px 5px; border-radius: 5px; white-space: nowrap; color: var(--text); }
+.jump .bc:hover { background: var(--hover); }
+.jump .bc.dim { color: var(--text2); }
+.jump .sep { color: var(--text3); width: 14px; height: 14px; }
+.jump .q { flex: 1; min-width: 0; font-size: 13.5px; display: flex; align-items: center; gap: 2px; }
+.jump .q .caret { width: 1.5px; height: 17px; background: var(--text); animation: blink 1.1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.jump .q .ph { color: var(--text3); }
+.jump .tag { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px 1px 5px; border-radius: 5px; background: var(--sel); color: var(--accent-fg); font-size: 12px; margin-right: 4px; white-space: nowrap; }
+.kbd { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 19px; padding: 0 5px; border-radius: 4px;
+  background: var(--kbd); color: var(--text2); font: 600 11px var(--font); border: 1px solid var(--stroke); white-space: nowrap; }
+.jump .hintk { display: flex; gap: 4px; align-items: center; color: var(--text3); font-size: 12px; padding-left: 8px; }
+.search { width: 200px; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 10px; color: var(--text3);
+  background: var(--input); border: 1px solid var(--stroke); border-radius: 7px; }
+
+/* jump strip: folders already open elsewhere */
+.strip { display: flex; align-items: center; gap: 6px; padding: 0 14px 8px 16px; min-height: 36px; overflow: hidden; }
+.strip .cap2 { color: var(--text3); font-size: 12px; margin-right: 2px; white-space: nowrap; display: flex; align-items: center; gap: 5px; }
+.chip { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 9px 0 6px; border-radius: 7px; border: 1px solid var(--stroke);
+  background: var(--card); white-space: nowrap; cursor: pointer; max-width: 230px; }
+.chip:hover { border-color: var(--sel-line); }
+.chip.on { background: var(--sel); border-color: var(--sel-line); color: var(--accent-fg); }
+.chip .nm { overflow: hidden; text-overflow: ellipsis; }
+.chip .src { color: var(--text3); font-size: 11.5px; }
+.chip .kbd { height: 17px; min-width: 18px; font-size: 10.5px; }
+.vsep { width: 1px; height: 18px; background: var(--divider); margin: 0 4px; }
+
+/* body */
+.pk-body { display: grid; grid-template-columns: 208px 1fr; min-height: 0; border-top: 1px solid var(--divider); }
+.side { padding: 10px 8px; overflow: hidden; border-right: 1px solid var(--divider); background: color-mix(in srgb, var(--dlg) 60%, var(--title)); }
+.side h4 { margin: 10px 10px 4px; font: 600 11.5px var(--font); color: var(--text3); display: flex; align-items: center; gap: 6px; }
+.side h4:first-child { margin-top: 2px; }
+.si { display: flex; align-items: center; gap: 9px; height: 30px; padding: 0 10px; border-radius: 6px; color: var(--text); white-space: nowrap; }
+.si .n { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.si .m { color: var(--text3); font-size: 11.5px; }
+.si:hover { background: var(--hover); }
+.si.on { background: var(--sel); color: var(--accent-fg); font-weight: 600; }
+.si .i { color: var(--text2); }
+.si.on .i { color: var(--accent-fg); }
+.bar2 { height: 3px; border-radius: 2px; background: var(--divider); margin: 0 10px 8px 35px; overflow: hidden; }
+.bar2 i { display: block; height: 100%; background: var(--accent); }
+
+.main { display: grid; grid-template-rows: auto auto 1fr; min-height: 0; position: relative; }
+.ctx { display: flex; align-items: center; gap: 8px; padding: 8px 14px 6px; min-height: 40px; }
+.notice { display: flex; align-items: center; gap: 8px; padding: 5px 6px 5px 10px; border-radius: 7px; background: var(--sel); color: var(--accent-fg); font-size: 12.5px; }
+.notice .lk { padding: 2px 8px; border-radius: 5px; cursor: pointer; font-weight: 600; }
+.notice .lk:hover { background: var(--hover); }
+.tools { margin-left: auto; display: flex; gap: 2px; }
+.fchips { display: flex; gap: 6px; }
+.fchip { height: 26px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--stroke); background: var(--card); display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text2); }
+.fchip.on { background: var(--sel); border-color: var(--sel-line); color: var(--accent-fg); font-weight: 600; }
+
+.recent { padding: 0 14px 6px; }
+.recent h5 { margin: 4px 2px 6px; font: 600 11.5px var(--font); color: var(--text3); display: flex; align-items: center; gap: 6px; }
+.rrow { display: flex; gap: 10px; }
+.rcard { width: 132px; border-radius: 8px; border: 1px solid var(--stroke); background: var(--card); padding: 6px; }
+.rcard.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.rcard .th { height: 74px; border-radius: 5px; margin-bottom: 6px; position: relative; overflow: hidden; }
+.rcard .n { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rcard .m { font-size: 11px; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.list { overflow: hidden; padding: 0 8px 8px; min-height: 0; }
+.lh, .lr { display: grid; grid-template-columns: 1fr 150px 110px 80px; align-items: center; gap: 8px; padding: 0 10px; }
+.lh { height: 30px; color: var(--text2); font-size: 12px; border-bottom: 1px solid var(--divider); margin: 0 4px 3px; }
+.lh span:last-child, .lr span:last-child { text-align: right; }
+.lr { height: 32px; border-radius: 6px; margin: 1px 0; }
+.lr:hover { background: var(--hover); }
+.lr .nm { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.lr .nm span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lr .d, .lr .t, .lr .s { color: var(--text2); font-size: 12px; white-space: nowrap; }
+.lr.dim { opacity: .45; }
+.lr.sel { background: var(--sel); box-shadow: inset 2px 0 0 var(--accent); }
+.lr.dup { background: var(--danger-soft); box-shadow: inset 2px 0 0 var(--danger); }
+.lr.new { animation: pop 1.6s ease-out; }
+.fico { width: 18px; height: 18px; flex: none; }
+
+/* footer */
+.pk-foot { border-top: 1px solid var(--divider); background: color-mix(in srgb, var(--dlg) 50%, var(--title)); padding: 12px 16px 14px; display: grid; gap: 8px; }
+.frow { display: grid; grid-template-columns: 76px 1fr 248px; gap: 10px; align-items: center; }
+.frow label { color: var(--text2); }
+.tb { height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-radius: 7px; background: var(--input); border: 1px solid var(--stroke); border-bottom-color: var(--input-line); min-width: 0; }
+.tb.focus { border-bottom: 2px solid var(--accent); }
+.tb.bad { border-bottom: 2px solid var(--danger); }
+.tb .v { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tb .v .selrange { background: var(--mark); border-radius: 2px; }
+.tb .ext { color: var(--text3); }
+.sel2 { justify-content: space-between; }
+.where { display: flex; align-items: center; gap: 10px; min-height: 32px; }
+.where .to { display: flex; align-items: center; gap: 7px; color: var(--text2); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.where .to b { color: var(--text); font-weight: 600; }
+.btn { height: 32px; min-width: 92px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--stroke); background: var(--card); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
+.btn.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; font-weight: 600; }
+.btn.ghost { background: transparent; border-color: transparent; min-width: 0; color: var(--accent-fg); }
+.btn.dangerous { color: var(--danger); }
+.clash { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; border-radius: 7px; background: var(--danger-soft); color: var(--text); font-size: 12.5px; }
+.clash .i { color: var(--danger); }
+.clash .x { color: var(--text2); }
+
+/* title: the app that asked, then what it asks */
+.apphead { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.apphead .ab { width: 20px; height: 20px; border-radius: 5px; display: grid; place-items: center; color: #fff; font: 700 10.5px var(--font); flex: none; }
+.apphead b { font-weight: 600; white-space: nowrap; }
+.apphead .tdiv { width: 1px; height: 14px; background: var(--stroke); }
+.apphead .verb { color: var(--text2); white-space: nowrap; }
+
+/* new folder: a labelled button, an inline row, a jump result */
+.nfb { height: 28px; padding: 0 8px 0 7px; border-radius: 6px; border: 1px solid var(--stroke); background: var(--card); display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px; white-space: nowrap; cursor: pointer; }
+.nfb:hover { border-color: var(--sel-line); }
+.nfb .i { color: var(--accent-fg); }
+.nfb .kbd { height: 17px; font-size: 10.5px; }
+.lr.newrow { background: var(--sel); box-shadow: inset 2px 0 0 var(--accent); }
+.lr .edit { display: inline-flex; align-items: center; height: 24px; padding: 0 6px; border-radius: 4px; background: var(--input); border: 1px solid var(--accent); min-width: 150px; }
+.lr .edit .caret { width: 1.5px; height: 15px; background: var(--text); margin-left: 1px; animation: blink 1.1s steps(1) infinite; }
+.lr .nhint { grid-column: 2 / -1; display: flex; gap: 6px; align-items: center; color: var(--text2); font-size: 12px; white-space: nowrap; }
+.newtag { padding: 0 6px; border-radius: 4px; background: var(--sel); color: var(--accent-fg); font-size: 11.5px; font-weight: 600; margin-left: 4px; }
+
+/* app options row (IFileDialogCustomize controls, property fields) */
+.opts { display: flex; align-items: center; gap: 8px; margin-left: 86px; min-height: 30px; }
+.ck { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 10px 0 8px; border-radius: 6px; white-space: nowrap; }
+.ck .box { width: 16px; height: 16px; border-radius: 4px; border: 1px solid var(--input-line); display: grid; place-items: center; }
+.ck.on .box { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.prop { display: inline-flex; align-items: center; height: 28px; border-radius: 6px; border: 1px solid var(--stroke); background: var(--card); overflow: hidden; white-space: nowrap; }
+.prop .pl { padding: 0 8px; color: var(--text2); background: var(--kbd); height: 100%; display: flex; align-items: center; font-size: 12px; }
+.prop .pv { padding: 0 9px; display: flex; align-items: center; gap: 5px; }
+.prop .pv.add { color: var(--accent-fg); }
+.cmb { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.cmb .lb { color: var(--text2); }
+.cmb .box2 { height: 28px; min-width: 132px; padding: 0 8px 0 10px; display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; border-radius: 6px; border: 1px solid var(--stroke); background: var(--card); }
+.morex { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 6px; color: var(--accent-fg); font-weight: 600; white-space: nowrap; }
+.morex .n { padding: 0 6px; border-radius: 9px; background: var(--sel); font-size: 11px; }
+.btn .i { width: 14px; height: 14px; }
+
+/* multi-select tray */
+.tray { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.tray .tc { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 6px 0 7px; border-radius: 6px; background: var(--card); border: 1px solid var(--stroke); white-space: nowrap; font-size: 12.5px; }
+.tray .tc .x { color: var(--text3); width: 12px; height: 12px; }
+.tray .sum { color: var(--text2); white-space: nowrap; margin-left: 4px; }
+.lr .cbx { width: 16px; height: 16px; border-radius: 4px; border: 1px solid var(--input-line); display: grid; place-items: center; flex: none; }
+.lr.sel .cbx { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
+/* ---------- jump panel ---------- */
+.jp { position: absolute; left: 106px; top: 84px; width: 640px; background: var(--flyout); border: 1px solid var(--stroke); border-radius: 10px;
+  box-shadow: var(--shadow); overflow: hidden; z-index: 5; }
+.jp .grp { padding: 6px 6px 2px; }
+.jp .gh { display: flex; align-items: center; gap: 6px; padding: 4px 10px 3px; font: 600 11.5px var(--font); color: var(--text3); }
+.jp .gh .c { margin-left: auto; font-weight: 400; }
+.jr { display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: center; padding: 6px 10px; border-radius: 7px; }
+.jr.on { background: var(--sel); }
+.jr .n { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jr .n mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 1px; }
+.jr .p { color: var(--text2); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jr .r { display: flex; align-items: center; gap: 6px; color: var(--text3); font-size: 11.5px; white-space: nowrap; }
+.jr .why { padding: 1px 7px; border-radius: 4px; background: var(--kbd); color: var(--text2); }
+.jp .foot { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; padding: 8px 14px; border-top: 1px solid var(--divider); color: var(--text3); font-size: 12px; background: color-mix(in srgb, var(--flyout) 70%, var(--title)); }
+.jp .foot span { display: inline-flex; gap: 5px; align-items: center; }
+.jp .idx { display: flex; align-items: center; gap: 8px; margin: 2px 6px 6px; padding: 8px 10px; border-radius: 7px; background: var(--warn-soft); color: var(--text); font-size: 12.5px; }
+.jp .idx .i { color: var(--warn); }
+.jp .idx .lk { margin-left: auto; color: var(--accent-fg); font-weight: 600; }
+
+/* ---------- notes ---------- */
+.notes { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; margin-top: 22px; }
+.note { background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; padding: 14px 16px; color: var(--text2); }
+.note b { display: block; color: var(--text); font: 600 13.5px var(--display); margin-bottom: 6px; }
+.note code { font: 12px var(--mono); background: var(--kbd); padding: 1px 5px; border-radius: 4px; color: var(--text); }
+.note ul { margin: 6px 0 0; padding-left: 18px; }
+.note li { margin: 3px 0; }
+.note .new { color: var(--warn); font-weight: 600; }
+.cmp { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+.cmp .note h6 { margin: 0 0 6px; font: 600 12px var(--font); color: var(--text3); }
+@media (max-width: 1100px) { .stage { height: 700px; } .pk { transform: translate(-50%,-50%) scale(.9); } }
+</style>
+</head>
+<body>
+<div class="top">
+  <h1><svg class="i" data-ic="jump" style="color:var(--accent-fg)"></svg>打开 / 保存对话框 · 跳转条 <small>效果稿 · 尺寸按 1000 × 640 DIP 默认窗口</small></h1>
+  <span class="sp"></span>
+  <span class="lbl">状态</span>
+  <div class="seg" data-k="s">
+    <button data-v="save">另存为</button><button data-v="jump">输入跳转</button><button data-v="newfolder">新建文件夹</button>
+    <button data-v="notepad">记事本</button><button data-v="multi">多选</button><button data-v="folder">选文件夹</button>
+    <button data-v="open">打开</button><button data-v="clash">同名冲突</button><button data-v="idx">无全盘索引</button>
+  </div>
+  <span class="lbl">主题</span>
+  <div class="seg" data-k="theme"><button data-v="light">浅色</button><button data-v="dark">深色</button></div>
+  <div class="seg" data-k="accent"><button data-v="sage">鼠尾草</button><button data-v="blue">蓝</button></div>
+</div>
+
+<div class="wrap">
+  <div class="statecap"><b id="capT"></b><span id="capD"></span></div>
+  <div class="stage">
+    <div class="host" id="host"></div>
+    <div class="scrim"></div>
+    <div class="pk" id="pk"></div>
+  </div>
+
+  <div class="notes">
+    <div class="note"><b>① 跳转条（取代地址栏的“输入路径”）</b>
+      平时显示面包屑；点一下、按 <span class="kbd">Ctrl</span> <span class="kbd">L</span>，或者在列表里直接打字，就变成跳转输入框。输入名称、路径片段或拼音首字母（<code>jd</code> → 季度），结果按来源分组：
+      <ul><li><b style="display:inline;font-size:inherit">已打开</b>：Pulse 各窗口的标签、资源管理器窗口</li>
+      <li><b style="display:inline;font-size:inherit">本程序最近</b>：这个程序上次打开 / 保存的位置</li>
+      <li><b style="display:inline;font-size:inherit">收藏</b>与<b style="display:inline;font-size:inherit">全盘</b>：共享收藏夹、Pulse 索引</li></ul>
+      <span class="kbd">Enter</span> 进入，<span class="kbd">Tab</span> 补全成路径，<span class="kbd">Ctrl</span> <span class="kbd">Enter</span> 直接保存到该文件夹（不进入）。</div>
+    <div class="note"><b>② 已打开的文件夹（Listary 式快速切换）</b>
+      对话框一出现就跳到 Pulse 当前窗口的文件夹，上方给出“撤回”回到程序原本建议的位置。下面一排是此刻打开着的所有文件夹，<span class="kbd">Alt</span> <span class="kbd">1</span>–<span class="kbd">9</span> 直达；鼠标悬停显示完整路径。资源管理器窗口也算在内，Pulse 未运行时这一排只剩资源管理器。</div>
+    <div class="note"><b>③ 每个程序记住自己的位置</b>
+      侧栏“Word 最近保存”只列这个程序（按进程和对话框模式）用过的文件夹，带次数 / 时间；保存类型改变时，优先推荐上次存同类文件的文件夹。打开模式顶部给出“最近的图片 / 文档”：跨文件夹的最近文件，一次点击直接选中，不用先找文件夹。</div>
+    <div class="note"><b>④ 保存前先说清楚</b>
+      底部一行始终显示完整目标“将保存到：…”。同名时不弹二次确认，而是在原地标红并给出“替换”或“保存为 …（2）.docx”；文件名默认只选中主名，扩展名单独显示，切换类型不会改坏名字。</div>
+    <div class="note"><b>数据来源（现有）</b>
+      <ul><li>Pulse 标签和窗口：共享核心里各窗口的 <code>Tab::current_path</code></li>
+      <li>收藏 / 快速访问：<code>picker_places::Snapshot</code>（已有共享位置）</li>
+      <li>全盘：PulseIndex 服务（MFT/USN）；未安装时是用户索引，只覆盖用户文件夹</li>
+      <li>布局记忆：<code>FolderPickerSpec::persist_layout</code> 已按程序和模式保存</li></ul></div>
+    <div class="note"><b>需要新增</b>
+      <ul><li class="new">按程序记录最近位置与次数（现在只记布局）</li>
+      <li class="new">枚举资源管理器窗口的当前文件夹（Shell Windows，在 shell host 侧读）</li>
+      <li class="new">拼音首字母匹配（索引查询与本地分组共用）</li>
+      <li class="new">跳转面板与 Alt+数字 快捷键；对话框打开时自动跳转并可撤回</li></ul></div>
+    <div class="note"><b>⑤ 新建文件夹：三个入口，都不离开对话框</b>
+      <ul><li>工具栏左侧带文字的“新建文件夹”按钮（<span class="kbd">Ctrl</span> <span class="kbd">Shift</span> <span class="kbd">N</span>），在列表顶部插入一行直接改名；<span class="kbd">Enter</span> 创建并进入，保存模式下“将保存到”同步变成新文件夹。</li>
+      <li>跳转条里找不到时，最后一行是“在 季度报告 中新建 ‘2026 Q3’”，<span class="kbd">Ctrl</span> <span class="kbd">Shift</span> <span class="kbd">Enter</span> 一步建好进入。</li>
+      <li>保存模式文件名里写 <code>2026 Q3\报告.docx</code>：底部提示“将新建文件夹 2026 Q3”，保存时一起创建。</li></ul></div>
+    <div class="note"><b>⑥ 兼容不同程序的参数</b>
+      <ul><li><code>FOS_PICKFOLDERS</code>：只列文件夹，文件名栏换成“文件夹”，按钮用程序给的文字或“选择此文件夹”</li>
+      <li><code>FOS_ALLOWMULTISELECT</code>：行首出现勾选框，底部变成已选托盘（可逐个移除），显示总数和大小</li>
+      <li><code>IFileDialogCustomize</code>：复选框 / 下拉 / 编辑框 / 文字统一放在文件名下的“选项行”；超过 4 个收进“更多选项”；<code>MakeProminent</code> 的控件（如 Word 的“工具”）放到按钮旁</li>
+      <li>属性字段（Word 的作者、标签）以小胶囊显示，点开编辑；<code>AddPlace</code> 进侧栏“程序提供的位置”</li>
+      <li><code>SetOkButtonLabel</code> / <code>SetFileNameLabel</code> / 过滤器 / 默认扩展名照程序原样，标题栏左侧始终是发起的程序</li></ul></div>
+  </div>
+  <div class="cmp">
+    <div class="note"><h6>现在</h6>路径框只能完整输入路径；侧栏固定为桌面 / 文档 / 下载；要去另一个窗口里开着的文件夹，只能逐级点进去或复制路径；保存位置每次都从程序给的默认文件夹开始。</div>
+    <div class="note"><h6>改后</h6>两次按键内到达：<span class="kbd">Alt</span> <span class="kbd">1</span> 去正在用的文件夹，或打两个字母跳到任何地方；常用位置按程序自动浮上来；保存前就能看到完整目标和冲突。</div>
+  </div>
+</div>
+
+<script>
+(() => {
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const P = new URLSearchParams(location.search);
+const st = { s: P.get('s') || 'save', theme: P.get('theme') || 'light', accent: P.get('accent') || 'sage' };
+
+/* 16-grid line icons, 1.5 stroke */
+const L = {
+  back: '<path d="M13 8H3.5"/><path d="M7.5 4 3.5 8l4 4"/>',
+  fwd: '<path d="M3 8h9.5"/><path d="M8.5 4l4 4-4 4"/>',
+  up: '<path d="M8 13V3.5"/><path d="M4 7.5l4-4 4 4"/>',
+  refresh: '<path d="M13.25 8A5.25 5.25 0 1 1 11.6 4.2"/><path d="M12.25 1.75v3h-3"/>',
+  search: '<circle cx="7" cy="7" r="4.25"/><path d="m10.25 10.25 3.5 3.5"/>',
+  folder: '<path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h6a1 1 0 0 1 1 1v6.75a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/>',
+  newfolder: '<path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h6a1 1 0 0 1 1 1v6.75a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z"/><path d="M8 7.5v4M6 9.5h4"/>',
+  file: '<path d="M3.25 1.75h6l3.5 3.5v9h-9.5z"/><path d="M9.25 1.75v3.5h3.5"/>',
+  'chev-r': '<path d="m6 3.5 4.5 4.5L6 12.5"/>',
+  'chev-d': '<path d="m3.5 6 4.5 4.5L12.5 6"/>',
+  x: '<path d="m4 4 8 8M12 4l-8 8"/>',
+  check: '<path d="m3 8.5 3.25 3.25L13 5"/>',
+  star: '<path d="M8 1.9l1.8 3.7 4.1.6-3 2.9.7 4.1L8 11.3l-3.6 1.9.7-4.1-3-2.9 4.1-.6z"/>',
+  clock: '<circle cx="8" cy="8" r="6"/><path d="M8 4.75V8l2.25 1.5"/>',
+  pc: '<rect x="1.75" y="2.75" width="12.5" height="8" rx="1"/><path d="M5.5 13.5h5M8 10.75v2.75"/>',
+  disk: '<rect x="1.75" y="4.5" width="12.5" height="7" rx="1.5"/><circle cx="11.25" cy="8" r=".75" fill="currentColor" stroke="none"/>',
+  desktop: '<rect x="1.75" y="2.75" width="12.5" height="8" rx="1"/><path d="M5.5 13.5h5M8 10.75v2.75"/>',
+  doc: '<path d="M3.25 1.75h6l3.5 3.5v9h-9.5z"/><path d="M9.25 1.75v3.5h3.5M5.75 8.5h4.5M5.75 11h4.5"/>',
+  download: '<path d="M8 2v8"/><path d="M4.75 6.75 8 10l3.25-3.25"/><path d="M2.75 13.5h10.5"/>',
+  image: '<rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5"/><circle cx="5.75" cy="6.5" r="1.25"/><path d="m2.25 12 4-4 3 3 1.75-1.75 3 3"/>',
+  tab: '<path d="M1.75 5.25v7a1 1 0 0 0 1 1h10.5a1 1 0 0 0 1-1v-6a1 1 0 0 0-1-1H7.5L6.25 2.75h-3.5a1 1 0 0 0-1 1z"/>',
+  window: '<rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5"/><path d="M1.75 5.75h12.5"/><path d="M4 4.25h.01M5.75 4.25h.01"/>',
+  list: '<path d="M5.5 4h8M5.5 8h8M5.5 12h8M2.5 4h.01M2.5 8h.01M2.5 12h.01"/>',
+  grid: '<rect x="2.25" y="2.25" width="4.5" height="4.5" rx="1"/><rect x="9.25" y="2.25" width="4.5" height="4.5" rx="1"/><rect x="2.25" y="9.25" width="4.5" height="4.5" rx="1"/><rect x="9.25" y="9.25" width="4.5" height="4.5" rx="1"/>',
+  eye: '<path d="M1.75 8S4 3.75 8 3.75 14.25 8 14.25 8 12 12.25 8 12.25 1.75 8 1.75 8z"/><circle cx="8" cy="8" r="1.9"/>',
+  sort: '<path d="M4.5 2.75v10.5M2.25 11 4.5 13.25 6.75 11"/><path d="M9 4h5M9 8h3.5M9 12h2"/>',
+  undo: '<path d="M5 3.75 2.25 6.5 5 9.25"/><path d="M2.5 6.5h7.25a3.5 3.5 0 0 1 0 7H6"/>',
+  enter: '<path d="M13.25 3v4.5a1.5 1.5 0 0 1-1.5 1.5H3.5"/><path d="M6.25 6.25 3.5 9l2.75 2.75"/>',
+  jump: '<path d="M9 1.75 3.75 9h4l-1 5.25L12.25 7h-4z"/>',
+  warn: '<path d="M8 2.25 14 13H2z"/><path d="M8 6.5v3"/><circle cx="8" cy="11.3" r=".6" fill="currentColor" stroke="none"/>',
+  info: '<circle cx="8" cy="8" r="6"/><path d="M8 7.25v4"/><circle cx="8" cy="5" r=".6" fill="currentColor" stroke="none"/>',
+  save: '<path d="M2.75 2.75h8.5l2 2v8.5a1 1 0 0 1-1 1H3.75a1 1 0 0 1-1-1z"/><path d="M5.25 2.75v3h5v-3M5 13.75V9.75h6v4"/>',
+  open: '<path d="M1.75 4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h5a1 1 0 0 1 1 1v1"/><path d="M1.75 12.75 3.6 7.5a1 1 0 0 1 .95-.7h9.4a.75.75 0 0 1 .7 1l-1.6 4.65a1 1 0 0 1-.95.6H2.75a1 1 0 0 1-1-1V4.25"/>',
+  plus: '<path d="M8 3v10M3 8h10"/>',
+  pin: '<path d="M10 1.75 14.25 6l-2.5 1-2.5 2.5.25 3-1.25 1.25L2.25 7.75 3.5 6.5l3 .25L9 4.25z"/><path d="m5.25 10.75-3.5 3.5"/>',
+};
+const icon = (id, style = '') => `<svg class="i" viewBox="0 0 16 16" style="${style}">${L[id] || ''}</svg>`;
+
+/* colored file-type icons */
+function fico(kind) {
+  if (kind === 'folder') return `<svg class="fico" viewBox="0 0 16 16"><path d="M1.5 4.25a1 1 0 0 1 1-1h3.2l1.4 1.5h6.4a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z" fill="var(--folder-a)"/><path d="M1.5 6.25h13V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z" fill="var(--folder-b)"/></svg>`;
+  const c = { docx: '#2B6CC4', xlsx: '#1F7A45', pdf: '#D2493D', pptx: '#C9542F', png: '#7B61C9', jpg: '#7B61C9', psd: '#1D6FB8', txt: '#6B7787', zip: '#C98A3A' }[kind] || '#6B7787';
+  const t = { docx: 'W', xlsx: 'X', pdf: '', pptx: 'P', psd: 'Ps', zip: '' }[kind];
+  return `<svg class="fico" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z" fill="${c}"/><path d="M9.5 1.5v3h3" fill="#fff" opacity=".45"/>${t ? `<text x="7.6" y="11.6" font-size="${t.length > 1 ? 4.6 : 5.6}" font-weight="700" fill="#fff" text-anchor="middle" font-family="Segoe UI">${t}</text>` : '<path d="M5.5 9h4.5M5.5 11h3" stroke="#fff" stroke-width=".9" opacity=".8"/>'}</svg>`;
+}
+const appBadge = (app) => app === 'word' ? '<span class="ab" style="background:#2B579A">W</span>' : '<span class="ab" style="background:#0B1D33;color:#31A8FF">Ps</span>';
+
+/* ---------- apps that open the dialog ---------- */
+const APPS = {
+  word: { name: 'Microsoft Word', badge: '<span class="ab" style="background:#2B579A">W</span>', bar: '#2B579A', fg: '#fff', doc: '2026 第三季度销售报告（最终版） - Word', ribbon: ['文件', '开始', '插入', '设计', '布局', '引用', '审阅', '视图'], last: 'Word 上次', recentCap: 'Word 最近保存' },
+  ps: { name: 'Adobe Photoshop', badge: '<span class="ab" style="background:#0B1D33;color:#31A8FF">Ps</span>', bar: '#0B1D33', fg: '#9FD3FF', doc: 'Adobe Photoshop 2026', ribbon: ['文件', '编辑', '图像', '图层', '文字', '选择', '滤镜', '视图'], last: 'Photoshop 上次', recentCap: 'Photoshop 最近打开' },
+  notepad: { name: '记事本', badge: '<span class="ab" style="background:#2F6FB3">N</span>', bar: '#F3F3F3', fg: '#222', doc: '*会议记录 - 记事本', ribbon: ['文件', '编辑', '查看'], last: '记事本 上次', recentCap: '记事本 最近保存' },
+  wechat: { name: '微信', badge: '<span class="ab" style="background:#07C160">微</span>', bar: '#2E2E2E', fg: '#fff', doc: '微信 · 项目组', ribbon: ['聊天', '通讯录', '收藏', '文件'], last: '微信 上次', recentCap: '微信 最近发送' },
+  code: { name: 'Visual Studio Code', badge: '<span class="ab" style="background:#0065A9">&lt;/&gt;</span>', bar: '#1F1F1F', fg: '#CCCCCC', doc: 'Visual Studio Code', ribbon: ['文件', '编辑', '选择', '查看', '转到', '运行', '终端'], last: 'VS Code 上次', recentCap: 'VS Code 最近打开' },
+};
+
+/* ---------- sample data ---------- */
+const OPEN = [
+  { n: '季度报告', p: 'D:\\工作\\季度报告', src: 'Pulse', ic: 'tab' },
+  { n: '设计稿-v3', p: 'D:\\设计\\设计稿-v3', src: 'Pulse', ic: 'tab' },
+  { n: '下载', p: 'C:\\Users\\SS\\Downloads', src: 'Pulse', ic: 'tab' },
+  { n: '季度数据核对', p: 'E:\\财务\\2026\\季度数据核对', src: '资源管理器', ic: 'window' },
+];
+const FILES_REPORT = [
+  { n: '2026 Q2', k: 'folder', d: '2026-07-03 09:12', t: '文件夹', s: '' },
+  { n: '图表', k: 'folder', d: '2026-11-08 16:40', t: '文件夹', s: '' },
+  { n: '原始数据', k: 'folder', d: '2026-11-10 11:05', t: '文件夹', s: '' },
+  { n: '2026 第三季度销售报告（初稿）.docx', k: 'docx', d: '2026-11-07 18:20', t: 'Word 文档', s: '1.2 MB' },
+  { n: '2026 第三季度销售报告（最终版）.docx', k: 'docx', d: '2026-11-10 18:02', t: 'Word 文档', s: '1.3 MB' },
+  { n: '区域销售明细.xlsx', k: 'xlsx', d: '2026-11-10 10:31', t: 'Excel 工作表', s: '486 KB' },
+  { n: '汇报.pptx', k: 'pptx', d: '2026-11-09 21:14', t: 'PowerPoint 演示文稿', s: '6.8 MB' },
+  { n: '季度报告-签字版.pdf', k: 'pdf', d: '2026-11-11 08:47', t: 'PDF 文档', s: '2.1 MB' },
+  { n: '会议纪要.txt', k: 'txt', d: '2026-11-11 09:30', t: '文本文档', s: '3 KB' },
+];
+const FILES_DESIGN = [
+  { n: '导出', k: 'folder', d: '2026-11-10 14:22', t: '文件夹', s: '' },
+  { n: '图层', k: 'folder', d: '2026-11-10 14:20', t: '文件夹', s: '' },
+  { n: '首页-深色.png', k: 'png', d: '2026-11-10 14:22', t: 'PNG 图片', s: '1.8 MB' },
+  { n: '首页-浅色.png', k: 'png', d: '2026-11-10 14:21', t: 'PNG 图片', s: '1.7 MB' },
+  { n: 'banner@2x.psd', k: 'psd', d: '2026-11-09 19:03', t: 'Photoshop 文档', s: '48.2 MB' },
+  { n: '图标集.psd', k: 'psd', d: '2026-11-08 10:15', t: 'Photoshop 文档', s: '12.6 MB' },
+  { n: '说明.txt', k: 'txt', d: '2026-11-08 10:02', t: '文本文档', s: '2 KB' },
+  { n: '设计稿-v3.rar', k: 'zip', d: '2026-11-10 14:30', t: '压缩文件', s: '248 MB' },
+];
+const FILES_PROJECTS = [
+  { n: 'pulse', k: 'folder', d: '2026-11-11 18:40', t: '文件夹', s: '' },
+  { n: 'pulse-extensions', k: 'folder', d: '2026-11-10 22:05', t: '文件夹', s: '' },
+  { n: '设计稿-v3', k: 'folder', d: '2026-11-10 14:30', t: '文件夹', s: '' },
+  { n: '官网', k: 'folder', d: '2026-10-28 16:12', t: '文件夹', s: '' },
+  { n: '脚本工具', k: 'folder', d: '2026-09-02 11:47', t: '文件夹', s: '' },
+  { n: 'README.md', k: 'txt', d: '2026-11-01 10:20', t: 'Markdown', s: '4 KB' },
+  { n: '工作区.code-workspace', k: 'txt', d: '2026-10-11 09:00', t: '工作区', s: '1 KB' },
+];
+
+function host(app) {
+  const a = APPS[app];
+  return `<div class="bar" style="background:${a.bar};color:${a.fg}">${a.badge.replace('class="ab"', 'class="ab" style="width:18px;height:18px"')}<span>${a.doc}</span></div>
+    <div class="ribbon">${a.ribbon.map(x => `<span>${x}</span>`).join('')}</div>
+    <div class="doc"><div class="paper">${Array.from({ length: 14 }, (_, i) => `<i style="width:${[92, 100, 84, 96, 60, 100, 88, 94, 70, 100, 82, 90, 66, 98][i]}%"></i>`).join('')}</div></div>`;
+}
+
+function strip(active, app) {
+  const chips = OPEN.map((o, i) => `<span class="chip ${i === active ? 'on' : ''}" title="${o.p}"><span class="kbd">Alt ${i + 1}</span>${icon(o.ic, 'color:var(--text2)')}<span class="nm">${o.n}</span><span class="src">${o.src}</span></span>`).join('');
+  return `<div class="strip"><span class="cap2">${icon('jump', 'width:13px;height:13px')}已打开</span>${chips}<span class="vsep"></span><span class="chip" title="C:\\Users\\SS\\Documents">${icon('clock', 'color:var(--text2)')}<span class="nm">文档</span><span class="src">${APPS[app].last}</span></span></div>`;
+}
+
+function side(app, current, extra) {
+  const recent = {
+    word: [['季度报告', '23 次'], ['2026 Q2', '7 月'], ['文档', '上周']],
+    notepad: [['季度报告', '6 次'], ['桌面', '昨天'], ['脚本工具', '上周']],
+    ps: [['设计稿-v3', '12 次'], ['导出', '昨天'], ['素材库', '3 天前']],
+    wechat: [['季度报告', '9 次'], ['下载', '今天'], ['合同扫描件', '上周']],
+    code: [['项目', '31 次'], ['pulse', '今天'], ['脚本工具', '上月']],
+  }[app];
+  const on = (n) => n === current ? 'on' : '';
+  return `<div class="side">
+    <h4>${icon('clock', 'width:13px;height:13px')}${APPS[app].recentCap}</h4>
+    ${recent.map(([n, m]) => `<div class="si ${on(n)}">${icon('folder')}<span class="n">${n}</span><span class="m">${m}</span></div>`).join('')}
+    ${extra ? `<h4>${icon('pin', 'width:13px;height:13px')}程序提供的位置</h4>${extra.map(n => `<div class="si">${icon('folder')}<span class="n">${n}</span></div>`).join('')}` : ''}
+    <h4>${icon('star', 'width:13px;height:13px')}收藏夹</h4>
+    <div class="si">${icon('folder')}<span class="n">项目 pulse</span></div>
+    <div class="si">${icon('folder')}<span class="n">合同模板</span></div>
+    <h4>快速访问</h4>
+    <div class="si">${icon('desktop')}<span class="n">桌面</span></div>
+    <div class="si">${icon('doc')}<span class="n">文档</span></div>
+    <div class="si">${icon('download')}<span class="n">下载</span></div>
+    <div class="si">${icon('image')}<span class="n">图片</span></div>
+    <h4>此电脑</h4>
+    <div class="si">${icon('disk')}<span class="n">Win11 (C:)</span><span class="m">42.6 GB</span></div><div class="bar2"><i style="width:91%;background:var(--warn)"></i></div>
+    <div class="si">${icon('disk')}<span class="n">数据 (D:)</span><span class="m">1.2 TB</span></div><div class="bar2"><i style="width:38%"></i></div>
+  </div>`;
+}
+
+function crumbs(parts) {
+  return parts.map((p, i) => `<span class="bc ${i < parts.length - 1 ? 'dim' : ''}">${p}</span>${i < parts.length - 1 ? `<svg class="i sep" viewBox="0 0 16 16">${L['chev-r']}</svg>` : ''}`).join('');
+}
+
+function rows(files, opts = {}) {
+  const sel = opts.sel || [];
+  const keep = (f) => !opts.dim || f.k === 'folder' || opts.dim.includes(f.k);
+  const head = `<div class="lh"><span>名称</span><span>修改日期</span><span>类型</span><span>大小</span></div>`;
+  const newrow = opts.newrow ? `<div class="lr newrow"><span class="nm">${fico('folder')}<span class="edit">${opts.newrow}<span class="caret"></span></span></span>
+      <span class="nhint"><span class="kbd">Enter</span>创建并进入<span class="kbd">Esc</span>取消 · 名字可用</span></div>` : '';
+  return `<div class="list">${head}${newrow}
+    ${files.filter(f => !opts.hide || keep(f)).map(f => {
+      const cls = [sel.includes(f.n) ? 'sel' : '', f.n === opts.clash ? 'dup' : '', !keep(f) ? 'dim' : ''].join(' ');
+      const box = opts.checks && f.k !== 'folder' ? `<span class="cbx">${sel.includes(f.n) ? icon('check', 'width:11px;height:11px;stroke-width:2.2') : ''}</span>` : (opts.checks ? '<span style="width:16px"></span>' : '');
+      return `<div class="lr ${cls}"><span class="nm">${box}${fico(f.k)}<span>${f.n}</span></span><span class="d">${f.d}</span><span class="t">${f.t}</span><span class="s">${f.s}</span></div>`;
+    }).join('')}</div>`;
+}
+
+function navRow(inner, focus, here) {
+  return `<div class="pk-nav">
+    <button class="nb">${icon('back')}</button><button class="nb off">${icon('fwd')}</button><button class="nb">${icon('up')}</button>
+    <div class="jump ${focus ? 'focus' : ''}">${inner}</div>
+    <div class="search">${icon('search')}<span>在 ${here} 中搜索</span></div>
+    <button class="nb">${icon('refresh')}</button>
+  </div>`;
+}
+const jumpHint = `<span class="sp"></span><span class="hintk">打字跳转<span class="kbd">Ctrl L</span></span>`;
+const newFolderBtn = `<button class="nfb">${icon('newfolder')}新建文件夹<span class="kbd">Ctrl Shift N</span></button>`;
+const viewTools = (grid) => `<div class="tools"><button class="nb">${icon('sort')}</button><button class="nb">${icon('list')}</button>${grid ? `<button class="nb">${icon('grid')}</button>` : ''}<button class="nb">${icon('eye')}</button></div>`;
+
+/* ---------- footers ---------- */
+function where(lead, path, tail, buttons, extra = '') {
+  return `<div class="where"><span class="to">${lead}<b>${path}</b>${tail}</span><span class="sp"></span>${extra}${buttons}</div>`;
+}
+function wordOptions() {
+  return `<div class="opts">
+    <span class="prop"><span class="pl">作者</span><span class="pv">SS</span></span>
+    <span class="prop"><span class="pl">标签</span><span class="pv add">${icon('plus', 'width:12px;height:12px')}添加标签</span></span>
+    <span class="ck on"><span class="box">${icon('check', 'width:11px;height:11px;stroke-width:2.2')}</span>保存缩略图</span>
+  </div>`;
+}
+function saveFoot(o = {}) {
+  const name = o.name || '2026 第三季度销售报告（最终版）';
+  const target = o.folder ? `D:\\工作\\季度报告\\${o.folder}\\` : 'D:\\工作\\季度报告\\';
+  const tools = `<button class="btn">工具${icon('chev-d')}</button>`;
+  return `<div class="pk-foot">
+    <div class="frow"><label>文件名(N):</label>
+      <div class="tb ${o.bad ? 'bad' : 'focus'}"><span class="v"><span class="selrange">${name}</span><span class="ext">.docx</span></span></div>
+      <div class="tb sel2"><span>Word 文档 (*.docx)</span>${icon('chev-d', 'color:var(--text2)')}</div></div>
+    ${wordOptions()}
+    ${o.bad ? `<div class="clash">${icon('warn')}<span>“季度报告”里已有同名文件 <span class="x">· 昨天 18:02 · 1.3 MB</span></span><span class="sp"></span>
+       <button class="btn ghost">保存为 …（最终版）(2).docx</button><button class="btn dangerous">替换</button></div>` : ''}
+    ${where(icon('folder', 'color:var(--folder-a)') + '将保存到：', target, name + '.docx' + (o.folder ? '<span class="newtag">新文件夹</span>' : ''),
+      `<button class="btn">取消</button><button class="btn primary" ${o.bad ? 'style="opacity:.5"' : ''}>保存</button>`, tools)}
+  </div>`;
+}
+
+/* ---------- jump panel ---------- */
+function jumpPanel(index) {
+  const hl = (s) => s.replace('季度', '<mark>季度</mark>');
+  const row = (on, ic, n, p, why, k) => `<div class="jr ${on ? 'on' : ''}">${ic}<div style="min-width:0"><div class="n">${hl(n)}</div><div class="p">${p}</div></div><div class="r">${why ? `<span class="why">${why}</span>` : ''}${k || ''}</div></div>`;
+  const tabIc = icon('tab', 'color:var(--accent-fg)');
+  const folderIc = fico('folder');
+  let html = `<div class="jp">
+    <div class="grp"><div class="gh">${icon('jump', 'width:12px;height:12px')}已打开<span class="c">2</span></div>
+      ${row(true, tabIc, '季度报告', 'D:\\工作\\季度报告', 'Pulse 标签', `<span class="kbd">Alt 1</span>${icon('enter', 'width:14px;height:14px')}`)}
+      ${row(false, icon('window', 'color:var(--text2)'), '季度数据核对', 'E:\\财务\\2026\\季度数据核对', '资源管理器', '<span class="kbd">Alt 4</span>')}
+    </div>
+    <div class="grp"><div class="gh">${icon('clock', 'width:12px;height:12px')}Word 最近保存<span class="c">2</span></div>
+      ${row(false, folderIc, '季度报告\\2026 Q2', 'D:\\工作\\季度报告\\2026 Q2', '7 月 3 日')}
+      ${row(false, folderIc, '季度总结模板', 'C:\\Users\\SS\\Documents\\模板\\季度总结模板', '上月')}
+    </div>`;
+  if (index === 'full') html += `
+    <div class="grp"><div class="gh">${icon('pc', 'width:12px;height:12px')}全盘<span class="c">索引 · 0.02 秒 · 共 37 个</span></div>
+      ${row(false, folderIc, '季度报告备份', 'E:\\备份\\2025\\季度报告备份', '文件夹')}
+      ${row(false, fico('docx'), '2025 第四季度销售报告.docx', 'D:\\归档\\2025\\2025 第四季度销售报告.docx', '同类文件 · 进入所在文件夹')}
+    </div>`;
+  else html += `<div class="idx">${icon('info')}<span>全盘索引服务未安装，正在使用用户索引：只搜索用户文件夹（桌面、文档、下载…）。</span><span class="lk">了解索引服务</span></div>
+    <div class="grp"><div class="gh">${icon('pc', 'width:12px;height:12px')}用户文件夹<span class="c">用户索引 · 4 个</span></div>
+      ${row(false, fico('docx'), '季度复盘.docx', 'C:\\Users\\SS\\Desktop\\季度复盘.docx', '同类文件')}
+    </div>`;
+  html += `<div class="grp" style="border-top:1px solid var(--divider);margin-top:4px">
+      <div class="jr">${icon('newfolder', 'color:var(--accent-fg)')}<div style="min-width:0"><div class="n" style="font-weight:400">在 <b>季度报告</b> 中新建文件夹“jd”</div><div class="p">D:\\工作\\季度报告\\jd</div></div><div class="r"><span class="kbd">Ctrl</span><span class="kbd">Shift</span><span class="kbd">Enter</span></div></div></div>
+    <div class="foot"><span>${icon('chev-d', 'width:12px;height:12px;transform:rotate(180deg)')}${icon('chev-d', 'width:12px;height:12px')}选择</span>
+      <span><span class="kbd">Enter</span>进入</span><span><span class="kbd">Tab</span>补全路径</span>
+      <span><span class="kbd">Ctrl</span><span class="kbd">Enter</span>直接保存到这里</span><span><span class="kbd">Esc</span>返回</span>
+      <span style="margin-left:auto">支持拼音首字母 · 路径片段</span></div></div>`;
+  return html;
+}
+
+/* ---------- states ---------- */
+const CAP = {
+  save: ['另存为 · Word', '标题栏左侧是发起的程序。对话框出现时已跳到 Pulse 正在看的“季度报告”；文件名下是 Word 自带的作者 / 标签 / 缩略图，“工具”留在按钮旁。'],
+  jump: ['输入跳转', '在面包屑上打字（或 Ctrl+L）：jd → 季度。最后一行可以直接用输入的名字新建文件夹。'],
+  newfolder: ['新建文件夹', '点“新建文件夹”或 Ctrl+Shift+N：列表顶部出现一行直接命名，Enter 建好进入；“将保存到”同步变成新文件夹。'],
+  notepad: ['另存为 · 记事本', '程序加的下拉框（编码）放在选项行，保存类型和默认扩展名照程序原样。'],
+  multi: ['打开 · 微信（多选）', '程序允许多选时，行首出现勾选框，底部是已选托盘；侧栏多出“程序提供的位置”。'],
+  folder: ['选择文件夹 · VS Code', '只选文件夹：文件淡出，文件名栏换成“文件夹”，按钮用程序给的文字。'],
+  open: ['打开 · Photoshop', '顶部是跨文件夹的最近图片，按程序接受的类型筛选，一次点击就选中。'],
+  clash: ['同名冲突', '不再弹出确认框：冲突在原地说明，给出“替换”或自动编号的新名字。'],
+  idx: ['无全盘索引', '没装 PulseIndex 服务时，跳转面板只搜已打开、最近和用户文件夹，并说明原因。'],
+};
+const APP_OF = { save: 'word', jump: 'word', newfolder: 'word', clash: 'word', idx: 'word', notepad: 'notepad', multi: 'wechat', folder: 'code', open: 'ps' };
+const VERB = { save: '另存为', jump: '另存为', newfolder: '另存为', clash: '另存为', idx: '另存为', notepad: '另存为', multi: '打开', folder: '打开文件夹', open: '打开' };
+
+function render() {
+  document.documentElement.dataset.theme = st.theme;
+  document.documentElement.dataset.accent = st.accent;
+  $$('.seg[data-k]').forEach(s => $$('button', s).forEach(b => b.setAttribute('aria-pressed', st[s.dataset.k] === b.dataset.v)));
+  const s = CAP[st.s] ? st.s : 'save';
+  $('#capT').textContent = CAP[s][0];
+  $('#capD').textContent = CAP[s][1];
+  const app = APP_OF[s];
+  $('#host').innerHTML = host(app);
+
+  const title = `<div class="pk-title"><span class="apphead">${APPS[app].badge}<b>${APPS[app].name}</b><span class="tdiv"></span><span class="verb">${VERB[s]}</span></span>
+    <span class="sp"></span><span class="cap">${icon('x', 'width:12px;height:12px')}</span></div>`;
+
+  let html = title, panel = '';
+  if (s === 'open') {
+    html += navRow(crumbs(['数据 (D:)', '设计', '设计稿-v3']) + jumpHint, false, '设计稿-v3') + strip(1, app);
+    const ctx = `<div class="ctx">${newFolderBtn}<div class="fchips"><span class="fchip on">${icon('image', 'width:13px;height:13px')}图片和 PSD</span><span class="fchip">全部文件</span></div>${viewTools(true)}</div>`;
+    const thumbs = [
+      ['首页-深色.png', '设计稿-v3\\导出 · 10 分钟前', 'linear-gradient(135deg,#1B2430,#3A4F6B)', true],
+      ['banner@2x.psd', '设计稿-v3 · 昨天', 'linear-gradient(135deg,#F2B880,#D96C4F)'],
+      ['产品主图-白底.jpg', '下载 · 昨天', 'linear-gradient(135deg,#F4F4F2,#D9DDE3)'],
+      ['海报-双十一.psd', 'E:\\资料\\活动 · 3 天前', 'linear-gradient(135deg,#7B3FE4,#E0457B)'],
+      ['图标集.psd', '设计稿-v3 · 上周', 'linear-gradient(135deg,#5BA88B,#2E6B5A)'],
+    ];
+    const recent = `<div class="recent"><h5>${icon('clock', 'width:12px;height:12px')}最近的图片 · 来自 Photoshop 和 Pulse，不限文件夹</h5><div class="rrow">${thumbs.map(([n, m, g, on]) =>
+      `<div class="rcard ${on ? 'on' : ''}"><div class="th" style="background:${g}"><svg viewBox="0 0 120 74" style="position:absolute;inset:0;width:100%;height:100%"><rect x="14" y="16" width="52" height="7" rx="3" fill="#fff" opacity=".55"/><rect x="14" y="29" width="34" height="5" rx="2.5" fill="#fff" opacity=".35"/><circle cx="92" cy="40" r="15" fill="#fff" opacity=".22"/></svg></div><div class="n">${n}</div><div class="m">${m}</div></div>`).join('')}</div></div>`;
+    html += `<div class="pk-body">${side(app, '设计稿-v3')}<div class="main">${ctx}${recent}${rows(FILES_DESIGN, { sel: ['首页-深色.png'], dim: ['png', 'psd', 'jpg'] })}</div></div>`;
+    html += `<div class="pk-foot">
+      <div class="frow"><label>文件名(N):</label><div class="tb focus"><span class="v">首页-深色.png</span></div>
+        <div class="tb sel2"><span>所有格式 (*.PSD;*.PNG;*.JPG…)</span>${icon('chev-d', 'color:var(--text2)')}</div></div>
+      <div class="opts"><span class="ck"><span class="box"></span>图像序列</span><span class="morex">更多选项<span class="n">2</span>${icon('chev-d', 'width:12px;height:12px')}</span></div>
+      ${where(fico('png') + '将选择：', 'D:\\设计\\设计稿-v3\\导出\\', '首页-深色.png', '<button class="btn">取消</button><button class="btn primary">打开</button>')}</div>`;
+  } else if (s === 'multi') {
+    html += navRow(crumbs(['数据 (D:)', '工作', '季度报告']) + jumpHint, false, '季度报告') + strip(0, app);
+    const ctx = `<div class="ctx">${newFolderBtn}<div class="fchips"><span class="fchip on">全部文件</span></div>${viewTools(true)}</div>`;
+    const picked = ['区域销售明细.xlsx', '汇报.pptx', '季度报告-签字版.pdf'];
+    html += `<div class="pk-body">${side(app, '季度报告', ['微信文件', '聊天文件 · 项目组'])}<div class="main">${ctx}<div></div>${rows(FILES_REPORT, { sel: picked, checks: true })}</div></div>`;
+    html += `<div class="pk-foot">
+      <div class="frow"><label>已选 3 项</label><div class="tray">${picked.map(n => `<span class="tc">${fico(n.split('.').pop())}${n}${icon('x', 'width:12px;height:12px;color:var(--text3)')}</span>`).join('')}</div>
+        <div class="tb sel2"><span>所有文件 (*.*)</span>${icon('chev-d', 'color:var(--text2)')}</div></div>
+      ${where(icon('check', 'color:var(--accent-fg)'), '3 个文件 · 9.4 MB', '<span style="color:var(--text3)"> · Ctrl 或 Shift 点击继续添加</span>', '<button class="btn">取消</button><button class="btn primary">发送 (3)</button>')}</div>`;
+  } else if (s === 'folder') {
+    html += navRow(crumbs(['数据 (D:)', '项目']) + jumpHint, false, '项目') + strip(-1, app);
+    const ctx = `<div class="ctx">${newFolderBtn}<div class="fchips"><span class="fchip on">${icon('folder', 'width:13px;height:13px')}只看文件夹</span></div>${viewTools(false)}</div>`;
+    html += `<div class="pk-body">${side(app, '项目')}<div class="main">${ctx}<div></div>${rows(FILES_PROJECTS, { sel: ['pulse'], dim: [] })}</div></div>`;
+    html += `<div class="pk-foot">
+      <div class="frow"><label>文件夹:</label><div class="tb focus"><span class="v">pulse</span></div><span></span></div>
+      ${where(icon('folder', 'color:var(--folder-a)') + '将选择：', 'D:\\项目\\', 'pulse', '<button class="btn">取消</button><button class="btn primary">选择文件夹</button>')}</div>`;
+  } else if (s === 'notepad') {
+    html += navRow(crumbs(['数据 (D:)', '工作', '季度报告']) + jumpHint, false, '季度报告') + strip(0, app);
+    const ctx = `<div class="ctx">${newFolderBtn}<div class="fchips"><span class="fchip on">${fico('txt')}文本文档</span><span class="fchip">全部文件</span></div>${viewTools(false)}</div>`;
+    html += `<div class="pk-body">${side(app, '季度报告')}<div class="main">${ctx}<div></div>${rows(FILES_REPORT, { dim: ['txt'] })}</div></div>`;
+    html += `<div class="pk-foot">
+      <div class="frow"><label>文件名(N):</label><div class="tb focus"><span class="v"><span class="selrange">会议记录</span><span class="ext">.txt</span></span></div>
+        <div class="tb sel2"><span>文本文档 (*.txt)</span>${icon('chev-d', 'color:var(--text2)')}</div></div>
+      <div class="opts"><span class="cmb"><span class="lb">编码(E):</span><span class="box2">UTF-8${icon('chev-d', 'width:13px;height:13px;color:var(--text2)')}</span></span></div>
+      ${where(icon('folder', 'color:var(--folder-a)') + '将保存到：', 'D:\\工作\\季度报告\\', '会议记录.txt', '<button class="btn">取消</button><button class="btn primary">保存</button>')}</div>`;
+  } else {
+    const jumping = s === 'jump' || s === 'idx';
+    html += jumping
+      ? navRow(`<span class="tag">${icon('folder', 'width:12px;height:12px')}季度报告</span><span class="q">jd<span class="caret"></span></span><span class="hintk"><span class="kbd">Esc</span>返回</span>`, true, '季度报告')
+      : navRow(crumbs(['数据 (D:)', '工作', '季度报告']) + jumpHint, false, '季度报告');
+    html += strip(0, app);
+    const lead = s === 'save'
+      ? `<div class="notice">${icon('jump', 'width:14px;height:14px')}已跳到 Pulse 当前文件夹<b>季度报告</b><span class="lk">${icon('undo', 'width:12px;height:12px;vertical-align:-2px')} 回到 文档</span></div>`
+      : `<div class="fchips"><span class="fchip on">${fico('docx')}Word 文档</span><span class="fchip">全部文件</span></div>`;
+    const ctx = `<div class="ctx">${newFolderBtn}${lead}${viewTools(false)}</div>`;
+    html += `<div class="pk-body">${side(app, '季度报告')}<div class="main">${ctx}<div></div>${rows(FILES_REPORT, {
+      dim: ['docx'], clash: s === 'clash' ? '2026 第三季度销售报告（最终版）.docx' : '', newrow: s === 'newfolder' ? '2026 Q3' : '' })}</div></div>`;
+    html += saveFoot({ bad: s === 'clash', folder: s === 'newfolder' ? '2026 Q3' : '' });
+    if (jumping) panel = jumpPanel(s === 'idx' ? 'user' : 'full');
+  }
+  $('#pk').innerHTML = html + panel;
+}
+
+$$('.seg[data-k]').forEach(seg => seg.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  st[seg.dataset.k] = b.dataset.v;
+  history.replaceState(null, '', '?' + new URLSearchParams(st));
+  render();
+}));
+document.addEventListener('keydown', e => {
+  if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'n') { e.preventDefault(); st.s = 'newfolder'; render(); return; }
+  if (e.ctrlKey && e.key.toLowerCase() === 'l') { e.preventDefault(); st.s = 'jump'; render(); }
+  if (e.key === 'Escape' && ['jump', 'idx', 'newfolder'].includes(st.s)) { st.s = 'save'; render(); }
+});
+$$('svg[data-ic]').forEach(s => { s.setAttribute('viewBox', '0 0 16 16'); s.innerHTML = L[s.dataset.ic] || ''; });
+render();
+})();
+</script>
+</body>
+</html>

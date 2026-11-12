@@ -1,0 +1,1392 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>扩展商店与 7-Zip</title>
+<style>
+/* Tokens: src/ui/FluentTokens.h MakeTheme(); accent = the sage green the running app shows.
+   State is driven by ?view=store|detail|menu|installed &state=ready|loading|failed|offline|install|restart
+   &sel=archive|files|locked &tab=settings|menu|formats|about &community=empty|sample &theme=light|dark &w=narrow */
+:root {
+  --bg: #E9ECE6; --title: #F1F3EE; --sheet: #F7F8F4; --card: #FFFFFF; --flyout: #FFFFFF;
+  --text: #303B50; --text2: #66748A; --text3: #929CAE;
+  --hover: rgba(82,125,112,.055); --pressed: rgba(82,125,112,.09);
+  --stroke: #DCE3D9; --divider: #E5EAE3; --input: rgba(255,255,255,.9); --input-line: rgba(166,181,169,.65);
+  --accent: #527D70; --accent-hover: #5F8A7D; --accent-fg: #3F6B5E; --on-accent: #FFFFFF; --sel: rgba(82,125,112,.095);
+  --track: rgba(48,59,80,.16); --skel: rgba(48,59,80,.07);
+  --ok: #2F7A4F; --ok-bg: rgba(47,122,79,.09); --warn: #9D5D00; --warn-bg: rgba(157,93,0,.09);
+  --danger: #C42B1C; --danger-bg: rgba(196,43,28,.07);
+  --scrim: rgba(233,236,230,.6);
+  --shadow: 0 16px 40px rgba(48,59,80,.16), 0 2px 6px rgba(48,59,80,.08);
+  --menu-shadow: 0 8px 24px rgba(48,59,80,.18), 0 1px 3px rgba(48,59,80,.10);
+  --font: "Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+  --display: "Segoe UI Variable Display","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+  --mono: "Cascadia Mono",Consolas,ui-monospace,monospace;
+}
+:root[data-theme="dark"] {
+  --bg: #111111; --title: #1A1A1A; --sheet: #202020; --card: #272727; --flyout: #2C2C2C;
+  --text: #FFFFFF; --text2: rgba(255,255,255,.62); --text3: rgba(255,255,255,.40);
+  --hover: rgba(255,255,255,.07); --pressed: rgba(255,255,255,.05);
+  --stroke: rgba(255,255,255,.08); --divider: rgba(255,255,255,.06); --input: rgba(255,255,255,.06); --input-line: rgba(255,255,255,.45);
+  --accent: #6E9C8E; --accent-hover: #7FAB9D; --accent-fg: #8DBBAD; --on-accent: #10201B; --sel: rgba(110,156,142,.17);
+  --track: rgba(255,255,255,.20); --skel: rgba(255,255,255,.06);
+  --ok: #7FCB98; --ok-bg: rgba(127,203,152,.11); --warn: #F2C661; --warn-bg: rgba(242,198,97,.09);
+  --danger: #FF99A4; --danger-bg: rgba(255,153,164,.09);
+  --scrim: rgba(0,0,0,.4);
+  --shadow: 0 16px 44px rgba(0,0,0,.55), 0 2px 6px rgba(0,0,0,.4);
+  --menu-shadow: 0 10px 28px rgba(0,0,0,.5), 0 1px 3px rgba(0,0,0,.4);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--font); }
+button, input, select { font: inherit; color: inherit; }
+button { background: none; border: 0; padding: 0; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 1px; border-radius: 4px; }
+.i { width: 16px; height: 16px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.i.s12 { width: 12px; height: 12px; } .i.s20 { width: 20px; height: 20px; } .i.s24 { width: 24px; height: 24px; }
+[hidden] { display: none !important; }
+
+/* page frame around the mock windows */
+.page { max-width: 1300px; margin: 0 auto; padding: 22px 16px 64px; display: flex; flex-direction: column; gap: 16px; }
+.page > header h1 { font: 600 24px var(--display); margin: 0; }
+.page > header p { margin: 4px 0 0; color: var(--text2); max-width: 90ch; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 9px 12px; background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; position: sticky; top: 0; z-index: 50; }
+.ctl { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text2); }
+.seg { display: inline-flex; flex-wrap: wrap; padding: 2px; gap: 2px; background: var(--hover); border-radius: 7px; }
+.seg button { height: 26px; padding: 0 10px; border-radius: 5px; font-size: 12.5px; color: var(--text2); }
+.seg button[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: 0 0 0 1px var(--stroke); }
+.stage { overflow-x: auto; padding: 2px 0 6px; }
+.stage > .win { margin: 0 auto; }
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 10px; }
+.note { background: var(--card); border: 1px solid var(--stroke); border-radius: 8px; padding: 11px 14px; font-size: 12.5px; color: var(--text2); }
+.note b { color: var(--text); font-weight: 600; display: block; margin-bottom: 3px; font-size: 13px; }
+.note .new { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 9px; background: var(--warn-bg); color: var(--warn); margin-left: 4px; font-weight: 600; }
+
+/* window chrome (matches the running app) */
+.win { width: 1180px; height: 780px; flex-shrink: 0; display: flex; flex-direction: column; background: var(--sheet); border: 1px solid var(--stroke); border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; font-size: 13px; position: relative; transition: width .2s ease; }
+.win.narrow { width: 760px; }
+.tb { height: 44px; display: flex; align-items: center; gap: 6px; padding-left: 12px; background: var(--title); flex-shrink: 0; }
+.tb .brand { display: flex; align-items: center; gap: 8px; font: 600 14px var(--display); margin-right: 6px; }
+.logo { width: 22px; height: 22px; border-radius: 5px; background: linear-gradient(135deg,#9B8CF0,#5A4FCF 60%,#3B2F9E); clip-path: polygon(0 18%,62% 0,100% 30%,100% 100%,0 100%); }
+.tbtn { width: 32px; height: 30px; display: grid; place-items: center; border-radius: 6px; color: var(--text2); }
+.tbtn:hover { background: var(--hover); }
+.tab { height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 12px; border-radius: 7px 7px 0 0; color: var(--text2); font-size: 13px; min-width: 120px; }
+.tab.on { background: var(--sheet); color: var(--text); align-self: flex-end; height: 34px; }
+.tb .sp { flex: 1; }
+.tgroup { display: flex; gap: 2px; padding: 3px; border-radius: 9px; background: var(--hover); margin-right: 14px; }
+.tgroup .tbtn.on { background: var(--sel); color: var(--accent-fg); position: relative; }
+.tgroup .tbtn.on::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: 2px; height: 2px; border-radius: 1px; background: var(--accent); }
+.cap { width: 46px; height: 44px; display: grid; place-items: center; color: var(--text2); }
+.body { flex: 1; min-height: 0; display: flex; }
+.sb { height: 34px; flex-shrink: 0; display: flex; align-items: center; gap: 14px; padding: 0 14px; background: var(--title); font-size: 12.5px; color: var(--text2); }
+.sb .ai { display: flex; align-items: center; gap: 5px; color: var(--text); font-weight: 600; }
+.sb .hist { display: flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 12px; background: var(--hover); color: var(--text); }
+.sb .sp { flex: 1; }
+
+/* settings nav */
+.nav { width: 232px; flex-shrink: 0; padding: 10px 10px; display: flex; flex-direction: column; gap: 1px; overflow-y: auto; background: var(--title); }
+.narrow .nav { width: 58px; padding: 10px 8px; }
+.navsearch { height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 12px; margin-bottom: 8px; border-radius: 8px; background: var(--card); border: 1px solid var(--stroke); color: var(--text3); }
+.navsearch kbd { margin-left: auto; font: 11.5px var(--font); padding: 2px 7px; border: 1px solid var(--stroke); border-radius: 10px; color: var(--text2); }
+.narrow .navsearch { padding: 0; justify-content: center; }
+.narrow .navsearch span, .narrow .navsearch kbd, .narrow .ni span, .narrow .ni .nb { display: none; }
+.ni { height: 36px; display: flex; align-items: center; gap: 12px; padding: 0 12px; border-radius: 7px; color: var(--text); position: relative; white-space: nowrap; font-size: 14px; }
+.narrow .ni { justify-content: center; padding: 0; }
+.ni .i { color: var(--text2); }
+.ni:hover { background: var(--hover); }
+.ni.on { background: var(--sel); }
+.ni.on::before { content: ""; position: absolute; left: -10px; top: 10px; bottom: 10px; width: 3px; border-radius: 2px; background: var(--accent); }
+.narrow .ni.on::before { left: -8px; }
+.ni .nb { margin-left: auto; font-size: 11.5px; padding: 1px 8px; border-radius: 10px; background: var(--sel); color: var(--accent-fg); font-weight: 600; }
+.ni .nb.red { background: #C42B1C; color: #fff; min-width: 20px; text-align: center; padding: 1px 6px; }
+.nsep { height: 1px; background: var(--divider); margin: 5px 10px; }
+
+/* settings content */
+.main { flex: 1; min-width: 0; overflow-y: auto; position: relative; }
+.content { padding: 26px 32px 40px; max-width: 980px; }
+.narrow .content { padding: 20px 18px 32px; }
+.ph { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+.ph h1 { font: 600 28px/1.2 var(--display); margin: 0; }
+.ph p { margin: 4px 0 0; color: var(--text2); font-size: 13px; }
+.ph .grow { flex: 1; min-width: 220px; }
+.search { width: 260px; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-radius: 7px; background: var(--input); border: 1px solid var(--stroke); border-bottom-color: var(--input-line); color: var(--text3); }
+.narrow .search { width: 100%; }
+.search input { border: 0; outline: 0; background: none; flex: 1; min-width: 0; color: var(--text); }
+.search input::placeholder { color: var(--text3); }
+.pivot { display: flex; gap: 22px; margin: 18px 0 18px; border-bottom: 1px solid var(--divider); }
+.pivot button { height: 36px; position: relative; color: var(--text2); font-size: 14px; display: flex; align-items: center; gap: 6px; }
+.pivot button:hover { color: var(--text); }
+.pivot button.on { color: var(--text); font-weight: 600; }
+.pivot button.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 3px; border-radius: 2px; background: var(--accent); }
+.count { font-size: 11.5px; font-weight: 600; padding: 0 7px; border-radius: 9px; background: var(--hover); color: var(--text2); line-height: 18px; }
+.count.acc { background: var(--accent); color: var(--on-accent); }
+
+.btn { height: 32px; padding: 0 14px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border-radius: 6px; background: var(--card); border: 1px solid var(--stroke); border-bottom-color: color-mix(in srgb, var(--stroke) 70%, #000 12%); white-space: nowrap; font-size: 13px; }
+.btn:hover { background: color-mix(in srgb, var(--card) 92%, var(--accent) 8%); }
+.btn.pri { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+.btn.pri:hover { background: var(--accent-hover); }
+.btn.sub { background: transparent; border-color: transparent; color: var(--accent-fg); padding: 0 8px; }
+.btn.sub:hover { background: var(--hover); }
+.btn.sm { height: 28px; padding: 0 11px; font-size: 12.5px; }
+.btn[disabled] { opacity: .45; pointer-events: none; }
+.link { color: var(--accent-fg); display: inline-flex; align-items: center; gap: 4px; }
+.link:hover { text-decoration: underline; }
+
+/* featured 7-Zip hero */
+.hero { border-radius: 12px; border: 1px solid var(--stroke); background: var(--card); overflow: hidden; }
+.hero-top { display: flex; gap: 18px; padding: 20px 22px 18px; align-items: center; position: relative; background:
+  radial-gradient(600px 180px at 0% 0%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 70%),
+  radial-gradient(400px 160px at 100% 120%, color-mix(in srgb, #C9A35B 12%, transparent), transparent 70%); }
+.tile { width: 44px; height: 44px; border-radius: 11px; display: grid; place-items: center; flex-shrink: 0; color: #fff; position: relative; box-shadow: inset 0 0 0 1px rgba(255,255,255,.14), 0 1px 2px rgba(0,0,0,.12); }
+.tile.lg { width: 60px; height: 60px; border-radius: 14px; }
+.tile.xl { width: 72px; height: 72px; border-radius: 17px; }
+.tile .i { stroke-width: 1.6; }
+.t7z { background: linear-gradient(145deg,#5E8E80,#36594F); }
+.timg { background: linear-gradient(145deg,#9A86D8,#6650B3); }
+.traw { background: linear-gradient(145deg,#D49A5B,#A86A2E); }
+.tff { background: linear-gradient(145deg,#4F97B4,#2B6680); }
+.tsrch { background: linear-gradient(145deg,#6F8FC6,#43629A); }
+.tai { background: linear-gradient(145deg,#B07CD8,#7650B0); }
+.tc1 { background: linear-gradient(145deg,#8C9AAF,#5C6A80); } .tc2 { background: linear-gradient(145deg,#C98585,#9B5555); } .tc3 { background: linear-gradient(145deg,#7DAF8A,#4E7F5B); }
+.hero h2 { margin: 0; font: 600 20px var(--display); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.hero .sub { color: var(--text2); font-size: 13px; margin-top: 2px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.verified { display: inline-flex; align-items: center; gap: 3px; color: var(--accent-fg); font-weight: 600; }
+.pill { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 9px; border-radius: 11px; font-size: 12px; font-weight: 600; background: var(--hover); color: var(--text2); white-space: nowrap; }
+.pill.ok { background: var(--ok-bg); color: var(--ok); }
+.pill.warn { background: var(--warn-bg); color: var(--warn); }
+.pill.acc { background: var(--sel); color: var(--accent-fg); }
+.pill.dot::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.hero-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.narrow .hero-top { flex-wrap: wrap; }
+.narrow .hero-actions { margin-left: 0; width: 100%; }
+.quick { display: grid; grid-template-columns: 1fr 236px; border-top: 1px solid var(--divider); }
+.narrow .quick { grid-template-columns: 1fr; }
+.quick-set { padding: 14px 22px 18px; display: flex; flex-direction: column; gap: 4px; }
+.qhead { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text2); margin-bottom: 4px; }
+.qhead b { color: var(--text); font-weight: 600; font-size: 13px; }
+.saved { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text3); transition: color .2s; }
+.saved.flash { color: var(--ok); }
+.qrow { display: flex; align-items: center; gap: 12px; min-height: 44px; border-radius: 8px; padding: 0 4px; }
+.qrow + .qrow { border-top: 1px solid var(--divider); border-radius: 0; }
+.qrow .lbl { flex: 1; min-width: 0; }
+.qrow .lbl div:first-child { font-size: 13.5px; }
+.qrow .lbl div + div { font-size: 12px; color: var(--text3); }
+.quick-prev { padding: 14px 16px; background: color-mix(in srgb, var(--sheet) 70%, var(--card)); border-left: 1px solid var(--divider); display: flex; flex-direction: column; gap: 8px; }
+.narrow .quick-prev { border-left: 0; border-top: 1px solid var(--divider); }
+.quick-prev .cap2 { font-size: 11.5px; color: var(--text3); display: flex; align-items: center; gap: 6px; }
+
+/* combobox */
+.combo { position: relative; }
+.combo > button { height: 32px; min-width: 168px; padding: 0 10px 0 12px; display: flex; align-items: center; gap: 8px; border-radius: 6px; background: var(--card); border: 1px solid var(--stroke); border-bottom-color: var(--input-line); text-align: left; }
+.combo > button span { flex: 1; }
+.combo > button .i { color: var(--text2); }
+.combo > button:hover { background: color-mix(in srgb, var(--card) 92%, var(--accent) 8%); }
+.combo .list { position: absolute; z-index: 30; right: 0; top: 36px; min-width: 100%; background: var(--flyout); border: 1px solid var(--stroke); border-radius: 8px; box-shadow: var(--menu-shadow); padding: 4px; }
+.combo .list button { width: 100%; height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-radius: 5px; text-align: left; white-space: nowrap; position: relative; }
+.combo .list button:hover { background: var(--hover); }
+.combo .list button.on { background: var(--sel); }
+.combo .list button.on::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 2px; background: var(--accent); }
+.combo .list small { color: var(--text3); margin-left: auto; padding-left: 14px; }
+
+/* toggle */
+.tg { width: 40px; height: 20px; border-radius: 10px; border: 1px solid var(--text2); position: relative; flex-shrink: 0; transition: background .15s, border-color .15s; }
+.tg::after { content: ""; position: absolute; top: 3px; left: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--text2); transition: left .15s, background .15s; }
+.tg[aria-checked="true"] { background: var(--accent); border-color: var(--accent); }
+.tg[aria-checked="true"]::after { left: 22px; background: var(--on-accent); }
+.tgwrap { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text2); }
+
+/* section + cards */
+.sec { margin-top: 28px; }
+.sech { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.sech h3 { margin: 0; font: 600 15px var(--display); }
+.sech span { color: var(--text3); font-size: 12.5px; }
+.sech .grow { flex: 1; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 18px; }
+.chip { height: 30px; padding: 0 13px; border-radius: 15px; border: 1px solid var(--stroke); background: var(--card); color: var(--text2); font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
+.chip:hover { color: var(--text); }
+.chip.on { background: var(--sel); border-color: color-mix(in srgb, var(--accent) 40%, transparent); color: var(--accent-fg); font-weight: 600; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.card { background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; padding: 14px 14px 12px; display: flex; flex-direction: column; gap: 10px; text-align: left; transition: border-color .15s, box-shadow .15s, transform .15s; min-height: 156px; }
+.card:hover { border-color: color-mix(in srgb, var(--accent) 35%, var(--stroke)); box-shadow: 0 4px 14px rgba(48,59,80,.08); }
+.card .top { display: flex; gap: 12px; align-items: flex-start; }
+.card .nm { font-weight: 600; font-size: 14px; line-height: 1.3; }
+.card .pub { font-size: 12px; color: var(--text3); margin-top: 2px; display: flex; gap: 4px; align-items: center; }
+.card .sum { font-size: 12.5px; line-height: 1.5; max-height: 3em; color: var(--text2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.card .foot { display: flex; align-items: center; gap: 8px; margin-top: auto; min-height: 28px; }
+.card .meta { font-size: 11.5px; color: var(--text3); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .state { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--ok); font-weight: 600; }
+.bar { height: 3px; border-radius: 2px; background: var(--track); overflow: hidden; flex: 1; }
+.bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; width: 0; transition: width .3s; }
+.bar.ind i { width: 30%; animation: ind 1.1s ease-in-out infinite; }
+@keyframes ind { 0% { transform: translateX(-100%); } 100% { transform: translateX(340%); } }
+.empty { border: 1px dashed var(--stroke); border-radius: 10px; padding: 26px 20px; display: flex; align-items: center; gap: 16px; background: color-mix(in srgb, var(--card) 50%, transparent); }
+.empty .ico { width: 44px; height: 44px; border-radius: 12px; background: var(--hover); display: grid; place-items: center; color: var(--text3); flex-shrink: 0; }
+.empty b { display: block; font-size: 14px; }
+.empty p { margin: 2px 0 0; color: var(--text2); font-size: 12.5px; }
+.trust { margin-top: 26px; display: flex; gap: 10px; align-items: flex-start; color: var(--text3); font-size: 12px; padding-top: 14px; border-top: 1px solid var(--divider); }
+.trust .grow { flex: 1; }
+.banner { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-radius: 9px; margin-top: 16px; font-size: 13px; }
+.banner.info { background: var(--sel); color: var(--text); }
+.banner.info .i { color: var(--accent-fg); }
+.banner.err { background: var(--danger-bg); }
+.banner.err .i { color: var(--danger); }
+.banner .grow { flex: 1; }
+.skel { background: var(--skel); border-radius: 6px; position: relative; overflow: hidden; }
+.skel::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.35), transparent); animation: sh 1.4s infinite; transform: translateX(-100%); }
+:root[data-theme="dark"] .skel::after { background: linear-gradient(90deg, transparent, rgba(255,255,255,.05), transparent); }
+@keyframes sh { to { transform: translateX(100%); } }
+.spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--track); border-top-color: var(--accent); animation: rot .8s linear infinite; flex-shrink: 0; }
+@keyframes rot { to { transform: rotate(360deg); } }
+
+/* detail page */
+.crumb { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text2); margin-bottom: 14px; }
+.crumb button { color: var(--text2); } .crumb button:hover { color: var(--accent-fg); }
+.dhead { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+.dhead h1 { margin: 0; font: 600 26px/1.2 var(--display); }
+.dhead .sub { color: var(--text2); margin-top: 3px; }
+.dhead .badges { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.dhead .acts { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.narrow .dhead .acts { margin-left: 0; }
+.dgrid { display: grid; grid-template-columns: minmax(0,1fr) 270px; gap: 20px; align-items: start; }
+.narrow .dgrid { grid-template-columns: 1fr; }
+.group { background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; overflow: hidden; }
+.group + .gl { margin-top: 22px; }
+.gl { font: 600 13px var(--display); color: var(--text); margin: 0 0 8px 2px; display: flex; align-items: center; gap: 8px; }
+.gl:first-child { margin-top: 0; }
+.row { padding: 14px 16px; display: flex; gap: 14px; align-items: center; }
+.row + .row { border-top: 1px solid var(--divider); }
+.row .ri { width: 32px; height: 32px; border-radius: 8px; background: var(--hover); display: grid; place-items: center; color: var(--text2); flex-shrink: 0; align-self: flex-start; }
+.row .rl { flex: 1; min-width: 0; }
+.row .rt { font-size: 14px; }
+.row .rd { font-size: 12.5px; color: var(--text2); margin-top: 1px; }
+.row.col { flex-direction: column; align-items: stretch; gap: 12px; }
+.row.col .rhead { display: flex; gap: 14px; align-items: center; }
+.opts { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; padding-left: 46px; }
+.opts.fmt { grid-template-columns: repeat(3, minmax(0,1fr)); }
+.narrow .opts { grid-template-columns: 1fr; padding-left: 0; }
+.narrow .opts.fmt { grid-template-columns: 1fr 1fr; }
+.opt { border: 1px solid var(--stroke); border-radius: 8px; padding: 10px 12px; text-align: left; display: flex; gap: 10px; align-items: flex-start; background: var(--card); transition: border-color .12s, background .12s; }
+.opt:hover { background: var(--hover); }
+.opt .radio { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--text2); flex-shrink: 0; margin-top: 2px; position: relative; }
+.opt.on { border-color: var(--accent); background: var(--sel); box-shadow: inset 0 0 0 1px var(--accent); }
+.opt.on .radio { border: 5px solid var(--accent); }
+.opt b { font-weight: 600; font-size: 13px; display: block; }
+.opt small { display: block; color: var(--text2); font-size: 12px; margin-top: 2px; line-height: 1.4; }
+.opt .ext { font: 600 13px var(--mono); }
+.opt.dis { opacity: .5; pointer-events: none; }
+.pathrow { display: flex; gap: 8px; padding-left: 46px; align-items: center; flex-wrap: wrap; }
+.narrow .pathrow { padding-left: 0; }
+.tbox { height: 32px; flex: 1; min-width: 200px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-radius: 6px; background: var(--input); border: 1px solid var(--stroke); border-bottom: 1px solid var(--input-line); }
+.tbox:focus-within { border-bottom: 2px solid var(--accent); }
+.tbox.bad { border-bottom: 2px solid var(--danger); }
+.tbox input { border: 0; outline: 0; background: none; flex: 1; min-width: 0; }
+.tbox input.mono { font-family: var(--mono); font-size: 12.5px; }
+.err-t { color: var(--danger); font-size: 12px; padding-left: 46px; display: flex; gap: 5px; align-items: center; }
+.narrow .err-t { padding-left: 0; }
+.slider { padding-left: 46px; }
+.narrow .slider { padding-left: 0; }
+.slider input { width: 100%; accent-color: var(--accent); margin: 0; }
+.ticks { display: flex; justify-content: space-between; font-size: 12px; color: var(--text3); margin-top: 4px; }
+.ticks span.on { color: var(--accent-fg); font-weight: 600; }
+.foot-note { display: flex; gap: 8px; font-size: 12.5px; color: var(--text2); margin-top: 14px; align-items: flex-start; }
+.foot-note .i { margin-top: 2px; color: var(--text3); }
+.side { position: sticky; top: 0; display: flex; flex-direction: column; gap: 10px; }
+.side .card2 { background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; padding: 14px; }
+.side h4 { margin: 0 0 10px; font: 600 13px var(--display); display: flex; align-items: center; gap: 8px; }
+.side h4 .seg { margin-left: auto; }
+.side .seg button { height: 22px; padding: 0 8px; font-size: 12px; }
+.result { font-size: 12px; color: var(--text2); display: flex; gap: 8px; align-items: flex-start; line-height: 1.45; }
+.result .i { color: var(--accent-fg); margin-top: 1px; }
+.mono { font-family: var(--mono); }
+.cmdrow .drag { color: var(--text3); cursor: grab; }
+.cmdrow .tag { font-size: 11.5px; color: var(--text3); }
+.fmtgroups { display: flex; flex-direction: column; gap: 16px; }
+.fchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.fchip { font: 12px var(--mono); padding: 3px 9px; border-radius: 6px; background: var(--hover); color: var(--text); }
+.fchip.w { background: var(--sel); color: var(--accent-fg); font-weight: 600; }
+.kv { display: grid; grid-template-columns: 120px 1fr; gap: 8px 16px; font-size: 13px; }
+.kv dt { color: var(--text2); } .kv dd { margin: 0; }
+.ver { display: flex; align-items: center; gap: 12px; padding: 10px 16px; }
+.ver + .ver { border-top: 1px solid var(--divider); }
+.ver .v { font: 600 13px var(--mono); width: 70px; }
+.ver .d { flex: 1; color: var(--text2); font-size: 12.5px; }
+
+/* installed list */
+.ilist { display: flex; flex-direction: column; gap: 8px; }
+.irow { background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; padding: 12px 14px; display: flex; gap: 14px; align-items: center; }
+.irow .rl { flex: 1; min-width: 0; }
+.irow .nm { font-weight: 600; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.irow .ds { font-size: 12.5px; color: var(--text2); margin-top: 2px; }
+.irow.upd { border-color: color-mix(in srgb, var(--accent) 40%, var(--stroke)); }
+.irow.off { opacity: .72; }
+.narrow .irow { flex-wrap: wrap; }
+
+/* context menu (shared by previews and the file list) */
+.cm { background: var(--flyout); border: 1px solid var(--stroke); border-radius: 9px; box-shadow: var(--menu-shadow); padding: 4px; width: 264px; font-size: 13px; user-select: none; }
+.cm.mini { width: 100%; box-shadow: none; font-size: 12.5px; }
+.cm .mi { height: 32px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border-radius: 5px; color: var(--text); position: relative; width: 100%; text-align: left; }
+.cm.mini .mi { height: 28px; }
+.cm .mi .i { color: var(--text2); }
+.cm .mi kbd { margin-left: auto; font: 11.5px var(--font); color: var(--text3); }
+.cm .mi .chev { margin-left: auto; color: var(--text3); }
+.cm .mi:hover, .cm .mi.hot { background: var(--hover); }
+.cm .mi.two { height: 46px; align-items: center; }
+.cm.mini .mi.two { height: 40px; }
+.cm .mi.two .tx { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
+.cm .mi.two .tx small { color: var(--text3); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cm .mi.pri .i { color: var(--accent-fg); }
+.cm .mi.pri .tx > span { font-weight: 600; }
+.cm .mi.flash { animation: fl .6s ease; }
+@keyframes fl { 0%,100% { background: transparent; } 40% { background: var(--sel); } }
+.cm .msep { height: 1px; background: var(--divider); margin: 4px 6px; }
+.cm .mh { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 6px 0 10px; font-size: 11.5px; color: var(--text3); font-weight: 600; letter-spacing: .02em; }
+.cm .mh button { margin-left: auto; width: 24px; height: 22px; border-radius: 5px; display: grid; place-items: center; color: var(--text3); }
+.cm .mh button:hover { background: var(--hover); color: var(--accent-fg); }
+.cm .hl { background: color-mix(in srgb, var(--sel) 60%, transparent); border-radius: 7px; margin: 2px 0; padding: 2px 0; }
+.cm .mi.dim { color: var(--text3); }
+.cm .actsrow { display: flex; gap: 2px; padding: 2px 4px 4px; border-bottom: 1px solid var(--divider); margin-bottom: 4px; }
+.cm .actsrow button { flex: 1; height: 34px; border-radius: 5px; display: grid; place-items: center; color: var(--text2); }
+.cm .actsrow button:hover { background: var(--hover); color: var(--text); }
+.subwrap { position: relative; }
+.subm { position: absolute; left: calc(100% - 2px); top: -6px; display: none; z-index: 5; }
+.subwrap:hover > .subm, .subwrap.open > .subm { display: block; }
+.subwrap:hover > .mi, .subwrap.open > .mi { background: var(--hover); }
+.cm.mini .subm { position: static; display: block; width: auto; box-shadow: none; border: 0; border-left: 2px solid color-mix(in srgb, var(--accent) 50%, transparent); border-radius: 0; margin: 2px 0 4px 18px; padding: 0 0 0 4px; background: none; }
+.cm.mini .subwrap > .mi .chev { transform: rotate(90deg); }
+
+/* explorer window */
+.ex-side { width: 200px; flex-shrink: 0; background: var(--title); padding: 10px 8px; display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
+.narrow .ex-side { display: none; }
+.ex-side .h { font-size: 12.5px; font-weight: 600; color: var(--text2); padding: 8px 10px 4px; display: flex; align-items: center; gap: 8px; }
+.ex-side .it { height: 32px; display: flex; align-items: center; gap: 10px; padding: 0 10px 0 18px; border-radius: 6px; font-size: 13px; }
+.ex-side .it.on { background: var(--sel); }
+.ex-main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--sheet); position: relative; }
+.addr { height: 46px; display: flex; align-items: center; gap: 6px; padding: 0 10px; }
+.addr .bc { flex: 1; height: 34px; display: flex; align-items: center; gap: 6px; padding: 0 12px; border-radius: 7px; background: var(--card); border: 1px solid var(--stroke); font-size: 13px; min-width: 0; }
+.addr .bc .i { color: var(--text3); width: 12px; height: 12px; }
+.addr .srch { width: 240px; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-radius: 7px; background: var(--card); border: 1px solid var(--stroke); color: var(--text3); }
+.narrow .addr .srch { display: none; }
+.cmdbar { height: 42px; display: flex; align-items: center; gap: 4px; padding: 0 10px; }
+.cmdbar .btn.pri { height: 30px; }
+.cmdbar .vs { width: 1px; height: 20px; background: var(--divider); margin: 0 6px; }
+.cmdbar .sp { flex: 1; }
+.flist { flex: 1; margin: 0 10px 8px; border-radius: 9px; background: var(--card); border: 1px solid var(--stroke); overflow: hidden; display: flex; flex-direction: column; position: relative; }
+.fh, .fr { display: grid; grid-template-columns: minmax(0,1fr) 150px 120px 90px; align-items: center; padding: 0 12px; gap: 10px; }
+.narrow .fh, .narrow .fr { grid-template-columns: minmax(0,1fr) 110px 76px; }
+.narrow .fh > :nth-child(3), .narrow .fr > :nth-child(3) { display: none; }
+.fh { height: 34px; font-size: 12.5px; color: var(--text2); border-bottom: 1px solid var(--divider); }
+.fr { height: 36px; font-size: 13px; border-radius: 6px; margin: 1px 4px; position: relative; cursor: default; }
+.fr:hover { background: var(--hover); }
+.fr.sel { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 24%, transparent), color-mix(in srgb, var(--accent) 7%, transparent)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent); }
+.fr.newi { animation: newi 1.6s ease; }
+@keyframes newi { 0% { background: color-mix(in srgb, var(--accent) 35%, transparent); } 100% { background: transparent; } }
+.fr .n { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.fr .n span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fr .d, .fr .t, .fr .s { color: var(--text2); font-size: 12.5px; white-space: nowrap; }
+.fr .s { text-align: right; }
+.fh > :last-child { text-align: right; }
+.ficon { width: 22px; height: 22px; flex-shrink: 0; position: relative; display: grid; place-items: center; }
+.ficon .lock { position: absolute; right: -3px; bottom: -2px; width: 11px; height: 11px; border-radius: 3px; background: var(--card); display: grid; place-items: center; color: var(--text2); box-shadow: 0 0 0 1px var(--stroke); }
+.ficon .lock .i { width: 8px; height: 8px; stroke-width: 2; }
+.ctx { position: absolute; z-index: 20; }
+.task { display: flex; align-items: center; gap: 8px; padding: 3px 10px; border-radius: 12px; background: var(--hover); color: var(--text); min-width: 260px; }
+.task .bar { min-width: 80px; }
+.task b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.toast { position: absolute; right: 18px; bottom: 46px; width: 340px; background: var(--flyout); border: 1px solid var(--stroke); border-radius: 10px; box-shadow: var(--menu-shadow); padding: 12px 14px; display: flex; gap: 12px; align-items: flex-start; z-index: 40; animation: up .25s ease; }
+@keyframes up { from { transform: translateY(8px); opacity: 0; } }
+.toast .ok { width: 22px; height: 22px; border-radius: 50%; background: var(--ok-bg); color: var(--ok); display: grid; place-items: center; flex-shrink: 0; }
+.toast .tl { flex: 1; min-width: 0; }
+.toast .tl b { font-weight: 600; display: block; }
+.toast .tl small { color: var(--text2); font-size: 12px; }
+.toast .ta { display: flex; gap: 6px; margin-top: 8px; }
+
+/* dialogs */
+.scrim { position: absolute; inset: 0; background: var(--scrim); display: grid; place-items: center; z-index: 60; backdrop-filter: blur(1px); }
+.dlg { width: 460px; max-width: calc(100% - 32px); background: var(--sheet); border: 1px solid var(--stroke); border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; animation: up .2s ease; }
+.dlg.wide { width: 540px; }
+.dlg .db { padding: 20px 22px 16px; display: flex; flex-direction: column; gap: 12px; max-height: 560px; overflow-y: auto; }
+.dlg h3 { margin: 0; font: 600 18px var(--display); display: flex; align-items: center; gap: 10px; }
+.dlg p { margin: 0; color: var(--text2); font-size: 13px; }
+.dlg .df { padding: 14px 22px; background: var(--title); border-top: 1px solid var(--divider); display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+.dlg .df .grow { flex: 1; font-size: 12px; color: var(--text3); }
+.dlg .df .btn { min-width: 96px; }
+.fld { display: flex; flex-direction: column; gap: 5px; }
+.fld > label { font-size: 12.5px; color: var(--text2); }
+.src { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; background: var(--card); border: 1px solid var(--stroke); }
+.src .rl { flex: 1; min-width: 0; } .src .rl small { display: block; color: var(--text3); font-size: 12px; }
+.fseg { display: flex; flex-wrap: wrap; gap: 4px; }
+.fseg button { height: 30px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--stroke); background: var(--card); font: 12.5px var(--mono); }
+.fseg button.on { border-color: var(--accent); background: var(--sel); color: var(--accent-fg); font-weight: 600; box-shadow: inset 0 0 0 1px var(--accent); }
+.hint { font-size: 12px; color: var(--text3); }
+.exp { border: 1px solid var(--stroke); border-radius: 8px; background: var(--card); }
+.exp > button { width: 100%; height: 42px; padding: 0 12px; display: flex; align-items: center; gap: 10px; text-align: left; }
+.exp > button .chev { margin-left: auto; color: var(--text2); transition: transform .15s; }
+.exp.open > button .chev { transform: rotate(180deg); }
+.exp .ebody { padding: 4px 12px 12px 38px; display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--divider); padding-top: 12px; }
+.chk { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; cursor: pointer; }
+.chk .box { width: 18px; height: 18px; border-radius: 4px; border: 1px solid var(--text2); flex-shrink: 0; display: grid; place-items: center; margin-top: 1px; }
+.chk .box .i { width: 12px; height: 12px; stroke-width: 2.2; opacity: 0; color: var(--on-accent); }
+.chk.on .box { background: var(--accent); border-color: var(--accent); }
+.chk.on .box .i { opacity: 1; }
+.chk small { display: block; color: var(--text2); font-size: 12px; }
+.hash { display: grid; grid-template-columns: 72px 1fr 28px; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 7px; background: var(--card); border: 1px solid var(--stroke); }
+.hash.match { border-color: var(--ok); box-shadow: inset 0 0 0 1px var(--ok); }
+.hash span:first-child { font-size: 12px; color: var(--text2); font-weight: 600; }
+.hash code { font: 12px var(--mono); word-break: break-all; }
+.icon-btn { width: 28px; height: 28px; border-radius: 5px; display: grid; place-items: center; color: var(--text2); }
+.icon-btn:hover { background: var(--hover); color: var(--text); }
+.verdict { font-size: 12.5px; font-weight: 600; }
+.verdict.ok { color: var(--ok); } .verdict.no { color: var(--danger); }
+.consent { border: 1px solid var(--stroke); background: var(--card); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.perm { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; }
+.perm .i { margin-top: 2px; color: var(--warn); }
+.perm small { display: block; color: var(--text2); font-size: 12px; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></symbol>
+    <symbol id="box" viewBox="0 0 16 16"><path d="M2.5 4.5h11v9h-11zM1.5 2.5h13v2h-13zM6.5 7h3"/></symbol>
+    <symbol id="extract" viewBox="0 0 16 16"><path d="M2.5 6.5v7h11v-7M1.5 3.5h13v3h-13zM8 8.5v4M6 10.5l2 2 2-2"/></symbol>
+    <symbol id="extractto" viewBox="0 0 16 16"><path d="M1.5 4.5v8a1 1 0 0 0 1 1h8M1.5 4.5V3.5a1 1 0 0 1 1-1h3l1.5 1.5h5.5a1 1 0 0 1 1 1v3"/><path d="M10.5 11.5h4.5M13 9.5l2 2-2 2"/></symbol>
+    <symbol id="compress" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z"/><path d="M7.5 3v1.5M7.5 6v1.5M7.5 9v1.5"/><rect x="6.5" y="11" width="2" height="2" rx=".5"/></symbol>
+    <symbol id="addarc" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v4M3.5 1.5v13h5"/><path d="M7 3v1.5M7 6v1.5"/><path d="M12.5 10.5v4M10.5 12.5h4"/></symbol>
+    <symbol id="test" viewBox="0 0 16 16"><path d="M8 1.5 13.5 3.5v4.2c0 3.2-2.4 5.6-5.5 6.8-3.1-1.2-5.5-3.6-5.5-6.8V3.5z"/><path d="m5.5 8 1.8 1.8L10.8 6.3"/></symbol>
+    <symbol id="hash" viewBox="0 0 16 16"><path d="M6 1.5 4.5 14.5M11.5 1.5 10 14.5M2 5.5h12M1.5 10.5h12"/></symbol>
+    <symbol id="gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2"/><path d="M6.9 1.6h2.2l.4 1.8 1.2.7 1.8-.6 1.1 1.9-1.4 1.3v1.4l1.4 1.3-1.1 1.9-1.8-.6-1.2.7-.4 1.8H6.9l-.4-1.8-1.2-.7-1.8.6-1.1-1.9 1.4-1.3V7.3L2.4 6l1.1-1.9 1.8.6 1.2-.7z"/></symbol>
+    <symbol id="folder" viewBox="0 0 16 16"><path d="M1.5 4a1 1 0 0 1 1-1h3.4l1.6 1.6h6a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/></symbol>
+    <symbol id="file" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9zM9.5 1.5v3h3"/></symbol>
+    <symbol id="chev-r" viewBox="0 0 16 16"><path d="m6 3.5 4.5 4.5L6 12.5"/></symbol>
+    <symbol id="chev-d" viewBox="0 0 16 16"><path d="m3.5 6 4.5 4.5L12.5 6"/></symbol>
+    <symbol id="chev-u" viewBox="0 0 16 16"><path d="m3.5 10 4.5-4.5 4.5 4.5"/></symbol>
+    <symbol id="more" viewBox="0 0 16 16"><circle cx="3.5" cy="8" r=".6"/><circle cx="8" cy="8" r=".6"/><circle cx="12.5" cy="8" r=".6"/></symbol>
+    <symbol id="check" viewBox="0 0 16 16"><path d="m3 8.5 3.2 3.2L13 4.8"/></symbol>
+    <symbol id="shield" viewBox="0 0 16 16"><path d="M8 1.5 13.5 3.5v4.2c0 3.2-2.4 5.6-5.5 6.8-3.1-1.2-5.5-3.6-5.5-6.8V3.5z"/></symbol>
+    <symbol id="badge" viewBox="0 0 16 16"><path d="m8 1.5 1.6 1.2 2-.1.6 1.9 1.6 1.2-.6 1.9.6 1.9-1.6 1.2-.6 1.9-2-.1L8 14.5l-1.6-1.2-2 .1-.6-1.9-1.6-1.2.6-1.9-.6-1.9 1.6-1.2.6-1.9 2 .1z"/><path d="m5.8 8 1.5 1.5 3-3"/></symbol>
+    <symbol id="lock" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7.5" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></symbol>
+    <symbol id="eye" viewBox="0 0 16 16"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/></symbol>
+    <symbol id="copy" viewBox="0 0 16 16"><rect x="5.5" y="5.5" width="8" height="9" rx="1.5"/><path d="M3.5 10.5h-1v-8a1 1 0 0 1 1-1h7v1"/></symbol>
+    <symbol id="cut" viewBox="0 0 16 16"><circle cx="4.5" cy="12" r="2"/><circle cx="11.5" cy="12" r="2"/><path d="M5.9 10.6 12 1.5M10.1 10.6 4 1.5"/></symbol>
+    <symbol id="rename" viewBox="0 0 16 16"><path d="M2 5.5h8M2 10.5h5M11 3v10M9.5 3h3M9.5 13h3"/></symbol>
+    <symbol id="trash" viewBox="0 0 16 16"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 10h6.6L12 4"/></symbol>
+    <symbol id="props" viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M5 5.5h6M5 8h6M5 10.5h4"/></symbol>
+    <symbol id="open" viewBox="0 0 16 16"><path d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M11.5 9.5v4h-9v-9h4"/></symbol>
+    <symbol id="openwith" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><path d="M11.5 9v5M9 11.5h5"/></symbol>
+    <symbol id="path" viewBox="0 0 16 16"><path d="M6.5 9.5 9.5 6.5M7 4.5l1-1a3 3 0 0 1 4.3 4.3l-1 1M9 11.5l-1 1a3 3 0 0 1-4.3-4.3l1-1"/></symbol>
+    <symbol id="undo" viewBox="0 0 16 16"><path d="M5 3.5 2 6.5l3 3"/><path d="M2.5 6.5H10a3.5 3.5 0 0 1 0 7H6"/></symbol>
+    <symbol id="x" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+    <symbol id="plus" viewBox="0 0 16 16"><path d="M8 2.5v11M2.5 8h11"/></symbol>
+    <symbol id="minus" viewBox="0 0 16 16"><path d="M3 8h10"/></symbol>
+    <symbol id="square" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1"/></symbol>
+    <symbol id="back" viewBox="0 0 16 16"><path d="M13 8H3M7 4 3 8l4 4"/></symbol>
+    <symbol id="fwd" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4"/></symbol>
+    <symbol id="up" viewBox="0 0 16 16"><path d="M8 13V3M4 7l4-4 4 4"/></symbol>
+    <symbol id="refresh" viewBox="0 0 16 16"><path d="M13.5 8A5.5 5.5 0 1 1 11.8 4"/><path d="M12 1.5V4.5H9"/></symbol>
+    <symbol id="image" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><circle cx="5.5" cy="6" r="1.2"/><path d="m1.5 11.5 4-3.5 3 2.5 2-1.5 4 3"/></symbol>
+    <symbol id="camera" viewBox="0 0 16 16"><path d="M1.5 5a1 1 0 0 1 1-1h2l1.2-1.5h4.6L11.5 4h2a1 1 0 0 1 1 1v7.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/><circle cx="8" cy="8.5" r="2.5"/></symbol>
+    <symbol id="film" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="m6.5 5.5 4 2.5-4 2.5z"/></symbol>
+    <symbol id="textsearch" viewBox="0 0 16 16"><path d="M2 3.5h12M2 6.5h6M2 9.5h4M2 12.5h4"/><circle cx="11" cy="10" r="2.5"/><path d="m13 12 1.5 1.5"/></symbol>
+    <symbol id="sparkle" viewBox="0 0 16 16"><path d="M8 1.5 9.2 6.8 14.5 8 9.2 9.2 8 14.5 6.8 9.2 1.5 8 6.8 6.8z"/></symbol>
+    <symbol id="puzzle" viewBox="0 0 16 16"><path d="M3 4.5h2.5a1.5 1.5 0 1 1 3 0H11v2.5a1.5 1.5 0 1 1 0 3V13H8.5a1.5 1.5 0 1 0-3 0H3V10a1.5 1.5 0 1 0 0-3z"/></symbol>
+    <symbol id="palette" viewBox="0 0 16 16"><path d="M8 1.5a6.5 6.5 0 0 0 0 13c1 0 1.5-.6 1.5-1.4 0-1.2-1-1.3-1-2.3 0-.8.6-1.3 1.4-1.3H12a2.5 2.5 0 0 0 2.5-2.5C14.5 4 11.6 1.5 8 1.5z"/><circle cx="5" cy="7" r=".6"/><circle cx="7" cy="4.5" r=".6"/><circle cx="10.2" cy="4.8" r=".6"/></symbol>
+    <symbol id="listv" viewBox="0 0 16 16"><rect x="1.5" y="3" width="13" height="10" rx="1.5"/><path d="m6 6.5 1.5 1.5L6 9.5M9 9.5h2"/></symbol>
+    <symbol id="tabs" viewBox="0 0 16 16"><rect x="1.5" y="3.5" width="13" height="10" rx="1.5"/><path d="M1.5 6.5h13M5 3.5v3"/></symbol>
+    <symbol id="power" viewBox="0 0 16 16"><path d="M8 1.5v6M4.5 3.8a5.5 5.5 0 1 0 7 0"/></symbol>
+    <symbol id="dup" viewBox="0 0 16 16"><rect x="1.5" y="4.5" width="9" height="9" rx="1.5"/><path d="M5.5 4.5v-1a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-1"/></symbol>
+    <symbol id="cube" viewBox="0 0 16 16"><path d="M8 1.5 14 4.5v7L8 14.5 2 11.5v-7z"/><path d="M2 4.5 8 7.5l6-3M8 7.5v7"/></symbol>
+    <symbol id="lines" viewBox="0 0 16 16"><path d="M5.5 4h8M5.5 8h8M5.5 12h8M2.5 4h.5M2.5 8h.5M2.5 12h.5"/></symbol>
+    <symbol id="kbd" viewBox="0 0 16 16"><rect x="1.5" y="3.5" width="13" height="9" rx="1.5"/><path d="M4 6.5h.5M6.5 6.5H7M9 6.5h.5M11.5 6.5h.5M4.5 9.5h7"/></symbol>
+    <symbol id="info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.2v4M8 4.8v.2"/></symbol>
+    <symbol id="warn" viewBox="0 0 16 16"><path d="M8 2 14.5 13.5h-13z"/><path d="M8 6.5v3.2M8 11.5v.2"/></symbol>
+    <symbol id="sidebar" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M6 2.5v11"/></symbol>
+    <symbol id="panes" viewBox="0 0 16 16"><rect x="1.5" y="4" width="10" height="10" rx="1.5"/><path d="M4.5 4V3a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-2"/></symbol>
+    <symbol id="contrast" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="M8 1.5v13A6.5 6.5 0 0 0 8 1.5z" fill="currentColor"/></symbol>
+    <symbol id="download" viewBox="0 0 16 16"><path d="M8 2v8M4.5 6.5 8 10l3.5-3.5M2.5 13.5h11"/></symbol>
+    <symbol id="cloudoff" viewBox="0 0 16 16"><path d="M4.5 12.5h7.2a3 3 0 0 0 .6-5.9A4.5 4.5 0 0 0 4 5.8a3.4 3.4 0 0 0 .5 6.7zM2 2l12 12"/></symbol>
+    <symbol id="drag" viewBox="0 0 16 16"><circle cx="6" cy="4" r=".6"/><circle cx="10" cy="4" r=".6"/><circle cx="6" cy="8" r=".6"/><circle cx="10" cy="8" r=".6"/><circle cx="6" cy="12" r=".6"/><circle cx="10" cy="12" r=".6"/></symbol>
+    <symbol id="sort" viewBox="0 0 16 16"><path d="M4.5 2.5v11M2 11l2.5 2.5L7 11M9 4h5M9 7.5h4M9 11h3"/></symbol>
+    <symbol id="filter" viewBox="0 0 16 16"><path d="M2 3.5h12M4.5 8h7M7 12.5h2"/></symbol>
+    <symbol id="newfolder" viewBox="0 0 16 16"><path d="M1.5 4a1 1 0 0 1 1-1h3.4l1.6 1.6h6a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/><path d="M8 7v4M6 9h4"/></symbol>
+    <symbol id="star" viewBox="0 0 16 16"><path d="m8 1.8 1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.6l-3.8 2 .7-4.3-3.1-3 4.3-.6z"/></symbol>
+    <symbol id="pc" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="8.5" rx="1.2"/><path d="M5.5 13.5h5M8 11v2.5"/></symbol>
+    <symbol id="disk" viewBox="0 0 16 16"><rect x="1.5" y="4.5" width="13" height="7" rx="1.5"/><path d="M11.5 8h.5"/></symbol>
+  </defs>
+</svg>
+
+<div class="page">
+  <header>
+    <h1>扩展商店 · 7-Zip 重设计</h1>
+    <p>商店成为“发现 + 设置”的一处入口：7-Zip 的常用设置直接放在商店首页和详情页里，右侧实时预览右键菜单；在文件列表里右键压缩包或文件，第一层就能一步完成解压、压缩、测试和校验。</p>
+  </header>
+
+  <div class="controls" id="controls">
+    <div class="ctl">视图 <div class="seg" data-k="view">
+      <button data-v="store">商店首页</button><button data-v="detail">7-Zip 详情</button><button data-v="installed">已安装</button><button data-v="menu">文件列表右键</button></div></div>
+    <div class="ctl" data-for="store">商店状态 <div class="seg" data-k="state">
+      <button data-v="ready">就绪</button><button data-v="loading">加载中</button><button data-v="failed">加载失败</button><button data-v="offline">离线目录</button><button data-v="install">安装审阅</button><button data-v="restart">待重启</button></div></div>
+    <div class="ctl" data-for="store">社区 <div class="seg" data-k="community">
+      <button data-v="empty">空</button><button data-v="sample">示例数据</button></div></div>
+    <div class="ctl" data-for="installed">已安装 <div class="seg" data-k="inst">
+      <button data-v="some">有扩展</button><button data-v="none">空</button></div></div>
+    <div class="ctl" data-for="menu">右键对象 <div class="seg" data-k="sel">
+      <button data-v="archive">单个压缩包</button><button data-v="locked">加密压缩包</button><button data-v="files">多个文件</button></div></div>
+    <div class="ctl">主题 <div class="seg" data-k="theme"><button data-v="light">浅色</button><button data-v="dark">深色</button></div></div>
+    <div class="ctl">宽度 <div class="seg" data-k="w"><button data-v="wide">标准</button><button data-v="narrow">窄窗口</button></div></div>
+  </div>
+
+  <div class="stage">
+    <!-- ===================== SETTINGS WINDOW ===================== -->
+    <div class="win" id="setwin">
+      <div class="tb">
+        <div class="brand"><div class="logo"></div>Pulse</div>
+        <button class="tbtn"><svg class="i"><use href="#sidebar"/></svg></button>
+        <div class="tab"><svg class="i"><use href="#folder"/></svg>fixture</div>
+        <button class="tbtn"><svg class="i"><use href="#plus"/></svg></button>
+        <div class="sp"></div>
+        <div class="tgroup"><button class="tbtn"><svg class="i"><use href="#panes"/></svg></button><button class="tbtn on"><svg class="i"><use href="#gear"/></svg></button><button class="tbtn"><svg class="i"><use href="#contrast"/></svg></button></div>
+        <div class="cap"><svg class="i s12"><use href="#minus"/></svg></div><div class="cap"><svg class="i s12"><use href="#square"/></svg></div><div class="cap"><svg class="i s12"><use href="#x"/></svg></div>
+      </div>
+      <div class="body">
+        <nav class="nav">
+          <div class="navsearch"><svg class="i"><use href="#search"/></svg><span>查找设置</span><kbd>Ctrl+F</kbd></div>
+          <div class="ni"><svg class="i"><use href="#palette"/></svg><span>外观</span></div>
+          <div class="nsep"></div>
+          <div class="ni"><svg class="i"><use href="#listv"/></svg><span>文件列表</span></div>
+          <div class="ni"><svg class="i"><use href="#tabs"/></svg><span>标签页与窗口</span></div>
+          <div class="nsep"></div>
+          <div class="ni"><svg class="i"><use href="#power"/></svg><span>启动与集成</span></div>
+          <div class="ni"><svg class="i"><use href="#dup"/></svg><span>文件操作</span></div>
+          <div class="nsep"></div>
+          <div class="ni"><svg class="i"><use href="#search"/></svg><span>搜索与索引</span></div>
+          <div class="ni"><svg class="i"><use href="#eye"/></svg><span>快速预览</span></div>
+          <div class="ni on" data-go="store"><svg class="i"><use href="#cube"/></svg><span>扩展商店</span><b class="nb" id="navUpd">1</b></div>
+          <div class="ni"><svg class="i"><use href="#sparkle"/></svg><span>AI 助手</span><b class="nb">新</b></div>
+          <div class="ni"><svg class="i"><use href="#lines"/></svg><span>右键菜单</span></div>
+          <div class="ni"><svg class="i"><use href="#kbd"/></svg><span>快捷键</span><b class="nb red">1</b></div>
+          <div class="nsep"></div>
+          <div class="ni"><svg class="i"><use href="#dup"/></svg><span>重复文件</span></div>
+          <div class="nsep"></div>
+          <div class="ni"><svg class="i"><use href="#info"/></svg><span>关于与诊断</span></div>
+        </nav>
+        <main class="main" id="main">
+
+          <!-- ============ STORE HOME ============ -->
+          <section class="content" data-view="store">
+            <div class="ph">
+              <div class="grow"><h1>扩展商店</h1><p>按需为 Pulse 添加模块：预览更多格式、搜索文件正文，以及自定义体验。</p></div>
+              <label class="search"><svg class="i"><use href="#search"/></svg><input placeholder="搜索扩展"></label>
+            </div>
+            <div class="pivot">
+              <button class="on" data-go="store">发现</button>
+              <button data-go="installed">已安装 <span class="count">5</span></button>
+              <button data-go="installed" data-upd="1">更新 <span class="count acc">1</span></button>
+            </div>
+
+            <div data-state="restart" class="banner info" style="margin:0 0 16px"><svg class="i s20"><use href="#refresh"/></svg><div class="grow"><b>增强包已更改。重启 Pulse 后生效。</b><div style="font-size:12px;color:var(--text2)">已安装：内容搜索 1.4.0</div></div><button class="btn pri sm">重启 Pulse</button><button class="btn sub sm">稍后</button></div>
+            <div data-state="offline" class="banner info" style="margin:0 0 16px;background:var(--warn-bg)"><svg class="i s20" style="color:var(--warn)"><use href="#cloudoff"/></svg><div class="grow"><b>离线目录</b> <span style="color:var(--text2)">· 显示上次成功加载的目录（2026-11-08），安装和更新暂不可用。</span></div><button class="btn sm"><svg class="i"><use href="#refresh"/></svg>重试</button></div>
+
+            <!-- loading -->
+            <div data-state="loading">
+              <div style="display:flex;align-items:center;gap:10px;color:var(--text2);margin-bottom:12px"><div class="spin"></div>正在加载商店目录…<button class="btn sub sm" style="margin-left:auto">取消</button></div>
+              <div class="skel" style="height:178px;border-radius:12px"></div>
+              <div style="display:flex;gap:6px;margin:18px 0"><div class="skel" style="width:60px;height:30px;border-radius:15px"></div><div class="skel" style="width:76px;height:30px;border-radius:15px"></div><div class="skel" style="width:66px;height:30px;border-radius:15px"></div><div class="skel" style="width:58px;height:30px;border-radius:15px"></div></div>
+              <div class="grid"><div class="skel" style="height:156px;border-radius:10px"></div><div class="skel" style="height:156px;border-radius:10px"></div><div class="skel" style="height:156px;border-radius:10px"></div></div>
+            </div>
+
+            <!-- failed -->
+            <div data-state="failed">
+              <div class="empty" style="border-style:solid;background:var(--card)">
+                <div class="ico" style="background:var(--danger-bg);color:var(--danger)"><svg class="i s24"><use href="#cloudoff"/></svg></div>
+                <div style="flex:1"><b>商店目录加载失败</b><p>请检查网络，或在下载源设置中更换下载源后重试。已安装的扩展不受影响。</p><p class="mono" style="font-size:11.5px;color:var(--text3);margin-top:6px">WinHTTP 12002 · 连接超时（自动 › 国内镜像 → GitHub）</p></div>
+                <div style="display:flex;flex-direction:column;gap:6px"><button class="btn pri"><svg class="i"><use href="#refresh"/></svg>重试</button><button class="btn sub sm">下载源设置</button></div>
+              </div>
+              <div class="sec">
+                <div class="sech"><h3>已安装</h3><span>离线时也可以修改设置</span></div>
+                <div class="grid" id="failedInstalled"></div>
+              </div>
+            </div>
+
+            <!-- ready -->
+            <div data-state="ready offline install restart">
+              <div class="hero">
+                <div class="hero-top">
+                  <div class="tile xl t7z"><svg class="i" style="width:34px;height:34px"><use href="#box"/></svg></div>
+                  <div style="min-width:0">
+                    <h2>7-Zip 压缩与解压 <span class="pill ok dot">已启用</span></h2>
+                    <div class="sub"><span class="verified"><svg class="i s12"><use href="#badge"/></svg>Pulse 官方</span>· 7-Zip 26.00 引擎，支持 57 种格式</div>
+                    <div class="sub" style="margin-top:6px;color:var(--text3)">右键直接解压、快速压缩、测试和计算校验值；7z、RAR、ISO 等压缩包可在快速预览中查看内容。</div>
+                  </div>
+                  <div class="hero-actions">
+                    <button class="btn" data-go="detail" data-tab="settings">全部设置<svg class="i s12"><use href="#chev-r"/></svg></button>
+                  </div>
+                </div>
+                <div class="quick">
+                  <div class="quick-set">
+                    <div class="qhead"><b>常用设置</b><span class="saved" data-saved><svg class="i s12"><use href="#check"/></svg><span>改动会自动保存</span></span></div>
+                    <div class="qrow"><div class="lbl"><div>右键“解压”的方式</div><div data-bind="modeDesc"></div></div><div class="combo" data-combo="mode"></div></div>
+                    <div class="qrow"><div class="lbl"><div>快速压缩</div><div data-bind="quickDesc"></div></div><div class="combo" data-combo="fmt"></div><div class="combo" data-combo="level"></div></div>
+                    <div class="qrow"><div class="lbl"><div>记住本次输入的密码</div><div>解压时先自动尝试，只保存在内存中，退出 Pulse 即清除</div></div><button class="tg" role="switch" data-toggle="remember"></button></div>
+                  </div>
+                  <div class="quick-prev">
+                    <div class="cap2"><svg class="i s12"><use href="#lines"/></svg>右键压缩包时<button class="link" style="margin-left:auto;font-size:11.5px" data-go="menu">去试试</button></div>
+                    <div class="cm mini" data-preview="archive-short"></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="chips" id="cats">
+                <button class="chip on">全部</button><button class="chip"><svg class="i s12"><use href="#box"/></svg>压缩包</button><button class="chip"><svg class="i s12"><use href="#image"/></svg>预览</button><button class="chip"><svg class="i s12"><use href="#textsearch"/></svg>搜索</button><button class="chip"><svg class="i s12"><use href="#sparkle"/></svg>AI</button>
+              </div>
+
+              <div class="sec" style="margin-top:18px">
+                <div class="sech"><h3>Pulse 官方</h3><span>随 Pulse 发布并校验，按需下载</span></div>
+                <div class="grid" id="officialGrid"></div>
+              </div>
+
+              <div class="sec">
+                <div class="sech"><h3>社区增强包</h3><span data-community="sample" class="pill warn">示例数据</span><div class="grow"></div><button class="btn sub sm" data-community="sample">查看全部</button></div>
+                <div data-community="empty" class="empty">
+                  <div class="ico"><svg class="i s24"><use href="#puzzle"/></svg></div>
+                  <div style="flex:1"><b>还没有社区扩展</b><p>发现社区增强包，为 Pulse 添加更多功能。开发者可以用 Pulse SDK 发布原生扩展。</p></div>
+                  <button class="btn sm">开发文档</button>
+                </div>
+                <div data-community="sample" class="grid" id="communityGrid"></div>
+              </div>
+
+              <div class="trust">
+                <svg class="i" style="margin-top:1px"><use href="#shield"/></svg>
+                <div class="grow">社区增强包由各自发布者提供。原生扩展不在沙箱中运行；安装前请核对来源并审阅权限。</div>
+                <button class="link" style="font-size:12px;white-space:nowrap">下载源设置<svg class="i s12"><use href="#chev-r"/></svg></button>
+              </div>
+            </div>
+          </section>
+
+          <!-- ============ 7-ZIP DETAIL ============ -->
+          <section class="content" data-view="detail">
+            <div class="crumb"><button data-go="store">扩展商店</button><svg class="i s12"><use href="#chev-r"/></svg><span style="color:var(--text)">7-Zip 压缩与解压</span></div>
+            <div class="dhead">
+              <div class="tile xl t7z"><svg class="i" style="width:34px;height:34px"><use href="#box"/></svg></div>
+              <div style="min-width:0">
+                <h1>7-Zip 压缩与解压</h1>
+                <div class="sub"><span class="verified"><svg class="i s12"><use href="#badge"/></svg>Pulse 官方</span> · 7-Zip 26.00 引擎，支持 57 种格式</div>
+                <div class="badges"><span class="pill ok dot" id="enPill">已启用</span><span class="pill">原生代码 · 不在沙箱中运行</span><span class="pill">26.00 · 2.1 MB</span></div>
+              </div>
+              <div class="acts">
+                <div class="tgwrap"><span id="enLbl">已启用</span><button class="tg" role="switch" aria-checked="true" id="enToggle"></button></div>
+                <div class="combo" id="moreMenu"><button class="btn" style="min-width:0;padding:0 8px" aria-label="更多"><svg class="i"><use href="#more"/></svg></button></div>
+              </div>
+            </div>
+            <div class="pivot">
+              <button data-tab="settings">常用设置</button>
+              <button data-tab="menu">右键菜单</button>
+              <button data-tab="formats">支持格式</button>
+              <button data-tab="about">关于</button>
+            </div>
+            <div class="banner info" id="disabledBanner" hidden style="margin:-4px 0 16px"><svg class="i s20"><use href="#info"/></svg><div class="grow">扩展已停用，重启 Pulse 后右键菜单中不再显示 7-Zip 命令。设置会保留。</div><button class="btn pri sm">重启 Pulse</button></div>
+
+            <div class="dgrid">
+              <div>
+                <!-- settings tab -->
+                <div data-tab-body="settings">
+                  <div class="gl">解压 <span class="saved" data-saved style="margin-left:auto"><svg class="i s12"><use href="#check"/></svg><span>改动会自动保存</span></span></div>
+                  <div class="group">
+                    <div class="row col">
+                      <div class="rhead"><div class="ri"><svg class="i"><use href="#extract"/></svg></div><div class="rl"><div class="rt">右键“解压”的方式</div><div class="rd">决定菜单里第一项叫什么、做什么</div></div></div>
+                      <div class="opts" id="modeOpts" style="grid-template-columns:1fr"></div>
+                    </div>
+                    <div class="row col">
+                      <div class="rhead"><div class="ri"><svg class="i"><use href="#folder"/></svg></div><div class="rl"><div class="rt">解压到</div><div class="rd">“解压到…”打开时也从这里开始</div></div></div>
+                      <div class="opts" id="locOpts" style="grid-template-columns:repeat(2,minmax(0,1fr))"></div>
+                      <div class="pathrow" id="fixedRow"><label class="tbox" id="fixedBox"><svg class="i" style="color:var(--text3)"><use href="#folder"/></svg><input class="mono" id="fixedInput" value="D:\解压"></label><button class="btn">浏览…</button></div>
+                      <div class="err-t" id="fixedErr" hidden><svg class="i s12"><use href="#warn"/></svg>请填写本机磁盘上的完整路径，或留空。</div>
+                    </div>
+                  </div>
+
+                  <div class="gl" style="margin-top:22px">压缩</div>
+                  <div class="group">
+                    <div class="row col">
+                      <div class="rhead"><div class="ri"><svg class="i"><use href="#compress"/></svg></div><div class="rl"><div class="rt">快速压缩格式</div><div class="rd" data-bind="quickDesc"></div></div></div>
+                      <div class="opts fmt" id="fmtOpts"></div>
+                    </div>
+                    <div class="row col">
+                      <div class="rhead"><div class="ri"><svg class="i"><use href="#sort"/></svg></div><div class="rl"><div class="rt">快速压缩等级</div><div class="rd" id="levelDesc">等级越高越小，也越慢</div></div><b id="levelVal" style="color:var(--accent-fg)"></b></div>
+                      <div class="slider"><input type="range" min="0" max="5" step="1" id="levelRange"><div class="ticks" id="levelTicks"></div></div>
+                    </div>
+                  </div>
+                  <div class="foot-note"><svg class="i"><use href="#info"/></svg><span>需要密码、分卷或其他格式时，右键“添加到压缩包…”，那里会单独询问，不影响这里的默认值。</span></div>
+
+                  <div class="gl" style="margin-top:22px">密码</div>
+                  <div class="group">
+                    <div class="row"><div class="ri"><svg class="i"><use href="#lock"/></svg></div><div class="rl"><div class="rt">记住本次输入的密码</div><div class="rd">解压时先自动尝试，只保存在内存中，退出 Pulse 即清除</div></div><button class="tg" role="switch" data-toggle="remember"></button></div>
+                  </div>
+                  <div class="foot-note"><svg class="i"><use href="#info"/></svg><span>RAR 只能解压：7-Zip 不提供 RAR 压缩。写入经过 Pulse 的文件操作，可在“操作记录”中撤销。</span></div>
+                </div>
+
+                <!-- menu tab -->
+                <div data-tab-body="menu">
+                  <div class="gl">菜单位置 <span class="pill warn" style="font-size:11px">新增</span></div>
+                  <div class="group">
+                    <div class="row col">
+                      <div class="opts" id="placeOpts" style="grid-template-columns:repeat(2,minmax(0,1fr));padding-left:0"></div>
+                    </div>
+                  </div>
+                  <div class="gl" style="margin-top:22px">显示的命令 <span style="font-weight:400;color:var(--text3);font-size:12px">· 只在选中的文件适用时出现</span></div>
+                  <div class="group" id="cmdList"></div>
+                  <div class="foot-note"><svg class="i"><use href="#kbd"/></svg><span>也可以在“快捷键”里给常用命令设快捷键，或在“右键菜单”页调整与其他命令的先后顺序。</span></div>
+                </div>
+
+                <!-- formats tab -->
+                <div data-tab-body="formats">
+                  <div class="group"><div class="row col">
+                    <div class="fmtgroups">
+                      <div><div class="gl">可压缩，也可解压</div><div class="fchips" id="fmtW"></div></div>
+                      <div><div class="gl">只能解压与预览</div><div class="fchips" id="fmtR"></div></div>
+                    </div>
+                  </div></div>
+                  <div class="foot-note"><svg class="i"><use href="#eye"/></svg><span>启用后，快速预览可直接列出这些压缩包的内容；内置 ZIP 功能不受影响。</span></div>
+                </div>
+
+                <!-- about tab -->
+                <div data-tab-body="about">
+                  <div class="group"><div class="row">
+                    <dl class="kv">
+                      <dt>发布者</dt><dd><span class="verified"><svg class="i s12"><use href="#badge"/></svg>Pulse 官方</span></dd>
+                      <dt>版本</dt><dd>26.00 · 2026-10-21 · 需要 Pulse 1.0.59 或更高</dd>
+                      <dt>引擎</dt><dd>7-Zip 26.00（Igor Pavlov）</dd>
+                      <dt>许可</dt><dd>LGPL-2.1 · RAR 解压代码受 unRAR 许可限制</dd>
+                      <dt>权限</dt><dd>读取所选文件 · 通过 Pulse 写入目标文件夹 · 自有设置</dd>
+                      <dt>源代码</dt><dd><button class="link">extensions/7zip</button></dd>
+                    </dl>
+                  </div></div>
+                  <div class="gl" style="margin-top:22px">版本历史</div>
+                  <div class="group">
+                    <div class="ver"><span class="v">26.00</span><span class="d">智能解压；快速压缩无需弹窗；校验值核对</span><span class="pill ok">当前</span></div>
+                    <div class="ver"><span class="v">25.01</span><span class="d">首个原生扩展版本，取代旧的 7-Zip 下载包</span><button class="btn sm">回滚</button></div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- live preview -->
+              <aside class="side">
+                <div class="card2">
+                  <h4><svg class="i"><use href="#eye"/></svg>右键菜单预览<div class="seg" data-k="pv"><button data-v="archive">压缩包</button><button data-v="files">文件</button></div></h4>
+                  <div class="cm mini" data-preview="full"></div>
+                </div>
+                <div class="card2">
+                  <div class="result" data-bind="resultText"></div>
+                </div>
+              </aside>
+            </div>
+          </section>
+
+          <!-- ============ INSTALLED ============ -->
+          <section class="content" data-view="installed">
+            <div class="ph"><div class="grow"><h1>扩展商店</h1><p>查看已安装的原生扩展，包括已停用的扩展。变更将在重启 Pulse 后生效。</p></div>
+              <label class="search"><svg class="i"><use href="#search"/></svg><input placeholder="搜索已安装"></label></div>
+            <div class="pivot">
+              <button data-go="store">发现</button>
+              <button class="on">已安装 <span class="count">5</span></button>
+              <button>更新 <span class="count acc">1</span></button>
+            </div>
+            <div data-inst="some">
+              <div class="sech"><h3>可更新</h3><div class="grow"></div><button class="btn sm pri">全部更新</button></div>
+              <div class="ilist" id="updList"></div>
+              <div class="sech" style="margin-top:22px"><h3>已安装</h3><span>5 个</span></div>
+              <div class="ilist" id="instList"></div>
+            </div>
+            <div data-inst="none" class="empty">
+              <div class="ico"><svg class="i s24"><use href="#cube"/></svg></div>
+              <div style="flex:1"><b>尚未安装原生扩展</b><p>你可以在“发现”中查看可用扩展。</p></div>
+              <button class="btn pri" data-go="store">浏览商店</button>
+            </div>
+          </section>
+        </main>
+      </div>
+      <div class="sb"><span class="ai"><svg class="i"><use href="#sparkle"/></svg>AI</span><span>0 个项目</span><span class="hist"><svg class="i s12"><use href="#undo"/></svg>操作记录<svg class="i s12"><use href="#chev-u"/></svg></span></div>
+
+      <!-- install review dialog -->
+      <div class="scrim" id="installDlg" hidden>
+        <div class="dlg wide">
+          <div class="db">
+            <h3><div class="tile tff" style="width:36px;height:36px;border-radius:9px"><svg class="i s20"><use href="#film"/></svg></div>审阅安装权限</h3>
+            <p>原生扩展可执行不受沙箱限制的代码。请仅安装你信任的扩展，并审阅新增权限。</p>
+            <div class="src"><div class="rl"><b>FFmpeg 媒体增强</b> <span style="color:var(--text3)">7.1.2</span><small>Pulse 官方 · LGPL-2.1 · 仅解码构建，不含 GPL 组件 · 约 38 MB</small></div><span class="verified"><svg class="i s12"><use href="#badge"/></svg>签名有效</span></div>
+            <div class="consent">
+              <div class="perm"><svg class="i"><use href="#warn"/></svg><div>原生代码<small>在隔离的预览进程中解码视频，崩溃或超时只影响预览</small></div></div>
+              <div class="perm"><svg class="i"><use href="#film"/></svg><div>读取视频文件<small>生成缩略图、显示时长和媒体信息</small></div></div>
+            </div>
+            <div class="chk on" data-chk><span class="box"><svg class="i"><use href="#check"/></svg></span><div>允许此扩展运行原生代码</div></div>
+            <div class="chk" data-chk><span class="box"><svg class="i"><use href="#check"/></svg></span><div>同意上述新增权限</div></div>
+            <div class="chk on" data-chk><span class="box"><svg class="i"><use href="#check"/></svg></span><div>安装后启用（重启后生效）</div></div>
+            <div class="err-t" id="consentErr" style="padding-left:0" hidden><svg class="i s12"><use href="#warn"/></svg>请先勾选所需的原生代码和新增权限授权。</div>
+          </div>
+          <div class="df"><span class="grow"></span><button class="btn pri" id="installGo">同意并安装</button><button class="btn" data-close>取消</button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== EXPLORER WINDOW ===================== -->
+    <div class="win" id="exwin" hidden>
+      <div class="tb">
+        <div class="brand"><div class="logo"></div>Pulse</div>
+        <button class="tbtn"><svg class="i"><use href="#sidebar"/></svg></button>
+        <div class="tab on"><svg class="i" style="color:var(--accent-fg)"><use href="#folder"/></svg>下载<svg class="i s12" style="margin-left:auto;color:var(--text3)"><use href="#x"/></svg></div>
+        <button class="tbtn"><svg class="i"><use href="#plus"/></svg></button>
+        <div class="sp"></div>
+        <div class="tgroup"><button class="tbtn"><svg class="i"><use href="#panes"/></svg></button><button class="tbtn" data-go="detail" data-tab="settings" title="设置"><svg class="i"><use href="#gear"/></svg></button><button class="tbtn"><svg class="i"><use href="#contrast"/></svg></button></div>
+        <div class="cap"><svg class="i s12"><use href="#minus"/></svg></div><div class="cap"><svg class="i s12"><use href="#square"/></svg></div><div class="cap"><svg class="i s12"><use href="#x"/></svg></div>
+      </div>
+      <div class="body">
+        <div class="ex-side">
+          <div class="h"><svg class="i" style="color:#E3A53C"><use href="#star"/></svg>快速访问</div>
+          <div class="it"><svg class="i" style="color:#4A8FD9"><use href="#pc"/></svg>桌面</div>
+          <div class="it on"><svg class="i" style="color:#3D9A6E"><use href="#download"/></svg>下载</div>
+          <div class="it"><svg class="i" style="color:#5B7FC7"><use href="#file"/></svg>文档</div>
+          <div class="it"><svg class="i" style="color:#C77A4A"><use href="#image"/></svg>图片</div>
+          <div class="h" style="margin-top:10px"><svg class="i"><use href="#pc"/></svg>此电脑</div>
+          <div class="it"><svg class="i"><use href="#disk"/></svg>系统 (C:)</div>
+          <div class="it"><svg class="i"><use href="#disk"/></svg>数据 (D:)</div>
+        </div>
+        <div class="ex-main">
+          <div class="addr">
+            <button class="tbtn"><svg class="i"><use href="#back"/></svg></button><button class="tbtn"><svg class="i"><use href="#fwd"/></svg></button><button class="tbtn"><svg class="i"><use href="#up"/></svg></button>
+            <div class="bc">此电脑<svg class="i"><use href="#chev-r"/></svg>数据 (D:)<svg class="i"><use href="#chev-r"/></svg>下载</div>
+            <button class="tbtn"><svg class="i"><use href="#refresh"/></svg></button>
+            <div class="srch"><svg class="i"><use href="#search"/></svg>搜索“下载”</div>
+          </div>
+          <div class="cmdbar">
+            <button class="btn pri"><svg class="i"><use href="#newfolder"/></svg>新建文件夹</button>
+            <div class="vs"></div>
+            <button class="tbtn"><svg class="i"><use href="#cut"/></svg></button><button class="tbtn"><svg class="i"><use href="#copy"/></svg></button><button class="tbtn"><svg class="i"><use href="#rename"/></svg></button><button class="tbtn"><svg class="i"><use href="#trash"/></svg></button>
+            <div class="vs"></div>
+            <button class="tbtn" title="解压" id="tbExtract"><svg class="i"><use href="#extract"/></svg></button>
+            <button class="tbtn" title="压缩"><svg class="i"><use href="#compress"/></svg></button>
+            <div class="sp"></div>
+            <button class="btn sub" style="color:var(--text)"><svg class="i"><use href="#sort"/></svg>排序</button><button class="btn sub" style="color:var(--text)"><svg class="i"><use href="#filter"/></svg>筛选</button>
+          </div>
+          <div class="flist" id="flist">
+            <div class="fh"><span>名称</span><span>修改日期</span><span>类型</span><span>大小</span></div>
+            <div id="frows"></div>
+            <div class="ctx" id="ctx" hidden></div>
+          </div>
+          <div class="toast" id="toast" hidden></div>
+        </div>
+      </div>
+      <div class="sb"><span class="ai"><svg class="i"><use href="#sparkle"/></svg>AI</span><span id="sbCount">7 个项目</span><span class="hist"><svg class="i s12"><use href="#undo"/></svg>操作记录<svg class="i s12"><use href="#chev-u"/></svg></span><span class="sp"></span><span class="task" id="task" hidden></span></div>
+
+      <!-- password dialog -->
+      <div class="scrim" id="pwDlg" hidden>
+        <div class="dlg">
+          <div class="db">
+            <h3><svg class="i s20" style="color:var(--accent-fg)"><use href="#lock"/></svg>需要密码</h3>
+            <p>这个压缩包已加密，输入密码后继续解压。</p>
+            <div class="src"><svg class="i s20" style="color:#C9893A"><use href="#box"/></svg><div class="rl"><b>项目资料.7z</b><small>1.24 GB · 7z · AES-256，文件名已加密</small></div></div>
+            <div class="fld"><label>密码</label><div class="tbox" id="pwBox"><input type="password" id="pwInput" value="" placeholder=""><button class="icon-btn" id="pwEye"><svg class="i"><use href="#eye"/></svg></button></div>
+              <div class="err-t" id="pwErr" style="padding-left:0" hidden><svg class="i s12"><use href="#warn"/></svg>密码不正确，请重新输入。</div></div>
+            <div class="hint" style="display:flex;gap:6px"><svg class="i s12" style="margin-top:2px"><use href="#info"/></svg><span>本次运行期间会记住，同一密码的其他压缩包自动解开。可在扩展设置里关闭。</span></div>
+          </div>
+          <div class="df"><span class="grow">提示：输入 1234 演示错误</span><button class="btn pri" id="pwGo">解压</button><button class="btn" data-close>取消</button></div>
+        </div>
+      </div>
+
+      <!-- add-to-archive dialog -->
+      <div class="scrim" id="addDlg" hidden>
+        <div class="dlg wide">
+          <div class="db">
+            <h3>添加到压缩包</h3>
+            <div class="src"><svg class="i s20" style="color:#D8A43E"><use href="#folder"/></svg><div class="rl"><b>照片 2026 和另外 2 项</b><small>保存到 下载</small></div></div>
+            <div class="fld"><label>压缩包名称</label><div class="tbox" id="addNameBox"><input id="addName" value="照片 2026"><span class="mono" style="color:var(--text3)" id="addExt">.7z</span></div>
+              <div class="err-t" id="addNameErr" style="padding-left:0" hidden><svg class="i s12"><use href="#warn"/></svg>名称不能为空，也不能包含 \ / : * ? " &lt; &gt; |</div></div>
+            <div class="fld"><label>格式</label><div class="fseg" id="addFmt"></div><div class="hint" id="addFmtHint"></div></div>
+            <div class="fld"><label>压缩等级 · <b id="addLevelVal" style="color:var(--accent-fg)"></b></label><div class="slider" style="padding-left:0"><input type="range" min="0" max="5" id="addLevel"><div class="ticks" id="addTicks"></div></div></div>
+            <div class="exp" id="addPw">
+              <button><svg class="i"><use href="#lock"/></svg><div><div>设置密码</div><div class="hint" id="addPwState">不加密</div></div><svg class="i chev"><use href="#chev-d"/></svg></button>
+              <div class="ebody" hidden>
+                <div class="fld"><label>密码（留空则不加密）</label><div class="tbox"><input type="password" id="addP1"></div></div>
+                <div class="fld"><label>再次输入密码</label><div class="tbox" id="addP2Box"><input type="password" id="addP2"></div><div class="err-t" id="addPwErr" style="padding-left:0" hidden><svg class="i s12"><use href="#warn"/></svg>两次输入的密码不一致。</div></div>
+                <div class="chk on" data-chk id="encNames"><span class="box"><svg class="i"><use href="#check"/></svg></span><div>同时加密文件名</div></div>
+                <div class="fld" id="zipMethod" hidden><label>ZIP 加密方式</label><div class="fseg" style="font-family:var(--font)"><button class="on" style="font-family:var(--font)">AES-256（推荐）</button><button style="font-family:var(--font)">ZipCrypto（兼容旧软件）</button></div></div>
+              </div>
+            </div>
+            <div class="exp" id="addMore">
+              <button><svg class="i"><use href="#gear"/></svg><div>更多选项</div><svg class="i chev"><use href="#chev-d"/></svg></button>
+              <div class="ebody" hidden>
+                <div class="fld"><label>分卷大小</label><div class="fseg" style="font-family:var(--font)"><button class="on" style="font-family:var(--font)">不分卷</button><button>100 MB</button><button>700 MB</button><button>4 GB</button></div><div class="hint">大文件拆成多个 .001、.002… 便于传输</div></div>
+                <div class="row" style="padding:0;border:0"><div class="rl"><div class="rt" style="font-size:13px">固实压缩</div><div class="rd">体积更小，单独取出某个文件会稍慢</div></div><button class="tg" role="switch" aria-checked="true" data-local></button></div>
+              </div>
+            </div>
+          </div>
+          <div class="df"><span class="grow" id="addDest">保存到 D:\下载\照片 2026.7z</span><button class="btn pri" id="addGo">压缩</button><button class="btn" data-close>取消</button></div>
+        </div>
+      </div>
+
+      <!-- checksum dialog -->
+      <div class="scrim" id="hashDlg" hidden>
+        <div class="dlg wide">
+          <div class="db">
+            <h3><svg class="i s20" style="color:var(--accent-fg)"><use href="#hash"/></svg>校验值</h3>
+            <div class="src"><svg class="i s20" style="color:#8A79C9"><use href="#disk"/></svg><div class="rl"><b id="hashName">ubuntu-24.04.3-desktop-amd64.iso</b><small id="hashSize">6,345,887,744 字节</small></div></div>
+            <div class="hash" data-alg="CRC32"><span>CRC32</span><code>5D0A7E31</code><button class="icon-btn"><svg class="i"><use href="#copy"/></svg></button></div>
+            <div class="hash" data-alg="SHA-1"><span>SHA-1</span><code>1f2c6b3e9a40d7c88e2f51b0a6d3c4e97b18f025</code><button class="icon-btn"><svg class="i"><use href="#copy"/></svg></button></div>
+            <div class="hash" data-alg="SHA-256"><span>SHA-256</span><code>c3514bf0056180d09376462a7a1b4f213c1d6e8ea67fae5c25099c6fd3d8274b</code><button class="icon-btn"><svg class="i"><use href="#copy"/></svg></button></div>
+            <div class="fld"><label>核对 · 粘贴网站公布的值，自动比对</label><div class="tbox"><input class="mono" id="hashIn" placeholder="粘贴 CRC32、SHA-1 或 SHA-256"></div><div class="verdict" id="hashVerdict"></div></div>
+          </div>
+          <div class="df"><span class="grow"></span><button class="btn">复制全部</button><button class="btn pri" data-close>关闭</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section class="notes">
+    <div class="note"><b>商店 = 发现 + 设置</b>首页的 7-Zip 卡片直接带“常用设置”三项（解压方式、快速压缩格式/等级、记住密码），改动即时保存并在右侧预览右键菜单；“全部设置”进详情页。原来分散在“增强包”页的官方预览、搜索、AI 增强包也作为“Pulse 官方”卡片放进商店。</div>
+    <div class="note"><b>详情页：设置旁边就是菜单预览</b>“右键‘解压’的方式”“解压到”“快速压缩格式/等级”与插件现有 Settings 字段一一对应；标题按插件 Title() 规则实时变化（固定文件夹 → “解压到固定文件夹”，快速压缩 → “快速压缩为 {格式}”）。tar 选中时等级置灰并提示“tar 不压缩”。</div>
+    <div class="note"><b>右键：常用操作放在第一层</b>右键压缩包时第一组就是 7-Zip 命令，主命令带一行结果提示（解压到哪、保存成什么名字），无需再弹窗；组标题右侧齿轮直达设置。加密压缩包走密码框；多选文件出现“快速压缩为 7z / 添加到压缩包…”。</div>
+    <div class="note"><b>需要宿主新增的能力 <span class="new">新增</span></b>①命令描述里的第二行提示（hint）；②菜单分组标题与“收进子菜单”选项；③单条命令显示开关；④商店卡片内嵌扩展设置（复用插件 settings 页数据）。①②需扩展 PulseCommandDescriptor，其余只动商店 UI。</div>
+    <div class="note"><b>状态覆盖</b>商店：加载中骨架屏、加载失败（已安装仍可改设置）、离线目录、安装审阅（未勾选授权时报错）、待重启横幅、社区为空；已安装：可更新/停用/空。7-Zip：停用开关、固定文件夹路径校验、密码错误、名称非法、两次密码不一致、校验值一致/不一致。</div>
+    <div class="note"><b>真实数据与限制</b>文字取自 catalog.tsv 与 extensions/7zip/text.cpp；格式数“57”、FFmpeg 体积与校验值为示例。社区“示例数据”仅用于看排版，当前目录中没有社区扩展。</div>
+  </section>
+</div>
+
+<script>
+(() => {
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const ico = (id, cls = '') => `<svg class="i ${cls}"><use href="#${id}"/></svg>`;
+
+/* ---------- shared 7-Zip settings (mirrors extensions/7zip/settings.h) ---------- */
+const FMT = [
+  { n: '7z', d: '压缩率最高，可加密文件名。需要 7-Zip 或 Pulse 打开。', ext: '.7z' },
+  { n: 'zip', d: '兼容性最好，Windows、macOS 和手机都能直接打开。', ext: '.zip' },
+  { n: 'tar', d: '只打包不压缩，保留 Linux 权限信息。', ext: '.tar' },
+  { n: 'tar.gz', d: 'Linux 和 macOS 上最常见，不支持加密。', ext: '.tar.gz' },
+  { n: 'tar.xz', d: '比 tar.gz 更小，压缩较慢，不支持加密。', ext: '.tar.xz' },
+  { n: 'tar.bz2', d: '较老的 Linux 发行格式，不支持加密。', ext: '.tar.bz2' },
+];
+const LV = ['仅存储', '最快', '快速', '标准', '最大', '极限'];
+const MODES = {
+  smart: { t: '智能解压', d: '只有一个文件夹或文件时直接放出来，否则放进同名文件夹', menu: '智能解压' },
+  folder: { t: '总是放进同名文件夹', d: '菜单显示为“解压到同名文件夹”', menu: '解压到同名文件夹' },
+  here: { t: '直接解压到当前位置', d: '菜单显示为“解压到此处”', menu: '解压到此处' },
+};
+const S = { mode: 'smart', loc: 'beside', fixed: 'D:\\解压', fmt: 0, level: 3, remember: true, enabled: true, place: 'top',
+  cmds: { extract: true, to: true, test: true, quick: true, add: true, hash: true } };
+
+const extractTitle = () => S.loc === 'fixed' && S.fixed ? '解压到固定文件夹' : MODES[S.mode].menu;
+const quickTitle = () => `快速压缩为 ${FMT[S.fmt].n}`;
+const isTar = () => S.fmt === 2;
+const fixedValid = () => /^[A-Za-z]:\\/.test(S.fixed);
+
+function extractHint(name, single) {
+  const base = name.replace(/\.(7z|rar|zip|iso|tar\.gz)$/i, '');
+  const dest = S.loc === 'fixed' && S.fixed ? S.fixed.replace(/\\$/, '') + '\\' : '';
+  if (S.mode === 'here') return `放到 ${dest || '当前文件夹'}`;
+  if (S.mode === 'folder' || !single) return `→ ${dest}${base}\\`;
+  return `→ ${dest}${base}\\（直接放出）`;
+}
+
+/* ---------- menu model ---------- */
+const CMDS = [
+  { k: 'extract', icon: 'extract', title: extractTitle, on: 'archive', tag: '压缩包', pri: true },
+  { k: 'to', icon: 'extractto', title: () => '解压到…', on: 'archive', tag: '压缩包' },
+  { k: 'test', icon: 'test', title: () => '测试压缩包', on: 'archive', tag: '压缩包' },
+  { k: 'quick', icon: 'compress', title: quickTitle, on: 'files', tag: '文件和文件夹', pri: true },
+  { k: 'add', icon: 'addarc', title: () => '添加到压缩包…', on: 'files', tag: '文件和文件夹' },
+  { k: 'hash', icon: 'hash', title: () => '计算校验值', on: 'any', tag: '文件' },
+];
+
+function sevenItems(kind, ctx) {
+  // kind: archive | files ; ctx: {name, single, quickName}
+  return CMDS.filter(c => S.cmds[c.k] && (c.on === kind || c.on === 'any' || (kind === 'archive' && c.k === 'quick' && false)))
+    .map(c => {
+      let hint = '';
+      if (c.k === 'extract') hint = extractHint(ctx.name, ctx.single);
+      if (c.k === 'quick') hint = `保存为 ${ctx.quickName}${FMT[S.fmt].ext}${isTar() ? '' : ' · ' + LV[S.level]}`;
+      return { ...c, label: c.title(), hint: c.pri ? hint : '' };
+    });
+}
+
+function menuHTML(kind, ctx, opts = {}) {
+  const items = sevenItems(kind, ctx);
+  const it = (c) => c.hint
+    ? `<button class="mi two ${c.pri ? 'pri' : ''}" data-cmd="${c.k}">${ico(c.icon)}<span class="tx"><span>${c.label}</span><small>${c.hint}</small></span></button>`
+    : `<button class="mi" data-cmd="${c.k}">${ico(c.icon)}<span>${c.label}</span></button>`;
+  let seven = '';
+  if (S.enabled && items.length) {
+    if (S.place === 'sub') {
+      const subItems = items.map(it).join('') + `<div class="msep"></div><button class="mi" data-go="detail" data-tab="settings">${ico('gear')}<span>7-Zip 设置…</span></button>`;
+      seven = `<div class="hl subwrap"><button class="mi" data-sub="1">${ico('box')}<span>7-Zip</span>${ico('chev-r', 'chev')}</button><div class="cm subm">${subItems}</div></div>`;
+    } else {
+      seven = `<div class="hl"><div class="mh">7-Zip<button data-go="detail" data-tab="settings" title="7-Zip 设置">${ico('gear', 's12')}</button></div>${items.map(it).join('')}</div>`;
+    }
+  }
+  if (opts.short) return seven || `<div class="mi dim">${ico('info')}<span>7-Zip 已停用</span></div>`;
+  const head = `<div class="actsrow"><button title="剪切">${ico('cut')}</button><button title="复制">${ico('copy')}</button><button title="重命名">${ico('rename')}</button><button title="删除">${ico('trash')}</button></div>`;
+  const open = kind === 'archive'
+    ? `<button class="mi">${ico('open')}<span>打开</span><kbd>Enter</kbd></button><button class="mi">${ico('eye')}<span>快速预览</span><kbd>Space</kbd></button><button class="mi">${ico('openwith')}<span>打开方式</span>${ico('chev-r', 'chev')}</button>`
+    : `<button class="mi">${ico('open')}<span>打开</span><kbd>Enter</kbd></button>`;
+  const tail = `<div class="msep"></div><button class="mi">${ico('path')}<span>复制路径</span><kbd>Ctrl+Shift+C</kbd></button><button class="mi">${ico('star')}<span>固定到快速访问</span></button><div class="msep"></div><button class="mi">${ico('props')}<span>属性</span><kbd>Alt+Enter</kbd></button>`;
+  return head + open + (seven ? '<div class="msep"></div>' + seven : '') + tail;
+}
+
+/* ---------- URL state ---------- */
+const P = new URLSearchParams(location.search);
+const st = {
+  view: P.get('view') || 'store', state: P.get('state') || 'ready', community: P.get('community') || 'empty',
+  inst: P.get('inst') || 'some', sel: P.get('sel') || 'archive', theme: P.get('theme') || 'light', w: P.get('w') || 'wide',
+  tab: P.get('tab') || 'settings', pv: 'archive',
+};
+function pushURL() {
+  const q = new URLSearchParams();
+  for (const k of ['view', 'state', 'community', 'inst', 'sel', 'theme', 'w', 'tab']) q.set(k, st[k]);
+  history.replaceState(null, '', '?' + q);
+}
+
+/* ---------- comboboxes ---------- */
+const COMBOS = {
+  mode: { opts: () => Object.entries(MODES).map(([k, m]) => ({ v: k, t: m.t })), get: () => S.mode, set: v => { S.mode = v; } },
+  fmt: { opts: () => FMT.map((f, i) => ({ v: i, t: f.n, s: f.ext })), get: () => S.fmt, set: v => { S.fmt = +v; }, min: 96 },
+  level: { opts: () => LV.map((l, i) => ({ v: i, t: l })), get: () => S.level, set: v => { S.level = +v; }, min: 96, dis: isTar },
+};
+function renderCombos() {
+  $$('[data-combo]').forEach(el => {
+    const c = COMBOS[el.dataset.combo];
+    const cur = c.opts().find(o => String(o.v) === String(c.get()));
+    const open = el.classList.contains('open');
+    const dis = c.dis && c.dis();
+    el.innerHTML = `<button style="${c.min ? 'min-width:' + c.min + 'px' : ''}" ${dis ? 'disabled style="opacity:.45;min-width:96px"' : ''}><span>${dis ? 'tar 不压缩' : cur.t}</span>${ico('chev-d', 's12')}</button>` +
+      (open ? `<div class="list">${c.opts().map(o => `<button data-v="${o.v}" class="${String(o.v) === String(c.get()) ? 'on' : ''}">${o.t}${o.s ? `<small class="mono">${o.s}</small>` : ''}</button>`).join('')}</div>` : '');
+  });
+}
+document.addEventListener('click', e => {
+  const comboBtn = e.target.closest('[data-combo] > button');
+  const comboOpt = e.target.closest('[data-combo] .list button');
+  if (comboOpt) {
+    const el = comboOpt.closest('[data-combo]');
+    COMBOS[el.dataset.combo].set(comboOpt.dataset.v);
+    el.classList.remove('open'); changed(); return;
+  }
+  $$('[data-combo].open').forEach(el => { if (!el.contains(e.target)) el.classList.remove('open'); });
+  if (comboBtn) { comboBtn.parentElement.classList.toggle('open'); renderCombos(); return; }
+  renderCombos();
+});
+
+/* ---------- saved indicator ---------- */
+let savedTimer;
+function changed() {
+  renderAll();
+  $$('[data-saved]').forEach(s => { s.classList.add('flash'); s.querySelector('span').textContent = '已保存。'; });
+  clearTimeout(savedTimer);
+  savedTimer = setTimeout(() => $$('[data-saved]').forEach(s => { s.classList.remove('flash'); s.querySelector('span').textContent = '改动会自动保存'; }), 1600);
+}
+
+/* ---------- store cards ---------- */
+const OFFICIAL = [
+  { id: '7z', tile: 't7z', icon: 'box', nm: '7-Zip 压缩与解压', sum: '右键解压、快速压缩、测试与校验；快速预览可列出 7z、RAR、ISO、CAB、WIM 等压缩包内容。', meta: '26.00 · LGPL-2.1', st: 'installed', cat: 1 },
+  { id: 'img', tile: 'timg', icon: 'image', nm: '现代图像格式', sum: '不依赖微软商店扩展，直接预览 iPhone 照片（HEIC）、AVIF、JPEG XL 和 HDR / EXR 图像，文件夹里也能看到缩略图。', meta: 'libheif · dav1d · libjxl · OpenEXR', st: 'update', cat: 2 },
+  { id: 'raw', tile: 'traw', icon: 'camera', nm: '相机 RAW', sum: '通过 LibRaw 为 CR2、CR3、NEF、ARW、DNG、RAF 等相机原片提供预览和缩略图。', meta: 'LibRaw · LGPL-2.1', st: 'installed', cat: 2 },
+  { id: 'ff', tile: 'tff', icon: 'film', nm: 'FFmpeg 媒体增强', sum: '系统缺少解码器的视频也能生成缩略图、显示时长和媒体信息：HEVC、AV1、VP9、ProRes、FLV、RMVB、MPEG-TS 等。', meta: 'LGPL-2.1 · 约 38 MB', st: 'get', cat: 2 },
+  { id: 'cs', tile: 'tsrch', icon: 'textsearch', nm: '内容搜索', sum: '在 Word、Excel、PowerPoint、PDF 和文本文件的正文中搜索关键词，结果中高亮命中片段。索引只在本机建立。', meta: 'SQLite FTS5 · PDFium', st: 'installed', cat: 3 },
+  { id: 'ai', tile: 'tai', icon: 'sparkle', nm: 'AI 增强包', sum: '让 Claude 等支持 MCP 的 AI 应用查找、查看和整理你的文件：改动文件前都要在 Pulse 里确认，并且可以撤销。', meta: '随 Pulse 同步更新', st: 'installed', cat: 4 },
+];
+const COMMUNITY = [
+  { tile: 'tc1', icon: 'lines', nm: 'Markdown 大纲', pub: 'lin.dev', sum: '在详情面板显示 Markdown 文件的标题大纲，点击跳转预览位置。', meta: '0.4.2 · MIT', st: 'get' },
+  { tile: 'tc2', icon: 'tabs', nm: '项目工作区', pub: 'wsl-tools', sum: '为常用项目保存标签页、分栏和筛选组合，一键恢复。', meta: '1.1.0 · Apache-2.0', st: 'get' },
+  { tile: 'tc3', icon: 'path', nm: 'Git 状态列', pub: 'gitkit', sum: '在文件列表加一列显示 Git 修改状态，支持暂存与还原。', meta: '2.0.1 · MIT', st: 'get' },
+];
+let installing = null, installPct = 0;
+function cardHTML(x, official = true) {
+  let act;
+  if (installing === x.id) act = `<div class="bar"><i style="width:${installPct}%"></i></div><span class="meta" style="flex:0">${installPct < 100 ? '正在验证安装包…' : ''}</span>`;
+  else if (x.st === 'installed' || x.st === 'done') act = `<span class="meta">${x.meta}</span><span class="state">${ico('check', 's12')}${x.st === 'done' ? '待重启' : '已安装'}</span>`;
+  else if (x.st === 'update') act = `<span class="meta">${x.meta}</span><button class="btn sm pri">更新</button>`;
+  else act = `<span class="meta">${x.meta}</span><button class="btn sm" data-install="${x.id || ''}" ${st.state === 'offline' ? 'disabled' : ''}>${ico('download', 's12')}安装</button>`;
+  const pub = official ? `<span class="verified" style="font-weight:600">${ico('badge', 's12')}Pulse 官方</span>` : `<span>${x.pub}</span>`;
+  return `<div class="card" ${x.id === '7z' ? 'data-go="detail" data-tab="settings" style="cursor:pointer"' : ''}>
+    <div class="top"><div class="tile ${x.tile}">${ico(x.icon, 's20')}</div><div style="min-width:0"><div class="nm">${x.nm}</div><div class="pub">${pub}</div></div></div>
+    <div class="sum">${x.sum}</div><div class="foot">${act}</div></div>`;
+}
+function renderStore() {
+  $('#officialGrid').innerHTML = OFFICIAL.map(x => cardHTML(x)).join('');
+  $('#communityGrid').innerHTML = COMMUNITY.map(x => cardHTML(x, false)).join('');
+  $('#failedInstalled').innerHTML = OFFICIAL.filter(x => x.st !== 'get').slice(0, 3).map(x => cardHTML(x)).join('');
+}
+
+/* ---------- installed list ---------- */
+function renderInstalled() {
+  const row = (x, extra) => `<div class="irow ${extra || ''}"><div class="tile ${x.tile}">${ico(x.icon, 's20')}</div>
+    <div class="rl"><div class="nm">${x.nm} <span style="font-weight:400;color:var(--text3);font-size:12px">${x.v}</span>${x.pills || ''}</div><div class="ds">${x.ds}</div></div>${x.acts}</div>`;
+  $('#updList').innerHTML = row({ tile: 'timg', icon: 'image', nm: '现代图像格式', v: '1.3.0 → 1.4.0', ds: '新增 JPEG XL 动图预览；修复部分 HEIC 旋转方向', acts: '<button class="btn sm pri">更新</button>' }, 'upd');
+  $('#instList').innerHTML = [
+    { tile: 't7z', icon: 'box', nm: '7-Zip 压缩与解压', v: '26.00', pills: `<span class="pill ${S.enabled ? 'ok' : ''} dot">${S.enabled ? '已启用' : '已停用'}</span>`, ds: '原生代码 · 不在沙箱中运行 · ' + extractTitle() + ' · ' + quickTitle(),
+      acts: `<button class="btn sm" data-go="detail" data-tab="settings">${ico('gear', 's12')}设置</button><button class="tg" role="switch" aria-checked="${S.enabled}" data-toggle="enabled"></button><button class="icon-btn">${ico('more')}</button>` },
+    { tile: 'timg', icon: 'image', nm: '现代图像格式', v: '1.3.0', pills: '<span class="pill ok dot">已启用</span>', ds: 'HEIC · AVIF · JPEG XL · EXR', acts: '<button class="tg" role="switch" aria-checked="true" data-local></button><button class="icon-btn">' + ico('more') + '</button>' },
+    { tile: 'traw', icon: 'camera', nm: '相机 RAW', v: '0.21.3', pills: '<span class="pill ok dot">已启用</span>', ds: 'CR2 · CR3 · NEF · ARW · DNG · RAF', acts: '<button class="tg" role="switch" aria-checked="true" data-local></button><button class="icon-btn">' + ico('more') + '</button>' },
+    { tile: 'tsrch', icon: 'textsearch', nm: '内容搜索', v: '1.4.0', pills: '<span class="pill warn">重启后生效</span>', ds: '开发版内置 · 索引只在本机建立', acts: '<button class="tg" role="switch" aria-checked="true" data-local></button><button class="icon-btn">' + ico('more') + '</button>' },
+    { tile: 'tai', icon: 'sparkle', nm: 'AI 增强包', v: '1.0.59', pills: '<span class="pill">已停用</span>', ds: '不用时不运行任何后台程序', acts: '<button class="tg" role="switch" aria-checked="false" data-local></button><button class="icon-btn">' + ico('more') + '</button>' },
+  ].map((x, i) => row(x, i === 4 ? 'off' : '')).join('');
+}
+
+/* ---------- detail settings ---------- */
+function opt(on, title, desc, attrs, extra = '') {
+  return `<button class="opt ${on ? 'on' : ''} ${extra}" ${attrs}><span class="radio"></span><span><b>${title}</b>${desc ? `<small>${desc}</small>` : ''}</span></button>`;
+}
+function renderDetail() {
+  $('#modeOpts').innerHTML = Object.entries(MODES).map(([k, m]) => opt(S.mode === k, m.t, m.d, `data-mode="${k}"`)).join('');
+  $('#locOpts').innerHTML = opt(S.loc === 'beside', '压缩包所在文件夹', '和压缩包放在一起', 'data-loc="beside"') + opt(S.loc === 'fixed', '固定文件夹', '所有压缩包都解压到同一个文件夹', 'data-loc="fixed"');
+  $('#fixedRow').hidden = S.loc !== 'fixed';
+  if (document.activeElement !== $('#fixedInput')) $('#fixedInput').value = S.fixed;
+  const bad = S.loc === 'fixed' && !fixedValid();
+  $('#fixedErr').hidden = !bad; $('#fixedBox').classList.toggle('bad', bad);
+  $('#fmtOpts').innerHTML = FMT.map((f, i) => `<button class="opt ${S.fmt === i ? 'on' : ''}" data-fmt="${i}"><span class="radio"></span><span><b class="ext">${f.n}</b><small>${f.d}</small></span></button>`).join('');
+  const r = $('#levelRange'); r.value = S.level; r.disabled = isTar(); r.style.opacity = isTar() ? .4 : 1;
+  $('#levelVal').textContent = isTar() ? 'tar 不压缩' : LV[S.level];
+  $('#levelTicks').innerHTML = LV.map((l, i) => `<span class="${!isTar() && i === S.level ? 'on' : ''}">${l}</span>`).join('');
+  $('#placeOpts').innerHTML = opt(S.place === 'top', '直接显示在第一层', '常用命令一步可达（推荐）', 'data-place="top"') + opt(S.place === 'sub', '收进“7-Zip”子菜单', '菜单更短，多一步点击', 'data-place="sub"');
+  $('#cmdList').innerHTML = CMDS.map(c => `<div class="row cmdrow"><span class="drag">${ico('drag')}</span><div class="ri">${ico(c.icon)}</div><div class="rl"><div class="rt">${c.title()}</div><div class="rd">${c.tag}${c.pri ? ' · 显示结果提示' : ''}</div></div><button class="tg" role="switch" aria-checked="${S.cmds[c.k]}" data-cmdt="${c.k}"></button></div>`).join('');
+  const W = ['7z', 'zip', 'tar', 'gz', 'xz', 'bz2', 'wim'];
+  const R = ['rar', 'rar5', 'iso', 'udf', 'cab', 'arj', 'lzh', 'chm', 'cpio', 'deb', 'rpm', 'dmg', 'hfs', 'apfs', 'vhd', 'vhdx', 'vmdk', 'qcow2', 'msi', 'nsis', 'squashfs', 'cramfs', 'ext4', 'fat', 'ntfs', 'gpt', 'mbr', 'lzma', 'z', 'zst', 'lz4', 'swf', 'flv', 'xar', 'pkg', 'appx', 'apm', 'mub', 'ihex', 'uefi', 'te', 'mslz', 'sparse', 'avb', 'lp', 'base64', 'chi', 'lit', 'nsis', 'sqfs', 'scap', 'uefif', 'zipx', 'jar', 'xpi', 'epub'].slice(0, 50);
+  $('#fmtW').innerHTML = W.map(f => `<span class="fchip w">${f}</span>`).join('');
+  $('#fmtR').innerHTML = R.map(f => `<span class="fchip">${f}</span>`).join('');
+  $('#enLbl').textContent = S.enabled ? '已启用' : '已停用';
+  $('#enPill').textContent = S.enabled ? '已启用' : '已停用'; $('#enPill').className = 'pill dot ' + (S.enabled ? 'ok' : '');
+  $('#enToggle').setAttribute('aria-checked', S.enabled);
+  $('#disabledBanner').hidden = S.enabled;
+}
+
+function renderBinds() {
+  $$('[data-bind="modeDesc"]').forEach(e => e.textContent = `右键菜单显示：${extractTitle()}`);
+  $$('[data-bind="quickDesc"]').forEach(e => e.textContent = `右键“快速压缩为 ${FMT[S.fmt].n}”直接生成，不弹窗`);
+  $$('[data-toggle="remember"]').forEach(e => e.setAttribute('aria-checked', S.remember));
+  const res = S.mode === 'smart'
+    ? `${ico('check')}<span><b style="color:var(--text)">设计稿-v3.rar</b> 里只有一个文件夹 <span class="mono">设计稿-v3\\</span>，会直接放出来；<b style="color:var(--text)">发票.zip</b> 有 12 个散文件，会放进 <span class="mono">发票\\</span>。</span>`
+    : S.mode === 'folder' ? `${ico('check')}<span>每个压缩包都放进与它同名的文件夹，不会把文件撒在当前目录里。</span>`
+    : `${ico('warn')}<span>压缩包里的文件直接写到当前位置；同名项目使用文件冲突对话框处理。</span>`;
+  $$('[data-bind="resultText"]').forEach(e => e.innerHTML = res + (S.loc === 'fixed' ? `<br>` : ''));
+  $$('[data-preview="archive-short"]').forEach(e => e.innerHTML = menuHTML('archive', { name: '设计稿-v3.rar', single: true }, { short: true }));
+  $$('[data-preview="full"]').forEach(e => e.innerHTML = st.pv === 'archive'
+    ? menuHTML('archive', { name: '设计稿-v3.rar', single: true }, { withSub: true, subTop: 150 })
+    : menuHTML('files', { quickName: '照片 2026' }, { withSub: true, subTop: 64 }));
+}
+
+/* ---------- explorer ---------- */
+const FILES = [
+  { n: '设计稿-v3.rar', ic: 'box', c: '#C9893A', d: '2026-11-10 14:22', t: '压缩文件', s: '248 MB', arc: true },
+  { n: '项目资料.7z', ic: 'box', c: '#C9893A', d: '2026-11-09 18:05', t: '压缩文件', s: '1.24 GB', arc: true, lock: true },
+  { n: '发票-2026Q3.zip', ic: 'box', c: '#C9893A', d: '2026-10-31 09:41', t: '压缩文件', s: '3.4 MB', arc: true },
+  { n: 'ubuntu-24.04.3-desktop-amd64.iso', ic: 'disk', c: '#8A79C9', d: '2026-10-28 22:10', t: '光盘映像文件', s: '5.91 GB', arc: true },
+  { n: '照片 2026', ic: 'folder', c: '#D8A43E', d: '2026-11-08 20:13', t: '文件夹', s: '' },
+  { n: '季度报告.docx', ic: 'file', c: '#3E6FC2', d: '2026-11-07 16:30', t: 'Word 文档', s: '842 KB' },
+  { n: '季度报告.pdf', ic: 'file', c: '#C8473B', d: '2026-11-07 16:32', t: 'PDF 文档', s: '1.6 MB' },
+];
+let extraRows = [];
+const SEL = { archive: [0], locked: [1], files: [4, 5, 6] };
+let selected = SEL[st.sel] || [0], menuOpen = true;
+function renderRows() {
+  const all = [...extraRows, ...FILES];
+  $('#frows').innerHTML = all.map((f, i) => {
+    const idx = i - extraRows.length;
+    return `<div class="fr ${selected.includes(idx) ? 'sel' : ''} ${f.fresh ? 'newi' : ''}" data-i="${idx}"><span class="n"><span class="ficon"><svg class="i s20" style="color:${f.c}"><use href="#${f.ic}"/></svg>${f.lock ? `<span class="lock">${ico('lock')}</span>` : ''}</span><span>${f.n}</span></span><span class="d">${f.d}</span><span class="t">${f.t}</span><span class="s">${f.s}</span></div>`;
+  }).join('');
+  extraRows.forEach(r => r.fresh = false);
+  $('#sbCount').textContent = `${all.length} 个项目` + (selected.length ? ` · 已选择 ${selected.length} 项` : '');
+}
+function renderCtx() {
+  const ctx = $('#ctx');
+  if (!menuOpen || !selected.length) { ctx.hidden = true; return; }
+  const files = selected.map(i => FILES[i]);
+  const kind = files.every(f => f && f.arc) ? 'archive' : 'files';
+  const first = files[0];
+  const quickName = files.length === 1 ? first.n.replace(/\.[^.]+$/, '') : '照片 2026';
+  ctx.innerHTML = `<div class="cm">${menuHTML(kind, { name: first.n, single: first.n.startsWith('设计稿'), quickName }, { withSub: true, subTop: kind === 'archive' ? 150 : 64 })}</div>`;
+  const rowEl = $(`.fr[data-i="${selected[selected.length - 1]}"]`);
+  const listR = $('#flist').getBoundingClientRect();
+  const rr = rowEl.getBoundingClientRect();
+  ctx.hidden = false;
+  const h = ctx.firstElementChild.offsetHeight;
+  let top = rr.bottom - listR.top - 6;
+  if (top + h > listR.height - 6) top = Math.max(6, listR.height - h - 6);
+  ctx.style.top = top + 'px';
+  ctx.style.left = Math.min(st.w === 'narrow' ? 120 : 210, listR.width - 290) + 'px';
+}
+function runTask(label, done) {
+  menuOpen = false; renderCtx();
+  const t = $('#task'); let p = 0; t.hidden = false;
+  const tick = () => {
+    p = Math.min(100, p + 9 + Math.random() * 14);
+    t.innerHTML = `${ico('box', 's12')}<span>${label}</span><div class="bar"><i style="width:${p}%"></i></div><b>${Math.round(p)}%</b><button class="icon-btn" style="width:20px;height:20px">${ico('x', 's12')}</button>`;
+    if (p < 100) setTimeout(tick, 160); else setTimeout(() => { t.hidden = true; done(); }, 250);
+  };
+  tick();
+}
+function toast(title, sub) {
+  const el = $('#toast');
+  el.innerHTML = `<span class="ok">${ico('check', 's12')}</span><div class="tl"><b>${title}</b><small>${sub}</small><div class="ta"><button class="btn sm">打开</button><button class="btn sm sub">${ico('undo', 's12')}撤销</button></div></div><button class="icon-btn" data-toast-x>${ico('x', 's12')}</button>`;
+  el.hidden = false;
+  clearTimeout(toast.t); toast.t = setTimeout(() => el.hidden = true, 6000);
+}
+function doExtract(i) {
+  const f = FILES[i];
+  const base = f.n.replace(/\.(rar|7z|zip|iso)$/i, '');
+  const target = S.loc === 'fixed' && S.fixed ? S.fixed + '\\' + base : base;
+  runTask(`解压 ${f.n}`, () => {
+    if (!(S.loc === 'fixed') && S.mode !== 'here') { extraRows.unshift({ n: base, ic: 'folder', c: '#D8A43E', d: '刚刚', t: '文件夹', s: '', fresh: true }); selected = [-extraRows.length + 0]; selected = []; }
+    renderRows(); toast(`已解压到 ${target}`, S.mode === 'smart' ? '智能解压：压缩包内只有一个文件夹，已直接放出' : extractTitle());
+  });
+}
+function cmd(k) {
+  const files = selected.map(i => FILES[i]);
+  if (k === 'extract') {
+    if (files.some(f => f.lock) && !(S.remember && cmd.known)) { menuOpen = false; renderCtx(); $('#pwDlg').hidden = false; $('#pwInput').value = ''; $('#pwErr').hidden = true; $('#pwBox').classList.remove('bad'); setTimeout(() => $('#pwInput').focus(), 50); return; }
+    doExtract(selected[0]);
+  } else if (k === 'to') {
+    menuOpen = false; renderCtx(); toast('选择目标文件夹', `从 ${S.loc === 'fixed' ? S.fixed : 'D:\\下载'} 开始浏览（演示）`);
+  } else if (k === 'test') {
+    runTask(`测试 ${files[0].n}`, () => toast('测试通过，没有发现错误。', files[0].n + ' · 312 个文件'));
+  } else if (k === 'quick') {
+    const name = (files.length === 1 ? files[0].n.replace(/\.[^.]+$/, '') : '照片 2026') + FMT[S.fmt].ext;
+    runTask(`压缩为 ${name}`, () => { extraRows.unshift({ n: name, ic: 'box', c: '#C9893A', d: '刚刚', t: '压缩文件', s: '412 MB', arc: true, fresh: true }); selected = []; renderRows(); toast(`已压缩为 ${name}`, `${FMT[S.fmt].n} · ${isTar() ? 'tar 不压缩' : LV[S.level]} · 保存到 下载`); });
+  } else if (k === 'add') {
+    menuOpen = false; renderCtx(); openAdd();
+  } else if (k === 'hash') {
+    menuOpen = false; renderCtx();
+    const f = files[0]; $('#hashName').textContent = f.n; $('#hashIn').value = ''; $('#hashVerdict').textContent = ''; $$('.hash').forEach(h => h.classList.remove('match'));
+    $('#hashDlg').hidden = false;
+  }
+}
+/* add dialog */
+const A = { fmt: 0, level: 3 };
+function openAdd() { A.fmt = S.fmt; A.level = S.level; $('#addDlg').hidden = false; renderAdd(); }
+function renderAdd() {
+  $('#addFmt').innerHTML = FMT.map((f, i) => `<button class="${A.fmt === i ? 'on' : ''}" data-afmt="${i}">${f.n}</button>`).join('');
+  $('#addFmtHint').textContent = FMT[A.fmt].d;
+  $('#addExt').textContent = FMT[A.fmt].ext;
+  const r = $('#addLevel'); r.value = A.level; r.disabled = A.fmt === 2; r.style.opacity = A.fmt === 2 ? .4 : 1;
+  $('#addLevelVal').textContent = A.fmt === 2 ? 'tar 不压缩' : LV[A.level];
+  $('#addTicks').innerHTML = LV.map((l, i) => `<span class="${A.fmt !== 2 && i === A.level ? 'on' : ''}">${l}</span>`).join('');
+  const canEnc = A.fmt <= 1;
+  $('#addPw').style.opacity = canEnc ? 1 : .5; $('#addPw').style.pointerEvents = canEnc ? '' : 'none';
+  const p1 = $('#addP1').value;
+  $('#addPwState').textContent = !canEnc ? '此格式不支持加密' : !p1 ? '不加密' : A.fmt === 0 ? '使用 AES-256 加密' : '在下方选择加密方式';
+  $('#encNames').hidden = A.fmt !== 0; $('#zipMethod').hidden = A.fmt !== 1;
+  const mismatch = $('#addP2').value && $('#addP2').value !== p1;
+  $('#addPwErr').hidden = !mismatch; $('#addP2Box').classList.toggle('bad', !!mismatch);
+  const nm = $('#addName').value; const badName = !nm.trim() || /[\\/:*?"<>|]/.test(nm);
+  $('#addNameErr').hidden = !badName; $('#addNameBox').classList.toggle('bad', badName);
+  $('#addGo').disabled = badName || mismatch;
+  $('#addDest').textContent = `保存到 D:\\下载\\${nm}${FMT[A.fmt].ext}`;
+}
+
+/* ---------- global render ---------- */
+function renderAll() {
+  document.documentElement.dataset.theme = st.theme;
+  $$('.seg[data-k]').forEach(s => $$('button', s).forEach(b => b.setAttribute('aria-pressed', st[s.dataset.k] === b.dataset.v)));
+  $$('#controls [data-for]').forEach(c => c.hidden = !c.dataset.for.split(' ').includes(st.view));
+  const ex = st.view === 'menu';
+  $('#setwin').hidden = ex; $('#exwin').hidden = !ex;
+  $$('.win').forEach(w => w.classList.toggle('narrow', st.w === 'narrow'));
+  $$('[data-view]').forEach(v => v.hidden = v.dataset.view !== st.view);
+  $$('[data-state]').forEach(v => v.hidden = !v.dataset.state.split(' ').includes(st.state));
+  $$('[data-community]').forEach(v => v.hidden = v.dataset.community !== st.community);
+  $$('[data-inst]').forEach(v => v.hidden = v.dataset.inst !== st.inst);
+  $$('[data-tab]').forEach(b => { if (b.closest('.pivot')) b.classList.toggle('on', b.dataset.tab === st.tab); });
+  $$('[data-tab-body]').forEach(b => b.hidden = b.dataset.tabBody !== st.tab);
+  $('#installDlg').hidden = st.state !== 'install' || st.view !== 'store';
+  renderStore(); renderInstalled(); renderDetail(); renderBinds(); renderCombos();
+  if (ex) { renderRows(); renderCtx(); }
+  pushURL();
+}
+
+/* ---------- events ---------- */
+document.addEventListener('click', e => {
+  const t = e.target;
+  const seg = t.closest('.seg[data-k] button');
+  if (seg) {
+    const k = seg.closest('.seg').dataset.k; st[k] = seg.dataset.v;
+    if (k === 'sel') { selected = SEL[st.sel]; menuOpen = true; extraRows = []; }
+    if (k === 'view' && st.view === 'menu') { menuOpen = true; }
+    if (k === 'state') { installing = null; OFFICIAL.find(x => x.id === 'ff').st = 'get'; }
+    renderAll(); return;
+  }
+  const go = t.closest('[data-go]');
+  if (go && !t.closest('[data-combo]')) {
+    st.view = go.dataset.go; if (go.dataset.tab) st.tab = go.dataset.tab;
+    if (st.view === 'menu') { menuOpen = true; selected = SEL[st.sel]; }
+    $$('.scrim').forEach(s => { if (s.id !== 'installDlg') s.hidden = true; });
+    renderAll(); $('#main').scrollTop = 0; return;
+  }
+  const tab = t.closest('.pivot [data-tab]'); if (tab) { st.tab = tab.dataset.tab; renderAll(); return; }
+  const m = t.closest('[data-mode]'); if (m) { S.mode = m.dataset.mode; changed(); return; }
+  const l = t.closest('[data-loc]'); if (l) { S.loc = l.dataset.loc; changed(); return; }
+  const f = t.closest('[data-fmt]'); if (f) { S.fmt = +f.dataset.fmt; changed(); return; }
+  const pl = t.closest('[data-place]'); if (pl) { S.place = pl.dataset.place; changed(); return; }
+  const ct = t.closest('[data-cmdt]'); if (ct) { S.cmds[ct.dataset.cmdt] = !S.cmds[ct.dataset.cmdt]; changed(); return; }
+  const tg = t.closest('[data-toggle]'); if (tg) { S[tg.dataset.toggle] = !S[tg.dataset.toggle]; changed(); return; }
+  if (t.closest('#enToggle')) { S.enabled = !S.enabled; changed(); return; }
+  const loc = t.closest('[data-local]'); if (loc) { loc.setAttribute('aria-checked', loc.getAttribute('aria-checked') !== 'true'); return; }
+  const ck = t.closest('[data-chk]'); if (ck) { ck.classList.toggle('on'); if (ck.closest('#installDlg')) $('#consentErr').hidden = true; return; }
+  const cat = t.closest('#cats .chip'); if (cat) { $$('#cats .chip').forEach(c => c.classList.toggle('on', c === cat)); return; }
+  const ins = t.closest('[data-install]');
+  if (ins) { st.state = 'install'; renderAll(); return; }
+  if (t.closest('#installGo')) {
+    const need = $$('#installDlg [data-chk]').slice(0, 2).every(c => c.classList.contains('on'));
+    if (!need) { $('#consentErr').hidden = false; return; }
+    $('#installDlg').hidden = true; installing = 'ff'; installPct = 0;
+    const step = () => { installPct = Math.min(100, installPct + 12); renderStore(); if (installPct < 100) setTimeout(step, 180); else { installing = null; OFFICIAL.find(x => x.id === 'ff').st = 'done'; st.state = 'restart'; renderAll(); } };
+    step(); return;
+  }
+  const cl = t.closest('[data-close]');
+  if (cl) { const s = cl.closest('.scrim'); s.hidden = true; if (s.id === 'installDlg') { st.state = 'ready'; renderAll(); } return; }
+  const ap = t.closest('#addPw > button, #addMore > button');
+  if (ap) { const ex = ap.parentElement; ex.classList.toggle('open'); ex.querySelector('.ebody').hidden = !ex.classList.contains('open'); return; }
+  const af = t.closest('[data-afmt]'); if (af) { A.fmt = +af.dataset.afmt; renderAdd(); return; }
+  if (t.closest('#addGo')) { $('#addDlg').hidden = true; const name = $('#addName').value + FMT[A.fmt].ext; runTask(`压缩为 ${name}`, () => { extraRows.unshift({ n: name, ic: 'box', c: '#C9893A', d: '刚刚', t: '压缩文件', s: '398 MB', arc: true, lock: !!$('#addP1').value, fresh: true }); selected = []; renderRows(); toast(`已压缩为 ${name}`, `${FMT[A.fmt].n} · ${A.fmt === 2 ? 'tar 不压缩' : LV[A.level]}${$('#addP1').value ? ' · 已加密' : ''}`); }); return; }
+  if (t.closest('#pwGo')) {
+    if ($('#pwInput').value === '1234' || !$('#pwInput').value) { $('#pwErr').hidden = false; $('#pwBox').classList.add('bad'); return; }
+    $('#pwDlg').hidden = true; cmd.known = true; doExtract(1); return;
+  }
+  if (t.closest('#pwEye')) { const i = $('#pwInput'); i.type = i.type === 'password' ? 'text' : 'password'; return; }
+  if (t.closest('[data-toast-x]')) { $('#toast').hidden = true; return; }
+  const c = t.closest('#ctx [data-cmd]');
+  if (c) { c.classList.add('flash'); setTimeout(() => cmd(c.dataset.cmd), 140); return; }
+  const sb = t.closest('#ctx [data-sub]'); if (sb) { sb.parentElement.classList.toggle('open'); return; }
+  if (t.closest('#tbExtract')) { if (selected.length && FILES[selected[0]] && FILES[selected[0]].arc) cmd('extract'); return; }
+  const row = t.closest('.fr');
+  if (row && +row.dataset.i >= 0) { selected = e.ctrlKey ? [...new Set([...selected, +row.dataset.i])] : [+row.dataset.i]; menuOpen = false; renderRows(); renderCtx(); return; }
+  if (st.view === 'menu' && !t.closest('#ctx') && !t.closest('.scrim') && !t.closest('#toast') && !t.closest('#task')) { menuOpen = false; renderCtx(); }
+});
+document.addEventListener('contextmenu', e => {
+  const row = e.target.closest('.fr');
+  if (!row || +row.dataset.i < 0) return;
+  e.preventDefault();
+  const i = +row.dataset.i;
+  if (!selected.includes(i)) selected = [i];
+  menuOpen = true; renderRows(); renderCtx();
+});
+document.addEventListener('input', e => {
+  if (e.target.id === 'levelRange') { S.level = +e.target.value; changed(); }
+  if (e.target.id === 'fixedInput') { S.fixed = e.target.value; renderDetail(); renderBinds(); renderCombos(); clearTimeout(savedTimer); }
+  if (e.target.id === 'addLevel') { A.level = +e.target.value; renderAdd(); }
+  if (['addName', 'addP1', 'addP2'].includes(e.target.id)) renderAdd();
+  if (e.target.id === 'pwInput') { $('#pwErr').hidden = true; $('#pwBox').classList.remove('bad'); }
+  if (e.target.id === 'hashIn') {
+    const v = e.target.value.trim().toLowerCase(); let hit = null;
+    $$('.hash').forEach(h => { const m = v && h.querySelector('code').textContent.toLowerCase() === v; h.classList.toggle('match', m); if (m) hit = h.dataset.alg; });
+    const vd = $('#hashVerdict');
+    vd.className = 'verdict ' + (hit ? 'ok' : v ? 'no' : '');
+    vd.textContent = hit ? `✓ 与 ${hit} 一致` : v ? '✗ 与这些值都不一致' : '';
+  }
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { menuOpen = false; renderCtx(); $$('.scrim').forEach(s => { if (!s.hidden && s.id !== 'installDlg') s.hidden = true; }); } });
+window.addEventListener('resize', () => { if (st.view === 'menu') renderCtx(); });
+
+if (P.get('dlg')) setTimeout(() => { if (P.get('dlg') === 'pw') { selected = [1]; cmd('extract'); } else if (P.get('dlg') === 'add') { selected = [4, 5, 6]; cmd('add'); } else if (P.get('dlg') === 'hash') { selected = [3]; cmd('hash'); } }, 50);
+if (P.get('fixed')) { S.loc = 'fixed'; S.fixed = P.get('fixed'); }
+if (P.get('fmt')) S.fmt = +P.get('fmt');
+if (P.get('place')) S.place = P.get('place');
+renderAll();
+})();
+</script>
+</body>
+</html>

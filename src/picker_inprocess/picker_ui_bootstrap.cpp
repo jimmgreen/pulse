@@ -1,4 +1,5 @@
 #include "picker_ui_environment.h"
+#include "picker_jump_context.h"
 #include "../common/picker_owner_guard.h"
 #include <thread>
 #include <chrono>
@@ -193,6 +194,7 @@ HRESULT WINAPI Show(const PulsePickerUiConfig* config, const PulsePickerUiCallba
         spec.on_file_ok = [&](HWND window, const pulse::ui::FilePickerResult& candidate) { return Notify(frame, PULSE_PICKER_UI_FILE_OK, window, &candidate); };
         active = &frame;
         struct ActiveScope { ~ActiveScope() { active = nullptr; } } live;
+        const auto jump_context = pulse::picker_inprocess::AttachJumpContext(spec, GetCurrentProcessId());
         const auto outcome = pulse::ui::ShowFilePickerDetailed(config->owner, spec, colors.dark, pulse::ui::HexColor(colors.accent_rgb));
         frame.window = nullptr;
         if (FAILED(frame.callback_error)) { result->win32_error = ERROR_FUNCTION_FAILED; return frame.callback_error; }
@@ -208,6 +210,7 @@ HRESULT WINAPI Show(const PulsePickerUiConfig* config, const PulsePickerUiCallba
         if (path.size() >= result->path_capacity) { result->win32_error = ERROR_INSUFFICIENT_BUFFER; return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER); }
         std::copy(path.begin(), path.end(), result->path); result->path[path.size()] = 0;
         result->path_units = static_cast<uint32_t>(path.size()); result->status = PULSE_PICKER_UI_ACCEPTED; result->win32_error = ERROR_SUCCESS;
+        if (jump_context) jump_context->Accepted(path);
         return S_OK;
     } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
     catch (...) { return E_FAIL; }

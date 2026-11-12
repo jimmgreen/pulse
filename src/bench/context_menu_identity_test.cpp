@@ -243,6 +243,40 @@ int wmain() {
         ordered.ResetToDefaults();
         check(!ordered.BuiltinOrderCustom(BuiltinMenuSurface::Item) && !ordered.BuiltinOrderCustom(BuiltinMenuSurface::RowButtons),
             "CMI-O08 restore defaults also restores the order");
+
+        // Extension right-click menu placement and per-command visibility overrides (CMI-E*).
+        using app::ExtensionMenuPlacement;
+        app::ContextMenuPrefs ext_prefs;
+        check(ext_prefs.PlacementForExtension("demo.pkg") == ExtensionMenuPlacement::Default &&
+            ext_prefs.ExtensionCommandVisible("native:demo.pkg:cmd1"),
+            "CMI-E01 extension placement defaults to Default and commands default to visible");
+        ext_prefs.SetExtensionPlacement("demo.pkg", ExtensionMenuPlacement::Submenu);
+        ext_prefs.SetExtensionPlacement("hidden.pkg", ExtensionMenuPlacement::Hidden);
+        ext_prefs.SetExtensionPlacement("flat.pkg", ExtensionMenuPlacement::Flat);
+        ext_prefs.SetExtensionCommandVisible("native:demo.pkg:cmd1", false);
+        ext_prefs.SetExtensionCommandVisible("native:demo.pkg:cmd2", false);
+        check(ext_prefs.Save(), "CMI-E02 save extension placement and hidden command overrides");
+
+        app::ContextMenuPrefs ext_loaded;
+        check(ext_loaded.Load() &&
+            ext_loaded.PlacementForExtension("demo.pkg") == ExtensionMenuPlacement::Submenu &&
+            ext_loaded.PlacementForExtension("hidden.pkg") == ExtensionMenuPlacement::Hidden &&
+            ext_loaded.PlacementForExtension("flat.pkg") == ExtensionMenuPlacement::Flat &&
+            !ext_loaded.ExtensionCommandVisible("native:demo.pkg:cmd1") &&
+            !ext_loaded.ExtensionCommandVisible("native:demo.pkg:cmd2") &&
+            ext_loaded.ExtensionCommandVisible("native:demo.pkg:cmd3"),
+            "CMI-E03 extension placement and hidden commands survive JSON save/load");
+
+        ext_loaded.SetExtensionPlacement("demo.pkg", ExtensionMenuPlacement::Default);
+        ext_loaded.SetExtensionCommandVisible("native:demo.pkg:cmd1", true);
+        check(!ext_loaded.extension_placement.contains("demo.pkg") &&
+            !ext_loaded.extension_hidden_commands.contains("native:demo.pkg:cmd1") &&
+            !ext_loaded.ExtensionCommandVisible("native:demo.pkg:cmd2"),
+            "CMI-E04 restoring individual extension defaults prunes redundant map entries");
+
+        ext_loaded.ResetToDefaults();
+        check(ext_loaded.extension_placement.empty() && ext_loaded.extension_hidden_commands.empty(),
+            "CMI-E05 ResetToDefaults clears all extension right-click menu overrides");
     }
     if (base.parent_path() != parent || !base.filename().wstring().starts_with(L"context-menu-identity-")) return 1;
     std::error_code error; fs::remove_all(base, error);

@@ -93,3 +93,103 @@ Still required after root performs real packaging: verify actual packaged import
 load with a foreign caller directory/CWD, Open/Save/cancel/standard events,
 preview/helper availability, DPI/text visibility, and old/new version coexistence.
 No script operation in this directory attaches to or launches a third-party app.
+
+## Explicit x64 + x86 deployment
+
+`multi_arch.py` keeps **two complete, architecture-pure schema-1 bundles** and a
+bounded `multiarch.json` index that binds both child manifest byte hashes. It
+does not remove the single-bundle mixed-PE rejection. Each child includes its
+own architecture-matched host, runtime, UI, automatic COM DLL, native control,
+dependencies and licenses. Both builds must already contain the full closure;
+the packer never silently borrows a missing x86 binary from the x64 build.
+
+```powershell
+python -B tools/pack_dialog_experiment/multi_arch.py pack --build-x64 C:/absolute/pulse/build --build-x86 C:/absolute/pulse/build-bridge-x86 --version R8-dual-1 --output C:/absolute/experiments/R8-dual-1
+python -B tools/pack_dialog_experiment/multi_arch.py verify --directory C:/absolute/experiments/R8-dual-1
+python -B tools/pack_dialog_experiment/multi_arch.py status --directory C:/absolute/experiments/R8-dual-1
+python -B tools/pack_dialog_experiment/multi_arch.py enable --directory C:/absolute/experiments/R8-dual-1
+python -B tools/pack_dialog_experiment/multi_arch.py disable --directory C:/absolute/experiments/R8-dual-1
+# Change just one view (the integrity check still covers BOTH bundles):
+python -B tools/pack_dialog_experiment/multi_arch.py enable --directory C:/absolute/experiments/R8-dual-1 --arch x86
+python -B -m unittest discover -s tools/pack_dialog_experiment -p test_multi_arch.py -q
+```
+
+Unlike the pure-file `pack.py`, explicit `status`/`enable`/`disable` execute each
+verified native control. Native x64 and x86 controls use the 64-bit and 32-bit
+HKCU COM registry views respectively. A 64-bit Windows host is required to run
+both controls. The native controls must provide `--status-json`,
+`--enable-json ABSOLUTE_BUNDLE` and `--disable-for-json ABSOLUTE_BUNDLE`.
+Their stdout is one UTF-8 JSON object with `error`, `enabled`, `conflict`,
+`status_error`, and `dll_path`. Their exit code and JSON error must agree.
+Older controls without this protocol fail before the tool reports a mutation
+as successful. Native enable checks for another bundle under its registration
+mutation lock; native disable is scoped to the expected DLL path under the same
+lock. The tool itself never writes the registry or invokes `reg.exe`.
+
+Both closures are reverified before every native launch, including a read-only
+status command and a selected-architecture command. All selected views pass a
+status/ownership preflight before any change. Conflicts, unreadable status or
+another bundle's recorded path prevent changes. A successful enable/disable
+reports both view states. A later-view failure attempts to restore the prior
+enabled/disabled state of only the views attempted by this transaction, in
+reverse order, including the failing view's partial journal. A preexisting
+enabled view skipped by enable is not disabled by rollback. Results distinguish
+`ok`, `failed`, `rolled-back` and `rollback-failed`; a failed request always exits
+1, including a successful rollback. JSON records every native operation and
+rollback outcome. Recovery never imports a registry snapshot over external
+changes. The process-wide named orchestration mutex serializes these tools;
+native per-call locks still protect individual mutations. This is transactional
+recovery on ordinary errors, not a crash-persistent distributed transaction or
+an atomic switch against a separate concurrent legacy control process.
+
+The wrapper is an executable development/deployment path, **not installer
+integration**. Production `dialog-current.json`, the stable launcher, setup
+upgrade/uninstall, and the application settings UI continue to select their
+existing single-architecture bundle. They do not consume `multiarch.json`.
+Keep both new children immutable while callers can hold modules. Disabling
+registration stops future interception; it does not unload an existing caller's
+modules or delete deployment files. Use per-architecture real caller/UI checks
+before drawing conclusions about dialog behavior. The synthetic test suite
+checks packaging and orchestration using fake native responses; it is not a
+claim that either real registry view or a third-party dialog was exercised.
+
+## Thin x86 companion for installed x64 packages (schema 3)
+
+`pack_installer.py --dialog-build-x86` now packages a thin x86 companion and
+keeps the complete x64 application in its existing schema-1 addressed bundle.
+The companion's roots are `PulseDialogLauncher.exe`, `PulseDialogAuto32.dll`,
+`PulseDialogAutoControl.exe`, and `PulseFileDialogRuntimeUiProof32R8.dll`, plus
+their real normal/delay PE dependencies and Pulse/Detours licenses. It does not
+collect the full x86 `DEFAULT_LAYOUT`, PDFium, LumaText, or preview worker.
+Use freshly built thin-capable native components; schema-1-era binaries are
+not made thin-capable by repackaging them. Synthetic test PEs are not runnable.
+
+Schema 3 is x86-only. It retains the schema-1 top-level keys, sets
+`dynamic_helpers` to `{}`, and adds exactly:
+
+```json
+"host_bundle": {"manifest_sha256": "<64 lowercase hexadecimal characters>"}
+```
+
+The host is resolved only as the companion directory's sibling named by that
+hash. It must have a matching manifest hash and verification marker, complete
+schema-1 x64 PE closure and automatic components, and the identical version.
+Thin-host chains are rejected before recursion. Installed payload verification
+also requires the host hash to equal `dialog-current.json`'s primary hash.
+The primary pointer still requires schema 1; older full schema-1 x86 companion
+payloads remain valid. `multi_arch.py` continues to produce its original two
+full schema-1 experimental bundles.
+
+Programmatic `plan`, `package`, and `package_addressed` accept keyword arguments
+`thin=True, host_digest=<hash>`. Planning checks syntax and the x86 PE closure;
+packaging/verifying additionally require the complete sibling host. Standalone
+`pack.py plan/pack` expose `--thin --host-digest <hash>`. For `pack`, place the
+new output directory alongside the already addressed x64 host, never elsewhere.
+
+Focused synthetic validation (does not execute or install binaries):
+
+```powershell
+python -m unittest discover -s tools/pack_installer -p test_pack_installer_thin.py
+python -m unittest discover -s tools/pack_installer -p test_pack_installer_dual.py
+python -m unittest discover -s tools/pack_dialog_experiment -p test_pack.py
+```

@@ -951,7 +951,7 @@ OpMinutes	IDS_OP_MINUTES	1602	 分 	 min 	 分
 OpHours	IDS_OP_HOURS	1603	 小时 	 hr 	 小時 
 OpMinutesEnd	IDS_OP_MINUTES_END	1604	 分	 min	 分
 OpConflictTitle	IDS_OP_CONFLICT_TITLE	1605	替换或跳过文件	Replace or skip files	替換或跳過檔案
-OpConflictLead	IDS_OP_CONFLICT_LEAD	1606	目标中已包含“	The destination already contains “	目標中已包含「
+OpConflictLead	IDS_OP_CONFLICT_LEAD	1606	目标中已有“	The destination already has “	目標中已有「
 OpReplaceFile	IDS_OP_REPLACE_FILE	1607	替换目标中的文件	Replace the destination file	替換目標中的檔案
 OpReplaceDesc	IDS_OP_REPLACE_DESC	1608	使用来源中的版本覆盖现有文件	Use the source version	使用來源中的版本覆蓋現有檔案
 OpSkipFile	IDS_OP_SKIP_FILE	1609	跳过该文件	Skip this file	跳過該檔案
@@ -5165,3 +5165,339 @@ StoreCommunityEmpty	IDS_STORE_COMMUNITY_EMPTY	6435	还没有社区扩展	No comm
 SetupEndRetry	IDS_SETUP_END_RETRY	6436	结束进程并重试	End processes and retry	結束處理程序並重試
 SetupEndConfirm	IDS_SETUP_END_CONFIRM	6437	将结束列表中可核验的占用进程，未保存的内容可能丢失。请先保存工作。是否继续？	End the verified processes in this list? Unsaved work may be lost. Save your work before continuing.	將結束清單中可核驗的占用處理程序，未儲存的內容可能遺失。請先儲存工作。是否繼續？
 SetupEndFailed	IDS_SETUP_END_FAILED	6438	部分进程未能结束，请查看安装日志或手动退出后重试。	Some processes could not be ended. Check the setup log or quit them manually and retry.	部分處理程序未能結束，請查看安裝記錄或手動結束後重試。
+DialogAutoArchStatusFormat	IDS_DIALOG_AUTO_ARCH_STATUS_FORMAT	6439	{arch}：{component} · {registration}	{arch}: {component} · {registration}	{arch}：{component} · {registration}
+DialogAutoArchComponentPresent	IDS_DIALOG_AUTO_ARCH_COMPONENT_PRESENT	6440	组件存在	Component present	元件存在
+DialogAutoArchComponentMissing	IDS_DIALOG_AUTO_ARCH_COMPONENT_MISSING	6441	组件缺失	Component missing	缺少元件
+DialogAutoArchComponentUnknown	IDS_DIALOG_AUTO_ARCH_COMPONENT_UNKNOWN	6442	组件未确认	Component not checked	尚未確認元件
+DialogAutoArchRegistered	IDS_DIALOG_AUTO_ARCH_REGISTERED	6443	登记匹配（未测激活）	Registration matches (activation not tested)	登錄相符（尚未測試啟動）
+DialogAutoArchUnregistered	IDS_DIALOG_AUTO_ARCH_UNREGISTERED	6444	未登记	Not registered	尚未登錄
+DialogAutoArchConflict	IDS_DIALOG_AUTO_ARCH_CONFLICT	6445	登记冲突	Registration conflict	登錄衝突
+DialogAutoArchReadError	IDS_DIALOG_AUTO_ARCH_READ_ERROR	6446	登记读取失败	Registration read failed	讀取登錄失敗
+DialogAutoArchScope	IDS_DIALOG_AUTO_ARCH_SCOPE	6447	自动模式仅覆盖受支持的 COM 打开/保存；传统 API 需要受管启动，其他家族单独验收。	Automatic mode covers supported COM Open/Save only. Legacy APIs require managed launch; other families are verified separately.	自動模式僅涵蓋支援的 COM 開啟／儲存；傳統 API 需要受控啟動，其他家族另行驗收。
+DialogAutoArchX64	IDS_DIALOG_AUTO_ARCH_X64	6448	x64	x64	x64
+DialogAutoArchX86	IDS_DIALOG_AUTO_ARCH_X86	6449	x86	x86	x86
+DialogAutoArchDisabledMatching	IDS_DIALOG_AUTO_ARCH_DISABLED_MATCHING	6450	已停用（仍有匹配登记）	Disabled (matching registration remains)	已停用（仍保留相符登錄）
+PreviewNativeDocumentEmpty	IDS_PREVIEW_NATIVE_DOCUMENT_EMPTY	6451	当前页没有可预览的文字内容。请用关联应用查看完整内容。	This page has no previewable text. Open it in its associated app to view the full content.	目前頁面沒有可預覽的文字內容。請用關聯應用程式檢視完整內容。
+PreviewNativeContentMode	IDS_PREVIEW_NATIVE_CONTENT_MODE	6452	内容预览（非原始版式）	Content preview (not original layout)	內容預覽（非原始版面配置）
+PreviewNextSlide	IDS_PREVIEW_NEXT_SLIDE	6453	下一张幻灯片	Next slide	下一張投影片
+StoreTabDiscover	IDS_STORE_TAB_DISCOVER	6454	发现	Discover	
+StoreTabInstalled	IDS_STORE_TAB_INSTALLED	6455	已安装	Installed	
+StoreSearchHint	IDS_STORE_SEARCH_HINT	6456	搜索扩展	Search extensions	
+StoreCatAll	IDS_STORE_CAT_ALL	6457	全部	All	
+StoreCatArchive	IDS_STORE_CAT_ARCHIVE	6458	压缩包	Archives	
+StoreCatPreview	IDS_STORE_CAT_PREVIEW	6459	预览	Preview	
+StoreCatSearch	IDS_STORE_CAT_SEARCH	6460	搜索	Search	
+StoreCatAi	IDS_STORE_CAT_AI	6461	AI	AI	
+StoreOfficialHint	IDS_STORE_OFFICIAL_HINT	6462	随 Pulse 发布并校验，按需下载	Released and verified with Pulse, downloaded when needed	
+StoreCommunityEmptyDesc	IDS_STORE_COMMUNITY_EMPTY_DESC	6463	开发者可以用 Pulse SDK 发布原生扩展。	Developers can publish native extensions with the Pulse SDK.	
+StoreNoMatch	IDS_STORE_NO_MATCH	6464	没有符合条件的扩展	No extensions match	
+StoreQuickTitle	IDS_STORE_QUICK_TITLE	6465	常用设置	Common settings	
+StoreAutoSaved	IDS_STORE_AUTO_SAVED	6466	改动会自动保存	Changes save automatically	
+StoreSaved	IDS_STORE_SAVED	6467	已保存	Saved	
+StoreAllSettings	IDS_STORE_ALL_SETTINGS	6468	全部设置	All settings	
+StorePreviewArchiveCaption	IDS_STORE_PREVIEW_ARCHIVE_CAPTION	6469	右键压缩包时	Right-clicking an archive	
+StoreMenuShows	IDS_STORE_MENU_SHOWS	6470	右键菜单显示：{name}	Menu shows: {name}	
+StoreQuickCompress	IDS_STORE_QUICK_COMPRESS	6471	快速压缩	Quick compress	
+StoreFailedDesc	IDS_STORE_FAILED_DESC	6472	请检查网络，或在下载源设置中更换下载源后重试。已安装的扩展不受影响。	Check the network, or pick another download source and try again. Installed extensions are not affected.	
+StoreDownloadSources	IDS_STORE_DOWNLOAD_SOURCES	6473	下载源设置	Download sources	
+StoreOfflineDesc	IDS_STORE_OFFLINE_DESC	6474	显示上次成功加载的目录，安装和更新暂不可用。	Showing the last loaded catalog; installing and updating are unavailable.	
+StoreInstalledSection	IDS_STORE_INSTALLED_SECTION	6475	已安装	Installed	
+StoreInstalledOfflineHint	IDS_STORE_INSTALLED_OFFLINE_HINT	6476	离线时也可以修改设置	Settings still work offline	
+StorePackInstall	IDS_STORE_PACK_INSTALL	6477	安装	Install	
+StorePackManage	IDS_STORE_PACK_MANAGE	6478	管理	Manage	
+StorePackRepair	IDS_STORE_PACK_REPAIR	6479	修复	Repair	
+StoreLocalFfmpeg	IDS_STORE_LOCAL_FFMPEG	6480	正在使用本地 FFmpeg	Using your own FFmpeg	
+SzEngineFormats	IDS_SZ_ENGINE_FORMATS	6481	7-Zip 引擎，支持 {n} 种格式	7-Zip engine, {n} formats	
+SzTabSettings	IDS_SZ_TAB_SETTINGS	6482	常用设置	Settings	
+SzTabMenu	IDS_SZ_TAB_MENU	6483	右键菜单	Context menu	
+SzTabFormats	IDS_SZ_TAB_FORMATS	6484	支持格式	Formats	
+SzTabAbout	IDS_SZ_TAB_ABOUT	6485	关于	About	
+SzSectionExtract	IDS_SZ_SECTION_EXTRACT	6486	解压	Extracting	
+SzSectionCompress	IDS_SZ_SECTION_COMPRESS	6487	压缩	Compressing	
+SzSectionPassword	IDS_SZ_SECTION_PASSWORD	6488	密码	Passwords	
+SzModeTitle	IDS_SZ_MODE_TITLE	6489	右键“解压”的方式	What Extract does	
+SzModeDesc	IDS_SZ_MODE_DESC	6490	决定菜单里第一项叫什么、做什么	Names and sets the first menu command	
+SzModeSmart	IDS_SZ_MODE_SMART	6491	智能解压	Smart extract	
+SzModeSmartDesc	IDS_SZ_MODE_SMART_DESC	6492	只有一个文件夹或文件时直接放出来，否则放进同名文件夹	One folder or file comes out as is; otherwise into a folder named after the archive	
+SzModeFolder	IDS_SZ_MODE_FOLDER	6493	总是放进同名文件夹	Always into a folder named after it	
+SzModeFolderDesc	IDS_SZ_MODE_FOLDER_DESC	6494	菜单显示为“解压到同名文件夹”	The menu reads “Extract to folder”	
+SzModeHere	IDS_SZ_MODE_HERE	6495	直接解压到当前位置	Straight into the location	
+SzModeHereDesc	IDS_SZ_MODE_HERE_DESC	6496	菜单显示为“解压到此处”	The menu reads “Extract here”	
+SzLocationTitle	IDS_SZ_LOCATION_TITLE	6497	解压到	Extract into	
+SzLocationDesc	IDS_SZ_LOCATION_DESC	6498	“解压到…”打开时也从这里开始	“Extract to…” starts here too	
+SzLocationBeside	IDS_SZ_LOCATION_BESIDE	6499	压缩包所在文件夹	The archive’s folder	
+SzLocationBesideDesc	IDS_SZ_LOCATION_BESIDE_DESC	6500	和压缩包放在一起	Next to the archive	
+SzLocationFixed	IDS_SZ_LOCATION_FIXED	6501	固定文件夹	A fixed folder	
+SzLocationFixedDesc	IDS_SZ_LOCATION_FIXED_DESC	6502	所有压缩包都解压到同一个文件夹	Every archive goes to the same folder	
+SzFolderHint	IDS_SZ_FOLDER_HINT	6503	本机磁盘上的完整路径	A full path on a local drive	
+SzFormatTitle	IDS_SZ_FORMAT_TITLE	6504	快速压缩格式	Quick compress format	
+SzFormatDesc	IDS_SZ_FORMAT_DESC	6505	右键“快速压缩为 {name}”直接生成，不弹窗	“Quick compress to {name}” makes it with no dialog	
+SzFmt7z	IDS_SZ_FMT7Z	6506	压缩率最高，可加密文件名。需要 7-Zip 或 Pulse 打开。	Smallest archives; can hide file names. Opens in 7-Zip or Pulse.	
+SzFmtZip	IDS_SZ_FMT_ZIP	6507	兼容性最好，Windows、macOS 和手机都能直接打开。	Most compatible: Windows, macOS and phones open it directly.	
+SzFmtTar	IDS_SZ_FMT_TAR	6508	只打包不压缩，保留 Linux 权限信息。	Bundles without compressing; keeps Linux permissions.	
+SzFmtTarGz	IDS_SZ_FMT_TAR_GZ	6509	Linux 和 macOS 上最常见，不支持加密。	The usual choice on Linux and macOS; no encryption.	
+SzFmtTarXz	IDS_SZ_FMT_TAR_XZ	6510	比 tar.gz 更小，压缩较慢，不支持加密。	Smaller than tar.gz, slower to make; no encryption.	
+SzFmtTarBz2	IDS_SZ_FMT_TAR_BZ2	6511	较老的 Linux 发行格式，不支持加密。	An older Linux format; no encryption.	
+SzLevelTitle	IDS_SZ_LEVEL_TITLE	6512	快速压缩等级	Quick compress level	
+SzLevelDesc	IDS_SZ_LEVEL_DESC	6513	等级越高越小，也越慢	Higher is smaller and slower	
+SzLevelTar	IDS_SZ_LEVEL_TAR	6514	tar 不压缩	tar does not compress	
+SzLevel0	IDS_SZ_LEVEL0	6515	仅存储	Store	
+SzLevel1	IDS_SZ_LEVEL1	6516	最快	Fastest	
+SzLevel2	IDS_SZ_LEVEL2	6517	快速	Fast	
+SzLevel3	IDS_SZ_LEVEL3	6518	标准	Normal	
+SzLevel4	IDS_SZ_LEVEL4	6519	最大	Maximum	
+SzLevel5	IDS_SZ_LEVEL5	6520	极限	Ultra	
+SzCompressNote	IDS_SZ_COMPRESS_NOTE	6521	需要密码、分卷或其他格式时，右键“添加到压缩包…”，那里会单独询问，不影响这里的默认值。	For a password, volumes or another format, use “Add to archive…”; it asks separately and leaves these defaults alone.	
+SzRememberTitle	IDS_SZ_REMEMBER_TITLE	6522	记住本次输入的密码	Remember passwords this session	
+SzRememberDesc	IDS_SZ_REMEMBER_DESC	6523	解压时先自动尝试，只保存在内存中，退出 Pulse 即清除	Tried first when extracting; kept in memory only and cleared when Pulse exits	
+SzRarNote	IDS_SZ_RAR_NOTE	6524	RAR 只能解压：7-Zip 不提供 RAR 压缩。写入经过 Pulse 的文件操作，可在“操作记录”中撤销。	RAR can be extracted only: 7-Zip cannot create RAR archives. Writes go through Pulse file operations and can be undone from Operation history.	
+SzPlacementTitle	IDS_SZ_PLACEMENT_TITLE	6525	菜单位置	Placement	
+SzPlacementTop	IDS_SZ_PLACEMENT_TOP	6526	直接显示在第一层	Right in the menu	
+SzPlacementTopDesc	IDS_SZ_PLACEMENT_TOP_DESC	6527	常用命令一步可达（推荐）	One click away (recommended)	
+SzPlacementSub	IDS_SZ_PLACEMENT_SUB	6528	收进“7-Zip”子菜单	In a 7-Zip submenu	
+SzPlacementSubDesc	IDS_SZ_PLACEMENT_SUB_DESC	6529	菜单更短，多一步点击	A shorter menu, one more click	
+SzCommandsTitle	IDS_SZ_COMMANDS_TITLE	6530	显示的命令	Commands shown	
+SzCommandsDesc	IDS_SZ_COMMANDS_DESC	6531	只在选中的文件适用时出现	Each appears only when the selection suits it	
+SzCmdExtract	IDS_SZ_CMD_EXTRACT	6532	解压（按上方选择的方式）	Extract (as chosen in Settings)	
+SzCmdTo	IDS_SZ_CMD_TO	6533	解压到…	Extract to…	
+SzCmdTest	IDS_SZ_CMD_TEST	6534	测试压缩包	Test archive	
+SzCmdQuick	IDS_SZ_CMD_QUICK	6535	快速压缩（按设置的格式和等级）	Quick compress (format and level in Settings)	
+SzCmdAdd	IDS_SZ_CMD_ADD	6536	添加到压缩包…	Add to archive…	
+SzCmdHash	IDS_SZ_CMD_HASH	6537	计算校验值	Compute checksums	
+SzForArchives	IDS_SZ_FOR_ARCHIVES	6538	压缩包	Archives	
+SzForFiles	IDS_SZ_FOR_FILES	6539	文件和文件夹	Files and folders	
+SzForFile	IDS_SZ_FOR_FILE	6540	文件	Files	
+SzWithResult	IDS_SZ_WITH_RESULT	6541	显示结果提示	shows its result	
+SzFormatsWritable	IDS_SZ_FORMATS_WRITABLE	6542	可压缩，也可解压	Create and extract	
+SzFormatsReadOnly	IDS_SZ_FORMATS_READ_ONLY	6543	只能解压与预览	Extract and preview only	
+SzFormatsNote	IDS_SZ_FORMATS_NOTE	6544	启用后，快速预览可直接列出这些压缩包的内容；内置 ZIP 功能不受影响。	With it on, Quick Look lists the contents of these archives; built-in ZIP keeps working.	
+SzAboutVersion	IDS_SZ_ABOUT_VERSION	6545	版本	Version	
+SzAboutLicense	IDS_SZ_ABOUT_LICENSE	6546	许可	License	
+SzAboutPermissions	IDS_SZ_ABOUT_PERMISSIONS	6547	权限	Permissions	
+SzAboutPermissionsValue	IDS_SZ_ABOUT_PERMISSIONS_VALUE	6548	读取所选文件 · 通过 Pulse 写入目标文件夹 · 自有设置	Reads the selected files · writes to the destination through Pulse · its own settings	
+SzAboutSource	IDS_SZ_ABOUT_SOURCE	6549	源代码	Source code	
+SzAboutHistory	IDS_SZ_ABOUT_HISTORY	6550	版本历史	Version history	
+SzAboutCurrent	IDS_SZ_ABOUT_CURRENT	6551	当前	Current	
+SzPreviewTitle	IDS_SZ_PREVIEW_TITLE	6552	右键菜单预览	Context menu preview	
+SzPreviewArchive	IDS_SZ_PREVIEW_ARCHIVE	6553	压缩包	Archive	
+SzPreviewFiles	IDS_SZ_PREVIEW_FILES	6554	文件	Files	
+SzSampleArchive	IDS_SZ_SAMPLE_ARCHIVE	6555	设计稿-v3.rar	Designs-v3.rar	
+SzSampleFolder	IDS_SZ_SAMPLE_FOLDER	6556	照片 2026	Photos 2026	
+SzSampleFile	IDS_SZ_SAMPLE_FILE	6557	季度报告.docx	Report.docx	
+SzSampleParent	IDS_SZ_SAMPLE_PARENT	6558	下载	Downloads	
+SzResultSmart	IDS_SZ_RESULT_SMART	6559	只有一个顶层文件夹或文件的压缩包会直接放出来，其余放进同名文件夹。	An archive with a single top folder or file comes out as is; the rest go into a folder named after it.	
+SzResultFolder	IDS_SZ_RESULT_FOLDER	6560	每个压缩包都放进与它同名的文件夹，不会把文件撒在当前目录里。	Each archive goes into a folder named after it, never loose in the current folder.	
+SzResultHere	IDS_SZ_RESULT_HERE	6561	压缩包里的文件直接写到当前位置；同名项目使用文件冲突对话框处理。	Files go straight into the current folder; name clashes use the file conflict dialog.	
+SzDisabledNote	IDS_SZ_DISABLED_NOTE	6562	扩展已停用，重启 Pulse 后右键菜单中不再显示 7-Zip 命令。设置会保留。	The extension is off. After Pulse restarts, the 7-Zip commands leave the context menu; settings are kept.	
+SzLoading	IDS_SZ_LOADING	6563	正在读取 7-Zip 的设置…	Reading the 7-Zip settings…	
+SzUnavailable	IDS_SZ_UNAVAILABLE	6564	7-Zip 的设置暂时读不到：扩展已停用或尚未启动。	The 7-Zip settings are not available: the extension is off or has not started.	
+SzMoreActions	IDS_SZ_MORE_ACTIONS	6565	更多操作	More actions	
+SzAboutEngine	IDS_SZ_ABOUT_ENGINE	6566	引擎	Engine	引擎
+SzRequiresPulse	IDS_SZ_REQUIRES_PULSE	6567	需要 Pulse {version} 或更高	Requires Pulse {version} or later	需要 Pulse {version} 或更新版本
+ManagedApplicationTitle	IDS_MANAGED_APPLICATION_TITLE	6568	选择托管应用	Managed application	
+ManagedApplicationDesc	IDS_MANAGED_APPLICATION_DESC	6569	选择应用的 .exe 文件，自动匹配已验证的 32 位或 64 位组件。然后选择普通启动；确需提权的软件使用下方管理员入口。	Choose an application .exe; Pulse automatically matches verified 32-bit or 64-bit components. Use standard launch, or the administrator entry below for applications that require elevation.	
+ManagedApplicationChoose	IDS_MANAGED_APPLICATION_CHOOSE	6570	选择应用…	Choose application…	
+ManagedApplicationFilter	IDS_MANAGED_APPLICATION_FILTER	6571	应用程序 (*.exe)	Applications (*.exe)	
+ManagedApplicationEmpty	IDS_MANAGED_APPLICATION_EMPTY	6572	尚未选择应用	No application selected	
+ManagedLaunchTitle	IDS_MANAGED_LAUNCH_TITLE	6573	启动所选应用	Launch selected application	
+ManagedLaunchDesc	IDS_MANAGED_LAUNCH_DESC	6574	启动前检查是否已有同路径进程。启动请求不代表文件对话框已经接管。	Check for existing processes at the same path before launch. A launch request does not certify dialog replacement.	
+ManagedLaunchAction	IDS_MANAGED_LAUNCH_ACTION	6575	托管启动…	Managed launch…	
+ManagedLaunchConfirmTitle	IDS_MANAGED_LAUNCH_CONFIRM_TITLE	6576	确认托管启动	Confirm managed launch	
+ManagedLaunchConfirmBody	IDS_MANAGED_LAUNCH_CONFIRM_BODY	6577	请先保存工作，并完全退出所选应用。已有实例或单实例程序可能把请求交给旧进程，旧进程不会因此接管。本操作仅提交普通权限启动请求，不保证文件对话框已接管；需要管理员权限的软件请使用独立管理员入口。	Save your work and fully exit the selected application first. An existing or single-instance application may hand off to an old process, which this launch does not manage. This submits a standard-permission launch request only and does not certify dialog replacement. Use the separate administrator entry for applications that require elevation.	
+ManagedLaunchFound	IDS_MANAGED_LAUNCH_FOUND	6578	已确认的同路径进程数：{count}。此计数不代表这些进程已接管。	Confirmed processes at the same path: {count}. This count does not mean those processes are managed.	
+ManagedLaunchIncomplete	IDS_MANAGED_LAUNCH_INCOMPLETE	6579	进程扫描不完整，仍可能有未识别的已有实例。	The process scan is incomplete; other existing instances may remain unidentified.	
+ManagedLaunchSubmit	IDS_MANAGED_LAUNCH_SUBMIT	6580	提交启动请求	Submit launch request	
+ManagedLaunchSubmitted	IDS_MANAGED_LAUNCH_SUBMITTED	6581	启动请求已提交；尚未确认对话框接管。	Launch request submitted; dialog replacement has not been confirmed.	
+ManagedLaunchFailed	IDS_MANAGED_LAUNCH_FAILED	6582	托管启动未确认完成；应用可能已经启动。请检查所选应用和错误信息。	Managed launch completion is unconfirmed; the application may already have started. Check the selected application and error details.	
+SzExtensionUpdateRequired	IDS_SZ_EXTENSION_UPDATE_REQUIRED	6583	当前 7-Zip 扩展版本不支持此页。请更新 7-Zip 扩展并重启 Pulse；仅更新主程序不会更新扩展。	This 7-Zip extension version does not support this page. Update the 7-Zip extension and restart Pulse; updating Pulse alone does not update extensions.	
+ManagedApplicationArchitecture	IDS_MANAGEDAPPLICATIONARCHITECTURE	6584	应用架构：{arch}	Application architecture: {arch}	
+ManagedLaunchComponentMissing	IDS_MANAGEDLAUNCHCOMPONENTMISSING	6585	匹配的托管启动组件缺失或校验失败。请修复安装后重试。	Matching managed-launch components are missing or invalid. Repair the installation and retry.	
+SidebarRailWorkspaces	IDS_SIDEBAR_RAIL_WORKSPACES	6640	工作区	Spaces	
+SidebarRailQuickAccess	IDS_SIDEBAR_RAIL_QUICK_ACCESS	6641	快速	Quick	
+SidebarRailSavedSearches	IDS_SIDEBAR_RAIL_SAVED_SEARCHES	6642	搜索	Search	
+SidebarRailDrives	IDS_SIDEBAR_RAIL_DRIVES	6643	磁盘	Drives	
+SidebarRailTags	IDS_SIDEBAR_RAIL_TAGS	6644	标签	Tags	
+SidebarRailNetworks	IDS_SIDEBAR_RAIL_NETWORKS	6645	网络	Net	
+StoreExtensionDraining	IDS_STORE_EXTENSION_DRAINING	6646	正在停止后台任务…	Stopping background tasks…	
+StoreExtensionRestartRequired	IDS_STORE_EXTENSION_RESTART_REQUIRED	6647	重启后完成卸载	Restart required to unload	
+ExtensionStorePublisherRotated	IDS_EXTENSION_STORE_PUBLISHER_ROTATED	6648	发布者密钥已轮换（旧指纹：{old}）	Publisher key rotated (previous: {old})	
+StoreCatalogExpired	IDS_STORE_CATALOG_EXPIRED	6649	商店目录已过期，建议联网刷新以获取最新安全更新。	Store catalog has expired; refresh online for the latest security updates.	
+StoreCatalogStaleOffline	IDS_STORE_CATALOG_STALE_OFFLINE	6650	当前显示的是较早的离线目录缓存，联网刷新后可安装或更新。	Showing an older offline catalog cache; refresh online to install or update.	
+ManagedAdminTitle	IDS_MANAGEDADMINTITLE	6651	管理员托管启动	Administrator managed launch	
+ManagedAdminDesc	IDS_MANAGEDADMINDESC	6652	仅用于确实需要管理员权限的软件。将显示 Windows 提权确认；仅支持受保护安装目录中的已验证组件。	For applications that require administrator privileges. Windows will ask for elevation. Requires verified components in a protected installation directory.	
+ManagedAdminAction	IDS_MANAGEDADMINACTION	6653	以管理员身份托管启动	Launch as administrator	
+ManagedAdminConfirmTitle	IDS_MANAGEDADMINCONFIRMTITLE	6654	确认管理员托管启动	Confirm administrator managed launch	
+ManagedAdminConfirmBody	IDS_MANAGEDADMINCONFIRMBODY	6655	请先保存工作并完全退出所选应用。确认后 Windows 将请求管理员权限；取消提权不会启动应用。已有实例可能接收请求而仍未接管。本操作仅启动本次所选应用，不提升 Pulse 主窗口权限，也不保证所有对话框已接管。	Save your work and fully exit the selected application first. Windows will then request administrator privileges; cancelling elevation will not launch the application. An existing instance may receive the request without being managed. This launches only the selected application, does not elevate the main Pulse window, and does not certify replacement of all dialogs.	
+ManagedAdminUnavailable	IDS_MANAGEDADMINUNAVAILABLE	6656	管理员托管组件尚未就绪。请使用安装版，并确认匹配组件位于受保护的安装目录。	Administrator managed-launch components are not ready. Use an installed copy with matching components in a protected installation directory.	
+ManagedAdminCancelled	IDS_MANAGEDADMINCANCELLED	6657	已取消管理员权限请求，未提交应用启动。	Administrator permission request cancelled; application launch was not submitted.	
+DialogHistoryTitle	IDS_DIALOGHISTORYTITLE	6658	软件接管记录	Application dialog history	
+DialogHistoryDesc	IDS_DIALOGHISTORYDESC	6659	自动记录已观察到的对话框结果。出现问题时，说明原因和处理方法；未观察到记录不代表失败。	Automatically records observed dialog outcomes, with explanations and next steps for issues. No record does not mean failure.	
+DialogHistoryRefresh	IDS_DIALOGHISTORYREFRESH	6660	检查最新记录	Check latest records	
+DialogHistoryEmpty	IDS_DIALOGHISTORYEMPTY	6661	暂无可确认的软件记录。照常使用软件即可，Pulse 会在后台记录可观察到的接管结果。	No attributable application records yet. Use your applications normally; Pulse records observable dialog outcomes in the background.	
+DialogHistoryNote	IDS_DIALOGHISTORYNOTE	6662	显示最近 12 组软件接管记录，不记录所选文件名或内容。重复事件合并；后续成功仅说明那一次操作成功。	Shows the latest 12 grouped application records, not selected filenames or contents. Repeated events are grouped; a later success only confirms that operation.	
+DialogHistoryUnattributed	IDS_DIALOGHISTORYUNATTRIBUTED	6663	部分旧记录缺少可靠的软件身份，暂不归到任何软件，也不据此判断失败。	Some older records lack reliable application identity. They are not attributed to an application or counted as failures.	
+DialogHistoryStorageError	IDS_DIALOGHISTORYSTORAGEERROR	6664	部分历史记录未能读取或保存。当前列表可能不完整，可导出诊断继续排查。	Some history could not be read or saved. The list may be incomplete; export diagnostics for investigation.	
+DialogHistoryUnknown	IDS_DIALOGHISTORYUNKNOWN	6665	状态待确认	Status unconfirmed	
+DialogHistoryFallback	IDS_DIALOGHISTORYFALLBACK	6666	本次使用了原生对话框	This operation used the native dialog	
+DialogHistoryFailure	IDS_DIALOGHISTORYFAILURE	6667	本次接管未完成	This operation did not complete in Pulse	
+DialogHistorySuccess	IDS_DIALOGHISTORYSUCCESS	6668	已确认 Pulse 对话框接管	Pulse dialog replacement was confirmed	
+DialogHistoryReasonUnknown	IDS_DIALOGHISTORYREASONUNKNOWN	6669	原因尚未确认，不作推断。	The cause is not confirmed; no cause is inferred.	
+DialogHistoryUnsupported	IDS_DIALOGHISTORYUNSUPPORTED	6670	该对话框请求包含暂未支持的功能。	This dialog request contains an unsupported feature.	
+DialogHistoryProviderUnavailable	IDS_DIALOGHISTORYPROVIDERUNAVAILABLE	6671	本次未能连接或加载对话框组件。	The dialog component could not be connected to or loaded.	
+DialogHistoryTimeout	IDS_DIALOGHISTORYTIMEOUT	6672	本次等待对话框组件超时。	The dialog component timed out.	
+DialogHistoryPermissionDenied	IDS_DIALOGHISTORYPERMISSIONDENIED	6673	本次接管被权限检查拒绝。	A permission check rejected this dialog request.	
+DialogHistoryPermissionUnknown	IDS_DIALOGHISTORYPERMISSIONUNKNOWN	6674	诊断所需权限不足，尚未确认接管状态。	Diagnostic access was insufficient; the dialog status is unconfirmed.	
+DialogHistoryMismatch	IDS_DIALOGHISTORYMISMATCH	6675	软件使用的接管组件与当前登记不一致。	The application is using a dialog component that differs from the current registration.	
+DialogHistoryDisabled	IDS_DIALOGHISTORYDISABLED	6676	发生此事件时，自动接管处于关闭状态。	Automatic dialog replacement was disabled when this event occurred.	
+DialogHistoryConflict	IDS_DIALOGHISTORYCONFLICT	6677	发现接管登记冲突。	Conflicting dialog registration was observed.	
+DialogHistoryInitialFolder	IDS_DIALOGHISTORYINITIALFOLDER	6678	本次初始位置暂不受支持，已保留原生对话框。	The initial location is not supported; the native dialog was retained.	
+DialogHistoryProviderFailure	IDS_DIALOGHISTORYPROVIDERFAILURE	6679	对话框组件报告本次处理失败。	The dialog component reported a failure for this operation.	
+DialogHistoryNative	IDS_DIALOGHISTORYNATIVE	6680	本次已回到原生对话框，具体原因尚未确认。	This operation fell back to the native dialog; the specific cause is unconfirmed.	
+DialogHistorySucceeded	IDS_DIALOGHISTORYSUCCEEDED	6681	本次操作已有成功结果，不代表该软件的所有对话框均受支持。	This operation returned successfully; this does not certify all dialogs in the application.	
+DialogHistoryRestart	IDS_DIALOGHISTORYRESTART	6682	处理方法：先保存工作，完全退出该软件（包括托盘），再按平时的方式重新打开。	Next step: save your work, fully exit the application (including its tray icon), then reopen it normally.	
+DialogHistorySettings	IDS_DIALOGHISTORYSETTINGS	6683	处理方法：检查本页的自动接管设置；若显示冲突，请导出诊断，不必自行修改系统登记。	Next step: check automatic dialog replacement on this page. For a conflict, export diagnostics rather than editing system registration.	
+DialogHistoryRetry	IDS_DIALOGHISTORYRETRY	6684	处理方法：重新尝试打开或保存；若再次出现，请导出诊断。	Next step: retry opening or saving. If it recurs, export diagnostics.	
+DialogHistoryUseNative	IDS_DIALOGHISTORYUSENATIVE	6685	处理方法：继续使用原生对话框即可；可导出诊断反馈兼容性问题。	Next step: continue using the native dialog. Export diagnostics to report the compatibility issue.	
+DialogHistoryExport	IDS_DIALOGHISTORYEXPORT	6686	处理方法：导出诊断供排查，无需手动查找日志或运行命令。	Next step: export diagnostics for investigation. No manual log collection or commands are needed.	
+DialogHistoryNoAction	IDS_DIALOGHISTORYNOACTION	6687	无需处理，照常使用即可。	No action is needed; continue using the application normally.	
+DialogHistoryMeta	IDS_DIALOGHISTORYMETA	6688	最近事件：{time} UTC · 合并 {count} 次	Latest event: {time} UTC · {count} grouped events	
+DialogHistoryLaterSuccess	IDS_DIALOGHISTORYLATERSUCCESS	6689	此后已观察到同一软件的一次成功接管；此前问题记录仍保留。	A later successful dialog replacement was observed for this application; the earlier issue remains in history.	
+DialogHistoryOpen	IDS_DIALOGHISTORYOPEN	6690	操作：打开	Operation: Open	
+DialogHistorySave	IDS_DIALOGHISTORYSAVE	6691	操作：保存	Operation: Save	
+DialogHistoryOperationUnknown	IDS_DIALOGHISTORYOPERATIONUNKNOWN	6692	操作类型未确认	Operation type unconfirmed	
+DialogHistoryPartial	IDS_DIALOGHISTORYPARTIAL	6693	日志采集有范围或读取限制，当前列表可能不完整。	Log collection was limited or incomplete; this list may not include every event.	
+DialogRestartNote	IDS_DIALOGRESTARTNOTE	6694	运行中的软件仍有旧接管组件，建议如下。约每分钟自动更新，不会关闭软件。	Older dialog components were found in running applications. Updated about once a minute; applications are never closed automatically.	
+DialogRestartNone	IDS_DIALOGRESTARTNONE	6695	本次检查未发现需要重新打开的软件；这不代表所有软件的对话框均受支持。	This scan found no applications requiring a restart. This does not mean every application dialog is supported.	
+DialogRestartPartial	IDS_DIALOGRESTARTPARTIAL	6696	部分运行进程未能完整检查，未将这些进程判定为接管失败。	Some running processes could not be fully checked. They are not classified as takeover failures.	
+DialogRestartRequired	IDS_DIALOGRESTARTREQUIRED	6697	当前状态：仍加载旧接管组件。请先保存工作，再完整退出此软件（包括托盘中的后台进程），然后正常重新打开。无需重启电脑。	Current status: an older dialog component is still loaded. Save your work, fully exit this application (including background tray processes), then reopen it normally. No computer restart is needed.	
+StoreUninstallPurgeData	IDS_STOREUNINSTALLPURGEDATA	6698	同时清除此扩展保存的设置与授权记录	Also delete saved settings and permissions for this extension	
+OpTaskWritingPrefix	IDS_OP_TASK_WRITING_PREFIX	6699	正在写入 	Writing 	
+OpTaskThroughPulse	IDS_OP_TASK_THROUGH_PULSE	6700	经过 Pulse 文件操作	Through Pulse file operations	
+OpContinueInBackground	IDS_OP_CONTINUE_IN_BACKGROUND	6701	在后台继续	Continue in background	
+OpCopyDetails	IDS_OP_COPY_DETAILS	6702	复制详情	Copy details	
+PickerWillSave	IDS_PICKER_WILL_SAVE	6703	将保存到：	Will save to: 	
+PickerOpenFolders	IDS_PICKER_OPEN_FOLDERS	6704	已打开	Open	
+PickerUndoJump	IDS_PICKER_UNDO_JUMP	6705	回到 {name}	Back to {name}	
+PickerExplorerSource	IDS_PICKER_EXPLORER_SOURCE	6706	资源管理器	Explorer	
+PickerPulseSource	IDS_PICKER_PULSE_SOURCE	6817	Pulse	Pulse	Pulse
+PickerPropertyAdd	IDS_PICKER_PROPERTY_ADD	6818	添加{name}	Add {name}	
+DialogRecordStatusSuccess	IDS_DIALOG_RECORD_STATUS_SUCCESS	6819	已接管	Replaced	
+DialogRecordStatusNative	IDS_DIALOG_RECORD_STATUS_NATIVE	6820	原生对话框	Native dialog	
+DialogRecordStatusFailed	IDS_DIALOG_RECORD_STATUS_FAILED	6821	未完成	Not completed	
+DialogRecordStatusRestart	IDS_DIALOG_RECORD_STATUS_RESTART	6822	需重新打开	Reopen needed	
+DialogRecordStatusUnknown	IDS_DIALOG_RECORD_STATUS_UNKNOWN	6823	待确认	Unconfirmed	
+DialogRecordGroupRestart	IDS_DIALOG_RECORD_GROUP_RESTART	6824	需要重新打开	Needs reopening	
+DialogRecordGroupRecent	IDS_DIALOG_RECORD_GROUP_RECENT	6825	最近记录	Recent records	
+DialogRecordCountOne	IDS_DIALOG_RECORD_COUNT_ONE	6826	1 次	once	
+DialogRecordCountMany	IDS_DIALOG_RECORD_COUNT_MANY	6827	合并 {count} 次	{count} events	
+DialogRecordRunningOld	IDS_DIALOG_RECORD_RUNNING_OLD	6828	运行中 · 仍加载旧接管组件	Running · older dialog component loaded	
+PickerJumpRecent	IDS_PICKER_JUMP_RECENT	6707	{name} 最近使用	{name} recent	
+PickerJumpEverywhere	IDS_PICKER_JUMP_EVERYWHERE	6708	全盘	Everywhere	
+PickerJumpCreate	IDS_PICKER_JUMP_CREATE	6709	在 {folder} 中新建文件夹“{name}”	New folder “{name}” in {folder}	
+PickerJumpNoMatch	IDS_PICKER_JUMP_NO_MATCH	6710	没有匹配的文件夹	No matching folders	
+PickerJumpHintPick	IDS_PICKER_JUMP_HINT_PICK	6711	选择	Select	
+PickerJumpHintEnter	IDS_PICKER_JUMP_HINT_ENTER	6712	进入	Go	
+PickerJumpHintTab	IDS_PICKER_JUMP_HINT_TAB	6713	补全路径	Complete path	
+PickerJumpHintSaveHere	IDS_PICKER_JUMP_HINT_SAVE_HERE	6714	直接保存到这里	Save here	
+PickerJumpHintBack	IDS_PICKER_JUMP_HINT_BACK	6715	返回	Back	
+PickerJumpNote	IDS_PICKER_JUMP_NOTE	6716	支持拼音首字母 · 路径片段	Pinyin initials · path fragments	
+PickerJumpPulseTab	IDS_PICKER_JUMP_PULSE_TAB	6717	Pulse 标签	Pulse tab	
+StoreInstallFromFile	IDS_STORE_INSTALL_FROM_FILE	6718	从文件安装…	Install from file…	
+StoreInstallFileDialogTitle	IDS_STORE_INSTALL_FILE_DIALOG_TITLE	6719	选择扩展包	Select extension package	
+StoreInstallFileFilter	IDS_STORE_INSTALL_FILE_FILTER	6720	Pulse 扩展包 (*.pulse-ext)	Pulse extension package (*.pulse-ext)	
+StoreRestartNow	IDS_STORE_RESTART_NOW	6721	立即重启	Restart now	
+StoreInstallFailed	IDS_STORE_INSTALL_FAILED	6722	扩展安装失败	Extension installation failed	
+StoreSourceLocalFile	IDS_STORE_SOURCE_LOCAL_FILE	6723	来源：本地扩展包	Source: Local extension package	
+StoreSourceCatalog	IDS_STORE_SOURCE_CATALOG	6724	来源：扩展商店目录	Source: Extension store catalog	
+StorePublisherUnsigned	IDS_STORE_PUBLISHER_UNSIGNED	6725	未签名（本地扩展包）	Unsigned (local package)	
+StorePublisherVerified	IDS_STORE_PUBLISHER_VERIFIED	6726	已验证数字签名（指纹：{pin}）	Verified digital signature (fingerprint: {pin})	
+StorePublisherNewKey	IDS_STORE_PUBLISHER_NEW_KEY	6727	数字签名已校验 · 首次信任发布者公钥（指纹：{pin}）	Signature verified · First-time publisher key (fingerprint: {pin})	
+StoreUnsignedLocalWarning	IDS_STORE_UNSIGNED_LOCAL_WARNING	6728	警告：此本地扩展包没有数字签名，无法核验发布者身份。仅在完全信任文件来源时继续安装。	Warning: This local extension package is unsigned and its publisher cannot be verified. Only install it if you fully trust its source.	
+StoreTrustKeyHint	IDS_STORE_TRUST_KEY_HINT	6729	信任后将固定此发布者公钥，用于校验后续安装与更新。	Trusting pins this publisher's public key to verify installations and future updates.	
+StorePermissionsAddedHeading	IDS_STORE_PERMISSIONS_ADDED_HEADING	6730	请求的系统与目录权限：	Requested permissions:	
+StorePermissionsNone	IDS_STORE_PERMISSIONS_NONE	6731	未声明额外的宿主目录或系统操作权限。	No additional folder or system operation permissions requested.	
+StorePermissionsUnchanged	IDS_STORE_PERMISSIONS_UNCHANGED	6732	未新增额外权限（保持当前已安装版本的权限范围）。	No additional permissions requested beyond the currently installed version.	
+StoreExtensionIdLabel	IDS_STORE_EXTENSION_ID_LABEL	6733	扩展标识符：{id}	Extension ID: {id}	
+StoreRollbackRevisionLabel	IDS_STORE_ROLLBACK_REVISION_LABEL	6734	版本回退：{current} → {target}	Revision rollback: {current} → {target}	
+StoreChangeNoAddedPermissions	IDS_STORE_CHANGE_NO_ADDED_PERMISSIONS	6735	此变更不请求新增权限。	This change does not request additional permissions.	
+StorePermContextRead	IDS_STORE_PERM_CONTEXT_READ	6736	读取当前打开的文件夹与所选项目信息	Read the current folder and selected items	
+StorePermContextEvents	IDS_STORE_PERM_CONTEXT_EVENTS	6737	接收目录切换与选择变更通知	Receive folder navigation and selection change events	
+StorePermFilesReadCurrentDir	IDS_STORE_PERM_FILES_READ_CURRENT_DIR	6738	读取当前浏览文件夹中的文件与子项	Read files and entries in the current folder	
+StorePermFilesRenameCurrentDir	IDS_STORE_PERM_FILES_RENAME_CURRENT_DIR	6739	重命名当前浏览文件夹中的文件或文件夹	Rename files and folders in the current folder	
+StorePermFilesReadDir	IDS_STORE_PERM_FILES_READ_DIR	6740	读取指定文件夹中的文件列表与内容	Read files and contents in specified folders	
+StorePermFilesWatchDir	IDS_STORE_PERM_FILES_WATCH_DIR	6741	监视文件夹中的文件变动	Monitor folders for file changes	
+StorePermFilesOpen	IDS_STORE_PERM_FILES_OPEN	6742	打开文件或调用系统关联程序	Open files or launch associated programs	
+StorePermFilesTransferSelection	IDS_STORE_PERM_FILES_TRANSFER_SELECTION	6743	复制或移动当前选中的文件与文件夹	Copy or move currently selected files and folders	
+StorePermFilesDeleteSelection	IDS_STORE_PERM_FILES_DELETE_SELECTION	6744	删除当前选中项目或移入回收站	Delete currently selected items or move them to the Recycle Bin	
+StorePermFilesTransferToDir	IDS_STORE_PERM_FILES_TRANSFER_TO_DIR	6745	向目标文件夹写入、导出或解压文件	Write, export, or extract files into destination folders	
+StorePermFilesTransferFromDir	IDS_STORE_PERM_FILES_TRANSFER_FROM_DIR	6746	从源文件夹读取并打包或导入文件	Read and package or import files from source folders	
+StorePermFilesTransferDirTree	IDS_STORE_PERM_FILES_TRANSFER_DIR_TREE	6747	递归复制、移动或同步整个目录树	Recursively copy, move, or sync entire directory trees	
+StorePermOperationsOwn	IDS_STORE_PERM_OPERATIONS_OWN	6748	创建并管理后台文件任务与进度提示	Create and manage background file tasks and progress	
+StorePermSettingsOwn	IDS_STORE_PERM_SETTINGS_OWN	6749	保存并管理此扩展自身的设置项	Save and manage settings owned by this extension	
+StorePermAuditOwn	IDS_STORE_PERM_AUDIT_OWN	6750	记录此扩展自身的运行诊断与审计日志	Record diagnostic and audit logs owned by this extension	
+StoreErrorSignatureInvalid	IDS_STORE_ERROR_SIGNATURE_INVALID	6751	扩展包数字签名无效或已被篡改，已拒绝安装。	The extension package signature is invalid or tampered with; installation was blocked.	
+StoreErrorSignatureRequired	IDS_STORE_ERROR_SIGNATURE_REQUIRED	6752	当前签名安全策略要求扩展必须包含有效数字签名。	Current signature policy requires extensions to have a valid digital signature.	
+StoreErrorPublisherMismatch	IDS_STORE_ERROR_PUBLISHER_MISMATCH	6753	扩展包发布者与已安装版本的签名身份不一致，已拒绝覆盖。	The package publisher does not match the installed signed extension; replacement was blocked.	
+PickerRecentFiles	IDS_PICKER_RECENT_FILES	6754	最近的文件 · 不限文件夹	Recent files · any folder	
+PickerJumpUserIndex	IDS_PICKER_JUMP_USER_INDEX	6755	正在使用用户索引	Using the per-user index	
+PickerWillCreateFolders	IDS_PICKER_WILL_CREATE_FOLDERS	6756	将新建文件夹：{paths}	Will create folders: {paths}	
+PickerCreateFolders	IDS_PICKER_CREATE_FOLDERS	6757	创建这些文件夹	Create these folders	
+PickerCreatedFoldersRemain	IDS_PICKER_CREATED_FOLDERS_REMAIN	6758	创建的文件夹会保留，即使之后取消保存。	Created folders will remain even if you cancel saving afterwards.	
+PickerAppLastLocation	IDS_PICKER_APP_LAST_LOCATION	6759	{name} 上次	{name} last location	
+PickerRecentFilesFromApp	IDS_PICKER_RECENT_FILES_FROM_APP	6760	最近的文件 · 来自 {name}，不限文件夹	Recent files · from {name}, any folder	
+PickerSearchFolder	IDS_PICKER_SEARCH_FOLDER	6761	在 {name} 中搜索	Search in {name}	
+OpConflictExistingLabel	IDS_OP_CONFLICT_EXISTING_LABEL	6762	现有	Existing	
+OpConflictIncomingCopyLabel	IDS_OP_CONFLICT_INCOMING_COPY_LABEL	6763	复制过来	Incoming	
+OpConflictIncomingMoveLabel	IDS_OP_CONFLICT_INCOMING_MOVE_LABEL	6764	移动过来	Incoming	
+OpConflictSameSizeTime	IDS_OP_CONFLICT_SAME_SIZE_TIME	6765	两个文件大小和修改时间完全相同	Both files have the same size and modified time	
+OpConflictSameSizeOnly	IDS_OP_CONFLICT_SAME_SIZE_ONLY	6766	两个文件大小相同	Both files have the same size	
+OpConflictIncomingNewerLargerCopy	IDS_OP_CONFLICT_INCOMING_NEWER_LARGER_COPY	6767	复制过来的文件较新且更大	Incoming file is newer and larger	
+OpConflictIncomingNewerLargerMove	IDS_OP_CONFLICT_INCOMING_NEWER_LARGER_MOVE	6768	移动过来的文件较新且更大	Incoming file is newer and larger	
+OpConflictIncomingNewerSmallerCopy	IDS_OP_CONFLICT_INCOMING_NEWER_SMALLER_COPY	6769	复制过来的文件较新，但较小	Incoming file is newer, but smaller	
+OpConflictIncomingNewerSmallerMove	IDS_OP_CONFLICT_INCOMING_NEWER_SMALLER_MOVE	6770	移动过来的文件较新，但较小	Incoming file is newer, but smaller	
+OpConflictIncomingNewerSameSizeCopy	IDS_OP_CONFLICT_INCOMING_NEWER_SAME_SIZE_COPY	6771	复制过来的文件较新，大小相同	Incoming file is newer, with the same size	
+OpConflictIncomingNewerSameSizeMove	IDS_OP_CONFLICT_INCOMING_NEWER_SAME_SIZE_MOVE	6772	移动过来的文件较新，大小相同	Incoming file is newer, with the same size	
+OpConflictExistingNewerLarger	IDS_OP_CONFLICT_EXISTING_NEWER_LARGER	6773	现有文件较新且更大	Existing file is newer and larger	
+OpConflictExistingNewerSmaller	IDS_OP_CONFLICT_EXISTING_NEWER_SMALLER	6774	现有文件较新，但较小	Existing file is newer, but smaller	
+OpConflictExistingNewerSameSize	IDS_OP_CONFLICT_EXISTING_NEWER_SAME_SIZE	6775	现有文件较新，大小相同	Existing file is newer, with the same size	
+OpConflictIncomingLargerCopy	IDS_OP_CONFLICT_INCOMING_LARGER_COPY	6776	修改时间相同，复制过来的文件更大	Same modified time; incoming file is larger	
+OpConflictIncomingLargerMove	IDS_OP_CONFLICT_INCOMING_LARGER_MOVE	6777	修改时间相同，移动过来的文件更大	Same modified time; incoming file is larger	
+OpConflictExistingLarger	IDS_OP_CONFLICT_EXISTING_LARGER	6778	修改时间相同，现有文件更大	Same modified time; existing file is larger	
+OpConflictFoldersSummary	IDS_OP_CONFLICT_FOLDERS_SUMMARY	6779	同名文件夹中的内容将会合并	Contents of folders with the same name will be merged	
+OpRecommended	IDS_OP_RECOMMENDED	6780	推荐	Recommended	
+OpReplaceCopySub	IDS_OP_REPLACE_COPY_SUB	6781	用复制过来的文件覆盖现有文件	Overwrite the existing file with the incoming one	
+OpReplaceMoveSub	IDS_OP_REPLACE_MOVE_SUB	6782	用移动过来的文件覆盖现有文件	Overwrite the existing file with the incoming one	
+OpSkipFileSub	IDS_OP_SKIP_FILE_SUB	6783	保留现有文件，不做更改	Keep the existing file without changes	
+OpSkipItemSub	IDS_OP_SKIP_ITEM_SUB	6784	保留现有项目，不做更改	Keep the existing item without changes	
+OpKeepCopyAsLead	IDS_OP_KEEP_COPY_AS_LEAD	6785	复制过来的另存为 	Save incoming as 	
+OpKeepMoveAsLead	IDS_OP_KEEP_MOVE_AS_LEAD	6786	移动过来的另存为 	Save incoming as 	
+PickerTypeToJump	IDS_PICKER_TYPE_TO_JUMP	6787	打字跳转	Type to jump	
+PickerJustNow	IDS_PICKER_JUST_NOW	6788	刚刚	Just now	
+PickerMinutesAgo	IDS_PICKER_MINUTES_AGO	6789	{count} 分钟前	{count} minutes ago	
+PickerHoursAgo	IDS_PICKER_HOURS_AGO	6790	{count} 小时前	{count} hours ago	
+PickerYesterday	IDS_PICKER_YESTERDAY	6791	昨天	Yesterday	
+PickerVisitCount	IDS_PICKER_VISIT_COUNT	6792	{count} 次	{count} visits	
+PickerRecentFilesFromAppAndPulse	IDS_PICKER_RECENT_FILES_FROM_APP_AND_PULSE	6793	最近的文件 · 来自 {name} 和 Pulse，不限文件夹	Recent files · from {name} and Pulse, any folder	
+PickerAutoJumpNotice	IDS_PICKER_AUTO_JUMP_NOTICE	6794	已跳到 Pulse 当前文件夹 {name}	Jumped to the current Pulse folder {name}	
+PickerSelectionContinue	IDS_PICKER_SELECTION_CONTINUE	6795	Ctrl 或 Shift 点击继续添加	Ctrl or Shift click to add more	
+PickerFoldersOnly	IDS_PICKER_FOLDERS_ONLY	6796	只看文件夹	Folders only	
+PickerIndexLearn	IDS_PICKER_INDEX_LEARN	6797	了解索引服务	About indexing	
+PickerSelectedSizeFormat	IDS_PICKER_SELECTED_SIZE_FORMAT	6798	{count} 个文件 · {size}	{count} files · {size}	
+PickerUserIndexExplanation	IDS_PICKER_USER_INDEX_EXPLANATION	6799	正在使用用户索引，只搜索已纳入用户索引的文件夹。全盘索引服务可扩大搜索范围；此处不会自动安装服务。	Using the per-user index; only indexed user folders are searched. The full-disk indexing service can expand coverage. No service is installed automatically here.	
+PickerSearchResultSummary	IDS_PICKER_SEARCH_RESULT_SUMMARY	6800	{count} 个结果 · {ms} 毫秒	{count} results · {ms} ms	
+PickerSaveAsName	IDS_PICKER_SAVE_AS_NAME	6801	另存为 {name}	Save as {name}	
+DialogHistoryShownClosed	IDS_DIALOGHISTORYSHOWNCLOSED	6802	Pulse 对话框已显示并正常取消或关闭，没有返回选中文件。	The Pulse dialog was displayed and cancelled or closed normally; no selected file was returned.	
+NativeExtTabSettings	IDS_NATIVE_EXT_TAB_SETTINGS	6803	扩展设置	Extension settings	
+NativeExtTabContextMenu	IDS_NATIVE_EXT_TAB_CONTEXT_MENU	6804	右键菜单	Context menu	
+NativeExtMenuPlacementTitle	IDS_NATIVE_EXT_MENU_PLACEMENT_TITLE	6805	菜单显示方式	Menu placement	
+NativeExtMenuPlacementDesc	IDS_NATIVE_EXT_MENU_PLACEMENT_DESC	6806	决定该扩展的命令在右键菜单中的排列方式	Choose how this extension's commands appear in the context menu	
+NativeExtMenuPlacementDefault	IDS_NATIVE_EXT_MENU_PLACEMENT_DEFAULT	6807	默认	Default	
+NativeExtMenuPlacementFlat	IDS_NATIVE_EXT_MENU_PLACEMENT_FLAT	6808	平铺到主菜单	Flat in main menu	
+NativeExtMenuPlacementSubmenu	IDS_NATIVE_EXT_MENU_PLACEMENT_SUBMENU	6809	收纳到子菜单	Collapse into submenu	
+NativeExtMenuPlacementHidden	IDS_NATIVE_EXT_MENU_PLACEMENT_HIDDEN	6810	隐藏全部	Hide all	
+NativeExtMenuCommandsTitle	IDS_NATIVE_EXT_MENU_COMMANDS_TITLE	6811	右键菜单命令	Context menu commands	
+NativeExtMenuCommandsDesc	IDS_NATIVE_EXT_MENU_COMMANDS_DESC	6812	单独开启或隐藏该扩展在右键菜单中的每一项命令	Show or hide individual context menu commands from this extension	
+NativeExtMenuCommandsEmpty	IDS_NATIVE_EXT_MENU_COMMANDS_EMPTY	6813	该扩展当前未声明右键菜单命令	This extension has not declared any context menu commands	
+NativeExtMenuHiddenByPlugin	IDS_NATIVE_EXT_MENU_HIDDEN_BY_PLUGIN	6814	已由扩展自身隐藏	Currently hidden by the extension	
+NativeExtMenuResetOverrides	IDS_NATIVE_EXT_MENU_RESET_OVERRIDES	6815	恢复默认菜单显示	Reset menu overrides	
+DialogHistoryAdminAutoFailed	IDS_DIALOGHISTORYADMINAUTOFAILED	6816	这款管理员软件尚未自动接入。请在接管设置中检查自动服务状态。	Automatic attachment to this elevated application failed. Check the automatic service status in dialog integration settings.	

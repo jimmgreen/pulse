@@ -73,6 +73,7 @@ constexpr UINT WM_TAG_DROP_UNDO = WM_APP + 98;  // the 已给 N 项加上「…�
 constexpr UINT WM_TAG_RULE_HIT = WM_APP + 99;  // 自动规则: files appeared in a watched folder (tag_rules.cpp)
 constexpr UINT WM_TRAY_UNDO = WM_APP + 100;      // the tray release snack: undo the copy / move
 constexpr UINT WM_TRAY_OPEN_DEST = WM_APP + 101;  // the tray release snack: open the target folder
+constexpr UINT WM_TASK_RESULT_OPEN = WM_APP + 145;  // a plugin task's result snack: show what it produced
 constexpr UINT WM_TRAY_RESTORE = WM_APP + 102;   // the 已清空暂存区 snack: put the items back
 constexpr UINT WM_TRAY_TAKE_CLIP = WM_APP + 103;  // stage the Ctrl+C / Ctrl+X offer (剪贴板 N 项 · 收入)
 constexpr UINT WM_TAG_RULE_ACCEPT = WM_APP + 104;  // the 自动规则 snack's 加上

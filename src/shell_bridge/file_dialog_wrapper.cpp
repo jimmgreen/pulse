@@ -3,8 +3,11 @@
 #include "picker_shell_results.h"
 #include "file_dialog_events.h"
 #include "file_dialog_inprocess_session.h"
+#include "file_dialog_dynamic_helpers.h"
+#include "file_dialog_navigation_root.h"
 #include "file_dialog_client_state.h"
 #include "file_dialog_properties.h"
+#include "save_as_item_model.h"
 #include "../common/picker_navigation.h"
 #include "../ipc/picker_client.h"
 #include "../ui/file_save_model.h"
@@ -99,6 +102,27 @@ public:
         AddRef();
         struct Hold { FileDialog* self; ~Hold() { self->inprocess_.reset(); self->pending_folders_.clear(); self->showing_ = false; self->Release(); } } hold{this};
         showing_ = true;
+        show_observation_ = {};
+        show_observation_.sequence = ++show_sequence_;
+        show_observation_.factory = factory_;
+        ObserveShow(true);
+        const HRESULT result = ShowCore(owner);
+        show_observation_.result = result;
+        show_observation_.accepted_result = result == S_OK && bridge_result_ && item_ && result_count_ != 0;
+        ObserveShow(false);
+        return result;
+    }
+    HRESULT ShowNative(HWND owner, FileDialogShowFallback fallback = FileDialogShowFallback::Contract) {
+        show_observation_.native_fallback = true;
+        show_observation_.fallback = fallback;
+        return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
+    }
+    void ObserveShow(bool begin) noexcept {
+        if (services_.observe_show) {
+            try { services_.observe_show(begin, show_observation_); } catch (...) {}
+        }
+    }
+    HRESULT ShowCore(HWND owner) {
         // Clear the previous result before any fallible preparation of this Show.
         item_.Reset(); items_.Reset(); returned_name_.clear(); result_count_ = 0; result_index_ = 0; bridge_result_ = false;
         cancel_.Reset();
@@ -116,9 +140,10 @@ public:
                 if (!ready) {
                     ObserveNativeReason("resolve-not-ready-native");
                     shown_ = true;
-                    return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
+                    return ShowNative(owner, FileDialogShowFallback::ResolveNotReady);
                 }
                 resolved.resolve_on_show = {};
+                resolved.observe_show = std::move(services_.observe_show);
                 services_ = std::move(resolved);
                 // Deferred capture is not authorization. IPC cannot represent
                 // the retained event/custom-control contract.
@@ -140,20 +165,23 @@ public:
             // pulse.exe route: basic dialogs only; everything retained for
             // events, custom controls, properties or places stays in-process.
             const bool bridge_route = services_.prefer_bridge && (services_.run_bridge || !services_.executable.empty()) &&
-                subscriptions_.empty() && custom_controls_.empty() && !custom_group_ && !properties_owned_ && places_.empty();
+                subscriptions_.empty() && custom_controls_.empty() && !custom_group_ && !properties_owned_ && places_.empty() && !shell_filter_;
             // The pulse.exe host carries local-save access and caller-validated
             // Open/Save over the pipe; native extended options, places,
             // properties and missing-file Open remain provider features.
             const auto make_context = [&](bool bridge) {
                 PreparationContext c;
+                c.shell_item_filter_supported = !bridge && provided(PULSE_PICKER_UI_V2_FEATURE_SHELL_ITEM_FILTER);
                 c.native_options_supported = !bridge && provided(PULSE_PICKER_UI_V2_FEATURE_NATIVE_OPTIONS);
                 c.save_properties_owned = !bridge && properties_owned_ && provided(PULSE_PICKER_UI_V2_FEATURE_PROPERTIES);
                 c.client_state_owned = (bridge || services_.inprocess_provider) && static_cast<bool>(client_state_);
                 c.filesystem_places_owned = !bridge && provided(PULSE_PICKER_UI_V2_FEATURE_FILESYSTEM_PLACES);
                 c.native_save_defaults_supported = bridge || provided(PULSE_PICKER_UI_V2_FEATURE_SAVE_NATIVE_DEFAULTS);
                 c.save_no_test_create_supported = bridge || provided(PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_TEST_CREATE);
+                c.save_no_overwrite_supported = !bridge && provided(PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_OVERWRITE);
                 c.save_caller_validation_supported = bridge || provided(PULSE_PICKER_UI_V2_FEATURE_SAVE_SKIP_ACCESS);
                 c.open_missing_supported = !bridge && provided(PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING);
+                c.open_missing_validated_supported = !bridge && provided(PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING_VALIDATED);
                 c.caller_validation_supported = bridge || provided(PULSE_PICKER_UI_V2_FEATURE_OPEN_SKIP_ACCESS);
                 return c;
             };
@@ -172,6 +200,18 @@ public:
             const auto resolve_initial = [&](PreparationContext& c) {
                 if (!(((policy == AccessPolicy::LocalOpenV1 && factory_ == DialogFactory::Open) ||
                     (policy == AccessPolicy::LocalSaveV1 && factory_ == DialogFactory::Save)) && !native_only_)) return true;
+                if (factory_ == DialogFactory::Save && save_as_item_.HasCall()) {
+                    const HRESULT refreshed = save_as_item_.RefreshAfterSetter(native_.Get(), S_OK);
+                    SaveAsItemSeed seed;
+                    ComPtr<IPropertyStore> metadata;
+                    if (save_metadata_requested_ && (!c.save_properties_owned || properties_.Snapshot(&metadata) != S_OK)) return false;
+                    if (refreshed != S_OK || save_as_item_.BuildFilesystemSeed(save_metadata_requested_, &seed, metadata.Get()) != S_OK)
+                        return false;
+                    if (!CopyText(seed.directory.c_str(), c.resolved_initial_directory.emplace()) ||
+                        !CopyText(seed.filename.c_str(), c.resolved_save_as_filename.emplace())) return false;
+                    c.filesystem_save_as_item_owned = true;
+                    return true;
+                }
                 ComPtr<IShellItem> folder;
                 PWSTR path = nullptr;
                 SFGAOF attributes = SFGAO_FILESYSTEM | SFGAO_FOLDER;
@@ -220,7 +260,7 @@ public:
                     ObserveNativeReason(loaded ? "provider-loaded-on-demand" : "provider-load-on-demand-failed");
                     if (!loaded) {
                         shown_ = true;
-                        return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
+                        return ShowNative(owner, FileDialogShowFallback::ProviderUnavailable);
                     }
                     services_.inprocess_provider = std::move(loaded);
                 }
@@ -230,10 +270,11 @@ public:
                 auto context = make_context(false);
                 if (!resolve_initial(context)) {
                     shown_ = true;
-                    return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
+                    return ShowNative(owner, FileDialogShowFallback::InitialFolderUnavailable);
                 }
                 decision = PrepareFileDialogContract(factory_, calls_, id, policy, context);
             }
+            show_observation_.contract_reason = decision.reason;
             if (services_.observe_contract) {
                 try { services_.observe_contract(decision, native_only_, shown_, subscriptions_.size()); }
                 catch (...) {} // A diagnostic failure must not change dialog behavior.
@@ -244,14 +285,14 @@ public:
             const bool local_save = decision.supported_access_policy == AccessPolicy::LocalSaveV1;
             // The v1 pipe without bridge_request cannot carry local save or labels.
             if (local_save && !services_.inprocess_provider && !bridge_request)
-                return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
+                return ShowNative(owner);
             if ((decision.title || decision.ok_button_label || decision.file_name_label || decision.open_default_extension || decision.require_unencrypted_save) &&
                 !services_.inprocess_provider && !bridge_request)
-                return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
-            if (!eligible) return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
+                return ShowNative(owner);
+            if (!eligible) return ShowNative(owner);
             if (services_.inprocess_provider && !custom_group_ && !bridge_request) {
                 if (factory_ != DialogFactory::Open && !local_save)
-                    return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
+                    return ShowNative(owner);
                 DWORD owner_pid = 0;
                 const DWORD owner_thread = owner ? GetWindowThreadProcessId(owner, &owner_pid) : 0;
                 char diagnostic[224]{};
@@ -270,19 +311,23 @@ public:
                         for (const auto& field : properties_.Fields()) {
                             FileDialogPropertyView view;
                             view.index = static_cast<uint32_t>(property_views.size());
-                            view.kind = field.type == VT_LPWSTR ? PULSE_PICKER_UI_V2_PROPERTY_SCALAR : PULSE_PICKER_UI_V2_PROPERTY_LIST;
+                            const bool list = field.type == (VT_VECTOR | VT_LPWSTR);
+                            view.kind = field.group ? PULSE_PICKER_UI_V2_PROPERTY_GROUP : field.read_only ?
+                                (list ? PULSE_PICKER_UI_V2_PROPERTY_READONLY_LIST : PULSE_PICKER_UI_V2_PROPERTY_READONLY_SCALAR) :
+                                (list ? PULSE_PICKER_UI_V2_PROPERTY_LIST : PULSE_PICKER_UI_V2_PROPERTY_SCALAR);
                             view.label = field.label; view.values = field.values;
                             property_views.push_back(std::move(view));
                         }
                     }
-                    prepared = session->Prepare(decision, owner, custom_controls_, places_, property_views);
+                    prepared = session->Prepare(decision, owner, custom_controls_, places_, property_views,
+                        !explicit_set_folder_ && !explicit_folder_, navigation_root_);
                 }
                 catch (...) { ObserveNativeReason("inprocess-prepare-exception"); throw; }
                 std::snprintf(diagnostic, sizeof(diagnostic), "inprocess-prepare-return hr=0x%08lX", static_cast<unsigned long>(prepared));
                 ObserveNativeReason(diagnostic);
                 if (prepared != S_OK) {
                     session.reset();
-                    return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
+                    return ShowNative(owner, FileDialogShowFallback::ProviderPrepareFailed);
                 }
                 result_native_options_ = decision.effective_options.value_or(0);
                 inprocess_ = std::move(session); inprocess_used_ = true; bridge_result_ = true;
@@ -293,7 +338,9 @@ public:
                 if (result_native_options_ & FOS_SHAREAWARE) callbacks.share_violation = InprocessShareViolation;
                 PulsePickerUiV2Result result{}; std::wstring path;
                 inprocess_callback_seen_ = false;
+                show_observation_.provider_started = true;
                 const HRESULT shown = inprocess_->Show(callbacks, result, path);
+                show_observation_.ui_shown = (result.flags & PULSE_PICKER_UI_V2_UI_SHOWN) != 0;
                 if (inprocess_->Closed()) return inprocess_->CloseResult();
                 // Show clears output buffer pointers only after validating the provider's
                 // terminal result. Any callback, even malformed, excludes startup retry.
@@ -303,7 +350,7 @@ public:
                     !result.path.data && !result.paths.data && !result.path.units && !result.paths.units && !result.path_count) {
                     inprocess_.reset(); inprocess_used_ = false; bridge_result_ = false;
                     ObserveNativeReason("inprocess-startup-native-fallback");
-                    return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
+                    return ShowNative(owner, FileDialogShowFallback::ProviderFailedBeforeUi);
                 }
                 if (FAILED(shown) || result.status != PULSE_PICKER_UI_V2_ACCEPTED) return shown;
                 const HRESULT materialized = CreatePickerShellItemArray(ResultOperation(), inprocess_->AcceptedPaths(), &items_, allow_missing_result_, result_native_options_);
@@ -335,6 +382,7 @@ public:
             cancel_.Reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
             if (!cancel_) return HRESULT_FROM_WIN32(GetLastError());
             const auto& request = bridge_request ? *bridge_request : *decision.request;
+            show_observation_.provider_started = true;
             const auto response = services_.run_bridge ? services_.run_bridge(request, owner, cancel_.Get()) :
                 wire::RunPickerClient(services_.executable, request, owner, cancel_.Get());
             cancel_.Reset();
@@ -477,6 +525,7 @@ public:
     HRESULT STDMETHODCALLTYPE SetDefaultFolder(IShellItem* folder) override {
         if (const auto hr = Mutable(); FAILED(hr)) return hr;
         SetterCall call; call.setting = Setting::DefaultFolder; call.native_result = native_->SetDefaultFolder(folder);
+        RefreshSaveAsItem(call.native_result);
         // Do not turn a default into an explicit folder: native GetFolder and
         // the owned client history resolve precedence when Show prepares.
         return Track(std::move(call));
@@ -500,7 +549,8 @@ public:
             if (navigated != S_OK) return navigated;
         } else if (const auto hr = Mutable(); FAILED(hr)) return hr;
         SetterCall call; call.setting = Setting::Folder; call.native_result = native_->SetFolder(folder);
-        if (call.native_result == S_OK) explicit_folder_ = true;
+        RefreshSaveAsItem(call.native_result);
+        if (call.native_result == S_OK) explicit_folder_ = explicit_set_folder_ = true;
         PWSTR path = nullptr;
         SFGAOF attributes = SFGAO_FILESYSTEM | SFGAO_FOLDER;
         if (SUCCEEDED(call.native_result) && folder && SUCCEEDED(folder->GetAttributes(attributes, &attributes)) &&
@@ -646,7 +696,17 @@ public:
     }
     HRESULT STDMETHODCALLTYPE SetFilter(IShellItemFilter* filter) override {
         if (const auto hr = Mutable(); FAILED(hr)) return hr;
-        return Unsupported(Setting::ShellFilter, native_->SetFilter(filter));
+        const HRESULT result = native_->SetFilter(filter);
+        // The mirrored native object owns exactly the native one reference.
+        // Borrow it only while native_ lives; take a strong callback snapshot.
+        if (result == S_OK) shell_filter_ = filter;
+        SetterCall call; call.setting = Setting::ShellFilter; call.native_result = result; call.value = filter ? 1u : 0u;
+        if (inprocess_) {
+            // A running provider cannot replace the visible enumeration atomically.
+            // End this Show rather than silently retaining a stale filter or replaying native UI.
+            inprocess_->Close(HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
+        }
+        return Track(std::move(call));
     }
     HRESULT STDMETHODCALLTYPE GetResults(IShellItemArray** items) override {
         if (!items) return E_POINTER;
@@ -670,12 +730,27 @@ public:
         return FAILED(hr) ? hr : open->GetSelectedItems(items);
     }
     HRESULT STDMETHODCALLTYPE SetSaveAsItem(IShellItem* item) override {
-        return SaveCall("SetSaveAsItem", Setting::SaveAsItem, item != nullptr, 0, [&](IFileSaveDialog* save) { return save->SetSaveAsItem(item); });
+        if (const auto hr = Mutable(); FAILED(hr)) return hr;
+        if (factory_ != DialogFactory::Save) return E_NOINTERFACE;
+        if (inspecting_metadata_) return HRESULT_FROM_WIN32(ERROR_BUSY);
+        AddRef();
+        struct Hold { FileDialog* self; ~Hold() { self->inspecting_metadata_ = false; self->Release(); } } hold{this};
+        inspecting_metadata_ = true;
+        ++metadata_epoch_; metadata_seen_ = true; readonly_collection_ = false;
+        ComPtr<IFileSaveDialog> save; const HRESULT queried = native_.As(&save); if (FAILED(queried)) return queried;
+        SetterCall call; call.setting = Setting::SaveAsItem; call.value = item ? 1u : 0u;
+        call.native_result = save->SetSaveAsItem(item);
+        const HRESULT captured = save_as_item_.ObserveSetSaveAsItem(item, native_.Get(), call.native_result);
+        DiagnosticResult("save-as-item-capture", captured);
+        if (call.native_result == S_OK) explicit_folder_ = item != nullptr;
+        if (captured != S_OK) MarkNativeOnly("save-as-item-outside-filesystem-subset");
+        return Track(std::move(call));
     }
     HRESULT STDMETHODCALLTYPE SetProperties(IPropertyStore* properties) override {
         if (const auto hr = Mutable(); FAILED(hr)) return hr;
         if (factory_ != DialogFactory::Save) return E_NOINTERFACE;
         if (inspecting_metadata_) return HRESULT_FROM_WIN32(ERROR_BUSY);
+        save_metadata_requested_ = true;
         AddRef();
         struct Hold { FileDialog* self; ~Hold() { self->inspecting_metadata_ = false; self->Release(); } } hold{this};
         inspecting_metadata_ = true;
@@ -703,6 +778,7 @@ public:
         if (const auto hr = Mutable(); FAILED(hr)) return hr;
         if (factory_ != DialogFactory::Save) return E_NOINTERFACE;
         if (inspecting_metadata_) return HRESULT_FROM_WIN32(ERROR_BUSY);
+        save_metadata_requested_ = true;
         AddRef();
         struct Hold { FileDialog* self; ~Hold() { self->inspecting_metadata_ = false; self->Release(); } } hold{this};
         inspecting_metadata_ = true;
@@ -774,7 +850,7 @@ public:
         *properties = nullptr;
         if (const auto hr = Thread(); FAILED(hr)) return hr;
         if (properties_owned_ && bridge_result_) {
-            if (properties_collected_ && ((inprocess_ && !inprocess_->Closed()) || properties_accepted_))
+            if (properties_collected_ && ((inprocess_ && inprocess_->InFileOk() && !inprocess_->Closed()) || properties_accepted_))
                 return properties_.Snapshot(properties);
             return E_UNEXPECTED;
         }
@@ -792,10 +868,25 @@ public:
             ComPtr<IFileSaveDialog> save; const HRESULT queried = native_.As(&save);
             return FAILED(queried) ? queried : save->GetProperties(properties);
         }
+        if (save_as_item_.HasCall() && !save_metadata_requested_) {
+            // No collection was requested: native GetProperties fails before,
+            // during and after an accepted SaveAsItem Show. Keep that getter
+            // contract instead of inventing metadata from the source filename.
+            ComPtr<IFileSaveDialog> save; const HRESULT queried = native_.As(&save);
+            return FAILED(queried) ? queried : save->GetProperties(properties);
+        }
         if (bridge_result_) return E_NOTIMPL;
         return SaveCall("GetProperties", Setting::SaveProperties, properties != nullptr, 0, [&](IFileSaveDialog* save) { return save->GetProperties(properties); });
     }
     HRESULT STDMETHODCALLTYPE ApplyProperties(IShellItem* item, IPropertyStore* properties, HWND owner, IFileOperationProgressSink* sink) override {
+        if (bridge_result_ && save_as_item_.HasCall() && !save_metadata_requested_) {
+            if (const auto hr = Thread(); FAILED(hr)) return hr;
+            if (!item || !properties) return E_POINTER;
+            // The documented Shell copy helper acts on the supplied existing
+            // item/store, not the dialog's initial or accepted source identity.
+            ComPtr<IFileSaveDialog> save; const HRESULT queried = native_.As(&save);
+            return FAILED(queried) ? queried : save->ApplyProperties(item, properties, owner, sink);
+        }
         if (properties_owned_ && bridge_result_) {
             if (const auto hr = Thread(); FAILED(hr)) return hr;
             if (!properties_accepted_ && !(inprocess_ && inprocess_->InFileOk() && !inprocess_->Closed())) return E_UNEXPECTED;
@@ -806,10 +897,32 @@ public:
         return SaveCall("ApplyProperties", Setting::SaveProperties, properties != nullptr, 0, [&](IFileSaveDialog* save) { return save->ApplyProperties(item, properties, owner, sink); });
     }
     HRESULT STDMETHODCALLTYPE SetCancelButtonLabel(LPCWSTR text) override {
-        return Dialog2Call([&](IFileDialog2* dialog) { return dialog->SetCancelButtonLabel(text); });
+        if (const auto hr = Mutable(); FAILED(hr)) return hr;
+        if (!native2_) return E_NOINTERFACE;
+        const HRESULT hr = native2_->SetCancelButtonLabel(text);
+        try {
+            SetterCall call; call.setting = Setting::CancelButtonLabel; call.native_result = hr;
+            if (SUCCEEDED(hr) && !CopyText(text, call.text)) MarkNativeOnly("cancel-label-snapshot-invalid");
+            Track(std::move(call));
+        } catch (...) { MarkNativeOnly("cancel-label-snapshot-allocation"); }
+        return hr;
     }
     HRESULT STDMETHODCALLTYPE SetNavigationRoot(IShellItem* root) override {
-        return Dialog2Call([&](IFileDialog2* dialog) { return dialog->SetNavigationRoot(root); });
+        if (const auto hr = Thread(); FAILED(hr)) return hr;
+        if (!native2_) return E_NOINTERFACE;
+        if (showing_ && bridge_result_ && !inprocess_) return E_UNEXPECTED;
+        std::wstring path;
+        const HRESULT captured = CaptureNavigationRoot(root, path);
+        if (inprocess_ && (captured != S_OK || !inprocess_->SupportsNavigationRoot())) return E_NOTIMPL;
+        const HRESULT hr = native2_->SetNavigationRoot(root);
+        if (hr == E_INVALIDARG) return hr;
+        if (hr != S_OK || captured != S_OK) { MarkNativeOnly("navigation-root-outside-filesystem-subset", &IID_IFileDialog2); return hr; }
+        if (inprocess_) {
+            const HRESULT updated = inprocess_->SetNavigationRoot(path);
+            if (updated != S_OK) { inprocess_->Close(updated); return updated; }
+        }
+        navigation_root_ = std::move(path); navigation_root_item_ = root;
+        return hr;
     }
     HRESULT STDMETHODCALLTYPE EnableOpenDropDown(DWORD id) override {
         return AddContainer(PULSE_PICKER_UI_V2_CONTROL_OPEN_DROPDOWN, id, nullptr);
@@ -1135,7 +1248,7 @@ private:
         if (FAILED(Thread()) || !inprocess_) return RPC_E_WRONG_THREAD;
         HRESULT hr = inprocess_->Observe(event);
         DiagnosticResult("inprocess-observe-return", hr);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr)) { if (event.kind == PULSE_PICKER_UI_V2_EVENT_INCLUDE_ITEM) inprocess_->Close(hr); return hr; }
         struct Exit { FileDialogInprocessSession* session; ~Exit() { session->LeaveEvent(); } } exit{inprocess_.get()};
         if (event.kind == PULSE_PICKER_UI_V2_EVENT_NAVIGATION_COMPLETE) {
             if (!event.proposed_folder.data || !event.proposed_folder.units || event.proposed_folder.units > PULSE_PICKER_UI_V2_MAX_UNITS) return E_INVALIDARG;
@@ -1149,9 +1262,25 @@ private:
             if (inprocess_->Read(state) != S_OK || _wcsicmp(state.folder.c_str(), path.c_str())) return E_UNEXPECTED;
             SetterCall call; call.setting = Setting::Folder; call.native_result = native_->SetFolder(folder.Get());
             if (call.native_result != S_OK) return call.native_result;
-            explicit_folder_ = true; call.filesystem_folder = true;
+            explicit_folder_ = explicit_set_folder_ = true; call.filesystem_folder = true;
             call.text.assign(path.begin(), path.end());
             return Track(std::move(call));
+        }
+        if (event.kind == PULSE_PICKER_UI_V2_EVENT_INCLUDE_ITEM) {
+            if (!shell_filter_ || !event.proposed_folder.data || !event.proposed_folder.units ||
+                event.proposed_folder.units > PULSE_PICKER_UI_V2_MAX_UNITS) return E_INVALIDARG;
+            const std::wstring path(event.proposed_folder.data, event.proposed_folder.units);
+            ComPtr<IShellItem> item;
+            const wchar_t* parsing = picker_navigation::IsComputerPath(path) ? L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}" : path.c_str();
+            const HRESULT created = SHCreateItemFromParsingName(parsing, nullptr, IID_PPV_ARGS(&item));
+            if (created != S_OK || !item) {
+                const HRESULT failure = FAILED(created) ? created : E_UNEXPECTED;
+                inprocess_->Close(failure); return failure;
+            }
+            ComPtr<IShellItemFilter> filter = shell_filter_;
+            // Native IFileDialog does not call GetEnumFlagsForItem. IncludeItem
+            // filters views, not typed navigation or the final typed result.
+            return filter->IncludeItem(item.Get());
         }
         // Strong snapshot in Advise order. A callback can remove itself/another
         // sink or register a replacement using a recycled native cookie.
@@ -1170,8 +1299,9 @@ private:
                 values.emplace_back(value.units ? std::wstring(value.data, value.units) : std::wstring());
             }
             const PROPERTYKEY key = properties_.Fields()[event.control_id].key;
-            return properties_.Edit(key, values);
+            return properties_.EditDraft(key, values);
         }
+        if (event.kind == PULSE_PICKER_UI_V2_EVENT_FILE_OK && properties_owned_ && properties_.HasInvalidEdits()) return S_FALSE;
         const auto interactive = [&](const FileDialogCustomControl* control) {
             if (!control || (control->state & 3u) != 3u) return false;
             if (!control->has_parent || (control->state & PULSE_PICKER_UI_V2_CONTROL_PROMINENT)) return true;
@@ -1312,6 +1442,7 @@ private:
         case Setting::DefaultExtension: return "SetDefaultExtension";
         case Setting::Title: return "SetTitle";
         case Setting::OkButtonLabel: return "SetOkButtonLabel";
+        case Setting::CancelButtonLabel: return "SetCancelButtonLabel";
         case Setting::FileNameLabel: return "SetFileNameLabel";
         case Setting::Place: return "AddPlace";
         case Setting::ClientGuid: return "SetClientGuid";
@@ -1387,9 +1518,32 @@ private:
         return Track(std::move(call));
     }
     HRESULT Text(Setting setting, LPCWSTR text, HRESULT (STDMETHODCALLTYPE IFileDialog::*method)(LPCWSTR)) {
-        if (inprocess_ && (setting == Setting::Title || setting == Setting::OkButtonLabel || setting == Setting::FileNameLabel)) return E_NOTIMPL;
+        if (inprocess_) {
+            if (const auto hr = Thread(); FAILED(hr)) return hr;
+            const auto kind = DynamicTextKind(setting);
+            if (!kind) return E_NOTIMPL;
+            std::u16string captured;
+            if (!(setting == Setting::DefaultExtension && !text) && !CopyText(text, captured)) return E_INVALIDARG;
+            std::wstring owned(captured.begin(), captured.end());
+            const HRESULT updated = inprocess_->UpdateText(kind, owned);
+            if (updated != S_OK) return updated;
+            const HRESULT native_result = (native_.Get()->*method)(text);
+            if (FAILED(native_result)) { inprocess_->Close(native_result); return native_result; }
+            if (setting == Setting::FileName && native_result == S_FALSE) {
+                PWSTR current = nullptr;
+                const HRESULT queried = native_->GetFileName(&current);
+                const bool unchanged = queried == S_OK && current && owned == current;
+                CoTaskMemFree(current);
+                // Native reports an unchanged filename as S_FALSE. Do not turn
+                // that verified no-op into an unrecognized-success replay call.
+                if (unchanged) return S_FALSE;
+            }
+            SetterCall call; call.setting = setting; call.native_result = native_result; call.text = std::move(captured);
+            return Track(std::move(call));
+        }
         if (const auto hr = Mutable(); FAILED(hr)) return hr;
         const HRESULT hr = (native_.Get()->*method)(text);
+        if (setting == Setting::FileName) RefreshSaveAsItem(hr);
         SetterCall call; call.setting = setting; call.native_result = hr;
         try {
             // The system dialog accepts null here and clears a previous default.
@@ -1407,14 +1561,23 @@ private:
     }
     template<class F> HRESULT Dialog2Call(F&& call) {
         if (const auto hr = Thread(); FAILED(hr)) return hr;
-        MarkNativeOnly("dialog2-method", &IID_IFileDialog2);
         if (bridge_result_) return E_UNEXPECTED;
         if (!native2_) return E_NOINTERFACE;
         AddRef();
         struct Hold { FileDialog* self; ~Hold() { self->Release(); } } hold{this};
-        try { return call(native2_.Get()); }
-        catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
-        catch (...) { return E_FAIL; }
+        try {
+            const HRESULT hr = call(native2_.Get());
+            // Native rejects null/file roots without changing its navigation state.
+            // Do not make a failed capability probe disable otherwise supported UI.
+            if (hr != E_INVALIDARG) MarkNativeOnly("navigation-root", &IID_IFileDialog2);
+            return hr;
+        } catch (const std::bad_alloc&) {
+            MarkNativeOnly("navigation-root-native-exception", &IID_IFileDialog2);
+            return E_OUTOFMEMORY;
+        } catch (...) {
+            MarkNativeOnly("navigation-root-native-exception", &IID_IFileDialog2);
+            return E_FAIL;
+        }
     }
     bool CanCaptureInprocess() const noexcept {
         return services_.inprocess_provider || static_cast<bool>(services_.resolve_on_show) ||
@@ -1523,7 +1686,7 @@ private:
         if (!CanCaptureInprocess() || !control || control->kind < PULSE_PICKER_UI_V2_CONTROL_COMBO || control->kind>6)
             return CustomizeCall(method, false, id, item, state, call);
         const bool structural = operation == ItemMutation::Add || operation == ItemMutation::Remove || operation == ItemMutation::Clear;
-        if (inprocess_ && structural) return E_NOTIMPL;
+        if (inprocess_ && structural && !inprocess_->SupportsDynamicItems()) return E_NOTIMPL;
         if (!inprocess_) { if (const auto hr = Mutable(); FAILED(hr)) return hr; }
         try {
             auto next = *control;
@@ -1563,7 +1726,8 @@ private:
             if (hr == S_OK) { *control = std::move(next); return S_OK; }
             const auto* old_item = FindItem(*control, item);
             HRESULT restored = E_UNEXPECTED;
-            if (operation == ItemMutation::State && old_item) restored = native->SetControlItemState(id, item, static_cast<CDCONTROLSTATEF>(old_item->state));
+            if (structural) restored = RestoreControlItems(native.Get(), *control, next);
+            else if (operation == ItemMutation::State && old_item) restored = native->SetControlItemState(id, item, static_cast<CDCONTROLSTATEF>(old_item->state));
             else if (operation == ItemMutation::Label && old_item) restored = native->SetControlItemText(id, item, old_item->label.c_str());
             else if (operation == ItemMutation::Select && control->has_selected) restored = native->SetSelectedControlItem(id, control->selected_item_id);
             HRESULT ui_restored = E_FAIL; try { ui_restored = inprocess_->UpdateControl(*control); } catch (...) {}
@@ -1713,6 +1877,7 @@ private:
         if (const auto hr = Mutable(); FAILED(hr)) return hr;
         if (factory_ != DialogFactory::Save) return E_NOINTERFACE;
         ++metadata_epoch_; metadata_seen_ = true; readonly_collection_ = false;
+        save_metadata_requested_ = true;
         AddRef(); struct Hold { FileDialog* self; ~Hold() { self->Release(); } } hold{this};
         ComPtr<IFileSaveDialog> save; const auto hr = native_.As(&save);
         if (FAILED(hr)) return hr;
@@ -1728,6 +1893,8 @@ private:
     ComPtr<IFileDialog> native_;
     ComPtr<IFileDialog2> native2_;
     FileDialogBridgeServices services_;
+    uint64_t show_sequence_ = 0;
+    FileDialogShowObservation show_observation_;
     std::unique_ptr<FileDialogInprocessSession> inprocess_;
     bool inprocess_used_ = false;
     bool inprocess_callback_seen_ = false;
@@ -1736,7 +1903,15 @@ private:
     std::shared_ptr<FileDialogClientState> client_state_;
     std::optional<GUID> client_guid_;
     bool explicit_folder_ = false;
+    bool explicit_set_folder_ = false;
     std::vector<FileDialogPlace> places_;
+    void RefreshSaveAsItem(HRESULT result) noexcept {
+        if (!save_as_item_.HasCall()) return;
+        const HRESULT captured = save_as_item_.RefreshAfterSetter(native_.Get(), result);
+        if (captured != S_OK) MarkNativeOnly("save-as-item-refresh-failed");
+    }
+    SaveAsItemModel save_as_item_;
+    bool save_metadata_requested_ = false;
     FileDialogProperties properties_;
     bool properties_owned_ = false, properties_accepted_ = false, properties_collected_ = false;
     bool readonly_collection_ = false, readonly_properties_result_ = false, metadata_seen_ = false, inspecting_metadata_ = false;
@@ -1759,9 +1934,12 @@ private:
     HRESULT close_result_ = S_OK;
     wire::PipeHandle cancel_;
     std::vector<SetterCall> calls_;
+    IShellItemFilter* shell_filter_ = nullptr; // Borrowed from native_ SetFilter ownership; caller STA only.
     ComPtr<IShellItem> item_;
     ComPtr<IShellItemArray> items_;
     std::wstring returned_name_;
+    std::wstring navigation_root_;
+    ComPtr<IShellItem> navigation_root_item_;
     UINT result_index_ = 0;
     size_t result_count_ = 0;
 };

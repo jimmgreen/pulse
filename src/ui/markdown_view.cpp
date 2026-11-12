@@ -232,8 +232,8 @@ bool MarkdownView::SetPayloadImpl(const std::wstring& payload, const std::wstrin
             toc_.push_back(std::move(entry));
         } else if (f[0] == L"M" && f.size() >= 2) {
             format_.assign(f[1]);
-            if (format_ == L"docx" && f.size() >= 3) words_ = ToU32(f[2]);
-            if (f.size() >= 3 && format_ != L"docx") doc_title_ = Unescape(f[2]);
+            if ((format_ == L"docx" || format_ == L"doc" || format_ == L"rtf") && f.size() >= 3) words_ = ToU32(f[2]);
+            if (f.size() >= 3 && format_ != L"docx" && format_ != L"doc" && format_ != L"rtf") doc_title_ = Unescape(f[2]);
             if (f.size() >= 4) doc_author_ = Unescape(f[3]);
         } else if (f[0] == L"I" && f.size() >= 3) {
             notebook_ = true;
@@ -732,6 +732,22 @@ bool MarkdownView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const 
     const bool repaint = DrawDocument(dc, factory, doc, theme, dark, scale, images, generation,
                                       sel_start, sel_end, matches);
     if (toc_rect_.right > toc_rect_.left) DrawToc(dc, toc_rect_, theme, dark);
+    if (!format_.empty() && !CurrentSectionHasContent() && brush_) {
+        const std::wstring message = pulse::l10n::Get(pulse::l10n::StringId::PreviewNativeDocumentEmpty);
+        const float width = (std::max)(1.0f, doc.right - doc.left - 48.0f * scale);
+        const float height = (std::max)(1.0f, doc.bottom - doc.top);
+        WrlPtr<IDWriteTextLayout> layout;
+        if (SUCCEEDED(factory->CreateTextLayout(message.data(), static_cast<UINT32>(message.size()),
+                body_.Get(), width, height, &layout))) {
+            layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            brush_->SetColor(WithAlpha(theme.text, 0.7f));
+            dc->PushAxisAlignedClip(doc, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            dc->DrawTextLayout(D2D1::Point2F(doc.left + 24.0f * scale, doc.top), layout.Get(), brush_.Get(),
+                D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            dc->PopAxisAlignedClip();
+        }
+    }
     return repaint;
 }
 
@@ -974,7 +990,8 @@ bool MarkdownView::DrawDocument(ID2D1DeviceContext* dc, IDWriteFactory2* factory
         const float fy = oy + footer_y_;
         brush_->SetColor(line);
         dc->FillRectangle(R(origin_x_, fy, origin_x_ + W, fy + 1.0f * s), brush_.Get());
-        std::wstring label = pulse::l10n::Get(pulse::l10n::StringId::NextChapter).c_str();
+        std::wstring label = pulse::l10n::Get(format_ == L"ppt" || format_ == L"pptx"
+            ? pulse::l10n::StringId::PreviewNextSlide : pulse::l10n::StringId::NextChapter).c_str();
         const std::wstring& name = sections_[section_ + 1].name;
         if (!name.empty()) label += L"  ·  " + name.substr(0, 60);
         label += L"  ›";
@@ -1166,6 +1183,15 @@ std::wstring MarkdownView::LinkAt(float x, float y) const {
         if ((run.flags & kLink) && m.textPosition >= run.start && m.textPosition < run.start + run.length)
             return run.target;
     return {};
+}
+
+bool MarkdownView::CurrentSectionHasContent() const noexcept {
+    for (const auto& block : blocks_) {
+        if (block.image) return true;
+        for (const wchar_t c : block.text)
+            if (c != L' ' && c != L'\t' && c != L'\r' && c != L'\n' && c != 0x3000) return true;
+    }
+    return false;
 }
 
 void MarkdownView::Reveal(uint32_t offset) {

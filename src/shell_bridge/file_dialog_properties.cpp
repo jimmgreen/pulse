@@ -1,4 +1,5 @@
 #include "file_dialog_properties.h"
+#include "property_value_text.h"
 #include <propvarutil.h>
 #include <algorithm>
 #include <cwchar>
@@ -16,6 +17,10 @@ struct Value {
 };
 bool Text(const wchar_t* text) {
     return !text || wcsnlen_s(text, kMaxText + 1) <= kMaxText;
+}
+bool EditableScalar(VARTYPE type) {
+    return type == VT_LPWSTR || type == VT_I1 || type == VT_UI1 || type == VT_I2 || type == VT_UI2 ||
+        type == VT_I4 || type == VT_UI4 || type == VT_I8 || type == VT_UI8 || type == VT_BOOL || property_text::ExactScalar(type);
 }
 bool Safe(const PROPVARIANT& value) {
     switch (value.vt) {
@@ -76,6 +81,10 @@ HRESULT FileDialogProperties::Clone(IPropertyStore* source, IPropertyStore** res
 HRESULT FileDialogProperties::MakeFields(IPropertyStore* store, const std::vector<Description>& descriptions,
     std::vector<DialogPropertyField>& result) const {
     for (const auto& description : descriptions) {
+        DialogPropertyField field{ description.key, description.type, description.label, {} };
+        field.read_only = description.read_only;
+        field.group = description.group;
+        if (description.group) { result.push_back(std::move(field)); continue; }
         Value value;
         HRESULT hr = store->GetValue(description.key, &value.value); if (FAILED(hr)) return hr;
         if (!Safe(value.value)) return E_NOTIMPL;
@@ -85,9 +94,33 @@ HRESULT FileDialogProperties::MakeFields(IPropertyStore* store, const std::vecto
             hr = PSCoerceToCanonicalValue(description.key, &value.value);
             if (hr != S_OK || !Safe(value.value) || (value.value.vt != VT_EMPTY && value.value.vt != description.type)) return E_NOTIMPL;
         }
-        DialogPropertyField field{ description.key, description.type, description.label, {} };
-        if (description.type == VT_LPWSTR) field.values.emplace_back(value.value.vt == VT_EMPTY || !value.value.pwszVal ? L"" : value.value.pwszVal);
-        else if (value.value.vt != VT_EMPTY) {
+        if (description.read_only && description.type != (VT_VECTOR | VT_LPWSTR)) {
+            PWSTR formatted = nullptr;
+            if (value.value.vt != VT_EMPTY) {
+                hr = PSFormatForDisplayAlloc(description.key, value.value, PDFF_DEFAULT, &formatted);
+                if (FAILED(hr)) { CoTaskMemFree(formatted); return hr; }
+            }
+            try { field.values.emplace_back(formatted ? formatted : L""); }
+            catch (...) { CoTaskMemFree(formatted); throw; }
+            CoTaskMemFree(formatted);
+        } else if (description.type == VT_LPWSTR) field.values.emplace_back(value.value.vt == VT_EMPTY || !value.value.pwszVal ? L"" : value.value.pwszVal);
+        else if (property_text::ExactScalar(description.type)) {
+            std::wstring text;
+            if (value.value.vt != VT_EMPTY) {
+                hr = property_text::Format(value.value, text);
+                if (FAILED(hr)) return hr;
+            }
+            field.values.push_back(std::move(text));
+        } else if (EditableScalar(description.type)) {
+            PWSTR text = nullptr;
+            if (value.value.vt != VT_EMPTY) {
+                hr = PropVariantToStringAlloc(value.value, &text);
+                if (FAILED(hr)) return hr;
+            }
+            try { field.values.emplace_back(text ? text : L""); }
+            catch (...) { CoTaskMemFree(text); throw; }
+            CoTaskMemFree(text);
+        } else if (value.value.vt != VT_EMPTY) {
             for (ULONG i = 0; i < value.value.calpwstr.cElems; ++i)
                 field.values.emplace_back(value.value.calpwstr.pElems[i] ? value.value.calpwstr.pElems[i] : L"");
         }
@@ -103,6 +136,7 @@ HRESULT FileDialogProperties::SetStore(IPropertyStore* store) noexcept try {
     std::vector<DialogPropertyField> fields;
     hr = MakeFields(working.Get(), descriptions_, fields); if (FAILED(hr)) return hr;
     original_ = std::move(original); working_ = std::move(working); fields_ = std::move(fields);
+    invalid_edits_.clear();
     return S_OK;
 } catch (...) { return E_OUTOFMEMORY; }
 HRESULT FileDialogProperties::SetCollected(IPropertyDescriptionList* list) noexcept try {
@@ -117,11 +151,12 @@ HRESULT FileDialogProperties::SetCollected(IPropertyDescriptionList* list) noexc
         hr = description->GetTypeFlags(PDTF_MASK_ALL, &flags); if (FAILED(hr)) return hr;
         // ISINNATE means read-only; ISGROUP is a heading, not an editable value.
         // ISSYSTEMPROPERTY only denotes schema ownership and does not forbid editing.
-        if (flags & (PDTF_ISINNATE | PDTF_ISGROUP)) return E_NOTIMPL;
         Description item;
+        item.group = (flags & PDTF_ISGROUP) != 0;
+        item.read_only = item.group || (flags & PDTF_ISINNATE) != 0;
         hr = description->GetPropertyKey(&item.key); if (FAILED(hr)) return hr;
         hr = description->GetPropertyType(&item.type); if (FAILED(hr)) return hr;
-        if (item.type != VT_LPWSTR && item.type != (VT_VECTOR | VT_LPWSTR)) return E_NOTIMPL;
+        if (!item.read_only && !EditableScalar(item.type) && item.type != (VT_VECTOR | VT_LPWSTR)) return E_NOTIMPL;
         PWSTR label = nullptr;
         hr = description->GetDisplayName(&label);
         if (FAILED(hr)) { CoTaskMemFree(label); return hr; }
@@ -136,17 +171,43 @@ HRESULT FileDialogProperties::SetCollected(IPropertyDescriptionList* list) noexc
     std::vector<DialogPropertyField> fields;
     hr = MakeFields(working.Get(), descriptions, fields); if (FAILED(hr)) return hr;
     working_ = std::move(working); descriptions_ = std::move(descriptions); fields_ = std::move(fields);
+    invalid_edits_.clear();
     return S_OK;
 } catch (...) { return E_OUTOFMEMORY; }
 HRESULT FileDialogProperties::Edit(REFPROPERTYKEY key, const std::vector<std::wstring>& values) noexcept try {
     const auto found = std::find_if(descriptions_.begin(), descriptions_.end(), [&](const auto& item) { return IsEqualPropertyKey(item.key, key); });
     if (found == descriptions_.end()) return E_INVALIDARG;
-    if (values.size() > kMaxItems || (found->type == VT_LPWSTR && values.size() != 1)) return E_INVALIDARG;
+    if (found->read_only || found->group) return E_ACCESSDENIED;
+    if (values.size() > kMaxItems || (EditableScalar(found->type) && values.size() != 1)) return E_INVALIDARG;
     for (const auto& text : values) if (text.size() > kMaxText || text.find(L'\0') != std::wstring::npos) return E_INVALIDARG;
     Value value;
     HRESULT hr;
     if (found->type == VT_LPWSTR) hr = InitPropVariantFromString(values[0].c_str(), &value.value);
-    else {
+    else if (EditableScalar(found->type)) {
+        if (values[0].empty()) hr = S_OK; // VT_EMPTY clears the optional metadata value.
+        else {
+            if (!property_text::ExactScalar(found->type) && found->type != VT_BOOL) {
+                const auto first = values[0][0] == L'-' || values[0][0] == L'+' ? 1u : 0u;
+                if (first == values[0].size() || values[0].find_first_not_of(L"0123456789", first) != std::wstring::npos)
+                    return E_INVALIDARG; // Do not round fractions or accept locale-dependent separators.
+            }
+            Value source;
+            if (property_text::ExactScalar(found->type)) hr = property_text::Parse(found->type, values[0], value.value);
+            else {
+                hr = InitPropVariantFromString(values[0].c_str(), &source.value);
+                if (SUCCEEDED(hr)) hr = PropVariantChangeType(&value.value, source.value, PVCHF_NOHEXSTRING, found->type);
+            }
+            if (SUCCEEDED(hr)) {
+                Value canonical;
+                hr = PropVariantCopy(&canonical.value, &value.value);
+                if (SUCCEEDED(hr)) hr = PSCoerceToCanonicalValue(key, &canonical.value);
+                if (hr != S_OK) return FAILED(hr) ? hr : E_INVALIDARG;
+                if (hr == S_OK && (canonical.value.vt != value.value.vt ||
+                    (property_text::ExactScalar(value.value.vt) ? !property_text::Same(canonical.value, value.value) :
+                    PropVariantCompareEx(canonical.value, value.value, PVCU_DEFAULT, PVCF_DEFAULT) != 0))) hr = E_INVALIDARG;
+            }
+        }
+    } else {
         std::vector<PCWSTR> pointers;
         for (const auto& text : values) pointers.push_back(text.c_str());
         hr = InitPropVariantFromStringVector(pointers.data(), static_cast<ULONG>(pointers.size()), &value.value);
@@ -162,7 +223,26 @@ HRESULT FileDialogProperties::Edit(REFPROPERTYKEY key, const std::vector<std::ws
     std::vector<DialogPropertyField> fields;
     hr = MakeFields(working.Get(), descriptions_, fields); if (FAILED(hr)) return hr;
     working_ = std::move(working); fields_ = std::move(fields);
+    std::erase_if(invalid_edits_, [&](const auto& item) { return IsEqualPropertyKey(item, key); });
     return S_OK;
+} catch (...) { return E_OUTOFMEMORY; }
+HRESULT FileDialogProperties::EditDraft(REFPROPERTYKEY key, const std::vector<std::wstring>& values) noexcept try {
+    const auto field = std::find_if(descriptions_.begin(), descriptions_.end(), [&](const auto& item) { return IsEqualPropertyKey(item.key, key); });
+    if (field != descriptions_.end() && (field->read_only || field->group)) return E_ACCESSDENIED;
+    if (field == descriptions_.end() || values.size() > kMaxItems ||
+        (EditableScalar(field->type) && values.size() != 1)) return E_INVALIDARG;
+    for (const auto& text : values)
+        if (text.size() > kMaxText || text.find(L'\0') != std::wstring::npos) return E_INVALIDARG;
+    const HRESULT hr = Edit(key, values);
+    if (hr == S_OK) {
+        std::erase_if(invalid_edits_, [&](const auto& item) { return IsEqualPropertyKey(item, key); });
+        return S_OK;
+    }
+    if (hr != E_INVALIDARG && hr != DISP_E_TYPEMISMATCH && hr != DISP_E_OVERFLOW &&
+        hr != HRESULT_FROM_WIN32(ERROR_INVALID_DATA) && hr != HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW)) return hr;
+    if (std::none_of(invalid_edits_.begin(), invalid_edits_.end(), [&](const auto& item) { return IsEqualPropertyKey(item, key); }))
+        invalid_edits_.push_back(key);
+    return S_FALSE;
 } catch (...) { return E_OUTOFMEMORY; }
 HRESULT FileDialogProperties::Snapshot(IPropertyStore** store) const noexcept try {
     return Clone(working_.Get(), store);
@@ -173,6 +253,7 @@ HRESULT FileDialogProperties::ResetEdits() noexcept try {
     std::vector<DialogPropertyField> fields;
     hr = MakeFields(working.Get(), descriptions_, fields); if (FAILED(hr)) return hr;
     working_ = std::move(working); fields_ = std::move(fields);
+    invalid_edits_.clear();
     return S_OK;
 } catch (...) { return E_OUTOFMEMORY; }
 }

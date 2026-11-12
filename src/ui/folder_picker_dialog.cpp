@@ -1,8 +1,16 @@
 #include "view_zoom.h"
+#include "picker_legacy_child.h"
+#include "picker_navigation_root.h"
+#include "../picker_inprocess/picker_ui_api_v2.h"
 #include "picker_hover_preview.h"
+#include "picker_recent_thumbnail_cache.h"
 #include "quick_preview_window.h"
 #include "../common/picker_shell_namespace.h"
 #include "../common/picker_places_snapshot.h"
+#if defined(PULSE_PICKER_JUMP_UI_TEST_HOOKS)
+#include "../bench/picker_jump_ui_test_api.h"
+#include "../bench/picker_embedded_layout_test.h"
+#endif
 #include "../common/picker_places_saved.h"
 #include "picker_places_ui.h"
 #include "picker_places_request.h"
@@ -20,10 +28,12 @@
 #include "picker_marquee.h"
 #include "picker_blank_click.h"
 #include "../app/create_rename_intent.h"
+#include "../app/jump_match.h"
 #include "edit_host.h"
 #include "../fs/drive_kind.h"
 #include "../common/windows_compat.h"
 #include "folder_picker_dialog.h"
+#include "picker_shell_filtered_listing.h"
 #include "../common/picker_navigation.h"
 #include "../common/picker_layout_settings.h"
 #include "../common/runtime_log.h"
@@ -60,6 +70,7 @@
 #include <cwctype>
 #include <memory>
 #include <deque>
+#include <filesystem>
 #include <unordered_set>
 #include <utility>
 
@@ -118,6 +129,7 @@ void PickerProofFocus(const char* phase, int previous, int next) {
 constexpr wchar_t kPickerClass[] = L"PulseFolderPickerWindow";
 constexpr UINT kListingMessage = WM_APP + 1;
 constexpr UINT kValidationMessage = WM_APP + 2;
+constexpr UINT kSaveDirectoriesMessage = WM_APP + 97;
 constexpr UINT kEndAddressMessage = WM_APP + 3;
 constexpr UINT kEndRenameMessage = WM_APP + 95;
 constexpr UINT kEmbeddedNavigationMessage = WM_APP + 4;
@@ -128,7 +140,13 @@ constexpr UINT kPickerFrameMessage = WM_APP + 9;
 constexpr UINT kHoverListingMessage = WM_APP + 10;
 constexpr DWORD kInitialFolderTimeoutMs = 5000;
 constexpr UINT_PTR kSharedPlacesTimer = 0x504c;
+constexpr UINT_PTR kJumpContextTimer = 0x504d;
 constexpr UINT kCustomUpdateMessage = WM_APP + 5;
+constexpr UINT kTextUpdateMessage = WM_APP + 11;
+constexpr UINT kPropertyValidationMessage = WM_APP + 12;
+constexpr UINT kNavigationRootMessage = WM_APP + 13;
+constexpr UINT kNavigationRootListingMessage = WM_APP + 14;
+constexpr int kLegacyChildFocus = -100;
 constexpr int kCustomFocusBase = 1000;
 constexpr int kCustomEditBase = 2000;
 constexpr size_t PULSE_CUSTOM_EDIT_MAX = 32767;
@@ -137,6 +155,7 @@ constexpr UINT_PTR kSearchTimer = 2;
 constexpr UINT_PTR kMotionTimer = 3;
 constexpr UINT_PTR kMarqueeTimer = 4;
 constexpr UINT_PTR kHoverTimer = 5;
+constexpr UINT_PTR kRecentThumbnailTimer = 6;
 constexpr int kPathEditId = 101;
 constexpr int kFilenameEditId = 102;
 constexpr int kSearchEditId = 103;
@@ -145,7 +164,7 @@ constexpr float kDefaultWidth = 1000.0f;
 constexpr float kDefaultHeight = 640.0f;
 constexpr float kMinWidth = 640.0f;
 constexpr float kMinHeight = 420.0f;
-constexpr float kSidebarDip = 196.0f;
+constexpr float kSidebarDip = 208.0f;
 
 // Sidebar sections. The ids only have to be distinct; they follow
 // app::SidebarSectionId so the shared renderer sees familiar values.
@@ -369,7 +388,7 @@ public:
                                              ? l10n::StringId::PickerSelect
                                              : l10n::StringId::PickerSelectFolder);
         normal_primary_text_ = chrome_.primary_text;
-        chrome_.cancel_text = l10n::Get(l10n::StringId::Cancel);
+        chrome_.cancel_text = spec.has_cancel_button_label ? spec.cancel_button_label : l10n::Get(l10n::StringId::Cancel);
         chrome_.hosted_edit = true;
         UpdateFilterText();
         focus_ = kPickList;
@@ -426,7 +445,8 @@ public:
                           static_cast<int>(kDefaultHeight * scale_));
         if (persist_layout_) picker_layout::RestorePlacement(hwnd_,owner_,layout_settings_);
         loader_ = std::make_unique<PickerLoader>(hwnd_, kListingMessage, kValidationMessage,
-            spec_.on_dialog_event ? kFolderCommitMessage : 0);
+            spec_.on_dialog_event ? kFolderCommitMessage : 0, kSaveDirectoriesMessage);
+        if (!spec_.navigation_root.empty()) navigation_root_.Set(hwnd_, kNavigationRootListingMessage, spec_.navigation_root, options_);
         AddClipboardFormatListener(hwnd_);
         PickerProofPhase("clipboard-before");
         ReadCutClipboard();
@@ -445,6 +465,7 @@ public:
         }
         PickerProofPhase("navigate-before");
         Navigate(start, false);
+        initial_jump_generation_ = generation_;
         PickerProofPhase("navigate-after");
         if (spec_.on_dialog_event && !WaitInitialFolderCommit()) return false;
         if (spec_.on_dialog_event) {
@@ -480,6 +501,7 @@ public:
         PickerProofPhase("first-frame-after");
         PickerProofResult("ready-before-state-is-done", S_OK, native_error_, done_);
         if (spec_.owner_guard && !spec_.owner_guard->Alive()) done_ = true;
+        submit_ready_ = !done_;
         if (!done_ && spec_.on_dialog_event) {
             PublishEmbeddedState();
             if (NotifyEmbedded(PickerDialogEvent::Ready) != S_OK) FailPaintedEdit(ERROR_FUNCTION_FAILED);
@@ -492,6 +514,7 @@ public:
             if (notified != S_OK) { native_error_ = ERROR_FUNCTION_FAILED; done_ = true; }
         }
 
+        if (!done_ && pending_submit_) PostMessageW(hwnd_, WM_COMMAND, IDOK, 0);
         PickerProofPhase("modal-loop-enter");
         MSG message{};
         while (!done_) {
@@ -516,6 +539,7 @@ public:
                 if(spec_.cancel_event && WaitForSingleObject(spec_.cancel_event,0)==WAIT_OBJECT_0) {PickerProofPhase("pump-cancel-after-sent-message");break;}
                 if (!peeked) continue;
                 if (message.message == WM_QUIT) { PostQuitMessage(static_cast<int>(message.wParam)); break; }
+                if (LegacyDialogMessage(message)) continue;
                 RedirectStrayModalKey(message, hwnd_);
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
@@ -527,6 +551,7 @@ public:
                 else { native_error_ = GetLastError(); if (!native_error_) native_error_ = ERROR_GEN_FAILURE; }
                 break;
             }
+            if (LegacyDialogMessage(message)) continue;
             RedirectStrayModalKey(message, hwnd_);
             TranslateMessage(&message);
             DispatchMessageW(&message);
@@ -642,6 +667,7 @@ private:
     // loads. Typed, remembered and history paths wait for their listing.
     void Navigate(std::wstring path, bool push_history, std::wstring select_after = {},
                   bool verified = false) {
+        jump_save_generation_ = 0;
         if (external_navigation_) return;
         if (push_history && !initial_load_) user_interacted_ = true;
         create_consent_paths_.clear();
@@ -752,6 +778,7 @@ private:
                         if (message.message == kFolderCommitMessage) PickerLoader::TakeFolderCommit(message.lParam);
                         else if (message.message == kListingMessage) PickerLoader::Take(message.lParam);
                         else if (message.message == kValidationMessage) PickerLoader::TakeValidation(message.lParam);
+                        else if (message.message == kSaveDirectoriesMessage) PickerLoader::TakeSaveDirectories(message.lParam);
                     }
                     return false;
                 }
@@ -807,6 +834,19 @@ private:
         const bool notify_folder = embedded_folder_pending_ && listing->error == ERROR_SUCCESS;
         embedded_folder_pending_ = false;
         DismissHover();
+        if (spec_.shell_item_filter && listing->error == ERROR_SUCCESS) {
+            PublishEmbeddedState();
+            const auto generation = listing->generation;
+            waiting_ = loading_ = true;
+            unsigned checks = 0; ULONGLONG next_yield = GetTickCount64() + 8;
+            const auto current = [&] { return ContinueShellFilterBatch(generation, checks, next_yield); };
+            const HRESULT filtered = FilterPickerShellListing(*listing,
+                [&](const std::wstring& path) { return NotifyEmbedded(PickerDialogEvent::IncludeItem, path); }, current);
+            if (filtered != S_OK) { AbandonShellFilterBatch(generation); return; }
+            if (!current()) { AbandonShellFilterBatch(generation); return; }
+            waiting_ = loading_ = false;
+        }
+        if (new_folder_draft_) EndRename(false);
         entries_ = std::move(listing->entries);
         snapshot_ = std::move(listing->snapshot);
         if (current_.empty()) RefreshDrivesFromListing();
@@ -841,6 +881,13 @@ private:
             Select(static_cast<int>(intent->entry_index));
             app::ConsumeCreateRenameIntent(create_rename_intents_, intent->task_id);
             RenameSelection();
+        }
+        if (jump_save_generation_ == listing->generation) {
+            jump_save_generation_ = 0;
+            if (!done_ && !waiting_ && !validating_ && current_verified_ &&
+                generation_ == listing->generation && pending_navigation_.empty() &&
+                external_navigation_queue_.empty() && filename_text_ == jump_save_filename_)
+                SubmitSelection();
         }
         Invalidate();
     }
@@ -984,9 +1031,24 @@ private:
 
     void ClearOverwrite() {
         pending_overwrite_.reset();
+        const bool had_banner = chrome_.overwrite_pending;
         chrome_.overwrite_pending = false;
+        if (had_banner && hwnd_) Relayout();  // the banner row goes
         if (hwnd_) RemovePropW(hwnd_, L"Pulse.PickerOverwriteGeneration");
         chrome_.notice.clear();
+    }
+    std::wstring OverwriteAlternative(const std::wstring& path) const {
+        const auto leaf = PickerLeafName(path);
+        const auto dot = leaf.find_last_of(L'.');
+        const auto stem = dot == leaf.npos || dot == 0 ? leaf : leaf.substr(0, dot);
+        const auto extension = dot == leaf.npos || dot == 0 ? std::wstring{} : leaf.substr(dot);
+        for (unsigned suffix = 2; suffix < 10000; ++suffix) {
+            auto candidate = stem + L" (" + std::to_wstring(suffix) + L")" + extension;
+            if (std::none_of(entries_.begin(), entries_.end(), [&](const auto& entry) {
+                return CompareStringOrdinal(entry.name.c_str(), -1, candidate.c_str(), -1, TRUE) == CSTR_EQUAL;
+            })) return candidate;
+        }
+        return stem + L" (10000)" + extension;
     }
     void ResolveOverwrite(bool replace, bool rename = false) {
         if (!pending_overwrite_) return;
@@ -999,18 +1061,10 @@ private:
         } else {
             ++generation_; validating_ = false; ClearEmbeddedCandidate();
             if (rename) {
-                const auto leaf = PickerLeafName(snapshot.Path());
-                const auto dot = leaf.find_last_of(L'.');
-                const auto stem = dot == leaf.npos ? leaf : leaf.substr(0, dot);
-                const auto extension = dot == leaf.npos ? std::wstring{} : leaf.substr(dot);
-                std::wstring candidate;
-                for (unsigned suffix = 2; suffix < 10000; ++suffix) {
-                    candidate = stem + L" (" + std::to_wstring(suffix) + L")" + extension;
-                    if (std::none_of(entries_.begin(), entries_.end(), [&](const auto& entry) {
-                        return CompareStringOrdinal(entry.name.c_str(), -1, candidate.c_str(), -1, TRUE) == CSTR_EQUAL;
-                    })) break;
-                }
-                SetFilename(std::move(candidate));
+                const auto parent = PickerParent(snapshot.Path());
+                const auto candidate = OverwriteAlternative(snapshot.Path());
+                SetFilename(SamePickerPath(parent, current_) ? candidate :
+                    parent + (parent.back() == L'\\' ? L"" : L"\\") + candidate);
             }
             UpdateChosen(); FocusFilename();
             if (rename) SubmitSelection();
@@ -1090,7 +1144,7 @@ private:
         }
     }
 
-    void ValidateNames(std::vector<std::wstring> names, bool typed_names = false) {
+    void ValidateNames(std::vector<std::wstring> names, bool typed_names = false, bool directories_checked = false) {
         if (!loader_ || validating_ || waiting_ || names.empty()) return;
         if (!allow_multiselect_ && names.size() > 1) {
             chrome_.notice = l10n::Get(l10n::StringId::SelectOneFileHere).c_str();
@@ -1116,7 +1170,12 @@ private:
             request.caller_validates_access = spec_.skip_access_validation;
             request.no_test_file_create = spec_.no_test_file_create;
             request.require_existing_save_parent = spec_.require_existing_save_parent;
-            loader_->ValidateSave(++generation_, std::move(request));
+            const std::filesystem::path input(request.filename);
+            if (!directories_checked && input.has_parent_path() && !input.is_absolute() && !input.has_root_name() &&
+                !input.has_root_directory() && !request.require_existing_save_parent && !request.no_test_file_create &&
+                !(spec_.native_options & (FOS_PATHMUSTEXIST | FOS_NOTESTFILECREATE)))
+                loader_->PrepareSaveDirectories(++generation_, std::move(request), spec_.native_options);
+            else loader_->ValidateSave(++generation_, std::move(request));
         } else {
             auto validation_options = options_;
             validation_options.use_default_extension = spec_.use_open_default_extension;
@@ -1129,6 +1188,16 @@ private:
     }
 
     void SubmitSelection() {
+        if (done_) return;
+        // Initial notifications can pump caller commands before the first
+        // frame. Coalesce OK until edits and the visible frame are ready.
+        if (!submit_ready_) { pending_submit_ = true; return; }
+        pending_submit_ = false;
+        if (navigation_root_.Active() && !navigation_root_.RootLoaded()) return;
+        if (!invalid_properties_.empty()) {
+            chrome_.notice = ErrorText(ERROR_INVALID_DATA, L""); Invalidate(); return;
+        }
+        if (new_folder_draft_) return;
         if (spec_.on_dialog_event && !embedded_folder_committed_) return;
         if (!FlushPaintedEdits()) return;
         if (validating_ || !HasRequiredInteraction()) return;
@@ -1161,6 +1230,55 @@ private:
             names.push_back(chosen_);
         }
         ValidateNames(std::move(names), mode_ == PickerMode::File && !filename_from_selection_);
+    }
+
+    void OnSaveDirectories(std::unique_ptr<PickerSaveDirectories> reply) {
+        if (!CheckPaintedEdits() || !reply || done_ || !validating_ || reply->generation != generation_ ||
+            (spec_.owner_guard && !spec_.owner_guard->Alive()) ||
+            (spec_.cancel_event && WaitForSingleObject(spec_.cancel_event, 0) == WAIT_OBJECT_0)) return;
+        chrome_.notice.clear();
+        if (reply->creating && reply->creation.error) {
+            validating_ = false;
+            chrome_.notice = ErrorText(reply->creation.error, reply->creation.failed_path);
+            if (!reply->creation.created.empty()) {
+                chrome_.notice += L"\n" + l10n::Get(l10n::StringId::PickerCreatedFoldersRemain);
+                for (const auto& path : reply->creation.created) chrome_.notice += L"\n" + path;
+            }
+            UpdateChosen(); Invalidate(); return;
+        }
+        if (!reply->creating && !reply->plan.error && !reply->plan.missing.empty()) {
+            const auto prompt_generation = generation_;
+            // ConfirmDialog displays at most five rows. Do not hide any directory
+            // behind its count-only overflow; gather consent for every batch first.
+            for (size_t first = 0; first < reply->plan.missing.size(); first += 5) {
+                ConfirmDialogSpec confirm;
+                confirm.title = l10n::Get(l10n::StringId::PickerCreateFolders);
+                confirm.message = l10n::Get(l10n::StringId::PickerWillCreateFolders);
+                if (const auto at = confirm.message.find(L"{paths}"); at != std::wstring::npos)
+                    confirm.message.erase(at, 7);
+                confirm.note = l10n::Get(l10n::StringId::PickerCreatedFoldersRemain);
+                confirm.confirm_text = l10n::Get(l10n::StringId::PickerCreateFolders);
+                confirm.cancel_text = l10n::Get(l10n::StringId::Cancel);
+                confirm.default_choice = ConfirmChoice::Cancel;
+                confirm.cancel_event = spec_.cancel_event;
+                const size_t end = std::min(first + 5, reply->plan.missing.size());
+                confirm.items.assign(reply->plan.missing.begin() + first, reply->plan.missing.begin() + end);
+                if (!ShowConfirmDialog(hwnd_, confirm, dark_, accent_) || done_ || generation_ != prompt_generation ||
+                    (spec_.owner_guard && !spec_.owner_guard->Alive()) ||
+                    (spec_.cancel_event && WaitForSingleObject(spec_.cancel_event, 0) == WAIT_OBJECT_0)) {
+                    if (!done_ && generation_ == prompt_generation) {
+                        validating_ = false; UpdateChosen(); Invalidate();
+                    }
+                    return;
+                }
+            }
+            if (loader_) loader_->PrepareSaveDirectories(++generation_, std::move(reply->request), spec_.native_options, std::move(reply->plan));
+            return;
+        }
+        // Unsupported plans preserve the original validation/contract behavior.
+        // A completed independent create action enters the same FileOk pipeline.
+        validating_ = false;
+        ValidateNames({reply->request.filename}, false, true);
     }
 
     void OnValidation(std::unique_ptr<PickerValidation> validation) {
@@ -1270,7 +1388,7 @@ private:
             }
             create_consent_paths_ = validation->paths;
         }
-        if (validation->overwrite_required) {
+        if (validation->overwrite_required && spec_.prompt_overwrite) {
             if (!loader_ || !validation->save_snapshot) return;
             // Keep consent tied to this generation; edits and navigation invalidate it.
             validating_ = true;
@@ -1299,6 +1417,12 @@ private:
                 overwrite_generation_ = generation_;
                 chrome_.overwrite_pending = true;
                 chrome_.notice = l10n::Get(l10n::StringId::TheTargetNameAlreadyExists) + L" " + PickerLeafName(pending_overwrite_->Path());
+                for (const auto& entry : entries_) if (SamePickerPath(entry.path, pending_overwrite_->Path())) {
+                    if (entry.modified.dwLowDateTime || entry.modified.dwHighDateTime)
+                        chrome_.notice += L" · " + format::LocalFileTime(entry.modified);
+                    chrome_.notice += L" · " + format::ByteSize(entry.size);
+                    break;
+                }
                 SetPropW(hwnd_, L"Pulse.PickerOverwriteGeneration", reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(generation_ + 1)));
                 focus_ = kPickOverwriteBack;
                 SetFocus(hwnd_);
@@ -1389,6 +1513,13 @@ private:
         else details_preview_.SetEmbeddedBounds(rect);
     }
 
+    bool CloseCustomDetails() {
+        if (custom_details_open_ && !chrome_.overwrite_pending) {
+            custom_details_open_ = false; focus_ = kPickList;
+            Relayout(); FocusList(); Invalidate(); return true;
+        }
+        return false;
+    }
     void Cancel() {
         if (operating_) return;
         result_.clear();
@@ -1414,6 +1545,7 @@ private:
     }
 
     void Close() noexcept {
+        navigation_root_.Close();
         details_preview_.Close();
         EndRename(false);
         CancelBlankClick();
@@ -1431,6 +1563,7 @@ private:
         KillTimer(hwnd_, kSearchTimer);
         KillTimer(hwnd_, kMotionTimer);
         KillTimer(hwnd_, kSharedPlacesTimer);
+        KillTimer(hwnd_, kJumpContextTimer);
         // Stop the loader first: after this no listing can be posted, so the
         // ones already queued are all that must be freed.
         PickerProofPhase("close-loader-before");
@@ -1441,6 +1574,8 @@ private:
             PickerLoader::Take(pending.lParam);
         while (PeekMessageW(&pending, hwnd_, kFolderCommitMessage, kFolderCommitMessage, PM_REMOVE))
             PickerLoader::TakeFolderCommit(pending.lParam);
+        while (PeekMessageW(&pending, hwnd_, kSaveDirectoriesMessage, kSaveDirectoriesMessage, PM_REMOVE))
+            PickerLoader::TakeSaveDirectories(pending.lParam);
         while (PeekMessageW(&pending, hwnd_, kValidationMessage, kValidationMessage, PM_REMOVE))
             PickerLoader::TakeValidation(pending.lParam);
         if (IsWindow(hwnd_)) {
@@ -1461,9 +1596,10 @@ private:
     // ---- view model --------------------------------------------------------
 
     float Width() const { return static_cast<float>(compositor_.Width()); }
-    float Height() const { return static_cast<float>(compositor_.Height()); }
+    float Height() const { return static_cast<float>((std::max)(0, static_cast<int>(compositor_.Height()) - legacy_child_.Height(hwnd_))); }
     D2D1_RECT_F ClientRectF() const { return D2D1::RectF(0, 0, Width(), Height()); }
     bool PropertySidebar() const {
+        if (!custom_details_open_ && !PickerPropertiesNeedPanel(spec_.custom_controls)) return false;
         return Width() / std::max(0.1f, scale_) >= 900 && std::any_of(spec_.custom_controls.begin(), spec_.custom_controls.end(), [](const auto& control) { return control.property_layout != 0; });
     }
     float RendererWidth() const { return Width() - (PropertySidebar() ? 272 * scale_ : 0); }
@@ -1478,6 +1614,26 @@ private:
         return item;
     }
 
+    void RefreshJumpContext() {
+        if (spec_.poll_jump_context) {
+            spec_.filter_index = options_.filter_index;
+            const auto original = spec_.initial_path;
+            bool changed = false;
+            try { changed = spec_.poll_jump_context(spec_); } catch (...) { }
+            if (changed) {
+                app_icon_bitmap_.reset();
+                recent_thumbs_.clear();
+                if (!SamePickerPath(original, spec_.initial_path)) {
+                    if (!jump_context_touched_ && generation_ == initial_jump_generation_ && spec_.allow_auto_jump)
+                        Navigate(spec_.initial_path, true);
+                    else { spec_.initial_path = original; spec_.auto_jump_from.clear(); }
+                }
+                SyncJumpStrip();
+                if (jump_.open) UpdateJump();
+                Relayout();
+            }
+        }
+    }
     void RefreshSharedPlaces() {
         auto latest = spec_.read_shared_places ? spec_.read_shared_places() : picker_places::Read();
         if (latest.shared_available || spec_.read_shared_places) pulse_places_ = std::move(latest);
@@ -1706,8 +1862,34 @@ private:
         } else if (!path.empty()) Navigate(path, true);
     }
 
+    bool ContinueShellFilterBatch(uint64_t generation, unsigned& checks, ULONGLONG& next_yield) {
+        if (++checks >= 16 || GetTickCount64() >= next_yield) {
+            checks = 0; next_yield = GetTickCount64() + 8;
+            MSG message{};
+            for (unsigned count = 0; count < 16 && PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE); ++count) {
+                if (message.message == WM_QUIT) { PostQuitMessage(static_cast<int>(message.wParam)); Cancel(); break; }
+                TranslateMessage(&message); DispatchMessageW(&message);
+                if (done_ || generation_ != generation) break;
+            }
+        }
+        return !done_ && generation_ == generation && pending_navigation_.empty() && external_navigation_queue_.empty() &&
+            (!spec_.cancel_event || WaitForSingleObject(spec_.cancel_event, 0) != WAIT_OBJECT_0) &&
+            (!spec_.owner_guard || spec_.owner_guard->Alive());
+    }
+    void AbandonShellFilterBatch(uint64_t generation) {
+        if (done_) return; // A callback Close keeps its existing terminal HRESULT.
+        if ((spec_.cancel_event && WaitForSingleObject(spec_.cancel_event, 0) == WAIT_OBJECT_0) ||
+            (spec_.owner_guard && !spec_.owner_guard->Alive())) { Cancel(); return; }
+        // A normal reentrant navigation invalidates only the old enumeration.
+        // Do not clear a newer loader's waiting state or turn navigation into failure.
+        if (generation_ == generation) waiting_ = loading_ = false;
+        if (!pending_navigation_.empty()) PostMessageW(hwnd_, kEmbeddedNavigationMessage, 0, 0);
+        if (!external_navigation_queue_.empty()) PostMessageW(hwnd_, kExternalNavigationMessage, 0, 0);
+        Invalidate();
+    }
     void BuildSidebar() {
         vm_.sidebar.clear();
+        if (navigation_root_.Active()) { navigation_root_.Append(vm_.sidebar); return; }
         auto add_context = [&](int id, const std::wstring& label, bool opened) {
             SidebarGroup group; group.id = id; group.header = label; group.collapsed = collapsed_[id - 1];
             for (const auto& entry : pulse_places_.folders) {
@@ -1718,11 +1900,26 @@ private:
             }
             if (!group.items.empty()) vm_.sidebar.push_back(std::move(group));
         };
+        if (!spec_.app_recent_places.empty()) {
+            // This program's own folders, most used first, with how often / how recently.
+            SidebarGroup recent; recent.id = 2; recent.collapsed = collapsed_[1];
+            recent.header = spec_.host_app_name.empty() ? l10n::Get(l10n::StringId::Recent)
+                : FillPickerText(l10n::Get(l10n::StringId::PickerJumpRecent), spec_.host_app_name);
+            for (const auto& place : spec_.app_recent_places) {
+                if (place.path.empty()) continue;
+                auto item = PlaceItem({place.label.empty() ? PickerLeafName(place.path) : place.label, place.path, L"\xE8B7"});
+                item.badge = place.detail;
+                recent.items.push_back(std::move(item));
+            }
+            if (!recent.items.empty()) vm_.sidebar.push_back(std::move(recent));
+        }
         if (!spec_.places.empty()) {
             SidebarGroup caller; caller.id = 6; caller.header = l10n::Get(l10n::StringId::PickerApplicationPlaces); caller.collapsed = collapsed_[5];
             for (const auto& place : spec_.places) caller.items.push_back(PlaceItem(place));
             vm_.sidebar.push_back(std::move(caller));
         }
+        if (!(spec_.native_options & FOS_HIDEPINNEDPLACES))
+            AppendPickerSharedPlaces(vm_, pulse_places_, collapsed_[6], collapsed_[7], folded_favorite_groups_, PickerLeafName);
         SidebarGroup quick;
         quick.id = kGroupQuick;
         quick.header = l10n::Get(l10n::StringId::PickerQuickAccess);
@@ -1734,13 +1931,13 @@ private:
         }
         for (const auto& entry : pulse_places_.folders) {
             if (!entry.pinned || (spec_.native_options & FOS_HIDEPINNEDPLACES)) continue;
+            if (std::any_of(pulse_places_.starred_items.begin(), pulse_places_.starred_items.end(),
+                [&](const auto& item) { return SamePickerPath(item.path, entry.path); })) continue;
             picker_user_storage::Path parsed;
             if (!picker_user_storage::Parse(entry.path, parsed) || std::any_of(quick.items.begin(), quick.items.end(), [&](const auto& item) { return SamePickerPath(item.path, parsed.value); })) continue;
             quick.items.push_back(PlaceItem({entry.label.empty() ? PickerLeafName(parsed.value) : entry.label, parsed.value, L"\xE8B7"}));
         }
         if (!quick.items.empty()) vm_.sidebar.push_back(std::move(quick));
-        if (!(spec_.native_options & FOS_HIDEPINNEDPLACES))
-            AppendPickerSharedPlaces(vm_, pulse_places_, collapsed_[6], collapsed_[7], folded_favorite_groups_, PickerLeafName);
         add_context(4, l10n::Get(l10n::StringId::PickerPulseOpenPlaces), true);
         if (!(spec_.native_options & FOS_HIDEMRUPLACES))
             add_context(5, l10n::Get(l10n::StringId::Recent), false);
@@ -1754,6 +1951,9 @@ private:
         drives.items = drives_;
         vm_.sidebar.push_back(std::move(drives));
         FilterPickerHiddenPlaces(vm_, layout_settings_.hidden_places);
+        // Shell filters apply to enumerated view objects, not unrelated navigation
+        // shortcuts. Keep sidebar catalog data untouched and never rebind/probe it.
+
     }
 
     int CollapseSlot(int group_id) const {
@@ -1791,6 +1991,9 @@ private:
         vm_.address_search_current = true;
         vm_.address_search_content = false;
         vm_.address_search_text = search_text_;
+        vm_.address_search_placeholder = current_.empty() || picker_shell::IsParsingName(current_)
+            ? l10n::Get(l10n::StringId::Search)
+            : FillPickerText(l10n::Get(l10n::StringId::PickerSearchFolder), PickerLeafName(current_));
         vm_.address_search_has_text = !search_text_.empty();
         vm_.address_search_scope_label = l10n::Get(l10n::StringId::ThisFolder).c_str();
         BuildSidebar();
@@ -1840,6 +2043,8 @@ private:
                                    ? vm_.hover_control_index : -1;
 
         chrome_.selected_names.clear();
+        chrome_.filename_label = spec_.has_file_name_label ? spec_.file_name_label :
+            l10n::Get(mode_ == PickerMode::Folder ? l10n::StringId::FolderName : l10n::StringId::FileName);
         selection_tag_indices_.clear();
         if (allow_multiselect_ && filename_from_selection_ && !editing_selection_names_) {
             std::vector<int> sorted(selected_set_.begin(), selected_set_.end()); std::sort(sorted.begin(), sorted.end());
@@ -1850,10 +2055,20 @@ private:
                 }
             }
         }
-        chrome_.primary_enabled = chrome_.overwrite_pending || (!waiting_ && !validating_ && !chosen_.empty());
-        chrome_.primary_text = chrome_.overwrite_pending ? l10n::Get(l10n::StringId::OpReplaceFile) : normal_primary_text_;
+        chrome_.primary_enabled = !new_folder_draft_ && !chrome_.overwrite_pending && !waiting_ && !validating_ && !chosen_.empty();
+        if (chrome_.selected_names.size() > 1 && !spec_.has_file_name_label) {
+            wchar_t count[128]{};
+            swprintf_s(count, l10n::Get(l10n::StringId::SelectedCountFormat).c_str(), static_cast<int>(chrome_.selected_names.size()));
+            chrome_.filename_label = count;
+        }
+        chrome_.primary_text = normal_primary_text_;
+        if (allow_multiselect_ && chrome_.selected_names.size() > 1)  // HTML 发送 (3)
+            chrome_.primary_text += L" (" + std::to_wstring(chrome_.selected_names.size()) + L")";
+        chrome_.overwrite_replace_text = chrome_.overwrite_pending ? l10n::Get(l10n::StringId::Replace) : std::wstring();
         chrome_.overwrite_back_text = l10n::Get(l10n::StringId::PickerBackToEdit);
-        chrome_.rename_text = l10n::Get(l10n::StringId::PickerRenameSave);
+        chrome_.rename_text = pending_overwrite_ ? FillPickerText(l10n::Get(l10n::StringId::PickerSaveAsName),
+            OverwriteAlternative(pending_overwrite_->Path())) : l10n::Get(l10n::StringId::PickerRenameSave);
+        SyncJumpStrip();
         chrome_.filename_focused = focus_ == kPickFilename;
         chrome_.focus = focus_;
     }
@@ -1868,6 +2083,17 @@ private:
 
     void UpdateSummary() {
         chrome_.summary.clear();
+        chrome_.summary_lead.clear(); chrome_.summary_folder.clear(); chrome_.summary_leaf.clear();
+        if (chrome_.overwrite_pending && pending_overwrite_) {
+            // The banner asks; the row under it still names the file that would be replaced.
+            const auto target = pending_overwrite_->Path();
+            const size_t cut = target.find_last_of(L"\\/");
+            if (cut != std::wstring::npos && cut + 1 < target.size()) {
+                chrome_.summary_lead = l10n::Get(l10n::StringId::PickerWillSave);
+                chrome_.summary_folder = target.substr(0, cut + 1);
+                chrome_.summary_leaf = target.substr(cut + 1);
+            }
+        }
         if (chrome_.selected_names.size() > 1) {
             wchar_t count[128]{};
             swprintf_s(count, l10n::Get(l10n::StringId::SelectedCountFormat).c_str(), static_cast<int>(chrome_.selected_names.size()));
@@ -1894,6 +2120,13 @@ private:
                 if (!target.error) shown = target.path;
             }
             chrome_.summary = prefix + FitPathMiddle(shown, width - measure(prefix), measure);
+            // The same target in parts for the drawn line: lead, folder, leaf.
+            const size_t cut = shown.find_last_of(L"\\/");
+            if (cut != std::wstring::npos && cut + 1 < shown.size()) {
+                chrome_.summary_lead = mode_ == PickerMode::Save ? l10n::Get(l10n::StringId::PickerWillSave) : prefix;
+                chrome_.summary_folder = shown.substr(0, cut + 1);
+                chrome_.summary_leaf = shown.substr(cut + 1);
+            }
         } else if (mode_ == PickerMode::Folder && current_.empty() && !waiting_) {
             chrome_.summary = l10n::Get(l10n::StringId::ChooseAFolderOrADrive).c_str();
         } else if (mode_ == PickerMode::Image) {
@@ -2129,6 +2362,7 @@ private:
     }
 
     void EndAddressEdit(bool refocus_list) {
+        CloseJump();
         if (!address_editing_) return;
         address_editing_ = false;
         PlaceEdits();
@@ -2229,9 +2463,21 @@ private:
             selected_set_.clear();
             selected_ = -1;
             anchor_ = -1;
+            if (mode_ == PickerMode::Save && !syncing_filename_filter_ && !embedded_callback_depth_) {
+                if (const auto inferred = InferSaveFilterFromFilename(filename_text_, options_.filters, options_.filter_index)) {
+                    syncing_filename_filter_ = true;
+                    struct Reset { bool& value; ~Reset() { value = false; } } reset{syncing_filename_filter_};
+                    // Reload invalidates the old validation/listing generation and
+                    // publishes TypeChanged through the same path as the dropdown.
+                    ApplyFilter(*inferred);
+                    return;
+                }
+            }
         } else if (edit == search_edit_) {
             search_text_ = ReadEdit(edit);
             SetTimer(hwnd_, kSearchTimer, 180, nullptr);
+        } else if (edit == path_edit_) {
+            UpdateJump();
         }
         UpdateChosen();
         Invalidate();
@@ -2243,10 +2489,12 @@ private:
         if (!self) return DefSubclassProc(hwnd, msg, wparam, lparam);
         switch (msg) {
         case WM_KEYDOWN:
+            self->jump_context_touched_ = true;
             if (hwnd == self->rename_edit_) {
                 if (wparam == VK_RETURN || wparam == VK_ESCAPE) { self->EndRename(wparam == VK_RETURN); return 0; }
             }
             self->DismissHover();
+            if (hwnd == self->path_edit_ && self->JumpKey(wparam)) return 0;
             if (self->HandleViewKey(wparam)) return 0;
             if (wparam == VK_RETURN) {
                 if (hwnd == self->path_edit_) self->SubmitPath();
@@ -2256,6 +2504,7 @@ private:
                 return 0;
             }
             if (wparam == VK_ESCAPE) {
+                if (self->CloseCustomDetails()) return 0;
                 self->Cancel();
                 return 0;
             }
@@ -2316,8 +2565,11 @@ private:
     // ---- layout and painting ----------------------------------------------
 
     void ApplyRendererSettings() {
+        SyncCustomOptions();
         renderer_.SetResourceModule(spec_.module_instance);
-        renderer_.SetEmbedded(kPickerTitleDip, PickerFooterDip(mode_) + CustomHeightDip());
+        renderer_.SetEmbeddedPickerLayout(true, kPickerStripDip);
+        renderer_.SetEmbedded(kPickerTitleDip, PickerFooterDip(mode_, chrome_.overwrite_pending, !chrome_.options.empty()) + CustomHeightDip());
+        renderer_.SetItemClick(false, 0, allow_multiselect_);
         renderer_.SetDetailsPanelVisible((spec_.native_options & FOS_FORCEPREVIEWPANEON) != 0);
         renderer_.SetSidebarWidthDip(layout_settings_.sidebar_width);
         if (spec_.row_height_dip > 0.0f) renderer_.SetRowHeightDip(spec_.row_height_dip);
@@ -2336,14 +2588,96 @@ private:
         return false;
     }
     bool CompactCustom() const {
+        if (custom_details_open_ || PickerPropertiesNeedPanel(spec_.custom_controls)) return false;
         bool any = false;
         for (size_t i = 0; i < spec_.custom_controls.size(); ++i) {
             const auto& control = spec_.custom_controls[i];
-            if (!(EffectiveControl(i) & 2) || control.kind == 5) continue;
-            if (control.property_layout || control.kind == 1 || control.kind == 6 || control.kind == kPickerCustomSeparator || control.has_parent) return false;
+            if (!(EffectiveControl(i) & 2) || control.kind == 5 || control.kind == 1 || control.kind == kPickerCustomSeparator) continue;
             any = true;
         }
         return any;
+    }
+    void SyncCustomOptions() {
+        chrome_.options.clear();
+        chrome_.footer_tool = {};
+        chrome_.more_options_text = l10n::Get(l10n::StringId::AdvMore);
+        if (!CompactCustom()) return;
+        // File properties (HTML 作者 | SS): one joined chip per field. List values merge into
+        // the first value's chip; an empty list shows its add button as "添加X". The inline
+        // remove buttons stay in the details panel.
+        const auto field_label = [&](uint32_t parent) {
+            for (const auto& group : spec_.custom_controls) if (group.kind == 1 && group.id == parent) return group.label;
+            return std::wstring();
+        };
+        const auto field_chip = [&](uint32_t parent) -> PickerOptionChip* {
+            for (auto& chip : chrome_.options) {
+                if (!chip.property || chip.id < kCustomFocusBase) continue;
+                const auto& owner = spec_.custom_controls[static_cast<size_t>(chip.id - kCustomFocusBase)];
+                if (owner.has_parent && owner.parent_id == parent) return &chip;
+            }
+            return nullptr;
+        };
+        for (size_t i = 0; i < spec_.custom_controls.size(); ++i) {
+            const auto& control = spec_.custom_controls[i];
+            const auto state = EffectiveControl(i);
+            if (control.kind == 5 || control.kind == 1 || control.kind == kPickerCustomSeparator || !(state & 2)) continue;
+            if (control.property_layout == 2) continue;
+            if (control.property_layout == 1 || control.property_layout == 3 || control.property_layout == 4) {
+                const bool add = control.property_layout == 3;
+                if (auto* existing = control.has_parent ? field_chip(control.parent_id) : nullptr) {
+                    if (!add && !control.text.empty()) {
+                        if (existing->add) { existing->id = kCustomFocusBase + static_cast<int>(i); existing->text.clear(); existing->add = false; }
+                        existing->text += (existing->text.empty() ? L"" : L", ") + control.text;
+                    }
+                    continue;
+                }
+                PickerOptionChip chip;
+                chip.id = kCustomFocusBase + static_cast<int>(i);
+                chip.property = true;
+                chip.enabled = (state & 1) != 0;
+                chip.label = control.has_parent ? field_label(control.parent_id) : control.label;
+                if (chip.label.empty()) chip.label = control.label;
+                chip.add = add || control.text.empty();
+                chip.text = chip.add ? FillPickerText(l10n::Get(l10n::StringId::PickerPropertyAdd), chip.label) : control.text;
+                chrome_.options.push_back(std::move(chip));
+                continue;
+            }
+            auto caption = control.label;
+            std::wstring label;
+            if (control.kind == 8 && !control.text.empty()) {
+                label = control.label; caption = control.text;
+            }
+            if (control.kind == 3 && control.has_selected) for (const auto& item : control.items)
+                if (item.id == control.selected_item_id) { label = control.label; caption = item.label; break; }
+            PickerOptionChip chip;
+            chip.id = kCustomFocusBase + static_cast<int>(i); chip.text = std::move(caption);
+            chip.checkable = control.kind == 7; chip.checked = control.checked; chip.enabled = (state & 1) != 0;
+            chip.drop_down = control.kind == 3 || control.kind == 4 || control.kind == 6 || control.kind == 8;
+            chip.label = std::move(label);
+            if (mode_ == PickerMode::Save && control.kind == 4 && !chrome_.footer_tool.id)
+                chrome_.footer_tool = chip;
+            chrome_.options.push_back(std::move(chip));
+        }
+        if (chrome_.footer_tool.id && compositor_.Dc()) {
+            const auto layout = LayoutPickerChrome(Width(), Height(), chrome_, painter_, scale_);
+            if (layout.footer_tool.right > layout.footer_tool.left)
+                std::erase_if(chrome_.options, [&](const auto& chip) { return chip.id == chrome_.footer_tool.id; });
+        }
+    }
+    void ShowMoreOptions() {
+        std::vector<FluentMenuItem> items;
+        for (size_t i = chrome_layout_.option_chips.size(); i < chrome_.options.size(); ++i) {
+            const auto& option = chrome_.options[i];
+            const auto caption = option.label.empty() || option.add ? option.text : option.label + L": " + option.text;
+            auto item = Item(option.id, caption.c_str());
+            item.enabled = option.enabled; item.toggle = option.checkable; item.checked = option.checked;
+            items.push_back(std::move(item));
+        }
+        if (items.empty()) return;
+        const auto generation = embedded_state_.generation;
+        menu_.SetTheme(dark_, accent_);
+        const int chosen = TrackPickerDropdown(ScreenRect(chrome_layout_.more_options), std::move(items));
+        if (!done_ && generation == embedded_state_.generation && chosen >= kCustomFocusBase) Activate(chosen);
     }
     size_t CompactCustomCount() const {
         size_t count = 0;
@@ -2363,7 +2697,7 @@ private:
     }
     float CustomHeightDip() const {
         if (PropertySidebar()) return 0.0f;
-        if (CompactCustom()) return std::min(128.0f, 8.0f + 40.0f * static_cast<float>((CompactCustomCount() + CompactCustomColumns() - 1) / CompactCustomColumns()));
+        if (CompactCustom()) return 0.0f;
         bool prominent = false, separators = false;
         float content = 20.0f;
         for (size_t i = 0; i < spec_.custom_controls.size(); ++i) {
@@ -2419,14 +2753,12 @@ private:
         rect.top+=static_cast<float>(row)*30.0f*scale_;rect.bottom=rect.top+28.0f*scale_;return rect;
     }
     D2D1_RECT_F CustomRect(size_t index) const {
+        if (chrome_.footer_tool.id == kCustomFocusBase + static_cast<int>(index) &&
+            chrome_layout_.footer_tool.right > chrome_layout_.footer_tool.left) return chrome_layout_.footer_tool;
         if (CompactCustom()) {
-            size_t ordinal = 0;
-            for (size_t i = 0; i < index; ++i) if (spec_.custom_controls[i].kind != 5 && (EffectiveControl(i) & 2)) ++ordinal;
-            const auto columns = CompactCustomColumns();
-            const float width = (Width() - 32 * scale_ - static_cast<float>(columns - 1) * 12 * scale_) / static_cast<float>(columns);
-            const float x = 16 * scale_ + static_cast<float>(ordinal % columns) * (width + 12 * scale_);
-            const float y = CustomPanel().top + (4 + 40 * static_cast<float>(ordinal / columns)) * scale_ - custom_scroll_;
-            return D2D1::RectF(x, y, x + width, y + 36 * scale_);
+            for (size_t i = 0; i < chrome_layout_.option_chips.size() && i < chrome_.options.size(); ++i)
+                if (chrome_.options[i].id == kCustomFocusBase + static_cast<int>(index)) return chrome_layout_.option_chips[i];
+            return chrome_layout_.more_options;
         }
         if (PropertySidebar()) {
             const auto panel = CustomPanel();
@@ -2468,9 +2800,13 @@ private:
         Invalidate();
     }
     void DrawCustom(const Theme& theme) {
-        if (spec_.custom_controls.empty()) return;
+        if (spec_.custom_controls.empty() || CompactCustom()) return;
         auto* dc = compositor_.Dc();
-        if (PropertySidebar()) painter_.FillRoundedRect(CustomPanel(), 8 * scale_, theme.surface_card);
+        if (PropertySidebar()) {
+            painter_.FillRoundedRect(D2D1::RectF(RendererWidth(), kPickerTitleDip * scale_, Width(), chrome_layout_.footer.top),
+                0, theme.surface_sheet);
+            painter_.FillRoundedRect(CustomPanel(), 8 * scale_, theme.surface_card);
+        }
         dc->PushAxisAlignedClip(CustomPanel(), D2D1_ANTIALIAS_MODE_ALIASED);
         for (size_t i = 0; i < spec_.custom_controls.size(); ++i) {
             const auto state = EffectiveControl(i);
@@ -2519,16 +2855,12 @@ private:
             [&](const auto& item) { return item.id == control.id; });
         if (found == spec_.custom_controls.end() || found->kind != control.kind ||
             found->has_parent != control.has_parent || found->parent_id != control.parent_id) return E_INVALIDARG;
-        if(found->items.size()!=control.items.size()) return E_NOTIMPL;
-        for(size_t i=0;i<found->items.size();++i) if(found->items[i].id!=control.items[i].id) return E_NOTIMPL;
         // All potentially allocating copies precede mutation. If publishing the
         // snapshot fails, restore local state without allocating and end Show:
         // the adapter may have partially copied its snapshot before failing.
         PickerCustomControl previous=control;
         PickerDialogSnapshot previous_snapshot = embedded_state_;
         std::swap(*found,previous);
-        embedded_state_.candidate.clear(); embedded_state_.candidates.clear();
-        ++embedded_state_.generation;
         const HRESULT published = NotifyEmbedded(PickerDialogEvent::Snapshot);
         if (published != S_OK) {
             std::swap(*found,previous);
@@ -2544,14 +2876,407 @@ private:
         }
         Relayout(); ScrollCustom(0); Invalidate(); return S_OK;
     }
+    HRESULT UpdateText(uint32_t kind, const std::wstring& text) {
+        if (done_) return HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+        if (kind < PULSE_PICKER_UI_V2_TEXT_TITLE || kind > PULSE_PICKER_UI_V2_TEXT_DEFAULT_EXTENSION) return E_INVALIDARG;
+        // Allocate before changing state. A setter invalidates pending acceptance,
+        // including a FileOk callback whose candidate used the old filename/extension.
+        auto copied = text;
+        if (kind == PULSE_PICKER_UI_V2_TEXT_FILENAME && copied == filename_text_) return S_OK;
+        if (kind == PULSE_PICKER_UI_V2_TEXT_DEFAULT_EXTENSION && copied == spec_.default_extension) return S_OK;
+        if (kind == PULSE_PICKER_UI_V2_TEXT_TITLE) {
+            chrome_.title = copied; spec_.title = std::move(copied); spec_.explicit_title = true;
+            SetWindowTextW(hwnd_, spec_.title.c_str());
+        } else if (kind == PULSE_PICKER_UI_V2_TEXT_OK_LABEL) {
+            chrome_.primary_text = normal_primary_text_ = copied; spec_.ok_button_label = std::move(copied); spec_.has_ok_button_label = true;
+        } else if (kind == PULSE_PICKER_UI_V2_TEXT_FILENAME_LABEL) {
+            chrome_.filename_label = copied; spec_.file_name_label = std::move(copied); spec_.has_file_name_label = true;
+        } else {
+            ++generation_; validating_ = false;
+            ClearEmbeddedCandidate();
+            if (kind == PULSE_PICKER_UI_V2_TEXT_FILENAME) {
+                filename_from_selection_ = false; selected_set_.clear(); selected_ = anchor_ = -1;
+                SetFilename(std::move(copied));
+            } else {
+                spec_.default_extension = std::move(copied);
+                spec_.use_open_default_extension = mode_ != PickerMode::Save;
+                UpdateChosen();
+            }
+        }
+        if (done_) return HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+        Relayout(); Invalidate(); return S_OK;
+    }
+
+    // ---- jump strip (HTML 跳转条) ---------------------------------------------
+    // The host's list, or else the folders the shared Pulse places mark open.
+    std::vector<PickerOpenFolder> OpenFolders() const {
+        if (!spec_.open_folders.empty()) return spec_.open_folders;
+        std::vector<PickerOpenFolder> folders;
+        for (const auto& entry : pulse_places_.folders) {
+            if (!entry.open) continue;
+            picker_user_storage::Path parsed;
+            if (!picker_user_storage::Parse(entry.path, parsed)) continue;
+            folders.push_back({parsed.value, entry.label, false});
+        }
+        return folders;
+    }
+    bool ShowsRecentFiles() const {
+        return (mode_ == PickerMode::File || mode_ == PickerMode::Image) && !spec_.recent_files.empty();
+    }
+    // A recent card: its full path goes into the file name; a double click opens it.
+    void PickRecentFile(size_t index, bool open) {
+        if (index >= spec_.recent_files.size() || spec_.recent_files[index].path.empty()) return;
+        chrome_.recent_selected = static_cast<int>(index);
+        setting_edits_ = true;
+        if (filename_edit_) SetWindowTextW(filename_edit_, spec_.recent_files[index].path.c_str());
+        setting_edits_ = false;
+        SetFilename(spec_.recent_files[index].path);
+        UpdateChosen();
+        if (open) SubmitSelection();
+        Invalidate();
+    }
+    ID2D1Bitmap* RecentThumbnail(size_t index) {
+        if (index >= spec_.recent_files.size() || !spec_.recent_files[index].thumbnail || !compositor_.Dc()) return nullptr;
+        if (recent_thumb_device_ != compositor_.Dc()) { recent_thumbs_.clear(); recent_thumb_device_ = compositor_.Dc(); }
+        if (recent_thumbs_.size() < spec_.recent_files.size()) recent_thumbs_.resize(spec_.recent_files.size());
+        auto& slot = recent_thumbs_[index];
+        if (slot.get()) return slot.get();
+        BITMAP info{};
+        if (!GetObjectW(spec_.recent_files[index].thumbnail, sizeof(info), &info) || info.bmWidth <= 0 || info.bmHeight == 0) return nullptr;
+        const int w = info.bmWidth, h = std::abs(info.bmHeight);
+        std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4);
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(bi.bmiHeader); bi.bmiHeader.biWidth = w; bi.bmiHeader.biHeight = -h;
+        bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+        HDC screen = GetDC(nullptr);
+        const int got = GetDIBits(screen, spec_.recent_files[index].thumbnail, 0, static_cast<UINT>(h), pixels.data(), &bi, DIB_RGB_COLORS);
+        ReleaseDC(nullptr, screen);
+        if (got != h) return nullptr;
+        const auto props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+        compositor_.Dc()->CreateBitmap(D2D1::SizeU(w, h), pixels.data(), w * 4, props, &slot);
+        return slot.get();
+    }
+    void JumpToOpenFolder(size_t index) {
+        const auto folders = OpenFolders();
+        if (index >= folders.size() || folders[index].path.empty()) return;
+        Navigate(folders[index].path, true);
+        Invalidate();
+    }
+    void UndoAutoJump() {
+        if (spec_.auto_jump_from.empty()) return;
+        auto from = spec_.auto_jump_from;
+        spec_.auto_jump_from.clear();  // offered once
+        Navigate(std::move(from), true);
+        Invalidate();
+    }
+    // ---- jump panel (HTML 输入跳转) --------------------------------------------
+    static bool JumpLooksLikePath(const std::wstring& text) {
+        return text.find_first_of(L"\\/:") != std::wstring::npos || (!text.empty() && (text[0] == L'%' || text[0] == L'.'));
+    }
+    static bool JumpMatches(std::wstring hay, std::wstring query) {
+        CharLowerBuffW(hay.data(), static_cast<DWORD>(hay.size()));
+        CharLowerBuffW(query.data(), static_cast<DWORD>(query.size()));
+        return hay.find(query) != std::wstring::npos;
+    }
+    bool JumpMatchesFolder(const std::wstring& name, const std::wstring& path, const std::wstring& query) const {
+        if (JumpMatches(name, query) || JumpMatches(path, query)) return true;
+        return pulse_places_.jump_policy_available && pulse_places_.pinyin &&
+            !app::RankJumpFolders({{path, name}}, query, true, 1).empty();
+    }
+    void CloseJump() {
+        if (!jump_.open) return;
+        jump_.open = false;
+        jump_.rows.clear();
+        Invalidate();
+    }
+    void UpdateJump() {
+        const std::wstring query = path_edit_ ? ReadEdit(path_edit_) : std::wstring();
+        const bool keep_selection = query == jump_.query && jump_.selected >= 0 && static_cast<size_t>(jump_.selected) < jump_.rows.size();
+        const auto selected_path = keep_selection ? jump_.rows[static_cast<size_t>(jump_.selected)].path : std::wstring();
+        jump_.rows.clear(); jump_.selected = 0; jump_.hover = -1; jump_.query = query;
+        jump_.open = address_editing_ && !query.empty() && !JumpLooksLikePath(query);
+        if (!jump_.open) { Invalidate(); return; }
+        using I = l10n::StringId;
+        jump_.titles[kJumpOpen] = l10n::Get(I::PickerOpenFolders);
+        jump_.titles[kJumpRecent] = spec_.host_app_name.empty() ? l10n::Get(I::Recent)
+            : FillPickerText(l10n::Get(I::PickerJumpRecent), spec_.host_app_name);
+        jump_.titles[kJumpFavorite] = l10n::Get(I::StarredItems);
+        jump_.titles[kJumpEverywhere] = l10n::Get(spec_.jump_index_status == 1 ? I::PickerJumpUserIndex : I::PickerJumpEverywhere);
+        jump_.empty_text = l10n::Get(I::PickerJumpNoMatch);
+        jump_.hints[0] = l10n::Get(I::PickerJumpHintPick);
+        jump_.hints[1] = l10n::Get(I::PickerJumpHintEnter);
+        jump_.hints[2] = l10n::Get(I::PickerJumpHintTab);
+        jump_.hints[3] = mode_ == PickerMode::Save ? l10n::Get(I::PickerJumpHintSaveHere) : std::wstring();
+        jump_.hints[4] = l10n::Get(I::PickerJumpHintBack);
+        jump_.foot_note = l10n::Get(I::PickerJumpNote);
+        const auto open_folders = OpenFolders();
+        for (size_t i = 0; i < open_folders.size(); ++i) {
+            const auto& folder = open_folders[i];
+            const auto name = FolderLabel(folder);
+            if (!JumpMatchesFolder(name, folder.path, query)) continue;
+            PickerJumpRow row;
+            row.group = kJumpOpen; row.name = name; row.path = folder.path; row.window = folder.explorer;
+            row.note = l10n::Get(folder.explorer ? I::PickerExplorerSource : I::PickerJumpPulseTab);
+            if (i < 9) row.key = L"Alt+" + std::to_wstring(i + 1);
+            jump_.rows.push_back(std::move(row));
+        }
+        if (!spec_.last_location.path.empty()) {
+            const auto name = FolderLabel(spec_.last_location);
+            if (JumpMatchesFolder(name, spec_.last_location.path, query))
+                jump_.rows.push_back({kJumpRecent, name, spec_.last_location.path, spec_.last_location_source});
+        }
+        if (spec_.jump_search) {
+            std::vector<PickerJumpResult> found;
+            try { found = spec_.jump_search(query); } catch (...) { found.clear(); }
+            for (auto& result : found) {
+                if (result.path.empty()) continue;
+                PickerJumpRow row;
+                row.group = std::clamp(result.group, static_cast<int>(kJumpRecent), static_cast<int>(kJumpEverywhere));
+                row.name = result.name.empty() ? PickerLeafName(result.path) : result.name;
+                row.path = std::move(result.path); row.note = std::move(result.note); row.file = result.file;
+                jump_.rows.push_back(std::move(row));
+            }
+            std::stable_sort(jump_.rows.begin(), jump_.rows.end(), [](const PickerJumpRow& a, const PickerJumpRow& b) { return a.group < b.group; });
+        }
+        if (!current_.empty() && !picker_navigation::IsComputerPath(current_)) {
+            PickerJumpRow create;
+            create.group = kJumpCreate;
+            create.name = FillPickerText(FillFolderText(l10n::Get(I::PickerJumpCreate), PickerLeafName(current_)), query);
+            create.path = current_ + (current_.back() == L'\\' ? L"" : L"\\") + query;
+            create.key = L"Ctrl+Shift+Enter";
+            jump_.rows.push_back(std::move(create));
+        }
+        for (auto& detail : jump_.group_details) detail.clear();
+        for (int group = 0; group < kJumpCreate; ++group) {
+            size_t count = 0;
+            for (const auto& row : jump_.rows) if (row.group == group) ++count;
+            if (count) jump_.group_details[group] = std::to_wstring(count);
+        }
+        if (spec_.jump_search_complete && spec_.jump_search_query == query) {
+            size_t count = 0;
+            for (const auto& row : jump_.rows) if (row.group == kJumpEverywhere) ++count;
+            auto text = l10n::Get(I::PickerSearchResultSummary);
+            auto at = text.find(L"{count}");
+            if (at != text.npos) text.replace(at, 7, std::to_wstring(count));
+            at = text.find(L"{ms}");
+            if (at != text.npos) text.replace(at, 4, std::to_wstring(spec_.jump_search_elapsed_ms));
+            jump_.group_details[kJumpEverywhere] = std::move(text);
+        }
+        jump_.index_notice = spec_.jump_index_status == 1 ? l10n::Get(I::PickerJumpUserIndex) : std::wstring();
+        jump_.index_action_text = spec_.jump_index_status == 1 ? l10n::Get(I::PickerIndexLearn) : std::wstring();
+        if (keep_selection) for (size_t i = 0; i < jump_.rows.size(); ++i)
+            if (SamePickerPath(jump_.rows[i].path, selected_path)) { jump_.selected = static_cast<int>(i); break; }
+        Invalidate();
+    }
+    static std::wstring FillFolderText(std::wstring text, const std::wstring& folder) {
+        const auto at = text.find(L"{folder}");
+        if (at != std::wstring::npos) text.replace(at, 8, folder);
+        return text;
+    }
+    void ActivateJumpRow(int index, bool save_here) {
+        if (index < 0 || static_cast<size_t>(index) >= jump_.rows.size()) return;
+        const PickerJumpRow row = jump_.rows[static_cast<size_t>(index)];
+        const auto query = jump_.query;
+        CloseJump();
+        EndAddressEdit(true);
+        if (row.group == kJumpCreate) {
+            NewNamedFolder(query);
+            return;
+        }
+        const auto destination = row.file ? PickerParent(row.path) : row.path;
+        if (destination.empty()) return;
+        const auto before = generation_;
+        Navigate(destination, true, row.file ? row.path : std::wstring());
+        if (save_here && mode_ == PickerMode::Save && !row.file && waiting_ &&
+            generation_ != before && SamePickerPath(current_, destination)) {
+            // Resume through the normal save validator only after this listing commits.
+            jump_save_generation_ = generation_;
+            jump_save_filename_ = filename_text_;
+        }
+    }
+    // Keys while the address row edits with the panel open; true when handled.
+    bool JumpKey(WPARAM key) {
+        if (!jump_.open) return false;
+        const int count = static_cast<int>(jump_.rows.size());
+        if (key == VK_DOWN || key == VK_UP) {
+            if (count) jump_.selected = (jump_.selected + (key == VK_DOWN ? 1 : count - 1)) % count;
+            Invalidate();
+            return true;
+        }
+        if (key == VK_ESCAPE) { CloseJump(); return true; }
+        if (key == VK_RETURN) {
+            const bool ctrl = KeyDown(VK_CONTROL), shift = KeyDown(VK_SHIFT);
+            int index = jump_.selected;
+            if (ctrl && shift) {
+                index = -1;
+                for (int i = 0; i < count; ++i) if (jump_.rows[static_cast<size_t>(i)].group == kJumpCreate) index = i;
+            }
+            ActivateJumpRow(index, ctrl && !shift);
+            return true;
+        }
+        if (key == VK_TAB && count && jump_.selected < count && jump_.rows[static_cast<size_t>(jump_.selected)].group != kJumpCreate) {
+            // Complete to the full path; the panel closes because a path is not a name.
+            auto path = jump_.rows[static_cast<size_t>(jump_.selected)].path;
+            if (!jump_.rows[static_cast<size_t>(jump_.selected)].file && !path.empty() && path.back() != L'\\') path += L'\\';
+            SetWindowTextW(path_edit_, path.c_str());
+            SendMessageW(path_edit_, EM_SETSEL, path.size(), path.size());
+            return true;
+        }
+        return false;
+    }
+    static std::wstring FolderLabel(const PickerOpenFolder& folder) {
+        if (!folder.label.empty()) return folder.label;
+        return PickerLeafName(folder.path);
+    }
+    void SyncJumpStrip() {
+        chrome_.strip_left = 0.0f;
+        chrome_.recent_left = scale_ > 0.0f ? renderer_.EffectiveSidebarWidth(static_cast<float>(Width())) / scale_ : 0.0f;
+        chrome_.app_name = spec_.host_app_name;
+        chrome_.app_icon = AppIconBitmap();
+        chrome_.strip_caption = l10n::Get(l10n::StringId::PickerOpenFolders);
+        chrome_.open_folders.clear();
+        for (const auto& folder : OpenFolders()) {
+            PickerOpenChip chip;
+            chip.label = FolderLabel(folder);
+            chip.path = folder.path;
+            chip.window = folder.explorer;
+            chip.source = l10n::Get(folder.explorer ? l10n::StringId::PickerExplorerSource : l10n::StringId::PickerPulseSource);
+            chip.active = SamePickerPath(folder.path, current_);
+            chrome_.open_folders.push_back(std::move(chip));
+        }
+        chrome_.last_location = {};
+        if (!spec_.last_location.path.empty() && !SamePickerPath(spec_.last_location.path, current_)) {
+            chrome_.last_location.label = FolderLabel(spec_.last_location);
+            chrome_.last_location.path = spec_.last_location.path;
+            chrome_.last_location.source = spec_.last_location_source;
+        }
+        chrome_.auto_jump_notice.clear();
+        if (!spec_.auto_jump_from.empty() && !current_.empty() && !SamePickerPath(spec_.auto_jump_from, current_))
+            chrome_.auto_jump_notice = FillPickerText(l10n::Get(l10n::StringId::PickerAutoJumpNotice), PickerLeafName(current_));
+        chrome_.undo_jump_text.clear();
+        if (!spec_.auto_jump_from.empty() && !SamePickerPath(spec_.auto_jump_from, current_))
+            chrome_.undo_jump_text = FillPickerText(l10n::Get(l10n::StringId::PickerUndoJump), PickerLeafName(spec_.auto_jump_from));
+        chrome_.recent_files.clear();
+        if (ShowsRecentFiles()) {
+            chrome_.recent_caption = spec_.recent_files_caption.empty() ? l10n::Get(l10n::StringId::PickerRecentFiles) : spec_.recent_files_caption;
+            for (size_t i = 0; i < spec_.recent_files.size(); ++i)
+                chrome_.recent_files.push_back({PickerLeafName(spec_.recent_files[i].path), spec_.recent_files[i].detail, RecentThumbnail(i)});
+        }
+        chrome_.selection_summary.clear(); chrome_.selection_hint.clear();
+        if (allow_multiselect_) {
+            uint64_t bytes = 0; size_t count = 0;
+            for (int index : selected_set_) if (index >= 0 && static_cast<size_t>(index) < entries_.size()) {
+                const auto& entry = entries_[static_cast<size_t>(index)];
+                if (entry.kind == PickerEntryKind::File) { bytes += entry.size; ++count; }
+            }
+            if (count) {
+                auto text = l10n::Get(l10n::StringId::PickerSelectedSizeFormat);
+                auto at = text.find(L"{count}");
+                if (at != text.npos) text.replace(at, 7, std::to_wstring(count));
+                at = text.find(L"{size}");
+                if (at != text.npos) text.replace(at, 6, format::ByteSize(bytes));
+                chrome_.selection_summary = std::move(text);
+                chrome_.selection_hint = l10n::Get(l10n::StringId::PickerSelectionContinue);
+            }
+        }
+        chrome_.new_folder_text = l10n::Get(l10n::StringId::NewFolder);
+        chrome_.new_folder_key = L"Ctrl+Shift+N";
+        chrome_.context_filters.clear();
+        if (mode_ == PickerMode::Folder) {
+            PickerOptionChip chip;
+            chip.id = kPickContextFilterBase; chip.checked = true; chip.enabled = false;
+            chip.text = l10n::Get(l10n::StringId::PickerFoldersOnly);
+            chrome_.context_filters.push_back(std::move(chip));
+        } else {
+            // HTML fchips: the program's type and 全部文件 side by side, a one-click switch;
+            // every other type stays in the type list. Labels drop the "(*.ext)" tail.
+            const auto all_files = [](const std::wstring& pattern) {
+                size_t start = 0;
+                while (start <= pattern.size()) {
+                    size_t end = pattern.find(L';', start);
+                    if (end == std::wstring::npos) end = pattern.size();
+                    auto part = pattern.substr(start, end - start);
+                    while (!part.empty() && part.front() == L' ') part.erase(part.begin());
+                    while (!part.empty() && part.back() == L' ') part.pop_back();
+                    if (part == L"*" || part == L"*.*") return true;
+                    start = end + 1;
+                }
+                return false;
+            };
+            const auto short_label = [](std::wstring label) {
+                const auto open = label.rfind(L'(');
+                if (open != std::wstring::npos && open > 0 && !label.empty() && label.back() == L')') {
+                    label.erase(open);
+                    while (!label.empty() && label.back() == L' ') label.pop_back();
+                }
+                return label;
+            };
+            const size_t count = std::min<size_t>(options_.filters.size(), 64);
+            size_t specific = count, everything = count;
+            if (options_.filter_index < count && !all_files(options_.filters[options_.filter_index].pattern))
+                specific = options_.filter_index;
+            for (size_t i = 0; i < count; ++i) {
+                const bool all = all_files(options_.filters[i].pattern);
+                if (all && everything == count) everything = i;
+                if (!all && specific == count) specific = i;
+            }
+            for (const size_t i : {specific, everything}) {
+                if (i >= count) continue;
+                PickerOptionChip chip;
+                chip.id = kPickContextFilterBase + static_cast<int>(i);
+                chip.text = short_label(options_.filters[i].label);
+                if (chip.text.empty()) chip.text = options_.filters[i].label;
+                chip.label = options_.filters[i].pattern;  // the view picks the chip's icon from it
+                chip.checked = i == options_.filter_index;
+                chrome_.context_filters.push_back(std::move(chip));
+            }
+        }
+    }
+    static std::wstring FillPickerText(std::wstring text, const std::wstring& name) {
+        const auto at = text.find(L"{name}");
+        if (at != std::wstring::npos) text.replace(at, 6, name);
+        return text;
+    }
+    // The host program's icon for the title strip, at the pixels the worker extracted
+    // (common::LoadIconPixels at the title size). A host that only hands over an HICON
+    // goes through the same IconPixels conversion, so alpha and mask icons stay clean.
+    ID2D1Bitmap* AppIconBitmap() {
+        auto* dc = compositor_.Dc();
+        if (!dc) return nullptr;
+        common::MenuIconRef pixels = spec_.host_app_icon_pixels;
+        if (!pixels && spec_.host_app_icon) {
+            if (!app_icon_fallback_) app_icon_fallback_ = common::IconPixels(spec_.host_app_icon);
+            pixels = app_icon_fallback_;
+        }
+        if (!pixels || !pixels->Valid()) return nullptr;
+        if (app_icon_bitmap_.get() && app_icon_device_ == dc && app_icon_source_ == pixels) return app_icon_bitmap_.get();
+        app_icon_bitmap_.reset();
+        app_icon_device_ = dc;
+        app_icon_source_ = pixels;
+        const auto props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+        dc->CreateBitmap(D2D1::SizeU(pixels->width, pixels->height), pixels->bgra.data(), pixels->width * 4, props, &app_icon_bitmap_);
+        return app_icon_bitmap_.get();
+    }
 
     void Relayout() {
         if (!compositor_.Dc()) return;
+        legacy_child_.Layout(hwnd_);
         DismissHover("hover-layout");
-        renderer_.SetEmbedded(kPickerTitleDip, PickerFooterDip(mode_) + CustomHeightDip());
+        SyncCustomOptions();
+        renderer_.SetEmbedded(kPickerTitleDip, PickerFooterDip(mode_, chrome_.overwrite_pending, !chrome_.options.empty()) + CustomHeightDip());
+        renderer_.SetEmbeddedBand(kPickerStripDip);
+        renderer_.SetEmbeddedPickerRecent((ShowsRecentFiles() ? kPickerRecentDip : 0.0f) +
+            (!spec_.auto_jump_from.empty() && !current_.empty() && !SamePickerPath(spec_.auto_jump_from, current_) ? kPickerAutoJumpNoticeDip : 0.0f));
+        chrome_.strip_top = kPickerTitleDip + renderer_.ToolbarHeightDip() - renderer_.EmbeddedBandDip();
+        chrome_.strip_right = RendererWidth() / scale_;
         renderer_.SetDetailsPanelVisible((spec_.native_options & FOS_FORCEPREVIEWPANEON) != 0);
         SyncVm();
         SyncOpenDropDown();
+        const auto pane_bounds = PaneBounds();
+        chrome_.context_top = pane_bounds.top / scale_;
+        chrome_.context_left = pane_bounds.left / scale_;
+        chrome_.context_right = renderer_.PaneHeaderTitleRight(vm_.pane, pane_bounds) / scale_;
+        chrome_.recent_top = renderer_.EmbeddedPickerRecentRect(pane_bounds).top / scale_;
         chrome_layout_ = LayoutPickerChrome(Width(), Height(), chrome_, painter_, scale_);
         ClampScroll();
         PlaceEdits();
@@ -2598,12 +3323,33 @@ private:
         PULSE_PICKER_TRACE_POINT("chrome-before");
         chrome_layout_ = LayoutPickerChrome(Width(), Height(), chrome_, painter_, scale_);
         if (filename_edit_ && (IsWindowVisible(filename_edit_) != FALSE) != (chrome_.selected_names.size() <= 1)) PlaceEdits();
+        recent_thumbnail_cache_.Begin(hwnd_, compositor_.Dc());
+        chrome_.draw_recent_thumbnail = [this](size_t index, const D2D1_RECT_F& bounds) {
+            const bool bitmap = index < spec_.recent_files.size() && recent_thumbnail_cache_.Draw(spec_.recent_files[index], bounds);
+#if defined(PULSE_PICKER_JUMP_UI_TEST_HOOKS)
+            if (bitmap) ++test_recent_bitmap_draws_;
+#endif
+            return bitmap;
+        };
         DrawPickerChrome(compositor_, painter_, theme, chrome_, chrome_layout_, hc);
+        const bool recent_upload = recent_thumbnail_cache_.End();
+        const auto recent_retry = recent_thumbnail_cache_.RetryDeadline();
+        if (recent_upload || recent_retry) {
+            const auto now = GetTickCount64();
+            const auto delay = recent_upload || recent_retry <= now ? 16ull : std::min<uint64_t>(recent_retry - now, 60000);
+            SetTimer(hwnd_, kRecentThumbnailTimer, static_cast<UINT>(delay), nullptr);
+        } else KillTimer(hwnd_, kRecentThumbnailTimer);
         DrawCustom(theme);
         PULSE_PICKER_TRACE_POINT("chrome-after");
         PULSE_PICKER_TRACE_POINT("painted-edits-before");
         DrawPaintedEdits();
         PULSE_PICKER_TRACE_POINT("painted-edits-after");
+        if (jump_.open) {
+            jump_.hover = chrome_.hover >= kPickJumpRowBase ? chrome_.hover - kPickJumpRowBase : -1;
+            jump_layout_ = LayoutPickerJump(jump_, renderer_.AddressBarRect(Width()), Width(),
+                                            chrome_layout_.footer.top - 8.0f * scale_, scale_);
+            DrawPickerJump(compositor_, painter_, theme, jump_, jump_layout_, hc);
+        } else jump_layout_ = {};
         auto hover_bounds = RendererRect();
         hover_bounds.bottom = chrome_layout_.footer.top;
         renderer_.DrawHoverPreview(hover_preview_.view, hover_bounds, theme, hc);
@@ -2689,7 +3435,15 @@ private:
 
     Hit HitAt(float x, float y) {
         Hit hit;
+        if (jump_.open) {
+            const int row = HitTestPickerJump(jump_layout_, x, y);
+            if (row >= 0) { hit.chrome = kPickJumpRowBase + row; return hit; }
+            if (row == kPickerJumpIndexInfoHit) { hit.chrome = kPickJumpIndexInfo; return hit; }
+            if (row == -1) { hit.chrome = kPickJumpPanel; return hit; }
+        }
         hit.chrome = HitTestPickerChrome(chrome_layout_, chrome_, x, y);
+        if (PropertySidebar() && x >= RendererWidth() && y >= kPickerTitleDip * scale_ && y < chrome_layout_.footer.top)
+            hit.chrome = kPickNone;
         if (!spec_.custom_controls.empty() && ContainsRect(CustomPanel(), x, y)) {
             for (size_t i = 0; i < spec_.custom_controls.size(); ++i)
                 if (PickerCustomInteractive(spec_.custom_controls[i].kind) && EffectiveControl(i) == 3 && ContainsRect(CustomRect(i), x, y))
@@ -2780,6 +3534,19 @@ private:
                 SetTimer(hwnd_, kHoverTimer, 50, nullptr);
             }
         } else if (!hover_preview_.view.path.empty()) DismissHover("hover-nonrow");
+        if (hit.chrome >= kPickOpenFolderBase && hit.chrome < kPickOpenFolderBase + 9) {
+            const auto folders = OpenFolders();
+            const auto index = static_cast<size_t>(hit.chrome - kPickOpenFolderBase);
+            if (index < folders.size()) vm_.tooltip_text = folders[index].path;
+        } else if (hit.chrome == kPickLastLocation) {
+            vm_.tooltip_text = spec_.last_location.path;
+        } else if (changed && hit.main.region != HitTestResult::Row) {
+            vm_.tooltip_text.clear();
+        }
+        if (!vm_.tooltip_text.empty()) {
+            vm_.tooltip_x = static_cast<float>(hover_point_.x);
+            vm_.tooltip_y = static_cast<float>(hover_point_.y);
+        }
         if (changed) Invalidate();
     }
 
@@ -3065,8 +3832,12 @@ private:
         const int command = TrackPickerDropdown(ScreenRect(chrome_layout_.filter), std::move(items));
         SetFilterOpen(false);
         if (done_ || command <= 0) return;
-        if (options_.filter_index == static_cast<size_t>(command - 1)) return;
-        options_.filter_index = static_cast<size_t>(command - 1);
+        ApplyFilter(static_cast<size_t>(command - 1));
+    }
+
+    void ApplyFilter(size_t index) {
+        if (index >= options_.filters.size() || options_.filter_index == index) return;
+        options_.filter_index = index;
         if (mode_ == PickerMode::Save) save_filter_changed_ = true;
         if (mode_ == PickerMode::File) open_filter_changed_ = true;
         UpdateFilterText();
@@ -3313,6 +4084,7 @@ private:
     }
 
     std::vector<std::wstring> OperationPaths() const {
+        if (new_folder_draft_) return {};
         std::vector<int> indices(selected_set_.begin(), selected_set_.end());
         std::sort(indices.begin(), indices.end());
         std::vector<std::wstring> paths;
@@ -3348,7 +4120,8 @@ private:
                IsClipboardFormatAvailable(CF_HDROP);
     }
 
-    void ExecuteOperation(ops::OpRequest request, const ops::ClipboardData* clipboard = nullptr, bool unique_create = false) {
+    void ExecuteOperation(ops::OpRequest request, const ops::ClipboardData* clipboard = nullptr,
+                          bool unique_create = false, bool enter_created = false) {
         if (operating_ || done_) return;
         const bool create_item = request.type == ops::OpType::CreateFolder || request.type == ops::OpType::CreateTextFile;
         const auto operation_parent = current_;
@@ -3374,6 +4147,11 @@ private:
             }))
             ops::CompleteCutClipboard(clipboard->sequence, clipboard->paths);
         if (generation_ != operation_generation || !SamePickerPath(current_, operation_parent)) return;
+        if (enter_created && create_task && !destinations.empty()) {
+            Navigate(destinations.front(), true);
+            FocusList();
+            return;
+        }
         if (!destinations.empty()) ClearSelection();
         Reload();
         select_after_paths_ = destinations;
@@ -3433,12 +4211,24 @@ private:
             Invalidate();
             return;
         }
+        const bool creating_folder = new_folder_draft_;
+        if (creating_folder) {
+            new_folder_draft_ = false;
+            snapshot_ = std::move(new_folder_snapshot_);
+            if (!entries_.empty()) entries_.erase(entries_.begin());
+            selected_ = -1; selected_set_.clear(); anchor_ = -1;
+        }
         const bool owned_focus = rename_edit_ && GetFocus() == rename_edit_;
         rename_path_.clear();
         rename_index_ = -1;
         ++rename_serial_;
         if (rename_edit_) ShowWindow(rename_edit_, SW_HIDE);
         if (owned_focus && !done_) FocusList();
+        if (creating_folder) {
+            UpdateChosen(); Invalidate();
+            if (commit && current) NewNamedFolder(name);
+            return;
+        }
         if (!commit || !current || name == PickerLeafName(path)) { Invalidate(); return; }
         ops::OpRequest request;
         request.type = ops::OpType::Rename;
@@ -3504,7 +4294,50 @@ private:
         ExecuteOperation(std::move(request));
     }
 
-    void NewFolder() { NewItem(true); }
+    void NewFolder() {
+        if (picker_shell::IsParsingName(current_) || current_.empty() || !current_verified_ ||
+            waiting_ || validating_ || operating_ || !loader_) return;
+        EndRename(false);
+        if (!rename_edit_) rename_edit_ = MakeEdit(104, L"");
+        if (!rename_edit_) return;
+        const auto name = l10n::Get(l10n::StringId::NewFolder);
+        PickerEntry draft;
+        draft.name = name;
+        draft.path = current_ + (current_.back() == L'\\' ? L"" : L"\\") + name;
+        draft.kind = PickerEntryKind::Folder;
+        new_folder_snapshot_ = snapshot_;
+        auto rows = std::make_shared<std::vector<fs::DirEntry>>();
+        if (snapshot_) *rows = *snapshot_;
+        fs::DirEntry row;
+        row.name = name; row.attrs = FILE_ATTRIBUTE_DIRECTORY; row.is_dir = true;
+        rows->insert(rows->begin(), std::move(row));
+        snapshot_ = std::move(rows);
+        entries_.insert(entries_.begin(), std::move(draft));
+        new_folder_draft_ = true;
+        selected_ = anchor_ = 0; selected_set_.clear();
+        rename_path_ = entries_.front().path; rename_index_ = 0;
+        rename_generation_ = generation_; ++rename_serial_;
+        SetWindowTextW(rename_edit_, name.c_str());
+        RemovePropW(rename_edit_, L"Pulse.EditDimExt");
+        EnsureVisible(0); PlaceRenameEdit(); SetFocus(rename_edit_);
+        SendMessageW(rename_edit_, EM_SETSEL, 0, -1);
+        Invalidate();
+    }
+
+    void NewNamedFolder(const std::wstring& name) {
+        if (picker_shell::IsParsingName(current_) || current_.empty() || !current_verified_ ||
+            waiting_ || validating_ || operating_ || !loader_) return;
+        if (!IsPickerFolderName(name)) {
+            chrome_.notice = ErrorText(ERROR_INVALID_NAME, name);
+            Invalidate();
+            return;
+        }
+        EndRename(false);
+        ops::OpRequest request;
+        request.type = ops::OpType::CreateFolder;
+        request.sources = {current_ + (current_.back() == L'\\' ? L"" : L"\\") + name};
+        ExecuteOperation(std::move(request), nullptr, false, true);
+    }
 
     void NewItem(bool folder) {
         if (picker_shell::IsParsingName(current_)) return;
@@ -3521,18 +4354,31 @@ private:
     // ---- focus and keys ----------------------------------------------------
 
     std::vector<int> FocusOrder() const {
-        if (chrome_.overwrite_pending) return {kPickOverwriteBack, kPickRename, kPickCancel, kPickPrimary};
+        if (chrome_.overwrite_pending) return {kPickRename, kPickOverwriteReplace, kPickCancel};
         std::vector<int> order = {kPickAddress, kPickSearch, kPickList};
+        for (size_t i = 0; i < chrome_layout_.context_filters.size(); ++i)
+            order.push_back(chrome_.context_filters[i].id);
         if (filename_edit_) {
             if (IsWindowEnabled(filename_edit_)) order.push_back(kPickFilename);
             order.push_back(kPickFilter);
         }
-        for (size_t i = 0; i < spec_.custom_controls.size(); ++i)
-            if (PickerCustomInteractive(spec_.custom_controls[i].kind) && EffectiveControl(i) == 3)
-                order.push_back(kCustomFocusBase + static_cast<int>(i));
+        if (CompactCustom()) {
+            for (size_t i = 0; i < chrome_layout_.option_chips.size() && i < chrome_.options.size(); ++i)
+                if (chrome_.options[i].enabled) order.push_back(chrome_.options[i].id);
+            if (chrome_layout_.option_chips.size() < chrome_.options.size()) order.push_back(kPickMoreOptions);
+        } else for (size_t i = 0; i < spec_.custom_controls.size(); ++i)
+            if (PickerCustomInteractive(spec_.custom_controls[i].kind) && EffectiveControl(i) == 3) order.push_back(kCustomFocusBase + static_cast<int>(i));
+        if (chrome_.footer_tool.enabled && chrome_layout_.footer_tool.right > chrome_layout_.footer_tool.left)
+            order.push_back(chrome_.footer_tool.id);
         order.push_back(kPickCancel);
         if (!chosen_.empty() && !waiting_ && !validating_) { order.push_back(kPickPrimary); if(chrome_.primary_drop_down) order.push_back(kPickPrimaryDropDown); }
+        if (legacy_child_.Height(hwnd_)) order.push_back(kLegacyChildFocus);
         return order;
+    }
+    bool LegacyDialogMessage(MSG& message) {
+        int direction = 0;
+        if (legacy_child_.TabExit(hwnd_, message, direction)) { focus_ = kLegacyChildFocus; MoveFocus(direction); return true; }
+        return legacy_child_.DialogMessage(hwnd_, message);
     }
 
     void MoveFocus(int direction) {
@@ -3547,8 +4393,9 @@ private:
         if (next == kPickAddress) { BeginAddressEdit(); return; }
         if (next == kPickSearch) { BeginSearch(); return; }
         if (next == kPickFilename) { FocusFilename(); return; }
+        if (next == kLegacyChildFocus) { focus_ = next; legacy_child_.Focus(hwnd_, direction < 0); return; }
         focus_ = next;
-        if (next >= kCustomFocusBase) {
+        if (next >= kCustomFocusBase && !CompactCustom()) {
             const auto rect = CustomRect(static_cast<size_t>(next - kCustomFocusBase));
             const auto panel = CustomPanel();
             if (rect.top < panel.top) ScrollCustom(rect.top - panel.top);
@@ -3561,6 +4408,30 @@ private:
     }
 
     void Activate(int id) {
+        if (id == kPickJumpIndexInfo) {
+            ConfirmDialogSpec info;
+            info.title = l10n::Get(l10n::StringId::PickerIndexLearn);
+            info.message = l10n::Get(l10n::StringId::PickerUserIndexExplanation);
+            info.confirm_text = l10n::Get(l10n::StringId::Close);
+            info.cancel_text = l10n::Get(l10n::StringId::Cancel);
+            info.cancel_event = spec_.cancel_event;
+            ShowConfirmDialog(hwnd_, info, dark_, accent_);
+            return;
+        }
+#if defined(PULSE_PICKER_JUMP_UI_TEST_HOOKS)
+        test_last_activate_ = id;
+#endif
+        if (id == kPickMoreOptions) { ShowMoreOptions(); return; }
+        if (id >= kPickContextFilterBase && id < kPickContextFilterBase + 64) {
+            if (!chrome_.overwrite_pending) ApplyFilter(static_cast<size_t>(id - kPickContextFilterBase));
+            return;
+        }
+        // The jump strip (its chip ids sit inside the selection-tag range, so first).
+        if (id >= kPickRecentBase && id < kPickRecentBase + 64) { PickRecentFile(static_cast<size_t>(id - kPickRecentBase), false); return; }
+        if (id >= kPickOpenFolderBase && id < kPickOpenFolderBase + 9) { JumpToOpenFolder(static_cast<size_t>(id - kPickOpenFolderBase)); return; }
+        if (id == kPickLastLocation) { if (!spec_.last_location.path.empty()) Navigate(spec_.last_location.path, true); return; }
+        if (id == kPickUndoJump) { UndoAutoJump(); return; }
+        if (id == kPickNewFolder) { NewFolder(); return; }
         if (id >= kPickRemoveSelectionBase && id < kCustomFocusBase) {
             const auto index = static_cast<size_t>(id - kPickRemoveSelectionBase);
             if (index < selection_tag_indices_.size()) {
@@ -3570,7 +4441,8 @@ private:
             return;
         }
         if (chrome_.overwrite_pending) {
-            if (id == kPickPrimary) { ResolveOverwrite(true); return; }
+            if (id == kPickOverwriteReplace) { ResolveOverwrite(true); return; }
+            if (id == kPickPrimary) return;
             if (id == kPickOverwriteBack || id == kPickRename) { ResolveOverwrite(false, id == kPickRename); return; }
         }
         PickerProofFocus("activate", focus_, id);
@@ -3581,6 +4453,20 @@ private:
         }
         if (id >= kCustomFocusBase) {
             const size_t index = static_cast<size_t>(id - kCustomFocusBase);
+            // A compact chip that needs typing (an edit, a property's add) opens the details panel there.
+            if (CompactCustom() && index < spec_.custom_controls.size() && EffectiveControl(index) == 3 &&
+                (spec_.custom_controls[index].kind == 8 || spec_.custom_controls[index].kind == 6 ||
+                 spec_.custom_controls[index].property_layout == 3)) {
+                custom_details_open_ = true;
+                Relayout(); ScrollCustom(0);
+                const auto rect = CustomRect(index), panel = CustomPanel();
+                if (rect.top < panel.top) ScrollCustom(rect.top - panel.top);
+                else if (rect.bottom > panel.bottom) ScrollCustom(rect.bottom - panel.bottom);
+                focus_ = id;
+                if (spec_.custom_controls[index].kind == 8) SetFocus(custom_edits_[index]);
+                else SetFocus(hwnd_);
+                Invalidate(); return;
+            }
             if(index<spec_.custom_controls.size() && EffectiveControl(index)==3) {
                 const auto control=spec_.custom_controls[index];
                 if(control.kind==8) {SetFocus(custom_edits_[index]);return;}
@@ -3679,6 +4565,7 @@ private:
 
     bool HandleKey(WPARAM key) {
         DismissHover();
+        if (key == VK_ESCAPE && CloseCustomDetails()) return true;
         if (HandleViewKey(key)) return true;
         if (marquee_.pending || marquee_.active) {
             if (key == VK_ESCAPE) EndMarquee(true);
@@ -3849,6 +4736,12 @@ private:
             BeginSearch();
             return;
         case R::AddressSearchClose: ExitSearch(); return;
+        case R::RowCheck:
+            if (allow_multiselect_ && hit.index >= 0) {
+                focus_ = kPickList; SetFocus(hwnd_);
+                Select(hit.index, false, true);
+            }
+            return;
         case R::Row:
             if (hit.index < 0) break;
             focus_ = kPickList;
@@ -3890,6 +4783,9 @@ private:
         case R::PaneEmptyNewFolder: NewFolder(); return;
         case R::SidebarItem:
         case R::SidebarItemExpand:
+            if (navigation_root_.Active() && hit.region == R::SidebarItemExpand) {
+                navigation_root_.Toggle(hit.path); Relayout(); Invalidate(); return;
+            }
             OpenSharedPlace(hit.path);
             return;
         case R::SidebarHeader:
@@ -3920,6 +4816,13 @@ private:
     }
 
     LRESULT Handle(UINT message, WPARAM wparam, LPARAM lparam) {
+        if (message == PickerLegacyChildMessage()) {
+            if (legacy_destroying_) { legacy_child_.Clear(); return wparam ? 0 : kPickerLegacyChildAttached; }
+            if (!legacy_child_.Attach(hwnd_, reinterpret_cast<HWND>(wparam), static_cast<int>(kMinHeight * scale_))) return 0;
+            Relayout(); Invalidate(); return kPickerLegacyChildAttached;
+        }
+        if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN || message == WM_LBUTTONDOWN || message == WM_MOUSEWHEEL)
+            jump_context_touched_ = true;
         if (external_navigation_ && (message == WM_COMMAND ||
             (message == WM_TIMER && wparam == kSearchTimer) ||
             message == kEmbeddedNavigationMessage)) return 0;
@@ -3932,6 +4835,81 @@ private:
             return 0;
         }
         switch (message) {
+#if defined(PULSE_PICKER_JUMP_UI_TEST_HOOKS)
+        case kPickerJumpUiTestMessage: {
+            DWORD sender_pid = 0;
+            GetWindowThreadProcessId(reinterpret_cast<HWND>(wparam), &sender_pid);
+            if (sender_pid != GetCurrentProcessId() || !lparam) return FALSE;
+            auto* request = reinterpret_cast<PickerJumpUiTest*>(lparam);
+            if (request->size != sizeof(*request) || request->version != 1) return FALSE;
+            if (request->jump_path) {
+                const std::wstring path(request->jump_path);
+                const bool file = request->jump_file;
+                spec_.jump_search = [path, file](const std::wstring& query) {
+                    if (query != L"fixture-result") return std::vector<PickerJumpResult>{};
+                    return std::vector<PickerJumpResult>{{path, L"fixture-result", {}, 3, file}};
+                };
+            }
+            if (request->recent_path) {
+                spec_.poll_jump_context = {};
+                KillTimer(hwnd_, kJumpContextTimer);
+                PickerRecentFile file;
+                file.path = request->recent_path;
+                file.attributes = request->recent_attributes;
+                file.modified = request->recent_modified; file.size = request->recent_size;
+                spec_.recent_files = {std::move(file)};
+                test_recent_bitmap_draws_ = 0;
+                Relayout(); Invalidate();
+            }
+            PickerJumpUiTest result;
+            result.recent_bitmap_draws = test_recent_bitmap_draws_;
+            result.last_down_hit = test_last_down_;
+            result.last_up_hit = test_last_up_;
+            result.last_activate = test_last_activate_;
+            result.current_pressed = chrome_.pressed;
+            result.ready = !waiting_ && !validating_;
+            const auto rect = [](D2D1_RECT_F value) { return RECT{static_cast<LONG>(value.left), static_cast<LONG>(value.top), static_cast<LONG>(value.right), static_cast<LONG>(value.bottom)}; };
+            result.option_count = static_cast<unsigned>(std::min<size_t>(4, chrome_layout_.option_chips.size()));
+            for (unsigned i = 0; i < result.option_count; ++i) result.options[i] = rect(chrome_layout_.option_chips[i]);
+            result.more = rect(chrome_layout_.more_options);
+            result.new_folder = rect(chrome_layout_.new_folder);
+            result.overwrite_replace = rect(chrome_layout_.overwrite_replace);
+            result.overwrite_rename = rect(chrome_layout_.rename);
+            result.primary_enabled = chrome_.primary_enabled;
+            result.footer_tool = rect(chrome_layout_.footer_tool);
+            result.context_filter_count = static_cast<unsigned>(std::min<size_t>(2, chrome_layout_.context_filters.size()));
+            for (unsigned i = 0; i < result.context_filter_count; ++i)
+                result.context_filters[i] = rect(chrome_layout_.context_filters[i]);
+            result.remove_count = static_cast<unsigned>(std::min<size_t>(2, chrome_layout_.selection_tags.size()));
+            for (unsigned i = 0; i < result.remove_count; ++i) {
+                auto value = chrome_layout_.selection_tags[i]; value.left = std::max(value.left, value.right - 24 * scale_);
+                result.remove_selection[i] = rect(value);
+            }
+            const auto list = renderer_.PaneListRect(vm_.pane, PaneBounds());
+            int previous = -1;
+            for (float y = list.top; y < list.bottom && result.row_check_count < 2; y += 3 * scale_)
+                for (float x = list.left; x < std::min(list.right, list.left + 70 * scale_); x += 3 * scale_) {
+                    const auto hit = renderer_.HitTest(vm_, RendererRect(), x, y);
+                    if (hit.region == HitTestResult::RowCheck && hit.index != previous) {
+                        previous = hit.index;
+                        float right = x, bottom = y;
+                        for (float at = x + 1; at < list.right; at += 1) {
+                            const auto next = renderer_.HitTest(vm_, RendererRect(), at, y);
+                            if (next.region != HitTestResult::RowCheck || next.index != hit.index) break;
+                            right = at;
+                        }
+                        for (float at = y + 1; at < list.bottom; at += 1) {
+                            const auto next = renderer_.HitTest(vm_, RendererRect(), (x + right) * 0.5f, at);
+                            if (next.region != HitTestResult::RowCheck || next.index != hit.index) break;
+                            bottom = at;
+                        }
+                        result.row_checks[result.row_check_count++] = {static_cast<LONG>((x + right) * 0.5f), static_cast<LONG>((y + bottom) * 0.5f)};
+                        break;
+                    }
+                }
+            *request = result; return TRUE;
+        }
+#endif
         case kPickerDropMessage: {
             if (ole_drag_out_) return 0;
             auto request = std::move(queued_drop_);
@@ -4024,6 +5002,7 @@ private:
             menu_.SetTheme(dark_, accent_);
             Relayout();
             SetTimer(hwnd_, kSharedPlacesTimer, 1000, nullptr);
+            if (spec_.poll_jump_context) SetTimer(hwnd_, kJumpContextTimer, 100, nullptr);
             RegisterPickerDrop();
             return 0;
         }
@@ -4038,7 +5017,7 @@ private:
         case WM_GETMINMAXINFO: {
             auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
             info->ptMinTrackSize.x = static_cast<LONG>(kMinWidth * scale_);
-            info->ptMinTrackSize.y = static_cast<LONG>(kMinHeight * scale_);
+            info->ptMinTrackSize.y = static_cast<LONG>(kMinHeight * scale_) + legacy_child_.Height(hwnd_);
             return 0;
         }
         case kDetailsPreviewNavigateMessage:
@@ -4092,6 +5071,8 @@ private:
             return reinterpret_cast<LRESULT>(EditBrush());
         }
         case WM_COMMAND:
+            if (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == IDOK) { SubmitSelection(); return 0; }
+            if (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == IDCANCEL) { Cancel(); return 0; }
             if (HIWORD(wparam) == EN_CHANGE) InputChanged(reinterpret_cast<HWND>(lparam));
             return 0;
         case WM_CLIPBOARDUPDATE:
@@ -4117,7 +5098,7 @@ private:
             }
             return 0;
         case kEndRenameMessage:
-            if (wparam == rename_serial_) EndRename(true);
+            if (wparam == rename_serial_) EndRename(!new_folder_draft_);
             return 0;
         case kEndAddressMessage:
             if (address_editing_ && GetFocus() != path_edit_) EndAddressEdit(false);
@@ -4171,6 +5152,11 @@ private:
             }
             const auto card = renderer_.HoverCardRect();
             request->card = {static_cast<LONG>(card.left), static_cast<LONG>(card.top), static_cast<LONG>(card.right), static_cast<LONG>(card.bottom)};
+            request->cancel_text = chrome_.cancel_text;
+            request->cancel = {static_cast<LONG>(chrome_layout_.cancel.left), static_cast<LONG>(chrome_layout_.cancel.top),
+                static_cast<LONG>(chrome_layout_.cancel.right), static_cast<LONG>(chrome_layout_.cancel.bottom)};
+            request->primary = {static_cast<LONG>(chrome_layout_.primary.left), static_cast<LONG>(chrome_layout_.primary.top),
+                static_cast<LONG>(chrome_layout_.primary.right), static_cast<LONG>(chrome_layout_.primary.bottom)};
             request->footer = {0, static_cast<LONG>(chrome_layout_.footer.top), static_cast<LONG>(Width()), static_cast<LONG>(Height())};
             return TRUE;
         }
@@ -4204,8 +5190,10 @@ private:
             hover_preview_.Receive(PickerLoader::Take(lparam));
             Invalidate(); return 0;
         case WM_TIMER:
+            if (wparam == kRecentThumbnailTimer) { KillTimer(hwnd_, kRecentThumbnailTimer); Invalidate(); return 0; }
             if (wparam == kHoverTimer) { HoverTick(); return 0; }
             if (wparam == kSharedPlacesTimer) { RefreshSharedPlaces(); return 0; }
+            if (wparam == kJumpContextTimer) { RefreshJumpContext(); return 0; }
             if (wparam == kMarqueeTimer) { UpdateMarquee(marquee_.cursor.x, marquee_.cursor.y, true); return 0; }
             if (wparam == kSearchTimer) { ApplySearchNow(); return 0; }
             if (wparam == kMotionTimer) { Invalidate(); return 0; }
@@ -4221,6 +5209,9 @@ private:
             return 0;
         case kListingMessage:
             OnListing(PickerLoader::Take(lparam));
+            return 0;
+        case kSaveDirectoriesMessage:
+            OnSaveDirectories(PickerLoader::TakeSaveDirectories(lparam));
             return 0;
         case kValidationMessage:
             OnValidation(PickerLoader::TakeValidation(lparam));
@@ -4255,6 +5246,29 @@ private:
             try { return static_cast<LRESULT>(UpdateCustom(*reinterpret_cast<const PickerCustomControl*>(lparam))); }
             catch (const std::bad_alloc&) { return static_cast<LRESULT>(E_OUTOFMEMORY); }
             catch (...) { return static_cast<LRESULT>(E_FAIL); }
+        case kTextUpdateMessage:
+            try { return static_cast<LRESULT>(UpdateText(static_cast<uint32_t>(wparam), *reinterpret_cast<const std::wstring*>(lparam))); }
+            catch (const std::bad_alloc&) { return static_cast<LRESULT>(E_OUTOFMEMORY); }
+            catch (...) { return static_cast<LRESULT>(E_FAIL); }
+        case kNavigationRootMessage:
+            try {
+                navigation_root_.Set(hwnd_, kNavigationRootListingMessage, *reinterpret_cast<const std::wstring*>(lparam), options_);
+                Relayout(); Invalidate(); return static_cast<LRESULT>(S_OK);
+            } catch (...) { return static_cast<LRESULT>(E_OUTOFMEMORY); }
+        case kNavigationRootListingMessage: {
+            const DWORD error = navigation_root_.Complete(lparam);
+            if (error && !navigation_root_.RootLoaded()) { FailPaintedEdit(error); return 0; }
+            if (error) chrome_.notice = ErrorText(error, L"");
+            Relayout(); Invalidate(); return 0;
+        }
+        case kPropertyValidationMessage:
+            try {
+                const auto index = static_cast<uint32_t>(wparam);
+                std::erase(invalid_properties_, index);
+                if (lparam) invalid_properties_.push_back(index);
+                chrome_.notice = invalid_properties_.empty() ? std::wstring() : ErrorText(ERROR_INVALID_DATA, L"");
+                Invalidate(); return static_cast<LRESULT>(S_OK);
+            } catch (...) { return static_cast<LRESULT>(E_OUTOFMEMORY); }
         case WM_MOUSEWHEEL: {
             POINT card_point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             ScreenToClient(hwnd_, &card_point);
@@ -4279,6 +5293,9 @@ private:
             const float x = static_cast<float>(GET_X_LPARAM(lparam));
             const float y = static_cast<float>(GET_Y_LPARAM(lparam));
             const Hit blank_hit = HitAt(x, y);
+#if defined(PULSE_PICKER_JUMP_UI_TEST_HOOKS)
+            test_last_down_ = blank_hit.chrome ? blank_hit.chrome : -static_cast<int>(blank_hit.main.region);
+#endif
             const bool blank_press = spec_.blank_click_action != app::kBlankClickOff &&
                 !waiting_ && !validating_ && !operating_ && !searching_ &&
                 !KeyDown(VK_CONTROL) && !KeyDown(VK_SHIFT) && !KeyDown(VK_MENU) &&
@@ -4293,6 +5310,13 @@ private:
             }
             const Hit& hit = blank_hit;
             chrome_.show_focus = false;
+            if (hit.chrome == kPickJumpPanel) return 0;
+            if (message == WM_LBUTTONDBLCLK && hit.chrome >= kPickRecentBase && hit.chrome < kPickRecentBase + 64) {
+                PickRecentFile(static_cast<size_t>(hit.chrome - kPickRecentBase), true);
+                return 0;
+            }
+            if (jump_.open && hit.chrome >= kPickJumpRowBase && hit.chrome < kPickRecentBase) { ActivateJumpRow(hit.chrome - kPickJumpRowBase, false); return 0; }
+            CloseJump();
             if (hit.chrome == kPickFilename) { FocusFilename(); return 0; }
             if (hit.chrome != kPickNone) {
                 if (hit.chrome >= kCustomFocusBase) { focus_ = hit.chrome; SetFocus(hwnd_); }
@@ -4367,6 +5391,9 @@ private:
                 return 0;
             }
             const int pressed = chrome_.pressed;
+#if defined(PULSE_PICKER_JUMP_UI_TEST_HOOKS)
+            test_last_up_ = HitAt(lparam).chrome;
+#endif
             chrome_.pressed = kPickNone;
             if (pressed != kPickNone) {
                 ReleaseCapture();
@@ -4454,6 +5481,10 @@ private:
             if (wparam == VK_RIGHT) { GoForward(); return 0; }
             if (wparam == 'D') { BeginAddressEdit(); return 0; }
             if (wparam == 'N' && filename_edit_) { FocusFilename(); return 0; }
+            if (wparam >= '1' && wparam <= '9' && static_cast<size_t>(wparam - '1') < OpenFolders().size()) {
+                JumpToOpenFolder(static_cast<size_t>(wparam - '1'));
+                return 0;
+            }
             break;
         case WM_CHAR:
             if (wparam >= 0x20 && wparam != 0x7F && focus_ == kPickList && !KeyDown(VK_CONTROL)) {
@@ -4481,6 +5512,9 @@ private:
         case WM_ERASEBKGND:
             return 1;
         case WM_DESTROY:
+            legacy_destroying_ = true; legacy_child_.Clear();
+            recent_thumbnail_cache_.Detach();
+            KillTimer(hwnd_, kRecentThumbnailTimer);
             DismissHover();
             frame_pump_.Stop();
             ole_drop_.Revoke();
@@ -4518,6 +5552,10 @@ private:
     HWND owner_ = nullptr;
     HWND path_edit_ = nullptr;
     HWND filename_edit_ = nullptr;
+    PickerLegacyChild legacy_child_;
+    PickerNavigationRoot navigation_root_;
+    bool legacy_destroying_ = false;
+    std::vector<uint32_t> invalid_properties_;
     HWND search_edit_ = nullptr;
     std::vector<HWND> custom_edits_;
     int custom_radio_item_=-1;
@@ -4554,6 +5592,7 @@ private:
     picker_places::Snapshot pulse_places_;
     std::wstring current_;
     std::vector<PickerEntry> entries_;
+    PickerRecentThumbnailCache recent_thumbnail_cache_;
     fs::SnapshotPtr snapshot_;
     std::unordered_set<int> selected_set_;
     PickerMarquee marquee_;
@@ -4589,6 +5628,8 @@ private:
     std::vector<std::wstring> select_after_paths_;
     std::vector<app::CreateRenameIntent> create_rename_intents_;
     HWND rename_edit_ = nullptr;
+    bool new_folder_draft_ = false;
+    fs::SnapshotPtr new_folder_snapshot_;
     std::wstring rename_path_;
     int rename_index_ = -1;
     uint64_t rename_generation_ = 0;
@@ -4604,12 +5645,20 @@ private:
     std::optional<SaveConfirmationSnapshot> pending_overwrite_;
     uint64_t overwrite_generation_ = 0;
     std::wstring normal_primary_text_;
+    ComPtr<ID2D1Bitmap> app_icon_bitmap_;
+    std::vector<ComPtr<ID2D1Bitmap>> recent_thumbs_;
+    const void* recent_thumb_device_ = nullptr;
+    PickerJumpPanel jump_;
+    PickerJumpLayout jump_layout_;
+    const void* app_icon_device_ = nullptr;
+    common::MenuIconRef app_icon_source_, app_icon_fallback_;
     bool save_focus_pending_ = false;
     HWND save_focus_before_validation_ = nullptr;
     bool address_editing_ = false;
     bool searching_ = false;
     bool allow_multiselect_ = false;
     bool save_filter_changed_ = false;
+    bool syncing_filename_filter_ = false;
     bool open_filter_changed_ = false;
     bool filename_from_selection_ = false;
     bool editing_selection_names_ = false;
@@ -4626,11 +5675,21 @@ private:
     PickerDialogSnapshot embedded_state_;
     unsigned embedded_callback_depth_ = 0;
     bool embedded_ready_ = false, embedded_folder_pending_ = false;
+    bool submit_ready_ = false, pending_submit_ = false;
     bool embedded_folder_committed_ = false;
     std::deque<std::wstring> external_navigation_queue_;
     bool external_navigation_ = false;
     std::unique_ptr<PickerListing> external_listing_;
     uint64_t generation_ = 0;
+    uint64_t initial_jump_generation_ = 0;
+    bool jump_context_touched_ = false;
+    bool custom_details_open_ = false;
+#if defined(PULSE_PICKER_JUMP_UI_TEST_HOOKS)
+    unsigned test_recent_bitmap_draws_ = 0;
+    int test_last_down_ = 0, test_last_up_ = 0, test_last_activate_ = 0;
+#endif
+    uint64_t jump_save_generation_ = 0;
+    std::wstring jump_save_filename_;
     ULONGLONG typeahead_time_ = 0;
     std::wstring typeahead_;
     size_t mode_index_ = 0;
@@ -4657,6 +5716,18 @@ HRESULT NavigatePickerFolder(HWND window, const std::wstring& path) {
 HRESULT UpdatePickerCustomControl(HWND window, const PickerCustomControl& control) {
     if (!window || GetWindowThreadProcessId(window, nullptr) != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
     return static_cast<HRESULT>(SendMessageW(window, kCustomUpdateMessage, 0, reinterpret_cast<LPARAM>(&control)));
+}
+HRESULT UpdatePickerText(HWND window, uint32_t kind, const std::wstring& text) {
+    if (!window || GetWindowThreadProcessId(window, nullptr) != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
+    return static_cast<HRESULT>(SendMessageW(window, kTextUpdateMessage, kind, reinterpret_cast<LPARAM>(&text)));
+}
+HRESULT SetPickerPropertyValidation(HWND window, uint32_t index, bool invalid) {
+    if (!window || GetWindowThreadProcessId(window, nullptr) != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
+    return static_cast<HRESULT>(SendMessageW(window, kPropertyValidationMessage, index, invalid ? 1 : 0));
+}
+HRESULT SetPickerNavigationRoot(HWND window, const std::wstring& root) {
+    if (!window || GetWindowThreadProcessId(window, nullptr) != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
+    return static_cast<HRESULT>(SendMessageW(window, kNavigationRootMessage, 0, reinterpret_cast<LPARAM>(&root)));
 }
 
 FilePickerOutcome ShowFilePickerDetailed(HWND owner, const FolderPickerSpec& spec, bool dark,
@@ -4711,3 +5782,8 @@ bool ShowFolderPicker(HWND owner, const FolderPickerSpec& spec, bool dark,
 }
 
 } // namespace pulse::ui
+#if defined(PULSE_PICKER_JUMP_UI_TEST_HOOKS)
+extern "C" __declspec(dllexport) int WINAPI PulsePickerJumpLayoutTest() {
+    return pulse::ui::TestPickerEmbeddedLayout();
+}
+#endif

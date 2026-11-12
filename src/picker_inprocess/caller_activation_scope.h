@@ -26,8 +26,13 @@ public:
     explicit CallerActivationFrame(const CallerActivation& caller) noexcept : entered_(caller.Push(cookie_)) {}
     CallerActivationFrame(const CallerActivationFrame&) = delete;
     CallerActivationFrame& operator=(const CallerActivationFrame&) = delete;
-    ~CallerActivationFrame() { if (entered_) DeactivateActCtx(0, cookie_); }
+    ~CallerActivationFrame() { Leave(); }
     bool Entered() const noexcept { return entered_; }
+    bool Leave() noexcept {
+        if (!entered_) return true;
+        entered_ = false; // One pop attempt; never retry a possibly unbalanced stack.
+        return DeactivateActCtx(0, cookie_) != FALSE;
+    }
 private:
     ULONG_PTR cookie_ = 0;
     bool entered_ = false;

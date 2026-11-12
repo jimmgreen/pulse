@@ -42,6 +42,7 @@ inline StoreChangeDecision EvaluateStoreChangeReview(const extensions::store::In
     };
     const auto& review = *current.review;
     if ((review.native_code && !checked("native")) || (!review.added_resources.empty() && !checked("resources"))) return {Kind::MissingConsent, {}};
-    return {Kind::Approve, {true, review.native_code && checked("native"), !review.added_resources.empty() && checked("resources")}};
+    const bool purge_data = review.action == extensions::store::StoreChangeAction::Uninstall && checked("purge_data");
+    return {Kind::Approve, {true, review.native_code && checked("native"), !review.added_resources.empty() && checked("resources"), purge_data}};
 }
 }

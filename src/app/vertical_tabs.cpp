@@ -136,7 +136,7 @@ void CloseSidebarPeek(AppState& s) {
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
-void UpdateSidebarPeek(AppState& s, int x, int y) {
+void UpdateSidebarPeek(AppState& s, int x, [[maybe_unused]] int y) {
     const float w = static_cast<float>(s.compositor.Width());
     if (!s.appPrefs.sidebar_collapsed && !s.renderer.SidebarAutoCollapsed(w)) {
         if (s.sidebarPeekArmAt || s.renderer.SidebarPeek()) CloseSidebarPeek(s);
@@ -150,13 +150,9 @@ void UpdateSidebarPeek(AppState& s, int x, int y) {
             CloseSidebarPeek(s);
         return;
     }
-    const bool in_rail = static_cast<float>(x) < ui::kSidebarRailWidthDip * s.scale &&
-                         static_cast<float>(y) >= s.renderer.TitleBarHeight();
-    if (!in_rail || !PeekEligible(s)) {
-        s.sidebarPeekArmAt = 0;
-        return;
-    }
-    if (!s.sidebarPeekArmAt) s.sidebarPeekArmAt = GetTickCount64();
+    // The rail reads on its own (section titles, drive letters, tooltips), so
+    // hovering it no longer opens the full sidebar; the toggle and Ctrl+B do.
+    s.sidebarPeekArmAt = 0;
 }
 
 void DismissSidebarPeekOutside(AppState& s, int x, int y) {

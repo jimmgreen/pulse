@@ -13,6 +13,8 @@ namespace pulse::shell_bridge {
 // Production callers require advertised capabilities; cap-zero UI is test-only.
 struct FileDialogInprocessProvider {
     PulsePickerUiV2Api api{};
+    PulsePickerUiV2UpdateText update_text = nullptr;
+    PulsePickerUiV2SetNavigationRoot set_navigation_root = nullptr;
     std::shared_ptr<void> module_lifetime;
     bool allow_unverified_proof = false;
     // Remote providers bind HWND to their authenticated live child and session.
@@ -56,18 +58,26 @@ public:
     ~FileDialogInprocessSession();
     FileDialogInprocessSession(const FileDialogInprocessSession&) = delete;
     FileDialogInprocessSession& operator=(const FileDialogInprocessSession&) = delete;
-    HRESULT Prepare(const ContractDecision&, HWND owner, const std::vector<FileDialogCustomControl>& controls = {}, const std::vector<FileDialogPlace>& places = {}, const std::vector<FileDialogPropertyView>& properties = {});
+    HRESULT Prepare(const ContractDecision&, HWND owner, const std::vector<FileDialogCustomControl>& controls = {}, const std::vector<FileDialogPlace>& places = {}, const std::vector<FileDialogPropertyView>& properties = {}, bool allow_auto_jump = false, const std::wstring& navigation_root = {});
     HRESULT UpdateControl(const FileDialogCustomControl&);
     HRESULT Navigate(const std::wstring& folder);
     HRESULT Show(const PulsePickerUiV2Callbacks&, PulsePickerUiV2Result&, std::wstring& path);
     HRESULT Observe(const PulsePickerUiV2Event&);
     HRESULT ObserveOverwrite(const PulsePickerUiV2OverwriteEvent&);
     HRESULT ObserveShareViolation(const PulsePickerUiV2OverwriteEvent&);
-    void LeaveEvent() noexcept { event_kind_ = 0; event_generation_ = 0; }
+    void LeaveEvent() noexcept { event_kind_ = 0; event_generation_ = 0; fileok_invalidated_ = false; }
     HRESULT Read(FileDialogInprocessSnapshot&) const noexcept;
     HRESULT CompleteFileOk(HRESULT);
     HRESULT GetWindow(HWND*) const;
     HRESULT Close(HRESULT);
+    HRESULT UpdateText(uint32_t kind, const std::wstring& text);
+    HRESULT SetNavigationRoot(const std::wstring& root);
+    bool SupportsNavigationRoot() const noexcept {
+        return (provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_NAVIGATION_ROOT) && provider_->set_navigation_root;
+    }
+    bool SupportsDynamicItems() const noexcept {
+        return (provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_DYNAMIC_ITEMS) != 0;
+    }
     bool InFileOk() const noexcept { return event_kind_ == PULSE_PICKER_UI_V2_EVENT_FILE_OK; }
     const std::vector<std::wstring>& AcceptedPaths() const noexcept { return accepted_paths_; }
     bool Closed() const noexcept { return close_requested_; }
@@ -77,8 +87,9 @@ private:
     std::function<void(const char*)> diagnostic_;
     std::shared_ptr<const FileDialogInprocessProvider> provider_;
     PulsePickerUiV2Session session_ = 0;
-    PulsePickerUiV2Config config_{};
-    std::wstring folder_, filename_, extension_, title_, ok_label_, filename_label_;
+    PulsePickerUiV2FolderPolicyConfig config_storage_{};
+    PulsePickerUiV2Config& config_ = config_storage_.base.base;
+    std::wstring folder_, filename_, extension_, title_, ok_label_, filename_label_, cancel_label_;
     std::vector<std::wstring> labels_, patterns_;
     std::vector<PulsePickerUiV2Filter> filters_;
     std::vector<FileDialogPropertyView> properties_;
@@ -90,6 +101,7 @@ private:
     std::vector<PulsePickerUiV2Control> controls_;
     std::vector<std::vector<PulsePickerUiV2ControlItem>> control_items_;
     uint64_t show_ = 0, event_generation_ = 0, accepted_generation_ = 0;
+    bool fileok_invalidated_ = false;
     std::wstring accepted_candidate_;
     std::vector<std::wstring> accepted_paths_;
     uint32_t accepted_index_ = 0;

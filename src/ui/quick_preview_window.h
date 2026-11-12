@@ -510,7 +510,7 @@ private:
     TreeView tree_;
     bool tree_source_ = false;      // session-wide: JSON/XML shown as source
     bool notebook_source_ = false;  // session-wide: notebooks shown as source
-    bool doc_handler_ = false;      // session-wide: DOCX in the system preview handler
+    bool doc_handler_ = false;      // explicit system preview choice for the current document
     uint32_t icon_request_ = 0;     // frame_index for .ico/.cur: 0 largest, k entry k-1
     std::vector<IconSize> icon_sizes_;
     int icon_selected_ = -1;

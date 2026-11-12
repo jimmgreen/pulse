@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <filesystem>
+#include <shobjidl.h>
 
 namespace pulse::ui {
 namespace {
@@ -58,10 +59,49 @@ bool Missing(DWORD error) { return error == ERROR_FILE_NOT_FOUND || error == ERR
 
 } // namespace
 
+std::optional<size_t> InferSaveFilterFromFilename(std::wstring_view filename,
+    const std::vector<PickerFilter>& filters, size_t current_filter) {
+    if (current_filter >= filters.size() || !ValidText(filename)) return std::nullopt;
+    const auto slash = filename.find_last_of(L"\\/");
+    const auto leaf = filename.substr(slash == filename.npos ? 0 : slash + 1);
+    if (leaf.empty() || leaf.front() == L'.' || leaf.back() == L'.' || std::iswspace(leaf.back()) ||
+        leaf.find_first_of(L"<>:\"|?*") != leaf.npos || leaf.find(L'.') == leaf.npos) return std::nullopt;
+    const auto matches = [&](std::wstring_view pattern) {
+        bool matched = false;
+        for (size_t start = 0; start < pattern.size();) {
+            const auto end = pattern.find(L';', start);
+            const auto part = pattern.substr(start, end == pattern.npos ? pattern.size() - start : end - start);
+            if (!part.starts_with(L"*.") || !Extension(part.substr(2))) return false;
+            const auto extension = part.substr(2);
+            if (leaf.size() > extension.size() + 1 && leaf[leaf.size() - extension.size() - 1] == L'.') {
+                const auto suffix = leaf.substr(leaf.size() - extension.size());
+                matched |= std::equal(suffix.begin(), suffix.end(), extension.begin(),
+                    [](wchar_t a, wchar_t b) { return std::towlower(a) == std::towlower(b); });
+            }
+            if (end == pattern.npos) return matched;
+            start = end + 1;
+            if (start == pattern.size()) return false;
+        }
+        return false;
+    };
+    if (matches(filters[current_filter].pattern)) return std::nullopt;
+    std::optional<size_t> inferred;
+    for (size_t i = 0; i < filters.size(); ++i) {
+        if (!matches(filters[i].pattern)) continue;
+        if (inferred) return std::nullopt;
+        inferred = i;
+    }
+    return inferred;
+}
+
 SaveTargetResult ResolveSaveTarget(const SaveTargetRequest& request) {
-    if (request.no_test_file_create && request.filename.find_first_of(L"\\/") != std::wstring::npos) {
+    if (request.filename.find_first_of(L"\\/") != std::wstring::npos) {
         auto input = std::filesystem::path(request.filename);
-        if (!input.is_absolute()) input = std::filesystem::path(request.directory) / input;
+        if (!input.is_absolute()) {
+            if (input.has_root_name() || input.has_root_directory()) return {};
+            input = std::filesystem::path(request.directory) / input;
+        }
+        input.make_preferred();
         pulse::picker_user_storage::Path parsed;
         if (!pulse::picker_user_storage::Parse(input.wstring(), parsed)) return {};
         SaveTargetRequest leaf = request;
@@ -150,6 +190,91 @@ SaveTargetResult ValidateSaveTarget(const SaveTargetRequest& request) {
     result.target_exists = true;
     result.read_only = (attributes & FILE_ATTRIBUTE_READONLY) != 0;
     result.state = attributes & FILE_ATTRIBUTE_DIRECTORY ? SaveTargetState::TargetDirectory : SaveTargetState::ConfirmOverwrite;
+    return result;
+}
+
+
+namespace {
+DWORD DirectoryCreationPolicy(const SaveTargetRequest& request, uint32_t native_options) {
+    if (request.require_existing_save_parent || request.no_test_file_create ||
+        (native_options & (FOS_PATHMUSTEXIST | FOS_NOTESTFILECREATE))) return ERROR_PATH_NOT_FOUND;
+    const std::filesystem::path input(request.filename);
+    if (input.is_absolute() || input.has_root_name() || input.has_root_directory() || !input.has_parent_path())
+        return ERROR_NOT_SUPPORTED;
+    for (const auto& part : input) if (part == L".." || part == L".") return ERROR_INVALID_NAME;
+    return ERROR_SUCCESS;
+}
+std::vector<std::wstring> DirectoryAncestors(const std::wstring& target) {
+    const auto parent = std::filesystem::path(target).parent_path();
+    std::vector<std::wstring> result;
+    auto path = parent.root_path();
+    result.push_back(path.wstring());
+    for (const auto& part : parent.relative_path()) {
+        path /= part;
+        result.push_back(path.wstring());
+    }
+    return result;
+}
+}
+
+SaveDirectoryPlan PlanSaveDirectories(const SaveTargetRequest& request, uint32_t native_options,
+                                     const std::function<bool()>& cancelled) {
+    SaveDirectoryPlan plan;
+    plan.error = DirectoryCreationPolicy(request, native_options);
+    if (plan.error) return plan;
+    const auto resolved = ResolveSaveTarget(request);
+    if (resolved.state != SaveTargetState::Resolved) { plan.error = ERROR_INVALID_NAME; return plan; }
+    plan.target = resolved.path;
+    // The picker base must already exist. Never reconstruct a removed base folder.
+    const DWORD base = GetFileAttributesW(Native(pulse::path::StripExtendedPathPrefix(request.directory)).c_str());
+    if (base == INVALID_FILE_ATTRIBUTES) { plan.error = GetLastError(); return plan; }
+    if (!(base & FILE_ATTRIBUTE_DIRECTORY)) { plan.error = ERROR_DIRECTORY; return plan; }
+    for (const auto& path : DirectoryAncestors(plan.target)) {
+        if (cancelled && cancelled()) { plan.error = ERROR_CANCELLED; return plan; }
+        const DWORD attr = GetFileAttributesW(Native(path).c_str());
+        if (attr == INVALID_FILE_ATTRIBUTES) {
+            const DWORD error = GetLastError();
+            if (!Missing(error)) { plan.error = error; return plan; }
+            plan.missing.push_back(path);
+        } else if (!(attr & FILE_ATTRIBUTE_DIRECTORY)) { plan.error = ERROR_DIRECTORY; return plan; }
+        else if (attr & FILE_ATTRIBUTE_REPARSE_POINT) { plan.error = ERROR_NOT_SUPPORTED; return plan; }
+    }
+    return plan;
+}
+
+SaveDirectoryCreation CreateSaveDirectories(const SaveTargetRequest& request, const SaveDirectoryPlan& approved,
+                                            uint32_t native_options, const std::function<bool()>& cancelled) {
+    SaveDirectoryCreation result;
+    if (approved.error || approved.missing.empty()) { result.error = ERROR_INVALID_PARAMETER; return result; }
+    const auto fresh = PlanSaveDirectories(request, native_options, cancelled);
+    if (fresh.error) { result.error = fresh.error; result.failed_path = fresh.target; return result; }
+    if (fresh.target != approved.target || fresh.missing != approved.missing) {
+        result.error = ERROR_RETRY; result.failed_path = fresh.target; return result;
+    }
+    struct HeldDirectories {
+        std::vector<HANDLE> values;
+        ~HeldDirectories() { for (HANDLE h : values) CloseHandle(h); }
+    } held;
+    for (const auto& path : DirectoryAncestors(fresh.target)) {
+        result.failed_path = path;
+        if (cancelled && cancelled()) { result.error = ERROR_CANCELLED; return result; }
+        if (std::find(approved.missing.begin(), approved.missing.end(), path) != approved.missing.end()) {
+            if (!CreateDirectoryW(Native(path).c_str(), nullptr)) { result.error = GetLastError(); return result; }
+            result.created.push_back(path);
+        }
+        // Retain every ancestor without DELETE sharing while descending. Reparse
+        // replacements are rejected; renamed ancestors cannot redirect later creates.
+        HANDLE handle = CreateFileW(Native(path).c_str(), FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) { result.error = GetLastError(); return result; }
+        held.values.push_back(handle);
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!GetFileInformationByHandle(handle, &info)) { result.error = GetLastError(); return result; }
+        if (!(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) { result.error = ERROR_DIRECTORY; return result; }
+        if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { result.error = ERROR_NOT_SUPPORTED; return result; }
+    }
+    result.failed_path.clear();
     return result;
 }
 

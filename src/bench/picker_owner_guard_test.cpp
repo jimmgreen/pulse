@@ -78,6 +78,41 @@ bool WaitRestored(HWND window) {
     }
     return false;
 }
+void CrossThreadFocus() {
+    const auto pump = [] { const auto end=GetTickCount64()+100; do { MSG msg{}; while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) DispatchMessageW(&msg); Sleep(1); } while(GetTickCount64()<end); };
+    Owner owner;
+    HWND a = owner.window;
+    HWND b = CreateWindowW(L"STATIC", L"Owned B cross-thread", WS_OVERLAPPEDWINDOW,420,80,240,160,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+    ShowWindow(b, SW_SHOW); ShowWindow(a, SW_SHOWNOACTIVATE);
+    const DWORD fg_thread=GetWindowThreadProcessId(GetForegroundWindow(),nullptr);
+    const bool attached=fg_thread && fg_thread!=GetCurrentThreadId() && AttachThreadInput(GetCurrentThreadId(),fg_thread,TRUE);
+    SetForegroundWindow(b);
+    if(attached) AttachThreadInput(GetCurrentThreadId(),fg_thread,FALSE);
+
+    for (bool switched : {false,true}) {
+        SetForegroundWindow(b); pump(); SetForegroundWindow(a); pump();
+        Check(GetForegroundWindow()==a,"cross-thread A foreground over B (setup)");
+        if(GetForegroundWindow()!=a){DestroyWindow(b);return;}
+        pulse::PickerOwnerGuard guard(a);
+        HWND dialog = CreateWindowW(L"STATIC",L"Owned cross-thread dialog",WS_POPUP|WS_CAPTION,80,80,200,100,a,nullptr,GetModuleHandleW(nullptr),nullptr);
+        ShowWindow(dialog,SW_SHOW);SetForegroundWindow(dialog); pump();
+        Check(!guard.Error() && GetForegroundWindow()==dialog,"cross-thread picker foreground (setup)");
+        if(guard.Error() || GetForegroundWindow()!=dialog){DestroyWindow(dialog);DestroyWindow(b);return;}
+        if(switched) { SetForegroundWindow(b); pump(); }
+        const auto trace = [&](const char* stage) { DWORD fp=0; const HWND fg=GetForegroundWindow(); GetWindowThreadProcessId(fg,&fp);
+            std::printf("FOCUS stage=%s A=%p B=%p D=%p fg=%p fg_pid=%lu self=%lu switched=%d\n",stage,static_cast<void*>(a),static_cast<void*>(b),static_cast<void*>(dialog),static_cast<void*>(fg),fp,GetCurrentProcessId(),switched); };
+        trace("before-restore");
+        guard.RestoreBeforeDialogHide(dialog); trace("after-restore-immediate"); pump(); trace("after-restore-pumped");
+        const HWND expected=switched?b:a;
+        DWORD fg_pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&fg_pid);printf("CROSS foreground_pid=%lu self=%lu isA=%d isB=%d switched=%d\n",fg_pid,GetCurrentProcessId(),GetForegroundWindow()==a,GetForegroundWindow()==b,switched);
+        Check(IsWindowEnabled(a),"only guard-owned cross-thread disable restored");
+        Check(GetForegroundWindow()==expected,"cross-thread restoration returns A or preserves user B");
+        SetWindowPos(dialog,nullptr,0,0,0,0,SWP_HIDEWINDOW|SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOOWNERZORDER|SWP_NOMOVE|SWP_NOSIZE);
+        DestroyWindow(dialog); pump(); trace("after-destroy-pumped");
+        Check(GetForegroundWindow()==expected,"cross-thread composed hide/destroy preserves foreground");
+    }
+    DestroyWindow(b);
+}
 void Responsive() {
     Owner owner;
     Check(owner.window != nullptr, "create independently pumped same-process owner");
@@ -206,6 +241,7 @@ void FocusRestoration(bool legacy_tail = false) {
     const DWORD fixture_thread = GetCurrentThreadId();
     const bool attached = foreground_thread && foreground_thread != fixture_thread &&
         AttachThreadInput(fixture_thread, foreground_thread, TRUE) != FALSE;
+    ShowWindow(owner.window, SW_SHOWNOACTIVATE);
     SetForegroundWindow(owner.window);
     if (attached) AttachThreadInput(fixture_thread, foreground_thread, FALSE);
     const bool ready = GetForegroundWindow() == owner.window;
@@ -248,6 +284,49 @@ void FocusRestoration(bool legacy_tail = false) {
         ShowWindow(dialog, SW_HIDE); DestroyWindow(dialog);
         Check(GetForegroundWindow() == owner.other && GetFocus() == owner.other, "picker hide/destroy does not reclaim switched foreground");
         owner.switch_on_enable = owner.switch_on_activate = false;
+    }
+    for (int timing = 0; timing < 3; ++timing) {
+        SetForegroundWindow(owner.window);
+        const HWND saved_focus = GetFocus();
+        EnableWindow(owner.window, FALSE); // MFC-style caller owns this transition.
+        {
+            pulse::PickerOwnerGuard guard(owner.window);
+            HWND dialog = CreateWindowW(L"Pulse.OwnerGuard.FocusPopup", L"Caller-disabled owner",
+                WS_POPUP | WS_CAPTION, 100, 100, 280, 120, owner.window, nullptr,
+                GetModuleHandleW(nullptr), nullptr);
+            ShowWindow(dialog, SW_SHOW); SetForegroundWindow(dialog);
+            Check(!guard.Error() && GetForegroundWindow() == dialog,
+                "caller-disabled picker obtains foreground");
+            if (timing == 1) SetForegroundWindow(owner.other);
+            owner.switch_on_activate = timing == 2;
+            guard.RestoreBeforeDialogHide(dialog);
+            Check(!IsWindowEnabled(owner.window), "guard never enables caller-disabled owner");
+            const HWND expected = timing == 0 ? owner.window : owner.other;
+            Check(GetForegroundWindow() == expected,
+                "disabled owner activation respects user and activation-handler switches");
+            ShowWindow(dialog, SW_HIDE); DestroyWindow(dialog);
+            Check(GetForegroundWindow() == expected,
+                "disabled-owner hide and destroy preserve chosen foreground");
+        }
+        Check(!IsWindowEnabled(owner.window), "guard destruction preserves caller-owned disabled state");
+        EnableWindow(owner.window, TRUE);
+        // MFC restores saved focus itself after re-enabling its modal owner.
+        if (GetForegroundWindow() == owner.window) SetFocus(saved_focus);
+        Check(timing ? GetForegroundWindow() == owner.other :
+            GetForegroundWindow() == owner.window && GetFocus() == owner.edit,
+            "caller restoration keeps child focus or externally chosen foreground");
+        owner.switch_on_activate = false;
+    }
+    {
+        FocusOwner destroyed;
+        EnableWindow(destroyed.window, FALSE);
+        pulse::PickerOwnerGuard guard(destroyed.window);
+        HWND dialog = CreateWindowW(L"Pulse.OwnerGuard.FocusPopup", L"Destroyed owner",
+            WS_POPUP, 0, 0, 20, 20, destroyed.window, nullptr, GetModuleHandleW(nullptr), nullptr);
+        DestroyWindow(destroyed.window);
+        destroyed.window = nullptr;
+        guard.RestoreBeforeDialogHide(dialog);
+        Check(!guard.Alive(), "destroyed caller-disabled owner never receives restoration");
     }
     const HWND foreground = GetForegroundWindow();
     if ((foreground == owner.window || foreground == owner.other) && IsWindow(previous_foreground))
@@ -366,6 +445,13 @@ void ForeignDisabled(bool low = false, HWND reverse_owner = nullptr) {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    if(argc==2 && wcscmp(argv[1],L"--focus-cross-thread")==0){CrossThreadFocus();printf("Checks: %d, failures: %d\n",checks,failures);return failures?1:0;}
+    if (argc == 2 && wcscmp(argv[1], L"--foreign-only") == 0) {
+        ForeignDisabled(); ForeignDisabled(true);
+        { Owner reverse(false); ForeignDisabled(true, reverse.window); }
+        std::printf("Checks: %d, failures: %d\n", checks, failures);
+        return failures ? 1 : 0;
+    }
     if (argc == 2 && (wcscmp(argv[1], L"--focus-only") == 0 || wcscmp(argv[1], L"--focus-legacy-tail") == 0)) {
         FocusRestoration(wcscmp(argv[1], L"--focus-legacy-tail") == 0);
         std::printf("Checks: %d, failures: %d\n", checks, failures);
@@ -390,3 +476,4 @@ int wmain(int argc, wchar_t** argv) {
     CloseHandle(completed);
     return failures ? 1 : 0;
 }
+

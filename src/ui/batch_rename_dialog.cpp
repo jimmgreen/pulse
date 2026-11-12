@@ -1671,9 +1671,9 @@ private:
         W_ = static_cast<float>(compositor_.Width());
         H_ = static_cast<float>(compositor_.Height());
         if (!glass_) Fill(D2D1::RectF(0, 0, W_, H_), 0.0f, pal_.card);
-        Stroke(D2D1::RectF(0, 0, W_, H_), X(12), Alpha(pal_.text, 0.09f));
 
         DrawTitle();
+        Stroke(D2D1::RectF(0, 0, W_, H_), X(12), Alpha(pal_.text, 0.09f));
         if (!options_.proposed_names) {
             DrawAiBar();
             DrawExamples();
@@ -1727,9 +1727,11 @@ private:
              R(x, y, X(360), X(kTitleH)), pal_.text3);
 
         // Close.
-        const D2D1_RECT_F close = R(W_ - X(8 + 36), y + X(8), X(36), X(36));
-        if (Hov({H::Close})) Fill(close, X(8), pal_.hover);
-        Ico(kX, close.left + X(11), close.top + X(11), X(14), pal_.text2);
+        const D2D1_RECT_F close = R(W_ - X(46), 0, X(46), X(kTitleH));
+        fluent::ControlState close_state{};
+        close_state.hovered = Hov({H::Close});
+        close_state.pressed = press_ == Hit{H::Close} && Hov({H::Close});
+        painter_.DrawTitleBarButton(close, fluent::TitleBarButtonRole::Close, {}, close_state);
         Reg(close, {H::Close});
 
         if (options_.proposed_names) return;
@@ -1738,7 +1740,7 @@ private:
         const float w0 = X(12 + 14 + 6 + 12) + Measure(l0, Fmt::T13);
         const float w1 = X(12 + 14 + 6 + 12) + Measure(l1, Fmt::T13);
         const float mw = w0 + w1 + X(6);
-        const D2D1_RECT_F seg = R(close.left - X(6) - mw, y + X(10), mw, X(34));
+        const D2D1_RECT_F seg = R(close.left - X(8) - mw, y + X(9), mw, X(34));
         Fill(seg, X(9), pal_.hover);
         const D2D1_RECT_F b0 = R(seg.left + X(3), seg.top + X(3), w0, X(28));
         const D2D1_RECT_F b1 = R(b0.right, seg.top + X(3), w1, X(28));

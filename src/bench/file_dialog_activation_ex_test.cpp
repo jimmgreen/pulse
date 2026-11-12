@@ -182,7 +182,7 @@ void Diagnostics() {
         };
         const IID* requested = mode == 1 ? &unknown_iid : &IID_IFileOpenDialog;
         Results results{requested};
-        const DWORD context = mode == 2 ? CLSCTX_INPROC_SERVER | CLSCTX_DISABLE_AAA : CLSCTX_INPROC_SERVER;
+        const DWORD context = mode == 2 ? CLSCTX_INPROC_SERVER | CLSCTX_NO_CUSTOM_MARSHAL : CLSCTX_INPROC_SERVER;
         if (mode == 3) config.enabled = false;
         if (mode == 4) probe.override_result = S_FALSE;
         if (mode == 5) probe.override_item = S_FALSE;
@@ -242,12 +242,14 @@ int main() {
         Check(hr == probe.result && Unchanged(results, probe) && probe.ex_calls == 1 &&
             (mode != 4 || (probe.server == &server && probe.creations == 0 && hr == E_ACCESSDENIED)), labels[mode], hr);
     }
-    {
+    for (DWORD modifiers : {DWORD(CLSCTX_DISABLE_AAA), DWORD(CLSCTX_NO_CODE_DOWNLOAD), DWORD(CLSCTX_NO_FAILURE_LOG),
+        DWORD(CLSCTX_DISABLE_AAA | CLSCTX_NO_CODE_DOWNLOAD | CLSCTX_NO_FAILURE_LOG)}) {
         Probe probe; active = &probe; auto config = Configuration();
         Results results{&IID_IUnknown};
-        const DWORD flags = CLSCTX_INPROC_SERVER | CLSCTX_DISABLE_AAA;
+        const DWORD flags = CLSCTX_INPROC_SERVER | modifiers;
         const auto hr = ActivateFileDialogEx(config, CLSID_FileOpenDialog, nullptr, flags, nullptr, results.Count(), results.values.data());
-        Check(hr == probe.result && probe.context == flags && Unchanged(results, probe), "extra context flags are forwarded without dropping or wrapping", hr);
+        Check(hr == S_OK && hr == probe.result && probe.ex_calls == 1 && probe.context == flags && Unified(results) && !Unchanged(results, probe),
+            "whitelisted context modifiers preserve exact original call and publish unified wrapper", hr);
         Results other{&IID_IUnknown};
         Check(ActivateFileDialogEx(config, CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, nullptr, other.Count(), other.values.data()) == S_OK &&
             Unchanged(other, probe), "unknown class is unchanged native activation");

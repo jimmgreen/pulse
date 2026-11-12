@@ -1,4 +1,5 @@
 #pragma once
+#include "store_icons.h"
 
 #include "ui_compositor.h"
 #include "drive_capacity.h"
@@ -112,6 +113,7 @@ struct TabSpec {
 struct MenuItemSpec {
     D2D1_RECT_F bounds{};
     std::wstring_view text;
+    std::wstring_view detail;      // optional second line (caption, secondary)
     std::wstring_view shortcut;
     std::wstring_view badge_text;
     std::wstring_view glyph;
@@ -139,6 +141,10 @@ struct MenuItemSpec {
     bool heading = false;
     uint16_t match_start = 0;
     uint16_t match_length = 0;
+    StoreIcon vector_icon = StoreIcon::None;
+    uint32_t custom_icon = 0;
+    bool group_tint = false;
+    bool primary = false;
 };
 
 struct ScrollbarSpec {
@@ -514,7 +520,7 @@ public:
     void DrawCheckBox(const D2D1_RECT_F& bounds, std::wstring_view text,
                       const ControlState& state);
     void DrawRadioButton(const D2D1_RECT_F& bounds, std::wstring_view text,
-                         const ControlState& state);
+                         const ControlState& state, float indicator_dip = 20.0f);
     void DrawSwitch(const D2D1_RECT_F& bounds, std::wstring_view text,
                     const ControlState& state);
     void DrawTitleBarButton(const D2D1_RECT_F& bounds, TitleBarButtonRole role,
@@ -542,6 +548,7 @@ public:
     void DrawSegmentedTrack(const D2D1_RECT_F& bounds);
     void DrawBadge(const BadgeSpec& spec);
     float MeasureBadgeWidth(std::wstring_view text) const;
+    float MeasureMonospaceBadgeWidth(std::wstring_view text) const;
     float MeasureButtonWidth(std::wstring_view text,
                              std::wstring_view glyph = {},
                              bool drop_down = false,

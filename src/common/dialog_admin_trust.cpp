@@ -176,6 +176,51 @@ DWORD VerifyProtectedTree(const std::wstring &root) noexcept {
         return ERROR_INVALID_DATA;
     }
 }
+DWORD AdminControlRoot(const std::wstring& install_root, bool create, std::wstring& result) noexcept {
+    result.clear();
+    try {
+        if (create && !IsElevated()) return ERROR_ELEVATION_REQUIRED;
+        if (const DWORD error = VerifyProtectedPath(install_root, true)) return error;
+        const auto path = install_root + L"\\ManagedAdminSessions";
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            const DWORD missing = GetLastError();
+            if (missing != ERROR_FILE_NOT_FOUND && missing != ERROR_PATH_NOT_FOUND) return missing;
+            if (!create) { result = path; return ERROR_SUCCESS; }
+            Local descriptor;
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                L"O:BAG:BAD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)(A;OICI;GRGX;;;BU)S:(ML;OICI;NW;;;HI)",
+                SDDL_REVISION_1, reinterpret_cast<PSECURITY_DESCRIPTOR*>(&descriptor.p), nullptr)) return GetLastError();
+            SECURITY_ATTRIBUTES security{sizeof(security), descriptor.p, FALSE};
+            if (!CreateDirectoryW(path.c_str(), &security) && GetLastError() != ERROR_ALREADY_EXISTS) return GetLastError();
+        }
+        if (const DWORD error = VerifyProtectedPath(path, true)) return error;
+        result = path;
+        return ERROR_SUCCESS;
+    } catch (...) { return ERROR_NOT_ENOUGH_MEMORY; }
+}
+DWORD VerifyAdminLaunchLocation(const std::wstring& install_root, const std::wstring& bundle_root,
+                               const std::wstring& host_path, WORD machine) noexcept {
+    try {
+        if (machine != IMAGE_FILE_MACHINE_I386 && machine != IMAGE_FILE_MACHINE_AMD64) return ERROR_EXE_MACHINE_TYPE_MISMATCH;
+        if (const DWORD error = VerifyProtectedPath(install_root, true)) return error;
+        const auto prefix = install_root + L"\\";
+        auto contained = [&](const std::wstring& path) {
+            return path.size() > prefix.size() && CompareStringOrdinal(path.data(), static_cast<int>(prefix.size()),
+                prefix.data(), static_cast<int>(prefix.size()), TRUE) == CSTR_EQUAL;
+        };
+        if (!contained(bundle_root) || !contained(host_path)) return ERROR_ACCESS_DENIED;
+        if (const DWORD error = VerifyProtectedPath(install_root + L"\\dialog-current.json", false)) return error;
+        if (machine == IMAGE_FILE_MACHINE_I386)
+            if (const DWORD error = VerifyProtectedPath(install_root + L"\\dialog-x86-current.json", false)) return error;
+        if (const DWORD error = VerifyProtectedTree(bundle_root)) return error;
+        const auto host_root = std::filesystem::path(host_path).parent_path().wstring();
+        if (_wcsicmp(host_root.c_str(), bundle_root.c_str()))
+            if (const DWORD error = VerifyProtectedTree(host_root)) return error;
+        std::wstring control;
+        return AdminControlRoot(install_root, false, control);
+    } catch (...) { return ERROR_NOT_ENOUGH_MEMORY; }
+}
 bool IsElevated() noexcept {
     HANDLE token = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))

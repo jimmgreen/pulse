@@ -87,6 +87,7 @@
 #include "bitlocker_unlock.h"
 #include "../fs/bitlocker_volume.h"
 #include "app_navigation.h"
+#include "extension_store_ui.h"
 #include "app_network_locations.h"
 #include "app_network_page.h"
 #include "app_messages.h"
@@ -1653,11 +1654,15 @@ void AddNativePinSwatch(AppState& state, ui::FluentMenuItem& row) {
     row.tooltip += L" · " + std::wstring(l10n::Get(pin.checked ? l10n::StringId::ToolbarRemoveTool : l10n::StringId::PinToToolbar));
     row.quick_swatches.push_back(std::move(pin));
 }
-void AppendNativeCommandRows(AppState& state, std::vector<ui::FluentMenuItem>& items) {
-    auto rows = extensions::native::CommandRows(state);
-    if (!rows.empty() && !items.empty()) items.back().separator_after = true;
-    items.insert(items.end(), std::make_move_iterator(rows.begin()), std::make_move_iterator(rows.end()));
 }
+void AppendNativeCommandRows(AppState& state, std::vector<ui::FluentMenuItem>& items) {
+    auto rows = extensions::native::ContextMenuCommandRows(state);
+    if (rows.empty()) return;
+    auto at = std::find_if(items.begin(), items.end(), [](const auto& row) { return row.command == app::CmdCopyPath; });
+    if (at == items.end()) at = std::find_if(items.begin(), items.end(), [](const auto& row) { return row.command == app::CmdProperties; });
+    if (at != items.begin()) std::prev(at)->separator_after = true;
+    if (at != items.end()) rows.back().separator_after = true;
+    items.insert(at, std::make_move_iterator(rows.begin()), std::make_move_iterator(rows.end()));
 }
 
 void DispatchMenuCommand(AppState& s, int cmd) {
@@ -2002,7 +2007,9 @@ void DispatchMenuCommand(AppState& s, int cmd) {
                 if (idx >= 0 && idx < static_cast<int>(s.paletteHits.size())) {
                     const auto& hit = s.paletteHits[static_cast<size_t>(idx)];
                     if (hit.is_dir) NavigateTo(s, hit.path);
-                    else {
+                    else if (IsExtensionPackageFilePath(hit.path) && OpenExtensionPackageInStore(s, hit.path)) {
+                        RecordRecentOpen(s, hit.path, app::PlaceItemKind::File);
+                    } else {
                         s.ops.OpenWith(hit.path);
                         RecordRecentOpen(s, hit.path, app::PlaceItemKind::File);
                     }
@@ -3726,7 +3733,12 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
         const bool is_dir = attrs != INVALID_FILE_ATTRIBUTES &&
                             (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
         if (is_dir) NavigateTo(s, path);
-        else if (attrs != INVALID_FILE_ATTRIBUTES) {
+        else if (attrs != INVALID_FILE_ATTRIBUTES &&
+                 (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+                 IsExtensionPackageFilePath(path) &&
+                 OpenExtensionPackageInStore(s, path)) {
+            RecordRecentOpen(s, path, app::PlaceItemKind::File);
+        } else if (attrs != INVALID_FILE_ATTRIBUTES) {
             s.ops.OpenWith(path);
             RecordRecentOpen(s, path, app::PlaceItemKind::File);
         }
@@ -4786,7 +4798,12 @@ std::vector<ui::SelectionChipAction> ToolbarPinActions(AppState& s) {
             if (native_pin < native_pins.size() && out.size() < static_cast<size_t>(ui::kToolbarCommandPins)) {
                 const auto& row = native_pins[native_pin];
                 ui::SelectionChipAction action;
-                action.command = row.command; action.glyph = row.glyph; action.label = row.text; action.enabled = row.enabled;
+                action.command = row.command;
+                action.glyph = !row.glyph.empty() ? row.glyph
+                    : row.custom_icon != 0 ? (L"icon:#" + std::to_wstring(row.custom_icon))
+                    : row.vector_icon != ui::StoreIcon::None ? (L"icon:#" + std::to_wstring(ui::StoreIconToId(row.vector_icon)))
+                    : std::wstring{};
+                action.label = row.text; action.enabled = row.enabled;
                 out.push_back(std::move(action));
             }
             ++native_pin;

@@ -63,6 +63,26 @@ bool g_initialized = false;
 bool g_safe_mode = false;
 LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter = nullptr;
 std::atomic<FaultAttribution> g_attribution{nullptr};
+std::atomic<ActiveCallClueFn> g_active_call_clue{nullptr};
+
+void FormatActiveCallClue(const char* raw_id, char (&out)[256]) noexcept {
+    out[0] = '\0';
+    if (!raw_id || !*raw_id) return;
+    char clean_id[96]{};
+    size_t count = 0;
+    for (const char* p = raw_id; *p && count + 1 < sizeof(clean_id); ++p) {
+        const char c = *p;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') {
+            clean_id[count++] = c;
+        }
+    }
+    clean_id[count] = '\0';
+    if (!count) return;
+    snprintf(out, sizeof(out),
+             "ActiveExtensionCallClue: %s (unconfirmed fault outside plugin image)",
+             clean_id);
+}
 struct Maintenance {
     std::wstring root;
     HANDLE wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -298,16 +318,21 @@ void QueryOsVersion() noexcept {
 }
 
 void WriteFallback(const std::wstring& stem, DWORD code, void* address,
-                   const char* context) noexcept {
+                   const char* context, const char* call_clue) noexcept {
     const std::wstring path = JoinPath(g_diagnostics_root, stem + L".log");
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                               CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return;
-    char line[1024]{};
-    const int length = snprintf(line, sizeof(line),
-        "context=%s code=0x%08lX address=%p pid=%lu tid=%lu version=%ls build=%ls\r\n",
-        context ? context : "unknown", code, address, GetCurrentProcessId(),
-        GetCurrentThreadId(), PULSE_VERSION_STRING, PULSE_BUILD_ID);
+    char line[1280]{};
+    const int length = call_clue && *call_clue
+        ? snprintf(line, sizeof(line),
+            "context=%s code=0x%08lX address=%p pid=%lu tid=%lu version=%ls build=%ls\r\n%s\r\n",
+            context ? context : "unknown", code, address, GetCurrentProcessId(),
+            GetCurrentThreadId(), PULSE_VERSION_STRING, PULSE_BUILD_ID, call_clue)
+        : snprintf(line, sizeof(line),
+            "context=%s code=0x%08lX address=%p pid=%lu tid=%lu version=%ls build=%ls\r\n",
+            context ? context : "unknown", code, address, GetCurrentProcessId(),
+            GetCurrentThreadId(), PULSE_VERSION_STRING, PULSE_BUILD_ID);
     if (length > 0) {
         DWORD written = 0;
         WriteFile(file, line, static_cast<DWORD>((std::min)(length,
@@ -336,7 +361,7 @@ bool WriteDump(const std::wstring& stem, EXCEPTION_POINTERS* exception) noexcept
 
 void WriteJson(const std::wstring& stem, EXCEPTION_POINTERS* exception,
                const char* context, bool recoverable, bool dump_written,
-               const char* extension) noexcept {
+               const char* extension, const char* call_clue) noexcept {
     const std::wstring path = JoinPath(g_diagnostics_root, stem + L".json");
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                               CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -356,13 +381,15 @@ void WriteJson(const std::wstring& stem, EXCEPTION_POINTERS* exception,
         "  \"exception_code\":\"0x%08lX\",\n  \"exception_address\":\"%p\",\n"
         "  \"context\":\"%s\",\n  \"recoverable\":%s,\n  \"dump_written\":%s,\n"
         "  \"uptime_ms\":%llu,\n  \"os\":\"%lu.%lu.%lu\",\n  \"extension\":\"%s\",\n"
+        "  \"extension_call_clue\":\"%s\",\n"
         "  \"breadcrumbs\":[",
         stem.c_str(), now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
         now.wSecond, now.wMilliseconds, PULSE_VERSION_STRING, PULSE_BUILD_ID,
         RoleToken(g_config.role), GetCurrentProcessId(), GetCurrentThreadId(), code,
         address, context ? context : "unknown", recoverable ? "true" : "false",
         dump_written ? "true" : "false", GetTickCount64() - g_started_tick,
-        g_os_major, g_os_minor, g_os_build, extension ? extension : "");
+        g_os_major, g_os_minor, g_os_build, extension ? extension : "",
+        call_clue ? call_clue : "");
     const uint64_t newest = g_breadcrumb_sequence.load(std::memory_order_acquire);
     const uint64_t first = newest > kBreadcrumbCount ? newest - kBreadcrumbCount + 1 : 1;
     bool emitted = false;
@@ -399,9 +426,19 @@ LONG WriteReport(EXCEPTION_POINTERS* exception, const char* context,
     // Attribute first: the hook records the plugin for the next start even if
     // the dump below runs out of stack or the process is killed mid-write.
     const char* extension = nullptr;
+    char call_clue[256]{};
     if (!recoverable) {
         if (const FaultAttribution attribution = g_attribution.load(std::memory_order_acquire))
             extension = attribution(address);
+    }
+    if (!extension) {
+        if (const ActiveCallClueFn clue_fn = g_active_call_clue.load(std::memory_order_acquire)) {
+            FormatActiveCallClue(clue_fn(), call_clue);
+            if (call_clue[0] != '\0') {
+                OutputDebugStringA(call_clue);
+                OutputDebugStringA("\r\n");
+            }
+        }
     }
     const std::wstring stem = EventStem();
     HANDLE lease = CreateFileW(JoinPath(g_diagnostics_root, stem + L".writing").c_str(), GENERIC_WRITE, 0,
@@ -411,8 +448,8 @@ LONG WriteReport(EXCEPTION_POINTERS* exception, const char* context,
         return EXCEPTION_EXECUTE_HANDLER;
     }
     const bool dump_written = WriteDump(stem, exception);
-    WriteJson(stem, exception, context, recoverable, dump_written, extension);
-    if (!dump_written) WriteFallback(stem, code, address, context);
+    WriteJson(stem, exception, context, recoverable, dump_written, extension, call_clue);
+    if (!dump_written) WriteFallback(stem, code, address, context, call_clue);
     if (lease != INVALID_HANDLE_VALUE) CloseHandle(lease);
     if (recoverable) {
         g_report_active.store(0, std::memory_order_release);
@@ -504,6 +541,10 @@ LONG ReportRecoverable(EXCEPTION_POINTERS* exception, const char* context) noexc
 
 void SetFaultAttribution(FaultAttribution attribution) noexcept {
     g_attribution.store(attribution, std::memory_order_release);
+}
+
+void SetActiveCallClue(ActiveCallClueFn clue) noexcept {
+    g_active_call_clue.store(clue, std::memory_order_release);
 }
 
 bool SafeModeRequested() noexcept {

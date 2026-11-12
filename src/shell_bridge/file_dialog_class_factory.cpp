@@ -79,7 +79,7 @@ HRESULT ActivateFileDialogClass(const FileDialogClassActivation& activation, REF
     catch (...) { if (output) *output = nullptr; return E_FAIL; }
     if (FAILED(created)) { if (output) *output = nullptr; return created; }
     if (created != S_OK || !activation.enabled || recursion.nested || !output || !*output || server ||
-        context != CLSCTX_INPROC_SERVER || (iid != IID_IUnknown && iid != IID_IClassFactory) || !Sta() ||
+        !detail::InprocActivationContext(context) || (iid != IID_IUnknown && iid != IID_IClassFactory) || !Sta() ||
         (clsid != CLSID_FileOpenDialog && clsid != CLSID_FileSaveDialog)) return created;
     // Retain exactly the requested native interface until all preparation works.
     ComPtr<IUnknown> original;

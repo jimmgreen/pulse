@@ -342,8 +342,10 @@ PickerValidation ValidatePaths(const std::wstring& current, const std::vector<st
     if (FAILED(picker_shell::ValidateOptions(options.native_options))) { result.error = ERROR_INVALID_PARAMETER; return result; }
     if (names.empty()) { result.error = ERROR_INVALID_NAME; return result; }
     const bool create_prompt = (options.native_options & FOS_CREATEPROMPT) != 0;
+    const bool validated_missing = options.allow_missing_open && options.validate_local_open_access_v1 &&
+        !options.skip_access_validation && !create_prompt;
     if ((options.allow_missing_open && (mode != PickerMode::File ||
-            (!create_prompt && (!options.skip_access_validation || options.validate_local_open_access_v1)))) ||
+            (!create_prompt && !validated_missing && (!options.skip_access_validation || options.validate_local_open_access_v1)))) ||
         (options.require_existing_open_parent && !options.allow_missing_open)) {
         result.error = ERROR_NOT_SUPPORTED; return result;
     }
@@ -455,7 +457,7 @@ PickerValidation ValidatePaths(const std::wstring& current, const std::vector<st
             }
         }
         bool missing = false;
-        if (options.allow_missing_open && (options.skip_access_validation || create_prompt) &&
+        if (options.allow_missing_open && (options.skip_access_validation || create_prompt || validated_missing) &&
             (result.error == ERROR_FILE_NOT_FOUND || result.error == ERROR_PATH_NOT_FOUND)) {
             if (cancelled()) { result.error = ERROR_CANCELLED; break; }
             picker_user_storage::Path storage;
@@ -522,6 +524,7 @@ struct PickerLoader::Target {
     UINT message = 0;
     UINT validation_message = 0;
     UINT folder_commit_message = 0;
+    UINT directories_message = 0;
     std::atomic<uint64_t> serial{0};
     bool closed = false;
     std::function<void(uint64_t)> pending;
@@ -531,11 +534,12 @@ PickerListing ReadPickerListing(const std::wstring& path, PickerMode mode, const
     return ReadListing(path, mode, options, [] { return false; });
 }
 
-PickerLoader::PickerLoader(HWND hwnd, UINT message, UINT validation_message, UINT folder_commit_message) : target_(std::make_shared<Target>()) {
+PickerLoader::PickerLoader(HWND hwnd, UINT message, UINT validation_message, UINT folder_commit_message, UINT directories_message) : target_(std::make_shared<Target>()) {
     target_->hwnd = hwnd;
     target_->message = message;
     target_->validation_message = validation_message;
     target_->folder_commit_message = folder_commit_message;
+    target_->directories_message = directories_message;
     for (int worker = 0; worker < 2; ++worker) std::thread([target = target_] {
         SetThreadErrorMode(SEM_FAILCRITICALERRORS, nullptr);
         std::unique_lock lock(target->lock);
@@ -563,6 +567,8 @@ PickerLoader::~PickerLoader() {
         while (PeekMessageW(&message, target_->hwnd, target_->message, target_->message, PM_REMOVE)) Take(message.lParam);
         if (target_->folder_commit_message)
             while (PeekMessageW(&message, target_->hwnd, target_->folder_commit_message, target_->folder_commit_message, PM_REMOVE)) TakeFolderCommit(message.lParam);
+        if (target_->directories_message)
+            while (PeekMessageW(&message, target_->hwnd, target_->directories_message, target_->directories_message, PM_REMOVE)) TakeSaveDirectories(message.lParam);
         if (target_->validation_message)
             while (PeekMessageW(&message, target_->hwnd, target_->validation_message, target_->validation_message, PM_REMOVE)) TakeValidation(message.lParam);
     }
@@ -635,6 +641,31 @@ void ApplySaveSnapshot(PickerValidation& result, SaveRevalidationResult save) {
         result.save_snapshot = std::move(save.snapshot);
     } else if (!result.error) result.error = ERROR_INVALID_DATA;
 }
+}
+
+std::unique_ptr<PickerSaveDirectories> PickerLoader::TakeSaveDirectories(LPARAM lparam) {
+    return std::unique_ptr<PickerSaveDirectories>(reinterpret_cast<PickerSaveDirectories*>(lparam));
+}
+
+void PickerLoader::PrepareSaveDirectories(uint64_t generation, SaveTargetRequest request, uint32_t native_options,
+                                         std::optional<SaveDirectoryPlan> approved) {
+    std::lock_guard guard(target_->lock);
+    ++target_->serial;
+    target_->pending = [target = target_.get(), generation, request = std::move(request), native_options,
+                       approved = std::move(approved)](uint64_t serial) {
+        auto cancelled = [&] { return target->serial.load() != serial; };
+        if (cancelled()) return;
+        auto reply = std::make_unique<PickerSaveDirectories>();
+        reply->generation = generation;
+        reply->request = request;
+        reply->creating = approved.has_value();
+        if (approved) reply->creation = CreateSaveDirectories(request, *approved, native_options, cancelled);
+        else reply->plan = PlanSaveDirectories(request, native_options, cancelled);
+        std::lock_guard guard(target->lock);
+        if (!target->closed && !cancelled() && target->directories_message &&
+            PostMessageW(target->hwnd, target->directories_message, 0, reinterpret_cast<LPARAM>(reply.get()))) reply.release();
+    };
+    target_->changed.notify_one();
 }
 
 void PickerLoader::ValidateSave(uint64_t generation, SaveTargetRequest request) {

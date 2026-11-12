@@ -1,4 +1,5 @@
 #include "file_dialog_remote_provider.h"
+#include "../picker_inprocess/picker_open_missing.h"
 #include "../ipc/picker_remote_protocol.h"
 #include "../ipc/picker_transport.h"
 #include "../common/picker_owner_guard.h"
@@ -29,7 +30,9 @@ struct Context {
     int quit_code=0;
     PickerOwnerGuard* owner=nullptr;
     uint64_t show_id=0,window=0;
+    uint32_t peer_features=0;
     bool close_requested=false;
+    bool deferred_close=false;
     HRESULT close_result=S_OK;
     uint64_t pending_close=0; // sequence of a Close sent while Show waits for the host
     wire::Snapshot accepted;
@@ -118,7 +121,7 @@ HRESULT WINAPI Initialize(const PulsePickerUiV2Initialize* init,PulsePickerUiV2S
     }
     c->initialized=true;active=c;*out=c->token;return S_OK;});}
 HRESULT WINAPI Shutdown(PulsePickerUiV2Session token){return Boundary([&]()->HRESULT{std::shared_ptr<Context> c;HRESULT hr=Get(token,c);if(FAILED(hr))return hr;if(c->showing)return HRESULT_FROM_WIN32(ERROR_BUSY);c->dead=true;c->job.Reset();active.reset();return S_OK;});}
-HRESULT WINAPI Validate(PulsePickerUiV2Session token,const PulsePickerUiV2Config* config){return Boundary([&]()->HRESULT{std::shared_ptr<Context> c;HRESULT hr=Get(token,c);if(FAILED(hr))return hr;if(!config||c->showing)return E_INVALIDARG;wire::Message m,r;m.kind=wire::Kind::ValidateConfig;if(!wire::FromAbi(*config,m.config))return E_INVALIDARG;return c->Call(m,r);});}
+HRESULT WINAPI Validate(PulsePickerUiV2Session token,const PulsePickerUiV2Config* config){return Boundary([&]()->HRESULT{std::shared_ptr<Context> c;HRESULT hr=Get(token,c);if(FAILED(hr))return hr;if(!config||c->showing)return E_INVALIDARG;wire::Message m,r;m.kind=wire::Kind::ValidateConfig;if(!wire::FromAbi(*config,m.config))return E_INVALIDARG;if(!wire::ConfigSupportedByPeer(m.config,c->peer_features))return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);return c->Call(m,r);});}
 HRESULT Command(PulsePickerUiV2Session token,wire::Message& m,wire::Message& r){std::shared_ptr<Context> c;HRESULT hr=Get(token,c);if(FAILED(hr))return hr;if(!c->showing||!c->callback)return HRESULT_FROM_WIN32(ERROR_INVALID_STATE);return c->Call(m,r);}
 HRESULT WINAPI Query(PulsePickerUiV2Session token,uint64_t show,uint64_t generation,PulsePickerUiV2Snapshot* out){return Boundary([&]()->HRESULT{if(!out)return E_POINTER;wire::Message m,r;m.kind=wire::Kind::Query;m.show_id=show;m.expected_generation=generation;HRESULT hr=Command(token,m,r);if(FAILED(hr))return hr;if(r.snapshot.show_id!=show || (generation && r.snapshot.generation!=generation) || !active->Window(r.snapshot.window) || (active->window && active->window!=r.snapshot.window))return E_ACCESSDENIED;return wire::CopyToAbi(r.snapshot,*out);});}
 HRESULT WINAPI GetWindow(PulsePickerUiV2Session token,uint64_t show,HWND* out){return Boundary([&]()->HRESULT{if(!out)return E_POINTER;wire::Message m,r;m.kind=wire::Kind::GetWindow;m.show_id=show;HRESULT hr=Command(token,m,r);if(FAILED(hr))return hr;if(show!=active->show_id || !active->Window(r.window) || (active->window && active->window!=r.window))return E_ACCESSDENIED;*out=reinterpret_cast<HWND>(static_cast<uintptr_t>(r.window));return S_OK;});}
@@ -128,6 +131,16 @@ HRESULT WINAPI Close(PulsePickerUiV2Session token,uint64_t show,HRESULT reason){
     // the frame is written beside that read and the host's reply is taken by
     // Show's own loop; the local checks mirror the in-process ones.
     std::shared_ptr<Context> c=active;
+    if(c && c->token==token && c->thread==GetCurrentThreadId() && Sta() && c->showing && c->callback && c->io){
+        if(!c->show_id)return HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+        if(show!=c->show_id)return HRESULT_FROM_WIN32(ERROR_RETRY);
+        if(c->close_requested)return S_FALSE;
+        if(c->dead)return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+        // Query/control RPCs pump STA messages. Defer a reentrant Close until
+        // that reply is consumed, before acknowledging the current host event.
+        c->close_requested=true;c->deferred_close=true;c->close_result=reason;c->accepted={};
+        return S_OK;
+    }
     if(c && c->token==token && c->thread==GetCurrentThreadId() && Sta() && c->showing && !c->callback){
         if(!c->show_id)return HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
         if(show!=c->show_id)return HRESULT_FROM_WIN32(ERROR_RETRY);
@@ -142,6 +155,25 @@ HRESULT WINAPI Close(PulsePickerUiV2Session token,uint64_t show,HRESULT reason){
     }
     wire::Message m,r;m.kind=wire::Kind::Close;m.show_id=show;m.hresult=static_cast<uint32_t>(reason);HRESULT hr=Command(token,m,r);if(SUCCEEDED(hr)&&!active->close_requested){active->close_requested=true;active->close_result=reason;active->accepted={};}return hr;});}
 HRESULT WINAPI Update(PulsePickerUiV2Session token,uint64_t show,const PulsePickerUiV2Control* control){return Boundary([&]()->HRESULT{wire::Message m,r;m.kind=wire::Kind::UpdateControl;m.show_id=show;if(!control||!wire::FromAbi(*control,m.control))return E_INVALIDARG;return Command(token,m,r);});}
+HRESULT WINAPI SetNavigationRoot(PulsePickerUiV2Session token, PulsePickerUiV2Text root) {
+    return Boundary([&]() -> HRESULT {
+        std::shared_ptr<Context> context; HRESULT hr = Get(token, context); if (FAILED(hr)) return hr;
+        if (!(context->peer_features & PULSE_PICKER_UI_V2_FEATURE_NAVIGATION_ROOT)) return E_NOTIMPL;
+        if (!root.data || !root.units || root.units > PULSE_PICKER_UI_V2_MAX_UNITS) return E_INVALIDARG;
+        wire::Message message, reply; message.kind = wire::Kind::SetNavigationRoot; message.folder.assign(root.data, root.units);
+        return context->Call(message, reply);
+    });
+}
+HRESULT WINAPI UpdateText(PulsePickerUiV2Session token, uint64_t show, uint32_t kind, PulsePickerUiV2Text text) {
+    return Boundary([&]() -> HRESULT {
+        std::shared_ptr<Context> context; HRESULT hr = Get(token, context); if (FAILED(hr)) return hr;
+        if (!(context->peer_features & PULSE_PICKER_UI_V2_FEATURE_DYNAMIC_TEXT)) return E_NOTIMPL;
+        if (text.units > PULSE_PICKER_UI_V2_MAX_UNITS || (!text.data && text.units)) return E_INVALIDARG;
+        wire::Message message, reply; message.kind = wire::Kind::UpdateText; message.show_id = show; message.text_kind = kind;
+        if (text.units) message.text.assign(text.data, text.units);
+        return Command(token, message, reply);
+    });
+}
 HRESULT WINAPI Navigate(PulsePickerUiV2Session token,uint64_t show,PulsePickerUiV2Text folder){return Boundary([&]()->HRESULT{if(!folder.data&&folder.units)return E_INVALIDARG;wire::Message m,r;m.kind=wire::Kind::Navigate;m.show_id=show;if(folder.units)m.folder.assign(folder.data,folder.units);return Command(token,m,r);});}
 HRESULT WINAPI Show(PulsePickerUiV2Session token,const PulsePickerUiV2Config* config,const PulsePickerUiV2Callbacks* callbacks,PulsePickerUiV2Result* output){ bool terminal=false; HRESULT returned=Boundary([&]()->HRESULT{
     std::shared_ptr<Context> c;HRESULT hr=Get(token,c);if(FAILED(hr))return hr;
@@ -151,8 +183,10 @@ HRESULT WINAPI Show(PulsePickerUiV2Session token,const PulsePickerUiV2Config* co
     output->filter_index=0;output->show_id=0;output->generation=0;output->path.units=0;output->paths.units=0;output->path_count=0;
     if(output->path.data&&output->path.capacity)output->path.data[0]=0;
     if(output->paths.data&&output->paths.capacity)output->paths.data[0]=0;
-    c->show_id=0;c->window=0;c->close_requested=false;c->close_result=S_OK;c->accepted={};c->pending_close=0;
+    c->show_id=0;c->window=0;c->close_requested=false;c->deferred_close=false;c->close_result=S_OK;c->accepted={};c->pending_close=0;
     wire::Message request;request.kind=wire::Kind::Show;if(!wire::FromAbi(*config,request.config))return E_INVALIDARG;
+    if((request.config.open_options&PULSE_PICKER_UI_V2_OPEN_SHELL_ITEM_FILTER)&&!callbacks->callback)return E_INVALIDARG;
+    if(!wire::ConfigSupportedByPeer(request.config,c->peer_features))return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
     c->showing=true;
     struct Reset{Context& c;~Reset(){c.owner=nullptr;c.showing=false;c.callback=false;if(c.quit){PostQuitMessage(c.quit_code);c.quit=false;}}}reset{*c};
     PickerOwnerGuard owner(reinterpret_cast<HWND>(static_cast<uintptr_t>(request.config.owner)));
@@ -205,6 +239,11 @@ HRESULT WINAPI Show(PulsePickerUiV2Session token,const PulsePickerUiV2Config* co
                 queried.snapshot.window!=c->window || queried.snapshot.candidate_paths.empty())answer=HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
             else c->accepted=queried.snapshot;
         }
+        if(c->deferred_close){
+            wire::Message close,closed;close.kind=wire::Kind::Close;close.show_id=c->show_id;close.hresult=static_cast<uint32_t>(c->close_result);
+            c->deferred_close=false;c->accepted={};
+            hr=c->Call(close,closed);if(FAILED(hr))return hr;
+        }
         c->callback=false;wire::Message reply;reply.request_id=c->id;reply.kind=wire::Kind::EventReply;reply.sequence=incoming.sequence;reply.hresult=static_cast<uint32_t>(answer);reply.response=response;
         hr=c->Send(reply);if(FAILED(hr))return hr;
     }
@@ -233,6 +272,7 @@ HRESULT Start(const std::wstring& executable,const std::shared_ptr<Context>& c,w
         hr=c->Io([&](HANDLE stop){return server.Accept(c->process.Get(),c->channel,{stop,10000});});if(FAILED(hr))return hr;
         wire::Message hello;hello.kind=wire::Kind::Hello;hello.version=2;hr=c->Call(hello,reply);if(FAILED(hr))return hr;
         if(reply.version!=2)return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+        c->peer_features=reply.features;
         return S_OK;
 }
 }HRESULT LoadFileDialogRemoteProvider(const std::wstring& executable,std::shared_ptr<const FileDialogInprocessProvider>& output,bool allow_unverified) noexcept {
@@ -243,8 +283,8 @@ HRESULT Start(const std::wstring& executable,const std::shared_ptr<Context>& c,w
         auto c=std::make_shared<Context>();wire::Message reply;HRESULT hr=Start(executable,c,reply);if(FAILED(hr))return hr;
         auto binding=std::make_shared<Binding>();binding->executable=executable;binding->current=c;binding->capabilities=reply.capabilities;binding->features=reply.features;
         auto provider=std::make_shared<FileDialogInprocessProvider>();provider->module_lifetime=binding;provider->allow_unverified_proof=allow_unverified;
-        auto& api=provider->api;api.size=sizeof(api);api.version=2;api.capabilities=reply.capabilities;api.implemented_features=reply.features;
-        api.Initialize=Initialize;api.ValidateConfig=Validate;api.Show=Show;api.GetWindow=GetWindow;api.Query=Query;api.Close=Close;api.Shutdown=Shutdown;api.UpdateControl=Update;api.Navigate=Navigate;
+        auto& api=provider->api;api.size=sizeof(api);api.version=2;api.capabilities=reply.capabilities;api.implemented_features=picker_inprocess::RemotePickerFeatures(reply.features);
+        api.Initialize=Initialize;api.ValidateConfig=Validate;api.Show=Show;api.GetWindow=GetWindow;api.Query=Query;api.Close=Close;api.Shutdown=Shutdown;api.UpdateControl=Update;api.Navigate=Navigate;provider->update_text=UpdateText;provider->set_navigation_root=SetNavigationRoot;
         provider->validate_remote_window=[weak=std::weak_ptr<Binding>(binding)](PulsePickerUiV2Session session,HWND window){auto bound=weak.lock();auto current=bound?bound->current:nullptr;return current&&current==active&&!current->dead&&current->thread==GetCurrentThreadId()&&current->token==session&&current->Window(reinterpret_cast<uintptr_t>(window));};
         pending=binding;output=std::move(provider);return S_OK;
     });

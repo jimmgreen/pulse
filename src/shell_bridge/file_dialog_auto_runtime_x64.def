@@ -1,0 +1,6 @@
+LIBRARY PulseFileDialogAutoRuntime64
+EXPORTS
+    PulseFileDialogRuntimeQuery
+    PulseFileDialogRuntimeAutoStart
+    PulseFileDialogRuntimeAutoAttach
+    PulseFileDialogRuntimeAutoQuery

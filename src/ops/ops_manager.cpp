@@ -2085,7 +2085,14 @@ OpStatus OpsManager::Status() const {
     // Cleared before the snapshot: a change made after it posts again.
     notify_pending_since_.store(0);
     std::lock_guard<std::mutex> lock(mutex_);
-    if (status_.active || active_item_ || !queue_.empty()) return PresentOperationStatus(status_);
+    if (status_.active || active_item_ || !queue_.empty()) {
+        // A plugin task waiting on this operation (its staged output being written) stands
+        // in for it, so one window shows both steps. Permission prompts stay the operation's.
+        if (status_.active && status_.task_id && status_.authorization == AuthorizationState::None)
+            for (const auto& [id, task] : external_tasks_)
+                if (task.status.external_linked == status_.task_id) return task.status;
+        return PresentOperationStatus(status_);
+    }
     if (!external_tasks_.empty()) return external_tasks_.begin()->second.status;
     if (!external_finals_.empty() && external_finals_.back().terminal_sequence > status_.terminal_sequence)
         return external_finals_.back();

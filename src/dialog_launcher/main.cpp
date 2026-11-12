@@ -13,6 +13,7 @@
 #include "../shell_bridge/runtime_config.h"
 #include "managed_launch_profile.h"
 #include "process_launch_path.h"
+#include "target_preflight.h"
 #include "../common/dialog_bundle.h"
 #include "../common/dialog_session.h"
 
@@ -215,6 +216,17 @@ int Launch(int argc, wchar_t** argv, pulse::dialog_bundle::BundleLease* verified
         const DWORD error = pulse::dialog_bundle::RecheckDirectory(*verified_bundle);
         if (error) { std::cout << "bundle_valid=0 error=" << error << " process_started=0 runtime_handshake=0\n"; return 2; }
     }
+    // Read-only advisory snapshot. Existing processes are neither attached nor
+    // treated as managed; a real multi-instance launch remains permitted.
+    const auto preflight = pulse::dialog_launcher::ScanExistingTarget(target);
+    const auto preflight_json = pulse::dialog_launcher::TargetPreflightJson(preflight, session->nonce, GetCurrentProcessId());
+    std::cout << preflight_json << '\n' << std::flush;
+    log << preflight_json << '\n' << std::flush;
+    {
+        std::ofstream structured(directory / L"launcher-preflight.jsonl", std::ios::binary);
+        structured << preflight_json << '\n' << std::flush;
+        if (!structured) log << "preflight_log_write_failed=1\n" << std::flush;
+    }
     const BOOL created = DetourCreateProcessWithDllExW(launch_target.c_str(), command.data(), nullptr, nullptr, FALSE,
         CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, environment.data(), launch_cwd.c_str(), &startup, &child, dll_ansi.c_str(), nullptr);
     log << "create=" << created << " error=" << (created ? 0 : GetLastError()) << '\n' << std::flush;
@@ -311,7 +323,30 @@ int Launch(int argc, wchar_t** argv, pulse::dialog_bundle::BundleLease* verified
     std::cout << "No runtime handshake yet; application remains running. Use --status to recheck.\n"; return 3;
 }
 }
+int LaunchInstalledAdmin(int argc,wchar_t** argv) {
+    if(argc!=5 || std::wstring_view(argv[3])!=L"--" || !pulse::dialog_admin::IsElevated()) return 2;
+    if(!AllowedProcess(GetCurrentProcess(),true)) return 2;
+    const auto install=AdminDrivePath(Canonical(argv[2],true));
+    const auto target=AdminDrivePath(Canonical(argv[4],false));
+    WORD machine=0;
+    if(install.empty() || target.empty() || !Machine(target,machine) || machine!=kMachine) return 2;
+    pulse::dialog_bundle::BundleLease bundle;
+    DWORD error=pulse::dialog_bundle::ResolveInstalledBundleForMachine(install,machine,bundle);
+    if(!error && _wcsicmp(AdminDrivePath(Self()).c_str(),AdminDrivePath(bundle.Launcher()).c_str())) error=ERROR_REVISION_MISMATCH;
+    if(!error) error=pulse::dialog_admin::VerifyAdminLaunchLocation(install,AdminDrivePath(bundle.Directory()),AdminDrivePath(bundle.Host()),machine);
+    if(!error) error=pulse::dialog_bundle::RecheckDirectory(bundle);
+    std::wstring control;
+    if(!error) error=pulse::dialog_admin::AdminControlRoot(install,true,control);
+    if(error) {std::cout<<"admin_session_rejected stage=installed-launch error="<<error<<"\n";return 2;}
+    std::vector<std::wstring> arguments{argv[0],L"--admin-session",L"--bundle",bundle.Directory(),
+        L"--cwd",fs::path(target).parent_path().wstring(),L"--control-root",control,L"--",target};
+    std::vector<wchar_t*> pointers;for(auto& argument:arguments) pointers.push_back(argument.data());
+    return Launch(static_cast<int>(pointers.size()),pointers.data());
+}
 int wmain(int argc, wchar_t** argv) {
+    if(argc>=2 && std::wstring_view(argv[1])==L"--admin-installed") {
+        try {return LaunchInstalledAdmin(argc,argv);} catch(...) {return 2;}
+    }
     if (argc == 3 && std::wstring_view(argv[1]) == L"--admin-check") {
         const DWORD error = pulse::dialog_admin::VerifyProtectedTree(AdminDrivePath(argv[2]));
         std::cout << "admin_tree_valid=" << !error << " error=" << error << " is_elevated=" << pulse::dialog_admin::IsElevated() << "\n";

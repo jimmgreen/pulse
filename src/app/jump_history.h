@@ -27,6 +27,9 @@ public:
     double Score(const std::wstring& path, const std::wstring& app, int64_t now = Now()) const;
     // Highest score first.
     std::vector<std::wstring> Top(const std::wstring& app, size_t limit, int64_t now = Now()) const;
+    int64_t LastUsed(const std::wstring& path) const;
+    // Zero means an unknown lifetime total (legacy records), never a decayed score.
+    uint64_t VisitCount(const std::wstring& path) const;
     size_t Size() const;
     void Clear();
 
@@ -41,7 +44,7 @@ public:
 
 private:
     struct Visits { std::wstring app; double score = 0; int64_t last = 0; };
-    struct Entry { std::wstring path, key; double score = 0; int64_t last = 0; std::vector<Visits> apps; };
+    struct Entry { std::wstring path, key; double score = 0; int64_t last = 0; std::vector<Visits> apps; uint64_t count = 0; };
     static double Decayed(double score, int64_t last, int64_t now);
     double ScoreLocked(const Entry& e, const std::wstring& app, int64_t now) const;
     Entry* FindLocked(const std::wstring& path);

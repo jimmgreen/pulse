@@ -12,6 +12,9 @@ add_executable(pulse_picker_session_test src/bench/picker_session_test.cpp
 target_link_libraries(pulse_picker_session_test PRIVATE advapi32 bcrypt)
 
 add_executable(pulse_file_save_model_test src/bench/file_save_model_test.cpp src/ui/file_save_model.cpp)
+add_executable(pulse_file_save_path_model_test EXCLUDE_FROM_ALL src/bench/file_save_model_test.cpp
+    src/ui/file_save_model.cpp src/ui/file_save_revalidation.cpp src/ui/file_save_access_policy.cpp)
+target_compile_definitions(pulse_file_save_path_model_test PRIVATE PULSE_SAVE_PATH_PIPELINE_TEST=1)
 
 add_executable(pulse_file_save_revalidation_test src/bench/file_save_revalidation_test.cpp
     src/ui/file_save_revalidation.cpp src/ui/file_save_model.cpp)
@@ -42,6 +45,9 @@ add_executable(pulse_picker_legacy_model_test src/bench/picker_legacy_model_test
     src/ipc/picker_legacy_model.cpp src/ipc/picker_protocol.cpp)
 
 add_executable(pulse_file_dialog_contract_test src/bench/file_dialog_contract_test.cpp
+    src/shell_bridge/file_dialog_contract.cpp src/ipc/picker_protocol.cpp)
+add_executable(pulse_picker_open_filter_space_contract_test EXCLUDE_FROM_ALL
+    src/bench/picker_open_filter_space_contract_test.cpp
     src/shell_bridge/file_dialog_contract.cpp src/ipc/picker_protocol.cpp)
 
 add_executable(pulse_file_dialog_wrapper_test src/bench/file_dialog_wrapper_test.cpp
@@ -216,14 +222,34 @@ add_executable(pulse_picker_event_adapter_test src/bench/picker_event_adapter_te
 
 # Complete ABI transport: share the existing picker implementation in pulse.exe.
 target_sources(pulse PRIVATE src/picker_inprocess/picker_ui_bootstrap.cpp src/picker_inprocess/picker_ui_bootstrap_v2.cpp)
+target_sources(pulse PRIVATE src/picker_inprocess/picker_jump_context.cpp)
 set_property(SOURCE src/picker_inprocess/picker_ui_bootstrap.cpp APPEND PROPERTY COMPILE_DEFINITIONS
     "$<$<STREQUAL:$<TARGET_PROPERTY:NAME>,pulse>:PULSE_PICKER_EXE_HOST=1>")
+add_executable(pulse_file_dialog_no_overwrite_live_test EXCLUDE_FROM_ALL src/bench/file_dialog_no_overwrite_live_test.cpp)
+target_link_libraries(pulse_file_dialog_no_overwrite_live_test PRIVATE shell32 ole32 uuid user32)
+add_executable(pulse_picker_cancel_label_remote_test EXCLUDE_FROM_ALL src/bench/picker_cancel_label_ui_test.cpp
+    src/shell_bridge/file_dialog_remote_provider.cpp src/ipc/picker_remote_protocol.cpp
+    src/ipc/picker_transport.cpp src/ipc/picker_protocol.cpp src/common/picker_owner_guard.cpp)
+target_compile_definitions(pulse_picker_cancel_label_remote_test PRIVATE PULSE_REMOTE_PROVIDER_TEST=1)
+target_link_libraries(pulse_picker_cancel_label_remote_test PRIVATE ole32 user32 advapi32 bcrypt)
+add_executable(pulse_picker_cancel_label_ui_test EXCLUDE_FROM_ALL src/bench/picker_cancel_label_ui_test.cpp)
+target_link_libraries(pulse_picker_cancel_label_ui_test PRIVATE ole32 user32 advapi32)
 add_executable(pulse_picker_remote_protocol_test EXCLUDE_FROM_ALL src/bench/picker_remote_protocol_test.cpp src/ipc/picker_remote_protocol.cpp)
 add_executable(pulse_picker_remote_v2_test EXCLUDE_FROM_ALL src/bench/picker_inprocess_v2_test.cpp
     src/shell_bridge/file_dialog_remote_provider.cpp src/ipc/picker_remote_protocol.cpp
     src/ipc/picker_transport.cpp src/ipc/picker_protocol.cpp src/common/picker_owner_guard.cpp)
 target_compile_definitions(pulse_picker_remote_v2_test PRIVATE PULSE_REMOTE_PROVIDER_TEST=1)
 target_link_libraries(pulse_picker_remote_v2_test PRIVATE ole32 user32 windowscodecs advapi32 bcrypt)
+add_executable(pulse_picker_remote_owner_test EXCLUDE_FROM_ALL
+    src/bench/picker_remote_owner_test.cpp src/common/picker_owner_guard.cpp
+    src/shell_bridge/file_dialog_remote_provider.cpp src/ipc/picker_remote_protocol.cpp
+    src/ipc/picker_transport.cpp src/ipc/picker_protocol.cpp)
+target_compile_definitions(pulse_picker_remote_owner_test PRIVATE PULSE_REMOTE_PROVIDER_TEST=1)
+target_link_libraries(pulse_picker_remote_owner_test PRIVATE ole32 user32 advapi32 bcrypt)
+add_executable(pulse_picker_remote_reentrant_close_test EXCLUDE_FROM_ALL
+    src/bench/picker_remote_reentrant_close_test.cpp src/ipc/picker_remote_protocol.cpp
+    src/ipc/picker_transport.cpp src/ipc/picker_protocol.cpp src/common/picker_owner_guard.cpp)
+target_link_libraries(pulse_picker_remote_reentrant_close_test PRIVATE ole32 user32 advapi32 bcrypt)
 add_executable(pulse_picker_open_bench EXCLUDE_FROM_ALL src/bench/picker_open_bench.cpp
     src/shell_bridge/file_dialog_remote_provider.cpp src/ipc/picker_remote_protocol.cpp
     src/ipc/picker_transport.cpp src/ipc/picker_protocol.cpp src/common/picker_owner_guard.cpp)
@@ -234,3 +260,30 @@ add_executable(pulse_file_dialog_remote_multiselect_live_test EXCLUDE_FROM_ALL
     ${_inprocess_wrapper_test_sources})
 target_compile_definitions(pulse_file_dialog_remote_multiselect_live_test PRIVATE PULSE_REMOTE_PROVIDER_TEST=1)
 target_link_libraries(pulse_file_dialog_remote_multiselect_live_test PRIVATE shell32 ole32 uuid advapi32 bcrypt user32)
+# Shell-item filter native oracle and contract/caller-thread regressions.
+add_executable(pulse_file_dialog_shell_filter_contract_test EXCLUDE_FROM_ALL
+    src/bench/file_dialog_shell_filter_contract_test.cpp src/shell_bridge/file_dialog_contract.cpp src/ipc/picker_protocol.cpp)
+add_executable(pulse_file_dialog_shell_filter_model_test EXCLUDE_FROM_ALL
+    src/bench/file_dialog_shell_filter_model_test.cpp src/ipc/picker_remote_protocol.cpp)
+add_executable(pulse_file_dialog_shell_filter_native_test EXCLUDE_FROM_ALL src/bench/file_dialog_shell_filter_native_test.cpp)
+target_link_libraries(pulse_file_dialog_shell_filter_native_test PRIVATE ole32 shell32 user32 uuid)
+add_executable(pulse_file_dialog_shell_filter_wrapper_test EXCLUDE_FROM_ALL
+    src/bench/file_dialog_shell_filter_wrapper_test.cpp ${_inprocess_wrapper_test_sources})
+target_link_libraries(pulse_file_dialog_shell_filter_wrapper_test PRIVATE shell32 ole32 uuid advapi32 bcrypt user32 propsys)
+add_executable(pulse_file_dialog_shell_filter_registered_test EXCLUDE_FROM_ALL src/bench/file_dialog_shell_filter_registered_test.cpp)
+target_link_libraries(pulse_file_dialog_shell_filter_registered_test PRIVATE shell32 ole32 uuid user32)
+add_executable(pulse_dialog_no_overwrite_registered_test EXCLUDE_FROM_ALL src/bench/dialog_no_overwrite_registered_test.cpp)
+target_link_libraries(pulse_dialog_no_overwrite_registered_test PRIVATE shell32 ole32 uuid user32 propsys)
+
+# Validated missing Open capability, ABI compatibility, and real access-policy boundaries.
+add_executable(pulse_picker_open_missing_validated_test EXCLUDE_FROM_ALL
+    src/bench/picker_open_missing_validated_test.cpp
+    src/shell_bridge/file_dialog_contract.cpp
+    src/shell_bridge/file_dialog_inprocess_session.cpp
+    src/ui/folder_picker_model.cpp
+    src/ui/file_save_model.cpp
+    src/ui/file_save_revalidation.cpp
+    src/ui/file_save_access_policy.cpp
+    src/ipc/picker_protocol.cpp)
+target_link_libraries(pulse_picker_open_missing_validated_test PRIVATE
+    pulse_fs_watch pulse_localization ole32 shell32 user32 uuid advapi32)

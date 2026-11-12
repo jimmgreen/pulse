@@ -8,6 +8,21 @@
 namespace pulse::shell_bridge {
 struct FileDialogInprocessProvider;
 class FileDialogClientState;
+enum class FileDialogShowFallback {
+    None, ResolveNotReady, ProviderUnavailable, InitialFolderUnavailable, Contract,
+    ProviderPrepareFailed, ProviderFailedBeforeUi
+};
+// Passive per-Show evidence. ui_shown describes Pulse only, and remains unknown
+// when the route has no explicit provider UI_SHOWN result (including the pipe).
+struct FileDialogShowObservation {
+    uint64_t sequence = 0;
+    std::optional<DialogFactory> factory;
+    HRESULT result = E_PENDING;
+    bool native_fallback = false, provider_started = false, accepted_result = false;
+    std::optional<bool> ui_shown;
+    NativeReason contract_reason = NativeReason::None;
+    FileDialogShowFallback fallback = FileDialogShowFallback::None;
+};
 struct FileDialogBridgeServices {
     std::wstring executable;
     std::shared_ptr<FileDialogClientState> client_state; // Optional isolated state store for embedding/tests.
@@ -24,6 +39,8 @@ struct FileDialogBridgeServices {
     std::function<HRESULT(IFileDialog*, HWND)> show_native;
     // Diagnostics cannot authorize a contract or affect its outcome.
     std::function<void(const ContractDecision&, bool, bool, size_t)> observe_contract;
+    // true marks begin, false marks terminal; exceptions never affect Show.
+    std::function<void(bool, const FileDialogShowObservation&)> observe_show;
     AccessPolicy save_access_policy = AccessPolicy::None; // Independent opt-in; LocalSaveV1 is inprocess-only.
     AccessPolicy access_policy = AccessPolicy::None; // Opt-in; Save/native parity unchanged.
     // Absent by default. Explicit v2 provider; no runtime admission is enabled here.

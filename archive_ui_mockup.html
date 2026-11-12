@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>7-Zip 界面重设计</title>
+<style>
+/* Pulse tokens: src/ui/FluentTokens.h MakeTheme(); accent = Pulse sage green seen in the running app. */
+:root {
+  --bg: #F3F5F1; --title: #F1F3EE; --sheet: #F7F8F4; --card: #FFFFFF; --flyout: #FFFFFF;
+  --text: #303B50; --text2: #66748A; --text3: #929CAE;
+  --hover: rgba(82,125,112,.055); --pressed: rgba(82,125,112,.09);
+  --stroke: #DCE3D9; --divider: #E5EAE3; --input: rgba(255,255,255,.9); --input-line: rgba(166,181,169,.65);
+  --accent: #527D70; --accent-fg: #3F6B5E; --on-accent: #FFFFFF; --sel: rgba(82,125,112,.095);
+  --track: rgba(48,59,80,.18);
+  --danger: #C42B1C; --danger-bg: #FDE7E9; --info-bg: rgba(82,125,112,.08);
+  --scrim: rgba(243,245,241,.55);
+  --shadow: 0 16px 40px rgba(48,59,80,.16), 0 2px 6px rgba(48,59,80,.08);
+  --font: "Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+  --display: "Segoe UI Variable Display","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+}
+:root[data-theme="dark"] {
+  --bg: #1A1A1A; --title: #1A1A1A; --sheet: #202020; --card: #272727; --flyout: #2B2B2B;
+  --text: #FFFFFF; --text2: rgba(255,255,255,.61); --text3: rgba(255,255,255,.40);
+  --hover: rgba(255,255,255,.08); --pressed: rgba(255,255,255,.06);
+  --stroke: rgba(255,255,255,.08); --divider: rgba(255,255,255,.06); --input: rgba(255,255,255,.06); --input-line: rgba(255,255,255,.54);
+  --accent: #6E9C8E; --accent-fg: #8DBBAD; --on-accent: #10201B; --sel: rgba(110,156,142,.18);
+  --track: rgba(255,255,255,.22);
+  --danger: #FF99A4; --danger-bg: rgba(255,153,164,.10); --info-bg: rgba(110,156,142,.12);
+  --scrim: rgba(0,0,0,.35);
+  --shadow: 0 16px 44px rgba(0,0,0,.55), 0 2px 6px rgba(0,0,0,.4); color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--font); }
+button, input, select { font: inherit; color: inherit; }
+button { background: none; border: 0; padding: 0; cursor: pointer; }
+.page { max-width: 1240px; margin: 0 auto; padding: 24px 16px 64px; display: flex; flex-direction: column; gap: 20px; }
+h1 { font: 600 26px var(--display); margin: 0; }
+.lead { margin: 4px 0 0; color: var(--text2); max-width: 80ch; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 10px 12px; background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; position: sticky; top: 0; z-index: 20; }
+.ctl { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text2); flex-wrap: wrap; }
+.pill { display: inline-flex; flex-wrap: wrap; padding: 2px; gap: 2px; background: var(--hover); border-radius: 7px; }
+.pill button { height: 26px; padding: 0 10px; border-radius: 5px; font-size: 12.5px; color: var(--text2); }
+.pill button[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: 0 0 0 1px var(--stroke); }
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.note { background: var(--card); border: 1px solid var(--stroke); border-radius: 8px; padding: 12px 14px; font-size: 13px; color: var(--text2); }
+.note b { color: var(--text); font-weight: 600; display: block; margin-bottom: 2px; }
+.i { width: 16px; height: 16px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+
+/* host window behind the dialog */
+.stage { display: flex; justify-content: center; overflow-x: auto; padding: 4px 0 8px; }
+.win { width: 1100px; height: 880px; flex-shrink: 0; display: flex; flex-direction: column; background: var(--sheet); border: 1px solid var(--stroke); border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; font-size: 13px; position: relative; }
+.tb { height: 40px; display: flex; align-items: center; gap: 10px; padding-left: 14px; background: var(--title); flex-shrink: 0; font-weight: 600; }
+.tb .tab { margin-left: 18px; height: 30px; align-self: flex-end; padding: 0 14px; display: flex; align-items: center; gap: 8px; background: var(--sheet); border-radius: 8px 8px 0 0; font-weight: 400; }
+.tb .sp { flex: 1; }
+.cap { width: 46px; height: 40px; display: grid; place-items: center; color: var(--text2); }
+.body { flex: 1; min-height: 0; display: flex; }
+.side { width: 220px; flex-shrink: 0; background: var(--title); padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+.si { height: 32px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border-radius: 6px; }
+.si.on { background: var(--sel); position: relative; }
+.si.on::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; background: var(--accent); }
+.sh { font-size: 12px; color: var(--text2); padding: 10px 10px 2px; font-weight: 600; }
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 8px 12px 0; }
+.addr { height: 36px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: 6px; background: var(--card); border: 1px solid var(--stroke); color: var(--text2); margin-bottom: 8px; }
+.list { flex: 1; background: var(--card); border: 1px solid var(--stroke); border-radius: 8px 8px 0 0; padding: 6px 8px; }
+.lh, .row { display: grid; grid-template-columns: 1fr 150px 140px 80px; align-items: center; height: 34px; padding: 0 10px; border-radius: 6px; }
+.lh { color: var(--text2); font-weight: 600; height: 32px; }
+.row.picked { background: var(--sel); }
+.fi { display: flex; align-items: center; gap: 10px; }
+.ext { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--stroke); color: var(--text2); margin-right: 6px; }
+.scrim { position: absolute; inset: 40px 0 0 0; background: var(--scrim); }
+
+/* Pulse form dialog (src/ui/form_dialog.cpp): 36 title, 20 pad, 32 buttons, 8 gap */
+.dlg { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 560px; background: var(--sheet); border: 1px solid var(--stroke); border-radius: 8px; box-shadow: var(--shadow); overflow: hidden; }
+.dlg.w440 { width: 440px; }
+.dlg.w600 { width: 600px; }
+.dt { height: 36px; display: flex; align-items: center; padding-left: 16px; font-size: 12.5px; border-bottom: 1px solid var(--divider); }
+.dt .sp { flex: 1; }
+.dt .x { width: 46px; height: 36px; display: grid; place-items: center; color: var(--text2); }
+.db { padding: 16px 20px 0; display: flex; flex-direction: column; gap: 14px; }
+.df { display: flex; justify-content: flex-end; gap: 8px; padding: 20px; }
+.btn { height: 32px; min-width: 88px; padding: 0 14px; border-radius: 4px; background: var(--card); border: 1px solid var(--stroke); box-shadow: 0 1px 0 rgba(0,0,0,.04); display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.btn.pri { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+.btn.sm { min-width: 0; height: 28px; padding: 0 10px; font-size: 12.5px; }
+.btn.icon { min-width: 0; width: 32px; padding: 0; }
+
+.src { display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: var(--card); border: 1px solid var(--stroke); border-radius: 8px; }
+.src .ic { width: 36px; height: 36px; border-radius: 8px; display: grid; place-items: center; background: var(--sel); color: var(--accent-fg); }
+.src b { font-weight: 600; display: block; }
+.src span { color: var(--text2); font-size: 12.5px; }
+.lbl { font-size: 13px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: baseline; }
+.lbl em { font-style: normal; color: var(--text2); font-size: 12.5px; }
+.field { height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 10px; background: var(--input); border: 1px solid var(--stroke); border-bottom-color: var(--input-line); border-radius: 4px; }
+.field.focus { border-bottom: 2px solid var(--accent); }
+.field input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; }
+.field input::placeholder { color: var(--text3); }
+.badge { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--hover); color: var(--text2); }
+.field .eye { color: var(--text2); display: grid; place-items: center; }
+.cap2 { color: var(--text2); font-size: 12.5px; margin-top: 6px; }
+.seg { display: flex; padding: 3px; gap: 3px; background: var(--hover); border-radius: 6px; }
+.seg button { flex: 1; height: 28px; border-radius: 4px; color: var(--text2); font-size: 13px; }
+.seg button.on { background: var(--card); color: var(--text); box-shadow: 0 0 0 1px var(--stroke), 0 1px 2px rgba(0,0,0,.06); font-weight: 600; }
+.slider { position: relative; height: 32px; }
+.slider .tr { position: absolute; left: 8px; right: 8px; top: 15px; height: 4px; border-radius: 2px; background: var(--track); }
+.slider .fill { position: absolute; left: 8px; top: 15px; height: 4px; border-radius: 2px; background: var(--accent); }
+.slider .tick { position: absolute; top: 13px; width: 2px; height: 8px; border-radius: 1px; background: var(--track); }
+.slider .th { position: absolute; top: 6px; width: 20px; height: 20px; margin-left: -10px; border-radius: 50%; background: var(--card); border: 1px solid var(--stroke); box-shadow: 0 1px 3px rgba(0,0,0,.18); display: grid; place-items: center; }
+.slider .th::after { content: ""; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); }
+.stops { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--text3); padding: 0 2px; }
+.stops span.on { color: var(--text); }
+.group { background: var(--card); border: 1px solid var(--stroke); border-radius: 8px; }
+.grow { display: flex; align-items: center; gap: 12px; padding: 12px 14px; min-height: 52px; }
+.grow + .grow, .gsub { border-top: 1px solid var(--divider); }
+.grow .t { flex: 1; min-width: 0; }
+.grow .t b { font-weight: 400; display: block; }
+.grow .t span { color: var(--text2); font-size: 12.5px; }
+.gsub { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.sw { width: 40px; height: 20px; border-radius: 10px; border: 1px solid var(--text2); position: relative; flex-shrink: 0; }
+.sw::after { content: ""; position: absolute; left: 4px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--text2); }
+.sw.on { background: var(--accent); border-color: var(--accent); }
+.sw.on::after { left: 23px; background: var(--on-accent); }
+.sel { height: 32px; min-width: 150px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 10px; background: var(--card); border: 1px solid var(--stroke); border-radius: 4px; }
+.sel .i { width: 12px; height: 12px; color: var(--text2); }
+.chk { display: flex; align-items: center; gap: 10px; }
+.chk i { width: 18px; height: 18px; border-radius: 4px; border: 1px solid var(--text2); display: grid; place-items: center; }
+.chk.on i { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.chk.off { color: var(--text3); }
+.chk.off i { border-color: var(--text3); }
+.info { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 6px; font-size: 13px; background: var(--info-bg); }
+.info.err { background: var(--danger-bg); }
+.info .i { margin-top: 2px; color: var(--accent-fg); }
+.info.err .i { color: var(--danger); }
+.adv { display: flex; align-items: center; gap: 6px; color: var(--text2); font-size: 13px; }
+
+/* password + checksum */
+.lockrow { display: flex; gap: 14px; align-items: flex-start; }
+.lock { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: var(--sel); color: var(--accent-fg); flex-shrink: 0; }
+.lockrow b { font-weight: 600; word-break: break-all; }
+.lockrow p { margin: 2px 0 0; color: var(--text2); font-size: 12.5px; }
+.hash { display: grid; grid-template-columns: 76px 1fr 32px; align-items: center; gap: 6px 10px; }
+.hash .k { color: var(--text2); font-size: 12.5px; }
+.hash .v { font: 13px "Cascadia Mono", Consolas, monospace; padding: 6px 10px; background: var(--card); border: 1px solid var(--stroke); border-radius: 4px; word-break: break-all; }
+.hash .ok { color: var(--accent-fg); }
+.df .toast { margin-right: auto; display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text2); }
+
+/* settings page */
+.nav { width: 230px; background: var(--title); padding: 8px; display: flex; flex-direction: column; gap: 2px; flex-shrink: 0; }
+.ns { height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 10px; margin: 2px 2px 8px; border-radius: 6px; background: var(--input); border: 1px solid var(--stroke); color: var(--text3); }
+.ni { height: 36px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border-radius: 6px; position: relative; }
+.ni.on { background: var(--sel); }
+.ni.on::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 2px; background: var(--accent); }
+.content { flex: 1; min-width: 0; overflow: auto; padding: 22px 28px 28px; display: flex; flex-direction: column; gap: 10px; }
+.crumb { font: 600 26px var(--display); display: flex; align-items: center; gap: 10px; }
+.crumb span { color: var(--text2); font-weight: 400; }
+.hero { display: flex; align-items: center; gap: 14px; padding: 14px 16px; background: var(--card); border: 1px solid var(--stroke); border-radius: 8px; margin-top: 6px; }
+.hero .ic { width: 44px; height: 44px; border-radius: 10px; background: #A16207; color: #fff; display: grid; place-items: center; }
+.hero b { font-weight: 600; font-size: 15px; display: block; }
+.hero span { color: var(--text2); font-size: 12.5px; }
+.hero .saved { margin-left: auto; color: var(--text2); font-size: 12.5px; display: flex; align-items: center; gap: 6px; }
+.secth { font-weight: 600; font-size: 14px; margin: 12px 0 2px; }
+.card { background: var(--card); border: 1px solid var(--stroke); border-radius: 8px; }
+.crow { display: flex; align-items: center; gap: 14px; padding: 14px 16px; min-height: 64px; }
+.crow + .crow, .csub { border-top: 1px solid var(--divider); }
+.crow .gl { color: var(--text2); }
+.crow .t { flex: 1; min-width: 0; }
+.crow .t b { font-weight: 400; display: block; }
+.crow .t span { color: var(--text2); font-size: 12.5px; }
+.csub { padding: 6px 16px 12px 46px; display: flex; flex-direction: column; }
+.radio { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; }
+.radio i { width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--text2); flex-shrink: 0; margin-top: 1px; display: grid; place-items: center; }
+.radio.on i { border: 5px solid var(--accent); }
+.radio b { font-weight: 400; display: block; }
+.radio span { color: var(--text2); font-size: 12.5px; }
+.pathrow { display: flex; gap: 8px; margin: 2px 0 6px 28px; }
+.pathrow .field { flex: 1; }
+.menuprev { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 14px; background: var(--hover); font-size: 12.5px; color: var(--text2); }
+.menuprev b { color: var(--text); font-weight: 600; }
+.foot { color: var(--text2); font-size: 12.5px; display: flex; gap: 16px; flex-wrap: wrap; padding: 6px 2px; }
+[hidden] { display: none !important; }
+@media (max-width: 760px) { .two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>7-Zip 压缩/解压界面重设计</h1>
+    <p class="lead">只用扩展界面模型已有的控件（分段、步进滑块、开关、单选、分组、信息条、文本框尾部标签），宿主无需新增控件类型。所有文字为真实文案草稿，状态可在下方切换。</p>
+  </header>
+
+  <div class="controls" role="toolbar" aria-label="状态切换">
+    <div class="ctl">界面 <span class="pill" id="views">
+      <button data-view="add" aria-pressed="true">添加到压缩包</button>
+      <button data-view="password">输入密码</button>
+      <button data-view="hash">校验值</button>
+      <button data-view="settings">扩展设置</button>
+    </span></div>
+    <div class="ctl" id="addStates">格式 <span class="pill">
+      <button data-fmt="0" aria-pressed="true">7z</button>
+      <button data-fmt="1">zip</button>
+      <button data-fmt="3">tar.gz</button>
+    </span>
+    <span class="pill"><button data-pw="0" aria-pressed="true">不加密</button><button data-pw="1">设置密码</button><button data-pw="2">两次不一致</button></span>
+    <span class="pill"><button data-adv="0" aria-pressed="true">更多选项收起</button><button data-adv="1">展开</button></span></div>
+    <div class="ctl" id="pwStates" hidden>状态 <span class="pill"><button data-try="0" aria-pressed="true">首次</button><button data-try="1">密码错误</button></span></div>
+    <div class="ctl" id="hashStates" hidden>状态 <span class="pill"><button data-copied="0" aria-pressed="true">默认</button><button data-copied="1">已复制</button></span></div>
+    <div class="ctl" id="setStates" hidden>解压到 <span class="pill"><button data-loc="0" aria-pressed="true">所在文件夹</button><button data-loc="1">固定文件夹</button></span></div>
+    <div class="ctl">主题 <span class="pill"><button data-theme="light" aria-pressed="true">浅色</button><button data-theme="dark">深色</button></span></div>
+  </div>
+
+  <div class="stage">
+    <!-- explorer window behind the dialogs -->
+    <div class="win" id="explorer">
+      <div class="tb"><svg class="i" viewBox="0 0 16 16" style="color:var(--accent-fg)"><path d="M3 13V5l5-3 5 3v8"/></svg>Pulse
+        <div class="tab"><svg class="i" viewBox="0 0 16 16"><path d="M1.5 4.5h5l1.5 1.5h6.5v7h-13z"/></svg>run3</div>
+        <div class="sp"></div><div class="cap">—</div><div class="cap">▢</div><div class="cap">✕</div></div>
+      <div class="body">
+        <div class="side">
+          <div class="sh">快速访问</div>
+          <div class="si">最近使用</div><div class="si">桌面</div><div class="si">下载</div><div class="si on">项目 pulse</div>
+        </div>
+        <div class="main">
+          <div class="addr">build-extensions › 7zip-live › ui-test › run3</div>
+          <div class="list">
+            <div class="lh"><span>名称</span><span>修改日期</span><span>类型</span><span>大小</span></div>
+            <div class="row picked"><span class="fi"><span class="ext">TXT</span>hello.txt</span><span>今天 07:11</span><span>文本文档</span><span>13 B</span></div>
+            <div class="row"><span class="fi"><span class="ext">FOLDER</span>报告</span><span>今天 03:06</span><span>文件夹</span><span>2.9 KB</span></div>
+            <div class="row"><span class="fi"><span class="ext">GZ</span>单个文件夹.tar.gz</span><span>今天 03:06</span><span>压缩文件</span><span>210 B</span></div>
+            <div class="row"><span class="fi"><span class="ext">ZIP</span>多个顶层项.zip</span><span>今天 03:06</span><span>压缩文件</span><span>910 B</span></div>
+            <div class="row"><span class="fi"><span class="ext">7Z</span>加密-密码pulse.7z</span><span>今天 03:06</span><span>压缩文件</span><span>302 B</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="scrim"></div>
+
+      <!-- 添加到压缩包 -->
+      <section class="dlg" id="dlgAdd" aria-label="添加到压缩包">
+        <div class="dt">添加到压缩包<span class="sp"></span><span class="x">✕</span></div>
+        <div class="db">
+          <div class="src"><span class="ic"><svg class="i" viewBox="0 0 16 16"><path d="M3 2.5h7l3 3v8H3z"/><path d="M10 2.5v3h3"/></svg></span>
+            <div><b>hello.txt 和另外 2 项</b><span>共 2.9 KB · 保存到 run3</span></div></div>
+          <div>
+            <div class="lbl">压缩包名称</div>
+            <div class="field focus"><input value="hello" aria-label="压缩包名称"><span class="badge" id="nameExt">.7z</span></div>
+          </div>
+          <div>
+            <div class="lbl">格式</div>
+            <div class="seg" id="fmtSeg"><button data-f="0" class="on">7z</button><button data-f="1">zip</button><button data-f="3">tar.gz</button><button data-f="4">tar.xz</button><button data-f="5">tar.bz2</button><button data-f="2">tar</button></div>
+            <div class="cap2" id="fmtDesc">压缩率最高，可加密文件名。需要 7-Zip 或 Pulse 打开。</div>
+          </div>
+          <div id="levelBlock">
+            <div class="lbl">压缩等级<em id="levelName">标准</em></div>
+            <div class="slider" aria-hidden="true"><div class="tr"></div><div class="fill" style="width:calc((100% - 16px)*.6)"></div>
+              <div class="tick" style="left:8px"></div><div class="tick" style="left:calc(8px + (100% - 16px)*.2)"></div><div class="tick" style="left:calc(8px + (100% - 16px)*.4)"></div><div class="tick" style="left:calc(8px + (100% - 16px)*.8)"></div><div class="tick" style="left:calc(100% - 10px)"></div>
+              <div class="th" style="left:calc(8px + (100% - 16px)*.6)"></div></div>
+            <div class="stops"><span>仅存储</span><span>最快</span><span>快速</span><span class="on">标准</span><span>较好</span><span>极限</span></div>
+          </div>
+          <div class="group" id="protect">
+            <div class="grow"><svg class="i" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>
+              <div class="t"><b>设置密码</b><span id="protDesc">留空则不加密</span></div><span class="sw" id="pwSwitch"></span></div>
+            <div class="gsub" id="pwFields" hidden>
+              <div class="two">
+                <div class="field focus"><input type="password" value="pulse2026" aria-label="密码"><span class="eye"><svg class="i" viewBox="0 0 16 16"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/></svg></span></div>
+                <div class="field"><input type="password" id="confirm" value="pulse2026" placeholder="再次输入密码" aria-label="再次输入密码"></div>
+              </div>
+              <div class="chk on" id="encNames"><i>✓</i>同时加密文件名（不输入密码看不到里面有什么）</div>
+              <div id="zipMethod" hidden style="display:flex;align-items:center;gap:12px"><span style="flex:1">加密方式</span><span class="sel">AES-256（推荐）<svg class="i" viewBox="0 0 12 12"><path d="M3 4.5l3 3 3-3"/></svg></span></div>
+              <div class="info err" id="mismatch" hidden><svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="M8 4.8v3.6M8 10.8v.2"/></svg>两次输入的密码不一致。</div>
+            </div>
+          </div>
+          <div>
+            <div class="adv" id="advToggle"><svg class="i" viewBox="0 0 16 16" id="advChevron"><path d="M6 4l4 4-4 4"/></svg>更多选项</div>
+            <div class="group" id="advBody" hidden style="margin-top:8px">
+              <div class="grow"><div class="t"><b>分卷大小</b><span>大文件拆成多个 .001、.002… 便于传输</span></div><span class="sel">不分卷<svg class="i" viewBox="0 0 12 12"><path d="M3 4.5l3 3 3-3"/></svg></span></div>
+              <div class="grow" id="solidRow"><div class="t"><b>固实压缩</b><span>体积更小，单独取出某个文件会稍慢</span></div><span class="sw on"></span></div>
+            </div>
+          </div>
+        </div>
+        <div class="df"><button class="btn pri">压缩</button><button class="btn">取消</button></div>
+      </section>
+
+      <!-- 输入密码 -->
+      <section class="dlg w440" id="dlgPw" hidden aria-label="需要密码">
+        <div class="dt">需要密码<span class="sp"></span><span class="x">✕</span></div>
+        <div class="db">
+          <div class="lockrow"><span class="lock"><svg class="i" viewBox="0 0 16 16" style="width:20px;height:20px"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg></span>
+            <div><b>加密-密码pulse.7z</b><p id="pwHint">这个压缩包已加密，输入密码后继续解压。</p></div></div>
+          <div class="info err" id="pwWrong" hidden><svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="M8 4.8v3.6M8 10.8v.2"/></svg>密码不正确，请重新输入。</div>
+          <div class="field focus"><input type="password" id="pwInput" placeholder="密码" aria-label="密码"><span class="eye"><svg class="i" viewBox="0 0 16 16"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/></svg></span></div>
+          <div class="cap2" style="margin-top:-6px">本次运行期间会记住，同一密码的其他压缩包自动解开。可在扩展设置里关闭。</div>
+        </div>
+        <div class="df"><button class="btn pri">解压</button><button class="btn">取消</button></div>
+      </section>
+
+      <!-- 校验值 -->
+      <section class="dlg w600" id="dlgHash" hidden aria-label="校验值">
+        <div class="dt">校验值<span class="sp"></span><span class="x">✕</span></div>
+        <div class="db">
+          <div class="src"><span class="ic"><svg class="i" viewBox="0 0 16 16"><path d="M3 2.5h7l3 3v8H3z"/><path d="M10 2.5v3h3"/></svg></span>
+            <div><b>hello.txt</b><span>13 字节</span></div></div>
+          <div class="hash">
+            <span class="k">CRC32</span><span class="v">8964df74</span><button class="btn icon sm" title="复制"><svg class="i" viewBox="0 0 16 16"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M3 10.5V3.5A1 1 0 0 1 4 2.5h6.5"/></svg></button>
+            <span class="k">SHA-1</span><span class="v">4d378e949b5303d66b58dff60b4d502da18dd345</span><button class="btn icon sm" title="复制"><svg class="i" viewBox="0 0 16 16"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M3 10.5V3.5A1 1 0 0 1 4 2.5h6.5"/></svg></button>
+            <span class="k">SHA-256</span><span class="v">fab17c4aadb81ab4413bbee16ce6eb2789ed98655a28ef47a5a2bda31b6d3c3b</span><button class="btn icon sm" title="复制"><svg class="i" viewBox="0 0 16 16"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M3 10.5V3.5A1 1 0 0 1 4 2.5h6.5"/></svg></button>
+          </div>
+          <div>
+            <div class="lbl">核对<em>粘贴网站公布的值，自动比对</em></div>
+            <div class="field"><input placeholder="粘贴 CRC32、SHA-1 或 SHA-256" id="verify" aria-label="核对"></div>
+            <div class="cap2 ok" id="verifyOk" hidden>✓ 与 SHA-256 一致</div>
+          </div>
+        </div>
+        <div class="df"><span class="toast" id="copied" hidden><svg class="i" viewBox="0 0 16 16" style="color:var(--accent-fg)"><path d="M3 8.5l3 3 7-7"/></svg>已复制 SHA-256</span><button class="btn pri">复制全部</button><button class="btn">关闭</button></div>
+      </section>
+    </div>
+
+    <!-- settings window -->
+    <div class="win" id="settings" hidden>
+      <div class="tb"><svg class="i" viewBox="0 0 16 16" style="color:var(--accent-fg)"><path d="M3 13V5l5-3 5 3v8"/></svg>Pulse<div class="sp"></div><div class="cap">—</div><div class="cap">▢</div><div class="cap">✕</div></div>
+      <div class="body">
+        <nav class="nav">
+          <div class="ns">查找设置</div>
+          <div class="ni">外观</div><div class="ni">文件列表</div><div class="ni">文件操作</div><div class="ni">搜索与索引</div><div class="ni">快速预览</div>
+          <div class="ni on">扩展商店</div><div class="ni">右键菜单</div><div class="ni">快捷键</div><div class="ni">关于与诊断</div>
+        </nav>
+        <div class="content">
+          <div class="crumb"><span>扩展商店 ›</span>7-Zip</div>
+          <div class="hero"><span class="ic"><svg class="i" viewBox="0 0 16 16" style="width:22px;height:22px"><path d="M2.5 4.5h11v9h-11z"/><path d="M2.5 4.5l1.5-2h8l1.5 2M7 4.5v3h2v-3"/></svg></span>
+            <div><b>7-Zip 压缩与解压</b><span>Pulse 官方 · 1.0.0 · 7-Zip 26.00 引擎，支持几十种格式</span></div>
+            <span class="saved"><svg class="i" viewBox="0 0 16 16"><path d="M3 8.5l3 3 7-7"/></svg>改动已自动保存</span></div>
+
+          <div class="secth">解压</div>
+          <div class="card">
+            <div class="crow"><svg class="i gl" viewBox="0 0 16 16"><path d="M8 2.5v8M4.5 7.5L8 11l3.5-3.5M3 13.5h10"/></svg>
+              <div class="t"><b>右键“解压”的方式</b><span>决定菜单里第一项叫什么、做什么</span></div>
+              <span class="menuprev" aria-label="菜单预览">右键菜单显示 <b id="menuName">智能解压</b></span></div>
+            <div class="csub">
+              <div class="radio on" data-mode="智能解压"><i></i><div><b>智能解压</b><span>只有一个文件夹或文件时直接放出来，否则放进同名文件夹</span></div></div>
+              <div class="radio" data-mode="解压到同名文件夹"><i></i><div><b>总是放进同名文件夹</b><span>菜单显示为“解压到同名文件夹”</span></div></div>
+              <div class="radio" data-mode="解压到此处"><i></i><div><b>直接解压到当前位置</b><span>菜单显示为“解压到此处”</span></div></div>
+            </div>
+            <div class="crow"><svg class="i gl" viewBox="0 0 16 16"><path d="M1.5 4.5h5l1.5 1.5h6.5v7h-13z"/></svg>
+              <div class="t"><b>解压到</b><span id="locDesc">压缩包所在的文件夹</span></div></div>
+            <div class="csub">
+              <div class="radio on" id="locBeside"><i></i><div><b>压缩包所在文件夹</b></div></div>
+              <div class="radio" id="locFixed"><i></i><div><b>固定文件夹</b><span>例如统一放到“下载\已解压”</span></div></div>
+              <div class="pathrow" id="pathRow" hidden><div class="field"><input value="D:\已解压" aria-label="固定文件夹"></div><button class="btn">浏览…</button></div>
+            </div>
+          </div>
+
+          <div class="secth">压缩</div>
+          <div class="card">
+            <div class="crow"><svg class="i gl" viewBox="0 0 16 16"><path d="M2.5 4.5h11v9h-11zM7 4.5v3h2v-3"/></svg>
+              <div class="t"><b>快速压缩格式</b><span>右键“快速压缩为 7z”直接生成，不弹窗</span></div>
+              <div class="seg" style="width:300px"><button class="on">7z</button><button>zip</button><button>tar.gz</button><button>tar.xz</button></div></div>
+            <div class="crow"><svg class="i gl" viewBox="0 0 16 16"><path d="M2 8h12M5 5v6M11 5v6"/></svg>
+              <div class="t"><b>快速压缩等级</b><span>标准：速度和体积的平衡</span></div>
+              <div style="width:300px"><div class="slider"><div class="tr"></div><div class="fill" style="width:calc((100% - 16px)*.6)"></div><div class="th" style="left:calc(8px + (100% - 16px)*.6)"></div></div>
+              <div class="stops"><span>仅存储</span><span class="on">标准</span><span>极限</span></div></div></div>
+          </div>
+
+          <div class="secth">密码</div>
+          <div class="card">
+            <div class="crow"><svg class="i gl" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>
+              <div class="t"><b>记住本次输入的密码</b><span>解压时先自动尝试，只保存在内存中，退出 Pulse 即清除</span></div><span class="sw on"></span></div>
+          </div>
+          <div class="foot"><span>RAR 只能解压：7-Zip 不提供 RAR 压缩（RAR 编码器为 WinRAR 专有）。</span><span>NOTICE · LGPL-2.1 + unRAR 限制</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div class="note"><b>添加到压缩包</b>名称只填主名，扩展名做成尾部标签随格式变；格式用分段按钮一眼看全，下方一句话说明差异；等级改成 6 档滑块；密码收进“设置密码”开关，不加密时整组只占一行；分卷、固实放进“更多选项”。</div>
+    <div class="note"><b>输入密码</b>锁形图标 + 文件名加粗；错误时在输入框上方显示红色提示条并清空选中；说明会话记忆，避免用户疑惑第二次为何不再问。</div>
+    <div class="note"><b>校验值</b>每个值单独一行、等宽字体、行尾复制按钮；新增“核对”框，粘贴官网公布的值自动比对（不分大小写），这是校验值最常见的用途。</div>
+    <div class="note"><b>扩展设置</b>改为 Pulse 设置页同款卡片行：左图标、标题与说明，右侧控件；解压方式用带说明的单选，并实时预览菜单第一项名称；去掉页内嵌套滚动和“选择增强包”下拉（从商店卡片直接进入）。</div>
+    <div class="note"><b>为什么没有 RAR</b>7-Zip 只能解压 RAR/RAR5，不能创建；RAR 编码器是 WinRAR 专有且许可禁止实现。格式下拉的圆点是宿主把选项画成了单选项，已修复为只显示对勾。</div>
+    <div class="note"><b>实现边界</b>需宿主小改：分组卡片行布局、文本框尾部标签与显示密码按钮、步进滑块档位文字；其余为扩展侧重排。扩展设置页“菜单预览”可用文本节点实现。</div>
+  </div>
+</div>
+<script>
+(() => {
+  const q = new URLSearchParams(location.search);
+  const state = { view: q.get('view') || 'add', fmt: q.get('fmt') || '0', pw: q.get('pw') || '0', adv: q.get('adv') || '0',
+                  tryN: q.get('try') || '0', copied: q.get('copied') || '0', loc: q.get('loc') || '0', theme: q.get('theme') || 'light' };
+  const $ = (s) => document.querySelector(s);
+  const fmts = { '0': ['.7z', '压缩率最高，可加密文件名。需要 7-Zip 或 Pulse 打开。', true, true],
+                 '1': ['.zip', '兼容性最好，Windows、macOS 和手机都能直接打开。', true, false],
+                 '2': ['.tar', '只打包不压缩，保留 Linux 权限信息。', false, false],
+                 '3': ['.tar.gz', 'Linux 和 macOS 上最常见，不支持加密。', false, false],
+                 '4': ['.tar.xz', '比 tar.gz 更小，压缩较慢，不支持加密。', false, false],
+                 '5': ['.tar.bz2', '较老的 Linux 发行格式，不支持加密。', false, false] };
+  function press(sel, attr, val) { document.querySelectorAll(sel + ' button').forEach(b => b.setAttribute('aria-pressed', b.dataset[attr] === val)); }
+  function render() {
+    document.documentElement.dataset.theme = state.theme;
+    press('.controls', 'theme', state.theme);
+    document.querySelectorAll('#views button').forEach(b => b.setAttribute('aria-pressed', b.dataset.view === state.view));
+    $('#explorer').hidden = state.view === 'settings';
+    $('#settings').hidden = state.view !== 'settings';
+    $('#dlgAdd').hidden = state.view !== 'add'; $('#dlgPw').hidden = state.view !== 'password'; $('#dlgHash').hidden = state.view !== 'hash';
+    $('#addStates').hidden = state.view !== 'add'; $('#pwStates').hidden = state.view !== 'password';
+    $('#hashStates').hidden = state.view !== 'hash'; $('#setStates').hidden = state.view !== 'settings';
+    // add dialog
+    const f = fmts[state.fmt];
+    press('#addStates', 'fmt', state.fmt); press('#addStates', 'pw', state.pw); press('#addStates', 'adv', state.adv);
+    document.querySelectorAll('#fmtSeg button').forEach(b => b.classList.toggle('on', b.dataset.f === state.fmt));
+    $('#nameExt').textContent = f[0]; $('#fmtDesc').textContent = f[1];
+    $('#levelBlock').style.opacity = state.fmt === '2' ? .45 : 1;
+    $('#levelName').textContent = state.fmt === '2' ? 'tar 不压缩' : '标准';
+    const encryptable = f[2];
+    $('#protect').style.display = encryptable ? '' : 'none';
+    const on = encryptable && state.pw !== '0';
+    $('#pwSwitch').classList.toggle('on', on); $('#pwFields').hidden = !on;
+    $('#protDesc').textContent = on ? (state.fmt === '0' ? '7z 使用 AES-256 加密' : '选择加密方式') : '留空则不加密';
+    $('#encNames').hidden = !f[3]; $('#zipMethod').hidden = state.fmt !== '1';
+    $('#mismatch').hidden = state.pw !== '2'; $('#confirm').value = state.pw === '2' ? 'pulse2025' : 'pulse2026';
+    const adv = state.adv === '1';
+    $('#advBody').hidden = !adv; $('#advChevron').style.transform = adv ? 'rotate(90deg)' : '';
+    $('#solidRow').hidden = state.fmt !== '0';
+    // password dialog
+    press('#pwStates', 'try', state.tryN);
+    $('#pwWrong').hidden = state.tryN !== '1';
+    $('#pwInput').value = state.tryN === '1' ? 'wrong' : '';
+    // hash
+    press('#hashStates', 'copied', state.copied);
+    $('#copied').hidden = state.copied !== '1';
+    $('#verify').value = state.copied === '1' ? 'FAB17C4AADB81AB4413BBEE16CE6EB2789ED98655A28EF47A5A2BDA31B6D3C3B' : '';
+    $('#verifyOk').hidden = state.copied !== '1';
+    // settings
+    press('#setStates', 'loc', state.loc);
+    $('#locBeside').classList.toggle('on', state.loc === '0'); $('#locFixed').classList.toggle('on', state.loc === '1');
+    $('#pathRow').hidden = state.loc !== '1'; $('#locDesc').textContent = state.loc === '1' ? 'D:\\已解压' : '压缩包所在的文件夹';
+  }
+  document.querySelector('.controls').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    const d = b.dataset;
+    if (d.view) state.view = d.view; if (d.theme) state.theme = d.theme; if (d.fmt) state.fmt = d.fmt;
+    if (d.pw) state.pw = d.pw; if (d.adv) state.adv = d.adv; if (d.try) state.tryN = d.try;
+    if (d.copied) state.copied = d.copied; if (d.loc) state.loc = d.loc;
+    render();
+  });
+  $('#fmtSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { state.fmt = b.dataset.f; render(); } });
+  $('#pwSwitch').addEventListener('click', () => { state.pw = state.pw === '0' ? '1' : '0'; render(); });
+  $('#advToggle').addEventListener('click', () => { state.adv = state.adv === '1' ? '0' : '1'; render(); });
+  $('#locBeside').addEventListener('click', () => { state.loc = '0'; render(); });
+  $('#locFixed').addEventListener('click', () => { state.loc = '1'; render(); });
+  document.querySelectorAll('[data-mode]').forEach(r => r.addEventListener('click', () => {
+    document.querySelectorAll('[data-mode]').forEach(x => x.classList.toggle('on', x === r));
+    $('#menuName').textContent = r.dataset.mode;
+  }));
+  render();
+})();
+</script>
+</body>
+</html>
+

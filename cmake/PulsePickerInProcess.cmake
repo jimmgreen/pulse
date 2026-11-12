@@ -1,14 +1,21 @@
 # Controlled in-process proof only; include after shared Pulse libraries/functions.
+option(PULSE_PICKER_JUMP_UI_TEST_HOOKS "Enable owned picker jump integration probes" OFF)
+if(PULSE_PICKER_JUMP_UI_TEST_HOOKS)
+    set_property(SOURCE src/ui/folder_picker_dialog.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+        PULSE_PICKER_JUMP_UI_TEST_HOOKS=1 PULSE_WITH_TEST_HOOKS=1)
+endif()
 # Explicit renderer dependency closure; never includes app_main or app source glob.
 set(PULSE_PICKER_INPROCESS_SOURCES
     src/picker_inprocess/picker_ui_bootstrap.cpp
     src/picker_inprocess/picker_ui_bootstrap_v2.cpp
+    src/picker_inprocess/picker_jump_context.cpp
+    src/app/jump_history.cpp src/app/jump_match.cpp src/index/index_client.cpp src/index/index_config.cpp
     src/app/new_item_name.cpp src/app/create_rename_intent.cpp
     src/app/picker_appearance.cpp
     src/app/frame_pump.cpp
     src/picker_inprocess/picker_ui.rc
     src/ui/folder_picker_dialog.cpp src/common/picker_owner_guard.cpp
-    src/common/picker_layout_settings.cpp
+    src/common/picker_layout_settings.cpp src/common/menu_icon.cpp
     src/ui/folder_picker_loader.cpp
     src/ui/folder_picker_model.cpp
     src/ui/details_column_menu_model.cpp
@@ -168,7 +175,7 @@ set_property(SOURCE src/picker_inprocess/picker_ui.rc APPEND PROPERTY OBJECT_DEP
 set_target_properties(pulse_picker_ui_proof PROPERTIES OUTPUT_NAME PulsePickerUiProof)
 target_compile_definitions(pulse_picker_ui_proof PRIVATE MD4C_USE_UTF16)
 target_link_libraries(pulse_picker_ui_proof PRIVATE
-    pulse_localization pulse_runtime_log pulse_fs_watch pulse_text pulse_sqlite_core pulse_virtual_disk
+    pulse_localization pulse_runtime_log pulse_fs_watch pulse_text pulse_sqlite_core pulse_virtual_disk pulse_dialog_bundle
     d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 oleaut32 shell32 uuid
     comctl32 advapi32 shlwapi version windowscodecs gdi32 gdiplus uxtheme
     netapi32 mpr bcrypt propsys cfgmgr32 winhttp crypt32 secur32
@@ -228,3 +235,8 @@ target_link_libraries(pulse_picker_low_integrity_owner_test PRIVATE advapi32 ole
 
 add_executable(pulse_picker_native_options_ui_test EXCLUDE_FROM_ALL src/bench/picker_native_options_ui_test.cpp)
 target_link_libraries(pulse_picker_native_options_ui_test PRIVATE ole32 user32)
+add_executable(pulse_picker_jump_context_test EXCLUDE_FROM_ALL
+    src/bench/picker_jump_context_test.cpp src/bench/localization_test.rc src/picker_inprocess/picker_jump_context.cpp src/common/menu_icon.cpp
+    src/app/jump_history.cpp src/app/jump_match.cpp src/index/filename_pinyin.cpp
+    src/index/index_client.cpp src/index/index_config.cpp src/index/index_query.cpp src/index/search_kinds.cpp src/ui/folder_picker_model.cpp)
+target_link_libraries(pulse_picker_jump_context_test PRIVATE user32 shell32 shlwapi ole32 oleaut32 uuid advapi32 version gdi32 pulse_dialog_bundle pulse_localization)

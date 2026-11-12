@@ -1,3 +1,4 @@
+#include "../ui/settings_dialog_records.h"
 #include "app_internal.h"
 #include "../common/app_runtime_paths.h"
 #include "../ui/ui_renderer.h"
@@ -25,7 +26,33 @@ int RunDialogManagementUiTest(pulse::AppState& s,const wchar_t* output) {
     ui::fluent::Painter painter(&s.compositor);
     auto fixture=[&](int variant) {
         auto vm=BuildVm(s,false);vm.settings_open=true;vm.settings_page=11;vm.settings_scroll=0;
-        vm.settings_dialog_available=true;vm.settings_dialog_busy=variant==1;
+        vm.settings_dialog_available=true;vm.settings_dialog_busy=variant==1 || variant==7;
+        vm.settings_dialog_records.clear();
+        vm.settings_dialog_history_note=l10n::Get(variant>=6 ? I::DialogHistoryNote : I::DialogHistoryEmpty);
+        if(variant>=6) {
+            ui::WindowViewModel::DialogTakeoverRow record;
+            record.application=L"Example application with a very long executable name.exe";
+            record.file=L"example_application_with_a_very_long_executable_name.exe";
+            record.attention=variant!=9;
+            record.status=l10n::Get(variant==9 ? I::DialogRecordStatusSuccess : I::DialogRecordStatusNative);
+            record.tone=variant==9 ? 1 : 2;
+            record.meta=l10n::Get(I::Save)+L" · "+l10n::Get(I::DialogRecordCountOne);
+            record.last_event=133760000000000000ull;
+            if(variant!=9) record.detail=l10n::Get(I::DialogHistoryMismatch)+L"\n"+l10n::Get(I::DialogHistoryRestart);
+            else record.later=l10n::Get(I::DialogHistoryLaterSuccess);
+            vm.settings_dialog_records.push_back(std::move(record));
+            if(variant==8) vm.settings_dialog_history_note+=L"\n"+std::wstring(l10n::Get(I::DialogHistoryUnattributed))+L"\n"+l10n::Get(I::DialogHistoryStorageError);
+        }
+        if(variant==10) {
+            vm.settings_dialog_history_note=l10n::Get(I::DialogRestartNote)+L"\n"+l10n::Get(I::DialogRestartPartial);
+            ui::WindowViewModel::DialogTakeoverRow restart;
+            restart.application=restart.file=L"Old version application with a long name.exe";
+            restart.detail=l10n::Get(I::DialogRestartRequired);restart.attention=true;
+            restart.meta=l10n::Get(I::DialogRecordRunningOld);
+            restart.status=l10n::Get(I::DialogRecordStatusRestart);restart.tone=2;restart.group=1;
+            for(auto& row:vm.settings_dialog_records) row.group=2;
+            vm.settings_dialog_records.insert(vm.settings_dialog_records.begin(),std::move(restart));
+        }
         vm.settings_dialog_enabled=variant==2;vm.settings_dialog_conflict=variant==3;
         vm.settings_dialog_failed=variant==4 || variant==5;vm.settings_dialog_scope_expanded=false;
         vm.settings_dialog_status=l10n::Get(variant==1 ? I::StartupDialogsChecking : variant==2 ? I::StartupDialogsOn : variant==3 ? I::StartupDialogsConflict : variant==4 ? I::StartupDialogsMissing : variant==5 ? I::StartupDialogsPathMismatch : I::StartupDialogsOff);
@@ -38,17 +65,17 @@ int RunDialogManagementUiTest(pulse::AppState& s,const wchar_t* output) {
         l10n::SetLanguage(locale);painter.InvalidateTypography();
         for(float scale:{1.0f,1.5f,2.0f}) {
             s.compositor.RecreateTextFormats(scale);s.renderer.SetScale(scale);painter.SetScale(scale);
-            for(float width:{620.0f,1280.0f}) for(int variant=0;variant<6;++variant) {
+            for(float width:{620.0f,1280.0f}) for(int variant=0;variant<11;++variant) {
                 auto vm=fixture(variant);const auto window=D2D1::RectF(0,0,width*scale,1100*scale);
                 const auto l=ui::MakeSettingsLayout(vm,window,scale,s.renderer.TitleBarHeight(),28*scale,&painter);
-                const D2D1_RECT_F controls[]={l.dialog_toggle_row,l.dialog_retry_button,l.dialog_export_button,l.dialog_scope_button,l.startup_restore_button};
-                const int actions[]={10,11,12,13,15};
-                for(int i=0;i<5;++i) {
+                const D2D1_RECT_F controls[]={l.dialog_toggle_row,l.dialog_retry_button,l.dialog_export_button,l.dialog_scope_button,l.startup_restore_button,l.dialog_refresh_button};
+                const int actions[]={10,11,12,13,15,4};
+                for(int i=0;i<6;++i) {
                     const auto r=controls[i];if(r.bottom<=r.top) continue;
                     bounds&=r.right>r.left && r.left>=l.content.left && r.right<=l.content.right;
                     auto shown=vm;shown.settings_scroll=r.top-l.content.top-20*scale;
                     const auto hit=s.renderer.HitTest(shown,window,(r.left+r.right)/2,(r.top+r.bottom)/2-shown.settings_scroll);
-                    hits&=(hit.region==H::SettingsDialogManagement && hit.index==actions[i])==(i==3 || !vm.settings_dialog_busy);
+                    hits&=(hit.region==H::SettingsDialogManagement && hit.index==actions[i])==(i==3 || (!vm.settings_dialog_busy));
                 }
                 for(int j=0;j<2;++j) {
                     const auto r=j ? l.dialog_jump_auto_row : l.dialog_jump_row;
@@ -75,8 +102,18 @@ int RunDialogManagementUiTest(pulse::AppState& s,const wchar_t* output) {
                     }
                 }
                 bounds&=(l.dialog_scope_button.bottom>l.dialog_scope_button.top)==vm.settings_dialog_enabled;
-                bounds&=(l.dialog_application_row.bottom>l.dialog_application_row.top)==(vm.settings_dialog_enabled || vm.settings_dialog_conflict || vm.settings_dialog_failed);
-                old_hidden&=l.dialog_bundle_button.bottom==0 && l.dialog_launch_button.bottom==0 && l.dialog_disable_buttons.empty();
+                bounds&=l.dialog_application_row.bottom>l.dialog_application_row.top;
+                old_hidden&=l.dialog_bundle_button.bottom==0 && l.dialog_disable_buttons.empty() &&
+                    l.dialog_application_button.bottom==0 && l.dialog_launch_button.bottom==0 && l.dialog_admin_button.bottom==0;
+                bounds&=l.dialog_refresh_button.bottom>l.dialog_refresh_button.top && l.dialog_history_rows.size()==vm.settings_dialog_records.size();
+                float previous=l.dialog_history_note.bottom;
+                for(size_t i=0;i<l.dialog_history_rows.size();++i) {
+                    const auto row=l.dialog_history_rows[i];const auto& record=vm.settings_dialog_records[i];
+                    const float needed=ui::dialog_records::RowHeight(painter,record,row.right-row.left,scale);
+                    wrapped&=needed<=row.bottom-row.top+0.5f;
+                    bounds&=row.top>=previous && row.left>=l.content.left && row.right<=l.content.right;
+                    previous=row.bottom;
+                }
                 if(variant==0) for(int mode=0;mode<5;++mode) {
                     auto quick=vm;
                     quick.settings_integration_restore_busy=false;
@@ -101,30 +138,30 @@ int RunDialogManagementUiTest(pulse::AppState& s,const wchar_t* output) {
     check(bounds,"formal controls fit at 620/1280 DIP and 100/150/200 percent");
     check(hits,"formal action hit regions and busy-state disabling match rendering");
     check(wrapped,"scope explanation fits in all three languages");
-    check(old_hidden,"bundle/application/launch/session testing controls removed");
+    check(old_hidden,"manual permission and architecture launch controls stay hidden; application history is the daily entry");
     check(TestDialogManagementBackgroundVm(s),"background dialog refresh preserves visible state and does not enter busy layout");
     check(shortcut_bounds,"integration enable shortcuts stay within wide/narrow footer bounds without overlapping text");
     check(shortcut_hits,"integration enable shortcuts hit keep-running 10 then launch-at-sign-in 11");
     check(shortcut_hidden,"integration shortcuts hide when both settings are enabled or runtime integration is disabled");
     const auto base=std::filesystem::path(output).parent_path();
-    for(bool dark:{false,true}) for(bool narrow:{false,true}) for(int section=0;section<7;++section) {
+    for(bool dark:{false,true}) for(bool narrow:{false,true}) for(int section=0;section<12;++section) {
         const float scale=narrow ? 1.5f : 1.0f;
         l10n::SetLanguage(narrow ? L"en-US" : L"zh-CN");painter.InvalidateTypography();
         s.compositor.RecreateTextFormats(scale);s.renderer.SetScale(scale);painter.SetScale(scale);
         const int width=static_cast<int>((narrow ? 620 : 1280)*scale),height=static_cast<int>(1000*scale);
         s.compositor.Resize(width,height);
-        auto vm=fixture(section==6 ? 5 : section==1 ? 3 : section==2 ? 0 : 2);vm.settings_dialog_scope_expanded=section==4;vm.dark=dark;vm.window_effect=ui::WindowEffect::None;
+        auto vm=fixture(section>=7 ? section-1 : section==6 ? 5 : section==1 ? 3 : section==2 ? 0 : 2);vm.settings_dialog_scope_expanded=section==4;vm.dark=dark;vm.window_effect=ui::WindowEffect::None;
         vm.background_image.clear();vm.backdrop_enabled=false;vm.wallpaper_look=0;vm.wallpaper_blur=0;
         if(section==0) {vm.settings_integration_experimental=true;vm.settings_keep_running=false;}
         const auto window=D2D1::RectF(0,0,static_cast<float>(width),static_cast<float>(height));
         const auto l=ui::MakeSettingsLayout(vm,window,scale,s.renderer.TitleBarHeight(),28*scale,&painter);
-        vm.settings_scroll=section==5 ? l.dialog_jump_row.top-l.content.top-12*scale : section==0 ? 0 : (section==1 || section==4 || section==6 ? l.dialog_management_section.top : section==2 ? l.startup_dialog_info.heading.top : l.section[2].top)-l.content.top-12*scale;
+        vm.settings_scroll=section>=7 ? l.dialog_history_heading.top-l.content.top-12*scale : section==5 ? l.dialog_jump_row.top-l.content.top-12*scale : section==0 ? 0 : (section==1 || section==4 || section==6 ? l.dialog_management_section.top : section==2 ? l.startup_dialog_info.heading.top : l.section[2].top)-l.content.top-12*scale;
         auto* dc=s.compositor.Dc();dc->BeginDraw();s.renderer.Render(vm,window,ui::MakeTheme(dark,s.accentColor));
         check(dc->EndDraw()==S_OK,"startup integration fixture rendered");
         const auto name=std::wstring(L"startup-")+(dark ? L"dark-" : L"light-")+(narrow ? L"narrow-" : L"wide-")+std::to_wstring(section)+L".png";
         check(s.compositor.SaveSnapshot((base/name).c_str()),"screenshot captured for visual review");
     }
-    for(int index:{10,11,12,15}) {H action{};action.region=H::SettingsDialogManagement;action.index=index;if(s.isolatedTest) HandleSettingsControl(s,action);}
+    for(int index:{1,2,3,4,10,11,12,15}) {H action{};action.region=H::SettingsDialogManagement;action.index=index;if(s.isolatedTest) HandleSettingsControl(s,action);}
     check(s.isolatedTest && s.core.dialogManagement==original_management,"isolated mutating actions cannot initialize controllers or touch configuration");
     l10n::SetLanguage(l10n::LanguageId(language));s.compositor.Resize(original_width,original_height);
     s.compositor.RecreateTextFormats(original_scale);s.renderer.SetScale(original_scale);

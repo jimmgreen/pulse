@@ -1,5 +1,6 @@
 ﻿#include <cstring>
 bool RunThumbnailCacheTests();
+bool RunThumbnailRenameRegression();
 bool RunBoundedImageRetryRegression();
 bool RunThumbnailRetryRegression();
 bool RunThumbnailDownloadRetryRegression();
@@ -12,6 +13,7 @@ bool RunThumbnailIdleRegression(bool baseline);
 bool RunThumbnailUploadRegression();
 bool RunPsdProgressiveRegression(const char* fixture);
 int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--rename") == 0) return RunThumbnailRenameRegression() ? 0 : 1;
     if (argc == 2 && std::strcmp(argv[1], "--bounded-image-retry") == 0) return RunBoundedImageRetryRegression() ? 0 : 1;
     if (argc == 2 && std::strcmp(argv[1], "--editor-save") == 0) return RunThumbnailEditorSaveRegression() ? 0 : 1;
     if (argc == 2 && std::strcmp(argv[1], "--download-retry") == 0) return RunThumbnailDownloadRetryRegression() ? 0 : 1;

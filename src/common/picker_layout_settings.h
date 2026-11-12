@@ -7,7 +7,7 @@ namespace pulse::picker_layout {
 struct State {
     int view_mode = 0, sort = 0;
     bool descending = false, maximized = false;
-    float sidebar_width = 196;
+    float sidebar_width = 208;
     float icon_dip = 0;
     unsigned collapsed_mask = 0;
     std::array<float, 5> column_widths{};

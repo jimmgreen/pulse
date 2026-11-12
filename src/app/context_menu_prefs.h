@@ -7,11 +7,21 @@
 #pragma once
 #include "../ipc/ctx_menu_util.h"
 #include "builtin_menu_items.h"
+#include <map>
+#include <set>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
 namespace pulse::app {
+
+enum class ExtensionMenuPlacement : uint8_t {
+    Default = 0,
+    Flat = 1,
+    Submenu = 2,
+    Hidden = 3,
+};
 
 struct SeenMenuItem {
     std::wstring key;
@@ -58,8 +68,15 @@ struct ContextMenuPrefs {
     uint64_t builtin_hidden = 0;
     // Their order per BuiltinMenuSurface; empty = table order.
     BuiltinMenuOrder builtin_order[static_cast<size_t>(BuiltinMenuSurface::Count)];
+    // Native extension context-menu overrides (UTF-8 package_id / "native:<pkg>:<cmd>").
+    std::map<std::string, ExtensionMenuPlacement> extension_placement;
+    std::set<std::string> extension_hidden_commands;
 
     void ResetToDefaults();
+    ExtensionMenuPlacement PlacementForExtension(std::string_view package_id) const;
+    void SetExtensionPlacement(std::string_view package_id, ExtensionMenuPlacement placement);
+    bool ExtensionCommandVisible(std::string_view identity) const;
+    void SetExtensionCommandVisible(std::string_view identity, bool on);
     // Re-keys the seen catalog through CatalogKey and carries the per-item
     // overrides onto the new keys; run whenever the catalog is loaded.
     void MigrateSeenKeys();

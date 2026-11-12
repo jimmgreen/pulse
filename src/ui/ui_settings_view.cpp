@@ -2,6 +2,7 @@
 #include "../common/windows_compat.h"
 #include "ui_renderer.h"
 #include "ui_renderer_internal.h"
+#include "store_icons.h"
 #include "../common/localization.h"
 #include "tab_shape.h"
 #include "bloom_accent_picker.h"
@@ -302,20 +303,32 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         : vm.settings_page == kSettingsPageAssistant ? asst_text::Title() : l10n::Get(page_title_id);
     ComPtr<IDWriteTextLayout> title_layout;
     compositor_->DwriteFactory()->CreateTextLayout(title.c_str(), static_cast<UINT32>(title.size()),
-        compositor_->HeaderFormat(), lay.content.right-lay.content.left-pad*2, 40*scale_, &title_layout);
-    if (title_layout.get()) {
+        compositor_->HeaderFormat(), lay.page_heading.right-lay.page_heading.left, 40*scale_, &title_layout);
+    if (title_layout.get() && !lay.sz.on) {
         title_layout->SetFontSize(26*scale_, {0,static_cast<UINT32>(title.size())});
         title_layout->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, {0,static_cast<UINT32>(title.size())});
-        compositor_->DrawTextLayout(D2D1::Point2F(lay.content.left+pad,origin+pad),title_layout.get(),brText_.get());
+        compositor_->DrawTextLayout(D2D1::Point2F(lay.page_heading.left,lay.page_heading.top),title_layout.get(),brText_.get());
     }
-    if (vm.settings_page == 5 || vm.settings_page == 8 || vm.settings_page == kSettingsPageAi ||
-        vm.settings_page == kSettingsPageAssistant || vm.settings_page == kSettingsPageNativeExtensions)
+    if (!lay.sz.on && (vm.settings_page == 5 || vm.settings_page == 8 || vm.settings_page == kSettingsPageAi ||
+        vm.settings_page == kSettingsPageAssistant || vm.settings_page == kSettingsPageNativeExtensions))
         painter_.DrawWrappedCaption(vm.settings_page == kSettingsPageNativeExtensions ? l10n::Get(l10n::StringId::NativeExtensionSettingsIntro).c_str()
                                     : vm.settings_page == kSettingsPageAssistant ? asst_text::Intro().c_str()
                                     : vm.settings_page == kSettingsPageAi ? ai_text::Intro()
                                     : vm.settings_page == 8 ? (vm.settings_store_browse ? l10n::Get(l10n::StringId::StoreIntro).c_str() : vm.settings_store_installed ? l10n::Get(l10n::StringId::StoreInstalledIntro).c_str() : pack_text::PacksIntro()) : pack_text::Intro(),
-            D2D1::Point2F(lay.content.left+pad, origin+60*scale_),
+            D2D1::Point2F(lay.content.left+pad, origin+(vm.settings_page == kSettingsPageNativeExtensions ? 88 : 60)*scale_),
             lay.content.right-lay.content.left-2*pad, theme.text_secondary);
+    if (vm.settings_page == kSettingsPageNativeExtensions && lay.native_store_crumb.right > lay.native_store_crumb.left) {
+        // Back to the store: a chevron and the store's name, in the accent, with a hover plate.
+        const auto crumb = lay.native_store_crumb;
+        if (IsHovered(vm, HitTestResult::SettingsPackAction, static_cast<int>(PackAction::StoreBrowse))) {
+            MakeBrush(dc, theme.fill_hover, brFillHover_);
+            FillRoundedRect(dc, brFillHover_.get(), crumb.left, crumb.top, crumb.right - crumb.left, crumb.bottom - crumb.top, 5*scale_);
+        }
+        const D2D1_COLOR_F link = vm.dark ? MixColor(theme.accent, HexColor(0xFFFFFF), 0.3f) : theme.accent;
+        DrawStoreIcon(dc, StoreIcon::ChevronLeft, D2D1::RectF(crumb.left + 4*scale_, crumb.top + 6*scale_, crumb.left + 18*scale_, crumb.bottom - 6*scale_), link);
+        painter_.DrawText(l10n::Get(l10n::StringId::StoreTitle), D2D1::RectF(crumb.left + 22*scale_, crumb.top, crumb.right, crumb.bottom),
+                          compositor_->TextFormat(), link);
+    }
     if ((IsGeneralSettingsPage(vm.settings_page) && vm.settings_page != 11) || vm.settings_page == 1)
         painter_.DrawText(l10n::Get(vm.settings_page == 0 ? l10n::StringId::SettingsAppearanceIntro
             : vm.settings_page == 9 ? l10n::StringId::SettingsFileListIntro

@@ -4,6 +4,8 @@
 #pragma once
 #include <list>
 #include "ui_renderer.h"
+#include "store_icons.h"
+#include "settings_dialog_records.h"
 #include "layer_alphas.h"
 #include "empty_state_layout.h"
 #include "bloom_accent_picker.h"
@@ -482,8 +484,9 @@ void ClearTextWidthCache() {
             Item,
             Drive,
             Tag,
-            // Rail only: a section's own icon row (always present, so the icon
-            // never disappears and the section can be folded from it).
+            // Rail only: a section's own row (always present, so the section
+            // can be folded from it). sub 0 = the short title row, sub 1 = the
+            // icon row that stands in for a folded section's rows.
             Rail,
             // Rail only: "+N" chip standing in for section rows that do not fit
             // (batch = how many rows it replaces). Drawn, never hit.
@@ -754,19 +757,38 @@ void ClearTextWidthCache() {
                 if (group.items.empty() && group.add_action == SidebarAddAction::None) continue;
                 // Header-less sections (starred root, OneDrive accounts) are
                 // their own rows and cannot fold; every other section gets a
-                // permanent rail row that folds and unfolds it, so the section
-                // icon never disappears.
+                // short title row (shorter than an icon row) that folds and
+                // unfolds it, so the section boundaries read at a glance. A
+                // folded section adds one icon row standing in for its rows.
                 if (!group.header.empty()) {
-                    if (y + rowH > sb.bottom - trayH) break;
+                    const float headH = 22.0f * scale;
+                    const float gap = out.empty() ? 0.0f : 4.0f * scale;
+                    if (y + gap + headH > sb.bottom - trayH) break;
+                    y += gap;
                     SidebarSlot slot;
                     slot.kind = SidebarSlot::Rail;
-                    slot.rc = D2D1::RectF(4.0f * scale, y, width - 4.0f * scale, y + rowH);
+                    slot.rc = D2D1::RectF(4.0f * scale, y, width - 4.0f * scale, y + headH);
                     slot.group = g;
                     slot.item = -1;
+                    slot.sub = 0;
                     slot.run = run++;
                     out.push_back(slot);
-                    y += rowH;
-                    if (group.collapsed) continue;
+                    y += headH;
+                    if (group.collapsed) {
+                        bool tag_section = false;
+                        for (const auto& it : group.items) {
+                            if (it.is_tag) { tag_section = true; break; }
+                        }
+                        const float foldH = tag_section ? 32.0f * scale : rowH;
+                        if (y + foldH > sb.bottom - trayH) break;
+                        SidebarSlot fold = slot;
+                        fold.sub = 1;
+                        fold.rc = D2D1::RectF(4.0f * scale, y, width - 4.0f * scale, y + foldH);
+                        fold.run = run++;
+                        out.push_back(fold);
+                        y += foldH;
+                        continue;
+                    }
                 }
                 for (int i = 0; i < static_cast<int>(group.items.size()); ++i) {
                     if (group.items[i].starred_child) continue;
@@ -2686,9 +2708,12 @@ struct SettingsLayout {
     D2D1_RECT_F dialog_toggle_row{}, dialog_scope_button{}, dialog_export_button{}, dialog_retry_button{};
     D2D1_RECT_F dialog_management_section{}, dialog_management_intro{}, dialog_management_status{};
     D2D1_RECT_F dialog_bundle_row{}, dialog_application_row{}, dialog_actions_row{}, dialog_empty_row{};
+    D2D1_RECT_F dialog_managed_application_row{}, dialog_selected_application_row{}, dialog_managed_launch_row{}, dialog_managed_admin_row{};
     D2D1_RECT_F dialog_auto_enable{}, dialog_auto_disable{};
-    D2D1_RECT_F dialog_bundle_button{}, dialog_application_button{}, dialog_launch_button{}, dialog_refresh_button{};
-    std::vector<D2D1_RECT_F> dialog_session_rows, dialog_disable_buttons;
+    D2D1_RECT_F dialog_bundle_button{}, dialog_application_button{}, dialog_launch_button{}, dialog_admin_button{}, dialog_refresh_button{};
+    std::vector<D2D1_RECT_F> dialog_session_rows, dialog_disable_buttons, dialog_history_rows;
+    std::vector<std::pair<D2D1_RECT_F, int>> dialog_history_groups;  // caption row, DialogTakeoverRow::group
+    D2D1_RECT_F dialog_history_heading{}, dialog_history_note{};
     D2D1_RECT_F integration_card{}, integration_status{}, integration_summary{}, integration_hint{};
     D2D1_RECT_F integration_retry{}, integration_restore{};
     D2D1_RECT_F integration_section{}, integration_badge{}, integration_bar{}, integration_list_head{};
@@ -2712,16 +2737,56 @@ struct SettingsLayout {
     D2D1_RECT_F preview_codec_row[kPreviewCodecCount]{}, preview_codec_button[kPreviewCodecCount]{};
     // 预览增强包 page (5), see LayoutSettingsPacks.
     D2D1_RECT_F pack_update_all{}, pack_manage{}, pack_native_settings{}, native_settings_content{};
-    D2D1_RECT_F store_tabs[3]{}, store_refresh{}, store_cancel{}, store_state{},
-        store_trust{}, store_notice{}, store_restart{}, store_manage{}, store_section{}, store_empty{},
+    D2D1_RECT_F native_store_crumb{}; // page 15: "‹ 扩展商店" back to the store
+    D2D1_RECT_F page_heading{};
+    D2D1_RECT_F store_tabs[3]{}, store_refresh{}, store_install_file{}, store_cancel{}, store_state{},
+        store_trust{}, store_notice{}, store_restart{}, store_restart_button{}, store_manage{}, store_section{}, store_empty{},
         store_community_section{};
     struct StoreCard {
         D2D1_RECT_F bounds{}, icon{}, name{}, publisher{}, summary{}, version{}, status{}, button{};
+        D2D1_RECT_F enabled_badge{}, settings{}; // "设置": installed extensions that provide a settings page
+        bool feature = false;   // laid out full width at the top of its section
     };
+    StoreCard store_feature;
+    int store_feature_item=-1;
     std::vector<StoreCard> store_items;
+    // Browse extras (settings_layout_store.h): search, chips, loading blocks, the
+    // failed card, official pack cards and the 7-Zip quick settings in its card.
+    D2D1_RECT_F store_search{}, store_chips[5]{}, store_skeleton[4]{}, store_failed{}, store_failed_retry{},
+        store_failed_sources{}, store_official_hint{}, store_community_card{}, store_no_match{};
+    struct StorePack {
+        int pack = 0; // 0 images, 1 RAW, 2 FFmpeg, 3 content search, 4 AI
+        D2D1_RECT_F bounds{}, icon{}, name{}, publisher{}, summary{}, meta{}, state{}, button{}, secondary{}, progress{};
+    };
+    std::vector<StorePack> store_packs;
+    struct StoreQuick {
+        bool on = false;
+        D2D1_RECT_F section{}, title{}, saved{}, rows[3]{}, mode{}, format{}, level{}, remember{};
+        D2D1_RECT_F preview{}, preview_caption{}, preview_menu{};
+    } store_quick;
+    // The 7-Zip detail page (vm.settings_store_view.detail).
+    struct SevenZipDetail {
+        bool on = false;
+        D2D1_RECT_F crumb{}, crumb_name{}, icon{}, name{}, sub{}, badges[3]{}, enable{}, enable_label{}, more{};
+        D2D1_RECT_F tabs[4]{}, disabled_banner{}, body{}, side{}, preview_card{}, preview_title{}, preview_kinds[2]{}, preview_menu{}, result_card{};
+        D2D1_RECT_F section_label[3]{}, saved{}, groups[4]{};
+        // 常用设置
+        D2D1_RECT_F mode_row{}, mode_opts[3]{}, location_row{}, location_opts[2]{}, folder{}, browse{},
+            format_row{}, format_opts[6]{}, level_row{}, level_track{}, level_stops[6]{}, level_value{},
+            compress_note{}, remember_row{}, remember{}, rar_note{};
+        // 右键菜单
+        D2D1_RECT_F placement_label{}, placement_opts[2]{}, commands_label{}, command_rows[6]{}, command_switch[6]{};
+        // 支持格式 / 关于
+        D2D1_RECT_F formats_rw_label{}, formats_ro_label{}, formats_note{};
+        std::vector<D2D1_RECT_F> chips_rw, chips_ro;
+        D2D1_RECT_F about_rows[6]{}, history_label{}, history_card{};
+        D2D1_RECT_F about_keys[6]{}, about_values[6]{}, about_source{};
+        std::vector<D2D1_RECT_F> history_versions, history_notes, history_current;
+        std::vector<D2D1_RECT_F> history_rows, history_rollback;
+    } sz;
     struct InstalledCard {
-        D2D1_RECT_F bounds{}, name{}, id{}, version{}, publisher{}, badge{}, native_code{}, status{}, notice{};
-        D2D1_RECT_F enable{}, disable{}, uninstall{}, rollback{};
+        D2D1_RECT_F bounds{}, icon{}, name{}, id{}, version{}, publisher{}, badge{}, native_code{}, status{}, notice{};
+        D2D1_RECT_F enable{}, disable{}, more{}, settings{};
     };
     std::vector<InstalledCard> installed_items;
     // 增强包 page, 搜索: the 内容搜索 module and the planned OCR one.

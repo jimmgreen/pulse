@@ -8,11 +8,6 @@ namespace pulse::dialog_launcher {
 namespace {
 namespace fs = std::filesystem;
 constexpr uint32_t magic = 0x504c4d50;
-#ifdef _WIN64
-constexpr uint32_t machine = IMAGE_FILE_MACHINE_AMD64;
-#else
-constexpr uint32_t machine = IMAGE_FILE_MACHINE_I386;
-#endif
 struct Handle {
     HANDLE value = INVALID_HANDLE_VALUE;
     ~Handle() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
@@ -166,11 +161,14 @@ DWORD CaptureProfile(ManagedLaunchProfile& input, const std::wstring& actual_lau
         if (const DWORD e = Resolve(p.target, false, p.target, nullptr, &target_machine)) return e;
         if (const DWORD e = Resolve(p.cwd, true, p.cwd)) return e;
         if (const DWORD e = Resolve(p.control_root, true, p.control_root)) return e;
-        p.component_root = fs::path(p.launcher).parent_path().wstring(); p.machine = machine;
-        if (target_machine != machine || runtime_machine != machine || launcher_machine != machine) return ERROR_EXE_MACHINE_TYPE_MISMATCH;
-        if (!Same(fs::path(p.host).parent_path().wstring(), p.component_root) ||
-            !Same(fs::path(p.runtime).parent_path().wstring(), p.component_root) ||
+        p.component_root = fs::path(p.launcher).parent_path().wstring();
+        // The manager can be x64 while the verified launcher and target are x86.
+        p.machine = launcher_machine;
+        if ((launcher_machine != IMAGE_FILE_MACHINE_AMD64 && launcher_machine != IMAGE_FILE_MACHINE_I386) ||
+            target_machine != launcher_machine || runtime_machine != launcher_machine) return ERROR_EXE_MACHINE_TYPE_MISMATCH;
+        if (!Same(fs::path(p.runtime).parent_path().wstring(), p.component_root) ||
             _wcsicmp(fs::path(p.host).filename().c_str(), L"pulse.exe") != 0 || !Shape(p)) return ERROR_INVALID_DATA;
+        if (p.format_version != 2 && !Same(fs::path(p.host).parent_path().wstring(), p.component_root)) return ERROR_INVALID_DATA;
         if (p.format_version == 2) {
             dialog_bundle::BundleLease bundle;
             if (const DWORD e = dialog_bundle::VerifyBundle(p.bundle_root, p.manifest_digest, bundle)) return e;

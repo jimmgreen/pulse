@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pulse 增强包商店</title>
+<style>
+/* Pulse tokens (src/ui/FluentTokens.h MakeTheme). Layout: a Settings window whose 增强包 page becomes the store;
+   a state switcher above it drives every state the page has to show. */
+:root {
+  --bg: #F3F5F1; --title: #F1F3EE; --sheet: #F7F8F4; --card: #FFFFFF; --flyout: #FFFFFF;
+  --text: #303B50; --text2: #66748A; --text3: #929CAE;
+  --hover: rgba(82,125,112,.055); --pressed: rgba(82,125,112,.09);
+  --stroke: #DCE3D9; --divider: #E5EAE3; --input: rgba(255,255,255,.9); --input-line: rgba(166,181,169,.65);
+  --accent: #0078D4; --accent-fg: #0067C0; --on-accent: #FFFFFF; --sel: rgba(0,120,212,.095);
+  --ok: #0F7B0F; --ok-bg: rgba(15,123,15,.09); --warn: #9D5D00; --warn-bg: rgba(157,93,0,.10);
+  --danger: #C42B1C; --danger-bg: rgba(196,43,28,.08);
+  --shadow: 0 16px 40px rgba(48,59,80,.16), 0 2px 6px rgba(48,59,80,.08);
+  --font: "Segoe UI Variable Text","Segoe UI",system-ui,"Microsoft YaHei",sans-serif;
+  --display: "Segoe UI Variable Display","Segoe UI",system-ui,"Microsoft YaHei",sans-serif;
+  --mono: "Cascadia Mono",Consolas,ui-monospace,monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #1A1A1A; --title: #1A1A1A; --sheet: #202020; --card: #272727; --flyout: #2B2B2B;
+  --text: #FFFFFF; --text2: rgba(255,255,255,.61); --text3: rgba(255,255,255,.40);
+  --hover: rgba(255,255,255,.08); --pressed: rgba(255,255,255,.06);
+  --stroke: rgba(255,255,255,.08); --divider: rgba(255,255,255,.06); --input: rgba(255,255,255,.06); --input-line: rgba(255,255,255,.54);
+  --accent-fg: #5AAAE6; --sel: rgba(64,154,223,.17);
+  --ok: #6CCB5F; --ok-bg: rgba(108,203,95,.12); --warn: #FCE100; --warn-bg: rgba(252,225,0,.08); --danger: #FF99A4; --danger-bg: rgba(255,153,164,.10);
+  --shadow: 0 16px 44px rgba(0,0,0,.55), 0 2px 6px rgba(0,0,0,.4); color-scheme: dark;
+} }
+:root[data-theme="dark"] {
+  --bg: #1A1A1A; --title: #1A1A1A; --sheet: #202020; --card: #272727; --flyout: #2B2B2B;
+  --text: #FFFFFF; --text2: rgba(255,255,255,.61); --text3: rgba(255,255,255,.40);
+  --hover: rgba(255,255,255,.08); --pressed: rgba(255,255,255,.06);
+  --stroke: rgba(255,255,255,.08); --divider: rgba(255,255,255,.06); --input: rgba(255,255,255,.06); --input-line: rgba(255,255,255,.54);
+  --accent-fg: #5AAAE6; --sel: rgba(64,154,223,.17);
+  --ok: #6CCB5F; --ok-bg: rgba(108,203,95,.12); --warn: #FCE100; --warn-bg: rgba(252,225,0,.08); --danger: #FF99A4; --danger-bg: rgba(255,153,164,.10);
+  --shadow: 0 16px 44px rgba(0,0,0,.55), 0 2px 6px rgba(0,0,0,.4); color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--font); }
+button, input { font: inherit; color: inherit; }
+button { background: none; border: 0; padding: 0; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 1px; border-radius: 4px; }
+.page { max-width: 1240px; margin: 0 auto; padding: 28px 16px 64px; display: flex; flex-direction: column; gap: 24px; }
+h1, h2, h3 { font-family: var(--display); margin: 0; text-wrap: balance; }
+h1 { font-size: 28px; font-weight: 600; }
+p { margin: 0; color: var(--text2); max-width: 74ch; }
+.eyebrow { font: 600 12px var(--mono); color: var(--accent-fg); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 10px 12px; background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; position: sticky; top: 0; z-index: 20; }
+.ctl { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text2); flex-wrap: wrap; }
+.seg { display: inline-flex; flex-wrap: wrap; padding: 2px; gap: 2px; background: var(--hover); border-radius: 7px; }
+.seg button { height: 26px; padding: 0 10px; border-radius: 5px; font-size: 12.5px; color: var(--text2); }
+.seg button[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: 0 0 0 1px var(--stroke); }
+.i { width: 16px; height: 16px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+
+/* settings window */
+.stage { display: flex; justify-content: center; overflow-x: auto; padding: 4px 0 8px; }
+.win { width: 1080px; height: 720px; flex-shrink: 0; display: flex; flex-direction: column; background: var(--sheet); border: 1px solid var(--stroke); border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; font-size: 13px; position: relative; transition: width .2s ease; }
+.win.narrow { width: 680px; }
+.tb { height: 40px; display: flex; align-items: center; gap: 8px; padding-left: 14px; background: var(--title); flex-shrink: 0; font-weight: 600; }
+.tb .logo { color: var(--accent-fg); }
+.tb .sp { flex: 1; }
+.cap { width: 46px; height: 40px; display: grid; place-items: center; color: var(--text2); }
+.body { flex: 1; min-height: 0; display: flex; }
+.nav { width: 220px; flex-shrink: 0; padding: 8px; display: flex; flex-direction: column; gap: 1px; overflow-y: auto; background: var(--title); }
+.narrow .nav { width: 56px; }
+.navsearch { height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 10px; margin: 2px 2px 8px; border-radius: 6px; background: var(--input); border: 1px solid var(--stroke); color: var(--text3); }
+.narrow .navsearch span, .narrow .ni span, .narrow .nh { display: none; }
+.nh { font-size: 11.5px; font-weight: 600; color: var(--text2); padding: 10px 10px 3px; }
+.ni { height: 34px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border-radius: 6px; color: var(--text); position: relative; white-space: nowrap; }
+.ni:hover { background: var(--hover); }
+.ni.on { background: var(--sel); }
+.ni.on::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 2px; background: var(--accent); }
+.ni .badge { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent); color: var(--on-accent); font-size: 11px; display: grid; place-items: center; }
+.narrow .ni .badge { position: absolute; right: 4px; top: 3px; min-width: 14px; height: 14px; font-size: 9.5px; }
+.content { flex: 1; min-width: 0; overflow-y: auto; padding: 22px 28px 28px; }
+.narrow .content { padding: 18px 16px; }
+.ph { display: flex; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.ph h2 { font-size: 26px; font-weight: 600; }
+.ph p { font-size: 13px; margin-top: 4px; }
+.ph .grow { flex: 1; min-width: 240px; }
+.search { width: 260px; height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 10px; background: var(--input); border: 1px solid var(--stroke); border-bottom-color: var(--input-line); border-radius: 6px; color: var(--text3); }
+.narrow .search { width: 100%; }
+.search input { flex: 1; min-width: 0; border: 0; background: none; outline: none; color: var(--text); }
+.tabs { display: flex; gap: 4px; margin: 18px 0 12px; border-bottom: 1px solid var(--divider); }
+.tab { height: 36px; padding: 0 12px; color: var(--text2); position: relative; display: inline-flex; align-items: center; gap: 6px; }
+.tab[aria-selected="true"] { color: var(--text); font-weight: 600; }
+.tab[aria-selected="true"]::after { content: ""; position: absolute; left: 12px; right: 12px; bottom: -1px; height: 3px; border-radius: 2px; background: var(--accent); }
+.tab .count { font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 9px; background: var(--hover); color: var(--text2); }
+.tab .count.hot { background: var(--accent); color: var(--on-accent); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+.chip { height: 28px; padding: 0 12px; border-radius: 14px; border: 1px solid var(--stroke); background: var(--card); color: var(--text2); font-size: 12.5px; }
+.chip[aria-pressed="true"] { background: var(--sel); border-color: transparent; color: var(--accent-fg); font-weight: 600; }
+.banner { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: 8px; margin-bottom: 14px; font-size: 12.5px; }
+.banner b { display: block; font-weight: 600; color: var(--text); }
+.banner .acts { margin-left: auto; display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
+.banner.warn { background: var(--warn-bg); } .banner.danger { background: var(--danger-bg); } .banner.info { background: var(--sel); }
+.banner.warn > .i { color: var(--warn); } .banner.danger > .i { color: var(--danger); } .banner.info > .i { color: var(--accent-fg); }
+.narrow .banner { flex-wrap: wrap; } .narrow .banner > div:not(.acts) { flex: 1 1 calc(100% - 30px); min-width: 0; } .narrow .banner .acts { margin-left: 26px; }
+.sec { display: flex; align-items: baseline; gap: 10px; margin: 6px 0 10px; }
+.sec h3 { font-size: 14px; font-weight: 600; }
+.sec small { color: var(--text3); font-size: 12px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 10px; margin-bottom: 20px; }
+.card { background: var(--card); border: 1px solid var(--stroke); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 10px; text-align: left; min-width: 0; }
+.card:hover { border-color: color-mix(in srgb, var(--stroke) 50%, var(--text3)); }
+.card[aria-current="true"] { border-color: var(--accent-fg); box-shadow: 0 0 0 1px var(--accent-fg) inset; }
+.ch { display: flex; gap: 12px; align-items: flex-start; }
+/* App tiles: a soft top light, a hairline inner edge and a short shadow, like
+   Fluent app icons; the artwork is 24-unit two-tone (white strokes + a 30% fill). */
+.ico { --c: #2563EB; width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; flex-shrink: 0; color: #fff;
+  background: linear-gradient(160deg, color-mix(in srgb, var(--c) 62%, #fff) 0%, var(--c) 52%, color-mix(in srgb, var(--c) 82%, #000) 100%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.28), inset 0 0 0 1px rgba(0,0,0,.10), 0 1px 2px rgba(15,23,42,.14), 0 2px 6px color-mix(in srgb, var(--c) 22%, transparent); }
+.ico .i { width: 24px; height: 24px; stroke-width: 1.5; filter: drop-shadow(0 1px 0.5px rgba(0,0,0,.18)); }
+.cm { flex: 1; min-width: 0; }
+.cn { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 14px; }
+.cn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pub { font-size: 12px; color: var(--text2); display: flex; align-items: center; gap: 4px; }
+.pub .i { width: 13px; height: 13px; color: var(--accent-fg); }
+.desc { font-size: 12.5px; color: var(--text2); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 37px; }
+.cf { display: flex; align-items: center; gap: 8px; }
+.meta { font-size: 11.5px; color: var(--text3); display: flex; gap: 8px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.tag { font-size: 11px; padding: 1px 7px; border-radius: 9px; background: var(--hover); color: var(--text2); white-space: nowrap; }
+.tag.ok { background: var(--ok-bg); color: var(--ok); } .tag.warn { background: var(--warn-bg); color: var(--warn); } .tag.danger { background: var(--danger-bg); color: var(--danger); }
+.btn { height: 30px; min-width: 72px; padding: 0 12px; border-radius: 6px; background: var(--card); border: 1px solid var(--stroke); font-size: 12.5px; white-space: nowrap; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.btn:hover { background: var(--hover); }
+.btn.pri { background: var(--accent); color: var(--on-accent); border-color: transparent; font-weight: 600; }
+.btn.pri:hover { filter: brightness(1.07); }
+.btn.quiet { border-color: transparent; color: var(--accent-fg); background: none; }
+.btn.danger { color: var(--danger); }
+.btn[disabled] { opacity: .5; pointer-events: none; }
+.prog { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.bar { height: 4px; border-radius: 2px; background: var(--divider); overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; transition: width .3s; }
+.prog small { font-size: 11.5px; color: var(--text2); }
+.row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: var(--card); border: 1px solid var(--stroke); border-radius: 8px; margin-bottom: 6px; }
+.row .ico { width: 32px; height: 32px; border-radius: 8px; } .row .ico .i { width: 20px; height: 20px; }
+.row .cm small { display: block; font-size: 12px; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toggle { width: 40px; height: 20px; border-radius: 10px; border: 1px solid var(--text2); position: relative; flex-shrink: 0; }
+.toggle::after { content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 6px; background: var(--text2); transition: left .15s; }
+.toggle[aria-checked="true"] { background: var(--accent); border-color: var(--accent); }
+.toggle[aria-checked="true"]::after { left: 23px; background: #fff; }
+.empty { text-align: center; padding: 48px 16px; color: var(--text2); display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.empty .i { width: 40px; height: 40px; color: var(--text3); stroke-width: 1.2; }
+.empty b { color: var(--text); font-size: 14px; }
+.dev { margin-top: 8px; padding: 14px; border: 1px dashed var(--stroke); border-radius: 8px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.dev p { font-size: 12.5px; flex: 1; min-width: 220px; }
+.skel { height: 150px; border-radius: 8px; background: var(--card); border: 1px solid var(--stroke); position: relative; overflow: hidden; }
+.skel::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, var(--hover), transparent); animation: sweep 1.2s infinite; }
+@keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+/* detail drawer */
+.scrim { position: absolute; inset: 40px 0 0 0; background: rgba(0,0,0,.18); opacity: 0; pointer-events: none; transition: opacity .15s; }
+.drawer { position: absolute; top: 40px; right: 0; bottom: 0; width: 440px; background: var(--flyout); border-left: 1px solid var(--stroke); box-shadow: -12px 0 32px rgba(0,0,0,.12); transform: translateX(100%); transition: transform .2s ease; display: flex; flex-direction: column; }
+.narrow .drawer { width: 100%; }
+.win.detail .drawer { transform: none; } .win.detail .scrim { opacity: 1; pointer-events: auto; }
+.dh { padding: 18px 18px 12px; display: flex; gap: 14px; align-items: flex-start; border-bottom: 1px solid var(--divider); }
+.dh .ico { width: 52px; height: 52px; border-radius: 13px; } .dh .ico .i { width: 32px; height: 32px; }
+.dh h3 { font-size: 18px; font-weight: 600; }
+.dh .x { margin-left: auto; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 6px; color: var(--text2); }
+.dh .x:hover { background: var(--hover); }
+.db { flex: 1; overflow-y: auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 16px; }
+.db > * { flex-shrink: 0; } /* the drawer scrolls; its sections keep their height */
+.dact { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.shot { height: 150px; border-radius: 8px; border: 1px solid var(--stroke); background: var(--sheet); display: grid; place-items: center; color: var(--text3); font-size: 12px; position: relative; overflow: hidden; }
+.shot .mini { position: absolute; inset: 14px; border-radius: 6px; background: var(--card); border: 1px solid var(--stroke); display: grid; grid-template-columns: 70px 1fr 110px; overflow: hidden; }
+.shot .mini i { display: block; border-right: 1px solid var(--divider); }
+.shot .mini i:last-child { border: 0; background: var(--sel); }
+.dsec h4 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: .04em; }
+.perm { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--divider); font-size: 12.5px; }
+.perm:last-child { border: 0; }
+.perm .i { margin-top: 2px; color: var(--text2); }
+.perm b { display: block; font-weight: 600; font-size: 13px; }
+.perm span { color: var(--text2); }
+.perm.ask .i { color: var(--warn); }
+.kv { display: grid; grid-template-columns: 90px 1fr; gap: 4px 10px; font-size: 12.5px; }
+.kv dt { color: var(--text2); } .kv dd { margin: 0; overflow-wrap: anywhere; }
+.ver { font-size: 12.5px; color: var(--text2); } .ver b { color: var(--text); font-weight: 600; }
+
+/* notes */
+.split { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+.note { background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; padding: 16px; }
+.note h3 { font-size: 12px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--text2); margin-bottom: 8px; }
+.note ul { margin: 0; padding-left: 18px; color: var(--text2); display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.note li b { color: var(--text); font-weight: 600; }
+@media (max-width: 600px) { h1 { font-size: 23px; } .controls { position: static; } }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <header style="display:flex;flex-direction:column;gap:10px">
+    <div class="eyebrow">设置 › 功能 › 增强包</div>
+    <h1>增强包商店</h1>
+    <p>把现有的“增强包”页改成商店：官方预览与搜索模块和社区扩展放在一起浏览、安装、更新和管理。每个增强包在隔离进程中运行，安装前写清楚它能做什么；写入文件、联网等操作仍然逐次请你确认。</p>
+  </header>
+
+  <div class="controls" role="toolbar" aria-label="预览设置">
+    <div class="ctl">状态 <span class="seg" id="stateSeg">
+      <button data-v="ok" aria-pressed="true">正常</button><button data-v="loading" aria-pressed="false">加载目录</button><button data-v="offline" aria-pressed="false">连不上下载源</button><button data-v="mismatch" aria-pressed="false">版本不匹配</button><button data-v="crash" aria-pressed="false">崩溃后停用</button>
+    </span></div>
+    <div class="ctl">主题 <span class="seg" id="themeSeg"><button data-v="sys" aria-pressed="true">跟随</button><button data-v="light" aria-pressed="false">浅色</button><button data-v="dark" aria-pressed="false">深色</button></span></div>
+    <div class="ctl">宽度 <span class="seg" id="widthSeg"><button data-v="wide" aria-pressed="true">1080</button><button data-v="narrow" aria-pressed="false">680</button></span></div>
+  </div>
+
+  <div class="stage"><div class="win" id="win"></div></div>
+
+  <section class="split">
+    <div class="note">
+      <h3>页面结构</h3>
+      <ul>
+        <li><b>三个标签</b>：发现、已安装、更新。更新有数字提示，同时显示在左侧“增强包”导航项上。</li>
+        <li><b>官方和社区分开</b>：官方增强包带认证标记，排在前面；社区扩展写明发布者。</li>
+        <li><b>卡片只放决定要用的信息</b>：名称、发布者、一句话说明、大小、权限摘要、一个主按钮。</li>
+        <li><b>点卡片打开右侧详情</b>：截图、权限逐条说明、隔离说明、版本记录、停用 / 卸载 / 下载源。</li>
+        <li><b>问题用页顶横幅</b>：网络、校验不一致、崩溃停用，各自给出直接的处理按钮。</li>
+      </ul>
+    </div>
+    <div class="note">
+      <h3>与现有实现的对应</h3>
+      <ul>
+        <li>官方模块沿用现在的增强包下载、校验（大小 + 校验值）和下载源设置。</li>
+        <li>社区扩展对应本分支的扩展平台：清单声明的能力就是详情页里的“权限”。</li>
+        <li>“写入文件需确认”对应冻结文件计划确认框；“设置页”“面板”对应清单里的页面与面板。</li>
+        <li>崩溃停用沿用 <code>ExtensionCrashDisabled*</code> 文案；版本不匹配沿用 <code>PackMismatch*</code>。</li>
+        <li>开发者区保留“启用 / 停用开发增强包”，从本地文件夹加载。</li>
+      </ul>
+    </div>
+  </section>
+</div>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="srch" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.25"/><path d="m10.25 10.25 3 3"/></symbol>
+  <symbol id="x" viewBox="0 0 16 16"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7"/></symbol>
+  <symbol id="pulse" viewBox="0 0 16 16"><path d="M1.5 8h2.75l1.75-4 3.5 8 1.75-4h3.25"/></symbol>
+  <symbol id="verified" viewBox="0 0 16 16"><path d="M8 1.75 9.6 3.1l2.1-.1.5 2 1.7 1.3-.8 2 .8 2-1.7 1.3-.5 2-2.1-.1L8 14.25 6.4 12.9l-2.1.1-.5-2L2.1 9.7l.8-2-.8-2L3.8 4.4l.5-2 2.1.1Z"/><path d="m5.75 8.1 1.6 1.6 3-3.2"/></symbol>
+  <symbol id="film" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5 3v10M11 3v10M2 6.5h3M2 9.5h3M11 6.5h3M11 9.5h3"/></symbol>
+  <symbol id="image" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><circle cx="5.75" cy="6.25" r="1"/><path d="m2.5 11.5 3-3 2.5 2.5 2-2 3.5 3.5"/></symbol>
+  <symbol id="doc" viewBox="0 0 16 16"><path d="M4.5 2h4.6L12 4.9v8.1a1 1 0 0 1-1 1H4.5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z"/><path d="M9 2v3h3M5.5 8.5h5M5.5 11h3.5"/></symbol>
+  <symbol id="find" viewBox="0 0 16 16"><path d="M3.5 2h5L11 4.5V7"/><path d="M3.5 2v12h4"/><circle cx="10.5" cy="10.5" r="2.5"/><path d="m12.4 12.4 1.6 1.6"/></symbol>
+  <symbol id="ocr" viewBox="0 0 16 16"><path d="M2 5V3a1 1 0 0 1 1-1h2M11 2h2a1 1 0 0 1 1 1v2M14 11v2a1 1 0 0 1-1 1h-2M5 14H3a1 1 0 0 1-1-1v-2"/><path d="M5.5 6h5M8 6v5"/></symbol>
+  <symbol id="zip" viewBox="0 0 16 16"><rect x="3" y="2" width="10" height="12" rx="1.5"/><path d="M8 2v1.5M7 4.5h1M8 5.5h1M7 6.5h1"/><rect x="6.75" y="8" width="2.5" height="3" rx=".6"/></symbol>
+  <symbol id="git" viewBox="0 0 16 16"><circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="6" r="1.5"/><path d="M4.5 5v6M11.5 7.5c0 2-2 2.5-4.5 3.2"/></symbol>
+  <symbol id="rename" viewBox="0 0 16 16"><path d="M2.5 5h5M2.5 8h5M2.5 11h5"/><path d="M11 3v10M9.5 3h3M9.5 13h3"/></symbol>
+  <symbol id="dup" viewBox="0 0 16 16"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 10.5V4a1 1 0 0 1 1-1h6.5"/><path d="m7.25 9 1.25 1.25L10.75 8"/></symbol>
+  <symbol id="compress" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"/><path d="M6 5.5 8 7.5l2-2M6 10.5l2-2 2 2"/></symbol>
+  <symbol id="folder" viewBox="0 0 16 16"><path d="M2 4.75A1.25 1.25 0 0 1 3.25 3.5h2.6l1.3 1.3h5.6A1.25 1.25 0 0 1 14 6.05v5.7A1.25 1.25 0 0 1 12.75 13h-9.5A1.25 1.25 0 0 1 2 11.75Z"/></symbol>
+  <symbol id="eye" viewBox="0 0 16 16"><path d="M1.75 8C3 5.5 5.3 4 8 4s5 1.5 6.25 4C13 10.5 10.7 12 8 12S3 10.5 1.75 8Z"/><circle cx="8" cy="8" r="2"/></symbol>
+  <symbol id="write" viewBox="0 0 16 16"><path d="M10.5 2.5 13.5 5.5 6 13H3v-3Z"/><path d="m9 4 3 3"/></symbol>
+  <symbol id="net" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2 2 2 10 0 12M8 2c-2 2-2 10 0 12"/></symbol>
+  <symbol id="panel" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M10 3v10"/></symbol>
+  <symbol id="shield" viewBox="0 0 16 16"><path d="M8 1.75 13 3.5V7.5c0 3-2.2 5.3-5 6.75C5.2 12.8 3 10.5 3 7.5V3.5Z"/><path d="m5.75 8 1.6 1.6 3-3.1"/></symbol>
+  <symbol id="warn" viewBox="0 0 16 16"><path d="M8 2.5 14 13H2Z"/><path d="M8 6.5v3M8 11.3v.2"/></symbol>
+  <symbol id="cloudx" viewBox="0 0 16 16"><path d="M4.5 12.5h7a3 3 0 0 0 .5-5.95A4.25 4.25 0 0 0 3.85 7.4 2.6 2.6 0 0 0 4.5 12.5Z"/><path d="m6.5 8 3 3M9.5 8l-3 3"/></symbol>
+  <symbol id="puzzle" viewBox="0 0 16 16"><path d="M3 5.5h2.25a1.75 1.75 0 1 1 3.5 0H11v2.25a1.75 1.75 0 1 1 0 3.5V13.5H8.75a1.75 1.75 0 1 0-3.5 0H3v-2.25a1.75 1.75 0 1 0 0-3.5Z"/></symbol>
+  <symbol id="home" viewBox="0 0 16 16"><path d="M2.75 7 8 2.75 13.25 7v6.25H2.75Z"/></symbol>
+  <symbol id="tabs" viewBox="0 0 16 16"><rect x="2" y="4" width="12" height="9" rx="1.25"/><path d="M2 6.5h12M6 4V2.5h4V4"/></symbol>
+  <symbol id="brush" viewBox="0 0 16 16"><path d="M13.5 2.5 7 9"/><path d="M6.5 9.5c-2 0-3 1.5-3 4 2.5 0 4-1 4-3Z"/></symbol>
+  <symbol id="gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.25"/><path d="M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.6 3.6l1.05 1.05M11.35 11.35l1.05 1.05M3.6 12.4l1.05-1.05M11.35 4.65l1.05-1.05"/></symbol>
+  <symbol id="spark" viewBox="0 0 16 16"><path d="M7.5 2c.35 2.6 1.4 3.65 4 4-2.6.35-3.65 1.4-4 4-.35-2.6-1.4-3.65-4-4 2.6-.35 3.65-1.4 4-4Z"/></symbol>
+  <symbol id="keyboard" viewBox="0 0 16 16"><rect x="1.75" y="4" width="12.5" height="8" rx="1.5"/><path d="M4.5 6.5h.01M7 6.5h.01M9.5 6.5h.01M12 6.5h.01M5 9.5h6"/></symbol>
+  <symbol id="update" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.46-3.54L13 6"/><path d="M13 3v3h-3"/></symbol>
+  <!-- App tile artwork, 24 units: white strokes plus one 30% fill for depth. -->
+  <symbol id="a-film" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5" fill="currentColor" fill-opacity=".22"/><path d="M7 5v14M17 5v14"/><path d="M3.75 8.5H7M3.75 12H7M3.75 15.5H7M17 8.5h3.25M17 12h3.25M17 15.5h3.25"/><path d="M10.5 9.6v4.8a.5.5 0 0 0 .76.43l3.9-2.4a.5.5 0 0 0 0-.86l-3.9-2.4a.5.5 0 0 0-.76.43Z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="a-image" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="9.5" r="1.75" fill="currentColor" stroke="none"/><path d="M3.75 17.25 8.4 12.6a1.25 1.25 0 0 1 1.77 0L13 15.4l1.6-1.6a1.25 1.25 0 0 1 1.77 0l4 4V17a2.5 2.5 0 0 1-2.5 2.5H6a2.5 2.5 0 0 1-2.25-1.4Z" fill="currentColor" fill-opacity=".3" stroke="none"/><path d="m3.75 17.25 4.65-4.65a1.25 1.25 0 0 1 1.77 0L13 15.4M13 15.4l1.6-1.6a1.25 1.25 0 0 1 1.77 0l4 4"/></symbol>
+  <symbol id="a-doc" viewBox="0 0 24 24"><path d="M7 3h6.6L18.5 7.9V19a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" fill="currentColor" fill-opacity=".22"/><path d="M13.5 3v3.5a1.5 1.5 0 0 0 1.5 1.5h3.5"/><rect x="8" y="11" width="8" height="6.5" rx="1"/><path d="M8 13.75h8M10.75 11v6.5"/></symbol>
+  <symbol id="a-find" viewBox="0 0 24 24"><path d="M6.5 3h6.6L17.5 7.4V10"/><path d="M6.5 3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4.5"/><path d="M7.75 8.5h4M7.75 11.5h2.5"/><circle cx="15" cy="15" r="3.75" fill="currentColor" fill-opacity=".3"/><path d="m17.75 17.75 2.75 2.75"/></symbol>
+  <symbol id="a-ocr" viewBox="0 0 24 24"><path d="M3.5 8V6a2.5 2.5 0 0 1 2.5-2.5h2M16 3.5h2A2.5 2.5 0 0 1 20.5 6v2M20.5 16v2a2.5 2.5 0 0 1-2.5 2.5h-2M8 20.5H6A2.5 2.5 0 0 1 3.5 18v-2"/><rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" fill-opacity=".22" stroke="none"/><path d="M9 9.25h6M12 9.25v6"/></symbol>
+  <symbol id="a-zip" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2.5" fill="currentColor" fill-opacity=".22"/><path d="M12 3v1.75M10.5 6.25H12M12 7.75h1.5M10.5 9.25H12"/><rect x="10" y="11" width="4" height="5.5" rx="1.25" fill="currentColor" stroke="none"/><circle cx="12" cy="14.5" r=".75" fill="#000" fill-opacity=".35" stroke="none"/></symbol>
+  <symbol id="a-git" viewBox="0 0 24 24"><path d="M7 7.5v9M17 9.5c0 3-3.5 3.5-7.6 5.2"/><circle cx="7" cy="5.5" r="2.25" fill="currentColor" fill-opacity=".3"/><circle cx="7" cy="18.5" r="2.25" fill="currentColor"/><circle cx="17" cy="7.5" r="2.25" fill="currentColor" fill-opacity=".3"/></symbol>
+  <symbol id="a-rename" viewBox="0 0 24 24"><rect x="3" y="7" width="13" height="10" rx="2" fill="currentColor" fill-opacity=".22"/><path d="M6 14.5 8 9.5l2 5M6.7 13h2.6"/><path d="M12.25 11.5v3M13.75 12.6c0-.75-.6-1.1-1.5-1.1"/><path d="M18.5 4.5v15M16.75 4.5h3.5M16.75 19.5h3.5"/></symbol>
+  <symbol id="a-dup" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="11" height="13" rx="2" fill="currentColor" fill-opacity=".22"/><rect x="9.5" y="7.5" width="11" height="13" rx="2" fill="currentColor" fill-opacity=".001"/><path d="m12.5 14.25 1.75 1.75 3.25-3.5"/></symbol>
+  <symbol id="a-compress" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="3" fill="currentColor" fill-opacity=".22"/><path d="M8 3.75v3.5L12 10l4-2.75v-3.5M8 20.25v-3.5L12 14l4 2.75v3.5"/><path d="M12 10v4" stroke-dasharray="1 1.75"/></symbol>
+  <symbol id="a-cloud" viewBox="0 0 24 24"><path d="M7 18.5h10a4 4 0 0 0 .65-7.95A5.75 5.75 0 0 0 6.6 11.7 3.4 3.4 0 0 0 7 18.5Z" fill="currentColor" fill-opacity=".25"/><path d="M14.5 12.25a2.75 2.75 0 0 0-4.7-.6M9.5 15.25a2.75 2.75 0 0 0 4.7.6"/><path d="M9.6 10.25v1.6h1.6M14.4 16.75v-1.6h-1.6"/></symbol>
+</defs></svg>
+
+<script>
+(() => {
+const ic = (id, cls = '') => `<svg class="i ${cls}" aria-hidden="true"><use href="#${id}"/></svg>`;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+/* Catalog. official = Pulse packs (real names and copy from the current 增强包 page); others are community extensions. */
+const P = [
+  { id: 'ffmpeg', name: 'FFmpeg 预览增强包', icon: 'a-film', color: '#C2410C', pub: 'Pulse', official: true, cat: 'preview', size: '28 MB', ver: '7.0.2', installed: true, enabled: true,
+    desc: '预览视频画面与封面，补齐 MKV、FLV、RMVB 等格式的缩略图和播放。', perms: ['read-selection', 'isolated'], update: '7.1.1' },
+  { id: 'heic', name: '现代图像格式', icon: 'a-image', color: '#0E7490', pub: 'Pulse', official: true, cat: 'preview', size: '6.4 MB', ver: '1.3.0', installed: true, enabled: true,
+    desc: '不依赖微软商店扩展，直接预览 iPhone 照片（HEIC）、AVIF、JPEG XL 和 HDR / EXR 图像，文件夹里也能看到缩略图。', perms: ['read-selection', 'isolated'] },
+  { id: 'office', name: 'Office 高保真预览', icon: 'a-doc', color: '#1D4ED8', pub: 'Pulse', official: true, cat: 'preview', size: '41 MB', ver: '24.8',
+    desc: '把 Word、Excel、PowerPoint 按原始版式渲染成预览，不需要安装 Office。', perms: ['read-selection', 'isolated'] },
+  { id: 'content', name: '内容搜索', icon: 'a-find', color: '#047857', pub: 'Pulse', official: true, cat: 'search', size: '9.8 MB', ver: '1.0.58', installed: true, enabled: true,
+    desc: '在 Word、Excel、PowerPoint、PDF 和文本文件的正文中搜索关键词，结果中高亮命中片段。索引只在本机建立，不上传任何内容。', perms: ['read-index', 'isolated'], meta: 'SQLite FTS5 · PDFium · 随 Pulse 同步更新' },
+  { id: 'ocr', name: '图片文字识别（OCR）', icon: 'a-ocr', color: '#6D28D9', pub: 'Pulse', official: true, cat: 'search', size: '18 MB', ver: '0.9.0', badge: '即将推出',
+    desc: '识别截图和扫描件里的文字，加入内容搜索；也能在预览里直接选中复制。', perms: ['read-index', 'isolated'] },
+  { id: 'zip', name: '压缩包预览', icon: 'a-zip', color: '#A16207', pub: 'Pulse', official: true, cat: 'preview', size: '2.1 MB', ver: '24.09',
+    desc: '不解压直接浏览 7z、RAR、ZIP 里的文件列表和图片。', perms: ['read-selection', 'isolated'], meta: '7z.dll · LGPL-2.1 + unRAR 条款' },
+  { id: 'git', name: 'Git 状态面板', icon: 'a-git', color: '#B91C1C', pub: 'tidewave', cat: 'panel', size: '820 KB', ver: '2.4.1', installed: true, enabled: true, update: '2.5.0',
+    desc: '在文件列表里标出修改、未跟踪和冲突的文件；右侧面板显示分支、提交记录和差异。', perms: ['read-folder', 'panel', 'run-git'] },
+  { id: 'rules', name: '批量重命名规则库', icon: 'a-rename', color: '#0F766E', pub: '林间小站', cat: 'fileops', size: '310 KB', ver: '1.8.0',
+    desc: '把常用的重命名规则（日期前缀、序号、拼音转换、照片拍摄时间）保存成一键规则。', perms: ['read-selection', 'write-confirm'] },
+  { id: 'dups', name: '重复文件清理', icon: 'a-dup', color: '#4338CA', pub: 'Northline Labs', cat: 'fileops', size: '1.2 MB', ver: '3.0.2',
+    desc: '按内容找出重复的照片和文档，选好保留哪份后移到回收站，每一步都可撤销。', perms: ['read-folder', 'write-confirm', 'panel'] },
+  { id: 'squash', name: '图片压缩', icon: 'a-compress', color: '#BE185D', pub: 'pixelmint', cat: 'fileops', size: '2.6 MB', ver: '0.7.4',
+    desc: '把选中的照片压缩成 WebP / AVIF，另存到旁边的文件夹，不覆盖原图。', perms: ['read-selection', 'write-confirm'] },
+  { id: 'cloudsync', name: '网盘同步状态', icon: 'a-cloud', color: '#0369A1', pub: 'skyfold', cat: 'panel', size: '540 KB', ver: '1.1.0',
+    desc: '为百度网盘、坚果云目录显示上传中、已同步和冲突状态。', perms: ['read-folder', 'network'] },
+];
+const PERMS = {
+  'read-selection': ['eye', '读取你选中的文件', '只在你选择文件并打开预览或命令时读取，不会自己扫描磁盘。'],
+  'read-folder': ['folder', '读取当前文件夹', '列出当前打开文件夹里的文件名和属性。'],
+  'read-index': ['find', '建立本机索引', '在本机读取所选位置的文件正文建立索引，不上传任何内容。'],
+  'write-confirm': ['write', '写入文件（每次确认）', '先生成冻结的文件计划，列出将写入或移动的每个项目，确认后才执行；不会覆盖现有文件。', true],
+  'network': ['net', '访问网络', '连接发布者声明的服务器以读取同步状态。', true],
+  'panel': ['panel', '显示面板', '在 Pulse 右侧添加一个面板。'],
+  'run-git': ['git', '运行 git', '在当前仓库里运行只读的 git 命令（status、log、diff）。'],
+  'isolated': ['shield', '在隔离进程中运行', '崩溃或超时只影响当前预览，Pulse 会回退到内置的缩略图和文本视图。'],
+};
+const CATS = [['all', '全部'], ['preview', '预览'], ['search', '搜索'], ['fileops', '文件操作'], ['panel', '面板']];
+const S = { tab: 'discover', cat: 'all', q: '', state: 'ok', narrow: false, detail: null, installing: {} };
+const $ = s => document.querySelector(s);
+const win = $('#win');
+const updates = () => P.filter(p => p.installed && p.update);
+const installed = () => P.filter(p => p.installed);
+
+function permSummary(p) {
+  const asks = p.perms.filter(k => PERMS[k][3]);
+  if (p.official) return `<span class="tag ok">隔离运行</span>`;
+  return asks.length ? `<span class="tag warn">${asks.map(k => PERMS[k][1].replace('（每次确认）', '需确认')).join(' · ')}</span>` : `<span class="tag">只读</span>`;
+}
+function action(p, inDrawer = false) {
+  const prog = S.installing[p.id];
+  if (prog != null) return `<div class="prog"><div class="bar"><i style="width:${prog}%"></i></div><small>正在下载 ${prog}% · ${p.size}</small></div><button class="btn" data-cancel="${p.id}">取消</button>`;
+  if (p.badge) return `<button class="btn" disabled>${p.badge}</button>`;
+  if (p.installed && p.update) return `<button class="btn pri" data-update="${p.id}">更新到 ${p.update}</button>`;
+  if (p.installed) return inDrawer ? `<button class="btn" data-toggle="${p.id}">${p.enabled ? '停用' : '启用'}</button><button class="btn danger" data-remove="${p.id}">卸载</button>` : `<button class="btn" data-open="${p.id}">已安装</button>`;
+  return `<button class="btn pri" data-get="${p.id}">获取</button>`;
+}
+function card(p) {
+  return `<div class="card" role="button" tabindex="0" data-open="${p.id}" aria-current="${S.detail === p.id}">
+    <div class="ch"><span class="ico" style="--c:${p.color}">${ic(p.icon)}</span>
+      <div class="cm"><div class="cn"><span>${esc(p.name)}</span></div>
+        <div class="pub">${p.official ? ic('verified') + 'Pulse 官方' : esc(p.pub)}</div></div></div>
+    <div class="desc">${esc(p.desc)}</div>
+    <div class="cf"><div class="meta"><span>${p.size}</span>${permSummary(p)}${p.installed && !p.enabled ? '<span class="tag danger">已停用</span>' : ''}</div>${action(p)}</div>
+  </div>`;
+}
+function banner() {
+  if (S.state === 'offline') return `<div class="banner danger" role="alert">${ic('cloudx')}<div><b>连不上下载服务器</b>3 个下载源都试过了。请检查网络或代理后重试。已安装的增强包照常可用。</div><div class="acts"><button class="btn quiet">下载源设置</button><button class="btn">重试</button></div></div>`;
+  if (S.state === 'mismatch') return `<div class="banner warn" role="alert">${ic('warn')}<div><b>增强包与这个版本的 Pulse 不匹配</b>下载源「GitHub」给出的文件和这个 Pulse 里登记的不一致。可以换一个下载源；如果当前 Pulse 不是正式发布的版本，更新到最新正式版即可。</div><div class="acts"><button class="btn quiet">查看详情</button><button class="btn">换下载源</button></div></div>`;
+  if (S.state === 'crash') return `<div class="banner warn" role="alert">${ic('warn')}<div><b>已停用崩溃的增强包</b>Pulse 上次在运行 Git 状态面板 时意外退出，已将其停用。更新增强包后会自动恢复，也可以在这里重新启用。</div><div class="acts"><button class="btn" data-update="git">更新到 2.5.0</button><button class="btn quiet" data-reenable="git">重新启用</button></div></div>`;
+  return '';
+}
+function discover() {
+  if (S.state === 'loading') return `<div class="grid">${'<div class="skel"></div>'.repeat(6)}</div>`;
+  const q = S.q.trim().toLowerCase();
+  let list = P.filter(p => (S.cat === 'all' || p.cat === S.cat) && (!q || (p.name + p.desc + p.pub).toLowerCase().includes(q)));
+  if (!list.length) return `<div class="empty">${ic('srch')}<b>没有找到「${esc(S.q)}」</b>换个关键词，或在“全部”分类里看看。</div>`;
+  const off = list.filter(p => p.official), com = list.filter(p => !p.official);
+  return `${off.length ? `<div class="sec"><h3>Pulse 官方</h3><small>随 Pulse 校验大小与校验值，在隔离进程中运行</small></div><div class="grid">${off.map(card).join('')}</div>` : ''}
+    ${com.length ? `<div class="sec"><h3>社区扩展</h3><small>由发布者维护；写入文件、联网等操作每次需要你确认</small></div><div class="grid">${com.map(card).join('')}</div>` : ''}`;
+}
+function rowOf(p, extra = '') {
+  return `<div class="row"><span class="ico" style="--c:${p.color}">${ic(p.icon)}</span>
+    <div class="cm" data-open="${p.id}" style="cursor:pointer"><div class="cn"><span>${esc(p.name)}</span>${p.official ? '' : `<span class="tag">${esc(p.pub)}</span>`}</div><small>${extra || `${p.ver} · ${p.size}`}</small></div>${action(p)}</div>`;
+}
+function installedTab() {
+  const list = installed();
+  return `<div class="sec"><h3>已安装</h3><small>${list.length} 个 · 共占用 39.6 MB</small></div>
+    ${list.map(p => `<div class="row"><span class="ico" style="--c:${p.color}">${ic(p.icon)}</span>
+      <div class="cm" data-open="${p.id}" style="cursor:pointer"><div class="cn"><span>${esc(p.name)}</span>${p.update ? '<span class="tag ok">有更新</span>' : ''}${!p.enabled ? '<span class="tag danger">已停用</span>' : ''}</div><small>${p.ver} · ${p.size} · ${p.official ? 'Pulse 官方' : esc(p.pub)}</small></div>
+      ${p.update ? `<button class="btn pri" data-update="${p.id}">更新</button>` : ''}
+      <button class="toggle" role="switch" aria-checked="${p.enabled}" aria-label="启用 ${esc(p.name)}" data-toggle="${p.id}"></button></div>`).join('')}
+    <div class="dev">${ic('puzzle')}<p><b style="color:var(--text)">开发增强包</b><br>从本地文件夹加载正在开发的增强包，修改后自动重新加载；只在本机生效。</p><button class="btn">选择文件夹…</button><button class="btn quiet">开发诊断</button></div>`;
+}
+function updatesTab() {
+  const list = updates();
+  if (!list.length) return `<div class="empty">${ic('update')}<b>全部是最新版本</b>上次检查：刚刚</div>`;
+  return `<div class="sec"><h3>${list.length} 个更新</h3><small>上次检查：刚刚</small><span style="flex:1"></span><button class="btn pri" data-updateall="1">全部更新</button></div>
+    ${list.map(p => rowOf(p, `${p.ver} → ${p.update} · ${p.id === 'ffmpeg' ? '修复 HEVC 10-bit 缩略图偏色；新增 AV1 封面' : '支持子模块；冲突文件显示在列表顶部'}`)).join('')}`;
+}
+function drawer() {
+  const p = P.find(x => x.id === S.detail);
+  if (!p) return '';
+  return `<div class="dh"><span class="ico" style="--c:${p.color}">${ic(p.icon)}</span>
+      <div style="min-width:0"><h3>${esc(p.name)}</h3><div class="pub">${p.official ? ic('verified') + 'Pulse 官方' : esc(p.pub)} · ${p.ver} · ${p.size}</div></div>
+      <button class="x" data-close aria-label="关闭详情">${ic('x')}</button></div>
+    <div class="db">
+      <div class="dact">${action(p, true)}${p.installed && p.update ? `<button class="btn" data-toggle="${p.id}">${p.enabled ? '停用' : '启用'}</button>` : ''}</div>
+      <p style="font-size:13px">${esc(p.desc)}</p>
+      <div class="shot"><div class="mini"><i></i><i></i><i></i></div></div>
+      <div class="dsec"><h4>它能做什么</h4>${p.perms.map(k => { const [icon, t, d, ask] = PERMS[k]; return `<div class="perm${ask ? ' ask' : ''}">${ic(icon)}<div><b>${t}</b><span>${d}</span></div></div>`; }).join('')}</div>
+      <div class="dsec"><h4>信息</h4><dl class="kv"><dt>发布者</dt><dd>${p.official ? 'Pulse（认证）' : esc(p.pub)}</dd><dt>版本</dt><dd>${p.ver}${p.update ? `（可更新到 ${p.update}）` : ''}</dd><dt>大小</dt><dd>${p.size}</dd>${p.meta ? `<dt>组件</dt><dd>${esc(p.meta)}</dd>` : ''}<dt>校验</dt><dd>${p.official ? '下载后核对登记的大小和校验值，完全一致才安装' : '发布者签名 · 清单哈希'}</dd></dl></div>
+      ${p.update ? `<div class="dsec"><h4>更新内容</h4><div class="ver"><b>${p.update}</b> · 修复与改进，安装后立即生效，无需重启 Pulse。</div></div>` : ''}
+      <div class="dsec"><h4>来源</h4><div class="dact"><button class="btn quiet">下载源设置</button>${p.installed ? '<button class="btn quiet">打开所在文件夹</button>' : ''}</div></div>
+    </div>`;
+}
+function render() {
+  const nUp = updates().length;
+  const nav = [['personal', '个性化', [['brush', '外观'], ['tabs', '标签页与窗口']]], ['browse', '浏览', [['folder', '文件与文件夹'], ['eye', '预览']]],
+    ['features', '功能', [['puzzle', '增强包', true], ['spark', 'Pulse 助手'], ['find', '搜索']]], ['system', '系统', [['home', '启动与集成'], ['keyboard', '快捷键'], ['gear', '高级']]]];
+  win.className = 'win' + (S.narrow ? ' narrow' : '') + (S.detail ? ' detail' : '');
+  win.innerHTML = `
+    <div class="tb">${ic('pulse', 'logo')}设置<span class="sp"></span><span class="cap">${ic('x')}</span></div>
+    <div class="body">
+      <nav class="nav" aria-label="设置分类"><div class="navsearch">${ic('srch')}<span>查找设置</span></div>
+        ${nav.map(([, h, items]) => `<div class="nh">${h}</div>${items.map(([icon, t, on]) => `<button class="ni${on ? ' on' : ''}" title="${t}">${ic(icon)}<span>${t}</span>${on && nUp ? `<span class="badge">${nUp}</span>` : ''}</button>`).join('')}`).join('')}
+      </nav>
+      <main class="content">
+        <div class="ph"><div class="grow"><h2>增强包</h2><p>按需为 Pulse 添加模块：预览更多格式、搜索文件正文……每个模块独立下载、在隔离进程中运行，随时可以停用或卸载，不影响 Pulse 本体。</p></div>
+          <label class="search">${ic('srch')}<input id="q" value="${esc(S.q)}" placeholder="搜索增强包" aria-label="搜索增强包"></label></div>
+        <div class="tabs" role="tablist">
+          <button class="tab" role="tab" data-tab="discover" aria-selected="${S.tab === 'discover'}">发现</button>
+          <button class="tab" role="tab" data-tab="installed" aria-selected="${S.tab === 'installed'}">已安装 <span class="count">${installed().length}</span></button>
+          <button class="tab" role="tab" data-tab="updates" aria-selected="${S.tab === 'updates'}">更新 ${nUp ? `<span class="count hot">${nUp}</span>` : ''}</button>
+        </div>
+        ${banner()}
+        ${S.tab === 'discover' ? `<div class="chips">${CATS.map(([v, t]) => `<button class="chip" data-cat="${v}" aria-pressed="${S.cat === v}">${t}</button>`).join('')}</div>${discover()}` : S.tab === 'installed' ? installedTab() : updatesTab()}
+      </main>
+    </div>
+    <div class="scrim" data-close></div>
+    <aside class="drawer" aria-label="增强包详情">${drawer()}</aside>`;
+}
+function startInstall(id, then) {
+  S.installing[id] = 0; render();
+  const t = setInterval(() => {
+    if (S.installing[id] == null) { clearInterval(t); return; }
+    S.installing[id] = Math.min(100, S.installing[id] + 17);
+    if (S.installing[id] >= 100) { clearInterval(t); delete S.installing[id]; then(); }
+    render();
+  }, 260);
+}
+win.addEventListener('click', e => {
+  const t = e.target.closest('[data-tab],[data-cat],[data-get],[data-update],[data-updateall],[data-cancel],[data-toggle],[data-remove],[data-reenable],[data-close],[data-open]');
+  if (!t) return;
+  const d = t.dataset, find = id => P.find(p => p.id === id);
+  if (d.tab) { S.tab = d.tab; S.detail = null; }
+  else if (d.cat) S.cat = d.cat;
+  else if (d.get) { startInstall(d.get, () => { const p = find(d.get); p.installed = true; p.enabled = true; }); return; }
+  else if (d.update) { startInstall(d.update, () => { const p = find(d.update); p.ver = p.update; delete p.update; p.enabled = true; if (S.state === 'crash') S.state = 'ok'; seg('#stateSeg', S.state); }); return; }
+  else if (d.updateall) { updates().forEach(p => startInstall(p.id, () => { p.ver = p.update; delete p.update; })); return; }
+  else if (d.cancel) delete S.installing[d.cancel];
+  else if (d.toggle) { const p = find(d.toggle); p.enabled = !p.enabled; }
+  else if (d.remove) { const p = find(d.remove); p.installed = false; p.enabled = false; delete p.update; }
+  else if (d.reenable) { find(d.reenable).enabled = true; S.state = 'ok'; seg('#stateSeg', 'ok'); }
+  else if (d.close !== undefined) S.detail = null;
+  else if (d.open) S.detail = d.open;
+  render();
+});
+win.addEventListener('keydown', e => { if (e.key === 'Escape' && S.detail) { S.detail = null; render(); } if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('.card')) { e.preventDefault(); S.detail = e.target.dataset.open; render(); } });
+win.addEventListener('input', e => { if (e.target.id === 'q') { S.q = e.target.value; S.tab = 'discover'; const pos = e.target.selectionStart; render(); const q = $('#q'); q.focus(); q.setSelectionRange(pos, pos); } });
+const seg = (sel, v) => document.querySelectorAll(sel + ' button').forEach(b => b.setAttribute('aria-pressed', b.dataset.v === v));
+document.addEventListener('click', e => {
+  const b = e.target.closest('.controls .seg button'); if (!b) return;
+  const id = b.parentElement.id, v = b.dataset.v;
+  if (id === 'stateSeg') { S.state = v; if (v === 'crash') { P.find(p => p.id === 'git').enabled = false; } else P.find(p => p.id === 'git').enabled = true; }
+  if (id === 'themeSeg') { if (v === 'sys') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v; }
+  if (id === 'widthSeg') S.narrow = v === 'narrow';
+  seg('#' + id, v); render();
+});
+/* ?theme=&state=&w=narrow&tab=&detail= for headless checks */
+const q = new URLSearchParams(location.search);
+if (q.get('theme')) { document.documentElement.dataset.theme = q.get('theme'); seg('#themeSeg', q.get('theme')); }
+if (q.get('state')) { S.state = q.get('state'); seg('#stateSeg', S.state); if (S.state === 'crash') P.find(p => p.id === 'git').enabled = false; }
+if (q.get('w') === 'narrow') { S.narrow = true; seg('#widthSeg', 'narrow'); }
+if (q.get('tab')) S.tab = q.get('tab');
+if (q.get('detail')) S.detail = q.get('detail');
+render();
+})();
+</script>
+</body>
+</html>

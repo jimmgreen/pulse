@@ -58,6 +58,7 @@ public:
     // while PlainText, find, selection and copy still span the whole book.
     int SectionCount() const noexcept { return static_cast<int>(sections_.size()); }
     int SectionIndex() const noexcept { return section_; }
+    bool CurrentSectionHasContent() const noexcept;
     // Shows a section scrolled to one of its blocks, or to its end.
     bool ShowSection(int index, int block = 0, bool at_end = false);
     // The contents sidebar and the next-chapter link. Click returns true when

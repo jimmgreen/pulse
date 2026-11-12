@@ -257,6 +257,15 @@ void ReleaseTrayTo(AppState& s, const std::wstring& dir_in, bool move) {
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
+void OpenTaskResult(AppState& s) {
+    const std::wstring path = s.taskResultPath;
+    if (path.empty()) return;
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) { NavigateTo(s, path); return; }
+    const std::wstring parent = fs::ParentPath(path);
+    if (!parent.empty()) NavigateTo(s, parent);
+}
+
 void NoteTrayReleaseFinished(AppState& s, const ops::FinishedTask& done) {
     if (!s.trayRelease.task || done.task_id != s.trayRelease.task) return;
     const AppState::TrayReleaseNote note = std::move(s.trayRelease);
@@ -1032,6 +1041,9 @@ bool EnsureOperationWindow(AppState& s) {
     operation_callbacks.open_folder = [hwnd](const std::wstring& folder) {
         if (AppState* state = GetAppState(hwnd)) NavigateTo(*state, folder);
     };
+    operation_callbacks.task_action = [hwnd](uint64_t task_id, const std::string& action) {
+        if (AppState* state = GetAppState(hwnd)) state->ops.InvokeExternalTaskAction(task_id, action);
+    };
     operation_callbacks.locate_results = [hwnd](uint64_t task_id) {
         if (AppState* state = GetAppState(hwnd)) LocateOperationResults(*state, task_id);
     };
@@ -1494,6 +1506,21 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
         s.appPrefs.status_hints_learned = true;
         s.appPrefs.Save();
     }
+    // A plugin task that finished with a result: say what it made (HTML 已解压到), once per task
+    // across the windows sharing this core, with 打开文件夹 and 撤销.
+    static uint64_t task_result_shown = 0;
+    if (!status.active && status.external && status.external_outcome == ops::ExternalOutcome::Completed &&
+        !status.external_result.empty() && status.task_id != task_result_shown && s.hwnd) {
+        task_result_shown = status.task_id;
+        std::vector<ui::SnackAction> actions;
+        if (!status.external_result_path.empty()) {
+            s.taskResultPath = status.external_result_path;
+            actions.push_back({l10n::Get(l10n::StringId::OpenFolder), WM_TASK_RESULT_OPEN});
+        }
+        if (s.ops.CanUndo()) actions.push_back({l10n::Get(l10n::StringId::SnackUndo), WM_UNDO_DELETE});
+        s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Undo, status.external_result, status.external_detail,
+                                       std::move(actions), s.ops.CanUndo() ? L"Ctrl+Z" : L"");
+    }
 
     if (s.operationHistoryTaskId && !status.active) return;
     if (status.active) s.operationHistoryTaskId = 0;
@@ -1599,7 +1626,8 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
         // The ops notification shows the locked-item prompt; a timer tick
         // that sees the failure first must not open the failure window.
         if (locked_failure) return;
-        if (ErrorIs(status.last_error, L"已取消", L"Canceled")) {
+        if (ErrorIs(status.last_error, L"已取消", L"Canceled") ||
+            (status.external && status.external_outcome == ops::ExternalOutcome::Cancelled)) {
             HideOperationWindow(s);
             return;
         }

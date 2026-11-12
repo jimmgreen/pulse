@@ -39,4 +39,10 @@ const wchar_t* RoleName(ProcessRole role) noexcept;
 using FaultAttribution = const char* (*)(const void* address) noexcept;
 void SetFaultAttribution(FaultAttribution attribution) noexcept;
 
+// Called from the crash path when FaultAttribution returns nullptr, to query
+// any thread-local extension callback active on the crashing thread as an
+// unconfirmed diagnostic clue (never used to auto-disable a package).
+using ActiveCallClueFn = const char* (*)() noexcept;
+void SetActiveCallClue(ActiveCallClueFn clue) noexcept;
+
 } // namespace pulse::crash

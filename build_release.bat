@@ -32,5 +32,7 @@ if defined LUMATEXT_SOURCE_DIR (
     cmake %PULSE_CMAKE_FRESH% -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=%PULSE_BUILD_TYPE% %PULSE_UPDATE_CONFIG%
 )
 if errorlevel 1 exit /b 1
-cmake --build build %PULSE_CMAKE_CLEAN%
+rem Only what the installer ships (pulse_package, CMakeLists.txt); test programs
+rem build by name when a test needs them, so a broken test never blocks a package.
+cmake --build build --target pulse_package %PULSE_CMAKE_CLEAN%
 if errorlevel 1 exit /b 1

@@ -1,6 +1,7 @@
 #include "../common/windows_compat.h"
 #include "ui_renderer.h"
 #include "ui_renderer_internal.h"
+#include "window_helpers.h"
 #include "ai_panel_icons.h"
 #include "bloom_accent_picker.h"
 #include "../common/localization.h"
@@ -632,6 +633,81 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
                 label(row,l10n::Get(title),L"",glyph,right);
                 painter_.DrawWrappedCaption(l10n::Get(desc),D2D1::Point2F(row.left+54*scale_,row.top+35*scale_),right-row.left-54*scale_,theme.text_secondary);
             };
+            action_label(lay.dialog_history_heading,lay.dialog_refresh_button,I::DialogHistoryTitle,I::DialogHistoryDesc,L"\xE9D9");
+            button(lay.dialog_refresh_button,l10n::Get(I::DialogHistoryRefresh),H::SettingsDialogManagement,4,false,available);
+            const auto note=lay.dialog_history_note;
+            const auto& history_note=vm.settings_dialog_history_note.empty() ? l10n::Get(I::DialogHistoryEmpty) : vm.settings_dialog_history_note;
+            painter_.DrawWrappedCaption(history_note,D2D1::Point2F(note.left+20*scale_,note.top+12*scale_),
+                (std::max)(40*scale_,note.right-note.left-40*scale_),theme.text_secondary);
+            // dialog_records_mockup.html: icon, name and file name, status chip, one
+            // summary line; what happened / what to do in a box; a later success.
+            namespace R=dialog_records;
+            for(const auto& [caption_row,group]:lay.dialog_history_groups) {
+                divider(D2D1::RectF(caption_row.left,caption_row.top,caption_row.right,caption_row.top));
+                painter_.FillRoundedRect(caption_row,0,theme.surface_sheet);
+                painter_.DrawText(l10n::Get(group==1 ? I::DialogRecordGroupRestart : I::DialogRecordGroupRecent),
+                    D2D1::RectF(caption_row.left+R::kSide*scale_,caption_row.top,caption_row.right-R::kSide*scale_,caption_row.bottom),
+                    compositor_->SmallFormat(),theme.text_secondary);
+            }
+            const bool dark_theme=(theme.bg.r+theme.bg.g+theme.bg.b)<1.5f;
+            const D2D1_COLOR_F success=dark_theme ? HexColor(0x5FD4A0) : HexColor(0x0F7B4F);
+            const auto measure_text=[&](std::wstring_view text){return typography::MeasureLine(compositor_,compositor_->TextFormat(),text);};
+            const auto measure_small=[&](std::wstring_view text){return typography::MeasureLine(compositor_,compositor_->SmallFormat(),text);};
+            for(size_t i=0;i<lay.dialog_history_rows.size() && i<vm.settings_dialog_records.size();++i) {
+                const auto row=lay.dialog_history_rows[i];const auto& record=vm.settings_dialog_records[i];
+                divider(D2D1::RectF(row.left,row.top,row.right,row.top));
+                const float top=row.top+R::kPad*scale_;
+                // Program icon: drawn 1:1 when the worker extracted it at this size.
+                const float edge=std::round(R::kIcon*scale_);
+                const float icon_x=std::round(row.left+R::kSide*scale_),icon_y=std::round(top+(R::kHead*scale_-edge)*0.5f);
+                const auto icon=D2D1::RectF(icon_x,icon_y,icon_x+edge,icon_y+edge);
+                if(ID2D1Bitmap* bitmap=record.icon ? AppIconBitmap(record.icon) : nullptr) {
+                    compositor_->Dc()->DrawBitmap(bitmap,&icon,1.0f,D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+                } else {
+                    painter_.FillRoundedRect(icon,7*scale_,WithAlpha(theme.text,0.06f));
+                    DrawStoreIcon(compositor_->Dc(),StoreIcon::Square,D2D1::RectF(icon.left+8*scale_,icon.top+8*scale_,icon.right-8*scale_,icon.bottom-8*scale_),
+                        theme.text_secondary,1.3f);
+                }
+                // Status chip, centered on the name line.
+                const float chip_w=record.status.empty() ? 0.0f : painter_.MeasureBadgeWidth(record.status);
+                const float chip_top=top+(R::kTitleH-22.0f)*0.5f*scale_;
+                const auto chip=D2D1::RectF(row.right-R::kSide*scale_-chip_w,chip_top,row.right-R::kSide*scale_,chip_top+22*scale_);
+                if(chip_w>0) painter_.DrawBadge({chip,record.status,record.tone==1 ? fluent::BadgeKind::Success :
+                    record.tone==2 ? fluent::BadgeKind::Warning : record.tone==3 ? fluent::BadgeKind::Danger : fluent::BadgeKind::Neutral});
+                // Name, then the executable name in the caption color while there is room.
+                const float text_left=row.left+R::TextLeft()*scale_;
+                const float name_right=(chip_w>0 ? chip.left-12*scale_ : row.right-R::kSide*scale_);
+                const auto name=FitTextEnd(record.application,(std::max)(0.0f,name_right-text_left),measure_text);
+                const float name_w=measure_text(name);
+                painter_.DrawText(name,D2D1::RectF(text_left,top,name_right,top+R::kTitleH*scale_),compositor_->TextFormat(),theme.text);
+                const float file_left=text_left+name_w+6*scale_;
+                if(!record.file.empty() && record.file!=record.application && name_right-file_left>=40*scale_)
+                    painter_.DrawText(FitTextEnd(record.file,name_right-file_left,measure_small),
+                        D2D1::RectF(file_left,top+1*scale_,name_right,top+R::kTitleH*scale_),compositor_->SmallFormat(),theme.text_secondary);
+                // Summary: operation, count and the latest event in the list's date style.
+                std::wstring meta=record.meta;
+                if(record.last_event) meta+=(meta.empty() ? L"" : L" · ")+SmartListDate(record.last_event);
+                painter_.DrawText(FitTextEnd(meta,(std::max)(0.0f,row.right-R::kSide*scale_-text_left),measure_small),
+                    D2D1::RectF(text_left,top+R::kTitleH*scale_,row.right-R::kSide*scale_,top+R::kHead*scale_),compositor_->SmallFormat(),theme.text_secondary);
+                float y=top+R::kHead*scale_;
+                if(const float box_h=R::BoxHeight(painter_,record,row.right-row.left,scale_);box_h>0) {
+                    const auto box=D2D1::RectF(text_left,y+R::kBoxTop*scale_,row.right-R::kSide*scale_,y+R::kBoxTop*scale_+box_h);
+                    painter_.FillRoundedRect(box,6*scale_,WithAlpha(theme.text,dark_theme ? 0.08f : 0.05f));
+                    const auto [what,todo]=R::SplitDetail(record.detail);
+                    const float width=R::BoxTextWidth(row.right-row.left,scale_);
+                    const auto origin=D2D1::Point2F(box.left+R::kBoxPadX*scale_,box.top+R::kBoxPadY*scale_);
+                    painter_.DrawWrappedCaption(what,origin,width,theme.text);
+                    if(!todo.empty()) painter_.DrawWrappedCaption(todo,D2D1::Point2F(origin.x,origin.y+painter_.MeasureWrappedCaptionHeight(what,width)+2*scale_),
+                        width,theme.text_secondary);
+                    y=box.bottom;
+                }
+                if(!record.later.empty()) {
+                    const float note_top=y+R::kLaterTop*scale_;
+                    DrawStoreIcon(compositor_->Dc(),StoreIcon::Check,D2D1::RectF(text_left,note_top+2*scale_,text_left+12*scale_,note_top+14*scale_),success,1.6f);
+                    painter_.DrawWrappedCaption(record.later,D2D1::Point2F(text_left+R::kLaterIcon*scale_,note_top),
+                        R::LaterTextWidth(row.right-row.left,scale_),success);
+                }
+            }
             action_label(lay.dialog_application_row,lay.dialog_export_button,I::StartupDiagnostics,I::StartupDiagnosticsDesc,L"\xE8A5");
             button(lay.dialog_export_button,l10n::Get(I::StartupDiagnosticsExport),H::SettingsDialogManagement,12,false,available);
             toggle(lay.dialog_jump_row,I::DialogJumpBar,I::DialogJumpBarDesc,L"\xE8E5",vm.settings_dialog_jump_bar,41);

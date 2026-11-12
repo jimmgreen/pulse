@@ -44,6 +44,37 @@ int ClampCap(int v, int lo, int hi, int fallback) {
 constexpr const wchar_t* kOrderKeys[] = { L"item", L"background", L"row_buttons" };
 static_assert(std::size(kOrderKeys) == static_cast<size_t>(BuiltinMenuSurface::Count));
 
+std::wstring AsciiWide(std::string_view s) {
+    return std::wstring(s.begin(), s.end());
+}
+
+bool TryWideAscii(std::wstring_view w, std::string& out) {
+    out.clear();
+    if (w.empty() || w.size() > 192) return false;
+    out.reserve(w.size());
+    for (const wchar_t ch : w) {
+        if (ch <= 0x20 || ch > 0x7e) return false;
+        out.push_back(static_cast<char>(ch));
+    }
+    return true;
+}
+
+const wchar_t* PlacementKey(ExtensionMenuPlacement p) {
+    switch (p) {
+    case ExtensionMenuPlacement::Flat: return L"flat";
+    case ExtensionMenuPlacement::Submenu: return L"submenu";
+    case ExtensionMenuPlacement::Hidden: return L"hidden";
+    default: return L"default";
+    }
+}
+
+ExtensionMenuPlacement ParsePlacementKey(std::wstring_view v) {
+    if (v == L"flat") return ExtensionMenuPlacement::Flat;
+    if (v == L"submenu") return ExtensionMenuPlacement::Submenu;
+    if (v == L"hidden") return ExtensionMenuPlacement::Hidden;
+    return ExtensionMenuPlacement::Default;
+}
+
 } // namespace
 
 void ContextMenuPrefs::ResetToDefaults() {
@@ -63,6 +94,29 @@ void ContextMenuPrefs::ResetToDefaults() {
     slow_ext.clear();
     builtin_hidden = 0;
     ResetBuiltinOrder();
+    extension_placement.clear();
+    extension_hidden_commands.clear();
+}
+
+ExtensionMenuPlacement ContextMenuPrefs::PlacementForExtension(std::string_view package_id) const {
+    const auto it = extension_placement.find(std::string(package_id));
+    return it == extension_placement.end() ? ExtensionMenuPlacement::Default : it->second;
+}
+
+void ContextMenuPrefs::SetExtensionPlacement(std::string_view package_id, ExtensionMenuPlacement placement) {
+    if (package_id.empty()) return;
+    if (placement == ExtensionMenuPlacement::Default) extension_placement.erase(std::string(package_id));
+    else extension_placement[std::string(package_id)] = placement;
+}
+
+bool ContextMenuPrefs::ExtensionCommandVisible(std::string_view identity) const {
+    return !extension_hidden_commands.contains(std::string(identity));
+}
+
+void ContextMenuPrefs::SetExtensionCommandVisible(std::string_view identity, bool on) {
+    if (identity.empty()) return;
+    if (on) extension_hidden_commands.erase(std::string(identity));
+    else extension_hidden_commands.insert(std::string(identity));
 }
 
 bool ContextMenuPrefs::CategoryEnabled(ipc::CtxMenuCategory c) const {
@@ -358,7 +412,30 @@ std::wstring ContextMenuPrefs::ToJson() const {
         ++se;
         out += (se == slow_ext.size()) ? L"\n" : L",\n";
     }
-    out += L"  }\n}\n";
+    out += L"  },\n  \"extensions\":{\n    \"placement\":{";
+    size_t ep = 0;
+    for (const auto& [pkg, mode] : extension_placement) {
+        if (mode == ExtensionMenuPlacement::Default) continue;
+        std::wstring key;
+        pulse::json::Escape(AsciiWide(pkg), key);
+        out += (ep == 0 ? L"\n      \"" : L",\n      \"");
+        out += key;
+        out += L"\":{\"mode\":\"";
+        out += PlacementKey(mode);
+        out += L"\"}";
+        ++ep;
+    }
+    out += ep == 0 ? L"},\n    \"commands\":{" : L"\n    },\n    \"commands\":{";
+    size_t ec = 0;
+    for (const auto& id : extension_hidden_commands) {
+        std::wstring key;
+        pulse::json::Escape(AsciiWide(id), key);
+        out += (ec == 0 ? L"\n      \"" : L",\n      \"");
+        out += key;
+        out += L"\":{\"visible\":false}";
+        ++ec;
+    }
+    out += ec == 0 ? L"}\n  }\n}\n" : L"\n    }\n  }\n}\n";
     return out;
 }
 
@@ -443,6 +520,26 @@ bool ContextMenuPrefs::FromJson(const std::wstring& json) {
     // Purge disable state older builds persisted for SendTo (#77): the
     // exemption above keeps it clear, so this migration is idempotent.
     slow_ext.erase(ipc::SendToHandlerCatalogKey());
+
+    extension_placement.clear();
+    extension_hidden_commands.clear();
+    const std::wstring ext_obj = ExtractObject(json, L"extensions");
+    if (!ext_obj.empty()) {
+        pulse::json::ForEachMember(ExtractObject(ext_obj, L"placement"),
+            [&](const std::wstring& key, const std::wstring& block) {
+                std::string pkg;
+                if (!TryWideAscii(key, pkg)) return;
+                const auto mode = ParsePlacementKey(pulse::json::ExtractString(block, L"mode"));
+                if (mode != ExtensionMenuPlacement::Default) extension_placement[std::move(pkg)] = mode;
+            });
+        pulse::json::ForEachMember(ExtractObject(ext_obj, L"commands"),
+            [&](const std::wstring& key, const std::wstring& block) {
+                std::string id;
+                if (!TryWideAscii(key, id)) return;
+                if (!pulse::json::ExtractBool(block, L"visible", true))
+                    extension_hidden_commands.insert(std::move(id));
+            });
+    }
     const int version = pulse::json::ExtractInt(json, L"version", 1);
     if (version < 2) {
         // Drop the old heuristic's verdicts (every entry there was recorded

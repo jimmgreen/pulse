@@ -21,7 +21,8 @@ public:
     IndexClient(const IndexClient&) = delete;
     IndexClient& operator=(const IndexClient&) = delete;
 
-    void Start(HWND notify, UINT status_msg, UINT search_msg, std::wstring pipe_name = kPipeName);
+    void Start(HWND notify, UINT status_msg, UINT search_msg, std::wstring pipe_name = kPipeName,
+               std::wstring helper_executable = {});
     void Stop();
 
     std::wstring Status() const;
@@ -85,6 +86,7 @@ private:
     UINT search_msg_ = 0;
     HANDLE pipe_ = INVALID_HANDLE_VALUE;
     std::wstring pipe_name_ = kPipeName;
+    std::wstring helper_executable_; // Optional caller-verified helper; default retains ExePath policy.
     HANDLE child_proc_ = nullptr;
     HANDLE child_thread_ = nullptr;
     ULONGLONG service_start_tick_ = 0;   // last StartStoppedService attempt (Worker thread only)

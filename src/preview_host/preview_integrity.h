@@ -51,7 +51,7 @@ inline Integrity DescribeIntegrity(const DecodeResult& result, bool made) {
         status.state = IntegrityState::Partial;
         status.reason = IntegrityReason::SourceFallback;
     }
-    if (error == L"docx-reading") {
+    if (error == L"docx-reading" || error == L"office-reading") {
         status.state = IntegrityState::Partial;
         status.reason = IntegrityReason::ReadingConversion;
     } else if (!error.empty()) {

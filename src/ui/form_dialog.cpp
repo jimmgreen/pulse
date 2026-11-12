@@ -2,6 +2,7 @@
 // a composed borderless popup drawn with the Fluent painter; the form is an
 // ExtensionTreeView child filling the area between message and footer.
 #include "form_dialog.h"
+#include "../common/picker_owner_guard.h"
 #include "../common/windows_compat.h"
 #include "dialog_lifecycle.h"
 #include "extension_tree.h"
@@ -9,6 +10,8 @@
 #include "fluent_components.h"
 #include "ui_compositor.h"
 #include "window_helpers.h"
+#include "store_icons.h"
+#include "typography.h"
 #include "../common/localization.h"
 
 #include <windowsx.h>
@@ -23,6 +26,26 @@ constexpr UINT kFitMessage = WM_APP + 0x32;
 constexpr float kMinFittedFormH = 24.0f;
 constexpr float kTitleH = 36.0f, kPad = 20.0f, kButtonH = 32.0f, kButtonGap = 8.0f, kMinButtonW = 88.0f;
 constexpr int kHitClose = 1, kHitButton = 10;
+constexpr float kHeadingH = 28.0f, kSubjectH = 56.0f;
+// The accent as a foreground on the dialog surface (lighter in dark mode).
+D2D1_COLOR_F AccentForeground(const Theme& theme) {
+    if (IsHighContrast()) return theme.accent;
+    const auto& a = theme.accent;
+    return theme.bg.r + theme.bg.g + theme.bg.b < 1.5f
+        ? D2D1::ColorF(a.r + (1.0f - a.r) * 0.35f, a.g + (1.0f - a.g) * 0.35f, a.b + (1.0f - a.b) * 0.35f, 1.0f) : a;
+}
+std::optional<StoreIcon> IconOf(FormDialogIcon icon) {
+    switch (icon) {
+    case FormDialogIcon::Key: return StoreIcon::Key;
+    case FormDialogIcon::Archive: return StoreIcon::Box;
+    case FormDialogIcon::Checksum: return StoreIcon::Hash;
+    case FormDialogIcon::Info: return StoreIcon::Info;
+    case FormDialogIcon::Warning: return StoreIcon::Warn;
+    case FormDialogIcon::Folder: return StoreIcon::Folder;
+    case FormDialogIcon::Lock: return StoreIcon::Lock;
+    default: return std::nullopt;
+    }
+}
 } // namespace
 
 struct FormDialog::Impl : std::enable_shared_from_this<Impl> {
@@ -31,19 +54,45 @@ struct FormDialog::Impl : std::enable_shared_from_this<Impl> {
     Compositor compositor;
     fluent::Painter painter;
     ExtensionTreeView tree;
-    bool dark = false, done = false, running = false, owner_disabled = false;
+    std::unique_ptr<pulse::PickerOwnerGuard> owner_guard;
+    bool dark = false, done = false, running = false;
     bool backdrop = false;
     float scale = 1.0f, message_h = 0.0f, height = 200.0f, fitted_form_h = 0.0f;
     D2D1_COLOR_F accent = HexColor(0x0078D4);
     int hover = 0, pressed = 0;
+    ComPtr<IDWriteTextFormat> heading_format, subject_format;
+    bool HasHeading() const { return !spec.heading.empty(); }
+    bool HasSubject() const { return spec.subject_kind != FormDialogSubject::None || !spec.subject.empty(); }
+    void CreateFormats() {
+        auto* factory = compositor.DwriteFactory();
+        auto make = [&](ComPtr<IDWriteTextFormat>& out, float size, DWRITE_FONT_WEIGHT weight) {
+            out.reset();
+            if (!factory) return;
+            typography::TextFormatSpec format;
+            format.role = typography::FontRole::Text;
+            format.size = size * scale;
+            format.weight = weight;
+            if (FAILED(typography::CreateTextFormat(factory, format, &out)) || !out.get()) return;
+            out->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            out->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+            out->SetTrimming(&trimming, nullptr);
+        };
+        make(heading_format, 18.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+        make(subject_format, 13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    }
 
     float Width() const { return std::clamp(spec.width_dip, 360.0f, 720.0f); }
     // The requested height is a ceiling; the form shrinks to its laid-out content.
     float MaxFormHeight() const { return spec.form ? std::clamp(spec.form_height_dip, 40.0f, 640.0f) : 0.0f; }
     float FormHeight() const { return fitted_form_h > 0.0f ? fitted_form_h : MaxFormHeight(); }
-    float MessageTop() const { return kTitleH + 16.0f; }
-    float FormTop() const { return MessageTop() + (message_h > 0 ? message_h / scale + 12.0f : 0.0f); }
-    float FooterTop() const { return FormTop() + (spec.form ? FormHeight() + 16.0f : 4.0f); }
+    float HeadingTop() const { return kTitleH + 16.0f; }
+    float MessageTop() const { return HeadingTop() + (HasHeading() ? kHeadingH + 4.0f : 0.0f); }
+    float SubjectTop() const { return MessageTop() + (message_h > 0 ? message_h / scale + 12.0f : 0.0f); }
+    float FormTop() const { return SubjectTop() + (HasSubject() ? kSubjectH + 14.0f : 0.0f); }
+    float FooterTop() const { return FormTop() + (spec.form ? FormHeight() + 16.0f : 4.0f) + (Banded() ? 12.0f : 0.0f); }
+    // The newer layout (heading or card) sets the buttons on a shaded band.
+    bool Banded() const { return HasHeading() || HasSubject(); }
     D2D1_RECT_F CloseRect() const { return DipRect(scale, Width() - 46.0f, 0, 46.0f, kTitleH); }
     D2D1_RECT_F ButtonRect(size_t index) const {
         float right = Width() - kPad;
@@ -81,7 +130,77 @@ struct FormDialog::Impl : std::enable_shared_from_this<Impl> {
     void Measure() {
         message_h = spec.message.empty() ? 0.0f
             : painter.MeasureWrappedCaptionHeight(spec.message, (Width() - 2 * kPad) * scale);
-        height = FooterTop() + kButtonH + kPad;
+        height = FooterTop() + kButtonH + (Banded() ? 14.0f : kPad);
+    }
+
+    void DrawSubjectArt(D2D1_RECT_F box) {
+        auto* dc = compositor.Dc();
+        if (spec.subject_kind == FormDialogSubject::Archive && !IsHighContrast()) {
+            DrawProductTile(dc, box, ProductArt::SevenZip, HexColor(0x527D70), StoreIcon::Box);
+            return;
+        }
+        // 16-grid artwork scaled into the box: a two-tone folder or a page with a fold.
+        const float u = (box.right - box.left) / 16.0f;
+        auto at = [&](float x, float y, float w, float h) { return D2D1::RectF(box.left + x * u, box.top + y * u, box.left + (x + w) * u, box.top + (y + h) * u); };
+        if (spec.subject_kind == FormDialogSubject::Folder) {
+            painter.FillRoundedRect(at(1.5f, 3.25f, 5.2f, 3.0f), u, HexColor(0xE8B84A));
+            painter.FillRoundedRect(at(1.5f, 4.75f, 13.0f, 8.25f), u, HexColor(0xE8B84A));
+            painter.FillRoundedRect(at(1.5f, 6.25f, 13.0f, 6.75f), u, HexColor(0xF4CB64));
+        } else {
+            painter.FillRoundedRect(at(3.5f, 1.5f, 9.0f, 13.0f), u * 0.8f, HexColor(0x3E6FC2));
+            painter.FillRoundedRect(at(9.5f, 1.5f, 3.0f, 3.0f), u * 0.5f, HexColor(0x9DB7E1));
+        }
+    }
+
+    void DrawBody(const Theme& theme) {
+        auto* dc = compositor.Dc();
+        const float content_w = Width() - 2 * kPad;
+        if (HasHeading()) {
+            float x = kPad;
+            if (spec.extension_icon.has_value()) {
+                DrawExtensionIcon(dc, *spec.extension_icon, DipRect(scale, x, HeadingTop() + 4.0f, 20.0f, 20.0f),
+                                  AccentForeground(theme), &theme, 1.5f);
+                x += 28.0f;
+            } else if (const auto icon = IconOf(spec.icon)) {
+                DrawStoreIcon(dc, *icon, DipRect(scale, x, HeadingTop() + 4.0f, 20.0f, 20.0f), AccentForeground(theme), 1.5f);
+                x += 28.0f;
+            }
+            painter.DrawText(spec.heading, DipRect(scale, x, HeadingTop(), Width() - kPad - x, kHeadingH),
+                             heading_format.get() ? heading_format.get() : compositor.HeaderFormat(), theme.text);
+        }
+        if (HasSubject()) {
+            const auto card = DipRect(scale, kPad, SubjectTop(), content_w, kSubjectH);
+            painter.FillRoundedRect(card, 6.0f * scale, WithAlpha(theme.text, dark ? 0.06f : 0.035f));
+            painter.StrokeRoundedRect(card, 6.0f * scale, theme.stroke_card);
+            const float art = spec.subject_kind == FormDialogSubject::Archive ? 36.0f : 30.0f;
+            DrawSubjectArt(DipRect(scale, kPad + 10.0f + (36.0f - art) * 0.5f, SubjectTop() + (kSubjectH - art) * 0.5f, art, art));
+            const float tx = kPad + 56.0f, tw = content_w - 66.0f;
+            const bool two = !spec.subject_detail.empty();
+            painter.DrawText(spec.subject, DipRect(scale, tx, SubjectTop() + (two ? 9.0f : 18.0f), tw, 20.0f),
+                             subject_format.get() ? subject_format.get() : compositor.TextFormat(), theme.text);
+            if (two) painter.DrawText(spec.subject_detail, DipRect(scale, tx, SubjectTop() + 29.0f, tw, 18.0f),
+                                      compositor.SmallFormat(), theme.text_secondary);
+        }
+        if (Banded()) {
+            const float band = FooterTop() - 14.0f;
+            painter.FillRoundedRect(DipRect(scale, 0, band, Width(), height - band), 0,
+                                    dark ? HexColor(0x000000, 0.2f) : HexColor(0x000000, 0.045f));
+            painter.FillRoundedRect(DipRect(scale, 0, band, Width(), 1), 0, theme.stroke_divider);
+        }
+        if (!spec.footnote.empty()) {
+            const float right = (spec.buttons.empty() ? Width() - kPad : ButtonRect(0).left / scale) - 12.0f;
+            float x = kPad;
+            if (spec.extension_footnote_icon.has_value()) {
+                DrawExtensionIcon(dc, *spec.extension_footnote_icon, DipRect(scale, x, FooterTop() + 9.0f, 14.0f, 14.0f),
+                                  theme.text_secondary, &theme, 1.3f);
+                x += 20.0f;
+            } else if (const auto icon = IconOf(spec.footnote_icon)) {
+                DrawStoreIcon(dc, *icon, DipRect(scale, x, FooterTop() + 9.0f, 14.0f, 14.0f), theme.text_secondary, 1.3f);
+                x += 20.0f;
+            }
+            painter.DrawText(spec.footnote, DipRect(scale, x, FooterTop(), (std::max)(0.0f, right - x), kButtonH),
+                             compositor.SmallFormat(), theme.text_secondary);
+        }
     }
 
     int Hit(float x, float y) const {
@@ -97,6 +216,7 @@ struct FormDialog::Impl : std::enable_shared_from_this<Impl> {
             compositor.RecreateTextFormats(scale);
             painter.SetCompositor(&compositor);
             painter.SetScale(scale);
+            CreateFormats();
         }
         if (!compositor.Dc()) return;
         const bool high_contrast = IsHighContrast();
@@ -112,7 +232,8 @@ struct FormDialog::Impl : std::enable_shared_from_this<Impl> {
         painter.FillRoundedRect(DipRect(scale, 0, kTitleH, Width(), 1), 0, theme.stroke_divider);
         if (!spec.message.empty())
             painter.DrawWrappedCaption(spec.message, D2D1::Point2F(kPad * scale, MessageTop() * scale),
-                                       (Width() - 2 * kPad) * scale, theme.text);
+                                       (Width() - 2 * kPad) * scale, HasHeading() ? theme.text_secondary : theme.text);
+        DrawBody(theme);
         for (size_t i = 0; i < spec.buttons.size(); ++i) {
             const int id = kHitButton + static_cast<int>(i);
             fluent::ControlState state{};
@@ -140,13 +261,15 @@ struct FormDialog::Impl : std::enable_shared_from_this<Impl> {
         auto callback = answer ? std::move(spec.on_closed) : decltype(spec.on_closed){};
         spec.on_closed = nullptr;
         spec.on_states_changed = nullptr;
-        if (owner_disabled && IsWindow(owner)) { EnableWindow(owner, TRUE); owner_disabled = false; }
+        spec.on_command = nullptr;
+        spec.command_enabled = nullptr;
         if (IsWindow(hwnd)) {
+            if (owner_guard) owner_guard->RestoreBeforeDialogHide(hwnd);
             HideComposedDialog(hwnd, nullptr);
             tree.Close();
             DestroyWindow(hwnd);
         }
-        if (IsWindow(owner) && answer) SetForegroundWindow(owner);
+        owner_guard.reset();
         if (callback) callback(button, std::move(states));
     }
 
@@ -161,6 +284,10 @@ struct FormDialog::Impl : std::enable_shared_from_this<Impl> {
         auto keep = shared_from_this();
         MSG message{};
         while (!done) {
+            if (owner_guard && !owner_guard->Alive()) {
+                Finish(spec.cancel_button, true);
+                break;
+            }
             const BOOL got = GetMessageW(&message, nullptr, 0, 0);
             if (got <= 0) {
                 if (got == 0) PostQuitMessage(static_cast<int>(message.wParam));
@@ -202,6 +329,7 @@ struct FormDialog::Impl : std::enable_shared_from_this<Impl> {
             compositor.RecreateTextFormats(scale);
             painter.SetCompositor(&compositor);
             painter.SetScale(scale);
+            CreateFormats();
             return 0;
         case WM_NCCALCSIZE:
             return 0;
@@ -282,6 +410,11 @@ bool FormDialog::Show(HWND owner, FormDialogSpec spec, bool dark, D2D1_COLOR_F a
     self.dark = dark;
     self.accent = accent;
     self.scale = static_cast<float>(pulse::compat::WindowDpi(owner)) / 96.0f;
+    self.owner_guard = std::make_unique<pulse::PickerOwnerGuard>(owner);
+    if (self.owner_guard->Error() != ERROR_SUCCESS || !self.owner_guard->Alive()) {
+        self.owner_guard.reset();
+        return false;
+    }
     WNDCLASSEXW wc{sizeof(wc)};
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpfnWndProc = Impl::Proc;
@@ -291,8 +424,10 @@ bool FormDialog::Show(HWND owner, FormDialogSpec spec, bool dark, D2D1_COLOR_F a
     const int width = static_cast<int>(std::lround(self.Width() * self.scale));
     if (!CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_CONTROLPARENT, kClass, self.spec.title.c_str(),
                          WS_POPUP | WS_THICKFRAME | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, width,
-                         static_cast<int>(200 * self.scale), owner, nullptr, wc.hInstance, &self) || !self.hwnd)
+                         static_cast<int>(200 * self.scale), owner, nullptr, wc.hInstance, &self) || !self.hwnd) {
+        self.owner_guard.reset();
         return false;
+    }
     self.Measure();
     const int height = static_cast<int>(std::lround(self.height * self.scale));
     CenterOwnedWindow(self.hwnd, owner, width, height);
@@ -309,16 +444,25 @@ bool FormDialog::Show(HWND owner, FormDialogSpec spec, bool dark, D2D1_COLOR_F a
             for (const auto& change : changes) entries.push_back({change.key, change.value});
             if (!entries.empty()) alive->spec.on_states_changed(entries);
         };
-        callbacks.command_enabled = [](const std::string&) { return false; };
+        callbacks.on_command = [weak](const std::string& id) {
+            const auto alive = weak.lock();
+            if (!alive || alive->done || !alive->spec.on_command) return;
+            alive->spec.on_command(id);
+        };
+        callbacks.command_enabled = [weak](const std::string& id) {
+            const auto alive = weak.lock();
+            if (!alive || alive->done || !alive->spec.command_enabled) return false;
+            return alive->spec.command_enabled(id);
+        };
         if (!self.tree.Create(self.hwnd, *self.spec.form, std::move(callbacks), dark, accent, self.scale)) {
+            if (self.owner_guard) self.owner_guard->RestoreBeforeDialogHide(self.hwnd);
             DestroyWindow(self.hwnd);
+            self.owner_guard.reset();
             return false;
         }
         self.tree.SetBounds(self.FormRect());
         self.Fit(true);
     }
-    EnableWindow(owner, FALSE);
-    self.owner_disabled = true;
     ShowWindow(self.hwnd, SW_SHOW);
     SetForegroundWindow(self.hwnd);
     if (self.tree.Hwnd()) SetFocus(self.tree.Hwnd());
@@ -330,6 +474,22 @@ bool FormDialog::SetStates(const std::vector<extensions::UiStateEntry>& states) 
     if (!IsOpen() || !impl_->tree.Hwnd() || !impl_->tree.SetStates(states)) return false;
     PostMessageW(impl_->hwnd, kFitMessage, 0, 0);
     return true;
+}
+
+bool FormDialog::UpdateForm(const extensions::UiTree& form) {
+    if (!IsOpen() || !impl_->tree.Hwnd() || !impl_->tree.UpdateTree(form)) return false;
+    impl_->spec.form = form;
+    PostMessageW(impl_->hwnd, kFitMessage, 0, 0);
+    return true;
+}
+
+std::optional<std::string> FormDialog::StateValue(const std::string& key) const {
+    if (!IsOpen() || !impl_->tree.Hwnd()) return std::nullopt;
+    return impl_->tree.StateValue(key);
+}
+
+void FormDialog::RefreshForm() {
+    if (IsOpen() && impl_->tree.Hwnd()) impl_->tree.Refresh();
 }
 void FormDialog::Dismiss() { if (IsOpen()) impl_->Cancel(); }
 void FormDialog::Destroy() { if (impl_ && impl_->hwnd && !impl_->done) impl_->Finish(-1, false); }

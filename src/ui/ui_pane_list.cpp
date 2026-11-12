@@ -380,7 +380,7 @@ bool MainRenderer::DrawExcludeEmptySvg(const D2D1_RECT_F& bounds, float opacity)
 D2D1_RECT_F MainRenderer::PaneListRect(const D2D1_RECT_F& pane_bounds, float extra_top,
                                        ViewMode mode) const {
     D2D1_RECT_F list = pane_bounds;
-    list.top += pane_header_height_ + extra_top +
+    list.top += pane_header_height_ + EmbeddedPickerRecentHeight() + extra_top +
                 (ShowsColumnHeader(mode) ? column_header_height_ : 0.0f);
     if (list.top > list.bottom) list.top = list.bottom;
     return list;
@@ -3398,7 +3398,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         }
         DrawPaneHeaderIcon(closeRc, PaneHeaderIcon::Close, closeHot ? theme.text : theme.text_secondary);
     }
-    y += pane_header_height_;
+    y += pane_header_height_ + EmbeddedPickerRecentHeight();
 
     if (const ColumnStripLayout strip = ColumnStripGeometry(pane, pane_rect); strip.active) {
         DrawColumnStrip(vm, pane, pane_rect, pane_index, theme);
@@ -3488,8 +3488,8 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         y += bannerH;
     }
     if (pane.is_recent) {
-        D2D1_RECT_F track = RecentFilterRect(bounds, pane_header_height_ + bannerH, scale_, 0);
-        track.right = RecentFilterRect(bounds, pane_header_height_ + bannerH, scale_, 2).right;
+        D2D1_RECT_F track = RecentFilterRect(bounds, pane_header_height_ + EmbeddedPickerRecentHeight() + bannerH, scale_, 0);
+        track.right = RecentFilterRect(bounds, pane_header_height_ + EmbeddedPickerRecentHeight() + bannerH, scale_, 2).right;
         painter_.DrawSegmentedTrack(track);
         static constexpr pulse::l10n::StringId labels[] = {
             pulse::l10n::StringId::FilterAll, pulse::l10n::StringId::FilterFolders,
@@ -3497,7 +3497,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         };
         for (int i = 0; i < 3; ++i) {
             fluent::SegmentedItemSpec segment;
-            segment.bounds = RecentFilterRect(bounds, pane_header_height_ + bannerH, scale_, i);
+            segment.bounds = RecentFilterRect(bounds, pane_header_height_ + EmbeddedPickerRecentHeight() + bannerH, scale_, i);
             segment.shared_track = true;
             segment.text = pulse::l10n::Get(labels[i]);
             segment.position = i == 0 ? fluent::SegmentPosition::First
@@ -3508,7 +3508,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
                                     vm.hover_pane_index == pane_index;
             painter_.DrawSegmentedItem(segment);
         }
-        const D2D1_RECT_F clear = RecentClearRect(bounds, pane_header_height_ + bannerH, scale_);
+        const D2D1_RECT_F clear = RecentClearRect(bounds, pane_header_height_ + EmbeddedPickerRecentHeight() + bannerH, scale_);
         fluent::ControlState clear_state;
         clear_state.enabled = pane.recent_total > 0;
         clear_state.hovered = IsHovered(vm, HitTestResult::RecentClear, pane_index);
@@ -3525,7 +3525,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         SearchFilterChipWidthsPx(painter_, scale_, labels, widths);
         for (int i = 0; i < 5; ++i) {
             fluent::ButtonSpec chip;
-            chip.bounds = SearchFilterRect(bounds, pane_header_height_ + bannerH, scale_, i, widths);
+            chip.bounds = SearchFilterRect(bounds, pane_header_height_ + EmbeddedPickerRecentHeight() + bannerH, scale_, i, widths);
             chip.text = labels[i];
             if (i == 4) chip.glyph = kSearchAdvancedGlyph;
             chip.kind = fluent::ButtonKind::Toggle;

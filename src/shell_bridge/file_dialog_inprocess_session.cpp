@@ -50,7 +50,7 @@ FileDialogInprocessSession::~FileDialogInprocessSession() {
         try { provider_->api.Shutdown(session_); } catch (...) {} // Destructor never crosses COM with an exception.
     }
 }
-HRESULT FileDialogInprocessSession::Prepare(const ContractDecision& decision, HWND owner, const std::vector<FileDialogCustomControl>& controls, const std::vector<FileDialogPlace>& places, const std::vector<FileDialogPropertyView>& properties) {
+HRESULT FileDialogInprocessSession::Prepare(const ContractDecision& decision, HWND owner, const std::vector<FileDialogCustomControl>& controls, const std::vector<FileDialogPlace>& places, const std::vector<FileDialogPropertyView>& properties, bool allow_auto_jump, const std::wstring& navigation_root) {
     if (!provider_ || !provider_->module_lifetime || !Table(provider_->api) || session_) return Unsupported();
     if (!decision.effective_options || decision.native_options != (*decision.effective_options & kExtendedFileDialogOptions)) return Unsupported();
     const bool save = decision.validation_category == ValidationCategory::LocalSaveAccessV1 && decision.supported_access_policy == AccessPolicy::LocalSaveV1;
@@ -58,12 +58,14 @@ HRESULT FileDialogInprocessSession::Prepare(const ContractDecision& decision, HW
     const bool folder = open && decision.effective_options && (*decision.effective_options & FOS_PICKFOLDERS);
     const uint32_t required = (folder ? PULSE_PICKER_UI_V2_CAP_FOLDER_V1 : save ? PULSE_PICKER_UI_V2_CAP_SAVE_LOCAL_V1 : PULSE_PICKER_UI_V2_CAP_OPEN_LOCAL_V1) |
         PULSE_PICKER_UI_V2_CAP_STANDARD_EVENTS | PULSE_PICKER_UI_V2_CAP_STATE_QUERY | (controls.empty() && properties.empty() ? 0u : PULSE_PICKER_UI_V2_CAP_CUSTOM_BUTTONS);
+    if (decision.shell_item_filter && !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_SHELL_ITEM_FILTER)) return Unsupported();
     if (decision.native_options && !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_NATIVE_OPTIONS)) return Unsupported();
     if (!provider_->allow_unverified_proof && (provider_->api.capabilities & required) != required) return Unsupported();
     if (decision.require_unencrypted_save && (!save || !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_SAVE_UNENCRYPTED))) return Unsupported();
     if (!controls.empty() && !provider_->api.UpdateControl) return Unsupported();
     if ((decision.title || decision.ok_button_label || decision.file_name_label) &&
         !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_CUSTOM_LABELS)) return Unsupported();
+    if (decision.cancel_button_label && !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_CANCEL_LABEL)) return Unsupported();
     if (decision.open_default_extension && !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_OPEN_DEFAULT_EXTENSION)) return Unsupported();
     for (const auto& control : controls) if (control.kind == PULSE_PICKER_UI_V2_CONTROL_COMBO &&
         !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_CUSTOM_COMBOBOX)) return Unsupported();
@@ -89,10 +91,13 @@ HRESULT FileDialogInprocessSession::Prepare(const ContractDecision& decision, HW
         if (decision.no_test_file_create != ((*decision.effective_options & FOS_NOTESTFILECREATE) != 0)) return Unsupported();
         if (decision.native_save_defaults && (caller || !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_SAVE_NATIVE_DEFAULTS))) return Unsupported();
         if (caller && (!(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_SAVE_SKIP_ACCESS) || decision.require_unencrypted_save)) return Unsupported();
-        const uint32_t required_native = caller ? (FOS_OVERWRITEPROMPT | FOS_NOVALIDATE) : decision.native_save_defaults ? FOS_OVERWRITEPROMPT : (FOS_OVERWRITEPROMPT | FOS_NOREADONLYRETURN | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
+        if (decision.no_overwrite_prompt != ((*decision.effective_options & FOS_OVERWRITEPROMPT) == 0) ||
+            (decision.no_overwrite_prompt && !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_OVERWRITE))) return Unsupported();
+        const uint32_t required_native = (decision.no_overwrite_prompt ? 0u : FOS_OVERWRITEPROMPT) |
+            (caller ? FOS_NOVALIDATE : decision.native_save_defaults ? 0u : (FOS_NOREADONLYRETURN | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR));
         const uint32_t optional_native = (decision.no_test_file_create ? FOS_NOTESTFILECREATE : 0u) | (decision.native_save_defaults ? FOS_NOREADONLYRETURN : 0u) | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR | FOS_FORCEFILESYSTEM | FOS_DONTADDTORECENT | FOS_FORCESHOWHIDDEN | FOS_DEFAULTNOMINIMODE | kExtendedFileDialogOptions;
         if ((*decision.effective_options & required_native) != required_native || (*decision.effective_options & ~(required_native | optional_native))) return Unsupported();
-        const uint32_t options = wire::OverwritePrompt | ((*decision.effective_options & FOS_FORCESHOWHIDDEN) ? wire::ShowHidden : 0u);
+        const uint32_t options = (decision.no_overwrite_prompt ? 0u : wire::OverwritePrompt) | ((*decision.effective_options & FOS_FORCESHOWHIDDEN) ? wire::ShowHidden : 0u);
         if (request->options != options) return Unsupported();
         expected = wire::Save | (request->filters.empty() ? 0u : wire::Filters);
     } else if (folder) {
@@ -102,7 +107,9 @@ HRESULT FileDialogInprocessSession::Prepare(const ContractDecision& decision, HW
     } else {
         // Open remains advisory; Save has its independent extension contract.
         const bool skip = decision.skip_open_access_validation;
-        if (decision.allow_missing_open && ((!skip && !(*decision.effective_options & FOS_CREATEPROMPT)) || !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING))) return Unsupported();
+        const bool validated_missing = decision.allow_missing_open && !skip && !(*decision.effective_options & FOS_CREATEPROMPT);
+        if (decision.allow_missing_open && !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING)) return Unsupported();
+        if (validated_missing && !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING_VALIDATED)) return Unsupported();
         if (decision.require_existing_open_parent && !decision.allow_missing_open) return Unsupported();
         if (skip && !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_OPEN_SKIP_ACCESS)) return Unsupported();
         const uint32_t access = skip ? wire::SkipAccessValidation : wire::ValidateLocalOpenAccessV1;
@@ -139,9 +146,12 @@ HRESULT FileDialogInprocessSession::Prepare(const ContractDecision& decision, HW
     property_values_.resize(properties_.size()); property_abi_.clear(); property_abi_.reserve(properties_.size());
     for (size_t i = 0; i < properties_.size(); ++i) {
         const auto& field = properties_[i];
-        if ((field.kind != PULSE_PICKER_UI_V2_PROPERTY_SCALAR && field.kind != PULSE_PICKER_UI_V2_PROPERTY_LIST) ||
+        if (field.kind >= PULSE_PICKER_UI_V2_PROPERTY_READONLY_SCALAR &&
+            !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_PROPERTY_PRESENTATION)) return Unsupported();
+        if ((field.kind < PULSE_PICKER_UI_V2_PROPERTY_SCALAR || field.kind > PULSE_PICKER_UI_V2_PROPERTY_GROUP) ||
             field.values.size() > PULSE_PICKER_UI_V2_MAX_PROPERTY_VALUES ||
-            (field.kind == PULSE_PICKER_UI_V2_PROPERTY_SCALAR && field.values.size() != 1) ||
+            ((field.kind == PULSE_PICKER_UI_V2_PROPERTY_SCALAR || field.kind == PULSE_PICKER_UI_V2_PROPERTY_READONLY_SCALAR) && field.values.size() != 1) ||
+            (field.kind == PULSE_PICKER_UI_V2_PROPERTY_GROUP && !field.values.empty()) ||
             field.label.empty() || field.label.size() > PULSE_PICKER_UI_V2_MAX_UNITS) return Unsupported();
         for (size_t j = 0; j < i; ++j) if (properties_[j].index == field.index) return Unsupported();
         for (const auto& value : field.values) if (value.size() > PULSE_PICKER_UI_V2_MAX_UNITS) return Unsupported();
@@ -159,7 +169,11 @@ HRESULT FileDialogInprocessSession::Prepare(const ContractDecision& decision, HW
     config_.size = sizeof(config_); config_.version = 2; config_.owner = owner;
     config_.required_capabilities = provider_->allow_unverified_proof ? 0 : required;
     if (decision.skip_open_access_validation) config_.open_options |= PULSE_PICKER_UI_V2_OPEN_SKIP_ACCESS_VALIDATION;
-    if (decision.allow_missing_open) config_.open_options |= PULSE_PICKER_UI_V2_OPEN_ALLOW_MISSING;
+    if (decision.allow_missing_open) {
+        config_.open_options |= PULSE_PICKER_UI_V2_OPEN_ALLOW_MISSING;
+        if (!decision.skip_open_access_validation && !(*decision.effective_options & FOS_CREATEPROMPT))
+            config_.open_options |= PULSE_PICKER_UI_V2_OPEN_MISSING_VALIDATED;
+    }
     if (decision.require_existing_open_parent) config_.open_options |= PULSE_PICKER_UI_V2_OPEN_REQUIRE_EXISTING_PARENT;
     config_.access_policy = folder ? PULSE_PICKER_UI_V2_ACCESS_FOLDER_V1 : save ? PULSE_PICKER_UI_V2_ACCESS_LOCAL_SAVE_V1 : PULSE_PICKER_UI_V2_ACCESS_LOCAL_OPEN_V1;
     if (decision.open_default_extension) {
@@ -167,12 +181,22 @@ HRESULT FileDialogInprocessSession::Prepare(const ContractDecision& decision, HW
         extension_.assign(decision.open_default_extension->begin(), decision.open_default_extension->end());
         config_.open_options |= PULSE_PICKER_UI_V2_OPEN_USE_DEFAULT_EXTENSION;
     } else extension_.assign(request->default_extension.begin(), request->default_extension.end());
+    if (decision.shell_item_filter) config_.open_options |= PULSE_PICKER_UI_V2_OPEN_SHELL_ITEM_FILTER;
     config_.default_extension = Text(extension_);
-    if (save) config_.save_options = PULSE_PICKER_UI_V2_SAVE_OVERWRITE_PROMPT | (decision.no_test_file_create ? PULSE_PICKER_UI_V2_SAVE_NO_TEST_CREATE : 0u) | (decision.require_existing_save_parent ? PULSE_PICKER_UI_V2_SAVE_REQUIRE_EXISTING_PARENT : 0u) | (decision.native_save_defaults ? PULSE_PICKER_UI_V2_SAVE_NATIVE_DEFAULTS : 0u) | (decision.skip_save_access_validation ? PULSE_PICKER_UI_V2_SAVE_SKIP_ACCESS_VALIDATION : 0u) | (decision.require_unencrypted_save ? PULSE_PICKER_UI_V2_SAVE_REQUIRE_UNENCRYPTED : 0u);
+    if (save) config_.save_options = (decision.no_overwrite_prompt ? PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT : PULSE_PICKER_UI_V2_SAVE_OVERWRITE_PROMPT) | (decision.no_test_file_create ? PULSE_PICKER_UI_V2_SAVE_NO_TEST_CREATE : 0u) | (decision.require_existing_save_parent ? PULSE_PICKER_UI_V2_SAVE_REQUIRE_EXISTING_PARENT : 0u) | (decision.native_save_defaults ? PULSE_PICKER_UI_V2_SAVE_NATIVE_DEFAULTS : 0u) | (decision.skip_save_access_validation ? PULSE_PICKER_UI_V2_SAVE_SKIP_ACCESS_VALIDATION : 0u) | (decision.require_unencrypted_save ? PULSE_PICKER_UI_V2_SAVE_REQUIRE_UNENCRYPTED : 0u);
     config_.initial_folder = Text(folder_); config_.filename = Text(filename_);
     if (decision.title) { title_.assign(decision.title->begin(), decision.title->end()); config_.title = Text(title_); config_.label_flags |= PULSE_PICKER_UI_V2_LABEL_TITLE; }
     if (decision.ok_button_label) { ok_label_.assign(decision.ok_button_label->begin(), decision.ok_button_label->end()); config_.ok_button_label = Text(ok_label_); config_.label_flags |= PULSE_PICKER_UI_V2_LABEL_OK; }
     if (decision.file_name_label) { filename_label_.assign(decision.file_name_label->begin(), decision.file_name_label->end()); config_.file_name_label = Text(filename_label_); config_.label_flags |= PULSE_PICKER_UI_V2_LABEL_FILE_NAME; }
+    if (decision.cancel_button_label) {
+        cancel_label_.assign(decision.cancel_button_label->begin(), decision.cancel_button_label->end());
+        config_storage_.base.cancel_button_label = Text(cancel_label_);
+        config_.size = sizeof(config_storage_.base); config_.label_flags |= PULSE_PICKER_UI_V2_LABEL_CANCEL;
+    }
+    if (provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_FOLDER_PROVENANCE) {
+        config_.size = sizeof(config_storage_);
+        config_storage_.folder_policy = allow_auto_jump ? PULSE_PICKER_UI_V2_FOLDER_ALLOW_AUTO_JUMP : 0;
+    }
     if (request->options & wire::AllowMultiSelect) config_.open_options |= PULSE_PICKER_UI_V2_OPEN_ALLOW_MULTI_SELECT;
     config_.filters = filters_.data(); config_.filter_count = static_cast<uint32_t>(filters_.size()); config_.filter_index = request->filter_index;
     if (request->options & wire::ShowHidden) config_.open_options |= PULSE_PICKER_UI_V2_OPEN_SHOW_HIDDEN;
@@ -185,11 +209,21 @@ HRESULT FileDialogInprocessSession::Prepare(const ContractDecision& decision, HW
     PulsePickerUiV2Initialize initialize{}; initialize.size = sizeof(initialize); initialize.version = 2;
     HRESULT hr = provider_->api.Initialize(&initialize, &session_);
     if (hr != S_OK || !session_) return FAILED(hr) ? hr : E_UNEXPECTED;
+    if (!navigation_root.empty()) { hr = SetNavigationRoot(navigation_root); if (hr != S_OK) return hr; }
+    char summary[320]{};
+    std::snprintf(summary, sizeof(summary),
+        "config-summary size=%u version=%u folder_tail=%u folder_policy=0x%08X label_flags=0x%08X open=0x%08X save=0x%08X native=0x%08X features=0x%08X",
+        config_.size, config_.version, config_.size == sizeof(config_storage_) ? 1u : 0u,
+        config_.size == sizeof(config_storage_) ? config_storage_.folder_policy : 0u,
+        config_.label_flags, config_.open_options, config_.save_options, config_.native_options,
+        provider_->api.implemented_features);
+    Report(summary);
     const HRESULT validated = provider_->api.ValidateConfig(session_, &config_);
     if (FAILED(validated)) {
         // Read-only diagnostic probes. Never use a reduced config for Show.
         const auto report_probe = [&](const char* part, uint32_t index, const PulsePickerUiV2Config& probe) {
             const HRESULT probe_hr = provider_->api.ValidateConfig(session_, &probe);
+            // Probes below carry only the original v2 config, never an extension.
             char detail[176]{};
             std::snprintf(detail, sizeof(detail), "config-probe part=%s index=%u hr=0x%08lX controls=%u properties=%u filters=%u", part, index,
                 static_cast<unsigned long>(probe_hr), probe.control_count, probe.property_count, probe.filter_count);
@@ -197,13 +231,14 @@ HRESULT FileDialogInprocessSession::Prepare(const ContractDecision& decision, HW
             return probe_hr;
         };
         auto base = config_;
+        base.size = sizeof(base);
         base.controls = nullptr; base.control_count = 0;
         base.properties = nullptr; base.property_count = 0;
         base.places = nullptr; base.place_count = 0;
         base.filters = nullptr; base.filter_count = 0; base.filter_index = 0;
         base.label_flags = 0; base.title = {}; base.ok_button_label = {}; base.file_name_label = {};
         report_probe("base", 0, base);
-        auto probe = base; probe.label_flags = config_.label_flags; probe.title = config_.title;
+        auto probe = base; probe.label_flags = config_.label_flags & ~PULSE_PICKER_UI_V2_LABEL_CANCEL; probe.title = config_.title;
         probe.ok_button_label = config_.ok_button_label; probe.file_name_label = config_.file_name_label;
         report_probe("labels", 0, probe);
         probe = base; probe.filters = config_.filters; probe.filter_count = config_.filter_count; probe.filter_index = config_.filter_index;
@@ -234,13 +269,26 @@ HRESULT FileDialogInprocessSession::Observe(const PulsePickerUiV2Event& event) {
         (event.reserved[0] || event.reserved[1]) ? 1u : 0u, event.show_id, event.generation, static_cast<unsigned long>(event_kind_));
     Report(diagnostic);
     if (event.size != sizeof(event) || event.reserved[0] || event.reserved[1] || !event.show_id || !event.generation ||
-        event.kind < PULSE_PICKER_UI_V2_EVENT_READY || event.kind > PULSE_PICKER_UI_V2_EVENT_NAVIGATION_COMPLETE || event_kind_ ||
+        event.kind < PULSE_PICKER_UI_V2_EVENT_READY || event.kind > PULSE_PICKER_UI_V2_EVENT_INCLUDE_ITEM || event_kind_ ||
         (event.kind != PULSE_PICKER_UI_V2_EVENT_NAVIGATION_COMPLETE && event.navigation_result != S_OK)) {
         Report("observe-failed stage=header"); return E_UNEXPECTED;
+    }
+    if (event.kind == PULSE_PICKER_UI_V2_EVENT_INCLUDE_ITEM &&
+        (!(config_.open_options & PULSE_PICKER_UI_V2_OPEN_SHELL_ITEM_FILTER) || !event.proposed_folder.data ||
+         !event.proposed_folder.units || event.proposed_folder.units > PULSE_PICKER_UI_V2_MAX_UNITS ||
+         event.control_id || event.item_id || event.control_text.units)) return E_INVALIDARG;
+    if (event.kind == PULSE_PICKER_UI_V2_EVENT_INCLUDE_ITEM) {
+        for (uint32_t i = 0; i < event.proposed_folder.units; ++i) {
+            const auto ch = static_cast<uint16_t>(event.proposed_folder.data[i]);
+            if (!ch || (ch >= 0xDC00 && ch <= 0xDFFF)) return E_INVALIDARG;
+            if (ch >= 0xD800 && ch <= 0xDBFF && (++i >= event.proposed_folder.units ||
+                event.proposed_folder.data[i] < 0xDC00 || event.proposed_folder.data[i] > 0xDFFF)) return E_INVALIDARG;
+        }
     }
     if (event.kind == PULSE_PICKER_UI_V2_EVENT_PROPERTY_CHANGED) {
         const auto field = std::find_if(properties_.begin(), properties_.end(), [&](const auto& value) { return value.index == event.control_id; });
         if (!(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_PROPERTIES) || field == properties_.end() ||
+            (field->kind != PULSE_PICKER_UI_V2_PROPERTY_SCALAR && field->kind != PULSE_PICKER_UI_V2_PROPERTY_LIST) ||
             event.property_value_count > PULSE_PICKER_UI_V2_MAX_PROPERTY_VALUES ||
             (event.property_value_count && !event.property_values) ||
             (field->kind == PULSE_PICKER_UI_V2_PROPERTY_SCALAR && event.property_value_count != 1)) return E_INVALIDARG;
@@ -336,6 +384,7 @@ HRESULT FileDialogInprocessSession::Read(FileDialogInprocessSnapshot& output) co
 HRESULT FileDialogInprocessSession::CompleteFileOk(HRESULT result) {
     accepted_candidate_.clear(); accepted_paths_.clear(); accepted_generation_ = 0;
     if (result != S_OK || close_requested_) return result;
+    if (fileok_invalidated_) return S_FALSE;
     FileDialogInprocessSnapshot snapshot; const HRESULT hr = Read(snapshot);
     if (FAILED(hr)) return hr;
     if (!(snapshot.flags & PULSE_PICKER_UI_V2_STATE_CANDIDATE_READY) || snapshot.candidate.empty()) return E_UNEXPECTED;
@@ -352,13 +401,44 @@ HRESULT FileDialogInprocessSession::UpdateControl(const FileDialogCustomControl&
     if (!ProminenceSupported(control, provider_->api.implemented_features)) return Unsupported();
     std::vector<PulsePickerUiV2ControlItem> items;
     const auto abi = control.Abi(items);
-    return provider_->api.UpdateControl(session_, show_, &abi);
+    const HRESULT updated = provider_->api.UpdateControl(session_, show_, &abi);
+    if (updated == S_OK) event_generation_ = 0;
+    return updated;
 }
 HRESULT FileDialogInprocessSession::Navigate(const std::wstring& folder) {
     if (!session_ || !show_ || close_requested_) return E_UNEXPECTED;
     if (!(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_NAVIGATE) || !provider_->api.Navigate) return Unsupported();
     if (folder.empty() || folder.size() > PULSE_PICKER_UI_V2_MAX_UNITS) return E_INVALIDARG;
     return provider_->api.Navigate(session_, show_, {folder.data(), static_cast<uint32_t>(folder.size())});
+}
+HRESULT FileDialogInprocessSession::UpdateText(uint32_t kind, const std::wstring& text) {
+    if (!session_ || !show_ || close_requested_) return E_UNEXPECTED;
+    if (!(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_DYNAMIC_TEXT) || !provider_->update_text)
+        return E_NOTIMPL;
+    uint64_t before_generation = 0;
+    const bool affects_candidate = InFileOk() && (kind == PULSE_PICKER_UI_V2_TEXT_FILENAME || kind == PULSE_PICKER_UI_V2_TEXT_DEFAULT_EXTENSION);
+    if (affects_candidate) {
+        PulsePickerUiV2Snapshot before{}; before.size = sizeof(before);
+        const HRESULT queried = provider_->api.Query(session_, show_, 0, &before);
+        if (queried != S_OK && queried != HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER)) return queried;
+        before_generation = before.generation;
+    }
+    const HRESULT updated = provider_->update_text(session_, show_, kind, Text(text));
+    if (updated == S_OK) {
+        event_generation_ = 0;
+        if (affects_candidate) {
+            PulsePickerUiV2Snapshot after{}; after.size = sizeof(after);
+            const HRESULT queried = provider_->api.Query(session_, show_, 0, &after);
+            if (queried != S_OK && queried != HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER)) return queried;
+            fileok_invalidated_ |= after.generation != before_generation;
+        }
+    }
+    return updated;
+}
+HRESULT FileDialogInprocessSession::SetNavigationRoot(const std::wstring& root) {
+    if (!session_ || close_requested_) return E_UNEXPECTED;
+    if (!(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_NAVIGATION_ROOT) || !provider_->set_navigation_root) return E_NOTIMPL;
+    return provider_->set_navigation_root(session_, Text(root));
 }
 HRESULT FileDialogInprocessSession::Close(HRESULT result) {
     if (close_requested_) return S_OK;

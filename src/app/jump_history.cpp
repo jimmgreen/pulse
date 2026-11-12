@@ -52,6 +52,14 @@ void JumpHistory::ParseLocked(const std::wstring& text) {
         if (!line.empty() && line.back() == L'\r') line.pop_back();
         const auto f = Split(line, L'\t');
         if (f.size() < 3 || f[0].empty()) continue;
+        if (f[0] == L"#count-v1") {
+            if (auto* entry = FindLocked(f[1])) {
+                wchar_t* end = nullptr;
+                const auto count = std::wcstoull(f[2].c_str(), &end, 10);
+                if (!f[2].empty() && f[2][0] != L'-' && end && !*end) entry->count = count;
+            }
+            continue;
+        }
         Entry e;
         e.path = Plain(f[0]);
         e.key = Key(e.path);
@@ -102,7 +110,9 @@ void JumpHistory::Record(const std::wstring& path, const std::wstring& app, int6
     if (!e) {
         entries_.push_back({});
         e = &entries_.back();
+        e->count = 1;
     }
+    else if (e->count && e->count != UINT64_MAX) ++e->count;
     e->path = Plain(path);
     e->key = Key(e->path);
     e->score = Decayed(e->score, e->last, now) + 1.0;
@@ -170,6 +180,18 @@ void JumpHistory::Clear() {
     SaveLocked();
 }
 
+int64_t JumpHistory::LastUsed(const std::wstring& path) const {
+    std::lock_guard lock(mu_);
+    const auto* entry = enabled_ ? FindLocked(path) : nullptr;
+    return entry ? entry->last : 0;
+}
+
+uint64_t JumpHistory::VisitCount(const std::wstring& path) const {
+    std::lock_guard lock(mu_);
+    const auto* entry = enabled_ ? FindLocked(path) : nullptr;
+    return entry ? entry->count : 0;
+}
+
 std::wstring JumpHistory::SerializeLocked() const {
     std::wstring text;
     wchar_t number[64];
@@ -186,6 +208,8 @@ std::wstring JumpHistory::SerializeLocked() const {
             text += number;
         }
         text += L'\n';
+        // Older readers ignore this zero-score metadata row instead of consuming an app slot.
+        if (e.count) text += L"#count-v1\t" + e.path + L"\t" + std::to_wstring(e.count) + L"\n";
     }
     return text;
 }

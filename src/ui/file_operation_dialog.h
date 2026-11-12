@@ -32,6 +32,8 @@ struct FileOperationCallbacks {
     std::function<void(const std::wstring&)> open_folder;
     std::function<void(uint64_t)> locate_results;
     std::function<void(uint64_t, int)> more_action;
+    // A button of an ended plugin task (OpsManager::InvokeExternalTaskAction).
+    std::function<void(uint64_t, const std::string&)> task_action;
     // Screen point of the status-bar operation pill: hiding shrinks the card
     // toward it, reopening from the pill grows it from there. Empty = unknown.
     std::function<std::optional<POINT>()> status_anchor;
@@ -153,6 +155,7 @@ private:
     ComPtr<IDWriteTextFormat> chip_format_;
     ComPtr<IDWriteTextFormat> glyph_format_;
     ComPtr<IDWriteTextFormat> tile_glyph_format_;
+    ComPtr<IDWriteTextFormat> mono_format_;
     bool dark_ = false;
     bool backdrop_enabled_ = false;
     bool detailed_ = false;

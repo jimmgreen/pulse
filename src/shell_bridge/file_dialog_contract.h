@@ -10,7 +10,7 @@ enum class DialogFactory { Open, Save };
 enum class Setting {
     Options, FileTypes, FileTypeIndex, Folder, DefaultFolder, FileName, DefaultExtension,
     Title, OkButtonLabel, FileNameLabel, Place, ClientGuid, ClearClientData,
-    Events, Customize, SaveProperties, SaveAsItem, ShellFilter, Unknown, ReadonlyOwnershipCollection
+    Events, Customize, SaveProperties, SaveAsItem, ShellFilter, Unknown, ReadonlyOwnershipCollection, CancelButtonLabel
 };
 // A bounded snapshot of a real native setter call, in original call order.
 // native_result is observed evidence, not a result invented by this model.
@@ -45,20 +45,27 @@ inline constexpr uint32_t kExtendedFileDialogOptions = static_cast<uint32_t>(FOS
 // Separately observed native getter evidence, never an invented setter call.
 struct PreparationContext {
     std::optional<std::u16string> resolved_initial_directory;
+    // Native-mirrored filesystem SaveAsItem. Retained Shell identity and any
+    // detached metadata snapshot are verified by the wrapper, not wire paths.
+    std::optional<std::u16string> resolved_save_as_filename;
+    bool filesystem_save_as_item_owned = false;
     bool client_state_owned = false;
     bool filesystem_places_owned = false;
     bool caller_validation_supported = false;
     bool open_missing_supported = false;
+    bool open_missing_validated_supported = false;
     bool save_caller_validation_supported = false;
     bool native_save_defaults_supported = false;
     bool save_no_test_create_supported = false;
+    bool save_no_overwrite_supported = false;
     bool save_properties_owned = false;
     bool native_options_supported = false;
+    bool shell_item_filter_supported = false;
 };
 enum class ValidationCategory { Unknown, DefaultOpen, DefaultSave, Folder, OpenSkipAccessValidation, LocalOpenAccessV1, LocalSaveAccessV1 };
 struct ContractDecision {
     // Settings absent from the host wire require an explicitly capable in-process provider.
-    std::optional<std::u16string> title, ok_button_label, file_name_label;
+    std::optional<std::u16string> title, ok_button_label, file_name_label, cancel_button_label;
     std::optional<std::u16string> open_default_extension;
     uint32_t native_options = 0; // Negotiated extended bits, bound to effective_options at runtime.
     bool require_unencrypted_save = false;
@@ -68,7 +75,9 @@ struct ContractDecision {
     bool skip_save_access_validation = false;
     bool native_save_defaults = false;
     bool no_test_file_create = false;
+    bool no_overwrite_prompt = false;
     bool require_existing_save_parent = false;
+    bool shell_item_filter = false;
     AccessPolicy supported_access_policy = AccessPolicy::None;
     Disposition disposition = Disposition::NativeOnly;
     NativeReason reason = NativeReason::None;

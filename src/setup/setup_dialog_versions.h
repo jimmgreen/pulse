@@ -7,9 +7,11 @@ namespace pulse::setup {
 struct DialogVersionPlan {
     bool versioned = false;
     bool reused = false;
+    unsigned machine = 0;
     std::string digest;
     std::wstring relative_directory;
     std::vector<std::wstring> replacements;
+    std::vector<DialogVersionPlan> companions;
 };
 bool IsDialogVersionDigest(const std::string& value);
 bool IsDialogVersionFile(const std::wstring& relative);

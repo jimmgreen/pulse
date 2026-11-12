@@ -2,17 +2,33 @@
 #include <windows.h>
 #include <string>
 namespace pulse::dialog_auto {
+enum class Architecture { X64, X86 };
 #ifdef _WIN64
+inline constexpr Architecture CurrentArchitecture = Architecture::X64;
 inline constexpr auto DllName = L"PulseDialogAuto64.dll";
 inline constexpr auto ConfigKey = L"Software\\Pulse\\DialogAuto";
 inline constexpr REGSAM RegistryView = KEY_WOW64_64KEY;
 #else
+inline constexpr Architecture CurrentArchitecture = Architecture::X86;
 inline constexpr auto DllName = L"PulseDialogAuto32.dll";
 inline constexpr auto ConfigKey = L"Software\\Pulse\\DialogAuto32";
 inline constexpr REGSAM RegistryView = KEY_WOW64_32KEY;
 #endif
 struct Status { bool enabled = false; bool conflict = false; DWORD error = ERROR_SUCCESS; std::wstring dll_path; };
+const wchar_t* DllNameFor(Architecture architecture) noexcept;
+Status Inspect(Architecture architecture);
+DWORD Enable(Architecture architecture, const std::wstring& absolute_dll);
+DWORD EnableIfUnclaimed(Architecture architecture, const std::wstring& absolute_dll);
+// Rebind only an exact old journal that is fully disabled and has no CLSID roots.
+// This does not relax the unclaimed-only endpoint or discard extra preferences.
+DWORD EnableIfDisabledFor(Architecture architecture, const std::wstring& expected_old_dll, const std::wstring& new_dll);
+DWORD Disable(Architecture architecture);
+DWORD DisableFor(Architecture architecture, const std::wstring& absolute_dll);
 DWORD Enable(const std::wstring& absolute_dll);
+// Transactional multi-architecture callers must not replace another bundle's
+// journal during recovery. The identity check shares Enable's mutation lock.
+DWORD EnableIfUnclaimed(const std::wstring& absolute_dll);
+DWORD EnableIfDisabledFor(const std::wstring& expected_old_dll, const std::wstring& new_dll);
 DWORD Disable();
 // Uninstall: leave other installations untouched; ownership is checked under the mutation lock.
 DWORD DisableFor(const std::wstring& absolute_dll);

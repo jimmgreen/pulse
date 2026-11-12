@@ -16,12 +16,8 @@ int main() {
     for (unsigned build : {0u, 9600u, 19045u, 20348u, 22000u, 22620u, 22621u, 26100u}) {
         for (auto effect : {WindowEffect::None, WindowEffect::Acrylic, WindowEffect::Mica, WindowEffect::MicaAlt}) {
             for (bool modern : {false, true}) {
-#ifdef PULSE_MATERIAL_BASELINE
-                const bool actual = effect == WindowEffect::None || modern;
-#else
                 const bool actual = WindowEffectSupportedOnBuild(effect, build, modern);
-#endif
-                const bool expected = effect == WindowEffect::None || (modern && build >= 22621);
+                const bool expected = effect == WindowEffect::None || modern;
                 ++checks;
                 if (actual != expected) { ++failures; std::printf("[FAIL] build=%u effect=%d modern=%d\n", build, int(effect), int(modern)); }
             }

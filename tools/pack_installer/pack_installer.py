@@ -51,6 +51,7 @@ DEFAULT_LAYOUT = [
     ("{build}/pulse_shell.exe", "pulse_shell.exe"),
     ("{build}/pulse_start_pin.dll", "pulse_start_pin.dll"),
     ("{build}/pulse_integration.exe", "pulse_integration.exe"),
+    ("{build}/PulseDialogAdminAuto.exe", "PulseDialogAdminAuto.exe"),
     ("{build}/lumatext.dll", "lumatext.dll"),
     ("{build}/pdfium.dll", "pdfium.dll"),
     ("{build}/licenses/PDFium/*", "licenses/PDFium/"),
@@ -108,10 +109,83 @@ def build_payload(items, version: str, channel: str = "windows") -> tuple[bytes,
     return xz, {"raw": len(raw), "xz": len(xz), "files": len(files)}
 
 
+
+def _dialog_tools():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pack_dialog_experiment"))
+    import pack as dialog_pack
+    return dialog_pack
+
+
+def verify_dialog_payload(directory: Path) -> dict:
+    """Verify the legacy main pointer and an optional architecture-pure x86 peer."""
+    dialog_pack = _dialog_tools()
+    directory = Path(directory)
+    primary = dialog_pack.verify_installed(directory)
+    try:
+        (directory / "dialog-x86-current.json").lstat()
+    except FileNotFoundError:
+        return primary
+    main = dialog_pack.verify(directory / primary["directory"])
+    if main["architecture"] != "x64":
+        raise dialog_pack.PackageError("x86 companion requires an x64 primary bundle")
+    pointer_path = dialog_pack.no_links(directory / "dialog-x86-current.json")
+    if pointer_path.stat().st_size > 1024:
+        raise dialog_pack.PackageError("x86 dialog pointer bound")
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"), object_pairs_hook=dialog_pack.unique_object)
+    if not isinstance(pointer, dict) or set(pointer) != {"schema", "directory", "manifest_sha256"} or type(pointer["schema"]) is not int or pointer["schema"] != 1:
+        raise dialog_pack.PackageError("x86 dialog pointer schema")
+    digest = pointer["manifest_sha256"]
+    if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise dialog_pack.PackageError("x86 dialog pointer hash")
+    if pointer["directory"] != "DialogBridge/" + digest:
+        raise dialog_pack.PackageError("x86 dialog pointer directory/hash mismatch")
+    bundle = dialog_pack.no_links(directory / pointer["directory"])
+    if dialog_pack.digest(dialog_pack.no_links(bundle / "manifest.json")) != digest:
+        raise dialog_pack.PackageError("x86 dialog pointer manifest hash mismatch")
+    manifest = dialog_pack.verify(bundle)
+    if manifest['version'] != main['version']:
+        raise dialog_pack.PackageError("x86 companion version differs from primary bundle")
+    names = {entry["path"].lower() for entry in manifest["files"]}
+    thin = manifest['schema'] == 3
+    required = dialog_pack.thin_roots() if thin else dialog_pack.roots("x86", automatic=True)
+    if manifest["schema"] not in (1, 3) or manifest["architecture"] != "x86" or not all(
+            name.lower() in names for name in required):
+        raise dialog_pack.PackageError("complete architecture-matched x86 dialog bundle required")
+    if thin and manifest['host_bundle']['manifest_sha256'] != primary['manifest_sha256']:
+        raise dialog_pack.PackageError('thin companion does not bind current primary host')
+    return primary
+
+
+def package_installed_dual(root: Path, build: Path, output: Path, version: str,
+                         items, dialog_build_x86: Path | None = None) -> dict:
+    dialog_pack = _dialog_tools()
+    root, build = Path(root).resolve(), Path(build).resolve()
+    machine = dialog_pack.PE(build / "pulse.exe").machine
+    arch = next((name for name, value in dialog_pack.MACHINES.items() if value == machine), None)
+    if arch is None:
+        raise dialog_pack.PackageError("unsupported Pulse architecture for dialog bundle")
+    if dialog_build_x86 is not None:
+        if arch != "x64":
+            raise dialog_pack.PackageError("--dialog-build-x86 requires an x64 main build")
+        dialog_build_x86 = Path(dialog_build_x86).resolve()
+        # Fail before creating either destination if the companion is incomplete,
+        # mixed-bitness, or silently borrowed from the main build.
+        dialog_pack.plan(dialog_build_x86, version, "x86", root, thin=True, host_digest='0' * 64)
+    primary = dialog_pack.package_installed(build, output, version, arch, root, items)
+    if dialog_build_x86 is not None:
+        pointer = dialog_pack.package_addressed(dialog_build_x86, Path(output) / "DialogBridge",
+                                               version, "x86", root, thin=True,
+                                               host_digest=primary['manifest_sha256'])
+        with (Path(output) / "dialog-x86-current.json").open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(pointer, stream, separators=(",", ":"))
+            stream.write("\n")
+    return verify_dialog_payload(output)
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=".", help="repository root")
     ap.add_argument("--build", default="build", help="build directory (relative to root or absolute)")
+    ap.add_argument("--dialog-build-x86", help="optional thin x86 dialog bridge build (relative to root or absolute)")
     ap.add_argument("--stub", required=True, help="bootstrapper executable")
     ap.add_argument("--version", required=True)
     ap.add_argument("--out", required=True)
@@ -126,17 +200,13 @@ def main() -> int:
     items = collect(root, build)
     # Ship one verified application/dialog runtime under its content hash;
     # the root contains only the stable launcher and version pointer.
-    sys.path.insert(0, str(root / "tools" / "pack_dialog_experiment"))
-    import pack as dialog_pack
     actual_build = build if build.is_absolute() else root / build
-    machine = dialog_pack.PE(actual_build / "pulse.exe").machine
-    arch = next((name for name, value in dialog_pack.MACHINES.items() if value == machine), None)
-    if arch is None:
-        raise SystemExit("unsupported Pulse architecture for dialog bundle")
+    dialog_x86 = Path(args.dialog_build_x86) if args.dialog_build_x86 else None
+    if dialog_x86 is not None and not dialog_x86.is_absolute():
+        dialog_x86 = root / dialog_x86
     with tempfile.TemporaryDirectory(prefix="pulse-dialog-") as staging:
         bundle = Path(staging) / "installed"
-        dialog_pack.package_installed(actual_build, bundle, args.version, arch, root, items)
-        dialog_pack.verify_installed(bundle)
+        package_installed_dual(root, actual_build, bundle, args.version, items, dialog_x86)
         items = [(f, f.relative_to(bundle).as_posix())
                  for f in sorted(bundle.rglob("*")) if f.is_file()]
         xz, stats = build_payload(items, args.version, args.channel)

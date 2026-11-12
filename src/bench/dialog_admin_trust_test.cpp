@@ -1,6 +1,6 @@
 #include "../common/dialog_admin_trust.cpp"
 #include <cstdio>
-int main() {
+int wmain(int argc,wchar_t** argv) {
     int failures = 0;
     auto check = [&](const wchar_t *sddl, bool ancestor, bool accepted, const char *name) {
         PSECURITY_DESCRIPTOR descriptor = nullptr;
@@ -41,9 +41,36 @@ int main() {
             ++failures;
     } else
         ++failures;
+    std::wstring control;
+    const auto own_root=std::filesystem::path(own_path).parent_path().wstring();
+    const bool no_create=pulse::dialog_admin::AdminControlRoot(own_root,false,control)!=ERROR_SUCCESS && control.empty() &&
+        !std::filesystem::exists(std::filesystem::path(own_root)/L"ManagedAdminSessions");
+    std::printf("[%s] read-only admin readiness rejects user-owned root without creating directory\n",no_create?"PASS":"FAIL");
+    if(!no_create) ++failures;
+    const auto denied_create=pulse::dialog_admin::AdminControlRoot(own_root,true,control);
+    const bool create_guard=denied_create!=ERROR_SUCCESS && control.empty();
+    std::printf("[%s] creating admin control root requires elevation and protected ancestry\n",create_guard?"PASS":"FAIL");
+    if(!create_guard) ++failures;
+    const bool bad_machine=pulse::dialog_admin::VerifyAdminLaunchLocation(own_root,own_root,own_path,0)==ERROR_EXE_MACHINE_TYPE_MISMATCH;
+    std::printf("[%s] unknown admin target machine rejected\n",bad_machine?"PASS":"FAIL");
+    if(!bad_machine) ++failures;
+    const bool outside=pulse::dialog_admin::VerifyAdminLaunchLocation(own_root,L"C:\\Other\\bundle",own_path,IMAGE_FILE_MACHINE_AMD64)!=ERROR_SUCCESS;
+    std::printf("[%s] user-writable or outside installed launch tree rejected\n",outside?"PASS":"FAIL");
+    if(!outside) ++failures;
     wchar_t program_files[32768]{};
     if (GetEnvironmentVariableW(L"ProgramFiles", program_files, 32768))
         std::printf("[INFO] ProgramFiles protected path error=%lu\n",
                     pulse::dialog_admin::VerifyProtectedPath(program_files, true));
+    if(argc==4 && std::wstring_view(argv[1])==L"--control-root-readonly") {
+        const bool expected=std::wstring_view(argv[3])==L"allowed";
+        if(!expected && std::wstring_view(argv[3])!=L"denied") return 2;
+        const auto path=std::filesystem::path(argv[2])/L"ManagedAdminSessions";
+        const DWORD before=GetFileAttributesW(path.c_str());
+        std::wstring chosen;
+        const DWORD error=pulse::dialog_admin::AdminControlRoot(argv[2],false,chosen);
+        const bool pass=(error==ERROR_SUCCESS)==expected && before==GetFileAttributesW(path.c_str());
+        std::printf("[%s] existing protected-root policy checked without creation or ACL repair error=%lu\n",pass?"PASS":"FAIL",error);
+        if(!pass) ++failures;
+    }
     return failures ? 1 : 0;
 }

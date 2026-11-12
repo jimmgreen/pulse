@@ -1,17 +1,16 @@
 #pragma once
 #include "../fs/fs_enum.h"
+#include "../fs/fs_watch.h"
 #include "../ui/ui_view_model.h"
 #include <string>
 #include <vector>
 
 namespace pulse::app {
 
-// Renamed rows retain their displayed position within their group. New rows
-// and metadata updates that change the active sort key use the comparator.
-
-// True when both entries have equivalent active sorting and grouping keys.
-bool SameEntrySortPosition(const fs::DirEntry& a, const fs::DirEntry& b,
-                           ui::SortColumn col, ui::SortDirection dir);
+// A modified row (same name, new size or date) retains its displayed position
+// within its group until F5, a sort change, or reopening the folder, and so
+// does a file saved through a temp file or a backup rename. New and renamed
+// rows, and rows whose group changes, take their sort position.
 
 // True when `a` and `b` fall in the same group (always true when ungrouped).
 bool SameEntryGroup(const fs::DirEntry& a, const fs::DirEntry& b,
@@ -38,12 +37,11 @@ struct EntryRename {
 };
 
 // Merges a freshly enumerated listing (`fresh`, in sort order) into the order
-// on screen (`shown`): rows with unchanged sort keys keep their place with fresh
-// metadata, a renamed row (`renames`) keeps its old row, removed rows drop
-// out, and new rows merge in at their sort position.
+// on screen (`shown`): existing rows in the same group keep their place with
+// fresh metadata, removed rows drop out, and new rows (renamed ones included,
+// or rows whose group changed) merge in at their sort position.
 std::vector<fs::DirEntry> KeepEntryOrder(const std::vector<fs::DirEntry>& shown,
                                          const std::vector<fs::DirEntry>& fresh,
-                                         const std::vector<EntryRename>& renames,
                                          ui::SortColumn col, ui::SortDirection dir);
 
 // True when `fresh` lists the rows shown in the same order and groups, so
@@ -52,6 +50,14 @@ std::vector<fs::DirEntry> KeepEntryOrder(const std::vector<fs::DirEntry>& shown,
 bool SameEntryOrder(const std::vector<fs::DirEntry>& shown,
                     const std::vector<fs::DirEntry>& fresh,
                     ui::SortColumn col, ui::SortDirection dir);
+
+// Updates selection names across a directory notification batch: names still
+// present in `after` (including atomic replace saves and case-only renames)
+// stay on that row; names no longer present follow FILE_ACTION_RENAMED_NEW_NAME
+// chains in `events`.
+void FollowNotifyRenames(const std::vector<fs::DirNotifyEvent>& events,
+                         const std::vector<fs::DirEntry>& after,
+                         std::vector<std::wstring>& names, std::wstring& focus);
 
 // Points selection names at their new names when `fresh` shows the rename
 // landed (the old name is gone, the new one present), so a refresh that

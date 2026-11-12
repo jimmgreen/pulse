@@ -141,7 +141,7 @@ void AppPrefs::ResetToDefaults() {
     change_tracking_days = 7;
     theme_mode = -1;
     language = L"system";
-    window_effect = ui::WindowEffectSupported(ui::WindowEffect::MicaAlt) ? L"mica-alt" : L"none";
+    window_effect = L"mica-alt";
     menu_acrylic = true;
     background_image.clear();
     wallpaper_look = 50;
@@ -679,7 +679,6 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     window_effect = pulse::json::ExtractString(json, L"window_effect", L"mica-alt");
     if (window_effect == L"dwm-blur") window_effect = L"acrylic-material";
     else if (window_effect.empty()) window_effect = L"mica-alt";
-    if (!ui::WindowEffectSupported(ui::WindowEffect::MicaAlt)) window_effect = L"none";
     menu_acrylic = pulse::json::ExtractBool(json, L"menu_acrylic", true);
     background_image = pulse::json::ExtractString(json, L"background_image");
     row_height = pulse::json::ExtractInt(json, L"row_height", 34);

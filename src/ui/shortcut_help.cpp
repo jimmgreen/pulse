@@ -1,6 +1,7 @@
 #include "shortcut_help.h"
 #include "../common/windows_compat.h"
 #include "../common/localization.h"
+#include "command_icons.h"
 #include "typography.h"
 #include "../app/keymap.h"
 #include <windowsx.h>
@@ -135,8 +136,8 @@ ShortcutHelpLayout LayoutShortcutHelp(float width, float height, float scale) {
     const float wanted = (header + content + kFooter) * scale;
     const float h = std::max(0.0f, std::min(wanted, height - 32 * scale));
     l.card = D2D1::RectF((width-w)/2, (height-h)/2, (width+w)/2, (height+h)/2);
-    l.close = D2D1::RectF(l.card.right-48*scale, l.card.top+16*scale,
-                         l.card.right-16*scale, l.card.top+48*scale);
+    l.close = D2D1::RectF(l.card.right-46*scale, l.card.top,
+                         l.card.right, l.card.top+36*scale);
     l.body = D2D1::RectF(l.card.left+kPad*scale, l.card.top+header*scale,
                         l.card.right-kPad*scale, l.card.bottom-kFooter*scale);
     l.max_scroll = std::max(0.0f, l.content_height-(l.body.bottom-l.body.top));
@@ -153,8 +154,8 @@ void DrawShortcutHelp(Compositor& compositor, bool dark, D2D1_COLOR_F accent,
     const auto ink = dark ? HexColor(0xE7EAF5) : HexColor(0x303C54);
     const auto muted = dark ? HexColor(0xA7B3CA) : HexColor(0x71819D);
     const auto line = dark ? HexColor(0x363E50) : HexColor(0xE3E8F3);
-    const auto tint = dark ? HexColor(0x2B324B) : HexColor(0xEEF1FD);
-    const auto heading = MakeTheme(dark, accent).accent;
+    const auto theme = MakeTheme(dark, accent);
+    const auto heading = theme.accent;
     ComPtr<ID2D1SolidColorBrush> brush;
     dc->CreateSolidColorBrush(ink, &brush);
     if (!brush.get()) return;
@@ -207,11 +208,30 @@ void DrawShortcutHelp(Compositor& compositor, bool dark, D2D1_COLOR_F accent,
     text(l10n::Get(Id::HelpDescription),
          D2D1::RectF(left,l.card.top+52*scale,l.card.right-kPad*scale,
                      l.body.top-6*scale),12.5f,muted);
-    if (close_hover) fill(l.close,tint,6);
-    brush->SetColor(muted);
-    const float cx=(l.close.left+l.close.right)/2, cy=(l.close.top+l.close.bottom)/2;
-    dc->DrawLine({cx-5*scale,cy-5*scale},{cx+5*scale,cy+5*scale},brush.get(),1.5f*scale);
-    dc->DrawLine({cx+5*scale,cy-5*scale},{cx-5*scale,cy+5*scale},brush.get(),1.5f*scale);
+    if (close_hover) {
+        ComPtr<ID2D1Factory> factory;
+        dc->GetFactory(&factory);
+        ComPtr<ID2D1RoundedRectangleGeometry> card_clip;
+        if (factory.get() && SUCCEEDED(factory->CreateRoundedRectangleGeometry(
+                D2D1::RoundedRect(l.card, 14.0f * scale, 14.0f * scale), &card_clip)) && card_clip.get()) {
+            dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), card_clip.get()), nullptr);
+            brush->SetColor(theme.danger);
+            dc->FillRectangle(l.close, brush.get());
+            dc->PopLayer();
+        } else {
+            brush->SetColor(theme.danger);
+            dc->FillRectangle(l.close, brush.get());
+        }
+    }
+    brush->SetColor(close_hover ? HexColor(0xFFFFFF) : ink);
+    ComPtr<ID2D1StrokeStyle> close_stroke;
+    command_icons::CreateStrokeStyle(dc, &close_stroke);
+    const auto close_icon = command_icons::CenteredBounds(l.close, 16.0f * 0.66f * scale);
+    if (!command_icons::Draw(dc, brush.get(), close_stroke.get(), command_icons::Icon::Close, close_icon)) {
+        const float cx=(l.close.left+l.close.right)/2, cy=(l.close.top+l.close.bottom)/2;
+        dc->DrawLine({cx-5*scale,cy-5*scale},{cx+5*scale,cy+5*scale},brush.get(),1.5f*scale);
+        dc->DrawLine({cx+5*scale,cy-5*scale},{cx-5*scale,cy+5*scale},brush.get(),1.5f*scale);
+    }
 
     dc->PushAxisAlignedClip(l.body,D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     const float top = l.body.top - std::clamp(scroll,0.0f,l.max_scroll);

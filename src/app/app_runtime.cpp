@@ -3487,6 +3487,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.drag_badge_x = s.dropBadgeX;
     vm.drag_badge_y = s.dropBadgeY;
     vm.drag_badge_move = s.dropBadgeMove && !s.dropBadge.empty();
+    vm.button_pressed = s.buttonPress.active && s.buttonPress.inside;
     vm.hover_region = s.hoverRegion;
     vm.hover_control_index = s.hoverControlIndex;
     vm.hover_sub_index = s.hoverSubIndex;

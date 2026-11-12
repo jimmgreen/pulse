@@ -7,6 +7,7 @@
 #include "ai_settings_ui.h"
 #include "ai_assistant.h"
 #include "ai_assistant_settings.h"
+#include "extension_store_actions.h"
 #include "folder_alias.h"
 #include "app_wall_hint.h"
 #include "arrival_select.h"
@@ -1960,10 +1961,54 @@ bool RestoreBlankDeselect(AppState& s, POINT client, bool maximizing) {
     return true;
 }
 
+static app::ButtonPressContext ButtonContext(AppState& s, const ui::HitTestResult& hit) {
+    // Window controls do not depend on a directory refresh or settings page.
+    if (hit.region == ui::HitTestResult::Close || hit.region == ui::HitTestResult::Minimize ||
+        hit.region == ui::HitTestResult::Maximize) return {};
+    auto* pane = hit.pane_index >= 0 ? PaneAtSlot(s, hit.pane_index) : s.pane;
+    auto* tab = pane ? pane->ActiveTab() : nullptr;
+    const void* target = nullptr;
+    if (hit.region == ui::HitTestResult::TabClose && hit.index >= 0 &&
+        static_cast<size_t>(hit.index) < s.window_tabs.items.size())
+        target = s.window_tabs.items[hit.index].get();
+    return {pane, tab, target, tab ? tab->view_generation : 0, s.settings.page()};
+}
+
+void CancelButtonPress(AppState& s) {
+    if (!s.buttonPress.active) return;
+    s.buttonPress.Cancel(); // Clear before ReleaseCapture synchronously reenters the window procedure.
+    s.hoverRegion = 0;
+    s.hoverControlIndex = s.hoverSubIndex = s.hoverPaneIndex = -1;
+    if (GetCapture() == s.hwnd) ReleaseCapture();
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+static void UpdateButtonPressHover(AppState& s, const ui::HitTestResult& hit) {
+    s.buttonPress.inside = s.buttonPress.Matches(hit, ButtonContext(s, hit));
+    s.hoverRegion = s.buttonPress.inside ? static_cast<int>(hit.region) : 0;
+    s.hoverControlIndex = s.buttonPress.inside ? hit.index : -1;
+    s.hoverSubIndex = s.buttonPress.inside ? hit.sub_index : -1;
+    s.hoverPaneIndex = s.buttonPress.inside ? hit.pane_index : -1;
+    s.hoverRow = -1;
+    s.tooltipText.clear();
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
 LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
         int mx = GET_X_LPARAM(lParam);
         int my = GET_Y_LPARAM(lParam);
+        if (s->buttonPress.active) {
+            if (!(wParam & MK_LBUTTON) || GetCapture() != hwnd) {
+                CancelButtonPress(*s);
+                return 0;
+            }
+            const auto vm = BuildVm(*s, false);
+            const auto rect = D2D1::RectF(0, 0, static_cast<float>(s->compositor.Width()),
+                static_cast<float>(s->compositor.Height()));
+            UpdateButtonPressHover(*s, s->renderer.HitTest(vm, rect, static_cast<float>(mx), static_cast<float>(my)));
+            return 0;
+        }
         if (AiAssistantMouseMove(*s, mx, my)) {   // Pulse 助手 owns its panel
             if (s->hoverRegion != 0 || s->hoverRow >= 0 || !s->tooltipText.empty())
                 HandleMouseLeave(s, hwnd, WM_MOUSELEAVE, 0, 0);
@@ -2013,6 +2058,10 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                     InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
+        }
+        if (ExtensionStoreLevelDragging(*s)) {
+            if (!(wParam & MK_LBUTTON)) ExtensionStoreLevelDragEnd(*s);
+            else { ExtensionStoreLevelDrag(*s, mx); return 0; }
         }
         // Settings > AI 助手 › 思考强度 knob held.
         if (AssistantThinkDragging(*s)) {
@@ -3065,8 +3114,28 @@ static void ClickGroupHeader(AppState& s, int pane_slot, int group, bool select)
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
-LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+static LRESULT DispatchLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                  const app::ButtonPress* released = nullptr) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        if (released) {
+            const auto vm = BuildVm(*s, false);
+            const auto rect = D2D1::RectF(0, 0, static_cast<float>(s->compositor.Width()),
+                static_cast<float>(s->compositor.Height()));
+            const auto hit = s->renderer.HitTest(vm, rect,
+                static_cast<float>(GET_X_LPARAM(lParam)), static_cast<float>(GET_Y_LPARAM(lParam)));
+            if (!released->Matches(hit, ButtonContext(*s, hit))) return 0;
+            // Close may destroy AppState synchronously; return without touching it again.
+            if (hit.region == ui::HitTestResult::Close)
+                return SendMessageW(hwnd, WM_CLOSE, 0, 0);
+            if (hit.region == ui::HitTestResult::Minimize) {
+                ShowWindow(hwnd, SW_MINIMIZE);
+                return 0;
+            }
+            if (hit.region == ui::HitTestResult::Maximize) {
+                ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+                return 0;
+            }
+        }
         const bool deferredActivation = s->deferredFileActivation;
         const bool old_list_press = s->listSelection.PendingBand() || s->listSelection.BandActive() ||
             s->listSelection.PendingFile();
@@ -3089,6 +3158,20 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         ui::WindowViewModel vm = BuildVm(*s, false);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
+        if (released) {
+            // Recheck after focus/editor commits and synchronous capture-change callbacks.
+            if (!released->Matches(hit, ButtonContext(*s, hit))) return 0;
+            s->hoverRegion = static_cast<int>(hit.region);
+            s->hoverControlIndex = hit.index;
+            s->hoverSubIndex = hit.sub_index;
+            s->hoverPaneIndex = hit.pane_index;
+        } else if (app::IsReleaseButton(hit)) {
+            s->buttonPress.Begin(hit, ButtonContext(*s, hit));
+            SetCapture(hwnd);
+            if (GetCapture() != hwnd) { s->buttonPress.Cancel(); return 0; }
+            UpdateButtonPressHover(*s, hit);
+            return 0;
+        }
         if (HandlePaneLayoutClick(*s, hit)) return 0;
         if (s->undoHistoryOpen && hit.region != ui::HitTestResult::UndoHistoryRow &&
             hit.region != ui::HitTestResult::UndoHistorySurface && hit.region != ui::HitTestResult::StatusUndoHistory &&
@@ -4196,6 +4279,11 @@ static bool HandlePaneHeaderBlankDoubleClick(AppState& s, const ui::HitTestResul
     return true;
 }
 
+LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (s) CancelButtonPress(*s);
+    return DispatchLButtonDown(s, hwnd, msg, wParam, lParam);
+}
+
 LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
         s->fileClick.CancelRename();
@@ -4232,6 +4320,10 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
         ui::WindowViewModel vm = BuildVm(*s, false);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
+        // Folder-size labels and breadcrumb text retain their distinct double-click actions.
+        if (app::IsReleaseButton(hit) && hit.region != ui::HitTestResult::RowFolderSize &&
+            hit.region != ui::HitTestResult::BreadcrumbSegment)
+            return HandleLButtonDown(s, hwnd, WM_LBUTTONDOWN, wParam, lParam);
         const bool suppress_open = s->fileClick.SuppressesDoubleClick(
             static_cast<uint32_t>(GetMessageTime()), GetDoubleClickTime());
         auto double_item = FileClickIdentityFor(*s, hit.index);
@@ -4373,6 +4465,13 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
 }
 
 LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        if (s && s->buttonPress.active) {
+            const auto pressed = s->buttonPress;
+            const bool captured = GetCapture() == hwnd;
+            CancelButtonPress(*s);
+            if (captured) return DispatchLButtonDown(s, hwnd, msg, wParam, lParam, &pressed);
+            return 0;
+        }
         (void)msg;
         (void)wParam;
         g_blank_drag = BlankWindowDrag{};
@@ -4404,6 +4503,10 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 s->settings.EndSlider();
                 if (GetCapture() == hwnd) ReleaseCapture();
                 InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (ExtensionStoreLevelDragEnd(*s)) {
+                if (GetCapture() == hwnd) ReleaseCapture();
                 return 0;
             }
             if (AssistantThinkDragEnd(*s)) {
@@ -4764,6 +4867,7 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 }
 
 LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        if (s && reinterpret_cast<HWND>(lParam) != hwnd) CancelButtonPress(*s);
         (void)msg;
         (void)wParam;
         (void)lParam;
@@ -4830,6 +4934,7 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
 }
 
 LRESULT HandleRButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        if (s) CancelButtonPress(*s);
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
         if (!s->workspaceRenameRoot.empty()) HideWorkspaceRenameOverlay(*s, true);
         if (AiAssistantMouseOther(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) return 0;   // Pulse 助手
@@ -5298,6 +5403,10 @@ void ShowKeyboardContextMenu(AppState& s) {
 }
 
 LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        if (s && s->buttonPress.active && wParam == VK_ESCAPE) {
+            CancelButtonPress(*s);
+            return 0;
+        }
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
         CancelFileClick(*s);
         if (wParam == VK_ESCAPE && ToolbarPinDragging()) { EndToolbarPinDrag(*s, true); return 0; }

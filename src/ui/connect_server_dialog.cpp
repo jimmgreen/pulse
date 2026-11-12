@@ -369,8 +369,10 @@ private:
             return 0;
         case WM_NCCALCSIZE:
             return 0;
-        case WM_NCHITTEST:
-            return pulse::ui::BorderlessHitTest(hwnd_, lparam, 36 * scale_, CloseRect());
+        case WM_NCHITTEST: {
+            const LRESULT hit = pulse::ui::BorderlessHitTest(hwnd_, lparam, 36 * scale_, CloseRect());
+            return hit >= HTLEFT && hit <= HTBOTTOMRIGHT ? HTCLIENT : hit;
+        }
         case WM_SIZE:
             if (compositor_.Dc()) compositor_.Resize(LOWORD(lparam), HIWORD(lparam));
             LayoutEdit();

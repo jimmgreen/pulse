@@ -20,6 +20,7 @@
 #include "duplicate_cleanup_guard.h"
 #include "op_speed_graph.h"
 #include "controlled_transfer.h"
+#include "transfer_rate_estimator.h"
 #include "../common/menu_icon.h"
 #include <condition_variable>
 #include <cstdint>
@@ -224,12 +225,25 @@ struct OpFailure {
 };
 
 enum class ExternalOutcome { None, Completed, Partial, Failed, Cancelled };
+struct ExternalAction {
+    std::string id;
+    std::wstring text;
+    bool primary = false;
+};
 
 struct OpStatus {
     bool external = false;
     std::wstring external_title;
     std::wstring external_kind;
     ExternalOutcome external_outcome = ExternalOutcome::None;
+    // Plugin task presentation: named steps (1-based current one), a footer hint, the
+    // failure's explanation, what stayed safe, and buttons once it has ended.
+    std::vector<std::wstring> external_steps;
+    uint32_t external_step = 0;
+    std::wstring external_note, external_detail, external_assurance, external_log;
+    std::wstring external_result, external_result_path; // completed: the result notice and what it opens
+    std::vector<ExternalAction> external_actions;
+    uint64_t external_linked = 0; // host operation shown as this task while it runs
     uint64_t terminal_sequence = 0;
     bool active = false;
     bool can_pause = true;
@@ -537,7 +551,11 @@ public:
     // undone instead. Pending: part of the group is still queued.
     GroupUndo UndoGroup(uint64_t group);
 
-    uint64_t CreateExternalTask(std::wstring title, std::wstring type_label);
+    uint64_t CreateExternalTask(std::wstring title, std::wstring type_label, std::wstring source = {},
+                                std::wstring destination = {}, std::vector<std::wstring> steps = {});
+    // The plugin's handler for the ended task's buttons; InvokeExternalTaskAction runs it once.
+    void SetExternalTaskActionHandler(uint64_t task_id, std::function<void(const std::string&)> handler);
+    bool InvokeExternalTaskAction(uint64_t task_id, const std::string& action);
     bool UpdateExternalTask(uint64_t task_id, const OpStatus& progress);
     bool ExternalTaskCancelled(uint64_t task_id) const;
     bool FinishExternalTask(uint64_t task_id, ExternalOutcome outcome, const OpStatus& final_status = {});
@@ -739,9 +757,13 @@ private:
     struct ExternalTaskState {
         OpStatus status;
         bool cancelled = false; // guarded by mutex_; no plugin callbacks while locked.
+        // Speed and remaining time from the reported bytes, like a built-in copy.
+        TransferRateEstimator rate;
+        bool rate_started = false;
     };
     std::map<uint64_t, ExternalTaskState> external_tasks_;
     std::deque<OpStatus> external_finals_;
+    std::map<uint64_t, std::function<void(const std::string&)>> external_action_handlers_;
     uint64_t terminal_sequence_ = 0;
     uint64_t next_seq_ = 1;
 

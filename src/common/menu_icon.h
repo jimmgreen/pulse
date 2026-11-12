@@ -8,7 +8,10 @@
 #pragma once
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
+
+struct HICON__;  // <windows.h> HICON, without including it here
 
 namespace pulse::common {
 
@@ -27,5 +30,14 @@ struct MenuIconPixels {
 };
 
 using MenuIconRef = std::shared_ptr<const MenuIconPixels>;
+
+// menu_icon.cpp (link it where used). HICON -> premultiplied BGRA at the icon's
+// own size: alpha icons keep their alpha, classic ones take the AND mask.
+MenuIconRef IconPixels(HICON__* icon);
+// "file[,index]" (environment strings expanded) -> file and icon index.
+bool ParseIconReference(const std::wstring& reference, std::wstring& file, int& index);
+// The icon of "file[,index]" extracted at exactly `edge` pixels (1..64), so it is
+// drawn without resampling a small icon. Reads the file: worker threads only.
+MenuIconRef LoadIconPixels(const std::wstring& reference, uint32_t edge);
 
 } // namespace pulse::common

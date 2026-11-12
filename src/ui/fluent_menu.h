@@ -20,6 +20,7 @@
 // FluentMenuModel is the windowless layout/hit-test half; the console
 // self-test drives it directly with a standalone DWrite factory.
 #pragma once
+#include "store_icons.h"
 #include "fluent_components.h"
 #include "ui_motion.h"
 #include "../common/menu_icon.h"
@@ -50,6 +51,9 @@ struct FluentMenuSwatch {
 struct FluentMenuItem {
     int command = 0;              // app-defined verb id; 0 is never returned
     std::wstring text;
+    // Optional second line under the label (caption, secondary colour): the
+    // result a plugin command will produce. It ellipsizes; never widens the menu.
+    std::wstring detail;
     std::wstring glyph;           // Segoe Fluent Icons codepoint string
     std::wstring shortcut;        // right-aligned caption, e.g. L"Ctrl+Shift+C"
     std::wstring badge_text;      // right-aligned Fluent badge (takes priority over shortcut)
@@ -86,6 +90,13 @@ struct FluentMenuItem {
     uint16_t match_start = 0;
     uint16_t match_length = 0;
     int drag_command = 0;         // optional toolbar drag identity; never dispatched as a command
+    StoreIcon vector_icon = StoreIcon::None;
+    uint32_t custom_icon = 0;
+    // Opt-in extension group presentation; existing menus retain their metrics.
+    bool group_tint = false, group_start = false, group_end = false;
+    bool primary = false;
+    StoreIcon trailing_vector_icon = StoreIcon::None; // always visible trailing action
+
 };
 
 // Access key of a row: explicit mnemonic, else trailing "(X)" / "（X）" in text
@@ -155,6 +166,7 @@ private:
     float pad_v_ = 4.0f;      // surface inner padding (DIP*scale)
     float sep_h_ = 5.0f;      // separator slot height (line + gaps)
     float heading_h_ = 26.0f; // a heading row (26 DIP)
+    float detail_row_h_ = 48.0f; // a row with a detail line (row + 16 DIP)
     float inline_label_width_ = 0.0f;
     int width_ = 0;
     int locked_width_ = 0;    // PatchInPlace: Layout keeps this width

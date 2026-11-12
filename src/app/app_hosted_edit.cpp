@@ -884,8 +884,8 @@ void HideRenameOverlay(AppState& s, bool commit) {
                 tab->pending_selected_names = { target };
                 tab->pending_ensure_selection_visible = true;
                 tab->pending_selection_revision = tab->selection_revision;
-                // The renamed row keeps its place even if the refresh beats
-                // the watcher event (#13).
+                // Selection and thumbnail follow the renamed row (now at its
+                // sort position) even if the refresh beats the watcher event.
                 tab->held_renames.push_back({tab->EntryAt(index).name, target});
                 s.ops.Submit(std::move(req));  // its 别名 follows on completion (app_main)
             }

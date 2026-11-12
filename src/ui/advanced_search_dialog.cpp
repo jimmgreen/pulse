@@ -223,7 +223,6 @@ constexpr SvgPart kIcoFolder[] = {
 constexpr SvgPart kIcoFolderAdd[] = {
     {"M1.8 4.5a1 1 0 0 1 1-1h3.4l1.4 1.5h5.6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H2.8a1 1 0 0 1-1-1z", false, 1.3f, 1.0f},
     {"M8 7.5v3.5M6.3 9.2H9.7", false, 1.3f, 1.0f}};
-constexpr SvgPart kIcoX[] = {{"M3 3l8 8M11 3l-8 8", false, 1.3f, 1.0f}};
 constexpr SvgPart kIcoChevRight[] = {{"M4.5 2.5L8 6l-3.5 3.5", false, 1.3f, 1.0f}};
 constexpr SvgPart kIcoChevDown[] = {{"M2.5 4.5L6 8l3.5-3.5", false, 1.3f, 1.0f}};
 
@@ -398,7 +397,7 @@ private:
     }
 
     D2D1_RECT_F R(float x, float y, float w, float h) const { return DipRect(scale_, x, y, w, h); }
-    D2D1_RECT_F CloseRect() const { return R(kDlgW - 8 - 36, 8, 36, 36); }
+    D2D1_RECT_F CloseRect() const { return R(kDlgW - 46, 0, 46, kTitleH); }
 
     // ---- state helpers -------------------------------------------------------------
 
@@ -572,7 +571,7 @@ private:
             const float w1 = X(12 + 14 + 6 + 12) + Measure(b, kF13);
             const float mw = w0 + w1 + X(6);
             const D2D1_RECT_F close = CloseRect();
-            seg_rect_ = D2D1::RectF(close.left - X(6) - mw, X(9), close.left - X(6), X(9 + 34));
+            seg_rect_ = D2D1::RectF(close.left - X(8) - mw, X(9), close.left - X(8), X(9 + 34));
             mode_rect_[0] = D2D1::RectF(seg_rect_.left + X(3), seg_rect_.top + X(3), seg_rect_.left + X(3) + w0,
                                         seg_rect_.bottom - X(3));
             mode_rect_[1] = D2D1::RectF(mode_rect_[0].right, mode_rect_[0].top, mode_rect_[0].right + w1,
@@ -1279,9 +1278,10 @@ private:
                 Text(l10n::Get(mode_labels[i]), kF13, D2D1::RectF(r.left + X(32), r.top, r.right, r.bottom), c);
             }
             const D2D1_RECT_F close = CloseRect();
-            if (hover_ == kHitClose || pressed_ == kHitClose)
-                Fill(close, X(8), pressed_ == kHitClose ? Mix(pal_.hover, pal_.text, 0.06f) : pal_.hover);
-            Icon(kIcoX, 14, close.left + X(11), close.top + X(11), X(14), pal_.text2);
+            fluent::ControlState close_state{};
+            close_state.hovered = hover_ == kHitClose;
+            close_state.pressed = pressed_ == kHitClose && hover_ == kHitClose;
+            painter_.DrawTitleBarButton(close, fluent::TitleBarButtonRole::Close, {}, close_state);
 
             // Fields (shared look: focus = 2 px accent line at the bottom).
             auto field = [&](const D2D1_RECT_F& bounds, HWND edit, I placeholder) {
@@ -1489,6 +1489,7 @@ private:
         case WM_NCHITTEST: {
             // The title bar drags, except over the close button and the mode switch.
             const LRESULT hit = BorderlessHitTest(hwnd_, lparam, kTitleH * scale_, CloseRect());
+            if (hit >= HTLEFT && hit <= HTBOTTOMRIGHT) return HTCLIENT;
             if (hit == HTCAPTION) {
                 POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
                 ScreenToClient(hwnd_, &pt);

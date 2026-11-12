@@ -310,6 +310,11 @@ void PublishPickerPlaces(AppState& s, bool force) {
     AppState* window = s.core.windows.MostRecent();
     if (!window) window = &s;
     picker_places::Snapshot snapshot;
+    snapshot.jump_policy_available = true;
+    snapshot.auto_jump = window->appPrefs.dialog_jump_auto;
+    snapshot.remember = window->appPrefs.jump_history;
+    snapshot.pinyin = window->appPrefs.search_pinyin;
+    snapshot.index = window->appPrefs.search_enabled;
     snapshot.endpoint = s.core.host.Hwnd();
     for (const auto& w : window->places.workspaces)
         snapshot.workspaces.push_back({w.root, w.name, w.color_rgb});

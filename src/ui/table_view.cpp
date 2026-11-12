@@ -176,7 +176,7 @@ bool TableView::SetPayloadImpl(const std::wstring& payload,
             const auto f = Split(line.substr(2), L'\t');
             if (f.size() < 7) continue;
             Sheet sheet;
-            spreadsheet = f[0] == L"xlsx";
+            spreadsheet = f[0] == L"xlsx" || f[0] == L"xls";
             sheet.name = Unescape(f[1], nullptr);
             sheet.cols = (std::min)(ToSize(f[2]), size_t{4096});
             sheet.truncated = f[4] == L"1";

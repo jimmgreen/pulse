@@ -6,7 +6,7 @@
 namespace pulse::shell_bridge {
 namespace {
 bool Eligible(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, DialogFactory& factory) {
-    if (outer || context != CLSCTX_INPROC_SERVER) return false;
+    if (outer || !detail::InprocActivationContext(context)) return false;
     if (clsid == CLSID_FileOpenDialog) factory = DialogFactory::Open;
     else if (clsid == CLSID_FileSaveDialog) factory = DialogFactory::Save;
     else return false;

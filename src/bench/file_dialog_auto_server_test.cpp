@@ -15,6 +15,7 @@ Status Inspect() {
     return {fixture_enabled.load(), false, ERROR_SUCCESS, path};
 }
 }
+#include "../shell_bridge/file_dialog_token_diagnostics.h"
 #include "../shell_bridge/file_dialog_auto_server.cpp"
 #include <chrono>
 #include <condition_variable>
@@ -133,6 +134,66 @@ int wmain(int argc, wchar_t** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     int failures = 0;
     auto check = [&](bool ok, const char* name) { std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", name); failures += !ok; };
+    if (argc == 2 && wcscmp(argv[1], L"--token-diagnostics") == 0) {
+        namespace td = pulse::shell_bridge::token_diagnostics;
+        const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
+            (L"dialog-token-diagnostics-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
+        check(log::Initialize(root.wstring(), "dialog_auto"), "initialize isolated token diagnostic log");
+        constexpr const wchar_t* expected[]{L"THREAD_IMPERSONATION",L"THREAD_TOKEN_QUERY_FAILED",L"PROCESS_TOKEN_QUERY_FAILED",L"ELEVATION_QUERY_FAILED",
+            L"ELEVATED_BUNDLE_UNTRUSTED",L"RESTRICTED_TOKEN",L"APPCONTAINER_QUERY_FAILED",L"APPCONTAINER",L"INTEGRITY_QUERY_FAILED",L"INVALID_INTEGRITY_SID",L"BELOW_MEDIUM_INTEGRITY"};
+        for (unsigned reason = 1; reason <= 11; ++reason) {
+            check(wcscmp(td::ReasonName(reason), expected[reason - 1]) == 0, "legacy numeric token reason retains fixed readable meaning");
+            td::Evidence value; value.reason = reason; value.error = ERROR_ACCESS_DENIED; value.elevated_known = true; value.elevated = true;
+            value.elevation_type = TokenElevationTypeFull; value.token_type = TokenPrimary; value.trust_checked = reason == 5; value.trust_error = reason == 5 ? ERROR_ACCESS_DENIED : ERROR_SUCCESS;
+            td::LogToken("token_rejected_fixture", td::Stage::Resolve, value);
+        }
+        td::Evidence untrusted; untrusted.reason = 5; untrusted.trust_checked = true; untrusted.trust_error = ERROR_ACCESS_DENIED;
+        check(wcscmp(td::GateReason(false, untrusted, false, false, 0, true), L"ELEVATED_BUNDLE_UNTRUSTED") == 0, "bundle rejection is not mislabeled disabled");
+        check(wcscmp(td::GateReason(true, {}, false, false, 0, true), L"AUTOMATIC_DISABLED") == 0 &&
+            wcscmp(td::GateReason(true, {}, true, true, 0, true), L"REGISTRATION_CONFLICT") == 0 &&
+            wcscmp(td::GateReason(true, {}, true, false, ERROR_ACCESS_DENIED, true), L"REGISTRATION_QUERY_FAILED") == 0 &&
+            wcscmp(td::GateReason(true, {}, true, false, 0, false), L"REGISTERED_MODULE_MISMATCH") == 0, "registration failure classes remain distinct diagnostic observations");
+        SetLastError(ERROR_ALREADY_EXISTS); td::LogToken("token_unknown_fixture", td::Stage::Validation, {});
+        check(GetLastError() == ERROR_ALREADY_EXISTS, "diagnostic formatting preserves caller LastError");
+        SetLastError(ERROR_ALREADY_EXISTS); LogCallerSecurityContext();
+        check(GetLastError() == ERROR_ALREADY_EXISTS, "read-only process metadata query preserves caller LastError");
+        HANDLE process = nullptr, impersonation = nullptr, original = nullptr;
+        const BOOL had_original = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY | TOKEN_IMPERSONATE, TRUE, &original);
+        const DWORD original_error = had_original ? ERROR_SUCCESS : GetLastError();
+        bool installed = false;
+        if ((had_original || original_error == ERROR_NO_TOKEN) && OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &process) &&
+            DuplicateTokenEx(process, TOKEN_QUERY | TOKEN_IMPERSONATE, nullptr, SecurityImpersonation, TokenImpersonation, &impersonation)) installed = SetThreadToken(nullptr, impersonation) != FALSE;
+        check(installed, "create process-owned temporary impersonation fixture");
+        if (installed) {
+            check(!TokenSafe(), "actual server still rejects thread impersonation before other gates");
+            td::Evidence observed;
+            check(!TokenSafe(td::Stage::Resolve, &observed) && observed.reason == 1 && observed.error == ERROR_SUCCESS,
+                "resolve rejection preserves original reason and result");
+            check(!TokenSafe(td::Stage::Validation), "validation rejection preserves original result");
+        }
+        const bool restored = !installed || (had_original ? SetThreadToken(nullptr, original) != FALSE : RevertToSelf() != FALSE);
+        check(restored, "restore the exact prior thread token state");
+        if (impersonation) CloseHandle(impersonation); if (process) CloseHandle(process); if (original) CloseHandle(original);
+        check(log::Flush(), "token diagnostic records flush without dropped fields"); const auto health = log::GetHealth(); log::Shutdown();
+        check(health.dropped_events == 0 && health.write_errors == 0, "bounded formatter fits runtime logger field limits");
+        std::string all, actual;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) if (entry.path().extension() == L".jsonl") {
+            std::ifstream input(entry.path()); std::string line;
+            while (std::getline(input, line)) { all += line; if (line.find("\"event\":\"token_rejected\"") != std::string::npos) actual += line; }
+        }
+        check(actual.find("\"reason\":1") != std::string::npos && actual.find("\"error\":0") != std::string::npos, "actual rejected record retains old numeric reason and error");
+        check(actual.find("THREAD_IMPERSONATION") != std::string::npos && actual.find("\"stage\":\"activation\"") != std::string::npos, "actual rejection record includes readable reason and stage");
+        check(actual.find("process_arch_bits") != std::string::npos && actual.find("process_elevated_known") != std::string::npos && actual.find("admin_trust_checked") != std::string::npos,
+            "actual rejected record carries explicit known versus unobserved process and trust evidence");
+        check(actual.find("\"stage\":\"resolve\"") != std::string::npos && actual.find("\"stage\":\"validation\"") != std::string::npos,
+            "actual repeated rejection identifies resolve and validation stages");
+        check(all.find("PROCESS_TOKEN_OBSERVED") != std::string::npos && all.find("\"process_elevated_known\":1") != std::string::npos &&
+            all.find("\"token_type_name\":\"primary\"") != std::string::npos, "actual process token metadata is observed independently of admission");
+        check(all.find("\"admin_trust_checked\":0") != std::string::npos && all.find("\"admin_trust_accepted\":0") != std::string::npos && all.find("\"token_type_name\":\"unknown\"") != std::string::npos,
+            "unchecked trust and unknown token metadata never imply success");
+        std::printf("TOKEN_DIAGNOSTICS failures=%d ui=0 registration_mutations=0\n", failures);
+        return failures ? 1 : 0;
+    }
     if (argc > 1 && wcscmp(argv[1], L"--diagnostics") == 0) {
         const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
             (L"dialog-diagnostics-" + std::to_wstring(GetCurrentProcessId())));

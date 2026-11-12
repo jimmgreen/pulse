@@ -21,7 +21,7 @@ inline DWORD ValidateRuntimeReadyReceipt(const std::wstring& directory, const Se
             ready.size != sizeof(ready) || ready.reserved || ready.target_pid != session.target_pid ||
             ready.machine != session.machine || CompareFileTime(&ready.target_created, &session.target_created) ||
             ready.nonce[39] || std::wmemcmp(ready.nonce, session.nonce, 40) ||
-            ready.status != S_OK || !(ready.installed_entries & kCoCreateInstance)) return ERROR_INVALID_DATA;
+            ready.status != S_OK || !(ready.installed_entries & (kCoCreateInstance | kRoGetActivationFactory))) return ERROR_INVALID_DATA;
         return ERROR_SUCCESS;
     } catch (...) { return ERROR_NOT_ENOUGH_MEMORY; }
 }

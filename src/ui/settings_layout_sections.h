@@ -421,7 +421,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         const auto toggle=l.dialog_toggle_row;
         l.dialog_badge=badge_stack ? D2D1::RectF(left+54*scale,toggle.bottom-34*scale,left+54*scale+badge_w,toggle.bottom-12*scale)
             : D2D1::RectF(right-84*scale-badge_w,toggle.top+21*scale,right-84*scale,toggle.top+43*scale);
-        if(info_problem || vm.settings_dialog_busy) {
+        if(!vm.settings_dialog_status.empty()) {
             l.dialog_management_status=row((info_problem ? 64.0f : 24.0f)+wrap_height(vm.settings_dialog_status,right-left-92*scale));
             if(info_problem) {
                 auto retry=row(56);
@@ -446,8 +446,19 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
             control=D2D1::RectF(bx,by,(std::min)(right-20*scale,bx+bw),by+32*scale);
             return r;
         };
-        if(vm.settings_dialog_enabled || info_problem)
-            l.dialog_application_row=action_row(I::StartupDiagnosticsDesc,I::StartupDiagnosticsExport,l.dialog_export_button);
+        l.dialog_history_heading=action_row(I::DialogHistoryDesc,I::DialogHistoryRefresh,l.dialog_refresh_button);
+        const auto& history_note=vm.settings_dialog_history_note.empty() ? l10n::Get(I::DialogHistoryEmpty) : vm.settings_dialog_history_note;
+        l.dialog_history_note=row(24+wrap_height(history_note,(std::max)(40*scale,right-left-40*scale)));
+        int previous_group=0;
+        for(const auto& record:vm.settings_dialog_records) {
+            if(record.group && record.group!=previous_group)
+                l.dialog_history_groups.push_back({row(dialog_records::kGroupH),record.group});
+            previous_group=record.group;
+            const float height=painter ? dialog_records::RowHeight(*painter,record,right-left,scale)/scale
+                : dialog_records::kPad*2+dialog_records::kHead+(record.detail.empty() ? 0.0f : 64.0f);
+            l.dialog_history_rows.push_back(row(height));
+        }
+        l.dialog_application_row=action_row(I::StartupDiagnosticsDesc,I::StartupDiagnosticsExport,l.dialog_export_button);
         auto jump_row=[&](I title,I desc) {
             const float width=(std::max)(40*scale,right-left-126*scale);
             const float title_h=painter ? painter->MeasureWrappedBodyHeight(l10n::Get(title),width)/scale : 40.0f;
@@ -886,6 +897,9 @@ inline bool CanRefresh(const ExtensionStoreView& view) {
 inline bool CanRefreshInstalled(const ExtensionStoreView& view) {
     return !view.installed_busy && !view.installed_loading;
 }
+inline bool CanInstallFromFile(const ExtensionStoreView& view) {
+    return !view.busy && !view.installed_busy;
+}
 inline const std::wstring& Tab(int index) {
     using I = l10n::StringId;
     return l10n::Get(index == 0 ? I::StoreBrowse : index == 1 ? I::StoreInstalled : I::StoreManage);
@@ -896,107 +910,7 @@ inline const std::wstring& InstalledBadge(const InstalledExtensionItem& item) {
 }
 }
 
-// Shared geometry for drawing and hit tests. All captions use the same measured
-// width at paint time, including publisher, status and long untrusted summaries.
-float LayoutSettingsStore(SettingsLayout& l, const WindowViewModel& vm, float s,
-                          float y, const fluent::Painter* painter) {
-    using I = l10n::StringId;
-    const auto& view = vm.settings_store_view;
-    const float left = l.content.left + 20*s, right = l.content.right - 20*s;
-    const float font = static_cast<float>(vm.settings_ui_font_scale)/100;
-    auto height = [&](std::wstring_view value, float w) {
-        return value.empty() ? 0.0f : painter ? painter->MeasureWrappedCaptionHeight(value, (std::max)(1.0f, w)) : 40*s*font;
-    };
-    auto caption = [&](std::wstring_view value, float inset = 0.0f) {
-        const auto r = D2D1::RectF(left+inset, y, right-inset, y+height(value, right-left-2*inset));
-        y = r.bottom+12*s; return r;
-    };
-    auto width = [&](std::wstring_view value) {
-        return (std::min)(right-left, painter ? painter->MeasureButtonWidth(value) : 144*s*font);
-    };
-    const float bh = 32*s*font;
-    const float rw = width(l10n::Get(I::Refresh));
-    l.store_refresh = D2D1::RectF(left,y,left+rw,y+bh);
-    if (view.busy) {
-        const float cw = width(l10n::Get(I::Cancel));
-        const bool stack = rw+8*s+cw > right-left;
-        const float x = stack ? left : left+rw+8*s;
-        l.store_cancel = D2D1::RectF(x, y+(stack ? bh+8*s : 0), (std::min)(right,x+cw), y+(stack ? 2*bh+8*s : bh));
-    }
-    y = (std::max)(l.store_refresh.bottom,l.store_cancel.bottom)+12*s;
-    const auto state = store_text::State(view);
-    l.store_state = caption(state);
-    y += 4*s;
-    l.store_trust = caption(l10n::Get(I::StoreTrust),12*s);
-    y += 8*s;
-    if (!view.notice.empty()) { l.store_notice = caption(view.notice,12*s); y += 8*s; }
-    if (view.pending_restart) { l.store_restart = caption(l10n::Get(I::StoreRestart),12*s); y += 8*s; }
-    l.store_manage = caption(l10n::Get(I::StoreOfficialManage),12*s);
-    y += 12*s;
-    const bool listed = view.state == ExtensionStoreView::State::Online || view.state == ExtensionStoreView::State::Offline;
-    if (view.items.empty() && listed) {
-        l.store_section = caption(l10n::Get(I::StoreCommunity));
-        y += 20*s;
-        l.store_empty = caption(l10n::Get(I::StoreEmpty),16*s);
-        return y+36*s;
-    }
-    const int columns = right-left >= 660*s*font ? 2 : 1;
-    const float gap = 12*s, w = (right-left-gap*(columns-1))/columns;
-    // Official packages first, then the community; store_items stays indexed like view.items.
-    l.store_items.assign(view.items.size(), {});
-    float row_bottom = y;
-    for (const bool official : {true, false}) {
-    size_t placed = 0;
-    for (size_t i=0; i<view.items.size(); ++i) {
-        const auto& item=view.items[i];
-        if (item.official != official) continue;
-        if (!placed) {
-            y = row_bottom;
-            if (official) l.store_section = caption(l10n::Get(I::StoreOfficial));
-            else l.store_community_section = caption(l10n::Get(I::StoreCommunity));
-            row_bottom = y;
-        }
-        if (placed && placed%columns==0) { y=row_bottom+gap; }
-        SettingsLayout::StoreCard c;
-        const float x=left+static_cast<float>(placed%columns)*(w+gap);
-        ++placed;
-        const float tl=x+16*s, tr=x+w-16*s, tw=tr-tl;
-        // Header: an icon tile, then the name over the publisher line. Below: summary, status, and a footer
-        // with the version and size on the left and the action on the right.
-        const float tile=44*s, tx=tl+tile+12*s;
-        float cy=y+16*s;
-        c.icon=D2D1::RectF(tl,cy,tl+tile,cy+tile);
-        const float name_h=painter ? painter->MeasureWrappedSectionHeight(item.name,(std::max)(1.0f,tr-tx)) : 24*s;
-        c.name=D2D1::RectF(tx,cy,tr,cy+name_h);
-        c.publisher=D2D1::RectF(tx,c.name.bottom+2*s,tr,c.name.bottom+2*s+height(item.publisher.empty()?L"x":item.publisher,tr-tx-18*s));
-        cy=(std::max)(c.icon.bottom,c.publisher.bottom)+12*s;
-        auto field=[&](std::wstring_view value, float after) {
-            auto r=D2D1::RectF(tl,cy,tr,cy+height(value,tw)); cy=r.bottom+(value.empty()?0:after*s); return r;
-        };
-        c.summary=field(item.summary,10);
-        c.status=field(item.status,10);
-        cy+=2*s;
-        c.version=D2D1::RectF(tl,cy,tr,cy+bh);
-        if (!item.button_label.empty()) {
-            const float bw=(std::min)(tw,painter ? painter->MeasureButtonWidth(item.button_label) : 144*s*font);
-            c.button=D2D1::RectF(tr-bw,cy,tr,cy+bh);
-            c.version.right=(std::max)(c.version.left,c.button.left-12*s);
-        }
-        cy+=bh;
-        c.bounds=D2D1::RectF(x,y,x+w,cy+16*s);
-        row_bottom=(std::max)(row_bottom,c.bounds.bottom);
-        l.store_items[i]=c;
-    }
-    if (placed) row_bottom += 24*s;
-    else if (!official && listed) {  // the community section is shown even when it is empty
-        y = row_bottom;
-        l.store_community_section = caption(l10n::Get(I::StoreCommunity));
-        l.store_empty = caption(l10n::Get(I::StoreCommunityEmpty),16*s);
-        row_bottom = y + 12*s;
-    }
-    }
-    return row_bottom;
-}
+#include "settings_layout_store.h"
 
 float LayoutSettingsInstalled(SettingsLayout& l, const WindowViewModel& vm, float s,
                               float y, const fluent::Painter* painter) {
@@ -1015,50 +929,102 @@ float LayoutSettingsInstalled(SettingsLayout& l, const WindowViewModel& vm, floa
         const auto r = D2D1::RectF(left+inset,y,right-inset,y+height(value,right-left-2*inset));
         y = r.bottom+20*s; return r;
     };
+    store_view::LayoutSearch(l,s,font,y);
     l.store_refresh = D2D1::RectF(left,y,(std::min)(right,left+width(l10n::Get(I::Refresh))),y+bh);
-    y = l.store_refresh.bottom+12*s;
+    {
+        const float fw = (std::min)(right - left, width(l10n::Get(I::StoreInstallFromFile)));
+        if (l.store_refresh.right + 8*s + fw <= right) {
+            l.store_install_file = D2D1::RectF(l.store_refresh.right + 8*s, y, l.store_refresh.right + 8*s + fw, y + bh);
+        } else {
+            l.store_install_file = D2D1::RectF(left, l.store_refresh.bottom + 8*s, left + fw, l.store_refresh.bottom + 8*s + bh);
+        }
+    }
+    y = (std::max)(l.store_refresh.bottom, l.store_install_file.bottom)+12*s;
     if (view.installed_loading) l.store_state = caption(l10n::Get(I::StoreInstalledLoading));
     else if (!view.installed_error.empty()) l.store_state = caption(l10n::Get(I::StoreInstalledFailed));
     if (!view.installed_error.empty()) l.store_notice = caption(view.installed_error,12*s);
-    if (view.pending_restart) l.store_restart = caption(l10n::Get(I::StoreRestart),12*s);
+    if (view.pending_restart) {
+        const float rbw = (std::min)(right - left - 24*s, width(l10n::Get(I::StoreRestartNow)));
+        const bool inline_btn = right - left - 24*s - rbw - 12*s >= 180*s;
+        if (inline_btn) {
+            const float text_w = right - left - 24*s - rbw - 12*s;
+            const float th = height(l10n::Get(I::StoreRestart), text_w);
+            const float row_h = (std::max)(th, bh);
+            const float ty = y + (row_h - th) / 2;
+            const float by = y + (row_h - bh) / 2;
+            l.store_restart = D2D1::RectF(left + 12*s, ty, right - 12*s - rbw - 12*s, ty + th);
+            l.store_restart_button = D2D1::RectF(right - 12*s - rbw, by, right - 12*s, by + bh);
+            y += row_h + 20*s;
+        } else {
+            l.store_restart = D2D1::RectF(left + 12*s, y, right - 12*s, y + height(l10n::Get(I::StoreRestart), right - left - 24*s));
+            l.store_restart_button = D2D1::RectF(left + 12*s, l.store_restart.bottom + 8*s, left + 12*s + rbw, l.store_restart.bottom + 8*s + bh);
+            y = l.store_restart_button.bottom + 20*s;
+        }
+    }
     if (view.installed.empty() && !view.installed_loading && view.installed_error.empty()) {
         l.store_empty = caption(l10n::Get(I::StoreInstalledEmpty),16*s);
     }
-    for (const auto& item : view.installed) {
+    l.installed_items.resize(view.installed.size());
+    size_t displayed=0;
+    for (size_t installed_index=0;installed_index<view.installed.size();++installed_index) {
+        const auto& item=view.installed[installed_index];
+        if(!store_view::Contains(item.name,view.search) && !store_view::Contains(item.id,view.search) && !store_view::Contains(item.publisher,view.search)) continue;
+        ++displayed;
         SettingsLayout::InstalledCard c;
-        const float tl = left+16*s, tr = right-16*s, tw = tr-tl;
-        float cy = y+16*s;
-        auto field = [&](std::wstring_view value) {
-            const auto r = D2D1::RectF(tl,cy,tr,cy+height(value,tw));
-            cy = r.bottom+(value.empty()?0:8*s); return r;
+        const float tl=left+72*s, tr=right-16*s;
+        const auto catalog=std::find_if(view.items.begin(),view.items.end(),[&](const auto& value) {
+            return std::wstring(value.id.begin(),value.id.end())==item.id && store_view::HasSettings(view,value);
+        });
+        const bool settings=catalog!=view.items.end();
+        const float settings_w=settings ? width(l10n::Get(I::Settings)) : 0;
+        const float actions_w=40*s+32*s+(settings ? settings_w+8*s : 0)+8*s;
+        const bool inline_actions=right-left >= 760*s*font && tr-tl-actions_w >= 280*s*font;
+        const float text_right=inline_actions ? tr-actions_w-20*s : tr;
+        const float tw=text_right-tl;
+        float cy=y+14*s, fx=tl, line_bottom=cy;
+        c.icon=D2D1::RectF(left+14*s,cy,left+58*s,cy+44*s);
+        auto flowing_field=[&](std::wstring_view value,bool badge=false) {
+            if(value.empty()) return D2D1::RectF();
+            const float fw=(std::min)(tw,painter ? (badge ? painter->MeasureBadgeWidth(value) : painter->MeasureButtonWidth(value)) :
+                (static_cast<float>(value.size())*7+16)*s*font);
+            if(fx>tl && fx+fw>text_right) {fx=tl;cy=line_bottom+4*s;}
+            const float fh=badge ? 24*s*font : (std::max)(22*s*font,height(value,fw));
+            const auto r=D2D1::RectF(fx,cy,fx+fw,cy+fh);
+            fx=r.right+8*s; line_bottom=(std::max)(line_bottom,r.bottom); return r;
         };
-        c.name = field(item.name);
-        c.id = field(item.id);
-        c.publisher = field(item.publisher);
-        c.version = field(item.version);
-        // Badges have their own matching single-line measurement and drawing path.
-        const auto& badge = store_text::InstalledBadge(item);
-        const float bw = (std::min)(tw,painter ? painter->MeasureBadgeWidth(badge) : 120*s*font);
-        c.badge = D2D1::RectF(tl,cy,tl+bw,cy+24*s*font); cy = c.badge.bottom+8*s;
-        if (item.native_code) c.native_code = field(l10n::Get(I::StoreNativeCode));
-        c.status = field(item.status);
-        c.notice = field(item.notice);
-        cy += 4*s;
-        // Actions flow below the text and wrap independently; disabled actions remain visible.
-        float ax = tl;
-        auto action = [&](std::wstring_view label) {
-            const float aw = (std::min)(tw,width(label));
-            if (ax > tl && ax+aw > tr) { ax=tl; cy+=bh+8*s; }
-            const auto r = D2D1::RectF(ax,cy,ax+aw,cy+bh); ax=r.right+8*s; return r;
+        c.name=flowing_field(item.name);
+        c.version=flowing_field(item.version);
+        c.badge=flowing_field(store_text::InstalledBadge(item),true);
+        cy=line_bottom+4*s; fx=tl;
+        c.id=flowing_field(item.id);
+        c.publisher=flowing_field(item.publisher);
+        cy=line_bottom+4*s;
+        auto description=[&](std::wstring_view value) {
+            if(value.empty()) return D2D1::RectF();
+            const auto r=D2D1::RectF(tl,cy,text_right,cy+height(value,tw));
+            cy=r.bottom+4*s; return r;
         };
-        if (item.enabled) c.disable = action(l10n::Get(I::ExtensionPackageDisable));
-        else c.enable = action(l10n::Get(I::ExtensionPackageEnable));
-        c.uninstall = action(l10n::Get(I::StoreUninstall));
-        c.rollback = action(l10n::Get(I::StoreRollback));
-        c.bounds = D2D1::RectF(left,y,right,cy+bh+16*s);
-        l.installed_items.push_back(c);
-        y=c.bounds.bottom+12*s;
+        if(item.native_code) c.native_code=description(l10n::Get(I::StoreNativeCode));
+        c.status=description(item.status); c.notice=description(item.notice);
+        const float text_bottom=(std::max)(cy,c.icon.bottom);
+        float ax=inline_actions ? tr-actions_w : left+14*s;
+        const float actions_left=ax;
+        float ay=inline_actions ? y+14*s : text_bottom+8*s;
+        float actions_bottom=ay;
+        auto action=[&](float requested,bool toggle=false) {
+            const float aw=(std::min)(tr-actions_left,requested);
+            if(ax>actions_left && ax+aw>tr) {ax=actions_left;ay=actions_bottom+8*s;}
+            const float ah=toggle ? 20*s : bh;
+            const auto r=D2D1::RectF(ax,ay+(bh-ah)/2,ax+aw,ay+(bh+ah)/2);
+            ax=r.right+8*s; actions_bottom=(std::max)(actions_bottom,ay+bh); return r;
+        };
+        if(settings) c.settings=action(settings_w);
+        if(item.enabled) c.disable=action(40*s,true); else c.enable=action(40*s,true);
+        c.more=action(32*s);
+        c.bounds=D2D1::RectF(left,y,right,(std::max)(text_bottom,actions_bottom)+14*s);
+        l.installed_items[installed_index]=c; y=c.bounds.bottom+8*s;
     }
+    if(displayed==0 && !view.installed.empty() && !view.search.empty()) l.store_no_match=caption(l10n::Get(I::StoreNoMatch),16*s);
     return y+24*s;
 }
 
@@ -1067,30 +1033,89 @@ inline int HitTestSettingsStore(const SettingsLayout& l, const WindowViewModel& 
     const auto ContainsPt = [](D2D1_RECT_F r,float px,float py) {
         return r.right>r.left && r.bottom>r.top && px>=r.left && px<r.right && py>=r.top && py<r.bottom;
     };
+    const auto& view=vm.settings_store_view;
+    if (l.sz.on) {
+        const auto& d=l.sz;
+        if (ContainsPt(d.crumb,x,y)) return static_cast<int>(PackAction::StoreDetailBack);
+        if (ContainsPt(d.enable,x,y)) return static_cast<int>(PackAction::StoreDetailEnable);
+        if (ContainsPt(d.more,x,y)) return static_cast<int>(PackAction::StoreDetailMore);
+        if (ContainsPt(l.store_restart_button,x,y)) return static_cast<int>(PackAction::StoreRestartNow);
+        for(int i=0;i<4;++i) if(ContainsPt(d.tabs[i],x,y)) return static_cast<int>(PackAction::StoreDetailTabBase)+i;
+        if(ContainsPt(d.about_source,x,y)) return static_cast<int>(PackAction::SzSource);
+        if (!view.seven_zip.available) return -1;
+        for(int i=0;i<3;++i) if(ContainsPt(d.mode_opts[i],x,y)) return static_cast<int>(PackAction::SzModeBase)+i;
+        for(int i=0;i<2;++i) {
+            if(ContainsPt(d.location_opts[i],x,y)) return static_cast<int>(PackAction::SzLocationBase)+i;
+            if(ContainsPt(d.placement_opts[i],x,y)) return static_cast<int>(PackAction::SzPlacementBase)+i;
+            if(ContainsPt(d.preview_kinds[i],x,y)) return static_cast<int>(PackAction::SzPreviewBase)+i;
+        }
+        for(int i=0;i<6;++i) {
+            if(ContainsPt(d.format_opts[i],x,y)) return static_cast<int>(PackAction::SzFormatBase)+i;
+            if(view.seven_zip.format!=2 && ContainsPt(d.level_stops[i],x,y)) return static_cast<int>(PackAction::SzLevelBase)+i;
+            if(ContainsPt(d.command_rows[i],x,y)) return static_cast<int>(PackAction::SzCommandBase)+i;
+        }
+        if(ContainsPt(d.remember,x,y)) return static_cast<int>(PackAction::SzRemember);
+        if(ContainsPt(d.browse,x,y)) return static_cast<int>(PackAction::SzBrowse);
+        if(d.history_rollback.size()>1 && ContainsPt(d.history_rollback[1],x,y)) return static_cast<int>(PackAction::SzHistoryRollback);
+        return -1;
+    }
     if (ContainsPt(l.store_tabs[0],x,y)) return static_cast<int>(PackAction::StoreBrowse);
     if (ContainsPt(l.store_tabs[1],x,y)) return static_cast<int>(PackAction::StoreInstalled);
     if (ContainsPt(l.store_tabs[2],x,y)) return static_cast<int>(PackAction::StoreManage);
-    const auto& view=vm.settings_store_view;
     if (!vm.settings_store_browse && vm.settings_store_installed) {
+        if (view.pending_restart && ContainsPt(l.store_restart_button,x,y)) return static_cast<int>(PackAction::StoreRestartNow);
         if (store_text::CanRefreshInstalled(view) && ContainsPt(l.store_refresh,x,y)) return static_cast<int>(PackAction::InstalledRefresh);
+        if (store_text::CanInstallFromFile(view) && ContainsPt(l.store_install_file,x,y)) return static_cast<int>(PackAction::StoreInstallFromFile);
         if (view.installed_busy) return -1;
         for (size_t i=0;i<l.installed_items.size() && i<view.installed.size() && i<10000;++i) {
             const auto& c=l.installed_items[i]; const auto& item=view.installed[i];
             const int index=static_cast<int>(i);
+            if (ContainsPt(c.settings,x,y)) {
+                for(size_t k=0;k<view.items.size() && k<10000;++k) {
+                    const auto& catalog=view.items[k];
+                    if(store_view::HasSettings(view,catalog) && std::wstring(catalog.id.begin(),catalog.id.end())==item.id)
+                        return static_cast<int>(PackAction::StoreItemSettingsBase)+static_cast<int>(k);
+                }
+            }
             if (!item.enabled && item.can_enable && ContainsPt(c.enable,x,y)) return static_cast<int>(PackAction::InstalledEnableBase)+index;
             if (item.enabled && item.can_disable && ContainsPt(c.disable,x,y)) return static_cast<int>(PackAction::InstalledDisableBase)+index;
-            if (item.can_uninstall && ContainsPt(c.uninstall,x,y)) return static_cast<int>(PackAction::InstalledUninstallBase)+index;
-            if (item.can_rollback && ContainsPt(c.rollback,x,y)) return static_cast<int>(PackAction::InstalledRollbackBase)+index;
+            if (ContainsPt(c.more,x,y)) return static_cast<int>(PackAction::InstalledMoreBase)+index;
         }
         return -1;
     }
     if (!vm.settings_store_browse) return -1;
+    if (view.pending_restart && ContainsPt(l.store_restart_button,x,y)) return static_cast<int>(PackAction::StoreRestartNow);
+    if (store_text::CanInstallFromFile(view) && ContainsPt(l.store_install_file,x,y)) return static_cast<int>(PackAction::StoreInstallFromFile);
+    for(int i=0;i<5;++i) if(ContainsPt(l.store_chips[i],x,y)) return static_cast<int>(PackAction::StoreChipBase)+i;
+    if(ContainsPt(l.store_failed_sources,x,y)) return static_cast<int>(PackAction::StoreSources);
+    if(l.store_quick.on && view.seven_zip.available) {
+        const auto& q=l.store_quick;
+        if(ContainsPt(q.mode,x,y)) return static_cast<int>(PackAction::StoreQuickMode);
+        if(ContainsPt(q.format,x,y)) return static_cast<int>(PackAction::StoreQuickFormat);
+        if(view.seven_zip.format!=2 && ContainsPt(q.level,x,y)) return static_cast<int>(PackAction::StoreQuickLevel);
+        if(ContainsPt(q.remember,x,y)) return static_cast<int>(PackAction::StoreQuickRemember);
+    }
+    for(const auto& c:l.store_packs) {
+        const auto info=store_view::Pack(vm,c.pack);
+        if(info.action_enabled && ContainsPt(c.button,x,y)) return static_cast<int>(info.action);
+        if(!info.secondary.empty() && ContainsPt(c.secondary,x,y)) return static_cast<int>(info.secondary_action);
+    }
     if (ContainsPt(l.store_manage,x,y)) return static_cast<int>(PackAction::StoreManage);
     if (store_text::CanRefresh(view) && ContainsPt(l.store_refresh,x,y)) return static_cast<int>(PackAction::StoreRefresh);
     if (view.busy && ContainsPt(l.store_cancel,x,y)) return static_cast<int>(PackAction::StoreCancel);
-    for (size_t i=0;i<l.store_items.size() && i<view.items.size();++i)
+    if(l.store_feature_item>=0 && l.store_feature_item<static_cast<int>(view.items.size()) && l.store_feature_item<10000) {
+        const auto& item=view.items[static_cast<size_t>(l.store_feature_item)];
+        if(item.action_enabled && !item.button_label.empty() && ContainsPt(l.store_feature.button,x,y))
+            return static_cast<int>(PackAction::StoreItemBase)+l.store_feature_item;
+        if(store_view::HasSettings(view,item) && ContainsPt(l.store_feature.settings,x,y))
+            return static_cast<int>(PackAction::StoreItemSettingsBase)+l.store_feature_item;
+    }
+    for (size_t i=0;i<l.store_items.size() && i<view.items.size() && i<10000;++i) {
         if (view.items[i].action_enabled && !view.items[i].button_label.empty() && ContainsPt(l.store_items[i].button,x,y))
             return static_cast<int>(PackAction::StoreItemBase)+static_cast<int>(i);
+        if (store_view::HasSettings(view,view.items[i]) && ContainsPt(l.store_items[i].settings,x,y))
+            return static_cast<int>(PackAction::StoreItemSettingsBase)+static_cast<int>(i);
+    }
     return -1;
 }
 
@@ -1219,13 +1244,16 @@ float LayoutSettingsPacks(SettingsLayout& l, const WindowViewModel& vm, float sc
     }
     return y + 24*scale;
     }
+    if (vm.settings_store_view.detail && vm.settings_store_view.seven_zip.item >= 0 &&
+        vm.settings_store_view.seven_zip.item < static_cast<int>(vm.settings_store_view.items.size()))
+        return LayoutSevenZipDetail(l,vm,scale,y-44*scale,painter);
     y += caption_h(vm.settings_store_browse ? l10n::Get(l10n::StringId::StoreIntro).c_str()
         : vm.settings_store_installed ? store_text::InstalledIntro().c_str() : pack_text::PacksIntro(), right - left) + 18*scale;
     // Measure labels, not equal thirds: long localized labels wrap the tab row.
     const float tab_h = 36*font*scale;
     float tab_x = left;
     for (int i=0;i<3;++i) {
-        const float tab_w = (std::min)(right-left,painter ? painter->MeasureButtonWidth(store_text::Tab(i)) : 200*font*scale);
+        const float tab_w = (std::min)(right-left,painter ? painter->MeasureButtonWidth(store_view::Tab(i)) + (i == 1 ? 36*scale : 0) : (i == 1 ? 156 : 120)*font*scale);
         if (tab_x > left && tab_x+tab_w > right) { tab_x=left; y+=tab_h+8*scale; }
         l.store_tabs[i]=D2D1::RectF(tab_x,y,tab_x+tab_w,y+tab_h);
         tab_x+=tab_w+4*scale;

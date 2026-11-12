@@ -14,6 +14,7 @@
 #include <wrl/client.h>
 #include <set>
 #include <mutex>
+#include "picker_window_capture_test.h"
 
 namespace {
 // Snapshot requests: the remote picker HWND lives in pulse.exe, so pass the
@@ -1561,7 +1562,15 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
     return failures ? 1 : 0;
 }
 }
+#include "picker_dynamic_update_test.inc"
+#include "picker_pending_submit_test.inc"
+#include "picker_navigation_root_test.inc"
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 3 && std::wstring_view(argv[2]) == L"pre-ready-submit") return pending_submit_test::Run(argv[1]);
+    if (argc == 3 && std::wstring_view(argv[2]) == L"navigation-root") return navigation_root_test::Run(argv[1]);
+    if (argc == 3 && std::wstring_view(argv[2]) == L"navigation-root-old-peer") return navigation_root_test::Run(argv[1], true);
+    if (argc == 3 && std::wstring_view(argv[2]) == L"dynamic-update") return dynamic_update_test::Run(argv[1]);
+    if (argc == 3 && std::wstring_view(argv[2]) == L"dynamic-update-narrow") return dynamic_update_test::Run(argv[1], true);
     if (argc == 3 && std::wstring_view(argv[2]) == L"folder-links-config") {
         if (!std::filesystem::path(argv[1]).is_absolute()) return 2;
         const HRESULT apartment = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);

@@ -9,6 +9,8 @@ $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
 & python (Join-Path $repo 'scripts/test_release_packs.py')
 if ($LASTEXITCODE -ne 0) { throw 'Release pack catalog validation failed before compilation' }
+& python (Join-Path $repo 'tools/extensions/check_docs_and_contracts.py')
+if ($LASTEXITCODE -ne 0) { throw 'Extension SDK docs and contracts validation failed before compilation' }
 $build = [IO.Path]::GetFullPath((Join-Path $repo $BuildDir))
 if (-not $build.StartsWith($repo + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'BuildDir must be inside the repository'
@@ -184,13 +186,52 @@ $aiPack = Join-Path $build 'ai-pack'
 $aiDist = Join-Path $repo "dist/ai-pack-$Channel"
 New-Item -ItemType Directory -Path $aiDist -Force | Out-Null
 Copy-Item -Path (Join-Path $aiPack '*') -Destination $aiDist -Force
+$licenses = Join-Path $build 'licenses/LumaText'
+New-Item -ItemType Directory -Path $licenses -Force | Out-Null
+Copy-Item -Path (Join-Path $sdkRoot 'share/LumaText/licenses/*') -Destination $licenses -Force
+if ($Channel -eq 'windows') {
+    $version = (Get-Content (Join-Path $repo 'version.txt') -Raw).Trim()
+    $sdkDist = Join-Path $repo 'dist/native-sdk'
+    if (Test-Path -LiteralPath $sdkDist) {
+        Remove-Item -LiteralPath $sdkDist -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $sdkDist -Force | Out-Null
+    $sdkArchiveName = "Pulse-NativeSDK-$version-windows-x64.zip"
+    $sdkArchivePath = Join-Path $sdkDist $sdkArchiveName
+    $sdkShaPath = "$sdkArchivePath.sha256"
+    $sdkCompatPath = Join-Path $sdkDist 'native-sdk-compatibility.json'
+    & python (Join-Path $repo 'tools/extensions/bundle_native_sdk.py') bundle --output $sdkArchivePath
+    if ($LASTEXITCODE -ne 0) { throw 'Native SDK ZIP bundling failed' }
+    $sdkHash = (Get-FileHash -LiteralPath $sdkArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText($sdkShaPath, "$sdkHash *$sdkArchiveName`n", [Text.UTF8Encoding]::new($false))
+    & python (Join-Path $repo 'tools/extensions/bundle_native_sdk.py') compatibility --archive $sdkArchivePath --output $sdkCompatPath
+    if ($LASTEXITCODE -ne 0) { throw 'Native SDK compatibility report generation failed' }
+    $verifySdkScript = Join-Path $repo 'tools/extensions/verify_sdk_bundle.py'
+    $verifySdkBatch = Join-Path $build 'verify-sdk-bundle.bat'
+    @"
+@echo off
+call "$vcvars"
+if errorlevel 1 exit /b 1
+chcp 65001 >nul
+set "VSLANG=1033"
+$toolsetEnvironment
+python "$verifySdkScript" --archive "$sdkArchivePath" --require-compile
+exit /b %errorlevel%
+"@ | Set-Content -LiteralPath $verifySdkBatch -Encoding ascii
+    & $verifySdkBatch
+    if ($LASTEXITCODE -ne 0) { throw 'Native SDK standalone bundle compile and lifecycle verification failed' }
+    $previewArchiveName = "Pulse-NativePreview-$version-windows-x64.zip"
+    $previewArchivePath = Join-Path $sdkDist $previewArchiveName
+    $previewShaPath = "$previewArchivePath.sha256"
+    & python (Join-Path $repo 'tools/extensions/bundle_native_preview.py') --source-sdk $sdkArchivePath --host (Join-Path $build 'pulse.exe') --output $previewArchivePath
+    if ($LASTEXITCODE -ne 0) { throw 'Native Preview ZIP bundling failed' }
+    $previewHash = (Get-FileHash -LiteralPath $previewArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText($previewShaPath, "$previewHash *$previewArchiveName`n", [Text.UTF8Encoding]::new($false))
+}
 if ($Channel -eq 'win81') {
     python tools/audit_win81_imports.py $build
     if ($LASTEXITCODE -ne 0) { throw 'Windows 8.1 startup import guard failed' }
 }
-$licenses = Join-Path $build 'licenses/LumaText'
-New-Item -ItemType Directory -Path $licenses -Force | Out-Null
-Copy-Item -Path (Join-Path $sdkRoot 'share/LumaText/licenses/*') -Destination $licenses
 # Pulse setup: bootstrapper + xz payload (scripts/pack_setup.bat).
 & (Join-Path $repo 'scripts/pack_setup.bat') $build $Channel
 if ($LASTEXITCODE -ne 0) { throw 'Installer packaging failed' }

@@ -138,7 +138,22 @@ int LegacyEntryTest() {
     a.lpstrInitialDir = "C:\\"; a.lpstrFilter = "Text\0*.txt\0\0"; a.Flags = w.Flags;
     check(ObserveOpenW(&w) && std::wstring(file) == fixture && w.nFileOffset == expected_offset && w.nFileExtension == expected_extension && HookDialogError() == 0, "runtime OpenW commits path offsets and error");
     check(ObserveOpenA(&a) && std::string(ansi) == fixture_ansi && a.nFileOffset == expected_offset && a.nFileExtension == expected_extension && HookDialogError() == 0, "runtime OpenA commits byte offsets");
-    multiple = true; file[0] = 0; ansi[0] = 0; w.Flags |= OFN_ALLOWMULTISELECT; a.Flags = w.Flags;
+    w.Flags |= OFN_ALLOWMULTISELECT; a.Flags = w.Flags;
+    std::fill_n(file, 512, L'X'); file[0] = 0;
+    std::fill_n(ansi, 512, 'X'); ansi[0] = 0;
+    check(ObserveOpenW(&w) && file[fixture.size()] == 0 && file[fixture.size() + 1] == 0,
+        "single W result in multiselect mode terminates the complete list, not just its path");
+    check(ObserveOpenA(&a) && ansi[fixture_ansi.size()] == 0 && ansi[fixture_ansi.size() + 1] == 0,
+        "single A result in multiselect mode terminates the complete byte list");
+    file[0] = 0; ansi[0] = 0; w.nMaxFile = static_cast<DWORD>(fixture.size() + 1); a.nMaxFile = static_cast<DWORD>(fixture_ansi.size() + 1);
+    check(!ObserveOpenW(&w) && HookDialogError() == FNERR_BUFFERTOOSMALL && file[0] == fixture.size() + 2,
+        "multiselect W capacity includes the final empty item");
+    WORD single_required = 0;
+    const BOOL single_short = ObserveOpenA(&a); std::memcpy(&single_required, ansi, sizeof(single_required));
+    check(!single_short && HookDialogError() == FNERR_BUFFERTOOSMALL && single_required == fixture_ansi.size() + 2,
+        "multiselect A capacity includes the final empty item");
+    w.nMaxFile = 512; a.nMaxFile = 512;
+    multiple = true; file[0] = 0; ansi[0] = 0;
     const auto parent = std::filesystem::path(fixture).parent_path().wstring();
     const auto leaf = std::filesystem::path(fixture).filename().wstring();
     check(ObserveOpenW(&w) && std::wstring(file) == parent && w.nFileOffset == parent.size() + 1 &&
@@ -162,7 +177,7 @@ int LegacyEntryTest() {
     WORD required = 0;
     const BOOL short_result = ObserveSaveA(&a); std::memcpy(&required, ansi, sizeof(required));
     check(!short_result && HookDialogError() == FNERR_BUFFERTOOSMALL && required == fixture_ansi.size() + 1, "runtime A short buffer uses first WORD");
-    check(native == 0 && bridge == 12, "all twelve runtime calls dispatched once without native replay");
+    check(native == 0 && bridge == 16, "all sixteen runtime calls dispatched once without native replay");
     original_open_w = LegacyNativeW; original_save_w = LegacyNativeW;
     original_open_a = LegacyNativeA; original_save_a = LegacyNativeA;
     original_dialog_error = LegacyNativeError;
@@ -171,7 +186,7 @@ int LegacyEntryTest() {
     check(!ObserveSaveW(&w) && HookDialogError() == CDERR_NOTEMPLATE, "hook SaveW falls back before Show");
     check(!ObserveOpenA(&a) && HookDialogError() == CDERR_NOTEMPLATE, "template OpenA preserves native error");
     check(!ObserveSaveA(&a) && HookDialogError() == CDERR_NOTEMPLATE, "template SaveA falls back before Show");
-    check(legacy_native_calls == 4 && bridge == 12, "unsupported modes never dispatch a replacement");
+    check(legacy_native_calls == 4 && bridge == 16, "unsupported modes never dispatch a replacement");
     check(DeleteFileW(peer.c_str()) && DeleteFileW(fixture.c_str()), "remove isolated legacy fixture");
     legacy_test_services = {}; current = nullptr;
     std::printf("Legacy failures: %u\n", failures); return failures ? 1 : 0;
@@ -198,7 +213,7 @@ HRESULT WINAPI LegacyAutomatedEvent(void* context, const PulsePickerUiV2Event* e
     return result;
 }
 }
-int LegacyUiTest(bool save, bool ansi, bool filter_tail = false, bool cancel_ui = false) {
+int LegacyUiTest(bool save, bool ansi, bool filter_tail = false, bool cancel_ui = false, bool expanded_flags = false) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     wchar_t executable[32768]{}; GetModuleFileNameW(nullptr, executable, 32768);
     const auto dll = std::filesystem::path(executable).parent_path() / L"PulsePickerUiProof.dll";
@@ -210,7 +225,7 @@ int LegacyUiTest(bool save, bool ansi, bool filter_tail = false, bool cancel_ui 
     if (!get || get(2, sizeof(provider->api), &provider->api) != S_OK) return 2;
     provider->module_lifetime = std::shared_ptr<void>(module, [](void* handle) { FreeLibrary(static_cast<HMODULE>(handle)); });
     provider->allow_unverified_proof = true;
-    if (filter_tail) {
+    if (filter_tail || expanded_flags) {
         static decltype(provider->api.Show) real_show = nullptr;
         real_show = provider->api.Show;
         provider->api.Show = [](PulsePickerUiV2Session session, const PulsePickerUiV2Config* config, const PulsePickerUiV2Callbacks* callbacks, PulsePickerUiV2Result* result)->HRESULT {
@@ -222,8 +237,8 @@ int LegacyUiTest(bool save, bool ansi, bool filter_tail = false, bool cancel_ui 
     }
     const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") / (L"legacy-ui-" + std::to_wstring(GetCurrentProcessId())));
     if (!std::filesystem::create_directory(root)) return 2;
-    legacy_expected_folder = root.wstring();
     const auto original_cwd = std::filesystem::current_path();
+    legacy_expected_folder = expanded_flags ? original_cwd.wstring() : root.wstring();
     const auto fixture = root / L"probe.txt";
     HANDLE file = CreateFileW(fixture.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return 2;
@@ -245,8 +260,9 @@ int LegacyUiTest(bool save, bool ansi, bool filter_tail = false, bool cancel_ui 
     original_open_w = LegacyNativeW; original_save_w = LegacyNativeW;
     original_open_a = LegacyNativeA; original_save_a = LegacyNativeA;
     original_dialog_error = LegacyNativeError;
-    const DWORD flags = filter_tail ? 0x00881A04u : OFN_EXPLORER | OFN_HIDEREADONLY | OFN_NOCHANGEDIR | OFN_DONTADDTORECENT | OFN_PATHMUSTEXIST |
-        (save ? OFN_OVERWRITEPROMPT | OFN_NOREADONLYRETURN : OFN_FILEMUSTEXIST);
+    const DWORD flags = (filter_tail ? 0x00881A04u : OFN_EXPLORER | OFN_HIDEREADONLY | OFN_NOCHANGEDIR | OFN_DONTADDTORECENT | OFN_PATHMUSTEXIST |
+        (save ? OFN_OVERWRITEPROMPT | OFN_NOREADONLYRETURN : OFN_FILEMUSTEXIST)) |
+        (expanded_flags ? OFN_LONGNAMES | OFN_NOLONGNAMES | (save ? OFN_NOTESTFILECREATE : 0u) : 0u);
     HANDLE ended = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!ended) { DeleteFileW(fixture.c_str()); RemoveDirectoryW(root.c_str()); return 2; }
     const DWORD ui_thread = GetCurrentThreadId();
@@ -265,6 +281,7 @@ int LegacyUiTest(bool save, bool ansi, bool filter_tail = false, bool cancel_ui 
         OPENFILENAMEA input{}; input.lStructSize = sizeof(input); input.lpstrFile = buffer; input.nMaxFile = 1024;
         input.lpstrTitle = save ? "Legacy test: Save A" : "Legacy test: Open A";
         input.lpstrInitialDir = directory.c_str(); input.lpstrFilter = filter_tail ? "Text\0;*.txt;;*.zip;\0\0" : "Text\0*.txt\0\0"; input.Flags = flags;
+        if (expanded_flags) input.lCustData = 1234;
         accepted = save ? ObserveSaveA(&input) : ObserveOpenA(&input);
         if (accepted) {
             const int units = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, buffer, -1, nullptr, 0);
@@ -280,6 +297,7 @@ int LegacyUiTest(bool save, bool ansi, bool filter_tail = false, bool cancel_ui 
         OPENFILENAMEW input{}; input.lStructSize = sizeof(input); input.lpstrFile = buffer; input.nMaxFile = 1024;
         input.lpstrTitle = save ? L"Legacy test: Save W" : L"Legacy test: Open W";
         input.lpstrInitialDir = root.c_str(); input.lpstrFilter = filter_tail ? L"Text\0;*.txt;;*.zip;\0\0" : L"Text\0*.txt\0\0"; input.Flags = flags;
+        if (expanded_flags) input.lCustData = 1234;
         accepted = save ? ObserveSaveW(&input) : ObserveOpenW(&input);
         if (accepted) returned_path = buffer;
         std::printf("LEGACY_UI result=%u error=%lu path=%ls offset=%u extension=%u\n", accepted, HookDialogError(), buffer, input.nFileOffset, input.nFileExtension);
@@ -322,7 +340,7 @@ int LegacyUiTest(bool save, bool ansi, bool filter_tail = false, bool cancel_ui 
     std::printf("LEGACY_UI path_matches=%u host_consumed=%u native=%u native_api=%u cleanup=%u\n",
         path_matches, consumed, native_fallback, legacy_native_calls, clean);
     legacy_test_services = {}; current = nullptr;
-    if (filter_tail) {
+    if (filter_tail || expanded_flags) {
         std::printf("LEGACY_PULSE ready=%u file_ok=%u cwd_during=%u cwd_after=%u cancel=%u\n", legacy_ui_ready, legacy_file_ok, legacy_cwd_observed, cwd_expected, cancel_ui);
         return (cancel_ui ? !accepted && HookDialogError() == 0 : accepted && path_matches && consumed) &&
             legacy_ui_ready == 1 && legacy_file_ok == (cancel_ui ? 0u : 1u) && legacy_cwd_observed && cwd_expected && !native_fallback && !legacy_native_calls && clean ? 0 : 1;
@@ -485,6 +503,12 @@ int OtherCommonDialogErrorTest() {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--legacy-expanded-flags") {
+        unsigned failed = 0;
+        for (bool save : {false, true}) for (bool ansi : {false, true}) for (bool cancel : {false, true})
+            failed += LegacyUiTest(save, ansi, false, cancel, true) != 0;
+        std::printf("Legacy expanded flags cases=8 failures=%u\n", failed); return failed ? 1 : 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--legacy-pulse-filter-tail") {
         unsigned failed = 0;
         for (bool ansi : {false, true}) for (bool cancel : {false, true}) failed += LegacyUiTest(false, ansi, true, cancel) != 0;

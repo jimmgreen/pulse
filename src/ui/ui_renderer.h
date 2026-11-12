@@ -36,6 +36,8 @@ class MainRenderer {
     friend struct QuickPreviewAuditTest;
     friend struct ItemGripTest;
 public:
+    D2D1_RECT_F SettingsStoreField(int field) const;
+    D2D1_RECT_F SettingsStoreClip() const;
     std::vector<int> HiddenTitleTabs(const WindowViewModel& vm, float width) const;
     void SetResourceModule(HINSTANCE module) { resource_module_ = module; }
     HINSTANCE ResourceModule() const { return resource_module_ ? resource_module_ : GetModuleHandleW(nullptr); }
@@ -143,8 +145,29 @@ public:
         return D2D1::RectF(a.right - 32 * scale_, a.top + 4 * scale_, a.right - 4 * scale_, a.bottom - 4 * scale_);
     }
     FavoritesBarLayout FavoritesBarLayoutAt(const WindowViewModel& vm, float window_width) const;
+    float NavigationHeightDip() const { return EmbeddedPickerLayout() ? 46.0f : 44.0f; }
+    bool EmbeddedPickerLayout() const { return embedded_ && embedded_picker_layout_; }
+    float ToolbarLeft(float width) const { return EmbeddedPickerLayout() ? 0.0f : EffectiveSidebarWidth(width); }
     float ToolbarHeightDip() const {
-        return (vertical_tabs_ || embedded_ ? 44.0f : 88.0f) + (favorites_bar_ ? kFavoritesBarHeightDip : 0.0f);
+        return (vertical_tabs_ || embedded_ ? NavigationHeightDip() : 88.0f) + (favorites_bar_ ? kFavoritesBarHeightDip : 0.0f) +
+               (embedded_ ? embedded_band_dip_ : 0.0f);
+    }
+    // Embedded only: an empty band under the address row that the host draws
+    // (the picker's jump strip). The panes start below it.
+    void SetEmbeddedBand(float dip) { if (embedded_band_dip_ != dip) { embedded_band_dip_ = dip; SetScale(scale_); } }
+    float EmbeddedBandDip() const { return embedded_ ? embedded_band_dip_ : 0.0f; }
+    void SetEmbeddedPickerRecent(float dip) { embedded_picker_recent_dip_ = std::max(0.0f, dip); }
+    float EmbeddedPickerRecentHeight() const { return EmbeddedPickerLayout() ? embedded_picker_recent_dip_ * scale_ : 0.0f; }
+    D2D1_RECT_F EmbeddedPickerRecentRect(const D2D1_RECT_F& pane) const {
+        const float top = pane.top + pane_header_height_;
+        return D2D1::RectF(pane.left, top, pane.right, top + EmbeddedPickerRecentHeight());
+    }
+    // Picker hierarchy only: full-width navigation/strip, sidebar starts at body.
+      // Recent cards reserve space below the pane header, independently of the strip.
+    void SetEmbeddedPickerLayout(bool on, float strip_dip = 36.0f) {
+        embedded_picker_layout_ = on;
+        embedded_picker_strip_dip_ = strip_dip;
+        SetScale(scale_);
     }
     // Hosted inside another window (the file picker): no title bar, tabs,
     // command row, status bar or details panel; only the address row, the
@@ -443,6 +466,10 @@ public:
     void RefreshFolderThumbnails() { folder_thumbnail_cache_.Refresh(); }
     // A preview pack was installed, removed or switched: files that had no
     // thumbnail may have one now, so cached results are dropped.
+    void RenameImageThumbnail(const std::wstring& from, const std::wstring& to, uint64_t modified, uint64_t size) {
+        thumbnail_cache_.RenameImage(from, to, modified, size);
+        hover_cache_.RenameImage(from, to, modified, size);
+    }
     void EvictThumbnails() { thumbnail_cache_.Evict(); hover_cache_.Evict(); }
     auto FolderThumbnailDebugStats() { return folder_thumbnail_cache_.ReadDebugStats(); }
     void SetFolderThumbnailsEnabled(bool enabled) { folder_thumbnails_enabled_ = enabled; }
@@ -940,6 +967,10 @@ private:
     void DrawSettingsPulseMenu(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsSegmentPlate(int key, int selected, D2D1_RECT_F bounds, bool enabled = true);
     void DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    D2D1_RECT_F settings_store_fields_[7]{};
+    D2D1_RECT_F settings_store_clip_{};
+    void DrawSettingsStore(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    void DrawSevenZipDetail(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsSysCtx(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsShortcuts(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
@@ -1104,9 +1135,13 @@ private:
     ThumbnailCache& hover_cache_ = caches_.hover;
     HWND notify_hwnd_ = nullptr;
     bool embedded_ = false;
+    bool embedded_picker_layout_ = false;
+    float embedded_picker_strip_dip_ = 36.0f;
+    float embedded_picker_recent_dip_ = 0.0f;
     bool favorites_bar_ = false;
     float embedded_top_dip_ = 0.0f;
     float embedded_bottom_dip_ = 0.0f;
+    float embedded_band_dip_ = 0.0f;
     float scale_ = 1.0f;
     float title_bar_height_ = kTitleBarHeight;
     float toolbar_height_ = 88.0f;

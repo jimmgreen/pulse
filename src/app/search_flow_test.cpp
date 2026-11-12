@@ -674,7 +674,7 @@ int RunSidebarNarrowTest(AppState& s, const wchar_t* output) {
             check(!s.renderer.SidebarPeek() && !s.appPrefs.sidebar_collapsed,"outside click dismisses narrow overlay without preference change");
             const int rail_x=static_cast<int>(10*scale),rail_y=static_cast<int>(s.renderer.TitleBarHeight()+40*scale);
             SendMessageW(s.hwnd,WM_MOUSEMOVE,0,MAKELPARAM(rail_x,rail_y));
-            check(s.sidebarPeekArmAt!=0,"real mouse move on automatic rail arms hover peek");
+            check(s.sidebarPeekArmAt==0 && !s.renderer.SidebarPeek(),"mouse move on automatic rail keeps the rail without hover peek");
             SendMessageW(s.hwnd,WM_MOUSEMOVE,0,MAKELPARAM(static_cast<int>(w-10),rail_y));
             check(s.sidebarPeekArmAt==0,"leaving rail cancels hover arm");
             toggle();

@@ -63,7 +63,7 @@ bool TokenData(HANDLE process, TOKEN_INFORMATION_CLASS type, std::vector<BYTE>& 
     data.resize(count);
     return GetTokenInformation(token.value, type, data.data(), count, &count) != FALSE;
 }
-bool AllowedProcess(HANDLE process, bool allow_elevated) {
+static bool AllowedProcessForMachine(HANDLE process, bool allow_elevated, WORD expected_machine) {
     if (allow_elevated && !dialog_admin::IsElevated()) return false;
     Handle thread_token;
     if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &thread_token.value) || GetLastError() != ERROR_NO_TOKEN) return false;
@@ -78,7 +78,7 @@ bool AllowedProcess(HANDLE process, bool allow_elevated) {
     const auto query_machine = reinterpret_cast<IsWow64Process2Fn>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process2"));
     USHORT process_machine = 0, native_machine = 0;
     if (!query_machine || !query_machine(process, &process_machine, &native_machine) ||
-        (process_machine ? process_machine : native_machine) != kMachine) return false;
+        (process_machine ? process_machine : native_machine) != expected_machine) return false;
     std::vector<BYTE> own_user, other_user, own_level, other_level, container;
     PROCESS_PROTECTION_LEVEL_INFORMATION protection{};
     const auto query_protection = reinterpret_cast<decltype(&GetProcessInformation)>(
@@ -94,6 +94,9 @@ bool AllowedProcess(HANDLE process, bool allow_elevated) {
         *GetSidSubAuthority(integrity_sid, *GetSidSubAuthorityCount(integrity_sid) - 1) < SECURITY_MANDATORY_MEDIUM_RID) return false;
     return EqualSid(reinterpret_cast<TOKEN_USER*>(own_user.data())->User.Sid, reinterpret_cast<TOKEN_USER*>(other_user.data())->User.Sid) &&
         EqualSid(reinterpret_cast<TOKEN_MANDATORY_LABEL*>(own_level.data())->Label.Sid, reinterpret_cast<TOKEN_MANDATORY_LABEL*>(other_level.data())->Label.Sid);
+}
+bool AllowedProcess(HANDLE process, bool allow_elevated) {
+    return AllowedProcessForMachine(process, allow_elevated, kMachine);
 }
 bool Machine(const fs::path& file, WORD& machine) {
     std::ifstream stream(file, std::ios::binary | std::ios::ate);
@@ -115,13 +118,13 @@ bool ProcessIdentity(HANDLE process, const cfg::Session& session) {
     return GetProcessId(process) == session.target_pid && Created(process, created) && SameTime(created, session.target_created) &&
         QueryFullProcessImageNameW(process, 0, image, &count) && Same(Canonical(image, false), session.target_path);
 }
-bool LoadSession(const fs::path& directory, const std::wstring& expected_launcher, cfg::Session& session) {
+static bool LoadSessionForMachine(const fs::path& directory, const std::wstring& expected_launcher, cfg::Session& session, WORD expected_machine) {
     if (dialog_admin::IsElevated() &&
         (dialog_admin::VerifyProtectedPath(AdminDrivePath(directory.wstring()), true) ||
          dialog_admin::VerifyProtectedPath(AdminDrivePath(directory.parent_path().wstring()), true) ||
          dialog_admin::VerifyProtectedPath(AdminDrivePath((directory / cfg::kSessionFile).wstring()), false))) return false;
     if (!ReadExact(directory / cfg::kSessionFile, &session, sizeof(session)) || session.magic != cfg::kConfigMagic ||
-        session.version != cfg::kVersion || session.size != sizeof(session) || (session.reserved & ~cfg::kAdminSession) || session.machine != kMachine ||
+        session.version != cfg::kVersion || session.size != sizeof(session) || (session.reserved & ~cfg::kAdminSession) || session.machine != expected_machine ||
         session.nonce[39] || session.host_path[cfg::kPathUnits - 1] || session.target_path[cfg::kPathUnits - 1] ||
         session.control_path[cfg::kPathUnits - 1] || session.launcher_path[cfg::kPathUnits - 1]) return false;
     if (session.reserved == cfg::kAdminSession &&
@@ -133,17 +136,23 @@ bool LoadSession(const fs::path& directory, const std::wstring& expected_launche
     return wcslen(session.nonce) == 38 && SUCCEEDED(CLSIDFromString(session.nonce, &guid)) &&
         directory.filename() == session.nonce && Same(Canonical(directory, true), session.control_path) && Same(Canonical(expected_launcher, false), session.launcher_path);
 }
+bool LoadSession(const fs::path& directory, const std::wstring& expected_launcher, cfg::Session& session) {
+    return LoadSessionForMachine(directory, expected_launcher, session, kMachine);
+}
 bool Ready(const fs::path& directory, const cfg::Session& session, cfg::Ready& ready) {
-    return ReadExact(directory / cfg::kReadyFile, &ready, sizeof(ready)) && ready.magic == cfg::kReadyMagic &&
+    // The session directory may fit MAX_PATH while the longer receipt name
+    // does not. Resolve the existing directory before appending the leaf.
+    const auto canonical = Canonical(directory, true);
+    return !canonical.empty() && ReadExact(fs::path(canonical) / cfg::kReadyFile, &ready, sizeof(ready)) && ready.magic == cfg::kReadyMagic &&
         ready.version == cfg::kVersion && ready.size == sizeof(ready) && !ready.reserved && !ready.nonce[39] &&
         ready.target_pid == session.target_pid && ready.machine == session.machine &&
         SameTime(ready.target_created, session.target_created) && wcscmp(ready.nonce, session.nonce) == 0;
 }
-DWORD Inspect(const std::wstring& directory, const std::wstring& expected_launcher, bool disable, Status& output) noexcept {
+static DWORD InspectImpl(const std::wstring& directory, const std::wstring& expected_launcher, bool disable, WORD expected_machine, Status& output) noexcept {
     output = {};
     try {
         auto session = std::make_unique<cfg::Session>();
-        if (!LoadSession(directory, expected_launcher, *session)) return ERROR_INVALID_DATA;
+        if (!LoadSessionForMachine(directory, expected_launcher, *session, expected_machine)) return ERROR_INVALID_DATA;
         output.pid = session->target_pid;
         output.application = fs::path(session->target_path).filename().wstring();
         cfg::Ready ready;
@@ -163,7 +172,7 @@ DWORD Inspect(const std::wstring& directory, const std::wstring& expected_launch
         if (alive == WAIT_OBJECT_0) return ERROR_SUCCESS;
         if (alive != WAIT_TIMEOUT) return GetLastError();
         output.process_alive = true;
-        if (!AllowedProcess(process.value, session->reserved == cfg::kAdminSession)) return ERROR_ACCESS_DENIED;
+        if (!AllowedProcessForMachine(process.value, session->reserved == cfg::kAdminSession, expected_machine)) return ERROR_ACCESS_DENIED;
         if (disable && !output.local_disabled) {
             if (!WriteNew(fs::path(directory) / cfg::kDisableFile, session->nonce,
                 static_cast<DWORD>((wcslen(session->nonce)+1)*sizeof(wchar_t)))) {
@@ -175,4 +184,17 @@ DWORD Inspect(const std::wstring& directory, const std::wstring& expected_launch
         return ERROR_SUCCESS;
     } catch (...) { return ERROR_NOT_ENOUGH_MEMORY; }
 }
+DWORD Inspect(const std::wstring& directory, const std::wstring& expected_launcher, bool disable, Status& output) noexcept {
+    return InspectImpl(directory, expected_launcher, disable, kMachine, output);
+}
+DWORD InspectForMachine(const std::wstring& directory, const std::wstring& expected_launcher, WORD expected_machine, Status& output) noexcept {
+    output = {};
+    if (expected_machine != IMAGE_FILE_MACHINE_I386 && expected_machine != IMAGE_FILE_MACHINE_AMD64) return ERROR_EXE_MACHINE_TYPE_MISMATCH;
+    try {
+        WORD launcher_machine = 0;
+        if (!Machine(expected_launcher, launcher_machine) || launcher_machine != expected_machine) return ERROR_EXE_MACHINE_TYPE_MISMATCH;
+        return InspectImpl(directory, expected_launcher, false, expected_machine, output);
+    } catch (...) { return ERROR_NOT_ENOUGH_MEMORY; }
+}
+
 }

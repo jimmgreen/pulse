@@ -152,7 +152,8 @@ D2D1_RECT_F SidebarHoverPositionForTest(const MainRenderer* renderer) {
 }
 
 D2D1_RECT_F MainRenderer::SidebarRect(float w, float h) const {
-    float top = title_bar_height_ + margin_;
+    float top = title_bar_height_ + (EmbeddedPickerLayout()
+        ? (NavigationHeightDip() + embedded_picker_strip_dip_) * scale_ : margin_);
     float bottom = h - status_height_ - margin_;
     const float right = SidebarPeekVisible(w) ? SidebarFullWidth(w) : SidebarOwnWidth(w);
     return D2D1::RectF(0.0f, top, right, bottom);
@@ -393,6 +394,13 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
         MakeBrush(dc, fill, brFillSelected_);
         FillRoundedRect(dc, brFillSelected_.get(), pill.left, pill.top,
                         pill.right - pill.left, pill.bottom - pill.top, radius);
+        if (compact) {
+            // Rail: an accent bar at the pill's left edge marks the current place.
+            const float bar_h = (std::min)(16.0f * scale_, pill.bottom - pill.top - 8.0f * scale_);
+            const float bar_y = (pill.top + pill.bottom - bar_h) * 0.5f;
+            MakeBrush(dc, theme.accent, brAccent_);
+            FillRoundedRect(dc, brAccent_.get(), pill.left, bar_y, 3.0f * scale_, bar_h, 1.5f * scale_);
+        }
     }
     if (pill_slot < 0) {
         sm.lead.Hide();
@@ -410,6 +418,137 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
     } frame_request{this, sidebar_moving};
 
     if (compact) {
+        // Rail rows that read as text instead of lookalike icons: drive letters
+        // over a capacity bar, workspace initials in the workspace's color, and
+        // a "+" tile where an empty workspace section would leave a blank cell.
+        const auto draw_rail_tile = [&](const SidebarSlot& slot, const SidebarItem& item) -> bool {
+            const float cx = (slot.rc.left + slot.rc.right) * 0.5f;
+            const float cy = (slot.rc.top + slot.rc.bottom) * 0.5f;
+            const auto centered = [&](float w, float h) {
+                return D2D1::RectF(std::round(cx - w * 0.5f), std::round(cy - h * 0.5f),
+                                   std::round(cx - w * 0.5f) + w, std::round(cy - h * 0.5f) + h);
+            };
+            if (item.workspace_empty) {
+                // Same action as the wide card's button: save the current layout.
+                if (IsHovered(vm, HitTestResult::SidebarWorkspaceAction, slot.run, 4))
+                    painter_.FillRoundedRect(slot.rc, theme.radius_control * scale_, theme.fill_hover);
+                const float t = 24.0f * scale_;
+                const D2D1_RECT_F tile = centered(t, t);
+                painter_.StrokeRoundedRect(tile, 7.0f * scale_, theme.text_secondary, 1.0f * scale_);
+                DrawIconText(tile.left, tile.top, t, t, kIconAdd, L"+", theme.text_secondary, 0.72f);
+                return true;
+            }
+            if (IsHighContrast()) return false;
+            if (item.workspace_index >= 0 && !item.label.empty()) {
+                const float t = 24.0f * scale_;
+                const D2D1_RECT_F tile = centered(t, t);
+                const D2D1_COLOR_F fill = item.icon_color.a > 0.0f ? item.icon_color : theme.accent;
+                painter_.FillRoundedRect(tile, 7.0f * scale_, fill);
+                std::wstring initial = item.label.substr(0, IS_HIGH_SURROGATE(item.label[0]) ? 2 : 1);
+                if (initial[0] >= L'a' && initial[0] <= L'z') initial[0] = static_cast<wchar_t>(initial[0] - L'a' + L'A');
+                const float luma = 0.299f * fill.r + 0.587f * fill.g + 0.114f * fill.b;
+                painter_.DrawText(initial, tile, compositor_->TextFormat(),
+                                  luma > 0.62f ? HexColor(0x1F2421) : HexColor(0xFFFFFF),
+                                  fluent::HorizontalAlignment::Center, fill);
+                const int panes = static_cast<int>(item.workspace_panes.size());
+                if (panes > 1) {
+                    // How many panes the workspace opens, on a chip at the corner.
+                    const float d = 12.0f * scale_;
+                    const D2D1_RECT_F chip = D2D1::RectF(tile.right - d * 0.55f, tile.bottom - d * 0.6f,
+                                                         tile.right + d * 0.45f, tile.bottom + d * 0.4f);
+                    painter_.FillRoundedRect(chip, d * 0.5f, theme.surface_sheet);
+                    painter_.StrokeRoundedRect(chip, d * 0.5f, theme.stroke_divider);
+                    const wchar_t num[2] = {static_cast<wchar_t>(L'0' + (std::min)(panes, 9)), 0};
+                    painter_.DrawText(num, chip, compositor_->SmallFormat(), theme.text_secondary,
+                                      fluent::HorizontalAlignment::Center, theme.surface_sheet);
+                }
+                return true;
+            }
+            // Sidebar paths carry the extended prefix (\\?\C:\, \\?\UNC\server\share).
+            std::wstring_view bare = item.path;
+            const bool unc = bare.starts_with(L"\\\\?\\UNC\\") || (bare.starts_with(L"\\\\") && !bare.starts_with(L"\\\\?\\"));
+            if (bare.starts_with(L"\\\\?\\") && !unc) bare.remove_prefix(4);
+            if (item.is_drive && bare.size() >= 2 && bare[1] == L':') {
+                const D2D1_RECT_F tile = centered(30.0f * scale_, 23.0f * scale_);
+                const D2D1_COLOR_F fill = vm.dark ? D2D1_COLOR_F{1.0f, 1.0f, 1.0f, 0.09f}
+                                                  : D2D1_COLOR_F{0.0f, 0.0f, 0.0f, 0.065f};
+                painter_.FillRoundedRect(tile, 5.0f * scale_, fill);
+                wchar_t letter = bare[0];
+                if (letter >= L'a' && letter <= L'z') letter = static_cast<wchar_t>(letter - L'a' + L'A');
+                const wchar_t text[2] = {letter, 0};
+                painter_.DrawText(text, D2D1::RectF(tile.left, tile.top, tile.right, tile.bottom - 4.0f * scale_),
+                                  compositor_->TextFormat(), theme.text, fluent::HorizontalAlignment::Center);
+                if (item.total_bytes > 0) {
+                    // Used space, red once the drive is critically full.
+                    const D2D1_RECT_F track = D2D1::RectF(tile.left + 4.0f * scale_, tile.bottom - 6.0f * scale_,
+                                                          tile.right - 4.0f * scale_, tile.bottom - 3.0f * scale_);
+                    painter_.FillRoundedRect(track, 1.5f * scale_,
+                        vm.dark ? D2D1_COLOR_F{1.0f, 1.0f, 1.0f, 0.16f} : D2D1_COLOR_F{0.0f, 0.0f, 0.0f, 0.13f});
+                    const float ratio = std::clamp(item.used_ratio, 0.0f, 1.0f);
+                    if (ratio > 0.0f) {
+                        D2D1_RECT_F used = track;
+                        used.right = (std::max)(track.left + 3.0f * scale_,
+                                                track.left + (track.right - track.left) * ratio);
+                        painter_.FillRoundedRect(used, 1.5f * scale_, item.danger ? theme.danger : theme.accent);
+                    }
+                }
+                static const wchar_t system_drive = [] {
+                    wchar_t dir[MAX_PATH]{};
+                    const UINT n = GetSystemWindowsDirectoryW(dir, MAX_PATH);
+                    wchar_t c = n >= 2 && dir[1] == L':' ? dir[0] : L'\0';
+                    if (c >= L'a' && c <= L'z') c = static_cast<wchar_t>(c - L'a' + L'A');
+                    return c;
+                }();
+                if (letter == system_drive) {
+                    // The Windows drive carries a small four-pane mark.
+                    const float q = 2.0f * scale_;
+                    const float gap = 0.6f * scale_;
+                    const float x0 = tile.left + 3.0f * scale_;
+                    const float y0 = tile.top + 3.0f * scale_;
+                    MakeBrush(dc, theme.accent, brAccent_);
+                    for (int k = 0; k < 4; ++k) {
+                        const float x = x0 + (k % 2) * (q + gap);
+                        const float y = y0 + (k / 2) * (q + gap);
+                        dc->FillRectangle(D2D1::RectF(x, y, x + q, y + q), brAccent_.get());
+                    }
+                }
+                return true;
+            }
+            if (slot.group >= 0 && vm.sidebar[slot.group].add_action == SidebarAddAction::AddNetwork &&
+                unc && !item.label.empty()) {
+                // Network locations: an outlined tile with a short name, apart
+                // from the filled drive tiles and from the section's globe.
+                std::wstring abbr;
+                for (const wchar_t c : item.label) {
+                    if (c < 0x80) {
+                        if (!iswalnum(c)) { if (!abbr.empty()) break; continue; }
+                        abbr.push_back(c >= L'a' && c <= L'z' ? static_cast<wchar_t>(c - L'a' + L'A') : c);
+                        if (abbr.size() >= 3) break;
+                    } else {
+                        if (!abbr.empty() || IS_HIGH_SURROGATE(c)) break;
+                        abbr.push_back(c);
+                        break;
+                    }
+                }
+                if (abbr.empty()) abbr = item.label.substr(0, IS_HIGH_SURROGATE(item.label[0]) ? 2 : 1);
+                const D2D1_RECT_F tile = centered(30.0f * scale_, 23.0f * scale_);
+                const D2D1_COLOR_F ink = HexColor(vm.dark ? 0x6AA8F0 : 0x2F74C9);
+                painter_.StrokeRoundedRect(D2D1::RectF(tile.left + 0.5f, tile.top + 0.5f, tile.right - 0.5f, tile.bottom - 0.5f),
+                                           5.0f * scale_, ink, 1.3f * scale_);
+                painter_.DrawText(abbr, tile, compositor_->SmallFormat(), ink, fluent::HorizontalAlignment::Center);
+                if (item.status_dot) {
+                    const float r = 3.0f * scale_;
+                    MakeBrush(dc, theme.surface_sheet, brFillHover_);
+                    dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(tile.right - 1.0f * scale_, tile.top + 1.0f * scale_),
+                                                  r + 1.5f * scale_, r + 1.5f * scale_), brFillHover_.get());
+                    MakeBrush(dc, item.status_color, brFillHover_);
+                    dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(tile.right - 1.0f * scale_, tile.top + 1.0f * scale_), r, r),
+                                    brFillHover_.get());
+                }
+                return true;
+            }
+            return false;
+        };
         for (const auto& slot : slots) {
             if (slot.kind == SidebarSlot::TrayPanel) {
                 MakeBrush(dc, vm.tray_drop ? theme.fill_selected : theme.surface_flyout, brFillHover_);
@@ -427,14 +566,88 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                 continue;
             }
             if (slot.kind == SidebarSlot::Rail) {
-                // The section's own rail row: one icon stands in for the whole
-                // section, and clicking it folds or unfolds the section.
                 const auto& group = vm.sidebar[slot.group];
-                if (IsHovered(vm, HitTestResult::SidebarHeader, slot.group)) {
+                bool tag_section = false;
+                for (const auto& it : group.items) {
+                    if (it.is_tag) { tag_section = true; break; }
+                }
+                // sub 0 is the section's short title, sub 1 the icon row that
+                // stands in for a folded section; each lights on its own (hit
+                // sub_index 0 / 2) and both fold or unfold the section.
+                if (IsHovered(vm, HitTestResult::SidebarHeader, slot.group, slot.sub == 1 ? 2 : 0)) {
                     MakeBrush(dc, theme.fill_hover, brFillSelected_);
                     FillRoundedRect(dc, brFillSelected_.get(), slot.rc.left, slot.rc.top,
                         slot.rc.right - slot.rc.left, slot.rc.bottom - slot.rc.top,
                         theme.radius_control * scale_);
+                }
+                if (slot.sub == 0) {
+                    // A divider above the title (not at the very top) marks where
+                    // the section starts, so the rail reads as groups.
+                    if (slot.rc.top > sb.top + 1.0f) {
+                        MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
+                        FillRect(dc, brStrokeDivider_.get(), slot.rc.left + 6.0f * scale_,
+                                 std::round(slot.rc.top - 2.0f * scale_),
+                                 slot.rc.right - slot.rc.left - 12.0f * scale_, 1.0f);
+                    }
+                    const std::wstring& title = group.rail_header.empty() ? group.header : group.rail_header;
+                    IDWriteTextFormat* title_fmt = compositor_->SmallFormat();
+                    const bool title_hot = IsHovered(vm, HitTestResult::SidebarHeader, slot.group, 0);
+                    // A chevron after the title says the row folds: it points
+                    // right while folded and shows on hover while open.
+                    const float chev = 7.0f * scale_;
+                    const float chev_gap = 2.0f * scale_;
+                    const float text_w = title_fmt && compositor_->DwriteFactory()
+                        ? MeasureTextWidth(compositor_->DwriteFactory(), title_fmt, title) : 0.0f;
+                    const float slot_w = slot.rc.right - slot.rc.left;
+                    const bool show_chev = (group.collapsed || title_hot) && text_w > 0.0f &&
+                                           text_w + chev_gap + chev <= slot_w - 2.0f * scale_;
+                    if (!show_chev) {
+                        painter_.DrawText(title, slot.rc, title_fmt, theme.text_secondary,
+                                          fluent::HorizontalAlignment::Center);
+                        continue;
+                    }
+                    const float x0 = std::round((slot.rc.left + slot.rc.right - (text_w + chev_gap + chev)) * 0.5f);
+                    painter_.DrawText(title, D2D1::RectF(x0, slot.rc.top, x0 + text_w + 1.0f, slot.rc.bottom),
+                                      title_fmt, theme.text_secondary, fluent::HorizontalAlignment::Left);
+                    const float ccx = x0 + text_w + chev_gap + chev * 0.5f;
+                    const float ccy = (slot.rc.top + slot.rc.bottom) * 0.5f;
+                    const float arm = chev * 0.32f;
+                    MakeBrush(dc, theme.text_secondary, brText_);
+                    if (group.collapsed) {
+                        dc->DrawLine(D2D1::Point2F(ccx - arm * 0.5f, ccy - arm), D2D1::Point2F(ccx + arm * 0.5f, ccy),
+                                     brText_.get(), 1.2f * scale_);
+                        dc->DrawLine(D2D1::Point2F(ccx + arm * 0.5f, ccy), D2D1::Point2F(ccx - arm * 0.5f, ccy + arm),
+                                     brText_.get(), 1.2f * scale_);
+                    } else {
+                        dc->DrawLine(D2D1::Point2F(ccx - arm, ccy - arm * 0.5f), D2D1::Point2F(ccx, ccy + arm * 0.5f),
+                                     brText_.get(), 1.2f * scale_);
+                        dc->DrawLine(D2D1::Point2F(ccx, ccy + arm * 0.5f), D2D1::Point2F(ccx + arm, ccy - arm * 0.5f),
+                                     brText_.get(), 1.2f * scale_);
+                    }
+                    continue;
+                }
+                if (tag_section && !IsHighContrast()) {
+                    // Folded tags: the first tag colors in a small cluster (up
+                    // to 2x2), so the section shows what it holds.
+                    int tag_count = 0;
+                    for (const auto& it : group.items)
+                        if (it.is_tag) ++tag_count;
+                    const int n = (std::min)(tag_count, 4);
+                    const float d = 8.0f * scale_;
+                    const float step = d + 3.0f * scale_;
+                    const float cx = (slot.rc.left + slot.rc.right) * 0.5f;
+                    const float cy = (slot.rc.top + slot.rc.bottom) * 0.5f;
+                    int shown = 0;
+                    for (const auto& it : group.items) {
+                        if (!it.is_tag) continue;
+                        const float ox = n <= 1 ? 0.0f : (shown % 2 == 0 ? -0.5f : 0.5f) * step;
+                        const float oy = n <= 2 ? 0.0f : (shown < 2 ? -0.5f : 0.5f) * step;
+                        MakeBrush(dc, it.tag_dot.a > 0.0f ? it.tag_dot : theme.accent, brFillHover_);
+                        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx + ox, cy + oy), d * 0.5f, d * 0.5f),
+                                        brFillHover_.get());
+                        if (++shown >= n) break;
+                    }
+                    continue;
                 }
                 std::wstring glyph = group.icon_glyph;
                 if (glyph.empty() && !group.items.empty())
@@ -476,44 +689,25 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                                  D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
                     fmt->SetTextAlignment(oldAlign);
                     fmt->SetParagraphAlignment(oldPara);
-                }
-                // Tags read as their own group on the rail: a short divider
-                // above the section, and when folded the first tag colors peek
-                // out of the icon's corner so the section never looks empty.
-                bool tag_section = false;
-                for (const auto& it : group.items) {
-                    if (it.is_tag) { tag_section = true; break; }
-                }
-                if (tag_section && slot.run > 0) {
-                    MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
-                    FillRect(dc, brStrokeDivider_.get(), slot.rc.left + 10.0f * scale_,
-                             slot.rc.top - 1.0f, slot.rc.right - slot.rc.left - 20.0f * scale_, 1.0f);
-                }
-                if (tag_section && group.collapsed && !IsHighContrast()) {
-                    const float mini = 4.0f * scale_;
-                    float mx = rail_rc.right + 1.0f * scale_;
-                    const float my = rail_rc.bottom - 1.0f * scale_;
-                    D2D1_COLOR_F halo = vm.dark ? D2D1_COLOR_F{0.125f, 0.125f, 0.125f, 1.0f}
-                                                : D2D1_COLOR_F{0.97f, 0.973f, 0.957f, 1.0f};
-                    int shown = 0;
-                    for (const auto& it : group.items) {
-                        if (!it.is_tag || it.tag_dot.a <= 0.0f) continue;
-                        if (++shown > 3) break;
-                        MakeBrush(dc, halo, brFillHover_);
-                        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(mx, my), mini + 1.5f * scale_,
-                                                      mini + 1.5f * scale_), brFillHover_.get());
-                        MakeBrush(dc, it.tag_dot, brFillHover_);
-                        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(mx, my), mini, mini),
-                                        brFillHover_.get());
-                        mx -= mini * 2.0f;
+                } else if (!IsHighContrast()) {
+                    // A folded section names how many rows it hides, on a quiet chip.
+                    int hidden_rows = 0;
+                    for (const auto& it : group.items)
+                        if (it.indent == 0 && !it.workspace_empty && !it.starred_child) ++hidden_rows;
+                    if (hidden_rows > 0) {
+                        wchar_t num[4]{};
+                        if (hidden_rows > 9) wcscpy_s(num, L"9+");
+                        else num[0] = static_cast<wchar_t>(L'0' + hidden_rows);
+                        const float d = 14.0f * scale_;
+                        const float chip_w = hidden_rows > 9 ? d * 1.45f : d;
+                        const D2D1_RECT_F b = D2D1::RectF(rail_rc.right - chip_w * 0.4f, rail_rc.top - d * 0.45f,
+                                                          rail_rc.right + chip_w * 0.6f, rail_rc.top + d * 0.55f);
+                        const D2D1_COLOR_F chip = vm.dark ? D2D1_COLOR_F{0.24f, 0.25f, 0.25f, 1.0f}
+                                                          : D2D1_COLOR_F{0.88f, 0.89f, 0.87f, 1.0f};
+                        painter_.FillRoundedRect(b, d * 0.5f, chip);
+                        painter_.DrawText(num, b, compositor_->SmallFormat(), theme.text_secondary,
+                                          fluent::HorizontalAlignment::Center, chip);
                     }
-                }
-                // Separator between the section row and its expanded rows.
-                if (!group.collapsed) {
-                    MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
-                    FillRect(dc, brStrokeDivider_.get(), slot.rc.left + 8.0f * scale_,
-                             slot.rc.bottom - 1.0f,
-                             slot.rc.right - slot.rc.left - 16.0f * scale_, 1.0f);
                 }
                 continue;
             }
@@ -564,6 +758,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                 dc->FillEllipse(D2D1::Ellipse(c, r, r), brFillHover_.get());
                 continue;
             }
+            if (draw_rail_tile(slot, item)) continue;
             const D2D1_COLOR_F iconColor = item.icon_color.a > 0 ? item.icon_color
                                          : item.tag_dot.a > 0 ? item.tag_dot : theme.text;
             const int svg_id = item.is_tag ? 0 : FluentSvgIdForGlyph(item.icon_glyph);

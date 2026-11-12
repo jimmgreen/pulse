@@ -12,6 +12,12 @@ inline constexpr uint32_t kCoCreateInstance = 1;
 inline constexpr uint32_t kCoCreateInstanceEx = 2;
 inline constexpr uint32_t kCoGetClassObject = 4;
 inline constexpr uint32_t kCreateProcessW = 8;
+inline constexpr uint32_t kSHBrowseForFolderW = 16;
+inline constexpr uint32_t kSHBrowseForFolderA = 32;
+inline constexpr uint32_t kGetOpenFileNameW = 0x40, kGetSaveFileNameW = 0x80;
+inline constexpr uint32_t kGetOpenFileNameA = 0x100, kGetSaveFileNameA = 0x200;
+inline constexpr uint32_t kCommDlgExtendedError = 0x400;
+inline constexpr uint32_t kRoGetActivationFactory = 0x1000;
 // Other standard entries are currently unconnected. Flags are coverage,
 // never proof that any individual dialog passed the capability policy.
 #pragma pack(push, 8)

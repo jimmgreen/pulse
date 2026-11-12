@@ -94,6 +94,8 @@ public:
     IDWriteTextFormat* SmallFormat() const { return smallFormat_.get(); }
     IDWriteTextFormat* HeaderFormat() const { return headerFormat_.get(); }
     IDWriteTextFormat* TabFormat() const { return tabFormat_.get(); }
+    // The active tab's title: TabFormat in SemiBold.
+    IDWriteTextFormat* TabActiveFormat() const { return tabActiveFormat_.get() ? tabActiveFormat_.get() : tabFormat_.get(); }
     IDWriteTextFormat* AddressFormat() const { return addressFormat_.get(); }
     IDWriteTextFormat* IconFormat() const { return iconFormat_.get(); }
     bool DrawLumaText(std::wstring_view text, IDWriteTextFormat* format,
@@ -202,6 +204,7 @@ private:
     ComPtr<IDWriteTextFormat> smallFormat_;
     ComPtr<IDWriteTextFormat> headerFormat_;
     ComPtr<IDWriteTextFormat> tabFormat_;
+    ComPtr<IDWriteTextFormat> tabActiveFormat_;
     ComPtr<IDWriteTextFormat> addressFormat_;
     ComPtr<IDWriteTextFormat> iconFormat_;
     std::unique_ptr<LumaTextRenderer> lumaText_;

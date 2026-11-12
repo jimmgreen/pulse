@@ -1,0 +1,1246 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pulse 拖放与撤销</title>
+<style>
+/* Layout: controls + demo buttons → a live Pulse window (file model, toolbar, undo stack all real) → spec cards. Tokens: FluentTokens.h MakeTheme. */
+:root {
+  --bg: #F3F5F1; --title: #F1F3EE; --sheet: #F7F8F4; --card: #FFFFFF; --flyout: #FFFFFF; --status: #F7F8F4;
+  --text: #303B50; --text2: #66748A; --text3: #929CAE;
+  --hover: rgba(82,125,112,.055); --pressed: rgba(82,125,112,.09);
+  --stroke: #DCE3D9; --divider: #E5EAE3; --input: rgba(255,255,255,.9);
+  --accent: #0078D4; --accent-fg: #0067C0; --accent-soft: rgba(0,120,212,.095); --accent-soft2: rgba(0,120,212,.17); --on-accent: #FFFFFF;
+  --sel-a: rgba(0,120,212,.30); --sel-b: rgba(0,120,212,.08); --sel-line: #0078D4;
+  --folder: #BCA270; --file: #839FC4;
+  --ok: #0F7B0F; --warn: #9D5D00; --danger: #C42B1C; --danger-soft: rgba(196,43,28,.09);
+  --shadow: 0 8px 24px rgba(48,59,80,.16), 0 1px 3px rgba(48,59,80,.10);
+  --lift: 0 10px 26px rgba(48,59,80,.22), 0 2px 6px rgba(48,59,80,.14);
+  --win-shadow: 0 18px 50px rgba(48,59,80,.16);
+  --font: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --display: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  --icons: "Segoe Fluent Icons", "Segoe MDL2 Assets";
+  --mono: "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1A1A1A; --title: #1A1A1A; --sheet: #202020; --card: #272727; --flyout: #2B2B2B; --status: #151515;
+    --text: #FFFFFF; --text2: rgba(255,255,255,.606); --text3: rgba(255,255,255,.40);
+    --hover: rgba(255,255,255,.08); --pressed: rgba(255,255,255,.06);
+    --stroke: rgba(255,255,255,.07); --divider: rgba(255,255,255,.06); --input: rgba(255,255,255,.06);
+    --accent: #0078D4; --accent-fg: #5AAAE6; --accent-soft: rgba(64,154,223,.17); --accent-soft2: rgba(64,154,223,.28); --on-accent: #FFFFFF;
+    --sel-a: rgba(64,154,223,.45); --sel-b: rgba(64,154,223,.12); --sel-line: #5AAAE6;
+    --folder: #FFCD70; --file: #78B0E8;
+    --ok: #6CCB5F; --warn: #FCE100; --danger: #FF99A4; --danger-soft: rgba(255,153,164,.12);
+    --shadow: 0 8px 28px rgba(0,0,0,.45), 0 1px 3px rgba(0,0,0,.35);
+    --lift: 0 12px 30px rgba(0,0,0,.55), 0 2px 6px rgba(0,0,0,.4);
+    --win-shadow: 0 18px 50px rgba(0,0,0,.45);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1A1A1A; --title: #1A1A1A; --sheet: #202020; --card: #272727; --flyout: #2B2B2B; --status: #151515;
+  --text: #FFFFFF; --text2: rgba(255,255,255,.606); --text3: rgba(255,255,255,.40);
+  --hover: rgba(255,255,255,.08); --pressed: rgba(255,255,255,.06);
+  --stroke: rgba(255,255,255,.07); --divider: rgba(255,255,255,.06); --input: rgba(255,255,255,.06);
+  --accent: #0078D4; --accent-fg: #5AAAE6; --accent-soft: rgba(64,154,223,.17); --accent-soft2: rgba(64,154,223,.28); --on-accent: #FFFFFF;
+  --sel-a: rgba(64,154,223,.45); --sel-b: rgba(64,154,223,.12); --sel-line: #5AAAE6;
+  --folder: #FFCD70; --file: #78B0E8;
+  --ok: #6CCB5F; --warn: #FCE100; --danger: #FF99A4; --danger-soft: rgba(255,153,164,.12);
+  --shadow: 0 8px 28px rgba(0,0,0,.45), 0 1px 3px rgba(0,0,0,.35);
+  --lift: 0 12px 30px rgba(0,0,0,.55), 0 2px 6px rgba(0,0,0,.4);
+  --win-shadow: 0 18px 50px rgba(0,0,0,.45);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.5 var(--font); padding-inline: 16px; padding-block: 20px 48px; overflow-x: hidden; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; }
+button:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 1px; }
+.ic { font-family: var(--icons); font-style: normal; font-weight: normal; line-height: 1; }
+kbd { font: 11px/1 var(--font); padding: 2px 5px; border-radius: 4px; border: 1px solid var(--stroke); color: var(--text2); background: var(--hover); white-space: nowrap; }
+
+.page { max-width: 1480px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+.head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 24px; }
+.head h1 { margin: 0; font: 600 22px/1.25 var(--display); text-wrap: balance; }
+.head p { margin: 4px 0 0; color: var(--text2); max-width: 76ch; font-size: 13.5px; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.seg { display: inline-flex; background: var(--hover); border: 1px solid var(--stroke); border-radius: 7px; padding: 2px; gap: 2px; }
+.seg button { padding: 3px 10px; border-radius: 5px; font-size: 12.5px; color: var(--text2); }
+.seg button[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.demo { height: 30px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--stroke); background: var(--card); display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
+.demo:hover { border-color: var(--text3); }
+.demo .ic { color: var(--accent-fg); font-size: 12px; }
+.demo.run { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.demo.run .ic { color: var(--on-accent); }
+.tryline { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12.5px; color: var(--text2); }
+.tryline b { color: var(--text); font-weight: 600; }
+.stage { position: relative; width: 100%; }
+
+/* ---------- Pulse window ---------- */
+.win { position: absolute; top: 0; left: 0; width: 1180px; height: 700px; transform-origin: 0 0; display: flex; flex-direction: column; background: var(--title);
+  border: 1px solid var(--stroke); border-radius: 8px; overflow: hidden; box-shadow: var(--win-shadow); font-size: 13px; line-height: 1.35; user-select: none; outline: none; }
+.titlebar { height: 48px; flex-shrink: 0; display: flex; align-items: center; }
+.brand { width: 224px; display: flex; align-items: center; gap: 8px; padding-left: 12px; flex-shrink: 0; }
+.brand b { font: 600 14px var(--display); }
+.brand .tb-ic { margin-left: auto; margin-right: 4px; }
+.tb-ic { width: 34px; height: 30px; border-radius: 6px; display: grid; place-items: center; color: var(--text2); font-size: 15px; }
+.tb-ic:hover { background: var(--hover); color: var(--text); }
+.tabs { display: flex; align-items: flex-end; align-self: stretch; gap: 2px; }
+.tab { height: 38px; width: 180px; display: flex; align-items: center; gap: 8px; padding: 0 10px 0 12px; border-radius: 8px 8px 0 0; color: var(--text2); position: relative; }
+.tab:hover { background: var(--hover); }
+.tab.on { background: var(--sheet); color: var(--text); }
+.tab.on::after { content: ""; position: absolute; left: 12px; bottom: 2px; width: 18px; height: 3px; border-radius: 2px; background: var(--accent); }
+.tab span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab .ic { font-size: 9px; color: var(--text3); }
+.tab.drop { box-shadow: inset 0 0 0 1.5px var(--accent-fg); background: var(--accent-soft); }
+.caption { margin-left: auto; display: flex; align-items: center; height: 100%; }
+.caption .cap { width: 46px; height: 100%; display: grid; place-items: center; font-size: 10px; }
+.body { flex: 1; min-height: 0; display: flex; background: var(--sheet); }
+.sidebar { width: 224px; flex-shrink: 0; padding: 4px 8px; display: flex; flex-direction: column; gap: 2px; }
+.sb-h { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; color: var(--text2); font-weight: 600; font-size: 12.5px; margin-top: 4px; }
+.sb-i { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: 6px; white-space: nowrap; position: relative; }
+.sb-i:hover { background: var(--hover); }
+.sb-i.on { background: var(--hover); font-weight: 600; }
+.sb-i .ic { font-size: 14px; color: var(--accent-fg); width: 16px; text-align: center; }
+.sb-i small { margin-left: auto; color: var(--text3); font-size: 11.5px; font-weight: 400; }
+.sb-i.drop { background: var(--accent-soft2); box-shadow: inset 0 0 0 1.5px var(--accent-fg); }
+.content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.nav { height: 46px; flex-shrink: 0; display: flex; align-items: center; gap: 4px; padding: 0 8px 0 4px; }
+.navb { width: 30px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--text2); font-size: 15px; position: relative; }
+.navb:hover { background: var(--hover); }
+.navb[aria-disabled="true"] { color: var(--text3); }
+.navb.drop { background: var(--accent-soft2); box-shadow: inset 0 0 0 1.5px var(--accent-fg); color: var(--accent-fg); }
+.addr { flex: 1; height: 32px; border-radius: 6px; background: var(--input); border: 1px solid var(--stroke); display: flex; align-items: center; gap: 2px; padding: 0 6px; margin: 0 6px; white-space: nowrap; overflow: hidden; }
+.crumb { padding: 3px 6px; border-radius: 4px; position: relative; }
+.crumb:hover { background: var(--hover); }
+.crumb.cur { font-weight: 600; }
+.crumb.drop { background: var(--accent-soft2); box-shadow: inset 0 0 0 1.5px var(--accent-fg); color: var(--accent-fg); }
+.crumb.hint { box-shadow: inset 0 0 0 1px var(--stroke); }
+.cs { font-family: var(--icons); font-size: 9px; color: var(--text3); }
+.search { width: 260px; height: 32px; border-radius: 6px; background: var(--input); border: 1px solid var(--stroke); display: flex; align-items: center; gap: 8px; padding: 0 10px; color: var(--text3); }
+
+/* toolbar */
+.toolbar { height: 44px; flex-shrink: 0; display: flex; align-items: center; gap: 2px; padding: 0 8px 4px; position: relative; }
+.newbtn { height: 30px; display: flex; align-items: center; border-radius: 6px; background: var(--accent); color: var(--on-accent); margin-right: 8px; flex-shrink: 0; }
+.newbtn > span { display: flex; align-items: center; gap: 6px; padding: 0 10px; height: 100%; }
+.newbtn > span + span { border-left: 1px solid rgba(255,255,255,.28); padding: 0 8px; font-size: 10px; }
+.tools { flex: 1; display: flex; align-items: center; gap: 2px; min-width: 0; }
+.tool { height: 30px; min-width: 32px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; flex-shrink: 0; position: relative; }
+.tool .ic { font-size: 15px; color: var(--text2); }
+.tool:hover { background: var(--hover); }
+.tool.sep { min-width: 13px; padding: 0; }
+.tool.sep::before { content: ""; width: 1px; height: 18px; background: var(--divider); }
+.tool.sep:hover { background: none; }
+.tool.grow { flex: 1; min-width: 12px; }
+.tool.grow:hover { background: none; }
+.tool.ph { border: 1.5px dashed var(--accent-fg); background: var(--accent-soft); }
+.tool.ph * { visibility: hidden; }
+.tool.dim { opacity: .25; }
+.tools.dragging .tool:not(.ph):not(.grow):hover { background: none; }
+.morebtn { height: 30px; width: 32px; border-radius: 6px; display: grid; place-items: center; flex-shrink: 0; position: relative; }
+.morebtn:hover { background: var(--hover); }
+.morebtn .ic { font-size: 15px; color: var(--text2); }
+.morebtn.drop { background: var(--accent-soft2); box-shadow: inset 0 0 0 1.5px var(--accent-fg); }
+.toolbar.remove::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: 0; height: 2px; border-radius: 1px; background: var(--danger); opacity: .6; }
+.tfloat { position: absolute; z-index: 90; pointer-events: none; height: 30px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 6px; background: var(--flyout); box-shadow: var(--lift); border: 1px solid var(--stroke); transform: scale(1.06); white-space: nowrap; font-size: 13px; }
+.tfloat .ic { font-size: 15px; color: var(--text2); }
+.tfloat.out { border-color: var(--danger); background: var(--danger-soft); transform: scale(.96) rotate(-3deg); opacity: .9; }
+.tfloat .why { position: absolute; top: 36px; left: 50%; transform: translateX(-50%); font-size: 11.5px; padding: 3px 8px; border-radius: 10px; background: var(--flyout); box-shadow: var(--shadow); color: var(--text2); }
+.tfloat.out .why { color: var(--danger); }
+
+/* pane */
+.paneWrap { flex: 1; min-height: 0; display: flex; padding: 0 8px 4px 4px; }
+.pane { flex: 1; min-width: 0; background: var(--card); border: 1px solid var(--stroke); border-radius: 8px; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+.ph { height: 38px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 14px; position: relative; }
+.ph .pbar { position: absolute; left: 0; top: 11px; bottom: 11px; width: 3px; border-radius: 0 2px 2px 0; background: var(--accent); }
+.ph .pt { font-weight: 600; font-size: 13.5px; }
+.ph .pp { color: var(--text3); font-size: 12px; }
+.ch { height: 30px; flex-shrink: 0; display: grid; grid-template-columns: minmax(0,1fr) 140px 96px; align-items: center; padding: 0 14px 0 16px; color: var(--text2); font-size: 12.5px; border-bottom: 1px solid var(--divider); }
+.ch span:first-child { color: var(--accent-fg); font-weight: 600; }
+.ch .r, .row .r { text-align: right; }
+/* Laid over the column header while dragging, so no row moves under the cursor. */
+.upbar { position: absolute; left: 6px; right: 6px; top: 38px; height: 30px; z-index: 3; display: flex; align-items: center; gap: 10px; padding: 0 12px; border-radius: 6px; color: var(--text2); font-size: 12.5px;
+  background: var(--card); border: 1.5px dashed var(--stroke); opacity: 0; pointer-events: none; transform: translateY(-4px); transition: opacity .15s, transform .15s cubic-bezier(.2,.8,.2,1); }
+.pane.dragging .upbar.has { opacity: 1; pointer-events: auto; transform: none; }
+.upbar .ic { font-size: 14px; color: var(--accent-fg); }
+.upbar b { color: var(--text); font-weight: 600; }
+.upbar small { margin-left: auto; color: var(--text3); font-size: 11.5px; }
+.upbar.drop { background: linear-gradient(var(--accent-soft2), var(--accent-soft2)), var(--card); border-color: var(--accent-fg); color: var(--accent-fg); }
+.springing::after { content: ""; position: absolute; left: 4px; bottom: 2px; height: 2px; border-radius: 1px; width: calc(var(--p, 0) * (100% - 8px)); background: var(--accent-fg); }
+.rows { flex: 1; min-height: 0; overflow: auto; padding: 4px 6px; display: flex; flex-direction: column; gap: 2px; position: relative; }
+.row { height: 30px; flex-shrink: 0; display: grid; grid-template-columns: minmax(0,1fr) 140px 96px; align-items: center; padding: 0 8px 0 10px; border-radius: 5px; font-variant-numeric: tabular-nums; position: relative; transition: opacity .15s, height .18s, margin .18s; }
+.row:hover { background: var(--hover); }
+.row.sel { background: linear-gradient(90deg, var(--sel-a), var(--sel-b)); box-shadow: inset 0 0 0 1px var(--sel-line); }
+.row.lifted { opacity: .45; }
+.row.cut { opacity: .5; }
+.row.drop { background: var(--accent-soft2); box-shadow: inset 0 0 0 1.5px var(--accent-fg); }
+.row.nodrop { cursor: not-allowed; }
+.row.peek { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent-fg); }
+.row.flash { animation: flash 1.4s ease; }
+@keyframes flash { 0%, 35% { background: var(--accent-soft2); box-shadow: inset 0 0 0 1.5px var(--accent-fg); } 100% { background: transparent; } }
+.row.gone { opacity: 0; height: 0; margin-top: -2px; overflow: hidden; }
+.row .n { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.row .n .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.row .n input { flex: 1; min-width: 0; height: 24px; border: 1px solid var(--accent-fg); border-radius: 4px; background: var(--card); color: var(--text); font: inherit; padding: 0 6px; outline: none; box-shadow: 0 0 0 2px var(--accent-soft); }
+.row .d, .row .s { color: var(--text2); font-size: 12.5px; white-space: nowrap; }
+.fi { width: 16px; height: 16px; flex-shrink: 0; }
+.ico { position: relative; width: 16px; height: 16px; display: grid; place-items: center; flex-shrink: 0; }
+/* DrawSpringRing: radius = half the icon + 3 DIP, 2 DIP stroke, 18% accent track, accent arc from 12 o'clock, round caps. */
+.ring { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); pointer-events: none; overflow: visible; z-index: 2; }
+.ring circle { fill: none; stroke-width: 2; }
+.ring .trk { stroke: var(--accent); stroke-opacity: .18; }
+.ring .arc { stroke: var(--accent); stroke-linecap: round; stroke-dasharray: var(--c); stroke-dashoffset: calc(var(--c) * (1 - var(--p, 0))); }
+.ring.zero .arc { opacity: 0; }
+
+/* 中等图标 48 DIP / 大图标 96 DIP (IconPresetDip): the same rows laid out as tiles. */
+.rows.grid { display: grid; grid-template-columns: repeat(auto-fill, var(--cw)); grid-auto-rows: var(--chh); gap: 4px; align-content: start; justify-content: start; padding: 8px 10px; }
+.rows.grid.isz-m { --cw: 104px; --chh: 106px; --ic: 48px; }
+.rows.grid.isz-l { --cw: 148px; --chh: 160px; --ic: 96px; }
+.rows.grid .row { height: auto; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding: 8px 4px 6px; border-radius: 6px; }
+.rows.grid .row.drop { background: transparent; box-shadow: inset 0 0 0 2px var(--accent); }
+.rows.grid .row.sel.drop { box-shadow: inset 0 0 0 2px var(--accent); }
+.rows.grid .row .n { flex-direction: column; gap: 8px; width: 100%; align-items: center; }
+.rows.grid .row .ico { width: var(--ic); height: var(--ic); }
+.rows.grid .row .ico > svg.big, .rows.grid .row .ico > .thumbimg { width: var(--ic); height: var(--ic); }
+.rows.grid .row .n .nm { white-space: normal; text-align: center; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; font-size: 12.5px; line-height: 1.3; word-break: break-all; }
+.rows.grid .row .d, .rows.grid .row .s { display: none; }
+.rows.grid .row.gone { height: auto; opacity: 0; transform: scale(.85); }
+.rows.grid .row .n input { width: 100%; flex: none; text-align: center; }
+.thumbimg { display: block; border-radius: 4px; box-shadow: 0 0 0 2px var(--card), 0 2px 6px rgba(0,0,0,.3); }
+.vsw { margin-left: auto; display: flex; gap: 2px; }
+.vsw button { width: 28px; height: 26px; border-radius: 5px; display: grid; place-items: center; color: var(--text2); }
+.vsw button:hover { background: var(--hover); }
+.vsw button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-fg); }
+.pane.isgrid .ch { visibility: hidden; }
+.rowtag { position: absolute; right: 110px; top: 50%; transform: translateY(-50%); font-size: 11.5px; padding: 1px 8px; border-radius: 10px; background: var(--accent); color: var(--on-accent); white-space: nowrap; pointer-events: none; }
+.empty { color: var(--text3); text-align: center; padding: 40px 0; font-size: 12.5px; }
+
+/* drag ghost */
+.ghost { position: absolute; z-index: 100; pointer-events: none; }
+.gcards { position: relative; width: 200px; height: 36px; }
+.gcard { position: absolute; left: 0; top: 0; height: 30px; max-width: 200px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border-radius: 6px; background: var(--flyout); border: 1px solid var(--stroke); box-shadow: var(--lift); white-space: nowrap; font-size: 12.5px; }
+.gcard span { overflow: hidden; text-overflow: ellipsis; }
+.gcount { position: absolute; left: -8px; top: -8px; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 600; display: grid; place-items: center; z-index: 5; }
+.gbadge { margin-top: 6px; display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 12px; background: var(--accent); color: #fff; font-size: 12px; box-shadow: var(--shadow); white-space: nowrap; }
+.gbadge .ic { font-size: 11px; }
+.gbadge.no { background: var(--flyout); color: var(--text2); border: 1px solid var(--stroke); }
+.gbadge small { opacity: .8; margin-left: 4px; }
+
+/* status bar */
+.status { height: 28px; flex-shrink: 0; display: flex; align-items: center; gap: 14px; padding: 0 12px; background: var(--status); color: var(--text2); font-size: 12px; white-space: nowrap; position: relative; }
+.status .fill { flex: 1; }
+.ai { display: flex; align-items: center; gap: 6px; margin-left: -4px; padding: 0 8px 0 6px; height: 22px; border-radius: 11px; }
+.ai .spark { color: var(--accent-fg); font-size: 11px; }
+.ai b { color: var(--text); font-size: 11.5px; }
+.undo { height: 22px; display: flex; align-items: center; border-radius: 11px; background: var(--hover); color: var(--text); overflow: hidden; }
+.undo > button { height: 22px; display: flex; align-items: center; gap: 6px; padding: 0 8px; }
+.undo > button:hover { background: var(--pressed); }
+.undo > button .ic { font-size: 11px; color: var(--accent-fg); }
+.undo > button[disabled] { color: var(--text3); }
+.undo > button[disabled] .ic { color: var(--text3); }
+.undo .lbl { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.undo .lbl .ic { font-size: 8px; color: var(--text3); }
+.undo .div { width: 1px; height: 12px; background: var(--stroke); }
+.undo.open { box-shadow: inset 0 0 0 1px var(--accent-fg); }
+.undo.bump { animation: bump .45s cubic-bezier(.2,.8,.2,1); }
+@keyframes bump { 40% { transform: scale(1.06); background: var(--accent-soft2); } }
+
+/* history flyout */
+.hist { position: absolute; z-index: 60; width: 440px; background: var(--flyout); border: 1px solid var(--stroke); border-radius: 10px; box-shadow: var(--shadow); padding: 8px; display: flex; flex-direction: column; gap: 2px; animation: pop .16s cubic-bezier(.2,.8,.2,1); }
+.hist[hidden] { display: none; }
+@keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.hh { display: flex; align-items: baseline; justify-content: space-between; padding: 4px 6px 6px; }
+.hh b { font: 600 13.5px var(--display); }
+.hh small { color: var(--text2); font-size: 12px; }
+.hsec { font-size: 11.5px; color: var(--text3); padding: 6px 8px 2px; }
+.hrow { display: grid; grid-template-columns: 28px minmax(0,1fr) auto; gap: 0 10px; align-items: center; padding: 7px 6px; border-radius: 6px; position: relative; }
+.hrow:hover { background: var(--hover); }
+.hic { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; background: var(--accent-soft); color: var(--accent-fg); grid-row: 1 / span 2; }
+.hrow .t { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hrow .m { font-size: 11.5px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; gap: 6px; align-items: center; }
+.hrow .ha { grid-row: 1 / span 2; grid-column: 3; display: flex; gap: 2px; align-items: center; }
+.hrow .tm { font-size: 11.5px; color: var(--text3); font-variant-numeric: tabular-nums; }
+.hrow .ha .lnk { display: none; }
+.hrow:hover .ha .lnk, .hrow.kbd .ha .lnk { display: inline-flex; }
+.hrow:hover .ha .tm { display: none; }
+.lnk { height: 26px; padding: 0 9px; border-radius: 4px; color: var(--accent-fg); font-size: 12.5px; align-items: center; gap: 4px; white-space: nowrap; }
+.lnk:hover { background: var(--pressed); }
+.hrow.undone .t { color: var(--text3); text-decoration: line-through; text-decoration-color: var(--text3); }
+.hrow.undone .hic { background: var(--hover); color: var(--text3); }
+.hrow.locked .hic { background: var(--danger-soft); color: var(--danger); }
+.hrow.locked .t { color: var(--text2); }
+.hrow.inrange { background: var(--accent-soft); }
+.hrow.inrange.undone { background: var(--hover); }
+.hnow { display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-size: 11.5px; color: var(--accent-fg); font-weight: 600; }
+.hnow::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent-fg); box-shadow: 0 0 0 3px var(--accent-soft2); }
+.hnow::after { content: ""; flex: 1; height: 1.5px; background: var(--accent-fg); opacity: .5; }
+.hfoot { border-top: 1px solid var(--divider); margin-top: 4px; padding: 8px 6px 2px; font-size: 11.5px; color: var(--text3); display: flex; justify-content: space-between; gap: 8px; }
+
+/* menus, toasts */
+.menu { position: absolute; z-index: 70; min-width: 220px; background: var(--flyout); border: 1px solid var(--stroke); border-radius: 8px; box-shadow: var(--shadow); padding: 4px; animation: pop .14s ease; }
+.menu[hidden] { display: none; }
+.mi { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: 5px; white-space: nowrap; }
+.mi:hover { background: var(--hover); }
+.mi .ic { width: 16px; text-align: center; font-size: 13px; color: var(--text2); }
+.mi .lbl { flex: 1; }
+.mi .grip { font-family: var(--icons); font-size: 12px; color: var(--text3); }
+.mh { font-size: 11.5px; color: var(--text3); padding: 6px 10px 2px; }
+.msep { height: 1px; background: var(--divider); margin: 4px 6px; }
+.snack { position: absolute; z-index: 65; left: 50%; bottom: 40px; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 14px; border-radius: 8px; background: var(--flyout); border: 1px solid var(--stroke); box-shadow: var(--shadow); font-size: 13px; white-space: nowrap; animation: pop .16s ease; }
+.snack[hidden] { display: none; }
+.snack > .ic { color: var(--accent-fg); font-size: 13px; }
+.snack button { height: 28px; padding: 0 10px; border-radius: 4px; color: var(--accent-fg); font-weight: 600; }
+.snack button:hover { background: var(--hover); }
+.snack button.x { width: 28px; padding: 0; color: var(--text3); font-family: var(--icons); font-size: 9px; font-weight: 400; }
+.tip { position: absolute; z-index: 80; pointer-events: none; background: var(--flyout); border: 1px solid var(--stroke); box-shadow: var(--shadow); border-radius: 6px; padding: 5px 9px; font-size: 12px; white-space: nowrap; display: flex; gap: 8px; align-items: center; opacity: 0; transition: opacity .1s; }
+.tip.on { opacity: 1; }
+.cursor { position: absolute; z-index: 200; width: 22px; height: 22px; pointer-events: none; left: 0; top: 0; transition: transform .05s linear; filter: drop-shadow(0 2px 3px rgba(0,0,0,.4)); }
+.cursor[hidden] { display: none; }
+.cursor.down::after { content: ""; position: absolute; left: -10px; top: -10px; width: 20px; height: 20px; border-radius: 50%; background: rgba(90,170,230,.45); animation: tap .5s ease-out; }
+@keyframes tap { from { transform: scale(.4); opacity: 1; } to { transform: scale(1.4); opacity: 0; } }
+.caption-line { position: absolute; z-index: 210; left: 50%; top: 8px; transform: translateX(-50%); padding: 6px 14px; border-radius: 16px; background: var(--accent); color: #fff; font-size: 13px; box-shadow: var(--shadow); white-space: nowrap; pointer-events: none; }
+.caption-line[hidden] { display: none; }
+
+/* ---------- spec ---------- */
+.spec { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 400px), 1fr)); gap: 14px; }
+.card { background: var(--card); border: 1px solid var(--stroke); border-radius: 10px; padding: 16px 18px; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.card h3 { margin: 0; font: 600 15px/1.3 var(--display); }
+.card p { margin: 0; color: var(--text2); font-size: 13px; max-width: 70ch; }
+.card ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.card li { color: var(--text2); }
+.card li b { color: var(--text); font-weight: 600; }
+.tbl { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--divider); vertical-align: top; }
+th { color: var(--text2); font-weight: 600; font-size: 12px; }
+td:first-child { white-space: nowrap; }
+td code, li code, p code { font-family: var(--mono); font-size: 11.5px; padding: 1px 4px; border-radius: 4px; background: var(--hover); color: var(--text); }
+.tag { font-size: 11px; padding: 0 6px; border-radius: 8px; line-height: 18px; white-space: nowrap; background: var(--hover); color: var(--text2); }
+.tag.new { background: var(--accent-soft); color: var(--accent-fg); }
+.tag.bug { background: var(--danger-soft); color: var(--danger); }
+
+@media (prefers-reduced-motion: reduce) {
+  .row, .upbar, .hist, .menu, .snack, .undo.bump { transition: none !important; animation: none !important; }
+}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-folder" viewBox="0 0 16 16"><path fill="currentColor" d="M1.5 4a1.5 1.5 0 0 1 1.5-1.5h3.1c.4 0 .78.16 1.06.44L8.3 4h4.7A1.5 1.5 0 0 1 14.5 5.5v6.5a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 12z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" d="M4 1.8h5.2L12.6 5.2v9H4z"/><path fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" d="M9 1.9v3.5h3.5"/></symbol>
+    <symbol id="i-img" viewBox="0 0 16 16"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.2"/><path fill="currentColor" d="M3.5 11.5l3-3.4 2.2 2.3 1.4-1.4 2.4 2.5z"/><circle cx="10.6" cy="5.6" r="1.1" fill="currentColor"/></symbol>
+    <symbol id="i-zip" viewBox="0 0 16 16"><path fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" d="M3.5 1.8h9v12.4h-9z"/><path stroke="currentColor" stroke-width="1.4" d="M8 2v1.2M8 4.4v1.2M8 6.8v1.2"/><rect x="6.6" y="9" width="2.8" height="2.6" rx=".6" fill="currentColor"/></symbol>
+    <symbol id="i-drive" viewBox="0 0 16 16"><rect x="1.5" y="4.5" width="13" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/><path stroke="currentColor" stroke-width="1.4" d="M4 9h5"/><circle cx="12" cy="8" r=".9" fill="currentColor"/></symbol>
+    <symbol id="i-logo" viewBox="0 0 20 20"><rect width="20" height="20" rx="5" fill="#2B2B2B"/><path d="M3.5 10.5h3l1.6-4 2.8 8 1.8-4.5h3.8" fill="none" stroke="#5AAAE6" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+
+<div class="page">
+  <div class="head">
+    <div>
+      <h1>拖放与撤销：工具栏换位、拖进子文件夹或父文件夹、可回看的撤销</h1>
+      <p>窗口里的文件、工具栏和撤销记录都是真的：拖动、重命名、删除、复制粘贴都会进撤销记录。状态栏的撤销胶囊单击就撤一步，点文字展开操作记录：悬停回看每一步动了哪些文件，可以一次撤到某一步，撤过的还能重做。</p>
+    </div>
+    <div class="controls" id="controls"></div>
+  </div>
+  <div class="tryline">
+    <span><b>拖文件</b>到文件夹行或中 / 大图标的文件夹格（停 0.8 秒自动进入，图标外一圈进度环）、路径里的上级、列表顶部的「上一级」条、侧栏、第二个标签页</span>
+    <span><kbd>Ctrl</kbd> 复制 · <kbd>Shift</kbd> 移动 · <kbd>Esc</kbd> 取消拖动</span>
+    <span><b>拖工具栏按钮</b>换位置，往下拖出工具栏收进「更多」，从「更多」菜单拖回来</span>
+    <span><kbd>Ctrl+Z</kbd> 撤销 · <kbd>Ctrl+Y</kbd> 重做 · <kbd>F2</kbd> <kbd>Delete</kbd> <kbd>Ctrl+X/C/V</kbd> <kbd>Ctrl+Shift+N</kbd></span>
+  </div>
+  <div class="stage" id="stage"><div class="win" id="win" tabindex="0"></div></div>
+  <section class="spec" id="spec"></section>
+</div>
+
+<script>
+(() => {
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const g = c => `<i class="ic">&#x${c};</i>`;
+const qs = new URLSearchParams(location.search);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const SPRING_MS = 800;
+
+/* ---------- file model ---------- */
+let nid = 1;
+const FS = {};
+const F = (n, t, s = '', d = '') => ({ n, t, s, d });
+function mk(path, items) { FS[path] = { items: items.map(x => ({ id: 'f' + (nid++), ...x })) }; }
+mk('PC', [{ n: 'Win11 (C:)', t: 'drive', link: 'C:', s: '113G / 477G' }, { n: '新加卷 (P:)', t: 'drive', link: 'P:', s: '3.5T / 3.6T' }]);
+mk('C:', [F('桌面', 'folder', '', '11-06 09:00'), F('下载', 'folder', '', '11-06 14:34'), F('Windows', 'folder', '', '10-12 08:00')]);
+mk('C:\\桌面', [F('设计评审.pptx', 'doc', '4.6 MB', '11-06 14:34'), F('临时笔记.txt', 'txt', '2 KB', '11-06 11:03')]);
+mk('C:\\下载', [F('ffmpeg-7.1.zip', 'zip', '88.0 MB', '10-26 23:48'), F('合同扫描.pdf', 'doc', '2.1 MB', '11-05 17:20')]);
+mk('C:\\Windows', []);
+mk('P:', [F('源代码', 'folder', '', '11-06 10:02'), F('照片', 'folder', '', '10-12 11:27'), F('备份', 'folder', '', '11-01 20:00'), F('说明.txt', 'txt', '1 KB', '09-01 10:00')]);
+mk('P:\\源代码', [F('产品文档', 'folder', '', '10-28 09:12'), F('发布', 'folder', '', '11-05 18:40'), F('品牌设计', 'folder', '', '10-19 14:03'),
+  F('app.py', 'code', '574 B', '11-04 21:17'), F('main.cpp', 'code', '978 B', '11-06 10:02'), F('readme.md', 'txt', '225 B', '11-01 16:45'), F('styles.css', 'code', '166 B', '10-30 11:20'),
+  F('配置-v2.3.json', 'code', '412 B', '10-03 12:13'), F('项目计划.md', 'txt', '3.4 KB', '10-27 19:58'), F('旧日志.txt', 'txt', '18 KB', '09-20 08:00'), F('临时.tmp', 'txt', '2 KB', '11-06 09:30'), F('build.log', 'txt', '1.2 MB', '11-06 13:40')]);
+mk('P:\\源代码\\产品文档', [F('需求说明.docx', 'doc', '88 KB', '11-03 15:02'), F('路线图.md', 'txt', '6 KB', '10-28 09:12')]);
+mk('P:\\源代码\\发布', [F('1.0.57', 'folder', '', '10-21 22:10'), F('Pulse-1.0.58.zip', 'zip', '38.6 MB', '11-05 18:40'), F('PulseSetup-1.0.58.exe', 'exe', '41.2 MB', '11-05 18:41'), F('release-notes.md', 'txt', '6.1 KB', '11-05 18:22')]);
+mk('P:\\源代码\\发布\\1.0.57', [F('Pulse-1.0.57.zip', 'zip', '37.9 MB', '10-21 22:10')]);
+mk('P:\\源代码\\品牌设计', [F('logo.svg', 'img', '12 KB', '10-19 14:03'), F('配色.png', 'img', '220 KB', '10-19 14:10')]);
+mk('P:\\照片', [F('城市夜景.jpg', 'img', '8.2 MB', '09-24 19:48'), F('秋日森林.jpg', 'img', '9.7 MB', '10-11 16:05'), F('山湖晨雾.jpg', 'img', '8.0 MB', '10-12 06:41')]);
+mk('P:\\备份', [F('2026-10.zip', 'zip', '1.2 GB', '11-01 20:00')]);
+const NAMES = { 'PC': '此电脑', 'C:': 'Win11 (C:)', 'P:': '新加卷 (P:)' };
+const nameOf = p => NAMES[p] || p.split('\\').pop();
+const parentOf = p => p === 'PC' ? null : !p.includes('\\') ? 'PC' : p.slice(0, p.lastIndexOf('\\'));
+const join = (p, n) => p === 'PC' ? n : p + '\\' + n;
+const crumbsOf = p => { const out = []; let q = p; while (q) { out.unshift(q); q = parentOf(q); } return out; };
+const within = (p, root) => p === root || p.startsWith(root + '\\');
+let RECYCLE = 435;
+
+function uniqueName(path, n) {
+  if (!FS[path].items.some(x => x.n === n)) return n;
+  const dot = n.lastIndexOf('.'); const base = dot > 0 ? n.slice(0, dot) : n, ext = dot > 0 ? n.slice(dot) : '';
+  for (let i = 2; ; i++) { const c = `${base} (${i})${ext}`; if (!FS[path].items.some(x => x.n === c)) return c; }
+}
+function rekey(oldP, newP) {
+  Object.keys(FS).filter(k => within(k, oldP)).forEach(k => { const nk = newP + k.slice(oldP.length); FS[nk] = FS[k]; delete FS[k]; });
+}
+function cloneTree(oldP, newP) {
+  Object.keys(FS).filter(k => within(k, oldP)).forEach(k => { FS[newP + k.slice(oldP.length)] = { items: FS[k].items.map(x => ({ ...x, id: 'f' + (nid++) })) }; });
+}
+function moveRaw(names, from, to) {
+  const out = [];
+  names.forEach(n => {
+    const src = FS[from].items, i = src.findIndex(x => x.n === n); if (i < 0) return;
+    const it = src.splice(i, 1)[0]; const nn = uniqueName(to, it.n);
+    if (it.t === 'folder') rekey(join(from, it.n), join(to, nn));
+    it.n = nn; FS[to].items.push(it); out.push(nn);
+  });
+  return out;
+}
+function copyRaw(names, from, to) {
+  const out = [];
+  names.forEach(n => {
+    const it = FS[from].items.find(x => x.n === n); if (!it) return;
+    const nn = uniqueName(to, it.n);
+    if (it.t === 'folder') cloneTree(join(from, it.n), join(to, nn));
+    FS[to].items.push({ ...it, id: 'f' + (nid++), n: nn, d: '11-06 14:36' }); out.push(nn);
+  });
+  return out;
+}
+function removeRaw(names, path) {
+  const out = [];
+  names.forEach(n => {
+    const src = FS[path].items, i = src.findIndex(x => x.n === n); if (i < 0) return;
+    const it = src.splice(i, 1)[0]; const sub = {};
+    if (it.t === 'folder') Object.keys(FS).filter(k => within(k, join(path, n))).forEach(k => { sub[k] = FS[k]; delete FS[k]; });
+    out.push({ it, sub });
+  });
+  return out;
+}
+function restoreRaw(list, path) { list.forEach(({ it, sub }) => { FS[path].items.push(it); Object.assign(FS, sub); }); }
+function renameRaw(path, a, b) {
+  const it = FS[path].items.find(x => x.n === a); if (!it) return;
+  if (it.t === 'folder') rekey(join(path, a), join(path, b));
+  it.n = b;
+}
+
+/* ---------- undo stack (newest last) and redo list ---------- */
+const S = {
+  theme: qs.get('theme') === 'light' ? 'light' : 'dark',
+  tabs: [{ path: 'P:\\源代码', back: [] }, { path: 'C:\\下载', back: [] }], tab: 0,
+  sel: new Set(), anchor: null, clip: null, scale: 1, editing: null,
+  hist: [], redo: [], clock: 0,
+};
+const TAB = () => S.tabs[S.tab];
+const cur = () => TAB().path;
+document.documentElement.dataset.theme = S.theme;
+const shortPath = p => nameOf(p);
+const plural = names => names.length > 1 ? `${names.length} 项` : `“${names[0]}”`;
+function stamp() { const m = 36 + (S.clock++); return `14:${String(m % 60).padStart(2, '0')}`; }
+
+function commit(e, quiet) {
+  const hadRedo = S.redo.length;
+  S.hist.push(e); S.redo = [];
+  if (!quiet) { bumpUndo(); if (hadRedo) e.note = '重做记录已清空'; }
+  return e;
+}
+function opMove(names, from, to, copy, time) {
+  const a = names.slice(), b = copy ? copyRaw(names, from, to) : moveRaw(names, from, to);
+  if (!b.length) return null;
+  const e = { kind: copy ? 'copy' : 'move', icon: copy ? 'E8C8' : 'E8DE', supported: true, time: time || stamp(),
+    label: `${copy ? '复制' : '移动'} ${plural(a)}`, detail: `${shortPath(from)} → ${shortPath(to)}`, path: to, from, names: b,
+    undo() { if (copy) removeRaw(e.names, to); else { e.a = moveRaw(e.names, to, from); } },
+    redo() { e.names = copy ? copyRaw(a, from, to) : moveRaw(e.a || a, from, to); },
+    peek() { return S.redo.includes(e) ? { path: from, names: e.a || a } : { path: to, names: e.names }; } };
+  return e;
+}
+function opRecycle(names, path, time) {
+  let removed = removeRaw(names, path); if (!removed.length) return null;
+  RECYCLE += removed.length;
+  const e = { kind: 'recycle', icon: 'E74D', supported: true, time: time || stamp(), label: `删除 ${plural(names)}`, detail: `${shortPath(path)} → 回收站`, path, names,
+    undo() { restoreRaw(removed, path); RECYCLE -= removed.length; }, redo() { removed = removeRaw(names, path); RECYCLE += removed.length; },
+    peek() { return { path, names: S.redo.includes(e) ? names : [] }; } };
+  return e;
+}
+function opCreate(path, name, time) {
+  const nn = uniqueName(path, name);
+  FS[path].items.push({ id: 'f' + (nid++), n: nn, t: 'folder', s: '', d: '11-06 14:36' }); FS[join(path, nn)] = { items: [] };
+  const e = { kind: 'create', icon: 'E8F4', supported: true, time: time || stamp(), label: `新建文件夹 “${nn}”`, detail: shortPath(path), path, names: [nn],
+    undo() { e.saved = removeRaw([e.names[0]], path); }, redo() { restoreRaw(e.saved, path); },
+    peek() { return { path, names: e.names }; } };
+  return e;
+}
+function opRename(path, a, b, time) {
+  renameRaw(path, a, b);
+  const e = { kind: 'rename', icon: 'E8AC', supported: true, time: time || stamp(), label: `重命名 “${a}”`, detail: `→ “${b}” · ${shortPath(path)}`, path, names: [b],
+    undo() { renameRaw(path, b, a); }, redo() { renameRaw(path, a, b); },
+    peek() { return { path, names: [S.redo.includes(e) ? a : b] }; } };
+  return e;
+}
+function opPerm(names, path, time) {
+  removeRaw(names, path);
+  return { kind: 'perm', icon: 'E7BA', supported: false, time: time || stamp(), label: `永久删除 ${plural(names)}`, detail: `${shortPath(path)} · 不经过回收站`, path, names,
+    undo() {}, redo() {}, peek() { return { path, names: [] }; } };
+}
+// Earlier today, so the history has something to look back on.
+commit(opRecycle(['旧日志.txt', '临时.tmp'], 'P:\\源代码', '10:20'), true);
+commit(opCreate('P:\\源代码', '素材', '11:02'), true);
+commit(opRename('P:\\源代码', 'readme.md', 'README.md', '11:40'), true);
+commit(opMove(['styles.css'], 'P:\\源代码', 'P:\\源代码\\发布', true, '13:15'), true);
+commit(opPerm(['build.log'], 'P:\\源代码', '13:50'), true);
+
+function undoOne() {
+  for (let i = S.hist.length - 1; i >= 0; i--) {
+    const e = S.hist[i]; if (!e.supported) continue;
+    S.hist.splice(i, 1); e.undo(); S.redo.push(e); return e;
+  }
+  return null;
+}
+function redoOne() { const e = S.redo.pop(); if (!e) return null; e.redo(); S.hist.push(e); return e; }
+function undoSteps(target) {
+  const before = snapshotIds(); let n = 0, last = null;
+  while (true) { const e = undoOne(); if (!e) break; n++; last = e; if (!target || e === target) break; }
+  if (!n) { snack('没有可以撤销的操作', null, 'E946'); return; }
+  afterChange(before);
+  snack(n > 1 ? `已撤销 ${n} 步，回到「${esc(target.label)}」之前` : `已撤销：${esc(last.label)}`, ['重做', 'redo'], 'E7A7');
+  bumpUndo();
+}
+function redoSteps(target) {
+  const before = snapshotIds(); let n = 0, last = null;
+  while (S.redo.length) { const e = redoOne(); n++; last = e; if (!target || e === target) break; }
+  if (!n) { snack('没有可以重做的操作', null, 'E946'); return; }
+  afterChange(before);
+  snack(n > 1 ? `已重做 ${n} 步` : `已重做：${esc(last.label)}`, ['撤销', 'undo'], 'E7A6');
+  bumpUndo();
+}
+
+/* ---------- toolbar model ---------- */
+const TOOL = {
+  cut: { g: 'E8C6', t: '剪切', k: 'Ctrl+X' }, copy: { g: 'E8C8', t: '复制', k: 'Ctrl+C' }, paste: { g: 'E77F', t: '粘贴', k: 'Ctrl+V' },
+  rename: { g: 'E8AC', t: '重命名', k: 'F2' }, delete: { g: 'E74D', t: '删除', k: 'Delete' }, sort: { g: 'E8CB', t: '排序', label: true }, filter: { g: 'E71C', t: '筛选', label: true },
+  split: { g: 'E89F', t: '分屏布局' }, details: { g: 'E8A0', t: '详细信息面板' }, columns: { g: 'E8A9', t: '分栏视图' },
+  selall: { g: 'E8B3', t: '全选', k: 'Ctrl+A' }, term: { g: 'E756', t: '在此处打开终端' }, props: { g: 'E946', t: '属性', k: 'Alt+Enter' }, path: { g: 'E71B', t: '复制路径', k: 'Ctrl+Shift+C' }, undoT: { g: 'E7A7', t: '撤销', k: 'Ctrl+Z' },
+};
+let ORDER = ['cut', 'copy', 'paste', 'rename', 'delete', 'sep1', 'sort', 'filter', 'grow', 'split', 'details', 'columns'];
+let HIDDEN = ['selall', 'path', 'undoT', 'term', 'props'];
+
+/* ---------- rendering ---------- */
+const VIEWS = [['details', '详细信息', 'Ctrl+Shift+6', '<path d="M3 4h10M3 8h10M3 12h10"/>'], ['medium', '中等图标', 'Ctrl+Shift+3', '<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/>'], ['large', '大图标', 'Ctrl+Shift+2', '<rect x="2.5" y="2.5" width="11" height="11" rx="2"/>']];
+const view = () => TAB().view || 'details';
+const THUMB = { img: ['linear-gradient(135deg,#3a6ea5,#89c2d9 55%,#f4d58d)', 'linear-gradient(200deg,#386641,#6a994e 50%,#f2e8cf)', 'linear-gradient(140deg,#ffcdb2,#e5989b 50%,#6d6875)', 'linear-gradient(160deg,#2d3142,#4f5d75 50%,#ef8354)'] };
+// Icon-view art: filled folders, pages with a coloured band, picture thumbnails.
+function bigIcon(it) {
+  if (it.t === 'folder') return `<svg class="big" viewBox="0 0 16 16" style="color:var(--folder);filter:drop-shadow(0 1px 1px rgba(0,0,0,.25))"><use href="#i-folder"/></svg>`;
+  if (it.t === 'drive') return `<svg class="big" viewBox="0 0 42 30"><rect x="2" y="6" width="38" height="18" rx="3" fill="#C9D3DE" stroke="rgba(0,0,0,.2)"/><rect x="6" y="16" width="20" height="3" rx="1.5" fill="#2F8FE8"/><circle cx="33" cy="15" r="2" fill="#6CCB5F"/></svg>`;
+  if (it.t === 'img') { const h = [...it.n].reduce((a, c) => a + c.charCodeAt(0), 0); return `<span class="thumbimg" style="background:${THUMB.img[h % 4]};height:calc(var(--ic) * .76);margin-top:calc(var(--ic) * .12)"></span>`; }
+  const band = { doc: ['#C4523A', 'DOC'], code: ['#3D7BD9', '</>'], zip: ['#C08A3E', 'ZIP'], exe: ['#5B7FC7', 'EXE'], txt: ['#8A97AA', 'TXT'] }[it.t] || ['#8A97AA', ''];
+  return `<svg class="big" viewBox="0 0 40 44"><path d="M8 2h17l9 9v29a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" fill="#F7F7F7" stroke="rgba(0,0,0,.18)"/><path d="M25 2v7a2 2 0 0 0 2 2h7" fill="#E2E2E2" stroke="rgba(0,0,0,.18)"/>
+    <rect x="3" y="24" width="24" height="12" rx="2" fill="${band[0]}"/><text x="15" y="33" font-family="Segoe UI" font-weight="700" font-size="7.5" fill="#fff" text-anchor="middle">${esc(band[1])}</text></svg>`;
+}
+function ringSVG(ic) {
+  const r = ic / 2 + 3, box = Math.ceil(2 * r + 4), c = box / 2, len = (2 * Math.PI * r).toFixed(1);
+  return `<svg class="ring zero" width="${box}" height="${box}" viewBox="0 0 ${box} ${box}" style="--c:${len}"><circle class="trk" cx="${c}" cy="${c}" r="${r}"/><circle class="arc" cx="${c}" cy="${c}" r="${r}" transform="rotate(-90 ${c} ${c})"/></svg>`;
+}
+function setView(v) { TAB().view = v; renderRows(); renderVsw(); }
+function renderVsw() { $('#vsw').innerHTML = VIEWS.map(([v, l, kk, d]) => `<button data-view="${v}" aria-pressed="${view() === v}" data-tip="${l}" data-key="${kk}"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round">${d}</svg></button>`).join(''); }
+function icon(it) {
+  const map = { folder: ['i-folder', '--folder'], img: ['i-img', '#5E9C7E'], zip: ['i-zip', '#C08A3E'], drive: ['i-drive', '--accent-fg'], exe: ['i-file', '#5B7FC7'], doc: ['i-file', '#C4523A'], code: ['i-file', '--file'], txt: ['i-file', '--text3'] };
+  const [id, c] = map[it.t] || map.txt;
+  return `<svg class="fi" style="color:${c.startsWith('--') ? `var(${c})` : c}"><use href="#${id}"/></svg>`;
+}
+function winHTML() {
+  return `
+  <div class="titlebar">
+    <div class="brand"><svg width="20" height="20"><use href="#i-logo"/></svg><b>Pulse</b><button class="tb-ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2"/><path d="M6 2.8v10.4"/></svg></button></div>
+    <div class="tabs" id="tabs"></div>
+    <div class="caption"><button class="tb-ic">${g('E713')}</button><button class="tb-ic" data-act="theme">${g('E793')}</button><span style="width:10px"></span><span class="cap">${g('E921')}</span><span class="cap">${g('E922')}</span><span class="cap">${g('E8BB')}</span></div>
+  </div>
+  <div class="body">
+    <nav class="sidebar" id="sidebar"></nav>
+    <div class="content">
+      <div class="nav"><button class="navb" data-act="back" data-tip="后退" data-key="Alt+←">${g('E72B')}</button><button class="navb" aria-disabled="true">${g('E72A')}</button><button class="navb" id="upBtn" data-act="up" data-tip="向上一级" data-key="Alt+↑">${g('E74A')}</button>
+        <div class="addr" id="addr"></div><button class="navb">${g('E72C')}</button><div class="search">${g('E721')}<span id="sph"></span></div></div>
+      <div class="toolbar" id="toolbar"><div class="newbtn"><span>${g('E710')}新建</span><span>${g('E70D')}</span></div><div class="tools" id="tools"></div><button class="morebtn" id="moreBtn" data-act="more" data-tip="更多">${g('E712')}</button></div>
+      <div class="paneWrap"><section class="pane" id="pane">
+        <header class="ph"><span class="pbar"></span><span class="pt" id="pt"></span><span class="pp" id="pp"></span><div class="vsw" id="vsw"></div></header>
+        <div class="ch"><span>名称 <i class="ic" style="font-size:8px">&#xE70E;</i></span><span>修改日期</span><span class="r">大小</span></div>
+        <div class="upbar" id="upbar"></div>
+        <div class="rows" id="rows"></div>
+      </section></div>
+    </div>
+  </div>
+  <div class="status" id="status"></div>
+  <div class="hist" id="hist" hidden></div>
+  <div class="menu" id="menu" hidden></div>
+  <div class="snack" id="snack" hidden></div>
+  <div class="tip" id="tip"></div>`;
+}
+function renderTabs() {
+  $('#tabs').innerHTML = S.tabs.map((t, i) => `<div class="tab${i === S.tab ? ' on' : ''}" data-tab="${i}" data-path="${esc(t.path)}"><svg width="14" height="14" style="color:var(--folder)"><use href="#i-folder"/></svg><span>${esc(nameOf(t.path))}</span>${g('E8BB')}</div>`).join('') + `<button class="tb-ic">${g('E710')}</button>`;
+}
+function renderSidebar() {
+  const q = [['C:\\桌面', 'E7F4', '桌面'], ['C:\\下载', 'E896', '下载'], ['P:\\照片', 'EB9F', '照片'], ['P:\\备份', 'E8B7', '备份']];
+  $('#sidebar').innerHTML = `<div class="sb-h">${g('E734')}星标项目</div><div class="sb-h">${g('E80F')}快速访问</div>` +
+    q.map(([p, c, n]) => `<div class="sb-i${cur() === p ? ' on' : ''}" data-path="${esc(p)}">${g(c)}${n}</div>`).join('') +
+    `<div class="sb-i" data-recycle="1">${g('E74D')}回收站<small>${RECYCLE} 项</small></div><div class="sb-h">${g('E7F8')}此电脑</div>` +
+    [['C:', 'Win11 (C:)', '113G / 477G'], ['P:', '新加卷 (P:)', '3.5T / 3.6T']].map(([p, n, s]) => `<div class="sb-i${cur() === p ? ' on' : ''}" data-path="${p}">${g('EDA2')}${n}<small>${s}</small></div>`).join('');
+}
+function renderAddr() {
+  const cs = crumbsOf(cur());
+  $('#addr').innerHTML = cs.map((p, i) => `${i ? '<span class="cs">&#xE76C;</span>' : ''}<span class="crumb${i === cs.length - 1 ? ' cur' : ''}" data-path="${esc(p)}">${esc(nameOf(p))}</span>`).join('');
+  $('#sph').textContent = '搜索' + nameOf(cur());
+  $('#pt').textContent = nameOf(cur());
+  $('#pp').textContent = crumbsOf(cur()).slice(1, -1).map(nameOf).join(' › ');
+  const par = parentOf(cur());
+  $('#upbar').className = 'upbar' + (par && par !== 'PC' ? ' has' : '');
+  $('#upbar').dataset.path = par || '';
+  $('#upbar').innerHTML = par && par !== 'PC' ? `${g('E74A')}放到上一级 <b>${esc(nameOf(par))}</b><small>停一下打开它</small>` : '';
+  $('#upBtn').setAttribute('aria-disabled', String(!par));
+}
+function folderCount(p) { return FS[p] ? FS[p].items.length : 0; }
+function sortItems(items) { return items.slice().sort((a, b) => (a.t === 'folder' || a.t === 'drive' ? 0 : 1) - (b.t === 'folder' || b.t === 'drive' ? 0 : 1) || a.n.localeCompare(b.n, 'zh')); }
+function renderRows() {
+  const items = sortItems(FS[cur()] ? FS[cur()].items : []);
+  const peek = S.peek && S.peek.path === cur() ? new Set(S.peek.names) : null;
+  const grid = view() !== 'details';
+  $('#rows').className = 'rows' + (grid ? ' grid isz-' + (view() === 'large' ? 'l' : 'm') : '');
+  $('#pane').classList.toggle('isgrid', grid);
+  $('#rows').innerHTML = items.length ? items.map(it => {
+    const isDir = it.t === 'folder' || it.t === 'drive';
+    const full = it.t === 'drive' ? it.link : join(cur(), it.n);
+    const size = it.t === 'folder' ? `${folderCount(full)} 项` : it.s;
+    const cls = ['row', S.sel.has(it.n) ? 'sel' : '', S.clip && S.clip.cut && S.clip.path === cur() && S.clip.names.includes(it.n) ? 'cut' : '', peek && peek.has(it.n) ? 'peek' : '', S.flashIds && S.flashIds.has(it.id) ? 'flash' : ''].join(' ');
+    const name = S.editing === it.n ? `<input id="renameBox" value="${esc(it.n)}" spellcheck="false">` : `<span class="nm">${esc(it.n)}</span>`;
+    return `<div class="${cls}" data-n="${esc(it.n)}" data-id="${it.id}" ${isDir ? `data-dir="${esc(full)}"` : ''} ${grid ? `title="${esc(it.n)} · ${size}"` : ''}><div class="n"><span class="ico">${grid ? bigIcon(it) : icon(it)}</span>${name}</div><div class="d">${it.d ? '2026-' + it.d : ''}</div><div class="s r">${size}</div></div>`;
+  }).join('') : '<div class="empty">这个文件夹是空的 · 把文件拖到这里</div>';
+  S.flashIds = null;
+  const box = $('#renameBox');
+  if (box) { box.focus(); const dot = box.value.lastIndexOf('.'); box.setSelectionRange(0, dot > 0 ? dot : box.value.length); }
+}
+function renderTools(flip) {
+  const before = flip ? Object.fromEntries($$('#tools .tool').map(el => [el.dataset.tool, el.getBoundingClientRect().left])) : null;
+  const T = S.tdrag;
+  const order = T && T.moved ? ORDER.filter(id => id !== T.id) : ORDER.slice();
+  if (T && T.moved && T.index >= 0 && !T.out) order.splice(T.index, 0, '__ph');
+  $('#tools').classList.toggle('dragging', !!(T && T.moved));
+  $('#tools').innerHTML = order.map(id => {
+    if (id === '__ph') return `<div class="tool ph" data-tool="__ph" style="width:${T.w}px"></div>`;
+    if (id === 'grow') return `<div class="tool grow" data-tool="grow"></div>`;
+    if (id.startsWith('sep')) return `<div class="tool sep" data-tool="${id}" title="分隔线，也能拖"></div>`;
+    const t = TOOL[id];
+    return `<button class="tool" data-tool="${id}" data-tip="${t.t}" data-key="${t.k || ''}">${g(t.g)}${t.label ? t.t + (id === 'sort' ? ' <i class="ic" style="font-size:8px">&#xE70D;</i>' : '') : ''}</button>`;
+  }).join('');
+  if (before && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    $$('#tools .tool').forEach(el => { const b = before[el.dataset.tool]; if (b === undefined) return; const dx = b - el.getBoundingClientRect().left; if (Math.abs(dx) > 1) el.animate([{ transform: `translateX(${dx / k()}px)` }, { transform: 'none' }], { duration: 180, easing: 'cubic-bezier(.2,.8,.2,1)' }); });
+  }
+}
+function renderStatus() {
+  const items = FS[cur()] ? FS[cur()].items : [];
+  const top = [...S.hist].reverse().find(e => e.supported);
+  const next = S.redo[S.redo.length - 1];
+  const open = !$('#hist').hidden;
+  $('#status').innerHTML = `<span class="ai"><span class="spark">✦</span><b>AI</b></span><span>${items.length} 个项目</span>${S.sel.size ? `<span>已选中 ${S.sel.size} 项</span>` : ''}
+    <span class="undo${open ? ' open' : ''}" id="undoChip">
+      <button data-act="undo" ${top ? '' : 'disabled'} data-tip="${top ? '撤销：' + esc(top.label) : '没有可撤销的操作'}" data-key="Ctrl+Z">${g('E7A7')}</button><span class="div"></span>
+      <button class="lbl" data-act="hist" data-tip="操作记录：回看、撤销到某一步、重做">${top ? '撤销 ' + esc(top.label) : '操作记录'} <i class="ic">&#xE70E;</i></button>
+      ${S.redo.length ? `<span class="div"></span><button data-act="redo" data-tip="重做：${esc(next.label)}" data-key="Ctrl+Y">${g('E7A6')}</button>` : ''}
+    </span><span class="fill"></span><span>空格 快速预览 · 拖到文件夹上停一下可以进入</span>`;
+}
+function bumpUndo() { renderStatus(); const c = $('#undoChip'); if (c) { c.classList.remove('bump'); void c.offsetWidth; c.classList.add('bump'); } if (!$('#hist').hidden) renderHist(); }
+function render() { renderTabs(); renderSidebar(); renderAddr(); renderRows(); renderVsw(); renderTools(); renderStatus(); }
+
+/* ---------- history flyout ---------- */
+function renderHist() {
+  const h = $('#hist');
+  const done = [...S.hist].reverse(), undone = S.redo.slice();
+  const canUndo = S.hist.filter(e => e.supported).length;
+  const row = (e, isUndone) => {
+    const p = e.peek(); const here = p.path === cur();
+    const acts = !e.supported ? `<span class="lnk" style="display:inline-flex;color:var(--text3)">${g('E72E')}无法撤销</span>`
+      : isUndone ? `<button class="lnk" data-act="redoto" data-e="${S.redo.indexOf(e)}">${g('E7A6')}重做到这里</button>`
+      : `<button class="lnk" data-act="undoto" data-e="${S.hist.indexOf(e)}">${g('E7A7')}撤销到这里</button>`;
+    const loc = !here && p.path && FS[p.path] ? `<button class="lnk" data-act="locate" data-path="${esc(p.path)}" data-e="${isUndone ? 'r' : 'h'}${isUndone ? S.redo.indexOf(e) : S.hist.indexOf(e)}">${g('E8B7')}定位</button>` : '';
+    return `<div class="hrow${isUndone ? ' undone' : ''}${!e.supported ? ' locked' : ''}" data-hk="${isUndone ? 'r' : 'h'}${isUndone ? S.redo.indexOf(e) : S.hist.indexOf(e)}">
+      <span class="hic">${g(e.icon)}</span><div class="t">${esc(e.label)}</div>
+      <div class="m"><span>${esc(e.detail)}</span>${e.note ? `<span style="color:var(--text3)">· ${e.note}</span>` : ''}</div>
+      <span class="ha"><span class="tm">${e.time}</span>${loc}${acts}</span></div>`;
+  };
+  h.innerHTML = `<div class="hh"><b>操作记录</b><small>可撤销 ${canUndo} 步${undone.length ? ` · 可重做 ${undone.length} 步` : ''}</small></div>
+    ${undone.length ? `<div class="hsec">已撤销 · 可以重做</div>${undone.map(e => row(e, true)).join('')}` : ''}
+    <div class="hnow">现在</div>
+    ${done.map(e => row(e, false)).join('') || '<div class="hsec">还没有操作</div>'}
+    <div class="hfoot"><span>悬停回看动了哪些文件 · 撤销到某一步会连同它之后的一起撤</span><span><kbd>Ctrl+Z</kbd> <kbd>Ctrl+Y</kbd></span></div>`;
+  const chip = $('#undoChip');
+  const r = rel(chip);
+  h.hidden = false;
+  h.style.left = Math.max(8, Math.min(1180 - 448, r.l - 20)) + 'px';
+  h.style.top = (r.t - h.offsetHeight - 8) + 'px';
+}
+function setPeek(key) {
+  $$('#hist .hrow').forEach(x => x.classList.remove('inrange'));
+  if (!key) { S.peek = null; renderRows(); return; }
+  const isR = key[0] === 'r', i = +key.slice(1);
+  const e = isR ? S.redo[i] : S.hist[i]; if (!e) return;
+  // The rows that "撤销到这里" would sweep: this one and every newer supported step.
+  $$('#hist .hrow').forEach(x => {
+    const k2 = x.dataset.hk, j = +k2.slice(1);
+    if (!isR && k2[0] === 'h' && j >= i && S.hist[j].supported) x.classList.add('inrange');
+    if (isR && k2[0] === 'r' && j >= i) x.classList.add('inrange');
+  });
+  S.peek = e.peek(); renderRows();
+}
+
+/* ---------- actions ---------- */
+function snapshotIds() { return new Set((FS[cur()] ? FS[cur()].items : []).map(x => x.id)); }
+function afterChange(before) {
+  const now = FS[cur()] ? FS[cur()].items : [];
+  const nowIds = new Set(now.map(x => x.id));
+  const gone = [...before].filter(id => !nowIds.has(id));
+  S.flashIds = new Set(now.filter(x => !before.has(x.id)).map(x => x.id));
+  S.sel = new Set([...S.sel].filter(n => now.some(x => x.n === n)));
+  const finish = () => { renderRows(); renderSidebar(); renderStatus(); if (!$('#hist').hidden) renderHist(); };
+  if (gone.length && !matchMedia('(prefers-reduced-motion: reduce)').matches) { gone.forEach(id => { const el = $(`.row[data-id="${id}"]`); if (el) el.classList.add('gone'); }); setTimeout(finish, 190); }
+  else finish();
+}
+function navigate(path, keepBack) {
+  if (!FS[path] || path === cur()) return;
+  if (!keepBack) TAB().back.push(cur());
+  TAB().path = path; S.sel.clear(); S.anchor = null; S.editing = null;
+  render();
+  $('#rows').animate([{ opacity: .4, transform: 'translateX(10px)' }, { opacity: 1, transform: 'none' }], { duration: 180, easing: 'ease-out' });
+}
+function doTransfer(names, from, to, copy) {
+  if (!names.length || from === to) return;
+  const before = snapshotIds();
+  const e = opMove(names, from, to, copy); if (!e) return;
+  commit(e);
+  S.sel.clear();
+  afterChange(before);
+  snack(`已${copy ? '复制' : '移动'} ${names.length} 项到「${esc(nameOf(to))}」${e.note ? '，' + e.note : ''}`, ['撤销', 'undo'], copy ? 'E8C8' : 'E8DE', to !== cur() ? ['定位', 'locate:' + to, e.names] : null);
+}
+function snack(text, action, icon = 'E946', action2) {
+  const el = $('#snack');
+  el.innerHTML = `${g(icon)}<span>${text}</span>${action2 ? `<button data-act="${action2[1].split(':')[0]}" data-path="${esc(action2[1].slice(7))}">${action2[0]}</button>` : ''}${action ? `<button data-act="${action[1]}">${action[0]}</button>` : ''}<button class="x" data-act="snackx">&#xE711;</button>`;
+  S.snackNames = action2 ? action2[2] : null;
+  el.hidden = false; el.style.animation = 'none'; void el.offsetWidth; el.style.animation = '';
+  clearTimeout(S.snackT); S.snackT = setTimeout(() => { el.hidden = true; }, 4500);
+}
+function startRename() {
+  const n = [...S.sel][0]; if (!n) return;
+  S.editing = n; renderRows();
+}
+function endRename(commitIt) {
+  const box = $('#renameBox'); const a = S.editing; if (!a) return;
+  const b = box ? box.value.trim() : a; S.editing = null;
+  if (commitIt && b && b !== a) {
+    if (FS[cur()].items.some(x => x.n === b)) { renderRows(); snack(`已有同名项目「${esc(b)}」`, null, 'E7BA'); return; }
+    const before = snapshotIds(); commit(opRename(cur(), a, b)); S.sel = new Set([b]); afterChange(before);
+    const el = $(`.row[data-n="${CSS.escape(b)}"]`); if (el) el.classList.add('flash');
+    snack(`已重命名为「${esc(b)}」`, ['撤销', 'undo'], 'E8AC');
+  } else renderRows();
+}
+function del() {
+  const names = [...S.sel]; if (!names.length) return;
+  const before = snapshotIds(); const e = opRecycle(names, cur()); if (!e) return;
+  commit(e); S.sel.clear(); afterChange(before);
+  snack(`已删除 ${names.length} 项到回收站`, ['撤销', 'undo'], 'E74D');
+}
+function newFolder() {
+  const before = snapshotIds(); const e = commit(opCreate(cur(), '新建文件夹'));
+  S.sel = new Set(e.names); afterChange(before); setTimeout(startRename, 220);
+}
+function clip(cut) { const names = [...S.sel]; if (!names.length) return; S.clip = { cut, path: cur(), names }; renderRows(); snack(`已${cut ? '剪切' : '复制'} ${names.length} 项，到目标文件夹按 Ctrl+V`, null, cut ? 'E8C6' : 'E8C8'); }
+function paste() {
+  if (!S.clip) { snack('剪贴板里没有文件', null, 'E77F'); return; }
+  const { cut, path, names } = S.clip;
+  if (cut && path === cur()) { snack('已经在这个文件夹里了', null, 'E946'); return; }
+  doTransfer(names.filter(n => FS[path].items.some(x => x.n === n)), path, cur(), !cut);
+  if (cut) S.clip = null;
+}
+function act(a, el) {
+  const [cmd] = a.split(':');
+  switch (cmd) {
+    case 'undo': $('#snack').hidden = true; undoSteps(null); break;
+    case 'redo': $('#snack').hidden = true; redoSteps(null); break;
+    case 'hist': if ($('#hist').hidden) { renderHist(); renderStatus(); } else closeHist(); break;
+    case 'undoto': { const e = S.hist[+el.dataset.e]; setPeek(null); undoSteps(e); break; }
+    case 'redoto': { const e = S.redo[+el.dataset.e]; setPeek(null); redoSteps(e); break; }
+    case 'locate': {
+      const p = el.dataset.path; const key = el.dataset.e;
+      let names = S.snackNames || [];
+      if (key) { const e = key[0] === 'r' ? S.redo[+key.slice(1)] : S.hist[+key.slice(1)]; if (e) names = e.peek().names; }
+      closeHist(); $('#snack').hidden = true; navigate(p);
+      S.sel = new Set(names.filter(n => FS[p].items.some(x => x.n === n))); renderRows(); renderStatus();
+      $$('.row.sel').forEach(r => r.classList.add('flash'));
+      break;
+    }
+    case 'back': { const b = TAB().back.pop(); if (b) navigate(b, true); break; }
+    case 'up': { const p = parentOf(cur()); if (p) navigate(p); break; }
+    case 'more': openMore(); break;
+    case 'theme': S.theme = S.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = S.theme; renderControls(); break;
+    case 'snackx': $('#snack').hidden = true; break;
+    case 'tool': runTool(el.dataset.id); break;
+  }
+}
+function runTool(id) {
+  ({ cut: () => clip(true), copy: () => clip(false), paste, rename: startRename, delete: del, selall: () => { S.sel = new Set(FS[cur()].items.map(x => x.n)); renderRows(); renderStatus(); }, undoT: () => undoSteps(null),
+    sort: () => snack('排序：名称 ↑', null, 'E8CB'), filter: () => snack('筛选', null, 'E71C'), split: () => snack('分屏布局', null, 'E89F'), details: () => snack('详细信息面板', null, 'E8A0'), columns: () => snack('分栏视图', null, 'E8A9'),
+    term: () => snack('在此处打开终端', null, 'E756'), props: () => snack('属性', null, 'E946'), path: () => snack('已复制路径 ' + esc(cur()), null, 'E71B') }[id] || (() => {}))();
+}
+function closeHist() { $('#hist').hidden = true; S.peek = null; renderRows(); renderStatus(); }
+function openMore() {
+  const m = $('#menu');
+  if (!m.hidden) { m.hidden = true; return; }
+  m.innerHTML = `<div class="mh">按住拖到工具栏上就能固定</div>` + HIDDEN.map(id => `<div class="mi" data-hidden="${id}" data-act="tool" data-id="${id}">${g(TOOL[id].g)}<span class="lbl">${TOOL[id].t}</span><span class="grip">&#xE76F;</span></div>`).join('') +
+    `<div class="msep"></div><div class="mi">${g('E70F')}<span class="lbl">自定义工具栏…</span></div>`;
+  m.hidden = false;
+  const r = rel($('#moreBtn'));
+  m.style.left = (r.l + r.w - m.offsetWidth) + 'px'; m.style.top = (r.t + r.h + 4) + 'px';
+}
+
+/* ---------- geometry ---------- */
+const k = () => S.scale || 1;
+function rel(el) { const w = $('#win').getBoundingClientRect(), r = el.getBoundingClientRect(); return { l: (r.left - w.left) / k(), t: (r.top - w.top) / k(), w: r.width / k(), h: r.height / k() }; }
+function winPt(x, y) { const w = $('#win').getBoundingClientRect(); return { x: (x - w.left) / k(), y: (y - w.top) / k() }; }
+let tipT = 0;
+function showTip(el) {
+  const tip = $('#tip'); if (!el.dataset.tip) return;
+  tip.innerHTML = `<span>${esc(el.dataset.tip)}</span>${el.dataset.key ? `<kbd>${esc(el.dataset.key)}</kbd>` : ''}`;
+  tip.classList.add('on');
+  const r = rel(el), tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = Math.max(6, Math.min(1180 - tw - 6, r.l + r.w / 2 - tw / 2)) + 'px';
+  tip.style.top = (r.t > 300 ? r.t - th - 6 : r.t + r.h + 6) + 'px';
+}
+
+/* ---------- file drag ---------- */
+let FD = null;       // file drag
+let TD = null;       // toolbar drag
+function dropInfo(target, ctrl, shift) {
+  const from = FD.from;
+  const to = target.path;
+  const cross = to.slice(0, 2) !== from.slice(0, 2);
+  const copy = ctrl || (!shift && cross);
+  const blocked = to === from ? `已在「${nameOf(from)}」中` : FD.names.some(n => within(to, join(from, n))) ? '不能放进它自己里面' : to === 'PC' ? '这里不能放文件' : '';
+  return { to, copy, blocked, label: `${copy ? '复制' : '移动'}到「${nameOf(to)}」`, hint: blocked ? '' : copy ? (cross ? '跨磁盘默认复制 · Shift 移动' : '') : 'Ctrl 复制' };
+}
+// What is under the pointer while dragging files.
+function fileTarget(x, y) {
+  const el = document.elementFromPoint(x, y); if (!el) return null;
+  const row = el.closest('.row[data-dir]'); if (row) return { el: row, path: row.dataset.dir, spring: true };
+  const up = el.closest('#upbar.has'); if (up) return { el: up, path: up.dataset.path, spring: true };
+  const ub = el.closest('#upBtn'); if (ub && parentOf(cur())) return { el: ub, path: parentOf(cur()), spring: true };
+  const cr = el.closest('.crumb'); if (cr) return { el: cr, path: cr.dataset.path };
+  const sb = el.closest('.sb-i[data-path]'); if (sb) return { el: sb, path: sb.dataset.path, spring: true };
+  const tb = el.closest('.tab[data-tab]'); if (tb) return { el: tb, path: tb.dataset.path, tab: +tb.dataset.tab, spring: +tb.dataset.tab !== S.tab };
+  if (el.closest('#rows') || el.closest('#pane')) return { el: null, path: cur() };
+  return null;
+}
+function ghostHTML() {
+  const its = FD.names.slice(0, 3).map(n => FS[FD.from].items.find(x => x.n === n)).filter(Boolean);
+  return `<div class="gcards">${its.map((it, i) => `<div class="gcard" style="transform:translate(${i * 5}px, ${i * 5}px);z-index:${3 - i}">${icon(it)}<span>${esc(it.n)}</span></div>`).reverse().join('')}${FD.names.length > 1 ? `<span class="gcount">${FD.names.length}</span>` : ''}</div><div class="gbadge" id="gbadge"></div>`;
+}
+function updateFileDrag(x, y, ctrl, shift) {
+  const p = winPt(x, y);
+  FD.ghost.style.left = p.x + 14 + 'px'; FD.ghost.style.top = p.y + 12 + 'px';
+  $$('.drop').forEach(e => e.classList.remove('drop'));
+  const t = fileTarget(x, y);
+  const badge = $('#gbadge');
+  if (!t) { badge.className = 'gbadge no'; badge.innerHTML = `${g('E711')}松手取消`; FD.target = null; FD.springKey = null; $$('.ring').forEach(e => e.remove()); return; }
+  const info = dropInfo(t, ctrl, shift);
+  FD.target = info.blocked ? null : info;
+  if (info.blocked) { badge.className = 'gbadge no'; badge.innerHTML = `${g('E7BA')}${esc(info.blocked)}`; }
+  else { badge.className = 'gbadge'; badge.innerHTML = `${g(info.copy ? 'E8C8' : 'E8DE')}${esc(info.label)}${info.hint ? `<small>${info.hint}</small>` : ''}`; }
+  if (t.el && !info.blocked) t.el.classList.add('drop');
+  // Spring-loaded: resting on a folder (row, 上一级, ↑, sidebar, tab) opens it.
+  const key = t.spring && !info.blocked ? (t.tab !== undefined ? 'tab' + t.tab : t.path) : null;
+  if (key !== FD.springKey) {
+    FD.springKey = key; FD.springAt = performance.now(); FD.springEl = key ? t.el : null;
+    $$('.ring').forEach(e => e.remove()); $$('.springing').forEach(e => { e.classList.remove('springing'); e.style.removeProperty('--p'); });
+    if (key) { const host = t.el.querySelector('.ico'); if (host) host.insertAdjacentHTML('beforeend', ringSVG(host.offsetWidth || 16)); else t.el.classList.add('springing'); }
+  }
+}
+// A timer rather than animation frames: the spring must fire even while the pointer rests.
+let springTimer = 0;
+function springTick() {
+  if (!FD) { clearInterval(springTimer); springTimer = 0; return; }
+  if (FD.springKey) {
+    const p = FD.freeze || Math.min(1, (performance.now() - FD.springAt) / SPRING_MS);
+    $$('.ring').forEach(r => { r.style.setProperty('--p', p); r.classList.toggle('zero', p <= 0); });
+    if (FD.springEl) FD.springEl.style.setProperty('--p', p);
+    if (p >= 1) {
+      const key = FD.springKey; FD.springKey = null;
+      if (key.startsWith('tab')) { S.tab = +key.slice(3); render(); }
+      else navigate(key);
+      $('#pane').classList.add('dragging');
+      $$('.crumb:not(.cur)').forEach(c => c.classList.add('hint'));
+      updateFileDrag(FD.lx, FD.ly, FD.ctrl, FD.shift);
+    }
+  }
+}
+function startFileDrag() {
+  FD.moved = true;
+  $$('.row').forEach(r => { if (FD.names.includes(r.dataset.n)) r.classList.add('lifted'); });
+  const gh = document.createElement('div'); gh.className = 'ghost'; FD.ghost = gh; gh.innerHTML = ghostHTML(); $('#win').appendChild(gh);
+  $('#pane').classList.add('dragging');
+  $$('.crumb:not(.cur)').forEach(c => c.classList.add('hint'));
+  clearInterval(springTimer); springTimer = setInterval(springTick, 40);
+}
+function endFileDrag(drop) {
+  const d = FD; FD = null;
+  $$('.drop').forEach(e => e.classList.remove('drop')); $$('.ring').forEach(e => e.remove()); $$('.crumb.hint').forEach(c => c.classList.remove('hint')); $$('.springing').forEach(e => e.classList.remove('springing'));
+  $('#pane').classList.remove('dragging');
+  if (!d || !d.moved) return;
+  if (drop && d.target) { d.ghost.remove(); doTransfer(d.names, d.from, d.target.to, d.target.copy); return; }
+  // Cancelled: the ghost goes back to where the drag began.
+  const a = d.ghost.animate([{ transform: 'none', opacity: 1 }, { transform: `translate(${d.sx - parseFloat(d.ghost.style.left)}px, ${d.sy - parseFloat(d.ghost.style.top)}px)`, opacity: 0 }], { duration: 220, easing: 'ease-in' });
+  a.onfinish = () => d.ghost.remove(); setTimeout(() => d.ghost.remove(), 260);
+  $$('.row.lifted').forEach(r => r.classList.remove('lifted'));
+  if (d.from !== cur()) snack(`已取消，文件还在「${esc(nameOf(d.from))}」`, null, 'E711', ['回去', 'locate:' + d.from, d.names]);
+}
+
+/* ---------- toolbar drag ---------- */
+// Index into the order without the dragged tool (what is drawn, minus the placeholder).
+function toolIndexAt(x) {
+  const els = $$('#tools .tool').filter(e => e.dataset.tool !== '__ph');
+  for (let i = 0; i < els.length; i++) { const r = els[i].getBoundingClientRect(); if (x < r.left + r.width / 2) return i; }
+  return els.length;
+}
+function updateToolDrag(x, y) {
+  const p = winPt(x, y);
+  TD.float.style.left = p.x - TD.grab + 'px'; TD.float.style.top = p.y - 15 + 'px';
+  const tb = $('#toolbar').getBoundingClientRect(), more = $('#moreBtn').getBoundingClientRect();
+  const overMore = x >= more.left - 4 && x <= more.right + 4 && y >= more.top - 6 && y <= more.bottom + 6;
+  const out = overMore || y > tb.bottom + 26 * k() || y < tb.top - 30 * k();
+  $('#moreBtn').classList.toggle('drop', overMore);
+  $('#toolbar').classList.toggle('remove', out && TD.fromOrder);
+  TD.float.classList.toggle('out', out && TD.fromOrder);
+  TD.float.querySelector('.why').textContent = out ? (TD.fromOrder ? '松手收进「更多」' : '松手放回「更多」') : TD.fromOrder ? '松手放在这里' : '松手固定到工具栏';
+  const idx = out ? -1 : toolIndexAt(x);
+  if (idx !== TD.index || out !== TD.out) { TD.index = idx; TD.out = out; renderTools(true); }
+}
+function startToolDrag() {
+  TD.moved = true;
+  const t = TOOL[TD.id] || { g: '', t: '分隔线' };
+  const fl = document.createElement('div'); fl.className = 'tfloat';
+  fl.innerHTML = TD.id.startsWith('sep') ? `<span style="width:1px;height:18px;background:var(--text3)"></span><span style="font-size:12px;color:var(--text2)">分隔线</span><span class="why"></span>` : `${g(t.g)}${t.label ? t.t : ''}<span class="why"></span>`;
+  $('#win').appendChild(fl); TD.float = fl;
+  S.tdrag = TD; $('#menu').hidden = true;
+  renderTools(true);
+}
+function endToolDrag(commitIt) {
+  const d = TD; TD = null; S.tdrag = null;
+  $('#toolbar').classList.remove('remove'); $('#moreBtn').classList.remove('drop');
+  if (!d.moved) { renderTools(); if (d.fromMenu) $('#menu').hidden = true; if (d.click) runTool(d.id); return; }
+  d.float.remove();
+  if (commitIt) {
+    const was = ORDER.slice(), wasH = HIDDEN.slice();
+    if (d.out) { if (d.fromOrder) { ORDER = ORDER.filter(x => x !== d.id); if (!d.id.startsWith('sep')) HIDDEN.unshift(d.id); } }
+    else { ORDER = ORDER.filter(x => x !== d.id); ORDER.splice(Math.max(0, d.index), 0, d.id); HIDDEN = HIDDEN.filter(x => x !== d.id); }
+    const changed = was.join() !== ORDER.join();
+    S.tdrag = null; renderTools(true);
+    const name = (TOOL[d.id] || { t: '分隔线' }).t;
+    if (changed) {
+      S.toolUndo = { order: was, hidden: wasH };
+      snack(d.out && d.fromOrder ? `「${name}」已收进「更多」` : d.fromOrder ? `已把「${name}」挪到新位置` : `「${name}」已固定到工具栏`, ['还原', 'toolundo'], d.out ? 'E712' : 'E76F');
+    }
+  } else renderTools(true);
+}
+
+/* ---------- events ---------- */
+document.addEventListener('pointerdown', e => {
+  if (e.button !== 0) return;
+  const win = e.target.closest('#win'); if (!win) return;
+  if (S.editing && !e.target.closest('#renameBox')) endRename(true);
+  if (!e.target.closest('#hist') && !e.target.closest('#undoChip') && !$('#hist').hidden) closeHist();
+  if (!e.target.closest('#menu') && !e.target.closest('#moreBtn')) $('#menu').hidden = true;
+  if (!e.target.closest('input')) win.focus({ preventScroll: true });
+  const tool = e.target.closest('#tools .tool');
+  if (tool && !tool.classList.contains('grow')) { const r = tool.getBoundingClientRect(); TD = { id: tool.dataset.tool, x0: e.clientX, y0: e.clientY, w: r.width / k(), grab: (e.clientX - r.left) / k(), fromOrder: true, index: ORDER.indexOf(tool.dataset.tool), click: !tool.dataset.tool.startsWith('sep') }; return; }
+  const hid = e.target.closest('#menu [data-hidden]');
+  if (hid) { TD = { id: hid.dataset.hidden, x0: e.clientX, y0: e.clientY, w: 34, grab: 16, fromOrder: false, index: -1, click: true, fromMenu: true }; return; }
+  const row = e.target.closest('.row');
+  if (row && !e.target.closest('input')) {
+    const n = row.dataset.n, items = sortItems(FS[cur()].items).map(x => x.n);
+    if (e.ctrlKey) { S.sel.has(n) ? S.sel.delete(n) : S.sel.add(n); S.anchor = n; }
+    else if (e.shiftKey && S.anchor) { const a = items.indexOf(S.anchor), b = items.indexOf(n); S.sel = new Set(items.slice(Math.min(a, b), Math.max(a, b) + 1)); }
+    else if (!S.sel.has(n)) { S.sel = new Set([n]); S.anchor = n; }
+    renderRows(); renderStatus();
+    if (cur() === 'PC') return;
+    FD = { names: [...S.sel], from: cur(), x0: e.clientX, y0: e.clientY, moved: false, sx: winPt(e.clientX, e.clientY).x, sy: winPt(e.clientX, e.clientY).y, lx: e.clientX, ly: e.clientY, single: n };
+    return;
+  }
+  if (e.target.closest('#rows') && !row) { S.sel.clear(); renderRows(); renderStatus(); }
+});
+document.addEventListener('pointermove', e => {
+  if (FD) {
+    FD.lx = e.clientX; FD.ly = e.clientY; FD.ctrl = e.ctrlKey; FD.shift = e.shiftKey;
+    if (!FD.moved) { if (Math.hypot(e.clientX - FD.x0, e.clientY - FD.y0) < 5) return; startFileDrag(); }
+    updateFileDrag(e.clientX, e.clientY, e.ctrlKey, e.shiftKey); return;
+  }
+  if (TD) {
+    if (!TD.moved) { if (Math.hypot(e.clientX - TD.x0, e.clientY - TD.y0) < 6) return; startToolDrag(); }
+    updateToolDrag(e.clientX, e.clientY);
+  }
+});
+document.addEventListener('pointerup', e => {
+  if (FD) { if (!FD.moved && !e.ctrlKey && !e.shiftKey && S.sel.size > 1) { S.sel = new Set([FD.single]); renderRows(); renderStatus(); } endFileDrag(true); return; }
+  if (TD) endToolDrag(true);
+});
+document.addEventListener('click', e => {
+  const c = e.target.closest('[data-ctl]'); if (c) { S[c.dataset.ctl] = c.dataset.v; document.documentElement.dataset.theme = S.theme; renderControls(); return; }
+  const dm = e.target.closest('[data-demo]'); if (dm) { runDemo(+dm.dataset.demo); return; }
+  if (e.target.closest('#tools .tool') || e.target.closest('#menu [data-hidden]')) return;
+  const cr = e.target.closest('.crumb'); if (cr && !cr.classList.contains('cur')) { navigate(cr.dataset.path); return; }
+  const sb = e.target.closest('.sb-i[data-path]'); if (sb) { navigate(sb.dataset.path); return; }
+  const tb = e.target.closest('.tab[data-tab]'); if (tb) { S.tab = +tb.dataset.tab; S.sel.clear(); render(); return; }
+  const vb = e.target.closest('[data-view]'); if (vb) { setView(vb.dataset.view); return; }
+  const t = e.target.closest('[data-act]');
+  if (t && !t.disabled) {
+    if (t.dataset.act === 'toolundo') { ORDER = S.toolUndo.order; HIDDEN = S.toolUndo.hidden; renderTools(true); $('#snack').hidden = true; return; }
+    act(t.dataset.act, t);
+  }
+});
+document.addEventListener('dblclick', e => {
+  const row = e.target.closest('.row'); if (!row || e.target.closest('input')) return;
+  if (row.dataset.dir) navigate(row.dataset.dir); else snack(`打开 ${esc(row.dataset.n)}`, null, 'E8E5');
+});
+document.addEventListener('mouseover', e => {
+  const tipEl = e.target.closest('#win [data-tip]');
+  if (tipEl && !tipEl.contains(e.relatedTarget) && !FD && !TD) { clearTimeout(tipT); tipT = setTimeout(() => showTip(tipEl), $('#tip').classList.contains('on') ? 0 : 420); }
+  const hr = e.target.closest('#hist .hrow');
+  if (hr && !hr.contains(e.relatedTarget)) setPeek(hr.dataset.hk);
+});
+document.addEventListener('mouseout', e => {
+  const tipEl = e.target.closest('#win [data-tip]');
+  if (tipEl && !tipEl.contains(e.relatedTarget)) { clearTimeout(tipT); $('#tip').classList.remove('on'); }
+  const hr = e.target.closest('#hist .hrow');
+  if (hr && !(e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest('#hist .hrow'))) setPeek(null);
+});
+document.addEventListener('keydown', e => {
+  if (S.editing) { if (e.key === 'Enter') { e.preventDefault(); endRename(true); } else if (e.key === 'Escape') { e.preventDefault(); S.editing = null; renderRows(); } return; }
+  if (FD && e.key === 'Escape') { endFileDrag(false); return; }
+  if (TD && e.key === 'Escape') { endToolDrag(false); return; }
+  if (FD && (e.key === 'Control' || e.key === 'Shift')) { updateFileDrag(FD.lx, FD.ly, e.ctrlKey, e.shiftKey); return; }
+  if (!document.activeElement || !document.activeElement.closest || !document.activeElement.closest('#win')) return;
+  const ctrl = e.ctrlKey || e.metaKey, key = e.key.toLowerCase();
+  if (e.key === 'Escape') { if (!$('#hist').hidden) closeHist(); else if (!$('#menu').hidden) $('#menu').hidden = true; else { S.sel.clear(); renderRows(); renderStatus(); } return; }
+  if (ctrl && !e.shiftKey && key === 'z') { e.preventDefault(); undoSteps(null); return; }
+  if (ctrl && (key === 'y' || (e.shiftKey && key === 'z'))) { e.preventDefault(); redoSteps(null); return; }
+  if (ctrl && e.shiftKey && key === 'n') { e.preventDefault(); newFolder(); return; }
+  if (ctrl && e.shiftKey && ({ Digit2: 1, Digit3: 1, Digit6: 1 })[e.code]) { e.preventDefault(); setView({ Digit2: 'large', Digit3: 'medium', Digit6: 'details' }[e.code]); return; }
+  if (ctrl && key === 'x') { e.preventDefault(); clip(true); return; }
+  if (ctrl && key === 'c') { e.preventDefault(); clip(false); return; }
+  if (ctrl && key === 'v') { e.preventDefault(); paste(); return; }
+  if (ctrl && key === 'a') { e.preventDefault(); runTool('selall'); return; }
+  if (e.key === 'F2') { e.preventDefault(); startRename(); return; }
+  if (e.key === 'Delete') { e.preventDefault(); del(); return; }
+  if (e.key === 'Backspace' || (e.altKey && e.key === 'ArrowUp')) { e.preventDefault(); act('up'); return; }
+  if (e.key === 'Enter') { const n = [...S.sel][0]; const it = n && FS[cur()].items.find(x => x.n === n); if (it && (it.t === 'folder' || it.t === 'drive')) navigate(it.t === 'drive' ? it.link : join(cur(), n)); }
+});
+document.addEventListener('keyup', e => { if (FD && (e.key === 'Control' || e.key === 'Shift')) updateFileDrag(FD.lx, FD.ly, e.ctrlKey, e.shiftKey); });
+
+/* ---------- scripted demos with a visible cursor ---------- */
+const DEMOS = [
+  ['E8DE', '拖进子文件夹'], ['E74A', '拖到父文件夹'], ['E8B7', '停一下自动进入'], ['E8A9', '大图标里拖动'], ['E76F', '工具栏换位'], ['E81C', '撤销回看与重做'],
+];
+let demoRunning = false;
+async function runDemo(i) {
+  if (demoRunning) return; demoRunning = true; renderControls(i);
+  const cursor = $('#cursor'), cap = $('#cap');
+  const W = () => $('#win').getBoundingClientRect();
+  let pos = { x: W().left + 600 * k(), y: W().top + 400 * k() };
+  const place = () => { const w = W(); cursor.style.transform = `translate(${(pos.x - w.left) / k()}px, ${(pos.y - w.top) / k()}px)`; };
+  cursor.hidden = false; place();
+  const say = t => { cap.textContent = t; cap.hidden = !t; };
+  const at = (sel, dx = 0, dy = 0) => { const el = typeof sel === 'string' ? $(sel) : sel; const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2 + dx * k(), y: r.top + r.height / 2 + dy * k() }; };
+  const fire = (type, o = {}) => { const el = document.elementFromPoint(pos.x, pos.y) || document.body; el.dispatchEvent(new PointerEvent(type, { bubbles: true, clientX: pos.x, clientY: pos.y, button: 0, pointerId: 1, ...o })); return el; };
+  async function move(to, ms = 500, o = {}) { const a = { ...pos }, n = Math.max(6, Math.round(ms / 16)); for (let s = 1; s <= n; s++) { const t = s / n, e = t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; pos = { x: a.x + (to.x - a.x) * e, y: a.y + (to.y - a.y) * e }; place(); fire('pointermove', o); await sleep(16); } }
+  async function down(o = {}) { cursor.classList.remove('down'); void cursor.offsetWidth; cursor.classList.add('down'); fire('pointerdown', o); await sleep(80); }
+  async function up(o = {}) { fire('pointerup', o); await sleep(60); }
+  async function click(o = {}) { await down(o); const el = document.elementFromPoint(pos.x, pos.y); await up(o); if (el) el.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: pos.x, clientY: pos.y, ...o })); await sleep(120); }
+  const row = n => $(`.row[data-n="${CSS.escape(n)}"]`);
+  const go = async (p, v = 'details') => { if (cur() !== p) navigate(p); if (view() !== v) setView(v); await sleep(250); };
+  try {
+    if (i === 0) {
+      await go('P:\\源代码');
+      say('选中 app.py，Ctrl 加选 main.cpp'); await move(at(row('app.py'), -120)); await click(); await move(at(row('main.cpp'), -120), 350); await click({ ctrlKey: true });
+      say('拖到「发布」上，松手就进去了'); await down(); await move(at(row('main.cpp'), -80, 20), 200); await move(at(row('发布'), -100), 700); await sleep(400); await up();
+      say('列表里滑走，状态栏的撤销胶囊跳一下'); await sleep(1400);
+    } else if (i === 1) {
+      await go('P:\\源代码\\发布');
+      say('在「发布」里拖 release-notes.md'); await move(at(row('release-notes.md'), -100)); await click(); await down(); await move(at(row('release-notes.md'), -60, 30), 200);
+      say('顶部出现「放到上一级」，路径里的上级也都能放'); await move(at('#upbar', -150), 600); await sleep(250);
+      await move(at('.crumb[data-path="P:"]'), 600); await sleep(500);
+      say('放到「新加卷 (P:)」'); await up(); await sleep(1500);
+    } else if (i === 2) {
+      await go('P:\\源代码');
+      say('拖「配置-v2.3.json」到「发布」上，停住不动'); await move(at(row('配置-v2.3.json'), -100)); await click(); await down(); await move(at(row('配置-v2.3.json'), -60, 20), 200);
+      await move(at(row('发布'), -100), 600); say('图标外圈走满 0.8 秒，「发布」打开，拖动不断'); await sleep(1100);
+      say('接着放进它的子文件夹「1.0.57」'); await move(at(row('1.0.57'), -80), 600); await sleep(300); await up(); await sleep(1500);
+    } else if (i === 3) {
+      await go('P:\\源代码', 'large');
+      say('大图标：拖「项目计划.md」到「发布」上'); await move(at(row('项目计划.md'), 0, -20)); await click(); await down(); await move(at(row('项目计划.md'), 20, 0), 200);
+      await move(at(row('发布'), 10, -10), 700);
+      say('图标格描边，图标外一圈进度环走满 0.8 秒就打开'); await sleep(1150);
+      say('还是大图标，放进「1.0.57」'); await move(at(row('1.0.57'), 0, -10), 600); await sleep(350); await up(); await sleep(1600);
+    } else if (i === 4) {
+      say('按住「删除」往左拖，别的按钮让开位置'); await move(at('[data-tool="delete"]')); await down(); await move(at('[data-tool="cut"]', -24), 700); await sleep(300); await up(); await sleep(500);
+      say('「分栏视图」往下拖出工具栏，收进「更多」'); await move(at('[data-tool="columns"]')); await down(); await move(at('[data-tool="columns"]', 0, 70), 600); await sleep(500); await up(); await sleep(700);
+      say('从「更多」把「复制路径」拖回工具栏'); await move(at('#moreBtn')); await click(); await sleep(300);
+      await move(at('#menu [data-hidden="path"]')); await down(); await move(at('[data-tool="sep1"]', 4), 800); await sleep(300); await up(); await sleep(1300);
+    } else if (i === 5) {
+      say('点撤销胶囊的文字，展开操作记录'); await move(at('#undoChip .lbl')); await click(); await sleep(500);
+      const rows = $$('#hist .hrow:not(.undone)');
+      say('悬停回看：这一步动了哪些文件'); for (const r of rows.slice(0, 3)) { await move(at(r, -60), 350); r.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); await sleep(700); }
+      const target = rows[Math.min(2, rows.length - 1)];
+      target.classList.add('kbd'); target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      say('撤销到这一步：连同它之后的一起撤'); await move(at(target.querySelector('[data-act="undoto"]') || target, 0), 400); await click(); await sleep(900);
+      say('撤过的变灰，还能重做'); await sleep(300);
+      const us = $$('#hist .hrow.undone'), r1 = us[us.length - 1];
+      if (r1) { r1.classList.add('kbd'); await move(at(r1, -40), 400); r1.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); await sleep(500); const b = r1.querySelector('[data-act="redoto"]'); if (b) { await move(at(b), 300); await click(); } }
+      await sleep(1400);
+    }
+  } finally {
+    if (FD) endFileDrag(false);
+    if (TD) endToolDrag(false);
+    say(''); cursor.hidden = true; demoRunning = false; renderControls();
+  }
+}
+
+/* ---------- page ---------- */
+function renderControls(running) {
+  $('#controls').innerHTML = `<div class="seg"><button data-ctl="theme" data-v="dark" aria-pressed="${S.theme === 'dark'}">深色</button><button data-ctl="theme" data-v="light" aria-pressed="${S.theme === 'light'}">浅色</button></div>` +
+    DEMOS.map(([c, l], i) => `<button class="demo${running === i ? ' run' : ''}" data-demo="${i}">${g(running === i ? 'E769' : 'E768')}${l}</button>`).join('');
+}
+function fitStage() {
+  const st = $('#stage'), w = $('#win');
+  const kk = Math.min(1, st.clientWidth / 1182);
+  S.scale = kk; w.style.transform = `scale(${kk})`;
+  w.style.left = Math.max(0, (st.clientWidth - 1182 * kk) / 2) + 'px';
+  st.style.height = 702 * kk + 'px';
+}
+$('#win').innerHTML = winHTML() + `<svg class="cursor" id="cursor" hidden viewBox="0 0 22 22"><path d="M3 2l14 8.5-6.2 1.2 3.6 6.6-2.6 1.4-3.6-6.6L3.6 17z" fill="#fff" stroke="#111" stroke-width="1.2" stroke-linejoin="round"/></svg><div class="caption-line" id="cap" hidden></div>`;
+if (['details', 'medium', 'large'].includes(qs.get('view'))) TAB().view = qs.get('view');
+fitStage(); render(); renderControls();
+window.addEventListener('resize', fitStage);
+// Deep poses for screenshots: a drag held mid-way, the history open.
+(function pose(p) {
+  if (!p) return;
+  const c = el => { const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; };
+  const rowEl = n => $(`.row[data-n="${CSS.escape(n)}"]`);
+  // The target is looked up after the rows re-render; the spring ring is frozen part-way.
+  const dragFiles = (names, toSel, dx = -60) => { S.sel = new Set(names); renderRows(); const a = c(rowEl(names[0])); FD = { names, from: cur(), x0: a.x, y0: a.y, moved: false, sx: 0, sy: 0, lx: a.x, ly: a.y, freeze: .65 }; startFileDrag(); const b = c(toSel()); FD.lx = b.x + dx; FD.ly = b.y; updateFileDrag(b.x + dx, b.y, false, false); };
+  if (p === 'drag') dragFiles(['app.py', 'main.cpp'], () => rowEl('发布'), view() === 'details' ? -120 : 0);
+  if (p === 'dragup') { navigate('P:\\源代码\\发布'); dragFiles(['release-notes.md'], () => $('#upbar'), -160); }
+  if (p === 'dragcrumb') { navigate('P:\\源代码\\发布'); dragFiles(['release-notes.md'], () => $('.crumb[data-path="P:"]'), 0); }
+  if (p === 'tool' || p === 'toolout') {
+    const id = p === 'tool' ? 'delete' : 'columns', el = $(`[data-tool="${id}"]`), r = el.getBoundingClientRect(), a = c(el);
+    TD = { id, x0: a.x, y0: a.y, w: r.width / k(), grab: r.width / k() / 2, fromOrder: true, index: ORDER.indexOf(id), click: true };
+    startToolDrag();
+    const to = p === 'tool' ? { x: c($('[data-tool="cut"]')).x - 20 * k(), y: a.y } : { x: a.x, y: a.y + 70 * k() };
+    updateToolDrag(to.x, to.y);
+  }
+  if (p === 'hist' || p === 'histundone') {
+    if (p === 'histundone') { undoSteps(S.hist[S.hist.length - 3]); $('#snack').hidden = true; }
+    renderHist(); renderStatus();
+    const rows = $$('#hist .hrow'); const r = rows[p === 'hist' ? 2 : rows.length - 3]; if (r) { r.classList.add('kbd'); setPeek(r.dataset.hk); }
+  }
+})(qs.get('pose'));
+
+$('#spec').innerHTML = `
+<article class="card">
+  <h3>现在的代码是什么情况</h3>
+  <div class="tbl"><table>
+    <tr><th>交互</th><th>现状</th><th></th></tr>
+    <tr><td>工具栏换位</td><td>只能在「自定义工具栏」弹窗打开时拖（<code>toolbar_pin_drag.h</code>）。平时按住拖不动</td><td><span class="tag new">新增</span></td></tr>
+    <tr><td>拖到子文件夹</td><td><code>app_input.cpp</code> 的拖放处理里已有：文件夹行可放、停 800 ms 自动进入（详细信息和中 / 大图标都由 <code>DrawList</code> 画：目标格 2 DIP 描边，<code>DrawSpringRing</code> 在图标外画一圈进度环，这个保留不改）、路径段可放、标签页可放。列表内拖动也走同一个 <code>DoDragDrop</code>。你反馈拖不进子文件夹和父文件夹，说明这条路径在列表内拖动时没生效，要先单独查</td><td><span class="tag bug">疑似缺陷</span></td></tr>
+    <tr><td>拖到父文件夹</td><td>只能放到路径段上，没有更显眼的入口</td><td><span class="tag new">新增「上一级」条、↑ 按钮可放</span></td></tr>
+    <tr><td>撤销</td><td>一个撤销栈（<code>OpsManager::undo_</code>），只能一步步 <kbd>Ctrl+Z</kbd>，看不到栈里有什么；没有重做</td><td><span class="tag new">新增回看、撤销到某步、重做</span></td></tr>
+  </table></div>
+</article>
+<article class="card">
+  <h3>工具栏换位</h3>
+  <ul>
+    <li><b>直接拖</b>：按住任一工具移动超过 6 px 就进入拖动，单击照常执行。被拖的按钮浮起，其他按钮平滑让位，虚线框是落点。</li>
+    <li><b>拖出去</b>：往下或往上离开工具栏、或拖到 ⋯ 上，变红并提示「松手收进「更多」」。收起不是删除，「更多」菜单里还能用。</li>
+    <li><b>拖回来</b>：「更多」菜单的每一项右边有抓手，按住拖到工具栏上就固定。</li>
+    <li>分隔线也能拖；左右两组之间的空白是一个位置，拖过它就到了右侧那组。</li>
+    <li>每次改动都有「还原」；<kbd>Esc</kbd> 取消正在进行的拖动。顺序存进 <code>appPrefs.toolbar_tools</code>，和「自定义工具栏」弹窗共用。</li>
+  </ul>
+</article>
+<article class="card">
+  <h3>把文件拖到别的文件夹</h3>
+  <div class="tbl"><table>
+    <tr><th>放到</th><th>效果</th></tr>
+    <tr><td>文件夹行</td><td>行描边高亮，跟手标签写「移动到「发布」」。停 0.8 秒：图标外圈走满，进入这个文件夹，拖动继续</td></tr>
+    <tr><td>中 / 大图标的文件夹格</td><td>同一套规则：整格 2 DIP 描边，48 / 96 DIP 的图标外一圈进度环（半径 = 图标一半 + 3 DIP，12 点钟方向起顺时针），走满就打开，视图保持不变</td></tr>
+    <tr><td>列表顶部「上一级」条</td><td>拖动时盖在列头上，下面的行不会被挤动；只在有上一级时出现，停一下进入上一级</td></tr>
+    <tr><td>路径里的任一级</td><td>拖动时所有上级带一圈细框提示可放；放上去直接移到那一级</td></tr>
+    <tr><td>↑ 向上一级按钮</td><td>同「上一级」条，停一下进入</td></tr>
+    <tr><td>侧栏、另一个标签页</td><td>可放；停一下切过去</td></tr>
+    <tr><td>当前文件夹空白、自己身上</td><td>灰色标签「已在「源代码」中」或「不能放进它自己里面」，松手不做任何事</td></tr>
+  </table></div>
+  <p>默认同盘移动、跨盘复制，和 Windows 一致；按住 <kbd>Ctrl</kbd> 复制、<kbd>Shift</kbd> 移动，标签实时变化。<kbd>Esc</kbd> 取消，跟手卡片飞回原处；如果拖动途中已经进了别的文件夹，提示「文件还在原处 · 回去」。</p>
+</article>
+<article class="card">
+  <h3>撤销胶囊和操作记录</h3>
+  <ul>
+    <li><b>胶囊</b>：状态栏左侧，<b>↶</b> 撤一步，文字写着下一步会撤什么，<b>↷</b> 只在能重做时出现。每次操作完胶囊轻跳一下。</li>
+    <li><b>操作记录</b>：点胶囊文字展开。最新在上，「现在」线以下是已做的，线以上是撤销过、还能重做的（划掉、变灰）。</li>
+    <li><b>回看</b>：悬停某一步，列表里它动过的文件带左侧蓝条；不在当前文件夹时出现「定位」，点了直接过去并选中。同时，「撤销到这里」会波及的几步一起高亮。</li>
+    <li><b>撤销到这里 / 重做到这里</b>：一次撤或重做多步，提示里写撤了几步，带「重做」。</li>
+    <li><b>不能撤销的步骤</b>（永久删除，对应 <code>UndoEntry::supported = false</code>）留在记录里，带锁，撤销时跳过它。</li>
+    <li>撤销后再做新操作，重做记录清空，并在这一步旁边写明。</li>
+  </ul>
+</article>
+<article class="card">
+  <h3>落到代码里的位置</h3>
+  <ul>
+    <li><b>工具栏</b>：把 <code>ToolbarPinDragState</code> 的拖动从「自定义工具栏」弹窗里放出来，命中测试在 <code>MakeToolbarLayout</code> 的 <code>pins</code> 上做；超过 6 px 才开始，避免误拖。</li>
+    <li><b>拖放</b>：先查列表内拖动为什么没走到文件夹行和路径段的放置分支；「上一级」条是新的命中区域（<code>HitTestResult</code> 加一种），弹簧打开复用 <code>springRow</code> 和 <code>DrawSpringRing</code>。</li>
+    <li><b>重做</b>：<code>OpsManager</code> 加 <code>redo_</code>：撤销成功的条目进 <code>redo_</code>，重做就重新提交原来的请求；新操作清空 <code>redo_</code>。撤销到某一步用现有的逐步撤销循环，每步仍走后台队列。</li>
+    <li><b>状态栏</b>：<code>StatusBarView</code> 加撤销胶囊（标签取 <code>UndoLabel()</code>），记录弹层的数据来自 <code>undo_</code> / <code>redo_</code> 的只读快照，回看用 <code>UndoEntry::destinations</code> 选中文件。</li>
+  </ul>
+</article>
+<article class="card">
+  <h3>新增文案（写入 catalog.tsv）</h3>
+  <div class="tbl"><table>
+    <tr><th>name</th><th>zh</th><th>en</th></tr>
+    <tr><td>DropToParentFormat</td><td>放到上一级 %s</td><td>Drop into the parent, %s</td></tr>
+    <tr><td>DropPauseToOpen</td><td>停一下打开它</td><td>Pause to open it</td></tr>
+    <tr><td>DropAlreadyHereFormat</td><td>已在「%s」中</td><td>Already in %s</td></tr>
+    <tr><td>DropIntoItself</td><td>不能放进它自己里面</td><td>Can't drop a folder into itself</td></tr>
+    <tr><td>DragCancelledFormat</td><td>已取消，文件还在「%s」</td><td>Cancelled. The files are still in %s</td></tr>
+    <tr><td>ToolbarReleaseToMore</td><td>松手收进「更多」</td><td>Release to move it into More</td></tr>
+    <tr><td>ToolbarMovedToMoreFormat</td><td>「%s」已收进「更多」</td><td>%s moved into More</td></tr>
+    <tr><td>ToolbarDragFromMore</td><td>按住拖到工具栏上就能固定</td><td>Drag onto the toolbar to pin</td></tr>
+    <tr><td>History</td><td>操作记录</td><td>History</td></tr>
+    <tr><td>UndoToHere / RedoToHere</td><td>撤销到这里 / 重做到这里</td><td>Undo to here / Redo to here</td></tr>
+    <tr><td>Redo</td><td>重做</td><td>Redo</td></tr>
+    <tr><td>UndoneStepsFormat</td><td>已撤销 %d 步</td><td>Undid %d steps</td></tr>
+    <tr><td>CannotUndo</td><td>无法撤销</td><td>Can't be undone</td></tr>
+    <tr><td>RedoCleared</td><td>重做记录已清空</td><td>Redo history cleared</td></tr>
+  </table></div>
+</article>`;
+})();
+</script>
+</body>
+</html>

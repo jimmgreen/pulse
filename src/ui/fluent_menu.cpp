@@ -106,7 +106,8 @@ namespace {
 
 // The row of a visible flyout: same label, state and children (with IDs).
 bool SameFlyoutRow(const FluentMenuItem& a, const FluentMenuItem& b) {
-    if (a.text != b.text || a.enabled != b.enabled || a.children.size() != b.children.size())
+    if (a.group_tint != b.group_tint || a.group_start != b.group_start || a.group_end != b.group_end ||
+        a.primary != b.primary || a.trailing_vector_icon != b.trailing_vector_icon || a.vector_icon != b.vector_icon || a.custom_icon != b.custom_icon || a.text != b.text || a.detail != b.detail || a.enabled != b.enabled || a.children.size() != b.children.size())
         return false;
     for (size_t i = 0; i < a.children.size(); ++i) {
         const auto& x = a.children[i];
@@ -117,7 +118,8 @@ bool SameFlyoutRow(const FluentMenuItem& a, const FluentMenuItem& b) {
 }
 
 bool DisplayEqualItem(const FluentMenuItem& a, const FluentMenuItem& b) {
-    if (a.text != b.text || a.enabled != b.enabled ||
+    if (a.group_tint != b.group_tint || a.group_start != b.group_start || a.group_end != b.group_end ||
+        a.primary != b.primary || a.trailing_vector_icon != b.trailing_vector_icon || a.vector_icon != b.vector_icon || a.custom_icon != b.custom_icon || a.text != b.text || a.enabled != b.enabled ||
         a.toggle != b.toggle || a.secondary != b.secondary || a.checked != b.checked ||
         a.shortcut_inline != b.shortcut_inline || a.shortcut != b.shortcut ||
         a.heading != b.heading || a.match_start != b.match_start ||
@@ -169,7 +171,7 @@ bool FluentMenuModel::PatchInPlace(std::vector<FluentMenuItem> src, IDWriteFacto
     if (src.size() != items_.size()) return false;
     for (size_t i = 0; i < src.size(); ++i)
         if (src[i].separator_after != items_[i].separator_after ||
-            src[i].heading != items_[i].heading) return false;
+            src[i].group_tint != items_[i].group_tint || src[i].heading != items_[i].heading || src[i].detail.empty() != items_[i].detail.empty()) return false;
     const int height = height_;
     items_ = std::move(src);
     locked_width_ = width_;
@@ -182,7 +184,7 @@ bool FluentMenuModel::PatchGrow(std::vector<FluentMenuItem> src, IDWriteFactory2
     const size_t shown = items_.size();
     if (shown == 0 || src.size() <= shown) return false;
     for (size_t i = 0; i < shown; ++i)
-        if (src[i].heading != items_[i].heading) return false;
+        if (src[i].group_tint != items_[i].group_tint || src[i].heading != items_[i].heading || src[i].detail.empty() != items_[i].detail.empty()) return false;
     for (size_t i = 0; i + 1 < shown; ++i)
         if (src[i].separator_after != items_[i].separator_after) return false;
     if (items_[shown - 1].separator_after && !src[shown - 1].separator_after) return false;
@@ -202,6 +204,8 @@ void FluentMenuModel::Layout(IDWriteFactory2* dwrite, float scale, float min_wid
     pad_v_ = 4.0f * scale_;
     sep_h_ = 5.0f * scale_;
     heading_h_ = std::round(26.0f * scale_);
+    // A row with a detail line: label and caption stacked, 16 DIP taller.
+    detail_row_h_ = std::round(row_h_ + 16.0f * scale_);
 
     auto body = MakeFormat(dwrite, kLabelDip * scale_);
     auto caption = MakeFormat(dwrite, 12.0f * scale_);
@@ -225,6 +229,9 @@ void FluentMenuModel::Layout(IDWriteFactory2* dwrite, float scale, float min_wid
         if (it.shortcut_inline && !it.shortcut.empty())
             inline_label_width_ = std::max(inline_label_width_, text_w);
         float w = radio_col + left_chrome + text_w + right_chrome;
+        // A detail line may widen the card too, within the same max width below.
+        if (!it.detail.empty())
+            w = (std::max)(w, radio_col + left_chrome + std::ceil(MeasureWidth(dwrite, caption.get(), it.detail) + 2.0f * scale_) + right_chrome);
         if (it.trailing_command) w += 32.0f * scale_;
         if (it.toggle) w += 52.0f * scale_;
         if (!it.children.empty()) w += 26.0f * scale_; // 22px chevron column + 4px gap
@@ -247,9 +254,15 @@ void FluentMenuModel::Layout(IDWriteFactory2* dwrite, float scale, float min_wid
     // Context menus stay compact; a long undo/file name ellipsizes instead of
     // stretching the flyout. Command palette passes a larger min_width_px.
     const float max_w = (std::max)(min_width_px, 320.0f * scale_);
+    const bool grouped = std::any_of(items_.begin(), items_.end(), [](const FluentMenuItem& item) {
+        return item.group_tint || item.primary;
+    });
+    // The extension menu design has a fixed 264 DIP card; detail text ellipsizes.
+    // Explicit palette minimums and an already-locked live menu width still win.
+    const float desired_width = grouped ? 264.0f * scale_ : (std::min)(content_w, max_w);
     width_ = locked_width_ > 0
         ? locked_width_
-        : (int)std::ceil((std::max)(min_width_px, (std::min)(content_w, max_w)));
+        : (int)std::ceil((std::max)(min_width_px, desired_width));
     truncated_.assign(items_.size(), 0);
     for (size_t i = 0; i < row_w.size(); ++i)
         truncated_[i] = row_w[i] > static_cast<float>(width_) + 0.5f ? 1 : 0;
@@ -260,7 +273,7 @@ void FluentMenuModel::Layout(IDWriteFactory2* dwrite, float scale, float min_wid
 
     float h = pad_v_ * 2.0f;
     for (const auto& it : items_) {
-        h += HasLayoutTiles(it) ? 72.0f * scale_ : it.heading ? heading_h_ : row_h_;
+        h += HasLayoutTiles(it) ? 72.0f * scale_ : it.heading ? heading_h_ : it.group_tint ? (it.detail.empty() ? 32.0f : 46.0f) * scale_ : it.detail.empty() ? row_h_ : detail_row_h_;
         if (it.separator_after) h += sep_h_;
     }
     height_ = (int)std::ceil(h);
@@ -276,7 +289,9 @@ bool FluentMenuModel::Truncated(int i) const {
 
 float FluentMenuModel::RowHeightPx(int i) const {
     const FluentMenuItem* it = At(i);
-    return it && HasLayoutTiles(*it) ? 72.0f * scale_ : it && it->heading ? heading_h_ : row_h_;
+    return it && HasLayoutTiles(*it) ? 72.0f * scale_ : it && it->heading ? heading_h_
+        : it && it->group_tint ? (it->detail.empty() ? 32.0f : 46.0f) * scale_
+        : it && !it->detail.empty() ? detail_row_h_ : row_h_;
 }
 
 float FluentMenuModel::RowTopPx(int i) const {
@@ -292,7 +307,7 @@ int FluentMenuModel::HitTestRow(float y_px) const {
     float y = pad_v_;
     for (int i = 0; i < (int)items_.size(); ++i) {
         const float row = RowHeightPx(i);
-        if (y_px >= y && y_px < y + row) return items_[i].heading ? -1 : i;
+        if (y_px >= y && y_px < y + row) return items_[i].heading && !items_[i].trailing_command ? -1 : i;
         y += row;
         if (items_[i].separator_after) {
             if (y_px >= y && y_px < y + sep_h_) return -1; // dead zone
@@ -327,7 +342,7 @@ std::vector<MenuMnemonicTarget> FindMenuMnemonic(const std::vector<FluentMenuIte
     for (size_t i = 0; i < items.size(); ++i) {
         const FluentMenuItem& item = items[i];
         if (!item.enabled) continue;
-        if ((item.command != 0 || !item.children.empty()) && matches(MenuItemMnemonic(item)))
+        if ((item.command != 0 || (item.heading && item.trailing_command) || !item.children.empty()) && matches(MenuItemMnemonic(item)))
             out.push_back({ static_cast<int>(i), -1 });
         for (size_t s = 0; s < item.quick_swatches.size(); ++s) {
             const FluentMenuSwatch& swatch = item.quick_swatches[s];
@@ -355,7 +370,7 @@ int FluentMenuModel::NextEnabled(int from, int dir) const {
         i += dir > 0 ? 1 : -1;
         if (i < 0) i = n - 1;
         if (i >= n) i = 0;
-        if (items_[i].enabled && !items_[i].heading) return i;
+        if (items_[i].enabled && (!items_[i].heading || items_[i].trailing_command)) return i;
     }
     return -1;
 }
@@ -979,6 +994,22 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
         if (header > 0) y += (float)header;
         dc->PushAxisAlignedClip(D2D1::RectF(static_cast<float>(kShadowMargin), y,
             static_cast<float>(kShadowMargin + cw), y + body), D2D1_ANTIALIAS_MODE_ALIASED);
+        // Draw one contiguous tint behind the declared group, before its hover plate.
+        for (int first = 0; first < model.Count(); ++first) {
+            const auto* head = model.At(first);
+            if (!head->group_tint || !head->group_start) continue;
+            int last = first;
+            while (last + 1 < model.Count() && !model.At(last)->group_end &&
+                   model.At(last + 1)->group_tint && !model.At(last + 1)->group_start) ++last;
+            const float offset = y - (main ? scroll_y_ : 0.0f);
+            const auto bounds = D2D1::RectF(kShadowMargin + 4.0f*scale_,
+                offset + model.RowTopPx(first), kShadowMargin + static_cast<float>(cw) - 4.0f*scale_,
+                offset + model.RowTopPx(last) + model.RowHeightPx(last));
+            auto tint = theme.fill_selected;
+            tint.a *= .6f * (std::max)(0.0f, row_alpha(first));
+            if (!high_contrast) painter_.FillRoundedRect(bounds, 7.0f*scale_, tint);
+            first = last;
+        }
         // Hover plate: one rounded rect that glides between rows (Plate
         // spring) instead of each row lighting up on its own. High contrast
         // keeps the per-row system highlight.
@@ -1031,12 +1062,17 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
             spec.bounds = D2D1::RectF((float)kShadowMargin, y,
                                       (float)(kShadowMargin + cw), y + model.RowHeightPx(i));
             spec.text = it->text;
+            spec.detail = it->detail;
             spec.heading = it->heading;
             spec.match_start = it->match_start;
             spec.match_length = it->match_length;
             spec.glyph = it->glyph;
+            spec.vector_icon = it->vector_icon;
+            spec.custom_icon = it->custom_icon;
+            spec.group_tint = it->group_tint;
+            spec.primary = it->primary;
             spec.glyph_scale = it->glyph_scale;
-            spec.accent_glyph = it->accent_glyph;
+            spec.accent_glyph = it->accent_glyph || it->primary;
             spec.shortcut = it->shortcut;
             spec.shortcut_inline = it->shortcut_inline;
             spec.inline_label_width = model.InlineLabelWidthPx();
@@ -1059,7 +1095,16 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
             if (it->icon) spec.icon_bitmap = IconBitmapFor(it->icon, dc);
             if (it->trailing_command) spec.bounds.right -= 32.0f * scale_;
             painter_.DrawMenuItem(spec);
-            if (it->trailing_command && i == hover_row && it->enabled) {
+            if (it->trailing_command && it->trailing_vector_icon != StoreIcon::None) {
+                const float right = static_cast<float>(kShadowMargin + cw) - 6.0f * scale_;
+                const float top = y + (model.RowHeightPx(i) - 22.0f * scale_) * .5f;
+                const auto button = D2D1::RectF(right - 24.0f * scale_, top, right, top + 22.0f * scale_);
+                const bool hot = i == hover_row && it->enabled;
+                if (hot) painter_.FillRoundedRect(button, 5.0f * scale_, theme.fill_hover);
+                const auto ink = !it->enabled ? theme.text_disabled : hot ? theme.accent : theme.text_secondary;
+                const auto icon = D2D1::RectF(button.left + 4*scale_, top + 3*scale_, right - 4*scale_, top + 19*scale_);
+                DrawStoreIcon(dc, it->trailing_vector_icon, icon, ink, 1.35f*scale_);
+            } else if (it->trailing_command && i == hover_row && it->enabled) {
                 const float right = static_cast<float>(kShadowMargin + cw) - 8.0f * scale_;
                 const float glyph_top = y + (model.RowHeightPx(i) - 20.0f * scale_) * 0.5f;
                 painter_.DrawGlyph(L"\xE711", D2D1::RectF(right - 20.0f * scale_,
@@ -1451,7 +1496,7 @@ void FluentMenu::OnSubMouse(POINT client_pt, bool button_up) {
     const float y = (float)client_pt.y - (float)kShadowMargin;
     int row = sub_->model.HitTestRow(y);
     const FluentMenuItem* it = sub_->model.At(row);
-    if (it && (!it->enabled || it->heading)) {
+    if (it && (!it->enabled || (it->heading && !it->trailing_command))) {
         row = -1;
         it = nullptr;
     }
@@ -1672,7 +1717,7 @@ bool FluentMenu::RenderTip(const std::wstring& text) {
 void FluentMenu::UpdateHover(int row, int swatch) {
     if (row >= 0) {
         const FluentMenuItem* it = model_.At(row);
-        if (it && (!it->enabled || it->heading)) {
+        if (it && (!it->enabled || (it->heading && !it->trailing_command))) {
             row = -1;
             swatch = -1;
         } else if (!it || it->quick_swatches.empty()) {
@@ -1721,7 +1766,7 @@ int FluentMenu::HitTestSwatch(const FluentMenuModel& model, int row, float clien
 int FluentMenu::InvokeRow(int row) {
     const FluentMenuItem* it = model_.At(row);
     if (!it || !it->enabled) return 0;
-    return it->command;
+    return it->heading ? it->trailing_command : it->command;
 }
 
 int FluentMenu::InvokeAt(int row, float client_x) const {
@@ -1731,11 +1776,12 @@ int FluentMenu::InvokeAt(int row, float client_x) const {
 int FluentMenu::InvokeAt(const FluentMenuModel& model, int row, float client_x) const {
     const FluentMenuItem* item = model.At(row);
     if (item && item->enabled && item->trailing_command &&
-        client_x >= kShadowMargin + model.WidthPx() - 36.0f * scale_ &&
+        client_x >= kShadowMargin + model.WidthPx() -
+            (item->trailing_vector_icon != StoreIcon::None ? 30.0f : 36.0f) * scale_ &&
         client_x < kShadowMargin + model.WidthPx() - 6.0f * scale_)
         return item->trailing_command;
     if (!item || !item->enabled || item->quick_swatches.empty())
-        return item && item->enabled ? item->command : 0;
+        return item && item->enabled && !item->heading ? item->command : 0;
     const int swatch = HitTestSwatch(model, row, client_x);
     if (swatch >= 0) return item->quick_swatches[static_cast<size_t>(swatch)].command;
     return item->command;
@@ -1778,8 +1824,8 @@ bool FluentMenu::HandleMnemonicKey(const MSG& msg) {
             OpenSubmenu(target.row, in_sub ? SubmenuDepth() + 1 : 0);
             sub_->hover = sub_->model.FirstEnabled();
             if (RenderSub()) PresentSub(255);
-        } else if (item->command != 0) {
-            result_ = item->command;
+        } else if ((item->heading ? item->trailing_command : item->command) != 0) {
+            result_ = item->heading ? item->trailing_command : item->command;
             Dismiss();
         }
         return true;
@@ -2038,8 +2084,8 @@ bool FluentMenu::HandleFilterKey(UINT msg, WPARAM wParam) {
                 OpenSubmenu(sub_->hover, SubmenuDepth() + 1);
                 sub_->hover = sub_->model.FirstEnabled();
                 if (RenderSub()) PresentSub(255);
-            } else if (child && child->enabled && child->command != 0) {
-                result_ = child->command;
+            } else if (child && child->enabled && (child->heading ? child->trailing_command : child->command) != 0) {
+                result_ = child->heading ? child->trailing_command : child->command;
                 Dismiss();
             }
             return true;
@@ -2337,8 +2383,8 @@ int FluentMenu::RunModalLoop() {
                                 OpenSubmenu(sub_->hover, SubmenuDepth() + 1);
                                 sub_->hover = sub_->model.FirstEnabled();
                                 if (RenderSub()) PresentSub(255);
-                            } else if (child && child->enabled && child->command != 0) {
-                                result_ = child->command;
+                            } else if (child && child->enabled && (child->heading ? child->trailing_command : child->command) != 0) {
+                                result_ = child->heading ? child->trailing_command : child->command;
                                 Dismiss();
                             }
                         } else if (hover_row_ >= 0) {

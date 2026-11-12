@@ -2,6 +2,7 @@
 #include "ui_renderer.h"
 #include "ui_renderer_internal.h"
 #include "../common/localization.h"
+#include "store_icons.h"
 #include <algorithm>
 
 namespace pulse::ui {
@@ -56,9 +57,13 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
         const float cy = (row.top + row.bottom) * 0.5f;
         return D2D1::RectF(row.right - 16*s - 42*s, cy - 16*s, row.right - 16*s, cy + 16*s);
     };
-    auto setting = [&](D2D1_RECT_F r, const wchar_t* icon, std::wstring_view title, std::wstring_view desc) {
+    auto setting = [&](D2D1_RECT_F r, const wchar_t* icon, std::wstring_view title, std::wstring_view desc,
+                       StoreIcon vector_icon = StoreIcon::None) {
         const float right = r.right - 72*s;
-        DrawIconText(r.left + 16*s, r.top + 20*s, 24*s, 24*s, icon, L"", theme.text_secondary, 0.85f);
+        if (vector_icon != StoreIcon::None)
+            DrawStoreIcon(dc, vector_icon, D2D1::RectF(r.left+16*s,r.top+20*s,r.left+40*s,r.top+44*s), theme.text_secondary);
+        else
+            DrawIconText(r.left + 16*s, r.top + 20*s, 24*s, 24*s, icon, L"", theme.text_secondary, 0.85f);
         text(title, D2D1::RectF(r.left + 54*s, r.top + 10*s, right, r.top + 34*s));
         painter_.DrawWrappedCaption(desc, D2D1::Point2F(r.left + 54*s, r.top + 35*s),
                                     right - r.left - 54*s, theme.text_secondary);
@@ -127,15 +132,49 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
     };
     if (vm.settings_page == 8) {
         using I = l10n::StringId;
-        for (int i=0;i<3;++i) {
-            fluent::SegmentedItemSpec tab{};
-            tab.bounds=lay.store_tabs[i];
-            tab.text=store_text::Tab(i);
+        settings_store_fields_[0] = lay.store_search;
+        settings_store_fields_[1] = lay.sz.folder;
+        settings_store_fields_[2] = lay.store_quick.mode;
+        settings_store_fields_[3] = lay.store_quick.format;
+        settings_store_fields_[4] = lay.store_quick.level;
+        settings_store_fields_[5] = lay.sz.more;
+        settings_store_fields_[6] = lay.sz.level_track;
+        settings_store_clip_ = lay.content;
+        if (lay.sz.on) { DrawSevenZipDetail(vm, rect, theme); return; }
+        // Pivot: labels on a hairline, the current one in full text with an accent bar under it.
+        {
             const int selected=vm.settings_store_browse ? 0 : vm.settings_store_installed ? 1 : 2;
-            tab.state.checked=selected==i;
-            tab.state.hovered=hovered(i==0 ? PackAction::StoreBrowse : i==1 ? PackAction::StoreInstalled : PackAction::StoreManage);
-            tab.position=fluent::SegmentPosition::Single;
-            painter_.DrawSegmentedItem(tab);
+            const float line_left=lay.store_tabs[0].left;
+            MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
+            for (int i=0;i<3;++i) if (i==0 || lay.store_tabs[i].top>lay.store_tabs[i-1].top)
+                FillRect(dc, brStrokeDivider_.get(), line_left, lay.store_tabs[i].bottom-1, lay.content.right-20*s-line_left, 1);
+            for (int i=0;i<3;++i) {
+                const auto r=lay.store_tabs[i];
+                const bool on=selected==i;
+                const bool hot=hovered(i==0 ? PackAction::StoreBrowse : i==1 ? PackAction::StoreInstalled : PackAction::StoreManage);
+                if (hot && !on) {
+                    MakeBrush(dc, theme.fill_hover, brFillHover_);
+                    FillRoundedRect(dc, brFillHover_.get(), r.left, r.top+2*s, r.right-r.left, r.bottom-r.top-8*s, 6*s);
+                }
+                const bool installed_tab = i == 1;
+                const auto label_rect = D2D1::RectF(r.left, r.top, r.right - (installed_tab ? 32*s : 0), r.bottom-4*s);
+                painter_.DrawText(store_view::Tab(i), label_rect,
+                    on ? compositor_->HeaderFormat() : compositor_->TextFormat(),
+                    on || hot ? theme.text : theme.text_secondary, fluent::HorizontalAlignment::Center);
+                if (installed_tab) {
+                    const bool updates = std::any_of(vm.settings_store_view.items.begin(), vm.settings_store_view.items.end(),
+                        [](const auto& item) { return item.settings_package >= 0 && item.action_enabled; });
+                    const auto count_color = updates ? theme.accent : theme.text_secondary;
+                    const auto badge_rect = D2D1::RectF(r.right-32*s, r.top+8*s, r.right-8*s, r.bottom-10*s);
+                    painter_.FillRoundedRect(badge_rect, 9*s, WithAlpha(count_color, .10f));
+                    painter_.DrawText(std::to_wstring(vm.settings_store_view.installed.size()), badge_rect,
+                        compositor_->SmallFormat(), count_color, fluent::HorizontalAlignment::Center);
+                }
+                if (on) {
+                    MakeBrush(dc, vm.dark ? MixColor(theme.accent, HexColor(0xFFFFFF), 0.22f) : theme.accent, brAccent_);
+                    FillRoundedRect(dc, brAccent_.get(), r.left+12*s, r.bottom-3*s, r.right-r.left-24*s, 3*s, 1.5f*s);
+                }
+            }
         }
         if (!vm.settings_store_browse && vm.settings_store_installed) {
             const auto& view=vm.settings_store_view;
@@ -149,17 +188,54 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
                 painter_.FillRoundedRect(D2D1::RectF(r.left-12*s,r.top-6*s,r.right+12*s,r.bottom+6*s),6*s,WithAlpha(color,vm.dark?0.12f:0.07f));
                 caption(value,r,theme.text_secondary);
             };
+            if (lay.store_search.right > lay.store_search.left) {
+                painter_.DrawTextFieldFrame(lay.store_search, {}, true);
+                DrawStoreIcon(dc, StoreIcon::Search,
+                    D2D1::RectF(lay.store_search.left+10*s,lay.store_search.top+9*s,
+                        lay.store_search.left+26*s,lay.store_search.top+25*s), theme.text_secondary);
+            }
+            caption(l10n::Get(I::StoreNoMatch),lay.store_no_match,theme.text_secondary);
             button(lay.store_refresh,l10n::Get(I::Refresh),PackAction::InstalledRefresh,
                 fluent::ButtonKind::Standard,store_text::CanRefreshInstalled(view));
+            button(lay.store_install_file,l10n::Get(I::StoreInstallFromFile),PackAction::StoreInstallFromFile,
+                fluent::ButtonKind::Standard,store_text::CanInstallFromFile(view));
             caption(l10n::Get(view.installed_loading ? I::StoreInstalledLoading : I::StoreInstalledFailed),
                 lay.store_state,view.installed_loading ? theme.text_secondary : painter_.StatusToneColor(fluent::InfoBarKind::Error));
             bar(view.installed_error,lay.store_notice,fluent::InfoBarKind::Error);
-            bar(l10n::Get(I::StoreRestart),lay.store_restart,fluent::InfoBarKind::Warning);
+            if (lay.store_restart.bottom > lay.store_restart.top) {
+                auto banner = lay.store_restart;
+                if (lay.store_restart_button.bottom > lay.store_restart_button.top && lay.store_restart_button.right > lay.store_restart_button.left) {
+                    banner.left = (std::min)(banner.left, lay.store_restart_button.left);
+                    banner.top = (std::min)(banner.top, lay.store_restart_button.top);
+                    banner.right = (std::max)(banner.right, lay.store_restart_button.right);
+                    banner.bottom = (std::max)(banner.bottom, lay.store_restart_button.bottom);
+                }
+                const auto color = painter_.StatusToneColor(fluent::InfoBarKind::Warning);
+                painter_.FillRoundedRect(D2D1::RectF(banner.left-12*s,banner.top-6*s,banner.right+12*s,banner.bottom+6*s),
+                    6*s,WithAlpha(color,vm.dark?0.12f:0.07f));
+                caption(l10n::Get(I::StoreRestart),lay.store_restart,theme.text_secondary);
+                button(lay.store_restart_button,l10n::Get(I::StoreRestartNow),PackAction::StoreRestartNow);
+            }
             caption(l10n::Get(I::StoreInstalledEmpty),lay.store_empty,theme.text_secondary);
             for (size_t i=0;i<lay.installed_items.size() && i<view.installed.size();++i) {
                 const auto& c=lay.installed_items[i]; const auto& item=view.installed[i];
+                if (c.bounds.right <= c.bounds.left || c.bounds.bottom <= c.bounds.top) continue;
                 card(c.bounds);
-                caption(item.name,c.name,theme.text);
+                const auto catalog = std::find_if(view.items.begin(), view.items.end(), [&](const auto& value) {
+                    return std::wstring(value.id.begin(), value.id.end()) == item.id;
+                });
+                const auto icon = catalog == view.items.end() ? (item.id == L"pulse.7zip" ? StoreIcon::Box : StoreIcon::Puzzle) : catalog->icon;
+                const auto icon_color = catalog == view.items.end() ? (item.id == L"pulse.7zip" ? HexColor(0x527D70) : theme.accent) : HexColor(catalog->icon_color);
+                painter_.FillRoundedRect(c.icon, 11*s, icon_color);
+                {
+                    const D2D1_GRADIENT_STOP stops[]={{0,MixColor(icon_color,D2D1::ColorF(1,1,1),.17f)},{1,MixColor(icon_color,D2D1::ColorF(0,0,0),.16f)}};
+                    ComPtr<ID2D1GradientStopCollection> stops_collection;ComPtr<ID2D1LinearGradientBrush> gradient;
+                    if(SUCCEEDED(dc->CreateGradientStopCollection(stops,2,&stops_collection))&&SUCCEEDED(dc->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties({c.icon.left,c.icon.top},{c.icon.right,c.icon.bottom}),stops_collection.get(),&gradient)))
+                        dc->FillRoundedRectangle(D2D1::RoundedRect(c.icon,11*s,11*s),gradient.get());
+                }
+                DrawStoreIcon(dc, icon, D2D1::RectF(c.icon.left+11*s,c.icon.top+11*s,c.icon.right-11*s,c.icon.bottom-11*s), D2D1::ColorF(1,1,1));
+                if (c.name.bottom > c.name.top)
+                    painter_.DrawWrappedSection(item.name, D2D1::Point2F(c.name.left, c.name.top), c.name.right - c.name.left, theme.text);
                 caption(item.id,c.id,theme.text_secondary);
                 caption(item.publisher,c.publisher,theme.text_secondary);
                 caption(item.version,c.version,theme.text_secondary);
@@ -171,76 +247,38 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
                 caption(item.status,c.status,theme.text_secondary);
                 caption(item.notice,c.notice,theme.text_secondary);
                 const auto action=[&](PackAction base) { return static_cast<PackAction>(static_cast<int>(base)+static_cast<int>(i)); };
-                button(c.enable,l10n::Get(I::ExtensionPackageEnable),action(PackAction::InstalledEnableBase),fluent::ButtonKind::Standard,item.can_enable && !view.installed_busy && i<10000);
-                button(c.disable,l10n::Get(I::ExtensionPackageDisable),action(PackAction::InstalledDisableBase),fluent::ButtonKind::Standard,item.can_disable && !view.installed_busy && i<10000);
-                button(c.uninstall,l10n::Get(I::StoreUninstall),action(PackAction::InstalledUninstallBase),fluent::ButtonKind::Standard,item.can_uninstall && !view.installed_busy && i<10000);
-                button(c.rollback,l10n::Get(I::StoreRollback),action(PackAction::InstalledRollbackBase),fluent::ButtonKind::Standard,item.can_rollback && !view.installed_busy && i<10000);
+                const auto switch_bounds = item.enabled ? c.disable : c.enable;
+                if (switch_bounds.right > switch_bounds.left) {
+                    fluent::ControlState state{};
+                    state.checked = item.enabled;
+                    state.enabled = (item.enabled ? item.can_disable : item.can_enable) && !view.installed_busy && i < 10000;
+                    state.hovered = state.enabled && hovered(action(item.enabled ? PackAction::InstalledDisableBase : PackAction::InstalledEnableBase));
+                    painter_.DrawSwitch(switch_bounds, L"", state);
+                }
+                if (catalog != view.items.end()) {
+                    const auto catalog_index = static_cast<int>(catalog - view.items.begin());
+                    button(c.settings, l10n::Get(I::Settings),
+                        static_cast<PackAction>(static_cast<int>(PackAction::StoreItemSettingsBase) + catalog_index),
+                        fluent::ButtonKind::Standard, store_view::HasSettings(view, *catalog) && catalog_index < 10000);
+                }
+                if (c.more.right > c.more.left) {
+                    fluent::ControlState state{};
+                    state.enabled = (item.can_uninstall || item.can_rollback) && !view.installed_busy && i < 10000;
+                    state.hovered = state.enabled && hovered(action(PackAction::InstalledMoreBase));
+                    painter_.DrawButton({c.more, L"", {}, fluent::ButtonKind::Standard, state});
+                    DrawStoreIcon(dc, StoreIcon::More,
+                        D2D1::RectF(c.more.left+8*s,c.more.top+8*s,c.more.right-8*s,c.more.bottom-8*s),
+                        state.enabled ? theme.text_secondary : theme.text_disabled);
+                }
             }
             return;
         }
         if (vm.settings_store_browse) {
-            const auto& view=vm.settings_store_view;
-            auto caption=[&](std::wstring_view value,D2D1_RECT_F r,D2D1_COLOR_F color) {
-                if (r.bottom<=r.top) return;
-                painter_.DrawWrappedCaption(value,D2D1::Point2F(r.left,r.top),r.right-r.left,color);
-            };
-            auto bar=[&](std::wstring_view value,D2D1_RECT_F r,fluent::InfoBarKind kind) {
-                if (r.bottom<=r.top) return;
-                const auto color=painter_.StatusToneColor(kind);
-                painter_.FillRoundedRect(D2D1::RectF(r.left-12*s,r.top-6*s,r.right+12*s,r.bottom+6*s),6*s,WithAlpha(color,vm.dark?0.12f:0.07f));
-                caption(value,r,theme.text_secondary);
-            };
-            button(lay.store_refresh,l10n::Get(I::Refresh),PackAction::StoreRefresh,
-                fluent::ButtonKind::Standard,store_text::CanRefresh(view));
-            if (view.busy) button(lay.store_cancel,l10n::Get(I::Cancel),PackAction::StoreCancel);
-            // An explicit badge distinguishes cached/offline results from online data.
-            if (view.state==ExtensionStoreView::State::Offline) {
-                fluent::BadgeSpec badge{};
-                badge.bounds=lay.store_state;
-                badge.bounds.right=(std::min)(badge.bounds.right,badge.bounds.left+painter_.MeasureBadgeWidth(store_text::State(view)));
-                badge.text=store_text::State(view); badge.kind=fluent::BadgeKind::Warning;
-                painter_.DrawBadge(badge);
-            } else caption(store_text::State(view),lay.store_state,
-                view.state==ExtensionStoreView::State::Failed ? painter_.StatusToneColor(fluent::InfoBarKind::Error) : theme.text_secondary);
-            bar(l10n::Get(I::StoreTrust),lay.store_trust,fluent::InfoBarKind::Informational);
-            bar(view.notice,lay.store_notice,view.state==ExtensionStoreView::State::Failed ? fluent::InfoBarKind::Error : fluent::InfoBarKind::Informational);
-            bar(l10n::Get(I::StoreRestart),lay.store_restart,fluent::InfoBarKind::Warning);
-            card(D2D1::RectF(lay.store_manage.left-12*s,lay.store_manage.top-6*s,lay.store_manage.right+12*s,lay.store_manage.bottom+6*s));
-            hover_row(lay.store_manage,PackAction::StoreManage);
-            caption(l10n::Get(I::StoreOfficialManage),lay.store_manage,theme.accent);
-            const bool any_official = std::any_of(view.items.begin(), view.items.end(),
-                                                  [](const auto& item) { return item.official; });
-            caption(l10n::Get(any_official ? I::StoreOfficial : I::StoreCommunity),lay.store_section,theme.text);
-            caption(l10n::Get(I::StoreCommunity),lay.store_community_section,theme.text);
-            caption(l10n::Get(view.items.empty() ? I::StoreEmpty : I::StoreCommunityEmpty),lay.store_empty,theme.text_secondary);
-            for (size_t i=0;i<lay.store_items.size() && i<view.items.size();++i) {
-                const auto& c=lay.store_items[i]; const auto& item=view.items[i];
-                card(c.bounds);
-                // Icon tile in the package's own color with its glyph in white.
-                const auto tile=item.icon_color;
-                const D2D1_COLOR_F tile_color=D2D1::ColorF(((tile>>16)&0xFF)/255.0f,((tile>>8)&0xFF)/255.0f,(tile&0xFF)/255.0f);
-                painter_.FillRoundedRect(c.icon,10*s,tile_color);
-                painter_.DrawGlyph(item.icon_glyph,c.icon,D2D1::ColorF(1,1,1));
-                if (c.name.bottom>c.name.top) painter_.DrawWrappedSection(item.name,D2D1::Point2F(c.name.left,c.name.top),c.name.right-c.name.left,theme.text);
-                // A verified mark before the publisher: official packages are signed with Pulse's pinned key.
-                auto publisher=c.publisher;
-                if (item.official) {
-                    painter_.DrawGlyph(L"\xE73E",D2D1::RectF(publisher.left,publisher.top,publisher.left+14*s,publisher.bottom),theme.accent);
-                    publisher.left+=18*s;
-                }
-                caption(item.official ? l10n::Get(I::StoreOfficial) : item.publisher,publisher,theme.text_secondary);
-                caption(item.summary,c.summary,theme.text);
-                caption(item.status,c.status,theme.accent);
-                if (!item.version.empty()) {
-                    const std::wstring meta=L"v"+item.version+(item.size.empty() ? std::wstring{} : L" · "+item.size);
-                    painter_.DrawText(meta,c.version,compositor_->SmallFormat(),theme.text_secondary);
-                }
-                button(c.button,item.button_label,static_cast<PackAction>(static_cast<int>(PackAction::StoreItemBase)+static_cast<int>(i)),
-                    fluent::ButtonKind::Primary,item.action_enabled);
-            }
+            DrawSettingsStore(vm, rect, theme);
             return;
         }
     }
+
     if (vm.settings_page != 8) {
     text(pack_text::TriggerSection(), lay.trigger_section);
     const int trigger = vm.settings_preview_trigger == 1 ? 1 : 0;
@@ -369,9 +407,9 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
 
     card(lay.pack_native_settings);
     hover_row(lay.pack_native_settings, PackAction::NativeSettings);
-    setting(lay.pack_native_settings, L"\xE713", l10n::Get(l10n::StringId::NativeExtensionSettingsTitle),
-        l10n::Get(l10n::StringId::NativeExtensionSettingsIntro));
-    painter_.DrawGlyph(L"\xE76C", D2D1::RectF(lay.pack_native_settings.right-38*s,
+    setting(lay.pack_native_settings, nullptr, l10n::Get(l10n::StringId::NativeExtensionSettingsTitle),
+        l10n::Get(l10n::StringId::NativeExtensionSettingsIntro), StoreIcon::Gear);
+    DrawStoreIcon(dc, StoreIcon::ChevronRight, D2D1::RectF(lay.pack_native_settings.right-38*s,
         lay.pack_native_settings.top+24*s, lay.pack_native_settings.right-18*s,
         lay.pack_native_settings.top+44*s), theme.text_secondary);
 
@@ -379,7 +417,7 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
     {
         const auto& r = lay.pack_summary;
         card(r);
-        DrawIconText(r.left + 16*s, r.top + 24*s, 24*s, 24*s, L"\xE7B8", L"", theme.text_secondary, 0.85f);
+        DrawStoreIcon(dc, StoreIcon::Box, D2D1::RectF(r.left+16*s,r.top+24*s,r.left+40*s,r.top+48*s), theme.text_secondary);
         const bool compact = r.right - r.left < 560*s*static_cast<float>(vm.settings_ui_font_scale)/100;
         const float right = compact ? r.right - 16*s
             : (lay.pack_update_all.right > lay.pack_update_all.left ? lay.pack_update_all.left : lay.pack_open.left) - 12*s;
@@ -394,7 +432,7 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
     // One pack card (geometry from LayoutSettingsPacks' card_layout).
     struct CardSpec {
         D2D1_RECT_F card, badge, enable, primary, notice_box;
-        const wchar_t* icon;
+        StoreIcon icon;
         std::wstring_view title, desc, meta;
         pack_text::Badge badge_text;
         bool shows_enable, enabled, installed, installing, available;
@@ -410,7 +448,7 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
         const auto& r = c.card;
         card(r);
         const float text_left = r.left + 54*s, inner_right = r.right - 16*s;
-        DrawIconText(r.left + 16*s, r.top + 18*s, 24*s, 24*s, c.icon, L"", theme.accent, 0.9f);
+        DrawStoreIcon(dc, c.icon, D2D1::RectF(r.left+16*s,r.top+18*s,r.left+40*s,r.top+42*s), theme.accent);
         const bool stacked = c.badge.top > r.top + 30*s;
         text(c.title, D2D1::RectF(text_left, r.top + 12*s,
             stacked ? inner_right : c.badge.left - 12*s, r.top + 40*s));
@@ -455,7 +493,7 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
 
     // Media: the FFmpeg pack.
     text(pack_text::Media(), lay.pack_media_section);
-    draw_card({lay.pack_card, lay.pack_badge, lay.pack_enable, lay.pack_primary, lay.pack_notice, L"\xE714",
+    draw_card({lay.pack_card, lay.pack_badge, lay.pack_enable, lay.pack_primary, lay.pack_notice, StoreIcon::Film,
                pack_text::MediaTitle(), pack_text::MediaDesc(), pack_text::MediaMeta(), pack_text::MediaBadge(vm),
                false, vm.settings_pack_ffmpeg_enabled, vm.settings_pack_media_installed,
                vm.settings_pack_installing, vm.settings_pack_media_available, vm.settings_pack_progress, pack_text::Primary(vm),
@@ -465,7 +503,7 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
     // Images: the image pack.
     text(pack_text::Images(), lay.pack_images_section);
     draw_card({lay.pack_images_card, lay.pack_images_badge, lay.pack_images_enable, lay.pack_images_primary,
-               lay.pack_images_notice, L"\xE91B",
+               lay.pack_images_notice, StoreIcon::Image,
                pack_text::ImagesTitle(), pack_text::ImagesDesc(), pack_text::ImagesMeta(), pack_text::ImagesBadge(vm),
                pack_text::ShowsImagesEnable(vm), vm.settings_pack_images_enabled, vm.settings_pack_images_installed,
                vm.settings_pack_images_installing, vm.settings_pack_images_available, vm.settings_pack_images_progress, pack_text::ImagesPrimary(vm),
@@ -474,7 +512,7 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
 
     // RAW camera photos.
     draw_card({lay.pack_raw_card, lay.pack_raw_badge, lay.pack_raw_enable, lay.pack_raw_primary,
-               lay.pack_raw_notice, L"\xE722",
+               lay.pack_raw_notice, StoreIcon::Camera,
                pack_text::RawTitle(), pack_text::RawDesc(), pack_text::RawMeta(), pack_text::RawBadge(vm),
                pack_text::ShowsRawEnable(vm), vm.settings_pack_raw_enabled, vm.settings_pack_raw_installed,
                vm.settings_pack_raw_installing, vm.settings_pack_raw_available, vm.settings_pack_raw_progress, pack_text::RawPrimary(vm),
@@ -488,13 +526,13 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
         static const std::wstring kNone;
         const bool ready = pack_text::ContentReady(vm);
         draw_card({lay.pack_content_card, lay.pack_content_badge, lay.pack_content_enable, lay.pack_content_primary,
-                   lay.pack_content_notice, L"\xE721",
+                   lay.pack_content_notice, StoreIcon::TextSearch,
                    pack_text::ContentTitle(), pack_text::ContentDesc(), pack_text::ContentMeta(), pack_text::ContentBadge(vm),
                    false, false, ready, false, pack_text::ContentAvailable(vm), 0.0f, pack_text::ContentPrimary(vm),
                    PackAction::ContentInstall, PackAction::ContentInstall, PackAction::ContentManage,
                    ready ? vm.settings_content_status : kNone, lay.pack_content_update, std::wstring{}, PackAction::ContentInstall});
         draw_card({lay.pack_ocr_card, lay.pack_ocr_badge, lay.pack_ocr_enable, lay.pack_ocr_primary,
-                   lay.pack_ocr_notice, L"\xE8B9",
+                   lay.pack_ocr_notice, StoreIcon::TextSearch,
                    pack_text::OcrTitle(), pack_text::OcrDesc(), {}, pack_text::OcrBadge(),
                    false, false, false, false, false, 0.0f, pack_text::ComingSoon(),
                    PackAction::ContentInstall, PackAction::ContentInstall, PackAction::ContentInstall,
@@ -507,7 +545,7 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
         static const std::wstring kNone;
         const PackAction action = pack_text::AiAction(vm);
         draw_card({lay.pack_ai_card, lay.pack_ai_badge, lay.pack_ai_enable, lay.pack_ai_primary,
-                   lay.pack_ai_notice, L"\xE99A",
+                   lay.pack_ai_notice, StoreIcon::Sparkle,
                    pack_text::AiTitle(), pack_text::AiDesc(), pack_text::AiMeta(), pack_text::AiBadge(vm),
                    false, false, pack_text::AiUsable(vm), vm.settings_ai_pack_installing,
                    pack_text::AiAvailable(vm), vm.settings_ai_pack_progress, pack_text::AiPrimary(vm),
@@ -525,7 +563,7 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
     if (source_switch) toggle(lay.pack_enable, vm.settings_pack_ffmpeg_enabled, PackAction::Enable);
     divider_below(lay.pack_source_status);
     hover_row(lay.pack_custom_row, PackAction::UseCustom);
-    setting(lay.pack_custom_row, L"\xE943", pack_text::CustomTitle(), pack_text::CustomDesc());
+    setting(lay.pack_custom_row, nullptr, pack_text::CustomTitle(), pack_text::CustomDesc(), StoreIcon::Folder);
     toggle(row_switch(lay.pack_custom_row), vm.settings_pack_use_custom, PackAction::UseCustom);
     divider_below(lay.pack_custom_row);
     if (lay.pack_path_row.bottom > lay.pack_path_row.top) {
@@ -553,7 +591,7 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
         // 下载源: title and caption, the drop-down at the right.
         const auto& r = lay.pack_dl_row;
         const float right = lay.pack_dl_choice.left - 14*s;
-        DrawIconText(r.left + 16*s, r.top + 20*s, 24*s, 24*s, L"\xE896", L"", theme.text_secondary, 0.85f);
+        DrawStoreIcon(dc, StoreIcon::Download, D2D1::RectF(r.left+16*s,r.top+20*s,r.left+40*s,r.top+44*s), theme.text_secondary);
         text(pack_text::DownloadSourceTitle(), D2D1::RectF(r.left + 54*s, r.top + 10*s, right, r.top + 34*s));
         painter_.DrawWrappedCaption(pack_text::DownloadSourceDesc(), D2D1::Point2F(r.left + 54*s, r.top + 35*s),
                                     right - r.left - 54*s, theme.text_secondary);
@@ -566,11 +604,11 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
         divider_below(r);
     }
     hover_row(lay.pack_auto_update_row, PackAction::AutoUpdate);
-    setting(lay.pack_auto_update_row, L"\xE72C", pack_text::AutoUpdateTitle(), pack_text::AutoUpdateDesc());
+    setting(lay.pack_auto_update_row, nullptr, pack_text::AutoUpdateTitle(), pack_text::AutoUpdateDesc(), StoreIcon::Refresh);
     toggle(row_switch(lay.pack_auto_update_row), vm.settings_pack_auto_update, PackAction::AutoUpdate);
     divider_below(lay.pack_auto_update_row);
     hover_row(lay.pack_remove_row, PackAction::RemoveOnUninstall);
-    setting(lay.pack_remove_row, L"\xE74D", pack_text::RemoveTitle(), pack_text::RemoveDesc());
+    setting(lay.pack_remove_row, nullptr, pack_text::RemoveTitle(), pack_text::RemoveDesc(), StoreIcon::Trash);
     toggle(row_switch(lay.pack_remove_row), vm.settings_pack_remove_on_uninstall, PackAction::RemoveOnUninstall);
 
     if (lay.pack_speed_card.bottom > lay.pack_speed_card.top) {
@@ -579,7 +617,7 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
         card(lay.pack_speed_card);
         const auto& c = lay.pack_speed_card;
         const float right = lay.pack_speed_button.left - 14*s;
-        DrawIconText(c.left + 16*s, c.top + 20*s, 24*s, 24*s, L"\xE916", L"", theme.text_secondary, 0.85f);
+        DrawStoreIcon(dc, StoreIcon::Refresh, D2D1::RectF(c.left+16*s,c.top+20*s,c.left+40*s,c.top+44*s), theme.text_secondary);
         text(pack_text::SpeedTestTitle(), D2D1::RectF(c.left + 54*s, c.top + 10*s, right, c.top + 34*s));
         painter_.DrawWrappedCaption(pack_text::SpeedTestDesc(), D2D1::Point2F(c.left + 54*s, c.top + 35*s),
                                     right - c.left - 54*s, theme.text_secondary);
