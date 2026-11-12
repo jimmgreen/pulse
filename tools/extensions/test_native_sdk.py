@@ -97,6 +97,9 @@ def main():
     source.add_argument("--archive", type=Path)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--validate-only", action="store_true")
+    # The archive reference sample links official 7-Zip; its x64 7z.dll, License.txt and
+    # NOTICE.txt are not part of the SDK, so that sample builds only when they are given.
+    parser.add_argument("--sevenzip-dir", type=Path)
     args = parser.parse_args()
     args.work.mkdir(parents=True, exist_ok=True)
     root = validate(extract(args.archive, args.work / "sdk") if args.archive else args.sdk_root)
@@ -197,16 +200,28 @@ int main() { return 0; }
             (abi / "CMakeLists.txt").write_text('cmake_minimum_required(VERSION 3.25)\nproject(NativeAbiCheck LANGUAGES CXX)\nadd_executable(abi_check main.cpp)\ntarget_include_directories(abi_check PRIVATE "${PULSE_SDK_INCLUDE}")\n', encoding="utf-8")
             for command in (["cmake", "-S", str(abi.resolve()), "-B", str((abi / "build").resolve()), "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DPULSE_SDK_INCLUDE=" + str(root / "sdk/native/include")], ["cmake", "--build", str((abi / "build").resolve())]):
                 subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT)
-            for example in ("basic", "rename-panel", "inspector", "reactive-panel", "live-data", "directory-browser", "file-operations", "directory-transfer", "directory-workbench"):
+            for example in ("basic", "archive-dialog", "rename-panel", "inspector", "reactive-panel", "live-data", "directory-browser", "file-operations", "directory-transfer", "directory-workbench"):
                 build = (args.work / ("build-" + example)).resolve()
                 for command in (["cmake", "-S", str(root / "examples/native" / example), "-B", str(build), "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DPULSE_SDK_INCLUDE=" + str(root / "sdk/native/include")], ["cmake", "--build", str(build)]):
                     subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT)
             for name in ("pulse_rename_lower.dll", "pulse_rename_upper.dll"):
                 if not (args.work / "build-rename-panel" / name).is_file():
                     raise ValueError("Missing author DLL " + name)
-            for directory, name in (("basic", "pulse_native_example.dll"), ("inspector", "pulse_inspector.dll"), ("reactive-panel", "pulse_reactive.dll"), ("live-data", "pulse_live_data.dll"), ("directory-browser", "pulse_directory_browser.dll"), ("file-operations", "pulse_file_operations.dll"), ("directory-transfer", "pulse_directory_transfer.dll"), ("directory-workbench", "pulse_directory_workbench.dll")):
+            for directory, name in (("basic", "pulse_native_example.dll"), ("archive-dialog", "pulse_archive_dialog.dll"), ("inspector", "pulse_inspector.dll"), ("reactive-panel", "pulse_reactive.dll"), ("live-data", "pulse_live_data.dll"), ("directory-browser", "pulse_directory_browser.dll"), ("file-operations", "pulse_file_operations.dll"), ("directory-transfer", "pulse_directory_transfer.dll"), ("directory-workbench", "pulse_directory_workbench.dll")):
                 if not (args.work / ("build-" + directory) / name).is_file():
                     raise ValueError("Missing author DLL " + name)
+            # Reference samples under sdk/native/samples: the out-of-process worker always,
+            # the 7-Zip archive sample when its third-party engine is supplied.
+            samples = [("sandboxed-worker", [], ("pulse_sandboxed_worker.dll", "sandboxed_worker.exe"))]
+            if args.sevenzip_dir:
+                samples.append(("archive", ["-DPULSE_7ZIP_DIR=" + str(args.sevenzip_dir.resolve())], ("pulse_archive.dll",)))
+            for sample, extra, outputs in samples:
+                build = (args.work / ("build-sample-" + sample)).resolve()
+                for command in (["cmake", "-S", str(root / "sdk/native/samples" / sample), "-B", str(build), "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DPULSE_SDK_INCLUDE=" + str(root / "sdk/native/include")] + extra, ["cmake", "--build", str(build)]):
+                    subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT)
+                for name in outputs:
+                    if not (build / name).is_file():
+                        raise ValueError("Missing sample output " + name)
             with (args.work / "wrapper-test.log").open("w", encoding="utf-8") as test_log:
                 subprocess.run([str((args.work / "build-reactive-panel/pulse_client_wrapper_test.exe").resolve())], check=True, stdout=test_log, stderr=subprocess.STDOUT)
             with (args.work / "data-provider-test.log").open("w", encoding="utf-8") as test_log:
@@ -215,7 +230,8 @@ int main() { return 0; }
                 subprocess.run([str((args.work / "build-directory-browser/pulse_directory_browser_test.exe").resolve())], check=True, stdout=test_log, stderr=subprocess.STDOUT)
         report["dllsCompiled"] = True
         report["abiPackingCompiled"] = True
-        report["dllCount"] = 10
+        report["dllCount"] = 12 + (1 if args.sevenzip_dir else 0)
+        report["samplesCompiled"] = ["sandboxed-worker"] + (["archive"] if args.sevenzip_dir else [])
         report["directoryProviderTestsPassed"] = True
         report["dataProviderTestsPassed"] = True
         report["wrapperTestsPassed"] = True

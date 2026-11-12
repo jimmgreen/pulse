@@ -267,11 +267,11 @@ class NativeBundleTests(unittest.TestCase):
             compat_report = bundle_native_sdk.compatibility_report(archive)
             self.assertEqual(compat_report["compatibility"], compat)
             self.assertEqual(compat_report["archiveSha256"], hashlib.sha256(archive.read_bytes()).hexdigest())
-            self.assertEqual(len(compat_report["templates"]), 8)
+            self.assertEqual(len(compat_report["templates"]), 9)
 
             verified = verify_sdk_bundle.verify_bundle(archive, compile_projects=False)
             self.assertTrue(verified["ok"], verified)
-            self.assertEqual(verified["templatesVerified"], 8)
+            self.assertEqual(verified["templatesVerified"], 9)
 
 
 if __name__ == "__main__":

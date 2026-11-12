@@ -28,6 +28,7 @@ EXPECTED_RESOURCES = [
 ]
 
 EXPECTED_TEMPLATES = (
+    "archive-dialog",
     "directory-browser",
     "directory-transfer",
     "directory-workbench",

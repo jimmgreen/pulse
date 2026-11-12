@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class ProjectCreatorTests(unittest.TestCase):
     def test_template_enumeration_excludes_basic_and_matches_catalog(self):
         expected = template_catalog.names(ROOT / "examples/native")
-        self.assertEqual(len(expected), 8)
+        self.assertEqual(len(expected), 9)
         self.assertNotIn("basic", expected)
         self.assertNotIn("dock-panel", expected)
         self.assertEqual(project_creator.templates(ROOT), expected)

@@ -17,7 +17,7 @@ cmake -S C:/PulseAuthor/my-rename -B C:/PulseAuthor/my-rename/build -G Ninja -DC
 cmake --build C:/PulseAuthor/my-rename/build
 ```
 
-需要源码级断点与 `.pdb` 符号调试时，使用 `-B C:/PulseAuthor/my-rename/build-debug -DCMAKE_BUILD_TYPE=RelWithDebInfo`（或 `Debug`）并将 Visual Studio / VS Code (`cppvsdbg`) 附加到隔离测试宿主的 PID。`new` 支持 `examples/native/catalog.json` 中的全部 8 个可打包模板（`directory-browser`、`directory-transfer`、`directory-workbench`、`file-operations`、`inspector`、`live-data`、`reactive-panel`、`rename-panel`），自动渲染新包 `id`/`name`、CMake 目标名与 README；最小 ABI 示例 `examples/native/basic` 不含 `manifest.json`，仅作头文件编译参考。业务源码只依赖公开头，不包含 Pulse 的私有类或内部静态库。
+需要源码级断点与 `.pdb` 符号调试时，使用 `-B C:/PulseAuthor/my-rename/build-debug -DCMAKE_BUILD_TYPE=RelWithDebInfo`（或 `Debug`）并将 Visual Studio / VS Code (`cppvsdbg`) 附加到隔离测试宿主的 PID。`new` 支持 `examples/native/catalog.json` 中的全部 9 个可打包模板（`archive-dialog`、`directory-browser`、`directory-transfer`、`directory-workbench`、`file-operations`、`inspector`、`live-data`、`reactive-panel`、`rename-panel`），自动渲染新包 `id`/`name`、CMake 目标名与 README；最小 ABI 示例 `examples/native/basic` 不含 `manifest.json`，仅作头文件编译参考。业务源码只依赖公开头，不包含 Pulse 的私有类或内部静态库。
 
 ## 2. 生成清单并打包
 
@@ -80,7 +80,7 @@ python tools/extensions/native_author_mcp.py --workspace C:/PulseAuthor --sdk-ro
 
 | 工具 | 用途 |
 |---|---|
-| `native_sdk_describe` | 发现接口（按 `interface` 读取完整公开头）、8 个可打包 `templates` 及 `abiSamples` (`["basic"]`) |
+| `native_sdk_describe` | 发现接口（按 `interface` 读取完整公开头）、9 个可打包 `templates` 及 `abiSamples` (`["basic"]`) |
 | `native_project_create` | 基于可打包模板创建带唯一包 ID（支持可选 `id`/`displayName`，默认派生 `local.<name>`）的独立工程 |
 | `native_project_build` | 支持 `config`（`Debug` / `RelWithDebInfo` / `Release`），返回 DLL、`.pdb` 符号与调试器附加提示 |
 | `native_package_stage` | 计算哈希、生成 manifest、打包和校验 |
@@ -170,7 +170,7 @@ P1.5确认、冲突、定位、撤销重做、暂存清理已有真实宿主证�
 
 `pulse.settings.pages` V1 的create(title,tree,page)同步复制既有UI-model树，每个包会话最多一页，挂在宿主增强包设置区；所有调用和回调在owner UI线程。page也是普通panel ID；query仅提供该页专用的 `pulse.ui.model`、`pulse.ui.events` 表，独立于插件主面板，不提供mount/data。remove或停用使ID与订阅失效，专用context保留到会话destroy；回调借用文本须立即复制，userdata保留到当前回调返回。
 
-`pulse.dialogs` V1/V2（`pulse/dialogs.h`）在 owner UI 线程提供宿主自绘 Fluent 模态对话框（标题、可选正文、可选 UI-model 表单及 1–3 个底部按钮，支持 `password` 掩码输入，由 `PickerOwnerGuard` 统一管理模态焦点与父窗口禁用），每会话最多一个活动模态框；V2 新增对话框内不关闭弹窗的命令回调（`subscribe_command` / `unsubscribe_command`）、表单模型原地刷新（`update_model`）与同步状态读取（`get_state`），并可与 `pulse.pickers`（打开/保存文件、目录选择、带拼音匹配的 `quick_pick`）、`pulse.workbench`（胶囊提示、通知卡片、路径定位、内置文本对比、剪贴板）和 `pulse.diagnostics`（节点/字段级结构化错误诊断）组合完成完整向导工作流。官方 `extensions/7zip` 用其承载密码输入、压缩参数与哈希校验结果。
+`pulse.dialogs` V1/V2（`pulse/dialogs.h`）在 owner UI 线程提供宿主自绘 Fluent 模态对话框（标题、可选正文、可选 UI-model 表单及 1–3 个底部按钮，支持 `password` 掩码输入，由 `PickerOwnerGuard` 统一管理模态焦点与父窗口禁用），每会话最多一个活动模态框；V2 新增对话框内不关闭弹窗的命令回调（`subscribe_command` / `unsubscribe_command`）、表单模型原地刷新（`update_model`）与同步状态读取（`get_state`），并可与 `pulse.pickers`（打开/保存文件、目录选择、带拼音匹配的 `quick_pick`）、`pulse.workbench`（胶囊提示、通知卡片、路径定位、内置文本对比、剪贴板）和 `pulse.diagnostics`（节点/字段级结构化错误诊断）组合完成完整向导工作流。官方 `extensions/7zip` 用其承载密码输入、压缩参数与哈希校验结果。`PulseDialogRequest` 末尾的可选字段（`heading` 大标题、`icon` 标题图标 `PULSE_DIALOG_ICON_*`、`subject_kind`/`subject`/`subject_detail` 对象卡片、`footnote`/`footnote_icon` 底部提示，按 `size` 读取）决定 7-Zip 对话框的外观；完整写法见可打包模板 [`archive-dialog`](../examples/native/archive-dialog/README.md)。
 
 持久化复用 `pulse.resources.settings_get/set`，接纳请求不表示保存成功，只有完成回调可显示Saved。样例以单键 `archive.preferences` 保存版本化值（`1\n格式索引\n级别索引\n目录`，总计最多1024 UTF-8字节），使用expected_version做CAS避免多字段部分保存。version_conflict不覆盖外部修改：重新get版本，保留草稿，明确要求用户再次Save；请求失败提供Reload/Save重试。停用/销毁取消未完成resource请求，不回滚已提交设置。
 

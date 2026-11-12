@@ -65,7 +65,7 @@ class GenerationTests(unittest.TestCase):
     def test_native_templates_have_no_legacy_fields(self):
         allowed = set(read_json(SCHEMA)["properties"])
         templates = template_catalog.all_templates()
-        self.assertEqual(len(templates), 8)
+        self.assertEqual(len(templates), 9)
         for value in templates.values():
             self.assertFalse(set(value) - allowed)
 

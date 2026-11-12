@@ -308,12 +308,12 @@ def verify_bundle(archive_path, work_dir=None, compile_projects=False, require_c
         if not contract_report.get("ok"):
             raise ValueError(f"Contract check reported errors: {contract_report.get('errors')}")
 
-        # 2. Scaffold independent projects for all 8 packable templates using extracted pulse_ext.py new.
+        # 2. Scaffold independent projects for all 9 packable templates using extracted pulse_ext.py new.
         cli_script = extracted_sdk / "tools/extensions/pulse_ext.py"
         examples_catalog = json.loads((extracted_sdk / "examples/native/catalog.json").read_text(encoding="utf-8"))
         templates = list(examples_catalog["templates"])
-        if len(templates) != 8:
-            raise ValueError(f"Expected 8 packable templates in SDK, found {len(templates)}: {templates}")
+        if len(templates) != 9:
+            raise ValueError(f"Expected 9 packable templates in SDK, found {len(templates)}: {templates}")
 
         projects_root = temp_root / "generated-projects"
         projects_root.mkdir()

@@ -12,6 +12,7 @@ RESERVED_DEVICES = (
 )
 
 TEMPLATE_CMAKELISTS_STEMS = {
+    "archive-dialog": "pulse_archive_dialog",
     "directory-browser": "pulse_directory_browser",
     "directory-transfer": "pulse_directory_transfer",
     "directory-workbench": "pulse_directory_workbench",

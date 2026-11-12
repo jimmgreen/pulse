@@ -91,7 +91,8 @@ python tools/extensions/pulse_ext.py --json enable com.acme.my-plugin --store C:
 
 ## 4. Packable Templates vs Reference Samples
 
-- **8 Packable `new` Templates** (`examples/native/catalog.json`):
+- **9 Packable `new` Templates** (`examples/native/catalog.json`):
+  - `archive-dialog` — 7-Zip-style host dialog (`pulse.dialogs` V2: heading, icon, subject card, footnote), derived form states, folder picker via `pulse.pickers`.
   - `inspector` — directory stats, CAS settings (`pulse.resources`), audit view.
   - `rename-panel` — two-phase rename plan + host confirmation (`pulse.files`).
   - `reactive-panel` — `std::jthread` worker + `pulse.dispatch` + `pulse/client.hpp`.

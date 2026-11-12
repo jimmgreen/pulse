@@ -7,6 +7,8 @@
 
 - [reactive-panel](reactive-panel/README.md)：状态事件驱动 C++20 工作线程，通过 dispatch 返回 UI；含关键生命周期封装测试。
 
+- [archive-dialog](archive-dialog/README.md)：右键命令打开宿主绘制的 `pulse.dialogs` 对话框（大标题、图标、对象卡片、底部提示），表单派生状态实时回写，“浏览…”按钮经 `pulse.pickers` 选文件夹；即 7-Zip 扩展压缩对话框的写法。
+
 - [live-data](live-data/README.md)：DLL 自行生成 4096 条数据、后台筛选排序、128 条分页与稳定 ID delta；单工作线程演示取消、空结果和错误，不包含目录 watch。
 
 这些开发预览示例可按原生包契约生成清单、打包和安装，并从正常命令面板挂载。显式 DLL 参数仅用于开发调试。示例不意味着 UI 挂载点或全部内部服务已经开放。参见 [SDK 契约](../../sdk/native/README.md)。

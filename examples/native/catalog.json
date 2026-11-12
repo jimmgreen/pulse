@@ -1,6 +1,7 @@
 {
   "formatVersion": 1,
   "templates": [
+    "archive-dialog",
     "directory-browser",
     "directory-transfer",
     "directory-workbench",
