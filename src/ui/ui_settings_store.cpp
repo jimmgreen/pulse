@@ -191,6 +191,30 @@ struct StorePainter {
     }
 };
 A Offset(A a,size_t i){return static_cast<A>(static_cast<int>(a)+static_cast<int>(i));}
+// 接管压缩包: a format's icon from the 7-Zip extension's DLL (the one File Explorer shows), per device and size.
+ID2D1Bitmap* FormatIcon(ID2D1DeviceContext* dc,const std::wstring& library,int id,int px) {
+    struct Entry { ID2D1DeviceContext* dc=nullptr; std::wstring library; int id=0,px=0; ComPtr<ID2D1Bitmap> bitmap; };
+    static std::vector<Entry> cache;
+    if(!dc||library.empty()||id<=0)return nullptr;
+    for(auto& e:cache) if(e.dc==dc&&e.id==id&&e.px==px&&e.library==library) return e.bitmap.get();
+    if(cache.size()>64)cache.clear();
+    Entry entry;entry.dc=dc;entry.library=library;entry.id=id;entry.px=px;
+    HICON icon=nullptr;
+    if(HMODULE module=LoadLibraryExW(library.c_str(),nullptr,LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE)) {
+        if(FAILED(LoadIconWithScaleDown(module,MAKEINTRESOURCEW(id),px,px,&icon)))icon=nullptr;
+        FreeLibrary(module);
+    }
+    if(icon) {
+        ComPtr<IWICImagingFactory> wic;ComPtr<IWICBitmap> source;ComPtr<IWICFormatConverter> converter;
+        if(SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&wic)))&&
+           SUCCEEDED(wic->CreateBitmapFromHICON(icon,&source))&&SUCCEEDED(wic->CreateFormatConverter(&converter))&&
+           SUCCEEDED(converter->Initialize(source.get(),GUID_WICPixelFormat32bppPBGRA,WICBitmapDitherTypeNone,nullptr,0.0,WICBitmapPaletteTypeMedianCut)))
+            dc->CreateBitmapFromWicBitmap(converter.get(),nullptr,&entry.bitmap);
+        DestroyIcon(icon);
+    }
+    cache.push_back(std::move(entry));
+    return cache.back().bitmap.get();
+}
 }
 D2D1_RECT_F MainRenderer::SettingsStoreField(int field) const { return field>=0&&field<7?settings_store_fields_[field]:D2D1_RECT_F{}; }
 D2D1_RECT_F MainRenderer::SettingsStoreClip() const {return settings_store_clip_;}
@@ -417,6 +441,45 @@ void MainRenderer::DrawSevenZipDetail(const WindowViewModel& vm,const D2D1_RECT_
         const auto fallback=(z.available||z.needs_update)?I::SzExtensionUpdateRequired:z.needs_restart?I::ExtensionStoreInstalledRestart:item.enabled?I::SzLoading:I::SzUnavailable;
         p.Caption(l10n::Get(fallback),Inset(d.groups[0],20*s,20*s),theme.text_secondary);
         return;
+    }
+    if(v.detail_tab==0&&z.take_available) {
+        p.Heading(l10n::Get(I::SzTakeSection),d.take_label);
+        p.Card(d.take_group);
+        p.Row(d.take_row,StoreIcon::Box,l10n::Get(I::SzTakeTitle),l10n::Get(I::SzTakeDesc),76);
+        p.Switch(d.take_switch,z.take,A::SzTake);
+        p.Line(d.take_group.left+16*s,d.take_group.right-16*s,d.take_head.top-4*s,theme.stroke_divider);
+        if(z.take_busy) {
+            p.Caption(l10n::Get(I::SzTakeBusy),{d.take_head.left,d.take_head.top+6*s,d.take_head.right,d.take_head.bottom},theme.accent);
+        } else {
+            p.Caption(z.take_head,{d.take_head.left,d.take_head.top+6*s,d.take_head.right,d.take_head.bottom},theme.text_secondary);
+            p.Button(d.take_winsettings,l10n::Get(I::SzTakeWinSettings),A::SzTakeWinSettings);
+            p.Button(d.take_next,l10n::Get(I::SzTakeConfirmEach),A::SzTakeNext,true);
+        }
+        const auto warning=painter_.StatusToneColor(fluent::InfoBarKind::Warning);
+        for(size_t i=0;i<d.take_rows.size()&&i<z.take_rows.size();++i) {
+            const auto& r=d.take_rows[i];const auto& row=z.take_rows[i];
+            using Owner=SevenZipTakeRow::Owner;
+            const bool dim=row.owner==Owner::Off;
+            if(p.Hot(Offset(A::SzTakeIncBase,i))&&z.take)painter_.FillRoundedRect(Inset(r.bounds,0,2*s),6*s,theme.fill_hover);
+            if(i)p.Line(r.bounds.left+8*s,r.bounds.right-8*s,r.bounds.top,theme.stroke_divider);
+            fluent::ControlState check{};check.checked=row.included;check.enabled=z.take;check.hovered=z.take&&p.Hot(Offset(A::SzTakeIncBase,i));
+            painter_.DrawCheckBox(r.check,L"",check);
+            const int px=std::max(16,static_cast<int>(std::lround((r.icon.right-r.icon.left))));
+            if(auto* bitmap=FormatIcon(compositor_->Dc(),z.icon_library,row.icon,px))
+                compositor_->Dc()->DrawBitmap(bitmap,r.icon,dim?.7f:1.0f,D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            auto name_color=dim?theme.text_secondary:theme.text;
+            p.Text(row.label,{r.name.left,r.name.top,r.name.right,r.name.top+20*s},false,&name_color);
+            p.Text(row.extensions,{r.name.left,r.name.top+20*s,r.name.right,r.name.bottom},true);
+            const auto tone=row.owner==Owner::Pulse?green:row.owner==Owner::Other?warning:theme.text_secondary;
+            const float cy=(r.status.top+r.status.bottom)/2;
+            painter_.FillRoundedRect({r.status.left,cy-3.5f*s,r.status.left+7*s,cy+3.5f*s},3.5f*s,row.owner==Owner::Off?WithAlpha(tone,.5f):tone);
+            auto status_color=row.owner==Owner::Pulse||row.owner==Owner::Other?theme.text:theme.text_secondary;
+            p.Text(row.status,{r.status.left+14*s,r.status.top,r.status.right,r.status.bottom},true,&status_color);
+            p.Button(r.ask,l10n::Get(row.ask_windows?I::SzTakeAskSet:I::SzTakeAskChange),Offset(A::SzTakeAskBase,i));
+        }
+        p.Line(d.take_group.left+16*s,d.take_group.right-16*s,d.double_click_row.top-2*s,theme.stroke_divider);
+        p.Row(d.double_click_row,StoreIcon::Open,l10n::Get(I::SzDblTitle),l10n::Get(I::SzDblDesc));
+        for(int i=0;i<2;++i)p.Option(d.double_click_opts[i],l10n::Get(i?I::SzDblOpen:I::SzModeSmart),l10n::Get(i?I::SzDblOpenDesc:I::SzModeSmartDesc),z.double_click==i,Offset(A::SzDoubleClickBase,i));
     }
     if(v.detail_tab==0) {
         constexpr I sections[]={I::SzSectionExtract,I::SzSectionCompress,I::SzSectionPassword};

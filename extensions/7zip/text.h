@@ -34,6 +34,7 @@ enum class Id {
     ResultExtracted, ResultCompressed, ResultItems, ResultTook,
     TestOkDetail, StatFiles, StatUnpacked, StatRatio, StatFormat, StatTime, StatCount, StatRatioValue, StatSeconds, Done,
     ErrWorkerCrashed, ErrWorkerTimedOut, ErrWorkerMemory, DetailWorkerIsolated,
+    TakeFailed, TypeArchive, TypeBundle, TypeCab, VerbPreview, AppDescription,
 };
 const char* Get(Id id);                       // UTF-8
 std::string Format(Id id, const std::string& name);  // replaces {name}

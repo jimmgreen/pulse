@@ -19,6 +19,9 @@ enum class ExternalOpenStatus { Dispatched, Deferred, Failed };
 struct ExternalOpenResult { ExternalOpenStatus status = ExternalOpenStatus::Failed; AppState* target = nullptr; };
 ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw, bool reveal = false);
 bool ExternalOpenWindowBusy(const AppState& state);
+// "pulse:extract:<archive>" / "pulse:archive-preview:<archive>": File Explorer opening an archive
+// type of the 7-Zip extension's 接管压缩包. OpenExternalFolder shows it, then extracts or previews it.
+bool IsArchiveLaunch(const std::wstring& raw);
 
 // WM_CONVERT_EXTERNAL_OPEN, the toast after such an open was clicked (M7b,
 // plan §6 rule 7): a folder opened in window `s` goes back as a tab (with

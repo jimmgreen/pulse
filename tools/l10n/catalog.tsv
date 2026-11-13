@@ -5501,3 +5501,26 @@ NativeExtMenuCommandsEmpty	IDS_NATIVE_EXT_MENU_COMMANDS_EMPTY	6813	该扩展当�
 NativeExtMenuHiddenByPlugin	IDS_NATIVE_EXT_MENU_HIDDEN_BY_PLUGIN	6814	已由扩展自身隐藏	Currently hidden by the extension	
 NativeExtMenuResetOverrides	IDS_NATIVE_EXT_MENU_RESET_OVERRIDES	6815	恢复默认菜单显示	Reset menu overrides	
 DialogHistoryAdminAutoFailed	IDS_DIALOGHISTORYADMINAUTOFAILED	6816	这款管理员软件尚未自动接入。请在接管设置中检查自动服务状态。	Automatic attachment to this elevated application failed. Check the automatic service status in dialog integration settings.	
+SzTakeSection	IDS_SZ_TAKE_SECTION	6834	接管压缩包	Archive files	
+SzTakeTitle	IDS_SZ_TAKE_TITLE	6835	接管压缩包	Open archives with Pulse	
+SzTakeDesc	IDS_SZ_TAKE_DESC	6836	双击压缩包直接用 Pulse 解压，压缩包换上按格式区分的图标。别的压缩软件正在打开的格式不动，可以在下面单独改。关掉时恢复原来的关联。	Double-click an archive to extract it with Pulse, and give archives an icon for each format. Formats another archiver opens are left alone; change them one by one below. Turning this off restores the previous associations.	
+SzTakeBusy	IDS_SZ_TAKE_BUSY	6837	正在注册图标和关联，并通知资源管理器刷新图标…	Registering icons and associations, and asking File Explorer to refresh…	
+SzTakeWinSettings	IDS_SZ_TAKE_WIN_SETTINGS	6838	在 Windows 设置里一起改	Change them in Windows Settings	
+SzTakeConfirmEach	IDS_SZ_TAKE_CONFIRM_EACH	6839	逐个确认	Confirm one by one	
+SzTakeAskSet	IDS_SZ_TAKE_ASK_SET	6840	设为 Pulse…	Use Pulse…	
+SzTakeAskChange	IDS_SZ_TAKE_ASK_CHANGE	6841	改为 Pulse…	Switch to Pulse…	
+SzDblTitle	IDS_SZ_DBL_TITLE	6842	双击压缩包时	When you double-click an archive	
+SzDblDesc	IDS_SZ_DBL_DESC	6843	右键菜单里的命令不变	Context menu commands stay the same	
+SzDblOpen	IDS_SZ_DBL_OPEN	6844	在 Pulse 里打开	Open in Pulse	
+SzDblOpenDesc	IDS_SZ_DBL_OPEN_DESC	6845	先看里面有什么，不解压	See what is inside without extracting	
+SzTakeStatusExtract	IDS_SZ_TAKE_STATUS_EXTRACT	6846	Pulse 智能解压	Pulse smart extract	
+SzTakeStatusOpen	IDS_SZ_TAKE_STATUS_OPEN	6847	在 Pulse 中打开	Opens in Pulse	
+SzTakeStatusOther	IDS_SZ_TAKE_STATUS_OTHER	6848	现在由「{name}」打开	Opens with {name} now	
+SzTakeStatusExcluded	IDS_SZ_TAKE_STATUS_EXCLUDED	6849	不接管	Not taken over	
+SzTakeStatusExcludedWho	IDS_SZ_TAKE_STATUS_EXCLUDED_WHO	6850	不接管 · 由「{name}」打开	Not taken over · opens with {name}	
+SzTakeStatusOff	IDS_SZ_TAKE_STATUS_OFF	6851	未接管	Not taken over	
+SzTakeStatusOffWho	IDS_SZ_TAKE_STATUS_OFF_WHO	6852	未接管 · 由「{name}」打开	Not taken over · opens with {name}	
+SzTakeStatusFree	IDS_SZ_TAKE_STATUS_FREE	6853	没有程序打开	No program opens it	
+SzTakeOffHint	IDS_SZ_TAKE_OFF_HINT	6854	打开后，下面这些格式双击就用 Pulse 解压，并换上压缩包图标。	When on, these formats extract with Pulse on double-click and get archive icons.	
+SzTakeSummaryAsk	IDS_SZ_TAKE_SUMMARY_ASK	6855	已接管 {count} 种 · {name} 种需要在 Windows 里确认一次	{count} taken over · {name} need confirming once in Windows	
+SzTakeSummaryDone	IDS_SZ_TAKE_SUMMARY_DONE	6856	已接管 {count} 种 · 全部完成	{count} taken over · all done	

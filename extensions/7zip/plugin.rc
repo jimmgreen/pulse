@@ -1,0 +1,17 @@
+// plugin.rc - the "document" style archive icons registered as DefaultIcon by association.cpp.
+// Rendered from archive_icons_mockup.html: 16/20/24 px use the simplified page, 32-256 px the full one.
+101 ICON "icons/zip.ico"
+102 ICON "icons/zipx.ico"
+103 ICON "icons/7z.ico"
+104 ICON "icons/rar.ico"
+105 ICON "icons/tar.ico"
+106 ICON "icons/gz.ico"
+107 ICON "icons/xz.ico"
+108 ICON "icons/bz2.ico"
+109 ICON "icons/lzma.ico"
+110 ICON "icons/z.ico"
+111 ICON "icons/cab.ico"
+112 ICON "icons/lzh.ico"
+113 ICON "icons/lha.ico"
+114 ICON "icons/arj.ico"
+115 ICON "icons/cpio.ico"

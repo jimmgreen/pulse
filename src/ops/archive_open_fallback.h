@@ -43,6 +43,19 @@ inline HRESULT CurrentDefault(const wchar_t* extension, std::wstring& progid) {
     CoTaskMemFree(value);
     return result;
 }
+// The 7-Zip extension's own file type (接管压缩包, extensions/7zip/takeover_record.h) whose
+// double-click extracts: run that in place instead of starting Pulse again through the shell.
+inline bool PulseExtractType(std::wstring_view progid) {
+    constexpr std::wstring_view prefix = L"Pulse.Archive.";
+    if (progid.size() <= prefix.size() || CompareStringOrdinal(progid.data(), static_cast<int>(prefix.size()),
+                                                                prefix.data(), static_cast<int>(prefix.size()), TRUE) != CSTR_EQUAL)
+        return false;
+    const std::wstring key = L"Software\\Classes\\" + std::wstring(progid) + L"\\shell\\open\\command";
+    wchar_t command[2048]{};
+    DWORD bytes = sizeof(command) - sizeof(wchar_t);
+    return RegGetValueW(HKEY_CURRENT_USER, key.c_str(), nullptr, RRF_RT_REG_SZ, nullptr, command, &bytes) == ERROR_SUCCESS &&
+        std::wstring_view(command).find(L"\"pulse:extract:") != std::wstring_view::npos;
+}
 // Called only by the shell-open STA, never while handling a UI click.
 inline bool NeedsFallback(const std::wstring& path) {
     if (!Supported(path)) return false;
@@ -51,6 +64,6 @@ inline bool NeedsFallback(const std::wstring& path) {
     const auto extension = path.substr(path.find_last_of(L'.'));
     std::wstring progid;
     const auto result = CurrentDefault(extension.c_str(), progid);
-    return ShouldExtract(result, progid);
+    return ShouldExtract(result, progid) || (SUCCEEDED(result) && PulseExtractType(progid));
 }
 }

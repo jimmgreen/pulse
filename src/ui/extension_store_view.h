@@ -33,6 +33,15 @@ struct SevenZipMenuRow {
     uint32_t icon = 0; // PULSE_COMMAND_ICON_*
     StoreIcon vector_icon = StoreIcon::File; // its drawn icon (StoreCommandIconFor)
 };
+// 接管压缩包: one format (or the legacy group) as the extension reports it.
+struct SevenZipTakeRow {
+    std::wstring label, extensions, status; // "GZ", ".gz .tgz", "现在由「Bandizip」打开"
+    enum class Owner { Off, Pulse, Other, Free } owner = Owner::Off;
+    bool included = true;     // its checkbox
+    bool ask = false;         // offer Windows' chooser
+    bool ask_windows = false; // the current owner is Windows' archive folder (设为, not 改为)
+    int icon = 0;             // resource id in SevenZipView::icon_library
+};
 struct SevenZipView {
     bool available = false; // the package runs and its page answers
     bool needs_restart = false; // installed/toggled on disk, awaiting full Pulse restart
@@ -52,6 +61,13 @@ struct SevenZipView {
     std::wstring status;      // the page's own save line ("已保存。", errors)
     std::vector<std::wstring> formats_rw, formats_ro;
     std::vector<SevenZipMenuRow> archive_rows, file_rows; // the live menu for sample selections
+    // 接管压缩包 (older packages publish none of it: take_available stays false).
+    bool take_available = false, take = false, take_busy = false, ask_any = false, ask_many = false;
+    int double_click = 0;     // 0 smart extract, 1 open in Pulse
+    std::wstring take_head;   // the summary line over the formats
+    std::string take_config;  // "<take>|<double-click>|<formats hex>", edited back as a whole
+    std::wstring icon_library;
+    std::vector<SevenZipTakeRow> take_rows;
 };
 // Registry snapshot, including disabled packages; never derived from the running runtime.
 struct InstalledExtensionItem {

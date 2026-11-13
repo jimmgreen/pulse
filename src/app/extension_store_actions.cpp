@@ -100,6 +100,28 @@ bool ExtensionStoreDetailAction(AppState& s, int action) {
         save("cmd" + std::to_string(bit), (z.commands & (1u << bit)) ? "false" : "true");
     } else if (action == Value(Action::SzRemember) || action == Value(Action::StoreQuickRemember)) save("remember", z.remember ? "false" : "true");
     else if (action == Value(Action::SzBrowse)) { if (z.available) BrowseSevenZipFolder(s); }
+    else if (action == Value(Action::SzTake)) {
+        if (z.take_available && !z.take_busy) { auto config = z.take_config; config[0] = z.take ? '0' : '1'; save("takecfg", config); }
+    } else if (range(Action::SzTakeIncBase, 16)) {
+        const auto index = action - Value(Action::SzTakeIncBase);
+        if (z.take && !z.take_busy && index < static_cast<int>(z.take_rows.size())) {
+            unsigned groups = static_cast<unsigned>(std::strtoul(z.take_config.substr(4, 3).c_str(), nullptr, 16)) ^ (1u << index);
+            char hex[4]{};
+            sprintf_s(hex, "%03x", groups & 0xfffu);
+            save("takecfg", z.take_config.substr(0, 4) + hex);
+        }
+    } else if (range(Action::SzTakeAskBase, 16)) {
+        const auto index = static_cast<size_t>(action - Value(Action::SzTakeAskBase));
+        if (z.available && index < z.take_rows.size() && z.take_rows[index].ask) ClickSevenZip(s, "ask" + std::to_string(index));
+    } else if (action == Value(Action::SzTakeNext)) { if (z.available && z.ask_any) ClickSevenZip(s, "asknext"); }
+    else if (action == Value(Action::SzTakeWinSettings)) { if (z.available && z.ask_any) ClickSevenZip(s, "winsettings"); }
+    else if (range(Action::SzDoubleClickBase, 2)) {
+        if (z.take_available && !z.take_busy) {
+            auto config = z.take_config;
+            config[2] = action == Value(Action::SzDoubleClickBase) ? '0' : '1';
+            if (config != z.take_config) save("takecfg", config);
+        }
+    }
     else if (action == Value(Action::StoreQuickMode) && z.available) {
         const int selected = Choice(s, 2, {l10n::Get(Id::SzModeSmart), l10n::Get(Id::SzModeFolder), l10n::Get(Id::SzModeHere)}, z.mode);
         if (selected >= 0) save("mode", std::to_string(selected));

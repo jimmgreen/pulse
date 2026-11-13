@@ -1,13 +1,17 @@
 #include <windows.h>
 #include "settings.h"
+#include "association.h"
 #include "engine.h"
 #include "text.h"
 #include <pulse/client.hpp>
 #include <pulse/ui_events.h>
 #include <array>
+#include <atomic>
 #include <map>
 #include <stdexcept>
+#include <optional>
 #include <string_view>
+#include <thread>
 
 using pulse::sdk::View;
 using T = text::Id;
@@ -28,6 +32,17 @@ std::string Hex2(int value) {
     constexpr char kDigits[] = "0123456789abcdef";
     return {kDigits[(value >> 4) & 15], kDigits[value & 15]};
 }
+std::string Hex3(unsigned value) {
+    constexpr char kDigits[] = "0123456789abcdef";
+    return {kDigits[(value >> 8) & 15], kDigits[(value >> 4) & 15], kDigits[value & 15]};
+}
+std::string Utf8(const std::wstring& value) {
+    if (value.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    std::string out(static_cast<size_t>(n > 0 ? n : 0), '\0');
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), out.data(), n, nullptr, nullptr);
+    return out;
+}
 } // namespace
 
 struct Settings::State {
@@ -42,14 +57,118 @@ struct Settings::State {
     // Saved values, as the page shows them.
     std::map<std::string, std::string> values{{"mode", "0"}, {"location", "0"}, {"folder", ""}, {"format", "0"},
                                               {"level", "3"}, {"remember", "true"}, {"placement", "0"},
-                                              {"commands", Hex2(kAllCommands)}};
+                                              {"commands", Hex2(kAllCommands)},
+                                              {"take", "false"}, {"dbl", "0"}, {"inc", Hex3(association::kAllGroups)}};
     bool loading = false, saving = false, loaded = false, dirty = false;
     pulse::sdk::Subscription browse, edits;
+    // 接管压缩包: registry and COM work runs on `worker`, one job at a time; results come back through `dispatch`.
+    pulse::sdk::DispatchQueue* dispatch = nullptr;
+    std::array<pulse::sdk::Subscription, association::kGroupCount + 2> take_commands;
+    std::vector<association::Status> statuses = std::vector<association::Status>(association::kGroupCount);
+    std::thread worker;
+    std::atomic<bool> stop{false};
+    unsigned job = 0;
+    bool busy = false;
+    int chain = -1;  // 逐个确认: the group whose chooser was just shown
     ~State() {
+        StopWorker();
         if (request) resources.cancel_request(resources.context, request);
         browse.Reset();
         edits.Reset();
+        for (auto& command : take_commands) command.Reset();
         if (page) pages.remove(pages.context, page);
+    }
+    void StopWorker() {
+        stop = true;
+        if (worker.joinable()) worker.join();
+        stop = false;
+    }
+    unsigned Groups() const {
+        const auto& hex = values.at("inc");
+        unsigned value = 0;
+        for (const char c : hex) {
+            const int digit = HexDigit(c);
+            if (hex.size() != 3 || digit < 0) return association::kAllGroups;
+            value = (value << 4) | static_cast<unsigned>(digit);
+        }
+        return value & association::kAllGroups;
+    }
+    bool Taking() const { return values.at("take") == "true"; }
+    enum class Job { Query, Refresh, Apply, Remove };
+    // Writes or removes the associations as the values say, then reads back how Windows opens each format.
+    // `watch`: keep re-reading for a minute (the user is changing them in Windows Settings).
+    void Run(Job kind, bool watch = false) {
+        if (!dispatch) return;
+        StopWorker();
+        const unsigned groups = Groups(), serial = ++job;
+        const bool extract = values.at("dbl") != "1", taking = Taking();
+        if (kind == Job::Apply || kind == Job::Remove) { busy = true; DeriveTake(); }
+        worker = std::thread([this, kind, watch, groups, extract, taking, serial] {
+            bool ok = true;
+            if (kind == Job::Apply || kind == Job::Refresh) ok = association::Apply(groups, extract);
+            else if (kind == Job::Remove) association::Remove();
+            auto result = association::Query(taking ? groups : 0);
+            auto posted = result;
+            dispatch->Post([this, serial, kind, ok, posted = std::move(posted)]() mutable { Finished(serial, kind, ok, std::move(posted)); });
+            for (int tick = 0; watch && tick < 300 && !stop; ++tick) {
+                Sleep(200);
+                if (tick % 10 != 9 || stop) continue;
+                auto again = association::Query(taking ? groups : 0);
+                bool same = again.size() == result.size();
+                for (size_t i = 0; same && i < again.size(); ++i) same = again[i].owner == result[i].owner && again[i].who == result[i].who;
+                if (same) continue;
+                result = again;
+                dispatch->Post([this, serial, again = std::move(again)]() mutable { Finished(serial, Job::Query, true, std::move(again)); });
+            }
+        });
+    }
+    void Finished(unsigned serial, Job kind, bool ok, std::vector<association::Status> result) {
+        if (serial != job) return;
+        busy = false;
+        statuses = std::move(result);
+        DeriveTake();
+        if ((kind == Job::Apply || kind == Job::Refresh) && !ok) Status(text::Get(T::TakeFailed));
+        // 逐个确认: once a format became Pulse's, Windows' chooser comes up for the next one.
+        if (chain >= 0) {
+            const int done = chain;
+            chain = -1;
+            if (statuses[static_cast<size_t>(done)].owner == association::Owner::Pulse) {
+                const int next = NextAsk();
+                if (next >= 0) dispatch->Post([this, next] { Choose(next, true); });
+            }
+        }
+    }
+    int NextAsk() const {
+        if (!Taking()) return -1;
+        for (int i = 0; i < association::kGroupCount; ++i)
+            if (statuses[static_cast<size_t>(i)].owner == association::Owner::Other) return i;
+        return -1;
+    }
+    void Choose(int group, bool chained) {
+        if (busy || !Taking() || group < 0) return;
+        association::Choose(GetActiveWindow(), group);
+        chain = chained ? group : -1;
+        Run(Job::Query);
+    }
+    // 接管压缩包 as Pulse's 7-Zip page reads it (extension_store_seven_zip.cpp); a page holds at most 32
+    // states, so the whole section is three: takecfg "<take 0-1>|<double-click 0-1>|<formats, 3 hex digits>",
+    // takeview "<busy 0-1>" then per format "\n<owner p/o/f/x><w if Windows' own folder, else ->who",
+    // takefmt "<icon library>" then per format "\n<label>|<extensions>|<icon resource>".
+    std::string Config() const {
+        return std::string(Taking() ? "1" : "0") + "|" + values.at("dbl") + "|" + values.at("inc");
+    }
+    void DeriveTake() {
+        const bool taking = Taking();
+        std::string view = busy ? "1" : "0";
+        for (const auto& status : statuses) {
+            const auto owner = taking ? status.owner : association::Owner::Off;
+            view += owner == association::Owner::Pulse ? "\np" : owner == association::Owner::Other ? "\no"
+                  : owner == association::Owner::Free ? "\nf" : "\nx";
+            view += status.windows ? "w" : "-";
+            view += Utf8(status.who).substr(0, 60);
+        }
+        Set("takecfg", Config());
+        Set("takeview", view);
     }
     void Set(const std::string& key, const std::string& value) {
         const PulseUiState update{View(key), View(value)};
@@ -57,14 +176,17 @@ struct Settings::State {
     }
     void Status(const std::string& value) { Set("status", value); }
     void Show() {
-        for (const auto& [key, value] : values) Set(key, value);
+        for (const auto& [key, value] : values)
+            if (key != "take" && key != "dbl" && key != "inc") Set(key, value);
         Derive();
         Set("ready", loaded ? "true" : "false");
+        DeriveTake();
     }
     std::string Encoded() const {
         const auto& v = values;
-        return "4\n" + v.at("mode") + "\n" + v.at("location") + "\n" + v.at("format") + "\n" + v.at("level") + "\n" +
-               (v.at("remember") == "false" ? "0" : "1") + "\n" + v.at("placement") + "\n" + v.at("commands") + "\n" + v.at("folder");
+        return "5\n" + v.at("mode") + "\n" + v.at("location") + "\n" + v.at("format") + "\n" + v.at("level") + "\n" +
+               (v.at("remember") == "false" ? "0" : "1") + "\n" + v.at("placement") + "\n" + v.at("commands") + "\n" +
+               (v.at("take") == "true" ? "1" : "0") + "\n" + v.at("dbl") + "\n" + v.at("inc") + "\n" + v.at("folder");
     }
     void Decode(const PulseSettings& settings) {
         for (uint32_t i = 0; i < settings.count; ++i) {
@@ -72,18 +194,30 @@ struct Settings::State {
             const auto value = Copy(settings.values[i].value);
             // v3: "3\n<mode 0-2>\n<location 0-1>\n<format 0-5>\n<level 0-5>\n<remember 0-1>\n<folder>"
             // v4: the same, then "<placement 0-1>\n<commands, 2 hex digits>\n" before <folder>.
-            const bool v3 = value.compare(0, 2, "3\n") == 0, v4 = value.compare(0, 2, "4\n") == 0;
-            if (value.size() >= 12 && (v3 || v4) && value[3] == '\n' && value[5] == '\n' && value[7] == '\n' &&
+            // v5: v4, then "<take 0-1>\n<double-click 0-1>\n<formats taken, 3 hex digits>\n" before <folder>.
+            const bool v3 = value.compare(0, 2, "3\n") == 0, v4 = value.compare(0, 2, "4\n") == 0, v5 = value.compare(0, 2, "5\n") == 0;
+            if (value.size() >= 12 && (v3 || v4 || v5) && value[3] == '\n' && value[5] == '\n' && value[7] == '\n' &&
                 value[9] == '\n' && value[11] == '\n' && value[2] >= '0' && value[2] <= '2' && (value[4] == '0' || value[4] == '1') &&
                 value[6] >= '0' && value[6] <= '5' && value[8] >= '0' && value[8] <= '5' && (value[10] == '0' || value[10] == '1')) {
                 size_t folder = 12;
-                if (v4) {
+                if (v4 || v5) {
                     if (value.size() < 17 || (value[12] != '0' && value[12] != '1') || value[13] != '\n' || value[16] != '\n') continue;
                     const int high = HexDigit(value[14]), low = HexDigit(value[15]);
                     if (high < 0 || low < 0 || ((high << 4) | low) > kAllCommands) continue;
+                    folder = 17;
+                }
+                if (v5) {
+                    if (value.size() < 25 || (value[17] != '0' && value[17] != '1') || value[18] != '\n' ||
+                        (value[19] != '0' && value[19] != '1') || value[20] != '\n' || value[24] != '\n' ||
+                        HexDigit(value[21]) < 0 || HexDigit(value[22]) < 0 || HexDigit(value[23]) < 0) continue;
+                    values["take"] = value[17] == '1' ? "true" : "false";
+                    values["dbl"].assign(1, value[19]);
+                    values["inc"] = value.substr(21, 3);
+                    folder = 25;
+                }
+                if (v4 || v5) {
                     values["placement"].assign(1, value[12]);
                     values["commands"] = value.substr(14, 2);
-                    folder = 17;
                 }
                 values["mode"].assign(1, value[2]);
                 values["location"].assign(1, value[4]);
@@ -136,10 +270,13 @@ struct Settings::State {
                 self.Status(text::Get(T::SettingsSaved));
             } else {
                 const auto mine = self.values;
+                const bool first = !self.loaded;
                 self.Decode(reply->settings);
                 if (self.dirty) self.values = mine;
                 self.loaded = true;
                 self.Show();
+                // The extension's files may have moved (an update): keep the icons and command pointing at them.
+                if (first) self.Run(self.Taking() ? Job::Refresh : Job::Query);
             }
             if (self.dirty) self.Save();
             if (self.changed) self.changed();
@@ -150,6 +287,27 @@ struct Settings::State {
     }
     void Edited(const PulseUiStateBatch& batch) {
         bool save = false;
+        std::optional<Job> takeover;
+        for (uint32_t i = 0; i < batch.count; ++i) {
+            const auto key = Copy(batch.changes[i].key), value = Copy(batch.changes[i].value);
+            if (key != "takecfg") continue;
+            // "<take>|<double-click>|<formats>" from Pulse's 7-Zip page; one change at a time while idle.
+            if (busy || value.size() != 7 || (value[0] != '0' && value[0] != '1') || value[1] != '|' ||
+                (value[2] != '0' && value[2] != '1') || value[3] != '|' ||
+                HexDigit(value[4]) < 0 || HexDigit(value[5]) < 0 || HexDigit(value[6]) < 0) {
+                DeriveTake();
+                continue;
+            }
+            const bool take = value[0] == '1';
+            const std::string dbl(1, value[2]), inc = value.substr(4, 3);
+            if (take != Taking()) takeover = take ? Job::Apply : Job::Remove;
+            else if (take && (dbl != values["dbl"] || inc != values["inc"])) takeover = Job::Apply;
+            values["take"] = take ? "true" : "false";
+            values["dbl"] = dbl;
+            values["inc"] = inc;
+            save = true;
+        }
+        if (takeover) Run(*takeover);
         for (uint32_t i = 0; i < batch.count; ++i) {
             const auto key = Copy(batch.changes[i].key), value = Copy(batch.changes[i].value);
             // Radios report "true" for the one picked: mode0..2, location0..1, placement0..1.
@@ -330,7 +488,15 @@ struct Settings::State {
             .State("placement0", "true").State("placement1", "false")
             .State("placement", "0").State("commands", Hex2(kAllCommands))
             .State("cmd0", "true").State("cmd1", "true").State("cmd2", "true").State("cmd3", "true").State("cmd4", "true").State("cmd5", "true")
-            .Command("browse");
+            .Command("browse").Command("asknext").Command("winsettings");
+        // 接管压缩包 lives on Pulse's own 7-Zip page; this page only carries its data (DeriveTake).
+        std::string formats = Utf8(association::IconLibrary());
+        for (int i = 0; i < association::kGroupCount; ++i) {
+            formats += std::string("\n") + association::GroupLabel(i) + "|" + association::GroupExtensions(i) + "|" +
+                       std::to_string(association::GroupIcon(i));
+            tree.Command("ask" + std::to_string(i));
+        }
+        tree.State("takecfg", Config()).State("takeview", "0").State("takefmt", formats);
         auto result = pages.create(pages.context, View(text::Get(T::SettingsTitle)), &tree.Build(), &page);
         if (result != PULSE_OK) return result;
         result = pages.query(pages.context, page, View(PULSE_UI_MODEL_INTERFACE), PULSE_UI_MODEL_VERSION, &model, sizeof(model));
@@ -339,6 +505,17 @@ struct Settings::State {
         if (result != PULSE_OK) return result;
         result = browse.Command(model, page, "browse", [this](uint64_t, PulseStringView) { try { Browse(); } catch (...) {} });
         if (result != PULSE_OK) return result;
+        result = take_commands[0].Command(model, page, "asknext", [this](uint64_t, PulseStringView) { try { Choose(NextAsk(), true); } catch (...) {} });
+        if (result != PULSE_OK) return result;
+        result = take_commands[1].Command(model, page, "winsettings", [this](uint64_t, PulseStringView) {
+            try { if (Taking() && !busy) { association::OpenDefaultApps(); Run(Job::Query, true); } } catch (...) {}
+        });
+        if (result != PULSE_OK) return result;
+        for (int i = 0; i < association::kGroupCount; ++i) {
+            result = take_commands[static_cast<size_t>(i) + 2].Command(model, page, "ask" + std::to_string(i),
+                [this, i](uint64_t, PulseStringView) { try { Choose(i, false); } catch (...) {} });
+            if (result != PULSE_OK) return result;
+        }
         result = edits.State(model, events, page, {}, PULSE_UI_STATE_USER,
                              [this](uint64_t, const PulseUiStateBatch& batch) { try { Edited(batch); } catch (...) {} });
         if (result != PULSE_OK) return result;
@@ -349,8 +526,10 @@ struct Settings::State {
 
 Settings::Settings() : state_(std::make_unique<State>()) {}
 Settings::~Settings() = default;
-PulseStatus Settings::Initialize(const pulse::sdk::Host& host, PulseStagingV1 staging, std::function<void()> changed) {
+PulseStatus Settings::Initialize(const pulse::sdk::Host& host, PulseStagingV1 staging, pulse::sdk::DispatchQueue& dispatch,
+                                 std::function<void()> changed) {
     state_->staging = staging;
+    state_->dispatch = &dispatch;
     state_->changed = std::move(changed);
     auto result = host.Query(PULSE_SETTINGS_PAGES_INTERFACE_NAME, PULSE_SETTINGS_PAGES_VERSION_1, state_->pages);
     if (result != PULSE_OK) return result;
@@ -365,3 +544,4 @@ int Settings::Level() const { return state_->values.at("level")[0] - '0'; }
 bool Settings::RememberPasswords() const { return state_->values.at("remember") != "false"; }
 bool Settings::MenuSubmenu() const { return state_->values.at("placement") == "1"; }
 bool Settings::CommandShown(int index) const { return index >= 0 && index < kCommandCount && ((state_->Commands() >> index) & 1); }
+bool Settings::TakeOver() const { return state_->Taking(); }

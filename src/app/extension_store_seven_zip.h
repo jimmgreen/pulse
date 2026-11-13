@@ -18,4 +18,7 @@ void FillSevenZipView(AppState& s, ui::ExtensionStoreView& view);
 bool SetSevenZipState(AppState& s, const std::string& key, const std::string& value);
 // The extension's own folder chooser for 固定文件夹.
 bool BrowseSevenZipFolder(AppState& s);
+// A button of the extension's page: "ask0".."ask11" (Windows' chooser for one format),
+// "asknext" (逐个确认), "winsettings" (Windows' Default apps).
+bool ClickSevenZip(AppState& s, const std::string& command);
 }

@@ -1070,6 +1070,11 @@ enum class PackAction : int {
     SzCommandBase = 70090,          // + 0..5
     SzPreviewBase = 70100,          // + 0..1
     SzHistoryRollback = 70110,
+    SzTake = 70120,                 // 接管压缩包 switch
+    SzTakeIncBase = 70130,          // + format 0..15: its checkbox
+    SzTakeAskBase = 70150,          // + format 0..15: 设为/改为 Pulse…
+    SzTakeNext = 70170, SzTakeWinSettings = 70171,
+    SzDoubleClickBase = 70175,      // + 0..1
     SzSource = 70400,
     InstalledMoreBase = 80000, // plus displayed installed index; existing management menu actions
 };

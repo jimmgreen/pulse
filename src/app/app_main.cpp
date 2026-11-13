@@ -4939,6 +4939,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         }
     }
 
+    // An archive opened from File Explorer (接管压缩包) while Pulse was closed: the window starts as
+    // usual and the request goes through the open queue once it can take it (open_routing.cpp).
+    std::wstring archive_launch;
+    if (IsArchiveLaunch(state.open_path)) archive_launch = std::exchange(state.open_path, std::wstring());
     // This process owns the window now: create the D3D device and warm the
     // shell's icon cache on worker threads while the main thread builds the
     // windows. On the main thread they cost about 250 ms (NVIDIA's driver
@@ -5100,6 +5104,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         DestroyWindow(hwnd);
         return 1;
     }
+    if (!archive_launch.empty()) QueueExternalOpen(state, std::move(archive_launch));
     // Diagnostics: sample thread stacks while the UI thread is stalled.
     for (int i = 1; i < __argc; ++i) {
         if (wcscmp(__wargv[i], L"--hang-watch") != 0) continue;

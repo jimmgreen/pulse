@@ -41,6 +41,7 @@ struct Plugin {
     PulsePreviewV1 preview{};
     std::array<pulse::sdk::CommandRegistration, static_cast<size_t>(Command::Count)> registrations;
     pulse::sdk::CommandRegistration auto_extract_registration;
+    bool auto_extract = false;  // extract-auto is registered
     std::array<PulseCommandId, static_cast<size_t>(Command::Count)> ids{};
     std::array<std::string, static_cast<size_t>(Command::Count)> titles;
     // What each command was last registered with (title, detail, placement, shown);
@@ -265,8 +266,14 @@ PulseStatus Register(Plugin& plugin, Command command) {
     return status;
 }
 
+// What opening an archive runs: Pulse's own double-click on an archive nothing opens, and File
+// Explorer's once 接管压缩包 made it Pulse's (pulse:extract:, open_routing.cpp).
+bool WantsAutoExtract(const Plugin& plugin) {
+    return plugin.settings->CommandShown(static_cast<int>(Command::Extract)) || plugin.settings->TakeOver();
+}
 PulseStatus RegisterAutoExtract(Plugin& plugin) {
-    if (!plugin.settings->CommandShown(static_cast<int>(Command::Extract))) {
+    plugin.auto_extract = WantsAutoExtract(plugin);
+    if (!plugin.auto_extract) {
         plugin.auto_extract_registration.Reset();
         return PULSE_OK;
     }
@@ -327,6 +334,7 @@ void Refresh(Plugin& plugin) {
     }
     // The host lists commands in registration order, so re-register all of them to keep the menu order.
     if (changed) RegisterCommands(plugin);
+    else if (plugin.auto_extract != WantsAutoExtract(plugin)) RegisterAutoExtract(plugin);
 }
 
 PulseStatus PULSE_CALL Preview(void*, const PulsePreviewRequest* request) {
@@ -417,7 +425,7 @@ extern "C" __declspec(dllexport) PulseStatus PULSE_CALL PulsePluginEntryV1(const
     auto status = RegisterCommands(*plugin);
     if (status != PULSE_OK) return status;
     try {
-        status = plugin->settings->Initialize(plugin->host, plugin->staging, [plugin] { try { Refresh(*plugin); } catch (...) {} });
+        status = plugin->settings->Initialize(plugin->host, plugin->staging, *plugin->dispatch, [plugin] { try { Refresh(*plugin); } catch (...) {} });
         if (status != PULSE_OK) return status;
     } catch (...) { return PULSE_ERROR_INITIALIZATION; }
     return status == PULSE_OK ? RegisterPreviews(*plugin) : status;

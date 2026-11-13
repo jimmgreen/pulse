@@ -2774,6 +2774,11 @@ struct SettingsLayout {
         D2D1_RECT_F mode_row{}, mode_opts[3]{}, location_row{}, location_opts[2]{}, folder{}, browse{},
             format_row{}, format_opts[6]{}, level_row{}, level_track{}, level_stops[6]{}, level_value{},
             compress_note{}, remember_row{}, remember{}, rar_note{};
+        // 接管压缩包 (on 常用设置, above 解压)
+        D2D1_RECT_F take_label{}, take_group{}, take_row{}, take_switch{}, take_head{}, take_next{}, take_winsettings{},
+            double_click_row{}, double_click_opts[2]{};
+        struct TakeRow { D2D1_RECT_F bounds{}, check{}, icon{}, name{}, status{}, ask{}; };
+        std::vector<TakeRow> take_rows;
         // 右键菜单
         D2D1_RECT_F placement_label{}, placement_opts[2]{}, commands_label{}, command_rows[6]{}, command_switch[6]{};
         // 支持格式 / 关于

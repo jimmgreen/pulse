@@ -1275,7 +1275,14 @@ void Painter::DrawCheckBox(const D2D1_RECT_F& bounds, std::wstring_view text,
         if (!state.enabled) {
             check_color = MultiplyAlpha(check_color, 0.8f);
         }
-        DrawCheckMark(box, check_color);
+        // A light mark centred at under half the box (WinUI's proportion); the menu
+        // check (DrawCheckMark) fills its own row cell and stays as it is.
+        const float unit = Width(box) / 18.0f;
+        const auto at = [&](float x, float y) { return D2D1::Point2F(box.left + x * unit, box.top + y * unit); };
+        auto* brush = ScratchBrush(check_color);
+        const float stroke = std::max(1.0f, 1.5f * unit);
+        dc_->DrawLine(at(5.3f, 9.3f), at(7.8f, 11.7f), brush, stroke, round_stroke_.get());
+        dc_->DrawLine(at(7.8f, 11.7f), at(12.8f, 6.5f), brush, stroke, round_stroke_.get());
     }
     DrawText(text,
              D2D1::RectF(box.right + Px(8.0f), bounds.top, bounds.right, bounds.bottom),

@@ -187,6 +187,12 @@ constexpr Row kRows[] = {
     {Id::ErrWorkerTimedOut, "7-Zip 工作进程响应超时，已安全终止。", "7-Zip 工作行程回應逾時，已安全終止。", "The 7-Zip worker stopped responding and was safely terminated."},
     {Id::ErrWorkerMemory, "压缩包所需内存超出安全上限，已终止工作进程。", "壓縮檔所需記憶體超出安全上限，已終止工作行程。", "The archive exceeded the worker memory limit and was safely stopped."},
     {Id::DetailWorkerIsolated, "解码在独立受限进程中运行；Pulse 主程序未受影响，可按需重试。", "解碼在獨立受限行程中執行；Pulse 主程式未受影響，可按需重試。", "Decoding runs in an isolated worker process; Pulse was not affected and you can retry."},
+    {Id::TakeFailed, "无法写入文件关联，请稍后重试", "無法寫入檔案關聯，請稍後重試", "Could not write the file associations. Try again later."},
+    {Id::TypeArchive, "{name} 压缩文件", "{name} 壓縮檔", "{name} archive"},
+    {Id::TypeBundle, "{name} 归档文件", "{name} 封存檔", "{name} archive"},
+    {Id::TypeCab, "CAB 安装包", "CAB 安裝套件", "CAB package"},
+    {Id::VerbPreview, "在 Pulse 中打开", "在 Pulse 中開啟", "Open in Pulse"},
+    {Id::AppDescription, "用 Pulse 和 7-Zip 解压与预览压缩包", "用 Pulse 和 7-Zip 解壓縮與預覽壓縮檔", "Extract and preview archives with Pulse and 7-Zip"},
 };
 int Language() {
     static const int language = [] {

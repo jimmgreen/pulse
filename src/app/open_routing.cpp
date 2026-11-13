@@ -2,7 +2,11 @@
 #include "open_routing.h"
 
 #include "app_internal.h"
+#include "app_commands.h"
 #include "extension_store_ui.h"
+#include "extensions/native/command_contributions.h"
+#include "../ops/archive_open_fallback.h"
+#include "../../extensions/7zip/takeover_record.h"
 #include "../common/localization.h"
 #include "../common/path_utils.h"
 #include "app_messages.h"
@@ -16,6 +20,8 @@
 #include "../common/runtime_log.h"
 
 #include <algorithm>
+#include <map>
+#include <optional>
 #include <vector>
 
 namespace pulse {
@@ -67,11 +73,78 @@ void ForgetOpenToast(AppCore& core) {
     core.open_convert_into = nullptr;
 }
 
+// File Explorer opened an archive whose file type 接管压缩包 made Pulse's (extensions/7zip):
+// "pulse:extract:<path>" or "pulse:archive-preview:<path>". The path comes after the prefix.
+struct ArchiveLaunch { std::wstring path; bool extract = true; };
+std::optional<ArchiveLaunch> ParseArchiveLaunch(const std::wstring& raw) {
+    for (const auto& [prefix, extract] : {std::pair<std::wstring_view, bool>{takeover::kExtractLaunch, true},
+                                          {takeover::kPreviewLaunch, false}}) {
+        if (raw.size() <= prefix.size() || CompareStringOrdinal(raw.data(), static_cast<int>(prefix.size()), prefix.data(),
+                                                                static_cast<int>(prefix.size()), TRUE) != CSTR_EQUAL) continue;
+        ArchiveLaunch launch{raw.substr(prefix.size()), extract};
+        while (!launch.path.empty() && launch.path.front() == L'"') launch.path.erase(launch.path.begin());
+        while (!launch.path.empty() && launch.path.back() == L'"') launch.path.pop_back();
+        return launch;
+    }
+    return std::nullopt;
+}
+
+// 在 Pulse 里打开: the quick preview opens on the archive's row, once its folder has loaded and
+// selected it (a preview shown earlier follows the selection away). Gives up after about 10 s.
+struct PendingPreview { std::wstring path; int ticks = 0; };
+constexpr UINT_PTR kArchivePreviewTimer = 0x50A7C;
+std::map<HWND, PendingPreview>& PendingPreviews() {
+    static std::map<HWND, PendingPreview> pending;
+    return pending;
+}
+bool SamePath(std::wstring_view a, std::wstring_view b) {
+    constexpr std::wstring_view extended = L"\\\\?\\";
+    if (a.starts_with(extended)) a.remove_prefix(extended.size());
+    if (b.starts_with(extended)) b.remove_prefix(extended.size());
+    return CompareStringOrdinal(a.data(), static_cast<int>(a.size()), b.data(), static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
+}
+void CALLBACK PreviewTick(HWND hwnd, UINT, UINT_PTR id, DWORD) {
+    auto& pending = PendingPreviews();
+    const auto at = pending.find(hwnd);
+    AppState* s = GetAppState(hwnd);
+    ui::QuickPreviewItem item;
+    const bool ready = at != pending.end() && s && SelectedQuickPreviewItem(*s, item) && SamePath(item.path, at->second.path);
+    if (!ready && at != pending.end() && s && ++at->second.ticks < 50) return;
+    KillTimer(hwnd, id);
+    if (at != pending.end()) pending.erase(at);
+    if (ready) OpenQuickPreview(*s, item, true);
+}
+void PreviewWhenSelected(AppState& target, const std::wstring& path) {
+    PendingPreviews()[target.hwnd] = {path, 0};
+    SetTimer(target.hwnd, kArchivePreviewTimer, 200, PreviewTick);
+}
+
 }  // namespace
 
 bool ExternalOpenWindowBusy(const AppState& state) { return IsBusy(state); }
 
+bool IsArchiveLaunch(const std::wstring& raw) { return ParseArchiveLaunch(raw).has_value(); }
+
 ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw, bool reveal) {
+    // The archive is shown selected in its folder (as any file Pulse is asked to open), then extracted
+    // there or previewed. Nothing runs until a window has taken it, so a deferred request is retried whole.
+    if (const auto archive = ParseArchiveLaunch(raw)) {
+        const DWORD attributes = GetFileAttributesW(archive->path.c_str());
+        const bool file = attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+        const auto result = OpenExternalFolder(mru, archive->path, false);
+        if (!file || result.status != ExternalOpenStatus::Dispatched || !result.target) return result;
+        AppState& target = *result.target;
+        if (archive->extract) {
+            if (!extensions::native::HandleArchiveOpenFallback(target, archive->path)) {
+                // The 7-Zip extension is gone or turned off: give the archive types back, then open it as Windows would.
+                takeover::RemoveAll();
+                target.ops.OpenWith(archive->path, false);
+            }
+        } else {
+            PreviewWhenSelected(target, archive->path);
+        }
+        return result;
+    }
     const bool activate = raw == L"pulse:activate";
     const bool icon = raw.empty();
     const bool win_e = raw == L"pulse:win-e";

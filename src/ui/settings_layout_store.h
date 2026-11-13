@@ -726,6 +726,75 @@ float LayoutSevenZipDetail(SettingsLayout& l, const WindowViewModel& vm, float s
     };
     if (z.TabAvailable(view.detail_tab) || view.detail_tab == 3) {
         if (view.detail_tab == 0) {
+            // 接管压缩包 (archive_icons_mockup.html): the switch, one row per format, what a double-click does.
+            if (z.take_available) {
+                d.take_label = D2D1::RectF(ml + 2*s, y, mr, y + 22*s*font);
+                y += 22*s*font + 8*s;
+                const float gt = y;
+                d.take_row = head_row(l10n::Get(I::SzTakeDesc), 60*s);
+                const float mid = (d.take_row.top + d.take_row.bottom) / 2;
+                d.take_switch = D2D1::RectF(mr - 16*s - 40*s, mid - 10*s, mr - 16*s, mid + 10*s);
+                const float ll = ml + 16*s, lr = mr - 16*s;
+                y += 6*s;
+                // The summary line, with 逐个确认 and (for several) 在 Windows 设置里一起改 at its right.
+                float buttons_left = lr;
+                if (!z.take_busy && z.ask_any) {
+                    const float nw = width(l10n::Get(I::SzTakeConfirmEach));
+                    d.take_next = D2D1::RectF(lr - nw, y, lr, y + bh);
+                    buttons_left = d.take_next.left - 8*s;
+                    if (z.ask_many) {
+                        const float ww = width(l10n::Get(I::SzTakeWinSettings));
+                        if (buttons_left - ww - ll >= 160*s) {
+                            d.take_winsettings = D2D1::RectF(buttons_left - ww, y, buttons_left, y + bh);
+                            buttons_left = d.take_winsettings.left - 8*s;
+                        }
+                    }
+                }
+                const auto& head = z.take_busy ? l10n::Get(I::SzTakeBusy) : z.take_head;
+                const float head_h = (std::max)(bh, height(head, buttons_left - ll - 8*s));
+                d.take_head = D2D1::RectF(ll + 8*s, y, buttons_left - 8*s, y + head_h);
+                y += head_h + 6*s;
+                if (!z.take_busy) {
+                    for (const auto& row : z.take_rows) {
+                        SettingsLayout::SevenZipDetail::TakeRow r;
+                        const float ask_w = row.ask ? width(l10n::Get(row.ask_windows ? I::SzTakeAskSet : I::SzTakeAskChange)) : 0.0f;
+                        const float name_w = (std::clamp)((lr - ll) * 0.3f, 128*s, 220*s);
+                        const float status_x = ll + 8*s + 18*s + 12*s + 24*s + 10*s + name_w + 8*s;
+                        const float status_r = row.ask ? lr - 8*s - ask_w - 8*s : lr - 8*s;
+                        // Narrow: the status goes under the name.
+                        const bool stacked = status_r - status_x < 120*s;
+                        const float row_h = (stacked ? 62 : 46)*s*font;
+                        r.bounds = D2D1::RectF(ll, y, lr, y + row_h);
+                        const float cy = stacked ? y + 23*s*font : y + row_h / 2;
+                        r.check = D2D1::RectF(ll + 8*s, cy - 9*s, ll + 26*s, cy + 9*s);
+                        r.icon = D2D1::RectF(r.check.right + 12*s, cy - 12*s, r.check.right + 36*s, cy + 12*s);
+                        r.name = D2D1::RectF(r.icon.right + 10*s, y + 4*s, stacked ? lr - 8*s - ask_w - 8*s : r.icon.right + 10*s + name_w, y + 42*s*font);
+                        r.status = stacked ? D2D1::RectF(r.name.left, r.name.bottom, lr - 8*s, r.bounds.bottom - 4*s)
+                                           : D2D1::RectF(r.name.right + 8*s, y, status_r, r.bounds.bottom);
+                        if (row.ask) r.ask = D2D1::RectF(lr - 8*s - ask_w, cy - bh / 2, lr - 8*s, cy + bh / 2);
+                        d.take_rows.push_back(r);
+                        y = r.bounds.bottom;
+                    }
+                }
+                y += 10*s;
+                d.double_click_row = head_row(l10n::Get(I::SzDblDesc), 0);
+                const bool two = mr - ml - 78*s >= 440*s;
+                for (int i = 0; i < 2; ++i) {
+                    const float ow = two ? (mr - 16*s - option_left - opt_gap) / 2 : mr - 16*s - option_left;
+                    const auto& desc = l10n::Get(i ? I::SzDblOpenDesc : I::SzModeSmartDesc);
+                    const float oh = 14*s + 20*s*font + height(desc, ow - 46*s) + 12*s;
+                    const float ox = option_left + (two ? i * (ow + opt_gap) : 0.0f);
+                    const float oy = two || i == 0 ? y : d.double_click_opts[0].bottom + opt_gap;
+                    d.double_click_opts[i] = D2D1::RectF(ox, oy, ox + ow, oy + (std::max)(62*s*font, oh));
+                }
+                if (two) {
+                    const float tallest = (std::max)(d.double_click_opts[0].bottom, d.double_click_opts[1].bottom);
+                    d.double_click_opts[0].bottom = d.double_click_opts[1].bottom = tallest;
+                }
+                y = d.double_click_opts[1].bottom + opt_gap + 10*s;
+                d.take_group = D2D1::RectF(ml, gt, mr, y);
+                y += 22*s;
+            }
             const float g0 = group_begin(0, l10n::Get(I::SzSectionExtract));
             d.mode_row = head_row(l10n::Get(I::SzModeDesc), 0);
             for (int i = 0; i < 3; ++i) {

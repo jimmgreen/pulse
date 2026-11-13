@@ -1055,6 +1055,16 @@ inline int HitTestSettingsStore(const SettingsLayout& l, const WindowViewModel& 
             if(ContainsPt(d.command_rows[i],x,y)) return static_cast<int>(PackAction::SzCommandBase)+i;
         }
         if(ContainsPt(d.remember,x,y)) return static_cast<int>(PackAction::SzRemember);
+        if(ContainsPt(d.take_switch,x,y)) return static_cast<int>(PackAction::SzTake);
+        if(ContainsPt(d.take_next,x,y)) return static_cast<int>(PackAction::SzTakeNext);
+        if(ContainsPt(d.take_winsettings,x,y)) return static_cast<int>(PackAction::SzTakeWinSettings);
+        for(size_t i=0;i<d.take_rows.size() && i<16;++i) {
+            const auto& row=d.take_rows[i];
+            if(ContainsPt(row.ask,x,y)) return static_cast<int>(PackAction::SzTakeAskBase)+static_cast<int>(i);
+            if(ContainsPt(D2D1::RectF(row.bounds.left,row.bounds.top,row.name.right,row.bounds.bottom),x,y))
+                return static_cast<int>(PackAction::SzTakeIncBase)+static_cast<int>(i);
+        }
+        for(int i=0;i<2;++i) if(ContainsPt(d.double_click_opts[i],x,y)) return static_cast<int>(PackAction::SzDoubleClickBase)+i;
         if(ContainsPt(d.browse,x,y)) return static_cast<int>(PackAction::SzBrowse);
         if(d.history_rollback.size()>1 && ContainsPt(d.history_rollback[1],x,y)) return static_cast<int>(PackAction::SzHistoryRollback);
         return -1;
