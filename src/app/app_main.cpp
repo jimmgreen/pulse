@@ -204,6 +204,7 @@ namespace pulse::app { bool RunMediaColumnResizeCapture(); }
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "psapi.lib")
 #include "app_internal.h"
+#include "extensions/native/command_contributions.h"
 #include "app_network_page.h"
 #include "cloud_download.h"
 
@@ -1875,6 +1876,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             // Shell dialogs (打开方式…/属性) must be owned by the Pulse window.
             s->ops.SetUiWindow(hwnd);
             s->ops.Start([notify = ServiceWindow(*s)] { PostMessageW(notify, WM_OPS_NOTIFY, 0, 0); });
+            s->ops.EnableArchiveOpenFallback();
             // Drop stages of Pulse processes that are gone (#55).
             app::SweepDropStages(app::DropStageRoot(), false);
             const ops::RecoverySnapshot recovery = s->isolatedTest
@@ -3219,6 +3221,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_OPS_NOTIFY: {
         if (s) {
+            for (const auto& path : s->ops.TakeArchiveOpenFallbacks()) {
+                if (!extensions::native::HandleArchiveOpenFallback(*s, path))
+                    s->ops.OpenWith(path, false); // Missing/disabled plugin: normal Windows behavior, no loop.
+            }
             ops::OpStatus st = s->ops.Status();
             UpdateOperationWindow(*s, true);
             if (s->ops.TakeCtxInvokeDone()) {

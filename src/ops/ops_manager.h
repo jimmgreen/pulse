@@ -455,7 +455,9 @@ public:
     static constexpr size_t kMaxReportedFailures = 500;
 
     // Double-click open: ShellExecuteEx on a dedicated open thread (plan §6.2).
-    void OpenWith(const std::wstring& path);
+    void OpenWith(const std::wstring& path, bool allow_archive_fallback = true);
+    void EnableArchiveOpenFallback() { archive_open_fallback_enabled_ = true; }
+    std::vector<std::wstring> TakeArchiveOpenFallbacks();
 
     // Shell "properties" verb on the ops worker thread. Compile-verified only
     // in 1B-2; wired to the context menu but exercised manually.
@@ -605,6 +607,7 @@ private:
         std::wstring open_path;   // non-empty => ShellExecuteEx instead
         std::wstring open_verb;   // empty = default action; "open" / "properties" / ...
         std::wstring open_args;   // e.g. -d "<dir>" for wt.exe
+        bool allow_archive_fallback = false;
         std::wstring open_file;   // explicit program (empty => open_path is the file)
         std::vector<std::wstring> open_paths; // multi-item "properties"
         uint64_t seq = 0;
@@ -825,6 +828,8 @@ private:
     mutable std::mutex open_mutex_;
     std::condition_variable open_cv_;
     std::deque<QueueItem> open_queue_;
+    std::atomic<bool> archive_open_fallback_enabled_{false};
+    std::vector<std::wstring> archive_open_fallbacks_;
 };
 
 // wt.exe argument string for "open terminal here" (unit-tested; launching is

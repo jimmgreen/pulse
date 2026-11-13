@@ -10,6 +10,8 @@ std::vector<ui::FluentMenuItem> CommandRows(AppState&, std::wstring_view query =
 // group (a caption above the rows, or one submenu row when the group asks for it).
 std::vector<ui::FluentMenuItem> ContextMenuCommandRows(AppState&);
 bool HandleContributedCommand(AppState&, int);
+// Shell-open worker confirmed no archive application; use the original path, not the current selection.
+bool HandleArchiveOpenFallback(AppState&, const std::wstring& path);
 bool HandleContributedShortcut(AppState&, WPARAM key);
 std::vector<ui::FluentMenuItem> PinnedCommandRows(AppState&);
 std::wstring CommandIdentity(AppState&, int);

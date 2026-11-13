@@ -40,6 +40,7 @@ struct Plugin {
     PulseDispatchV1 dispatch_api{};
     PulsePreviewV1 preview{};
     std::array<pulse::sdk::CommandRegistration, static_cast<size_t>(Command::Count)> registrations;
+    pulse::sdk::CommandRegistration auto_extract_registration;
     std::array<PulseCommandId, static_cast<size_t>(Command::Count)> ids{};
     std::array<std::string, static_cast<size_t>(Command::Count)> titles;
     // What each command was last registered with (title, detail, placement, shown);
@@ -264,12 +265,54 @@ PulseStatus Register(Plugin& plugin, Command command) {
     return status;
 }
 
+PulseStatus RegisterAutoExtract(Plugin& plugin) {
+    if (!plugin.settings->CommandShown(static_cast<int>(Command::Extract))) {
+        plugin.auto_extract_registration.Reset();
+        return PULSE_OK;
+    }
+    static constexpr const char* extensions[] = {
+        ".7z", ".zip", ".rar", ".tar", ".gz", ".tgz", ".xz", ".txz", ".bz2", ".tbz2", ".tbz",
+        ".lzma", ".z", ".cab", ".arj", ".lzh", ".lha", ".cpio", ".zipx"
+    };
+    static const auto views = [] {
+        std::vector<PulseStringView> result;
+        for (const auto* extension : extensions) result.push_back(View(extension));
+        return result;
+    }();
+    PulseCommandDescriptor descriptor{};
+    descriptor.size = sizeof(descriptor);
+    descriptor.id = View("extract-auto");
+    descriptor.title = View(text::Get(T::CmdSmart));
+    descriptor.flags = PULSE_COMMAND_HIDDEN;
+    descriptor.icon = PULSE_COMMAND_ICON_EXTRACT;
+    descriptor.kinds = PULSE_COMMAND_FILES;
+    descriptor.min_selection = descriptor.max_selection = 1;
+    descriptor.extensions = views.data();
+    descriptor.extension_count = static_cast<uint32_t>(views.size());
+    Plugin* self = &plugin;
+    return plugin.auto_extract_registration.Register(plugin.commands, descriptor,
+        [self](PulseCommandId, const PulseContextSelectionSnapshot& selection) {
+            try {
+                if (selection.entry_count != 1 || !selection.entries) return;
+                const auto path = Wide(selection.entries[0].path);
+                if (path.empty()) return;
+                auto extension = Utf8(fs::path(path).extension().wstring());
+                for (auto& ch : extension) if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+                bool supported = false;
+                for (const auto* candidate : extensions) if (extension == candidate) supported = true;
+                if (!supported) return;
+                // Opening an unassociated archive is independent of the menu's destination/mode preferences.
+                self->jobs->Extract(path, Utf8(fs::path(path).parent_path().wstring()), Jobs::ExtractMode::Smart);
+            } catch (...) {}
+        });
+}
+
 PulseStatus RegisterCommands(Plugin& plugin) {
     for (size_t i = 0; i < static_cast<size_t>(Command::Count); ++i) {
         const auto status = Register(plugin, static_cast<Command>(i));
         if (status != PULSE_OK) return status;
     }
-    return PULSE_OK;
+    return RegisterAutoExtract(plugin);
 }
 
 // Settings changed: menu titles that name the behavior follow it.
@@ -340,6 +383,7 @@ void PULSE_CALL Destroy(void* value) {
     auto* plugin = static_cast<Plugin*>(value);
     if (plugin->jobs) plugin->jobs->CancelAll();
     for (auto& registration : plugin->registrations) registration.Reset();
+    plugin->auto_extract_registration.Reset();
     if (plugin->preview.context) for (const auto id : plugin->previews) plugin->preview.unregister_provider(plugin->preview.context, id);
     if (plugin->dispatch) plugin->dispatch->Close();
     plugin->jobs.reset();

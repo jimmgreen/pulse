@@ -4,6 +4,7 @@
 #include "shell_command_template.h"
 // ops_manager.cpp — See ops_manager.h for the contract.
 #include "ops_manager.h"
+#include "archive_open_fallback.h"
 #include "controlled_transfer_probe.h"
 #include "failed_retry_template.h"
 #ifndef PULSE_ELEVATED_HOST
@@ -1193,6 +1194,11 @@ void OpsManager::Stop() {
     open_cv_.notify_all();
     if (open_thread_.joinable()) open_thread_.join();
     {
+        std::lock_guard lock(open_mutex_);
+        archive_open_fallbacks_.clear();
+        archive_open_fallback_enabled_ = false;
+    }
+    {
         std::lock_guard<std::mutex> lock(mutex_);
         running_ = false;
     }
@@ -1510,8 +1516,16 @@ void OpsManager::RunControlled(const std::shared_ptr<ControlledJob>& job, uint64
     }
 }
 
-void OpsManager::OpenWith(const std::wstring& path) {
+std::vector<std::wstring> OpsManager::TakeArchiveOpenFallbacks() {
+    std::lock_guard lock(open_mutex_);
+    std::vector<std::wstring> result;
+    result.swap(archive_open_fallbacks_);
+    return result;
+}
+
+void OpsManager::OpenWith(const std::wstring& path, bool allow_archive_fallback) {
     QueueItem item;
+    item.allow_archive_fallback = allow_archive_fallback;
     item.open_path = path;
     // Some registered defaults expose "edit" or a delegated default action.
     // Leave the verb empty so Windows selects the association's default.
@@ -2869,6 +2883,21 @@ void OpsManager::OpenThread() {
         const std::wstring target = item.open_file.empty() ? shell_path : item.open_file;
         const std::wstring item_dir = item.open_file.empty()
             ? OpenItemWorkingDirectory(item.open_path) : shell_path;
+        if (item.allow_archive_fallback && archive_open_fallback_enabled_ && item.open_verb.empty() &&
+            item.open_file.empty() && archive_open::NeedsFallback(shell_path)) {
+            bool queued = false;
+            {
+                std::lock_guard lock(open_mutex_);
+                if (archive_open_fallbacks_.size() < 64) {
+                    archive_open_fallbacks_.push_back(item.open_path); queued = true;
+                }
+            }
+            if (queued) {
+                diagnostics::runtime::Event("archive_open_fallback_queued", {{"task", item.seq}});
+                if (notify_) notify_();
+                continue;
+            }
+        }
         const ULONGLONG prepared = GetTickCount64();
         const auto opened = LaunchImageOrShellItem(target, item.open_verb, item.open_args, item_dir,
             dialog_owner, !item.open_file.empty());

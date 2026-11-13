@@ -525,6 +525,42 @@ bool CommandsAdapter::InvokeIdentity(HWND owner, const std::string& identity) {
     }
     return false;
 }
+bool CommandsAdapter::InvokeHiddenIdentity(HWND owner, const std::string& identity, const CommandSelection& selection) {
+    if (identity.empty() || !selection.valid) return false;
+    const auto registry = State::registry;
+    for (const auto& [token, weak] : registry) {
+        const auto self = weak.lock();
+        if (!self || self->owner != owner || !self->Ready() || self->active) continue;
+        const auto item = self->commands.find(token);
+        if (item == self->commands.end() || item->second.info.identity != identity) continue;
+        auto command = item->second;
+        if (!(command.info.flags & PULSE_COMMAND_HIDDEN)) return false;
+        command.info.flags &= ~static_cast<uint32_t>(PULSE_COMMAND_HIDDEN);
+        Selection selected;
+        selected.valid = selection.valid;
+        selected.directory = selection.directory;
+        for (const auto& row : selection.entries)
+            selected.entries.push_back({row.path, row.name, row.directory ? PULSE_CONTEXT_ENTRY_DIRECTORY : 0u});
+        if (!State::Matches(command, selected)) return false;
+        std::vector<PulseContextSelectionEntry> rows;
+        rows.reserve(selected.entries.size());
+        for (const auto& row : selected.entries)
+            rows.push_back({sizeof(PulseContextSelectionEntry), row.flags, View(row.path), View(row.name)});
+        const PulseContextSelectionSnapshot snapshot{sizeof(snapshot), selected.revision, View(selected.directory),
+                                                     rows.data(), static_cast<uint32_t>(rows.size())};
+        self->active = true;
+        bool invoked = false;
+        try {
+            const crash_guard::CallScope call_scope(self->package.c_str());
+            command.callback(command.user, static_cast<PulseCommandId>(token), &snapshot);
+            invoked = true;
+        }
+        catch (...) { self->Close(); }
+        self->active = false;
+        return invoked;
+    }
+    return false;
+}
 bool CommandsAdapter::Shortcut(HWND owner, uint32_t key, uint32_t modifiers) {
     for (const auto& info : Entries(owner)) if (info.enabled && info.key == key && info.modifiers == modifiers) return Invoke(owner, info.token);
     return false;

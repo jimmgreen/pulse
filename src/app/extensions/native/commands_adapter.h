@@ -78,6 +78,8 @@ public:
     static std::string Identity(HWND owner, int token);
     static bool Invoke(HWND owner, int token);
     static bool InvokeIdentity(HWND owner, const std::string& identity);
+    // Host-only dispatch of a hidden command against an explicit, immutable selection.
+    static bool InvokeHiddenIdentity(HWND owner, const std::string& identity, const CommandSelection& selection);
     static bool Shortcut(HWND owner, uint32_t key, uint32_t modifiers);
 private:
     struct State;

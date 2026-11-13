@@ -302,6 +302,23 @@ std::vector<ui::FluentMenuItem> ContextMenuCommandRows(AppState& owner) {
     }
     return rows;
 }
+bool HandleArchiveOpenFallback(AppState& owner, const std::wstring& path) {
+    CommandSelection selection;
+    const std::filesystem::path file(path);
+    CommandSelectionEntry entry;
+    if (!TryUtf8(path, entry.path) || !TryUtf8(file.filename().wstring(), entry.name) ||
+        !TryUtf8(file.parent_path().wstring(), selection.directory)) return false;
+    selection.entries.push_back(std::move(entry)); selection.valid = true;
+    PrepareCommandPackages(owner);
+    for (size_t package = 0; package < PackageCount(); ++package) {
+        const auto* manifest = PackageManifest(package);
+        if (!manifest || manifest->id != "pulse.7zip" || !manifest->native || !PackageEnabled(package)) continue;
+        if (!EnsureCommandPackageStarted(owner, package)) return false;
+        return CommandsAdapter::InvokeHiddenIdentity(owner.hwnd, "native:pulse.7zip:extract-auto", selection);
+    }
+    return false;
+}
+
 bool HandleContributedCommand(AppState& owner, int command) {
     if (command >= kSettingsCommand && command < kSettingsCommand + 10000) {
         const size_t package = static_cast<size_t>(command - kSettingsCommand);
