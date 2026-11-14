@@ -128,8 +128,8 @@ class ReleaseGate(unittest.TestCase):
                 patch('ensure_release_packs.verify_independent') as verify, \
                 patch('ensure_release_packs.ensure') as stage, patch('builtins.print'):
             main()
-        self.assertEqual(read_catalog.call_args.args[1:], ('jimmgreen/pulse', 'v1'))
-        stage.assert_called_once_with(self.packs, 'jimmgreen/pulse', 'v1', 'source', None)
+        self.assertEqual(read_catalog.call_args.args[1:], ('ClauxQz4/pulse', 'v1', 'jimmgreen/pulse'))
+        stage.assert_called_once_with(self.packs, 'ClauxQz4/pulse', 'v1', 'source', None)
         verify.assert_not_called()
 
     def test_verify_independent_cli_rejects_staging_arguments(self):
@@ -193,8 +193,42 @@ class ReleaseGate(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Catalog release URL does not match target: raw'):
                 catalog(header, repository, 'wrong-tag')
 
+    def test_fork_catalog_accepts_only_fork_and_explicit_pinned_source(self):
+        root = Path(__file__).resolve().parents[1]
+        header = root / 'src/app/pack_catalog_generated.h'
+        original = header.read_text(encoding='utf-8')
+        packs = catalog(header, 'ClauxQz4/pulse', 'v1', 'jimmgreen/pulse')
+        self.assertTrue(all(pack['repository'] == 'jimmgreen/pulse' for pack in packs))
+        with tempfile.TemporaryDirectory() as directory:
+            changed = Path(directory) / 'mixed-catalog.h'
+            changed.write_text(original.replace('github.com/jimmgreen/pulse/',
+                'github.com/ClauxQz4/pulse/', 1), encoding='utf-8')
+            mixed = catalog(changed, 'ClauxQz4/pulse', 'v1', 'jimmgreen/pulse')
+            self.assertNotIn('repository', mixed[0])
+            self.assertTrue(all(pack['repository'] == 'jimmgreen/pulse' for pack in mixed[1:]))
+            changed.write_text(original.replace('github.com/jimmgreen/pulse/',
+                'github.com/unrelated/repo/', 1), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'Catalog release URL does not match target'):
+                catalog(changed, 'ClauxQz4/pulse', 'v1', 'jimmgreen/pulse')
+
     def test_new_draft_can_copy_verified_published_bundle(self):
         ensure(self.packs, 'test/repo', 'v1', 'source', gh=self.gh)
+        self.assertEqual(self.uploads, 1)
+        self.assertEqual(len(self.remote['v1']), 6)
+
+    def test_fork_reads_pinned_upstream_packs_but_only_writes_to_fork(self):
+        for pack in self.packs:
+            pack['repository'] = 'upstream/repo'
+            pack['release_tag'] = 'pack-' + pack['id'] + '-' + pack['version']
+            name = pack['files'][0]['download_name']
+            self.remote[pack['release_tag']] = {name: self.assets[name]}
+        ensure(self.packs, 'fork/repo', 'v1', gh=self.gh)
+        for call in self.calls:
+            repository = call[call.index('--repo') + 1]
+            expected = 'fork/repo' if call[2] == 'v1' else 'upstream/repo'
+            self.assertEqual(repository, expected)
+            if call[1] == 'upload':
+                self.assertEqual(repository, 'fork/repo')
         self.assertEqual(self.uploads, 1)
         self.assertEqual(len(self.remote['v1']), 6)
 

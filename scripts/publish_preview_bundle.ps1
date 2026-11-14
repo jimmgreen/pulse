@@ -6,7 +6,7 @@ param(
     [switch]$ValidateOnly
 )
 $ErrorActionPreference = 'Stop'
-$repository = 'jimmgreen/pulse'
+$repository = 'ClauxQz4/pulse'
 $directory = (Resolve-Path -LiteralPath $AssetDirectory).Path
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path
 $notesPath = (Resolve-Path -LiteralPath $Notes).Path

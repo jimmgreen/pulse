@@ -253,6 +253,7 @@ struct McpQuestion {
     std::wstring step;         // 本次运行: 新建文件夹「报销」
     std::string rule_tool;     // 始终允许这个文件夹: pulse.<id>; empty without one
     std::wstring rule_folder;
+    size_t open_index = SIZE_MAX; // The exact nav.open target displayed by this question.
 };
 
 // The question for a step outside Pulse: the assistant's card words (ToolRunActions).
@@ -297,6 +298,7 @@ void McpAskNext(AppState& s, std::shared_ptr<CtlRun> run, std::shared_ptr<std::v
             return;
         }
         run->mcp_clicked = choice == ui::ConfirmChoice::Secondary ? q.spec.secondary_text : q.spec.confirm_text;
+        if (q.open_index < run->open_targets.size()) run->open_targets[q.open_index].confirmed = true;
         if (choice == ui::ConfirmChoice::Secondary && !q.rule_tool.empty() && run->mcp->allow_always)
             run->mcp->allow_always(q.rule_tool, q.rule_folder);
         McpAskNext(s2, run, questions, i + 1);
@@ -331,6 +333,10 @@ void McpStart(AppState& s, std::shared_ptr<app::ai::McpActionsRun> mcp) {
         app::ai::FinishMcpRun(*mcp, ToolOutcome::Fail("invalid_args", "steps is empty"));
         return;
     }
+    if (const std::string error = BindOpenTargets(s, *run); !error.empty()) {
+        app::ai::FinishMcpRun(*mcp, ToolOutcome::Fail("invalid_args", error));
+        return;
+    }
     // Every step must be allowed before any runs: a call is all or nothing up front.
     size_t file_steps = 0;
     std::string moved_by;   // the first step that may change the folder Pulse shows
@@ -352,7 +358,7 @@ void McpStart(AppState& s, std::shared_ptr<app::ai::McpActionsRun> mcp) {
             app::ai::FinishMcpRun(*mcp, std::move(out));
             return;
         }
-        const std::wstring target = id == "nav.open" ? OpenTarget(s, StepArgs(run->queue[i])) : std::wstring();
+        const std::wstring& target = BoundOpenTarget(*run, i);
         const McpGroup group = app::actions::McpGroupOf(id, target);
         const Gate gate = app::actions::AiPolicy(id, target).gate;
         // 本次运行: 给 8 项打标签「报销」 · 整理 Pulse 未打开 (被设置拦下).
@@ -419,7 +425,7 @@ void McpStart(AppState& s, std::shared_ptr<app::ai::McpActionsRun> mcp) {
     for (size_t i = 0; i < run->queue.size(); ++i) {
         const std::string id = StepAction(run->queue[i]);
         const json::Value& args = StepArgs(run->queue[i]);
-        const std::wstring target = id == "nav.open" ? OpenTarget(s, args) : std::wstring();
+        const std::wstring& target = BoundOpenTarget(*run, i);
         McpQuestion q;
         q.what = McpWhat(*run, i);
         const std::wstring named = json::Wide(args.get_string("name"));
@@ -452,6 +458,7 @@ void McpStart(AppState& s, std::shared_ptr<app::ai::McpActionsRun> mcp) {
                 if (text.state != app::actions::ArgAsk::State::Ask) continue;   // the step says why
             }
             q.spec = McpConfirmSpec(s, *run, id, target, has_text ? &text : nullptr);
+            if (id == "nav.open") q.open_index = i;
         } else {
             continue;
         }

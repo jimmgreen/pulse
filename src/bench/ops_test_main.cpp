@@ -8,6 +8,7 @@
 #include "../ops/ops_manager.h"
 #include "../common/runtime_log.h"
 #include "../ops/transfer_rate_estimator.h"
+#include "../ops/transfer_engine.h"
 #include "../ops/verification_worker.h"
 #include "../app/update_shutdown.h"
 #include "../ops/clipboard.h"
@@ -613,7 +614,128 @@ static int RunUndoRedoHistoryTests(bool progress_only = false) {
     return g_fail ? 1 : 0;
 }
 
+static int RunMoveSourceChangedTest() {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(com)) return 2;
+    GUID guid{};
+    wchar_t guid_text[40]{};
+    if (FAILED(CoCreateGuid(&guid)) || !StringFromGUID2(guid, guid_text, 40)) {
+        CoUninitialize();
+        return 2;
+    }
+    std::error_code ec;
+    const auto temp = std::filesystem::temp_directory_path(ec);
+    const auto root = temp / (std::wstring(L"pulse-move-source-") + guid_text);
+    if (ec || !std::filesystem::create_directory(root, ec)) { CoUninitialize(); return 2; }
+
+    l10n::SetLanguage(L"en-US");
+    g_ops.SetJournalPath(L"");
+    g_ops.Start([] {}, false);
+    enum class Change { Replace, Edit, None, Readonly };
+    for (const auto change : {Change::Replace, Change::Edit, Change::None, Change::Readonly}) {
+        const std::wstring suffix = std::to_wstring(static_cast<int>(change));
+        const auto source_dir = root / (L"source" + suffix);
+        const auto target_dir = root / (L"target" + suffix);
+        const auto a = (source_dir / L"a.txt").wstring(), b = (source_dir / L"b.txt").wstring();
+        const auto target_a = (target_dir / L"a.txt").wstring(), target_b = (target_dir / L"b.txt").wstring();
+        const auto edited = (source_dir / L"edited.txt").wstring();
+        const char old_bytes[] = "first version";
+        const char new_bytes[] = "secondversion";
+        static_assert(sizeof(old_bytes) == sizeof(new_bytes));
+        MakeDir(source_dir.wstring());
+        MakeDir(target_dir.wstring());
+        const bool fixture = MakeFile(a, old_bytes, sizeof(old_bytes)) && MakeFile(b, old_bytes, sizeof(old_bytes)) &&
+            MakeFile(target_a, "old target A", 12) && MakeFile(target_b, "old target B", 12) &&
+            MakeFile(edited, new_bytes, sizeof(new_bytes));
+        Check(fixture, L"move: create isolated conflict fixtures");
+        if (!fixture) continue;
+        if (change == Change::Readonly)
+            Check(SetFileAttributesW(a.c_str(), FILE_ATTRIBUTE_READONLY) != FALSE, L"move: make unchanged source read-only");
+        const auto old_hash = FileHash(a);
+        const auto new_hash = FileHash(edited);
+        const auto target_b_hash = FileHash(target_b);
+        const auto before = g_ops.Status().completed_ops;
+        g_ops.Submit(SimpleOp(ops::OpType::Move, {a.c_str(), b.c_str()}, target_dir.c_str()));
+        const auto wait_conflict = [&](const std::wstring& source) -> uint64_t {
+            const auto deadline = GetTickCount64() + 5000;
+            while (GetTickCount64() < deadline && g_ops.Status().completed_ops == before) {
+                if (const auto conflict = g_ops.PendingConflict(); conflict && conflict->source == source)
+                    return conflict->token;
+                Sleep(10);
+            }
+            return 0;
+        };
+        const auto first = wait_conflict(a);
+        if (first) g_ops.ResolveConflict(first, ops::ConflictChoice::Replace, false);
+        const auto second = first ? wait_conflict(b) : 0;
+        const bool pending = second && FileHash(a) == old_hash && FileHash(target_a) == old_hash;
+        Check(pending, L"move: first file copied with source still pending at the second conflict");
+        if (pending) {
+            if (change == Change::Replace) {
+                Check(MoveFileExW(edited.c_str(), a.c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE &&
+                    FileHash(a) == new_hash, L"move: replace the pending source path with a different file");
+            } else if (change == Change::Edit) {
+                const auto id = FileId(a);
+                Check(MakeFile(a, new_bytes, sizeof(new_bytes)) && FileHash(a) == new_hash && FileId(a) == id,
+                    L"move: modify the pending source in place without changing its size");
+            }
+        }
+        if (second && change == Change::Edit) g_ops.ResolveConflict(second, ops::ConflictChoice::Replace, false);
+        else g_ops.CancelCurrent();
+        Check(WaitOpDone(before, 5000), L"move: operation reaches its terminal result");
+        if (change == Change::Replace)
+            Check(FileHash(a) == new_hash && FileHash(target_a) == old_hash,
+                L"move: cancellation preserves the replacement at the source path");
+        else if (change == Change::Edit) {
+            Check(FileHash(a) == new_hash && FileHash(target_a) == old_hash,
+                L"move: completion preserves the source edited in place");
+            Check(g_ops.Status().failed_items == 1 && !Exists(b) && FileHash(target_b) == old_hash,
+                L"move: report the changed source and still move the unchanged source");
+        } else {
+            Check(!Exists(a) && FileHash(target_a) == old_hash,
+                L"move: cancellation still commits the unchanged source already copied");
+        }
+        if (change != Change::Edit)
+            Check(FileHash(b) == old_hash && FileHash(target_b) == target_b_hash,
+                L"move: cancellation leaves the unresolved conflict untouched");
+        if (change == Change::Readonly) {
+            if (Exists(a)) SetFileAttributesW(a.c_str(), FILE_ATTRIBUTE_NORMAL);
+            if (Exists(target_a)) SetFileAttributesW(target_a.c_str(), FILE_ATTRIBUTE_NORMAL);
+        }
+    }
+    g_ops.Stop();
+
+    const auto pool_source = (root / L"pool-source.txt").wstring();
+    const auto pool_target = (root / L"pool-target.txt").wstring();
+    const auto pool_edited = (root / L"pool-edited.txt").wstring();
+    const bool pool_fixture = MakeFile(pool_source, "", 0) && MakeFile(pool_edited, "new data", 8);
+    Check(pool_fixture, L"move: create empty-file fixture for a pooled move");
+    if (pool_fixture) {
+        std::atomic<bool> cancel{false}, pause{false};
+        std::mutex mutex;
+        std::condition_variable cv;
+        ops::SmallCopyPool pool(2, cancel, pause, mutex, cv);
+        pool.Submit(ops::SmallCopyJob{0, pool_source, pool_target, FILE_ATTRIBUTE_NORMAL, true, 0});
+        std::vector<ops::SmallCopyResult> results;
+        const auto deadline = GetTickCount64() + 5000;
+        while (results.empty() && GetTickCount64() < deadline) results = pool.Take(true);
+        Check(results.size() == 1 && results[0].move_pending && results[0].move_source &&
+              FileSize(pool_target) == 0, L"move: pooled copy records the actual empty source version");
+        if (results.size() == 1) {
+            const auto new_hash = FileHash(pool_edited);
+            const bool replaced = MoveFileExW(pool_edited.c_str(), pool_source.c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE;
+            Check(replaced && ops::DeleteCopiedMoveSource(pool_source, results[0].move_source) == ERROR_FILE_INVALID &&
+                  FileHash(pool_source) == new_hash, L"move: the pooled source receipt rejects a replacement");
+        }
+    }
+    std::filesystem::remove_all(root, ec);
+    Check(!ec, L"move: clean up isolated fixtures");
+    CoUninitialize();
+    return g_fail ? 1 : 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--move-source-changed-only") return RunMoveSourceChangedTest();
     if (argc == 2 && std::wstring_view(argv[1]) == L"--undo-history-persistence-only") return RunUndoHistoryPersistenceTests();
     if (argc == 2 && std::wstring_view(argv[1]) == L"--undo-history-progress-behavior") return RunUndoRedoHistoryTests(true);
     if (argc == 2 && std::wstring_view(argv[1]) == L"--undo-history-progress-only") return RunUndoHistoryProgressTests(false);

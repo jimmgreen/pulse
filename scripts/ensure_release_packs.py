@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 
 
-def catalog(path, repository, tag):
+def catalog(path, repository, tag, source_repository=None):
     text = path.read_text(encoding='utf-8-sig')
     arrays = dict(re.findall(r'inline constexpr PackFile (\w+)\[\] = \{(.*?)\n\};', text, re.S))
     releases = re.findall(r'inline constexpr PackRelease \w+\{\s*L"([^"]+)",\s*L"([^"]+)",\s*L"([^"]+)",\s*(\w+),\s*(?:std::size\(\4\)|sizeof\(\4\)\s*/\s*sizeof\(\4\[0\]\))\s*\};', text)
@@ -20,9 +20,13 @@ def catalog(path, repository, tag):
         independent_tag = f'pack-{key}-{version}'
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', version):
             raise ValueError(f'Invalid catalog version: {key}')
-        prefix = f'https://github.com/{repository}/releases/download/'
-        if url not in {f'{prefix}{tag}/', f'{prefix}{independent_tag}/'}:
+        sources = [repository] + ([source_repository] if source_repository else [])
+        origin = next((source for source in sources if url in {
+            f'https://github.com/{source}/releases/download/{tag}/',
+            f'https://github.com/{source}/releases/download/{independent_tag}/'}), None)
+        if origin is None:
             raise ValueError(f'Catalog release URL does not match target: {key}')
+        prefix = f'https://github.com/{origin}/releases/download/'
         release_tag = independent_tag if url == f'{prefix}{independent_tag}/' else tag
         body = arrays[array]
         rows = re.findall(r'\{L"([^"]+)", (\d+), L"([a-f0-9]{64})", (\d+), L"([a-f0-9]{64})"(?:, L"([^"]+)")?\},', body)
@@ -36,7 +40,10 @@ def catalog(path, repository, tag):
             names.add(download)
             files.append(dict(name=name, size=int(size), sha256=sha, packed_size=int(packed_size),
                               packed_sha256=packed_sha, download_name=download))
-        packs.append(dict(id=key, version=version, release_tag=release_tag, files=files))
+        pack = dict(id=key, version=version, release_tag=release_tag, files=files)
+        if origin != repository:
+            pack['repository'] = origin
+        packs.append(pack)
     return packs
 
 
@@ -60,14 +67,15 @@ def verify_independent(packs, repository, key, expected_version, gh=None):
     if pack['release_tag'] != tag:
         raise ValueError('Independent release must match the catalog pack and version')
     gh = gh or (lambda *args: subprocess.run(['gh', *args], check=True, capture_output=True, text=True).stdout)
-    state = json.loads(gh('release', 'view', tag, '--repo', repository, '--json', 'isDraft'))
+    source = pack.get('repository', repository)
+    state = json.loads(gh('release', 'view', tag, '--repo', source, '--json', 'isDraft'))
     if state.get('isDraft') is not False:
         raise ValueError('Independent pack release must be published')
     with tempfile.TemporaryDirectory(prefix='pulse-verify-independent-pack-') as temporary:
         directory = Path(temporary)
         for entry in pack['files']:
             name = entry['download_name']
-            gh('release', 'download', tag, '--repo', repository,
+            gh('release', 'download', tag, '--repo', source,
                '--pattern', name, '--dir', str(directory))
             validate(directory / name, entry)
     return pack
@@ -82,13 +90,15 @@ def ensure(packs, repository, tag, source_tag=None, asset_directory=None, gh=Non
         if pack['release_tag'] != tag:
             if pack['release_tag'] != f"pack-{pack['id']}-{pack['version']}":
                 raise ValueError('Independent release must match the catalog pack and version')
-            state = json.loads(gh('release', 'view', pack['release_tag'], '--repo', repository, '--json', 'isDraft'))
+            state = json.loads(gh('release', 'view', pack['release_tag'], '--repo', pack.get('repository', repository), '--json', 'isDraft'))
             if state['isDraft']:
                 raise ValueError('Independent pack release must be published')
     if source_tag and source_tag != tag:
-        state = json.loads(gh('release', 'view', source_tag, '--repo', repository, '--json', 'isDraft'))
-        if state['isDraft']:
-            raise ValueError('Source pack release must be published')
+        sources = {pack.get('repository', repository) for pack in packs if pack['release_tag'] == tag}
+        for source in sources:
+            state = json.loads(gh('release', 'view', source_tag, '--repo', source, '--json', 'isDraft'))
+            if state['isDraft']:
+                raise ValueError('Source pack release must be published')
     with tempfile.TemporaryDirectory(prefix='pulse-release-packs-') as temporary:
         root = Path(temporary)
         uploads = []
@@ -101,7 +111,8 @@ def ensure(packs, repository, tag, source_tag=None, asset_directory=None, gh=Non
                     validate(local, entry)
                     uploads.append(str(local.resolve()))
                 else:
-                    gh('release', 'download', pack['release_tag'] if independent else source_tag or tag, '--repo', repository,
+                    gh('release', 'download', pack['release_tag'] if independent else source_tag or tag,
+                       '--repo', pack.get('repository', repository),
                        '--pattern', name, '--dir', str(root))
                     validate(root / name, entry)
                     uploads.append(str(root / name))
@@ -124,7 +135,9 @@ def ensure(packs, repository, tag, source_tag=None, asset_directory=None, gh=Non
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--repository', default='jimmgreen/pulse')
+    parser.add_argument('--repository', default='ClauxQz4/pulse')
+    parser.add_argument('--source-repository', default='jimmgreen/pulse',
+                        help='Read-only source for existing pinned preview packs; all uploads target --repository')
     parser.add_argument('--tag')
     parser.add_argument('--source-tag')
     parser.add_argument('--asset-directory', type=Path)
@@ -137,7 +150,7 @@ def main():
             parser.error('--verify-independent requires --expected-pack-version')
         if args.tag or args.source_tag or args.asset_directory:
             parser.error('--verify-independent does not accept staging arguments')
-        packs = catalog(args.catalog, args.repository, '')
+        packs = catalog(args.catalog, args.repository, '', args.source_repository)
         pack = verify_independent(packs, args.repository, args.verify_independent, args.expected_pack_version)
         print(f"Verified {len(pack['files'])} published {pack['release_tag']} pack files; "
               'engine was not rebuilt; no assets uploaded or published')
@@ -146,7 +159,7 @@ def main():
         parser.error('--tag is required for pack staging')
     if args.expected_pack_version:
         parser.error('--expected-pack-version requires --verify-independent')
-    packs = catalog(args.catalog, args.repository, args.tag)
+    packs = catalog(args.catalog, args.repository, args.tag, args.source_repository)
     ensure(packs, args.repository, args.tag, args.source_tag, args.asset_directory)
     print(f"Verified {sum(len(p['files']) for p in packs)} remote pack files and {len(packs)} manifests for {args.tag}")
 

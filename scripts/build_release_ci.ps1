@@ -48,7 +48,7 @@ $testNames = @('pulse_rename_ops_test', 'pulse_child_edit_test', 'pulse_localiza
     'pulse_image_preview_integrity_test', 'pulse_udf_listing_test', 'pulse_preview_integrity_test',
     'pulse_change_tracking_memory_test', 'pulse_change_feed_memory_test', 'pulse_usn_packet_queue_test',
     'pulse_content_progress_ui_test', 'pulse_operation_presentation_test', 'pulse_column_strip_test', 'pulse_entry_sort_key_test',
-    'pulse_file_lock_test', 'pulse_dialogs_test',
+    'pulse_file_lock_test', 'pulse_dialogs_test', 'pulse_setup_remove_tree_test', 'pulse_setup_start_pin_registration_test',
     # AI enhancement pack: catalog/install, JSON, broker, tools, MCP over real pipes.
     'pulse_ai_pack_test', 'pulse_ai_json_test', 'pulse_ai_broker_test', 'pulse_ai_tools_test', 'pulse_ai_mcp_test')
 $testTargets = (@('pulse', 'pulse_index_engine_test', 'pulse_index_host_stress',
@@ -67,7 +67,7 @@ if errorlevel 1 exit /b 1
 chcp 65001 >nul
 set "VSLANG=1033"
 $toolsetEnvironment
-cmake -S "$repo" -B "$build" -G Ninja $compilerArguments -DCMAKE_BUILD_TYPE=Release -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DPULSE_WIN81_CANDIDATE=$candidate $testConfiguration -DPULSE_WITH_LUMATEXT=ON -DLUMATEXT_SOURCE_DIR= -DCMAKE_PREFIX_PATH="$sdkRoot" -DPULSE_UPDATE_MANIFEST_URL="https://github.com/jimmgreen/pulse/releases/latest/download/$manifest" -DPULSE_UPDATE_PUBLIC_KEY_HEX=$publicKey
+cmake -S "$repo" -B "$build" -G Ninja $compilerArguments -DCMAKE_BUILD_TYPE=Release -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DPULSE_WIN81_CANDIDATE=$candidate $testConfiguration -DPULSE_WITH_LUMATEXT=ON -DLUMATEXT_SOURCE_DIR= -DCMAKE_PREFIX_PATH="$sdkRoot" -DPULSE_UPDATE_MANIFEST_URL="https://github.com/ClauxQz4/pulse/releases/latest/download/$manifest" -DPULSE_UPDATE_PUBLIC_KEY_HEX=$publicKey
 if errorlevel 1 exit /b 1
 cmake --build "$build" --parallel 4 --target $testTargets
 exit /b %errorlevel%
@@ -88,6 +88,8 @@ if (-not $SkipTests) {
     if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure 'Update shutdown and automatic wait regression failed' }
     & (Join-Path $build 'pulse_ops_test.exe') --delete-progress-only
     if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure 'Delete progress rate and remaining-time regression failed' }
+    & (Join-Path $build 'pulse_ops_test.exe') --move-source-changed-only
+    if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure 'Move source identity/version regression failed' }
     & (Join-Path $build 'pulse_playback_controls_test.exe') --timeline-only
     if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure 'Playback timeline regression failed' }
     & (Join-Path $build 'pulse_preview_test.exe') --vector-only
@@ -118,7 +120,8 @@ if (-not $SkipTests) {
     }
     $selftestCases = @('rename-editor', 'rename-editor-native', 'operation-toast',
         'filter-controls', 'rename-outside', 'address-editor', 'address-editor-native', 'release-panels-hidden', 'pr-shell', 'pin-reorder', 'snapshot-patch', 'list-columns',
-        'filename-render', 'filename-render-native', 'folder-views', 'pane-header-icons', 'folder-sizes', 'tray-stack')
+        'filename-render', 'filename-render-native', 'folder-views', 'pane-header-icons', 'folder-sizes', 'tray-stack',
+        'ai-open-authorization')
     $selftestLogs = @{
         'folder-sizes' = 'bench_data/folder-sizes/results.log'
         'pane-header-icons' = 'bench_data/pane-header-icons/results.log'

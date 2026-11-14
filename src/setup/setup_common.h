@@ -56,7 +56,9 @@ std::wstring ParentDir(const std::wstring& path);
 bool CreateDirs(const std::wstring& dir);
 bool ReadWholeFile(const std::wstring& path, std::string& data);
 bool WriteWholeFile(const std::wstring& path, const void* data, size_t size);
-void RemoveTree(const std::wstring& dir);  // locked leftovers are removed at reboot
+// Does not traverse reparse points. Locked leftovers are removed at reboot.
+// A kept direct child (case-insensitive) also preserves the ordinary root.
+void RemoveTree(const std::wstring& dir, const wchar_t* keep_child = nullptr);
 std::wstring Utf8ToWide(const std::string& s);
 std::string WideToUtf8(const std::wstring& s);
 
