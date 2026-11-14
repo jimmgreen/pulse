@@ -87,7 +87,11 @@ bool NameSortKey(const std::wstring& name, std::string& key) {
 // names compare by key, else through NameCompare.
 int ItemNameCompare(const fs::DirEntry& a, const fs::DirEntry& b,
                     const std::string* key_a = nullptr, const std::string* key_b = nullptr) {
-    if (a.drive_type != 0 && b.drive_type != 0) {
+    const bool a_pc_drive = a.drive_type != 0 || a.pc_wsl;
+    const bool b_pc_drive = b.drive_type != 0 || b.pc_wsl;
+    if (a_pc_drive && b_pc_drive) {
+        if (a.drive_type != 0 && b.drive_type == 0) return -1;
+        if (a.drive_type == 0 && b.drive_type != 0) return 1;
         const int cmp = _wcsicmp(a.full_path.c_str(), b.full_path.c_str());
         if (cmp != 0) return cmp;
     }
@@ -172,7 +176,9 @@ bool Less(const fs::DirEntry& a, const fs::DirEntry& b, ui::SortColumn col,
     int cmp = 0;
     // This PC rows: its details view heads the date column 使用情况 and the
     // size column 可用. Drives without a known size follow in either direction.
-    if (a.drive_type != 0 && b.drive_type != 0 &&
+    const bool a_pc_drive = a.drive_type != 0 || a.pc_wsl;
+    const bool b_pc_drive = b.drive_type != 0 || b.pc_wsl;
+    if (a_pc_drive && b_pc_drive &&
         (col == ui::SortColumn::Mtime || col == ui::SortColumn::Size)) {
         const bool ka_known = a.drive_total > 0, kb_known = b.drive_total > 0;
         if (ka_known != kb_known) return ka_known;
@@ -231,9 +237,15 @@ bool Less(const fs::DirEntry& a, const fs::DirEntry& b, ui::SortColumn col,
         break;
     case ui::SortColumn::Type: {
         // Drive rows have no extension; their type is the drive kind.
-        cmp = a.drive_type != 0 && b.drive_type != 0
-            ? static_cast<int>(a.drive_type) - static_cast<int>(b.drive_type)
-            : ExtensionCompare(a.name, b.name);
+        const bool a_pc_drive = a.drive_type != 0 || a.pc_wsl;
+        const bool b_pc_drive = b.drive_type != 0 || b.pc_wsl;
+        if (a_pc_drive && b_pc_drive) {
+            if (a.drive_type != 0 && b.drive_type == 0) cmp = -1;
+            else if (a.drive_type == 0 && b.drive_type != 0) cmp = 1;
+            else cmp = static_cast<int>(a.drive_type) - static_cast<int>(b.drive_type);
+        } else {
+            cmp = ExtensionCompare(a.name, b.name);
+        }
         if (cmp == 0) cmp = ItemNameCompare(a, b, na, nb);
         break;
     }

@@ -33,6 +33,7 @@
 #define IDR_FLUENT_MUSIC_SVG 131
 #define IDR_FLUENT_DOCUMENTS_SVG 132
 #define IDR_FLUENT_WORKSPACE_SVG 133
+#define IDR_FLUENT_WSL_SVG 134
 // Model service marks (assets/providers), Settings > AI 助手.
 #define IDR_PROVIDER_DEEPSEEK_SVG 140
 #define IDR_PROVIDER_QWEN_SVG 141

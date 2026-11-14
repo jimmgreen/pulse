@@ -129,6 +129,7 @@ struct ListEntryView {
     uint32_t drive_space_bold_start = 0;
     uint32_t drive_space_bold_length = 0;
     bool drive_mounted = false;  // This PC: mapped / user-mode mount (网络盘 chip in tiles)
+    bool wsl = false;             // This PC: registered WSL distribution
     uint32_t launcher_rgb = 0;   // This PC program icon (网盘程序入口): brand tint, 0 = not one
     uint8_t net_kind = 0;        // pulse:networks device row: 1 PC, 2 NAS, 3 Mac (own icon), 0 = not one
     // This PC phone: fs::kPcDevice* bits (0 = not a phone) and one capacity

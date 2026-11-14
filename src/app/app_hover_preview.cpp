@@ -294,7 +294,7 @@ void ReadFolder(const std::shared_ptr<HoverFolderJob>& job, const FolderReadOpti
 // recycle bin, change records or virtual locations.
 bool FolderCardPath(const app::Tab& tab, int row, std::wstring& path) {
     const fs::DirEntry& entry = tab.EntryAt(static_cast<size_t>(row));
-    if (!entry.is_dir || entry.change_record_only || IsRecycleTab(&tab)) return false;
+    if (!entry.is_dir || entry.change_record_only || entry.pc_wsl || IsRecycleTab(&tab)) return false;
     path = EntryFullPath(tab, row);
     return !path.empty() && !fs::IsVirtualPath(path);
 }
@@ -321,6 +321,7 @@ void StartFolderJob(AppState& s, const app::Tab& tab, const fs::DirEntry& entry,
     auto& card = s.hoverPreview;
     if (card.folder_job && card.folder_job->path == path && !card.folder_job->cancelled) return;
     if (card.folder_job) card.folder_job->cancelled = true;
+    if (entry.pc_wsl) return;
     auto job = std::make_shared<HoverFolderJob>();
     job->path = path;
     card.folder_job = job;

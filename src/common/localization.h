@@ -5150,6 +5150,8 @@ enum class StringId : UINT {
     SetupEndRetry = IDS_SETUP_END_RETRY,
     SetupEndConfirm = IDS_SETUP_END_CONFIRM,
     SetupEndFailed = IDS_SETUP_END_FAILED,
+    WslDistributionType = IDS_WSL_DISTRIBUTION_TYPE,
+    ThisPcStatusWsl = IDS_THISPC_STATUS_WSL,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

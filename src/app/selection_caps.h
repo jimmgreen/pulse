@@ -147,15 +147,15 @@ inline SelectionCaps ComputeSelectionCaps(const Tab& tab, const PlacesCatalog* p
                 launchers = true;
                 continue;
             }
-            if (!e.drive_type) continue;
+            if (!e.drive_type && !e.pc_wsl) continue;
             drives = true;
             caps.any_removable = caps.any_removable || e.drive_type == DRIVE_REMOVABLE ||
                 e.drive_type == DRIVE_CDROM;
             caps.any_remote = caps.any_remote || e.drive_type == DRIVE_REMOTE;
             caps.any_locked = caps.any_locked || e.drive_locked;
-            all_locked = all_locked && e.drive_locked;
+            all_locked = all_locked && e.drive_type != 0 && e.drive_locked;
             // A disc has no writable label; a locked volume cannot be read.
-            if (e.drive_locked || e.drive_type == DRIVE_CDROM) rename = false;
+            if (e.pc_wsl || e.drive_locked || e.drive_type == DRIVE_CDROM) rename = false;
         }
         if (launchers) {
             caps.kind = SelectionKind::Launchers;  // no file commands at all

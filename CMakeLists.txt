@@ -701,6 +701,7 @@ if(PULSE_APP_SOURCES)
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/fluent/add_circle_24_color.svg"
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/fluent/search_24_color.svg"
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/fluent/pc_24_color.svg"
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/fluent/wsl_24_color.svg"
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/fluent/tag_24_color.svg")
     target_link_options(pulse PRIVATE /MANIFEST:NO)
 # pulse.map resolves --hang-watch stack RVAs (Release builds carry no PDB).
@@ -1072,6 +1073,8 @@ add_executable(pulse_preview_handler_pan_test src/bench/preview_handler_pan_test
 add_executable(pulse_directory_test src/bench/directory_regression_test.cpp)
 add_executable(pulse_fs_audit_test src/bench/fs_audit_test.cpp)
 target_link_libraries(pulse_fs_audit_test PRIVATE pulse_localization user32 shell32 shlwapi netapi32 advapi32)
+add_executable(pulse_wsl_distro_test src/bench/wsl_distro_test.cpp)
+target_link_libraries(pulse_wsl_distro_test PRIVATE advapi32)
 add_executable(pulse_enum_benchmark_test src/bench/enum_benchmark_test.cpp)
 target_link_libraries(pulse_enum_benchmark_test PRIVATE shell32 shlwapi)
 add_executable(pulse_network_agent_client_test src/bench/network_agent_client_test.cpp

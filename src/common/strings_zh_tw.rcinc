@@ -5138,4 +5138,6 @@ BEGIN
     IDS_SETUP_END_RETRY "結束處理程序並重試"
     IDS_SETUP_END_CONFIRM "將結束清單中可核驗的占用處理程序，未儲存的內容可能遺失。請先儲存工作。是否繼續？"
     IDS_SETUP_END_FAILED "部分處理程序未能結束，請查看安裝記錄或手動結束後重試。"
+    IDS_WSL_DISTRIBUTION_TYPE "WSL 發行版"
+    IDS_THISPC_STATUS_WSL "%zu 個 WSL 發行版"
 END

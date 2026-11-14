@@ -297,6 +297,23 @@ int main() {
               "the drive's label and capacity return once its media answers");
         CloseHandle(release_drive);
     }
+    {
+        std::vector<DirEntry> listed;
+        bool listed_ok = true;
+        try { EnumerateDirectory(L"", listed, EnumerationOptions{}); } catch (...) { listed_ok = false; }
+        const auto registered = EnumerateRegisteredWslDistributions();
+        size_t wsl_rows = 0;
+        bool shape_ok = listed_ok;
+        for (const auto& entry : listed) {
+            if (!entry.pc_wsl) continue;
+            ++wsl_rows;
+            shape_ok = shape_ok && entry.is_dir && entry.drive_type == 0 &&
+                entry.drive_total == 0 && entry.drive_free == 0 && entry.drive_fs.empty() &&
+                entry.full_path == WslDistributionPath(entry.name);
+        }
+        Check(shape_ok && wsl_rows == registered.size(),
+              "This PC appends registered WSL rows without drive media metadata");
+    }
     CloseHandle(entered);CloseHandle(release_io);std::filesystem::remove_all(dir);
     return failures?1:0;
 }
