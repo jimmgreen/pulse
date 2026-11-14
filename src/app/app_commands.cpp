@@ -1454,7 +1454,7 @@ std::vector<SelectedDrive> SelectedDrives(const app::Tab& tab) {
     for (int index : tab.SelectedIndices()) {
         if (index < 0 || static_cast<size_t>(index) >= tab.EntryCount()) continue;
         const fs::DirEntry e = tab.EntryAt(static_cast<size_t>(index));
-        if (!e.drive_type) continue;
+        if (!e.drive_type || e.pc_wsl) continue;
         std::wstring root = fs::DriveRootOf(EntryFullPath(tab, index));
         if (!root.empty()) drives.push_back({std::move(root), e.drive_type, e.drive_locked});
     }
@@ -6078,7 +6078,7 @@ namespace {
 bool QuickPreviewItemAt(AppState& s, const app::Tab& tab, int index, ui::QuickPreviewItem& item) {
     if (!tab.snapshot || index < 0 || index >= static_cast<int>(tab.EntryCount())) return false;
     const fs::DirEntry& entry = tab.EntryAt(static_cast<size_t>(index));
-    if (entry.pc_launcher || entry.pc_device) return false;  // 网盘程序入口 / phones: no file to preview
+    if (entry.pc_launcher || entry.pc_device || entry.pc_wsl) return false;  // This PC pseudo-rows: no preview source
     // Folders preview as a contents listing; not in This PC (whole drives),
     // the recycle bin or other virtual locations.
     if (entry.is_dir && (tab.current_path.empty() || IsRecycleTab(&tab) ||

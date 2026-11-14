@@ -11,6 +11,7 @@
 #include "drive_label.h"
 #include "bitlocker_volume.h"
 #include "bounded_enumeration.h"
+#include "wsl_distros.h"
 #include "../common/localization.h"
 #include <windows.h>
 #include <shellapi.h>
@@ -508,6 +509,17 @@ static void EnumerateThisPc(std::vector<DirEntry>& out, const std::atomic<bool>*
             e.drive_locked = media->locked;
             if (!media->remote_fs) e.drive_fs = media->fs_name;
         }
+        out.push_back(std::move(e));
+    }
+    if (cancelled && cancelled->load()) return;
+    for (const auto& distro : EnumerateRegisteredWslDistributions()) {
+        if (cancelled && cancelled->load()) return;
+        DirEntry e;
+        e.name = distro.name;
+        e.full_path = distro.path;
+        e.is_dir = true;
+        e.attrs = FILE_ATTRIBUTE_DIRECTORY;
+        e.pc_wsl = true;
         out.push_back(std::move(e));
     }
 }

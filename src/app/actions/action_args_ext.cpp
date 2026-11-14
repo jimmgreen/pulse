@@ -616,7 +616,7 @@ DriveRef DriveArg(AppState& s, const json::Value& args) {
     const std::vector<int> sel = tab->SelectedIndices();
     if (sel.size() != 1 || sel[0] < 0 || static_cast<size_t>(sel[0]) >= tab->EntryCount()) return d;
     const fs::DirEntry e = tab->EntryAt(static_cast<size_t>(sel[0]));
-    if (!e.drive_type) return d;
+    if (!e.drive_type || e.pc_wsl) return d;
     d.root = fs::DriveRootOf(EntryFullPath(*tab, sel[0]));
     d.type = e.drive_type;
     return d;

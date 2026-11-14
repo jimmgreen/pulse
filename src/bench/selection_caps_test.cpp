@@ -169,6 +169,17 @@ int main(int argc, char** argv) {
     caps = ComputeSelectionCaps(tab, &places);
     Check(caps.kind == SelectionKind::Drives && !caps.rename && !caps.del, "two drives: no rename, no delete");
 
+    // Registered WSL distributions are navigable This PC drive rows, but have
+    // no physical-drive verbs or label mutation.
+    auto wsl = Entry(L"Ubuntu", L"\\\\?\\UNC\\wsl.localhost\\Ubuntu");
+    wsl.pc_wsl = true;
+    Fill(tab, L"", {wsl});
+    tab.ToggleSelect(0);
+    caps = ComputeSelectionCaps(tab, &places);
+    Check(caps.kind == SelectionKind::Drives && !caps.rename && !caps.any_removable &&
+          !caps.any_remote && !caps.any_locked && !caps.all_locked && !caps.del,
+          "WSL distribution: drive selection category without physical-drive verbs");
+
     // A server's share list.
     Fill(tab, L"\\\\nas", {Entry(L"share", L"\\\\nas\\share")});
     tab.ToggleSelect(0);

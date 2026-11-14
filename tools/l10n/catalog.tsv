@@ -5165,3 +5165,5 @@ StoreCommunityEmpty	IDS_STORE_COMMUNITY_EMPTY	6435	还没有社区扩展	No comm
 SetupEndRetry	IDS_SETUP_END_RETRY	6436	结束进程并重试	End processes and retry	結束處理程序並重試
 SetupEndConfirm	IDS_SETUP_END_CONFIRM	6437	将结束列表中可核验的占用进程，未保存的内容可能丢失。请先保存工作。是否继续？	End the verified processes in this list? Unsaved work may be lost. Save your work before continuing.	將結束清單中可核驗的占用處理程序，未儲存的內容可能遺失。請先儲存工作。是否繼續？
 SetupEndFailed	IDS_SETUP_END_FAILED	6438	部分进程未能结束，请查看安装日志或手动退出后重试。	Some processes could not be ended. Check the setup log or quit them manually and retry.	部分處理程序未能結束，請查看安裝記錄或手動結束後重試。
+WslDistributionType	IDS_WSL_DISTRIBUTION_TYPE	6439	WSL 发行版	WSL distribution	WSL 發行版
+ThisPcStatusWsl	IDS_THISPC_STATUS_WSL	6440	%zu 个 WSL 发行版	%zu WSL distributions	%zu 個 WSL 發行版

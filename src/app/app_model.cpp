@@ -1618,19 +1618,21 @@ static std::wstring StatusText(const Tab& tab) {
     if (tab.loading || !tab.snapshot) return L"";
     if (tab.current_path == L"pulse:networks" && !tab.virtual_status.empty()) return tab.virtual_status;
     if (tab.current_path.empty()) {
-        // This PC: what is there (2 个磁盘 · 1 个网络盘 · 1 个设备), not
+        // This PC: what is there (2 个磁盘 · 1 个 WSL 发行版 · 1 个网络盘 · 1 个设备), not
         // folders and files: phones and program icons are neither.
-        size_t counts[4]{};
+        size_t counts[5]{};
         for (size_t i = 0; i < tab.EntryCount(); ++i) {
             const fs::DirEntry& e = tab.EntryAt(i);
-            if (e.drive_type) ++counts[e.drive_remote_like ? 1 : 0];
+            if (e.pc_wsl) ++counts[4];
+            else if (e.drive_type) ++counts[e.drive_remote_like ? 1 : 0];
             else if (e.pc_device & fs::kPcDevicePhone) ++counts[2];
             else if (e.pc_launcher) ++counts[3];
         }
-        const l10n::StringId ids[4] = {l10n::StringId::ThisPcStatusDrives, l10n::StringId::ThisPcStatusMounted,
-                                       l10n::StringId::ThisPcStatusDevices, l10n::StringId::ThisPcStatusLaunchers};
+        const l10n::StringId ids[5] = {l10n::StringId::ThisPcStatusDrives, l10n::StringId::ThisPcStatusMounted,
+                                       l10n::StringId::ThisPcStatusDevices, l10n::StringId::ThisPcStatusLaunchers,
+                                       l10n::StringId::ThisPcStatusWsl};
         std::wstring text;
-        for (int k = 0; k < 4; ++k) {
+        for (int k = 0; k < 5; ++k) {
             if (counts[k] == 0 && k != 0) continue;
             wchar_t part[96]{};
             swprintf_s(part, l10n::Get(ids[k]).c_str(), counts[k]);

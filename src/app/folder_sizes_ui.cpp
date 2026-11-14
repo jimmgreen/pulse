@@ -62,7 +62,7 @@ void FillFolderSizes(AppState& s, ui::WindowViewModel& vm) {
             const int source = order[static_cast<size_t>(r)];
             if (source < 0 || static_cast<size_t>(source) >= column.snapshot->size()) continue;
             const auto& entry = (*column.snapshot)[static_cast<size_t>(source)];
-            if (!entry.is_dir || entry.drive_type != 0) continue;
+            if (!entry.is_dir || entry.drive_type != 0 || entry.pc_wsl) continue;
             column_rows.push_back({&column, source, ChildPath(column.path, entry.name)});
         }
     };
@@ -102,12 +102,12 @@ void FillFolderSizes(AppState& s, ui::WindowViewModel& vm) {
                 const auto& entry = (*pane.snapshot)[static_cast<size_t>(source)];
                 // Recycle Bin folders carry their size ($I) and are not at
                 // full_path (their original place) to be probed or scanned.
-                if (!entry.is_dir || !entry.recycle_path.empty()) continue;
+                if (!entry.is_dir || entry.pc_wsl || !entry.recycle_path.empty()) continue;
                 path = entry.full_path.empty() && !pane.is_search ? ChildPath(pane.path, entry.name) : entry.full_path;
             } else {
                 if (static_cast<size_t>(source) >= pane.entries.size()) continue;
                 const auto& entry = pane.entries[static_cast<size_t>(source)];
-                if (!entry.is_dir) continue;
+                if (!entry.is_dir || entry.wsl) continue;
                 path = entry.path;
             }
             if (path.empty() || fs::IsVirtualPath(path)) continue;
@@ -122,7 +122,7 @@ void FillFolderSizes(AppState& s, ui::WindowViewModel& vm) {
             const auto& entries = *pane.snapshot;
             for (size_t i = 0; i < entries.size() && count < kSortRequestLimit; ++i) {
                 const auto& entry = entries[i];
-                if (!entry.is_dir || entry.drive_type != 0 || !entry.recycle_path.empty() ||
+                if (!entry.is_dir || entry.drive_type != 0 || entry.pc_wsl || !entry.recycle_path.empty() ||
                     shown.contains(static_cast<int>(i))) continue;
                 const std::wstring path = entry.full_path.empty() ? ChildPath(pane.path, entry.name) : entry.full_path;
                 if (fs::IsVirtualPath(path)) continue;

@@ -2206,7 +2206,7 @@ PreviewDrawResult MainRenderer::DrawEntryThumbnail(ID2D1DeviceContext* dc,
     const D2D1_RECT_F& dest, const ListEntryView& entry, ViewMode mode,
     uint64_t generation, uint32_t pixels, float opacity, bool align_bottom,
     D2D1_RECT_F* artwork, uint32_t* duration) {
-    if (entry.launcher_rgb || entry.device || entry.net_kind) return PreviewDrawResult::Failed;  // no file behind it: DrawEntryIcon
+    if (entry.launcher_rgb || entry.device || entry.net_kind || entry.wsl) return PreviewDrawResult::Failed;  // no file behind it: DrawEntryIcon
     if (entry.is_dir) {
         const bool grid = mode == ViewMode::MediumIcons || mode == ViewMode::LargeIcons ||
                           mode == ViewMode::ExtraLargeIcons;
@@ -2249,7 +2249,7 @@ void MainRenderer::PrefetchNextScreen(const PaneViewModel& vm, int first, int la
         if (vm.content_results && !vm.content_results->Ready(static_cast<size_t>(src))) continue;
         const ListEntryView& e = MakeVisibleEntry(vm, static_cast<size_t>(src));
         // Cloud placeholders would download; folders have their own cache.
-        if (e.is_dir || e.is_link || e.record_only || e.cloud_recall) continue;
+        if (e.is_dir || e.is_link || e.record_only || e.cloud_recall || e.wsl) continue;
         if (!thumbnail_cache_.Prefetch(e.path, e.attrs, pixels, vm.view_generation,
                                        e.modified_value, e.size_value)) return;  // busy: a later frame
     }
@@ -2554,6 +2554,11 @@ void MainRenderer::DrawEntryIcon(const ListEntryView& entry, float x, float y, f
             {x + size * 0.64f, y + size * 0.5f}, brTextSecondary_.get(), std::max(1.0f, size * 0.045f));
         return;
     }
+    if (entry.wsl) {
+        if (DrawFluentSvg(IDR_FLUENT_WSL_SVG, dest, opacity, nullptr, true)) return;
+        DrawFolderIcon(x, y, size, theme, opacity);
+        return;
+    }
     if (entry.device && compositor_ && compositor_->Dc()) {
         auto* dc = compositor_->Dc();
         // Phones: the phone glyph on a soft plate; an amber lock while the
@@ -2663,7 +2668,7 @@ void MainRenderer::DrawMorphIcon(const ListEntryView& entry, const PaneViewModel
     }
     // The settled view's icon is converted on the icon worker meanwhile, so
     // the first static frame after the glide only finds it cached.
-    if (!entry.record_only)
+    if (!entry.record_only && !entry.wsl)
         icon_cache_.Prefetch(entry.path, entry.name, entry.is_dir, entry.attrs, target_size);
     const float icon_alpha = (thumb ? 1.0f - thumb_weight : 1.0f) * sample.opacity * hidden_alpha;
     if (icon_alpha <= 0.01f) {
@@ -2672,7 +2677,7 @@ void MainRenderer::DrawMorphIcon(const ListEntryView& entry, const PaneViewModel
                             {}, 0.0f, 0.0f, &thumbnail_artwork);
         return;
     }
-    if (entry.record_only || entry.launcher_rgb || entry.device || entry.net_kind) {
+    if (entry.record_only || entry.launcher_rgb || entry.device || entry.net_kind || entry.wsl) {
         DrawEntryIcon(entry, icon.left, icon.top, size, theme, hidden_alpha);
         return;
     }
@@ -2857,7 +2862,7 @@ void MainRenderer::DrawMorphFrom(const PaneViewModel& vm, const motion::ViewMorp
                     e.thumb_path.empty() ? e.path : e.thumb_path, e.attrs, ThumbnailRequestPixels(mode, size),
                     e.modified_value, e.size_value, hidden_alpha, grid, nullptr)) == PreviewDrawResult::Bitmap;
         if (thumb) continue;
-        if (e.launcher_rgb || e.device || e.net_kind) {  // 网盘程序入口, phones and LAN devices draw their own icon
+        if (e.launcher_rgb || e.device || e.net_kind || e.wsl) {  // non-filesystem rows draw their own icon
             DrawEntryIcon(e, dest.left, dest.top, size, theme, hidden_alpha);
             continue;
         }
@@ -6040,7 +6045,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                     DrawThumbnailBadges(e, artwork, renderedIconSize, media_duration_ms, theme);
                 if (!drewThumbnail && !empty_folder) {
                     // Change records and 网盘程序入口 draw their own icon (DrawEntryIcon).
-                    const bool own_icon = e.record_only || e.launcher_rgb != 0 || e.device != 0 || e.net_kind != 0;
+                    const bool own_icon = e.record_only || e.launcher_rgb != 0 || e.device != 0 || e.net_kind != 0 || e.wsl;
                     ID2D1Bitmap* grid_bitmap = iconGrid && !morphing && !own_icon
                         ? icon_cache_.BitmapFor(e.path, e.name, e.is_dir, e.attrs, renderedIconSize) : nullptr;
                     artwork_hit_valid = grid_bitmap != nullptr;

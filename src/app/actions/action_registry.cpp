@@ -584,7 +584,7 @@ bool OneDrive(AppState& s, fs::DirEntry& e, std::wstring& root) {
     const std::vector<int> sel = tab->SelectedIndices();
     if (sel.size() != 1 || sel[0] < 0 || static_cast<size_t>(sel[0]) >= tab->EntryCount()) return false;
     e = tab->EntryAt(static_cast<size_t>(sel[0]));
-    if (!e.drive_type) return false;
+    if (!e.drive_type || e.pc_wsl) return false;
     root = fs::DriveRootOf(EntryFullPath(*tab, sel[0]));
     return !root.empty();
 }
