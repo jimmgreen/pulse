@@ -241,16 +241,23 @@ void ToolFindDuplicates(AppState& s, const app::ai::ModelToolCall& call, const j
 // control_pulse (flow F): the assistant runs actions of the action table
 // (actions/action_registry.h) by id, in order. View, organize and create
 // actions run at once; programs and system actions ask first (one confirm
-// card for the call); moving and deleting files stays with the flow tools
+// card per sensitive step); moving and deleting files stays with the flow tools
 // (P4). Each action is a step; the result card undoes the call as one group
 // and shows the user's own keys (or what to type in the palette). The call
 // stops at the first step that fails; what was done stays done and undoable.
 
 struct CtlStep;
+struct CtlOpenTarget {
+    std::wstring path;
+    bool confirmed = false;
+};
 struct CtlRun {
     std::string call_id;
     uint64_t gen = 0;
     std::vector<json::Value> queue;     // the actions; a layout's panes add opens
+    // Bound before permission checks and questions; never resolve again while
+    // running. Entries stay aligned when a layout inserts navigation steps.
+    std::vector<CtlOpenTarget> open_targets;
     size_t index = 0;
     // 撤销, in reverse order. Each checks that what it restores still exists.
     std::vector<std::function<void(AppState&)>> undo;
@@ -364,6 +371,9 @@ void CtlNext(AppState& s, std::shared_ptr<CtlRun> run);
 bool SelectAsk(AppState& s, std::shared_ptr<CtlRun> run, const json::Value& act);
 CtlStep CtlSelectNone(AppState& s, CtlRun& run);
 std::wstring OpenTarget(AppState& s, const json::Value& act);
+std::string BindOpenTargets(AppState& s, CtlRun& run);
+const std::wstring& BoundOpenTarget(const CtlRun& run, size_t index);
+void CtlAskNext(AppState& s, std::shared_ptr<CtlRun> run, size_t first);
 std::wstring LeafName(const std::wstring& path);
 CtlStep CtlOpenFile(AppState& s, CtlRun& run, const json::Value& act);
 CtlStep CtlNewFolder(AppState& s, CtlRun& run, const json::Value& act);

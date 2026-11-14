@@ -90,18 +90,7 @@ bool RemovePreviewPacksOnUninstall() {
 }
 
 void DeleteLocalDataKeepingPacks() {
-    const std::wstring root = LocalPulseDir();
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW((root + L"\\*").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do {
-        const std::wstring name = fd.cFileName;
-        if (name == L"." || name == L".." || EqualsNoCase(name, L"packs")) continue;
-        const std::wstring path = root + L"\\" + name;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveTree(path);
-        else DeleteFileW(path.c_str());
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
+    RemoveTree(LocalPulseDir(), L"packs");
 }
 
 void CleanupPulseData(const std::wstring& index_path) {

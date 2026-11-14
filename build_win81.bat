@@ -20,7 +20,7 @@ set "PULSE_WIN81_SELFTEST=ON"
 if /i "%~1"=="/release" set "PULSE_WIN81_SELFTEST=OFF"
 if /i "%~1"=="/production" set "PULSE_WIN81_SELFTEST=OFF"
 set /p PULSE_UPDATE_KEY=<"%~dp0cmake\update-public-key.txt"
-set PULSE_UPDATE_CONFIG=-DPULSE_UPDATE_MANIFEST_URL="https://github.com/jimmgreen/pulse/releases/latest/download/update-manifest-win81.json" -DPULSE_UPDATE_PUBLIC_KEY_HEX=%PULSE_UPDATE_KEY%
+set PULSE_UPDATE_CONFIG=-DPULSE_UPDATE_MANIFEST_URL="https://github.com/ClauxQz4/pulse/releases/latest/download/update-manifest-win81.json" -DPULSE_UPDATE_PUBLIC_KEY_HEX=%PULSE_UPDATE_KEY%
 if exist "%LUMATEXT_SOURCE_DIR%\build-vs18\_deps\harfbuzz-src\src\harfbuzz.cc" set PULSE_DEPS=-DFETCHCONTENT_SOURCE_DIR_HARFBUZZ="%LUMATEXT_SOURCE_DIR%\build-vs18\_deps\harfbuzz-src" -DFETCHCONTENT_SOURCE_DIR_FREETYPE="%LUMATEXT_SOURCE_DIR%\build-vs18\_deps\freetype-src"
 cmake -S . -B build-win81 -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER="%PULSE_VC_ROOT%\bin\Hostx64\x64\cl.exe" -DCMAKE_CXX_COMPILER="%PULSE_VC_ROOT%\bin\Hostx64\x64\cl.exe" -DCMAKE_LINKER="%PULSE_VC_ROOT%\bin\Hostx64\x64\link.exe" -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DPULSE_WITH_SELFTEST=%PULSE_WIN81_SELFTEST% -DPULSE_WITH_TEST_HOOKS=%PULSE_WIN81_SELFTEST% -DPULSE_WIN81_CANDIDATE=ON -DLUMATEXT_SOURCE_DIR="%LUMATEXT_SOURCE_DIR%" -DPULSE_WITH_LUMATEXT=ON %PULSE_DEPS% %PULSE_UPDATE_CONFIG%
 if errorlevel 1 exit /b 1

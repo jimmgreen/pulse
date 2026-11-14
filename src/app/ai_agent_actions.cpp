@@ -194,6 +194,11 @@ CtlStep CtlLayout(AppState& s, CtlRun& run, const json::Value& act) {
             o.set("args", std::move(args));
             opens.push_back(std::move(o));
         }
+        if (run.open_targets.size() == run.queue.size())
+            run.open_targets.insert(run.open_targets.begin() + static_cast<std::ptrdiff_t>(run.index + 1),
+                                    opens.size(), CtlOpenTarget{});
+        else
+            run.open_targets.clear(); // An inconsistent queue must not inherit another step's authority.
         run.queue.insert(run.queue.begin() + static_cast<std::ptrdiff_t>(run.index + 1), opens.begin(), opens.end());
     }
     return st;
@@ -953,6 +958,42 @@ std::wstring OpenTarget(AppState& s, const json::Value& act) {
     return {};
 }
 
+const std::wstring& BoundOpenTarget(const CtlRun& run, size_t index) {
+    static const std::wstring empty;
+    return run.open_targets.size() == run.queue.size() && index < run.open_targets.size()
+               ? run.open_targets[index].path : empty;
+}
+
+std::string BindOpenTargets(AppState& s, CtlRun& run) {
+    run.open_targets.assign(run.queue.size(), {});
+    for (size_t i = 0; i < run.queue.size(); ++i) {
+        if (StepAction(run.queue[i]) != "nav.open") continue;
+        const json::Value& args = StepArgs(run.queue[i]);
+        const std::wstring supplied = json::Wide(args.get_string("path"));
+        const bool absolute = (supplied.size() >= 3 && supplied[1] == L':' &&
+                               (supplied[2] == L'\\' || supplied[2] == L'/')) ||
+                              (supplied.size() >= 2 && supplied[0] == L'\\' && supplied[1] == L'\\');
+        auto fail = [&](const char* reason) {
+            run.open_targets.clear();
+            return "step " + std::to_string(i + 1) + " (nav.open): " + reason + "; nothing of this call was done";
+        };
+        // A later selected item/name could mean the result of an earlier step.
+        // Binding today's selection would silently open the wrong object.
+        if (i > 0 && !absolute)
+            return fail("a later open must use a full path; split selection/navigation and open into separate calls");
+        const std::wstring target = OpenTarget(s, args);
+        if (target.empty()) return fail("no target could be resolved; pass a full path or select one item first");
+        const DWORD needed = GetFullPathNameW(target.c_str(), 0, nullptr, nullptr);
+        if (!needed) return fail("the open target could not be made absolute");
+        std::wstring full(needed, L'\0');
+        const DWORD written = GetFullPathNameW(target.c_str(), needed, full.data(), nullptr);
+        if (!written || written >= needed) return fail("the open target could not be made absolute");
+        full.resize(written);
+        run.open_targets[i].path = std::move(full);
+    }
+    return {};
+}
+
 std::wstring LeafName(const std::wstring& path) {
     const size_t slash = path.find_last_of(L"\\/");
     return slash == std::wstring::npos ? path : path.substr(slash + 1);
@@ -962,14 +1003,26 @@ CtlStep CtlOpenFile(AppState& s, CtlRun& run, const json::Value& act) {
     CtlStep st;
     st.icon = ui::AiIcon::Open;
     st.title = Text(I::AiCtlStepOpen);
-    const std::wstring path = OpenTarget(s, act);
+    const std::wstring path = BoundOpenTarget(run, run.index);
     if (path.empty()) {
         st.arg = json::Wide(act.get_string("path"));
-        st.error = "no such file (pass a full path, a name in the open folder, or select one item)";
+        st.error = "open target was not bound before authorization; start a new run_actions call";
         st.why = Text(I::AiActWhyNoFile);
         return st;
     }
     st.arg = LeafName(path);
+    const app::actions::McpGroup group = app::actions::McpGroupOf("nav.open", path);
+    if (run.mcp && !run.mcp->allowed[static_cast<size_t>(group)]) {
+        st.error = app::ai::McpNotAllowed(group, "nav.open").error.message;
+        st.why = Text(I::AiActWhyLocked);
+        return st;
+    }
+    if (app::actions::AiPolicy("nav.open", path).gate == app::actions::Gate::Confirm &&
+        !run.open_targets[run.index].confirmed) {
+        st.error = "this open target requires its own confirmation before execution";
+        st.why = Text(I::AiActWhyDeclined);
+        return st;
+    }
     if (IsDirectory(path)) {
         json::Value go = json::Value::Object();
         go.set("path", Utf8(path));

@@ -649,6 +649,7 @@ struct CopyProgressContext {
     std::function<void(uint64_t, uint64_t)> report;
     bool pause_sent = false;
     std::shared_ptr<VerificationStamp> owned_output;
+    MoveSourceReceipt* move_source = nullptr;
     ULONGLONG last_report = 0;
 };
 
@@ -656,6 +657,7 @@ COPYFILE2_MESSAGE_ACTION CALLBACK CopyProgress(const COPYFILE2_MESSAGE* message,
                                                void* raw) {
     auto* ctx = static_cast<CopyProgressContext*>(raw);
     if (!ctx || !message) return COPYFILE2_PROGRESS_CANCEL;
+    if (ctx->move_source) ctx->move_source->Observe(*message);
     if (!ctx->owned_output) {
         HANDLE target = INVALID_HANDLE_VALUE;
         switch (message->Type) {
@@ -4830,7 +4832,11 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     // sources go in batches, after one flush per volume has made every copy
     // in the batch durable (FlushCopyToDisk): a power cut leaves a moved file
     // in one place or both, never in neither.
-    std::vector<size_t> pending_moves;
+    struct PendingMove {
+        size_t index;
+        std::optional<MoveSourceVersion> source;
+    };
+    std::vector<PendingMove> pending_moves;
     ULONGLONG pending_since = 0;
     std::wstring last_volume_parent, last_volume_root;
     const auto volume_of = [&](const std::wstring& file) {
@@ -4845,10 +4851,10 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     };
     const auto commit_moves = [&]() -> bool {
         if (pending_moves.empty()) return true;
-        const std::vector<size_t> batch = std::move(pending_moves);
+        const auto batch = std::move(pending_moves);
         pending_moves.clear();
         std::vector<std::pair<std::wstring, size_t>> volumes;  // volume -> a copy on it
-        for (size_t i : batch) {
+        for (const auto& [i, source] : batch) {
             const std::wstring volume = volume_of(entries[i].destination);
             if (std::none_of(volumes.begin(), volumes.end(), [&](const auto& known) {
                     return _wcsicmp(known.first.c_str(), volume.c_str()) == 0; }))
@@ -4870,18 +4876,12 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             }
         }
         bool ok = true;
-        for (size_t i : batch) {
+        for (const auto& [i, source] : batch) {
             auto& moved = entries[i];
-            // The attributes were read while scanning.
-            if (moved.attributes & FILE_ATTRIBUTE_READONLY)
-                SetFileAttributesW(moved.source.c_str(), moved.attributes & ~FILE_ATTRIBUTE_READONLY);
-            if (!DeleteFileW(moved.source.c_str())) {
-                const DWORD code = GetLastError();
+            if (const DWORD code = DeleteCopiedMoveSource(moved.source, source)) {
                 diagnostics::runtime::Event("move_commit_failed", {{"task", task_id}, {"stage", 3},
                     {"error", code}, {"source", preview::DiagnosticPathId(moved.source)},
                     {"destination", preview::DiagnosticPathId(moved.destination)}});
-                if (moved.attributes & FILE_ATTRIBUTE_READONLY)
-                    SetFileAttributesW(moved.source.c_str(), moved.attributes);
                 const HRESULT hr = HRESULT_FROM_WIN32(code);
                 std::wstring reason = FailureReason(l10n::Get(l10n::StringId::MoveCopiedSourceKept).c_str(),
                                                     TransferFailureText(hr));
@@ -4905,9 +4905,9 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         }
         return ok;
     };
-    const auto queue_move = [&](size_t index) -> bool {
+    const auto queue_move = [&](size_t index, const std::optional<MoveSourceVersion>& source) -> bool {
         if (pending_moves.empty()) pending_since = GetTickCount64();
-        pending_moves.push_back(index);
+        pending_moves.push_back({index, source});
         if (pending_moves.size() >= 512 || GetTickCount64() - pending_since >= 2000) return commit_moves();
         return true;
     };
@@ -4968,7 +4968,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                 SetProgressStatus([&](OpStatus& st) { st.total_bytes = total_bytes; });
             }
             if (result.move_pending) {
-                if (!queue_move(result.index)) pool->Stop();
+                if (!queue_move(result.index, result.move_source)) pool->Stop();
             } else {
                 done.completed = true;
                 done.source_removed = result.source_removed;
@@ -5488,7 +5488,9 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         const bool replacing = destination_exists && choice == ConflictChoice::Replace;
 
         uint64_t known_file_total = entry.bytes;
+        MoveSourceReceipt move_source;
         CopyProgressContext context;
+        if (req.type == OpType::Move) context.move_source = &move_source;
         context.cancel = &transfer_cancel_;
         context.pause = &transfer_pause_;
         context.report = [&](uint64_t done, uint64_t actual_total) {
@@ -5551,6 +5553,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         DWORD extra_flags = COPY_FILE_COPY_SYMLINK | (unbuffered ? COPY_FILE_NO_BUFFERING : 0);
         for (;;) {
             context.pause_sent = false;
+            move_source.BeginAttempt(resume);
             COPYFILE2_EXTENDED_PARAMETERS parameters{};
             parameters.dwSize = sizeof(parameters);
             parameters.dwCopyFlags = extra_flags;
@@ -5560,7 +5563,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             // Small files finish within one callback interval; the callback
             // only adds a round trip per file. Pause and cancel are checked
             // between files for them.
-            if (context.skip || entry.bytes >= kProgressCallbackMinBytes || verify_requested || !direct) {
+            if (context.skip || context.move_source || entry.bytes >= kProgressCallbackMinBytes || verify_requested || !direct) {
                 parameters.pProgressRoutine = CopyProgress;
                 parameters.pvCallbackContext = &context;
             }
@@ -5731,7 +5734,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                           L" | " + Win32Message(flush_error);
                 break;
             }
-            if (!queue_move(index)) break;
+            if (!queue_move(index, move_source.Version())) break;
         } else {
             entry.completed = true;
         }

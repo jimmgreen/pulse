@@ -34,11 +34,16 @@ bool RegisterStartPin(const std::wstring& app, std::wstring& error) {
         // Record every new ancestor so rollback never removes a pre-existing key.
         for (size_t end = key.find(L'\\'); ; end = key.find(L'\\', end + 1)) {
             const std::wstring part = key.substr(0, end);
-            DWORD disposition = 0;
-            status = RegCreateKeyExW(HKEY_LOCAL_MACHINE, part.c_str(), 0, nullptr, 0,
-                                    KEY_READ | KEY_WRITE | KEY_WOW64_64KEY, nullptr, &handle, &disposition);
+            const REGSAM access = (end == std::wstring::npos ? KEY_QUERY_VALUE | KEY_SET_VALUE : KEY_READ) |
+                KEY_WOW64_64KEY;
+            status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, part.c_str(), 0, access, &handle);
+            if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND) {
+                DWORD disposition = 0;
+                status = RegCreateKeyExW(HKEY_LOCAL_MACHINE, part.c_str(), 0, nullptr, 0,
+                                        access, nullptr, &handle, &disposition);
+                if (status == ERROR_SUCCESS && disposition == REG_CREATED_NEW_KEY) created.push_back(part);
+            }
             if (status != ERROR_SUCCESS) break;
-            if (disposition == REG_CREATED_NEW_KEY) created.push_back(part);
             if (end == std::wstring::npos) break;
             RegCloseKey(handle);
             handle = nullptr;

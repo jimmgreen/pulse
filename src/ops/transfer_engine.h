@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -50,6 +51,30 @@ TransferTarget DescribeTransferTarget(const std::wstring& source, const std::wst
 // and restored). File systems that cannot flush count as done. False: keep
 // the source; `error` says why.
 bool FlushCopyToDisk(const std::wstring& path, DWORD attributes, DWORD& error, bool sync = true);
+
+struct MoveSourceVersion {
+    VerificationStamp stamp{};
+    FILE_ID_INFO file_id{};
+    LONGLONG change_time = 0;
+    bool has_file_id = false;
+};
+
+// Record the file CopyFile2 actually opened. A resumed attempt must still use
+// the same version as the first attempt.
+class MoveSourceReceipt {
+public:
+    void BeginAttempt(bool resume);
+    void Observe(const COPYFILE2_MESSAGE& message);
+    std::optional<MoveSourceVersion> Version() const { return observed_ ? version_ : std::nullopt; }
+private:
+    std::optional<MoveSourceVersion> version_;
+    bool observed_ = false;
+    bool resuming_ = false;
+};
+
+// Open against concurrent write/delete access, then compare and delete through
+// that same handle. Returns a Win32 error if the source was kept.
+DWORD DeleteCopiedMoveSource(const std::wstring& path, const std::optional<MoveSourceVersion>& expected);
 
 struct SmallCopyJob {
     size_t index = 0;           // entry index in RunTransfer
@@ -94,6 +119,7 @@ struct SmallCopyResult {
     DWORD buffering_cleanup_error = ERROR_SUCCESS;
     bool buffered_retry = false;
     std::shared_ptr<VerificationStamp> owned_output;
+    std::optional<MoveSourceVersion> move_source;
 };
 
 // Optional diagnostic state. Read worker totals only after the pool has joined.
@@ -169,7 +195,12 @@ private:
     uint64_t reserved_bytes_ = 0;
     std::unordered_map<size_t, uint64_t> reservations_;
     std::unordered_map<size_t, SmallCopyProgress> progress_;
-    struct ProgressContext { SmallCopyPool* pool; size_t index; std::shared_ptr<VerificationStamp>* owned_output; };
+    struct ProgressContext {
+        SmallCopyPool* pool;
+        size_t index;
+        std::shared_ptr<VerificationStamp>* owned_output;
+        MoveSourceReceipt* move_source;
+    };
     static COPYFILE2_MESSAGE_ACTION CALLBACK Progress(const COPYFILE2_MESSAGE*, PVOID);
     bool closing_ = false;
     std::vector<std::thread> threads_;

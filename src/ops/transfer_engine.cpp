@@ -2,6 +2,7 @@
 #include "transfer_engine.h"
 #include "../common/worker_thread.h"
 #include "owned_transfer_output.h"
+#include "native_delete_stream.h"
 #include "../fs/drive_kind.h"
 #include "../common/runtime_log.h"
 #include <winioctl.h>
@@ -10,6 +11,40 @@
 
 namespace pulse::ops {
 namespace {
+
+struct SourceHandle {
+    HANDLE value;
+    ~SourceHandle() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+};
+
+DWORD ReadMoveSourceVersion(HANDLE file, MoveSourceVersion& version, FILE_BASIC_INFO& basic) {
+    if (!GetFileInformationByHandleEx(file, FileBasicInfo, &basic, sizeof(basic))) return GetLastError();
+    if (basic.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
+        return ERROR_FILE_INVALID;
+    if (!CaptureOwnedOutputStamp(file, version.stamp)) return ERROR_FILE_INVALID;
+    version.change_time = basic.ChangeTime.QuadPart;
+    version.has_file_id = GetFileInformationByHandleEx(file, FileIdInfo, &version.file_id, sizeof(version.file_id)) != FALSE;
+    return ERROR_SUCCESS;
+}
+
+bool SameMoveSourceVersion(const MoveSourceVersion& expected, const MoveSourceVersion& actual) {
+    const auto& a = expected.stamp;
+    const auto& b = actual.stamp;
+    return (!expected.has_file_id || (actual.has_file_id &&
+            expected.file_id.VolumeSerialNumber == actual.file_id.VolumeSerialNumber &&
+            memcmp(expected.file_id.FileId.Identifier, actual.file_id.FileId.Identifier,
+                   sizeof(expected.file_id.FileId.Identifier)) == 0)) &&
+        a.volume == b.volume && a.index_high == b.index_high && a.index_low == b.index_low &&
+        a.bytes == b.bytes && CompareFileTime(&a.last_write, &b.last_write) == 0 &&
+        expected.change_time == actual.change_time;
+}
+
+DWORD CheckMoveSourceVersion(HANDLE file, const MoveSourceVersion& expected, FILE_BASIC_INFO& basic) {
+    if (file == INVALID_HANDLE_VALUE) return GetLastError();
+    MoveSourceVersion actual{};
+    if (const DWORD error = ReadMoveSourceVersion(file, actual, basic)) return error;
+    return SameMoveSourceVersion(expected, actual) ? ERROR_SUCCESS : ERROR_FILE_INVALID;
+}
 
 enum class Storage { Solid, Spinning, Remote, Removable, Unknown };
 
@@ -96,6 +131,77 @@ unsigned ThreadsFor(Storage storage) {
 constexpr auto kTakeWait = std::chrono::milliseconds(100);
 
 }  // namespace
+
+void MoveSourceReceipt::BeginAttempt(bool resume) {
+    resuming_ = resume;
+    observed_ = false;
+    if (!resume) version_.reset();
+}
+
+void MoveSourceReceipt::Observe(const COPYFILE2_MESSAGE& message) {
+    if (observed_) return;
+    HANDLE source;
+    switch (message.Type) {
+    case COPYFILE2_CALLBACK_STREAM_STARTED: source = message.Info.StreamStarted.hSourceFile; break;
+    case COPYFILE2_CALLBACK_CHUNK_STARTED: source = message.Info.ChunkStarted.hSourceFile; break;
+    case COPYFILE2_CALLBACK_CHUNK_FINISHED: source = message.Info.ChunkFinished.hSourceFile; break;
+    case COPYFILE2_CALLBACK_STREAM_FINISHED: source = message.Info.StreamFinished.hSourceFile; break;
+    default: return;
+    }
+    if (!source || source == INVALID_HANDLE_VALUE) return;
+    observed_ = true;
+    MoveSourceVersion current{};
+    FILE_BASIC_INFO basic{};
+    if (ReadMoveSourceVersion(source, current, basic) != ERROR_SUCCESS ||
+        (resuming_ && (!version_ || !SameMoveSourceVersion(*version_, current)))) {
+        version_.reset();
+    } else {
+        version_ = current;
+    }
+}
+
+DWORD DeleteCopiedMoveSource(const std::wstring& path, const std::optional<MoveSourceVersion>& expected) {
+    if (!expected) return ERROR_FILE_INVALID;
+    const auto open = [&](DWORD access) {
+        return CreateFileW(path.c_str(), DELETE | FILE_READ_ATTRIBUTES | access,
+            FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    };
+    FILE_BASIC_INFO basic{};
+    {
+        const SourceHandle file{open(0)};
+        if (const DWORD error = CheckMoveSourceVersion(file.value, *expected, basic)) return error;
+        if (!(basic.FileAttributes & FILE_ATTRIBUTE_READONLY)) {
+            FILE_DISPOSITION_INFO disposition{TRUE};
+            return SetFileInformationByHandle(file.value, FileDispositionInfo, &disposition, sizeof(disposition))
+                ? ERROR_SUCCESS : GetLastError();
+        }
+        struct { DWORD flags; } disposition{
+            native_delete::kDispositionDelete | native_delete::kDispositionPosixSemantics | native_delete::kDispositionIgnoreReadonly
+        };
+        if (SetFileInformationByHandle(file.value, native_delete::kFileDispositionInfoEx,
+                                      &disposition, sizeof(disposition)))
+            return ERROR_SUCCESS;
+        const DWORD error = GetLastError();
+        if (error != ERROR_INVALID_PARAMETER && error != ERROR_NOT_SUPPORTED && error != ERROR_INVALID_FUNCTION)
+            return error;
+    }
+
+    // Older file systems need the read-only attribute cleared on the handle.
+    const SourceHandle file{open(FILE_WRITE_ATTRIBUTES)};
+    if (const DWORD error = CheckMoveSourceVersion(file.value, *expected, basic)) return error;
+    const DWORD attributes = basic.FileAttributes;
+    FILE_BASIC_INFO writable{};
+    writable.FileAttributes = attributes & ~FILE_ATTRIBUTE_READONLY;
+    if (!writable.FileAttributes) writable.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    if (!SetFileInformationByHandle(file.value, FileBasicInfo, &writable, sizeof(writable))) return GetLastError();
+    FILE_DISPOSITION_INFO disposition{TRUE};
+    if (SetFileInformationByHandle(file.value, FileDispositionInfo, &disposition, sizeof(disposition))) return ERROR_SUCCESS;
+    const DWORD error = GetLastError();
+    FILE_BASIC_INFO restore{};
+    restore.FileAttributes = attributes;
+    SetFileInformationByHandle(file.value, FileBasicInfo, &restore, sizeof(restore));
+    return error;
+}
 
 unsigned TransferThreadCount(const std::wstring& source, const std::wstring& dest_dir) {
     return (std::min)(ThreadsFor(StorageOf(source, 1)), ThreadsFor(StorageOf(dest_dir, 2)));
@@ -370,6 +476,7 @@ bool FlushCopyToDisk(const std::wstring& path, DWORD attributes, DWORD& error, b
 COPYFILE2_MESSAGE_ACTION CALLBACK SmallCopyPool::Progress(const COPYFILE2_MESSAGE* message, PVOID opaque) {
     const auto& context = *static_cast<ProgressContext*>(opaque);
     auto& pool = *context.pool;
+    if (context.move_source) context.move_source->Observe(*message);
     if (context.owned_output && !*context.owned_output) {
         HANDLE target = INVALID_HANDLE_VALUE;
         switch (message->Type) {
@@ -425,17 +532,20 @@ SmallCopyResult SmallCopyPool::Run(const SmallCopyJob& job, std::unique_ptr<SHA2
             }
         }
     }
-    ProgressContext context{this, job.index, (job.verify || job.staged || job.unbuffered) ? &result.owned_output : nullptr};
+    MoveSourceReceipt move_source;
+    ProgressContext context{this, job.index, (job.verify || job.staged || job.unbuffered || job.move) ? &result.owned_output : nullptr,
+                            job.move ? &move_source : nullptr};
     // Link semantics survive an unsupported no-buffering retry unchanged.
     COPYFILE2_EXTENDED_PARAMETERS parameters{};
     parameters.dwSize = sizeof(parameters);
     parameters.dwCopyFlags = COPY_FILE_COPY_SYMLINK | COPY_FILE_FAIL_IF_EXISTS |
         (job.unbuffered ? COPY_FILE_NO_BUFFERING : 0);
-    if (job.verify || job.staged || job.unbuffered || job.bytes >= (1ull << 20)) {
+    if (job.verify || job.staged || job.unbuffered || job.move || job.bytes >= (1ull << 20)) {
         parameters.pProgressRoutine = Progress;
         parameters.pvCallbackContext = &context;
     }
     const auto copy = [&] {
+        move_source.BeginAttempt(false);
         if (!profile) return CopyFile2(job.source.c_str(), job.destination.c_str(), &parameters);
         const auto started = std::chrono::steady_clock::now();
         const HRESULT hr = CopyFile2(job.source.c_str(), job.destination.c_str(), &parameters);
@@ -467,7 +577,7 @@ SmallCopyResult SmallCopyPool::Run(const SmallCopyJob& job, std::unique_ptr<SHA2
         if (result.hr != HRESULT_FROM_WIN32(ERROR_FILE_EXISTS) &&
             result.hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) &&
             !(parameters.pProgressRoutine && result.hr == HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED))) {
-            if (job.verify || job.staged || job.unbuffered) {
+            if (job.verify || job.staged || job.unbuffered || job.move) {
                 DWORD cleanup_error = 0;
                 if (result.owned_output) DeleteVerifiedOutput(job.destination, *result.owned_output, cleanup_error);
             } else DeleteFileW(job.destination.c_str());
@@ -515,6 +625,7 @@ SmallCopyResult SmallCopyPool::Run(const SmallCopyJob& job, std::unique_ptr<SHA2
             result.not_flushed = true;
             return result;
         }
+        result.move_source = move_source.Version();
         result.move_pending = true;
     }
     return result;

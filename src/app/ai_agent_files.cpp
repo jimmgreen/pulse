@@ -470,7 +470,7 @@ CtlStep CtlRunStep(AppState& s, CtlRun& run, const std::string& id, const json::
         st.why = Text(I::AiActWhyUnknown);
         return st;
     }
-    const app::actions::Policy policy = app::actions::AiPolicy(id);
+    const app::actions::Policy policy = app::actions::AiPolicy(id, BoundOpenTarget(run, run.index));
     // Plan without a file step of its own (tray.send_to): the flow tools.
     if (policy.gate == app::actions::Gate::Plan || policy.gate == app::actions::Gate::Locked) {
         CtlStep st;
@@ -706,31 +706,29 @@ struct AskStep {
     size_t index = SIZE_MAX;
     std::string id;
     std::wstring target;   // nav.open: the file
-    size_t count = 0;      // how many steps of the call ask
     bool has_text = false; // P4b: the action's own card words (推送到远端？)
     app::actions::ArgAsk text;
 };
 
-AskStep FirstAsk(AppState& s, const std::vector<json::Value>& queue) {
+AskStep FirstAsk(AppState& s, const CtlRun& run, size_t first) {
     AskStep ask;
-    for (size_t i = 0; i < queue.size(); ++i) {
-        const std::string id = StepAction(queue[i]);
-        const std::wstring target = id == "nav.open" ? OpenTarget(s, StepArgs(queue[i])) : std::wstring();
+    for (size_t i = first; i < run.queue.size(); ++i) {
+        const std::string id = StepAction(run.queue[i]);
+        const std::wstring& target = BoundOpenTarget(run, i);
         if (app::actions::AiPolicy(id, target).gate != app::actions::Gate::Confirm) continue;
         app::actions::ArgAsk text;
         const bool has_text = app::actions::HasAskText(id);
         if (has_text) {
             // Nothing to push, no repository: no card; the step says why.
-            text = app::actions::AskFor(s, id, StepArgs(queue[i]));
+            text = app::actions::AskFor(s, id, StepArgs(run.queue[i]));
             if (text.state != app::actions::ArgAsk::State::Ask) continue;
         }
-        ++ask.count;
-        if (ask.index != SIZE_MAX) continue;
         ask.index = i;
         ask.id = id;
         ask.target = target;
         ask.has_text = has_text;
         ask.text = std::move(text);
+        break;
     }
     return ask;
 }
@@ -764,6 +762,12 @@ void ToolRunActions(AppState& s, const app::ai::ModelToolCall& call, const json:
         NextTool(s);
         return;
     }
+    if (const std::string error = BindOpenTargets(s, *run); !error.empty()) {
+        AddToolResult(a, call.id, ToolOutcome::Fail("invalid_args", error));
+        ++a.call_index;
+        NextTool(s);
+        return;
+    }
     // Only settings: the settings card of the third batch (old -> new, 显示).
     bool only_settings = true;
     for (const auto& step : run->queue) only_settings = only_settings && StepAction(step) == "settings.set";
@@ -793,12 +797,17 @@ void ToolRunActions(AppState& s, const app::ai::ModelToolCall& call, const json:
     }
     HideRenameOverlay(s, true);   // panes and windows are about to move: end a rename like a click elsewhere
     FoldSteps(s, a);
-    const AskStep ask = FirstAsk(s, run->queue);
+    CtlAskNext(s, run, 0);
+}
+
+void CtlAskNext(AppState& s, std::shared_ptr<CtlRun> run, size_t first) {
+    if (RunGone(s, *run)) return;
+    const AskStep ask = FirstAsk(s, *run, first);
     if (ask.index == SIZE_MAX) {
         CtlNext(s, run);
         return;
     }
-    // One confirm card for the call, before any step runs.
+    // Each sensitive target gets its own card, before any step runs.
     AiChat& ch = Chat(s);
     AiChatSetChip(ch, ui::StatusAiState::Waiting, Text(I::AiAsstChipWaiting));
     AiBlockView& cf = ch.Add(AiBlockKind::Confirm, Now());
@@ -811,12 +820,11 @@ void ToolRunActions(AppState& s, const app::ai::ModelToolCall& call, const json:
         cf.sub = Text(I::AiActRunSub);
         cf.cf_icon = ui::AiIcon::Package;
         cf.file = name;
+        cf.file_note = ask.target;
         WIN32_FILE_ATTRIBUTE_DATA fa{};
-        const size_t slash = ask.target.find_last_of(L"\\/");
-        const std::wstring folder = slash == std::wstring::npos ? std::wstring() : FolderLabel(ask.target.substr(0, slash));
         if (GetFileAttributesExW(ask.target.c_str(), GetFileExInfoStandard, &fa))
             cf.file_note = AiChatFormatSize((static_cast<uint64_t>(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow) +
-                           (folder.empty() ? L"" : L" \u00B7 " + folder);
+                           L" \u00B7 " + ask.target;
         cf.deny = Text(I::AiActRunDeny);
         cf.accept = Text(I::AiActRunAccept);
     } else if (ask.has_text) {
@@ -845,7 +853,7 @@ void ToolRunActions(AppState& s, const app::ai::ModelToolCall& call, const json:
         cf.hint1_icon = ui::AiIcon::Tasks;
     }
     ch.confirm_id = cf.id;
-    ch.on_confirm = [run, program, name](AppState& s3, bool accept) {
+    ch.on_confirm = [run, program, name, index = ask.index](AppState& s3, bool accept) {
         AiChat& c3 = Chat(s3);
         if (AiBlockView* card = c3.Find(c3.confirm_id)) {
             card->done = true;
@@ -871,8 +879,9 @@ void ToolRunActions(AppState& s, const app::ai::ModelToolCall& call, const json:
             NextTool(s3);
             return;
         }
+        if (program) run->open_targets[index].confirmed = true;
         AiChatSetChip(c3, ui::StatusAiState::Busy, Text(I::AiCtlApplied), 0.2f);
-        CtlNext(s3, run);
+        CtlAskNext(s3, run, index + 1);
     };
     Redraw(s);
 }

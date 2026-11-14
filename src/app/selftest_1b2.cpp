@@ -370,6 +370,7 @@ struct TabControllerTestAccess {
 bool RunPaneHeaderIconTest();
 bool RunFolderSizesTest();
 bool RunColumnResizeUiTest();
+void RunAiOpenAuthorizationTest(void (*check)(bool, const wchar_t*), const std::wstring& fixture_root);
 
 namespace {
 
@@ -6374,6 +6375,39 @@ void TestMcpRunActions() {
     Check(code_of(moved) == "invalid_args" && moved->outcome.error.message.find("step 1 (nav.go)") != std::string::npos &&
               moved->undo.empty(),
           L"mcp: a new folder after a step that changes the folder is refused before anything runs");
+
+    // Synthetic rows only: no fixture is executable and these calls never
+    // reach the system open boundary, even before the regression is fixed.
+    const auto unresolved = run_of(R"([{"action":"nav.open"}])", {G::View});
+    Check(code_of(unresolved) == "invalid_args" && unresolved->undo.empty(),
+          L"mcp: an unresolved open is refused before it can be authorized as a view action");
+    app::LayoutTab& layout = LiveLayout(s);
+    layout.panes.clear();
+    layout.panes.push_back(std::make_unique<Pane>());
+    s.pane = layout.panes.front().get();
+    layout.root = SplitContainer::CreateLeaf(s.pane);
+    layout.focused_index = 0;
+    Tab& selected_tab = layout.panes.front()->view;
+    selected_tab.current_path = L"C:\\PulseAiOpenFixture";
+    auto selected_rows = std::make_shared<std::vector<fs::DirEntry>>();
+    selected_rows->push_back(AsEntry(L"document.txt", 0, 0));
+    selected_rows->push_back(AsEntry(L"program.exe", 0, 0));
+    selected_tab.SetSnapshot(selected_rows);
+    selected_tab.SelectOnly(1);
+    const auto open_external_off = run_of(R"([{"action":"nav.open"}])", {G::View});
+    Check(code_of(open_external_off) == "not_allowed" && open_external_off->undo.empty(),
+          L"mcp: opening a selected program is refused before confirmation when external is off");
+    selected_tab.SelectOnly(0);
+    const auto changes_selection = run_of(R"([{"action":"select.clear"},{"action":"nav.open"}])", {G::View});
+    Check(code_of(changes_selection) == "invalid_args" && selected_tab.SelectedCount() == 1 &&
+              changes_selection->undo.empty(),
+          L"mcp: a selection-dependent open after another step rejects the whole batch before changing selection");
+    const auto changes_folder = run_of(
+        R"([{"action":"nav.go","args":{"path":"C:\\PulseAiOpenMissingFolder"}},
+            {"action":"nav.open","args":{"path":"document.txt"}}])", {G::View});
+    Check(code_of(changes_folder) == "invalid_args" && selected_tab.current_path == L"C:\\PulseAiOpenFixture" &&
+              changes_folder->undo.empty(),
+          L"mcp: a folder-dependent open after navigation rejects the whole batch before navigation");
 }
 
 void TestActionState() {
@@ -9873,6 +9907,14 @@ int RunSelfTest1B2() {
         return g_fail ? 1 : 0;
     }
     if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"ai-open-authorization") == 0) {
+        TestMcpRunActions();
+        RunAiOpenAuthorizationTest(Check, WorkspacePath(L"bench_data\\ai_open_uncreated_"));
+        LogLine(L"\n== ai-open-authorization: %d passed, %d failed ==\n", g_pass, g_fail);
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return g_fail ? 1 : 0;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
         wcscmp(test_case, L"action-state") == 0) {
         TestActionState();
         TestActionPolicy();
@@ -9880,6 +9922,7 @@ int RunSelfTest1B2() {
         TestActionArgs();
         TestFilePlans();
         TestMcpRunActions();
+        RunAiOpenAuthorizationTest(Check, WorkspacePath(L"bench_data\\ai_open_uncreated_"));
         if (g_log) { fclose(g_log); g_log = nullptr; }
         return g_fail ? 1 : 0;
     }
@@ -10039,6 +10082,7 @@ int RunSelfTest1B2() {
     TestActionArgs();
     TestFilePlans();
     TestMcpRunActions();
+    RunAiOpenAuthorizationTest(Check, WorkspacePath(L"bench_data\\ai_open_uncreated_"));
     TestViewLayouts();
     TestListColumns();
     TestOptionalColumns();
