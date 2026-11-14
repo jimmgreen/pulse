@@ -108,6 +108,9 @@ public:
     void Warm();
     void Reset();
     void Evict();
+    // Drop every size/metadata variant of one file and make in-flight work
+    // for its prior contents unable to repopulate the cache.
+    void InvalidatePath(const std::wstring& path);
     std::shared_future<void> SuspendVolume(const std::wstring& root);
     void ResumeVolume(const std::wstring& root);
     void BeginFrame();
@@ -231,6 +234,7 @@ private:
         ipc::PreviewRequestKind kind = ipc::PreviewRequestKind::Content;
         uint32_t frame_index = 0;
         uint32_t epoch = 0;
+        uint64_t path_epoch = 0;
         bool details = false;
         bool interest_tracked = false;
         // Set when taken: on screen and quick, so its host runs a step higher.
@@ -316,6 +320,7 @@ private:
     std::condition_variable cv_;
     std::deque<Request> queue_;
     std::unordered_set<std::wstring> pending_;
+    std::unordered_map<std::wstring, uint32_t> pending_ids_;
     std::unordered_set<std::wstring> retry_interest_;
     bool track_retry_interest_ = false;
     std::unordered_map<std::wstring, Item> items_;
@@ -325,6 +330,7 @@ private:
     size_t max_items_ = kDefaultMaxItems;
     std::unordered_map<std::wstring, std::wstring> still_by_identity_;
     std::unordered_map<std::wstring, uint32_t> transient_failures_;
+    std::unordered_map<std::wstring, uint64_t> path_epochs_;
     std::wstring latest_details_identity_;
     std::atomic<uint32_t> epoch_{1};
     struct VolumeRelease {

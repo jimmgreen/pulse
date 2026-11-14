@@ -88,6 +88,7 @@
             const bool saved = writer != INVALID_HANDLE_VALUE && WriteFile(writer, green.data(),
                 static_cast<DWORD>(green.size()), &written, nullptr) && written == green.size();
             if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+            cache.InvalidatePath(path.wstring());
             check(saved && await_pixels(1), "overwrite close recovers green thumbnail even before snapshot metadata refresh");
             Sleep(20);
             check(write(temporary, 0) && ReplaceFileW(path.c_str(), temporary.c_str(), nullptr, 0, nullptr, nullptr) &&

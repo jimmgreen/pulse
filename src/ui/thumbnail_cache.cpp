@@ -181,11 +181,13 @@ bool ThumbnailCache::Prefetch(const std::wstring& path, DWORD attrs, uint32_t pi
     request.id = next_id_++; request.generation = generation;
     request.pixels = pixel_size; request.attrs = attrs;
     request.epoch = epoch_.load(std::memory_order_relaxed);
+    request.path_epoch = path_epochs_[ThumbnailPathEpochKey(path)];
     request.path = path; request.key = key; request.identity = Key(path, 0, modified, size);
     request.modified = modified; request.size = size;
     // Frame 0 ranks behind every drawn request and is dropped first.
     wanted_[key] = {0, ++draw_sequence_};
     pending_.insert(key);
+    pending_ids_[key] = request.id;
     queue_.push_back(std::move(request));
     DropOverflowLocked();
     StartWorkersLocked();
@@ -397,6 +399,11 @@ std::wstring ThumbnailCache::Key(const std::wstring& path, uint32_t pixels,
     return path + L"\n" + std::to_wstring(pixels) + L":" + std::to_wstring(modified) +
            L":" + std::to_wstring(size) + L":" + std::to_wstring(frame_index);
 }
+static std::wstring ThumbnailPathEpochKey(const std::wstring& path) {
+    std::wstring key(path);
+    for (auto& ch : key) ch = ch == L'/' ? L'\\' : static_cast<wchar_t>(towlower(ch));
+    return key;
+}
 void ThumbnailCache::StopChildren() {
     for (uint32_t lane = 0; lane < kMaxLanes; ++lane) StopChild(lane);
 }
@@ -425,9 +432,9 @@ void ThumbnailCache::Reset() {
         if (lane.worker.joinable()) lane.worker.join();
     StopChildren();
     if (folder_revisit_) folder_revisit_->Reset();
-    std::lock_guard lock(mutex_); queue_.clear(); pending_.clear(); items_.clear(); lru_.clear(); folder_requests_.clear();
+    std::lock_guard lock(mutex_); queue_.clear(); pending_.clear(); pending_ids_.clear(); items_.clear(); lru_.clear(); folder_requests_.clear();
     wanted_.clear(); interests_.clear(); interest_window_ = nullptr; slow_in_flight_ = 0; psd_refinements_in_flight_ = 0;
-    still_by_identity_.clear(); transient_failures_.clear(); retry_interest_.clear();
+    still_by_identity_.clear(); transient_failures_.clear(); retry_interest_.clear(); path_epochs_.clear();
     cache_bytes_ = 0; device_binding_.Bind(nullptr); dc_ = nullptr; latest_details_identity_.clear();
     draw_retry_deadline_ = 0;
     epoch_.fetch_add(1, std::memory_order_relaxed);
@@ -519,12 +526,62 @@ void ThumbnailCache::Evict() {
     epoch_.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard lock(mutex_);
     if (folder_revisit_) folder_revisit_->Evict();
-    queue_.clear(); pending_.clear(); items_.clear(); lru_.clear(); folder_requests_.clear();
+    queue_.clear(); pending_.clear(); pending_ids_.clear(); items_.clear(); lru_.clear(); folder_requests_.clear();
     still_by_identity_.clear(); transient_failures_.clear(); retry_interest_.clear();
     wanted_.clear(); interests_.clear(); interest_window_ = nullptr;
     cache_bytes_ = 0;
     latest_details_identity_.clear();
     draw_retry_deadline_ = 0;
+}
+
+void ThumbnailCache::InvalidatePath(const std::wstring& path) {
+    if (path.empty()) return;
+    if (folder_revisit_) folder_revisit_->InvalidatePath(path);
+    const auto folded_path = ThumbnailPathEpochKey(path);
+    const auto prefix = path + L"\n";
+    std::lock_guard lock(mutex_);
+    ++path_epochs_[folded_path];
+    for (auto it = queue_.begin(); it != queue_.end();) {
+        if (ThumbnailPathEpochKey(it->path) == folded_path) {
+            pending_.erase(it->key);
+            pending_ids_.erase(it->key);
+            it = queue_.erase(it);
+        } else ++it;
+    }
+    for (auto it = pending_ids_.begin(); it != pending_ids_.end();) {
+        const auto separator = it->first.find(L'\n');
+        const auto item_path = separator == std::wstring::npos ? it->first : it->first.substr(0, separator);
+        if (ThumbnailPathEpochKey(item_path) == folded_path) {
+            pending_.erase(it->first);
+            it = pending_ids_.erase(it);
+        } else ++it;
+    }
+    for (auto it = folder_requests_.begin(); it != folder_requests_.end();) {
+        const auto separator = it->first.find(L'\n');
+        const auto item_path = separator == std::wstring::npos ? it->first : it->first.substr(0, separator);
+        if (ThumbnailPathEpochKey(item_path) == folded_path) it = folder_requests_.erase(it);
+        else ++it;
+    }
+    for (auto it = items_.begin(); it != items_.end();) {
+        const auto separator = it->first.find(L'\n');
+        const auto item_path = separator == std::wstring::npos ? it->first : it->first.substr(0, separator);
+        if (ThumbnailPathEpochKey(item_path) == folded_path) {
+            cache_bytes_ -= it->second.cost;
+            lru_.erase(it->second.lru_position);
+            transient_failures_.erase(it->first);
+            it = items_.erase(it);
+        } else ++it;
+    }
+    for (auto it = still_by_identity_.begin(); it != still_by_identity_.end();) {
+        const auto separator = it->first.find(L'\n');
+        const auto item_path = separator == std::wstring::npos ? it->first : it->first.substr(0, separator);
+        if (ThumbnailPathEpochKey(item_path) == folded_path)
+            it = still_by_identity_.erase(it);
+        else ++it;
+    }
+    retry_interest_.clear();
+    draw_retry_deadline_ = 0;
+    cv_.notify_all();
 }
 
 bool ThumbnailCache::Palette(const std::wstring& path, uint32_t pixel_size, uint64_t modified,
@@ -641,6 +698,8 @@ void ThumbnailCache::LogFailure(uint32_t lane, const Request& req, uint64_t star
     {
         std::lock_guard lock(mutex_);
         cancelled = cancelled || req.epoch != epoch_.load(std::memory_order_relaxed) ||
+            (path_epochs_.contains(ThumbnailPathEpochKey(req.path)) &&
+             path_epochs_.at(ThumbnailPathEpochKey(req.path)) != req.path_epoch) ||
             (req.details && req.identity != latest_details_identity_) ||
             (req.document && !req.document->active.load());
     }
@@ -651,7 +710,7 @@ void ThumbnailCache::LogFailure(uint32_t lane, const Request& req, uint64_t star
         {"stage", stage}, {"error", error}, {"elapsed_ms", GetTickCount64() - started},
         {"request", req.id}, {"generation", req.generation}, {"host_pid", lane_child.dwProcessId},
         {"exit_known", exit_known}, {"exit_code", exit_code}, {"cache", lane_token},
-        {"kind", static_cast<uint32_t>(req.kind)}, {"flags", req.flags},
+        {"kind", static_cast<uint32_t>(req.kind)}, {"flags", req.flags}, {"pixels", req.pixels},
         {"path_id", preview::DiagnosticPathId(req.path)}},
         cancelled ? diagnostics::runtime::Level::Info : diagnostics::runtime::Level::Error);
 }
@@ -786,9 +845,11 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
             request.interest_tracked = interest_window_ && !direct_preview;
             request.details = direct_preview; request.frame_index = frame_index;
             request.epoch = epoch_.load(std::memory_order_relaxed);
+            request.path_epoch = path_epochs_[ThumbnailPathEpochKey(path)];
             request.timeout_ms = ResponseTimeoutMs(path, request.kind, direct_preview ? 0 : size);
             request.path = path; request.key = key; request.identity = identity;
             request.modified = modified; request.size = size;
+            pending_ids_[key] = request.id;
             if (visible_order) queue_.push_back(std::move(request));
             else queue_.push_front(std::move(request));
             DropOverflowLocked();
@@ -1012,6 +1073,8 @@ bool ThumbnailCache::Properties(const std::wstring& path, DWORD attrs, uint64_t 
         request.identity = identity;
         request.timeout_ms = ResponseTimeoutMs(path, request.kind);
         request.epoch = epoch_.load(std::memory_order_relaxed);
+        request.path_epoch = path_epochs_[ThumbnailPathEpochKey(path)];
+        pending_ids_[key] = request.id;
         queue_.push_back(std::move(request));
         StartWorkersLocked();
         cv_.notify_one();
@@ -1093,6 +1156,10 @@ bool ThumbnailCache::StoreResult(const Request& req, Item result) {
     std::lock_guard lock(mutex_);
     // An old decode must not remove a replacement request queued after Evict().
     if (req.epoch != epoch_.load(std::memory_order_relaxed)) return false;
+    const auto path_epoch = path_epochs_.find(ThumbnailPathEpochKey(req.path));
+    if ((path_epoch == path_epochs_.end() ? 0 : path_epoch->second) != req.path_epoch) return false;
+    if (const auto pending = pending_ids_.find(req.key);
+        pending != pending_ids_.end() && pending->second != req.id) return false;
     if (req.interest_tracked && !WantedByWindowLocked(req.key)) { pending_.erase(req.key); return false; }
     if (req.document && !req.document->active.load()) {
         pending_.erase(req.key);
@@ -1142,6 +1209,13 @@ bool ThumbnailCache::StoreResult(const Request& req, Item result) {
         RememberFolder(req, result, std::move(compact));
         result.transient = false;
         result.cost *= 2; // CPU pixels retained for device recovery plus GPU bitmap.
+    }
+    if (result.failed) {
+        const auto current = items_.find(req.key);
+        if (current != items_.end() && !current->second.failed) {
+            pending_.erase(req.key);
+            return false;
+        }
     }
     pending_.erase(req.key);
     if (req.flags & ipc::kPreviewRequestFlagPsdRefine) {
@@ -1263,6 +1337,8 @@ bool ThumbnailCache::IsTransientResponse(bool transport_ok, const Request& reque
 bool ThumbnailCache::FolderRequestCurrent(const Request& request) {
     { std::lock_guard lock(mutex_);
       if (request.epoch != epoch_.load(std::memory_order_relaxed)) return false;
+      const auto path_epoch = path_epochs_.find(ThumbnailPathEpochKey(request.path));
+      if ((path_epoch == path_epochs_.end() ? 0 : path_epoch->second) != request.path_epoch) return false;
       if (VolumeSuspendedLocked(request.path) ||
           (request.interest_tracked && !WantedByWindowLocked(request.key))) {
           pending_.erase(request.key); return false;
