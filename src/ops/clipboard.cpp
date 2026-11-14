@@ -152,9 +152,8 @@ bool ReadClipboard(ClipboardData& out) {
     return ok;
 }
 
-bool PasteShellClipboard(const std::wstring& dir) {
-    IDataObject* data = nullptr;
-    if (FAILED(OleGetClipboard(&data)) || !data) return false;
+bool DropShellDataObject(const std::wstring& dir, IDataObject* data, DWORD wanted) {
+    if (!data || (wanted != DROPEFFECT_COPY && wanted != DROPEFFECT_MOVE)) return false;
     IDropTarget* drop = nullptr;
     IShellItem* folder = nullptr;
     // The shell does not parse Pulse's \\?\ form.
@@ -165,19 +164,7 @@ bool PasteShellClipboard(const std::wstring& dir) {
     }
     bool ok = false;
     if (drop) {
-        // A cut moves, as in Explorer; anything else copies.
-        DWORD effect = DROPEFFECT_COPY;
-        FORMATETC fmt{ static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT)),
-                       nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
-        STGMEDIUM medium{};
-        if (SUCCEEDED(data->GetData(&fmt, &medium))) {
-            if (const DWORD* preferred = static_cast<const DWORD*>(GlobalLock(medium.hGlobal))) {
-                if (PreferredEffectIsCut(*preferred)) effect = DROPEFFECT_MOVE;
-                GlobalUnlock(medium.hGlobal);
-            }
-            ReleaseStgMedium(&medium);
-        }
-        const DWORD wanted = effect;
+        DWORD effect = wanted;
         POINTL pt{ 0, 0 };
         if (SUCCEEDED(drop->DragEnter(data, MK_LBUTTON, pt, &effect)) && (effect & wanted)) {
             effect = wanted;
@@ -187,6 +174,25 @@ bool PasteShellClipboard(const std::wstring& dir) {
         }
         drop->Release();
     }
+    return ok;
+}
+
+bool PasteShellClipboard(const std::wstring& dir) {
+    IDataObject* data = nullptr;
+    if (FAILED(OleGetClipboard(&data)) || !data) return false;
+    // A cut moves, as in Explorer; anything else copies.
+    DWORD effect = DROPEFFECT_COPY;
+    FORMATETC fmt{ static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT)),
+                   nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+    STGMEDIUM medium{};
+    if (SUCCEEDED(data->GetData(&fmt, &medium))) {
+        if (const DWORD* preferred = static_cast<const DWORD*>(GlobalLock(medium.hGlobal))) {
+            if (PreferredEffectIsCut(*preferred)) effect = DROPEFFECT_MOVE;
+            GlobalUnlock(medium.hGlobal);
+        }
+        ReleaseStgMedium(&medium);
+    }
+    const bool ok = DropShellDataObject(dir, data, effect);
     data->Release();
     return ok;
 }

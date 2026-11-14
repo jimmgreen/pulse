@@ -1,6 +1,7 @@
 // clipboard.h — System clipboard interop with Explorer (CF_HDROP + drop effect).
 #pragma once
 #include <windows.h>
+#include <objidl.h>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -28,6 +29,10 @@ bool WriteClipboardText(const std::wstring& text);
 
 // Reads an Explorer copy/cut (CF_HDROP). Returns false if no files present.
 bool ReadClipboard(ClipboardData& out);
+
+// Sends an existing OLE data object to a real filesystem folder's Shell drop
+// target. Used for virtual files whose bytes are streamed by the source.
+bool DropShellDataObject(const std::wstring& dir, IDataObject* data, DWORD effect);
 
 // Files with no path to read: copied out of a zip, a Remote Desktop session,
 // Outlook... They come as Shell IDList Array / FileGroupDescriptorW (virtual

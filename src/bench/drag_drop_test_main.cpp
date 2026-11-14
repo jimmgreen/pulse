@@ -120,6 +120,96 @@ private:
     DWORD preferred_;
 };
 
+class VirtualFilesDataObject final : public IDataObject {
+public:
+    VirtualFilesDataObject(bool descriptor = true, bool contents = true, bool readable = true)
+        : descriptor_(descriptor), contents_(contents), readable_(readable) {}
+    IFACEMETHODIMP QueryInterface(REFIID riid, void** out) override {
+        if (!out) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IDataObject) {
+            *out = static_cast<IDataObject*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    IFACEMETHODIMP_(ULONG) AddRef() override { return ++ref_; }
+    IFACEMETHODIMP_(ULONG) Release() override {
+        const ULONG left = --ref_;
+        if (!left) delete this;
+        return left;
+    }
+    IFACEMETHODIMP GetData(FORMATETC* fmt, STGMEDIUM* out) override {
+        if (!fmt || !out) return E_POINTER;
+        *out = {};
+        if (fmt->cfFormat == DescriptorFormat() && descriptor_ && (fmt->tymed & TYMED_HGLOBAL)) {
+            HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(FILEGROUPDESCRIPTORW));
+            if (!memory) return E_OUTOFMEMORY;
+            auto* group = static_cast<FILEGROUPDESCRIPTORW*>(GlobalLock(memory));
+            if (!group) { GlobalFree(memory); return E_OUTOFMEMORY; }
+            group->cItems = 1;
+            group->fgd[0].dwFlags = FD_FILESIZE;
+            group->fgd[0].nFileSizeLow = static_cast<DWORD>(sizeof(kContents) - 1);
+            wcscpy_s(group->fgd[0].cFileName, MAX_PATH, L"image.jpg");
+            GlobalUnlock(memory);
+            out->tymed = TYMED_HGLOBAL;
+            out->hGlobal = memory;
+            return S_OK;
+        }
+        if (fmt->cfFormat == ContentsFormat() && contents_ && readable_ && fmt->lindex == 0 &&
+            (fmt->tymed & TYMED_ISTREAM)) {
+            IStream* stream = nullptr;
+            if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream))) return E_OUTOFMEMORY;
+            ULONG written = 0;
+            const HRESULT hr = stream->Write(kContents, sizeof(kContents) - 1, &written);
+            if (FAILED(hr) || written != sizeof(kContents) - 1) { stream->Release(); return E_FAIL; }
+            LARGE_INTEGER start{};
+            if (FAILED(stream->Seek(start, STREAM_SEEK_SET, nullptr))) { stream->Release(); return E_FAIL; }
+            out->tymed = TYMED_ISTREAM;
+            out->pstm = stream;
+            return S_OK;
+        }
+        return DV_E_FORMATETC;
+    }
+    IFACEMETHODIMP GetDataHere(FORMATETC*, STGMEDIUM*) override { return E_NOTIMPL; }
+    IFACEMETHODIMP QueryGetData(FORMATETC* fmt) override {
+        if (!fmt) return E_POINTER;
+        if (fmt->cfFormat == DescriptorFormat() && descriptor_ && (fmt->tymed & TYMED_HGLOBAL)) return S_OK;
+        if (fmt->cfFormat == ContentsFormat() && contents_ && fmt->lindex == 0 &&
+            (fmt->tymed & TYMED_ISTREAM)) return S_OK;
+        return DV_E_FORMATETC;
+    }
+    IFACEMETHODIMP GetCanonicalFormatEtc(FORMATETC*, FORMATETC* out) override {
+        if (out) out->ptd = nullptr;
+        return E_NOTIMPL;
+    }
+    IFACEMETHODIMP SetData(FORMATETC*, STGMEDIUM*, BOOL) override { return E_NOTIMPL; }
+    IFACEMETHODIMP EnumFormatEtc(DWORD, IEnumFORMATETC** out) override {
+        if (out) *out = nullptr;
+        return E_NOTIMPL;
+    }
+    IFACEMETHODIMP DAdvise(FORMATETC*, DWORD, IAdviseSink*, DWORD*) override {
+        return OLE_E_ADVISENOTSUPPORTED;
+    }
+    IFACEMETHODIMP DUnadvise(DWORD) override { return OLE_E_ADVISENOTSUPPORTED; }
+    IFACEMETHODIMP EnumDAdvise(IEnumSTATDATA**) override { return OLE_E_ADVISENOTSUPPORTED; }
+
+    static CLIPFORMAT DescriptorFormat() {
+        return static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_FILEDESCRIPTORW));
+    }
+    static CLIPFORMAT ContentsFormat() {
+        return static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_FILECONTENTS));
+    }
+    static constexpr char kContents[] = "virtual image data";
+
+private:
+    ULONG ref_ = 1;
+    bool descriptor_;
+    bool contents_;
+    bool readable_;
+};
+
 // When set, the native loop drops on this target with these keys instead of
 // answering COPY, the way a Pulse window receives Pulse's own drag.
 IDropTarget* g_route_target = nullptr;
@@ -245,6 +335,95 @@ int wmain(int argc, wchar_t** argv) {
     if (argc == 2 && wcscmp(argv[1], L"--edge-scroll") == 0) return EdgeScrollTest();
     using namespace pulse::ui;
     setvbuf(stdout, nullptr, _IONBF, 0);
+    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    {
+        auto* data = new VirtualFilesDataObject();
+        std::vector<std::wstring> names;
+        Check(ExtractVirtualFileNames(data, names) && names == std::vector<std::wstring>{L"image.jpg"},
+              "virtual file descriptors require readable indexed contents and expose safe leaf names");
+        unsigned over_calls = 0, drop_calls = 0;
+        bool contents_forwarded = false;
+        DropTargetCallbacks callbacks;
+        callbacks.virtual_drag_over = [&](const auto& files, POINT, DWORD, DWORD allowed) {
+            ++over_calls;
+            return files == std::vector<std::wstring>{L"image.jpg"} ? allowed & DROPEFFECT_COPY
+                                                                       : DROPEFFECT_NONE;
+        };
+        callbacks.virtual_drop = [&](const auto& files, IDataObject* original, POINT, DWORD,
+                                     DWORD allowed) {
+            ++drop_calls;
+            FORMATETC format{ VirtualFilesDataObject::ContentsFormat(), nullptr,
+                              DVASPECT_CONTENT, 0, TYMED_ISTREAM };
+            STGMEDIUM medium{};
+            if (files == std::vector<std::wstring>{L"image.jpg"} &&
+                SUCCEEDED(original->GetData(&format, &medium)) && medium.pstm) {
+                char bytes[sizeof(VirtualFilesDataObject::kContents)]{};
+                ULONG read = 0;
+                contents_forwarded = SUCCEEDED(medium.pstm->Read(bytes, sizeof(bytes) - 1, &read)) &&
+                    read == sizeof(VirtualFilesDataObject::kContents) - 1 &&
+                    std::memcmp(bytes, VirtualFilesDataObject::kContents, read) == 0;
+                ReleaseStgMedium(&medium);
+            }
+            return allowed & DROPEFFECT_COPY;
+        };
+        auto* target = new WindowDropTarget(nullptr, std::move(callbacks));
+        DWORD effect = DROPEFFECT_COPY | DROPEFFECT_MOVE;
+        target->DragEnter(data, 0, POINTL{}, &effect);
+        const bool entered = effect == DROPEFFECT_COPY;
+        effect = DROPEFFECT_COPY | DROPEFFECT_MOVE;
+        target->DragOver(0, POINTL{}, &effect);
+        const bool hovered = effect == DROPEFFECT_COPY;
+        effect = DROPEFFECT_COPY | DROPEFFECT_MOVE;
+        target->Drop(data, 0, POINTL{}, &effect);
+        Check(entered && hovered && effect == DROPEFFECT_COPY && over_calls == 2 && drop_calls == 1 &&
+              contents_forwarded,
+              "virtual file drop preserves the source IDataObject and performs a copy");
+        target->Release();
+        data->Release();
+    }
+    {
+        auto* data = new VirtualFilesDataObject(true, true, false);
+        DropTargetCallbacks callbacks;
+        callbacks.virtual_drag_over = [](const auto&, POINT, DWORD, DWORD allowed) {
+            return allowed & DROPEFFECT_COPY;
+        };
+        callbacks.virtual_drop = [](const auto&, IDataObject* original, POINT, DWORD, DWORD) {
+            FORMATETC format{ VirtualFilesDataObject::ContentsFormat(), nullptr,
+                              DVASPECT_CONTENT, 0, TYMED_ISTREAM };
+            STGMEDIUM medium{};
+            if (FAILED(original->GetData(&format, &medium))) return DWORD(DROPEFFECT_NONE);
+            ReleaseStgMedium(&medium);
+            return DWORD(DROPEFFECT_COPY);
+        };
+        auto* target = new WindowDropTarget(nullptr, std::move(callbacks));
+        DWORD effect = DROPEFFECT_COPY;
+        target->DragEnter(data, 0, POINTL{}, &effect);
+        const bool entered = effect == DROPEFFECT_COPY;
+        effect = DROPEFFECT_COPY;
+        target->Drop(data, 0, POINTL{}, &effect);
+        Check(entered && effect == DROPEFFECT_NONE,
+              "a stream that fails on Drop is not reported as copied");
+        target->Release();
+        data->Release();
+    }
+    for (auto* data : { new VirtualFilesDataObject(true, false),
+                        new VirtualFilesDataObject(false, false) }) {
+        std::vector<std::wstring> names;
+        unsigned over_calls = 0, drop_calls = 0;
+        DropTargetCallbacks callbacks;
+        callbacks.virtual_drag_over = [&](const auto&, POINT, DWORD, DWORD) { ++over_calls; return DWORD(DROPEFFECT_COPY); };
+        callbacks.virtual_drop = [&](const auto&, IDataObject*, POINT, DWORD, DWORD) { ++drop_calls; return DWORD(DROPEFFECT_COPY); };
+        auto* target = new WindowDropTarget(nullptr, std::move(callbacks));
+        DWORD effect = DROPEFFECT_COPY;
+        target->DragEnter(data, 0, POINTL{}, &effect);
+        const bool rejected = effect == DROPEFFECT_NONE && !ExtractVirtualFileNames(data, names);
+        effect = DROPEFFECT_COPY;
+        target->Drop(data, 0, POINTL{}, &effect);
+        Check(rejected && effect == DROPEFFECT_NONE && over_calls == 0 && drop_calls == 0,
+              "missing virtual contents and unrelated OLE data are rejected");
+        target->Release();
+        data->Release();
+    }
     for (DWORD allowed : { DWORD(DROPEFFECT_NONE), DWORD(DROPEFFECT_COPY),
                            DWORD(DROPEFFECT_MOVE), DWORD(DROPEFFECT_COPY | DROPEFFECT_MOVE) }) {
         for (DWORD keys : { DWORD(0), DWORD(MK_CONTROL), DWORD(MK_SHIFT), DWORD(MK_CONTROL | MK_SHIFT) }) {
@@ -372,7 +551,6 @@ int wmain(int argc, wchar_t** argv) {
         target->Release();
         data->Release();
     }
-    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const auto root = std::filesystem::current_path() / L"bench_data" / L"drag_drop_test" /
         std::to_wstring(GetCurrentProcessId());
     std::filesystem::create_directories(root);

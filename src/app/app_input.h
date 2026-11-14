@@ -35,6 +35,10 @@ DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
 DWORD DropExecute(AppState& s, const std::vector<std::wstring>& sources,
                          POINT pt, DWORD key_state, DWORD allowed,
                          DWORD preferred_effect);
+DWORD ResolveVirtualFileDropTarget(AppState& s, const std::vector<std::wstring>& names,
+                                   POINT pt, DWORD key_state, DWORD allowed);
+DWORD DropVirtualFiles(AppState& s, const std::vector<std::wstring>& names,
+                       IDataObject* data, POINT pt, DWORD key_state, DWORD allowed);
 void StartDragOut(AppState& s);
 float MaxScrollForActivePane(AppState& s, ui::PaneViewModel* out = nullptr);
 void ClampScroll(AppState& s);
