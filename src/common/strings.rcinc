@@ -5520,6 +5520,17 @@ BEGIN
     IDS_SEC_DESC_STAGING "暂存区图标的大小，以及什么时候收起来。"
     IDS_SEC_DESC_CHANGES "记录文件夹里最近的变化，保留多久。"
     IDS_SEC_DESC_NETWORK "局域网发现、缓存和最近的网络位置。"
+    IDS_CTX_LAYER_PULSE_TITLE "Pulse 的右键菜单"
+    IDS_CTX_LAYER_SYSTEM_TITLE "Windows 的右键菜单"
+    IDS_CTX_LAYER_PULSE_WHAT "只在 Pulse 里右键时出现的菜单。"
+    IDS_CTX_LAYER_SYSTEM_WHAT "资源管理器、桌面和所有软件共用的菜单。"
+    IDS_CTX_FACT_INSTANT "改了马上生效"
+    IDS_CTX_FACT_NO_ADMIN "不需要权限"
+    IDS_CTX_FACT_RESTORE "随时恢复"
+    IDS_CTX_FACT_APPLY "点「应用」才生效"
+    IDS_CTX_FACT_BACKUP "先自动备份，可撤销"
+    IDS_CTX_FACT_ADMIN "改所有用户时需管理员"
+    IDS_CTX_LAYER_PENDING "{n} 处待应用"
 END
 
 LANGUAGE 0x09, 0x01
@@ -11039,6 +11050,17 @@ BEGIN
     IDS_SEC_DESC_STAGING "Staging tray icon size, and when it tucks away."
     IDS_SEC_DESC_CHANGES "Recording recent folder changes, and for how long."
     IDS_SEC_DESC_NETWORK "LAN discovery, caching and recent network places."
+    IDS_CTX_LAYER_PULSE_TITLE "Pulse's context menu"
+    IDS_CTX_LAYER_SYSTEM_TITLE "Windows context menu"
+    IDS_CTX_LAYER_PULSE_WHAT "The menu you get when you right-click inside Pulse."
+    IDS_CTX_LAYER_SYSTEM_WHAT "The menu File Explorer, the desktop and every app share."
+    IDS_CTX_FACT_INSTANT "Takes effect at once"
+    IDS_CTX_FACT_NO_ADMIN "No permission needed"
+    IDS_CTX_FACT_RESTORE "Restore any time"
+    IDS_CTX_FACT_APPLY "Takes effect when you apply"
+    IDS_CTX_FACT_BACKUP "Backed up first, can be undone"
+    IDS_CTX_FACT_ADMIN "Admin needed for all users"
+    IDS_CTX_LAYER_PENDING "{n} to apply"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

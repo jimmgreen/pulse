@@ -796,7 +796,6 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
             const bool enabled=!vm.settings_vertical_tabs;
             const bool selected=vm.tab_layout==i;
             const auto preview_accent=vm.dark ? MixColor(theme.accent,HexColor(0xFFFFFF),0.3f) : theme.accent;
-            auto muted_tab=theme.text_disabled;muted_tab.a*=0.5f;
             const bool hovered=enabled && IsHovered(vm,H::SettingsTabLayout,i);
             const auto foreground=enabled ? (selected ? theme.text : theme.text_secondary) : theme.text_disabled;
             painter_.FillRoundedRect(r,8*scale_,hovered ? theme.fill_hover : theme.fill_input);
@@ -804,24 +803,64 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
             const float stroke=(selected ? 2.0f : 1.0f)*scale_;
             const auto border=D2D1::RectF(r.left+stroke/2,r.top+stroke/2,r.right-stroke/2,r.bottom-stroke/2);
             dc->DrawRoundedRectangle(D2D1::RoundedRect(border,8*scale_,8*scale_),brStrokeCard_.get(),stroke);
-            const auto illustration=D2D1::RectF(r.left+9*scale_,r.top+9*scale_,r.right-9*scale_,r.top+63*scale_);
-            painter_.FillRoundedRect(illustration,6*scale_,theme.tab_bg);
-            const float content_left=illustration.left+6*scale_;
-            const float available=illustration.right-content_left-6*scale_;
-            for(int row=0;row<(i==0 ? 1 : 3);++row) {
-                const int count=i==0 ? 4 : row==2 ? 1 : 3;
-                const float weights[2][3]={{2,1,3},{1,3,2}};
-                float x=content_left;
-                const float room=available-(i==0 ? 9*scale_ : 0)-(count-1)*2*scale_;
-                for(int col=0;col<count;++col) {
-                    const float fraction=i==2 && row<2 ? weights[row][col]/6.0f : row==2 ? 1.0f : 1.0f/count;
-                    const float width=room*fraction;
-                    const bool active=(i==0 ? col==1 : row==1 && col==1);
-                    const auto color=!enabled ? theme.text_disabled : active ? preview_accent : muted_tab;
-                    painter_.FillRoundedRect(D2D1::RectF(x,illustration.top+(6+row*13)*scale_,x+width,illustration.top+(16+row*13)*scale_),3*scale_,color);
-                    x+=width+2*scale_;
+            // A tiny Pulse window: the tab strip on the title colour, each tab a folder dot
+            // and a title line; the active tab joins the content below with the accent
+            // underline real tabs have; faint rows of files under it.
+            const auto ill=D2D1::RectF(r.left+9*scale_,r.top+9*scale_,r.right-9*scale_,r.top+63*scale_);
+            const float s=scale_;
+            const auto strip_fill=vm.dark ? HexColor(0x1C1C1C) : HexColor(0xE9EDE6);
+            const auto content_fill=vm.dark ? HexColor(0x2B2B2B) : HexColor(0xFFFFFF);
+            const auto tab_fill=WithAlpha(theme.text,vm.dark ? 0.07f : 0.06f);
+            const auto ink=enabled ? theme.text_secondary : theme.text_disabled;
+            const auto accent=enabled ? preview_accent : theme.text_disabled;
+            const auto folder=enabled ? theme.icon_folder : theme.text_disabled;
+            painter_.FillRoundedRect(ill,6*s,strip_fill);
+            painter_.StrokeRoundedRect(ill,6*s,theme.stroke_card,1);
+            const int rows=i==0 ? 1 : 2;
+            const float tab_h=11*s,row_gap=2*s,strip_top=ill.top+5*s;
+            const float strip_bottom=strip_top+rows*tab_h+(rows-1)*row_gap;
+            const auto content=D2D1::RectF(ill.left+4*s,strip_bottom,ill.right-4*s,ill.bottom-4*s);
+            painter_.FillRoundedRect(content,3*s,content_fill);
+            for(int k=0;k<3;++k) {
+                const float y=content.top+(5+k*5.5f)*s;
+                if(y+2*s>content.bottom-2*s) break;
+                const float widths[]={0.62f,0.44f,0.53f};
+                painter_.FillRoundedRect(D2D1::RectF(content.left+5*s,y,content.left+5*s+(content.right-content.left-10*s)*widths[k],y+2*s),
+                    1*s,WithAlpha(ink,0.28f));
+            }
+            auto tab=[&](float x0,float x1,float y0,bool active) {
+                if(x1-x0<6*s) return;
+                const auto t=D2D1::RectF(x0,y0,x1,y0+tab_h);
+                painter_.FillRoundedRect(t,3*s,active ? content_fill : tab_fill);
+                const float mid=(t.top+t.bottom)*0.5f;
+                painter_.FillRoundedRect(D2D1::RectF(x0+3*s,mid-1.75f*s,x0+6.5f*s,mid+1.75f*s),0.8f*s,WithAlpha(folder,active ? 0.95f : 0.6f));
+                if(x1-x0>14*s) painter_.FillRoundedRect(D2D1::RectF(x0+8.5f*s,mid-1*s,x1-3*s,mid+1*s),1*s,WithAlpha(ink,active ? 0.75f : 0.45f));
+                if(active) painter_.FillRoundedRect(D2D1::RectF(x0+2*s,t.bottom-1.6f*s,x1-2*s,t.bottom),0.8f*s,accent);
+            };
+            const float x_left=ill.left+4*s,x_right=ill.right-4*s;
+            if(i==0) {
+                // One row: fixed-width tabs run past the edge; a chevron scrolls on.
+                const float chevron_w=12*s,tab_w=34*s;
+                dc->PushAxisAlignedClip(D2D1::RectF(x_left,strip_top,x_right-chevron_w,strip_top+tab_h),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                for(int col=0;col<6;++col) tab(x_left+col*(tab_w+2*s),x_left+col*(tab_w+2*s)+tab_w,strip_top,col==1);
+                dc->PopAxisAlignedClip();
+                const float cx=x_right-chevron_w*0.5f,cy=strip_top+tab_h*0.5f;
+                DrawStoreIcon(dc,StoreIcon::ChevronRight,D2D1::RectF(cx-4.5f*s,cy-4.5f*s,cx+4.5f*s,cy+4.5f*s),ink,1.4f);
+            } else {
+                // Two rows: equal columns, or each tab as wide as its title.
+                const float weights[2][3]={{3,2,4},{4,3,0}};
+                for(int row=0;row<2;++row) {
+                    const float y=strip_top+row*(tab_h+row_gap);
+                    const int count=i==1 ? 3 : (row==0 ? 3 : 2);
+                    float total=0;for(int c=0;c<count;++c) total+=i==1 ? 1.0f : weights[row][c];
+                    const float room=x_right-x_left-(count-1)*2*s;
+                    float x=x_left;
+                    for(int col=0;col<count;++col) {
+                        const float w=room*(i==1 ? 1.0f : weights[row][col])/total;
+                        tab(x,x+w,y,row==1 && col==(i==1 ? 1 : 0));
+                        x+=w+2*s;
+                    }
                 }
-                if(i==0) painter_.DrawText(L"›",D2D1::RectF(x,illustration.top+4*scale_,illustration.right-4*scale_,illustration.top+18*scale_),compositor_->SmallFormat(),theme.text_secondary,fluent::HorizontalAlignment::Center);
             }
             painter_.DrawText(l10n::Get(tab_labels[i]),D2D1::RectF(r.left+7*scale_,r.top+69*scale_,r.right-7*scale_,r.bottom-7*scale_),compositor_->SmallFormat(),foreground,fluent::HorizontalAlignment::Center);
         }

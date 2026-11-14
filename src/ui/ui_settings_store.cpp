@@ -186,8 +186,10 @@ struct StorePainter {
     void Row(D2D1_RECT_F r,StoreIcon icon,std::wstring_view title,std::wstring_view desc,float reserve=16) {
         if(!Present(r))return;
         Tile(icon,{r.left+16*s,r.top+16*s,r.left+48*s,r.top+48*s},t.text_secondary);
-        Text(title,{r.left+62*s,r.top+10*s,r.right-reserve*s,r.top+34*s});
-        Caption(desc,{r.left+62*s,r.top+36*s,r.right-reserve*s,r.bottom-8*s},t.text_secondary);
+        // The caption starts under the title at the UI text size (36 DIP at 100%).
+        const float title_h=24*s*static_cast<float>(vm.settings_ui_font_scale)/100;
+        Text(title,{r.left+62*s,r.top+10*s,r.right-reserve*s,r.top+10*s+title_h});
+        Caption(desc,{r.left+62*s,r.top+12*s+title_h,r.right-reserve*s,r.bottom-6*s},t.text_secondary);
     }
 };
 A Offset(A a,size_t i){return static_cast<A>(static_cast<int>(a)+static_cast<int>(i));}

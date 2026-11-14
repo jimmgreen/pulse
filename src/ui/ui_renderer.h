@@ -978,8 +978,9 @@ private:
     void DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawProviderMark(std::string_view id, std::wstring_view name, const D2D1_RECT_F& r, const Theme& theme);
     // 右键菜单 layer cards, the same on pages 2 and 6: Pulse 右键菜单 | 系统右键菜单.
+    // system_pending: Windows-menu changes not applied yet (a badge on that card).
     void DrawCtxLayerCards(const D2D1_RECT_F& pulse, const D2D1_RECT_F& system, bool system_current,
-                           bool other_hovered, const Theme& theme);
+                           bool other_hovered, int system_pending, const Theme& theme);
     IDWriteTextFormat* SysCtxTitleFormat();  // 13 dip semibold (creates the 系统右键菜单 formats)
 
     void DrawList(const PaneViewModel& vm, float x, float y, float w, float h, const Theme& theme,

@@ -884,7 +884,11 @@ float LayoutSevenZipDetail(SettingsLayout& l, const WindowViewModel& vm, float s
             y += 22*s*font + 8*s;
             const float g1 = y;
             for (int i = 0; i < 6; ++i) {
-                d.command_rows[i] = D2D1::RectF(ml, y, mr, y + 58*s*font);
+                // StorePainter::Row: the title from top+10 (24 DIP at 100% text), the
+                // caption under it and 10 DIP below; the tag may wrap on a narrow page.
+                const float caption_h = height(store_view::CommandTag(i), mr - ml - 62*s - 76*s);
+                const float row_h = (std::max)(56*s, (12 + 24*font)*s + caption_h + 10*s);
+                d.command_rows[i] = D2D1::RectF(ml, y, mr, y + row_h);
                 d.command_switch[i] = D2D1::RectF(mr - 16*s - 40*s, (d.command_rows[i].top + d.command_rows[i].bottom)/2 - 10*s,
                                                   mr - 16*s, (d.command_rows[i].top + d.command_rows[i].bottom)/2 + 10*s);
                 y = d.command_rows[i].bottom;

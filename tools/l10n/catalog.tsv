@@ -5545,3 +5545,14 @@ SecDescDelete	IDS_SEC_DESC_DELETE	6874	删除之前要不要先问一下。	Whet
 SecDescStaging	IDS_SEC_DESC_STAGING	6875	暂存区图标的大小，以及什么时候收起来。	Staging tray icon size, and when it tucks away.	
 SecDescChanges	IDS_SEC_DESC_CHANGES	6876	记录文件夹里最近的变化，保留多久。	Recording recent folder changes, and for how long.	
 SecDescNetwork	IDS_SEC_DESC_NETWORK	6877	局域网发现、缓存和最近的网络位置。	LAN discovery, caching and recent network places.	
+CtxLayerPulseTitle	IDS_CTX_LAYER_PULSE_TITLE	6878	Pulse 的右键菜单	Pulse's context menu	
+CtxLayerSystemTitle	IDS_CTX_LAYER_SYSTEM_TITLE	6879	Windows 的右键菜单	Windows context menu	
+CtxLayerPulseWhat	IDS_CTX_LAYER_PULSE_WHAT	6880	只在 Pulse 里右键时出现的菜单。	The menu you get when you right-click inside Pulse.	
+CtxLayerSystemWhat	IDS_CTX_LAYER_SYSTEM_WHAT	6881	资源管理器、桌面和所有软件共用的菜单。	The menu File Explorer, the desktop and every app share.	
+CtxFactInstant	IDS_CTX_FACT_INSTANT	6882	改了马上生效	Takes effect at once	
+CtxFactNoAdmin	IDS_CTX_FACT_NO_ADMIN	6883	不需要权限	No permission needed	
+CtxFactRestore	IDS_CTX_FACT_RESTORE	6884	随时恢复	Restore any time	
+CtxFactApply	IDS_CTX_FACT_APPLY	6885	点「应用」才生效	Takes effect when you apply	
+CtxFactBackup	IDS_CTX_FACT_BACKUP	6886	先自动备份，可撤销	Backed up first, can be undone	
+CtxFactAdmin	IDS_CTX_FACT_ADMIN	6887	改所有用户时需管理员	Admin needed for all users	
+CtxLayerPending	IDS_CTX_LAYER_PENDING	6888	{n} 处待应用	{n} to apply	

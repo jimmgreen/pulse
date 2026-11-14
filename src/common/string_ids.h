@@ -5538,5 +5538,16 @@
 #define IDS_SEC_DESC_STAGING                                                             6875
 #define IDS_SEC_DESC_CHANGES                                                             6876
 #define IDS_SEC_DESC_NETWORK                                                             6877
+#define IDS_CTX_LAYER_PULSE_TITLE                                                        6878
+#define IDS_CTX_LAYER_SYSTEM_TITLE                                                       6879
+#define IDS_CTX_LAYER_PULSE_WHAT                                                         6880
+#define IDS_CTX_LAYER_SYSTEM_WHAT                                                        6881
+#define IDS_CTX_FACT_INSTANT                                                             6882
+#define IDS_CTX_FACT_NO_ADMIN                                                            6883
+#define IDS_CTX_FACT_RESTORE                                                             6884
+#define IDS_CTX_FACT_APPLY                                                               6885
+#define IDS_CTX_FACT_BACKUP                                                              6886
+#define IDS_CTX_FACT_ADMIN                                                               6887
+#define IDS_CTX_LAYER_PENDING                                                            6888
 
 #endif  // PULSE_STRING_IDS_H

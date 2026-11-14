@@ -290,10 +290,10 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
             const float intro_h=painter ? (std::max)(18*scale,painter->MeasureWrappedCaptionHeight(intro,cr-cl)) : 18*scale;
             l.ctx_intro=D2D1::RectF(cl,y,cr,y+intro_h);
             y+=(std::max)(intro_h,32*scale)+14*scale;
-            const float gap=10*scale,card_w=(cr-cl-gap)*0.5f;
-            l.ctx_layer[0]=D2D1::RectF(cl,y,cl+card_w,y+58*scale);
-            l.ctx_layer[1]=D2D1::RectF(cl+card_w+gap,y,cr,y+58*scale);
-            y+=58*scale+12*scale;
+            const float gap=12*scale,card_w=(cr-cl-gap)*0.5f;
+            l.ctx_layer[0]=D2D1::RectF(cl,y,cl+card_w,y+kCtxLayerCardDip*scale);
+            l.ctx_layer[1]=D2D1::RectF(cl+card_w+gap,y,cr,y+kCtxLayerCardDip*scale);
+            y+=kCtxLayerCardDip*scale+12*scale;
         }
         l.context_rows.resize(vm.settings_items.size());
         {

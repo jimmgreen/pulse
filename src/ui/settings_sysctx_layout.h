@@ -181,6 +181,8 @@ inline std::wstring Ms(uint32_t ms) { return std::to_wstring(ms) + L" ms"; }
 } // namespace sysctx_text
 
 inline constexpr float kSysCtxRowDip = 52.0f;
+// The two layer cards (pages 2 and 6): a scene, the menu's name, one line, the facts.
+inline constexpr float kCtxLayerCardDip = 88.0f;
 
 inline bool SysCtxContains(const D2D1_RECT_F& r, float x, float y) {
     return r.right > r.left && x >= r.left && x < r.right && y >= r.top && y < r.bottom;
@@ -548,10 +550,10 @@ inline float LayoutSettingsSysCtx(SettingsLayout& l, const WindowViewModel& vm, 
     y += (std::max)(intro_h, bh) + 14 * s;
 
     // Layer cards.
-    const float gap = 10 * s, card_w = (right - left - gap) * 0.5f;
-    o.local_card = D2D1::RectF(left, y, left + card_w, y + 58 * s);
-    o.system_card = D2D1::RectF(left + card_w + gap, y, right, y + 58 * s);
-    y += 58 * s + 12 * s;
+    const float gap = 12 * s, card_w = (right - left - gap) * 0.5f;
+    o.local_card = D2D1::RectF(left, y, left + card_w, y + kCtxLayerCardDip * s);
+    o.system_card = D2D1::RectF(left + card_w + gap, y, right, y + kCtxLayerCardDip * s);
+    y += kCtxLayerCardDip * s + 12 * s;
     if (!v) return y;
 
     if (v->pending == 0 && !v->message.empty() && v->state == SysCtxView::State::Ready) {

@@ -5530,6 +5530,17 @@ enum class StringId : UINT {
     SecDescStaging = IDS_SEC_DESC_STAGING,
     SecDescChanges = IDS_SEC_DESC_CHANGES,
     SecDescNetwork = IDS_SEC_DESC_NETWORK,
+    CtxLayerPulseTitle = IDS_CTX_LAYER_PULSE_TITLE,
+    CtxLayerSystemTitle = IDS_CTX_LAYER_SYSTEM_TITLE,
+    CtxLayerPulseWhat = IDS_CTX_LAYER_PULSE_WHAT,
+    CtxLayerSystemWhat = IDS_CTX_LAYER_SYSTEM_WHAT,
+    CtxFactInstant = IDS_CTX_FACT_INSTANT,
+    CtxFactNoAdmin = IDS_CTX_FACT_NO_ADMIN,
+    CtxFactRestore = IDS_CTX_FACT_RESTORE,
+    CtxFactApply = IDS_CTX_FACT_APPLY,
+    CtxFactBackup = IDS_CTX_FACT_BACKUP,
+    CtxFactAdmin = IDS_CTX_FACT_ADMIN,
+    CtxLayerPending = IDS_CTX_LAYER_PENDING,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

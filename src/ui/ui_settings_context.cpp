@@ -34,7 +34,8 @@ void MainRenderer::DrawSettingsContext(const WindowViewModel& vm,const D2D1_RECT
     // Intro and the layer cards (MakeSettingsLayout), as on 系统右键菜单.
     painter_.DrawWrappedCaption(l10n::Get(I::ContextMenuDesc),D2D1::Point2F(l.ctx_intro.left,l.ctx_intro.top+6*scale_),
                                 l.ctx_intro.right-l.ctx_intro.left,theme.text_secondary);
-    DrawCtxLayerCards(l.ctx_layer[0],l.ctx_layer[1],false,IsHovered(vm,HitTestResult::SettingsCtxPivot,6),theme);
+    DrawCtxLayerCards(l.ctx_layer[0],l.ctx_layer[1],false,IsHovered(vm,HitTestResult::SettingsCtxPivot,6),
+                      vm.settings_sysctx ? vm.settings_sysctx->pending : 0,theme);
     DrawSettingsPulseMenu(vm,rect,theme);
 }
 
