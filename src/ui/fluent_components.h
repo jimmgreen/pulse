@@ -545,6 +545,7 @@ public:
     void DrawSplitButton(const SplitButtonSpec& spec);
     void DrawSplitter(const SplitterSpec& spec);
     void DrawSegmentedItem(const SegmentedItemSpec& spec);
+    void DrawTrackSegment(const SegmentedItemSpec& spec);
     void DrawSegmentedTrack(const D2D1_RECT_F& bounds);
     void DrawBadge(const BadgeSpec& spec);
     float MeasureBadgeWidth(std::wstring_view text) const;

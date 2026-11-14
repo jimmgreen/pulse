@@ -5524,3 +5524,24 @@ SzTakeStatusFree	IDS_SZ_TAKE_STATUS_FREE	6853	没有程序打开	No program open
 SzTakeOffHint	IDS_SZ_TAKE_OFF_HINT	6854	打开后，下面这些格式双击就用 Pulse 解压，并换上压缩包图标。	When on, these formats extract with Pulse on double-click and get archive icons.	
 SzTakeSummaryAsk	IDS_SZ_TAKE_SUMMARY_ASK	6855	已接管 {count} 种 · {name} 种需要在 Windows 里确认一次	{count} taken over · {name} need confirming once in Windows	
 SzTakeSummaryDone	IDS_SZ_TAKE_SUMMARY_DONE	6856	已接管 {count} 种 · 全部完成	{count} taken over · all done	
+SecDescThemeColor	IDS_SEC_DESC_THEME_COLOR	6857	浅色深色、强调色和窗口材质。	Light or dark, the accent and the window material.	
+SecDescBackground	IDS_SEC_DESC_BACKGROUND	6858	背景图片和界面的透明程度。	A background picture and how see-through the interface is.	
+SecDescTextLanguage	IDS_SEC_DESC_TEXT_LANGUAGE	6859	界面语言、文字渲染和字号。	Interface language, text rendering and size.	
+SecDescOpenSelect	IDS_SEC_DESC_OPEN_SELECT	6860	鼠标怎么打开文件，怎么选中多项。	How the mouse opens files and selects several.	
+SecDescVisibleItems	IDS_SEC_DESC_VISIBLE_ITEMS	6861	隐藏文件、系统文件和文件夹排在哪里。	Hidden and system files, and where folders go.	
+SecDescListLook	IDS_SEC_DESC_LIST_LOOK	6862	行高、斑马纹、日期写法和各种标记。	Row height, stripes, dates and marks.	
+SecDescMtime	IDS_SEC_DESC_MTIME	6863	最近改过的文件在列表里怎么标出来。	How recently changed files stand out in the list.	
+SecDescSync	IDS_SEC_DESC_SYNC	6864	OneDrive、SVN 等文件的同步状态标记。	Sync state marks for OneDrive, SVN and similar files.	
+SecDescTabs	IDS_SEC_DESC_TABS	6865	标签页多了怎么排，怎么关闭。	How tabs wrap when there are many, and how they close.	
+SecDescOpenLocation	IDS_SEC_DESC_OPEN_LOCATION	6866	启动和新标签页先显示哪里。	What startup and new tabs show first.	
+SecDescOpenWindows	IDS_SEC_DESC_OPEN_WINDOWS	6867	点图标、新窗口和其他程序打开文件夹时去哪个窗口。	Which window the icon, a new window and other programs' folders use.	
+SecDescArrange	IDS_SEC_DESC_ARRANGE	6868	一键排列窗口时包括哪些、间距多大。	What arranging windows includes, and the spacing.	
+SecDescIntegration	IDS_SEC_DESC_INTEGRATION	6869	用 Pulse 打开文件夹、此电脑和 Win+E。	Pulse opens folders, This PC and Win+E.	
+SecDescDialogs	IDS_SEC_DESC_DIALOGS	6870	用 Pulse 代替其他程序里的打开和保存窗口。	Pulse in place of other apps' open and save windows.	
+SecDescStartupTray	IDS_SEC_DESC_STARTUP_TRAY	6871	开机启动、托盘图标，关掉窗口后是否继续运行。	Starting with Windows, the tray icon, and staying open after the window closes.	
+SecDescExplorer	IDS_SEC_DESC_EXPLORER	6872	在资源管理器右键菜单里给文件打 Pulse 标签。	Tag files with Pulse from File Explorer's context menu.	
+SecDescRestore	IDS_SEC_DESC_RESTORE	6873	把所有接管交还给 Windows。	Give everything back to Windows.	
+SecDescDelete	IDS_SEC_DESC_DELETE	6874	删除之前要不要先问一下。	Whether to ask before deleting.	
+SecDescStaging	IDS_SEC_DESC_STAGING	6875	暂存区图标的大小，以及什么时候收起来。	Staging tray icon size, and when it tucks away.	
+SecDescChanges	IDS_SEC_DESC_CHANGES	6876	记录文件夹里最近的变化，保留多久。	Recording recent folder changes, and for how long.	
+SecDescNetwork	IDS_SEC_DESC_NETWORK	6877	局域网发现、缓存和最近的网络位置。	LAN discovery, caching and recent network places.	

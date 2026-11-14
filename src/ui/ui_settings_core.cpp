@@ -31,9 +31,12 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
     auto text=[&](const std::wstring& value,D2D1_RECT_F r,bool is_small=false) {
         painter_.DrawText(value,r,is_small ? compositor_->SmallFormat() : compositor_->TextFormat(),is_small ? theme.text_secondary : theme.text);
     };
+    // General pages: a soft card that lets the window tint (and Mica/acrylic) through
+    // instead of a flat white slab (chrome_surfaces_mockup.html, E); dark is soft already.
+    const float card_soft=IsGeneralSettingsPage(vm.settings_page) && !vm.dark && !IsHighContrast() ? 0.55f : 1.0f;
     auto draw_card=[&](D2D1_RECT_F r) {
         if(r.bottom<=r.top) return;
-        MakeBrush(dc,WithAlpha(theme.surface_card,card_alpha_),brFillInput_); MakeBrush(dc,theme.stroke_card,brStrokeCard_);
+        MakeBrush(dc,WithAlpha(theme.surface_card,card_alpha_*card_soft),brFillInput_); MakeBrush(dc,theme.stroke_card,brStrokeCard_);
         dc->FillRoundedRectangle(D2D1::RoundedRect(r,8*scale_,8*scale_),brFillInput_.get());
         dc->DrawRoundedRectangle(D2D1::RoundedRect(r,8*scale_,8*scale_),brStrokeCard_.get(),1);
     };
@@ -194,16 +197,40 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
     };
     if(IsGeneralSettingsPage(vm.settings_page)) {
         const int page=vm.settings_page;
+        // Side column hues, one per section in page order; lifted on dark so the glyphs stay readable.
+        const D2D1_COLOR_F hues[]={theme.accent,HexColor(0x2E8B7A),HexColor(0xB5700A),HexColor(0x7B5CC4),HexColor(0xC2476B)};
         for(int i=0;i<lay.section_count;++i) {
             const auto& r=lay.section[i];
-            painter_.DrawText(l10n::Get(lay.section_title[i]),D2D1::RectF(r.left+2*scale_,r.top+6*scale_,r.right,r.bottom),
-                compositor_->HeaderFormat(),theme.text);
+            const bool side=lay.section_side && lay.section_name[i].right>lay.section_name[i].left;
+            const auto name=side ? lay.section_name[i] : D2D1::RectF(r.left,r.top,r.right,r.bottom);
+            if(side) {
+                if(lay.section_rule[i]>0.0f) {
+                    MakeBrush(dc,theme.stroke_divider,brStrokeDivider_);
+                    FillRect(dc,brStrokeDivider_.get(),lay.content.left+20*scale_,lay.section_rule[i],lay.content.right-lay.content.left-40*scale_,1);
+                }
+                const auto hue=IsHighContrast() ? theme.text : vm.dark ? MixColor(hues[i%5],HexColor(0xFFFFFF),0.3f) : hues[i%5];
+                const auto tile=lay.section_tile[i];
+                painter_.FillRoundedRect(tile,8*scale_,WithAlpha(hue,vm.dark ? 0.16f : 0.12f));
+                painter_.StrokeRoundedRect(tile,8*scale_,WithAlpha(hue,0.18f));
+                DrawStoreIcon(dc,SectionInfo(lay.section_title[i]).icon,
+                    D2D1::RectF(tile.left+8*scale_,tile.top+8*scale_,tile.right-8*scale_,tile.bottom-8*scale_),hue);
+                painter_.DrawText(l10n::Get(lay.section_title[i]),name,compositor_->HeaderFormat(),theme.text);
+                const auto desc=lay.section_desc[i];
+                painter_.DrawWrappedCaption(l10n::Get(SectionInfo(lay.section_title[i]).desc),D2D1::Point2F(desc.left,desc.top),
+                    desc.right-desc.left,theme.text_secondary);
+            } else {
+                painter_.DrawText(l10n::Get(lay.section_title[i]),D2D1::RectF(r.left+2*scale_,r.top+6*scale_,r.right,r.bottom),
+                    compositor_->HeaderFormat(),theme.text);
+            }
             if(lay.section_title[i]==I::StartupDialogsTitle) {
                 const float title_width=MeasureTextWidth(compositor_->DwriteFactory(),compositor_->HeaderFormat(),l10n::Get(I::StartupDialogsTitle));
                 const auto experimental=l10n::Get(I::IntegrationExperimentalTag);
                 const float badge_width=painter_.MeasureBadgeWidth(experimental);
                 fluent::BadgeSpec badge{};badge.text=experimental;badge.kind=fluent::BadgeKind::Warning;
-                badge.bounds=D2D1::RectF(r.left+title_width+12*scale_,r.top+7*scale_,r.left+title_width+12*scale_+badge_width,r.top+29*scale_);
+                // Beside the title; in the side column, under it when the title fills the line.
+                const float bx=side && title_width+12*scale_+badge_width>name.right-name.left ? name.left : (side ? name.left : r.left)+title_width+12*scale_;
+                const float by=side ? (bx==name.left ? name.bottom+2*scale_ : name.top+1*scale_) : r.top+7*scale_;
+                badge.bounds=D2D1::RectF(bx,by,bx+badge_width,by+22*scale_);
                 painter_.DrawBadge(badge);
             }
         }

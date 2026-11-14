@@ -2689,6 +2689,13 @@ struct SettingsLayout {
     // tinted bands behind dependent rows, and the dividers between rows.
     l10n::StringId section_title[8]{};
     int section_count = 0;
+    // Wide general pages put each section's title in a column left of its card
+    // (chrome_surfaces_mockup.html, E): section[i] is then that column block, with
+    // its tile, title and description; section_rule[i] is the line above it (0: none).
+    bool section_side = false;
+    D2D1_RECT_F section_tile[8]{}, section_name[8]{}, section_desc[8]{};
+    float section_rule[8]{};
+    int section_rows[8]{};
     std::vector<D2D1_RECT_F> child_bands;
     std::vector<D2D1_RECT_F> dividers;      // left, top (= y), right; bottom unused
     // Sidebar group headings (empty when the sidebar is too short or compact)

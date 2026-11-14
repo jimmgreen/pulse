@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pulse 表面层次效果图</title>
+<style>
+/* Tokens: src/ui/FluentTokens.h MakeTheme(); sizes: ui_renderer.cpp (pane header 40, column header 32), Theme (toolbar 40, row 28). */
+:root {
+  --bg:#F3F5F1; --title:#F1F3EE; --sheet:#F7F8F4; --card:#FFFFFF; --header:#F7F8F4;
+  --text:#303B50; --text2:#66748A; --text3:#929CAE;
+  --stroke:#DCE3D9; --divider:#E5EAE3; --hover:rgba(82,125,112,.055); --pressed:rgba(82,125,112,.09);
+  --accent:#0067C0; --accent-text:#0067C0; --sel:rgba(0,103,192,.095); --input:rgba(255,255,255,.9);
+  --track:rgba(0,0,0,.047); --track-edge:rgba(0,0,0,.031); --plate:#FFFFFF; --plate-edge:rgba(0,0,0,.07); --plate-shadow:rgba(0,0,0,.055);
+  --page:#E9ECE6; --page-text:#303B50; --zone-drag:rgba(234,138,0,.20); --zone-drag-edge:#C77700; --zone-sort:rgba(0,103,192,.16); --zone-list:rgba(42,160,90,.12);
+  --folder:#BCA270; --file:#839FC4; --shadow:0 18px 50px rgba(30,45,40,.16), 0 2px 6px rgba(30,45,40,.08);
+  color-scheme: light;
+}
+:root[data-theme=dark] {
+  --bg:#1A1A1A; --title:#1A1A1A; --sheet:#202020; --card:#272727; --header:#1E1E1E;
+  --text:#FFFFFF; --text2:rgba(255,255,255,.61); --text3:rgba(255,255,255,.4);
+  --stroke:rgba(255,255,255,.045); --divider:rgba(255,255,255,.06); --hover:rgba(255,255,255,.08); --pressed:rgba(255,255,255,.06);
+  --accent:#0067C0; --accent-text:#4D95D3; --sel:rgba(0,103,192,.15); --input:rgba(255,255,255,.06);
+  --track:rgba(255,255,255,.059); --track-edge:rgba(255,255,255,.039); --plate:rgba(255,255,255,.118); --plate-edge:rgba(255,255,255,.07); --plate-shadow:rgba(0,0,0,.27);
+  --page:#111312; --page-text:#E8ECEA; --folder:#FFCD70; --file:#78B0E8; --shadow:0 18px 50px rgba(0,0,0,.5), 0 2px 6px rgba(0,0,0,.3);
+  color-scheme: dark;
+}
+* { box-sizing:border-box; }
+html, body { margin:0; }
+body { background:var(--page); color:var(--page-text); font:14px/1.45 "Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",sans-serif; }
+.wrap { max-width:1240px; margin:0 auto; padding:28px 24px 64px; }
+h1 { font:600 26px/1.25 "Segoe UI Variable Display","Segoe UI","Microsoft YaHei UI",sans-serif; margin:0 0 6px; }
+.lede { color:var(--text2); margin:0 0 18px; max-width:860px; }
+.bar { display:flex; flex-wrap:wrap; gap:10px 14px; align-items:center; margin:0 0 26px; }
+.bar .lab { color:var(--text2); font-size:13px; }
+section { margin:0 0 44px; }
+h2 { font:600 19px/1.3 "Segoe UI Variable Display","Segoe UI","Microsoft YaHei UI",sans-serif; margin:0 0 4px; display:flex; gap:10px; align-items:center; }
+.sub { color:var(--text2); margin:0 0 14px; font-size:13.5px; max-width:900px; }
+.opts { display:flex; flex-wrap:wrap; gap:10px; margin:0 0 14px; align-items:center; }
+.note { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:12px; margin-top:14px; }
+.note div { background:var(--card); border:1px solid var(--stroke); border-radius:10px; padding:12px 14px; font-size:13px; color:var(--text2); }
+.note b { color:var(--text); display:block; margin-bottom:3px; font-weight:600; }
+.pill { font-size:11px; font-weight:600; padding:1px 7px; border-radius:99px; background:var(--sel); color:var(--accent-text); }
+
+/* ---- segmented control: the new painter (neutral track, raised plate, accent semibold) ---- */
+.seg { display:inline-flex; padding:3px; border-radius:8px; background:var(--track); box-shadow:inset 0 0 0 1px var(--track-edge); position:relative; }
+.seg button { all:unset; position:relative; z-index:1; cursor:pointer; padding:0 14px; height:26px; line-height:26px; border-radius:6px; font-size:13px; color:var(--text2); white-space:nowrap; text-align:center; min-width:52px; }
+.seg button:hover:not(.on) { background:var(--hover); color:var(--text); }
+.seg button:active:not(.on) { background:var(--pressed); }
+.seg button.on { background:var(--plate); color:var(--accent-text); font-weight:600; box-shadow:0 0 0 1px var(--plate-edge), 0 1px 0 var(--plate-shadow); }
+.seg.dis { opacity:.55; pointer-events:none; }
+.seg.dis button.on { box-shadow:0 0 0 1px var(--plate-edge); }
+.seg.old { background:#EDF1EA; box-shadow:inset 0 0 0 1px #E5EAE3; }
+:root[data-theme=dark] .seg.old { background:#2B2B2B; box-shadow:inset 0 0 0 1px rgba(255,255,255,.06); }
+.seg.old button.on { background:rgba(255,255,255,.84); color:var(--accent-text); font-weight:400; box-shadow:0 0 0 1px var(--divider), 0 1px 0 rgba(0,0,0,.07); }
+:root[data-theme=dark] .seg.old button.on { background:rgba(255,255,255,.157); }
+.seg.old button:hover:not(.on) { background:var(--hover); color:var(--text2); }
+.segdemo { display:grid; grid-template-columns:150px repeat(4, minmax(150px,1fr)); gap:12px 16px; align-items:center; background:var(--card); border:1px solid var(--stroke); border-radius:12px; padding:18px 20px; }
+.segdemo .h { color:var(--text2); font-size:12px; }
+.segdemo .rl { color:var(--text); font-size:13px; font-weight:600; }
+.segdemo .rl small { display:block; color:var(--text2); font-weight:400; }
+
+/* ---- scaled stages: real DIP sizes, fitted to the column ---- */
+.stage { position:relative; border-radius:12px; overflow:hidden; box-shadow:var(--shadow); background:var(--bg); }
+.stage .inner { transform-origin:0 0; position:absolute; left:0; top:0; }
+
+/* ---- Pulse window ---- */
+.win { background:var(--bg); color:var(--text); font-size:12.5px; position:relative; overflow:hidden; display:flex; flex-direction:column; }
+.tb { height:40px; display:flex; align-items:center; gap:10px; padding:0 8px 0 12px; background:var(--title); }
+.tb .app { display:flex; gap:7px; align-items:center; font-weight:600; font-size:12.5px; }
+.tab { height:30px; margin-top:8px; align-self:flex-start; border-radius:8px 8px 0 0; background:var(--bg); padding:0 34px 0 10px; display:flex; align-items:center; gap:6px; position:relative; }
+.tab::after { content:""; position:absolute; left:10px; right:10px; bottom:0; height:2px; border-radius:2px; background:var(--accent); }
+.tb .sp { flex:1; }
+.tb .wc { display:flex; gap:22px; color:var(--text2); padding-right:8px; }
+.addr { height:36px; display:flex; align-items:center; gap:10px; padding:0 12px; }
+.addr .nav { display:flex; gap:12px; color:var(--text3); }
+.crumbs { flex:1; height:28px; border-radius:7px; background:var(--input); box-shadow:inset 0 0 0 1px var(--divider); display:flex; align-items:center; gap:6px; padding:0 10px; color:var(--text); }
+.crumbs i { color:var(--text3); font-style:normal; }
+.search { width:240px; height:28px; border-radius:7px; background:var(--input); box-shadow:inset 0 0 0 1px var(--divider); display:flex; align-items:center; gap:7px; padding:0 10px; color:var(--text3); }
+.tools { height:40px; display:flex; align-items:center; gap:6px; padding:0 12px; }
+.newbtn { height:28px; border-radius:6px; background:var(--accent); color:#fff; display:flex; align-items:center; gap:6px; padding:0 10px; font-weight:600; font-size:12px; }
+.ib { width:28px; height:28px; border-radius:6px; display:grid; place-items:center; color:var(--text2); }
+.ib.off { color:var(--text3); opacity:.6; }
+.tools .sp { flex:1; }
+.tools .t { display:flex; gap:5px; align-items:center; color:var(--text); padding:0 8px; height:28px; border-radius:6px; }
+.body { display:flex; flex:1; min-height:0; }
+.side { width:200px; flex:none; padding:4px 8px; color:var(--text); }
+.side .g { color:var(--text2); font-size:11.5px; margin:10px 8px 4px; display:flex; gap:6px; align-items:center; }
+.side .r { height:28px; display:flex; align-items:center; gap:8px; padding:0 10px; border-radius:6px; }
+.side .r.on { background:var(--sel); }
+.main { flex:1; min-width:0; padding:0 10px 10px 2px; display:flex; flex-direction:column; }
+.card { background:var(--card); border:1px solid var(--stroke); border-radius:10px; overflow:hidden; flex:1; display:flex; flex-direction:column; }
+.strip { height:40px; display:flex; align-items:center; padding:0 10px 0 12px; gap:8px; position:relative; }
+.strip .t { font-weight:600; font-size:13px; }
+.strip .views { margin-left:auto; display:flex; gap:2px; }
+.strip .views span { width:28px; height:26px; border-radius:6px; display:grid; place-items:center; color:var(--text2); }
+.strip .views span.on { background:var(--sel); color:var(--accent-text); }
+.cols { height:32px; display:grid; grid-template-columns:1fr 150px 120px 90px; align-items:center; padding:0 8px; position:relative; }
+.cols div { height:26px; display:flex; align-items:center; gap:4px; padding:0 8px; border-radius:6px; color:var(--text2); cursor:default; }
+.cols div.s { color:var(--accent-text); }
+.cols div:nth-child(4) { justify-content:flex-end; }
+.cols div:hover { background:var(--hover); color:var(--text); }
+.rows { padding:2px 8px 8px; overflow:hidden; }
+.row { height:28px; display:grid; grid-template-columns:1fr 150px 120px 90px; align-items:center; padding:0 8px; border-radius:6px; }
+.row:hover { background:var(--hover); }
+.row.sel { background:var(--sel); box-shadow:inset 0 0 0 1px var(--accent); }
+.row > span { padding:0 8px; display:flex; align-items:center; gap:8px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.row .d, .row .k { color:var(--text2); }
+.row .z { text-align:right; justify-content:flex-end; color:var(--text2); }
+.status { height:24px; display:flex; align-items:center; gap:14px; padding:0 14px; color:var(--text2); font-size:11.5px; }
+
+/* strip variants */
+.v-now .cols { background:var(--input); border-bottom:1px solid var(--divider); }
+/* A: the strip is window chrome; the list card starts at the column header */
+.v-a .main { padding-top:0; }
+.v-a .strip.out { height:34px; padding:0 4px 0 6px; }
+.v-a .strip.out .t { font-weight:600; }
+.v-a .card { margin-top:6px; }
+.v-a .card .cols { background:var(--input); border-bottom:1px solid var(--divider); }
+/* B: header becomes buttons on its own shelf, with a hairline and air above */
+.v-b .strip { border-bottom:1px solid var(--divider); }
+.v-b .strip:hover .grip { opacity:1; }
+.v-b .grip { opacity:0; transition:opacity .15s; display:grid; grid-template-columns:repeat(3,3px); gap:3px; margin-left:6px; }
+.v-b .grip i { width:3px; height:3px; border-radius:50%; background:var(--text3); }
+.v-b .cols { margin-top:6px; background:transparent; }
+.v-b .cols div { box-shadow:inset 0 0 0 1px transparent; }
+.v-b .cols div:hover { box-shadow:inset 0 0 0 1px var(--divider); background:var(--header); }
+.v-b .cols::after { content:""; position:absolute; left:8px; right:8px; bottom:0; height:1px; background:var(--divider); }
+/* C: no strip in a single pane; the title and views move into the toolbar */
+.v-c .tools .ttl { font-weight:600; color:var(--text); margin-left:6px; padding-left:12px; border-left:1px solid var(--divider); height:18px; display:flex; align-items:center; }
+.v-c .card .cols { background:var(--header); border-bottom:1px solid var(--divider); }
+.v-c .tools .views { display:flex; gap:2px; margin-left:6px; }
+.v-c .tools .views span { width:28px; height:26px; border-radius:6px; display:grid; place-items:center; color:var(--text2); }
+.v-c .tools .views span.on { background:var(--sel); color:var(--accent-text); }
+
+/* click-zone overlay */
+.zone { position:absolute; pointer-events:none; display:none; border-radius:6px; font-size:11px; font-weight:600; align-items:center; justify-content:center; letter-spacing:.2px; }
+.zones .zone { display:flex; }
+.zone.drag { background:var(--zone-drag); box-shadow:inset 0 0 0 1.5px var(--zone-drag-edge); color:var(--zone-drag-edge); }
+.zone.sort { background:var(--zone-sort); box-shadow:inset 0 0 0 1.5px var(--accent); color:var(--accent-text); }
+.zone.list { background:var(--zone-list); box-shadow:inset 0 0 0 1.5px #2AA05A; color:#1F8048; }
+:root[data-theme=dark] .zone.drag { color:#FFB54D; } :root[data-theme=dark] .zone.list { color:#62D08E; }
+.toast { position:absolute; left:50%; bottom:40px; transform:translate(-50%, 8px); opacity:0; transition:.18s; background:var(--card); color:var(--text); border:1px solid var(--stroke); box-shadow:var(--shadow); border-radius:8px; padding:8px 14px; font-size:12.5px; pointer-events:none; white-space:nowrap; }
+.toast.show { opacity:1; transform:translate(-50%,0); }
+
+/* ---- settings window ---- */
+.sw { background:var(--bg); color:var(--text); font-size:12.5px; display:flex; flex-direction:column; }
+.sw .tb { background:var(--bg); }
+.sw .sbody { display:flex; flex:1; min-height:0; }
+.snav { width:132px; flex:none; padding:4px 8px; }
+.snav .q { height:28px; border-radius:7px; background:var(--input); box-shadow:inset 0 0 0 1px var(--divider); display:flex; align-items:center; gap:6px; padding:0 8px; color:var(--text3); margin-bottom:10px; font-size:12px; }
+.snav .g { color:var(--text2); font-size:11px; margin:10px 6px 3px; }
+.snav .r { height:28px; display:flex; align-items:center; gap:8px; padding:0 8px; border-radius:6px; position:relative; }
+.snav .r.on { background:var(--sel); }
+.snav .r.on::before { content:""; position:absolute; left:-6px; top:8px; bottom:8px; width:3px; border-radius:2px; background:var(--accent); }
+.spage { flex:1; min-width:0; overflow:hidden; padding:6px 16px 20px 6px; }
+.spage .col { }
+.spage h3 { font:600 22px/1.3 "Segoe UI Variable Display","Segoe UI","Microsoft YaHei UI",sans-serif; margin:4px 0 2px; }
+.spage .desc { color:var(--text2); font-size:11.5px; margin-bottom:14px; }
+.sec { font-weight:600; font-size:12.5px; margin:14px 0 6px 2px; }
+.scard { background:var(--card); border:1px solid var(--stroke); border-radius:8px; }
+.srow { min-height:52px; display:flex; align-items:center; gap:12px; padding:8px 14px; }
+.srow + .srow { border-top:1px solid var(--divider); }
+.srow .ic { width:16px; color:var(--text2); flex:none; display:grid; place-items:center; }
+.srow .tx { flex:1; min-width:0; }
+.srow .tx b { font-weight:400; display:block; font-size:12.5px; }
+.srow .tx small { color:var(--text2); font-size:11.5px; display:block; }
+.srow:hover { background:var(--hover); }
+.sw-toggle { width:40px; height:20px; border-radius:10px; position:relative; flex:none; box-shadow:inset 0 0 0 1px var(--text2); }
+.sw-toggle::after { content:""; position:absolute; width:12px; height:12px; border-radius:50%; left:4px; top:4px; background:var(--text2); }
+.sw-toggle.on { background:var(--accent); box-shadow:none; }
+.sw-toggle.on::after { left:24px; background:#fff; }
+.combo { height:28px; min-width:150px; border-radius:6px; background:var(--input); box-shadow:inset 0 0 0 1px var(--divider), inset 0 -1px 0 var(--stroke); display:flex; align-items:center; justify-content:space-between; padding:0 10px; gap:12px; flex:none; }
+.spage .seg button { height:24px; line-height:24px; font-size:12px; padding:0 12px; min-width:0; }
+/* settings variants */
+/* soft surfaces: the card lets the window tint (and Mica/acrylic) through instead of a flat white slab */
+:root { --soft:rgba(255,255,255,.45); --soft-edge:rgba(48,59,80,.075); --soft-head:rgba(255,255,255,.42); --rail:rgba(48,59,80,.06); }
+:root[data-theme=dark] { --soft:rgba(255,255,255,.035); --soft-edge:rgba(255,255,255,.07); --soft-head:rgba(255,255,255,.025); --rail:rgba(255,255,255,.05); }
+.tile { width:30px; height:30px; border-radius:8px; display:grid; place-items:center; flex:none; color:var(--hue); background:color-mix(in srgb, var(--hue) 14%, transparent); box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--hue) 18%, transparent); }
+.tile.big { width:44px; height:44px; border-radius:12px; }
+.tile.big svg { width:22px; height:22px; }
+.hero { display:flex; gap:14px; align-items:center; margin:2px 0 16px; }
+.hero h3 { margin:0; }
+.hero .desc { margin:0; }
+.hero .chips { margin-left:auto; display:flex; gap:6px; }
+.chip { font-size:11px; color:var(--text2); padding:3px 9px; border-radius:99px; background:var(--rail); white-space:nowrap; }
+.chip b { color:var(--accent-text); font-weight:600; }
+/* D: soft group cards, each opened by its own header */
+.s-d .spage .col { max-width:1080px; }
+.s-d .scard { background:var(--soft); border-color:var(--soft-edge); border-radius:12px; margin-bottom:14px; overflow:hidden; }
+.s-d .ghead { display:flex; gap:12px; align-items:center; padding:12px 14px; background:var(--soft-head); border-bottom:1px solid var(--soft-edge); }
+.s-d .ghead b { font-size:13px; font-weight:600; display:block; }
+.s-d .ghead small { color:var(--text2); font-size:11.5px; }
+.s-d .srow { padding-left:56px; }
+.s-d .srow .ic { display:none; }
+.s-d .srow + .srow { border-top:1px solid var(--soft-edge); }
+.s-d .srow:hover { background:var(--hover); }
+/* E: group titles in their own column; the rows on a soft card beside them */
+.s-e .spage .col { max-width:1180px; }
+.s-e .grp { display:grid; grid-template-columns:230px 1fr; gap:28px; padding:16px 0 18px; border-top:1px solid var(--rail); }
+.s-e .grp:first-of-type { border-top:0; padding-top:4px; }
+.s-e .gside { display:flex; flex-direction:column; gap:8px; padding-top:4px; }
+.s-e .gside b { font-size:13.5px; font-weight:600; }
+.s-e .gside small { color:var(--text2); font-size:11.5px; line-height:1.5; }
+.s-e .gside .meta { color:var(--text3); font-size:11px; }
+.s-e .scard { background:var(--soft); border-color:var(--soft-edge); border-radius:12px; overflow:hidden; }
+.s-e .srow .ic { display:none; }
+.s-e .srow { padding-left:16px; }
+.s-e .srow + .srow { border-top:1px solid var(--soft-edge); }
+.s-e.narrow .grp { grid-template-columns:180px 1fr; gap:20px; }
+/* F: no cards; the page is one surface, groups are headed by a tile and a rule */
+.s-f .spage .col { max-width:1080px; }
+.s-f .scard { background:transparent; border:0; }
+.s-f .fhead { display:flex; gap:10px; align-items:center; margin:18px 0 4px; }
+.s-f .fhead b { font-size:13px; font-weight:600; }
+.s-f .fhead small { color:var(--text2); font-size:11.5px; margin-left:4px; }
+.s-f .fhead::after { content:""; flex:1; height:1px; background:var(--rail); margin-left:10px; }
+.s-f .srow { border-radius:10px; padding-left:52px; }
+.s-f .srow .ic { display:none; }
+.s-f .srow + .srow { border-top:0; box-shadow:0 -1px 0 var(--rail); }
+.s-f .srow:hover { background:var(--soft); box-shadow:0 0 0 1px var(--soft-edge); }
+.ruler { position:absolute; display:none; height:0; border-top:1.5px dashed #C77700; pointer-events:none; }
+.ruler span { position:absolute; left:calc(100% + 8px); top:-10px; background:#C77700; color:#fff; font-size:11px; padding:1px 8px; border-radius:99px; white-space:nowrap; font-weight:600; }
+.zones .ruler { display:block; }
+#setRuler span { left:50%; transform:translateX(-50%); top:-20px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>表面层次：工具栏与表头、设置留白、分段控件</h1>
+  <p class="lede">配色取自 <code>FluentTokens.h</code>，尺寸取自现有代码：标题条 40、列表头 32、工具栏 40、行高 28。下面三个方案组都能切换，「显示点击区域」会标出每块区域点下去做什么。</p>
+  <div class="bar">
+    <span class="lab">主题</span>
+    <div class="seg" id="themeSeg"><button data-theme="light">浅色</button><button data-theme="dark">深色</button></div>
+    <span class="lab" style="margin-left:8px">点击区域</span>
+    <div class="seg" id="zoneSeg"><button data-zones="0">隐藏</button><button data-zones="1">显示</button></div>
+  </div>
+
+  <section id="s1">
+    <h2>1　工具栏与列表表头之间</h2>
+    <p class="sub">现在：文件夹标题条（空白处<b>拖动窗口</b>）和列表头（点击<b>排序</b>、拖动<b>调整列宽和顺序</b>）都在同一块白色卡片上，中间没有边界，往上一点就是拖窗口，往下一点就变成排序。</p>
+    <div class="opts">
+      <div class="seg" id="stripSeg">
+        <button data-strip="now">现在</button><button data-strip="a">A 标题条归窗口（推荐）</button><button data-strip="b">B 表头按钮化</button><button data-strip="c">C 并入工具栏</button>
+      </div>
+    </div>
+    <div class="stage" id="stage1"><div class="inner" id="win1"></div></div>
+    <div class="note" id="note1"></div>
+  </section>
+
+  <section id="s2">
+    <h2>2　设置里的大片白色</h2>
+    <p class="sub">现在：每组是一整块纯白卡片，铺满整个内容区，页面只有「白卡片 / 底色」一种层次。新方案都把卡片换成半透明的柔面（透出窗口底色和 Mica / 亚克力），再各用一种办法建立层次。</p>
+    <div class="opts">
+      <div class="seg" id="setSeg">
+        <button data-set="now">现在</button><button data-set="d">D 柔面分组</button><button data-set="e">E 左侧组标题（推荐）</button><button data-set="f">F 无卡片</button>
+      </div>
+      <div class="seg" id="widthSeg"><button data-width="1440">窗口 1440</button><button data-width="1100">窗口 1100</button></div>
+    </div>
+    <div class="stage" id="stage2"><div class="inner" id="win2"></div></div>
+    <div class="note" id="note2"></div>
+  </section>
+
+  <section id="s3">
+    <h2>3　分段控件 <span class="pill">选中保留强调色</span></h2>
+    <p class="sub">底槽改为无色调的半透明凹槽（不再是偏绿的 #EDF1EA），选中项是有细边和轻阴影的凸起板，文字保留强调色并加粗；悬停有淡底，禁用整体变淡。</p>
+    <div class="segdemo" id="segdemo"></div>
+  </section>
+</div>
+
+<script>
+(() => {
+const $ = (s, el = document) => el.querySelector(s);
+const qs = new URLSearchParams(location.search);
+const pick = (v, list, d) => list.includes(v) ? v : d;
+const S = {
+  theme: pick(qs.get('theme'), ['light', 'dark'], 'light'),
+  zones: qs.get('zones') === '1',
+  strip: pick(qs.get('strip'), ['now', 'a', 'b', 'c'], 'a'),
+  set: pick(qs.get('set'), ['now', 'd', 'e', 'f'], 'e'),
+  width: pick(qs.get('width'), ['1440', '1100'], '1440'),
+  sort: { col: 0, dir: 1 },
+};
+
+/* drawn icons (16 grid), never font glyphs */
+const I = (d, w = 16) => `<svg width="${w}" height="${w}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+const ic = {
+  back: I('<path d="M10 3.5 5.5 8l4.5 4.5"/>'), fwd: I('<path d="M6 3.5 10.5 8 6 12.5"/>'), up: I('<path d="M8 13V3.5M4 7.5 8 3.5l4 4"/>'),
+  refresh: I('<path d="M13 8a5 5 0 1 1-1.6-3.7M13 3v3h-3"/>'), search: I('<circle cx="7" cy="7" r="4"/><path d="m10 10 3 3"/>'),
+  newf: I('<path d="M2.5 5a1.5 1.5 0 0 1 1.5-1.5h2.6l1.4 1.5h4A1.5 1.5 0 0 1 13.5 6.5v5A1.5 1.5 0 0 1 12 13H4a1.5 1.5 0 0 1-1.5-1.5z"/><path d="M8 7.5v3M6.5 9h3"/>'),
+  cut: I('<circle cx="4.5" cy="11.5" r="1.8"/><circle cx="11.5" cy="11.5" r="1.8"/><path d="M5.8 10.2 11 3M10.2 10.2 5 3"/>'),
+  copy: I('<rect x="5" y="5" width="8" height="8.5" rx="1.5"/><path d="M3 10.5V4a1.5 1.5 0 0 1 1.5-1.5H10"/>'),
+  paste: I('<rect x="3.5" y="3" width="9" height="11" rx="1.5"/><path d="M6 3V2h4v1"/>'),
+  ren: I('<path d="M3 12.5h2l7-7-2-2-7 7z"/>'), del: I('<path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M5 4.5l.6 8.5h4.8l.6-8.5"/>'),
+  sort: I('<path d="M5 3v10M2.5 10.5 5 13l2.5-2.5M11 13V3M8.5 5.5 11 3l2.5 2.5"/>'), filter: I('<path d="M2.5 3.5h11l-4.3 5v4l-2.4 1v-5z"/>'),
+  group: I('<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="11" height="4.5" rx="1"/>'),
+  details: I('<path d="M5.5 4h8M5.5 8h8M5.5 12h8M2.5 4h.5M2.5 8h.5M2.5 12h.5"/>'), tiles: I('<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/>'),
+  icons: I('<rect x="2.5" y="2.5" width="11" height="7" rx="1.2"/><path d="M4 12.5h3M9 12.5h3"/>'), more: I('<path d="M3.5 8h.1M8 8h.1M12.5 8h.1" stroke-width="2"/>'),
+  chev: I('<path d="M4.5 6.5 8 10l3.5-3.5"/>', 12), star: I('<path d="m8 2.8 1.6 3.3 3.6.5-2.6 2.5.6 3.6L8 11l-3.2 1.7.6-3.6-2.6-2.5 3.6-.5z"/>'),
+  clock: I('<circle cx="8" cy="8" r="5.5"/><path d="M8 5v3l2 1.5"/>'), desk: I('<rect x="2.5" y="3" width="11" height="8" rx="1.2"/><path d="M6 13.5h4"/>'),
+  down: I('<path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13.5h10"/>'), pic: I('<rect x="2.5" y="3" width="11" height="10" rx="1.5"/><circle cx="6" cy="6.5" r="1.2"/><path d="m3 12 3.5-3.5 2.5 2.5 1.5-1.5 2.5 2.5"/>'),
+  min: I('<path d="M3.5 8h9"/>', 12), max: I('<rect x="3.5" y="3.5" width="9" height="9" rx="1"/>', 12), close: I('<path d="m4 4 8 8M12 4l-8 8"/>', 12),
+  gear: I('<circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/>'),
+  pointer: I('<path d="M4 2.5v10l2.8-2.6 1.8 4 1.6-.7-1.8-3.9 3.8-.3z"/>'), timer: I('<circle cx="8" cy="8.8" r="4.7"/><path d="M8 6.5v2.5M6.5 2h3"/>'),
+  check: I('<rect x="2.5" y="2.5" width="11" height="11" rx="2.5"/><path d="m5.3 8.2 1.8 1.8 3.6-3.8"/>'), blank: I('<path d="M13 8H3.5M7.5 4 3.5 8l4 4"/>'),
+  eye: I('<path d="M1.8 8S4 3.8 8 3.8 14.2 8 14.2 8 12 12.2 8 12.2 1.8 8 1.8 8z"/><circle cx="8" cy="8" r="1.8"/><path d="M2.5 2.5l11 11"/>'), shield: I('<path d="M8 2.2 13 4v3.6c0 3-2.2 5.2-5 6.2-2.8-1-5-3.2-5-6.2V4z"/>'),
+  sortf: I('<path d="M3 4h10M3 8h7M3 12h4"/>'), rows: I('<path d="M3 4h10M3 8h10M3 12h10"/>'), zebra: I('<rect x="2.5" y="3" width="11" height="3" rx=".8"/><rect x="2.5" y="10" width="11" height="3" rx=".8"/>'),
+  date: I('<rect x="2.5" y="3.5" width="11" height="10" rx="1.5"/><path d="M2.5 6.5h11M5.5 2v3M10.5 2v3"/>'),
+  palette: I('<path d="M8 2.5a5.5 5.5 0 1 0 0 11c.9 0 1.2-.7.9-1.3-.4-.8.1-1.7 1-1.7H11a2.5 2.5 0 0 0 2.5-2.5A5.5 5.5 0 0 0 8 2.5z"/>'),
+  list: I('<path d="M3 4.5h10M3 8h10M3 11.5h10"/>'), tabs: I('<rect x="2.5" y="4.5" width="11" height="8.5" rx="1.2"/><path d="M2.5 7h11M6 4.5V3h4.5v1.5"/>'), power: I('<path d="M8 2.5V8M5 4.2a5 5 0 1 0 6 0"/>'),
+  ops: I('<path d="M3 5h8l-2-2M13 11H5l2 2"/>'), store: I('<path d="M3 6h10l-1 7.5H4z"/><path d="M5.5 6a2.5 2.5 0 0 1 5 0"/>'),
+};
+const folderIcon = `<svg width="16" height="16" viewBox="0 0 16 16"><path d="M1.5 4.2c0-.7.5-1.2 1.2-1.2h3.4l1.4 1.5h5.8c.7 0 1.2.5 1.2 1.2v6.6c0 .7-.5 1.2-1.2 1.2H2.7c-.7 0-1.2-.5-1.2-1.2z" fill="var(--folder)"/><path d="M1.5 6h13v5.8c0 .7-.5 1.2-1.2 1.2H2.7c-.7 0-1.2-.5-1.2-1.2z" fill="var(--folder)" opacity=".75"/></svg>`;
+const fileIcon = (c = 'var(--file)') => `<svg width="16" height="16" viewBox="0 0 16 16"><path d="M4 1.5h5.2L12.5 4.8v9c0 .4-.3.7-.7.7H4c-.4 0-.7-.3-.7-.7V2.2c0-.4.3-.7.7-.7z" fill="var(--card)" stroke="${c}" stroke-width="1"/><path d="M9.2 1.5v3.3h3.3" fill="none" stroke="${c}"/></svg>`;
+
+/* sample listing (bench_data/archive_takeover and the repo root) */
+const ROWS = [
+  { n: 'assets', k: '文件夹', d: '周三 19:40', z: '', dir: 1, t: 3 },
+  { n: 'docs', k: '文件夹', d: '今天 06:12', z: '', dir: 1, t: 9 },
+  { n: 'extensions', k: '文件夹', d: '今天 07:02', z: '', dir: 1, t: 10 },
+  { n: 'src', k: '文件夹', d: '今天 07:16', z: '', dir: 1, t: 11 },
+  { n: 'archive_icons_mockup.html', k: 'HTML 文档', d: '今天 05:41', z: '58.3 KB', t: 8, sz: 58300 },
+  { n: 'AGENTS.md', k: 'Markdown', d: '周一 22:18', z: '9.6 KB', t: 4, sz: 9600 },
+  { n: 'build_installer.bat', k: 'Windows 批处理文件', d: '周二 10:02', z: '512 B', t: 5, sz: 512 },
+  { n: 'CMakeLists.txt', k: '文本文档', d: '今天 07:09', z: '74.1 KB', t: 12, sz: 74100 },
+  { n: '多个顶层项.zip', k: 'ZIP 压缩文件', d: '周一 00:06', z: '910 B', t: 2, sz: 910 },
+];
+const COLS = ['名称', '修改日期', '类型', '大小'];
+function sortedRows() {
+  const { col, dir } = S.sort;
+  const key = r => col === 0 ? r.n.toLowerCase() : col === 1 ? r.t : col === 2 ? r.k : (r.sz || 0);
+  return [...ROWS].sort((a, b) => (b.dir || 0) - (a.dir || 0) || (key(a) > key(b) ? dir : key(a) < key(b) ? -dir : 0));
+}
+
+function windowHtml(v) {
+  const cols = `<div class="cols">${COLS.map((c, i) => `<div data-col="${i}" class="${S.sort.col === i ? 's' : ''}">${c}${S.sort.col === i ? `<span style="display:inline-flex;transform:${S.sort.dir > 0 ? 'none' : 'rotate(180deg)'}">${I('<path d="M4.5 10 8 6.5l3.5 3.5"/>', 12)}</span>` : ''}</div>`).join('')}</div>`;
+  const rows = `<div class="rows">${sortedRows().map((r, i) => `<div class="row${r.n === 'extensions' ? ' sel' : ''}"><span>${r.dir ? folderIcon : fileIcon(r.n.endsWith('.zip') ? '#F2A93B' : 'var(--file)')}${r.n}</span><span class="d">${r.d}</span><span class="k">${r.k}</span><span class="z">${r.z}</span></div>`).join('')}</div>`;
+  const views = `<div class="views"><span class="on">${ic.details}</span><span>${ic.tiles}</span><span>${ic.icons}</span><span>${ic.more}</span></div>`;
+  const strip = cls => `<div class="strip ${cls}" data-drag="1"><span class="t">pulse</span><span class="grip"><i></i><i></i><i></i><i></i><i></i><i></i></span>${views}</div>`;
+  const toolsRight = `<span class="sp"></span><span class="t">${ic.sort}排序${ic.chev}</span><span class="t">${ic.filter}筛选</span><span class="t">${ic.group}分组${ic.chev}</span>`;
+  const tools = v === 'c'
+    ? `<div class="tools" data-drag="1"><span class="newbtn">${ic.newf}新建文件夹</span><span class="ib off">${ic.cut}</span><span class="ib off">${ic.copy}</span><span class="ib off">${ic.paste}</span><span class="ib off">${ic.ren}</span><span class="ib off">${ic.del}</span><span class="ttl">pulse</span>${toolsRight}<span class="views">${views.replace('<div class="views">', '').replace('</div>', '')}</span></div>`
+    : `<div class="tools" data-drag="1"><span class="newbtn">${ic.newf}新建文件夹</span><span class="ib off">${ic.cut}</span><span class="ib off">${ic.copy}</span><span class="ib off">${ic.paste}</span><span class="ib off">${ic.ren}</span><span class="ib off">${ic.del}</span>${toolsRight}</div>`;
+  const card = v === 'a'
+    ? `${strip('out')}<div class="card">${cols}${rows}</div>`
+    : v === 'c' ? `<div class="card">${cols}${rows}</div>`
+    : `<div class="card">${strip('')}${cols}${rows}</div>`;
+  return `<div class="win v-${v}" id="w1" style="width:1180px;height:560px">
+    <div class="tb"><span class="app"><svg width="16" height="16" viewBox="0 0 20 20"><rect width="20" height="20" rx="5" fill="#2B2B2B"/><path d="M3.5 10.5h3l1.6-4 2.8 8 1.8-4.5h3.8" fill="none" stroke="#8CC2B1" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Pulse</span>
+      <span class="tab">${folderIcon}pulse</span><span style="color:var(--text2)">＋</span><span class="sp"></span><span class="wc">${ic.gear}${ic.min}${ic.max}${ic.close}</span></div>
+    <div class="addr"><span class="nav">${ic.back}${ic.fwd}${ic.up}</span><div class="crumbs">此电脑<i>›</i>C:<i>›</i>Users<i>›</i>SS<i>›</i>Desktop<i>›</i>pulse</div><span style="color:var(--text2)">${ic.refresh}</span><div class="search">${ic.search}搜索全盘</div></div>
+    ${tools}
+    <div class="body">
+      <div class="side"><div class="g">${ic.star}收藏夹</div><div class="g">快速访问</div>
+        <div class="r">${ic.clock}最近使用</div><div class="r on">${ic.desk}桌面</div><div class="r">${ic.down}下载</div><div class="r">${ic.pic}图片</div></div>
+      <div class="main">${card}</div>
+    </div>
+    <div class="status"><span>9 个项目</span><span>选中 1 项</span><span>Git sdk/preview3-dialogs</span></div>
+    <div class="zone drag" id="zDrag">拖动窗口</div><div class="zone sort" id="zSort">点击排序 · 拖动调整列宽和顺序</div><div class="zone list" id="zList">选择文件</div>
+    <div class="ruler" id="gapRuler"><span></span></div>
+    <div class="toast" id="toast1"></div>
+  </div>`;
+}
+const NOTES1 = {
+  now: [['问题', '标题条（40）和表头（32）是同一块白卡片上连续的 72 像素，拖窗口和排序只隔一条看不见的线。'], ['发生在', '单个窗格时标题条空白处拖动窗口；分栏时这里拖出窗格。表头在任何视图都会响应点击和拖动。']],
+  a: [['做法', '标题条留在窗口底色上，和工具栏是一层；白色列表卡从表头开始，表头沿用列表卡的颜色，跟上面的底色分开。（已在开发版里实现）'], ['为什么推荐', '卡片的上边缘就是「窗口 / 列表」的分界，不靠颜色深浅猜。标题条 34 加 6 像素间隔，总高度和现在一样。'], ['分栏', '每个窗格的标题条同样落在底色上，拖出窗格的手感不变。']],
+  b: [['做法', '保留现在的卡片，在标题条下加分隔线，表头下移 6 像素；表头每列做成悬停有边框的按钮。'], ['取舍', '改动最小，但两块仍在同一张白卡上，靠细线和间隙区分，误触会减少但不会消失。'], ['附加', '悬停标题条空白处时出现拖动点，提示这里能拖窗口。']],
+  c: [['做法', '单个窗格时不画标题条：文件夹名和视图按钮并入工具栏右侧，表头直接是列表卡的第一行。'], ['取舍', '省下 40 像素纵向空间；拖窗口改在工具栏和标签栏的空白处。分栏时每个窗格仍需要自己的标题条。'], ['影响', '工具栏右侧更挤，窄窗口时排序/筛选/分组要折叠进「更多」。']],
+};
+
+function settingsHtml(v, width) {
+  const seg = (labels, on, dis) => `<div class="seg${dis ? ' dis' : ''}">${labels.map((l, i) => `<button class="${i === on ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+  const row = (icon, title, desc, ctl) => `<div class="srow"><span class="ic">${icon}</span><span class="tx"><b>${title}</b><small>${desc}</small></span>${ctl}</div>`;
+  const tog = on => `<span class="sw-toggle${on ? ' on' : ''}"></span>`;
+  const combo = t => `<span class="combo">${t}${I('<path d="M4.5 6.5 8 10l3.5-3.5"/>', 12)}</span>`;
+  const groups = [
+    { title: '打开与选择', blurb: '鼠标怎么打开文件，怎么选中多项。', hue: '#0067C0', icon: ic.pointer, meta: '4 项 · 1 项已改', rows: [
+      row(ic.pointer, '打开项目', '用鼠标打开文件和文件夹的方式', seg(['双击打开', '单击打开'], 0)),
+      row(ic.timer, '文件双击间隔', '控制文件双击识别时间，不更改 Windows 设置。', combo('跟随系统')),
+      row(ic.check, '用复选框选择项目', '每一项前面显示复选框，勾一下就能多选，不用按 Ctrl', tog(false)),
+      row(ic.blank, '双击列表空白处', '后退没有历史时回到上一级；有选中项时第一下先取消选择；搜索结果页除外', seg(['不操作', '后退', '向上一级'], 2))] },
+    { title: '显示哪些项目', blurb: '隐藏文件、系统文件和文件夹排在哪里。', hue: '#2E8B7A', icon: ic.eye, meta: '3 项', rows: [
+      row(ic.eye, '显示隐藏文件', '显示带有 Windows 隐藏属性的文件和文件夹', tog(false)),
+      row(ic.shield, '显示受保护的操作系统文件', '显示同时带隐藏和系统属性的系统文件，如 desktop.ini', tog(false)),
+      row(ic.sortf, '文件夹位置', '默认位置：在某个文件夹里改过的会单独记住', seg(['置顶', '置底', '混排'], 0))] },
+    { title: '列表外观', blurb: '行高、斑马纹和日期的写法。', hue: '#B5700A', icon: ic.rows, meta: '3 项 · 2 项已开', rows: [
+      row(ic.rows, '列表行高', '调整文件列表每一行的高度，立即生效', seg(['紧凑', '标准', '宽松'], 1)),
+      row(ic.zebra, '斑马纹行', '详细信息视图隔行加淡底色，长列表更容易横向对齐', tog(true)),
+      row(ic.date, '智能日期', '近期时间显示为“今天 14:32”“昨天 09:10”“周三 18:00”', tog(true))] },
+  ];
+  const tile = (g, big) => `<span class="tile${big ? ' big' : ''}" style="--hue:${g.hue}">${g.icon}</span>`;
+  let body;
+  if (v === 'd') body = groups.map(g => `<div class="scard"><div class="ghead">${tile(g)}<span><b>${g.title}</b><small>${g.blurb}</small></span></div>${g.rows.join('')}</div>`).join('');
+  else if (v === 'e') body = groups.map(g => `<div class="grp"><div class="gside">${tile(g)}<b>${g.title}</b><small>${g.blurb}</small><span class="meta">${g.meta}</span></div><div class="scard">${g.rows.join('')}</div></div>`).join('');
+  else if (v === 'f') body = groups.map(g => `<div class="fhead">${tile(g)}<b>${g.title}</b><small>${g.blurb}</small></div><div class="scard">${g.rows.join('')}</div>`).join('');
+  else body = groups.map(g => `<div class="sec">${g.title}</div><div class="scard">${g.rows.join('')}</div>`).join('');
+  const head = v === 'now'
+    ? `<h3>文件列表</h3><div class="desc">打开方式、显示哪些文件，以及列表里的各种提示。</div>`
+    : `<div class="hero"><span class="tile big" style="--hue:var(--accent-text)">${ic.list}</span><div><h3>文件列表</h3><div class="desc">打开方式、显示哪些文件，以及列表里的各种提示。</div></div><div class="chips"><span class="chip">10 项设置</span><span class="chip"><b>3</b> 项与默认不同</span></div></div>`;
+  const nav = [['个性化'], [ic.palette, '外观'], ['浏览'], [ic.list, '文件列表', 1], [ic.tabs, '标签页与窗口'], ['系统'], [ic.power, '启动与集成'], [ic.ops, '文件操作'], ['功能'], [ic.search, '搜索与索引'], [ic.store, '扩展商店']];
+  return `<div class="sw s-${v}${width < 1300 ? ' narrow' : ''}" id="w2" style="width:${width}px;height:700px">
+    <div class="tb"><span class="app"><svg width="16" height="16" viewBox="0 0 20 20"><rect width="20" height="20" rx="5" fill="#2B2B2B"/><path d="M3.5 10.5h3l1.6-4 2.8 8 1.8-4.5h3.8" fill="none" stroke="#8CC2B1" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Pulse</span><span class="sp"></span><span class="wc">${ic.gear}${ic.min}${ic.max}${ic.close}</span></div>
+    <div class="sbody"><div class="snav"><div class="q">${ic.search}查找设置</div>${nav.map(n => n.length === 1 ? `<div class="g">${n[0]}</div>` : `<div class="r${n[2] ? ' on' : ''}">${n[0]}${n[1]}</div>`).join('')}</div>
+      <div class="spage"><div class="col">${head}${body}</div></div></div>
+    <div class="ruler" id="setRuler"><span></span></div>
+  </div>`;
+}
+const NOTES2 = {
+  now: [['问题', '每组一整块纯白卡片，铺满内容区；页面上只有「白卡片 / 底色」一种层次，组和组之间只靠一行小标题区分。'], ['不变的', '设置项、文字和控件都不动，下面三个方案只改表面和层次。']],
+  d: [['做法', '卡片换成半透明柔面，透出窗口底色；每组卡片顶上有自己的组头：彩色图标块、组名和一句说明，设置项缩进排在下面。'], ['层次', '页面头 → 组头 → 设置项，三级一眼分开；页面头带「10 项设置 · 3 项与默认不同」。'], ['取舍', '组头占一行高度，页面比现在略长。']],
+  e: [['做法', '每组左边一栏放图标块、组名、说明和「几项 · 几项已改」，右边是柔面卡片里的设置项；组之间用细线隔开。'], ['为什么推荐', '宽窗口多出来的宽度被组标题栏用掉，不再是卡片里的空白；白色只剩右侧一列柔面，层次来自左右两栏。'], ['窄窗口', '左栏收到 180；再窄时组标题回到卡片上方（同现在）。']],
+  f: [['做法', '去掉卡片，设置项直接排在窗口底色上，行之间是细线；组头是图标块加组名，后面一条细线延伸到右边。'], ['取舍', '白色最少，最接近原生 Windows 11 设置的「列表」感；但行和行的边界更弱，悬停时才显出柔面。']],
+};
+function segDemo() {
+  const col = (cls, on, extra = '') => `<div class="seg ${cls}" ${extra}><button class="${on === 0 ? 'on' : ''}">资源管理器</button><button class="${on === 1 ? 'on' : ''}">新窗口</button><button class="${on === 2 ? 'on' : ''}">标签页</button></div>`;
+  $('#segdemo').innerHTML = `<span></span><span class="h">默认</span><span class="h">悬停「标签页」</span><span class="h">按下</span><span class="h">禁用</span>
+    <span class="rl">之前<small>偏绿底槽、平板</small></span>${col('old', 1)}${col('old', 1, 'data-hover="2"')}${col('old', 1, 'data-press="2"')}${col('old dis', 1)}
+    <span class="rl">现在<small>无色调凹槽、凸起板、强调色</small></span>${col('', 1)}${col('', 1, 'data-hover="2"')}${col('', 1, 'data-press="2"')}${col('dis', 1)}`;
+  // Fixed hover/press samples for the comparison cells.
+  document.querySelectorAll('[data-hover] button:nth-child(3)').forEach(b => { b.style.background = 'var(--hover)'; b.style.color = 'var(--text)'; });
+  document.querySelectorAll('[data-press] button:nth-child(3)').forEach(b => { b.style.background = 'var(--pressed)'; b.style.color = 'var(--text)'; });
+  document.querySelectorAll('#segdemo .seg:not(.dis)').forEach(seg => seg.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    seg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+  }));
+}
+
+/* fit a fixed-size window into its stage */
+function fit(stage, inner, w, h) {
+  const scale = Math.min(1, stage.parentElement.clientWidth / w);
+  inner.style.transform = `scale(${scale})`;
+  stage.style.width = `${w * scale}px`; stage.style.height = `${h * scale}px`;
+}
+function place(el, r, base) { Object.assign(el.style, { left: `${r.left - base.left}px`, top: `${r.top - base.top}px`, width: `${r.width}px`, height: `${r.height}px` }); }
+function unscaled(el, root) {
+  const s = root.getBoundingClientRect().width / root.offsetWidth, r = el.getBoundingClientRect(), b = root.getBoundingClientRect();
+  return { left: (r.left - b.left) / s, top: (r.top - b.top) / s, width: r.width / s, height: r.height / s };
+}
+function zonesWin1() {
+  const w = $('#w1'); if (!w) return;
+  const zero = { left: 0, top: 0 };
+  const strip = S.strip === 'c' ? w.querySelector('.tools') : w.querySelector('.strip');
+  const cols = w.querySelector('.cols'), rows = w.querySelector('.rows');
+  const sr = unscaled(strip, w);
+  if (S.strip === 'c') { const sp = unscaled(w.querySelector('.tools .ttl'), w); sr.left = sp.left; sr.width = unscaled(w.querySelector('.tools .t'), w).left - sp.left - 8; }
+  else { const t = unscaled(strip.querySelector('.t'), w), vw = unscaled(strip.querySelector('.views'), w); sr.left = t.left + t.width + 8; sr.width = vw.left - sr.left - 8; }
+  place($('#zDrag'), sr, zero);
+  place($('#zSort'), unscaled(cols, w), zero);
+  const rr = unscaled(rows, w); rr.height = Math.min(rr.height, 120); place($('#zList'), rr, zero);
+  const gap = unscaled(cols, w).top - (sr.top + sr.height), ruler = $('#gapRuler');
+  Object.assign(ruler.style, { left: `${sr.left + sr.width * .5 - 70}px`, width: '140px', top: `${sr.top + sr.height + Math.max(0, gap) / 2}px` });
+  ruler.querySelector('span').textContent = gap <= 0.5 ? '两块紧贴，没有边界' : S.strip === 'a' ? `卡片边缘分开 · ${Math.round(gap)} 间隔` : `间隔 ${Math.round(gap)}`;
+}
+function rulerWin2() {
+  const w = $('#w2'); if (!w) return;
+  const rows = w.querySelectorAll('.srow'), first = rows[0];
+  const r = unscaled(first, w), t = unscaled(first.querySelector('.tx b'), w), c = unscaled(first.lastElementChild, w);
+  const span = c.left - (t.left + Math.min(t.width, 120));
+  Object.assign($('#setRuler').style, { left: `${t.left + Math.min(t.width, 120)}px`, width: `${Math.max(0, span)}px`, top: `${r.top + r.height / 2}px` });
+  $('#setRuler span').textContent = `标题到控件 ${Math.round(span)} px`;
+}
+
+function toast(text) {
+  const t = $('#toast1'); if (!t) return;
+  t.textContent = text; t.classList.add('show'); clearTimeout(S._t); S._t = setTimeout(() => t.classList.remove('show'), 1500);
+}
+function render() {
+  document.documentElement.dataset.theme = S.theme;
+  document.body.classList.toggle('zones', S.zones);
+  const sel = (id, attr, v) => document.querySelectorAll(`#${id} button`).forEach(b => b.classList.toggle('on', b.dataset[attr] === String(v)));
+  sel('themeSeg', 'theme', S.theme); sel('zoneSeg', 'zones', S.zones ? 1 : 0); sel('stripSeg', 'strip', S.strip); sel('setSeg', 'set', S.set); sel('widthSeg', 'width', S.width);
+  $('#win1').innerHTML = windowHtml(S.strip);
+  $('#win2').innerHTML = settingsHtml(S.set, +S.width);
+  $('#note1').innerHTML = NOTES1[S.strip].map(([b, t]) => `<div><b>${b}</b>${t}</div>`).join('');
+  $('#note2').innerHTML = NOTES2[S.set].map(([b, t]) => `<div><b>${b}</b>${t}</div>`).join('');
+  fit($('#stage1'), $('#win1'), 1180, 560);
+  fit($('#stage2'), $('#win2'), +S.width, 700);
+  zonesWin1(); rulerWin2();
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (b && b.dataset.theme) { S.theme = b.dataset.theme; render(); return; }
+  if (b && b.dataset.zones) { S.zones = b.dataset.zones === '1'; render(); return; }
+  if (b && b.dataset.strip) { S.strip = b.dataset.strip; render(); return; }
+  if (b && b.dataset.set) { S.set = b.dataset.set; render(); return; }
+  if (b && b.dataset.width) { S.width = b.dataset.width; render(); return; }
+  const c = e.target.closest('#w1 .cols div');
+  if (c) { const i = +c.dataset.col; S.sort = { col: i, dir: S.sort.col === i ? -S.sort.dir : 1 }; render(); toast(`按「${COLS[i]}」${S.sort.dir > 0 ? '升序' : '降序'}排列`); return; }
+  if (e.target.closest('#w1 [data-drag]') && !e.target.closest('.views, .newbtn, .ib, .t')) toast('这里拖动的是窗口');
+});
+document.addEventListener('mousemove', e => {
+  const d = e.target.closest('#w1 [data-drag]');
+  document.body.style.cursor = d && !e.target.closest('.views, .newbtn, .ib, .t, .ttl') ? 'move' : '';
+});
+window.addEventListener('resize', render);
+segDemo(); render();
+window.__S = S; window.__render = render;
+})();
+</script>
+</body>
+</html>

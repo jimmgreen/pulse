@@ -3236,11 +3236,15 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
     // Each pane is a card on the shared sheet; the frame below outlines it.
     // Over DWM material it replaces the title tint and sheet under it, so
     // its opacity is the interface transparency's whatever the sidebar's.
+    // The title strip stays on the sheet with the toolbar (it drags the window
+    // or the pane); the card starts under it, so its top edge is where the list
+    // and its column header begin (chrome_surfaces_mockup.html, A).
     const bool pane_cut = pane_alpha_ >= 0.0f;
+    const float card_top = (std::min)(pane_rect.bottom, pane_rect.top + pane_header_height_);
     MakeBrush(dc, pane_cut ? pane_color_ : WithAlpha(theme.surface_card, card_alpha_), brFillHover_);
     if (pane_cut) dc->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
-    FillRoundedRect(dc, brFillHover_.get(), pane_rect.left, pane_rect.top,
-                    pane_rect.right - pane_rect.left, pane_rect.bottom - pane_rect.top,
+    FillRoundedRect(dc, brFillHover_.get(), pane_rect.left, card_top,
+                    pane_rect.right - pane_rect.left, pane_rect.bottom - card_top,
                     theme.radius_control * scale_);
     if (pane_cut) dc->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
 
@@ -3713,10 +3717,18 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         // Match the pane's material opacity. Copy over a cut-through pane so
         // the header does not become opaque by stacking the same tint twice;
         // otherwise blend over the existing card, never making it clearer.
+        // As the card's top row (the strip above is on the sheet) it follows the card's corners.
         MakeBrush(dc, pane_cut ? pane_color_ : WithAlpha(theme.fill_input, theme.fill_input.a * card_alpha_),
                   brFillInput_);
         if (pane_cut) dc->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
-        FillRect(dc, brFillInput_.get(), x, y, w, column_header_height_);
+        const float card_radius = theme.radius_control * scale_;
+        if (std::abs(y - card_top) < 0.5f && std::abs(x - pane_rect.left) < 0.5f) {
+            dc->PushAxisAlignedClip(D2D1::RectF(x, y, x + w, y + column_header_height_), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            FillRoundedRect(dc, brFillInput_.get(), x, y, w, column_header_height_ + 2.0f * card_radius, card_radius);
+            dc->PopAxisAlignedClip();
+        } else {
+            FillRect(dc, brFillInput_.get(), x, y, w, column_header_height_);
+        }
         if (pane_cut) dc->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
         FillRect(dc, brStrokeDivider_.get(), x, y + column_header_height_ - 1, w, 1);
         const DetailsColumnLayout columns = AnimateColumns(DetailsColumns(bounds, pane), pane_index);
@@ -4007,7 +4019,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
     else if (target) frameColor = WithAlpha(theme.accent, 0.22f);
     const float strokeW = focused && IsHighContrast() ? 1.5f * scale_ : 1.0f * scale_;
     D2D1_ROUNDED_RECT frame = D2D1::RoundedRect(
-        D2D1::RectF(pane_rect.left + 0.5f * scale_, pane_rect.top + 0.5f * scale_,
+        D2D1::RectF(pane_rect.left + 0.5f * scale_, card_top + 0.5f * scale_,
                     pane_rect.right - 0.5f * scale_, pane_rect.bottom - 0.5f * scale_),
         radius, radius);
     if (split && focused && !IsHighContrast()) {

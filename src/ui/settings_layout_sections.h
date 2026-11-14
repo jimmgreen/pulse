@@ -57,10 +57,47 @@ inline bool IntegrationCoverActive(const WindowViewModel& vm,int i) {
         : i==1 ? vm.settings_integration_this_pc_active : vm.settings_integration_win_e_active);
 }
 
+// A general page section's one-line description and drawn icon (the side column).
+struct SettingsSectionInfo { l10n::StringId desc; StoreIcon icon; };
+inline SettingsSectionInfo SectionInfo(l10n::StringId title) {
+    using I = l10n::StringId;
+    switch (title) {
+    case I::SettingsSecThemeColor: return {I::SecDescThemeColor, StoreIcon::Palette};
+    case I::SettingsSecBackground: return {I::SecDescBackground, StoreIcon::Image};
+    case I::SettingsSecTextLanguage: return {I::SecDescTextLanguage, StoreIcon::Lines};
+    case I::SettingsSecOpenSelect: return {I::SecDescOpenSelect, StoreIcon::Open};
+    case I::SettingsSecVisibleItems: return {I::SecDescVisibleItems, StoreIcon::Eye};
+    case I::SettingsSecListLook: return {I::SecDescListLook, StoreIcon::ListView};
+    case I::ListMtimeHint: return {I::SecDescMtime, StoreIcon::Sort};
+    case I::SettingsSecSyncStatus: return {I::SecDescSync, StoreIcon::Refresh};
+    case I::SettingsSecTabs: return {I::SecDescTabs, StoreIcon::Tabs};
+    case I::SettingsSecOpenLocation: return {I::SecDescOpenLocation, StoreIcon::Folder};
+    case I::SettingsSecOpenWindows: return {I::SecDescOpenWindows, StoreIcon::Panes};
+    case I::SettingsSecArrangeWindows: return {I::SecDescArrange, StoreIcon::Sidebar};
+    case I::SettingsIntegration: return {I::SecDescIntegration, StoreIcon::Pc};
+    case I::StartupDialogsTitle: return {I::SecDescDialogs, StoreIcon::OpenWith};
+    case I::SettingsSecStartupTray: return {I::SecDescStartupTray, StoreIcon::Power};
+    case I::SettingsSecExplorer: return {I::SecDescExplorer, StoreIcon::Path};
+    case I::StartupRestoreSection: return {I::SecDescRestore, StoreIcon::Undo};
+    case I::SettingsSecDelete: return {I::SecDescDelete, StoreIcon::Trash};
+    case I::SettingsSecStaging: return {I::SecDescStaging, StoreIcon::Box};
+    case I::SettingsSecChanges: return {I::SecDescChanges, StoreIcon::Lines};
+    case I::SidebarNetworkLocations: return {I::SecDescNetwork, StoreIcon::Disk};
+    default: return {I::SecDescThemeColor, StoreIcon::None};
+    }
+}
+inline constexpr float kSectionSideMinPage = 900.0f;  // DIP of page width that earns the side column
+
 float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float scale,
                             float y, const fluent::Painter* painter) {
     using I = l10n::StringId;
-    const float left = l.content.left + 20*scale, right = l.content.right - 20*scale;
+    // Wide pages: the section titles take a column of their own and the cards
+    // sit right of it, so the extra width is structure instead of empty card.
+    const float page_left = l.content.left + 20*scale, right = l.content.right - 20*scale;
+    const bool side = right - page_left >= kSectionSideMinPage*scale;
+    const float side_w = side ? (right - page_left >= 1120*scale ? 220.0f : 184.0f)*scale : 0.0f;
+    const float left = side ? page_left + side_w + 28*scale : page_left;
+    l.section_side = side;
     const bool narrow = right - left < 560*scale;
     const float seg_h = narrow ? 98.0f : 64.0f;
     const float child_inset = 28.0f*scale;
@@ -77,11 +114,33 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
     auto end_group = [&]() {
         close_band();
         if (group_index >= 0 && group_has_row) l.group[group_index] = D2D1::RectF(left, group_top, right, y);
+        if (side && group_index >= 0) {
+            // The column block: tile, title, description; the group is at least as tall.
+            const float top = l.section[group_index].top;
+            const auto desc = l10n::Get(SectionInfo(l.section_title[group_index]).desc);
+            const float desc_h = painter ? painter->MeasureWrappedCaptionHeight(desc, side_w) : 40*scale;
+            l.section_tile[group_index] = D2D1::RectF(page_left, top + 4*scale, page_left + 32*scale, top + 36*scale);
+            l.section_name[group_index] = D2D1::RectF(page_left, top + 44*scale, page_left + side_w, top + 68*scale);
+            l.section_desc[group_index] = D2D1::RectF(page_left, top + 70*scale, page_left + side_w, top + 70*scale + desc_h);
+            // A group laid out by hand (the integration card) only reaches its own height.
+            if (group_has_row) y = (std::max)(y, l.section_desc[group_index].bottom + 22*scale);
+            l.section[group_index] = D2D1::RectF(page_left, top, page_left + side_w, (std::max)(y, l.section_desc[group_index].bottom));
+        }
         group_has_row = false;
     };
     auto section = [&](I title) {
         end_group();
         if (l.section_count >= 8) return;
+        if (side) {
+            // A rule between groups; the title column and the card start on one line.
+            if (l.section_count) { y += 18*scale; l.section_rule[l.section_count] = y; y += 18*scale; }
+            else y += 26*scale;
+            group_index = l.section_count++;
+            l.section_title[group_index] = title;
+            l.section[group_index] = D2D1::RectF(page_left, y, page_left + side_w, y + 30*scale);
+            group_top = y;
+            return;
+        }
         y += (l.section_count == 0 ? 22.0f : 26.0f)*scale;
         group_index = l.section_count++;
         l.section_title[group_index] = title;
@@ -95,6 +154,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
             else if (!child) { close_band(); l.dividers.push_back(D2D1::RectF(left + 16*scale, y, right - 16*scale, y)); }
         }
         if (child && band_top < 0.0f) band_top = y;
+        if (!child && group_index >= 0) ++l.section_rows[group_index];
         group_has_row = true; previous_child = child;
         auto r = D2D1::RectF(child ? left + child_inset : left, y, right, y + h*scale);
         y = r.bottom;
@@ -289,12 +349,13 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         auto wrap_height = [&](std::wstring_view value, float width) {
             return painter ? painter->MeasureWrappedCaptionHeight(value,(std::max)(40*scale,width))/scale : 64.0f;
         };
-        const float lead_h=wrap_height(l10n::Get(I::StartupIntegrationLead),right-left);
-        l.startup_lead=D2D1::RectF(left,y+12*scale,right,y+(24+lead_h)*scale);y=l.startup_lead.bottom+12*scale;
-        const bool overview_stack=right-left<680*scale;
-        const float overview_w=overview_stack ? right-left : (right-left-20*scale)/3;
+        // The lead and the three overview tiles describe the whole page: full width, also beside a side column.
+        const float lead_h=wrap_height(l10n::Get(I::StartupIntegrationLead),right-page_left);
+        l.startup_lead=D2D1::RectF(page_left,y+12*scale,right,y+(24+lead_h)*scale);y=l.startup_lead.bottom+12*scale;
+        const bool overview_stack=right-page_left<680*scale;
+        const float overview_w=overview_stack ? right-page_left : (right-page_left-20*scale)/3;
         for(int i=0;i<3;++i) {
-            const float x=left+(overview_stack ? 0 : i*(overview_w+10*scale));
+            const float x=page_left+(overview_stack ? 0 : i*(overview_w+10*scale));
             const float top=y+(overview_stack ? i*82*scale : 0);
             l.startup_overview[i]=D2D1::RectF(x,top,x+overview_w,top+72*scale);
         }

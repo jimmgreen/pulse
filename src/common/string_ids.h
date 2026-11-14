@@ -5517,5 +5517,26 @@
 #define IDS_SZ_TAKE_OFF_HINT                                                             6854
 #define IDS_SZ_TAKE_SUMMARY_ASK                                                          6855
 #define IDS_SZ_TAKE_SUMMARY_DONE                                                         6856
+#define IDS_SEC_DESC_THEME_COLOR                                                         6857
+#define IDS_SEC_DESC_BACKGROUND                                                          6858
+#define IDS_SEC_DESC_TEXT_LANGUAGE                                                       6859
+#define IDS_SEC_DESC_OPEN_SELECT                                                         6860
+#define IDS_SEC_DESC_VISIBLE_ITEMS                                                       6861
+#define IDS_SEC_DESC_LIST_LOOK                                                           6862
+#define IDS_SEC_DESC_MTIME                                                               6863
+#define IDS_SEC_DESC_SYNC                                                                6864
+#define IDS_SEC_DESC_TABS                                                                6865
+#define IDS_SEC_DESC_OPEN_LOCATION                                                       6866
+#define IDS_SEC_DESC_OPEN_WINDOWS                                                        6867
+#define IDS_SEC_DESC_ARRANGE                                                             6868
+#define IDS_SEC_DESC_INTEGRATION                                                         6869
+#define IDS_SEC_DESC_DIALOGS                                                             6870
+#define IDS_SEC_DESC_STARTUP_TRAY                                                        6871
+#define IDS_SEC_DESC_EXPLORER                                                            6872
+#define IDS_SEC_DESC_RESTORE                                                             6873
+#define IDS_SEC_DESC_DELETE                                                              6874
+#define IDS_SEC_DESC_STAGING                                                             6875
+#define IDS_SEC_DESC_CHANGES                                                             6876
+#define IDS_SEC_DESC_NETWORK                                                             6877
 
 #endif  // PULSE_STRING_IDS_H

@@ -2512,13 +2512,67 @@ void Painter::DrawSplitButton(const SplitButtonSpec& spec) {
 
 void Painter::DrawSegmentedTrack(const D2D1_RECT_F& bounds) {
     if (!theme_ || !dc_) return;
-    auto fill = high_contrast_ ? theme_->bg : dark_ ? HexColor(0x2B2B2B) : HexColor(0xEDF1EA);
-    FillRoundedRect(bounds, Px(8.0f), fill);
-    StrokeRoundedRect(bounds, Px(8.0f), theme_->stroke_divider);
+    if (high_contrast_) {
+        FillRoundedRect(bounds, Px(8.0f), theme_->bg);
+        StrokeRoundedRect(bounds, Px(8.0f), theme_->stroke_card);
+        return;
+    }
+    // A neutral recess that takes on whatever is under it (card, Mica, acrylic):
+    // no tint of its own, so it never reads as a coloured box.
+    FillRoundedRect(bounds, Px(8.0f), dark_ ? Rgba(0xFFFFFF, 15) : Rgba(0x000000, 12));
+    StrokeRoundedRect(bounds, Px(8.0f), dark_ ? Rgba(0xFFFFFF, 10) : Rgba(0x000000, 8));
+}
+
+// One segment on a shared track (DrawSegmentedTrack): the chosen one is a raised
+// plate with a hairline edge and a soft shadow, its label in the accent and semibold;
+// the others are plain labels that darken and get a faint wash on hover.
+void Painter::DrawTrackSegment(const SegmentedItemSpec& spec) {
+    const bool selected = spec.state.selected || spec.state.checked;
+    const bool enabled = spec.state.enabled;
+    const float radius = Px(6.0f);
+    const auto plate = Inset(spec.bounds, Px(3.0f));
+    if (!spec.suppress_plate) {
+        if (selected) {
+            const float a = enabled ? 1.0f : 0.5f;
+            if (enabled) {
+                FillRoundedRect(D2D1::RectF(plate.left, plate.top + Px(1.0f), plate.right, plate.bottom + Px(1.0f)),
+                                radius, Rgba(0x000000, dark_ ? 70 : 14));
+            }
+            auto fill = dark_ ? Rgba(0xFFFFFF, 30) : HexColor(0xFFFFFF);
+            fill.a *= a;
+            FillRoundedRect(plate, radius, fill);
+            auto edge = dark_ ? Rgba(0xFFFFFF, 18) : Rgba(0x000000, 18);
+            edge.a *= a;
+            StrokeRoundedRect(plate, radius, edge);
+        } else if (enabled && (spec.state.hovered || spec.state.pressed)) {
+            const int alpha = spec.state.pressed ? 16 : 9;
+            FillRoundedRect(plate, radius, dark_ ? Rgba(0xFFFFFF, alpha) : Rgba(0x000000, alpha));
+        }
+    }
+    // The chosen label keeps the accent (lifted on dark so it stays readable on the plate).
+    const auto accent = dark_ ? MixColor(theme_->accent, HexColor(0xFFFFFF), 0.3f) : theme_->accent;
+    const D2D1_COLOR_F foreground = !enabled ? theme_->text_disabled
+        : selected ? accent : spec.state.hovered || spec.state.pressed ? theme_->text : theme_->text_secondary;
+    auto content = Inset(spec.bounds, Px(6.0f));
+    if (!spec.glyph.empty()) {
+        const float icon_width = spec.text.empty() ? Width(content) : Px(16.0f);
+        const float total = spec.text.empty() ? icon_width : Width(content);
+        DrawGlyph(spec.glyph, D2D1::RectF(content.left, content.top, content.left + icon_width, content.bottom), foreground);
+        content.left += spec.text.empty() ? total : icon_width + Px(6.0f);
+    }
+    if (!spec.text.empty()) {
+        DrawText(spec.text, content, selected && enabled ? SectionFormat() : NavFormat(), foreground,
+                 spec.glyph.empty() ? HorizontalAlignment::Center : HorizontalAlignment::Left);
+    }
+    if (spec.state.keyboard_focus) DrawFocusRing(spec.bounds, Px(8.0f));
 }
 
 void Painter::DrawSegmentedItem(const SegmentedItemSpec& spec) {
     if (!theme_ || !dc_ || Width(spec.bounds) <= 0.0f || Height(spec.bounds) <= 0.0f) {
+        return;
+    }
+    if (spec.shared_track && !high_contrast_) {
+        DrawTrackSegment(spec);
         return;
     }
     const float radius = !spec.shared_track && spec.position == SegmentPosition::Middle
