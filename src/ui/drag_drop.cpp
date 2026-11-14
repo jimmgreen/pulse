@@ -7,10 +7,12 @@
 #include <shobjidl.h>
 #include <shlguid.h>
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <cwctype>
 #include <mutex>
+#include <string_view>
 #include <vector>
 
 namespace pulse::ui {
@@ -239,6 +241,64 @@ bool ExtractHDropPaths(IDataObject* obj, std::vector<std::wstring>& out) {
     }
     ReleaseStgMedium(&medium);
     return !out.empty();
+}
+
+bool ExtractVirtualFileNames(IDataObject* obj, std::vector<std::wstring>& out) {
+    out.clear();
+    if (!obj) return false;
+
+    const CLIPFORMAT descriptor_format =
+        static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_FILEDESCRIPTORW));
+    const CLIPFORMAT contents_format =
+        static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_FILECONTENTS));
+    if (!descriptor_format || !contents_format) return false;
+
+    FORMATETC descriptor_fmt{ descriptor_format, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+    STGMEDIUM descriptor_medium{};
+    if (FAILED(obj->GetData(&descriptor_fmt, &descriptor_medium)) || !descriptor_medium.hGlobal)
+        return false;
+
+    bool valid = false;
+    const SIZE_T bytes = GlobalSize(descriptor_medium.hGlobal);
+    const SIZE_T header_size = offsetof(FILEGROUPDESCRIPTORW, fgd);
+    auto* group = static_cast<const FILEGROUPDESCRIPTORW*>(GlobalLock(descriptor_medium.hGlobal));
+    if (group && bytes >= header_size) {
+        const SIZE_T count = group->cItems;
+        const SIZE_T available = (bytes - header_size) / sizeof(FILEDESCRIPTORW);
+        if (count > 0 && count <= available && count <= 4096) {
+            std::vector<std::wstring> names;
+            names.reserve(count);
+            valid = true;
+            for (SIZE_T i = 0; i < count; ++i) {
+                const wchar_t* raw_name = group->fgd[i].cFileName;
+                const size_t length = wcsnlen_s(raw_name, MAX_PATH);
+                if (length == 0 || length == MAX_PATH) {
+                    valid = false;
+                    break;
+                }
+                const std::wstring_view view(raw_name, length);
+                const size_t separator = view.find_last_of(L"\\/:");
+                std::wstring name(view.substr(separator == std::wstring_view::npos ? 0 : separator + 1));
+                if (name.empty() || name == L"." || name == L"..") {
+                    valid = false;
+                    break;
+                }
+
+                FORMATETC contents_fmt{ contents_format, nullptr, DVASPECT_CONTENT,
+                                        static_cast<LONG>(i),
+                                        TYMED_HGLOBAL | TYMED_ISTREAM | TYMED_ISTORAGE };
+                if (FAILED(obj->QueryGetData(&contents_fmt))) {
+                    valid = false;
+                    break;
+                }
+                names.push_back(std::move(name));
+            }
+            if (valid) out = std::move(names);
+        }
+    }
+    if (group) GlobalUnlock(descriptor_medium.hGlobal);
+    ReleaseStgMedium(&descriptor_medium);
+    return valid && !out.empty();
 }
 
 bool IsShellItemId(const std::wstring& path) {
@@ -754,8 +814,13 @@ void WindowDropTarget::TickScroll() {
     POINT point{};
     if (!GetCursorPos(&point) || WindowFromPoint(point) != hwnd_) return;
     ScreenToClient(hwnd_, &point);
-    if (cb_.drag_scroll(point) && cb_.drag_over)
-        cb_.drag_over(sources_, point, keys_, allowed_, preferred_);
+    if (cb_.drag_scroll(point)) {
+        if (virtual_files_) {
+            if (cb_.virtual_drag_over) cb_.virtual_drag_over(sources_, point, keys_, allowed_);
+        } else if (cb_.drag_over) {
+            cb_.drag_over(sources_, point, keys_, allowed_, preferred_);
+        }
+    }
 }
 
 HRESULT WindowDropTarget::QueryInterface(REFIID riid, void** out) {
@@ -786,8 +851,12 @@ HRESULT WindowDropTarget::DragEnter(IDataObject* obj, DWORD key_state, POINTL pt
     if (!effect) return E_POINTER;
     StopScroll();
     sources_.clear();
+    virtual_files_ = false;
     preferred_ = 0;
     if (!ExtractHDropPaths(obj, sources_) && !ExtractShellItemIds(obj, sources_)) {
+        virtual_files_ = ExtractVirtualFileNames(obj, sources_);
+    }
+    if (sources_.empty()) {
         *effect = DROPEFFECT_NONE;
         return S_OK;
     }
@@ -797,8 +866,13 @@ HRESULT WindowDropTarget::DragEnter(IDataObject* obj, DWORD key_state, POINTL pt
     keys_ = key_state;
     if (hwnd_ && allowed && cb_.drag_scroll && !scrolling_)
         scrolling_ = SetTimer(hwnd_, kScrollTimer, 50, nullptr) != 0;
-    *effect = allowed && cb_.drag_over ? cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed, preferred_) & allowed
-                            : DROPEFFECT_NONE;
+    if (allowed && virtual_files_ && cb_.virtual_drag_over) {
+        *effect = cb_.virtual_drag_over(sources_, ClientPoint(pt), key_state, allowed) & allowed;
+    } else if (allowed && !virtual_files_ && cb_.drag_over) {
+        *effect = cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed, preferred_) & allowed;
+    } else {
+        *effect = DROPEFFECT_NONE;
+    }
     return S_OK;
 }
 
@@ -814,14 +888,20 @@ HRESULT WindowDropTarget::DragOver(DWORD key_state, POINTL pt, DWORD* effect) {
     if (!allowed) StopScroll();
     else if (hwnd_ && cb_.drag_scroll && !scrolling_)
         scrolling_ = SetTimer(hwnd_, kScrollTimer, 50, nullptr) != 0;
-    *effect = allowed && cb_.drag_over ? cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed, preferred_) & allowed
-                            : DROPEFFECT_NONE;
+    if (allowed && virtual_files_ && cb_.virtual_drag_over) {
+        *effect = cb_.virtual_drag_over(sources_, ClientPoint(pt), key_state, allowed) & allowed;
+    } else if (allowed && !virtual_files_ && cb_.drag_over) {
+        *effect = cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed, preferred_) & allowed;
+    } else {
+        *effect = DROPEFFECT_NONE;
+    }
     return S_OK;
 }
 
 HRESULT WindowDropTarget::DragLeave() {
     StopScroll();
     sources_.clear();
+    virtual_files_ = false;
     preferred_ = 0;
     if (cb_.drag_leave) cb_.drag_leave();
     return S_OK;
@@ -832,7 +912,10 @@ HRESULT WindowDropTarget::Drop(IDataObject* obj, DWORD key_state, POINTL pt, DWO
     if (!effect) return E_POINTER;
     const DWORD allowed = *effect & (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK);
     std::vector<std::wstring> sources;
-    if (!allowed || (!ExtractHDropPaths(obj, sources) && !ExtractShellItemIds(obj, sources))) {
+    bool virtual_files = false;
+    if (!ExtractHDropPaths(obj, sources) && !ExtractShellItemIds(obj, sources))
+        virtual_files = ExtractVirtualFileNames(obj, sources);
+    if (!allowed || sources.empty()) {
         *effect = DROPEFFECT_NONE;
         DragLeave();
         return S_OK;
@@ -840,8 +923,11 @@ HRESULT WindowDropTarget::Drop(IDataObject* obj, DWORD key_state, POINTL pt, DWO
     // Read the preference from the dropped object itself rather than the
     // DragEnter cache: Drop is the call that decides whether originals move.
     const DWORD preferred = PreferredDropEffect(obj);
-    DWORD performed = cb_.drop ? cb_.drop(sources, ClientPoint(pt), key_state, allowed, preferred) & allowed
-                               : DROPEFFECT_NONE;
+    DWORD performed = virtual_files
+        ? (cb_.virtual_drop ? cb_.virtual_drop(sources, obj, ClientPoint(pt), key_state, allowed) & allowed
+                            : DROPEFFECT_NONE)
+        : (cb_.drop ? cb_.drop(sources, ClientPoint(pt), key_state, allowed, preferred) & allowed
+                    : DROPEFFECT_NONE);
     // Pulse never leaves deleting to the source: a move is queued as an ops
     // Move that removes the originals only after their copy landed. So a move
     // is reported as an optimized move (pdwEffect and Performed DropEffect
@@ -853,6 +939,7 @@ HRESULT WindowDropTarget::Drop(IDataObject* obj, DWORD key_state, POINTL pt, DWO
     WriteDwordFormat(obj, (CLIPFORMAT)PerformedEffectFormat(), reported);
     WriteDwordFormat(obj, (CLIPFORMAT)LogicalPerformedEffectFormat(), performed);
     sources_.clear();
+    virtual_files_ = false;
     return S_OK;
 }
 

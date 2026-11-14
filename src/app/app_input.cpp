@@ -1157,6 +1157,33 @@ DWORD DropExecute(AppState& s, const std::vector<std::wstring>& sources,
     return effect;
 }
 
+DWORD ResolveVirtualFileDropTarget(AppState& s, const std::vector<std::wstring>& names,
+                                   POINT pt, DWORD key_state, DWORD allowed) {
+    allowed &= DROPEFFECT_COPY;
+    if (names.empty() || !allowed) return RejectDropTarget(s);
+
+    const DWORD effect = ResolveDropTarget(s, names, pt, key_state, allowed, DROPEFFECT_COPY);
+    const bool filesystem_folder = !s.dropDestDir.empty() && !s.dropTray &&
+        !s.dropQuickAccess && !s.dropFavoriteAdd && FavoritesBarDropGroup().empty() &&
+        !s.dropHeader && s.dropLaunchProgram.empty() && s.dropToolbarApp < 0 &&
+        !s.dropToolbarPin && !fs::IsVirtualPath(s.dropDestDir);
+    if (effect != DROPEFFECT_COPY || !filesystem_folder) return RejectDropTarget(s);
+    return DROPEFFECT_COPY;
+}
+
+DWORD DropVirtualFiles(AppState& s, const std::vector<std::wstring>& names,
+                       IDataObject* data, POINT pt, DWORD key_state, DWORD allowed) {
+    if (ResolveVirtualFileDropTarget(s, names, pt, key_state, allowed) != DROPEFFECT_COPY || !data)
+        return DROPEFFECT_NONE;
+
+    const std::wstring destination = s.dropDestDir;
+    ClearDropFeedback(s);
+    s.springEntered = false;
+    if (!ops::DropShellDataObject(destination, data, DROPEFFECT_COPY)) return DROPEFFECT_NONE;
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+    return DROPEFFECT_COPY;
+}
+
 // Starts the modal OLE drag-out for the selected entries.
 void StartDragOut(AppState& s) {
     if(DeferContentSelection(s,[](AppState& v){if(GetKeyState(VK_LBUTTON)&0x8000) StartDragOut(v);})) return;

@@ -58,6 +58,9 @@ std::wstring DropLaunchArguments(const std::vector<std::wstring>& sources);
 // IDataObject inspection (drop-in side).
 // ---------------------------------------------------------------------------
 bool ExtractHDropPaths(IDataObject* obj, std::vector<std::wstring>& out);
+// Virtual files exposed through CFSTR_FILEDESCRIPTORW/CFSTR_FILECONTENTS.
+// Names are display names; contents remain owned by the original IDataObject.
+bool ExtractVirtualFileNames(IDataObject* obj, std::vector<std::wstring>& out);
 // Items with no filesystem path (a phone's files): their "::{CLSID}\..."
 // parsing names, only when every item is one. False for anything else.
 bool ExtractShellItemIds(IDataObject* obj, std::vector<std::wstring>& out);
@@ -188,12 +191,17 @@ struct DropTargetCallbacks {
     // absent), so the badge matches what the drop will actually do.
     std::function<DWORD(const std::vector<std::wstring>& sources, POINT pt,
                         DWORD key_state, DWORD allowed, DWORD preferred)> drag_over;
+    // Virtual files keep their original IDataObject for Shell streaming on drop.
+    std::function<DWORD(const std::vector<std::wstring>& names, POINT pt,
+                        DWORD key_state, DWORD allowed)> virtual_drag_over;
     // Timer-driven scrolling; true asks the target to refresh its row hit test.
     std::function<bool(POINT)> drag_scroll;
     std::function<void()> drag_leave;
     // Same arguments as drag_over. Returns one allowed performed effect, or NONE.
     std::function<DWORD(const std::vector<std::wstring>& sources, POINT pt,
                         DWORD key_state, DWORD allowed, DWORD preferred)> drop;
+    std::function<DWORD(const std::vector<std::wstring>& names, IDataObject* data,
+                        POINT pt, DWORD key_state, DWORD allowed)> virtual_drop;
 };
 
 class WindowDropTarget final : public IDropTarget {
@@ -217,6 +225,7 @@ private:
     DWORD allowed_ = 0;
     DWORD keys_ = 0;
     bool scrolling_ = false;
+    bool virtual_files_ = false;
 
     LONG ref_ = 1;
     HWND hwnd_ = nullptr;

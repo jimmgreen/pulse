@@ -1931,6 +1931,12 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 return st ? ResolveDropTarget(*st, srcs, pt, keys, allowed, preferred)
                           : DROPEFFECT_NONE;
             };
+            dcb.virtual_drag_over = [hwnd](const std::vector<std::wstring>& names, POINT pt,
+                                           DWORD keys, DWORD allowed) -> DWORD {
+                AppState* st = GetAppState(hwnd);
+                return st ? ResolveVirtualFileDropTarget(*st, names, pt, keys, allowed)
+                          : DROPEFFECT_NONE;
+            };
             dcb.drag_scroll = [hwnd](POINT pt) {
                 AppState* st = GetAppState(hwnd);
                 return st && TickDropEdgeScroll(*st, pt);
@@ -1942,6 +1948,12 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                               DWORD keys, DWORD allowed, DWORD preferred) -> DWORD {
                 AppState* st = GetAppState(hwnd);
                 return st ? DropExecute(*st, srcs, pt, keys, allowed, preferred)
+                          : DROPEFFECT_NONE;
+            };
+            dcb.virtual_drop = [hwnd](const std::vector<std::wstring>& names, IDataObject* data,
+                                      POINT pt, DWORD keys, DWORD allowed) -> DWORD {
+                AppState* st = GetAppState(hwnd);
+                return st ? DropVirtualFiles(*st, names, data, pt, keys, allowed)
                           : DROPEFFECT_NONE;
             };
             s->dropTarget = new ui::WindowDropTarget(hwnd, std::move(dcb));
