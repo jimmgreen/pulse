@@ -2494,8 +2494,21 @@ static void ApplyDirNotifiesToWindow(AppState& s, const std::vector<AppState::Di
             else structural.push_back(event);
         }
     }
-    for (const auto& [folder, names] : modified_by_path)
+    for (const auto& [folder, names] : modified_by_path) {
+        if (WindowShowsFolder(s, folder)) {
+            for (const auto& name : names) {
+                std::wstring file = folder;
+                if (!file.empty() && file.back() != L'\\' && file.back() != L'/') file.push_back(L'\\');
+                file += name;
+                auto& caches = s.core.render_caches;
+                caches.thumbnails.InvalidatePath(file);
+                caches.folder_thumbnails.InvalidatePath(file);
+                caches.details.InvalidatePath(file);
+                caches.hover.InvalidatePath(file);
+            }
+        }
         QueueSizePatches(s, folder, names, now + 100);
+    }
     for (const auto& [folder, events] : structural_by_path) {
         if (events.empty() || !WindowShowsFolder(s, folder)) continue;
         shown.push_back(folder);
@@ -2526,6 +2539,16 @@ static void ApplyDirNotifiesToWindow(AppState& s, const std::vector<AppState::Di
         due_by_path[group].second.push_back(std::move(event));
     }
     for (const auto& [patch_path, events] : due_by_path) {
+        auto& caches = s.core.render_caches;
+        for (const auto& event : events) {
+            std::wstring file = patch_path;
+            if (!file.empty() && file.back() != L'\\' && file.back() != L'/') file.push_back(L'\\');
+            file += event.name;
+            caches.thumbnails.InvalidatePath(file);
+            caches.folder_thumbnails.InvalidatePath(file);
+            caches.details.InvalidatePath(file);
+            caches.hover.InvalidatePath(file);
+        }
         if (!ApplyNotifiesToVisible(s, patch_path, events)) {
             s.store.MarkDirty(patch_path);
             RefreshPath(s, patch_path);

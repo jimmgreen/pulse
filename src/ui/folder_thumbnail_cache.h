@@ -20,6 +20,7 @@ public:
     void RemoveNotifyWindow(HWND hwnd) { cache_.RemoveNotifyWindow(hwnd); }
     void Reset();
     void Refresh();
+    void InvalidatePath(const std::wstring& path) { cache_.InvalidatePath(path); }
     void BeginFrame();
     void ShareUploadBudget(ThumbnailCache& other) { cache_.ShareUploadBudget(other); }
     bool TakeUploadFrameRequest() {

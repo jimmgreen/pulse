@@ -190,6 +190,33 @@ struct ThumbnailCacheTestAccess {
         cache.StoreResult(req, std::move(good));
         check(!cache.items_.at(req.key).failed && !cache.transient_failures_.contains(req.key),
             "completed image replaces failure and clears retry history");
+        ThumbnailCache::Request older = req;
+        older.id = 1;
+        req.id = 2;
+        ThumbnailCache::Item newest; newest.kind = ipc::PreviewContentKind::Bitmap;
+        newest.w = newest.h = 2; newest.stride = 8; newest.pixels.assign(16, 255); newest.cost = 16;
+        cache.pending_.insert(req.key); cache.pending_ids_[req.key] = req.id;
+        cache.StoreResult(req, std::move(newest));
+        ThumbnailCache::Item late_failure; late_failure.failed = true;
+        check(!cache.StoreResult(older, std::move(late_failure)) &&
+            !cache.items_.at(req.key).failed && cache.items_.at(req.key).pixels.size() == 16,
+            "late same-key failure cannot replace a newer successful bitmap");
+        const auto old_item = cache.Key(req.path, 64, 20, 100);
+        ThumbnailCache::Request obsolete = req;
+        obsolete.path = req.path; obsolete.key = old_item; obsolete.path_epoch = 0;
+        ThumbnailCache::Item obsolete_bitmap; obsolete_bitmap.kind = ipc::PreviewContentKind::Bitmap;
+        obsolete_bitmap.pixels.assign(4, 255); obsolete_bitmap.cost = 4;
+        cache.StoreResult(obsolete, std::move(obsolete_bitmap));
+        cache.InvalidatePath(req.path);
+        ThumbnailCache::Item stale_decode; stale_decode.failed = true;
+        check(!cache.StoreResult(obsolete, std::move(stale_decode)) && !cache.items_.contains(old_item),
+            "path invalidation expires every key variant and rejects an in-flight old decode");
+        const auto unaffected = cache.Key(L"other.png", 64, 20, 100);
+        ThumbnailCache::Request other = req; other.path = L"other.png"; other.key = unaffected;
+        ThumbnailCache::Item other_bitmap; other_bitmap.kind = ipc::PreviewContentKind::Bitmap;
+        other_bitmap.pixels.assign(4, 255); other_bitmap.cost = 4;
+        cache.StoreResult(other, std::move(other_bitmap));
+        check(cache.items_.contains(unaffected), "path invalidation leaves unrelated file entries intact");
         cache.Evict(); cache.pending_.insert(req.key);
         ThumbnailCache::Item old; old.failed = true;
         check(!cache.StoreResult(req, std::move(old)) && cache.pending_.contains(req.key),

@@ -34,7 +34,7 @@ void FolderThumbnailCache::Reset() { visible_.clear(); cache_.Reset(); }
 void FolderThumbnailCache::Refresh() {
     std::lock_guard lock(cache_.mutex_);
     cache_.epoch_.fetch_add(1, std::memory_order_relaxed);
-    cache_.queue_.clear(); cache_.pending_.clear(); cache_.folder_requests_.clear();
+    cache_.queue_.clear(); cache_.pending_.clear(); cache_.pending_ids_.clear(); cache_.folder_requests_.clear();
     cache_.transient_failures_.clear();
     for (auto& [key, item] : cache_.items_) {
         item.retry_at = 0; item.folder_refresh_complete = false;
@@ -144,16 +144,20 @@ PreviewDrawResult FolderThumbnailCache::Draw(ID2D1DeviceContext* dc,
         request.path = path; request.key = key; request.identity = identity;
         request.modified = modified; request.size = size;
         request.epoch = cache_.epoch_.load(std::memory_order_relaxed);
+        std::wstring folded_path(path);
+        for (auto& ch : folded_path) ch = ch == L'/' ? L'\\' : static_cast<wchar_t>(towlower(ch));
+        request.path_epoch = cache_.path_epochs_[folded_path];
         request.timeout_ms = 1500;
         request.flags = ipc::kPreviewRequestFlagFolderThumbnail;
         if (single) request.flags |= ipc::kPreviewRequestFlagFolderSingle;
         if (visible->second.force) request.flags |= ipc::kPreviewRequestFlagFolderRefresh;
         cache_.folder_requests_[key] = request.id;
         cache_.pending_.insert(key);
+        cache_.pending_ids_[key] = request.id;
         cache_.queue_.push_back(std::move(request));
         if (cache_.queue_.size() > ThumbnailCache::kDefaultMaxItems) {
             const auto dropped = cache_.queue_.front().key;
-            cache_.pending_.erase(dropped); cache_.folder_requests_.erase(dropped);
+            cache_.pending_.erase(dropped); cache_.pending_ids_.erase(dropped); cache_.folder_requests_.erase(dropped);
             cache_.queue_.pop_front();
         }
         if (!cache_.running_.exchange(true)) cache_.worker_ = std::thread([this] { cache_.Worker(); });
