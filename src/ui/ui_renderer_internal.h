@@ -2832,6 +2832,7 @@ struct SettingsLayout {
     D2D1_RECT_F vertical_tabs_row{};
     D2D1_RECT_F tray_hide_row{};
     D2D1_RECT_F lan_discovery_row{}, network_recent_row{}, hidden_shares_row{};
+    D2D1_RECT_F recent_items_row{};
     D2D1_RECT_F lan_cache_card{}, lan_cache_row[3]{};
     D2D1_RECT_F network_clear_row{}, network_clear_button{};
     D2D1_RECT_F hints_row{};

@@ -2900,6 +2900,8 @@ enum class StringId : UINT {
     SettingsLanDiscoveryDesc = IDS_SETTINGS_LAN_DISCOVERY_DESC,
     SettingsNetworkRecent = IDS_SETTINGS_NETWORK_RECENT,
     SettingsNetworkRecentDesc = IDS_SETTINGS_NETWORK_RECENT_DESC,
+    SettingsRecentItems = IDS_SETTINGS_RECENT_ITEMS,
+    SettingsRecentItemsDesc = IDS_SETTINGS_RECENT_ITEMS_DESC,
     SettingsHiddenSharesDesc = IDS_SETTINGS_HIDDEN_SHARES_DESC,
     SettingsLanCache = IDS_SETTINGS_LAN_CACHE,
     SettingsLanCacheDesc = IDS_SETTINGS_LAN_CACHE_DESC,

@@ -93,6 +93,7 @@ struct AppPrefs {
     // 网络位置 (Settings → 文件操作): machine-local, not in settings export.
     bool lan_discovery = true;           // look for LAN devices when the network page opens
     bool network_recent_enabled = true;  // remember and list 最近访问
+    bool recent_items_enabled = true;    // record opened files and visited folders
     bool show_hidden_shares = false;     // list C$ / ADMIN$ in a server's shares
     int lan_cache_mode = 0;              // keep found devices: 0 10 min, 1 1 h, 2 this session
     bool sidebar_collapsed = false;   // sidebar folded to its icon rail (Ctrl+B)

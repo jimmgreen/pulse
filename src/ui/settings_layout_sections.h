@@ -483,6 +483,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         section(I::SettingsSecChanges);
         l.change_tracking_row=row(64);
         l.change_days_row=row(seg_h,true); fitted_segments(l.change_days_row,l.change_days,{I::ChangeToday,I::ChangeLast3Days,I::ChangeLast7Days});
+        l.recent_items_row=row(64);
 
         section(I::SidebarNetworkLocations);
         l.lan_discovery_row=row(64);

@@ -552,6 +552,7 @@ void RememberPath(AppState& s, const std::wstring& path) {
 
 void RecordRecentOpen(AppState& s, const std::wstring& path,
                              app::PlaceItemKind kind) {
+    if (!s.appPrefs.recent_items_enabled) return;
     s.places.RecordRecent(path, kind);
 }
 // Drag spring-loading: how far the 800 ms rest on the folder row under the
@@ -2856,6 +2857,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_tray_hide_empty = s.appPrefs.tray_hide_when_empty;
     vm.settings_lan_discovery = s.appPrefs.lan_discovery;
     vm.settings_network_recent = s.appPrefs.network_recent_enabled;
+    vm.settings_recent_items_enabled = s.appPrefs.recent_items_enabled;
     vm.settings_hidden_shares = s.appPrefs.show_hidden_shares;
     vm.settings_lan_cache_mode = s.appPrefs.lan_cache_mode;
     vm.settings_show_hints = s.appPrefs.show_hints;

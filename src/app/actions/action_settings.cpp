@@ -138,6 +138,7 @@ const SetDef kSettingDefs[] = {
      {{{"today", I::ChangeToday, 1}, {"3", I::ChangeLast3Days, 3}, {"7", I::ChangeLast7Days, 7}}}},
     SET_SW("lan_discovery", SettingsLanDiscovery, 12, 0, 40, lan_discovery),
     SET_SW("network_recent", SettingsNetworkRecent, 12, 0, 41, network_recent_enabled),
+    SET_SW("recent_items", SettingsRecentItems, 12, 0, 43, recent_items_enabled),
     SET_SW("hidden_shares", NetworkShowHiddenShares, 12, 0, 42, show_hidden_shares),
     SET_SW("confirm_delete", SettingsConfirmDelete, 12, 0, 32, confirm_recycle_delete),
     // 搜索与索引

@@ -2908,6 +2908,8 @@
 #define IDS_SETTINGS_LAN_DISCOVERY_DESC                                                  4116
 #define IDS_SETTINGS_NETWORK_RECENT                                                      4117
 #define IDS_SETTINGS_NETWORK_RECENT_DESC                                                 4118
+#define IDS_SETTINGS_RECENT_ITEMS                                                        7000
+#define IDS_SETTINGS_RECENT_ITEMS_DESC                                                   7001
 #define IDS_SETTINGS_HIDDEN_SHARES_DESC                                                  4119
 #define IDS_SETTINGS_LAN_CACHE                                                           4120
 #define IDS_SETTINGS_LAN_CACHE_DESC                                                      4121
