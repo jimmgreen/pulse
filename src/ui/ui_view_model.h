@@ -1391,6 +1391,7 @@ struct WindowViewModel {
     // 文件操作 → 网络位置 (AppPrefs lan_discovery ...).
     bool settings_lan_discovery = true;
     bool settings_network_recent = true;
+    bool settings_recent_items_enabled = true;
     bool settings_hidden_shares = false;
     int settings_lan_cache_mode = 0;  // 0 10 min, 1 1 h, 2 this session
     bool settings_show_hints = true;

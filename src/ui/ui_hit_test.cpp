@@ -614,6 +614,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 if (ContainsPt(lay.change_tracking_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 8; return r;
                 }
+                if (ContainsPt(lay.recent_items_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle; r.index = 47; return r;
+                }
                 for (int i = 0; i < 3; ++i) if (vm.settings_change_tracking && ContainsPt(lay.change_days[i], x, y)) {
                     r.region = HitTestResult::SettingsChangeDays; r.index = i; return r;
                 }

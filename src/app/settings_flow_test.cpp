@@ -963,6 +963,20 @@ int RunSettingsSearchTest(pulse::AppState& s,const wchar_t* output) {
             check(TestSettingsFilter(l10n::Get(I::SettingsTheme)+L"   "+l10n::Get(I::SettingsAppearance), I::SettingsTheme), "AND title and category");
             check(TestSettingsFilter(l10n::Get(I::SettingsThemeDesc), I::SettingsTheme), "translated description");
             check(!TestSettingsFilter(l10n::Get(I::SettingsTheme)+L" no-such-setting-123", I::SettingsTheme), "missing AND term rejected");
+            ui::WindowViewModel recent_vm;
+            s.settingsSearchQuery = l10n::Get(I::SettingsRecentItems);
+            FillSettingsSearchVm(s, recent_vm);
+            const bool recent_found = std::any_of(recent_vm.settings_search_results.begin(), recent_vm.settings_search_results.end(),
+                [&](const auto& result) { return result.title == l10n::Get(I::SettingsRecentItems) && result.page == 12; });
+            check(recent_found, "settings search finds recent recording setting on file operations page");
+            if (recent_found) {
+                recent_vm.settings_open = true;
+                recent_vm.settings_page = 12;
+                const auto recent_layout = ui::MakeSettingsLayout(recent_vm, D2D1::RectF(0, 0, 900, 800), 1, 40, 24, nullptr);
+                check(recent_layout.recent_items_row.bottom > recent_layout.recent_items_row.top,
+                    "settings search target keeps recent recording row geometry");
+            }
+            s.settingsSearchQuery.clear();
             ui::WindowViewModel vm;
             s.settingsSearchQuery = l10n::Get(I::SettingsTheme);
             FillSettingsSearchVm(s, vm);
@@ -1133,8 +1147,65 @@ int RunStableEntryRegistrationTest(const wchar_t* output) {
 }
 
 #endif
+int RunRecentRecordingSettingsTest(pulse::AppState& s, const wchar_t* output) {
+    using namespace pulse;
+    using H = ui::HitTestResult;
+    std::ofstream log{std::filesystem::path(output)};
+    int failures = 0;
+    auto check = [&](bool ok, const char* label) { log << (ok ? "[PASS] " : "[FAIL] ") << label << '\n'; if (!ok) ++failures; };
+    s.appPrefs.persist = false;
+    const bool apps_before = s.appPrefs.global_search_apps;
+    const bool recent_before = s.appPrefs.recent_items_enabled;
+    s.settings.ToggleUi(43);
+    check(s.appPrefs.global_search_apps != apps_before && s.appPrefs.recent_items_enabled == recent_before,
+        "index 43 toggles global search apps without touching recent recording");
+    s.settings.ToggleUi(43);
+    s.settings.ToggleUi(47);
+    check(s.appPrefs.global_search_apps == apps_before && s.appPrefs.recent_items_enabled != recent_before,
+        "index 47 toggles recent recording without touching global search apps");
+    s.settings.ToggleUi(47);
+    check(s.appPrefs.global_search_apps == apps_before && s.appPrefs.recent_items_enabled == recent_before,
+        "settings index regression leaves both switches restored");
+    OpenSettingsTab(s, 12);
+    const auto window = D2D1::RectF(0, 0, static_cast<float>(s.compositor.Width()), static_cast<float>(s.compositor.Height()));
+    ui::fluent::Painter painter(&s.compositor);
+    auto vm = BuildVm(s, false);
+    auto layout = ui::MakeSettingsLayout(vm, window, s.scale, s.renderer.TitleBarHeight(), 28*s.scale, &painter);
+    s.settings.SetScroll(layout.recent_items_row.top - layout.content.top, s.renderer.SettingsMaxScroll(vm, window.right, window.bottom));
+    vm = BuildVm(s, false);
+    layout = ui::MakeSettingsLayout(vm, window, s.scale, s.renderer.TitleBarHeight(), 28*s.scale, &painter);
+    const auto row = layout.recent_items_row;
+    const auto recent_label = l10n::Get(l10n::StringId::SettingsRecentItems);
+    check(row.right > row.left && (recent_label.find(L"最近") != std::wstring::npos ||
+          recent_label.find(L"Recent") != std::wstring::npos),
+        "File operations shows the recent recording setting label");
+    s.places.RecordRecent(L"C:\\recent-recording-existing.txt", app::PlaceItemKind::File);
+    const auto click = [&] {
+        const int x = static_cast<int>((row.left + row.right) / 2), y = static_cast<int>((row.top + row.bottom) / 2);
+        const auto hit = s.renderer.HitTest(BuildVm(s, false), window, static_cast<float>(x), static_cast<float>(y));
+        check(hit.region == H::SettingsToggle && hit.index == 47, "recent recording row hits setting index 47");
+        SendMessageW(s.hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
+        SendMessageW(s.hwnd, WM_LBUTTONUP, 0, MAKELPARAM(x, y));
+    };
+    s.appPrefs.recent_items_enabled = true;
+    click();
+    check(!s.appPrefs.recent_items_enabled && !BuildVm(s, false).settings_recent_items_enabled,
+        "click turns off and displays the recent recording switch");
+    RecordRecentOpen(s, L"C:\\recent-recording-disabled.txt", app::PlaceItemKind::File);
+    check(s.places.FindRecent(L"C:\\recent-recording-existing.txt") &&
+          !s.places.FindRecent(L"C:\\recent-recording-disabled.txt"),
+        "disabled recording preserves existing items and omits new opens");
+    click();
+    RecordRecentOpen(s, L"C:\\recent-recording-enabled.txt", app::PlaceItemKind::File);
+    check(s.appPrefs.recent_items_enabled && s.places.FindRecent(L"C:\\recent-recording-enabled.txt"),
+        "reenabling records the next opened file");
+    log << "failures=" << failures << std::endl;
+    return failures ? 1 : 0;
+}
+
 #ifdef PULSE_WITH_SELFTEST
 int RunSettingsFlowTest(AppState& s,const wchar_t* output) {
+    if (GetEnvironmentVariableW(L"PULSE_TEST_RECENT_RECORDING", nullptr, 0)) return RunRecentRecordingSettingsTest(s, output);
     if (GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_SEARCH", nullptr, 0)) return RunSettingsSearchTest(s, output);
     if (GetEnvironmentVariableW(L"PULSE_TEST_ASSISTANT_TOGGLE_HIT", nullptr, 0))
         return RunAssistantToggleHitTest(output);

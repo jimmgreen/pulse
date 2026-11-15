@@ -3024,6 +3024,17 @@ void TestAppPrefsAndSettingsPath() {
           prefs.launch_on_startup && prefs.keep_running_on_close &&
           !prefs.open_folders_in_pulse,
           L"appprefs: parse json");
+    Check(prefs.recent_items_enabled, L"appprefs: recent recording defaults enabled for legacy preferences");
+    prefs.recent_items_enabled = false;
+    const std::wstring recent_json = prefs.ToJson();
+    AppPrefs recent_loaded;
+    recent_loaded.persist = false;
+    Check(recent_loaded.FromJson(recent_json) && !recent_loaded.recent_items_enabled,
+          L"appprefs: disabled recent recording survives JSON round-trip");
+    Check(recent_json.find(L"\"recent_items_enabled\":false") != std::wstring::npos,
+          L"appprefs: recent recording preference is serialized");
+    prefs.recent_items_enabled = true;
+
     Check(prefs.ApplyLaunchOnStartup(false) && !prefs.launch_on_startup,
           L"appprefs: persist=false toggle does not write Run key");
     Check(prefs.ApplyFolderOpen(true) && prefs.open_folders_in_pulse,

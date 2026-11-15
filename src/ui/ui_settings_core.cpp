@@ -880,6 +880,7 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
             segmented(lay.change_days_row,lay.change_days,days,day_values,vm.settings_change_days,H::SettingsChangeDays,I::SettingsChangeDays,I::SettingsChangeDaysDesc,3,L"\xE9D5");
             dim_end(dim);
         }
+        toggle(lay.recent_items_row,I::SettingsRecentItems,I::SettingsRecentItemsDesc,L"\xE8A5",vm.settings_recent_items_enabled,47);
         // 网络位置.
         toggle(lay.lan_discovery_row,I::SettingsLanDiscovery,I::SettingsLanDiscoveryDesc,L"\xE701",vm.settings_lan_discovery,40);
         {
