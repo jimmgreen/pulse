@@ -3,8 +3,12 @@
 
 #include "../common/json_value.h"
 
+#define LLM_RETRY_IMPLEMENTATION
+#include "../../third_party/llm-retry/llm_retry.hpp"
+
 #include <winhttp.h>
 
+#include <algorithm>
 #include <atomic>
 #include <map>
 #include <mutex>
@@ -159,6 +163,21 @@ void ReadError(const std::string& body, std::string& type, std::string& message)
     if (type.empty()) type = err->get_string("code");
 }
 
+// Closes the request unless Cancel already did.
+void CloseRequest(ModelStream::Shared& sh) {
+    std::lock_guard<std::mutex> lock(sh.mu);
+    if (sh.request) WinHttpCloseHandle(sh.request);
+    sh.request = nullptr;
+}
+
+// The link dropped before any answer. Timeouts are not retried: the receive
+// timeout is long, so a retry would multiply the wait.
+bool TransientNetworkError(DWORD error) {
+    return error == ERROR_WINHTTP_CANNOT_CONNECT || error == ERROR_WINHTTP_CONNECTION_ERROR;
+}
+
+struct Cancelled {};
+
 void Run(std::shared_ptr<ModelStream::Shared> sh, ModelEndpoint endpoint, std::string body) {
     struct DoneGuard {
         ModelStream::Shared& s;
@@ -195,48 +214,84 @@ void Run(std::shared_ptr<ModelStream::Shared> sh, ModelEndpoint endpoint, std::s
         return;
     }
     const std::wstring path = url.path + L"/chat/completions";
-    HINTERNET request = WinHttpOpenRequest(connection.value, L"POST", path.c_str(), nullptr, WINHTTP_NO_REFERER,
-                                           WINHTTP_DEFAULT_ACCEPT_TYPES, url.secure ? WINHTTP_FLAG_SECURE : 0);
-    if (!request) {
-        Push(*sh, Failure(0, GetLastError(), "network", {}));
-        return;
-    }
-    {
-        std::lock_guard<std::mutex> lock(sh->mu);
-        if (sh->cancelled.load()) {
-            WinHttpCloseHandle(request);
-            return;
-        }
-        sh->request = request;
-    }
-    // Closes the request unless Cancel already did.
-    struct RequestGuard {
-        ModelStream::Shared& s;
-        ~RequestGuard() {
-            std::lock_guard<std::mutex> lock(s.mu);
-            if (s.request) WinHttpCloseHandle(s.request);
-            s.request = nullptr;
-        }
-    } request_guard{*sh};
-
     std::wstring headers = L"Content-Type: application/json\r\nAccept: text/event-stream\r\nAuthorization: Bearer ";
     headers += endpoint.key;
     headers += L"\r\n";
     SecureZeroMemory(endpoint.key.data(), endpoint.key.size() * sizeof(wchar_t));
-    const BOOL sent = WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(headers.size()), body.data(),
-                                         static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0);
-    SecureZeroMemory(headers.data(), headers.size() * sizeof(wchar_t));
-    if (!sent || !WinHttpReceiveResponse(request, nullptr)) {
-        const DWORD error = GetLastError();
-        if (!sh->cancelled.load()) Push(*sh, Failure(0, error, "network", {}));
+    struct Wipe {
+        std::wstring& text;
+        ~Wipe() { SecureZeroMemory(text.data(), text.size() * sizeof(wchar_t)); }
+    } wipe{headers};
+    struct RequestGuard {
+        ModelStream::Shared& s;
+        ~RequestGuard() { CloseRequest(s); }
+    } request_guard{*sh};
+
+    // A dropped link or a busy service (5xx) before the answer starts is tried
+    // again, up to 3 attempts with backoff. Once the stream starts nothing is
+    // retried, so no delta reaches the UI twice; 429 stays with the user.
+    llm::RetryConfig retry;
+    retry.retry_on_http_codes = {500, 502, 503, 504};
+    HINTERNET request = nullptr;
+    DWORD status = 0;
+    DWORD network_error = 0;
+    std::string error_body;
+    try {
+        status = llm::with_retry<DWORD>([&]() -> DWORD {
+            if (sh->cancelled.load()) throw Cancelled{};
+            HINTERNET r = WinHttpOpenRequest(connection.value, L"POST", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                             WINHTTP_DEFAULT_ACCEPT_TYPES, url.secure ? WINHTTP_FLAG_SECURE : 0);
+            if (!r) {
+                network_error = GetLastError();
+                throw llm::LLMError{0, {}, false};
+            }
+            {
+                std::lock_guard<std::mutex> lock(sh->mu);
+                if (sh->cancelled.load()) {
+                    WinHttpCloseHandle(r);
+                    throw Cancelled{};
+                }
+                sh->request = r;
+            }
+            if (!WinHttpSendRequest(r, headers.c_str(), static_cast<DWORD>(headers.size()), body.data(),
+                                    static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0) ||
+                !WinHttpReceiveResponse(r, nullptr)) {
+                network_error = GetLastError();
+                CloseRequest(*sh);
+                throw llm::LLMError{0, {}, !sh->cancelled.load() && TransientNetworkError(network_error)};
+            }
+            DWORD code = 0, size = sizeof(code);
+            WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &code, &size, WINHTTP_NO_HEADER_INDEX);
+            error_body.clear();
+            const auto& codes = retry.retry_on_http_codes;
+            if (std::find(codes.begin(), codes.end(), static_cast<int>(code)) != codes.end()) {
+                // Kept for the failure if this was the last attempt.
+                std::vector<char> chunk(16 * 1024);
+                DWORD read = 0;
+                while (WinHttpReadData(r, chunk.data(), static_cast<DWORD>(chunk.size()), &read) && read > 0)
+                    if (error_body.size() < 64 * 1024) error_body.append(chunk.data(), read);
+                CloseRequest(*sh);
+                throw llm::LLMError{static_cast<int>(code), {}, true};
+            }
+            request = r;
+            return code;
+        }, retry).value;
+    } catch (const Cancelled&) {
+        return;
+    } catch (const llm::LLMError& err) {
+        if (sh->cancelled.load()) return;
+        if (err.http_code == 0) {
+            Push(*sh, Failure(0, network_error, "network", {}));
+            return;
+        }
+        std::string type, message;
+        ReadError(error_body, type, message);
+        Push(*sh, Failure(err.http_code, 0, std::move(type), std::move(message)));
         return;
     }
-    DWORD status = 0, size = sizeof(status);
-    WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
-                        &status, &size, WINHTTP_NO_HEADER_INDEX);
 
     std::string pending;   // bytes after the last complete line
-    std::string error_body;
     Assembler acc;
     bool finished = false;
     std::vector<char> buffer(16 * 1024);
