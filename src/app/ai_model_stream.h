@@ -21,6 +21,9 @@ namespace pulse::app::ai {
 struct ModelEndpoint {
     std::wstring base_url = L"https://api.deepseek.com";
     std::wstring key;
+    // Services that route by conversation (OpenCode: x-opencode-session) get
+    // this one id for every request of a conversation; empty sends nothing.
+    std::wstring session;
 };
 
 struct ModelToolCall {
@@ -81,5 +84,11 @@ struct ModelProbe {
     std::string error_message;
 };
 ModelProbe ProbeModelService(ModelEndpoint endpoint);
+
+// Request headers for an OpenAI-format call at `base_url`, ending with \r\n
+// (never include the Authorization one: a service that routes by conversation
+// rejects a call without its session header). `session` is filtered to what a
+// header value may hold; an empty one leaves the header out.
+std::wstring RequestHeaders(const std::wstring& base_url, std::wstring_view session);
 
 } // namespace pulse::app::ai

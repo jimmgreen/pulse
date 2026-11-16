@@ -23,6 +23,7 @@
 #include "context_menu.h"
 #include "batch_rename.h"
 #include "ai_assistant_chat.h"
+#include "ai_chat_store.h"
 #include "ai_model_key.h"
 #include "ai_model_stream.h"
 #include "ai_providers.h"
@@ -1352,6 +1353,9 @@ static size_t SubmitBatchRename(AppState& s, const std::vector<std::wstring>& pa
             app::ai::ModelEndpoint endpoint;
             endpoint.base_url = AiAgentBaseUrl();
             endpoint.key = std::move(key);
+            // One throwaway conversation per pass (ai_model_stream.h
+            // RequestHeaders): the ids themselves are what goes to the model.
+            endpoint.session = app::ai::NewChatId(app::ai::NowUnixMs(), static_cast<uint32_t>(GetTickCount64()));
             auto stream = app::ai::ModelStream::Start(std::move(endpoint),
                                                       app::ai::WithoutThinking(app::ai::CurrentProvider(), body));
             if (!stream) { error = l10n::Get(l10n::StringId::BrAiErrNetwork); return nullptr; }

@@ -309,8 +309,10 @@ void AiHistorySave(AppState& s) {
     if (c.history_id.empty()) {
         const uint32_t salt = static_cast<uint32_t>(GetTickCount64()) ^ (GetCurrentProcessId() << 16);
         c.history_id = ai::NewChatId(now, salt);
-        c.created = now;
     }
+    // The conversation begins when it is first written, not when its first
+    // request goes out (ai_assistant_agent.cpp names the id early).
+    if (c.created == 0) c.created = now;
     doc.set("id", U(c.history_id));
     doc.set("created", c.created);
     doc.set("updated", now);
@@ -343,6 +345,10 @@ bool AiHistoryOpenChat(AppState& s, const std::wstring& id) {
     c.pinned = doc.get_bool("pinned");
     int64_t created = 0;
     if (const json::Value* v = doc.find("created")) v->get_int(created);
+    // A file that names no start keeps the one its other stamp implies (the
+    // list shows `updated` for it too); a file with neither starts now.
+    if (created == 0) created = ai::EntryOf(id, doc).updated;
+    if (created == 0) created = ai::NowUnixMs();
     c.created = created;
     if (const json::Value* blocks = doc.find("blocks"); blocks && blocks->is_array())
         for (const json::Value& b : blocks->items()) RestoreBlock(c, b);

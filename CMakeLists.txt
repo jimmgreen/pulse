@@ -1447,6 +1447,11 @@ target_link_libraries(pulse_model_thinking_test PRIVATE pulse_localization pulse
 add_executable(pulse_ai_chat_store_test src/bench/ai_chat_store_test.cpp src/app/ai_chat_store.cpp src/app/ai_providers.cpp
     src/app/ai_settings.cpp src/common/json_value.cpp)
 target_link_libraries(pulse_ai_chat_store_test PRIVATE pulse_localization pulse_runtime_log shell32 advapi32)
+# The headers an OpenAI-format call carries: User-Agent, and the conversation
+# id OpenCode routes by (missing one is answered "cannot be routed").
+add_executable(pulse_ai_request_headers_test src/bench/ai_request_headers_test.cpp src/app/ai_model_stream.cpp
+    src/common/json_value.cpp)
+target_link_libraries(pulse_ai_request_headers_test PRIVATE pulse_localization pulse_runtime_log winhttp)
 add_executable(pulse_drive_capacity_test src/bench/drive_capacity_test.cpp src/bench/localization_test.rc)
 target_link_libraries(pulse_drive_capacity_test PRIVATE pulse_localization)
 add_executable(pulse_preview_sizing_test src/bench/preview_sizing_test.cpp)

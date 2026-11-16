@@ -18,6 +18,7 @@
 // reasoning_content in the history (the service requires it back). Nothing
 // moves without the user's 整理; the model cannot delete or overwrite.
 #include "ai_agent_internal.h"
+#include "ai_chat_store.h"
 #include "ai_model_list.h"
 #include "extensions/developer_tools.h"
 #include "extensions/developer_tool_catalog.h"
@@ -970,6 +971,11 @@ void SendRound(AppState& s) {
     app::ai::ModelEndpoint endpoint;
     endpoint.base_url = AiAgentBaseUrl();
     endpoint.key = std::move(key);
+    // Services that route by conversation take one id for the whole of it
+    // (ai_model_stream.h RequestHeaders); a conversation still unsaved gets
+    // the id it would be saved under.
+    if (c.history_id.empty()) c.history_id = app::ai::NewChatId(app::ai::NowUnixMs(), static_cast<uint32_t>(Now()));
+    endpoint.session = c.history_id;
     a.sent_tools = !app::ai::IsChatOnlyModel(endpoint.base_url, Utf8(AiChatModelId(s)));
     a.stream = app::ai::ModelStream::Start(std::move(endpoint), Body(s, a));
     const uint64_t gen = a.generation;

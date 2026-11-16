@@ -1,6 +1,7 @@
 // ai_model_list.cpp - The connected service's models (ai_model_list.h).
 #include "ai_model_list.h"
 
+#include "ai_chat_store.h"
 #include "ai_model_key.h"
 #include "ai_model_stream.h"
 #include "ai_settings.h"
@@ -263,6 +264,8 @@ void RefreshListedModels(HWND hwnd, const std::wstring& base_url) {
     ModelEndpoint endpoint;
     endpoint.base_url = base_url;
     if (!LoadModelKey(endpoint.key) || endpoint.key.empty()) return;
+    // One throwaway conversation per listing (ai_model_stream.h RequestHeaders).
+    endpoint.session = NewChatId(NowUnixMs(), static_cast<uint32_t>(GetTickCount64()));
     g_tried_url = url;
     g_tried_at = tick;
     auto job = std::make_shared<Job>();
