@@ -5,6 +5,10 @@
 
 #include <winhttp.h>
 
+// PULSE_VERSION_STRING / PULSE_BUILD_ID, for the User-Agent the call names
+// itself with (RequestHeaders); a build without them says "Pulse".
+#include "pulse_version.h"
+
 #include <atomic>
 #include <map>
 #include <mutex>
@@ -75,6 +79,46 @@ bool Crack(const std::wstring& base, Url& url) {
     url.port = parts.nPort;
     url.secure = parts.nScheme == INTERNET_SCHEME_HTTPS;
     return !url.host.empty();
+}
+
+// Whether `host` is `domain` or one of its subdomains (api.deepseek.com,
+// www.opencode.ai). Case-blind: a service's host is not case-sensitive.
+bool HostIn(const std::wstring& host, std::wstring_view domain) {
+    if (host.size() < domain.size()) return false;
+    const size_t start = host.size() - domain.size();
+    if (start > 0 && host[start - 1] != L'.') return false;
+    for (size_t i = 0; i < domain.size(); ++i) {
+        wchar_t c = host[start + i];
+        if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c - L'A' + L'a');
+        wchar_t d = domain[i];
+        if (d >= L'A' && d <= L'Z') d = static_cast<wchar_t>(d - L'A' + L'a');
+        if (c != d) return false;
+    }
+    return true;
+}
+
+// What a header value may hold: a header ends at CR or LF, so anything else
+// (a line break, a colon) would let the value inject a header. Empty when
+// nothing is left, which leaves the header out.
+std::wstring HeaderSafe(std::wstring_view value, size_t max_chars) {
+    std::wstring out;
+    for (const wchar_t c : value) {
+        if (out.size() >= max_chars) break;
+        if (c < 0x20 || c > 0x7e) continue;
+        out.push_back(c);
+    }
+    return out;
+}
+
+// Pulse's own name, which OpenCode asks a client to send as its User-Agent.
+std::wstring UserAgent() {
+#if defined(PULSE_VERSION_STRING) && defined(PULSE_BUILD_ID)
+    return std::wstring(L"Pulse/") + PULSE_VERSION_STRING + L"+" + PULSE_BUILD_ID;
+#elif defined(PULSE_VERSION_STRING)
+    return std::wstring(L"Pulse/") + PULSE_VERSION_STRING;
+#else
+    return L"Pulse";
+#endif
 }
 
 // One tool call while its pieces stream in.
@@ -219,7 +263,9 @@ void Run(std::shared_ptr<ModelStream::Shared> sh, ModelEndpoint endpoint, std::s
         }
     } request_guard{*sh};
 
-    std::wstring headers = L"Content-Type: application/json\r\nAccept: text/event-stream\r\nAuthorization: Bearer ";
+    std::wstring headers = L"Content-Type: application/json\r\nAccept: text/event-stream\r\n";
+    headers += RequestHeaders(endpoint.base_url, endpoint.session);
+    headers += L"Authorization: Bearer ";
     headers += endpoint.key;
     headers += L"\r\n";
     SecureZeroMemory(endpoint.key.data(), endpoint.key.size() * sizeof(wchar_t));
@@ -351,7 +397,8 @@ ModelProbe ProbeModelService(ModelEndpoint endpoint) {
         probe.win32_error = GetLastError();
         return probe;
     }
-    std::wstring headers = L"Accept: application/json\r\nAuthorization: Bearer " + endpoint.key + L"\r\n";
+    std::wstring headers = L"Accept: application/json\r\n" + RequestHeaders(endpoint.base_url, endpoint.session) +
+                           L"Authorization: Bearer " + endpoint.key + L"\r\n";
     // Anthropic lists its models only to its own key header (chat takes the bearer).
     const std::wstring anthropic = L"api.anthropic.com";
     if (url.host.size() >= anthropic.size() &&
@@ -402,6 +449,23 @@ ModelProbe ProbeModelService(ModelEndpoint endpoint) {
 std::wstring ModelHost(const std::wstring& base_url) {
     Url url;
     return Crack(base_url, url) ? url.host : base_url;
+}
+
+std::wstring RequestHeaders(const std::wstring& base_url, std::wstring_view session) {
+    std::wstring headers = L"User-Agent: " + HeaderSafe(UserAgent(), 96) + L"\r\n";
+    Url url;
+    if (!Crack(base_url, url)) return headers;
+    // OpenCode routes a conversation by x-opencode-session and answers a call
+    // without it with "cannot be routed efficiently" (docs/console/go).
+    if (HostIn(url.host, L"opencode.ai")) {
+        const std::wstring id = HeaderSafe(session, 64);
+        if (!id.empty()) {
+            headers += L"x-opencode-session: ";
+            headers += id;
+            headers += L"\r\n";
+        }
+    }
+    return headers;
 }
 
 } // namespace pulse::app::ai

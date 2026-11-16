@@ -3,6 +3,7 @@
 #include "ai_assistant.h"
 #include "ai_assistant_chat.h"
 #include "ai_assistant_voice.h"
+#include "ai_chat_store.h"
 #include "ai_model_key.h"
 #include "ai_model_list.h"
 #include "ai_model_stream.h"
@@ -694,6 +695,8 @@ void Connect(AppState& s, AsstPageUi& u) {
     }
     // 小米 MiMo's Token Plan keys (tp-) connect to their own host.
     if (!u.url_editing) endpoint.base_url = ai::AddressForKey(p, endpoint.base_url, endpoint.key);
+    // 连接 is one throwaway conversation of its own (and 测试连接 the next).
+    endpoint.session = ai::NewChatId(ai::NowUnixMs(), static_cast<uint32_t>(GetTickCount64()));
     u.connecting = true;
     u.error_title.clear();
     u.error_sub.clear();
@@ -724,6 +727,7 @@ void StartTest(AppState& s) {
         g_testing.store(false);
         return;
     }
+    endpoint.session = ai::NewChatId(ai::NowUnixMs(), static_cast<uint32_t>(GetTickCount64()));
     const HWND hwnd = s.hwnd;
     try {
         std::thread([hwnd, endpoint = std::move(endpoint)]() mutable {
