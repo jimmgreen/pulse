@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 #include <cstdint>
+#include <future>
 
 namespace pulse::app {
 enum class FolderSizeState { Manual, Calculating, Ready, Updating, Partial, Unavailable, Cached, Indexed };
@@ -85,6 +86,9 @@ public:
     void SetChangeNotify(HWND hwnd, UINT message);
     FolderSizeStats ReadStats() const;
     void Stop();
+    // UI request only. Wait/get off-thread before eject; timeout must abort eject.
+    std::shared_future<void> SuspendVolume(const std::wstring& root);
+    void ResumeVolume(const std::wstring& root);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

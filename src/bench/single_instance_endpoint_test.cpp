@@ -1,5 +1,8 @@
 #include "../app/single_instance_coordinator.h"
 #include "../app/shell_tag_menu.h"
+#include "../app/open_request_pipe.h"
+#include <cstring>
+#include <algorithm>
 #include <filesystem>
 #include <cstdio>
 #include <string>
@@ -8,9 +11,16 @@ namespace {
 using Coordinator = pulse::app::SingleInstanceCoordinator;
 Coordinator* primary = nullptr;
 std::wstring received;
-int opens = 0, tags = 0;
+int opens = 0, tags = 0, copydata_calls = 0;
+constexpr UINT kQueueWake = WM_APP + 127;
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == kQueueWake && primary) {
+        auto request = primary->TakeQueuedOpenRequest();
+        if (request) { ++opens; received = request->path; Coordinator::CompleteDelivery(*request, true); }
+        return 0;
+    }
     if (message == WM_COPYDATA) {
+        ++copydata_calls;
         if (!primary || !primary->OwnsEndpoint(hwnd)) return FALSE;
         auto* data = reinterpret_cast<COPYDATASTRUCT*>(lparam);
         Coordinator::OpenRequest request;
@@ -166,6 +176,81 @@ int wmain(int argc, wchar_t** argv) {
     check(!Coordinator::FindPrimaryWindow(name), "released endpoint is not replaced by same-class decoy");
     check(coordinator.Acquire(name) == Coordinator::AcquireResult::Primary && coordinator.PublishEndpoint(window) &&
         Coordinator::FindPrimaryWindow(name) == window, "primary restart publishes a fresh endpoint");
+    coordinator.Release();
+    check(coordinator.Acquire(name) == Coordinator::AcquireResult::Primary, "RawV2 primary reacquires private namespace");
+    const int raw_before = opens, copy_before = copydata_calls;
+    HANDLE raw_sender = Spawn(L"--sender \"" + name + L"\" open \"pulse:win-e\"", root.wstring());
+    check(coordinator.PublishEndpoint(window, kQueueWake), "RawV2 publication starts receiver before advertising capability");
+    const bool accepted_without_pump = raw_sender && WaitForSingleObject(raw_sender, 6000) == WAIT_OBJECT_0;
+    check(accepted_without_pump && opens == raw_before, "cold requester is accepted while primary UI does not pump");
+    check(WaitChild(raw_sender), "RawV2 requester exits with acknowledged acceptance");
+    auto pump = [] { MSG message{}; while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&message); };
+    pump();
+    check(opens == raw_before + 1 && received == L"pulse:win-e" && copydata_calls == copy_before,
+        "resumed UI dispatches unchanged WinE marker exactly once without COPYDATA");
+    const auto endpoint = Coordinator::FindPrimaryEndpoint(name);
+    check(endpoint && !endpoint->pipe_name.empty(), "RawV2 sidecar yields verified pipe identity");
+    if (endpoint) {
+        using Pipe = pulse::app::OpenRequestPipe;
+        Coordinator::OpenRequest queued;
+        queued.id[0] = 73; queued.deadline = GetTickCount64() + 5000; queued.path = L"pulse:new-tab";
+        auto bytes = Coordinator::EncodeOpenRequest(queued);
+        const Pipe::ServerIdentity identity{endpoint->pid, endpoint->created};
+        // Exchange deliberately performs one connection attempt. A previous
+        // client's ACK may still be draining; retry only explicit admission
+        // Retry or a proven pre-send busy result, never an ambiguous send here.
+        auto exchange = [&](const char* label) {
+            unsigned attempts = 0;
+            for (;;) {
+                ++attempts;
+                auto result = Pipe::Exchange(endpoint->pipe_name, identity, bytes, queued.deadline);
+                const auto observed_at = GetTickCount64();
+                printf("EXCHANGE %s attempt=%u reply=%d error=%lu stage=%u may_sent=%u remaining=%llu\n",
+                    label, attempts, result.reply ? static_cast<int>(*result.reply) : -1,
+                    result.error, static_cast<unsigned>(result.stage), result.request_may_have_been_sent ? 1u : 0u,
+                    static_cast<unsigned long long>(queued.deadline > observed_at ? queued.deadline - observed_at : 0));
+                fflush(stdout);
+                const bool retry = result.reply == Pipe::Reply::Retry ||
+                    (!result.reply && result.error == ERROR_PIPE_BUSY && !result.request_may_have_been_sent && result.stage == Pipe::Stage::None);
+                const auto now = GetTickCount64();
+                if (!retry || now >= queued.deadline) return result;
+                Sleep(static_cast<DWORD>((std::min)(uint64_t{10}, queued.deadline - now)));
+            }
+        };
+        const int before_duplicate = opens;
+        const auto first = exchange("first");
+        const auto duplicate = exchange("duplicate");
+        check(first.reply == Pipe::Reply::Accepted && duplicate.reply == Pipe::Reply::Duplicate && opens == before_duplicate,
+            "same ID has one committed queue entry before UI dispatch");
+        pump();
+        printf("DISPATCH before=%d after=%d expected_path_match=%u\n", before_duplicate, opens, received == queued.path ? 1u : 0u);
+        check(opens == before_duplicate + 1 && received == queued.path, "duplicate pipe retry executes only once");
+        const auto sidecar_name = name + L".Endpoint.RawV2." + endpoint->nonce;
+        HANDLE sidecar = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, sidecar_name.c_str());
+        auto* sidecar_bytes = sidecar ? static_cast<unsigned char*>(MapViewOfFile(sidecar, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 128)) : nullptr;
+        check(sidecar_bytes != nullptr, "fixture can inspect its own 128-byte capability sidecar");
+        if (sidecar_bytes) {
+            DWORD magic = 0; std::memcpy(&magic, sidecar_bytes + 4, sizeof(magic));
+            const DWORD bad_magic = 0; std::memcpy(sidecar_bytes + 4, &bad_magic, sizeof(bad_magic));
+            const int before_invalid = copydata_calls;
+            check(!Coordinator::FindPrimaryEndpoint(name) && !legacy_secondary.ForwardOpenPath(L"pulse:win-e", 80) && copydata_calls == before_invalid,
+                "present malformed capability fails closed without legacy COPYDATA fallback");
+            std::memcpy(sidecar_bytes + 4, &magic, sizeof(magic));
+            UnmapViewOfFile(sidecar_bytes);
+        }
+        if (sidecar) CloseHandle(sidecar);
+        queued.id[0] = 74; queued.deadline = GetTickCount64() + 5000;
+        bytes = Coordinator::EncodeOpenRequest(queued);
+        const auto pending = exchange("shutdown-pending");
+        check(pending.reply == Pipe::Reply::Accepted, "shutdown fixture has accepted but undispatched work");
+        const int before_release = opens;
+        coordinator.Release();
+        pump();
+        check(!coordinator.TakeQueuedOpenRequest() && opens == before_release && !Coordinator::FindPrimaryEndpoint(name),
+            "release drains receiver and cancels queued work before stale wake can dispatch");
+        const auto stopped = Pipe::Exchange(endpoint->pipe_name, identity, bytes, GetTickCount64() + 100);
+        check(!stopped.reply, "released endpoint no longer acknowledges requests");
+    }
     coordinator.Release(); DestroyWindow(window); DestroyWindow(later_decoy); primary = nullptr;
     SetEvent(stop); check(WaitChild(decoy), "isolated helper exits cleanly");
     CloseHandle(ready); CloseHandle(stop);

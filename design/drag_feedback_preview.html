@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang='zh-CN' data-theme='light'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Pulse 拖拽反馈：合并方案效果预览</title>
+<style>
+:root{
+  --board:#E6EAE3;--card:#FFFFFF;--sheet:#F7F8F4;--flyout:#FFFFFF;--win:#FFFFFF;
+  --text:#303B50;--text2:#66748A;--text3:#929CAE;
+  --stroke:#DCE3D9;--div:#E5EAE3;--hover:rgba(82,125,112,.06);
+  --track:#EDF1EA;--seg-on:#FFFFFF;--ab:#2E8B6A;--accent:var(--ab);
+  --acc-soft:rgba(46,139,106,.12);--amber:#D48A1A;--amber-soft:#FAEEDA;--amber-text:#854F0B;
+  --blue:#185FA5;--blue-soft:#E6F1FB;--blue-text:#0C447C;
+  --crumb-tint:#EEF0F6;--zone:#F4F5FA;--shadow:0 10px 28px rgba(40,58,50,.16);
+  --card-shadow:0 6px 18px rgba(40,58,50,.16);color-scheme:light}
+:root[data-theme='dark']{
+  --board:#141414;--card:#242424;--sheet:#1C1C1C;--flyout:#2B2B2B;--win:#202020;
+  --text:#F2F2F2;--text2:#A9A9A9;--text3:#7B7B7B;
+  --stroke:#3A3A3A;--div:#333333;--hover:rgba(255,255,255,.07);
+  --track:#2B2B2B;--seg-on:#3A3A3A;--ab:#4FB891;--acc-soft:rgba(79,184,145,.16);
+  --amber:#E0A344;--amber-soft:#3A2F1C;--amber-text:#E8C489;
+  --blue:#6EA9E8;--blue-soft:#1E2C3A;--blue-text:#B6D6F5;
+  --crumb-tint:#252833;--zone:#262733;--shadow:0 10px 28px rgba(0,0,0,.5);
+  --card-shadow:0 6px 18px rgba(0,0,0,.5);color-scheme:dark}
+*{box-sizing:border-box;margin:0}
+body{font:14px/1.5 'Segoe UI Variable Text','Segoe UI','Microsoft YaHei UI','PingFang SC',system-ui,sans-serif;
+  color:var(--text);background:var(--board);padding:30px 22px 64px;max-width:1200px;margin:0 auto}
+button,input{font:inherit;color:inherit}
+button{background:none;border:0;cursor:pointer;padding:0}
+h1{font-size:25px;font-weight:600;letter-spacing:-.2px}
+h2{font-size:16px;font-weight:600}
+h3{font-size:13px;font-weight:600;color:var(--text)}
+p{line-height:1.65}
+.head{display:flex;flex-wrap:wrap;gap:16px 30px;align-items:flex-end;justify-content:space-between;margin-bottom:22px}
+.eyebrow{font-size:12px;color:var(--accent);font-weight:600;letter-spacing:.6px;margin-bottom:6px}
+.sub{color:var(--text2);font-size:13px;max-width:76ch;margin-top:8px}
+.sub b{color:var(--text);font-weight:600}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--text2);white-space:nowrap;flex-wrap:wrap}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.ctlbar{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;padding:14px 16px;border:1px solid var(--stroke);
+  border-radius:12px;background:var(--card);box-shadow:0 2px 10px rgba(40,58,50,.05);margin-bottom:20px}
+.ctl{display:flex;gap:9px;align-items:center;font-size:12px;color:var(--text2);white-space:nowrap}
+.num{font-variant-numeric:tabular-nums;color:var(--text);font-weight:600;min-width:44px}
+input[type=range]{accent-color:var(--accent);width:120px}
+.seg{display:inline-flex;padding:3px;border-radius:8px;background:var(--track);border:1px solid var(--div)}
+.seg button{padding:4px 9px;border-radius:6px;color:var(--text2);font-size:12px;white-space:nowrap}
+.seg button[aria-checked=true]{color:var(--accent);font-weight:600;background:var(--seg-on);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.btn{padding:6px 13px;border-radius:8px;border:1px solid var(--stroke);background:var(--sheet);font-size:12px}
+.btn:hover{background:var(--hover)}
+.compare{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.panel{border:1px solid var(--stroke);border-radius:14px;background:var(--card);overflow:hidden;box-shadow:0 3px 14px rgba(40,58,50,.07)}
+.panel-head{display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid var(--div)}
+.pill{font-size:11px;padding:2px 9px;border-radius:20px;font-weight:600}
+.pill.warn{background:var(--amber-soft);color:var(--amber-text)}
+.pill.good{background:var(--acc-soft);color:var(--accent)}
+.panel-foot{padding:11px 16px;border-top:1px solid var(--div);font-size:12px;color:var(--text2);line-height:1.6}
+.panel-foot b{color:var(--text);font-weight:600}
+.stage{padding:18px;background:var(--sheet);display:flex;justify-content:center}
+.win{position:relative;width:430px;height:300px;background:var(--win);border:1px solid var(--stroke);
+  border-radius:8px;overflow:hidden;box-shadow:var(--shadow);cursor:crosshair;user-select:none}
+.crumb{height:52px;display:flex;align-items:center;gap:12px;padding:0 14px;border-bottom:1px solid var(--div);
+  font-size:15px;color:var(--text);background:var(--win)}
+.crumb .chev{color:var(--text3);font-size:19px;font-weight:400}
+.crumb b{padding:3px 8px;border:1.6px solid var(--accent);border-radius:7px;font-weight:600;color:var(--text)}
+.crumb .thin{color:var(--text2)}
+.upper{height:118px;background:var(--crumb-tint);padding:20px 16px}
+.upper .h1{font-size:13px;color:var(--text3);line-height:1.9}
+.upper .h2{font-size:13px;color:var(--text3);line-height:1.9}
+.lower{height:129px;background:var(--win);border-top:1px solid var(--div)}
+.rowskel{margin-top:20px;display:grid;gap:11px;padding-left:6px}
+.rowskel i{display:block;height:7px;width:var(--w);border-radius:4px;background:var(--div)}
+.cursor{position:absolute;width:0;height:0;z-index:6;pointer-events:none}
+.cursor svg{position:absolute;left:-1px;top:-2px}
+.stack{position:absolute;z-index:4;display:flex;align-items:center;gap:9px;padding:0 13px;
+  border-radius:20px;background:var(--flyout);border:1px solid var(--stroke);box-shadow:var(--card-shadow)}
+.stack .ico,.merged .ico{width:17px;height:17px;border-radius:5px;background:#1D9E75;flex:none;position:relative}
+.stack .ico::after,.merged .ico::after{content:'';position:absolute;left:5px;top:4px;width:7px;height:7px;
+  border-radius:2px;background:rgba(255,255,255,.9)}
+.stack .fn,.merged .fn{font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;min-width:0;flex:1}
+.fan{position:absolute;z-index:3;border-radius:20px;background:var(--flyout);border:1px solid var(--stroke);
+  box-shadow:var(--card-shadow);opacity:.75}
+.badge{position:absolute;z-index:5;display:flex;align-items:center;gap:0;padding:0 11px;
+  border-radius:5px;background:var(--flyout);border:1.5px solid var(--amber);box-shadow:var(--card-shadow);
+  font-size:12px;color:var(--text);white-space:nowrap}
+.badge .edge{width:3px;height:60%;border-radius:2px;background:var(--amber);margin-right:9px;flex:none}
+.badge.copy{border-color:var(--ab)}
+.badge.copy .edge{background:var(--ab)}
+.badge.link{border-color:var(--blue)}
+.badge.link .edge{background:var(--blue)}
+.gaplabel{position:absolute;z-index:7;pointer-events:none;font-size:11px;color:var(--blue);white-space:nowrap;
+  background:var(--flyout);border:1px solid var(--div);border-radius:4px;padding:1px 6px}
+.gapline{position:absolute;z-index:2;border-left:1px dashed var(--blue);opacity:.7}
+.merged{position:absolute;z-index:5;display:flex;align-items:center;gap:9px;
+  background:var(--flyout);border:1px solid var(--stroke);box-shadow:var(--card-shadow);
+  border-radius:20px;overflow:hidden;padding:0 13px}
+.merged .stripe{position:absolute;left:0;top:9%;height:82%;width:3px;border-radius:0 2px 2px 0;background:var(--amber)}
+.merged.copy .stripe{background:var(--ab)}
+.merged.link .stripe{background:var(--blue)}
+.merged .sep{width:1px;height:18px;background:var(--div);flex:none;margin:0 2px}
+.merged .act{font-size:12px;font-weight:600;color:var(--amber-text);white-space:nowrap}
+.merged.copy .act{color:var(--accent)}
+.merged.link .act{color:var(--blue-text)}
+.merged .key{font-size:10px;font-weight:600;color:var(--text2);border:1px solid var(--stroke);
+  border-bottom-width:2px;border-radius:4px;padding:1px 5px;background:var(--sheet);white-space:nowrap;flex:none}
+.merged .alt{font-size:11px;color:var(--text3);white-space:nowrap}
+.merged .count{font-size:11px;color:var(--text3);border-radius:10px;background:var(--track);padding:1px 7px;flex:none}
+.merged.double{display:block;padding:0;border-radius:12px}
+.merged.double .r1{display:flex;align-items:center;gap:9px;height:56%;padding:0 13px;position:relative}
+.merged.double .r2{display:flex;align-items:center;gap:7px;height:44%;padding:0 13px 0 16px;
+  border-top:1px solid var(--div);background:var(--sheet);position:relative}
+.merged.double .stripe{top:0;height:100%;border-radius:0}
+.merged.double .fn{flex:1}
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-top:26px}
+.note{padding:16px 18px;border:1px solid var(--stroke);border-radius:12px;background:var(--card);font-size:12.5px;
+  color:var(--text2);line-height:1.7}
+.note h3{margin-bottom:7px}
+.note p+p{margin-top:8px}
+.note b{color:var(--text);font-weight:600}
+.impl{margin-top:26px;padding:18px 20px;border:1px solid var(--stroke);border-radius:12px;background:var(--card)}
+.impl h2{margin-bottom:12px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--div);vertical-align:top}
+th{color:var(--text2);font-weight:600;white-space:nowrap}
+td:first-child{white-space:nowrap;color:var(--text)}
+code{font-family:Consolas,'Cascadia Mono',monospace;font-size:11.5px;color:var(--accent);
+  background:var(--hover);padding:1px 5px;border-radius:4px}
+.tip{font-size:12px;color:var(--text2);margin-top:10px}
+@media(max-width:940px){.compare{grid-template-columns:1fr}.stage{overflow-x:auto;justify-content:flex-start}}
+</style>
+</head>
+<body>
+<div class='head'>
+  <div>
+    <div class='eyebrow'>拖拽反馈 · 设计预览</div>
+    <h1>把两个框合成一个</h1>
+    <p class='sub'>「拖的是什么」和「放开会发生什么」本来就是一件事的两半。拆成两个浮层，就不得不做位置避让；光标一靠近窗口顶部，
+      <b>BadgeTop()</b> 把动作提示翻到整个卡片堆下方，中间留下大段空白。合并进拖拽卡片后，只剩一个跟随光标的胶囊。</p>
+  </div>
+  <div class='legend'>
+    <span><i style='background:#D48A1A'></i>移动</span>
+    <span><i style='background:#2E8B6A'></i>复制</span>
+    <span><i style='background:#185FA5'></i>快捷方式</span>
+    <button class='btn' id='themeBtn' type='button'>切换暗色</button>
+  </div>
+</div>
+
+<div class='ctlbar'>
+  <div class='ctl'><label for='yRange'>光标高度</label><input id='yRange' type='range' min='10' max='250' value='52'><span class='num' id='yVal'>52px</span></div>
+  <div class='ctl'><span>位置</span><div class='seg' id='posSeg'>
+    <button data-y='24' aria-checked='false'>窗口顶部</button><button data-y='150' aria-checked='false'>窗口中段</button><button data-y='240' aria-checked='false'>窗口底部</button>
+  </div></div>
+  <div class='ctl'><span>动作</span><div class='seg' id='effSeg'>
+    <button data-eff='move' aria-checked='true'>移动</button><button data-eff='copy' aria-checked='false'>复制</button><button data-eff='link' aria-checked='false'>快捷方式</button>
+  </div></div>
+  <div class='ctl'><span>缩放</span><div class='seg' id='scaleSeg'>
+    <button data-scale='1' aria-checked='false'>100%</button><button data-scale='1.25' aria-checked='true'>125%</button><button data-scale='1.5' aria-checked='false'>150%</button>
+  </div></div>
+  <div class='ctl'><span>合并形态</span><div class='seg' id='formSeg'>
+    <button data-form='single' aria-checked='true'>单行</button><button data-form='double' aria-checked='false'>两行</button>
+  </div></div>
+</div>
+
+<div class='compare'>
+  <article class='panel'>
+    <div class='panel-head'><h2>现状 A</h2><span class='pill warn'>2 个浮层</span></div>
+    <div class='stage' id='stageA'></div>
+    <div class='panel-foot' id='footA'></div>
+  </article>
+  <article class='panel'>
+    <div class='panel-head'><h2>建议 B</h2><span class='pill good' id='pillB'>1 个浮层 · 单行</span></div>
+    <div class='stage' id='stageB'></div>
+    <div class='panel-foot' id='footB'></div>
+  </article>
+</div>
+
+<div class='notes'>
+  <div class='note'>
+    <h3>为什么不建议「把两个框贴紧」</h3>
+    <p>贴紧仍是两个视觉焦点，而且 badge 与卡片堆的相对位置要同时处理：窄窗口、长文件名、多文件扇形叠放、125%/150% DPI、贴边翻转。
+      <b>避让逻辑本身才是复杂度来源</b>，不是那 8 DIP 的间隙。</p>
+    <p>合并后只保留「胶囊不超出窗口」一个约束，<code>BadgeTop()</code>、<code>stack_bottom</code> 与对应的 35 组边缘用例都可以退役。</p>
+  </div>
+  <div class='note'>
+    <h3>合并的代价与处理</h3>
+    <p><b>胶囊变宽</b>：单行形态需要放宽 <code>kCardMaxW=236</code>，文件名用省略号，窗口剩余宽度不足时自动切两行。</p>
+    <p><b>多文件拖拽</b>：动作文字只出现在最前面的 lead card，后面的扇形卡片保持纯文件名，避免重复。</p>
+    <p><b>语义不能只靠颜色</b>：色条是辅助，动作文字必须保留，高对比度模式下靠边框与文字区分移动 / 复制 / 快捷方式。</p>
+    <p><b>贴右拖拽</b>：右侧空间不足时整块胶囊左移、右边缘贴住客户区，而不是压缩文字或截断动作——这是唯一保留的边界约束。</p>
+  </div>
+</div>
+
+<div class='impl'>
+  <h2>落地改动</h2>
+  <table>
+    <tr><th>文件</th><th>改动</th></tr>
+    <tr><td>src/ui/drag_stack.cpp</td><td>lead card 尾部增加动作区（分隔线 + 动作文字 + 修饰键键帽），左侧 3px 语义色条；两行形态作为长名/窄窗回退。</td></tr>
+    <tr><td>src/app/app_input.cpp</td><td>把 <code>dropBadge</code> 的文案组装结果改成结构化动作（动词 + 目标名 + 替代键），传给拖拽卡片，而不是画第二个浮层。</td></tr>
+    <tr><td>src/app/app_state.h / app_runtime.cpp</td><td>移除 <code>dropBadge*</code> 一组字段及其到 view model 的传递；保留修饰键状态与 effect。</td></tr>
+    <tr><td>src/ui/ui_renderer.cpp</td><td>删除 <code>drag_badge</code> 绘制分支（1419–1447 行）；拖放目标高亮（面包屑、行、侧栏）保持不变。</td></tr>
+    <tr><td>src/ui/drag_layout.h</td><td>只留卡片几何常量；删除 <code>BadgeTop()</code> 与 <code>stack_bottom</code>。</td></tr>
+    <tr><td>src/bench/drag_layout_test.cpp</td><td>用「胶囊不超出客户区 + 长名省略 + 多文件堆叠」用例替换 35 组避让用例。</td></tr>
+  </table>
+  <p class='tip'>预览窗口内移动鼠标可同步模拟拖拽；滑块、动作、缩放、形态与主题都按上面的真实布局公式计算。
+    也可用 <code>?eff=copy&amp;form=double&amp;scale=1.5&amp;theme=dark</code> 直接打开指定状态。此页仅为效果预览，未改动产品代码。</p>
+</div>
+
+<script>
+(function(){
+'use strict';
+var W = 430, H = 300;
+var CARD_H = 34, CARD_MAX_W = 236, OFFSET_Y = 14, FAN_STEP = 4;
+var STACK_BOTTOM = OFFSET_Y + CARD_H + 2 * FAN_STEP + CARD_MAX_W * 0.225 + 12;
+var S = { y: 52, x: 78, scale: 1.25, eff: 'move', form: 'single' };
+var TEXT = {
+  move: { act: '移动到 SS', key: 'Ctrl', alt: '改为复制', badge: '移动到 SS  ·  Ctrl 改为复制' },
+  copy: { act: '复制到 SS', key: 'Shift', alt: '改为移动', badge: '复制到 SS  ·  Shift 改为移动' },
+  link: { act: '创建快捷方式到 SS', key: '', alt: '', badge: '创建快捷方式到 SS' }
+};
+function clamp(v, lo, hi){ return Math.max(lo, Math.min(v, hi)); }
+function px(v){ return Math.round(v * 10) / 10; }
+function setSeg(id, attr, value){
+  var root = document.getElementById(id);
+  var buttons = root.querySelectorAll('button');
+  for (var i = 0; i < buttons.length; i++) {
+    buttons[i].setAttribute('aria-checked', String(buttons[i].getAttribute(attr) === String(value)));
+  }
+}
+function badgeTop(cursorY, height, scale, top, bottom, margin){
+  var y = cursorY - height - (CARD_MAX_W * 0.225 / 2 + 12 + 8) * scale;
+  var flipped = false;
+  if (y < top + margin) { y = cursorY + (STACK_BOTTOM + 8) * scale; flipped = true; }
+  return { y: Math.max(top + margin, Math.min(y, bottom - height - margin)), flipped: flipped };
+}
+function windowHtml(side){
+  return "<div class='win' id='win" + side + "'>" +
+    "<div class='crumb'><span class='chev'>›</span><b>SS</b><span class='chev'>›</span><span class='thin'>Desktop</span><span class='chev'>›</span></div>" +
+    "<div class='upper'><div class='h1'>把 WorkBuddy AI 拖到工具栏，</div><div class='h2'>它会出现在这里</div>" +
+    "<div class='rowskel'><i style='--w:44%'></i><i style='--w:29%'></i><i style='--w:36%'></i></div></div>" +
+    "<div class='lower'></div>" +
+    "<div class='cursor' id='cur" + side + "'><svg width='18' height='22' viewBox='0 0 18 22'>" +
+    "<path d='M1 1 L1 17 L5 13 L8 20 L11 19 L8 12 L14 12 Z' fill='white' stroke='#2C2C2A' stroke-width='1.2'/></svg></div>" +
+    (side === 'A'
+      ? "<div class='fan' id='fanA'></div><div class='stack' id='stackA'><span class='ico'></span><span class='fn'>WorkBuddy AI.lnk</span></div>" +
+        "<div class='badge' id='badgeA'><span class='edge'></span><span id='badgeTextA'></span></div>" +
+        "<div class='gapline' id='gapLineA'></div><div class='gaplabel' id='gapLabelA'></div>"
+      : "<div class='fan' id='fanB'></div><div class='merged' id='mergedB'></div>") +
+    "</div>";
+}
+function mergedHtml(eff, form, scale){
+  var t = TEXT[eff];
+  var key = t.key ? "<span class='key'>" + t.key + "</span><span class='alt'>" + t.alt + "</span>" : '';
+  var stripe = "<span class='stripe'></span>";
+  if (form === 'double') {
+    return stripe + "<div class='r1'><span class='ico'></span><span class='fn'>WorkBuddy AI.lnk</span>" +
+      "<span class='count'>+2</span></div><div class='r2'><span class='act'>" + t.act + "</span>" + key + "</div>";
+  }
+  return stripe + "<span class='ico'></span><span class='fn'>WorkBuddy AI.lnk</span>" +
+    "<span class='sep'></span><span class='act'>" + t.act + "</span>" + key;
+}
+function render(){
+  var s = S.scale, t = TEXT[S.eff];
+  var cardL = S.x + 16 * s, cardT = S.y + 14 * s;
+  var cardW = Math.min(200 * s, W - cardL - 8), cardH = 34 * s;
+  var margin = 4 * s;
+  var badgeW = Math.min(232 * s, W - margin * 2), badgeH = 24 * s;
+  var badgeL = Math.min(S.x + 14 * s, W - badgeW - margin);
+  var bt = badgeTop(S.y, badgeH, s, 0, H, margin);
+  var badgeT = bt.y;
+
+  var stageA = document.getElementById('stageA');
+  var stageB = document.getElementById('stageB');
+  if (!stageA.querySelector('.win')) stageA.innerHTML = windowHtml('A');
+  if (!stageB.querySelector('.win')) stageB.innerHTML = windowHtml('B');
+
+  var fanA = document.getElementById('fanA'), fanB = document.getElementById('fanB');
+  fanA.style.left = px(cardL + 5 * s) + 'px'; fanA.style.top = px(cardT + FAN_STEP * s) + 'px';
+  fanA.style.width = px(cardW) + 'px'; fanA.style.height = px(cardH) + 'px';
+  fanB.style.left = px(cardL + 5 * s) + 'px'; fanB.style.top = px(cardT + FAN_STEP * s) + 'px';
+  fanB.style.width = px(cardW) + 'px'; fanB.style.height = px(cardH) + 'px';
+
+  var stack = document.getElementById('stackA');
+  stack.style.left = px(cardL) + 'px'; stack.style.top = px(cardT) + 'px';
+  stack.style.width = px(cardW) + 'px'; stack.style.height = px(cardH) + 'px';
+  stack.style.fontSize = px(13 * s) + 'px';
+  stack.style.borderRadius = px(20 * s) + 'px';
+
+  var badge = document.getElementById('badgeA');
+  badge.className = 'badge' + (S.eff === 'copy' ? ' copy' : S.eff === 'link' ? ' link' : '');
+  badge.style.left = px(badgeL) + 'px'; badge.style.top = px(badgeT) + 'px';
+  badge.style.width = px(badgeW) + 'px'; badge.style.height = px(badgeH) + 'px';
+  badge.style.fontSize = px(12 * s) + 'px';
+  document.getElementById('badgeTextA').textContent = t.badge;
+
+  var merged = document.getElementById('mergedB');
+  var mergedW = Math.min((S.form === 'double' ? 236 : 300) * s, W - 16);
+  var mergedL = cardL;
+  if (mergedL + mergedW > W - 8) mergedL = Math.max(8, W - 8 - mergedW);
+  var mergedH = (S.form === 'double' ? 52 : 34) * s;
+  merged.className = 'merged ' + S.eff + (S.form === 'double' ? ' double' : '');
+  merged.innerHTML = mergedHtml(S.eff, S.form, s);
+  merged.style.left = px(mergedL) + 'px'; merged.style.top = px(cardT) + 'px';
+  merged.style.width = px(mergedW) + 'px'; merged.style.height = px(mergedH) + 'px';
+  merged.style.fontSize = px(13 * s) + 'px';
+  merged.style.borderRadius = px((S.form === 'double' ? 12 : 20) * s) + 'px';
+
+  var curA = document.getElementById('curA'), curB = document.getElementById('curB');
+  curA.style.left = px(S.x) + 'px'; curA.style.top = px(S.y) + 'px';
+  curB.style.left = px(S.x) + 'px'; curB.style.top = px(S.y) + 'px';
+
+  var gapLine = document.getElementById('gapLineA'), gapLabel = document.getElementById('gapLabelA');
+  if (bt.flipped) {
+    var from = cardT + cardH, to = badgeT;
+    gapLine.style.display = 'block';
+    gapLine.style.left = px(Math.min(cardL + cardW + 12, W - 12)) + 'px';
+    gapLine.style.top = px(from) + 'px';
+    gapLine.style.height = px(Math.max(0, to - from)) + 'px';
+    gapLabel.style.display = 'block';
+    gapLabel.style.left = px(Math.min(cardL, W - 200)) + 'px';
+    gapLabel.style.top = px(from + Math.max(6, (to - from) / 2 - 8)) + 'px';
+    gapLabel.textContent = '空白 ≈ ' + Math.round((STACK_BOTTOM + 8 - 48) * s) + 'px · BadgeTop fallback';
+  } else {
+    gapLine.style.display = 'none';
+    gapLabel.style.display = 'none';
+  }
+
+  document.getElementById('yVal').textContent = Math.round(S.y) + 'px';
+  document.getElementById('pillB').textContent = '1 个浮层 · ' + (S.form === 'double' ? '两行' : '单行');
+  document.getElementById('footA').innerHTML = bt.flipped
+    ? "<b>光标靠顶，上方放不下</b> → badge 被翻到卡片堆下方 <code>cursor + (stack_bottom + 8) × " + s + "</code>，两个框被拉开约 " + Math.round((STACK_BOTTOM + 8 - 48) * s) + "px。"
+    : "<b>常规位置</b> → badge 在光标上方 <code>cursor − height − 46.6 × " + s + "</code>。仍是两个独立浮层，各画各的。";
+  document.getElementById('footB').innerHTML = "<b>动作信息并入卡片</b>：文件名是主信息，动作与修饰键是次级信息，用分隔线和对比度分层。只跟随光标，无翻转分支。";
+
+  setSeg('effSeg', 'data-eff', S.eff);
+  setSeg('scaleSeg', 'data-scale', String(S.scale));
+  setSeg('formSeg', 'data-form', S.form);
+  setSeg('posSeg', 'data-y', String(S.y));
+  document.getElementById('yRange').value = String(Math.round(S.y));
+}
+function bindStage(side){
+  var win = document.getElementById('win' + side);
+  win.addEventListener('pointermove', function(e){
+    var r = win.getBoundingClientRect();
+    S.y = clamp(e.clientY - r.top, 10, H - 20);
+    S.x = clamp(e.clientX - r.left, 20, W - 130);
+    render();
+  });
+}
+function bindSeg(id, attr, apply){
+  var root = document.getElementById(id);
+  root.addEventListener('click', function(e){
+    var b = e.target.closest('button');
+    if (!b) return;
+    apply(b.getAttribute(attr));
+    render();
+  });
+}
+document.getElementById('yRange').addEventListener('input', function(e){ S.y = Number(e.target.value); render(); });
+bindSeg('posSeg', 'data-y', function(v){ S.y = Number(v); });
+bindSeg('effSeg', 'data-eff', function(v){ S.eff = v; });
+bindSeg('scaleSeg', 'data-scale', function(v){ S.scale = Number(v); });
+bindSeg('formSeg', 'data-form', function(v){ S.form = v; });
+document.getElementById('themeBtn').addEventListener('click', function(e){
+  var root = document.documentElement;
+  var dark = root.getAttribute('data-theme') === 'dark';
+  root.setAttribute('data-theme', dark ? 'light' : 'dark');
+  e.target.textContent = dark ? '切换暗色' : '切换亮色';
+});
+function readQuery(){
+  var q = new URLSearchParams(window.location.search);
+  if (q.has('eff') && TEXT[q.get('eff')]) S.eff = q.get('eff');
+  if (q.has('form')) S.form = q.get('form') === 'double' ? 'double' : 'single';
+  if (q.has('scale')) S.scale = clamp(Number(q.get('scale')) || 1.25, 1, 1.5);
+  if (q.has('y')) S.y = clamp(Number(q.get('y')) || 52, 10, 250);
+  if (q.has('x')) S.x = clamp(Number(q.get('x')) || 78, 20, W - 130);
+  if (q.get('theme') === 'dark') {
+    document.documentElement.setAttribute('data-theme', 'dark');
+    document.getElementById('themeBtn').textContent = '切换亮色';
+  }
+}
+readQuery();
+render();
+bindStage('A');
+bindStage('B');
+window.__preview = { S: S, render: render, badgeTop: badgeTop, STACK_BOTTOM: STACK_BOTTOM };
+})();
+</script>
+</body>
+</html>

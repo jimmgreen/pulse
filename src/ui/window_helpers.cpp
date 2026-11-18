@@ -1,6 +1,7 @@
 #include "../common/windows_compat.h"
 #include "../common/os_version.h"
 #include "window_helpers.h"
+#include "surface_capture.h"
 
 #include <algorithm>
 #include <cmath>
@@ -13,6 +14,23 @@
 #include <wrl/client.h>
 
 namespace pulse::ui {
+
+namespace {
+thread_local const wchar_t* surface_capture_path = nullptr;
+thread_local bool surface_capture_saved = false;
+}
+
+bool CaptureDialogSurface(const std::wstring& path, const std::function<void()>& render) {
+    struct Restore {
+        const wchar_t* path = surface_capture_path;
+        bool saved = surface_capture_saved;
+        ~Restore() { surface_capture_path = path; surface_capture_saved = saved; }
+    } restore;
+    surface_capture_path = path.c_str();
+    surface_capture_saved = false;
+    render();
+    return surface_capture_saved;
+}
 
 float ScaleDip(float scale, float value) { return value * scale; }
 
@@ -518,13 +536,13 @@ void BeginSurface(Compositor& compositor, fluent::Painter& painter,
                   bool backdrop_enabled, float scale) {
     auto* dc = compositor.Dc();
     dc->BeginDraw();
-    ID2D1Bitmap1* plate = high_contrast || !DrawsOwnCorners() ? nullptr : DialogAcrylicPlate(compositor, dark, scale);
+    ID2D1Bitmap1* plate = high_contrast || surface_capture_path || !DrawsOwnCorners() ? nullptr : DialogAcrylicPlate(compositor, dark, scale);
     dc->Clear(D2D1::ColorF(0, 0.0f));
     painter.BeginFrame(theme, high_contrast);
     D2D1_COLOR_F tint = theme.bg;
     // Acrylic carries its own frost, so the tint stays thin (效果图 ④); Mica
     // needs more to read as a dialog rather than the wallpaper.
-    tint.a = high_contrast || !backdrop_enabled ? 1.0f
+    tint.a = high_contrast || surface_capture_path || !backdrop_enabled ? 1.0f
            : IsAcrylicBackdrop(compositor.Hwnd()) ? 0.42f
            : (dark ? 0.76f : 0.82f);
     const float width = static_cast<float>(compositor.Width());
@@ -576,7 +594,8 @@ void EndSurface(Compositor& compositor) {
         compositor.NotifyDeviceLost(hr);
         return;
     }
-    compositor.Present();
+    if (surface_capture_path) surface_capture_saved = compositor.SaveSnapshot(surface_capture_path);
+    else compositor.Present();
 }
 
 } // namespace pulse::ui

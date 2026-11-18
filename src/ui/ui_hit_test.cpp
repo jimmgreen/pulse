@@ -1,4 +1,5 @@
 #include "toolbar_layout.h"
+#include "tab_pager_layout.h"
 // ui_hit_test.cpp — Hit testing and tab-strip queries.
 #include "ui_renderer.h"
 #include "address_search_layout.h"
@@ -26,11 +27,8 @@ bool MainRenderer::TabItemRect(const WindowViewModel& vm, float window_w, int in
     if (!out || index < 0 || index >= static_cast<int>(vm.tabs.size())) return false;
     if (vm.tabs[static_cast<size_t>(index)].hidden) return false; // collapsed group
     const TabStripMetrics m = ComputeTabStrip(vm, window_w);
-    const float left = m.x0 + static_cast<float>(index) * m.pitch
-        + (index < static_cast<int>(m.extra.size()) ? m.extra[static_cast<size_t>(index)] : 0.0f);
-    const float w = m.Width(vm, static_cast<size_t>(index));
-    *out = D2D1::RectF(left, m.y, left + w, m.y + m.h);
-    return true;
+    *out = m.ItemRect(vm, static_cast<size_t>(index));
+    return out->right > out->left && out->bottom > out->top;
 }
 
 bool MainRenderer::TabGroupChipRect(const WindowViewModel& vm, float window_w,
@@ -39,8 +37,8 @@ bool MainRenderer::TabGroupChipRect(const WindowViewModel& vm, float window_w,
     const TabStripMetrics m = ComputeTabStrip(vm, window_w);
     for (const auto& chip : m.chips) {
         if (chip.group != group_index) continue;
-        *out = D2D1::RectF(chip.left, m.y + 4.0f * scale_, chip.left + chip.width,
-                           m.y + m.h - 4.0f * scale_);
+        *out = D2D1::RectF(chip.left, chip.top + 4.0f * scale_, chip.left + chip.width,
+                           chip.top + m.h - 4.0f * scale_);
         return true;
     }
     return false;
@@ -94,12 +92,44 @@ int MainRenderer::SettingsSliderValueAt(const WindowViewModel& vm, const D2D1_RE
         : SettingsSliderValue(SettingsSlider(lay.wallpaper_blur_row, scale_), x, kWallpaperBlurMax);
 }
 
+float MainRenderer::AssistantThinkPositionAt(const WindowViewModel& vm, const D2D1_RECT_F& rect, float x) const {
+    const SettingsLayout lay = MakeSettingsLayout(vm, rect, scale_, title_bar_height_,
+                                                  status_height_, &painter_);
+    const int stops = asst_text::ThinkSegments(vm.settings_assistant);
+    const D2D1_RECT_F& r = lay.assistant.think_slider;
+    if (stops < 2 || r.right <= r.left) return -1.0f;
+    return fluent::StepSliderPositionAt(r, stops, x, scale_);
+}
+
 HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F& rect, float x, float y) const {
     HitTestResult r;
     if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return r;
     // Embedded hosts own the title strip and footer controls.
     if (embedded_ && (y < title_bar_height_ || y >= rect.bottom - status_height_)) return r;
 
+    const auto layout_hit = PaneLayoutHit(vm, rect, x, y, scale_,
+        compositor_ ? compositor_->DwriteFactory() : nullptr,
+        compositor_ ? compositor_->SmallFormat() : nullptr);
+    if (layout_hit.region != HitTestResult::None) return layout_hit;
+    if (vm.status.history_open) {
+        const auto bounds = UndoHistoryBounds(vm, rect, scale_);
+        if (ContainsPt(bounds, x, y)) {
+            r.region = HitTestResult::UndoHistorySurface;
+            for (int index = vm.status.history_offset; index < std::min(vm.status.history_offset + 7, static_cast<int>(vm.status.history.size())); ++index) {
+                const float top = UndoHistoryRowTop(vm, bounds, static_cast<size_t>(index), scale_);
+                if (y < top || y >= top + kUndoHistoryRowHeight * scale_ || y >= bounds.bottom - 30 * scale_) continue;
+                r.region = HitTestResult::UndoHistoryRow; r.index = index;
+                const bool row_hot = vm.hover_region == HitTestResult::UndoHistoryRow && vm.hover_control_index == index;
+                r.sub_index = 2;
+                if (row_hot && y >= top + 9 * scale_ && y < top + 35 * scale_ && x < bounds.right - 7 * scale_) {
+                    if (vm.status.history[index].elsewhere && x >= bounds.right - 160 * scale_ && x < bounds.right - 105 * scale_) r.sub_index = 1;
+                    else if (vm.status.history[index].supported && x >= bounds.right - 105 * scale_) r.sub_index = 0;
+                }
+                break;
+            }
+            return r;
+        }
+    }
     if (vm.change_popover.visible) {
         const auto popup = ChangePopoverRect(vm.change_popover, rect, scale_);
         if (ContainsPt(popup, x, y)) {
@@ -147,6 +177,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
     if (y < title_bar_height_ && !titleToolbar) {
         const float ctrlW = 46.0f * scale_;
         const TitleChrome chrome = MakeTitleChrome(rect.right, scale_, title_bar_height_);
+        TitleBrandWidth(vm, rect.right);
         // Before the toggle: on the rail the window dot sits on its corner (M7c).
         if (ContainsPt(WindowIdentityRect(vm, rect.right), x, y)) {
             r.region = HitTestResult::WindowIdentity;
@@ -157,6 +188,21 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             return r;
         }
         const TabStripMetrics strip = ComputeTabStrip(vm, rect.right);
+        if (!strip.hidden_indices.empty() && ContainsPt(strip.overflow_button,x,y)) {
+            r.region=HitTestResult::TabScroll; r.index=0;
+            r.label=L"+"+std::to_wstring(strip.hidden_indices.size());
+            for (const int index : strip.hidden_indices) r.label += L"\n"+vm.tabs[static_cast<size_t>(index)].title;
+            return r;
+        }
+        if (!strip.item_rects.empty() && strip.total_rows > strip.rows) {
+            const auto pager = MakeTabPagerLayout(rect.right, kTabRowHeight * scale_, strip.rows, scale_);
+            if (tab_first_row_ > 0 && ContainsPt(pager.up, x, y)) {
+                r.region = HitTestResult::TabScroll; r.index = -1; return r;
+            }
+            if (tab_first_row_ < strip.total_rows - strip.rows && ContainsPt(pager.down, x, y)) {
+                r.region = HitTestResult::TabScroll; r.index = 1; return r;
+            }
+        }
         auto hitTab = [&](int i) -> bool {
             if (vm.tabs[static_cast<size_t>(i)].hidden) return false;
             // A scrolling strip only shows tabs between its arrows.
@@ -173,12 +219,19 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 // hidden (collapsed) members just like the draw path.
                 float fx = vm.tab_drag_x;
                 for (int k = vm.tab_drag_index; k < i; ++k)
-                    if (!vm.tabs[static_cast<size_t>(k)].hidden) fx += strip.pitch;
+                    if (!vm.tabs[static_cast<size_t>(k)].hidden) fx += strip.Width(vm,static_cast<size_t>(k))+2.0f*scale_;
                 tabLeft = fx;
+            }
+            if (!strip.item_rects.empty()) {
+                const auto item = strip.ItemRect(vm, static_cast<size_t>(i));
+                if (!(vm.tab_layout == 0 && vm.tab_drag_index >= 0 && i >= vm.tab_drag_index &&
+                    i < vm.tab_drag_index + std::max(1,vm.tab_drag_count))) tabLeft = item.left;
+                if (y < item.top || y >= item.bottom) return false;
             }
             if (x < tabLeft || x >= tabLeft + tabW) return false;
             r.index = i;
-            const bool show_close = TabCloseVisible(vm, i, tabW, scale_);
+            const bool icon_only = static_cast<size_t>(i) < strip.icon_only.size() && strip.icon_only[static_cast<size_t>(i)];
+            const bool show_close = !icon_only && TabCloseVisible(vm, i, tabW, scale_);
             const float close_hit = (kTabClosePadDip + kTabCloseSizeDip) * scale_;
             r.region = show_close && x >= tabLeft + tabW - close_hit
                 ? HitTestResult::TabClose : HitTestResult::Tab;
@@ -186,10 +239,11 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         };
         if (!vertical_tabs_) {
         if (strip.overflow && y >= strip.y && y < strip.y + strip.h) {
-            if (x >= strip.view_left - strip.arrow_w && x < strip.view_left) {
+            if (strip.scroll > 0.5f && x >= strip.view_left - strip.arrow_w && x < strip.view_left) {
                 r.region = HitTestResult::TabScroll; r.index = -1; return r;
             }
-            if (x >= strip.view_right && x < strip.view_right + strip.arrow_w) {
+            if (strip.scroll < strip.max_scroll - 0.5f &&
+                x >= strip.view_right && x < strip.view_right + strip.arrow_w) {
                 r.region = HitTestResult::TabScroll; r.index = 1; return r;
             }
         }
@@ -204,7 +258,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         for (const auto& chip : strip.chips) {
             if (strip.overflow && (x < strip.view_left || x >= strip.view_right)) break;
             if (x >= chip.left && x < chip.left + chip.width &&
-                y >= strip.y + 4.0f * scale_ && y < strip.y + strip.h - 4.0f * scale_) {
+                y >= chip.top + 4.0f * scale_ && y < chip.top + strip.h - 4.0f * scale_) {
                 r.region = HitTestResult::TabGroup;
                 r.index = chip.group;
                 return r;
@@ -216,10 +270,15 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             if (hitTab(i)) return r;
         }
         const float cx = strip.new_x;
-        if (x >= cx && x < cx + 32.0f * scale_) {
+        if (x >= cx && x < cx + 32.0f * scale_ && y >= strip.new_y && y < strip.new_y + strip.h) {
             r.region = HitTestResult::TabNew;
             return r;
         }
+        }
+        if (y >= TitleControlsHeight()) return r;
+        if (x >= chrome.windows_left && x < chrome.windows_left + chrome.settings_w) {
+            r.region = HitTestResult::WindowManageButton;
+            return r;
         }
         if (x >= chrome.settings_left && x < chrome.settings_left + chrome.settings_w) {
             r.region = HitTestResult::SettingsButton;
@@ -244,6 +303,12 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         if (y >= rect.bottom - status_height_) {
             r.region = StatusBarHitRegion(vm, rect, x, y, scale_, status_height_,
                                           compositor_);
+            if (r.region == HitTestResult::StatusBarTask) {
+                if (!ContainsPt(task_pill_rect_, x, y)) r.region = HitTestResult::StatusBar;
+                for (int i = 0; i < 3; ++i)
+                    if (task_action_rects_[i].right > task_action_rects_[i].left &&
+                        ContainsPt(task_action_rects_[i], x, y)) r.sub_index = i;
+            }
             return r;
         }
         // The scrollbar drawn over the content's right edge: press and drag
@@ -253,6 +318,14 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             y >= lay.content.top && y < lay.content.bottom) {
             r.region = HitTestResult::Scrollbar;
             r.sub_index = 3;
+            return r;
+        }
+        if (ContainsPt(lay.search_clear, x, y) || ContainsPt(lay.search_empty_clear, x, y)) { r.region = HitTestResult::SettingsSearchClear; return r; }
+        if (ContainsPt(lay.search_box, x, y)) { r.region = HitTestResult::SettingsFind; return r; }
+        if (!vm.settings_search_query.empty() && ContainsPt(lay.content, x, y)) {
+            for (size_t i = 0; i < lay.search_results.size(); ++i) {
+                if (ContainsPt(lay.search_results[i], x, y)) { r.region = HitTestResult::SettingsSearchResult; r.index = static_cast<int>(i); return r; }
+            }
             return r;
         }
         for (int i = 0; i < kSettingsNavCount; ++i) {
@@ -285,13 +358,14 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             }
             if(ContainsPt(lay.performance_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=4;return r;}
             if(ContainsPt(lay.menu_acrylic_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=36;return r;}
-            for(int list_row=0;list_row<6;++list_row)
-                if(ContainsPt(lay.list_style_row[list_row],x,y)) {r.region=HitTestResult::SettingsToggle;r.index=list_row<3 ? 17+list_row : (list_row==3 ? 22 : list_row==4 ? 33 : 34);return r;}
+            for(int list_row=0;list_row<7;++list_row)
+                if(ContainsPt(lay.list_style_row[list_row],x,y)) {r.region=HitTestResult::SettingsToggle;r.index=list_row<3 ? 17+list_row : (list_row==3 ? 22 : list_row==4 ? 33 : list_row==5 ? 34 : 80);return r;}
             // 鼠标与选择 (the rows hidden without single-click are empty rects).
             for(int i=0;i<2;++i) {
                 if(ContainsPt(lay.click_open_row[i],x,y)) {r.region=HitTestResult::SettingsClickMode;r.index=i;return r;}
                 if(ContainsPt(lay.name_highlight_row[i],x,y)) {r.region=HitTestResult::SettingsNameBand;r.index=i;return r;}
             }
+            if(ContainsPt(lay.arrange_minimized_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=81;return r;}
             if(ContainsPt(lay.hover_select_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=77;return r;}
             if(ContainsPt(lay.item_checkbox_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=78;return r;}
             // 修改时间提示 (the hidden rows are empty rects) and sync status.
@@ -306,13 +380,36 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             for(int i=0;i<3;++i) if(ContainsPt(actions[i],x,y)) {r.region=HitTestResult::SettingsContentAction;r.index=i+1;return r;}
 
             if (IsGeneralSettingsPage(vm.settings_page)) {
-                // The switch, then the two extras (only while it is on); the coverage tiles are read-only.
+                if(vm.settings_page==11) {
+                    for(int i=0;i<3;++i) if(ContainsPt(lay.startup_overview[i],x,y)) {r.region=HitTestResult::SettingsDialogManagement;r.index=20+i;return r;}
+                    const D2D1_RECT_F controls[]={lay.dialog_toggle_row,lay.dialog_retry_button,lay.dialog_export_button,lay.dialog_scope_button,lay.startup_restore_button};
+                    const int dialog_actions[]={10,11,12,13,15};
+                    for(int i=0;i<5;++i) {
+                        const bool available=vm.settings_dialog_available && !vm.settings_dialog_busy && !vm.settings_integration_restore_busy;
+                        const bool restore=vm.settings_integration_enabled || vm.settings_integration_state>=2 || vm.settings_dialog_enabled || vm.settings_dialog_conflict || vm.settings_dialog_failed || vm.settings_shell_tags;
+                        if((i==3 || (available && (i!=4 || restore))) && ContainsPt(controls[i],x,y)) {
+                            r.region=HitTestResult::SettingsDialogManagement;r.index=dialog_actions[i];return r;
+                        }
+                    }
+                }
+                if(vm.settings_page==11 && vm.settings_integration_restore_busy) return r;
+                if (ContainsPt(lay.dialog_jump_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle; r.index = 41; return r;
+                }
+                if (vm.settings_dialog_jump_bar && ContainsPt(lay.dialog_jump_auto_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle; r.index = 42; return r;
+                }
+
+                if(vm.settings_integration_enabled) for(int i=0;i<3;++i) {
+                    for(int j=0;j<IntegrationChoiceCount(i);++j) if(ContainsPt(lay.integration_segments[i][j],x,y)) {r.region=HitTestResult::SettingsIntegration;r.index=20+i*3+j;return r;}
+                }
                 if(ContainsPt(lay.default_manager_row,x,y)) {r.region=HitTestResult::SettingsIntegration;r.index=0;return r;}
                 if(vm.settings_integration_enabled) {
                     if(ContainsPt(lay.explorer_windows_row,x,y)) {r.region=HitTestResult::SettingsIntegration;r.index=4;return r;}
                     if(ContainsPt(lay.recycle_bin_row,x,y)) {r.region=HitTestResult::SettingsIntegration;r.index=7;return r;}
                     if(ContainsPt(lay.folders_compat_row,x,y)) {r.region=HitTestResult::SettingsIntegration;r.index=9;return r;}
                 }
+                if(ContainsPt(lay.integration_hint_action,x,y)) {r.region=HitTestResult::SettingsIntegration;r.index=vm.settings_keep_running ? 11 : 10;return r;}
                 if(ContainsPt(lay.integration_try,x,y)) {r.region=HitTestResult::SettingsIntegration;r.index=8;return r;}
                 if(vm.settings_integration_can_retry && ContainsPt(lay.integration_retry,x,y)) {
                     r.region=HitTestResult::SettingsIntegration;r.index=5;return r;
@@ -372,19 +469,31 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         return r;
                     }
                 }
-                for (int i = 0; i < 3; ++i) {
-                    if (ContainsPt(lay.notify_icon_row[i], x, y)) {
+                // 4: 外部打开 4 段；其余那几行仍是 3/2 段。只呼出 by max.
+                for (int i = 0; i < 4; ++i) {
+                    if (i < 3 && ContainsPt(lay.notify_icon_row[i], x, y)) {
                         r.region = HitTestResult::SettingsNotifyIcon;
                         r.index = i;
                         return r;
                     }
-                }
-                for (int i = 0; i < 4; ++i) {
+                    if (i < 3 && ContainsPt(lay.open_pulse_icon_row[i], x, y)) {
+                        r.region = HitTestResult::SettingsOpenPulseIcon; r.index = i; return r;
+                    }
+                    if (i < 3 && ContainsPt(lay.new_window_shows_row[i], x, y)) {
+                        r.region = HitTestResult::SettingsNewWindowShows; r.index = i; return r;
+                    }
+                    if (i < 2 && ContainsPt(lay.arrange_gap_row[i], x, y)) {
+                        r.region = HitTestResult::SettingsArrangeGap; r.index = i; return r;
+                    }
                     if (ContainsPt(lay.external_open_row[i], x, y)) {
                         r.region = HitTestResult::SettingsExternalOpen;
                         r.index = i;
                         return r;
                     }
+                }
+                if (!vm.settings_vertical_tabs) for(int i=0;i<3;++i) {
+                    if(ContainsPt(lay.tab_layout_choices[i],x,y)) {r.region=HitTestResult::SettingsTabLayout;r.index=i;return r;}
+                    if(vm.tab_layout && ContainsPt(lay.tab_rows_choices[i],x,y)) {r.region=HitTestResult::SettingsTabRows;r.index=i;return r;}
                 }
                 for (int i = 0; i < 2; ++i) {
                     if (ContainsPt(lay.startup_open_row[i], x, y)) {
@@ -423,7 +532,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     }
                 }
                 for (int i = 0; i < kWindowEffectCount; ++i) {
-                    if (ContainsPt(lay.effect_row[i], x, y)) {
+                    if (WindowEffectSupported(static_cast<WindowEffect>(i)) && ContainsPt(lay.effect_row[i], x, y)) {
                         r.region = HitTestResult::SettingsEffect;
                         r.index = i;
                         return r;
@@ -563,12 +672,6 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 }
                 if (vm.settings_global_search_enabled && ContainsPt(lay.global_search_apps_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 43; return r;
-                }
-                if (ContainsPt(lay.dialog_jump_row, x, y)) {
-                    r.region = HitTestResult::SettingsToggle; r.index = 41; return r;
-                }
-                if (vm.settings_dialog_jump_bar && ContainsPt(lay.dialog_jump_auto_row, x, y)) {
-                    r.region = HitTestResult::SettingsToggle; r.index = 42; return r;
                 }
                 if (ContainsPt(lay.search_pinyin_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 9; return r;
@@ -721,8 +824,17 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     r.region = HitTestResult::SettingsToggle; r.index = 31; return r;
                 }
             } else if (vm.settings_page == 5 || vm.settings_page == 8) {
+                const int store_target = HitTestSettingsStore(lay, vm, x, y);
+                if (store_target >= 0) {
+                    r.region = HitTestResult::SettingsPackAction;
+                    r.index = store_target;
+                    return r;
+                }
+                // Store surfaces must not fall through to unrelated legacy pack targets.
+                if (vm.settings_page == 8 && (vm.settings_store_browse || vm.settings_store_installed)) return r;
                 // Buttons first: they sit inside the clickable rows.
                 const std::pair<const D2D1_RECT_F*, PackAction> pack_targets[] = {
+                    {&lay.pack_native_settings, PackAction::NativeSettings},
                     {&lay.pack_open, PackAction::OpenFolder},
                     {&lay.pack_update_all, PackAction::UpdateAll},
                     {&lay.pack_manage, PackAction::ManagePacks},
@@ -738,19 +850,17 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     {&lay.pack_update, PackAction::Update},
                     {&lay.pack_images_update, PackAction::ImagesUpdate},
                     {&lay.pack_raw_update, PackAction::RawUpdate},
-                    {&lay.pack_archive_update, PackAction::ArchiveUpdate},
                     {&lay.pack_images_primary, vm.settings_pack_images_installed && !vm.settings_pack_images_installing
                                                    ? PackAction::ImagesRemove : PackAction::ImagesInstall},
                     {&lay.pack_images_enable, PackAction::ImagesEnable},
                     {&lay.pack_raw_primary, vm.settings_pack_raw_installed && !vm.settings_pack_raw_installing
                         ? PackAction::RawRemove : PackAction::RawInstall},
                     {&lay.pack_raw_enable, PackAction::RawEnable},
-                    {&lay.pack_archive_primary, vm.settings_pack_archive_installed && !vm.settings_pack_archive_installing
-                        ? PackAction::ArchiveRemove : PackAction::ArchiveInstall},
-                    {&lay.pack_archive_enable, PackAction::ArchiveEnable},
                     {&lay.pack_detect, PackAction::UseDetected},
                     {&lay.pack_browse, PackAction::Browse},
                     {&lay.pack_custom_row, PackAction::UseCustom},
+                    {&lay.pack_dl_choice, PackAction::DownloadSource},
+                    {&lay.pack_speed_button, PackAction::SpeedTest},
                     {&lay.pack_auto_update_row, PackAction::AutoUpdate},
                     {&lay.pack_remove_row, PackAction::RemoveOnUninstall},
                     {&lay.trigger_choice[0], PackAction::TriggerHover},
@@ -761,6 +871,22 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     {&lay.hover_size_choice[0], PackAction::HoverSizeSmall},
                     {&lay.hover_size_choice[1], PackAction::HoverSizeMedium},
                     {&lay.hover_size_choice[2], PackAction::HoverSizeLarge},
+                    {&lay.hover_size_choice[3], PackAction::HoverSizeXLarge},
+                    {&lay.hold_choice[0], PackAction::HoldOff},
+                    {&lay.hold_choice[1], PackAction::HoldShort},
+                    {&lay.hold_choice[2], PackAction::HoldMedium},
+                    {&lay.hold_choice[3], PackAction::HoldLong},
+                    {&lay.preview_size_choice[0], PackAction::PreviewSizeFit},
+                    {&lay.preview_size_choice[1], PackAction::PreviewSizeStandard},
+                    {&lay.preview_size_choice[2], PackAction::PreviewSizeLarge},
+                    {&lay.preview_size_choice[3], PackAction::PreviewSizeMaximized},
+                    {&lay.preview_size_choice[4], PackAction::PreviewSizeFullScreen},
+                    {&lay.preview_remember_row, PackAction::PreviewRememberSize},
+                    {&lay.space_choice[0], PackAction::SpaceClose},
+                    {&lay.space_choice[1], PackAction::SpacePlayPause},
+                    {&lay.loop_choice[0], PackAction::LoopAnimations},
+                    {&lay.loop_choice[1], PackAction::LoopAll},
+                    {&lay.loop_choice[2], PackAction::LoopNone},
                 };
                 for (const auto& [bounds, action] : pack_targets) {
                     if (action == PackAction::Install && !pack_text::PrimaryEnabled(vm.settings_pack_media_available,
@@ -769,8 +895,6 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         vm.settings_pack_images_installed, vm.settings_pack_images_installing)) continue;
                     if (action == PackAction::RawInstall && !pack_text::PrimaryEnabled(vm.settings_pack_raw_available,
                         vm.settings_pack_raw_installed, vm.settings_pack_raw_installing)) continue;
-                    if (action == PackAction::ArchiveInstall && !pack_text::PrimaryEnabled(vm.settings_pack_archive_available,
-                        vm.settings_pack_archive_installed, vm.settings_pack_archive_installing)) continue;
                     if (bounds->right > bounds->left && ContainsPt(*bounds, x, y)) {
                         r.region = HitTestResult::SettingsPackAction;
                         r.index = static_cast<int>(action);
@@ -795,6 +919,13 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 const int target = HitTestSettingsAi(lay, vm, x, y);
                 if (target >= 0) {
                     r.region = HitTestResult::SettingsAi;
+                    r.index = target;
+                    return r;
+                }
+            } else if (vm.settings_page == kSettingsPageAssistant) {
+                const int target = HitTestSettingsAssistant(lay, vm, x, y);
+                if (target >= 0) {
+                    r.region = HitTestResult::SettingsAssistant;
                     r.index = target;
                     return r;
                 }
@@ -911,9 +1042,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             NewButtonWidthPx(rect.right-EffectiveSidebarWidth(rect.right) < 600 * scale_), vm.pane.filter_expand);
         const HitTestResult::Region nav[] = {HitTestResult::NavBack, HitTestResult::NavForward,
             HitTestResult::NavUp, HitTestResult::NavRefresh};
-        const bool searchOverlay=vm.address_searching && rect.right-EffectiveSidebarWidth(rect.right)<480*scale_;
-        if (!searchOverlay)
-            for (int i=0; i<4; ++i) if (ContainsPt(toolbar.navigation[i],x,y)) {r.region=nav[i]; return r;}
+        const bool searchOverlay=vm.address_searching && toolbar.merged_search;
+        for (int i=0; i<4; ++i) if (ContainsPt(toolbar.navigation[i],x,y)) {r.region=nav[i]; return r;}
         // Hit-test the same rect the chrome is drawn in; toolbar.search can be wider,
         // which shifted every chip target (e.g. the options icon toggled the mode).
         const auto searchBounds=searchOverlay || vm.address_searching ? SearchBarRect(rect.right) : toolbar.search;
@@ -940,12 +1070,32 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 r.control_bounds=AddressFavoritesRect(rect.right);
                 return r;
             }
-            if (!vm.address_editing && x < toolbar.address.right-28*scale_) {
+            if (!vm.address_editing && x < toolbar.address.right-(FavoritesButtonShown() ? 28*scale_ : 0)) {
                 std::vector<BreadcrumbPlaced> placed;
                 BreadcrumbStrip strip;
                 BreadcrumbLayout(vm.pane,rect.right,placed,&strip);
                 // A scrolled-away part of a long path is not clickable.
                 const bool in_view=strip.overflow<=0.0f || (x>=strip.view.left && x<strip.view.right);
+                if (in_view && !placed.empty() && placed.front().text == L"\u2026" &&
+                    (toolbar.merged_search || toolbar.navigation_tier == NavigationTier::Narrow)) {
+                    auto more = placed.front().rc;
+                    if (placed.size() > 1) more.right = placed[1].rc.left;
+                    if (ContainsPt(more, x, y)) {
+                        r.region = HitTestResult::BreadcrumbArrow; r.index = -2;
+                        r.path = placed.front().path; r.control_bounds = more; return r;
+                    }
+                }
+                if (in_view) for (size_t i=0;i<placed.size();++i) {
+                    if (i+1==placed.size() && (vm.pane.is_query_search ||
+                        (!vm.pane.path.empty() && fs::IsVirtualPath(vm.pane.path)))) break;
+                    auto arrow = placed[i].rc;
+                    arrow.left = arrow.right;
+                    arrow.right = i+1<placed.size() ? placed[i+1].rc.left : arrow.left+14.0f*scale_;
+                    if (ContainsPt(arrow,x,y)) {
+                        r.region=HitTestResult::BreadcrumbArrow; r.index=(int)i;
+                        r.path=placed[i].path; r.control_bounds=arrow; return r;
+                    }
+                }
                 if (in_view) for (size_t i=0;i<placed.size();++i) if (ContainsPt(placed[i].rc,x,y)) {
                     r.region=HitTestResult::BreadcrumbSegment; r.index=(int)i; r.path=placed[i].path; break;
                 }
@@ -998,8 +1148,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         r.region = StatusBarHitRegion(vm, rect, x, y, scale_, status_height_,
                                       compositor_);
         if (r.region == HitTestResult::StatusBarTask) {
-            // 撤销 / 打开 on the finished pill, as last drawn.
-            for (int i = 0; i < 2; ++i)
+            // Use the exact visible capsule and button bounds, including compact mode.
+            if (!ContainsPt(task_pill_rect_, x, y)) r.region = HitTestResult::StatusBar;
+            for (int i = 0; i < 3; ++i)
                 if (task_action_rects_[i].right > task_action_rects_[i].left &&
                     ContainsPt(task_action_rects_[i], x, y)) r.sub_index = i;
         }
@@ -1234,7 +1385,25 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 slot.kind == SidebarSlot::Tag) {
                 if (slot.group >= 0 && slot.item >= 0) {
                     const auto& item = vm.sidebar[slot.group].items[slot.item];
-                    if (!compact && SidebarItemHasUnpin(item) &&
+                    if (!compact && item.workspace_empty && ContainsPt(WorkspaceActionRect(slot.rc, scale_, 4), x, y)) {
+                        r.region = HitTestResult::SidebarWorkspaceAction;
+                        r.index = slot.run;
+                        r.sub_index = 4;
+                        r.path = item.path;
+                        return r;
+                    }
+                    if (!compact && item.workspace_index >= 0) {
+                        for (int action = 0; action < (item.workspace_dirty ? 4 : 2); ++action) {
+                            if (ContainsPt(WorkspaceActionRect(slot.rc, scale_, action), x, y)) {
+                                r.region = HitTestResult::SidebarWorkspaceAction;
+                                r.index = slot.run;
+                                r.sub_index = action;
+                                r.path = item.path;
+                                return r;
+                            }
+                        }
+                    }
+                    if (!compact && item.workspace_index < 0 && SidebarItemHasUnpin(item) &&
                         ContainsPt(WorkspaceUnpinRect(slot.rc, scale_), x, y)) {
                         r.region = HitTestResult::SidebarItemAction;
                         r.index = slot.run;
@@ -1249,7 +1418,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         return r;
                     }
                     if (!compact && item.expandable &&
-                        ContainsPt(SidebarExpandRect(slot.rc, scale_), x, y)) {
+                        ContainsPt(SidebarExpandRect(item.workspace_index >= 0 ? D2D1::RectF(slot.rc.left, slot.rc.top, slot.rc.right, slot.rc.top + 44.0f * scale_) : slot.rc, scale_), x, y)) {
                         r.region = HitTestResult::SidebarItemExpand;
                         r.index = slot.run;
                         r.path = item.path;
@@ -1295,12 +1464,11 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             y >= panel.top && y < panel.bottom) {
             DetailsHitRects hitRects;
             const float previewH = vm.details.preview_enabled
-                ? DetailsPreviewHeight(panel, scale_, vm.details.preview_expansion) : 0.0f;
+                ? DetailsPreviewHeight(panel, scale_, vm.details.preview_expansion, vm.details) : 0.0f;
             LayoutDetailsPanel(panel, scale_, vm.details,
                                compositor_ ? compositor_->DwriteFactory() : nullptr,
                                compositor_ ? compositor_->SmallFormat() : nullptr,
                                compositor_, previewH, hitRects);
-            if (ContainsPt(hitRects.cloud_download, x, y)) { r.region = HitTestResult::DetailsCloudDownload; return r; }
             if (ContainsPt(hitRects.preview_enable, x, y)) { r.region = HitTestResult::DetailsPreviewEnable; return r; }
             if (ContainsPt(hitRects.preview, x, y)) { r.region = HitTestResult::DetailsPreview; return r; }
             if (ContainsPt(hitRects.preview_toggle, x, y)) { r.region = HitTestResult::DetailsPreviewToggle; return r; }
@@ -1363,16 +1531,32 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         }
     }
 
+    pane_close_visible_ = vm.pane_slots.size() > 1;
+    pane_expand_visible_ = vm.layout_controls.pane_names.size() > 1 && vm.layout_controls.zoom_index < 0;
     auto hitPaneBounds = [&](const PaneViewModel& paneVm, const D2D1_RECT_F& paneRect, int paneIndex, bool focused) -> HitTestResult {
         // Header controls use the full pane; below the header the column
         // view narrows the regular list to its body.
         D2D1_RECT_F paneRc = paneRect;
         HitTestResult out;
         out.pane_index = paneIndex;
+        // Returning panes are still snapshot-only; never hit invisible rows below them.
+        if(pane_zoom_motion_.start && pane_zoom_motion_.restoring && paneIndex!=pane_zoom_motion_.excluded) {
+            out.pane_index=-1; return out;
+        }
         if (x < paneRc.left || x >= paneRc.right || y < paneRc.top || y >= paneRc.bottom)
             return out;
+        if (vm.layout_controls.zoom_index >= 0) {
+            auto chip=PaneZoomChipRect(paneVm,paneRc);chip.left=std::max(chip.left,chip.right-72*scale_);
+            if(ContainsPt(chip,x,y)){out.region=HitTestResult::PaneExpand;out.index=paneIndex;return out;}
+        }
+        if (pane_expand_visible_ && ContainsPt(PaneExpandRect(paneRc), x, y)) { out.region=HitTestResult::PaneExpand;out.index=paneIndex;return out; }
+        if (vm.pane_slots.size() > 1 && ContainsPt(PaneCloseRect(paneRc), x, y)) {
+            out.region = HitTestResult::PaneClose;
+            out.index = paneIndex;
+            return out;
+        }
         const D2D1_RECT_F detailsRc = PaneDetailsRect(paneRc, 1.0f, paneVm.size_control);
-        if (focused && paneVm.header_controls_opacity > 0.05f) {
+        if ((vm.pane_slots.size() > 1 || vm.layout_controls.zoom_index >= 0 || (focused && paneVm.header_controls_opacity > 0.05f))) {
             // The size slider can open over the title, so it goes first.
             const D2D1_RECT_F sizeRc[] = {PaneSizeSliderRect(paneVm, paneRc), PaneSizeButtonRect(paneVm, paneRc)};
             const HitTestResult::Region sizeHits[] = {HitTestResult::PaneSizeSlider, HitTestResult::PaneSizeButton};
@@ -1383,12 +1567,12 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         if (compositor_ && ContainsPt(ChangeTitleRect(paneRc, PaneHeaderTitleRight(paneVm, paneRc), pane_header_height_, paneVm.title_change_badge, scale_, compositor_, paneVm.header_text), x, y)) {
             out.region = HitTestResult::ChangeBadge; out.index = -1; return out;
         }
-        if (focused && paneVm.header_controls_opacity > 0.05f) {
+        if ((vm.pane_slots.size() > 1 || vm.layout_controls.zoom_index >= 0 || (focused && paneVm.header_controls_opacity > 0.05f))) {
             const D2D1_RECT_F buttons[] = {detailsRc, PaneMediumIconsRect(paneRc, 1.0f, paneVm.size_control),
                                            PaneWallRect(paneVm, paneRc), PaneViewButtonRect(paneRc)};
             const HitTestResult::Region actions[] = {HitTestResult::PaneDetails, HitTestResult::PaneMediumIcons,
                                                      HitTestResult::PaneWall, HitTestResult::PaneViewButton};
-            for (int i=0;i<4;++i) if (buttons[i].right > buttons[i].left && ContainsPt(buttons[i],x,y)) {
+            for (int i=0;i<4;++i) if ((i==3 || paneRc.right-paneRc.left>=280*scale_) && buttons[i].right > buttons[i].left && ContainsPt(buttons[i],x,y)) {
                 out.region=actions[i]; out.index=paneIndex; return out;
             }
         }
@@ -1472,9 +1656,17 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             }
         }
         const float columnTop = changesTop + (paneVm.is_changes ? 36 * scale_ : 0) +
-                                TagQueryBarHeight(paneVm, scale_);
+                                TagQueryBarHeight(paneVm, scale_) + DupFunnelHeight(paneVm, scale_) +
+                                DriveOverviewHeight(paneVm, scale_);
         float listTop = paneRc.top + pane_header_height_ + extra +
                         (ShowsColumnHeader(paneVm.view_mode) ? column_header_height_ : 0.0f);
+        const float parentTop = ShowsColumnHeader(paneVm.view_mode) ? columnTop : paneRc.top + 5.0f * scale_;
+        if (!paneVm.drag_parent_path.empty() && y >= parentTop && y < parentTop + 30.0f * scale_) {
+            out.region = HitTestResult::DropParent;
+            out.path = paneVm.drag_parent_path;
+            out.pane_index = paneIndex;
+            return out;
+        }
         if (y >= paneRc.top && y < paneRc.top + pane_header_height_) {
             out.region = HitTestResult::PaneHeader;
             // index 0: the empty strip right of the title (and its change
@@ -1544,7 +1736,10 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     return out;
                 }
             }
-            for (int divider = 0; divider < columns.count - 1; ++divider) {
+            // This PC columns have fixed widths:
+            // a drag would write the global column widths.
+            for (int divider = 0; divider < columns.count - 1 && !paneVm.this_pc_columns;
+                 ++divider) {
                 if (std::abs(x - columns.DividerX(divider)) <= 4.0f * scale_) {
                     out.region = HitTestResult::ColumnDivider;
                     out.index = divider;
@@ -1554,6 +1749,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             out.region = HitTestResult::ColumnHeader;
             int col = 0;
             while (col < columns.count - 1 && x >= columns.DividerX(col)) ++col;
+            // index: the display column; sub_index: its ColumnKind (header drag).
+            out.index = col;
+            out.sub_index = static_cast<int>(columns.kinds[static_cast<size_t>(col)]);
             switch (columns.kinds[static_cast<size_t>(col)]) {
             case ColumnKind::Name: out.column = SortColumn::Name; break;
             case ColumnKind::Path:
@@ -1565,7 +1763,11 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             case ColumnKind::Size: out.column = SortColumn::Size; break;
             case ColumnKind::Created: out.column = SortColumn::Created; break;
             case ColumnKind::Accessed: out.column = SortColumn::Accessed; break;
-            case ColumnKind::Status: out.region = HitTestResult::Pane; break; // display-only
+            case ColumnKind::Status:   // display-only, but it can be dragged
+                if (!columns.reorderable) out.region = HitTestResult::Pane;
+                break;
+            case ColumnKind::Total: out.region = HitTestResult::Pane; break;  // This PC: display-only
+            default: out.column = MediaSortColumn(columns.kinds[static_cast<size_t>(col)]); break;
             }
             return out;
         }

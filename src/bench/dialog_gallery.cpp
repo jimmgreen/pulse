@@ -11,6 +11,7 @@
 #include "../common/windows_compat.h"
 #include "../common/localization.h"
 #include "../app/ai_question_specs.h"
+#include "../app/extensions/transfer_confirmation.h"
 #include "../ui/confirm_dialog.h"
 #include "../ui/confirm_dialog_view.h"
 #include "../ui/fluent_components.h"
@@ -76,8 +77,27 @@ struct ConfirmScene {
     ConfirmDialogVisual visual;
 };
 
-std::vector<ConfirmScene> ConfirmScenes() {
+std::vector<ConfirmScene> ConfirmScenes(bool transfer_only = false) {
     std::vector<ConfirmScene> scenes;
+    if (transfer_only) {
+        using namespace pulse::extensions;
+        for (const bool move : {false, true}) {
+            transfer_plan::Plan plan;
+            plan.transfer.operation = move ? transfer_plan::Operation::Move : transfer_plan::Operation::Copy;
+            plan.transfer.target.path = L"D:\\Preview\\归档目标";
+            for (int i = 0; i < 8; ++i)
+                plan.transfer.sources.push_back({L"C:\\Preview\\项目资料\\季度报告\\" +
+                    std::wstring(12, L'长') + std::to_wstring(i) + L".txt", {1, {}, 1024, 1}, {}});
+            auto built = BuildTransferConfirmation(plan, {0, "example.transfer-preview", "preview", 1},
+                                                   L"资料整理\x202E");
+            if (!built) continue;
+            ConfirmScene scene{move ? L"confirm_transfer_move" : L"confirm_transfer_copy", std::move(*built.spec), {}};
+            scene.visual.focus = kConfirmCancel;
+            scene.visual.show_focus = true;
+            scenes.push_back(std::move(scene));
+        }
+        return scenes;
+    }
     {
         ConfirmScene s{L"confirm_warning", {}, {}};
         s.spec.title = L"继续导出诊断信息？";
@@ -147,7 +167,7 @@ std::vector<ConfirmScene> ConfirmScenes() {
     return scenes;
 }
 
-int RunGallery(const std::wstring& out_dir) {
+int RunGallery(const std::wstring& out_dir, bool transfer_only = false) {
     CreateDirectoryW(out_dir.c_str(), nullptr);
     WNDCLASSW window_class{};
     window_class.hInstance = GetModuleHandleW(nullptr);
@@ -173,8 +193,14 @@ int RunGallery(const std::wstring& out_dir) {
         const std::wstring suffix = scale > 1.0f ? L"_150" : L"";
         for (const Variant& variant : kVariants) {
             const Theme theme = ThemeFor(variant);
-            for (const ConfirmScene& scene : ConfirmScenes()) {
+            for (const ConfirmScene& scene : ConfirmScenes(transfer_only)) {
                 const ConfirmDialogSpec spec = NormalizeConfirmSpec(scene.spec);
+                if (transfer_only) {
+                    const auto clipboard = ConfirmClipboardText(spec);
+                    for (const auto& item : spec.items)
+                        if (clipboard.find(item) == std::wstring::npos) ++failures;
+                    if (spec.default_choice != ConfirmChoice::Cancel || spec.items.size() != 9) ++failures;
+                }
                 ConfirmDialogFormats formats;
                 formats.Create(compositor.DwriteFactory(), scale);
                 const ConfirmDialogLayout layout = LayoutConfirmDialog(
@@ -217,16 +243,23 @@ void WriteResult(const std::wstring& file, const std::wstring& text) {
     }
 }
 
-int RunLive(const std::wstring& kind, bool dark, const std::wstring& out) {
+int RunLive(const std::wstring& kind, bool dark, const std::wstring& out, bool check_default_cancel) {
     const D2D1_COLOR_F accent = HexColor(0x0078D4);
     if (kind.rfind(L"confirm-", 0) == 0) {
-        const std::wstring name = L"confirm_" + kind.substr(8);
-        for (const ConfirmScene& scene : ConfirmScenes()) {
+        std::wstring name = L"confirm_" + kind.substr(8);
+        for (wchar_t& ch : name) if (ch == L'-') ch = L'_';
+        for (const ConfirmScene& scene : ConfirmScenes(kind.rfind(L"confirm-transfer-", 0) == 0)) {
             if (name != scene.name) continue;
-            const ConfirmChoice choice = ShowConfirmDialogEx(nullptr, scene.spec, dark, accent);
+            auto spec = scene.spec;
+            if (check_default_cancel) {
+                spec.on_open = [](HWND window) {
+                    if (window) PostMessageW(window, WM_KEYDOWN, VK_RETURN, 0);
+                };
+            }
+            const ConfirmChoice choice = ShowConfirmDialogEx(nullptr, spec, dark, accent);
             WriteResult(out, choice == ConfirmChoice::Confirm ? L"confirm"
                              : choice == ConfirmChoice::Secondary ? L"secondary" : L"cancel");
-            return 0;
+            return check_default_cancel && choice != ConfirmChoice::Cancel ? 6 : 0;
         }
         return 5;
     }
@@ -252,12 +285,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     int result = 0;
     if (!args.empty() && args[0] == L"--live" && args.size() >= 2) {
         bool dark = false;
+        bool check_default_cancel = false;
         std::wstring out;
         for (size_t i = 2; i < args.size(); ++i) {
             if (args[i] == L"--dark") dark = true;
+            else if (args[i] == L"--check-default-cancel") check_default_cancel = true;
             else if (args[i] == L"--out" && i + 1 < args.size()) out = args[++i];
         }
-        result = RunLive(args[1], dark, out);
+        result = RunLive(args[1], dark, out, check_default_cancel);
+    } else if (!args.empty() && args[0] == L"--transfer-only") {
+        result = RunGallery(args.size() > 1 ? args[1] : L"build-transfer-dialog-verify", true);
     } else {
         result = RunGallery(args.empty() ? L"build-dialog-verify" : args[0]);
     }

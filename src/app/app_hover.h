@@ -3,7 +3,7 @@
 
 namespace pulse {
 struct AppState;
-namespace ui { struct HitTestResult; }
+namespace ui { struct HitTestResult; struct WindowViewModel; }
 
 struct HoverPointerApi {
     BOOL (WINAPI* cursor_position)(LPPOINT) = GetCursorPos;
@@ -11,6 +11,9 @@ struct HoverPointerApi {
     BOOL (WINAPI* to_client)(HWND, LPPOINT) = ScreenToClient;
     HWND (WINAPI* capture)() = GetCapture;
 };
+
+void UpdatePaneHoverActivation(AppState& s, const ui::WindowViewModel& vm,
+                               const ui::HitTestResult& hit, POINT point, WPARAM buttons);
 
 // Applies hover only: never selects an item or changes keyboard/pane focus.
 bool UpdatePointerHover(AppState& s, const ui::HitTestResult& hit, POINT point);

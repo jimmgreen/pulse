@@ -1,4 +1,5 @@
 #include "window_overview_view.h"
+#include "window_layout_diagram.h"
 #include "FluentTokens.h"
 #include "typography.h"
 #include "window_switcher_view.h"
@@ -10,7 +11,6 @@ namespace pulse::ui {
 namespace {
 
 // DIP
-constexpr float kInset = 14.0f;     // panel inside the client area
 constexpr float kPad = 20.0f;       // inside the panel
 constexpr float kHeaderH = 58.0f;
 constexpr float kButtonH = 32.0f;
@@ -78,8 +78,7 @@ void WindowOverviewView::Hide() noexcept {
 // last. Rects are kept unscrolled; scroll_ is applied when used.
 void WindowOverviewView::Layout() {
     const float s = scale_;
-    panel_ = D2D1::RectF(client_.left + kInset * s, client_.top + kInset * s, client_.right - kInset * s,
-                         client_.bottom - kInset * s);
+    panel_ = client_;
     const auto width_of = [&](const std::wstring& text) {
         const float w = f_small_ && dwrite_ ? MeasureTextWidth(dwrite_, f_small_, text)
                                             : static_cast<float>(text.size()) * 13.0f * s;
@@ -88,13 +87,19 @@ void WindowOverviewView::Layout() {
     const float by = panel_.top + (kHeaderH - kButtonH) * 0.5f * s;
     const float done_w = width_of(data_.done);
     done_button_ = D2D1::RectF(panel_.right - kPad * s - done_w, by, panel_.right - kPad * s, by + kButtonH * s);
-    const float merge_w = width_of(data_.merge_all);
-    merge_button_ = D2D1::RectF(done_button_.left - 8.0f * s - merge_w, by, done_button_.left - 8.0f * s,
-                                by + kButtonH * s);
 
     area_ = D2D1::RectF(panel_.left + kPad * s, panel_.top + kHeaderH * s, panel_.right - kPad * s,
                         panel_.bottom - 10.0f * s);
     const float avail_w = std::max(area_.right - area_.left, 1.0f);
+    const float toolbar_w = width_of(data_.arrange) + 26*s;
+    const float title_w = width_of(data_.title);
+    arrange_in_header_ = done_button_.left - toolbar_w - 12*s > area_.left + title_w + 24*s;
+    const float toolbar_x = arrange_in_header_ ? done_button_.left - toolbar_w - 10*s : area_.left;
+    const float toolbar_y = arrange_in_header_ ? by : area_.top;
+    arrange_buttons_.clear();
+    if (!data_.arrangements.empty())
+        arrange_buttons_.push_back(D2D1::RectF(toolbar_x, toolbar_y, toolbar_x + toolbar_w, toolbar_y + kButtonH*s));
+    if (!arrange_in_header_ && !arrange_buttons_.empty()) area_.top=arrange_buttons_.back().bottom+12*s;
     const size_t items = data_.cards.size() + 1;
     const size_t cols = std::clamp<size_t>(static_cast<size_t>((avail_w + kGap * s) / ((kCardMinW + kGap) * s)), 1,
                                            items);
@@ -156,11 +161,10 @@ OverviewHit WindowOverviewView::HitTest(float x, float y) const noexcept {
         hit.kind = OverviewHitKind::Done;
         return hit;
     }
-    if (In(merge_button_, x, y)) {
-        hit.kind = data_.can_merge_all ? OverviewHitKind::MergeAll : OverviewHitKind::Panel;
-        return hit;
+    for (size_t i=0;i<arrange_buttons_.size();++i) if(In(arrange_buttons_[i],x,y)) {
+        hit.kind=OverviewHitKind::Arrange; hit.card=static_cast<int>(i); return hit;
     }
-    hit.kind = OverviewHitKind::Panel;
+    hit.kind = y < panel_.top + kHeaderH * scale_ ? OverviewHitKind::Caption : OverviewHitKind::Panel;
     if (!In(area_, x, y)) return hit;
     const float dy = -scroll_;
     if (In(Shift(new_card_, dy), x, y)) {
@@ -294,16 +298,8 @@ void WindowOverviewView::Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, ID
     const float line = std::max(1.0f, s);
     const D2D1_COLOR_F surface = Opaque(theme.surface_flyout, theme.bg);
 
-    // Backdrop and panel.
-    dc->FillRectangle(client_, use(D2D1::ColorF(0, 0, 0, 0.32f)));
-    const float radius = 14.0f * s;
-    for (int i = 6; i >= 1; --i) {
-        const float g = static_cast<float>(i) * 2.5f * s;
-        fill(D2D1::RectF(panel_.left - g, panel_.top - g + 8.0f * s, panel_.right + g, panel_.bottom + g + 8.0f * s),
-             radius + g, D2D1::ColorF(0, 0, 0, 0.04f));
-    }
-    fill(panel_, radius, surface);
-    stroke(panel_, radius, theme.stroke_card, line);
+    // Overview is a full-window surface; the native window owns its outer frame.
+    dc->FillRectangle(client_, use(surface));
 
     // Header: title, hint (or the notice), buttons.
     const float hx = panel_.left + kPad * s;
@@ -311,13 +307,23 @@ void WindowOverviewView::Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, ID
     const float title_w = MeasureTextWidth(dwrite, f_title_, data_.title);
     text(f_title_, data_.title, D2D1::RectF(hx, hy0, hx + title_w + 2.0f * s, hy1), theme.text);
     const bool notice = !data_.notice.empty();
-    text(f_small_, notice ? data_.notice : data_.hint,
-         D2D1::RectF(hx + title_w + 16.0f * s, hy0, merge_button_.left - 16.0f * s, hy1),
-         notice ? theme.accent : theme.text_secondary);
-    const bool merge_hot = hover_.kind == OverviewHitKind::MergeAll;
-    fill(merge_button_, 6.0f * s, Alpha(theme.text, merge_hot ? 0.10f : 0.05f));
-    stroke(merge_button_, 6.0f * s, theme.stroke_card, line);
-    text(f_center_, data_.merge_all, merge_button_, data_.can_merge_all ? theme.text : Alpha(theme.text, 0.4f));
+    const auto hint_rect = D2D1::RectF(hx + title_w + 16.0f * s, hy0,
+        arrange_in_header_ && !arrange_buttons_.empty() ? arrange_buttons_.front().left - 12*s : done_button_.left - 16*s, hy1);
+    if (hint_rect.right - hint_rect.left >= 100*s)
+        text(f_small_, notice ? data_.notice : data_.hint, hint_rect, notice ? theme.accent : theme.text_secondary);
+    if (!arrange_buttons_.empty()) {
+        const auto r = arrange_buttons_.front();
+        const bool hot = hover_.kind == OverviewHitKind::Arrange;
+        fill(r, 6*s, hot ? theme.fill_hover : Alpha(theme.text, 0.05f));
+        stroke(r, 6*s, theme.stroke_card, line);
+        DrawWindowArrangementIcon(dc, D2D1::RectF(r.left+10*s,r.top+10*s,r.left+26*s,r.bottom-10*s),
+            3, use(theme.text_secondary), surface);
+        auto label = r; label.left += 26*s; label.right -= 12*s;
+        text(f_center_, data_.arrange, label, theme.text);
+        const float cx = r.right - 12*s, cy = (r.top + r.bottom)*0.5f;
+        dc->DrawLine(D2D1::Point2F(cx-3*s,cy-1*s), D2D1::Point2F(cx,cy+2*s), use(theme.text_secondary), line);
+        dc->DrawLine(D2D1::Point2F(cx,cy+2*s), D2D1::Point2F(cx+3*s,cy-1*s), use(theme.text_secondary), line);
+    }
     const bool done_hot = hover_.kind == OverviewHitKind::Done;
     fill(done_button_, 6.0f * s, done_hot ? Alpha(theme.accent, 0.88f) : theme.accent);
     text(f_center_, data_.done, done_button_, D2D1::ColorF(1, 1, 1, 1));

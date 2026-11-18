@@ -44,6 +44,7 @@ TiffReduceStatus ReduceTiff(TiffByteSource& source, uint32_t min_edge, unsigned 
 TiffReduceStatus ReduceTiffMemory(const uint8_t* data, size_t size, uint32_t min_edge,
                                   unsigned threads, TiffReduced& out);
 // False whenever WIC should decode the file instead.
+bool EstimateReducedTiffMemory(const std::wstring& path, uint32_t min_edge, uint64_t& bytes);
 bool ReduceTiffFile(const std::wstring& path, uint32_t min_edge, TiffReduced& out);
 
 // Exposed for tests: TIFF LZW (MSB-first, early change). Writes at most

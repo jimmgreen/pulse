@@ -9,4 +9,8 @@ namespace pulse::ui {
 // 标签页与窗口, 启动与集成, 文件操作).
 inline constexpr int kSettingsPageAi = 13;
 
+// Settings > AI 助手: Pulse's own assistant (a sidebar row under 增强包).
+inline constexpr int kSettingsPageAssistant = 14;
+inline constexpr int kSettingsPageNativeExtensions = 15;
+
 } // namespace pulse::ui

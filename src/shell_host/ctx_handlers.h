@@ -39,6 +39,7 @@ struct CtxItemOut {
     // The row's MIIM_BITMAP as premultiplied BGRA (what Explorer paints next
     // to the label); null when the handler set none.
     common::MenuIconRef icon;
+    uint8_t depth = 0;          // preorder tree depth; legacy child rows default to 1
 };
 
 struct CtxHandlerSlot {

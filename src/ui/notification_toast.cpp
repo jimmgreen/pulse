@@ -9,19 +9,18 @@
 
 namespace pulse::ui {
 namespace {
-// Motion (pulse_motion_v2 toasts): a capsule rises 14 dip on the Pop spring
-// while its plate unfurls from 70% width and fades in, the content following
-// 40 ms later; a replacing message morphs the plate to its new width; a
-// dismissed one sinks 8 dip and fades in 150 ms. Transform and opacity only.
-// Leaving follows the prototype's poof: 14 dip down, tipping -3 degrees,
-// 200 ms.
-constexpr float kRiseDip = 14.0f, kSinkDip = 14.0f, kUnfurlFrom = 0.70f, kExitTiltDeg = -3.0f;
-constexpr float kFadeInMs = 110.0f, kContentDelayMs = 40.0f, kContentFadeMs = 130.0f, kSwapFadeMs = 140.0f;
-constexpr uint64_t kExitMs = 200;
+// Short, wall-clock bounded motion avoids a long spring tail under load.
+constexpr float kRiseDip = 6.0f, kSinkDip = 6.0f, kUnfurlFrom = 0.90f, kExitTiltDeg = 0.0f;
+constexpr float kFadeInMs = 90.0f, kContentDelayMs = 0.0f, kContentFadeMs = 100.0f, kSwapFadeMs = 100.0f;
+constexpr uint64_t kExitMs = 100;
 constexpr size_t kMaxGhosts = 3;
 constexpr ULONGLONG kGhostLifeMs = 8000;
 constexpr float kStackStepDip = 9.0f, kFanStepDip = 52.0f;
-uint32_t EnterSettleMs() noexcept { return motion::SpringSettleMs(motion::spring::Pop); }
+uint32_t EnterSettleMs() noexcept { return 180; }
+float ToastProgress(float ms) noexcept {
+    const float t = (std::clamp)(ms / 180.0f, 0.0f, 1.0f);
+    return 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+}
 float Clamp01(float v) noexcept { return (std::clamp)(v, 0.0f, 1.0f); }
 
 // Moves the drawing by the pose's drop and, once the plate is down, clips and
@@ -159,6 +158,14 @@ void NotificationToast::ShowError(HWND owner, std::wstring title, std::wstring m
     Show(owner, std::move(title), std::move(message), true);
     kind_ = fluent::InfoBarKind::Error;
 }
+void NotificationToast::ShowActionCard(HWND owner, fluent::InfoBarKind kind, std::wstring title, std::wstring message,
+                                       std::vector<SnackAction> actions) {
+    Show(owner, std::move(title), std::move(message), true);
+    kind_ = kind;
+    if (actions.size() > 2) actions.resize(2);
+    actions_ = std::move(actions);
+    action_rects_.assign(actions_.size(), D2D1_RECT_F{});
+}
 void NotificationToast::Dismiss(HWND owner) {
     const bool was_up = visible_;
     visible_ = false;
@@ -180,10 +187,17 @@ void NotificationToast::Dismiss(HWND owner) {
 
 float NotificationToast::Expand() const noexcept {
     if (expand_from_ == expand_to_) return expand_to_;
-    const float p = motion::SpringProgress(motion::spring::Pop, static_cast<float>(motion::NowMs() - expand_at_));
+    const float p = ToastProgress(static_cast<float>(motion::NowMs() - expand_at_));
     return expand_from_ + (expand_to_ - expand_from_) * p;
 }
 
+void NotificationToast::AccountTime(ULONGLONG now) noexcept {
+    if (!persistent_ && !hovered_) {
+        const auto elapsed = now - last_tick_;
+        remaining_ = elapsed >= remaining_ ? 0 : remaining_ - elapsed;
+    }
+    last_tick_ = now;
+}
 bool NotificationToast::StackMoving() const noexcept {
     if (ghosts_.empty()) return false;
     const uint64_t now = motion::NowMs();
@@ -207,13 +221,13 @@ NotificationToast::Pose NotificationToast::CurrentPose(float scale, float target
     const float t = static_cast<float>(motion::NowMs() - enter_at_);
     if (swapped_ && swap_snack_ == snack_) {
         if (snack_ && swap_from_w_ > 0.0f) {
-            const float s = motion::SpringProgress(motion::spring::Snappy, t);
+            const float s = ToastProgress(t);
             pose.plate_w = swap_from_w_ + (target_w - swap_from_w_) * s;
         }
         pose.content_alpha = Clamp01(t / kSwapFadeMs);
         return pose;
     }
-    const float s = motion::SpringProgress(motion::spring::Pop, t);
+    const float s = ToastProgress(t);
     pose.dy = kRiseDip * scale * (1.0f - s);
     if (snack_) pose.plate_w = target_w * (kUnfurlFrom + (1.0f - kUnfurlFrom) * s);
     pose.plate_alpha = Clamp01(t / kFadeInMs);
@@ -240,26 +254,34 @@ bool NotificationToast::HandleMessage(HWND owner, UINT message, WPARAM wparam, L
     }
     if (message == WM_TIMER && wparam == timer) {
         const auto now = GetTickCount64();
-        if (!persistent_ && !hovered_) {
-            const auto elapsed = now - last_tick_;
-            remaining_ = elapsed >= remaining_ ? 0 : remaining_ - elapsed;
-            if (!remaining_) { Dismiss(owner); return true; }
-        }
-        last_tick_ = now;
+        AccountTime(now);
+        if (!persistent_ && !hovered_ && !remaining_) { Dismiss(owner); return true; }
         // Old capsules leave the stack on their own; the fan holds them.
+        bool changed = false;
         if (!hovered_) {
             const size_t before = ghosts_.size();
             while (!ghosts_.empty() && now - ghosts_.back().at > kGhostLifeMs) ghosts_.pop_back();
-            if (ghosts_.size() != before && ghosts_.empty()) expand_from_ = expand_to_ = 0.0f;
+            changed = ghosts_.size() != before;
+            if (changed && ghosts_.empty()) expand_from_ = expand_to_ = 0.0f;
         }
-        // 16 ms frames while the toast comes in, then only the run-down line.
-        if (StackMoving()) {
+        // 16 ms frames only while something moves. A settled capsule repaints
+        // nothing: a single timer wakes it to expire it (or the oldest ghost),
+        // so the owner window is not redrawn on a fixed cadence.
+        const bool entering = animate_ && motion::NowMs() - enter_at_ < EnterSettleMs();
+        if (StackMoving() || entering) {
             SetTimer(owner, timer, 16, nullptr);
-        } else if (!animate_ || motion::NowMs() - enter_at_ >= EnterSettleMs()) {
-            if (persistent_) KillTimer(owner, timer);
-            else SetTimer(owner, timer, snack_ ? 100 : 200, nullptr);  // the capsule's line runs down smoothly
+            changed = true;
+        } else if (persistent_ || hovered_) {
+            KillTimer(owner, timer);  // hover resumes it on leave
+        } else {
+            ULONGLONG wait = remaining_;
+            if (!ghosts_.empty()) {
+                const auto age = now - ghosts_.back().at;
+                wait = (std::min)(wait, age >= kGhostLifeMs ? ULONGLONG{1} : kGhostLifeMs - age + 1);
+            }
+            SetTimer(owner, timer, static_cast<UINT>((std::max)(wait, ULONGLONG{16})), nullptr);
         }
-        InvalidateRect(owner, nullptr, FALSE);
+        if (changed) InvalidateRect(owner, nullptr, FALSE);
         return true;
     }
     const float x = static_cast<float>(GET_X_LPARAM(lparam));
@@ -267,14 +289,15 @@ bool NotificationToast::HandleMessage(HWND owner, UINT message, WPARAM wparam, L
     if (message == WM_MOUSEMOVE) {
         const bool hovered = Contains(card_, x, y) || (!ghosts_.empty() && Contains(stack_area_, x, y));
         if (hovered != hovered_) {
+            AccountTime(GetTickCount64());
             hovered_ = hovered;
-            last_tick_ = GetTickCount64();
             if (!ghosts_.empty()) {
                 expand_from_ = Expand();
                 expand_to_ = hovered ? 1.0f : 0.0f;
                 expand_at_ = motion::NowMs();
-                SetTimer(owner, timer, 16, nullptr);
             }
+            // Leaving re-arms the expiry; entering lets the next tick pause it.
+            SetTimer(owner, timer, 16, nullptr);
             InvalidateRect(owner, nullptr, FALSE);
         }
         if (hovered_) {
@@ -284,20 +307,20 @@ bool NotificationToast::HandleMessage(HWND owner, UINT message, WPARAM wparam, L
         }
         if (pressed_card_ || hovered_) return true;
     } else if (message == WM_MOUSELEAVE) {
+        AccountTime(GetTickCount64());
         hovered_ = false;
-        last_tick_ = GetTickCount64();
+        SetTimer(owner, timer, 16, nullptr);  // resume the expiry
         if (!ghosts_.empty() && expand_to_ != 0.0f) {
             expand_from_ = Expand();
             expand_to_ = 0.0f;
             expand_at_ = motion::NowMs();
-            SetTimer(owner, timer, 16, nullptr);
             InvalidateRect(owner, nullptr, FALSE);
         }
     } else if (message == WM_LBUTTONDOWN && Contains(card_, x, y)) {
         pressed_card_ = true;
         pressed_close_ = Contains(close_, x, y);
         pressed_action_ = -1;
-        for (size_t i = 0; snack_ && i < action_rects_.size(); ++i)
+        for (size_t i = 0; i < action_rects_.size(); ++i)
             if (Contains(action_rects_[i], x, y)) pressed_action_ = static_cast<int>(i);
         SetCapture(owner);
         InvalidateRect(owner, nullptr, FALSE);
@@ -305,7 +328,8 @@ bool NotificationToast::HandleMessage(HWND owner, UINT message, WPARAM wparam, L
     } else if (message == WM_LBUTTONUP && (pressed_card_ || Contains(card_, x, y))) {
         const bool close = pressed_close_ && Contains(close_, x, y);
         const int pressed_action = pressed_action_;
-        const bool action = !snack_ && pressed_card_ && !pressed_close_ && Contains(card_, x, y) && action_message_;
+        const bool action = !snack_ && actions_.empty() && pressed_card_ && !pressed_close_ && Contains(card_, x, y) &&
+                            action_message_;
         pressed_close_ = pressed_card_ = false;
         pressed_action_ = -1;
         if (GetCapture() == owner) ReleaseCapture();
@@ -313,10 +337,11 @@ bool NotificationToast::HandleMessage(HWND owner, UINT message, WPARAM wparam, L
         else if (action) {
             PostMessageW(owner, action_message_, 0, 0);
             Dismiss(owner);
-        } else if (snack_ && pressed_action >= 0 && static_cast<size_t>(pressed_action) < actions_.size() &&
+        } else if (pressed_action >= 0 && static_cast<size_t>(pressed_action) < actions_.size() &&
+                   static_cast<size_t>(pressed_action) < action_rects_.size() &&
                    Contains(action_rects_[static_cast<size_t>(pressed_action)], x, y)) {
-            // The capsule acts on its buttons only (M7i): the rest of it is text.
-            if (const UINT post = actions_[static_cast<size_t>(pressed_action)].message) PostMessageW(owner, post, 0, 0);
+            // The capsule and an action card act on their buttons only: the rest is text.
+            if (const UINT post = actions_[static_cast<size_t>(pressed_action)].message) PostMessageW(owner, post, actions_[static_cast<size_t>(pressed_action)].wparam, 0);
             Dismiss(owner);
         } else {
             InvalidateRect(owner, nullptr, FALSE);
@@ -365,9 +390,10 @@ void NotificationToast::Draw(Compositor& compositor, const Theme& theme, float s
         DWRITE_TEXT_METRICS metrics{};
         if (SUCCEEDED(body->GetMetrics(&metrics))) {
             const float line = metrics.lineCount ? metrics.height / static_cast<float>(metrics.lineCount) : px(16.0f);
-            body_h = (std::min)(metrics.height, std::ceil(line * 2.0f));
-            if (metrics.lineCount > 2) {
-                // Two lines at most; the rest is cut with an ellipsis.
+            // Two lines at most (four on a card with buttons: it explains what to do).
+            const UINT32 max_lines = actions_.empty() ? 2u : 4u;
+            body_h = (std::min)(metrics.height, std::ceil(line * static_cast<float>(max_lines)));
+            if (metrics.lineCount > max_lines) {
                 body->SetMaxHeight(body_h + 0.5f);
                 ComPtr<IDWriteInlineObject> ellipsis;
                 if (SUCCEEDED(factory->CreateEllipsisTrimmingSign(body.get(), &ellipsis))) {
@@ -379,7 +405,11 @@ void NotificationToast::Draw(Compositor& compositor, const Theme& theme, float s
             }
         }
     }
-    const float height = std::round(px(12.0f) + title_h + (body_h > 0.0f ? px(2.0f) + body_h : 0.0f) + px(12.0f));
+    // An action card: a row of buttons under the text.
+    const float button_h = px(28.0f), buttons_gap = px(10.0f);
+    const float buttons_h = actions_.empty() ? 0.0f : buttons_gap + button_h;
+    const float height = std::round(px(12.0f) + title_h + (body_h > 0.0f ? px(2.0f) + body_h : 0.0f) + buttons_h +
+                                    px(12.0f));
     const float right = std::round(window_w - margin);
     const float top = std::round(window_h - px(48.0f) - height);
     card_ = D2D1::RectF(right - width, top, right, top + height);
@@ -390,7 +420,15 @@ void NotificationToast::Draw(Compositor& compositor, const Theme& theme, float s
     DrawSnackPlate(dc, card_, radius, pal, scale, high_contrast, pose.plate_alpha);
     if (pose.content_alpha <= 0.0f) return;
     scope.Fade(pose.content_alpha);
-    if (kind_ == fluent::InfoBarKind::Error && !high_contrast) {
+    const bool toned = kind_ == fluent::InfoBarKind::Error ||
+                       (kind_ == fluent::InfoBarKind::Warning && !actions_.empty());
+    if (toned && !high_contrast) {
+        // A card with buttons is tinted in its tone: it asks for a next step.
+        if (!actions_.empty()) {
+            D2D1_COLOR_F tint = painter_.StatusToneColor(kind_);
+            tint.a = 0.07f;
+            painter_.FillRoundedRect(card_, radius, tint);
+        }
         // An error keeps a thin edge in its tone so it is not read as a status note.
         D2D1_COLOR_F edge = painter_.StatusToneColor(kind_);
         edge.a = 0.55f;
@@ -414,6 +452,24 @@ void NotificationToast::Draw(Compositor& compositor, const Theme& theme, float s
     if (GetCursorPos(&cursor) && ScreenToClient(compositor.Hwnd(), &cursor)) {
         cx = static_cast<float>(cursor.x);
         cy = static_cast<float>(cursor.y);
+    }
+    if (!actions_.empty()) {
+        action_rects_.resize(actions_.size());
+        float bx = card_.left + text_x;
+        const float by = card_.bottom - px(12.0f) - button_h;
+        for (size_t i = 0; i < actions_.size(); ++i) {
+            const float bw = (std::max)(px(72.0f), painter_.MeasureButtonWidth(actions_[i].label));
+            const D2D1_RECT_F button = D2D1::RectF(bx, by, (std::min)(bx + bw, card_.right - pad), by + button_h);
+            action_rects_[i] = button;
+            fluent::ButtonSpec spec;
+            spec.bounds = button;
+            spec.text = actions_[i].label;
+            spec.kind = i == 0 && !high_contrast ? fluent::ButtonKind::Primary : fluent::ButtonKind::Standard;
+            spec.state.hovered = visible_ && Contains(button, cx, cy);
+            spec.state.pressed = pressed_action_ == static_cast<int>(i);
+            painter_.DrawButton(spec);
+            bx = button.right + px(8.0f);
+        }
     }
     close_ = D2D1::RectF(card_.right - px(8.0f + 24.0f), line_mid - px(12.0f), card_.right - px(8.0f), line_mid + px(12.0f));
     if (visible_ && (Contains(close_, cx, cy) || pressed_close_)) painter_.FillRoundedRect(close_, px(12.0f), pal.hover);
@@ -559,17 +615,6 @@ void NotificationToast::DrawSnack(Compositor& compositor, const Theme& theme, fl
         dc->DrawLine(D2D1::Point2F(c - arm, mid - arm), D2D1::Point2F(c + arm, mid + arm), brush.get(), px(1.2f));
         dc->DrawLine(D2D1::Point2F(c + arm, mid - arm), D2D1::Point2F(c - arm, mid + arm), brush.get(), px(1.2f));
     }
-    // The time left runs down along the bottom; it stops under the cursor.
-    if (!high_contrast && duration_ > 0) {
-        const float share = static_cast<float>(remaining_) / static_cast<float>(duration_);
-        const float inset = radius * 0.75f;
-        const float span = (card_.right - card_.left - 2.0f * inset) * (std::clamp)(share, 0.0f, 1.0f);
-        const D2D1_COLOR_F line = pal.progress;  // the theme color, as set in Settings
-        if (span > 0.0f)
-            painter_.FillRoundedRect(D2D1::RectF(card_.left + inset, card_.bottom - px(2.5f), card_.left + inset + span,
-                                                 card_.bottom - px(1.0f)),
-                                     px(0.75f), line);
-    }
 }
 
 void NotificationToast::DrawGhosts(Compositor& compositor, const SnackPalette& pal, float scale, float height,
@@ -581,7 +626,7 @@ void NotificationToast::DrawGhosts(Compositor& compositor, const SnackPalette& p
     const float center = (card_.left + card_.right) * 0.5f;
     const float e = Expand();
     // Each ghost moved one step back at the last push.
-    const float push = motion::SpringProgress(motion::spring::Pop, static_cast<float>(motion::NowMs() - stack_push_at_));
+    const float push = ToastProgress(static_cast<float>(motion::NowMs() - stack_push_at_));
     ComPtr<ID2D1SolidColorBrush> brush;
     if (FAILED(dc->CreateSolidColorBrush(pal.text, &brush))) return;
     for (size_t n = ghosts_.size(); n-- > 0;) {

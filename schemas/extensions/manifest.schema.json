@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pulse extension manifest v1",
+  "description": "Native package metadata. The host additionally checks UTF-8 byte limits and the 64 KiB file limit. Unknown and removed declarative fields are rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "id",
+    "name"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": 1
+    },
+    "id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "name": {
+      "$ref": "#/$defs/displayText"
+    },
+    "resources": {
+      "type": "array",
+      "maxItems": 15,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "context.read",
+          "files.readCurrentDirectory",
+          "operations.own",
+          "settings.own",
+          "audit.own",
+          "files.renameCurrentDirectory",
+          "files.readDirectory",
+          "files.watchDirectory",
+          "files.open",
+          "context.events",
+          "files.transferCurrentSelection",
+          "files.deleteCurrentSelection",
+          "files.transferToDirectory",
+          "files.transferFromDirectory",
+          "files.transferDirectoryTree"
+        ]
+      },
+      "description": "Capabilities disclosed at installation; declarations do not gate individual native calls. Instance lifecycle and handle ownership remain enforced."
+    },
+    "native": {
+      "$ref": "#/$defs/nativePackage",
+      "description": "Explicit trusted in-process Windows x64 DLL package. Mutually exclusive with runtime. Discovery grants no execution authority."
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "displayText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "At most 128 UTF-8 bytes after JSON decoding. JSON Schema maxLength counts characters, not bytes; the host enforces the byte limit."
+    },
+    "nativePackage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "architecture",
+        "library",
+        "sha256"
+      ],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1
+        },
+        "architecture": {
+          "const": "windows-x64"
+        },
+        "library": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,123}\\.dll$",
+          "maxLength": 128,
+          "not": {
+            "pattern": "^(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])\\."
+          }
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 63,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          },
+          "description": "Additional package files. Flat non-reserved ASCII filenames, no trailing dot or case-insensitive duplicates including the entry DLL. Each file <=64 MiB; whole package <=256 MiB."
+        }
+      }
+    }
+  }
+}

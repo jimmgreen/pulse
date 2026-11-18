@@ -48,6 +48,11 @@ struct FoldedNameEqual {
 
 } // namespace
 
+bool SameEntrySortPosition(const fs::DirEntry& a, const fs::DirEntry& b,
+                           ui::SortColumn col, ui::SortDirection dir) {
+    return !EntryLess(a, b, col, dir) && !EntryLess(b, a, col, dir);
+}
+
 bool SameEntryGroup(const fs::DirEntry& a, const fs::DirEntry& b,
                     ui::SortColumn col, ui::SortDirection dir) {
     return GroupOrder(a, b, col, dir) == 0;
@@ -97,15 +102,18 @@ std::vector<fs::DirEntry> KeepEntryOrder(const std::vector<fs::DirEntry>& shown,
     std::vector<size_t> kept;
     kept.reserve(std::min(shown.size(), fresh.size()));
     for (const auto& row : shown) {
+        bool renamed = false;
         auto it = fresh_at.find(row.name);
         if (it == fresh_at.end()) {
             const auto rename = renamed_to.find(row.name);
             if (rename == renamed_to.end()) continue;
+            renamed = true;
             it = fresh_at.find(rename->second);
             if (it == fresh_at.end()) continue;
         }
         const size_t at = it->second;
-        if (used[at] || !SameEntryGroup(row, fresh[at], col, dir)) continue;
+        if (used[at] || !SameEntryGroup(row, fresh[at], col, dir) ||
+            (!renamed && !SameEntrySortPosition(row, fresh[at], col, dir))) continue;
         used[at] = 1;
         kept.push_back(at);
     }

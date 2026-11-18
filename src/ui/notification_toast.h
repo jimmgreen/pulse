@@ -14,19 +14,26 @@ enum class SnackIcon { Tab, Window, Undo, Merge, Suggest };
 struct SnackAction {
     std::wstring label;
     UINT message = 0;
+    WPARAM wparam = 0;
 };
 
 class NotificationToast {
 public:
     void Show(HWND owner, std::wstring title, std::wstring message, bool persistent = true, UINT action_message = 0);
     void ShowError(HWND owner, std::wstring title, std::wstring message);
+    // The corner card with up to two buttons under its text (the first one
+    // reads as the primary): each posts its message and closes the card. It
+    // waits to be read like an error; `kind` picks the glyph and tone. The
+    // text gets up to four lines.
+    void ShowActionCard(HWND owner, fluent::InfoBarKind kind, std::wstring title, std::wstring message,
+                        std::vector<SnackAction> actions);
     // The tone of the card shown by the last Show (its glyph; an error also
     // gets an edge). Show picks warning for persistent cards, else info.
     void SetKind(fluent::InfoBarKind kind) noexcept { kind_ = kind; }
     // A one-line capsule at the bottom center (M7i): an icon, what happened
     // (`text`) and a quieter `detail`, up to two buttons and a shortcut chip.
-    // It goes after `duration_ms` (paused under the cursor), with a line that
-    // runs down; only the buttons act, the close button and Esc dismiss.
+    // It goes after `duration_ms` (paused under the cursor); only the buttons
+    // act, the close button and Esc dismiss.
     void ShowSnack(HWND owner, SnackIcon icon, std::wstring text, std::wstring detail,
                    std::vector<SnackAction> actions, std::wstring key = {}, UINT duration_ms = 6000);
     // The next ShowSnack replaces the capsule that is up (its plate morphs)
@@ -97,6 +104,7 @@ private:
     D2D1_RECT_F stack_area_{};   // the drawn ghosts (hover keeps the fan open)
     float Expand() const noexcept;
     bool StackMoving() const noexcept;
+    void AccountTime(ULONGLONG now) noexcept;  // spend time on the expiry unless paused
     void DrawGhosts(Compositor& compositor, const SnackPalette& pal, float scale, float height,
                     const Pose& pose, bool high_contrast);
 };

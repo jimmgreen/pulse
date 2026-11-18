@@ -7,6 +7,7 @@
 // All file operations are confined to bench_data/opstest/selftest_1b2 and
 // cleaned up afterwards.
 #include "selftest_1b2.h"
+#include "group_wheel_ui.h"
 #include "scroll_hover_taskbar_test.h"
 #include "change_tracking_ui_test.h"
 #include "change_tracking_app_test.h"
@@ -50,6 +51,8 @@
 #include "actions/action_inventory.h"
 #include "actions/action_files.h"
 #include "ai_cleanup_scan.h"
+#include "ai_dup_scan.h"
+#include "dup_finder.h"
 #include "actions/action_params.h"
 #include "actions/action_policy.h"
 #include "actions/action_registry.h"
@@ -206,16 +209,17 @@ struct FluentMenuTestPeer {
         menu.model_.SetItems(std::move(items));
         menu.model_.Layout(nullptr, scale, 300.0f * scale);
     }
+    static uint64_t ScrollbarFadeFullMs() { return fluent::ScrollbarFade::kExpandMs; }
     static bool CheckOverflowFit(float scale) {
         FluentMenu menu;
         FillOverflowMenu(menu, scale, 6);
         menu.ApplyHeightLimit(400.0f * scale);
-        if (menu.overflow_ || menu.ArrowPx() != 0.0f ||
+        if (menu.overflow_ || menu.BarSpec().enabled ||
             std::abs(menu.BodyHeightPx() - static_cast<float>(menu.model_.HeightPx())) > 0.01f)
             return false;
         FillOverflowMenu(menu, scale, 60);
         menu.ApplyHeightLimit(400.0f * scale);
-        return menu.overflow_ && menu.Scrollable() && menu.ArrowPx() > 0.0f &&
+        return menu.overflow_ && menu.Scrollable() && menu.BarSpec().enabled &&
             std::abs(menu.BodyHeightPx() - 400.0f * scale) < 0.01f &&
             menu.MaxScrollPx() > 0.0f && menu.scroll_y_ == 0.0f;
     }
@@ -224,27 +228,30 @@ struct FluentMenuTestPeer {
         FillOverflowMenu(menu, scale, 60);
         menu.ApplyHeightLimit(400.0f * scale);
         menu.open_ = true;
-        const float arrow = menu.ArrowPx();
         auto at = [&](float body_y) {
             return POINT{ menu.kShadowMargin + 40, static_cast<LONG>(menu.kShadowMargin + body_y) };
         };
         bool ok = true;
-        menu.OnMouse(at(arrow * 0.5f), false);
-        ok = ok && menu.arrow_hover_ == -1 && menu.hover_row_ == -1;
-        menu.OnMouse(at(arrow + menu.model_.RowTopPx(0) + 2.0f), false);
-        ok = ok && menu.arrow_hover_ == 0 && menu.hover_row_ == 0;
-        const float bottom = menu.BodyHeightPx() - arrow * 0.5f;
-        menu.OnMouse(at(bottom), false);
-        ok = ok && menu.arrow_hover_ == 1 && menu.hover_row_ == -1;
-        menu.OnMouse(at(bottom), true); // a click pages down without invoking anything
-        const float paged = menu.scroll_y_;
-        ok = ok && paged > 0.0f && menu.result_ == 0 && menu.open_;
-        // Rows under the pointer account for the arrow strip and the offset.
-        menu.OnMouse(at(arrow + 2.0f), false);
-        ok = ok && menu.hover_row_ == menu.model_.HitTestRow(paged + 2.0f);
-        const float before = menu.scroll_y_;
-        menu.OnMouse(at(arrow * 0.5f), true); // and the top arrow pages back up
-        ok = ok && menu.scroll_y_ < before;
+        menu.OnMouse(at(menu.model_.RowTopPx(0) + 2.0f), false);
+        ok = ok && menu.hover_row_ == 0;
+        // The shared scrollbar: a press away from it is not a bar press; one
+        // low on its track jumps there without invoking a row; dragging
+        // follows the pointer; releasing ends the drag and keeps the menu.
+        const fluent::ScrollbarSpec bar = menu.BarSpec();
+        const float bx = (bar.viewport.left + bar.viewport.right) * 0.5f;
+        ok = ok && !menu.BarPress(menu.kShadowMargin + 40.0f, bar.viewport.bottom - 2.0f);
+        ok = ok && menu.BarPress(bx, bar.viewport.bottom - 2.0f) && menu.bar_drag_;
+        ok = ok && std::abs(menu.scroll_y_ - menu.MaxScrollPx()) < 0.01f && menu.result_ == 0 && menu.open_;
+        menu.BarDrag(bar.viewport.top);
+        ok = ok && menu.scroll_y_ == 0.0f;
+        menu.BarDrag((bar.viewport.top + bar.viewport.bottom) * 0.5f);
+        const float mid = menu.scroll_y_;
+        ok = ok && mid > 0.0f && mid < menu.MaxScrollPx();
+        menu.BarRelease();
+        ok = ok && !menu.bar_drag_ && !menu.BarDrag(bar.viewport.top) && menu.result_ == 0 && menu.open_;
+        // Rows under the pointer account for the offset.
+        menu.OnMouse(at(2.0f), false);
+        ok = ok && menu.hover_row_ == menu.model_.HitTestRow(mid + 2.0f);
         menu.open_ = false;
         return ok;
     }
@@ -263,23 +270,13 @@ struct FluentMenuTestPeer {
             return false;
         return menu.hover_row_ == -1; // scrolling drops the stale hover
     }
-    static bool CheckOverflowArrowHover(float scale) {
+    static bool CheckOverflowRowSteps(float scale) {
         FluentMenu menu;
         FillOverflowMenu(menu, scale, 60);
         menu.ApplyHeightLimit(400.0f * scale);
-        menu.arrow_hover_ = 1;
-        menu.TickArrowScroll(); // the first tick only starts the clock
-        if (menu.scroll_y_ != 0.0f) return false;
-        menu.arrow_tick_ = std::chrono::steady_clock::now() - std::chrono::milliseconds(70);
-        menu.TickArrowScroll();
-        const float moved = menu.scroll_y_;
         // One whole row per step: the next row's top lines up with the viewport.
-        if (std::abs(moved - menu.model_.RowTopPx(1)) > 0.01f)
-            return false;
-        menu.arrow_hover_ = 0; // the pointer left the arrow
-        menu.arrow_tick_ = std::chrono::steady_clock::now() - std::chrono::milliseconds(70);
-        menu.TickArrowScroll();
-        if (menu.scroll_y_ != moved) return false;
+        menu.ScrollRows(1);
+        if (std::abs(menu.scroll_y_ - menu.model_.RowTopPx(1)) > 0.01f) return false;
         // Paging and stepping back always land on a row top.
         menu.ScrollRows(5);
         menu.ScrollRows(-1);
@@ -306,12 +303,15 @@ struct FluentMenuTestPeer {
             items.push_back(std::move(item));
         }
         // Lay out once to size the limit, then render the same rows mid-scroll
-        // with the pointer resting on the bottom arrow.
+        // with the pointer on the scrollbar.
         menu.model_.SetItems(items);
         menu.model_.Layout(compositor.DwriteFactory(), scale, 0.0f);
         menu.ApplyHeightLimit(360.0f * scale);
         menu.ScrollRows(4);
-        menu.arrow_hover_ = 1;
+        menu.bar_fade_.KeepVisible(true);
+        menu.bar_fade_.SetHot(true, 1);
+        menu.bar_fade_.Tick(1);
+        menu.bar_fade_.Tick(1 + ScrollbarFadeFullMs());
         return menu.overflow_ && menu.SaveDebugSnapshot(path.c_str(), std::move(items), -1);
     }
     static bool CheckSubmenuColors(float scale) {
@@ -326,17 +326,17 @@ struct FluentMenuTestPeer {
         FluentMenuItem clear;
         clear.command = 120;
         clear.text = L"No color dot";
-        menu.sub_model_.SetItems({strip, clear});
-        menu.sub_model_.Layout(nullptr, scale);
+        menu.first_sub_.model.SetItems({strip, clear});
+        menu.first_sub_.model.Layout(nullptr, scale);
         // Deliberately different parent width: submenu hits must use its own geometry.
         menu.model_.SetItems({clear});
         menu.model_.Layout(nullptr, scale, 800.0f);
         const int y = menu.kShadowMargin + static_cast<int>(
-            menu.sub_model_.RowTopPx(0) + menu.sub_model_.RowHeightPx() * 0.5f);
+            menu.first_sub_.model.RowTopPx(0) + menu.first_sub_.model.RowHeightPx() * 0.5f);
         for (int i = 0; i < 8; ++i) {
             int x = -1;
-            for (int candidate = 0; candidate < menu.sub_model_.WidthPx() + menu.kShadowMargin; ++candidate) {
-                if (menu.HitTestSwatch(menu.sub_model_, 0, static_cast<float>(candidate)) == i) {
+            for (int candidate = 0; candidate < menu.first_sub_.model.WidthPx() + menu.kShadowMargin; ++candidate) {
+                if (menu.HitTestSwatch(menu.first_sub_.model, 0, static_cast<float>(candidate)) == i) {
                     x = candidate;
                     break;
                 }
@@ -344,18 +344,18 @@ struct FluentMenuTestPeer {
             if (x < 0) return false;
             menu.open_ = true;
             menu.animating_out_ = false;
-            menu.sub_parent_row_ = 0;
+            menu.first_sub_.parent_row = 0;
             menu.OnSubMouse(POINT{x, y}, false);
-            if (menu.sub_hover_swatch_ != i) return false;
+            if (menu.first_sub_.hover_swatch != i) return false;
             menu.OnSubMouse(POINT{x, y}, true);
             if (menu.result_ != 90 + i) return false;
         }
         menu.open_ = true;
         menu.animating_out_ = false;
-        menu.sub_parent_row_ = 0;
+        menu.first_sub_.parent_row = 0;
         menu.OnSubMouse(POINT{menu.kShadowMargin + 10,
-            menu.kShadowMargin + static_cast<int>(menu.sub_model_.RowTopPx(1) +
-                menu.sub_model_.RowHeightPx() * 0.5f)}, true);
+            menu.kShadowMargin + static_cast<int>(menu.first_sub_.model.RowTopPx(1) +
+                menu.first_sub_.model.RowHeightPx() * 0.5f)}, true);
         return menu.result_ == 120;
     }
 };
@@ -1180,7 +1180,7 @@ void TestBlankPaneClickNavigation() {
         const std::wstring initial_folder = tab->current_path;
         Check(state->appPrefs.blank_click_action == kBlankClickOff, L"blank pane: back on empty click defaults off");
         press();
-        Check(state->marqueePending && !state->blankClickTab,
+        Check(state->listSelection.PendingBand() && !state->blankClickTab,
               L"blank pane: disabled back still permits marquee selection");
         release();
         SendMessageW(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, point);
@@ -1210,10 +1210,10 @@ void TestBlankPaneClickNavigation() {
               L"blank pane: disabling during a press prevents pending navigation");
         state->appPrefs.blank_click_action = kBlankClickBack;
         press();
-        Check(state->marqueePending && state->blankClickTab == tab && GetCapture() == hwnd,
+        Check(state->listSelection.PendingBand() && state->blankClickTab == tab && GetCapture() == hwnd,
               L"blank pane: real blank hit arms click and captures mouse");
         SendMessageW(hwnd, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x + 1, y + 1));
-        Check(state->marqueePending && state->blankClickTab == tab,
+        Check(state->listSelection.PendingBand() && state->blankClickTab == tab,
               L"blank pane: held-button move preserves pending click");
         release();
         Check(tab->current_path == initial_folder,
@@ -1252,7 +1252,7 @@ void TestBlankPaneClickNavigation() {
         tab->back_stack.push(folder);
         const auto history_size = tab->back_stack.size();
         press();
-        Check(state->marqueePending && !state->blankClickTab,
+        Check(state->listSelection.PendingBand() && !state->blankClickTab,
               L"blank pane: search results allow selection without arming navigation");
         release();
         Check(tab->current_path == L"pulse:search:showbox" && tab->back_stack.size() == history_size,
@@ -2024,7 +2024,7 @@ void TestCtrlDragSelection() {
     Check(tab.IsSelected(0) && tab.IsSelected(1) && tab.SelectedCount() == 2,
           L"Ctrl-drag: preserves all selected files and folders");
     // Starting a drag clears the deferred click, as does capture cancellation.
-    state->clickCollapseIndex = -1;
+    state->listSelection.ClearDeferred();
     FinishListRowClick(*state);
     Check(tab.SelectedCount() == 2, L"Ctrl-drag: drag completion does not deselect source");
     HandleListRowClick(*state, 2, true, false);
@@ -2074,17 +2074,17 @@ void TestMenuModel() {
     for (float scale : {1.0f, 1.5f}) {
         const bool hi = scale != 1.0f;
         Check(ui::FluentMenuTestPeer::CheckOverflowFit(scale), hi
-            ? L"menu overflow: a menu taller than the screen stays on it with arrows (#67, 150%)"
-            : L"menu overflow: a menu taller than the screen stays on it with arrows (#67, 100%)");
+            ? L"menu overflow: a menu taller than the screen stays on it with a scrollbar (#67, 150%)"
+            : L"menu overflow: a menu taller than the screen stays on it with a scrollbar (#67, 100%)");
         Check(ui::FluentMenuTestPeer::CheckOverflowPointer(scale), hi
-            ? L"menu overflow: arrows page on click and rows hit-test through the scroll (150%)"
-            : L"menu overflow: arrows page on click and rows hit-test through the scroll (100%)");
+            ? L"menu overflow: the shared scrollbar drags without invoking a row; rows hit-test through the scroll (150%)"
+            : L"menu overflow: the shared scrollbar drags without invoking a row; rows hit-test through the scroll (100%)");
         Check(ui::FluentMenuTestPeer::CheckOverflowKeysAndWheel(scale), hi
-            ? L"menu overflow: keyboard selection stays between the arrows; scrolling clamps (150%)"
-            : L"menu overflow: keyboard selection stays between the arrows; scrolling clamps (100%)");
-        Check(ui::FluentMenuTestPeer::CheckOverflowArrowHover(scale), hi
-            ? L"menu overflow: resting on an arrow keeps scrolling until the pointer leaves (150%)"
-            : L"menu overflow: resting on an arrow keeps scrolling until the pointer leaves (100%)");
+            ? L"menu overflow: keyboard selection stays in view; scrolling clamps (150%)"
+            : L"menu overflow: keyboard selection stays in view; scrolling clamps (100%)");
+        Check(ui::FluentMenuTestPeer::CheckOverflowRowSteps(scale), hi
+            ? L"menu overflow: row steps land on a row top (150%)"
+            : L"menu overflow: row steps land on a row top (100%)");
     }
     Check(ui::FluentMenuTestPeer::CheckSubmenuColors(1.0f),
           L"menu: all submenu color dots hover and dispatch at 100 percent DPI");
@@ -2579,7 +2579,7 @@ void TestContextMenuPrefs() {
         reset.persist = false;
         reset.SetGroupEnabled(ipc::CtxMenuGroup::Share, false);
         reset.ResetToDefaults();
-        Check(reset.share && reset.GroupEnabled(ipc::CtxMenuGroup::System) && !reset.open_with_com,
+        Check(reset.share && reset.GroupEnabled(ipc::CtxMenuGroup::System) && reset.open_with_com,
               L"prefs: restore defaults turns 发送到 and the system group back on");
         // Files written before version 3 stored the old off defaults.
         ContextMenuPrefs old_file;
@@ -3870,6 +3870,12 @@ void TestViewZoomAnchor() {
         };
         press(seg_wall);
         const ui::WindowViewModel wvm = BuildVm(*state);
+        // Wall rows arrive from a worker; the first frame intentionally uses the icon grid.
+        const ULONGLONG wall_start = GetTickCount64();
+        while (!state->renderer.ListRowHeightDip(wvm.pane_slots.front().pane, wvm.pane_slots.front().rect).wall &&
+               GetTickCount64() - wall_start < 5000) Sleep(10);
+        Check(state->renderer.ListRowHeightDip(wvm.pane_slots.front().pane, wvm.pane_slots.front().rect).wall != nullptr,
+              L"photo wall: background rows become ready before checking wall geometry");
         const D2D1_RECT_F wall_item = state->renderer.ItemRectInPane(wvm.pane_slots.front().pane,
                                                                      wvm.pane_slots.front().rect, 3);
         Check(tab->wall && tab->view_mode == ViewMode::LargeIcons && wvm.pane_slots.front().pane.wall &&
@@ -4063,11 +4069,19 @@ void TestFolderSorts() {
     Check(prefs.folder_sorts.Find(L"\\\\?\\c:\\b\\") == newest &&
           prefs.folder_sorts.Find(L"C:/B/") == newest,
           L"folder sorts: case, separators, trailing slash and extended prefix agree");
+    Check(prefs.folder_sorts.Set(L"", newest) &&
+          prefs.folder_sorts.Find(L"pulse:this-pc") == newest &&
+          !prefs.folder_sorts.Set(L"pulse:this-pc", newest),
+          L"folder sorts: This PC empty path saves under its stable virtual key");
+    const auto invalid_column = static_cast<SortColumn>(static_cast<int>(SortColumn::MediaFps) + 1);
     Check(!prefs.folder_sorts.Set(L"pulse:search:x", newest) &&
-          !prefs.folder_sorts.Set(L"", newest) &&
           !prefs.folder_sorts.Set(L"relative", newest) &&
-          !prefs.folder_sorts.Set(L"C:\\Bad", { static_cast<SortColumn>(9), SortDirection::Asc }),
-          L"folder sorts: virtual, nonabsolute and invalid values are rejected");
+          !prefs.folder_sorts.Set(L"C:\\Bad", { static_cast<SortColumn>(-1), SortDirection::Asc }) &&
+          !prefs.folder_sorts.Set(L"C:\\Bad", { invalid_column, SortDirection::Asc }) &&
+          !prefs.folder_sorts.Set(L"", { invalid_column, SortDirection::Asc }) &&
+          !prefs.folder_sorts.Set(L"C:\\Bad", { SortColumn::Name, static_cast<SortDirection>(2) }) &&
+          prefs.folder_sorts.Find(L"") == newest && !prefs.folder_sorts.Find(L"C:\\Bad"),
+          L"folder sorts: other virtual, nonabsolute and invalid values are rejected without changing choices");
     const std::wstring unc = L"\\\\server\\share\\照片";
     prefs.folder_sorts.Set(unc, biggest);
     AppPrefs reloaded;
@@ -4075,10 +4089,11 @@ void TestFolderSorts() {
     reloaded.FromJson(prefs.ToJson());
     Check(reloaded.folder_sorts.Find(L"C:\\B") == newest &&
           reloaded.folder_sorts.Find(unc) == biggest &&
+          reloaded.folder_sorts.Find(L"") == newest &&
           reloaded.folder_sorts.Find(L"C:\\A") == by_name,
           L"folder sorts: preferences round trip including UNC and Unicode");
     bool every_survives = true;
-    for (int c = 0; c < 5; ++c) {
+    for (int c = 0; c <= static_cast<int>(SortColumn::MediaFps); ++c) {
         for (int d = 0; d < 2; ++d) {
             const FolderSort each{ static_cast<SortColumn>(c), static_cast<SortDirection>(d) };
             prefs.folder_sorts.Set(L"C:\\Every", each);
@@ -4091,7 +4106,8 @@ void TestFolderSorts() {
     prefs.folder_views.ApplyToAll(ViewMode::List);
     prefs.folder_sorts.ApplyToAll(biggest);
     Check(!prefs.folder_sorts.Find(L"C:\\B") && !prefs.folder_views.Find(L"C:\\B") &&
-          prefs.folder_sorts.Default() == biggest && prefs.folder_views.Default() == ViewMode::List,
+          prefs.folder_sorts.Default() == biggest && prefs.folder_views.Default() == ViewMode::List &&
+          prefs.folder_sorts.Find(L"") == newest,
           L"folder sorts: apply to all replaces defaults and forgets per-folder choices");
     reloaded.FromJson(prefs.ToJson());
     Check(reloaded.folder_sorts.Default() == biggest &&
@@ -4125,7 +4141,7 @@ void TestFolderSorts() {
               L"folder groups: old preferences keep folders ungrouped");
     }
     prefs.ResetToDefaults();
-    Check(prefs.folder_sorts.Default() == by_name &&
+    Check(prefs.folder_sorts.Default() == by_name && !prefs.folder_sorts.Find(L"") &&
           prefs.folder_views.Default() == ViewMode::Details,
           L"folder sorts: reset restores defaults");
 
@@ -4143,6 +4159,8 @@ void TestFolderSorts() {
     if (ready) {
         state->renderer.SetCompositor(&state->compositor);
         const auto a = WorkspacePath(L"bench_data/folder-sort-fixture/a");
+        state->compositor.RecreateTextFormats(1.0f);
+        state->renderer.SetScale(1.0f);
         const auto b = WorkspacePath(L"bench_data/folder-sort-fixture/b");
         const auto c = WorkspacePath(L"bench_data/folder-sort-fixture/c");
         const auto sort_of = [](const app::Tab* t) {
@@ -4203,6 +4221,94 @@ void TestFolderSorts() {
         Check(!ApplyGroupToAllFolders(*state, 3, false), L"folder groups: apply to all ignores virtual views");
         active->current_path = real_path;
         state->appPrefs.folder_groups.Clear();
+        OpenSortWheel(*state);
+        Check(state->renderer.GroupWheelPicker().IsOpen(), L"sort wheel: opens in isolated window");
+        auto& sort_wheel = state->renderer.GroupWheelPicker();
+        sort_wheel.Tick(GetTickCount64() + 1000);
+        auto* dc = state->compositor.Dc();
+        const auto sort_vm = BuildVm(*state);
+        Check(dc != nullptr, L"sort wheel: view model and drawing context ready");
+        dc->BeginDraw();
+        dc->Clear(D2D1::ColorF(0xf5f5f5));
+        state->renderer.Render(sort_vm, D2D1::RectF(0, 0, 1000, 700),
+            ui::MakeTheme(false, D2D1::ColorF(0x0078d4)));
+        Check(SUCCEEDED(dc->EndDraw()), L"sort wheel: production rendering succeeds");
+        const auto capture = WorkspacePath(L"bench_data/sort-wheel-light.png");
+        Check(state->compositor.SaveSnapshot(capture.c_str()), L"sort wheel: screenshot saved");
+        bool all_hit = false;
+        for (int y = 0; y < 700 && !all_hit; y += 4)
+            for (int x = 0; x < 1000 && !all_hit; x += 4)
+                all_hit = sort_wheel.HitApplyAll(static_cast<float>(x), static_cast<float>(y));
+        Check(all_hit, L"sort wheel: apply all button is rendered and clickable");
+        sort_wheel.Close();
+        state->scale = 1.25f;
+        state->darkMode = true;
+        state->renderer.SetScale(state->scale);
+        state->compositor.RecreateTextFormats(state->scale);
+        OpenSortWheel(*state);
+        sort_wheel.Tick(GetTickCount64() + 1000);
+        dc->BeginDraw();
+        dc->Clear(D2D1::ColorF(0x202020));
+        state->renderer.Render(BuildVm(*state), D2D1::RectF(0, 0, 1000, 700),
+            ui::MakeTheme(true, D2D1::ColorF(0x0078d4)));
+        Check(SUCCEEDED(dc->EndDraw()), L"sort wheel: dark 125 percent rendering succeeds");
+        const auto dark_capture = WorkspacePath(L"bench_data/sort-wheel-dark-125.png");
+        Check(state->compositor.SaveSnapshot(dark_capture.c_str()), L"sort wheel: dark screenshot saved");
+        sort_wheel.Close();
+        state->scale = 1.0f;
+        state->darkMode = false;
+        state->renderer.SetScale(state->scale);
+        state->compositor.RecreateTextFormats(state->scale);
+        const auto previous_mode = DefaultFolderSortMode();
+        const auto previous_view = active->view_mode;
+        const auto previous_group = active->group_by;
+        const auto previous_view_default = state->appPrefs.folder_views.Default();
+        state->appPrefs.folder_sorts.SetFolderMode(a, 2);
+        auto other = std::make_unique<AppState>(state->core);
+        other->isolatedTest = true;
+        other->hwnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP,
+            0, 0, 1000, 700, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        other->window_tabs.NewTab(a);
+        other->pane = other->window_tabs.Active()->panes.front().get();
+        auto* other_tab = other->pane->ActiveTab();
+        other_tab->folder_sort = 2;
+        other_tab->view_mode = ViewMode::Details;
+        const bool other_ready = other->hwnd && other->compositor.Init(other->hwnd);
+        Check(other_ready, L"sort wheel: second window initialized");
+        other->renderer.SetCompositor(&other->compositor);
+        state->core.windows.Add(state->hwnd, state.get());
+        state->core.windows.Add(other->hwnd, other.get());
+        Check(ApplySortToAllFolders(*state, static_cast<int>(SortColumn::Size), true, 1, false),
+              L"sort wheel: apply chosen sort to all without applying view or grouping");
+        Check(sort_of(other_tab) == FolderSort{SortColumn::Size, SortDirection::Desc} &&
+              other_tab->folder_sort == -1 && other_tab->view_mode == ViewMode::Details,
+              L"sort wheel: another window receives sorting without changing its view");
+        state->core.windows.Remove(other->hwnd);
+        state->core.windows.Remove(state->hwnd);
+        other->watches.Stop();
+        DestroyWindow(other->hwnd);
+        other->hwnd = nullptr;
+        Check(state->appPrefs.folder_sorts.Default() == FolderSort{SortColumn::Size, SortDirection::Desc} &&
+              !state->appPrefs.folder_sorts.Find(a) && !state->appPrefs.folder_sorts.FindFolderMode(a) &&
+              active->folder_sort == -1 && active->EffectiveFolderSort() == FolderSortMode::FoldersLast,
+              L"sort wheel: selected direction and folder placement replace folder overrides");
+        Check(active->view_mode == previous_view && active->group_by == previous_group &&
+              state->appPrefs.folder_views.Default() == previous_view_default,
+              L"sort wheel: applying sorting preserves view and grouping");
+        active->NavigateTo(b);
+        StartLoadingPath(*state, *active, b);
+        Check(sort_of(active) == FolderSort{SortColumn::Size, SortDirection::Desc} &&
+              active->EffectiveFolderSort() == FolderSortMode::FoldersLast,
+              L"sort wheel: reopening a folder inherits the global sort and bottom placement");
+        active->current_path = L"pulse:recent";
+        Check(!ApplySortToAllFolders(*state, static_cast<int>(SortColumn::Name), false, 0, false),
+              L"sort wheel: virtual views cannot overwrite global sorting");
+        active->current_path = real_path;
+        active->search_content_active = true;
+        Check(!ApplySortToAllFolders(*state, static_cast<int>(SortColumn::Name), false, 0, false),
+              L"sort wheel: pending content search cannot overwrite global sorting");
+        active->search_content_active = false;
+        SetFolderSortMode(previous_mode);
     }
     state->watches.Stop();
     DestroyWindow(hwnd);
@@ -4595,17 +4701,30 @@ void TestNavigateAlwaysEnumerates() {
     RemoveDirectoryW(parent.c_str());
 }
 
+std::wstring CreateSnapshotPatchDirectory(const wchar_t* name) {
+    const std::wstring dir = kOpsTestRoot + L"\\" + name + L"-" +
+        std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+    std::error_code error;
+    std::filesystem::create_directories(kOpsTestRoot, error);
+    const bool created = !error && std::filesystem::create_directory(dir, error);
+    Check(created && !error, L"patch fixture: creates an isolated workspace directory");
+    if (!created || error) {
+        LogLine(L"[INFO] patch fixture: directory creation failed (%d): %s\n", error.value(), dir.c_str());
+        return {};
+    }
+    return dir;
+}
+
 void TestSnapshotPatch() {
-    wchar_t temp[MAX_PATH]{};
-    GetTempPathW(ARRAYSIZE(temp), temp);
-    const std::wstring dir = std::wstring(temp) + L"PulsePatchTest-" +
-                             std::to_wstring(GetCurrentProcessId());
-    CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring dir = CreateSnapshotPatchDirectory(L"PulsePatchTest");
+    if (dir.empty()) return;
     const std::wstring a = dir + L"\\alpha.txt";
     const std::wstring b = dir + L"\\beta.txt";
     HANDLE hf = CreateFileW(a.c_str(), GENERIC_WRITE, 0, nullptr,
                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hf != INVALID_HANDLE_VALUE) CloseHandle(hf);
+    Check(hf != INVALID_HANDLE_VALUE, L"patch fixture: creates the expected real file");
+    if (hf == INVALID_HANDLE_VALUE) { RemoveDirectoryW(dir.c_str()); return; }
+    CloseHandle(hf);
 
     std::vector<fs::DirEntry> entries;
     fs::DirNotifyEvent added;
@@ -4618,13 +4737,19 @@ void TestSnapshotPatch() {
 
     hf = CreateFileW(b.c_str(), GENERIC_WRITE, 0, nullptr,
                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hf != INVALID_HANDLE_VALUE) CloseHandle(hf);
+    Check(hf != INVALID_HANDLE_VALUE, L"patch fixture: creates the expected real file");
+    if (hf == INVALID_HANDLE_VALUE) {
+        DeleteFileW(a.c_str());
+        RemoveDirectoryW(dir.c_str());
+        return;
+    }
+    CloseHandle(hf);
     added.name = L"beta.txt";
     Check(ApplyDirNotify(entries, dir, added, ui::SortColumn::Name, ui::SortDirection::Asc) ==
               NotifyPatch::Applied &&
           entries.size() == 2,
           L"patch: second ADDED keeps sort order");
-    Check(_wcsicmp(entries[0].name.c_str(), L"alpha.txt") == 0 &&
+    Check(entries.size() == 2 && _wcsicmp(entries[0].name.c_str(), L"alpha.txt") == 0 &&
           _wcsicmp(entries[1].name.c_str(), L"beta.txt") == 0,
           L"patch: name sort is alpha then beta");
 
@@ -4660,11 +4785,8 @@ void TestSnapshotPatch() {
 }
 
 void TestSnapshotPatchBatch() {
-    wchar_t temp[MAX_PATH]{};
-    GetTempPathW(ARRAYSIZE(temp), temp);
-    const std::wstring dir = std::wstring(temp) + L"PulsePatchBatch-" +
-                             std::to_wstring(GetCurrentProcessId());
-    CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring dir = CreateSnapshotPatchDirectory(L"PulsePatchBatch");
+    if (dir.empty()) return;
     const auto full = [&](const wchar_t* name) { return dir + L"\\" + name; };
     const auto make = [&](const wchar_t* name, DWORD bytes) {
         HANDLE hf = CreateFileW(full(name).c_str(), GENERIC_WRITE, 0, nullptr,
@@ -4792,11 +4914,8 @@ void TestSnapshotPatchBatch() {
 
 // #13: patches keep rows on screen in place like File Explorer.
 void TestSnapshotPatchHoldsRows() {
-    wchar_t temp[MAX_PATH]{};
-    GetTempPathW(ARRAYSIZE(temp), temp);
-    const std::wstring dir = std::wstring(temp) + L"PulsePatchHold-" +
-                             std::to_wstring(GetCurrentProcessId());
-    CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring dir = CreateSnapshotPatchDirectory(L"PulsePatchHold");
+    if (dir.empty()) return;
     const auto full = [&](const wchar_t* name) { return dir + L"\\" + name; };
     const auto make = [&](const wchar_t* name, DWORD bytes) {
         HANDLE hf = CreateFileW(full(name).c_str(), GENERIC_WRITE, 0, nullptr,
@@ -4845,9 +4964,9 @@ void TestSnapshotPatchHoldsRows() {
     make(L"beta.txt", 5000);
     Check(ApplyDirNotify(entries, dir, ev(FILE_ACTION_MODIFIED, L"beta.txt"),
                          ui::SortColumn::Size, ui::SortDirection::Desc) == NotifyPatch::Applied &&
-          names(entries) == L"aardvark.txt,zeta.txt,beta.txt,gamma.txt" &&
-          entries[2].size == 5000u,
-          L"patch hold: a modified row keeps its place and takes the new size");
+          names(entries) == L"beta.txt,aardvark.txt,zeta.txt,gamma.txt" &&
+          entries[0].size == 5000u,
+          L"patch sort: a modified size key moves the row to its descending sort position");
 
     {
         const ScopedEntryGrouping grouping(static_cast<int>(GroupBy::Type));
@@ -4855,11 +4974,11 @@ void TestSnapshotPatchHoldsRows() {
         make(L"notes.md", 1);
         name_asc(entries, ev(FILE_ACTION_ADDED, L"new"), dir);
         name_asc(entries, ev(FILE_ACTION_ADDED, L"notes.md"), dir);
-        Check(names(entries) == L"new,notes.md,aardvark.txt,zeta.txt,beta.txt,gamma.txt",
+        Check(names(entries) == L"new,notes.md,beta.txt,aardvark.txt,zeta.txt,gamma.txt",
               L"patch hold: grouped, a new row goes to its sort position in its group");
         MoveFileW(full(L"zeta.txt").c_str(), full(L"zeta.md").c_str());
         name_asc(entries, ev(FILE_ACTION_RENAMED_NEW_NAME, L"zeta.md", L"zeta.txt"), dir);
-        Check(names(entries) == L"new,notes.md,zeta.md,aardvark.txt,beta.txt,gamma.txt",
+        Check(names(entries) == L"new,notes.md,zeta.md,beta.txt,aardvark.txt,gamma.txt",
               L"patch hold: grouped, a rename into another group moves to its place there");
     }
 
@@ -5717,8 +5836,51 @@ bool AsPump(const std::function<bool()>& done, DWORD ms, const std::function<voi
 
 } // namespace
 
-// P3: the assistant's gate per action and find_actions' rows
-// (plans/ai/P3_AI接入动作表.html).
+// P3: the assistant's gate per action and find_actions' rows.
+// Task 46: the 重复文件 tab's keep rules (flow E's): organised folder › clean
+// name › earliest or newest; two organised folders keep one each.
+void TestDupKeepRules() {
+    namespace ai = app::ai;
+    const auto file = [](const wchar_t* path, uint64_t mtime, bool organized, bool clean) {
+        ai::DupFile f;
+        f.path = path;
+        f.bytes = 100;
+        f.mtime = mtime;
+        f.organized = organized;
+        f.clean = clean;
+        return f;
+    };
+    ai::DupGroup g;
+    g.files = {file(L"D:\\dl\\a (1).txt", 1, false, false), file(L"D:\\dl\\a.txt", 2, false, true)};
+    ai::ApplyKeepRules(g, false);
+    Check(g.files[1].keep && !g.files[0].keep && g.why == ai::DupWhy::CleanName && g.Extra() == 1 && g.ExtraBytes() == 100,
+          L"dup rules: a clean name beats an older copy");
+    g.files = {file(L"D:\\dl\\r.docx", 1, false, true), file(L"D:\\work\\q3\\r.docx", 5, true, true)};
+    ai::ApplyKeepRules(g, false);
+    Check(g.files[1].keep && g.why == ai::DupWhy::Organized, L"dup rules: the sorted folder's copy stays");
+    g.files = {file(L"D:\\dl\\demo.mp4", 1, false, true), file(L"D:\\dl\\other.mp4", 9, false, true)};
+    ai::ApplyKeepRules(g, false);
+    const bool oldest = g.files[0].keep && g.why == ai::DupWhy::Earliest;
+    ai::ApplyKeepRules(g, true);
+    Check(oldest && g.files[1].keep && !g.files[0].keep && g.why == ai::DupWhy::Newest,
+          L"dup rules: rule 3 keeps the oldest, or the newest when asked");
+    g.files = {file(L"D:\\p\\A\\t.jpg", 1, true, true), file(L"D:\\p\\B\\t.jpg", 1, true, true),
+               file(L"D:\\dl\\t.jpg", 1, false, true)};
+    ai::ApplyKeepRules(g, false);
+    Check(g.both && g.Kept() == 2 && !g.files[2].keep && g.why == ai::DupWhy::Both,
+          L"dup rules: two sorted folders both keep theirs");
+    g.files = {file(L"D:\\dl\\a (1).txt", 1, false, false), file(L"D:\\dl\\a.txt", 2, false, true)};
+    ai::ApplyKeepRules(g, false);
+    ai::PickKeeper(g, 0);
+    ai::ApplyKeepRules(g, true);
+    Check(g.picked && g.files[0].keep && !g.files[1].keep && g.why == ai::DupWhy::Picked,
+          L"dup rules: the user's pick survives a rule change");
+    json::Value out;
+    Check(app::dup::Finished(0) && !app::dup::ResultJson(0, out) && app::dup::Summary(0).empty() &&
+              !app::dup::IsDupTab(L"pulse:ai-list:0"),
+          L"dup tab: an unknown run is over and has no result");
+}
+
 void TestActionPolicy() {
     namespace act = app::actions;
     const auto gate = [](std::string_view id, std::wstring_view target = {}) { return act::AiPolicy(id, target).gate; };
@@ -5731,6 +5893,16 @@ void TestActionPolicy() {
     Check(gate("file.recycle") == act::Gate::Plan && gate("recycle.empty") == act::Gate::Plan,
           L"policy: deleting shows its card first");
     Check(gate("app.exit") == act::Gate::Locked, L"policy: exiting Pulse is the user's only");
+    // Task 46: comparing files is a read (查看与读取, on by default); AI 整理
+    // only fills the assistant's box, so an AI app gets its lock card.
+    Check(gate("file.find_duplicates") == act::Gate::Direct &&
+              act::McpGroupOf("file.find_duplicates") == act::McpGroupOfRisk(act::ActionRisk::Read),
+          L"policy: comparing duplicates is a read step");
+    Check(gate("file.organize") == act::Gate::Plan && gate("assistant.organize_here") == act::Gate::Locked &&
+              act::HasLockText("assistant.organize_here"),
+          L"policy: organizing shows a plan; AI 整理此文件夹 is the user's");
+    Check(act::FindAction("file.find_duplicates") != nullptr && act::FindAction("assistant.organize_here") != nullptr,
+          L"policy: the task 46 rows are in the palette");
     Check(gate("no.such.action") == act::Gate::Locked, L"policy: unknown ids are locked");
     Check(gate("index.install_full") == act::Gate::Confirm, L"policy: a system action asks first");
     Check(gate("nav.open", L"C:\\AsT\\setup.exe") == act::Gate::Confirm &&
@@ -5931,6 +6103,31 @@ void TestFilePlans() {
               L"file plans: emptying the bin is a permanent delete in the files group");
     }
 
+    // Task 46: file.organize puts several folders in one plan.
+    const auto moves = [](std::initializer_list<std::pair<std::wstring, std::wstring>> list) {
+        json::Value v = json::Value::Object();
+        json::Value arr = json::Value::Array();
+        for (const auto& [item, dest] : list) {
+            json::Value m = json::Value::Object();
+            m.set("item", json::Utf8(item));
+            m.set("dest", json::Utf8(dest));
+            arr.push(std::move(m));
+        }
+        v.set("moves", std::move(arr));
+        return v;
+    };
+    Check(act::FileOpOf("file.organize") == act::FileOp::Organize, L"file plans: file.organize is a file step");
+    p = act::PlanFileOp(s, "file.organize", moves({{a, root + L"\\docs"}, {b, sub}}), nullptr);
+    Check(p.ok && !p.skip && p.op == act::FileOp::Organize && p.dests.size() == 2 && p.dests[0].make &&
+              !p.dests[1].make && p.dests[1].sources.size() == 1,
+          L"file plans: organize lists each folder and makes the missing one");
+    p = act::PlanFileOp(s, "file.organize", moves({{a, root}}), nullptr);
+    Check(p.ok && p.skip, L"file plans: organizing into its own folder does nothing");
+    p = act::PlanFileOp(s, "file.organize", moves({{a, root + L"\\docs"}, {a, sub}}), nullptr);
+    Check(!p.ok && !p.why.empty(), L"file plans: an item listed twice is refused");
+    p = act::PlanFileOp(s, "file.organize", moves({{sub + L"\\x.txt", root}, {root + L"\\x.txt", root}}), nullptr);
+    Check(!p.ok, L"file plans: organize refuses a missing item");
+
     for (const wchar_t* f : {L"\\a.txt", L"\\b.txt", L"\\sub\\x.txt", L"\\sub\\y.txt"}) DeleteFileW((root + f).c_str());
     RemoveDirectoryW(sub.c_str());
     RemoveDirectoryW(root.c_str());
@@ -6111,8 +6308,8 @@ void TestMcpRunActions() {
     size_t total = 0;
     for (size_t n : counts) total += n;
     Check(total == std::size(act::kActions) && counts[static_cast<size_t>(G::View)] > 0 &&
-              counts[static_cast<size_t>(G::Locked)] == 3 && counts[static_cast<size_t>(G::Files)] == 11,
-          L"mcp: every action is in one group; 3 are only the user's, 11 change files");
+              counts[static_cast<size_t>(G::Locked)] == 4 && counts[static_cast<size_t>(G::Files)] == 12,
+          L"mcp: every action is in one group; 4 are only the user's, 12 change files");
     Check(act::McpGroupOf("nav.back") == G::View && act::McpGroupOf("settings.set") == G::Organize &&
               act::McpGroupOf("file.new_folder") == G::Create && act::McpGroupOf("file.recycle") == G::Files &&
               act::McpGroupOf("file.delete_permanent") == G::Files && act::McpGroupOf("git.push") == G::External &&
@@ -6656,17 +6853,31 @@ void TestIntegrationCompat() {
     Check(prefs.integration_enabled && prefs.open_folders_in_pulse && settings.IntegrationState() == 1,
           L"compat: the master switch registers the folder verb by default");
     settings.IntegrationAction(9);
-    Check(prefs.integration_folders_compat && !prefs.open_folders_in_pulse && prefs.integration_folders &&
+    Check(prefs.integration_folders_compat && prefs.open_folders_in_pulse && prefs.integration_folders &&
               prefs.take_over_win_e && prefs.take_over_this_pc && settings.IntegrationState() == 1,
-          L"compat: on drops only the folder verb and reads healthy");
+          L"compat: on preserves direct opening and reads healthy");
     AppPrefs loaded;
     loaded.FromJson(prefs.ToJson());
     Check(loaded.integration_folders_compat && loaded.integration_folders,
           L"compat: the choice round trips through app.json");
+    prefs.open_folders_in_pulse = false;
+    Check(settings.IntegrationState() == 2, L"compat: observer alone cannot report direct opening as healthy");
+    Check(prefs.UpgradeCompatibleFolderOpen() && prefs.open_folders_in_pulse,
+          L"compat: enabled compatibility settings regain direct opening automatically");
+    prefs.integration_folders = false;
+    prefs.open_folders_in_pulse = false;
+    Check(prefs.UpgradeCompatibleFolderOpen() && !prefs.open_folders_in_pulse,
+          L"compat: upgrade respects the disabled folder scope");
+    prefs.integration_folders = true;
+    prefs.integration_enabled = false;
+    Check(prefs.UpgradeCompatibleFolderOpen() && !prefs.open_folders_in_pulse,
+          L"compat: upgrade respects the disabled master switch");
+    prefs.integration_enabled = true;
+    prefs.UpgradeCompatibleFolderOpen();
     settings.IntegrationAction(7);
     settings.IntegrationAction(7);
-    Check(!prefs.open_folders_in_pulse && settings.IntegrationState() == 1,
-          L"compat: re-applying another scope leaves the folder verb off");
+    Check(prefs.open_folders_in_pulse && settings.IntegrationState() == 1,
+          L"compat: re-applying another scope preserves direct opening");
     settings.IntegrationAction(9);
     Check(!prefs.integration_folders_compat && prefs.open_folders_in_pulse && settings.IntegrationState() == 1,
           L"compat: off registers the folder verb again");
@@ -8027,6 +8238,98 @@ void TestOptionalColumns() {
     r.SetDetailsColumns(0xFFFFFFFFu);
     Check(r.DetailsColumnsMask() == ui::kDetailsColumnsAll, L"optional columns: unknown bits are ignored");
 
+    // Column order (header drag): model, layout, drop slots.
+    {
+        using ui::DetailsColumnOrder;
+        const DetailsColumnOrder dflt = ui::kDetailsColumnOrderDefault;
+        Check(ui::NormalizeDetailsColumnOrder(DetailsColumnOrder{4, 4, 9, 0, 2, 2}) == DetailsColumnOrder{4, 2, 7, 5, 6, 3},
+              L"column order: repeats and unknown kinds dropped, missing ones appended in the default order");
+        Check(ui::ParseDetailsColumnOrder(ui::FormatDetailsColumnOrder(DetailsColumnOrder{4, 3, 2, 5, 6, 7})) ==
+                  DetailsColumnOrder{4, 3, 2, 5, 6, 7} &&
+              ui::FormatDetailsColumnOrder(dflt) == L"7,2,5,6,3,4",
+              L"column order: format / parse round trip");
+        Check(ui::ParseDetailsColumnOrder(L"") == dflt && ui::ParseDetailsColumnOrder(L"x,9,1") == dflt &&
+                  ui::ParseDetailsColumnOrder(L"4") == DetailsColumnOrder{4, 7, 2, 5, 6, 3},
+              L"column order: empty, garbage and partial strings stay a full permutation");
+        Check(ui::MoveDetailsColumn(dflt, 4, 2, false) == DetailsColumnOrder{7, 4, 2, 5, 6, 3} &&
+                  ui::MoveDetailsColumn(dflt, 7, 4, true) == DetailsColumnOrder{2, 5, 6, 3, 4, 7} &&
+                  ui::MoveDetailsColumn(dflt, 2, 2, false) == dflt && ui::MoveDetailsColumn(dflt, 0, 2, false) == dflt,
+              L"column order: moves before / after an anchor; self and invalid moves change nothing");
+
+        r.SetDetailsColumns(ui::kDetailsColumnsAll);
+        r.SetDetailsColumnOrder(DetailsColumnOrder{4, 3, 2, 5, 6, 7});
+        const auto custom = r.DetailsColumns(pane(1600.0f), {}, false);
+        Check(custom.reorderable && custom.count == 6 && custom.kinds[0] == K::Name && custom.kinds[1] == K::Size &&
+                  custom.kinds[2] == K::Type && custom.kinds[3] == K::Date && custom.kinds[4] == K::Created &&
+                  custom.kinds[5] == K::Accessed && fills(custom),
+              L"column order: the layout follows the stored order after the name");
+        ui::DetailsColumnWidths own{};
+        own[3] = 200.0f;   // created
+        const auto custom_manual = r.DetailsColumns(pane(1600.0f), own, false);
+        Check(close_to(custom_manual.Width(K::Created), 200.0f) && close_to(custom_manual.Width(K::Accessed), 130.0f),
+              L"column order: manual widths follow the column, not the position");
+        const int created_at = custom_manual.IndexOf(K::Created);
+        own = r.ResizeDetailsColumnDivider(pane(1600.0f), own, created_at,
+                                           custom_manual.DividerX(created_at) - 40.0f * scale);
+        const auto custom_dragged = r.DetailsColumns(pane(1600.0f), own, false);
+        Check(close_to(custom_dragged.Width(K::Created), 160.0f) && close_to(custom_dragged.Width(K::Accessed), 170.0f),
+              L"column order: divider drags resize the reordered neighbours");
+        bool drops = true;
+        for (float w = 260.0f; w <= 1600.0f; w += 20.0f) {
+            const auto c = r.DetailsColumns(pane(w), {}, false);
+            drops &= fills(c) && (c.Has(K::Created) || !c.Has(K::Accessed)) && (c.Has(K::Type) || !c.Has(K::Created)) &&
+                     (c.Has(K::Date) || !c.Has(K::Type));
+        }
+        Check(drops, L"column order: narrowing still drops accessed, created, type, then modified");
+        const auto custom_search = r.DetailsColumns(pane(1600.0f), {}, true);
+        Check(custom_search.reorderable && custom_search.FirstOrderable() == 2 && custom_search.kinds[1] == K::Path &&
+                  custom_search.kinds[2] == K::Size && custom_search.kinds[3] == K::Type &&
+                  custom_search.kinds[4] == K::Date,
+              L"column order: search views keep name and path first, then the stored order");
+
+        // Drop slots: column 1 (size) dragged right past type lands before modified.
+        float line = -1.0f;
+        Check(ui::MainRenderer::ColumnDropSlot(custom, 1, custom.DividerX(1) + 1.0f) == -1 &&
+                  ui::MainRenderer::ColumnDropSlot(custom, 1, custom.DividerX(0) + 2.0f) == -1 &&
+                  ui::MainRenderer::ColumnDropSlot(custom, 0, custom.DividerX(3)) == -1,
+              L"column order: dropping a column beside itself or dragging the name is no move");
+        const int to = ui::MainRenderer::ColumnDropSlot(custom, 1, custom.DividerX(2) + 3.0f, &line);
+        Check(to == 3 && std::abs(line - custom.DividerX(2)) < 0.05f &&
+                  ui::MainRenderer::ReorderedColumns(custom, DetailsColumnOrder{4, 3, 2, 5, 6, 7}, 1, to) ==
+                      DetailsColumnOrder{3, 4, 2, 5, 6, 7},
+              L"column order: the nearest edge is the slot; the drop reorders");
+        const int end = ui::MainRenderer::ColumnDropSlot(custom, 1, custom.right - 2.0f, &line);
+        Check(end == custom.count && std::abs(line - custom.right) < 0.05f &&
+                  ui::MainRenderer::ReorderedColumns(custom, DetailsColumnOrder{4, 3, 2, 5, 6, 7}, 1, end) ==
+                      DetailsColumnOrder{3, 2, 5, 6, 4, 7},
+              L"column order: dropping after the last shown column anchors to it (status stays hidden behind)");
+        // Hidden columns keep their place around a move among shown ones.
+        r.SetDetailsColumns(ui::kDetailsColumnModified | ui::kDetailsColumnSize);
+        r.SetDetailsColumnOrder(dflt);
+        const auto two = r.DetailsColumns(pane(1200.0f), {}, false);
+        Check(two.count == 3 && two.kinds[1] == K::Date && two.kinds[2] == K::Size &&
+                  ui::MainRenderer::ReorderedColumns(two, dflt, 2, 1) == DetailsColumnOrder{7, 4, 2, 5, 6, 3},
+              L"column order: moving among shown columns leaves the hidden ones in place");
+        r.SetDetailsColumnOrder(dflt);
+        r.SetDetailsColumns(ui::kDetailsColumnsAll);
+
+        AppPrefs order_prefs;
+        order_prefs.persist = false;
+        Check(order_prefs.details_column_order == dflt, L"column order: default prefs keep the classic order");
+        order_prefs.details_column_order = DetailsColumnOrder{3, 4, 2, 5, 6, 7};
+        AppPrefs order_reloaded;
+        order_reloaded.persist = false;
+        Check(order_reloaded.FromJson(order_prefs.ToJson()) &&
+                  order_reloaded.details_column_order == order_prefs.details_column_order,
+              L"column order: saved order round trips");
+        order_reloaded.FromJson(L"{\"details_columns\":28,\"details_columns_v\":2}");
+        Check(order_reloaded.details_column_order == dflt,
+              L"column order: settings saved before reordering existed read the classic order");
+        order_reloaded.FromJson(L"{\"details_column_order\":\"3,3,junk\"}");
+        Check(order_reloaded.details_column_order == DetailsColumnOrder{3, 7, 2, 5, 6, 4},
+              L"column order: a damaged stored order is repaired");
+    }
+
     // Prefs: global choice, default when missing, garbage normalized.
     AppPrefs prefs;
     prefs.persist = false;
@@ -8380,11 +8683,11 @@ void TestLinkResolve() {
           EntryLess(e2, e1, ui::SortColumn::Name, ui::SortDirection::Desc,
                     FolderSortMode::FoldersFirst),
         L"sort: folders-first keeps folders on top in both directions");
-    Check(EntryLess(e2, e1, ui::SortColumn::Name, ui::SortDirection::Asc,
-                    FolderSortMode::FollowDirection) &&
+    Check(EntryLess(e1, e2, ui::SortColumn::Name, ui::SortDirection::Asc,
+                    FolderSortMode::FoldersLast) &&
           EntryLess(e1, e2, ui::SortColumn::Name, ui::SortDirection::Desc,
-                    FolderSortMode::FollowDirection),
-        L"sort: follow-direction sends folders to the bottom when reversed");
+                    FolderSortMode::FoldersLast),
+        L"sort: folders-last keeps folders at the bottom in both directions");
     Check(!EntryLess(e2, e1, ui::SortColumn::Name, ui::SortDirection::Asc,
                      FolderSortMode::Mixed) &&
           EntryLess(e1, e2, ui::SortColumn::Name, ui::SortDirection::Asc,
@@ -8800,7 +9103,7 @@ void TestKeymap() {
           L"keymap check: single letters and digits rejected");
     Check(issue(KeyAction::CopyPath, L"Win+F") == I::WinKey && issue(KeyAction::GlobalSearch, L"Win+Shift+F") == I::None,
           L"keymap check: Win only for the global hotkey");
-    Check(issue(KeyAction::CopyToTarget, L"Ctrl+Alt+X") == I::Taken, L"keymap check: another program's hotkey");
+    Check(issue(KeyAction::GlobalSearch, L"Ctrl+Alt+X") == I::Taken, L"keymap check: another program's hotkey");
     const auto dup = k::CheckChord(m, KeyAction::CopyPath, chord(L"Ctrl+Shift+F"), env);
     Check(dup.issue == I::Duplicate && dup.level == k::ChordLevel::Warn && dup.other.action == KeyAction::AdvancedSearch,
           L"keymap check: another action's key can be replaced");
@@ -8829,17 +9132,16 @@ void TestKeymap() {
 
     k::Keymap fresh;
     const auto issues = k::CollectIssues(fresh, env);
-    Check(issues.size() == 3 && issues[0].level == k::ChordLevel::Block && issues[1].level == k::ChordLevel::Block &&
-          issues[2].issue == I::Ime && issues[2].action == KeyAction::AdvancedSearch,
-          L"keymap: issues list (taken first, then the IME)");
+    Check(issues.size() == 1 && issues[0].issue == I::Ime && issues[0].action == KeyAction::AdvancedSearch,
+          L"keymap: local issues include IME, not global registration failures");
     const auto suggestions = k::SuggestChords(fresh, KeyAction::CopyToTarget, env);
     bool suggestions_ok = suggestions.size() == 3;
     for (const KeyChord c : suggestions)
         suggestions_ok = suggestions_ok && k::CheckChord(fresh, KeyAction::CopyToTarget, c, env).level == k::ChordLevel::Ok;
     Check(suggestions_ok && suggestions[0] == chord(L"Ctrl+Alt+Shift+C"), L"keymap: three free suggestions");
     const auto probe = k::ProbeCandidates(fresh);
-    Check(std::find(probe.begin(), probe.end(), chord(L"Ctrl+Alt+C")) != probe.end() && probe.size() > 60,
-          L"keymap: probe list covers the keys in effect");
+    Check(std::find(probe.begin(), probe.end(), chord(L"Ctrl+C")) == probe.end() && !probe.empty(),
+          L"keymap: probe list excludes local copy");
 
     // Messages the handlers expect.
     Check(k::KeyMessageFor(chord(L"Alt+D")) == WM_SYSKEYDOWN && k::KeyMessageFor(chord(L"Ctrl+Alt+C")) == WM_KEYDOWN,
@@ -9498,6 +9800,13 @@ int RunSelfTest1B2() {
         return passed ? 0 : 1;
     }
     if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"folder-sorts") == 0) {
+        TestFolderSorts();
+        LogLine(L"\n== folder-sorts: %d passed, %d failed ==\n", g_pass, g_fail);
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return g_fail ? 1 : 0;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
         wcscmp(test_case, L"folder-views") == 0) {
         TestViewZoomChain();
         TestContinuousIconSize();
@@ -9576,6 +9885,7 @@ int RunSelfTest1B2() {
         wcscmp(test_case, L"action-state") == 0) {
         TestActionState();
         TestActionPolicy();
+        TestDupKeepRules();
         TestActionArgs();
         TestFilePlans();
         TestMcpRunActions();
@@ -9605,6 +9915,12 @@ int RunSelfTest1B2() {
     if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
         wcscmp(test_case, L"filename-render") == 0) {
         const bool passed = RunFilenameRenderTest();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return passed ? 0 : 1;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"details-list-perf") == 0) {
+        const bool passed = RunDetailsListPerfTest();
         if (g_log) { fclose(g_log); g_log = nullptr; }
         return passed ? 0 : 1;
     }
@@ -9728,6 +10044,7 @@ int RunSelfTest1B2() {
     TestSplitLayout();
     TestActionState();
     TestActionPolicy();
+    TestDupKeepRules();
     TestActionArgs();
     TestFilePlans();
     TestMcpRunActions();

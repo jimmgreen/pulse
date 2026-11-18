@@ -41,10 +41,20 @@ struct GlobalSearchContext {
     // most started first among equal matches (history: may be null).
     bool show_apps = true;
     std::shared_ptr<app::JumpHistory> history;
+    bool positioned = false;
+    int x = 0, y = 0;                         // screen pixels; negative monitor coordinates are valid
     int width = 0, height = 0;                  // DIP; 0 = default
 };
 struct GlobalSearchEvents {
-    std::function<void(int width, int height)> resized;          // DIP, after a user resize
+    // After hiding the popup; true means the host owns this open request.
+    std::function<bool(const std::wstring& path, bool directory, bool location)> open_path;
+    std::function<void(const std::vector<std::wstring>& paths)> stage_paths;
+    std::function<std::vector<std::wstring>()> staged_paths;
+    std::function<void(const std::wstring& path)> unstage_path;
+    std::function<void()> clear_staging;
+    std::function<void()> toggle_theme;
+    std::function<void()> clear_search_history;
+    std::function<void(int x, int y, int width, int height)> placement_changed; // screen pixels + DIP size
     std::function<void(const std::wstring& path)> pin_folder;     // 添加常用位置…
     std::function<void(const GlobalSearchHandoff& search, const std::wstring& path, bool directory)> opened;
 };

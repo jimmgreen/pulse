@@ -20,8 +20,18 @@ namespace pulse::app {
 
 enum class PackInstallOutcome : uint32_t { None, Installed, Failed, Cancelled };
 
+// Why an install failed, for what the failure message offers next.
+enum class PackFailure : uint32_t {
+    None,
+    Network,    // no source could be reached (or kept answering with an error)
+    Mismatch,   // every source served a file this build does not expect
+    Disk,       // the packs folder could not be written
+    Other,
+};
+
 struct PackInstallProgress {
     std::atomic<bool> cancelled{false};
+    std::atomic<uint32_t> failure{0};    // PackFailure of a failed install
     std::atomic<uint64_t> received{0};   // compressed bytes of finished and current files
     std::atomic<uint64_t> total{0};
 };
@@ -55,7 +65,7 @@ public:
     // 0..1 of the compressed bytes.
     float progress() const noexcept;
     // The finished job's outcome, once; None while idle or running.
-    PackInstallOutcome TakeOutcome(DWORD& error);
+    PackInstallOutcome TakeOutcome(DWORD& error, PackFailure* failure = nullptr);
 
 private:
     struct Job {

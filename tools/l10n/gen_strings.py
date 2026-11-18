@@ -25,6 +25,7 @@ Outputs (all generated; do not edit by hand):
     src/common/strings.rcinc       zh-CN and en-US STRINGTABLEs
     src/common/strings_zh_tw.rcinc zh-TW STRINGTABLE
     src/common/zh_hant_table.inc   runtime Simplified->Traditional phrase/char tables
+    src/setup/setup_strings.generated.inc standalone setup language table
 
 The zh-TW text is taken from the catalog when present; otherwise it is computed
 from `zh` with OpenCC s2twp protected by tools/zh_tw/glossary.tsv (the same
@@ -96,7 +97,7 @@ EXCLUDED = (
     "src/index/index_query.cpp",
     "src/app/entry_group.cpp",
     "src/app/selftest_1b2.cpp",
-    "src/setup/setup_strings.cpp",  # setup carries its own 3-language table
+    "src/setup/setup_strings.cpp",  # setup table is generated from the same catalog
 )
 ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\", '"': '"', "'": "'", "?": "?"}
 
@@ -408,6 +409,20 @@ def gen_strings_tw_rcinc(rows) -> str:
     return "\n".join(out) + "\n"
 
 
+def gen_setup_strings(rows) -> str:
+    header = (ROOT / "src/setup/setup_strings.h").read_text(encoding="utf-8")
+    body = re.search(r"enum class Str \{(.*?)\};", header, re.S).group(1)
+    names = re.findall(r"^\s*(\w+)\s*,?\s*$", body, re.M)
+    by_name = {row.name: row for row in rows}
+    out = ["// Generated from tools/l10n/catalog.tsv. Do not edit by hand."]
+    for name in names:
+        if name == "Count":
+            continue
+        row = by_name["Setup" + name]
+        out.append("    {" + ", ".join(cpp_literal(value) for value in (row.zh, row.tw, row.en)) + "},  // " + name)
+    return "\n".join(out) + "\n"
+
+
 def build_outputs(rows):
     for row in rows:
         if not row.tw:
@@ -418,6 +433,7 @@ def build_outputs(rows):
         RCINC: gen_strings_rcinc(rows),
         RCINC_TW: gen_strings_tw_rcinc(rows),
         TABLE: generate_table([r.zh for r in rows]),
+        ROOT / "src/setup/setup_strings.generated.inc": gen_setup_strings(rows),
     }
 
 

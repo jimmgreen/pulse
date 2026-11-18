@@ -1,0 +1,49 @@
+Drag feedback and downloading-directory refresh -- 2026-11-04
+
+Changes
+Internal Pulse drags now show file identity and destination/action in the
+same drag card. The old independent renderer badge is suppressed only while
+that thread has an active Pulse drag visual. Main-window and picker target
+events forward and clear the same feedback. External drags retain their
+existing fallback. Long feedback wraps to two lines and the live card is
+constrained to the monitor work area.
+
+Downloading files publish replacement snapshots as their size changes.
+Pending file presses previously shared the marquee's exact snapshot-pointer
+guard, so ordinary refresh cancelled drag initiation. File presses now track
+the pressed entry key and selected entry keys, remap after a refresh, and
+still reject source deletion, changed selection, navigation or another tab
+or pane. The unchanged-index path avoids a whole-directory search. A shared
+snapshot reference prevents address reuse until rebase/end/cancel.
+
+Diagnostics
+file_drag_start records the number of refresh rebases; file_press_cancel
+records the distinct source/context/selection cancellation reason. No file
+paths are logged and routine mouse moves do not produce repeated events.
+
+Validation
+- pulse_file_press_refresh_test: 13 PASS, including 100 real Tab snapshot
+  replacements/size changes/reorderings, production selection restoration
+  and MatchFilePress, multi-selection, cancellation and snapshot lifetime.
+- pulse_list_selection_gesture_test: 19 PASS.
+- pulse_drag_drop_test: 98 PASS. This exercises production data objects and
+  drag callbacks with the native modal OLE boundary replaced by the test.
+  New checks cover feedback forwarding, clearing, completion/cancellation,
+  separate consecutive drag lifetimes and no-active-visual fallback.
+- Final affected main translation units compiled successfully. A signedness
+  warning in the new test was corrected; final test build is warning-free.
+  Logs: bench_data/drag-final-build.log, drag-final-test-build.log,
+  drag-drop-test.log, file_press_build.log; build/dragshot/final-build.log.
+- Production drag_stack.cpp rendering was inspected offscreen for light/dark,
+  100%/150% DPI, single/multiple files, move/copy/refused, cancellation/drop,
+  long text and bottom-right screen-edge placement. Images are in
+  build/dragshot/feedback-light.png, feedback-dark-150.png,
+  feedback-multi.png, feedback-edge-150.png.
+
+Limits
+No computer-use automation or user-file changes were used. Snapshot tests
+reproduce the production model transition, not a real network download.
+No complete Pulse window / native cross-window OLE drag was tested. The
+whole-app build remains separately blocked by extension_host/isolation.cpp
+Windows constant declarations (documented in the PSD verification report).
+No new installer was produced for this change.

@@ -1,3 +1,4 @@
+#include "pbgra_blend.h"
 #include "gif_decoder.h"
 #include <wincodec.h>
 #include <wrl/client.h>
@@ -27,13 +28,13 @@ bool Same(const BY_HANDLE_FILE_INFORMATION& a, const BY_HANDLE_FILE_INFORMATION&
         a.nFileIndexLow == b.nFileIndexLow && a.nFileSizeHigh == b.nFileSizeHigh && a.nFileSizeLow == b.nFileSizeLow &&
         CompareFileTime(&a.ftLastWriteTime, &b.ftLastWriteTime) == 0;
 }
-// Walk the inexpensive container before allowing WIC to allocate a source raster.
-bool Inspect(const std::vector<uint8_t>& data, const GifLimits& limits, UINT& w, UINT& h,
-             std::vector<Meta>& frames, uint32_t& loops, uint64_t& source_bytes, Color& background, std::wstring& error) {
+// Validate container bounds before allowing WIC to allocate a source raster.
+bool Inspect(std::vector<uint8_t>& data, UINT& w, UINT& h,
+             std::vector<Meta>& frames, uint32_t& loops, uint64_t& source_bytes, Color& background, std::wstring& error, bool first_frame_only) {
     auto bad = [&](const wchar_t* why) { error = why; return false; };
     if (data.size() < 13 || (memcmp(data.data(), "GIF87a", 6) && memcmp(data.data(), "GIF89a", 6))) return bad(L"gif-invalid");
     w = U16(data.data() + 6); h = U16(data.data() + 8);
-    if (!w || !h || uint64_t(w) * h * 4 > limits.canvas_bytes) return bad(L"gif-canvas-budget");
+    if (!w || !h || uint64_t(w) * h * 4 > MAXDWORD) return bad(L"gif-canvas-budget");
     size_t at = 13;
     auto take = [&](size_t n) { if (n > data.size() - at) return false; at += n; return true; };
     background = {};
@@ -76,20 +77,18 @@ bool Inspect(const std::vector<uint8_t>& data, const GifLimits& limits, UINT& w,
                    U16(data.data() + at + 6), disposal, delay, transparent};
             const auto packed = data[at + 8]; at += 9;
             if (!f.w || !f.h || f.x > w || f.y > h || f.w > w - f.x || f.h > h - f.y ||
-                uint64_t(f.w) * f.h * 4 > limits.canvas_bytes) return bad(L"gif-frame-bounds");
-            if (frames.size() == limits.frames) return bad(L"gif-frame-budget");
+                uint64_t(f.w) * f.h * 4 > MAXDWORD) return bad(L"gif-frame-bounds");
             source_bytes += uint64_t(f.w) * f.h * 4;
-            if (source_bytes > limits.working_bytes / 2) return bad(L"gif-source-budget");
             frames.push_back(f); disposal = 0; delay = 100; transparent = false;
             if ((packed & 0x80) && !take(size_t(3) << ((packed & 7) + 1))) return bad(L"gif-truncated");
             if (!take(1) || !blocks()) return bad(L"gif-truncated");
+            if (first_frame_only) { data.resize(at); data.push_back(0x3b); return true; }
         } else return bad(L"gif-invalid-block");
     }
     return bad(L"gif-truncated");
 }
 }
 struct GifDecoder::State {
-    GifLimits limits;
     DWORD thread = GetCurrentThreadId();
     BY_HANDLE_FILE_INFORMATION identity{};
     std::wstring path;
@@ -109,18 +108,20 @@ struct GifDecoder::State {
         std::vector<Meta>().swap(frames); path.clear(); next = 0; loops = 0; source_bytes = 0; stats.reserved_bytes = 0;
     }
 };
-GifDecoder::GifDecoder(GifLimits limits) : state_(std::make_unique<State>()) { state_->limits = limits; }
+GifDecoder::GifDecoder() : state_(std::make_unique<State>()) {}
 GifDecoder::~GifDecoder() = default;
 void GifDecoder::Reset() { state_->Clear(); }
-GifStats GifDecoder::Stats() const { return state_->stats; }
-bool GifDecoder::Decode(const std::wstring& path, UINT edge, uint32_t index, GifFrame& result, HANDLE cancel) {
+GifStats GifDecoder::Stats() const {
+    auto stats = state_->stats;
+    stats.backup_capacity_bytes = state_->saved.capacity();
+    return stats;
+}
+bool GifDecoder::Decode(const std::wstring& path, UINT edge, uint32_t index, GifFrame& result, HANDLE cancel, bool first_frame_only) {
     auto& s = *state_; result = {};
     if (s.thread != GetCurrentThreadId()) { result.error = L"gif-wrong-thread"; return false; }
-    const auto deadline = GetTickCount64() + s.limits.milliseconds;
     auto fail = [&](const wchar_t* error) { result.error = error; result.pixels.clear(); s.Clear(); return false; };
     auto interrupted = [&]() -> const wchar_t* {
         if (cancel && WaitForSingleObject(cancel, 0) == WAIT_OBJECT_0) return L"gif-cancelled";
-        if (GetTickCount64() >= deadline) return L"gif-time-budget";
         return nullptr;
     };
     try {
@@ -129,26 +130,41 @@ bool GifDecoder::Decode(const std::wstring& path, UINT edge, uint32_t index, Gif
                                OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr)};
         BY_HANDLE_FILE_INFORMATION identity{};
         if (file.value == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(file.value, &identity)) return fail(L"gif-open-failed");
-        const uint64_t bytes = (uint64_t(identity.nFileSizeHigh) << 32) | identity.nFileSizeLow;
-        if (!bytes || bytes > s.limits.file_bytes || bytes > MAXDWORD) return fail(L"gif-file-budget");
+        const uint64_t file_bytes = (uint64_t(identity.nFileSizeHigh) << 32) | identity.nFileSizeLow;
+        const uint64_t bytes = first_frame_only ? (std::min)(file_bytes, 16ull * 1024 * 1024) : file_bytes;
+        if (first_frame_only) { s.Clear(); index = 0; edge = (std::min)(edge, 512u); }
+        if (!bytes || bytes > MAXDWORD) return fail(L"gif-file-budget");
         if (s.path != path || !s.decoder || !Same(identity, s.identity)) {
             s.Clear();
-            s.file.resize(static_cast<size_t>(bytes));
-            DWORD read = 0;
-            if (!ReadFile(file.value, s.file.data(), static_cast<DWORD>(bytes), &read, nullptr) || read != bytes) return fail(L"gif-read-failed");
-            std::wstring error;
-            if (!Inspect(s.file, s.limits, s.w, s.h, s.frames, s.loops, s.source_bytes, s.background, error)) {
-                result.error = error; s.Clear(); return false;
+            size_t loaded = 0;
+            for (;;) {
+                const size_t wanted = first_frame_only ? (std::min)(static_cast<size_t>(bytes),
+                    (std::max)(size_t(65536), loaded * 2)) : static_cast<size_t>(bytes);
+                s.file.resize(wanted);
+                DWORD read = 0;
+                const auto added = static_cast<DWORD>(wanted - loaded);
+                if (!ReadFile(file.value, s.file.data() + loaded, added, &read, nullptr) || read != added)
+                    return fail(L"gif-read-failed");
+                loaded = wanted;
+                std::wstring error;
+                s.frames.clear(); s.source_bytes = 0; s.loops = 0;
+                if (Inspect(s.file, s.w, s.h, s.frames, s.loops, s.source_bytes, s.background, error, first_frame_only)) break;
+                if (!first_frame_only || error != L"gif-truncated" || loaded == bytes) {
+                    result.error = first_frame_only && loaded < file_bytes && error == L"gif-truncated" ?
+                        L"gif-thumbnail-budget" : error;
+                    s.Clear(); return false;
+                }
+                if (const auto why = interrupted()) return fail(why);
             }
             // Canvas + disposal backup + decoded source + WIC bitmap copy + output,
             // with another canvas allowance for scaler scratch. Bound all declared
             // source rasters too, rather than assuming WIC releases previous frames.
-            const uint64_t reserve = bytes + uint64_t(s.w) * s.h * 4 * 6 + uint64_t(s.frames.size()) * sizeof(Meta) + s.source_bytes * 2;
-            if (reserve > s.limits.working_bytes) return fail(L"gif-memory-budget");
+            const uint64_t reserve = s.file.capacity() + uint64_t(s.w) * s.h * 4 * 6 + uint64_t(s.frames.size()) * sizeof(Meta) + s.source_bytes * 2;
+            if (first_frame_only && reserve > 192ull * 1024 * 1024) return fail(L"gif-thumbnail-budget");
             if (const auto why = interrupted()) return fail(why);
             if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&s.factory))) ||
                 FAILED(s.factory->CreateStream(&s.stream)) ||
-                FAILED(s.stream->InitializeFromMemory(s.file.data(), static_cast<DWORD>(bytes))) ||
+                FAILED(s.stream->InitializeFromMemory(s.file.data(), static_cast<DWORD>(s.file.size()))) ||
                 FAILED(s.factory->CreateDecoderFromStream(s.stream.Get(), nullptr, WICDecodeMetadataCacheOnDemand, &s.decoder)))
                 return fail(L"gif-decoder-failed");
             UINT count = 0;
@@ -166,7 +182,6 @@ bool GifDecoder::Decode(const std::wstring& path, UINT edge, uint32_t index, Gif
             FillBackground(s.canvas, s.w, 0, 0, s.w, s.h, s.frames.front().transparent ? Color{} : s.background);
             s.saved.clear(); s.next = 0; ++s.stats.resets;
         }
-        if (index + 1 - s.next > s.limits.steps_per_request) return fail(L"gif-work-budget");
         for (; s.next <= index; ++s.next) {
             if (const auto error = interrupted()) return fail(error);
             if (s.next) {
@@ -176,11 +191,24 @@ bool GifDecoder::Decode(const std::wstring& path, UINT edge, uint32_t index, Gif
                     // the logical screen background from the global color table.
                     FillBackground(s.canvas, s.w, previous.x, previous.y, previous.w, previous.h,
                         previous.transparent ? Color{} : s.background);
-                } else if (previous.disposal == 3 && s.saved.size() == s.canvas.size()) s.canvas = s.saved;
+                } else if (previous.disposal == 3 &&
+                           s.saved.size() == static_cast<size_t>(previous.w) * previous.h * 4) {
+                    for (UINT y = 0; y < previous.h; ++y)
+                        std::memcpy(s.canvas.data() + (static_cast<size_t>(previous.y + y) * s.w + previous.x) * 4,
+                            s.saved.data() + static_cast<size_t>(y) * previous.w * 4,
+                            static_cast<size_t>(previous.w) * 4);
+                }
             }
             const auto& frame = s.frames[s.next];
-            if (frame.disposal == 3) s.saved = s.canvas;
-            else s.saved.clear();
+            if (frame.disposal == 3 && !first_frame_only) {
+                // This frame can only change its validated rectangle. Preserve that
+                // region for disposal instead of retaining a second full canvas.
+                s.saved.resize(static_cast<size_t>(frame.w) * frame.h * 4);
+                for (UINT y = 0; y < frame.h; ++y)
+                    std::memcpy(s.saved.data() + static_cast<size_t>(y) * frame.w * 4,
+                        s.canvas.data() + (static_cast<size_t>(frame.y + y) * s.w + frame.x) * 4,
+                        static_cast<size_t>(frame.w) * 4);
+            } else s.saved.clear();
             ComPtr<IWICBitmapFrameDecode> decoded;
             ComPtr<IWICFormatConverter> converter;
             if (FAILED(s.decoder->GetFrame(s.next, &decoded)) || FAILED(s.factory->CreateFormatConverter(&converter)) ||
@@ -193,13 +221,8 @@ bool GifDecoder::Decode(const std::wstring& path, UINT edge, uint32_t index, Gif
             ++s.stats.decoded_frames;
             for (UINT y = 0; y < h; ++y) {
                 if ((y & 63) == 0) if (const auto error = interrupted()) return fail(error);
-                for (UINT x = 0; x < w; ++x) {
-                    const auto* src = raster.data() + (static_cast<size_t>(y) * w + x) * 4;
-                    auto* dst = s.canvas.data() + (static_cast<size_t>(frame.y + y) * s.w + frame.x + x) * 4;
-                    const uint32_t inverse = 255 - src[3];
-                    for (int channel = 0; channel < 4; ++channel)
-                        dst[channel] = static_cast<uint8_t>(src[channel] + (dst[channel] * inverse + 127) / 255);
-                }
+                BlendPbgraSpan(s.canvas.data() + (static_cast<size_t>(frame.y + y) * s.w + frame.x) * 4,
+                    raster.data() + static_cast<size_t>(y) * w * 4, w);
             }
         }
         if (const auto error = interrupted()) return fail(error);
@@ -225,6 +248,10 @@ namespace { thread_local std::unique_ptr<GifDecoder> cached; }
 bool DecodeGifCached(const std::wstring& path, UINT edge, uint32_t index, GifFrame& result) {
     if (!cached) cached = std::make_unique<GifDecoder>();
     return cached->Decode(path, edge, index, result);
+}
+bool DecodeGifFirstFrameThumbnail(const std::wstring& path, UINT edge, GifFrame& result) {
+    GifDecoder decoder;
+    return decoder.Decode(path, edge, 0, result, nullptr, true);
 }
 void ResetGifDecodeCache() { cached.reset(); }
 }

@@ -1,1 +1,0 @@
-{"name":"pulse-rawpack","version-string":"1","dependencies":[{"name":"libraw","default-features":false,"features":["dng-lossy"]}]}

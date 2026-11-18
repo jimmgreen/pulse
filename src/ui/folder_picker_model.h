@@ -15,18 +15,34 @@
 
 namespace pulse::ui {
 
-enum class PickerMode { Folder, Image, File };
+enum class PickerMode { Folder, Image, File, Save };
 enum class PickerEntryKind { Folder, Image, Drive, File };
 
 struct PickerFilter { std::wstring label; std::wstring pattern; };
 enum class PickerSort { Name, Modified, Size, Type };
 struct PickerOptions {
+    uint32_t native_options = 0;
     std::vector<PickerFilter> filters;
     size_t filter_index = 0;
     bool show_hidden = false;
     std::wstring search;
     PickerSort sort = PickerSort::Name;
     bool descending = false;
+    // File acceptance only; listing and Image format restrictions remain strict.
+    bool advisory_file_filters = false;
+    // Explicit Open contract only. The loader still checks existence; it does
+    // not implement a read-access probe for either value of this field.
+    bool skip_access_validation = false;
+    bool allow_missing_open = false;
+    bool require_existing_open_parent = false;
+    bool validate_local_open_access_v1 = false;
+    // Explicit Open setter evidence. Only typed submissions may try a default
+    // extension after the exact path is missing; listing selections never do.
+    std::wstring default_extension;
+    bool extension_filter_changed = false;
+    bool typed_names = false;
+    bool use_default_extension = false;
+    bool no_dereference_links = false;
 };
 
 struct PickerEntry {
@@ -37,6 +53,7 @@ struct PickerEntry {
     uint64_t size = 0;   // file size; total bytes for drives
     uint64_t free = 0;   // drives only
     size_t source = 0;   // index in the enumeration, used while building the listing
+    uint32_t shell_attributes = 0; // SFGAOF; path may be a Shell parsing name.
 };
 
 // One folder's contents as read by the loader. path "" is This PC (drives).
@@ -71,6 +88,8 @@ std::wstring PickerParent(std::wstring_view path);
 // "/" and "C:", and drops trailing separators except on roots.
 std::wstring NormalizePickerInput(std::wstring_view text);
 bool SamePickerPath(std::wstring_view a, std::wstring_view b);
+bool IsPickerFolderName(std::wstring_view name);
+bool IsPickerDiskPath(std::wstring_view path);
 
 // What the primary button returns: the selected folder or picture, else the
 // current folder in folder mode. Empty = nothing to pick (button disabled).

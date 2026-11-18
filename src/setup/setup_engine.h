@@ -5,6 +5,8 @@
 #include "setup_common.h"
 #include "setup_options.h"
 #include "setup_payload.h"
+#include "setup_file_locks.h"
+#include "setup_dialog_versions.h"
 
 #include <functional>
 #include <string>
@@ -19,6 +21,10 @@ struct EngineCallbacks {
     // Pulse reported a running copy/move. Return true to ask again (Retry),
     // false to give up. Called on the engine thread; may block.
     std::function<bool()> busy;
+    std::function<bool(const FileLockReport&)> locked;
+    // Post-commit housekeeping: true retries after the user closes owners;
+    // false keeps busy versions without undoing a successful installation.
+    std::function<bool(const DialogCleanupReport&)> cleanup_locked;
 };
 
 struct InstallRequest {
@@ -35,8 +41,12 @@ struct InstallResult {
     std::wstring error;
     std::wstring app_dir;
     bool index_running = false;  // for the summary on the finish page
+    bool index_configured = false; // a deliberately stopped service is not a start failure
     bool verbs_seeded = false;
+    bool defaults_written = false;
     bool startup = false;
+    bool dialog_cleanup_pending = false;
+    size_t dialog_versions_removed = 0;
 };
 
 // Resolves defaults the wizard shows: target directory, remembered tasks and

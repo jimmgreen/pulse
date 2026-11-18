@@ -58,7 +58,7 @@ QuickPreviewWindow::PagesLayout QuickPreviewWindow::ComputePagesLayout() const {
                                    content.left + kStripWidth * scale_, content.bottom);
         layout.view.left = layout.strip.right;
     }
-    layout.margin = kPageMargin * scale_;
+    layout.margin = (embedded_ ? 6.0f : kPageMargin) * scale_;
     layout.gap = kPageGap * scale_;
     const float fit = (std::max)(40.0f * scale_,
                                  layout.view.right - layout.view.left - layout.margin * 2.0f);

@@ -1,5 +1,5 @@
-// toolbar_picker.h — the 「自定义工具栏」 popover (toolbar picker T3,
-// pulse_toolbar_picker.html v3). It hangs under the toolbar's More button and
+// toolbar_picker.h — the 「自定义工具栏」 popover (toolbar picker T3).
+// It hangs under the toolbar's More button and
 // shows the toolbar's tools, the selection chip's actions and the pinned apps
 // as tiles, one page each. Tiles are dragged to reorder (within their
 // section). Every change applies at once through the callbacks, so the

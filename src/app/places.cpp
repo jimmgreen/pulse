@@ -431,6 +431,9 @@ bool PlacesCatalog::Load() {
 
     for (const auto& block : ExtractObjectArray(json, L"workspaces")) {
         Workspace w;
+        w.expanded = pulse::json::ExtractInt(block, L"expanded") != 0;
+        if (block.find(L"\"color_rgb\"") != std::wstring::npos)
+            w.color_rgb = static_cast<uint32_t>(pulse::json::ExtractInt(block, L"color_rgb")) & 0xFFFFFF;
         w.name = pulse::json::ExtractString(block, L"name");
         w.root = pulse::json::ExtractString(block, L"root");
         w.layout = pulse::json::ExtractInt(block, L"layout");
@@ -735,6 +738,11 @@ void PlacesCatalog::StopPlacesWriter() {
 bool PlacesCatalog::Save() const {
     if (!persist) return true;
     if (load_failed) return false;
+    if (async_save_depth_) {
+        MarkPlacesDirty();
+        async_save_dirty_ = true;
+        return true;
+    }
     const SaveSnapshot snapshot = CaptureSaveSnapshot();
     uint64_t revision;
     {
@@ -775,7 +783,8 @@ bool PlacesCatalog::SaveSnapshotFile(const SaveSnapshot& snapshot) {
         pulse::json::Escape(w.name, name);
         pulse::json::Escape(w.root, root);
         f << L"    {\"name\":\"" << name << L"\",\"root\":\"" << root
-          << L"\",\"layout\":" << w.layout << L",\"panes\":";
+          << L"\",\"layout\":" << w.layout << L",\"expanded\":" << (w.expanded ? 1 : 0)
+          << L",\"color_rgb\":" << w.color_rgb << L",\"panes\":";
         writeArr(w.pane_paths);
         std::vector<std::wstring> views;
         views.reserve(w.pane_views.size());
@@ -905,7 +914,10 @@ bool PlacesCatalog::SaveSnapshotFile(const SaveSnapshot& snapshot) {
     f << L"  ]\n}\n";
     DeleteFileW((dir + L"\\places.tmp").c_str());
     const std::wstring document = f.str();
-    return WriteCatalogDocument(dir + L"\\places.json", document, false);
+    const std::wstring path = dir + L"\\places.json";
+    std::wstring existing;
+    if (ReadUtf8File(path, existing) && existing == document) return true;
+    return WriteCatalogDocument(path, document, false);
 }
 
 bool PlacesCatalog::FlushPendingSave(bool force) const {
@@ -2031,6 +2043,9 @@ void PlacesCatalog::RemapPaths(const std::vector<std::pair<std::wstring, std::ws
         valid.emplace_back(std::move(old_norm), std::move(new_norm));
     }
     if (valid.empty()) return;
+    // Operation completion runs on the UI thread. Publish the remapped paths
+    // immediately, but never wait there for the catalog writer or storage.
+    ScopedAsyncSave queued_save(*this);
     // Every path follows the move whose source it is or lies under.
     const auto apply = [&](const PathRoots& roots) {
         bool changed = false;

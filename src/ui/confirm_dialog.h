@@ -55,6 +55,7 @@ struct ConfirmDialogSpec {
     // goes, so a question asked for someone else (an AI client) can be
     // closed from outside with WM_CLOSE, which answers Cancel.
     std::function<void(HWND)> on_open;
+    HANDLE cancel_event = nullptr; // borrowed; nested picker disconnect cancellation
 };
 
 ConfirmChoice ShowConfirmDialogEx(HWND owner, const ConfirmDialogSpec& spec, bool dark,
@@ -63,5 +64,10 @@ ConfirmChoice ShowConfirmDialogEx(HWND owner, const ConfirmDialogSpec& spec, boo
 // True when the user picked the confirm button.
 bool ShowConfirmDialog(HWND owner, const ConfirmDialogSpec& spec, bool dark,
                        D2D1_COLOR_F accent);
+
+// Captures the existing native confirmation surface without changing its state.
+// Only a live confirmation window on the calling UI thread is accepted.
+// Live controls on an opaque host-theme surface; DWM acrylic is not captured.
+bool SaveConfirmDialogFrame(HWND window, const std::wstring& path);
 
 } // namespace pulse::ui

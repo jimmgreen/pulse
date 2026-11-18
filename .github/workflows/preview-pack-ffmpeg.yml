@@ -11,6 +11,10 @@ on:
         description: FFmpeg release to build (e.g. 7.1.1)
         required: true
         default: '7.1.1'
+      pack_version:
+        description: Pulse pack version (independent of the FFmpeg release)
+        required: true
+        default: '1.0.5'
   push:
     branches: ['codex/pack-download-build']
     tags: ['pack-ffmpeg-[0-9]*']
@@ -35,17 +39,20 @@ jobs:
             make diffutils tar xz curl
             mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-zlib mingw-w64-x86_64-dav1d
+            mingw-w64-x86_64-libass
       - name: Resolve version
         id: version
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/pack-ffmpeg-* ]]; then
             echo "value=${GITHUB_REF#refs/tags/pack-ffmpeg-}" >> "$GITHUB_OUTPUT"
           else
-            echo "value=${{ inputs.ffmpeg_version || '7.1.1' }}" >> "$GITHUB_OUTPUT"
+            echo "value=${{ inputs.pack_version || '1.0.5' }}" >> "$GITHUB_OUTPUT"
           fi
       - name: Build
         # Windows runners check out with CRLF; bash needs LF.
-        run: sed -i "s/\r$//" packs/ffmpeg/build.sh && bash packs/ffmpeg/build.sh "${{ steps.version.outputs.value }}" pack-out
+        env:
+          FFMPEG_VERSION: ${{ inputs.ffmpeg_version || '7.1.1' }}
+        run: sed -i "s/\r$//" packs/ffmpeg/build.sh && bash packs/ffmpeg/build.sh "$FFMPEG_VERSION" pack-out
       - name: Smoke test
         shell: pwsh
         run: |
@@ -90,10 +97,11 @@ jobs:
           [IO.File]::WriteAllBytes((Join-Path $PWD 'frames.rgb'), [byte[]]::new(48))
           & $ff -v error -y -f rawvideo -pixel_format rgb24 -video_size 2x2 -framerate 4 -i frames.rgb -ss 0.25 -t 0.25 -c:v bmp -f image2pipe frame.bmp
           if ($LASTEXITCODE -ne 0 -or (Get-Item frame.bmp).Length -eq 0) { throw 'Video output seeking failed' }
+          & ./scripts/test_ffmpeg_subtitles.ps1 -FFmpeg $ff
       - name: Check the pack is self-contained
         run: |
           for exe in pack-out/ffmpeg.exe pack-out/ffprobe.exe; do
-            if objdump -p "$exe" | grep -iE 'DLL Name: (libwinpthread|libgcc|libstdc|libdav1d|zlib1)'; then
+            if objdump -p "$exe" | grep -iE 'DLL Name: (lib|zlib|freetype|harfbuzz|fribidi|fontconfig|brotli|bz2|png)'; then
               echo "$exe depends on a MinGW DLL"; exit 1
             fi
           done
@@ -166,7 +174,23 @@ jobs:
             pulse-pack-ffmpeg-*.json
             *.lzms
             pack-catalog.inc
+            build-pack-ffmpeg/ffmpeg-*.tar.xz
+            packs/ffmpeg/build.sh
           if-no-files-found: error
+      - name: Preserve build diagnostics and binaries
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pack-ffmpeg-failure-${{ github.run_id }}
+          path: |
+            pack-out/
+            build-pack-ffmpeg/prefix/bin/
+            build-pack-ffmpeg/ffmpeg-*/config.h
+            build-pack-ffmpeg/ffmpeg-*/ffbuild/config.*
+            build-pack-ffmpeg/*package-files.txt
+            build-pack-ffmpeg/pack-filters.txt
+          if-no-files-found: warn
+          retention-days: 7
 
   publish:
     needs: build
@@ -184,8 +208,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = '${{ github.ref_name }}'
+          $assets = @((Get-ChildItem pulse-pack-ffmpeg-*, *.lzms, pack-catalog.inc).FullName)
+          $assets += (Get-ChildItem build-pack-ffmpeg/ffmpeg-*.tar.xz).FullName
+          $assets += (Resolve-Path packs/ffmpeg/build.sh).Path
           # --latest=false: Pulse's updater reads releases/latest/download/update-manifest.json,
           # so a pack release must never become the repository's "latest" release.
           gh release create $tag --repo '${{ github.repository }}' --latest=false --title "FFmpeg preview pack $($tag -replace 'pack-ffmpeg-','')" `
             --notes 'Optional decode-only LGPL FFmpeg for Pulse previews. Installed from Settings > Preview packs.' `
-            (Get-ChildItem pulse-pack-ffmpeg-*, *.lzms, pack-catalog.inc)
+            @assets

@@ -1,0 +1,90 @@
+{
+  "apiVersion": 1,
+  "id": "sample.property-sheet",
+  "name": "Read-only property sheet",
+  "commands": [
+    {
+      "id": "refresh",
+      "title": "Refresh current folder",
+      "capability": "view.refresh"
+    }
+  ],
+  "panel": {
+    "title": "Selection properties",
+    "ui": {
+      "version": 1,
+      "root": {
+        "type": "scrollView",
+        "id": "properties-root",
+        "children": [
+          {
+            "type": "group",
+            "id": "properties-group",
+            "text": "Host context properties",
+            "children": [
+              {
+                "type": "text",
+                "id": "properties-help",
+                "text": "Read-only values from the current pane. This page composes standard Group, Grid and Text nodes."
+              },
+              {
+                "type": "grid",
+                "id": "properties-grid",
+                "columns": 2,
+                "gap": 12,
+                "children": [
+                  {
+                    "type": "text",
+                    "id": "folder-label",
+                    "text": "Current folder"
+                  },
+                  {
+                    "type": "text",
+                    "id": "folder-value",
+                    "binding": "context.directory"
+                  },
+                  {
+                    "type": "text",
+                    "id": "selected-label",
+                    "text": "Selection count"
+                  },
+                  {
+                    "type": "text",
+                    "id": "selected-value",
+                    "binding": "context.selectionCount"
+                  },
+                  {
+                    "type": "text",
+                    "id": "name-label",
+                    "text": "Selected name"
+                  },
+                  {
+                    "type": "text",
+                    "id": "name-value",
+                    "binding": "context.selectionName"
+                  },
+                  {
+                    "type": "text",
+                    "id": "view-label",
+                    "text": "Host view"
+                  },
+                  {
+                    "type": "text",
+                    "id": "view-value",
+                    "binding": "context.viewMode"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "button",
+            "id": "refresh-properties",
+            "text": "Refresh current folder",
+            "command": "refresh"
+          }
+        ]
+      }
+    }
+  }
+}

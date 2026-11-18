@@ -10,6 +10,9 @@
 //   pulse.find_actions    Read    the action table, with what AI apps may run   (ai_tools_actions.h, P5)
 //   pulse.run_actions     View    steps of the action table; each checked against ai.json's
 //                                 mcp_allow, asking in Pulse where its group asks
+//   pulse.describe_extension_api       Read  public manifest contract (no window or file access)
+//   pulse.validate_extension_manifest  Read  validate supplied JSON text (no loading or execution)
+//   pulse.get_extension_template       Read  return validated built-in manifest text (no execution)
 //
 // reveal needs 查看与界面 and create_zip 新建 switched on (P5).
 //

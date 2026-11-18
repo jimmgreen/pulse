@@ -1,4 +1,6 @@
 #include "mcp_tools.h"
+#include "../common/ai_action_request.h"
+#include "../app/extensions/developer_tool_catalog.h"
 #include <cstring>
 
 namespace pulse::ai_host {
@@ -14,6 +16,8 @@ constexpr const char* kStepWaits[] = {"listing_loaded", "op_finished", "preview_
 // pieces: one literal may not pass MSVC's limit.
 const char* RunActionsDescription() {
     static const std::string text = std::string(
+        "Package-bound workflow.run/workflow.cancel and extension resource APIs are not run_actions IDs. "
+        "Discovery and template validation grant no package identity or execution authority; caller, owner, principal and ticket fields are rejected. "
         "Does things in Pulse itself, in order, as one undo group (at most 12 steps): panes and the folders in them, wi"
         "ndows, tabs, view, sort, grouping, panels, selection, the staging tray, tags, favorites, settings, new folders"
         ", opening files, file operations, and any action find_actions returns. What AI apps may do is the user's choic"
@@ -33,6 +37,12 @@ const char* RunActionsDescription() {
         "e folder or a known folder, made if missing. Locked actions (quitting Pulse, unlocking a BitLocker drive, the "
         "AI permissions, turning off delete confirmation) are only the user's. Stops at the first step that fails; earl"
         "ier steps stay done. undo_last undoes the whole call. Returns each step's outcome.\n") + std::string(
+        "file.organize {moves: [{item, dest}]} sorts many files into folders with one plan dialog (a file step; missi"
+        "ng folders are made; any name already taken refuses the whole plan). file.find_duplicates {folders, min_size,"
+        " show} is a read step: Pulse reads the files on this PC to compare them byte for byte - their contents never "
+        "reach you - skips online-only cloud files, opens a tab with the groups unless show is false, and returns each"
+        " group's paths, sizes and dates, the copy it would keep and why (at most 50 groups). The user can move the ex"
+        "tras to the Recycle Bin from that tab; file.recycle {items} asks them every time.\n") + std::string(
         "Common actions (args): window.layout {layout: single|side_by_side|stacked|three|four, panes: [a folder per pan"
         "e, left or top first; \"\" leaves one]}, nav.go {path, pane}, window.new {path}, tab.new {path}, tab.close, ta"
         "b.to_window, pane.to_window {pane}, window.merge, window.overview, nav.back, nav.up, view.mode {view: extra_la"
@@ -138,6 +148,16 @@ std::vector<ToolDef> MakeTools() {
         "Undoes the most recent change an AI client made through Pulse: a zip it created (it goes to the Recycle "
         "Bin) or a whole run_actions call. Refuses when the user's own last operation is on top.",
         false, true, false, {}});
+    for (const auto& spec : extensions::kDeveloperTools) {
+        ToolDef tool{spec.name, spec.title, spec.description, true, false, true, {}};
+        if (spec.parameter) {
+            Param parameter{spec.parameter, ParamKind::String, true, spec.minimum, spec.maximum, spec.parameter_description};
+            if (spec.template_choices) parameter.choices.assign(extensions::generated::kTemplateNames.begin(),
+                extensions::generated::kTemplateNames.end());
+            tool.params.push_back(std::move(parameter));
+        }
+        tools.push_back(std::move(tool));
+    }
     return tools;
 }
 
@@ -232,6 +252,7 @@ const ToolDef* FindTool(std::string_view name) {
 }
 
 json::Value InputSchema(const ToolDef& tool) {
+    if (const auto* spec = extensions::FindDeveloperTool(tool.name)) return extensions::DeveloperToolInputSchema(*spec);
     json::Value properties = json::Value::Object();
     json::Value required = json::Value::Array();
     for (const Param& p : tool.params) {
@@ -329,6 +350,7 @@ json::Value ToolsList() {
 }
 
 std::string ValidateArguments(const ToolDef& tool, const json::Value& args) {
+    if (std::string_view(tool.name) == "run_actions") return pulse::ai::ValidateActionRequest(args);
     if (!args.is_object()) return "arguments must be an object";
     for (const std::string& key : args.keys()) {
         bool known = false;
@@ -340,6 +362,11 @@ std::string ValidateArguments(const ToolDef& tool, const json::Value& args) {
         const std::string where = std::string("\"") + p.name + "\"";
         if (!v) {
             if (p.required) return where + " is required";
+            continue;
+        }
+        if (std::string_view(tool.name) == "validate_extension_manifest" && std::string_view(p.name) == "manifest") {
+            if (!v->is_string()) return where + " must be a string";
+            if (v->as_string().size() > 65536) return where + " is too long (at most 65536 UTF-8 bytes)";
             continue;
         }
         switch (p.kind) {

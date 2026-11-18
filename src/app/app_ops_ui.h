@@ -2,18 +2,24 @@
 #pragma once
 #include "app_runtime.h"
 #include <optional>
+#include <memory>
 #include "../ui/confirm_dialog.h"
 
 namespace pulse::app::rename { struct Preset; }
+namespace pulse { struct DeletePreflight; }
 
 namespace pulse {
 bool SubmitWithConflictResolution(AppState& s, ops::OpRequest request, uint64_t* task_id = nullptr);
 void ReleaseTrayBatch(AppState& s, size_t idx);
 void PasteIntoCurrent(AppState& s);
 void DeleteSelected(AppState& s, bool permanent);
-void DeletePaths(AppState& s, std::vector<std::wstring> paths, bool permanent);
+void PollDeletePreflight(AppState& s);
+void CancelDeletePreflight(AppState& s);
+std::shared_ptr<DeletePreflight> DeletePaths(AppState& s, std::vector<std::wstring> paths, bool permanent,
+    bool recycle_only = false, bool force_confirmation = false);
 // A delete finished: rows that slid out return if it failed; a recycle offers
 // "Deleted N items - Undo" (motion 5b).
+void NoteDeleteCompletion(AppState& s, const ops::CompletedOperation& completed);
 void NoteDeleteFinished(AppState& s, const ops::FinishedTask& done);
 // The batch rename dialog's task ended: flash the renamed rows and offer undo
 // (once the dialog has closed).
@@ -46,7 +52,7 @@ std::vector<std::wstring> TrayDestList(const AppState& s);
 void RememberTrayDest(AppState& s, const std::wstring& dir);
 // Copy (or move) every staged item that still exists into dir.
 void SendTrayToDest(AppState& s, const std::wstring& dir, bool move);
-// Shelf release (pulse_tray_redesign.html): copy / move every staged item
+// Shelf release: copy / move every staged item
 // that exists and is not already in dir. Selects the arrivals when dir is the
 // current folder; a snack with 撤销 / 打开 follows when the task finishes.
 void ReleaseTrayTo(AppState& s, const std::wstring& dir, bool move);
@@ -70,6 +76,10 @@ size_t ShowBatchRenameWith(AppState& s, const std::vector<std::wstring>& paths, 
 // Builds this window's operations window the first time it has to show it.
 bool EnsureOperationWindow(AppState& s);
 void PinAndShowOperationWindow(AppState& s);
+void HandleUndoHistoryAction(AppState& s, uint64_t task_id, bool undone, bool locate);
+void HandleOperationStatusAction(AppState& s, int action);
+void HandleOperationHistoryAction(AppState& s, uint64_t task_id, int action);
+std::vector<ui::FluentMenuItem> BuildOperationHistoryMenu(AppState& s, const std::vector<ops::OpStatus>& history);
 void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog);
 // Makes `to` the window that shows file operations (multi-window M4c, plan
 // §8.1): ops notifications and shell dialogs go to it, and the progress

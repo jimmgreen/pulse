@@ -101,6 +101,8 @@ int ItemNameCompare(const fs::DirEntry& a, const fs::DirEntry& b,
 std::atomic<FolderSortMode> g_folder_sort_mode{FolderSortMode::FoldersFirst};
 // -1: no ScopedFolderSortMode on this thread.
 thread_local int t_folder_sort_mode = -1;
+std::atomic<MediaSortKeySource> g_media_sort_keys{nullptr};
+thread_local const std::wstring* t_media_sort_folder = nullptr;
 
 } // namespace
 
@@ -124,10 +126,25 @@ ScopedFolderSortMode::~ScopedFolderSortMode() {
     t_folder_sort_mode = previous_;
 }
 
+void SetMediaSortKeySource(MediaSortKeySource source) noexcept {
+    g_media_sort_keys.store(source, std::memory_order_release);
+}
+
+ScopedMediaSortFolder::ScopedMediaSortFolder(const std::wstring& folder) noexcept
+    : previous_(t_media_sort_folder) {
+    t_media_sort_folder = &folder;
+}
+
+ScopedMediaSortFolder::~ScopedMediaSortFolder() {
+    t_media_sort_folder = previous_;
+}
+
 bool EntryLess(const fs::DirEntry& a, const fs::DirEntry& b,
                ui::SortColumn col, ui::SortDirection dir) {
     if (const EntryGrouping* grouping = CurrentEntryGrouping()) {
-        if (const int c = GroupCompare(a, b, grouping->by, grouping->clock, col, dir))
+        GroupClock clock = grouping->clock;
+        clock.folders = CurrentFolderSortMode();
+        if (const int c = GroupCompare(a, b, grouping->by, clock, col, dir))
             return c < 0;
     }
     return EntryLess(a, b, col, dir, CurrentFolderSortMode());
@@ -142,17 +159,49 @@ struct SizeKey {
 
 bool Less(const fs::DirEntry& a, const fs::DirEntry& b, ui::SortColumn col,
           ui::SortDirection dir, FolderSortMode folders, const SizeKey* ka, const SizeKey* kb,
-          const std::string* na = nullptr, const std::string* nb = nullptr) {
+          const std::string* na = nullptr, const std::string* nb = nullptr,
+          const MediaSortKey* ma = nullptr, const MediaSortKey* mb = nullptr) {
     const bool a_folder = a.is_dir || (!a.link_target.empty() && a.link_target_is_dir);
     const bool b_folder = b.is_dir || (!b.link_target.empty() && b.link_target_is_dir);
-    // FoldersFirst pins folders above the direction flip below; FollowDirection
-    // feeds the group through it so descending order sends folders down.
+    // Folder placement is independent of the sort direction.
     if (a_folder != b_folder) {
         if (folders == FolderSortMode::FoldersFirst) return a_folder;
-        if (folders == FolderSortMode::FollowDirection)
-            return (dir == ui::SortDirection::Desc) ? !a_folder : a_folder;
+        if (folders == FolderSortMode::FoldersLast)
+            return !a_folder;
     }
     int cmp = 0;
+    // This PC rows: its details view heads the date column 使用情况 and the
+    // size column 可用. Drives without a known size follow in either direction.
+    if (a.drive_type != 0 && b.drive_type != 0 &&
+        (col == ui::SortColumn::Mtime || col == ui::SortColumn::Size)) {
+        const bool ka_known = a.drive_total > 0, kb_known = b.drive_total > 0;
+        if (ka_known != kb_known) return ka_known;
+        if (ka_known) {
+            const auto key = [col](const fs::DirEntry& e) {
+                const uint64_t free = std::min(e.drive_free, e.drive_total);
+                return col == ui::SortColumn::Size
+                    ? static_cast<double>(free)
+                    : static_cast<double>(e.drive_total - free) / static_cast<double>(e.drive_total);
+            };
+            const double va = key(a), vb = key(b);
+            cmp = va < vb ? -1 : va > vb ? 1 : 0;
+        }
+        if (cmp == 0) cmp = ItemNameCompare(a, b, na, nb);
+        if (dir == ui::SortDirection::Desc) cmp = -cmp;
+        return cmp < 0;
+    }
+    if (col >= ui::SortColumn::MediaTaken) {
+        if (ma && mb) {
+            if (ma->known != mb->known) return ma->known;
+            if (ma->known) {
+                if (!ma->text.empty() || !mb->text.empty()) cmp = NameCompare(ma->text, mb->text);
+                if (cmp == 0) cmp = ma->number < mb->number ? -1 : ma->number > mb->number ? 1 : 0;
+            }
+        }
+        if (cmp == 0) cmp = ItemNameCompare(a, b, na, nb);
+        if (dir == ui::SortDirection::Desc) cmp = -cmp;
+        return cmp < 0;
+    }
     switch (col) {
     case ui::SortColumn::Name:
         cmp = ItemNameCompare(a, b, na, nb);
@@ -192,6 +241,8 @@ bool Less(const fs::DirEntry& a, const fs::DirEntry& b, ui::SortColumn col,
         cmp = _wcsicmp(a.full_path.c_str(), b.full_path.c_str());
         if (cmp == 0) cmp = ItemNameCompare(a, b, na, nb);
         break;
+    default:  // Media*: above
+        break;
     }
     if (dir == ui::SortDirection::Desc) cmp = -cmp;
     return cmp < 0;
@@ -210,14 +261,16 @@ namespace {
 // (grouping and folder mode included), computed over positions so that a
 // throwing tick leaves the rows as they were.
 void SortRows(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDirection dir,
-              const FolderSizeLookup* sizes, const std::function<void()>& tick) {
+              const FolderSizeLookup* sizes, const std::function<void()>& tick, size_t keep = SIZE_MAX) {
     const size_t n = entries.size();
+    if (keep == 0) { entries.clear(); return; }
     if (n < 2) return;
     std::vector<SizeKey> size_keys;
     if (sizes) {
         size_keys.resize(n);
         std::wstring lower;
         for (size_t i = 0; i < n; ++i) {
+            if (tick) tick();
             const fs::DirEntry& e = entries[i];
             if (!e.is_dir || e.drive_type != 0) {
                 size_keys[i].bytes = e.size;
@@ -233,30 +286,56 @@ void SortRows(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDi
     // All rows compare by name key or none do, so the order stays consistent.
     std::vector<std::string> name_keys(n);
     for (size_t i = 0; i < n; ++i) {
+        if (tick) tick();
         if (!NameSortKey(entries[i].name, name_keys[i])) {
             std::vector<std::string>().swap(name_keys);
             break;
         }
     }
     const bool keyed = !name_keys.empty();
+    std::vector<MediaSortKey> media_keys;
+    if (col >= ui::SortColumn::MediaTaken && t_media_sort_folder) {
+        if (const MediaSortKeySource source = g_media_sort_keys.load(std::memory_order_acquire))
+            source(*t_media_sort_folder, entries, col, media_keys);
+        if (media_keys.size() != n) media_keys.clear();
+    }
+    const bool media = !media_keys.empty();
     std::vector<size_t> order(n);
     std::iota(order.begin(), order.end(), size_t{0});
     const EntryGrouping* grouping = CurrentEntryGrouping();
     const FolderSortMode mode = CurrentFolderSortMode();
-    std::sort(order.begin(), order.end(), [&](size_t x, size_t y) {
+    GroupClock clock = grouping ? grouping->clock : GroupClock{};
+    clock.date_column = col;
+    clock.folders = mode;
+    std::vector<int> group_ranks;
+    if (grouping) {
+        group_ranks.reserve(n);
+        for (const auto& entry : entries) {
+            if (tick) tick();
+            group_ranks.push_back(GroupRank(entry, grouping->by, clock));
+        }
+    }
+    const auto less = [&](size_t x, size_t y) {
         if (tick) tick();
         const fs::DirEntry& a = entries[x];
         const fs::DirEntry& b = entries[y];
         if (grouping) {
-            if (const int c = GroupCompare(a, b, grouping->by, grouping->clock, col, dir))
+            if (const int c = GroupCompareRanks(a, b, grouping->by, col, dir,
+                    group_ranks.empty() ? 0 : group_ranks[x], group_ranks.empty() ? 0 : group_ranks[y], clock))
                 return c < 0;
         }
         return Less(a, b, col, dir, mode,
                     sizes ? &size_keys[x] : nullptr, sizes ? &size_keys[y] : nullptr,
-                    keyed ? &name_keys[x] : nullptr, keyed ? &name_keys[y] : nullptr);
-    });
+                    keyed ? &name_keys[x] : nullptr, keyed ? &name_keys[y] : nullptr,
+                    media ? &media_keys[x] : nullptr, media ? &media_keys[y] : nullptr);
+    };
+    keep = (std::min)(keep, n);
+    if (keep < n) {
+        std::partial_sort(order.begin(), order.begin() + keep, order.end(), less);
+        order.resize(keep);
+    } else std::sort(order.begin(), order.end(), less);
     std::vector<fs::DirEntry> sorted;
-    sorted.reserve(n);
+    sorted.reserve(keep);
     for (const size_t i : order) sorted.push_back(std::move(entries[i]));
     entries.swap(sorted);
 }
@@ -266,6 +345,11 @@ void SortRows(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDi
 void SortEntries(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDirection dir,
                  const std::function<void()>& tick) {
     SortRows(entries, col, dir, nullptr, tick);
+}
+
+void SortFirstEntries(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDirection dir,
+                      size_t keep, const std::function<void()>& tick) {
+    SortRows(entries, col, dir, nullptr, tick, keep);
 }
 
 void SortEntriesBySize(std::vector<fs::DirEntry>& entries, ui::SortDirection dir,

@@ -1,6 +1,5 @@
 // batch_rename_dialog.cpp — 批量重命名: a stack of switchable steps on the
-// left, the live old → new preview on the right (design:
-// plans/Pulse_批量重命名_重设计.html). The rename engine lives in
+// left, the live old → new preview on the right. The rename engine lives in
 // app/batch_rename_plan; this file only draws, edits the steps and hands the
 // chain-safe list of renames back to the caller.
 #include "edit_host.h"
@@ -16,6 +15,7 @@
 #include "typography.h"
 #include "ui_compositor.h"
 #include "window_helpers.h"
+#include "surface_capture.h"
 #include "../common/localization.h"
 
 #include <commctrl.h>
@@ -306,6 +306,7 @@ uint64_t LocalTicks(const FILETIME& utc) {
 // Photo metadata ({拍摄日期}, {尺寸}) read off the UI thread. The job is shared
 // with its worker, which stops early once the dialog cancels it.
 constexpr UINT kMetaMsg = WM_APP + 0x31;   // wparam 1 = done, 0 = progress
+constexpr UINT kReviewReadyMsg = WM_APP + 0x34;
 constexpr UINT kAiMsg = WM_APP + 0x32;     // the AI request finished
 struct MetaJob {
     bool taken = false, dims = false;
@@ -411,13 +412,23 @@ public:
         scale_ = BatchRenameScaleForTest();
 #endif
         result_ = {};
-        LoadSources();
+        if (options_.proposed_names) {
+            if (!options_.proposed_plan || options_.proposed_sources.size() != paths_.size() ||
+                options_.proposed_names->size() != paths_.size()) return result_;
+            sources_ = options_.proposed_sources;
+            plan_ = *options_.proposed_plan;
+            if (plan_.rows.size() != sources_.size()) return result_;
+            folder_label_ = sources_.empty() ? std::wstring() : sources_.front().folder;
+            opts_.policy = rn::Policy::Block;
+        } else LoadSources();
 #ifndef PULSE_TEST_BATCH_RENAME_PRESENT
-        store_ = rn::LoadPresets();
+        if (!options_.proposed_names) store_ = rn::LoadPresets();
 #endif
         // A fresh dialog opens with the cleanup most people start from (the
         // design's first scene), or with the steps it was handed.
-        if (options_.preset) {
+        if (options_.proposed_names) {
+            steps_.clear();
+        } else if (options_.preset) {
             rn::Preset p = *options_.preset;
             for (auto& st : p.steps) {
                 st.pattern = UiTokens(st.pattern);
@@ -462,7 +473,9 @@ public:
         BatchRenameShownForTest(hwnd_);
 #endif
         SetForegroundWindow(hwnd_);
-        if (Field* f = FindField(steps_ui_.front().id, kFind)) SetFocus(f->hwnd);
+        if (!steps_ui_.empty()) {
+            if (Field* f = FindField(steps_ui_.front().id, kFind)) SetFocus(f->hwnd);
+        }
 
         MSG message{};
         while (!done_ && GetMessageW(&message, nullptr, 0, 0) > 0) {
@@ -588,15 +601,25 @@ private:
     }
 
     void Recompute(bool flash) {
-        if (!content_mode_) EnsureMetadata(rn::NeedsTakenDate(steps_, opts_), rn::NeedsDimensions(steps_));
+        if (!options_.proposed_names && !content_mode_) EnsureMetadata(rn::NeedsTakenDate(steps_, opts_), rn::NeedsDimensions(steps_));
         std::vector<std::wstring> before;
-        before.reserve(plan_.rows.size());
-        for (const auto& r : plan_.rows) before.push_back(r.new_name);
-        const auto exists = [this](const std::wstring& source, const std::wstring& lower) {
-            auto it = existing_.find(rn::Lower(ParentOf(source)));
+        if (flash) {
+            before.reserve(plan_.rows.size());
+            for (const auto& r : plan_.rows) before.push_back(r.new_name);
+        }
+        std::unordered_map<std::wstring, std::wstring> parent_keys;
+        parent_keys.reserve(sources_.size());
+        for (const auto& source : sources_)
+            parent_keys.emplace(source.path, rn::Lower(ParentOf(source.path)));
+        const auto exists = [this, &parent_keys](const std::wstring& source, const std::wstring& lower) {
+            const auto parent = parent_keys.find(source);
+            if (parent == parent_keys.end()) return false;
+            auto it = existing_.find(parent->second);
             return it != existing_.end() && it->second.count(lower) > 0;
         };
-        if (content_mode_) {
+        if (options_.proposed_names) {
+            plan_ = *options_.proposed_plan;
+        } else if (content_mode_) {
             // Checked suggestions take the same checks (clashes, validity, order) as steps.
             std::vector<std::wstring> names(sources_.size());
             for (size_t i = 0; i < sources_.size() && i < crows_.size(); ++i)
@@ -653,10 +676,11 @@ private:
     void Complete(bool accepted) {
         if (executing_) return;
         if (accepted) {
+            if (options_.review_valid && !options_.review_valid()) { Complete(false); return; }
             CommitRowEdit(true);
             if (!CanApply()) return;
             result_.accepted = true;
-            if (!content_mode_) {
+            if (!options_.proposed_names && !content_mode_) {
                 store_.last = {S(StringId::BrPresetLast), steps_, opts_};
                 store_.has_last = true;
                 SaveStore();
@@ -1257,6 +1281,7 @@ private:
     }
 
     void EnsureFields() {
+        if (options_.proposed_names) return;
         if (!FindField(-1, 0)) CreateField(-1, 0, std::wstring(), false);
         for (size_t i = 0; i < steps_.size(); ++i) {
             const int id = steps_ui_[i].id;
@@ -1649,10 +1674,12 @@ private:
         Stroke(D2D1::RectF(0, 0, W_, H_), X(12), Alpha(pal_.text, 0.09f));
 
         DrawTitle();
-        DrawAiBar();
-        DrawExamples();
-        if (content_mode_) DrawContentPane();
-        else DrawSteps();
+        if (!options_.proposed_names) {
+            DrawAiBar();
+            DrawExamples();
+            if (content_mode_) DrawContentPane();
+            else DrawSteps();
+        }
         DrawPreview();
         DrawFooter();
         DrawMenus();
@@ -1671,7 +1698,9 @@ private:
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
         }
-        if (anim_active_) SetTimer(hwnd_, kAnimTimer, 15, nullptr);
+        if (options_.proposed_names && options_.on_review_ready && ++review_frames_ == 2)
+            PostMessageW(hwnd_, kReviewReadyMsg, 0, 0);
+        if (anim_active_ || options_.review_valid) SetTimer(hwnd_, kAnimTimer, anim_active_ ? 15 : 50, nullptr);
         else KillTimer(hwnd_, kAnimTimer);
     }
 
@@ -1703,6 +1732,7 @@ private:
         Ico(kX, close.left + X(11), close.top + X(11), X(14), pal_.text2);
         Reg(close, {H::Close});
 
+        if (options_.proposed_names) return;
         // Mode switch: 规则 | 按内容命名.
         const std::wstring l0 = S(StringId::BrModeRules), l1 = S(StringId::BrModeContent);
         const float w0 = X(12 + 14 + 6 + 12) + Measure(l0, Fmt::T13);
@@ -2551,8 +2581,8 @@ private:
     // ---------------------------------------------------------------- preview
 
     void DrawPreview() {
-        const float top = X(kBodyTop) + X(1), bottom = H_ - X(kFootH);
-        const float left = X(kStepsW);
+        const float top = X(options_.proposed_names ? kTitleH : kBodyTop) + X(1), bottom = H_ - X(kFootH);
+        const float left = options_.proposed_names ? 0.0f : X(kStepsW);
         const D2D1_RECT_F pane = D2D1::RectF(left, top, W_, bottom);
         Reg(pane, {H::Preview});
 
@@ -2585,7 +2615,7 @@ private:
                 Text(rg, Fmt::T125m, D2D1::RectF(link.left + X(27), link.top, link.right, link.bottom), pal_.ai);
                 Reg(link, {H::CRegen});
             }
-        } else {
+        } else if (!options_.proposed_names) {
         // Numbering order.
         static const StringId orders[] = {StringId::BrOrderList, StringId::BrOrderTaken, StringId::BrOrderModified,
                                           StringId::BrOrderName};
@@ -2982,6 +3012,7 @@ private:
             if (k > 0) Fill(D2D1::RectF(0, top - X(1), W_ * k, top + X(1)), 0, pal_.accent);
         }
         const float cy = top + X(kFootH) * 0.5f;
+        if (!options_.proposed_names) {
         // 同时修改扩展名 (rules only: suggestions keep the extension).
         float x = X(18);
         if (!content_mode_) {
@@ -3010,6 +3041,7 @@ private:
         Reg(pd, {H::PolicyDD});
         policy_dd_ = pd;
 
+        }
         // Buttons, right to left.
         const bool can = CanApply();
         const std::wstring go = FmtS(StringId::BrRenameN, plan_.renames);
@@ -3233,6 +3265,8 @@ private:
 
     void Click(const Hit& h) {
         if (executing_) return;
+        if (options_.proposed_names && h.k != H::Close && h.k != H::Cancel && h.k != H::Apply &&
+            h.k != H::Tab && h.k != H::Preview && h.k != H::Row) return;
         if (c_edit_ >= 0 && !(h.k == H::CName && h.a == c_edit_)) CommitRowEdit(true);
         const bool had_menu = menu_ != Menu::None;
         const Menu was = menu_;
@@ -3518,10 +3552,25 @@ private:
             SetBkColor(hdc, Ref(ai ? pal_.card : pal_.field));
             return reinterpret_cast<LRESULT>(ai ? brush_ai_ : brush_field_);
         }
+        case kReviewReadyMsg: {
+            auto callback = std::move(options_.on_review_ready);
+            const HWND window = hwnd_;
+            const std::weak_ptr<uint8_t> lifetime = review_lifetime_;
+            if (callback) callback(window, [this, window, lifetime](const std::wstring& path) {
+                if (lifetime.expired() || !IsWindow(window)) return false;
+                // DWM acrylic is external to the backbuffer. Use the same real
+                // opaque-theme capture pass as other native dialogs, then restore.
+                const bool saved = CaptureDialogSurface(path, [this] { Render(); });
+                if (!lifetime.expired() && IsWindow(window)) Render();
+                return saved;
+            });
+            return 0;
+        }
         case WM_COMMAND:
             if (HIWORD(wparam) == EN_CHANGE) OnFieldChanged(reinterpret_cast<HWND>(lparam));
             return 0;
         case WM_TIMER:
+            if (options_.review_valid && !options_.review_valid()) { Complete(false); return 0; }
             if (wparam == kAnimTimer) InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case WM_MOUSEWHEEL: {
@@ -3611,6 +3660,8 @@ private:
         case WM_ERASEBKGND:
             return 1;
         case WM_DESTROY:
+            // The owner may be closed while a read-only review pumps its modal loop.
+            if (options_.proposed_names) done_ = true;
             KillTimer(hwnd_, kAnimTimer);
             DestroyFields();
             if (font_) { DeleteObject(font_); font_ = nullptr; }
@@ -3692,6 +3743,8 @@ private:
     std::shared_ptr<MetaJob> meta_job_;
     std::vector<int> meta_rank_;   // source -> order in meta_job_ (-1 = not media)       // the open menu, from the last frame
     BatchRenameDialogOptions options_;
+    unsigned review_frames_ = 0;
+    std::shared_ptr<uint8_t> review_lifetime_ = std::make_shared<uint8_t>(0);
     BatchRenameDialogResult result_;
 
     std::vector<HitRect> hits_;

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace pulse::app::ai {
@@ -49,13 +50,33 @@ struct VoicePrefs {
     bool IsDefault() const { return service.empty() && base_url.empty() && model.empty() && pause == 1 && mic.empty(); }
 };
 
-// Pulse 助手 (ai_assistant.h): where its panel sits and the model last used.
+// What Pulse 助手 remembers of a model service that is not the one in use
+// (设置 › AI 助手 › 其他已保存的服务), so switching back keeps its model and
+// address. Its key stays in its own key file (ai_model_key.h).
+struct ServicePrefs {
+    std::string model;
+    std::string base_url;   // empty: the service's own address
+};
+
+// Pulse 助手 (ai_assistant.h): where its panel sits, the model service in use
+// (ai_providers.h) and the model last used.
 struct AssistantPrefs {
     bool floating = false;                    // "dock": "docked" | "floating"
+    std::string service;                      // ai_providers.h id; empty: deepseek
     std::string model = "deepseek-flash";
-    int effort = 2;                           // 0 off, 1 low, 2 medium, 3 high
-    std::string base_url;                     // 管理连接 · 高级; empty: https://api.deepseek.com
+    // "thinking": the level the user prefers, 0 off … 6 max (ai_providers.h
+    // ThinkLevel); each model uses the nearest one it has. "effort" (0..3,
+    // what older versions read) is still written alongside, and read when
+    // "thinking" is missing.
+    int thinking = 4;                         // high
+    std::string base_url;                     // empty: the service's own address
+    std::vector<std::pair<std::string, ServicePrefs>> services;   // "services": {id: {...}}, the others
     VoicePrefs voice;                         // "voice": {...}
+    // 55 P3 历史对话: "history": false stops saving conversations;
+    // "history_days" removes those not updated for that many days (pinned
+    // ones stay). Written only when not the default, so older files stay.
+    bool history = true;
+    int history_days = 0;                     // 0: keep them all
 };
 
 // What AI apps (MCP) may do in Pulse (P5, 设置 › 增强包 › AI 与 MCP › AI
@@ -67,6 +88,7 @@ struct AssistantPrefs {
 inline constexpr const char* kMcpDefaultAllow[] = {"view", "create"};
 
 struct Settings {
+    bool enabled = true; // Built-in assistant, independent of MCP access.
     bool mcp_enabled = false;
     int log_days = 30;     // 1..365
     std::vector<ClientRecord> clients;

@@ -1,5 +1,6 @@
 // session.cpp
 #include "session.h"
+#include "hot_entry_data_dir.h"
 #include "split_tree_shape.h"
 #include "../common/config_json.h"
 #include "../ui/panel_metrics.h"
@@ -370,6 +371,8 @@ bool ParseLayoutTabs(const std::wstring& array_json,
 }
 
 std::wstring GetPulseDataDir() {
+    const auto& hot_fixture = VerifiedHotEntryDataDirectory();
+    if (!hot_fixture.empty()) return hot_fixture;
 #ifdef PULSE_WITH_SELFTEST
     wchar_t test_dir[32768]{};
     const DWORD length = GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", test_dir, ARRAYSIZE(test_dir));
@@ -422,7 +425,11 @@ std::wstring SessionToJson(const SessionSnapshot& snap) {
     f << L"  \"detailsPreviewOnly\":" << (snap.details_preview_only ? L"true" : L"false") << L",\n";
     f << L"  \"detailsPreview\":" << (snap.details_preview ? L"true" : L"false") << L",\n";
     f << L"  \"tray\":" << trayJson << L",\n";
-    f << L"  \"undo\":" << (snap.undo_json.empty() ? L"[]" : snap.undo_json) << L",\n";
+    f << L"  \"undo\":";
+    if (snap.undo_snapshot) f << *snap.undo_snapshot;
+    else if (snap.undo_json.empty()) f << L"[]";
+    else f << snap.undo_json;
+    f << L",\n";
     f << L"  \"activeTab\":" << snap.active_layout_tab << L",\n";
     f << L"  \"tabGroups\":" << TabGroupsToJson(snap.tab_groups) << L",\n";
     f << L"  \"layoutTabs\":" << LayoutTabsToJson(snap.layout_tabs);

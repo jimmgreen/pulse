@@ -1,4 +1,4 @@
-// Permanent delete dialog (pulse_ops_dialogs.html §6): Enter deletes, Tab
+// Permanent delete dialog: Enter deletes, Tab
 // reaches 移到回收站, Escape cancels, the buttons click through, and there is
 // no recycle button where the items have no bin. Optional argv[1] is a folder
 // that receives screenshots.
@@ -108,11 +108,11 @@ void CALLBACK Step(HWND, UINT, UINT_PTR timer, DWORD) {
     KillTimer(nullptr, timer);
     RECT client{};
     GetClientRect(dialog, &client);
-    // 82 + 2 + 34 per row + 20 + 64: three items and "and N more", or one item.
+    // The total line adds 22 DIP below the list.
     const bool many_rows = g_scenario == 0 || g_scenario == 1 || g_scenario == 5;
-    const float tall = many_rows ? 304.0f : 202.0f;
+    const float tall = many_rows ? 326.0f : 224.0f;
     Check(std::abs(client.bottom - static_cast<LONG>(tall * Scale(dialog))) <= 2,
-          many_rows ? "four list rows: 304 DIP tall" : "one list row: 202 DIP tall");
+          many_rows ? "four list rows and total: 326 DIP tall" : "one list row and total: 224 DIP tall");
     const float footer_y = tall - 32.0f;
     switch (g_scenario) {
     case 0: Shot(dialog, L"many", g_dark); SendMessageW(dialog, WM_KEYDOWN, VK_RETURN, 0); break;

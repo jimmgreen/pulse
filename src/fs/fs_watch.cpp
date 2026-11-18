@@ -96,6 +96,8 @@ struct DirWatch::State {
     std::atomic<HANDLE> hDir_{INVALID_HANDLE_VALUE};
     HANDLE hStop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     std::atomic<bool> running_{true};
+    std::promise<void> stopped_;
+    std::shared_future<void> stopped_future_ = stopped_.get_future().share();
     std::atomic<bool> armed_{false};
     bool stamp_arm_ = false;
     std::atomic<bool> starting_{false};  // listed in starting_watches
@@ -153,6 +155,7 @@ struct DirWatch::State {
         for (HANDLE event : {removal_event_, released_event_, resume_event_})
             if (event) CloseHandle(event);
         --active_watchers;
+        stopped_.set_value();
     }
     static HANDLE OpenDirectory(const std::wstring& path);
     static bool ReadIdentity(HANDLE handle, BY_HANDLE_FILE_INFORMATION& identity);
@@ -197,7 +200,12 @@ bool DirWatch::Start(const std::wstring& path, ChangeCallback cb, bool subtree, 
 bool DirWatch::Armed() const { return state_ && state_->armed_.load(); }
 
 void DirWatch::Stop() {
-    if (!state_) return;
+    (void)StopAsync();
+}
+
+std::shared_future<void> DirWatch::StopAsync() {
+    if (!state_) return {};
+    auto completion = state_->stopped_future_;
     state_->EndStarting();
     state_->running_ = false;
     SetEvent(state_->hStop_);
@@ -211,6 +219,7 @@ void DirWatch::Stop() {
         thread_.detach();
     }
     state_.reset(); // The worker owns handles and pending OVERLAPPED until drained.
+    return completion;
 }
 
 HANDLE DirWatch::State::OpenDirectory(const std::wstring& path) {
@@ -583,6 +592,9 @@ void DirWatch::State::WorkerThread() {
 }
 
 void DirWatchSet::Sync(const std::vector<std::wstring>& paths, Callback cb) {
+    std::erase_if(retiring_, [](const auto& item) {
+        return !item.second.valid() || item.second.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
+    });
     {
         std::lock_guard<std::mutex> lock(mutex_);
         callback_ = std::move(cb);
@@ -591,14 +603,22 @@ void DirWatchSet::Sync(const std::vector<std::wstring>& paths, Callback cb) {
     wanted.reserve(paths.size());
     for (const auto& path : paths) {
         if (path.empty() || IsVirtualPath(path)) continue;
-        wanted.push_back(NormalizePath(path));
+        auto key = NormalizePath(path);
+        if (std::any_of(suspended_roots_.begin(), suspended_roots_.end(), [&](const auto& root) {
+            return _wcsicmp(key.c_str(), root.c_str()) == 0 || (key.size() > root.size() && _wcsnicmp(key.c_str(), root.c_str(), root.size()) == 0 &&
+                (root.back() == L'\\' || key[root.size()] == L'\\'));
+        })) continue;
+        wanted.push_back(std::move(key));
     }
     std::sort(wanted.begin(), wanted.end());
     wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
 
     for (auto it = watches_.begin(); it != watches_.end();) {
         if (std::binary_search(wanted.begin(), wanted.end(), it->first)) ++it;
-        else it = watches_.erase(it);
+        else {
+            retiring_.emplace_back(it->first, it->second->StopAsync());
+            it = watches_.erase(it);
+        }
     }
     for (const auto& path : wanted) {
         if (watches_.contains(path)) continue;
@@ -622,6 +642,34 @@ void DirWatchSet::Stop() {
     watches_.clear();
     std::lock_guard<std::mutex> lock(mutex_);
     callback_ = {};
+}
+
+std::vector<std::shared_future<void>> DirWatchSet::SuspendVolume(const std::wstring& root) {
+    const auto key = NormalizePath(root);
+    std::vector<std::shared_future<void>> result;
+    if (key.empty()) return result;
+    for (const auto& [path, future] : retiring_) {
+        if (_wcsicmp(path.c_str(), key.c_str()) == 0 || (path.size() > key.size() && _wcsnicmp(path.c_str(), key.c_str(), key.size()) == 0 &&
+            (key.back() == L'\\' || path[key.size()] == L'\\'))) result.push_back(future);
+    }
+    if (std::find(suspended_roots_.begin(), suspended_roots_.end(), key) == suspended_roots_.end())
+        suspended_roots_.push_back(key);
+    for (auto it = watches_.begin(); it != watches_.end();) {
+        const auto& path = it->first;
+        if (_wcsicmp(path.c_str(), key.c_str()) == 0 || (path.size() > key.size() && _wcsnicmp(path.c_str(), key.c_str(), key.size()) == 0 &&
+            (key.back() == L'\\' || path[key.size()] == L'\\'))) {
+            auto completion = it->second->StopAsync();
+            result.push_back(completion);
+            retiring_.emplace_back(path, std::move(completion));
+            it = watches_.erase(it);
+        } else ++it;
+    }
+    return result;
+}
+
+void DirWatchSet::ResumeVolume(const std::wstring& root) {
+    const auto key = NormalizePath(root);
+    std::erase_if(suspended_roots_, [&](const auto& value) { return _wcsicmp(value.c_str(), key.c_str()) == 0; });
 }
 
 bool DirWatchSet::Armed(const std::wstring& path) const {

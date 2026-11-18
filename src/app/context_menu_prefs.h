@@ -38,25 +38,24 @@ struct ContextMenuPrefs {
 
     // Every group Explorer's classic menu shows is on by default, so Pulse's
     // menu is never shorter than Explorer's; the settings page and the menu
-    // presets turn groups off. Only the COM-sourced 打开方式 rows stay off —
-    // our own 打开方式… already covers them.
+    // presets turn groups off; explicit per-item disables remain authoritative.
     bool software = true;
     bool share = true;
     bool wallpaper = true;
     bool rotate = true;
     bool shortcut = true;
     bool open_with = true;
-    bool open_with_com = false;
+    bool open_with_com = true;
     bool system_extra = true;
     bool print = true;
 
-    int open_with_mru = 2;
+    int open_with_mru = -1; // -1 keeps every available recommendation.
 
     std::unordered_map<std::wstring, bool> item_enabled;
     std::vector<SeenMenuItem> seen;
     std::unordered_map<std::wstring, SlowComExt> slow_ext;
     // Pulse's own menu rows / row buttons the user turned off (BuiltinMenuBit).
-    uint32_t builtin_hidden = 0;
+    uint64_t builtin_hidden = 0;
     // Their order per BuiltinMenuSurface; empty = table order.
     BuiltinMenuOrder builtin_order[static_cast<size_t>(BuiltinMenuSurface::Count)];
 

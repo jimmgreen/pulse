@@ -47,6 +47,7 @@ inline ExplorerKeyCommand ExplorerShortcut(UINT key, bool ctrl, bool shift, bool
     const int number = digit ? static_cast<int>(key - L'1') : -1;
     if (ctrl && alt && !shift && key == L'D') return {A::MarkTarget};
     if (ctrl && !alt && key == L'D') return {A::Delete, 0, shift};
+    if (ctrl && !shift && !alt && key == L'N') return {A::NewWindow};
     if (ctrl && shift && !alt && key == L'N') return {A::NewFolder};
     if (ctrl && shift && !alt && key == L'W') return {A::CloseWindow};
     if (ctrl && shift && !alt && key == L'M') return {A::MoveTabToNewWindow};

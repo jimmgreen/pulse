@@ -322,6 +322,7 @@ std::vector<uint8_t> SerializeCtxLayout(const CtxLayoutRecords& records, std::ws
             if (row.separator_after) flags |= kRowSeparator;
             if (row.has_children) flags |= kRowHasChildren;
             if (row.child) flags |= kRowChild;
+            flags |= static_cast<uint32_t>(row.depth) << 8;
             PutU32(out, row.id);
             PutU32(out, flags);
             PutU32(out, static_cast<uint32_t>(row.mnemonic));
@@ -370,6 +371,7 @@ bool ParseCtxLayout(const uint8_t* data, size_t size, std::wstring_view build,
             row.separator_after = (flags & kRowSeparator) != 0;
             row.has_children = (flags & kRowHasChildren) != 0;
             row.child = (flags & kRowChild) != 0;
+            row.depth = static_cast<uint8_t>((flags >> 8) & 0xFF);
             row.mnemonic = static_cast<wchar_t>(mnemonic);
             record.rows.push_back(std::move(row));
         }

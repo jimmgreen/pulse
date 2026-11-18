@@ -6,7 +6,7 @@ namespace pulse {
 namespace ai_agent {
 
 // ------------------------------------------------------------ run_task --
-// Flow C (plans/ai/Pulse_AI助手_第一批扩展.html): find files (or take the
+// Flow C: find files (or take the
 // selection), file them into a folder (by month, year or type) and zip them.
 // The plan is built from the real files, the user confirms it once, the whole
 // task is one undo group, and a file that cannot move pauses the task and asks.

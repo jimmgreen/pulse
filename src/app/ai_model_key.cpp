@@ -1,13 +1,14 @@
 // ai_model_key.cpp - DPAPI storage of the model API key (ai_model_key.h).
 #include "ai_model_key.h"
 
+#include "ai_providers.h"
 #include "ai_settings.h"
 
 #include <windows.h>
 #include <dpapi.h>
 
 #include <algorithm>
-#include <cstring>
+#include <string>
 #include <vector>
 
 namespace pulse::app::ai {
@@ -17,12 +18,21 @@ namespace {
 // ties the blob to this purpose (another program's DPAPI data, or the other
 // key's file, does not decrypt here).
 struct Slot {
-    const wchar_t* file;
-    const char* entropy;
+    std::wstring file;
+    std::string entropy;
     const wchar_t* description;
 };
-constexpr Slot kModelSlot{L"model_key.bin", "Pulse.AI.ModelKey.v1", L"Pulse model key"};
-constexpr Slot kVoiceSlot{L"voice_key.bin", "Pulse.AI.VoiceKey.v1", L"Pulse voice key"};
+const Slot kVoiceSlot{L"voice_key.bin", "Pulse.AI.VoiceKey.v1", L"Pulse voice key"};
+
+// DeepSeek keeps the file every earlier version wrote; each other service
+// has its own (model_key_qwen.bin …), so switching back needs no new paste.
+Slot ServiceSlot(std::string_view id) {
+    if (id.empty() || IsDefaultProvider(ProviderById(id)) || !KnownProvider(id))
+        return Slot{L"model_key.bin", "Pulse.AI.ModelKey.v1", L"Pulse model key"};
+    const std::string name(id);
+    return Slot{L"model_key_" + std::wstring(name.begin(), name.end()) + L".bin",
+                "Pulse.AI.ModelKey." + name + ".v1", L"Pulse model key"};
+}
 
 std::wstring KeyPath(const Slot& slot) {
     const std::wstring dir = AiDirectory();
@@ -30,8 +40,8 @@ std::wstring KeyPath(const Slot& slot) {
 }
 
 DATA_BLOB Entropy(const Slot& slot) {
-    return DATA_BLOB{static_cast<DWORD>(strlen(slot.entropy)),
-                     reinterpret_cast<BYTE*>(const_cast<char*>(slot.entropy))};
+    return DATA_BLOB{static_cast<DWORD>(slot.entropy.size()),
+                     reinterpret_cast<BYTE*>(const_cast<char*>(slot.entropy.data()))};
 }
 
 void Wipe(void* data, size_t bytes) {
@@ -116,10 +126,15 @@ bool ClearKey(const Slot& slot) {
 
 } // namespace
 
-bool SaveModelKey(std::wstring_view key) { return SaveKey(kModelSlot, key); }
-bool LoadModelKey(std::wstring& key) { return LoadKey(kModelSlot, key); }
-bool HasModelKey() { return HasKey(kModelSlot); }
-bool ClearModelKey() { return ClearKey(kModelSlot); }
+bool SaveServiceKey(std::string_view service, std::wstring_view key) { return SaveKey(ServiceSlot(service), key); }
+bool LoadServiceKey(std::string_view service, std::wstring& key) { return LoadKey(ServiceSlot(service), key); }
+bool HasServiceKey(std::string_view service) { return HasKey(ServiceSlot(service)); }
+bool ClearServiceKey(std::string_view service) { return ClearKey(ServiceSlot(service)); }
+
+bool SaveModelKey(std::wstring_view key) { return SaveServiceKey(CurrentProvider().id, key); }
+bool LoadModelKey(std::wstring& key) { return LoadServiceKey(CurrentProvider().id, key); }
+bool HasModelKey() { return HasServiceKey(CurrentProvider().id); }
+bool ClearModelKey() { return ClearServiceKey(CurrentProvider().id); }
 
 bool SaveVoiceKey(std::wstring_view key) { return SaveKey(kVoiceSlot, key); }
 bool LoadVoiceKey(std::wstring& key) { return LoadKey(kVoiceSlot, key); }

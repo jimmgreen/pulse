@@ -160,6 +160,7 @@ public:
         bool media_installed = false;     // the FFmpeg pack itself is on disk
         bool enabled = true, use_custom = false, remove_on_uninstall = true;
         bool auto_update = true;          // 自动更新预览增强包
+        uint32_t download_source = 0;     // 下载源 (app::UpdateSource)
         uint32_t installed = 0;
         uint64_t bytes = 0;
         std::wstring version, custom_path, detected_path, root, notice;
@@ -176,10 +177,6 @@ public:
         bool raw_available = false;
         float raw_progress = 0.0f;
         std::wstring raw_version, raw_notice, raw_update_version;
-        bool archive_installed = false, archive_enabled = true, archive_installing = false;
-        bool archive_available = false;
-        float archive_progress = 0.0f;
-        std::wstring archive_version, archive_notice, archive_update_version;
     };
     const PackState& Packs();
 
@@ -214,10 +211,6 @@ public:
     bool TakeRawPackResult();
     bool RemoveRawPack();
     bool ToggleRawPack();
-    bool InstallArchivePack(HWND notify);
-    bool TakeArchivePackResult();
-    bool RemoveArchivePack();
-    bool ToggleArchivePack();
     // Installs the catalog's newer release over an installed pack, copying
     // its unchanged files; the pack's switches stay as they are.
     bool UpdatePack(packs::PackId id, HWND notify);
@@ -226,6 +219,8 @@ public:
     bool UseDetectedFfmpeg();
     void ToggleRemovePacksOnUninstall();
     void ToggleAutoUpdatePacks();
+    // 下载源: saves packs.json and applies it to the downloads that start next.
+    bool SetDownloadSource(uint32_t source);
     // Background updates (TickUpdates): 更新到 for every installed pack that
     // packs::PackAutoUpdateWanted picks. A failed one stays quiet - the
     // button remains and the next call tries again - and one the user
@@ -264,14 +259,27 @@ public:
     void ClickMode(int index);      // 鼠标与选择: 0/1 double/single click, 2/3 name band on hover/always
     // Optional Details columns (ui/details_column_set.h bits), every folder.
     void DetailsColumns(uint32_t mask);
+    void DetailsColumnOrder(const ui::DetailsColumnOrder& order);
     void StartupOpen(int index);
     void NotifyIcon(int index);
     void NewTabOpen(int index);
+    void OpenPulseIcon(int index);
+    void NewWindowShows(int index);
+    void OpenThisPc(int index);
+    void OpenWinE(int index);
+    void ArrangeGap(int index);
+    void ArrangeMinimized(int index);
     void ExternalOpen(int index);  // plan §6 policy (multi-window M7b)
     void BlankClick(int index);   // 0 nothing, 1 back, 2 up
     void PreviewTrigger(int index);    // 0 hover card, 1 Space only
     void HoverPreviewDelay(int index); // 0.3 / 0.5 / 0.8 s
-    void HoverCardSize(int index);     // 0 small, 1 medium, 2 large
+    void HoverCardSize(int index);     // 0 small, 1 medium, 2 large, 3 extra large
+    // 快速预览 > 预览窗口 and 按住预览.
+    void PreviewSize(int index);       // app::kPreviewSize*; drops a remembered size
+    void TogglePreviewRememberSize();
+    void PreviewSpace(int index);      // 0 closes, 1 plays / pauses
+    void PreviewLoop(int index);       // app::kPreviewLoop*
+    void HoldPreview(int index);       // 0 off, 1..3: 0.3 / 0.5 / 0.8 s
     // 0 picks the default location's folder, 1 resets it to This PC.
     void HomeFolder(int action);
     void TextRendering(int index);
@@ -370,11 +378,11 @@ private:
     uint64_t offer_checked_ = 0;
     bool offer_missing_ = false;   // published, not installed, no own FFmpeg
     void RefreshPacks();
+    PackInstaller raw_installer_;
     PackInstaller media_installer_;
     uint64_t image_offer_checked_ = 0;
     bool image_offer_missing_ = false;   // published, not installed
     PackInstaller image_installer_;
-    PackInstaller raw_installer_, archive_installer_;
     PackInstaller& InstallerFor(packs::PackId id);
     std::wstring& NoticeFor(packs::PackId id);
     bool InstallPack(packs::PackId id, HWND notify, bool automatic = false);

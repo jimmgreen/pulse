@@ -29,7 +29,7 @@ inline bool IsBuiltinContextVerb(std::wstring_view verb, bool background) {
         L"open", L"opennewprocess", L"opennewwindow", L"opennewtab",
         L"explore", L"openas", L"cut", L"copy", L"paste", L"pastelink",
         L"delete", L"rename", L"properties", L"copyaspath",
-        L"pintohome",
+        L"pintohome", L"pulsetags", // Pulse already exposes its native tag picker.
     };
     for (auto k : kCommon)
         if (v == k) return true;
@@ -120,6 +120,8 @@ inline wchar_t MenuMnemonic(std::wstring_view raw) {
 
 // At most this many children per software-owned submenu flyout.
 inline constexpr int kMaxSubmenuChildren = 16;
+inline constexpr int kMaxMenuDepth = 16;
+inline constexpr int kMaxMenuTreeRows = 512;
 // Static-verb command packing: parent index * stride + child (0 = parent).
 // Stays inside CmdShellStaticBase..CmdShellComBase (2000 slots).
 inline constexpr int kStaticVerbStride = kMaxSubmenuChildren + 1;

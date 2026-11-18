@@ -19,6 +19,9 @@ bool OfferContentPack(AppState& s, bool once_per_session = false);
 // installed pack after Pulse itself was updated (Settings > auto update).
 void TickContentPackInstall(AppState& s);
 
+// 重试 on the failure card: downloads again, without asking.
+bool RetryContentPackInstall(AppState& s);
+
 // Banner for a content search that failed because the pack is not usable;
 // false when that is not why it failed.
 bool ContentPackBanner(DWORD error, std::wstring& title, std::wstring& message);

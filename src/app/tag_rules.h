@@ -11,6 +11,7 @@ namespace pulse {
 // (Re)loads the rules and watches their folders; hits go to `target`.
 void StartTagRules(HWND target);
 void StopTagRules();
+int RunTagRuleReuseTest();
 // The window that handles hits (the last active one).
 void RetargetTagRules(HWND target);
 // WM_TAG_RULE_HIT: files appeared — tag them or offer to.

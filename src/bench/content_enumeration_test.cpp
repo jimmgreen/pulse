@@ -62,7 +62,9 @@ void Close(HANDLE handle) {
     SetLastError(ERROR_INVALID_HANDLE);
 }
 }
-int wmain() {
+int RunContentMatchPerf();
+int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--match-perf") return RunContentMatchPerf();
     namespace fs = std::filesystem;
     const auto fixture_parent = fs::absolute(fs::current_path() / L"bench_data").lexically_normal();
     const auto base = fixture_parent /

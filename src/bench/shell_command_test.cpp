@@ -1,4 +1,7 @@
 #include "../ops/shell_command.h"
+#include "../ops/shell_command_template.h"
+#include <algorithm>
+#include <vector>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -14,6 +17,8 @@ DWORD terminal_open_error = ERROR_SUCCESS;
 DWORD actual_mask = 0;
 bool actual_null_verb = false, require_default_action = false, force_shell_failure = false;
 HANDLE shell_process = nullptr;
+std::vector<std::wstring> missing_programs;  // ShellStub reports these as not installed
+std::vector<std::wstring> launched_programs;
 BOOL WINAPI CreateStub(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES,
     BOOL, DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION) {
     SetLastError(create_error); return create_error == ERROR_SUCCESS;
@@ -28,6 +33,10 @@ BOOL WINAPI ShellStub(SHELLEXECUTEINFOW* info) {
     actual_mask = info->fMask;
     actual_null_verb = info->lpVerb == nullptr;
     info->hProcess = shell_process;
+    launched_programs.push_back(actual_file);
+    if (std::find(missing_programs.begin(), missing_programs.end(), actual_file) != missing_programs.end()) {
+        SetLastError(ERROR_FILE_NOT_FOUND); return FALSE;
+    }
     const DWORD error = require_default_action && info->lpVerb ? ERROR_NO_ASSOCIATION
         : terminal_sequence && actual_verb == L"open" ? terminal_open_error : shell_error;
     SetLastError(error); return !force_shell_failure && error == ERROR_SUCCESS;
@@ -146,6 +155,15 @@ int wmain(int argc, wchar_t** argv) {
     check(SplitShellCommand(image.wstring() + L" " + arguments, parts) && parts.executable == image.wstring() && parts.arguments == arguments,
         "unquoted executable path containing spaces resolved without truncation");
     check(!SplitShellCommand(L"\"unfinished", parts) && !SplitShellCommand(L"", parts), "malformed command rejected");
+    {
+        // The INF Install verb: REG_EXPAND_SZ "%SystemRoot%\System32\InfDefaultInstall.exe "%1"",
+        // expanded by RegGetValue; the image requires elevation (740).
+        wchar_t system[MAX_PATH]{}; GetSystemDirectoryW(system, MAX_PATH);
+        const std::wstring inf_image = std::wstring(system) + L"\\InfDefaultInstall.exe";
+        const auto inf_command = ExpandShellCommand(inf_image + L" \"%1\"", (root / L"cursor theme" / L"install.inf").wstring());
+        const bool split = SplitShellCommand(inf_command, parts);
+        check(split && _wcsicmp(parts.executable.c_str(), inf_image.c_str()) == 0, "INF install verb splits for elevation");
+    }
     const HWND owner = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x1234));
     const ShellCommandApi stub{CreateStub, ShellStub};
     auto result = LaunchShellCommand(command, root.wstring(), owner, stub);
@@ -203,6 +221,29 @@ int wmain(int argc, wchar_t** argv) {
     terminal = LaunchTerminal(L"wt.exe", terminal_args, terminal_dir, owner, stub);
     check(terminal.error == ERROR_FILE_NOT_FOUND && !terminal.elevation_requested && shell_calls == 9,
         "missing terminal returns actionable error without elevation or fallback");
+    {
+        // "Open in terminal" without Windows Terminal (Windows 10 / removed).
+        terminal_open_error = ERROR_SUCCESS;
+        std::wstring used;
+        missing_programs = {L"wt.exe"}; launched_programs.clear();
+        terminal = LaunchTerminalOrShell(terminal_args, terminal_dir, owner, stub, &used);
+        check(!terminal.error && used == L"pwsh.exe" && launched_programs == std::vector<std::wstring>{L"wt.exe", L"pwsh.exe"} &&
+            actual_args.empty() && actual_dir == L"C:\\工具 folder\\",
+            "missing wt.exe opens PowerShell 7 in the same folder without wt arguments");
+        missing_programs = {L"wt.exe", L"pwsh.exe", L"powershell.exe"}; launched_programs.clear();
+        terminal = LaunchTerminalOrShell(terminal_args, terminal_dir, owner, stub, &used);
+        check(!terminal.error && used == L"cmd.exe" && launched_programs.size() == 4,
+            "with no PowerShell either, cmd opens in the folder");
+        missing_programs.clear(); launched_programs.clear();
+        terminal = LaunchTerminalOrShell(terminal_args, terminal_dir, owner, stub, &used);
+        check(!terminal.error && used == L"wt.exe" && launched_programs.size() == 1 && actual_args == terminal_args,
+            "installed Windows Terminal is used first with its folder argument");
+        terminal_open_error = ERROR_CANCELLED; launched_programs.clear();
+        terminal = LaunchTerminalOrShell(terminal_args, terminal_dir, owner, stub, &used);
+        check(terminal.error == ERROR_CANCELLED && launched_programs.size() == 1,
+            "a cancelled launch is not retried with another shell");
+        terminal_open_error = ERROR_SUCCESS;
+    }
     terminal_sequence = false;
     const auto marker = root / L"child.txt";
     const auto live = LaunchShellCommand(L"\"" + image.wstring() + L"\" --child \"" + marker.wstring() +

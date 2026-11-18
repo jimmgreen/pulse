@@ -1,6 +1,9 @@
 // app_hover_preview.cpp - The hover preview card (see app_hover_preview.h).
 #include "app_hover_preview.h"
 #include "../fs/cloud_state.h"
+#include "../fs/bounded_enumeration.h"
+#include "../fs/count_directory.h"
+#include "../fs/drive_kind.h"
 #include "app_internal.h"
 #include "app_details_tree.h"
 #include "entry_sort.h"
@@ -8,6 +11,7 @@
 #include "../common/text_format.h"
 #include "../common/preview_extensions.h"
 #include "../ui/video_preview.h"
+#include "../ui/hover_preview_content.h"
 #include "../ui/ui_renderer.h"
 #include <windowsx.h>
 #include <shellapi.h>
@@ -55,35 +59,11 @@ bool HoverPreviewOn(const AppState& s) {
     return s.appPrefs.preview_trigger == app::kPreviewTriggerHover && !s.safeMode;
 }
 
-// The shell's name for the file type ("JPEG 图像"), by extension: a registry
-// lookup (SHGFI_USEFILEATTRIBUTES never opens the file), remembered per
-// extension.
-std::wstring TypeName(const std::wstring& name) {
-    thread_local std::unordered_map<std::wstring, std::wstring> cache;
-    const size_t dot = name.find_last_of(L'.');
-    std::wstring ext = dot == std::wstring::npos || dot == 0 ? std::wstring() : name.substr(dot);
-    for (auto& c : ext) c = static_cast<wchar_t>(towlower(c));
-    if (const auto it = cache.find(ext); it != cache.end()) return it->second;
-    std::wstring type;
-    SHFILEINFOW info{};
-    const std::wstring probe = L"file" + ext;
-    if (SHGetFileInfoW(probe.c_str(), FILE_ATTRIBUTE_NORMAL, &info, sizeof(info),
-                       SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES))
-        type = info.szTypeName;
-    if (type.empty()) {
-        std::wstring upper = ext.size() > 1 ? ext.substr(1) : std::wstring();
-        for (auto& c : upper) c = static_cast<wchar_t>(towupper(c));
-        type = upper.empty() ? std::wstring(l10n::Get(l10n::StringId::TypeFile).c_str())
-                             : upper + l10n::Get(l10n::StringId::File).c_str();
-    }
-    if (cache.size() > 256) cache.clear();
-    cache.emplace(ext, type);
-    return type;
-}
+using ui::hover_preview_content::TypeName;
 
 // Nothing else owns the pointer: no drag, marquee, resize or capture.
 bool PointerFree(const AppState& s) {
-    return !GetCapture() && !s.dragPending && !s.marqueePending && !s.marqueeActive &&
+    return !GetCapture() && !s.listSelection.PendingFile() && !s.listSelection.PendingBand() && !s.listSelection.BandActive() &&
         !s.tabDragging && !s.scrollbarDragging && !s.columnResizing && !s.stripResizing &&
         !s.stripHScrolling && !s.splitterDragging && !s.detailsPanelResizing;
 }
@@ -100,30 +80,10 @@ app::Tab* TabAtSlot(AppState& s, int slot) {
     return pane ? pane->ActiveTab() : nullptr;
 }
 
-std::wstring LowerExtension(const std::wstring& name) {
-    const size_t dot = name.find_last_of(L'.');
-    std::wstring ext = dot == std::wstring::npos || dot == 0 ? std::wstring() : name.substr(dot);
-    for (auto& c : ext) c = static_cast<wchar_t>(towlower(c));
-    return ext;
-}
+using ui::hover_preview_content::CardVideo;
 
-// Plays (silently) in the card: video Media Foundation or the FFmpeg pack
-// can open; audio-only files keep their cover art or icon.
-bool CardVideo(const std::wstring& path) {
-    return ui::VideoPreview::Supports(path) && !ui::VideoPreview::IsAudio(path);
-}
-
-// Takes the preview host or a player a noticeable moment: these show the
-// dwell line on the row and a loading sweep in the card.
 bool SlowToDecode(const fs::DirEntry& entry, const std::wstring& path) {
-    if (entry.size >= 48ull * 1024 * 1024) return true;
-    const std::wstring ext = LowerExtension(entry.name);
-    if (preview::IsVideoExtension(ext) || CardVideo(path) || preview::IsPdfRasterExtension(ext) ||
-        preview::IsArchiveExtension(ext) || preview::IsPsdExtension(ext) ||
-        preview::IsFamilyExtension(preview::PreviewFamily::Raw, ext))
-        return true;
-    return preview::IsOneOf(ext, {L".docx", L".pptx", L".xlsx", L".xlsm", L".epub", L".ipynb", L".dwg",
-                                  L".heic", L".heif", L".hif", L".avif"});
+    return ui::hover_preview_content::SlowToDecode(entry.name, entry.size, path);
 }
 
 // ---- Folder cards ------------------------------------------------------
@@ -141,34 +101,7 @@ std::wstring JoinPath(const std::wstring& parent, const std::wstring& name) {
     return parent + L'\\' + name;
 }
 
-// The composition bar's kind of a file, by extension.
-int FolderKind(const std::wstring& name) {
-    static const std::unordered_map<std::wstring, int> kinds = [] {
-        std::unordered_map<std::wstring, int> map;
-        const auto add = [&map](int kind, std::initializer_list<const wchar_t*> list) {
-            for (const wchar_t* ext : list) map.emplace(ext, kind);
-        };
-        add(ui::kHoverKindImage, {L".jpg", L".jpeg", L".jfif", L".png", L".gif", L".bmp", L".webp", L".heic",
-                                  L".heif", L".hif", L".avif", L".tif", L".tiff", L".svg", L".ico", L".psd",
-                                  L".raw", L".dng", L".cr2", L".cr3", L".nef", L".arw", L".orf", L".rw2"});
-        add(ui::kHoverKindVideo, {L".mp4", L".mkv", L".mov", L".avi", L".wmv", L".flv", L".webm", L".m4v",
-                                  L".ts", L".mts", L".m2ts", L".mpg", L".mpeg", L".3gp"});
-        add(ui::kHoverKindAudio, {L".mp3", L".flac", L".wav", L".aac", L".m4a", L".ogg", L".opus", L".wma",
-                                  L".ape", L".aiff"});
-        add(ui::kHoverKindDocument, {L".doc", L".docx", L".xls", L".xlsx", L".xlsm", L".ppt", L".pptx", L".pdf",
-                                     L".txt", L".md", L".rtf", L".odt", L".ods", L".odp", L".csv", L".wps",
-                                     L".et", L".dps", L".epub", L".xps"});
-        add(ui::kHoverKindCode, {L".c", L".cc", L".cpp", L".h", L".hpp", L".cs", L".js", L".mjs", L".ts",
-                                 L".tsx", L".jsx", L".py", L".java", L".go", L".rs", L".rb", L".php", L".html",
-                                 L".css", L".scss", L".json", L".xml", L".yml", L".yaml", L".toml", L".sh",
-                                 L".ps1", L".bat", L".cmd", L".lua", L".kt", L".swift", L".sql", L".vue"});
-        add(ui::kHoverKindArchive, {L".zip", L".rar", L".7z", L".tar", L".gz", L".tgz", L".bz2", L".xz",
-                                    L".zst", L".cab", L".iso"});
-        return map;
-    }();
-    const auto it = kinds.find(LowerExtension(name));
-    return it == kinds.end() ? ui::kHoverKindOther : it->second;
-}
+using ui::hover_preview_content::FolderKind;
 
 // The listing's visibility rule (Tab::AllowsAttributes), for the worker.
 bool ShownChild(DWORD attrs, bool show_hidden, bool show_protected) {
@@ -286,7 +219,7 @@ void ReadFolder(const std::shared_ptr<HoverFolderJob>& job, const FolderReadOpti
     }
     try {
         const app::ScopedFolderSortMode folder_mode(options.folder_sort);
-        app::SortEntries(entries, options.sort_column, options.sort_direction, [&cancelled] {
+        app::SortFirstEntries(entries, options.sort_column, options.sort_direction, ui::kHoverFolderMaxItems, [&cancelled] {
             if (cancelled()) throw SortCancelled{};
         });
     } catch (...) {
@@ -334,20 +267,20 @@ void ReadFolder(const std::shared_ptr<HoverFolderJob>& job, const FolderReadOpti
         if (!item.is_dir || (item.attrs & FILE_ATTRIBUTE_REPARSE_POINT) || fs::IsCloudPlaceholder(item.attrs))
             continue;
         ++asked;
-        std::vector<fs::DirEntry> children;
+        int count = 0;
         try {
-            fs::EnumerationOptions enumeration;
-            enumeration.cancelled = cancelled;
-            enumeration.timeout_ms = 400;
-            fs::EnumerateDirectory(JoinPath(job->path, item.name), children, enumeration);
+            const auto elapsed = GetTickCount64() - start;
+            if (elapsed >= 800) break;
+            const auto remaining = (std::min)(ULONGLONG{400}, ULONGLONG{800} - elapsed);
+            const auto child_path = JoinPath(job->path, item.name);
+            count = fs::RunBoundedEnumeration<int>(fs::IsUncPath(child_path) || fs::IsRemoteLikeDrive(child_path),
+                [child_path, show_hidden = options.show_hidden, show_protected = options.show_protected]
+                (const std::atomic_bool& cancel) {
+                    return fs::CountDirectoryChildren(child_path, show_hidden, show_protected, cancel);
+                }, cancelled, std::chrono::milliseconds(remaining));
         } catch (...) {
             continue;
         }
-        int count = 0;
-        for (const auto& child : children)
-            if (child.name != L"." && child.name != L".." &&
-                ShownChild(child.attrs, options.show_hidden, options.show_protected))
-                ++count;
         item.children = count;
         any = true;
     }

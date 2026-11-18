@@ -12,6 +12,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <future>
 
 namespace pulse::fs {
 struct DirNotifyEvent;
@@ -69,6 +70,8 @@ public:
     bool Start(const std::wstring& path, ChangeCallback cb, bool subtree = false,
                bool stamp_arm = false);
     void Stop();
+    // Request stop without joining. Ready means all owned handles are closed.
+    std::shared_future<void> StopAsync();
     bool Armed() const;
     const std::wstring& path() const { return path_; }
 
@@ -87,12 +90,17 @@ public:
 
     void Sync(const std::vector<std::wstring>& paths, Callback cb);
     void Stop();
+    // Owner-thread calls. Wait on returned futures off-thread; Resume requires Sync.
+    std::vector<std::shared_future<void>> SuspendVolume(const std::wstring& root);
+    void ResumeVolume(const std::wstring& root);
     bool Armed(const std::wstring& path) const;
 
 private:
     std::mutex mutex_;
     Callback callback_;
     std::unordered_map<std::wstring, std::unique_ptr<DirWatch>> watches_;
+    std::vector<std::wstring> suspended_roots_;
+    std::vector<std::pair<std::wstring, std::shared_future<void>>> retiring_;
 };
 
 } // namespace pulse::fs

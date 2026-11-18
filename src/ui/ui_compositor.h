@@ -45,11 +45,13 @@ struct ComPtr {
 };
 
 class Compositor {
+    friend struct QuickPreviewAuditTest;
 public:
     Compositor();
     ~Compositor();
 
     bool Init(HWND hwnd);
+    void SetCompositionAboveChildren(bool enabled) { composition_above_children_ = enabled; }
     // Starts creating the process's first D3D11 device on a worker thread;
     // the first Init on any thread takes it (waiting if needed) instead of
     // creating its own. Driver loading dominates that call (about 250 ms on
@@ -60,7 +62,9 @@ public:
     void Resize(int width, int height);
     // dirty: the only client rect this frame drew (partial redraw); null for
     // a whole frame. Ignored unless CanPresentPartial().
-    void Present(const RECT* dirty = nullptr);
+    // Reports swap-chain/DirectComposition submission status; S_OK alone means
+    // both succeeded. Existing callers may deliberately ignore the status.
+    HRESULT Present(const RECT* dirty = nullptr);
     // Partial redraw (plans/Pulse_局部重绘方案.md): the swap chain keeps its
     // buffers (FLIP_SEQUENTIAL) and the last frame reached the screen whole,
     // so the next one may redraw part of it. PULSE_PARTIAL_REDRAW=0 turns it off.
@@ -77,6 +81,11 @@ public:
     ID2D1DeviceContext* Dc() const { return dc_.get(); }
     IDWriteFactory2* DwriteFactory() const { return dwriteFactory_.get(); }
     HWND Hwnd() const { return hwnd_; }
+    bool AdapterDescription(DXGI_ADAPTER_DESC& description) const {
+        ComPtr<IDXGIAdapter> adapter;
+        return dxgiDevice_.get() && SUCCEEDED(dxgiDevice_->GetAdapter(&adapter)) &&
+            SUCCEEDED(adapter->GetDesc(&description));
+    }
 
     void RecreateTextFormats(float scale);
     bool UpdateTextRenderingParams(HMONITOR monitor);
@@ -104,8 +113,11 @@ public:
                          float& width, float* height = nullptr);
     bool PaintLumaEdit(HWND hwnd, HDC hdc, IDWriteTextFormat* format,
                        const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background);
+    bool DrawLumaEditOnSurface(HWND hwnd, IDWriteTextFormat* format,
+        const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background, const D2D1_RECT_F& bounds);
     bool PresentLumaEdit(HWND hwnd, IDWriteTextFormat* format,
-                         const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background);
+                         const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background,
+                         bool painted_plain_child = false);
     LRESULT CallLumaEditMouse(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                IDWriteTextFormat* format);
     void SynchronizeEditSelection(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -165,6 +177,7 @@ private:
     static bool IsDeviceLost(HRESULT hr);
 
     HWND hwnd_ = nullptr;
+    bool composition_above_children_ = false;
     int width_ = 0;
     int height_ = 0;
 

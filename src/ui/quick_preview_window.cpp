@@ -1,9 +1,11 @@
+#include "../common/volume_path.h"
 #include "edit_host.h"
 #include "FluentTokens.h"
 #include "legacy_icons.h"
 #include "command_icons.h"
 #include "../common/windows_compat.h"
 #include "quick_preview_window.h"
+#include "text_contrast_scope.h"
 #include "../app/folder_alias.h"
 #include "preview_notice.h"
 #include "../common/file_placeholder.h"
@@ -11,6 +13,7 @@
 #include "../common/text_format.h"
 #include "../ipc/preview_protocol.h"
 #include "../ops/clipboard.h"
+#include "quick_preview_sizing.h"
 #include "fluent_components.h"
 #include "lumatext_renderer.h"
 #include "syntax_highlight.h"
@@ -71,6 +74,8 @@ constexpr UINT_PTR kPreviewDeadlineTimer = 31;
 constexpr UINT_PTR kFindEditCaretTimer = 71;
 constexpr UINT_PTR kZoomCloseTimer = 72;
 constexpr UINT_PTR kNavSlideTimer = 74;  // the next item slides in (motion phase 6)
+constexpr UINT_PTR kSizeProbeTimer = 76;
+constexpr UINT_PTR kFitTimer = 75;       // 适应内容 once the first frame tells the size
 constexpr double kZoomOpenSeconds = 0.22;
 constexpr double kZoomCloseSeconds = 0.15;
 constexpr float kMaxDecodedZoom = 4.0f;
@@ -98,6 +103,8 @@ enum {
     kArchiveCmdCopyPath,
     kViewCmdFirst,       // + 0 / 1: the header's view toggle, folded into the menu
     kViewCmdSecond,
+    kSizeCmdFirst = 60,  // + PreviewSizeMode: the header's window size menu
+    kSizeCmdRemember = 70,
     kFileCmdBase = 100,  // + static_cast<int>(QuickPreviewAction)
 };
 
@@ -162,6 +169,11 @@ void FillHitRange(ID2D1DeviceContext* dc, IDWriteTextLayout* layout,
 
 } // namespace
 
+void QuickPreviewWindow::SetHandlerCovered(bool covered) {
+    handler_covered_ = covered;
+    handler_.SetCovered(covered || embedded_occluded_);
+}
+
 QuickPreviewWindow::~QuickPreviewWindow() {
     if (hwnd_) DestroyWindow(hwnd_);
 }
@@ -185,13 +197,37 @@ bool QuickPreviewWindow::Initialize(HWND owner, UINT navigate_message, UINT open
     RegisterClassExW(&window_class);
     hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
         kWindowClass, pulse::l10n::Get(pulse::l10n::StringId::QuickPreview).c_str(),
-        WS_POPUP | WS_THICKFRAME | WS_SYSMENU,
+        embedded_ ? (WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS) : (WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_CLIPCHILDREN),
         CW_USEDEFAULT, CW_USEDEFAULT, 960, 680, owner, nullptr, window_class.hInstance, this);
     return hwnd_ != nullptr;
 }
 
+bool QuickPreviewWindow::InitializeEmbedded(HWND owner, UINT navigate_message, UINT open_message, UINT command_message) {
+    embedded_ = true;
+    return Initialize(owner, navigate_message, open_message, command_message);
+}
+
+void QuickPreviewWindow::SetEmbeddedBounds(RECT bounds) {
+    if (!hwnd_ || !embedded_) return;
+    RECT current{};
+    GetWindowRect(hwnd_, &current);
+    MapWindowPoints(nullptr, owner_, reinterpret_cast<POINT*>(&current), 2);
+    if (EqualRect(&current, &bounds)) return;
+    SetWindowPos(hwnd_, nullptr, bounds.left, bounds.top,
+        (std::max)(1L, bounds.right - bounds.left), (std::max)(1L, bounds.bottom - bounds.top),
+        SWP_NOACTIVATE | SWP_NOZORDER);
+}
+
+void QuickPreviewWindow::ShowEmbedded(const QuickPreviewItem& item, RECT bounds, bool dark, bool safe_mode) {
+    SetEmbeddedBounds(bounds);
+    Show(item, dark, WindowEffect::None, safe_mode, nullptr, false);
+}
+
 void QuickPreviewWindow::ResetTextState() {
-    preview_text_.clear();
+    std::wstring{}.swap(preview_text_);
+    preview_text_identity_.Reset();
+    plain_highlight_lines_.Reset();
+    ResetTextDrawingCache();
     text_layout_.reset();
     text_layout_width_ = 0.0f;
     text_layout_scale_ = 0.0f;
@@ -200,9 +236,11 @@ void QuickPreviewWindow::ResetTextState() {
     sel_anchor_ = sel_focus_ = 0;
     selecting_ = false;
     CloseFind();
+    decltype(find_matches_){}.swap(find_matches_);
 }
 
 void QuickPreviewWindow::ResetView() {
+    native_preview_.Reset();
     if (hwnd_) KillTimer(hwnd_, kPreviewDeadlineTimer);
     preview_deadline_ = 0;
     thumbnails_.TakeRetryDeadline();
@@ -242,6 +280,8 @@ void QuickPreviewWindow::RecreateFormats() {
     close_format_.reset();
     preview_text_format_.reset();
     reading_text_format_.reset();
+    plain_highlight_lines_.Reset();
+    ResetTextDrawingCache();
     text_layout_.reset();
     if (!compositor_.DwriteFactory()) return;
     typography::CreateTextFormat(compositor_.DwriteFactory(),
@@ -299,7 +339,8 @@ void QuickPreviewWindow::RecreateFormats() {
 }
 
 void QuickPreviewWindow::Show(const QuickPreviewItem& item, bool dark, WindowEffect effect,
-                              bool safe_mode, const POINT* zoom_from) {
+                              bool safe_mode, const POINT* zoom_from, bool activate) {
+    if (path::OnAnyVolume(item.path, suspended_volumes_)) return;
     if (!hwnd_ || item.path.empty()) return;
     if (closing_) {
         // Re-opened while the close zoom is still running.
@@ -307,6 +348,7 @@ void QuickPreviewWindow::Show(const QuickPreviewItem& item, bool dark, WindowEff
         closing_ = false;
         compositor_.ClearZoom();
     }
+    if (embedded_) embedded_open_ = true;
     item_ = item;
     title_ = PreviewTitle(item_);
     open_app_cache_.clear();   // associations may have changed since the last preview
@@ -316,24 +358,43 @@ void QuickPreviewWindow::Show(const QuickPreviewItem& item, bool dark, WindowEff
     effect_ = effect;
     safe_mode_ = safe_mode;
     handler_immediate_ = true;
-    ApplyWindowEffect(hwnd_, effect_, dark_);
+    if (!embedded_) ApplyWindowEffect(hwnd_, effect_, dark_);
     if (find_edit_brush_) {
         DeleteObject(find_edit_brush_);
         find_edit_brush_ = nullptr;
     }
     ++generation_;
+    size_probe_.Cancel();
+    probe_w_ = probe_h_ = 0;
+    KillTimer(hwnd_, kSizeProbeTimer);
     ResetView();
     ResetAnimation();
     icon_request_ = 0; icon_sizes_.clear(); icon_selected_ = -1; icon_pill_rects_.clear();
     BeginVideo();
+    if (!activate && !embedded_ && video_.active()) video_.SetMuted(true);   // a peek is silent
+    if (embedded_) {
+        Render();
+        ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+    BeginContentSizeProbe();
+    StartKeyHint();
     RECT owner_rect{};
     GetWindowRect(owner_, &owner_rect);
-    const int owner_width = owner_rect.right - owner_rect.left;
-    const int owner_height = owner_rect.bottom - owner_rect.top;
-    const int width = std::clamp(static_cast<int>(owner_width * 0.82), 640, 1280);
-    const int height = std::clamp(static_cast<int>(owner_height * 0.82), 480, 900);
-    const int x = owner_rect.left + (owner_width - width) / 2;
-    const int y = owner_rect.top + (owner_height - height) / 2;
+    // Size: Settings > 快速预览 > 预览窗口 (a remembered drag wins), centred
+    // on Pulse's window.
+    LeaveFullScreen(false);
+    user_sized_ = false;
+    fit_pending_ = false;
+    KillTimer(hwnd_, kFitTimer);
+    const POINT owner_centre{(owner_rect.left + owner_rect.right) / 2, (owner_rect.top + owner_rect.bottom) / 2};
+    const bool full_screen = options_.size_mode == static_cast<int>(PreviewSizeMode::FullScreen);
+    const RECT placed = PlanRect(full_screen ? static_cast<int>(PreviewSizeMode::Fit) : options_.size_mode,
+                                 owner_centre, true);
+    const int x = placed.left, y = placed.top;
+    const int width = (std::max)(1L, placed.right - placed.left);
+    const int height = (std::max)(1L, placed.bottom - placed.top);
     SetWindowTextW(hwnd_, item_.name.empty()
         ? pulse::l10n::Get(pulse::l10n::StringId::QuickPreview).c_str() : PreviewTitle(item_).c_str());
     // Zoom out of the item's icon. Only with a plain (None) window effect:
@@ -354,14 +415,22 @@ void QuickPreviewWindow::Show(const QuickPreviewItem& item, bool dark, WindowEff
     const bool was_visible = IsWindowVisible(hwnd_) != FALSE;
     SetWindowPos(hwnd_, HWND_TOP, x, y, width, height,
                  was_visible ? 0u : static_cast<UINT>(SWP_NOACTIVATE));
+    if (full_screen) EnterFullScreen();
     if (!was_visible) Render();
-    ShowWindow(hwnd_, SW_SHOW);
-    SetForegroundWindow(hwnd_);
+    ShowWindow(hwnd_, activate ? SW_SHOW : SW_SHOWNOACTIVATE);
+    if (activate) SetForegroundWindow(hwnd_);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 // Prev / next: remember the direction so the item that answers slides in
-// from that side (pulse_motion_v2.html quick preview, spring Smooth).
+// from that side (spring Smooth).
+// A peek pinned with Space: it takes the keyboard and its sound back.
+void QuickPreviewWindow::Activate() {
+    if (!visible()) return;
+    if (video_.active()) video_.SetMuted(playback_muted_);
+    SetForegroundWindow(hwnd_);
+}
+
 void QuickPreviewWindow::PostNavigate(int dir) {
     if (!owner_ || !navigate_message_) return;
     pending_nav_dir_ = dir;
@@ -370,6 +439,7 @@ void QuickPreviewWindow::PostNavigate(int dir) {
 }
 
 void QuickPreviewWindow::Update(const QuickPreviewItem& item) {
+    if (path::OnAnyVolume(item.path, suspended_volumes_)) return;
     if (!visible() || item.path.empty()) return;
     const uint64_t nav_now = motion::NowMs();
     nav_dir_ = 0;
@@ -391,12 +461,28 @@ void QuickPreviewWindow::Update(const QuickPreviewItem& item) {
     title_ = PreviewTitle(item_);
     RefreshItemFacts();
     ++generation_;
+    size_probe_.Cancel();
+    probe_w_ = probe_h_ = 0;
+    KillTimer(hwnd_, kSizeProbeTimer);
     handler_immediate_ = false;
     ResetView();
     ResetAnimation();
     icon_request_ = 0; icon_sizes_.clear(); icon_selected_ = -1; icon_pill_rects_.clear();
     handler_.Reset();
     BeginVideo();
+    BeginContentSizeProbe();
+    if (!same) StartKeyHint();
+    // 适应内容 follows each item's shape around the window's centre, unless
+    // the window was sized by hand, maximized or is full screen.
+    fit_pending_ = false;
+    KillTimer(hwnd_, kFitTimer);
+    const RECT& kept = options_.remembered;
+    const bool remembered = options_.remember_size && kept.right > kept.left && kept.bottom > kept.top;
+    if (!same && !fullscreen_ && !user_sized_ && !remembered && !IsZoomed(hwnd_) &&
+        options_.size_mode == static_cast<int>(PreviewSizeMode::Fit)) {
+        const RECT next = PlanRect(options_.size_mode, WindowCentre(), false);
+        if (!fit_pending_) ApplyRect(next);   // pending: keep the size until the first frame
+    }
     SetWindowTextW(hwnd_, item_.name.empty()
         ? pulse::l10n::Get(pulse::l10n::StringId::QuickPreview).c_str() : PreviewTitle(item_).c_str());
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -408,8 +494,15 @@ void QuickPreviewWindow::SetStarred(bool starred) {
 }
 
 void QuickPreviewWindow::Close() {
+    if (embedded_ && !embedded_open_) return;
+    embedded_open_ = false;
     if (!hwnd_ || closing_) return;
     commands_.Clear();
+    size_probe_.Cancel();
+    KillTimer(hwnd_, kSizeProbeTimer);
+    fit_pending_ = false;
+    KillTimer(hwnd_, kFitTimer);
+    LeaveFullScreen(false);   // the next Show places the window again
     handler_.Hide();
     ResetAnimation();
     ResetView();
@@ -429,7 +522,7 @@ void QuickPreviewWindow::Close() {
         if (owner_) SetForegroundWindow(owner_);
         return;
     }
-    FinishClose(true);
+    FinishClose(!embedded_);
 }
 
 // restore_focus is false after the close zoom: focus already went back to the
@@ -456,7 +549,12 @@ void QuickPreviewWindow::Resize() {
     if (!hwnd_ || !compositor_.Dc()) return;
     RECT rect{};
     GetClientRect(hwnd_, &rect);
-    compositor_.Resize((std::max)(1L, rect.right), (std::max)(1L, rect.bottom));
+    const int width = (std::max)(1L, rect.right);
+    const int height = (std::max)(1L, rect.bottom);
+    // A playback tick redraws the chrome; it must not discard and recreate the
+    // presentation buffers when the window has not actually changed size.
+    if (width != compositor_.Width() || height != compositor_.Height())
+        compositor_.Resize(width, height);
 }
 
 float QuickPreviewWindow::FindBarHeight() const noexcept {
@@ -494,7 +592,7 @@ D2D1_RECT_F QuickPreviewWindow::ContentRect() const {
     const float height = static_cast<float>(compositor_.Height());
     const float header = HeaderHeight();
     return D2D1::RectF(0, header + FindBarHeight() + preview_notice_height_, width - InfoDrawerWidth(),
-                       (std::max)(header, height - FooterHeight() - PlaybackHeight()));
+                       (std::max)(header + FindBarHeight() + preview_notice_height_, height - FooterHeight() - PlaybackHeight()));
 }
 
 D2D1_RECT_F QuickPreviewWindow::ChromeButtonRect(ChromeButton button) const {
@@ -503,6 +601,7 @@ D2D1_RECT_F QuickPreviewWindow::ChromeButtonRect(ChromeButton button) const {
     case ChromeButton::Next: return header_.next;
     case ChromeButton::More: return header_.more;
     case ChromeButton::Open: return header_.open;
+    case ChromeButton::Size: return header_.size;
     default: return D2D1::RectF(0, 0, 0, 0);
     }
 }
@@ -572,8 +671,9 @@ void QuickPreviewWindow::DrawMarkdownToggle(ID2D1DeviceContext* dc,
 QuickPreviewWindow::ChromeButton QuickPreviewWindow::HitChromeButton(POINT client) const {
     const float x = static_cast<float>(client.x);
     const float y = static_cast<float>(client.y);
+    if (fullscreen_) return ChromeButton::None;
     for (ChromeButton button : {ChromeButton::Prev, ChromeButton::Next, ChromeButton::Open,
-                                ChromeButton::More}) {
+                                ChromeButton::Size, ChromeButton::More}) {
         const D2D1_RECT_F rect = ChromeButtonRect(button);
         if (x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom) return button;
     }
@@ -602,8 +702,229 @@ void QuickPreviewWindow::ActivateChromeButton(ChromeButton button) {
         ShowContextMenu(screen);
         break;
     }
+    case ChromeButton::Size: {
+        const D2D1_RECT_F rect = ChromeButtonRect(ChromeButton::Size);
+        POINT screen{static_cast<LONG>(rect.left), static_cast<LONG>(rect.bottom)};
+        ClientToScreen(hwnd_, &screen);
+        ShowSizeMenu(screen);
+        break;
+    }
     default:
         break;
+    }
+}
+
+// ---- Window size presets ---------------------------------------------------
+
+POINT QuickPreviewWindow::WindowCentre() const {
+    RECT now{};
+    GetWindowRect(hwnd_, &now);
+    return POINT{(now.left + now.right) / 2, (now.top + now.bottom) / 2};
+}
+
+int QuickPreviewWindow::SizingChromeHeight() const {
+    // Videos and animated pictures both carry the transport bar under the picture.
+    const bool bar = (video_.active() && !VideoPreview::IsAudio(item_.path)) || frame_count_ > 1;
+    const float playback = bar ? PlaybackHeight() : 0.0f;
+    return static_cast<int>(std::lround(HeaderHeight() + FooterHeight() + playback));
+}
+
+void QuickPreviewWindow::BeginContentSizeProbe() {
+    size_probe_.Cancel();
+    probe_w_ = probe_h_ = 0;
+    KillTimer(hwnd_, kSizeProbeTimer);
+    if (!image_item_ || embedded_ || item_.path.empty() ||
+        (item_.attrs & FILE_ATTRIBUTE_DIRECTORY) || OfflinePlaceholder()) return;
+    if (size_probe_.Start(generation_, item_.path)) SetTimer(hwnd_, kSizeProbeTimer, 30, nullptr);
+}
+
+bool QuickPreviewWindow::ContentPixelSize(uint32_t& width, uint32_t& height) const {
+    if (image_item_ && (source_w_ || decoded_w_)) {
+        width = source_w_ ? source_w_ : decoded_w_;
+        height = source_w_ ? source_h_ : decoded_h_;
+        if (image_turns_ & 1) std::swap(width, height);
+        return width && height;
+    }
+    if (video_.active()) {
+        if (VideoPreview::IsAudio(item_.path)) return false;
+        const auto state = video_.Snapshot();
+        width = state.width;
+        height = state.height;
+        return width && height;
+    }
+    width = probe_w_; height = probe_h_;
+    if (image_turns_ & 1) std::swap(width, height);
+    return width && height;
+}
+
+RECT QuickPreviewWindow::PlanRect(int mode, POINT centre, bool use_remembered) {
+    PreviewSizeInput in;
+    in.mode = static_cast<PreviewSizeMode>(std::clamp(mode, 0, 4));
+    MONITORINFO info{sizeof(info)};
+    GetMonitorInfoW(MonitorFromPoint(centre, MONITOR_DEFAULTTONEAREST), &info);
+    in.work = info.rcWork;
+    in.centre = centre;
+    in.chrome_h = SizingChromeHeight();
+    in.scale = scale_;
+    const RECT& kept = options_.remembered;
+    if (use_remembered && options_.remember_size && kept.right > kept.left && kept.bottom > kept.top) {
+        in.remembered_w = kept.right - kept.left;
+        in.remembered_h = kept.bottom - kept.top;
+    } else if (in.mode == PreviewSizeMode::Fit && !(item_.attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+        uint32_t w = 0, h = 0;
+        if (ContentPixelSize(w, h)) {
+            in.content_w = static_cast<int>(w);
+            in.content_h = static_cast<int>(h);
+        } else if (video_.active() && !VideoPreview::IsAudio(item_.path)) {
+            in.content_w = 1920;   // 16:9 until the video reports its size
+            in.content_h = 1080;
+            fit_pending_ = true;
+        } else if (image_item_) {
+            fit_pending_ = true;   // 标准 until the first frame
+        }
+    }
+    return PreviewWindowRect(in);
+}
+
+void QuickPreviewWindow::ApplyRect(const RECT& rect) {
+    if (embedded_) return;
+    if (!hwnd_ || rect.right <= rect.left || rect.bottom <= rect.top) return;
+    RECT now{};
+    GetWindowRect(hwnd_, &now);
+    if (EqualRect(&now, &rect)) return;
+    SetWindowPos(hwnd_, nullptr, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void QuickPreviewWindow::FitToContent(uint32_t width, uint32_t height) {
+    if (embedded_) return;
+    if (!visible() || !width || !height || fullscreen_ || user_sized_ || IsZoomed(hwnd_) ||
+        options_.size_mode != static_cast<int>(PreviewSizeMode::Fit)) return;
+    PreviewSizeInput in;
+    in.mode = PreviewSizeMode::Fit;
+    in.centre = WindowCentre();
+    MONITORINFO info{sizeof(info)};
+    GetMonitorInfoW(MonitorFromPoint(in.centre, MONITOR_DEFAULTTONEAREST), &info);
+    in.work = info.rcWork;
+    in.chrome_h = SizingChromeHeight();
+    in.scale = scale_;
+    in.content_w = static_cast<int>(width);
+    in.content_h = static_cast<int>(height);
+    ApplyRect(PreviewWindowRect(in));
+}
+
+void QuickPreviewWindow::ChooseSizeMode(int mode) {
+    mode = std::clamp(mode, 0, 4);
+    options_.size_mode = mode;
+    options_.remembered = RECT{};   // a preset replaces the dragged size
+    user_sized_ = false;
+    fit_pending_ = false;
+    if (mode == static_cast<int>(PreviewSizeMode::FullScreen)) {
+        EnterFullScreen();
+    } else {
+        LeaveFullScreen(false);
+        if (IsZoomed(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
+        ApplyRect(PlanRect(mode, WindowCentre(), false));
+    }
+    ReportOptions();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void QuickPreviewWindow::EnterFullScreen() {
+    if (embedded_) return;
+    if (!hwnd_ || fullscreen_) return;
+    if (IsZoomed(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
+    GetWindowRect(hwnd_, &pre_fullscreen_);
+    MONITORINFO info{sizeof(info)};
+    if (!GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &info)) return;
+    fullscreen_ = true;
+    const DWORD corner = DWMWCP_DONOTROUND;
+    DwmSetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
+    const RECT& m = info.rcMonitor;
+    SetWindowPos(hwnd_, HWND_TOP, m.left, m.top, m.right - m.left, m.bottom - m.top,
+                 SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    if (find_open_) LayoutFindEdit();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void QuickPreviewWindow::LeaveFullScreen(bool restore_rect) {
+    if (!hwnd_ || !fullscreen_) return;
+    fullscreen_ = false;
+    const DWORD corner = DWMWCP_ROUND;
+    DwmSetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
+    if (restore_rect) ApplyRect(pre_fullscreen_);
+    if (find_open_) LayoutFindEdit();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void QuickPreviewWindow::StartKeyHint() {
+    key_hint_until_ = 0;
+    if (!video_.active() || VideoPreview::IsAudio(item_.path) || !options_.space_closes ||
+        options_.key_hint_left <= 0) return;
+    key_hint_until_ = GetTickCount64() + 5000;
+    --options_.key_hint_left;
+    ReportOptions();
+}
+
+void QuickPreviewWindow::ReportOptions() {
+    if (item_.path.empty()) return;
+    const QuickPreviewItem target = item_;
+    PostAction(QuickPreviewAction::SaveOptions, &target);
+}
+
+void QuickPreviewWindow::ToggleLoop() {
+    // The three choices nest (不循环 < 仅动图 < 动图和视频), so L steps along
+    // them: a looping video implies looping animations, and vice versa.
+    const bool video = video_.active();
+    if (video) options_.loop = VideoLoops() ? 0 : 1;
+    else options_.loop = AnimationLoops() ? 2 : 0;
+    const bool on = video ? VideoLoops() : AnimationLoops();
+    playback_note_ = pulse::l10n::Get(on ? pulse::l10n::StringId::PreviewLoopOn
+                                         : pulse::l10n::StringId::PreviewLoopOff);
+    playback_note_until_ = GetTickCount64() + 1500;
+    // Turning it back on wakes an animation that stopped on its last frame.
+    if (!video && on && !animation_active_ && frame_count_ > 1 && frame_index_ + 1 >= frame_count_)
+        TogglePlayback();
+    ReportOptions();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void QuickPreviewWindow::ShowSizeMenu(POINT screen) {
+    if (!text_menu_.Create(hwnd_, &compositor_, scale_)) return;
+    text_menu_.SetTheme(dark_, accent_);
+    text_menu_.SetTopmost(native_kind_ == NativeKind::None);
+    using pulse::l10n::StringId;
+    static constexpr StringId kLabels[5] = {StringId::PreviewSizeFit, StringId::PreviewSizeStandard,
+        StringId::PreviewSizeLarge, StringId::PreviewSizeMaximized, StringId::PreviewSizeFullScreen};
+    static constexpr const wchar_t* kKeys[5] = {L"", L"Ctrl+1", L"Ctrl+2", L"Ctrl+3", L"F"};
+    const int current = fullscreen_ ? 4 : std::clamp(options_.size_mode, 0, 4);
+    std::vector<FluentMenuItem> items;
+    for (int i = 0; i < 5; ++i) {
+        FluentMenuItem item;
+        item.command = kSizeCmdFirst + i;
+        item.text = pulse::l10n::Get(kLabels[i]);
+        item.shortcut = kKeys[i];
+        item.radio_group = true;
+        item.radio = i == current;
+        item.separator_after = i == 4;
+        items.push_back(std::move(item));
+    }
+    FluentMenuItem remember;
+    remember.command = kSizeCmdRemember;
+    remember.text = pulse::l10n::Get(StringId::PreviewRememberSize);
+    remember.glyph = L"\xE81C";
+    remember.toggle = true;
+    remember.checked = options_.remember_size;
+    items.push_back(std::move(remember));
+    const uint64_t menu_generation = generation_;
+    const int cmd = text_menu_.TrackPopup(screen, std::move(items));
+    if (!visible() || menu_generation != generation_) return;
+    if (cmd >= kSizeCmdFirst && cmd < kSizeCmdFirst + 5) {
+        ChooseSizeMode(cmd - kSizeCmdFirst);
+    } else if (cmd == kSizeCmdRemember) {
+        options_.remember_size = !options_.remember_size;
+        if (!options_.remember_size) options_.remembered = RECT{};
+        ReportOptions();
     }
 }
 
@@ -865,8 +1186,10 @@ void QuickPreviewWindow::SetImageFooter(const D2D1_RECT_F& content) {
                                                  StringId::PreviewBgDark, StringId::PreviewBgChecker};
         AddFooterControl(kFooterImageBg, pulse::l10n::Get(kBackdrop[image_backdrop_ & 3]));
     }
-    AddFooterControl(kFooterInfo, pulse::l10n::Get(pulse::l10n::StringId::Information));
-    footer_controls_.back().on = info_open_;
+    if (!embedded_) {
+        AddFooterControl(kFooterInfo, pulse::l10n::Get(pulse::l10n::StringId::Information));
+        footer_controls_.back().on = info_open_;
+    }
 }
 
 bool QuickPreviewWindow::ImageBackdropWanted() {
@@ -907,17 +1230,24 @@ bool QuickPreviewWindow::DrawImageBackdrop(ID2D1DeviceContext* dc, const D2D1_RE
     const uint32_t cells[4] = {a, b, b, a};
     const auto props = D2D1::BitmapProperties(
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-    ComPtr<ID2D1Bitmap> tile;
-    ComPtr<ID2D1BitmapBrush> brush;
-    if (FAILED(dc->CreateBitmap(D2D1::SizeU(2, 2), cells, 8, &props, &tile)) || !tile.get() ||
+    ComPtr<ID2D1Device> device;
+    dc->GetDevice(&device);
+    if (device.get() != backdrop_device_.get() || backdrop_dark_ != dark_) {
+        backdrop_brush_.reset();
+        backdrop_device_ = std::move(device);
+        backdrop_dark_ = dark_;
+    }
+    if (!backdrop_brush_.get()) {
+        ComPtr<ID2D1Bitmap> tile;
+        if (FAILED(dc->CreateBitmap(D2D1::SizeU(2, 2), cells, 8, &props, &tile)) || !tile.get() ||
         FAILED(dc->CreateBitmapBrush(tile.get(), D2D1::BitmapBrushProperties(D2D1_EXTEND_MODE_WRAP,
-            D2D1_EXTEND_MODE_WRAP, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR), &brush)) ||
-        !brush.get())
-        return false;
+            D2D1_EXTEND_MODE_WRAP, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR), &backdrop_brush_)) ||
+        !backdrop_brush_.get()) return false;
+    }
     const float cell = std::round(8.0f * scale_);
-    brush->SetTransform(D2D1::Matrix3x2F::Scale(cell, cell) *
+    backdrop_brush_->SetTransform(D2D1::Matrix3x2F::Scale(cell, cell) *
                         D2D1::Matrix3x2F::Translation(std::round(shown.left), std::round(shown.top)));
-    dc->FillRectangle(shown, brush.get());
+    dc->FillRectangle(shown, backdrop_brush_.get());
     return true;
 }
 
@@ -928,19 +1258,26 @@ bool QuickPreviewWindow::PlainTextCandidate() const {
 }
 
 void QuickPreviewWindow::EnsureTextLayout(const std::wstring& text, bool hex, float width,
-                                          bool reading) {
+                                          bool reading, bool same_text) {
     reading = reading && !hex && reading_text_format_.get();
     if (text.empty() || !compositor_.DwriteFactory() || !preview_text_format_.get()) {
+        // The source token must not acknowledge text we could not synchronize.
+        preview_text_identity_.Reset();
+        plain_highlight_lines_.Reset();
+        ResetTextDrawingCache();
         text_layout_.reset();
         return;
     }
     const std::wstring extension = L"." + ExtensionLabel(item_.path);
     const bool gutter = !hex && !reading && line_numbers_ && SyntaxWantsLineNumbers(extension);
-    if (text_layout_.get() && text == preview_text_ && hex == text_layout_hex_ &&
+    if (text_layout_.get() && (same_text || text == preview_text_) && hex == text_layout_hex_ &&
         std::abs(width - text_layout_width_) < 0.5f &&
         std::abs(scale_ - text_layout_scale_) < 0.001f && dark_ == text_layout_dark_ &&
         gutter == (text_gutter_ > 0.0f) && reading == text_layout_reading_) return;
-    preview_text_ = text;
+    const bool text_changed = !same_text && text != preview_text_;
+    if (!same_text) preview_text_ = text;
+    plain_highlight_lines_.Reset();
+    ResetTextDrawingCache();
     text_layout_.reset();
     preview_text_format_->SetWordWrapping(
         hex ? DWRITE_WORD_WRAPPING_NO_WRAP : DWRITE_WORD_WRAPPING_WRAP);
@@ -1031,6 +1368,7 @@ void QuickPreviewWindow::EnsureTextLayout(const std::wstring& text, bool hex, fl
     text_layout_width_ = width;
     text_layout_scale_ = scale_;
     text_layout_hex_ = hex;
+    if (text_changed) UpdateFindMatches();
 }
 
 bool QuickPreviewWindow::HitTestText(float x, float y, uint32_t& index) {
@@ -1094,6 +1432,15 @@ void QuickPreviewWindow::SelectAllText() {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+void QuickPreviewWindow::SetSearchQuery(const std::wstring& query) {
+    if (search_query_ == query) return;
+    search_query_ = query;
+    if (find_open_) return;
+    find_query_ = search_query_;
+    UpdateFindMatches();
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 void QuickPreviewWindow::OpenFind() {
     find_open_ = true;
     if (HasTextSelection() && find_query_.empty()) {
@@ -1118,9 +1465,11 @@ void QuickPreviewWindow::OpenFind() {
 }
 
 void QuickPreviewWindow::CloseFind() {
+    const bool restore_focus = find_open_ && find_edit_ && GetFocus() == find_edit_;
+    plain_highlight_lines_.Reset();
     find_open_ = false;
-    find_query_.clear();
-    find_matches_.clear();
+    find_query_ = search_query_;
+    UpdateFindMatches();
     archive_.SetFilter(L"");
     find_index_ = 0;
     if (find_edit_) {
@@ -1128,7 +1477,7 @@ void QuickPreviewWindow::CloseFind() {
         ShowWindow(find_edit_, SW_HIDE);
     }
     if (hwnd_ && IsWindowVisible(hwnd_)) {
-        SetFocus(hwnd_);
+        if (restore_focus) SetFocus(hwnd_);
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 }
@@ -1175,7 +1524,7 @@ void QuickPreviewWindow::LayoutFindEdit() {
 }
 
 void QuickPreviewWindow::SyncFindFromEdit() {
-    if (!find_edit_) return;
+    if (!find_edit_ || !find_open_) return;
     wchar_t buf[kFindQueryLimit + 1]{};
     GetWindowTextW(find_edit_, buf, ARRAYSIZE(buf));
     if (find_query_ == buf) return;
@@ -1458,6 +1807,8 @@ void QuickPreviewWindow::ShowContextMenu(POINT screen) {
     else if (cmd == kTextCmdFind) OpenFind();
     else if (cmd == kTextCmdLineNumbers) {
         line_numbers_ = !line_numbers_;
+        plain_highlight_lines_.Reset();
+        ResetTextDrawingCache();
         text_layout_.reset();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -1468,7 +1819,11 @@ void QuickPreviewWindow::ShowContextMenu(POINT screen) {
 void QuickPreviewWindow::UpdateFindMatches() {
     find_matches_.clear();
     find_index_ = 0;
-    if (find_query_.empty() || preview_text_.empty()) return;
+    pending_search_reveal_ = false;
+    if (find_query_.empty() || preview_text_.empty()) {
+        plain_highlight_lines_.Reset();
+        return;
+    }
     const size_t n = preview_text_.size();
     const size_t q = find_query_.size();
     if (q > n) return;
@@ -1482,6 +1837,7 @@ void QuickPreviewWindow::UpdateFindMatches() {
         }
         if (match) find_matches_.push_back(static_cast<uint32_t>(i));
     }
+    pending_search_reveal_ = !find_open_ && !search_query_.empty() && !find_matches_.empty();
 }
 
 void QuickPreviewWindow::ScrollMatchIntoView(uint32_t start) {
@@ -1580,13 +1936,23 @@ void QuickPreviewWindow::DrawTextPreview(ID2D1DeviceContext* dc, const D2D1_RECT
     }
     // After the clamp: End and wheel overshoot must not draw one frame past the end.
     const float origin_y = content.top + pad + HexRulerHeight() - text_scroll_;
-    if (find_open_ && !find_query_.empty() && !find_matches_.empty()) {
+    if (!find_query_.empty() && !find_matches_.empty()) {
         ComPtr<ID2D1SolidColorBrush> match_brush;
         ComPtr<ID2D1SolidColorBrush> current_brush;
         dc->CreateSolidColorBrush(D2D1::ColorF(0xC19C00, 0.28f), &match_brush);
         dc->CreateSolidColorBrush(D2D1::ColorF(0xCA5010, 0.40f), &current_brush);
         const uint32_t length = static_cast<uint32_t>(find_query_.size());
-        for (size_t i = 0; i < find_matches_.size(); ++i) {
+        auto first = find_matches_.begin();
+        auto last = find_matches_.end();
+        uint32_t visible_begin = 0, visible_end = 0;
+        if (find_matches_.size() > 128 && plain_highlight_lines_.Range(text_layout_.get(),
+                content.top - origin_y, content.bottom - origin_y, visible_begin, visible_end)) {
+            const uint32_t earliest = visible_begin >= length ? visible_begin - length + 1 : 0;
+            first = std::lower_bound(first, last, earliest);
+            last = std::lower_bound(first, last, visible_end);
+        }
+        for (auto match = first; match != last; ++match) {
+            const size_t i = static_cast<size_t>(match - find_matches_.begin());
             FillHitRange(dc, text_layout_.get(), find_matches_[i], length, origin_x, origin_y,
                          i == find_index_ ? current_brush.get() : match_brush.get());
         }
@@ -1616,8 +1982,7 @@ void QuickPreviewWindow::DrawTextPreview(ID2D1DeviceContext* dc, const D2D1_RECT
         if (hex_hover_ != hex_selected_) light(hex_hover_, dark_ ? 0.26f : 0.16f);
     }
     DrawLineNumbers(dc, content, origin_y);
-    dc->DrawTextLayout(D2D1::Point2F(origin_x, origin_y), text_layout_.get(), text_brush,
-                       D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+    DrawCachedText(dc, text_brush, origin_x, origin_y);
     if (text_layout_hex_) DrawHexRuler(dc, content, origin_x);
     LARGE_INTEGER now{}, freq{};
     QueryPerformanceCounter(&now);
@@ -1847,6 +2212,9 @@ HCURSOR QuickPreviewWindow::ContentCursor(POINT client) const {
         client.y < content.top || client.y >= content.bottom)
         return LoadCursorW(nullptr, IDC_ARROW);
     if (native_kind_ == NativeKind::Markdown &&
+        (markdown_.DraggingScrollbar() || markdown_.OverScrollbar(static_cast<float>(client.x), static_cast<float>(client.y))))
+        return LoadCursorW(nullptr, IDC_ARROW);
+    if (native_kind_ == NativeKind::Markdown &&
         markdown_.IsClickable(static_cast<float>(client.x), static_cast<float>(client.y)))
         return LoadCursorW(nullptr, IDC_HAND);
     if (native_kind_ == NativeKind::Markdown) {
@@ -1866,6 +2234,10 @@ HCURSOR QuickPreviewWindow::ContentCursor(POINT client) const {
 
 void QuickPreviewWindow::SchedulePreviewDeadline() {
     uint64_t deadline = thumbnails_.TakeRetryDeadline();
+    if (compositor_.NeedsRecovery()) {
+        const auto retry = GetTickCount64() + 250;
+        if (!deadline || retry < deadline) deadline = retry;
+    }
     const auto handler = handler_.NextDeadline();
     if (handler && (!deadline || handler < deadline)) deadline = handler;
     if (!hwnd_ || closing_ || !visible()) deadline = 0;
@@ -1885,25 +2257,32 @@ void QuickPreviewWindow::Render() {
     LARGE_INTEGER render_start{};
     QueryPerformanceCounter(&render_start);
     thumbnails_.BeginFrame();
-    if (!compositor_.Dc()) return;
     if (compositor_.NeedsRecovery()) {
-        if (!compositor_.Recover()) return;
+        native_preview_.Reset();
+        if (!compositor_.Recover()) {
+            SchedulePreviewDeadline();
+            return;
+        }
         compositor_.RecreateTextFormats(scale_);
         RecreateFormats();
         thumbnails_.SetDeviceContext(compositor_.Dc());
         open_icons_.SetDeviceContext(compositor_.Dc());
     }
+    if (!compositor_.Dc()) return;
     Resize();
     auto* dc = compositor_.Dc();
     dc->BeginDraw();
     const ChromePalette palette = Palette();
     const bool high_contrast = palette.high_contrast;
+    const TextContrastScope text_contrast_scope(high_contrast, !TextOptimizationBaselineForTest());
     // System colours are COLORREFs (0x00BBGGRR): Palette() converts them.
     const D2D1_COLOR_F background = palette.bg;
     const D2D1_COLOR_F foreground = palette.ink;
     const D2D1_COLOR_F secondary = high_contrast ? foreground
         : dark_ ? D2D1::ColorF(0xB8B8B8) : D2D1::ColorF(0x606060);
-    dc->Clear(background);
+    // Full screen: pictures and videos sit on black.
+    dc->Clear(fullscreen_ && !high_contrast && (image_item_ || video_.active())
+        ? D2D1::ColorF(0x000000) : background);
     ComPtr<ID2D1SolidColorBrush> text_brush;
     ComPtr<ID2D1SolidColorBrush> secondary_brush;
     dc->CreateSolidColorBrush(foreground, &text_brush);
@@ -1943,7 +2322,9 @@ void QuickPreviewWindow::Render() {
                                              nav_alpha, nullptr, D2D1_LAYER_OPTIONS1_NONE), nullptr);
     }
     const bool offline = OfflinePlaceholder();
-    const bool use_handler = !offline && !safe_mode_ && !video_.active() &&
+    const bool plugin_preview = !offline && !safe_mode_ && !(item_.attrs & FILE_ATTRIBUTE_DIRECTORY) &&
+        native_preview_.Available(owner_, item_.path);
+    const bool use_handler = !plugin_preview && !offline && !safe_mode_ && !video_.active() &&
         !(item_.attrs & FILE_ATTRIBUTE_DIRECTORY) && PreviewHandlerHost::CanHost(item_.path) &&
         !(kMarkdownRender && SyntaxLanguageName(L"." + ExtensionLabel(item_.path)) == L"Markdown") &&
         !(kTableView && TableFileKind(item_.path) == 2 && !table_handler_) &&
@@ -1974,7 +2355,7 @@ void QuickPreviewWindow::Render() {
         const auto video = video_.Snapshot();
         const bool audio = VideoPreview::IsAudio(item_.path);
         const bool codec_card = CodecCardVisible(video);
-        const bool picture = !audio && !codec_card && video.ready && SUCCEEDED(video.error);
+        const bool picture = !audio && !codec_card && !video.opening && video.ready && SUCCEEDED(video.error);
         if (picture && !high_contrast) {
             // Video sits on black, transport bar included.
             ComPtr<ID2D1SolidColorBrush> black;
@@ -1999,13 +2380,17 @@ void QuickPreviewWindow::Render() {
                 else if (property.label == L"编码格式" && shown.codec_name.empty()) shown.codec_name = property.value;
             }
             SetMediaFooter(shown, std::move(facts));
-            if (video.ready && SUCCEEDED(video.error))
+            if (video.ready && SUCCEEDED(video.error) && GetTickCount64() < key_hint_until_)
+                footer_hint_ = pulse::l10n::Get(pulse::l10n::StringId::PreviewKeyHint);
+            else if (video.ready && SUCCEEDED(video.error))
                 footer_hint_ = pulse::l10n::Get(video.ffmpeg ? pulse::l10n::StringId::PreviewDecodeFfmpeg
                                                              : pulse::l10n::StringId::PreviewDecodeSystem);
         }
         if (codec_card) {
             // The card explains the missing picture.
-        } else if (FAILED(video.error))
+        } else if (video.opening)
+            status = pulse::l10n::Get(pulse::l10n::StringId::PreviewLoading);
+        else if (FAILED(video.error))
             status = video.unsupported_audio
                 ? l10n::HantText(l10n::Get(l10n::StringId::WindowsCannotDecodeThisAudioOpenItInTheDefaultApp).c_str())
                 : pulse::l10n::Get(pulse::l10n::StringId::PreviewCannotRender);
@@ -2023,7 +2408,7 @@ void QuickPreviewWindow::Render() {
         native_kind_ = NativeKind::Pages;
         DrawPages(dc, secondary_brush.get());
     } else {
-        std::wstring text;
+        std::shared_ptr<const std::wstring> shared_payload;
         std::wstring error;
         preview::Integrity integrity;
         bool truncated = false;
@@ -2050,6 +2435,7 @@ void QuickPreviewWindow::Render() {
                               DrawImageBackdrop(dc, content, draw);
         if (table_.TakePendingSheetRequest(sheet_request_)) {
             preview_text_.clear();
+            preview_text_identity_.Reset();
             find_matches_.clear();
             preview_notice_.clear();
         }
@@ -2081,38 +2467,49 @@ void QuickPreviewWindow::Render() {
                 }
                 dc->SetTransform(D2D1::Matrix3x2F::Rotation(90.0f * static_cast<float>(image_turns_), c) * saved);
             }
+            const auto contributed = plugin_preview ? native_preview_.Draw(owner_, hwnd_, dc, box,
+                item_.path, item_.modified, item_.size, pixels, shared_payload, truncated, integrity,
+                decoded_w_, decoded_h_, dark_, accent_, scale_) : std::optional<PreviewDrawResult>{};
+            if (contributed) {
+                source_w_ = decoded_w_; source_h_ = decoded_h_;
+                if (turned) dc->SetTransform(saved);
+                return *contributed;
+            }
             const PreviewDrawResult drawn = thumbnails_.Draw(dc, box, item_.path, item_.attrs, pixels,
-                generation_, item_.modified, item_.size, 1.0f, &text, &truncated,
+                generation_, item_.modified, item_.size, 1.0f, nullptr, &truncated,
                 &bytes_read, true, &error, nullptr, nullptr, nullptr, nullptr,
                 frame, &reported_frame_count, &reported_delay_ms, &reported_loop_count,
                 &decoded_w_, &decoded_h_, &source_w_, &source_h_, nullptr, &text_encoding,
-                false, nullptr, nullptr, &integrity);
+                false, nullptr, nullptr, &integrity, {}, &shared_payload);
             if (turned) dc->SetTransform(saved);
             return drawn;
         };
         PreviewDrawResult result = draw_at(want, requested);
-        if (result == PreviewDrawResult::Pending && preview_pixels_ != 0 &&
+        if (!plugin_preview && result == PreviewDrawResult::Pending && preview_pixels_ != 0 &&
             preview_pixels_ != want) {
             result = draw_at(preview_pixels_, requested);
         } else if (result != PreviewDrawResult::Pending) {
             preview_pixels_ = want;
         }
         if (folder && result == PreviewDrawResult::Archive &&
-            text.rfind(L"PULSEARC\t1\tDIR\t-\t2", 0) == 0) {
+            shared_payload && shared_payload->rfind(L"PULSEARC\t1\tDIR\t-\t2", 0) == 0) {
             // The quick pass ran out of time: the full count replaces it when ready.
-            std::wstring full_text, full_error;
+            std::shared_ptr<const std::wstring> full_text;
+            std::wstring full_error;
             bool full_truncated = false;
             uint32_t full_bytes = 0;
             if (thumbnails_.Draw(dc, draw, item_.path, item_.attrs, want, generation_,
-                    item_.modified, item_.size, 1.0f, &full_text, &full_truncated, &full_bytes,
+                    item_.modified, item_.size, 1.0f, nullptr, &full_truncated, &full_bytes,
                     true, &full_error, nullptr, nullptr, nullptr, nullptr, 1,
                     nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                    nullptr, nullptr, false, nullptr, nullptr, &integrity) ==
+                    nullptr, nullptr, false, nullptr, nullptr, &integrity, {}, &full_text) ==
                 PreviewDrawResult::Archive) {
-                text = std::move(full_text);
+                shared_payload = std::move(full_text);
                 error = std::move(full_error);
             }
         }
+        const std::wstring empty_text;
+        const std::wstring& text = shared_payload ? *shared_payload : empty_text;
         if (result != PreviewDrawResult::Pending) {
             // The picture cards explain these failures themselves.
             const bool codec_card = kImageExtras && result == PreviewDrawResult::Failed &&
@@ -2134,7 +2531,13 @@ void QuickPreviewWindow::Render() {
             InvalidateRect(hwnd_, nullptr, FALSE);
         } else if (result == PreviewDrawResult::Bitmap && reported_frame_count > 1 &&
                    (kImageExtras || ExtensionLabel(item_.path) == L"GIF")) {
-            if (frame_count_ <= 1) InvalidateRect(hwnd_, nullptr, FALSE);
+            if (frame_count_ <= 1) {
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                // It animates: 适应内容 makes room for the transport bar it now shows.
+                fit_w_ = source_w_ ? source_w_ : decoded_w_;
+                fit_h_ = source_w_ ? source_h_ : decoded_h_;
+                if (fit_w_ && fit_h_) SetTimer(hwnd_, kFitTimer, 1, nullptr);
+            }
             frame_count_ = reported_frame_count;
             frame_delay_ms_ = std::clamp(reported_delay_ms, 20u, 2000u);
             loop_count_ = reported_loop_count;
@@ -2168,8 +2571,17 @@ void QuickPreviewWindow::Render() {
         } else if (result != PreviewDrawResult::Pending) {
             ResetAnimation();
         }
-        if (result == PreviewDrawResult::Bitmap) {
+        if (result == PreviewDrawResult::Custom) {
+            native_kind_ = NativeKind::Model;
+        } else if (result == PreviewDrawResult::Bitmap) {
             native_kind_ = NativeKind::Bitmap;
+            if (fit_pending_ && image_item_ && !icon) {
+                // 适应内容 for a picture whose header could not be read.
+                fit_pending_ = false;
+                fit_w_ = source_w_ ? source_w_ : decoded_w_;
+                fit_h_ = source_w_ ? source_h_ : decoded_h_;
+                if (fit_w_ && fit_h_) SetTimer(hwnd_, kFitTimer, 1, nullptr);
+            }
             SetImageFooter(content);
             // The first decoded frame tells the backdrop where (and whether) to draw.
             if (!backdrop && !icon && image_item_ && ImageBackdropWanted())
@@ -2180,12 +2592,12 @@ void QuickPreviewWindow::Render() {
                 if (icon_unsized) InvalidateRect(hwnd_, nullptr, FALSE);  // lay out at the real size
             }
         } else if (result == PreviewDrawResult::Archive &&
-                   archive_.SetPayload(text, PreviewCardName(item_), item_.size)) {
+                   archive_.SetPayload(shared_payload, PreviewCardName(item_), item_.size)) {
             native_kind_ = NativeKind::Archive;
             archive_.Draw(dc, &compositor_, content, CurrentTheme(), scale_, true);
             SetFooterParts(archive_.StatusParts());
             footer_hint_ = archive_.Hint();
-        } else if (result == PreviewDrawResult::Markdown && markdown_.SetPayload(text, item_.path) &&
+        } else if (result == PreviewDrawResult::Markdown && markdown_.SetPayload(shared_payload, item_.path) &&
                    (!markdown_.DocFormat().empty() ||
                     !(markdown_.IsNotebook() ? notebook_source_ : markdown_source_))) {
             // DOCX / EPUB have no source view; DOCX may switch to the handler.
@@ -2195,17 +2607,15 @@ void QuickPreviewWindow::Render() {
             native_kind_ = NativeKind::Markdown;
             if (markdown_.IsNotebook()) toggle_kind_ = ToggleKind::NotebookSource;
             if (document) toggle_kind_ = ToggleKind::DocHandler;
-            if (preview_text_ != markdown_.PlainText()) {
+            if (preview_text_identity_.Changed(&markdown_, markdown_.TextRevision(), markdown_.PlainText(), preview_text_)) {
                 preview_text_ = markdown_.PlainText();
+                plain_highlight_lines_.Reset();
+                ResetTextDrawingCache();
                 text_layout_.reset();
                 sel_anchor_ = sel_focus_ = 0;
-                if (find_open_) UpdateFindMatches();
+                if (find_open_ || !search_query_.empty()) UpdateFindMatches();
             }
-            std::vector<MarkdownView::Highlight> marks;
-            marks.reserve(find_matches_.size());
-            for (size_t i = 0; i < find_matches_.size(); ++i)
-                marks.push_back({find_matches_[i], static_cast<uint32_t>(find_query_.size()),
-                                 i == find_index_});
+            const SearchHighlights marks(find_matches_, static_cast<uint32_t>(find_query_.size()), find_index_);
             markdown_.SetTocHidden(toc_hidden_);
             if (markdown_.HasToc() && content.right - content.left >= 640.0f * scale_)
                 AddFooterControl(kFooterToc, pulse::l10n::Get(toc_hidden_
@@ -2271,20 +2681,21 @@ void QuickPreviewWindow::Render() {
                 parts.push_back(std::move(size));
                 SetFooterParts(std::move(parts));
             }
-        } else if (result == PreviewDrawResult::Markdown && markdown_.SetPayload(text, item_.path)) {
+        } else if (result == PreviewDrawResult::Markdown && markdown_.SetPayload(shared_payload, item_.path)) {
             // Source mode: the highlighted text view with its status pill.
             markdown_shown_ = true;
             if (markdown_.IsNotebook()) toggle_kind_ = ToggleKind::NotebookSource;
             native_kind_ = NativeKind::Text;
-            const bool changed = preview_text_ != markdown_.Source();
-            EnsureTextLayout(markdown_.Source(), false, (std::max)(1.0f, width - pad * 2.0f));
+            const bool changed = preview_text_identity_.Changed(&markdown_, markdown_.TextRevision(),
+                markdown_.Source(), preview_text_, true);
+            EnsureTextLayout(markdown_.Source(), false, (std::max)(1.0f, width - pad * 2.0f), false, !changed);
             if (changed) {
                 sel_anchor_ = sel_focus_ = 0;
-                if (find_open_) UpdateFindMatches();
+                if (find_open_ || !search_query_.empty()) UpdateFindMatches();
             }
             DrawTextPreview(dc, content, text_brush.get());
             SetTextFooter(false, bytes_read, truncated, text_encoding);
-        } else if (result == PreviewDrawResult::Table && table_.SetPayload(text)) {
+        } else if (result == PreviewDrawResult::Table && table_.SetPayload(shared_payload)) {
             const bool sheet = table_.IsSpreadsheet();
             if (kTableView && (!sheet || PreviewHandlerHost::CanHost(item_.path))) {
                 markdown_shown_ = true;
@@ -2293,43 +2704,43 @@ void QuickPreviewWindow::Render() {
             if (!sheet && (!kTableView || table_source_)) {
                 // Source mode: the text view with its status pill.
                 native_kind_ = NativeKind::Text;
-                const bool changed = preview_text_ != table_.Source();
-                EnsureTextLayout(table_.Source(), false, (std::max)(1.0f, width - pad * 2.0f));
+                const bool changed = preview_text_identity_.Changed(&table_, table_.TextRevision(),
+                    table_.Source(), preview_text_, true);
+                EnsureTextLayout(table_.Source(), false, (std::max)(1.0f, width - pad * 2.0f), false, !changed);
                 if (changed) {
                     sel_anchor_ = sel_focus_ = 0;
-                    if (find_open_) UpdateFindMatches();
+                    if (find_open_ || !search_query_.empty()) UpdateFindMatches();
                 }
                 DrawTextPreview(dc, content, text_brush.get());
                 SetTextFooter(false, bytes_read, truncated, text_encoding);
             } else {
                 native_kind_ = NativeKind::Table;
-                if (preview_text_ != table_.PlainText()) {
+                if (preview_text_identity_.Changed(&table_, table_.TextRevision(), table_.PlainText(), preview_text_)) {
                     preview_text_ = table_.PlainText();
+                    plain_highlight_lines_.Reset();
+                    ResetTextDrawingCache();
                     text_layout_.reset();
                     sel_anchor_ = sel_focus_ = 0;
-                    if (find_open_) UpdateFindMatches();
+                    if (find_open_ || !search_query_.empty()) UpdateFindMatches();
                 }
-                std::vector<TableView::Highlight> marks;
-                marks.reserve(find_matches_.size());
-                for (size_t i = 0; i < find_matches_.size(); ++i)
-                    marks.push_back({find_matches_[i], static_cast<uint32_t>(find_query_.size()),
-                                     i == find_index_});
+                const SearchHighlights marks(find_matches_, static_cast<uint32_t>(find_query_.size()), find_index_);
                 table_.SetFooterTabs(true);
                 table_.Draw(dc, compositor_.DwriteFactory(), content, CurrentTheme(), dark_, scale_,
                             background, marks);
                 SetTableFooter(text_encoding);
             }
-        } else if (result == PreviewDrawResult::Tree && tree_.SetPayload(text)) {
+        } else if (result == PreviewDrawResult::Tree && tree_.SetPayload(shared_payload)) {
             // The Tree | Source pill only when there is a tree to go back to.
             markdown_shown_ = kTreeView && !tree_.HasError();
             toggle_kind_ = ToggleKind::TreeSource;
             if (!kTreeView || tree_.HasError() || tree_source_) {
                 native_kind_ = NativeKind::Text;
-                const bool changed = preview_text_ != tree_.Source();
-                EnsureTextLayout(tree_.Source(), false, (std::max)(1.0f, width - pad * 2.0f));
+                const bool changed = preview_text_identity_.Changed(&tree_, tree_.TextRevision(),
+                    tree_.Source(), preview_text_, true);
+                EnsureTextLayout(tree_.Source(), false, (std::max)(1.0f, width - pad * 2.0f), false, !changed);
                 if (changed) {
                     sel_anchor_ = sel_focus_ = 0;
-                    if (find_open_) UpdateFindMatches();
+                    if (find_open_ || !search_query_.empty()) UpdateFindMatches();
                 }
                 DrawTextPreview(dc, content, text_brush.get());
                 if (tree_.HasError() && kTreeView) {
@@ -2344,17 +2755,15 @@ void QuickPreviewWindow::Render() {
                 }
             } else {
                 native_kind_ = NativeKind::Tree;
-                if (preview_text_ != tree_.PlainText()) {
+                if (preview_text_identity_.Changed(&tree_, tree_.TextRevision(), tree_.PlainText(), preview_text_)) {
                     preview_text_ = tree_.PlainText();
+                    plain_highlight_lines_.Reset();
+                    ResetTextDrawingCache();
                     text_layout_.reset();
                     sel_anchor_ = sel_focus_ = 0;
-                    if (find_open_) UpdateFindMatches();
+                    if (find_open_ || !search_query_.empty()) UpdateFindMatches();
                 }
-                std::vector<TreeView::Highlight> marks;
-                marks.reserve(find_matches_.size());
-                for (size_t i = 0; i < find_matches_.size(); ++i)
-                    marks.push_back({find_matches_[i], static_cast<uint32_t>(find_query_.size()),
-                                     i == find_index_});
+                const SearchHighlights marks(find_matches_, static_cast<uint32_t>(find_query_.size()), find_index_);
                 tree_.Draw(dc, compositor_.DwriteFactory(), content, CurrentTheme(), dark_, scale_, marks);
                 if (tree_.HasCurrent())
                     AddFooterControl(kFooterCopyPath, pulse::l10n::Get(pulse::l10n::StringId::CopyPath).c_str());
@@ -2375,6 +2784,7 @@ void QuickPreviewWindow::Render() {
                 toggle_kind_ = ToggleKind::TextReading;
                 reading = !ToggleSecond();
             }
+            preview_text_identity_.Reset();
             EnsureTextLayout(text, result == PreviewDrawResult::Hex,
                              (std::max)(1.0f, width - pad * 2.0f), reading);
             DrawTextPreview(dc, content, text_brush.get());
@@ -2405,7 +2815,7 @@ void QuickPreviewWindow::Render() {
             DrawImageCodecCard(dc, content, L"pack", text_brush.get());
         } else if (result == PreviewDrawResult::Failed) {
             native_kind_ = NativeKind::None;
-            status = pulse::l10n::Get(error == L"path-unavailable"
+            status = pulse::l10n::Get(error == L"archive-plugin-required" ? pulse::l10n::StringId::ArchivePluginRequired : error == L"path-unavailable"
                 ? pulse::l10n::StringId::PreviewFileUnavailable
                 : pulse::l10n::StringId::PreviewCannotRender);
         }
@@ -2413,6 +2823,11 @@ void QuickPreviewWindow::Render() {
         if (FindBarHeight() > 0.0f) {
             DrawFindBar(dc, FindBarRect());
         }
+    }
+    if (pending_search_reveal_ && !find_matches_.empty()) {
+        pending_search_reveal_ = false;
+        ScrollMatchIntoView(find_matches_.front());
+        InvalidateRect(hwnd_, nullptr, FALSE);
     }
     DrawPlayback(dc, text_brush.get());
     if (!status.empty()) {
@@ -2430,8 +2845,10 @@ void QuickPreviewWindow::Render() {
     // The shell stays put while the content slides.
     LayoutHeader();
     DrawInfoDrawer(dc, palette);
-    DrawHeader(dc, palette);
-    DrawFooter(dc, palette);
+    if (!fullscreen_) {
+        DrawHeader(dc, palette);
+        DrawFooter(dc, palette);
+    }
     SchedulePreviewDeadline();
     {
         // Frame building only; EndDraw's flush and Present wait on the GPU and vsync.
@@ -2445,6 +2862,12 @@ void QuickPreviewWindow::Render() {
     if (result == D2DERR_RECREATE_TARGET || result == DXGI_ERROR_DEVICE_REMOVED ||
         result == DXGI_ERROR_DEVICE_RESET) compositor_.NotifyDeviceLost(result);
     else {
+#if defined(PULSE_PICKER_INPROCESS_PROOF)
+        if (native_kind_ != NativeKind::None) SetPropW(hwnd_, L"Pulse.PreviewTestContentReady", reinterpret_cast<HANDLE>(1));
+        else RemovePropW(hwnd_, L"Pulse.PreviewTestContentReady");
+        if (const auto snapshot = reinterpret_cast<const wchar_t*>(RemovePropW(hwnd_, L"Pulse.PreviewTestSnapshot")))
+            compositor_.SaveSnapshot(snapshot);
+#endif
         compositor_.Present();
         if (zoom_pending_) {
             // Start after the first frame of the new item is on screen.
@@ -2482,6 +2905,7 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         if (wparam) return 0;
         break;
     case WM_NCHITTEST: {
+        if (embedded_ || fullscreen_) return HTCLIENT;   // no frame to drag or size
         POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         ScreenToClient(hwnd_, &point);
         RECT client{};
@@ -2677,6 +3101,13 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             return 0;
         }
         if (native_kind_ == NativeKind::Markdown &&
+            markdown_.ScrollbarMouseDown(static_cast<float>(point.x), static_cast<float>(point.y))) {
+            selecting_ = false;
+            if (markdown_.DraggingScrollbar()) SetCapture(hwnd_);
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
+        if (native_kind_ == NativeKind::Markdown &&
             markdown_.Click(static_cast<float>(point.x), static_cast<float>(point.y))) {
             // Contents entry or next-chapter link: the click is spent.
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -2685,6 +3116,10 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         if (AudioMouseDown(point)) return 0;
         if (PagesMouseDown(point)) {
             InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
+        if (video_.active() && !VideoPreview::IsAudio(item_.path)) {
+            TogglePlayback();   // a click on the picture pauses / resumes, like K
             return 0;
         }
         SetCapture(hwnd_);
@@ -2725,6 +3160,13 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             return 0;
         }
         const D2D1_RECT_F content = ContentRect();
+        if (native_kind_ == NativeKind::Markdown &&
+            markdown_.ScrollbarMouseDown(static_cast<float>(point.x), static_cast<float>(point.y))) {
+            selecting_ = false;
+            if (markdown_.DraggingScrollbar()) SetCapture(hwnd_);
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
         if (native_kind_ == NativeKind::Archive) {
             // Folder listing: double-click opens the item in the main window.
             if (archive_.IsFolderListing() && archive_.HasSelection() &&
@@ -2748,6 +3190,12 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             }
             return 0;
         }
+        if (video_.active() && !VideoPreview::IsAudio(item_.path) && !CodecCardClick(point) &&
+            point.x >= content.left && point.x < content.right &&
+            point.y >= content.top && point.y < content.bottom) {
+            TogglePlayback();   // the second click of a fast pair is a click too
+            return 0;
+        }
         if (native_kind_ == NativeKind::Bitmap &&
             point.x >= content.left && point.x < content.right &&
             point.y >= content.top && point.y < content.bottom) {
@@ -2759,6 +3207,19 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
     case WM_MOUSEMOVE: {
         POINT point{};
         ClientPoint(lparam, point);
+        if (markdown_.DraggingScrollbar()) {
+            if (!(wparam & MK_LBUTTON)) {
+                markdown_.EndScrollbarDrag();
+                if (GetCapture() == hwnd_) ReleaseCapture();
+            } else if (markdown_.ScrollbarMouseMove(static_cast<float>(point.x), static_cast<float>(point.y))) {
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return 0;
+        }
+        if (playback_volume_drag_) {
+            DragPlaybackVolume(static_cast<float>(point.x));
+            return 0;
+        }
         if (playback_drag_) {
             SeekPlayback(static_cast<float>(point.x));
             return 0;
@@ -2785,7 +3246,11 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         if (native_kind_ == NativeKind::Table) {
             const float x = static_cast<float>(point.x), y = static_cast<float>(point.y);
             if (table_.Dragging()) {
-                if (table_.MouseMove(x, y)) InvalidateRect(hwnd_, nullptr, FALSE);
+                if (!(wparam & MK_LBUTTON)) {
+                    table_.MouseUp();
+                    if (GetCapture() == hwnd_) ReleaseCapture();
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                } else if (table_.MouseMove(x, y)) InvalidateRect(hwnd_, nullptr, FALSE);
             } else {
                 if (table_.Hover(x, y)) InvalidateRect(hwnd_, nullptr, FALSE);
                 // Full text of a clipped cell once the pointer rests on it.
@@ -2851,11 +3316,21 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         return 0;
     case WM_LBUTTONUP:
     case WM_CAPTURECHANGED:
+    case WM_CANCELMODE:
         if (message == WM_LBUTTONUP && playback_drag_)
             SeekPlayback(static_cast<float>(GET_X_LPARAM(lparam)));
+        if (message == WM_LBUTTONUP && playback_volume_drag_)
+            DragPlaybackVolume(static_cast<float>(GET_X_LPARAM(lparam)));
+        playback_volume_drag_ = false;
         EndPlaybackDrag(message == WM_LBUTTONUP);
         panning_ = false;
         selecting_ = false;
+        if (markdown_.DraggingScrollbar()) {
+            if (message == WM_LBUTTONUP)
+                markdown_.ScrollbarMouseMove(static_cast<float>(GET_X_LPARAM(lparam)), static_cast<float>(GET_Y_LPARAM(lparam)));
+            markdown_.EndScrollbarDrag();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
         if (table_.Dragging()) {
             table_.MouseUp();
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -2864,7 +3339,7 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             tree_.MouseUp();
             InvalidateRect(hwnd_, nullptr, FALSE);
         }
-        if (message == WM_LBUTTONUP) ReleaseCapture();
+        if ((message == WM_LBUTTONUP || message == WM_CANCELMODE) && GetCapture() == hwnd_) ReleaseCapture();
         return 0;
     case WM_RBUTTONUP: {
         POINT point{};
@@ -2944,6 +3419,23 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             else KillTimer(hwnd_, kZoomCloseTimer);
             return 0;
         }
+        if (wparam == kSizeProbeTimer) {
+            if (auto result = size_probe_.Take(generation_, item_.path)) {
+                KillTimer(hwnd_, kSizeProbeTimer);
+                probe_w_ = result->width; probe_h_ = result->height;
+                if (fit_pending_ && visible() && probe_w_ && probe_h_) {
+                    fit_pending_ = false;
+                    uint32_t width = 0, height = 0;
+                    if (ContentPixelSize(width, height)) FitToContent(width, height);
+                }
+            }
+            return 0;
+        }
+        if (wparam == kFitTimer) {
+            KillTimer(hwnd_, kFitTimer);
+            FitToContent(fit_w_, fit_h_);
+            return 0;
+        }
         if (wparam == kNavSlideTimer) {
             if (nav_dir_ != 0 && visible()) InvalidateRect(hwnd_, nullptr, FALSE);
             else KillTimer(hwnd_, kNavSlideTimer);
@@ -2954,13 +3446,30 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             return 0;
         }
         if (wparam == 8 && video_.active()) {
+            if (fit_pending_ || VideoLoops()) {
+                const auto state = video_.Snapshot();
+                if (fit_pending_ && state.ready && state.width && state.height) {
+                    fit_pending_ = false;
+                    FitToContent(state.width, state.height);
+                }
+                // 循环播放: start again from the beginning once it ends.
+                const ULONGLONG now = GetTickCount64();
+                if (VideoLoops() && state.ready && state.ended && SUCCEEDED(state.error) &&
+                    now - video_loop_at_ > 500) {
+                    video_loop_at_ = now;
+                    video_.Seek(0.0);
+                    video_.Play(true);
+                }
+            }
             if (visible() && !IsIconic(hwnd_)) InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
         if (wparam == kAnimationTimer && animation_active_ && visible()) {
             if (frame_count_ > 1 && !waiting_for_frame_ && !playback_scrub_pending_) {
                 if (frame_index_ + 1 >= frame_count_) {
-                    if (loop_count_ != 0 && completed_loops_ >= loop_count_) {
+                    // 循环播放 off: finish this pass and rest on the last frame (most
+                    // files ask to loop forever, so the file's own count cannot decide).
+                    if (!AnimationLoops()) {
                         animation_active_ = false;
                         KillTimer(hwnd_, kAnimationTimer);
                         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -3006,6 +3515,26 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             return 0;
         }
         break;
+    case WM_ENTERSIZEMOVE:
+        GetWindowRect(hwnd_, &size_move_start_);
+        break;
+    case WM_EXITSIZEMOVE: {
+        // A size dragged by hand: kept for this preview, and next time while
+        // 记住我拖出来的大小 is on. Moving alone changes nothing.
+        RECT now{};
+        GetWindowRect(hwnd_, &now);
+        const bool resized = now.right - now.left != size_move_start_.right - size_move_start_.left ||
+                             now.bottom - now.top != size_move_start_.bottom - size_move_start_.top;
+        if (resized && !fullscreen_ && !IsZoomed(hwnd_)) {
+            user_sized_ = true;
+            fit_pending_ = false;
+            if (options_.remember_size) {
+                options_.remembered = now;
+                ReportOptions();
+            }
+        }
+        break;
+    }
     case WM_GETMINMAXINFO: {
         auto* limits = reinterpret_cast<MINMAXINFO*>(lparam);
         limits->ptMinTrackSize.x = static_cast<LONG>(480.0f * scale_);
@@ -3036,6 +3565,12 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         }
         return 0;
     case WM_KEYDOWN: {
+        if (embedded_ && !find_open_ && (wparam == VK_ESCAPE || wparam == VK_SPACE)) {
+            if (wparam == VK_SPACE && HasPlayback()) {
+                if (!(lparam & (1LL << 30))) TogglePlayback();
+            } else if (owner_) SetFocus(owner_);
+            return 0;
+        }
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         if (wparam == VK_TAB && !find_open_ && !ctrl) {
@@ -3058,12 +3593,38 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         }
         if (wparam == VK_ESCAPE) {
             if (find_open_) CloseFind();
+            else if (fullscreen_) LeaveFullScreen(true);   // Esc leaves full screen first
             else Close();
+            return 0;
+        }
+        const bool repeat = (lparam & (1LL << 30)) != 0;
+        if (!find_open_ && ctrl && !shift &&
+            ((wparam >= '1' && wparam <= '3') || (wparam >= VK_NUMPAD1 && wparam <= VK_NUMPAD3))) {
+            // 标准 / 大 / 最大化, like the header's size menu.
+            const int step = static_cast<int>(wparam >= VK_NUMPAD1 ? wparam - VK_NUMPAD1 : wparam - '1');
+            if (!repeat) ChooseSizeMode(static_cast<int>(PreviewSizeMode::Standard) + step);
+            return 0;
+        }
+        if (!find_open_ && !ctrl && !shift && wparam == 'F') {
+            if (!repeat) {
+                if (fullscreen_) LeaveFullScreen(true);
+                else EnterFullScreen();
+            }
             return 0;
         }
         if (!find_open_ && HasPlayback() && !ctrl) {
             if (wparam == VK_SPACE) {
-                if (!(lparam & (1LL << 30))) TogglePlayback();
+                // 空格键 setting: close like on every other file, or play / pause.
+                if (options_.space_closes) Close();
+                else if (!repeat) TogglePlayback();
+                return 0;
+            }
+            if (wparam == 'K') {
+                if (!repeat) TogglePlayback();
+                return 0;
+            }
+            if (wparam == 'L') {
+                if (!repeat) ToggleLoop();
                 return 0;
             }
             if (wparam == VK_OEM_COMMA || wparam == VK_OEM_PERIOD) {
@@ -3232,7 +3793,8 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
     }
     case WM_SETTINGCHANGE:
     case WM_THEMECHANGED:
-        ApplyWindowEffect(hwnd_, effect_, dark_);
+        RefreshHighContrast();
+        if (!embedded_) ApplyWindowEffect(hwnd_, effect_, dark_);
         if (find_edit_brush_) {
             DeleteObject(find_edit_brush_);
             find_edit_brush_ = nullptr;
@@ -3243,6 +3805,8 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         Close();
         return 0;
     case WM_DESTROY:
+        size_probe_.Cancel();
+        KillTimer(hwnd_, kSizeProbeTimer);
         ResetPlayback();
         ResetAnimation();
         handler_.Reset();
@@ -3250,6 +3814,8 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         DestroyFindEdit();
         close_format_.reset();
         preview_text_format_.reset();
+        plain_highlight_lines_.Reset();
+        ResetTextDrawingCache();
         text_layout_.reset();
         compositor_.Shutdown();
         hwnd_ = nullptr;

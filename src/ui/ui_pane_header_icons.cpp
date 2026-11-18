@@ -28,6 +28,9 @@ void MainRenderer::DrawPaneHeaderIcon(const D2D1_RECT_F& rc, PaneHeaderIcon icon
     case PaneHeaderIcon::SwapHorizontal: command = I::SwapHorizontal; break;
     case PaneHeaderIcon::SwapVertical: command = I::SwapVertical; break;
     case PaneHeaderIcon::Size: command = I::Sliders; break;
+    case PaneHeaderIcon::Expand: command = I::PaneExpand; break;
+    case PaneHeaderIcon::Restore: command = I::PaneRestore; break;
+    case PaneHeaderIcon::Close: command = I::Close; break;
     case PaneHeaderIcon::Wall: break;  // drawn below
     }
     MakeBrush(dc, color, brText_);
@@ -59,7 +62,15 @@ void MainRenderer::DrawPaneHeaderIcon(const D2D1_RECT_F& rc, PaneHeaderIcon icon
     const float side = bounds.right - bounds.left;
     const float width = icon_stroke_px_ > 0.0f && side > 0.0f
         ? icon_stroke_px_ * command_icons::kCanvas / side : command_icons::kStroke;
-    command_icons::Draw(dc, brText_.get(), paneHeaderStroke_.get(), command, bounds, 1.0f, width);
+    // The toolbar's split button at rest takes its accent part like the pins.
+    const auto tone = icon_tones_ && !IsHighContrast() ? command_icons::ToneOf(command)
+                                                       : command_icons::Tone::None;
+    ID2D1Brush* accent = nullptr;
+    if (tone != command_icons::Tone::None) {
+        MakeBrush(dc, icon_tone_colors_[static_cast<size_t>(tone)], brIconTone_);
+        accent = brIconTone_.get();
+    }
+    command_icons::DrawTwoTone(dc, brText_.get(), accent, paneHeaderStroke_.get(), command, bounds, 1.0f, width);
 }
 
 } // namespace pulse::ui

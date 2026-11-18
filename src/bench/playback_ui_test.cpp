@@ -67,9 +67,25 @@ struct QuickPreviewPlaybackProbe {
         if (FAILED(hr)) { if (previous) previous->Release(); Check(false, "create component GPU target"); return; }
         dc->SetTarget(target); dc->BeginDraw();
         dc->Clear(q.dark_ ? D2D1::ColorF(0x151515) : D2D1::ColorF(0xF7F7F7));
+        // Match Render's video surface: playback uses light ink on black even
+        // in the light theme. Capturing controls on the theme canvas alone
+        // would invent a white-on-white state that production never displays.
+        const auto state = q.video_.Snapshot();
+        if (q.video_.active() && !VideoPreview::IsAudio(q.item_.path) &&
+            !q.CodecCardVisible(state) && !state.opening && state.ready &&
+            SUCCEEDED(state.error) && !q.Palette().high_contrast) {
+            ID2D1SolidColorBrush* background = nullptr;
+            dc->CreateSolidColorBrush(D2D1::ColorF(0x000000), &background);
+            if (background) {
+                dc->FillRectangle(D2D1::RectF(0, q.ContentRect().top,
+                    static_cast<float>(size.width), q.PlaybackRect().bottom), background);
+                background->Release();
+            }
+        }
         ID2D1SolidColorBrush* brush = nullptr;
         dc->CreateSolidColorBrush(q.dark_ ? D2D1::ColorF(0xF4F4F4) : D2D1::ColorF(0x202020), &brush);
-        q.DrawHud(dc, q.ContentRect(), brush);
+        q.DrawHeader(dc, q.Palette());
+        q.DrawFooter(dc, q.Palette());
         q.DrawPlayback(dc, brush);
         if (brush) brush->Release();
         const HRESULT drawn = dc->EndDraw();
@@ -286,6 +302,119 @@ struct QuickPreviewPlaybackProbe {
         q.Close(); DestroyWindow(owner); Pump(800);
         return failures ? 1 : 0;
     }
+    static int RunTracks(const std::wstring& path) {
+        HWND owner = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"Playback controls test owner",
+            WS_OVERLAPPEDWINDOW, 40, 40, 680, 500, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        QuickPreviewWindow q;
+        Check(q.Initialize(owner, WM_APP + 1, WM_APP + 2), "initialize track controls preview");
+        q.Show(Item(path), false, WindowEffect::None, false);
+        Check(Until([&] { const auto state = q.video_.Snapshot(); return state.ready || FAILED(state.error); }),
+            "track fixture finishes opening");
+        Check(q.video_.Snapshot().ready, "track fixture is playable");
+        q.video_.Play(false);
+        auto menu_state = q.video_.Snapshot();
+        menu_state.ffmpeg = true;
+        menu_state.ready = true;
+        menu_state.error = S_OK;
+        menu_state.can_select_audio = true;
+        menu_state.can_select_subtitle = true;
+        menu_state.audio_tracks = {{2, L"English", true}, {7, L"Chinese", true}};
+        menu_state.audio_track = 7;
+        menu_state.subtitle_tracks = {{9, L"Text", true}, {12, L"Bitmap", false}};
+        menu_state.subtitle_track = -1;
+        const auto audio_items = q.PlaybackTrackItems(false, menu_state);
+        Check(audio_items.size() == 2 && !audio_items[0].radio && audio_items[1].radio && audio_items[1].enabled,
+            "audio menu shows selected track using stream IDs");
+        const auto subtitle_items = q.PlaybackTrackItems(true, menu_state);
+        Check(subtitle_items.size() == 3 && subtitle_items[0].radio && subtitle_items[0].enabled &&
+            subtitle_items[1].enabled && !subtitle_items[2].enabled,
+            "subtitle menu shows off and disables unsupported formats");
+        menu_state.can_select_audio = false;
+        menu_state.can_select_subtitle = false;
+        const auto disabled_audio = q.PlaybackTrackItems(false, menu_state);
+        const auto disabled_subtitles = q.PlaybackTrackItems(true, menu_state);
+        Check(!disabled_audio.empty() && !disabled_subtitles.empty() &&
+            std::none_of(disabled_audio.begin(), disabled_audio.end(), [](const auto& item) { return item.enabled; }) &&
+            std::none_of(disabled_subtitles.begin(), disabled_subtitles.end(), [](const auto& item) { return item.enabled; }),
+            "unavailable backend exposes explanation and no enabled track commands");
+        menu_state.ffmpeg = false;
+        menu_state.ffmpeg_available = true;
+        menu_state.ffmpeg_subtitles_available = true;
+        const auto enable_subtitles = q.PlaybackTrackItems(true, menu_state);
+        Check(enable_subtitles.front().enabled && enable_subtitles.front().command != 0,
+            "native playback offers explicit subtitle reload when pack is installed");
+        menu_state.ffmpeg_subtitles_available = false;
+        const auto limited_pack = q.PlaybackTrackItems(true, menu_state);
+        Check(std::none_of(limited_pack.begin(), limited_pack.end(), [](const auto& item) { return item.enabled; }),
+            "pack without subtitle support cannot offer a misleading reload action");
+        const auto enhanced_audio = q.PlaybackTrackItems(false, menu_state);
+        Check(enhanced_audio.front().enabled && enhanced_audio.front().command != 0,
+            "pack without subtitle filters still offers enhanced audio playback");
+        menu_state.ffmpeg_available = false;
+        const auto absent_pack = q.PlaybackTrackItems(true, menu_state);
+        Check(std::none_of(absent_pack.begin(), absent_pack.end(), [](const auto& item) { return item.enabled; }),
+            "missing pack only explains settings entry without installing or switching");
+        scrub_test_window = q.hwnd_;
+        CreateDirectoryW(L"build\\playback-check", nullptr);
+        SetWindowPos(q.hwnd_, nullptr, 0, 0, 480, 420, SWP_NOMOVE | SWP_NOZORDER);
+        Pump(60);
+        auto g = q.PlaybackLayout();
+        Check(g.track.right <= g.time_right.left && g.time_right.right < g.chip.left,
+            "narrow timeline controls do not overlap");
+        Check(g.volume.right < g.volume_track.left && g.volume_track.right < g.volume_value.left &&
+            g.volume_value.right < g.speed.left && g.speed.right < g.audio_tracks.left &&
+            g.audio_tracks.right < g.subtitles.left && g.subtitles.right <= q.PlaybackRect().right &&
+            g.audio_tracks.right > g.audio_tracks.left && g.subtitles.right > g.subtitles.left,
+            "narrow volume and track controls do not overlap");
+        POINT point{static_cast<LONG>((g.volume_track.left + g.volume_track.right) * 0.5f),
+            static_cast<LONG>((g.volume_track.top + g.volume_track.bottom) * 0.5f)};
+        q.PlaybackMouseDown(point);
+        Check(q.playback_volume_drag_ && GetCapture() == q.hwnd_ && std::abs(q.playback_volume_ - 0.5f) < .03f,
+            "visible volume slider captures and sets volume");
+        SendMessageW(q.hwnd_, WM_MOUSEMOVE, MK_LBUTTON,
+            MAKELPARAM(static_cast<int>(g.volume_track.right + 30), point.y));
+        Check(q.playback_volume_ == 1.0f, "drag outside slider clamps volume to maximum");
+        SendMessageW(q.hwnd_, WM_LBUTTONUP, 0,
+            MAKELPARAM(static_cast<int>(g.volume_track.left - 30), point.y));
+        Check(q.playback_volume_ == 0 && !q.playback_volume_drag_ && GetCapture() != q.hwnd_,
+            "slider release clamps to zero and releases capture");
+        q.PlaybackWheel(point, 5);
+        Check(std::abs(q.playback_volume_ - .25f) < .001f, "wheel adjusts visible volume slider");
+        POINT mute{static_cast<LONG>((g.volume.left + g.volume.right) * .5f), point.y};
+        q.PlaybackMouseDown(mute);
+        Check(q.playback_muted_ && std::abs(q.playback_volume_ - .25f) < .001f, "mute preserves slider volume");
+        q.PlaybackMouseDown(mute);
+        Check(!q.playback_muted_, "mute toggles off");
+        q.PlaybackMouseDown(point);
+        SendMessageW(q.hwnd_, WM_CANCELMODE, 0, 0);
+        Check(!q.playback_volume_drag_ && GetCapture() != q.hwnd_, "cancel clears volume dragging");
+        q.Render();
+        Capture(q, L"build\\playback-check\\tracks-light-480.bmp");
+        q.dark_ = true;
+        pulse::l10n::SetLanguage(L"en-US");
+        q.playback_note_.clear();
+        q.playback_note_until_ = 0;
+        q.Render();
+        Capture(q, L"build\\playback-check\\tracks-dark-480-en.bmp");
+        SetWindowPos(q.hwnd_, nullptr, 0, 0, std::lround(1000 * q.scale_), std::lround(640 * q.scale_), SWP_NOMOVE | SWP_NOZORDER);
+        Pump(60); q.Render();
+        g = q.PlaybackLayout();
+        Check(std::abs(q.PlaybackHeight() - 56 * q.scale_) < .01f &&
+            g.time_right.right < g.volume.left && g.volume.right < g.volume_track.left &&
+            g.volume_track.right < g.volume_value.left && g.volume_value.right < g.speed.left &&
+            g.speed.right < g.audio_tracks.left && g.audio_tracks.right < g.subtitles.left &&
+            g.subtitles.right < g.chip.left && g.track.right <= g.time_right.left,
+            "wide playback keeps one row without overlapping controls");
+        Capture(q, L"build\\playback-check\\tracks-dark-wide-en.bmp");
+        q.scale_ = 2.0f;
+        q.RecreateFormats();
+        SetWindowPos(q.hwnd_, nullptr, 0, 0, 960, 700, SWP_NOMOVE | SWP_NOZORDER);
+        Pump(60); q.Render();
+        Capture(q, L"build\\playback-check\\tracks-dark-200.bmp");
+        scrub_test_window = nullptr;
+        q.Close(); DestroyWindow(owner); Pump(800);
+        return failures ? 1 : 0;
+    }
     static int RunVideo(const std::wstring& path) {
         HWND owner = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"Video preview test owner",
             WS_OVERLAPPEDWINDOW, 40, 40, 680, 500, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -399,14 +528,20 @@ struct QuickPreviewPlaybackProbe {
     }
 };
 }
+#if defined(PULSE_WITH_TEST_HOOKS)
+int PulsePlaybackUiMain(int argc, wchar_t** argv) {
+#else
 int wmain(int argc, wchar_t** argv) {
+#endif
+    const bool tracks_only = argc == 3 && wcscmp(argv[1], L"--tracks-only") == 0;
     const bool video_only = argc == 3 && wcscmp(argv[1], L"--video-only") == 0;
     const bool end_seek_only = argc == 3 && wcscmp(argv[1], L"--end-seek-only") == 0;
-    if (argc != 2 && !video_only && !end_seek_only) return 2;
+    if (argc != 2 && !video_only && !end_seek_only && !tracks_only) return 2;
     OleInitialize(nullptr);
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES}; InitCommonControlsEx(&controls);
     pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
-    const int result = end_seek_only ? pulse::ui::QuickPreviewPlaybackProbe::RunEndSeek(argv[2])
+    const int result = tracks_only ? pulse::ui::QuickPreviewPlaybackProbe::RunTracks(argv[2])
+        : end_seek_only ? pulse::ui::QuickPreviewPlaybackProbe::RunEndSeek(argv[2])
         : video_only ? pulse::ui::QuickPreviewPlaybackProbe::RunVideo(argv[2])
         : pulse::ui::QuickPreviewPlaybackProbe::Run(argv[1]);
     OleUninitialize(); return result;

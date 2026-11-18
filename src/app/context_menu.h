@@ -5,6 +5,7 @@
 // so the console self-test can assert the verb list, hit-test and dispatch
 // without a GUI.
 #pragma once
+#include <functional>
 #include "../ui/fluent_menu.h"
 #include "../ui/view_layout.h"
 #include "../ui/ui_view_model.h"
@@ -45,7 +46,7 @@ enum MenuCmd : int {
     CmdSortAscending,
     CmdSortDescending,
     CmdFolderSortTop,     // 文件夹优先：始终置顶
-    CmdFolderSortFollow,  // 文件夹优先：跟随排序方向
+    CmdFolderSortFollow,  // 文件夹优先：置底
     CmdFolderSortMixed,   // 文件夹优先：与文件混排
     CmdSortCreated = 31,  // 排序方式：创建日期
     CmdSortAccessed = 32, // 排序方式：访问日期
@@ -152,7 +153,8 @@ enum MenuCmd : int {
     CmdToolbarAppBase = 5100,
     CmdToolbarPinAppBase = 5120,
     // Toolbar toggle tools (toolbar_tools.h): + index into kToolbarToolIds.
-    CmdToolbarToolBase = 5160,
+    CmdToolbarToolBase = 5300,
+    CmdToolbarToolEnd = 5400,
     // New menu ▸ 「新建」按钮的主操作: + AppPrefs::toolbar_new_primary (0..2).
     CmdNewPrimaryBase = 5180,
     // Network page (app_network_page.h): 连接服务器 and its ▾ menu, 最近访问.
@@ -165,8 +167,14 @@ enum MenuCmd : int {
     CmdNetworkClearRecent = 5196,        // ⋯ 清除最近访问
     CmdNetworkHiddenShares = 5197,       // ⋯ 显示隐藏共享 (toggle)
     CmdNetworkDiscoverySettings = 5198,  // ⋯ 局域网发现设置… (Settings → 文件操作)
+    // Task 46: 查找重复文件 (dup_finder.h) and AI 整理此文件夹… (folder background, palette).
+    CmdFindDuplicates = 5200,
+    CmdAiOrganizeHere = 5201,
+    CmdDupKeepThis = 5202,               // 重复文件 tab row: 只保留这份
+    CmdDupReapplyRules = 5203,           // 重复文件 tab row: 按规则重新标
     CmdShellStaticBase = 6000,
     CmdShellComBase = 8000,
+    CmdShellComLast = CmdShellComBase + 0x7FFF, // live and predicted Shell menu IDs
 };
 
 // One merged Explorer row (registry static verb or pulse_shell COM item),
@@ -264,7 +272,7 @@ struct BackgroundViewOptions {
     ui::ViewMode view_mode = ui::ViewMode::Details;
     ui::SortColumn sort_column = ui::SortColumn::Name;
     ui::SortDirection sort_direction = ui::SortDirection::Asc;
-    int folder_sort = 0; // 0 folders first, 1 follow direction, 2 mixed
+    int folder_sort = 0; // 0 folders first, 1 folders last, 2 mixed
     bool wall = false;   // the icon view is a photo wall
     bool details_panel = false;
     bool can_sort = true;
@@ -328,5 +336,7 @@ std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
 // "base.ext", "base (2).ext", ... — first name not colliding under dir.
 std::wstring UniqueChildName(const std::wstring& dir, const std::wstring& base,
                              const std::wstring& ext);
+std::wstring UniqueChildName(const std::wstring& dir, const std::wstring& base,
+                             const std::wstring& ext, const std::function<bool()>& cancelled);
 
 } // namespace pulse::app

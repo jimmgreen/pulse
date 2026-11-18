@@ -14,11 +14,29 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace pulse {
 struct AppState;
 struct AiAgent;   // the DeepSeek agent loop (ai_assistant_agent.cpp)
+struct AiHistoryTail;   // model messages cut off the history (ai_agent_internal.h)
+namespace json { class Value; }
+
+// 55 P2: the versions of one user message, like branches. A version is the
+// message's words plus everything after it: the blocks and the model
+// history. The current version lives in AiChat::blocks (its entry here only
+// keeps its words); the others wait here until ‹ › brings one back.
+struct AiTurnVersion {
+    std::wstring text, context;
+    std::vector<ui::AiBlockView> tail;
+    std::shared_ptr<AiHistoryTail> history;
+};
+
+struct AiTurnBranch {
+    std::vector<AiTurnVersion> versions;
+    size_t current = 0;
+};
 
 struct AiChat {
     std::vector<ui::AiBlockView> blocks;
@@ -79,12 +97,24 @@ struct AiChat {
     ui::AiErrTone peek_tone = ui::AiErrTone::Err;
     std::wstring peek_title;
 
+    // 55 P2. Per user block id: the model history's length before it, and
+    // its versions once it has more than one.
+    std::unordered_map<uint32_t, size_t> turn_hist;
+    std::unordered_map<uint32_t, AiTurnBranch> branches;
+
+    // 55 P3 历史对话: the file this conversation saves to (empty until its
+    // first save), its title, whether the user renamed or pinned it, and
+    // what was last written (unchanged: not written again).
+    std::wstring history_id, title;
+    bool renamed = false, pinned = false;
+    int64_t created = 0;
+    size_t saved_sig = 0;
+
     ui::AiBlockView* Find(uint32_t id);
     ui::AiBlockView& Add(ui::AiBlockKind kind, uint64_t now_ms);
 };
 
-// A failed turn (the agent builds it from the stream's error; error card A in
-// plans/ai/Pulse_AI助手_错误与快捷键.html).
+// A failed turn (the agent builds it from the stream's error; error card A).
 struct AiChatError {
     ui::AiErrTone tone = ui::AiErrTone::Err;
     ui::AiIcon icon = ui::AiIcon::AlertCircle;
@@ -134,6 +164,17 @@ void AiChatUndoLast(AppState& s);   // the latest result card's 撤销
 void AiChatFail(AppState& s, AiChatError err);
 // Sends the last prompt again in place of the failed turn (no second bubble).
 void AiChatRetryTurn(AppState& s);
+// 55 P2, `block` any block of the turn. 重新生成: the turn's answer becomes a
+// new version (kind 0 再试一次, 1 更详细, 2 更简洁). ‹ ›: another version.
+// 继续生成: a stopped answer goes on. Edit: the message gets new words and
+// a new version.
+enum class AiRegen : uint8_t { Again, Longer, Shorter };
+void AiChatRegenerate(AppState& s, int block, AiRegen kind);
+void AiChatSwitchVersion(AppState& s, int block, int delta);
+void AiChatContinue(AppState& s, int block);
+void AiChatEditTurn(AppState& s, int user_block, const std::wstring& text);
+// The user block of the turn `block` is in (-1: none).
+int AiChatUserOf(const AiChat& c, int block);
 // The error card button behind an ErrAction hit (false: none).
 bool AiChatErrAction(AppState& s, int index, ui::AiErrAct& act);
 // Runs the chat's own error buttons: 重试, 去充值, 复制详情.
@@ -143,10 +184,50 @@ void AiChatErrRun(AppState& s, int index);
 bool AiAgentConnected();        // a model key is stored (checked at most every 2 s)
 void AiAgentKeyChanged();       // after the key or the address was saved or removed
 std::wstring AiAgentBaseUrl();  // ai.json assistant.base_url, else the default
-std::wstring AiAgentDefaultBaseUrl();   // https://api.deepseek.com
+std::wstring AiAgentDefaultBaseUrl();   // the service's own address (ai_providers.h)
 std::wstring AiAgentHost();     // "api.deepseek.com"
 std::wstring AiAssistantModelName(const AppState& s);   // the model a request uses, as the service names it
-void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context);
+// 思考 for that model (ai_providers.h ModelThinking): whether a request
+// thinks, and the level's name for the turn's meta (高, 开启, 自动 …).
+bool AiAssistantThinks(const AppState& s);
+std::wstring AiAssistantThinkName(const AppState& s);
+// `note`: one more line for the model only (重新生成's 更详细 / 更简洁).
+void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context, const std::wstring& note = {});
+// 继续生成: the turn again with the part already written; what comes goes
+// on in the text block `text_id`, without a thinking block.
+void AiAgentContinue(AppState& s, const std::wstring& prompt, bool with_context, const std::wstring& partial,
+                     uint32_t text_id);
+// The model history: its length, the messages from `from` on (cut off and
+// returned), and putting such a tail back at `from`.
+size_t AiAgentHistorySize(AppState& s);
+// 55 P3: the whole model history as a saved conversation keeps it, and
+// putting such a history into a fresh conversation (历史对话 › open).
+json::Value AiAgentHistoryJson(AppState& s);
+void AiAgentSetHistory(AppState& s, json::Value history);
+
+// 55 P3 历史对话 (ai_chat_history.cpp). Saving needs a message and
+// 保存对话历史 on; opening another conversation stops and saves this one.
+void AiHistorySave(AppState& s);
+bool AiHistoryOpenChat(AppState& s, const std::wstring& id);
+// The layer over the panel: open lists the saved conversations (and drops
+// those past 保留时间).
+void AiHistoryShow(AppState& s, bool open);
+void AiHistoryFillVm(AppState& s, ui::AiHistoryView& view);
+// A click in the layer; true when it started renaming a row (the app puts
+// its EDIT there with AiHistoryRenameTitle).
+bool AiHistoryActivate(AppState& s, ui::AiPanelPart part, int row);
+void AiHistorySetQuery(AppState& s, std::wstring query);
+void AiHistoryRenameText(AppState& s, std::wstring text);
+const std::wstring& AiHistoryRenameTitle(AppState& s);
+bool AiHistoryRenaming(const AppState& s);
+void AiHistoryRenameEnd(AppState& s, bool save);   // Enter saves, Esc / elsewhere gives up
+bool AiHistoryOpenFirst(AppState& s);              // Enter in the search box
+// Esc: the rename, the confirmation, then the layer; true when taken.
+bool AiHistoryEscape(AppState& s);
+bool AiHistoryRowPinned(AppState& s, int row);     // its tip: 固定 / 取消固定
+int AiAgentToolCount(AppState& s);   // tool calls of the running (or last) turn
+std::shared_ptr<AiHistoryTail> AiAgentCutHistory(AppState& s, size_t from);
+void AiAgentRestoreHistory(AppState& s, size_t from, const std::shared_ptr<AiHistoryTail>& tail);
 void AiAgentStop(AppState& s);   // cancels the request and any tool still running
 // Flow A: the 搜索条件 card's chip × and + 条件 search again in Pulse without
 // the model; 接着做 fills the composer (复制路径 copies at once).
@@ -154,7 +235,9 @@ void AiAgentQueryChip(AppState& s, int block, int chip);
 void AiAgentQueryAdd(AppState& s, int block);
 void AiAgentFollow(AppState& s, int block, int item);
 // Puts `text` into the composer without sending it and focuses it (ai_assistant.cpp).
-void AiAssistantFillComposer(AppState& s, const std::wstring& text);
+// `select_from`: the text from there on starts selected (AI 整理此文件夹…'s
+// 按类型分到文件夹, typed over to change it); past the end: the caret at the end.
+void AiAssistantFillComposer(AppState& s, const std::wstring& text, size_t select_from = static_cast<size_t>(-1));
 // 语音输入: recognized words go after what is there (a space only between
 // letters or digits), the caret at the end. Never sends.
 void AiAssistantAppendComposer(AppState& s, const std::wstring& words);

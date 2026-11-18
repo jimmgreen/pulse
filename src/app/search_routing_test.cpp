@@ -16,6 +16,7 @@ void AddPendingSearch(AppCore& core, uint32_t id) {
     PendingSearch pending;
     pending.query.limit = 50;
     pending.network_expected = false;
+    pending.recycle_ready = true;
     pending.network_ready = true;  // local results alone complete the request
     core.pendingIndexSearches[id] = std::move(pending);
 }

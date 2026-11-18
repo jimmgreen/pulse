@@ -24,12 +24,25 @@
 
 namespace pulse::ui {
 
+struct FfmpegTrack {
+    int id = -1; // index within audio/subtitle streams, for -map / subtitles si
+    std::wstring label;
+    std::string codec;
+    bool supported = true;
+};
+
 struct FfmpegMediaInfo {
+    std::vector<FfmpegTrack> audio_tracks, subtitle_tracks;
     int64_t duration = 0;            // 100 ns, 0 when unknown
     uint32_t width = 0, height = 0;  // display size (square pixels)
     double fps = 0;
     bool video = false, audio = false;
+    bool subtitle_filters = false;
 };
+
+// Backend-only, bounded/cancellable capability probe, cached by executable identity.
+bool FfmpegSubtitleFilters(const std::wstring& ffmpeg, const std::atomic<bool>* stop = nullptr);
+bool ParseFfmpegSubtitleFilters(std::string_view output);
 
 // Runs "ffmpeg -i" once (at most 8 s). False when ffmpeg cannot read the file.
 bool ProbeFfmpegMedia(const std::wstring& ffmpeg, const std::wstring& path, FfmpegMediaInfo& info,
@@ -61,6 +74,7 @@ public:
     // (Re)starts the decoders at `position` (100 ns). When paused, only the
     // first frame is shown and the audio waits, ready to resume at once.
     bool Start(int64_t position, float rate, SIZE box, bool playing);
+    bool SelectTracks(int audio, int subtitle); // applied by the next Start
     void SetPlaying(bool playing);
     void SetVolume(float volume, bool muted);
     // The frame due now, or nullptr. Call every few milliseconds.
@@ -71,6 +85,8 @@ public:
     bool Ended();
     bool Failed() const noexcept { return failed_; }
     std::string Diagnostic();
+    DWORD DecoderExitCode() const noexcept { return decoder_exit_.load(); }
+    MMRESULT AudioDeviceError() const noexcept { return audio_device_error_; }
     bool playing() const noexcept { return playing_; }
     float rate() const noexcept { return rate_; }
     bool audio_open() const noexcept { return wave_ != nullptr; }
@@ -90,11 +106,15 @@ private:
     const FfmpegMediaInfo info_;
     std::shared_ptr<Pool> pool_;
 
+    int audio_track_ = 0, subtitle_track_ = -1;
+
     // Session.
     int64_t start_ = 0;
     float rate_ = 1.0f;
     bool playing_ = false;
     std::atomic<bool> failed_{false};
+    std::atomic<DWORD> decoder_exit_{0};
+    MMRESULT audio_device_error_ = MMSYSERR_NOERROR;
     std::function<void()> wake_;
     bool first_shown_ = false;
     bool stepped_ = false;

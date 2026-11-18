@@ -25,6 +25,7 @@ struct ChangeTrackingUi {
     ui::ChangePopover popover;
     std::wstring hover_path;
     uint64_t hover_deadline = 0;
+    uint64_t hover_ready_at = 0;
 };
 void StartChangeTracking(AppState& s);
 bool TickChangeTracking(AppState& s);

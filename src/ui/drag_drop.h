@@ -122,12 +122,16 @@ public:
     virtual void Track() = 0;
     // The effect the current target answered (DROPEFFECT_*).
     virtual void Effect(DWORD effect) = 0;
+    virtual void Feedback(const std::wstring& text) { (void)text; }
     // The drag ended. The visual animates out and frees itself; the caller
     // must not touch it afterwards.
     virtual void Finish(DWORD effect, bool cancelled) = 0;
 };
-using DragVisualFactory = DragVisual* (*)(const std::vector<std::wstring>& paths);
+using DragVisualFactory = DragVisual* (*)(const std::vector<std::wstring>& paths, bool dark);
 void SetDragVisualFactory(DragVisualFactory factory);
+// Returns false for foreign drags or when the optional visual is unavailable.
+bool SetDragVisualFeedback(const std::wstring& text);
+bool DragVisualActive();
 
 // Landing in the real slots (pulse_motion_v2, rolando-sound-cards): a drop
 // into a folder that a Pulse list shows asks the card stack to wait at the
@@ -168,9 +172,10 @@ private:
 };
 
 // Runs the modal DoDragDrop loop. Returns the performed DROPEFFECT_*.
+// dark is the source window theme; file artwork must never determine card colours.
 DWORD DoFileDragDrop(const std::vector<std::wstring>& paths, DWORD allowed_effects,
                      std::function<bool()> esc_consumed,
-                     const std::wstring& source_view = {});
+                     const std::wstring& source_view, bool dark);
 
 // ---------------------------------------------------------------------------
 // Drop-in target.
@@ -183,6 +188,8 @@ struct DropTargetCallbacks {
     // absent), so the badge matches what the drop will actually do.
     std::function<DWORD(const std::vector<std::wstring>& sources, POINT pt,
                         DWORD key_state, DWORD allowed, DWORD preferred)> drag_over;
+    // Timer-driven scrolling; true asks the target to refresh its row hit test.
+    std::function<bool(POINT)> drag_scroll;
     std::function<void()> drag_leave;
     // Same arguments as drag_over. Returns one allowed performed effect, or NONE.
     std::function<DWORD(const std::vector<std::wstring>& sources, POINT pt,
@@ -192,6 +199,9 @@ struct DropTargetCallbacks {
 class WindowDropTarget final : public IDropTarget {
 public:
     WindowDropTarget(HWND hwnd, DropTargetCallbacks cb);
+    ~WindowDropTarget();
+    static constexpr UINT_PTR kScrollTimer = 0xD512;
+    void TickScroll();
 
     IFACEMETHODIMP QueryInterface(REFIID riid, void** out) override;
     IFACEMETHODIMP_(ULONG) AddRef() override { return ++ref_; }
@@ -203,6 +213,10 @@ public:
 
 private:
     POINT ClientPoint(POINTL pt) const;
+    void StopScroll();
+    DWORD allowed_ = 0;
+    DWORD keys_ = 0;
+    bool scrolling_ = false;
 
     LONG ref_ = 1;
     HWND hwnd_ = nullptr;

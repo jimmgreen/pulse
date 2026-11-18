@@ -205,7 +205,7 @@ int WallRows::RowAtY(float y) const noexcept {
     return static_cast<int>(it - row_top.begin()) - 1;
 }
 
-WallRows BuildWallRows(const std::vector<float>& aspects, float width, float row_px, float scale) {
+WallRows BuildWallRows(const std::vector<float>& aspects, float width, float row_px, float scale, const std::atomic<uint64_t>* generation, uint64_t expected) {
     WallRows out;
     const size_t n = aspects.size();
     out.x.resize(n);
@@ -241,6 +241,7 @@ WallRows BuildWallRows(const std::vector<float>& aspects, float width, float row
         sum = 0.0f;
     };
     for (size_t i = 0; i < n; ++i) {
+        if ((i & 255) == 0 && generation && generation->load() != expected) return {};
         sum += aspect(i);
         if (sum * h0 + static_cast<float>(i - first) * gap >= avail) flush(i + 1, false);
     }

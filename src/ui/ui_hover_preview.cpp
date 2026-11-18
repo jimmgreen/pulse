@@ -1,3 +1,4 @@
+#include "../common/volume_path.h"
 // ui_hover_preview.cpp - The hover preview card (HoverPreviewView): an
 // acrylic flyout beside the hovered file with its preview, an icon tile with
 // the name and type, and a strip of three key facts.
@@ -35,7 +36,7 @@ constexpr float kBareTop = 14.0f;     // no preview: the tile starts the card
 constexpr float kMinCardWidth = 320.0f;  // the name, the type line and the three facts
 constexpr float kMinWellHeight = 96.0f;
 // 卡片尺寸 小 / 中 / 大: the base edge the shape is measured from.
-constexpr float kBaseEdge[3] = {280.0f, 380.0f, 500.0f};
+constexpr float kBaseEdge[4] = {280.0f, 380.0f, 500.0f, 660.0f};  // 小 / 中 / 大 / 特大
 constexpr float kZoom = 1.75f;        // Ctrl held
 
 // What the card shows, and so its shape.
@@ -223,6 +224,11 @@ VideoPreview::State MainRenderer::HoverVideoState() const {
 void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_RECT_F& client,
                                     const Theme& theme, bool high_contrast) {
     hover_frame_ms_ = 0;
+    const bool suspended = path::OnAnyVolume(view.path, suspended_volumes_);
+    hover_image_animation_.Bind(view.path, view.modified, view.size,
+        view.visible && !view.folder && !view.video && !view.instant && !suspended &&
+        (!view.owner || !IsIconic(view.owner)));
+    if (suspended) return;
     const auto stop_video = [&] {
         if (hover_video_ && hover_video_->active()) hover_video_->Reset();
         hover_video_path_.clear();
@@ -234,6 +240,9 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
         return;
     }
     if (hover_bench_) return;
+    // Office cards use budgeted thumbnail uploads. Renew their allowance on
+    // every paint, including timer-only paints while the pointer stays still.
+    hover_cache_.BeginFrame();
     hover_card_rect_ = D2D1_RECT_F{};
     hover_list_rect_ = D2D1_RECT_F{};
     hover_scroll_max_ = 0.0f;
@@ -286,10 +295,12 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
     const int laid_kind = hover_shape_kind_;
     const float laid_aspect = hover_shape_aspect_;
 
-    // Its size: the 小/中/大 base edge (much larger while Ctrl is held),
-    // never more than 45% of the window's width and 80% of its height.
-    float base = kBaseEdge[std::clamp(view.size_step, 0, 2)] * s;
-    float max_w = client_w * 0.45f, max_h = client_h * 0.8f;
+    // Its size: the 小/中/大/特大 base edge (much larger while Ctrl is held),
+    // never more than 45% of the window's width and 80% of its height (特大:
+    // 60% and 88%).
+    const bool xlarge = view.size_step >= 3;
+    float base = kBaseEdge[std::clamp(view.size_step, 0, 3)] * s;
+    float max_w = client_w * (xlarge ? 0.6f : 0.45f), max_h = client_h * (xlarge ? 0.88f : 0.8f);
     if (view.zoom) {
         base *= kZoom;
         max_w = client_w * 0.7f;
@@ -393,6 +404,18 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
     const D2D1_RECT_F content = show_well
         ? D2D1::RectF(well.left + 4.0f * s, well.top + 4.0f * s, well.right - 4.0f * s, well.bottom - 4.0f * s)
         : D2D1::RectF(card.left, card.top, card.left + 1.0f, card.top + 1.0f);
+    // A playing clip replaces the poster. Take one snapshot for this frame,
+    // and keep the poster path only until an actual video image is available.
+    VideoPreview::State video;
+    uint64_t serial = 0;
+    std::shared_ptr<const FfmpegFrame> picture;
+    if (view.video && view.owner && hover_video_ && hover_video_path_ == view.path) {
+        video = hover_video_->Snapshot();
+        if (video.ffmpeg) picture = hover_video_->Frame(serial);
+    }
+    const bool video_showing = !hover_video_failed_ && video.ready && SUCCEEDED(video.error) &&
+        (!video.missing_decoder || video.ffmpeg) &&
+        (video.ffmpeg ? picture && picture->width && picture->height : video.position > 0);
     uint32_t decoded_w = 0, decoded_h = 0;
     std::wstring preview_text;
     // Office documents ask for the thumbnail kind of preview: the embedded
@@ -405,14 +428,31 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
     // is none instead of trying the shell and a hex dump.
     // HEIF: the embedded thumbnail first, then the photo; while the photo
     // decodes the cache keeps drawing the thumbnail (a stale size).
-    const bool heif_wait = HeifPhoto(view.name) &&
+    const bool heif_wait = !video_showing && HeifPhoto(view.name) &&
         hover_cache_.Draw(dc, content, view.path, view.attrs, kHeifQuickEdge, 1, view.modified, view.size, 0.0f,
             nullptr, nullptr, nullptr, true) == PreviewDrawResult::Pending;
-    const PreviewDrawResult result = heif_wait ? PreviewDrawResult::Pending :
+    const auto animation_now = GetTickCount64();
+    const auto animation_frame = hover_image_animation_.Request(animation_now);
+    uint32_t animation_count = 1, animation_delay = 0;
+    PreviewDrawResult result = video_showing ? PreviewDrawResult::Bitmap : heif_wait ? PreviewDrawResult::Pending :
         hover_cache_.Draw(dc, content, view.path, view.attrs, 1024u, 1,
         view.modified, view.size, show_well ? 1.0f : 0.0f, &preview_text, nullptr, nullptr,
-        !OfficeDocument(view.name), nullptr, nullptr, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr,
+        !OfficeDocument(view.name), nullptr, nullptr, nullptr, nullptr, nullptr,
+        animation_frame, &animation_count, &animation_delay, nullptr,
         &decoded_w, &decoded_h);
+    if (!view.video && !view.instant) {
+        if (result == PreviewDrawResult::Bitmap)
+            hover_image_animation_.Commit(animation_count, animation_delay, animation_now);
+        else if (hover_image_animation_.Waiting()) {
+            const auto fallback = hover_cache_.Draw(dc, content, view.path, view.attrs, 1024u, 1,
+                view.modified, view.size, show_well ? 1.0f : 0.0f, nullptr, nullptr, nullptr, true,
+                nullptr, nullptr, nullptr, nullptr, nullptr, hover_image_animation_.Current(),
+                nullptr, nullptr, nullptr, &decoded_w, &decoded_h);
+            if (result != PreviewDrawResult::Pending) hover_image_animation_.Stop();
+            if (fallback == PreviewDrawResult::Bitmap) result = fallback;
+        }
+        if (const auto delay = hover_image_animation_.NextDelay(animation_now)) hover_frame_ms_ = delay;
+    }
     const bool textual = result == PreviewDrawResult::Text || result == PreviewDrawResult::Hex ||
                          result == PreviewDrawResult::Markdown;
     // The facts after the preview: the host works one request at a time, and
@@ -485,8 +525,6 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
                 hover_video_path_ = view.path;
             }
         }
-        VideoPreview::State video;
-        if (hover_video_ && hover_video_path_ == view.path) video = hover_video_->Snapshot();
         // No picture to show: an error, or Media Foundation would only play
         // the (muted) sound because the video decoder is missing.
         if (!hover_video_failed_ && hover_video_path_ == view.path &&
@@ -511,11 +549,7 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
             frame = D2D1::RectF(std::round(cx - w * 0.5f), std::round(cy - h * 0.5f),
                                 std::round(cx + w * 0.5f), std::round(cy + h * 0.5f));
         }
-        uint64_t serial = 0;
-        std::shared_ptr<const FfmpegFrame> picture;
-        if (video.ffmpeg && hover_video_) picture = hover_video_->Frame(serial);
-        const bool showing = !hover_video_failed_ && video.ready && SUCCEEDED(video.error) &&
-            (video.ffmpeg ? picture && picture->width && picture->height : video.position > 0);
+        const bool showing = video_showing;
         if (hover_video_ && hover_video_->active()) {
             const RECT bounds{std::lround(frame.left), std::lround(frame.top), std::lround(frame.right),
                               std::lround(frame.bottom)};
@@ -645,10 +679,11 @@ void MainRenderer::DrawHoverFolderCard(const HoverPreviewView& view, const D2D1_
     const uint64_t total = ready ? info->folders + info->files : 0;
     const size_t listed = ready ? info->items.size() : 0;
 
-    // Width: the 小/中/大 base edge (Ctrl: much larger), like a file's card.
-    float base = kBaseEdge[std::clamp(view.size_step, 0, 2)] * s;
-    float max_w = client_w * 0.45f, max_h = client_h * 0.8f;
-    int rows_cap = view.size_step <= 0 ? 6 : view.size_step == 1 ? 8 : 11;
+    // Width: the 小/中/大/特大 base edge (Ctrl: much larger), like a file's card.
+    const bool xlarge = view.size_step >= 3;
+    float base = kBaseEdge[std::clamp(view.size_step, 0, 3)] * s;
+    float max_w = client_w * (xlarge ? 0.6f : 0.45f), max_h = client_h * (xlarge ? 0.88f : 0.8f);
+    int rows_cap = view.size_step <= 0 ? 6 : view.size_step == 1 ? 8 : view.size_step == 2 ? 11 : 14;
     if (view.zoom) {
         base *= kZoom;
         max_w = client_w * 0.7f;
@@ -765,13 +800,8 @@ void MainRenderer::DrawHoverFolderCard(const HoverPreviewView& view, const D2D1_
             text(l10n::Get(l10n::StringId::Of).c_str() + format::ByteSize(view.drive_total), head, compositor_->SmallFormat(),
                  palette.text_secondary, fluent::HorizontalAlignment::Right);
             const D2D1_RECT_F bar = D2D1::RectF(head.left, well.top + 33.0f * s, head.right, well.top + 41.0f * s);
-            fill(bar, 4.0f * s, palette.divider);
             const float fraction = static_cast<float>(static_cast<double>(used) / static_cast<double>(view.drive_total));
-            const bool low = view.drive_free * 10 < view.drive_total;  // under 10% left
-            if (fraction > 0.0f)
-                fill(D2D1::RectF(bar.left, bar.top, bar.left + (std::max)(8.0f * s, (bar.right - bar.left) * fraction),
-                                 bar.bottom),
-                     4.0f * s, low ? D2D1::ColorF(0xD1453B) : palette.accent);
+            painter_.DrawCapacityBar(bar, fraction, palette.accent, 1.0f, view.drive_free);
         } else {
             text(l10n::Get(l10n::StringId::CapacityUnknown).c_str(), head, compositor_->SmallFormat(), palette.text_secondary);
         }
@@ -1108,6 +1138,7 @@ MainRenderer::HoverBenchSample MainRenderer::BenchHoverPreview(const std::wstrin
     // HEIF, as the card: the embedded thumbnail, timed on its own.
     if (!warm_run && HeifPhoto(name)) {
         for (;;) {
+            hover_cache_.BeginFrame();
             dc->SetTarget(target.get());
             dc->BeginDraw();
             const PreviewDrawResult quick = hover_cache_.Draw(dc, D2D1::RectF(4.0f, 4.0f, 380.0f, 380.0f), path,
@@ -1123,6 +1154,7 @@ MainRenderer::HoverBenchSample MainRenderer::BenchHoverPreview(const std::wstrin
         }
     }
     for (;;) {
+        hover_cache_.BeginFrame();
         if (properties_first && sample.properties_ms < 0.0 &&
             hover_cache_.Properties(path, attrs, 1, modified, size, properties))
             sample.properties_ms = clock.Ms();
@@ -1178,6 +1210,7 @@ int MainRenderer::PrefetchHoverPreview(const std::wstring& path, DWORD attrs, ui
     dc->GetTarget(&previous);
     const size_t slash = path.find_last_of(L"\\/");
     const std::wstring name = slash == std::wstring::npos ? path : path.substr(slash + 1);
+    hover_cache_.BeginFrame();
     dc->SetTarget(target.get());
     dc->BeginDraw();
     // HEIF: the thumbnail first, as the card does; the photo follows once

@@ -22,6 +22,26 @@ RECT WorkspaceToScreenRect(const RECT& workspace, const RECT& monitor, const REC
     return screen;
 }
 
+RECT ScreenToWorkspaceRect(const RECT& screen, const RECT& monitor, const RECT& work) {
+    RECT workspace = screen;
+    OffsetRect(&workspace, monitor.left - work.left, monitor.top - work.top);
+    return workspace;
+}
+
+RECT SavedNormalRect(HWND hwnd, const WINDOWPLACEMENT& placement) {
+    if (placement.showCmd != SW_SHOWNORMAL || !hwnd) return placement.rcNormalPosition;
+    // Windows 10 1903+; the target API level is Windows 8.1.
+    using IsArranged = BOOL(WINAPI*)(HWND);
+    static const auto is_arranged = reinterpret_cast<IsArranged>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "IsWindowArranged"));
+    RECT screen{}, bounds{}, work{};
+    if (!is_arranged || !is_arranged(hwnd) || !GetWindowRect(hwnd, &screen) ||
+        screen.right <= screen.left || screen.bottom <= screen.top ||
+        !MonitorRects(MonitorFromRect(&screen, MONITOR_DEFAULTTONEAREST), bounds, work))
+        return placement.rcNormalPosition;
+    return ScreenToWorkspaceRect(screen, bounds, work);
+}
+
 RECT RestoredWindowRect(const RECT& workspace) {
     RECT bounds{}, work{};
     HMONITOR monitor = MonitorFromRect(&workspace, MONITOR_DEFAULTTONEAREST);

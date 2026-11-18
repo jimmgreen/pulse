@@ -6,9 +6,19 @@
 namespace pulse::app {
 namespace {
 
+constexpr std::wstring_view kThisPcSortKey = L"pulse:this-pc";
+
+std::wstring SortPrefKey(const std::wstring& path) {
+    // This PC uses an empty navigation path, but needs its own persisted key.
+    if (path.empty() || path == kThisPcSortKey) return std::wstring(kThisPcSortKey);
+    return FolderPrefKey(path);
+}
+
 // Indexed by ui::SortColumn; stable JSON names.
 constexpr const wchar_t* kColumnNames[] = { L"name", L"modified", L"type", L"size", L"path",
-                                            L"created", L"accessed" };
+                                            L"created", L"accessed", L"taken", L"dimensions",
+                                            L"camera", L"title", L"artist", L"album", L"duration",
+                                            L"frame_rate" };
 constexpr int kColumnCount = static_cast<int>(sizeof(kColumnNames) / sizeof(kColumnNames[0]));
 
 bool Valid(FolderSort sort) {
@@ -23,7 +33,7 @@ std::wstring JsonKey(int column, int direction) {
 }
 
 // Indexed by app::FolderSortMode; stable JSON names.
-constexpr const wchar_t* kFolderModeKeys[] = { L"sort_folders_top", L"sort_folders_follow",
+constexpr const wchar_t* kFolderModeKeys[] = { L"sort_folders_top", L"sort_folders_bottom",
                                                L"sort_folders_mixed" };
 constexpr int kFolderModeCount = static_cast<int>(sizeof(kFolderModeKeys) / sizeof(kFolderModeKeys[0]));
 
@@ -40,12 +50,12 @@ bool FolderSortPrefs::PathLess::operator()(const std::wstring& a, const std::wst
 }
 
 std::optional<FolderSort> FolderSortPrefs::Find(const std::wstring& path) const {
-    const auto it = sorts_.find(FolderPrefKey(path));
+    const auto it = sorts_.find(SortPrefKey(path));
     return it == sorts_.end() ? std::nullopt : std::optional(it->second);
 }
 
 bool FolderSortPrefs::Set(const std::wstring& path, FolderSort sort) {
-    const auto key = FolderPrefKey(path);
+    const auto key = SortPrefKey(path);
     if (key.empty() || !Valid(sort)) return false;
     const auto [it, inserted] = sorts_.try_emplace(key, sort);
     if (!inserted && it->second == sort) return false;
@@ -54,12 +64,12 @@ bool FolderSortPrefs::Set(const std::wstring& path, FolderSort sort) {
 }
 
 std::optional<int> FolderSortPrefs::FindFolderMode(const std::wstring& path) const {
-    const auto it = folder_modes_.find(FolderPrefKey(path));
+    const auto it = folder_modes_.find(SortPrefKey(path));
     return it == folder_modes_.end() ? std::nullopt : std::optional(it->second);
 }
 
 bool FolderSortPrefs::SetFolderMode(const std::wstring& path, int mode) {
-    const auto key = FolderPrefKey(path);
+    const auto key = SortPrefKey(path);
     if (key.empty() || mode < 0 || mode >= kFolderModeCount) return false;
     const auto [it, inserted] = folder_modes_.try_emplace(key, mode);
     if (!inserted && it->second == mode) return false;
@@ -68,8 +78,12 @@ bool FolderSortPrefs::SetFolderMode(const std::wstring& path, int mode) {
 }
 
 void FolderSortPrefs::ApplyToAll(FolderSort sort) {
+    const auto this_pc = Find(L"");
+    const auto this_pc_mode = FindFolderMode(L"");
     sorts_.clear();
     folder_modes_.clear();
+    if (this_pc) Set(L"", *this_pc);
+    if (this_pc_mode) SetFolderMode(L"", *this_pc_mode);
     default_ = Valid(sort) ? sort : FolderSort{};
 }
 
@@ -120,6 +134,9 @@ void FolderSortPrefs::ReadJson(const std::wstring& input) {
         for (int direction = 0; direction <= 1; ++direction)
             for (const auto& path : json::ExtractStringArray(input, JsonKey(column, direction)))
                 Set(path, FromInts(column, direction));
+    // Migrate the old direction-dependent mode; explicit new keys take precedence.
+    for (const auto& path : json::ExtractStringArray(input, L"sort_folders_follow"))
+        SetFolderMode(path, 1);
     for (int mode = 0; mode < kFolderModeCount; ++mode)
         for (const auto& path : json::ExtractStringArray(input, kFolderModeKeys[mode]))
             SetFolderMode(path, mode);

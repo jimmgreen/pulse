@@ -89,6 +89,7 @@ inline constexpr ActionEntry kActions[] = {
     {"window.close", ActionRisk::View},
     {"window.reopen", ActionRisk::View},
     {"window.activate", ActionRisk::View},
+    {"window.arrange", ActionRisk::View},
     {"window.merge", ActionRisk::View},
     {"window.overview", ActionRisk::View},
     {"window.maximize", ActionRisk::View},
@@ -131,6 +132,8 @@ inline constexpr ActionEntry kActions[] = {
     {"file.batch_rename", ActionRisk::View},
     {"file.group_into_folder", ActionRisk::Move},
     {"file.dissolve", ActionRisk::Move},
+    {"file.organize", ActionRisk::Move},          // AI apps: moves[{item, dest}], one plan dialog
+    {"file.find_duplicates", ActionRisk::Read},   // reads files to compare them; opens a 重复文件 tab
     {"file.zip", ActionRisk::Create},
     {"file.recycle", ActionRisk::Delete},
     {"file.delete_permanent", ActionRisk::PermanentDelete},
@@ -205,6 +208,7 @@ inline constexpr ActionEntry kActions[] = {
     {"keymap.read", ActionRisk::Read},
     {"keymap.set", ActionRisk::Organize},
     {"assistant.prefs", ActionRisk::UserOnly},   // its own permissions and connections: only the user
+    {"assistant.organize_here", ActionRisk::UserOnly},   // fills the assistant's box for the user to send
 };
 
 // In KeyAction order, one per action (checked at compile time).
@@ -264,8 +268,16 @@ inline constexpr KeyActionLink kKeyActionLinks[] = {
     {KeyAction::SwitchWindow, {"window.activate"}},
     {KeyAction::Overview, {"window.overview"}},
     {KeyAction::MergeWindows, {"window.merge"}},
+
     {KeyAction::AiAssistant, {"", "the assistant itself"}},
+    {KeyAction::AiHistory, {"", "the assistant's own chat history"}},
     {KeyAction::ShortcutHelp, {"app.shortcut_help"}},
+    {KeyAction::ArrangeSideBySide, {"window.arrange"}},
+    {KeyAction::ArrangeStacked, {"window.arrange"}},
+    {KeyAction::ArrangeColumns, {"window.arrange"}},
+    {KeyAction::ArrangeTile, {"window.arrange"}},
+    {KeyAction::ArrangeMain, {"window.arrange"}},
+    {KeyAction::ArrangeCascade, {"window.arrange"}},
 };
 
 inline constexpr MenuCmdLink kMenuCmdLinks[] = {
@@ -396,6 +408,7 @@ inline constexpr MenuCmdLink kMenuCmdLinks[] = {
     {CmdToolbarAppBase, {"toolbar.open_with"}},
     {CmdToolbarPinAppBase, {"toolbar.pin_app"}},
     {CmdToolbarToolBase, {"toolbar.tools"}},
+    {CmdToolbarToolEnd, {"", "exclusive end of toolbar tool command range"}},
     {CmdNewPrimaryBase, {"toolbar.tools"}},
     {CmdConnectServer, {"net.connect_server"}},
     {CmdForgetNetworkRecent, {"net.recent"}},
@@ -406,8 +419,13 @@ inline constexpr MenuCmdLink kMenuCmdLinks[] = {
     {CmdNetworkClearRecent, {"net.recent"}},
     {CmdNetworkHiddenShares, {"settings.set"}},
     {CmdNetworkDiscoverySettings, {"app.settings_page"}},
+    {CmdFindDuplicates, {"file.find_duplicates"}},
+    {CmdAiOrganizeHere, {"assistant.organize_here"}},
+    {CmdDupKeepThis, {"file.find_duplicates"}},
+    {CmdDupReapplyRules, {"file.find_duplicates"}},
     {CmdShellStaticBase, {"shell.run_verb"}},
     {CmdShellComBase, {"shell.run_verb"}},
+    {CmdShellComLast, {"shell.run_verb"}},
     {kCmdGitPull, {"git.pull"}},
     {kCmdGitPush, {"git.push"}},
     {kCmdGitRefresh, {"git.refresh"}},

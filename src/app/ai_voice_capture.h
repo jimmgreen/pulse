@@ -1,5 +1,4 @@
-// ai_voice_capture.h - The composer's microphone (third batch, flow V in
-// plans/ai/Pulse_AI助手_第三批_操控Pulse与语音.html).
+// ai_voice_capture.h - The composer's microphone (third batch, flow V).
 //
 // WASAPI shared-mode capture on its own thread, downmixed and resampled to
 // 16 kHz mono 16-bit and split into sentences where the speaker pauses.

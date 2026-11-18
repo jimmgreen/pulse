@@ -29,6 +29,7 @@ inline constexpr UINT kHostRoutedMessages[] = {
     WM_WORKER_RESULT,          // PostWorkerResult
     WM_OPS_NOTIFY,             // OpsManager completion
     WM_INDEX_NOTIFY,           // IndexClient status
+    WM_RECYCLE_SEARCH,         // current-user recycle search results
     WM_INDEX_SEARCH,           // IndexClient search results
     WM_NETWORK_INDEX_NOTIFY,   // NetworkAgentClient status
     WM_NETWORK_INDEX_SEARCH,   // NetworkAgentClient search results
@@ -40,6 +41,7 @@ inline constexpr UINT kHostRoutedMessages[] = {
     WM_CTX_LAYOUT_SEED,        // persistent context menu layout read (C4)
     WM_SHELL_VERBS,            // static verb reads (process-wide cache)
     WM_RECYCLE_INFO,           // Recycle Bin occupancy query
+    WM_RECYCLE_SHELL_CHANGED,  // external Recycle Bin mutation
     WM_NETWORK_LOCATIONS,      // network locations read
     WM_LAN_DISCOVERY,          // LAN device discovery (network page)
     WM_UPDATE_RESULT,          // update check
@@ -49,6 +51,8 @@ inline constexpr UINT kHostRoutedMessages[] = {
     WM_TAG_ADS_DISCOVERED,     // tag ADS discovery
     WM_SETTINGS_TASK_RESULT,   // settings background tasks
     WM_NET_PROBE,              // UNC probe scheduler (shared queue)
+    WM_DRIVE_EJECT_READY,
+    WM_DRIVE_VERB,
     WM_BITLOCKER_UNLOCK,       // unlock wait (the prompt stays owned by the waiting window)
     WM_NETWORK_CONNECT,        // share logon (the credential prompt stays owned by the waiting window)
     WM_EXPLORER_TAKEOVER,      // Explorer window takeover (opens in the most recent window)
@@ -80,9 +84,10 @@ inline constexpr GUID kPortableDeviceInterfaceClass = {
 
 inline SystemBroadcast ClassifySystemBroadcast(UINT message, WPARAM wparam, LPARAM lparam) noexcept {
     switch (message) {
+    case WM_THEMECHANGED: return SystemBroadcast::Theme;
     case WM_SETTINGCHANGE: {
         const auto* area = reinterpret_cast<const wchar_t*>(lparam);
-        if (!area || wcscmp(area, L"ImmersiveColorSet") == 0 || wcscmp(area, L"HighContrast") == 0)
+        if (wparam == SPI_SETHIGHCONTRAST || !area || wcscmp(area, L"ImmersiveColorSet") == 0 || wcscmp(area, L"HighContrast") == 0)
             return SystemBroadcast::Theme;
         return SystemBroadcast::None;
     }

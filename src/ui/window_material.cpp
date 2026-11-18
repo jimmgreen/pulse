@@ -145,13 +145,6 @@ IWICBitmapSource* ToDisplayPixels(IWICImagingFactory* wic, IWICBitmapFrameDecode
     return converter.get();
 }
 
-// The kernel's build: under a compatibility layer RtlGetVersion reports 7601 /
-// 9200 on Windows 11 and Mica / rounded corners were wrongly turned off.
-bool IsWindows11OrLater() noexcept {
-    static const bool value = pulse::os::TrueWindowsBuild() >= 22000;
-    return value;
-}
-
 DWORD BackdropTypeForEffect(WindowEffect effect) noexcept {
     switch (effect) {
     case WindowEffect::Acrylic: return DWMSBT_TRANSIENTWINDOW;
@@ -381,15 +374,6 @@ const wchar_t* WindowEffectLabel(WindowEffect effect) noexcept {
     }
 }
 
-WindowEffect WindowEffectFromId(std::wstring_view id) noexcept {
-    if (id == L"acrylic-material" || id == L"acrylic" || id == L"dwm-blur")
-        return WindowEffect::Acrylic;
-    if (id == L"mica") return WindowEffect::Mica;
-    if (id == L"mica-alt" || id == L"miac-alt") return WindowEffect::MicaAlt;
-    if (id == L"none") return WindowEffect::None;
-    return WindowEffect::MicaAlt;
-}
-
 bool SampleTarget(ID2D1DeviceContext* dc, const D2D1_RECT_F& rect, float margin, TargetSample& sample) noexcept {
     sample = TargetSample{};
     if (!dc || !(rect.right > rect.left) || !(rect.bottom > rect.top)) return false;
@@ -575,7 +559,7 @@ bool ApplyWindowEffect(HWND hwnd, WindowEffect effect, bool dark) noexcept {
     const DWORD corner = DWMWCP_ROUND;
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
 
-    if (IsHighContrast() || !compat::ModernWindows() || !IsWindows11OrLater()) {
+    if (IsHighContrast() || !WindowEffectSupported(effect)) {
         effect = WindowEffect::None;
     }
 
@@ -605,7 +589,7 @@ bool ApplyWindowEffect(HWND hwnd, WindowEffect effect, bool dark) noexcept {
         DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
     }
 
-    const MARGINS margins{ -1 };
+    const MARGINS margins = effect == WindowEffect::None ? MARGINS{} : MARGINS{ -1 };
     DwmExtendFrameIntoClientArea(hwnd, &margins);
     return WindowEffectUsesBackdrop(effect) && SUCCEEDED(hr);
 }

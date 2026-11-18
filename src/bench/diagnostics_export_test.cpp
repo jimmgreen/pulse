@@ -240,7 +240,7 @@ void Run(const fs::path& root) {
 }
 } // namespace
 
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
     const auto workspace = std::filesystem::canonical(std::filesystem::current_path());
     const auto fixtures = workspace / L"bench_data";
     std::filesystem::create_directories(fixtures);
@@ -255,7 +255,155 @@ int wmain() {
         return 1;
     }
     try {
-        Run(root);
+        if (argc == 2 && std::wstring_view(argv[1]) == L"--frame-perf") {
+            const auto source = root / L"source";
+            const auto perf = source / L"Diagnostics" / L"Perf";
+            fs::create_directories(perf);
+            const std::string frames = "frame_id=7 elapsed=90 sample=1 status=0\n  pulse.exe+0x1234\n";
+            for (const auto* name : {L"frame-123.log", L"frame-123.log.1"}) Write(perf / name, frames);
+            Write(perf / L"perf-environment-123.json", "{\"module\":\"pulse.exe\",\"rva\":4660}");
+            Write(perf / L"frame-private.log", "private");
+            Write(perf / L"frame-123.log.2", "private");
+            Write(perf / L"private.json", "private");
+            pulse::diagnostics::ExportOptions options;
+            options.source_root = source.wstring();
+            options.support_report = true;
+            options.include_dumps = false;
+            auto run = [&](const wchar_t* name) {
+                const auto destination = root / name;
+                fs::create_directory(destination);
+                options.destination = destination.wstring();
+                return pulse::diagnostics::Export(options);
+            };
+            Check(run(L"perf-export"), "ordinary support export includes performance evidence without dumps");
+            const auto output = root / L"perf-export" / L"Perf";
+            Check(Read(output / L"frame-123.log") == frames && Read(output / L"frame-123.log.1") == frames,
+                "module RVA stack text and rotated performance evidence remain exact");
+            Check(Read(output / L"perf-environment-123.json") == Read(perf / L"perf-environment-123.json"),
+                "allowlisted performance environment evidence is exported");
+            Check(!fs::exists(output / L"frame-private.log") && !fs::exists(output / L"frame-123.log.2") &&
+                !fs::exists(output / L"private.json"), "performance allowlist excludes unrelated files");
+            Write(root / L"outside.log", "outside-content");
+            if (Symlink(perf / L"frame-456.log", root / L"outside.log", false)) {
+                Check(!run(L"perf-file-link"), "performance file reparse point is rejected");
+                Check(!fs::exists(root / L"perf-file-link" / L"Perf" / L"frame-456.log") &&
+                    Read(root / L"perf-file-link" / L"Perf" / L"frame-123.log") == frames,
+                    "reparse rejection preserves ordinary evidence without reading link target");
+                fs::remove(perf / L"frame-456.log");
+            }
+            const auto linked_source = root / L"linked-source";
+            fs::create_directories(linked_source / L"Diagnostics");
+            if (Symlink(linked_source / L"Diagnostics" / L"Perf", perf, true)) {
+                options.source_root = linked_source.wstring();
+                Check(!run(L"perf-directory-link"), "performance directory reparse point is rejected");
+                Check(!fs::exists(root / L"perf-directory-link" / L"Perf" / L"frame-123.log"),
+                    "linked performance directory is not traversed");
+            }
+        } else if (argc == 2 && std::wstring_view(argv[1]) == L"--win-e-context") {
+            const auto source = root / L"source";
+            const auto runtime = source / L"Diagnostics" / L"Runtime";
+            fs::create_directories(runtime);
+            const auto record = [](const std::string& value, const char* event = "win_e_context_process") {
+                return std::string("{\"event\":\"") + event +
+                    "\",\"component\":\"app\",\"data\":{\"context_id\":7,\"program\":\"" + value +
+                    "\",\"private\":\"omit-me\"}}\n";
+            };
+            std::string events = record("explorer.exe") + record("My App.exe");
+            for (const auto& invalid : {std::string("C:\\\\private\\\\secret.exe"),
+                std::string("folder/private.exe"), std::string("stream:secret.exe"),
+                std::string("bad\\tname.exe"), std::string("bad\\u007fname.exe"),
+                std::string("bad\\u0085name.exe"), std::string(256, 'x'), std::string(".."), std::string()})
+                events += record(invalid);
+            events += record("unrelated.exe", "unrelated_event");
+            Write(runtime / L"app-123.jsonl", events);
+            for (const auto* name : {L"hotkey_broker-456.jsonl", L"hotkey_broker-456.jsonl.1", L"hotkey_broker-456.critical.jsonl"})
+                Write(runtime / name, record("explorer.exe"));
+            Write(runtime / L"hotkey_broker-private.jsonl", events);
+            const auto destination = root / L"export";
+            fs::create_directory(destination);
+            pulse::diagnostics::ExportOptions options;
+            options.source_root = source.wstring();
+            options.destination = destination.wstring();
+            options.support_report = true;
+            options.install_directory = (root / L"install").wstring();
+            Check(pulse::diagnostics::Export(options), "Win+E context support export succeeds");
+            const auto exported = Read(destination / L"Runtime" / L"app-123.jsonl");
+            Check(exported.find("\"program\":\"explorer.exe\"") != std::string::npos &&
+                exported.find("\"program\":\"My App.exe\"") != std::string::npos,
+                "Win+E executable basenames survive real support sanitization");
+            size_t count = 0;
+            for (size_t pos = 0; (pos = exported.find("\"program\":", pos)) != std::string::npos; ++pos) ++count;
+            Check(count == 2 && exported.find("omit-me") == std::string::npos &&
+                exported.find("unrelated.exe") == std::string::npos,
+                "paths, controls, oversized names and unrelated text remain redacted");
+            Check(exported.find("\"context_id\":7") != std::string::npos,
+                "numeric process correlation survives export");
+            for (const auto* name : {L"hotkey_broker-456.jsonl", L"hotkey_broker-456.jsonl.1", L"hotkey_broker-456.critical.jsonl"})
+                Check(Read(destination / L"Runtime" / name).find("\"program\":\"explorer.exe\"") != std::string::npos,
+                    "broker current, rotated and critical logs survive support export");
+            Check(!fs::exists(destination / L"Runtime" / L"hotkey_broker-private.jsonl"),
+                "broker nonnumeric process suffix remains excluded");
+            Check(Read(destination / L"support-report.json").find("pulse_hotkey_broker.exe") != std::string::npos,
+                "support component inventory includes hotkey broker");
+        } else if (argc == 2 && std::wstring_view(argv[1]) == L"--launcher") {
+            const auto source = root / L"source";
+            const auto runtime = source / L"Diagnostics" / L"Runtime";
+            fs::create_directories(runtime);
+            const std::string event = "{\"event\":\"shell_entry_launch_failed\",\"component\":\"launcher\",\"data\":{\"phase\":1,\"error\":126,\"native_attempted\":1,\"native_error\":0}}\n";
+            for (const auto* name : {L"launcher-123.jsonl", L"launcher-123.jsonl.1", L"launcher-123.critical.jsonl"})
+                Write(runtime / name, event);
+            Write(runtime / L"launcher-private.jsonl", event);
+            const auto destination = root / L"export";
+            fs::create_directory(destination);
+            pulse::diagnostics::ExportOptions options;
+            options.source_root = source.wstring();
+            options.destination = destination.wstring();
+            options.support_report = true;
+            options.install_directory = (root / L"install").wstring();
+            Check(pulse::diagnostics::Export(options), "launcher failure support export succeeds");
+            for (const auto* name : {L"launcher-123.jsonl", L"launcher-123.jsonl.1", L"launcher-123.critical.jsonl"}) {
+                const auto exported = Read(destination / L"Runtime" / name);
+                Check(exported.find("shell_entry_launch_failed") != std::string::npos &&
+                    exported.find("\"native_attempted\":1") != std::string::npos &&
+                    exported.find("\"error\":126") != std::string::npos,
+                    "launcher failure and fallback evidence survive support sanitization");
+            }
+            Check(!fs::exists(destination / L"Runtime" / L"launcher-private.jsonl"), "invalid launcher process suffix excluded");
+        } else if (argc == 2 && std::wstring_view(argv[1]) == L"--dialog-auto") {
+            const auto source = root / L"source";
+            const auto runtime = source / L"Diagnostics" / L"Runtime";
+            fs::create_directories(runtime);
+            const std::string event = "{\"event\":\"native\",\"component\":\"dialog_auto\",\"data\":{\"reason\":2}}\n"
+                "{\"event\":\"loaded_bridge\",\"component\":\"dialog_auto\",\"data\":{\"path\":\"C:\\\\Pulse\\\\bridge.dll\",\"private\":\"omit-me\"}}\n"
+                "{\"event\":\"contract_decision\",\"component\":\"dialog_auto\",\"text_truncated\":true,\"data\":{\"reason_name\":\"SetterFailed\"}}\n";
+            for (const auto* name : {L"dialog_auto-123.jsonl", L"dialog_auto-123.jsonl.1", L"dialog_auto-123.critical.jsonl"})
+                Write(runtime / name, event);
+            Write(runtime / L"dialog_auto-private.jsonl", event);
+            const auto destination = root / L"export";
+            fs::create_directory(destination);
+            pulse::diagnostics::ExportOptions options;
+            options.source_root = source.wstring();
+            options.destination = destination.wstring();
+            options.support_report = true;
+            options.install_directory = (root / L"install").wstring();
+            Check(pulse::diagnostics::Export(options), "dialog auto support export succeeds");
+            const auto installation = Read(destination / L"support-report.json");
+            Check(installation.find("\"dialog_installation\"") != std::string::npos &&
+                installation.find("\"exporting_executable\"") != std::string::npos &&
+                installation.find("\"registrations\"") != std::string::npos,
+                "dialog installation includes executable and both registration views");
+            Check(installation.find("PulseDialogAuto64.dll") != std::string::npos &&
+                installation.find("\"status\":\"missing\"") != std::string::npos &&
+                installation.find("\"modified_filetime\"") != std::string::npos,
+                "dialog component inventory records missing files and timestamps");
+            for (const auto* name : {L"dialog_auto-123.jsonl", L"dialog_auto-123.jsonl.1", L"dialog_auto-123.critical.jsonl"})
+                Check(Read(destination / L"Runtime" / name).find("native") != std::string::npos, "dialog auto event preserved");
+            Check(!fs::exists(destination / L"Runtime" / L"dialog_auto-private.jsonl"), "invalid process suffix excluded");
+            const auto exported = Read(destination / L"Runtime" / L"dialog_auto-123.jsonl");
+            Check(exported.find("bridge.dll") != std::string::npos && exported.find("SetterFailed") != std::string::npos &&
+                exported.find("omit-me") == std::string::npos && exported.find("\"text_truncated\":true") != std::string::npos,
+                "allowlisted dialog diagnostic text and truncation survive export without unrelated strings");
+        } else Run(root);
     } catch (const std::exception& error) {
         std::printf("[FAIL] Exception: %s\n", error.what());
         ++failures;

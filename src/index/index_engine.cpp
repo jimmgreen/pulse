@@ -1412,21 +1412,30 @@ SearchResult Engine::Search(const Query& q, const std::atomic<uint32_t>* latest,
     }
     const size_t cap = q.limit;
 
-    MatchSet matches;
+    MatchSet collected;
     const bool same_scope = cache_path_prefix_ == prefix &&
         cache_folders_only_ == q.folders_only;
     const bool exact_cached_page = cache_epoch_ == filter_epoch_ && same_scope &&
         cache_raw_ == q.needle && cache_set_.universe == LiveCount();
-    if (exact_cached_page) {
-        matches = cache_set_;
-    } else if (cache_epoch_ == filter_epoch_ && same_scope &&
-               QueryCanNarrow(cache_raw_, q.needle) && cache_set_.universe == LiveCount()) {
-        NarrowMatchesLocked(cq, prefix_node, q.folders_only, use_attrs, cache_set_, matches,
-                            latest, expected);
-    } else {
-        CollectMatchesLocked(cq, prefix_node, q.folders_only, use_attrs, matches, latest, expected);
+    // Keep the established materialized path for comparison-sorted pages.
+    // Borrow only paths whose speedup is supported by the paired benchmarks.
+    const bool borrow_cached_page = exact_cached_page &&
+        (q.rank || q.sort == ResultSort::Index || cap == 0);
+    if (exact_cached_page && !borrow_cached_page) {
+        collected = cache_set_;
+    } else if (!exact_cached_page) {
+        if (cache_epoch_ == filter_epoch_ && same_scope &&
+            QueryCanNarrow(cache_raw_, q.needle) && cache_set_.universe == LiveCount()) {
+            NarrowMatchesLocked(cq, prefix_node, q.folders_only, use_attrs, cache_set_, collected,
+                                latest, expected);
+        } else {
+            CollectMatchesLocked(cq, prefix_node, q.folders_only, use_attrs, collected, latest, expected);
+        }
     }
     if (latest && latest->load() != expected) return out;
+    // query_mu_ serializes cache users and mutex_ excludes index mutation for
+    // this whole call. Exact pages can borrow the caller-independent matches.
+    const MatchSet& candidates = borrow_cached_page ? cache_set_ : collected;
     struct Ranked {
         int32_t id = -1;
         int score = 0;
@@ -1459,15 +1468,14 @@ SearchResult Engine::Search(const Query& q, const std::atomic<uint32_t>* latest,
     };
     // Caller filter (#66). The shared cache keeps the caller-independent set;
     // only this result is narrowed to the folders the caller may list.
-    MatchSet unfiltered;
-    bool filtered = false;
-    if (visibility && matches.total) {
-        MatchSet visible;
-        visible.universe = matches.universe;
+    MatchSet visible;
+    const bool filtered = visibility && candidates.total;
+    if (filtered) {
+        visible.universe = candidates.universe;
         std::vector<int32_t> unchecked;
         int32_t last_parent = INT32_MIN;
         int last_state = 0;
-        matches.ForEach([&](int32_t id) {
+        candidates.ForEach([&](int32_t id) {
             // Ids follow the folder layout, so siblings usually arrive together.
             const int32_t parent = NodeAt(id).parent;
             if (parent != last_parent) {
@@ -1485,7 +1493,7 @@ SearchResult Engine::Search(const Query& q, const std::atomic<uint32_t>* latest,
             // total counts confirmed names only; the host checks the rest.
             const size_t heap_n = q.offset + cap;
             std::priority_queue<Ranked, std::vector<Ranked>, decltype(better)> top(better);
-            matches.ForEach([&](int32_t id) {
+            candidates.ForEach([&](int32_t id) {
                 if (latest && latest->load() != expected) return;
                 const int32_t parent = NodeAt(id).parent;
                 if (parent >= 0 && visibility->State(parent) == 0) return;
@@ -1514,16 +1522,13 @@ SearchResult Engine::Search(const Query& q, const std::atomic<uint32_t>* latest,
             cache_raw_ = q.needle;
             cache_path_prefix_ = prefix;
             cache_folders_only_ = q.folders_only;
-            cache_set_ = std::move(matches);
+            if (!borrow_cached_page) cache_set_ = std::move(collected);
             cache_epoch_ = filter_epoch_;
             return out;
         }
         visible.total = visible.ids.size();
-        unfiltered = std::move(matches);
-        matches = std::move(visible);
-        filtered = true;
     }
-    const MatchSet& cacheable = filtered ? unfiltered : matches;
+    const MatchSet& matches = filtered ? visible : candidates;
     out.total = matches.total;
     if (cap == 0 || matches.total == 0) {
         cache_raw_ = q.needle;
@@ -1532,7 +1537,7 @@ SearchResult Engine::Search(const Query& q, const std::atomic<uint32_t>* latest,
         cache_ranked_ = q.rank;
         cache_sort_ = q.sort;
         cache_sort_desc_ = q.sort_desc;
-        cache_set_ = cacheable;
+        if (!borrow_cached_page) cache_set_ = candidates;
         cache_epoch_ = filter_epoch_;
         return out;
     }
@@ -1543,7 +1548,7 @@ SearchResult Engine::Search(const Query& q, const std::atomic<uint32_t>* latest,
     cache_ranked_ = q.rank;
     cache_sort_ = q.rank ? ResultSort::Index : q.sort;
     cache_sort_desc_ = q.rank ? false : q.sort_desc;
-    cache_set_ = cacheable;
+    if (!borrow_cached_page) cache_set_ = candidates;
     cache_epoch_ = filter_epoch_;
 
     const size_t start = (std::min)(q.offset, matches.total);
@@ -1573,6 +1578,39 @@ SearchResult Engine::Search(const Query& q, const std::atomic<uint32_t>* latest,
         std::sort(ranked.begin(), ranked.end(), better);
         for (size_t k = start; k < ranked.size() && chosen.size() < want; ++k)
             chosen.push_back(ranked[k].id);
+    } else if (q.sort == ResultSort::Index) {
+        // Index order is already represented by ids / ascending set bits.
+        // Skip complete bitmap words and collect only this page, including in
+        // reverse order, instead of materializing every match for 48 results.
+        const size_t page_size = (std::min)(want, matches.total - start);
+        if (!matches.dense) {
+            for (size_t k = 0; k < page_size; ++k) {
+                const size_t position = q.sort_desc ? matches.ids.size() - 1 - start - k : start + k;
+                chosen.push_back(matches.ids[position]);
+            }
+        } else if (page_size) {
+            size_t skip = start;
+            auto take_word = [&](size_t word) {
+                uint64_t bits = matches.bits[word];
+                const size_t count = static_cast<size_t>(std::popcount(bits));
+                if (skip >= count) { skip -= count; return; }
+                while (bits && chosen.size() < page_size) {
+                    const unsigned bit = q.sort_desc
+                        ? 63u - static_cast<unsigned>(std::countl_zero(bits))
+                        : static_cast<unsigned>(std::countr_zero(bits));
+                    if (skip) --skip;
+                    else chosen.push_back(static_cast<int32_t>(word * 64 + bit));
+                    bits &= ~(uint64_t{1} << bit);
+                }
+            };
+            if (q.sort_desc) {
+                for (size_t word = matches.bits.size(); word > 0 && chosen.size() < page_size;)
+                    take_word(--word);
+            } else {
+                for (size_t word = 0; word < matches.bits.size() && chosen.size() < page_size; ++word)
+                    take_word(word);
+            }
+        }
     } else {
         std::vector<int32_t> ids;
         if (!matches.dense) {
@@ -1581,10 +1619,7 @@ SearchResult Engine::Search(const Query& q, const std::atomic<uint32_t>* latest,
             ids.reserve(matches.total);
             matches.ForEach([&](int32_t id) { ids.push_back(id); });
         }
-        if (q.sort != ResultSort::Index)
-            PartialSortPage(ids, start, want, q.sort, q.sort_desc);
-        else if (q.sort_desc)
-            std::reverse(ids.begin(), ids.end());
+        PartialSortPage(ids, start, want, q.sort, q.sort_desc);
         const size_t end = (std::min)(ids.size(), start + want);
         for (size_t k = start; k < end; ++k) chosen.push_back(ids[k]);
     }
@@ -1903,8 +1938,11 @@ bool Engine::CommitMappedFile(const std::wstring& path) {
     if (MachineIndexScope()) {
         const ShardPaths paths = AggregateShardPaths();
         ShardManifest published;
-        if (!PublishShardBase(paths, tmp, built_unix_, 0, published, nullptr)) {
+        uint32_t failure_stage = 0;
+        if (!PublishShardBase(paths, tmp, built_unix_, 0, published, nullptr, {}, &failure_stage)) {
             const DWORD error = GetLastError();
+            diagnostics::runtime::Event("filename_publish_stage_failed", {{"operation", index_operation},
+                {"error", error}, {"stage", failure_stage}}, IndexErrorLevel(error));
             return fail("filename_publish_shard_failed", error);
         }
     } else {
@@ -2648,6 +2686,9 @@ void Engine::MergeBase(bool force, const char* reason) {
     }
     const bool wrote = WriteIndexFile(path, snap, vols, built);
     DWORD save_error = wrote ? ERROR_SUCCESS : GetLastError();
+    // Serialization is finished. Release the full snapshot before mapping the
+    // next base or compacting a failed merge's overlay, not after memory sampling.
+    snap = Store{};
     bool committed = false;
     {
         std::unique_lock<std::shared_mutex> lock(mutex_);
@@ -2662,6 +2703,9 @@ void Engine::MergeBase(bool force, const char* reason) {
         } else {
             if (wrote) save_error = GetLastError();
             built_unix_ = previous_built;
+            // A failed publication does not reclaim names. Run the same bounded
+            // local maintenance used during backoff without discarding pending work.
+            CompactNamePoolLocked(GetTickCount64());
         }
     }
     if (committed) RemoveLegacyVolumeShards();
@@ -3222,6 +3266,7 @@ Engine::UsnBatch Engine::ApplyUsnBatchLocked(VolState& v, const BYTE* begin, con
 }
 
 bool Engine::CatchUpVolume(VolState& v, bool* changed, bool* structural) {
+    if (VolumePaused(v.volume_id)) return true;
     const auto timing = FilenameTiming::Begin();
     const auto stream = journal_streams_.find(v.volume_id);
     uint64_t journal_id = 0;
@@ -3634,6 +3679,7 @@ bool Engine::BuildMftTree(VolState vol, uint64_t root_frn, std::vector<FrnNode> 
 }
 
 bool Engine::RebuildVolumeMft(const VolumeInfo& volume) {
+    if (VolumePaused(volume.id)) return true;
     if (!MachineIndexScope() || volume.id.empty()) return false;
 
     // Flatten the current live view first. This gives the replacement build a
@@ -3972,7 +4018,7 @@ bool Engine::NeedsSearchRebuildLocked() const {
 void Engine::StartJournalStreams() {
     journal_streams_.clear();
     for (const auto& volume : vols_) {
-        if (volume.journal_id && !volume_retry_after_.contains(volume.volume_id)) journal_streams_[volume.volume_id] =
+        if (!VolumePaused(volume.volume_id) && volume.journal_id && !volume_retry_after_.contains(volume.volume_id)) journal_streams_[volume.volume_id] =
             std::make_unique<UsnStream>(volume.letter, volume.journal_id, volume.next_usn, change_signal_);
     }
 }
@@ -3980,6 +4026,7 @@ void Engine::RecoverFailedVolumes(const std::vector<VolumeInfo>& volumes, ULONGL
                                   const std::function<bool(const VolumeInfo&)>& rebuild) {
     for (const auto& volume : volumes) {
         if (!running_) break;
+        if (VolumePaused(volume.id)) continue;
         const auto cooldown = volume_recovered_after_.find(volume.id);
         if (cooldown != volume_recovered_after_.end() && now < cooldown->second) {
             volume_retry_after_[volume.id] = cooldown->second;
@@ -4139,17 +4186,19 @@ void Engine::Worker() {
     auto topology_tick = GetTickCount64();
     StartJournalStreams();
     while (running_) {
+        ApplyVolumePauses();
         SeedPendingChanges();
         std::vector<HANDLE> events{change_signal_};
-        for (auto& watch : watches_) if (events.size() < MAXIMUM_WAIT_OBJECTS) events.push_back(watch.event);
+        for (auto& watch : watches_) if (events.size() < MAXIMUM_WAIT_OBJECTS) if (watch.dir != INVALID_HANDLE_VALUE) events.push_back(watch.event);
         const auto wait_timing = FilenameTiming::Begin();
         const DWORD wake = WaitForMultipleObjects(static_cast<DWORD>(events.size()), events.data(), FALSE, 15000);
         filename_timing_.End(FilenameStage::Wait, wait_timing, wake == WAIT_TIMEOUT ? 0 : 1,
             wake == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS, wake == WAIT_TIMEOUT ? "maintenance" : "event");
+        ApplyVolumePauses();
         PollWalkWatches();
         changes_.Flush(false, &filename_timing_.Memory());
         if (!running_) break;
-        if (rebuild_requested_.exchange(false)) {
+        if (volume_pauses_.empty() && rebuild_requested_.exchange(false)) {
             journal_streams_.clear();
             volume_retry_after_.clear();
             FullRebuild();
@@ -4182,6 +4231,7 @@ void Engine::Worker() {
                 UpdateVolumeVisibilityLocked(online);
                 lock.unlock();
                 for (size_t i : idx) {
+                    if (VolumePaused(vols_[i].volume_id)) continue;
                     const bool present = std::any_of(online.begin(), online.end(), [&](const VolumeInfo& drive) {
                         return NormalizeVolumeId(drive.id) == NormalizeVolumeId(vols_[i].volume_id);
                     });
@@ -4268,6 +4318,7 @@ void Engine::StartWalkWatches(const std::vector<std::wstring>& roots) {
         w.path = path;
         w.buf.resize(64 * 1024);
         w.event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (PathPaused(path)) continue;
         w.dir = CreateFileW(path.c_str(), FILE_LIST_DIRECTORY,
                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                             nullptr, OPEN_EXISTING,
@@ -4516,3 +4567,5 @@ uint64_t Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DW
 }
 
 } // namespace pulse::index
+
+#include "index_volume_pause_impl.h"

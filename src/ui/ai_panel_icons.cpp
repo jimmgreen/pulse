@@ -158,7 +158,7 @@ constexpr IconPart k_search[] = {
     {"M4.5 11A6.5 6.5 0 1 0 17.5 11A6.5 6.5 0 1 0 4.5 11Z", 0, 0x000000u, 1.6f, 1.0f},
     {"M16 16l4.5 4.5", 0, 0x000000u, 1.6f, 1.0f},
 };
-// 管理连接 (plans/ai/Pulse_AI助手_管理连接.html, its 20 px boxes scaled to 24).
+// 管理连接 (its 20 px boxes scaled to 24).
 constexpr IconPart k_chevl[] = {
     {"M15 5.4L8.4 12l6.6 6.6", 0, 0x000000u, 1.9f, 1.0f},
 };
@@ -175,7 +175,7 @@ constexpr IconPart k_eyeoff[] = {
     {"M9.4 12A2.6 2.6 0 1 0 14.6 12A2.6 2.6 0 1 0 9.4 12Z", 0, 0x000000u, 1.6f, 1.0f},
     {"M4.5 4.5l15 15", 0, 0x000000u, 1.6f, 1.0f},
 };
-// Error cards (plans/ai/Pulse_AI助手_错误与快捷键.html, 24 px boxes).
+// Error cards (24 px boxes).
 constexpr IconPart k_key[] = {
     {"M4 15A4 4 0 1 0 12 15A4 4 0 1 0 4 15Z", 0, 0x000000u, 1.7f, 1.0f},
     {"M11 12l9-9M17 6l3 3M15 8l2 2", 0, 0x000000u, 1.7f, 1.0f},
@@ -219,7 +219,7 @@ constexpr IconPart k_warn[] = {
     {"M12 10v4M12 17v.1", 0, 0x000000u, 1.8f, 1.0f},
 };
 
-// First batch of extensions (plans/ai/Pulse_AI助手_第一批扩展.html, 24 px boxes).
+// First batch of extensions (24 px boxes).
 constexpr IconPart k_bolt[] = {
     {"M13 3L5 13.5h6L10 21l8-10.5h-6z", 0, 0x000000u, 1.6f, 1.0f},
 };
@@ -313,7 +313,7 @@ constexpr IconPart k_rocket[] = {
     {"M10 19.5h4", 0, 0x000000u, 1.6f, 1.0f},
 };
 
-// P4 (plans/ai/P4_全部领域接入.html).
+// P4.
 constexpr IconPart k_pin[] = {
     {"M9 4h6l-1 5 3 3v2H7v-2l3-3z", 0, 0x000000u, 1.6f, 1.0f},
     {"M12 14v6", 0, 0x000000u, 1.6f, 1.0f},
@@ -343,6 +343,43 @@ constexpr IconPart k_pull[] = {
 constexpr IconPart k_eject[] = {
     {"M12 5l7 8.5H5z", 0, 0x000000u, 1.6f, 1.0f},
     {"M5 18.5h14", 0, 0x000000u, 1.6f, 1.0f},
+};
+
+constexpr IconPart k_quote[] = {
+    {"M5 9.5h4.5v4.5c0 2.5-1.5 4-3.5 4.5M14.5 9.5H19v4.5c0 2.5-1.5 4-3.5 4.5", 0, 0x000000u, 1.6f, 1.0f},
+    {"M5 9.5V6h4.5v3.5M14.5 9.5V6H19v3.5", 0, 0x000000u, 1.6f, 1.0f},
+};
+
+// 55 P2.
+constexpr IconPart k_thumbd[] = {
+    {"M8 13.5v-9H5.5a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1zM8 13.5l3.5 6.5a2 2 0 0 0 2.3-2.4L13 14h5a2 2 0 0 0 2-2.3l-1-6a2 2 0 0 0-2-1.7H8", 0, 0x000000u, 1.6f, 1.0f},
+};
+constexpr IconPart k_edit[] = {
+    {"M14.5 5.5l4 4L9 19H5v-4z", 0, 0x000000u, 1.6f, 1.0f},
+    {"M12.5 7.5l4 4", 0, 0x000000u, 1.6f, 1.0f},
+};
+constexpr IconPart k_info[] = {
+    {"M4 12A8 8 0 1 0 20 12A8 8 0 1 0 4 12Z", 0, 0x000000u, 1.6f, 1.0f},
+    {"M12 11v5M12 8h.01", 0, 0x000000u, 1.6f, 1.0f},
+};
+constexpr IconPart k_detail[] = {
+    {"M5 7h14M5 12h14M5 17h9", 0, 0x000000u, 1.6f, 1.0f},
+};
+constexpr IconPart k_short[] = {
+    {"M5 9h14M5 15h8", 0, 0x000000u, 1.6f, 1.0f},
+};
+constexpr IconPart k_model[] = {
+    {"M8 5h8a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V8a3 3 0 0 1 3-3z", 0, 0x000000u, 1.6f, 1.0f},
+    {"M9 9h6v6H9z", 0, 0x000000u, 1.6f, 1.0f},
+};
+// 55 P3: the header's 历史对话 (a clock running back) and a row's chat bubble.
+constexpr IconPart k_history[] = {
+    {"M4.5 12a7.5 7.5 0 1 0 2.2-5.3", 0, 0x000000u, 1.6f, 1.0f},
+    {"M4.5 4.5v3.5H8", 0, 0x000000u, 1.6f, 1.0f},
+    {"M12 8v4.2l2.8 1.8", 0, 0x000000u, 1.6f, 1.0f},
+};
+constexpr IconPart k_chat[] = {
+    {"M5 6.5A2 2 0 0 1 7 4.5h10a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-6l-4 3.5v-3.5H7a2 2 0 0 1-2-2z", 0, 0x000000u, 1.6f, 1.0f},
 };
 
 constexpr IconDef kIcons[] = {
@@ -423,6 +460,15 @@ constexpr IconDef kIcons[] = {
     {k_push, std::size(k_push)},
     {k_pull, std::size(k_pull)},
     {k_eject, std::size(k_eject)},
+    {k_quote, std::size(k_quote)},
+    {k_thumbd, std::size(k_thumbd)},
+    {k_edit, std::size(k_edit)},
+    {k_info, std::size(k_info)},
+    {k_detail, std::size(k_detail)},
+    {k_short, std::size(k_short)},
+    {k_model, std::size(k_model)},
+    {k_history, std::size(k_history)},
+    {k_chat, std::size(k_chat)},
 };
 
 static_assert(std::size(kIcons) == static_cast<size_t>(AiIcon::Count), "one table entry per AiIcon");

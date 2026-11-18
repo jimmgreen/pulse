@@ -1,0 +1,50 @@
+Open/save picker creation and selection
+
+Cause: the picker used a separate name-entry popup and navigated into a newly
+created directory. Its completion handling retained only one destination and
+did not explicitly scroll the refreshed selection into view.
+
+Implementation:
+- Create folder and text document use shared UniqueChildName and the existing
+  operation queue. Name lookup runs off the UI thread, with cancellation checks.
+- Shared CreateRenameIntent binds actual completion paths to parent/generation.
+  Creation stays in the parent, selects the item, scrolls and starts inline naming.
+- Inline editing reuses the shared edit host and renderer RenameFieldRect;
+  file stems are selected without extensions, Escape retains created items,
+  invalid names remain editable, keyboard commit/cancel returns list focus.
+- Copy/move/rename completion selects actual destinations in the current parent.
+  Navigation clears pending selection/editor state; stale operation results do
+  not modify the newly navigated view.
+- Blank-area New text document uses the same creation path.
+
+Scoped validation artifacts:
+- bench_data/picker-create-build.log
+- bench_data/picker-create-operations-test.log
+- bench_data/picker-create-live-test.log
+- bench_data/picker-create-probe-build.log
+Native picker cases run on a private desktop in isolated workspace fixtures.
+Production test hooks remain disabled. No computer-use tools are involved.
+
+Final results:
+- Release pulse, PulsePickerUiProof and focused operation target built successfully.
+  bench_data/picker-create-final-build.log
+- Native dialog Open/Save x Details/MediumIcons: light 52 PASS, dark 52 PASS.
+  Includes directory/file creation, actual-path selection, scroll visibility,
+  duplicate naming, Escape, invalid-name correction, file-extension selection,
+  inline rename, keyboard focus, and navigation clearing stale edit/selection.
+  bench_data/picker-create-final-light.log / picker-create-final-dark.log
+- Focused operation --create-only: 6 PASS (shared folder/file naming, destination,
+  existing content, owner re-enable, cancellation). picker-create-only-test.log
+- Inspected painted dark icon-mode edit snapshot: full New folder (2) visible.
+  picker-create-dark-font-editing-2.png
+
+Verification limits:
+- The broader operation test stopped during recycle undo on the private desktop;
+  it was terminated and is not counted as passed (picker-create-operations-test.log).
+  Existing cases remain; --create-only isolates this change without deleting them.
+- Painted-host interaction could not complete on the private desktop. A minimal
+  startup with no creation/rename reproduces flush-no-present, occluded=1, frame=0,
+  error 1627 (picker_painted_startup.log). Production presentation checks were not
+  weakened. Painted-host full foreground interaction remains for installed testing.
+- Native parent captures omit separately composed child text; painted edit captures
+  were used to inspect text layout. No actual installation was performed here.

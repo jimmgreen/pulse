@@ -1,5 +1,7 @@
 // action_args.cpp - The runners of action_args.h, by domain.
 #include "action_args.h"
+#include "../window_arrange_ui.h"
+#include "../window_management_ui.h"
 
 #include "action_inventory.h"
 #include "action_state.h"
@@ -1105,6 +1107,20 @@ ArgRun KeymapSet(AppState& s, const json::Value& args) {
     return r;
 }
 
+ArgRun WindowArrangeRun(AppState& s, const json::Value& args) {
+    const auto* value=args.find("layout");
+    if (!value || !value->is_string()) return Fail("layout is required", I::ArrangeUnavailable);
+    constexpr std::string_view names[]={"side_by_side","stacked","columns","tile","main","cascade","main_right","main_top"};
+    for (int i=0;i<8;++i) if (value->as_string()==names[i]) {
+        const auto layout=static_cast<WindowArrangeLayout>(i);
+        if (!ArrangeWindows(s,layout)) return Fail("windows cannot be arranged now",I::ArrangeUnavailable);
+        ArgRun result; result.ok=true; result.title=Text(WindowArrangeLabel(layout));
+        result.line_before=Text(I::ArrangeApplied); result.undo=[token=WindowArrangeGeneration()](AppState& st){UndoWindowArrange(st,token);};
+        return result;
+    }
+    return Fail("unknown layout",I::ArrangeUnavailable);
+}
+
 // ---- The table ------------------------------------------------------------------------
 
 using Runner = ArgRun (*)(AppState&, const json::Value&);
@@ -1119,6 +1135,7 @@ constexpr std::pair<std::string_view, Runner> kRunners[] = {
     {"tab.activate", TabActivate},
     {"pane.focus", PaneFocusRun},
     {"window.activate", WindowActivate},
+    {"window.arrange", WindowArrangeRun},
     {"sidebar.section", SidebarSection},
     {"view.icon_size", IconSize},
     {"tag.create", TagCreate},

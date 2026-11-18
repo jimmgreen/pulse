@@ -32,6 +32,7 @@ struct UninstallResult {
     // -1 when it did not run (upgrade, test mode).
     int restore_result = -1;
     bool reboot_needed = false;     // a locked file is deleted at the next restart
+    bool dialog_cleanup_pending = false; // occupied/unverified version directories retained, no reboot promise
     bool schedule_self_delete = false;
     bool nothing_changed = false;   // failed or gave up before anything was removed
 };

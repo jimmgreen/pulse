@@ -211,6 +211,20 @@ int main(int argc, char** argv) {
     if (std::filesystem::exists(root)) return 2;
     std::filesystem::create_directories(root);
     fixture = root.wstring();
+    if (argc == 2 && std::string_view(argv[1]) == "--save-only") {
+        PlacesCatalog c;
+        c.quick_access_paths = {L"C:\\first"};
+        Check(c.Save(), "initial places save");
+        const auto file = root / L"places.json";
+        const auto before = std::filesystem::last_write_time(file);
+        Sleep(30);
+        Check(c.Save() && std::filesystem::last_write_time(file) == before,
+              "identical places snapshot does not rewrite the file");
+        c.quick_access_paths.push_back(L"C:\\second");
+        Check(c.Save() && std::filesystem::last_write_time(file) != before,
+              "changed places snapshot is persisted");
+        return failures ? 1 : 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--workspace-only") {
         WorkspaceRoundTrip();
         printf("fixtures retained: %ls\n", root.c_str());

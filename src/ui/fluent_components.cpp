@@ -2,6 +2,7 @@
 #include "command_icons.h"
 #include "../common/localization.h"
 #include "fluent_components.h"
+#include "window_action_icon.h"
 #include "tab_shape.h"
 #include "typography.h"
 
@@ -14,6 +15,9 @@
 namespace pulse::ui::fluent {
 
 namespace {
+
+// Corner radius of buttons, dropdowns and text fields (DIPs).
+constexpr float kControlCorner = 6.0f;
 
 constexpr std::wstring_view kChevronDown = L"\xE70D";
 constexpr std::wstring_view kChevronUp = L"\xE70E";
@@ -266,6 +270,9 @@ void Painter::SetCompositor(Compositor* compositor) noexcept {
         brush.reset();
     }
     scratch_brush_.reset();
+    for (auto& entry : gradient_cache_) {
+        entry.brush.reset();
+    }
     round_stroke_.reset();
     body_format_.reset();
     nav_format_.reset();
@@ -582,6 +589,21 @@ void Painter::DrawTextWithBrush(std::wstring_view text, const D2D1_RECT_F& bound
                    text_brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
+float Painter::MeasureWrappedBodyHeight(std::wstring_view text, float width) const {
+    IDWriteTextLayout* layout = GetWrappedTextLayout(compositor_, BodyFormat(), text, width);
+    DWRITE_TEXT_METRICS metrics{};
+    if (!layout || FAILED(layout->GetMetrics(&metrics))) return 0.0f;
+    return std::ceil(metrics.height);
+}
+
+void Painter::DrawWrappedBody(std::wstring_view text, D2D1_POINT_2F origin, float width,
+                              const D2D1_COLOR_F& color) {
+    if (!dc_) return;
+    IDWriteTextLayout* layout = GetWrappedTextLayout(compositor_, BodyFormat(), text, width);
+    ID2D1SolidColorBrush* brush = ScratchBrush(color);
+    if (layout && brush) DrawLayoutText(compositor_, dc_, high_contrast_, origin, layout, brush);
+}
+
 float Painter::MeasureWrappedCaptionHeight(std::wstring_view text, float width) const {
     IDWriteTextLayout* layout = GetWrappedTextLayout(compositor_, CaptionFormat(), text, width);
     DWRITE_TEXT_METRICS metrics{};
@@ -700,6 +722,14 @@ void Painter::DrawPaneLayoutIcon(const D2D1_RECT_F& bounds, MenuPictogram kind,
         return;
     }
     EnsureStrokeStyle();
+    if (kind >= MenuPictogram::WindowNew && kind <= MenuPictogram::WindowMerge) {
+        const float inset = (std::min)(Width(bounds), Height(bounds)) * 0.08f;
+        DrawWindowActionIcon(dc_, D2D1::RectF(bounds.left + inset, bounds.top + inset,
+            bounds.right - inset, bounds.bottom - inset),
+            static_cast<WindowActionIcon>(static_cast<int>(kind) - static_cast<int>(MenuPictogram::WindowNew) + 1),
+            ScratchBrush(color));
+        return;
+    }
     const float box = std::min(Width(bounds), Height(bounds)) * 0.72f;
     if (box < 6.0f) {
         return;
@@ -739,6 +769,14 @@ void Painter::DrawPaneLayoutIcon(const D2D1_RECT_F& bounds, MenuPictogram kind,
     case MenuPictogram::LayoutThree:
         vline(mid_x, top, bottom);
         hline(mid_x, right, mid_y);
+        break;
+    case MenuPictogram::LayoutColumns:
+        vline(left + (right-left)/3, top, bottom);
+        vline(left + (right-left)*2/3, top, bottom);
+        break;
+    case MenuPictogram::LayoutCascade:
+        StrokeRoundedRect(D2D1::RectF(left + box*0.22f, top + box*0.22f, right, bottom), radius, color, stroke);
+        StrokeRoundedRect(D2D1::RectF(left + box*0.44f, top + box*0.44f, right, bottom), radius, color, stroke);
         break;
     case MenuPictogram::LayoutFour:
         vline(mid_x, top, bottom);
@@ -800,6 +838,59 @@ void Painter::DrawCommandButton(const ButtonSpec& spec) {
     if (state.keyboard_focus) DrawFocusRing(spec.bounds, Px(theme_->radius_control));
 }
 
+ID2D1LinearGradientBrush* Painter::CachedGradient(const D2D1_COLOR_F& from, const D2D1_COLOR_F& to) {
+    if (!dc_) return nullptr;
+    const auto same = [](const D2D1_COLOR_F& a, const D2D1_COLOR_F& b) {
+        return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+    };
+    for (auto& entry : gradient_cache_) {
+        if (entry.brush.get() && same(entry.from, from) && same(entry.to, to)) return entry.brush.get();
+    }
+    GradientEntry& slot = gradient_cache_[gradient_next_];
+    gradient_next_ = (gradient_next_ + 1) % gradient_cache_.size();
+    slot.brush.reset();
+    slot.from = from;
+    slot.to = to;
+    const D2D1_GRADIENT_STOP stops[2] = {{0.0f, from}, {1.0f, to}};
+    ComPtr<ID2D1GradientStopCollection> collection;
+    if (SUCCEEDED(dc_->CreateGradientStopCollection(stops, 2, &collection))) {
+        dc_->CreateLinearGradientBrush(
+            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(0.0f, 1.0f)),
+            collection.get(), &slot.brush);
+    }
+    return slot.brush.get();
+}
+
+void Painter::StrokeElevationRect(const D2D1_RECT_F& bounds, float radius,
+                                  const D2D1_COLOR_F& border, const D2D1_COLOR_F& edge,
+                                  bool edge_on_top) {
+    if (!dc_ || Width(bounds) <= 0.0f || Height(bounds) <= 0.0f) {
+        return;
+    }
+    const auto same = [](const D2D1_COLOR_F& a, const D2D1_COLOR_F& b) {
+        return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+    };
+    ID2D1LinearGradientBrush* brush = nullptr;
+    if (!same(border, edge)) brush = CachedGradient(border, edge);
+    if (!brush) {
+        StrokeRoundedRect(bounds, radius, border);
+        return;
+    }
+    // The gradient runs over the last few pixels and is clamped beyond, so
+    // the darker edge follows the corners instead of stopping where they start.
+    const float band = std::max(1.0f, Px(3.0f));
+    if (edge_on_top) {
+        brush->SetStartPoint(D2D1::Point2F(bounds.left, bounds.top + band));
+        brush->SetEndPoint(D2D1::Point2F(bounds.left, bounds.top));
+    } else {
+        brush->SetStartPoint(D2D1::Point2F(bounds.left, bounds.bottom - band));
+        brush->SetEndPoint(D2D1::Point2F(bounds.left, bounds.bottom));
+    }
+    const auto aligned = Inset(bounds, 0.5f);
+    dc_->DrawRoundedRectangle(D2D1::RoundedRect(aligned, radius, radius), brush, 1.0f,
+                              round_stroke_.get());
+}
+
 void Painter::DrawButton(const ButtonSpec& spec) {
     if (!theme_ || !compositor_) {
         return;
@@ -812,7 +903,7 @@ void Painter::DrawButton(const ButtonSpec& spec) {
     const bool primary = spec.kind == ButtonKind::Primary || (toggle && state.checked);
     const bool transparent = spec.kind == ButtonKind::Transparent ||
                              (spec.kind == ButtonKind::TransparentToggle && !state.checked);
-    const float radius = Px(theme_->radius_control);
+    const float radius = Px(kControlCorner);
     D2D1_COLOR_F foreground = dark_ ? HexColor(0xFFFFFF) : HexColor(0x000000);
     D2D1_COLOR_F fill{};
     D2D1_COLOR_F border{};
@@ -891,16 +982,23 @@ void Painter::DrawButton(const ButtonSpec& spec) {
                : state.pressed ? RgbaF(0xFFFFFF, 0.0326f)
                : state.hovered ? RgbaF(0xFFFFFF, 0.0837f)
                                : RgbaF(0xFFFFFF, 0.0605f);
-        border = RgbaF(0xFFFFFF, 0.053f);
-        edge = state.enabled && !state.pressed ? RgbaF(0xFFFFFF, 0.08f) : border;
+        border = !state.enabled || state.pressed ? RgbaF(0xFFFFFF, 0.053f)
+                 : state.hovered ? RgbaF(0xFFFFFF, 0.075f) : RgbaF(0xFFFFFF, 0.065f);
+        edge = !state.enabled || state.pressed ? border
+               : state.hovered ? RgbaF(0xFFFFFF, 0.14f) : RgbaF(0xFFFFFF, 0.12f);
         foreground = !state.enabled ? RgbaF(0xFFFFFF, 0.3628f)
                      : state.pressed ? RgbaF(0xFFFFFF, 0.786f) : HexColor(0xFFFFFF);
     } else {
-        fill = !state.enabled || state.pressed ? RgbaF(0xF9F9F9, 0.30f)
-               : state.hovered ? RgbaF(0xF9F9F9, 0.50f) : RgbaF(0xFFFFFF, 0.70f);
-        border = !state.enabled ? RgbaF(0x000000, 0.06f) : RgbaF(0x000000, 0.073f);
-        edge = !state.enabled ? border
-                              : state.pressed ? border : RgbaF(0x000000, 0.183f);
+        // A solid face one step brighter than the card it sits on, so the
+        // button reads as a control rather than a line under some text.
+        fill = !state.enabled ? RgbaF(0xF9F9F9, 0.50f)
+               : state.pressed ? HexColor(0xF2F4F0)
+               : state.hovered ? HexColor(0xF8F9F7) : HexColor(0xFFFFFF);
+        border = !state.enabled ? RgbaF(0x000000, 0.06f)
+                 : state.hovered && !state.pressed ? RgbaF(0x000000, 0.085f)
+                                                   : RgbaF(0x000000, 0.075f);
+        edge = !state.enabled || state.pressed ? border
+               : state.hovered ? RgbaF(0x000000, 0.19f) : RgbaF(0x000000, 0.17f);
         foreground = !state.enabled ? RgbaF(0x000000, 0.36f)
                      : state.pressed ? RgbaF(0x000000, 0.63f) : HexColor(0x000000);
     }
@@ -920,11 +1018,7 @@ void Painter::DrawButton(const ButtonSpec& spec) {
         FillRoundedRect(spec.bounds, radius, fill);
     }
     if (draw_border) {
-        StrokeRoundedRect(spec.bounds, radius, border);
-        const float y = edge_on_top ? spec.bounds.top + 0.5f : spec.bounds.bottom - 0.5f;
-        dc_->DrawLine(D2D1::Point2F(spec.bounds.left + radius, y),
-                      D2D1::Point2F(spec.bounds.right - radius, y),
-                      ScratchBrush(edge), 1.0f);
+        StrokeElevationRect(spec.bounds, radius, border, edge, edge_on_top);
     }
 
     const float pad_x = Px(8.0f);
@@ -977,9 +1071,27 @@ void Painter::DrawButton(const ButtonSpec& spec) {
             body->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         }
         const bool center = spec.glyph.empty() && !spec.drop_down;
-        DrawText(spec.text, D2D1::RectF(left, content.top, right, content.bottom),
-                 body, foreground,
-                 center ? HorizontalAlignment::Center : HorizontalAlignment::Left);
+        if (!spec.keycap.empty()) {
+            // Text and keycap as one centred group; the key in a thin frame.
+            IDWriteTextFormat* caption = CaptionFormat();
+            const float key_w = typography::MeasureLine(compositor_, caption, spec.keycap) + Px(10.0f);
+            const float text_w = typography::MeasureLine(compositor_, body, spec.text);
+            const float gap = Px(8.0f);
+            float x = center ? std::max(left, (left + right - text_w - gap - key_w) * 0.5f) : left;
+            DrawText(spec.text, D2D1::RectF(x, content.top, std::min(right, x + text_w + Px(1.0f)), content.bottom),
+                     body, foreground, HorizontalAlignment::Left);
+            x += text_w + gap;
+            const float mid = (spec.bounds.top + spec.bounds.bottom) * 0.5f;
+            const D2D1_RECT_F key = D2D1::RectF(x, mid - Px(8.0f), std::min(right, x + key_w), mid + Px(8.0f));
+            if (Width(key) > Px(12.0f)) {
+                StrokeRoundedRect(key, Px(4.0f), MultiplyAlpha(foreground, 0.42f), std::max(1.0f, Px(1.0f)));
+                DrawText(spec.keycap, key, caption, MultiplyAlpha(foreground, 0.66f), HorizontalAlignment::Center);
+            }
+        } else {
+            DrawText(spec.text, D2D1::RectF(left, content.top, right, content.bottom),
+                     body, foreground,
+                     center ? HorizontalAlignment::Center : HorizontalAlignment::Left);
+        }
         if (body) body->SetWordWrapping(old_wrap);
     }
 
@@ -994,7 +1106,7 @@ void Painter::DrawTextFieldFrame(const D2D1_RECT_F& bounds, const ControlState& 
         return;
     }
 
-    const float radius = Px(theme_->radius_control);
+    const float radius = Px(kControlCorner);
     const D2D1_COLOR_F fill = TextFieldFillColor(*theme_, state, dark_, high_contrast_,
                                                 hosted_edit);
     D2D1_COLOR_F border;
@@ -1099,7 +1211,7 @@ void Painter::DrawTextField(const TextFieldSpec& spec) {
     }
 
     if (spec.state.keyboard_focus) {
-        DrawFocusRing(spec.bounds, Px(theme_->radius_control));
+        DrawFocusRing(spec.bounds, Px(kControlCorner));
     }
 }
 
@@ -1407,6 +1519,13 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
         caption.left += Px(16.0f);
         caption.right -= Px(16.0f);
         caption.top += Px(6.0f);
+        if (!spec.shortcut.empty()) {
+            auto detail = caption;
+            const float width = MeasureTextWidth(compositor_, CaptionFormat(), spec.shortcut);
+            detail.left = (std::max)(caption.left, caption.right - width);
+            caption.right = detail.left - Px(12.0f);
+            DrawText(spec.shortcut, detail, CaptionFormat(), theme_->text_secondary, HorizontalAlignment::Right);
+        }
         DrawText(spec.text, caption, CaptionFormat(), theme_->text_secondary);
         if (spec.separator_after) {
             const float y = spec.bounds.bottom - 0.5f;
@@ -1765,7 +1884,7 @@ void Painter::DrawSidebarItem(const SidebarItemSpec& spec) {
         return;
     }
     if (spec.detail.empty() && spec.alias_mark) {
-        // 别名: the name, then the mark right after it (pulse_alias.html).
+        // 别名: the name, then the mark right after it.
         const float mark = Px(14.0f);
         const float gap = Px(6.0f);
         const float avail = (std::max)(0.0f, Width(content) - mark - gap);
@@ -1955,21 +2074,185 @@ D2D1_RECT_F Painter::ScrollbarThumbRect(const ScrollbarSpec& spec) const noexcep
 
 D2D1_RECT_F ScrollbarThumbRect(const ScrollbarSpec& spec, float scale,
                               bool high_contrast) noexcept {
+    const float length = spec.horizontal ? Width(spec.viewport) : Height(spec.viewport);
     if (!spec.enabled || spec.viewport_extent <= 0.0f ||
-        spec.content_extent <= spec.viewport_extent || Height(spec.viewport) <= 0.0f) {
+        spec.content_extent <= spec.viewport_extent || length <= 0.0f) {
         return D2D1::RectF();
     }
     const float progress = high_contrast ? 1.0f : Clamp01(spec.expand_progress);
     const float width = (2.5f + 2.5f * progress) * scale;
     const float min_thumb = 20.0f * scale;
-    const float thumb_height = std::min(Height(spec.viewport),
-        std::max(min_thumb, Height(spec.viewport) * spec.viewport_extent / spec.content_extent));
+    const float thumb_length = std::min(length,
+        std::max(min_thumb, length * spec.viewport_extent / spec.content_extent));
     const float max_offset = std::max(0.0f, spec.content_extent - spec.viewport_extent);
-    const float travel = std::max(0.0f, Height(spec.viewport) - thumb_height);
+    const float travel = std::max(0.0f, length - thumb_length);
     const float normalized = max_offset > 0.0f ? Clamp01(spec.offset / max_offset) : 0.0f;
+    if (spec.horizontal) {
+        const float left = spec.viewport.left + travel * normalized;
+        const float bottom = spec.viewport.bottom - 2.5f * scale;
+        return D2D1::RectF(left, bottom - width, left + thumb_length, bottom);
+    }
     const float top = spec.viewport.top + travel * normalized;
     const float right = spec.viewport.right - 2.5f * scale;
-    return D2D1::RectF(right - width, top, right, top + thumb_height);
+    return D2D1::RectF(right - width, top, right, top + thumb_length);
+}
+
+bool ScrollbarHitTest(const ScrollbarSpec& spec, float x, float y) noexcept {
+    return spec.enabled && spec.viewport_extent > 0.0f && spec.content_extent > spec.viewport_extent &&
+           x >= spec.viewport.left && x < spec.viewport.right &&
+           y >= spec.viewport.top && y < spec.viewport.bottom;
+}
+
+float ScrollbarGrabOffset(float thumb_start, float thumb_length, float pointer) noexcept {
+    return pointer >= thumb_start && pointer < thumb_start + thumb_length
+        ? pointer - thumb_start : thumb_length * 0.5f;
+}
+
+float ScrollbarDragOffset(float track_start, float track_length, float thumb_length,
+                          float max_offset, float pointer, float grab) noexcept {
+    if (max_offset <= 0.0f) return 0.0f;
+    const float travel = std::max(1.0f, track_length - thumb_length);
+    const float along = pointer - track_start - std::min(grab, thumb_length);
+    return std::clamp(along * max_offset / travel, 0.0f, max_offset);
+}
+
+namespace {
+
+float ApproachFade(float value, float target, uint64_t dt, uint64_t up_ms, uint64_t down_ms) noexcept {
+    if (value == target) return value;
+    if (value < target) {
+        const float step = static_cast<float>(dt) / static_cast<float>(up_ms);
+        return std::min(target, value + step);
+    }
+    const float step = static_cast<float>(dt) / static_cast<float>(down_ms);
+    return std::max(target, value - step);
+}
+
+} // namespace
+
+void ScrollbarFade::Reveal(uint64_t now) noexcept {
+    visible_until_ = std::max(visible_until_, now + kHoldMs);
+}
+
+void ScrollbarFade::SetHot(bool hot, uint64_t now) noexcept {
+    if (hot_ && !hot) visible_until_ = std::max(visible_until_, now + kHoldMs);
+    hot_ = hot;
+}
+
+float ScrollbarFade::TargetOpacity(uint64_t now) const noexcept {
+    return (keep_visible_ || hot_ || now < visible_until_) ? 1.0f : 0.0f;
+}
+
+bool ScrollbarFade::Tick(uint64_t now) noexcept {
+    // The first tick after a long idle steps by at most one fade.
+    const uint64_t dt = last_tick_ == 0 || now < last_tick_
+        ? 0 : std::min<uint64_t>(now - last_tick_, kFadeOutMs);
+    last_tick_ = now;
+    const float opacity = opacity_ == 0.0f && TargetOpacity(now) > 0.0f && dt == 0
+        ? 1.0f  // no time base yet: show at once rather than stall
+        : ApproachFade(opacity_, TargetOpacity(now), dt, kFadeInMs, kFadeOutMs);
+    const float expand = ApproachFade(expand_, TargetExpand(), dt, kExpandMs, kExpandMs);
+    const bool changed = opacity != opacity_ || expand != expand_;
+    opacity_ = opacity;
+    expand_ = expand;
+    return changed;
+}
+
+bool ScrollbarFade::Moving(uint64_t now) const noexcept {
+    if (opacity_ != TargetOpacity(now) || expand_ != TargetExpand()) return true;
+    // Holding: tick fast just before the fade so it starts smoothly.
+    constexpr uint64_t kLead = 150;
+    return opacity_ > 0.0f && !hot_ && !keep_visible_ && visible_until_ <= now + kLead;
+}
+
+namespace {
+constexpr float kStepKnobDip = 30.0f;
+constexpr float kStepTrackDip = 26.0f;
+constexpr float kStepRowDip = 34.0f;
+}  // namespace
+
+float StepSliderHeight(float scale) noexcept { return std::round(kStepRowDip * scale); }
+
+float StepSliderStopX(const D2D1_RECT_F& bounds, int stops, float position, float scale) noexcept {
+    const float inset = kStepKnobDip * 0.5f * scale;
+    const float left = bounds.left + inset;
+    const float right = bounds.right - inset;
+    if (stops < 2 || right <= left) return (bounds.left + bounds.right) * 0.5f;
+    const float last = static_cast<float>(stops - 1);
+    return left + (right - left) * std::clamp(position, 0.0f, last) / last;
+}
+
+float StepSliderPositionAt(const D2D1_RECT_F& bounds, int stops, float x, float scale) noexcept {
+    const float inset = kStepKnobDip * 0.5f * scale;
+    const float left = bounds.left + inset;
+    const float right = bounds.right - inset;
+    if (stops < 2 || right <= left) return 0.0f;
+    return Clamp01((x - left) / (right - left)) * static_cast<float>(stops - 1);
+}
+
+void Painter::DrawStepSlider(const StepSliderSpec& spec) {
+    if (!dc_ || !theme_) return;
+    const int stops = std::max(spec.stops, 2);
+    const ControlState& state = spec.state;
+    const float cy = (spec.bounds.top + spec.bounds.bottom) * 0.5f;
+    const float track_h = std::round(Px(kStepTrackDip));
+    const float track_top = std::round(cy - track_h * 0.5f);
+    const D2D1_RECT_F track = D2D1::RectF(std::round(spec.bounds.left), track_top,
+                                          std::round(spec.bounds.right), track_top + track_h);
+    const float radius = track_h * 0.5f;
+    const float knob_x = StepSliderStopX(spec.bounds, stops, spec.position, scale_);
+    const float knob_r = Px(kStepKnobDip) * 0.5f;
+    D2D1_COLOR_F rest, fill, dot_rest, dot_fill, knob, knob_line;
+    if (high_contrast_) {
+        rest = theme_->fill_input;
+        fill = state.enabled ? theme_->accent : theme_->text_disabled;
+        dot_rest = theme_->text;
+        dot_fill = theme_->accent_text;
+        knob = state.enabled ? theme_->text : theme_->text_disabled;
+        knob_line = theme_->stroke_input_bottom;
+    } else {
+        const AccentShades shades = DeriveAccentShades(theme_->accent);
+        rest = dark_ ? Rgba(0xFFFFFF, 20) : Rgba(0x000000, 15);
+        fill = !state.enabled ? (dark_ ? Rgba(0xFFFFFF, 41) : Rgba(0x000000, 56))
+               : state.pressed ? shades.light2
+               : state.hovered ? shades.light1 : theme_->accent;
+        dot_rest = dark_ ? Rgba(0xFFFFFF, 77) : Rgba(0x000000, 66);
+        dot_fill = theme_->accent_text;
+        dot_fill.a *= 0.7f;
+        knob = !state.enabled ? (dark_ ? Rgba(0xFFFFFF, 96) : Rgba(0xFFFFFF, 200))
+                              : dark_ ? HexColor(0xF3F3F3) : HexColor(0xFFFFFF);
+        knob_line = dark_ ? Rgba(0x000000, 40) : Rgba(0x000000, 20);
+    }
+    FillRoundedRect(track, radius, rest);
+    // The accent runs to just past the knob, so the knob sits on its end.
+    const float fill_right = std::min(track.right, std::max(track.left + track_h, knob_x + radius));
+    FillRoundedRect(D2D1::RectF(track.left, track.top, fill_right, track.bottom), radius, fill);
+    const float dot_r = Px(2.5f);
+    for (int i = 0; i < stops; ++i) {
+        const float x = StepSliderStopX(spec.bounds, stops, static_cast<float>(i), scale_);
+        if (std::abs(x - knob_x) < knob_r + Px(2.0f)) continue;   // under the knob
+        dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, cy), dot_r, dot_r),
+                         ScratchBrush(x < knob_x ? dot_fill : dot_rest));
+    }
+    if (!high_contrast_ && state.enabled) {
+        // A soft shadow under the knob; a touch deeper while hovered or held.
+        const float deep = state.pressed || state.hovered ? 1.4f : 1.0f;
+        for (int i = 3; i >= 1; --i) {
+            const float grow = Px(static_cast<float>(i));
+            const int alpha = static_cast<int>((dark_ ? 34.0f : 16.0f) * deep / static_cast<float>(i));
+            dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knob_x, cy + Px(1.0f)), knob_r + grow * 0.5f,
+                                           knob_r + grow * 0.5f),
+                             ScratchBrush(Rgba(0x000000, alpha)));
+        }
+    }
+    const D2D1_ELLIPSE knob_shape = D2D1::Ellipse(D2D1::Point2F(knob_x, cy), knob_r, knob_r);
+    dc_->FillEllipse(knob_shape, ScratchBrush(knob));
+    const float stroke = std::max(1.0f, std::round(Px(1.0f)));
+    dc_->DrawEllipse(D2D1::Ellipse(knob_shape.point, knob_r - stroke * 0.5f, knob_r - stroke * 0.5f),
+                     ScratchBrush(knob_line), stroke);
+    if (state.keyboard_focus) {
+        DrawFocusRing(D2D1::RectF(knob_x - knob_r, cy - knob_r, knob_x + knob_r, cy + knob_r), knob_r);
+    }
 }
 
 void Painter::DrawScrollbar(const ScrollbarSpec& spec) {
@@ -1986,9 +2269,11 @@ void Painter::DrawScrollbar(const ScrollbarSpec& spec) {
     }
     const float progress = high_contrast_ ? 1.0f : Clamp01(spec.expand_progress);
     if (progress > 0.0f) {
-        const auto background = D2D1::RectF(spec.viewport.right - Px(10.0f),
-                                            spec.viewport.top, spec.viewport.right,
-                                            spec.viewport.bottom);
+        const auto background = spec.horizontal
+            ? D2D1::RectF(spec.viewport.left, spec.viewport.bottom - Px(10.0f),
+                          spec.viewport.right, spec.viewport.bottom)
+            : D2D1::RectF(spec.viewport.right - Px(10.0f), spec.viewport.top,
+                          spec.viewport.right, spec.viewport.bottom);
         D2D1_COLOR_F background_color = high_contrast_ ? theme_->surface_flyout
                                             : dark_ ? Rgba(0x2C2C2C, 245)
                                                     : Rgba(0xFCFCFC, 217);
@@ -1999,7 +2284,7 @@ void Painter::DrawScrollbar(const ScrollbarSpec& spec) {
                                : dark_ ? Rgba(0xFFFFFF, 139)
                                        : Rgba(0x000000, 114);
     foreground.a *= opacity;
-    FillRoundedRect(thumb, Width(thumb) * 0.5f, foreground);
+    FillRoundedRect(thumb, std::min(Width(thumb), Height(thumb)) * 0.5f, foreground);
 }
 
 void Painter::DrawBreadcrumbSegment(const BreadcrumbSegmentSpec& spec) {
@@ -2051,6 +2336,9 @@ void Painter::DrawCommandSearchBox(const CommandSearchBoxSpec& spec) {
     field.leading_glyph = kSearch;
     field.state = spec.state;
     field.trailing_keycap = spec.keycap;
+    field.text = spec.text;
+    field.suppress_text = spec.suppress_text;
+    field.hosted_edit = spec.hosted_edit;
     DrawTextField(field);
 }
 
@@ -2159,7 +2447,7 @@ void Painter::DrawSegmentedItem(const SegmentedItemSpec& spec) {
         return;
     }
     const float radius = !spec.shared_track && spec.position == SegmentPosition::Middle
-                             ? 0.0f : Px(theme_->radius_control);
+                             ? 0.0f : Px(spec.shared_track ? 6.0f : theme_->radius_control);
     D2D1_COLOR_F fill = Rgba(0x000000, 0);
     if (spec.state.selected || spec.state.checked) {
         fill = high_contrast_ ? theme_->fill_selected
@@ -2167,20 +2455,27 @@ void Painter::DrawSegmentedItem(const SegmentedItemSpec& spec) {
     } else if (spec.state.enabled && (spec.state.hovered || spec.state.pressed)) {
         fill = spec.state.pressed ? theme_->fill_pressed : theme_->fill_hover;
     }
+    if (!spec.state.enabled) fill.a *= 0.35f;
     const auto plate = spec.shared_track ? Inset(spec.bounds, Px(3.0f)) : spec.bounds;
-    if (fill.a > 0.0f) {
+    if (!spec.suppress_plate && spec.shared_track && spec.state.enabled &&
+        (spec.state.selected || spec.state.checked) && !high_contrast_) {
+        const auto shadow=D2D1::RectF(plate.left,plate.top+Px(1),plate.right,plate.bottom+Px(1));
+        FillRoundedRect(shadow,radius,Rgba(0x000000,dark_ ? 32 : 18));
+    }
+    if (!spec.suppress_plate && fill.a > 0.0f) {
         if (radius > 0.0f) {
             FillRoundedRect(plate, radius, fill);
         } else {
             dc_->FillRectangle(plate, ScratchBrush(fill));
         }
     }
-    if (!spec.shared_track || spec.state.selected || spec.state.checked) {
+    if (!spec.suppress_plate && (!spec.shared_track || spec.state.selected || spec.state.checked)) {
         StrokeRoundedRect(plate, radius,
                           high_contrast_ ? theme_->stroke_card : theme_->stroke_divider);
     }
 
-    const D2D1_COLOR_F foreground = spec.state.enabled ? ((spec.state.selected || spec.state.checked) ? theme_->accent : theme_->text_secondary)
+    const auto accent = spec.shared_track && dark_ && !high_contrast_ ? MixColor(theme_->accent, HexColor(0xFFFFFF), 0.3f) : theme_->accent;
+    const D2D1_COLOR_F foreground = spec.state.enabled ? ((spec.state.selected || spec.state.checked) ? accent : theme_->text_secondary)
                                                         : theme_->text_disabled;
     auto content = Inset(spec.bounds, Px(spec.shared_track ? 3.0f : 6.0f));
     if (!spec.glyph.empty()) {
@@ -2192,7 +2487,7 @@ void Painter::DrawSegmentedItem(const SegmentedItemSpec& spec) {
         content.left += spec.text.empty() ? 0.0f : icon_width + Px(4.0f);
     }
     if (!spec.text.empty()) {
-        DrawText(spec.text, content, BodyFormat(), foreground,
+        DrawText(spec.text, content, spec.shared_track ? NavFormat() : BodyFormat(), foreground,
                  spec.glyph.empty() ? HorizontalAlignment::Center
                                     : HorizontalAlignment::Left);
     }
@@ -2323,10 +2618,12 @@ void Painter::DrawTag(const TagSpec& spec) {
 }
 
 float Painter::MeasureButtonWidth(std::wstring_view text, std::wstring_view glyph,
-                                  bool drop_down) const {
+                                  bool drop_down, std::wstring_view keycap) const {
     float width = Px(8.0f) * 2.0f;
     if (!glyph.empty()) width += Px(20.0f) + Px(4.0f);
     if (drop_down) width += Px(16.0f) + Px(4.0f);
+    if (!keycap.empty())
+        width += typography::MeasureLine(compositor_, CaptionFormat(), keycap) + Px(10.0f) + Px(8.0f);
     width += typography::MeasureLine(compositor_, BodyFormat(), text);
     return std::max(Px(32.0f), std::ceil(width));
 }
@@ -2528,44 +2825,167 @@ void Painter::DrawDriveSidebarItem(const DriveSidebarItemSpec& spec) {
                   icon_color);
     }
     const float text_left = content.left + icon_slot + Px(8.0f);
+    const CapacityLevel level = CapacityLevelFor(spec.capacity, spec.free_bytes);
+    const D2D1_COLOR_F bar_color = spec.bar_color.a > 0.0f ? spec.bar_color
+                                 : spec.icon_color.a > 0.0f ? spec.icon_color
+                                                            : theme_->accent;
+    if (spec.total_bytes > 0) {
+        // Name and percent, a 6 px bar, then the free and total sizes.
+        const std::wstring percent = CapacityPercentText(spec.capacity);
+        const float percent_width = MeasureTextWidth(compositor_->DwriteFactory(),
+                                                     CaptionFormat(), percent) + Px(6.0f);
+        DrawText(spec.name,
+                 D2D1::RectF(text_left, content.top, content.right - percent_width,
+                            content.top + text_row),
+                 NavFormat(), foreground);
+        DrawText(percent,
+                 D2D1::RectF(content.right - percent_width, content.top, content.right,
+                            content.top + text_row),
+                 CaptionFormat(), spec.state.enabled ? CapacityInk(level) : theme_->text_disabled,
+                 HorizontalAlignment::Right);
+        const float bar_top = content.top + text_row + Px(4.0f);
+        DrawCapacityBar(D2D1::RectF(text_left, bar_top, content.right, bar_top + Px(6.0f)),
+                        spec.capacity, bar_color, 1.0f, spec.free_bytes);
+        const float line_top = bar_top + Px(6.0f) + Px(3.0f);
+        DrawCapacitySpaceLine(DriveTileSpaceText(spec.free_bytes, spec.total_bytes), level,
+                              D2D1::RectF(text_left, line_top, content.right, line_top + Px(16.0f)),
+                              spec.state.enabled);
+        if (spec.state.keyboard_focus) {
+            DrawFocusRing(spec.bounds, radius);
+        }
+        return;
+    }
     const float detail_width = MeasureTextWidth(compositor_->DwriteFactory(),
                                                 CaptionFormat(), spec.detail) + Px(6.0f);
     DrawText(spec.name,
              D2D1::RectF(text_left, content.top, content.right - detail_width,
                         content.top + text_row),
              NavFormat(), foreground);
+    // "76.3G 可用" in the level's colour once the drive is filling up.
     DrawText(spec.detail,
              D2D1::RectF(content.right - detail_width, content.top, content.right,
                         content.top + text_row),
-             CaptionFormat(), theme_->text_secondary, HorizontalAlignment::Right);
+             CaptionFormat(), spec.state.enabled ? CapacityInk(level) : theme_->text_disabled,
+             HorizontalAlignment::Right);
 
-    const auto track = D2D1::RectF(text_left, content.bottom - Px(4.0f), content.right,
+    const auto track = D2D1::RectF(text_left, content.bottom - Px(5.0f), content.right,
                                    content.bottom);
-    DrawCapacityBar(track, spec.capacity,
-                    spec.bar_color.a > 0.0f ? spec.bar_color
-                    : spec.icon_color.a > 0.0f ? spec.icon_color
-                                               : theme_->accent);
+    DrawCapacityBar(track, spec.capacity, bar_color, 1.0f, spec.free_bytes);
     if (spec.state.keyboard_focus) {
         DrawFocusRing(spec.bounds, radius);
     }
 }
 
-void Painter::DrawCapacityBar(const D2D1_RECT_F& track, float capacity, D2D1_COLOR_F value_color) {
+void Painter::DrawCapacitySpaceLine(const DriveSpaceText& space, CapacityLevel level,
+                                    const D2D1_RECT_F& bounds, bool enabled) {
+    if (!theme_ || !dc_ || !compositor_ || space.text.empty() || Width(bounds) <= 1.0f ||
+        Height(bounds) <= 0.0f) {
+        return;
+    }
+    IDWriteTextFormat* format = CaptionFormat();
+    IDWriteFactory2* factory = compositor_->DwriteFactory();
+    const D2D1_COLOR_F muted = enabled ? theme_->text_secondary : theme_->text_disabled;
+    const auto size = static_cast<UINT32>(space.text.size());
+    const UINT32 bold_start = (std::min)(static_cast<UINT32>(space.bold_start), size);
+    const UINT32 bold_length = (std::min)(static_cast<UINT32>(space.bold_length), size - bold_start);
+    ComPtr<IDWriteTextLayout> layout;
+    ComPtr<ID2D1SolidColorBrush> strong;
+    if (high_contrast_ || !format || !factory || bold_length == 0 ||
+        FAILED(factory->CreateTextLayout(space.text.c_str(), size, format, Width(bounds),
+                                         Height(bounds), &layout)) || !layout.get() ||
+        FAILED(dc_->CreateSolidColorBrush(
+            enabled ? (level == CapacityLevel::Critical ? CapacityInk(level) : theme_->text) : muted,
+            &strong)) || !strong.get()) {
+        DrawText(space.text, bounds, format, muted);
+        return;
+    }
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    DWRITE_TEXT_METRICS metrics{};
+    if (SUCCEEDED(layout->GetMetrics(&metrics)) && metrics.widthIncludingTrailingWhitespace > Width(bounds)) {
+        DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+        ComPtr<IDWriteInlineObject> ellipsis;
+        factory->CreateEllipsisTrimmingSign(layout.get(), &ellipsis);
+        layout->SetTrimming(&trimming, ellipsis.get());
+    }
+    const DWRITE_TEXT_RANGE bold{bold_start, bold_length};
+    layout->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, bold);
+    // "仅剩 14.7 GB" in red, the words before the size included.
+    layout->SetDrawingEffect(strong.get(), level == CapacityLevel::Critical
+                                               ? DWRITE_TEXT_RANGE{0, bold_start + bold_length}
+                                               : bold);
+    const D2D1_RECT_F snapped = typography::SnapVerticalBounds(bounds);
+    DrawLayoutText(compositor_, dc_, high_contrast_, D2D1::Point2F(snapped.left, snapped.top), layout.get(),
+                   ScratchBrush(muted), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+}
+
+void Painter::DrawCapacityBar(const D2D1_RECT_F& track, float capacity, D2D1_COLOR_F value_color,
+                              float reveal, std::uint64_t free_bytes) {
     if (!theme_ || !dc_ || Width(track) <= 0.0f || Height(track) <= 0.0f) {
         return;
     }
     const float radius = Height(track) * 0.5f;
-    FillRoundedRect(track, radius, dark_ ? Rgba(0xFFFFFF, 20) : Rgba(0x000000, 18));
+    // A quiet groove: a faint fill and a hairline, so an empty drive still
+    // reads as a track on Mica and on the solid pane alike.
+    FillRoundedRect(track, radius, dark_ ? Rgba(0xFFFFFF, 26) : Rgba(0x000000, 19));
+    if (!high_contrast_ && Height(track) >= Px(4.0f)) {
+        StrokeRoundedRect(track, (std::max)(0.0f, radius - 0.5f),
+                          dark_ ? Rgba(0xFFFFFF, 10) : Rgba(0x000000, 9));
+    }
     const float value = Clamp01(capacity);
-    if (value <= 0.0f) {
+    const float grow = Clamp01(reveal);
+    if (value <= 0.0f || grow <= 0.0f) {
         return;
     }
+    // A sliver of use still shows as a round dot rather than vanishing.
+    const float full = (std::min)(Width(track), (std::max)(Width(track) * value, Height(track)));
     auto value_rect = track;
-    value_rect.right = track.left + Width(track) * value;
-    if (value >= 0.90f) {
-        value_color = theme_->danger;
+    value_rect.right = track.left + full * grow;
+    const CapacityLevel level = CapacityLevelFor(value, free_bytes);
+    if (high_contrast_) {
+        FillRoundedRect(value_rect, radius, level == CapacityLevel::Normal ? value_color : theme_->danger);
+        return;
     }
-    FillRoundedRect(value_rect, radius, value_color);
+    // Lighter at the start, the full tone at the end.
+    const auto mix = [](D2D1_COLOR_F a, const D2D1_COLOR_F& b, float t) {
+        a.r += (b.r - a.r) * t;
+        a.g += (b.g - a.g) * t;
+        a.b += (b.b - a.b) * t;
+        a.a = 1.0f;
+        return a;
+    };
+    const D2D1_COLOR_F white = HexColor(0xFFFFFF);
+    D2D1_COLOR_F from{}, to{};
+    switch (level) {
+    case CapacityLevel::Warning:
+        from = dark_ ? HexColor(0xF2C068) : HexColor(0xE2A04A);
+        to = dark_ ? HexColor(0xE0A03A) : HexColor(0xC8811A);
+        break;
+    case CapacityLevel::Critical:
+        from = dark_ ? HexColor(0xFF8A73) : HexColor(0xE5604C);
+        to = dark_ ? HexColor(0xE5533F) : HexColor(0xC42B1C);
+        break;
+    case CapacityLevel::Normal:
+    default:
+        // Dark panes lift the accent a step so the bar keeps its contrast.
+        to = mix(value_color, white, dark_ ? 0.10f : 0.0f);
+        from = mix(value_color, white, dark_ ? 0.32f : 0.24f);
+        break;
+    }
+    if (ID2D1LinearGradientBrush* brush = CachedGradient(from, to)) {
+        // The gradient spans the drive's full fill, so it does not slide while growing.
+        brush->SetStartPoint(D2D1::Point2F(track.left, track.top));
+        brush->SetEndPoint(D2D1::Point2F(track.left + full, track.top));
+        dc_->FillRoundedRectangle(D2D1::RoundedRect(value_rect, radius, radius), brush);
+    } else {
+        FillRoundedRect(value_rect, radius, to);
+    }
+    // A faint top highlight between the round ends gives the fill some body.
+    if (Height(track) >= Px(6.0f) && Width(value_rect) > 2.0f * radius + 2.0f) {
+        const float y = value_rect.top + 0.5f;
+        dc_->DrawLine(D2D1::Point2F(value_rect.left + radius, y), D2D1::Point2F(value_rect.right - radius, y),
+                      ScratchBrush(dark_ ? Rgba(0xFFFFFF, 40) : Rgba(0xFFFFFF, 72)), 1.0f);
+    }
 }
 
 void Painter::DrawPaneHeader(const PaneHeaderSpec& spec) {
@@ -2958,6 +3378,19 @@ float Painter::InfoBarStripHeight(const InfoBarSpec& spec, float width) const {
 D2D1_COLOR_F Painter::StatusToneColor(InfoBarKind kind) const {
     if (!theme_) return D2D1::ColorF(0, 0, 0, 0);
     return MakeInfoTone(*theme_, kind, dark_, high_contrast_, theme_->bg).glyph;
+}
+
+D2D1_COLOR_F Painter::CapacityInk(CapacityLevel level) const {
+    if (!theme_) return D2D1::ColorF(0, 0, 0, 0);
+    switch (level) {
+    case CapacityLevel::Warning:
+        return MakeInfoTone(*theme_, InfoBarKind::Warning, dark_, high_contrast_, theme_->bg).action;
+    case CapacityLevel::Critical:
+        return MakeInfoTone(*theme_, InfoBarKind::Error, dark_, high_contrast_, theme_->bg).action;
+    case CapacityLevel::Normal:
+    default:
+        return theme_->text_secondary;
+    }
 }
 
 // A solid round glyph with the symbol cut out of it, in the tone of `kind`.

@@ -6,7 +6,7 @@
 
 namespace pulse::ops {
 
-// The progress card's speed history (pulse_ops_dialogs.html, speed graph).
+// The progress card's speed history (speed graph).
 // OpsManager records it in the background for the running task, so a card
 // first shown late (or reopened after being hidden) draws the whole run;
 // the card keeps sampling the same way while it is visible.
@@ -28,6 +28,13 @@ struct OpSpeedGraph {
         points.clear();
         by_progress = true;
         last_tick = 0;
+    }
+
+    // Completion is an event, not a periodic sample. Preserve the last measured
+    // rate rather than adding the terminal status's zero speed.
+    void Complete() {
+        if (!by_progress || points.empty() || points.back().x >= 1.0f) return;
+        points.push_back({1.0f, points.back().v});
     }
 
     bool Due(uint64_t now) const { return last_tick == 0 || now - last_tick >= kIntervalMs; }

@@ -1,3 +1,7 @@
+#include "context_working_directory.h"
+#include "host_log_batch.h"
+#include "recycle_restore_index.h"
+#include "../common/recycle_restore.h"
 #include "../common/windows_compat.h"
 // main.cpp — pulse_shell.exe: windowless STA+COM shell-operation proxy.
 //
@@ -12,6 +16,8 @@
 #include "../ipc/protocol.h"
 #include "../ipc/ctx_menu_util.h"
 #include "ctx_handlers.h"
+#include "isolated_start_pin.h"
+#include "start_pin_client.h"
 #include "packaged_ctx_handlers.h"
 #include "../common/current_user_security.h"
 #include "../common/path_utils.h"
@@ -87,8 +93,11 @@ struct HostState {
 constexpr LONGLONG kHostLogMaxBytes = 1024 * 1024;
 const std::wstring& HostLogPath() {
     static const std::wstring path = [] {
-        wchar_t dir[MAX_PATH]{};
-        if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, dir))) return std::wstring();
+        wchar_t dir[32768]{};
+        const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", dir, ARRAYSIZE(dir));
+        if ((!n || n >= ARRAYSIZE(dir)) &&
+            FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, dir)))
+            return std::wstring();
         std::wstring p = std::wstring(dir) + L"\\Pulse";
         CreateDirectoryW(p.c_str(), nullptr);
         return p + L"\\pulse_shell_host.log";
@@ -96,7 +105,13 @@ const std::wstring& HostLogPath() {
     return path;
 }
 
+std::mutex& HostLogMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
 void HostLog(const wchar_t* msg) {
+    std::lock_guard<std::mutex> lock(HostLogMutex());
     const std::wstring& path = HostLogPath();
     if (path.empty()) return;
     const auto open_log = [&path] {
@@ -112,10 +127,66 @@ void HostLog(const wchar_t* msg) {
         f = open_log();
     }
     if (f != INVALID_HANDLE_VALUE) {
-        char buf[512];
-        int n = snprintf(buf, sizeof(buf), "[%lu] %ls\n", GetCurrentProcessId(), msg);
-        if (n > 0) { DWORD w = 0; WriteFile(f, buf, (DWORD)n, &w, nullptr); }
+        // Bound each entry and encode explicitly: the C locale can reject
+        // non-ASCII menu labels when printf converts a wide string.
+        size_t length = 0;
+        while (msg && msg[length] && length < 2048) ++length;
+        if (length && msg[length - 1] >= 0xD800 && msg[length - 1] <= 0xDBFF) --length;
+        std::wstring line = L"[" + std::to_wstring(GetCurrentProcessId()) + L"] ";
+        if (length) line.append(msg, length);
+        line += L"\n";
+        char buf[8192];
+        const int n = WideCharToMultiByte(CP_UTF8, 0, line.data(), static_cast<int>(line.size()),
+                                          buf, static_cast<int>(sizeof(buf)), nullptr, nullptr);
+        if (n > 0) {
+            DWORD written = 0;
+            WriteFile(f, buf, static_cast<DWORD>(n), &written, nullptr);
+        }
         CloseHandle(f);
+    }
+}
+
+bool ContextDiagnosticsEnabled() {
+    static const bool enabled = [] {
+        wchar_t exe[32768]{};
+        const DWORD n = GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
+        if (!n || n >= ARRAYSIZE(exe)) return false;
+        std::wstring path(exe, n);
+        const auto slash = path.find_last_of(L"\\/");
+        if (slash == std::wstring::npos) return false;
+        path.resize(slash + 1);
+        path += L"pulse-context-diagnostics.flag";
+        const DWORD attrs = GetFileAttributesW(path.c_str());
+        return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+    }();
+    return enabled;
+}
+
+std::wstring DiagnosticText(std::wstring value) {
+    if (value.size() > 96) value.resize(96);
+    for (auto& c : value) if (c < L' ' || c == 0x7f) c = L' ';
+    return value;
+}
+
+void ContextDiagnostic(uint32_t sid, const std::wstring& message) {
+    if (!ContextDiagnosticsEnabled()) return;
+    HostLog((L"ctxdiag sid=" + std::to_wstring(sid) + L" " + message).c_str());
+}
+
+void DiagnosticRawRows(uint32_t sid, HMENU menu, const std::wstring& source, UINT depth = 0) {
+    if (!ContextDiagnosticsEnabled() || !menu || depth > 8) return;
+    const int count = (std::min)(GetMenuItemCount(menu), 256);
+    for (int i = 0; i < count; ++i) {
+        wchar_t label[97]{};
+        MENUITEMINFOW info{sizeof(info)};
+        info.fMask = MIIM_ID | MIIM_FTYPE | MIIM_STATE | MIIM_STRING | MIIM_SUBMENU;
+        info.dwTypeData = label;
+        info.cch = ARRAYSIZE(label);
+        if (!GetMenuItemInfoW(menu, static_cast<UINT>(i), TRUE, &info)) continue;
+        ContextDiagnostic(sid, L"raw source=" + DiagnosticText(source) + L" depth=" + std::to_wstring(depth) +
+            L" id=" + std::to_wstring(info.wID) + L" state=" + std::to_wstring(info.fState) +
+            L" type=" + std::to_wstring(info.fType) + L" text=" + DiagnosticText(label));
+        DiagnosticRawRows(sid, info.hSubMenu, source, depth + 1);
     }
 }
 
@@ -411,162 +482,22 @@ HRESULT ExecuteCreate(const uint32_t type, const std::wstring& path) {
     return S_OK;
 }
 
-std::wstring CanonPath(std::wstring p) {
-    p = ToParsingPath(std::move(p));
-    for (auto& c : p) {
-        if (c == L'/') c = L'\\';
-        c = static_cast<wchar_t>(towupper(c));
-    }
-    while (p.size() > 3 && p.back() == L'\\') p.pop_back();
-    return p;
-}
-
-bool ReadRecycleOriginal(const std::wstring& i_path, std::wstring& original) {
-    original.clear();
-    pulse::recycle::IndexRecord record;
-    if (!pulse::recycle::ReadIndex(i_path, record)) return false;
-    original = std::move(record.original_path);
-    return true;
-}
-
-// \\?\ form for the Win32 calls below: this host has no longPathAware
-// manifest, and restored items are often deeper than MAX_PATH.
-std::wstring ExtendedPath(const std::wstring& path) {
-    std::wstring plain = pulse::path::StripExtendedPathPrefix(path);
-    std::replace(plain.begin(), plain.end(), L'/', L'\\');
-    if (plain.size() > 2 && plain[0] == L'\\' && plain[1] == L'\\')
-        return L"\\\\?\\UNC\\" + plain.substr(2);
-    return L"\\\\?\\" + plain;
-}
-
-// Length of the "\\?\C:\" or "\\?\UNC\server\share\" root of an ExtendedPath.
-size_t ExtendedRootLength(const std::wstring& path) {
-    if (path.rfind(L"\\\\?\\UNC\\", 0) != 0) return 7;
-    const size_t server = path.find(L'\\', 8);
-    const size_t share = server == std::wstring::npos ? server : path.find(L'\\', server + 1);
-    return share == std::wstring::npos ? path.size() : share + 1;
-}
-
-// The Shell's Restore recreates the original folder when it is gone.
-bool EnsureParentFolder(const std::wstring& path, size_t root) {
-    const size_t slash = path.find_last_of(L'\\');
-    if (slash == std::wstring::npos || slash + 1 <= root) return true;
-    const std::wstring parent = path.substr(0, slash);
-    const DWORD attributes = GetFileAttributesW(parent.c_str());
-    if (attributes != INVALID_FILE_ATTRIBUTES) return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    if (!EnsureParentFolder(parent, root)) return false;
-    return CreateDirectoryW(parent.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS;
-}
-
-// "name (2).ext": the next free name beside a taken one, as the Shell's
-// "keep both" names it.
-std::wstring FreeSiblingName(const std::wstring& path, bool folder) {
-    const size_t slash = path.find_last_of(L'\\');
-    const std::wstring dir = path.substr(0, slash + 1);
-    const std::wstring name = path.substr(slash + 1);
-    size_t dot = folder ? std::wstring::npos : name.find_last_of(L'.');
-    if (dot == 0) dot = std::wstring::npos;
-    const std::wstring stem = name.substr(0, dot);
-    const std::wstring extension = dot == std::wstring::npos ? L"" : name.substr(dot);
-    for (int n = 2; n < 10000; ++n) {
-        std::wstring candidate = dir + stem + L" (" + std::to_wstring(n) + L")" + extension;
-        if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) return candidate;
-    }
-    return {};
-}
-
-// The production caller validates the current user's recycle-root identity
-// before reaching this step. Tests use only their own isolated $I/$R fixtures.
-// Restores like the Shell's Restore: a missing original folder is recreated,
-// long paths work, and when the original name is taken again both are kept by
-// restoring under the next free "name (N)" name.
-bool RestoreSelectedRecyclePayload(const std::wstring& payload, std::wstring& error) {
-    std::wstring index = payload;
-    const size_t slash = index.find_last_of(L"\\/");
-    if (slash == std::wstring::npos || slash + 2 >= index.size()) return false;
-    index[slash + 2] = L'I';
-    std::wstring original;
-    if (!ReadRecycleOriginal(index, original)) {
-        error = L"无法读取所选回收站条目";
-        return false;
-    }
-    const std::wstring source = ExtendedPath(payload);
-    const DWORD attributes = GetFileAttributesW(source.c_str());
-    if (attributes == INVALID_FILE_ATTRIBUTES) {
-        error = L"回收站中未找到该项";
-        return false;
-    }
-    const bool folder = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    std::wstring dest = ExtendedPath(original);
-    bool moved = false;
-    if (EnsureParentFolder(dest, ExtendedRootLength(dest))) {
-        // A name taken between the check and the move just moves on to the next one.
-        for (int attempt = 0; !moved && !dest.empty() && attempt < 4; ++attempt) {
-            if (GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES) dest = FreeSiblingName(dest, folder);
-            if (dest.empty()) break;
-            moved = MoveFileExW(source.c_str(), dest.c_str(), MOVEFILE_COPY_ALLOWED) != FALSE;
-            if (!moved) {
-                const DWORD move_error = GetLastError();
-                if (move_error != ERROR_ALREADY_EXISTS && move_error != ERROR_FILE_EXISTS) break;
-            }
-        }
-    }
-    if (!moved) {
-        error = L"还原失败 | " + pulse::path::StripExtendedPathPrefix(original);
-        return false;
-    }
-    DeleteFileW(ExtendedPath(index).c_str());
-    // Explorer windows on the original folder and on the Recycle Bin update.
-    const std::wstring shown = pulse::path::StripExtendedPathPrefix(dest);
-    const std::wstring gone = pulse::path::StripExtendedPathPrefix(source);
-    SHChangeNotify(folder ? SHCNE_MKDIR : SHCNE_CREATE, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, shown.c_str(), nullptr);
-    SHChangeNotify(folder ? SHCNE_RMDIR : SHCNE_DELETE, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, gone.c_str(), nullptr);
-    return true;
-}
-
-bool RestoreOneFromRecycle(const std::wstring& payload, std::wstring& error) {
-    const std::wstring wanted = CanonPath(payload);
-    const std::wstring sid = pulse::CurrentUserSidString();
-    if (wanted.size() < 3 || wanted[1] != L':' || sid.empty()) {
-        error = L"无法确定当前用户的回收站";
-        return false;
-    }
-    const std::wstring parent = wanted.substr(0, wanted.find_last_of(L'\\'));
-    const std::wstring expected = CanonPath(wanted.substr(0, 2) + L"\\$Recycle.Bin\\" + sid);
-    const std::wstring name = wanted.substr(wanted.find_last_of(L'\\') + 1);
-    if (parent != expected || name.size() <= 2 || name.substr(0, 2) != L"$R") {
-        // Legacy undo records contain only the original path. Never guess
-        // between multiple versions of that path.
-        WIN32_FIND_DATAW data{};
-        HANDLE find = FindFirstFileW((expected + L"\\$I*").c_str(), &data);
-        std::wstring match;
-        bool ambiguous = false;
-        if (find != INVALID_HANDLE_VALUE) {
-            do {
-                std::wstring original;
-                const std::wstring index = expected + L"\\" + data.cFileName;
-                if (!ReadRecycleOriginal(index, original) || CanonPath(original) != wanted) continue;
-                std::wstring candidate = index;
-                candidate[candidate.find_last_of(L'\\') + 2] = L'R';
-                if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
-                if (!match.empty()) { ambiguous = true; break; }
-                match = std::move(candidate);
-            } while (FindNextFileW(find, &data));
-            FindClose(find);
-        }
-        if (!match.empty() && !ambiguous) return RestoreOneFromRecycle(match, error);
-        error = L"无法唯一确定回收站版本，请在回收站中选择具体条目";
-        return false;
-    }
-    return RestoreSelectedRecyclePayload(payload, error);
-}
+using pulse::recycle::CanonPath;
+using pulse::recycle::ReadRecycleOriginal;
+using pulse::recycle::ExtendedPath;
+using pulse::recycle::ExtendedRootLength;
+using pulse::recycle::EnsureParentFolder;
+using pulse::recycle::FreeSiblingName;
+using pulse::recycle::RestoreSelectedRecyclePayload;
+using pulse::recycle::RestoreOneFromRecycle;
 
 HRESULT ExecuteRestore(const std::vector<std::wstring>& paths, std::wstring& error) {
     if (paths.empty()) return E_INVALIDARG;
     size_t ok = 0;
+    pulse::shell::RecycleRestoreIndex lookup;
     for (const auto& src : paths) {
         std::wstring one_error;
-        if (RestoreOneFromRecycle(src, one_error)) {
+        if (RestoreOneFromRecycle(src, one_error, lookup)) {
             ++ok;
         } else if (error.empty()) {
             error = one_error;
@@ -768,10 +699,12 @@ void ExecuteShellVerb(Request* req) {
             for (wchar_t c : verb) verb_a.push_back(c < 0x80 ? static_cast<char>(c) : '?');
         }
         if (SUCCEEDED(hr)) {
+            const auto dir = pulse::shell::ContextWorkingDirectory(ToParsingPath(req->sources.front()), background);
             CMINVOKECOMMANDINFOEX info{};
             info.cbSize = sizeof(info);
             info.fMask = CMIC_MASK_UNICODE;
             info.hwnd = owner;
+            info.lpDirectoryW = dir.empty() ? nullptr : dir.c_str();
             if (verb.empty()) {
                 info.lpVerb = MAKEINTRESOURCEA(default_id);
                 info.lpVerbW = MAKEINTRESOURCEW(default_id);
@@ -1288,6 +1221,7 @@ void SendCtxItems(uint32_t session_id, const std::vector<CtxItemOut>& items,
         if (it.separator_after) item_flags |= CTX_ITEM_SEPARATOR_AFTER;
         if (it.has_children) item_flags |= CTX_ITEM_HAS_CHILDREN;
         if (it.child) item_flags |= CTX_ITEM_CHILD;
+        item_flags |= PackCtxItemDepth(it.depth);
         item_flags |= pulse::ipc::PackCtxItemMnemonic(it.mnemonic);
         w.PutU32(item_flags);
         w.PutString(it.verb);
@@ -1348,6 +1282,7 @@ void CollectCtxItems(IContextMenu* menu, IContextMenu2* menu2, HMENU hmenu,
 // draws itself): one host log line per row, so a user's log tells whether a
 // row Explorer shows never came or was lost on the way to the app.
 void LogShellMenuRows(IContextMenu* menu, HMENU hmenu) {
+    pulse::shell::HostLogBatch log(HostLogPath(), nullptr, 64, kHostLogMaxBytes, &HostLogMutex());
     const int count = GetMenuItemCount(hmenu);
     wchar_t head[64];
     swprintf_s(head, L"phone ctx: %d native rows", count);
@@ -1360,7 +1295,7 @@ void LogShellMenuRows(IContextMenu* menu, HMENU hmenu) {
         mii.cch = ARRAYSIZE(text);
         if (!GetMenuItemInfoW(hmenu, static_cast<UINT>(i), TRUE, &mii)) continue;
         if (mii.fType & MFT_SEPARATOR) {
-            HostLog(L"phone ctx:   ----");
+            log.Add(L"phone ctx:   ----");
             continue;
         }
         wchar_t verb[64]{};
@@ -1375,7 +1310,7 @@ void LogShellMenuRows(IContextMenu* menu, HMENU hmenu) {
         line += text;
         if (mii.hSubMenu) line += L" >";
         if (mii.fState & MFS_DISABLED) line += L" (disabled)";
-        HostLog(line.c_str());
+        log.Add(line.c_str());
     }
 }
 
@@ -1425,6 +1360,7 @@ HRESULT BuildCtxMenu(const CtxSessionData& d, IContextMenu** out_menu, HMENU* ou
         menu->Release();
         return hr;
     }
+    DiagnosticRawRows(d.session_id, hmenu, L"fallback");
     const bool phone_items = !d.background && IsShellNamespacePath(ToParsingPath(d.paths.front()));
     if (phone_items) LogShellMenuRows(menu, hmenu);
     IContextMenu2* menu2 = nullptr;
@@ -1438,6 +1374,15 @@ HRESULT BuildCtxMenu(const CtxSessionData& d, IContextMenu** out_menu, HMENU* ou
     if (menu2) menu2->Release();
     *out_menu = menu;
     *out_hmenu = hmenu;
+    return S_OK;
+}
+
+HRESULT InvokeStartPinPaths(const std::vector<std::wstring>& paths, bool pin) {
+    if (paths.empty()) return E_INVALIDARG;
+    for (const auto& path : paths) {
+        const HRESULT hr = pulse::start_pin::Invoke(ToParsingPath(path), pin);
+        if (FAILED(hr)) return hr;
+    }
     return S_OK;
 }
 
@@ -1456,6 +1401,11 @@ void CtxInvoke(const CtxSessionData& d, IContextMenu* menu, UINT id_first,
                                          reinterpret_cast<LPSTR>(verb_buf),
                                          ARRAYSIZE(verb_buf)))) {
         verb_buf[ARRAYSIZE(verb_buf) - 1] = L'\0';  // some handlers fill the buffer unterminated
+        if (!_wcsicmp(verb_buf, L"PinToStartScreen") || !_wcsicmp(verb_buf, L"UnpinFromStartScreen")) {
+            const HRESULT hr = InvokeStartPinPaths(d.paths, !_wcsicmp(verb_buf, L"PinToStartScreen"));
+            SendDone(invoke_req_id, hr, false, FAILED(hr) ? L"context menu invoke failed" : L"");
+            return;
+        }
         HRESULT pin_hr = E_FAIL;
         if (_wcsicmp(verb_buf, L"taskbarpin") == 0) {
             if (pulse::shell::InvokeTaskbandPin(d.paths, pin_hr)) {
@@ -1472,13 +1422,7 @@ void CtxInvoke(const CtxSessionData& d, IContextMenu* menu, UINT id_first,
             HostLog(L"taskbarpin: TaskbarPinManager unavailable, using InvokeCommand");
         }
     }
-    std::wstring dir = ToParsingPath(d.paths.front());
-    if (IsShellNamespacePath(dir)) {
-        dir.clear();  // a phone item has no directory to run in
-    } else if (!d.background) {
-        const auto slash = dir.find_last_of(L'\\');
-        if (slash != std::wstring::npos && slash > 2) dir.resize(slash);
-    }
+    const auto dir = pulse::shell::ContextWorkingDirectory(ToParsingPath(d.paths.front()), d.background);
     CMINVOKECOMMANDINFOEX info{};
     info.cbSize = sizeof(info);
     info.fMask = CMIC_MASK_UNICODE;
@@ -1509,6 +1453,7 @@ struct HandlerWorker {
         if (exit_event) CloseHandle(exit_event);
         if (thread) CloseHandle(thread);
     }
+    uint32_t session_id = 0;
     pulse::shell::CtxHandlerDesc desc;
     std::vector<std::wstring> paths;
     bool background = false;
@@ -1517,6 +1462,7 @@ struct HandlerWorker {
     UINT id_last = 0;
     UINT qcm_flags = 0;
     pulse::shell::CtxHandlerSlot slot;
+    std::unique_ptr<pulse::shell::IsolatedStartPinSession> isolated_start_pin;
     std::vector<CtxItemOut> items;
     std::vector<pulse::shell::SendToTarget> send_to;   // native 发送到 only
     HANDLE done_event = nullptr;
@@ -1562,14 +1508,33 @@ DWORD HandlerWorkerThreadImpl(LPVOID param) {
         const std::wstring title = pulse::shell::NativeSendToTitle(&mnemonic);
         pulse::shell::NativeSendToItems(w->send_to, title, mnemonic, w->id_first, w->id_last,
                                         w->items);
+    } else if (_wcsicmp(w->desc.clsid_text.c_str(),
+                       L"{470c0ebd-5d73-4d58-9ced-e91e22e23282}") == 0) {
+        // Keep native menu enumeration isolated. Invocation is delegated to
+        // the Explorer extension because Windows checks the caller identity.
+        w->isolated_start_pin = std::make_unique<pulse::shell::IsolatedStartPinSession>();
+        const HRESULT hr = w->isolated_start_pin->Query(w->paths, w->owner,
+            w->id_first, w->id_last, w->qcm_flags, w->exit_event, w->items);
+        w->phase = 1;
+        ContextDiagnostic(w->session_id, L"isolated handler=" + DiagnosticText(w->desc.clsid_text) +
+            L" hr=" + std::to_wstring(static_cast<unsigned long>(hr)));
+        if (FAILED(hr)) {
+            w->items.clear();
+            w->isolated_start_pin.reset();
+        }
     } else if (pulse::shell::BindCtxSelection(w->paths, w->background, bind)) {
         const HRESULT hr = pulse::shell::QueryOneHandler(
             w->desc, bind, w->owner, w->id_first, w->id_last, w->qcm_flags, w->slot, &w->phase);
+        ContextDiagnostic(w->session_id, L"handler=" + DiagnosticText(w->desc.clsid_text) +
+            L" hr=" + std::to_wstring(static_cast<unsigned long>(hr)));
+        DiagnosticRawRows(w->session_id, w->slot.hmenu, w->desc.clsid_text);
         if (SUCCEEDED(hr) && w->slot.menu)
             pulse::shell::CollectHandlerItems(w->slot, w->background, w->items);
         else
             pulse::shell::ReleaseHandlerSlot(w->slot);
     }
+    ContextDiagnostic(w->session_id, L"worker completed handler=" + DiagnosticText(w->desc.clsid_text) +
+        L" phase=" + std::to_wstring(w->phase.load()) + L" rows=" + std::to_wstring(w->items.size()));
     w->elapsed_ms = static_cast<uint32_t>(GetTickCount64() - t0);
     if (w->done_event) SetEvent(w->done_event);
 
@@ -1590,7 +1555,18 @@ DWORD HandlerWorkerThreadImpl(LPVOID param) {
                 d.background = w->background;
                 if (IsNativeSendToClsid(w->desc.clsid_text))
                     InvokeNativeSendTo(*w, inv->invoke_req_id, inv->item_id);
-                else if (w->slot.menu && inv->item_id >= w->id_first)
+                else if (w->isolated_start_pin) {
+                    HRESULT hr = E_INVALIDARG;
+                    for (const auto& item : w->items) {
+                        if (item.id != inv->item_id || !item.enabled || item.has_children) continue;
+                        if (!_wcsicmp(item.verb.c_str(), L"PinToStartScreen") ||
+                            !_wcsicmp(item.verb.c_str(), L"UnpinFromStartScreen"))
+                            hr = InvokeStartPinPaths(w->paths, !_wcsicmp(item.verb.c_str(), L"PinToStartScreen"));
+                        break;
+                    }
+                    SendDone(inv->invoke_req_id, hr, false,
+                             FAILED(hr) ? L"context menu invoke failed" : L"");
+                } else if (w->slot.menu && inv->item_id >= w->id_first)
                     CtxInvoke(d, w->slot.menu, w->id_first, inv->invoke_req_id, inv->item_id);
                 else
                     SendDone(inv->invoke_req_id, E_INVALIDARG, false,
@@ -1606,6 +1582,7 @@ DWORD HandlerWorkerThreadImpl(LPVOID param) {
         if (invoked || exiting) break;
     }
     pulse::shell::ReleaseHandlerSlot(w->slot);
+    w->isolated_start_pin.reset();
     pulse::shell::FreeSendToTargets(w->send_to);
     CoUninitialize();
     return 0;
@@ -1721,6 +1698,25 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
     constexpr DWORD kHandlerStuckMs = 5000;
     const ULONGLONG started = GetTickCount64();
     UINT qcm_flags = QueryContextMenuFlags(*data);
+    if (ContextDiagnosticsEnabled()) {
+        ContextDiagnostic(sid, L"request count=" + std::to_wstring(data->paths.size()) +
+            L" background=" + std::to_wstring(data->background) + L" flags=" + std::to_wstring(qcm_flags));
+        for (size_t i = 0; i < (std::min)(data->paths.size(), size_t{32}); ++i) {
+            const auto& path = data->paths[i];
+            const bool shell = IsShellNamespacePath(path);
+            const DWORD attrs = shell ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(path.c_str());
+            const wchar_t* kind = shell ? L"namespace" : attrs == INVALID_FILE_ATTRIBUTES ? L"unknown" :
+                (attrs & FILE_ATTRIBUTE_DIRECTORY) ? L"directory" : L"file";
+            const auto dot = path.find_last_of(L'.');
+            const auto slash = path.find_last_of(L"\\/");
+            const std::wstring extension = !shell && dot != std::wstring::npos &&
+                (slash == std::wstring::npos || dot > slash) ? path.substr(dot) : std::wstring();
+            ContextDiagnostic(sid, L"object=" + std::to_wstring(i) + L" type=" + kind +
+                L" extension=" + (shell ? std::wstring() : DiagnosticText(extension)));
+        }
+        for (const auto& clsid : data->disabled_clsids)
+            ContextDiagnostic(sid, L"disabled=" + DiagnosticText(clsid));
+    }
 
     std::vector<std::unique_ptr<HandlerWorker>> workers;
     std::vector<CtxItemOut> items;
@@ -1787,6 +1783,7 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
     for (const auto& handler : handlers) {
         if (next_id + kIdsPerHandler > kCtxIdLast) break;
         auto worker = std::make_unique<HandlerWorker>();
+        worker->session_id = sid;
         worker->desc = handler;
         worker->paths = data->paths;
         worker->background = data->background;
@@ -1962,7 +1959,8 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
         pump_session_messages();
         items = collect_items(statuses);
     } else {
-        api.fallback(*data, &fallback_menu, &fallback_hmenu, items);
+        const HRESULT fallback_hr = api.fallback(*data, &fallback_menu, &fallback_hmenu, items);
+        ContextDiagnostic(sid, L"fallback hr=" + std::to_wstring(static_cast<unsigned long>(fallback_hr)));
     }
 
     const uint32_t elapsed = static_cast<uint32_t>(GetTickCount64() - started);
@@ -1982,6 +1980,16 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
         swprintf_s(line, L"handler %ls %ums rows=%u%ls", status.clsid.c_str(), status.elapsed_ms,
                    status.rows, (status.flags & CTX_HANDLER_DONE) ? L"" : L" unfinished");
         api.log(line);
+    }
+    if (ContextDiagnosticsEnabled()) {
+        for (const auto& status : statuses)
+            ContextDiagnostic(sid, L"status=" + DiagnosticText(status.clsid) + L" flags=" +
+                std::to_wstring(status.flags) + L" rows=" + std::to_wstring(status.rows) +
+                L" ms=" + std::to_wstring(status.elapsed_ms));
+        for (const auto& item : items)
+            ContextDiagnostic(sid, L"output id=" + std::to_wstring(item.id) + L" enabled=" +
+                std::to_wstring(item.enabled) + L" child=" + std::to_wstring(item.child) +
+                L" verb=" + DiagnosticText(item.verb) + L" text=" + DiagnosticText(item.text));
     }
     SendCtxItems(sid, items, 0, collect_hung(), statuses);
 
@@ -2195,6 +2203,7 @@ DWORD WINAPI ParentWatchdog(LPVOID param) {
 // cached in PackagedContextMenuVerbs() behind its own lock.
 DWORD WINAPI PackagedVerbsPrewarm(LPVOID) {
     const HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    pulse::shell::IsolatedStartPinSession::Prewarm();
     const ULONGLONG start = GetTickCount64();
     const size_t count = pulse::shell::PackagedContextMenuVerbs().size();
     wchar_t buf[96];
@@ -2255,6 +2264,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     // Declare PMv2 before COM or any HWND exists so Windows does not bitmap-scale
     // those dialogs on high-DPI displays.
     pulse::compat::EnableDpiAwareness();
+    if (__argc > 1 && wcscmp(__wargv[1], L"--isolated-start-pin") == 0)
+        return pulse::shell::RunIsolatedStartPin(__argc, __wargv);
 
     DWORD ui_pid = GetCurrentProcessId();
     if (__argc > 1) {
@@ -2269,6 +2280,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(hr)) return 1;
+    if (__argc == 3 && (!_wcsicmp(__wargv[1], L"--start-pin") || !_wcsicmp(__wargv[1], L"--start-unpin"))) {
+        hr = pulse::start_pin::Invoke(__wargv[2], !_wcsicmp(__wargv[1], L"--start-pin"));
+        CoUninitialize();
+        return static_cast<int>(hr);
+    }
 
     std::wstring pipe_name = PipeNameFor(ui_pid);
     pulse::CurrentUserSecurityAttributes pipe_security;

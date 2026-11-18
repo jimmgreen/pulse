@@ -305,7 +305,7 @@ void AppendGitStatusText(const app::Tab& tab, std::wstring& text) {
 void AppendGitMenu(const app::Tab& tab, std::vector<ui::FluentMenuItem>& items) {
     if (tab.git_root.empty()) return;
     ui::FluentMenuItem git;
-    git.text = L"Git";
+    git.text = l10n::Get(l10n::StringId::Git);
     git.glyph = L"\xE8B7";
     git.children.push_back(BranchRow(tab.git_root));
     for (auto& row : GitRows(tab.git_root)) git.children.push_back(std::move(row));

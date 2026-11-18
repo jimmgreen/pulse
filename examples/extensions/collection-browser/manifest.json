@@ -1,0 +1,194 @@
+{
+  "apiVersion": 1,
+  "commands": [
+    {
+      "id": "refreshHost",
+      "title": "Refresh current folder",
+      "capability": "view.refresh"
+    }
+  ],
+  "id": "sample.collection-browser",
+  "name": "Current folder collection",
+  "panel": {
+    "title": "Current folder collection",
+    "ui": {
+      "version": 1,
+      "state": [
+        {
+          "key": "filter",
+          "value": ""
+        },
+        {
+          "key": "sort",
+          "value": "nameAsc"
+        },
+        {
+          "key": "status",
+          "value": "idle"
+        },
+        {
+          "key": "error",
+          "value": ""
+        },
+        {
+          "key": "progress",
+          "value": "0"
+        },
+        {
+          "key": "selection",
+          "value": ""
+        }
+      ],
+      "actions": [
+        {
+          "id": "loadEntries",
+          "dataOperation": {
+            "target": "entries",
+            "operation": "refresh"
+          }
+        },
+        {
+          "id": "nextEntries",
+          "dataOperation": {
+            "target": "entries",
+            "operation": "nextPage"
+          }
+        },
+        {
+          "id": "cancelEntries",
+          "dataOperation": {
+            "target": "entries",
+            "operation": "cancel"
+          }
+        },
+        {
+          "id": "retryEntries",
+          "dataOperation": {
+            "target": "entries",
+            "operation": "retry"
+          }
+        },
+        {
+          "id": "sortAsc",
+          "updates": [
+            {
+              "key": "sort",
+              "value": "nameAsc"
+            }
+          ]
+        },
+        {
+          "id": "sortDesc",
+          "updates": [
+            {
+              "key": "sort",
+              "value": "nameDesc"
+            }
+          ]
+        }
+      ],
+      "root": {
+        "type": "scrollView",
+        "id": "collection-root",
+        "children": [
+          {
+            "type": "text",
+            "id": "collection-help",
+            "text": "Browse entries already loaded in the current host folder."
+          },
+          {
+            "type": "textInput",
+            "id": "filter-input",
+            "text": "Filter entries",
+            "state": "filter",
+            "placeholder": "Filter by name"
+          },
+          {
+            "type": "stack",
+            "id": "sort-actions",
+            "children": [
+              {
+                "type": "button",
+                "id": "sort-asc",
+                "text": "Name ascending",
+                "command": "sortAsc",
+                "flex": 1,
+                "minWidth": 140
+              },
+              {
+                "type": "button",
+                "id": "sort-desc",
+                "text": "Name descending",
+                "command": "sortDesc",
+                "flex": 1,
+                "minWidth": 140
+              }
+            ],
+            "orientation": "horizontal"
+          },
+          {
+            "type": "virtualList",
+            "id": "entries",
+            "state": "selection",
+            "minHeight": 240,
+            "dataSource": {
+              "source": "context.directoryEntries",
+              "pageSize": 64,
+              "filterState": "filter",
+              "sortState": "sort",
+              "statusState": "status",
+              "errorState": "error",
+              "progressState": "progress"
+            }
+          },
+          {
+            "type": "text",
+            "id": "load-status",
+            "binding": "state.status"
+          },
+          {
+            "type": "text",
+            "id": "load-error",
+            "binding": "state.error"
+          },
+          {
+            "type": "progress",
+            "id": "load-progress",
+            "binding": "state.progress"
+          },
+          {
+            "type": "grid",
+            "id": "page-actions",
+            "columns": 4,
+            "children": [
+              {
+                "type": "button",
+                "id": "load",
+                "text": "Refresh snapshot",
+                "command": "loadEntries"
+              },
+              {
+                "type": "button",
+                "id": "next-page",
+                "text": "Next page",
+                "command": "nextEntries"
+              },
+              {
+                "type": "button",
+                "id": "cancel",
+                "text": "Cancel loading",
+                "command": "cancelEntries"
+              },
+              {
+                "type": "button",
+                "id": "retry",
+                "text": "Retry loading",
+                "command": "retryEntries"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

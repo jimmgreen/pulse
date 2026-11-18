@@ -1,4 +1,5 @@
 #include "../preview_host/gif_decoder.h"
+#include "gif_fixture.h"
 #include <objbase.h>
 #include <filesystem>
 #include <fstream>
@@ -6,29 +7,14 @@
 #include <array>
 #include <algorithm>
 #include <thread>
+#include <chrono>
 using namespace pulse::preview;
 using Bytes = std::vector<uint8_t>;
 namespace {
 int failures = 0;
 void Check(bool ok, const char* name) { std::cout << (ok ? "[PASS] " : "[FAIL] ") << name << '\n'; failures += !ok; }
-void Word(Bytes& out, uint32_t n) { out.push_back(static_cast<uint8_t>(n)); out.push_back(static_cast<uint8_t>(n >> 8)); }
-void Frame(Bytes& out, uint32_t x, uint32_t width, uint32_t height, uint8_t color, uint8_t disposal, bool transparent = false) {
-    out.insert(out.end(), {0x21, 0xf9, 4, static_cast<uint8_t>((disposal << 2) | (transparent ? 1 : 0)), 10, 0, 3, 0, 0x2c});
-    Word(out, x); Word(out, 0); Word(out, width); Word(out, height); out.push_back(0);
-    Bytes data; uint32_t bits = 0; unsigned used = 0;
-    auto code = [&](uint32_t value) {
-        bits |= value << used; used += 3;
-        while (used >= 8) { data.push_back(static_cast<uint8_t>(bits)); bits >>= 8; used -= 8; }
-    };
-    for (uint32_t i = 0; i < width * height; ++i) { code(4); code(color); }
-    code(5); if (used) data.push_back(static_cast<uint8_t>(bits));
-    out.push_back(2);
-    for (size_t at = 0; at < data.size();) {
-        const auto n = (std::min)(size_t(255), data.size() - at);
-        out.push_back(static_cast<uint8_t>(n)); out.insert(out.end(), data.begin() + at, data.begin() + at + n); at += n;
-    }
-    out.push_back(0);
-}
+using pulse_test::gif_fixture::Word;
+using pulse_test::gif_fixture::Frame;
 Bytes Animation(uint32_t count = 4, uint8_t base = 0) {
     Bytes out{'G','I','F','8','9','a'}; Word(out, 4); Word(out, 2);
     out.insert(out.end(), {0x81,0,0, 255,0,0, 0,255,0, 0,0,255, 255,255,255});
@@ -44,7 +30,114 @@ bool Pixel(const GifFrame& frame, UINT x, std::array<uint8_t, 4> value) {
     return frame.pixels.size() >= (size_t(x) + 1) * 4 && std::equal(value.begin(), value.end(), frame.pixels.begin() + x * 4);
 }
 }
-int wmain() {
+int MemoryRegression() {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const auto root = std::filesystem::absolute(L"bench_data");
+    std::filesystem::create_directories(root);
+    const auto folder = root / (L"gif-memory-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    if (!CreateDirectoryW(folder.c_str(), nullptr)) return 2;
+    {
+        struct Patch { uint32_t x, y, w, h; uint8_t color, disposal; bool transparent; };
+        const Patch patches[] = {
+            {0,0,16,16,0,1,false}, {0,0,16,16,1,3,false},
+            {3,5,4,6,2,3,false}, {14,13,2,3,3,3,true},
+            {13,12,3,4,1,3,false}, {0,0,1,1,2,1,false}};
+        Bytes bytes{'G','I','F','8','9','a'}; Word(bytes,16); Word(bytes,16);
+        bytes.insert(bytes.end(), {0x81,0,0,255,0,0,0,255,0,0,0,255,255,255,255});
+        std::vector<Bytes> expected;
+        Bytes canvas(16*16*4), backup;
+        const std::array<uint8_t,4> colors[] = {{0,0,255,255},{0,255,0,255},{255,0,0,255},{0,0,0,0}};
+        for (size_t i=0;i<std::size(patches);++i) {
+            const auto& p=patches[i];
+            if (i && patches[i-1].disposal==3) canvas=backup;
+            if (p.disposal==3) backup=canvas;
+            for (uint32_t y=p.y;y<p.y+p.h;++y) for(uint32_t x=p.x;x<p.x+p.w;++x)
+                if (!(p.transparent && p.color==3)) std::copy(colors[p.color].begin(),colors[p.color].end(),canvas.begin()+(y*16+x)*4);
+            expected.push_back(canvas);
+            Frame(bytes,p.x,p.w,p.h,p.color,p.disposal,p.transparent,p.y);
+        }
+        bytes.push_back(0x3b);
+        const auto fixture=folder/L"regions.gif";
+        Check(Write(fixture,bytes),"write full, partial, edge, transparent and consecutive disposal-3 fixture");
+        GifDecoder decoder; GifFrame frame;
+        bool pixels=true;
+        for (uint32_t i : {0u,1u,2u,3u,4u,5u,2u,5u,0u,4u,3u,1u,5u})
+            pixels &= decoder.Decode(fixture,16,i,frame) && frame.pixels==expected[i];
+        Check(pixels,"all pixels match independent full-canvas reference after forward/reverse/repeated seeks");
+
+        Bytes large{'G','I','F','8','9','a'}; Word(large,2048); Word(large,2048);
+        large.insert(large.end(),{0x81,0,0,255,0,0,0,255,0,0,0,255,255,255,255});
+        Frame(large,0,1,1,0,1);
+        Frame(large,17,32,32,1,3,false,13);
+        Frame(large,2040,8,7,2,3,false,2041);
+        Frame(large,0,1,1,0,1);
+        large.push_back(0x3b);
+        const auto large_path=folder/L"large.gif";
+        Check(Write(large_path,large),"write large canvas with small disposal patches");
+        GifDecoder resident;
+        uint64_t checksum=1469598103934665603ull;
+        bool decoded=true;
+        const auto begin=std::chrono::steady_clock::now();
+        for(int repeat=0;repeat<30;++repeat) for(uint32_t index=0;index<4;++index) {
+            decoded &= resident.Decode(large_path,256,index,frame);
+            for(auto pixel:frame.pixels) { checksum^=pixel; checksum*=1099511628211ull; }
+        }
+        const auto elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
+        const auto stats=resident.Stats();
+        std::cout << "MEMORY backup_capacity_bytes=" << stats.backup_capacity_bytes
+            << " loads=" << stats.cache_loads << " decoded=" << stats.decoded_frames
+            << " repeated_ms=" << elapsed << " checksum=" << checksum << '\n';
+        Check(decoded && stats.cache_loads==1 && stats.decoded_frames==120,"repeated playback keeps one decoder and linear frame decode count");
+        Check(stats.backup_capacity_bytes<=32*32*4,"backup allocation follows largest affected rectangle instead of full canvas");
+        resident.Reset();
+        Check(resident.Stats().backup_capacity_bytes==0,"reset releases backup allocation");
+    }
+    std::filesystem::remove_all(folder);
+    if(SUCCEEDED(com)) CoUninitialize();
+    return failures?1:0;
+}
+int BlendPerf() {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(com)) return 2;
+    const auto root = std::filesystem::absolute(L"bench_data");
+    std::filesystem::create_directories(root);
+    const auto folder = root / (L"gif-blend-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    if (!CreateDirectoryW(folder.c_str(), nullptr)) { CoUninitialize(); return 2; }
+    Bytes bytes{'G','I','F','8','9','a'}; Word(bytes, 1024); Word(bytes, 1024);
+    bytes.insert(bytes.end(), {0x81,0,0,255,0,0,0,255,0,0,0,255,255,255,255});
+    Frame(bytes, 0, 1024, 1024, 0, 1);
+    Frame(bytes, 0, 1024, 1024, 1, 1);
+    Frame(bytes, 0, 1024, 1024, 3, 1, true);
+    Frame(bytes, 0, 1024, 1024, 2, 1);
+    bytes.push_back(0x3b);
+    const auto path = folder / L"full-frames.gif";
+    Check(Write(path, bytes), "write full-frame opaque and transparent GIF fixture");
+    GifDecoder decoder; GifFrame frame;
+    uint64_t checksum = 1469598103934665603ull;
+    bool valid = true;
+    const auto begin = std::chrono::steady_clock::now();
+    for (int repeat = 0; repeat < 10; ++repeat) for (uint32_t index = 0; index < 4; ++index) {
+        valid &= decoder.Decode(path, 256, index, frame);
+        const std::array<uint8_t,4> expected = index == 0 ? std::array<uint8_t,4>{0,0,255,255} :
+            index == 3 ? std::array<uint8_t,4>{255,0,0,255} : std::array<uint8_t,4>{0,255,0,255};
+        valid &= frame.width == 256 && frame.height == 256 && Pixel(frame, 0, expected);
+        for (const auto byte : frame.pixels) { checksum ^= byte; checksum *= 1099511628211ull; }
+    }
+    const auto elapsed = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
+    const auto stats = decoder.Stats();
+    std::cout << "BLEND ms=" << elapsed << " checksum=" << checksum << " loads=" << stats.cache_loads
+              << " frames=" << stats.decoded_frames << '\n';
+    Check(valid && stats.cache_loads == 1 && stats.decoded_frames == 40, "full-frame GIF playback preserves pixels and cache reuse");
+    decoder.Reset();
+    std::error_code error; std::filesystem::remove_all(folder, error);
+    Check(!error, "clean owned full-frame GIF fixture");
+    CoUninitialize();
+    return failures ? 1 : 0;
+}
+
+int wmain(int argc, wchar_t** argv) {
+    if (argc==2 && std::wstring_view(argv[1])==L"--blend-perf") return BlendPerf();
+    if (argc==2 && std::wstring_view(argv[1])==L"--memory") return MemoryRegression();
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const auto root = std::filesystem::absolute(L"bench_data"); std::filesystem::create_directories(root);
     const auto folder = root / (L"gif-budget-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
@@ -84,28 +177,28 @@ int wmain() {
         if (changed != INVALID_HANDLE_VALUE) { SetFileTime(changed, nullptr, nullptr, &modified); CloseHandle(changed); }
         Check(decoder.Decode(path, 256, 0, frame) && Pixel(frame, 0, {0,255,0,255}), "mtime change invalidates same-size same-ID data");
         const auto long_path = folder / L"long.gif"; Check(Write(long_path, Animation(160)), "write harmless 160-frame GIF");
+        auto large_tail = Animation(160);
+        large_tail.pop_back();
+        for (unsigned i = 0; i < 70000; ++i) {
+            large_tail.insert(large_tail.end(), {0x21, 0xfe, 255});
+            large_tail.insert(large_tail.end(), 255, uint8_t('x'));
+            large_tail.push_back(0);
+        }
+        large_tail.push_back(0x3b);
+        const auto large_path = folder / L"large-tail.gif";
+        Check(Write(large_path, large_tail), "write valid GIF over 16 MiB with small first frame");
+        Check(DecodeGifFirstFrameThumbnail(large_path, 256, frame) && frame.count == 1,
+            "large animation tail does not prevent bounded first frame decode");
+        GifFrame small_first;
+        Check(DecodeGifFirstFrameThumbnail(long_path, 256, small_first) && small_first.pixels == frame.pixels,
+            "truncated WIC stream length preserves identical first frame for large tail");
         GifDecoder sequential;
         bool linear = true;
         for (uint32_t i = 0; i < 160; ++i) linear &= sequential.Decode(long_path, 256, i, frame);
         Check(linear && sequential.Stats().decoded_frames == 160, "first long playback decodes N frames instead of N squared prefix work");
         GifDecoder cold;
-        Check(!cold.Decode(long_path, 256, 159, frame) && frame.error == L"gif-work-budget" && cold.Stats().decoded_frames == 0,
-              "cold distant seek rejects excessive prefix work before frame decode");
-        GifLimits test_limits; test_limits.canvas_bytes = 16; GifDecoder canvas_limited(test_limits);
-        Check(!canvas_limited.Decode(path, 1, 0, frame) && frame.error == L"gif-canvas-budget" && canvas_limited.Stats().decoded_frames == 0,
-              "tiny output cannot bypass canvas budget and no raster allocated");
-        test_limits = {}; test_limits.working_bytes = 100; GifDecoder total_limited(test_limits);
-        Check(!total_limited.Decode(path, 256, 0, frame) && frame.error == L"gif-memory-budget" && total_limited.Stats().decoded_frames == 0,
-              "combined source and raster reservation rejected before WIC");
-        test_limits = {}; test_limits.working_bytes = 80; GifDecoder source_limited(test_limits);
-        Check(!source_limited.Decode(path, 256, 0, frame) && frame.error == L"gif-source-budget" && source_limited.Stats().decoded_frames == 0,
-              "aggregate source frames bounded even if codec retains prior rasters");
-        test_limits = {}; test_limits.file_bytes = 10; GifDecoder file_limited(test_limits);
-        Check(!file_limited.Decode(path, 256, 0, frame) && frame.error == L"gif-file-budget", "compressed file budget checked before read allocation");
-        test_limits = {}; test_limits.frames = 2; GifDecoder frames_limited(test_limits);
-        Check(!frames_limited.Decode(path, 256, 0, frame) && frame.error == L"gif-frame-budget", "frame metadata bounded before decoder creation");
-        test_limits = {}; test_limits.milliseconds = 0; GifDecoder timed(test_limits);
-        Check(!timed.Decode(path, 256, 0, frame) && frame.error == L"gif-time-budget", "expired work deadline cancels before file and codec work");
+        Check(cold.Decode(long_path, 256, 159, frame) && cold.Stats().decoded_frames == 160,
+              "cold distant seek decodes without a prefix-work cap");
         auto outside = Animation();
         const auto descriptor = std::find(outside.begin(), outside.end(), uint8_t(0x2c));
         if (descriptor != outside.end()) *(descriptor + 5) = 5;
@@ -124,6 +217,10 @@ int wmain() {
             const auto fixture = folder / (transparent ? L"transparent.gif" : L"white-background.gif");
             Check(Write(fixture, bytes), "write explicit background and transparency fixture");
             GifDecoder background_decoder;
+            GifFrame thumbnail, expected;
+            Check(background_decoder.Decode(fixture, 256, 0, expected) &&
+                DecodeGifFirstFrameThumbnail(fixture, 256, thumbnail) && thumbnail.pixels == expected.pixels && thumbnail.count == 1,
+                "static first frame matches animation background transparency and offsets");
             const std::array<uint8_t, 4> bg = transparent ? std::array<uint8_t, 4>{0,0,0,0} :
                 std::array<uint8_t, 4>{255,255,255,255};
             for (uint32_t i : {0u,1u,2u,0u,2u,1u}) {

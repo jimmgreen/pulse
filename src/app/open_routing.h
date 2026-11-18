@@ -13,8 +13,12 @@ struct AppState;
 
 // `raw` as a launch passes it: a folder, a file (its folder opens with it
 // selected) or This PC. `mru` is the window that received the request (the
-// most recently used one). Returns the window that shows it now.
-AppState& OpenExternalFolder(AppState& mru, const std::wstring& raw);
+// most recently used one). Dispatched means navigation was issued, not that
+// its contents have been presented. Deferred/Failed never carry a target.
+enum class ExternalOpenStatus { Dispatched, Deferred, Failed };
+struct ExternalOpenResult { ExternalOpenStatus status = ExternalOpenStatus::Failed; AppState* target = nullptr; };
+ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw, bool reveal = false);
+bool ExternalOpenWindowBusy(const AppState& state);
 
 // WM_CONVERT_EXTERNAL_OPEN, the toast after such an open was clicked (M7b,
 // plan §6 rule 7): a folder opened in window `s` goes back as a tab (with

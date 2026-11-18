@@ -45,6 +45,8 @@ constexpr UINT WM_NETWORK_LOCATIONS = WM_APP + 73;
 constexpr UINT WM_ASSOC_CHANGED = WM_APP + 74;  // SHCNE_ASSOCCHANGED: default programs changed
 constexpr UINT WM_BITLOCKER_UNLOCK = WM_APP + 75;  // app::BitLockerUnlockResult* (bitlocker_unlock.h)
 constexpr UINT WM_RELEASE_WINDOW_STATES = WM_APP + 76;  // host: free retired window states (window_factory.h)
+constexpr UINT WM_ARRANGE_WINDOWS = WM_APP + 129;
+constexpr UINT WM_MERGE_ALL_WINDOWS = WM_APP + 130;
 constexpr UINT WM_NEW_WINDOW = WM_APP + 77;  // open another window at this window's folder (M4a)
 constexpr UINT WM_REOPEN_CLOSED_WINDOW = WM_APP + 78;  // reopen the last closed window (M4c toast, Ctrl+Shift+T)
 constexpr UINT WM_OPEN_SESSION_WINDOWS = WM_APP + 79;  // first window shown: open the session's other windows (M4d)
@@ -57,7 +59,8 @@ constexpr UINT WM_ADOPT_OPEN_POLICY = WM_APP + 85;  // the "make it the default"
 constexpr UINT WM_REOPEN_CLOSED_TABS = WM_APP + 86;  // the "N tabs closed" toast was clicked (M7f)
 constexpr UINT WM_NETWORK_CONNECT = WM_APP + 88;  // app::NetworkConnectResult* (network_connect.h)
 constexpr UINT WM_CTX_LAYOUT_SEED = WM_APP + 87;  // lParam CtxLayoutSeed*: persistent menu layout read (C4)
-constexpr UINT WM_OPEN_EXTERNAL = WM_APP + 89;  // host: lParam std::wstring*, a forwarded launch accepted earlier
+constexpr UINT WM_OPEN_EXTERNAL = WM_APP + 89;  // host: wake only; SingleInstanceCoordinator owns queued requests
+constexpr UINT WM_DRIVE_EJECT_READY = WM_APP + 133; // shared_ptr<DriveEjectTask>*
 constexpr UINT WM_DRIVE_VERB = WM_APP + 90;  // app::DriveVerbResult* (drive_verbs.h): eject / disconnect finished
 constexpr UINT WM_DETAILS_TREE_UNDO = WM_APP + 91;  // the "expanded N folders" snack: undo it
 constexpr UINT WM_UNDO_DELETE = WM_APP + 92;  // the "deleted N items" snack: undo the delete
@@ -90,5 +93,28 @@ constexpr UINT WM_DOUBLE_CTRL = WM_APP + 118;  // two Ctrl taps anywhere: toggle
 constexpr UINT WM_DIALOG_JUMP_CONTEXT = WM_APP + 119;  // the dialog jump bar wants the open folders
 constexpr UINT WM_DEVICE_WATCH_READY = WM_APP + 120;  // worker: wParam ticket, lParam PIDLIST_ABSOLUTE of the phone folder to watch (app_runtime.h)
 constexpr UINT WM_DEVICE_FOLDER_CHANGED = WM_APP + 121;  // SHChangeNotify on the watched phone folder (SHCNRF_NewDelivery)
+// The failed pack download card's buttons (pack_failure_ui.h).
+constexpr UINT WM_PACK_RETRY = WM_APP + 122;
+constexpr UINT WM_PACK_SOURCES = WM_APP + 123;
+constexpr UINT WM_PACK_CHECK_UPDATE = WM_APP + 124;
+constexpr UINT WM_PACK_DETAILS = WM_APP + 125;
+constexpr UINT WM_PACK_OPEN_FOLDER = WM_APP + 126;
+constexpr UINT WM_SOURCE_PROBE_DONE = WM_APP + 127;  // a 测速 probe finished (download_source_probe.h)
+
+constexpr UINT WM_WINDOW_ARRANGE_UNDO = WM_APP + 128;
+constexpr UINT WM_DIALOG_MANAGEMENT_RESULT = WM_APP + 131;
 
 }  // namespace pulse
+
+constexpr UINT WM_REOPEN_WORKSPACE_PANE = WM_APP + 132;
+
+constexpr UINT WM_RECYCLE_SEARCH = WM_APP + 134;
+constexpr UINT WM_DETAILS_TREE_RENAME = WM_APP + 135;
+
+constexpr UINT WM_RECYCLE_SHELL_CHANGED = WM_APP + 136;
+
+constexpr UINT WM_DETAILS_PREVIEW_NAVIGATE = WM_APP + 137;
+constexpr UINT WM_DETAILS_PREVIEW_OPEN = WM_APP + 138;
+constexpr UINT WM_DETAILS_PREVIEW_COMMAND = WM_APP + 139;
+constexpr UINT WM_DRAG_RETURN = WM_APP + 143;
+constexpr UINT WM_HISTORY_REDO = WM_APP + 144;

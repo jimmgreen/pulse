@@ -1,4 +1,14 @@
+#include "extensions/native/command_contributions.h"
+#include "shell_cache_readers.h"
+#include "window_management_ui.h"
+#include "app_hosted_edit.h"
+#include "../ui/view_zoom.h"
+#include "extensions/native/package_commands.h"
+#include "drive_eject_ui.h"
+#include "group_selection_plan.h"
+#include "quick_preview_navigation.h"
 #include "tag_color_commands.h"
+#include "picker_appearance.h"
 #include "git_ui.h"
 #include "mtime_hint_prefs.h"
 #include "tag_ads_sync.h"
@@ -43,15 +53,18 @@
 #include "tag_missing.h"
 #include "tag_rules.h"
 #include "entry_sort.h"
+#include "media_columns_ui.h"
 #include "session.h"
 #include "context_menu.h"
 #include "actions/action_registry.h"
 #include "ai_assistant.h"
 #include "ai_assistant_chat.h"
+#include "dup_finder.h"
 #include "system_ctx_registry.h"
 #include "shell_verbs.h"
 #include "toolbar_apps.h"
 #include "toolbar_tools.h"
+#include "toolbar_view_order.h"
 #include "toolbar_selection.h"
 #include "vertical_tabs.h"
 #include "app_change_tracking.h"
@@ -275,7 +288,10 @@ std::vector<int> GroupableSelection(const app::Tab& tab) {
 }
 
 bool CanGroupSelection(const app::Tab* tab) {
-    return CanCreateHere(tab) && !IsRecycleTab(tab) && GroupableSelection(*tab).size() >= 2;
+    if (!CanCreateHere(tab) || IsRecycleTab(tab)) return false;
+    std::vector<std::wstring> sources;
+    for (int index : GroupableSelection(*tab)) sources.push_back(EntryFullPath(*tab, index));
+    return app::GroupSelectionParent(sources).has_value();
 }
 
 // Only plain folders dissolve: emptying a junction or symlink would move the
@@ -323,8 +339,11 @@ void GroupSelectionIntoFolder(AppState& s) {
     if (!CanGroupSelection(tab)) return;
     std::vector<std::wstring> sources;
     for (int index : GroupableSelection(*tab)) sources.push_back(EntryFullPath(*tab, index));
-    const std::wstring folder = JoinChild(tab->current_path,
-        app::UniqueChildName(tab->current_path, l10n::Get(l10n::StringId::NewFolder), L""));
+    const auto plan = app::PlanGroupSelection(sources, [](const std::wstring& parent) {
+        return app::UniqueChildName(parent, l10n::Get(l10n::StringId::NewFolder), L"");
+    });
+    if (!plan) return;
+    const std::wstring& folder = plan->destination;
     const uint64_t group = NewUndoGroup();
     const std::wstring label = l10n::Get(l10n::StringId::NewFolderWithSelection).c_str();
     ops::OpRequest create;
@@ -345,7 +364,7 @@ void GroupSelectionIntoFolder(AppState& s) {
     s.groupRenameFolder = folder;
     s.groupRenameUndo = group;
     app::QueueCreateRenameIntent(tab->create_rename_intents, move_id,
-        tab->current_path, tab->view_generation);
+        tab->current_path, tab->view_generation, plan->parent);
 }
 
 // 解散文件夹: each selected folder's contents move up into this folder (a
@@ -851,7 +870,7 @@ void TrayOpenTextDiff(AppState& s) {
     s.textDiff->Show(s.hwnd, paths[0], paths[1], s.darkMode, s.accentColor);
 }
 
-// Shelf ⋯ menu (pulse_tray_redesign.html moreMenu); also the tray's
+// Shelf ⋯ menu; also the tray's
 // right-click menu. ZIP and rename are shelf buttons now.
 void ShowTrayBatchMenu(AppState& s, POINT screen_pt) {
     if (!EnsureMenu(s)) return;
@@ -1509,7 +1528,7 @@ void RunDriveVerb(AppState& s, int cmd) {
     if (cmd == app::CmdUnlockDrive && drive.locked) {
         app::StartBitLockerUnlock(s.hwnd, ServiceWindow(s), WM_BITLOCKER_UNLOCK, drive.root);
     } else if (cmd == app::CmdEjectDrive && app::DriveEjectable(drive.root, drive.type)) {
-        app::StartDriveEject(s.hwnd, WM_DRIVE_VERB, drive.root, drive.type);
+        StartPreparedDriveEject(s, drive.root, drive.type);
     } else if (cmd == app::CmdDisconnectDrive && drive.type == DRIVE_REMOTE) {
         app::StartDriveDisconnect(s.hwnd, WM_DRIVE_VERB, drive.root, false);
     }
@@ -1536,6 +1555,7 @@ void RenameSelected(AppState& s) {
 }
 
 void ApplyDriveVerbResult(AppState& s, const app::DriveVerbResult& result) {
+    if (result.verb == app::DriveVerb::Eject) CompletePreparedDriveEject(s, result.root);
     const std::wstring drive = DriveDisplay(result.root);
     if (result.error == NO_ERROR) {
         RefreshAfterDriveChange(s);
@@ -1574,7 +1594,7 @@ void ApplyDriveVerbResult(AppState& s, const app::DriveVerbResult& result) {
     if (!ui::ShowConfirmDialog(s.hwnd, spec, s.darkMode, s.accentColor)) return;
     if (eject) {
         uint8_t type = static_cast<uint8_t>(GetDriveTypeW(result.root.c_str()));
-        app::StartDriveEject(s.hwnd, WM_DRIVE_VERB, result.root, type);
+        StartPreparedDriveEject(s, result.root, type);
     } else {
         app::StartDriveDisconnect(s.hwnd, WM_DRIVE_VERB, result.root, false);
     }
@@ -1602,9 +1622,54 @@ static void RunCloudPin(AppState& s, fs::CloudPinAction action) {
 
 static void FlipToolbarTool(AppState& s, size_t index);
 
+// AI 整理此文件夹… (task 46 ⑦): opens the assistant with a sentence about the
+// folder (or the selection) and selects its editable end; never sends.
+static void AiOrganizeHere(AppState& s) {
+    const app::Tab* tab = ActiveTab(s);
+    if (!tab || tab->current_path.empty() || fs::IsVirtualPath(tab->current_path) || !AiAgentConnected()) return;
+    const size_t picked = tab->SelectedCount();
+    std::wstring head = l10n::Get(picked > 0 ? l10n::StringId::AiOrgHereSel : l10n::StringId::AiOrgHere);
+    const std::wstring key = picked > 0 ? L"{n}" : L"{folder}";
+    if (const size_t at = head.find(key); at != std::wstring::npos)
+        head.replace(at, key.size(), picked > 0 ? std::to_wstring(picked) : app::TabTitle(tab->current_path));
+    const size_t from = head.size();
+    AiAssistantOpen(s);
+    AiAssistantFillComposer(s, head + l10n::Get(l10n::StringId::AiOrgHereTail), from);
+}
+
+namespace {
+constexpr int kNativePinCommandOffset = 0x10000000;
+bool HandleNativeCommandPin(AppState& state, int command) {
+    if (command < 0x30000000 || command >= 0x40000000) return false;
+    extensions::native::ToggleCommandPin(state, command - kNativePinCommandOffset);
+    return true;
+}
+void AddNativePinSwatch(AppState& state, ui::FluentMenuItem& row) {
+    if (row.command < 0x20000000 || row.command >= 0x30000000) return;
+    ui::FluentMenuSwatch pin;
+    pin.command = row.command + kNativePinCommandOffset;
+    pin.checked = extensions::native::IsCommandPinned(state, row.command);
+    pin.glyph = ui::command_icons::kGlyphPinToolbar;
+    row.tooltip += L" · " + std::wstring(l10n::Get(pin.checked ? l10n::StringId::ToolbarRemoveTool : l10n::StringId::PinToToolbar));
+    row.quick_swatches.push_back(std::move(pin));
+}
+void AppendNativeCommandRows(AppState& state, std::vector<ui::FluentMenuItem>& items) {
+    auto rows = extensions::native::CommandRows(state);
+    if (!rows.empty() && !items.empty()) items.back().separator_after = true;
+    items.insert(items.end(), std::make_move_iterator(rows.begin()), std::make_move_iterator(rows.end()));
+}
+}
+
 void DispatchMenuCommand(AppState& s, int cmd) {
+    if (cmd == 35004) { RestoreToolbarDrag(s); return; }
+    if (cmd == 35010) { ShowSortDropdown(s); return; }
+    if (cmd == 35011) { ShowFilterEditor(s); return; }
+    if (cmd == 35012) { ShowGroupDropdown(s); return; }
+    if (HandleNativeCommandPin(s, cmd)) return;
+    if (extensions::native::HandleContributedCommand(s, cmd)) return;
+    if (extensions::native::HandlePackageCommand(s, cmd)) return;
     if (HandleNetworkPageCommand(s, cmd)) return;  // 连接服务器, 最近访问, ...
-    if (cmd >= app::CmdToolbarToolBase && cmd < app::CmdNewPrimaryBase &&
+    if (cmd >= app::CmdToolbarToolBase && cmd < app::CmdToolbarToolEnd &&
         cmd < app::CmdToolbarToolBase + static_cast<int>(app::kToolbarToolCount)) {
         const size_t tool = static_cast<size_t>(cmd - app::CmdToolbarToolBase);
         if (app::kToolbarToolIds[tool] == L"split") ShowSplitDropdown(s);
@@ -1771,6 +1836,10 @@ void DispatchMenuCommand(AppState& s, int cmd) {
     case app::CmdUnpinNetwork: UnpinSelectedNetworks(s); break;
     case app::CmdBatchRename: ShowBatchRename(s); break;
     case app::CmdGroupIntoFolder: GroupSelectionIntoFolder(s); break;
+    case app::CmdFindDuplicates: app::dup::FindInFolder(s); break;
+    case app::CmdAiOrganizeHere: AiOrganizeHere(s); break;
+    case app::CmdDupKeepThis: app::dup::KeepSelected(s); break;
+    case app::CmdDupReapplyRules: app::dup::ReapplyRules(s); break;
     case app::CmdDissolveFolder: DissolveSelectedFolders(s); break;
     case app::CmdSetAlias: ShowAliasOverlay(s); break;
     case app::CmdStageToTray: StageSelection(s); break;
@@ -1817,7 +1886,7 @@ void DispatchMenuCommand(AppState& s, int cmd) {
             RunDeviceVerb(s, SelectedShellIds(*device_tab), L"properties");
             break;
         }
-        if (const app::Tab* tab = ActiveTab(s); IsRecycleTab(tab) && tab->snapshot) {
+        if (const app::Tab* tab = ActiveTab(s); tab && (IsRecycleTab(tab) || app::RecycleSelectionOf(*tab) != app::RecycleSelection::None) && tab->snapshot) {
             for (int index : tab->SelectedIndices()) {
                 if (index < 0 || index >= static_cast<int>(tab->EntryCount())) continue;
                 const fs::DirEntry entry = tab->EntryAt(static_cast<size_t>(index));
@@ -2191,6 +2260,17 @@ std::vector<ui::FluentMenuItem> BuildFinderItemMenu(
         open_path.glyph = ui::command_icons::kGlyphOpenPath;
         items.insert(items.begin() + 1, std::move(open_path));
     }
+    // 重复文件 tab (task 46 ④): 打开所在文件夹, 只保留这份, 按规则重新标 after 打开.
+    if (tab && app::dup::IsDupTab(tab->current_path)) {
+        ui::FluentMenuItem open_path = VerbRow(app::CmdOpenPath, l10n::Get(l10n::StringId::OpenPath),
+                                               ui::command_icons::kGlyphOpenPath);
+        ui::FluentMenuItem keep = VerbRow(app::CmdDupKeepThis, l10n::Get(l10n::StringId::DupFKeepThis), L"\xE73E");
+        keep.enabled = app::dup::CanKeepSelected(s);
+        ui::FluentMenuItem again = VerbRow(app::CmdDupReapplyRules, l10n::Get(l10n::StringId::DupFReapply), L"\xE72C");
+        again.separator_after = true;
+        const size_t at = items.empty() ? 0 : 1;
+        items.insert(items.begin() + static_cast<std::ptrdiff_t>(at), {std::move(open_path), std::move(keep), std::move(again)});
+    }
     if (CanDissolveSelection(tab)) {
         ui::FluentMenuItem dissolve;
         dissolve.command = app::CmdDissolveFolder;
@@ -2336,6 +2416,13 @@ std::wstring StaticVerbKey(const app::Tab& tab, const std::vector<int>& indices)
     return all_drives ? std::wstring(ipc::kDriveVerbKey) : std::wstring(ipc::kFolderVerbKey);
 }
 
+namespace {
+app::ShellCacheReaders& CacheReaders() {
+    static app::ShellCacheReaders readers;
+    return readers;
+}
+} // namespace
+
 // Registry static verbs are read off the UI thread and cached per extension;
 // the reader posts WM_SHELL_VERBS back when done.
 void PrefetchStaticVerbs(AppState& s, const std::wstring& ext) {
@@ -2346,13 +2433,16 @@ void PrefetchStaticVerbs(AppState& s, const std::wstring& ext) {
         return;
     HWND hwnd = ServiceWindow(s);
     const uint32_t cache_generation = s.context_menu.cache_generation();
-    std::thread([hwnd, ext, cache_generation] {
+    CacheReaders().Start([hwnd, ext, cache_generation](std::stop_token stop) {
+        if (stop.stop_requested()) return;
         auto verbs = app::EnumerateStaticVerbs(ext);
+        if (stop.stop_requested()) return;
         app::ResolveStaticVerbIcons(verbs);
+        if (stop.stop_requested()) return;
         auto* result = new ShellVerbsResult{ ext, std::move(verbs), cache_generation };
         if (!PostMessageW(hwnd, WM_SHELL_VERBS, 0, reinterpret_cast<LPARAM>(result)))
             delete result;
-    }).detach();
+    });
 }
 
 void StartShellRegistryWatch(HWND hwnd) {
@@ -2362,28 +2452,33 @@ void StartShellRegistryWatch(HWND hwnd) {
     });
 }
 
-void StopShellRegistryWatch() { g_shell_watcher.Stop(); }
+void StopShellRegistryWatch() {
+    g_shell_watcher.Stop();
+    ++g_shell_seed_generation;
+    CacheReaders().Stop();
+}
 
 void SeedShellVerbCache(AppState& s) {
     HWND hwnd = ServiceWindow(s);
     // A newer seed supersedes this one; stop instead of piling up readers.
     const uint32_t generation = ++g_shell_seed_generation;
     const uint32_t cache_generation = s.context_menu.cache_generation();
-    std::thread([hwnd, generation, cache_generation] {
+    CacheReaders().Start([hwnd, generation, cache_generation](std::stop_token stop) {
         // Re-reading up to 400 types costs about 2 s of CPU right at startup
         // (and after every Classes change), when the first screen of
         // thumbnails is decoding: background CPU and I/O priority lets those
-        // go first. The thread is detached and ends here, so no END call.
+        // go first. The reader ends after this job, so no END call.
         SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
         // The cache file can be megabytes: read and parse it here, never on
         // the UI thread, which only merges the result (WM_SHELL_VERB_SEED).
+        if (stop.stop_requested()) return;
         auto seed = std::make_unique<ShellVerbSeed>();
         seed->generation = generation;
         if (!app::LoadMachineStaticVerbCache(seed->machine) || seed->machine.empty()) return;
         std::vector<std::wstring> extensions;
         extensions.reserve(seed->machine.size());
         for (const auto& [ext, verbs] : seed->machine) extensions.push_back(ext);
-        if (g_shell_seed_generation.load() != generation) return;
+        if (stop.stop_requested() || g_shell_seed_generation.load() != generation) return;
         if (!PostMessageW(hwnd, WM_SHELL_VERB_SEED, 0, reinterpret_cast<LPARAM>(seed.get())))
             return;
         seed.release();
@@ -2392,15 +2487,17 @@ void SeedShellVerbCache(AppState& s) {
         for (const auto& ext : extensions) {
             // The window goes away on exit: stop rather than keep resolving
             // icons while the process tears down.
-            if (n++ > 400 || g_shell_seed_generation.load() != generation || !IsWindow(hwnd))
+            if (stop.stop_requested() || n++ > 400 || g_shell_seed_generation.load() != generation || !IsWindow(hwnd))
                 break;
             auto verbs = app::EnumerateStaticVerbs(ext);
+            if (stop.stop_requested()) return;
             app::ResolveStaticVerbIcons(verbs);
+            if (stop.stop_requested()) return;
             auto* result = new ShellVerbsResult{ ext, std::move(verbs), cache_generation };
             if (!PostMessageW(hwnd, WM_SHELL_VERBS, 0, reinterpret_cast<LPARAM>(result)))
                 delete result;
         }
-    }).detach();
+    });
 }
 
 void ApplyShellVerbSeed(AppState& s, ShellVerbSeed& seed) {
@@ -2504,17 +2601,19 @@ void SeedCtxLayout(AppState& s) {
     if (!CtxLayoutPersists(s)) return;
     HWND hwnd = ServiceWindow(s);
     const uint32_t generation = s.context_menu.cache_generation();
-    std::thread([hwnd, generation] {
+    CacheReaders().Start([hwnd, generation](std::stop_token stop) {
         // File read and ~30 registry queries per type: never on the UI thread.
         // An empty seed is posted too: it tells the UI the layout is loaded
         // and may be saved.
+        if (stop.stop_requested()) return;
         auto seed = std::make_unique<CtxLayoutSeed>();
         seed->generation = generation;
         app::LoadCtxLayoutFile(app::CtxLayoutCachePath(), CtxLayoutBuild(),
                                app::CtxLayoutFingerprint, seed->layout);
+        if (stop.stop_requested()) return;
         if (PostMessageW(hwnd, WM_CTX_LAYOUT_SEED, 0, reinterpret_cast<LPARAM>(seed.get())))
             seed.release();
-    }).detach();
+    });
 }
 
 void ApplyCtxLayoutSeed(AppState& s, CtxLayoutSeed& seed) {
@@ -2687,10 +2786,35 @@ bool HandleShellMenuCommand(AppState& s, int cmd) {
         [&s] { WaitForShellMenuReady(s); }, [&s] { ScheduleFolderRefresh(s); });
 }
 
+void ShowSidebarDriveMenu(AppState& s, std::wstring path, POINT screen_pt) {
+    if (!IsDriveRootPath(path) || !EnsureMenu(s)) return;
+    s.context_menu.Close();
+    StartCtxQuery(s, {path}, false, std::wstring(ipc::kDriveVerbKey));
+    s.context_menu.SeedComItemsFromCache();
+    auto items = app::BuildBreadcrumbMenu(true);
+    app::ApplyBuiltinMenuPrefs(items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Item);
+    s.context_menu.OpenMenu(items);
+    const int cmd = s.menu->TrackPopup(screen_pt, ExplorerMenu(s, s.context_menu.base_items()));
+    s.context_menu.CloseMenu();
+    if (HandleShellMenuCommand(s, cmd)) return;
+    // Sidebar commands belong to the clicked drive, never the active selection.
+    switch (cmd) {
+    case app::CmdOpen: NavigateTo(s, path); break;
+    case app::CmdOpenInNewTab: OpenFolderTab(s, path); break;
+    case app::CmdCopyPath: ops::WriteClipboardText(path); break;
+    case app::CmdCopy: ops::WriteClipboard({path}, false); break;
+    case app::CmdOpenTerminal: s.ops.OpenTerminal(path); break;
+    case app::CmdProperties: s.ops.ShowProperties(path); break;
+    default: break;
+    }
+}
+
 void ShowItemContextMenu(AppState& s, POINT screen_pt, bool from_chip) {
     if(DeferContentSelection(s,[=](AppState& v){ShowItemContextMenu(v,screen_pt,from_chip);})) return;
     if (!EnsureMenu(s)) return;
     app::Tab* tab = ActiveTab(s);
+    if (tab && app::RecycleSelectionOf(*tab) == app::RecycleSelection::Mixed) return;
+    const bool recycle_selection = IsRecycleTab(tab) || (tab && app::RecycleSelectionOf(*tab) == app::RecycleSelection::All);
     const std::vector<std::wstring> paths =
         tab ? SelectedFullPaths(*tab) : std::vector<std::wstring>{};
     std::vector<std::wstring> device_ids;
@@ -2701,7 +2825,7 @@ void ShowItemContextMenu(AppState& s, POINT screen_pt, bool from_chip) {
         else s.context_menu.Close();
     } else if (!pc_device.empty()) {
         StartCtxQuery(s, {std::move(pc_device)}, false, std::wstring(kDeviceVerbKeyPrefix) + L"pc");
-    } else if (tab && !paths.empty() && !IsRecycleTab(tab)) {
+    } else if (tab && !paths.empty() && !recycle_selection) {
         StartCtxQuery(s, paths, false, StaticVerbKey(*tab, tab->SelectedIndices()));
     }
     s.context_menu.SeedComItemsFromCache();
@@ -2711,21 +2835,22 @@ void ShowItemContextMenu(AppState& s, POINT screen_pt, bool from_chip) {
     const auto quick_paths = QuickAccessTargets(tab, false);
     auto base_items = BuildFinderItemMenu(s, s.ops.CanUndo(), undoLabel);
     std::vector<std::wstring> window_folders;
-    if (!IsRecycleTab(tab)) {
-        app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Item);
+    if (!recycle_selection) {
         if (!paths.empty()) window_folders = WindowTransferFolders(s);
         const app::SelectionCaps caps = SelectionCapsOf(s);
         // Phone items go to another window's folder through Explorer's
         // engine (SubmitDeviceTransfer), like local ones.
         app::AppendWindowTransferCommands(base_items, window_folders, tab && (caps.copy || caps.cut));
+        app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Item);
     } else {
         app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs);
     }
+    AppendNativeCommandRows(s, base_items);
     s.context_menu.OpenMenu(base_items);
-    auto display = IsRecycleTab(tab) ? std::move(base_items)
+    auto display = recycle_selection ? std::move(base_items)
                                      : ExplorerMenu(s, s.context_menu.base_items());
-    if (from_chip && !IsRecycleTab(tab)) {
-        // Chip ⋯ (prototype app_pins.html): 用 <pinned app> 打开 and
+    if (from_chip && !recycle_selection) {
+        // Chip ⋯: 用 <pinned app> 打开 and
         // 固定到工具栏 ▸ lead the item menu.
         auto apps = ToolbarAppMenuItems(s);
         if (!apps.empty()) {
@@ -2735,7 +2860,7 @@ void ShowItemContextMenu(AppState& s, POINT screen_pt, bool from_chip) {
         }
     }
 
-    if (!IsRecycleTab(tab)) BeginCtxTiming(s, display.size(), seeded);
+    if (!recycle_selection) BeginCtxTiming(s, display.size(), seeded);
     const int cmd = s.menu->TrackPopup(screen_pt, std::move(display));
     const int favorite_index = cmd >= app::CmdTagBase && cmd < app::CmdTagBase + app::kMaxFavoriteTags
         ? s.places.FavoriteTagIndex(cmd - app::CmdTagBase + 1) : -1;
@@ -2763,6 +2888,7 @@ std::vector<app::sysctx::NewTemplate> NewTemplatesForMenu(AppState& s, bool wait
 bool RunShellNewCommand(AppState& s, int cmd, const std::vector<app::sysctx::NewTemplate>& templates);
 void AppendBackgroundNewMenu(std::vector<ui::FluentMenuItem>& items,
                              const std::vector<app::sysctx::NewTemplate>& templates);
+void AppendFolderTools(std::vector<ui::FluentMenuItem>& items);
 } // namespace
 
 void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
@@ -2778,7 +2904,7 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     view_options.sort_direction = tab->sort_direction;
     view_options.folder_sort = static_cast<int>(tab->EffectiveFolderSort());
     view_options.details_panel = s.showDetailsPanel;
-    view_options.can_sort = kind != L"starred" && kind != L"recent";
+    view_options.can_sort = kind != L"recent";
     view_options.indexed_search = (kind == L"search" || kind == L"saved-search") && !tab->content_results;
     view_options.show_path = kind == L"search" || kind == L"saved-search" || kind == L"recycle";
     view_options.filesystem = !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path);
@@ -2792,6 +2918,8 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
         const std::wstring undoLabel = s.ops.UndoLabel();
         auto items = app::BuildRecycleBackgroundMenu(s.ops.CanUndo(), undoLabel, can_empty);
         app::AppendBackgroundViewCommands(items, view_options);
+        app::ApplyBuiltinMenuPrefs(items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Background);
+        AppendNativeCommandRows(s, items);
         s.context_menu.OpenMenu(std::move(items));
         const int cmd = s.menu->TrackPopup(screen_pt, s.context_menu.base_items());
         s.context_menu.CloseMenu();
@@ -2826,11 +2954,12 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     if (tab->current_path.empty()) EraseCommand(base_items, app::CmdCopyPath);
     const auto quick_paths = QuickAccessTargets(tab, true);
     AppendQuickAccessCommand(s, base_items, quick_paths);
-    app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Background);
     const bool can_create_here = CanCreateHere(tab);
     const auto new_templates = can_create_here ? NewTemplatesForMenu(s, false)
                                                : std::vector<app::sysctx::NewTemplate>{};
     if (can_create_here) AppendBackgroundNewMenu(base_items, new_templates);
+    if (!tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path) && !app::IsUncServerRoot(tab->current_path))
+        AppendFolderTools(base_items);
     // This PC, a server's share list, the Network view and other Pulse views
     // take no new items or pastes, and have no folder of their own to open a
     // terminal in or pin as a workspace.
@@ -2858,6 +2987,8 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     // In-app Git: pull / push / refresh for a folder inside a repository.
     const std::wstring git_root = tab->git_root;
     if (view_options.filesystem) AppendGitMenu(*tab, base_items);
+    app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Background);
+    AppendNativeCommandRows(s, base_items);
     s.context_menu.OpenMenu(std::move(base_items));
     auto display = ExplorerMenu(s, s.context_menu.base_items());
 
@@ -3007,7 +3138,8 @@ std::wstring WithoutEllipsis(std::wstring label) {
 }
 // Tools with a command of their own run it (details / columns too, which are
 // toggles); the others (the setting switches, split) run as
-// CmdToolbarToolBase + index, kept below CmdNewPrimaryBase.
+// CmdToolbarToolBase + index, within its own reserved range.
+static_assert(app::CmdToolbarToolBase + app::kToolbarToolCount <= app::CmdToolbarToolEnd);
 int ToolbarToolCommand(size_t index) {
     return kToolbarTools[index].command ? kToolbarTools[index].command
                                         : app::CmdToolbarToolBase + static_cast<int>(index);
@@ -3034,6 +3166,23 @@ bool ToolbarToggleOn(const AppState& s, size_t index) {
     if (id == L"folder_size") return p.folder_size_auto;
     if (id == L"columns") { const app::Tab* tab = s.pane ? s.pane->ActiveTab() : nullptr; return tab && tab->column_layout; }
     return false;
+}
+// More lists at most this many unpinned commands; 自定义工具栏 has them all.
+constexpr size_t kMoreUnpinnedMax = 8;
+// Commands taken off the toolbar this session lead that list, so a removed
+// pin stays runnable and can be dragged back from More.
+std::vector<std::wstring>& RecentlyUnpinned(const AppState& s) {
+    static std::unordered_map<const AppState*, std::vector<std::wstring>> recent;
+    return recent[&s];
+}
+void NoteUnpinned(const AppState& s, const std::vector<std::wstring>& before, const std::vector<std::wstring>& after) {
+    auto& recent = RecentlyUnpinned(s);
+    for (const auto& id : app::ToolbarToolsOnly(before)) {
+        if (std::find(after.begin(), after.end(), id) != after.end()) continue;
+        std::erase(recent, id);
+        recent.insert(recent.begin(), id);
+    }
+    if (recent.size() > kMoreUnpinnedMax) recent.resize(kMoreUnpinnedMax);
 }
 ui::FluentMenuItem CustomizeToolbarItem() {
     ui::FluentMenuItem item;
@@ -3182,6 +3331,30 @@ bool RunShellNewCommand(AppState& s, int cmd, const std::vector<app::sysctx::New
 // The background menu's 新建 flyout: the toolbar New menu's rows, minus the
 // flat 新建文件夹 / 新建文本文档 rows the menu already shows (those stay
 // separately configurable on the 右键菜单 page), right after them.
+// 查找重复文件 and, with a model connected, AI 整理此文件夹… under 新建 ›
+// (task 46 ①); not shown at all without AI (the palette greys it instead).
+void AppendFolderTools(std::vector<ui::FluentMenuItem>& items) {
+    size_t at = 0;
+    const std::wstring new_text = l10n::Get(l10n::StringId::New);
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (!items[i].children.empty() && items[i].text == new_text) { at = i + 1; break; }
+        if (items[i].command == app::CmdNewFolder || items[i].command == app::CmdNewTextFile) at = i + 1;
+    }
+    std::vector<ui::FluentMenuItem> rows;
+    rows.push_back(VerbRow(app::CmdFindDuplicates, l10n::Get(l10n::StringId::ActFindDuplicates), L"\xE8C8"));
+    if (AiAgentConnected())
+        rows.push_back(VerbRow(app::CmdAiOrganizeHere, l10n::Get(l10n::StringId::ActOrganizeHere),
+                               ui::command_icons::kGlyphSparkle));
+    if (at > 0) {
+        rows.back().separator_after = items[at - 1].separator_after;
+        items[at - 1].separator_after = false;
+    } else {
+        rows.back().separator_after = true;
+    }
+    items.insert(items.begin() + static_cast<std::ptrdiff_t>(at), std::make_move_iterator(rows.begin()),
+                 std::make_move_iterator(rows.end()));
+}
+
 void AppendBackgroundNewMenu(std::vector<ui::FluentMenuItem>& items,
                              const std::vector<app::sysctx::NewTemplate>& templates) {
     bool has_folder = false, has_text = false;
@@ -3266,7 +3439,7 @@ void ShowSplitDropdown(AppState& s) {
     D2D1_RECT_F anchor = layout.overflow;
     size_t slot = 0;
     for (const auto& id : s.appPrefs.toolbar_tools) {
-        if (app::ToolbarToolIndex(id) < 0) continue;
+        if (!app::IsToolbarTool(id)) continue;
         if (id == L"split") {
             if (slot < layout.pins.size() && layout.pins[slot].right > layout.pins[slot].left) anchor = layout.pins[slot];
             break;
@@ -3412,7 +3585,7 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
     // 收藏夹分组与分隔线: 放进分组 › (each group, 新建分组…, 移出分组) and the
     // separator after it.
     constexpr int kNewGroup = 30190, kLeaveGroup = 30191, kSeparator = 30192, kGroupBase = 30200;
-    constexpr int kOpenNewTab = 30180;
+    constexpr int kOpenNewTab = app::CmdOpenInNewTab;
     std::vector<std::wstring> group_ids;
     std::vector<ui::FluentMenuItem> items;
     ui::FluentMenuItem open;
@@ -3521,6 +3694,7 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
         (recent_item && recent_item->kind == app::PlaceItemKind::Folder) ||
         (!fs::IsVirtualPath(path) && QuickAccessEntryForPath(s, path));
     if (known_folder) AppendQuickAccessCommand(s, items, {path});
+    app::ApplyBuiltinMenuPrefs(items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Item);
     const int cmd = s.menu->TrackPopup(screen_pt, std::move(items));
     if (HandleQuickAccessCommand(s, cmd, known_folder ? std::vector<std::wstring>{path}
                                                                    : std::vector<std::wstring>{})) return;
@@ -3611,21 +3785,32 @@ bool ApplyViewToAllFolders(AppState& s, bool confirm) {
     const int folder_mode = static_cast<int>(tab->EffectiveFolderSort());
     s.appPrefs.folder_views.ApplyToAll(tab->view_mode);
     s.appPrefs.folder_sorts.ApplyToAll({ tab->sort_column, tab->sort_direction });
-    // Folders-first goes with the sort: per-folder choices are gone and this
-    // folder's becomes the settings default.
-    std::vector<std::wstring> resort;
-    ForEachPane(s, [&](app::Pane& pane) {
-        app::Tab* shown = pane.ActiveTab();
-        if (!shown || shown->folder_sort < 0 || fs::IsVirtualPath(shown->current_path)) return;
-        if (shown->folder_sort != folder_mode) resort.push_back(shown->current_path);
-        shown->folder_sort = -1;
-    });
+    const auto sort_column = tab->sort_column;
+    const auto sort_direction = tab->sort_direction;
+    s.appPrefs.folder_sort_mode = folder_mode;
+    app::SetFolderSortMode(app::FolderSortModeFromInt(folder_mode));
     s.appPrefs.Save();
-    if (folder_mode != s.appPrefs.folder_sort_mode) {
-        s.settings.FolderSort(folder_mode);  // saves, then re-sorts every visible folder
-    } else {
-        for (const auto& path : resort) RefreshPath(s, path, RefreshReason::Explicit);
-    }
+    // Clearing saved overrides is not enough: open tabs still carry their old
+    // sort keys and cached order, including tabs in other windows.
+    app::ForEachWindowSharingCore(s, [&](AppState& window) {
+        std::vector<std::wstring> paths;
+        ForEachPane(window, [&](app::Pane& pane) {
+            auto* shown = pane.ActiveTab();
+            if (!shown || shown->current_path.empty() || fs::IsVirtualPath(shown->current_path) ||
+                shown->content_results || shown->search_content_active) return;
+            shown->sort_column = sort_column;
+            shown->sort_direction = sort_direction;
+            shown->folder_sort = -1;
+            shown->search_relevance = false;
+            if (std::find(paths.begin(), paths.end(), shown->current_path) == paths.end())
+                paths.push_back(shown->current_path);
+        });
+        for (const auto& path : paths) {
+            window.store.MarkDirty(path);
+            RefreshPath(window, path, RefreshReason::Explicit);
+        }
+        InvalidateRect(window.hwnd, nullptr, FALSE);
+    });
     return true;
 }
 
@@ -3638,6 +3823,7 @@ bool ApplyGroupToAllFolders(AppState& s, int group_by, bool confirm) {
     if (!usable()) return false;
     const app::GroupBy by = app::GroupByFromInt(group_by);
     if (by == app::GroupBy::Location) return false;  // multi-folder views only
+    if (by > app::GroupBy::Location) return false;   // fixed views and media groups: never a default
     if (confirm) {
         ui::ConfirmDialogSpec spec;
         spec.title = l10n::Get(l10n::StringId::ApplyViewAllTitle);
@@ -3830,15 +4016,9 @@ void ChooseViewMode(AppState& s, ui::ViewMode mode) {
 void ZoomIconSize(AppState& s, int step, const POINT* anchor_point, bool leave_icons) {
     const app::Tab* tab = ActiveTab(s);
     if (!tab || step == 0) return;
-    if (!ui::IsZoomIconMode(tab->view_mode)) {
-        if (!leave_icons) return;
-        if (step > 0) ShowLastIconSize(s, anchor_point);
-        else ApplyViewMode(s, ui::ViewMode::Details, 0.0f, anchor_point);
-        return;
-    }
-    const float dip = ui::ZoomIconDip(ui::IconDip(tab->view_mode, tab->icon_dip, s.scale), step, s.scale);
-    if (dip > 0.0f) SetIconSize(s, dip, anchor_point);
-    else if (leave_icons) ApplyViewMode(s, ui::ViewMode::Details, 0.0f, anchor_point);
+    const auto target = ui::ResolveIconZoom(tab->view_mode, tab->icon_dip,
+        tab->last_icon_mode, tab->last_icon_dip, step, s.scale, leave_icons);
+    ApplyViewMode(s, target.mode, target.dip, anchor_point);
 }
 
 void ShowViewDropdown(AppState& s, int pane_index) {
@@ -3877,7 +4057,7 @@ void ShowSortDropdown(AppState& s) {
     options.sort_column = tab->sort_column;
     options.sort_direction = tab->sort_direction;
     options.folder_sort = static_cast<int>(tab->EffectiveFolderSort());
-    options.can_sort = kind != L"starred" && kind != L"recent";
+    options.can_sort = kind != L"recent";
     options.indexed_search = (kind == L"search" || kind == L"saved-search") && !tab->content_results;
     options.show_path = kind == L"search" || kind == L"saved-search" || kind == L"recycle";
     options.group_virtual = kind == L"search" || kind == L"saved-search" || app::IsTagViewKind(kind) || kind == L"recycle";
@@ -3944,7 +4124,7 @@ std::vector<ui::SelectionChipAction> SelectionChipActions(AppState& s) {
         std::wstring path;
         std::vector<int> selected;   // the folder items depend on the whole selection
         const void* snapshot = nullptr;  // a drive unlocked or ejected: same rows, new verbs
-        uint32_t hidden = 0;
+        uint64_t hidden = 0;
         std::vector<std::wstring> tools;
         std::vector<std::wstring> selection;
         app::BuiltinMenuOrder order;
@@ -4138,7 +4318,7 @@ void ShowSelectionChipMenu(AppState& s, POINT anchor) {
     }
     if (cmd == kClear) {
         tab->ClearSelection();
-        s.clickCollapseIndex = -1;
+        s.listSelection.ClearDeferred();
     } else if (cmd == kKeepFolders || cmd == kKeepFiles) {
         std::vector<int> keep;
         for (int index : selected)
@@ -4245,7 +4425,7 @@ void RunToolbarSelectionAction(AppState& s, int action) {
     if (action == ui::kSelChipClear) {
         // Same as Esc in the list.
         tab->ClearSelection();
-        s.clickCollapseIndex = -1;
+        s.listSelection.ClearDeferred();
         InvalidateRect(s.hwnd, nullptr, FALSE);
         return;
     }
@@ -4279,10 +4459,9 @@ void RunToolbarSelectionAction(AppState& s, int action) {
     else DispatchMenuCommand(s, cmd);
 }
 
-void ShowToolbarMore(AppState& s) {
-    if (!EnsureMenu(s)) return;
+std::vector<ui::FluentMenuItem> BuildToolbarMoreItems(AppState& s) {
     auto* tab=ActiveTab(s);
-    if (!tab) return;
+    if (!tab) return {};
     const float width=static_cast<float>(s.compositor.Width());
     const float left=s.renderer.EffectiveSidebarWidth(width);
     // The toolbar as drawn: an open filter folds pins in here too.
@@ -4293,20 +4472,41 @@ void ShowToolbarMore(AppState& s) {
     // ends in 自定义工具栏…; with none folded it opens the popover directly.
     std::vector<ui::FluentMenuItem> items;
     // Pinned commands without room on the toolbar (all of them when narrow).
+    if (width < 600 * s.scale) {
+        ui::FluentMenuItem settings;
+        settings.command = app::CmdSettings; settings.text = l10n::Get(l10n::StringId::Settings);
+        settings.glyph = L"\xE713"; items.push_back(std::move(settings));
+        ui::FluentMenuItem theme;
+        theme.command = app::CmdToolbarToolBase + app::ToolbarToolIndex(L"theme");
+        theme.text = l10n::Get(l10n::StringId::TooltipToggleTheme); theme.glyph = L"\xE793";
+        items.push_back(std::move(theme));
+        ui::FluentMenuItem windows;
+        windows.command = -6100; windows.text = l10n::Get(l10n::StringId::WindowManage);
+        windows.glyph = L"\xE8A7"; windows.separator_after = true; items.push_back(std::move(windows));
+    }
     const auto pins=ToolbarPinActions(s);
     const uint64_t separators=app::ToolbarSeparatorMask(s.appPrefs.toolbar_tools);
     size_t pin=0;
     for (const auto& id : s.appPrefs.toolbar_tools) {
         const int tool=app::ToolbarToolIndex(id);
-        if (tool<0 || pin>=pins.size()) continue;
+        if (!app::IsToolbarTool(id) || pin>=pins.size()) continue;
         const size_t slot=pin++;
         if (slot<layout.pins.size() && layout.pins[slot].right>layout.pins[slot].left) continue;
         // The user's groups carry over into the menu as separator lines.
         if (!items.empty() && slot<64 && (separators>>slot & 1)) items.back().separator_after=true;
+        if (tool < 0) {
+            ui::FluentMenuItem item;
+            item.command = pins[slot].command; item.text = pins[slot].label;
+            item.glyph = pins[slot].glyph; item.enabled = pins[slot].enabled;
+            AddNativePinSwatch(s, item);
+            items.push_back(std::move(item));
+            continue;
+        }
         const ToolbarToolDef& def=kToolbarTools[tool];
         ui::FluentMenuItem item;
         item.command=pins[slot].command; item.text=l10n::Get(def.label);
-        item.glyph=def.glyph; item.shortcut=app::ShownShortcut(def.shortcut);
+        item.drag_command=tool+1;
+        item.glyph=def.glyph; item.shortcut=L"\u22EE";
         item.enabled=pins[slot].enabled;
         item.checked=pins[slot].checked;
         item.glyph=pins[slot].glyph;
@@ -4317,6 +4517,34 @@ void ShowToolbarMore(AppState& s) {
             item.children=app::BuildSplitMenu(static_cast<int>(LayoutOf(s)));
         }
         items.push_back(std::move(item));
+    }
+    // Unpinned commands: the ones just taken off the toolbar first, then the
+    // rest in toolbar order, capped so the menu stays short.
+    std::vector<size_t> unpinned;
+    for (const auto& id : RecentlyUnpinned(s)) {
+        const int index = app::ToolbarToolIndex(id);
+        if (index >= 0 && !ToolbarToolPinned(s, id)) unpinned.push_back(static_cast<size_t>(index));
+    }
+    for (size_t tool = 0; tool < app::kToolbarToolCount && unpinned.size() < kMoreUnpinnedMax; ++tool)
+        if (!ToolbarToolPinned(s, app::kToolbarToolIds[tool]) &&
+            std::find(unpinned.begin(), unpinned.end(), tool) == unpinned.end())
+            unpinned.push_back(tool);
+    if (unpinned.size() > kMoreUnpinnedMax) unpinned.resize(kMoreUnpinnedMax);
+    for (const size_t tool : unpinned) {
+        const ToolbarToolDef& def = kToolbarTools[tool];
+        ui::FluentMenuItem item;
+        item.command = ToolbarToolCommand(tool);
+        item.text = l10n::Get(def.label);
+        item.glyph = def.glyph;
+        item.drag_command = static_cast<int>(tool) + 1;
+        item.shortcut = L"\u22EE";
+        items.push_back(std::move(item));
+    }
+    const bool shown[]{s.appPrefs.toolbar_show_sort,s.appPrefs.toolbar_show_filter,s.appPrefs.toolbar_show_group};
+    const l10n::StringId view_labels[]{l10n::StringId::ToolbarSort,l10n::StringId::ToolbarFilter,l10n::StringId::ToolbarGroup};
+    for(int view=0;view<3;++view) if(!shown[view]) {
+        ui::FluentMenuItem item;item.command=35010+view;item.drag_command=1001+view;
+        item.text=l10n::Get(view_labels[view]);item.shortcut=L"\u22EE";items.push_back(std::move(item));
     }
     // Pinned apps without room, after the commands (the toolbar order).
     const auto apps=ToolbarAppPins(s);
@@ -4331,22 +4559,53 @@ void ShowToolbarMore(AppState& s) {
         // then passes none of the selected items).
         items.push_back(std::move(item));
     }
-    // 网络位置: the page's own actions lead (pulse_network_design.html §06),
+    // 网络位置: the page's own actions lead,
     // so ⋯ is a menu there even when every pin fits.
     if (tab->current_path == kNetworkLocationsPath) AppendNetworkMoreItems(s, items);
+    auto contributed = extensions::native::CommandRows(s);
+    for (auto& row : contributed) {
+        if (extensions::native::IsCommandPinned(s, row.command)) continue;
+        AddNativePinSwatch(s, row);
+        items.push_back(std::move(row));
+    }
     // Everything fits: the button is just 自定义工具栏 (prototype #custBtn).
-    if (items.empty()) { ShowToolbarCustomize(s, 0); return; }
+    if (items.empty()) return {};
     items.back().separator_after=true;
     items.push_back(CustomizeToolbarItem());
+    return items;
+}
+
+void ShowToolbarMore(AppState& s) {
+    if (!EnsureMenu(s) || !ActiveTab(s)) return;
+    auto items = BuildToolbarMoreItems(s);
+    if (items.empty()) { ShowToolbarCustomize(s, 0); return; }
+    const float width = static_cast<float>(s.compositor.Width());
+    const float left = s.renderer.EffectiveSidebarWidth(width);
+    const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(width - left < 600 * s.scale),
+        s.pane ? s.pane->filter_expand : 0.0f);
     POINT anchor{static_cast<LONG>(layout.overflow.left),static_cast<LONG>(layout.overflow.bottom)};
     ClientToScreen(s.hwnd,&anchor);
     const int cmd=s.menu->TrackPopup(anchor,items);
+    if (cmd == -6100) { ShowWindowManagementMenu(s, anchor); return; }
+    if (s.menu->DraggedCommand() > 0) {
+        BeginToolbarMenuDrag(s, s.menu->DraggedCommand() - 1, s.menu->DragPoint());
+        return;
+    }
     if (RunToolbarAppMenuCommand(s,cmd)) return;
     if (cmd!=app::CmdNone) DispatchMenuCommand(s,cmd);
 }
 
 // Right-click on a pinned tool: group it with a separator, take it off, or
 // open 自定义工具栏.
+static void ClearToolbarMenuTooltip(AppState& s) {
+    s.tooltipText.clear();
+    s.hoverSince = 0;
+    s.hoverRegion = 0;
+    // Refresh the frame copied by the menu's acrylic background.
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+    UpdateWindow(s.hwnd);
+}
+
 void ShowToolbarPinMenu(AppState& s, int slot, POINT screen) {
     if (!EnsureMenu(s) || slot < 0) return;
     const auto only = app::ToolbarToolsOnly(s.appPrefs.toolbar_tools);
@@ -4369,6 +4628,7 @@ void ShowToolbarPinMenu(AppState& s, int slot, POINT screen) {
     remove.separator_after = true;
     items.push_back(std::move(remove));
     items.push_back(CustomizeToolbarItem());
+    ClearToolbarMenuTooltip(s);
     const int cmd = s.menu->TrackPopup(screen, std::move(items));
     auto& tools = s.appPrefs.toolbar_tools;
     std::vector<std::wstring> changed = tools;
@@ -4378,9 +4638,41 @@ void ShowToolbarPinMenu(AppState& s, int slot, POINT screen) {
         changed = app::RemoveToolbarTool(tools, static_cast<size_t>(slot));
     else if (cmd != app::CmdNone) { DispatchMenuCommand(s, cmd); return; }
     if (changed == tools) return;
+    NoteUnpinned(s, tools, changed);
     tools = std::move(changed);
     if (!s.isolatedTest) s.appPrefs.Save();
     InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+void ShowToolbarViewMenu(AppState& s, ui::HitTestResult::Region region, POINT screen) {
+    bool* shown = nullptr;
+    switch (region) {
+    case ui::HitTestResult::ToolbarSort: shown = &s.appPrefs.toolbar_show_sort; break;
+    case ui::HitTestResult::ToolbarGroup:
+    case ui::HitTestResult::ToolbarGroupClear: shown = &s.appPrefs.toolbar_show_group; break;
+    case ui::HitTestResult::FilterBox:
+    case ui::HitTestResult::FilterClear: shown = &s.appPrefs.toolbar_show_filter; break;
+    default: return;
+    }
+    if (!EnsureMenu(s)) return;
+    constexpr int kRemoveTool = 35003;
+    ui::FluentMenuItem remove;
+    remove.command = kRemoveTool;
+    remove.text = l10n::Get(l10n::StringId::ToolbarRemoveTool);
+    remove.glyph = L"\xE711";
+    remove.separator_after = true;
+    std::vector<ui::FluentMenuItem> items;
+    items.push_back(std::move(remove));
+    items.push_back(CustomizeToolbarItem());
+    ClearToolbarMenuTooltip(s);
+    const int cmd = s.menu->TrackPopup(screen, std::move(items));
+    if (cmd == kRemoveTool) {
+        *shown = false;
+        if (!s.isolatedTest) s.appPrefs.Save();
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+    } else if (cmd != app::CmdNone) {
+        DispatchMenuCommand(s, cmd);
+    }
 }
 
 void ShowToolbarAppPinMenu(AppState& s, size_t app, POINT screen) {
@@ -4405,6 +4697,7 @@ void ShowToolbarAppPinMenu(AppState& s, size_t app, POINT screen) {
     remove.separator_after = true;
     items.push_back(std::move(remove));
     items.push_back(CustomizeToolbarItem());
+    ClearToolbarMenuTooltip(s);
     const int cmd = s.menu->TrackPopup(screen, std::move(items));
     const auto drop_break = [&] {
         breaks.erase(std::remove_if(breaks.begin(), breaks.end(), [&](const std::wstring& b) {
@@ -4428,18 +4721,27 @@ int g_toolbar_preview = -1;
 int g_toolbar_link_tool = -1;
 std::wstring g_toolbar_link_app;
 struct ToolbarPinDrag {
-    bool down = false, active = false, out = false, moved = false;
+    bool down = false, active = false, out = false, moved = false, separator = false, right = false;
+    int view = -1;
+    std::vector<std::wstring> original_views;
+    std::array<bool, 3> original_shown{};
     int index = -1;        // the pin's slot now (tools, then apps)
     POINT start{};
+    std::vector<std::wstring> original_tools, original_apps;
     float grab = 0.0f;     // pointer x - the pin's left edge at the press
     float left = 0.0f, dy = 0.0f;
 };
 ToolbarPinDrag g_pin_drag;
+std::vector<std::wstring> g_toolbar_restore_tools, g_toolbar_restore_apps;
+HWND g_toolbar_restore_owner = nullptr;
+std::vector<std::wstring> g_toolbar_restore_views;
+std::array<bool,3> g_toolbar_restore_shown{};
 
 void PushToolbarPinDrag(AppState& s) {
     ui::ToolbarPinDragState state;
     if (g_pin_drag.active) {
-        state.index = g_pin_drag.index;
+        state.view = g_pin_drag.view;
+        state.index = g_pin_drag.separator ? -1 : g_pin_drag.index;
         state.left = g_pin_drag.left;
         state.dy = g_pin_drag.dy;
         state.out = g_pin_drag.out;
@@ -4449,7 +4751,7 @@ void PushToolbarPinDrag(AppState& s) {
     if (g_toolbar_link_tool >= 0 && static_cast<size_t>(g_toolbar_link_tool) < app::kToolbarToolCount) {
         int slot = 0;
         for (const auto& id : s.appPrefs.toolbar_tools) {
-            if (app::ToolbarToolIndex(id) < 0) continue;
+            if (!app::IsToolbarTool(id)) continue;
             if (id == app::kToolbarToolIds[g_toolbar_link_tool]) { state.linked = slot; break; }
             ++slot;
         }
@@ -4477,7 +4779,19 @@ std::vector<ui::SelectionChipAction> ToolbarPinActions(AppState& s) {
     if (g_toolbar_preview >= 0 && static_cast<size_t>(g_toolbar_preview) < app::kToolbarToolCount &&
         !ToolbarToolPinned(s, app::kToolbarToolIds[g_toolbar_preview]))
         ids.emplace_back(app::kToolbarToolIds[g_toolbar_preview]);
+    const auto native_pins = extensions::native::PinnedCommandRows(s);
+    size_t native_pin = 0;
     for (const auto& id : ids) {
+        if (app::IsNativeToolbarTool(id)) {
+            if (native_pin < native_pins.size() && out.size() < static_cast<size_t>(ui::kToolbarCommandPins)) {
+                const auto& row = native_pins[native_pin];
+                ui::SelectionChipAction action;
+                action.command = row.command; action.glyph = row.glyph; action.label = row.text; action.enabled = row.enabled;
+                out.push_back(std::move(action));
+            }
+            ++native_pin;
+            continue;
+        }
         const int tool = app::ToolbarToolIndex(id);
         if (tool < 0 || out.size() >= static_cast<size_t>(ui::kToolbarCommandPins)) continue;
         const ToolbarToolDef& def = kToolbarTools[tool];
@@ -4562,7 +4876,7 @@ static RECT ToolbarMoreScreenRect(AppState& s) {
 }
 
 // 自定义工具栏 → 排序与筛选: the toolbar's view buttons (not pins; they
-// show or hide in place, AppPrefs::toolbar_show_*).
+// have their own visibility and order preferences).
 struct ToolbarViewDef {
     std::wstring_view id;
     const wchar_t* glyph;
@@ -4619,7 +4933,9 @@ static std::vector<size_t> ToolbarPinsOrder(const AppState& s) {
         const int at = app::ToolbarToolIndex(id);
         if (at >= 0 && !placed[at]) { placed[at] = 1; order.push_back(static_cast<size_t>(at)); }
     }
-    for (size_t i = 0; i < kToolbarViewCount; ++i) order.push_back(app::kToolbarToolCount + i);
+    for (int index : app::ToolbarViewLayoutOrder(s.appPrefs.toolbar_view_order))
+        order.push_back(app::kToolbarToolCount + static_cast<size_t>(index));
+    order.push_back(app::kToolbarToolCount + 3); // Favorites bar is not a view control.
     return order;
 }
 
@@ -4662,7 +4978,7 @@ void ShowToolbarCustomize(AppState& s, int page) {
         spec.pins.push_back(std::move(tile));
     }
     // 排序与筛选: the view buttons at the toolbar's right, shown or hidden
-    // in place (tiles kToolbarToolCount + i).
+    // in their saved order (tiles kToolbarToolCount + i).
     for (size_t i = 0; i < kToolbarViewCount; ++i) {
         ui::ToolbarPickerTile tile;
         tile.glyph = kToolbarViews[i].glyph;
@@ -4718,14 +5034,32 @@ void ShowToolbarCustomize(AppState& s, int page) {
     // The picker hands over the checked tiles in its order: the toolbar's.
     spec.on_tools = [&s, save](const std::vector<size_t>& pinned) {
         std::vector<std::wstring> tools;
+        std::vector<std::wstring> view_order;
         bool view[kToolbarViewCount] = {};
         for (size_t index : pinned) {
             if (index < app::kToolbarToolCount) tools.emplace_back(app::kToolbarToolIds[index]);
-            else if (index - app::kToolbarToolCount < kToolbarViewCount) view[index - app::kToolbarToolCount] = true;
+            else if (index - app::kToolbarToolCount < kToolbarViewCount) {
+                const size_t at = index - app::kToolbarToolCount;
+                view[at] = true;
+                if (at < app::kToolbarViewIds.size()) view_order.emplace_back(app::kToolbarViewIds[at]);
+            }
         }
         bool changed = false;
+        // Visibility changes do not move the hidden controls' saved slots.
+        view_order = app::ReorderVisibleToolbarViews(s.appPrefs.toolbar_view_order, view_order);
+        if (view_order != s.appPrefs.toolbar_view_order) {
+            s.appPrefs.toolbar_view_order = std::move(view_order);
+            changed = true;
+        }
         for (size_t i = 0; i < kToolbarViewCount; ++i)
             if (ToolbarViewShown(s, i) != view[i]) { ToolbarViewPref(s, i) = view[i]; changed = true; }
+        size_t saved_slot = 0;
+        for (const auto& id : s.appPrefs.toolbar_tools) {
+            if (!app::IsToolbarTool(id)) continue;
+            if (app::IsNativeToolbarTool(id))
+                tools.insert(tools.begin() + static_cast<std::ptrdiff_t>(std::min(saved_slot, tools.size())), id);
+            ++saved_slot;
+        }
         tools = app::KeepToolbarSeparators(s.appPrefs.toolbar_tools, tools);
         if (tools != s.appPrefs.toolbar_tools) {
             s.appPrefs.toolbar_tools = std::move(tools);
@@ -4842,6 +5176,13 @@ void ShowToolbarCustomize(AppState& s, int page) {
         save();
     };
     spec.dark_now = [&s] { return s.darkMode; };
+    // The details pane's shell preview overlay is topmost and would sit on
+    // top of the picker; hide it while the picker is up (kept loaded).
+    struct CoverPreview {
+        AppState& s;
+        explicit CoverPreview(AppState& state) : s(state) { s.detailsPreview.SetHandlerCovered(true); }
+        ~CoverPreview() { s.detailsPreview.SetHandlerCovered(false); }
+    } cover{s};
     ui::ShowToolbarPicker(s.hwnd, spec, s.darkMode, s.accentColor);
     g_toolbar_preview = -1;
     g_toolbar_link_tool = -1;
@@ -4870,14 +5211,116 @@ void BeginToolbarPinDrag(AppState& s, int index, POINT pt) {
     g_pin_drag.down = true;
     g_pin_drag.index = index;
     g_pin_drag.start = pt;
+    g_pin_drag.original_tools = s.appPrefs.toolbar_tools;
+    g_pin_drag.original_apps = s.appPrefs.toolbar_apps;
+    g_pin_drag.original_views = s.appPrefs.toolbar_view_order;
+    g_pin_drag.original_shown = {s.appPrefs.toolbar_show_sort,s.appPrefs.toolbar_show_filter,s.appPrefs.toolbar_show_group};
     g_pin_drag.grab = static_cast<float>(pt.x) - layout.pins[static_cast<size_t>(index)].left;
     SetCapture(s.hwnd);
+}
+
+void BeginToolbarViewDrag(AppState& s, int view, POINT pt) {
+    BeginToolbarPinDrag(s, 0, pt);
+    g_pin_drag.view = view;
+    g_pin_drag.index = -1;
+    const auto layout=CurrentToolbarLayout(s);
+    const D2D1_RECT_F views[]{layout.sort,layout.filter,layout.group};
+    if(view>=0 && view<3)g_pin_drag.grab=static_cast<float>(pt.x)-views[view].left;
+}
+
+bool BeginToolbarSeparatorDrag(AppState& s, POINT pt) {
+    const auto layout = CurrentToolbarLayout(s);
+    for (size_t i = 1; i < layout.pins.size() && i < 64; ++i) {
+        const auto& r = layout.pins[i];
+        if (!(layout.pin_dividers >> i & 1) || r.right <= r.left) continue;
+        if (std::fabs(static_cast<float>(pt.x) - (r.left - 6.0f * s.scale)) <= 5.0f * s.scale &&
+            pt.y >= r.top && pt.y <= r.bottom) {
+            BeginToolbarPinDrag(s, static_cast<int>(i), pt);
+            g_pin_drag.separator = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+void BeginToolbarMenuDrag(AppState& s, int tool, POINT screen) {
+    if (tool >= 1000 && tool < 1003) {
+        ScreenToClient(s.hwnd,&screen);
+        BeginToolbarViewDrag(s,tool-1000,screen);
+        bool* shown[]{&s.appPrefs.toolbar_show_sort,&s.appPrefs.toolbar_show_filter,&s.appPrefs.toolbar_show_group};
+        *shown[tool-1000]=true;
+        g_pin_drag.active=true;g_pin_drag.moved=true;
+        return;
+    }
+    if (tool < 0 || static_cast<size_t>(tool) >= app::kToolbarToolCount) return;
+    const auto original = s.appPrefs.toolbar_tools;
+    const std::wstring id(app::kToolbarToolIds[tool]);
+    auto only = app::ToolbarToolsOnly(original);
+    auto found = std::find(only.begin(), only.end(), id);
+    if (found == only.end()) {
+        s.appPrefs.toolbar_tools.push_back(id);
+        only.push_back(id);
+        found = only.end() - 1;
+    }
+    InvalidateRect(s.hwnd,nullptr,FALSE);
+    UpdateWindow(s.hwnd); // synchronize renderer pin count/layout before capturing the new pin
+    ScreenToClient(s.hwnd, &screen);
+    BeginToolbarPinDrag(s, static_cast<int>(found - only.begin()), screen);
+    g_pin_drag.original_tools = original;
+    g_pin_drag.active = true;
+    g_pin_drag.moved = s.appPrefs.toolbar_tools != original;
+    g_pin_drag.grab = 16.0f * s.scale;
+    MoveToolbarPinDrag(s, screen);
 }
 
 void MoveToolbarPinDrag(AppState& s, POINT pt) {
     ToolbarPinDrag& d = g_pin_drag;
     if (!d.down) return;
     const float dx = static_cast<float>(pt.x - d.start.x), dy = static_cast<float>(pt.y - d.start.y);
+    if (d.view >= 0) {
+        if (!d.active && std::hypot(dx,dy) < 6.0f*s.scale) return;
+        d.active = true;
+        const auto layout = CurrentToolbarLayout(s);
+        const D2D1_RECT_F views[]{layout.sort,layout.filter,layout.group};
+        const auto& more=layout.overflow;
+        d.out=pt.y<more.top-30*s.scale || pt.y>more.bottom+26*s.scale ||
+            (pt.x>=more.left && pt.x<=more.right);
+        int target=d.view;float distance=1e9f;
+        for(int i=0;i<3;++i) {
+            if(views[i].right<=views[i].left)continue;
+            const float delta=std::fabs(static_cast<float>(pt.x)-(views[i].left+views[i].right)*0.5f);
+            if(delta<distance){distance=delta;target=i;}
+        }
+        const float middle=(layout.create.right+layout.overflow.left)*0.5f;
+        if(!d.out) {
+            int slot=-1;
+            if(pt.x<middle) {
+                slot=0;
+                const int count=static_cast<int>(app::ToolbarToolsOnly(s.appPrefs.toolbar_tools).size());
+                for(int i=0;i<count && i<ui::kToolbarPinSlots;++i) {
+                    const auto& pin=layout.pins[i];
+                    if(pin.right>pin.left && pt.x>(pin.left+pin.right)*0.5f)slot=i+1;
+                }
+            }
+            const auto changed=app::SetToolbarViewSlot(s.appPrefs.toolbar_tools,d.view,slot);
+            d.moved=d.moved || changed!=s.appPrefs.toolbar_tools;
+            s.appPrefs.toolbar_tools=changed;
+        }
+        if(target!=d.view && !d.out && pt.x>=middle) {
+            auto& order=s.appPrefs.toolbar_view_order;
+            order=app::NormalizeToolbarViewOrder(order);
+            const std::wstring id(app::kToolbarViewIds[d.view]);
+            const std::wstring to(app::kToolbarViewIds[target]);
+            const auto position=std::find(order.begin(),order.end(),to)-order.begin();
+            order.erase(std::find(order.begin(),order.end(),id));
+            order.insert(order.begin()+position,id);
+            d.moved=true;
+        }
+        d.left=static_cast<float>(pt.x)-d.grab;
+        d.dy=std::clamp(dy,-4.0f*s.scale,14.0f*s.scale);
+        PushToolbarPinDrag(s);
+        return;
+    }
     const int tools = static_cast<int>(std::min<size_t>(app::ToolbarToolsOnly(s.appPrefs.toolbar_tools).size(),
                                                         ui::kToolbarCommandPins));
     const int pins = static_cast<int>(ToolbarPinActions(s).size());
@@ -4886,17 +5329,31 @@ void MoveToolbarPinDrag(AppState& s, POINT pt) {
     const bool is_app = d.index >= pins && d.index < pins + apps;
     if (!is_tool && !is_app) return;   // the preview pin
     if (!d.active) {
-        if (std::hypot(dx, dy) < 4.0f * s.scale) return;
+        if (std::hypot(dx, dy) < 6.0f * s.scale) return;
         d.active = true;
     }
     const auto layout = CurrentToolbarLayout(s);
-    const D2D1_RECT_F home = layout.pins[static_cast<size_t>(d.index)];
+    D2D1_RECT_F home = layout.pins[static_cast<size_t>(d.index)];
+    if (home.right <= home.left) home = layout.create;
     const float w = home.right - home.left;
     d.left = static_cast<float>(pt.x) - d.grab;
     // Below the row it stays in sight (14 DIP down at most), faded once
     // letting go would take it off.
     d.dy = std::clamp(dy, -4.0f * s.scale, 14.0f * s.scale);
-    d.out = dy > 34.0f * s.scale;
+    const auto& more = layout.overflow;
+    d.out = pt.y < home.top - 30.0f * s.scale || pt.y > home.bottom + 26.0f * s.scale ||
+        (pt.x >= more.left - 4.0f * s.scale && pt.x <= more.right + 4.0f * s.scale &&
+         pt.y >= more.top - 6.0f * s.scale && pt.y <= more.bottom + 6.0f * s.scale);
+    const int right_from = app::ToolbarRightFrom(s.appPrefs.toolbar_tools);
+    float right_edge=layout.overflow.left;
+    const auto view_slots=app::ToolbarViewSlots(s.appPrefs.toolbar_tools);
+    const D2D1_RECT_F view_rects[]{layout.sort,layout.filter,layout.group};
+    for(int view=0;view<3;++view) if(view_slots[view]<0 && view_rects[view].right>view_rects[view].left)
+        right_edge=std::min(right_edge,view_rects[view].left);
+    float boundary = (layout.create.right + right_edge) * 0.5f;
+    if (right_from > 0 && right_from < tools && layout.pins[right_from].right > layout.pins[right_from].left)
+        boundary = (layout.pins[right_from-1].right + layout.pins[right_from].left) * 0.5f;
+    d.right = static_cast<float>(pt.x) > boundary;
     // The slot whose centre is nearest the pin's, in its own group.
     const int from = is_tool ? 0 : pins, to = is_tool ? tools : pins + apps;
     int best = d.index;
@@ -4906,6 +5363,20 @@ void MoveToolbarPinDrag(AppState& s, POINT pt) {
         if (r.right <= r.left) continue;
         const float dist = std::fabs((r.left + r.right) * 0.5f - (d.left + w * 0.5f));
         if (dist < best_dist) { best_dist = dist; best = i; }
+    }
+    if (d.separator) {
+        if (best > 0 && best < tools && best != d.index && !d.out) {
+            auto mask = app::ToolbarSeparatorMask(s.appPrefs.toolbar_tools);
+            mask &= ~(uint64_t{1} << d.index);
+            mask |= uint64_t{1} << best;
+            s.appPrefs.toolbar_tools = app::KeepToolbarViewSlots(s.appPrefs.toolbar_tools,
+                app::SetToolbarRightFrom(app::WithToolbarSeparators(app::ToolbarToolsOnly(s.appPrefs.toolbar_tools), mask),
+                    app::ToolbarRightFrom(s.appPrefs.toolbar_tools)));
+            d.index = best;
+            d.moved = true;
+        }
+        PushToolbarPinDrag(s);
+        return;
     }
     if (best != d.index && !d.out) {
         auto move = [](std::vector<std::wstring>& list, int a, int b) {
@@ -4928,23 +5399,80 @@ void EndToolbarPinDrag(AppState& s, bool cancel) {
     if (!d.down) return;
     g_pin_drag = ToolbarPinDrag{};
     if (GetCapture() == s.hwnd) ReleaseCapture();
-    bool changed = d.moved;
-    if (d.active && d.out && !cancel) {
+    if (cancel) {
+        s.appPrefs.toolbar_tools = d.original_tools;
+        s.appPrefs.toolbar_apps = d.original_apps;
+        s.appPrefs.toolbar_view_order = d.original_views;
+        s.appPrefs.toolbar_show_sort=d.original_shown[0];
+        s.appPrefs.toolbar_show_filter=d.original_shown[1];
+        s.appPrefs.toolbar_show_group=d.original_shown[2];
+    }
+    bool changed = d.moved && !cancel;
+    if (d.active && d.out && !cancel && d.view >= 0) {
+        bool* shown[]{&s.appPrefs.toolbar_show_sort,&s.appPrefs.toolbar_show_filter,&s.appPrefs.toolbar_show_group};
+        *shown[d.view]=false;changed=true;
+    }
+    if (d.active && d.out && !cancel && d.view < 0) {
         const int tools = static_cast<int>(std::min<size_t>(app::ToolbarToolsOnly(s.appPrefs.toolbar_tools).size(),
                                                             ui::kToolbarCommandPins));
         const int pins = static_cast<int>(ToolbarPinActions(s).size());
-        if (d.index < tools) {
-            s.appPrefs.toolbar_tools = app::RemoveToolbarTool(s.appPrefs.toolbar_tools, static_cast<size_t>(d.index));
+        if (d.separator) {
+            const auto mask = app::ToolbarSeparatorMask(s.appPrefs.toolbar_tools) & ~(uint64_t{1} << d.index);
+            s.appPrefs.toolbar_tools = app::KeepToolbarViewSlots(s.appPrefs.toolbar_tools,
+                app::SetToolbarRightFrom(app::WithToolbarSeparators(app::ToolbarToolsOnly(s.appPrefs.toolbar_tools), mask),
+                    app::ToolbarRightFrom(s.appPrefs.toolbar_tools)));
+            changed = true;
+        } else if (d.index < tools) {
+            auto removed = app::RemoveToolbarTool(s.appPrefs.toolbar_tools, static_cast<size_t>(d.index));
+            NoteUnpinned(s, s.appPrefs.toolbar_tools, removed);
+            s.appPrefs.toolbar_tools = std::move(removed);
             changed = true;
         } else if (d.index >= pins && d.index - pins < static_cast<int>(s.appPrefs.toolbar_apps.size())) {
             s.appPrefs.toolbar_apps.erase(s.appPrefs.toolbar_apps.begin() + (d.index - pins));
             changed = true;
         }
     }
-    if (changed && !s.isolatedTest) s.appPrefs.Save();
+    if (d.active && !d.out && !d.separator && !cancel && d.view < 0 &&
+        d.index < static_cast<int>(app::ToolbarToolsOnly(s.appPrefs.toolbar_tools).size())) {
+        const int right = app::ToolbarRightFrom(s.appPrefs.toolbar_tools);
+        const int next = d.right ? (right < 0 ? d.index : std::min(right, d.index))
+                                 : (right >= 0 && d.index >= right ? d.index + 1 : right);
+        const auto grouped = app::SetToolbarRightFrom(s.appPrefs.toolbar_tools, next);
+        changed = changed || grouped != s.appPrefs.toolbar_tools;
+        s.appPrefs.toolbar_tools = grouped;
+    }
+    if (changed) {
+        g_toolbar_restore_tools = d.original_tools;
+        g_toolbar_restore_apps = d.original_apps;
+        g_toolbar_restore_owner = s.hwnd;
+        g_toolbar_restore_views=d.original_views;
+        g_toolbar_restore_shown=d.original_shown;
+        if (!s.isolatedTest) s.appPrefs.Save();
+        s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Undo,
+            l10n::Get(l10n::StringId::ToolbarDragChanged), {},
+            {{l10n::Get(l10n::StringId::ToolbarDragRestore), WM_COMMAND, 35004}});
+    }
     PushToolbarPinDrag(s);
-    if (!d.active && !cancel) RunToolbarAction(s, true, d.index);   // a click
+    if (!d.active && !cancel && d.view >= 0) {
+        if(d.view==0) ShowSortDropdown(s);
+        else if(d.view==1) ShowFilterEditor(s);
+        else ShowGroupDropdown(s);
+    }
+    if (!d.active && !cancel && !d.separator && d.view < 0) RunToolbarAction(s, true, d.index);   // a click
     ui::ToolbarPickerActivate();
+}
+
+void RestoreToolbarDrag(AppState& s) {
+    if (g_toolbar_restore_owner != s.hwnd) return;
+    s.appPrefs.toolbar_tools = std::move(g_toolbar_restore_tools);
+    s.appPrefs.toolbar_apps = std::move(g_toolbar_restore_apps);
+    g_toolbar_restore_owner = nullptr;
+    s.appPrefs.toolbar_view_order=std::move(g_toolbar_restore_views);
+    s.appPrefs.toolbar_show_sort=g_toolbar_restore_shown[0];
+    s.appPrefs.toolbar_show_filter=g_toolbar_restore_shown[1];
+    s.appPrefs.toolbar_show_group=g_toolbar_restore_shown[2];
+    if (!s.isolatedTest) s.appPrefs.Save();
+    PushToolbarPinDrag(s);
 }
 
 // Toolbar toggle tools: the same change and effects as the settings page.
@@ -5365,6 +5893,13 @@ void ShowOmnibar(AppState& s, OmnibarMode mode) {
                 parsed.kind == app::OmnibarQuery::Kind::Command ? app::actions::PaletteMode::Commands
                                                                 : app::actions::PaletteMode::Mixed,
                 PaletteUsed());
+        if (parsed.kind == app::OmnibarQuery::Kind::Command) {
+            auto native_commands = extensions::native::CommandRows(s, parsed.needle);
+            commands.insert(commands.begin(), std::make_move_iterator(native_commands.begin()), std::make_move_iterator(native_commands.end()));
+            auto contributed = extensions::native::PackageEntries(parsed.needle);
+            commands.insert(commands.begin(), std::make_move_iterator(contributed.begin()),
+                            std::make_move_iterator(contributed.end()));
+        }
         auto items = app::BuildCommandPalette(query, std::move(commands), s.places.RecentFolderPaths(),
                                               s.paletteHits, project_only, s.paletteTotal, current);
         // 别名: aliased folders lead ("fbb" or 发布包 → that folder).
@@ -5417,6 +5952,9 @@ void ShowOmnibar(AppState& s, OmnibarMode mode) {
         if (index < alias_paths.size()) NavigateTo(s, alias_paths[index]);
         return;
     }
+    if (HandleNativeCommandPin(s, cmd)) return;
+    if (extensions::native::HandleContributedCommand(s, cmd)) return;
+    if (extensions::native::HandlePackageCommand(s, cmd)) return;
     if (cmd == app::actions::kPaletteAskAssistant) {
         // Fills the assistant's box; the user reads it and presses Enter.
         const auto q = app::ParseOmnibarQuery(s.paletteQuery, project_only);
@@ -5487,14 +6025,7 @@ void ApplyAppWindowChrome(AppState& s) {
 static ui::FolderPickerSpec MakePickerSpec(const AppState& s, ui::PickerMode mode) {
     ui::FolderPickerSpec spec;
     spec.mode = mode;
-    spec.selection_outline = s.appPrefs.list_selection_outline;
-    spec.row_height_dip = static_cast<float>(
-        app::EffectiveRowHeightDip(s.appPrefs.row_height, s.appPrefs.ui_font_scale));
-    spec.list_smart_date = s.appPrefs.list_smart_date;
-    spec.list_zebra_rows = s.appPrefs.list_zebra_rows;
-    spec.list_size_bar = s.appPrefs.list_size_bar;
-    spec.thumbnail_badges = s.appPrefs.list_thumbnail_badges;
-    spec.details_columns = s.appPrefs.details_columns;
+    app::ApplyPickerAppearanceToSpec(app::PickerAppearanceFromPrefs(s.appPrefs), spec);
     spec.show_hidden = s.appPrefs.show_hidden_files;
     return spec;
 }
@@ -5611,13 +6142,19 @@ bool SelectedQuickPreviewItem(AppState& s, ui::QuickPreviewItem& item) {
 }
 
 void ToggleQuickPreview(AppState& s) {
+    if (HoldPreviewPin(s)) return;   // Space while holding the button keeps the peek open
     if (s.quickPreview.visible()) {
         s.quickPreview.Close();
         return;
     }
     if(DeferContentSelection(s,[](AppState& v){ToggleQuickPreview(v);},true)) return;
     ui::QuickPreviewItem item;
-    if (SelectedQuickPreviewItem(s, item)) {
+    if (SelectedQuickPreviewItem(s, item)) OpenQuickPreview(s, item, true);
+}
+
+void OpenQuickPreview(AppState& s, const ui::QuickPreviewItem& item, bool activate) {
+    s.detailsPreview.Close();
+    {
         const auto effect = s.appPrefs.background_image.empty()
             ? ui::WindowEffectFromId(s.appPrefs.window_effect)
             : ui::WindowEffect::None;
@@ -5648,7 +6185,8 @@ void ToggleQuickPreview(AppState& s) {
         s.quickPreview.Initialize(s.hwnd, WM_QUICK_PREVIEW_NAVIGATE,
                                   WM_QUICK_PREVIEW_OPEN, WM_QUICK_PREVIEW_COMMAND);
         s.quickPreview.SetAccent(s.accentColor);
-        s.quickPreview.Show(item, s.darkMode, effect, s.safeMode, zoom_from);
+        s.quickPreview.SetOptions(QuickPreviewOptionsFromPrefs(s.appPrefs));
+        s.quickPreview.Show(item, s.darkMode, effect, s.safeMode, zoom_from, activate);
         s.quickPreviewSelection.Reset(item.path);
     }
 }
@@ -5659,9 +6197,9 @@ void NavigateQuickPreview(AppState& s, int direction) {
     ui::WindowViewModel vm = BuildVm(s);
     const int count = static_cast<int>(vm.pane.EntryCount());
     if (count <= 0) return;
-    int view = vm.pane.ViewIndex(tab->selected_index);
-    if (view < 0) view = 0;
-    view = std::clamp(view + (direction < 0 ? -1 : 1), 0, count - 1);
+    const int view = app::QuickPreviewNavigationTarget(
+        vm.pane.ViewIndex(tab->selected_index), count, direction);
+    if (view < 0) return;
     tab->MoveFocus(vm.pane.SourceIndex(view), false);
     EnsureRowVisible(s, *tab, tab->selected_index);
     auto update=[](AppState& v) {
@@ -5670,6 +6208,40 @@ void NavigateQuickPreview(AppState& s, int direction) {
     };
     if(!DeferContentSelection(s,update,true)) update(s);
     InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+void SyncDetailsPreview(AppState& s) {
+    auto* tab = ActiveTab(s);
+    const auto bounds = s.renderer.DetailsPreviewBounds();
+    ui::QuickPreviewItem item;
+    if (!s.showDetailsPanel || !s.detailsPreviewEnabled || IsIconic(s.hwnd) ||
+        s.quickPreview.visible() || !tab || tab->loading || tab->SelectedCount() != 1 ||
+        bounds.right <= bounds.left || bounds.bottom <= bounds.top ||
+        !SelectedQuickPreviewItem(s, item)) {
+        s.detailsPreview.Close();
+        s.detailsPreview.SetEmbeddedOcclusion({});
+        return;
+    }
+    RECT rect{static_cast<LONG>(bounds.left), static_cast<LONG>(bounds.top),
+              static_cast<LONG>(bounds.right), static_cast<LONG>(bounds.bottom)};
+    s.detailsPreview.InitializeEmbedded(s.hwnd, WM_DETAILS_PREVIEW_NAVIGATE,
+        WM_DETAILS_PREVIEW_OPEN, WM_DETAILS_PREVIEW_COMMAND);
+    s.detailsPreview.SetAccent(s.accentColor);
+    s.detailsPreview.SetOptions(QuickPreviewOptionsFromPrefs(s.appPrefs));
+    const auto& shown = s.detailsPreview.item();
+    if (!s.detailsPreview.visible() || s.detailsPreviewDark != s.darkMode ||
+        shown.path != item.path || shown.size != item.size ||
+        shown.modified != item.modified || shown.attrs != item.attrs) {
+        s.detailsPreviewDark = s.darkMode;
+        s.detailsPreview.ShowEmbedded(item, rect, s.darkMode, s.safeMode);
+    }
+    else {
+        s.detailsPreview.SetEmbeddedBounds(rect);
+        s.detailsPreview.SetStarred(item.starred);
+    }
+    // Visible() includes the closing animation. Keep the same preview session
+    // and scroll position; restore its whole region only once the flyout is gone.
+    s.detailsPreview.SetEmbeddedOcclusion(s.renderer.GroupWheelPicker().OcclusionBounds());
 }
 
 void SyncQuickPreview(AppState& s) {
@@ -5779,9 +6351,11 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
                                 s.appPrefs.list_selection_outline);
         s.renderer.SetTreeSticky(s.appPrefs.list_tree_sticky);
         s.renderer.SetDetailsColumns(s.appPrefs.details_columns);
+        s.renderer.SetDetailsColumnOrder(s.appPrefs.details_column_order);
         s.renderer.SetRowActions(app::RowActionMask(s.ctxMenuPrefs.builtin_hidden,
             s.ctxMenuPrefs.BuiltinOrder(app::BuiltinMenuSurface::RowButtons)));
         s.renderer.SetThumbnailBadges(s.appPrefs.list_thumbnail_badges);
+        app::SetMediaColumnsEnabled(s.appPrefs.media_columns);
     }
     if (app::HasEffect(effects, app::SettingsEffect::FolderSort)) {
         app::SetFolderSortMode(app::FolderSortModeFromInt(s.appPrefs.folder_sort_mode));

@@ -57,19 +57,20 @@ std::wstring RecycleIndexPath(const std::wstring& content_path) {
 
 // A folder whose $I record holds no total (some tools leave it 0): add up
 // what is inside, bounded so a huge tree cannot stall the listing.
-uint64_t RecycledFolderBytes(const std::wstring& dir, int& budget) {
+uint64_t RecycledFolderBytes(const std::wstring& dir, int& budget, const std::function<bool()>& cancelled) {
+    if (cancelled && cancelled()) return 0;
     uint64_t total = 0;
     WIN32_FIND_DATAW data{};
     HANDLE find = FindFirstFileExW((dir + L"\\*").c_str(), FindExInfoBasic, &data, FindExSearchNameMatch,
                                    nullptr, FIND_FIRST_EX_LARGE_FETCH);
     if (find == INVALID_HANDLE_VALUE) return 0;
     do {
-        if (--budget < 0) break;
+        if (--budget < 0 || (cancelled && cancelled())) break;
         const std::wstring_view name = data.cFileName;
         if (name == L"." || name == L"..") continue;
         if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             if (!(data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
-                total += RecycledFolderBytes(dir + L"\\" + data.cFileName, budget);
+                total += RecycledFolderBytes(dir + L"\\" + data.cFileName, budget, cancelled);
         } else {
             total += (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
         }
@@ -78,7 +79,9 @@ uint64_t RecycledFolderBytes(const std::wstring& dir, int& budget) {
     return total;
 }
 
-bool ReadRecycleIndex(const std::wstring& index_path, RecycleItem& out) {
+static bool ReadRecycleIndexCancellable(const std::wstring& index_path, RecycleItem& out,
+    const std::function<bool()>& cancelled) {
+    if (cancelled && cancelled()) return false;
     out = {};
     const std::wstring name = FileNameOf(index_path);
     if (name.size() < 3 || name[0] != L'$' || (name[1] != L'I' && name[1] != L'i'))
@@ -108,12 +111,18 @@ bool ReadRecycleIndex(const std::wstring& index_path, RecycleItem& out) {
         out.size = bytes.QuadPart;
     } else if (out.is_dir && out.size == 0) {
         int budget = 20000;
-        out.size = RecycledFolderBytes(out.content_path, budget);
+        out.size = RecycledFolderBytes(out.content_path, budget, cancelled);
     }
     return true;
 }
 
-bool EnumerateRecycleBinAtRoot(const std::wstring& recycle_root, std::vector<DirEntry>& out) {
+bool ReadRecycleIndex(const std::wstring& index_path, RecycleItem& out) {
+    return ReadRecycleIndexCancellable(index_path, out, {});
+}
+
+bool EnumerateRecycleBinAtRoot(const std::wstring& recycle_root, std::vector<DirEntry>& out,
+    const std::function<bool()>& cancelled) {
+    if (cancelled && cancelled()) return false;
     const std::wstring sid = CurrentUserSidString();
     if (sid.empty()) return false; // Never fall back to scanning other users.
     const std::wstring normalized = NormalizePath(recycle_root);
@@ -126,9 +135,10 @@ bool EnumerateRecycleBinAtRoot(const std::wstring& recycle_root, std::vector<Dir
         return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
     }
     do {
+        if (cancelled && cancelled()) { FindClose(find); return false; }
         if (index.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         RecycleItem item;
-        if (ReadRecycleIndex(sid_dir + L"\\" + index.cFileName, item))
+        if (ReadRecycleIndexCancellable(sid_dir + L"\\" + index.cFileName, item, cancelled))
             out.push_back(ToDirEntry(item));
     } while (FindNextFileW(find, &index));
     const DWORD error = GetLastError();
@@ -136,20 +146,28 @@ bool EnumerateRecycleBinAtRoot(const std::wstring& recycle_root, std::vector<Dir
     return error == ERROR_NO_MORE_FILES;
 }
 
-void EnumerateRecycleBin(std::vector<DirEntry>& out, RecycleBinInfo* info) {
+bool EnumerateRecycleBinAtRoot(const std::wstring& recycle_root, std::vector<DirEntry>& out) {
+    return EnumerateRecycleBinAtRoot(recycle_root, out, {});
+}
+
+void EnumerateRecycleBin(std::vector<DirEntry>& out, RecycleBinInfo* info,
+    const std::function<bool()>& cancelled) {
     out.clear();
+    if (cancelled && cancelled()) { if (info) *info = {}; return; }
     if (info) QueryRecycleBinInfo(*info);
     const DWORD drives = GetLogicalDrives();
     bool complete = drives != 0;
     for (int i = 0; i < 26; ++i) {
+        if (cancelled && cancelled()) { out.clear(); if (info) *info = {}; return; }
         if ((drives & (1u << i)) == 0) continue;
         wchar_t root[4] = { static_cast<wchar_t>(L'A' + i), L':', L'\\', 0 };
         const UINT type = GetDriveTypeW(root);
         if (type != DRIVE_FIXED && type != DRIVE_REMOVABLE) continue;
         if (IsRemoteLikeDrive(root)) continue;  // cloud mount: no local bin to scan
         const std::wstring bin = NormalizePath(std::wstring(root) + L"$Recycle.Bin");
-        if (!EnumerateRecycleBinAtRoot(bin, out)) complete = false;
+        if (!EnumerateRecycleBinAtRoot(bin, out, cancelled)) complete = false;
     }
+    if (cancelled && cancelled()) { out.clear(); if (info) *info = {}; return; }
     if (!info) return;
     uint64_t enum_bytes = 0;
     for (const auto& entry : out) enum_bytes += entry.size;
@@ -162,6 +180,10 @@ void EnumerateRecycleBin(std::vector<DirEntry>& out, RecycleBinInfo* info) {
         info->bytes = enum_bytes;
         return;
     }
+}
+
+void EnumerateRecycleBin(std::vector<DirEntry>& out, RecycleBinInfo* info) {
+    EnumerateRecycleBin(out, info, {});
 }
 
 } // namespace pulse::fs

@@ -67,6 +67,15 @@ int main() {
     Check(Same(r, {100, 200, 900, 800}), "bottom taskbar: coordinates are unchanged");
     r = WorkspaceToScreenRect({-1800, 100, -1000, 700}, {-2560, -200, 0, 1240}, {-2560, -160, 0, 1240});
     Check(Same(r, {-1800, 140, -1000, 740}), "secondary monitor with a top bar keeps its own offset");
+    // A snapped window saves its actual screen rectangle in workspace
+    // coordinates: the round trip must land on the same screen rectangle,
+    // including a portrait monitor left of the primary.
+    const RECT portrait{-1080, -240, 0, 1680}, portrait_work{-1080, -200, 0, 1680};
+    const RECT snapped{-1080, -200, 0, 1680};
+    Check(Same(WorkspaceToScreenRect(ScreenToWorkspaceRect(snapped, portrait, portrait_work), portrait, portrait_work),
+               snapped), "snapped rectangle on a left portrait monitor survives the workspace round trip");
+    r = ScreenToWorkspaceRect({160, 200, 960, 800}, mon, {60, 0, 1920, 1080});
+    Check(Same(r, {100, 200, 900, 800}), "screen to workspace undoes a left taskbar shift");
 
     // Multi-window M4b: a new window cascades from its opener.
     const RECT desk{0, 0, 1920, 1040};
@@ -123,7 +132,20 @@ int main() {
     wc.hInstance = inst;
     wc.lpszClassName = L"PulsePlacementTest";
     RegisterClassW(&wc);
-    HWND bar = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"bar", WS_POPUP,
+    {
+        // Not snapped (normal or maximized): the saved rectangle stays rcNormalPosition.
+        HWND plain = CreateWindowExW(0, wc.lpszClassName, L"placement", WS_OVERLAPPEDWINDOW,
+            200, 200, 640, 480, nullptr, nullptr, inst, nullptr);
+        ShowWindow(plain, SW_SHOWNOACTIVATE);
+        WINDOWPLACEMENT wp{sizeof(wp)};
+        GetWindowPlacement(plain, &wp);
+        Check(Same(SavedNormalRect(plain, wp), wp.rcNormalPosition), "unsnapped window saves rcNormalPosition");
+        ShowWindow(plain, SW_MAXIMIZE);
+        GetWindowPlacement(plain, &wp);
+        Check(Same(SavedNormalRect(plain, wp), wp.rcNormalPosition), "maximized window saves its restore rectangle");
+        DestroyWindow(plain);
+    }
+    HWND bar =CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"bar", WS_POPUP,
         0, 0, 10, 10, nullptr, nullptr, inst, nullptr);
     APPBARDATA abd{sizeof(abd)};
     abd.hWnd = bar;

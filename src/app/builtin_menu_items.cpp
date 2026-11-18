@@ -40,6 +40,31 @@ constexpr BuiltinMenuInfo kItems[] = {
     { BuiltinMenuItem::Paste,          L"paste",          l10n::StringId::Paste },
     { BuiltinMenuItem::Properties,     L"properties",     l10n::StringId::Properties },
     { BuiltinMenuItem::FolderProperties, L"folder_properties", l10n::StringId::ContextFolderProperties },
+    { BuiltinMenuItem::OpenPath, L"open_path", l10n::StringId::OpenPath },
+    { BuiltinMenuItem::GroupIntoFolder, L"group_into_folder", l10n::StringId::NewFolderWithSelection_2 },
+    { BuiltinMenuItem::DissolveFolder, L"dissolve_folder", l10n::StringId::UngroupFolder_2 },
+    { BuiltinMenuItem::SetAlias, L"set_alias", l10n::StringId::SetAliasEllipsis },
+    { BuiltinMenuItem::StageToTray, L"stage_to_tray", l10n::StringId::CtxAddToTray },
+    { BuiltinMenuItem::CopyToTarget, L"copy_to_target", l10n::StringId::CopyToTarget },
+    { BuiltinMenuItem::MoveToTarget, L"move_to_target", l10n::StringId::MoveToTarget },
+    { BuiltinMenuItem::BatchRename, L"batch_rename", l10n::StringId::BatchRename },
+    { BuiltinMenuItem::CompareSideBySide, L"compare_side_by_side", l10n::StringId::CompareSideBySide },
+    { BuiltinMenuItem::CloudKeep, L"cloud_keep", l10n::StringId::CloudKeepOnDevice },
+    { BuiltinMenuItem::CloudFree, L"cloud_free", l10n::StringId::CloudFreeUpSpace },
+    { BuiltinMenuItem::EjectDrive, L"eject_drive", l10n::StringId::Eject },
+    { BuiltinMenuItem::DisconnectDrive, L"disconnect_drive", l10n::StringId::DisconnectNetworkDrive },
+    { BuiltinMenuItem::UnlockDrive, L"unlock_drive", l10n::StringId::UnlockDrive },
+    { BuiltinMenuItem::MapNetworkDrive, L"map_network_drive", l10n::StringId::MapNetworkDrive },
+    { BuiltinMenuItem::ForgetNetworkRecent, L"forget_network_recent", l10n::StringId::NetworkForgetRecent },
+    { BuiltinMenuItem::DupKeepThis, L"dup_keep_this", l10n::StringId::DupFKeepThis },
+    { BuiltinMenuItem::DupReapplyRules, L"dup_reapply_rules", l10n::StringId::DupFReapply },
+    { BuiltinMenuItem::FindDuplicates, L"find_duplicates", l10n::StringId::ActFindDuplicates },
+    { BuiltinMenuItem::AiOrganizeHere, L"ai_organize_here", l10n::StringId::ActOrganizeHere },
+    { BuiltinMenuItem::NewTemplates, L"new_templates", l10n::StringId::New },
+    { BuiltinMenuItem::Git, L"git", l10n::StringId::Git },
+    { BuiltinMenuItem::ConnectServer, L"connect_server", l10n::StringId::ConnectServerMenu },
+    { BuiltinMenuItem::CopyToWindow, L"copy_to_window", l10n::StringId::CopyToWindow },
+    { BuiltinMenuItem::MoveToWindow, L"move_to_window", l10n::StringId::MoveToWindow },
 };
 static_assert(sizeof(kItems) / sizeof(kItems[0]) == kBuiltinMenuItemCount,
               "every built-in item needs a key and a label");
@@ -61,13 +86,33 @@ constexpr BuiltinMenuRow kItemRows[] = {
     { B::Count, F::Open, L"\xE8E5", L"Enter", false, false },
     { B::Count, F::Strip, nullptr, nullptr, false, false },
     { B::RecentChanges, F::None, L"\xE81C", nullptr, false, false },
+    { B::CompareSideBySide, F::None, ui::command_icons::kGlyphCompare, nullptr, false, false },
+    { B::BatchRename, F::None, ui::command_icons::kGlyphBatchRename, nullptr, false, false },
+    { B::GroupIntoFolder, F::None, ui::command_icons::kGlyphGroupFolder, L"Ctrl+G", false, false },
+    { B::DissolveFolder, F::None, L"\xED25", L"Ctrl+Shift+G", false, false },
+    { B::OpenPath, F::None, ui::command_icons::kGlyphOpenPath, nullptr, false, false },
     { B::OpenInNewTab, F::None, L"\xE8A7", nullptr, false, false },
     { B::CopyPath, F::None, ui::command_icons::kGlyphCopyPath, L"Ctrl+Shift+C", false, false },
+    { B::SetAlias, F::None, L"\xE8EC", L"Shift+F2", false, false },
+    { B::StageToTray, F::None, L"\xE7B8", L"Ctrl+Shift+S", false, false },
+    { B::CopyToTarget, F::None, ui::command_icons::kGlyphCopyToPane, L"Ctrl+Alt+C", false, false },
+    { B::MoveToTarget, F::None, ui::command_icons::kGlyphMoveToPane, L"Ctrl+Alt+X", false, false },
+    { B::CopyToWindow, F::None, L"\xE8C8", nullptr, false, true },
+    { B::MoveToWindow, F::None, L"\xE8C6", nullptr, false, true },
     { B::Terminal, F::None, L"\xE756", nullptr, false, false },
     { B::Properties, F::None, L"\xE946", L"Alt+Enter", true, false },
     { B::QuickAccess, F::None, ui::command_icons::kGlyphPinQuickAccess, nullptr, false, false },
     { B::PinWorkspace, F::None, ui::command_icons::kGlyphPinWorkspace, nullptr, false, false },
     { B::PinNetwork, F::None, ui::command_icons::kGlyphPinNetwork, nullptr, true, false },
+    { B::EjectDrive, F::None, L"\xF847", nullptr, false, false },
+    { B::DisconnectDrive, F::None, L"\xE8CD", nullptr, false, false },
+    { B::UnlockDrive, F::None, L"\xE785", nullptr, false, false },
+    { B::MapNetworkDrive, F::None, L"\xE8CE", nullptr, false, false },
+    { B::ForgetNetworkRecent, F::None, L"\xE711", nullptr, false, false },
+    { B::CloudKeep, F::None, L"\xE718", nullptr, false, false },
+    { B::CloudFree, F::None, L"\xE753", nullptr, false, false },
+    { B::DupKeepThis, F::None, L"\xE73E", nullptr, false, false },
+    { B::DupReapplyRules, F::None, L"\xE72C", nullptr, false, false },
     { B::Tags, F::None, L"\xE8EC", nullptr, true, false },
     { B::Undo, F::None, L"\xE7A7", L"Ctrl+Z", false, false },
 };
@@ -78,13 +123,19 @@ constexpr BuiltinMenuRow kBackgroundRows[] = {
     { B::Refresh, F::None, L"\xE72C", L"F5", true, false },
     { B::NewFolder, F::None, L"\xE8F4", L"F7", false, false },
     { B::NewTextFile, F::None, L"\xE8A5", nullptr, true, false },
+    { B::NewTemplates, F::None, L"\xE710", nullptr, false, true },
+    { B::FindDuplicates, F::None, L"\xE8C8", nullptr, false, false },
+    { B::AiOrganizeHere, F::None, ui::command_icons::kGlyphSparkle, nullptr, false, false },
     { B::Paste, F::None, L"\xE77F", L"Ctrl+V", false, false },
     { B::CopyPath, F::None, ui::command_icons::kGlyphCopyPath, L"Ctrl+Shift+C", true, false },
     { B::SelectCommands, F::None, L"\xE8B3", L"Ctrl+A", true, false },
     { B::Terminal, F::None, L"\xE756", nullptr, true, false },
+    { B::Git, F::None, L"\xE8B7", nullptr, false, true },
     { B::QuickAccess, F::None, ui::command_icons::kGlyphPinQuickAccess, nullptr, false, false },
     { B::PinWorkspace, F::None, ui::command_icons::kGlyphPinWorkspace, nullptr, false, false },
     { B::PinNetwork, F::None, ui::command_icons::kGlyphPinNetwork, nullptr, true, false },
+    { B::MapNetworkDrive, F::None, L"\xE8CE", nullptr, false, false },
+    { B::ConnectServer, F::None, L"\xE968", nullptr, false, false },
     { B::RecentChanges, F::None, L"\xE81C", nullptr, false, false },
     { B::Undo, F::None, L"\xE7A7", L"Ctrl+Z", true, false },
     { B::FolderProperties, F::None, L"\xE946", nullptr, false, false },
@@ -95,18 +146,18 @@ constexpr BuiltinMenuRow kRowButtonRows[] = {
     { B::RowMore, F::None, L"\xE712", nullptr, false, false },
 };
 
-constexpr uint32_t Bits(std::initializer_list<B> items) {
-    uint32_t bits = 0;
+constexpr uint64_t Bits(std::initializer_list<B> items) {
+    uint64_t bits = 0;
     for (const B item : items) bits |= BuiltinMenuBit(item);
     return bits;
 }
-constexpr uint32_t kAllBits = (1u << kBuiltinMenuItemCount) - 1u;
+constexpr uint64_t kAllBits = ~uint64_t{0} >> (64 - kBuiltinMenuItemCount);
 // 精简 keeps the everyday rows; 标准 drops the rarely used pins and
 // selection helpers; 完整 (default) shows everything.
-constexpr uint32_t kSlimHidden = kAllBits & ~Bits({
+constexpr uint64_t kSlimHidden = kAllBits & ~Bits({
     B::CopyPath, B::Undo, B::View, B::Sort, B::Group, B::Refresh, B::NewFolder,
     B::NewTextFile, B::Paste, B::Properties, B::FolderProperties });
-constexpr uint32_t kStandardHidden = Bits({ B::PinNetwork, B::RecentChanges, B::SelectCommands });
+constexpr uint64_t kStandardHidden = Bits({ B::PinNetwork, B::RecentChanges, B::SelectCommands });
 
 } // namespace
 
@@ -175,7 +226,7 @@ std::vector<BuiltinMenuRow> BuiltinMenuOrderedRows(BuiltinMenuSurface surface, c
 }
 
 std::vector<BuiltinMenuVisibleRow> BuiltinMenuVisibleRows(BuiltinMenuSurface surface,
-                                                          uint32_t builtin_hidden,
+                                                          uint64_t builtin_hidden,
                                                           const BuiltinMenuOrder& order) {
     const auto rows = BuiltinMenuOrderedRows(surface, order);
     std::vector<BuiltinMenuVisibleRow> kept;
@@ -204,16 +255,16 @@ bool BuiltinMenuShared(BuiltinMenuItem item) {
     return in_item && in_background;
 }
 
-uint32_t BuiltinMenuPresetHidden(BuiltinMenuPreset preset) {
+uint64_t BuiltinMenuPresetHidden(BuiltinMenuPreset preset) {
     switch (preset) {
-    case BuiltinMenuPreset::Slim: return kSlimHidden;
-    case BuiltinMenuPreset::Standard: return kStandardHidden;
+    case BuiltinMenuPreset::Slim: return kSlimHidden & ~Bits({B::RowStar, B::RowNewTab, B::RowMore});
+    case BuiltinMenuPreset::Standard: return kStandardHidden & ~Bits({B::RowStar, B::RowNewTab, B::RowMore});
     default: return 0;
     }
 }
 
-BuiltinMenuPreset BuiltinMenuPresetFor(uint32_t builtin_hidden) {
-    builtin_hidden &= kAllBits;
+BuiltinMenuPreset BuiltinMenuPresetFor(uint64_t builtin_hidden) {
+    builtin_hidden &= kAllBits & ~Bits({B::RowStar, B::RowNewTab, B::RowMore});
     for (int i = 0; i < static_cast<int>(BuiltinMenuPreset::Count); ++i) {
         const auto preset = static_cast<BuiltinMenuPreset>(i);
         if (BuiltinMenuPresetHidden(preset) == builtin_hidden) return preset;
@@ -229,7 +280,7 @@ std::wstring BuiltinMenuLabel(BuiltinMenuItem item) {
     return l10n::Get(Info(item).label);
 }
 
-uint32_t RowActionMask(uint32_t builtin_hidden, const BuiltinMenuOrder& row_order) {
+uint32_t RowActionMask(uint64_t builtin_hidden, const BuiltinMenuOrder& row_order) {
     uint32_t mask = kRowActionsAll;
     if (builtin_hidden & BuiltinMenuBit(BuiltinMenuItem::RowStar)) mask &= ~kRowActionStar;
     if (builtin_hidden & BuiltinMenuBit(BuiltinMenuItem::RowNewTab)) mask &= ~kRowActionNewTab;

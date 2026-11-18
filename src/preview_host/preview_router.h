@@ -43,6 +43,7 @@ struct DecodeRequest {
 
 // Everything a decoder writes. Defaults match a zeroed PreviewResponse.
 struct DecodeResult {
+    bool embedded_psd = false;
     ipc::PreviewContentKind kind = ipc::PreviewContentKind::None;
     std::vector<uint8_t> pixels;
     UINT width = 0, height = 0, stride = 0;

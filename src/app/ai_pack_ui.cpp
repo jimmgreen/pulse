@@ -1,6 +1,7 @@
 #include "ai_pack_ui.h"
 #include "ai_pack.h"
 #include "pack_installer.h"
+#include "pack_failure_ui.h"
 #include "app_internal.h"
 #include "../common/localization.h"
 #include "../common/preview_packs.h"
@@ -127,16 +128,31 @@ void TickAiPackInstall(AppState& s) {
         checked_update = true;
         MaybeUpdateInBackground(s);
     }
+    // Screenshot fixture: the failure card of PULSE_TEST_PACK_FAILURE (a
+    // PackFailure value), once, in an isolated test instance.
+    static bool fixture_shown = false;
+    wchar_t fixture[8]{};
+    if (!fixture_shown && s.isolatedTest && s.hwnd &&
+        GetEnvironmentVariableW(L"PULSE_TEST_PACK_FAILURE", fixture, ARRAYSIZE(fixture))) {
+        fixture_shown = true;
+        const auto failure = static_cast<app::PackFailure>(_wtoi(fixture));
+        const DWORD error = failure == app::PackFailure::Network ? 12029u
+                          : failure == app::PackFailure::Mismatch ? static_cast<DWORD>(ERROR_FILE_TOO_LARGE)
+                          : failure == app::PackFailure::Disk ? static_cast<DWORD>(ERROR_DISK_FULL) : 1u;
+        ShowPackFailure(s, FailedPack::Ai, failure, error);
+    }
     if (!g_owner || Installer().running()) return;
     // The window that asked reports the outcome, unless it was closed.
     if (s.hwnd != g_owner && IsWindow(g_owner)) return;
     DWORD error = 0;
-    const auto outcome = Installer().TakeOutcome(error);
+    app::PackFailure failure = app::PackFailure::None;
+    const auto outcome = Installer().TakeOutcome(error, &failure);
     if (outcome == app::PackInstallOutcome::None) return;
     const bool silent = g_silent;
     g_owner = nullptr;
     diagnostics::runtime::Event("ai_pack_install_done",
-                                {{"outcome", static_cast<uint64_t>(outcome)}, {"error", static_cast<uint64_t>(error)}});
+                                {{"outcome", static_cast<uint64_t>(outcome)}, {"error", static_cast<uint64_t>(error)},
+                                 {"failure", static_cast<uint64_t>(failure)}});
     if (outcome == app::PackInstallOutcome::Installed) {
         app::ForgetVerifiedAiPack();
         if (silent) return;
@@ -144,11 +160,14 @@ void TickAiPackInstall(AppState& s) {
         s.notification_toast.Show(s.hwnd, Text(StringId::AiPackInstalledTitle), Text(StringId::AiPackInstalledMessage),
                                   false);
     } else if (outcome == app::PackInstallOutcome::Failed && !silent) {
-        wchar_t code[64]{};
-        swprintf_s(code, Text(StringId::ErrorCodeFormat).c_str(), error);
-        s.notification_toast.ShowError(s.hwnd, Text(StringId::AiPackFailedTitle),
-                                       Text(StringId::AiPackFailedMessage) + L"\n" + code);
+        ShowPackFailure(s, FailedPack::Ai, failure, error);
     }
+}
+
+bool RetryAiPackInstall(AppState& s) {
+    const bool started = StartInstall(s, false);
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+    return started;
 }
 
 } // namespace pulse

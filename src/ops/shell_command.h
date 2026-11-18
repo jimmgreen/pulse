@@ -39,4 +39,9 @@ std::wstring QuoteWindowsArgument(std::wstring_view value);
 std::wstring TerminalCommandLine(const std::wstring& directory);
 TerminalLaunchResult LaunchTerminal(const std::wstring& executable, const std::wstring& arguments,
     const std::wstring& directory, HWND owner, const ShellCommandApi& api = {});
+// "Open in terminal": Windows Terminal with `wt_arguments`, or - when wt.exe is
+// not installed (Windows 10, removed) - PowerShell 7, Windows PowerShell, then
+// cmd, each started in `directory`. `launched` receives the program tried last.
+TerminalLaunchResult LaunchTerminalOrShell(const std::wstring& wt_arguments, const std::wstring& directory,
+    HWND owner, const ShellCommandApi& api = {}, std::wstring* launched = nullptr);
 }

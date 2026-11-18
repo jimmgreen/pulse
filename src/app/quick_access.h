@@ -23,6 +23,16 @@ std::wstring QuickAccessRowKey(const AppState& s, const ui::WindowViewModel& vm,
 // Drops the dragged quick-access row `key` into gap `gap` of the visible rows.
 void CommitQuickAccessDrag(AppState& s, const std::wstring& key, size_t gap);
 // Right-click on a workspace row: open, refresh its saved layout, unpin.
+void MoveWorkspace(AppState& s, int index, int to_index);
+void UpdateWorkspaceFromCurrent(AppState& s, int index);
+inline constexpr UINT kUndoWorkspaceRemovalMessage = WM_APP + 0x3B1;
+void ClearWorkspaceActions(AppState& s);
+void RenameWorkspace(AppState& s, int index);
+void RemoveWorkspaceWithUndo(AppState& s, int index);
+void UndoWorkspaceRemoval(AppState& s);
+std::vector<ui::FluentMenuItem> BuildWorkspaceMenuItems(AppState& s, int index);
+std::vector<ui::FluentMenuItem> BuildWorkspacePaneMenuItems(const AppState& s, int workspace, int pane);
+void ShowWorkspacePaneMenu(AppState& s, int workspace, int pane, POINT point);
 void ShowWorkspaceMenu(AppState& s, int index, POINT point);
 // Right-click on a pinned network location row: open, unpin (#236).
 void ShowNetworkPlaceMenu(AppState& s, const std::wstring& unc, POINT point);

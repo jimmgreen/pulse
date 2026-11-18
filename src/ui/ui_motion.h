@@ -200,8 +200,11 @@ public:
     // row travels from where it was to its new slot (motion v2 "sort" /
     // "filter": full FLIP of the visible rows) and rows that were not on
     // screen fade in.
+    // Grid membership changes snap: a straight FLIP across a wrapped row
+    // crosses unrelated cells. Keep arrival flashes and explicit rearranges.
     void BeginFrame(uint64_t context, float scroll_x, float scroll_y, size_t count,
-                    uint64_t frame, uint64_t now, bool allowed, uint64_t arrangement = 0) noexcept {
+                    uint64_t frame, uint64_t now, bool allowed, uint64_t arrangement = 0,
+                    bool slide_membership = true) noexcept {
         const bool continuous = valid_ && context == context_ &&
                                 (frame == frame_ || frame == frame_ + 1);
         const bool same_view = continuous && scroll_x == scroll_x_ && scroll_y == scroll_y_;
@@ -221,6 +224,7 @@ public:
         }
         if (trigger_) {
             shifts_.clear();
+            slide_ = rearranged || slide_membership;
             if (rearranged) appear_.clear();
             reflow_ = rearranged;
             grew_ = count > count_;
@@ -246,7 +250,7 @@ public:
             if (it != previous_.end()) {
                 const float dx = it->second.x - pos.x;
                 const float dy = it->second.y - pos.y;
-                if (dx != 0.0f || dy != 0.0f) shifts_[key] = D2D1_POINT_2F{dx, dy};
+                if (slide_ && (dx != 0.0f || dy != 0.0f)) shifts_[key] = D2D1_POINT_2F{dx, dy};
             } else if (reflow_) {
                 appear_[key] = now_;
             } else if (grew_) {
@@ -320,6 +324,7 @@ private:
     float ShiftProgress() const noexcept;
     bool valid_ = false;
     bool trigger_ = false;
+    bool slide_ = true;
     bool grew_ = false;
     bool reflow_ = false;
     uint64_t arrangement_ = 0;
@@ -341,7 +346,7 @@ private:
 // function of elapsed time: no per-frame integration state, frame drops never
 // change the path, and the same curve can be baked into a DComp animation.
 // k: stiffness, c: damping. Values match the motion tokens of the design
-// prototype (pulse_motion_v2.html).
+// prototype.
 struct SpringSpec {
     float k = 520.0f;
     float c = 34.0f;
@@ -398,10 +403,11 @@ inline float ListShiftMotion::ShiftProgress() const noexcept {
 // RectMotion driven by a spring instead of a fixed ease. The plate carries
 // its velocity across target changes: sweeping the pointer over several
 // rows keeps it moving instead of restarting from rest at every row (which
-// read as the plate lagging the pointer). Integrated in fixed 4 ms steps
-// from the elapsed time, so the path does not depend on the frame rate.
+// read as the plate lagging the pointer). Evaluated analytically from elapsed time so dropped frames and
+// different refresh rates follow the same path.
 class SpringRectMotion {
 public:
+    D2D1_RECT_F Current() const noexcept { return current_; }
     D2D1_RECT_F Update(uint64_t context, int64_t key, const D2D1_RECT_F& target,
                        uint64_t frame, uint64_t now, SpringSpec spec) noexcept {
         const bool continuous = visible_ && context == context_ &&
@@ -410,6 +416,7 @@ public:
             Snap(target);
             last_ = now;
         } else if (key != key_) {
+            if (!settled_) Step(now);
             to_ = target;
             spec_ = spec;
             if (settled_) {
@@ -452,17 +459,41 @@ private:
         settled_ = true;
     }
     void Step(uint64_t now) noexcept {
-        float dt = static_cast<float>(std::min<uint64_t>(now - last_, 64)) * 0.001f;
+        const float dt = static_cast<float>(now - last_) * 0.001f;
         last_ = now;
         float* x[4] = {&current_.left, &current_.top, &current_.right, &current_.bottom};
         const float g[4] = {to_.left, to_.top, to_.right, to_.bottom};
-        while (dt > 0.0f) {
-            const float h = std::min(dt, 0.004f);
-            for (int i = 0; i < 4; ++i) {
-                vel_[i] += (spec_.k * (g[i] - *x[i]) - spec_.c * vel_[i]) * h;
-                *x[i] += vel_[i] * h;
+        const float alpha = spec_.c * 0.5f;
+        const float discriminant = alpha * alpha - spec_.k;
+        const float root = std::sqrt(std::fabs(discriminant));
+        const float e = std::exp(-alpha * dt);
+        const float cosine = discriminant < -0.001f ? std::cos(root * dt) : 0.0f;
+        const float sine = discriminant < -0.001f ? std::sin(root * dt) : 0.0f;
+        const float r1 = -alpha + root, r2 = -alpha - root;
+        const float e1 = discriminant >= 0.001f ? std::exp(r1 * dt) : 0.0f;
+        const float e2 = discriminant >= 0.001f ? std::exp(r2 * dt) : 0.0f;
+        for (int i = 0; i < 4; ++i) {
+            const float y = *x[i] - g[i];
+            const float v = vel_[i];
+            float position = 0.0f;
+            float velocity = 0.0f;
+            if (std::fabs(discriminant) < 0.001f) {
+                const float b = v + alpha * y;
+                position = e * (y + b * dt);
+                velocity = e * (v - alpha * b * dt);
+            } else if (discriminant < 0.0f) {
+                const float w = root;
+                const float c = cosine, sn = sine;
+                position = e * (y * c + (v + alpha * y) / w * sn);
+                velocity = e * (v * c - (alpha * v + spec_.k * y) / w * sn);
+            } else {
+                const float a = (v - r2 * y) / (r1 - r2);
+                const float b = y - a;
+                position = a * e1 + b * e2;
+                velocity = r1 * a * e1 + r2 * b * e2;
             }
-            dt -= h;
+            *x[i] = g[i] + position;
+            vel_[i] = velocity;
         }
         bool rest = now - start_ >= kMaxGlideMs;
         if (!rest) {
@@ -484,6 +515,41 @@ private:
     float vel_[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     D2D1_RECT_F to_{};
     D2D1_RECT_F current_{};
+};
+
+// File-list hover keeps velocity when the pointer changes speed between rows.
+// Retain the whole traversed span until settled for partial repaint damage.
+class ListHoverMotion {
+public:
+    D2D1_RECT_F Update(uint64_t context, int64_t key, const D2D1_RECT_F& target,
+                      uint64_t frame, uint64_t now) noexcept {
+        const bool continuous = visible_ && context == context_ &&
+            (frame == frame_ || frame == frame_ + 1);
+        const auto previous = spring_.Current();
+        const bool moving = spring_.Active(now);
+        const auto current = spring_.Update(context,key,target,frame,now,{1600.0f,80.0f});
+        if (!continuous || !moving) span_ = current;
+        if (continuous) Include(previous);
+        Include(current);
+        Include(target);
+        visible_ = true; context_ = context; key_ = key; frame_ = frame;
+        return current;
+    }
+    bool Active(uint64_t now) const noexcept { return spring_.Active(now); }
+    void SetAnimationsEnabled(bool enabled) noexcept { spring_.SetAnimationsEnabled(enabled); }
+    void Hide() noexcept { spring_.Hide(); visible_ = false; span_ = {}; }
+    D2D1_RECT_F Current() const noexcept { return spring_.Current(); }
+    D2D1_RECT_F Span() const noexcept { return span_; }
+private:
+    void Include(const D2D1_RECT_F& r) noexcept {
+        span_.left = std::min(span_.left,r.left); span_.top = std::min(span_.top,r.top);
+        span_.right = std::max(span_.right,r.right); span_.bottom = std::max(span_.bottom,r.bottom);
+    }
+    SpringRectMotion spring_;
+    D2D1_RECT_F span_{};
+    uint64_t context_ = 0, frame_ = 0;
+    int64_t key_ = 0;
+    bool visible_ = false;
 };
 
 } // namespace pulse::ui::motion

@@ -1,4 +1,5 @@
 #include "context_menu_controller.h"
+#include "../common/context_diagnostics.h"
 #include "../common/localization.h"
 
 #include "../ipc/ctx_menu_util.h"
@@ -16,10 +17,12 @@ namespace {
 // The submenu each row sits in: children follow their parent row.
 std::vector<std::wstring> ParentKeys(const std::vector<ops::ShellMenuItem>& items) {
     std::vector<std::wstring> parents(items.size());
-    std::wstring current;
+    std::vector<std::wstring> path;
     for (size_t i = 0; i < items.size(); ++i) {
-        if (!items[i].child) current = items[i].clsid + L'\x1F' + items[i].text;
-        else parents[i] = current;
+        const size_t depth = items[i].depth ? items[i].depth : items[i].child ? 1 : 0;
+        if (depth < path.size()) path.resize(depth);
+        if (!path.empty()) parents[i] = path.back();
+        path.push_back(parents[i] + items[i].clsid + L'\x1F' + items[i].text + L'\x1E');
     }
     return parents;
 }
@@ -27,7 +30,7 @@ std::vector<std::wstring> ParentKeys(const std::vector<ops::ShellMenuItem>& item
 // A cached row and a live row are the same command: same handler, same
 // submenu, and the same verb (or, without one, the same label).
 bool SameComCommand(const ops::ShellMenuItem& cached, const ops::ShellMenuItem& live) {
-    if (cached.child != live.child || cached.has_children != live.has_children ||
+    if (cached.child != live.child || cached.depth != live.depth || cached.has_children != live.has_children ||
         cached.clsid != live.clsid)
         return false;
     if (!cached.verb.empty() || !live.verb.empty()) return cached.verb == live.verb;
@@ -77,7 +80,7 @@ bool SameLayoutRows(const std::vector<ops::ShellMenuItem>& a,
     for (size_t i = 0; i < a.size(); ++i) {
         if ((a[i].id == 0) != (b[i].id == 0) || a[i].enabled != b[i].enabled ||
             a[i].separator_after != b[i].separator_after ||
-            a[i].has_children != b[i].has_children || a[i].child != b[i].child ||
+            a[i].has_children != b[i].has_children || a[i].child != b[i].child || a[i].depth != b[i].depth ||
             a[i].mnemonic != b[i].mnemonic || a[i].verb != b[i].verb ||
             a[i].text != b[i].text || a[i].clsid != b[i].clsid || a[i].handler != b[i].handler)
             return false;
@@ -99,10 +102,26 @@ ShellMenuEntry ComEntry(const ops::ShellMenuItem& item, int command = 0) {
     return entry;
 }
 
+ui::FluentMenuItem ShellDisplayEntry(const ShellMenuEntry& entry) {
+    ui::FluentMenuItem row;
+    row.command = entry.command;
+    row.text = entry.text;
+    row.mnemonic = entry.mnemonic;
+    row.enabled = entry.enabled;
+    row.icon = entry.icon;
+    for (const auto& child : entry.children) {
+        if (child.text.empty() || (child.command == 0 && child.children.empty())) continue;
+        auto converted = ShellDisplayEntry(child);
+        if (child.children.empty() || !converted.children.empty()) row.children.push_back(std::move(converted));
+    }
+    return row;
+}
+
 } // namespace
 
 void AppendShellSection(std::vector<ui::FluentMenuItem>& items,
                         const std::vector<ShellMenuEntry>& entries) {
+    context_diagnostics::Batch diagnostic(L"append-shell");
     if (entries.empty()) return;
     auto lower = [](std::wstring s) {
         for (auto& c : s) c = static_cast<wchar_t>(std::towlower(c));
@@ -115,27 +134,11 @@ void AppendShellSection(std::vector<ui::FluentMenuItem>& items,
     size_t added = 0;
     for (const auto& e : entries) {
         const bool header = !e.children.empty();
-        if (e.text.empty() || (e.command == 0 && !header)) continue;
+        if (e.text.empty() || (e.command == 0 && !header)) { diagnostic.Row(L"drop-invalid", e.text); continue; }
         const std::wstring key = lower(e.text);
-        if (!seen.insert(key).second) continue;
+        if (!seen.insert(key).second) { diagnostic.Row(L"drop-duplicate-label", e.text); continue; }
         if (added == 0 && !items.empty()) items.back().separator_after = true;
-        ui::FluentMenuItem row;
-        row.command = e.command;
-        row.text = e.text;
-        row.mnemonic = e.mnemonic;
-        row.enabled = e.enabled;
-        row.icon = e.icon;
-        // Software-owned submenu: keep the hierarchy as a one-level flyout.
-        for (const auto& c : e.children) {
-            if (c.text.empty() || c.command == 0) continue;
-            ui::FluentMenuItem child;
-            child.command = c.command;
-            child.text = c.text;
-            child.mnemonic = c.mnemonic;
-            child.enabled = c.enabled;
-            child.icon = c.icon;
-            row.children.push_back(std::move(child));
-        }
+        ui::FluentMenuItem row = ShellDisplayEntry(e);
         if (header && row.children.empty()) continue;
         items.push_back(std::move(row));
         ++added;
@@ -189,12 +192,18 @@ std::vector<ui::FluentMenuItem> ReconcileCtxDisplay(
         out.push_back(std::move(row));
         ++result.late;
     }
+    context_diagnostics::Batch diagnostic(L"reconcile");
+    diagnostic.Number(L"greyed", result.greyed);
+    diagnostic.Number(L"withheld", result.withheld);
+    diagnostic.Number(L"late", result.late);
+    for (const auto& row : out) diagnostic.Row(row.enabled ? L"candidate-enabled" : L"candidate-disabled", row.text);
     if (stats) *stats = result;
     return out;
 }
 
 std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
                                                const std::vector<ShellMenuEntry>& entries) {
+    context_diagnostics::Batch diagnostic(L"preferences");
     std::vector<ShellMenuEntry> compress_top;
     struct Ranked {
         ShellMenuEntry entry;
@@ -203,17 +212,19 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
     std::vector<Ranked> kept;
     kept.reserve(entries.size());
     int mru_kept = 0;
-    const int mru_cap = (std::max)(0, prefs.open_with_mru);
+    const int mru_cap = prefs.open_with_mru;
     int vendor_index = -1;
 
-    const bool compress_on = prefs.ItemEnabled(ipc::CompressCatalogKey(),
+    const bool compress_on = prefs.RowEnabled(ipc::CompressCatalogKey(),
         ipc::CtxMenuCategory::Software, true);
 
     for (const auto& e : entries) {
-        if (e.text.empty()) continue;
-        if (!e.clsid.empty() && !prefs.HandlerEnabled(e.clsid)) continue;
+        diagnostic.Row(e.from_com ? L"input-com" : L"input-static", e.text);
+        if (e.text.empty()) { diagnostic.Row(L"drop-empty"); continue; }
+        if (!e.clsid.empty() && !prefs.HandlerEnabled(e.clsid)) { diagnostic.Row(L"drop-handler-disabled", e.clsid); continue; }
         const bool flyout = !e.children.empty();
         if (!flyout && ipc::IsCompressTopLevel(e.text)) {
+            diagnostic.Row(compress_on ? L"regroup-compression" : L"drop-compression-preference", e.text);
             if (compress_on) compress_top.push_back(e);
             continue;
         }
@@ -221,9 +232,13 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
         const std::wstring key = !e.clsid.empty()
             ? ipc::HandlerCatalogKey(e.clsid)
             : ipc::CatalogKey(e.text, flyout);
-        if (!prefs.ItemEnabled(key, cat, e.from_com)) continue;
+        diagnostic.Number(L"category", static_cast<unsigned>(cat));
+        if (!prefs.RowEnabled(key, cat, e.from_com)) {
+            diagnostic.Row(prefs.item_enabled.contains(key) ? L"drop-item-override" : L"drop-category-or-com-preference", e.text);
+            continue;
+        }
         if (cat == ipc::CtxMenuCategory::OpenWith && ipc::IsOpenWithMruText(e.text)) {
-            if (mru_kept >= mru_cap) continue;
+            if (mru_cap >= 0 && mru_kept >= mru_cap) { diagnostic.Row(L"drop-mru-cap", e.text); continue; }
             ++mru_kept;
         }
         // Explorer's order: vendor flyouts, then software verbs, 打开方式, 打印,
@@ -248,6 +263,7 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
                     dup = true;
                     break;
                 }
+            if (dup) diagnostic.Row(L"drop-compression-duplicate", row.text);
             if (!dup) dest.children.push_back(std::move(row));
         }
         compress_top.clear();
@@ -317,6 +333,9 @@ void ContextMenuController::StartQuery(
     extension_ = std::move(extension);
     if (background && extension_.empty()) extension_ = ipc::kBackgroundVerbKey;
     names_ = CtxNamesFor(paths_, background_);
+    context_diagnostics::Batch diagnostic(L"start-query");
+    diagnostic.Number(L"token", token);
+    diagnostic.Number(L"selection-count", paths.size());
     token_ = token;
     com_ready_ = false;
     com_predicted_ = false;
@@ -397,10 +416,16 @@ bool IsNativeNewEntry(const ShellMenuEntry& entry) {
 std::vector<ui::FluentMenuItem> ContextMenuController::BuildDisplay(
     ContextMenuPrefs& prefs, const std::vector<ui::FluentMenuItem>& base_items,
     bool& prefs_changed) const {
+    context_diagnostics::Batch diagnostic(L"build-display");
+    diagnostic.Number(L"token", token_);
+    diagnostic.Row(com_predicted_ ? L"cache-predicted" : L"live-layout");
     std::vector<ui::FluentMenuItem> display = base_items;
     auto entries = ComposeEntries(prefs, prefs_changed);
     // The same entries already sit in Pulse's 新建 flyout; one 新建 is enough.
-    if (HasPulseNewMenu(base_items)) std::erase_if(entries, IsNativeNewEntry);
+    if (HasPulseNewMenu(base_items)) {
+        for (const auto& entry : entries) if (IsNativeNewEntry(entry)) diagnostic.Row(L"drop-native-new-duplicate", entry.text);
+        std::erase_if(entries, IsNativeNewEntry);
+    }
     AppendShellSection(display, ApplyExplorerPrefs(prefs, std::move(entries)));
     ui::FluentMenuItem manage;
     manage.command = CmdSettingsContextMenu;
@@ -408,6 +433,10 @@ std::vector<ui::FluentMenuItem> ContextMenuController::BuildDisplay(
     manage.glyph = L"\xE713";
     if (!display.empty()) display.back().separator_after = true;
     display.push_back(std::move(manage));
+    for (const auto& row : display) {
+        diagnostic.Row(row.enabled ? L"candidate-enabled" : L"candidate-disabled", row.text);
+        for (const auto& child : row.children) diagnostic.Row(child.enabled ? L"candidate-child-enabled" : L"candidate-child-disabled", child.text);
+    }
     return display;
 }
 
@@ -460,6 +489,13 @@ std::vector<ui::FluentMenuItem> ContextMenuController::ReconcileDisplay(
 }
 
 void ContextMenuController::CommitDisplay(std::vector<ui::FluentMenuItem> shown) {
+    context_diagnostics::Batch diagnostic(L"commit-display");
+    diagnostic.Number(L"token", token_);
+    diagnostic.Number(L"rows", shown.size());
+    for (const auto& row : shown) {
+        diagnostic.Row(row.enabled ? L"committed-enabled" : L"committed-disabled", row.text);
+        for (const auto& child : row.children) diagnostic.Row(child.enabled ? L"committed-child-enabled" : L"committed-child-disabled", child.text);
+    }
     shown_ = std::move(shown);
     // Appended rows are shown rows from now on: late adds up, greyed is the
     // current state.
@@ -480,7 +516,7 @@ bool ContextMenuController::ExecuteShellCommand(
     int command,
     const std::function<void()>& wait_until_ready,
     const std::function<void()>& refresh_folder) {
-    if (command >= CmdShellComBase) {
+    if (command >= CmdShellComBase && command <= CmdShellComLast) {
         const uint32_t clicked = static_cast<uint32_t>(command - CmdShellComBase);
         std::wstring text, verb;
         if (const auto* snapshot = FindComItemIn(menu_com_items_, clicked)) {
@@ -514,16 +550,26 @@ bool ContextMenuController::ExecuteShellCommand(
             };
             const auto live = std::find_if(static_verbs_.begin(), static_verbs_.end(),
                 [&](const StaticVerb& candidate) { return same(*verb, candidate); });
+            auto descendant = [](auto&& self, const StaticVerb& parent, int& ordinal) -> const StaticVerb* {
+                for (const auto& candidate : parent.children) {
+                    if (--ordinal == 0) return &candidate;
+                    if (const auto* found = self(self, candidate, ordinal)) return found;
+                }
+                return nullptr;
+            };
             if (child > 0) {
-                const size_t ci = static_cast<size_t>(child - 1);
-                if (ci < verb->children.size()) verb = &verb->children[ci];
-                else verb = nullptr;
+                int ordinal = child;
+                verb = descendant(descendant, *verb, ordinal);
             }
-            // An asynchronous refresh may reorder or remove the shown command.
-            // Keep its displayed identity; never reinterpret an old position.
+            auto contains = [&](auto&& self, const StaticVerb& parent) -> bool {
+                for (const auto& candidate : parent.children)
+                    if (same(*verb, candidate) || self(self, candidate)) return true;
+                return false;
+            };
+            // Never reinterpret a displayed command after an asynchronous refresh.
             if (live == static_verbs_.end()) verb = nullptr;
-            else if (verb && child > 0 && std::none_of(live->children.begin(), live->children.end(),
-                [&](const StaticVerb& candidate) { return same(*verb, candidate); })) verb = nullptr;
+            else if (verb && child > 0 && !contains(contains, *live)) verb = nullptr;
+            if (verb && !verb->children.empty()) verb = nullptr;
             constexpr size_t kMaxTargets = 16;
             if (verb) {
                 for (size_t i = 0; i < paths_.size() && i < kMaxTargets; ++i) {
@@ -735,6 +781,11 @@ ContextMenuController::QueryCompletion ContextMenuController::CompleteComQuery(
         return result;
     }
     if (token == 0 || token != token_) return result;
+    context_diagnostics::Batch diagnostic(L"complete-com");
+    diagnostic.Number(L"token", token);
+    diagnostic.Number(L"partial", partial);
+    diagnostic.Number(L"rows", items.size());
+    diagnostic.Number(L"predicted", com_predicted_);
     result.accepted = true;
     result.partial = partial;
     result.cache_key = CacheKey(background_, extension_, paths_.size() > 1);
@@ -776,6 +827,9 @@ ContextMenuController::QueryCompletion ContextMenuController::CompleteComQuery(
 
 std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
     ContextMenuPrefs& prefs, bool& prefs_changed) const {
+    context_diagnostics::Batch diagnostic(L"compose-input");
+    for (const auto& row : static_verbs_) diagnostic.Row(L"static", row.display);
+    for (const auto& row : com_items_) { diagnostic.Row(row.child ? L"com-child" : L"com", row.text); diagnostic.Row(L"clsid", row.clsid); }
     std::vector<ShellMenuEntry> entries;
     entries.reserve(static_verbs_.size() + com_items_.size());
     // Explorer's own 打开方式 flyout (recommended apps + 选择其他应用) replaces
@@ -790,51 +844,59 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
     for (size_t i = 0; i < static_verbs_.size() && i < static_cast<size_t>(ipc::kMaxStaticVerbParents);
          ++i) {
         const auto& verb = static_verbs_[i];
-        if (com_open_with && ipc::ToLowerVerb(verb.verb) == L"openas") continue;
+        if (com_open_with && ipc::ToLowerVerb(verb.verb) == L"openas") { diagnostic.Row(L"drop-static-openas-replaced-by-com", verb.display); continue; }
         ShellMenuEntry entry;
         entry.text = verb.display;
         entry.mnemonic = verb.mnemonic;
         entry.verb = verb.verb;
         entry.icon = verb.icon_pixels;
-        if (!verb.children.empty()) {
-            entry.command = 0;
-            const size_t n = (std::min)(verb.children.size(),
-                                        static_cast<size_t>(ipc::kMaxSubmenuChildren));
-            for (size_t j = 0; j < n; ++j) {
-                ShellMenuEntry child;
-                child.command = CmdShellStaticBase +
-                    static_cast<int>(i) * ipc::kStaticVerbStride + static_cast<int>(j) + 1;
-                child.text = verb.children[j].display;
-                child.mnemonic = verb.children[j].mnemonic;
-                child.verb = verb.children[j].verb;
-                child.icon = verb.children[j].icon_pixels;
-                entry.children.push_back(std::move(child));
+        int ordinal = 0;
+        auto children = [&](auto&& self, const std::vector<StaticVerb>& source) -> std::vector<ShellMenuEntry> {
+            std::vector<ShellMenuEntry> rows;
+            for (const auto& child : source) {
+                if (ordinal >= ipc::kMaxSubmenuChildren) break;
+                const int slot = ++ordinal;
+                ShellMenuEntry row;
+                row.text = child.display;
+                row.mnemonic = child.mnemonic;
+                row.verb = child.verb;
+                row.icon = child.icon_pixels;
+                row.children = self(self, child.children);
+                if (!child.children.empty() && row.children.empty()) continue;
+                if (row.children.empty()) row.command = CmdShellStaticBase +
+                    static_cast<int>(i) * ipc::kStaticVerbStride + slot;
+                rows.push_back(std::move(row));
             }
-        } else {
-            entry.command = CmdShellStaticBase +
-                static_cast<int>(i) * ipc::kStaticVerbStride;
-        }
+            return rows;
+        };
+        entry.children = children(children, verb.children);
+        if (verb.children.empty()) entry.command = CmdShellStaticBase +
+            static_cast<int>(i) * ipc::kStaticVerbStride;
+        else if (entry.children.empty()) continue;
         entries.push_back(std::move(entry));
     }
-    for (size_t i = 0; i < com_items_.size(); ++i) {
-        const auto& item = com_items_[i];
-        if (item.child) continue;
-        if (item.has_children) {
-            ShellMenuEntry parent = ComEntry(item);
-            // It stands in for the static row, so the 打开方式 group switch
-            // governs it rather than the COM-sourced "open with" rows switch.
-            if (ipc::IsOpenWithSubmenuVerb(item.verb)) parent.from_com = false;
-            for (size_t j = i + 1; j < com_items_.size() && com_items_[j].child; ++j) {
-                if (com_items_[j].id > 0x7FFF) continue;
-                parent.children.push_back(ComEntry(com_items_[j],
-                    CmdShellComBase + static_cast<int>(com_items_[j].id)));
-            }
-            if (!parent.children.empty()) entries.push_back(std::move(parent));
-            continue;
+    auto row_depth = [](const ops::ShellMenuItem& row) -> size_t {
+        return row.depth ? row.depth : row.child ? 1 : 0;
+    };
+    auto compose = [&](auto&& self, size_t& index, size_t depth) -> std::vector<ShellMenuEntry> {
+        std::vector<ShellMenuEntry> rows;
+        while (index < com_items_.size() && row_depth(com_items_[index]) >= depth) {
+            const auto& item = com_items_[index++];
+            if (row_depth(item) != depth) continue;
+            ShellMenuEntry entry = ComEntry(item, item.has_children ? 0 :
+                CmdShellComBase + static_cast<int>(item.id));
+            if (item.has_children) {
+                entry.children = self(self, index, depth + 1);
+                if (depth == 0 && ipc::IsOpenWithSubmenuVerb(item.verb)) entry.from_com = false;
+                if (entry.children.empty()) continue;
+            } else if (item.id == 0 || item.id > 0x7FFF) continue;
+            rows.push_back(std::move(entry));
         }
-        if (item.id > 0x7FFF) continue;
-        entries.push_back(ComEntry(item, CmdShellComBase + static_cast<int>(item.id)));
-    }
+        return rows;
+    };
+    size_t com_index = 0;
+    auto com_entries = compose(compose, com_index, 0);
+    for (auto& entry : com_entries) entries.push_back(std::move(entry));
 
     prefs_changed = false;
     std::unordered_set<std::wstring> recorded_handlers;
@@ -950,6 +1012,12 @@ bool ContextMenuController::TakeTiming(bool shell_command, CtxMenuTiming& out) {
     // Late rows of an answer the open menu could not take (a visible flyout
     // was changing): the stored layout has them for the next menu.
     timing_.dropped = pending_stats_.late + pending_stats_.withheld;
+    context_diagnostics::Batch diagnostic(L"menu-final-timing");
+    diagnostic.Number(L"token", token_);
+    diagnostic.Number(L"rows", timing_.rows_final);
+    diagnostic.Number(L"late", reconcile_stats_.late);
+    diagnostic.Number(L"greyed", reconcile_stats_.greyed);
+    diagnostic.Number(L"dropped", timing_.dropped);
     timing_.shell_command = shell_command;
     out = std::move(timing_);
     timing_ = {};

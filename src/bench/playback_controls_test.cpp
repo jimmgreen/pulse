@@ -1,14 +1,34 @@
-#include "../ui/playback_timeline.h"
+﻿#include "../ui/playback_timeline.h"
 #include "../ui/video_preview.h"
+#include "../common/runtime_log.h"
+#include "preview_resource_test_metrics.h"
+#include <atomic>
 #include <windows.h>
 #include <objbase.h>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 
+#ifdef PULSE_VIDEO_PREVIEW_TESTING
+namespace pulse::ui { extern void (*g_video_preview_open_for_test)(); }
+static HANDLE slow_video_release = nullptr;
+static std::atomic<unsigned> slow_video_live{0};
+static void SlowVideoOpen() {
+    ++slow_video_live;
+    WaitForSingleObject(slow_video_release, 15000);
+    --slow_video_live;
+}
+#endif
 using pulse::ui::VideoPreview;
 static int failures = 0;
+static int layout_messages = 0;
+static WNDPROC original_video_proc = nullptr;
+LRESULT CALLBACK CountLayout(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_WINDOWPOSCHANGING) ++layout_messages;
+    return CallWindowProcW(original_video_proc, hwnd, message, wparam, lparam);
+}
 void Check(bool ok, const char* label) {
     std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", label);
     std::fflush(stdout);
@@ -18,7 +38,7 @@ void Pump(unsigned ms) {
     const auto end = GetTickCount64() + ms;
     do {
         MSG msg{};
-        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        while (GetTickCount64() < end && PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg); DispatchMessageW(&msg);
         }
         Sleep(5);
@@ -30,11 +50,74 @@ bool Until(const std::function<bool()>& condition, unsigned ms = 10000) {
     return false;
 }
 int wmain(int argc, wchar_t** argv) {
+#ifdef PULSE_VIDEO_PREVIEW_TESTING
+    if (argc == 2 && wcscmp(argv[1], L"--resource-bounds") == 0) {
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        HWND owner = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"slow video fixture", WS_OVERLAPPEDWINDOW,
+            -30000, -30000, 300, 300, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        slow_video_release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        pulse::ui::g_video_preview_open_for_test = SlowVideoOpen;
+        const auto before = PreviewResourceMetrics::Capture("before");
+        for (int batch = 0; batch < 2; ++batch) {
+            for (int i = 0; i < 16; ++i) {
+                VideoPreview video;
+                video.Open(owner, L"isolated-slow.mp4");
+                Pump(15);
+                if (batch == 1) Check(video.Snapshot().error == HRESULT_FROM_WIN32(ERROR_BUSY),
+                    "saturated open reports retryable busy without a worker");
+            }
+            const auto held = PreviewResourceMetrics::Capture(batch ? "second-batch-held" : "first-batch-held");
+            Check(slow_video_live > 0 && slow_video_live <= 4, "slow video workers stay bounded across object destruction");
+            Check(held.threads <= before.threads + 4, "slow video thread count respects process admission bound");
+        }
+        SetEvent(slow_video_release);
+        Check(Until([] { return slow_video_live == 0; }, 5000), "slow video workers complete after release");
+        Pump(150);
+        {
+            ResetEvent(slow_video_release);
+            VideoPreview video;
+            video.Open(owner, L"isolated-resumed.mp4");
+            Check(Until([] { return slow_video_live == 1; }, 2000), "video reopens after capacity is released");
+            video.Reset();
+            SetEvent(slow_video_release);
+            Check(Until([] { return slow_video_live == 0; }, 5000), "reopened video releases after reset");
+        }
+        Pump(150);
+        const auto after = PreviewResourceMetrics::Capture("final");
+        Check(after.handles <= before.handles + 2 && after.threads <= before.threads,
+            "video thread and handle counts return near baseline");
+        Check(GetWindow(owner, GW_CHILD) == nullptr, "retired video HWNDs are destroyed after worker release");
+        pulse::ui::g_video_preview_open_for_test = nullptr;
+        DestroyWindow(owner); CloseHandle(slow_video_release); CoUninitialize();
+        return failures ? 1 : 0;
+    }
+#endif
+
+    struct TestLog {
+        bool enabled = false;
+        TestLog() {
+            wchar_t root[32768]{};
+            const DWORD length = GetEnvironmentVariableW(L"PULSE_TEST_PLAYBACK_LOG_ROOT", root, static_cast<DWORD>(std::size(root)));
+            if (length > 0 && length < std::size(root)) {
+                enabled = pulse::diagnostics::runtime::Initialize(root, "playback-test");
+                Check(enabled, "isolated playback diagnostic log initializes");
+            }
+        }
+        ~TestLog() {
+            if (enabled) {
+                pulse::diagnostics::runtime::Flush();
+                pulse::diagnostics::runtime::Shutdown();
+            }
+        }
+    } test_log;
+
+    const bool tracks_only = argc == 3 && wcscmp(argv[2], L"--tracks-only") == 0;
     const bool unsupported_audio_only = argc == 3 && wcscmp(argv[2], L"--unsupported-audio-only") == 0;
+    const bool cadence_only = argc == 3 && wcscmp(argv[2], L"--cadence-only") == 0;
     const bool open_only = argc == 3 && wcscmp(argv[2], L"--open-only") == 0;
     const bool end_seek_only = argc == 3 && wcscmp(argv[2], L"--end-seek-only") == 0;
     using namespace pulse::ui::playback;
-    if (!open_only && !end_seek_only && !unsupported_audio_only) {
+    if (!cadence_only && !open_only && !end_seek_only && !unsupported_audio_only && !tracks_only) {
         Check(FrameAt(0, 20) == 0 && FrameAt(1, 20) == 19, "GIF seek endpoints are valid frame indices");
         Check(FrameAt(.5, 11) == 5, "GIF seek maps progress to frame");
         Check(FrameAt(-1, 10) == 0 && FrameAt(2, 10) == 9, "GIF seek clamps beyond track");
@@ -47,7 +130,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(VideoPreview::Supports(L"test.MP4") && !VideoPreview::Supports(L"test.gif"), "video selection preserves GIF path");
     }
     if (argc == 2 && wcscmp(argv[1], L"--timeline-only") == 0) return failures ? 1 : 0;
-    if (argc != 2 && !open_only && !end_seek_only && !unsupported_audio_only) { std::puts("Video runtime tests require an isolated fixture path"); return 2; }
+    if (argc != 2 && !cadence_only && !open_only && !end_seek_only && !unsupported_audio_only && !tracks_only) { std::puts("Video runtime tests require an isolated fixture path"); return 2; }
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     HWND window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"STATIC",
         L"Pulse playback regression fixture", WS_OVERLAPPEDWINDOW,
@@ -56,6 +139,24 @@ int wmain(int argc, wchar_t** argv) {
     VideoPreview video;
     video.Open(window, argv[1]);
     video.Layout(RECT{0, 0, 460, 260}, true);
+    HWND child = GetWindow(window, GW_CHILD);
+    if (child) {
+        original_video_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(child, GWLP_WNDPROC,
+            reinterpret_cast<LONG_PTR>(CountLayout)));
+        for (int i = 0; i < 120; ++i) video.Layout(RECT{0, 0, 460, 260}, true);
+        Check(layout_messages == 0, "identical playback layouts do not reposition the video window");
+        video.Layout(RECT{0, 0, 400, 240}, true);
+        Check(layout_messages > 0, "changed playback bounds reposition the video window");
+        layout_messages = 0;
+        video.Layout(RECT{0, 0, 400, 240}, true);
+        Check(layout_messages == 0, "resized playback layout also remains stable");
+        video.Layout(RECT{0, 0, 400, 240}, false);
+        Check(!IsWindowVisible(child), "layout visibility change hides video");
+        video.Layout(RECT{0, 0, 460, 260}, true);
+        Check(IsWindowVisible(child), "layout visibility change restores video");
+        SetWindowLongPtrW(child, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(original_video_proc));
+    }
+    Check(child != nullptr, "video child exists for layout regression");
     const bool opened = Until([&] { auto s = video.Snapshot(); return s.ready || FAILED(s.error); });
     auto state = video.Snapshot();
     std::printf("open HRESULT=%08lx ready=%d size=%ux%u duration=%lld\n",
@@ -73,6 +174,62 @@ int wmain(int argc, wchar_t** argv) {
         return failures ? 1 : 0;
     }
     Check(opened && state.ready && SUCCEEDED(state.error), "real media opens through production media worker");
+    if (tracks_only) {
+        Check(state.ready && !state.ffmpeg, "normal MP4 retains native backend by default");
+        Check(state.audio_tracks.size() == 2 && state.can_select_audio, "native audio tracks enumerated");
+        video.Play(false);
+        video.SetVolume(0.37f);
+        video.SetMuted(true);
+        Pump(300);
+        video.Seek(0.25);
+        Check(Until([&] { const auto s = video.Snapshot(); return s.ready && !s.busy && s.position > s.duration / 5; }),
+            "native paused seek reaches saved position");
+        if (state.audio_tracks.size() == 2) {
+            const int wanted = state.audio_tracks[1].id;
+            video.SelectAudioTrack(wanted);
+            Check(Until([&] { const auto s = video.Snapshot(); return s.ready && !s.busy && s.audio_track == wanted && s.position > s.duration / 5; }),
+                "native track switch reapplies item and restores position");
+        }
+        state = video.Snapshot();
+        Check(!state.playing && state.muted && std::fabs(state.volume - 0.37f) < .001f,
+            "native track switch preserves paused volume and mute");
+        Check(state.ffmpeg_available, "installed pack available for explicit subtitle activation");
+        if (state.ffmpeg_available) {
+            const int64_t position = state.position;
+            video.EnableTrackPlayback();
+            Check(Until([&] { auto s = video.Snapshot(); return s.ffmpeg && s.ready; }), "explicit action switches to FFmpeg");
+            state = video.Snapshot();
+            Check(!state.playing && state.muted && std::fabs(state.volume - .37f) < .001f &&
+                std::llabs(state.position - position) < 5'000'000, "backend switch preserves position pause and audio settings");
+            Check(state.audio_track == 1, "backend switch preserves selected second audio track");
+            Check(state.audio_tracks.size() == 2 && state.subtitle_tracks.size() == 2,
+                "enhanced backend exposes audio and subtitle tracks");
+            Check(state.can_select_subtitle == state.ffmpeg_subtitles_available, "subtitle selection follows actual pack filters");
+            if (state.ffmpeg_subtitles_available) {
+                video.SelectSubtitleTrack(0);
+                Check(Until([&] { auto s = video.Snapshot(); return s.ready && s.subtitle_track == 0; }), "subtitle request applies on worker");
+                video.SelectSubtitleTrack(-1);
+                Check(Until([&] { auto s = video.Snapshot(); return s.ready && s.subtitle_track == -1; }), "subtitle off applies on worker");
+            } else {
+                Check(!state.subtitle_tracks[0].supported && !state.subtitle_tracks[1].supported,
+                    "limited pack clearly marks both subtitle tracks unavailable");
+                video.SelectSubtitleTrack(0);
+                Pump(200);
+                Check(video.Snapshot().ready && video.Snapshot().subtitle_track == -1,
+                    "unsupported subtitle request leaves playback healthy");
+            }
+            video.Open(window, argv[1]);
+            Check(Until([&] { return video.Snapshot().ready; }), "reopen native fixture");
+            video.EnableTrackPlayback();
+            video.Reset();
+            Check(!video.active(), "reset cancels pending backend switch");
+        }
+        video.Reset();
+        Pump(1000);
+        DestroyWindow(window);
+        CoUninitialize();
+        return failures ? 1 : 0;
+    }
     if (end_seek_only) {
         if (state.ready) {
             video.Play(false);
@@ -98,6 +255,42 @@ int wmain(int argc, wchar_t** argv) {
         Pump(800);
         DestroyWindow(window);
         CoUninitialize();
+        return failures ? 1 : 0;
+    }
+    if (cadence_only) {
+        Pump(1000);
+        HDC screen = GetDC(nullptr), memory = CreateCompatibleDC(screen);
+        HBITMAP bitmap = CreateCompatibleBitmap(screen, 320, 180);
+        HGDIOBJ old = SelectObject(memory, bitmap);
+        unsigned char pixels[320 * 180 * 4]{};
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = 320; info.bmiHeader.biHeight = -180;
+        info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
+        POINT origin{60, 40}; ClientToScreen(child, &origin);
+        unsigned long long previous = 0;
+        ULONGLONG start = GetTickCount64(), changed = start;
+        unsigned changes = 0, stalls = 0; ULONGLONG longest = 0;
+        while (GetTickCount64() - start < 8000) {
+            Pump(8);
+            BitBlt(memory, 0, 0, 320, 180, screen, origin.x, origin.y, SRCCOPY);
+            SelectObject(memory, old);
+            GetDIBits(memory, bitmap, 0, 180, pixels, &info, DIB_RGB_COLORS);
+            SelectObject(memory, bitmap);
+            unsigned long long hash = 1469598103934665603ULL;
+            for (unsigned i = 0; i < sizeof(pixels); i += 4) { hash ^= pixels[i]; hash *= 1099511628211ULL; }
+            const auto now = GetTickCount64();
+            if (hash != previous) {
+                const auto gap = now - changed;
+                if (changes && gap > 100) ++stalls;
+                longest = (std::max)(longest, gap);
+                previous = hash; changed = now; ++changes;
+            }
+        }
+        std::printf("presentation changes=%u gaps_over_100ms=%u longest_ms=%llu final_hold_ms=%llu backend=%s\n",
+            changes, stalls, longest, GetTickCount64() - changed, video.Snapshot().ffmpeg ? "ffmpeg" : "MF");
+        SelectObject(memory, old); DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(nullptr, screen);
+        video.Reset(); Pump(800); DestroyWindow(window); CoUninitialize();
         return failures ? 1 : 0;
     }
     if (open_only) {

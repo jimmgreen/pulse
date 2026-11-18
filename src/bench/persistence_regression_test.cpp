@@ -46,6 +46,40 @@ static int TagAdsOnly() {
         "journal write failure cannot claim volume unsupported");
     if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
     Check(SyncTagAdsUpdates({}, &diagnostics).empty(), "journal recovery retries idempotent deletion");
+    const auto old_folder = dir / L"old-folder";
+    std::filesystem::create_directory(old_folder);
+    const auto old_file = (old_folder / L"moved.txt").wstring();
+    Check(pulse::WriteUtf8FileAtomic(old_file, L"original content"), "create moved-file fixture");
+    TagAdsUpdate stale; stale.path = old_file;
+    stale.tags = {{L"t", L"label", 0x123456}};
+    Check(WriteTagAdsV2(old_file, stale.tags), "prepare moved-file tag stream");
+    held = CreateFileW((old_file + L":Pulse.Tag").c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, 0, nullptr);
+    Check(held != INVALID_HANDLE_VALUE && !SyncTagAdsUpdates({stale}, &diagnostics).empty(),
+        "locked stream retains pending tag update before move");
+    if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
+    const auto moved_file = dir / L"moved.txt";
+    std::filesystem::rename(old_file, moved_file);
+    std::filesystem::remove(old_folder);
+    Check(SyncTagAdsUpdates({}, &diagnostics).empty() && diagnostics.empty() && !HasPendingTagAds(old_file),
+        "retry retires moved file under removed parent on accessible volume");
+    Check(!std::filesystem::exists(old_file) && std::filesystem::exists(moved_file),
+        "stale retry cannot recreate moved host file");
+    stale.path = fixture + L"\\absent.txt";
+    Check(SyncTagAdsUpdates({stale}, &diagnostics).empty() && !std::filesystem::exists(stale.path),
+        "nonempty tags never recreate missing host in existing directory");
+    const auto online_fixture = fixture;
+    fixture = (dir / L"offline-profile").wstring(); std::filesystem::create_directory(fixture);
+    const DWORD drives = GetLogicalDrives();
+    wchar_t unused = L'Z';
+    while (unused >= L'D' && (drives & (1u << (unused - L'A')))) --unused;
+    Check(unused >= L'D', "find unused drive for offline retry fixture");
+    if (unused >= L'D') {
+        stale.path = std::wstring(1, unused) + L":\\Pulse-offline-fixture\\tagged.txt";
+        Check(!SyncTagAdsUpdates({stale}, &diagnostics).empty() && HasPendingTagAds(stale.path),
+            "unavailable drive retains pending intent instead of treating it as deleted");
+    }
+    fixture = online_fixture;
     std::vector<TagAdsUpdate> batch;
     bool created = true;
     for (int i = 0; i < 65; ++i) {
@@ -146,6 +180,21 @@ static int TagAdsOnly() {
         "successful sync cannot clear unrelated replacement banner");
     ApplyTagAdsNotice(notice, {first}, title, message, true);
     Check(message == L"Keep this warning", "sync retry cannot overwrite unrelated banner");
+    notice = {}; title.clear(); message.clear();
+    const TagAdsFailure old_path{L"Z:\\old-folder\\moved.txt", TagAdsFailureStage::StreamWrite, ERROR_PATH_NOT_FOUND};
+    ApplyTagAdsNotice(notice, {old_path}, title, message, true, L"D:\\Music");
+    Check(title.empty() && message.empty(), "unrelated folder does not display old path retry");
+    const TagAdsFailure local{L"D:\\Music\\track.mp3", TagAdsFailureStage::StreamWrite, ERROR_ACCESS_DENIED};
+    ApplyTagAdsNotice(notice, {old_path, local}, title, message, true, L"d:\\music\\");
+    Check(message == TagAdsFailureMessage(local), "current folder still displays genuine sync failure");
+    ApplyTagAdsNotice(notice, {local}, title, message, true, L"D:\\Music2");
+    Check(title.empty() && message.empty(), "changing folders clears the owned old banner");
+    ApplyTagAdsNotice(notice, {{L"D:\\Music2\\track.mp3", TagAdsFailureStage::StreamWrite, ERROR_ACCESS_DENIED}},
+        title, message, true, L"D:\\Music");
+    Check(title.empty() && message.empty(), "folder boundary prevents sibling prefix match");
+    ApplyTagAdsNotice(notice, {{fixture, TagAdsFailureStage::JournalRead, ERROR_INVALID_DATA}},
+        title, message, true, L"D:\\Music");
+    Check(!message.empty(), "global journal failure remains visible in current folder");
     uint64_t revision = 0;
     Check(AcceptTagAdsResult(revision, 2) && !AcceptTagAdsResult(revision, 1) &&
         !AcceptTagAdsResult(revision, 2) && AcceptTagAdsResult(revision, 3),
@@ -156,6 +205,54 @@ static int TagAdsOnly() {
     return failures ? 1 : 0;
 }
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--folder-bottom") {
+        pulse::app::AppPrefs prefs, reloaded;
+        Check(prefs.FromJson(LR"({"folder_sort_mode":1,"sort_folders_follow":["C:\\Legacy"],"sort_folders_top":["C:\\Top"],"sort_folders_mixed":["C:\\Mixed"]})") &&
+            prefs.folder_sort_mode == 1 && prefs.folder_sorts.FindFolderMode(L"C:\\Legacy") == 1 &&
+            prefs.folder_sorts.FindFolderMode(L"C:\\Top") == 0 && prefs.folder_sorts.FindFolderMode(L"C:\\Mixed") == 2,
+            "legacy follow mode migrates to bottom without changing other modes");
+        const auto json = prefs.ToJson();
+        Check(json.find(L"sort_folders_bottom") != std::wstring::npos && json.find(L"sort_folders_follow") == std::wstring::npos &&
+            reloaded.FromJson(json) && reloaded.folder_sorts.FindFolderMode(L"C:\\Legacy") == 1 && reloaded.folder_sort_mode == 1,
+            "bottom persists with explicit key and round trips");
+        Check(reloaded.FromJson(LR"({"sort_folders_follow":["C:\\Both"],"sort_folders_top":["C:\\Both"]})") &&
+            reloaded.folder_sorts.FindFolderMode(L"C:\\Both") == 0, "explicit current mode overrides legacy mode");
+        return failures ? 1 : 0;
+    }
+
+    if (argc == 2 && std::string_view(argv[1]) == "--native-command-pins") {
+        using namespace pulse::app;
+        const std::wstring native = L"native:sample.archive:extract";
+        AppPrefs prefs, reloaded;
+        prefs.persist = reloaded.persist = false;
+        prefs.toolbar_tools = {L"cut", L"|", native, L"::right", L"copy"};
+        Check(reloaded.FromJson(prefs.ToJson()) && reloaded.toolbar_tools == prefs.toolbar_tools,
+            "native command pin identity and toolbar position survive preference reload");
+        Check(ToolbarToolsOnly(reloaded.toolbar_tools) == std::vector<std::wstring>{L"cut", native, L"copy"} &&
+            ToolbarRightFrom(reloaded.toolbar_tools) == 2 && ToolbarSeparatorMask(reloaded.toolbar_tools) == 2,
+            "native command pins count in layout and separator slots");
+        Check(ToolbarToolsOnly(MoveToolbarTool(reloaded.toolbar_tools, 1, 0)) ==
+            std::vector<std::wstring>{native, L"cut", L"copy"}, "native command pin reorders with builtin tools");
+        Check(ToolbarToolsOnly(RemoveToolbarTool(reloaded.toolbar_tools, 1)) ==
+            std::vector<std::wstring>{L"cut", L"copy"}, "native command pin removal preserves builtin tools");
+        Check(NormalizeToolbarTools({native, native, L"native::x", L"native:x:", L"native:x:y:z", L"native:x:/path"}) ==
+            std::vector<std::wstring>{native}, "native pin IDs reject malformed identities and duplicates");
+        return failures ? 1 : 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--toolbar-view-order") {
+        using pulse::app::AppPrefs;
+        const std::vector<std::wstring> expected{L"group", L"sort", L"filter"};
+        AppPrefs prefs, reloaded;
+        prefs.toolbar_view_order = expected;
+        prefs.toolbar_show_sort = false;
+        Check(reloaded.FromJson(prefs.ToJson()) && reloaded.toolbar_view_order == expected && !reloaded.toolbar_show_sort,
+            "toolbar view order and visibility round trip independently");
+        Check(reloaded.FromJson(L"{}") && reloaded.toolbar_view_order == std::vector<std::wstring>{L"sort", L"filter", L"group"},
+            "older preferences retain original toolbar order");
+        Check(reloaded.FromJson(LR"({"toolbar_view_order":["group","unknown","group","sort"]})") &&
+            reloaded.toolbar_view_order == expected, "invalid view order is normalized without losing valid choices");
+        return failures ? 1 : 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--tag-ads") return TagAdsOnly();
     using namespace pulse; using namespace pulse::app;
     auto dir = std::filesystem::absolute(L"bench_data/persistence-regression-" + std::to_wstring(GetCurrentProcessId()));
@@ -222,6 +319,29 @@ int main(int argc, char** argv) {
     Check(!prefs.StoreBackgroundImage(source) && prefs.background_image==old && std::filesystem::exists(old), "PERSIST-05 configuration commit failure preserves previous image");CloseHandle(locked);
     Check(prefs.StoreBackgroundImage(source) && std::filesystem::exists(prefs.background_image) && !std::filesystem::exists(old), "PERSIST-05 successful commit precedes old image removal");
     AppPrefs reloaded;reloaded.persist=false;Check(reloaded.Load() && reloaded.background_image==prefs.background_image, "PERSIST-05 new cache path survives reload");
+    {
+        // 快速预览 > 预览窗口 / 按住预览 (task 54): defaults, round trip, bad values.
+        AppPrefs older; older.persist=false;
+        Check(older.FromJson(LR"({"hover_card_size":2})") && older.preview_size==0 && older.preview_remember_size &&
+              older.preview_rect_w==0 && older.preview_space_closes && older.preview_loop==0 &&
+              older.hold_preview_ms==0 && older.preview_key_hint_left==3 && older.hover_card_size==2,
+              "PREVIEW-01 prefs from before keep the defaults (fit, remember, Space closes, hold off)");
+        AppPrefs set; set.persist=false;
+        set.preview_size=4; set.preview_remember_size=false; set.preview_rect_x=-1500; set.preview_rect_y=40;
+        set.preview_rect_w=1200; set.preview_rect_h=800; set.preview_space_closes=false; set.preview_loop=1;
+        set.hold_preview_ms=500; set.preview_key_hint_left=1; set.hover_card_size=3;
+        AppPrefs set_again; set_again.persist=false;
+        Check(set_again.FromJson(set.ToJson()) && set_again.preview_size==4 && !set_again.preview_remember_size &&
+              set_again.preview_rect_x==-1500 && set_again.preview_rect_y==40 && set_again.preview_rect_w==1200 &&
+              set_again.preview_rect_h==800 && !set_again.preview_space_closes && set_again.preview_loop==1 &&
+              set_again.hold_preview_ms==500 && set_again.preview_key_hint_left==1 && set_again.hover_card_size==3,
+              "PREVIEW-02 preview window prefs and the extra large card round trip");
+        AppPrefs bad; bad.persist=false;
+        Check(bad.FromJson(LR"({"preview_size":9,"preview_loop":-2,"hold_preview_ms":450,"preview_key_hint_left":40,"preview_rect_w":-5,"hover_card_size":7})") &&
+              bad.preview_size==0 && bad.preview_loop==0 && bad.hold_preview_ms==0 && bad.preview_key_hint_left==3 &&
+              bad.preview_rect_w==0 && bad.hover_card_size==1,
+              "PREVIEW-03 out-of-range preview values fall back to the defaults");
+    }
     {
         using Tools = std::vector<std::wstring>;
         AppPrefs legacy; legacy.persist=false;

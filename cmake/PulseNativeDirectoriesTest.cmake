@@ -1,0 +1,6 @@
+add_executable(pulse_native_directories_test src/bench/native_sdk/directories_test.cpp
+    src/app/extensions/native/directories_adapter.cpp src/app/extensions/authorization.cpp)
+target_compile_features(pulse_native_directories_test PRIVATE cxx_std_20)
+target_compile_definitions(pulse_native_directories_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX PULSE_DIRECTORIES_TEST)
+target_compile_options(pulse_native_directories_test PRIVATE /W4 /permissive- /utf-8)
+target_link_libraries(pulse_native_directories_test PRIVATE pulse_fs_watch user32 bcrypt)

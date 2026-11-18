@@ -70,7 +70,14 @@ void Gallery(IWICImagingFactory* wic, ID2D1Factory* factory, const wchar_t* file
         L"Move to pane",L"Open path",L"New folder",L"Group",L"Dissolve",L"Folder size",L"Workspace",
         L"Toolbar",L"Sidebar",L"Undo",L"Markdown",L"Zip",L"Select all",L"Invert",L"Hidden",L"Protected",
         L"Compact",L"Zebra",L"Size bar",L"Smart date",L"Outline",L"Terminal",L"Search all",L"Map drive",
-        L"Keyboard",L"Pin badge",L"Pin favorites",L"Pin quick",L"Pin workspace",L"Pin network",L"Pin toolbar"
+        L"Keyboard",L"Pin badge",L"Pin favorites",L"Pin quick",L"Pin workspace",L"Pin network",L"Pin toolbar",
+        L"Group by",L"App",L"Folder list",L"Reset",L"Text name",L"Package",L"Unpin",L"Stack",L"Video",
+        L"Cloud",L"Error",L"Merge",L"Pause",L"Play",L"Send",L"V bar",L"Move",L"Power",L"Bulb",L"Pointer",
+        L"Import",L"Export",L"Bolt",L"Camera",L"Fav bar",L"Full screen",L"Save",L"Unlock",L"Eject",
+        L"Skip",L"Disconnect",L"Music",L"Wrench",L"Timer",L"Help",L"Puzzle",L"Sparkle",
+        L"Wi-Fi",L"Mic",L"Checkbox",L"Highlight",L"Key",L"Bold",L"Layers",L"Globe",L"Flag",L"Phone",
+        L"Check circle",L"Check filled",L"Blocked",L"Down",
+        L"Dialog",L"User",L"Exit",L"Pane expand",L"Pane restore",L"New file",L"Redo"
     };
     static_assert(std::size(names) == static_cast<size_t>(Icon::Count)-1);
     constexpr int kRows = static_cast<int>((std::size(names) + 10) / 11);
@@ -195,6 +202,16 @@ int wmain(int argc, wchar_t** argv) {
                 Check(FromGlyph(glyphs[i])!=FromGlyph(glyphs[j]),"private glyph ids map to distinct shapes");
         Check(FromGlyph(L"\xE7A7")==Icon::Undo && FromGlyph(L"\xE756")==Icon::Terminal &&
               FromGlyph(L"\xF012")==Icon::Zip,"toolbar tools draw on the vector grid, not the font");
+        // Settings rows and navigation, the assistant setup, cloud states, network
+        // devices and command-palette actions: none of them may fall back to the font.
+        for (const wchar_t* glyph : {L"\xE701",L"\xE703",L"\xE720",L"\xE73A",L"\xE771",L"\xE775",L"\xE7BC",
+                 L"\xE7E6",L"\xE815",L"\xE81E",L"\xE897",L"\xE8AD",L"\xE8D7",L"\xE8DD",L"\xE8DE",L"\xE8E9",
+                 L"\xE8F6",L"\xE99A",L"\xE9CA",L"\xE9D5",L"\xE9F5",L"\xEB3C",L"\xEB42",L"\xEC57",L"\xECCD",
+                 L"\xECE7",L"\xED1E",L"\xE733",L"\xE74A",L"\xE768",L"\xE78B",L"\xE7C1",L"\xE7F8",L"\xE8E6",
+                 L"\xE8EA",L"\xE8FF",L"\xE930",L"\xE9D9",L"\xEB90",L"\xEC61"})
+            Check(FromGlyph(glyph)!=Icon::None,"settings, cloud-state and action glyphs draw on the vector grid");
+        Check(FromGlyph(L"\xE930")!=FromGlyph(L"\xEC61") && FromGlyph(L"\xE74A")==Icon::Up &&
+              FromGlyph(L"\xE74B")==Icon::Down,"cloud states stay distinct; arrows point the right way");
     }
 
     int renderings=0;

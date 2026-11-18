@@ -1,4 +1,4 @@
-// ui_tray_shelf.cpp — staging tray shelf (pulse_tray_redesign.html).
+// ui_tray_shelf.cpp — staging tray shelf.
 //
 // The tray panel shows one of three layers, swapped with a short cross-fade
 // while the panel height springs to the new layer:
@@ -212,6 +212,12 @@ void ShelfText(Compositor* compositor, IDWriteTextFormat* fmt,
     if (!compositor || !compositor->Dc()) return;
     IDWriteFactory2* factory = compositor->DwriteFactory();
     if (!factory || !fmt || text.empty() || w <= 1.0f || h <= 1.0f) return;
+    auto foreground = br->GetColor();
+    foreground.a *= br->GetOpacity();
+    if (!IsHighContrast() && compositor->DrawLumaText(text, fmt, rc, foreground,
+            D2D1::ColorF(0, 0.0f), align)) {
+        return;
+    }
     ComPtr<IDWriteTextLayout> layout;
     if (FAILED(factory->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), fmt, w, h,
                                          &layout)) || !layout.get())
@@ -237,7 +243,7 @@ IDWriteTextFormat* MainRenderer::ShelfFormat(int role) const {
     if (!shelf_formats_[role].get()) {
         struct Spec { float size; DWRITE_FONT_WEIGHT weight; };
         static constexpr Spec kSpecs[kShelfFormatCount] = {
-            {13.0f, DWRITE_FONT_WEIGHT_BOLD},       // 0 title / half label
+            {13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD},  // 0 title / half label
             {12.0f, DWRITE_FONT_WEIGHT_NORMAL},     // 1 hint, chips
             {12.5f, DWRITE_FONT_WEIGHT_BOLD},       // 2 release label
             {14.0f, DWRITE_FONT_WEIGHT_BOLD},       // 3 meta count

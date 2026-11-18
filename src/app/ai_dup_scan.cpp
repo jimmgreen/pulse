@@ -189,7 +189,7 @@ struct Seen {
 
 void Walk(const std::wstring& dir, size_t root, uint64_t min_bytes, std::vector<Seen>& out,
           std::unordered_set<std::wstring>& seen_dirs, DupProgress& progress, const std::atomic<bool>& cancel,
-          bool& truncated) {
+          bool& truncated, uint64_t& online) {
     std::vector<std::wstring> stack{dir};
     while (!stack.empty()) {
         if (cancel.load() || truncated) return;
@@ -213,10 +213,13 @@ void Walk(const std::wstring& dir, size_t root, uint64_t min_bytes, std::vector<
                 continue;
             }
             // Cloud placeholders would download to be read.
-            if (a & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN))
+            if (a & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN)) {
+                ++online;
                 continue;
+            }
             const uint64_t bytes = (static_cast<uint64_t>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
             progress.files.fetch_add(1);
+            progress.bytes.fetch_add(bytes);
             if (bytes < min_bytes || bytes == 0) continue;
             out.push_back({full, bytes, Ticks(fd.ftLastWriteTime), root});
             if (out.size() >= kMaxFiles) {
@@ -360,7 +363,8 @@ void FindDuplicates(DupScan& scan, uint64_t min_bytes, DupProgress& progress, co
     std::vector<Seen> all;
     std::unordered_set<std::wstring> seen_dirs;
     for (size_t r = 0; r < scan.roots.size(); ++r)
-        Walk(scan.roots[r].path, r, min_bytes, all, seen_dirs, progress, cancel, scan.truncated);
+        Walk(scan.roots[r].path, r, min_bytes, all, seen_dirs, progress, cancel, scan.truncated,
+             scan.online_skipped);
     scan.total_files = progress.files.load();
     std::unordered_map<uint64_t, std::vector<size_t>> by_size;
     for (size_t i = 0; i < all.size(); ++i) by_size[all[i].bytes].push_back(i);
@@ -426,10 +430,12 @@ void FindDuplicates(DupScan& scan, uint64_t min_bytes, DupProgress& progress, co
                 f.bytes = all[i].bytes;
                 f.mtime = all[i].mtime;
                 f.root = all[i].root;
-                const std::wstring pl = Lower(f.path);
+                // Loose: right in Downloads / Desktop; their subfolders (下载\工作\2026 Q3)
+                // were made by someone sorting (task 46 rule ①).
+                const std::wstring parent_l = Lower(Parent(f.path));
                 bool loose = false;
                 for (const auto& m : messy_l)
-                    if (Under(pl, m)) loose = true;
+                    if (parent_l == m) loose = true;
                 f.organized = !loose && _wcsicmp(Parent(f.path).c_str(), scan.roots[f.root].path.c_str()) != 0;
                 f.clean = CleanName(f.path);
                 g.files.push_back(std::move(f));

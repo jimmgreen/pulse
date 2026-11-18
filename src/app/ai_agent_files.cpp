@@ -47,6 +47,7 @@ std::wstring FoVerb(fo::FileOp op) {
     case fo::FileOp::Purge: return Text(I::PermanentDelete);
     case fo::FileOp::Restore: return Text(I::Restore);
     case fo::FileOp::EmptyBin: return Text(I::EmptyRecycleBin);
+    case fo::FileOp::Organize: return Text(I::AiFoAcceptOrganize);
     case fo::FileOp::None: break;
     }
     return {};
@@ -61,6 +62,8 @@ std::wstring FoArg(const fo::FilePlan& p) {
     case fo::FileOp::Group: return Fill(Text(I::AiFoArgGroup), L"{n}", Num(p.count));
     case fo::FileOp::Dissolve: return Fill(Text(I::AiFoArgDissolve), L"{n}", Num(p.count));
     case fo::FileOp::EmptyBin: return Fill(Text(I::AiFoNItems), L"{n}", Num(p.count));
+    case fo::FileOp::Organize:
+        return Fill(Fill(Text(I::AiFoArgOrganize), L"{n}", Num(p.count)), L"{k}", Num(p.dests.size()));
     default: return FoWhat(p);
     }
 }
@@ -184,6 +187,22 @@ void FoCard(AppState& s, CtlRun& run, const fo::FilePlan& p, AiBlockView& cf) {
             cf.hint2_warn = true;
         }
         break;
+    case fo::FileOp::Organize: {
+        // 「Claude」想把 23 个项目整理到 4 个文件夹 / 都在「下载」里。不会覆盖… (task 46 ⑧).
+        cf.cf_icon = ui::AiIcon::Move;
+        const std::wstring n = Num(p.count), k = Num(p.dests.size());
+        cf.title = run.mcp ? Fill(Fill(Fill(Text(I::AiFoTitleOrganizeMcp), L"{client}", run.mcp->client), L"{n}", n), L"{k}", k)
+                           : Fill(Fill(Text(I::AiFoTitleOrganize), L"{n}", n), L"{k}", k);
+        cf.sub = !more.empty() ? more
+                 : p.one_source_folder ? Fill(Text(I::AiFoSubOrganize), L"{folder}", folder)
+                                       : Text(I::AiFoSubOrganizeMixed);
+        size_t made = 0;
+        for (const fo::OrganizeDest& d : p.dests) made += d.make ? 1 : 0;
+        if (made) cf.hint1 = Fill(Text(I::AiFoOrgNewN), L"{n}", Num(made));
+        cf.hint2 = Text(I::AiFoOrgNoClash);
+        cf.hint = Text(I::AiFoHintUndo);
+        break;
+    }
     case fo::FileOp::None: break;
     }
     // 把「a.txt」移到 / 永久删除「a.txt」: no space before a quoted name.
@@ -246,6 +265,9 @@ void FoDone(AppState& s, std::shared_ptr<CtlRun> run, std::shared_ptr<fo::FilePl
         case fo::FileOp::Purge: line = Fill(Text(I::AiFoLinePurge), L"{n}", Num(plan->count)); break;
         case fo::FileOp::Restore: line = Fill(Text(I::AiFoLineRestore), L"{n}", Num(plan->sources.size())); break;
         case fo::FileOp::EmptyBin: line = Fill(Text(I::AiFoLineEmpty), L"{n}", Num(plan->count)); break;
+        case fo::FileOp::Organize:
+            line = Fill(Fill(Text(I::AiFoLineOrganize), L"{n}", Num(plan->count)), L"{k}", Num(plan->dests.size()));
+            break;
         case fo::FileOp::None: break;
         }
         st->sub = line;
@@ -256,7 +278,8 @@ void FoDone(AppState& s, std::shared_ptr<CtlRun> run, std::shared_ptr<fo::FilePl
             run->mcp_line = line;
             run->mcp_steps.push_back(line);
             run->mcp_files = true;
-            if (plan->op == fo::FileOp::Move || plan->op == fo::FileOp::Copy) run->mcp_open = plan->dest;
+            if (plan->op == fo::FileOp::Move || plan->op == fo::FileOp::Copy || plan->op == fo::FileOp::Organize)
+                run->mcp_open = plan->dest;
             if (fo::FileOpUndoes(plan->op) && group) {
                 std::lock_guard lock(run->mcp->mu);
                 run->mcp->file_group = group;
@@ -272,6 +295,13 @@ void FoDone(AppState& s, std::shared_ptr<CtlRun> run, std::shared_ptr<fo::FilePl
         if (!plan->dest.empty() && (plan->op == fo::FileOp::Move || plan->op == fo::FileOp::Copy)) st->data.set("dest", Utf8(plan->dest));
         if (plan->clashes && plan->op == fo::FileOp::Restore) st->data.set("left_in_bin", static_cast<uint64_t>(plan->clashes));
         if (plan->clashes && plan->op != fo::FileOp::Restore) st->data.set("renamed_to_keep_both", static_cast<uint64_t>(plan->clashes));
+        if (plan->op == fo::FileOp::Organize) {
+            st->data.set("moved", static_cast<uint64_t>(plan->count));
+            st->data.set("created_folders", static_cast<uint64_t>(plan->make_folders.size()));
+            json::Value folders = json::Value::Array();
+            for (const fo::OrganizeDest& d : plan->dests) folders.push(json::Value(Utf8(d.path)));
+            st->data.set("folders", std::move(folders));
+        }
         st->data.set("undoable", fo::FileOpUndoes(plan->op));
     }
     run->file_step = st;
@@ -333,6 +363,17 @@ void FoSubmit(AppState& s, std::shared_ptr<CtlRun> run, std::shared_ptr<fo::File
 // there is nothing to do); run->file_step then says so.
 bool FoAsk(AppState& s, std::shared_ptr<CtlRun> run, const std::string& id, const json::Value& args) {
     AiAgent& a = Agent(s);
+    if (!run->mcp && fo::FileOpOf(id) == fo::FileOp::Organize) {
+        // The assistant sorts with organize_files (its own plan card and rules).
+        auto st = std::make_shared<CtlStep>();
+        st->icon = ui::AiIcon::Move;
+        st->title = StepTitle(s, id);
+        st->error = "file.organize is for AI apps; in Pulse use organize_files (it shows the user a plan)";
+        st->why = Text(I::AiActWhyLater);
+        run->file_step = st;
+        run->file_state = 2;
+        return false;
+    }
     auto plan = std::make_shared<fo::FilePlan>(fo::PlanFileOp(s, id, args, &ResolveTaskDest));
     if (!plan->ok || plan->skip) {
         auto st = std::make_shared<CtlStep>();
@@ -574,6 +615,7 @@ void CtlNext(AppState& s, std::shared_ptr<CtlRun> run) {
         // A file step: its card first; the call goes on from FoDone (P4c).
         if (run->file_state == 0 && app::actions::IsFileOp(what) && FoAsk(s, run, what, StepArgs(step))) return;
         if (run->file_state == 0 && what == "select.items" && SelectAsk(s, run, StepArgs(step))) return;
+        if (run->file_state == 0 && what == "file.find_duplicates" && DupStepAsk(s, run, StepArgs(step))) return;
         if (run->file_state == 1) return;   // its card is up or its tasks run
         const size_t undo_before = run->undo.size();
         CtlStep st;

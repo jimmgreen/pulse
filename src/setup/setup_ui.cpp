@@ -28,7 +28,7 @@ namespace {
 constexpr float kW = 720.f, kH = 468.f, kTitle = 40.f;
 // Welcome hero block offset: centres the logo..path group between titlebar and footer.
 constexpr float kWelcomeDy = 30.f;
-constexpr UINT WM_ENGINE_PHASE = WM_APP + 1, WM_ENGINE_BUSY = WM_APP + 2, WM_ENGINE_DONE = WM_APP + 3;
+constexpr UINT WM_ENGINE_PHASE = WM_APP + 1, WM_ENGINE_BUSY = WM_APP + 2, WM_ENGINE_DONE = WM_APP + 3, WM_ENGINE_LOCKED = WM_APP + 4;
 constexpr float kPi = 3.14159265f;
 float EaseOut(float t) { const float u = 1 - t; return 1 - u * u * u; }  // cubic, no powf
 
@@ -112,13 +112,13 @@ bool ValidInstallPath(const std::wstring& p) {
 
 enum Id : int {
     kNone, kMin, kCloseX, kInstall, kAgree, kLicense, kToOptions, kBack, kAppEdit, kBrowseApp, kTglIndex,
-    kIndexEdit, kBrowseIndex, kTglStartup, kTglDesktop, kOptBack, kOptInstall, kCancelInstall, kLaunch,
-    kCloseDone, kOpenLog, kDlgPrimary, kDlgSecondary, kDot0, kDot1, kDot2, kTglCleanup, kUnStart, kUnClose,
+    kIndexEdit, kBrowseIndex, kTglStartup, kTglDesktop, kTglGlobal, kTglAi, kOptBack, kOptInstall, kCancelInstall, kLaunch,
+    kCloseDone, kOpenLog, kDlgPrimary, kDlgSecondary, kDlgEndRetry, kDot0, kDot1, kDot2, kDot3, kDot4, kDot5, kTglCleanup, kUnStart, kUnClose,
 };
 
 enum class Page { Welcome, Options, Install, Done, Error, Uninstall };
 enum class UnState { Idle, Running, Done, Failed };
-enum class Dialog { None, Busy, Cancel };
+enum class Dialog { None, Busy, Cancel, Locked, Cleanup };
 
 class Wizard {
 public:
@@ -162,7 +162,10 @@ private:
     // ---- device ----
     bool CreateFactories();
     bool EnsureDevice();
-    void ReleaseDevice() { SafeRelease(brush_); SafeRelease(logo_); SafeRelease(logo_small_); SafeRelease(rt_); }
+    void ReleaseDevice() { SafeRelease(brush_); SafeRelease(logo_); SafeRelease(logo_small_); SafeRelease(rt_); SafeRelease(window_rt_); }
+#ifdef PULSE_SETUP_UI_CAPTURE
+    bool CaptureProbe(const wchar_t* path);
+#endif
     void LoadLogo();
     float Dpi() const { return static_cast<float>(dpi_); }
     float Scale() const { return dpi_ / 96.f; }
@@ -203,6 +206,7 @@ private:
     void PaintDone();
     void PaintError();
     void PaintDialog();
+    void PaintLockDialog();
     void PaintUninstall();
     float CardTop(float y) const { return y - scroll_; }
 
@@ -250,7 +254,8 @@ private:
     ID2D1Factory* d2d_ = nullptr;
     IDWriteFactory* dwrite_ = nullptr;
     IWICImagingFactory* wic_ = nullptr;
-    ID2D1HwndRenderTarget* rt_ = nullptr;
+    ID2D1RenderTarget* rt_ = nullptr;
+    ID2D1HwndRenderTarget* window_rt_ = nullptr;
     ID2D1SolidColorBrush* brush_ = nullptr;
     ID2D1Bitmap* logo_ = nullptr;
     ID2D1Bitmap* logo_small_ = nullptr;
@@ -286,9 +291,15 @@ private:
     bool engine_done_ = false, busy_given_up_ = false;
     ULONGLONG done_time_ = 0;
     ULONGLONG glow_frame_ = 0;  // last welcome-glow repaint (throttled to ~30 fps)
+    FileLockReport locked_report_;
+    FileLockReport displayed_locks_;
+    size_t locked_cleanup_versions_ = 0, displayed_cleanup_versions_ = 0;
+    float lock_scroll_ = 0, lock_scroll_max_ = 0;
     HANDLE busy_answer_event_ = nullptr;
     std::atomic<bool> busy_retry_{false};
+    std::atomic<bool> end_locks_{false}, end_locks_failed_{false};
     bool slow_ = false;
+    bool probe_ = false;
     int slide_ = 0;
     ULONGLONG slide_time_ = 0;
 };
@@ -302,8 +313,8 @@ bool Wizard::CreateFactories() {
                                    reinterpret_cast<IUnknown**>(&dwrite_))))
         return false;
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic_));
-    // Segoe UI Variable on Windows 11, Segoe UI otherwise; CJK comes from the
-    // matching UI font so that punctuation and glyph shapes are regional.
+    // Keep both Chinese translations in the prototype's sans-serif family.
+    // Older Windows installations may expose YaHei without the UI suffix.
     IDWriteFontCollection* fonts = nullptr;
     dwrite_->GetSystemFontCollection(&fonts);
     auto has = [&](const wchar_t* name) {
@@ -311,10 +322,15 @@ bool Wizard::CreateFactories() {
         BOOL exists = FALSE;
         return fonts && SUCCEEDED(fonts->FindFamilyName(name, &index, &exists)) && exists;
     };
-    if (lang_ == Lang::ZhHans && has(L"Microsoft YaHei UI")) font_family_ = L"Microsoft YaHei UI";
-    else if (lang_ == Lang::ZhHant && has(L"Microsoft JhengHei UI")) font_family_ = L"Microsoft JhengHei UI";
-    else if (has(L"Segoe UI Variable Text")) font_family_ = L"Segoe UI Variable Text";
-    else font_family_ = L"Segoe UI";
+    font_family_ = L"Segoe UI";
+    if (lang_ != Lang::En) {
+        for (const wchar_t* family : {L"Microsoft YaHei UI", L"Microsoft YaHei", L"Microsoft JhengHei UI", L"Microsoft JhengHei"}) {
+            if (has(family)) {
+                font_family_ = family;
+                break;
+            }
+        }
+    }
     SafeRelease(fonts);
     return true;
 }
@@ -327,8 +343,10 @@ bool Wizard::EnsureDevice() {
                                                     D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
                                                     Dpi(), Dpi());
     if (FAILED(d2d_->CreateHwndRenderTarget(
-            props, D2D1::HwndRenderTargetProperties(hwnd_, D2D1::SizeU(rc.right, rc.bottom)), &rt_)))
+            props, D2D1::HwndRenderTargetProperties(hwnd_, D2D1::SizeU(rc.right, rc.bottom)), &window_rt_)))
         return false;
+    rt_ = window_rt_;
+    rt_->AddRef();
     rt_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     rt_->CreateSolidColorBrush(theme_.text, &brush_);
     LoadLogo();
@@ -535,6 +553,14 @@ void Wizard::Icon(int kind, float x, float y, D2D1_COLOR_F c) {
         case 7:  // back chevron (14 px)
             Polyline({{x + 9, y + 1.5f}, {x + 3.5f, y + 7}, {x + 9, y + 12.5f}}, c, 1.5f);
             break;
+        case 9:  // dual sparkle, matching the setup prototype's 20 px icon
+            Polyline({{x + 9, y + 2.5f}, {x + 10.7f, y + 7.1f}, {x + 15.3f, y + 8.8f},
+                      {x + 10.7f, y + 10.5f}, {x + 9, y + 15.1f}, {x + 7.3f, y + 10.5f},
+                      {x + 2.7f, y + 8.8f}, {x + 7.3f, y + 7.1f}}, c, w, true);
+            Polyline({{x + 15.5f, y + 13}, {x + 16.1f, y + 14.6f}, {x + 17.7f, y + 15.2f},
+                      {x + 16.1f, y + 15.8f}, {x + 15.5f, y + 17.4f}, {x + 14.9f, y + 15.8f},
+                      {x + 13.3f, y + 15.2f}, {x + 14.9f, y + 14.6f}}, c, w, true);
+            break;
         case 8:  // warning triangle (20 px)
             Polyline({{x + 10, y + 2}, {x + 18.5f, y + 17}, {x + 1.5f, y + 17}}, c, 1.5f, true);
             Line(x + 10, y + 7.5f, x + 10, y + 11.5f, c, 1.6f);
@@ -585,7 +611,20 @@ float Wizard::Button(int id, const std::wstring& label, float x, float y, Btn st
     if (style == Btn::Primary) Line(r.left + radius, r.bottom - .5f, r.right - radius, r.bottom - .5f, Hex(0, .18f), 1);
     const float tw = TextWidth(label, font, weight);
     float tx = x + (w - tw - icon_w) / 2;
-    if (icon) { Icon(icon, tx, y + (h - 14) / 2, fg); tx += icon_w; }
+    if (icon) {
+        float center_y = y + h / 2;
+        if (auto* layout = Layout(label, font, weight, tw + 1, h, false, DWRITE_TEXT_ALIGNMENT_LEADING)) {
+            DWRITE_TEXT_METRICS metrics{};
+            DWRITE_OVERHANG_METRICS ink{};
+            if (SUCCEEDED(layout->GetMetrics(&metrics)) && SUCCEEDED(layout->GetOverhangMetrics(&ink))) {
+                // Match the visible glyphs, not the font's asymmetric line box.
+                center_y = y + std::max(0.f, (h - metrics.height) / 2) + (h - ink.top + ink.bottom) / 2;
+            }
+            layout->Release();
+        }
+        Icon(icon, tx, center_y - 7, fg);
+        tx += icon_w;
+    }
     Text(label, {tx, y, tx + tw + 1, y + h}, font, fg, weight);
     FocusRing(id, r, radius);
     Hit(id, r);
@@ -669,6 +708,47 @@ void Wizard::PaintTitleBar() {
     if (can_close) Hit(kCloseX, close_r, false);
 }
 
+#ifdef PULSE_SETUP_UI_CAPTURE
+// Test executable only: exercise the same painter without requiring an unlocked
+// desktop. The shipping installer has no capture entry point.
+bool Wizard::CaptureProbe(const wchar_t* path) {
+    ReleaseDevice();
+    IWICBitmap* bitmap = nullptr;
+    HRESULT hr = wic_->CreateBitmap(static_cast<UINT>(kW * Scale()), static_cast<UINT>(kH * Scale()),
+        GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bitmap);
+    if (SUCCEEDED(hr)) hr = d2d_->CreateWicBitmapRenderTarget(bitmap,
+        D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), Dpi(), Dpi()), &rt_);
+    if (SUCCEEDED(hr)) {
+        rt_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        hr = rt_->CreateSolidColorBrush(theme_.text, &brush_);
+    }
+    if (SUCCEEDED(hr)) {
+        LoadLogo();
+        Paint();
+        wchar_t scroll[16]{};
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_LOCK_SCROLL", scroll, 16)) {
+            lock_scroll_ = static_cast<float>(_wtoi(scroll));
+            Paint();
+        }
+    }
+    IWICStream* stream = nullptr;
+    IWICBitmapEncoder* encoder = nullptr;
+    IWICBitmapFrameEncode* frame = nullptr;
+    if (SUCCEEDED(hr)) hr = wic_->CreateStream(&stream);
+    if (SUCCEEDED(hr)) hr = stream->InitializeFromFilename(path, GENERIC_WRITE);
+    if (SUCCEEDED(hr)) hr = wic_->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+    if (SUCCEEDED(hr)) hr = encoder->Initialize(stream, WICBitmapEncoderNoCache);
+    if (SUCCEEDED(hr)) hr = encoder->CreateNewFrame(&frame, nullptr);
+    if (SUCCEEDED(hr)) hr = frame->Initialize(nullptr);
+    if (SUCCEEDED(hr)) hr = frame->WriteSource(bitmap, nullptr);
+    if (SUCCEEDED(hr)) hr = frame->Commit();
+    if (SUCCEEDED(hr)) hr = encoder->Commit();
+    SafeRelease(frame); SafeRelease(encoder); SafeRelease(stream); SafeRelease(bitmap);
+    return SUCCEEDED(hr);
+}
+#endif
+
 void Wizard::PaintPage(Page p, float dx, float alpha) {
     if (alpha <= 0.01f) return;
     rt_->SetTransform(D2D1::Matrix3x2F::Translation(dx, 0));
@@ -691,15 +771,11 @@ void Wizard::PaintPage(Page p, float dx, float alpha) {
 }
 
 void Wizard::PaintWelcome() {
-    // Logo glow, coloured from the icon itself: its gold pulse line and lit
-    // dot. Light leaks from the dot past the tile, a broad warm halo balances
-    // it, and a navy-tinted shadow lifts the tile. While the page is shown
-    // the light flows: the dot breathes, the halo drifts and two warm lights
-    // circle the tile in opposite directions (pulse_installer_glow.html, "金色余晖").
+    // Soft violet light follows the folded-page product mark.
     {
         const float lx = kW / 2 - 48, ly = 54 + kWelcomeDy, cx = kW / 2, cy = 102 + kWelcomeDy;
         const D2D1_POINT_2F dot{lx + 64.2f, ly + 42.6f};
-        const D2D1_COLOR_F gold = Hex(0xF2B43A), hot = Hex(0xFFD66E), core = Hex(0xFFF6D2);
+        const D2D1_COLOR_F gold = Hex(0x8079F4), hot = Hex(0xAAA3FF), core = Hex(0xE5E2FF);
         const float k = theme_.dark ? 1.15f : 1.f;
         // Seconds within a 36 s loop: every period below divides it.
         const float t = GlowAnimating() ? static_cast<float>(GetTickCount64() % 36000) / 1000.f : 0.f;
@@ -715,13 +791,13 @@ void Wizard::PaintWelcome() {
             SafeRelease(brush);
             SafeRelease(coll);
         };
-        const D2D1_COLOR_F wash = theme_.dark ? Hex(0xFFBA50) : Hex(0xFFCE78);
+        const D2D1_COLOR_F wash = theme_.dark ? Hex(0x8C84F8) : Hex(0xC3C0FF);
         const float wa = theme_.dark ? .06f : .11f;  // low enough to stay free of 8-bit banding rings
         glow({cx, cy - 20}, 380, 380, {{0, WithAlpha(wash, wa)}, {.45f, WithAlpha(wash, wa * .45f)}, {1, WithAlpha(wash, 0)}});
         glow({cx + 14 * std::cos(drift), cy + 9 * std::sin(drift)}, 175, 175,
              {{0, WithAlpha(gold, .20f * k)}, {.38f, WithAlpha(gold, .13f * k)}, {.62f, WithAlpha(hot, .05f * k)},
               {1, WithAlpha(hot, 0)}});
-        // Two warm lights circle the tile in opposite directions, so the glow
+        // Two soft lights circle the mark in opposite directions, so the glow
         // visibly moves around it rather than only pulsing in place.
         if (GlowAnimating()) {
             glow({cx + 72 * std::cos(orbit), cy + 40 * std::sin(orbit)}, 110, 110,
@@ -732,15 +808,6 @@ void Wizard::PaintWelcome() {
         const float dk = k * (.55f + .45f * breath), dr = 128 * (.88f + .20f * breath);
         glow(dot, dr, dr, {{0, WithAlpha(core, .70f * dk)}, {.10f, WithAlpha(hot, .55f * dk)}, {.30f, WithAlpha(gold, .30f * dk)},
                            {.55f, WithAlpha(gold, .10f * dk)}, {.80f, WithAlpha(gold, .025f * dk)}, {1, WithAlpha(gold, 0)}});
-        // Soft drop shadow: stacked rounded rects, tinted navy on light themes.
-        const D2D1_COLOR_F shade = theme_.dark ? Hex(0x000000) : Hex(0x1C1F34);
-        const float sa = theme_.dark ? 2.1f : .6f;
-        for (int i = 14; i >= 1; --i) {
-            const float sp = i * 1.5f, oy = 8 + i * 1.25f;
-            Fill({lx + 6 - sp * .5f, ly + oy - sp * .3f, lx + 90 + sp * .5f, ly + oy + 92 + sp * .3f}, WithAlpha(shade, .016f * sa),
-                 21 + sp * .6f);
-        }
-        glow({cx, ly + 98}, 60, 9.6f, {{0, WithAlpha(shade, .30f * sa)}, {1, WithAlpha(shade, 0)}});
     }
     if (logo_) rt_->DrawBitmap(logo_, {kW / 2 - 48, 54 + kWelcomeDy, kW / 2 + 48, 150 + kWelcomeDy}, 1, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
 
@@ -807,20 +874,22 @@ void Wizard::PaintOptions() {
     };
     auto card = [&](int icon, Str title, Str sub, float alpha, const wchar_t* badge = nullptr,
                     bool wide_text = false) {
-        const D2D1_RECT_F r{L, y, R, y + 62};
+        const float sub_right = wide_text ? R - 80 : R - 330;
+        const float sub_height = wide_text ? TextHeight(T(sub), 12, sub_right - L - 50) : 18.f;
+        const D2D1_RECT_F r{L, y, R, y + std::max(62.f, sub_height + 44.f)};
         Fill(r, theme_.card, 7);
         Stroke(r, theme_.stroke, 7);
         Icon(icon, L + 16, y + 21, WithAlpha(theme_.text, .9f * alpha));
         const std::wstring t1 = T(title);
-        Text(t1, {L + 50, y + 12, R - 300, y + 32}, 13.5f, WithAlpha(theme_.text, alpha));
+        Text(t1, {L + 50, y + 12, wide_text ? R - 80 : R - 300, y + 32}, 13.5f, WithAlpha(theme_.text, alpha));
         if (badge) {
             const float bx = L + 50 + TextWidth(t1, 13.5f) + 6, bw = TextWidth(badge, 11) + 14;
             const D2D1_RECT_F b{bx, y + 14, bx + bw, y + 30};
             Fill(b, WithAlpha(theme_.accent, .22f * alpha), 8);
             Text(badge, b, 11, WithAlpha(theme_.accent, alpha), DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
         }
-        Text(T(sub), {L + 50, y + 32, wide_text ? R - 130 : R - 330, y + 50}, 12,
-             WithAlpha(theme_.text2, alpha));
+        Text(T(sub), {L + 50, y + 32, sub_right, y + 32 + sub_height}, 12,
+             WithAlpha(theme_.text2, alpha), DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, wide_text);
         return r;
     };
     auto field = [&](int edit_id, int browse_id, const D2D1_RECT_F& card_r, float width, D2D1_RECT_F& edit_rect,
@@ -842,7 +911,7 @@ void Wizard::PaintOptions() {
         if (!edit_shown)
             Text(edit_id == kAppEdit ? req_.app_dir : req_.index_path, edit_rect, 12.5f,
                  WithAlpha(theme_.text, enabled ? 1.f : .45f));
-        Hit(edit_id, in);
+        if (enabled) Hit(edit_id, in);
         if (enabled) Button(browse_id, T(Str::Browse), bx, card_r.top + 15, Btn::Normal, bw);
         else Text(T(Str::Browse), {bx, card_r.top + 15, right, card_r.top + 47}, 13, WithAlpha(theme_.text3, a),
                   DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -873,28 +942,28 @@ void Wizard::PaintOptions() {
     section(Str::SecSearch);
     const auto idx_card = card(2, Str::OptIndex, Str::OptIndexSub, 1, T(Str::Recommended), true);
     Toggle(kTglIndex, req_.tasks.index_service, idx_card.right - 16, idx_card.top + 31);
-    y += 65;
+    y = idx_card.bottom + 3;
     const float ia = req_.tasks.index_service ? 1.f : .45f;
     const auto dir_card = card(3, Str::IndexDir, Str::IndexDirSub, ia);
     field(kIndexEdit, kBrowseIndex, dir_card, 220, index_edit_rect_, index_edit_visible_, req_.tasks.index_service);
     y += 62 + 14;
+    const auto global_card = card(2, Str::OptGlobalSearch, Str::OptGlobalSearchSub, 1, nullptr, true);
+    Toggle(kTglGlobal, req_.tasks.global_search, global_card.right - 16, global_card.top + 31);
+    y = global_card.bottom + 14;
+    section(Str::SecAi);
+    const auto ai_card = card(9, Str::OptAiAssistant, Str::OptAiAssistantSub, 1, T(Str::New), true);
+    Toggle(kTglAi, req_.tasks.ai_assistant, ai_card.right - 16, ai_card.top + 31);
+    y = ai_card.bottom + 14;
     section(Str::SecOther);
     const auto st_card = card(4, Str::OptStartup, Str::OptStartupSub, 1, nullptr, true);
     Toggle(kTglStartup, req_.tasks.startup, st_card.right - 16, st_card.top + 31);
-    y += 65;
+    y = st_card.bottom + 3;
     const auto dk_card = card(5, Str::OptDesktop, Str::OptDesktopSub, 1, nullptr, true);
     Toggle(kTglDesktop, req_.tasks.desktop_icon, dk_card.right - 16, dk_card.top + 31);
-    y += 62 + 8;
+    y = dk_card.bottom + 8;
     rt_->PopAxisAlignedClip();
     max_scroll_ = std::max(0.f, (y + scroll_) - view_bottom);
 
-    // Hit rects outside the viewport must not receive clicks.
-    hits_.erase(std::remove_if(hits_.begin(), hits_.end(),
-                               [&](const HitRect& h) {
-                                   return h.id != kBack && h.id != kMin && h.id != kCloseX &&
-                                          (h.r.bottom < view_top || h.r.top > view_bottom);
-                               }),
-                hits_.end());
     if (max_scroll_ > 0) {  // thin scroll indicator
         const float vh = view_bottom - view_top, th = vh * vh / (vh + max_scroll_);
         const float ty = view_top + (vh - th) * (scroll_ / max_scroll_);
@@ -986,9 +1055,10 @@ void Wizard::PaintInstall() {
     const D2D1_RECT_F panel{360, 58, kW - 24, kH - 50};
     Fill(panel, theme_.card, 10);
     Stroke(panel, theme_.stroke, 10);
-    if (GetTickCount64() - slide_time_ > 3200) { slide_ = (slide_ + 1) % 3; slide_time_ = GetTickCount64(); }
+    if (!probe_ && GetTickCount64() - slide_time_ > 3200) { slide_ = (slide_ + 1) % 6; slide_time_ = GetTickCount64(); }
     const float st = std::min(1.f, (GetTickCount64() - slide_time_) / 500.f);
-    const Str titles[] = {Str::S1Title, Str::S2Title, Str::S3Title}, texts[] = {Str::S1Text, Str::S2Text, Str::S3Text};
+    const Str titles[] = {Str::S4Title, Str::S1Title, Str::S2Title, Str::S3Title, Str::S5Title, Str::S6Title};
+    const Str texts[] = {Str::S4Text, Str::S1Text, Str::S2Text, Str::S3Text, Str::S5Text, Str::S6Text};
     const float text_h = TextHeight(T(texts[slide_]), 12.5f, panel.right - panel.left - 44);
     const D2D1_RECT_F art{panel.left + 22, panel.top + 22 + 10 * (1 - st), panel.right - 22,
                           panel.bottom - 30 - text_h - 38 + 10 * (1 - st)};
@@ -1014,6 +1084,25 @@ void Wizard::PaintInstall() {
             my += 18;
         };
         if (slide_ == 0) {
+            const float prompt_height = TextHeight(T(Str::AiDemoPrompt), 11.5f, mw - 44);
+            Fill({mx + 24, my, mx + mw, my + prompt_height + 16}, WithAlpha(theme_.accent, .20f), 8);
+            Text(T(Str::AiDemoPrompt), {mx + 34, my + 8, mx + mw - 10, my + 8 + prompt_height},
+                 11.5f, theme_.text, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+            my += prompt_height + 26;
+            const float reply_height = TextHeight(T(Str::AiDemoReply), 11.5f, mw - 36);
+            const float reply_bottom = my + reply_height + 52;
+            Fill({mx, my, mx + mw - 12, reply_bottom}, theme_.input, 8);
+            Stroke({mx, my, mx + mw - 12, reply_bottom}, theme_.stroke, 8);
+            Text(T(Str::AiDemoReply), {mx + 12, my + 10, mx + mw - 24, my + 10 + reply_height},
+                 11.5f, theme_.text2, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+            const float action_width = TextWidth(T(Str::AiDemoAction), 10.5f) + 20;
+            const D2D1_RECT_F action{mx + 12, my + reply_height + 19, mx + 12 + action_width, reply_bottom - 9};
+            Fill(action, WithAlpha(theme_.accent, .14f), 4);
+            Text(T(Str::AiDemoAction), action, 10.5f, theme_.accent, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                 DWRITE_TEXT_ALIGNMENT_CENTER);
+            my = reply_bottom + 12;
+            if (my + 30 < art.bottom) { row(.86f, false); row(.64f, false); }
+        } else if (slide_ == 1) {
             const D2D1_RECT_F s{mx, my, mx + mw, my + 22};
             Fill(s, theme_.input, 5);
             Stroke(s, theme_.stroke, 5);
@@ -1026,7 +1115,7 @@ void Wizard::PaintInstall() {
             }
             my += 28;
             row(1, true); row(1, false); row(.8f, false); row(.9f, false); row(.6f, false);
-        } else if (slide_ == 1) {
+        } else if (slide_ == 2) {
             const float half = (mw - 6) / 2;
             float ry = my;
             for (float f : {1.f, .9f, 1.f, .7f, .85f}) { Fill({mx, ry, mx + half * f, ry + 12}, f == .9f ? WithAlpha(theme_.accent, .45f) : theme_.card_strong, 3); ry += 18; }
@@ -1039,6 +1128,28 @@ void Wizard::PaintInstall() {
                 rt_->FillRoundedRectangle(D2D1::RoundedRect(pv, 5, 5), pg);
             SafeRelease(pg);
             SafeRelease(pc);
+        } else if (slide_ == 4) {
+            const D2D1_RECT_F tray{mx, my, mx + mw, my + 110};
+            Fill(tray, WithAlpha(theme_.accent, .06f), 6);
+            Stroke(tray, WithAlpha(theme_.accent, .35f), 6);
+            for (int i = 0; i < 3; ++i) {
+                const float left = mx + mw * (i == 1 ? .30f : i == 2 ? .18f : .10f);
+                const float top = my + 12 + i * 28.f;
+                Fill({left, top, left + mw * .55f, top + 22}, theme_.input, 4);
+                Stroke({left, top, left + mw * .55f, top + 22}, theme_.stroke, 4);
+                Fill({left + 8, top + 7, left + mw * .42f, top + 15}, theme_.card_strong, 3);
+            }
+            my += 122;
+            row(.58f, true); row(.8f, false);
+        } else if (slide_ == 5) {
+            const D2D1_COLOR_F colors[] = {Hex(0xEF4444), Hex(0xF59E0B), Hex(0x22C55E),
+                                          Hex(0x3B82F6), Hex(0xA855F7), Hex(0xEF4444)};
+            const float widths[] = {.9f, .7f, .85f, .6f, .75f, .5f};
+            for (int r = 0; r < 6; ++r) {
+                Fill({mx, my + 3, mx + 9, my + 12}, colors[r], 4.5f);
+                Fill({mx + 18, my + 1, mx + 18 + (mw - 18) * widths[r], my + 13}, theme_.card_strong, 3);
+                my += 24;
+            }
         } else {
             const float half = (mw - 6) / 2;
             for (int c = 0; c < 2; ++c) {
@@ -1054,14 +1165,21 @@ void Wizard::PaintInstall() {
             }
         }
     }
+    if (slide_ == 0) {
+        const float badge_width = TextWidth(T(Str::New), 10.5f) + 14;
+        const float badge_left = art.left + TextWidth(T(titles[slide_]), 15, DWRITE_FONT_WEIGHT_SEMI_BOLD) + 8;
+        const D2D1_RECT_F badge{badge_left, art.bottom + 16, badge_left + badge_width, art.bottom + 32};
+        Fill(badge, WithAlpha(theme_.accent, .16f), 8);
+        Text(T(Str::New), badge, 10.5f, theme_.accent, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
     Text(T(titles[slide_]), {art.left, art.bottom + 14, art.right, art.bottom + 34}, 15, theme_.text,
          DWRITE_FONT_WEIGHT_SEMI_BOLD);
     Text(T(texts[slide_]), {art.left, art.bottom + 38, art.right, art.bottom + 40 + text_h}, 12.5f, theme_.text2,
          DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
     if (layer) { rt_->PopLayer(); layer->Release(); }
     {
-        float x = panel.right - 16 - (14 + 5 + 5 + 10);
-        for (int i = 0; i < 3; ++i) {
+        float x = panel.right - 16 - (14 + 5 * 5 + 5 * 5);
+        for (int i = 0; i < 6; ++i) {
             const float w = i == slide_ ? 14.f : 5.f;
             const D2D1_RECT_F d{x, panel.bottom - 17, x + w, panel.bottom - 12};
             Fill(d, i == slide_ ? theme_.accent : theme_.text3, 2.5f);
@@ -1084,11 +1202,29 @@ void Wizard::PaintInstall() {
 
 void Wizard::PaintDone() {
     const float t = std::min(1.f, (GetTickCount64() - page_time_) / 900.f);
-    const bool has_pills = (req_.tasks.index_service && !req_.options.test) || result_.verbs_seeded || result_.startup;
+    std::vector<std::pair<std::wstring, D2D1_COLOR_F>> pills;
+    if (req_.tasks.index_service && !req_.options.test && (result_.index_running || !result_.index_configured))
+        pills.push_back(result_.index_running ? std::pair{std::wstring(T(Str::SumIndex)), theme_.success}
+                                              : std::pair{std::wstring(T(Str::SumIndexFailed)), theme_.warn});
+    if (result_.defaults_written && req_.tasks.global_search) pills.push_back({T(Str::SumGlobalSearch), theme_.success});
+    if (result_.defaults_written && req_.tasks.ai_assistant) pills.push_back({T(Str::SumAiAssistant), theme_.success});
+    if (result_.verbs_seeded) pills.push_back({T(Str::SumMenu), theme_.success});
+    if (result_.startup) pills.push_back({T(Str::SumStart), theme_.success});
+    if (result_.dialog_cleanup_pending) pills.push_back({T(Str::CleanupPending), theme_.warn});
+    std::vector<float> row_widths;
+    std::vector<size_t> row_starts;
+    for (size_t i = 0; i < pills.size(); ++i) {
+        const float w = TextWidth(pills[i].first, 11.5f) + 32;
+        if (row_widths.empty() || row_widths.back() + 6 + w > kW - 96) {
+            row_starts.push_back(i);
+            row_widths.push_back(w);
+        } else row_widths.back() += 6 + w;
+    }
+    const float pills_height = row_widths.empty() ? 0.f : 30.f * static_cast<float>(row_widths.size()) + 18.f;
     const std::wstring sub_measure = req_.upgrade ? T(Str::DoneSubUp)
                                      : result_.index_running ? T(Str::DoneSub) : T(Str::DoneSubNoIndex);
     // icon 84 + 18 + title 44 + text + 16 + pills 48 + buttons 32, centred in the stage
-    const float content = 84 + 18 + 44 + TextHeight(sub_measure, 13.5f, 420) + 16 + (has_pills ? 48 : 0) + 32;
+    const float content = 84 + 18 + 44 + TextHeight(sub_measure, 13.5f, 420) + 16 + pills_height + 32;
     const float cx = kW / 2, top = kTitle + (kH - kTitle - content) / 2 - 6;
     // Check mark that draws itself.
     const float circle = std::min(1.f, t / .65f);
@@ -1112,16 +1248,15 @@ void Wizard::PaintDone() {
          DWRITE_TEXT_ALIGNMENT_CENTER, true);
     y += sh + 16;
     // Summary pills.
-    std::vector<std::pair<std::wstring, D2D1_COLOR_F>> pills;
-    if (req_.tasks.index_service && !req_.options.test)
-        pills.push_back(result_.index_running ? std::pair{std::wstring(T(Str::SumIndex)), theme_.success}
-                                              : std::pair{std::wstring(T(Str::SumIndexFailed)), theme_.warn});
-    if (result_.verbs_seeded) pills.push_back({T(Str::SumMenu), theme_.success});
-    if (result_.startup) pills.push_back({T(Str::SumStart), theme_.success});
-    float total = -6;
-    for (auto& p : pills) total += TextWidth(p.first, 11.5f) + 32 + 6;
-    float x = (kW - total) / 2;
-    for (auto& [label, color] : pills) {
+    size_t row = 0;
+    float x = pills.empty() ? 0.f : (kW - row_widths[0]) / 2;
+    for (size_t i = 0; i < pills.size(); ++i) {
+        if (row + 1 < row_starts.size() && i == row_starts[row + 1]) {
+            ++row;
+            y += 30;
+            x = (kW - row_widths[row]) / 2;
+        }
+        const auto& [label, color] = pills[i];
         const float w = TextWidth(label, 11.5f) + 32;
         const D2D1_RECT_F r{x, y, x + w, y + 24};
         Fill(r, theme_.card, 12);
@@ -1206,7 +1341,7 @@ void Wizard::PaintUninstall() {
             std::lock_guard lock(file_mutex_);
             line = un_item_;
         } else if (un_state_ == UnState::Done) {
-            line = T(ures_.reboot_needed ? Str::UnDoneReboot : Str::UnDone);
+            line = T(ures_.dialog_cleanup_pending ? Str::UnDoneDialogRetained : ures_.reboot_needed ? Str::UnDoneReboot : Str::UnDone);
             color = theme_.text2;
         } else {
             line = std::wstring(T(Str::UnFailed)) + L" " + ures_.error;
@@ -1238,6 +1373,7 @@ void Wizard::PaintUninstall() {
 }
 
 void Wizard::PaintDialog() {
+    if (dialog_ == Dialog::Locked || dialog_ == Dialog::Cleanup) { PaintLockDialog(); return; }
     hits_.clear();  // modal
     Hit(kMin, {kW - 92, 0, kW - 46, kTitle}, false);
     const float t = std::min(1.f, (GetTickCount64() - dialog_time_) / 220.f);
@@ -1270,6 +1406,79 @@ void Wizard::PaintDialog() {
            busy ? Btn::Normal : Btn::Danger, 96, 32, true);
     rt_->SetTransform(D2D1::Matrix3x2F::Identity());
     if (t < 1) hits_.resize(1);
+}
+
+void Wizard::PaintLockDialog() {
+    hits_.clear();
+    Hit(kMin, {kW - 92, 0, kW - 46, kTitle}, false);
+    const bool cleanup = dialog_ == Dialog::Cleanup;
+    Fill({0, kTitle, kW, kH}, theme_.scrim);
+    const D2D1_RECT_F card{60, 58, kW - 60, kH - 18};
+    for (int i = 5; i > 0; --i)
+        Fill({card.left - i * 2.f, card.top + 5 - i, card.right + i * 2.f, card.bottom + 5 + i}, Hex(0, .035f), 10.f + i);
+    Fill(card, theme_.win, 10);
+    Stroke(card, theme_.stroke, 10);
+    Icon(8, card.left + 22, card.top + 23, theme_.warn);
+    Text(T(cleanup ? Str::CleanupTitle : Str::LockedTitle),
+         {card.left + 52, card.top + 18, card.right - 22, card.top + 46}, 18, theme_.text, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    const bool owners = !displayed_locks_.programs.empty();
+    const auto description = T(cleanup ? (owners ? Str::CleanupText : Str::CleanupUnknown) : Str::LockedText);
+    const float text_h = TextHeight(description, 12.5f, card.right - card.left - 44);
+    Text(description, {card.left + 22, card.top + 55, card.right - 22, card.top + 55 + text_h},
+         12.5f, theme_.text2, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+    const float section_y = card.top + 66 + text_h;
+    Text(T(owners ? Str::CleanupApps : Str::LockedTitle),
+         {card.left + 22, section_y, card.right - 22, section_y + 20}, 12, theme_.text, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    if (cleanup) Text(std::wstring(T(Str::CleanupVersions)) + L": " + std::to_wstring(displayed_cleanup_versions_),
+         {card.left + 230, section_y, card.right - 22, section_y + 20}, 11.5f, theme_.text3,
+         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    const float footer_y = card.bottom - 62;
+    const auto hint = T(end_locks_failed_ ? Str::EndFailed : cleanup ? Str::CleanupHint : !owners ? Str::LockedUnknown : Str::LockedLog);
+    const float hint_h = TextHeight(hint, 11.5f, card.right - card.left - 44);
+    const D2D1_RECT_F list{card.left + 22, section_y + 26, card.right - 22, footer_y - hint_h - 20};
+    Fill(list, theme_.card, 6);
+    Stroke(list, theme_.stroke, 6);
+    const size_t rows = owners ? displayed_locks_.programs.size() : displayed_locks_.files.size();
+    const float available = std::max(1.f, list.bottom - list.top - 8);
+    lock_scroll_max_ = std::max(0.f, static_cast<float>(rows) * 42.f - available);
+    lock_scroll_ = std::clamp(lock_scroll_, 0.f, lock_scroll_max_);
+    rt_->PushAxisAlignedClip({list.left + 1, list.top + 1, list.right - 1, list.bottom - 1}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    for (size_t i = 0; i < rows; ++i) {
+        const float y = list.top + 4 + static_cast<float>(i) * 42 - lock_scroll_;
+        if (y + 42 < list.top || y > list.bottom) continue;
+        std::wstring title, detail;
+        if (owners) {
+            const auto& program = displayed_locks_.programs[i];
+            title = program.name.empty() ? L"PID " + std::to_wstring(program.pid) : program.name;
+            detail = L"PID " + std::to_wstring(program.pid);
+        } else {
+            const auto& path = displayed_locks_.files[i];
+            const auto slash = path.find_last_of(L"\\/");
+            title = slash == std::wstring::npos ? path : path.substr(slash + 1);
+            detail = path;
+        }
+        Text(title, {list.left + 12, y + 2, list.right - 15, y + 22}, 12.5f, theme_.text, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+        Text(detail, {list.left + 12, y + 23, list.right - 15, y + 39}, 10.5f, theme_.text3);
+        if (i + 1 < rows) Line(list.left + 12, y + 41, list.right - 12, y + 41, theme_.divider, .7f);
+    }
+    rt_->PopAxisAlignedClip();
+    if (lock_scroll_max_ > 0) {
+        const float thumb = std::max(20.f, available * available / (available + lock_scroll_max_));
+        const float y = list.top + 4 + (available - thumb) * lock_scroll_ / lock_scroll_max_;
+        Fill({list.right - 6, y, list.right - 3, y + thumb}, theme_.text3, 1.5f);
+    }
+    Text(hint, {card.left + 22, footer_y - hint_h - 10, card.right - 22, footer_y - 10},
+         11.5f, theme_.text2, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+    Line(card.left, footer_y, card.right, footer_y, theme_.divider, 1);
+    Button(kOpenLog, T(Str::OpenLog), card.left + 18, footer_y + 15, Btn::Ghost);
+    const bool can_end = std::any_of(displayed_locks_.programs.begin(), displayed_locks_.programs.end(),
+        [](const LockedProgram& program) { return program.CanEnd(); });
+    float right = card.right - 22;
+    if (can_end) right -= Button(kDlgEndRetry, T(Str::EndRetry), right, footer_y + 15,
+        Btn::Primary, 128, 32, true) + 8;
+    right -= Button(kDlgPrimary, T(Str::Retry), right, footer_y + 15, can_end ? Btn::Normal : Btn::Primary, 64, 32, true) + 8;
+    Button(kDlgSecondary, T(cleanup ? Str::CleanupKeep : Str::Cancel), right,
+           footer_y + 15, Btn::Normal, 80, 32, true);
 }
 
 // ======================================================================
@@ -1317,6 +1526,12 @@ void Wizard::SyncFromEdits() {
 }
 
 void Wizard::Activate(int id) {
+    if (probe_ && (id == kInstall || id == kOptInstall || id == kLaunch || id == kUnStart || id == kOpenLog)) return;
+    if (probe_ && (id == kCloseX || id == kCloseDone)) { DestroyWindow(hwnd_); return; }
+    if ((id == kCloseX || id == kCancelInstall) && (dialog_ == Dialog::Locked || dialog_ == Dialog::Cleanup)) {
+        Activate(kDlgSecondary);
+        return;
+    }
     switch (id) {
         case kMin: ShowWindow(hwnd_, SW_MINIMIZE); break;
         case kUnClose:
@@ -1345,6 +1560,8 @@ void Wizard::Activate(int id) {
         case kBrowseApp: Browse(true); break;
         case kBrowseIndex: Browse(false); break;
         case kTglIndex: req_.tasks.index_service = !req_.tasks.index_service; break;
+        case kTglGlobal: req_.tasks.global_search = !req_.tasks.global_search; break;
+        case kTglAi: req_.tasks.ai_assistant = !req_.tasks.ai_assistant; break;
         case kTglStartup: req_.tasks.startup = !req_.tasks.startup; break;
         case kTglDesktop: req_.tasks.desktop_icon = !req_.tasks.desktop_icon; break;
         case kInstall: case kOptInstall: StartInstall(); break;
@@ -1354,17 +1571,35 @@ void Wizard::Activate(int id) {
         case kLaunch: outcome_.launch = true; CloseWith(kExitOk); break;
         case kCloseDone: CloseWith(page_ == Page::Done ? kExitOk : outcome_.exit_code); break;
         case kOpenLog: ShellExecuteW(hwnd_, L"open", LogPath().c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
+        case kDlgEndRetry:
+            if (dialog_ != Dialog::Locked && dialog_ != Dialog::Cleanup) break;
+            if (std::none_of(displayed_locks_.programs.begin(), displayed_locks_.programs.end(),
+                [](const LockedProgram& program) { return program.CanEnd(); })) break;
+            if (MessageBoxW(hwnd_, T(Str::EndConfirm), T(Str::EndRetry),
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) break;
+            Log(L"Lock dialog user action: end verified processes and retry");
+            end_locks_ = true;
+            busy_retry_ = true;
+            SetEvent(busy_answer_event_);
+            dialog_ = Dialog::None;
+            break;
         case kDlgPrimary:
-            if (dialog_ == Dialog::Busy) { busy_retry_ = true; SetEvent(busy_answer_event_); }
+            if (dialog_ == Dialog::Cleanup) Log(L"Dialog cleanup user action: retry");
+            if (dialog_ == Dialog::Busy || dialog_ == Dialog::Locked || dialog_ == Dialog::Cleanup) { busy_retry_ = true; SetEvent(busy_answer_event_); }
             else paused_ = false;
             dialog_ = Dialog::None;
             break;
         case kDlgSecondary:
-            if (dialog_ == Dialog::Busy) { busy_retry_ = false; busy_given_up_ = true; SetEvent(busy_answer_event_); }
+            if (dialog_ == Dialog::Cleanup) Log(L"Dialog cleanup user action: keep for now");
+            if (dialog_ == Dialog::Busy || dialog_ == Dialog::Locked || dialog_ == Dialog::Cleanup) {
+                busy_retry_ = false;
+                if (dialog_ != Dialog::Cleanup) busy_given_up_ = true;
+                SetEvent(busy_answer_event_);
+            }
             else { cancel_ = true; paused_ = false; }
             dialog_ = Dialog::None;
             break;
-        case kDot0: case kDot1: case kDot2: slide_ = id - kDot0; slide_time_ = GetTickCount64(); break;
+        case kDot0: case kDot1: case kDot2: case kDot3: case kDot4: case kDot5: slide_ = id - kDot0; slide_time_ = GetTickCount64(); break;
     }
     Invalidate();
 }
@@ -1410,6 +1645,33 @@ void Wizard::EngineThread(InstallRequest request) {
         while (paused_ && !cancel_) Sleep(50);
         if (slow_) Sleep(40);  // test installs only: make the progress page observable
         return !cancel_.load();
+    };
+    const auto finish_lock_answer = [this](const FileLockReport& report) {
+        if (end_locks_.exchange(false)) {
+            bool failed = false;
+            for (const auto& program : report.programs) {
+                const DWORD error = EndLockedProgram(program);
+                failed = failed || error != ERROR_SUCCESS;
+                Log(L"End lock owner PID " + std::to_wstring(program.pid) + L": Win32=" + std::to_wstring(error));
+            }
+            end_locks_failed_ = failed;
+        }
+        return busy_retry_.load();
+    };
+    cb.locked = [this, &finish_lock_answer](const FileLockReport& report) {
+        { std::lock_guard lock(file_mutex_); locked_report_ = report; }
+        PostMessageW(hwnd_, WM_ENGINE_LOCKED, 0, 0);
+        WaitForSingleObject(busy_answer_event_, INFINITE);
+        return finish_lock_answer(report);
+    };
+    cb.cleanup_locked = [this, &finish_lock_answer](const DialogCleanupReport& report) {
+        { std::lock_guard lock(file_mutex_); locked_report_ = report.locks;
+          if (locked_report_.files.empty()) for (const auto& entry : report.blocked_directories)
+              locked_report_.files.push_back(entry.directory);
+          locked_cleanup_versions_ = report.blocked_directories.size(); }
+        PostMessageW(hwnd_, WM_ENGINE_LOCKED, 1, 0);
+        WaitForSingleObject(busy_answer_event_, INFINITE);
+        return finish_lock_answer(report.locks);
     };
     cb.busy = [this]() {
         PostMessageW(hwnd_, WM_ENGINE_BUSY, 0, 0);
@@ -1518,7 +1780,11 @@ void Wizard::LayoutEdits() {
 
 int Wizard::HitTest(float x, float y) const {
     for (auto it = hits_.rbegin(); it != hits_.rend(); ++it)
-        if (x >= it->r.left && x < it->r.right && y >= it->r.top && y < it->r.bottom) return it->id;
+        if (x >= it->r.left && x < it->r.right && y >= it->r.top && y < it->r.bottom) {
+            if (page_ == Page::Options && it->id != kBack && it->id != kMin && it->id != kCloseX &&
+                it->id != kOptBack && it->id != kOptInstall && (y < kTitle + 50 || y >= kH - 61)) continue;
+            return it->id;
+        }
     return kNone;
 }
 
@@ -1586,7 +1852,7 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_SIZE:
-            if (rt_) rt_->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));
+            if (window_rt_) window_rt_->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));
             Invalidate();
             return 0;
         case WM_ERASEBKGND:
@@ -1642,12 +1908,22 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_MOUSEWHEEL:
+            if (dialog_ == Dialog::Locked || dialog_ == Dialog::Cleanup) {
+                lock_scroll_ = std::clamp(lock_scroll_ - GET_WHEEL_DELTA_WPARAM(wp) / 120.f * 42.f, 0.f, lock_scroll_max_);
+                Invalidate();
+                return 0;
+            }
             if (page_ == Page::Options && dialog_ == Dialog::None) {
                 scroll_ = std::clamp(scroll_ - GET_WHEEL_DELTA_WPARAM(wp) / 120.f * 48.f, 0.f, max_scroll_);
                 Invalidate();
             }
             return 0;
         case WM_KEYDOWN:
+            if ((dialog_ == Dialog::Locked || dialog_ == Dialog::Cleanup) &&
+                (wp == VK_NEXT || wp == VK_PRIOR || wp == VK_DOWN || wp == VK_UP)) {
+                lock_scroll_ = std::clamp(lock_scroll_ + (wp == VK_NEXT || wp == VK_DOWN ? 84.f : -84.f), 0.f, lock_scroll_max_);
+                Invalidate(); return 0;
+            }
             if (wp == VK_TAB) { MoveFocus(GetKeyState(VK_SHIFT) < 0); return 0; }
             if ((wp == VK_RETURN || wp == VK_SPACE) && focus_ != kNone) {
                 for (const auto& h : hits_) if (h.id == focus_) { Activate(focus_); return 0; }
@@ -1658,7 +1934,7 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (wp == VK_ESCAPE) {
-                if (dialog_ != Dialog::None) Activate(dialog_ == Dialog::Busy ? kDlgSecondary : kDlgPrimary);
+                if (dialog_ != Dialog::None) Activate(dialog_ == Dialog::Cancel ? kDlgPrimary : kDlgSecondary);
                 else if (page_ == Page::Options) Show(Page::Welcome);
                 else Activate(kCloseX);
                 return 0;
@@ -1678,6 +1954,18 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
             phase_ = static_cast<Phase>(wp);
             Invalidate();
             return 0;
+        case WM_ENGINE_LOCKED: {
+            { std::lock_guard lock(file_mutex_); displayed_locks_ = locked_report_;
+              displayed_cleanup_versions_ = locked_cleanup_versions_; }
+            dialog_ = wp ? Dialog::Cleanup : Dialog::Locked;
+            lock_scroll_ = 0;
+            focus_ = kDlgPrimary;
+            keyboard_focus_ = true;
+            dialog_time_ = GetTickCount64();
+            FlashWindow(hwnd_, TRUE);
+            Invalidate();
+            return 0;
+        }
         case WM_ENGINE_BUSY:
             dialog_ = Dialog::Busy;
             dialog_time_ = GetTickCount64();
@@ -1729,6 +2017,10 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
             Activate(kCloseX);  // Alt+F4 follows the close button's rules
             return 0;
         case WM_DESTROY:
+            busy_retry_ = false;
+            cancel_ = true;
+            paused_ = false;
+            SetEvent(busy_answer_event_);
             KillTimer(hwnd_, 1);
             PostQuitMessage(0);
             return 0;
@@ -1737,6 +2029,8 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 WizardOutcome Wizard::Run() {
+    wchar_t probe_value[16]{};
+    probe_ = req_.options.test && GetEnvironmentVariableW(L"PULSE_SETUP_UI_PROBE", probe_value, 16) != 0;
     if (!CreateFactories()) {
         Log(L"Direct2D is not available");
         outcome_.exit_code = kExitPrepareFailed;
@@ -1761,6 +2055,13 @@ WizardOutcome Wizard::Run() {
     if (HMODULE shcore = LoadLibraryW(L"shcore.dll")) {
         if (auto fn = reinterpret_cast<GetDpiForMonitorFn>(GetProcAddress(shcore, "GetDpiForMonitor"))) fn(mon, 0, &dx, &dy);
     }
+    if (probe_) {
+        wchar_t value[16]{};
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_DPI", value, 16)) {
+            const int requested = _wtoi(value);
+            if (requested == 96 || requested == 144 || requested == 192) dx = static_cast<UINT>(requested);
+        }
+    }
     dpi_ = dx;
     const int w = static_cast<int>(kW * Scale()), h = static_cast<int>(kH * Scale());
     const RECT& wa = mi.rcWork;
@@ -1783,6 +2084,49 @@ WizardOutcome Wizard::Run() {
     SendMessageW(index_edit_, WM_SETFONT, reinterpret_cast<WPARAM>(edit_font_), FALSE);
     SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
     page_time_ = GetTickCount64() - 1000;
+    if (probe_) {
+        wchar_t value[16]{};
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_PAGE", value, 16)) {
+            const int page = _wtoi(value);
+            if (page >= 0 && page <= 4) page_ = static_cast<Page>(page);
+        }
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_SLIDE", value, 16)) slide_ = std::clamp(_wtoi(value), 0, 5);
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_SCROLL", value, 16)) scroll_ = static_cast<float>(std::max(0, _wtoi(value)));
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_LOCKS", value, 16)) {
+            page_ = prev_page_ = Page::Install;
+            dialog_ = _wtoi(value) == 2 ? Dialog::Locked : Dialog::Cleanup;
+            displayed_cleanup_versions_ = 4;
+            displayed_locks_.programs = {{6888, L"QQ"}, {18832, L"QQ"}, {36772, L"Weixin"},
+                {4096, L"Adobe Photoshop — document editing session"}, {8192, L"Browser"}};
+            for (auto& program : displayed_locks_.programs) program.started.dwLowDateTime = 1;
+            if (_wtoi(value) == 3) {
+                displayed_locks_.programs.clear();
+                displayed_locks_.files = {L"C:\\Program Files\\Pulse\\DialogBridge\\9b3c1fcadc5b7e985b8a859cba86d8069e3163dfb447265f93bfe1392fc2a893\\PulseDialogAuto64.dll"};
+            }
+            dialog_time_ = GetTickCount64() - 1000;
+            focus_ = kDlgPrimary;
+            keyboard_focus_ = true;
+        }
+        result_.defaults_written = true;
+        result_.verbs_seeded = true;
+        result_.startup = true;
+        phase_ = Phase::Extracting;
+        shown_progress_ = .42f;
+        total_bytes_ = 100 * 1048576;
+        done_bytes_ = 42 * 1048576;
+        slide_time_ = GetTickCount64() - 1000;
+    }
+#ifdef PULSE_SETUP_UI_CAPTURE
+    if (probe_) {
+        wchar_t output[32768]{};
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_CAPTURE", output, 32768)) {
+            const bool captured = CaptureProbe(output);
+            DestroyWindow(hwnd_);
+            outcome_.exit_code = captured ? 0 : 1;
+            return outcome_;
+        }
+    }
+#endif
     ShowWindow(hwnd_, SW_SHOWNORMAL);
     SetForegroundWindow(hwnd_);
     SetTimer(hwnd_, 1, 16, nullptr);

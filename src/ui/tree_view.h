@@ -3,6 +3,7 @@
 // outline with indent guides, type colours, a current row, find highlights
 // and value / path copying.
 #pragma once
+#include "search_highlights.h"
 
 #include <windows.h>
 #include <d2d1_1.h>
@@ -10,6 +11,7 @@
 #include <wrl/client.h>
 #include <cstdint>
 #include <string>
+#include <memory>
 #include <vector>
 #include <utility>
 
@@ -18,9 +20,11 @@
 namespace pulse::ui {
 
 class TreeView {
+    friend struct PreviewBufferLifetimeTest;
 public:
     // Parses the payload; the same payload again keeps folding, scroll and
     // the current row. False for anything that is not a tree payload.
+    bool SetPayload(const std::shared_ptr<const std::wstring>& payload);
     bool SetPayload(const std::wstring& payload);
     void Clear();
     bool HasData() const noexcept { return !nodes_.empty(); }
@@ -31,13 +35,14 @@ public:
     std::wstring ErrorText() const;  // "\u7B2C 3 \u884C\uFF0C\u7B2C 7 \u5217\uFF1A\u7F3A\u5C11\u9017\u53F7"
     const std::wstring& Source() const noexcept { return source_; }
     // Every node's searchable text, one line per node in document order.
+    uint64_t TextRevision() const noexcept { return text_revision_; }
     const std::wstring& PlainText() const noexcept { return plain_; }
     // "JSON" | current path (or node count) — the window adds the size.
     std::vector<std::wstring> StatusParts() const;
 
-    struct Highlight { uint32_t start, length; bool current; };
+    using Highlight = SearchHighlight;
     void Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D1_RECT_F& rect,
-              const Theme& theme, bool dark, float scale, const std::vector<Highlight>& matches);
+              const Theme& theme, bool dark, float scale, SearchHighlights matches);
 
     bool Scroll(float wheel_steps);
     // Up/Down move the current row, Left/Right fold (or go to the parent /
@@ -93,6 +98,21 @@ private:
     void AppendJson(size_t i, int indent, std::wstring& out) const;
     void AppendXml(size_t i, int indent, std::wstring& out, bool subtree_root = false) const;
 
+    uint64_t text_revision_ = 0;
+    bool SetPayloadImpl(const std::wstring& payload,
+                        std::shared_ptr<const std::wstring> owner);
+    const std::wstring& Payload() const noexcept { return shared_payload_ ? *shared_payload_ : payload_; }
+    void StorePayload(const std::wstring& value, std::shared_ptr<const std::wstring> owner) {
+        if (owner) {
+            shared_payload_ = std::move(owner);
+            std::wstring{}.swap(payload_);
+        } else {
+            payload_ = value;
+            shared_payload_.reset();
+        }
+    }
+    std::shared_ptr<const std::wstring> shared_payload_;
+    std::weak_ptr<const std::wstring> payload_identity_;
     std::wstring payload_, source_, plain_, error_;
     uint32_t error_line_ = 0, error_column_ = 0;
     bool xml_ = false, truncated_ = false;

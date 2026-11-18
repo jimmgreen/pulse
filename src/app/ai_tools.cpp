@@ -2,6 +2,7 @@
 #include "ai_tools_fs.h"
 #include "ai_tools_actions.h"
 #include "ai_tools_ui.h"
+#include "extensions/developer_tools.h"
 #include "app_state.h"
 #include "../common/localization.h"
 #include "../index/index_client.h"
@@ -299,6 +300,12 @@ bool ClaimAiIndexResult(uint32_t request_id) {
 }
 
 void RegisterAiTools(ToolBroker& broker, const AiToolsHost& host) {
+    broker.Register({"pulse.describe_extension_api", PermissionClass::Read,
+                     extensions::DescribeExtensionApiTool, 10000, {}});
+    broker.Register({"pulse.validate_extension_manifest", PermissionClass::Read,
+                     extensions::ValidateExtensionManifestTool, 10000, {}});
+    broker.Register({"pulse.get_extension_template", PermissionClass::Read,
+                     extensions::GetExtensionTemplateTool, 10000, {}});
     const HWND window = host.ui_window;
     broker.Register({"pulse.get_context", PermissionClass::Read,
                      [window](const ToolCall& call) { return GetContextTool(window, call); }, 10000, {}});

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" shape-rendering="geometricPrecision">
+  <defs>
+    <path id="outline" d="M16 60A24 24 0 0 1 40 36H92C101 36 108 39 114 46L126 60H216A24 24 0 0 1 240 84V200A28 28 0 0 1 212 228H44A28 28 0 0 1 16 200Z"/>
+    <clipPath id="silhouette"><use href="#outline"/></clipPath>
+    <linearGradient id="back" x1="0" y1="36" x2="0" y2="228" gradientUnits="userSpaceOnUse"><stop stop-color="#2b2f86"/><stop offset="1" stop-color="#120f52"/></linearGradient>
+    <linearGradient id="front" x1="16" y1="70" x2="210" y2="240" gradientUnits="userSpaceOnUse"><stop stop-color="#c3c0ff"/><stop offset=".48" stop-color="#8079f4"/><stop offset="1" stop-color="#4b3fc6"/></linearGradient>
+    <linearGradient id="sheen" x1="0" y1="72" x2="0" y2="170" gradientUnits="userSpaceOnUse"><stop stop-color="#fff" stop-opacity=".30"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <linearGradient id="fold" x1="120" y1="80" x2="236" y2="226" gradientUnits="userSpaceOnUse"><stop stop-color="#8c84f8"/><stop offset="1" stop-color="#4a3fc4"/></linearGradient>
+    <linearGradient id="rim" x1="0" y1="72" x2="0" y2="225" gradientUnits="userSpaceOnUse"><stop stop-color="#fff" stop-opacity=".55"/><stop offset=".72" stop-color="#fff" stop-opacity=".55"/><stop offset=".87" stop-color="#fff" stop-opacity=".36"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="7"/></filter>
+    <path id="leftPage" d="M0 0H100V28C110 28 118 40 122 49C128 57 129 67 131 77L147 169C150 187 154 207 160 228L170 256H0Z"/>
+  </defs>
+  <!-- Clip the composite once so stacked antialiased edges cannot reveal the dark backplate. -->
+  <g clip-path="url(#silhouette)">
+    <path d="M0 0H256V256H0Z" fill="url(#back)"/>
+    <path d="M96 82L128 72C150 68 170 80 190 106L228 158C236 169 240 178 240 188H260V256H120Z" transform="translate(-3 -6)" fill="#120f52" opacity=".5" filter="url(#shadow)"/>
+    <path d="M96 82L128 72C150 68 170 80 190 106L228 158C236 169 240 178 240 188H260V256H120Z" fill="url(#fold)"/>
+    <path d="M128 72C150 68 170 80 190 106L228 158C236 169 240 178 240 188V200A28 28 0 0 1 212 228" fill="none" stroke="url(#rim)" stroke-width="1" stroke-linecap="round"/>
+    <use href="#leftPage" transform="translate(6 0)" fill="#120f52" opacity=".45" filter="url(#shadow)"/>
+    <use href="#leftPage" fill="url(#front)"/>
+    <use href="#leftPage" fill="url(#sheen)"/>
+  </g>
+</svg>

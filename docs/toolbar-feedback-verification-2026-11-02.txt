@@ -1,0 +1,30 @@
+工具栏反馈定向验证（2026-11-02）
+
+修复范围
+- 自定义工具栏中排序/筛选/分组的顺序保存到 toolbar_view_order，实际布局和命中位置跟随。
+- 旧设置保持默认顺序；显隐不打乱隐藏按钮的位置；选择操作栏边界跟随最左侧控件。
+- 三个工具栏按钮右键提供“移除”和“自定义工具栏”，复用已有文字和菜单。
+- 自定义弹窗及右键菜单的错误阴影GUID改为SDK CLSID_D2D1Shadow。
+- 保留已有约定：生效中的筛选/分组仍显示，避免隐藏正在影响列表的条件。
+
+验证结果
+- 受影响目标 pulse、pulse_toolbar_view_order_test、pulse_persistence_test 构建成功。
+- pulse_toolbar_view_order_test：864布局组合通过，含6种排列、3档DPI、3种宽度、显隐及筛选展开。
+- pulse_persistence_test --toolbar-view-order：3项通过，设置往返、旧格式和非法顺序归一化。
+- 实机 pulse --test-instance --shot，独立 PULSE_TEST_DATA_DIR：20项通过，退出码0。
+  实际鼠标拖动group到sort之前，浅深主题下偏好和renderer均为group/sort/filter。
+  对三个按钮分别实际右键，点击“自定义”出现真实弹窗，点击“移除”关闭对应显隐设置。
+- 截图已查看，卡片布局无重叠；透明阴影外边距RGBA检查：y400，x20/30/40/41处
+  浅色alpha=3/13/30/32，深色alpha=7/27/64/68，x0为0、x42卡片为255，软阴影确实渲染。
+- git diff --check通过。构建出现已有app_input.cpp pointer_moved未使用警告，本次未改该逻辑。
+
+证据
+bench_data/toolbar-feedback-verified-20261102/toolbar.log
+bench_data/toolbar-feedback-verified-20261102/toolbar-picker-light.png
+bench_data/toolbar-feedback-verified-20261102/toolbar-picker-dark.png
+
+测试修正与限制
+首次GUI测试新增路径缓冲增加64KB主线程栈，右键时栈溢出；改为堆分配后消除。
+随后菜单键盘测试受初始hover影响误选；改为实际行坐标点击，保留全部断言，最终20项通过。
+所有测试使用独立数据目录，不修改个人设置；未替换Program Files中的安装版。
+只验证本次工具栏范围，未运行完整历史回归；高对比度沿用原有不绘制软阴影策略。

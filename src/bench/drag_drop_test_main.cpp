@@ -11,9 +11,45 @@
 #include <iterator>
 
 HRESULT WINAPI AuditNativeDrag(IDataObject*, IDropSource*, DWORD, DWORD*);
+namespace {
+bool edge_fixture = false;
+bool edge_timer = false;
+HWND edge_hwnd = reinterpret_cast<HWND>(1);
+UINT_PTR WINAPI EdgeSetTimer(HWND hwnd, UINT_PTR id, UINT interval, TIMERPROC proc) {
+    if (!edge_fixture) return ::SetTimer(hwnd, id, interval, proc);
+    edge_timer = true;
+    return id;
+}
+BOOL WINAPI EdgeKillTimer(HWND hwnd, UINT_PTR id) {
+    if (!edge_fixture) return ::KillTimer(hwnd, id);
+    edge_timer = false;
+    return TRUE;
+}
+BOOL WINAPI EdgeGetCursorPos(POINT* pt) {
+    if (!edge_fixture) return ::GetCursorPos(pt);
+    *pt = POINT{12, 24};
+    return TRUE;
+}
+HWND WINAPI EdgeWindowFromPoint(POINT pt) {
+    return edge_fixture ? edge_hwnd : ::WindowFromPoint(pt);
+}
+BOOL WINAPI EdgeScreenToClient(HWND hwnd, POINT* pt) {
+    return edge_fixture ? TRUE : ::ScreenToClient(hwnd, pt);
+}
+}
+#define SetTimer EdgeSetTimer
+#define KillTimer EdgeKillTimer
+#define GetCursorPos EdgeGetCursorPos
+#define WindowFromPoint EdgeWindowFromPoint
+#define ScreenToClient EdgeScreenToClient
 #define DoDragDrop AuditNativeDrag
 #include "../ui/drag_drop.cpp"
 #undef DoDragDrop
+#undef SetTimer
+#undef KillTimer
+#undef GetCursorPos
+#undef WindowFromPoint
+#undef ScreenToClient
 
 namespace {
 int failures = 0;
@@ -89,9 +125,53 @@ private:
 IDropTarget* g_route_target = nullptr;
 DWORD g_route_keys = 0;
 
+struct VisualRecord {
+    std::vector<std::wstring> feedback;
+    bool finished = false;
+    bool cancelled = false;
+};
+std::vector<VisualRecord> g_visual_records;
+bool g_audit_visual = false;
+bool g_cancel_visual = false;
+
+class RecordingDragVisual final : public pulse::ui::DragVisual {
+public:
+    RecordingDragVisual() : index_(g_visual_records.size()) { g_visual_records.emplace_back(); }
+    void Track() override {}
+    void Effect(DWORD) override {}
+    void Feedback(const std::wstring& text) override { g_visual_records[index_].feedback.push_back(text); }
+    void Finish(DWORD, bool cancelled) override {
+        Check(!pulse::ui::DragVisualActive(), "visual detached before finish callback");
+        g_visual_records[index_].finished = true;
+        g_visual_records[index_].cancelled = cancelled;
+        delete this;
+    }
+private:
+    size_t index_;
+};
+
+bool g_visual_dark = false;
+pulse::ui::DragVisual* CreateRecordingVisual(const std::vector<std::wstring>&, bool dark) {
+    g_visual_dark = dark;
+    return new RecordingDragVisual();
+}
+
 HRESULT WINAPI AuditNativeDrag(IDataObject* data, IDropSource*, DWORD allowed, DWORD* effect) {
     ++native_calls;
     pulse::ui::ExtractHDropPaths(data, native_paths);
+    if (g_audit_visual) {
+        Check(pulse::ui::DragVisualActive() && g_visual_records.back().feedback.empty(),
+              "each native drag starts with its own empty visual feedback");
+        Check(pulse::ui::SetDragVisualFeedback(L"Move to fixture") &&
+              g_visual_records.back().feedback == std::vector<std::wstring>{L"Move to fixture"},
+              "native drag forwards target feedback to active visual");
+        Check(pulse::ui::SetDragVisualFeedback({}) && g_visual_records.back().feedback.back().empty(),
+              "leaving target clears active visual feedback");
+        if (g_cancel_visual) {
+            *effect = DROPEFFECT_NONE;
+            return DRAGDROP_S_CANCEL;
+        }
+    }
     if (g_route_target) {
         DWORD e = allowed;
         g_route_target->DragEnter(data, g_route_keys, POINTL{}, &e);
@@ -110,7 +190,59 @@ bool SourceWouldDelete(DWORD returned, DWORD performed) {
     return returned == DROPEFFECT_MOVE || performed == DROPEFFECT_MOVE;
 }
 
-int wmain() {
+int EdgeScrollTest() {
+    using namespace pulse::ui;
+    edge_fixture = true;
+    unsigned ticks = 0, hits = 0;
+    bool at_edge = true;
+    DropTargetCallbacks callbacks;
+    callbacks.drag_scroll = [&](POINT) { ++ticks; return at_edge; };
+    callbacks.drag_over = [&](const auto&, POINT, DWORD, DWORD, DWORD) {
+        ++hits;
+        return DROPEFFECT_COPY;
+    };
+    callbacks.drop = [&](const auto&, POINT, DWORD, DWORD, DWORD) {
+        Check(!edge_timer, "drop stops the timer before executing its operation");
+        return DROPEFFECT_COPY;
+    };
+    auto* target = new WindowDropTarget(edge_hwnd, std::move(callbacks));
+    auto* data = FileDataObject::Create({L"C:\\fixture\\source.txt"});
+    DWORD effect = DROPEFFECT_COPY;
+    target->DragEnter(data, 0, POINTL{}, &effect);
+    Check(edge_timer, "supported drag starts the scroll timer");
+    target->TickScroll();
+    target->TickScroll();
+    Check(ticks == 2 && hits == 3, "stationary edge hover keeps ticking and refreshes the drop row");
+    at_edge = false;
+    target->TickScroll();
+    Check(ticks == 3 && hits == 3, "leaving the edge does not refresh or scroll the drop row");
+    effect = DROPEFFECT_NONE;
+    target->DragOver(0, POINTL{}, &effect);
+    target->TickScroll();
+    Check(!edge_timer && ticks == 3, "an unsupported effect pauses edge scrolling");
+    effect = DROPEFFECT_COPY;
+    target->DragOver(0, POINTL{}, &effect);
+    Check(edge_timer, "a supported effect resumes the timer");
+    target->DragLeave();
+    target->TickScroll();
+    Check(!edge_timer && ticks == 3, "DragLeave stops scrolling, including a queued timer tick");
+    effect = DROPEFFECT_COPY;
+    target->DragEnter(data, 0, POINTL{}, &effect);
+    target->Drop(data, 0, POINTL{}, &effect);
+    target->TickScroll();
+    Check(!edge_timer && ticks == 3, "Drop stops subsequent scroll ticks");
+    effect = DROPEFFECT_COPY;
+    target->DragEnter(data, 0, POINTL{}, &effect);
+    target->Release();
+    Check(!edge_timer, "target destruction releases its scroll timer");
+    data->Release();
+    edge_fixture = false;
+    printf("Drag edge scroll: %d passed, %d failed\n", passed, failures);
+    return failures ? 1 : 0;
+}
+
+int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && wcscmp(argv[1], L"--edge-scroll") == 0) return EdgeScrollTest();
     using namespace pulse::ui;
     setvbuf(stdout, nullptr, _IONBF, 0);
     for (DWORD allowed : { DWORD(DROPEFFECT_NONE), DWORD(DROPEFFECT_COPY),
@@ -252,15 +384,35 @@ int wmain() {
     const auto before_archived = ReadBytes(archived);
     Check(!before_original.empty() && !before_archived.empty(), "create isolated recycle identity fixtures");
     const DWORD rejected = DoFileDragDrop({original.wstring()}, DROPEFFECT_COPY | DROPEFFECT_MOVE,
-                                         {}, L"pulse:recycle");
+                                         {}, L"pulse:recycle", false);
     Check(rejected == DROPEFFECT_NONE && native_calls == 0 && native_paths.empty(),
           "recycle row cannot expose recreated original to a native drag");
     Check(ReadBytes(original) == before_original && ReadBytes(archived) == before_archived,
           "rejected recycle drag preserves both versions");
-    const DWORD ordinary = DoFileDragDrop({original.wstring()}, DROPEFFECT_COPY, {}, root.wstring());
+    const DWORD ordinary = DoFileDragDrop({original.wstring()}, DROPEFFECT_COPY, {}, root.wstring(), false);
     Check(ordinary == DROPEFFECT_COPY && native_calls == 1 &&
           native_paths == std::vector<std::wstring>{original.wstring()},
           "ordinary drag still reaches native boundary with selected path");
+    Check(!DragVisualActive() && !SetDragVisualFeedback(L"External drag"),
+          "foreign drag without a visual retains the renderer feedback fallback");
+    SetDragVisualFactory(&CreateRecordingVisual);
+    g_audit_visual = true;
+    for (bool cancel : {false, true}) {
+        g_cancel_visual = cancel;
+        const DWORD result = DoFileDragDrop({original.wstring()}, DROPEFFECT_COPY, {}, root.wstring(), cancel);
+        Check(g_visual_dark == cancel, "drag visual receives explicit light and dark source themes");
+        Check(result == static_cast<DWORD>(cancel ? DROPEFFECT_NONE : DROPEFFECT_COPY),
+              "visual feedback preserves native completion and cancellation results");
+        Check(!DragVisualActive() && !SetDragVisualFeedback(L"Late feedback") &&
+              g_visual_records.back().finished && g_visual_records.back().cancelled == cancel &&
+              g_visual_records.back().feedback.size() == 2,
+              "ended native drag rejects late feedback and finishes its visual exactly once");
+    }
+    g_audit_visual = false;
+    g_cancel_visual = false;
+    SetDragVisualFactory(nullptr);
+    Check(g_visual_records.size() == 2,
+          "consecutive native drags create independent visual lifetimes");
     {
         // Shift+drag onto a Pulse pane that queues the move (a share is slow,
         // so the copy has not even started when Drop returns).
@@ -274,7 +426,7 @@ int wmain() {
         g_route_target = target;
         g_route_keys = MK_SHIFT;
         const DWORD moved = DoFileDragDrop({original.wstring()}, DROPEFFECT_COPY | DROPEFFECT_MOVE,
-                                           {}, root.wstring());
+                                           {}, root.wstring(), false);
         g_route_target = nullptr;
         target->Release();
         Check(queued == 1 && moved == DROPEFFECT_MOVE,

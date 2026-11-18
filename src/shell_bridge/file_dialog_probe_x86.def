@@ -1,0 +1,4 @@
+LIBRARY PulsePickerBridgeProbe
+EXPORTS
+    PulseBridgeProbeGetApi=_PulseBridgeProbeGetApi@12
+    PulseBridgeProbeGetFixtureApi=_PulseBridgeProbeGetFixtureApi@12

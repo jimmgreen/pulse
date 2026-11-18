@@ -5,6 +5,7 @@
 #include "keymap.h"
 #include "shortcut_page.h"
 #include "shortcut_settings.h"
+#include "context_menu.h"
 #include "../ui/ui_renderer.h"
 #include <filesystem>
 #include "../ops/clipboard.h"
@@ -13,10 +14,11 @@
 #include <string>
 #include <vector>
 
-#ifdef PULSE_WITH_SELFTEST
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_WITH_TEST_HOOKS)
 using namespace pulse;
 namespace {
 
+#ifdef PULSE_WITH_SELFTEST
 std::wstring ClipboardText() {
     std::wstring text;
     for (int attempt = 0; attempt < 10 && !OpenClipboard(nullptr); ++attempt) Sleep(20);
@@ -29,6 +31,7 @@ std::wstring ClipboardText() {
     CloseClipboard();
     return text;
 }
+#endif
 
 LPARAM KeyLparam(UINT vk, bool alt) {
     LPARAM lp = 1 | (static_cast<LPARAM>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)) << 16);
@@ -38,6 +41,7 @@ LPARAM KeyLparam(UINT vk, bool alt) {
 
 }  // namespace
 
+#ifdef PULSE_WITH_SELFTEST
 void Render(pulse::AppState&);
 
 // Settings > 快捷键 (page 7) driven like a user: clicks go through the page's
@@ -296,11 +300,75 @@ int RunShortcutPageTest(AppState& s, const wchar_t* output) {
     return failures ? 1 : 0;
 }
 
+#endif
+
+int RunLayoutShortcutTest(AppState& s, const wchar_t* output) {
+    FILE* log = nullptr;
+    if (!s.isolatedTest || _wfopen_s(&log, output, L"w") || !log) return 2;
+    int failures = 0;
+    auto check = [&](bool ok, const char* label) {
+        std::fprintf(log, "[%s] %s\n", ok ? "PASS" : "FAIL", label);
+        std::fflush(log);
+        failures += !ok;
+    };
+    s.appPrefs.persist = false;
+    const auto saved_map = app::ActiveKeymap();
+    BYTE saved_keys[256]{};
+    GetKeyboardState(saved_keys);
+    auto press = [&](HWND target, UINT digit, bool shift) {
+        BYTE keys[256]{};
+        keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+        keys[VK_MENU] = keys[VK_LMENU] = 0x80;
+        if (shift) keys[VK_SHIFT] = keys[VK_LSHIFT] = 0x80;
+        SetKeyboardState(keys);
+        SendMessageW(target, WM_KEYDOWN, digit, KeyLparam(digit, true));
+        BYTE none[256]{};
+        SetKeyboardState(none);
+    };
+    auto is_layout = [&](app::LayoutPreset expected) {
+        const auto* layout = s.window_tabs.Active();
+        return layout && layout->layout == expected &&
+            layout->VisiblePanes().size() == app::LayoutPresetCount(expected);
+    };
+    const app::LayoutPreset presets[] = {app::LayoutPreset::Single, app::LayoutPreset::TwoVertical,
+        app::LayoutPreset::Three, app::LayoutPreset::FourGrid};
+    for (bool custom : {false, true}) {
+        app::SetActiveKeymap(custom ? app::Keymap::FromPrefs({L"Layout=Ctrl+Alt+Shift"}) : app::Keymap{});
+        SetFocus(s.hwnd);
+        for (int i : {1, 2, 3, 0}) {
+            press(s.hwnd, static_cast<UINT>('1' + i), custom);
+            const auto label = std::string(custom ? "custom layout digit " : "default layout digit ") +
+                std::to_string(i + 1) + " applies expected preset and pane count";
+            check(is_layout(presets[i]), label.c_str());
+        }
+        if (custom) {
+            press(s.hwnd, '2', false);
+            check(is_layout(app::LayoutPreset::Single), "old layout binding stays inactive after remapping");
+        }
+        ShowFilterEditor(s);
+        check(s.filterEditing && s.hwndFilterEdit, "filter editor opens for focus boundary");
+        if (s.hwndFilterEdit) {
+            press(s.hwndFilterEdit, '2', custom);
+            check(is_layout(app::LayoutPreset::Single), "layout chord does not split while editing filter text");
+        }
+        if (s.filterEditing) HideFilterEditor(s, false);
+    }
+    DispatchMenuCommand(s, app::CmdLayoutTwoHorizontal);
+    check(is_layout(app::LayoutPreset::TwoHorizontal), "stacked panes menu command still applies two horizontal panes");
+    app::SetActiveKeymap(saved_map);
+    SetKeyboardState(saved_keys);
+    std::fprintf(log, "failures=%d\n", failures);
+    std::fclose(log);
+    return failures ? 1 : 0;
+}
+
+#ifdef PULSE_WITH_SELFTEST
 // The shortcuts users reported (复制路径 Ctrl+Shift+C, 窗口总览 Ctrl+Shift+O)
 // and their neighbours, sent as real WM_KEYDOWN messages through the window
 // procedure and the hosted edit procedures. The user's clipboard text is put
 // back at the end.
 int RunShortcutFlowTest(AppState& s, const wchar_t* output) {
+    if (GetEnvironmentVariableW(L"PULSE_TEST_LAYOUT_SHORTCUTS", nullptr, 0)) return RunLayoutShortcutTest(s, output);
     if (GetEnvironmentVariableW(L"PULSE_TEST_SHORTCUT_PAGE", nullptr, 0)) return RunShortcutPageTest(s, output);
     FILE* log = nullptr;
     if (!s.isolatedTest || _wfopen_s(&log, output, L"w") || !log) return 2;
@@ -439,4 +507,5 @@ int RunShortcutFlowTest(AppState& s, const wchar_t* output) {
     std::fclose(log);
     return failures ? 1 : 0;
 }
+#endif
 #endif

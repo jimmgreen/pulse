@@ -4,6 +4,7 @@
 // view, selection, the common file commands, the tray, settings); the rest of
 // the inventory joins in P4. Rows only call what their menu row or key calls.
 #include "action_registry.h"
+#include "../window_arrange_ui.h"
 
 #include "action_args.h"
 #include "action_inventory.h"
@@ -15,6 +16,7 @@
 #include "../drive_verbs.h"
 #include "../git_ui.h"
 #include "../app_messages.h"
+#include "../ai_assistant_chat.h"
 #include "../context_menu.h"
 #include "../favorites_bar.h"
 #include "../keymap.h"
@@ -38,6 +40,7 @@
 #include "../../fs/bitlocker_volume.h"
 #include "../../fs/cloud_state.h"
 #include "../../fs/fs_enum.h"
+#include "../../ui/command_icons.h"
 #include "../../ui/ui_renderer.h"
 
 #include <iterator>
@@ -80,6 +83,31 @@ bool NeedFolder(AppState& s, ActionView& v) {
     return InFolder(s) ? true : Off(v, I::ActWhyNotFolder);
 }
 
+// Task 46: 查找重复文件 names the folder it compares; AI 整理此文件夹… needs a
+// model. Both are grey outside a real folder (此电脑, 回收站, 搜索结果).
+void FillFindDuplicates(AppState& s, ActionView& v) {
+    if (!InFolder(s)) {
+        Off(v, I::ActWhyOpenFolder);
+        return;
+    }
+    std::wstring value = Text(I::ActFindDupValue);
+    const std::wstring folder = TabTitle(ActiveTab(s)->current_path);
+    if (const size_t at = value.find(L"{folder}"); at != std::wstring::npos) value.replace(at, 8, folder);
+    v.value = std::move(value);
+}
+
+void FillOrganizeHere(AppState& s, ActionView& v) {
+    if (!InFolder(s)) {
+        Off(v, I::ActWhyOpenFolder);
+        return;
+    }
+    if (!AiAgentConnected()) {
+        Off(v, I::ActNeedAi);
+        return;
+    }
+    v.value = Text(I::ActOrganizeValue);
+}
+
 bool NeedPanes(AppState& s, ActionView& v) {
     return LiveLayout(s).VisiblePanes().size() > 1 ? true : Off(v, I::ActWhyOnePane);
 }
@@ -93,7 +121,7 @@ std::wstring Current(const std::vector<ui::FluentMenuItem>& rows) {
     return {};
 }
 
-BackgroundViewOptions ViewOptions(AppState& s, const Tab& tab) {
+BackgroundViewOptions ViewOptions(AppState&, const Tab& tab) {
     std::wstring kind;
     ParsePulsePath(tab.current_path, &kind, nullptr);
     const bool search = kind == L"search" || kind == L"saved-search";
@@ -102,8 +130,8 @@ BackgroundViewOptions ViewOptions(AppState& s, const Tab& tab) {
     o.view_mode = tab.view_mode;
     o.sort_column = tab.sort_column;
     o.sort_direction = tab.sort_direction;
-    o.folder_sort = s.appPrefs.folder_sort_mode;
-    o.can_sort = kind != L"starred" && kind != L"recent";
+    o.folder_sort = static_cast<int>(tab.EffectiveFolderSort());
+    o.can_sort = kind != L"recent";
     o.indexed_search = search && !tab.content_results;
     o.show_path = search || kind == L"recycle";
     o.group_virtual = search || IsTagViewKind(kind) || kind == L"recycle";
@@ -603,6 +631,7 @@ constexpr Fill kAlways = nullptr;
 constexpr std::pair<std::string_view, std::string_view> kNoRow[] = {
     {"search.files", "the search_files tool runs it"},
     {"settings.set", "one row per setting, from action_settings (SettingView)"},
+    {"file.organize", "AI apps only: it needs moves[{item, dest}]; the assistant uses organize_files"},
 };
 
 constexpr bool NoRowKnown() {
@@ -651,6 +680,18 @@ constexpr Def kDefs[] = {
      +[](AppState& s) { Post(s, WM_CLOSE); }, kAlways},
     {"window.overview", I::WindowOverviewTitle, I::ActDomWindow, L"\xE7C4", P::None, L"Ctrl+Shift+O", 0,
      +[](AppState& s) { ToggleWindowOverview(s); }, kAlways},
+    {"window.arrange", I::ArrangeSideBySide, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+     +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::SideBySide); }, kAlways},
+    {"window.arrange", I::ArrangeStacked, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+     +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Stacked); }, kAlways},
+    {"window.arrange", I::ArrangeColumns, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+     +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Columns); }, kAlways},
+    {"window.arrange", I::ArrangeTile, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+     +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Tile); }, kAlways},
+    {"window.arrange", I::ArrangeMain, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+     +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Main); }, kAlways},
+    {"window.arrange", I::ArrangeCascade, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+     +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Cascade); }, kAlways},
     {"window.merge", I::ActMergeWindows, I::ActDomWindow, L"\xE8C8", P::None, L"Ctrl+Shift+J", 0,
      +[](AppState& s) { MergeAllWindows(s); }, kAlways},
     {"window.maximize", I::ActMaximize, I::ActDomWindow, L"\xE922", P::None, L"F11", 0,
@@ -711,6 +752,8 @@ constexpr Def kDefs[] = {
      CmdGroupIntoFolder, kNoRun, FillSelection},
     {"file.dissolve", I::ActDissolveFolder, I::ActDomFiles, L"\xF5BB", P::None, L"Ctrl+Shift+G",
      CmdDissolveFolder, kNoRun, FillSelection},
+    {"file.find_duplicates", I::ActFindDuplicates, I::ActDomFiles, L"\xE8C8", P::None, kNoKey, CmdFindDuplicates,
+     kNoRun, FillFindDuplicates},
     {"file.zip", I::TrayMenuZip, I::ActDomFiles, L"\xF012", P::None, kNoKey, CmdCompressZip, kNoRun,
      FillSelection},
     {"file.recycle", I::Delete, I::ActDomFiles, L"\xE74D", P::None, L"Delete", CmdDelete, kNoRun,
@@ -862,6 +905,8 @@ constexpr Def kDefs[] = {
     {"drive.disconnect", I::DisconnectNetworkDrive, I::ActDomFiles, L"\xE8CD", P::None, kNoKey, CmdDisconnectDrive, kNoRun,
      FillDisconnect},
     {"drive.unlock", I::UnlockDrive, I::ActDomFiles, L"\xE785", P::None, kNoKey, CmdUnlockDrive, kNoRun, FillUnlock},
+    {"assistant.organize_here", I::ActOrganizeHere, I::ActDomAssistant, ui::command_icons::kGlyphSparkle, P::None,
+     kNoKey, CmdAiOrganizeHere, kNoRun, FillOrganizeHere},
     {"assistant.prefs", I::ActAssistantPrefs, I::ActDomApp, L"\xE713", P::None, kNoKey, 0,
      +[](AppState& s) { OpenSettingsTab(s, 13); }, kAlways},
     // 应用
@@ -956,6 +1001,14 @@ std::vector<ActionView> ListActions(AppState& s) {
         if (d.glyph) v.glyph = d.glyph;
         v.pictogram = d.pictogram;
         if (d.chord) v.shortcut = ShownShortcut(d.chord);
+        if (d.id == "window.arrange") {
+            constexpr I labels[]={I::ArrangeSideBySide,I::ArrangeStacked,I::ArrangeColumns,I::ArrangeTile,I::ArrangeMain,I::ArrangeCascade};
+            for (int layout=0;layout<6;++layout) if(d.title==labels[layout]) {
+                const auto key=static_cast<KeyAction>(static_cast<int>(KeyAction::ArrangeSideBySide)+layout);
+                const auto& bindings=ActiveKeymap().Bindings(key);
+                if (!bindings.empty()) v.shortcut=ChordDisplay(bindings.front());
+            }
+        }
         v.palette = !d.hidden;
         if (d.fill) d.fill(s, v);
         out.push_back(std::move(v));

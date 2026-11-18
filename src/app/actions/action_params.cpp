@@ -17,6 +17,7 @@ namespace pulse::app::actions {
 namespace {
 
 constexpr std::pair<std::string_view, std::string_view> kSpecs[] = {
+    {"window.arrange", "layout:side_by_side|stacked|columns|tile|main|cascade|main_right|main_top"},
     {"window.layout", "layout:single|side_by_side|stacked|three|four panes:folders"},
     {"nav.go", "path:folder pane:pane"},
     {"window.new", "path:folder"},
@@ -73,6 +74,8 @@ constexpr std::pair<std::string_view, std::string_view> kSpecs[] = {
     {"file.rename", "item:path name:string"},
     {"file.group_into_folder", "items:paths name:string"},
     {"file.dissolve", "items:paths"},
+    {"file.organize", "moves:moves"},
+    {"file.find_duplicates", "folders:folders min_size:bytes show:bool"},
     {"file.recycle", "items:paths"},
     {"file.delete_permanent", "items:paths"},
     // Runners that take no arguments (check_actions.py holds every runner
@@ -143,6 +146,13 @@ json::Value ArgSpecJson(std::string_view spec) {
         std::string type(word.substr(colon + 1));
         // P4: say what a tab may be, so several tabs go in one step.
         if (type == "tab") type = "number (1 = first, as get_state) | title | \"all\" | a list of these - several tabs in ONE step";
+        // Task 46: file.organize / file.find_duplicates.
+        if (type == "moves")
+            type = "[{item, dest}] - item: a path or a name in the open folder; dest: a folder path or a new folder "
+                   "name made in the open folder. All moves go in ONE plan the user confirms once";
+        if (type == "bytes") type = "number - skip files smaller than this (default 1024)";
+        if (word.substr(0, colon) == "folders" && type == "folders")
+            type = "folders - empty = the open folder; known names downloads/pictures/desktop/documents also work";
         out.set(word.substr(0, colon), type);
         at = end + 1;
     }

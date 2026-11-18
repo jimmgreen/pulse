@@ -10,6 +10,7 @@
 #include "app_internal.h"
 #include "app_details_tree.h"
 #include "app_messages.h"
+#include "create_rename_intent.h"
 #include "entry_sort.h"
 #include "../common/localization.h"
 #include "../common/text_format.h"
@@ -530,6 +531,35 @@ void SyncDetailsTrees(AppState& s) {
     });
     if (watches_changed) SyncVisibleWatches(s);
     for (const DetailsTree* t : finished) ReportRecursion(s, *t);
+    // BuildVm owns this rebuild; open the editor later from the message loop
+    // so ShowRenameOverlay cannot reenter an unfinished view build.
+    if (s.hwnd && s.renameIndex < 0) {
+        if (auto* tab = ActiveTab(s); tab && tab->TreeEntries() &&
+            app::PendingCreateRenameIntent(tab->create_rename_intents, tab->current_path, tab->view_generation)) {
+            const bool nested = std::any_of(tab->create_rename_intents.begin(), tab->create_rename_intents.end(),
+                [](const auto& intent) { return intent.ready && !intent.target_parent.empty() && intent.target_parent != intent.parent; });
+            if (nested) PostMessageW(s.hwnd, WM_DETAILS_TREE_RENAME, 0, 0);
+        }
+    }
+}
+
+void TryRenameDetailsTreeCreation(AppState& s) {
+    auto* tab = ActiveTab(s);
+    if (!tab || !tab->TreeEntries() || s.renameIndex >= 0) return;
+    for (size_t i = 0; i < tab->EntryCount(); ++i) {
+        if (IsDetailsTreePlaceholder(*tab, static_cast<int>(i))) continue;
+        const auto entry = tab->EntryAt(i);
+        const app::CreateRenameEntry candidate{entry.name, entry.full_path};
+        const auto selected = app::SelectCreateRenameIntent(tab->create_rename_intents,
+            tab->current_path, tab->view_generation, {&candidate, 1}, true, false);
+        if (!selected) continue;
+        tab->SelectOnly(static_cast<int>(i));
+        EnsureRowVisible(s, *tab, static_cast<int>(i));
+        ShowRenameOverlay(s);
+        if (s.renameIndex == static_cast<int>(i))
+            app::ConsumeCreateRenameIntent(tab->create_rename_intents, selected->task_id);
+        return;
+    }
 }
 
 void AppendDetailsTreeWatchPaths(const app::Tab& tab, std::vector<std::wstring>& paths) {
@@ -601,12 +631,13 @@ void NoteDetailsTreeResult(AppState& s, const app::WorkResult& res, bool again) 
 
 bool HandleDetailsTreeMouseDown(AppState& s, const ui::WindowViewModel& vm,
                                 const ui::HitTestResult& hit, int x, int y, bool alt) {
-    if (hit.region != ui::HitTestResult::Row || hit.index < 0) return false;
+    const bool sticky = hit.region == ui::HitTestResult::TreeSticky;
+    if ((!sticky && hit.region != ui::HitTestResult::Row) || hit.index < 0) return false;
     D2D1_RECT_F rect{};
     const ui::PaneViewModel& pane = HitPane(s, vm, hit, rect);
     app::Tab* tab = ActiveTab(s);
     if (!pane.tree || !tab || !tab->TreeEntries()) return false;
-    const int view = pane.ViewIndex(hit.index);
+    const int view = sticky ? hit.index : pane.ViewIndex(hit.index);
     const ui::DetailsTreeRow* row = pane.tree->At(view);
     if (!row) return false;
     const float fx = static_cast<float>(x);
@@ -619,6 +650,12 @@ bool HandleDetailsTreeMouseDown(AppState& s, const ui::WindowViewModel& vm,
     }
     if (row->kind != ui::TreeRowKind::Entry) return true;  // placeholders do nothing
     if (!row->expandable || s.renderer.TreeChevronAt(pane, rect, fx, fy) != view) return false;
+    if (sticky) {
+        if (s.scrollAnimating) CancelScrollAnimation(s);
+        const float row_top = s.renderer.ItemRectInPane(pane, rect, view).top;
+        const float list_top = s.renderer.PaneListRect(pane, rect).top;
+        tab->scroll_y = (std::max)(0.0f, tab->scroll_y + row_top - list_top);
+    }
     Toggle(s, *tab, pane, view, alt);
     return true;
 }

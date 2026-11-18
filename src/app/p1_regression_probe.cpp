@@ -18,14 +18,14 @@ struct P1MenuTestPeer {
         menu.open_ = true;
         menu.LayoutWindow({100, 100});
         menu.OpenSubmenu(0);
-        return menu.sub_parent_row_ == 0;
+        return menu.first_sub_.parent_row == 0;
     }
-    static int ChildCommand(FluentMenu& menu) { return menu.InvokeAt(menu.sub_model_, 0, 50.0f); }
+    static int ChildCommand(FluentMenu& menu) { return menu.InvokeAt(menu.first_sub_.model, 0, 50.0f); }
     static int RootChildCommand(FluentMenu& menu) { return menu.model_.At(0)->children[0].command; }
     static void Close(FluentMenu& menu) { menu.CloseSubmenu(); }
     static void Reopen(FluentMenu& menu) { menu.OpenSubmenu(0); }
     static int Click(FluentMenu& menu) {
-        const int y = FluentMenu::kShadowMargin + static_cast<int>(menu.sub_model_.RowTopPx(0) + 5);
+        const int y = FluentMenu::kShadowMargin + static_cast<int>(menu.first_sub_.model.RowTopPx(0) + 5);
         menu.OnSubMouse({50, y}, true);
         return menu.result_;
     }

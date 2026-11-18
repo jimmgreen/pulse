@@ -176,11 +176,17 @@ void RunCases(const files::path& root) {
               "M03-003 valid isolated restore moves exact content and retires only its own metadata");
     }
     const auto occupied = MakePair(root, L"occupied", 2, L"occupied.txt");
+    const auto untouched = MakePair(root, L"untouched", 2, L"untouched.txt");
+    const std::string untouched_index = ReadText(untouched.index);
     WriteText(occupied.target, "existing target must survive"); error.clear();
-    Check(!RestoreSelectedRecyclePayload(occupied.content.wstring(), error) && ReadText(occupied.target) == "existing target must survive",
+    const bool collision_restored = RestoreSelectedRecyclePayload(occupied.content.wstring(), error);
+    const auto sibling = occupied.target.parent_path() / L"occupied (2).txt";
+    Check(collision_restored && ReadText(occupied.target) == "existing target must survive",
           "M03-003 target collision never overwrites existing content");
-    Check(files::exists(occupied.index) && ReadText(occupied.content) == kBody,
-          "M03-003 failed collision restore preserves index and payload");
+    Check(ReadText(sibling) == kBody && !files::exists(occupied.index) && !files::exists(occupied.content),
+          "M03-003 collision restores exact payload under next free name and consumes selected metadata");
+    Check(ReadText(untouched.index) == untouched_index && ReadText(untouched.content) == kBody &&
+          !files::exists(untouched.target), "M03-003 collision restore leaves unrelated index and payload untouched");
     RunMalformedMatrix(root);
     const auto orphan = MakePair(root, L"orphan", 2, L"orphan.txt", false);
     item = {}; error.clear();

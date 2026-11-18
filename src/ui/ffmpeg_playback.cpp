@@ -1,7 +1,9 @@
 #include "ffmpeg_playback.h"
+#include "ui_motion.h"
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
+#include <sstream>
 
 #pragma comment(lib, "winmm.lib")
 
@@ -28,6 +30,27 @@ bool ParseFfmpegMediaInfo(std::string_view log, FfmpegMediaInfo& info) {
     info.duration = static_cast<int64_t>(ffmpeg::ParseDurationMs(log)) * 10'000;
     info.video = ffmpeg::HasStream(log, "Video");
     info.audio = ffmpeg::HasStream(log, "Audio");
+    std::istringstream lines{std::string(log)};
+    for (std::string line; std::getline(lines, line);) {
+        const auto first = line.find_first_not_of(" \t");
+        if (first == std::string::npos || line.compare(first, 10, "Stream #0:") != 0) continue;
+        const auto a = line.find("Audio: "), sub = line.find("Subtitle: ");
+        if (a == std::string::npos && sub == std::string::npos) continue;
+        const bool audio = a != std::string::npos;
+        auto& tracks = audio ? info.audio_tracks : info.subtitle_tracks;
+        if (tracks.size() >= 128) continue;
+        const auto begin = audio ? a + 7 : sub + 10;
+        const auto end = line.find_first_of(" ,\r\n", begin);
+        const std::string codec = line.substr(begin, end - begin);
+        const bool supported = audio || codec == "subrip" || codec == "ass" || codec == "ssa" ||
+            codec == "mov_text" || codec == "webvtt" || codec == "text";
+        std::wstring label = std::to_wstring(tracks.size() + 1) + L" · " + std::wstring(codec.begin(), codec.end());
+        const auto lang = line.find('(', line.find("Stream #0:"));
+        const auto close = lang == std::string::npos ? lang : line.find(')', lang);
+        if (close != std::string::npos && close < begin && close - lang < 32)
+            label += L" · " + std::wstring(line.begin() + lang + 1, line.begin() + close);
+        tracks.push_back({static_cast<int>(tracks.size()), std::move(label), codec, supported});
+    }
     if (info.video) {
         UINT w = 0, h = 0, num = 1, den = 1;
         if (!ffmpeg::ParseVideoSize(log, w, h)) {
@@ -41,6 +64,65 @@ bool ParseFfmpegMediaInfo(std::string_view log, FfmpegMediaInfo& info) {
         }
     }
     return info.video || info.audio;
+}
+
+bool ParseFfmpegSubtitleFilters(std::string_view output) {
+    bool subtitles = false, setpts = false;
+    std::istringstream lines{std::string(output)};
+    for (std::string line; std::getline(lines, line);) {
+        std::istringstream fields(line);
+        std::string flags, name, types;
+        if (!(fields >> flags >> name >> types) || (flags.size() != 2 && flags.size() != 3) ||
+            flags.find_first_not_of(".TSC") != std::string::npos || types != "V->V") continue;
+        if (name == "subtitles") subtitles = true;
+        if (name == "setpts") setpts = true;
+    }
+    return subtitles && setpts;
+}
+
+bool FfmpegSubtitleFilters(const std::wstring& executable, const std::atomic<bool>* stop) {
+    auto cancelled = [&] { return stop && stop->load(); };
+    if (cancelled()) return false;
+    WIN32_FILE_ATTRIBUTE_DATA attributes{};
+    if (!GetFileAttributesExW(executable.c_str(), GetFileExInfoStandard, &attributes)) return false;
+    struct Entry { std::wstring executable; FILETIME modified; DWORD size_high, size_low; bool supported; };
+    static std::mutex mutex;
+    static std::vector<Entry> cache;
+    {
+        std::lock_guard lock(mutex);
+        for (const auto& entry : cache)
+            if (entry.executable == executable && CompareFileTime(&entry.modified, &attributes.ftLastWriteTime) == 0 &&
+                entry.size_high == attributes.nFileSizeHigh && entry.size_low == attributes.nFileSizeLow)
+                return entry.supported;
+    }
+    ffmpeg::Process process;
+    ffmpeg::LaunchOptions options;
+    options.discard_stderr = true;
+    options.memory_limit = static_cast<SIZE_T>(256) * 1024 * 1024;
+    if (!process.Start(executable, L"-hide_banner -nostdin -filters", options)) return false;
+    std::string output;
+    std::thread reader([&] {
+        char buffer[4096];
+        for (DWORD got; (got = process.ReadOut(buffer, sizeof(buffer))) > 0;)
+            if (output.size() < 256 * 1024) output.append(buffer, got);
+    });
+    const ULONGLONG deadline = GetTickCount64() + 5000;
+    bool finished = false;
+    while (!cancelled() && GetTickCount64() < deadline)
+        if (process.Wait(25)) { finished = true; break; }
+    if (!finished) {
+        process.Terminate(cancelled() ? ERROR_CANCELLED : ERROR_TIMEOUT);
+        process.Wait(INFINITE);
+    }
+    reader.join();
+    if (!finished || cancelled() || process.ExitCode() != 0) return false;
+    const bool supported = ParseFfmpegSubtitleFilters(output);
+    {
+        std::lock_guard lock(mutex);
+        if (cache.size() >= 8) cache.erase(cache.begin());
+        cache.push_back({executable, attributes.ftLastWriteTime, attributes.nFileSizeHigh, attributes.nFileSizeLow, supported});
+    }
+    return supported;
 }
 
 bool ProbeFfmpegMedia(const std::wstring& ffmpeg_exe, const std::wstring& path, FfmpegMediaInfo& info,
@@ -69,9 +151,17 @@ bool ProbeFfmpegMedia(const std::wstring& ffmpeg_exe, const std::wstring& path, 
     bool finished = false;
     while (!cancelled() && GetTickCount64() < deadline)
         if (process.Wait(25)) { finished = true; break; }
-    if (!finished) process.Terminate(cancelled() ? ERROR_CANCELLED : ERROR_TIMEOUT);
+    if (!finished) {
+        process.Terminate(cancelled() ? ERROR_CANCELLED : ERROR_TIMEOUT);
+        process.Wait(INFINITE); // Backend thread: the volume-release barrier needs real process exit.
+    }
     reader.join();
-    return finished && !cancelled() && ParseFfmpegMediaInfo(log, info);
+    if (!finished || cancelled() || !ParseFfmpegMediaInfo(log, info)) return false;
+    info.subtitle_filters = FfmpegSubtitleFilters(ffmpeg_exe, stop);
+    if (cancelled()) return false;
+    if (!info.subtitle_filters)
+        for (auto& track : info.subtitle_tracks) track.supported = false;
+    return true;
 }
 
 SIZE FfmpegFrameSize(uint32_t width, uint32_t height, SIZE box) {
@@ -143,6 +233,10 @@ void FfmpegPlayback::Stop() {
     // Killing the decoders unblocks the pipe reads of both threads.
     if (video_) video_->Terminate();
     if (audio_) audio_->Terminate();
+    // Stop runs on the preview backend. Do not report release while a decoder
+    // still owns a file; the eject caller has its own bounded wait.
+    if (video_) video_->Wait(INFINITE);
+    if (audio_) audio_->Wait(INFINITE);
     queue_cv_.notify_all();
     if (wave_event_) SetEvent(wave_event_);
     if (video_reader_.joinable()) video_reader_.join();
@@ -167,10 +261,21 @@ void FfmpegPlayback::Stop() {
     stepped_frame_.reset();
 }
 
+bool FfmpegPlayback::SelectTracks(int audio, int subtitle) {
+    if (audio < 0 || (info_.audio && static_cast<size_t>(audio) >= info_.audio_tracks.size())) return false;
+    if (subtitle < -1 || (subtitle >= 0 && (!info_.subtitle_filters || static_cast<size_t>(subtitle) >= info_.subtitle_tracks.size() ||
+        !info_.subtitle_tracks[subtitle].supported))) return false;
+    audio_track_ = audio;
+    subtitle_track_ = subtitle;
+    return true;
+}
+
 bool FfmpegPlayback::Start(int64_t position, float rate, SIZE box, bool playing) {
     Stop();
     stop_.store(false);
     failed_ = false;
+    decoder_exit_ = 0;
+    audio_device_error_ = MMSYSERR_NOERROR;
     { std::lock_guard lock(error_mutex_); diagnostic_.clear(); }
     first_shown_ = false;
     stepped_ = false;
@@ -178,7 +283,7 @@ bool FfmpegPlayback::Start(int64_t position, float rate, SIZE box, bool playing)
     playing_ = playing;
     start_ = std::clamp<int64_t>(position, 0, info_.duration > 0 ? info_.duration : INT64_MAX);
     shown_time_ = paused_at_ = wall_base_ = start_;
-    wall_tick_ = GetTickCount64();
+    wall_tick_ = motion::NowMs();
     const std::wstring input = ffmpeg::QuoteArgument(ffmpeg::InputArgument(path_));
     const std::wstring seek = start_ > 0 ? L" -ss " + Seconds(start_) : std::wstring();
     bool any = false;
@@ -190,8 +295,25 @@ bool FfmpegPlayback::Start(int64_t position, float rate, SIZE box, bool playing)
         wchar_t filter[160];
         swprintf_s(filter, L"fps=%.4f,scale=%ld:%ld:flags=bilinear,format=bgra", out_fps_,
                    frame_size_.cx, frame_size_.cy);
+        std::wstring video_filter = filter;
+        if (subtitle_track_ >= 0) {
+            // Escape the option value and then the containing filter graph.
+            auto escape = [](std::wstring value, const wchar_t* special) {
+                std::wstring result;
+                for (wchar_t c : value) {
+                    if (wcschr(special, c)) result += L'\\';
+                    result += c;
+                }
+                return result;
+            };
+            std::wstring filename = ffmpeg::InputArgument(path_);
+            std::replace(filename.begin(), filename.end(), L'\\', L'/');
+            filename = escape(escape(filename, L"\\':"), L"\\'[],;");
+            video_filter = L"setpts=PTS+" + Seconds(start_) + L"/TB,subtitles=filename=" + filename +
+                L":si=" + std::to_wstring(subtitle_track_) + L",setpts=PTS-STARTPTS," + video_filter;
+        }
         const std::wstring args = L"-hide_banner -nostdin -nostats -loglevel error" + seek + L" -i " + input +
-            L" -map 0:v:0 -an -sn -dn -vf " + ffmpeg::QuoteArgument(filter) + L" -f rawvideo -pix_fmt bgra pipe:1";
+            L" -map 0:v:0 -an -sn -dn -vf " + ffmpeg::QuoteArgument(video_filter) + L" -f rawvideo -pix_fmt bgra pipe:1";
         ffmpeg::LaunchOptions options;
         options.priority = NORMAL_PRIORITY_CLASS;
         options.memory_limit = static_cast<SIZE_T>(2048) * 1024 * 1024;
@@ -222,11 +344,12 @@ bool FfmpegPlayback::Start(int64_t position, float rate, SIZE box, bool playing)
         format.nBlockAlign = 4;
         format.nAvgBytesPerSec = kBytesPerSecond;
         wave_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (wave_event_ && waveOutOpen(&wave_, WAVE_MAPPER, &format, reinterpret_cast<DWORD_PTR>(wave_event_),
-                                       0, CALLBACK_EVENT) == MMSYSERR_NOERROR) {
+        audio_device_error_ = wave_event_ ? waveOutOpen(&wave_, WAVE_MAPPER, &format,
+            reinterpret_cast<DWORD_PTR>(wave_event_), 0, CALLBACK_EVENT) : MMSYSERR_NOMEM;
+        if (audio_device_error_ == MMSYSERR_NOERROR) {
             if (!playing_) waveOutPause(wave_);
             std::wstring args = L"-hide_banner -nostdin -nostats -loglevel error" + seek + L" -i " + input +
-                L" -map 0:a:0 -vn -sn -dn";
+                L" -map 0:a:" + std::to_wstring(audio_track_) + L" -vn -sn -dn";
             const std::wstring tempo = FfmpegTempoFilter(rate_);
             if (!tempo.empty()) args += L" -af " + tempo;
             args += L" -ac 2 -ar 48000 -f s16le pipe:1";
@@ -323,7 +446,10 @@ void FfmpegPlayback::WriteAudio() {
 
 void FfmpegPlayback::CheckDecoderExit(ffmpeg::Process& process) {
     while (!stop_.load() && !process.Wait(25)) {}
-    if (!stop_.load() && process.ExitCode() != 0) failed_ = true;
+    if (!stop_.load() && process.ExitCode() != 0) {
+        decoder_exit_ = process.ExitCode();
+        failed_ = true;
+    }
 }
 
 void FfmpegPlayback::DrainError(ffmpeg::Process& process) {
@@ -358,7 +484,7 @@ int64_t FfmpegPlayback::Clock() {
             MMTIME time{TIME_BYTES};
             waveOutGetPosition(wave_, &time, sizeof(time));
             wall_base_ = start_ + static_cast<int64_t>(static_cast<double>(time.u.cb) * kSecond / kBytesPerSecond * rate_);
-            wall_tick_ = GetTickCount64();
+            wall_tick_ = motion::NowMs();
             wall_clock_ = true;
         } else {
             MMTIME time{TIME_BYTES};
@@ -366,7 +492,7 @@ int64_t FfmpegPlayback::Clock() {
                 return start_ + static_cast<int64_t>(static_cast<double>(time.u.cb) * kSecond / kBytesPerSecond * rate_);
         }
     }
-    return wall_base_ + static_cast<int64_t>((GetTickCount64() - wall_tick_) * 10'000.0 * rate_);
+    return wall_base_ + static_cast<int64_t>((motion::NowMs() - wall_tick_) * 10'000.0 * rate_);
 }
 
 void FfmpegPlayback::SetPlaying(bool playing) {
@@ -384,7 +510,7 @@ void FfmpegPlayback::SetPlaying(bool playing) {
     }
     if (playing) {
         wall_base_ = paused_at_;
-        wall_tick_ = GetTickCount64();
+        wall_tick_ = motion::NowMs();
     }
 }
 

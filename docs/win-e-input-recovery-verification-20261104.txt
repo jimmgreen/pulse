@@ -1,0 +1,43 @@
+Win+E input recovery — final production verification, 2026-11-04
+
+Shipped change:
+- Foreground WinEvent reinstalls the existing WH_KEYBOARD_LL at chain head;
+  250ms timer retries missed foreground notifications. Settings still own enablement.
+- No fullscreen/monitor/application-name bypass. Refresh preserves an accepted
+  E press through repeats/release. Reinstallation failure keeps the existing hook.
+- Callback performs no process/permission queries or logger writes. Bounded SPSC
+  ring feeds a separate context/trace worker, which also observes foreground even
+  when no chord arrived. Program basename/creation/permissions/monitor, E cycles,
+  repeats/releases, hook generations, request UUIDs and drops are persisted.
+- Final eligibility uses the current asynchronous snapshot. Observed modifiers
+  are diagnostic only: a swallowed modifier release must not capture plain E.
+- Pending completion cannot be overwritten by a subsequent rejected press;
+  unprepared rejection does not reuse the preceding request UUID.
+
+Evidence and limits:
+- Actual Windows hook-chain probes reproduced a later hook hiding earlier hooks,
+  and showed reinstalling the observer restores receipt. A separate downstream
+  modifier-consumption probe demonstrated async disagreement; it does not prove
+  this is the user's game, and event-history OR was deliberately NOT shipped.
+- Final directly linked production hook/trace/coordinator native executable:
+  bench_data/win-e-native/production-final-results.txt
+  6 real hook/queue checks + 1 pure stale-state check PASS, no skips. Long press
+  once, new press after release, late blocker suppresses delivery, actual native
+  foreground event restores it, three requests dispatched/no native fallback,
+  Stop prevents subsequent delivery. All test E inputs consumed; Win-up/mask
+  released; no physical interference; prior foreground restored.
+  Runtime: bench_data/win-e-native/production-async-34536/Diagnostics/Runtime/
+  Final source/executable hashes: final-production-evidence-hashes.json beside probe.
+- Final keyboard/queue regression: 136 PASS, win-e-recovery-queue-test.log.
+- Context native logger test: 12 PASS, bench_data/win-e-context-2448-648435640/.
+- Final ring/logging regression: 13 PASS, win-e-recovery-trace-test.log. 256 accepted
+  records drained in order, exactly 17 overflow drops persisted, 12-field contract,
+  key-repeat/up cycles and distinct request IDs, unmatched E counters verified.
+- Final build: bench_data/win-e-recovery-verified-build.log. Only affected targets.
+- Original exploratory foreground acquisition failure is retained in native probe
+  artifacts; it injected nothing and is not counted as passing. Final native run
+  temporarily attached input threads to activate its own window, detached, and
+  verified foreground before injection; it did not modify system settings.
+- No actual Wuthering Waves / anti-cheat session available here. This establishes
+  the tested failure mechanisms and production recovery, not 99% field coverage.
+- No user preferences, registry integration or files were modified for testing.

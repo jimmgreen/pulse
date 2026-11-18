@@ -1,0 +1,11 @@
+get_target_property(native_runtime_sources pulse_extension_runtime_test SOURCES)
+list(FILTER native_runtime_sources EXCLUDE REGEX "extension_runtime_test\\.cpp$")
+add_executable(pulse_native_package_runtime_test EXCLUDE_FROM_ALL
+    src/bench/native_package_runtime_test.cpp ${native_runtime_sources})
+target_compile_features(pulse_native_package_runtime_test PRIVATE cxx_std_20)
+target_compile_definitions(pulse_native_package_runtime_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0603)
+target_compile_options(pulse_native_package_runtime_test PRIVATE /W4 /permissive- /utf-8)
+get_target_property(native_runtime_libraries pulse_extension_runtime_test LINK_LIBRARIES)
+if(native_runtime_libraries)
+    target_link_libraries(pulse_native_package_runtime_test PRIVATE ${native_runtime_libraries})
+endif()

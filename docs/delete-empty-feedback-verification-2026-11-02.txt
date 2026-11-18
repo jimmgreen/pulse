@@ -1,0 +1,30 @@
+回收站清空弹窗与连续删除准备延迟 — 2026-11-02
+
+来源：用户截图显示回收站0项、弹窗失败且仍写准备中；另反馈连续删除反应慢。
+
+确认与修改
+1. EmptyRecycle最终判定沿用native阶段failed_entries；后续补救即使删除成功也误判失败。
+   保留原诊断，只在Shell查询/回退未失败且原回收目录只读核对无$I/$R时解除历史失败。
+   查询未知、无法核对、真实遗留、Shell失败与取消仍失败。不能单凭界面0项宣告成功。
+2. 终态不再因percent=-1或旧enumeration标志显示准备中；失败不显示误导的0剩余，也不显示正在永久删除副标题。
+   成功且无失败项按既有倒计时关闭；真正失败保留窗口。保持悬停/按住按钮暂停关闭行为。
+3. DeletePaths原先在UI线程创建、初始化并显示完整绘图窗口后才启动异步预检查。
+   现先启动预检查；pending超过200ms才创建可取消准备窗口。保留原取消、确认、容量/位置检查和队列语义。
+   慢任务UI仅读取启动前保存的路径/数量，避免与后台改写paths竞争。
+
+实际验证
+- pulse及相关目标Release构建成功，最终增量无新增编译警告。
+- pulse_recycle_empty_completion_test：20项PASS；真实锁定隔离$I/$R产生失败，再移除后证实旧判定失败、新判定通过；验证遗留、查询失败、取消、无证据等边界。未调用真实回收站清空。
+- pulse_delete_preflight_test：4项PASS；延迟展示、取消、替换/销毁/失败不提交。
+- pulse_file_operation_authorization_dialog_test --terminal：12项PASS；真实隔离桌面窗口显示、终态、自动关闭和按住暂停。
+  bench_data/empty-recycle-terminal-final-20261102/empty-failed-light.png、empty-failed-dark.png已目视检查，无准备中或正在删除的终态矛盾。
+- 隔离pulse --test-instance，PULSE_TEST_OPERATION_INTENT_UI=1与PULSE_TEST_DELETE_PREFLIGHT_UI=1：exit0，failures0。
+  bench_data/delete_preflight_ui_test.log：8次旧准备窗同步开销首次450.862ms，其余101.453–115.615ms，总1188.624ms。
+  新DeletePaths启动异步检查返回0.054–0.119ms，总0.634ms。不是完整删除吞吐对比。
+  快任务无窗口、慢任务显示且可取消、全部源文件保持不变通过。
+- pulse_recycle_policy_test --prepare-bench：三轮每轮24独立请求，到RecycleItem之前取消，全部PASS且源保留。
+  第一轮首次35.738ms、后续中位4.492ms；后两轮后续中位4.237/4.999ms。仅后台准备耗时，不是实际回收耗时。
+- 本次修改范围diff --check通过；未运行全量历史套件。
+
+边界：没有用户原始36项/12GB样本，不能证明所有用户清空失败均同因；真正Shell失败仍需保留错误。
+未清空实际回收站、未改变永久删除确认、未以缓存跳过安全检查，未调整连续请求取消/排队语义。

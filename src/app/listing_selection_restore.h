@@ -6,18 +6,39 @@
 #include <utility>
 
 namespace pulse::app {
+inline std::wstring ListingSelectionKey(const fs::DirEntry& entry) {
+    if (!entry.recycle_path.empty()) return L"recycle:" + entry.recycle_path;
+    if (!entry.full_path.empty()) return L"path:" + entry.full_path;
+    return L"name:" + entry.name;
+}
+
 inline void CapturePendingListingSelection(Tab& tab) {
     tab.pending_selection_revision = tab.selection_revision;
+    tab.pending_selection_key_revision = tab.selection_revision;
+    tab.pending_selection_keys.clear();
+    tab.pending_selection_key_names.clear();
+    tab.pending_selection_focus_key.clear();
+    tab.pending_selection_key_focus_name.clear();
     tab.pending_selected_names.clear();
     tab.pending_selected_name.clear();
     tab.pending_ensure_selection_visible = false;
     if (!tab.snapshot || tab.SelectedCount() <= 0) return;
     for (int index : tab.SelectedIndices()) {
-        if (index >= 0 && index < static_cast<int>(tab.EntryCount()))
-            tab.pending_selected_names.push_back(tab.EntryAt(static_cast<size_t>(index)).name);
+        if (index >= 0 && index < static_cast<int>(tab.EntryCount())) {
+            const auto& entry = tab.EntryAt(static_cast<size_t>(index));
+            tab.pending_selected_names.push_back(entry.name);
+            if (fs::IsVirtualPath(tab.current_path))
+                tab.pending_selection_keys.push_back(ListingSelectionKey(entry));
+        }
     }
     if (tab.selected_index >= 0 && tab.selected_index < static_cast<int>(tab.EntryCount()))
         tab.pending_selected_name = tab.EntryAt(static_cast<size_t>(tab.selected_index)).name;
+    if (!tab.pending_selection_keys.empty()) {
+        tab.pending_selection_key_names = tab.pending_selected_names;
+        tab.pending_selection_key_focus_name = tab.pending_selected_name;
+        if (tab.selected_index >= 0 && tab.selected_index < static_cast<int>(tab.EntryCount()))
+            tab.pending_selection_focus_key = ListingSelectionKey(tab.EntryAt(static_cast<size_t>(tab.selected_index)));
+    }
 }
 
 struct ListingSelectionRestore {
@@ -27,14 +48,21 @@ struct ListingSelectionRestore {
     bool user_changed = false;
     fs::SnapshotPtr previous_snapshot;
     int previous_focus = -1;
+    std::vector<std::wstring> keys;
+    std::wstring focus_key;
 };
 
 // Called after request-generation validation and before replacing the old snapshot.
 inline ListingSelectionRestore TakeListingSelection(Tab& tab, const std::wstring& result_path) {
     const bool changed = tab.pending_selection_revision != UINT64_MAX &&
         tab.pending_selection_revision != tab.selection_revision && tab.snapshot &&
-        tab.snapshot_path == result_path && !fs::IsVirtualPath(result_path);
+        tab.snapshot_path == result_path;
     if (changed) CapturePendingListingSelection(tab);
+    const bool captured_identity = tab.pending_selection_revision != UINT64_MAX &&
+        tab.pending_selection_key_revision == tab.pending_selection_revision &&
+        tab.snapshot_path == result_path &&
+        tab.pending_selection_key_names == tab.pending_selected_names &&
+        tab.pending_selection_key_focus_name == tab.pending_selected_name;
     ListingSelectionRestore restore{
         std::exchange(tab.pending_selected_names, {}),
         std::exchange(tab.pending_selected_name, {}),
@@ -46,12 +74,36 @@ inline ListingSelectionRestore TakeListingSelection(Tab& tab, const std::wstring
         restore.previous_snapshot = tab.snapshot;
         restore.previous_focus = tab.selected_index;
     }
+    if (captured_identity) {
+        restore.keys = std::move(tab.pending_selection_keys);
+        restore.focus_key = std::move(tab.pending_selection_focus_key);
+    }
+    tab.pending_selection_keys.clear();
+    tab.pending_selection_key_names.clear();
+    tab.pending_selection_focus_key.clear();
+    tab.pending_selection_key_focus_name.clear();
+    tab.pending_selection_key_revision = UINT64_MAX;
     tab.pending_selection_revision = UINT64_MAX;
     return restore;
 }
 
 inline void RestoreListingSelection(Tab& tab, const ListingSelectionRestore& restore,
                                     const Pane* pane = nullptr, const PlacesCatalog* places = nullptr) {
+    if (!restore.keys.empty()) {
+        const std::unordered_set<std::wstring> wanted(restore.keys.begin(), restore.keys.end());
+        std::vector<int> indices;
+        int focus = -1;
+        for (int i = 0; i < static_cast<int>(tab.EntryCount()); ++i) {
+            if (!tab.EntryVisible(i)) continue;
+            const auto key = ListingSelectionKey(tab.EntryAt(static_cast<size_t>(i)));
+            if (!wanted.contains(key)) continue;
+            indices.push_back(i);
+            if (key == restore.focus_key) focus = i;
+        }
+        tab.SelectIndices(indices);
+        if (focus >= 0) tab.selected_index = tab.selection_anchor = focus;
+        return;
+    }
     const auto& names = restore.names;
     const auto& focus = restore.focus;
     if (restore.user_changed) {

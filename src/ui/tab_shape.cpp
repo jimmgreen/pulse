@@ -18,8 +18,11 @@ void AddQuarterArc(ID2D1GeometrySink* sink, D2D1_POINT_2F end, float radius,
                                   D2D1_ARC_SIZE_SMALL));
 }
 
+// open = the silhouette without its bottom edge (an outline that runs into
+// the sheet), only for connected tabs.
 HRESULT CreateChromeTabGeometry(ID2D1Factory* factory, const D2D1_RECT_F& bounds,
-                                const ChromeTabShape& shape, ID2D1Geometry** out) {
+                                const ChromeTabShape& shape, ID2D1Geometry** out,
+                                bool open = false) {
     if (!factory || !out) return E_POINTER;
     *out = nullptr;
 
@@ -50,7 +53,8 @@ HRESULT CreateChromeTabGeometry(ID2D1Factory* factory, const D2D1_RECT_F& bounds
     const float right = bounds.right;
     const float top = bounds.top;
     const float bottom = bounds.bottom;
-    sink->BeginFigure(D2D1::Point2F(left - bot_r, bottom), D2D1_FIGURE_BEGIN_FILLED);
+    sink->BeginFigure(D2D1::Point2F(left - bot_r, bottom),
+                      open ? D2D1_FIGURE_BEGIN_HOLLOW : D2D1_FIGURE_BEGIN_FILLED);
     AddQuarterArc(sink.get(), D2D1::Point2F(left, bottom - bot_r), bot_r,
                   D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE);
     sink->AddLine(D2D1::Point2F(left, top + top_r));
@@ -62,7 +66,7 @@ HRESULT CreateChromeTabGeometry(ID2D1Factory* factory, const D2D1_RECT_F& bounds
     sink->AddLine(D2D1::Point2F(right, bottom - bot_r));
     AddQuarterArc(sink.get(), D2D1::Point2F(right + bot_r, bottom), bot_r,
                   D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE);
-    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    sink->EndFigure(open ? D2D1_FIGURE_END_OPEN : D2D1_FIGURE_END_CLOSED);
     hr = sink->Close();
     if (FAILED(hr)) return hr;
 
@@ -86,6 +90,28 @@ void FillChromeTab(ID2D1DeviceContext* dc, ID2D1Brush* brush,
         return;
     }
     dc->FillGeometry(geometry.get(), brush);
+}
+
+void StrokeChromeTabEdge(ID2D1DeviceContext* dc, ID2D1Brush* brush,
+                         const D2D1_RECT_F& bounds, const ChromeTabShape& shape, float width) {
+    if (!dc || !brush || width <= 0.0f) return;
+    ComPtr<ID2D1Factory> factory;
+    dc->GetFactory(&factory);
+    if (!factory.get()) return;
+    // Centred half a line inside the silhouette, so the edge stays on the
+    // tab and the shoulders still meet the sheet's top at the baseline.
+    const float inset = width * 0.5f;
+    const D2D1_RECT_F inner = D2D1::RectF(bounds.left + inset, bounds.top + inset,
+                                          bounds.right - inset, bounds.bottom);
+    ChromeTabShape edge = shape;
+    edge.top_radius = (std::max)(0.0f, shape.top_radius - inset);
+    edge.bottom_radius = shape.bottom_radius + inset;
+    ComPtr<ID2D1Geometry> geometry;
+    if (FAILED(CreateChromeTabGeometry(factory.get(), shape.connect_bottom ? inner : bounds,
+                                       shape.connect_bottom ? edge : shape, &geometry,
+                                       shape.connect_bottom)) || !geometry.get())
+        return;
+    dc->DrawGeometry(geometry.get(), brush, width);
 }
 
 void FillChromeTabAccent(ID2D1DeviceContext* dc, ID2D1Brush* brush,

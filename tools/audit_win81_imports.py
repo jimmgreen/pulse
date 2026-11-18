@@ -76,6 +76,7 @@ def main():
                            delay_imports=delayed, errors=errors))
         print(name+': '+('FAIL '+str(errors) if errors else 'PASS startup import guard'))
     dest = Path('bench_data/win81_imports.json')
+    dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(result, indent=2), encoding='utf-8')
     return int(failed)
 

@@ -63,10 +63,30 @@ inline bool IsUncShareRoot(std::wstring_view path) {
         path.find_first_of(L"\\/", slash + 1) == std::wstring_view::npos;
 }
 
+enum class RecycleSelection { None, All, Mixed };
+
+inline RecycleSelection RecycleSelectionOf(const Tab& tab) {
+    bool recycle = false;
+    bool ordinary = false;
+    for (int index : tab.SelectedIndices()) {
+        if (index < 0 || static_cast<size_t>(index) >= tab.EntryCount()) continue;
+        if (tab.EntryAt(static_cast<size_t>(index)).recycle_path.empty()) ordinary = true;
+        else recycle = true;
+    }
+    return recycle ? (ordinary ? RecycleSelection::Mixed : RecycleSelection::All)
+                   : RecycleSelection::None;
+}
+
 inline SelectionCaps ComputeSelectionCaps(const Tab& tab, const PlacesCatalog* places) {
     SelectionCaps caps;
     const int count = tab.SelectedCount();
     if (count <= 0) return caps;
+    const auto recycle = RecycleSelectionOf(tab);
+    if (recycle != RecycleSelection::None) {
+        caps.kind = SelectionKind::Recycle;
+        caps.del = recycle == RecycleSelection::All;
+        return caps;
+    }
     std::wstring kind;
     std::wstring rest;
     if (ParsePulsePath(tab.current_path, &kind, &rest) && kind == L"device") {

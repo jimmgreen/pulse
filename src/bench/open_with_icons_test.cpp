@@ -3,6 +3,12 @@
 
 namespace pulse::ui {
 struct OpenWithIconCacheTest {
+    static void Publish(OpenWithIconCache& cache, unsigned index, size_t bytes) {
+        OpenWithIconCache::Pixels pixels; pixels.data.resize(bytes);
+        cache.PublishReadyLocked(L".test" + std::to_wstring(index), std::move(pixels));
+    }
+    static size_t ReadyCount(OpenWithIconCache& cache) { return cache.ready_.size(); }
+    static size_t ReadyBytes(OpenWithIconCache& cache) { return cache.ready_bytes_; }
     static void HoldWorker(OpenWithIconCache& cache) { cache.running_ = true; }
     static size_t Queued(OpenWithIconCache& cache) { return cache.queue_.size(); }
     static void Complete(OpenWithIconCache& cache, const wchar_t* extension, bool found) {
@@ -12,7 +18,7 @@ struct OpenWithIconCacheTest {
             pixels.width = pixels.height = 1;
             pixels.data = {0, 0, 255, 255};
         }
-        cache.ready_[key] = std::move(pixels);
+        cache.PublishReadyLocked(key, std::move(pixels));
         cache.pending_.erase(key);
     }
 };
@@ -36,11 +42,22 @@ int main() {
     if (SUCCEEDED(hr)) hr = device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc);
     check(SUCCEEDED(hr), "create real software D2D device");
     if (FAILED(hr)) return 1;
+    {
+        OpenWithIconCache bounded;
+        for (unsigned i = 0; i < 2000; ++i) OpenWithIconCacheTest::Publish(bounded, i, 96 * 96 * 4);
+        check(OpenWithIconCacheTest::ReadyCount(bounded) <= 256 && OpenWithIconCacheTest::ReadyBytes(bounded) <= 4 * 1024 * 1024,
+            "abandoned ready results stay within count and byte budgets");
+        for (unsigned i = 0; i < 2000; ++i) OpenWithIconCacheTest::Publish(bounded, i, 0);
+        check(OpenWithIconCacheTest::ReadyCount(bounded) <= 256, "missing-icon results also have a count bound");
+        bounded.InvalidateAssociations();
+        check(OpenWithIconCacheTest::ReadyCount(bounded) == 0 && OpenWithIconCacheTest::ReadyBytes(bounded) == 0,
+            "association invalidation resets pending result accounting");
+    }
     OpenWithIconCache cache;
     cache.SetDeviceContext(dc.get());
     OpenWithIconCacheTest::HoldWorker(cache);
     for (const auto* name : {L"photo.JPG", L"photo.png", L"photo.HEIC", L"image.svg",
-            L"image.GIF", L"image.psd", L"photo.CR3", L"image.apng"})
+            L"image.GIF", L"photo.CR3", L"image.apng"})
         check(!cache.BadgeFor(name, 24).bitmap && OpenWithIconCacheTest::Queued(cache) == 0,
               "image does not display or request an application badge");
     check(!cache.BadgeFor(L"document.pdf", 24).bitmap && OpenWithIconCacheTest::Queued(cache) == 1,
@@ -71,5 +88,39 @@ int main() {
     cache.BadgeFor(L"movie.mp4", 24);
     OpenWithIconCacheTest::Complete(cache, L".mp4", true);
     check(cache.BadgeFor(L"movie.mp4", 24).bitmap != nullptr, "video retains application badge");
+    const auto before_family = OpenWithIconCacheTest::Queued(cache);
+    cache.BadgeFor(L"document.psd", 24);
+    cache.BadgeFor(L"document.psb", 24);
+    check(OpenWithIconCacheTest::Queued(cache) == before_family + 1,
+          "PSD/PSB share one pending Photoshop lookup");
+    OpenWithIconCacheTest::Complete(cache, L".psd", true);
+    const auto shared = cache.BadgeFor(L"document.psd", 24);
+    check(shared.bitmap && cache.BadgeFor(L"document.psb", 24).bitmap == shared.bitmap,
+          "PSD/PSB share the identical editor bitmap");
+    for (const auto* extension : {L".psd", L".psb"}) {
+        const std::wstring name = std::wstring(L"document") + extension;
+        cache.InvalidateAssociations();
+        const auto queued_pending = OpenWithIconCacheTest::Queued(cache);
+        const auto pending = cache.BadgeFor(name, 24);
+        check(pending.bitmap && !pending.format_label && OpenWithIconCacheTest::Queued(cache) == queued_pending + 1,
+              "PSD/PSB refreshes the shared editor without premature fallback");
+        OpenWithIconCacheTest::Complete(cache, L".psd", true);
+        const auto found = cache.BadgeFor(name, 24);
+        check(found.bitmap && !found.format_label, "PSD/PSB displays resolved Photoshop icon");
+        cache.InvalidateAssociations();
+        check(cache.BadgeFor(name, 24).bitmap == found.bitmap, "PSD/PSB retains icon during refresh");
+        OpenWithIconCacheTest::Complete(cache, L".psd", false);
+        const auto missing = cache.BadgeFor(name, 24);
+        check(!missing.bitmap && missing.format_label &&
+              _wcsicmp(missing.format_label, extension + 1) == 0, "PSD/PSB missing app uses correct format label");
+        const auto queued_before = OpenWithIconCacheTest::Queued(cache);
+        check(cache.BadgeFor(name, 24).format_label && OpenWithIconCacheTest::Queued(cache) == queued_before,
+              "PSD/PSB missing result is cached");
+        cache.InvalidateAssociations();
+        cache.BadgeFor(name, 24);
+        OpenWithIconCacheTest::Complete(cache, L".psd", true);
+        const auto restored = cache.BadgeFor(name, 24);
+        check(restored.bitmap && !restored.format_label, "PSD/PSB new association replaces fallback");
+    }
     return failed ? 1 : 0;
 }

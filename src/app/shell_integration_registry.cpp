@@ -1,4 +1,5 @@
 #include "shell_integration_registry.h"
+#include "../common/shell_open_entry.h"
 
 #include <shlwapi.h>
 #include <algorithm>
@@ -171,25 +172,27 @@ bool Decode(const Value& encoded, size_t count, Snapshot& snapshot) {
     return offset == encoded.bytes.size();
 }
 
-std::vector<Binding> Bindings(const std::wstring& group, const std::wstring& exe) {
+std::vector<Binding> Bindings(const std::wstring& group, const std::wstring& exe, bool legacy_command = false) {
     std::wstring shell, verb, line;
+    const std::wstring prefix = L"\"" + exe + L"\" " +
+        (legacy_command ? std::wstring() : std::wstring(shell_open_entry::kArgument) + L" ");
     if (group == L"WinE") {
         shell = L"Software\\Classes\\CLSID\\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\\shell";
         verb = shell + L"\\opennewwindow";
-        line = L"\"" + exe + L"\"";
+        line = prefix + (legacy_command ? L"--win-e" : L"pulse:win-e");
     } else if (group == L"ThisPc") {
         shell = L"Software\\Classes\\CLSID\\{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\shell";
         verb = shell + L"\\open";
-        line = L"\"" + exe + L"\" \"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\"";
+        line = prefix + L"\"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\"";
     } else if (group == L"RecycleBin") {
         // Same shape as This PC: the desktop icon runs CLSID\...\shell's default verb.
         shell = L"Software\\Classes\\CLSID\\{645FF040-5081-101B-9F08-00AA002F954E}\\shell";
         verb = shell + L"\\open";
-        line = L"\"" + exe + L"\" \"::{645FF040-5081-101B-9F08-00AA002F954E}\"";
+        line = prefix + L"\"::{645FF040-5081-101B-9F08-00AA002F954E}\"";
     } else {
         shell = L"Software\\Classes\\" + group + L"\\shell";
         verb = shell + L"\\open";
-        line = L"\"" + exe + L"\" \"%1\"";
+        line = prefix + L"\"%1\"";
     }
     std::vector<Binding> result{{verb + L"\\command", L"", String(line)},
                                 {verb + L"\\command", L"DelegateExecute", String(L"")}};
@@ -647,12 +650,25 @@ const wchar_t* ShellIntegrationFailureName(ShellIntegrationFailureKind kind) noe
     return L"unknown";
 }
 
+bool MigrateLegacyWinECommand(const std::wstring& exe) {
+    if (exe.empty()) return false;
+    const auto bindings = Bindings(L"WinE", exe);
+    Value command;
+    if (!Read(bindings.front().key, bindings.front().name, command)) return false;
+    if (Text(command) != L"\"" + exe + L"\"") return true;
+    return ApplyShellIntegration(ShellIntegrationKind::WinE, exe, true);
+}
+
 bool ReadShellIntegration(ShellIntegrationKind kind, const std::wstring& exe) {
     if (exe.empty()) return false;
     for (const auto& group : Groups(kind)) {
-        for (const auto& binding : Bindings(group, exe)) {
+        const auto bindings = Bindings(group, exe);
+        for (size_t i = 0; i < bindings.size(); ++i) {
+            const auto& binding = bindings[i];
             Value actual;
-            if (!Read(binding.key, binding.name, actual) || !SameValue(actual, binding.desired)) return false;
+            if (!Read(binding.key, binding.name, actual)) return false;
+            if (!SameValue(actual, binding.desired) &&
+                (i != 0 || !SameValue(actual, Bindings(group, exe, true).front().desired))) return false;
         }
         if (DefaultOpenVerbHidden(group)) return false;
     }

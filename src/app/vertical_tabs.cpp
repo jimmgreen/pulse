@@ -36,6 +36,8 @@ void ApplyVerticalTabs(AppState& s, ui::WindowViewModel& vm) {
     const bool vertical = s.appPrefs.vertical_tabs && !in_settings;
     s.renderer.SetVerticalTabs(vertical);
     s.renderer.SetSidebarCollapsed(s.appPrefs.sidebar_collapsed);
+    if (s.renderer.SidebarPeek() && !s.renderer.SidebarRailVisible(static_cast<float>(s.compositor.Width())))
+        CloseSidebarPeek(s);
     if (!vertical || vm.tabs.empty()) return;
 
     ui::SidebarGroup group;
@@ -92,13 +94,22 @@ void ApplyVerticalTabs(AppState& s, ui::WindowViewModel& vm) {
 }
 
 void ToggleSidebarCollapsed(AppState& s) {
+    const float width = static_cast<float>(s.compositor.Width());
+    if (s.renderer.SidebarAutoCollapsed(width)) {
+        const bool open = !s.renderer.SidebarPeekVisible(width);
+        s.sidebarPeekArmAt = 0;
+        if (open) s.renderer.SetSidebarPeek(true, true);
+        else CloseSidebarPeek(s);
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        return;
+    }
     // Pinning a peek keeps the overlay's width, so it expands in place.
     const bool from_peek = s.renderer.SidebarPeekVisible(static_cast<float>(s.compositor.Width()));
     s.sidebarPeekArmAt = 0;
     s.renderer.SetSidebarPeek(false);
     s.appPrefs.sidebar_collapsed = !s.appPrefs.sidebar_collapsed;
     s.renderer.SetSidebarCollapsed(s.appPrefs.sidebar_collapsed, !from_peek);
-    s.appPrefs.Save();
+    if (!s.isolatedTest) s.appPrefs.Save();
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
@@ -106,8 +117,9 @@ namespace {
 constexpr ULONGLONG kPeekDwellMs = 450;
 
 bool PeekEligible(AppState& s) {
-    if (!s.appPrefs.sidebar_collapsed || s.renderer.SidebarAnimating()) return false;
-    if (static_cast<float>(s.compositor.Width()) / s.scale < ui::kSidebarRailWindowDip) return false;
+    const float width = static_cast<float>(s.compositor.Width());
+    if (!s.appPrefs.sidebar_collapsed && !s.renderer.SidebarAutoCollapsed(width)) return false;
+    if (!s.renderer.SidebarAutoCollapsed(width) && s.renderer.SidebarAnimating()) return false;
     if ((GetKeyState(VK_LBUTTON) & 0x8000) != 0) return false;  // drags keep the rail
     if (const app::Tab* tab = ActiveTab(s); tab && tab->current_path.starts_with(L"pulse:settings"))
         return false;
@@ -125,12 +137,13 @@ void CloseSidebarPeek(AppState& s) {
 }
 
 void UpdateSidebarPeek(AppState& s, int x, int y) {
-    if (!s.appPrefs.sidebar_collapsed) {
+    const float w = static_cast<float>(s.compositor.Width());
+    if (!s.appPrefs.sidebar_collapsed && !s.renderer.SidebarAutoCollapsed(w)) {
         if (s.sidebarPeekArmAt || s.renderer.SidebarPeek()) CloseSidebarPeek(s);
         return;
     }
-    const float w = static_cast<float>(s.compositor.Width());
     if (s.renderer.SidebarPeek()) {
+        if (s.renderer.SidebarPeekPinned()) return;
         // Close once the pointer clears the overlay (the title-bar pin stays
         // reachable because it sits inside the overlay's width).
         if (static_cast<float>(x) > s.renderer.SidebarFullWidth(w) + 12.0f * s.scale)
@@ -144,6 +157,16 @@ void UpdateSidebarPeek(AppState& s, int x, int y) {
         return;
     }
     if (!s.sidebarPeekArmAt) s.sidebarPeekArmAt = GetTickCount64();
+}
+
+void DismissSidebarPeekOutside(AppState& s, int x, int y) {
+    const float w = static_cast<float>(s.compositor.Width());
+    if (!s.renderer.SidebarPeekVisible(w)) return;
+    const auto toggle = s.renderer.SidebarToggleRect(w);
+    if (x >= toggle.left && x < toggle.right && y >= toggle.top && y < toggle.bottom) return;
+    const auto sidebar = s.renderer.SidebarRect(w, static_cast<float>(s.compositor.Height()));
+    if (x < sidebar.left || x >= sidebar.right || y < sidebar.top || y >= sidebar.bottom)
+        CloseSidebarPeek(s);
 }
 
 bool TickSidebarPeek(AppState& s, ULONGLONG now) {

@@ -5,6 +5,13 @@
 
 namespace pulse {
 
+inline constexpr UINT_PTR kStatusFeedbackTimer = 0x53544154;
+inline void ShowStatusFeedback(AppState& s, std::wstring text) {
+    s.status_feedback = std::move(text);
+    SetTimer(s.hwnd, kStatusFeedbackTimer, 3500, nullptr);
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
 // The updater must keep the window open if session/preferences cannot be saved.
 bool PrepareSessionForUpdate(AppState& s);
 
@@ -72,11 +79,11 @@ void HandleTeachButton(AppState& s, int button);
 std::vector<std::wstring> VisibleFolderPaths(const AppState& s);
 void SyncVisibleWatches(AppState& s);
 void BindCurrentLayout(AppState& s);
-std::wstring ResolveOpenFolderPath(std::wstring path);
+std::wstring ResolveOpenFolderPath(std::wstring path, bool reveal = false);
 // When `raw` (a launch or forwarded path) names an existing file, selects it
 // in the active tab, which ResolveOpenFolderPath opened on its folder.
-void SelectLaunchedFile(AppState& s, const std::wstring& raw);
-void OpenFolderInNewTab(AppState& s, const std::wstring& raw);
+void SelectLaunchedFile(AppState& s, const std::wstring& raw, bool reveal = false);
+void OpenFolderInNewTab(AppState& s, const std::wstring& raw, bool reveal = false);
 void PostWorkerResult(AppState& s, app::WorkResult res);
 D2D1_RECT_F FocusedPaneRect(const AppState& s);
 app::Pane* PaneAtSlot(AppState& s, int index);
@@ -112,7 +119,9 @@ bool IsRecycleTab(const app::Tab* tab);
 std::wstring RecycleOccupancyText(const fs::RecycleBinInfo& info);
 void ApplyRecycleOccupancy(AppState& s);
 void RequestRecycleOccupancy(AppState& s);
-bool ApplyQueriedRecycleInfo(AppState& s, const fs::RecycleBinInfo& info);
+bool ApplyQueriedRecycleInfo(AppState& s, const fs::RecycleBinInfo& info, uint64_t request = 0);
+void OnRecycleShellChanged(AppState& s, WPARAM wparam, LPARAM lparam);
+void ReleaseRecycleShellWatch(AppState& s, HWND hwnd);
 void RefreshRecycleViews(AppState& s, bool query_occupancy = true);
 void ScheduleRecycleRefresh(AppState& s);
 bool PumpRecycleRefresh(AppState& s, ULONGLONG now);
@@ -168,3 +177,11 @@ void ApplyTagAdsDiscoveries(AppState& s, const std::vector<TagAdsDiscovery>& dis
 std::wstring SelectedFullPath(AppState& s);
 void SyncSavedSearchSidebar(AppState& s);
 } // namespace pulse
+
+namespace pulse {
+void StartSettingsSearch(AppState&);
+void LayoutSettingsSearch(AppState&);
+void SyncSettingsSearch(AppState&);
+void FillSettingsSearchVm(AppState&, ui::WindowViewModel&);
+void OpenSettingsSearchResult(AppState&, int);
+}

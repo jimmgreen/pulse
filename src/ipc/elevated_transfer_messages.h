@@ -12,6 +12,7 @@ inline void WriteStatus(Writer& writer, const ops::OpStatus& status) {
     writer.Number(status.eta_seconds);
     writer.Number<uint32_t>(status.can_pause ? 1 : 0);
     writer.Text(status.current_item); writer.Text(status.summary); writer.Text(status.last_error);
+    writer.Number<uint32_t>(status.enumeration_complete ? 1 : 0);
 }
 inline ops::OpStatus ReadStatus(Reader& reader) {
     ops::OpStatus status;
@@ -25,6 +26,9 @@ inline ops::OpStatus ReadStatus(Reader& reader) {
     status.eta_seconds = reader.Number<uint64_t>();
     status.can_pause = reader.Number<uint32_t>() != 0;
     status.current_item = reader.Text(); status.summary = reader.Text(); status.last_error = reader.Text();
+    const auto enumeration_complete = reader.Number<uint32_t>();
+    if (enumeration_complete > 1) reader.good = false;
+    status.enumeration_complete = enumeration_complete == 1;
     return status;
 }
 inline void WriteConflict(Writer& writer, const ops::ConflictItemInfo& item) {

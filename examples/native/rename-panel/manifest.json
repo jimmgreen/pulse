@@ -1,0 +1,11 @@
+{
+  "apiVersion": 1,
+  "id": "sample.native-rename",
+  "name": "Native developer rename panel",
+  "resources": [
+    "context.read",
+    "files.readCurrentDirectory",
+    "files.renameCurrentDirectory",
+    "operations.own"
+  ]
+}

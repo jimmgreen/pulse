@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <string_view>
 
 using namespace pulse::ui;
 
@@ -77,8 +78,8 @@ void CheckLayout(fluent::Painter& painter, float scale, PickerMode mode) {
               "buttons keep the 120 DIP minimum", scale, m);
         Check(l.summary.right <= l.cancel.left, "the summary never runs under the buttons", scale, m);
         if (mode == PickerMode::Folder) {
-            Check(l.filename.right <= l.filename.left && l.filter.right <= l.filter.left,
-                  "folders have no name or type field", scale, m);
+            Check(Inside(l.filename, l.footer) && l.filename.right > l.filename.left && l.filter.right <= l.filter.left && !Overlaps(l.filename, l.primary),
+                  "folder name field fits footer without type field or button overlap", scale, m);
         } else {
             Check(Inside(l.filename, l.footer) && Inside(l.filter, l.footer),
                   "name and type fields stay inside the footer", scale, m);
@@ -106,6 +107,16 @@ void CheckLayout(fluent::Painter& painter, float scale, PickerMode mode) {
         Check(HitTestPickerChrome(l, chrome, 60.0f * scale, CenterY(l.title)) == kPickNone,
               "the title text is a drag area", scale, m);
         FolderPickerChrome disabled = chrome;
+        auto split = chrome;
+        split.primary_drop_down = true;
+        const auto split_layout = LayoutPickerChrome(w,h,split,painter,scale);
+        Check(HitTestPickerChrome(split_layout,split,split_layout.primary.right-5*scale,CenterY(split_layout.primary))==kPickPrimaryDropDown,
+              "Open split arrow has independent hit target",scale,m);
+        Check(HitTestPickerChrome(split_layout,split,split_layout.primary.left+5*scale,CenterY(split_layout.primary))==kPickPrimary,
+              "Open split main segment retains acceptance",scale,m);
+        split.primary_enabled=false;
+        Check(HitTestPickerChrome(split_layout,split,split_layout.primary.right-5*scale,CenterY(split_layout.primary))==kPickNone,
+              "disabled Open split arrow ignores clicks",scale,m);
         disabled.primary_enabled = false;
         Check(HitTestPickerChrome(l, disabled, CenterX(l.primary), CenterY(l.primary)) == kPickNone,
               "a disabled primary ignores clicks", scale, m);
@@ -149,7 +160,8 @@ int wmain(int argc, wchar_t** argv) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     pulse::compat::EnableDpiAwareness();
     pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
-    const std::wstring output = argc > 1 ? argv[1] : L"build\\file-picker-visual";
+    const bool labels_only=argc>1 && std::wstring_view(argv[1])==L"--labels";
+    const std::wstring output = labels_only ? (argc>2 ? argv[2] : L"bench_data\\picker-label-layout") : argc > 1 ? argv[1] : L"build\\file-picker-visual";
     CreateDirectoryW(output.c_str(), nullptr);
     WNDCLASSW wc{};
     wc.hInstance = GetModuleHandleW(nullptr);
@@ -162,6 +174,44 @@ int wmain(int argc, wchar_t** argv) {
     {
         Compositor compositor;
         if (!compositor.Init(hwnd)) return 2;
+        if(labels_only) {
+            for(float scale:{1.0f,1.5f,2.0f}) {
+                compositor.RecreateTextFormats(scale);fluent::Painter painter(&compositor);painter.SetScale(scale);
+                for(float width:{640.0f,1000.0f}) {
+                    auto chrome=MakeChrome(PickerMode::File);chrome.primary_text=std::wstring(1024,L'W');chrome.filename_label=std::wstring(1024,L'F');
+                    const auto layout=LayoutPickerChrome(width*scale,640*scale,chrome,painter,scale);
+                    Check(Inside(layout.primary,layout.footer) && Inside(layout.cancel,layout.footer) && !Overlaps(layout.primary,layout.cancel),"long caller button label stays in bounded button without overlap",scale,2);
+                    Check(layout.filename.right>layout.filename.left && Inside(layout.filename,layout.footer) && !Overlaps(layout.filename_label,layout.filename) && !Overlaps(layout.filename,layout.filter),"long caller filename label preserves input and filter widths",scale,2);
+                    auto overwrite = chrome;
+                    overwrite.overwrite_pending = true;
+                    overwrite.overwrite_back_text = L"Back to editing";
+                    overwrite.rename_text = L"Save with another name";
+                    const auto confirm = LayoutPickerChrome(width * scale, 640 * scale, overwrite, painter, scale);
+                    Check(std::abs(confirm.footer.bottom - confirm.footer.top - 140.0f * scale) < 0.5f,
+                        "inline overwrite footer reserves 140 DIP", scale, 2);
+                    const D2D1_RECT_F buttons[] = {confirm.overwrite_back, confirm.rename, confirm.cancel, confirm.primary};
+                    for (int i = 0; i < 4; ++i) {
+                        Check(Inside(buttons[i], confirm.footer) && buttons[i].right > buttons[i].left &&
+                            !Overlaps(buttons[i], confirm.summary) && !Overlaps(buttons[i], confirm.filename),
+                            "overwrite actions stay inside footer clear of fields and hint", scale, 2);
+                        for (int j = i + 1; j < 4; ++j)
+                            Check(!Overlaps(buttons[i], buttons[j]), "overwrite actions do not overlap", scale, 2);
+                    }
+                    Check(HitTestPickerChrome(confirm, overwrite, (confirm.rename.left + confirm.rename.right) / 2,
+                        (confirm.rename.top + confirm.rename.bottom) / 2) == kPickRename,
+                        "rename action has its own hit target", scale, 2);
+                    for(bool dark:{false,true}) {
+                        compositor.Resize(static_cast<int>(width*scale),static_cast<int>(640*scale));
+                        auto* dc=compositor.Dc();const auto theme=MakeTheme(dark,HexColor(0x0078D4));dc->BeginDraw();dc->Clear(theme.bg);painter.BeginFrame(theme,false);
+                        DrawPickerChrome(compositor,painter,theme,chrome,layout,false);
+                        Check(dc->EndDraw()==S_OK,"long labels render with end ellipsis",scale,2);
+                        const auto name=output+L"\\labels-"+std::to_wstring(static_cast<int>(width))+L"-"+std::to_wstring(static_cast<int>(scale*100))+(dark ? L"-dark.png" : L"-light.png");
+                        Check(compositor.SaveSnapshot(name.c_str()),"label layout screenshot saved for visual review",scale,2);
+                    }
+                }
+            }
+            compositor.Shutdown();DestroyWindow(hwnd);CoUninitialize();return g_failures ? 1 : 0;
+        }
         const wchar_t* theme_names[] = {L"light", L"dark", L"hc"};
         const wchar_t* mode_names[] = {L"folder", L"image", L"file"};
         for (const float scale : {1.0f, 1.5f, 2.0f}) {

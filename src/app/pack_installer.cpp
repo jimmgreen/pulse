@@ -120,7 +120,8 @@ DWORD Fail(DWORD error) { return error ? error : ERROR_INSTALL_FAILURE; }
 // Downloads, verifies and decompresses one file into `directory`.
 DWORD InstallFile(const PackRelease& release, const PackFile& file, const std::wstring& directory,
                   Lzms& lzms, PackInstallProgress& progress, uint64_t done_before,
-                  const UpdateResponseReader& read) {
+                  const UpdateResponseReader& read, PackFailure& failure) {
+    failure = PackFailure::Disk;
     const std::wstring packed_path = directory + L"\\" + file.name + L".lzms";
     const std::wstring final_path = directory + L"\\" + file.name;
     {
@@ -146,24 +147,34 @@ DWORD InstallFile(const PackRelease& release, const PackFile& file, const std::w
         const std::wstring url = std::wstring(release.base_url) + download_name;
         UpdateError category = UpdateError::None;
         DWORD error = ERROR_SUCCESS;
-        if (!ReadUpdateWithFallback(url, file.packed_size, progress.cancelled, reset, consume, category, error, read))
-            return progress.cancelled.load() ? ERROR_CANCELLED : Fail(error);
-        if (received != file.packed_size || !VerifyUpdateInstaller(packed.value, file.packed_sha256))
-            return ERROR_INVALID_DATA;
+        // A source whose file has the wrong size or hash is a source to skip
+        // (a mirror with another build), not a reason to give up.
+        auto verify = [&] {
+            return received == file.packed_size && VerifyUpdateInstaller(packed.value, file.packed_sha256);
+        };
+        if (!ReadUpdateWithFallback(url, file.packed_size, progress.cancelled, reset, consume, category, error, read,
+                                    verify)) {
+            if (progress.cancelled.load()) return ERROR_CANCELLED;
+            failure = category == UpdateError::LocalIo ? PackFailure::Disk
+                    : category == UpdateError::ResponseTooLarge || category == UpdateError::Mismatch ? PackFailure::Mismatch
+                    : category == UpdateError::Network || category == UpdateError::HttpStatus ? PackFailure::Network
+                    : PackFailure::Other;
+            return Fail(error);
+        }
         std::vector<uint8_t> in, out;
         if (!ReadWhole(packed.value, in)) return Fail(GetLastError());
         packed.Close();
         DeleteFileW(packed_path.c_str());
         if (progress.cancelled.load()) return ERROR_CANCELLED;
         out.resize(static_cast<size_t>(file.size));
-        if (!lzms.Decompress(in, out)) return ERROR_INVALID_DATA;
+        if (!lzms.Decompress(in, out)) { failure = PackFailure::Mismatch; return ERROR_INVALID_DATA; }
         in.clear();
         in.shrink_to_fit();
         FileHandle plain(CreateFileW(final_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
         if (!plain.ok() || !WriteWhole(plain.value, out)) return Fail(GetLastError());
         // Hash what is on disk, not what was in memory.
-        if (!VerifyUpdateInstaller(plain.value, file.sha256)) return ERROR_INVALID_DATA;
+        if (!VerifyUpdateInstaller(plain.value, file.sha256)) { failure = PackFailure::Mismatch; return ERROR_INVALID_DATA; }
     }
     return ERROR_SUCCESS;
 }
@@ -236,18 +247,21 @@ PackInstallOutcome InstallPack(const PackRelease& release, const std::wstring& r
                                PackInstallProgress& progress, DWORD& error,
                                const UpdateResponseReader& read, bool reuse_installed) {
     error = ERROR_SUCCESS;
-    auto failed = [&](DWORD code) {
+    progress.failure.store(static_cast<uint32_t>(PackFailure::None), std::memory_order_relaxed);
+    // Failures without a better category are the packs folder's (Disk).
+    auto failed = [&](DWORD code, PackFailure why = PackFailure::Disk) {
         error = code;
+        if (code != ERROR_CANCELLED) progress.failure.store(static_cast<uint32_t>(why), std::memory_order_relaxed);
         return code == ERROR_CANCELLED ? PackInstallOutcome::Cancelled : PackInstallOutcome::Failed;
     };
-    if (root.empty() || !ValidRelease(release)) return failed(ERROR_INVALID_PARAMETER);
+    if (root.empty() || !ValidRelease(release)) return failed(ERROR_INVALID_PARAMETER, PackFailure::Other);
     uint64_t total = 0;
     for (size_t i = 0; i < release.file_count; ++i) total += release.files[i].packed_size;
     progress.total.store(total, std::memory_order_relaxed);
     progress.received.store(0, std::memory_order_relaxed);
 
     Lzms lzms;
-    if (!lzms.ready()) return failed(ERROR_NOT_SUPPORTED);
+    if (!lzms.ready()) return failed(ERROR_NOT_SUPPORTED, PackFailure::Other);
     const std::wstring base = root + L"\\" + release.key;
     const std::wstring version = release.version;
     const std::wstring staging = base + L"\\" + version + L".partial";
@@ -263,16 +277,18 @@ PackInstallOutcome InstallPack(const PackRelease& release, const std::wstring& r
     size_t reused = 0;
     for (size_t i = 0; i < release.file_count; ++i) {
         DWORD code = progress.cancelled.load() ? ERROR_CANCELLED : ERROR_SUCCESS;
+        PackFailure why = PackFailure::Other;
         if (code == ERROR_SUCCESS && !installed_directory.empty() &&
             ReuseInstalledFile(release.files[i], installed_directory, staging)) {
             ++reused;
         } else if (code == ERROR_SUCCESS) {
-            code = InstallFile(release, release.files[i], staging, lzms, progress, done, read);
+            code = InstallFile(release, release.files[i], staging, lzms, progress, done, read, why);
         }
         if (code != ERROR_SUCCESS) {
             RemovePackTree(staging);
-            diagnostics::runtime::Event("pack_install_failed", {{"error", code}, {"file", i}});
-            return failed(code);
+            diagnostics::runtime::Event("pack_install_failed",
+                                        {{"error", code}, {"file", i}, {"kind", static_cast<uint64_t>(why)}});
+            return failed(code, why);
         }
         done += release.files[i].packed_size;
         progress.received.store(done, std::memory_order_relaxed);
@@ -344,10 +360,11 @@ float PackInstaller::progress() const noexcept {
     return total ? static_cast<float>(static_cast<double>(received) / static_cast<double>(total)) : 0.0f;
 }
 
-PackInstallOutcome PackInstaller::TakeOutcome(DWORD& error) {
+PackInstallOutcome PackInstaller::TakeOutcome(DWORD& error, PackFailure* failure) {
     if (!job_ || job_->running.load()) return PackInstallOutcome::None;
     const auto outcome = static_cast<PackInstallOutcome>(job_->outcome.exchange(0));
     error = job_->error.load();
+    if (failure) *failure = static_cast<PackFailure>(job_->progress.failure.load());
     return outcome;
 }
 

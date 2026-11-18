@@ -1,5 +1,7 @@
+#include "pbgra_blend.h"
 #include "preview_decoders.h"
 #include "gif_decoder.h"
+#include "decode_budget.h"
 #include "../ipc/preview_protocol.h"
 #include "../common/preview_extensions.h"
 #include "../common/shell_id.h"
@@ -21,7 +23,6 @@
 #include "jpeg_embedded_preview.h"
 #include "tiff_reduce.h"
 #include "raw_pack.h"
-#include "archive_pack.h"
 #include "media_pack.h"
 #include "metafile_raster.h"
 #include "office_doc_model.h"
@@ -420,6 +421,23 @@ static bool DecodeImage(const std::wstring& path, DWORD attrs, UINT pixels,
     }
     // A camera's embedded preview carries no orientation of its own.
     if (orientation_override >= 1 && orientation_override <= 8) orientation = orientation_override;
+    uint64_t tiff_estimate = 0;
+    const bool reduced_candidate = preview::decode_budget_session && !embedded && frame_index == 0 && IsEqualGUID(container, GUID_ContainerFormatTiff) &&
+        preview::EstimateReducedTiffMemory(path, pixels, tiff_estimate);
+    if (preview::decode_budget_session) {
+        if (IsEqualGUID(container, GUID_ContainerFormatJpeg))
+            preview::RequireDecodeMemory(preview::EstimateJpegMemory(frame.Get(), path, sourceWidth, sourceHeight, pixels, true));
+        else if (reduced_candidate) preview::RequireDecodeMemory(tiff_estimate);
+        else {
+            ComPtr<IWICBitmapDecoderInfo> info;
+            CLSID codec{};
+            const bool builtin_png = IsEqualGUID(container, GUID_ContainerFormatPng) &&
+                SUCCEEDED(decoder->GetDecoderInfo(&info)) && SUCCEEDED(info->GetCLSID(&codec)) &&
+                IsEqualGUID(codec, CLSID_WICPngDecoder);
+            const auto rows = builtin_png ? preview::PngRowEstimate(path, pixels) : 0;
+            preview::RequireDecodeMemory(rows ? rows : preview::DecodeEstimate(uint64_t(sourceWidth) * sourceHeight, 20, pixels));
+        }
+    }
     // Scale first, straight off the frame: the JPEG decoder then decodes at
     // 1/2, 1/4 or 1/8 (IWICBitmapSourceTransform) instead of full size. A
     // flip-rotator in front of the scaler made every scaler pass re-decode
@@ -443,6 +461,8 @@ static bool DecodeImage(const std::wstring& path, DWORD attrs, UINT pixels,
                 dc.stride, static_cast<UINT>(dc.pixels.size()), dc.pixels.data(), &dc_bitmap)))
             source = dc_bitmap.Get();
     }
+    if (preview::decode_budget_session && IsEqualGUID(container, GUID_ContainerFormatJpeg) && !dc_bitmap)
+        preview::RequireDecodeMemory(preview::EstimateJpegMemory(frame.Get(), path, sourceWidth, sourceHeight, pixels));
     // Large TIFF: WIC decodes it on one thread at full size (about 2 s for
     // 100 MP). Strips and tiles decode in parallel straight into a picture
     // shrunk by an integer factor; the scaler below makes the exact size.
@@ -459,6 +479,8 @@ static bool DecodeImage(const std::wstring& path, DWORD attrs, UINT pixels,
                 static_cast<UINT>(reduced.pixels.size()), reduced.pixels.data(), &reduced_bitmap)))
             source = reduced_bitmap.Get();
     }
+    if (preview::decode_budget_session && reduced_candidate && !reduced_bitmap)
+        preview::RequireDecodeMemory(preview::DecodeEstimate(uint64_t(sourceWidth) * sourceHeight, 20, pixels));
     const bool quarter_turn = orientation >= 5;
     source_width = quarter_turn ? sourceHeight : sourceWidth;
     source_height = quarter_turn ? sourceWidth : sourceHeight;
@@ -530,16 +552,6 @@ static bool MetadataUInt(IWICMetadataQueryReader* reader, const wchar_t* name,
     return ok;
 }
 
-static void AlphaBlendPbgra(uint8_t* dst, const uint8_t* src) {
-    const uint32_t sa = src[3];
-    if (sa == 255) { dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = 255; return; }
-    if (sa == 0) return;
-    const uint32_t inv = 255u - sa;
-    dst[0] = static_cast<uint8_t>(src[0] + (dst[0] * inv + 127u) / 255u);
-    dst[1] = static_cast<uint8_t>(src[1] + (dst[1] * inv + 127u) / 255u);
-    dst[2] = static_cast<uint8_t>(src[2] + (dst[2] * inv + 127u) / 255u);
-    dst[3] = static_cast<uint8_t>(sa + (dst[3] * inv + 127u) / 255u);
-}
 
 // alpha_type: the provider's label; see shell_bitmap.h for how it is read.
 static bool HbitmapToBgra(HBITMAP bitmap, bool own, std::vector<uint8_t>& out,
@@ -729,6 +741,7 @@ static bool FramePixels(IWICImagingFactory* factory, IWICBitmapSource* frame, st
                                      nullptr, 0.0, WICBitmapPaletteTypeCustom)) ||
         FAILED(converter->GetSize(&width, &height)) || !width || !height || width > 16384 || height > 16384)
         return false;
+    preview::RequireDecodeMemory(preview::DecodeEstimate(uint64_t(width) * height, 20, 1024));
     pixels.resize(static_cast<size_t>(width) * height * 4);
     return SUCCEEDED(converter->CopyPixels(nullptr, width * 4, static_cast<UINT>(pixels.size()), pixels.data()));
 }
@@ -815,9 +828,28 @@ struct ApngState {
     std::wstring failure_reason;
     uint32_t next = 0;             // frames composed into canvas
     std::vector<uint8_t> canvas;   // what frame next-1 shows
-    std::vector<uint8_t> saved;    // canvas before frame next-1 (dispose 2)
+    std::vector<uint8_t> saved;    // changed rectangle before frame next-1 (dispose 2)
 };
 ApngState g_apng;
+
+void ReleaseApngPixels(ApngState& state) {
+    std::vector<uint8_t>().swap(state.file);
+    std::vector<uint8_t>().swap(state.canvas);
+    std::vector<uint8_t>().swap(state.saved);
+}
+
+void RetireApngForDifferentImage(const std::wstring& path) {
+    std::lock_guard guard(g_apng.lock);
+    if (g_apng.path.empty() || g_apng.path == path) return;
+    // A new image can bypass DecodeApngFrame (static PNG acceleration, JPEG).
+    // Retire the previous animation here while keeping the decoder host warm.
+    ReleaseApngPixels(g_apng);
+    g_apng.info = {};
+    g_apng.path.clear();
+    g_apng.failure_reason.clear();
+    g_apng.valid = false;
+    g_apng.next = 0;
+}
 }
 
 static bool DecodeApngFrame(const std::wstring& path, UINT pixels, uint32_t frame_index, DecodeResult& r,
@@ -842,7 +874,7 @@ static bool DecodeApngFrame(const std::wstring& path, UINT pixels, uint32_t fram
     if (st.path != path || st.size != size || st.modified != modified) {
         st.path = path; st.size = size; st.modified = modified;
         st.valid = false; st.next = 0;
-        st.canvas.clear(); st.saved.clear(); st.info = {};
+        ReleaseApngPixels(st); st.info = {};
         st.failure_reason.clear();
         uint32_t declared = 0;
         if (!HasApngControl(path, declared)) return false;
@@ -886,10 +918,21 @@ static bool DecodeApngFrame(const std::wstring& path, UINT pixels, uint32_t fram
         if (st.next > 0) {
             const preview::ApngFrame& prev = frames[st.next - 1];
             if (prev.dispose == 1) clear_rect(prev);
-            else if (prev.dispose == 2 && st.saved.size() == st.canvas.size()) st.canvas = st.saved;
+            else if (prev.dispose == 2 && st.saved.size() == static_cast<size_t>(prev.width) * prev.height * 4) {
+                for (uint32_t y = 0; y < prev.height; ++y)
+                    std::memcpy(st.canvas.data() + (static_cast<size_t>(prev.y + y) * cw + prev.x) * 4,
+                        st.saved.data() + static_cast<size_t>(y) * prev.width * 4,
+                        static_cast<size_t>(prev.width) * 4);
+            }
         }
         const preview::ApngFrame& f = frames[st.next];
-        if (f.dispose == 2) st.saved = st.canvas;
+        if (f.dispose == 2) {
+            st.saved.resize(static_cast<size_t>(f.width) * f.height * 4);
+            for (uint32_t y = 0; y < f.height; ++y)
+                std::memcpy(st.saved.data() + static_cast<size_t>(y) * f.width * 4,
+                    st.canvas.data() + (static_cast<size_t>(f.y + y) * cw + f.x) * 4,
+                    static_cast<size_t>(f.width) * 4);
+        } else st.saved.clear();
         const std::vector<uint8_t> png = preview::BuildApngFramePng(st.file, st.info, st.next);
         ComPtr<IWICStream> stream;
         ComPtr<IWICBitmapDecoder> decoder;
@@ -911,7 +954,7 @@ static bool DecodeApngFrame(const std::wstring& path, UINT pixels, uint32_t fram
             uint8_t* dst = &st.canvas[(static_cast<size_t>(f.y + y) * cw + f.x) * 4];
             const uint8_t* src = &px[static_cast<size_t>(y) * fw * 4];
             if (f.blend == 0) std::copy(src, src + static_cast<size_t>(w) * 4, dst);
-            else for (UINT x = 0; x < w; ++x) AlphaBlendPbgra(dst + x * 4, src + x * 4);
+            else preview::BlendPbgraSpan(dst, src, w);
         }
         ++st.next;
     }
@@ -941,7 +984,8 @@ static bool DecodeIconEntry(const std::wstring& path, UINT pixels, uint32_t fram
         return false;
     const size_t selected = frame_index == 0 ? preview::DefaultIconEntry(entries)
                                              : (std::min<size_t>)(frame_index - 1, entries.size() - 1);
-    if (cursor) file[2] = 1;  // WIC's icon decoder reads cursors once they claim to be icons
+    std::vector<uint8_t> selected_file;
+    if (!preview::MakeIconEntryFile(file, entries[selected], cursor, selected_file)) return false;
     ComPtr<IWICImagingFactory> factory;
     ComPtr<IWICStream> stream;
     ComPtr<IWICBitmapDecoder> decoder;
@@ -950,10 +994,10 @@ static bool DecodeIconEntry(const std::wstring& path, UINT pixels, uint32_t fram
     UINT cw = 0, ch = 0;
     if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) ||
         FAILED(factory->CreateStream(&stream)) ||
-        FAILED(stream->InitializeFromMemory(file.data(), static_cast<DWORD>(file.size()))) ||
+        FAILED(stream->InitializeFromMemory(selected_file.data(), static_cast<DWORD>(selected_file.size()))) ||
         FAILED(factory->CreateDecoder(GUID_ContainerFormatIco, nullptr, &decoder)) ||
         FAILED(decoder->Initialize(stream.Get(), WICDecodeMetadataCacheOnDemand)) ||
-        FAILED(decoder->GetFrame(entries[selected].frame, &frame)) ||
+        FAILED(decoder->GetFrame(0, &frame)) ||
         !FramePixels(factory.Get(), frame.Get(), canvas, cw, ch))
         return false;
     r.source_width = cw;
@@ -1066,6 +1110,7 @@ static bool HeifThumbnailInto(const DecodeRequest& q, UINT cap, DecodeResult& r)
 // Big still PNG / WebP through the image pack, several times faster than WIC
 // at 100 MP; false (WIC goes on) whenever the pack does not take it.
 static bool ImagePackAccelerateInto(const DecodeRequest& q, UINT cap, DecodeResult& r) {
+    if (preview::decode_budget_session && preview::ImagePackAvailable()) preview::RequireUnknownImageMemory(q.path, cap, true);
     preview::ImagePackFrame frame;
     if (!preview::ImagePackAccelerate(q.path, cap, q.grid, frame)) return false;
     r.pixels = std::move(frame.pixels);
@@ -1076,6 +1121,7 @@ static bool ImagePackAccelerateInto(const DecodeRequest& q, UINT cap, DecodeResu
 
 static bool ImagePackInto(const DecodeRequest& q, UINT cap, DecodeResult& r) {
     if (!preview::IsImagePackExtension(q.extension) || !preview::ImagePackAvailable()) return false;
+    preview::RequireUnknownImageMemory(q.path, cap, true);
     preview::ImagePackFrame frame;
     if (!preview::ImagePackDecode(q.path, cap, q.grid, frame)) {
         ClearBitmap(r);
@@ -1147,6 +1193,8 @@ static bool ExplorerCachedInto(const DecodeRequest& q, UINT cap, DecodeResult& r
 }
 
 static DecodeStep RunImage(const DecodeRequest& q, DecodeResult& r) {
+    RetireApngForDifferentImage(q.path);
+    if (q.extension != L".gif") preview::ResetGifDecodeCache();
     uint32_t frame_count = 1, frame_delay = 0, loop_count = 0;
     const bool gif = q.extension == L".gif";
     const UINT cap = ipc::ClampPreviewPixelSize(q.request.pixel_size, gif);
@@ -1173,13 +1221,16 @@ static DecodeStep RunImage(const DecodeRequest& q, DecodeResult& r) {
         }
     } else if (gif) {
         if (q.offline) { r.error = L"gif-offline"; return DecodeStep::Failed; }
+        if (q.grid) preview::RequireDecodeMemory(192ull << 20);
         preview::GifFrame frame;
-        made = preview::DecodeGifCached(q.path, cap, q.request.frame_index, frame);
+        made = q.grid ? preview::DecodeGifFirstFrameThumbnail(q.path, cap, frame) :
+            preview::DecodeGifCached(q.path, cap, q.request.frame_index, frame);
         if (made) {
             r.pixels = std::move(frame.pixels); r.width = frame.width; r.height = frame.height; r.stride = frame.stride;
             r.source_width = frame.source_width; r.source_height = frame.source_height;
             frame_count = frame.count; frame_delay = frame.delay; loop_count = frame.loops;
         } else {
+            if (q.grid) { r.error = frame.error; return DecodeStep::Failed; }
             // Over the animation budget (a 37 MB screen recording, say): show
             // the first frame as a still instead of an empty preview.
             ClearBitmap(r);
@@ -1242,6 +1293,7 @@ static DecodeStep RunImage(const DecodeRequest& q, DecodeResult& r) {
         // preview as unavailable.
         ClearBitmap(r);
         if (ImagePackInto(q, cap, r)) return MadeBitmap(r);
+        preview::RequireUnknownImageMemory(q.path, cap);
         if (ShellThumbnailInto(q, r)) return MadeBitmap(r);
         const std::wstring codec = MissingImageCodec(q.path, q.extension);
         if (!codec.empty()) {
@@ -1270,8 +1322,10 @@ static DecodeStep RunImagePack(const DecodeRequest& q, DecodeResult& r) {
         ClearBitmap(r);
     }
     if (ImagePackInto(q, q.cap, r)) return MadeBitmap(r);
-    if (q.extension == L".jxl" && HasShellThumbnailHandler(q.extension) && ShellThumbnailInto(q, r))
-        return MadeBitmap(r);
+    if (q.extension == L".jxl" && HasShellThumbnailHandler(q.extension)) {
+        preview::RequireUnknownImageMemory(q.path, q.cap);
+        if (ShellThumbnailInto(q, r)) return MadeBitmap(r);
+    }
     ClearBitmap(r);
     if (q.grid) return DecodeStep::Next;
     r.error = preview::ImagePackAvailable() ? L"image-decode-failed" : L"image-pack-missing";
@@ -1299,17 +1353,6 @@ static DecodeStep RunRawPack(const DecodeRequest& q, DecodeResult& r) {
     }
     // An installed shell provider may still have a cached embedded preview.
     return DecodeStep::Next;
-}
-
-static bool MakeEnhancedArchiveListing(const std::wstring& path, std::wstring& text,
-                                       uint32_t& bytes_read, std::wstring* error, bool allow_pack) {
-    if (preview::MakeArchiveListing(path, text, bytes_read, error)) return true;
-    // Preserve deliberate native limits/cancellation rather than retrying work.
-    if (error && (error->find(L"cancel") != std::wstring::npos ||
-                  error->find(L"limit") != std::wstring::npos)) return false;
-    // Archive contents are useful in the preview pane, not in grid thumbnails.
-    if (!allow_pack || !preview::ArchivePackAvailable()) return false;
-    return preview::ArchivePackListing(path, text, bytes_read, error);
 }
 
 // SVG through Direct2D; markup that does not render is shown as text.
@@ -1374,21 +1417,31 @@ static DecodeStep RunPdf(const DecodeRequest& q, DecodeResult& r) {
     return DecodeStep::Failed;
 }
 
-// Archives: contents tree instead of a hex dump. A file that is not a readable
-// archive falls through to the entries below.
+// The main host routes plugin previews first. These formats require that route;
+// never turn a missing archive plugin into a hex dump.
+static bool RequiresArchivePlugin(const DecodeRequest& q) {
+    return q.extension == L".7z" || q.extension == L".rar";
+}
+
+// Other archives use the built-in contents tree.
 static bool AcceptsArchive(const DecodeRequest& q) {
-    return !q.is_directory && preview::IsArchiveExtension(q.extension) && !q.offline;
+    return !q.is_directory && preview::IsArchiveExtension(q.extension) &&
+        (!q.offline || RequiresArchivePlugin(q));
 }
 static DecodeStep RunArchive(const DecodeRequest& q, DecodeResult& r) {
-    if (!MakeEnhancedArchiveListing(q.path, r.text, r.bytes_read, &r.error, !q.grid))
+    if (RequiresArchivePlugin(q)) {
+        r.error = L"archive-plugin-required";
+        return DecodeStep::Failed;
+    }
+    if (!preview::MakeArchiveListing(q.path, r.text, r.bytes_read, &r.error))
         return DecodeStep::Next;
     r.kind = ipc::PreviewContentKind::Archive;
     return DecodeStep::Made;
 }
 
 // PSD/PSB: the merged composite with its transparency; grid thumbnails of
-// large opaque documents use the embedded JPEG when it covers the requested
-// size (RasterizePsdFile). Installed shell providers are not
+// large documents show the embedded JPEG first, then explicitly request the
+// composite in a background refinement. Installed shell providers are not
 // preferred any more - common ones return the white-matted image labelled
 // opaque (white or washed-out thumbnails). Files the reader cannot decode
 // still reach the shell thumbnail (Next).
@@ -1396,9 +1449,10 @@ static bool AcceptsPsd(const DecodeRequest& q) {
     return !q.is_directory && !q.offline && preview::IsPsdExtension(q.extension);
 }
 static DecodeStep RunPsd(const DecodeRequest& q, DecodeResult& r) {
-    if (!preview::RasterizePsdFile(q.path, q.cap, q.grid, r.pixels, r.width, r.height,
-            r.stride, r.source_width, r.source_height, nullptr))
-        return DecodeStep::Next;
+    const bool refine = q.grid && (q.request.flags & ipc::kPreviewRequestFlagPsdRefine);
+    if (!preview::RasterizePsdFile(q.path, q.cap, q.grid && !refine, r.pixels, r.width, r.height,
+            r.stride, r.source_width, r.source_height, nullptr, &r.embedded_psd))
+        return refine ? DecodeStep::Failed : DecodeStep::Next;
     return MadeBitmap(r);
 }
 
@@ -2127,7 +2181,7 @@ static DecodeStep RunSniffed(const DecodeRequest& q, DecodeResult& r) {
         if (!made && r.error == L"pdf-thumbnail-budget") return DecodeStep::Failed;
         break;
     case preview::SniffedFormat::Archive:
-        if (!MakeEnhancedArchiveListing(q.path, r.text, r.bytes_read, &r.error, !q.grid)) {
+        if (!preview::MakeArchiveListing(q.path, r.text, r.bytes_read, &r.error)) {
             r.text.clear();
             r.bytes_read = 0;
             return DecodeStep::Next;
@@ -2397,5 +2451,18 @@ static const preview::DecoderEntry kDecoders[] = {
 };
 
 bool pulse::preview::DecodeContent(const DecodeRequest& request, DecodeResult& result) {
-    return RunDecoders(kDecoders, request, result);
+    if (request.grid && !request.offline && !request.is_directory) RequireDecodeMemory(DecodeEstimate(0, 1, request.cap));
+    for (const auto& entry : kDecoders) {
+        if (!entry.accepts(request)) continue;
+        if (request.grid && !request.offline && !request.is_directory &&
+            (!strcmp(entry.name, "raw-pack") || !strcmp(entry.name, "psd") ||
+             !strcmp(entry.name, "svg") || !strcmp(entry.name, "metafile") ||
+             (!strcmp(entry.name, "shell-thumbnail") && (IsDirectImage(request.extension) ||
+                 IsImagePackExtension(request.extension))))) RequireUnknownImageMemory(request.path, request.cap);
+        const auto step = entry.run(request, result);
+        if (step == DecodeStep::Next) continue;
+        result.decoder = entry.name;
+        return step == DecodeStep::Made;
+    }
+    return false;
 }

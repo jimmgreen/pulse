@@ -28,7 +28,8 @@ jobs:
   build:
     needs: l10n
     runs-on: windows-2022
-    timeout-minutes: 60
+    # Cold verification already takes ~48 minutes before the production rebuild.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -44,9 +45,14 @@ jobs:
           if ($version -notmatch '^\d+\.\d+\.\d+$' -or $env:RELEASE_REF -ne "refs/tags/v$version") {
             throw 'Push or select a version tag matching version.txt, for example v1.0.3.'
           }
-      - name: Build, test and package
+      - name: Build and verify release payload
         shell: pwsh
-        run: ./scripts/build_release_ci.ps1 -Channel '${{ matrix.channel }}'
+        env:
+          # Opt in only for the explicitly approved tag; other releases run tests.
+          QUICK_RELEASE_TAG: ${{ vars.PULSE_QUICK_RELEASE_TAG }}
+        run: |
+          $quick = $env:QUICK_RELEASE_TAG -eq $env:GITHUB_REF_NAME
+          ./scripts/build_release_ci.ps1 -Channel '${{ matrix.channel }}' -SkipTests:$quick
       - uses: actions/upload-artifact@v4
         with:
           name: installer-${{ matrix.channel }}

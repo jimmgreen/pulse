@@ -34,17 +34,23 @@ struct GlobalProviderStatus {
 struct GlobalSearchPosition {
     bool had_rows = false;
     std::wstring selected_path, first_path;
+    template<class Row> static const std::wstring& Identity(const Row& row) {
+        if constexpr (requires { row.recycle_path; }) {
+            if (!row.recycle_path.empty()) return row.recycle_path;
+        }
+        return row.path;
+    }
     template<class Rows> static GlobalSearchPosition Capture(const Rows& rows, int selected, int first) {
         GlobalSearchPosition position; position.had_rows = !rows.empty();
-        if (selected >= 0 && static_cast<size_t>(selected) < rows.size()) position.selected_path = rows[selected].path;
-        if (first >= 0 && static_cast<size_t>(first) < rows.size()) position.first_path = rows[first].path;
+        if (selected >= 0 && static_cast<size_t>(selected) < rows.size()) position.selected_path = Identity(rows[selected]);
+        if (first >= 0 && static_cast<size_t>(first) < rows.size()) position.first_path = Identity(rows[first]);
         return position;
     }
     template<class Rows> static int Find(const Rows& rows, const std::wstring& wanted) {
         if (wanted.empty()) return -1;
         const auto normalized = path::StripExtendedPathPrefix(wanted);
         for (size_t i = 0; i < rows.size(); ++i)
-            if (path::EqualInsensitive(path::StripExtendedPathPrefix(rows[i].path), normalized)) return static_cast<int>(i);
+            if (path::EqualInsensitive(path::StripExtendedPathPrefix(Identity(rows[i])), normalized)) return static_cast<int>(i);
         return -1;
     }
     template<class Rows> int Selection(const Rows& rows) const { return had_rows ? Find(rows, selected_path) : 0; }

@@ -1,8 +1,15 @@
+﻿#include <stdexcept>
+#include <chrono>
 #include "thumbnail_cache.h"
+#include "../common/decode_memory_budget.h"
 #include "../fs/cloud_state.h"
 #include "../common/utf8_file.h"
 #include "../common/runtime_log.h"
+#include "../common/preview_diagnostics.h"
+#include "../common/preview_extensions.h"
+#include "../common/module_location.h"
 #include "thumbnail_artwork_layout.h"
+#include "folder_thumbnail_resample.h"
 #include <algorithm>
 #include <cwctype>
 #include <iterator>
@@ -22,8 +29,8 @@ namespace {
 std::atomic<uint32_t> g_preview_cache_sequence{1};
 std::atomic<ThumbnailStore*> g_grid_store{nullptr};
 
-// Transport failures retry after 1 s, 4 s, then 15 s; the fourth in a row is
-// kept as a real failure so a file that always hangs its provider settles.
+// Non-image transport failures settle after three retries. Images below use
+// bounded backoff while visible, including when their decoder host fails.
 constexpr uint32_t kTransientRetryMs[] = {1000, 4000, 15000};
 
 bool UploadBitmap(ID2D1DeviceContext* dc, ComPtr<ID2D1Bitmap>& bitmap,
@@ -34,8 +41,6 @@ bool UploadBitmap(ID2D1DeviceContext* dc, ComPtr<ID2D1Bitmap>& bitmap,
         DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
     if (FAILED(dc->CreateBitmap(D2D1::SizeU(w, h), pixels.data(), stride, &props, &bitmap)))
         return false;
-    pixels.clear();
-    pixels.shrink_to_fit();
     return true;
 }
 
@@ -99,13 +104,19 @@ void WaitForHost(ULONGLONG waited_ms) {
 }  // namespace
 
 uint32_t ThumbnailCache::ResponseTimeoutMs(const std::wstring& path,
-                                           ipc::PreviewRequestKind kind) {
+                                           ipc::PreviewRequestKind kind, uint64_t source_size) {
     if (kind == ipc::PreviewRequestKind::Properties) return 4000;
     const size_t slash = path.find_last_of(L"\\/");
     const size_t dot = path.find_last_of(L'.');
     std::wstring ext = dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash)
         ? std::wstring() : path.substr(dot);
     for (auto& c : ext) c = static_cast<wchar_t>(std::towlower(c));
+    // Large lossless PNGs can spend seconds streaming compressed scanlines.
+    // Snapshot size is already available; never stat the file on the UI thread.
+    if (ext == L".png" && source_size >= (32ull << 20)) {
+        const auto chunks = (std::min)(uint64_t(12), source_size / (32ull << 20) + 1);
+        return static_cast<uint32_t>((std::max)(uint64_t(10000), chunks * 2500));
+    }
     static const wchar_t* const kLight[] = {
         L".jpg", L".jpeg", L".png", L".bmp", L".gif", L".ico", L".webp", L".tif", L".tiff",
         L".txt", L".md", L".json", L".xml", L".csv", L".log", L".ini", L".svg"};
@@ -136,6 +147,13 @@ void ThumbnailCache::SetGridStore(ThumbnailStore* store) {
     g_grid_store.store(store, std::memory_order_release);
 }
 
+namespace {
+bool ThumbnailPathOnVolume(const std::wstring& path, const std::wstring& root) {
+    return !root.empty() && path.size() >= root.size() &&
+        _wcsnicmp(path.c_str(), root.c_str(), root.size()) == 0 &&
+        (root.back() == L'\\' || path.size() == root.size() || path[root.size()] == L'\\');
+}
+}
 bool ThumbnailCache::Prefetch(const std::wstring& path, DWORD attrs, uint32_t pixel_size,
                               uint64_t generation, uint64_t modified, uint64_t size) {
     if (path.empty() || pixel_size < 24) return true;
@@ -143,11 +161,21 @@ bool ThumbnailCache::Prefetch(const std::wstring& path, DWORD attrs, uint32_t pi
     constexpr size_t kPrefetchQueueLimit = 32;
     const std::wstring key = Key(path, pixel_size, modified, size);
     std::lock_guard lock(mutex_);
-    if (!visible_order_ || items_.contains(key) || pending_.contains(key)) return true;
+    if (VolumeSuspendedLocked(path)) return false;
+    if (interest_window_) interests_[interest_window_].drawing.insert(key);
+    if (!visible_order_ || items_.contains(key)) return true;
+    if (pending_.contains(key)) {
+        // An item that scrolled into the prefetch range is still wanted.
+        // Do not demote a request drawn by another pane in this frame.
+        if (auto it = wanted_.find(key); it != wanted_.end() && it->second.first < frame_)
+            it->second = {0, ++draw_sequence_};
+        return true;
+    }
     if (queue_.size() >= kPrefetchQueueLimit) return false;
     Request request;
+    request.interest_tracked = interest_window_ != nullptr;
     request.kind = ipc::PreviewRequestKind::Content;
-    request.timeout_ms = ResponseTimeoutMs(path, request.kind);
+    request.timeout_ms = ResponseTimeoutMs(path, request.kind, size);
     // A video poster ahead of time would hold a lane for seconds.
     if (IsSlowRequest(request)) return true;
     request.id = next_id_++; request.generation = generation;
@@ -197,10 +225,71 @@ void ThumbnailCache::SetParallelism(uint32_t lanes) {
         !(GetEnvironmentVariableW(L"PULSE_THUMBNAIL_BOOST", boost, 4) > 0 && boost[0] == L'0');
 }
 
-void ThumbnailCache::AdvanceFrame() {
+bool ThumbnailCache::WantedByWindowLocked(const std::wstring& key) const {
+    for (const auto& [window, interest] : interests_) {
+        (void)window;
+        if (interest.committed.contains(key) || (interest.active && interest.drawing.contains(key))) return true;
+    }
+    return false;
+}
+
+void ThumbnailCache::RemoveNotifyWindow(HWND window) {
     std::lock_guard lock(mutex_);
+    interests_.erase(window);
+    if (interest_window_ == window) interest_window_ = nullptr;
+    repaint_.Remove(window);
+    std::erase_if(queue_, [&](const Request& req) {
+        if (!req.interest_tracked || WantedByWindowLocked(req.key)) return false;
+        pending_.erase(req.key); wanted_.erase(req.key); return true;
+    });
+}
+
+void ThumbnailCache::EndInterestFrame() {
+    std::lock_guard lock(mutex_);
+    if (!interest_window_) return;
+    auto& interest = interests_.at(interest_window_);
+    interest.committed.swap(interest.drawing);
+    interest.drawing.clear();
+    interest.visible.swap(interest.drawing_visible);
+    interest.drawing_visible.clear();
+    interest.active = false;
+    interest_window_ = nullptr;
+    std::erase_if(queue_, [&](const Request& req) {
+        if (!req.interest_tracked || WantedByWindowLocked(req.key)) return false;
+        pending_.erase(req.key); wanted_.erase(req.key);
+        return true;
+    });
+}
+
+void ThumbnailCache::NotifyResult(const Request& req) {
+    std::lock_guard lock(mutex_);
+    if (!req.interest_tracked) { repaint_.InvalidateAll(); return; }
+    for (const auto& [window, interest] : interests_)
+        if (interest.committed.contains(req.key) || (interest.active && interest.drawing.contains(req.key)))
+            InvalidateRect(window, nullptr, FALSE);
+}
+
+void ThumbnailCache::AdvanceFrame(HWND window) {
+    std::lock_guard lock(mutex_);
+    interest_window_ = window;
+    if (window) { auto& interest = interests_[window]; interest.active = true; interest.drawing.clear(); interest.drawing_visible.clear(); }
+    upload_elapsed_us_ = 0; upload_bytes_ = 0;
+    if (shared_upload_budget_) { shared_upload_budget_->elapsed_us = 0; shared_upload_budget_->bytes = 0; }
     ++frame_;
     draw_sequence_ = 0;
+    // Keep two frames of grace for reversals. Only retire queued grid work:
+    // prefetch (rank 0), explicit previews and running decodes stay intact.
+    if (visible_order_) {
+        std::erase_if(queue_, [&](const Request& request) {
+            if (request.interest_tracked) return false;
+            const auto wanted = wanted_.find(request.key);
+            if (request.details || wanted == wanted_.end() || wanted->second.first == 0 ||
+                frame_ <= wanted->second.first || frame_ - wanted->second.first <= 2) return false;
+            pending_.erase(request.key);
+            wanted_.erase(wanted);
+            return true;
+        });
+    }
     // Keys drawn while their decode was already running stay behind; keep
     // only what is still queued.
     if (wanted_.size() > 256) {
@@ -227,7 +316,8 @@ void ThumbnailCache::StartWorkersLocked() {
 // Formats outside the light list (video posters, shell providers, Office,
 // CAD) can take seconds; they may hold every lane but one.
 bool ThumbnailCache::IsSlowRequest(const Request& request) noexcept {
-    return request.kind == ipc::PreviewRequestKind::Content && request.timeout_ms > 2500;
+    return (request.flags & ipc::kPreviewRequestFlagPsdRefine) ||
+        (request.kind == ipc::PreviewRequestKind::Content && request.timeout_ms > 2500);
 }
 
 bool ThumbnailCache::TakeRequestLocked(Request& out, bool& slow) {
@@ -237,7 +327,14 @@ bool ThumbnailCache::TakeRequestLocked(Request& out, bool& slow) {
     std::pair<uint64_t, uint64_t> best{0, 0};
     for (auto it = queue_.begin(); it != queue_.end(); ++it) {
         if (slow_in_flight_ >= slow_cap && IsSlowRequest(*it)) continue;
-        if (!visible_order_) { pick = it; break; }
+        const bool refine = (it->flags & ipc::kPreviewRequestFlagPsdRefine) != 0;
+        // One composite upgrade at a time leaves slow slots for new first-pass
+        // requests on wider pools and avoids concurrent large-document I/O.
+        if (refine && psd_refinements_in_flight_) continue;
+        const bool picked_refine = pick != queue_.end() && (pick->flags & ipc::kPreviewRequestFlagPsdRefine);
+        if (pick != queue_.end() && !picked_refine && refine) continue;
+        if (picked_refine && !refine) pick = queue_.end();
+        if (!visible_order_) { if (pick == queue_.end()) pick = it; if (!refine) break; continue; }
         // Latest frame first, then paint order (top-left first).
         std::pair<uint64_t, uint64_t> rank{0, UINT64_MAX};
         if (it->details) rank = {UINT64_MAX, 0};
@@ -253,6 +350,7 @@ bool ThumbnailCache::TakeRequestLocked(Request& out, bool& slow) {
     // Drawn by a frame (prefetch ranks 0) and quick: worth a priority step.
     pick->urgent = boost_hosts_ && !slow && (pick->details || best.first > 0);
     if (slow) ++slow_in_flight_;
+    if (pick->flags & ipc::kPreviewRequestFlagPsdRefine) ++psd_refinements_in_flight_;
     wanted_.erase(pick->key);
     out = std::move(*pick);
     queue_.erase(pick);
@@ -285,10 +383,12 @@ void ThumbnailCache::DropOverflowLocked() {
 
 ThumbnailCache::~ThumbnailCache() { Reset(); }
 void ThumbnailCache::SetDeviceContext(ID2D1DeviceContext* dc) {
+    if (folder_revisit_) folder_revisit_->SetDeviceContext(dc);
     // Another window's context on the same device keeps every bitmap.
     std::lock_guard lock(mutex_);
     if (!device_binding_.Bind(dc)) return;
     dc_ = device_binding_.Dc();
+    ++device_generation_;
     for (auto& [_, item] : items_) item.bitmap.reset();
 }
 std::wstring ThumbnailCache::Key(const std::wstring& path, uint32_t pixels,
@@ -307,15 +407,16 @@ void ThumbnailCache::StopChild(uint32_t lane) {
     if (lane_pipe != INVALID_HANDLE_VALUE) { CancelIoEx(lane_pipe, nullptr); CloseHandle(lane_pipe); lane_pipe = INVALID_HANDLE_VALUE; }
     if (lane_child.hProcess) {
         TerminateProcess(lane_child.hProcess, 0);
-        // Termination is asynchronous: until the old host is gone its pipe
-        // instance exists, the next host's CreateNamedPipe (first instance
-        // only) fails, and the request after a restart cost a 1 s retry.
+        // Give asynchronous termination a bounded chance to release resources.
+        // SMB I/O may outlive this wait; replacements use their own pipe name.
         WaitForSingleObject(lane_child.hProcess, 2000);
         CloseHandle(lane_child.hProcess); CloseHandle(lane_child.hThread); lane_child = {};
     }
 }
 void ThumbnailCache::Reset() {
-    running_ = false; cv_.notify_all();
+    // Pair the predicate change with Worker wait registration under the same lock.
+    { std::lock_guard lock(mutex_); running_ = false; }
+    cv_.notify_all();
     if (worker_.joinable()) CancelSynchronousIo(worker_.native_handle());
     for (auto& lane : extra_lanes_)
         if (lane.worker.joinable()) CancelSynchronousIo(lane.worker.native_handle());
@@ -323,17 +424,36 @@ void ThumbnailCache::Reset() {
     for (auto& lane : extra_lanes_)
         if (lane.worker.joinable()) lane.worker.join();
     StopChildren();
+    if (folder_revisit_) folder_revisit_->Reset();
     std::lock_guard lock(mutex_); queue_.clear(); pending_.clear(); items_.clear(); lru_.clear(); folder_requests_.clear();
-    wanted_.clear(); slow_in_flight_ = 0;
+    wanted_.clear(); interests_.clear(); interest_window_ = nullptr; slow_in_flight_ = 0; psd_refinements_in_flight_ = 0;
     still_by_identity_.clear(); transient_failures_.clear(); retry_interest_.clear();
     cache_bytes_ = 0; device_binding_.Bind(nullptr); dc_ = nullptr; latest_details_identity_.clear();
     draw_retry_deadline_ = 0;
     epoch_.fetch_add(1, std::memory_order_relaxed);
 }
 void ThumbnailCache::BeginFrame() {
+    if (folder_revisit_) folder_revisit_->BeginFrame();
     std::lock_guard lock(mutex_);
+    upload_elapsed_us_ = 0; upload_bytes_ = 0;
+    if (shared_upload_budget_) { shared_upload_budget_->elapsed_us = 0; shared_upload_budget_->bytes = 0; }
     track_retry_interest_ = true;
     retry_interest_.clear();
+}
+
+uint64_t ThumbnailCache::WindowRetryDeadline(HWND window) {
+    std::lock_guard lock(mutex_);
+    const auto view = interests_.find(window);
+    if (view == interests_.end()) return 0;
+    uint64_t next = 0;
+    for (const auto& key : view->second.visible) {
+        const auto it = items_.find(key);
+        if (it == items_.end() || pending_.contains(key)) continue;
+        const auto& item = it->second;
+        if (item.failed && item.transient && item.retry_at)
+            next = next ? (std::min)(next, item.retry_at) : item.retry_at;
+    }
+    return next;
 }
 
 uint64_t ThumbnailCache::NextRetryDeadline() {
@@ -349,12 +469,59 @@ uint64_t ThumbnailCache::NextRetryDeadline() {
     return next;
 }
 
+bool ThumbnailCache::VolumeSuspendedLocked(const std::wstring& path) const {
+    for (const auto& entry : suspended_volumes_)
+        if (ThumbnailPathOnVolume(path, entry.first)) return true;
+    return false;
+}
+std::shared_future<void> ThumbnailCache::SuspendVolume(const std::wstring& root) {
+    std::lock_guard lock(mutex_);
+    std::wstring normalized = root;
+    for (auto& ch : normalized) ch = ch == L'/' ? L'\\' : static_cast<wchar_t>(towlower(ch));
+    while (!normalized.empty() && normalized.back() == L'\\') normalized.pop_back();
+    if (const auto it = suspended_volumes_.find(normalized); it != suspended_volumes_.end()) return it->second->future;
+    auto release = std::make_shared<VolumeRelease>();
+    suspended_volumes_[normalized] = release;
+    for (uint32_t lane = 0; lane < kMaxLanes; ++lane) {
+        if (!ThumbnailPathOnVolume(lane_paths_[lane], normalized)) continue;
+        if (release_lanes_[lane]) {
+            // A timed-out earlier attempt still owns this lane's release.
+            release = release_lanes_[lane];
+            suspended_volumes_[normalized] = release;
+            break;
+        }
+    }
+    for (uint32_t lane = 0; lane < kMaxLanes; ++lane) {
+        if (ThumbnailPathOnVolume(lane_paths_[lane], normalized) && !release_lanes_[lane]) {
+            release_lanes_[lane] = release;
+            ++release->pending;
+        }
+    }
+    for (auto it = queue_.begin(); it != queue_.end();) {
+        if (ThumbnailPathOnVolume(it->path, normalized)) {
+            pending_.erase(it->key);
+            it = queue_.erase(it);
+        } else ++it;
+    }
+    if (!release->pending) release->promise.set_value();
+    cv_.notify_all();
+    return release->future;
+}
+void ThumbnailCache::ResumeVolume(const std::wstring& root) {
+    std::lock_guard lock(mutex_);
+    std::wstring normalized = root;
+    for (auto& ch : normalized) ch = ch == L'/' ? L'\\' : static_cast<wchar_t>(towlower(ch));
+    while (!normalized.empty() && normalized.back() == L'\\') normalized.pop_back();
+    suspended_volumes_.erase(normalized);
+}
+
 void ThumbnailCache::Evict() {
     epoch_.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard lock(mutex_);
+    if (folder_revisit_) folder_revisit_->Evict();
     queue_.clear(); pending_.clear(); items_.clear(); lru_.clear(); folder_requests_.clear();
     still_by_identity_.clear(); transient_failures_.clear(); retry_interest_.clear();
-    wanted_.clear();
+    wanted_.clear(); interests_.clear(); interest_window_ = nullptr;
     cache_bytes_ = 0;
     latest_details_identity_.clear();
     draw_retry_deadline_ = 0;
@@ -386,6 +553,68 @@ bool ThumbnailCache::Stats(const std::wstring& path, uint32_t pixel_size, uint64
     return true;
 }
 
+void ThumbnailCache::PrepareBitmap(const std::wstring& key, bool budgeted) {
+    std::vector<uint8_t> pixels;
+    ID2D1DeviceContext* context = nullptr;
+    uint32_t w = 0, h = 0, stride = 0;
+    uint64_t token = 0, device = 0, epoch = 0;
+    {
+        std::lock_guard lock(mutex_);
+        const auto it = items_.find(key);
+        if (it == items_.end()) return;
+        auto& item = it->second;
+        if ((item.bitmap.get() && !item.bitmap_dirty) || item.failed || item.pixels.empty() || item.upload_token || !dc_) return;
+        const auto elapsed = shared_upload_budget_ ? shared_upload_budget_->elapsed_us.load() : upload_elapsed_us_;
+        const auto bytes = shared_upload_budget_ ? shared_upload_budget_->bytes.load() : upload_bytes_;
+        if (budgeted && (elapsed >= 3000 || (bytes &&
+            item.pixels.size() > 4194304 - (std::min)(bytes, size_t(4194304))))) {
+            upload_frame_pending_ = true;
+            const auto deadline = GetTickCount64() + 16;
+            if (!draw_retry_deadline_ || deadline < draw_retry_deadline_) draw_retry_deadline_ = deadline;
+            return;
+        }
+        token = item.upload_token = ++upload_sequence_;
+        device = device_generation_;
+        epoch = epoch_.load(std::memory_order_relaxed);
+        w = item.w; h = item.h; stride = item.stride;
+        pixels = std::move(item.pixels);
+        context = dc_; context->AddRef();
+        if (budgeted) {
+            upload_bytes_ += pixels.size();
+            if (shared_upload_budget_) shared_upload_budget_->bytes += pixels.size();
+        }
+    }
+    ComPtr<ID2D1Bitmap> bitmap;
+    const auto started = std::chrono::steady_clock::now();
+    if (upload_probe_) upload_probe_(*this);
+    const bool uploaded = UploadBitmap(context, bitmap, pixels, w, h, stride);
+    context->Release();
+    {
+        std::lock_guard lock(mutex_);
+        if (budgeted) {
+            const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started).count());
+            upload_elapsed_us_ += elapsed;
+            if (shared_upload_budget_) shared_upload_budget_->elapsed_us += elapsed;
+        }
+        const auto it = items_.find(key);
+        if (it == items_.end() || it->second.upload_token != token) return;
+        auto& item = it->second;
+        item.upload_token = 0;
+        item.upload_failed = !uploaded;
+        if (uploaded && device_generation_ == device && epoch_.load(std::memory_order_relaxed) == epoch) {
+            item.bitmap = std::move(bitmap);
+            item.bitmap_dirty = false;
+            if (folder_thumbnail_) item.pixels = std::move(pixels);
+        }
+        else {
+            item.pixels = std::move(pixels);
+            const auto deadline = GetTickCount64() + 16;
+            if (!draw_retry_deadline_ || deadline < draw_retry_deadline_) draw_retry_deadline_ = deadline;
+        }
+    }
+}
+
 ThumbnailCache::Item* ThumbnailCache::StaleBitmap(const std::wstring& identity,
                                                   const std::wstring& except_key) {
     const auto link = still_by_identity_.find(identity);
@@ -397,7 +626,7 @@ ThumbnailCache::Item* ThumbnailCache::StaleBitmap(const std::wstring& identity,
         return nullptr;
     }
     Item& item = it->second;
-    if (!UploadBitmap(dc_, item.bitmap, item.pixels, item.w, item.h, item.stride)) return nullptr;
+    if (!item.bitmap.get()) return nullptr;
     Touch(item);
     return &item;
 }
@@ -417,11 +646,13 @@ void ThumbnailCache::LogFailure(uint32_t lane, const Request& req, uint64_t star
     }
     DWORD exit_code = 0;
     const bool exit_known = lane_child.hProcess && GetExitCodeProcess(lane_child.hProcess, &exit_code);
-    diagnostics::runtime::Event(cancelled ? "preview_client_cancelled" : "preview_client_failure", {
+    diagnostics::runtime::TextEvent(cancelled ? "preview_client_cancelled" : "preview_client_failure",
+        {{"extension", preview::DiagnosticExtension(req.path)}}, {
         {"stage", stage}, {"error", error}, {"elapsed_ms", GetTickCount64() - started},
         {"request", req.id}, {"generation", req.generation}, {"host_pid", lane_child.dwProcessId},
         {"exit_known", exit_known}, {"exit_code", exit_code}, {"cache", lane_token},
-        {"kind", static_cast<uint32_t>(req.kind)}, {"flags", req.flags}},
+        {"kind", static_cast<uint32_t>(req.kind)}, {"flags", req.flags},
+        {"path_id", preview::DiagnosticPathId(req.path)}},
         cancelled ? diagnostics::runtime::Level::Info : diagnostics::runtime::Level::Error);
 }
 bool ThumbnailCache::Connect(uint32_t lane, const Request& req, uint64_t started) {
@@ -430,13 +661,13 @@ bool ThumbnailCache::Connect(uint32_t lane, const Request& req, uint64_t started
     PROCESS_INFORMATION& lane_child = io.child;
     const uint32_t lane_token = io.token;
     if (lane_pipe != INVALID_HANDLE_VALUE) return true;
-    const std::wstring pipeName = ipc::PreviewPipeName(lane_token);
-    wchar_t exe[MAX_PATH]{}; GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
-    wchar_t* slash = wcsrchr(exe, L'\\');
-    if (!slash) { LogFailure(lane, req, started, 1, ERROR_BAD_PATHNAME); return false; }
-    *(slash + 1) = 0;
+    wchar_t exe[MAX_PATH]{};
+    const auto module_address = +[] {};
+    const DWORD location_error = module_location::DirectoryFromAddress(reinterpret_cast<const void*>(module_address),
+        exe, ARRAYSIZE(exe));
+    if (location_error != ERROR_SUCCESS) { LogFailure(lane, req, started, 1, location_error); return false; }
     std::wstring cmd = L"\"" + std::wstring(exe) + L"Pulse.Preview.exe\" " +
-        std::to_wstring(lane_token);
+        std::to_wstring(lane_token) + L" --process-pipe";
     STARTUPINFOW si{sizeof(si)};
     si.dwFlags = STARTF_FORCEOFFFEEDBACK; // background helper: no AppStarting cursor
     if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | (folder_thumbnail_ ? BELOW_NORMAL_PRIORITY_CLASS : 0),
@@ -445,6 +676,9 @@ bool ThumbnailCache::Connect(uint32_t lane, const Request& req, uint64_t started
         LogFailure(lane, req, started, 1, error, !running_);
         return false;
     }
+    // TerminateProcess can outlive StopChild's bounded wait while SMB I/O
+    // drains. A replacement must never reuse that host's pipe instance.
+    const std::wstring pipeName = ipc::PreviewPipeName(lane_token, lane_child.dwProcessId);
     const ULONGLONG deadline = GetTickCount64() + 3000;
     DWORD connect_error = ERROR_SUCCESS;
     do {
@@ -484,7 +718,9 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
                                        uint32_t* text_encoding,
                                        bool align_artwork_bottom, D2D1_RECT_F* artwork_rect,
                                        uint32_t* media_duration_ms, preview::Integrity* integrity,
-                                       const std::shared_ptr<DocumentImageSession>& document) {
+                                       const std::shared_ptr<DocumentImageSession>& document,
+                                       std::shared_ptr<const std::wstring>* shared_text) {
+    if (shared_text) shared_text->reset();
     if (integrity) { *integrity = {}; integrity->state = preview::IntegrityState::Loading; }
     if (artwork_rect) *artwork_rect = dest;
     if (media_duration_ms) *media_duration_ms = 0;
@@ -496,13 +732,28 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
     // key, so the real preview is fetched instead of the cached refusal.
     if (pulse::fs::IsCloudPlaceholder(attrs)) document_key += L":cloud";
     const std::wstring key = Key(path, pixels, modified, size, frame_index) + document_key;
+    PrepareBitmap(key, !direct_preview);
+    if (!viewport && !(pan_x && pan_y) && frame_index == 0) {
+        std::wstring stale_key;
+        {
+            std::lock_guard lock(mutex_);
+            const auto link = still_by_identity_.find(Key(path, 0, modified, size) + document_key);
+            if (link != still_by_identity_.end() && link->second != key) stale_key = link->second;
+        }
+        if (!stale_key.empty()) PrepareBitmap(stale_key, !direct_preview);
+    }
     {
         std::lock_guard lock(mutex_);
+        if (VolumeSuspendedLocked(path)) return PreviewDrawResult::Failed;
+        if (interest_window_ && !direct_preview) {
+            auto& interest = interests_[interest_window_];
+            interest.drawing.insert(key); interest.drawing_visible.insert(key);
+        }
         if (track_retry_interest_) retry_interest_.insert(key);
         const std::wstring identity = Key(path, 0, modified, size) + document_key;
         if (direct_preview) SelectDetailsLocked(identity);
         const bool visible_order = visible_order_ && !direct_preview;
-        auto queue_request = [&] {
+        auto queue_request = [&](bool psd_refine = false) {
             if (visible_order) wanted_[key] = {frame_, ++draw_sequence_};
             if (pending_.contains(key)) return;
             for (auto old = queue_.begin(); old != queue_.end();) {
@@ -529,11 +780,13 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
             request.id = next_id_++; request.generation = generation;
             request.pixels = pixels; request.attrs = attrs;
             request.kind = ipc::PreviewRequestKind::Content;
+            if (psd_refine) request.flags |= ipc::kPreviewRequestFlagPsdRefine;
             request.document = document;
             if (document) request.flags |= ipc::kPreviewRequestFlagDocumentImage;
+            request.interest_tracked = interest_window_ && !direct_preview;
             request.details = direct_preview; request.frame_index = frame_index;
             request.epoch = epoch_.load(std::memory_order_relaxed);
-            request.timeout_ms = ResponseTimeoutMs(path, request.kind);
+            request.timeout_ms = ResponseTimeoutMs(path, request.kind, direct_preview ? 0 : size);
             request.path = path; request.key = key; request.identity = identity;
             request.modified = modified; request.size = size;
             if (visible_order) queue_.push_back(std::move(request));
@@ -545,6 +798,16 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
         auto it = items_.find(key);
         if (it != items_.end()) {
             Item& item = it->second;
+            if (!direct_preview && item.needs_psd_refine) queue_request(true);
+            const auto output_text = [&] {
+                // Promotion transfers the buffer once; holders survive cache eviction.
+                if (shared_text) {
+                    if (!item.shared_text && !item.text.empty())
+                        item.shared_text = std::make_shared<const std::wstring>(std::move(item.text));
+                    *shared_text = item.shared_text;
+                }
+                if (text) *text = item.shared_text ? *item.shared_text : item.text;
+            };
             Touch(item);
             if (truncated) *truncated = item.truncated;
             if (bytes_read) *bytes_read = item.bytes_read;
@@ -565,7 +828,7 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
                 item.kind == ipc::PreviewContentKind::Markdown ||
                 item.kind == ipc::PreviewContentKind::Table ||
                 item.kind == ipc::PreviewContentKind::Tree) {
-                if (text) *text = item.text;
+                output_text();
                 if (item.kind == ipc::PreviewContentKind::Tree) return PreviewDrawResult::Tree;
                 if (item.kind == ipc::PreviewContentKind::Table) return PreviewDrawResult::Table;
                 if (item.kind == ipc::PreviewContentKind::Archive) return PreviewDrawResult::Archive;
@@ -573,8 +836,8 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
                 return item.kind == ipc::PreviewContentKind::Hex
                     ? PreviewDrawResult::Hex : PreviewDrawResult::Text;
             }
-            UploadBitmap(dc_, item.bitmap, item.pixels, item.w, item.h, item.stride);
-            if (text && item.kind == ipc::PreviewContentKind::Bitmap) *text = item.text;  // e.g. icon sizes
+
+            if (item.kind == ipc::PreviewContentKind::Bitmap) output_text();  // e.g. icon sizes
             if (item.bitmap.get()) {
                 if (viewport) {
                     viewport->SetContent(dest, static_cast<float>(item.source_width ? item.source_width : item.w),
@@ -641,7 +904,13 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
                 return item.transient ? PreviewDrawResult::Pending : PreviewDrawResult::Failed;
             }
         }
-        queue_request();
+        const auto ready = items_.find(key);
+        if (ready == items_.end() || (ready->second.pixels.empty() && !ready->second.upload_token)) queue_request();
+        else {
+            if (!ready->second.upload_failed) upload_frame_pending_ = true;
+            const auto deadline = GetTickCount64() + 16;
+            if (!draw_retry_deadline_ || deadline < draw_retry_deadline_) draw_retry_deadline_ = deadline;
+        }
         // Another size of the same file (view switch, DPI change) or the
         // previous decode stays on screen until this one arrives.
         if (!viewport && !(pan_x && pan_y) && frame_index == 0) {
@@ -658,6 +927,24 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
         }
     }
     return PreviewDrawResult::Pending;
+}
+
+PreviewDrawResult ThumbnailCache::DrawCachedGridThumbnail(ID2D1DeviceContext* dc,
+    const D2D1_RECT_F& dest, const std::wstring& path, DWORD attrs, uint32_t pixel_size,
+    uint64_t modified, uint64_t size, float opacity, bool align_bottom, D2D1_RECT_F* artwork) {
+    if (artwork) *artwork = dest;
+    if (!dc || path.empty()) return PreviewDrawResult::Failed;
+    const std::wstring suffix = pulse::fs::IsCloudPlaceholder(attrs) ? L":cloud" : L"";
+    const auto key = Key(path, pixel_size, modified, size) + suffix;
+    std::lock_guard lock(mutex_);
+    const auto found = items_.find(key);
+    Item* item = found != items_.end() && found->second.bitmap.get() && !found->second.failed
+        ? &found->second : StaleBitmap(Key(path, 0, modified, size) + suffix, key);
+    if (!item) return PreviewDrawResult::Pending;
+    Touch(*item);
+    DrawContained(dc, item->bitmap.get(), item->w, item->h, dest, opacity,
+        item->artwork_bounds, align_bottom, artwork);
+    return PreviewDrawResult::Bitmap;
 }
 
 PreviewDrawResult ThumbnailCache::DrawGridThumbnail(ID2D1DeviceContext* dc,
@@ -708,6 +995,7 @@ bool ThumbnailCache::Properties(const std::wstring& path, DWORD attrs, uint64_t 
         (pulse::fs::IsCloudPlaceholder(attrs) ? L":cloud" : L"");
     const std::wstring key = identity + L":properties";
     std::lock_guard lock(mutex_);
+    if (VolumeSuspendedLocked(path)) return false;
     SelectDetailsLocked(identity);
     if (auto it = items_.find(key); it != items_.end()) {
         Touch(it->second);
@@ -746,10 +1034,66 @@ void ThumbnailCache::Touch(Item& item) {
     lru_.splice(lru_.end(), lru_, item.lru_position);
 }
 
+void ThumbnailCache::QueuePsdRefinement(const Request& request) {
+    std::lock_guard lock(mutex_);
+    if (!running_ || request.epoch != epoch_.load(std::memory_order_relaxed) ||
+        VolumeSuspendedLocked(request.path) || (request.interest_tracked && !WantedByWindowLocked(request.key)) ||
+        !items_.contains(request.key) || pending_.contains(request.key)) return;
+    Request next = request;
+    next.flags |= ipc::kPreviewRequestFlagPsdRefine;
+    next.urgent = false;
+    next.budget_deferrals = 0;
+    next.queued_at = GetTickCount64();
+    pending_.insert(next.key);
+    queue_.push_back(std::move(next));
+    cv_.notify_one();
+}
+
+void ThumbnailCache::RememberFolder(const Request& req, const Item& result, Item compact) {
+    if (!folder_revisit_) return;
+    auto& revisit = *folder_revisit_;
+    if (result.failed) {
+        if (result.transient) return;
+        std::lock_guard lock(revisit.mutex_);
+        if (auto old = revisit.items_.find(req.identity); old != revisit.items_.end()) {
+            revisit.cache_bytes_ -= old->second.cost;
+            revisit.lru_.erase(old->second.lru_position);
+            revisit.items_.erase(old);
+        }
+        revisit.still_by_identity_.erase(req.identity);
+        return;
+    }
+    if (compact.pixels.empty()) {
+        // A later small-size decode must update an existing large-size fallback,
+        // without reserving a duplicate tier for every tiny folder icon.
+        { std::lock_guard lock(revisit.mutex_);
+          if (!revisit.items_.contains(req.identity)) return; }
+        if (result.kind != ipc::PreviewContentKind::Bitmap ||
+            !CompactFolderPixels(result.pixels, result.w, result.h, result.stride,
+                compact.pixels, compact.w, compact.h)) return;
+    }
+    compact.stride = compact.w * 4;
+    compact.kind = ipc::PreviewContentKind::Bitmap;
+    compact.artwork_bounds = result.artwork_bounds;
+    compact.cost = compact.pixels.size() * 2;
+    Request stored;
+    stored.key = stored.identity = req.identity;
+    stored.epoch = revisit.epoch_.load(std::memory_order_relaxed);
+    revisit.StoreResult(stored, std::move(compact));
+}
+
 bool ThumbnailCache::StoreResult(const Request& req, Item result) {
+    Item compact;
+    // Resample on the worker before taking the lock used by UI drawing.
+    if (folder_revisit_ && (req.flags & ipc::kPreviewRequestFlagFolderThumbnail) &&
+        !result.failed && result.kind == ipc::PreviewContentKind::Bitmap &&
+        (std::max)(result.w, result.h) > 128)
+        CompactFolderPixels(result.pixels, result.w, result.h, result.stride,
+            compact.pixels, compact.w, compact.h);
     std::lock_guard lock(mutex_);
     // An old decode must not remove a replacement request queued after Evict().
     if (req.epoch != epoch_.load(std::memory_order_relaxed)) return false;
+    if (req.interest_tracked && !WantedByWindowLocked(req.key)) { pending_.erase(req.key); return false; }
     if (req.document && !req.document->active.load()) {
         pending_.erase(req.key);
         return false;
@@ -771,6 +1115,7 @@ bool ThumbnailCache::StoreResult(const Request& req, Item result) {
                 if (old->first != req.key && old->first.starts_with(prefix)) {
                     cache_bytes_ -= old->second.cost;
                     lru_.erase(old->second.lru_position);
+                    transient_failures_.erase(old->first);
                     old = items_.erase(old);
                 } else ++old;
             }
@@ -794,13 +1139,43 @@ bool ThumbnailCache::StoreResult(const Request& req, Item result) {
             transient_failures_.erase(req.key);
             result.retry_at = GetTickCount64() + 30000;
         }
+        RememberFolder(req, result, std::move(compact));
         result.transient = false;
         result.cost *= 2; // CPU pixels retained for device recovery plus GPU bitmap.
     }
     pending_.erase(req.key);
+    if (req.flags & ipc::kPreviewRequestFlagPsdRefine) {
+        if (const auto old = items_.find(req.key); old != items_.end()) old->second.needs_psd_refine = false;
+        if (result.failed || result.transient || result.kind != ipc::PreviewContentKind::Bitmap)
+            return false;
+    }
     if (req.details && req.identity != latest_details_identity_) return false;
 
-    if (result.failed && result.transient) {
+    const bool resource_limited = result.error == L"gif-thumbnail-budget" || result.error == L"gif-memory-budget" || result.error == L"decode-memory-budget";
+    if (result.failed && resource_limited) {
+        result.transient = true;
+        result.retry_at = GetTickCount64() + 15000;
+        transient_failures_.erase(req.key);
+    } else if (result.failed && (result.transient || result.error == L"image-decode-failed" ||
+        result.error == L"image-page-decode-failed" || result.error == L"gif-truncated" ||
+        result.error == L"gif-open-failed") &&
+        req.kind == ipc::PreviewRequestKind::Content && req.frame_index == 0 &&
+        !(req.attrs & FILE_ATTRIBUTE_DIRECTORY) &&
+        !(req.flags & ipc::kPreviewRequestFlagFolderThumbnail) &&
+        [&] {
+            std::wstring extension(preview::DiagnosticExtension(req.path));
+            std::transform(extension.begin(), extension.end(), extension.begin(),
+                [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+            return preview::IsImageExtension(extension);
+        }()) {
+        // Partial saves can look like corrupt data. Probe only four times
+        // per snapshot identity; a corrupt image must eventually settle.
+        auto& attempts = transient_failures_[req.key];
+        attempts = (std::min)(attempts + 1, 5u);
+        constexpr uint32_t retry_ms[] = {1000, 4000, 15000, 30000};
+        result.transient = attempts <= std::size(retry_ms);
+        result.retry_at = result.transient ? GetTickCount64() + retry_ms[attempts - 1] : 0;
+    } else if (result.failed && result.transient) {
         const uint32_t attempts = ++transient_failures_[req.key];
         if (attempts > std::size(kTransientRetryMs)) {
             result.transient = false;
@@ -820,6 +1195,10 @@ bool ThumbnailCache::StoreResult(const Request& req, Item result) {
     }
 
     if (auto old = items_.find(req.key); old != items_.end()) {
+        if (preserve_bitmap_on_replace_ && old->second.bitmap.get() && !result.failed) {
+            result.bitmap_dirty = old->second.bitmap_dirty || old->second.pixels != result.pixels;
+            result.bitmap = std::move(old->second.bitmap);
+        }
         cache_bytes_ -= old->second.cost;
         lru_.erase(old->second.lru_position);
         items_.erase(old);
@@ -838,6 +1217,7 @@ bool ThumbnailCache::StoreResult(const Request& req, Item result) {
                 if (cached->second.frame_count > 1 &&
                     cached->second.animation_identity == req.identity) {
                     cache_bytes_ -= cached->second.cost;
+                    transient_failures_.erase(cached->first);
                     items_.erase(cached);
                     lru_.erase(lru);
                     break;
@@ -861,6 +1241,8 @@ bool ThumbnailCache::StoreResult(const Request& req, Item result) {
         }
         auto oldest = items_.find(*victim);
         cache_bytes_ -= oldest->second.cost;
+        // Retry history belongs to the cached failure, not every path ever visited.
+        transient_failures_.erase(oldest->first);
         items_.erase(oldest);
         lru_.erase(victim);
     }
@@ -874,10 +1256,17 @@ bool ThumbnailCache::StoreResult(const Request& req, Item result) {
 }
 
 bool ThumbnailCache::IsTransientResponse(bool transport_ok, const Request& request, uint32_t status) {
-    return !transport_ok || ((request.flags & ipc::kPreviewRequestFlagFolderThumbnail) && status == ERROR_TIMEOUT);
+    return !transport_ok || status == ERROR_SHARING_VIOLATION || status == ERROR_LOCK_VIOLATION ||
+        ((request.flags & ipc::kPreviewRequestFlagFolderThumbnail) && status == ERROR_TIMEOUT);
 }
 
 bool ThumbnailCache::FolderRequestCurrent(const Request& request) {
+    { std::lock_guard lock(mutex_);
+      if (request.epoch != epoch_.load(std::memory_order_relaxed)) return false;
+      if (VolumeSuspendedLocked(request.path) ||
+          (request.interest_tracked && !WantedByWindowLocked(request.key))) {
+          pending_.erase(request.key); return false;
+      } }
     if (request.document && !request.document->active.load()) {
         std::lock_guard lock(mutex_);
         pending_.erase(request.key);
@@ -918,20 +1307,75 @@ void ThumbnailCache::Worker(uint32_t lane) {
     while (running_) {
         Request req;
         bool slow = false;
-        { std::unique_lock lock(mutex_); cv_.wait(lock, [&]{return !running_ || TakeRequestLocked(req, slow);});
-          if (!running_) break; }
-        // A slow request gives its slot back however this iteration ends.
+        {
+            std::unique_lock lock(mutex_);
+            const auto ready = [&] {
+                if (!running_ || release_lanes_[lane]) return true;
+                // After idle, give the first request to the warm primary host.
+                // Spare hosts return only when there is concurrent work.
+                if (lane > 0 && !lane_child.hProcess && !lane_busy_[0]) return false;
+                return TakeRequestLocked(req, slow);
+            };
+            if (lane > 0 && lane_child.hProcess) {
+                if (!cv_.wait_for(lock, std::chrono::seconds(30), ready)) {
+                    lock.unlock();
+                    StopChild(lane);
+                    lock.lock();
+                    lane_paths_[lane].clear();
+                    continue;
+                }
+            } else cv_.wait(lock, ready);
+            if (!running_) break;
+            if (release_lanes_[lane]) {
+                auto release = release_lanes_[lane];
+                lock.unlock();
+                // Only this lane owns its private host handles. Keep an independent
+                // process handle to prove termination after StopChild closes them.
+                HANDLE process = nullptr;
+                const bool had_process = lane_child.hProcess != nullptr;
+                const bool duplicated = !had_process || DuplicateHandle(GetCurrentProcess(), lane_child.hProcess,
+                    GetCurrentProcess(), &process, SYNCHRONIZE, FALSE, 0);
+                StopChild(lane);
+                const bool released = duplicated && (!process || WaitForSingleObject(process, INFINITE) == WAIT_OBJECT_0);
+                if (process) CloseHandle(process);
+                lock.lock();
+                lane_paths_[lane].clear();
+                release_lanes_[lane].reset();
+                if (!released && !release->failed) {
+                    release->promise.set_exception(std::make_exception_ptr(std::runtime_error("Thumbnail host release unconfirmed")));
+                    release->failed = true;
+                }
+                if (--release->pending == 0 && !release->failed) release->promise.set_value();
+                continue;
+            }
+            lane_paths_[lane] = req.path;
+            lane_busy_[lane] = true;
+            cv_.notify_all();
+        }
+        // Return both the busy marker and any slow slot on every exit path.
         struct SlowSlot {
             ThumbnailCache* cache;
             bool held;
+            bool refinement;
+            uint32_t lane;
             ~SlowSlot() {
-                if (!held) return;
-                { std::lock_guard lock(cache->mutex_); if (cache->slow_in_flight_) --cache->slow_in_flight_; }
+                {
+                    std::lock_guard lock(cache->mutex_);
+                    cache->lane_busy_[lane] = false;
+                    if (held && cache->slow_in_flight_) --cache->slow_in_flight_;
+                    if (refinement && cache->psd_refinements_in_flight_) --cache->psd_refinements_in_flight_;
+                }
                 cache->cv_.notify_all();
             }
-        } slow_slot{this, slow};
+        } slow_slot{this, slow, (req.flags & ipc::kPreviewRequestFlagPsdRefine) != 0, lane};
         if (!FolderRequestCurrent(req)) continue;
         const auto request_start = GetTickCount64();
+        if (!(req.flags & ipc::kPreviewRequestFlagGrid)) diagnostics::runtime::TextEvent("preview_client_request",
+            {{"extension", preview::DiagnosticExtension(req.path)}}, {
+            {"request", req.id}, {"generation", req.generation}, {"cache", LaneAt(lane).token},
+            {"path_id", preview::DiagnosticPathId(req.path)}, {"pixels", req.pixels},
+            {"source_bytes", req.size}, {"age_ms", request_start - req.queued_at},
+            {"deferrals", req.budget_deferrals}, {"kind", static_cast<uint32_t>(req.kind)}, {"flags", req.flags}});
         std::vector<uint8_t> trace_path_bytes;
         if (trace) pulse::EncodeUtf8Bytes(req.path, trace_path_bytes);
         const std::string trace_request_path(trace_path_bytes.begin(), trace_path_bytes.end());
@@ -957,7 +1401,8 @@ void ThumbnailCache::Worker(uint32_t lane) {
             req.kind == ipc::PreviewRequestKind::Content && req.frame_index == 0 &&
             !folder_thumbnail_ && !(req.flags & ipc::kPreviewRequestFlagFolderThumbnail) &&
             !(req.attrs & FILE_ATTRIBUTE_DIRECTORY) ? g_grid_store.load(std::memory_order_acquire) : nullptr;
-        const ThumbnailStoreKey store_key{req.path, req.attrs, req.pixels, req.modified, req.size};
+        const ThumbnailStoreKey store_key{req.path, req.attrs, req.pixels, req.modified, req.size,
+            (req.flags & ipc::kPreviewRequestFlagPsdRefine) != 0};
         // Folder composites: the stored one shows at once and the host is
         // still asked, since a child can change without touching the
         // folder's own time.
@@ -982,14 +1427,21 @@ void ThumbnailCache::Worker(uint32_t lane) {
                 const bool shown = StoreResult(req, std::move(hit));
                 mark("disk-hit", shown);
                 if (shown) {
-                    repaint_.InvalidateAll();
+                    NotifyResult(req);
                     std::lock_guard lock(mutex_);
                     folder_requests_[req.key] = req.id;
                     pending_.insert(req.key);
                 }
             }
         }
-        if (store) {
+        const bool psd_refine = (req.flags & ipc::kPreviewRequestFlagPsdRefine) != 0;
+        const auto extension = preview::DiagnosticExtension(req.path);
+        const bool psd_grid = visible_order_ && !req.details && !req.document &&
+            !((req.flags | extra_flags_.load(std::memory_order_relaxed)) & ipc::kPreviewRequestFlagCard) &&
+            (_wcsicmp(std::wstring(extension).c_str(), L".psd") == 0 ||
+            _wcsicmp(std::wstring(extension).c_str(), L".psb") == 0) &&
+            req.kind == ipc::PreviewRequestKind::Content;
+        if (store && !psd_refine) {
             StoredThumbnail kept;
             if (store->Load(store_key, kept)) {
                 Item hit;
@@ -1004,9 +1456,12 @@ void ThumbnailCache::Worker(uint32_t lane) {
                 hit.integrity.state = preview::IntegrityState::Complete;
                 hit.animation_identity = req.identity;
                 hit.cost = hit.pixels.size();
+                const bool refine = psd_grid && (std::max)(hit.w, hit.h) <
+                    (std::min)(req.pixels, (std::max)(hit.source_width, hit.source_height));
+                hit.needs_psd_refine = refine;
                 const bool kept_stored = StoreResult(req, std::move(hit));
                 mark("disk-hit", kept_stored);
-                if (kept_stored) repaint_.InvalidateAll();
+                if (kept_stored) { NotifyResult(req); if (refine) QueuePsdRefinement(req); }
                 continue;
             }
         }
@@ -1034,6 +1489,8 @@ void ThumbnailCache::Worker(uint32_t lane) {
         else if (quick_look_content_)
             wire.flags |= (req.attrs & FILE_ATTRIBUTE_DIRECTORY) ? ipc::kPreviewRequestFlagFolderListing
                                                                  : ipc::kPreviewRequestFlagRichText;
+        if ((wire.flags & ipc::kPreviewRequestFlagGrid) && !(wire.attrs & FILE_ATTRIBUTE_DIRECTORY) &&
+            wire.kind == ipc::PreviewRequestKind::Content) wire.magic = ipc::kPreviewBudgetRequestMagic;
         wire.path_chars=(uint32_t)req.path.size();
         if (ok) ok = ipc::WriteAll(lane_pipe, &wire, sizeof(wire)) &&
                      ipc::WriteAll(lane_pipe, req.path.data(), wire.path_chars * sizeof(wchar_t));
@@ -1054,14 +1511,52 @@ void ThumbnailCache::Worker(uint32_t lane) {
             return !queue_.empty() && queue_.front().path != req.path;
         };
         bool abandoned = false;
+        bool demand_cancelled = false;
+        preview::DecodeMemoryBudget::Lease decode_lease;
+        bool budget_over_limit = false;
+        unsigned budget_proposals = 0;
         if (ok) {
-            const ULONGLONG deadline = GetTickCount64() + (req.timeout_ms ? req.timeout_ms : 1000);
+            ULONGLONG deadline = GetTickCount64() + (req.timeout_ms ? req.timeout_ms : 1000);
             ULONGLONG last_trace = GetTickCount64();
             DWORD available = 0;
             while (running_ && GetTickCount64() < deadline) {
-                if (!FolderRequestCurrent(req)) { fail(13, ERROR_CANCELLED); ok = false; break; }
+                if (!FolderRequestCurrent(req)) { fail(13, ERROR_CANCELLED); demand_cancelled = abandoned = true; ok = false; break; }
                 if (!PeekNamedPipe(lane_pipe, nullptr, 0, nullptr, &available, nullptr)) { fail(4, GetLastError()); ok=false; break; }
-                if (available >= sizeof(response)) break;
+                if (available >= sizeof(response)) {
+                    ipc::PreviewResponse proposal{};
+                    DWORD peeked = 0;
+                    if (!PeekNamedPipe(lane_pipe, &proposal, sizeof(proposal), &peeked, nullptr, nullptr)) { ok = false; break; }
+                    if (proposal.magic != ipc::kPreviewBudgetProposalMagic) break;
+                    if (wire.magic != ipc::kPreviewBudgetRequestMagic || ++budget_proposals > 16 ||
+                        proposal.request_id != req.id || proposal.generation != req.generation ||
+                        proposal.mapping_chars || proposal.text_chars || proposal.error_chars || proposal.property_count ||
+                        (proposal.flags & ~1u) || !ipc::ReadAll(lane_pipe, &proposal, sizeof(proposal))) {
+                        fail(7, ERROR_INVALID_DATA); ok = false; break;
+                    }
+                    const uint64_t bytes = uint64_t(proposal.width) | (uint64_t(proposal.height) << 32);
+                    auto& budget = preview::SharedDecodeMemoryBudget();
+                    budget_over_limit = bytes > budget.Limit();
+                    const auto waiting_since = GetTickCount64();
+                    const bool upgrade = decode_lease.Bytes() != 0;
+                    bool granted = false;
+                    do {
+                        granted = budget.Reserve(decode_lease, bytes, (proposal.flags & 1) != 0);
+                        if (granted || upgrade || budget_over_limit) break;
+                        if (!running_ || !FolderRequestCurrent(req) || superseded()) {
+                            demand_cancelled = abandoned = true; ok = false; break;
+                        }
+                        if (lane_child.hProcess && WaitForSingleObject(lane_child.hProcess, 0) == WAIT_OBJECT_0) { ok = false; break; }
+                        Sleep(10);
+                    } while (GetTickCount64() - waiting_since < 2000);
+                    // Admission wait is not codec execution and must not spend its watchdog.
+                    deadline += GetTickCount64() - waiting_since;
+                    if (!ok) break;
+                    const uint32_t grant = granted ? ipc::kPreviewBudgetGrant : 0;
+                    if (!ipc::WriteAll(lane_pipe, &grant, sizeof(grant))) { ok = false; break; }
+                    mark(granted ? "budget-granted" : "budget-deferred", granted, static_cast<uint32_t>(bytes >> 20));
+                    available = 0;
+                    continue;
+                }
                 if (superseded()) { abandoned = true; fail(13, ERROR_CANCELLED); ok = false; break; }
                 if (lane_child.hProcess && WaitForSingleObject(lane_child.hProcess, 0) == WAIT_OBJECT_0) { fail(6, ERROR_PROCESS_ABORTED); ok=false; break; }
                 if (trace && GetTickCount64() - last_trace >= 250) {
@@ -1080,7 +1575,7 @@ void ThumbnailCache::Worker(uint32_t lane) {
         if (abandoned) {
             // Nothing is remembered about the file: coming back to it asks
             // again at once, without the transient-failure back-off.
-            { std::lock_guard lock(mutex_); pending_.erase(req.key); }
+            if (!demand_cancelled) { std::lock_guard lock(mutex_); pending_.erase(req.key); }
             LogFailure(lane, req, request_start, failure_stage, failure_error, true);
             StopChild(lane);
             continue;
@@ -1205,6 +1700,17 @@ void ThumbnailCache::Worker(uint32_t lane) {
             result.integrity.state = preview::IntegrityState::Failed;
             result.integrity.reason = preview::IntegrityReason::Unavailable;
         }
+        if (!psd_refine && ok && result.error == L"decode-memory-budget" && !budget_over_limit && req.budget_deferrals < 32 &&
+            running_ && FolderRequestCurrent(req)) {
+            decode_lease.Reset();
+            ++req.budget_deferrals;
+            Sleep((std::min)(250u, 20u * req.budget_deferrals) + lane * 7);
+            std::lock_guard lock(mutex_);
+            if (running_ && (req.epoch == epoch_.load(std::memory_order_relaxed) && !VolumeSuspendedLocked(req.path) &&
+                (!req.interest_tracked || WantedByWindowLocked(req.key)) && (!req.document || req.document->active.load()))) { queue_.push_back(std::move(req)); cv_.notify_one(); }
+            else if (req.epoch == epoch_.load(std::memory_order_relaxed)) pending_.erase(req.key);
+            continue;
+        }
         // A grid entry without a provider is expected; transport/mapping faults
         // and explicit preview failures still carry a terminal diagnostic.
         const bool ordinary_unsupported = !req.details && ok && response.status == 1 &&
@@ -1219,7 +1725,9 @@ void ThumbnailCache::Worker(uint32_t lane) {
         // Copied before the item is handed over; written once it is on screen.
         StoredThumbnail keep;
         ThumbnailStore* const saver = store ? store : folder_store;
-        const bool keepable = saver && !result.failed && !result.transient &&
+        const bool embedded_psd = (response.flags & ipc::kPreviewFlagEmbeddedPsd) != 0;
+        const bool refine = psd_grid && !psd_refine && !result.failed && embedded_psd;
+        const bool keepable = saver && !embedded_psd && !result.failed && !result.transient &&
             result.kind == ipc::PreviewContentKind::Bitmap && result.frame_count == 1 &&
             result.stride == result.w * 4 && result.integrity.state != preview::IntegrityState::Partial;
         if (keepable) {
@@ -1229,10 +1737,28 @@ void ThumbnailCache::Worker(uint32_t lane) {
             keep.source_height = result.source_height;
             keep.duration_ms = result.duration_ms;
         }
-        const bool stored = StoreResult(req, std::move(result));
+        result.needs_psd_refine = refine;
+        const bool stored = !(psd_refine && (embedded_psd || abandoned)) && StoreResult(req, std::move(result));
+        if (psd_refine && (embedded_psd || abandoned)) {
+            std::lock_guard lock(mutex_);
+            if (req.epoch == epoch_.load(std::memory_order_relaxed)) {
+                pending_.erase(req.key);
+                if (!abandoned) {
+                    if (const auto old = items_.find(req.key); old != items_.end()) old->second.needs_psd_refine = false;
+                }
+            }
+        }
+        if (psd_refine) diagnostics::runtime::TextEvent("psd_refinement",
+            {{"outcome", abandoned ? L"cancelled" : embedded_psd ? L"embedded-fallback" :
+                stored ? L"success" : failure_stage ? L"decode-error" : L"stale"}}, {
+            {"path_id", preview::DiagnosticPathId(req.path)}, {"target_edge", req.pixels},
+            {"result_edge", (std::max)(response.width, response.height)},
+            {"source_edge", (std::max)(response.source_width, response.source_height)},
+            {"completed", stored}, {"embedded", embedded_psd}, {"cancelled", abandoned},
+            {"elapsed_ms", GetTickCount64() - request_start}});
         mark("stored", stored, response.status);
-        if (!stored) LogFailure(lane, req, request_start, 12, ERROR_CANCELLED, true);
-        if (stored) repaint_.InvalidateAll();
+        if (!stored && !psd_refine) LogFailure(lane, req, request_start, 12, ERROR_CANCELLED, true);
+        if (stored) { NotifyResult(req); if (refine) QueuePsdRefinement(req); }
         if (!ok) StopChild(lane);
         if (keepable && stored && !(folder_store && keep.pixels == folder_shown))
             saver->Save(folder_store ? folder_key : store_key, decode_ms, keep);

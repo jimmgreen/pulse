@@ -13,6 +13,33 @@ namespace {
 constexpr GUID kShadowClsid = {0xC67EA361, 0x1863, 0x4e69, {0x89, 0xdb, 0x69, 0x5d, 0x3e, 0x9a, 0x5b, 0x6b}};
 }  // namespace
 
+void DrawElevationShadow(ID2D1DeviceContext* dc, const D2D1_RECT_F& rect, float radius, float deviation, float drop,
+                         const D2D1_COLOR_F& color, float opacity) {
+    const float alpha = color.a * (std::min)(opacity, 1.0f);
+    if (!dc || !(rect.right > rect.left) || !(rect.bottom > rect.top) || !(alpha > 0.0f)) return;
+    ComPtr<ID2D1SolidColorBrush> brush;
+    ComPtr<ID2D1CommandList> silhouette;
+    if (FAILED(dc->CreateSolidColorBrush(D2D1::ColorF(0x000000), &brush)) ||
+        FAILED(dc->CreateCommandList(&silhouette)) || !silhouette.get())
+        return;
+    // Record untransformed: DrawImage applies the caller's transform once.
+    D2D1_MATRIX_3X2_F transform{};
+    dc->GetTransform(&transform);
+    ComPtr<ID2D1Image> previous;
+    dc->GetTarget(&previous);
+    dc->SetTarget(silhouette.get());
+    dc->SetTransform(D2D1::IdentityMatrix());
+    dc->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), brush.get());
+    dc->SetTransform(transform);
+    dc->SetTarget(previous.get());
+    ComPtr<ID2D1Effect> shadow;
+    if (FAILED(silhouette->Close()) || FAILED(dc->CreateEffect(kShadowClsid, &shadow)) || !shadow.get()) return;
+    shadow->SetInput(0, silhouette.get());
+    shadow->SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, deviation);
+    shadow->SetValue(D2D1_SHADOW_PROP_COLOR, D2D1::Vector4F(color.r, color.g, color.b, alpha));
+    dc->DrawImage(shadow.get(), D2D1::Point2F(0.0f, drop), D2D1_INTERPOLATION_MODE_LINEAR);
+}
+
 void DrawSnackPlate(ID2D1DeviceContext* dc, const D2D1_RECT_F& rect, float radius, const SnackPalette& palette,
                     float scale, bool high_contrast, float opacity) {
     if (!dc || !(rect.right > rect.left) || !(rect.bottom > rect.top) || !(opacity > 0.0f)) return;
@@ -36,27 +63,8 @@ void DrawSnackPlate(ID2D1DeviceContext* dc, const D2D1_RECT_F& rect, float radiu
     const float fade = (std::min)(opacity, 1.0f);
 
     // Fluent flyout elevation: a wide soft shadow below and a tight one around.
-    ComPtr<ID2D1CommandList> silhouette;
-    if (SUCCEEDED(dc->CreateCommandList(&silhouette)) && silhouette.get()) {
-        ComPtr<ID2D1Image> previous;
-        dc->GetTarget(&previous);
-        dc->SetTarget(silhouette.get());
-        brush->SetColor(D2D1::ColorF(0x000000));
-        dc->FillRoundedRectangle(shape, brush.get());
-        dc->SetTarget(previous.get());
-        if (SUCCEEDED(silhouette->Close())) {
-            const auto cast = [&](float deviation, float drop, const D2D1_COLOR_F& color) {
-                ComPtr<ID2D1Effect> shadow;
-                if (color.a * fade <= 0.0f || FAILED(dc->CreateEffect(kShadowClsid, &shadow)) || !shadow.get()) return;
-                shadow->SetInput(0, silhouette.get());
-                shadow->SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, deviation);
-                shadow->SetValue(D2D1_SHADOW_PROP_COLOR, D2D1::Vector4F(color.r, color.g, color.b, color.a * fade));
-                dc->DrawImage(shadow.get(), D2D1::Point2F(0.0f, drop), D2D1_INTERPOLATION_MODE_LINEAR);
-            };
-            cast(8.0f * scale, 6.0f * scale, palette.shadow_key);
-            cast(1.0f * scale, 0.5f * scale, palette.shadow_ambient);
-        }
-    }
+    DrawElevationShadow(dc, rect, radius, 8.0f * scale, 6.0f * scale, palette.shadow_key, fade);
+    DrawElevationShadow(dc, rect, radius, 1.0f * scale, 0.5f * scale, palette.shadow_ambient, fade);
 
     // The shadow fades with its alpha; the glass in a layer (opened only now:
     // the silhouette above retargets the context, which a layer forbids).

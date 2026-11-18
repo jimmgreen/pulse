@@ -1,4 +1,4 @@
-// app_network_page.h - The network page beyond the pins (pulse_network_design.html):
+// app_network_page.h - The network page beyond the pins:
 // 连接服务器 in the New button's slot and the address bar, 最近访问, and the
 // 局域网设备 found by lan_discovery. Window-side; the data is shared through
 // AppCore::networkPage so every window sees the same lists.

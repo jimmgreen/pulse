@@ -10,6 +10,7 @@
 #include "ai_cleanup_scan.h"
 #include "ai_dup_scan.h"
 #include "ai_model_key.h"
+#include "ai_providers.h"
 #include "ai_model_stream.h"
 #include "ai_search_spec.h"
 #include "ai_settings.h"
@@ -70,6 +71,11 @@
 #include <shlobj.h>
 
 namespace pulse {
+// 55 P2: model messages cut off the history with a version (ai_assistant_chat.h).
+struct AiHistoryTail {
+    json::Value messages = json::Value::Array();
+};
+
 struct AiAgent {
     json::Value history = json::Value::Array();   // user / assistant / tool messages
     std::wstring pending_note;                    // told to the model with the next prompt
@@ -81,11 +87,17 @@ struct AiAgent {
     int rounds = 0;
     int tool_count = 0;
     bool organized = false;                       // organize_files ran this turn
+    bool sent_tools = false;                      // this round's request carried the tools
+    bool tools_retried = false;                   // a tools refusal was resent once this turn
     uint32_t think_id = 0;
     uint32_t text_id = 0;
     uint32_t steps_id = 0;
     std::string reasoning;                        // this round, UTF-8
     std::string content;
+    // 继续生成 (55 P2): the part already written (UTF-8) and its text block;
+    // the first round's words go on there and it shows no thinking block.
+    std::string carry;
+    uint32_t carry_id = 0;
     std::vector<app::ai::ModelToolCall> calls;    // this round's
     size_t call_index = 0;
     std::wstring read_folder;                     // for the folded steps line
@@ -175,8 +187,7 @@ std::wstring KnownFolder(const KNOWNFOLDERID& id);
 std::wstring ResolveTaskDest(std::wstring d);
 void ToolTask(AppState& s, const app::ai::ModelToolCall& call, const json::Value& args);
 // ---------------------------------------------------------- space (D) --
-// disk_usage and find_cleanup (plans/ai/Pulse_AI助手_第二批扩展.html, flow
-// D): where a drive's space went, then what in the user's own folders can
+// disk_usage and find_cleanup (flow D): where a drive's space went, then what in the user's own folders can
 // go to the Recycle Bin, after the user ticks and confirms it in Pulse.
 
 constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
@@ -226,7 +237,7 @@ void ToolFindCleanup(AppState& s, const app::ai::ModelToolCall& call, const json
 // ai_agent_dups.cpp
 void ToolFindDuplicates(AppState& s, const app::ai::ModelToolCall& call, const json::Value& args);
 // --------------------------------------------------------- run_actions --
-// P3 (plans/ai/P3_AI接入动作表.html), grown from the third batch's
+// P3, grown from the third batch's
 // control_pulse (flow F): the assistant runs actions of the action table
 // (actions/action_registry.h) by id, in order. View, organize and create
 // actions run at once; programs and system actions ask first (one confirm
@@ -318,6 +329,10 @@ struct CtlStep {
     bool quiet = false;              // no step row: the card that follows says it (the lock card)
 };
 
+// ai_agent_dupfind.cpp: file.find_duplicates waits for its compare (task 46);
+// true while it runs (CtlNext goes on when it ends).
+bool DupStepAsk(AppState& s, std::shared_ptr<CtlRun> run, const json::Value& args);
+
 // ai_agent_mcp.cpp
 bool RunGone(AppState& s, const CtlRun& run);
 void McpLater(AppState& s, std::shared_ptr<app::ai::McpActionsRun> mcp, uint32_t delay, std::function<int(AppState&)> fn);
@@ -367,7 +382,7 @@ CtlStep CtlArgs(AppState& s, CtlRun& run, const std::string& id, const json::Val
 bool IsChooser(std::string_view id);
 CtlStep CtlChooser(AppState& s, const std::string& id);
 // ------------------------------------------------------ file steps (P4c) --
-// plans/ai/P4_全部领域接入.html ② ③: a move, copy, rename or delete in
+// A move, copy, rename or delete in
 // run_actions shows its plan card (the first batch's 整理计划 row for moves,
 // the second batch's Recycle Bin card, the red two-click card for a permanent
 // delete); only after 确认 does Pulse queue the menus' own requests, under one
@@ -403,7 +418,7 @@ using app::actions::SettingText;
 json::Value SettingJson(const SetDef& d, int v);
 // ---------------------------------------------------------------- stream --
 
-// Error card A (plans/ai/Pulse_AI助手_错误与快捷键.html): red needs the user,
+// Error card A: red needs the user,
 // amber passes on its own. "DeepSeek" only for the official service; a custom
 // address is named by its host.
 using ui::AiErrAct;

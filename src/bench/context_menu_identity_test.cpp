@@ -89,16 +89,19 @@ int wmain() {
         bool presets = true;
         for (int i = 0; i < static_cast<int>(BuiltinMenuPreset::Count); ++i) {
             const auto preset = static_cast<BuiltinMenuPreset>(i);
-            presets &= app::BuiltinMenuPresetFor(app::BuiltinMenuPresetHidden(preset)) == preset;
+            const auto hidden = app::BuiltinMenuPresetHidden(preset);
+            presets &= app::BuiltinMenuPresetFor(hidden) == preset;
+            presets &= app::RowActionMask(hidden) == app::kRowActionsAll;
+            presets &= app::BuiltinMenuPresetFor(hidden | app::BuiltinMenuBit(BuiltinMenuItem::RowStar)) == preset;
         }
-        const uint32_t slim = app::BuiltinMenuPresetHidden(BuiltinMenuPreset::Slim);
+        const uint64_t slim = app::BuiltinMenuPresetHidden(BuiltinMenuPreset::Slim);
         presets &= (slim & app::BuiltinMenuBit(BuiltinMenuItem::Paste)) == 0 &&
             (slim & app::BuiltinMenuBit(BuiltinMenuItem::Properties)) == 0 &&
             (slim & app::BuiltinMenuBit(BuiltinMenuItem::PinNetwork)) != 0;
         check(presets, "CMI-B04 presets round-trip; 精简 keeps paste and properties");
         bool fixed_ok = true, separators_ok = true;
         for (int surface = 0; surface < static_cast<int>(app::BuiltinMenuSurface::Count); ++surface) {
-            for (const uint32_t hidden : { 0u, slim, 0xffffffffu }) {
+            for (const uint64_t hidden : { uint64_t{0}, slim, ~uint64_t{0} }) {
                 const auto rows = app::BuiltinMenuVisibleRows(static_cast<app::BuiltinMenuSurface>(surface), hidden);
                 if (!rows.empty()) separators_ok &= !rows.back().separator_after;
                 int fixed = 0;
@@ -118,6 +121,76 @@ int wmain() {
         for (int i = 0; i < app::kBuiltinMenuItemCount; ++i)
             labels &= !app::BuiltinMenuKey(static_cast<BuiltinMenuItem>(i)).empty();
         check(labels, "CMI-B08 every Pulse row has a stable key");
+
+
+        app::ContextMenuPrefs expanded;
+        uint64_t expected_hidden = 0;
+        for (int i = 22; i < app::kBuiltinMenuItemCount; ++i) {
+            const auto item = static_cast<BuiltinMenuItem>(i);
+            expanded.SetBuiltinVisible(item, false);
+            expected_hidden |= app::BuiltinMenuBit(item);
+        }
+        app::ContextMenuPrefs expanded_back;
+        check(expanded_back.FromJson(expanded.ToJson()) && expanded_back.builtin_hidden == expected_hidden &&
+            (expected_hidden >> 32) != 0 && expanded_back.BuiltinVisible(BuiltinMenuItem::OpenInNewTab) &&
+            !expanded_back.BuiltinVisible(BuiltinMenuItem::CloudFree) &&
+            !expanded_back.BuiltinVisible(BuiltinMenuItem::MoveToWindow),
+            "CMI-B09 all 25 added keys round-trip including bits above 31");
+        expanded_back.SetBuiltinVisible(BuiltinMenuItem::MoveToWindow, true);
+        check(expanded_back.builtin_hidden == (expected_hidden & ~app::BuiltinMenuBit(BuiltinMenuItem::MoveToWindow)) &&
+            app::RowActionMask(expected_hidden) == app::kRowActionsAll,
+            "CMI-B10 high-bit switch preserves other choices and the 32-bit row-action mask");
+        const wchar_t* legacy_keys[] = {
+            L"open_new_tab", L"copy_path", L"terminal", L"quick_access", L"pin_workspace", L"pin_network",
+            L"tags", L"recent_changes", L"select", L"undo", L"row_new_tab", L"row_star", L"row_more",
+            L"view", L"sort", L"group", L"refresh", L"new_folder", L"new_text", L"paste", L"properties", L"folder_properties"
+        };
+        bool legacy_compatible = true;
+        for (int i = 0; i < 22; ++i)
+            legacy_compatible &= app::BuiltinMenuKey(static_cast<BuiltinMenuItem>(i)) == legacy_keys[i];
+        app::ContextMenuPrefs legacy;
+        legacy_compatible &= legacy.FromJson(LR"({"pulse_items":{"copy_path":false,"row_star":false}})") &&
+            legacy.builtin_hidden == (app::BuiltinMenuBit(BuiltinMenuItem::CopyPath) | app::BuiltinMenuBit(BuiltinMenuItem::RowStar));
+        check(legacy_compatible, "CMI-B11 original 22 numeric positions and JSON keys stay compatible");
+        int coverage[app::kBuiltinMenuItemCount]{};
+        bool unique_surfaces = true;
+        for (int i = 0; i < static_cast<int>(app::BuiltinMenuSurface::Count); ++i) {
+            const auto surface = static_cast<app::BuiltinMenuSurface>(i);
+            uint64_t seen = 0;
+            for (const auto item : app::BuiltinMenuDefaultOrder(surface)) {
+                const auto bit = app::BuiltinMenuBit(item);
+                unique_surfaces &= (seen & bit) == 0;
+                seen |= bit;
+                ++coverage[static_cast<int>(item)];
+            }
+        }
+        for (int i = 0; i < app::kBuiltinMenuItemCount; ++i)
+            unique_surfaces &= coverage[i] == (app::BuiltinMenuShared(static_cast<BuiltinMenuItem>(i)) ? 2 : 1);
+        check(unique_surfaces && app::BuiltinMenuShared(BuiltinMenuItem::MapNetworkDrive),
+            "CMI-B12 every setting has unique surface coverage; map drive is shared");
+        const auto item_surface = app::BuiltinMenuDefaultOrder(app::BuiltinMenuSurface::Item);
+        const auto background_surface = app::BuiltinMenuDefaultOrder(app::BuiltinMenuSurface::Background);
+        bool new_surfaces = true;
+        for (int i = 22; i < app::kBuiltinMenuItemCount; ++i) {
+            const auto item = static_cast<BuiltinMenuItem>(i);
+            const bool background = item == BuiltinMenuItem::FindDuplicates || item == BuiltinMenuItem::AiOrganizeHere ||
+                item == BuiltinMenuItem::NewTemplates || item == BuiltinMenuItem::Git || item == BuiltinMenuItem::ConnectServer;
+            const bool shared = item == BuiltinMenuItem::MapNetworkDrive;
+            new_surfaces &= (std::find(item_surface.begin(), item_surface.end(), item) != item_surface.end()) == !background;
+            new_surfaces &= (std::find(background_surface.begin(), background_surface.end(), item) != background_surface.end()) == (background || shared);
+        }
+        check(new_surfaces, "CMI-B13 each added setting belongs to its actual menu surface");
+        bool old_orders_kept = true;
+        for (int surface = 0; surface < static_cast<int>(app::BuiltinMenuSurface::Count); ++surface) {
+            const auto kind = static_cast<app::BuiltinMenuSurface>(surface);
+            auto old_order = app::BuiltinMenuDefaultOrder(kind);
+            std::erase_if(old_order, [](auto item) { return static_cast<int>(item) >= 22; });
+            std::reverse(old_order.begin(), old_order.end());
+            auto normalized = app::NormalizeBuiltinMenuOrder(kind, old_order);
+            std::erase_if(normalized, [](auto item) { return static_cast<int>(item) >= 22; });
+            old_orders_kept &= normalized == old_order;
+        }
+        check(old_orders_kept, "CMI-B14 adding rows preserves users' saved relative order of original commands");
 
         // Drag-to-reorder on the settings preview (CMI-O*).
         using app::BuiltinMenuSurface;

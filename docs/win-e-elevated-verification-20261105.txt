@@ -1,0 +1,94 @@
+Pulse Win+E delivery verification, 2026-11-05
+Changed branch: WinEBrokerClient::Poll child_exited / Offered. Committed intent is claimed once after broker death; admitted and terminal slots are not replayed.
+BASELINE.cpp reconstructs the pre-fix early-return branch. It is not a historical full checkout.
+{
+  "baseline": "reconstructed pre-fix early-return branch, not a historical full source checkout",
+  "source_sha256": "b080add70b63d9e1e82ca6ac5ae237c2f9cf99dbfccc44553f5ad1e36d214802",
+  "baseline_sha256": "a2293c0b66af80cffa57f95069bc5c1bd33847f07e59b4207fee7ec2695eaed9"
+}
+Artifacts:
+C:\Users\SS\Desktop\pulse\bench_data\win-e-broker-verification\MODIFIED_FILE.cpp
+C:\Users\SS\Desktop\pulse\bench_data\win-e-broker-verification\DIFF_FILE.patch
+C:\Users\SS\Desktop\pulse\bench_data\win-e-broker-verification\VERIFICATION.txt
+C:\Users\SS\Desktop\pulse\bench_data\win-e-broker-verification\ROLLBACK.sh
+
+BASELINE
+COMMAND: powershell -NoProfile -File C:/Users/SS/Desktop/pulse/bench_data/win-e-broker-verification/run_case.ps1 BASELINE
+INPUT: exited child; Offered/Admitted/Dispatched/Rejected states; repeated Poll.
+LITERAL OUTPUT:
+[FAIL] exited broker's committed offer is claimed once and ownership returns to medium
+[PASS] repeated poll cannot duplicate committed offer after broker death
+[FAIL] completed dead-broker offer retains dispatched receipt
+[PASS] terminal dispatched receipt is never replayed
+[PASS] admitted or terminal dead-broker state is not replayed
+[PASS] admitted or terminal dead-broker state is not replayed
+[PASS] admitted or terminal dead-broker state is not replayed
+
+EXIT STATUS: 1
+
+MODIFIED
+COMMAND: powershell -NoProfile -File C:/Users/SS/Desktop/pulse/bench_data/win-e-broker-verification/run_case.ps1 MODIFIED
+INPUT: exited child; Offered/Admitted/Dispatched/Rejected states; repeated Poll.
+LITERAL OUTPUT:
+[PASS] exited broker's committed offer is claimed once and ownership returns to medium
+[PASS] repeated poll cannot duplicate committed offer after broker death
+[PASS] completed dead-broker offer retains dispatched receipt
+[PASS] terminal dispatched receipt is never replayed
+[PASS] admitted or terminal dead-broker state is not replayed
+[PASS] admitted or terminal dead-broker state is not replayed
+[PASS] admitted or terminal dead-broker state is not replayed
+
+EXIT STATUS: 0
+
+ROLLBACK
+COMMAND: powershell -NoProfile -File C:/Users/SS/Desktop/pulse/bench_data/win-e-broker-verification/run_case.ps1 ROLLBACK
+INPUT: exited child; Offered/Admitted/Dispatched/Rejected states; repeated Poll.
+LITERAL OUTPUT:
+[FAIL] exited broker's committed offer is claimed once and ownership returns to medium
+[PASS] repeated poll cannot duplicate committed offer after broker death
+[FAIL] completed dead-broker offer retains dispatched receipt
+[PASS] terminal dispatched receipt is never replayed
+[PASS] admitted or terminal dead-broker state is not replayed
+[PASS] admitted or terminal dead-broker state is not replayed
+[PASS] admitted or terminal dead-broker state is not replayed
+
+EXIT STATUS: 1
+
+ROLLBACK preparation: C:/Program Files/Git/bin/bash.exe bench_data/win-e-broker-verification/ROLLBACK.sh
+LITERAL OUTPUT: RESTORED: isolated fixture uses the pre-fix child_exited early-return branch
+EXIT STATUS: 0
+Restored behavior: isolated rollback copy equals baseline and reproduces the same two failures. Production source and MODIFIED_FILE retain the fix.
+
+Native command: C:/Users/SS/Desktop/pulse/bench_data/win-e-native/production-broker/pulse_win_e_broker_live_test.exe --run-native
+INPUT: actual high and medium integrity fixture windows, five repeated E-downs per simulated chord. Test-only fixed marker permits guarded SendInput; release broker ignores injected keys.
+LITERAL OUTPUT:
+SELF pid=52820 integrity=8192
+[PASS] real broker high integrity and validated live handshake
+[PASS] high foreground repeated chord produces one real broker request
+[PASS] medium foreground after ownership handoff does not double-submit
+[PASS] broker exits after production Stop with completed deliveries
+[PASS] stopped broker and medium hook produce no new requests
+[PASS] fixed intent only; no fallback, physical interference or held modifiers
+RESTORE_FOREGROUND=1
+SUMMARY failures=0 requests=2 high_pid=11956 high_il=12288 stage=3 error=0 fallback=0
+LOG_ROOT=C:\Users\SS\Desktop\pulse\bench_data\win-e-native\production-broker\native-52820
+
+EXIT STATUS: 0
+
+Other checks: protocol 17 PASS; export --win-e-context 10 PASS; release payload/static CRT; 47 installer hashes; native installed-bundle resolver 2 PASS; packaged language resources PASS.
+Build succeeded, with one pre-existing C4100 in unrelated action_registry.cpp:124; no broker/client warnings.
+Initial isolated-desktop test attempts exited 2 before UAC/input; real-desktop run passed.
+The live test verifies real privilege separation and application queue delivery, not a real Wuthering Waves session or Pulse window presentation. Native Explorer COM recovery compiled but was not exercised by the success-path fixture.
+Dedicated broker asks for standard runas approval each enabled Pulse session. Declining retains the medium hook. Pulse and file operations remain medium integrity.
+
+Installer verification:
+{
+  "file": "C:\\Users\\SS\\Desktop\\pulse\\dist\\PulseSetup-1.0.58-win-e-elevated-20261105.exe",
+  "bytes": 12509832,
+  "sha256": "38d2de92dd5bad80307b31d71d1e78d84a2b9f0f37fb685daf0b2f796400816d",
+  "verified_files": 47,
+  "version": "1.0.58",
+  "channel": "windows",
+  "current_runtime_binaries_match": true,
+  "current_launcher_and_setup_match": true
+}

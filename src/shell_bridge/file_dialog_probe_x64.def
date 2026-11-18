@@ -1,0 +1,4 @@
+LIBRARY PulsePickerBridgeProbe
+EXPORTS
+    PulseBridgeProbeGetApi
+    PulseBridgeProbeGetFixtureApi

@@ -1,4 +1,4 @@
-// context_menu_prefs.cpp — JSON load/save for the Explorer fusion-zone prefs.
+﻿// context_menu_prefs.cpp — JSON load/save for the Explorer fusion-zone prefs.
 #include "context_menu_prefs.h"
 #include "../common/config_json.h"
 #include "session.h"
@@ -13,6 +13,18 @@ namespace pulse::app {
 namespace {
 
 using pulse::json::ExtractObject;
+constexpr size_t kSeenCatalogLimit = 400;
+
+void RetireOldestSeen(ContextMenuPrefs& prefs) {
+    auto oldest = std::find_if(prefs.seen.begin(), prefs.seen.end(), [&](const auto& row) {
+        return !prefs.item_enabled.contains(row.key) && !prefs.ComDisabled(row.key);
+    });
+    if (oldest == prefs.seen.end()) oldest = prefs.seen.begin();
+    // The catalog is bounded discovery metadata; user overrides and disabled
+    // handler state remain intact even when every catalog row is configured.
+    if (oldest != prefs.seen.end()) prefs.seen.erase(oldest);
+}
+
 
 // 2: slow_ext only holds handlers the host proved hung (collect_hung). Files
 // written before that carry disables from the old "everyone still running
@@ -20,7 +32,8 @@ using pulse::json::ExtractObject;
 // 3: 发送到 / 共享 and the system groups default on (Explorer parity). Older
 // files stored the old off defaults as plain values, so they are turned on
 // once; per-row switches in "items" are the user's and stay.
-constexpr int kPrefsVersion = 3;
+// 4: expose COM Open-with entries and remove the old implicit MRU cap.
+constexpr int kPrefsVersion = 4;
 
 int ClampCap(int v, int lo, int hi, int fallback) {
     if (v < lo || v > hi) return fallback;
@@ -41,10 +54,10 @@ void ContextMenuPrefs::ResetToDefaults() {
     rotate = true;
     shortcut = true;
     open_with = true;
-    open_with_com = false;
+    open_with_com = true;
     system_extra = true;
     print = true;
-    open_with_mru = 2;
+    open_with_mru = -1;
     item_enabled.clear();
     seen.clear();
     slow_ext.clear();
@@ -92,7 +105,7 @@ bool ContextMenuPrefs::ItemEnabled(const std::wstring& key, ipc::CtxMenuCategory
                                    bool from_com) const {
     const auto it = item_enabled.find(key);
     if (it != item_enabled.end()) return it->second;
-    if (c == ipc::CtxMenuCategory::OpenWith && from_com) return open_with_com;
+    if (c == ipc::CtxMenuCategory::OpenWith && from_com) return open_with && open_with_com;
     return CategoryEnabled(c);
 }
 
@@ -183,9 +196,12 @@ std::vector<std::wstring> ContextMenuPrefs::DisabledHandlerClsids() const {
 bool ContextMenuPrefs::RecordSeen(const std::wstring& key, const std::wstring& text,
                                   bool flyout, ipc::CtxMenuCategory category, bool from_com) {
     if (key.empty() || text.empty()) return false;
-    for (const auto& item : seen)
-        if (item.key == key) return false;
-    if (seen.size() >= 400) return false;
+    const auto found = std::find_if(seen.begin(), seen.end(), [&](const auto& item) { return item.key == key; });
+    if (found != seen.end()) {
+        std::rotate(found, std::next(found), seen.end());
+        return false;
+    }
+    while (seen.size() >= kSeenCatalogLimit) RetireOldestSeen(*this);
     SeenMenuItem item;
     item.key = key;
     item.text = text;
@@ -349,7 +365,7 @@ std::wstring ContextMenuPrefs::ToJson() const {
 bool ContextMenuPrefs::FromJson(const std::wstring& json) {
     if (!pulse::json::ValidConfigObject(json)) return false;
     // "explorer_cap" of older files is ignored: the menu has no row cap.
-    open_with_mru = ClampCap(pulse::json::ExtractInt(json, L"open_with_mru", 2), 0, 8, 2);
+    open_with_mru = ClampCap(pulse::json::ExtractInt(json, L"open_with_mru", -1), -1, 8, -1);
 
     const std::wstring cats = ExtractObject(json, L"categories");
     const std::wstring& src = cats.empty() ? json : cats;
@@ -359,7 +375,7 @@ bool ContextMenuPrefs::FromJson(const std::wstring& json) {
     rotate = pulse::json::ExtractBool(src, L"rotate", true);
     shortcut = pulse::json::ExtractBool(src, L"shortcut", true);
     open_with = pulse::json::ExtractBool(src, L"open_with", true);
-    open_with_com = pulse::json::ExtractBool(src, L"open_with_com", false);
+    open_with_com = pulse::json::ExtractBool(src, L"open_with_com", true);
     system_extra = pulse::json::ExtractBool(src, L"system_extra", true);
     print = pulse::json::ExtractBool(src, L"print", true);
 
@@ -453,6 +469,11 @@ bool ContextMenuPrefs::FromJson(const std::wstring& json) {
     if (version < 3) {
         share = wallpaper = rotate = shortcut = system_extra = true;
     }
+    if (version < 4) {
+        open_with_com = true;
+        if (open_with_mru == 2) open_with_mru = -1;
+    }
+    while (seen.size() > kSeenCatalogLimit) RetireOldestSeen(*this);
     migrated = version < kPrefsVersion;
     return true;
 }

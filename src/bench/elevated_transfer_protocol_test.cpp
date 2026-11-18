@@ -1,5 +1,7 @@
 #include "../ipc/elevated_transfer_protocol.h"
+#include "../ipc/elevated_transfer_messages.h"
 #include <iostream>
+#include "../common/virtual_disk_eject.h"
 int main() {
     using namespace pulse::elevated;
     int failed = 0;
@@ -16,7 +18,7 @@ int main() {
     header.kind = Kind::RecycleDelete;
     check(ValidHeader(header, nonce) && Kind::RecycleDelete != Kind::PermanentDelete, "recycle and permanent requests have distinct bounded opcodes");
     header.version = kVersion - 1;
-    check(!ValidHeader(header, nonce), "old protocol cannot reinterpret v3 named-transfer payloads");
+    check(!ValidHeader(header, nonce), "old protocol cannot reinterpret v7 status payloads");
     Writer writer; writer.Number<uint32_t>(1); writer.Text(L"sample");
     Reader reader{writer.bytes};
     check(reader.Number<uint32_t>() == 1 && reader.Text() == L"sample" && reader.Done(), "bounded round trip");
@@ -38,7 +40,41 @@ int main() {
           "named target rejects traversal, device, stream and absolute paths");
     Writer named; named.Text(L"original.txt"); Reader named_reader{named.bytes};
     check(named_reader.Text() == L"original.txt" && named_reader.Done(), "exact Move leaf survives bounded UTF-16 round trip");
+    header.version = kVersion; header.kind = Kind::EjectVirtualDisk;
+    check(ValidHeader(header, nonce), "identity-bound eject opcode accepted by private elevated protocol");
+    check(pulse::storage::ValidVolumeName(L"\\\\?\\Volume{01234567-89ab-cdef-0123-456789abcdef}\\") &&
+          !pulse::storage::ValidVolumeName(L"C:\\") && !pulse::storage::ValidVolumeName(L"\\\\.\\PhysicalDrive0"),
+          "eject identity only accepts exact volume GUID syntax");
     Nonce parsed{};
     check(ParseNonce(NonceText(nonce), parsed) && parsed == nonce && !ParseNonce(L"xyz", parsed), "nonce parser exact length and alphabet");
+    pulse::ops::OpStatus discovering;
+    discovering.phase = pulse::ops::OpPhase::Running;
+    discovering.enumeration_complete = false;
+    discovering.percent = -1.0f;
+    discovering.eta_seconds = 0;
+    discovering.total_items = 64; discovering.completed_items = 23;
+    discovering.total_bytes = 4096; discovering.transferred_bytes = 1024;
+    discovering.current_item = L"sample";
+    Writer unknown_status; WriteStatus(unknown_status, discovering);
+    Reader unknown_reader{unknown_status.bytes};
+    const auto unknown_copy = ReadStatus(unknown_reader);
+    check(unknown_status.good && unknown_reader.Done() && !unknown_copy.enumeration_complete &&
+          unknown_copy.percent < 0 && unknown_copy.eta_seconds == 0 && unknown_copy.total_items == 64 &&
+          unknown_copy.completed_items == 23 && unknown_copy.transferred_bytes == 1024 && unknown_copy.current_item == L"sample",
+          "unknown enumeration totals survive elevated status round trip");
+    discovering.phase = pulse::ops::OpPhase::Completed;
+    discovering.enumeration_complete = true; discovering.percent = 100.0f;
+    Writer complete_status; WriteStatus(complete_status, discovering);
+    Reader complete_reader{complete_status.bytes};
+    const auto complete_copy = ReadStatus(complete_reader);
+    check(complete_reader.Done() && complete_copy.enumeration_complete && complete_copy.percent == 100.0f &&
+          complete_copy.phase == pulse::ops::OpPhase::Completed, "completed enumeration survives elevated status round trip");
+    auto malformed = complete_status.bytes;
+    malformed[malformed.size() - sizeof(uint32_t)] = 2;
+    Reader malformed_reader{malformed}; ReadStatus(malformed_reader);
+    check(!malformed_reader.Done(), "non-boolean enumeration flag rejected");
+    complete_status.bytes.resize(complete_status.bytes.size() - sizeof(uint32_t));
+    Reader legacy_reader{complete_status.bytes}; ReadStatus(legacy_reader);
+    check(!legacy_reader.Done(), "missing v7 enumeration flag rejected");
     return failed ? 1 : 0;
 }

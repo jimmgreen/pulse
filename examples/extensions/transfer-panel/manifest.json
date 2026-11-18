@@ -1,0 +1,40 @@
+{
+  "apiVersion": 1,
+  "id": "example.transfer-panel",
+  "name": "双栏文件计划",
+  "commands": [
+    {
+      "id": "copy",
+      "title": "复制到另一窗格",
+      "capability": "files.copySelectionToOtherPane"
+    },
+    {
+      "id": "move",
+      "title": "移动到另一窗格",
+      "capability": "files.moveSelectionToOtherPane"
+    }
+  ],
+  "panel": {
+    "title": "双栏文件计划",
+    "description": "需恰好两个可见窗格，选择普通文件后逐次确认；不会覆盖现有文件。",
+    "commands": [
+      "copy",
+      "move"
+    ],
+    "fields": [
+      {
+        "label": "当前目录",
+        "binding": "context.directory"
+      },
+      {
+        "label": "已选数量",
+        "binding": "context.selectionCount"
+      },
+      {
+        "label": "本包传输状态",
+        "binding": "context.transferStatus",
+        "empty": "暂无可用状态"
+      }
+    ]
+  }
+}

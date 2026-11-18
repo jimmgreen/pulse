@@ -386,6 +386,7 @@ struct DriveMedia {
     uint64_t free = 0;
     bool locked = false;
     bool remote_fs = false;  // WinFsp / Dokan / cloud file system name
+    std::wstring fs_name;    // NTFS, exFAT, ...
 };
 
 struct DriveMediaProbe {
@@ -406,6 +407,7 @@ DriveMedia QueryDriveMedia(const wchar_t* root) {
     if (GetVolumeInformationW(root, label, MAX_PATH, nullptr, nullptr, nullptr, fs_name, MAX_PATH)) {
         media.label = label;
         media.remote_fs = IsRemoteLikeFileSystemName(fs_name);
+        media.fs_name = fs_name;
     }
     else
         media.locked = IsBitLockerLockedError(GetLastError());
@@ -504,6 +506,7 @@ static void EnumerateThisPc(std::vector<DirEntry>& out, const std::atomic<bool>*
             e.drive_total = media->total;
             e.drive_free = media->free;
             e.drive_locked = media->locked;
+            if (!media->remote_fs) e.drive_fs = media->fs_name;
         }
         out.push_back(std::move(e));
     }

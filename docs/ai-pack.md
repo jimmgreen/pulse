@@ -52,6 +52,10 @@ AI 应用第一次连接时，Pulse 会弹出「「Claude」想连接 Pulse」�
 | `find_actions` | 查找 Pulse 的动作（和菜单、快捷键、命令面板是同一张表），并告诉 AI 哪些动作你允许它用 | 不询问 |
 | `run_actions` | 按顺序执行动作，最多 12 步 | 由动作所在的分组决定，见下表 |
 | `undo_last` | 撤销 AI 刚才做的改动 | 只能撤销 AI 自己的、仍在撤销栈顶的改动 |
+| `describe_extension_api`（开发分支） | 获取声明式增强包的公开接口与清单规范 | 不询问 |
+| `validate_extension_manifest`（开发分支） | 校验 AI 提供的清单文本；不会安装或运行 | 不询问 |
+
+使用新增开发工具需要配套更新主程序和 AI 增强包。希望让 AI 帮助制作自定义面板时，参考 [增强包 SDK 与 AI 开发流程](../sdk/native/README.md)。
 
 ### AI 应用可以做的事
 

@@ -35,6 +35,7 @@ struct CtxMenuItem {
     std::wstring handler;
     wchar_t mnemonic = 0;         // access key ("&X" of the raw label), 0 = none
     common::MenuIconRef icon;     // the row's app icon (MIIM_BITMAP), if any
+    uint8_t depth = 0;          // preorder tree depth; legacy child rows default to 1
 };
 
 // The optional tail of an RSP_CTX_ITEMS payload.

@@ -1,5 +1,5 @@
-#pragma once
-// Photo wall aspect ratios (Pulse_视图切换与图标密度方案.html, P2): width /
+﻿#pragma once
+// Photo wall aspect ratios (P2): width /
 // height of pictures and videos. Decoded thumbnails report theirs while they
 // are drawn; a background probe reads the rest from the file header (JPEG with
 // its EXIF orientation, PNG, GIF, BMP, WebP) or, for other formats, the
@@ -9,6 +9,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <map>
+#include <deque>
+#include <unordered_set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -31,8 +34,13 @@ public:
     static WallAspects& Instance();
     // Key of a path (never 0).
     static uint64_t Hash(const std::wstring& path) noexcept;
+    static uint64_t ContentHash(const std::wstring& path, uint64_t modified, uint64_t size) noexcept;
+    struct AspectChange { uint64_t hash; float aspect; };
+    bool ChangesSince(uint64_t& version, std::vector<AspectChange>& changes) const;
+    void ReplaceDemand(uint64_t owner, HWND notify, std::vector<std::pair<uint64_t, std::wstring>> files);
+    void RemoveDemand(uint64_t owner);
     // out[i] = known aspect of hashes[i], left alone when not known (0 hashes skipped).
-    void Lookup(const uint64_t* hashes, float* out, size_t count) const;
+    bool Lookup(const uint64_t* hashes, float* out, size_t count) const;
     // A decoded thumbnail's aspect; true when it differs from what was known
     // by more than rounding (a 256 px decode of a 1500x1000 photo is 1.506).
     bool Note(uint64_t hash, float aspect);
@@ -49,12 +57,24 @@ private:
     static void CALLBACK Work(PTP_CALLBACK_INSTANCE, void* context);
     void Run();
     bool Store(uint64_t hash, float aspect, float tolerance);
+    bool StoreLocked(uint64_t hash, float aspect, float tolerance);
+    bool TakeLocked(std::pair<uint64_t, std::wstring>& file);
+    bool WantedLocked(uint64_t hash) const;
+    void NotifyLocked();
+    friend struct WallAspectDemandTest;
 
     mutable std::mutex mutex_;
     std::unordered_map<uint64_t, float> known_;
     std::atomic<uint64_t> version_{1};
-    std::vector<std::pair<uint64_t, std::wstring>> queue_;  // probed from the back
-    HWND notify_ = nullptr;
+    struct Demand {
+        HWND notify = nullptr;
+        std::vector<std::pair<uint64_t, std::wstring>> files;
+        std::unordered_set<uint64_t> attempted;
+    };
+    std::map<uint64_t, Demand> demands_;
+    uint64_t last_owner_ = 0;
+    std::unordered_set<HWND> dirty_windows_;
+    std::deque<std::pair<uint64_t, AspectChange>> changes_;
     bool running_ = false;
 };
 

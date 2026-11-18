@@ -16,6 +16,7 @@
 #include "index_config.h"
 #include "../common/crash_reporter.h"
 #include "../common/diagnostics_exporter.h"
+#include "../common/runtime_log.h"
 #include "index_paths.h"
 #include "index_path_service.h"
 #include "network_agent_host.h"
@@ -83,6 +84,7 @@ struct Client {
     bool writing = false;
     std::thread writer;
     std::atomic<bool> alive{true};
+    std::atomic<bool> release_connection{false};
     std::atomic<uint32_t> latest_search{0};
     struct Subscription { uint32_t id = 0; Query query; std::shared_ptr<std::atomic<uint32_t>> latest = std::make_shared<std::atomic<uint32_t>>(0); uint32_t sent_id = 0; uint64_t sent_hash = 0; };
     std::mutex subscriptions_mu;
@@ -90,6 +92,7 @@ struct Client {
     std::atomic<bool> thread_done{false};
     std::wstring tracking_owner;
     bool tracking_lease = false;
+    std::shared_ptr<VolumePause> volume_pause;
     // #66: the caller's own token, captured from its first request, and the
     // folders already checked against it for searches (search thread only).
     HANDLE caller_token = nullptr;
@@ -283,6 +286,7 @@ std::vector<uint8_t> StatusPayload() {
     w.PutString(g.engine.Status());
     w.PutU32(g.engine.PinyinReady() ? 1u : 0u);
     w.PutU64(g.engine.Revision()); w.PutU32(1);
+    w.PutU32(kVolumePauseCapability);
     return w.data();
 }
 
@@ -295,7 +299,7 @@ void BroadcastStatus() {
         clients = g.clients;
     }
     for (auto& c : clients) {
-        if (c && c->alive) {
+        if (c && c->alive && !c->release_connection) {
             WriteFrame(*c, RSP_IDX_STATUS, 0, payload);
             std::vector<Client::Subscription> subscriptions;
             { std::lock_guard lock(c->subscriptions_mu); for (const auto& [id, sub] : c->subscriptions) if (sub.query.subscribe) subscriptions.push_back(sub); }
@@ -600,6 +604,7 @@ void SetTrackingLease(Client& c, const std::wstring& owner, bool enabled) {
 
 void DropClient(const std::shared_ptr<Client>& c) {
     if (!c) return;
+    g.engine.ResumeVolumes(c->volume_pause);
     if (!c->tracking_owner.empty()) SetTrackingLease(*c, c->tracking_owner, false);
     {
         std::lock_guard lock(c->write_mu);
@@ -722,7 +727,47 @@ void ClientThread(std::shared_ptr<Client> c) {
             break;
         // Impersonation needs a completed read; searches are queued only after this.
         if (!c->caller_token && CallerFilter()) c->caller_token = CaptureCallerToken(pipe);
-        if(hdr.type==8) {
+        if (hdr.type == REQ_IDX_VOLUME_PAUSE) {
+            c->release_connection = true;
+            PayloadReader reader(payload.data(), payload.size());
+            uint32_t count = 0;
+            DWORD error = ERROR_SUCCESS;
+            std::vector<std::wstring> ids, roots;
+            if (c->volume_pause || TrackingOwner(pipe).empty() || !reader.GetU32(count) || !count || count > 64) break;
+            ListCheck list{c->caller_token};
+            for (uint32_t i = 0; i < count; ++i) {
+                std::wstring root;
+                if (!reader.GetString(root) || root.empty() || root.size() > 32767) { error = ERROR_INVALID_PARAMETER; break; }
+                if (root.back() != L'\\') root += L'\\';
+                wchar_t id[MAX_PATH]{};
+                if (!GetVolumeNameForVolumeMountPointW(root.c_str(), id, MAX_PATH)) {
+                    error = GetLastError();
+                    if ((error == ERROR_NOT_READY || error == ERROR_NO_MEDIA_IN_DRIVE) && GetDriveTypeW(root.c_str()) == DRIVE_CDROM) {
+                        error = ERROR_SUCCESS;
+                        continue; // Empty optical tray has no mounted volume resources to release.
+                    }
+                    break;
+                }
+                if (!list.Dir(root)) { error = ERROR_ACCESS_DENIED; break; }
+                ids.emplace_back(id); roots.push_back(root);
+                DWORD needed = 0;
+                GetVolumePathNamesForVolumeNameW(id, nullptr, 0, &needed);
+                if (needed && needed <= 65536) {
+                    std::vector<wchar_t> paths(needed);
+                    if (GetVolumePathNamesForVolumeNameW(id, paths.data(), needed, &needed))
+                        for (const wchar_t* path = paths.data(); *path; path += wcslen(path) + 1) roots.emplace_back(path);
+                }
+            }
+            if (error == ERROR_SUCCESS && reader.remaining()) error = ERROR_INVALID_PARAMETER;
+            if (error == ERROR_SUCCESS && !ids.empty()) {
+                c->volume_pause = g.engine.PauseVolumes(std::move(ids), std::move(roots));
+                if (c->volume_pause->ready.wait_for(std::chrono::seconds(10)) != std::future_status::ready) error = ERROR_TIMEOUT;
+                else try { c->volume_pause->ready.get(); } catch (...) { error = ERROR_DEVICE_IN_USE; }
+                if (error != ERROR_SUCCESS) g.engine.ResumeVolumes(c->volume_pause);
+            }
+            PayloadWriter writer; writer.PutU32(error);
+            if (!WriteFrame(*c, RSP_IDX_VOLUME_PAUSE, hdr.request_id, writer.data())) break;
+        } else if(hdr.type==8) {
             PayloadReader reader(payload.data(),payload.size());uint64_t session=0;
             if(!reader.GetU64(session)) break;
             std::lock_guard lock(c->subscriptions_mu);
@@ -1218,6 +1263,21 @@ void ConfigureServiceRecovery(SC_HANDLE svc) {
     }
 }
 
+int EnsureInstalledServiceState() {
+    SetMachineIndexScope(true);
+    IndexConfig config;
+    if (!LoadMachineConfig(config, nullptr)) return ERROR_INVALID_DATA;
+    pulse::diagnostics::runtime::Event("index_service_configuration", {{"install", 0},
+        {"search_enabled", config.search_enabled}});
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return static_cast<int>(GetLastError());
+    SC_HANDLE service = OpenServiceW(scm, kServiceName, SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP);
+    const DWORD error = service ? EnsureServiceState(service, config.search_enabled) : GetLastError();
+    if (service) CloseServiceHandle(service);
+    CloseServiceHandle(scm);
+    return static_cast<int>(error);
+}
+
 int InstallService() {
     SetMachineIndexScope(true);
     // Repair ProgramData ACLs on every install so older SY/BA-only trees become
@@ -1225,8 +1285,10 @@ int InstallService() {
     (void)MachineDataRoot();
     (void)MachineIndexRoot();
     IndexConfig config;
-    LoadMachineConfig(config, nullptr);
-    SaveMachineConfig(config, nullptr);
+    if (!LoadMachineConfig(config, nullptr)) return ERROR_INVALID_DATA;
+    pulse::diagnostics::runtime::Event("index_service_configuration", {{"install", 1},
+        {"search_enabled", config.search_enabled}});
+    if (!SaveMachineConfig(config, nullptr)) return ERROR_WRITE_FAULT;
     const std::wstring bin = L"\"" + SelfPath() + L"\" --service";
 
     DWORD last_err = ERROR_GEN_FAILURE;
@@ -1235,7 +1297,7 @@ int InstallService() {
         if (!scm) return static_cast<int>(GetLastError());
 
         SC_HANDLE svc = OpenServiceW(scm, kServiceName,
-                                     SERVICE_START | SERVICE_QUERY_STATUS |
+                                     SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS |
                                          SERVICE_CHANGE_CONFIG | READ_CONTROL | WRITE_DAC);
         if (!svc && GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST) {
             svc = CreateServiceW(scm, kServiceName, L"Pulse Index",
@@ -1261,17 +1323,7 @@ int InstallService() {
             desc.lpDescription = text;
             ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
             ConfigureServiceRecovery(svc);
-            last_err = EnsureServiceRunning(
-                [&](SERVICE_STATUS_PROCESS& status) -> DWORD {
-                    DWORD needed = 0;
-                    return QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO,
-                        reinterpret_cast<LPBYTE>(&status), sizeof(status), &needed)
-                        ? ERROR_SUCCESS : GetLastError();
-                },
-                [&]() -> DWORD {
-                    return StartServiceW(svc, 0, nullptr) ? ERROR_SUCCESS : GetLastError();
-                },
-                [](DWORD delay) { Sleep(delay); });
+            last_err = EnsureServiceState(svc, config.search_enabled);
         }
         CloseServiceHandle(svc);
         CloseServiceHandle(scm);
@@ -1418,7 +1470,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         : pulse::crash::ProcessRole::IndexHelper;
     pulse::crash::Initialize({role, service_mode, {}});
 
-    if (a1 == L"--install") return InstallService();
+    if (a1 == L"--install" || a1 == L"--ensure-service-state") {
+        const bool install = a1 == L"--install";
+        const int result = install ? InstallService() : EnsureInstalledServiceState();
+        pulse::diagnostics::runtime::Event("index_service_configuration_result", {{"install", install},
+            {"error", static_cast<DWORD>(result)}}, result ? pulse::diagnostics::runtime::Level::Error
+                                                         : pulse::diagnostics::runtime::Level::Info);
+        pulse::diagnostics::runtime::Flush();
+        return result;
+    }
     if (a1 == L"--uninstall") return UninstallService();
     if (a1 == L"--export-diagnostics") return ExportDiagnosticsCommand(args);
     if (a1 == L"--configure-volume" || a1 == L"--set-index-path" ||

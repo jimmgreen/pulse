@@ -352,6 +352,11 @@ ModelProbe ProbeModelService(ModelEndpoint endpoint) {
         return probe;
     }
     std::wstring headers = L"Accept: application/json\r\nAuthorization: Bearer " + endpoint.key + L"\r\n";
+    // Anthropic lists its models only to its own key header (chat takes the bearer).
+    const std::wstring anthropic = L"api.anthropic.com";
+    if (url.host.size() >= anthropic.size() &&
+        url.host.compare(url.host.size() - anthropic.size(), anthropic.size(), anthropic) == 0)
+        headers += L"x-api-key: " + endpoint.key + L"\r\nanthropic-version: 2023-06-01\r\n";
     const BOOL sent = WinHttpSendRequest(request.value, headers.c_str(), static_cast<DWORD>(headers.size()),
                                          WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
     SecureZeroMemory(headers.data(), headers.size() * sizeof(wchar_t));
@@ -367,7 +372,8 @@ ModelProbe ProbeModelService(ModelEndpoint endpoint) {
     for (;;) {
         DWORD read = 0;
         if (!WinHttpReadData(request.value, buffer.data(), static_cast<DWORD>(buffer.size()), &read) || read == 0) break;
-        if (body.size() < 256 * 1024) body.append(buffer.data(), read);
+        // OpenRouter's list (descriptions, prices …) runs to megabytes.
+        if (body.size() < 16 * 1024 * 1024) body.append(buffer.data(), read);
     }
     probe.http_status = static_cast<int>(status);
     probe.ms = static_cast<uint32_t>(GetTickCount64() - started);
@@ -375,8 +381,18 @@ ModelProbe ProbeModelService(ModelEndpoint endpoint) {
         json::Value v;
         if (json::Parse(body, v) && v.is_object())
             if (const json::Value* data = v.find("data"); data && data->is_array())
-                for (const json::Value& m : data->items())
-                    if (std::string id = m.get_string("id"); !id.empty()) probe.models.push_back(std::move(id));
+                for (const json::Value& m : data->items()) {
+                    std::string id = m.get_string("id");
+                    if (id.empty()) continue;
+                    // OpenRouter: supported_parameters without "tools" (仅聊天).
+                    if (const json::Value* params = m.find("supported_parameters"); params && params->is_array()) {
+                        bool tools = false;
+                        for (const json::Value& p : params->items())
+                            if (p.is_string() && p.as_string() == "tools") tools = true;
+                        if (!tools) probe.chat_only.push_back(id);
+                    }
+                    probe.models.push_back(std::move(id));
+                }
     } else {
         ReadError(body, probe.error_type, probe.error_message);
     }

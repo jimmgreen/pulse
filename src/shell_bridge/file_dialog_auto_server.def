@@ -1,0 +1,4 @@
+LIBRARY PulseDialogAuto64
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE

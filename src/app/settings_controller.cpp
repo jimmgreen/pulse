@@ -1,3 +1,4 @@
+#include "../ui/window_material.h"
 #include "../common/windows_compat.h"
 #include "../common/localization.h"
 #include "settings_controller.h"
@@ -13,6 +14,7 @@
 #include "system_ctx_model.h"
 #include "shortcut_settings.h"
 #include "pack_catalog.h"
+#include "update_transport.h"
 #include "../ui/quick_preview_command.h"
 #include "../ui/settings_page_ids.h"
 
@@ -133,6 +135,8 @@ int SettingsController::PageFromName(std::wstring_view name) noexcept {
     if (name == L"tabs") return 10;
     if (name == L"system") return 11;
     if (name == L"file-ops") return 12;
+    if (name == L"native-extensions") return ui::kSettingsPageNativeExtensions;
+    if (name == L"assistant") return ui::kSettingsPageAssistant;
     return 0;
 }
 
@@ -150,12 +154,14 @@ const wchar_t* SettingsController::PageName(int page) noexcept {
     if (page == 10) return L"tabs";
     if (page == 11) return L"system";
     if (page == 12) return L"file-ops";
+    if (page == ui::kSettingsPageAssistant) return L"assistant";
+    if (page == ui::kSettingsPageNativeExtensions) return L"native-extensions";
     return L"general";
 }
 
 void SettingsController::SelectPage(int page) noexcept {
     CancelGlobalSearchHotkeyCapture();
-    page_ = std::clamp(page, 0, ui::kSettingsPageAi);
+    page_ = std::clamp(page, 0, ui::kSettingsPageNativeExtensions);
     scroll_ = 0.0f;
     packs_checked_ = 0;  // re-read the packs when their page opens
 }
@@ -200,24 +206,20 @@ void SettingsController::RefreshPacks() {
     const auto raw = packs::ReadInstalledPack(PackId::Raw);
     state.raw_installed = raw.present;
     state.raw_version = raw.version;
-    state.archive_notice = std::move(packs_.archive_notice);
-    const auto archive = packs::ReadInstalledPack(PackId::Archives);
-    state.archive_installed = archive.present;
-    state.archive_version = archive.version;
     state.root = packs::PacksRoot();
     const packs::PackSettings settings = packs::LoadPackSettings();
     state.raw_enabled = settings.enabled[static_cast<uint32_t>(PackId::Raw)];
-    state.archive_enabled = settings.enabled[static_cast<uint32_t>(PackId::Archives)];
     state.media_available = kMediaPackRelease.file_count != 0;
     state.images_available = kImagePackRelease.file_count != 0;
     state.raw_available = kRawPackRelease.file_count != 0;
-    state.archive_available = kArchivePackRelease.file_count != 0;
     state.enabled = settings.enabled[static_cast<uint32_t>(PackId::Media)];
     state.images_enabled = settings.enabled[static_cast<uint32_t>(PackId::Images)];
     state.use_custom = settings.use_custom_ffmpeg;
     state.custom_path = settings.custom_ffmpeg;
     state.remove_on_uninstall = settings.remove_on_uninstall;
     state.auto_update = settings.auto_update;
+    state.download_source = settings.download_source;
+    app::SetUpdateSource(static_cast<app::UpdateSource>(settings.download_source));
     const packs::InstalledPack media = packs::ReadInstalledPack(PackId::Media);
     state.media_installed = media.present;
     state.version = media.version;
@@ -232,8 +234,7 @@ void SettingsController::RefreshPacks() {
     state.update_version = update_of(media, kMediaPackRelease);
     state.images_update_version = update_of(images, kImagePackRelease);
     state.raw_update_version = update_of(raw, kRawPackRelease);
-    state.archive_update_version = update_of(archive, kArchivePackRelease);
-    state.installed = (media.present ? 1u : 0u) + (images.present ? 1u : 0u) + (raw.present ? 1u : 0u) + (archive.present ? 1u : 0u);
+    state.installed = (media.present ? 1u : 0u) + (images.present ? 1u : 0u) + (raw.present ? 1u : 0u);
     // What the preview host would use, ignoring the on/off switch so the card
     // can still say which FFmpeg it is switching.
     if (state.use_custom) {
@@ -260,11 +261,12 @@ uint64_t DownloadBytes(const PackRelease& release) {
 }
 
 const PackRelease& ReleaseFor(packs::PackId id) {
+    static const PackRelease unavailable{};
     switch (id) {
     case packs::PackId::Images: return kImagePackRelease;
     case packs::PackId::Raw: return kRawPackRelease;
-    case packs::PackId::Archives: return kArchivePackRelease;
-    default: return kMediaPackRelease;
+    case packs::PackId::Media: return kMediaPackRelease;
+    default: return unavailable;
     }
 }
 } // namespace
@@ -307,8 +309,6 @@ const SettingsController::PackState& SettingsController::Packs() {
     packs_.images_progress = packs_.images_installing ? image_installer_.progress() : 0.0f;
     packs_.raw_installing = raw_installer_.running();
     packs_.raw_progress = packs_.raw_installing ? raw_installer_.progress() : 0.0f;
-    packs_.archive_installing = archive_installer_.running();
-    packs_.archive_progress = packs_.archive_installing ? archive_installer_.progress() : 0.0f;
     return packs_;
 }
 
@@ -316,7 +316,6 @@ PackInstaller& SettingsController::InstallerFor(packs::PackId id) {
     switch (id) {
     case packs::PackId::Images: return image_installer_;
     case packs::PackId::Raw: return raw_installer_;
-    case packs::PackId::Archives: return archive_installer_;
     default: return media_installer_;
     }
 }
@@ -325,12 +324,12 @@ std::wstring& SettingsController::NoticeFor(packs::PackId id) {
     switch (id) {
     case packs::PackId::Images: return packs_.images_notice;
     case packs::PackId::Raw: return packs_.raw_notice;
-    case packs::PackId::Archives: return packs_.archive_notice;
     default: return packs_.notice;
     }
 }
 
 bool SettingsController::InstallPack(packs::PackId id, HWND notify, bool automatic) {
+    if (id != packs::PackId::Media && id != packs::PackId::Images && id != packs::PackId::Raw) return false;
     PackInstaller& installer = InstallerFor(id);
     const PackRelease& release = ReleaseFor(id);
     std::wstring& notice = NoticeFor(id);
@@ -372,6 +371,7 @@ int SettingsController::AutoUpdatePacks(HWND notify) {
 }
 
 bool SettingsController::UpdatePack(packs::PackId id, HWND notify) {
+    if (id != packs::PackId::Media && id != packs::PackId::Images && id != packs::PackId::Raw) return false;
     // Only from idle: the button goes away while the download runs, and a
     // late second click must not cancel it.
     if (InstallerFor(id).running() || !packs::ReadInstalledPack(id).present) return false;
@@ -382,6 +382,7 @@ bool SettingsController::InstallMediaPack(HWND notify) { return InstallPack(pack
 bool SettingsController::InstallImagePack(HWND notify) { return InstallPack(packs::PackId::Images, notify); }
 
 bool SettingsController::TakePackResult(packs::PackId id) {
+    if (id != packs::PackId::Media && id != packs::PackId::Images && id != packs::PackId::Raw) return false;
     DWORD error = ERROR_SUCCESS;
     const PackInstallOutcome outcome = InstallerFor(id).TakeOutcome(error);
     if (outcome == PackInstallOutcome::None) return false;
@@ -438,6 +439,7 @@ bool SettingsController::TakeMediaPackResult() { return TakePackResult(packs::Pa
 bool SettingsController::TakeImagePackResult() { return TakePackResult(packs::PackId::Images); }
 
 bool SettingsController::RemovePack(packs::PackId id) {
+    if (id != packs::PackId::Media && id != packs::PackId::Images && id != packs::PackId::Raw) return false;
     if (InstallerFor(id).running()) return false;
     const std::wstring root = packs::PacksRoot();
     if (root.empty()) return false;
@@ -490,17 +492,6 @@ bool SettingsController::ToggleRawPack() {
     return saved;
 }
 
-bool SettingsController::InstallArchivePack(HWND notify) { return InstallPack(packs::PackId::Archives, notify); }
-bool SettingsController::TakeArchivePackResult() { return TakePackResult(packs::PackId::Archives); }
-bool SettingsController::RemoveArchivePack() { return RemovePack(packs::PackId::Archives); }
-bool SettingsController::ToggleArchivePack() {
-    constexpr uint32_t index = static_cast<uint32_t>(packs::PackId::Archives);
-    const bool saved = UpdatePackSettings([](packs::PackSettings& s) { s.enabled[index] = !s.enabled[index]; });
-    packs_.archive_notice.clear();
-    RefreshPacks();
-    return saved;
-}
-
 bool SettingsController::ToggleCustomFfmpeg() {
     const std::wstring detected = Packs().detected_path;
     const bool saved = UpdatePackSettings([&](packs::PackSettings& s) {
@@ -542,6 +533,14 @@ void SettingsController::ToggleRemovePacksOnUninstall() {
 void SettingsController::ToggleAutoUpdatePacks() {
     UpdatePackSettings([](packs::PackSettings& s) { s.auto_update = !s.auto_update; });
     RefreshPacks();
+}
+
+bool SettingsController::SetDownloadSource(uint32_t source) {
+    if (source >= app::kUpdateSourceCount) return false;
+    const bool saved = UpdatePackSettings([source](packs::PackSettings& s) { s.download_source = source; });
+    if (saved) app::SetUpdateSource(static_cast<app::UpdateSource>(source));
+    RefreshPacks();
+    return saved;
 }
 
 void SettingsController::SetScroll(float value, float maximum) noexcept {
@@ -784,7 +783,7 @@ void SettingsController::SaveAndApply(SettingsEffect effect) const {
 }
 
 void SettingsController::WindowEffect(std::wstring_view effect_id) {
-    if (!compat::ModernWindows() && effect_id != L"none") return;
+    if (!ui::WindowEffectSupported(ui::WindowEffectFromId(effect_id))) return;
     static constexpr std::wstring_view ids[] = {
         L"none", L"acrylic-material", L"mica", L"mica-alt"
     };
@@ -894,6 +893,13 @@ void SettingsController::DetailsColumns(uint32_t mask) {
     SaveAndApply(SettingsEffect::ListStyle);
 }
 
+void SettingsController::DetailsColumnOrder(const ui::DetailsColumnOrder& order) {
+    const ui::DetailsColumnOrder next = ui::NormalizeDetailsColumnOrder(order);
+    if (!prefs_ || prefs_->details_column_order == next) return;
+    prefs_->details_column_order = next;
+    SaveAndApply(SettingsEffect::ListStyle);
+}
+
 // Startup and new-tab locations are read when they are used; nothing to apply.
 void SettingsController::StartupOpen(int index) {
     static constexpr int values[] = {0, 1};
@@ -911,6 +917,44 @@ void SettingsController::NewTabOpen(int index) {
     static constexpr int values[] = {0, 1};
     if (prefs_ && SelectValue(index, values, prefs_->new_tab_open))
         SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::OpenPulseIcon(int index) {
+    static constexpr int values[] = {0, 1, 2};
+    if (prefs_ && SelectValue(index, values, prefs_->open_pulse_icon))
+        SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::NewWindowShows(int index) {
+    static constexpr int values[] = {0, 1, 2};
+    if (prefs_ && SelectValue(index, values, prefs_->new_window_shows))
+        SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::OpenThisPc(int index) {
+    if (!prefs_ || index < 0 || index > 2) return;
+    if (index != 0) prefs_->open_this_pc = index - 1;
+    if (prefs_->integration_this_pc != (index != 0)) IntegrationAction(3);
+    else SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::OpenWinE(int index) {
+    if (!prefs_ || index < 0 || index > 3) return;
+    if (index != 0) prefs_->open_win_e = index - 1;
+    if (prefs_->integration_win_e != (index != 0)) IntegrationAction(2);
+    else SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::ArrangeGap(int index) {
+    static constexpr int values[] = {0, 1};
+    if (prefs_ && SelectValue(index, values, prefs_->arrange_gap))
+        SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::ArrangeMinimized(int index) {
+    if (!prefs_ || index < 0 || index > 1) return;
+    prefs_->arrange_include_minimized = index != 0;
+    SaveAndApply(SettingsEffect::None);
 }
 
 void SettingsController::ExternalOpen(int index) {
@@ -938,8 +982,45 @@ void SettingsController::HoverPreviewDelay(int index) {
 }
 
 void SettingsController::HoverCardSize(int index) {
-    static constexpr int values[] = {kHoverCardSmall, kHoverCardMedium, kHoverCardLarge};
+    static constexpr int values[] = {kHoverCardSmall, kHoverCardMedium, kHoverCardLarge, kHoverCardXLarge};
     if (prefs_ && SelectValue(index, values, prefs_->hover_card_size))
+        SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::PreviewSize(int index) {
+    static constexpr int values[] = {kPreviewSizeFit, kPreviewSizeStandard, kPreviewSizeLarge,
+                                     kPreviewSizeMaximized, kPreviewSizeFullScreen};
+    if (!prefs_) return;
+    const bool had_size = prefs_->preview_rect_w > 0;
+    if (!SelectValue(index, values, prefs_->preview_size) && !had_size) return;
+    // Picking a size here means that size, not the one dragged earlier.
+    prefs_->preview_rect_x = prefs_->preview_rect_y = prefs_->preview_rect_w = prefs_->preview_rect_h = 0;
+    SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::TogglePreviewRememberSize() {
+    if (!prefs_) return;
+    prefs_->preview_remember_size = !prefs_->preview_remember_size;
+    if (!prefs_->preview_remember_size)
+        prefs_->preview_rect_x = prefs_->preview_rect_y = prefs_->preview_rect_w = prefs_->preview_rect_h = 0;
+    SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::PreviewSpace(int index) {
+    if (!prefs_ || index < 0 || index > 1 || prefs_->preview_space_closes == (index == 0)) return;
+    prefs_->preview_space_closes = index == 0;
+    SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::PreviewLoop(int index) {
+    static constexpr int values[] = {kPreviewLoopAnimations, kPreviewLoopAll, kPreviewLoopNone};
+    if (prefs_ && SelectValue(index, values, prefs_->preview_loop))
+        SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::HoldPreview(int index) {
+    static constexpr int values[] = {0, 300, 500, 800};
+    if (prefs_ && SelectValue(index, values, prefs_->hold_preview_ms))
         SaveAndApply(SettingsEffect::None);
 }
 
@@ -1146,8 +1227,8 @@ int SettingsController::IntegrationState() const noexcept {
     const bool active = p.open_folders_in_pulse || p.take_over_win_e || p.take_over_this_pc ||
         p.take_over_recycle_bin || p.integration_residual;
     if (!p.integration_enabled) return active ? 2 : 0;
-    // In 兼容打开方式 the folder verb is meant to stay unregistered.
-    if (p.open_folders_in_pulse != (p.integration_folders && !p.integration_folders_compat) ||
+    // Compatibility supplements direct folder opening; it never replaces it.
+    if (p.open_folders_in_pulse != p.integration_folders ||
         p.take_over_win_e != p.integration_win_e || p.take_over_this_pc != p.integration_this_pc ||
         p.take_over_recycle_bin != p.integration_recycle_bin)
         return 2;
@@ -1178,7 +1259,20 @@ bool SettingsController::IntegrationJustEnabled() const noexcept {
 }
 
 void SettingsController::IntegrationAction(int index) {
-    if (!prefs_ || index < 0 || index > 9) return;
+    if (!prefs_ || index < 0 || index > 29) return;
+    if(index>=20) {
+        if(!prefs_->integration_enabled) return;
+        if(index==20 || index==21) { if(prefs_->integration_folders!=(index==21)) IntegrationAction(1); }
+        else if(index>=23 && index<=25) OpenThisPc(index-23);
+        else if(index>=26 && index<=29) OpenWinE(index-26);
+        return;
+    }
+    if(index>11) return;
+    if(index==10 || index==11) {
+        if(index==10 && !prefs_->keep_running_on_close) ToggleUi(2);
+        if(index==11 && !prefs_->launch_on_startup) ToggleUi(1);
+        return;
+    }
     if (index == 8) {
         // Try it: open This PC the way the desktop icon does, through the shell.
         ShellExecuteW(nullptr, nullptr, L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}", nullptr, nullptr, SW_SHOWNORMAL);
@@ -1189,9 +1283,6 @@ void SettingsController::IntegrationAction(int index) {
     p.integration_configured = true;
     if (index == 0) {
         p.integration_enabled = !p.integration_enabled;
-        // Folders and drives, This PC and Win + E go together: with only some of them,
-        // Explorer opens first and then hands every double-click on to Pulse.
-        if (p.integration_enabled) p.integration_folders = p.integration_win_e = p.integration_this_pc = true;
         integration_enabled_at_ = p.integration_enabled ? GetTickCount64() : 0;
     }
     else if (index == 1) p.integration_folders = !p.integration_folders;
@@ -1215,7 +1306,7 @@ void SettingsController::IntegrationAction(int index) {
         if ((index == 5 || index == 6) && HasLegacyShellIntegrationResidue() &&
             !RepairLegacyShellIntegrationResidue())
             failed(l10n::Get(l10n::StringId::LegacyExplorerAssociations).c_str(), L"legacy", false, false);
-        const bool folders_on = p.integration_enabled && p.integration_folders && !p.integration_folders_compat;
+        const bool folders_on = p.integration_enabled && p.integration_folders;
         if (!p.ApplyFolderOpen(folders_on))
             failed(l10n::Get(l10n::StringId::FoldersAndDrives).c_str(), L"folders", folders_on, true);
         const bool win_e_on = p.integration_enabled && p.integration_win_e;
@@ -1234,6 +1325,7 @@ void SettingsController::IntegrationAction(int index) {
 
 void SettingsController::ToggleUi(int index) {
     if (!prefs_ || !context_) return;
+    if (index == 81) { ArrangeMinimized(prefs_->arrange_include_minimized ? 0 : 1); return; }
     // 修改时间提示 switches and sync status, kept out of the chain below.
     // 77, 78: 鼠标与选择 hover selection and item check boxes; 79: 滚动时固定上级.
     if (index >= 70 && index <= 79) {
@@ -1307,6 +1399,9 @@ void SettingsController::ToggleUi(int index) {
     } else if (index == 34) {
         prefs_->list_thumbnail_badges = !prefs_->list_thumbnail_badges;
         SaveAndApply(SettingsEffect::ListStyle);
+    } else if (index == 80) {
+        prefs_->media_columns = !prefs_->media_columns;
+        SaveAndApply(SettingsEffect::ListStyle);
     } else if (index == 36) {
         prefs_->menu_acrylic = !prefs_->menu_acrylic;
         SaveAndApply(SettingsEffect::MenuMaterial);
@@ -1360,7 +1455,9 @@ void SettingsController::ToggleUi(int index) {
         Apply(SettingsEffect::GlobalSearch);
     } else if (index >= 60 && index < 63) {
         // Pulse menu presets (精简 / 标准 / 完整).
-        context_->builtin_hidden =
+        const auto row_bits = BuiltinMenuBit(BuiltinMenuItem::RowStar) |
+            BuiltinMenuBit(BuiltinMenuItem::RowNewTab) | BuiltinMenuBit(BuiltinMenuItem::RowMore);
+        context_->builtin_hidden = (context_->builtin_hidden & row_bits) |
             BuiltinMenuPresetHidden(static_cast<BuiltinMenuPreset>(index - 60));
         context_->Save();
         Apply(SettingsEffect::ListStyle);
@@ -1538,6 +1635,7 @@ void SettingsController::RemoveNetwork(int position) {
 }
 
 void SettingsController::DiagnosticsAction(int action) {
+    diagnostics::runtime::Event("diagnostics_action", {{"action", static_cast<uint64_t>(action)}});
     if (action >= 3 && action <= 5) {
         if (ui_.settings_transfer) ui_.settings_transfer(action - 3);
         return;
@@ -1553,19 +1651,28 @@ void SettingsController::DiagnosticsAction(int action) {
         else SetError(std::move(error));
         return;
     }
-    if (action != 2 || !ui_.prepare_diagnostics_export ||
-        !ui_.export_diagnostics || !ui_.task_completion) return;
+    if (action != 2) return;
+    if (!ui_.prepare_diagnostics_export || !ui_.export_diagnostics || !ui_.task_completion) {
+        diagnostics::runtime::Event("diagnostics_export_unavailable", {}, diagnostics::runtime::Level::Error);
+        SetError(l10n::Get(l10n::StringId::SettingsAborted));
+        return;
+    }
     std::wstring destination;
     bool include_service = false;
     bool include_dumps = false;
     if (!ui_.prepare_diagnostics_export(destination, include_service, include_dumps) ||
-        destination.empty()) return;
+        destination.empty()) {
+        diagnostics::runtime::Event("diagnostics_export_prepare_stopped");
+        return;
+    }
     ClearError();
     SettingsTask task{SettingsTaskKind::DiagnosticsExport};
     task.path = std::move(destination);
     task.enabled = include_service;
     task.pin = include_dumps;
-    StartUiTask(std::move(task));
+    const bool started = StartUiTask(std::move(task));
+    diagnostics::runtime::Event("diagnostics_export_submit", {{"started", started}});
+    if (!started) SetError(l10n::Get(l10n::StringId::SettingsAborted));
 }
 
 // ---- 缩略图缓存 ---------------------------------------------------------------

@@ -38,10 +38,12 @@ public:
         ID2D1Bitmap* bitmap = nullptr;
         // Light glyph on transparency (unplated Store logos): needs a dark plate.
         bool needs_plate = false;
+        const wchar_t* format_label = nullptr; // PSD/PSB only, after icon lookup fails
     };
     // Default program icon for `name`'s extension at about `pixels` square.
-    // Images have no badge. Initial requests and types without a program return
-    // empty; association refreshes retain the previous icon. Cheap per frame.
+    // Photos have no badge. PSD/PSB share the installed Photoshop icon, with
+    // a per-format label if that editor cannot be resolved.
+    // Initial requests return empty; refreshes retain the previous badge.
     Badge BadgeFor(const std::wstring& name, uint32_t pixels);
 
 private:
@@ -66,6 +68,7 @@ private:
     };
     void StartWorkerLocked();
     void WorkerLoop();
+    void PublishReadyLocked(const std::wstring& key, Pixels pixels);
 
     D2DDeviceBinding device_binding_;
     ID2D1DeviceContext* dc_ = nullptr;  // device_binding_'s private context
@@ -77,6 +80,8 @@ private:
     std::deque<Request> queue_;
     std::unordered_set<std::wstring> pending_;
     std::unordered_map<std::wstring, Pixels> ready_;
+    std::deque<std::wstring> ready_order_;
+    size_t ready_bytes_ = 0;
     std::atomic<uint32_t> epoch_{1};
     std::thread worker_;
     std::atomic<bool> running_{false};

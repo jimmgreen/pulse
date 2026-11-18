@@ -1,7 +1,9 @@
-#pragma once
+﻿#pragma once
 #include <windows.h>
 #include <cstdint>
 #include <memory>
+#include <future>
+#include <vector>
 #include <string>
 
 namespace pulse::ui {
@@ -12,8 +14,17 @@ struct FfmpegFrame;
 // so a retired decoder cannot publish state into the next file's preview.
 class VideoPreview {
 public:
+    struct Track {
+        int id = -1;
+        std::wstring label;
+        bool supported = true;
+    };
     struct State {
+        std::vector<Track> audio_tracks, subtitle_tracks;
+        int audio_track = -1, subtitle_track = -1;
+        bool can_select_audio = false, can_select_subtitle = false;
         bool ready = false;
+        bool opening = false; // Backend selection/probing is still in progress.
         bool playing = false;
         bool ended = false;
         bool can_seek = false;
@@ -37,6 +48,8 @@ public:
         const wchar_t* store_id = nullptr;  // Microsoft Store extension, if any
         // Playing through the FFmpeg preview pack (Media Foundation could not).
         bool ffmpeg = false;
+        bool ffmpeg_available = false;
+        bool ffmpeg_subtitles_available = false;
     };
     VideoPreview() = default;
     ~VideoPreview();
@@ -51,8 +64,11 @@ public:
     static bool IsAudio(const std::wstring& path);
     // card: the hover preview card's silent loop. Starts muted, lets the
     // pointer through to the owner, and decodes FFmpeg frames at card size.
+    // Four process-wide workers include retired decoders. At capacity Open
+    // reports ERROR_BUSY; selecting/opening again retries after a worker exits.
     void Open(HWND owner, const std::wstring& path, bool card = false);
     void Reset();
+    std::vector<std::shared_future<void>> SuspendVolume(const std::wstring& root);
     // corner_radius > 0 clips the video window to a rounded rectangle.
     void Layout(const RECT& bounds, bool visible, int corner_radius = 0);
     void Play(bool playing);
@@ -61,6 +77,9 @@ public:
     void SetVolume(float volume);  // 0..1
     void SetMuted(bool muted);
     void SetRate(float rate);
+    void EnableTrackPlayback(); // explicitly reload through the installed FFmpeg pack
+    void SelectAudioTrack(int id);
+    void SelectSubtitleTrack(int id);
     State Snapshot() const;
     // FFmpeg playback (State::ffmpeg): the picture for the owner to draw, already
     // scaled for it; serial changes with every new frame.
@@ -74,7 +93,11 @@ private:
                           const std::wstring& ffmpeg);
     static LRESULT CALLBACK VideoProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
     std::shared_ptr<Shared> state_;
+    std::vector<std::weak_ptr<Shared>> retired_;
     HWND child_ = nullptr;
+    RECT layout_bounds_{};
+    bool layout_valid_ = false;
+    bool layout_visible_ = false;
     SIZE region_size_{};
     int region_radius_ = 0;
 };

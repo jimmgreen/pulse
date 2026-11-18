@@ -17,9 +17,6 @@
 #include <deque>
 #include <optional>
 
-struct IImageList;
-struct IWICImagingFactory;
-
 namespace pulse::ui {
 
 class ShellIconCache {
@@ -50,12 +47,13 @@ public:
               bool is_dir, DWORD attrs, float opacity = 1.0f);
 
     // Icon bitmap at (about) desired_dips, or nullptr while unresolved —
-    // caller leaves the slot empty. Lets owners apply their own opacity
+    // caller draws its fallback. Extraction/conversion runs on the worker.
+    // Lets owners apply their own opacity
     // and transforms (tray card deck) instead of the fixed Draw path.
     ID2D1Bitmap* BitmapFor(const std::wstring& path, const std::wstring& name,
                            bool is_dir, DWORD attrs, float desired_dips);
 
-    // Like BitmapFor but never converts an icon on the calling thread: the
+    // Unlike BitmapFor, does not request missing icons and can reuse other sizes: the
     // best bitmap already converted (requested size first, then the nearest
     // other size, then the type's generic icon), or nullptr. For animation
     // frames, where a synchronous HICON -> D2D conversion (1-7 ms each for
@@ -91,12 +89,10 @@ public:
 private:
     friend struct ShellIconCacheTestAccess;
     static int ImageListId(float desired_pixels) noexcept;
-    IImageList* EnsureImageList(int list_id);
-    bool EnsureWic();
     int GenericIndex(const std::wstring& name, bool is_dir, DWORD attrs);
     void RequestExact(const std::wstring& path);
     ID2D1Bitmap* BitmapForIndex(int index, int list_id);
-    ComPtr<ID2D1Bitmap> BitmapFromIcon(HICON icon, IconArtworkBounds& bounds, bool jumbo);
+    void RequestConversion(uint64_t key);
     // Worker-converted pixels for key, uploaded to a D2D bitmap and cached.
     ID2D1Bitmap* UploadReady(uint64_t key);
     ID2D1Bitmap* StoreBitmap(uint64_t key, ComPtr<ID2D1Bitmap> bitmap,
@@ -112,8 +108,6 @@ private:
     ID2D1DeviceContext* dc_ = nullptr;  // device_binding_'s private context
     RepaintTargets repaint_;
     float scale_ = 1.0f;
-    std::unordered_map<int, IImageList*> image_lists_;
-    ComPtr<IWICImagingFactory> wic_;
     std::unordered_map<uint64_t, ComPtr<ID2D1Bitmap>> bitmaps_;
     std::unordered_map<uint64_t, IconArtworkBounds> artwork_bounds_;
     std::unordered_map<std::wstring, int> generic_index_;

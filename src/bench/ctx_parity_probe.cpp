@@ -24,6 +24,7 @@
 // HIDDEN-PREF (a settings switch: info only) or DISPLAY-DROPPED (lost while
 // composing: [FAIL]). The menu has no row cap.
 #include "../shell_host/ctx_handlers.h"
+#include "../shell_host/isolated_start_pin.h"
 #include "../app/shell_verbs.h"
 #include "../ipc/ctx_menu_util.h"
 #include "../app/context_menu_controller.h"
@@ -294,7 +295,17 @@ DWORD WINAPI WorkerThread(LPVOID param) {
     {
         pulse::shell::CtxBind bind;
         pulse::shell::CtxHandlerSlot slot;
-        if (pulse::shell::BindCtxSelection({ worker->path }, false, bind)) {
+        if (_wcsicmp(worker->desc.clsid_text.c_str(),
+                     L"{470c0ebd-5d73-4d58-9ced-e91e22e23282}") == 0) {
+            pulse::shell::IsolatedStartPinSession isolated;
+            worker->hr = isolated.Query({worker->path}, nullptr, worker->first,
+                worker->last, worker->flags, nullptr, worker->kept);
+            worker->total_ms = GetTickCount64() - started;
+            for (const auto& item : worker->kept) {
+                worker->full.push_back({item.child ? 1 : 0, item.text, item.verb,
+                    !item.enabled, item.has_children, worker->desc.name});
+            }
+        } else if (pulse::shell::BindCtxSelection({ worker->path }, false, bind)) {
             worker->hr = pulse::shell::QueryOneHandler(worker->desc, bind, nullptr, worker->first,
                                                        worker->last, worker->flags, slot);
             if (SUCCEEDED(worker->hr) && slot.menu) {
@@ -689,8 +700,66 @@ void ProbePath(const std::wstring& path, bool extended) {
 
 } // namespace
 
+// Read-only reproduction: no InvokeCommand and no changes to Start pins.
+// Exit 1 means the previously working command disappeared after the default
+// menu query; this is diagnostic evidence, not a passing regression test.
+int ProbeStartPinConflict(const std::wstring& path) {
+    pulse::shell::CtxBind bind;
+    if (!pulse::shell::BindCtxSelection({path}, false, bind)) return 2;
+    auto query = [](const wchar_t* label, bool send_to, const pulse::shell::CtxBind& selection,
+                    bool full_menu = true) {
+        pulse::shell::CtxHandlerDesc desc;
+        desc.clsid_text = send_to ? L"{7ba4c740-9e81-11cf-99d3-00aa004ae837}"
+                                 : L"{470c0ebd-5d73-4d58-9ced-e91e22e23282}";
+        CLSIDFromString(desc.clsid_text.c_str(), &desc.clsid);
+        pulse::shell::CtxHandlerSlot slot;
+        HRESULT hr = E_FAIL;
+        if (send_to && !full_menu) {
+            IShellExtInit* init = nullptr;
+            hr = CoCreateInstance(desc.clsid, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&init));
+            if (SUCCEEDED(hr)) {
+                hr = init->Initialize(selection.folder, selection.data, selection.assoc);
+                if (SUCCEEDED(hr)) hr = init->QueryInterface(IID_PPV_ARGS(&slot.menu));
+                init->Release();
+            }
+            if (SUCCEEDED(hr)) {
+                slot.hmenu = CreatePopupMenu();
+                hr = slot.menu->QueryContextMenu(slot.hmenu, 0, 1, 0x7FFF, CMF_NORMAL | CMF_ITEMMENU);
+            }
+        } else {
+            hr = pulse::shell::QueryOneHandler(desc, selection, nullptr,
+                1, 0x7FFF, CMF_NORMAL | CMF_ITEMMENU, slot);
+        }
+        const int rows = slot.hmenu ? GetMenuItemCount(slot.hmenu) : 0;
+        wprintf(L"%ls: HRESULT=0x%08lx, rows=%d\n", label, hr, rows);
+        pulse::shell::ReleaseHandlerSlot(slot);
+        return SUCCEEDED(hr) && rows > 0;
+    };
+    const bool first = query(L"Pin before", false, bind);
+    const bool repeated = query(L"Pin repeat (control)", false, bind);
+    query(L"SendTo alone (control)", true, bind, false);
+    const bool standalone = query(L"Pin after standalone SendTo", false, bind);
+    const bool native = query(L"SendTo/default menu", true, bind);
+    const bool after = query(L"Pin after (same selection)", false, bind);
+    pulse::shell::CtxBind fresh;
+    if (!pulse::shell::BindCtxSelection({path}, false, fresh)) return 2;
+    const bool after_fresh = query(L"Pin after (fresh selection)", false, fresh);
+    const bool reproduced = first && repeated && standalone && native && !after;
+    wprintf(L"Interference reproduced=%d, fresh selection restores=%d\n", reproduced, after_fresh);
+    return reproduced ? 1 : (first && repeated ? 0 : 2);
+}
+
 int wmain(int argc, wchar_t** argv) {
     _setmode(_fileno(stdout), _O_U8TEXT);
+    if (argc == 3 && wcscmp(argv[1], L"--pin-conflict") == 0) {
+        const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        if (FAILED(hr)) return 2;
+        wchar_t full[32768]{};
+        const DWORD size = GetFullPathNameW(argv[2], ARRAYSIZE(full), full, nullptr);
+        const int result = size && size < ARRAYSIZE(full) ? ProbeStartPinConflict(full) : 2;
+        CoUninitialize();
+        return result;
+    }
     bool extended = false;
     std::wstring report;
     std::vector<std::wstring> paths;

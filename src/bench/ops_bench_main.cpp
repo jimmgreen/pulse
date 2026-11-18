@@ -5,12 +5,14 @@
 //   pulse_ops_bench [--root DIR] [--files N] [--kb K] [--repeat R]
 //                   [--only copy,delete-multi,delete-tree,large,cross,recycle]
 //                   [--cross DIR] [--large-mb M] [--recycle-files N]
+//                   [--diagnostics-root DIR outside --root] [--verify]
 //
 // "recycle" is opt-in: it sends a few files to the Recycle Bin, then undoes the
 // operation so the bin is left as it was. Machines with on-access scanners give
 // low absolute numbers; compare runs on the same machine.
 #include "../ops/ops_manager.h"
 #include "../common/localization.h"
+#include "../common/runtime_log.h"
 #include <windows.h>
 #include <objbase.h>
 #include <atomic>
@@ -28,6 +30,7 @@ namespace fsys = std::filesystem;
 
 namespace {
 ops::OpsManager g_ops;
+bool g_failed = false;
 std::atomic<uint64_t> g_notifications{0};
 std::mutex g_ui_mutex;
 std::condition_variable g_ui_cv;
@@ -128,7 +131,8 @@ RunResult Run(ops::OpRequest request) {
 }
 
 void Report(const char* name, const RunResult& run, double units, const char* unit) {
-    const bool ok = run.finished && run.status.phase == ops::OpPhase::Completed;
+    const bool ok = run.finished && run.status.phase == ops::OpPhase::Completed && run.status.failed_items == 0;
+    if (!ok) g_failed = true;
     printf("%-14s %s %8.0f %s in %7.3f s = %9.1f %s/s  notify=%llu%s%ls\n", name, ok ? "ok  " : "FAIL",
            units, unit, run.seconds, run.seconds > 0 ? units / run.seconds : 0.0, unit,
            static_cast<unsigned long long>(run.notifications), ok ? "" : "  error=",
@@ -165,6 +169,26 @@ int wmain(int argc, wchar_t** argv) {
     const int large_mb = _wtoi(Arg(argc, argv, L"--large-mb", L"1024").c_str());
     const int recycle_files = _wtoi(Arg(argc, argv, L"--recycle-files", L"30").c_str());
     if (files <= 0 || kb < 0) return 2;
+    const std::wstring diagnostics_root = Arg(argc, argv, L"--diagnostics-root", L"");
+    const bool diagnostics_enabled = !diagnostics_root.empty();
+    if (diagnostics_enabled) {
+        const auto fixture = fsys::weakly_canonical(root);
+        const auto logs = fsys::weakly_canonical(diagnostics_root);
+        const auto relative = logs.lexically_relative(fixture);
+        if (relative.empty() || (relative.begin() != relative.end() && *relative.begin() != L"..")) {
+            fprintf(stderr, "[bench] diagnostics root must be outside fixture root\n");
+            CoUninitialize();
+            return 2;
+        }
+        if (!diagnostics::runtime::Initialize(logs.wstring(), "ops_bench")) {
+            fprintf(stderr, "[bench] diagnostic initialization failed\n");
+            diagnostics::runtime::Shutdown();
+            CoUninitialize();
+            return 2;
+        }
+    }
+    for (int i = 1; i < argc; ++i)
+        if (_wcsicmp(argv[i], L"--verify") == 0) g_ops.SetVerifyCopies(true);
     RemoveTree(root);
     fsys::create_directories(root);
     std::thread ui(UiThread);
@@ -176,6 +200,7 @@ int wmain(int argc, wchar_t** argv) {
             const auto source = root / L"copy_src";
             const auto target = root / L"copy_dst";
             const auto made = MakeTree(source, files, kb, false);
+            if (made.size() != static_cast<size_t>(files)) g_failed = true;
             fsys::create_directories(target);
             ops::OpRequest request;
             request.type = ops::OpType::Copy;
@@ -197,6 +222,7 @@ int wmain(int argc, wchar_t** argv) {
         if (Wants(only, L"move-cross") && !cross.empty()) {
             const auto source = root / L"move_src";
             const auto made = MakeTree(source, files, kb, false);
+            if (made.size() != static_cast<size_t>(files)) g_failed = true;
             const auto remote_dir = fsys::path(cross) / L"pulse_opsbench_cross";
             RemoveTree(remote_dir);
             fsys::create_directories(remote_dir);
@@ -329,6 +355,13 @@ int wmain(int argc, wchar_t** argv) {
     }
     ui.join();
     RemoveTree(root);
+    if (diagnostics_enabled) {
+        if (!diagnostics::runtime::Flush()) {
+            fprintf(stderr, "[bench] diagnostic flush failed\n");
+            g_failed = true;
+        }
+        diagnostics::runtime::Shutdown();
+    }
     CoUninitialize();
-    return 0;
+    return g_failed ? 1 : 0;
 }

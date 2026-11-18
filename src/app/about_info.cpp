@@ -1,3 +1,4 @@
+#include "../common/app_runtime_paths.h"
 #include "about_info.h"
 
 #include "../common/localization.h"
@@ -143,12 +144,7 @@ const std::wstring& WindowsText() {
 }
 
 std::wstring InstallDirectory() {
-    wchar_t path[MAX_PATH * 2]{};
-    const DWORD n = GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
-    if (!n || n >= std::size(path)) return {};
-    std::wstring dir(path, n);
-    const size_t slash = dir.find_last_of(L"\\/");
-    return slash == std::wstring::npos ? dir : dir.substr(0, slash);
+    return app_runtime_paths::InstallRoot();
 }
 
 constexpr const wchar_t* kArchitecture =

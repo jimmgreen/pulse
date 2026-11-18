@@ -1,0 +1,37 @@
+{
+  "apiVersion": 1,
+  "id": "example.navigation-panel",
+  "name": "效率工具",
+  "commands": [
+    {
+      "id": "back",
+      "title": "返回上一位置",
+      "capability": "navigation.back"
+    },
+    {
+      "id": "forward",
+      "title": "前往下一位置",
+      "capability": "navigation.forward"
+    },
+    {
+      "id": "up",
+      "title": "打开上级文件夹",
+      "capability": "navigation.up"
+    },
+    {
+      "id": "refresh",
+      "title": "刷新当前视图",
+      "capability": "view.refresh"
+    }
+  ],
+  "panel": {
+    "title": "导航工具面板",
+    "description": "把常用操作集中在一个工具面板中。面板按钮使用当前窗口的导航历史；切换目录后无需重新打开。",
+    "commands": [
+      "up",
+      "back",
+      "forward",
+      "refresh"
+    ]
+  }
+}

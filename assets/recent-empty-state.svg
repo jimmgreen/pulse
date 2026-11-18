@@ -1,68 +1,38 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="360" viewBox="0 0 512 360" fill="none">
   <title>No recent items</title>
-  <desc>A clock resting in a blue folder in the Pulse empty-state style.</desc>
+  <desc>A clock card standing in an open Pulse folder.</desc>
   <defs>
-    <radialGradient id="ambient" cx="0" cy="0" r="1" gradientTransform="translate(256 155) rotate(90) scale(120)" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#AAB4C6" stop-opacity="0.13"/>
-      <stop offset="1" stop-color="#7D899F" stop-opacity="0"/>
+    <linearGradient id="folderBack" x1="0" y1="50" x2="0" y2="214" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E9AE2B"/><stop offset="1" stop-color="#D2930F"/>
+    </linearGradient>
+    <linearGradient id="folderFront" x1="0" y1="146" x2="0" y2="222" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFEBB0"/><stop offset="0.07" stop-color="#FFDA6E"/><stop offset="1" stop-color="#F6B42A"/>
+    </linearGradient>
+    <linearGradient id="pocketShade" x1="0" y1="124" x2="0" y2="146" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6E3C00" stop-opacity="0"/><stop offset="1" stop-color="#6E3C00" stop-opacity="0.22"/>
+    </linearGradient>
+    <radialGradient id="ground" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(128 224) scale(118 12)">
+      <stop stop-color="#000000" stop-opacity="0.22"/><stop offset="1" stop-color="#000000" stop-opacity="0"/>
     </radialGradient>
-    <linearGradient id="folderBack" x1="139" y1="174" x2="369" y2="273" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#8298BC"/>
-      <stop offset="0.52" stop-color="#60779D"/>
-      <stop offset="1" stop-color="#354763"/>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#FFFFFF"/><stop offset="1" stop-color="#EEF1F5"/>
     </linearGradient>
-    <linearGradient id="folderFront" x1="145" y1="205" x2="343" y2="323" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#8499BC"/>
-      <stop offset="0.48" stop-color="#586E92"/>
-      <stop offset="1" stop-color="#35465F"/>
+    <linearGradient id="paperRear" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#F1F4F8"/><stop offset="1" stop-color="#DCE2EA"/>
     </linearGradient>
-    <linearGradient id="folderEdge" x1="133" y1="205" x2="374" y2="231" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#D3DCEB" stop-opacity="0.55"/>
-      <stop offset="0.55" stop-color="#9CAAC1" stop-opacity="0.24"/>
-      <stop offset="1" stop-color="#E0E6EF" stop-opacity="0.1"/>
-    </linearGradient>
-    <linearGradient id="clockFace" x1="199" y1="86" x2="310" y2="220" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#EEF1F5"/>
-      <stop offset="0.46" stop-color="#BBC3CF"/>
-      <stop offset="1" stop-color="#707C90"/>
-    </linearGradient>
-    <linearGradient id="clockInner" x1="221" y1="112" x2="291" y2="205" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#B8C1CE"/>
-      <stop offset="1" stop-color="#788397"/>
-    </linearGradient>
-    <filter id="shadow" x="92" y="61" width="328" height="278" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-      <feDropShadow dx="0" dy="10" stdDeviation="11" flood-color="#05070B" flood-opacity="0.22"/>
-    </filter>
   </defs>
-
-  <ellipse cx="256" cy="304" rx="122" ry="21" fill="#080A0F" fill-opacity="0.16"/>
-  <circle cx="256" cy="154" r="118" fill="url(#ambient)"/>
-  <circle cx="256" cy="154" r="103" stroke="#B5BECE" stroke-opacity="0.055" stroke-width="2"/>
-
-  <g opacity="0.52">
-    <path d="M169 83L173 94L184 98L173 102L169 113L165 102L154 98L165 94L169 83Z" fill="#C5CCD8"/>
-    <path d="M355 104L359 115L370 119L359 123L355 134L351 123L340 119L351 115L355 104Z" fill="#C5CCD8"/>
-    <circle cx="144" cy="177" r="4" fill="#9EA9BA"/>
-    <circle cx="377" cy="169" r="3" fill="#9EA9BA"/>
-  </g>
-
-  <g filter="url(#shadow)">
-    <path d="M126 222V188C126 177 135 168 146 168H188L203 153C207 149 212 147 218 147H260C267 147 273 151 277 157L285 168H365C376 168 385 177 385 188V222H126Z" fill="url(#folderBack)"/>
-    <path d="M128 181C132 175 138 173 147 173H192L207 158C211 154 216 153 221 153H258C264 153 269 156 272 161L280 173H379" stroke="#D6DEEB" stroke-opacity="0.2" stroke-width="2" stroke-linecap="round"/>
-
-    <g id="clock">
-      <circle cx="256" cy="151" r="81" fill="#566277" fill-opacity="0.72"/>
-      <circle cx="256" cy="151" r="74" fill="url(#clockFace)"/>
-      <circle cx="256" cy="151" r="58" fill="url(#clockInner)"/>
-      <path d="M219 101C239 86 271 83 295 99" stroke="#FFFFFF" stroke-opacity="0.3" stroke-width="3" stroke-linecap="round"/>
-      <path d="M256 117V153L286 177" stroke="#E9EDF2" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
-      <circle cx="256" cy="153" r="8" fill="#E9EDF2"/>
-      <path d="M256 79V88M328 151H319M256 223V214M184 151H193" stroke="#E6EAF0" stroke-opacity="0.68" stroke-width="4" stroke-linecap="round"/>
-    </g>
-
-    <path d="M109 215C108 204 117 195 128 195H384C396 195 405 206 403 218L389 297C387 309 378 317 366 317H146C135 317 126 309 124 298L109 215Z" fill="url(#folderFront)"/>
-    <path d="M120 210C122 202 129 199 137 199H380C389 199 395 205 395 213" stroke="url(#folderEdge)" stroke-width="2.6" stroke-linecap="round"/>
-    <path d="M126 296C129 305 136 311 147 311H364C374 311 380 306 382 298" stroke="#172033" stroke-opacity="0.22" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="256" cy="168" r="124" fill="#8A96A8" fill-opacity="0.09"/>
+  <circle cx="256" cy="168" r="108" stroke="#8A96A8" stroke-opacity="0.10" stroke-width="2"/>
+  <path d="M150 87L152.52 93.48L159 96L152.52 98.52L150 105L147.48 98.52L141 96L147.48 93.48Z" fill="#A7B1C2" fill-opacity="0.7"/><path d="M366 73L367.96 78.04L373 80L367.96 81.96L366 87L364.04 81.96L359 80L364.04 78.04Z" fill="#A7B1C2" fill-opacity="0.7"/><path d="M384 191L385.4 194.6L389 196L385.4 197.4L384 201L382.6 197.4L379 196L382.6 194.6Z" fill="#A7B1C2" fill-opacity="0.55"/><circle cx="132" cy="182" r="3.5" fill="#A7B1C2" fill-opacity="0.6"/><circle cx="356" cy="122" r="2.5" fill="#A7B1C2" fill-opacity="0.6"/>
+  <g transform="translate(104.96 44.04) scale(1.18)">
+    <ellipse cx="128" cy="224" rx="118" ry="12" fill="url(#ground)"/>
+    <path d="M26 62C26 55.4 31.4 50 38 50H92C96 50 99 51.4 102 54L114 64H218C224.6 64 230 69.4 230 76V214H26Z" fill="url(#folderBack)"/>
+    <path d="M38 55.5H91.5C94.5 55.5 96.8 56.5 99 58.5L112 69.5H218" stroke="#FFE7A3" stroke-opacity="0.45" stroke-width="1.6" stroke-linecap="round"/>
+    <rect x="130" y="38.5" width="76" height="98" rx="7" fill="#3A2400" fill-opacity="0.16"/><rect x="130" y="36" width="76" height="98" rx="7" fill="url(#paperRear)"/><rect x="130.5" y="36.5" width="75" height="97" rx="6.5" stroke="#30405A" stroke-opacity="0.12"/><path d="M170 52H194" stroke="#5E6E87" stroke-opacity="0.2" stroke-width="5" stroke-linecap="round"/><path d="M170 66H188" stroke="#5E6E87" stroke-opacity="0.15" stroke-width="5" stroke-linecap="round"/><rect x="70" y="44.5" width="92" height="112" rx="7" fill="#3A2400" fill-opacity="0.16"/><rect x="70" y="42" width="92" height="112" rx="7" fill="url(#paper)"/><rect x="70.5" y="42.5" width="91" height="111" rx="6.5" stroke="#30405A" stroke-opacity="0.12"/><circle cx="116" cy="92" r="27" fill="#E7ECF2"/><circle cx="116" cy="92" r="27" stroke="#5E6E87" stroke-width="5"/><path d="M116 77V92L127 100" stroke="#4A5A73" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="116" cy="92" r="3.5" fill="#4A5A73"/>
+    <rect x="26" y="112" width="204" height="34" fill="url(#pocketShade)"/>
+    <path d="M12.27 156.76Q10 146 21 146L235 146Q246 146 243.73 156.76L232.27 211.24Q230 222 219 222L37 222Q26 222 23.73 211.24Z" fill="url(#folderFront)"/>
+    <path d="M21 147.4H235" stroke="#FFFAE4" stroke-opacity="0.95" stroke-width="1.6" stroke-linecap="round"/>
+    <path d="M12.27 156.76Q10 146 21 146L235 146Q246 146 243.73 156.76L232.27 211.24Q230 222 219 222L37 222Q26 222 23.73 211.24Z" stroke="#965A00" stroke-opacity="0.18"/>
   </g>
 </svg>

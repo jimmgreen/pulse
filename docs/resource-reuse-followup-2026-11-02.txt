@@ -1,0 +1,55 @@
+Pulse 后续优化与实机验证（2026-11-02）
+
+范围：检查导航重绘，减少详情统计冷启动重复扫描。保留原有功能、动画和用户已有修改。
+测试使用bench_data隔离数据及--test-instance，未使用computer use。
+
+已修改：详情统计启动握手
+此前只等待根目录监听开始，父目录监听的就绪通知以及根监听的回调可能稍后到达，
+使刚完成的扫描再次失效。现在在原来本地20ms/UNC 150ms总预算内，等待两监听
+就绪回调先发布revision，再取扫描版本。超时仍回退为未验证结果，保留必要重扫。
+每最多5ms检查取消；根替换重启监听时清除就绪标记。
+StopAsync会等待既有回调完成并清空回调，旧回调不能在重置后伪装成新监听就绪。
+修改文件：src/app/folder_statistics.cpp、src/bench/folder_statistics_test.cpp。
+
+同代码定向对照
+用相同测试源和真实目录（2文件、18字节、1子目录），分别编译修改前快照与当前实现。
+各3轮，每轮8次全新服务，共24次冷启动；交错B/C、C/B、B/C顺序，串行运行，
+期间没有构建或其他本任务性能测试。
+                        修改前       修改后
+物理扫描总数             37           27（减少27.0%，不是整个应用提速27%）
+仅扫描一次的启动         11/24        21/24
+就绪时间中位数           1.182ms      0.812ms
+就绪时间均值             1.204ms      1.040ms
+p95                      2.545ms      2.592ms
+没有尾延迟改善证据；仍有3次需要再次扫描，没有取消合法的revision失效检查。
+证据：build/statistics_startup_comparison.json、statistics_cold_baseline_1..3.log、
+statistics_cold_current_1..3.log；修改前快照build/folder_statistics_startup_baseline.cpp。
+
+真实窗口重绘调查
+1200项A目录、100项B目录，20轮往返，共40次导航。
+初轮独立帧统计：进入B中位16.285ms、返回A中位16.182ms；最大27.990ms。
+末次返回时1019帧，动画收尾后1045帧；静置第5、30、60秒均为1045帧，
+对应frame_wakes均为1003。该场景没有发现动画结束后的持续重绘。
+5秒到60秒，进程CPU累计仅增加62.5ms；这是该机器该场景的短测，不代表所有工作负载。
+原始证据：bench_data/motion-20261102/navigation.csv。
+
+新增按调用位置统计RequestMotionFrame的有界诊断入口，只有隔离窗口测试显式Enable
+才记录，正常运行不启用。测试Finish显式落盘，不依赖进程退出时的析构。
+最初按编译开关启用的版本只在入口源文件生效、渲染侧未计数，未产生调用位置报告；
+已纠正为一致的渲染声明与显式测试启用，未把这次缺失报告算作有效调用位置证据。
+启用后的实际窗口复测正常退出，累计1083帧：
+  ui_pane_list.cpp:5115 列表入场：1040次请求
+  ui_toolbar.cpp:525 面包屑入场：734次请求
+  ui_sidebar.cpp:399 侧栏浮层：20次请求
+这些是请求次数，同帧会重叠，不能相加作为帧数。来源与原有动画一致，未削减动画。
+证据：bench_data/motion-20261102/requests.csv、navigation-instrumented.csv。
+
+实际验证与限制
+最新pulse构建通过；完整定向pulse_folder_statistics_test共15项PASS：冷启动、
+未就绪取消、真实递归、A/B/A缓存、稳定订阅、嵌套变更、根替换、单订阅取消、
+共享扫描、partial、未armed、缺失根、offline、退出和配额回收。
+日志：build/statistics_startup_regression.log。
+本次涉及文件git diff --check通过。构建仍报告用户已有app_input.cpp:2049中
+pointer_moved未引用警告（该变量在本轮前已有的未提交diff中），未修改该文件。
+未做真实断网UNC/云盘提供程序的穷尽验证；没有修改删除线程池、降低动画帧率，
+也没有以此宣称所有潜在性能热点均已消除。

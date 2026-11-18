@@ -1,0 +1,63 @@
+Win+E fullscreen routing / source-close confirmation — 2026-11-04
+
+Evidence (read-only user export: Desktop/Diagnostics/Runtime):
+- app-8672.jsonl and app-38680.jsonl identify 1.0.58,
+  build 20261028T111027Z-359C5732. A build label alone cannot establish source equality.
+- 19 Explorer handoffs: 16 record Closed -> Committed -> Presented;
+  requests 2/3/4 in pid 8672 record rejection code 2/detail 3 followed by
+  Cancelled and Rollback. The supplied logs already contain the exclusive
+  transaction phases; they do not substantiate a claim that this executable
+  exposes Pulse merely because IWebBrowser2::Quit returned S_OK.
+- WinE accepted requests independently dispatch Pulse without an Explorer
+  source identity. No foreground/fullscreen information is in these events.
+  The export therefore cannot identify which chord was the reported game
+  reproduction or prove a hook timeout/third-party input mechanism.
+
+Changes in this work:
+- Foreground window covering its monitor (including oversized borders), or
+  unavailable foreground geometry: do not enqueue a direct Pulse request and
+  do not swallow the chord. The native system entry owns the request; if it
+  produces an Explorer window, the existing watcher still performs the strict
+  prepared -> close -> observed destruction -> commit sequence. Failure keeps
+  the source and cancels the staged Pulse handoff. This is not disabling the
+  watcher or unconditionally closing a later unrelated Explorer window.
+- Normal/windowed and work-area-maximized foregrounds keep the existing direct
+  WinE route. Native-route decisions emit win_e_native_route/foreground_pid.
+- Removing the per-window identity property alone no longer counts as source
+  destruction. Require HWND disappearance or a different owner process/thread.
+  Same-process/thread HWND reuse conservatively times out rather than risking
+  a false commit. Close timeouts emit explorer_source_close_unconfirmed with
+  request_id, source_exists, marker_matches, source_pid.
+- Existing cancellation/deadline/Closed gating is retained. No timeout path
+  was changed to force-open Pulse.
+
+Validation:
+- Built pulse_open_handoff_test with the repository x64 MSVC setup.
+- Ran pulse_open_handoff_test: 193 PASS, exit 0 on the normal interactive desktop.
+  Evidence: bench_data/win-e-handoff-desktop-20261104.log.
+- Added full-monitor/oversized/negative-coordinate, ordinary/maximized,
+  unknown-foreground, chord repeat/release checks. Native hidden WS_POPUP HWND
+  covering the actual primary monitor uses the native route; shrinking the
+  same HWND uses the direct route. No activation or global key injection.
+- Native private HWND survives identity-property removal without confirming
+  close; actual DestroyWindow confirms it. Existing handoff tests also cover
+  ignored/failed close, cancellation, late confirmations, and exclusive commit.
+- Main pulse compilation is coordinated by the parent task after shared edits.
+
+Limits:
+- No game/anti-cheat/fullscreen presentation session was launched. This is a
+  defensive correction of the direct-route race exposure and a verified
+  confirmation hardening, not a claim of reproducing the user's game failure.
+- No user registration/preferences were changed. Tests did not inject Win+E
+  or close user Explorer windows. A native system/third-party launcher that
+  independently opens multiple applications is outside the hook guarantee.
+
+Follow-up review:
+- Real Shell desktop windows remain on the fast direct route, identified by
+  GetShellWindow and its owning process; another process naming a window WorkerW
+  cannot obtain the exception.
+- Logs distinguish Fullscreen and Unknown. Foreground geometry is sampled on the
+  logger thread, explicitly marked geometry_at_log, rather than blocking the hook.
+- The isolated execution desktop returned GetShellWindow=NULL: its first run had
+  192 passes and one environment failure. The identical binary then passed all
+  193 checks on the normal desktop. The first-run evidence was retained.

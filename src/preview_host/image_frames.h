@@ -43,15 +43,19 @@ struct IconEntry {
     uint32_t width = 0, height = 0;  // real size (PNG entries read their IHDR)
     uint32_t bits = 0;               // bits per pixel, 0 when unknown
     bool png = false;
-    uint32_t frame = 0;              // WIC frame index (directory position)
+    uint32_t frame = 0;              // file directory position, not a WIC frame index
     uint32_t offset = 0, size = 0;
 };
 
 // .ico (type 1) and .cur (type 2) directories. Entries keep file order, which
-// is WIC's frame order. Returns false for anything else.
+// need not match a decoder's frame order. Returns false for anything else.
 bool ParseIconDirectory(const std::vector<uint8_t>& file, std::vector<IconEntry>& entries, bool& cursor);
 // Index of the entry shown by default: the largest, then the deepest colour.
 size_t DefaultIconEntry(const std::vector<IconEntry>& entries);
+// Give WIC exactly one selected entry so codec-specific frame ordering cannot
+// substitute a different resolution. Cursor hotspots are not icon bit depths.
+bool MakeIconEntryFile(const std::vector<uint8_t>& file, const IconEntry& entry,
+                      bool cursor, std::vector<uint8_t>& out);
 
 // Payload sent beside the pixels so the window can offer the sizes:
 //   PULSEICO\t1\n

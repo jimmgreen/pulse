@@ -64,42 +64,60 @@ struct ExplorerWindowProbe {
     bool view_ready = false;      // its folder view exists and reports a folder
     bool supported = false;       // a file system folder or This PC
     size_t selected = 0;          // items selected in it
+    bool selection_read = false;
+    unsigned stable_age_ms = 0;   // same readable folder + selection in consecutive observations
 };
+
+// IShellWindows::Item explicitly returns S_FALSE/null for a missing entry.
+// https://learn.microsoft.com/en-us/windows/win32/api/exdisp/nf-exdisp-ishellwindows-item
+// Any inconsistent pair or other HRESULT leaves enumeration incomplete.
+enum class ShellWindowItemResult { Found, Absent, Invalid };
+constexpr ShellWindowItemResult ClassifyShellWindowItem(HRESULT result, bool has_dispatch) noexcept {
+    if (result == S_OK && has_dispatch) return ShellWindowItemResult::Found;
+    if (result == S_FALSE && !has_dispatch) return ShellWindowItemResult::Absent;
+    return ShellWindowItemResult::Invalid;
+}
 
 enum class ExplorerTakeoverStep { Wait, Take, Leave };
 
-constexpr unsigned kExplorerViewTimeoutMs = 4000;     // no view by then: leave it
-// After the view is ready: a selection arriving this soon goes along with the
-// request; a later one follows it (kExplorerLateSelectionMs).
-constexpr unsigned kExplorerSelectionGraceMs = 150;
-// The hidden source stays open this long after its view is ready, because
-// /select often applies 590-640 ms after it (Windows 11 23H2).
-constexpr unsigned kExplorerLateSelectionMs = 800;
-// A selection that changes this soon after the view is ready comes from the
-// program that opened the window (/select, SHOpenFolderAndSelectItems), not
-// from the user, even if the window could not be hidden in time.
+constexpr unsigned kExplorerViewTimeoutMs = 4000;     // admission observation bound
+// Nonempty selections must remain unchanged across a short observation
+// window; empty selections use one short grace window for late selection.
+constexpr unsigned kExplorerSelectionGraceMs = 100;
+constexpr unsigned kExplorerLateSelectionMs = 100;
+// Changes within this interval may be a late programmatic selection; they
+// still require a new presentation acknowledgement before any source close.
 constexpr unsigned kExplorerProgrammaticSelectionMs = 1500;
 
-// Wait for the view, leave virtual locations (Control Panel, Home, network…)
-// alone, and take the window as soon as its view is ready — Pulse shows the
-// folder at once while the source stays hidden.
+// Pure observation state: unreadable results, folder changes and selection
+// changes reset stability. Item enumeration order is not a selection change.
+class ExplorerSelectionStability {
+public:
+    unsigned Observe(unsigned age_ms, bool readable, const std::wstring& folder,
+                     const std::vector<std::wstring>& names);
+private:
+    bool valid_ = false;
+    unsigned since_ms_ = 0;
+    std::wstring folder_;
+    std::vector<std::wstring> names_;
+};
+
+// Wait for stable contents before submitting, bounded by registration age.
 ExplorerTakeoverStep DecideExplorerTakeover(const ExplorerWindowProbe& probe);
 
 // The source window once Pulse has acknowledged the folder.
 struct SourceCloseProbe {
     bool identity_kept = false;     // same window, process and folder; view still readable
     bool single_tab = false;        // exactly one tab and one shell view: nothing else to lose
-    bool hidden = false;            // invisible since it appeared: the user cannot have used it
     bool selection_changed = false; // differs from what was sent to Pulse
     bool sent_selection = false;    // the request carried names
     unsigned view_age_ms = 0;
 };
 
-enum class SourceCloseStep { Wait, Close, CloseAndSelect, Abort };
+enum class SourceCloseStep { Wait, Close, SelectAndKeep, Abort };
 
-// Never closes a window with other tabs or one the user may have touched. A
-// hidden source waits a moment for a late /select, which then follows the
-// request to Pulse.
+// Never closes a changed source. SelectAndKeep permits an optional follow-up,
+// but cannot authorize Quit without a new presentation acknowledgement.
 SourceCloseStep DecideSourceClose(const SourceCloseProbe& probe);
 
 } // namespace pulse::app

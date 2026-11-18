@@ -86,7 +86,7 @@ CtxLayoutRows MergeCtxHandlerShards(const CtxLayoutRows& previous, const CtxLayo
 bool MergeCtxHandlerStats(CtxHandlerStats& stats,
                           const std::vector<ops::ShellMenuHandlerStatus>& handlers);
 
-inline constexpr uint32_t kCtxLayoutVersion = 2;
+inline constexpr uint32_t kCtxLayoutVersion = 3;
 inline constexpr size_t kCtxLayoutMaxKeys = 512;
 
 struct CtxLayoutRecord {

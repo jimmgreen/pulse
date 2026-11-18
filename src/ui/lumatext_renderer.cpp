@@ -1,3 +1,4 @@
+#include "picker_proof_trace.h"
 #include "lumatext_renderer.h"
 #include "optional_lumatext.h"
 #include "typography.h"
@@ -81,6 +82,19 @@ bool Contains(const std::wstring& value, const wchar_t* fragment) {
 
 struct LumaTextRenderer::Impl {
     LumaTextStats stats;
+    bool Fail(std::uint64_t& counter) noexcept { ++counter; return false; }
+    bool trace_timings = false;
+    std::uint64_t TraceClock() const noexcept {
+        if (!trace_timings) return 0;
+        static const LONGLONG frequency = [] { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f.QuadPart; }();
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        return static_cast<std::uint64_t>(static_cast<double>(now.QuadPart) * 1000000.0 / static_cast<double>(frequency));
+    }
+    void TraceElapsed(std::uint64_t start, std::uint64_t& total) const noexcept {
+        if (trace_timings) total += TraceClock() - start;
+    }
+
 
 #if defined(PULSE_HAS_LUMATEXT)
     struct LayoutKey {
@@ -500,6 +514,13 @@ struct LumaTextRenderer::Impl {
     }
 
     bool Init(IDWriteFactory* dwrite, ID2D1RenderTarget* target) {
+        wchar_t trace[16]{};
+        const DWORD trace_length = GetEnvironmentVariableW(L"PULSE_STARTUP_TRACE", trace, ARRAYSIZE(trace));
+        trace_timings = trace_length > 0 && trace_length < ARRAYSIZE(trace) && trace[0] != L'0';
+#if defined(PULSE_STARTUP_TRACE_DIAGNOSTICS)
+        // Runtime slow-frame reports need timings even without a startup trace file.
+        trace_timings = true;
+#endif
         auto context_desc = LumaText::Descriptor<lt_context_desc>();
         context_desc.dwrite_factory = dwrite;
         context_desc.cpu_cache_limit_bytes = kGlyphCacheLimit;
@@ -725,7 +746,10 @@ struct LumaTextRenderer::Impl {
         FillLayoutDesc(desc, key, style, font_size, cascade);
 
         LumaText::TextLayout layout;
-        if (lt_text_layout_create(context.get(), &desc, layout.put()) != LT_OK) return nullptr;
+        const auto layout_start = TraceClock();
+        const auto layout_result = lt_text_layout_create(context.get(), &desc, layout.put());
+        TraceElapsed(layout_start, stats.layout_time_us);
+        if (layout_result != LT_OK) return nullptr;
         while (layouts.size() >= kLayoutCacheLimit) EvictOldestLayout();
         layout_lru.push_front(key);
         const auto inserted = layouts.emplace(key, LayoutSlot{std::move(layout),
@@ -740,7 +764,7 @@ struct LumaTextRenderer::Impl {
             format->GetFontStyle() != DWRITE_FONT_STYLE_NORMAL ||
             format->GetFontStretch() != DWRITE_FONT_STRETCH_NORMAL ||
             text.size() > UINT32_MAX) {
-            return false;
+            return Fail(stats.fail_input);
         }
         struct BusyGuard {
             bool& flag;
@@ -750,11 +774,11 @@ struct LumaTextRenderer::Impl {
         const float width = bounds.right - bounds.left;
         const float height = bounds.bottom - bounds.top;
         const float font_size = format->GetFontSize();
-        if (!(width > 0.0f) || !(height > 0.0f) || !(font_size > 0.0f)) return false;
+        if (!(width > 0.0f) || !(height > 0.0f) || !(font_size > 0.0f)) return Fail(stats.fail_input);
 
         std::uint32_t family = 0;
         LumaText::FontCascade* cascade = nullptr;
-        if (!ResolveCascade(format, text, family, cascade) || !cascade) return false;
+        if (!ResolveCascade(format, text, family, cascade) || !cascade) return Fail(stats.fail_font);
 
         LayoutKey key;
         key.text.assign(text);
@@ -765,10 +789,10 @@ struct LumaTextRenderer::Impl {
         key.width_64 = kUnboundedWidth64;
         key.alignment = DWRITE_TEXT_ALIGNMENT_LEADING;
         LumaText::TextLayout* layout = GetLayout(key, font_size, *cascade);
-        if (!layout || !*layout) return false;
+        if (!layout || !*layout) return Fail(stats.fail_layout);
 
         auto metrics = LumaText::Descriptor<lt_text_metrics>();
-        if (lt_text_layout_get_metrics(layout->get(), &metrics) != LT_OK) return false;
+        if (lt_text_layout_get_metrics(layout->get(), &metrics) != LT_OK) return Fail(stats.fail_backend);
         // Dest is an ink clip. Advance-only overflow left the last glyph's
         // optical weight / Mitchell lobe shaved off ("File" → "Fil").
         const float ink = pulse::ui::typography::InkPad(format);
@@ -777,12 +801,12 @@ struct LumaTextRenderer::Impl {
                 std::lround(std::max(1.0f, width - ink) * 64.0f));
             key.ellipsis = LT_TEXT_ELLIPSIS_END;
             layout = GetLayout(key, font_size, *cascade);
-            if (!layout || !*layout) return false;
-            if (lt_text_layout_get_metrics(layout->get(), &metrics) != LT_OK) return false;
+            if (!layout || !*layout) return Fail(stats.fail_layout);
+            if (lt_text_layout_get_metrics(layout->get(), &metrics) != LT_OK) return Fail(stats.fail_backend);
             // An ellipsized layout that still overflows would be clipped
             // mid-glyph with no "..." (long Explorer verbs in the fixed-width
             // context menu). DirectWrite trims correctly; let it draw.
-            if (metrics.line_count > 1 || metrics.width + ink > width + 0.5f) return false;
+            if (metrics.line_count > 1 || metrics.width + ink > width + 0.5f) return Fail(stats.fail_bounds);
         }
         const float floor_x = std::floor(bounds.left);
         const float phase_x = bounds.left - floor_x;
@@ -841,7 +865,7 @@ struct LumaTextRenderer::Impl {
         stats.surface_cache_misses++;
 
         Microsoft::WRL::ComPtr<ID2D1CommandList> commands;
-        if (FAILED(recording_dc->CreateCommandList(&commands)) || !commands) return false;
+        if (FAILED(recording_dc->CreateCommandList(&commands)) || !commands) return Fail(stats.fail_backend);
         recording_dc->SetTarget(commands.Get());
         recording_dc->BeginDraw();
         auto frame_desc = LumaText::Descriptor<lt_frame_desc>();
@@ -851,7 +875,7 @@ struct LumaTextRenderer::Impl {
         if (lt_frame_begin(renderer.get(), &frame_desc, frame.put()) != LT_OK) {
             recording_dc->EndDraw();
             recording_dc->SetTarget(nullptr);
-            return false;
+            return Fail(stats.fail_backend);
         }
 
         auto draw = LumaText::Descriptor<lt_draw_text_desc>();
@@ -873,18 +897,30 @@ struct LumaTextRenderer::Impl {
         // No render profile: it would pick a config by background and drop
         // the foreground-dependent dilation set above.
 
+        const auto draw_start = TraceClock();
         const lt_result result = lt_frame_draw_text_layout(frame.get(), layout->get(), &draw);
+        TraceElapsed(draw_start, stats.draw_time_us);
         auto frame_stats = LumaText::Descriptor<lt_frame_stats>();
         if (result == LT_OK && lt_frame_get_stats(frame.get(), &frame_stats) == LT_OK) {
             stats.freetype_glyphs += frame_stats.freetype_glyphs;
             stats.cache_hits += frame_stats.glyph_cache_hits;
+            if (trace_timings) {
+                stats.shaping_time_us += frame_stats.shaping_time_us;
+                stats.raster_time_us += frame_stats.raster_time_us;
+                stats.upload_time_us += frame_stats.upload_time_us;
+                stats.composition_time_us += frame_stats.composition_time_us;
+            }
         }
+        const auto end_start = TraceClock();
         const lt_result end_result = lt_frame_end(frame.get());
+        TraceElapsed(end_start, stats.frame_end_time_us);
+        const auto recording_start = TraceClock();
         const HRESULT recording_result = recording_dc->EndDraw();
+        TraceElapsed(recording_start, stats.recording_end_time_us);
         recording_dc->SetTarget(nullptr);
         if (result != LT_OK || end_result != LT_OK || FAILED(recording_result) ||
             FAILED(commands->Close())) {
-            return false;
+            return Fail(stats.fail_backend);
         }
 
         const float ink_width = std::min(width, std::max(1.0f, metrics.width + 2.0f));
@@ -913,14 +949,14 @@ struct LumaTextRenderer::Impl {
     // SetDrawingEffect(ID2D1SolidColorBrush) keep their colour.
     bool DrawLayout(D2D1_POINT_2F origin, IDWriteTextLayout* layout,
                     const D2D1_COLOR_F& foreground, bool clip) {
-        if (!layout_renderer || !target_dc || !layout) return false;
+        if (!layout_renderer || !target_dc || !layout) return Fail(stats.fail_input);
         float dpi_x = 96.0f, dpi_y = 96.0f;
         target_dc->GetDpi(&dpi_x, &dpi_y);
         auto frame_desc = LumaText::Descriptor<lt_frame_desc>();
         frame_desc.dpi_x = dpi_x;
         frame_desc.dpi_y = dpi_y;
         LumaText::Frame frame;
-        if (lt_frame_begin(layout_renderer.get(), &frame_desc, frame.put()) != LT_OK) return false;
+        if (lt_frame_begin(layout_renderer.get(), &frame_desc, frame.put()) != LT_OK) return Fail(stats.fail_backend);
         auto draw = LumaText::Descriptor<lt_draw_text_desc>();
         draw.origin_x = origin.x;
         draw.origin_y = origin.y;
@@ -933,32 +969,40 @@ struct LumaTextRenderer::Impl {
         draw.background_type = LT_BACKGROUND_TRANSPARENT;
         draw.render_config = LumaText::Descriptor<lt_render_config>();
         ApplySharpConfig(draw.render_config, foreground);
+        const auto draw_start = TraceClock();
         const lt_result result = lt_frame_draw_layout(frame.get(), layout, &draw);
+        TraceElapsed(draw_start, stats.draw_time_us);
         auto frame_stats = LumaText::Descriptor<lt_frame_stats>();
         if (result == LT_OK && lt_frame_get_stats(frame.get(), &frame_stats) == LT_OK) {
             stats.freetype_glyphs += frame_stats.freetype_glyphs;
             stats.cache_hits += frame_stats.glyph_cache_hits;
+            if (trace_timings) {
+                stats.shaping_time_us += frame_stats.shaping_time_us;
+                stats.raster_time_us += frame_stats.raster_time_us;
+                stats.upload_time_us += frame_stats.upload_time_us;
+                stats.composition_time_us += frame_stats.composition_time_us;
+            }
         }
+        const auto end_start = TraceClock();
         const lt_result end_result = lt_frame_end(frame.get());
+        TraceElapsed(end_start, stats.frame_end_time_us);
         stats.draw_calls++;
-        return result == LT_OK && end_result == LT_OK;
+        return (result == LT_OK && end_result == LT_OK) || Fail(stats.fail_backend);
     }
 
-    // Two colours in one shaped line (a dimmed file extension): the same
-    // layout is drawn twice, clipped at the caret x of `split` in that layout,
-    // so glyph positions never depend on substring widths.
+    // Locate the extension with the complete shaped line, not a separately
+    // measured prefix. Simple Latin extensions can then share one pixel phase.
     bool DrawSplit(std::wstring_view text, IDWriteTextFormat* format,
                    const D2D1_RECT_F& bounds, const D2D1_COLOR_F& foreground,
                    std::uint32_t split, const D2D1_COLOR_F& split_foreground,
                    const D2D1_COLOR_F& background) {
         ID2D1DeviceContext* dc = target_dc.Get();
-        if (!dc || busy || !renderer || !format || split == 0 || split >= text.size()) return false;
+        if (!dc || busy || !renderer || !format || split == 0 || split >= text.size()) return Fail(stats.fail_input);
         std::uint32_t family = 0;
         LumaText::FontCascade* cascade = nullptr;
         const float font_size = format->GetFontSize();
-        if (!(font_size > 0.0f) || !ResolveCascade(format, text, family, cascade) || !cascade) {
-            return false;
-        }
+        if (!(font_size > 0.0f)) return Fail(stats.fail_input);
+        if (!ResolveCascade(format, text, family, cascade) || !cascade) return Fail(stats.fail_font);
         LayoutKey key;
         key.text.assign(text);
         key.family = family;
@@ -968,33 +1012,48 @@ struct LumaTextRenderer::Impl {
         key.width_64 = kUnboundedWidth64;
         key.alignment = DWRITE_TEXT_ALIGNMENT_LEADING;
         LumaText::TextLayout* layout = GetLayout(key, font_size, *cascade);
-        if (!layout || !*layout) return false;
+        if (!layout || !*layout) return Fail(stats.fail_layout);
         auto metrics = LumaText::Descriptor<lt_text_metrics>();
-        if (lt_text_layout_get_metrics(layout->get(), &metrics) != LT_OK) return false;
+        if (lt_text_layout_get_metrics(layout->get(), &metrics) != LT_OK) return Fail(stats.fail_backend);
         // DrawOn would ellipsize this line, and the split would no longer
         // index the drawn glyphs.
         const float ink = pulse::ui::typography::InkPad(format);
-        if (metrics.width + ink > bounds.right - bounds.left + 0.5f) return false;
+        if (metrics.width + ink > bounds.right - bounds.left + 0.5f) return Fail(stats.fail_bounds);
         float split_x = 0.0f, split_y = 0.0f;
         auto hit = LumaText::Descriptor<lt_hit_test_metrics>();
         if (lt_text_layout_hit_test_position(layout->get(), split, false,
                                              &split_x, &split_y, &hit) != LT_OK) {
-            return false;
+            return Fail(stats.fail_backend);
         }
         const float cut = std::round(bounds.left + split_x);
+        const auto tail = text.substr(split);
+        const bool stable_tail = tail.front() == L'.' && std::all_of(tail.begin() + 1, tail.end(), [](wchar_t c) {
+            return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') ||
+                   (c >= L'0' && c <= L'9') || c == L'_';
+        });
+        float tail_width = 0;
+        if (stable_tail && !Measure(tail, format, tail_width, nullptr)) return Fail(stats.fail_backend);
         const float top = bounds.top - 8.0f, bottom = bounds.bottom + 8.0f;
         dc->PushAxisAlignedClip(D2D1::RectF(std::floor(bounds.left) - 8.0f, top, cut, bottom),
                                 D2D1_ANTIALIAS_MODE_ALIASED);
         const bool head = DrawOn(dc, text, format, bounds, foreground, background,
                                  DWRITE_TEXT_ALIGNMENT_LEADING);
         dc->PopAxisAlignedClip();
-        if (!head) return false;
+        if (!head) return false; // DrawOn already recorded the failure category.
         dc->PushAxisAlignedClip(D2D1::RectF(cut, top, std::ceil(bounds.right) + 8.0f, bottom),
                                 D2D1_ANTIALIAS_MODE_ALIASED);
-        // Same layout and geometry as the head draw; it cannot fail where
-        // that one succeeded short of a device loss, which redraws anyway.
-        DrawOn(dc, text, format, bounds, split_foreground, background,
-               DWRITE_TEXT_ALIGNMENT_LEADING);
+        if (stable_tail) {
+            // The suffix starts on a whole pixel regardless of the prefix's
+            // fractional advance. A fixed width also reuses its cached surface
+            // across filenames; the full-line fit above still owns truncation.
+            const auto tail_bounds = D2D1::RectF(cut, bounds.top, cut + tail_width + ink + 1.0f, bounds.bottom);
+            DrawOn(dc, tail, format, tail_bounds, split_foreground, background,
+                   DWRITE_TEXT_ALIGNMENT_LEADING);
+        } else {
+            // Keep contextual shaping intact for non-Latin extensions.
+            DrawOn(dc, text, format, bounds, split_foreground, background,
+                   DWRITE_TEXT_ALIGNMENT_LEADING);
+        }
         dc->PopAxisAlignedClip();
         return true;
     }
@@ -1060,6 +1119,10 @@ struct LumaTextRenderer::Impl {
         std::wstring text(static_cast<size_t>(len) + 1, L'\0');
         const int copied = GetWindowTextW(hwnd, text.data(), len + 1);
         text.resize(copied > 0 ? static_cast<size_t>(copied) : 0);
+        // A password field (an API key) is laid out, hit-tested and drawn as
+        // its mask: one character per character, so caret indices still match.
+        if (const auto mask = static_cast<wchar_t>(SendMessageW(hwnd, EM_GETPASSWORDCHAR, 0, 0)))
+            std::fill(text.begin(), text.end(), mask);
         return text;
     }
 
@@ -1412,7 +1475,7 @@ struct LumaTextRenderer::Impl {
     }
 
     bool PaintEdit(HWND hwnd, HDC hdc, IDWriteTextFormat* format,
-                   const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background) {
+                   const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background, const D2D1_RECT_F* surface_bounds = nullptr) {
         if (!hwnd || !format || !blit_dc || !dw_factory) return false;
         RECT rc{};
         GetClientRect(hwnd, &rc);
@@ -1420,15 +1483,13 @@ struct LumaTextRenderer::Impl {
         const int h = rc.bottom - rc.top;
         if (w <= 0 || h <= 0) return false;
 
+        PULSE_PICKER_TRACE_POINT("edit-ensure-bitmap-before");
         if (!EnsureBlit(w, h)) return false;
+        PULSE_PICKER_TRACE_POINT("edit-ensure-bitmap-after");
 
-        const int len = GetWindowTextLengthW(hwnd);
-        std::wstring text;
-        if (len > 0) {
-            text.resize(static_cast<size_t>(len) + 1);
-            const int copied = GetWindowTextW(hwnd, text.data(), len + 1);
-            text.resize(copied > 0 ? static_cast<size_t>(copied) : 0);
-        }
+        PULSE_PICKER_TRACE_POINT("edit-read-before");
+        std::wstring text = ReadEditText(hwnd);
+        PULSE_PICKER_TRACE_POINT("edit-read-after");
 
         DWORD sel0 = 0, sel1 = 0;
         SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&sel0),
@@ -1452,8 +1513,12 @@ struct LumaTextRenderer::Impl {
         const bool wraps = EditWraps(hwnd);
         const float wrap_width = wraps ? EditWrapWidth(hwnd, static_cast<float>(w)) : 0.0f;
         const float multiline = EditMultilineLine(hwnd);
+        PULSE_PICKER_TRACE_POINT("edit-layout-before");
         const auto dw_layout = DwEditLayout(text, format, static_cast<float>(h), wrap_width, multiline);
+        PULSE_PICKER_TRACE_POINT("edit-layout-after");
+        PULSE_PICKER_TRACE_POINT("edit-font-params-before");
         IDWriteRenderingParams* params = DwParams(hwnd);
+        PULSE_PICKER_TRACE_POINT("edit-font-params-after");
         if (!dw_layout || !params) return false;
         const auto caret_origin = [&](int position) {
             return DwCaretX(dw_layout.Get(), position, static_cast<int>(text.size()));
@@ -1652,31 +1717,50 @@ struct LumaTextRenderer::Impl {
                             caret_bottom),
                 brush.Get());
         }
+        PULSE_PICKER_TRACE_POINT("edit-blit-end-draw-before");
         const HRESULT end = blit_dc->EndDraw();
+        PULSE_PICKER_TRACE_POINT("edit-blit-end-draw-after");
         blit_dc->SetTarget(nullptr);
         if (FAILED(end) || !text_drawn || !selection_drawn || !brush) return false;
         ++stats.edit_directwrite_draws;
         stats.edit_rendering_mode = params->GetRenderingMode();
-        if (FAILED(blit_staging->CopyFromBitmap(nullptr, blit_target.Get(), nullptr))) {
-            return false;
-        }
-        D2D1_MAPPED_RECT mapped{};
-        if (FAILED(blit_staging->Map(D2D1_MAP_OPTIONS_READ, &mapped))) return false;
-        const size_t row_bytes = static_cast<size_t>(w) * 4u;
-        const void* dib_bits = mapped.bits;
-        std::vector<std::uint8_t> tight_pixels;
-        if (mapped.pitch != row_bytes) {
-            tight_pixels.resize(row_bytes * static_cast<size_t>(h));
-            const auto* source = static_cast<const std::uint8_t*>(mapped.bits);
-            for (int row = 0; row < h; ++row) {
-                std::memcpy(tight_pixels.data() + static_cast<size_t>(row) * row_bytes,
-                            source + static_cast<size_t>(row) * mapped.pitch,
-                            row_bytes);
+        bool presented = false;
+        if (surface_bounds) {
+            if (!target_dc) return false;
+            D2D1_MATRIX_3X2_F previous{}; target_dc->GetTransform(&previous);
+            target_dc->SetTransform(D2D1::Matrix3x2F::Identity());
+            target_dc->PushAxisAlignedClip(*surface_bounds, D2D1_ANTIALIAS_MODE_ALIASED);
+            target_dc->DrawBitmap(blit_target.Get(), surface_bounds, 1.0f,
+                D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, nullptr, nullptr);
+            target_dc->PopAxisAlignedClip();
+            target_dc->SetTransform(previous);
+            // blit_target is reused for the next editor. Finish its main-surface
+            // draw before another edit changes this shared bitmap's contents.
+            PULSE_PICKER_TRACE_POINT("main-flush-before");
+            presented = SUCCEEDED(target_dc->Flush());
+            PULSE_PICKER_TRACE_POINT("main-flush-after");
+        } else {
+            if (FAILED(blit_staging->CopyFromBitmap(nullptr, blit_target.Get(), nullptr))) {
+                return false;
             }
-            dib_bits = tight_pixels.data();
+            D2D1_MAPPED_RECT mapped{};
+            if (FAILED(blit_staging->Map(D2D1_MAP_OPTIONS_READ, &mapped))) return false;
+            const size_t row_bytes = static_cast<size_t>(w) * 4u;
+            const void* dib_bits = mapped.bits;
+            std::vector<std::uint8_t> tight_pixels;
+            if (mapped.pitch != row_bytes) {
+                tight_pixels.resize(row_bytes * static_cast<size_t>(h));
+                const auto* source = static_cast<const std::uint8_t*>(mapped.bits);
+                for (int row = 0; row < h; ++row) {
+                    std::memcpy(tight_pixels.data() + static_cast<size_t>(row) * row_bytes,
+                                source + static_cast<size_t>(row) * mapped.pitch,
+                                row_bytes);
+                }
+                dib_bits = tight_pixels.data();
+            }
+            presented = PresentEditBits(hwnd, hdc, dib_bits, w, h, background.a < 1.0f);
+            blit_staging->Unmap();
         }
-        const bool presented = PresentEditBits(hwnd, hdc, dib_bits, w, h, background.a < 1.0f);
-        blit_staging->Unmap();
 
         HIMC imc = ImmGetContext(hwnd);
         if (imc) {
@@ -1973,6 +2057,17 @@ bool LumaTextRenderer::Measure(std::wstring_view text, IDWriteTextFormat* format
 #endif
 }
 
+bool LumaTextRenderer::DrawEditOnSurface(HWND hwnd, IDWriteTextFormat* format,
+    const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background, const D2D1_RECT_F& bounds) {
+#if defined(PULSE_HAS_LUMATEXT)
+    TrackEdit(hwnd);
+    return impl_ && impl_->PaintEdit(hwnd, nullptr, format, foreground, background, &bounds);
+#else
+    (void)hwnd; (void)format; (void)foreground; (void)background; (void)bounds;
+    return false;
+#endif
+}
+
 bool LumaTextRenderer::PaintEdit(HWND hwnd, HDC hdc, IDWriteTextFormat* format,
                                  const D2D1_COLOR_F& foreground,
                                  const D2D1_COLOR_F& background) {
@@ -1993,8 +2088,11 @@ const LumaTextStats& LumaTextRenderer::Stats() const noexcept {
     return impl_->stats;
 }
 
-void LumaTextRenderer::RecordFallback() noexcept {
+void LumaTextRenderer::RecordFallback(unsigned api) noexcept {
     impl_->stats.fallback_draws++;
+    if (api == 0) ++impl_->stats.fallback_text;
+    else if (api == 1) ++impl_->stats.fallback_layout;
+    else ++impl_->stats.fallback_split;
 }
 
 } // namespace pulse::ui

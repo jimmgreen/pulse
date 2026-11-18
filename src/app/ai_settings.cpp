@@ -6,7 +6,45 @@
 namespace pulse::app::ai {
 namespace {
 
+// assistant.thinking (ai_providers.h ThinkLevel, kept apart so this file
+// needs nothing above it).
+constexpr const char* kThinkingNames[] = {"off", "minimal", "low", "medium", "high", "xhigh", "max"};
+int ClampThinking(int level) { return level < 0 ? 0 : level > 6 ? 6 : level; }
+int ThinkingFromName(const std::string& name) {
+    for (int i = 0; i < 7; ++i)
+        if (name == kThinkingNames[i]) return i;
+    return -1;
+}
+// "effort" meant what the service sent: DeepSeek's 0..3 were off, low, high
+// and max; the others' off, low, medium and high.
+bool DeepSeekService(const std::string& service) { return service.empty() || service == "deepseek"; }
+int ThinkingFromEffort(int effort, const std::string& service) {
+    static constexpr int kDeepSeek[] = {0, 2, 4, 6}, kOthers[] = {0, 2, 3, 4};
+    effort = effort < 0 ? 0 : effort > 3 ? 3 : effort;
+    return DeepSeekService(service) ? kDeepSeek[effort] : kOthers[effort];
+}
+int EffortFromThinking(int level, const std::string& service) {
+    static constexpr int kDeepSeek[] = {0, 1, 1, 2, 2, 3, 3}, kOthers[] = {0, 1, 1, 2, 3, 3, 3};
+    level = ClampThinking(level);
+    return DeepSeekService(service) ? kDeepSeek[level] : kOthers[level];
+}
+
+
 constexpr size_t kMaxClients = 64, kMaxRules = 256, kMaxName = 128;
+constexpr size_t kMaxServices = 32;
+
+// An address ai.json may carry: http(s), at most 512 bytes.
+bool UsableUrl(std::string_view url) {
+    return url.size() <= 512 && (url.starts_with("https://") || url.starts_with("http://"));
+}
+
+// A model service id (ai_providers.h): lower-case letters, digits, '-' and '_'.
+bool UsableServiceId(std::string_view id) {
+    if (id.empty() || id.size() > 32) return false;
+    for (const char ch : id)
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_')) return false;
+    return true;
+}
 
 std::wstring LocalAppData() {
     wchar_t root[32768];
@@ -75,6 +113,7 @@ Settings ParseSettings(std::string_view utf8, bool* malformed) {
         return s;
     }
     if (malformed) *malformed = false;
+    s.enabled = root.get_bool("enabled", true);
     s.mcp_enabled = root.get_bool("mcp_enabled", false);
     if (const auto* days = root.find("log_days")) {
         int64_t n = 0;
@@ -115,13 +154,30 @@ Settings ParseSettings(std::string_view utf8, bool* malformed) {
         s.assistant.floating = a->get_string("dock") == "floating";
         const std::string model = a->get_string("model");
         if (!model.empty() && model.size() <= kMaxName) s.assistant.model = model;
-        if (const auto* effort = a->find("effort")) {
-            int64_t n = 0;
-            if (effort->get_int(n, 0, 3)) s.assistant.effort = static_cast<int>(n);
-        }
+        int64_t effort = -1;
+        if (const auto* e = a->find("effort"); !e || !e->get_int(effort, 0, 3)) effort = -1;
+        const int thinking = ThinkingFromName(a->get_string("thinking"));
         const std::string base_url = a->get_string("base_url");
-        if (base_url.size() <= 512 && (base_url.starts_with("https://") || base_url.starts_with("http://")))
-            s.assistant.base_url = base_url;
+        if (UsableUrl(base_url)) s.assistant.base_url = base_url;
+        if (const std::string service = a->get_string("service"); UsableServiceId(service)) s.assistant.service = service;
+        s.assistant.history = a->get_bool("history", true);
+        if (int64_t days = 0; a->find("history_days") && a->find("history_days")->get_int(days, 0, 3650))
+            s.assistant.history_days = static_cast<int>(days);
+        if (thinking >= 0) s.assistant.thinking = thinking;
+        else if (effort >= 0) s.assistant.thinking = ThinkingFromEffort(static_cast<int>(effort), s.assistant.service);
+        if (const auto* list = a->find("services"); list && list->is_object()) {
+            for (size_t i = 0; i < list->size() && s.assistant.services.size() < kMaxServices; ++i) {
+                const std::string& id = list->keys()[i];
+                const json::Value& item = list->at(i);
+                if (!UsableServiceId(id) || !item.is_object()) continue;
+                ServicePrefs sp;
+                if (const std::string m = item.get_string("model"); m.size() <= kMaxName) sp.model = m;
+                if (const std::string u = item.get_string("base_url"); UsableUrl(u)) sp.base_url = u;
+                bool seen = false;
+                for (const auto& have : s.assistant.services) seen |= have.first == id;
+                if (!seen) s.assistant.services.emplace_back(id, std::move(sp));
+            }
+        }
         if (const auto* v = a->find("voice"); v && v->is_object()) {
             VoicePrefs& voice = s.assistant.voice;
             const std::string service = v->get_string("service");
@@ -144,7 +200,26 @@ Settings ParseSettings(std::string_view utf8, bool* malformed) {
 Settings LoadSettings(bool* malformed) {
     if (malformed) *malformed = false;
     const std::wstring path = SettingsPath();
-    if (path.empty() || GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return {};
+    if (path.empty()) return {};
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    const DWORD attribute_error = attributes == INVALID_FILE_ATTRIBUTES ? GetLastError() : ERROR_SUCCESS;
+    const bool missing = attributes == INVALID_FILE_ATTRIBUTES &&
+        (attribute_error == ERROR_FILE_NOT_FOUND || attribute_error == ERROR_PATH_NOT_FOUND);
+    if (missing) {
+        Settings defaults;
+        wchar_t executable[32768]{};
+        const DWORD count = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
+        if (count && count < std::size(executable)) {
+            std::wstring ini(executable, count);
+            const size_t slash = ini.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) {
+                ini.resize(slash + 1);
+                ini += L"setup-defaults.ini";
+                defaults.enabled = GetPrivateProfileIntW(L"features", L"ai_assistant", 1, ini.c_str()) != 0;
+            }
+        }
+        return defaults;
+    }
     std::wstring text;
     if (!ReadUtf8File(path, text)) {
         if (malformed) *malformed = true;
@@ -155,6 +230,7 @@ Settings LoadSettings(bool* malformed) {
 
 std::string SerializeSettings(const Settings& s) {
     json::Value root = json::Value::Object();
+    if (!s.enabled) root.set("enabled", false);
     root.set("mcp_enabled", s.mcp_enabled);
     root.set("log_days", s.log_days);
     json::Value clients = json::Value::Array();
@@ -181,9 +257,22 @@ std::string SerializeSettings(const Settings& s) {
     }
     json::Value assistant = json::Value::Object();
     assistant.set("dock", s.assistant.floating ? "floating" : "docked");
+    // Only once another service was chosen, so older files stay as they are.
+    if (!s.assistant.service.empty()) assistant.set("service", s.assistant.service);
     assistant.set("model", s.assistant.model);
-    assistant.set("effort", s.assistant.effort);
+    assistant.set("thinking", kThinkingNames[ClampThinking(s.assistant.thinking)]);
+    assistant.set("effort", EffortFromThinking(s.assistant.thinking, s.assistant.service));
     if (!s.assistant.base_url.empty()) assistant.set("base_url", s.assistant.base_url);
+    if (!s.assistant.services.empty()) {
+        json::Value list = json::Value::Object();
+        for (const auto& [id, sp] : s.assistant.services) {
+            json::Value item = json::Value::Object();
+            if (!sp.model.empty()) item.set("model", sp.model);
+            if (!sp.base_url.empty()) item.set("base_url", sp.base_url);
+            list.set(id, std::move(item));
+        }
+        assistant.set("services", std::move(list));
+    }
     if (const VoicePrefs& vp = s.assistant.voice; !vp.IsDefault()) {
         json::Value voice = json::Value::Object();
         if (!vp.service.empty()) voice.set("service", vp.service);
@@ -193,6 +282,8 @@ std::string SerializeSettings(const Settings& s) {
         if (!vp.mic.empty()) voice.set("mic", vp.mic);
         assistant.set("voice", std::move(voice));
     }
+    if (!s.assistant.history) assistant.set("history", false);
+    if (s.assistant.history_days > 0) assistant.set("history_days", s.assistant.history_days);
     root.set("assistant", std::move(assistant));
     return json::Serialize(root) + "\n";
 }

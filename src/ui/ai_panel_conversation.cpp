@@ -1,12 +1,12 @@
 // ai_panel_conversation.cpp — the Pulse 助手 conversation: user bubbles,
 // thinking, tool steps, plan / confirm / result cards, the streamed answer.
 //
-// Sizes, margins and motion follow v2.css ("messages" … "result card") of
-// plans/ai/pulse_ai_assistant_v2.html; CSS pixels are DIPs. Blocks are laid
+// Sizes, margins and motion follow the design's "messages" … "result card"
+// styles; CSS pixels are DIPs. Blocks are laid
 // out top to bottom with CSS margin collapsing, so spacing matches the page.
 #include "ai_panel_view.h"
 #include "ai_panel_draw.h"
-#include "ai_panel_conn.h"
+#include "ai_panel_rich.h"
 
 #include "ui_motion.h"
 
@@ -127,52 +127,6 @@ ID2D1LinearGradientBrush* Gradient(ID2D1DeviceContext* dc, D2D1_POINT_2F a, D2D1
     return brush;
 }
 
-// One line or paragraph of an answer: "- " bullets, **bold** spans.
-struct RichLine {
-    std::wstring text;
-    std::vector<DWRITE_TEXT_RANGE> bold;
-    bool bullet = false;
-};
-
-std::vector<RichLine> ParseRich(const std::wstring& src) {
-    std::vector<RichLine> out;
-    size_t pos = 0;
-    while (pos <= src.size()) {
-        size_t end = src.find(L'\n', pos);
-        if (end == std::wstring::npos) end = src.size();
-        std::wstring_view line(src.data() + pos, end - pos);
-        pos = end + 1;
-        while (!line.empty() && (line.back() == L'\r' || line.back() == L' ')) line.remove_suffix(1);
-        if (line.empty()) {
-            if (end == src.size()) break;
-            continue;
-        }
-        RichLine r;
-        if (line.size() >= 2 && (line[0] == L'-' || line[0] == L'\x2022') && line[1] == L' ') {
-            r.bullet = true;
-            line.remove_prefix(2);
-        }
-        bool bold = false;
-        UINT32 start = 0;
-        for (size_t i = 0; i < line.size(); ++i) {
-            if (line[i] == L'*' && i + 1 < line.size() && line[i + 1] == L'*') {
-                const UINT32 at = static_cast<UINT32>(r.text.size());
-                if (bold && at > start) r.bold.push_back({start, at - start});
-                bold = !bold;
-                start = at;
-                ++i;
-                continue;
-            }
-            r.text.push_back(line[i]);
-        }
-        // An unclosed ** while streaming still shows bold.
-        if (bold && r.text.size() > start) r.bold.push_back({start, static_cast<UINT32>(r.text.size()) - start});
-        out.push_back(std::move(r));
-        if (end == src.size()) break;
-    }
-    return out;
-}
-
 D2D1_RECT_F Intersect(const D2D1_RECT_F& a, const D2D1_RECT_F& b) {
     return D2D1::RectF((std::max)(a.left, b.left), (std::max)(a.top, b.top), (std::min)(a.right, b.right),
                        (std::min)(a.bottom, b.bottom));
@@ -261,24 +215,14 @@ float AiPanelView::TweenTo(uint64_t key, float target, uint32_t ms, uint64_t now
     return target;
 }
 
-void AiPanelView::ScrollBy(float dy) {
-    // The open model menu's list takes the wheel while it scrolls.
-    if (menu_shown_ && conn_ && !conn_->card && conn_->menu_scroll_max > 0.0f) {
-        conn_->menu_scroll = std::clamp(conn_->menu_scroll + dy, 0.0f, conn_->menu_scroll_max);
-        return;
-    }
-    // So does the connection card's body, in a short window.
-    if (menu_shown_ && conn_ && conn_->card && conn_->card_scroll_max > 0.0f) {
-        conn_->card_scroll = std::clamp(conn_->card_scroll + dy, 0.0f, conn_->card_scroll_max);
-        return;
-    }
+void AiPanelView::ScrollBy(float dy, bool animate) {
     const float max_scroll = (std::max)(0.0f, content_h_ - view_h_);
     const float base = scroll_anim_ ? scroll_to_ : scroll_;
     const float to = std::clamp(base + dy, 0.0f, max_scroll);
     scroll_from_ = scroll_;
     scroll_to_ = to;
     scroll_start_ = motion::NowMs();
-    scroll_anim_ = motion::SystemAnimationsEnabled();
+    scroll_anim_ = animate && motion::SystemAnimationsEnabled();
     if (!scroll_anim_) scroll_ = to;
     follow_ = to >= max_scroll - 1.0f;
 }
@@ -295,6 +239,8 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
     const bool motion_on = motion::SystemAnimationsEnabled();
     was_empty_ = false;
     for (auto& kv : tweens_) kv.second.used = false;
+    EnsureRichBrushes(dc, pal, vm.dark);
+    BeginRichFrame(vm);
 
     // Scroll position for this frame (content height is last frame's; a
     // following view snaps to the end below once this frame is measured).
@@ -398,10 +344,13 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
     // style: 0 normal, 1 red primary (.confirm.danger), 2 disabled primary,
     // 3 red text on a plain button (.b2.dz).
     const auto button = [&](float x_right, float y, const std::wstring& text, bool primary, AiIcon icon, bool with_icon,
-                            AiPanelPart part, int index, float max_w = 0.0f, int style = 0) {
+                            AiPanelPart part, int index, float max_w = 0.0f, int style = 0,
+                            const std::wstring& kbd = {}) {
         IDWriteTextFormat* fmt = primary ? formats_.body13b : formats_.body13;
         const float tw = c.Measure(text, fmt);
-        float bw = 28.0f * s + tw + (with_icon ? 20.0f * s : 0.0f);
+        // kbd: the key after the words in a lighter ink (取消 Esc).
+        const float kw = kbd.empty() ? 0.0f : c.Measure(kbd, formats_.caption) + 7.0f * s;
+        float bw = 28.0f * s + tw + kw + (with_icon ? 20.0f * s : 0.0f);
         if (max_w > 0.0f && bw > max_w) bw = max_w;   // a narrow panel: the text ends in …
         const D2D1_RECT_F r = D2D1::RectF(x_right - bw, y, x_right, y + 32.0f * s);
         const bool off = style == 2;
@@ -428,7 +377,10 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
             c.Icon(icon, tx, y + 9.0f * s, 14.0f * s, ink);
             tx += 20.0f * s;
         }
-        line(text, fmt, tx, y, r.right - 10.0f * s, 32.0f * s, ink);
+        line(text, fmt, tx, y, r.right - 10.0f * s - kw, 32.0f * s, ink);
+        if (kw > 0.0f)
+            line(kbd, formats_.caption, r.right - 14.0f * s - kw + 7.0f * s, y, r.right - 10.0f * s, 32.0f * s,
+                 Alpha(ink, primary ? 0.75f : 0.6f));
         dc->SetTransform(before);
         if (!off) hit(r, part, index);
         return bw;
@@ -541,6 +493,8 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
             // .acts fades in (opacity .3s), no slide.
             enter = entrance(b.born_ms, 0.0f, 300);
         }
+        // Editing a message: what comes after it is answered again (.42).
+        if (vm.edit_block >= 0 && index > vm.edit_block) enter.opacity *= 0.42f;
         if (b.gone_ms && motion_on) {
             // .err.gone: opacity 0, translateY(-4px) over .25 s (then removed).
             const float t = now_ms <= b.gone_ms ? 0.0f
@@ -555,6 +509,64 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
             // A new turn: .turn margin-bottom 12 collapses with the user's 4.
             if (!first) pending = (std::max)(pending, 12.0f * s);
             place(4.0f * s);
+            const float turn_top = top + y;
+            if (index == vm.edit_block) {
+                // .editbox: full width, card, 1 px accent border and a 3 px
+                // accent ring (16%), radius 14, padding 10 12 8; text 13.5 / 21
+                // (min 2 lines); the row: info 14 + note 12 text3, 取消 · 发送.
+                const float elh = 21.0f * s;
+                const float ta = static_cast<float>((std::max)(2, vm.edit_lines)) * elh;
+                // A narrow panel: the note takes its own line above the buttons
+                // rather than ending in … beside them.
+                const float btns_w = (28.0f * 2.0f + 7.0f * 2.0f + 8.0f) * s + c.Measure(vm.edit_send, formats_.body13b) +
+                                     c.Measure(L"Enter", formats_.caption) + c.Measure(vm.edit_cancel, formats_.body13) +
+                                     c.Measure(L"Esc", formats_.caption);
+                const float note_w = 20.0f * s + c.Measure(vm.edit_warn, formats_.caption);
+                const bool note_above = note_w + 8.0f * s + btns_w > (x1 - x0) - 24.0f * s;
+                const float note_h = note_above ? 20.0f * s : 0.0f;
+                const D2D1_RECT_F r = D2D1::RectF(x0, top + y, x1, top + y + 10.0f * s + ta + 8.0f * s + note_h + 32.0f * s + 8.0f * s);
+                if (visible(r.top - 3.0f * s, r.bottom + 3.0f * s)) {
+                    c.Stroke(Inflate(r, 3.0f * s), 17.0f * s, Alpha(pal.accent, 0.16f), 3.0f * s);
+                    c.Fill(r, 14.0f * s, pal.card);
+                    c.Stroke(r, 14.0f * s, pal.accent, 1.0f * s);
+                }
+                turn_edit_rect_ = D2D1::RectF(r.left + 12.0f * s, r.top + 10.0f * s, r.right - 12.0f * s, r.top + 10.0f * s + ta);
+                turn_edit_placed_ = turn_edit_rect_.top >= area.top && turn_edit_rect_.bottom <= area.bottom;
+                if (!turn_edit_placed_ && visible(turn_edit_rect_.top, turn_edit_rect_.bottom)) {
+                    // Scrolled partly out: the panel draws the words, a click brings the EDIT.
+                    float ly = turn_edit_rect_.top;
+                    size_t from = 0;
+                    while (from <= vm.edit_text.size() && ly < turn_edit_rect_.bottom) {
+                        const size_t nl = vm.edit_text.find(L'\n', from);
+                        const std::wstring seg = vm.edit_text.substr(from, nl == std::wstring::npos ? std::wstring::npos : nl - from);
+                        line(seg, formats_.body, turn_edit_rect_.left, ly, turn_edit_rect_.right, elh, pal.text);
+                        ly += elh;
+                        if (nl == std::wstring::npos) break;
+                        from = nl + 1;
+                    }
+                    hit(turn_edit_rect_, AiPanelPart::EditBox, index);
+                }
+                const float nx = r.left + 12.0f * s;
+                if (note_above && visible(turn_edit_rect_.bottom + 6.0f * s, turn_edit_rect_.bottom + 26.0f * s)) {
+                    const float ny = turn_edit_rect_.bottom + 6.0f * s;
+                    c.Icon(AiIcon::Info, nx, ny + 3.0f * s, 14.0f * s, pal.text3);
+                    line(vm.edit_warn, formats_.caption, nx + 20.0f * s, ny, r.right - 12.0f * s, 20.0f * s, pal.text3);
+                }
+                const float ry = turn_edit_rect_.bottom + 8.0f * s + note_h;
+                if (visible(ry, ry + 32.0f * s)) {
+                    float bx = r.right - 12.0f * s;
+                    bx -= button(bx, ry, vm.edit_send, true, AiIcon::Send, false, AiPanelPart::EditSend, index, 0.0f, 0, L"Enter");
+                    bx -= 8.0f * s;
+                    bx -= button(bx, ry, vm.edit_cancel, false, AiIcon::Close, false, AiPanelPart::EditCancel, index, 0.0f, 0, L"Esc");
+                    if (!note_above && bx - 8.0f * s - nx > 40.0f * s) {
+                        c.Icon(AiIcon::Info, nx, ry + 9.0f * s, 14.0f * s, pal.text3);
+                        line(vm.edit_warn, formats_.caption, nx + 20.0f * s, ry, bx - 8.0f * s, 32.0f * s, pal.text3);
+                    }
+                }
+                y += r.bottom - r.top;
+                pending = 8.0f * s;
+                break;
+            }
             if (!b.context.empty()) {
                 // .ctxp: h 24, padding 0 9 0 7, radius 12, folder 13, gap 6.
                 const float tw = c.Measure(b.context, formats_.caption);
@@ -569,18 +581,53 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
                 y += 30.0f * s;
             }
             // .bub: max-width 300, padding 10 14, radius 16 16 4 16, 13.5 / 21.
-            const float max_text = 300.0f * s - 28.0f * s;
-            const float tw = (std::min)(c.Measure(b.text, formats_.body), max_text);
-            const float th = (std::max)(21.0f * s, wrapped_h(b.text, formats_.body, max_text, 21.0f * s));
+            // Its text is selectable like an answer's (laid out once).
+            const float max_text = (std::min)(300.0f * s, x1 - x0) - 28.0f * s;
+            const AiRichDoc* rd = RichFor(compositor, b, max_text, s);
+            const float tw = rd ? rd->text_w : 0.0f;
+            const float th = rd ? (std::max)(21.0f * s, rd->height) : 21.0f * s;
             const float bw = tw + 28.0f * s;
             const D2D1_RECT_F r = D2D1::RectF(x1 - bw, top + y, x1, top + y + th + 20.0f * s);
-            if (visible(r.top, r.bottom)) {
-                FillCorners(c, r, 16.0f * s, 16.0f * s, 4.0f * s, 16.0f * s, pal.accent_soft);
-                wrapped(b.text, formats_.body, r.left + 14.0f * s, r.top + 10.0f * s, max_text + 1.0f, 21.0f * s,
-                        pal.text);
-            }
+            const bool shown = visible(r.top, r.bottom);
+            if (shown) FillCorners(c, r, 16.0f * s, 16.0f * s, 4.0f * s, 16.0f * s, pal.accent_soft);
+            if (rd) DrawRich(compositor, *rd, b, static_cast<int>(bi), r.left + 14.0f * s, r.top + 10.0f * s, pal, area, vm, s, now_ms, shown);
             y += th + 20.0f * s;
-            pending = 18.0f * s;
+            if (b.edited) {
+                // .edited: 11.5 text3, margin 3 4 0, under the bubble's right end.
+                y += 3.0f * s;
+                const float ew = c.Measure(vm.edited_label, formats_.meta);
+                if (visible(top + y, top + y + 16.0f * s))
+                    line(vm.edited_label, formats_.meta, x1 - 4.0f * s - ew - 1.0f, top + y, x1 - 4.0f * s + 1.0f, 16.0f * s, pal.text3);
+                y += 16.0f * s;
+            }
+            // .uacts: margin-top 4, 复制 · 编辑 (28, gap 2) at the right; they
+            // fade in (.15 s) while the pointer is over the turn.
+            y += 4.0f * s;
+            const bool acts_on = vm.hover_turn == index || hot(AiPanelPart::UserCopy, index) || hot(AiPanelPart::UserEdit, index);
+            const float acts_k = TweenTo(key + 5, acts_on ? 1.0f : 0.0f, 150, now_ms);
+            const float ay = top + y;
+            if (acts_k > 0.01f && visible(ay, ay + 28.0f * s)) {
+                const struct { AiPanelPart part; AiIcon icon; } items[] = {
+                    {AiPanelPart::UserCopy, AiIcon::Copy},
+                    {AiPanelPart::UserEdit, AiIcon::Edit},
+                };
+                float bx = x1 - (28.0f * 2.0f + 2.0f) * s;
+                for (const auto& it : items) {
+                    const D2D1_RECT_F br = D2D1::RectF(bx, ay, bx + 28.0f * s, ay + 28.0f * s);
+                    const bool h = hot(it.part, index);
+                    if (h) c.Fill(br, 7.0f * s, Alpha(down(it.part, index) ? Mix(pal.hover, pal.text, 0.06f) : pal.hover, acts_k));
+                    c.Icon(it.icon, bx + 6.5f * s, ay + 6.5f * s, 15.0f * s, Alpha(h ? pal.text : pal.text3, acts_k));
+                    if (acts_on) hit(br, it.part, index);
+                    bx += 30.0f * s;
+                }
+            }
+            y += 28.0f * s;
+            // The turn shows its buttons while the pointer is anywhere on it.
+            {
+                const D2D1_RECT_F turn_vis = D2D1::RectF(x0, (std::max)(turn_top, area.top), x1, (std::min)(top + y, area.bottom));
+                if (turn_vis.bottom > turn_vis.top) turn_rects_.push_back({turn_vis, index});
+            }
+            pending = 8.0f * s;
             break;
         }
         case AiBlockKind::Thinking: {
@@ -657,71 +704,34 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
             break;
         }
         case AiBlockKind::Text: {
-            // .turn: 13.5 / 22; p margin 2 0 10; ul margin 0 0 10, li 2 0,
-            // padding-left 18.
-            const std::vector<RichLine> lines = ParseRich(b.text);
-            if (lines.empty() && !b.streaming) break;
+            // The answer's Markdown (ai_panel_rich.cpp), laid out once per
+            // text and width: p 13.5 / 22, lists, code, tables, path chips.
+            const AiRichDoc* rd = RichFor(compositor, b, x1 - x0, s);
+            if (!rd || (rd->pieces.empty() && rd->decos.empty() && !b.streaming)) break;
             const float lh = 22.0f * s;
-            float caret_x = x0, caret_y = -1.0f;
-            for (size_t li = 0; li < lines.size(); ++li) {
-                const RichLine& rl = lines[li];
-                // p and li both have margin-top 2; li → li collapses to 2,
-                // anything next to a paragraph or the list's end to 10.
-                place(2.0f * s);
-                const float lx = rl.bullet ? x0 + 18.0f * s : x0;
-                const float lw = x1 - lx;
-                TextOptions o;
-                o.wrap = true;
-                o.line_height = lh;
-                IDWriteTextLayout* layout = c.Layout(rl.text.empty() ? std::wstring(L" ") : rl.text, formats_.body, lw,
-                                                     10000.0f, o);
-                float h = lh;
-                if (layout) {
-                    for (const DWRITE_TEXT_RANGE& r : rl.bold) layout->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, r);
-                    DWRITE_TEXT_METRICS m{};
-                    layout->GetMetrics(&m);
-                    h = (std::max)(lh, m.height);
-                    if (visible(top + y, top + y + h)) {
-                        if (rl.bullet) {
-                            const float r = 2.6f * s;
-                            dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x0 + 7.0f * s, top + y + lh * 0.5f + 0.5f * s), r, r),
-                                            c.B(pal.text));
-                        }
-                        compositor->DrawTextLayout(D2D1::Point2F(lx, top + y), layout, c.B(pal.text));
-                    }
-                    if (b.streaming && li + 1 == lines.size()) {
-                        DWRITE_HIT_TEST_METRICS hm{};
-                        float px = 0.0f, py = 0.0f;
-                        const UINT32 n = static_cast<UINT32>(rl.text.size());
-                        if (n > 0 && SUCCEEDED(layout->HitTestTextPosition(n - 1, TRUE, &px, &py, &hm))) {
-                            caret_x = lx + px;
-                            caret_y = top + y + hm.top;
-                        } else {
-                            caret_x = lx;
-                            caret_y = top + y;
-                        }
-                    }
-                    layout->Release();
-                }
-                y += h;
-                const bool next_bullet = li + 1 < lines.size() && lines[li + 1].bullet;
-                pending = (rl.bullet && next_bullet) ? 2.0f * s : 10.0f * s;
-            }
+            place(rd->pieces.empty() && rd->decos.empty() ? 2.0f * s : rd->margin_top);
+            const float by = top + y;
+            const float h = rd->height;
+            DrawRich(compositor, *rd, b, static_cast<int>(bi), x0, by, pal, area, vm, s, now_ms, visible(by, by + h));
             if (b.streaming) {
-                if (lines.empty()) {
-                    place(2.0f * s);
+                float caret_x = x0, caret_y = by, caret_lh = lh;
+                if (!RichCaret(*rd, b.id, x0, by, caret_x, caret_y, caret_lh)) {
                     caret_x = x0;
-                    caret_y = top + y;
-                    y += lh;
-                    pending = 10.0f * s;
+                    caret_y = by;
                 }
+                const bool empty = rd->pieces.empty() && rd->decos.empty();
                 // .caret: 7 × 15 accent, blinking at 1 s steps(2, start).
                 conv_decor_ = true;
                 if (!motion_on || now_ms % 1000 < 500) {
                     const float cx = caret_x + 1.0f * s;
-                    const float cy = caret_y + (lh - 15.0f * s) * 0.5f + 2.0f * s;
+                    const float cy = caret_y + (caret_lh - 15.0f * s) * 0.5f + 2.0f * s;
                     c.Fill(D2D1::RectF(cx, cy, cx + 7.0f * s, cy + 15.0f * s), 1.0f * s, pal.accent);
                 }
+                y += empty ? lh : h;
+                pending = empty ? 10.0f * s : rd->margin_bottom;
+            } else {
+                y += h;
+                pending = rd->margin_bottom;
             }
             break;
         }
@@ -1475,19 +1485,40 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
             const float ay = top + y;
             if (visible(ay, ay + 28.0f * s)) {
                 float x = x0 - 6.0f * s;
-                const struct { AiPanelPart part; AiIcon icon; } items[] = {
-                    {AiPanelPart::ActCopy, AiIcon::Copy},
-                    {AiPanelPart::ActRetry, AiIcon::Retry},
-                    {AiPanelPart::ActThumb, AiIcon::Thumb},
+                const auto mini = [&](float mw, AiPanelPart mpart, AiIcon micon, float mpx, bool mon, bool men) {
+                    const D2D1_RECT_F mr = D2D1::RectF(x, ay, x + mw, ay + 28.0f * s);
+                    const bool mh = men && hot(mpart, index);
+                    if (mh) c.Fill(mr, 7.0f * s, down(mpart, index) ? Mix(pal.hover, pal.text, 0.06f) : pal.hover);
+                    const D2D1_COLOR_F ink = mon ? pal.accent : mh ? pal.text : pal.text2;
+                    c.Icon(micon, x + (mw - mpx) * 0.5f, ay + (28.0f * s - mpx) * 0.5f, mpx,
+                           men ? ink : Alpha(pal.text2, 0.35f));
+                    if (men) hit(mr, mpart, index);
+                    x += mw;
                 };
-                for (const auto& it : items) {
-                    if (it.part == AiPanelPart::ActThumb && b.done) continue;   // failed turn
-                    const D2D1_RECT_F br = D2D1::RectF(x, ay, x + 28.0f * s, ay + 28.0f * s);
-                    const bool h = hot(it.part, index);
-                    if (h) c.Fill(br, 8.0f * s, down(it.part, index) ? Mix(pal.hover, pal.text, 0.06f) : pal.hover);
-                    c.Icon(it.icon, x + 6.5f * s, ay + 6.5f * s, 15.0f * s, h ? pal.text : pal.text2);
-                    hit(br, it.part, index);
-                    x += 30.0f * s;
+                // .ver: ‹ 2 / 3 ›, margin 0 4 0 2, buttons 24 (icon 13), 12 text2.
+                if (b.ver_count > 1) {
+                    x += 2.0f * s;
+                    mini(24.0f * s, AiPanelPart::VerPrev, AiIcon::ChevronLeft, 13.0f * s, false, b.ver > 1);
+                    const std::wstring vt = std::to_wstring(b.ver) + L" / " + std::to_wstring(b.ver_count);
+                    const float vw = c.Measure(vt, formats_.caption);
+                    line(vt, formats_.caption, x, ay, x + vw + 2.0f, 28.0f * s, pal.text2);
+                    x += vw;
+                    mini(24.0f * s, AiPanelPart::VerNext, AiIcon::ChevronRight, 13.0f * s, false, b.ver < b.ver_count);
+                    x += 4.0f * s;
+                }
+                if (!b.ver_only) {
+                    mini(28.0f * s, AiPanelPart::ActCopy, AiIcon::Copy, 15.0f * s, false, true);
+                    x += 2.0f * s;
+                    // 重新生成 and its caret (16 wide, chevron 11) side by side.
+                    mini(28.0f * s, AiPanelPart::ActRetry, AiIcon::Retry, 15.0f * s, false, true);
+                    mini(16.0f * s, AiPanelPart::ActRegenMenu, AiIcon::ChevronDown, 11.0f * s, false, true);
+                    x += 2.0f * s;
+                    if (!b.done) {   // a failed turn has nothing to rate
+                        mini(28.0f * s, AiPanelPart::ActThumb, AiIcon::Thumb, 15.0f * s, b.rating > 0, true);
+                        x += 2.0f * s;
+                        mini(28.0f * s, AiPanelPart::ActThumbDown, AiIcon::ThumbDown, 15.0f * s, b.rating < 0, true);
+                        x += 2.0f * s;
+                    }
                 }
                 line(b.meta, formats_.meta, x - 2.0f * s + 8.0f * s, ay, x1, 28.0f * s, pal.text3);
             }
@@ -1728,6 +1759,30 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
             }
             y += 34.0f * s;
             pending = 12.0f * s;
+            break;
+        }
+        case AiBlockKind::Stopped: {
+            // .stopped: 12 text3, stop 14, gap 8, margin -2 0 14; the link in accent.
+            place(-2.0f * s);
+            const float sy = top + y;
+            if (visible(sy, sy + 20.0f * s)) {
+                float x = x0;
+                c.Icon(AiIcon::Stop, x, sy + 3.0f * s, 14.0f * s, pal.text3);
+                x += 14.0f * s + 8.0f * s;
+                const float tw = c.Measure(b.title, formats_.caption);
+                line(b.title, formats_.caption, x, sy, x + tw + 2.0f, 20.0f * s, pal.text3);
+                x += tw;
+                if (!b.accept.empty()) {
+                    const float lw = c.Measure(b.accept, formats_.caption);
+                    const D2D1_RECT_F lr = D2D1::RectF(x - 2.0f * s, sy, x + lw + 2.0f * s, sy + 20.0f * s);
+                    const bool h = hot(AiPanelPart::StopContinue, index);
+                    line(b.accept, formats_.caption, x, sy, x + lw + 2.0f, 20.0f * s, pal.accent);
+                    if (h) c.Fill(D2D1::RectF(x, sy + 16.0f * s, x + lw, sy + 17.0f * s), 0.0f, pal.accent);
+                    hit(lr, AiPanelPart::StopContinue, index);
+                }
+            }
+            y += 20.0f * s;
+            pending = 14.0f * s;
             break;
         }
         case AiBlockKind::Query: {
@@ -3008,6 +3063,7 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
     }
     y += pending + 10.0f * s;
     content_h_ = y;
+    EndRichFrame();
 
     // Snap a following view to the end now that the height is known (no
     // one-frame lag while text streams in).
@@ -3018,13 +3074,22 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
     }
     if (scroll_ > max_scroll) scroll_ = max_scroll;
 
-    // Overlay scrollbar (Chromium's thin bar): only when it overflows.
-    if (max_scroll > 0.5f) {
-        const float track = view_h_ - 8.0f * s;
-        const float thumb = (std::max)(28.0f * s, track * view_h_ / content_h_);
-        const float ty = area.top + 4.0f * s + (track - thumb) * (scroll_ / max_scroll);
-        const D2D1_RECT_F tr = D2D1::RectF(area.right - 7.0f * s, ty, area.right - 3.0f * s, ty + thumb);
-        c.Fill(tr, 2.0f * s, Alpha(pal.text3, 0.35f));
+    // The shared scrollbar: only when it overflows.
+    if (max_scroll > 0.5f)
+        DrawBar(0, D2D1::RectF(area.right - 12.0f * s, area.top + 4.0f * s, area.right - 2.0f * s,
+                               area.top + view_h_ - 4.0f * s), scroll_, view_h_, content_h_);
+    // 55 P4: the 回到最新 pill shows once the view is scrolled up from the end.
+    jump_shown_ = max_scroll > 1.0f && scroll_ < max_scroll - 4.0f * s && !vm.jump_latest.empty();
+    if (jump_shown_) {
+        const float w = 112.0f * s, h = 30.0f * s;
+        const float cx = (conversation_rect_.left + conversation_rect_.right) * 0.5f;
+        jump_rect_ = D2D1::RectF(cx - w * 0.5f, conversation_rect_.bottom - h - 10.0f * s,
+                                 cx + w * 0.5f, conversation_rect_.bottom - 10.0f * s);
+        c.Fill(jump_rect_, h * 0.5f, pal.card);
+        c.Stroke(jump_rect_, h * 0.5f, pal.text3, 1.0f);
+        TextOptions o;
+        o.align = DWRITE_TEXT_ALIGNMENT_CENTER;
+        c.Text(vm.jump_latest, formats_.caption, jump_rect_, pal.text, o);
     }
 
     // Drop tweens of blocks that are gone.

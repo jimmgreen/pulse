@@ -26,7 +26,7 @@ void ReleaseLeavingTab(AppState& s, const app::LayoutTab& tab, bool active) {
         if (s.filterEditing) HideFilterEditor(s, true);
         if (s.quickPreview.visible()) s.quickPreview.Close();
     }
-    if (OwnsView(tab, s.renameClickTab) || OwnsPane(tab, s.renameClickPane)) CancelRenameClick(s);
+    if (OwnsView(tab, static_cast<const app::Tab*>(s.fileClick.Item().tab)) || OwnsPane(tab, static_cast<const app::Pane*>(s.fileClick.Item().pane))) CancelFileClick(s);
     if (OwnsView(tab, s.blankClickTab) || OwnsPane(tab, s.blankClickPane)) {
         s.blankClickPane = nullptr;
         s.blankClickTab = nullptr;

@@ -36,8 +36,10 @@ public:
     // next one. The icon, its visibility and its owner stay as they are.
     void Retarget(HWND window) noexcept {
         if (!hwnd_ || !window) return;
+        if (hwnd_ == window) return;
         hwnd_ = window;
         restore_maximized_ = false;
+        has_hidden_placement_ = false;
     }
     void Detach();
     bool SetVisible(bool visible);
@@ -58,7 +60,8 @@ public:
     // Runs inside RestoreWindow() just before a hidden window is shown again
     // (tray click, tray "Open", a second launch), so the app can reset it first.
     void SetBeforeRestore(std::function<void()> hook) { before_restore_ = std::move(hook); }
-    CallbackResult HandleCallback(LPARAM event);
+    CallbackResult HandleCallback(LPARAM event,
+        const std::function<int(POINT, HWND)>& show_menu = {});
 
     bool IsVisible() const noexcept { return icon_added_; }
 
@@ -71,6 +74,8 @@ private:
     bool icon_added_ = false;
     bool wanted_visible_ = false;   // last SetVisible request, for TaskbarCreated
     bool restore_maximized_ = false;
+    WINDOWPLACEMENT hidden_placement_{sizeof(WINDOWPLACEMENT)};
+    bool has_hidden_placement_ = false;
     std::function<void()> before_restore_;
 };
 

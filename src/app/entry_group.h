@@ -1,4 +1,5 @@
 #pragma once
+#include "entry_sort.h"
 #include "../fs/fs_enum.h"
 #include "../ui/ui_view_model.h"
 #include <cstdint>
@@ -20,11 +21,20 @@ namespace pulse::app {
 // 最近访问, DirEntry::net_group); like ThisPc it is never offered or saved.
 // AiDup is the assistant's 重复文件 list: one group per set of identical
 // files (DirEntry::net_group = its ordinal, change_old_path = its title).
+// Media* are the 媒体文件夹 groups (拍摄月份 / 相机 / 专辑 / 艺术家 / 分辨率档),
+// grouped by values the media property reader found: offered only in the
+// group wheel of a picture / music / video folder and kept for the session
+// only (FolderGroupPrefs never writes them).
 enum class GroupBy : uint8_t { None = 0, Name = 1, Date = 2, Type = 3, Size = 4, Tag = 5, Location = 6, ThisPc = 7,
-                               Network = 8, AiDup = 9 };
+                               Network = 8, AiDup = 9, MediaMonth = 10, MediaCamera = 11, MediaAlbum = 12,
+                               MediaArtist = 13, MediaTier = 14 };
 
 constexpr GroupBy GroupByFromInt(int v) noexcept {
-    return v >= 1 && v <= 9 ? static_cast<GroupBy>(v) : GroupBy::None;
+    return v >= 1 && v <= 14 ? static_cast<GroupBy>(v) : GroupBy::None;
+}
+
+constexpr bool IsMediaGroup(GroupBy g) noexcept {
+    return g >= GroupBy::MediaMonth && g <= GroupBy::MediaTier;
 }
 
 // Parent folder of a virtual-view entry (full_path), without the \\?\ prefix.
@@ -50,6 +60,24 @@ void PublishTagCatalog(std::shared_ptr<const TagCatalogSnapshot> snapshot);
 std::shared_ptr<const TagCatalogSnapshot> CurrentTagCatalog();
 std::shared_ptr<const TagGroupMap> TagGroupsForFolder(const std::wstring& folder);
 
+// Media grouping for one folder: the group of each file whose values are
+// known, for that exact file version. Files not listed (pending, unreadable,
+// no such value) form the unknown group, shown last; folders come first.
+struct MediaGroupMap {
+    struct Item {
+        uint64_t mtime = 0, size = 0;   // FILETIME ticks, bytes
+        int rank = 0;                   // index into labels
+    };
+    std::unordered_map<std::wstring, Item> by_name;   // leaf name as listed
+    std::vector<std::wstring> labels;                  // group order
+    int Unknown() const noexcept { return static_cast<int>(labels.size()); }
+};
+// Registered by the media columns (app start); tests have none, so every
+// file reads as unknown.
+using MediaGroupSource = std::shared_ptr<const MediaGroupMap> (*)(const std::wstring& folder, GroupBy g);
+void SetMediaGroupSource(MediaGroupSource source) noexcept;
+std::shared_ptr<const MediaGroupMap> MediaGroupsForFolder(const std::wstring& folder, GroupBy g);
+
 // Local-time day boundaries (FILETIME ticks, UTC) used by the date buckets.
 // Built once per sort / span pass so every comparison sees the same "today".
 struct GroupClock {
@@ -59,12 +87,18 @@ struct GroupClock {
     // column when it is a date (created / accessed), otherwise modified.
     // GroupCompare takes the column from its own argument.
     ui::SortColumn date_column = ui::SortColumn::Mtime;
+    FolderSortMode folders = FolderSortMode::Mixed;
     std::shared_ptr<const TagGroupMap> tags;  // GroupBy::Tag only
+    std::shared_ptr<const MediaGroupMap> media;  // Media* only
 };
 GroupClock MakeGroupClock(ui::SortColumn sort_column = ui::SortColumn::Mtime);
 
 // The time GroupBy::Date uses for a list sorted by `sort_column`.
 const FILETIME& GroupDateOf(const fs::DirEntry& e, ui::SortColumn sort_column) noexcept;
+
+// A separate directory group is shared by sorting, headers and collapse keys.
+// Fixed virtual groups retain their own hierarchy; Mixed uses the chosen field.
+inline constexpr int kFolderGroupRank = -2;
 
 // Date ranks: 0 future, 1 today, 2 yesterday, 3 earlier this week, 4 last week,
 // 5 earlier this month, 6 last month, 7 earlier this year, 8 a long time ago.
@@ -75,20 +109,31 @@ const FILETIME& GroupDateOf(const fs::DirEntry& e, ui::SortColumn sort_column) n
 // Type ranks: 0 folders, 1 files (files then split by extension).
 // ThisPc ranks: 0 drives, 1 devices (phones), 2 program icons.
 // Network ranks: DirEntry::net_group (1 pinned .. 4 recent).
+// Media ranks: -1 folders, MediaGroupMap label index, Unknown() when not known.
 int GroupRank(const fs::DirEntry& e, GroupBy g, const GroupClock& clock);
 
 // <0 when a's group is shown before b's, 0 same group.
 int GroupCompare(const fs::DirEntry& a, const fs::DirEntry& b, GroupBy g,
                  const GroupClock& clock, ui::SortColumn col, ui::SortDirection dir);
 
+// Same comparison using ranks prepared once per row (except Location, which
+// still compares parent paths). Date ranks must use the active sort column.
+int GroupCompareRanks(const fs::DirEntry& a, const fs::DirEntry& b, GroupBy g,
+                      ui::SortColumn col, ui::SortDirection dir, int ra, int rb,
+                      const GroupClock& clock = {});
+
 // Stable key for collapse state ("d3", "t:pdf", ...).
 std::wstring GroupKey(const fs::DirEntry& e, GroupBy g, const GroupClock& clock);
+
+// A media group's title for `rank`; empty for folders (-1) and unknown values,
+// which the callers name.
+std::wstring MediaGroupLabel(const GroupClock& clock, int rank);
 
 // Stable in-place reorder of `entries` (and `parallel`, if the same size) into
 // group order; order inside a group is kept. For views whose order comes from
 // elsewhere (indexed search pages) rather than the sorting worker.
 void StableGroupOrder(std::vector<fs::DirEntry>& entries, std::vector<std::wstring>* parallel,
-                      GroupBy g, ui::SortColumn col, ui::SortDirection dir);
+                      GroupBy g, ui::SortColumn col, ui::SortDirection dir, FolderSortMode folders);
 
 // Active grouping for EntryLess on the current thread. The worker and the
 // notify patcher wrap their sorts in a scope instead of threading the group
@@ -101,7 +146,7 @@ const EntryGrouping* CurrentEntryGrouping() noexcept;
 
 class ScopedEntryGrouping {
 public:
-    // `folder` resolves tag groups (GroupBy::Tag).
+    // `folder` resolves tag groups (GroupBy::Tag) and media groups.
     explicit ScopedEntryGrouping(int group_by, const std::wstring& folder = {});
     ~ScopedEntryGrouping();
     ScopedEntryGrouping(const ScopedEntryGrouping&) = delete;
@@ -134,6 +179,7 @@ private:
         bool operator()(const std::wstring& a, const std::wstring& b) const;
     };
     std::map<std::wstring, GroupBy, PathLess> groups_;
+    std::map<std::wstring, GroupBy, PathLess> session_;   // media groups: not saved
     std::optional<GroupBy> default_;
 };
 

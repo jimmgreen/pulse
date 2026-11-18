@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 #include <cstdint>
 #include <string>
+#include <memory>
 #include <vector>
 
 #include "FluentTokens.h"
@@ -17,11 +18,13 @@ namespace pulse::ui {
 class Compositor;
 
 class ArchivePreview {
+    friend struct PreviewBufferLifetimeTest;
 public:
     // Parses the Pulse.Preview.exe archive payload (ipc::PreviewContentKind::
     // Archive). Re-parsing only happens when the payload or file changes, so
     // expansion and scroll survive repaints. Returns false for a payload that
     // is not an archive listing.
+    bool SetPayload(const std::shared_ptr<const std::wstring>& payload, const std::wstring& file_name, uint64_t file_size);
     bool SetPayload(const std::wstring& payload, const std::wstring& file_name,
                     uint64_t file_size);
     void Clear();
@@ -104,6 +107,20 @@ private:
 
     // Model
     bool parsed_ = false;
+    bool SetPayloadImpl(const std::wstring& payload, const std::wstring& file_name, uint64_t file_size,
+                        std::shared_ptr<const std::wstring> owner);
+    const std::wstring& Payload() const noexcept { return shared_payload_ ? *shared_payload_ : payload_; }
+    void StorePayload(const std::wstring& value, std::shared_ptr<const std::wstring> owner) {
+        if (owner) {
+            shared_payload_ = std::move(owner);
+            std::wstring{}.swap(payload_);
+        } else {
+            payload_ = value;
+            shared_payload_.reset();
+        }
+    }
+    std::shared_ptr<const std::wstring> shared_payload_;
+    std::weak_ptr<const std::wstring> payload_identity_;
     std::wstring payload_;
     std::wstring file_name_;
     uint64_t file_size_ = 0;

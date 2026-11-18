@@ -21,6 +21,78 @@ bool WaitRow(const std::shared_ptr<index::ContentResultStore>& store,size_t i,in
 std::wstring Name(int i) { wchar_t name[40]{}; swprintf_s(name,L"f%05d.%s",i,i%2 ? L"txt":L"md"); return name; }
 }
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--store-filter-metadata") {
+        constexpr size_t count=12000, snippet_chars=512;
+        auto store=std::make_shared<index::ContentResultStore>(nullptr,0);
+        std::vector<index::ContentHit> hits;
+        for(size_t i=0;i<count;++i) {
+            index::ContentHit hit;
+            hit.name=Name(static_cast<int>(i)); hit.path=L"C:\\metadata-fixture\\"+hit.name;
+            hit.snippet=std::wstring(snippet_chars,L'x'); hit.size=i; hit.modified=0x123400000000ull+i;
+            hit.line=42; hit.file_id=i+1; hits.push_back(std::move(hit));
+        }
+        Check(store->Append(hits),"metadata fixture appends 12000 full-snippet rows");
+        hits.clear(); hits.shrink_to_fit();
+        const auto wait_filter=[&] {
+            const auto end=GetTickCount64()+30000;
+            while(store->Filtering() && GetTickCount64()<end) Sleep(1);
+            return !store->Filtering() && !store->Error();
+        };
+        std::atomic<bool> fields_valid{true};
+        auto filter=[&](const fs::DirEntry& e) {
+            const auto stamp=(uint64_t{e.mtime.dwHighDateTime}<<32)|e.mtime.dwLowDateTime;
+            if(e.name!=Name(static_cast<int>(e.size)) || e.full_path!=L"C:\\metadata-fixture\\"+e.name ||
+                stamp!=0x123400000000ull+e.size || e.attrs!=FILE_ATTRIBUTE_NORMAL) fields_valid=false;
+            return e.size%2==0;
+        };
+        const auto now=[] { return std::chrono::steady_clock::now(); };
+        const auto elapsed=[&](auto start) { return std::chrono::duration<double,std::milli>(now()-start).count(); };
+        std::vector<double> filter_times,clear_times,match_times;
+        for(int run=0;run<5;++run) {
+            auto start=now(); store->SetFilter(filter);
+            const bool filtered=wait_filter(); filter_times.push_back(elapsed(start));
+            Check(filtered && fields_valid && store->Count()==count/2,"filter sees unchanged metadata and returns exact even rows");
+            start=now();
+            auto done=std::make_shared<std::promise<index::ContentResultStore::Selection>>(); auto future=done->get_future();
+            store->Match([](const fs::DirEntry& e){return e.size%4==0;},[done](auto result){done->set_value(std::move(result));});
+            const bool ready=future.wait_for(std::chrono::seconds(30))==std::future_status::ready;
+            match_times.push_back(elapsed(start));
+            auto result=ready ? future.get() : index::ContentResultStore::Selection{};
+            Check(ready && !result.error && result.matches.size()==count/4 && result.matches.front()==0 && result.matches.back()==5998,
+                "Match returns correct filtered display positions without changing rows");
+            start=now(); store->SetFilter({});
+            Check(wait_filter() && store->Count()==count,"clearing filter restores all rows"); clear_times.push_back(elapsed(start));
+        }
+        store->SetFilter(filter); Check(wait_filter(),"filter ready for display and resolve checks");
+        index::ContentResultStore::Row row;
+        Check(WaitRow(store,1,row) && row.entry.size==2 && row.file_id==3 && row.snippet==L"L42  "+std::wstring(snippet_chars,L'x'),
+            "display pages retain exact line prefix, snippet and identity");
+        auto resolved=std::make_shared<std::promise<index::ContentResultStore::Selection>>();auto selection=resolved->get_future();
+        store->Resolve({0,1},false,0,[resolved](auto result){resolved->set_value(std::move(result));},store->OrderRevision());
+        const bool selected=selection.wait_for(std::chrono::seconds(30))==std::future_status::ready;
+        auto result=selected ? selection.get() : index::ContentResultStore::Selection{};
+        Check(selected && !result.error && result.rows.size()==2 && result.rows[1].second.entry.size==2 && result.rows[1].second.snippet==row.snippet,
+            "selection resolve preserves order and full snippets");
+        index::ContentHit changed;
+        changed.file_id=3;changed.name=Name(2);changed.path=L"C:\\metadata-fixture\\"+changed.name;
+        changed.size=3;changed.modified=9;changed.line=5;changed.snippet=L"updated";
+        Check(store->ApplyChanges({changed},index::ContentResultSort::Size,true) && store->Count()==count/2-1 &&
+            WaitRow(store,0,row) && row.entry.size==count-2,"live update retains filter membership and descending order");
+        auto entered=std::make_shared<std::promise<void>>();auto gate=entered->get_future();
+        auto release=std::make_shared<std::promise<void>>();auto released=release->get_future().share();
+        store->FindIdentity(1,[entered,released](int){entered->set_value();released.wait();});
+        const bool blocked=gate.wait_for(std::chrono::seconds(30))==std::future_status::ready;
+        std::atomic<int> obsolete_calls{0};
+        store->SetFilter([&](const fs::DirEntry&){++obsolete_calls;return false;});
+        store->SetFilter([](const fs::DirEntry& e){return e.size<10;});
+        release->set_value();
+        Check(blocked && wait_filter() && obsolete_calls==0 && store->Count()==10,"latest filter cancels queued stale filter without publishing old results");
+        Check(store->CachedRows()<=index::ContentResultStore::kPageSize*index::ContentResultStore::kCachePages,"metadata scan preserves bounded display cache");
+        for(auto* times:{&filter_times,&clear_times,&match_times}) std::sort(times->begin(),times->end());
+        printf("metadata_scan rows=%zu snippet_chars=%zu fixture_snippet_payload_bytes_per_full_scan=%zu filter_median_ms=%.3f clear_median_ms=%.3f match_median_ms=%.3f failures=%d\n",
+            count,snippet_chars,count*snippet_chars*sizeof(wchar_t),filter_times[2],clear_times[2],match_times[2],failures);
+        return failures ? 1 : 0;
+    }
     if (argc == 2 && std::wstring_view(argv[1]) == L"--task-stream") {
         index::ContentSearchRequest request; request.generation=440; request.task_scan=true;
         request.paged_results=true; request.sort=index::ContentResultSort::Name;

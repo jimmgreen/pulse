@@ -16,7 +16,7 @@ enum class CloseState { Done = 0, Failed = 1, Busy = 2 };
 CloseState ClosePulseForUpdate(const std::vector<std::wstring>& dirs, bool unattended_update);
 
 // Stops the PulseIndex service (when it runs from `dirs`) and ends
-// Pulse.Index.exe / Pulse.Preview.exe / pulse_shell.exe from `dirs`.
+// Index, preview, Shell, AI and content/document hosts from `dirs`.
 void StopPulseHosts(const std::vector<std::wstring>& dirs, bool touch_service);
 bool WaitUntilImageGone(const wchar_t* image, const std::vector<std::wstring>& dirs, unsigned timeout_ms);
 

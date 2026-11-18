@@ -1,5 +1,6 @@
 #include "../app/shell_integration_registry.h"
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <aclapi.h>
@@ -46,6 +47,33 @@ bool SetDword(const std::wstring& path, const wchar_t* name, DWORD number) {
     const bool ok = RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&number), sizeof(number)) == ERROR_SUCCESS;
     RegCloseKey(key); return ok;
 }
+// Snapshot v1 stores magic/count, then before/written pairs of flags/type/byte-count/payload.
+// Reproduce an actual old build: keep its original before value and set written[0]
+// to the same legacy command that is currently installed.
+bool SetLegacySnapshotCommand(const std::wstring& path, const Value& command) {
+    Value snapshot = Read(path, L"Snapshot");
+    if (!snapshot.exists || snapshot.type != REG_BINARY || snapshot.bytes.size() < 20) return false;
+    DWORD before_size = 0;
+    std::memcpy(&before_size, snapshot.bytes.data() + 16, sizeof(before_size));
+    const size_t written = 20 + static_cast<size_t>(before_size);
+    if (written > snapshot.bytes.size() || snapshot.bytes.size() - written < 12) return false;
+    DWORD old_size = 0;
+    std::memcpy(&old_size, snapshot.bytes.data() + written + 8, sizeof(old_size));
+    const size_t payload = written + 12;
+    if (old_size > snapshot.bytes.size() - payload) return false;
+    const DWORD flags = 3, size = static_cast<DWORD>(command.bytes.size());
+    std::memcpy(snapshot.bytes.data() + written, &flags, sizeof(flags));
+    std::memcpy(snapshot.bytes.data() + written + 4, &command.type, sizeof(command.type));
+    std::memcpy(snapshot.bytes.data() + written + 8, &size, sizeof(size));
+    snapshot.bytes.erase(snapshot.bytes.begin() + payload, snapshot.bytes.begin() + payload + old_size);
+    snapshot.bytes.insert(snapshot.bytes.begin() + payload, command.bytes.begin(), command.bytes.end());
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, path.c_str(), 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS) return false;
+    const bool ok = RegSetValueExW(key, L"Snapshot", 0, REG_BINARY, snapshot.bytes.data(),
+                                  static_cast<DWORD>(snapshot.bytes.size())) == ERROR_SUCCESS;
+    RegCloseKey(key);
+    return ok;
+}
 void Clear() { RegDeleteTreeW(HKEY_CURRENT_USER, L"Software"); }
 bool KeyExists(const std::wstring& path) {
     HKEY key = nullptr;
@@ -82,6 +110,59 @@ int wmain() {
     const std::wstring shell = L"Software\\Classes\\Directory\\shell", command = shell + L"\\open\\command";
     const std::wstring win = L"Software\\Classes\\CLSID\\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\\shell\\opennewwindow\\command";
     const std::wstring pc = L"Software\\Classes\\CLSID\\{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\shell";
+    for (const auto kind : {ShellIntegrationKind::Directory, ShellIntegrationKind::Drive,
+        ShellIntegrationKind::ThisPc, ShellIntegrationKind::RecycleBin, ShellIntegrationKind::WinE}) {
+        Clear();
+        Check(ApplyShellIntegration(kind, exe, true), "explicit shell command applies");
+        const std::wstring group = kind == ShellIntegrationKind::Directory ? L"Directory" :
+            kind == ShellIntegrationKind::Drive ? L"Drive" : kind == ShellIntegrationKind::ThisPc ? L"ThisPc" :
+            kind == ShellIntegrationKind::RecycleBin ? L"RecycleBin" : L"WinE";
+        const std::wstring key = kind == ShellIntegrationKind::WinE ? win :
+            kind == ShellIntegrationKind::ThisPc ? pc + L"\\open\\command" :
+            kind == ShellIntegrationKind::RecycleBin ? L"Software\\Classes\\CLSID\\{645FF040-5081-101B-9F08-00AA002F954E}\\shell\\open\\command" :
+            L"Software\\Classes\\" + group + L"\\shell\\open\\command";
+        const auto current = Read(key);
+        auto old = std::wstring(reinterpret_cast<const wchar_t*>(current.bytes.data()));
+        const auto marker = old.find(L"--shell-open ");
+        Check(marker != std::wstring::npos, "new registrations identify shell origin");
+        if (marker == std::wstring::npos) continue;
+        old.erase(marker, std::wstring(L"--shell-open ").size());
+        if (kind == ShellIntegrationKind::WinE) old = L"\"" + exe + L"\" --win-e";
+        Set(key, L"", old);
+        Check(SetLegacySnapshotCommand(L"Software\\Pulse\\ShellIntegration\\Backups\\v1\\" + group, Read(key)),
+            "legacy shell command fixture updates only its owned snapshot");
+        Check(ReadShellIntegration(kind, exe), "legacy exact shell command remains enabled");
+        Check(ApplyShellIntegration(kind, exe, true) && Read(key) == current,
+            "reapplying upgrades legacy command to explicit origin");
+        Check(ApplyShellIntegration(kind, exe, false), "upgraded registration preserves restoration snapshot");
+    }
+    Clear();
+    {
+        Set(win, L"", L"\"C:\\ThirdParty\\manager.exe\" /open", REG_EXPAND_SZ);
+        const Value third_party = Read(win);
+        Check(ApplyShellIntegration(ShellIntegrationKind::WinE, exe, true),
+              "WinE migration fixture stores original third-party command");
+        Set(win, L"", L"\"" + exe + L"\"");
+        const auto backup_path = L"Software\\Pulse\\ShellIntegration\\Backups\\v1\\WinE";
+        Check(SetLegacySnapshotCommand(backup_path, Read(win)),
+              "WinE migration fixture matches real legacy command and written snapshot");
+        Check(MigrateLegacyWinECommand(exe) && ReadShellIntegration(ShellIntegrationKind::WinE, exe),
+              "WinE legacy command migrates to explicit --win-e entry");
+        const Value migrated = Read(win);
+        const Value migrated_backup = Read(backup_path, L"Snapshot");
+        Check(MigrateLegacyWinECommand(exe) && Read(win) == migrated &&
+              Read(backup_path, L"Snapshot") == migrated_backup,
+              "WinE migration repeated call preserves command and backup bytes");
+        Check(ApplyShellIntegration(ShellIntegrationKind::WinE, exe, false) && Read(win) == third_party,
+              "WinE migrated registration restores original third-party command");
+        Clear();
+        Set(win, L"", L"\"C:\\Other\\pulse.exe\"");
+        const Value other_command = Read(win);
+        Check(MigrateLegacyWinECommand(exe) && Read(win) == other_command &&
+              !Read(backup_path, L"Snapshot").exists,
+              "WinE migration leaves another executable command untouched");
+        Clear();
+    }
     SetLegacyOrphans();
     Check(HasLegacyShellIntegrationResidue(), "remote seven-value orphan signature is detected without a command or snapshot");
     Check(ApplyShellIntegration(ShellIntegrationKind::ThisPc, exe, false) && HasLegacyShellIntegrationResidue(),
@@ -163,7 +244,7 @@ int wmain() {
             HasShellIntegrationOwnership(ShellIntegrationKind::RecycleBin, exe),
             "Recycle Bin takeover applies and reads back");
         const Value bin_command = Read(bin + L"\\open\\command");
-        const std::wstring expected = L"\"" + exe + L"\" \"::{645FF040-5081-101B-9F08-00AA002F954E}\"";
+        const std::wstring expected = L"\"" + exe + L"\" --shell-open \"::{645FF040-5081-101B-9F08-00AA002F954E}\"";
         Check(bin_command.exists && bin_command.bytes.size() == (expected.size() + 1) * sizeof(wchar_t) &&
             std::wstring(reinterpret_cast<const wchar_t*>(bin_command.bytes.data())) == expected &&
             Read(bin + L"\\open\\command", L"DelegateExecute").exists && Read(bin).exists,

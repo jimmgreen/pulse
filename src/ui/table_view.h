@@ -3,6 +3,7 @@
 // pinned header row and row-number column, cell selection, find highlights
 // and, for workbooks, sheet tabs.
 #pragma once
+#include "search_highlights.h"
 
 #include <windows.h>
 #include <d2d1_1.h>
@@ -10,6 +11,7 @@
 #include <wrl/client.h>
 #include <cstdint>
 #include <string>
+#include <memory>
 #include <vector>
 
 #include "FluentTokens.h"
@@ -17,9 +19,11 @@
 namespace pulse::ui {
 
 class TableView {
+    friend struct PreviewBufferLifetimeTest;
 public:
     // Parses the payload; a repeat of the same payload keeps sheet, scroll and
     // selection. Returns false for anything that is not a table payload.
+    bool SetPayload(const std::shared_ptr<const std::wstring>& payload);
     bool SetPayload(const std::wstring& payload);
     void Clear();
     bool HasData() const noexcept { return !sheets_.empty(); }
@@ -34,14 +38,15 @@ public:
     const std::wstring& Source() const noexcept { return source_; }
     // Cells of the current sheet joined by tabs, rows by newlines: what find
     // works on. Offsets below index this text.
+    uint64_t TextRevision() const noexcept { return text_revision_; }
     const std::wstring& PlainText() const noexcept { return plain_; }
     // CSV status pill segments ("CSV", "逗号 · UTF-8", "N 行 × M 列").
     std::vector<std::wstring> StatusParts(uint32_t encoding) const;
 
-    struct Highlight { uint32_t start, length; bool current; };
+    using Highlight = SearchHighlight;
     void Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D1_RECT_F& rect,
               const Theme& theme, bool dark, float scale, const D2D1_COLOR_F& background,
-              const std::vector<Highlight>& matches);
+              SearchHighlights matches);
 
     bool Scroll(float wheel_steps, bool horizontal);
     // Arrows move the selected cell (Shift extends); paging keys scroll.
@@ -80,10 +85,12 @@ private:
         bool truncated = false, header = false;
         size_t cols = 0;
         std::vector<std::vector<std::wstring>> cells;  // display text, header row included
+        std::vector<std::vector<unsigned>> fills;
         std::vector<std::vector<uint8_t>> flags;       // kBold / kNumeric per cell
         std::vector<float> col_x;                      // prefix sums (device px), cols + 1
         float num_w = 0.0f;                            // row-number column width
         float measured_scale = 0.0f;
+        float tab_width = -1.0f, selected_tab_width = -1.0f;
         float sx = 0.0f, sy = 0.0f;                    // scroll
         std::vector<uint8_t> col_types;                // inferred per column (ColumnType)
     };
@@ -113,6 +120,21 @@ private:
     Microsoft::WRL::ComPtr<IDWriteTextLayout> CellLayout(const std::wstring& text, bool bold,
                                                          bool right, float width) const;
 
+    uint64_t text_revision_ = 0;
+    bool SetPayloadImpl(const std::wstring& payload,
+                        std::shared_ptr<const std::wstring> owner);
+    const std::wstring& Payload() const noexcept { return shared_payload_ ? *shared_payload_ : payload_; }
+    void StorePayload(const std::wstring& value, std::shared_ptr<const std::wstring> owner) {
+        if (owner) {
+            shared_payload_ = std::move(owner);
+            std::wstring{}.swap(payload_);
+        } else {
+            payload_ = value;
+            shared_payload_.reset();
+        }
+    }
+    std::shared_ptr<const std::wstring> shared_payload_;
+    std::weak_ptr<const std::wstring> payload_identity_;
     std::wstring payload_, source_, plain_;
     std::vector<Sheet> sheets_;
     std::vector<uint32_t> row_offsets_;  // plain_ offset of each cells[] row

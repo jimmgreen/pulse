@@ -24,7 +24,7 @@ bool HandleListCharacter(AppState& s, wchar_t ch) {
             return rows[static_cast<size_t>(vm.pane.SourceIndex(view))].name;
         });
     if (next >= 0) {
-        CancelRenameClick(s);
+        CancelFileClick(s);
         CancelScrollAnimation(s);
         tab->SelectOnly(vm.pane.SourceIndex(next));
         EnsureRowVisible(s, *tab, tab->selected_index);

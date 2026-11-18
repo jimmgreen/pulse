@@ -11,17 +11,21 @@
 
 namespace pulse::elevated {
 inline constexpr uint32_t kMagic = 0x45504c53;
-inline constexpr uint16_t kVersion = 3;
+inline constexpr uint16_t kVersion = 7;
 inline constexpr uint32_t kMaxPayload = 1024 * 1024;
 inline constexpr uint32_t kMaxPaths = 4096;
 inline constexpr uint32_t kMaxString = 32760;
 // v3 Transfer appends an explicit single-root Move leaf name (empty = basename).
 // Old peers fail the version handshake; never reinterpret a different payload.
+// v7 appends an explicit enumeration-complete flag to status payloads.
+// v6 adds Transfer mode 2: no-overwrite rename with source and parent file identities.
+// v5 adds identity-bound virtual-disk ejection (private elevated protocol only).
+// v4 adds a single absolute-path CreateFolder request, without Shell dialogs.
 inline bool SafeTransferName(const std::wstring& name, size_t count, bool move) {
     return name.empty() || (move && count == 1 && name.size() <= kMaxString && pulse::IsRenameFilename(name));
 }
 using Nonce = std::array<unsigned char, 16>;
-enum class Kind : uint16_t { Hello = 1, Transfer, Cancel, Pause, Resume, ConflictReply, Progress, Conflict, CompletedItem, Result, Shutdown, RecycleDelete, PermanentDelete, DeletedItem };
+enum class Kind : uint16_t { Hello = 1, Transfer, Cancel, Pause, Resume, ConflictReply, Progress, Conflict, CompletedItem, Result, Shutdown, RecycleDelete, PermanentDelete, DeletedItem, CreateFolder, EjectVirtualDisk };
 #pragma pack(push, 1)
 struct Header {
     uint32_t magic = kMagic;
@@ -35,7 +39,7 @@ struct Header {
 static_assert(sizeof(Header) == 36);
 inline bool ValidHeader(const Header& header, const Nonce& nonce) {
     return header.magic == kMagic && header.version == kVersion && header.bytes <= kMaxPayload &&
-        header.nonce == nonce && header.kind >= Kind::Hello && header.kind <= Kind::DeletedItem;
+        header.nonce == nonce && header.kind >= Kind::Hello && header.kind <= Kind::EjectVirtualDisk;
 }
 struct Writer {
     std::vector<unsigned char> bytes;

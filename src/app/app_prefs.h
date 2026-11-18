@@ -6,6 +6,7 @@
 #include "../ui/details_column_set.h"
 #include "toolbar_selection.h"
 #include "toolbar_tools.h"
+#include "toolbar_view_order.h"
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -25,6 +26,12 @@ struct AppPrefs {
     // (a second launch brings the window back; #57).
     int notify_icon_mode = 0;
     bool open_folders_in_pulse = false;
+    int open_pulse_icon = 0;
+    int open_this_pc = 0;
+    int open_win_e = 0;
+    int new_window_shows = 2;
+    bool arrange_include_minimized = false;
+    int arrange_gap = 0;
     bool take_over_win_e = false;
     bool take_over_this_pc = false; // HKCU This PC open verb (default_file_manager.h)
     bool take_over_recycle_bin = false; // HKCU Recycle Bin open verb (default_file_manager.h)
@@ -40,9 +47,8 @@ struct AppPrefs {
     bool integration_incomplete = false;
     std::wstring integration_other_exe; // runtime: another Pulse copy owns the associations
     bool take_over_explorer_windows = false; // experimental choice; runtime is gated by integration_enabled
-    // 兼容打开方式: leave Directory/Drive open alone and let Explorer open the
-    // folder, then take its window over. For machines where the custom default
-    // verb never reaches Pulse (a context-menu extension stalls the lookup).
+    // Legacy compatibility toggle: enables the same supplemental observer as
+    // take_over_explorer_windows. Direct Directory/Drive verbs remain enabled.
     bool integration_folders_compat = false;
     bool shell_tag_menu = false;    // File Explorer "Pulse tags" submenu (shell_tag_menu.cpp syncs HKCU)   // registry is the source of truth (not in app.json)
     bool verify_copies = false;
@@ -61,6 +67,7 @@ struct AppPrefs {
     bool list_selection_outline = false; // accent outline around selected items (#78)
     // Grid thumbnails: default-program badge, plus playing time on videos.
     bool list_thumbnail_badges = true;
+    bool media_columns = true;          // 媒体文件夹使用专用列 (media_columns_ui.h)
     // 修改时间提示 (ui/mtime_hint.h): 0 off, 1 dots, 2 bars, 3 text only.
     int list_mtime_hint = 1;
     int list_mtime_range = 7;         // days: 1, 3, 7, 30
@@ -79,6 +86,8 @@ struct AppPrefs {
     // 同步状态: OneDrive placeholders and SVN working copies.
     bool sync_onedrive = true;
     bool sync_svn = true;
+    int tab_layout = 0;
+    int tab_max_rows = 3;
     bool vertical_tabs = false;       // tabs as the first sidebar section
     bool tray_hide_when_empty = false; // staging tray folds away while empty (drags still show it)
     // 网络位置 (Settings → 文件操作): machine-local, not in settings export.
@@ -89,10 +98,12 @@ struct AppPrefs {
     bool sidebar_collapsed = false;   // sidebar folded to its icon rail (Ctrl+B)
     bool favorites_bar = false;       // 收藏栏 under the command row (Ctrl+Shift+B)
     bool favorites_bar_icon_only = false;
-    // 0 folders first, 1 follow the sort direction, 2 mixed with files
+    // 0 folders first, 1 folders last, 2 mixed with files
     int folder_sort_mode = 0;
     // Optional Details columns for every folder (ui/details_column_set.h bits).
     uint32_t details_columns = ui::kDetailsColumnsDefault;
+    // Their left-to-right order, dragged in the column header.
+    ui::DetailsColumnOrder details_column_order = ui::kDetailsColumnOrderDefault;
     // Where Pulse opens. home_folder is the default location; empty means This PC.
     // startup_open: 0 restore the last tabs, 1 open the default location.
     // new_tab_open: 0 the current folder, 1 the default location.
@@ -128,6 +139,8 @@ struct AppPrefs {
     // Quick search popup size in DIP after the user resized it; 0 = default.
     int global_search_width = 0;
     int global_search_height = 0;
+    bool global_search_positioned = false;
+    int global_search_x = 0, global_search_y = 0;
     // Two clean Ctrl taps summon the quick search popup too (with global search on).
     bool global_search_double_ctrl = true;
     int global_search_double_ctrl_ms = 300; // longest gap between the taps: 200 / 300 / 400
@@ -151,6 +164,25 @@ struct AppPrefs {
     // The card's size step: 0 small, 1 medium, 2 large (kHoverCardSize*). The
     // card takes the content's shape within it; Ctrl enlarges it while held.
     int hover_card_size = 1;
+    // The Quick Look window (Settings > 快速预览 > 预览窗口, kPreviewSize*):
+    // 0 fits the picture or video, 1 standard, 2 large, 3 maximized, 4 full
+    // screen. Its title bar switches this too.
+    int preview_size = 0;
+    // A size the user dragged the window to (screen pixels; width 0 = none)
+    // is used instead of preview_size while preview_remember_size is on.
+    bool preview_remember_size = true;
+    int preview_rect_x = 0, preview_rect_y = 0, preview_rect_w = 0, preview_rect_h = 0;
+    // Space on a video or animation: true closes the preview as on every
+    // other file (K pauses); false plays / pauses.
+    bool preview_space_closes = true;
+    // kPreviewLoop*: 0 animations loop and videos stop at the end, 1 both
+    // loop, 2 neither (an animation plays as often as its file says).
+    int preview_loop = 0;
+    // Holding the left button on a file previews it until released: 0 off,
+    // else the delay in ms (300 / 500 / 800).
+    int hold_preview_ms = 0;
+    // How many more times a video shows the "Space closes" key hint.
+    int preview_key_hint_left = 3;
     bool change_tracking_enabled = false;
     int change_tracking_days = 7;
     // system / zh-CN / en-US
@@ -179,6 +211,7 @@ struct AppPrefs {
     int tray_icon_size = 48; // staging-tray deck icon edge in DIPs (32..64)
     // Interaction hints: status-bar context hints + one-time teaching tips.
     bool show_hints = true;
+    bool status_hints_learned = false; // Retire status-bar onboarding after a file operation.
     // Background update checks and their "update available" toasts (Settings > About).
     bool auto_check_updates = true;
     uint32_t tips_seen = 0; // bit per app::TeachTip already shown or dismissed
@@ -196,6 +229,7 @@ struct AppPrefs {
     bool toolbar_show_sort = true;
     bool toolbar_show_filter = true;
     bool toolbar_show_group = true;
+    std::vector<std::wstring> toolbar_view_order = NormalizeToolbarViewOrder({});
     // Actions the selection chip may show, in chip order, by id
     // (toolbar_selection.h). Without the json key: all, default order.
     std::vector<std::wstring> toolbar_selection = DefaultToolbarSelection();
@@ -213,6 +247,8 @@ struct AppPrefs {
     std::vector<uint32_t> custom_tag_colors;
     // Tag ids the tag panel lists under 最近用过, newest first (at most 5).
     std::vector<std::wstring> recent_tags;
+    // Extension package ids whose generated files publish without asking each time.
+    std::vector<std::wstring> extension_publish_trusted;
     // Pulse's folder picker, per entry point (#58-9): one "key|folder" line
     // each, newest first, so the tray, duplicate scan, quick access... each
     // open where they were last used instead of overwriting one another.
@@ -239,6 +275,7 @@ struct AppPrefs {
     // Remembers `folder` for `key`; true when picker_folders changed.
     bool RememberPickerFolder(std::wstring_view key, const std::wstring& folder);
     void MigrateIntegration();
+    bool UpgradeCompatibleFolderOpen();
     bool ReadIntegrationResidual() const;
     bool ReadIntegrationIncomplete() const;
     std::wstring ReadIntegrationOtherExe() const;
@@ -280,8 +317,27 @@ inline int NormalizeHoverPreviewDelay(int ms) noexcept {
 constexpr int kHoverCardSmall = 0;
 constexpr int kHoverCardMedium = 1;
 constexpr int kHoverCardLarge = 2;
+constexpr int kHoverCardXLarge = 3;
 inline int NormalizeHoverCardSize(int value) noexcept {
-    return value == kHoverCardSmall || value == kHoverCardLarge ? value : kHoverCardMedium;
+    return value == kHoverCardSmall || value == kHoverCardLarge || value == kHoverCardXLarge
+        ? value : kHoverCardMedium;
+}
+constexpr int kPreviewSizeFit = 0;
+constexpr int kPreviewSizeStandard = 1;
+constexpr int kPreviewSizeLarge = 2;
+constexpr int kPreviewSizeMaximized = 3;
+constexpr int kPreviewSizeFullScreen = 4;
+inline int NormalizePreviewSize(int value) noexcept {
+    return value >= kPreviewSizeFit && value <= kPreviewSizeFullScreen ? value : kPreviewSizeFit;
+}
+constexpr int kPreviewLoopAnimations = 0;
+constexpr int kPreviewLoopAll = 1;
+constexpr int kPreviewLoopNone = 2;
+inline int NormalizePreviewLoop(int value) noexcept {
+    return value == kPreviewLoopAll || value == kPreviewLoopNone ? value : kPreviewLoopAnimations;
+}
+inline int NormalizeHoldPreview(int ms) noexcept {
+    return ms == 300 || ms == 500 || ms == 800 ? ms : 0;
 }
 
 std::wstring FolderOpenCommandLine(const std::wstring& exe);

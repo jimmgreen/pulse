@@ -1,10 +1,10 @@
-// settings_sysctx_layout.h — Settings > 系统右键菜单 (page 6): texts, geometry
+﻿// settings_sysctx_layout.h — Settings > 系统右键菜单 (page 6): texts, geometry
 // and hit testing. Included by ui_renderer_internal.h inside its anonymous
 // namespace (like settings_layout_sections.h), so no includes here. Drawing:
 // ui_settings_sysctx.cpp; clicks: HitTestResult::SettingsSysCtx, handled in
 // app/settings_ui.cpp; data: app::SystemCtxModel.
 //
-// Layout follows the prototype (pulse_system_ctx_manager.html): intro with
+// Layout follows the prototype: intro with
 // the page commands, the 本地 / 系统 layer cards, then scene list | entries |
 // preview & details. Narrow windows drop the third column and open the
 // details under the selected row instead.
@@ -749,8 +749,10 @@ inline int HitTestSettingsSysCtx(const SettingsLayout& l, const WindowViewModel&
     auto detail_hit = [&]() -> int {
         if (SysCtxContains(o.detail.toggle, x, y)) return kSysCtxDetailSwitch;
         if (SysCtxContains(o.detail.pulse_toggle, x, y)) return kSysCtxDetailPulse;
-        if (SysCtxContains(o.detail.copy, x, y)) return kSysCtxDetailCopy;
-        if (SysCtxContains(o.detail.folder, x, y)) return kSysCtxDetailFolder;
+        if (SysCtxContains(o.detail.copy, x, y)) return v->selected >= 0 &&
+            static_cast<size_t>(v->selected) < v->rows.size() && v->rows[v->selected].registry_copyable ? kSysCtxDetailCopy : -1;
+        if (SysCtxContains(o.detail.folder, x, y)) return v->selected >= 0 &&
+            static_cast<size_t>(v->selected) < v->rows.size() && v->rows[v->selected].registry_copyable ? kSysCtxDetailFolder : -1;
         if (SysCtxContains(o.detail.remove, x, y)) return v && v->state == SysCtxView::State::Ready ? kSysCtxDetailDelete : -1;
         return -1;
     };

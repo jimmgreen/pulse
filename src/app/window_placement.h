@@ -15,8 +15,18 @@ namespace pulse::app {
 // launch.
 RECT WorkspaceToScreenRect(const RECT& workspace, const RECT& monitor, const RECT& work);
 
+// Inverse of WorkspaceToScreenRect.
+RECT ScreenToWorkspaceRect(const RECT& screen, const RECT& monitor, const RECT& work);
+
 // Screen rectangle for a saved rcNormalPosition, using the monitor it lies on.
 RECT RestoredWindowRect(const RECT& workspace);
+
+// The rectangle to save for a window, in workspace coordinates like
+// rcNormalPosition. A snapped or arranged window (Snap layouts, dragged to an
+// edge, top border double-clicked) keeps its pre-snap size in
+// rcNormalPosition, so the next launch reopened at the old size and place;
+// such a window saves the rectangle it actually has.
+RECT SavedNormalRect(HWND hwnd, const WINDOWPLACEMENT& placement);
 
 // Where a new window opens next to its opener (multi-window M4b, plan §5 P1).
 // `opener` is the opener's normal-state screen rectangle, `work` the work

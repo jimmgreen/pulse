@@ -92,7 +92,8 @@ std::wstring PipeFor(const std::wstring& local, const wchar_t* suffix) {
 }
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    const bool settings_only = argc == 2 && std::string_view(argv[1]) == "--settings-only";
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
     const std::wstring root = std::wstring(tmp) + L"pulse_ai_broker_test_" + std::to_wstring(GetCurrentProcessId());
@@ -104,6 +105,7 @@ int main() {
 
     // --- pipe names.
     const std::wstring name = PipeFor(local, L"");
+    if (!settings_only) {
     const size_t last_dot = name.find_last_of(L'.');
     Check(name.rfind(L"\\\\.\\pipe\\Pulse.Tools.", 0) == 0 && last_dot != std::wstring::npos &&
           name.size() - last_dot - 1 == 16 && name.find_first_not_of(L"0123456789abcdef", last_dot + 1) == std::wstring::npos,
@@ -114,8 +116,20 @@ int main() {
           proto::ToolPipeName(1, L"S-1-5-21-1", L"C:\\A") != proto::ToolPipeName(1, L"S-1-5-21-2", L"C:\\A"),
           "pipe name depends on session, user and LOCALAPPDATA, not on case");
 
+    }
+
     // --- ai.json.
     {
+        wchar_t executable[32768]{};
+        const DWORD count = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
+        std::wstring ini(executable, count);
+        const size_t slash = ini.find_last_of(L"\\/");
+        ini.resize(slash == std::wstring::npos ? 0 : slash + 1);
+        ini += L"setup-defaults.ini";
+        const bool expected_enabled = GetPrivateProfileIntW(L"features", L"ai_assistant", 1, ini.c_str()) != 0;
+        bool missing_malformed = true;
+        Check(LoadSettings(&missing_malformed).enabled == expected_enabled && !missing_malformed,
+              "missing ai.json reads install assistant default (enabled when absent)");
         Settings s;
         s.mcp_enabled = true;
         s.log_days = 45;
@@ -149,6 +163,50 @@ int main() {
         const Settings broken = LoadSettings(&malformed);
         Check(malformed && !broken.mcp_enabled, "a malformed ai.json reads as defaults (MCP off)");
         Check(ParseSettings("{\"log_days\":9999}").log_days == 30, "log_days out of range keeps the default");
+        // Legacy effort is migrated to thinking without adding service preferences.
+        const std::string older =
+            "{\"mcp_enabled\":false,\"log_days\":30,\"clients\":[],\"allow\":[],"
+            "\"assistant\":{\"dock\":\"docked\",\"model\":\"deepseek-flash\",\"effort\":2}}\n";
+        const std::string migrated =
+            "{\"mcp_enabled\":false,\"log_days\":30,\"clients\":[],\"allow\":[],"
+            "\"assistant\":{\"dock\":\"docked\",\"model\":\"deepseek-flash\",\"thinking\":\"high\",\"effort\":2}}\n";
+        Check(SerializeSettings(ParseSettings(older)) == migrated,
+              "legacy effort migrates to thinking while service preferences stay absent");
+        Check(ParseSettings(older).assistant.service.empty(), "no service means DeepSeek");
+        Check(ParseSettings(older).enabled, "legacy assistant settings remain enabled");
+        Settings disabled = ParseSettings(older);
+        disabled.enabled = false;
+        disabled.assistant.service = "qwen";
+        disabled.assistant.model = "saved-model";
+        disabled.mcp_enabled = true;
+        const Settings disabled_back = ParseSettings(SerializeSettings(disabled));
+        Check(!disabled_back.enabled && disabled_back.mcp_enabled &&
+              disabled_back.assistant.service == "qwen" && disabled_back.assistant.model == "saved-model",
+              "disabling assistant preserves provider and independent MCP setting");
+        disabled.enabled = true;
+        Check(ParseSettings(SerializeSettings(disabled)).enabled, "assistant can be re-enabled");
+        Settings svc;
+        svc.assistant.service = "qwen";
+        svc.assistant.model = "qwen-plus";
+        svc.assistant.services = {{"deepseek", {"deepseek-flash", ""}}, {"custom", {"my-model", "http://192.168.1.20:8000/v1"}}};
+        const Settings svc_back = ParseSettings(SerializeSettings(svc));
+        Check(svc_back.assistant.service == "qwen" && svc_back.assistant.model == "qwen-plus" &&
+              svc_back.assistant.services.size() == 2 && svc_back.assistant.services[0].first == "deepseek" &&
+              svc_back.assistant.services[0].second.model == "deepseek-flash" &&
+              svc_back.assistant.services[1].second.base_url == "http://192.168.1.20:8000/v1",
+              "service and the other services' models and addresses round-trip");
+        const Settings bad_svc = ParseSettings(
+            "{\"assistant\":{\"service\":\"Qwen!\",\"services\":{\"../x\":{\"model\":\"m\"},"
+            "\"kimi\":{\"base_url\":\"ftp://x\"}}}}");
+        Check(bad_svc.assistant.service.empty() && bad_svc.assistant.services.size() == 1 &&
+              bad_svc.assistant.services[0].first == "kimi" && bad_svc.assistant.services[0].second.base_url.empty(),
+              "malformed service ids and addresses are dropped");
+    }
+
+    if (settings_only) {
+        app::RemovePackTree(root);
+        std::printf("ai_broker_test settings: %d passed, %d failed\n", g_passed, g_failed);
+        return g_failed ? 1 : 0;
     }
 
     // --- the broker with fake tools.

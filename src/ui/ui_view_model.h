@@ -7,6 +7,7 @@
 #include "window_material.h"
 #include "fluent_components.h"
 #include "release_note_view.h"
+#include "extension_store_view.h"
 #include "sysctx_view.h"
 #include "shortcuts_view.h"
 #include "ai_settings_view.h"
@@ -27,6 +28,7 @@
 #include <array>
 #include <memory>
 #include <deque>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -57,7 +59,10 @@ class BloomAccentPicker;
 int FluentSvgIdForGlyph(std::wstring_view glyph);
 
 // Values are persisted (folder sort prefs, session): append only.
-enum class SortColumn { Name, Mtime, Type, Size, Path, Created, Accessed };
+// Media*: 媒体文件夹专用列 (PaneViewModel::media_columns), read by app/media_props.
+enum class SortColumn { Name, Mtime, Type, Size, Path, Created, Accessed,
+                        MediaTaken, MediaDims, MediaCamera, MediaTitle, MediaArtist, MediaAlbum,
+                        MediaDuration, MediaFps };
 enum class SortDirection { Asc, Desc };
 
 struct TabView {
@@ -114,9 +119,15 @@ struct ListEntryView {
     D2D1_COLOR_F tag_dots[3]{};
     int tag_dot_count = 0;
     std::wstring snippet;
-    // This PC tiles: used fraction (-1 = unknown) and "X free of Y".
+    // This PC tiles: used fraction (-1 = unknown), bytes left and
+    // "75.2 GB 可用 · 共 476.6 GB" with the free size drawn semibold.
     float drive_used = -1.0f;
+    uint64_t drive_free = 0;
+    uint64_t drive_total = 0;     // capacity; 0 = unknown
+    bool drive_row = false;       // This PC: a drive, capacity known or not
     std::wstring drive_space_text;
+    uint32_t drive_space_bold_start = 0;
+    uint32_t drive_space_bold_length = 0;
     bool drive_mounted = false;  // This PC: mapped / user-mode mount (网络盘 chip in tiles)
     uint32_t launcher_rgb = 0;   // This PC program icon (网盘程序入口): brand tint, 0 = not one
     uint8_t net_kind = 0;        // pulse:networks device row: 1 PC, 2 NAS, 3 Mac (own icon), 0 = not one
@@ -200,7 +211,34 @@ enum class CompareMark : uint8_t { Same = 0, OnlyHere = 1, Newer = 2, Older = 3,
 // Buttons on the strip above a file list (pane banner), main one first.
 enum class PaneBannerAction : int {
     None = 0, Retry, GoUp, Reconnect, Unlock, Refresh, ManageIndex, AddNetworkIndex, Dismiss,
-    NetworkSettings, LanRescan
+    NetworkSettings, LanRescan,
+    DupRecycle, DupRule, DupCancel   // the 重复文件 tab (app/dup_finder.h)
+};
+
+// The 重复文件 tab while it compares: the three passes as cards under the
+// banner (大小相同 › 开头 64 KB › 逐字节).
+struct DupFunnelView {
+    bool on = false;
+    int stage = 0;                // the pass running now (0..2); 3 = done
+    std::wstring title[3];        // ① 大小相同
+    std::wstring value[3];        // 96 个文件可能重复 / 14 / 23 已核对
+    float progress[3] = {};       // the running pass: 0..1, < 0 = no bar
+};
+
+// This PC in details view with two or more drives: the 存储总览 card above
+// the list. Each drive is one segment of a stacked bar, as wide as its share
+// of the total capacity and filled as far as it is used.
+struct DriveOverviewView {
+    struct Drive {
+        std::wstring letter;    // "C:"
+        float used = 0.0f;      // 0..1
+        uint64_t free = 0;
+        uint64_t total = 0;
+    };
+    std::vector<Drive> drives;  // fewer than two: no card
+    uint64_t free = 0;
+    uint64_t total = 0;
+    bool On() const { return drives.size() >= 2; }
 };
 
 // One chip of a tag view's condition bar or 细分 row.
@@ -215,6 +253,7 @@ struct TagQueryChipView {
 struct AiListOverlay;
 
 struct PaneViewModel {
+    std::vector<std::wstring> history_preview_paths;
     using FilterMap = std::vector<int>;
     using TagDots = std::unordered_map<int, std::vector<D2D1_COLOR_F>>;
 
@@ -248,7 +287,24 @@ struct PaneViewModel {
     std::wstring banner_message;
     int banner_kind = 0; // 0 info, 1 success, 2 warning, 3 error, 4 neutral
     PaneBannerAction banner_actions[2] = {PaneBannerAction::None, PaneBannerAction::None};
+    std::wstring banner_action_labels[2];   // non-empty: the button's own words (把多出的 4 份移到回收站)
     bool banner_dismissible = false;  // a close button that clears the banner
+    DupFunnelView dup_funnel;         // 重复文件 tab: the compare's passes while it runs
+    // This PC in details view: 名称 · 使用情况 · 可用 · 总大小 · 类型, fitted
+    // to the drives; the global column choice and widths stay as they are.
+    bool this_pc_columns = false;
+    DriveOverviewView drive_overview; // with this_pc_columns: the 存储总览 card
+    // Folder of mostly pictures (1), music (2) or videos (3) in details view:
+    // 名称 + that kind's columns (MainRenderer::MediaColumns); 0 = the usual
+    // columns. media_cell gives a row's text for one SortColumn::Media* value,
+    // empty while it is unknown or still being read.
+    uint8_t media_columns = 0;
+    std::function<std::wstring(int source, SortColumn column)> media_cell;
+    bool dup_chips = false;           // 重复文件 tab: 保留 / 多出 / 都留 as colored chips
+    std::wstring dup_empty_title;     // 重复文件 tab with nothing left: its empty-state title
+    // 重复文件 tab: the 路径 column names a folder under one of these roots
+    // by the root's label (下载\工作\2026 Q3). Pairs of root path, label.
+    std::vector<std::pair<std::wstring, std::wstring>> path_roots;
     // Derived data is shared with the tab cache. Search views can contain
     // 100k rows, so copying these containers for every animation frame is not
     // acceptable.
@@ -335,7 +391,12 @@ struct PaneViewModel {
     int selected_count = 0;
     bool all_selected = false;
     const std::unordered_set<int>* selected_indices = nullptr;
+    const void* selection_owner = nullptr;
+    uint64_t selection_revision = 0;
     int hover_index = -1;
+    std::wstring drag_parent_path;
+    bool drop_parent = false;
+    float drop_parent_progress = -1.0f;
     int drop_target_index = -1;   // folder row under an OLE drag (accent 2px stroke)
     float drop_spring_progress = -1.0f;  // 0..1 until the folder spring-opens; <0 = none
     bool header_drop = false;     // pane title bar is a navigate-to-folder target
@@ -348,6 +409,9 @@ struct PaneViewModel {
     bool focus_first_hint = false; // first view row has keyboard focus but no selection
     int focus_ring_source = -1;    // unselected row holding keyboard focus (Ctrl+arrows)
     float scroll_y = 0.0f;
+    // The file list's scrollbars (the shared control): expanded while hovered or dragged.
+    float scrollbar_expand = 0.0f;
+    float scrollbar_opacity = 1.0f;
     float scroll_x = 0.0f;
     ViewMode view_mode = ViewMode::Details;
     float icon_dip = 0.0f;        // icon grids: thumbnail width in DIP (0 = the mode's preset)
@@ -356,12 +420,14 @@ struct PaneViewModel {
     // GetTickCount64 when it appeared / goes (fades out from there); 0 = none.
     uint64_t wall_hint_since = 0;
     uint64_t wall_hint_until = 0;
+    uintptr_t wall_view_identity = 0;
     uint64_t view_generation = 1;
     SortColumn sort_column = SortColumn::Name;
     SortDirection sort_direction = SortDirection::Asc;
     // Manual details column widths (DIP, see DetailsColumnWidths). All zeroes
     // select the responsive defaults.
     DetailsColumnWidths details_column_dividers{};
+    std::array<std::array<float, 4>, 3> media_column_widths{};
     std::array<float, 4> search_column_dividers{};
     // "Group by" (app::GroupBy value) and its spans over view rows.
     int group_by = 0;
@@ -435,6 +501,19 @@ struct BreadcrumbSegment {
 std::vector<BreadcrumbSegment> SplitBreadcrumb(const std::wstring& path);
 
 struct SidebarItem {
+    int workspace_index = -1;
+    int workspace_child_number = 0;
+    int workspace_parent_index = -1;
+    ViewMode workspace_child_view = ViewMode::Details;
+    int workspace_layout = 0;
+    std::wstring workspace_root;
+    bool workspace_active = false;
+    bool workspace_dirty = false;
+    bool workspace_empty = false;
+    unsigned int workspace_color_rgb = 0x4CC2FF;
+    std::vector<std::wstring> workspace_panes;
+    std::vector<ViewMode> workspace_views;
+
     std::wstring label;
     std::wstring detail;
     std::wstring icon_glyph;       // Segoe Fluent Icons codepoint string.
@@ -451,6 +530,8 @@ struct SidebarItem {
     std::wstring path;
     bool is_drive = false;
     float used_ratio = 0.0f;       // For drives: 0..1.
+    uint64_t free_bytes = ~uint64_t{0};  // For drives: bytes left (all ones = unknown).
+    uint64_t total_bytes = 0;            // For drives: capacity (0 = unknown).
     int indent = 0;
     bool status_dot = false;
     D2D1_COLOR_F status_color = {};
@@ -466,7 +547,7 @@ struct SidebarItem {
     float flash = 0.0f;            // tab rows: attention pulse, see TabView::flash
 };
 
-enum class SidebarAddAction { None, CreateTag, AddNetwork, AddQuickAccess, NewTab };
+enum class SidebarAddAction { None, CreateTag, AddNetwork, AddQuickAccess, NewTab, SaveWorkspace };
 
 struct SidebarGroup {
     // Logical section id (pulse::app::SidebarSectionId). Collapse/hide masks and
@@ -531,7 +612,7 @@ struct TrayPuffView {
     float size = 1.0f;         // final scale
 };
 
-// One row of the open tray view (pulse_tray_redesign.html openHTML).
+// One row of the open tray view.
 struct TrayOpenRow {
     uint64_t id = 0;
     std::wstring path, name, size;
@@ -581,7 +662,7 @@ struct TrayDeckView {
     bool comparing = false;          // compare table replaces the card stack
     TrayCompareView compare;
 
-    // Shelf redesign (pulse_tray_redesign.html). The panel is one of three
+    // Shelf redesign. The panel is one of three
     // layers: a 40 dip strip when empty, two drop halves while files are
     // dragged over the window, and the shelf (fan + release + 送到 chips).
     int stage = 0;                   // TrayStage: 0 strip, 1 drop, 2 shelf
@@ -696,6 +777,7 @@ struct DetailsPanelView {
     DWORD attrs = 0;
     uint64_t modified_value = 0;    // thumbnail cache key parts
     uint64_t size_value = 0;
+    uintptr_t wall_view_identity = 0;
     uint64_t view_generation = 1;
     float scroll_y = 0.0f;
     bool preview_only = false;
@@ -729,7 +811,6 @@ struct DetailsPanelView {
 struct DetailsHitRects {
     D2D1_RECT_F open{}, new_tab{}, copy_path{}, more{}, star{}, rename{};
     D2D1_RECT_F tag_add{}, preview{}, preview_toggle{}, preview_enable{};
-    D2D1_RECT_F cloud_download{};   // 下载并预览 inside the preview well
     D2D1_RECT_F attr_readonly{}, attr_hidden{}, attr_advanced{};
     D2D1_RECT_F security_change{};
     std::vector<D2D1_RECT_F> preset_chips;
@@ -742,7 +823,19 @@ struct DetailsHitRects {
 // The AI chip at the left end of the status bar (app ai_status.h, Pulse 助手).
 enum class StatusAiState : uint8_t { Hidden, Idle, Busy, Waiting, Done, Error, Warn };
 
+struct UndoHistoryRowView {
+    uint64_t task_id = 0;
+    std::wstring label, detail;
+    std::wstring time;             // HH:MM it was recorded; empty when unknown
+    bool undone = false, supported = true, elsewhere = false;
+    std::wstring icon_glyph = L"\xE8A5";
+};
+
 struct StatusBarView {
+    bool can_undo = false, can_redo = false, history_open = false;
+    int history_offset = 0;
+    std::wstring undo_label;
+    std::vector<UndoHistoryRowView> history;
     bool query_active = false;
     bool query_cancellable = false;
     float query_progress = -1.0f; // 0..1 of this query's candidates; negative means unknown.
@@ -759,10 +852,12 @@ struct StatusBarView {
     bool task_is_update = false;   // Noninteractive, centered progress; never opens file operations.
     bool task_active = false;      // file operation running (drives the progress pill)
     bool task_failed = false;      // last operation ended with an error: no success check
+    uint64_t task_id = 0;          // resets completion age when another operation becomes current
     bool task_paused = false;      // paused or pausing: amber pill
+    uint32_t task_queued = 0;      // operations waiting behind the running one ("+N")
     uint64_t task_failed_items = 0; // partial failure: red pill until the next operation
     bool task_can_undo = false;    // finished pill offers 撤销 (sub_index 0)
-    bool task_can_open = false;    // finished pill offers 打开 (sub_index 1)
+    bool task_can_open = false;    // finished pill offers locate (sub_index 1); resume uses 2
     std::wstring performance_text; // development diagnostics; empty hides it
     std::wstring performance_compact_text;
     StatusAiState ai_state = StatusAiState::Hidden;
@@ -793,6 +888,11 @@ struct SplitterView {
 };
 // Splitter hit index of the swap button on splitter i: kSplitterSwapIndex + i.
 inline constexpr int kSplitterSwapIndex = 1000;
+
+struct DialogManagedSessionView {
+    std::wstring title, status;
+    bool can_disable = false;
+};
 
 struct SettingsRowView {
     std::wstring key;
@@ -921,11 +1021,10 @@ enum class PackAction : int {
     ImagesRemove,       // image pack: uninstall
     ImagesEnable,       // image pack: on / off
     RawInstall, RawRemove, RawEnable,
-    ArchiveInstall, ArchiveRemove, ArchiveEnable,
     TriggerHover, TriggerSpace,                         // 预览方式: hover card / Space only
     HoverDelayShort, HoverDelayMedium, HoverDelayLong,  // 悬停延迟: 0.3 / 0.5 / 0.8 s
-    HoverSizeSmall, HoverSizeMedium, HoverSizeLarge,    // 卡片尺寸: 小 / 中 / 大
-    Update, ImagesUpdate, RawUpdate, ArchiveUpdate,     // 更新到: the catalog's newer release
+    HoverSizeSmall, HoverSizeMedium, HoverSizeLarge, HoverSizeXLarge,  // 卡片尺寸: 小 / 中 / 大 / 特大
+    Update, ImagesUpdate, RawUpdate,     // 更新到: the catalog's newer release
     AutoUpdate,         // 自动更新增强包: on / off
     UpdateAll,          // 增强包 page: 全部更新 (every pack with a newer release)
     ManagePacks,        // 快速预览 page: open the 增强包 page
@@ -935,6 +1034,22 @@ enum class PackAction : int {
     AiRemove,           // AI pack: uninstall (asks first)
     AiCancel,           // AI pack: stop the running download
     AiManage,           // AI pack: open 增强包 > AI 与 MCP (kSettingsPageAi)
+    DownloadSource,     // 高级 > 下载源: the drop-down
+    SpeedTest,          // 测速: (re)run the probe of every source
+    // 快速预览 > 预览窗口 and 按住预览.
+    PreviewSizeFit, PreviewSizeStandard, PreviewSizeLarge, PreviewSizeMaximized, PreviewSizeFullScreen,
+    PreviewRememberSize,                 // 记住我拖出来的大小: on / off
+    SpaceClose, SpacePlayPause,          // 空格键（视频和动图）
+    LoopAnimations, LoopAll, LoopNone,   // 循环播放: 仅动图 / 动图和视频 / 不循环
+    HoldOff, HoldShort, HoldMedium, HoldLong,  // 按住预览: 关 / 0.3 / 0.5 / 0.8 s
+    NativeSettings,
+    StoreBrowse, StoreManage, StoreRefresh, StoreCancel,
+    StoreItemBase = 10000, // plus the index in settings_store_view.items (stable)
+    StoreInstalled = 1000, InstalledRefresh = 1001,
+    InstalledEnableBase = 20000, // plus displayed index in settings_store_view.installed
+    InstalledDisableBase = 30000,
+    InstalledUninstallBase = 40000,
+    InstalledRollbackBase = 50000,
 };
 
 // A tab dragged out of another window, over this one (multi-window M7h): the
@@ -966,7 +1081,22 @@ struct FilterTagSuggestionView {
     int count = 0;
 };
 
+struct PaneLayoutControls {
+    bool visible = true;
+    int preset = 0, zoom_index = -1, focus_index = 0, target_index = -1;
+    int preview_preset = -1, peek_index = -1;
+    bool compare = false, tray_open = false;
+    std::vector<std::wstring> pane_names, pane_paths;
+    std::vector<std::vector<std::wstring>> pane_previews;
+    std::vector<std::vector<std::wstring>> pane_preview_sizes;
+    std::vector<std::vector<bool>> pane_preview_dirs;
+    std::vector<size_t> pane_counts;
+    std::vector<std::wstring> preview_names;
+    int preview_target_index = -1;
+};
+
 struct WindowViewModel {
+    PaneLayoutControls layout_controls;
     AiPanelViewModel ai_panel;   // Pulse 助手 (ai_panel_view.h)
     std::wstring window_title;
     // Multi-window M7c: with two or more windows the title bar shows this
@@ -1041,6 +1171,9 @@ struct WindowViewModel {
     // Sidebar scrollbar fade (#44): 0 hidden .. 1 shown; expand 0 thin thumb .. 1 thumb + track.
     float sidebar_scrollbar_opacity = 1.0f;
     float sidebar_scrollbar_expand = 1.0f;
+    // Settings page scrollbar: thin at rest, expanded while hovered or dragged.
+    float settings_scrollbar_opacity = 1.0f;
+    float settings_scrollbar_expand = 0.0f;
     TrayDeckView tray_deck;
     bool details_visible = false;   // right details panel toggle (view menu)
     int layout_preset = 0;          // app::LayoutPreset of the active tab (toolbar split icon)
@@ -1049,6 +1182,7 @@ struct WindowViewModel {
 
     // OLE drag feedback (1B-2). Indices follow HitTestResult indexing.
     int breadcrumb_hover = -1;    // placed segment under the mouse
+    bool drag_folders_active = false;
     int breadcrumb_drop = -1;     // placed segment under a drag
     int sidebar_drop_index = -1;  // sidebar item under a drag
     int tab_drop_index = -1;      // a tab dragged from another window lands before this tab (M6b)
@@ -1138,6 +1272,15 @@ struct WindowViewModel {
     bool splitter_pressed = false;
     bool details_resize_pressed = false;
     bool column_resize_pressed = false;
+    // Details header drag (column reorder): the pane slot, the dragged
+    // display column, the insertion slot (-1: no change) and its line x,
+    // and the pointer's x for the floating header.
+    int column_drag_pane = -1;
+    int column_drag_from = -1;
+    int column_drag_slot = -1;
+    float column_drag_line_x = 0.0f;
+    float column_drag_cursor_x = 0.0f;
+    float column_drag_grab_dx = 0.0f;   // pointer x minus the column's left edge
     int hover_pane_index = -1;
 
     struct ContentFolderView { std::wstring path, status; bool error = false; };
@@ -1172,19 +1315,34 @@ struct WindowViewModel {
     std::wstring settings_pack_images_notice;
     std::wstring settings_pack_images_update_version;
     bool settings_pack_raw_installed = false, settings_pack_raw_enabled = true, settings_pack_raw_installing = false;
+    std::vector<std::wstring> settings_native_archive_extensions;
     bool settings_pack_raw_available = false;
     float settings_pack_raw_progress = 0.0f;
     std::wstring settings_pack_raw_version, settings_pack_raw_notice, settings_pack_raw_update_version;
-    bool settings_pack_archive_installed = false, settings_pack_archive_enabled = true, settings_pack_archive_installing = false;
-    bool settings_pack_archive_available = false;
-    float settings_pack_archive_progress = 0.0f;
-    std::wstring settings_pack_archive_version, settings_pack_archive_notice, settings_pack_archive_update_version;
+    // 高级 > 下载源 (app::UpdateSource) and 测速: per row (mirror 1, mirror 2, GitHub)
+    // milliseconds, or -1 not run, -2 running, -3 failed; the system proxy GitHub uses.
+    uint32_t settings_pack_download_source = 0;
+    int settings_pack_speed_ms[3]{-1, -1, -1};
+    std::wstring settings_pack_proxy;
     int settings_theme = 0; // system, light, dark
     bool settings_open = false;
     // 0 外观, 1 search/index, 2 context menu, 3 about, 4 duplicates, 5 quick look, 6 system menu,
     // 7 shortcuts, 8 packs, 9 文件列表, 10 标签页与窗口, 11 启动与集成, 12 文件操作,
-    // 13 AI 与 MCP (kSettingsPageAi, under 增强包)
+    // 13 AI 与 MCP (kSettingsPageAi, under 增强包), 14 AI 助手 (kSettingsPageAssistant)
+    struct SettingsSearchResult { std::wstring title, category; int page = 0; int command = 0; };
+    std::wstring settings_search_query;
+    bool settings_search_edit_visible = false;
+    int settings_search_selected = 0;
+    int settings_search_target = 0;
+    float settings_search_target_alpha = 0.0f;
+    std::vector<SettingsSearchResult> settings_search_results;
     int settings_page = 0;
+    bool settings_store_browse = true;
+    bool settings_store_installed = false; // browse wins; both false select legacy packs management
+    ExtensionStoreView settings_store_view;
+    // Settings > AI 助手 (filled on that page); the sidebar's 新 until it was opened.
+    AssistantPageView settings_assistant;
+    bool settings_assistant_new = false;
     // Settings > 系统右键菜单 (page 6): the model's last published view.
     std::shared_ptr<const SysCtxView> settings_sysctx;
     // Settings > 快捷键 (page 7): the page model's last view; the sidebar badge
@@ -1204,6 +1362,8 @@ struct WindowViewModel {
     bool settings_keep_running = false;
     bool settings_show_hidden_files = false;
     bool settings_show_protected_os_files = false;
+    int tab_layout = 0; // 0: single row, 1: aligned, 2: title width
+    int tab_max_rows = 3;
     bool show_pinned_tab_names = true;
     bool settings_list_smart_date = true;
     bool settings_list_zebra_rows = true;
@@ -1213,6 +1373,7 @@ struct WindowViewModel {
     bool settings_list_tag_names = false;
     bool settings_list_selection_outline = false;
     bool settings_list_thumbnail_badges = true;
+    bool settings_media_columns = true;
     // 缩略图缓存 row: 0 counting, 1 ready, 2 clearing, 3 cleared, 4 no cache
     // folder (SettingsController::ThumbCacheState).
     uint8_t settings_thumb_cache_phase = 0;
@@ -1234,10 +1395,16 @@ struct WindowViewModel {
     int settings_lan_cache_mode = 0;  // 0 10 min, 1 1 h, 2 this session
     bool settings_show_hints = true;
     bool settings_tips_seen = false;   // any teaching bubble already shown
-    int settings_folder_sort = 0; // 0 folders first, 1 follow direction, 2 mixed
+    int settings_folder_sort = 0; // 0 folders first, 1 folders last, 2 mixed
     int settings_startup_open = 0; // 0 last tabs, 1 default location
     int settings_notify_icon = 0;  // 0 always, 1 in the background, 2 never (#57)
     int settings_new_tab_open = 0; // 0 current folder, 1 default location
+    int settings_open_pulse_icon = 0;
+    int settings_new_window_shows = 0;
+    bool settings_arrange_include_minimized = false;
+    int settings_arrange_gap = 0;
+    int settings_open_this_pc = 0;
+    int settings_open_win_e = 0;
     int settings_external_open = 0; // 0 smart, 1 tab, 2 new window (multi-window M7b)
     bool settings_close_last_tab = false;
     bool settings_close_tab_double_click = false;
@@ -1255,6 +1422,14 @@ struct WindowViewModel {
     // 设为默认文件管理器: 0 off, 1 partial, 2 full; the text lists what is missing.
     int settings_default_manager = 0;
     std::wstring settings_default_manager_desc;
+    // Pure snapshots: layout/render tests may populate these without a controller.
+    std::wstring settings_dialog_bundle, settings_dialog_application, settings_dialog_status;
+    bool settings_dialog_available = false, settings_dialog_busy = false;
+    bool settings_dialog_enabled = false, settings_dialog_conflict = false, settings_dialog_failed = false;
+    bool settings_dialog_scope_expanded = false;
+    bool settings_integration_restore_busy = false;
+    bool settings_dialog_can_launch = false, settings_dialog_can_enable_auto = false;
+    std::vector<DialogManagedSessionView> settings_dialog_sessions;
     bool settings_integration_enabled = false;
     bool settings_integration_folders = false;
     bool settings_integration_win_e = false;
@@ -1279,7 +1454,12 @@ struct WindowViewModel {
     int settings_blank_click_action = 0;   // app/blank_pane_click.h
     int settings_preview_trigger = 0;      // app::kPreviewTrigger*
     int settings_hover_delay_ms = 500;     // 300 / 500 / 800
-    int settings_hover_card_size = 1;      // 0 small, 1 medium, 2 large
+    int settings_hover_card_size = 1;      // 0 small, 1 medium, 2 large, 3 extra large
+    int settings_preview_size = 0;         // app::kPreviewSize*
+    bool settings_preview_remember = true; // 记住我拖出来的大小
+    bool settings_preview_space_closes = true;
+    int settings_preview_loop = 0;         // app::kPreviewLoop*
+    int settings_hold_preview_ms = 0;      // 0 off, 300 / 500 / 800
     bool settings_change_tracking = false;
     int settings_change_days = 3;
     int settings_row_height = 34; // current row-height pref (DIPs) for density radios
@@ -1291,7 +1471,7 @@ struct WindowViewModel {
     // 2 row buttons), the hidden-item mask, and where BuiltinMenuItem 0 sits
     // in settings_items.
     int settings_context_tab = 0;
-    uint32_t settings_builtin_hidden = 0;
+    uint64_t settings_builtin_hidden = 0;
     size_t settings_builtin_first = 0;
     // Pulse menu order per BuiltinMenuSurface (normalized), and the preview
     // row being dragged: BuiltinMenuItem or -1, pointer position in px (y,
@@ -1362,6 +1542,7 @@ struct HitTestResult {
         TabNew,
         TabGroup,
         ThemeToggle,
+        WindowManageButton,
         SettingsButton,
         Minimize,
         Maximize,
@@ -1369,6 +1550,7 @@ struct HitTestResult {
         NavBack,
         NavForward,
         NavUp,
+        DropParent,
         NavRefresh,
         NewButton,
         Cut,
@@ -1380,6 +1562,7 @@ struct HitTestResult {
         DetailsToggle,
         PaneMediumIcons,
         PaneViewButton,
+        PaneClose,
         PaneDetails,
         PaneSizeSlider,     // icon views: the pane header's size slider (index = pane)
         PaneSizeButton,     // narrow pane: opens that slider over the title (index = pane)
@@ -1404,11 +1587,12 @@ struct HitTestResult {
         NetworkIndexAdd,
         PaneBannerButton,         // index = ui::PaneBannerAction
         SettingsContentIndex,
-        SettingsFind, SettingsDisclosure, SettingsTheme, SettingsDropdown,
+        SettingsFind, SettingsSearchResult, SettingsSearchClear, SettingsDisclosure, SettingsTheme, SettingsDropdown,
         SettingsContentAction,
         AddressSearchClear,
         AddressSearchClose,
         BreadcrumbSegment,
+        BreadcrumbArrow,
         ColumnHeader,
         ColumnDivider,
         FilterBox,
@@ -1427,6 +1611,7 @@ struct HitTestResult {
         SidebarHeaderAction,
         SidebarItem,
         SidebarItemAction,
+        SidebarWorkspaceAction,
         SidebarItemExpand,
         SidebarBlank,             // empty space in the sidebar: section menu
         TrayRelease,
@@ -1462,13 +1647,15 @@ struct HitTestResult {
         DetailsPreview,
         DetailsPreviewToggle,
         DetailsPreviewEnable,   // preview pane on/off chip inside the well
-        DetailsCloudDownload,   // 下载并预览 button in the well of a cloud-only file
         DetailsResize,
         StatusBar,
+        StatusUndo, StatusUndoHistory, StatusRedo, UndoHistoryRow, UndoHistorySurface,
+        PaneExpand, PaneLayoutPeek, PaneLayoutPreset, PaneLayoutZoom, PaneLayoutRestore, PaneLayoutCell, PaneLayoutTray, PaneLayoutCompare,
         StatusBarTask,
         StatusBarCancelSearch,
         SettingsNav,
         SettingsToggle,
+        SettingsDialogManagement, // 0 bundle, 1 application, 2 launch, 3 refresh, 100+ session disable
         SettingsIntegration, // 0 master, 4 experimental, 5 retry/restore, 6 restore all, 7 Recycle Bin, 8 try it
         SettingsGlobalSearchHotkey,
         SettingsChangeDays,
@@ -1483,7 +1670,11 @@ struct HitTestResult {
         SettingsFolderSort,
         SettingsStartupOpen,
         SettingsNotifyIcon,
+        SettingsTabLayout, SettingsTabRows,
         SettingsNewTabOpen,
+        SettingsOpenPulseIcon,
+        SettingsNewWindowShows,
+        SettingsArrangeGap,
         SettingsExternalOpen,
         SettingsBlankClick,
         SettingsHomeFolder,
@@ -1562,6 +1753,7 @@ struct HitTestResult {
         TreeSticky,            // details tree folder pinned over the list top: index = view row
         SidebarBarSwitch,      // 收藏夹 root row: move the list to the 收藏栏; index = run
         FavoritesBarDock,      // 收藏栏's right end: put the list back in the sidebar
+        SettingsAssistant,     // Settings > AI 助手: index = AssistantHit
     } region = None;
     SidebarAddAction sidebar_action = SidebarAddAction::None;
     int index = -1;          // tab/row/sidebar item/tray batch/tray item.

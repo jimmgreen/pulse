@@ -55,7 +55,7 @@ std::optional<PreviousInstall> FindPreviousInstall(const wchar_t* key) {
         p.inno = !ReadString(where.root, where.view, key, L"Pulse Setup: Version").has_value();
         if (auto t = ReadString(where.root, where.view, key, L"Inno Setup: Selected Tasks")) {
             Tasks tasks;
-            ApplyTaskList(*t, tasks, true);
+            ApplyRememberedTaskList(*t, tasks);
             p.tasks = tasks;
         }
         return p;

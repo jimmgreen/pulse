@@ -1,13 +1,16 @@
-// transfer_engine.h — Parallel copying of small files for OpsManager::RunTransfer.
+// transfer_engine.h — Parallel direct copying for OpsManager::RunTransfer.
 //
 // RunTransfer keeps everything that has to happen in order on its own
 // thread: folders (always created before what they contain), conflicts and
 // their prompts, links, large files with progress and pause, verification.
-// Small files with no conflict are handed to this pool; their results come
+// Eligible direct copies with no conflict are handed to this pool; their results come
 // back to the RunTransfer thread, which applies them, so the completed
 // lists, undo records and rollback stay in the original order.
 #pragma once
 #include <windows.h>
+#include "verification_worker.h"
+#include "transfer_device_budget.h"
+#include <memory>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -16,6 +19,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <unordered_map>
 
 namespace pulse::ops {
 
@@ -23,6 +27,10 @@ namespace pulse::ops {
 // solid-state storage, 4 on a share, 2 on a spinning disk, 1 on a removable
 // drive. When the storage cannot be identified, 2.
 unsigned TransferThreadCount(const std::wstring& source, const std::wstring& dest_dir);
+
+bool IsSolidToSpinningTransfer(const std::wstring& source, const std::wstring& dest_dir);
+
+unsigned MediumTransferThreadCount(const std::wstring& source, const std::wstring& dest_dir);
 
 struct TransferTarget {
     bool slow = false;         // a share or a removable drive
@@ -49,6 +57,24 @@ struct SmallCopyJob {
     std::wstring destination;   // known not to exist; its folder exists
     DWORD attributes = 0;       // as scanned
     bool move = false;          // write the copy out for a move (FlushCopyToDisk, no sync)
+    uint64_t bytes = 0;
+    bool verify = false;
+    std::shared_ptr<const VerificationStamp> expected_source;
+    bool staged = false;
+    bool unbuffered = false;
+    // Null preserves the legacy admission path. Queued jobs do not hold permits.
+    std::shared_ptr<const TransferDevicePair> devices;
+    // Scheduling weight, not allocated buffer memory or reported file size.
+    // Zero keeps the original whole-file admission policy.
+    uint64_t admission_bytes = 0;
+    uint64_t AdmissionBytes() const noexcept { return admission_bytes ? admission_bytes : bytes; }
+};
+
+struct SmallCopyProgress {
+    size_t index = 0;
+    uint64_t bytes = 0; // absolute snapshot, not a delta
+    uint64_t total = 0;
+    bool verifying = false;
 };
 
 struct SmallCopyResult {
@@ -59,31 +85,71 @@ struct SmallCopyResult {
     bool not_flushed = false;   // a move kept its source: the copy could not be written out
     bool move_pending = false;  // a move's copy is written out; RunTransfer deletes the source
     bool source_removed = false;
+    uint64_t bytes = 0; // actual logical size when available, otherwise scanned size
+    // Allocated only for verification jobs. Failure also sets hr; target cleanup
+    // and staging commit belong to the coordinator, never to the verifier.
+    std::shared_ptr<VerificationResult> verification;
+    bool copy_completed = false;
+    HRESULT buffering_fallback_error = S_OK;
+    DWORD buffering_cleanup_error = ERROR_SUCCESS;
+    bool buffered_retry = false;
+    std::shared_ptr<VerificationStamp> owned_output;
+};
+
+// Optional diagnostic state. Read worker totals only after the pool has joined.
+// Durations are summed worker nanoseconds, not task wall-clock time; waits/calls
+// may include user pauses. No profile object is allocated on the default path.
+struct SmallCopyWorkerProfile {
+    uint64_t queue_start_ns = 0, queue_supply_ns = 0, queue_close_ns = 0;
+    uint64_t budget_wait_ns = 0, copy_work_ns = 0, copy_calls = 0;
+    void Add(const SmallCopyWorkerProfile& other) {
+        queue_start_ns += other.queue_start_ns;
+        queue_supply_ns += other.queue_supply_ns;
+        queue_close_ns += other.queue_close_ns;
+        budget_wait_ns += other.budget_wait_ns;
+        copy_work_ns += other.copy_work_ns;
+        copy_calls += other.copy_calls;
+    }
+};
+struct SmallCopyPhaseProfile {
+    std::mutex mutex;
+    SmallCopyWorkerProfile workers;
+    uint64_t apply_ns = 0, apply_calls = 0, apply_empty_calls = 0, apply_results = 0;
+};
+struct SmallCopyQueueSnapshot {
+    size_t queued = 0, in_flight = 0, done = 0;
 };
 
 class SmallCopyPool {
 public:
-    // `pause`/`cancel` are RunTransfer's flags; workers check them between
-    // files. A paused worker waits on `control_cv` under `control_mutex`.
+    // `pause`/`cancel` are RunTransfer's flags; medium copies also check in callbacks.
+    // Small files check between files. A paused worker waits on `control_cv` under `control_mutex`.
     SmallCopyPool(unsigned threads, std::atomic<bool>& cancel, std::atomic<bool>& pause,
-                  std::mutex& control_mutex, std::condition_variable& control_cv);
+                  std::mutex& control_mutex, std::condition_variable& control_cv, bool bounded_medium = true,
+                  std::shared_ptr<SmallCopyPhaseProfile> phase_profile = {},
+                  TransferDeviceBudget::TaskToken budget_task = {});
     ~SmallCopyPool();
     SmallCopyPool(const SmallCopyPool&) = delete;
     SmallCopyPool& operator=(const SmallCopyPool&) = delete;
 
-    // True when a job can be queued without blocking.
-    bool HasRoom() const;
+    // Single coordinator producer: check HasRoom(job.AdmissionBytes()) before Submit.
+    // An oversized file may run alone; indices must be unique until Take.
+    bool HasRoom(uint64_t bytes = 0) const;
+    // Coalesced absolute snapshots; consume before Take, which retires them.
+    std::vector<SmallCopyProgress> TakeProgress();
     void Submit(SmallCopyJob job);
     // Finished results so far; with `wait`, blocks until at least one is
     // available or nothing is outstanding.
     std::vector<SmallCopyResult> Take(bool wait);
     size_t Outstanding() const;
-    // Queued jobs are dropped (reported with ran = false); running ones finish.
+    SmallCopyQueueSnapshot QueueSnapshot() const;
+    // Queued jobs are dropped; active callback copies are cancelled.
     void Stop();
 
 private:
     void Worker();
-    SmallCopyResult Run(const SmallCopyJob& job);
+    SmallCopyResult Run(const SmallCopyJob& job, std::unique_ptr<SHA256VerificationWorker>& verifier,
+                        SmallCopyWorkerProfile* profile);
 
     std::atomic<bool>& cancel_;
     std::atomic<bool>& pause_;
@@ -96,7 +162,15 @@ private:
     std::vector<SmallCopyResult> done_;
     size_t outstanding_ = 0;    // queued + running + done but not taken
     size_t capacity_ = 0;
-    bool stopping_ = false;
+    std::atomic<bool> stopping_{false};
+    const bool bounded_medium_;
+    const std::shared_ptr<SmallCopyPhaseProfile> phase_profile_;
+    const TransferDeviceBudget::TaskToken budget_task_;
+    uint64_t reserved_bytes_ = 0;
+    std::unordered_map<size_t, uint64_t> reservations_;
+    std::unordered_map<size_t, SmallCopyProgress> progress_;
+    struct ProgressContext { SmallCopyPool* pool; size_t index; std::shared_ptr<VerificationStamp>* owned_output; };
+    static COPYFILE2_MESSAGE_ACTION CALLBACK Progress(const COPYFILE2_MESSAGE*, PVOID);
     bool closing_ = false;
     std::vector<std::thread> threads_;
 };

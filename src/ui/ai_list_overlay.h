@@ -1,5 +1,4 @@
-// ai_list_overlay.h — Pulse 助手 in the file list (plans/ai/pulse_ai_assistant_v2.html,
-// scenes 3–5): what the assistant is doing to the folder a pane shows.
+// ai_list_overlay.h — Pulse 助手 in the file list (scenes 3–5): what the assistant is doing to the folder a pane shows.
 //
 //   reading   a spark walks the rows the assistant read; each row lights up
 //             for a moment and keeps a dot; a thin progress line runs under

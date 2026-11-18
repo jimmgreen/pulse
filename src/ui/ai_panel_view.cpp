@@ -1,10 +1,10 @@
 // ai_panel_view.cpp — Pulse 助手 panel: layout, drawing, hit testing.
 //
-// Sizes are the design's CSS pixels (plans/ai/pulse_ai_assistant_v2.html),
+// Sizes are the design's CSS pixels,
 // used as DIPs.
 #include "ai_panel_view.h"
 #include "ai_panel_draw.h"
-#include "ai_panel_conn.h"
+#include "ai_panel_rich.h"
 
 #include "typography.h"
 #include "ui_compositor.h"
@@ -60,9 +60,11 @@ void AiPanelView::Formats::Release() {
     scale = 0.0f;
 }
 
+AiPanelView::AiPanelView() = default;
 AiPanelView::~AiPanelView() { ReleaseDeviceResources(); }
 
 void AiPanelView::ReleaseDeviceResources() {
+    ReleaseRich();
     formats_.Release();
     SafeRelease(brush_);
     brush_dc_ = nullptr;
@@ -97,7 +99,6 @@ bool AiPanelView::Tick(uint64_t now_ms) {
     drawn_ = false;
     input_placed_ = false;
     menu_rect_ = {};
-    if (conn_) conn_->key_place = conn_->url_place = false;
     if (dock_anim_) {
         const float target = open_ && mode_ == AiPanelMode::Docked ? 1.0f : 0.0f;
         const float ms = static_cast<float>(now_ms - dock_start_);
@@ -262,6 +263,7 @@ void AiPanelView::Draw(Compositor* compositor, const AiPanelViewModel& vm, const
     drawn_ = false;
     input_placed_ = false;
     decor_ = false;
+    bars_[0].drawn = false;
     conv_anim_ = false;
     conv_decor_ = false;
     ID2D1DeviceContext* dc = compositor ? compositor->Dc() : nullptr;
@@ -276,6 +278,11 @@ void AiPanelView::Draw(Compositor* compositor, const AiPanelViewModel& vm, const
     text3_color_ = pal.text3;
     const float s = scale;
     Ctx c{compositor, dc, brush_, s};
+    bar_painter_.SetCompositor(compositor);
+    bar_painter_.SetScale(scale);
+    bar_painter_.BeginFrame(theme, vm.high_contrast);
+    bar_scale_ = scale;
+    bar_now_ = now_ms;
 
     glass_drawn_ = false;
     if (dock_value_ > 0.0f && column.right > column.left) {
@@ -372,9 +379,8 @@ void AiPanelView::Draw(Compositor* compositor, const AiPanelViewModel& vm, const
         }
     }
     if (drawn_ && open_) {
-        DrawModelMenu(compositor, vm, pal, s, now_ms);
+        DrawEffortMenu(compositor, vm, pal, s, now_ms);
         DrawVoiceMenu(compositor, vm, pal, s, now_ms);
-        DrawVoiceCard(compositor, vm, pal, s, now_ms);
     }
 }
 
@@ -382,18 +388,36 @@ void AiPanelView::DrawContent(Compositor* compositor, const AiPanelViewModel& vm
                               const D2D1_RECT_F& panel, float s, uint64_t now_ms) {
     Ctx c{compositor, compositor->Dc(), brush_, s};
     DrawHeader(compositor, vm, pal, panel, s);
-    // Composer: margin 6 12 12.
+    // Composer: margin 6 12 12 (its quote chip measured first).
+    MeasureQuote(compositor, vm, panel.right - panel.left - 24.0f * s - 2.0f * s - 22.0f * s, s);
     const float ch = ComposerHeight(vm, s);
     const D2D1_RECT_F box = D2D1::RectF(panel.left + 12.0f * s, panel.bottom - 12.0f * s - ch,
                                         panel.right - 12.0f * s, panel.bottom - 12.0f * s);
     conversation_rect_ = D2D1::RectF(panel.left, panel.top + kHeadDip * s, panel.right, box.top - 6.0f * s);
+    // 55 P3: 历史对话 slides in from the left (.32 s); what it covers is not drawn.
+    hist_k_ = HistorySlide(vm.history.open, now_ms);
+    hist_open_drawn_ = vm.history.open;
+    const bool hist_shown = hist_k_ > 0.001f;
+    if (hist_shown) {
+        const float edge = panel.left + (panel.right - panel.left) * hist_k_;
+        c.dc->PushAxisAlignedClip(D2D1::RectF(edge, panel.top + kHeadDip * s, (std::max)(edge, panel.right), panel.bottom),
+                                  D2D1_ANTIALIAS_MODE_ALIASED);
+    }
     c.dc->PushAxisAlignedClip(conversation_rect_, D2D1_ANTIALIAS_MODE_ALIASED);
     suggestion_rects_.clear();
+    go_settings_ = {};
     conv_hits_.clear();
+    jump_shown_ = false;   // 55 P4: set again by DrawConversation
+    turn_rects_.clear();
+    turn_edit_rect_ = {};
+    turn_edit_placed_ = false;
     if (vm.empty) DrawEmptyState(compositor, vm, pal, conversation_rect_, s, now_ms);
     else DrawConversation(compositor, vm, pal, conversation_rect_, s, now_ms);
     c.dc->PopAxisAlignedClip();
     DrawComposer(compositor, vm, pal, box, s, now_ms);
+    DrawSelectionBar(compositor, vm, pal, s);
+    if (hist_shown) c.dc->PopAxisAlignedClip();
+    DrawHistory(compositor, vm, pal, panel, s, now_ms);
 }
 
 void AiPanelView::DrawHeader(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal,
@@ -412,10 +436,13 @@ void AiPanelView::DrawHeader(Compositor* compositor, const AiPanelViewModel& vm,
     mode_button_ = D2D1::RectF(bx, cy - bs * 0.5f, bx + bs, cy + bs * 0.5f);
     bx -= bs + 8.0f * s;
     new_button_ = D2D1::RectF(bx, cy - bs * 0.5f, bx + bs, cy + bs * 0.5f);
-    c.Text(vm.title, formats_.title, D2D1::RectF(tx, head_rect_.top, new_button_.left - 8.0f * s, head_rect_.bottom),
+    bx -= bs + 8.0f * s;   // 55 P3: 历史对话, left of 新对话
+    hist_button_ = D2D1::RectF(bx, cy - bs * 0.5f, bx + bs, cy + bs * 0.5f);
+    c.Text(vm.title, formats_.title, D2D1::RectF(tx, head_rect_.top, hist_button_.left - 8.0f * s, head_rect_.bottom),
            pal.text);
     struct Button { const D2D1_RECT_F* r; AiPanelPart part; AiIcon icon; };
     const Button buttons[] = {
+        {&hist_button_, AiPanelPart::History, AiIcon::History},
         {&new_button_, AiPanelPart::NewChat, AiIcon::Plus},
         {&mode_button_, AiPanelPart::Mode, mode_ == AiPanelMode::Docked ? AiIcon::Float : AiIcon::Dock},
         {&close_button_, AiPanelPart::Close, AiIcon::ChevronDown},
@@ -423,11 +450,12 @@ void AiPanelView::DrawHeader(Compositor* compositor, const AiPanelViewModel& vm,
     for (const Button& b : buttons) {
         const bool hot = vm.hover.part == b.part;
         const bool down = hot && vm.pressed.part == b.part;
+        const bool on = b.part == AiPanelPart::History && vm.history.open;   // .hb.on
         const D2D1_COLOR_F hover = pal.glass ? pal.glass_hover : pal.hover;
-        if (hot) c.Fill(*b.r, 8.0f * s, down ? Mix(hover, pal.text, 0.06f) : hover);
+        if (hot || on) c.Fill(*b.r, 8.0f * s, down ? Mix(hover, pal.text, 0.06f) : hover);
         const float is = 17.0f * s;
         c.Icon(b.icon, (b.r->left + b.r->right - is) * 0.5f, (b.r->top + b.r->bottom - is) * 0.5f, is,
-               hot ? pal.text : pal.text2);
+               hot || on ? pal.text : pal.text2);
     }
     c.Fill(D2D1::RectF(panel.left, head_rect_.bottom - 1.0f, panel.right, head_rect_.bottom), 0.0f,
            pal.glass ? pal.glass_line : pal.line2);
@@ -454,9 +482,11 @@ void AiPanelView::DrawEmptyState(Compositor* compositor, const AiPanelViewModel&
     // .conv padding 16 18 10, .empty padding 26 6 0.
     const float x0 = area.left + 24.0f * s;
     const float x1 = area.right - 24.0f * s;
-    float y = top + (16.0f + 26.0f) * s;
+    // The setup state leaves out the big spark (the header has one) and the
+    // safety line, so it fits a common window without scrolling.
+    float y = top + (16.0f + (vm.setup ? 12.0f : 26.0f)) * s;
     // Breathing spark: scale .88 and 45 deg at the middle of a 3.2 s cycle.
-    {
+    if (!vm.setup) {
         // Nine breaths after opening, then it rests (a 30 fps repaint for as
         // long as the panel stays open would cost an idle window CPU).
         const uint64_t since = now_ms - opened_at_;
@@ -468,8 +498,53 @@ void AiPanelView::DrawEmptyState(Compositor* compositor, const AiPanelViewModel&
         pose.rotate_deg = 45.0f * b;
         c.Icon(AiIcon::Spark, x0, y, 44.0f * s, pal.accent, pose);
         if (breathe) decor_ = true;
+        y += (44.0f + 16.0f) * s;
     }
-    y += (44.0f + 16.0f) * s;
+    if (vm.setup) {
+        // No model service yet: what the assistant needs, the services it
+        // works with, and the way to Settings > AI 助手.
+        const float th = 28.0f * s;
+        c.Text(vm.setup_title, formats_.greeting, D2D1::RectF(x0, y, x1, y + th), pal.text);
+        y += th + 6.0f * s;
+        {
+            TextOptions o;
+            o.wrap = true;
+            o.line_height = 20.0f * s;
+            const float h = c.Text(vm.setup_intro, formats_.body13, D2D1::RectF(x0, y, x1, y + 200.0f * s), pal.text2, o);
+            y += std::ceil(h) + 12.0f * s;
+        }
+        const float mark = 20.0f * s, gap = 10.0f * s;
+        float lx = x0;
+        for (const std::string& id : vm.setup_marks) {
+            if (lx + mark > x1) {
+                lx = x0;
+                y += mark + 8.0f * s;
+            }
+            if (mark_painter_) mark_painter_(id, D2D1::RectF(lx, y, lx + mark, y + mark));
+            lx += mark + gap;
+        }
+        if (!vm.setup_more.empty()) {
+            const float mw = c.Measure(vm.setup_more, formats_.caption);
+            if (lx + mw > x1) {
+                lx = x0;
+                y += mark + 8.0f * s;
+            }
+            c.Text(vm.setup_more, formats_.caption, D2D1::RectF(lx, y, lx + mw + 2.0f * s, y + mark), pal.text3);
+        }
+        y += mark + 18.0f * s;
+        const float bw = c.Measure(vm.setup_go, formats_.body13b) + 32.0f * s;
+        const D2D1_RECT_F go = D2D1::RectF(x0, y, (std::min)(x0 + bw, x1), y + 36.0f * s);
+        D2D1_RECT_F shown = go;
+        shown.top = (std::max)(shown.top, area.top);
+        shown.bottom = (std::min)(shown.bottom, area.bottom);
+        go_settings_ = shown.bottom > shown.top ? shown : D2D1_RECT_F{};
+        const bool hot = vm.hover.part == AiPanelPart::GoSettings;
+        c.Fill(go, 8.0f * s, hot ? Mix(pal.accent, pal.text, 0.12f) : pal.accent);
+        TextOptions o;
+        o.align = DWRITE_TEXT_ALIGNMENT_CENTER;
+        c.Text(vm.setup_go, formats_.body13b, go, pal.on_accent, o);
+        y = go.bottom - 18.0f * s;   // no safety line: the height ends at the button
+    } else {
     const float gh = 28.0f * s;
     c.Text(vm.greeting, formats_.greeting, D2D1::RectF(x0, y, x1, y + gh), pal.text);
     y += gh + 6.0f * s;
@@ -518,21 +593,20 @@ void AiPanelView::DrawEmptyState(Compositor* compositor, const AiPanelViewModel&
         if (down) c.dc->SetTransform(saved);
         y = r.bottom + 8.0f * s;
     }
+    }
     // .safe: margin-top 14 (after the card's 8), shield 14, gap 7, 12 px text3.
-    y += 6.0f * s;
-    c.Icon(AiIcon::Shield, x0 + 2.0f * s, y + 2.0f * s, 14.0f * s, pal.text3);
-    c.Text(vm.safe_note, formats_.caption, D2D1::RectF(x0 + 23.0f * s, y, x1, y + 18.0f * s), pal.text3);
+    if (!vm.setup) {
+        y += 6.0f * s;
+        c.Icon(AiIcon::Shield, x0 + 2.0f * s, y + 2.0f * s, 14.0f * s, pal.text3);
+        c.Text(vm.safe_note, formats_.caption, D2D1::RectF(x0 + 23.0f * s, y, x1, y + 18.0f * s), pal.text3);
+    }
     // Height for the wheel (.conv padding-bottom 10) and the overlay bar.
     content_h_ = y + 18.0f * s + 10.0f * s - top;
     const float max_scroll = (std::max)(0.0f, content_h_ - view_h_);
     if (scroll_ > max_scroll) scroll_ = max_scroll;
-    if (max_scroll > 0.5f) {
-        const float track = view_h_ - 8.0f * s;
-        const float thumb = (std::max)(28.0f * s, track * view_h_ / content_h_);
-        const float ty = area.top + 4.0f * s + (track - thumb) * (scroll_ / max_scroll);
-        c.Fill(D2D1::RectF(area.right - 7.0f * s, ty, area.right - 3.0f * s, ty + thumb), 2.0f * s,
-               Alpha(pal.text3, 0.35f));
-    }
+    if (max_scroll > 0.5f)
+        DrawBar(0, D2D1::RectF(area.right - 12.0f * s, area.top + 4.0f * s, area.right - 2.0f * s,
+                               area.top + view_h_ - 4.0f * s), scroll_, view_h_, content_h_);
 }
 
 namespace {
@@ -546,7 +620,9 @@ float InputHeight(const AiPanelViewModel& vm, int input_lines, float s) {
 
 float AiPanelView::ComposerHeight(const AiPanelViewModel& vm, float s) const {
     // padding 10 / 8, context row 24 + 6, input, controls row 32, 1 px borders.
-    return std::round((2.0f + 10.0f + (vm.context_visible ? 30.0f : 0.0f) + 32.0f + 8.0f) * s) + InputHeight(vm, InputLines(vm), s);
+    const float quote = !vm.quote.empty() && rich_ ? rich_->quote_h : 0.0f;
+    return std::round((2.0f + 10.0f + (vm.context_visible ? 30.0f : 0.0f) + 32.0f + 8.0f) * s) + quote +
+           InputHeight(vm, InputLines(vm), s);
 }
 
 void AiPanelView::DrawComposer(Compositor* compositor, const AiPanelViewModel& vm, const Palette& base,
@@ -592,6 +668,7 @@ void AiPanelView::DrawComposer(Compositor* compositor, const AiPanelViewModel& v
         c.Icon(AiIcon::Close, xx, y + 6.5f * s, 11.0f * s, hot ? pal.text : pal.text3);
         y += 30.0f * s;
     }
+    DrawQuoteChip(compositor, vm, pal, left, right, y, s);
     const float input_h = InputHeight(vm, InputLines(vm), s);
     // .cp-in padding 2: the EDIT sits inside; the placeholder is drawn here
     // too, for the frames the EDIT is hidden (opening, model menu).
@@ -710,132 +787,113 @@ void AiPanelView::DrawComposer(Compositor* compositor, const AiPanelViewModel& v
     }
 }
 
-void AiPanelView::DrawModelMenu(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float s,
-                                uint64_t now_ms) {
-    const bool opening = vm.menu_open && !menu_shown_;
-    if (vm.menu_open != menu_shown_) {
-        menu_shown_ = vm.menu_open;
+// 思考强度 popover (after Codex): the level and 「model ›」 on top, ↺ back to
+// the default, the stepped slider (as many stops as the model has), and the
+// level's line under it. A model that is only on or off shows a switch row
+// instead; one that always thinks shows 始终思考 and why, with no control.
+void AiPanelView::DrawEffortMenu(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float s,
+                                 uint64_t now_ms) {
+    const bool levels = vm.effort_mode == AiEffortMode::Levels;
+    const bool toggle = vm.effort_mode == AiEffortMode::Toggle;
+    const bool fixed = vm.effort_mode == AiEffortMode::Fixed;
+    const bool want = vm.menu_open && (fixed || vm.effort_count >= 2);
+    const bool opening = want && !menu_shown_;
+    if (want != menu_shown_) {
+        menu_shown_ = want;
         menu_at_ = now_ms;
     }
     menu_rect_ = {};
-    menu_model_rects_.clear();
-    menu_effort_rects_ = {};
-    menu_manage_ = {};
-    if (!conn_) conn_ = std::make_shared<ConnGeom>();
-    ConnGeom& g = *conn_;
-    g.hits.clear();
-    g.key_place = g.url_place = false;
+    menu_link_ = {};
+    menu_slider_ = {};
+    menu_reset_ = {};
+    toggle_target_ = -1;
+    const int stops = levels ? std::clamp(vm.effort_count, 2, 7) : 0;
+    const int chosen = fixed ? 0 : std::clamp(vm.effort, 0, (levels ? stops : 2) - 1);
+    if (!levels) {
+        slider_stops_ = 0;
+        slider_target_ = -1;
+        slider_anim_ = false;
+        slider_drag_ = false;
+    } else if (opening || stops != slider_stops_ || slider_target_ < 0) {
+        slider_pos_ = static_cast<float>(chosen);
+        slider_target_ = chosen;
+        slider_anim_ = false;
+        slider_drag_ = false;
+    }
+    if (levels) slider_stops_ = stops;
+    if (levels && !slider_drag_) {
+        if (chosen != slider_target_) {   // a key, ↺, or the release's commit
+            slider_from_ = slider_pos_;
+            slider_target_ = chosen;
+            slider_at_ = now_ms;
+            slider_anim_ = animate_;
+            if (!animate_) slider_pos_ = static_cast<float>(chosen);
+        }
+        if (slider_anim_) {
+            constexpr float kSnapMs = 240.0f;
+            const float u = std::clamp(static_cast<float>(now_ms - slider_at_) / kSnapMs, 0.0f, 1.0f);
+            // Ease out with a slight overshoot onto the stop.
+            const float c1 = 1.1f, c3 = c1 + 1.0f, v = u - 1.0f;
+            const float e = 1.0f + c3 * v * v * v + c1 * v * v;
+            slider_pos_ = slider_from_ + (static_cast<float>(slider_target_) - slider_from_) * e;
+            if (u >= 1.0f) {
+                slider_anim_ = false;
+                slider_pos_ = static_cast<float>(slider_target_);
+            } else {
+                decor_ = true;
+            }
+        }
+    }
     const float t = animate_ ? std::clamp(static_cast<float>(now_ms - menu_at_) / static_cast<float>(kMenuMs), 0.0f, 1.0f) : 1.0f;
     const float p = menu_shown_ ? EaseDesign(t) : 1.0f - EaseDesign(t);
-    if (p <= 0.0f) {
-        // Gone: the next opening starts at its own size, as the menu.
-        g.sized = false;
-        g.card = false;
-        g.view.reset();
-        return;
-    }
+    if (p <= 0.0f || (!fixed && vm.effort_count < 2)) return;
     if (t < 1.0f) decor_ = true;
     Ctx c{compositor, compositor->Dc(), brush_, s};
-    // Geometry: width 300, right = button right + 6, bottom = button top - 8.
-    const float w = 300.0f * s;
-    const float pad = 6.0f * s;
-    const float head_h = 25.0f * s;
-    // Model rows: name + line (51), or the name alone for a model Pulse has
-    // no line for (36). A long list scrolls inside 312.
-    const float opt_h = 51.0f * s;
-    const float opt1_h = 36.0f * s;
-    auto row_h = [&](size_t i) { return vm.models[i].detail.empty() ? opt1_h : opt_h; };
-    float list_h = 0.0f, chosen_top = 0.0f, chosen_h = 0.0f;
-    for (size_t i = 0; i < vm.models.size(); ++i) {
-        if (static_cast<int>(i) == vm.model) {
-            chosen_top = list_h;
-            chosen_h = row_h(i);
-        }
-        list_h += row_h(i);
+    // The level under the knob while it is dragged, else the chosen one.
+    const int shown = levels && slider_drag_ ? std::clamp(static_cast<int>(std::lround(slider_pos_)), 0, stops - 1) : chosen;
+    const std::wstring& name = vm.effort_names[static_cast<size_t>(shown)];
+    const std::wstring& detail = vm.effort_details[static_cast<size_t>(shown)];
+
+    // Geometry: width 320; right = button right + 6, bottom = button top - 8.
+    const float w = 320.0f * s;
+    const float pad_x = 16.0f * s;
+    const float top_h = 42.0f * s;        // the level (20) and 「model ›」 (21)
+    const float gap = 6.0f * s;
+    const float slider_h = fluent::StepSliderHeight(s);
+    const float line_h = 16.0f * s;
+    // The line keeps one height for every level, so dragging never resizes.
+    const float text_w = w - 2.0f * pad_x;
+    int lines = 0;
+    const int lined = levels ? stops : toggle ? 2 : 0;   // 始终思考's line sits in its box
+    for (int i = 0; i < lined; ++i) {
+        const std::wstring& d = vm.effort_details[static_cast<size_t>(i)];
+        if (d.empty()) continue;
+        const float dh = c.MeasureWrapped(d, formats_.caption, text_w, line_h);
+        lines = (std::max)(lines, std::clamp(static_cast<int>(std::ceil(dh / line_h - 0.25f)), 1, 3));
     }
-    const float list_box_h = (std::min)(list_h, 312.0f * s);
-    g.menu_scroll_max = list_h - list_box_h;
-    if (opening) g.menu_scroll = chosen_h > 0.0f ? chosen_top + chosen_h * 0.5f - list_box_h * 0.5f : 0.0f;
-    g.menu_scroll = std::clamp(g.menu_scroll, 0.0f, g.menu_scroll_max);
-    const float sep_h = 13.0f * s;
-    const float seg_h = 36.0f * s;
-    const float desc_h = 28.0f * s;
-    const float foot_h = 36.0f * s;
-    const float h = pad * 2 + head_h + list_box_h + sep_h + head_h + seg_h + desc_h + foot_h;
+    const float caption_h = lines > 0 ? 4.0f * s + line_h * static_cast<float>(lines) : 0.0f;
+    // 这个模型始终会思考 / 只能开或关, in the faintest text under the line.
+    float note_h = 0.0f;
+    if (!vm.effort_note.empty()) {
+        const float dh = c.MeasureWrapped(vm.effort_note, formats_.caption, text_w, line_h);
+        note_h = 2.0f * s + line_h * static_cast<float>(std::clamp(static_cast<int>(std::ceil(dh / line_h - 0.25f)), 1, 2));
+    }
+    // The body: the slider, the switch row, or 始终思考's box.
+    const float row_h = 40.0f * s;
+    const float box_pad = 10.0f * s;
+    float body_h = slider_h;
+    if (toggle) body_h = row_h;
+    else if (fixed) {
+        const float dh = c.MeasureWrapped(detail, formats_.caption, text_w - 2.0f * box_pad, line_h);
+        body_h = 2.0f * box_pad +
+                 line_h * static_cast<float>(std::clamp(static_cast<int>(std::ceil(dh / line_h - 0.25f)), 1, 4));
+    }
+    const float h = 10.0f * s + top_h + gap + body_h + caption_h + note_h + 10.0f * s;
     const float anchor = model_button_.right + 6.0f * s;
-    const float bottom0 = model_button_.top - 8.0f * s;
-    // 管理连接: the menu unfolds into the card in place (same corner). The
-    // box eases between the two sizes and follows the card as it grows; the
-    // new content fades in over the move. While the menu fades out the last
-    // card stays.
-    if (menu_shown_) {
-        const bool card = vm.conn != nullptr;
-        if (card) g.view = vm.conn;
-        if (card != g.card) {
-            g.card = card;
-            g.card_scroll = 0.0f;
-            g.content_at = now_ms;
-            g.content = g.sized ? 0.0f : 1.0f;
-        }
-    }
-    if (g.card && !g.view) g.card = false;
-    const float card_w = 340.0f * s;
-    const float target_w = g.card ? card_w : w;
-    float target_h = h;
-    g.card_scroll_max = 0.0f;
-    if (g.card) {
-        // The whole card when it fits between the panel's top and the button;
-        // else its body scrolls (head, foot and a little body stay).
-        const float natural = DrawConnCard(compositor, vm, pal, D2D1::RectF(anchor - card_w, 0.0f, anchor, 0.0f), s, now_ms, false);
-        const float room = (std::max)(bottom0 - panel_rect_.top - 8.0f * s, 180.0f * s);
-        target_h = (std::min)(natural, std::floor(room));
-        g.card_view_h = target_h;
-        g.card_scroll_max = natural - target_h;
-        g.card_scroll = std::clamp(g.card_scroll, 0.0f, g.card_scroll_max);
-    }
-    if (!g.sized || !animate_) {
-        g.w = g.to_w = target_w;
-        g.h = g.to_h = target_h;
-        g.moving = false;
-        g.sized = true;
-        g.content = 1.0f;
-    } else if (std::fabs(target_w - g.to_w) > 0.5f || std::fabs(target_h - g.to_h) > 0.5f) {
-        g.from_w = g.w;
-        g.from_h = g.h;
-        g.to_w = target_w;
-        g.to_h = target_h;
-        g.at = now_ms;
-        g.moving = true;
-    }
-    if (g.moving) {
-        const float mt = static_cast<float>(now_ms - g.at) / static_cast<float>(kMenuMs);
-        if (mt >= 1.0f) {
-            g.w = g.to_w;
-            g.h = g.to_h;
-            g.moving = false;
-        } else {
-            const float e = EaseDesign(mt);
-            g.w = g.from_w + (g.to_w - g.from_w) * e;
-            g.h = g.from_h + (g.to_h - g.from_h) * e;
-        }
-        conv_anim_ = true;
-    }
-    if (g.content < 1.0f) {
-        const float ct = static_cast<float>(now_ms - g.content_at) / static_cast<float>(kMenuMs);
-        g.content = ct >= 1.0f ? 1.0f : EaseDesign(ct);
-        conv_anim_ = true;
-    }
-    // Right-aligned to the model button, but never past the panel's left
-    // edge: in a narrow docked panel the 340 card would leave the window, so
-    // it reaches further right (over the list) instead.
+    const float bottom = model_button_.top - 6.0f * s;
     const float min_left = panel_rect_.left + 8.0f * s;
-    const float right = std::round((std::max)(anchor, min_left + g.w));
-    const float bottom = bottom0;
-    const D2D1_RECT_F box = D2D1::RectF(std::round(right - g.w), std::round(bottom - g.h), right, bottom);
-    // Content keeps its own size, pinned to the box's top right; the box
-    // clips it while it moves.
-    const D2D1_RECT_F m = D2D1::RectF(right - target_w, box.top, right, box.top + target_h);
-    if (vm.menu_open) menu_rect_ = box;
+    const float right = std::round((std::max)(anchor, min_left + w));
+    const D2D1_RECT_F box = D2D1::RectF(std::round(right - w), std::round(bottom - h), right, bottom);
     const D2D1_POINT_2F origin = D2D1::Point2F(box.left + (box.right - box.left) * 0.85f, box.bottom);
     const float k = 0.97f + 0.03f * p;
     D2D1_MATRIX_3X2_F saved;
@@ -844,147 +902,123 @@ void AiPanelView::DrawModelMenu(Compositor* compositor, const AiPanelViewModel& 
     c.dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                                            D2D1::IdentityMatrix(), p, nullptr, D2D1_LAYER_OPTIONS1_NONE),
                     nullptr);
-    const float radius = 14.0f * s;
-    if (g.card) {
-        // .card-form: 0 22 60 rgba(28,40,34,.2), 0 3 10 .08.
-        c.Shadow(box, radius, 48.0f * s, 20.0f * s, pal.shadow);
-        c.Shadow(box, radius, 8.0f * s, 3.0f * s, Alpha(pal.shadow, 0.4f));
-    } else {
-        c.Shadow(box, radius, 40.0f * s, 16.0f * s, pal.shadow);
-    }
+    // The flyout surface of Pulse's menus (radius_flyout 12).
+    const float radius = 12.0f * s;
+    c.Shadow(box, radius, 40.0f * s, 16.0f * s, pal.shadow);
     c.Fill(box, radius, pal.card);
-    ID2D1RoundedRectangleGeometry* clip = nullptr;
-    {
-        ID2D1Factory* factory = nullptr;
-        c.dc->GetFactory(&factory);
-        if (factory) {
-            factory->CreateRoundedRectangleGeometry(D2D1::RoundedRect(box, radius, radius), &clip);
-            factory->Release();
-        }
-    }
-    c.dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                           D2D1::IdentityMatrix(), g.content, nullptr, D2D1_LAYER_OPTIONS1_NONE),
-                    nullptr);
-    if (g.card) {
-        g.rect = box;
-        DrawConnCard(compositor, vm, pal, m, s, now_ms, true);
-        // The fields take their EDITs once nothing moves.
-        if (g.moving || g.content < 1.0f || t < 1.0f || !menu_shown_ || !vm.conn) g.key_place = g.url_place = false;
-        c.dc->PopLayer();
-        if (clip) clip->Release();
-        c.Stroke(box, radius, pal.line);
-        c.dc->PopLayer();
-        c.dc->SetTransform(saved);
-        return;
-    }
-    float y = m.top + pad;
-    const float x0 = m.left + pad, x1 = m.right - pad;
-    c.Text(vm.model_heading, formats_.heading, D2D1::RectF(x0 + 10.0f * s, y + 6.0f * s, x1, y + 21.0f * s), pal.text3);
-    y += head_h;
-    const D2D1_RECT_F list_box = D2D1::RectF(x0, y, x1, y + list_box_h);
-    const bool scrolls = g.menu_scroll_max > 0.0f;
-    if (scrolls) c.dc->PushAxisAlignedClip(list_box, D2D1_ANTIALIAS_MODE_ALIASED);
-    float ry = y - g.menu_scroll;
-    for (size_t i = 0; i < vm.models.size(); ++i) {
-        const float rh = row_h(i);
-        const D2D1_RECT_F r = D2D1::RectF(x0, ry, x1, ry + rh);
-        ry += rh;
-        // Hits only where the row shows.
-        const D2D1_RECT_F shown = D2D1::RectF(r.left, (std::max)(r.top, list_box.top), r.right,
-                                              (std::min)(r.bottom, list_box.bottom));
-        menu_model_rects_.push_back(shown.bottom > shown.top ? shown : D2D1_RECT_F{});
-        if (r.bottom <= list_box.top || r.top >= list_box.bottom) continue;
-        const bool hot = vm.hover.part == AiPanelPart::MenuModel && vm.hover.index == static_cast<int>(i);
-        if (hot) c.Fill(r, 9.0f * s, pal.hover);
-        const float text_right = r.right - (scrolls ? 40.0f : 36.0f) * s;
-        if (vm.models[i].detail.empty()) {
-            c.Text(vm.models[i].name, formats_.body13b, D2D1::RectF(r.left + 10.0f * s, r.top, text_right, r.bottom), pal.text);
-        } else {
-            c.Text(vm.models[i].name, formats_.body13b, D2D1::RectF(r.left + 10.0f * s, r.top + 8.0f * s, text_right,
-                                                                  r.top + 26.0f * s), pal.text);
-            c.Text(vm.models[i].detail, formats_.caption, D2D1::RectF(r.left + 10.0f * s, r.top + 26.0f * s, text_right,
-                                                                    r.top + 43.0f * s), pal.text3);
-        }
-        if (static_cast<int>(i) == vm.model)
-            c.Icon(AiIcon::Check, text_right + 10.0f * s, (r.top + r.bottom) * 0.5f - 8.0f * s, 16.0f * s, pal.accent);
-    }
-    if (scrolls) {
-        // Rows slide under 10 px fades at an edge that has more beyond it.
-        auto fade = [&](float edge, float inner) {
-            const D2D1_COLOR_F solid = pal.card;
-            D2D1_COLOR_F clear = pal.card;
-            clear.a = 0.0f;
-            const D2D1_GRADIENT_STOP stops[] = {{0.0f, solid}, {1.0f, clear}};
-            ID2D1GradientStopCollection* col = nullptr;
-            if (FAILED(c.dc->CreateGradientStopCollection(stops, 2, &col))) return;
-            ID2D1LinearGradientBrush* brush = nullptr;
-            if (SUCCEEDED(c.dc->CreateLinearGradientBrush(
-                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(x0, edge), D2D1::Point2F(x0, inner)), col, &brush))) {
-                c.dc->FillRectangle(D2D1::RectF(x0, (std::min)(edge, inner), x1, (std::max)(edge, inner)), brush);
-                brush->Release();
-            }
-            col->Release();
-        };
-        if (g.menu_scroll > 0.5f) fade(list_box.top, list_box.top + 10.0f * s);
-        if (g.menu_scroll < g.menu_scroll_max - 0.5f) fade(list_box.bottom, list_box.bottom - 10.0f * s);
-        c.dc->PopAxisAlignedClip();
-        // A thin thumb at the right edge, like an overlay scrollbar.
-        const float track = list_box_h - 8.0f * s;
-        const float thumb = (std::max)(24.0f * s, track * list_box_h / list_h);
-        const float top = list_box.top + 4.0f * s + (track - thumb) * (g.menu_scroll / g.menu_scroll_max);
-        c.Fill(D2D1::RectF(x1 - 5.0f * s, top, x1 - 2.0f * s, top + thumb), 1.5f * s, pal.line);
-    }
-    y += list_box_h;
-    c.Fill(D2D1::RectF(x0 + 4.0f * s, y + 6.0f * s, x1 - 4.0f * s, y + 7.0f * s), 0.0f, pal.line2);
-    y += sep_h;
-    c.Text(vm.effort_heading, formats_.heading, D2D1::RectF(x0 + 10.0f * s, y + 6.0f * s, x1, y + 21.0f * s), pal.text3);
-    y += head_h;
-    // Segmented control: margin 2 8 0, padding 3, gap 2, items 28 high.
-    const D2D1_RECT_F seg = D2D1::RectF(x0 + 8.0f * s, y + 2.0f * s, x1 - 8.0f * s, y + 2.0f * s + 34.0f * s);
-    c.Fill(seg, 9.0f * s, pal.hover);
-    const float iw = (seg.right - seg.left - 6.0f * s - 6.0f * s) / 4.0f;
-    for (int i = 0; i < 4; ++i) {
-        const float ix = seg.left + 3.0f * s + static_cast<float>(i) * (iw + 2.0f * s);
-        const D2D1_RECT_F r = D2D1::RectF(ix, seg.top + 3.0f * s, ix + iw, seg.top + 31.0f * s);
-        menu_effort_rects_[static_cast<size_t>(i)] = r;
-        const bool sel = vm.effort == i;
-        const bool hot = vm.hover.part == AiPanelPart::MenuEffort && vm.hover.index == i;
-        if (sel) {
-            c.Shadow(r, 7.0f * s, 3.0f * s, 1.0f * s, Hex(0x000000, 0.12f));
-            c.Fill(r, 7.0f * s, pal.card);
-        }
-        TextOptions o;
-        o.align = DWRITE_TEXT_ALIGNMENT_CENTER;
-        c.Text(vm.effort_names[static_cast<size_t>(i)], sel ? formats_.small125b : formats_.small125, r,
-               sel || hot ? pal.text : pal.text2, o);
-    }
-    y += seg_h;
-    {
-        TextOptions o;
-        o.wrap = true;
-        o.line_height = 17.0f * s;
-        c.Text(vm.effort_detail, formats_.caption, D2D1::RectF(x0 + 10.0f * s, y + 7.0f * s, x1 - 10.0f * s, y + desc_h), pal.text3, o);
-    }
-    y += desc_h;
-    // Footer: border-top line2, margin-top 6, padding 8 10 4.
-    c.Fill(D2D1::RectF(x0, y + 6.0f * s, x1, y + 7.0f * s), 0.0f, pal.line2);
-    const float fy = y + 7.0f * s + 8.0f * s;
-    const float fh = 17.0f * s;
-    c.dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x0 + 10.0f * s + 3.5f * s, fy + fh * 0.5f), 3.5f * s, 3.5f * s),
-                      c.B(vm.connected ? pal.ok : pal.text3));
-    const float mw = c.Measure(vm.manage_text, formats_.small125b);
-    menu_manage_ = D2D1::RectF(x1 - 10.0f * s - mw - 4.0f * s, fy - 3.0f * s, x1 - 6.0f * s, fy + fh + 3.0f * s);
-    c.Text(vm.connection_text, formats_.caption, D2D1::RectF(x0 + 24.0f * s, fy, menu_manage_.left - 8.0f * s, fy + fh), pal.text3);
-    {
-        const bool hot = vm.hover.part == AiPanelPart::MenuManage;
-        D2D1_COLOR_F link = hot ? Mix(pal.accent, pal.text, 0.2f) : pal.accent;
-        c.Text(vm.manage_text, formats_.small125b, D2D1::RectF(menu_manage_.left + 2.0f * s, fy, menu_manage_.right, fy + fh), link);
-    }
-    c.dc->PopLayer();
-    if (clip) clip->Release();
     c.Stroke(box, radius, pal.line);
+
+    const float x0 = box.left + pad_x, x1 = box.right - pad_x;
+    float y = box.top + 10.0f * s;
+    TextOptions center;
+    center.align = DWRITE_TEXT_ALIGNMENT_CENTER;
+    // ↺ on the right; dim (and inert) at the default.
+    const float rb = 26.0f * s;
+    const D2D1_RECT_F reset = D2D1::RectF(x1 - rb + 6.0f * s, y - 2.0f * s, x1 + 6.0f * s, y - 2.0f * s + rb);
+    const bool can_reset = !fixed && shown != std::clamp(vm.effort_default, 0, (levels ? stops : 2) - 1);
+    const bool reset_hot = can_reset && vm.hover.part == AiPanelPart::MenuReset;
+    if (reset_hot) c.Fill(reset, 8.0f * s, vm.pressed.part == AiPanelPart::MenuReset ? Mix(pal.hover, pal.text, 0.06f) : pal.hover);
+    const float icon = 16.0f * s;
+    if (!fixed)   // nothing to go back to
+        c.Icon(AiIcon::Retry, (reset.left + reset.right - icon) * 0.5f, (reset.top + reset.bottom - icon) * 0.5f, icon,
+               !can_reset ? Alpha(pal.text3, 0.45f) : reset_hot ? pal.text : pal.text2);
+    // The level, in the accent.
+    const float side = rb + 6.0f * s;
+    c.Text(name, formats_.num15, D2D1::RectF(x0 + side, y, x1 - side, y + 20.0f * s), pal.accent, center);
+    // 「model ›」: opens the model list.
+    {
+        const float chev = 12.0f * s;
+        const float max_tw = (x1 - x0) - 2.0f * side - chev - 22.0f * s;
+        const float tw = (std::min)(c.Measure(vm.model_label, formats_.body13), max_tw);
+        const float lw = tw + 4.0f * s + chev + 18.0f * s;
+        const float cx = (x0 + x1) * 0.5f;
+        const D2D1_RECT_F link = D2D1::RectF(std::round(cx - lw * 0.5f), y + 21.0f * s, std::round(cx + lw * 0.5f),
+                                             y + 42.0f * s);
+        const bool hot = vm.hover.part == AiPanelPart::MenuModel;
+        if (hot) c.Fill(link, (link.bottom - link.top) * 0.5f, vm.pressed.part == AiPanelPart::MenuModel
+                                                                    ? Mix(pal.hover, pal.text, 0.06f) : pal.hover);
+        const float tx = link.left + 9.0f * s;
+        c.Text(vm.model_label, formats_.body13, D2D1::RectF(tx, link.top, tx + tw + 1.0f * s, link.bottom),
+               hot ? pal.text : pal.text2);
+        c.Icon(AiIcon::ChevronRight, tx + tw + 4.0f * s, (link.top + link.bottom - chev) * 0.5f, chev,
+               hot ? pal.text2 : pal.text3);
+        if (vm.menu_open) menu_link_ = link;
+    }
+    y += top_h + gap;
+    TextOptions wrap = center;
+    wrap.wrap = true;
+    wrap.center_v = false;
+    wrap.line_height = line_h;
+    // The body.
+    D2D1_RECT_F control = D2D1::RectF(x0, y, x1, y + body_h);
+    const bool body_hot = vm.hover.part == AiPanelPart::MenuSlider;
+    const D2D1_COLOR_F well = Mix(pal.card, pal.text, 0.035f);
+    if (levels) {
+        fluent::StepSliderSpec spec;
+        spec.bounds = control;
+        spec.stops = stops;
+        spec.position = slider_pos_;
+        spec.state.hovered = body_hot;
+        spec.state.pressed = slider_drag_;
+        bar_painter_.DrawStepSlider(spec);
+        control = D2D1::RectF(control.left, control.top - 3.0f * s, control.right, control.bottom + 3.0f * s);
+    } else if (toggle) {
+        // 深度思考 and the shared switch; the whole row flips it.
+        c.Fill(control, 8.0f * s, body_hot ? Mix(well, pal.text, vm.pressed.part == AiPanelPart::MenuSlider ? 0.06f : 0.03f) : well);
+        const float sw = 42.0f * s, sh = 32.0f * s;
+        c.Text(vm.effort_toggle_label, formats_.body13,
+               D2D1::RectF(control.left + 12.0f * s, control.top, control.right - sw - 16.0f * s, control.bottom), pal.text);
+        fluent::ControlState state{};
+        state.checked = chosen > 0;
+        state.hovered = body_hot;
+        const float sy = std::round((control.top + control.bottom - sh) * 0.5f);
+        bar_painter_.DrawSwitch(D2D1::RectF(control.right - 10.0f * s - sw, sy, control.right - 10.0f * s, sy + sh), L"", state);
+        toggle_target_ = chosen > 0 ? 0 : 1;
+    } else {
+        c.Fill(control, 8.0f * s, well);
+        TextOptions boxed = wrap;
+        c.Text(detail, formats_.caption,
+               D2D1::RectF(control.left + box_pad, control.top + box_pad, control.right - box_pad, control.bottom - box_pad),
+               pal.text2, boxed);
+    }
+    y += body_h;
+    if (lines > 0 && !detail.empty())
+        c.Text(detail, formats_.caption, D2D1::RectF(x0, y + 4.0f * s, x1, y + caption_h), pal.text3, wrap);
+    y += caption_h;
+    if (note_h > 0.0f) c.Text(vm.effort_note, formats_.caption, D2D1::RectF(x0, y + 2.0f * s, x1, y + note_h), pal.text3, wrap);
     c.dc->PopLayer();
     c.dc->SetTransform(saved);
+    if (vm.menu_open) {
+        menu_rect_ = box;
+        if (!fixed) menu_slider_ = control;
+        if (can_reset) menu_reset_ = reset;
+    }
+}
+
+bool AiPanelView::BeginSliderDrag(float x, float y) {
+    if (!In(menu_rect_, x, y) || !In(menu_slider_, x, y) || slider_stops_ < 2) return false;
+    slider_drag_ = true;
+    slider_anim_ = false;
+    slider_pos_ = fluent::StepSliderPositionAt(menu_slider_, slider_stops_, x, bar_scale_);
+    return true;
+}
+
+int AiPanelView::DragSlider(float x) {
+    if (!slider_drag_) return -1;
+    slider_pos_ = fluent::StepSliderPositionAt(menu_slider_, slider_stops_, x, bar_scale_);
+    return static_cast<int>(std::lround(slider_pos_));
+}
+
+int AiPanelView::EndSliderDrag() {
+    if (!slider_drag_) return -1;
+    slider_drag_ = false;
+    const int snapped = std::clamp(static_cast<int>(std::lround(slider_pos_)), 0, (std::max)(slider_stops_ - 1, 0));
+    slider_from_ = slider_pos_;
+    slider_target_ = snapped;
+    slider_at_ = motion::NowMs();
+    slider_anim_ = animate_;
+    if (!animate_) slider_pos_ = static_cast<float>(snapped);
+    return snapped;
 }
 
 bool AiPanelView::EnsureBrush(ID2D1DeviceContext* dc) {
@@ -1017,7 +1051,7 @@ void AiPanelView::DrawStatusChip(Compositor* compositor, const Theme& theme, con
     const bool busy = chip.state == AiChipState::Busy;
     const bool waiting = chip.state == AiChipState::Waiting;
     const bool done = chip.state == AiChipState::Done;
-    // A failed turn (plans/ai/Pulse_AI助手_错误与快捷键.html .chip.e / .chip.w).
+    // A failed turn.
     const bool failed = chip.state == AiChipState::Error;
     const bool unfinished = chip.state == AiChipState::Warn;
     const bool anim = motion::SystemAnimationsEnabled();
@@ -1099,31 +1133,33 @@ AiPanelHit AiPanelView::HitTest(float x, float y) const {
     AiPanelHit hit;
     if (!drawn_ || !open_) return hit;
     if (const AiPanelHit v = VoiceHitTest(x, y); v.part != AiPanelPart::None) return v;
-    if (In(menu_rect_, x, y) && conn_ && conn_->card) {
-        for (auto it = conn_->hits.rbegin(); it != conn_->hits.rend(); ++it)
-            if (In(it->rect, x, y)) return {it->part, -1};
-        return {AiPanelPart::ConnCard, -1};
-    }
     if (In(menu_rect_, x, y)) {
         hit.part = AiPanelPart::Menu;
-        for (size_t i = 0; i < menu_model_rects_.size(); ++i)
-            if (In(menu_model_rects_[i], x, y)) return {AiPanelPart::MenuModel, static_cast<int>(i)};
-        for (size_t i = 0; i < menu_effort_rects_.size(); ++i)
-            if (In(menu_effort_rects_[i], x, y)) return {AiPanelPart::MenuEffort, static_cast<int>(i)};
-        if (In(menu_manage_, x, y)) return {AiPanelPart::MenuManage, -1};
+        if (In(menu_link_, x, y)) return {AiPanelPart::MenuModel, -1};
+        if (In(menu_reset_, x, y)) return {AiPanelPart::MenuReset, -1};
+        if (In(menu_slider_, x, y)) {
+            if (slider_stops_ < 2) return {AiPanelPart::MenuSlider, toggle_target_};   // the switch row
+            const float at = fluent::StepSliderPositionAt(menu_slider_, slider_stops_, x, bar_scale_);
+            return {AiPanelPart::MenuSlider, static_cast<int>(std::lround(at))};
+        }
         return hit;
     }
     if (!In(panel_rect_, x, y)) return hit;
+    if (In(hist_button_, x, y)) return {AiPanelPart::History, -1};
     if (In(new_button_, x, y)) return {AiPanelPart::NewChat, -1};
+    if (hist_k_ > 0.001f && In(hist_rect_, x, y)) return HistoryHitTest(x, y);
     if (In(mode_button_, x, y)) return {AiPanelPart::Mode, -1};
     if (In(close_button_, x, y)) return {AiPanelPart::Close, -1};
+    if (jump_shown_ && In(jump_rect_, x, y)) return {AiPanelPart::JumpLatest, -1};
     if (In(conversation_rect_, x, y)) {
+        if (In(go_settings_, x, y)) return {AiPanelPart::GoSettings, -1};
         for (size_t i = 0; i < suggestion_rects_.size(); ++i)
             if (In(suggestion_rects_[i], x, y)) return {AiPanelPart::Suggestion, static_cast<int>(i)};
         for (auto it = conv_hits_.rbegin(); it != conv_hits_.rend(); ++it)
             if (In(it->rect, x, y)) return it->hit;
         return {AiPanelPart::Conversation, -1};
     }
+    if (In(quote_remove_, x, y)) return {AiPanelPart::QuoteRemove, -1};
     if (In(context_remove_, x, y)) return {AiPanelPart::ContextRemove, -1};
     if (In(context_chip_, x, y)) return {AiPanelPart::ContextChip, -1};
     if (In(add_files_, x, y)) return {AiPanelPart::AddFiles, -1};
@@ -1133,6 +1169,88 @@ AiPanelHit AiPanelView::HitTest(float x, float y) const {
     if (In(send_button_, x, y)) return {AiPanelPart::Send, -1};
     if (In(input_rect_, x, y)) return {AiPanelPart::Input, -1};
     return {AiPanelPart::Panel, -1};
+}
+
+void AiPanelView::RevealTurnEdit() {
+    if (turn_edit_rect_.bottom <= turn_edit_rect_.top) return;
+    const float pad = 12.0f * bar_scale_;
+    if (turn_edit_rect_.top < conversation_rect_.top + pad) ScrollBy(turn_edit_rect_.top - conversation_rect_.top - pad);
+    else if (turn_edit_rect_.bottom > conversation_rect_.bottom - pad) ScrollBy(turn_edit_rect_.bottom - conversation_rect_.bottom + pad + 68.0f * bar_scale_);
+}
+
+D2D1_RECT_F AiPanelView::ConvHitRect(AiPanelHit hit) const {
+    for (const ConvHit& h : conv_hits_)
+        if (h.hit == hit) return h.rect;
+    return {};
+}
+
+int AiPanelView::UserTurnAt(float x, float y) const {
+    if (!drawn_ || !open_ || !In(conversation_rect_, x, y)) return -1;
+    for (const auto& [r, block] : turn_rects_)
+        if (In(r, x, y)) return block;
+    return -1;
+}
+
+void AiPanelView::DrawBar(int which, const D2D1_RECT_F& viewport, float offset, float view, float content) {
+    Bar& b = bars_[static_cast<size_t>(which)];
+    // Thin at rest, full width with its track under the pointer or a drag.
+    b.fade.KeepVisible(true);
+    b.fade.SetHot(scroll_drag_ == which + 1 || scroll_hot_ == which + 1, bar_now_);
+    b.fade.Tick(bar_now_);
+    if (b.fade.Moving(bar_now_)) conv_anim_ = true;
+    b.spec.viewport = viewport;
+    b.spec.offset = offset;
+    b.spec.viewport_extent = view;
+    b.spec.content_extent = content;
+    b.spec.expand_progress = b.fade.Expand();
+    b.spec.opacity = b.fade.Opacity();
+    b.spec.enabled = true;
+    b.drawn = true;
+    bar_painter_.DrawScrollbar(b.spec);
+}
+
+int AiPanelView::BarAt(float x, float y) const {
+    auto in = [&](const D2D1_RECT_F& r) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; };
+    if (in(menu_rect_) || in(mic_menu_)) return 0;   // a menu covers the conversation there
+    if (bars_[0].drawn && fluent::ScrollbarHitTest(bars_[0].spec, x, y)) return 1;
+    return 0;
+}
+
+bool AiPanelView::BeginScrollDrag(float x, float y) {
+    const int which = BarAt(x, y);
+    if (which == 0) return false;
+    const Bar& b = bars_[static_cast<size_t>(which - 1)];
+    const D2D1_RECT_F thumb = fluent::ScrollbarThumbRect(b.spec, bar_scale_);
+    drag_grab_ = fluent::ScrollbarGrabOffset(thumb.top, thumb.bottom - thumb.top, y);
+    scroll_drag_ = which;
+    scroll_hot_ = which;
+    DragScroll(y);
+    return true;
+}
+
+bool AiPanelView::DragScroll(float y) {
+    if (scroll_drag_ == 0) return false;
+    const Bar& b = bars_[static_cast<size_t>(scroll_drag_ - 1)];
+    if (!b.drawn) {
+        scroll_drag_ = 0;   // its view went away (the menu closed)
+        return false;
+    }
+    const D2D1_RECT_F thumb = fluent::ScrollbarThumbRect(b.spec, bar_scale_);
+    const float max = (std::max)(0.0f, b.spec.content_extent - b.spec.viewport_extent);
+    const float v = fluent::ScrollbarDragOffset(b.spec.viewport.top, b.spec.viewport.bottom - b.spec.viewport.top,
+                                                thumb.bottom - thumb.top, max, y, drag_grab_);
+    if (std::abs(v - scroll_) < 0.01f && !scroll_anim_) return false;
+    scroll_ = v;
+    scroll_anim_ = false;
+    follow_ = v >= max - 1.0f;
+    return true;
+}
+
+bool AiPanelView::SetScrollHot(float x, float y) {
+    const int hot = scroll_drag_ != 0 ? scroll_drag_ : BarAt(x, y);
+    if (hot == scroll_hot_) return false;
+    scroll_hot_ = hot;
+    return true;
 }
 
 bool AiPanelView::Contains(float x, float y) const {

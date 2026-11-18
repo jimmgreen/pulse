@@ -14,6 +14,8 @@ namespace pulse::app::startup_trace {
 // `label` must be a string literal. A label repeats at most three times
 // (frame #1..#3); later calls with it are dropped.
 void Mark(const char* label) noexcept;
+// Latest cumulative diagnostic value; label must be a string literal.
+void Counter(const char* label, double value) noexcept;
 
 // Writes the trace `delay_ms` after this call, from a timer on `hwnd`'s
 // thread, so work that finishes just after the deferred startup is included.

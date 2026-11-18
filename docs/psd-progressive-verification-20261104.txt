@@ -1,0 +1,72 @@
+PSD/PSB progressive grid thumbnails -- 2026-11-04
+
+Behavior
+The embedded JPEG remains the quick first image for large documents. A
+separate low-priority request decodes the merged composite and replaces the
+first image. The response identifies an embedded result explicitly; a
+fallback JPEG is never persisted as a successful refinement. Successful
+refinement is persisted even when decoding was below the usual cache-cost
+threshold. Legacy undersized disk entries also trigger refinement.
+
+Only grid requests qualify. Direct preview, document image sessions and
+hover cards retain their existing behavior. A failed refinement preserves
+the first image without an immediate retry loop. Cancellation keeps the
+need-to-refine state so painting the item again can resume the upgrade.
+
+At most one refinement runs per cache; other initial thumbnail requests
+remain parallel. This is a conservative I/O/scheduling bound, not a proven
+optimal concurrency number for every machine. One/two-lane pools can still
+wait for the current bounded decode. It is not evidence establishing the
+cause of a particular user's UI stall.
+
+PSD/PSB grid thumbnails now request the actual default-application icon.
+After resolution confirms no icon is available, a PSD/PSB format chip is
+shown instead. A pending lookup is not treated as missing. Ordinary photo
+badge policy is unchanged.
+
+Diagnostics
+psd_refinement records a path hash, source/request/result edges, elapsed
+time and success/embedded-fallback/decode-error/cancelled/stale outcome.
+It does not record the plaintext file path. The embedded-fallback outcome
+does not distinguish every internal composite decoder failure reason.
+
+Verification
+1. pulse_preview_data_boundaries_test --psd-progressive: 7 PASS.
+   Generated 11648x8736 PSD/PSB with a 160x120 embedded JPEG. The composite
+   is deliberately a different color to detect accidental JPEG upscaling.
+   Verified 512x384 composite, embedded-origin flag, corrupt-composite
+   fallback, PSB, and fixture cleanup. Log: bench_data/psd-decode-test.log.
+   The recorded run occurred alongside compilation (16 ms first pass,
+   1688 ms composite); these are not an isolated throughput benchmark.
+2. pulse_thumbnail_cache_unit_test --psd-progressive
+   bench_data/preview-data-21188-632036937/progressive.psd: 20 PASS.
+   Includes real preview-host cold and legacy-cache paths, first-image
+   visibility, actual composite pixels, persistence, failure preservation,
+   stale generation, return-to-view scheduling via the production draw
+   path, and refinement concurrency/initial-request scheduling.
+   Log: bench_data/psd-cache-test.log.
+3. pulse_open_with_icons_test: 28 PASS (badge worker/caching tests).
+
+Build / delivery status
+The preview host, thumbnail-cache test and picker UI DLL built successfully.
+The affected main UI translation units compiled, but the complete main app
+build remains blocked by the separate extension integration currently in
+the working tree. src/extension_host/isolation.cpp lines 197 and 200 fail
+with C2065 for PROCESS_CREATION_CHILD_PROCESS_RESTRICTED and
+PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY under this build configuration.
+Log: bench_data/psd-final-retry-build.log. The earlier main link also lacked
+RunIsolatedScript before the concurrently updated CMake configuration added
+that implementation. No extension implementation was changed for this task.
+
+Pulse.ExtensionHost.exe is not currently listed in release_payload.ps1 or
+the installer payload list, although the updated main target depends on it.
+No new installer was produced or installed. Reconcile that separate build
+and packaging work before creating a release of the entire working tree.
+
+Limits
+The reporting user's original PSD was unavailable; generated fixtures were
+requested by the user. No computer-use automation was used. The new format
+chip has layout-bound checks but has not received a production UI screenshot
+review. This change does not promise every PSD can provide a full composite:
+unsupported, missing, corrupt or resource-limited composites retain the
+embedded first image.

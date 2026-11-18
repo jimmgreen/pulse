@@ -1,8 +1,11 @@
+﻿#include "../common/volume_path.h"
 // Keep MF header feature gates consistent with the Windows 8.1 app target.
 // The project NTDDI value is newer than WINVER in current Windows SDK headers.
 #undef NTDDI_VERSION
 #define NTDDI_VERSION 0x06030000
 #include "video_preview.h"
+#include "preview_resource_budget.h"
+#include "../common/runtime_log.h"
 #include "../common/path_utils.h"
 #include "../common/preview_packs.h"
 #include "ffmpeg_playback.h"
@@ -115,7 +118,13 @@ CodecInfo DescribeCodec(const GUID& subtype) {
 
 // True when the file has a video track that no installed decoder (software,
 // hardware or Store extension) accepts. Everything is loaded on demand.
-bool MissingVideoDecoder(const std::wstring& path, CodecInfo& info) {
+struct NativeProbe {
+    HRESULT result = HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
+    GUID subtype{};
+    bool subtype_known = false;
+    UINT32 decoders = 0;
+};
+bool MissingVideoDecoder(const std::wstring& path, CodecInfo& info, NativeProbe& probe) {
     HMODULE plat = LoadLibraryExW(L"mfplat.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     HMODULE readwrite = LoadLibraryExW(L"mfreadwrite.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     bool missing = false;
@@ -131,20 +140,23 @@ bool MissingVideoDecoder(const std::wstring& path, CodecInfo& info) {
         const auto create = reinterpret_cast<CreateReader>(
             GetProcAddress(readwrite, "MFCreateSourceReaderFromURL"));
         if (startup && shutdown && enumerate && create &&
-            SUCCEEDED(startup(MF_VERSION, MFSTARTUP_LITE))) {
+            SUCCEEDED(probe.result = startup(MF_VERSION, MFSTARTUP_LITE))) {
             {
                 ComPtr<IMFSourceReader> reader;
                 ComPtr<IMFMediaType> type;
                 GUID subtype{};
-                if (SUCCEEDED(create(path.c_str(), nullptr, &reader)) &&
-                    SUCCEEDED(reader->GetNativeMediaType(
+                if (SUCCEEDED(probe.result = create(path.c_str(), nullptr, &reader)) &&
+                    SUCCEEDED(probe.result = reader->GetNativeMediaType(
                         static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, &type)) &&
-                    SUCCEEDED(type->GetGUID(MF_MT_SUBTYPE, &subtype))) {
+                    SUCCEEDED(probe.result = type->GetGUID(MF_MT_SUBTYPE, &subtype))) {
+                    probe.subtype = subtype;
+                    probe.subtype_known = true;
                     const MFT_REGISTER_TYPE_INFO input{MFMediaType_Video, subtype};
                     IMFActivate** found = nullptr;
                     UINT32 count = 0;
-                    if (SUCCEEDED(enumerate(MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_ALL, &input,
+                    if (SUCCEEDED(probe.result = enumerate(MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_ALL, &input,
                                             nullptr, &found, &count))) {
+                        probe.decoders = count;
                         missing = count == 0;
                         for (UINT32 i = 0; i < count; ++i)
                             if (found[i]) found[i]->Release();
@@ -163,6 +175,12 @@ bool MissingVideoDecoder(const std::wstring& path, CodecInfo& info) {
 } // namespace
 
 struct VideoPreview::Shared {
+    const uint64_t session = diagnostics::runtime::NextId();
+    bool tracks_dirty = false;
+    bool enable_track_playback = false;
+    int64_t ffmpeg_resume_position = 0;
+    int ffmpeg_resume_audio = 0;
+    int requested_audio = -1, requested_subtitle = -1;
     HANDLE wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     ~Shared() { if (wake) CloseHandle(wake); }
     void Wake() { if (wake) SetEvent(wake); }
@@ -170,6 +188,9 @@ struct VideoPreview::Shared {
     State snapshot;
     std::atomic<bool> stop{false};
     std::atomic<bool> finished{false};
+    std::wstring path;
+    std::promise<void> released;
+    std::shared_future<void> release_done = released.get_future().share();
     std::atomic<bool> repaint{true};
     HWND child = nullptr;
     bool card = false;        // set before the player thread starts (Open)
@@ -285,6 +306,15 @@ LRESULT CALLBACK VideoPreview::VideoProc(HWND hwnd, UINT message, WPARAM wparam,
 
 void VideoPreview::Open(HWND owner, const std::wstring& path, bool card) {
     Reset();
+    auto lease = VideoWorkerBudget().TryAcquire();
+    if (!lease) {
+        state_ = std::make_shared<Shared>();
+        state_->path = path;
+        state_->snapshot.error = HRESULT_FROM_WIN32(ERROR_BUSY);
+        state_->finished = true;
+        state_->released.set_value();
+        return;
+    }
     static std::once_flag registered;
     std::call_once(registered, [] {
         WNDCLASSW wc{};
@@ -298,22 +328,28 @@ void VideoPreview::Open(HWND owner, const std::wstring& path, bool card) {
     child_ = CreateWindowExW(0, kVideoClass, L"", WS_CHILD | WS_CLIPSIBLINGS,
         0, 0, 1, 1, owner, nullptr, GetModuleHandleW(nullptr), nullptr);
     state_ = std::make_shared<Shared>();
+    state_->snapshot.opening = true;
+    state_->path = path;
     state_->child = child_;
     state_->card = card;
     if (card) state_->snapshot.muted = true;
-    if (!child_) { state_->snapshot.error = HRESULT_FROM_WIN32(GetLastError()); return; }
+    if (!child_) { state_->snapshot.error = HRESULT_FROM_WIN32(GetLastError()); state_->finished = true; state_->released.set_value(); return; }
     SetWindowLongPtrW(child_, GWLP_USERDATA,
         reinterpret_cast<LONG_PTR>(new std::shared_ptr<Shared>(state_)));
     try {
-        std::thread(Run, state_, path).detach();
+        std::thread([state = state_, path, lease = std::move(lease)]() mutable {
+            Run(std::move(state), path);
+        }).detach();
     } catch (...) {
         state_->snapshot.error = E_OUTOFMEMORY;
         state_->finished.store(true);
+        state_->released.set_value();
     }
 }
 
 void VideoPreview::Reset() {
-    if (state_) { state_->stop.store(true); state_->Wake(); }
+    std::erase_if(retired_, [](const auto& weak) { return weak.expired(); });
+    if (state_) { state_->stop.store(true); state_->Wake(); retired_.push_back(state_); }
     if (child_) {
         ShowWindow(child_, SW_HIDE);
         // Retire the render target only after MFPlay has released it. The child
@@ -322,16 +358,40 @@ void VideoPreview::Reset() {
         child_ = nullptr;
     }
     state_.reset();
+    layout_valid_ = false;
     region_size_ = {};
     region_radius_ = 0;
+}
+
+std::vector<std::shared_future<void>> VideoPreview::SuspendVolume(const std::wstring& root) {
+    if (state_ && path::OnVolume(state_->path, root)) Reset();
+    std::vector<std::shared_future<void>> pending;
+    std::erase_if(retired_, [&](const auto& weak) {
+        const auto state = weak.lock();
+        if (!state) return true;
+        if (path::OnVolume(state->path, root)) {
+            state->stop = true;
+            state->Wake();
+            pending.push_back(state->release_done);
+        }
+        return state->finished.load();
+    });
+    return pending;
 }
 
 void VideoPreview::Layout(const RECT& bounds, bool visible, int corner_radius) {
     if (!child_) return;
     const LONG width = (std::max)(1L, bounds.right - bounds.left);
     const LONG height = (std::max)(1L, bounds.bottom - bounds.top);
-    SetWindowPos(child_, nullptr, bounds.left, bounds.top, width, height,
-        SWP_NOACTIVATE | SWP_NOZORDER | (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+    const RECT normalized{bounds.left, bounds.top, bounds.left + width, bounds.top + height};
+    if (!layout_valid_ || !EqualRect(&normalized, &layout_bounds_) || visible != layout_visible_) {
+        if (SetWindowPos(child_, nullptr, bounds.left, bounds.top, width, height,
+            SWP_NOACTIVATE | SWP_NOZORDER | (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW))) {
+            layout_bounds_ = normalized;
+            layout_visible_ = visible;
+            layout_valid_ = true;
+        }
+    }
     if (width != region_size_.cx || height != region_size_.cy || corner_radius != region_radius_) {
         if (state_) state_->Wake();
         region_size_ = SIZE{width, height};
@@ -400,6 +460,35 @@ void VideoPreview::SetRate(float rate) {
     state_->snapshot.rate = std::clamp(rate, 0.25f, 4.0f);
     state_->audio_dirty = true;
 }
+void VideoPreview::EnableTrackPlayback() {
+    if (!state_) return;
+    std::lock_guard lock(state_->mutex);
+    if (!state_->snapshot.ffmpeg_available || state_->snapshot.ffmpeg || !state_->snapshot.ready) return;
+    state_->enable_track_playback = true;
+    state_->snapshot.opening = true;
+    state_->Wake();
+}
+void VideoPreview::SelectAudioTrack(int id) {
+    if (!state_) return;
+    std::lock_guard lock(state_->mutex);
+    const auto& s = state_->snapshot;
+    if (!s.can_select_audio || !std::any_of(s.audio_tracks.begin(), s.audio_tracks.end(),
+        [id](const Track& t) { return t.id == id && t.supported; })) return;
+    state_->requested_audio = id;
+    state_->tracks_dirty = true;
+    state_->Wake();
+}
+void VideoPreview::SelectSubtitleTrack(int id) {
+    if (!state_) return;
+    std::lock_guard lock(state_->mutex);
+    const auto& s = state_->snapshot;
+    if (!s.can_select_subtitle || (id != -1 && !std::any_of(s.subtitle_tracks.begin(), s.subtitle_tracks.end(),
+        [id](const Track& t) { return t.id == id && t.supported; }))) return;
+    state_->requested_subtitle = id;
+    state_->tracks_dirty = true;
+    state_->Wake();
+}
+
 void VideoPreview::Step() {
     if (!state_) return;
     struct Notify { Shared* state; ~Notify() { state->Wake(); } } notify{state_.get()};
@@ -411,20 +500,37 @@ void VideoPreview::Step() {
     state_->snapshot.control_error = S_OK;
 }
 
+#ifdef PULSE_VIDEO_PREVIEW_TESTING
+void (*g_video_preview_open_for_test)() = nullptr;
+#endif
+
 void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     struct Finish {
         std::shared_ptr<Shared> state;
         ~Finish() {
+            diagnostics::runtime::Event("playback_close", {{"session", state->session}, {"cancelled", state->stop.load()}});
+            {
+                std::lock_guard lock(state->mutex);
+                state->snapshot.opening = false;
+            }
             state->finished.store(true);
+            state->released.set_value();
             if (state->stop.load())
                 PostMessageW(state->child, kRetireVideo, 0, reinterpret_cast<LPARAM>(state.get()));
         }
     } finish{state};
+#ifdef PULSE_VIDEO_PREVIEW_TESTING
+    if (g_video_preview_open_for_test) { g_video_preview_open_for_test(); return; }
+#endif
+    const ULONGLONG opened_at = GetTickCount64();
+    diagnostics::runtime::Event("playback_open", {{"session", state->session},
+        {"remote", path.rfind(L"\\\\", 0) == 0}, {"card", state->card}});
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     HMODULE library = nullptr;
     ComPtr<IMFPMediaPlayer> player;
     ComPtr<Events> events;
     auto fail = [&](HRESULT hr) {
+        diagnostics::runtime::Event("playback_error", {{"session", state->session}, {"hr", static_cast<uint32_t>(hr)}}, diagnostics::runtime::Level::Warning);
         std::lock_guard lock(state->mutex);
         state->snapshot.error = hr;
         state->snapshot.ready = false;
@@ -435,18 +541,39 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     };
     if (FAILED(com)) { fail(com); return; }
     if (!IsAudio(path) && !state->stop.load()) {
+        const ULONGLONG probe_started = GetTickCount64();
         CodecInfo codec;
-        if (MissingVideoDecoder(pulse::path::StripExtendedPathPrefix(path), codec)) {
+        NativeProbe probe;
+        const bool missing = MissingVideoDecoder(pulse::path::StripExtendedPathPrefix(path), codec, probe);
+        if (missing) {
             std::lock_guard lock(state->mutex);
             state->snapshot.missing_decoder = true;
             state->snapshot.codec = codec.short_name;
             state->snapshot.codec_name = codec.name;
             state->snapshot.store_id = codec.store;
         }
+        uint64_t subtype_low = 0, subtype_high = 0;
+        memcpy(&subtype_low, &probe.subtype, sizeof(subtype_low));
+        memcpy(&subtype_high, reinterpret_cast<const BYTE*>(&probe.subtype) + sizeof(subtype_low), sizeof(subtype_high));
+        diagnostics::runtime::Event("playback_native_probe", {{"session", state->session},
+            {"elapsed_ms", GetTickCount64() - probe_started}, {"probe_hr", static_cast<uint32_t>(probe.result)},
+            {"subtype_known", probe.subtype_known}, {"subtype_low", subtype_low}, {"subtype_high", subtype_high},
+            {"decoders", probe.decoders}, {"missing_decoder", missing}},
+            FAILED(probe.result) ? diagnostics::runtime::Level::Warning : diagnostics::runtime::Level::Info);
     }
     // The FFmpeg preview pack takes over what Media Foundation cannot play:
     // containers it does not know, and videos without an installed decoder.
     const std::wstring pack_ffmpeg = packs::PackToolPath(packs::PackId::Media, L"ffmpeg.exe");
+    const ULONGLONG capability_start = GetTickCount64();
+    const bool subtitles_available = !pack_ffmpeg.empty() && FfmpegSubtitleFilters(pack_ffmpeg, &state->stop);
+    if (!pack_ffmpeg.empty()) diagnostics::runtime::Event("playback_pack_capability", {{"session", state->session},
+        {"subtitle_filters", subtitles_available}, {"elapsed_ms", GetTickCount64() - capability_start},
+        {"cancelled", state->stop.load()}});
+    {
+        std::lock_guard lock(state->mutex);
+        state->snapshot.ffmpeg_subtitles_available = subtitles_available;
+        state->snapshot.ffmpeg_available = !pack_ffmpeg.empty();
+    }
     const std::wstring ext = LowerExtension(path);
     const bool mf_format = NativeExtension(ext);
     // MPEG program streams: Media Foundation runs the clock and the audio but
@@ -484,6 +611,10 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     bool operation_error = false;
     uint32_t stepped = 0;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    bool switch_backend = false;
+    bool logged_ready = false;
+    int64_t last_position = -1;
+    ULONGLONG last_progress = GetTickCount64(), last_stall = last_progress;
     while (SUCCEEDED(hr) && player && !state->stop.load()) {
         for (const auto& event : events->Take()) {
             if (FAILED(event.error)) {
@@ -492,6 +623,7 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
                 positioning = false;
                 operation_error = true;
                 std::lock_guard lock(state->mutex);
+                diagnostics::runtime::Event("playback_control_error", {{"session", state->session}, {"hr", static_cast<uint32_t>(event.error)}}, diagnostics::runtime::Level::Warning);
                 state->snapshot.control_error = event.error;
                 state->playing = false;
                 state->steps = 0;
@@ -509,7 +641,50 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
                 if (SUCCEEDED(player->GetMediaItem(&item))) item->GetCharacteristics(&flags);
                 SIZE native{}, aspect{};
                 player->GetNativeVideoSize(&native, &aspect);
+                std::vector<Track> audio_tracks, subtitle_tracks;
+                int selected = -1;
+                DWORD count = 0;
+                if (item && SUCCEEDED(item->GetNumberOfStreams(&count))) {
+                    for (DWORD index = 0; index < (std::min)(count, 128UL); ++index) {
+                        PROPVARIANT type{};
+                        if (SUCCEEDED(item->GetStreamAttribute(index, MF_MT_MAJOR_TYPE, &type)) &&
+                            type.vt == VT_CLSID && type.puuid) {
+                            if (*type.puuid == MFMediaType_Audio) {
+                                PROPVARIANT subtype{};
+                                const HRESULT subtype_hr = item->GetStreamAttribute(index, MF_MT_SUBTYPE, &subtype);
+                                const bool known = SUCCEEDED(subtype_hr) && subtype.vt == VT_CLSID && subtype.puuid;
+                                diagnostics::runtime::Event("playback_native_audio_stream", {{"session", state->session},
+                                    {"index", index}, {"subtype_known", known}, {"hr", static_cast<uint32_t>(subtype_hr)},
+                                    {"subtype_data1", known ? subtype.puuid->Data1 : 0}});
+                                PropVariantClear(&subtype);
+                                BOOL enabled = FALSE;
+                                item->GetStreamSelection(index, &enabled);
+                                if (enabled) selected = static_cast<int>(index);
+                                std::wstring label = std::to_wstring(audio_tracks.size() + 1);
+                                PROPVARIANT language{};
+                                if (SUCCEEDED(item->GetStreamAttribute(index, MF_SD_LANGUAGE, &language)) &&
+                                    language.vt == VT_LPWSTR && language.pwszVal) label += L" · " + std::wstring(language.pwszVal);
+                                PropVariantClear(&language);
+                                audio_tracks.push_back({static_cast<int>(index), std::move(label), true});
+                            } else if (*type.puuid != MFMediaType_Video) {
+                                subtitle_tracks.push_back({static_cast<int>(index), std::to_wstring(index + 1), false});
+                            }
+                        }
+                        PropVariantClear(&type);
+                    }
+                }
+                if (!logged_ready) {
+                    diagnostics::runtime::Event("playback_ready", {{"session", state->session}, {"backend", 1},
+                        {"elapsed_ms", GetTickCount64() - opened_at}, {"audio_tracks", audio_tracks.size()},
+                        {"audio_selected", selected >= 0}});
+                    logged_ready = true;
+                }
                 std::lock_guard lock(state->mutex);
+                state->snapshot.audio_tracks = std::move(audio_tracks);
+                state->snapshot.subtitle_tracks = std::move(subtitle_tracks);
+                state->snapshot.audio_track = selected;
+                state->snapshot.can_select_audio = state->snapshot.audio_tracks.size() > 1;
+                state->snapshot.can_select_subtitle = false;
                 state->snapshot.can_seek = (flags & MFP_MEDIAITEM_CAN_SEEK) != 0;
                 state->snapshot.width = static_cast<uint32_t>((std::max)(0L, native.cx));
                 state->snapshot.height = static_cast<uint32_t>((std::max)(0L, native.cy));
@@ -537,11 +712,67 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
         player->GetState(&actual);
         const int64_t duration = ready ? Position(player.Get(), true) : 0;
         const int64_t position = ready ? Position(player.Get(), false) : 0;
+        {
+            std::lock_guard lock(state->mutex);
+            if (state->enable_track_playback && ready) {
+                state->enable_track_playback = false;
+                state->ffmpeg_resume_position = position;
+                const auto& tracks = state->snapshot.audio_tracks;
+                const auto selected = std::find_if(tracks.begin(), tracks.end(), [&](const Track& track) {
+                    return track.id == state->snapshot.audio_track;
+                });
+                state->ffmpeg_resume_audio = selected == tracks.end() ? 0 : static_cast<int>(selected - tracks.begin());
+                switch_backend = true;
+                break;
+            }
+        }
+        const ULONGLONG observed_at = GetTickCount64();
+        if (position != last_position || actual != MFP_MEDIAPLAYER_STATE_PLAYING) last_progress = observed_at;
+        last_position = position;
+        if (ready && actual == MFP_MEDIAPLAYER_STATE_PLAYING && observed_at - last_progress >= 2000 && observed_at - last_stall >= 5000) {
+            diagnostics::runtime::Event("playback_clock_stall", {{"session", state->session}, {"backend", 1},
+                {"elapsed_ms", observed_at - last_progress}});
+            last_stall = observed_at;
+        }
+        int select_audio = -1;
+        std::vector<Track> audio_tracks;
+        {
+            std::lock_guard lock(state->mutex);
+            if (ready && !busy && state->tracks_dirty) {
+                state->tracks_dirty = false;
+                select_audio = state->requested_audio;
+                audio_tracks = state->snapshot.audio_tracks;
+            }
+        }
+        if (select_audio >= 0) {
+            ComPtr<IMFPMediaItem> item;
+            HRESULT changed = player->GetMediaItem(&item);
+            for (const auto& track : audio_tracks) {
+                if (FAILED(changed)) break;
+                changed = item->SetStreamSelection(static_cast<DWORD>(track.id), track.id == select_audio);
+            }
+            // MFPlay applies selection only when the item is set again.
+            if (SUCCEEDED(changed)) changed = player->SetMediaItem(item.Get());
+            diagnostics::runtime::Event("playback_track", {{"session", state->session}, {"backend", 1},
+                {"audio", static_cast<uint32_t>(select_audio)}, {"hr", static_cast<uint32_t>(changed)}},
+                FAILED(changed) ? diagnostics::runtime::Level::Warning : diagnostics::runtime::Level::Info);
+            std::lock_guard lock(state->mutex);
+            state->snapshot.control_error = changed;
+            if (SUCCEEDED(changed)) {
+                ready = false;
+                ended = false;
+                state->seek_pending = duration > 0;
+                state->seek_fraction = duration > 0 ? static_cast<double>(position) / duration : 0;
+                state->audio_dirty = true;
+                deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+            }
+        }
         bool want_play = false, seek = false, step = false;
         double fraction = 0;
         {
             std::lock_guard lock(state->mutex);
             state->snapshot.ready = ready;
+            if (ready) state->snapshot.opening = false;
             state->snapshot.playing = state->playing && !ended;
             state->snapshot.ended = ended;
             state->snapshot.busy = busy || state->seek_pending || state->steps != 0;
@@ -590,6 +821,7 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
                 deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
             }
             if (FAILED(control)) {
+                diagnostics::runtime::Event("playback_control_error", {{"session", state->session}, {"hr", static_cast<uint32_t>(control)}}, diagnostics::runtime::Level::Warning);
                 operation_error = true;
                 std::lock_guard lock(state->mutex);
                 state->snapshot.control_error = control;
@@ -607,6 +839,8 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
             positioning = false;
             operation_error = true;
             std::lock_guard lock(state->mutex);
+            diagnostics::runtime::Event("playback_control_error", {{"session", state->session},
+                {"hr", static_cast<uint32_t>(HRESULT_FROM_WIN32(ERROR_TIMEOUT))}}, diagnostics::runtime::Level::Warning);
             state->snapshot.control_error = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
             state->snapshot.busy = false;
             state->playing = false;
@@ -624,11 +858,24 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
                 rate = state->snapshot.rate;
             }
             if (apply) {
-                player->SetVolume(volume);
-                player->SetMute(muted ? TRUE : FALSE);
+                const HRESULT volume_hr = player->SetVolume(volume);
+                const HRESULT mute_hr = player->SetMute(muted ? TRUE : FALSE);
+                if (FAILED(volume_hr) || FAILED(mute_hr)) {
+                    diagnostics::runtime::Event("playback_audio_control_error", {{"session", state->session},
+                        {"volume_hr", static_cast<uint32_t>(volume_hr)}, {"mute_hr", static_cast<uint32_t>(mute_hr)}}, diagnostics::runtime::Level::Warning);
+                    std::lock_guard lock(state->mutex);
+                    state->snapshot.control_error = FAILED(volume_hr) ? volume_hr : mute_hr;
+                }
                 float applied_rate = 1.0f;
-                if (FAILED(player->SetRate(rate)) || FAILED(player->GetRate(&applied_rate)))
+                HRESULT rate_hr = player->SetRate(rate);
+                if (SUCCEEDED(rate_hr)) rate_hr = player->GetRate(&applied_rate);
+                if (FAILED(rate_hr)) {
                     applied_rate = 1.0f;
+                    diagnostics::runtime::Event("playback_control_error", {{"session", state->session},
+                        {"hr", static_cast<uint32_t>(rate_hr)}, {"control", 4}}, diagnostics::runtime::Level::Warning);
+                    std::lock_guard lock(state->mutex);
+                    state->snapshot.control_error = rate_hr;
+                }
                 std::lock_guard lock(state->mutex);
                 if (!state->audio_dirty) state->snapshot.rate = applied_rate;
             }
@@ -643,16 +890,35 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     if (library) FreeLibrary(library);
     // Media Foundation could not open it at all (e.g. MKV with an unknown
     // audio codec, broken indexes): let the pack try before giving up.
-    if (!ready && FAILED(hr) && !pack_ffmpeg.empty() && !state->stop.load())
-        RunFfmpeg(state, path, pack_ffmpeg);
+    if ((switch_backend || (!ready && FAILED(hr))) && !pack_ffmpeg.empty() && !state->stop.load()) {
+        if (!RunFfmpeg(state, path, pack_ffmpeg) && !state->stop.load()) fail(HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
+    }
     CoUninitialize();
 }
 
 bool VideoPreview::RunFfmpeg(const std::shared_ptr<Shared>& state, const std::wstring& path,
                              const std::wstring& ffmpeg_exe) {
+    {
+        std::lock_guard lock(state->mutex);
+        state->snapshot.opening = true;
+        state->snapshot.ready = false;
+        state->snapshot.playing = false;
+    }
     FfmpegMediaInfo info;
     const std::wstring media_path = pulse::path::StripExtendedPathPrefix(path);
-    if (state->stop.load() || !ProbeFfmpegMedia(ffmpeg_exe, media_path, info, &state->stop) || state->stop.load()) return false;
+    const ULONGLONG probe_start = GetTickCount64();
+    const bool probed = !state->stop.load() && ProbeFfmpegMedia(ffmpeg_exe, media_path, info, &state->stop);
+    diagnostics::runtime::Event("playback_probe", {{"session", state->session}, {"backend", 2},
+        {"elapsed_ms", GetTickCount64() - probe_start}, {"ok", probed}, {"cancelled", state->stop.load()},
+        {"width", info.width}, {"height", info.height}, {"audio_tracks", info.audio_tracks.size()},
+        {"subtitle_tracks", info.subtitle_tracks.size()}});
+    if (!probed || state->stop.load()) return false;
+    for (const auto& track : info.audio_tracks) {
+        // Only codec identifiers, never FFmpeg stderr (which includes paths/metadata).
+        if (track.codec.size() <= 40 && track.codec.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_") == std::string::npos)
+            diagnostics::runtime::TextEvent("playback_audio_stream", {{"codec", std::wstring(track.codec.begin(), track.codec.end())}},
+                {{"session", state->session}, {"index", static_cast<uint64_t>(track.id)}});
+    }
     const bool audio_file = IsAudio(path);
     if (audio_file ? !info.audio : !info.video) return false;
     if (audio_file) info.video = false;   // cover art is drawn by the Quick Look itself
@@ -671,6 +937,21 @@ bool VideoPreview::RunFfmpeg(const std::shared_ptr<Shared>& state, const std::ws
         s.codec_name.clear();
         s.store_id = nullptr;
         s.ffmpeg = true;
+        s.ffmpeg_subtitles_available = info.subtitle_filters;
+        s.audio_tracks.clear();
+        s.subtitle_tracks.clear();
+        for (const auto& track : info.audio_tracks) s.audio_tracks.push_back({track.id, track.label, track.supported});
+        for (const auto& track : info.subtitle_tracks) s.subtitle_tracks.push_back({track.id, track.label, track.supported});
+        const int resume_audio = state->ffmpeg_resume_audio >= 0 &&
+            static_cast<size_t>(state->ffmpeg_resume_audio) < info.audio_tracks.size() ? state->ffmpeg_resume_audio : 0;
+        s.audio_track = info.audio ? resume_audio : -1;
+        s.subtitle_track = -1;
+        s.can_select_audio = s.audio_tracks.size() > 1;
+        s.can_select_subtitle = info.video && std::any_of(info.subtitle_tracks.begin(), info.subtitle_tracks.end(),
+            [](const FfmpegTrack& track) { return track.supported; });
+        state->requested_audio = s.audio_track;
+        state->requested_subtitle = -1;
+        state->tracks_dirty = false;
         s.width = info.video ? info.width : 0;
         s.height = info.video ? info.height : 0;
         s.duration = info.duration;
@@ -697,7 +978,16 @@ bool VideoPreview::RunFfmpeg(const std::shared_ptr<Shared>& state, const std::ws
         std::lock_guard lock(state->mutex);
         playing = state->playing;
     }
-    player.Start(0, rate, box(), playing);
+    int initial_audio = 0;
+    {
+        std::lock_guard lock(state->mutex);
+        initial_audio = (std::max)(0, state->requested_audio);
+    }
+    player.SelectTracks(initial_audio, -1);
+    player.Start(state->ffmpeg_resume_position, rate, box(), playing);
+    diagnostics::runtime::Event("playback_decoder_start", {{"session", state->session}, {"audio_open", player.audio_open()},
+        {"audio_device_error", player.AudioDeviceError()}, {"output_fps_milli", static_cast<uint64_t>(FfmpegOutputRate(info.fps) * 1000)}},
+        info.audio && !player.audio_open() ? diagnostics::runtime::Level::Warning : diagnostics::runtime::Level::Info);
     // 1 ms timer resolution only while frames are being paced.
     struct TimerResolution {
         bool on = false;
@@ -712,13 +1002,21 @@ bool VideoPreview::RunFfmpeg(const std::shared_ptr<Shared>& state, const std::ws
     uint32_t stepped = 0;
     SIZE grown_box{};
     ULONGLONG grown_since = 0;
+    ULONGLONG last_frame_at = GetTickCount64(), last_stall_at = last_frame_at;
+    bool logged_frame = false;
     while (!state->stop.load()) {
         bool want_play = false, seek = false, step = false, dirty = false;
         double fraction = 0;
         float wanted_rate = rate;
+        bool tracks_dirty = false;
+        int wanted_audio = 0, wanted_subtitle = -1;
         {
             std::lock_guard lock(state->mutex);
             want_play = state->playing;
+            tracks_dirty = state->tracks_dirty;
+            state->tracks_dirty = false;
+            wanted_audio = state->requested_audio;
+            wanted_subtitle = state->requested_subtitle;
             if (state->seek_pending) {
                 seek = true;
                 fraction = state->seek_fraction;
@@ -735,6 +1033,20 @@ bool VideoPreview::RunFfmpeg(const std::shared_ptr<Shared>& state, const std::ws
                 muted = state->snapshot.muted;
                 wanted_rate = state->snapshot.rate;
             }
+        }
+        if (tracks_dirty && player.SelectTracks((std::max)(0, wanted_audio), wanted_subtitle)) {
+            const int64_t position = player.Position();
+            const bool started = player.Start(position, rate, box(), want_play);
+            diagnostics::runtime::Event("playback_track", {{"session", state->session}, {"backend", 2},
+                {"audio", static_cast<uint32_t>(wanted_audio)}, {"subtitle", static_cast<uint32_t>(wanted_subtitle)}, {"ok", started}},
+                started ? diagnostics::runtime::Level::Info : diagnostics::runtime::Level::Warning);
+            std::lock_guard lock(state->mutex);
+            if (started) {
+                state->snapshot.audio_track = wanted_audio;
+                state->snapshot.subtitle_track = wanted_subtitle;
+            }
+            state->snapshot.control_error = started ? S_OK : E_FAIL;
+            ended = false;
         }
         if (dirty) {
             player.SetVolume(volume, muted);
@@ -779,6 +1091,12 @@ bool VideoPreview::RunFfmpeg(const std::shared_ptr<Shared>& state, const std::ws
             }
         }
         if (auto frame = player.Pump()) {
+            last_frame_at = GetTickCount64();
+            if (!logged_frame) {
+                diagnostics::runtime::Event("playback_ready", {{"session", state->session}, {"backend", 2},
+                    {"elapsed_ms", last_frame_at - probe_start}, {"audio_open", player.audio_open()}});
+                logged_frame = true;
+            }
             {
                 std::lock_guard lock(state->mutex);
                 state->frame = std::move(frame);
@@ -791,11 +1109,19 @@ bool VideoPreview::RunFfmpeg(const std::shared_ptr<Shared>& state, const std::ws
             std::lock_guard lock(state->mutex);
             state->playing = false;
         }
+        const ULONGLONG now = GetTickCount64();
+        if (!want_play || ended) last_frame_at = now;
+        if (info.video && want_play && !ended && now - last_frame_at >= 2000 && now - last_stall_at >= 5000) {
+            diagnostics::runtime::Event("playback_frame_stall", {{"session", state->session},
+                {"elapsed_ms", now - last_frame_at}, {"audio_open", player.audio_open()}});
+            last_stall_at = now;
+        }
         const bool failed = player.Failed();
         {
             std::lock_guard lock(state->mutex);
             auto& s = state->snapshot;
             s.ready = !failed;
+            s.opening = false;
             s.playing = state->playing && !ended;
             s.ended = ended;
             s.busy = false;
@@ -805,8 +1131,7 @@ bool VideoPreview::RunFfmpeg(const std::shared_ptr<Shared>& state, const std::ws
             if (failed) s.error = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
         }
         if (failed) {
-            const std::string diagnostic = player.Diagnostic();
-            OutputDebugStringA(diagnostic.c_str());
+            diagnostics::runtime::Event("playback_error", {{"session", state->session}, {"backend", 2}, {"hr", static_cast<uint32_t>(E_FAIL)}, {"decoder_exit", player.DecoderExitCode()}}, diagnostics::runtime::Level::Warning);
             break;
         }
         const bool pacing = want_play && !ended;

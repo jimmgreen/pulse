@@ -1,3 +1,4 @@
+#include "picker_proof_trace.h"
 // ui_compositor.cpp
 #include "ui_compositor.h"
 #include "../common/windows_compat.h"
@@ -5,6 +6,10 @@
 #include "lumatext_renderer.h"
 #include "typography.h"
 #include "FluentTokens.h"
+#include "text_contrast_scope.h"
+#ifdef PULSE_STARTUP_TRACE_DIAGNOSTICS
+#include "../app/startup_trace.h"
+#endif
 #include <commctrl.h>
 #include <prsht.h>
 #include <shellscalingapi.h>
@@ -18,6 +23,15 @@
 #include <vector>
 
 namespace pulse::ui {
+namespace {
+void TraceGraphics(const char* label) noexcept {
+#ifdef PULSE_STARTUP_TRACE_DIAGNOSTICS
+    app::startup_trace::Mark(label);
+#else
+    (void)label;
+#endif
+}
+}
 
 namespace {
 
@@ -128,12 +142,15 @@ bool Compositor::Init(HWND hwnd) {
         t_compositors.push_back(this);
     device_lost_ = false;
     if (!InitD3D()) return false;
+    TraceGraphics("graphics_device_ready");
     RECT rc;
     GetClientRect(hwnd_, &rc);
     width_ = std::max(1L, rc.right - rc.left);
     height_ = std::max(1L, rc.bottom - rc.top);
     if (!CreateSwapChain()) return false;
+    TraceGraphics("graphics_swapchain_ready");
     ResizeSwapChain();
+    TraceGraphics("graphics_target_ready");
     return targetBitmap_.get() != nullptr;
 }
 
@@ -186,10 +203,13 @@ void Compositor::PrefetchSharedDevice() {
         if (prefetch.started) return;
         prefetch.started = true;
     }
+    TraceGraphics("graphics_prefetch_scheduled");
     try {
         std::thread([] {
+            TraceGraphics("graphics_prefetch_worker_begin");
             ComPtr<ID3D11Device> device;
             const bool ok = SUCCEEDED(CreateD3DDevice(device));
+            TraceGraphics("graphics_prefetch_worker_created");
             DevicePrefetch& state = Prefetch();
             {
                 std::lock_guard<std::mutex> lock(state.mutex);
@@ -219,11 +239,13 @@ bool Compositor::InitD3D() {
         // D3D11 devices are free-threaded, so one created on the prefetch
         // worker serves this thread like its own.
         created->d3d = TakePrefetchedDevice();
+        TraceGraphics("graphics_prefetch_taken");
         if (created->d3d.get() && created->d3d->GetDeviceRemovedReason() != S_OK) created->d3d.reset();
         if (!created->d3d.get()) {
             hr = CreateD3DDevice(created->d3d);
             if (!CheckGraphics(hr, L"D3D11CreateDevice (hardware/WARP)")) return false;
         }
+        TraceGraphics("graphics_d3d_ready");
 
         hr = created->d3d->QueryInterface(&created->dxgi);
         if (!CheckGraphics(hr, L"IDXGIDevice1")) return false;
@@ -235,6 +257,7 @@ bool Compositor::InitD3D() {
         hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1),
             &opts, reinterpret_cast<void**>(&created->factory));
         if (!CheckGraphics(hr, L"D2D1CreateFactory")) return false;
+        TraceGraphics("graphics_d2d_factory_ready");
 
         hr = created->factory->CreateDevice(created->dxgi.get(), &created->d2d);
         if (!CheckGraphics(hr, L"D2D CreateDevice")) return false;
@@ -250,6 +273,7 @@ bool Compositor::InitD3D() {
 
     hr = d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc_);
     if (!CheckGraphics(hr, L"D2D CreateDeviceContext")) return false;
+    TraceGraphics("graphics_d2d_context_ready");
 
     dc_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     dc_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -257,10 +281,12 @@ bool Compositor::InitD3D() {
     hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory2),
         reinterpret_cast<IUnknown**>(&dwriteFactory_));
     if (!CheckGraphics(hr, L"DWriteCreateFactory")) return false;
+    TraceGraphics("graphics_dwrite_ready");
 
     UpdateTextRenderingParams(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST));
     if (!lumaText_) lumaText_ = std::make_unique<LumaTextRenderer>();
     lumaText_->Init(dwriteFactory_.get(), dc_.get());
+    TraceGraphics("graphics_lumatext_ready");
 
     return true;
 }
@@ -274,7 +300,7 @@ bool Compositor::DrawLumaText(std::wstring_view text, IDWriteTextFormat* format,
     if (lumaText_->Draw(text, format, bounds, foreground, background, alignment)) {
         return true;
     }
-    lumaText_->RecordFallback();
+    lumaText_->RecordFallback(0);
     return false;
 }
 
@@ -289,7 +315,7 @@ void Compositor::DrawTextLayout(D2D1_POINT_2F origin, IDWriteTextLayout* layout,
                                   (options & D2D1_DRAW_TEXT_OPTIONS_CLIP) != 0)) {
             return;
         }
-        lumaText_->RecordFallback();
+        lumaText_->RecordFallback(1);
     }
     dc_->DrawTextLayout(origin, layout, brush, options);
 }
@@ -304,7 +330,7 @@ bool Compositor::DrawLumaTextSplit(std::wstring_view text, IDWriteTextFormat* fo
                              background)) {
         return true;
     }
-    lumaText_->RecordFallback();
+    lumaText_->RecordFallback(2);
     return false;
 }
 
@@ -321,9 +347,14 @@ bool Compositor::PaintLumaEdit(HWND hwnd, HDC hdc, IDWriteTextFormat* format,
     return lumaText_->PaintEdit(hwnd, hdc, format, foreground, background);
 }
 
+bool Compositor::DrawLumaEditOnSurface(HWND hwnd, IDWriteTextFormat* format,
+    const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background, const D2D1_RECT_F& bounds) {
+    return CustomEditEnabled() && lumaText_->DrawEditOnSurface(hwnd, format, foreground, background, bounds);
+}
+
 bool Compositor::PresentLumaEdit(HWND hwnd, IDWriteTextFormat* format,
                                  const D2D1_COLOR_F& foreground,
-                                 const D2D1_COLOR_F& background) {
+                                 const D2D1_COLOR_F& background, bool painted_plain_child) {
     if (!hwnd) return false;
 #if defined(PULSE_TEST_LUMATEXT_PRESENT_FAILURE) || defined(PULSE_WITH_SELFTEST)
     if (GetEnvironmentVariableW(L"PULSE_TEST_LUMATEXT_PRESENT_FAILURE", nullptr, 0)) return false;
@@ -333,8 +364,11 @@ bool Compositor::PresentLumaEdit(HWND hwnd, IDWriteTextFormat* format,
     DWORD layered_flags = 0;
     const bool redirected = GetLayeredWindowAttributes(hwnd, nullptr, nullptr, &layered_flags) &&
         (layered_flags & LWA_ALPHA);
-    HDC hdc = redirected ? GetDC(hwnd) : nullptr;
-    const bool ok = (!redirected || hdc) && PaintLumaEdit(hwnd, hdc, format, foreground, background);
+    // Both modes receive the same PaintEdit bitmap; a plain child uses its
+    // normal redirected DC solely as the destination, never native text output.
+    const bool use_dc = redirected || painted_plain_child;
+    HDC hdc = use_dc ? GetDC(hwnd) : nullptr;
+    const bool ok = (!use_dc || hdc) && PaintLumaEdit(hwnd, hdc, format, foreground, background);
     if (hdc) ReleaseDC(hwnd, hdc);
     ValidateRect(hwnd, nullptr);
     return ok;
@@ -356,11 +390,11 @@ void Compositor::SynchronizeEditSelection(HWND hwnd, UINT msg, WPARAM wParam, LP
 }
 
 bool Compositor::LumaTextEnabled() const noexcept {
-    return LumaTextAvailable() && typography::UseLumaTextForUi() && !IsHighContrast();
+    return LumaTextAvailable() && typography::UseLumaTextForUi() && !TextHighContrast();
 }
 
 bool Compositor::CustomEditEnabled() const noexcept {
-    return LumaTextAvailable() && !IsHighContrast();
+    return LumaTextAvailable() && !TextHighContrast();
 }
 
 const LumaTextStats* Compositor::GetLumaTextStats() const noexcept {
@@ -397,7 +431,7 @@ bool Compositor::CreateSwapChain() {
             hr = factory->CreateSwapChainForComposition(d3dDevice_.get(), &desc, nullptr, &swapChain_);
         }
     }
-    if (SUCCEEDED(hr)) hr = compositionDevice_->CreateTargetForHwnd(hwnd_, FALSE, &compositionTarget_);
+    if (SUCCEEDED(hr)) hr = compositionDevice_->CreateTargetForHwnd(hwnd_, composition_above_children_ ? TRUE : FALSE, &compositionTarget_);
     if (SUCCEEDED(hr)) hr = compositionDevice_->CreateVisual(&compositionVisual_);
     if (SUCCEEDED(hr)) hr = compositionVisual_->SetContent(swapChain_.get());
     if (SUCCEEDED(hr)) hr = compositionTarget_->SetRoot(compositionVisual_.get());
@@ -653,11 +687,22 @@ Compositor* Compositor::FrameSourceUnder(HWND dialog, const RECT& area) {
     return nullptr;
 }
 
-void Compositor::Present(const RECT* dirty) {
-    if (device_lost_) return;
+HRESULT Compositor::Present(const RECT* dirty) {
+#if defined(PULSE_PICKER_INPROCESS_PROOF)
+    // Controlled proof only: the caller arms this after its second FileOk callback.
+    const DWORD previous_error = GetLastError();
+    wchar_t fail_present[2]{};
+    const bool inject_failure = GetEnvironmentVariableW(L"PULSE_PICKER_UI_PROOF_FAIL_PRESENT", fail_present, 2) == 1 &&
+        fail_present[0] == L'1';
+    SetLastError(previous_error);
+    if (inject_failure) return E_FAIL;
+#endif
+    if (device_lost_) return DXGI_ERROR_DEVICE_REMOVED;
     if (hwnd_) UpdateTextRenderingParams(
         MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST));
+    PULSE_PICKER_TRACE_POINT("copy-frame-before");
     CopyFrame();
+    PULSE_PICKER_TRACE_POINT("copy-frame-after");
     if (captureNext_) {
         captureNext_ = false;
         held_.reset();
@@ -669,28 +714,39 @@ void Compositor::Present(const RECT* dirty) {
                 held_.reset();
         }
     }
-    HRESULT hr = S_OK;
+    HRESULT hr = E_UNEXPECTED;
     if (swapChain_.get()) {
         if (dirty && CanPresentPartial()) {
             DXGI_PRESENT_PARAMETERS params{};
             RECT rect = *dirty;
             params.DirtyRectsCount = 1;
             params.pDirtyRects = &rect;
+            PULSE_PICKER_TRACE_POINT("swapchain-present-partial-before");
             hr = swapChain_->Present1(1, 0, &params);
+            PULSE_PICKER_TRACE_POINT("swapchain-present-partial-after");
         } else {
+            PULSE_PICKER_TRACE_POINT("swapchain-present-before");
             hr = swapChain_->Present(1, 0);
+            PULSE_PICKER_TRACE_POINT("swapchain-present-after");
         }
     }
     // Only a frame that reached the screen whole lets the next one be partial.
     full_next_ = FAILED(hr) || hr == DXGI_STATUS_OCCLUDED;
     if (FAILED(hr)) {
         if (IsDeviceLost(hr)) NotifyDeviceLost(hr);
-        return;
+        return hr;
     }
+    const HRESULT present_status = hr;
     if (compositionDevice_.get()) {
+        PULSE_PICKER_TRACE_POINT("composition-commit-before");
         hr = compositionDevice_->Commit();
-        if (FAILED(hr) && IsDeviceLost(hr)) NotifyDeviceLost(hr);
+        PULSE_PICKER_TRACE_POINT("composition-commit-after");
+        if (hr != S_OK) {
+            if (IsDeviceLost(hr)) NotifyDeviceLost(hr);
+            return hr;
+        }
     }
+    return present_status;
 }
 
 void Compositor::NotifyDeviceLost(HRESULT) {
@@ -712,71 +768,47 @@ bool Compositor::Recover() {
 }
 
 bool Compositor::SaveSnapshot(const wchar_t* path) {
-    if (!swapChain_.get() || !d3dDevice_.get()) return false;
-
-    ComPtr<ID3D11Texture2D> backBuffer;
-    HRESULT hr = swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
-    if (FAILED(hr)) return false;
-
-    D3D11_TEXTURE2D_DESC desc{};
-    backBuffer->GetDesc(&desc);
-
-    ComPtr<ID3D11DeviceContext> ctx;
-    d3dDevice_->GetImmediateContext(&ctx);
-
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.BindFlags = 0;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    desc.MiscFlags = 0;
-    ComPtr<ID3D11Texture2D> staging;
-    hr = d3dDevice_->CreateTexture2D(&desc, nullptr, &staging);
-    if (FAILED(hr)) return false;
-
-    ctx->CopyResource(staging.get(), backBuffer.get());
-
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    hr = ctx->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped);
-    if (FAILED(hr)) return false;
-
+    if (!dc_.get() || !targetBitmap_.get()) return false;
+    // Present rotates flip-model buffers. A pre-Present frame copy identifies
+    // the frame actually drawn, rather than the next writable back buffer.
+    auto* source_bitmap = FrameCopyEnabled() && frameCopy_.get() ? frameCopy_.get() : targetBitmap_.get();
+    const auto size = source_bitmap->GetPixelSize();
+    const auto pixel_format = source_bitmap->GetPixelFormat();
+    ComPtr<ID2D1Bitmap1> readable;
+    const auto properties = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        pixel_format, 96.0f, 96.0f);
+    if (FAILED(dc_->CreateBitmap(size, nullptr, 0, &properties, &readable)) ||
+        FAILED(readable->CopyFromBitmap(nullptr, source_bitmap, nullptr))) return false;
+    D2D1_MAPPED_RECT mapped{};
+    if (FAILED(readable->Map(D2D1_MAP_OPTIONS_READ, &mapped))) return false;
+    struct Unmap {
+        ID2D1Bitmap1* bitmap;
+        ~Unmap() { bitmap->Unmap(); }
+    } unmap{readable.get()};
     ComPtr<IWICImagingFactory> wic;
-    hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-        IID_PPV_ARGS(&wic));
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&wic)))) return false;
     ComPtr<IWICStream> stream;
-    hr = wic->CreateStream(&stream);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-    hr = stream->InitializeFromFilename(path, GENERIC_WRITE);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-
+    if (FAILED(wic->CreateStream(&stream)) || FAILED(stream->InitializeFromFilename(path, GENERIC_WRITE))) return false;
     ComPtr<IWICBitmapEncoder> encoder;
-    hr = wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-    hr = encoder->Initialize(stream.get(), WICBitmapEncoderNoCache);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-
+    if (FAILED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) ||
+        FAILED(encoder->Initialize(stream.get(), WICBitmapEncoderNoCache))) return false;
     ComPtr<IWICBitmapFrameEncode> frame;
-    hr = encoder->CreateNewFrame(&frame, nullptr);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-    hr = frame->Initialize(nullptr);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-
-    hr = frame->SetSize(desc.Width, desc.Height);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-
+    if (FAILED(encoder->CreateNewFrame(&frame, nullptr)) || FAILED(frame->Initialize(nullptr)) ||
+        FAILED(frame->SetSize(size.width, size.height))) return false;
     WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
-    hr = frame->SetPixelFormat(&format);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-
-    hr = frame->WritePixels(desc.Height, mapped.RowPitch, mapped.RowPitch * desc.Height,
-        static_cast<BYTE*>(mapped.pData));
-    ctx->Unmap(staging.get(), 0);
-    if (FAILED(hr)) return false;
-
-    hr = frame->Commit();
-    if (FAILED(hr)) return false;
-    hr = encoder->Commit();
-    return SUCCEEDED(hr);
+    if (FAILED(frame->SetPixelFormat(&format))) return false;
+    // PNG stores straight alpha; DComp surfaces store premultiplied alpha.
+    // Let WIC perform the conversion, just as the extension-panel exporter does.
+    const auto input_format = pixel_format.alphaMode == D2D1_ALPHA_MODE_PREMULTIPLIED
+        ? GUID_WICPixelFormat32bppPBGRA : pixel_format.alphaMode == D2D1_ALPHA_MODE_IGNORE
+        ? GUID_WICPixelFormat32bppBGR : GUID_WICPixelFormat32bppBGRA;
+    ComPtr<IWICBitmap> source;
+    if (FAILED(wic->CreateBitmapFromMemory(size.width, size.height, input_format,
+        mapped.pitch, mapped.pitch * size.height, mapped.bits, &source))) return false;
+    if (FAILED(frame->WriteSource(source.get(), nullptr)) || FAILED(frame->Commit())) return false;
+    return SUCCEEDED(encoder->Commit());
 }
 
 static void CreateFormat(IDWriteFactory2* factory, float size, DWRITE_FONT_WEIGHT weight,
@@ -794,9 +826,12 @@ static void CreateFormat(IDWriteFactory2* factory, float size, DWRITE_FONT_WEIGH
 void Compositor::RecreateTextFormats(float scale) {
     UpdateTextRenderingParams(hwnd_
         ? MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST) : nullptr);
-    // Every renderer file keeps its own width cache (ui_renderer_internal.h);
-    // only a new generation retires them all when formats are replaced.
-    typography::InvalidateMeasurements();
+    // Replacing formats can reuse their addresses, so retire cached widths.
+    // A new compositor owns no old formats: its first initialization must
+    // not discard the other windows' already measured text.
+    if (TextOptimizationBaselineForTest() || textFormat_.get() || fileNameFormat_.get() || smallFormat_.get() ||
+        headerFormat_.get() || tabFormat_.get() || addressFormat_.get() || iconFormat_.get())
+        typography::InvalidateMeasurements();
     textFormat_.reset();
     fileNameFormat_.reset();
     smallFormat_.reset();

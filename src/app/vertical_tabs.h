@@ -26,6 +26,7 @@ void CommitVerticalTabDrag(AppState& s, const std::wstring& path, size_t insert_
 void UpdateSidebarPeek(AppState& s, int x, int y);
 bool TickSidebarPeek(AppState& s, ULONGLONG now);
 void CloseSidebarPeek(AppState& s);
+void DismissSidebarPeekOutside(AppState& s, int x, int y);
 // Middle click closes a tab (title strip or sidebar row).
 bool HandleTabMiddleClick(AppState& s, int x, int y);
 // Double-click close (Settings > Startup and close): a press on a tab arms it,

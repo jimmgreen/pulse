@@ -6,6 +6,7 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -106,8 +107,58 @@ bool TestFallback() {
     passed &= Report("custom update hosts never use public accelerator", !ReadUpdateWithFallback(
         L"https://updates.example.test/manifest.json", 1024, cancelled, reset, consume, category, error,
         reader) && calls == 1);
-    for (const auto failure : {UpdateError::LocalIo, UpdateError::ResponseTooLarge, UpdateError::InsecureUrl,
-                              UpdateError::InvalidSignature}) {
+    calls = 0;
+    reader = [&](std::wstring_view, uint64_t, const std::atomic<bool>&,
+        const std::function<bool(const void*, DWORD)>&, UpdateError& result, DWORD& code) {
+        ++calls; result = UpdateError::ResponseTooLarge; code = ERROR_FILE_TOO_LARGE; return false;
+    };
+    passed &= Report("an oversized response tries the next source", !ReadUpdateWithFallback(url, 1024,
+        cancelled, reset, consume, category, error, reader) && calls == 3 &&
+        category == UpdateError::ResponseTooLarge && error == ERROR_FILE_TOO_LARGE);
+    calls = 0;
+    reader = [&](std::wstring_view, uint64_t, const std::atomic<bool>&,
+        const std::function<bool(const void*, DWORD)>&, UpdateError& result, DWORD& code) {
+        ++calls;
+        if (calls == 1) { result = UpdateError::ResponseTooLarge; code = ERROR_FILE_TOO_LARGE; return false; }
+        result = UpdateError::Network; code = ERROR_TIMEOUT; return false;
+    };
+    passed &= Report("a wrong file is reported over later network failures", !ReadUpdateWithFallback(url, 1024,
+        cancelled, reset, consume, category, error, reader) && calls == 3 &&
+        category == UpdateError::ResponseTooLarge && error == ERROR_FILE_TOO_LARGE);
+    calls = resets = 0;
+    int verified = 0;
+    reader = [&](std::wstring_view source, uint64_t, const std::atomic<bool>&,
+        const std::function<bool(const void*, DWORD)>& sink, UpdateError&, DWORD&) {
+        ++calls;
+        return sink(source == url ? "good" : "evil", 4);
+    };
+    passed &= Report("a response the caller rejects tries the next source", ReadUpdateWithFallback(url, 1024,
+        cancelled, reset, consume, category, error, reader, [&] { ++verified; return output == "good"; }) &&
+        calls == 3 && resets == 3 && verified == 3 && output == "good" && category == UpdateError::None);
+    calls = 0;
+    passed &= Report("every source rejected reports a mismatch", !ReadUpdateWithFallback(url, 1024,
+        cancelled, reset, consume, category, error, reader, [] { return false; }) && calls == 3 &&
+        category == UpdateError::Mismatch && error == ERROR_INVALID_DATA);
+    const std::pair<UpdateSource, std::wstring> fixed[] = {{UpdateSource::GitHub, std::wstring(url)},
+        {UpdateSource::Mirror1, proxy}, {UpdateSource::Mirror2, L"https://gh-proxy.com/" + url}};
+    for (const auto& [choice, expected] : fixed) {
+        SetUpdateSource(choice);
+        calls = 0;
+        std::wstring asked;
+        reader = [&](std::wstring_view source, uint64_t, const std::atomic<bool>&,
+            const std::function<bool(const void*, DWORD)>&, UpdateError& result, DWORD& code) {
+            ++calls; asked = source; result = UpdateError::Network; code = ERROR_TIMEOUT; return false;
+        };
+        passed &= Report("a chosen download source is the only one tried", !ReadUpdateWithFallback(url, 1024,
+            cancelled, reset, consume, category, error, reader) && calls == 1 && asked == expected);
+        const auto custom = UpdateSourceUrls(L"https://updates.example.test/manifest.json", choice);
+        passed &= Report("a chosen mirror never takes a custom update host",
+            custom.size() == 1 && custom[0] == L"https://updates.example.test/manifest.json");
+    }
+    SetUpdateSource(static_cast<UpdateSource>(7));
+    passed &= Report("an unknown download source means automatic", CurrentUpdateSource() == UpdateSource::Automatic);
+    SetUpdateSource(UpdateSource::Automatic);
+    for (const auto failure : {UpdateError::LocalIo, UpdateError::InsecureUrl, UpdateError::InvalidSignature}) {
         calls = 0;
         reader = [&](std::wstring_view, uint64_t, const std::atomic<bool>&,
             const std::function<bool(const void*, DWORD)>&, UpdateError& result, DWORD& code) {

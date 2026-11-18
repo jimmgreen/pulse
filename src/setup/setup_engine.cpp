@@ -1,4 +1,9 @@
 #include "setup_engine.h"
+#include "setup_install_handoff.h"
+#include "setup_dialog_migration.h"
+#include "setup_dialog_versions.h"
+#include "setup_runtime_transaction.h"
+#include "start_pin_registration.h"
 
 #include "setup_common.h"
 #include "setup_log.h"
@@ -13,6 +18,7 @@
 #include <knownfolders.h>
 
 #include <optional>
+#include <algorithm>
 
 namespace pulse::setup {
 namespace {
@@ -140,18 +146,29 @@ std::wstring ReplaceExe(std::wstring command, const std::wstring& old_exe, const
     return command;
 }
 
-void RestoreUpgradePrefs(const UpgradePrefs& p, const std::wstring& app) {
-    if (!p.captured) return;
+bool RestoreUpgradePrefs(const UpgradePrefs& p, const std::wstring& app, std::wstring& error) {
+    if (!p.captured) return true;
     const std::wstring exe = app + L"\\pulse.exe";
-    if (p.startup) WriteString(HKEY_CURRENT_USER, 0, kRunKey, L"Pulse", ReplaceExe(*p.startup, p.previous_exe, exe));
-    else DeleteValue(HKEY_CURRENT_USER, 0, kRunKey, L"Pulse");
     const auto flags = p.Flags();
-    if (flags.empty()) return;
-    const auto r = RunProcess(app + L"\\pulse_integration.exe",
+    if (flags.empty()) return true;
+    const auto r = RunProcess(InstalledRuntimeFile(app, L"pulse_integration.exe"),
                               flags.substr(1) + L" --upgrade-from " + Quote(p.previous_exe) + L" --exe " + Quote(exe),
                               true);
-    if (!r.started) Log(L"Could not start integration migration");
-    else if (r.exit_code != 0) Log(L"Integration migration incomplete; historical backup retained");
+    if (!r.started || r.exit_code != 0) {
+        error = L"Shell integration migration failed (" + std::to_wstring(r.exit_code) +
+            L"). Both installation directories were kept; the previous version was not removed.";
+        Log(error);
+        return false;
+    }
+    const auto migrated = CaptureUpgradePrefs(exe);
+    if ((p.directory && !migrated.directory) || (p.drive && !migrated.drive) ||
+        (p.win_e && !migrated.win_e) || (p.this_pc && !migrated.this_pc) ||
+        (p.recycle_bin && !migrated.recycle_bin)) {
+        error = L"Cannot verify migrated shell commands. Both installation directories were kept; the previous version was not removed.";
+        Log(error);
+        return false;
+    }
+    return true;
 }
 
 // Splits a registered UninstallString into exe and arguments.
@@ -285,13 +302,18 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
     if (previous) Log(L"Previous install: " + previous->dir + (previous->inno ? L" (Inno)" : L"") +
                       (in_place ? L", upgrading in place" : L""));
 
+    if (previous && real && NestedInstallDirectories(previous->dir, app))
+        return Fail(kExitPrepareFailed, L"The old and new installation directories must not contain each other. Choose a separate directory.");
+
     // An unattended update may only replace the registered machine install in place.
     if (o.pulse_update && (!in_place || (real && !previous->where.machine())))
         return Fail(kExitPrepareFailed, L"Pulse update requires the existing installation directory and scope.");
 
     // 1. Extract and verify everything before any running Pulse is disturbed.
     CreateDirs(app);
-    FileTransaction tx(app);
+    DialogLayoutMigration migration(app, real);
+    RuntimeRegistrationTransaction runtime_registration(app, real);
+    FileTransaction tx(app, [&](std::wstring& failure) { return migration.Recover(failure) && runtime_registration.Recover(failure); });
     std::wstring error;
     if (!tx.Begin(error)) return Fail(kExitPrepareFailed, error);
     ctx.Phase(Phase::Extracting, L"Extracting files");
@@ -316,10 +338,30 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
     }
     files.push_back(kUninstallerName);
     total_bytes += payload.Info().payload_offset;
+    const std::string defaults = std::string("[features]\r\nglobal_search=") +
+        (req.tasks.global_search ? "1" : "0") + "\r\nai_assistant=" +
+        (req.tasks.ai_assistant ? "1" : "0") + "\r\n";
+    const std::wstring defaults_source = (previous ? previous->dir : app) + L"\\setup-defaults.ini";
+    const std::wstring defaults_staged = tx.StagingDir() + L"\\setup-defaults.ini";
+    const bool defaults_written = FileExists(defaults_source)
+        ? CopyFileW(defaults_source.c_str(), defaults_staged.c_str(), FALSE) != FALSE
+        : WriteWholeFile(defaults_staged, defaults.data(), defaults.size());
+    if (!defaults_written) { tx.Abort(); return Fail(kExitPrepareFailed, L"Cannot write setup defaults"); }
+    files.push_back(L"setup-defaults.ini");
+    DialogVersionPlan dialog_version;
+    if (!PrepareDialogVersion(app, tx.StagingDir(), files, dialog_version, error)) { tx.Abort(); return Fail(kExitPrepareFailed, error); }
+    if (dialog_version.versioned) migration.SetVersionDirectory(dialog_version.relative_directory);
+    if (!WriteFileManifest(tx.StagingDir(), files)) { tx.Abort(); return Fail(kExitPrepareFailed, L"Cannot stage installed-file list."); }
+    files.push_back(kFileManifestName);
+    if (dialog_version.versioned) dialog_version.replacements.insert(dialog_version.replacements.end()-1, kFileManifestName);
+    else dialog_version.replacements.push_back(kFileManifestName);
     if (!FlushTree(tx.StagingDir(), files, error)) { tx.Abort(); return Fail(kExitPrepareFailed, error); }
     Log(L"Extracted and flushed " + std::to_wstring(files.size()) + L" files in " +
         std::to_wstring(GetTickCount64() - t0) + L" ms");
 
+    if (!PublishDialogVersion(app, tx.StagingDir(), dialog_version, error)) { tx.Abort(); return Fail(kExitPrepareFailed, error); }
+
+    if (!runtime_registration.Prepare(error)) { tx.Abort(); return Fail(kExitPrepareFailed, error); }
     // 2. Close Pulse and its hosts (PrepareToInstall).
     std::vector<std::wstring> dirs{app};
     if (previous && !SameDirectory(previous->dir, app)) dirs.push_back(previous->dir);
@@ -337,10 +379,35 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
         return true;
     };
     if (!close_all()) { tx.Abort(); return Fail(kExitPrepareFailed, error); }
+
+    const bool shared_dialog_layout = std::any_of(files.begin(), files.end(), [](const auto& path) {
+        return EqualsNoCase(path, L"PulseDialogAuto64.dll") || EqualsNoCase(path, L"PulseDialogAuto32.dll");
+    });
+    auto obsolete_dialog_files = (shared_dialog_layout || dialog_version.versioned) ? LegacyDialogFiles(app, files) : std::vector<std::wstring>{};
+    std::erase_if(obsolete_dialog_files, IsDialogVersionFile);
+    auto obsolete_files = obsolete_dialog_files;
+    const auto retired_runtimes = RetiredRuntimeFiles(files);
+    obsolete_files.insert(obsolete_files.end(), retired_runtimes.begin(), retired_runtimes.end());
+    auto replacement_files = dialog_version.replacements;
+    replacement_files.insert(replacement_files.end(), obsolete_files.begin(), obsolete_files.end());
+    for (;;) {
+        const auto locks = InspectReplacementLocks(app, replacement_files);
+        if (locks.Ready()) break;
+        Log(L"Replacement preflight:\n" + DescribeReplacementLocks(locks));
+        if (locks.error != ERROR_SUCCESS) {
+            tx.Abort();
+            return Fail(kExitPrepareFailed, L"Installation file preflight failed (Win32 " + std::to_wstring(locks.error) + L").\n" + DescribeReplacementLocks(locks));
+        }
+        if (!cb.locked || !cb.locked(locks)) {
+            tx.Abort();
+            return Fail(kExitPrepareFailed, L"Installation files are unavailable. Close the programs using them and retry.\n" + DescribeReplacementLocks(locks));
+        }
+    }
     if (cancelled) { tx.Abort(); return Fail(kExitCancelledDuring, L"Cancelled."); }
 
-    // Moving to another directory: preserve integration, then remove the old copy.
+    // Keep the old executable available until the new files and associations are verified.
     UpgradePrefs prefs;
+    std::wstring previous_directory;
     if (previous && !in_place && real) {
         std::wstring exe, args;
         if (!previous->uninstall_string.empty()) {
@@ -353,8 +420,9 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
                 return Fail(kExitPrepareFailed, L"The previous uninstaller is missing: " + exe);
             }
             prefs = CaptureUpgradePrefs(ParentDir(exe) + L"\\pulse.exe");
+            previous_directory = ParentDir(exe);
             if (!prefs.Flags().empty()) {
-                const auto r = RunProcess(tx.StagingDir() + L"\\pulse_integration.exe",
+                const auto r = RunProcess((dialog_version.versioned ? app + L"\\" + dialog_version.relative_directory : tx.StagingDir()) + L"\\pulse_integration.exe",
                                           L"--prepare-upgrade --exe " + Quote(prefs.previous_exe) + prefs.Flags(),
                                           true);
                 if (!r.started || r.exit_code != 0) {
@@ -362,34 +430,110 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
                     return Fail(kExitPrepareFailed, L"Cannot preserve the shell integration backup.");
                 }
             }
-            Log(L"Removing previous version: " + previous->uninstall_string);
-            const auto r = RunProcess(exe, args + L" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /PULSEUPGRADE=1", true);
-            if (!r.started || r.exit_code != 0) {
-                tx.Abort();
-                return Fail(kExitPrepareFailed, L"The previous version could not be removed (" +
-                                                    std::to_wstring(r.exit_code) + L").");
-            }
-            if (!close_all()) { tx.Abort(); return Fail(kExitPrepareFailed, error); }
-            WaitUntilServiceGone(kServiceName, 10000);
+
         }
     }
 
     // 3. Replace files atomically.
     ctx.Phase(Phase::Replacing, L"Replacing files");
-    if (!tx.Commit(files, error)) return Fail(kExitFatalInstall, error);
+    if ((shared_dialog_layout || dialog_version.versioned) && !migration.Prepare(error)) { tx.Abort(); return Fail(kExitPrepareFailed, error); }
+    auto register_runtime = [&](std::wstring& failure) {
+        if (!real) return true;
+        if (!RegisterStartPin(app, failure)) return false;
+        if (req.tasks.index_service) {
+            const auto index = InstalledRuntimeFile(app, L"Pulse.Index.exe");
+            bool exists = true;
+            const DWORD switched = SwitchServiceRuntime(kServiceName, index, exists);
+            if (switched) { failure = L"Index service runtime switch failed: " + Win32Error(switched); return false; }
+            const auto command = exists ? L"--ensure-service-state" : L"--install";
+            const auto r = RunProcess(index, command, true);
+            SERVICE_STATUS_PROCESS status{};
+            const DWORD query = ReadServiceStatus(kServiceName, status);
+            Log(L"Index service configuration: existing=" + std::to_wstring(exists) +
+                L" command=" + command + L" launched=" + std::to_wstring(r.started) +
+                L" result=" + std::to_wstring(r.exit_code) + L" status_error=" + std::to_wstring(query) +
+                L" state=" + std::to_wstring(status.dwCurrentState) +
+                L" win32_exit=" + std::to_wstring(status.dwWin32ExitCode) +
+                L" service_exit=" + std::to_wstring(status.dwServiceSpecificExitCode));
+            if (!r.started || r.exit_code != 0) {
+                failure = L"Index service configuration failed (" + std::wstring(command) + L"): " +
+                    std::to_wstring(r.exit_code);
+                return false;
+            }
+            if (query) { failure = L"Cannot verify index service: " + Win32Error(query); return false; }
+        }
+        if (!req.tasks.index_service && in_place) {
+            const DWORD disabled = DisableService(kServiceName);
+            if (disabled) { failure = L"Cannot disable index service: " + Win32Error(disabled); return false; }
+        }
+        return true;
+    };
+    if (!tx.Commit(dialog_version.replacements, error, obsolete_files, [&](std::wstring& failure) {
+        if (!migration.Apply(failure)) return false;
+        return !previous_directory.empty() || register_runtime(failure);
+    })) return Fail(kExitFatalInstall, error);
     tx.Finish();
-    if (!WriteFileManifest(app, files)) Log(L"Could not write the installed-file list");
-    for (const wchar_t* stale : {L"msvcp140.dll", L"msvcp140_atomic_wait.dll", L"vcruntime140.dll",
-                                 L"vcruntime140_1.dll"}) {
-        bool shipped = false;
-        for (const auto& f : files) shipped |= EqualsNoCase(f, stale);
-        if (!shipped) DeleteFileW((app + L"\\" + stale).c_str());  // [InstallDelete]
+    if (!previous_directory.empty()) {
+        // After this point neither directory may be rolled back: a failed multi-entry
+        // migration can legitimately leave some commands pointing to each executable.
+        if (!CompleteDirectoryMove(
+            [&](std::wstring& failure) { return RestoreUpgradePrefs(prefs, app, failure); },
+            [&](std::wstring& failure) {
+                Log(L"Removing previous version: " + previous->uninstall_string);
+                UninstallRequest removal;
+                removal.app_dir = previous_directory;
+                removal.options = o;
+                removal.options.pulse_upgrade = true;
+                // Use this engine, not an older uninstaller that may ignore upgrade mode.
+                const auto removed = RunUninstall(removal, {});
+                if (removed.exit_code != 0) {
+                    failure = L"The new files and shell associations are installed, but the previous version could not be removed (" +
+                        std::to_wstring(removed.exit_code) + L"). The new installation files were kept. " + removed.error;
+                    return false;
+                }
+                if (removed.schedule_self_delete) DeleteFileW((previous_directory + L"\\uninstall.exe").c_str());
+                if (previous->inno) RemoveInnoUninstaller(previous_directory);
+                RemoveDirectoryW(previous_directory.c_str());
+                if (prefs.startup) WriteString(HKEY_CURRENT_USER, 0, kRunKey, L"Pulse",
+                    ReplaceExe(*prefs.startup, prefs.previous_exe, app + L"\\pulse.exe"));
+                else DeleteValue(HKEY_CURRENT_USER, 0, kRunKey, L"Pulse");
+                if (!close_all()) { failure = error; return false; }
+                WaitUntilServiceGone(kServiceName, 10000);
+                return true;
+            }, register_runtime, error)) return Fail(kExitFatalInstall, error);
     }
+    DialogCleanupReport cleanup_report;
+    size_t versions_removed = 0;
+    if (dialog_version.versioned) {
+        do {
+            cleanup_report = CleanupDialogVersionsReport(app);
+            versions_removed += cleanup_report.deleted_directories.size();
+            Log(L"Dialog cleanup: removed=" + std::to_wstring(versions_removed) +
+                L" protected=" + std::to_wstring(cleanup_report.protected_directories.size()) +
+                L" blocked=" + std::to_wstring(cleanup_report.blocked_directories.size()) +
+                L" retained=" + std::to_wstring(cleanup_report.retained_directories.size()));
+            if (!cleanup_report.Retryable() || !cb.cleanup_locked ||
+                !cb.cleanup_locked(cleanup_report)) break;
+        } while (true);
+        if (!cleanup_report.Complete()) Log(L"Old dialog versions retained; retry cleanup after their owning programs exit.");
+    }
+    // Remove empty legacy directories only; unregistered user files remain untouched.
+    for (auto it = obsolete_dialog_files.rbegin(); it != obsolete_dialog_files.rend(); ++it) {
+        auto directory = ParentDir(app + L"\\" + *it);
+        while (!SameDirectory(directory, app)) {
+            if (!RemoveDirectoryW(directory.c_str())) break;
+            directory = ParentDir(directory);
+        }
+    }
+    RemoveDirectoryW((app + L"\\DialogBridge").c_str());
 
     // 4. Register: uninstall entry, shortcuts, startup.
     ctx.Phase(Phase::Registering, L"Registering Pulse");
     InstallResult result;
     result.app_dir = app;
+    result.dialog_cleanup_pending = dialog_version.versioned && !cleanup_report.Complete();
+    result.dialog_versions_removed = versions_removed;
+    result.defaults_written = defaults_written;
     bool post_failed = false;
     UninstallEntry entry;
     entry.dir = app;
@@ -413,9 +557,12 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
     const std::wstring uninstall_lnk = group + (chinese ? L"\\卸载 Pulse.lnk" : L"\\Uninstall Pulse.lnk");
     DeleteFileW(uninstall_lnk.c_str());
     if (!EnsureShortcut(uninstall_lnk, entry.uninstaller, L"", app, L"", error)) Log(L"Shortcut: " + error);
-    if (req.tasks.desktop_icon) {
-        const std::wstring desktop = KnownFolder(real ? FOLDERID_PublicDesktop : FOLDERID_Desktop);
-        if (!EnsureShortcut(desktop + (real ? L"\\Pulse.lnk" : L"\\Pulse Test.lnk"), app + L"\\pulse.exe", L"", app,
+    const std::wstring desktop = KnownFolder(real ? FOLDERID_PublicDesktop : FOLDERID_Desktop);
+    const std::wstring desktop_link = desktop + (real ? L"\\Pulse.lnk" : L"\\Pulse Test.lnk");
+    // Existing shortcuts also need the activation entry when an upgrade does
+    // not request creation of a desktop shortcut.
+    if (req.tasks.desktop_icon || GetFileAttributesW(desktop_link.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        if (!EnsureShortcut(desktop_link, app + L"\\pulse.exe", L"", app,
                             L"Pulse", error))
             Log(L"Shortcut: " + error);
     }
@@ -425,34 +572,34 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
     // 5. Post-install configuration (CurStepChanged ssPostInstall + [Run]).
     result.startup = real && req.tasks.startup;
     if (real) {
-        RestoreUpgradePrefs(prefs, app);
         if (req.tasks.index_service) ctx.Phase(Phase::IndexService, L"Configuring the index service");
-        const std::wstring index_exe = app + L"\\Pulse.Index.exe";
-        if (!req.tasks.index_service) {
-            if (in_place && ServiceExists(kServiceName)) {
-                const auto r = RunProcess(index_exe, L"--uninstall", true);
-                if (!r.started || r.exit_code != 0) {
-                    post_failed = true;
-                    Log(L"Index service removal failed: " + std::to_wstring(r.exit_code));
-                }
-            }
-        } else {
-            auto r = RunProcess(index_exe, L"--set-index-path " + Quote(NormalizeDir(req.index_path)), true);
-            if (!r.started || r.exit_code != 0) {
+        result.index_configured = req.tasks.index_service;
+        if (req.tasks.index_service) {
+            const auto configured = RunProcess(InstalledRuntimeFile(app, L"Pulse.Index.exe"),
+                L"--set-index-path " + Quote(NormalizeDir(req.index_path)), true);
+            if (!configured.started || configured.exit_code != 0) {
                 post_failed = true;
-                result.error = L"Index location configuration failed: " + std::to_wstring(r.exit_code);
+                result.error = L"Index location migration failed: " + std::to_wstring(configured.exit_code);
                 Log(result.error);
-            } else {
-                // Configure the location first: an upgrade must not start a scan
-                // only to stop it again for the same index path.
-                r = RunProcess(index_exe, L"--install", true);
-                if (!r.started || r.exit_code != 0) {
-                    post_failed = true;
-                    result.error = L"Index service setup failed: " + std::to_wstring(r.exit_code);
-                    Log(result.error);
-                } else {
-                    result.index_running = true;
-                }
+            }
+            SERVICE_STATUS_PROCESS status{};
+            const DWORD query = ReadServiceStatus(kServiceName, status);
+            result.index_running = !query && status.dwCurrentState == SERVICE_RUNNING;
+            Log(L"Index service final state: query=" + std::to_wstring(query) +
+                L" state=" + std::to_wstring(status.dwCurrentState) +
+                L" win32_exit=" + std::to_wstring(status.dwWin32ExitCode));
+            if (query) {
+                post_failed = true;
+                result.index_configured = false;
+                result.error = L"Cannot query installed index service: " + Win32Error(query);
+                Log(result.error);
+            }
+        } else if (in_place && ServiceExists(kServiceName)) {
+            const auto removed = RunProcess(InstalledRuntimeFile(app, L"Pulse.Index.exe"), L"--uninstall", true);
+            if (!removed.started || removed.exit_code != 0) {
+                post_failed = true;
+                result.error = L"Disabled index service remains pending removal: " + std::to_wstring(removed.exit_code);
+                Log(result.error);
             }
         }
         ctx.Phase(Phase::SeedVerbs, L"Caching context-menu verbs");

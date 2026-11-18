@@ -8,6 +8,7 @@
 #include "tag_ads_sync.h"
 #include "column_view_model.h"
 #include "explorer_handoff.h"
+#include "explorer_open_transaction.h"
 #include "entry_order_hold.h"
 #include "entry_sort.h"
 #include "create_rename_intent.h"
@@ -31,6 +32,7 @@
 namespace pulse { struct ContentSizeSummary; struct ContentSelectionRestore; }
 namespace pulse::app {
 struct ContentNavigationState;
+struct MediaColumnsState;
 
 // When navigating from a descendant to one of its ancestors, returns the
 // immediate child of the destination that the user just left. Empty means the
@@ -99,6 +101,7 @@ struct Tab {
     std::map<std::wstring, std::set<std::wstring>> collapsed_groups;
     uint64_t group_collapse_rev = 0;
     ui::DetailsColumnWidths details_column_dividers{};
+    std::array<std::array<float, 4>, 3> media_column_widths{};
     std::array<float, 4> search_column_dividers{};
     std::wstring filter_text;
     bool show_hidden_files = false;
@@ -143,6 +146,12 @@ struct Tab {
     std::wstring pending_selected_name;
     std::wstring pending_preview_rename;
     std::vector<std::wstring> pending_selected_names;
+    // Identity capture belongs to a refresh; explicit name intents remain separate.
+    uint64_t pending_selection_key_revision = UINT64_MAX;
+    std::vector<std::wstring> pending_selection_keys;
+    std::vector<std::wstring> pending_selection_key_names;
+    std::wstring pending_selection_focus_key;
+    std::wstring pending_selection_key_focus_name;
     uint64_t pending_selection_revision = UINT64_MAX;
     bool pending_ensure_selection_visible = false;
     // File Explorer order hold (#13): change patches and non-explicit
@@ -154,6 +163,12 @@ struct Tab {
     // with, and when they last moved for new totals (GetTickCount64).
     uint64_t folder_size_signature = 0;
     uint64_t folder_size_resorted_at = 0;
+    // 媒体文件夹专用列 (media_columns_ui.cpp): what they were worked out for,
+    // and the reader revision the last live re-sort saw.
+    mutable fs::SnapshotPtr media_snapshot;
+    mutable std::shared_ptr<const MediaColumnsState> media_state;
+    uint64_t media_resort_revision = 0;
+    uint64_t media_resorted_at = 0;
     ColumnStripState column_strip; // listings shown beside the list in column view
     std::wstring git_root;
     std::shared_ptr<std::vector<fs::DirEntry>> search_entries;
@@ -436,9 +451,18 @@ struct FolderCompareResult {
 FolderCompareResult CompareFolderTabs(const Tab& a, const Tab& b);
 void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane,
                        const PlacesCatalog* places = nullptr);
+// Task 46: the 重复文件 tab dresses its pane (banner, funnel, chips) on top of
+// the ai-list view. Registered by dup::Start, so tests link without it.
+using PaneDecorator = void (*)(const std::wstring& path, ui::PaneViewModel& out);
+void SetDupPaneDecorator(PaneDecorator decorator);
+// 媒体文件夹专用列: sets PaneViewModel::media_columns / media_cell. Registered
+// by InstallMediaColumns (media_columns_ui.cpp), so tests link without it.
+using MediaPaneDecorator = void (*)(const Tab& tab, ui::PaneViewModel& out);
+void SetMediaPaneDecorator(MediaPaneDecorator decorator);
 
 // One window tab = one working layout (pane count, split ratios, each column).
 struct LayoutTab {
+    std::unique_ptr<ExplorerOpenTransaction> explorer_transaction;
     std::wstring title; // empty = derive from the focused folder
     uint32_t marker_rgb = 0;
     bool pinned = false;
@@ -448,6 +472,12 @@ struct LayoutTab {
     std::unique_ptr<SplitContainer> root;
     int focused_index = 0;
     int target_index = -1;
+    // Presentation only: the split tree and all background panes stay intact.
+    int zoomed_pane_index = -1;
+    int layout_hover_region = 0, layout_hover_index = -1;
+    int layout_preview_preset = -1, layout_peek_index = -1;
+    bool layout_tray_open = false, layout_hover_drag = false;
+    uint64_t layout_hover_since = 0, layout_leave_at = 0;
     // Two-pane folder compare. Inputs of the last pass decide when to redo it.
     bool compare = false;
     bool compare_diff_only = false;
@@ -595,6 +625,8 @@ struct SidebarEntry {
     std::wstring path;
     bool is_drive = false;
     float used_ratio = 0.0f;
+    uint64_t free_bytes = ~uint64_t{0};  // drives: bytes left (all ones = unknown)
+    uint64_t total_bytes = 0;            // drives: capacity (0 = unknown)
     bool expandable = false;
     // Built-in quick-access link (BuiltinQuickAccess), -1 for user entries.
     // The quick-access menu toggles these one by one.

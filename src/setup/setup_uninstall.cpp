@@ -1,4 +1,9 @@
+#include "../common/dialog_auto_registration.h"
+#include "start_pin_registration.h"
 #include "setup_uninstall.h"
+#include "setup_dialog_versions.h"
+#include "setup_dialog_migration.h"
+#include "../common/dialog_bundle.h"
 
 #include "setup_common.h"
 #include "setup_engine.h"
@@ -18,7 +23,7 @@ namespace {
 // Files of an installation that predates the manifest ([Files] in the iss).
 constexpr const wchar_t* kKnownFiles[] = {
     L"pulse.exe", L"lumatext.dll", L"pdfium.dll", L"Pulse.Index.exe", L"Pulse.Document.exe",
-    L"Pulse.Preview.exe", L"pulse_shell.exe", L"pulse_elevated.exe", L"pulse_integration.exe",
+    L"Pulse.Preview.exe", L"pulse_start_pin.dll", L"pulse_shell.exe", L"pulse_elevated.exe", L"pulse_integration.exe",
     L"msvcp140.dll", L"msvcp140_atomic_wait.dll", L"vcruntime140.dll", L"vcruntime140_1.dll",
     L"uninstall.exe",
 };
@@ -223,12 +228,29 @@ UninstallResult RunUninstall(const UninstallRequest& req, const UninstallCallbac
         return result;
     }
 
+    // Restore before removing DLLs, including an install-directory migration.
+    if(real) {
+        DWORD restored=DisableOwnedDialogRegistration(app, dialog_auto::Inspect(), dialog_auto::DisableFor);
+        if(restored==ERROR_SUCCESS) restored=dialog_auto::DisableFor(app+L"\\"+dialog_auto::DllName);
+        if(restored==ERROR_SUCCESS) restored=dialog_auto::DisableFor(app+L"\\DialogBridge\\"+dialog_auto::DllName);
+        if (restored == ERROR_SUCCESS && FileExists(app + L"\\dialog-current.json")) {
+            dialog_bundle::BundleLease current;
+            restored = dialog_bundle::ResolveInstalledBundle(app, current);
+            if (!restored) restored = dialog_auto::DisableFor(current.Directory() + L"\\" + dialog_auto::DllName);
+        }
+        if(restored!=ERROR_SUCCESS) {
+            result.exit_code=kExitPrepareFailed;
+            result.error=L"Could not restore Pulse file dialogs. Installation files were kept. "+Win32Error(restored);
+            Log(result.error);return result;
+        }
+    }
+
     // 2. [UninstallRun]: stop and remove the index service before files go.
     progress(10, kServiceName);
     if (real) {
         const DWORD stop = StopService(kServiceName, 15000);
         if (stop != ERROR_SUCCESS) Log(L"Stopping PulseIndex: " + Win32Error(stop));
-        const std::wstring index_exe = app + L"\\Pulse.Index.exe";
+        const std::wstring index_exe = InstalledRuntimeFile(app, L"Pulse.Index.exe");
         if (FileExists(index_exe)) {
             const auto r = RunProcess(index_exe, L"--uninstall", true);
             Log(L"Pulse.Index.exe --uninstall: " + std::to_wstring(r.exit_code));
@@ -240,7 +262,7 @@ UninstallResult RunUninstall(const UninstallRequest& req, const UninstallCallbac
     // 3. usUninstall: give file associations back (not when only moving the install).
     if (real && !upgrade) {
         progress(18, L"pulse_integration.exe");
-        const auto r = RunProcess(app + L"\\pulse_integration.exe",
+        const auto r = RunProcess(InstalledRuntimeFile(app, L"pulse_integration.exe"),
                                   L"--restore --exe " + Quote(app + L"\\pulse.exe"), true);
         result.restore_result = r.started ? static_cast<int>(r.exit_code) : 3;
         Log(L"Integration restore: " + std::to_wstring(result.restore_result));
@@ -253,12 +275,25 @@ UninstallResult RunUninstall(const UninstallRequest& req, const UninstallCallbac
         }
     }
 
+    if (real && !UnregisterStartPin(app, result.error)) {
+        Log(result.error);
+        result.exit_code = kExitFailed;
+        return result;
+    }
+
     // 4. Installed files, then the directories they leave empty.
     std::vector<std::wstring> files = ReadFileManifest(app);
     if (files.empty()) {
         Log(L"No file manifest; removing the known Pulse files");
         for (const wchar_t* f : kKnownFiles) files.push_back(f);
         CollectTree(app, L"licenses", files);
+    }
+    const bool dialog_clean = CleanupDialogVersions(app, true);
+    std::erase_if(files, IsDialogVersionFile);
+    if (!dialog_clean) {
+        result.dialog_cleanup_pending = true;
+        result.error = L"Some dialog versions remain in DialogBridge because they are in use or could not be safely verified. Close their host applications before a later cleanup.";
+        Log(result.error);
     }
     const std::wstring self_name = L"uninstall.exe";
     size_t index = 0;

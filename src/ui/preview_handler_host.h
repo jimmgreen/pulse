@@ -1,9 +1,11 @@
-#pragma once
+﻿#pragma once
 #include <d2d1.h>
 #include <windows.h>
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <future>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -12,7 +14,8 @@ namespace pulse::ui {
 // Hosts the system IPreviewHandler (Explorer Alt+P) in a WS_POPUP overlay.
 // All third-party COM calls and the overlay HWND live on a dedicated STA.
 // The overlay matches the details preview rect so Word/Excel keep their own
-// scrollbars inside the pane (Explorer behavior).
+// scrollbars inside the pane (Explorer behavior). Embedded hosts are clipped to
+// their ancestors and follow ancestor window events without global topmost.
 class PreviewHandlerHost {
 public:
     enum class State { Idle, Loading, Shown, Failed };
@@ -26,6 +29,8 @@ public:
 
     void SetNotifyWindow(HWND hwnd);
     void Hide();
+    std::shared_future<void> SuspendVolume(const std::wstring& root);
+    void ResumeVolume(const std::wstring& root);
     void Reset();
     uint64_t NextWatchdogDeadline() const;
     // Re-evaluates the popup overlay's screen position after its owner moves.
@@ -34,6 +39,9 @@ public:
     // Main window WM_ACTIVATE / WM_ACTIVATEAPP. Overlay is WS_EX_NOACTIVATE so
     // it never receives those; TOPMOST must drop here or it covers other apps.
     void NotifyAppActivate(bool active);
+    // An app popup over the pane (the toolbar picker) hides the overlay
+    // without unloading the preview; false shows it again in place.
+    void SetCovered(bool covered);
 
     // enabled=false unloads immediately. bounds are owner-client pixels.
     void Sync(HWND owner, const D2D1_RECT_F& bounds, const std::wstring& path,
@@ -76,12 +84,16 @@ private:
     // the provider call they are inside returns, then unload and exit.
     std::vector<std::shared_ptr<WorkerState>> retired_;
     HWND notify_ = nullptr;
+    bool apartment_busy_ = false;
+    uint64_t admission_retry_ = 0;
     bool app_active_ = true;
+    bool covered_ = false;
     std::wstring last_identity_;
     std::wstring last_path_;
     RECT last_bounds_{};
     HWND last_owner_ = nullptr;
     bool last_enabled_ = false;
+    std::map<std::wstring, std::shared_future<void>> suspended_volumes_;
 };
 
 } // namespace pulse::ui

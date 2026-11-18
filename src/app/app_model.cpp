@@ -1,3 +1,4 @@
+#include "name_pattern.h"
 // app_model.cpp
 #include "app_model.h"
 #include "git_status.h"
@@ -19,6 +20,8 @@
 #include "../common/display_path.h"
 #include "../common/text_format.h"
 #include "../fs/drive_label.h"
+#include "../fs/drive_kind.h"
+#include "../ui/drive_capacity.h"
 #include "../ops/clipboard.h"
 #include "../ops/source_listing.h"
 #include <commctrl.h>
@@ -167,6 +170,13 @@ void Tab::SetSnapshot(fs::SnapshotPtr value) {
     view_cache_filter_text.clear();
     view_filter_map.reset();
     view_tag_dots.reset();
+    view_row_cache.reset();
+    view_groups.reset();
+    view_groups_snapshot.reset();
+    view_groups_filter.reset();
+    view_compare_base.reset();
+    view_compare_marks.reset();
+    view_compare_map.reset();
     snapshot_path = snapshot ? current_path : L"";
     if(content_results) { directory_count=0; file_count=content_results->Count(); return; }
     if (all_selected && !ShowsEveryEntry()) MaterializeSelection();
@@ -636,12 +646,14 @@ void Pane::NewTab(const std::wstring& path) {
     const ui::ViewMode mode = view.view_mode;
     const auto columns = view.details_column_dividers;
     const auto search_columns = view.search_column_dividers;
+    const auto media_columns = view.media_column_widths;
     const bool column_layout = view.column_layout;
     auto column_widths = std::move(view.column_widths_dip);
     view = Tab{};
     view.view_mode = mode;
     view.details_column_dividers = columns;
     view.search_column_dividers = search_columns;
+    view.media_column_widths = media_columns;
     view.column_layout = column_layout;
     view.column_widths_dip = std::move(column_widths);
     view.current_path = fs::NormalizePath(path);
@@ -679,6 +691,7 @@ std::unique_ptr<LayoutTab> MakeSingleLayoutTab(const std::wstring& path, const T
     if (source) {
         pane->view.view_mode = source->view_mode;
         pane->view.details_column_dividers = source->details_column_dividers;
+        pane->view.media_column_widths = source->media_column_widths;
         pane->view.search_column_dividers = source->search_column_dividers;
         pane->view.column_layout = source->column_layout;
         pane->view.column_widths_dip = source->column_widths_dip;
@@ -740,6 +753,11 @@ LayoutTab& WindowTabs::NewTabAt(size_t index, const std::wstring& path) {
 
 void WindowTabs::CloseTab(size_t idx) {
     if (idx >= items.size() || items.size() <= 1) return;
+    if (const auto& transaction = items[idx]->explorer_transaction) {
+        transaction->handoff->Cancel();
+        const auto phase = transaction->handoff->state.load();
+        if (phase == HandoffState::Closing || phase == HandoffState::Closed) return;
+    }
     if (items[idx]->pinned) return;
     items.erase(items.begin() + static_cast<ptrdiff_t>(idx));
     if (active >= items.size()) active = items.size() - 1;
@@ -748,6 +766,11 @@ void WindowTabs::CloseTab(size_t idx) {
 
 std::unique_ptr<LayoutTab> WindowTabs::TakeTab(size_t idx, bool allow_last) {
     if (idx >= items.size() || (items.size() <= 1 && !allow_last) || !items[idx]) return nullptr;
+    if (const auto& transaction = items[idx]->explorer_transaction) {
+        transaction->handoff->Cancel();
+        const auto phase = transaction->handoff->state.load();
+        if (phase == HandoffState::Closing || phase == HandoffState::Closed) return nullptr;
+    }
     std::unique_ptr<LayoutTab> tab = std::move(items[idx]);
     items.erase(items.begin() + static_cast<ptrdiff_t>(idx));
     if (items.empty()) active = 0;
@@ -1067,10 +1090,10 @@ bool StagingTray::RefreshExists() {
     bool changed = false;
     for (auto& batch : batches_) {
         for (auto& it : batch.items) {
-            // Network paths are not probed: a dead share would stall the UI thread.
+            // Mapped shares and user-mode cloud mounts can stall just like UNC paths.
             const bool unc = it.path.starts_with(L"\\\\?\\UNC\\") ||
                 (it.path.starts_with(L"\\\\") && !it.path.starts_with(L"\\\\?\\"));
-            if (unc) continue;
+            if (unc || fs::IsRemoteLikeDrive(it.path)) continue;
             const bool now = GetFileAttributesW(it.path.c_str()) != INVALID_FILE_ATTRIBUTES;
             if (now != it.exists) {
                 it.exists = now;
@@ -1329,7 +1352,7 @@ std::vector<SidebarEntry> BuildOneDriveEntries() {
         if (path.empty()) continue;
         const bool duplicate = std::any_of(out.begin(), out.end(),
             [&](const SidebarEntry& entry) {
-                return _wcsicmp(entry.path.c_str(), path.c_str()) == 0;
+                return SameCloudRootPath(entry.path, path);
             });
         if (duplicate) continue;
         std::wstring suffix = key == L"Personal"
@@ -1436,16 +1459,19 @@ void RefreshSidebarDriveCapacity(std::vector<SidebarEntry>& drives) {
         ULARGE_INTEGER free_bytes{}, total_bytes{};
         entry.detail.clear();
         entry.used_ratio = 0.0f;
+        entry.free_bytes = ~uint64_t{0};
+        entry.total_bytes = 0;
         entry.danger = false;
         if (!GetDiskFreeSpaceExW(entry.path.c_str(), &free_bytes, &total_bytes, nullptr))
             continue;
         const uint64_t total = total_bytes.QuadPart;
         const uint64_t free = std::min(free_bytes.QuadPart, total_bytes.QuadPart);
-        entry.detail = pulse::format::ByteSize(free, false, pulse::format::ByteSizeStyle::Compact)
-            + L" / " + pulse::format::ByteSize(total, false, pulse::format::ByteSizeStyle::Compact);
+        entry.detail = ui::DriveSidebarDetail(free, total);
         if (total > 0) {
             entry.used_ratio = static_cast<float>(static_cast<double>(total - free) / static_cast<double>(total));
-            entry.danger = static_cast<double>(free) / static_cast<double>(total) < 0.10;
+            entry.free_bytes = free;
+            entry.total_bytes = total;
+            entry.danger = ui::CapacityLevelFor(entry.used_ratio, free) == ui::CapacityLevel::Critical;
         }
     }
     if (changed) SetThreadErrorMode(old_mode, nullptr);
@@ -1615,45 +1641,20 @@ static std::wstring StatusText(const Tab& tab) {
     }
     wchar_t buf[128];
     swprintf_s(buf, l10n::Get(l10n::StringId::StatusItemsFormat).c_str(),
-        tab.directory_count + tab.file_count, tab.directory_count, tab.file_count);
+        tab.directory_count + tab.file_count);
     return buf;
 }
 
 static std::wstring SelectionText(const Tab& tab) {
     const int count = tab.SelectedCount();
-    if (count <= 0) return l10n::Get(l10n::StringId::NotSelected);
+    if (count <= 0) return {};
     // Only the details tree's "more" row: it is not an item.
     if (count == 1 && tab.TreeEntries() && tab.selected_index >= 0 &&
         tab.tree->IsPlaceholder(static_cast<size_t>(tab.selected_index)))
-        return l10n::Get(l10n::StringId::NotSelected);
-    if (count == 1 && tab.snapshot && tab.selected_index >= 0 &&
-        tab.selected_index < static_cast<int>(tab.EntryCount())) {
-        const auto& e = tab.EntryAt(tab.selected_index);
-        wchar_t buf[256];
-        swprintf_s(buf, l10n::Get(l10n::StringId::SelectedOneFormat).c_str(), e.name.c_str(),
-                   pulse::format::ByteSize(e.size, true).c_str());
-        // A row inside an expanded folder: where it is, from the current folder.
-        const size_t slash = e.full_path.find_last_of(L'\\');
-        const size_t base = tab.current_path.size() + (tab.current_path.ends_with(L'\\') ? 0 : 1);
-        if (tab.TreeEntries() && slash != std::wstring::npos && slash > base &&
-            _wcsnicmp(e.full_path.c_str(), tab.current_path.c_str(), tab.current_path.size()) == 0) {
-            wchar_t where[300];
-            swprintf_s(where, l10n::Get(l10n::StringId::SelectedInFolderFormat).c_str(),
-                       e.full_path.substr(base, slash - base).c_str());
-            return std::wstring(buf) + L"  \u00B7  " + where;
-        }
-        return buf;
-    }
-    wchar_t buf[64];
+        return {};
+    wchar_t buf[64]{};
     swprintf_s(buf, l10n::Get(l10n::StringId::SelectedCountFormat).c_str(), count);
-    // Content-search selections are summed asynchronously in BuildVm.
-    if (tab.content_results || !tab.snapshot) return buf;
-    uint64_t bytes = 0;
-    int files = 0;
-    tab.SelectionSizeSummary(&bytes, &files, nullptr);
-    // Like Explorer: folder sizes are unknown here, so show the files' total.
-    if (files <= 0) return buf;
-    return std::wstring(buf) + L"  \u00B7  " + pulse::format::ByteSize(bytes, true);
+    return buf;
 }
 
 static ui::SidebarGroup ConvertGroup(const std::wstring& header, const std::vector<SidebarEntry>& src,
@@ -1673,6 +1674,8 @@ static ui::SidebarGroup ConvertGroup(const std::wstring& header, const std::vect
         it.path = e.path;
         it.is_drive = e.is_drive;
         it.used_ratio = e.used_ratio;
+        it.free_bytes = e.free_bytes;
+        it.total_bytes = e.total_bytes;
         it.badge = e.badge;
         it.badge_color = ui::HexColor(e.badge_rgb);
         it.is_tag = e.is_tag;
@@ -1974,8 +1977,8 @@ index::ContentResultStore::Filter ContentFilter(const std::wstring& text, const 
         }
         sets.push_back(std::move(set));
     }
-    return [name=std::move(name),sets=std::move(sets)](const fs::DirEntry& entry) {
-        if(!NameMatchesPattern(entry.name,name)) return false;
+    return [pattern=NamePattern(name, true),sets=std::move(sets)](const fs::DirEntry& entry) {
+        if(!pattern.Matches(entry.name)) return false;
         if(sets.empty()) return true;
         const std::wstring key=ToLowerCopy(entry.full_path);
         for(const auto& set:sets) if(set.paths.contains(key)==set.exclude) return false;
@@ -1998,11 +2001,15 @@ void CollectFilterMatches(const Tab& tab, const PlacesCatalog* places, std::vect
     ParseFilterText(tab.filter_text, name_needle, tag_terms);
     if (name_needle.empty() && tag_terms.empty())
         name_needle = ToLowerCopy(tab.filter_text);
+    const NamePattern pattern(name_needle, true);
+    const auto* rows = tab.TreeEntries();
+    if (!rows) rows = tab.snapshot.get();
+    const int available = static_cast<int>((std::min)(static_cast<size_t>(n), rows->size()));
     out.reserve(static_cast<size_t>(n));
-    for (int i = 0; i < n; ++i) {
-        const auto& e = tab.EntryAt(static_cast<size_t>(i));
+    for (int i = 0; i < available; ++i) {
+        const auto& e = (*rows)[static_cast<size_t>(i)];
         if (!tab.EntryVisible(i)) continue;
-        bool name_ok = NameMatchesPattern(e.name, name_needle);
+        bool name_ok = pattern.Matches(e.name);
         // 别名: the filter also finds an item by its alias, or its pinyin.
         if (!name_ok && !name_needle.empty() && !AliasStore::Instance().Empty()) {
             const std::wstring alias = AliasStore::Instance().Find(EntryPathOf(tab, e));
@@ -2013,9 +2020,41 @@ void CollectFilterMatches(const Tab& tab, const PlacesCatalog* places, std::vect
             tag_ok = TagTermsMatch(*places, places->TagsForPath(EntryPathOf(tab, e)), tag_terms);
         if (name_ok && tag_ok) out.push_back(i);
     }
+    // Maps cached by each tab should not retain a full-directory allocation
+    // after a selective query. Keep dense results and small reusable buffers.
+    if (out.capacity() > 4096 && out.size() < out.capacity() / 8)
+        std::vector<int>(out.begin(), out.end()).swap(out);
 }
 
+namespace {
+PaneDecorator g_dup_decorator = nullptr;
+MediaPaneDecorator g_media_decorator = nullptr;
+void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const PlacesCatalog* places);
+} // namespace
+
+void SetDupPaneDecorator(PaneDecorator decorator) { g_dup_decorator = decorator; }
+void SetMediaPaneDecorator(MediaPaneDecorator decorator) { g_media_decorator = decorator; }
+
 void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCatalog* places) {
+    out.banner_action_labels[0].clear();
+    out.banner_action_labels[1].clear();
+    out.dup_funnel = {};
+    out.dup_chips = false;
+    out.dup_empty_title.clear();
+    out.media_columns = 0;
+    out.media_cell = nullptr;
+    FillPaneViewModelBody(out, pane, places);
+    const Tab* tab = pane.ActiveTab();
+    if (g_media_decorator && tab) g_media_decorator(*tab, out);
+    // A media column order without those columns on screen (switched off,
+    // another folder) sorts by name (SortEntries); show it as such.
+    if (!out.media_columns && out.sort_column >= ui::SortColumn::MediaTaken) out.sort_column = ui::SortColumn::Name;
+    if (g_dup_decorator && tab && tab->current_path.starts_with(L"pulse:ai-list:"))
+        g_dup_decorator(tab->current_path, out);
+}
+
+namespace {
+void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const PlacesCatalog* places) {
     const Tab* tab = pane.ActiveTab();
     if (!tab) return;
     out.path = tab->virtual_title.empty() ? DisplayPath(tab->current_path) : tab->virtual_title;
@@ -2045,7 +2084,7 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
     out.can_create_folder = out.can_create;  // the app adds a writable phone folder
     // The network page and a server's share list: 连接服务器 takes 新建's slot.
     out.connect_server = tab->current_path == L"pulse:networks" || IsUncServerRoot(tab->current_path);
-    out.curated_order = virtual_kind == L"starred" || virtual_kind == L"recent" || virtual_kind == L"changes" ||
+    out.curated_order = virtual_kind == L"recent" || virtual_kind == L"changes" ||
                         virtual_kind == L"ai-list";
     out.is_starred = virtual_kind == L"starred";
     out.is_recent = virtual_kind == L"recent";
@@ -2117,6 +2156,8 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
         out.selected_count = 0;
     out.all_selected = tab->all_selected;
     out.selected_indices = tab->all_selected ? nullptr : &tab->selected;
+    out.selection_owner = tab;
+    out.selection_revision = tab->selection_revision;
     out.focus_first_hint = tab->HasFocusHint();
     out.focus_ring_source = tab->HasCaret() && !tab->IsSelected(tab->caret_index) ? tab->caret_index : -1;
     out.scroll_y = tab->scroll_y;
@@ -2124,12 +2165,39 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
     out.view_mode = tab->view_mode;
     out.icon_dip = tab->icon_dip;
     out.wall = tab->wall;
+    out.wall_view_identity = reinterpret_cast<uintptr_t>(tab);
     out.view_generation = tab->view_generation;
     out.sort_column = tab->sort_column;
     out.sort_direction = tab->sort_direction;
     out.details_column_dividers = tab->details_column_dividers;
+    out.media_column_widths = tab->media_column_widths;
     out.search_column_dividers = tab->search_column_dividers;
     FillColumnStripView(out.column_strip, *tab);
+    // This PC in details view: its own columns, and 存储总览 over two or more
+    // local drives whose sizes are known.
+    out.this_pc_columns = tab->current_path.empty() && tab->view_mode == ui::ViewMode::Details &&
+                          !out.column_strip.Active();
+    out.drive_overview = {};
+    if (out.this_pc_columns && tab->snapshot && !tab->loading) {
+        for (size_t i = 0; i < tab->EntryCount(); ++i) {
+            const fs::DirEntry& e = tab->EntryAt(i);
+            if (!e.drive_type || e.drive_remote_like || e.drive_total == 0) continue;
+            ui::DriveOverviewView::Drive drive;
+            const std::wstring& root = e.full_path;
+            const size_t colon = root.find(L':');
+            if (colon != std::wstring::npos && colon > 0) drive.letter = root.substr(colon - 1, 2);
+            drive.total = e.drive_total;
+            drive.free = std::min(e.drive_free, e.drive_total);
+            drive.used = static_cast<float>(static_cast<double>(drive.total - drive.free) /
+                                            static_cast<double>(drive.total));
+            out.drive_overview.free += drive.free;
+            out.drive_overview.total += drive.total;
+            out.drive_overview.drives.push_back(std::move(drive));
+        }
+        // Drive letter order, whatever the rows are sorted by.
+        std::sort(out.drive_overview.drives.begin(), out.drive_overview.drives.end(),
+                  [](const auto& a, const auto& b) { return a.letter < b.letter; });
+    }
     out.focused = pane.focused;
     out.snapshot = tab->snapshot;
     out.tag_catalog = places;
@@ -2210,17 +2278,22 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
     if (out.group_by != 0 && tab->snapshot && !tab->content_results && !out.compare_active) {
         const GroupBy by = GroupByFromInt(out.group_by);
         GroupClock clock = by == GroupBy::Date ? MakeGroupClock(tab->sort_column) : GroupClock{};
-        // Tag groups re-split when the catalog changes; dates at midnight.
+        clock.folders = tab->EffectiveFolderSort();
+        // Tag groups re-split when the catalog changes; dates at midnight;
+        // media groups as values come in (each paced re-sort pass).
         const auto tag_catalog = by == GroupBy::Tag ? CurrentTagCatalog() : nullptr;
-        const uint64_t day_key = by == GroupBy::Tag ? (tag_catalog ? tag_catalog->revision : 0) : clock.today;
+        const bool media_groups = IsMediaGroup(by);
+        const uint64_t day_key = by == GroupBy::Tag ? (tag_catalog ? tag_catalog->revision : 0)
+                               : media_groups ? tab->media_resort_revision : clock.today;
         const int sort_key = static_cast<int>(tab->sort_column) * 2 +
-                             static_cast<int>(tab->sort_direction);
+                             static_cast<int>(tab->sort_direction) + 128 * static_cast<int>(clock.folders);
         if (!tab->view_groups || tab->view_groups_snapshot != tab->snapshot ||
             tab->view_groups_filter != out.filter_map || tab->view_groups_by != out.group_by ||
             tab->view_groups_sort != sort_key || tab->view_groups_day != day_key ||
             tab->view_groups_rev != tab->group_collapse_rev) {
             auto groups = std::make_shared<ui::ListGroups>();
             if (by == GroupBy::Tag) clock.tags = TagGroupsForFolder(tab->current_path);
+            if (media_groups) clock.media = MediaGroupsForFolder(tab->current_path, by);
             const auto& entries = *tab->snapshot;
             const auto folded = tab->collapsed_groups.find(tab->current_path);
             const std::set<std::wstring>* collapsed =
@@ -2231,6 +2304,7 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
             std::set<std::wstring> seen;
             bool contiguous = true;
             int prev = -1;
+            int prev_rank = 0;
             for (size_t row = 0; row < rows; ++row) {
                 const int src = out.filter_map ? (*out.filter_map)[row] : static_cast<int>(row);
                 if (src < 0 || static_cast<size_t>(src) >= entries.size()) {
@@ -2238,12 +2312,13 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
                     continue;
                 }
                 const fs::DirEntry& e = entries[static_cast<size_t>(src)];
+                const int rank = GroupRank(e, by, clock);
                 if (groups->empty() || prev < 0 ||
-                    GroupCompare(entries[static_cast<size_t>(prev)], e, by, clock,
-                                 tab->sort_column, tab->sort_direction) != 0) {
+                    GroupCompareRanks(entries[static_cast<size_t>(prev)], e, by,
+                                      tab->sort_column, tab->sort_direction, prev_rank, rank, clock) != 0) {
                     ui::ListGroup g;
                     g.first = static_cast<int>(row);
-                    g.rank = GroupRank(e, by, clock);
+                    g.rank = rank;
                     g.sample = src;
                     g.key = GroupKey(e, by, clock);
                     g.collapsed = collapsed && collapsed->contains(g.key);
@@ -2254,6 +2329,9 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
                     }
                     if (by == GroupBy::Location) g.label = GroupLocationLabel(e);
                     if (by == GroupBy::AiDup) g.label = e.change_old_path;
+                    if (media_groups)   // empty: 未知 (the renderer names it)
+                        g.label = g.rank < 0 ? l10n::Get(l10n::StringId::GroupFolders) : MediaGroupLabel(clock, g.rank);
+                    if (rank == kFolderGroupRank) g.label = l10n::Get(l10n::StringId::GroupFolders);
                     if (!seen.insert(g.key).second) {
                         contiguous = false;
                         break;
@@ -2264,6 +2342,7 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
                 ++g.count;
                 if (!e.is_dir) g.bytes += e.size;
                 prev = src;
+                prev_rank = rank;
             }
             if (!contiguous) groups->clear();
             tab->view_groups = std::move(groups);
@@ -2299,6 +2378,7 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
         }
     }
 }
+} // namespace
 
 namespace {
 std::wstring CompareKey(const std::wstring& name) {
@@ -2547,45 +2627,66 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
     }
 
     workspaces.header = l10n::Get(l10n::StringId::SidebarWorkspaces);
+    workspaces.add_action = ui::SidebarAddAction::SaveWorkspace;
+    workspaces.badge_count = places ? static_cast<int>(places->workspaces.size()) : 0;
     if (places) {
         for (int i = 0; i < static_cast<int>(places->workspaces.size()); ++i) {
             const auto& w = places->workspaces[static_cast<size_t>(i)];
             ui::SidebarItem it;
             it.label = w.name.empty() ? TabTitle(w.root) : w.name;
-            it.detail = DisplayPath(w.root);
             it.path = MakeWorkspacePath(i);
-            const bool unc = fs::IsUncPath(w.root);
-            it.icon_glyph = unc ? L"\xE968" : L"\xE8B7";
-            it.fallback_text = L"WS";
-            it.icon_color = ui::HexColor(unc ? 0x38BDF8 : 0x34D399);
-            if (unc) it.badge = l10n::Get(l10n::StringId::Server);
-            if (i == places->active_workspace)
-                it.badge = l10n::Get(unc ? l10n::StringId::CurrentServer
-                                         : l10n::StringId::Current);
-            // The saved split is what sets a workspace apart from a Quick
-            // access link; show it when there is more than one pane.
-            const auto panes = std::count_if(w.pane_paths.begin(), w.pane_paths.end(),
-                [](const std::wstring& p) { return !p.empty(); });
-            if (panes > 1) {
-                wchar_t pane_text[64]{};
-                swprintf_s(pane_text, l10n::Get(l10n::StringId::WorkspacePanes).c_str(),
-                           static_cast<int>(panes));
-                if (it.badge.empty()) it.badge = pane_text;
-                it.detail += L" \x00B7 ";
-                it.detail += pane_text;
+            it.workspace_index = i;
+            it.workspace_root = w.root;
+            it.workspace_layout = w.layout;
+            it.workspace_active = i == places->active_workspace;
+            it.workspace_color_rgb = w.color_rgb;
+            it.workspace_panes = w.pane_paths.empty() ? std::vector<std::wstring>{w.root} : w.pane_paths;
+            it.workspace_views = w.pane_views;
+            it.expandable = true;
+            it.expanded = w.expanded;
+            it.icon_color = ui::HexColor(w.color_rgb);
+            for (const auto& path : it.workspace_panes) {
+                if (!it.detail.empty()) it.detail += L" \x00B7 ";
+                it.detail += TabTitle(path);
             }
+            if (it.workspace_active) it.badge = l10n::Get(l10n::StringId::Current);
+            else if (fs::IsUncPath(w.root)) it.badge = l10n::Get(l10n::StringId::Server);
             workspaces.items.push_back(std::move(it));
-            for (const auto& child : places->FrequentChildren(i, 8)) {
-                ui::SidebarItem sub;
-                sub.label = TabTitle(child);
-                sub.path = child;
-                sub.indent = 1;
-                sub.icon_glyph = unc ? L"\xE968" : L"\xE8B7";
-                sub.fallback_text = L"Dir";
-                sub.icon_color = ui::HexColor(unc ? 0x38BDF8 : 0x94A3B8);
-                workspaces.items.push_back(std::move(sub));
+            if (w.expanded) {
+                const auto paths = w.pane_paths.empty() ? std::vector<std::wstring>{w.root} : w.pane_paths;
+                for (size_t j = 0; j < paths.size(); ++j) {
+                    ui::SidebarItem sub;
+                    sub.label = TabTitle(paths[j]);
+                    sub.path = paths[j];
+                    sub.indent = 1;
+                    sub.fallback_text = std::to_wstring(j + 1);
+                    sub.workspace_child_number = static_cast<int>(j + 1);
+                    sub.workspace_parent_index = i;
+                    sub.workspace_child_view = j < w.pane_views.size() ? w.pane_views[j] : ui::ViewMode::Details;
+                    sub.icon_glyph = L"\xE8B7";
+                    sub.icon_color = ui::HexColor(w.color_rgb);
+                    workspaces.items.push_back(std::move(sub));
+                }
+                for (const auto& child : places->FrequentChildren(i, 8)) {
+                    if (std::find(paths.begin(), paths.end(), child) != paths.end()) continue;
+                    ui::SidebarItem sub;
+                    sub.label = TabTitle(child);
+                    sub.path = child;
+                    sub.indent = 1;
+                    sub.icon_glyph = L"\xE8B7";
+                    sub.icon_color = ui::HexColor(0x94A3B8);
+                    workspaces.items.push_back(std::move(sub));
+                }
             }
         }
+    }
+
+    if (workspaces.items.empty()) {
+        ui::SidebarItem empty;
+        empty.workspace_empty = true;
+        empty.label = l10n::Get(l10n::StringId::WorkspaceEmptyHint);
+        empty.detail = l10n::Get(l10n::StringId::WorkspaceSaveCurrent);
+        workspaces.items.push_back(std::move(empty));
     }
 
     // Quick access: the built-in links (minus the ones switched off) and the
@@ -2628,14 +2729,14 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
                 std::move(row));
             ++starred_insert;
         };
-        const auto folder_row = [](const StarredItem& entry, int indent) {
+        const auto starred_row = [](const StarredItem& entry, int indent) {
             ui::SidebarItem child;
             child.label = TabTitle(entry.path);
             child.path = entry.path;
             child.indent = indent;
             child.starred_child = true;
-            child.icon_glyph = L"\xE8B7";
-            child.fallback_text = L"Dir";
+            child.icon_glyph = entry.kind == PlaceItemKind::File ? L"\xE8A5" : L"\xE8B7";
+            child.fallback_text = entry.kind == PlaceItemKind::File ? L"File" : L"Dir";
             child.icon_color = ui::HexColor(0xFBBF24);
             child.badge = entry.badge;
             child.badge_color = ui::HexColor(entry.badge_rgb);
@@ -2644,7 +2745,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
         // 收藏夹分组与分隔线: a group folds its folders under one row; a
         // separator is a line above the next row.
         bool line = false;
-        for (const auto& row : places->StarredRows(true)) {
+        for (const auto& row : places->StarredRows(false)) {
             if (row.kind == StarredRow::Kind::Separator) {
                 line = true;
                 continue;
@@ -2666,10 +2767,10 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
                 header.divider_above = std::exchange(line, false);
                 add(std::move(header));
                 if (group->collapsed) continue;
-                for (size_t member : row.members) add(folder_row(places->starred_items[member], 2));
+                for (size_t member : row.members) add(starred_row(places->starred_items[member], 2));
                 continue;
             }
-            ui::SidebarItem child = folder_row(places->starred_items[row.index], 1);
+            ui::SidebarItem child = starred_row(places->starred_items[row.index], 1);
             child.divider_above = std::exchange(line, false);
             add(std::move(child));
         }
@@ -2718,7 +2819,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
     // Section icons: every header section names itself with a glyph, so the wide
     // header and the narrow rail read the same. The PC glyph (monitor on a
     // stand) keeps "This PC" apart from the monitor-only Desktop row.
-    workspaces.icon_glyph = L"\xE8B7";    // folder
+    workspaces.icon_glyph = L"\xF5BE";    // shared workspace layout icon
     access.icon_glyph = L"\xE8A9";        // app grid
     savedSearches.icon_glyph = L"\xE721"; // search
     tags.icon_glyph = L"\xE8EC";          // tag

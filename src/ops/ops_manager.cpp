@@ -1,11 +1,33 @@
+#include "hdd_copy_buffer_policy.h"
+#include "../common/rename_identity.h"
+#include "../common/recycle_restore.h"
 #include "shell_command_template.h"
 // ops_manager.cpp — See ops_manager.h for the contract.
 #include "ops_manager.h"
+#include "controlled_transfer_probe.h"
+#include "failed_retry_template.h"
+#ifndef PULSE_ELEVATED_HOST
+#include "elevated_transfer_client.h"
+#endif
 #include "../common/runtime_log.h"
+#include "../common/preview_diagnostics.h"
 #include "operation_presentation.h"
 #include "transfer_rate_estimator.h"
+#include "transfer_stage_timing.h"
+#include "transfer_diagnostics.h"
+#include "transfer_enumeration_cursor.h"
+#include "transfer_pool_progress.h"
+#include "verification_worker.h"
+#include "transfer_device_budget.h"
+#include "transfer_features.h"
+#include "owned_transfer_output.h"
+#include "replacement_backup.h"
+#include "bounded_target_listing.h"
+#include "directory_metadata.h"
 #include "transfer_engine.h"
 #include "shell_command.h"
+#include "image_open_dispatch.h"
+#include "open_item_directory.h"
 #include "shortcut_launch.h"
 #include "elevated_transfer.h"
 #include "source_listing.h"
@@ -31,8 +53,10 @@
 #include <filesystem>
 #include <system_error>
 #include <memory>
+#include <limits>
 #include <thread>
 #include <unordered_map>
+#include <climits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -47,6 +71,47 @@ void ObserveShellCallbacksForReview(const ipc::ShellClient::Callbacks&);
 #endif
 
 namespace {
+// Session identity for generated containers that may survive undo.
+std::vector<std::wstring> GeneratedRecycleCandidates(const std::wstring& original) {
+    std::vector<std::wstring> result;
+    const auto wanted = recycle::CanonPath(original);
+    if (wanted.size() < 3 || wanted[1] != L':') return result;
+    const auto sid = CurrentUserSidString();
+    if (sid.empty()) return result;
+    const auto root = wanted.substr(0, 2) + L"\\$Recycle.Bin\\" + sid;
+    WIN32_FIND_DATAW data{};
+    HANDLE find = FindFirstFileW((root + L"\\$I*").c_str(), &data);
+    if (find == INVALID_HANDLE_VALUE) return result;
+    do {
+        auto index = root + L"\\" + data.cFileName;
+        std::wstring path;
+        if (!recycle::ReadRecycleOriginal(index, path) || recycle::CanonPath(path) != wanted) continue;
+        index[index.find_last_of(L'\\') + 2] = L'R';
+        if (GetFileAttributesW(index.c_str()) != INVALID_FILE_ATTRIBUTES) result.push_back(std::move(index));
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+    return result;
+}
+
+std::optional<GeneratedDirectoryReceipt> CaptureGeneratedDirectory(const std::wstring& path) {
+    HANDLE handle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return std::nullopt;
+    BY_HANDLE_FILE_INFORMATION info{};
+    const bool ok = GetFileInformationByHandle(handle, &info) &&
+        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT);
+    CloseHandle(handle);
+    if (!ok) return std::nullopt;
+    return GeneratedDirectoryReceipt{path, info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow};
+}
+
+// UndoEntry::recorded_at: the wall clock, shown as HH:MM in the history.
+uint64_t UndoClockNow() {
+    FILETIME now{};
+    GetSystemTimeAsFileTime(&now);
+    return (static_cast<uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+}
 
 std::wstring FileName(const std::wstring& path) {
     std::wstring_view v = path;
@@ -422,7 +487,7 @@ std::wstring CreateFailureText(DWORD code) {
 // 新建 entries (ShellNew) reuse the text-file path: a template file is copied
 // (CopyFile fails rather than overwrite), Data bytes are written, else the
 // file stays empty like NullFile.
-bool CreateInProcess(const OpRequest& req, std::wstring* error) {
+bool CreateInProcess(const OpRequest& req, std::wstring* error, DWORD* failure_code) {
     const std::wstring path = req.sources.empty() ? std::wstring{} : req.sources.front();
     DWORD code = ERROR_SUCCESS;
     if (path.empty()) {
@@ -465,12 +530,13 @@ bool CreateInProcess(const OpRequest& req, std::wstring* error) {
         }
     }
     if (code != ERROR_SUCCESS && error) *error = CreateFailureText(code);
+    if (failure_code) *failure_code = code;
     return code == ERROR_SUCCESS;
 }
 
 enum class RenameResult { Completed, Rejected };
 RenameResult RenameInProcess(const std::wstring& source, const std::wstring& new_name,
-                     std::wstring* error, DWORD* code = nullptr) {
+                     std::wstring* error, DWORD* code = nullptr, const RenameIdentity* identity = nullptr) {
     if (code) *code = ERROR_SUCCESS;
     if (source.empty() || !IsRenameComponent(new_name)) {
         if (error) *error = source.empty() ? l10n::Get(l10n::StringId::InvalidName_2).c_str() : RenameNameText(new_name);
@@ -488,8 +554,9 @@ RenameResult RenameInProcess(const std::wstring& source, const std::wstring& new
         if (error) *error = l10n::Get(l10n::StringId::TheTargetNameAlreadyExists).c_str();
         return RenameResult::Rejected;
     }
-    if (!MoveFileW(source.c_str(), target.c_str())) {
-        const DWORD failure = GetLastError();
+    const DWORD failure = identity ? RenameIdentified(source, new_name, *identity)
+        : MoveFileW(source.c_str(), target.c_str()) ? ERROR_SUCCESS : GetLastError();
+    if (failure != ERROR_SUCCESS) {
         if (code) *code = failure;
         if (error) *error = RenameFailureText(failure);
         return RenameResult::Rejected;
@@ -566,6 +633,7 @@ struct TransferEntry {
     // completed lists are built from these in entry order afterwards.
     bool completed = false;
     bool source_removed = false;
+    bool destination_written = false;  // independent of move/source-deletion success
     bool deferred = false;  // a large file moved behind the small ones
     uint64_t bytes = 0;
     DWORD attributes = FILE_ATTRIBUTE_NORMAL;
@@ -577,8 +645,10 @@ struct TransferEntry {
 struct CopyProgressContext {
     std::atomic<bool>* cancel = nullptr;
     std::atomic<bool>* pause = nullptr;
+    std::atomic<bool>* skip = nullptr;
     std::function<void(uint64_t, uint64_t)> report;
     bool pause_sent = false;
+    std::shared_ptr<VerificationStamp> owned_output;
     ULONGLONG last_report = 0;
 };
 
@@ -586,6 +656,19 @@ COPYFILE2_MESSAGE_ACTION CALLBACK CopyProgress(const COPYFILE2_MESSAGE* message,
                                                void* raw) {
     auto* ctx = static_cast<CopyProgressContext*>(raw);
     if (!ctx || !message) return COPYFILE2_PROGRESS_CANCEL;
+    if (!ctx->owned_output) {
+        HANDLE target = INVALID_HANDLE_VALUE;
+        switch (message->Type) {
+        case COPYFILE2_CALLBACK_CHUNK_STARTED: target = message->Info.ChunkStarted.hDestinationFile; break;
+        case COPYFILE2_CALLBACK_CHUNK_FINISHED: target = message->Info.ChunkFinished.hDestinationFile; break;
+        case COPYFILE2_CALLBACK_STREAM_STARTED: target = message->Info.StreamStarted.hDestinationFile; break;
+        case COPYFILE2_CALLBACK_STREAM_FINISHED: target = message->Info.StreamFinished.hDestinationFile; break;
+        default: break;
+        }
+        VerificationStamp stamp;
+        if (target != INVALID_HANDLE_VALUE && CaptureOwnedOutputStamp(target, stamp))
+            ctx->owned_output = std::make_shared<VerificationStamp>(stamp);
+    }
     uint64_t transferred = 0;
     uint64_t total = 0;
     // Only these carry byte counts. The start messages report 0 of 0, which
@@ -615,7 +698,7 @@ COPYFILE2_MESSAGE_ACTION CALLBACK CopyProgress(const COPYFILE2_MESSAGE* message,
         ctx->last_report = now;
         ctx->report(transferred, total);
     }
-    if (ctx->cancel && ctx->cancel->load()) return COPYFILE2_PROGRESS_CANCEL;
+    if ((ctx->cancel && ctx->cancel->load()) || (ctx->skip && ctx->skip->load())) return COPYFILE2_PROGRESS_CANCEL;
     if (ctx->pause && ctx->pause->load() && !ctx->pause_sent) {
         ctx->pause_sent = true;
         return COPYFILE2_PROGRESS_PAUSE;
@@ -717,17 +800,9 @@ std::wstring UniqueTemporaryPath(const std::wstring& destination,
     return base + L"-" + std::to_wstring(GetTickCount64());
 }
 
-bool SetCopiedDirectoryMetadata(const TransferEntry& entry) {
-    HANDLE handle = CreateFileW(entry.destination.c_str(), FILE_WRITE_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) return false;
-    const BOOL times = SetFileTime(handle, &entry.created, &entry.accessed, &entry.modified);
-    CloseHandle(handle);
-    DWORD attrs = entry.attributes & ~(FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY);
-    if (attrs == 0) attrs = FILE_ATTRIBUTE_NORMAL;
-    SetFileAttributesW(entry.destination.c_str(), attrs);
-    return times != FALSE;
+bool SetCopiedDirectoryMetadata(const TransferEntry& entry, DWORD& error) {
+    return ApplyDirectoryMetadata(entry.destination, entry.created, entry.accessed,
+                                  entry.modified, entry.attributes, error);
 }
 
 bool CopyReparsePoint(const TransferEntry& entry, std::wstring& error) {
@@ -793,61 +868,6 @@ bool StartsWithPath(const std::wstring& path, const std::wstring& prefix) {
     if (path.size() < prefix.size() || _wcsnicmp(path.c_str(), prefix.c_str(), prefix.size()) != 0)
         return false;
     return path.size() == prefix.size() || path[prefix.size()] == L'\\' || path[prefix.size()] == L'/';
-}
-
-bool Sha256File(const std::wstring& path, const std::atomic<bool>& cancel,
-                const std::function<void()>& wait_if_paused, std::array<uint8_t, 32>& digest,
-                std::wstring& error) {
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    DWORD object_bytes = 0;
-    DWORD hash_bytes = 0;
-    DWORD returned = 0;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0 ||
-        BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
-                          reinterpret_cast<PUCHAR>(&object_bytes), sizeof(object_bytes),
-                          &returned, 0) < 0 ||
-        BCryptGetProperty(algorithm, BCRYPT_HASH_LENGTH,
-                          reinterpret_cast<PUCHAR>(&hash_bytes), sizeof(hash_bytes),
-                          &returned, 0) < 0 || hash_bytes != digest.size()) {
-        if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
-        error = l10n::Get(l10n::StringId::CouldNotInitializeSHA256Verification).c_str();
-        return false;
-    }
-    std::vector<uint8_t> object(object_bytes);
-    if (BCryptCreateHash(algorithm, &hash, object.data(), object_bytes,
-                         nullptr, 0, 0) < 0) {
-        BCryptCloseAlgorithmProvider(algorithm, 0);
-        error = l10n::Get(l10n::StringId::CouldNotInitializeSHA256Verification).c_str();
-        return false;
-    }
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-    bool ok = file != INVALID_HANDLE_VALUE;
-    std::vector<uint8_t> buffer(1024 * 1024);
-    while (ok && !cancel.load()) {
-        wait_if_paused();
-        if (cancel.load()) break;
-        DWORD read = 0;
-        if (!ReadFile(file, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr)) {
-            ok = false;
-            break;
-        }
-        if (read == 0) break;
-        if (BCryptHashData(hash, buffer.data(), read, 0) < 0) {
-            ok = false;
-            break;
-        }
-    }
-    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
-    if (ok && !cancel.load() && BCryptFinishHash(hash, digest.data(),
-                                                 static_cast<ULONG>(digest.size()), 0) < 0)
-        ok = false;
-    BCryptDestroyHash(hash);
-    BCryptCloseAlgorithmProvider(algorithm, 0);
-    if (!ok && error.empty()) error = Win32Message(GetLastError()) + L" | " + path;
-    return ok && !cancel.load();
 }
 
 std::wstring JsonString(const std::wstring& value) {
@@ -931,21 +951,6 @@ bool SameFileObject(const std::wstring& left, const std::wstring& right) {
     return std::filesystem::equivalent(left, right, error) && !error;
 }
 
-// Folder that contains `path`, for ShellExecuteEx's lpDirectory. Empty for
-// shell namespace paths or when the parent is not an existing directory.
-// Runs on the open thread (the parent may be on a slow network share).
-std::wstring OpenItemWorkingDirectory(const std::wstring& path) {
-    const std::wstring plain = pulse::path::StripExtendedPathPrefix(path);
-    if (plain.size() < 3 || plain.rfind(L"::", 0) == 0) return {};
-    const size_t slash = plain.find_last_of(L"\\/");
-    if (slash == std::wstring::npos || slash == 0) return {};
-    std::wstring dir = plain.substr(0, slash);
-    if (dir.size() == 2 && dir[1] == L':') dir += L'\\'; // drive root: "C:" must become "C:\\"
-    const DWORD attrs = GetFileAttributesW(dir.c_str());
-    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) return {};
-    return dir;
-}
-
 // Undo history keeps the newest kMaxUndoSteps steps, so session.json stops
 // growing. A step is one entry, or a run of entries sharing a nonzero group
 // (undone together); trimming drops whole steps from the oldest end.
@@ -967,6 +972,16 @@ void TrimUndoHistory(std::deque<UndoEntry>& undo) {
 } // namespace
 
 // See ops_manager.h.
+std::wstring VerificationFailureText(const VerificationResult& result, HRESULT hr) {
+    switch (result.error) {
+    case VerificationError::SourceChanged: return l10n::Get(l10n::StringId::CopyVerificationSourceChanged);
+    case VerificationError::TargetChanged: return l10n::Get(l10n::StringId::CopyVerificationTargetChanged);
+    case VerificationError::Mismatch: return l10n::Get(l10n::StringId::SHA256VerificationFailed);
+    case VerificationError::Provider: return l10n::Get(l10n::StringId::CouldNotInitializeSHA256Verification);
+    default: return TransferFailureText(hr);
+    }
+}
+
 bool IsStopTransferError(HRESULT hr) {
     if (hr == E_OUTOFMEMORY) return true;
     // The Shell's copy engine codes share their low word with unrelated
@@ -1093,6 +1108,7 @@ std::wstring OpsManager::JournalJsonLocked() const {
     std::wstring out = L"{\n  \"schema\":1,\n  \"entries\":[";
     bool first = true;
     auto append = [&](const QueueItem& item, bool active) {
+        if (item.controlled || item.req.rename_authorized || item.req.generated_output) return; // Session authority must never become path-only recovery requests.
         if (item.req.sources.empty() && item.req.type != OpType::EmptyRecycle) return;
         // A phone operation is not resumed after a restart: the device may be
         // gone, and a half-done copy is left for the user to look at.
@@ -1152,8 +1168,18 @@ void OpsManager::Start(std::function<void()> notify, bool own_shell_client) {
 }
 
 void OpsManager::Stop() {
+    stopping_ = true;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& [id, task] : external_tasks_) {
+            (void)id;
+            task.cancelled = true;
+            task.status.phase = OpPhase::Cancelling;
+        }
+    }
     if (!running_) return;
     stopping_ = true;
+    item_control_.Cancel();
     {
         std::lock_guard<std::mutex> lock(menu_mutex_);
         menu_running_ = false;
@@ -1174,11 +1200,48 @@ void OpsManager::Stop() {
     cv_.notify_all();
     done_cv_.notify_all();
     if (thread_.joinable()) thread_.join();
+    std::vector<std::pair<std::function<void(ControlledTransferResult)>, ControlledTransferResult>> rename_notifications;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (const auto& item : queue_)
-            if (item.open_path.empty()) finished_tasks_.push_back({item.seq, {}});
+        for (const auto& item : queue_) {
+            if (!item.open_path.empty()) continue;
+            FinishedTask finished;
+            finished.task_id = item.seq;
+            finished.type = item.req.type;
+            finished.sources = item.req.sources;
+            if (item.controlled) {
+                item.controlled->cancelled = true;
+                ControlledTransferResult result;
+                result.permit_error = extensions::transfer_plan::Error::Cancelled;
+                for (const auto& source : item.req.sources) {
+                    ControlledTransferItem detail;
+                    detail.source = source;
+                    detail.state = ControlledTransferState::Cancelled;
+                    detail.error = ERROR_CANCELLED;
+                    result.items.push_back(std::move(detail));
+                }
+                item.controlled->status.phase = OpPhase::Failed;
+                item.controlled->status.result = result;
+                finished.controlled_result = std::move(result);
+                RetainControlledLocked(item.controlled);
+            }
+            if (item.req.rename_completed) {
+                ControlledTransferResult result;
+                result.error = ERROR_CANCELLED;
+                for (size_t i = 0; i < item.req.sources.size(); ++i) {
+                    ControlledTransferItem detail;
+                    detail.source = item.req.sources[i];
+                    if (i < item.req.new_names.size()) detail.destination = JoinPath(ParentOf(detail.source), item.req.new_names[i]);
+                    detail.state = ControlledTransferState::Cancelled;
+                    detail.error = ERROR_CANCELLED;
+                    result.items.push_back(std::move(detail));
+                }
+                rename_notifications.emplace_back(item.req.rename_completed, std::move(result));
+            }
+            finished_tasks_.push_back(std::move(finished));
+        }
     }
+    for (auto& [callback, result] : rename_notifications) callback(std::move(result));
     if (notify_) notify_();
     {
         std::scoped_lock lock(done_mutex_, menu_mutex_);
@@ -1192,12 +1255,16 @@ void OpsManager::Stop() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         queue_.clear();
+        retained_task_ids_.clear();
+        retained_final_statuses_.clear();
+        recent_completions_.clear();
+        history_replay_.reset();
     }
 }
 
-bool OpsManager::TryPrepareForUpdate() {
+bool OpsManager::TryPrepareForUpdate(bool continue_shutdown) {
     std::scoped_lock lock(mutex_, menu_mutex_);
-    if (update_preparing_ || active_item_ || !queue_.empty() || status_.active ||
+    if ((update_preparing_ && !continue_shutdown) || active_item_ || !queue_.empty() || !external_tasks_.empty() || status_.active ||
         recovery_cleanup_active_ || !recovery_cleanup_roots_.empty() ||
         menu_dispatching_ || !menu_queue_.empty() || !ctx_invoke_ids_.empty()) return false;
     update_preparing_ = true;
@@ -1211,7 +1278,10 @@ void OpsManager::CancelUpdatePreparation() {
 
 uint64_t OpsManager::Submit(OpRequest req) {
     if (!own_shell_client_ && req.type != OpType::Copy && req.type != OpType::Move &&
-        req.type != OpType::Rename) return 0;
+        req.type != OpType::Rename && req.type != OpType::RecycleDelete &&
+        req.type != OpType::RealDelete && req.type != OpType::CreateFolder &&
+        req.type != OpType::CreateTextFile && req.type != OpType::RestoreRecycle) return 0;
+    if (!own_shell_client_ && IsShellTransferRequest(req)) return 0;
     QueueItem item;
     item.req = std::move(req);
     uint64_t seq = 0;
@@ -1225,6 +1295,219 @@ uint64_t OpsManager::Submit(OpRequest req) {
     if (notify_) notify_();
     cv_.notify_one();
     return seq;
+}
+
+bool OpsManager::HasPendingOperations() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return active_item_.has_value() || !queue_.empty() || !external_tasks_.empty();
+}
+
+uint64_t OpsManager::SubmitControlled(extensions::transfer_plan::ExecutionPermit permit,
+                                     extensions::authorization::Registry& registry, bool retain_result) {
+    if (!registry.ValidateBinding(permit.Principal())) return 0;
+    auto job = std::make_shared<ControlledJob>(std::move(permit), registry);
+    QueueItem item;
+    item.controlled = job;
+    const auto& plan = job->permit.Plan().transfer;
+    item.req.type = plan.operation == extensions::transfer_plan::Operation::Move ? OpType::Move : OpType::Copy;
+    item.req.dest_dir = plan.target.path;
+    for (const auto& source : plan.sources) item.req.sources.push_back(source.path);
+    uint64_t id;
+    {
+        std::lock_guard lock(mutex_);
+        if (!running_ || stopping_ || update_preparing_) return 0;
+        size_t count = active_item_ && active_item_->controlled ? 1 : 0;
+        for (const auto& queued : queue_) if (queued.controlled) ++count;
+        if (count >= 32) return 0;
+        if (retain_result) {
+            const auto same = [&](const std::shared_ptr<ControlledJob>& value) {
+                return value && value->retained &&
+                    value->permit.Principal().Package() == job->permit.Principal().Package() &&
+                    value->permit.Principal().Owner() == job->permit.Principal().Owner();
+            };
+            size_t retained = active_item_ && same(active_item_->controlled) ? 1 : 0;
+            for (const auto& queued : queue_) if (same(queued.controlled)) ++retained;
+            for (const auto& finished : controlled_finished_) if (same(finished)) ++retained;
+            if (retained >= 32) return 0;
+            job->retained = true;
+        }
+        id = next_seq_++;
+        item.seq = id;
+        job->status.error = extensions::transfer_plan::Error::None;
+        job->status.task_id = id;
+        queue_.push_back(std::move(item));
+    }
+    NotifyStatusChanged();
+    cv_.notify_one();
+    return id;
+}
+
+std::shared_ptr<OpsManager::ControlledJob> OpsManager::FindControlledLocked(uint64_t task_id) const {
+    if (active_item_ && active_item_->seq == task_id) return active_item_->controlled;
+    for (const auto& item : queue_) if (item.seq == task_id) return item.controlled;
+    for (const auto& job : controlled_finished_) if (job->status.task_id == task_id) return job;
+    return {};
+}
+
+bool OpsManager::OwnsControlled(const ControlledJob& job,
+                               const extensions::authorization::PrincipalBinding& expected) const {
+    const auto& original = job.permit.Principal();
+    return original.Package() == expected.Package() && original.Owner() == expected.Owner() &&
+        job.registry.ValidateBinding(original) && job.registry.ValidateBinding(expected);
+}
+
+ControlledTaskStatus OpsManager::QueryControlled(uint64_t task_id,
+    const extensions::authorization::PrincipalBinding& expected) const {
+    std::lock_guard lock(mutex_);
+    const auto job = FindControlledLocked(task_id);
+    if (!job || !OwnsControlled(*job, expected)) return {};
+    auto result = job->status;
+    result.cancel_requested = job->cancelled.load();
+    if (status_.task_id == task_id) result.progress = status_;
+    result.progress.task_id = task_id;
+    result.progress.phase = result.phase;
+    result.progress.can_pause = false;
+    return result;
+}
+
+bool OpsManager::CancelControlled(uint64_t task_id,
+    const extensions::authorization::PrincipalBinding& expected) {
+    {
+        std::lock_guard lock(mutex_);
+        const auto job = FindControlledLocked(task_id);
+        if (!job || job->status.result || !OwnsControlled(*job, expected)) return false;
+        job->cancelled = true;
+        job->status.phase = OpPhase::Cancelling;
+        if (status_.active && status_.task_id == task_id) status_.phase = OpPhase::Cancelling;
+    }
+    NotifyStatusChanged();
+    cv_.notify_one();
+    return true;
+}
+
+void OpsManager::RetainControlledLocked(const std::shared_ptr<ControlledJob>& job) {
+    controlled_finished_.push_back(job);
+    TrimControlledLocked();
+}
+
+void OpsManager::TrimControlledLocked() {
+    size_t ordinary = static_cast<size_t>(std::count_if(controlled_finished_.begin(), controlled_finished_.end(),
+        [](const auto& job) { return !job->retained; }));
+    for (auto at = controlled_finished_.begin(); at != controlled_finished_.end() && ordinary > 16;) {
+        if (!(*at)->retained) {
+            at = controlled_finished_.erase(at);
+            --ordinary;
+        } else ++at;
+    }
+}
+
+bool OpsManager::ReleaseControlled(uint64_t task_id,
+    const extensions::authorization::PrincipalBinding& expected) {
+    std::lock_guard lock(mutex_);
+    const auto job = FindControlledLocked(task_id);
+    // Cleanup remains possible after revocation, but never across package/owner identities.
+    if (!job || job->permit.Principal().Package() != expected.Package() ||
+        job->permit.Principal().Owner() != expected.Owner()) return false;
+    job->retained = false;
+    if (job->status.result) {
+        const auto at = std::find(controlled_finished_.begin(), controlled_finished_.end(), job);
+        if (at != controlled_finished_.end()) controlled_finished_.erase(at);
+    }
+    return true;
+}
+
+void OpsManager::RunControlled(const std::shared_ptr<ControlledJob>& job, uint64_t task_id) {
+    auto probe = test::TakeControlledTransferProbe();
+    const auto& plan = job->permit.Plan().transfer;
+    uint64_t total = 0;
+    bool overflow = false;
+    for (const auto& source : plan.sources) {
+        if (source.identity.size > (std::numeric_limits<uint64_t>::max)() - total) { overflow = true; break; }
+        total += source.identity.size;
+    }
+    if (overflow) total = 0;
+    {
+        std::lock_guard lock(mutex_);
+        job->status.phase = job->cancelled ? OpPhase::Cancelling : OpPhase::Running;
+    }
+    SetStatus([&](OpStatus& st) {
+        const auto completed = st.completed_ops;
+        st = {};
+        st.completed_ops = completed;
+        st.task_id = task_id; st.active = true; st.can_pause = false;
+        st.type = plan.operation == extensions::transfer_plan::Operation::Move ? OpType::Move : OpType::Copy;
+        st.phase = job->cancelled ? OpPhase::Cancelling : OpPhase::Running;
+        st.total_items = plan.sources.size(); st.total_bytes = total; st.speed_basis = OpSpeedBasis::Bytes;
+        st.destination_dir = plan.target.path; st.destination_label = FileName(plan.target.path);
+        st.summary = ProgressSummary(st.type, plan.sources.size());
+    });
+    std::vector<uint64_t> bytes(plan.sources.size());
+    ControlledTransferResult result;
+    if (overflow) {
+        result.permit_error = extensions::transfer_plan::Error::InvalidDraft;
+        result.error = ERROR_ARITHMETIC_OVERFLOW;
+    } else result = ExecuteControlledTransfer(job->permit, job->registry, job->permit.Principal(), job->cancelled,
+        [&](const ControlledTransferProgress& progress) {
+            if (progress.item >= bytes.size()) return;
+            bytes[progress.item] = (std::min)(progress.bytes, plan.sources[progress.item].identity.size);
+            uint64_t transferred = 0;
+            for (const auto value : bytes) transferred += value;
+            SetProgressStatus([&](OpStatus& st) {
+                st.transferred_bytes = transferred;
+                st.current_item = plan.sources[progress.item].path;
+                st.percent = total ? static_cast<float>(100.0 * static_cast<double>(transferred) / static_cast<double>(total)) : 0.0f;
+            });
+            if (probe) {
+                auto checkpoint = std::exchange(probe, {});
+                checkpoint(task_id);
+            }
+        });
+    CompletedOperation completed;
+    completed.task_id = task_id;
+    completed.type = plan.operation == extensions::transfer_plan::Operation::Move ? OpType::Move : OpType::Copy;
+    completed.refresh_only = true;
+    completed.refresh_directories.push_back(plan.target.path);
+    uint64_t completed_count = 0;
+    uint64_t retained_count = 0;
+    DWORD error = result.error;
+    for (const auto& item : result.items) {
+        if (!error && item.error) error = item.error;
+        if (!error && item.cleanup_error) error = item.cleanup_error;
+        if (item.state == ControlledTransferState::DestinationCommittedSourceRetained) ++retained_count;
+        if (item.state == ControlledTransferState::Copied || item.state == ControlledTransferState::Moved ||
+            item.state == ControlledTransferState::DestinationCommittedSourceRetained) {
+            completed.destinations.push_back(item.destination);
+            completed.refresh_directories.push_back(ParentOf(item.source));
+        }
+        if (item.state == ControlledTransferState::Moved) moved_sources_.push_back(item.source);
+        if (item.state == ControlledTransferState::Copied || item.state == ControlledTransferState::Moved) ++completed_count;
+    }
+    SetStatus([&](OpStatus& st) {
+        st.active = false; st.phase = result.complete ? OpPhase::Completed : OpPhase::Failed;
+        st.completed_ops++; st.completed_items = completed_count;
+        if (result.complete) st.percent = 100.0f;
+        st.bytes_per_second = 0; st.eta_seconds = 0;
+        st.summary = std::wstring(OpVerb(st.type)) + l10n::Get(result.complete ? l10n::StringId::Completed : l10n::StringId::Failed).c_str();
+        if (!result.complete) {
+            st.last_error = l10n::Get(l10n::StringId::ExtensionTransferPartialSummary);
+            const auto replace = [&](std::wstring_view key, uint64_t value) {
+                const auto at = st.last_error.find(key);
+                if (at != std::wstring::npos) st.last_error.replace(at, key.size(), std::to_wstring(value));
+            };
+            replace(L"{completed}", completed_count);
+            replace(L"{retained}", retained_count);
+            replace(L"{pending}", plan.sources.size() - completed_count - retained_count);
+            replace(L"{error}", error ? error : result.permit_error == extensions::transfer_plan::Error::None
+                ? ERROR_CANCELLED : ERROR_ACCESS_DENIED);
+        }
+    });
+    {
+        std::lock_guard lock(mutex_);
+        job->status.phase = result.complete ? OpPhase::Completed : OpPhase::Failed;
+        job->status.progress = status_;
+        job->status.result = std::move(result);
+        if (!completed.destinations.empty()) completions_.push_back(std::move(completed));
+    }
 }
 
 void OpsManager::OpenWith(const std::wstring& path) {
@@ -1284,7 +1567,7 @@ void OpsManager::OpenTerminal(const std::wstring& dir) {
     QueueItem item;
     item.open_path = dir;
     item.open_file = L"wt.exe";
-    item.open_verb = L"__terminal";
+    item.open_verb = L"__open_terminal";  // with the PowerShell / cmd fallback
     item.open_args = TerminalCommandLine(dir);
     EnqueueOpen(std::move(item));
 }
@@ -1319,11 +1602,38 @@ void OpsManager::OpenShortcutProgram(const std::wstring& lnk, const std::wstring
 
 OpsManager::QueueItem* OpsManager::CurrentTransferLocked() {
     QueueItem* item = active_item_ ? &*active_item_ : queue_.empty() ? nullptr : &queue_.front();
-    return item && item->open_path.empty() &&
+    return item && !item->controlled && item->open_path.empty() &&
         (item->req.type == OpType::Copy || item->req.type == OpType::Move) ? item : nullptr;
 }
 
+bool OpsManager::SkipCurrentItem(uint64_t task, uint64_t token) {
+    const bool accepted = item_control_.Skip(task, token);
+    diagnostics::runtime::Event("operation_skip_requested", {{"task", task}, {"token", token}, {"accepted", accepted}});
+    if (accepted) {
+        {
+            std::scoped_lock lock(mutex_, transfer_control_mutex_);
+            if (status_.task_id == task) {
+                transfer_pause_.store(false);
+                status_.pause_requested = false;
+                if (auto* item = CurrentTransferLocked(); item && item->seq == task) item->transfer_paused = false;
+            }
+        }
+        transfer_control_cv_.notify_all();
+        SetStatus([&](OpStatus& status) {
+            if (status.task_id == task && status.current_item_token == token) status.current_item_token = 0;
+        });
+    }
+    return accepted;
+}
+
 void OpsManager::CancelCurrent() {
+    uint64_t external = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!active_item_ && queue_.empty() && !external_tasks_.empty()) external = external_tasks_.begin()->first;
+    }
+    if (external) { CancelTask(external); return; }
+    bool controlled = false;
     bool transfer = false;
     uint64_t task = 0;
     {
@@ -1331,23 +1641,32 @@ void OpsManager::CancelCurrent() {
         // pause wait predicates. No startup store can erase an accepted command.
         std::scoped_lock lock(mutex_, transfer_control_mutex_);
         auto* current = active_item_ ? &*active_item_ : queue_.empty() ? nullptr : &queue_.front();
-        if (current) {
-            current->cancel_requested = true;
-            shell_cancel_requested_ = true;
-        }
-        if (auto* item = CurrentTransferLocked()) {
-            item->transfer_cancelled = true;
-            item->transfer_paused = false;
-            task = item->seq;
-            transfer = true;
-        }
-        if (transfer_active_.load()) {
-            transfer_cancel_.store(true);
-            transfer_pause_.store(false);
-            if (!task) task = status_.task_id;
-            transfer = true;
-        }
+        if (current && current->controlled) {
+            current->controlled->cancelled = true;
+            current->controlled->status.phase = OpPhase::Cancelling;
+            if (status_.active && status_.task_id == current->seq) status_.phase = OpPhase::Cancelling;
+            controlled = true;
+        } else {
+            if (current) {
+                current->cancel_requested = true;
+                shell_cancel_requested_ = true;
+            }
+            if (auto* item = CurrentTransferLocked()) {
+                item->transfer_cancelled = true;
+                item->transfer_paused = false;
+                task = item->seq;
+                transfer = true;
+            }
+            if (transfer_active_.load()) {
+                transfer_cancel_.store(true);
+                item_control_.Cancel();
+                transfer_pause_.store(false);
+                if (!task) task = status_.task_id;
+                transfer = true;
+            }
+            }
     }
+    if (controlled) { NotifyStatusChanged(); return; }
     if (transfer) {
         transfer_control_cv_.notify_all();
         SetStatus([&](OpStatus& status) {
@@ -1357,6 +1676,135 @@ void OpsManager::CancelCurrent() {
     }
     uint32_t id = current_req_id_.load();
     if (id != 0) ipc::ShellClient::Instance().Cancel(id);
+}
+
+std::optional<OpStatus> OpsManager::QueryTask(uint64_t task_id) const {
+    if (!task_id) return std::nullopt;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (const auto task = external_tasks_.find(task_id); task != external_tasks_.end()) return task->second.status;
+    for (const auto& final : external_finals_) if (final.task_id == task_id) return final;
+    if (const auto retained = retained_final_statuses_.find(task_id); retained != retained_final_statuses_.end())
+        return retained->second;
+    if (active_item_ && active_item_->seq == task_id) {
+        OpStatus result = status_;
+        if (result.task_id != task_id) {
+            result = {};
+            result.active = true;
+            result.type = active_item_->req.type;
+            result.phase = OpPhase::Queued;
+            result.task_id = task_id;
+            result.total_items = active_item_->req.sources.size();
+        }
+        return result;
+    }
+    for (const auto& item : queue_) {
+        if (item.seq != task_id) continue;
+        OpStatus result;
+        result.active = true;
+        result.type = item.req.type;
+        result.phase = OpPhase::Queued;
+        result.task_id = task_id;
+        result.total_items = item.req.sources.size();
+        return result;
+    }
+    for (auto it = final_statuses_.rbegin(); it != final_statuses_.rend(); ++it)
+        if (it->task_id == task_id) return *it;
+    return std::nullopt;
+}
+
+bool OpsManager::RetainTask(uint64_t task_id) {
+    if (!task_id) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const bool known = (active_item_ && active_item_->seq == task_id) ||
+        std::any_of(queue_.begin(), queue_.end(), [task_id](const QueueItem& item) { return item.seq == task_id; }) ||
+        std::any_of(final_statuses_.begin(), final_statuses_.end(),
+            [task_id](const OpStatus& status) { return status.task_id == task_id; }) ||
+        retained_final_statuses_.contains(task_id);
+    if (!known) return false;
+    retained_task_ids_.insert(task_id);
+    if (const auto final = std::find_if(final_statuses_.begin(), final_statuses_.end(),
+            [task_id](const OpStatus& status) { return status.task_id == task_id; }); final != final_statuses_.end())
+        retained_final_statuses_.insert_or_assign(task_id, *final);
+    return true;
+}
+
+void OpsManager::ReleaseTask(uint64_t task_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    retained_task_ids_.erase(task_id);
+    retained_final_statuses_.erase(task_id);
+}
+
+bool OpsManager::CancelTask(uint64_t task_id) {
+    if (!task_id) return false;
+    bool external = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (const auto task = external_tasks_.find(task_id); task != external_tasks_.end()) {
+            task->second.cancelled = true;
+            task->second.status.phase = OpPhase::Cancelling;
+            external = true;
+        }
+        for (const auto& final : external_finals_) if (final.task_id == task_id) return false;
+    }
+    if (external) { NotifyStatusChanged(); return true; }
+    bool controlled = false;
+    bool active = false;
+    uint64_t transfer_task = 0;
+    uint32_t shell_request = 0;
+    {
+        std::scoped_lock lock(mutex_, transfer_control_mutex_);
+        QueueItem* target = nullptr;
+        if (active_item_ && active_item_->seq == task_id) {
+            target = &*active_item_;
+            active = true;
+        } else {
+            const auto queued = std::find_if(queue_.begin(), queue_.end(),
+                [task_id](const QueueItem& item) { return item.seq == task_id; });
+            if (queued != queue_.end()) target = &*queued;
+        }
+        if (!target) return false;
+        if (target->controlled) {
+            if (target->controlled->status.result) return false;
+            target->controlled->cancelled = true;
+            target->controlled->status.phase = OpPhase::Cancelling;
+            if (active && status_.active && status_.task_id == task_id)
+                status_.phase = OpPhase::Cancelling;
+            controlled = true;
+        } else {
+            target->cancel_requested = true;
+            if (active) {
+                shell_cancel_requested_ = true;
+                shell_request = current_req_id_.load();
+                if (auto* transfer = CurrentTransferLocked(); transfer && transfer->seq == task_id) {
+                    transfer->transfer_cancelled = true;
+                    transfer->transfer_paused = false;
+                    transfer_task = task_id;
+                }
+                if (transfer_active_.load()) {
+                    transfer_cancel_.store(true);
+                    item_control_.Cancel();
+                    transfer_pause_.store(false);
+                    if (!transfer_task) transfer_task = task_id;
+                }
+            }
+        }
+    }
+    if (controlled) {
+        NotifyStatusChanged();
+        return true;
+    }
+    if (transfer_task) {
+        transfer_control_cv_.notify_all();
+        SetStatus([&](OpStatus& status) {
+            if (status.active && status.task_id == task_id) {
+                status.pause_requested = false;
+                status.phase = OpPhase::Cancelling;
+            }
+        });
+    }
+    if (shell_request) ipc::ShellClient::Instance().Cancel(shell_request);
+    cv_.notify_one();
+    return true;
 }
 
 void OpsManager::PauseCurrent() {
@@ -1399,6 +1847,8 @@ void OpsManager::ResolveConflict(uint64_t token, ConflictChoice choice, bool app
     {
         std::lock_guard<std::mutex> lock(transfer_control_mutex_);
         if (!pending_conflict_ || pending_conflict_->token != token) return;
+        diagnostics::runtime::Event("operation_conflict_resolved", {{"task", pending_conflict_->task_id},
+            {"token", token}, {"choice", static_cast<uint64_t>(choice)}, {"apply_all", apply_to_all}});
         resolved_conflict_token_ = token;
         resolved_conflict_choice_ = choice;
         resolved_conflict_apply_all_ = apply_to_all;
@@ -1476,9 +1926,18 @@ bool OpsManager::RetryLockedOperation(uint64_t task_id, bool close_owners, bool 
 
 std::optional<OpStatus> OpsManager::FinalStatus(uint64_t task_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& final : external_finals_) if (final.task_id == task_id) return final;
     for (auto it = final_statuses_.rbegin(); it != final_statuses_.rend(); ++it)
         if (it->task_id == task_id) return *it;
     return std::nullopt;
+}
+
+std::vector<OpStatus> OpsManager::RecentStatuses() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<OpStatus> results(final_statuses_.rbegin(), final_statuses_.rend());
+    results.insert(results.end(), external_finals_.rbegin(), external_finals_.rend());
+    std::stable_sort(results.begin(), results.end(), [](const OpStatus& a, const OpStatus& b) { return a.terminal_sequence > b.terminal_sequence; });
+    return results;
 }
 
 std::vector<OpsManager::RetrySpawn> OpsManager::RetryFailedItems(uint64_t task_id,
@@ -1632,6 +2091,10 @@ OpStatus OpsManager::Status() const {
     // Cleared before the snapshot: a change made after it posts again.
     notify_pending_since_.store(0);
     std::lock_guard<std::mutex> lock(mutex_);
+    if (status_.active || active_item_ || !queue_.empty()) return PresentOperationStatus(status_);
+    if (!external_tasks_.empty()) return external_tasks_.begin()->second.status;
+    if (!external_finals_.empty() && external_finals_.back().terminal_sequence > status_.terminal_sequence)
+        return external_finals_.back();
     return PresentOperationStatus(status_);
 }
 
@@ -1651,7 +2114,27 @@ void OpsManager::NotifyStatusChanged() {
 void OpsManager::SetStatus(const std::function<void(OpStatus&)>& fn) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        const uint64_t previous_task = status_.task_id;
+        const bool previously_active = status_.active;
+        const auto previous_phase = status_.phase;
+        const auto previous_authorization = status_.authorization;
         fn(status_);
+        if (!status_.active && (previously_active || previous_task != status_.task_id))
+            status_.terminal_sequence = ++terminal_sequence_;
+        if (previous_task != status_.task_id || previous_phase != status_.phase || previous_authorization != status_.authorization) {
+            diagnostics::runtime::Event("operation_state", {{"task", status_.task_id},
+                {"type", static_cast<uint64_t>(status_.type)}, {"from_phase", static_cast<uint64_t>(previous_phase)},
+                {"phase", static_cast<uint64_t>(status_.phase)}, {"authorization", static_cast<uint64_t>(status_.authorization)},
+                {"active", status_.active}, {"bytes", status_.transferred_bytes}, {"items", status_.completed_items}});
+        }
+        if (!status_.active) status_.current_item_token = 0;
+        if (status_.task_id != previous_task) status_.enumeration_complete = true;
+        if (status_.active && !status_.enumeration_complete) {
+            status_.percent = -1.0f;
+            status_.eta_seconds = 0;
+            if (status_.phase == OpPhase::Running)
+                status_.summary = l10n::Get(l10n::StringId::OpScanningAndCopying);
+        }
         ApplyUndoSummaryLocked();
         SampleSpeedLocked();
     }
@@ -1710,7 +2193,15 @@ void OpsManager::SetProgressStatus(const std::function<void(OpStatus&)>& fn) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const uint64_t items_before = status_.completed_items;
+        const uint64_t previous_task = status_.task_id;
         fn(status_);
+        if (status_.task_id != previous_task) status_.enumeration_complete = true;
+        if (status_.active && !status_.enumeration_complete) {
+            status_.percent = -1.0f;
+            status_.eta_seconds = 0;
+            // SetStatus owns scanning/phase summaries. Numeric progress updates
+            // preserve that text without taking the localization lock per file.
+        }
         ApplyUndoSummaryLocked();
         SampleSpeedLocked();
         item_finished = status_.completed_items != items_before &&
@@ -1722,18 +2213,22 @@ void OpsManager::SetProgressStatus(const std::function<void(OpStatus&)>& fn) {
 
 bool OpsManager::CanUndo() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return !undo_.empty() && undo_.back().supported;
+    return !history_replay_ && !active_item_ && queue_.empty() && !update_preparing_ &&
+        std::any_of(undo_.begin(), undo_.end(), [](const auto& e) { return e.supported; });
 }
 
 bool OpsManager::CanUndoTask(uint64_t task_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return task_id != 0 && !undo_.empty() && undo_.back().supported && undo_.back().task_id == task_id;
+    const auto latest = std::find_if(undo_.rbegin(), undo_.rend(), [](const auto& e) { return e.supported; });
+    return !history_replay_ && !active_item_ && queue_.empty() && !update_preparing_ &&
+        task_id && latest != undo_.rend() && latest->task_id == task_id;
 }
 
 std::wstring OpsManager::UndoLabel() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (undo_.empty()) return L"";
-    const UndoEntry& e = undo_.back();
+    const auto latest = std::find_if(undo_.rbegin(), undo_.rend(), [](const auto& e) { return e.supported; });
+    if (latest == undo_.rend()) return L"";
+    const UndoEntry& e = *latest;
     if (e.supported && !e.label.empty())
         return l10n::IsChinese() ? std::wstring(l10n::Cn(L"撤销")) + e.label : L"Undo " + LowerFirst(e.label);
     if (!e.supported) {
@@ -1756,6 +2251,7 @@ void OpsManager::PushUndo(const OpRequest& req, uint64_t task_id,
     completed.task_id = task_id;
     completed.type = req.type;
     completed.sources = req.sources;
+    completed.refresh_directories = req.refresh_directories;
     if (req.type == OpType::CreateFolder || req.type == OpType::CreateTextFile)
         completed.destinations = req.sources;
     if (actual_destinations) {
@@ -1779,20 +2275,40 @@ void OpsManager::PushUndo(const OpRequest& req, uint64_t task_id,
     }
     if (req.is_undo) return;
     UndoEntry e;
-    e.type = req.type;
+    e.type = req.generated_output ? OpType::Copy : req.type;
+    e.generated_output = req.generated_output;
+    e.generated_backups = req.generated_backups;
+    e.generated_directories = req.generated_directories;
+    e.generated_directory_receipts = req.generated_directory_receipts;
     e.sources = req.sources;
     if (actual_destinations) e.destinations = *actual_destinations;
+    else if (req.type == OpType::BatchRename)
+        for (size_t i = 0; i < req.sources.size(); ++i)
+            e.destinations.push_back(JoinPath(ParentOf(req.sources[i]), i < req.new_names.size() ? req.new_names[i] : req.new_name));
     e.dest_dir = req.dest_dir;
     e.new_name = req.new_name;
     e.group = req.undo_group;
     e.label = req.undo_label;
     e.task_id = task_id;
-    if (req.type == OpType::RealDelete) return;              // never undoable, not recorded
+    e.recorded_at = UndoClockNow();
+    if (req.type == OpType::RealDelete) e.supported = false;
     if (req.type == OpType::RestoreRecycle) return;
     if (req.type == OpType::EmptyRecycle) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    undo_.push_back(std::move(e));
+    ClearRedoLocked();
+    e.redo_cleared = std::exchange(redo_cleared_pending_, false);
+    const auto existing = std::find_if(undo_.begin(), undo_.end(),
+        [task_id](const auto& entry) { return task_id && entry.task_id == task_id; });
+    if (existing != undo_.end()) {
+        existing->sources.insert(existing->sources.end(), e.sources.begin(), e.sources.end());
+        existing->destinations.insert(existing->destinations.end(), e.destinations.begin(), e.destinations.end());
+        existing->generated_directory_receipts.insert(existing->generated_directory_receipts.end(), e.generated_directory_receipts.begin(), e.generated_directory_receipts.end());
+        existing->generated_directories.insert(existing->generated_directories.end(), e.generated_directories.begin(), e.generated_directories.end());
+        existing->generated_backups.insert(existing->generated_backups.end(), e.generated_backups.begin(), e.generated_backups.end());
+        existing->redo_cleared = existing->redo_cleared || e.redo_cleared;
+    } else undo_.push_back(std::move(e));
     TrimUndoHistory(undo_);
+    ++undo_json_revision_;
 }
 
 std::vector<CompletedOperation> OpsManager::DrainCompletions() {
@@ -1800,10 +2316,55 @@ std::vector<CompletedOperation> OpsManager::DrainCompletions() {
     std::vector<CompletedOperation> out;
     out.reserve(completions_.size());
     while (!completions_.empty()) {
+        const auto& completed = completions_.front();
+        if (completed.task_id) {
+            auto found = std::find_if(recent_completions_.begin(), recent_completions_.end(),
+                [&](const CompletedOperation& entry) { return entry.task_id == completed.task_id; });
+            if (found == recent_completions_.end()) {
+                recent_completions_.push_back(completed);
+            } else {
+                found->sources.insert(found->sources.end(), completed.sources.begin(), completed.sources.end());
+                found->destinations.insert(found->destinations.end(), completed.destinations.begin(), completed.destinations.end());
+            }
+            while (recent_completions_.size() > 16) recent_completions_.pop_front();
+            size_t characters = 0;
+            for (const auto& entry : recent_completions_) {
+                for (const auto& path : entry.sources) characters += path.size();
+                for (const auto& path : entry.destinations) characters += path.size();
+            }
+            // Bound older history, but keep the newest task intact so a large
+            // transfer never silently loses some of its reveal targets.
+            while (characters > 4 * 1024 * 1024 && recent_completions_.size() > 1) {
+                const auto& entry = recent_completions_.front();
+                for (const auto& path : entry.sources) characters -= path.size();
+                for (const auto& path : entry.destinations) characters -= path.size();
+                recent_completions_.pop_front();
+            }
+        }
         out.push_back(std::move(completions_.front()));
         completions_.pop_front();
     }
     return out;
+}
+
+CompletedOperation OpsManager::TaskLocations(uint64_t task_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    CompletedOperation result;
+    result.task_id = task_id;
+    if (!task_id) return result;
+    const auto append = [&](const auto& entries) {
+        for (const auto& entry : entries) {
+            if (entry.task_id != task_id) continue;
+            result.type = entry.type;
+            result.sources.insert(result.sources.end(), entry.sources.begin(), entry.sources.end());
+            result.destinations.insert(result.destinations.end(), entry.destinations.begin(), entry.destinations.end());
+        }
+    };
+    append(recent_completions_);
+    append(completions_);
+    if (result.sources.empty() && active_item_ && active_item_->seq == task_id)
+        result.sources = active_item_->req.sources;
+    return result;
 }
 
 std::vector<FinishedTask> OpsManager::DrainFinishedTasks() {
@@ -1826,6 +2387,10 @@ bool OpsManager::GroupPendingLocked(uint64_t group) const {
 }
 
 void OpsManager::Undo() { UndoNewest(nullptr); }
+
+bool OpsManager::UndoTask(uint64_t task_id) {
+    return task_id && UndoNewest(nullptr, task_id) == GroupUndo::Started;
+}
 
 uint64_t OpsManager::TopUndoGroup() const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1850,133 +2415,289 @@ void OpsManager::RecordExternalCreate(const std::wstring& path, uint64_t group, 
     e.destinations.push_back(path);
     e.group = group;
     e.label = std::move(label);
+    e.recorded_at = UndoClockNow();
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (update_preparing_) return;
         completions_.push_back(std::move(completed));
+        e.task_id = next_seq_++;
+        ClearRedoLocked();
+        e.redo_cleared = std::exchange(redo_cleared_pending_, false);
         undo_.push_back(std::move(e));
         TrimUndoHistory(undo_);
+        ++undo_json_revision_;
     }
     NotifyStatusChanged();
 }
 
-OpsManager::GroupUndo OpsManager::UndoNewest(const uint64_t* required_group) {
-    std::vector<UndoEntry> batch;
+void OpsManager::ClearRedoLocked() {
+    if (!redo_.empty()) redo_cleared_pending_ = true;
+    redo_.clear();
+    std::erase_if(history_progress_, [](const auto& item) { return item.first.second; });
+}
+
+UndoHistoryProgress OpsManager::HistoryProgress() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return {!undo_.empty() || !redo_.empty(),
+        history_replay_.has_value() || active_item_.has_value() || !queue_.empty(),
+        history_completed_sequence_, history_completed_steps_,
+        history_completed_redo_, history_completed_success_};
+}
+
+UndoHistorySnapshot OpsManager::UndoHistory() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    UndoHistorySnapshot result;
+    result.busy = history_replay_.has_value() || active_item_.has_value() || !queue_.empty();
+    result.completed_sequence = history_completed_sequence_;
+    result.completed_steps = history_completed_steps_;
+    result.completed_redo = history_completed_redo_;
+    result.completed_success = history_completed_success_;
+    for (const auto& entry : undo_) result.entries.push_back({entry, false, entry.redo_cleared});
+    for (const auto& entry : redo_) result.entries.push_back({entry, true, entry.redo_cleared});
+    std::stable_sort(result.entries.begin(), result.entries.end(), [](const auto& a, const auto& b) {
+        return a.entry.task_id > b.entry.task_id;
+    });
+    return result;
+}
+
+std::vector<UndoHistorySummaryItem> OpsManager::UndoHistorySummary(bool include_rows) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<UndoHistorySummaryItem> result;
+    result.reserve(include_rows ? undo_.size() + redo_.size() : 1);
+    const UndoEntry* newest = nullptr;
+    if (!include_rows) {
+        for (const auto& entry : undo_)
+            if (entry.supported && (!newest || entry.task_id > newest->task_id)) newest = &entry;
+    }
+    const auto append = [&](const auto& entries, bool undone) {
+        for (const auto& entry : entries) {
+            if (!include_rows && &entry != newest) continue;
+            UndoHistorySummaryItem item;
+            item.type = entry.type;
+            item.task_id = entry.task_id;
+            item.label = entry.label;
+            item.source_count = entry.sources.size();
+            item.destination_count = entry.destinations.size();
+            if (!entry.sources.empty()) item.first_source = entry.sources.front();
+            if (!entry.destinations.empty()) item.first_destination = entry.destinations.front();
+            item.supported = entry.supported;
+            item.undone = undone;
+            item.redo_cleared = entry.redo_cleared;
+            item.recorded_at = entry.recorded_at;
+            result.push_back(std::move(item));
+        }
+    };
+    append(undo_, false);
+    if (include_rows) append(redo_, true);
+    std::stable_sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
+        return a.task_id > b.task_id;
+    });
+    return result;
+}
+
+size_t OpsManager::UndoHistoryCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return undo_.size() + redo_.size();
+}
+
+size_t OpsManager::QueuedTransferCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<size_t>(std::count_if(queue_.begin(), queue_.end(), [](const QueueItem& item) {
+        return item.open_path.empty() && item.open_paths.empty() && !item.cancel_requested;
+    }));
+}
+
+std::vector<std::wstring> OpsManager::UndoHistoryPreviewPaths(uint64_t task_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& entry : undo_) if (entry.task_id == task_id)
+        return entry.destinations.empty() ? entry.sources : entry.destinations;
+    for (const auto& entry : redo_) if (entry.task_id == task_id) return entry.sources;
+    return {};
+}
+
+bool OpsManager::CanRedo() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !history_replay_ && !active_item_ && queue_.empty() && !update_preparing_ && !redo_.empty();
+}
+
+bool OpsManager::Redo() {
+    bool started;
+    { std::lock_guard<std::mutex> lock(mutex_); started = StartHistoryLocked(true, 0, false); }
+    if (started) { cv_.notify_one(); NotifyStatusChanged(); }
+    return started;
+}
+
+bool OpsManager::UndoTo(uint64_t task_id) {
+    bool started;
+    { std::lock_guard<std::mutex> lock(mutex_); started = task_id && StartHistoryLocked(false, task_id, true); }
+    if (started) { cv_.notify_one(); NotifyStatusChanged(); }
+    return started;
+}
+
+bool OpsManager::RedoTo(uint64_t task_id) {
+    bool started;
+    { std::lock_guard<std::mutex> lock(mutex_); started = task_id && StartHistoryLocked(true, task_id, true); }
+    if (started) { cv_.notify_one(); NotifyStatusChanged(); }
+    return started;
+}
+
+OpsManager::GroupUndo OpsManager::UndoNewest(const uint64_t* required_group, uint64_t required_task) {
+    bool started = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (update_preparing_ || undo_.empty()) return GroupUndo::Unavailable;
-        if (required_group) {
-            if (undo_.back().group != *required_group) return GroupUndo::NotOnTop;
-            if (!undo_.back().supported) return GroupUndo::Unavailable;
-            if (GroupPendingLocked(*required_group)) return GroupUndo::Pending;
-        }
-        if (GroupPendingLocked(undo_.back().group)) {
-            // Undoing half an action would strand the rest; wait for it.
-            deferred_undo_group_ = undo_.back().group;
+        const auto latest = std::find_if(undo_.rbegin(), undo_.rend(), [](const auto& entry) { return entry.supported; });
+        if (latest == undo_.rend() || update_preparing_) return GroupUndo::Unavailable;
+        if ((required_task && latest->task_id != required_task) ||
+            (required_group && latest->group != *required_group)) return GroupUndo::NotOnTop;
+        if (GroupPendingLocked(latest->group)) {
+            if (!required_group) deferred_undo_group_ = latest->group;
             return GroupUndo::Pending;
         }
-        if (!undo_.back().supported) {
-            // Leave the entry; report why it cannot be undone.
-            status_.last_error = l10n::Get(l10n::StringId::UndoIsNotSupportedForItemsMovedToTheRecycleBin).c_str();
-        } else {
-            // One user action recorded as several operations undoes as one
-            // step, newest first; the queue runs the inverses in that order.
-            const uint64_t group = undo_.back().group;
-            do {
-                batch.push_back(std::move(undo_.back()));
-                undo_.pop_back();
-            } while (group && !undo_.empty() && undo_.back().group == group && undo_.back().supported);
-        }
+        started = StartHistoryLocked(false, 0, false);
     }
-    if (batch.empty()) {
-        if (notify_) notify_();
-        return GroupUndo::Unavailable;
-    }
+    if (started) { cv_.notify_one(); NotifyStatusChanged(); }
+    return started ? GroupUndo::Started : GroupUndo::Unavailable;
+}
 
-    for (const UndoEntry& e : batch) {
-    switch (e.type) {
-    case OpType::Move: {
-        // Move each actual destination back to its exact original name and
-        // parent, newest first: an item merged into a folder that an earlier
-        // root of the same move created goes back before that folder does,
-        // instead of travelling with it.
-        for (size_t i = e.sources.size(); i-- > 0;) {
-            const auto& src = e.sources[i];
-            OpRequest inv;
-            inv.type = OpType::Move;
-            inv.is_undo = true;
-            inv.undo_of = e.type;
-            inv.sources.push_back(i < e.destinations.size()
-                ? e.destinations[i] : JoinPath(e.dest_dir, FileName(src)));
-            inv.dest_dir = ParentOf(src);
-            inv.new_name = FileName(src);
-            Submit(std::move(inv));
+bool OpsManager::StartHistoryLocked(bool redo, uint64_t target, bool through_target) {
+    if (!running_ || stopping_ || update_preparing_ || history_replay_ || active_item_ || !queue_.empty()) return false;
+    const auto& entries = redo ? redo_ : undo_;
+    HistoryReplay replay; replay.redo = redo;
+    uint64_t group = 0;
+    bool found = !target;
+    for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
+        if (!it->supported) continue;
+        if (!through_target && !replay.steps.empty() && (!group || it->group != group)) break;
+        // Empty payload means deletion completed but its receipt was ambiguous.
+        // Never retry that deletion against a subsequently recreated pathname.
+        if (it->generated_output && std::any_of(it->generated_recycle_payloads.begin(),
+            it->generated_recycle_payloads.end(), [](const auto& value) { return value.second.empty(); })) return false;
+        if (replay.steps.empty()) group = it->group;
+        replay.steps.push_back(it->task_id);
+        if (target && it->task_id == target) { found = true; break; }
+    }
+    if (!found || replay.steps.empty()) return false;
+    history_replay_ = std::move(replay);
+    QueueHistoryRequestLocked();
+    return history_replay_.has_value();
+}
+
+void OpsManager::QueueHistoryRequestLocked() {
+    if (!history_replay_) return;
+    auto& replay = *history_replay_;
+    auto& entries = replay.redo ? redo_ : undo_;
+    const auto entry = std::find_if(entries.begin(), entries.end(), [&](const auto& value) {
+        return value.task_id == replay.steps[replay.step];
+    });
+    if (entry == entries.end()) { history_replay_.reset(); return; }
+    if (replay.requests.empty()) {
+        const auto& e = *entry;
+        for (size_t ordinal = 0; ordinal < e.sources.size(); ++ordinal) {
+            const size_t i = replay.redo ? ordinal : e.sources.size() - 1 - ordinal;
+            const auto& source = e.sources[i];
+            std::wstring destination = i < e.destinations.size() ? e.destinations[i] :
+                e.type == OpType::Rename || e.type == OpType::BatchRename ? JoinPath(ParentOf(source), e.new_name) :
+                e.type == OpType::CreateFolder || e.type == OpType::CreateTextFile ? source : JoinPath(e.dest_dir, FileName(source));
+            OpRequest request; request.is_undo = true;
+            if (!replay.redo) request.undo_of = e.type;
+            switch (e.type) {
+            case OpType::Move:
+                request.type = OpType::Move;
+                request.sources = {replay.redo ? source : destination};
+                request.dest_dir = ParentOf(replay.redo ? destination : source);
+                request.new_name = FileName(replay.redo ? destination : source);
+                break;
+            case OpType::Rename:
+            case OpType::BatchRename:
+                request.type = OpType::Rename;
+                request.sources = {replay.redo ? source : destination};
+                request.new_name = FileName(replay.redo ? destination : source);
+                break;
+            case OpType::Copy:
+            case OpType::CreateFolder:
+            case OpType::CreateTextFile:
+                request.type = replay.redo ? OpType::RestoreRecycle : OpType::RecycleDelete;
+                request.sources = {destination};
+                break;
+            case OpType::RecycleDelete:
+                request.type = replay.redo ? OpType::RecycleDelete : OpType::RestoreRecycle;
+                request.sources = {source};
+                break;
+            default: history_replay_.reset(); return;
+            }
+            request.generated_output = e.generated_output;
+            if (e.generated_output && replay.redo && request.type == OpType::RestoreRecycle) {
+                const auto payload = e.generated_recycle_payloads.find(destination);
+                if (payload != e.generated_recycle_payloads.end()) request.sources = {payload->second};
+            }
+            if (e.generated_output && std::find(e.generated_directories.begin(),
+                e.generated_directories.end(), destination) != e.generated_directories.end()) {
+                request.only_if_empty = !replay.redo;
+                const auto receipt = std::find_if(e.generated_directory_receipts.begin(), e.generated_directory_receipts.end(),
+                    [&](const auto& value) { return value.path == destination; });
+                if (receipt == e.generated_directory_receipts.end()) { history_replay_.reset(); return; }
+                request.generated_directory_replay = *receipt;
+            }
+            if (e.generated_output) {
+                const auto old = std::find_if(e.generated_backups.begin(), e.generated_backups.end(),
+                    [&](const auto& backup) { return _wcsicmp(backup.first.c_str(), destination.c_str()) == 0; });
+                if (old != e.generated_backups.end()) {
+                    OpRequest restore; restore.type = OpType::Move; restore.is_undo = true;
+                    restore.generated_output = true;
+                    restore.sources = {replay.redo ? destination : old->second};
+                    restore.dest_dir = ParentOf(replay.redo ? old->second : destination);
+                    restore.new_name = FileName(replay.redo ? old->second : destination);
+                    restore.collision_policy = CollisionPolicy::System;
+                    if (replay.redo) replay.requests.push_back(std::move(restore));
+                    else {
+                        replay.requests.push_back(std::move(request));
+                        replay.requests.push_back(std::move(restore));
+                        continue;
+                    }
+                }
+            }
+            replay.requests.push_back(std::move(request));
         }
-        break;
+        replay.request = history_progress_[{entry->task_id, replay.redo}];
     }
-    case OpType::Rename: {
-        OpRequest inv;
-        inv.type = OpType::Rename;
-        inv.is_undo = true;
-        inv.undo_of = e.type;
-        std::wstring new_path = JoinPath(ParentOf(e.sources.front()), e.new_name);
-        inv.sources.push_back(new_path);
-        inv.new_name = FileName(e.sources.front());
-        Submit(std::move(inv));
-        break;
+    if (replay.request >= replay.requests.size()) { history_replay_.reset(); return; }
+    QueueItem item;
+    item.req = replay.requests[replay.request];
+    item.seq = next_seq_++;
+    replay.active_task = item.seq;
+    queue_.push_front(std::move(item));
+}
+
+void OpsManager::FinishHistoryRequestLocked(uint64_t task_id, bool success) {
+    if (!history_replay_ || history_replay_->active_task != task_id) return;
+    auto& replay = *history_replay_;
+    const auto original = replay.steps[replay.step];
+    if (!success) {
+        ++history_completed_sequence_;
+        history_completed_steps_ = replay.step;
+        history_completed_redo_ = replay.redo;
+        history_completed_success_ = false;
+        history_replay_.reset(); return;
     }
-    case OpType::Copy: {
-        // Explorer semantics: undo copy = delete the produced copies (to bin).
-        OpRequest inv;
-        inv.type = OpType::RecycleDelete;
-        inv.is_undo = true;
-        inv.undo_of = e.type;
-        if (!e.destinations.empty()) inv.sources = e.destinations;
-        else for (const auto& src : e.sources)
-            inv.sources.push_back(JoinPath(e.dest_dir, FileName(src)));
-        Submit(std::move(inv));
-        break;
-    }
-    case OpType::CreateFolder:
-    case OpType::CreateTextFile: {
-        // Undo create = recycle-delete the created item.
-        OpRequest inv;
-        inv.type = OpType::RecycleDelete;
-        inv.is_undo = true;
-        inv.undo_of = e.type;
-        inv.sources = e.sources;
-        Submit(std::move(inv));
-        break;
-    }
-    case OpType::RecycleDelete: {
-        OpRequest inv;
-        inv.type = OpType::RestoreRecycle;
-        inv.is_undo = true;
-        inv.undo_of = e.type;
-        inv.sources = e.sources;
-        Submit(std::move(inv));
-        break;
-    }
-    case OpType::BatchRename: {
-        for (int i = static_cast<int>(e.sources.size()) - 1; i >= 0; --i) {
-            const size_t index = static_cast<size_t>(i);
-            OpRequest inv;
-            inv.type = OpType::Rename;
-            inv.is_undo = true;
-            inv.undo_of = e.type;
-            inv.sources.push_back(index < e.destinations.size()
-                ? e.destinations[index]
-                : JoinPath(ParentOf(e.sources[index]), e.new_name));
-            inv.new_name = FileName(e.sources[index]);
-            Submit(std::move(inv));
+    history_progress_[{original, replay.redo}] = ++replay.request;
+    if (replay.request == replay.requests.size()) {
+        auto& from = replay.redo ? redo_ : undo_;
+        auto& to = replay.redo ? undo_ : redo_;
+        const auto entry = std::find_if(from.begin(), from.end(), [&](const auto& value) { return value.task_id == original; });
+        if (entry == from.end()) { history_replay_.reset(); return; }
+        to.push_back(std::move(*entry)); from.erase(entry);
+        ++undo_json_revision_;
+        history_progress_.erase({original, replay.redo});
+        if (++replay.step == replay.steps.size()) {
+            ++history_completed_sequence_;
+            history_completed_steps_ = replay.step;
+            history_completed_redo_ = replay.redo;
+            history_completed_success_ = true;
+            history_replay_.reset(); return;
         }
-        break;
+        replay.requests.clear(); replay.request = 0;
     }
-    default:
-        break;
-    }
-    }
-    return GroupUndo::Started;
+    QueueHistoryRequestLocked();
 }
 
 // ---------------------------------------------------------------------------
@@ -2019,10 +2740,17 @@ void OpsManager::OpenThread() {
         HWND dialog_owner = ui_hwnd_.load();
         if (!dialog_owner || !IsWindow(dialog_owner)) dialog_owner = GetForegroundWindow();
 
-        if (_wcsicmp(item.open_verb.c_str(), L"__terminal") == 0) {
+        const bool any_terminal = _wcsicmp(item.open_verb.c_str(), L"__open_terminal") == 0;
+        if (any_terminal || _wcsicmp(item.open_verb.c_str(), L"__terminal") == 0) {
             const auto started = GetTickCount64();
-            const auto result = LaunchTerminal(item.open_file, item.open_args, item.open_path, dialog_owner);
+            // "Open in terminal" falls back to PowerShell / cmd when Windows
+            // Terminal is not installed; a pinned wt.exe runs only itself.
+            std::wstring launched = item.open_file;
+            const auto result = any_terminal
+                ? LaunchTerminalOrShell(item.open_args, item.open_path, dialog_owner, {}, &launched)
+                : LaunchTerminal(item.open_file, item.open_args, item.open_path, dialog_owner);
             diagnostics::runtime::Event("terminal_launch_result", {{"task", item.seq},
+                {"fallback", launched != L"wt.exe"},
                 {"open_error", result.open_error}, {"error", result.error},
                 {"cancelled", result.error == ERROR_CANCELLED},
                 {"elevation_requested", result.elevation_requested}, {"elapsed_ms", GetTickCount64() - started}});
@@ -2140,11 +2868,21 @@ void OpsManager::OpenThread() {
         const std::wstring target = item.open_file.empty() ? shell_path : item.open_file;
         const std::wstring item_dir = item.open_file.empty()
             ? OpenItemWorkingDirectory(item.open_path) : shell_path;
-        const auto result = LaunchShellItem(target, item.open_verb, item.open_args, item_dir, dialog_owner);
+        const ULONGLONG prepared = GetTickCount64();
+        const auto opened = LaunchImageOrShellItem(target, item.open_verb, item.open_args, item_dir,
+            dialog_owner, !item.open_file.empty());
+        if (opened.neighbor_attempted) diagnostics::runtime::Event("image_neighbor_launch", {{"task", item.seq},
+            {"launched", opened.neighbor_launched}, {"hr", static_cast<uint32_t>(opened.neighbor_error)},
+            {"stage", static_cast<uint32_t>(opened.neighbor_stage)},
+            {"photos_protocol", opened.photos_protocol_attempted},
+            {"photos_protocol_hr", static_cast<uint32_t>(opened.photos_protocol_error)},
+            {"shell_fallback", !opened.neighbor_launched && opened.neighbor_error != HRESULT_FROM_WIN32(ERROR_CANCELLED)}});
+        const auto& result = opened.shell;
         diagnostics::runtime::Event("shell_open_result", {{"task", item.seq},
             {"default_verb", item.open_verb.empty()}, {"explicit_app", !item.open_file.empty()},
             {"error", result.error}, {"cancelled", result.error == ERROR_CANCELLED},
             {"process_id", result.process_id}, {"shell_mask", result.mask},
+            {"working_dir_ms", prepared - started}, {"shell_ms", GetTickCount64() - prepared},
             {"elapsed_ms", GetTickCount64() - started}});
         if (result.error && result.error != ERROR_CANCELLED) {
             wchar_t detail[512]{};
@@ -2177,6 +2915,15 @@ void OpsManager::RecordShellDone(uint32_t id, uint32_t hr, bool cancelled, std::
             }
         }
         if (ConsumeCtxInvokeDone(id)) {
+            if (FAILED(static_cast<HRESULT>(hr)) && !cancelled) {
+                const DWORD code = HRESULT_FACILITY(hr) == FACILITY_WIN32 ? HRESULT_CODE(hr) : hr;
+                wchar_t code_text[16]{};
+                swprintf_s(code_text, L"0x%08X", static_cast<unsigned>(hr));
+                error = std::wstring(l10n::Get(l10n::StringId::OpFailed).c_str()) + L" | " +
+                    Win32Message(code) + L" (" + code_text + L")";
+                std::lock_guard<std::mutex> lock(menu_mutex_);
+                shell_verb_error_ = std::move(error);
+            }
             ctx_invoke_done_.fetch_add(1, std::memory_order_acq_rel);
             if (notify_) notify_();
             return;
@@ -2267,6 +3014,7 @@ void OpsManager::ConfigureShellCallbacks() {
             m.separator_after = it.separator_after;
             m.has_children = it.has_children;
             m.child = it.child;
+            m.depth = it.depth;
             m.verb = std::move(it.verb);
             m.text = std::move(it.text);
             m.clsid = std::move(it.clsid);
@@ -2333,15 +3081,44 @@ void OpsManager::WorkerThread() {
         // Opens/verbs run on OpenThread — never block transfers.
         if (!item.open_path.empty()) continue;
 
-        if (item.req.type == OpType::RecycleDelete && item.req.only_if_empty) {
+        bool generated_directory_skip = false, generated_directory_failed = false;
+        if (item.req.generated_directory_replay) {
+            const auto& expected = *item.req.generated_directory_replay;
+            const auto actual = CaptureGeneratedDirectory(expected.path);
+            if (actual) {
+                const bool same = actual->volume == expected.volume && actual->index_high == expected.index_high && actual->index_low == expected.index_low;
+                generated_directory_failed = !same;
+                generated_directory_skip = same && item.req.type == OpType::RestoreRecycle;
+            } else {
+                const DWORD attributes = GetFileAttributesW(expected.path.c_str());
+                const DWORD error = GetLastError();
+                const bool missing = attributes == INVALID_FILE_ATTRIBUTES && (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND);
+                generated_directory_failed = !missing || item.req.type != OpType::RestoreRecycle;
+            }
+        }
+        if (!generated_directory_failed && item.req.type == OpType::RecycleDelete && item.req.only_if_empty) {
             auto& sources = item.req.sources;
             sources.erase(std::remove_if(sources.begin(), sources.end(), [](const std::wstring& path) {
                 std::error_code error;
                 return !std::filesystem::is_directory(path, error) || !std::filesystem::is_empty(path, error) || error;
             }), sources.end());
         }
-        const bool skip = item.req.only_if_empty && item.req.sources.empty();
-        const bool run = !skip && ((!item.req.lock_retry && item.req.close_first.empty()) ||
+        const bool skip = generated_directory_skip || (item.req.only_if_empty && item.req.sources.empty());
+        if ((item.req.generated_output && skip) || generated_directory_failed) {
+            SetStatus([&](OpStatus& status) {
+                status.task_id = item.seq;
+                status.active = false;
+                status.phase = generated_directory_failed ? OpPhase::Failed : OpPhase::Completed;
+                status.last_error = generated_directory_failed ? Win32Message(ERROR_FILE_INVALID) : std::wstring{};
+                status.total_items = item.req.sources.size();
+                status.completed_items = generated_directory_failed ? 0 : status.total_items;
+                ++status.completed_ops;
+            });
+        }
+        std::map<std::wstring, std::vector<std::wstring>> recycle_before;
+        if (item.req.generated_output && item.req.is_undo && item.req.type == OpType::RecycleDelete && !skip && !generated_directory_failed)
+            for (const auto& source : item.req.sources) recycle_before.emplace(source, GeneratedRecycleCandidates(source));
+        const bool run = !skip && !generated_directory_failed && ((!item.req.lock_retry && item.req.close_first.empty()) ||
                          PrepareLockRetry(item.req, item.seq));
         moved_sources_.clear();
         recycle_refused_.clear();
@@ -2352,10 +3129,26 @@ void OpsManager::WorkerThread() {
             {"undo", item.req.is_undo}, {"run", run}});
         if (!run) {
             // PrepareLockRetry already published the outcome.
+        } else if (item.controlled) {
+            RunControlled(item.controlled, item.seq);
         } else if (item.req.type == OpType::Copy || item.req.type == OpType::Move) {
             RunTransfer(item.req, item.seq);
         } else {
             RunShellOp(item.req, item.seq);
+        }
+        std::map<std::wstring, std::wstring> recycled_payloads;
+        for (const auto& [source, before] : recycle_before) {
+            auto after = GeneratedRecycleCandidates(source);
+            std::erase_if(after, [&](const auto& value) { return std::find(before.begin(), before.end(), value) != before.end(); });
+            if (after.size() == 1) recycled_payloads.emplace(source, after.front());
+            else if (Status().phase == OpPhase::Completed) {
+                recycled_payloads.emplace(source, std::wstring{});
+                OutputDebugStringW((L"Pulse generated recycle receipt unresolved; replay blocked: " + source + L"\n").c_str());
+                SetStatus([&](OpStatus& status) {
+                    status.phase = OpPhase::Failed;
+                    status.last_error = Win32Message(ERROR_FILE_INVALID);
+                });
+            }
         }
         const auto diagnostic_status = Status();
         bool run_deferred_undo = false;
@@ -2371,6 +3164,10 @@ void OpsManager::WorkerThread() {
             finished.is_undo = item.req.is_undo;
             finished.sources = item.req.sources;
             finished.success = diagnostic_status.phase == OpPhase::Completed;
+            if (item.controlled) {
+                finished.controlled_result = item.controlled->status.result;
+                RetainControlledLocked(item.controlled);
+            }
             finished.recycle_refused = std::move(recycle_refused_);
             finished.recycle_refusal = recycle_refusal_;
             recycle_refused_.clear();
@@ -2387,13 +3184,27 @@ void OpsManager::WorkerThread() {
             if (!diagnostic_status.active && diagnostic_status.task_id == item.seq) {
                 final_statuses_.push_back(diagnostic_status);
                 while (final_statuses_.size() > 16) final_statuses_.pop_front();
+                if (retained_task_ids_.contains(item.seq))
+                    retained_final_statuses_.insert_or_assign(item.seq, diagnostic_status);
             }
             active_item_.reset();
+            if (history_replay_ && !history_replay_->redo && history_replay_->active_task == item.seq) {
+                const auto original = history_replay_->steps[history_replay_->step];
+                for (auto& entry : undo_) if (entry.task_id == original)
+                    for (const auto& [source, payload] : recycled_payloads)
+                        entry.generated_recycle_payloads.insert_or_assign(source, payload);
+            }
+            FinishHistoryRequestLocked(item.seq, diagnostic_status.task_id == item.seq &&
+                diagnostic_status.phase == OpPhase::Completed && diagnostic_status.last_error.empty() &&
+                diagnostic_status.completed_items >= item.req.sources.size());
             if (deferred_undo_group_ && !GroupPendingLocked(deferred_undo_group_)) {
                 deferred_undo_group_ = 0;
                 run_deferred_undo = true;
             }
         }
+        // Prepare the immutable persistence payload on the operation worker.
+        // A concurrent UI reader may also build it; publication keeps one identity.
+        (void)UndoJsonSnapshot();
         if (run_deferred_undo) Undo();
         if (notify_) notify_();
         PersistJournal();
@@ -3000,6 +3811,8 @@ void OpsManager::RunShellTransfer(const OpRequest& req, uint64_t task_id) {
                 std::lock_guard<std::mutex> lock(transfer_control_mutex_);
                 info.token = next_conflict_token_++;
                 pending_conflict_ = info;
+                diagnostics::runtime::Event("operation_conflict_wait", {{"task", task_id}, {"token", info.token},
+                    {"directory", info.source_is_directory}, {"remaining", info.remaining}});
                 resolved_conflict_token_ = 0;
             }
             SetStatus([&](OpStatus& st) {
@@ -3025,6 +3838,7 @@ void OpsManager::RunShellTransfer(const OpRequest& req, uint64_t task_id) {
             if (choice == ConflictChoice::Cancel) {
                 cancelled = true;
                 transfer_cancel_.store(true);
+                item_control_.Cancel();
                 break;
             }
             if (selected_apply_all) {
@@ -3237,6 +4051,42 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         RunShellTransfer(req, task_id);
         return;
     }
+    struct TimingReport {
+        uint64_t task;
+        uint64_t conflict_count_probes = 0;
+        uint64_t pool_threads = 0, pooled_files = 0;
+        bool medium_pool_enabled = false;
+        bool enabled = diagnostics::runtime::Enabled();
+        std::chrono::steady_clock::duration serial_copy_work_ms{}, source_hash_work_ms{}, target_hash_work_ms{}, commit_work_ms{};
+        TransferStageTiming timing{GetTickCount64()};
+        ~TimingReport() {
+            if (!enabled) return;
+            const auto now = GetTickCount64();
+            diagnostics::runtime::Event("file_transfer_pool", {{"task", task},
+                {"pool_threads", pool_threads}, {"medium_pool_enabled", medium_pool_enabled},
+                {"pooled_files", pooled_files}});
+            diagnostics::runtime::Event("file_transfer_stages", {{"task", task},
+                {"preparation_ms", timing.PreparationMs(now)},
+                {"preparation_complete", timing.preparation_complete},
+                {"execution_wall_ms", timing.ExecutionWallMs(now)},
+                {"first_copy_callback_seen", timing.copy_callback_seen},
+                {"first_copy_callback_ms", timing.FirstCopyCallbackMs()},
+                {"worker_total_ms", now - timing.started},
+                {"conflict_count_probes", conflict_count_probes},
+                {"serial_copy_work_ms", static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(serial_copy_work_ms).count())}, {"source_hash_work_ms", static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(source_hash_work_ms).count())},
+                {"target_hash_work_ms", static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(target_hash_work_ms).count())}, {"staged_commit_work_ms", static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(commit_work_ms).count())}});
+        }
+    } stage_report{task_id};
+    // Includes callback/pause work within each API call; excludes pooled copies.
+    auto measure_work = [&](std::chrono::steady_clock::duration& accumulated, auto&& work) {
+        if (!stage_report.enabled) return work();
+        const auto started = std::chrono::steady_clock::now();
+        const auto result = work();
+        const DWORD error = GetLastError();
+        accumulated += std::chrono::steady_clock::now() - started;
+        SetLastError(error);
+        return result;
+    };
 #ifdef PULSE_ELEVATED_TEST_CLIENT
     ObserveTransferStartForReview(*this, task_id);
 #endif
@@ -3279,6 +4129,20 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         st.items_per_second = st.peak_items_per_second = 0.0;
         st.speed_basis = OpSpeedBasis::Bytes;
         st.eta_seconds = 0;
+    });
+
+    TransferDiagnosticMonitor diagnostic_monitor(task_id, [this, task_id] {
+        TransferDiagnosticSnapshot value;
+        value.paused = transfer_pause_.load();
+        value.cancelled = transfer_cancel_.load();
+        std::unique_lock lock(mutex_, std::try_to_lock);
+        if (!lock.owns_lock() || status_.task_id != task_id) return value;
+        value.available = true;
+        value.bytes = status_.transferred_bytes;
+        value.total = status_.total_bytes;
+        value.items = status_.completed_items;
+        value.phase = static_cast<uint64_t>(status_.phase);
+        return value;
     });
 
     // Time spent paused or waiting on a conflict. The rate clock skips it, so
@@ -3342,7 +4206,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     // after partial completion could duplicate copies or move items twice.
 #ifndef PULSE_ELEVATED_HOST
     if (failure.empty() && !stop_requested() &&
-        !req.sources.empty() && !req.dest_dir.empty() &&
+        !req.generated_output && !req.sources.empty() && !req.dest_dir.empty() &&
         NeedsShellTransfer(req.sources, req.dest_dir, req.type == OpType::Move, req.new_name)) {
         RunAuthorizedTransfer(req, task_id);
         return;
@@ -3353,10 +4217,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     std::vector<TransferEntry> entries;
     std::vector<std::wstring> completed_sources;
     std::vector<std::wstring> completed_destinations;
-    struct ReplacementBackup {
-        std::wstring original;
-        std::wstring backup;
-    };
+    using ReplacementBackup = BoundReplacementBackup;
     std::vector<ReplacementBackup> replacement_backups;
 
     if (req.sources.empty() || req.dest_dir.empty()) {
@@ -3422,7 +4283,55 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     // Where each source's own entry is (npos: nothing to do for it). The
     // commit below looks roots up here instead of searching every entry.
     std::vector<size_t> root_entries(req.sources.size(), std::wstring::npos);
-    if (failure.empty() && !stop_requested()) {
+    std::unique_ptr<TransferEnumerationCursor> enumeration;
+    bool enumeration_complete = true;
+    size_t enumeration_batch_start = 0;
+    const auto append_enumerated = [&](size_t limit) {
+        TransferEnumerationCursor::Item item;
+        while (limit-- && !stop_requested() && enumeration->Next(item)) {
+            TransferEntry child;
+            child.source = std::move(item.source); child.destination = std::move(item.destination);
+            const auto& data = item.metadata;
+            child.attributes = data.dwFileAttributes;
+            child.directory = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            child.reparse = (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+            child.created = data.ftCreationTime; child.accessed = data.ftLastAccessTime;
+            child.modified = data.ftLastWriteTime;
+            child.bytes = child.directory ? 0 : (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+#ifdef PULSE_ELEVATED_TEST_CLIENT
+            ObserveTransferScanForReview(*this, child.source);
+#endif
+            entries.push_back(std::move(child));
+        }
+        enumeration_complete = enumeration->Complete();
+        if (enumeration->Error() != ERROR_SUCCESS) {
+            failure_hr = HRESULT_FROM_WIN32(enumeration->Error());
+            failure = l10n::Get(l10n::StringId::CouldNotScanTheSourceFolder).c_str() +
+                enumeration->ErrorPath() + L" | " + Win32Message(enumeration->Error());
+            enumeration_complete = false;
+        }
+    };
+    wchar_t streaming_option[8]{};
+    const bool streaming_requested = GetEnvironmentVariableW(L"PULSE_STREAMING_ENUMERATION", streaming_option, 8) == 1 && streaming_option[0] == L'1';
+    if (streaming_requested && failure.empty() && !stop_requested() && req.type == OpType::Copy &&
+        !req.is_undo && req.sources.size() == 1 && !StartsWithPath(req.dest_dir, req.sources.front())) {
+        TransferEntry root;
+        root.source = req.sources.front(); root.destination = JoinPath(req.dest_dir, root_name(root.source));
+        if (!PathExists(root.destination) && ReadEntryMetadata(root.source, root) && root.directory && !root.reparse) {
+            enumeration = std::make_unique<TransferEnumerationCursor>();
+            enumeration_complete = false;
+            root_entries[0] = 0;
+            entries.push_back(root);
+#ifdef PULSE_ELEVATED_TEST_CLIENT
+            ObserveTransferScanForReview(*this, root.source);
+#endif
+            enumeration->Start(root.source, root.destination);
+            append_enumerated(TransferEnumerationCursor::InitialBatchLimit - 1);
+            diagnostics::runtime::Event("file_transfer_streaming", {{"task", task_id}, {"initial_batch_limit", TransferEnumerationCursor::InitialBatchLimit},
+                {"refill_batch_limit", TransferEnumerationCursor::RefillBatchLimit}});
+        }
+    }
+    if (!enumeration && failure.empty() && !stop_requested()) {
         const SourceListing listing(req.sources);
         // Names a rename below brings in are added, so a later source with
         // the same name still finds its target taken.
@@ -3580,6 +4489,10 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         }
     }
 
+    stage_report.timing.EndPreparation(GetTickCount64());
+    diagnostics::runtime::Event("copy_preparation_end", {{"task", task_id},
+        {"elapsed_ms", stage_report.timing.PreparationMs(GetTickCount64())}});
+
     // Accidental same-folder drops leave zero work. Do not flash the status bar
     // with "移动 foo → dest 完成" for a no-op Explorer already ignores.
     if (failure.empty() && !stop_requested() && entries.empty()) {
@@ -3606,6 +4519,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     SetStatus([&](OpStatus& st) {
         st.total_bytes = total_bytes;
         st.total_items = entries.size();
+        st.enumeration_complete = enumeration_complete;
         if (failure.empty() && !cancelled) {
             st.phase = OpPhase::Running;
             st.percent = 0.0f;
@@ -3620,6 +4534,9 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     std::vector<std::wstring> skipped_sources;
     uint64_t committed_bytes = 0;
     uint64_t published_bytes = 0;
+    TransferPoolProgress pool_progress;
+    const TransferEntry* active_serial_entry = nullptr;
+    uint64_t active_serial_bytes = 0;
     uint64_t processed_items = 0;
     TransferRateEstimator rate;
     rate.Reset(rate_now(), 0);
@@ -3630,18 +4547,22 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             ? (std::min)(file_done, file_total) : file_done;
         uint64_t overall = committed_bytes + bounded_file_done;
         if (overall < committed_bytes) overall = UINT64_MAX;
+        const uint64_t concurrent = pool_progress.Total();
+        overall = concurrent > UINT64_MAX - overall ? UINT64_MAX : overall + concurrent;
+        if (active_serial_entry && active_serial_entry != &entry)
+            overall = active_serial_bytes > UINT64_MAX - overall ? UINT64_MAX : overall + active_serial_bytes;
         overall = (std::max)(published_bytes, overall);
         if (total_bytes > 0) overall = (std::min)(overall, total_bytes);
         published_bytes = overall;
         rate.Observe(rate_now(), overall, total_bytes);
         SetProgressStatus([&](OpStatus& st) {
-            st.current_item = FileName(entry.source);
+            st.current_item = FileName(st.current_item_token && active_serial_entry ? active_serial_entry->source : entry.source);
             st.transferred_bytes = overall;
             st.completed_items = completed_items;
             st.bytes_per_second = rate.speed();
             st.peak_bytes_per_second = (std::max)(st.peak_bytes_per_second, rate.speed());
             if (st.total_bytes > 0) {
-                st.percent = static_cast<float>((std::min)(100.0,
+                st.percent = static_cast<float>((std::min)(verify_copies_.load() ? 99.0 : 100.0,
                     static_cast<double>(overall) * 100.0 / st.total_bytes));
                 st.eta_seconds = rate.eta_seconds();
             } else if (st.total_items > 0) {
@@ -3670,16 +4591,39 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         });
     };
 
+    const bool directory_cache_enabled = TransferFeatureEnabled(L"PULSE_DIRECTORY_CACHE");
+#ifdef PULSE_CONFLICT_SNAPSHOT_BASELINE
+    const bool conflict_snapshot_enabled = false;
+#else
+    const bool conflict_snapshot_enabled = TransferFeatureEnabled(L"PULSE_CONFLICT_SNAPSHOT");
+#endif
     size_t conflicts_asked = 0;
-    auto remaining_conflicts = [&](size_t start) {
-        size_t count = 0;
+    // Informational snapshot only; execution still probes the actual target.
+    // Each target is counted at most once, then retired in execution order.
+    std::vector<unsigned char> known_conflicts;
+    size_t pending_known_conflicts = 0;
+    const auto retire_known_conflict = [&](size_t index) {
+        if (!known_conflicts.empty() && known_conflicts[index]) {
+            known_conflicts[index] = 0;
+            --pending_known_conflicts;
+        }
+    };
+    const auto snapshot_conflicts = [&](size_t start) {
+        if (!known_conflicts.empty()) return;
+        known_conflicts.resize(entries.size());
+        BoundedTargetListing target_hints;
         for (size_t j = start; j < entries.size(); ++j) {
+            if (stop_requested()) return;
             if (entries[j].renamed) continue;
+            if (directory_cache_enabled && target_hints.SnapshotAbsent(ParentOf(entries[j].destination), FileName(entries[j].destination))) continue;
+            if (stage_report.enabled) ++stage_report.conflict_count_probes;
             bool dest_dir = false;
             if (PathExists(entries[j].destination, &dest_dir) &&
-                !(entries[j].directory && !entries[j].reparse && dest_dir)) ++count;
+                !(entries[j].directory && !entries[j].reparse && dest_dir)) {
+                known_conflicts[j] = 1;
+                ++pending_known_conflicts;
+            }
         }
-        return count;
     };
 
     // Folders this task created (nothing inside can pre-exist, so the
@@ -3702,21 +4646,147 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         return true;
     };
 
-    // Small files without a conflict go to a copy pool sized for the storage;
-    // everything else stays on this thread, in order.
+    // Storage budgets are conservative across every selected root; an unrelated
+    // SSD source must not grant concurrency to an HDD, unknown disk or share.
+    const bool verify_requested = verify_copies_.load();
+    const bool bounded_verification = verify_requested && TransferFeatureEnabled(L"PULSE_BOUNDED_VERIFICATION") && req.type == OpType::Copy;
+    const auto scheduler_config = ReadTransferSchedulerConfig();
+    const bool overlap_large_verification = bounded_verification && scheduler_config.enabled &&
+        TransferFeatureEnabled(L"PULSE_LARGE_VERIFY_OVERLAP");
+    auto& device_budget = SharedTransferDeviceBudget();
+    const auto budget_task = scheduler_config.enabled ? TransferDeviceBudget::CreateTask() : TransferDeviceBudget::TaskToken{};
+    TransferDeviceIdentityCache device_identities;
+    std::unordered_map<std::wstring, TransferDeviceIdentity> parent_devices;
+    const auto source_device = [&](const TransferEntry& entry) {
+        const std::wstring key = entry.directory || entry.reparse ? entry.source : ParentOf(entry.source);
+        if (const auto found = parent_devices.find(key); found != parent_devices.end()) return found->second;
+        auto identity = device_identities.Resolve(entry.source);
+        if (parent_devices.size() >= 256) parent_devices.clear();
+        parent_devices.emplace(key, identity);
+        return identity;
+    };
+    std::unordered_map<std::wstring, TransferDeviceIdentity> destination_devices;
+    const auto target_device = [&](const std::wstring& parent) {
+        if (const auto found = destination_devices.find(parent); found != destination_devices.end()) return found->second;
+        auto identity = device_identities.Resolve(parent);
+        if (destination_devices.size() >= 256) destination_devices.clear();
+        destination_devices.emplace(parent, identity);
+        return identity;
+    };
+    std::unordered_map<std::wstring, std::shared_ptr<const TransferDevicePair>> device_pairs;
+    std::unordered_map<size_t, std::wstring> verified_staging;
+    std::unique_ptr<SHA256VerificationWorker> serial_verifier;
+    std::shared_ptr<SmallCopyPhaseProfile> phase_profile;
+    if (diagnostics::runtime::Enabled() && TransferFeatureEnabled(L"PULSE_COPY_PHASE_PROFILE", false))
+        phase_profile = std::make_shared<SmallCopyPhaseProfile>();
+    uint64_t profiled_refills = 0;
     std::unique_ptr<SmallCopyPool> pool;
-    std::unordered_set<std::wstring> pooled_destinations;  // outside fresh folders
-    if (!verify_copies_.load()) {
-        size_t small_files = 0;
-        for (const auto& candidate : entries)
-            if (!candidate.directory && !candidate.reparse && !candidate.renamed &&
-                candidate.bytes < kProgressCallbackMinBytes) ++small_files;
-        const unsigned threads = small_files >= kPoolMinFiles
-            ? TransferThreadCount(entries.empty() ? std::wstring{} : entries.front().source, req.dest_dir) : 1;
-        if (threads > 1)
-            pool = std::make_unique<SmallCopyPool>(threads, transfer_cancel_, transfer_pause_,
-                                                   transfer_control_mutex_, transfer_control_cv_);
-    }
+    bool medium_pool_enabled = false;
+    std::unordered_set<std::wstring> pooled_destinations;
+    size_t discovered_small_files = 0, discovered_medium_files = 0;
+    size_t pool_discovery_end = 0;
+    unsigned pool_threads = 0;
+    const auto update_pool = [&](const auto& drain) {
+        if (verify_requested && !bounded_verification) return;
+        for (; pool_discovery_end < entries.size(); ++pool_discovery_end) {
+            const auto& candidate = entries[pool_discovery_end];
+            if (candidate.directory || candidate.reparse || candidate.renamed) continue;
+            if (candidate.bytes < kProgressCallbackMinBytes) ++discovered_small_files;
+            else if (req.type == OpType::Copy && (candidate.bytes < kDirectCopyMaxBytes ||
+                (scheduler_config.enabled && TransferFeatureEnabled(L"PULSE_LARGE_COPY_POOL")))) ++discovered_medium_files;
+        }
+        const size_t small_files = discovered_small_files, medium_files = discovered_medium_files;
+        unsigned small_threads = 1, medium_threads = 1;
+        if (!req.sources.empty() && (small_files >= kPoolMinFiles || medium_files >= 2)) {
+            small_threads = UINT_MAX;
+            medium_threads = UINT_MAX;
+            std::unordered_map<std::wstring, std::pair<unsigned, unsigned>> source_budgets;
+            std::unordered_map<std::wstring, std::pair<unsigned, unsigned>> parent_budgets;
+            std::vector<wchar_t> volume_root(32768);
+            for (size_t source_index = 0; source_index < req.sources.size(); ++source_index) {
+                if (stop_requested()) break;
+                const auto& source = req.sources[source_index];
+                const size_t entry_index = root_entries[source_index];
+                // Ordinary siblings share their containing volume. Directory sources
+                // may themselves be mount points and must resolve their own volume.
+                // Exact keys also keep distinct case-sensitive directories separate.
+                const bool ordinary_file = entry_index < entries.size() &&
+                    !entries[entry_index].directory && !entries[entry_index].reparse &&
+                    !entries[entry_index].renamed;
+                const std::wstring parent = ordinary_file ? ParentOf(source) : std::wstring{};
+                const auto sibling = parent_budgets.find(parent);
+                std::pair<unsigned, unsigned> budget;
+                if (!parent.empty() && sibling != parent_budgets.end()) {
+                    budget = sibling->second;
+                } else {
+                    const std::wstring root = GetVolumePathNameW(source.c_str(), volume_root.data(),
+                        static_cast<DWORD>(volume_root.size())) ? std::wstring(volume_root.data()) : std::wstring{};
+                    const auto cached = source_budgets.find(root);
+                    if (!root.empty() && cached != source_budgets.end()) {
+                        budget = cached->second;
+                    } else {
+                        budget.first = small_files >= kPoolMinFiles ? TransferThreadCount(source, req.dest_dir) : 1;
+                        budget.second = medium_files >= 2 || bounded_verification ? MediumTransferThreadCount(source, req.dest_dir) : 1;
+                        if (!root.empty() && source_budgets.size() < 256) source_budgets.emplace(root, budget);
+                    }
+                    if (!parent.empty() && parent_budgets.size() < 256) parent_budgets.emplace(parent, budget);
+                }
+                small_threads = (std::min)(small_threads, budget.first);
+                medium_threads = (std::min)(medium_threads, budget.second);
+            }
+        }
+        if (small_files < kPoolMinFiles) small_threads = 1;
+        if (medium_files < 2 && !bounded_verification) medium_threads = 1;
+        const bool want_medium = req.type == OpType::Copy && !cancelled && medium_threads > 1 &&
+            (bounded_verification || TransferFeatureEnabled(L"PULSE_MEDIUM_COPY_POOL"));
+        const unsigned threads = want_medium
+            ? (small_files >= kPoolMinFiles ? (std::min)(small_threads, medium_threads) : medium_threads)
+            : small_threads;
+        if (threads <= 1 || (pool && pool_threads == threads && medium_pool_enabled == want_medium)) return;
+        // Drain with the old mode before replacing the pool: every admitted job
+        // must publish its result and retire its progress slot exactly once.
+        drain();
+        if (!failure.empty() || stop_requested()) return;
+        diagnostics::runtime::Event("copy_pool_reconfigure", {{"task", task_id},
+            {"old_threads", pool_threads}, {"new_threads", threads},
+            {"old_medium", medium_pool_enabled}, {"new_medium", want_medium},
+            {"discovered_small", small_files}, {"discovered_medium", medium_files}});
+        pool.reset();
+        medium_pool_enabled = want_medium;
+        pool = std::make_unique<SmallCopyPool>(threads, transfer_cancel_, transfer_pause_,
+            transfer_control_mutex_, transfer_control_cv_, medium_pool_enabled, phase_profile, budget_task);
+        pool_threads = threads;
+        if (stage_report.enabled) {
+            stage_report.pool_threads = threads;
+            stage_report.medium_pool_enabled = medium_pool_enabled;
+        }
+    };
+    update_pool([] {});
+    const bool budgeted_task = scheduler_config.enabled;
+    const auto devices_for = [&](const TransferEntry& entry, const std::wstring& parent) -> std::shared_ptr<const TransferDevicePair> {
+        if (!budgeted_task) return {};
+        const bool tiny = !verify_requested && entry.bytes < kProgressCallbackMinBytes;
+        std::wstring key = ParentOf(entry.source);
+        key += L"\n"; key += parent; key += tiny ? L"\nT" : L"\nM";
+        if (const auto found = device_pairs.find(key); found != device_pairs.end()) return found->second;
+        auto origin = source_device(entry);
+        auto destination = target_device(parent);
+        if (tiny) {
+            // Physical-device and opt-in UNC-server policies remain explicit;
+            // ordinary/verified files keep the endpoint's conservative capacity.
+            for (auto* endpoint : {&origin, &destination}) endpoint->capacity = endpoint->tiny_capacity;
+        }
+        auto pair = std::make_shared<TransferDevicePair>(std::move(origin), std::move(destination), device_budget);
+        if (device_pairs.size() >= 256) device_pairs.clear();
+        device_pairs.emplace(std::move(key), pair);
+        return pair;
+    };
+    diagnostics::runtime::Event("copy_pipeline_policy", {{"task", task_id},
+        {"scheduler", budgeted_task}, {"verify", verify_requested}, {"bounded_verify", bounded_verification}, {"large_verify_overlap", overlap_large_verification},
+        {"streaming", enumeration != nullptr}, {"directory_cache", directory_cache_enabled},
+        {"conflict_snapshot", conflict_snapshot_enabled}, {"parallel_pool", medium_pool_enabled},
+        {"large_pool", TransferFeatureEnabled(L"PULSE_LARGE_COPY_POOL")}, {"backend", 0}});
+
     // Items that failed while the task went on (partial failure). A failure
     // about the target rather than the item (IsStopTransferError), or a run
     // of failures with no success between, stops the task instead.
@@ -3734,9 +4804,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             });
         if (found == replacement_backups.end()) return;
         DWORD error = ERROR_SUCCESS;
-        if (PathExists(found->original)) error = ERROR_ALREADY_EXISTS;
-        else if (!MoveFileExW(found->backup.c_str(), found->original.c_str(), MOVEFILE_WRITE_THROUGH))
-            error = GetLastError();
+        RestoreBoundReplacementBackup(*found, error);
         if (error != ERROR_SUCCESS) {
             kept_backup_note += l10n::Get(l10n::StringId::CouldNotRestore).c_str() + found->original +
                 l10n::Get(l10n::StringId::OriginalKeptAt).c_str() + found->backup + L" | " + Win32Message(error);
@@ -3796,6 +4864,9 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             DWORD flush_error = 0;
             if (!FlushCopyToDisk(entries[i].destination, entries[i].attributes, flush_error, true)) {
                 if (!flush_error) flush_error = ERROR_WRITE_FAULT;
+                diagnostics::runtime::Event("move_commit_failed", {{"task", task_id}, {"stage", 2},
+                    {"error", flush_error}, {"source", preview::DiagnosticPathId(entries[i].source)},
+                    {"destination", preview::DiagnosticPathId(entries[i].destination)}});
                 if (failure.empty()) {
                     failure_hr = HRESULT_FROM_WIN32(flush_error);
                     failure = l10n::Get(l10n::StringId::MoveKeptSourceNotFlushed).c_str() + entries[i].destination +
@@ -3812,6 +4883,9 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                 SetFileAttributesW(moved.source.c_str(), moved.attributes & ~FILE_ATTRIBUTE_READONLY);
             if (!DeleteFileW(moved.source.c_str())) {
                 const DWORD code = GetLastError();
+                diagnostics::runtime::Event("move_commit_failed", {{"task", task_id}, {"stage", 3},
+                    {"error", code}, {"source", preview::DiagnosticPathId(moved.source)},
+                    {"destination", preview::DiagnosticPathId(moved.destination)}});
                 if (moved.attributes & FILE_ATTRIBUTE_READONLY)
                     SetFileAttributesW(moved.source.c_str(), moved.attributes);
                 const HRESULT hr = HRESULT_FROM_WIN32(code);
@@ -3844,25 +4918,61 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         return true;
     };
     const auto apply_pooled = [&](std::vector<SmallCopyResult> results) {
+        std::chrono::steady_clock::time_point apply_started{};
+        if (phase_profile) apply_started = std::chrono::steady_clock::now();
         for (const auto& result : results) {
+            pool_progress.Retire(result.index);
+            if (result.buffering_fallback_error)
+                diagnostics::runtime::Event("copy_pool_fallback", {{"task", task_id},
+                    {"error", static_cast<uint32_t>(result.buffering_fallback_error)}, {"cleanup_error", result.buffering_cleanup_error},
+                    {"buffered_retry", result.buffered_retry}});
             if (!result.ran) continue;
             auto& done = entries[result.index];
-            const DWORD code = FAILED(result.hr) ? HRESULT_CODE(result.hr) : result.delete_error;
+            HRESULT completed_hr = result.hr;
+            if (result.verification) {
+                stage_report.source_hash_work_ms += std::chrono::nanoseconds(result.verification->source_wall_ns);
+                stage_report.target_hash_work_ms += std::chrono::nanoseconds(result.verification->target_wall_ns);
+            }
+            if (const auto staged = verified_staging.find(result.index); staged != verified_staging.end()) {
+                if (SUCCEEDED(completed_hr)) {
+                    DWORD commit_error = ERROR_INVALID_HANDLE;
+                    if (!result.owned_output || !CommitVerifiedOutput(staged->second, done.destination, *result.owned_output, commit_error))
+                        completed_hr = HRESULT_FROM_WIN32(commit_error);
+                }
+                if (FAILED(completed_hr) && result.owned_output) {
+                    DWORD cleanup_error = ERROR_SUCCESS;
+                    if (!DeleteVerifiedOutput(staged->second, *result.owned_output, cleanup_error) &&
+                        cleanup_error != ERROR_FILE_NOT_FOUND && cleanup_error != ERROR_PATH_NOT_FOUND)
+                        diagnostics::runtime::Event("copy_cleanup_retained", {{"task", task_id}, {"error", cleanup_error}});
+                }
+                verified_staging.erase(staged);
+            }
+            const DWORD code = FAILED(completed_hr) ? HRESULT_CODE(completed_hr) : result.delete_error;
+            if (SUCCEEDED(completed_hr)) done.destination_written = true;
             if (code != ERROR_SUCCESS) {
-                const HRESULT hr = FAILED(result.hr) ? result.hr : HRESULT_FROM_WIN32(code);
+                const HRESULT hr = FAILED(completed_hr) ? completed_hr : HRESULT_FROM_WIN32(code);
                 if (result.not_flushed) {
+                    diagnostics::runtime::Event("move_commit_failed", {{"task", task_id}, {"stage", 1},
+                        {"error", code}, {"source", preview::DiagnosticPathId(done.source)},
+                        {"destination", preview::DiagnosticPathId(done.destination)}});
                     if (failure.empty()) {
                         failure_hr = hr;
                         failure = l10n::Get(l10n::StringId::MoveKeptSourceNotFlushed).c_str() + done.destination +
                                   L" | " + Win32Message(code);
                     }
                     pool->Stop();
-                } else if (!item_failed(done, hr, TransferFailureText(hr), done.source)) {
+                } else if (!item_failed(done, hr, result.verification ? VerificationFailureText(*result.verification, hr) : TransferFailureText(hr), done.source)) {
                     pool->Stop();
                 }
                 continue;
             }
             failures_in_a_row = 0;
+            if (result.bytes != done.bytes) {
+                if (result.bytes > done.bytes) total_bytes += result.bytes - done.bytes;
+                else total_bytes -= (std::min)(total_bytes, done.bytes - result.bytes);
+                done.bytes = result.bytes;
+                SetProgressStatus([&](OpStatus& st) { st.total_bytes = total_bytes; });
+            }
             if (result.move_pending) {
                 if (!queue_move(result.index)) pool->Stop();
             } else {
@@ -3873,9 +4983,46 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             publish_progress(done, done.bytes, done.bytes, processed_items);
             committed_bytes += done.bytes;
         }
+        if (phase_profile) {
+            const DWORD error = GetLastError();
+            phase_profile->apply_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - apply_started).count());
+            ++phase_profile->apply_calls;
+            if (results.empty()) ++phase_profile->apply_empty_calls;
+            phase_profile->apply_results += results.size();
+            SetLastError(error);
+        }
+    };
+    const auto poll_pool = [&](bool wait) {
+        if (!pool) return;
+        if (!medium_pool_enabled) {
+            apply_pooled(pool->Take(wait));
+            return;
+        }
+        for (const auto& progress : pool->TakeProgress()) {
+            // CopyFile2 totals include ADS; logical default-stream size remains
+            // the denominator until the successful result confirms its size.
+            const uint64_t bytes = (std::min)(progress.bytes, entries[progress.index].bytes);
+            if (!pool_progress.Update(progress.index, bytes)) continue;
+            if (stage_report.enabled && !stage_report.timing.copy_callback_seen)
+                stage_report.timing.ObserveCopyCallback(GetTickCount64(), bytes);
+            publish_progress(entries[progress.index], 0, 0, processed_items);
+            if (progress.verifying) SetProgressStatus([&](OpStatus& st) {
+                st.phase = OpPhase::Verifying;
+                st.summary = l10n::Get(l10n::StringId::Verifying) + FileName(entries[progress.index].source);
+                st.percent = st.percent < 0.0f ? st.percent : (std::min)(st.percent, 99.0f);
+                st.eta_seconds = 0;
+            });
+        }
+        apply_pooled(pool->Take(wait));
     };
     const auto drain_pool = [&] {
-        while (pool && pool->Outstanding() > 0) apply_pooled(pool->Take(true));
+        while (pool && pool->Outstanding() > 0) {
+            // The coordinator publishes Paused while workers wait in callbacks.
+            // Cancellation still stops and consumes every admitted result.
+            if (stop_requested() || !failure.empty()) pool->Stop();
+            poll_pool(true);
+        }
     };
 
     // Large files with no conflict wait until every small file has gone to
@@ -3886,18 +5033,69 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     // would stall flushing at the end) or the target is a share or a
     // removable drive. A same-volume copy that can block-clone keeps the
     // cached path, which clones.
-    const TransferTarget target = DescribeTransferTarget(
-        entries.empty() ? std::wstring{} : entries.front().source, req.dest_dir);
+    TransferTarget target = DescribeTransferTarget(
+        req.sources.empty() ? std::wstring{} : req.sources.front(), req.dest_dir);
+    // Clone eligibility depends on the source volume, not only the destination.
+    if (req.sources.size() != 1) target.block_clone = false;
     uint64_t large_remaining = 0;
     for (const auto& candidate : entries)
         if (!candidate.directory && !candidate.reparse && !candidate.renamed &&
             candidate.bytes >= kDirectCopyMaxBytes) large_remaining += candidate.bytes;
 
-    for (size_t step = 0; failure.empty() && !cancelled && step < entries.size() + deferred_large.size(); ++step) {
+    for (size_t step = 0; failure.empty() && !cancelled &&
+         (step < entries.size() + deferred_large.size() || !enumeration_complete); ++step) {
+        if (enumeration && !enumeration_complete && step == entries.size()) {
+            // Worker jobs own their paths and retain indices, not journal references.
+            // Only this coordinator consumes results; clear the finished serial view
+            // before vector growth and let enumeration overlap outstanding copies.
+            active_serial_entry = nullptr;
+            active_serial_bytes = 0;
+            poll_pool(false);
+            if (!failure.empty() || stop_requested()) break;
+            SmallCopyQueueSnapshot before_refill{};
+            std::chrono::steady_clock::time_point refill_started{};
+            if (phase_profile) {
+                if (pool) before_refill = pool->QueueSnapshot();
+                refill_started = std::chrono::steady_clock::now();
+            }
+            for (size_t j = enumeration_batch_start; j < entries.size(); ++j)
+                if (entries[j].directory && !entries[j].reparse)
+                    enumeration->RemapDirectory(entries[j].source, entries[j].destination);
+            enumeration_batch_start = entries.size();
+            append_enumerated(TransferEnumerationCursor::RefillBatchLimit);
+            for (size_t j = enumeration_batch_start; j < entries.size(); ++j) {
+                total_bytes += entries[j].bytes;
+                if (!entries[j].directory && !entries[j].reparse && entries[j].bytes >= kDirectCopyMaxBytes)
+                    large_remaining += entries[j].bytes;
+            }
+            if (!known_conflicts.empty()) known_conflicts.resize(entries.size());
+            SetStatus([&](OpStatus& st) {
+                st.total_items = entries.size(); st.total_bytes = total_bytes;
+                st.enumeration_complete = enumeration_complete;
+                if (!enumeration_complete) { st.percent = -1.0f; st.eta_seconds = 0; }
+            });
+            if (phase_profile) {
+                const auto wall_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - refill_started).count());
+                const auto after_refill = pool ? pool->QueueSnapshot() : SmallCopyQueueSnapshot{};
+                diagnostics::runtime::Event("copy_refill_profile", {{"task", task_id}, {"refill", ++profiled_refills},
+                    {"added", entries.size() - enumeration_batch_start}, {"wall_us", wall_us},
+                    {"queued_before", before_refill.queued}, {"inflight_before", before_refill.in_flight}, {"done_before", before_refill.done},
+                    {"queued_after", after_refill.queued}, {"inflight_after", after_refill.in_flight}, {"done_after", after_refill.done},
+                    {"complete", enumeration_complete}, {"includes_pause", true}});
+            }
+            if (!failure.empty() || stop_requested()) break;
+            update_pool(drain_pool);
+            if (!failure.empty() || stop_requested()) break;
+            if (step >= entries.size() + deferred_large.size()) break;
+        }
         const size_t index = step < entries.size() ? step : deferred_large[step - entries.size()];
-        if (pool) apply_pooled(pool->Take(false));
+        active_serial_entry = nullptr;
+        active_serial_bytes = 0;
+        poll_pool(false);
         if (!failure.empty() || stop_requested()) break;
         auto& entry = entries[index];
+        retire_known_conflict(index);
         if (entry.renamed) {
             ++processed_items;
             publish_progress(entry, entry.bytes, entry.bytes, processed_items);
@@ -3935,9 +5133,17 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             continue;
         }
         ConflictChoice choice = repeated;
-        const bool conflict = destination_exists &&
+        bool conflict = destination_exists &&
             !(entry.directory && !entry.reparse && destination_is_directory);
+        if (req.generated_output && req.is_undo && destination_exists) {
+            if (!item_failed(entry, HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS), Win32Message(ERROR_ALREADY_EXISTS), entry.destination)) break;
+            continue;
+        }
         bool selected_apply_all = false;
+        if (conflict && medium_pool_enabled) {
+            drain_pool();
+            if (!failure.empty() || stop_requested()) break;
+        }
         if (conflict && !apply_all) {
             ConflictItemInfo info;
             info.task_id = task_id;
@@ -3952,7 +5158,21 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                 info.destination_modified = destination_entry.modified;
                 info.destination_is_directory = destination_entry.directory;
             }
-            info.remaining = remaining_conflicts(index);
+            if (!conflict_snapshot_enabled) {
+            // Dedicated benchmark executable only: the original repeated scan.
+            for (size_t j = index; j < entries.size(); ++j) {
+                if (entries[j].renamed) continue;
+                if (stage_report.enabled) ++stage_report.conflict_count_probes;
+                bool dest_dir = false;
+                if (PathExists(entries[j].destination, &dest_dir) &&
+                    !(entries[j].directory && !entries[j].reparse && dest_dir)) ++info.remaining;
+            }
+            } else {
+            snapshot_conflicts(index + 1);
+            if (cancelled) break;
+            info.remaining = pending_known_conflicts + 1;
+            info.remaining_is_snapshot = true;
+            }
             info.ordinal = ++conflicts_asked;
             info.type = req.type;
             info.keep_both_name = FileName(UniqueCopyPath(entry.destination, entry.directory));
@@ -3960,6 +5180,8 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                 std::lock_guard<std::mutex> lock(transfer_control_mutex_);
                 info.token = next_conflict_token_++;
                 pending_conflict_ = info;
+                diagnostics::runtime::Event("operation_conflict_wait", {{"task", task_id}, {"token", info.token},
+                    {"directory", info.source_is_directory}, {"remaining", info.remaining}});
                 resolved_conflict_token_ = 0;
             }
             SetStatus([&](OpStatus& st) {
@@ -3987,6 +5209,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             if (choice == ConflictChoice::Cancel) {
                 cancelled = true;
                 transfer_cancel_.store(true);
+                item_control_.Cancel();
                 break;
             }
             if (selected_apply_all) {
@@ -4012,12 +5235,29 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             entry.destination = unique;
             if (entry.directory) {
                 for (size_t j = index + 1; j < entries.size(); ++j) {
-                    if (StartsWithPath(entries[j].destination, old_destination))
+                    if (StartsWithPath(entries[j].destination, old_destination)) {
                         entries[j].destination = unique + entries[j].destination.substr(old_destination.size());
+                        retire_known_conflict(j);
+                    }
                 }
             }
             destination_exists = false;
             destination_is_directory = false;
+        }
+        if (req.generated_output && !req.is_undo && conflict && choice == ConflictChoice::Replace) {
+            const auto backup_path = UniqueTemporaryPath(entry.destination, L".pulse-generated-original-", task_id, index);
+            ReplacementBackup backup;
+            DWORD error = ERROR_SUCCESS;
+            if (!CreateBoundReplacementBackup(entry.destination, backup_path, backup, error, &transfer_cancel_)) {
+                if (!item_failed(entry, HRESULT_FROM_WIN32(error), TransferFailureText(HRESULT_FROM_WIN32(error)), entry.destination)) break;
+                continue;
+            }
+            replacement_backups.push_back(std::move(backup));
+            OutputDebugStringW((L"Pulse generated original retained: " + backup_path + L"\n").c_str());
+            destination_exists = false;
+            destination_is_directory = false;
+            conflict = false;
+            entry.destination_preexisting = false;
         }
         if (conflict && choice == ConflictChoice::Replace &&
             (entry.directory != destination_is_directory || entry.reparse)) {
@@ -4029,20 +5269,26 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             }
             const std::wstring backup = UniqueTemporaryPath(
                 entry.destination, L".pulse-backup-", task_id, index);
-            if (!MoveFileExW(entry.destination.c_str(), backup.c_str(), MOVEFILE_WRITE_THROUGH)) {
-                const DWORD code = GetLastError();
+            ReplacementBackup bound_backup;
+            DWORD backup_error = ERROR_SUCCESS;
+            if (!CreateBoundReplacementBackup(entry.destination, backup, bound_backup, backup_error, &transfer_cancel_)) {
+                const DWORD code = backup_error;
                 if (!item_failed(entry, HRESULT_FROM_WIN32(code),
                                  FailureReason(l10n::Get(l10n::StringId::CouldNotSafelyBackUpTheItemBeingReplaced).c_str(),
                                                TransferFailureText(HRESULT_FROM_WIN32(code))),
                                  entry.destination)) break;
                 continue;
             }
-            replacement_backups.push_back({ entry.destination, backup });
+            replacement_backups.push_back(std::move(bound_backup));
             destination_exists = false;
             destination_is_directory = false;
         }
 
         if (entry.reparse) {
+            if (medium_pool_enabled) {
+                drain_pool();
+                if (!failure.empty() || stop_requested()) break;
+            }
             std::wstring error;
             if (!ensure_parent(parent_dir, error) || !CopyReparsePoint(entry, error)) {
                 if (!item_failed(entry, E_FAIL, ErrorWithoutPath(error), entry.source)) break;
@@ -4112,30 +5358,136 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             continue;
         }
 
-        const bool direct = !destination_exists && entry.bytes < kDirectCopyMaxBytes;
-        if (pool && direct && entry.bytes < kProgressCallbackMinBytes) {
-            while (!pool->HasRoom() && failure.empty() && !stop_requested())
-                apply_pooled(pool->Take(true));
-            if (!failure.empty() || cancelled) break;
-            if (!fresh_parent) pooled_destinations.insert(dir_key(entry.destination));
-            pool->Submit({index, entry.source, entry.destination, entry.attributes,
-                          req.type == OpType::Move});
+        // Generated staging files are already fully written and flushed. A
+        // same-volume publication (including a backed-up replacement) is a rename.
+        if (req.generated_output && req.type == OpType::Move && !destination_exists &&
+            MoveFileExW(entry.source.c_str(), entry.destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
+            entry.completed = true;
+            entry.source_removed = true;
+            entry.destination_written = true;
+            failures_in_a_row = 0;
+            ++processed_items;
+            publish_progress(entry, entry.bytes, entry.bytes, processed_items);
+            committed_bytes += entry.bytes;
+            if (entry.bytes >= kDirectCopyMaxBytes) large_remaining -= (std::min)(large_remaining, entry.bytes);
             continue;
         }
-        if (pool && !entry.deferred && !destination_exists) {
+        const bool direct = !destination_exists && entry.bytes < kDirectCopyMaxBytes;
+        const bool pooled_large = scheduler_config.enabled && medium_pool_enabled &&
+            TransferFeatureEnabled(L"PULSE_LARGE_COPY_POOL") && !destination_exists && entry.bytes >= kDirectCopyMaxBytes;
+        if (pool && (direct || pooled_large) && !entry.directory && !entry.reparse &&
+            (entry.bytes < kProgressCallbackMinBytes || medium_pool_enabled)) {
+            auto job_devices = devices_for(entry, parent_dir);
+            // Two oversized verified SSD streams may overlap copy and SHA reads.
+            // The weight bounds admission; SHA buffers remain 1 MiB per worker.
+            const bool overlap = overlap_large_verification && entry.bytes > (256ull << 20) &&
+                job_devices && job_devices->source.capacity == 4 && job_devices->target.capacity == 4;
+            const uint64_t admission_bytes = overlap ? (128ull << 20) : entry.bytes;
+            while (!pool->HasRoom(admission_bytes) && failure.empty() && !stop_requested())
+                poll_pool(true);
+            if (!failure.empty() || cancelled) break;
+            if (!fresh_parent) pooled_destinations.insert(dir_key(entry.destination));
+            if (medium_pool_enabled && (entry.bytes >= kProgressCallbackMinBytes || bounded_verification))
+                pool_progress.Admit(index);
+            if (stage_report.enabled) ++stage_report.pooled_files;
+            const bool staging_required = bounded_verification || pooled_large;
+            const std::wstring pooled_target = staging_required
+                ? UniqueTemporaryPath(entry.destination, bounded_verification ? L".pulse-verify-" : L".pulse-copy-", task_id, index) : entry.destination;
+            if (staging_required) verified_staging.emplace(index, pooled_target);
+            SmallCopyJob job{index, entry.source, pooled_target, entry.attributes, req.type == OpType::Move, entry.bytes};
+            job.verify = bounded_verification;
+            job.staged = staging_required;
+            job.devices = std::move(job_devices);
+            job.admission_bytes = admission_bytes;
+            if (pooled_large && !target.block_clone) {
+                MEMORYSTATUSEX memory{};
+                memory.dwLength = sizeof(memory);
+                job.unbuffered = target.slow || target.spinning ||
+                    (GlobalMemoryStatusEx(&memory) && large_remaining > memory.ullAvailPhys / 2);
+            }
+            pool->Submit(std::move(job));
+            continue;
+        }
+        if (!scheduler_config.enabled && !enumeration && pool && !entry.deferred && !destination_exists) {
             entry.deferred = true;
             deferred_large.push_back(index);
             continue;
+        }
+        if (medium_pool_enabled || budgeted_task) {
+            drain_pool();
+            if (!failure.empty() || stop_requested()) break;
+        }
+        TransferDeviceBudget::Lease serial_lease;
+        if (budgeted_task) {
+            const auto origin = source_device(entry);
+            const auto destination = target_device(parent_dir);
+            if (stage_report.enabled && entry.bytes >= 64ull * 1024 * 1024) {
+                const auto all_physical = [](const TransferDeviceIdentity& identity) {
+                    return !identity.resources.empty() && std::all_of(identity.resources.begin(), identity.resources.end(),
+                        [](const std::wstring& resource) { return resource.starts_with(L"disk:"); });
+                };
+                const bool known = all_physical(origin) && all_physical(destination);
+                const bool shared = known && std::any_of(origin.resources.begin(), origin.resources.end(),
+                    [&](const std::wstring& resource) {
+                        return std::find(destination.resources.begin(), destination.resources.end(), resource) != destination.resources.end();
+                    });
+                diagnostics::runtime::Event("copy_device_topology", {{"task", task_id},
+                    {"physical_known", known}, {"shared_physical_device", shared}});
+            }
+            TransferDeviceBudget::Waiter budget_waiter;
+            for (;;) {
+                if (transfer_cancel_.load() || stopping_.load()) { cancelled = true; break; }
+                if (transfer_pause_.load()) {
+                    budget_waiter.Reset();
+                    if (stop_requested()) break;
+                    continue;
+                }
+                serial_lease = budget_waiter ? device_budget.TryAcquire(budget_waiter)
+                    : device_budget.TryAcquire(origin, destination, entry.bytes);
+                if (serial_lease) break;
+                if (!budget_waiter) budget_waiter = device_budget.Wait(origin, destination, entry.bytes, budget_task);
+                if (budget_waiter) budget_waiter.WaitForChange();
+                else {
+                    std::unique_lock control(transfer_control_mutex_);
+                    transfer_control_cv_.wait_for(control, std::chrono::milliseconds(2), [&] {
+                        return transfer_cancel_.load() || stopping_.load() || transfer_pause_.load();
+                    });
+                }
+            }
+            if (cancelled) break;
         }
         bool unbuffered = false;
         if (entry.bytes >= kDirectCopyMaxBytes && !target.block_clone) {
             MEMORYSTATUSEX memory{};
             memory.dwLength = sizeof(memory);
-            // A spinning target drains the cache far slower than it fills;
-            // buffered, the copy then stalls in the dirty-page throttle where
-            // neither progress nor pause can get through.
+            // Large spinning-disk workloads retain direct I/O to avoid long
+            // dirty-page throttles. Small, fully enumerated copy jobs may use
+            // the bounded cache policy below; it does not promise durability.
             unbuffered = target.slow || target.spinning ||
                 (GlobalMemoryStatusEx(&memory) && large_remaining > memory.ullAvailPhys / 2);
+            if (target.spinning && !target.slow && req.type == OpType::Copy && !verify_requested &&
+                !enumeration && total_bytes <= (2ull << 30) && entry.bytes <= (512ull << 20) &&
+                TransferFeatureEnabled(L"PULSE_SMALL_HDD_COPY_BUFFER", true)) {
+                const bool memory_known = GlobalMemoryStatusEx(&memory) != FALSE;
+                if (UseBoundedHddCopyBuffer(IsSolidToSpinningTransfer(entry.source, parent_dir), req.type == OpType::Copy, verify_requested,
+                    enumeration != nullptr, target.spinning, target.slow, memory_known,
+                    total_bytes, entry.bytes, memory.ullAvailPhys)) {
+                    unbuffered = false;
+                    diagnostics::runtime::Event("bounded_hdd_buffer_selected", {{"task", task_id},
+                        {"file_bytes", entry.bytes}, {"task_bytes", total_bytes},
+                        {"available_bytes", memory.ullAvailPhys}});
+                }
+            }
+        }
+        if (stage_report.enabled && entry.bytes >= 64ull * 1024 * 1024) {
+            MEMORYSTATUSEX observed_memory{};
+            observed_memory.dwLength = sizeof(observed_memory);
+            const bool memory_known = GlobalMemoryStatusEx(&observed_memory) != FALSE;
+            diagnostics::runtime::Event("copy_buffer_policy", {{"task", task_id},
+                {"file_bytes", entry.bytes}, {"remaining_large_bytes", large_remaining},
+                {"unbuffered", unbuffered}, {"slow", target.slow}, {"spinning", target.spinning},
+                {"block_clone", target.block_clone}, {"memory_known", memory_known},
+                {"available_bytes", observed_memory.ullAvailPhys}});
         }
         std::wstring copy_destination = direct ? entry.destination
             : UniqueTemporaryPath(entry.destination, L".pulse-copy-", task_id, index);
@@ -4146,6 +5498,8 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         context.cancel = &transfer_cancel_;
         context.pause = &transfer_pause_;
         context.report = [&](uint64_t done, uint64_t actual_total) {
+            if (stage_report.enabled && !stage_report.timing.copy_callback_seen)
+                stage_report.timing.ObserveCopyCallback(GetTickCount64(), done);
             if (actual_total > 0 && actual_total != known_file_total) {
                 if (actual_total > known_file_total) total_bytes += actual_total - known_file_total;
                 else total_bytes -= (std::min)(total_bytes, known_file_total - actual_total);
@@ -4153,22 +5507,53 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                 entry.bytes = actual_total;
                 SetProgressStatus([&](OpStatus& st) { st.total_bytes = total_bytes; });
             }
-            // Small files finishing alongside count toward the same total.
-            if (pool) apply_pooled(pool->Take(false));
+            // Keep serial and admitted pool work disjoint in the overall total.
+            active_serial_entry = &entry;
+            active_serial_bytes = actual_total > 0 ? (std::min)(done, actual_total) : done;
+            poll_pool(false);
             publish_progress(entry, done, actual_total, processed_items);
         };
 
+        VerificationStamp source_before_copy;
+        if (verify_requested) {
+            DWORD error = ERROR_SUCCESS;
+            if (!CaptureVerificationStamp(entry.source, source_before_copy, error)) {
+                if (!item_failed(entry, HRESULT_FROM_WIN32(error), TransferFailureText(HRESULT_FROM_WIN32(error)), entry.source)) break;
+                continue;
+            }
+        }
+        const auto current_item = item_control_.Begin(task_id, transfer_cancel_);
+        context.skip = &current_item->cancel;
+        active_serial_entry = &entry;
+        active_serial_bytes = 0;
+        diagnostics::runtime::Event("operation_item_begin", {{"task", task_id}, {"token", current_item->token},
+            {"type", static_cast<uint64_t>(req.type)}, {"bytes", entry.bytes}});
+        SetStatus([&](OpStatus& st) {
+            st.current_item_token = current_item->token;
+            st.current_item = FileName(entry.source);
+        });
         HRESULT copy_result = E_FAIL;
+        bool retain_failed_attempt = false;
         // A direct copy that lost the name to another writer must not delete
         // that writer's file.
         auto discard_copy = [&] {
+            if (retain_failed_attempt) return;
             if (direct && (copy_result == HRESULT_FROM_WIN32(ERROR_FILE_EXISTS) ||
                            copy_result == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)))
                 return;
-            DeleteFileW(copy_destination.c_str());
+            if (copy_result == HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED)) return;
+            if (context.owned_output) {
+                DWORD cleanup_error = ERROR_SUCCESS;
+                if (!DeleteVerifiedOutput(copy_destination, *context.owned_output, cleanup_error))
+                    diagnostics::runtime::Event("copy_cleanup_retained", {{"task", task_id}, {"error", cleanup_error}});
+            } else if (direct && !verify_requested) {
+                DeleteFileW(copy_destination.c_str());
+            } else {
+                diagnostics::runtime::Event("copy_cleanup_retained", {{"task", task_id}, {"error", ERROR_INVALID_HANDLE}});
+            }
         };
         bool resume = false;
-        // Dropped together if the file system rejects either.
+        // A performance capability fallback must preserve link semantics.
         DWORD extra_flags = COPY_FILE_COPY_SYMLINK | (unbuffered ? COPY_FILE_NO_BUFFERING : 0);
         for (;;) {
             context.pause_sent = false;
@@ -4181,13 +5566,36 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             // Small files finish within one callback interval; the callback
             // only adds a round trip per file. Pause and cancel are checked
             // between files for them.
-            if (entry.bytes >= kProgressCallbackMinBytes) {
+            if (context.skip || entry.bytes >= kProgressCallbackMinBytes || verify_requested || !direct) {
                 parameters.pProgressRoutine = CopyProgress;
                 parameters.pvCallbackContext = &context;
             }
-            copy_result = CopyFile2(entry.source.c_str(), copy_destination.c_str(), &parameters);
-            if (copy_result == HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER) && extra_flags != 0 && !resume) {
-                extra_flags = 0;
+            const bool log_copy = stage_report.enabled && entry.bytes >= 64ull * 1024 * 1024;
+            const auto copy_started = log_copy ? GetTickCount64() : 0;
+            if (log_copy) diagnostics::runtime::Event("copy_api_begin", {{"task", task_id},
+                {"bytes", entry.bytes}, {"flags", parameters.dwCopyFlags}, {"resume", resume},
+                {"callback", parameters.pProgressRoutine != nullptr}});
+            copy_result = measure_work(stage_report.serial_copy_work_ms, [&] {
+                return CopyFile2(entry.source.c_str(), copy_destination.c_str(), &parameters);
+            });
+            if (log_copy) diagnostics::runtime::Event("copy_api_end", {{"task", task_id},
+                {"elapsed_ms", GetTickCount64() - copy_started}, {"hr", static_cast<uint64_t>(static_cast<uint32_t>(copy_result))}});
+            if (copy_result == HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER) && (extra_flags & COPY_FILE_NO_BUFFERING) && !resume) {
+                if (context.owned_output) {
+                    DWORD cleanup_error = ERROR_SUCCESS;
+                    if (!DeleteVerifiedOutput(copy_destination, *context.owned_output, cleanup_error)) {
+                        retain_failed_attempt = true;
+                        diagnostics::runtime::Event("copy_performance_fallback", {{"task", task_id},
+                            {"error", ERROR_INVALID_PARAMETER}, {"cleanup_error", cleanup_error},
+                            {"removed_flag", 0}, {"buffered_retry", false}});
+                        break;
+                    }
+                    context.owned_output.reset();
+                }
+                extra_flags &= ~COPY_FILE_NO_BUFFERING;
+                context.last_report = 0;
+                diagnostics::runtime::Event("copy_performance_fallback", {{"task", task_id}, {"error", ERROR_INVALID_PARAMETER},
+                    {"removed_flag", COPY_FILE_NO_BUFFERING}, {"buffered_retry", true}});
                 continue;
             }
             if (copy_result != HRESULT_FROM_WIN32(ERROR_REQUEST_PAUSED)) break;
@@ -4201,7 +5609,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             const ULONGLONG held_from = GetTickCount64();
             std::unique_lock<std::mutex> lock(transfer_control_mutex_);
             transfer_control_cv_.wait(lock, [&] {
-                return transfer_cancel_.load() || !transfer_pause_.load();
+                return transfer_cancel_.load() || current_item->cancel.load() || !transfer_pause_.load();
             });
             lock.unlock();
             held_ms += GetTickCount64() - held_from;
@@ -4217,6 +5625,19 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                 st.eta_seconds = rate.eta_seconds();
             });
         }
+        const bool item_skipped = item_control_.Finish(current_item);
+        SetStatus([](OpStatus& st) { st.current_item_token = 0; });
+        diagnostics::runtime::Event("operation_item_end", {{"task", task_id}, {"token", current_item->token},
+            {"hr", static_cast<uint32_t>(copy_result)}, {"skip", item_skipped}, {"cancel", transfer_cancel_.load()}});
+        if (item_skipped && !transfer_cancel_.load()) {
+            discard_copy();
+            restore_backup(entry.destination);
+            active_serial_entry = nullptr;
+            active_serial_bytes = 0;
+            published_bytes = committed_bytes + pool_progress.Total();
+            mark_skipped(entry);
+            continue;
+        }
         if (cancelled || transfer_cancel_.load()) {
             cancelled = true;
             discard_copy();
@@ -4228,15 +5649,14 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             continue;
         }
 
-        if (verify_copies_.load()) {
+        if (verify_requested) {
             SetStatus([&](OpStatus& st) {
                 st.phase = OpPhase::Verifying;
                 st.summary = l10n::Get(l10n::StringId::Verifying).c_str() + FileName(entry.source);
                 st.bytes_per_second = 0.0;
                 st.eta_seconds = 0;
             });
-            std::array<uint8_t, 32> source_hash{};
-            std::array<uint8_t, 32> copied_hash{};
+
             auto wait_if_paused = [&] {
                 if (!transfer_pause_.load() || transfer_cancel_.load()) return;
                 SetStatus([&](OpStatus& st) {
@@ -4255,26 +5675,24 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                     st.summary = l10n::Get(l10n::StringId::Verifying).c_str() + FileName(entry.source);
                 });
             };
-            std::wstring hash_error;
-            if (!Sha256File(entry.source, transfer_cancel_, wait_if_paused, source_hash, hash_error) ||
-                !Sha256File(copy_destination, transfer_cancel_, wait_if_paused, copied_hash, hash_error)) {
+            if (!serial_verifier) serial_verifier = std::make_unique<SHA256VerificationWorker>();
+            const auto verification = serial_verifier->Verify(entry.source, copy_destination,
+                transfer_cancel_, wait_if_paused, &source_before_copy, context.owned_output.get());
+            stage_report.source_hash_work_ms += std::chrono::nanoseconds(verification.source_wall_ns);
+            stage_report.target_hash_work_ms += std::chrono::nanoseconds(verification.target_wall_ns);
+            if (!verification.Success()) {
                 discard_copy();
                 if (transfer_cancel_.load()) { cancelled = true; break; }
-                if (!item_failed(entry, E_FAIL, ErrorWithoutPath(hash_error), entry.source)) break;
-                continue;
-            }
-            if (source_hash != copied_hash) {
-                discard_copy();
-                if (!item_failed(entry, HRESULT_FROM_WIN32(ERROR_CRC),
-                                 FailureReason(l10n::Get(l10n::StringId::SHA256VerificationFailed).c_str()),
-                                 entry.source)) break;
+                const DWORD error = verification.win32_error ? verification.win32_error : ERROR_CRC;
+                if (!item_failed(entry, HRESULT_FROM_WIN32(error),
+                    VerificationFailureText(verification, HRESULT_FROM_WIN32(error)), entry.source)) break;
                 continue;
             }
             SetStatus([&](OpStatus& st) { st.phase = OpPhase::Running; });
         }
 
         if (!direct && SameFileObject(entry.source, entry.destination)) {
-            DeleteFileW(copy_destination.c_str());
+            discard_copy();
             mark_skipped(entry);
             continue;
         }
@@ -4283,29 +5701,37 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             if (old_attributes != INVALID_FILE_ATTRIBUTES &&
                 (old_attributes & FILE_ATTRIBUTE_READONLY))
                 SetFileAttributesW(entry.destination.c_str(), old_attributes & ~FILE_ATTRIBUTE_READONLY);
-            if (!ReplaceFileW(entry.destination.c_str(), copy_destination.c_str(), nullptr,
-                              REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr) &&
-                !MoveFileExW(copy_destination.c_str(), entry.destination.c_str(),
-                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            if (!measure_work(stage_report.commit_work_ms, [&] { return ReplaceFileW(entry.destination.c_str(), copy_destination.c_str(), nullptr,
+                              REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr); }) &&
+                !measure_work(stage_report.commit_work_ms, [&] { return MoveFileExW(copy_destination.c_str(), entry.destination.c_str(),
+                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH); })) {
                 const DWORD error = GetLastError();
-                DeleteFileW(copy_destination.c_str());
+                discard_copy();
                 if (!item_failed(entry, HRESULT_FROM_WIN32(error), TransferFailureText(HRESULT_FROM_WIN32(error)),
                                  entry.destination)) break;
                 continue;
             }
-        } else if (!direct && !MoveFileExW(copy_destination.c_str(), entry.destination.c_str(),
-                                           MOVEFILE_WRITE_THROUGH)) {
-            const DWORD error = GetLastError();
-            DeleteFileW(copy_destination.c_str());
-            if (!item_failed(entry, HRESULT_FROM_WIN32(error), TransferFailureText(HRESULT_FROM_WIN32(error)),
-                             entry.destination)) break;
-            continue;
+        } else if (!direct) {
+            DWORD commit_error = ERROR_INVALID_HANDLE;
+            const bool committed = context.owned_output && measure_work(stage_report.commit_work_ms, [&] {
+                return CommitVerifiedOutput(copy_destination, entry.destination, *context.owned_output, commit_error);
+            });
+            if (!committed) {
+                discard_copy();
+                if (!item_failed(entry, HRESULT_FROM_WIN32(commit_error), TransferFailureText(HRESULT_FROM_WIN32(commit_error)),
+                                 entry.destination)) break;
+                continue;
+            }
         }
 
+        entry.destination_written = true;
         if (req.type == OpType::Move) {
             // Written out now; the source goes with its batch (commit_moves).
             if (DWORD flush_error = 0; !FlushCopyToDisk(entry.destination, entry.attributes, flush_error, false)) {
                 if (!flush_error) flush_error = ERROR_WRITE_FAULT;
+                diagnostics::runtime::Event("move_commit_failed", {{"task", task_id}, {"stage", 1},
+                    {"error", flush_error}, {"source", preview::DiagnosticPathId(entry.source)},
+                    {"destination", preview::DiagnosticPathId(entry.destination)}});
                 failure_hr = HRESULT_FROM_WIN32(flush_error);
                 failure = l10n::Get(l10n::StringId::MoveKeptSourceNotFlushed).c_str() + entry.destination +
                           L" | " + Win32Message(flush_error);
@@ -4323,17 +5749,39 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         committed_bytes += entry.bytes;
     }
 
+    active_serial_entry = nullptr;
+    active_serial_bytes = 0;
     if (pool) {
         if (!failure.empty() || cancelled || transfer_cancel_.load()) pool->Stop();
         drain_pool();
         pool.reset();
     }
+    if (phase_profile) {
+        // reset joined all workers and merged their local counters; closing waits
+        // are separate from supply gaps and do not imply producer starvation.
+        const auto& workers = phase_profile->workers;
+        diagnostics::runtime::Event("copy_phase_profile", {{"task", task_id},
+            {"copy_us", workers.copy_work_ns / 1000}, {"copy_calls", workers.copy_calls},
+            {"budget_wait_us", workers.budget_wait_ns / 1000}, {"queue_start_us", workers.queue_start_ns / 1000},
+            {"queue_supply_us", workers.queue_supply_ns / 1000}, {"queue_close_us", workers.queue_close_ns / 1000},
+            {"apply_us", phase_profile->apply_ns / 1000}, {"apply_calls", phase_profile->apply_calls},
+            {"apply_empty_calls", phase_profile->apply_empty_calls}, {"apply_results", phase_profile->apply_results},
+            {"includes_pause", true}});
+    }
     // Copies already written out finish their move, on failure and cancel
     // too (as each finished move used to).
     commit_moves();
+    std::vector<std::wstring> generated_directories;
+    std::vector<GeneratedDirectoryReceipt> generated_directory_receipts;
     for (const auto& done : entries) {
+        const bool new_container = req.generated_output && done.directory && !done.renamed &&
+            done.directory_prepared && !done.destination_preexisting;
+        if (new_container) {
+            generated_directories.push_back(done.destination);
+            if (auto receipt = CaptureGeneratedDirectory(done.destination)) generated_directory_receipts.push_back(std::move(*receipt));
+        }
         if (done.source_removed) moved_sources_.push_back(done.source);
-        if (!done.completed) continue;
+        if (!done.completed && !new_container) continue;
         completed_sources.push_back(done.source);
         completed_destinations.push_back(done.destination);
     }
@@ -4352,13 +5800,24 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                             return StartsWithPath(skipped, it->source);
                         });
                     if (!intentionally_retained && error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+                        diagnostics::runtime::Event("move_commit_failed", {{"task", task_id}, {"stage", 4},
+                            {"error", error}, {"source", preview::DiagnosticPathId(it->source)},
+                            {"destination", preview::DiagnosticPathId(it->destination)}});
                         if (failure.empty()) failure_hr = HRESULT_FROM_WIN32(error);
                         if (!failure.empty()) failure += L"; ";
                         failure += Win32Message(error) + L" | " + it->source;
                     }
                 }
             } else if (!it->reparse) {
-                SetCopiedDirectoryMetadata(*it);
+                DWORD metadata_error = ERROR_SUCCESS;
+                if (!SetCopiedDirectoryMetadata(*it, metadata_error)) {
+                    // Content remains committed. Report partial failure without
+                    // rolling back successful copies or silently claiming success.
+                    const HRESULT hr = HRESULT_FROM_WIN32(metadata_error);
+                    if (item_failures.size() < kMaxReportedFailures)
+                        item_failures.push_back({it->source, it->destination, Win32Message(metadata_error), hr});
+                    ++failed_items;
+                }
             }
         }
     }
@@ -4366,33 +5825,45 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     // Replacements that could not be put back, appended to the result text so
     // the kept ".pulse-backup-" copy can be recovered by hand.
     std::wstring rollback_note;
-    if (failure.empty() && !cancelled) {
+    std::vector<std::pair<std::wstring, std::wstring>> generated_backups;
+    if (req.generated_output && !req.is_undo) {
         for (const auto& backup : replacement_backups) {
-            std::error_code ignored;
-            fsys::remove_all(fsys::path(backup.backup), ignored);
+            const bool published = std::any_of(completed_destinations.begin(), completed_destinations.end(),
+                [&](const auto& path) { return _wcsicmp(path.c_str(), backup.original.c_str()) == 0; });
+            if (published) generated_backups.emplace_back(backup.original, backup.backup);
+            else {
+                DWORD error = ERROR_SUCCESS;
+                if (!RestoreBoundReplacementBackup(backup, error))
+                    rollback_note += L" | " + backup.backup + L" | " + Win32Message(error);
+            }
+        }
+    } else if (failure.empty() && !cancelled) {
+        for (const auto& backup : replacement_backups) {
+            DWORD error = ERROR_SUCCESS;
+            if (!CleanupBoundReplacementBackup(backup, error, &transfer_cancel_)) {
+                // A directory identity cannot authorize deleting newly added
+                // children. Preserve it and surface incomplete cleanup.
+                if (failure.empty()) failure_hr = HRESULT_FROM_WIN32(error);
+                if (!failure.empty()) failure += L"; ";
+                failure += Win32Message(error) + l10n::Get(l10n::StringId::OriginalKeptAt).c_str() + backup.backup;
+            }
         }
     } else {
-        // The new destination is removed only so the backup can take its name
-        // back. Both steps used to ignore their result, so a destination held
-        // open by a scanner, or a backup that could not be renamed, left the
-        // original stranded under its temporary name with nothing reported.
+        std::vector<std::wstring> restored_originals;
         for (auto it = replacement_backups.rbegin(); it != replacement_backups.rend(); ++it) {
-            std::error_code removed;
-            fsys::remove_all(fsys::path(it->original), removed);
-            DWORD error = removed ? static_cast<DWORD>(removed.value()) : ERROR_SUCCESS;
-            if (error == ERROR_SUCCESS &&
-                !MoveFileExW(it->backup.c_str(), it->original.c_str(), MOVEFILE_WRITE_THROUGH))
-                error = GetLastError();
-            if (error != ERROR_SUCCESS) {
+            DWORD error = ERROR_SUCCESS;
+            if (RestoreBoundReplacementBackup(*it, error)) {
+                restored_originals.push_back(it->original);
+            } else {
                 rollback_note += l10n::Get(l10n::StringId::CouldNotRestore).c_str() + it->original +
                     l10n::Get(l10n::StringId::OriginalKeptAt).c_str() + it->backup + L" | " +
                     Win32Message(error);
             }
         }
         for (size_t i = completed_destinations.size(); i-- > 0;) {
-            const bool restored = std::any_of(replacement_backups.begin(),
-                replacement_backups.end(), [&](const ReplacementBackup& backup) {
-                    return StartsWithPath(completed_destinations[i], backup.original);
+            const bool restored = std::any_of(restored_originals.begin(),
+                restored_originals.end(), [&](const std::wstring& original) {
+                    return StartsWithPath(completed_destinations[i], original);
                 });
             if (restored) {
                 const auto& source = completed_sources[i];
@@ -4407,6 +5878,9 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
 
     if (failure.empty() && !cancelled && failed_items == 0) {
         OpRequest committed = req;
+        committed.generated_backups = generated_backups;
+        committed.generated_directories = generated_directories;
+        committed.generated_directory_receipts = generated_directory_receipts;
         committed.sources.clear();
         std::vector<std::wstring> committed_destinations;
         // Each root and what was scanned under it are one run of entries
@@ -4420,6 +5894,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             const bool independent_root = !found.destination_preexisting
                 || _wcsicmp(found.destination.c_str(), original_destination.c_str()) != 0;
             if (independent_root) {
+                std::erase(committed.generated_directories, found.destination);
                 committed.sources.push_back(req.sources[root_index]);
                 committed_destinations.push_back(found.destination);
                 continue;
@@ -4428,7 +5903,8 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             for (size_t next = root_index + 1; next < req.sources.size(); ++next)
                 if (root_entries[next] != std::wstring::npos) { end = root_entries[next]; break; }
             for (size_t item = first; item < end; ++item) {
-                if (!entries[item].completed) continue;
+                if (!entries[item].completed && !(req.generated_output && entries[item].directory_prepared &&
+                    !entries[item].destination_preexisting)) continue;
                 committed.sources.push_back(entries[item].source);
                 committed_destinations.push_back(entries[item].destination);
             }
@@ -4436,17 +5912,45 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         if (!committed_destinations.empty()) PushUndo(committed, task_id, &committed_destinations);
     } else if (!completed_destinations.empty()) {
         OpRequest partial = req;
+        partial.generated_backups = generated_backups;
+        partial.generated_directories = generated_directories;
+        partial.generated_directory_receipts = generated_directory_receipts;
         partial.sources = completed_sources;
         PushUndo(partial, task_id, &completed_destinations);
     }
 
+    // A durable destination can remain even when removing its source fails.
+    // Publish disk changes separately from success/undo and identity remapping.
+    if (!failure.empty() || cancelled || transfer_cancel_.load() || failed_items != 0) {
+        CompletedOperation refresh;
+        refresh.task_id = task_id;
+        refresh.type = req.type;
+        refresh.refresh_only = true;
+        std::unordered_set<std::wstring> seen;
+        const auto add_directory = [&](const std::wstring& directory) {
+            if (!directory.empty() && seen.insert(directory).second)
+                refresh.refresh_directories.push_back(directory);
+        };
+        for (const auto& entry : entries) {
+            if (!entry.destination_written && !entry.directory_prepared && !entry.completed) continue;
+            add_directory(ParentOf(entry.destination));
+            if (req.type == OpType::Move) add_directory(ParentOf(entry.source));
+        }
+        if (!refresh.refresh_directories.empty()) {
+            add_directory(req.dest_dir);
+            for (const auto& source : req.sources) add_directory(ParentOf(source));
+            for (const auto& directory : req.refresh_directories) add_directory(directory);
+            std::lock_guard<std::mutex> lock(mutex_);
+            completions_.push_back(std::move(refresh));
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(transfer_control_mutex_);
         pending_conflict_.reset();
     }
     const bool transfer_cancelled = cancelled || transfer_cancel_.load();
     diagnostics::runtime::Event("file_transfer_result", {{"task", task_id},
-        {"hresult", static_cast<uint32_t>(failure_hr)}, {"has_error", !failure.empty()},
+        {"hresult", static_cast<uint32_t>(failure_hr)}, {"has_error", !failure.empty() || failed_items != 0}, {"failed_items", failed_items},
         {"cancelled", transfer_cancelled}, {"completed_sources", completed_sources.size()}});
     // Items held open by another program say by which (a bounded number:
     // each probe asks Restart Manager).
@@ -4489,7 +5993,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         : LockReport{};
     if (failed_items > 0) {
         std::lock_guard<std::mutex> lock(mutex_);
-        failed_retries_.push_back(FailedItemsRetry{task_id, req, item_failures});
+        failed_retries_.push_back(FailedItemsRetry{task_id, MakeFailedRetryTemplate(req), item_failures});
         while (failed_retries_.size() > 8) failed_retries_.pop_front();
     }
     rollback_note = kept_backup_note + rollback_note;
@@ -4535,6 +6039,23 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
 }
 
 void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
+    ControlledTransferResult rename_result;
+    struct RenameCompletion {
+        const OpRequest& request;
+        ControlledTransferResult& result;
+        ~RenameCompletion() {
+            if (request.rename_completed) request.rename_completed(std::move(result));
+        }
+    } rename_completion{req, rename_result};
+    if (req.rename_completed) {
+        for (size_t i = 0; i < req.sources.size(); ++i) {
+            ControlledTransferItem item;
+            item.source = req.sources[i];
+            if (i < req.new_names.size()) item.destination = JoinPath(ParentOf(req.sources[i]), req.new_names[i]);
+            rename_result.items.push_back(std::move(item));
+        }
+        rename_result.error = ERROR_OPERATION_ABORTED;
+    }
     if ((req.type == OpType::CreateFolder || req.type == OpType::CreateTextFile ||
          req.type == OpType::RealDelete) && IsShellTransferRequest(req)) {
         RunShellItemOp(req, task_id);
@@ -4630,36 +6151,37 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
                 st.eta_seconds = recycle_rate.eta_seconds();
             });
         };
-        const recycle_empty::Result result = recycle_empty::EmptyFolders(
-            recycle_empty::CurrentUserBinFolders(), cancelled, progress);
+        const auto bin_folders = recycle_empty::CurrentUserBinFolders();
+        recycle_empty::Result result = recycle_empty::EmptyFolders(bin_folders, cancelled, progress);
+        result.cancelled = result.cancelled || cancelled();
         HRESULT hr = S_OK;
         uint64_t shell_items = 0;
         if (!result.cancelled) {
             SHQUERYRBINFO left{};
             left.cbSize = sizeof(left);
-            if (SUCCEEDED(SHQueryRecycleBinW(nullptr, &left)) && left.i64NumItems > 0) {
+            hr = SHQueryRecycleBinW(nullptr, &left);
+            result.cancelled = result.cancelled || cancelled();
+            if (!result.cancelled && SUCCEEDED(hr) && left.i64NumItems > 0) {
                 shell_items = static_cast<uint64_t>(left.i64NumItems);
                 hr = SHEmptyRecycleBinW(nullptr, nullptr,
                     SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND);
             }
         }
+        result.cancelled = result.cancelled || cancelled();
+        const HRESULT completion = recycle_empty::FinalizeResult(result, hr, bin_folders);
         recycle_empty::NotifyShell();
         diagnostics::runtime::Event("recycle_empty_result", {{"task", task_id},
             {"items", result.removed_items}, {"files", result.deleted_files},
             {"bytes", result.deleted_bytes}, {"failed", result.failed_entries},
             {"error", static_cast<uint32_t>(result.first_error)}, {"cancelled", result.cancelled},
             {"shell_items", shell_items}, {"shell_hresult", static_cast<uint32_t>(hr)},
+            {"completion_hresult", static_cast<uint32_t>(completion)},
             {"elapsed_ms", GetTickCount64() - started}});
-
-        // Entries that were already gone (another tool emptied them first) count
-        // as failures, so the bin is the judge: nothing left means it worked.
-        SHQUERYRBINFO after{};
-        after.cbSize = sizeof(after);
-        const bool after_ok = SUCCEEDED(SHQueryRecycleBinW(nullptr, &after));
-        const bool items_left = !after_ok || after.i64NumItems > 0;
 
         SetStatus([&](OpStatus& st) {
             st.active = false;
+            st.current_item.clear();
+            st.enumeration_complete = true;
             st.percent = -1.0f;
             st.completed_ops++;
             st.bytes_per_second = 0;
@@ -4668,9 +6190,10 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
                 st.phase = OpPhase::Failed;
                 st.last_error = l10n::Get(l10n::StringId::Canceled).c_str();
                 st.summary = st.last_error;
-            } else if (FAILED(hr) || (result.failed_entries && items_left)) {
+            } else if (FAILED(completion)) {
                 st.phase = OpPhase::Failed;
                 st.last_error = l10n::Get(l10n::StringId::CouldNotEmptyTheRecycleBin).c_str();
+                st.summary = st.last_error;
             } else {
                 st.phase = OpPhase::Completed;
                 st.completed_items = st.total_items;
@@ -4708,24 +6231,77 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
 
     if (req.type == OpType::Rename || req.type == OpType::BatchRename) {
         bool valid = !req.sources.empty() && (req.type != OpType::Rename || req.sources.size() == 1);
+        if (req.rename_authorized || !req.authorized_rename_identities.empty()) {
+            valid = valid && req.type == OpType::BatchRename && req.rename_authorized &&
+                req.authorized_rename_identities.size() == req.sources.size() &&
+                req.new_names.size() == req.sources.size();
+        }
+        const bool authority_valid = !req.rename_authorized || req.rename_authorized();
         std::wstring invalid_reason;
         for (size_t i = 0; i < req.sources.size(); ++i) {
             const auto& name = req.type == OpType::BatchRename && i < req.new_names.size() ? req.new_names[i] : req.new_name;
             if (valid && !req.sources[i].empty() && !IsRenameComponent(name)) invalid_reason = RenameNameText(name);
             valid = valid && !req.sources[i].empty() && IsRenameComponent(name);
         }
-        if (!valid || shell_cancel_requested_.load() || stopping_.load()) {
+        if (!valid || !authority_valid || shell_cancel_requested_.load() || stopping_.load()) {
+            const bool cancelled = !authority_valid || shell_cancel_requested_.load() || stopping_.load();
+            rename_result.error = cancelled ? ERROR_CANCELLED : ERROR_INVALID_PARAMETER;
+            for (auto& item : rename_result.items) {
+                item.state = cancelled ? ControlledTransferState::Cancelled : ControlledTransferState::Failed;
+                item.error = rename_result.error;
+            }
             SetStatus([&](OpStatus& st) {
                 st.active = false; st.phase = OpPhase::Failed; st.percent = -1.0f;
                 ++st.completed_ops;
-                st.last_error = valid ? l10n::Get(l10n::StringId::Canceled).c_str()
+                st.last_error = cancelled ? l10n::Get(l10n::StringId::Canceled).c_str()
                     : !invalid_reason.empty() ? invalid_reason : l10n::Get(l10n::StringId::InvalidName_2).c_str();
             });
             return;
         }
     }
 
+    const auto rename_item = [&](const std::wstring& source, const std::wstring& name,
+                                 std::wstring* error, DWORD* code, size_t index = 0) {
+        if (shell_cancel_requested_.load() || stopping_.load() ||
+            (req.rename_authorized && !req.rename_authorized())) {
+            *error = l10n::Get(l10n::StringId::Canceled);
+            *code = ERROR_CANCELLED;
+            return RenameResult::Rejected;
+        }
+        auto result = RenameInProcess(source, name, error, code,
+            !req.authorized_rename_identities.empty() ? &req.authorized_rename_identities[index] :
+            req.authorized_rename_identity ? &*req.authorized_rename_identity : nullptr);
+#ifndef PULSE_ELEVATED_HOST
+        // The legacy elevation helper captures fresh path identities. A caller-bound
+        // reviewed batch must not replace its confirmed identities with those objects.
+        if (!req.rename_authorized && result == RenameResult::Rejected &&
+            (*code == ERROR_ACCESS_DENIED || *code == ERROR_PRIVILEGE_NOT_HELD ||
+             *code == ERROR_ELEVATION_REQUIRED)) {
+            ElevatedTransferCallbacks callbacks;
+            callbacks.authorization = [this](bool awaiting) {
+                SetStatus([&](OpStatus& status) {
+                    status.can_pause = false;
+                    status.authorization = awaiting ? AuthorizationState::Requesting : AuthorizationState::None;
+                });
+            };
+            const auto elevated = TransferWithElevatedHelper({source}, ParentOf(source), true,
+                UiWindow(), shell_cancel_requested_, ShellCollisionPolicy::System,
+                std::move(callbacks), name, true);
+            if (elevated.mutated && elevated.sources.size() == 1 && elevated.destinations.size() == 1) {
+                *code = ERROR_SUCCESS;
+                return RenameResult::Completed;
+            }
+            *code = elevated.cancelled ? ERROR_CANCELLED : FAILED(elevated.hr) ? HRESULT_CODE(elevated.hr) : ERROR_GEN_FAILURE;
+            if (elevated.cancelled) shell_cancel_requested_.store(true);
+            *error = elevated.cancelled ? l10n::Get(l10n::StringId::Canceled)
+                : elevated.error.empty() ? RenameFailureText(*code) : elevated.error;
+        }
+#endif
+        return result;
+    };
+
     if (req.type == OpType::BatchRename) {
+        rename_result.error = ERROR_SUCCESS;
         std::vector<std::wstring> ok_sources;
         std::vector<std::wstring> ok_names;
         std::vector<std::wstring> ok_destinations;
@@ -4743,8 +6319,21 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
             if (stopping_.load() || shell_cancel_requested_.load()) { cancelled = true; break; }
             // Each item uses the same no-overwrite filesystem rename.
             std::wstring local_error;
-            const auto local = RenameInProcess(req.sources[i], name, &local_error);
-            if (local == RenameResult::Rejected) { last_error = local_error; continue; }
+            DWORD local_code = ERROR_SUCCESS;
+            const auto local = rename_item(req.sources[i], name, &local_error, &local_code, i);
+            if (i < rename_result.items.size()) {
+                auto& outcome = rename_result.items[i];
+                outcome.state = local == RenameResult::Completed ? ControlledTransferState::Moved :
+                    local_code == ERROR_CANCELLED ? ControlledTransferState::Cancelled : ControlledTransferState::Failed;
+                outcome.error = local_code;
+                if (local != RenameResult::Completed) rename_result.error = local_code;
+            }
+            if (local_code == ERROR_CANCELLED) { cancelled = true; break; }
+            if (local == RenameResult::Rejected) {
+                last_error = local_error;
+                if (req.rename_authorized) break;
+                continue;
+            }
             if (local == RenameResult::Completed) {
                 ok_sources.push_back(req.sources[i]);
                 ok_names.push_back(name);
@@ -4759,7 +6348,18 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
             OpRequest recorded = req;
             recorded.sources = ok_sources;
             recorded.new_names = ok_names;
+            recorded.authorized_rename_identities.clear();
+            recorded.rename_authorized = {};
+            recorded.rename_completed = {};
             PushUndo(recorded, task_id, &ok_destinations);
+        }
+        rename_result.complete = !cancelled && ok_sources.size() == req.sources.size();
+        if (cancelled) {
+            rename_result.error = ERROR_CANCELLED;
+            for (auto& outcome : rename_result.items) if (outcome.state == ControlledTransferState::NotStarted) {
+                outcome.state = ControlledTransferState::Cancelled;
+                outcome.error = ERROR_CANCELLED;
+            }
         }
         SetStatus([&](OpStatus& st) {
             st.active = false;
@@ -4769,7 +6369,7 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
             if (cancelled) {
                 st.phase = OpPhase::Failed;
                 st.last_error = l10n::Get(l10n::StringId::Canceled).c_str();
-            } else if (ok_sources.empty()) {
+            } else if (ok_sources.empty() || (req.rename_authorized && !last_error.empty())) {
                 st.phase = OpPhase::Failed;
                 st.last_error = last_error.empty() ? l10n::Get(l10n::StringId::OpFailed).c_str() : last_error;
             } else {
@@ -4786,7 +6386,7 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
     if (req.type == OpType::Rename && req.sources.size() == 1) {
         std::wstring local_error;
         DWORD local_code = ERROR_SUCCESS;
-        const auto local = RenameInProcess(req.sources.front(), req.new_name, &local_error, &local_code);
+        const auto local = rename_item(req.sources.front(), req.new_name, &local_error, &local_code);
         if (local == RenameResult::Rejected) {
             // A handle held elsewhere: name the program and offer the retry,
             // like delete and move (the folder case probes files inside it).
@@ -4816,10 +6416,35 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
 
     if (req.type == OpType::CreateFolder || req.type == OpType::CreateTextFile) {
         std::wstring local_error;
-        const bool created = CreateInProcess(req, &local_error);
-        if (created) PushUndo(req, task_id);
+        DWORD create_error = ERROR_SUCCESS;
+        bool cancelled = shell_cancel_requested_.load() || stopping_.load();
+        bool created = !cancelled && CreateInProcess(req, &local_error, &create_error);
+        OpRequest completed = req;
+#ifndef PULSE_ELEVATED_HOST
+        if (!created && !cancelled && req.type == OpType::CreateFolder &&
+            (create_error == ERROR_ACCESS_DENIED || create_error == ERROR_PRIVILEGE_NOT_HELD ||
+             create_error == ERROR_ELEVATION_REQUIRED)) {
+            SetStatus([](OpStatus& st) {
+                st.can_pause = false;
+            });
+            ElevatedTransferCallbacks callbacks;
+            callbacks.authorization = [this](bool awaiting) {
+                SetStatus([&](OpStatus& st) {
+                    st.authorization = awaiting ? AuthorizationState::Requesting : AuthorizationState::None;
+                });
+            };
+            const auto result = CreateFolderWithElevatedHelper(req.sources.front(), UiWindow(), shell_cancel_requested_, std::move(callbacks));
+            created = result.mutated && result.destinations.size() == 1;
+            cancelled = result.cancelled;
+            if (created) completed.sources = result.destinations;
+            else if (!cancelled && FAILED(result.hr)) local_error = result.error.empty()
+                ? CreateFailureText(HRESULT_CODE(result.hr)) : result.error;
+        }
+#endif
+        if (created) PushUndo(completed, task_id);
         SetStatus([&](OpStatus& st) {
             st.active = false;
+            st.authorization = AuthorizationState::None;
             st.percent = -1.0f;
             st.completed_ops++;
             if (created) {
@@ -4828,8 +6453,35 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
                 st.summary = Describe(req) + l10n::Get(l10n::StringId::Completed).c_str();
             } else {
                 st.phase = OpPhase::Failed;
-                st.last_error = local_error;
+                st.last_error = cancelled ? l10n::Get(l10n::StringId::Canceled) : local_error;
             }
+        });
+        shell_cancel_requested_ = false;
+        return;
+    }
+
+    if ((!own_shell_client_ || req.generated_output) && req.type == OpType::RestoreRecycle) {
+        shell::RecycleRestoreIndex lookup;
+        std::wstring error;
+        OpRequest restored = req;
+        restored.sources.clear();
+        for (const auto& source : req.sources) {
+            if (shell_cancel_requested_.load() || stopping_.load()) break;
+            std::wstring one_error;
+            if (recycle::RestoreOneFromRecycle(source, one_error, lookup, req.generated_output)) restored.sources.push_back(source);
+            else if (error.empty()) error = l10n::ServiceErrorText(one_error);
+        }
+        const bool cancelled = shell_cancel_requested_.load() || stopping_.load();
+        if (!restored.sources.empty()) PushUndo(restored, task_id);
+        SetStatus([&](OpStatus& st) {
+            st.active = false;
+            st.can_pause = false;
+            ++st.completed_ops;
+            st.completed_items = restored.sources.size();
+            st.phase = !cancelled && restored.sources.size() == req.sources.size()
+                ? OpPhase::Completed : OpPhase::Failed;
+            st.last_error = cancelled ? std::wstring(l10n::Get(l10n::StringId::Canceled)) : error;
+            if (st.phase == OpPhase::Completed) st.summary = Describe(req) + l10n::Get(l10n::StringId::Completed).c_str();
         });
         return;
     }
@@ -4951,10 +6603,26 @@ bool OpsManager::WaitShellDone(uint32_t id, uint32_t& hr, bool& cancelled, std::
 // Undo stack JSON persistence (minimal parser, same style as StagingTray).
 // ---------------------------------------------------------------------------
 std::wstring OpsManager::UndoToJson() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    return *UndoJsonSnapshot();
+}
+
+std::shared_ptr<const std::wstring> OpsManager::UndoJsonSnapshot() const {
+    std::deque<UndoEntry> entries;
+    uint64_t revision;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (undo_json_cache_ && undo_json_cached_revision_ == undo_json_revision_)
+            return undo_json_cache_;
+        revision = undo_json_revision_;
+        entries = undo_;
+    }
     std::wstring out = L"[\n";
-    for (size_t i = 0; i < undo_.size(); ++i) {
-        const auto& e = undo_[i];
+    bool first = true;
+    for (size_t i = 0; i < entries.size(); ++i) {
+        const auto& e = entries[i];
+        if (e.generated_output) continue;
+        if (!first) out += L",\n";
+        first = false;
         wchar_t head[64];
         swprintf_s(head, L"  {\"type\":%d,\"sup\":%s,", (int)e.type, e.supported ? L"true" : L"false");
         out += head;
@@ -4977,11 +6645,20 @@ std::wstring OpsManager::UndoToJson() const {
             if (j + 1 < e.destinations.size()) out += L",";
         }
         out += L"]}";
-        if (i + 1 < undo_.size()) out += L",";
         out += L"\n";
     }
     out += L"]";
-    return out;
+    auto snapshot = std::make_shared<const std::wstring>(std::move(out));
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (revision == undo_json_revision_) {
+            if (undo_json_cache_ && undo_json_cached_revision_ == revision)
+                return undo_json_cache_;
+            undo_json_cache_ = snapshot;
+            undo_json_cached_revision_ = revision;
+        }
+    }
+    return snapshot;
 }
 
 bool OpsManager::UndoFromJson(const std::wstring& in) {
@@ -5110,8 +6787,13 @@ bool OpsManager::UndoFromJson(const std::wstring& in) {
         parsed.push_back(std::move(e));
     }
     std::lock_guard<std::mutex> lock(mutex_);
+    if (history_replay_ || active_item_ || !queue_.empty()) return false;
+    for (auto& entry : parsed) entry.task_id = next_seq_++;
     undo_ = std::move(parsed);
+    redo_.clear();
+    history_progress_.clear();
     TrimUndoHistory(undo_);
+    ++undo_json_revision_;
     return true;
 }
 

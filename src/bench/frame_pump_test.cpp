@@ -93,7 +93,50 @@ void TestUiTimerPacer() {
 
 } // namespace
 
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && wcscmp(argv[1], L"--morph-text-warmup") == 0) {
+        using VM = pulse::ui::motion::ViewMorphMotion;
+        if (!pulse::ui::motion::SystemAnimationsEnabled()) {
+            std::wprintf(L"[SKIP] system animations disabled; warmup transition not exercised\n");
+            return 2;
+        }
+        const auto cell = D2D1::RectF(0, 0, 120, 80);
+        const auto icon = D2D1::RectF(8, 8, 40, 40);
+        VM morph;
+        morph.BeginFrame(1, 0, 1, 1000, true);
+        morph.Record(7, cell, icon);
+        morph.AdvanceTextWarmup(37);
+        morph.BeginFrame(1, 1, 2, 1016, true);
+        Check(morph.Running() && morph.TextWarmupNext() == 0, L"new mode resets prior text warmup cursor");
+        Check(morph.TextOpacity() == 0.0f, L"new morph starts with hidden target text");
+        morph.AdvanceTextWarmup(12);
+        morph.Record(7, cell, icon);
+        morph.BeginFrame(1, 1, 3, 1032, true);
+        Check(morph.TextWarmupNext() == 12, L"ordinary frame preserves completed warmup rows");
+        morph.AdvanceTextWarmup(24);
+        morph.Record(7, cell, icon);
+        morph.BeginFrame(1, 2, 4, 1048, true);
+        Check(morph.Running() && morph.TextWarmupNext() == 0 && morph.FramesSinceStart() == 1,
+              L"rapid second mode switch starts its own warmup at zero");
+        Check(morph.TextOpacity() == 0.0f, L"rapid switch restarts target text opacity");
+        morph.AdvanceTextWarmup(9);
+        float previous = 0;
+        bool monotonic = true, saw_fade = false, preserved = true;
+        for (uint64_t frame = 5, now = 1064; frame < 40; ++frame, now += 16) {
+            morph.Record(7, cell, icon);
+            morph.BeginFrame(1, 2, frame, now, true);
+            const float alpha = morph.TextOpacity();
+            monotonic &= alpha >= previous && alpha >= 0 && alpha <= 1;
+            saw_fade |= alpha > 0 && alpha < 1;
+            preserved &= morph.TextWarmupNext() == 9;
+            previous = alpha;
+        }
+        Check(preserved, L"ordinary fade and settled frames preserve warmup progress");
+        Check(monotonic && saw_fade, L"target text fades continuously through intermediate opacity");
+        Check(!morph.Running() && morph.TextOpacity() == 1.0f, L"settled text is fully visible");
+        std::wprintf(L"== morph text warmup: %d passed, %d failed ==\n", passed, failed);
+        return failed ? 1 : 0;
+    }
     TestUiTimerPacer();
     HWND hwnd = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
     Check(hwnd != nullptr, L"message window");
@@ -136,6 +179,12 @@ int wmain() {
         Check(!animations || shift.Active(2100), L"row flash is active right after the insert");
         Check(!shift.Active(2016 + motion::ListShiftMotion::kFlashMs + motion::kSettleGraceMs),
               L"abandoned row flash stops asking for frames after its duration");
+        shift.BeginFrame(8, 0, 0, 15, 3, 2032, true); // expanded tree revision
+        const auto offset = shift.Offset(99, D2D1::Point2F(0, 80));
+        shift.Offset(100, D2D1::Point2F(0, 100));
+        Check(offset.x == 0 && offset.y == 0 && shift.Flash(99) == 0 && shift.Flash(100) == 0,
+              L"tree revision clears old flashes and does not flash revealed rows");
+        shift.EndFrame();
     }
 
     // View-mode morph (grid -> list): shared-element travel, spring timing,

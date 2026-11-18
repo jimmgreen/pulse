@@ -27,6 +27,7 @@
 #include <dwrite_3.h>
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,9 @@ struct FluentMenuSwatch {
     // tag color dot: wider hit target, hover pill, theme text color.
     std::wstring glyph;
     wchar_t mnemonic = 0;          // keyboard access key (case-insensitive), 0 = none
+    std::wstring label;
+    fluent::MenuPictogram pictogram = fluent::MenuPictogram::None;
+    bool custom_color = false;   // color-wheel dot that opens a custom picker
 };
 
 struct FluentMenuItem {
@@ -81,6 +85,7 @@ struct FluentMenuItem {
     bool heading = false;
     uint16_t match_start = 0;
     uint16_t match_length = 0;
+    int drag_command = 0;         // optional toolbar drag identity; never dispatched as a command
 };
 
 // Access key of a row: explicit mnemonic, else trailing "(X)" / "（X）" in text
@@ -187,6 +192,8 @@ public:
     bool SaveDebugSnapshot(const wchar_t* png_path, std::vector<FluentMenuItem> items,
                            int hover_row = -1);
 
+    int DraggedCommand() const { return dragged_command_; }
+    POINT DragPoint() const { return drag_point_; }
     bool IsOpen() const { return open_; }
     void Dismiss(); // immediate (no animation); safe anytime
     // Safe from the owner window while TrackPopup's modal loop is running
@@ -221,8 +228,13 @@ public:
     // Motion v2 "newmenu": the next popup grows out of this button (screen
     // px) - the container morphs from the button's pill, then rows fade in.
     void SetMorphFrom(RECT screen_rc) { morph_button_ = screen_rc; morph_next_ = true; }
-    // Align an ordinary selection menu below its control; cleared after use.
-    void SetDropdownRect(RECT screen_rc) { dropdown_rect_ = screen_rc; dropdown_ = true; }
+    // Align below its control, or centered above an icon; flip at screen edges.
+    // Cleared after use.
+    void SetDropdownRect(RECT screen_rc, bool prefer_above = false) {
+        dropdown_rect_ = screen_rc; dropdown_ = true; dropdown_above_ = prefer_above;
+    }
+    // Position the visible card at a screen point, excluding its transparent shadow.
+    static POINT CardOrigin(POINT point) { return {point.x - kShadowMargin, point.y - kShadowMargin}; }
     // Override the filter-mode minimum width (dips) for the next TrackPopup;
     // <= 0 restores the palette default. Reset after each popup.
     void SetFilterMinWidth(float dips) { filter_min_width_ = dips; }
@@ -240,6 +252,9 @@ public:
     // and dismiss on clicks that land in windows of other threads, which the
     // modal loop cannot otherwise observe. Sticky until changed.
     void SetTopmost(bool topmost) { topmost_ = topmost; }
+    // Notification-area menus have a hidden owner: activate the popup itself
+    // and cancel when another process/window takes foreground ownership.
+    void SetActivateOnOpen(bool activate) { activate_on_open_ = activate; }
 
     // Acrylic menus (process wide, Settings > menu acrylic). Turning it on also
     // makes every Compositor keep a GPU copy of its last frame: menus blur what
@@ -289,9 +304,9 @@ private:
     // the owner compositor's frame copy; false keeps the solid plate.
     bool EnsurePlate(Surface& s, const D2D1_RECT_F& card, POINT origin, ID2D1Image* target);
     void Present(BYTE alpha, int y_offset_px);
-    // One-level flyout for FluentMenuItem::children.
+    // Cascading flyouts share one modal loop and preserve each parent card.
     bool EnsureSubWindow();
-    void OpenSubmenu(int row);
+    void OpenSubmenu(int row, size_t depth = 0);
     void CloseSubmenu();
     void OnSubMouse(POINT client_pt, bool button_up);
     bool RenderSub();
@@ -305,15 +320,19 @@ private:
     void UpdateHover(int row, int swatch = -1);
     float BodyHeightPx() const;
     // Overflow scrolling (#67): a menu taller than the work area keeps its
-    // card on screen and scrolls the rows between two arrow strips.
+    // card on screen and scrolls its rows under the shared scrollbar.
     bool Scrollable() const { return max_visible_rows_ > 0 || overflow_; }
-    float ArrowPx() const;          // arrow strip height; 0 unless overflowing
     float ViewportPx() const;       // body height left for rows
     float MaxScrollPx() const;
     void ApplyHeightLimit(float available_px);
     bool ScrollTo(float y);         // clamps; true when the rows moved
     bool ScrollRows(int rows);      // whole rows, top row aligned like native menus
-    void TickArrowScroll();         // modal-loop tick while resting on an arrow
+    // The shared scrollbar (fluent::ScrollbarSpec) over the rows' right edge.
+    fluent::ScrollbarSpec BarSpec() const;
+    bool BarPress(float x, float y);   // true when the press grabbed the bar
+    bool BarDrag(float y);             // true when the rows moved
+    void BarRelease();
+    bool TickBar();                    // modal-loop tick; true while it animates
     void UpdateTooltip(int row);
     bool RenderTip(const std::wstring& text);   // tooltip text -> tip_surf_
     int HitTestSwatch(int row, float client_x) const;
@@ -343,6 +362,8 @@ private:
     bool dark_ = false;
     D2D1_COLOR_F accent_{};
 
+    int drag_row_ = -1, dragged_command_ = 0;
+    POINT drag_start_{}, drag_point_{};
     FluentMenuModel model_;
     FilterFn filter_fn_;
     std::wstring filter_query_;
@@ -361,9 +382,12 @@ private:
     bool anchor_to_rect_ = false;
     RECT dropdown_rect_{};
     bool dropdown_ = false;
+    bool dropdown_above_ = false;
     POINT popup_pt_{};
     bool top_center_ = false;
     bool topmost_ = false;
+    bool activate_on_open_ = false;
+    bool activation_confirmed_ = false;
     bool acrylic_active_ = false;  // decided when a popup opens
     HWND external_edit_ = nullptr; // borrowed; never moved, hidden or destroyed
     HWND edit_ = nullptr;
@@ -380,11 +404,10 @@ private:
     float scroll_y_ = 0.0f;
     float body_limit_px_ = 0.0f;
     bool overflow_ = false;
-    int arrow_hover_ = 0;          // -1 top arrow, +1 bottom arrow, 0 none
-    std::chrono::steady_clock::time_point arrow_tick_{};
-    float arrow_accum_ms_ = 0.0f;
-    static constexpr float kScrollArrowDip = 20.0f;
-    static constexpr float kScrollArrowMsPerRow = 60.0f;
+    fluent::ScrollbarFade bar_fade_;
+    bool bar_hot_ = false;         // pointer on the scrollbar
+    bool bar_drag_ = false;
+    float bar_grab_ = 0.0f;        // pointer offset along the thumb
     HWND tooltip_ = nullptr;
     std::wstring tooltip_text_;
     bool open_ = false;
@@ -401,18 +424,34 @@ private:
     };
     std::vector<IconBitmap> icon_bitmaps_;  // a menu holds a few dozen rows at most
 
-    // Flyout (one level, FluentMenuItem::children).
-    HWND sub_hwnd_ = nullptr;
-    Surface sub_surf_;
-    Surface tip_surf_;             // hover tooltip staging
-    FluentMenuModel sub_model_;
-    int sub_parent_row_ = -1;      // row in model_ whose children are shown
-    int sub_hover_ = -1;
-    int sub_hover_swatch_ = -1;
-    int sub_pending_row_ = -1;     // hover-to-open delay target
+    struct SubmenuState {
+        ~SubmenuState();
+        HWND hwnd = nullptr;
+        Surface surf;
+        FluentMenuModel model;
+        int parent_row = -1;
+        int hover = -1;
+        int hover_swatch = -1;
+        int x = 0, y = 0;
+        ::pulse::ui::motion::SpringRectMotion plate;
+        uint64_t plate_frame = 0;
+        bool animating = false, fade = false;
+        std::chrono::steady_clock::time_point anim_start;
+        int dx = 0, dy = 0, from_dx = 0, from_dy = 0;
+        BYTE alpha = 255;
+        int pending_row = -1;
+        std::chrono::steady_clock::time_point pending_since;
+    };
+    SubmenuState first_sub_;
+    std::vector<std::unique_ptr<SubmenuState>> deeper_subs_;
+    SubmenuState* sub_ = &first_sub_;
+    Surface tip_surf_;
+    int sub_pending_row_ = -1;
     std::chrono::steady_clock::time_point sub_pending_since_;
-    int sub_x_ = 0;                // flyout window origin (screen px)
-    int sub_y_ = 0;
+    size_t SubmenuDepth() const;
+    SubmenuState* SubmenuAt(size_t depth);
+    void CloseSubmenusFrom(size_t depth);
+    void SelectDeepestSubmenu();
 
     // Motion (see the header comment). motion_ samples SystemAnimationsEnabled
     // once per TrackPopup.
@@ -425,18 +464,8 @@ private:
     bool morph_ = false;           // this open morphs from morph_from_
     D2D1_RECT_F morph_from_{};     // the button pill in surface px
     ::pulse::ui::motion::SpringRectMotion plate_;
-    ::pulse::ui::motion::SpringRectMotion sub_plate_;
     uint64_t plate_frame_ = 0;
-    uint64_t sub_plate_frame_ = 0;
     uint64_t plate_context_ = 0;   // bumped per TrackPopup
-    bool sub_animating_ = false;
-    bool sub_fade_ = false;        // true: fade+slide in, false: glide to new header
-    std::chrono::steady_clock::time_point sub_anim_start_;
-    int sub_dx_ = 0;               // presented offset from sub_x_/sub_y_
-    int sub_dy_ = 0;
-    int sub_from_dx_ = 0;
-    int sub_from_dy_ = 0;
-    BYTE sub_alpha_ = 255;         // cap for PresentSub while fading in
 };
 
 } // namespace pulse::ui

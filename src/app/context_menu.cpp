@@ -119,6 +119,28 @@ std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring&
 
 BuiltinMenuItem BuiltinItemForCommand(int command) {
     switch (command) {
+    case CmdOpenPath: return BuiltinMenuItem::OpenPath;
+    case CmdGroupIntoFolder: return BuiltinMenuItem::GroupIntoFolder;
+    case CmdDissolveFolder: return BuiltinMenuItem::DissolveFolder;
+    case CmdSetAlias: return BuiltinMenuItem::SetAlias;
+    case CmdStageToTray: return BuiltinMenuItem::StageToTray;
+    case CmdCopyToTarget: return BuiltinMenuItem::CopyToTarget;
+    case CmdMoveToTarget: return BuiltinMenuItem::MoveToTarget;
+    case CmdBatchRename: return BuiltinMenuItem::BatchRename;
+    case CmdCompareSideBySide: return BuiltinMenuItem::CompareSideBySide;
+    case CmdCloudKeep: return BuiltinMenuItem::CloudKeep;
+    case CmdCloudFree: return BuiltinMenuItem::CloudFree;
+    case CmdEjectDrive: return BuiltinMenuItem::EjectDrive;
+    case CmdDisconnectDrive: return BuiltinMenuItem::DisconnectDrive;
+    case CmdUnlockDrive: return BuiltinMenuItem::UnlockDrive;
+    case CmdMapNetworkDrive: return BuiltinMenuItem::MapNetworkDrive;
+    case CmdDupKeepThis: return BuiltinMenuItem::DupKeepThis;
+    case CmdDupReapplyRules: return BuiltinMenuItem::DupReapplyRules;
+    case CmdFindDuplicates: return BuiltinMenuItem::FindDuplicates;
+    case CmdAiOrganizeHere: return BuiltinMenuItem::AiOrganizeHere;
+    case CmdConnectServer: return BuiltinMenuItem::ConnectServer;
+    case CmdForgetNetworkRecent: return BuiltinMenuItem::ForgetNetworkRecent;
+    case CmdUnpinNetwork: return BuiltinMenuItem::PinNetwork;
     case CmdOpenInNewTab: return BuiltinMenuItem::OpenInNewTab;
     case CmdCopyPath: return BuiltinMenuItem::CopyPath;
     case CmdOpenTerminal: return BuiltinMenuItem::Terminal;
@@ -148,6 +170,13 @@ namespace {
 BuiltinMenuItem BuiltinItemForRow(const ui::FluentMenuItem& item) {
     if (item.command != CmdNone) return BuiltinItemForCommand(item.command);
     if (item.children.empty()) return BuiltinMenuItem::Count;
+    const int child = item.children.front().command;
+    if (child >= CmdCopyToWindowBase && child < CmdCopyToWindowBase + kMaxWindowTransferTargets)
+        return BuiltinMenuItem::CopyToWindow;
+    if (child >= CmdMoveToWindowBase && child < CmdMoveToWindowBase + kMaxWindowTransferTargets)
+        return BuiltinMenuItem::MoveToWindow;
+    if (item.glyph == L"\xE710") return BuiltinMenuItem::NewTemplates;
+    if (item.glyph == L"\xE8B7") return BuiltinMenuItem::Git;
     if (item.glyph == kGlyphViewMenu) return BuiltinMenuItem::View;
     if (item.glyph == kGlyphSortMenu) return BuiltinMenuItem::Sort;
     if (item.glyph == kGlyphGroupMenu) return BuiltinMenuItem::Group;
@@ -211,13 +240,21 @@ void ApplyBuiltinMenuPrefs(std::vector<ui::FluentMenuItem>& items,
         const BuiltinMenuItem owner = BuiltinItemForRow(item);
         return owner != BuiltinMenuItem::Count && !prefs.BuiltinVisible(owner);
     };
-    const bool last_dropped = hidden(items.back());
+    bool last_dropped = hidden(items.back());
     std::vector<ui::FluentMenuItem> kept;
     kept.reserve(items.size());
     for (auto& item : items) {
         if (hidden(item)) {
             if (item.separator_after && !kept.empty()) kept.back().separator_after = true;
             continue;
+        }
+        if (!item.children.empty()) {
+            ApplyBuiltinMenuPrefs(item.children, prefs);
+            if (item.children.empty()) {
+                if (&item == &items.back()) last_dropped = true;
+                if (item.separator_after && !kept.empty()) kept.back().separator_after = true;
+                continue;
+            }
         }
         kept.push_back(std::move(item));
     }
@@ -705,19 +742,5 @@ std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
     return items;
 }
 
-std::wstring UniqueChildName(const std::wstring& dir, const std::wstring& base,
-                             const std::wstring& ext) {
-    auto exists = [&](const std::wstring& name) {
-        std::wstring full = dir;
-        if (!full.empty() && full.back() != L'\\') full += L'\\';
-        full += name;
-        return pulse::path::Exists(full);
-    };
-    std::wstring candidate = base + ext;
-    for (int i = 2; exists(candidate); ++i) {
-        candidate = base + L" (" + std::to_wstring(i) + L")" + ext;
-    }
-    return candidate;
-}
 
 } // namespace pulse::app

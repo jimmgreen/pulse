@@ -25,6 +25,18 @@ std::wstring ProcessPath(DWORD pid) {
     CloseHandle(process);
     return path;
 }
+bool VersionedDialogProcess(const std::wstring& path, const std::vector<std::wstring>& dirs) {
+    for (const auto& dir : dirs) {
+        const auto prefix = NormalizeDir(dir) + L"\\DialogBridge\\";
+        if (path.size() <= prefix.size() + 65 ||
+            CompareStringOrdinal(path.data(), static_cast<int>(prefix.size()), prefix.c_str(), -1, TRUE) != CSTR_EQUAL) continue;
+        bool digest = true;
+        for (size_t i = prefix.size(); i < prefix.size()+64; ++i)
+            digest = digest && ((path[i] >= L'0' && path[i] <= L'9') || (path[i] >= L'a' && path[i] <= L'f'));
+        if (digest && path[prefix.size()+64] == L'\\') return true;
+    }
+    return false;
+}
 
 // Processes named `image` running from `dirs`. Returns false when the
 // snapshot failed: a failed query is not evidence that nothing runs.
@@ -40,6 +52,7 @@ bool FindProcesses(const wchar_t* image, const std::vector<std::wstring>& dirs, 
     for (BOOL ok = Process32FirstW(snap, &e); ok; ok = Process32NextW(snap, &e)) {
         if (CompareStringOrdinal(e.szExeFile, -1, image, -1, TRUE) != CSTR_EQUAL) continue;
         auto path = ProcessPath(e.th32ProcessID);
+        if (VersionedDialogProcess(path, dirs)) continue;
         if (path.empty() ? unknown_inside : PathInDirectories(path, dirs)) out.push_back({e.th32ProcessID, path});
     }
     CloseHandle(snap);
@@ -75,7 +88,8 @@ CloseState ClosePulseWindows(const std::vector<std::wstring>& dirs, bool unatten
         if (!window) return CloseState::Done;
         DWORD pid = 0;
         GetWindowThreadProcessId(window, &pid);
-        if (!PathInDirectories(ProcessPath(pid), dirs)) continue;
+        const auto process_path = ProcessPath(pid);
+        if (!PathInDirectories(process_path, dirs)) continue;
         DWORD_PTR reply = 0;
         if (!SendMessageTimeoutW(window, msg, 0, 0, SMTO_ABORTIFHUNG, 30000, &reply)) return CloseState::Failed;
         if (reply == 2) return CloseState::Busy;
@@ -154,7 +168,8 @@ void StopPulseHosts(const std::vector<std::wstring>& dirs, bool touch_service) {
     // Scoped to the install directories (the Inno script used taskkill /IM,
     // which also ended hosts of portable copies that do not lock our files).
     std::vector<ProcessEntry> list;
-    for (const wchar_t* image : {L"Pulse.Index.exe", L"Pulse.Preview.exe", L"pulse_shell.exe"}) {
+    for (const wchar_t* image : {L"Pulse.Index.exe", L"Pulse.Preview.exe", L"pulse_shell.exe", L"Pulse.AI.exe",
+                                  L"Pulse.Content.exe", L"Pulse.Document.exe"}) {
         if (!FindProcesses(image, dirs, list, false)) continue;
         for (const auto& p : list) {
             const bool ok = EndProcess(p.pid);

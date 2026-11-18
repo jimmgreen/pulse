@@ -94,18 +94,20 @@ int main() {
         check(wait([&] { return !manager.Status().active; }) && manager.Status().phase == OpPhase::Completed &&
             manager.Status().completed_items == 0, "skipping the selection does not fabricate completed items");
         check(finished_without_move(next), "authorization all-skip emits terminal identity without consuming sources");
-        OpRequest denied_remove; denied_remove.type = OpType::RealDelete;
-        denied_remove.sources = {delete_first.wstring(), delete_second.wstring()};
-        const auto denied_task = manager.Submit(denied_remove);
-        check(wait([&] { return manager.Status().task_id == denied_task && manager.Status().authorization == AuthorizationState::ActionRequired; }),
-              "protected deletion uses the existing permission state");
-        manager.ResolveAuthorization(denied_task, false);
-        check(wait([&] { return manager.Status().current_item == delete_second.wstring() &&
-            manager.Status().authorization == AuthorizationState::ActionRequired; }), "deletion skip advances without deleting either item");
-        manager.CancelCurrent();
-        check(wait([&] { return !manager.Status().active; }) && std::filesystem::exists(delete_first) &&
-            std::filesystem::exists(delete_second), "cancel preserves protected deletion sources");
-        check(finished_without_move(denied_task), "authorization delete cancel publishes its own terminal identity");
+        for (const auto type : {OpType::RealDelete, OpType::RecycleDelete}) {
+            OpRequest denied_remove; denied_remove.type = type;
+            denied_remove.sources = {delete_first.wstring(), delete_second.wstring()};
+            const auto denied_task = manager.Submit(denied_remove);
+            check(wait([&] { return manager.Status().task_id == denied_task && manager.Status().authorization == AuthorizationState::ActionRequired; }),
+                  "protected deletion uses the existing permission state");
+            manager.ResolveAuthorization(denied_task, false);
+            check(wait([&] { return manager.Status().current_item == delete_second.wstring() &&
+                manager.Status().authorization == AuthorizationState::ActionRequired; }), "deletion skip advances without deleting either item");
+            manager.CancelCurrent();
+            check(wait([&] { return !manager.Status().active; }) && std::filesystem::exists(delete_first) &&
+                std::filesystem::exists(delete_second), "cancel preserves protected deletion sources");
+            check(finished_without_move(denied_task), "authorization delete cancel publishes its own terminal identity");
+        }
         OpRequest remove; remove.type = OpType::RealDelete; remove.sources = {first.wstring()};
         const auto deleted = manager.Submit(remove);
         check(wait([&] { return manager.Status().task_id == deleted && !manager.Status().active; }) &&

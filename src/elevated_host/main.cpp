@@ -1,3 +1,4 @@
+#include "../common/virtual_disk_eject.h"
 #include "../ipc/elevated_transfer_transport.h"
 #include "../ipc/elevated_transfer_messages.h"
 #include "../common/path_utils.h"
@@ -64,8 +65,9 @@ int Run(DWORD parent_id, const Nonce& nonce) {
     manager.Start([&] { SetEvent(changed.Get()); });
     std::thread receiver([&] {
         uint64_t last_request = 0;
+        std::vector<unsigned char> payload;
         while (!stopping.load()) {
-            Header header; std::vector<unsigned char> payload;
+            Header header;
             if (!ReadFrame(pipe.Get(), parent.Get(), nonce, header, payload)) break;
             Reader reader{payload};
             if (header.kind == Kind::Shutdown && header.request == 0 && reader.Done()) break;
@@ -79,16 +81,31 @@ int Run(DWORD parent_id, const Nonce& nonce) {
                 request.collision_policy = static_cast<ops::CollisionPolicy>(policy);
                 request.dest_dir = reader.Text();
                 const auto count = reader.Number<uint32_t>();
-                if (!reader.good || move > 1 || policy > 2 || verify > 1 || count == 0 || count > kMaxPaths || !SafePath(request.dest_dir)) break;
+                if (!reader.good || move > 2 || policy > 2 || verify > 1 || count == 0 || count > kMaxPaths || !SafePath(request.dest_dir)) break;
                 bool valid = true;
                 for (uint32_t i = 0; i < count; ++i) {
                     auto source = reader.Text(); if (!SafePath(source)) valid = false;
                     request.sources.push_back(std::move(source));
                 }
                 request.new_name = reader.Text();
+                if (move == 2) {
+                    ops::RenameIdentity identity;
+                    for (auto* object : {&identity.source, &identity.parent}) {
+                        object->volume = reader.Number<DWORD>();
+                        object->high = reader.Number<DWORD>();
+                        object->low = reader.Number<DWORD>();
+                    }
+                    request.authorized_rename_identity = identity;
+                }
                 if (!valid || !SafeTransferName(request.new_name, count, move != 0) || !reader.Done()) break;
-                // This request exposes only Copy/Move. No journal, arbitrary verb,
-                // shell menu, process termination or command execution is accepted.
+                if (move == 2) {
+                    if (request.new_name.empty() || count != 1) break;
+                    const auto parent_path = std::filesystem::path(request.sources.front()).parent_path().lexically_normal().wstring();
+                    const auto destination = std::filesystem::path(request.dest_dir).lexically_normal().wstring();
+                    if (CompareStringOrdinal(parent_path.c_str(), -1, destination.c_str(), -1, TRUE) != CSTR_EQUAL) break;
+                    // Dedicated no-overwrite rename; never enter the move engine.
+                    request.type = ops::OpType::Rename;
+                }
                 request.is_undo = true;
                 manager.SetVerifyCopies(verify != 0);
                 cancelled.store(false);
@@ -98,6 +115,38 @@ int Run(DWORD parent_id, const Nonce& nonce) {
                 last_request = header.request;
                 active_task.store(manager.Submit(std::move(request)));
                 SetEvent(changed.Get());
+            } else if (header.kind == Kind::CreateFolder) {
+                if (active_request.load() || header.request <= last_request) break;
+                auto path = reader.Text();
+                if (!reader.Done() || !SafePath(path)) break;
+                ops::OpRequest request;
+                request.type = ops::OpType::CreateFolder;
+                request.sources.push_back(std::move(path));
+                request.is_undo = true;
+                cancelled.store(false);
+                deleting.store(false);
+                active_task.store(0);
+                active_request.store(header.request);
+                last_request = header.request;
+                active_task.store(manager.Submit(std::move(request)));
+                SetEvent(changed.Get());
+            } else if (header.kind == Kind::EjectVirtualDisk) {
+                if (active_request.load() || header.request <= last_request) break;
+                storage::VirtualDiskIdentity identity;
+                identity.volume_name = reader.Text(); identity.image_path = reader.Text();
+                identity.serial = reader.Number<DWORD>(); identity.index_high = reader.Number<DWORD>();
+                identity.index_low = reader.Number<DWORD>();
+                if (!reader.Done() || !storage::ValidVolumeName(identity.volume_name) || identity.image_path.empty()) break;
+                last_request = header.request;
+                // The shared engine verifies the image and exact virtual device, then
+                // negotiates safe removal; it never force-removes or climbs parents.
+                std::wstring veto_name;
+                const DWORD error = storage::DetachVirtualDiskSafely(identity, &veto_name);
+                Writer result;
+                result.Number<HRESULT>(HRESULT_FROM_WIN32(error));
+                result.Number<uint32_t>(0); result.Number<uint32_t>(error == ERROR_SUCCESS ? 1 : 0);
+                result.Text(veto_name);
+                if (!WriteFrame(pipe.Get(), parent.Get(), nonce, Kind::Result, header.request, result)) break;
             } else if (header.kind == Kind::RecycleDelete || header.kind == Kind::PermanentDelete) {
                 if (active_request.load() || header.request <= last_request) break;
                 const auto count = reader.Number<uint32_t>();

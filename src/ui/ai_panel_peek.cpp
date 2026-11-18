@@ -1,5 +1,5 @@
 // ai_panel_peek.cpp — the bubble above the status bar chip once Pulse 助手
-// is closed (plans/ai/pulse_ai_assistant_v2.html .peek, scene 7):
+// is closed (scene 7):
 //
 //   ✦ Pulse 助手 · 完成                         ×
 //     已把 12 个文件整理到 5 个新文件夹：…

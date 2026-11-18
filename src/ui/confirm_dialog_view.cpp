@@ -16,7 +16,7 @@ namespace {
 constexpr float kMinWidth = 420.0f;
 constexpr float kMaxWidth = 540.0f;
 constexpr float kPad = 24.0f;
-// Pulse_文件操作对话框_重设计.html: the same modal as the file-operation
+// The same modal as the file-operation
 // dialogs. Headline at 18, the message under it, items in a bordered list of
 // 34-DIP rows, then a 64-DIP footer band with the buttons on the right.
 constexpr float kTitleBar = 40.0f;

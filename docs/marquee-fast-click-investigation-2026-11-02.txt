@@ -1,0 +1,20 @@
+跨屏框选后快速单击：调查记录（2026-11-02）
+
+状态：未确认根因，未宣称修复；本次未修改生产选择或渲染逻辑。
+用户补充：视频是其他用户的旧安装版本；本机测试跨屏框选更容易触发。
+
+实际验证：
+1. 当前代码的72组快速输入（不同方向/点击位置/绘制时序/轻微移动）：选择模型均收敛为1。
+2. 100项独立夹具，6组受控跨屏滚动：多选19项后快速单击，模型均为1。
+3. 实际SendInput自动滚动：r8有2组满足跨屏条件，点击后模型为1；首组滚动不足，FAIL，未计通过。
+4. r9实际SendInput并捕获屏幕：两组跨屏选中100项，点击及悬停后模型为1，屏幕截图亦仅1项高亮。第三组框选前置条件未成立(before=1)，FAIL，不能算通过。
+5. 交换链SaveSnapshot在Present之后可能读到轮转的旧缓冲，不能据此判断用户屏幕残留。因此补充BitBlt真实客户区截图，不能将旧缓冲截图视为根因证据。
+
+证据目录：bench_data/marquee-fast-click-20261102
+日志：burst-before.log、cross-before.log、physical-r8.log、physical-r9.log。
+真实屏幕：physical-0-screen-fast.bmp、physical-1-screen-fast.bmp；对应screen-full.bmp供对照。
+本次定向探针：src/app/selection_input_probe.cpp，PULSE_TEST_MARQUEE_CLICK_ONLY及SCROLL_ONLY/PHYSICAL_ONLY。
+
+未解决：
+不能确认旧安装版问题是否仍在当前构建出现。已安装版直接界面检查被computer-use工具拒绝：Computer Use was not approved to use Pulse。
+没有修改用户文件或设置。未制作宣称修复的安装包。CMake测试钩子配置已恢复OFF；build/pulse.exe为本次测试构建，不能直接作为发布载荷。已有dist安装包未变。

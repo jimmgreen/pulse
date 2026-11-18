@@ -100,6 +100,27 @@ uint64_t KeyHash(const ThumbnailStoreKey& key) {
     mix(&key.size, sizeof(key.size));
     mix(&key.modified, sizeof(key.modified));
     mix(&key.pixels, sizeof(key.pixels));
+    // Version only formats whose rendering changed, leaving photo/video caches warm.
+    const auto dot = key.path.find_last_of(L'.');
+    if (dot != std::wstring::npos) {
+        std::wstring extension = key.path.substr(dot);
+        for (auto& c : extension) c = static_cast<wchar_t>(std::towlower(c));
+        // WIC frame ordinals differ from ICO/CUR directory ordinals. Entries
+        // made before container-frame decoding can contain enlarged small icons.
+        if (extension == L".ico" || extension == L".cur") {
+            constexpr uint32_t icon_decode_policy = 1;
+            mix(&icon_decode_policy, sizeof(icon_decode_policy));
+        }
+        for (const auto* office : {L".docx", L".docm", L".doc", L".rtf", L".wps",
+             L".xlsx", L".xlsm", L".xls", L".et", L".pptx", L".pptm", L".ppsx",
+             L".ppt", L".pps", L".dps", L".odt", L".ods", L".odp", L".odg"}) {
+            if (extension != office) continue;
+            // Older Office sketches baked a second application badge into the page.
+            constexpr uint32_t office_style = 2;
+            mix(&office_style, sizeof(office_style));
+            break;
+        }
+    }
     return hash;
 }
 
@@ -231,8 +252,11 @@ const bool g_registered = (ThumbnailCache::SetGridStore(&ThumbnailDiskCache::Sha
 } // namespace
 
 ThumbnailDiskCache& ThumbnailDiskCache::Shared() {
-    static ThumbnailDiskCache cache;
-    return cache;
+    // Persistence is best effort. Keep this process-wide service alive until
+    // process termination so closing the UI never joins unbounded disk I/O.
+    // The writer owns its requests and uses only this service and thread-local WIC.
+    static auto* cache = new ThumbnailDiskCache;
+    return *cache;
 }
 
 const std::wstring& ThumbnailDiskCache::Root() {
@@ -292,7 +316,53 @@ bool ThumbnailDiskCache::Load(const ThumbnailStoreKey& key, StoredThumbnail& out
     return false;
 }
 
+ThumbnailDiskCache::~ThumbnailDiskCache() {
+    { std::lock_guard lock(writer_mutex_); stopping_ = true; writes_.clear(); }
+    writer_cv_.notify_one();
+    if (writer_.joinable()) writer_.join();
+}
+
 void ThumbnailDiskCache::Save(const ThumbnailStoreKey& key, uint32_t decode_ms, const StoredThumbnail& thumb) {
+    constexpr size_t kWriterBudget = 16u << 20;
+    const size_t bytes = thumb.pixels.size();
+    if (!bytes || bytes > kWriterBudget || key.path.size() > 32767 ||
+        !thumb.width || !thumb.height || thumb.width > kMaxEdge || thumb.height > kMaxEdge ||
+        bytes != static_cast<size_t>(thumb.width) * thumb.height * 4) return;
+    std::lock_guard lock(writer_mutex_);
+    if (stopping_ || writes_.size() >= 64 || bytes > kWriterBudget - writer_bytes_) return;
+    try {
+        if (!writer_.joinable()) writer_ = std::thread([this] { WriterLoop(); });
+        writes_.push_back({key.path, key.attrs, key.pixels, key.modified, key.size, key.keep_always, decode_ms, thumb});
+        writer_bytes_ += bytes;
+    } catch (...) { return; }
+    writer_cv_.notify_one();
+}
+
+bool ThumbnailDiskCache::FlushForTesting(uint32_t timeout_ms) {
+    std::unique_lock lock(writer_mutex_);
+    return writer_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+        [this] { return writer_bytes_ == 0; });
+}
+
+void ThumbnailDiskCache::WriterLoop() {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    for (;;) {
+        WriteRequest request;
+        {
+            std::unique_lock lock(writer_mutex_);
+            writer_cv_.wait(lock, [this] { return stopping_ || !writes_.empty(); });
+            if (stopping_) break;
+            request = std::move(writes_.front());
+            writes_.pop_front();
+        }
+        try { SaveNow({request.path, request.attrs, request.pixels, request.modified, request.size, request.keep_always}, request.decode_ms, request.thumb); } catch (...) {}
+        { std::lock_guard lock(writer_mutex_); writer_bytes_ -= request.thumb.pixels.size(); }
+        writer_cv_.notify_all();
+    }
+    if (SUCCEEDED(com)) CoUninitialize();
+}
+
+void ThumbnailDiskCache::SaveNow(const ThumbnailStoreKey& key, uint32_t decode_ms, const StoredThumbnail& thumb) {
     bool remote = false;
     if (Root().empty() || !Eligible(key.path, key.attrs, remote)) return;
     if (decode_ms < kMinDecodeMs && !remote && !key.keep_always && !AlwaysKept(key.path)) return;

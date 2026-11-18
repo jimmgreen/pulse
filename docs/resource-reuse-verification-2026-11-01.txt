@@ -1,0 +1,96 @@
+Pulse 资源复用优化与验证记录（2026-11-01）
+
+依据：Downloads/Pulse-资源复用与代码减负审查-2026-11-01.md。
+工作区已有大量未提交修改，本次保留；未提交、未打包或安装。
+构建：Windows x64 Release，PULSE_WITH_TEST_HOOKS=ON，SELFTEST=OFF。
+测试优先使用命令行、隔离目录和实际 Win32/DirectWrite/Direct2D 窗口，没有使用 computer use。
+
+已落地
+
+O2：复制池构造中途失败唤醒并 join 已启动线程；回收站创建失败沿共享游标继续，
+不重放已删除文件。同步降级仍检查取消，异常退出有线程清理保护。
+O1：保留完整枚举后删除的语义，在顶层元数据和 payload 枚举内部各设
+64MiB / 262144 条显式预算（包括路径及容器开销估算）；超限安全返回资源不足，
+未完整枚举的 payload 不删除，保留 $I。20000 仍是批次目标而非错误宣传的硬上限。
+O3：空批次不创建线程；未引入常驻删除线程池。
+O4：每批复用经过验证的日志句柄，按轮转边界重新打开；不复制完整 Record，
+critical 编码不复制整条证据。增加 opens/writes/失败阶段诊断。
+旋转临时拒绝访问最多等待21ms重试，永久错误仍保留并使 Flush 失败。
+O5：空 payload 不创建 event；一次 deadline I/O 的各片段独占并复用一个 event；
+接收循环复用受协议1MiB上限约束的 buffer，不跨读写共享 OVERLAPPED。
+
+BG1：详情 DFS provider 不再捕获 AppState，协调等待与底层 I/O 生命周期分离；
+窗口关闭取消协调等待，未实际返回的 provider 仍占配额。新增最多16项的共享统计服务，
+多窗口同路径合并扫描，单订阅取消不影响其他窗口；根及父目录监听提供revision和
+根替换失效，A→B→A复用有效结果，稳定订阅不定时重扫；部分结果不标verified。
+BG2：面包屑线程创建前预留本地/网络额度，满额不新增线程，底层退出后才归还；
+覆盖 UNC、映射网络盘和扩展本地路径分类。同路径合并在途任务，完成缓存最多
+32项/2MiB、500ms硬TTL，并在后台验证目录revision；命中不延长TTL，错误清理缓存。
+BG3：顺序无关最小根集合；保留同根 watcher，仅增删变化根；1024项去重队列、
+可取消背压，内核溢出先重设监听再流式补偿，失败保留 dirty 重试。
+保留UI消费时存在性复检：移除此检查会给排队期间删除的路径新增标签，违背功能不变。
+BG4：同目录、不同展示、尚未开始的同批请求共享原始枚举，各自投影/排序；
+取消一个订阅不影响另一订阅，同key刷新强制新代。只在第二个兼容请求出现时
+创建共享批次，单窗仍沿原始 move 路径，不增加原始快照副本。
+BG5：悬浮卡使用top-K排序，保持全量统计；子目录计数改流式统计，保留可见性过滤、
+取消、错误及剩余时间预算，不为只计数保存完整 DirEntry 数组。
+
+S1：一次Run按启用替换步骤预编译，非法规则仍跳过并报告bad_regex。
+S2：同次刷新读取一份Settings，缓存展示URL和microphone，不缓存凭证；保留2秒/epoch。
+S3：预计算名称排序、parent冲突key及UI exists回调parent，保留Unicode规范化。
+S4：仅flash=true复制旧名称。
+
+R1：最终网格布局及metrics有界复用；绘后清drawing effect，避免旧设备画刷残留。
+R2：窗口级64项/128KiB布局缓存、16项ellipsis、32项设备画刷；字体/设备正确失效。
+R3：棋盘brush按设备和主题复用；照片墙渐变按设备复用、逐tile更新坐标。
+R4：4096项缓存改O(1) LRU、增加2MiB文本预算与字体代际失效，不再整表清空。
+R5：目录缩略图锁外上传并校验token/device/epoch，与普通缩略图共用帧上传预算，
+保留目录CPU恢复副本、延后上传请求下一帧，绘制时仅持稳定bitmap引用。
+R6：This PC自然列宽有界缓存，按容量/类型/字体/语言/scale失效；窄布局用固定数组。
+
+实际验证
+
+1. pulse_resource_thread_test：第1/2/4线程失败、同步降级取消、预算超限保留全部文件、
+   可重试、枚举中取消、单payload 20001真实文件、文件占用部分失败保留$I。
+2. pulse_runtime_log_test：并发、轮转、首末错误证据、Flush、暂时/永久旋转锁及写失败。
+   最新诊断/握手版本连续12轮通过。一次样本407次写仅5次打开；不是吞吐倍率承诺。
+3. pulse_transport_reuse_test：1000个空/有数据交替帧，一次接收容量增长；超时取消排空。
+4. pulse_deadline_pipe_test：空帧、分片event复用、读写超时、取消、独立健康连接。
+5. pulse_batch_rename_reuse_test：1/1000/10000文件、字面$、非法正则、多步骤、
+   编译次数只随步骤增长、Unicode同目录冲突及跨目录独立。
+6. pulse_ai_assistant_settings_cache_test：1000次fill、2秒边界、epoch、provider切换；
+   隔离真实ai.json外改/损坏/删除，以及隔离exe目录setup-defaults.ini开关回退。
+7. pulse_background_provider_test：不返回provider退休仍占配额、100次重试不扩张、
+   本地/网络隔离、退出回收；流式统计空目录/隐藏system/10000文件/取消/错误。
+8. pulse_tag_rule_roots_test：根排列、路径段边界、父根移除、1024队列去重与排空重试。
+9. pulse_worker_enum_cancel_test：旧provider阻塞下导航与关闭、过期结果、单订阅取消、
+   同批不同展示仅一次枚举、同key刷新新代、单窗不创建共享批。
+10. pulse_entry_sort_key_test：10万条top48与完整排序对比，12种排序组合一致。
+    完整排序工作tick约152万—275万，部分排序约20万—77万（包含key准备，不是毫秒）。
+11. pulse_folder_thumbnail_cache_test：共享帧预算、锁外上传、epoch失效、CPU恢复副本、
+    暖态零上传、取消/尺寸/TTL/容量/负缓存及设备恢复。
+12. pulse_render_cache_sharing_test：实际D2D设备和窗口资源域、重绑与跨窗口bitmap。
+13. PULSE_TEST_CHROME_CACHE=1 pulse --quick-preview-audit：真实隐藏桌面窗口，
+    100次暖命中零新layout、动态文本/sign、字体失效、brush、棋盘主题、网格effect、
+    4200名称淘汰、照片墙渐变、This PC宽窄与容量更新，退出码0。
+    bench_data/render-resource-20261101-47056 的亮暗窄名称截图已人工查看，无裁切或重叠。
+14. pulse --tag-rule-reuse-test：真实watcher同根保留、根增删、1200真实文件通知、
+    队列背压与实际补偿扫描，退出码0。
+15. pulse_folder_statistics_test：真实递归计数、A→B→A、稳定订阅不重扫、嵌套变更、
+    根rename/recreate、双订阅单取消、partial不缓存、未armed、缺失根、退出及退休配额。
+16. pulse_breadcrumb_cache_test：在途合并、订阅释放、迟到退休、TTL/revision/错误失效、
+    条目及字节上限、并发订阅、真实目录新增子项和删除失效。
+
+已确认的验证边界与保留策略
+
+报告明确标为需要画像后决定的O3长期worker、O4b重复critical节流、O6长期ThreadpoolWork、
+O7手机详细日志，不为凑数量扩大改造；首条错误持久化和现有日志语义保留。
+详情统计的files/dirs/partial语义由独立共享服务管理，没有把不含计数的索引大小值
+冒充完整统计；未强行合并不同语义的列表索引统计与预览统计。
+BG4只合并尚未开始的同批请求，不跨revision复用完成结果，不复用不同provider安全域。
+R6仍最多扫描128条生成内容key，没有可靠revision时不以旧宽度冒充新容量。
+未进行真实断网UNC、真实手机、硬件设备丢失或所有DPI组合的穷尽测试；对应资源边界
+使用可控阻塞/epoch/实际D2D设备测试，不能把它们说成所有硬件场景均已验证。
+重命名presentation测试有4处既有文字边缘失败；用原HEAD的相关两份源对照得到相同
+403x31、ink_rows=5..30结果，证据build/rename-baseline.log；未改字体或弱化测试。
+全局diff --check仍指出用户原有catalog.tsv两个空tw列的行尾tab，本次涉及文件检查通过。

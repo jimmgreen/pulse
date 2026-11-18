@@ -42,7 +42,7 @@ UpdatedTitleFormat	IDS_UPDATED_TITLE_FORMAT	2064	Pulse 已更新到 %s	Pulse was
 UpdatedClick	IDS_UPDATED_CLICK	2065	点击查看本次更新内容	Click to see what changed	點選檢視本次更新內容
 CopiedShort	IDS_COPIED_SHORT	2066	已复制	Copied	已複製
 SettingsWinE	IDS_SETTINGS_WIN_E	2067	Win + E 和任务栏图标	Win + E and the taskbar icon	Win + E 和工作列圖示
-SettingsWinEDesc	IDS_SETTINGS_WIN_E_DESC	2068	按 Win + E，或点任务栏上的文件资源管理器图标时	When you press Win + E or click File Explorer on the taskbar	按 Win + E，或點工作列上的檔案總管圖示時
+SettingsWinEDesc	IDS_SETTINGS_WIN_E_DESC	2068	按 Win + E 或点任务栏的资源管理器图标时。管理员应用内的 Win + E 接管需在每次启动 Pulse 时授权；取消后仍保留普通接管。	For Win + E and the taskbar Explorer icon. Handling Win + E in administrator apps requires approval each time Pulse starts; cancelling keeps standard interception enabled.	按 Win + E 或點工作列的檔案總管圖示時。管理員應用程式內的 Win + E 接管需在每次啟動 Pulse 時授權；取消後仍保留一般接管。
 SettingsShellTags	IDS_SETTINGS_SHELL_TAGS	2069	在资源管理器右键菜单中打标签	Tag from the File Explorer context menu	在檔案總管右鍵選單中打標籤
 SettingsShellTagsDesc	IDS_SETTINGS_SHELL_TAGS_DESC	2070	右键文件或文件夹 → 显示更多选项 → Pulse 标签（Shift+右键可直接出现）	Right-click a file or folder, Show more options, Pulse tags (Shift+right-click shows it directly)	右鍵檔案或資料夾 → 顯示更多選項 → Pulse 標籤（Shift+右鍵可直接出現）
 ShellTagMenu	IDS_SHELL_TAG_MENU	2071	Pulse 标签	Pulse tags	Pulse 標籤
@@ -294,7 +294,7 @@ Server	IDS_SERVER	1061	服务器	Server	伺服器
 Current	IDS_CURRENT	1062	当前	Current	目前
 CurrentServer	IDS_CURRENT_SERVER	1063	当前 · 服务器	Current · Server	目前 · 伺服器
 ProjectFormat	IDS_PROJECT_FORMAT	1064	项目 %s	Project %s	項目 %s
-StatusItemsFormat	IDS_STATUS_ITEMS_FORMAT	1065	%zu 个项目 (%zu 文件夹, %zu 文件)	%zu items (%zu folders, %zu files)	%zu 個項目 (%zu 資料夾, %zu 檔案)
+StatusItemsFormat	IDS_STATUS_ITEMS_FORMAT	1065	%zu 个项目	%zu items	%zu 個項目
 NotSelected	IDS_NOT_SELECTED	1066	未选中	Nothing selected	未選取
 SelectedOneFormat	IDS_SELECTED_ONE_FORMAT	1067	已选中 1 项: %s  %s	1 selected: %s  %s	已選取 1 項: %s  %s
 SelectedCountFormat	IDS_SELECTED_COUNT_FORMAT	1068	已选中 %d 项	%d selected	已選取 %d 項
@@ -532,7 +532,7 @@ DiagnosticsClearConfirm	IDS_DIAGNOSTICS_CLEAR_CONFIRM	1291	确定清除本机 Pu
 DiagnosticsPrivacyTitle	IDS_DIAGNOSTICS_PRIVACY_TITLE	1292	导出诊断	Export diagnostics	匯出診斷
 DiagnosticsPrivacyMessage	IDS_DIAGNOSTICS_PRIVACY_MESSAGE	1293	转储可能包含内存片段、文件名或其他私人信息。仅在你信任接收方时导出。继续吗？	Dumps may contain memory fragments, file names, or other private information. Export only to a recipient you trust. Continue?	傾印可能包含記憶體片段、檔名或其他私人資訊。僅在你信任接收方時匯出。繼續嗎？
 DiagnosticsIncludeService	IDS_DIAGNOSTICS_INCLUDE_SERVICE	1294	是否同时导出索引服务诊断？选择“同时导出”将仅为本次复制请求管理员授权。	Also export index-service diagnostics? Choosing Include service requests administrator access for this copy only.	是否同時匯出索引服務診斷？選擇「同時匯出」將僅為本次複製請求管理員授權。
-DiagnosticsExportLocation	IDS_DIAGNOSTICS_EXPORT_LOCATION	1295	选择一个空文件夹用于导出诊断	Choose an empty folder for the diagnostics export	選擇一個空資料夾用於匯出診斷
+DiagnosticsExportLocation	IDS_DIAGNOSTICS_EXPORT_LOCATION	1295	选择诊断包保存位置（将自动新建文件夹）	Choose where to save diagnostics (a new folder will be created)	選擇診斷套件儲存位置（將自動新增資料夾）
 DiagnosticsExportFailed	IDS_DIAGNOSTICS_EXPORT_FAILED	1296	无法导出诊断文件。	Could not export diagnostics.	無法匯出診斷檔案。
 Update	IDS_UPDATE	1297	软件更新	Software update	軟體更新
 UpdateDesc	IDS_UPDATE_DESC	1298	自动检查更新，点击一次即可更新并恢复工作现场	Checks automatically; one click updates and restores your workspace	自動檢查更新，點選一次即可更新並還原工作環境
@@ -562,17 +562,17 @@ ListZebraRowsDesc	IDS_LIST_ZEBRA_DESC	2003	详细信息视图隔行加淡底色�
 ListSizeBar	IDS_LIST_SIZE_BAR	2004	大小比例条	Size bars	大小比例條
 ListSizeBarDesc	IDS_LIST_SIZE_BAR_DESC	2005	在大小列下方用细条直观比较文件大小	Draw a thin bar under file sizes for quick comparison	在大小欄下方用細條直觀比較檔案大小
 // File list: folder ordering against files.
-SettingsFolderSort	IDS_SETTINGS_FOLDER_SORT	2007	文件夹优先	Folders first	資料夾優先
+SettingsFolderSort	IDS_SETTINGS_FOLDER_SORT	2007	文件夹位置	Folder placement	資料夾位置
 SettingsFolderSortDesc	IDS_SETTINGS_FOLDER_SORT_DESC	2008	默认位置；在某个文件夹里改过的会单独记住	The default; a folder you change keeps its own choice	預設位置；在某個資料夾裡改過的會單獨記住
-FolderSortTop	IDS_FOLDER_SORT_TOP	2009	始终置顶	Always on top	始終置頂
-FolderSortFollow	IDS_FOLDER_SORT_FOLLOW	2010	跟随方向	Follow order	跟隨方向
-FolderSortMixed	IDS_FOLDER_SORT_MIXED	2011	不优先	Mixed	不優先
+FolderSortTop	IDS_FOLDER_SORT_TOP	2009	置顶	Top	置頂
+FolderSortFollow	IDS_FOLDER_SORT_FOLLOW	2010	置底	Bottom	置底
+FolderSortMixed	IDS_FOLDER_SORT_MIXED	2011	混排	Mixed	混排
 SettingsHomeFolder	IDS_SETTINGS_HOME_FOLDER	2361	默认位置	Default location	預設位置
 SettingsHomeFolderPick	IDS_SETTINGS_HOME_FOLDER_PICK	2362	选择文件夹…	Choose folder…	選擇資料夾…
 SettingsHomeFolderTitle	IDS_SETTINGS_HOME_FOLDER_TITLE	2363	选择默认位置	Choose the default location	選擇預設位置
 SettingsStartupOpen	IDS_SETTINGS_STARTUP_OPEN	2364	启动时打开	When Pulse starts	啟動時開啟
 SettingsStartupOpenDesc	IDS_SETTINGS_STARTUP_OPEN_DESC	2365	恢复上次关闭时的标签页，或只打开默认位置	Reopen the tabs from last time, or only the default location	恢復上次關閉時的分頁，或只開啟預設位置
-StartupOpenLastTabs	IDS_STARTUP_OPEN_LAST_TABS	2366	上次的标签页	Last tabs	上次的分頁
+StartupOpenLastTabs	IDS_STARTUP_OPEN_LAST_TABS	2366	上次的标签页	Last tabs	
 OpenDefaultLocation	IDS_OPEN_DEFAULT_LOCATION	2367	默认位置	Default location	預設位置
 SettingsNewTabOpen	IDS_SETTINGS_NEW_TAB_OPEN	2368	新标签页打开	New tabs open	新分頁開啟
 SettingsNewTabOpenDesc	IDS_SETTINGS_NEW_TAB_OPEN_DESC	2369	新建标签页时显示当前文件夹，或默认位置	Show the current folder in a new tab, or the default location	新增分頁時顯示目前資料夾，或預設位置
@@ -759,7 +759,6 @@ PickerWillSelect	IDS_PICKER_WILL_SELECT	2442	将选择：	Will select: 	將選�
 PickerPathPlaceholder	IDS_PICKER_PATH_PLACEHOLDER	2443	输入路径，按 Enter 前往	Type a path and press Enter	輸入路徑，按 Enter 前往
 PickerLoading	IDS_PICKER_LOADING	2444	正在加载…	Loading…	正在載入…
 PickerTitleFolder	IDS_PICKER_TITLE_FOLDER	2445	选择文件夹	Choose a folder	選擇資料夾
-PickerDriveFreeFormat	IDS_PICKER_DRIVE_FREE_FORMAT	2446	可用 %s，共 %s	%s free of %s	可用 %s，共 %s
 PickerPickImageHint	IDS_PICKER_PICK_IMAGE_HINT	2447	请选择一张图片	Select a picture	請選擇一張圖片
 SettingsAutoUpdate	IDS_SETTINGS_AUTO_UPDATE	2449	自动检查更新	Check for updates automatically	自動檢查更新
 SettingsAutoUpdateDesc	IDS_SETTINGS_AUTO_UPDATE_DESC	2450	关闭后不再在后台检查，也不弹出更新提醒	When off, no background checks or update reminders	關閉後不再在背景檢查，也不彈出更新提醒
@@ -1136,10 +1135,10 @@ IntegrationFactShift	IDS_INTEGRATION_FACT_SHIFT	2482	按住 Shift 可留在资�
 IntegrationFactWin11	IDS_INTEGRATION_FACT_WIN11	2483	Windows 11 上原窗口不会关闭	On Windows 11 the Explorer window stays open	Windows 11 上原視窗不會關閉
 IntegrationHintLaunch	IDS_INTEGRATION_HINT_LAUNCH	2484	“其他软件打开的文件夹”只在 Pulse 运行时有效。想一开机就生效，可以打开「开机自启」。	“Folders opened by other apps” works only while Pulse is running. To have it from sign-in, turn on Launch at sign-in.	「其他軟體開啟的資料夾」只在 Pulse 執行時有效。想一開機就生效，可以開啟「開機自啟」。
 IntegrationHintKeep	IDS_INTEGRATION_HINT_KEEP	2485	“其他软件打开的文件夹”只在 Pulse 运行时有效。想关掉窗口后也生效，可以打开「关闭后继续运行」。	“Folders opened by other apps” works only while Pulse is running. To keep it working after you close the window, turn on Keep running after close.	「其他軟體開啟的資料夾」只在 Pulse 執行時有效。想關掉視窗後也生效，可以開啟「關閉後繼續執行」。
-IntegrationHintKeepCompat	IDS_INTEGRATION_HINT_KEEP_COMPAT	3659	「兼容打开方式」只在 Pulse 运行时有效。想关掉窗口后也生效，可以打开「关闭后继续运行」。	Compatibility mode works only while Pulse is running. To keep it working after you close the window, turn on Keep running after close.	「相容開啟方式」只在 Pulse 執行時有效。想關掉視窗後也生效，可以開啟「關閉後繼續執行」。
-IntegrationHintLaunchCompat	IDS_INTEGRATION_HINT_LAUNCH_COMPAT	3660	「兼容打开方式」只在 Pulse 运行时有效。想一开机就生效，可以打开「开机自启」。	Compatibility mode works only while Pulse is running. To have it from sign-in, turn on Launch at sign-in.	「相容開啟方式」只在 Pulse 執行時有效。想一開機就生效，可以開啟「開機自啟」。
-IntegrationCompat	IDS_INTEGRATION_COMPAT	3661	兼容打开方式	Compatibility mode	相容開啟方式
-IntegrationCompatDesc	IDS_INTEGRATION_COMPAT_DESC	3662	双击文件夹没反应时勾选：Pulse 不再改动文件夹的双击动作，改为资源管理器先打开，再马上转到 Pulse，可能会闪一下。	Turn on if double-clicking a folder does nothing: Pulse leaves the double-click action alone, lets File Explorer open the folder, then moves it into Pulse right away. It may flash briefly.	按兩下資料夾沒反應時勾選：Pulse 不再改動資料夾的按兩下動作，改為檔案總管先開啟，再馬上轉到 Pulse，可能會閃一下。
+IntegrationHintKeepCompat	IDS_INTEGRATION_HINT_KEEP_COMPAT	3659	兼容补充接管需要 Pulse 运行；文件夹直接打开不受影响。可开启「关闭后继续运行」以保留补充接管。	The compatibility fallback requires Pulse to be running; direct folder opening is unaffected. Turn on Keep running after close to retain the fallback.	相容補充接管需要 Pulse 執行；資料夾直接開啟不受影響。可開啟「關閉後繼續執行」以保留補充接管。
+IntegrationHintLaunchCompat	IDS_INTEGRATION_HINT_LAUNCH_COMPAT	3660	兼容补充接管需要 Pulse 运行；文件夹直接打开不受影响。可开启「开机自启」以在登录后启用补充接管。	The compatibility fallback requires Pulse to be running; direct folder opening is unaffected. Turn on Launch at sign-in to enable the fallback after sign-in.	相容補充接管需要 Pulse 執行；資料夾直接開啟不受影響。可開啟「開機自啟」以在登入後啟用補充接管。
+IntegrationCompat	IDS_INTEGRATION_COMPAT	3661	兼容补充接管	Compatibility fallback	相容補充接管
+IntegrationCompatDesc	IDS_INTEGRATION_COMPAT_DESC	3662	文件夹仍优先直接在 Pulse 打开。启用后，对绕过默认打开动作的入口补充接管；仅此类入口可能短暂显示资源管理器。	Folders still open directly in Pulse first. Enable this to also catch entry points that bypass the default open action; only those entry points may briefly show File Explorer.	資料夾仍優先直接在 Pulse 開啟。啟用後，對略過預設開啟動作的入口補充接管；僅此類入口可能短暫顯示檔案總管。
 IntegrationFailTitle	IDS_INTEGRATION_FAIL_TITLE	2486	设置没有完成	The change didn’t go through	設定沒有完成
 IntegrationDriftTitle	IDS_INTEGRATION_DRIFT_TITLE	2487	有入口被改回了文件资源管理器	Something was switched back to File Explorer	有入口被改回了檔案總管
 IntegrationDriftDesc	IDS_INTEGRATION_DRIFT_DESC	2488	可能是系统更新或其他软件改的。点「恢复」重新交给 Pulse。	A Windows update or another app may have changed it. Choose Restore to hand it back to Pulse.	可能是系統更新或其他軟體改的。點「恢復」重新交給 Pulse。
@@ -1512,7 +1511,7 @@ GroupWheelGroups	IDS_GROUP_WHEEL_GROUPS	2331	%d 组	%d groups	%d 組
 GroupWheelFlat	IDS_GROUP_WHEEL_FLAT	2332	平铺	Flat	並排
 GroupWheelCurrent	IDS_GROUP_WHEEL_CURRENT	2333	当前	Current	目前
 GroupWheelScroll	IDS_GROUP_WHEEL_SCROLL	2334	滑动	Scroll	滑動
-GroupWheelApply	IDS_GROUP_WHEEL_APPLY	2335	确定	Apply	確定
+GroupWheelApply	IDS_GROUP_WHEEL_APPLY	2335	应用	Apply	套用
 GroupWheelItems	IDS_GROUP_WHEEL_ITEMS	2336	%d 项	%d items	%d 項
 SortOldNew	IDS_SORT_OLD_NEW	2337	旧→新	Old→New	舊→新
 SortNewOld	IDS_SORT_NEW_OLD	2338	新→旧	New→Old	新→舊
@@ -1521,7 +1520,7 @@ SortLargeSmall	IDS_SORT_LARGE_SMALL	2340	大→小	Large→Small	大→小
 SortWheelDirection	IDS_SORT_WHEEL_DIRECTION	2341	方向	Order	方向
 SortWheelFolders	IDS_SORT_WHEEL_FOLDERS	2342	文件夹	Folders	資料夾
 SortWheelFolderTop	IDS_SORT_WHEEL_FOLDER_TOP	2343	置顶	Top	置頂
-SortWheelFolderFollow	IDS_SORT_WHEEL_FOLDER_FOLLOW	2344	跟随	Follow	跟隨
+SortWheelFolderFollow	IDS_SORT_WHEEL_FOLDER_FOLLOW	2344	置底	Bottom	置底
 SortWheelFolderMixed	IDS_SORT_WHEEL_FOLDER_MIXED	2345	混排	Mixed	混排
 SortWheelSamples	IDS_SORT_WHEEL_SAMPLES	2346	照片|项目资料|报告.pdf|旅行照片.jpg|预算.xlsx|会议记录.docx|音乐.mp3	Photos|Projects|Report.pdf|Trip.jpg|Budget.xlsx|Notes.docx|Song.mp3	照片|專案資料|報告.pdf|旅行照片.jpg|預算.xlsx|會議記錄.docx|音樂.mp3
 SortWheelSamplePlaces	IDS_SORT_WHEEL_SAMPLE_PLACES	2347	文档|图片|音乐|桌面	Documents|Pictures|Music|Desktop	文件|圖片|音樂|桌面
@@ -1675,7 +1674,7 @@ ChooseFfmpegExe	IDS_CHOOSE_FFMPEG_EXE	2872	选择 ffmpeg.exe	Choose ffmpeg.exe
 TheCompleteSelectionCouldNotBeProcessedCheckTheTagsBeforeTry	IDS_THE_COMPLETE_SELECTION_COULD_NOT_BE_PROCESSED_CHECK_THE_TAGS_BEFORE_TRY	2873	未能处理完整选择，标签未完成更新。请检查后重试。	The complete selection could not be processed. Check the tags before trying again.	
 Text2874	IDS_TEXT2874	2874	「	“	
 Text2875	IDS_TEXT2875	2875	」	”	
-HeldByAnotherProgram	IDS_HELD_BY_ANOTHER_PROGRAM	2876	被其他程序占用	held by another program	
+HeldByAnotherProgram	IDS_HELD_BY_ANOTHER_PROGRAM	2876	全局热键不可用	Unavailable as a global hotkey	無法使用為全域快速鍵
 TheIMEMayTakeIt	IDS_THE_IMEMAY_TAKE_IT	2877	输入法可能拦截	the IME may take it	
 UsedByAnotherAction	IDS_USED_BY_ANOTHER_ACTION	2878	已被其他操作使用	used by another action	
 ReservedByWindows	IDS_RESERVED_BY_WINDOWS	2879	系统保留	reserved by Windows	
@@ -1706,8 +1705,8 @@ Text2903	IDS_TEXT2903	2903	：	:
 AllAvailable	IDS_ALL_AVAILABLE	2904	 全部可用	: all available	
 Save	IDS_SAVE	2905	保存	Save	
 CurrentKey	IDS_CURRENT_KEY	2906	当前按键：	Current key: 	
-IsHeldByAnotherProgram	IDS_IS_HELD_BY_ANOTHER_PROGRAM	2907	 被另一个程序占用	 is held by another program	
-AnotherProgramRegisteredItAsAHotkeySoPulseNeverReceivesItPic	IDS_ANOTHER_PROGRAM_REGISTERED_IT_AS_AHOTKEY_SO_PULSE_NEVER_RECEIVES_IT_PIC	2908	另一个程序把它注册成了全局热键，按下时 Pulse 收不到。换一个按键，或在那个程序里关掉这个热键。	Another program registered it as a hotkey, so Pulse never receives it. Pick another key, or switch the hotkey off in that program.	
+IsHeldByAnotherProgram	IDS_IS_HELD_BY_ANOTHER_PROGRAM	2907	 无法注册为全局热键	 cannot be registered as a global hotkey	 無法註冊為全域快速鍵
+AnotherProgramRegisteredItAsAHotkeySoPulseNeverReceivesItPic	IDS_ANOTHER_PROGRAM_REGISTERED_IT_AS_AHOTKEY_SO_PULSE_NEVER_RECEIVES_IT_PIC	2908	系统拒绝注册这个全局热键，未提供占用程序名称。这不代表应用内快捷键失效。可测试实际响应，或改用其他组合。	Windows rejected this global hotkey registration without identifying an owner. This does not prove that an in-app shortcut is blocked. Test the key or choose another combination.	系統拒絕註冊這個全域快速鍵，未提供占用程式名稱。這不代表應用程式內的快速鍵失效。可測試實際反應，或改用其他組合。
 MicrosoftPinyinUsesItFor	IDS_MICROSOFT_PINYIN_USES_IT_FOR	2909	微软拼音用它做	Microsoft Pinyin uses it for 	
 WhileTheChineseIMEIsOnItTakesThisKeyFirstSwitchTheIMEHotkeyO	IDS_WHILE_THE_CHINESE_IMEIS_ON_IT_TAKES_THIS_KEY_FIRST_SWITCH_THE_IMEHOTKEY_O	2910	中文输入法开着时，这个键会先被输入法拿走。关掉输入法的这个热键，或者换一个按键。	While the Chinese IME is on it takes this key first. Switch the IME hotkey off, or pick another key.	
 OpenSettingsTimeLanguageLanguageRegion	IDS_OPEN_SETTINGS_TIME_LANGUAGE_LANGUAGE_REGION	2911	打开 Windows 设置 → 时间和语言 → 语言和区域	Open Settings → Time & language → Language & region	
@@ -1729,7 +1728,7 @@ IsUsedBy	IDS_IS_USED_BY	2926	 已被	 is used by
 Text2927	IDS_TEXT2927	2927	使用		
 ItIsTheSystemWideHotkeyAndCannotBeShared	IDS_IT_IS_THE_SYSTEM_WIDE_HOTKEY_AND_CANNOT_BE_SHARED	2928	它是全局热键，不能同时用作程序内快捷键。	It is the system-wide hotkey and cannot be shared.	
 ThatIsAFixedKeyOrANumberedGroupItCannotBeReplaced	IDS_THAT_IS_AFIXED_KEY_OR_ANUMBERED_GROUP_IT_CANNOT_BE_REPLACED	2929	那是固定按键或带序号的组合，不能替换。	That is a fixed key or a numbered group; it cannot be replaced.	
-AnotherProgramRegisteredItSoPulseNeverReceivesIt	IDS_ANOTHER_PROGRAM_REGISTERED_IT_SO_PULSE_NEVER_RECEIVES_IT	2930	另一个程序把它注册成了全局热键，按下时 Pulse 收不到。	Another program registered it, so Pulse never receives it.	
+AnotherProgramRegisteredItSoPulseNeverReceivesIt	IDS_ANOTHER_PROGRAM_REGISTERED_IT_SO_PULSE_NEVER_RECEIVES_IT	2930	系统拒绝注册这个全局热键，未提供占用程序名称。请选择其他组合。	Windows rejected this global hotkey registration without identifying an owner. Choose another combination.	系統拒絕註冊這個全域快速鍵，未提供占用程式名稱。請選擇其他組合。
 ASystemWideHotkeyNeedsCtrlAltOrWin	IDS_ASYSTEM_WIDE_HOTKEY_NEEDS_CTRL_ALT_OR_WIN	2931	全局热键至少要有 Ctrl、Alt 或 Win	A system-wide hotkey needs Ctrl, Alt or Win	
 ASingleLetterOrDigitCannotBeAShortcut	IDS_ASINGLE_LETTER_OR_DIGIT_CANNOT_BE_ASHORTCUT	2932	单个字母或数字不能做快捷键	A single letter or digit cannot be a shortcut	
 TheyJumpToFileNamesAddCtrlOrAlt	IDS_THEY_JUMP_TO_FILE_NAMES_ADD_CTRL_OR_ALT	2933	它们用于按文件名首字母跳转，请加上 Ctrl 或 Alt。	They jump to file names; add Ctrl or Alt.	
@@ -1950,8 +1949,8 @@ AudioPreviewUnavailable	IDS_AUDIO_PREVIEW_UNAVAILABLE	3147	此音频暂无法预
 WindowsCannotDecodeThisAudioTryOpeningItInTheDefaultApp	IDS_WINDOWS_CANNOT_DECODE_THIS_AUDIO_TRY_OPENING_IT_IN_THE_DEFAULT_APP	3148	系统无法解码此音频。\n可尝试用默认应用打开。	Windows cannot decode this audio.\nTry opening it in the default app.	
 CanTShowThisVideoOnThisPC	IDS_CAN_TSHOW_THIS_VIDEO_ON_THIS_PC	3149	这台电脑无法显示此视频的画面	Can't show this video on this PC	
 ItSEncodedAs	IDS_IT_SENCODED_AS	3150	视频使用 	It's encoded as 	
-AndNoDecoderForItIsInstalledTheSoundStillPlays	IDS_AND_NO_DECODER_FOR_IT_IS_INSTALLED_THE_SOUND_STILL_PLAYS	3151	 编码，系统中没有对应的解码器。\n声音仍可正常播放。	 and no decoder for it is installed.\nThe sound still plays.	
-ReopenThePreviewAfterInstalling	IDS_REOPEN_THE_PREVIEW_AFTER_INSTALLING	3152	安装后重新打开预览即可看到画面	Reopen the preview after installing	
+AndNoDecoderForItIsInstalledTheSoundStillPlays	IDS_AND_NO_DECODER_FOR_IT_IS_INSTALLED_THE_SOUND_STILL_PLAYS	3151	 编码，当前播放方式未能解码画面。	. The current playback method could not decode its picture.	
+ReopenThePreviewAfterInstalling	IDS_REOPEN_THE_PREVIEW_AFTER_INSTALLING	3152	安装后重新打开预览重试，也可使用其他播放器	Reopen the preview after installing to try again, or use another player.	
 CanTShowThisPictureOnThisPC	IDS_CAN_TSHOW_THIS_PICTURE_ON_THIS_PC	3153	这台电脑无法显示此图片	Can't show this picture on this PC	
 ItUses	IDS_IT_USES	3154	图片使用 	It uses 	
 AndNoDecoderForItIsInstalled	IDS_AND_NO_DECODER_FOR_IT_IS_INSTALLED	3155	 格式，系统中没有对应的解码器。	 and no decoder for it is installed.	
@@ -2037,7 +2036,7 @@ OtherwiseTheyStayAndWorkAgainAfterReinstallingPulse	IDS_OTHERWISE_THEY_STAY_AND_
 UpdatePreviewPacksAutomatically	IDS_UPDATE_PREVIEW_PACKS_AUTOMATICALLY	3235	自动更新增强包	Update packs automatically	自動更新增強包
 RunsWithThePulseUpdateCheckAndDownloadsInTheBackground	IDS_RUNS_WITH_THE_PULSE_UPDATE_CHECK_AND_DOWNLOADS_IN_THE_BACKGROUND	3236	随 Pulse 更新检查一起进行，在后台下载	Runs with the Pulse update check and downloads in the background	
 PacksRunInTheIsolatedPreviewProcessACrashOrTimeoutOnlyAffect	IDS_PACKS_RUN_IN_THE_ISOLATED_PREVIEW_PROCESS_ACRASH_OR_TIMEOUT_ONLY_AFFECT	3237	预览增强包在隔离的预览进程中运行：崩溃或超时只影响当前预览，Pulse 会回退到内置的缩略图和文本视图。	Packs run in the isolated preview process: a crash or timeout only affects that preview, and Pulse falls back to its built-in views.	
-NoPreviewPacksInstalled	IDS_NO_PREVIEW_PACKS_INSTALLED	3238	尚未安装增强包	No packs installed	尚未安裝增強包
+NoPreviewPacksInstalled	IDS_NO_PREVIEW_PACKS_INSTALLED	3238	尚未安装内容增强包	No content packs installed	尚未安裝內容增強包
 UInstalledS	IDS_UINSTALLED_S	3239	已安装 %u 个 · 占用 %s	%u installed · %s	
 Found	IDS_FOUND	3240	检测到：	Found: 	
 NotPublished	IDS_NOT_PUBLISHED	3241	尚未发布	Not published	
@@ -2281,7 +2280,7 @@ OpRenamedPrefix	IDS_OP_RENAMED_PREFIX	3478	已重命名 	Renamed 	已重新命�
 OpCreatingPrefix	IDS_OP_CREATING_PREFIX	3479	正在新建 	Creating 	正在新增 
 OpRenamingPrefix	IDS_OP_RENAMING_PREFIX	3480	正在重命名 	Renaming 	正在重新命名 
 ToolbarSectionView	IDS_TOOLBAR_SECTION_VIEW	3481	排序与筛选	Sort & filter	排序與篩選
-PacksPageIntro	IDS_PACKS_PAGE_INTRO	3482	按需为 Pulse 添加模块：预览更多格式、搜索文件正文……每个模块独立下载、在隔离进程中运行，随时可以停用或卸载，不影响 Pulse 本体。	Add modules to Pulse as you need them: preview more formats, search inside files and more. Each module downloads on its own, runs in an isolated process and can be turned off or removed at any time without affecting Pulse itself.	按需為 Pulse 新增模組：預覽更多格式、搜尋檔案內文……每個模組獨立下載、在隔離處理程序中執行，隨時可以停用或解除安裝，不影響 Pulse 本體。
+PacksPageIntro	IDS_PACKS_PAGE_INTRO	3482	按需为 Pulse 添加模块：预览更多格式、搜索文件正文，以及自定义体验。在这里管理增强包及插件设置。	Add modules to Pulse as you need them: preview more formats, search inside files and customize your experience. Manage enhancement packs and plugin preferences here.	按需為 Pulse 新增模組：預覽更多格式、搜尋檔案內文，以及自訂體驗。在這裡管理增強包及外掛程式設定。
 ManagePacks	IDS_MANAGE_PACKS	3483	管理增强包	Manage packs	管理增強包
 UpdateAllPacks	IDS_UPDATE_ALL_PACKS	3484	全部更新	Update all	全部更新
 PackSearchSection	IDS_PACK_SEARCH_SECTION	3485	搜索	Search	搜尋
@@ -2962,7 +2961,7 @@ AiAsstEffortMid	IDS_AI_ASST_EFFORT_MID	4160	中	Medium	中
 AiAsstEffortHigh	IDS_AI_ASST_EFFORT_HIGH	4161	高	High	高
 AiAsstEffortOffDetail	IDS_AI_ASST_EFFORT_OFF_DETAIL	4162	不思考，直接回答，最快。	No thinking, answers straight away. Fastest.	不思考，直接回答，最快。
 AiAsstEffortLowDetail	IDS_AI_ASST_EFFORT_LOW_DETAIL	4163	简单任务，略想一下就动手。	Simple tasks: a quick thought, then action.	簡單任務，略想一下就動手。
-AiAsstEffortMidDetail	IDS_AI_ASST_EFFORT_MID_DETAIL	4164	默认。速度和仔细程度平衡。	Default. Balances speed and care.	預設。速度和仔細程度平衡。
+AiAsstEffortMidDetail	IDS_AI_ASST_EFFORT_MID_DETAIL	4164	速度和仔细程度平衡。	Balances speed and care.	速度和仔細程度平衡。
 AiAsstEffortHighDetail	IDS_AI_ASST_EFFORT_HIGH_DETAIL	4165	多步整理、复杂查找时更仔细，也更慢、更费 token。	More careful for multi-step tidying and complex searches; slower and uses more tokens.	多步整理、複雜尋找時更仔細，也更慢、更費 token。
 AiAsstConnected	IDS_AI_ASST_CONNECTED	4166	已连接 {host}	Connected to {host}	已連線 {host}
 AiAsstNotConnected	IDS_AI_ASST_NOT_CONNECTED	4167	未连接 · 需要 API 密钥	Not connected · API key needed	未連線 · 需要 API 金鑰
@@ -3050,50 +3049,17 @@ AiAsstErrEarly	IDS_AI_ASST_ERR_EARLY	4248	回答中途断开了，点「重试�
 AiAsstUndoBusy	IDS_AI_ASST_UNDO_BUSY	4249	整理还没做完，做完再撤销。	The sort is still running; undo once it finishes.	整理還沒做完，做完再復原。
 AiAsstUndoGone	IDS_AI_ASST_UNDO_GONE	4250	这次整理已经不能撤销了：之后又有别的改动。	This sort can no longer be undone: something else changed since.	這次整理已經不能復原了：之後又有別的變更。
 AiAsstMovedSome	IDS_AI_ASST_MOVED_SOME	4251	移动了 {k} / {n} 个，其余的没有成功	Moved {k} of {n}; the rest failed	移動了 {k} / {n} 個，其餘的沒有成功
-AiConnFormat	IDS_AI_CONN_FORMAT	4252	{host} · OpenAI 格式	{host} · OpenAI format	{host} · OpenAI 格式
-AiConnStatusOff	IDS_AI_CONN_STATUS_OFF	4253	未连接	Not connected	未連線
 AiConnStatusOn	IDS_AI_CONN_STATUS_ON	4254	已连接	Connected	已連線
-AiConnStatusBadKey	IDS_AI_CONN_STATUS_BAD_KEY	4255	密钥无效	Invalid key	金鑰無效
-AiConnStatusFailed	IDS_AI_CONN_STATUS_FAILED	4256	连接失败	Connection failed	連線失敗
-AiConnKeyLink	IDS_AI_CONN_KEY_LINK	4257	在哪里获取？	Where do I get one?	在哪裡取得？
-AiConnKeyPlaceholder	IDS_AI_CONN_KEY_PLACEHOLDER	4258	粘贴 sk- 开头的密钥	Paste the key that starts with sk-	貼上 sk- 開頭的金鑰
-AiConnPaste	IDS_AI_CONN_PASTE	4259	粘贴	Paste	貼上
-AiConnChange	IDS_AI_CONN_CHANGE	4260	更换	Change	更換
-AiConnKeyHelp	IDS_AI_CONN_KEY_HELP	4261	在 DeepSeek 开放平台的「API Keys」页面创建。	Create one on the API Keys page of the DeepSeek platform.	在 DeepSeek 開放平台的「API Keys」頁面建立。
-AiConnTesting	IDS_AI_CONN_TESTING	4262	正在连接 {host}…	Connecting to {host}…	正在連線 {host}…
-AiConnOkTitle	IDS_AI_CONN_OK_TITLE	4263	连接正常	Connection works	連線正常
-AiConnOkMs	IDS_AI_CONN_OK_MS	4264	 · {n} 毫秒	 · {n} ms	 · {n} 毫秒
-AiConnCheckedNow	IDS_AI_CONN_CHECKED_NOW	4265	上次检查：刚刚	Last checked: just now	上次檢查：剛剛
-AiConnCheckedMin	IDS_AI_CONN_CHECKED_MIN	4266	上次检查：{n} 分钟前	Last checked: {n} min ago	上次檢查：{n} 分鐘前
 AiConnErrAuth	IDS_AI_CONN_ERR_AUTH	4267	密钥无效（401）	Invalid key (401)	金鑰無效（401）
-AiConnErrAuthSub	IDS_AI_CONN_ERR_AUTH_SUB	4268	检查是否复制完整，或在开放平台重新创建一个。	Check that it was copied whole, or create a new one on the platform.	檢查是否複製完整，或在開放平台重新建立一個。
 AiConnErrBalance	IDS_AI_CONN_ERR_BALANCE	4269	余额不足（402）	Insufficient balance (402)	餘額不足（402）
-AiConnErrBalanceSub	IDS_AI_CONN_ERR_BALANCE_SUB	4270	到 DeepSeek 开放平台充值后再试。	Top up on the DeepSeek platform, then try again.	到 DeepSeek 開放平台儲值後再試。
 AiConnErrRate	IDS_AI_CONN_ERR_RATE	4271	请求太频繁（429）	Too many requests (429)	請求太頻繁（429）
 AiConnErrRateSub	IDS_AI_CONN_ERR_RATE_SUB	4272	稍等片刻再试。	Wait a moment and try again.	稍等片刻再試。
 AiConnErrServer	IDS_AI_CONN_ERR_SERVER	4273	服务暂时不可用（{code}）	Service unavailable ({code})	服務暫時無法使用（{code}）
 AiConnErrServerSub	IDS_AI_CONN_ERR_SERVER_SUB	4274	服务那边出了问题，稍后再试。	The service has a problem; try again later.	服務那邊出了問題，稍後再試。
 AiConnErrNetwork	IDS_AI_CONN_ERR_NETWORK	4275	连不上 {host}	Can't reach {host}	連不上 {host}
-AiConnErrNetworkSub	IDS_AI_CONN_ERR_NETWORK_SUB	4276	检查网络，或在「高级」里核对接口地址。	Check the network, or the address under Advanced.	檢查網路，或在「進階」裡核對介面位址。
 AiConnErrOther	IDS_AI_CONN_ERR_OTHER	4277	连接失败（{code}）	Connection failed ({code})	連線失敗（{code}）
-AiConnErrOtherSub	IDS_AI_CONN_ERR_OTHER_SUB	4278	在「高级」里核对接口地址是否正确。	Check the address under Advanced.	在「進階」裡核對介面位址是否正確。
 AiConnErrSave	IDS_AI_CONN_ERR_SAVE	4279	无法保存密钥	Couldn't save the key	無法儲存金鑰
 AiConnErrSaveSub	IDS_AI_CONN_ERR_SAVE_SUB	4280	Windows 加密存储失败，请再试一次。	Windows encrypted storage failed; try again.	Windows 加密儲存失敗，請再試一次。
-AiConnModels	IDS_AI_CONN_MODELS	4281	可用模型	Available models	可用模型
-AiConnModelFlash	IDS_AI_CONN_MODEL_FLASH	4282	快，日常整理	Fast, everyday tidying	快，日常整理
-AiConnModelPro	IDS_AI_CONN_MODEL_PRO	4283	更强的推理	Stronger reasoning	更強的推理
-AiConnDefault	IDS_AI_CONN_DEFAULT	4284	默认	Default	預設
-AiConnAdvanced	IDS_AI_CONN_ADVANCED	4285	高级	Advanced	進階
-AiConnUrl	IDS_AI_CONN_URL	4286	接口地址	Address	介面位址
-AiConnUrlHelp	IDS_AI_CONN_URL_HELP	4287	兼容 OpenAI 格式的服务都可以，留空用默认地址。	Any OpenAI-format service works; leave empty for the default.	相容 OpenAI 格式的服務都可以，留空用預設位址。
-AiConnSafe	IDS_AI_CONN_SAFE	4288	密钥用 Windows 加密，只保存在这台电脑上，只发给上面的服务。不会写进设置文件或日志。	The key is encrypted by Windows, kept only on this PC and sent only to the service above. It never goes into settings files or logs.	金鑰用 Windows 加密，只儲存在這台電腦上，只傳給上面的服務。不會寫進設定檔或記錄。
-AiConnRemove	IDS_AI_CONN_REMOVE	4289	移除密钥	Remove key	移除金鑰
-AiConnTest	IDS_AI_CONN_TEST	4290	测试连接	Test	測試連線
-AiConnSave	IDS_AI_CONN_SAVE	4291	保存	Save	儲存
-AiConnDone	IDS_AI_CONN_DONE	4292	完成	Done	完成
-AiConnBack	IDS_AI_CONN_BACK	4293	返回	Back	返回
-AiConnShowKey	IDS_AI_CONN_SHOW_KEY	4294	显示密钥	Show key	顯示金鑰
-AiConnHideKey	IDS_AI_CONN_HIDE_KEY	4295	隐藏密钥	Hide key	隱藏金鑰
 AiListWatch	IDS_AI_LIST_WATCH	4296	Pulse 助手正在读取 {k}/{n}	Pulse Assistant is reading {k}/{n}	Pulse 助手正在讀取 {k}/{n}
 AiPeekDone	IDS_AI_PEEK_DONE	4297	Pulse 助手 · 完成	Pulse Assistant · Done	Pulse 助手 · 完成
 AiPeekSorted	IDS_AI_PEEK_SORTED	4298	已把 {n} 个文件整理到 {g} 个新文件夹：{names}。	Sorted {n} files into {g} new folders: {names}.	已把 {n} 個檔案整理到 {g} 個新資料夾：{names}。
@@ -3849,10 +3815,9 @@ AiSetPillConn	IDS_AI_SET_PILL_CONN	5047	连接和 API key	Connections and API ke
 AiVoiceMic	IDS_AI_VOICE_MIC	5048	语音输入	Voice input	語音輸入
 AiVoiceOptions	IDS_AI_VOICE_OPTIONS	5049	语音输入选项	Voice input options	語音輸入選項
 AiVoiceHeading	IDS_AI_VOICE_HEADING	5050	语音识别	Speech recognition	語音辨識
-AiVoiceAdd	IDS_AI_VOICE_ADD	5051	添加	Add	新增
 AiVoiceNoConn	IDS_AI_VOICE_NO_CONN	5052	还没有语音连接	No voice connection yet	還沒有語音連線
 AiVoiceConnected	IDS_AI_VOICE_CONNECTED	5053	{model} · 已连接	{model} · Connected	{model} · 已連線
-AiVoiceNotConn	IDS_AI_VOICE_NOT_CONN	5054	点「添加」连一个语音识别服务	Click Add to connect a speech service	點「新增」連一個語音辨識服務
+AiVoiceNotConn	IDS_AI_VOICE_NOT_CONN	5054	连上语音识别服务后可用	Connect a speech service to use it	
 AiVoiceMicLabel	IDS_AI_VOICE_MIC_LABEL	5055	麦克风	Microphone	麥克風
 AiVoiceMicDefault	IDS_AI_VOICE_MIC_DEFAULT	5056	系统默认	System default	系統預設
 AiVoiceMicNone	IDS_AI_VOICE_MIC_NONE	5057	没有找到	None found	沒有找到
@@ -3861,18 +3826,8 @@ AiVoicePause1	IDS_AI_VOICE_PAUSE1	5059	1 秒	1 s	1 秒
 AiVoicePause2	IDS_AI_VOICE_PAUSE2	5060	2 秒	2 s	2 秒
 AiVoicePauseManual	IDS_AI_VOICE_PAUSE_MANUAL	5061	手动	Manual	手動
 AiVoiceMenuNote	IDS_AI_VOICE_MENU_NOTE	5062	只在点麦克风时录音，录完上传给语音服务识别，Pulse 不保存录音。文字填进输入框，按 Enter 才发送。	Records only after you click the mic. The audio goes to the speech service for recognition; Pulse keeps no recordings. The words go into the box and are sent only when you press Enter.	只在點麥克風時錄音，錄完上傳給語音服務辨識，Pulse 不儲存錄音。文字填進輸入框，按 Enter 才傳送。
-AiVoiceCardAdd	IDS_AI_VOICE_CARD_ADD	5063	添加语音识别连接	Add a speech recognition connection	新增語音辨識連線
-AiVoiceCardManage	IDS_AI_VOICE_CARD_MANAGE	5064	语音识别连接	Speech recognition connection	語音辨識連線
-AiVoiceCardSub	IDS_AI_VOICE_CARD_SUB	5065	DeepSeek 不能识别语音，需要另接一个语音识别服务（OpenAI 兼容的 /audio/transcriptions 接口）。	DeepSeek can't recognize speech, so voice input needs a separate speech recognition service (an OpenAI-compatible /audio/transcriptions endpoint).	DeepSeek 不能辨識語音，需要另接一個語音辨識服務（OpenAI 相容的 /audio/transcriptions 介面）。
-AiVoiceService	IDS_AI_VOICE_SERVICE	5066	服务	Service	服務
 AiVoiceSiliconFlow	IDS_AI_VOICE_SILICON_FLOW	5067	硅基流动	SiliconFlow	矽基流動
 AiVoiceCustom	IDS_AI_VOICE_CUSTOM	5068	自定义	Custom	自訂
-AiVoiceUrl	IDS_AI_VOICE_URL	5069	地址	Address	位址
-AiVoiceKeyNote	IDS_AI_VOICE_KEY_NOTE	5070	只存在本机	Stored only on this PC	只存在本機
-AiVoiceKeyPlaceholder	IDS_AI_VOICE_KEY_PLACEHOLDER	5071	粘贴 API key	Paste API key	貼上 API key
-AiVoiceModel	IDS_AI_VOICE_MODEL	5072	模型	Model	模型
-AiVoiceModelNote	IDS_AI_VOICE_MODEL_NOTE	5073	已从服务读取	Read from the service	已從服務讀取
-AiVoiceModelPlaceholder	IDS_AI_VOICE_MODEL_PLACEHOLDER	5074	填好 key 后从服务读取	Read from the service once the key is in	填好 key 後從服務讀取
 AiVoiceTesting	IDS_AI_VOICE_TESTING	5075	正在读取模型并测试识别…	Reading models and testing recognition…	正在讀取模型並測試辨識…
 AiVoiceTestOk	IDS_AI_VOICE_TEST_OK	5076	已连接 · 测试音频识别用了 {s} 秒	Connected · the test audio took {s} s to recognize	已連線 · 測試音訊辨識用了 {s} 秒
 AiVoiceErrKey	IDS_AI_VOICE_ERR_KEY	5077	服务不接受这个 key（401）。检查后重新粘贴。	The service rejected this key (401). Check it and paste it again.	服務不接受這個 key（401）。檢查後重新貼上。
@@ -3880,12 +3835,7 @@ AiVoiceErrNet	IDS_AI_VOICE_ERR_NET	5078	连不上 {host}。检查网络和地址
 AiVoiceErrHttp	IDS_AI_VOICE_ERR_HTTP	5079	服务返回了错误 {code}。{msg}	The service returned error {code}. {msg}	服務傳回了錯誤 {code}。{msg}
 AiVoiceErrNoModel	IDS_AI_VOICE_ERR_NO_MODEL	5080	这个服务没有列出语音识别模型。	This service lists no speech recognition models.	這個服務沒有列出語音辨識模型。
 AiVoiceErrSave	IDS_AI_VOICE_ERR_SAVE	5081	key 没能保存到本机，再试一次。	The key couldn't be saved on this PC. Try again.	key 沒能儲存到本機，再試一次。
-AiVoicePrivacy	IDS_AI_VOICE_PRIVACY	5082	只在你点麦克风时录音，录完上传给这个服务识别。Pulse 不保存录音。	Records only after you click the mic, then uploads it to this service for recognition. Pulse keeps no recordings.	只在你點麥克風時錄音，錄完上傳給這個服務辨識。Pulse 不儲存錄音。
-AiVoiceCancel	IDS_AI_VOICE_CANCEL	5083	取消	Cancel	取消
-AiVoiceSave	IDS_AI_VOICE_SAVE	5084	保存	Save	儲存
 AiVoiceRemove	IDS_AI_VOICE_REMOVE	5085	移除连接	Remove connection	移除連線
-AiVoiceAdded	IDS_AI_VOICE_ADDED	5086	已添加语音连接：{name}	Voice connection added: {name}	已新增語音連線：{name}
-AiVoiceRemoved	IDS_AI_VOICE_REMOVED	5087	已移除语音连接	Voice connection removed	已移除語音連線
 AiVoiceNeedTitle	IDS_AI_VOICE_NEED_TITLE	5088	语音输入需要一个语音识别连接	Voice input needs a speech recognition connection	語音輸入需要一個語音辨識連線
 AiVoiceNeedSub	IDS_AI_VOICE_NEED_SUB	5089	DeepSeek 不能识别语音。推荐硅基流动的 SenseVoiceSmall：中文好，国内直接能用。也可以用 OpenAI 或其他兼容的服务。	DeepSeek can't recognize speech. SiliconFlow's SenseVoiceSmall is recommended: good with Chinese and reachable in mainland China. OpenAI or any compatible service works too.	DeepSeek 不能辨識語音。推薦矽基流動的 SenseVoiceSmall：中文好，國內直接能用。也可以用 OpenAI 或其他相容的服務。
 AiVoiceNeedButton	IDS_AI_VOICE_NEED_BUTTON	5090	添加语音连接	Add voice connection	新增語音連線
@@ -4272,9 +4222,9 @@ AiMcpGroupExternal	IDS_AI_MCP_GROUP_EXTERNAL	5471	Pulse 之外的效果	Effects 
 AiMcpGroupLocked	IDS_AI_MCP_GROUP_LOCKED	5472	只能你自己做	Only you can do these	只能你自己做
 AiMcpWhere	IDS_AI_MCP_WHERE	5473	设置 › 增强包 › AI 与 MCP › AI 应用可以做的事	Settings › Enhancement packs › AI and MCP › What AI apps can do	設定 › 增強包 › AI 與 MCP › AI 應用可以做的事
 AiMcpUndoLabel	IDS_AI_MCP_UNDO_LABEL	5474	{client} 的操作	Changes by {client}	{client} 的操作
-AiMcpAskFrom	IDS_AI_MCP_ASK_FROM	5475	来自「{client}」的请求 · 2 分钟内不回答就算拒绝	Asked by {client} · no answer within 2 minutes counts as no	來自「{client}」的請求 · 2 分鐘內不回答就算拒絕
+AiMcpAskFrom	IDS_AI_MCP_ASK_FROM	5475	AI/MCP 请求 · 客户端：{client} · 2 分钟内不回答就算拒绝	AI/MCP request · client: {client} · no answer within 2 minutes counts as no	AI/MCP 請求 · 用戶端：{client} · 2 分鐘內不回答就算拒絕
 AiMcpArmNote	IDS_AI_MCP_ARM_NOTE	5476	永久删除无法撤销。再点一次按钮才会删除。	A permanent delete can't be undone. Click the button again to delete.	永久刪除無法復原。再點一次按鈕才會刪除。
-AiMcpCreateTitle	IDS_AI_MCP_CREATE_TITLE	5477	允许「{client}」{title}？	Allow {client}: {title}?	允許「{client}」{title}？
+AiMcpCreateTitle	IDS_AI_MCP_CREATE_TITLE	5477	允许 AI/MCP 客户端「{client}」{title}？	Allow AI/MCP client {client}: {title}?	允許 AI/MCP 用戶端「{client}」{title}？
 AiUndoRunLabel	IDS_AI_UNDO_RUN_LABEL	5478	刚才的一组操作	the last group of changes	剛才的一組操作
 AiMcpGroupsSection	IDS_AI_MCP_GROUPS_SECTION	5479	AI 应用可以做的事	What AI apps can do	AI 應用可以做的事
 AiMcpGroupsFoot	IDS_AI_MCP_GROUPS_FOOT	5480	只对 AI 应用（MCP）生效，Pulse 助手的规则不变。锁定的设置（关闭删除确认、助手权限、连接、API 密钥）任何开关都不会放开。	These apply to AI apps (MCP) only; Pulse Assistant's rules stay the same. No switch unlocks the locked settings (turning off delete confirmation, assistant permissions, connections, API keys).	只對 AI 應用（MCP）生效，Pulse 助手的規則不變。鎖定的設定（關閉刪除確認、助手權限、連線、API 金鑰）任何開關都不會放開。
@@ -4383,7 +4333,7 @@ DoubleCtrlNormal	IDS_DOUBLE_CTRL_NORMAL	5582	300 毫秒	300 ms	300 毫秒
 DoubleCtrlSlow	IDS_DOUBLE_CTRL_SLOW	5583	400 毫秒	400 ms	400 毫秒
 GlobalSearchJump	IDS_GLOBAL_SEARCH_JUMP	5584	跳转	Go to	跳轉
 DialogJumpBar	IDS_DIALOG_JUMP_BAR	5585	对话框跳转条	Dialog jump bar	對話方塊跳轉列
-DialogJumpBarDesc	IDS_DIALOG_JUMP_BAR_DESC	5586	在其它程序的打开、保存对话框下方列出 Pulse 里的文件夹，点一下就跳过去；Ctrl+G 跳到当前文件夹	Lists your Pulse folders under other apps' Open and Save dialogs; click one to go there, Ctrl+G jumps to the current folder	在其他程式的開啟、儲存對話方塊下方列出 Pulse 裡的資料夾，點一下就跳過去；Ctrl+G 跳到目前資料夾
+DialogJumpBarDesc	IDS_DIALOG_JUMP_BAR_DESC	5586	未能替换的打开、保存对话框保留原生界面，并显示 Pulse 文件夹跳转条；Ctrl+G 跳到当前文件夹	Open and Save dialogs that cannot be replaced keep their native interface with a Pulse folder jump bar; Ctrl+G goes to the current folder	無法取代的開啟、儲存對話方塊保留原生介面，並顯示 Pulse 資料夾跳轉列；Ctrl+G 跳到目前資料夾
 DialogJumpSearchCue	IDS_DIALOG_JUMP_SEARCH_CUE	5587	跳转到…  拼音也行	Go to…	跳轉到…  拼音也行
 DialogJumpCurrent	IDS_DIALOG_JUMP_CURRENT	5588	跳到 Pulse 当前的文件夹	Go to the current Pulse folder	跳到 Pulse 目前的資料夾
 DialogJumpNone	IDS_DIALOG_JUMP_NONE	5589	Pulse 里还没有打开的文件夹	No folders open in Pulse	Pulse 裡還沒有開啟的資料夾
@@ -4427,3 +4377,792 @@ OpAuthTitleMove	IDS_OP_AUTH_TITLE_MOVE	5626	移动到这里需要管理员权限
 OpAuthTitleDelete	IDS_OP_AUTH_TITLE_DELETE	5627	删除这些项目需要管理员权限	Deleting these items needs administrator permission	刪除這些項目需要系統管理員權限
 OpAuthNotGrantedShort	IDS_OP_AUTH_NOT_GRANTED_SHORT	5628	没有获得管理员权限。	Administrator permission wasn't granted.	沒有取得系統管理員權限。
 OpAuthorizationOnce	IDS_OP_AUTHORIZATION_ONCE	5629	确认一次即可，本次操作的其余项目不会再问。	You only need to approve once; the rest of this operation won't ask again.	確認一次即可，本次操作的其餘項目不會再詢問。
+ActFindDuplicates	IDS_ACT_FIND_DUPLICATES	5630	查找重复文件	Find duplicate files	尋找重複檔案
+ActOrganizeHere	IDS_ACT_ORGANIZE_HERE	5631	AI 整理此文件夹…	AI tidy this folder…	AI 整理此資料夾…
+ActDomAssistant	IDS_ACT_DOM_ASSISTANT	5632	AI 助手	AI assistant	AI 助理
+ActFindDupValue	IDS_ACT_FIND_DUP_VALUE	5633	比对「{folder}」	Compare “{folder}”	比對「{folder}」
+ActOrganizeValue	IDS_ACT_ORGANIZE_VALUE	5634	交给 Pulse 助手	Hand to the Pulse assistant	交給 Pulse 助理
+ActNeedAi	IDS_ACT_NEED_AI	5635	先在 设置 → AI 里连接模型	Connect a model in Settings → AI first	先在 設定 → AI 裡連線模型
+ActWhyOpenFolder	IDS_ACT_WHY_OPEN_FOLDER	5636	先打开一个文件夹	Open a folder first	先開啟一個資料夾
+AiOrgHere	IDS_AI_ORG_HERE	5637	把「{folder}」整理一下：	Tidy up “{folder}”: 	把「{folder}」整理一下：
+AiOrgHereSel	IDS_AI_ORG_HERE_SEL	5638	把选中的 {n} 项整理一下：	Tidy up the {n} selected items: 	把選取的 {n} 項整理一下：
+AiOrgHereTail	IDS_AI_ORG_HERE_TAIL	5639	按类型分到文件夹	sort them into folders by type	依類型分到資料夾
+AiLockOrgHereS	IDS_AI_LOCK_ORG_HERE_S	5640	这一步只是把一句话填进 Pulse 助手的输入框，由你自己改了再发。	This only puts a sentence in the Pulse assistant's box, for you to edit and send.	這一步只是把一句話填進 Pulse 助理的輸入框，由你自己改了再送出。
+AiLockOrgHereWhere	IDS_AI_LOCK_ORG_HERE_WHERE	5641	在 Pulse 里：命令面板 >「AI 整理此文件夹…」，或在文件夹空白处右键	In Pulse: command palette > “AI tidy this folder…”, or right-click a folder's empty space	在 Pulse 裡：命令面板 >「AI 整理此資料夾…」，或在資料夾空白處按右鍵
+DupFTitle	IDS_DUP_F_TITLE	5642	重复文件	Duplicate files	重複檔案
+DupFTabRunning	IDS_DUP_F_TAB_RUNNING	5643	重复文件 · 比对中	Duplicate files · comparing	重複檔案 · 比對中
+DupFGroupsN	IDS_DUP_F_GROUPS_N	5644	{g} 组	{g} groups	{g} 組
+DupFHeaderSub	IDS_DUP_F_HEADER_SUB	5645	{where} · 含子文件夹	{where} · with subfolders	{where} · 含子資料夾
+DupFSecs	IDS_DUP_F_SECS	5646	{s} 秒	{s} s	{s} 秒
+DupFRunTitle	IDS_DUP_F_RUN_TITLE	5647	正在比对「{where}」…	Comparing “{where}”…	正在比對「{where}」…
+DupFRunSub	IDS_DUP_F_RUN_SUB	5648	已看过 {n} 个文件 · {size}	{n} files looked at · {size}	已看過 {n} 個檔案 · {size}
+DupFS1	IDS_DUP_FS1	5649	① 大小相同	① Same size	① 大小相同
+DupFS2	IDS_DUP_FS2	5650	② 开头 64 KB 相同	② Same first 64 KB	② 開頭 64 KB 相同
+DupFS3	IDS_DUP_FS3	5651	③ 逐字节相同	③ Same bytes	③ 逐位元組相同
+DupFS1Run	IDS_DUP_FS1_RUN	5652	已看过 {n} 个	{n} looked at	已看過 {n} 個
+DupFS1Val	IDS_DUP_FS1_VAL	5653	{n} 个文件可能重复	{n} files may be duplicates	{n} 個檔案可能重複
+DupFS2Val	IDS_DUP_FS2_VAL	5654	{n} 个	{n} files	{n} 個
+DupFS3Val	IDS_DUP_FS3_VAL	5655	{k} / {n} 已核对	{k} / {n} checked	{k} / {n} 已核對
+DupFProg	IDS_DUP_F_PROG	5656	{k} / {n}	{k} / {n}	{k} / {n}
+DupFWait	IDS_DUP_F_WAIT	5657	等待	Waiting	等待
+DupFBusy	IDS_DUP_F_BUSY	5658	正在把多出的副本移到回收站…	Moving the extra copies to the Recycle Bin…	正在把多出的副本移到資源回收筒…
+DupFBusyPurge	IDS_DUP_F_BUSY_PURGE	5659	正在永久删除多出的副本…	Permanently deleting the extra copies…	正在永久刪除多出的副本…
+DupFBusySub	IDS_DUP_F_BUSY_SUB	5660	每组保留的那份先锁定，再核对一次内容	Each group's kept copy is locked and checked again first	每組保留的那份先鎖定，再核對一次內容
+DupFEmpty	IDS_DUP_F_EMPTY	5661	没有找到重复的文件	No duplicate files found	沒有找到重複的檔案
+DupFEmptyAfter	IDS_DUP_F_EMPTY_AFTER	5662	没有重复文件了	No duplicates left	沒有重複檔案了
+DupFSumTitle	IDS_DUP_F_SUM_TITLE	5663	{g} 组重复，多出 {n} 份，共 {size}	{g} duplicate groups, {n} extra copies, {size} in all	{g} 組重複，多出 {n} 份，共 {size}
+DupFSumKeepAll	IDS_DUP_F_SUM_KEEP_ALL	5664	{g} 组重复，都建议保留	{g} duplicate groups, all worth keeping	{g} 組重複，都建議保留
+DupFSumSub	IDS_DUP_F_SUM_SUB	5665	比对了 {n} 个文件 · 只算逐字节相同的	{n} files compared · only byte-for-byte matches count	比對了 {n} 個檔案 · 只算逐位元組相同的
+DupFSumOnline	IDS_DUP_F_SUM_ONLINE	5666	 · {n} 个云端文件没下载，跳过	 · {n} cloud files not downloaded, skipped	 · {n} 個雲端檔案沒下載，略過
+DupFSumTruncated	IDS_DUP_F_SUM_TRUNCATED	5667	 · 文件太多，只比对了一部分	 · too many files, only part was compared	 · 檔案太多，只比對了一部分
+DupFRecycleBtn	IDS_DUP_F_RECYCLE_BTN	5668	把多出的 {n} 份移到回收站	Move the {n} extra copies to the Recycle Bin	把多出的 {n} 份移到資源回收筒
+DupFRuleOldest	IDS_DUP_F_RULE_OLDEST	5669	保留规则：最早的	Keep: the oldest	保留規則：最早的
+DupFRuleNewest	IDS_DUP_F_RULE_NEWEST	5670	保留规则：最新的	Keep: the newest	保留規則：最新的
+DupFGroupMeta	IDS_DUP_F_GROUP_META	5671	{n} 份 · 每份 {size}	{n} copies · {size} each	{n} 份 · 每份 {size}
+DupFWaste	IDS_DUP_F_WASTE	5672	多出 {size}	{size} extra	多出 {size}
+DupFExtra	IDS_DUP_F_EXTRA	5673	多出	Extra	多出
+DupFWhyPre	IDS_DUP_F_WHY_PRE	5674	保留理由	Why keep it	保留理由
+DupFWhy1	IDS_DUP_F_WHY1	5675	① 在整理过的文件夹里	① In a sorted folder	① 在整理過的資料夾裡
+DupFWhy2	IDS_DUP_F_WHY2	5676	② 名字干净	② Clean name	② 名稱乾淨
+DupFWhy3	IDS_DUP_F_WHY3	5677	③ 最早的那份	③ The oldest copy	③ 最早的那份
+DupFWhy3New	IDS_DUP_F_WHY3_NEW	5678	③ 最新的那份	③ The newest copy	③ 最新的那份
+DupFWhyPicked	IDS_DUP_F_WHY_PICKED	5679	你选的 · 规则不再改这一组	Your pick · the rules leave this group alone	你選的 · 規則不再改這一組
+DupFWhyBoth	IDS_DUP_F_WHY_BOTH	5680	{n} 份分别在整理过的文件夹里，可能各有用处，默认都不删；要删就在一份上右键「只保留这份」	The {n} copies are in different sorted folders and may each be in use, so none is removed; to remove one, right-click the copy to keep and choose “Keep only this”	{n} 份分別在整理過的資料夾裡，可能各有用處，預設都不刪；要刪就在一份上按右鍵「只保留這份」
+DupFWhy2One	IDS_DUP_F_WHY2_ONE	5681	另一份名字带 {mark}	the other copy's name has {mark}	另一份名稱帶 {mark}
+DupFWhy2Many	IDS_DUP_F_WHY2_MANY	5682	其他几份名字带编号或「副本」	the other copies' names have a number or “Copy”	其他幾份名稱帶編號或「複本」
+DupFWhySameBytes	IDS_DUP_F_WHY_SAME_BYTES	5683	名字不同但内容完全一样	different names, identical contents	名稱不同但內容完全一樣
+DupFAskTitle	IDS_DUP_F_ASK_TITLE	5684	把 {n} 个多出的副本移到回收站？	Move {n} extra copies to the Recycle Bin?	把 {n} 個多出的副本移到資源回收筒？
+DupFAskMsg	IDS_DUP_F_ASK_MSG	5685	每组保留 1 份，共腾出 {size}。可以在 Pulse 里撤销，也可以从回收站还原。	One copy of each group stays; this frees {size}. You can undo it in Pulse or restore from the Recycle Bin.	每組保留 1 份，共騰出 {size}。可以在 Pulse 裡復原，也可以從資源回收筒還原。
+DupFAskMsgPurge	IDS_DUP_F_ASK_MSG_PURGE	5686	每组保留 1 份。回收站放不下，这些副本会被永久删除，不能撤销。	One copy of each group stays. The Recycle Bin can't hold them, so these copies will be deleted permanently and can't be undone.	每組保留 1 份。資源回收筒放不下，這些副本會被永久刪除，無法復原。
+DupFAskKeep	IDS_DUP_F_ASK_KEEP	5687	保留 {name}	keeps {name}	保留 {name}
+DupFAskRoom	IDS_DUP_F_ASK_ROOM	5688	{drive} 盘回收站还能放 {free}，放得下。删除前会再核对一次每组保留的那份。	The Recycle Bin on {drive}: can take {free} more — enough. Each group's kept copy is checked again first.	{drive} 磁碟的資源回收筒還能放 {free}，放得下。刪除前會再核對一次每組保留的那份。
+DupFAskTight	IDS_DUP_F_ASK_TIGHT	5689	{drive} 盘回收站只剩 {free}，放进去会挤掉最早删除的项目。删除前会再核对一次每组保留的那份。	The Recycle Bin on {drive}: has only {free} left; the oldest items in it will make room. Each group's kept copy is checked again first.	{drive} 磁碟的資源回收筒只剩 {free}，放進去會擠掉最早刪除的項目。刪除前會再核對一次每組保留的那份。
+DupFAskFull	IDS_DUP_F_ASK_FULL	5690	回收站放不下 {size}，这些文件会被永久删除	The Recycle Bin can't hold {size}; these files will be deleted permanently	資源回收筒放不下 {size}，這些檔案會被永久刪除
+DupFAskOk	IDS_DUP_F_ASK_OK	5691	移到回收站	Move to Recycle Bin	移到資源回收筒
+DupFAskPurge	IDS_DUP_F_ASK_PURGE	5692	永久删除…	Delete permanently…	永久刪除…
+DupFDone	IDS_DUP_F_DONE	5693	已把 {n} 个副本移到回收站，腾出 {size}	Moved {n} copies to the Recycle Bin, freeing {size}	已把 {n} 個副本移到資源回收筒，騰出 {size}
+DupFPurged	IDS_DUP_F_PURGED	5694	已永久删除 {n} 个副本，腾出 {size}	Deleted {n} copies permanently, freeing {size}	已永久刪除 {n} 個副本，騰出 {size}
+DupFPart	IDS_DUP_F_PART	5695	移走 {n} 个；{name} 刚被改过，这一组没动	Moved {n}; {name} just changed, so its group was left alone	移走 {n} 個；{name} 剛被修改，這一組沒動
+DupFPartN	IDS_DUP_F_PART_N	5696	移走 {n} 个；{k} 组的文件刚被改过，没动	Moved {n}; files in {k} groups just changed and were left alone	移走 {n} 個；{k} 組的檔案剛被修改，沒動
+DupFFailed	IDS_DUP_F_FAILED	5697	没能移走多出的副本，文件都没动	Couldn't move the extra copies; nothing was changed	沒能移走多出的副本，檔案都沒動
+DupFNoFolder	IDS_DUP_F_NO_FOLDER	5698	找不到这个文件夹	Can't find this folder	找不到這個資料夾
+DupFKeepThis	IDS_DUP_F_KEEP_THIS	5699	只保留这份	Keep only this	只保留這份
+DupFReapply	IDS_DUP_F_REAPPLY	5700	按规则重新标	Mark again by the rules	依規則重新標
+AiFoAcceptOrganize	IDS_AI_FO_ACCEPT_ORGANIZE	5701	整理	Organize	整理
+AiFoArgOrganize	IDS_AI_FO_ARG_ORGANIZE	5702	{n} 项 → {k} 个文件夹	{n} items → {k} folders	{n} 項 → {k} 個資料夾
+AiFoLineOrganize	IDS_AI_FO_LINE_ORGANIZE	5703	{n} 项已整理到 {k} 个文件夹	{n} items sorted into {k} folders	{n} 項已整理到 {k} 個資料夾
+AiFoTitleOrganize	IDS_AI_FO_TITLE_ORGANIZE	5704	把 {n} 个项目整理到 {k} 个文件夹？	Sort {n} items into {k} folders?	把 {n} 個項目整理到 {k} 個資料夾？
+AiFoTitleOrganizeMcp	IDS_AI_FO_TITLE_ORGANIZE_MCP	5705	AI/MCP 客户端「{client}」想把 {n} 个项目整理到 {k} 个文件夹	AI/MCP client “{client}” wants to sort {n} items into {k} folders	AI/MCP 用戶端「{client}」想把 {n} 個項目整理到 {k} 個資料夾
+AiFoSubOrganize	IDS_AI_FO_SUB_ORGANIZE	5706	都在「{folder}」里。不会覆盖任何文件，整次可以一步撤销。	All in “{folder}”. No file is overwritten, and it all undoes in one step.	都在「{folder}」裡。不會覆寫任何檔案，整次可以一步復原。
+AiFoSubOrganizeMixed	IDS_AI_FO_SUB_ORGANIZE_MIXED	5707	来自几个文件夹。不会覆盖任何文件，整次可以一步撤销。	From several folders. No file is overwritten, and it all undoes in one step.	來自幾個資料夾。不會覆寫任何檔案，整次可以一步復原。
+AiFoOrgNewN	IDS_AI_FO_ORG_NEW_N	5708	新建 {n} 个文件夹	{n} new folders	新增 {n} 個資料夾
+AiFoOrgNoClash	IDS_AI_FO_ORG_NO_CLASH	5709	目标文件夹里没有同名文件。	No file of the same name in the target folders.	目標資料夾裡沒有同名檔案。
+AiFoOrgRowNew	IDS_AI_FO_ORG_ROW_NEW	5710	新建	New	新增
+AiFoOrgRowHave	IDS_AI_FO_ORG_ROW_HAVE	5711	已有	Existing	已有
+AiFoOrgAlready	IDS_AI_FO_ORG_ALREADY	5712	这些项目已经在目标文件夹里了	These items are already in their folders	這些項目已經在目標資料夾裡了
+AiFoOrgClash	IDS_AI_FO_ORG_CLASH	5713	「{folder}」里已有「{name}」，整次没做	“{folder}” already has “{name}”; nothing was moved	「{folder}」裡已有「{name}」，整次沒做
+AiFoOrgNeedFolder	IDS_AI_FO_ORG_NEED_FOLDER	5714	「{name}」要写完整路径（当前不在文件夹里）	“{name}” needs a full path (no folder is open)	「{name}」要寫完整路徑（目前不在資料夾裡）
+AiFoOrgTwice	IDS_AI_FO_ORG_TWICE	5715	「{name}」列了两次	“{name}” is listed twice	「{name}」列了兩次
+PackFailNetworkAll	IDS_PACK_FAIL_NETWORK_ALL	5716	连不上下载服务器，{n} 个下载源都试过了。请检查网络或代理后重试。	Couldn't reach the download servers; all {n} sources were tried. Check your network or proxy and try again.	
+PackFailNetworkOne	IDS_PACK_FAIL_NETWORK_ONE	5717	连不上下载源「{source}」。请检查网络或代理，或换一个下载源后重试。	Couldn't reach {source}. Check your network or proxy, or pick another download source and try again.	
+PackMismatchTitle	IDS_PACK_MISMATCH_TITLE	5718	增强包与这个版本的 Pulse 不匹配	The pack doesn't match this version of Pulse	
+PackMismatchAll	IDS_PACK_MISMATCH_ALL	5719	{n} 个下载源给出的文件都和这个 Pulse 里登记的不一致。通常是因为当前 Pulse 不是正式发布的版本（例如自己编译的测试版），更新到最新正式版即可。	All {n} download sources served a file other than the one this Pulse expects. This usually means this Pulse isn't an official release (for example a build of your own); updating to the latest release fixes it.	
+PackMismatchOne	IDS_PACK_MISMATCH_ONE	5720	下载源「{source}」给出的文件和这个 Pulse 里登记的不一致。可以换一个下载源；如果当前 Pulse 不是正式发布的版本，更新到最新正式版即可。	{source} served a file other than the one this Pulse expects. Try another download source, or update to the latest release if this Pulse isn't an official one.	
+PackMismatchSize	IDS_PACK_MISMATCH_SIZE	5721	大小不一致	size differs	
+PackMismatchHash	IDS_PACK_MISMATCH_HASH	5722	校验值不一致	checksum differs	
+AiPackDiskTitle	IDS_AI_PACK_DISK_TITLE	5723	无法保存 AI 增强包	Couldn't save the AI pack	
+ContentPackDiskTitle	IDS_CONTENT_PACK_DISK_TITLE	5724	无法保存内容搜索增强包	Couldn't save the content search pack	
+PackDiskMessage	IDS_PACK_DISK_MESSAGE	5725	写入增强包文件夹失败：磁盘空间不足，或者文件夹没有写入权限。	Writing to the packs folder failed: the disk may be full, or the folder isn't writable.	
+ContentPackFailedTitle	IDS_CONTENT_PACK_FAILED_TITLE	5726	内容搜索增强包下载失败	Content search pack download failed	
+PackActionSources	IDS_PACK_ACTION_SOURCES	5727	下载源设置	Download source	
+PackActionDetails	IDS_PACK_ACTION_DETAILS	5728	查看详情	Details	
+UpdateSourceAuto	IDS_UPDATE_SOURCE_AUTO	5729	自动（推荐）	Automatic (recommended)	
+UpdateSourceMirror1	IDS_UPDATE_SOURCE_MIRROR1	5730	镜像 1 · ghproxy.net	Mirror 1 · ghproxy.net	
+UpdateSourceMirror2	IDS_UPDATE_SOURCE_MIRROR2	5731	镜像 2 · gh-proxy.com	Mirror 2 · gh-proxy.com	
+UpdateSourceGitHub	IDS_UPDATE_SOURCE_GITHUB	5732	GitHub 直连	GitHub direct	
+UpdateSourceAutoDesc	IDS_UPDATE_SOURCE_AUTO_DESC	5733	镜像 1 → 镜像 2 → GitHub，逐个尝试	Mirror 1 → mirror 2 → GitHub, one after another	
+UpdateSourceMirror1Desc	IDS_UPDATE_SOURCE_MIRROR1_DESC	5734	国内访问较快	Usually faster in mainland China	
+UpdateSourceMirror2Desc	IDS_UPDATE_SOURCE_MIRROR2_DESC	5735	备用镜像	Backup mirror	
+UpdateSourceGitHubDesc	IDS_UPDATE_SOURCE_GITHUB_DESC	5736	使用系统代理设置	Uses the system proxy settings	
+DownloadSourceTitle	IDS_DOWNLOAD_SOURCE_TITLE	5737	下载源	Download source	
+DownloadSourceDesc	IDS_DOWNLOAD_SOURCE_DESC	5738	增强包和 Pulse 更新从哪里下载。「自动」会先试国内镜像，连不上或文件不对就换下一个，最后试 GitHub。	Where packs and Pulse updates come from. Automatic tries the mirrors first, moves on when one can't be reached or serves a wrong file, and tries GitHub last.	
+SpeedTestTitle	IDS_SPEED_TEST_TITLE	5739	测速	Speed test	
+SpeedTestDesc	IDS_SPEED_TEST_DESC	5740	逐个连接下载源，取一个小文件，不会下载增强包本身。	Connects to each source and fetches a small file; the packs themselves aren't downloaded.	
+SpeedTestStart	IDS_SPEED_TEST_START	5741	开始测速	Test now	
+SpeedTestAgain	IDS_SPEED_TEST_AGAIN	5742	重新测速	Test again	
+SpeedTestOk	IDS_SPEED_TEST_OK	5743	可用 · {time}	Available · {time}	
+SpeedTestFail	IDS_SPEED_TEST_FAIL	5744	不可用	Unavailable	
+SpeedTestRunning	IDS_SPEED_TEST_RUNNING	5745	正在测速…	Testing…	
+SpeedTestViaProxy	IDS_SPEED_TEST_VIA_PROXY	5746	GitHub 直连（经系统代理 {proxy}）	GitHub direct (via system proxy {proxy})	
+SpeedTestNotRun	IDS_SPEED_TEST_NOT_RUN	5747	未测速	Not tested	
+PackDetailsTitle	IDS_PACK_DETAILS_TITLE	5748	增强包下载详情	Pack download details	
+PackDetailsPack	IDS_PACK_DETAILS_PACK	5749	增强包：{name} {version}	Pack: {name} {version}	
+PackDetailsFile	IDS_PACK_DETAILS_FILE	5750	文件：{file} · 登记 {size}	File: {file} · expected {size}	
+PackDetailsSources	IDS_PACK_DETAILS_SOURCES	5751	试过的下载源：{sources}	Sources tried: {sources}	
+PackDetailsResult	IDS_PACK_DETAILS_RESULT	5752	结果：{result}（错误代码 {code}）	Result: {result} (error code {code})	
+PackDetailsNote	IDS_PACK_DETAILS_NOTE	5753	Pulse 里登记了每个增强包文件的大小和校验值，下载到的文件完全一致才会安装。自己编译的 Pulse 登记的是本机编译的增强包，所以下载不到匹配的文件。	Pulse records the size and checksum of every pack file and installs only an exact match. A Pulse you built yourself records packs built on your PC, so no download can match.	
+AiPackName	IDS_AI_PACK_NAME	5754	AI 增强包	AI pack	
+ContentPackName	IDS_CONTENT_PACK_NAME	5755	内容搜索增强包	Content search pack	
+AsstPageTitle	IDS_ASST_PAGE_TITLE	5756	AI 助手	AI assistant	
+AsstPageIntro	IDS_ASST_PAGE_INTRO	5757	Pulse 内置的对话助手（Ctrl+J）。它用你自己的模型服务和 API Key，Key 只加密保存在这台电脑上。	Pulse's built-in chat assistant (Ctrl+J). It uses your own model service and API key; the key is stored encrypted on this PC only.	
+AsstModelSection	IDS_ASST_MODEL_SECTION	5758	模型服务	Model service	
+AsstDefaultModel	IDS_ASST_DEFAULT_MODEL	5764	默认模型	Default model	
+AsstKey	IDS_ASST_KEY	5767	API Key	API key	
+AsstTest	IDS_ASST_TEST	5774	测试连接	Test connection	
+AsstVoiceSection	IDS_ASST_VOICE_SECTION	5778	语音输入	Voice input	
+AsstVoiceTitle	IDS_ASST_VOICE_TITLE	5779	语音识别服务	Speech recognition service	
+AsstVoiceDesc	IDS_ASST_VOICE_DESC	5780	点麦克风说话，识别成文字放进输入框，不会自动发送；不保存录音	Click the mic and speak: the words go into the input box and are never sent on their own; no recording is kept	
+AsstVoiceNoKey	IDS_ASST_VOICE_NO_KEY	5785	缺少 Key	Key missing	
+AsstMcpSection	IDS_ASST_MCP_SECTION	5786	让其他 AI 应用使用 Pulse	Let other AI apps use Pulse	
+AsstMcpDesc	IDS_ASST_MCP_DESC	5787	和上面的助手不是一回事：这是让 Claude 等外部 AI 应用来查找、整理你的文件。需要 AI 增强包。	Not the assistant above: this lets outside AI apps such as Claude find and organize your files. Needs the AI pack.	
+AsstMcpMeta	IDS_ASST_MCP_META	5788	Pulse.AI.exe · MCP · 随 Pulse 同步更新	Pulse.AI.exe · MCP · updated with Pulse	
+AsstMcpManage	IDS_ASST_MCP_MANAGE	5789	在增强包中管理	Manage in Packs	
+SettingsNavNew	IDS_SETTINGS_NAV_NEW	5790	新	New	
+AsstBadgeFailed	IDS_ASST_BADGE_FAILED	5792	连接失败	Connection failed	
+AsstVoiceSetBadge	IDS_ASST_VOICE_SET_BADGE	5793	已设置	Set up	
+ProvQwen	IDS_PROV_QWEN	5794	通义千问	Qwen	
+ProvZhipu	IDS_PROV_ZHIPU	5795	智谱 GLM	Zhipu GLM	
+ProvDoubao	IDS_PROV_DOUBAO	5796	豆包	Doubao	
+ProvSilicon	IDS_PROV_SILICON	5797	硅基流动	SiliconFlow	
+ProvCustom	IDS_PROV_CUSTOM	5798	自定义	Custom	
+ProvSubDeepseek	IDS_PROV_SUB_DEEPSEEK	5799	深度求索	DeepSeek platform	
+ProvSubQwen	IDS_PROV_SUB_QWEN	5800	阿里云百炼	Alibaba Cloud Model Studio	
+ProvSubKimi	IDS_PROV_SUB_KIMI	5801	月之暗面	Moonshot AI	
+ProvSubZhipu	IDS_PROV_SUB_ZHIPU	5802	智谱开放平台	Zhipu open platform	
+ProvSubDoubao	IDS_PROV_SUB_DOUBAO	5803	火山方舟	Volcano Ark	
+ProvSubProxy	IDS_PROV_SUB_PROXY	5804	需要代理	Needs a proxy in China	
+ProvSubOpenRouter	IDS_PROV_SUB_OPENROUTER	5805	一个 Key 用多家	Many models, one key	
+ProvSubOllama	IDS_PROV_SUB_OLLAMA	5806	本机 · 无需 Key	This PC · no key	
+ProvSubCustom	IDS_PROV_SUB_CUSTOM	5807	任意兼容地址	Any compatible address	
+AiErrToolsHint	IDS_AI_ERR_TOOLS_HINT	5808	这个模型可能不支持工具调用（function calling），助手需要它来查看和整理文件。换一个支持的模型，或在 设置 › AI 助手 里更换服务。	This model may not support tool calls (function calling), which the assistant needs to look at and organize files. Pick a model that does, or change the service in Settings › AI assistant.	
+AsstPickTitle	IDS_ASST_PICK_TITLE	5809	选择模型服务	Choose a model service	
+AsstPickChange	IDS_ASST_PICK_CHANGE	5810	更换模型服务	Change the model service	
+AsstPickDesc	IDS_ASST_PICK_DESC	5811	支持所有兼容 OpenAI 接口的服务。选一个，然后填入它的 API Key。	Any service with an OpenAI-compatible API works. Pick one, then paste its API key.	
+AsstNotConnectedBadge	IDS_ASST_NOT_CONNECTED_BADGE	5812	未连接	Not connected	
+AsstCurrent	IDS_ASST_CURRENT	5813	当前	Current	
+AsstMore	IDS_ASST_MORE	5814	更多	More	
+AsstCompatSub	IDS_ASST_COMPAT_SUB	5815	{sub} · 兼容 OpenAI 接口	{sub} · OpenAI-compatible API	
+AsstCustomSub	IDS_ASST_CUSTOM_SUB	5816	任何兼容 OpenAI 接口的地址	Any OpenAI-compatible address	
+AsstRechoose	IDS_ASST_RECHOOSE	5817	换一个服务	Pick another	
+AsstKeyGet	IDS_ASST_KEY_GET	5818	还没有？到 {console} 创建	No key yet? Create one at {console}	
+AsstKeyGetPlain	IDS_ASST_KEY_GET_PLAIN	5819	填写服务方提供的密钥	The key the service gave you	
+AsstKeyPlaceholder	IDS_ASST_KEY_PLACEHOLDER	5820	粘贴 API Key	Paste the API key	
+AsstUrlTitle	IDS_ASST_URL_TITLE	5821	接口地址	API address	
+AsstUrlCustomDesc	IDS_ASST_URL_CUSTOM_DESC	5822	一般以 /v1 结尾，例如 http://192.168.1.20:8000/v1	Usually ends with /v1, e.g. http://192.168.1.20:8000/v1	
+AsstUrlDefault	IDS_ASST_URL_DEFAULT	5823	{url}（默认）	{url} (default)	
+AsstConnectTitle	IDS_ASST_CONNECT_TITLE	5824	连接	Connect	
+AsstConnectDesc	IDS_ASST_CONNECT_DESC	5825	连接时会读取这个服务提供的模型列表	Connecting reads the list of models this service offers	
+AsstConnectOllama	IDS_ASST_CONNECT_OLLAMA	5826	确认 Ollama 正在运行，然后连接	Make sure Ollama is running, then connect	
+AsstConnectBtn	IDS_ASST_CONNECT_BTN	5827	连接并读取模型	Connect and read models	
+AsstConnecting	IDS_ASST_CONNECTING	5828	正在连接…	Connecting…	
+AsstHostLine	IDS_ASST_HOST_LINE	5829	{host} · 上次连接 {time} · {ms} 毫秒	{host} · last connected {time} · {ms} ms	
+AsstChangeService	IDS_ASST_CHANGE_SERVICE	5830	更换服务	Change service	
+AsstFresh	IDS_ASST_FRESH	5831	连接正常	Connected	
+AsstFreshDetail	IDS_ASST_FRESH_DETAIL	5832	{ms} 毫秒 · 读到 {n} 个模型，默认用 {model}，可在下面更改	{ms} ms · {n} models found; using {model} by default, change it below	
+AsstFreshManual	IDS_ASST_FRESH_MANUAL	5833	这个服务不提供完整的模型列表，请在下面输入模型名	This service does not list all its models; type a model name below	
+AsstModelDesc2	IDS_ASST_MODEL_DESC_2	5834	新对话默认用它，对话中可在输入框左下角临时切换	New chats start with it; switch any time from the input box	
+AsstModelManual	IDS_ASST_MODEL_MANUAL	5835	手动输入模型名…	Type a model name…	
+AsstModelPlaceholder	IDS_ASST_MODEL_PLACEHOLDER	5836	模型名，原样发送	Model name, sent as typed	
+AsstModelNone	IDS_ASST_MODEL_NONE	5837	选择模型	Choose a model	
+AsstChatOnly	IDS_ASST_CHAT_ONLY	5838	仅聊天	Chat only	
+AsstThinkLevelsDesc	IDS_ASST_THINK_LEVELS_DESC	5839	越高回答越周到，但更慢、更费 token	Higher is more thorough, but slower and uses more tokens	
+AsstThinkToggle	IDS_ASST_THINK_TOGGLE	5840	深度思考	Deep thinking	
+AsstThinkToggleDesc	IDS_ASST_THINK_TOGGLE_DESC	5841	先思考再回答，更周到，但更慢、更费 token	Thinks before answering: more thorough, but slower and uses more tokens	
+AsstOthers	IDS_ASST_OTHERS	5842	其他已保存的服务	Other saved services	
+AsstOthersDesc	IDS_ASST_OTHERS_DESC	5843	各自的 Key 都还在，点一下就切换过去	Their keys are kept; click one to switch to it	
+AsstFoot	IDS_ASST_FOOT	5844	Key 用 Windows 加密保存在这台电脑上，只发给你选择的服务。改动立即生效。	Keys are encrypted by Windows on this PC and sent only to the service you chose. Changes apply right away.	
+AsstErrAuthSub	IDS_ASST_ERR_AUTH_SUB	5845	检查是否完整复制，或到控制台重新创建	Check that it was copied in full, or create a new one in the console	
+AsstErrBalanceSub	IDS_ASST_ERR_BALANCE_SUB	5846	到服务方控制台充值后再试	Top up in the service's console, then try again	
+AsstErrNetworkSub	IDS_ASST_ERR_NETWORK_SUB	5847	检查网络或代理，或核对接口地址	Check the network or proxy, or the API address	
+AsstErrOtherSub	IDS_ASST_ERR_OTHER_SUB	5848	核对接口地址是否正确	Check that the API address is right	
+AsstErrOllama	IDS_ASST_ERR_OLLAMA	5849	连不上 Ollama	Can't reach Ollama	
+AsstErrOllamaSub	IDS_ASST_ERR_OLLAMA_SUB	5850	确认 Ollama 已安装并正在运行	Make sure Ollama is installed and running	
+AsstReplace	IDS_ASST_REPLACE	5851	更换	Replace	
+AsstEdit	IDS_ASST_EDIT	5852	修改	Edit	
+AsstVoicePick	IDS_ASST_VOICE_PICK	5853	选择服务…	Choose a service…	
+AsstVoiceSubSilicon	IDS_ASST_VOICE_SUB_SILICON	5854	有免费模型	Has a free model	
+AsstVoiceSubOpenAi	IDS_ASST_VOICE_SUB_OPEN_AI	5855	需要代理	Needs a proxy in China	
+AsstVoiceSubCustom	IDS_ASST_VOICE_SUB_CUSTOM	5856	兼容地址	Any compatible address	
+AsstVoiceKeyShared	IDS_ASST_VOICE_KEY_SHARED	5857	可留空：沿用模型服务里硅基流动的 Key	May stay empty: uses the SiliconCloud key of the model service	
+AsstVoiceSharedMask	IDS_ASST_VOICE_SHARED_MASK	5858	与模型服务共用 · {mask}	Shared with the model service · {mask}	
+AsstVoiceConnectDesc	IDS_ASST_VOICE_CONNECT_DESC	5859	会读取识别模型，并用一段测试音频试识别一次	Reads the recognition models and tries a short test clip	
+AsstVoiceConnectBtn	IDS_ASST_VOICE_CONNECT_BTN	5860	连接并测试	Connect and test	
+AsstVoiceModelTitle	IDS_ASST_VOICE_MODEL_TITLE	5861	识别模型	Recognition model	
+AsstVoiceFoot	IDS_ASST_VOICE_FOOT	5862	只在麦克风亮着时录音；录音不保存。	Records only while the microphone is on; recordings are never kept.	
+AsstVoiceNoKeyMask	IDS_ASST_VOICE_NO_KEY_MASK	5863	还没有保存 Key	No key saved yet	
+AiAsstServiceSettings	IDS_AI_ASST_SERVICE_SETTINGS	5864	模型服务设置…	Model service settings…	
+AiAsstSetupTitle	IDS_AI_ASST_SETUP_TITLE	5865	先连接一个模型服务	Connect a model service first	
+AiAsstSetupIntro	IDS_AI_ASST_SETUP_INTRO	5866	助手使用你自己的模型服务和 API Key。国内外常见的服务都支持：	The assistant uses your own model service and API key. Popular services are supported:	
+AiAsstSetupMore	IDS_AI_ASST_SETUP_MORE	5867	及自定义	and custom ones	
+AiAsstSetupGo	IDS_AI_ASST_SETUP_GO	5868	去设置模型服务	Set up a model service	
+AiAsstEffortOn	IDS_AI_ASST_EFFORT_ON	5869	开启	On	
+AiAsstThinkShort	IDS_AI_ASST_THINK_SHORT	5870	思考	Thinking	
+AiAsstThinkOnDetail	IDS_AI_ASST_THINK_ON_DETAIL	5871	先想一想再回答，更仔细，也更慢。	Thinks before answering. More careful, but slower.	
+AiChipOpen	IDS_AI_CHIP_OPEN	5872	打开助手	Open assistant	
+AiChipCollapse	IDS_AI_CHIP_COLLAPSE	5873	收起助手	Collapse assistant	
+AiChipSettings	IDS_AI_CHIP_SETTINGS	5874	AI 助手设置…	AI assistant settings…	
+AiVoiceSettings	IDS_AI_VOICE_SETTINGS	5875	语音设置…	Voice settings…	
+AiAsstModelFlashShort	IDS_AI_ASST_MODEL_FLASH_SHORT	5876	日常整理	Everyday	日常整理
+AiAsstModelProShort	IDS_AI_ASST_MODEL_PRO_SHORT	5877	复杂任务	Complex tasks	複雜任務
+AiAsstEffortMinimal	IDS_AI_ASST_EFFORT_MINIMAL	5878	最低	Minimal	最低
+AiAsstEffortXHigh	IDS_AI_ASST_EFFORT_X_HIGH	5879	超高	Extra high	超高
+AiAsstEffortMax	IDS_AI_ASST_EFFORT_MAX	5880	最高	Max	最高
+AiAsstEffortMinimalDetail	IDS_AI_ASST_EFFORT_MINIMAL_DETAIL	5881	只做很少的思考，几乎和关闭一样快。	Barely thinks; almost as fast as off.	只做很少的思考，幾乎和關閉一樣快。
+AiAsstEffortXHighDetail	IDS_AI_ASST_EFFORT_X_HIGH_DETAIL	5882	更长时间推理，适合难题。	Reasons longer, for hard problems.	更長時間推理，適合難題。
+AiAsstEffortMaxDetail	IDS_AI_ASST_EFFORT_MAX_DETAIL	5883	最充分的推理，最慢、最费 token。	The most thorough reasoning; slowest and uses the most tokens.	最充分的推理，最慢、最費 token。
+AiAsstEffortDefault	IDS_AI_ASST_EFFORT_DEFAULT	5884	默认。{detail}	Default. {detail}	預設。{detail}
+AiAsstThinkAlways	IDS_AI_ASST_THINK_ALWAYS	5885	始终思考	Always thinks	始終思考
+AiAsstThinkAuto	IDS_AI_ASST_THINK_AUTO	5886	自动	auto	自動
+AiAsstThinkAlwaysNote	IDS_AI_ASST_THINK_ALWAYS_NOTE	5887	这个模型始终会思考，没有「关闭」	This model always thinks; it has no Off	這個模型始終會思考，沒有「關閉」
+AiAsstThinkToggleNote	IDS_AI_ASST_THINK_TOGGLE_NOTE	5888	这个模型只能开或关，不能调强度	This model is only on or off	這個模型只能開或關，不能調強度
+AiAsstThinkFixedDetail	IDS_AI_ASST_THINK_FIXED_DETAIL	5889	这个模型总是先思考再回答，不能调整强度，也不能关闭。	This model always thinks before answering; its thinking cannot be adjusted or switched off.	這個模型總是先思考再回答，不能調整強度，也不能關閉。
+AsstThinkAlwaysDesc	IDS_ASST_THINK_ALWAYS_DESC	5890	这个模型始终会思考，可以调强度	This model always thinks; choose how hard	這個模型始終會思考，可以調強度
+AsstThinkFixedDesc	IDS_ASST_THINK_FIXED_DESC	5891	这个模型始终会思考，不能调整	This model always thinks; it cannot be adjusted	這個模型始終會思考，不能調整
+AsstThinkNone	IDS_ASST_THINK_NONE	5892	{model} 不支持思考，所以没有思考强度设置。	{model} does not think, so there is no thinking setting.	{model} 不支援思考，所以沒有思考強度設定。
+ProvMimo	IDS_PROV_MIMO	5893	小米 MiMo	Xiaomi MiMo	小米 MiMo
+ProvSubMimo	IDS_PROV_SUB_MIMO	5894	小米开放平台	Xiaomi MiMo platform	小米開放平台
+AsstUrlMimo	IDS_ASST_URL_MIMO	5895	{url}（默认）· tp- 开头的 Token Plan Key 会自动改用套餐地址	{url} (default) · Token Plan keys (tp-) use their own address automatically	{url}（預設）· tp- 開頭的 Token Plan Key 會自動改用套餐位址
+DriveFreeOfTotal	IDS_DRIVE_FREE_OF_TOTAL	5896	{free} 可用 · 共 {total}	{free} free · {total} total	{free} 可用 · 共 {total}
+DriveOnlyLeft	IDS_DRIVE_ONLY_LEFT	5897	仅剩 {free} · 共 {total}	Only {free} left · {total} total	僅剩 {free} · 共 {total}
+DriveSideFree	IDS_DRIVE_SIDE_FREE	5898	{free} 可用	{free} free	{free} 可用
+DriveSideOnlyLeft	IDS_DRIVE_SIDE_ONLY_LEFT	5899	仅剩 {free}	Only {free} left	僅剩 {free}
+ColumnUsage	IDS_COLUMN_USAGE	5900	使用情况	Usage	使用情況
+ColumnFree	IDS_COLUMN_FREE	5901	可用	Free	可用
+ColumnTotalSize	IDS_COLUMN_TOTAL_SIZE	5902	总大小	Total size	總大小
+ThisPcOverviewTitle	IDS_THIS_PC_OVERVIEW_TITLE	5903	存储总览	Storage	儲存空間總覽
+ThisPcOverviewDrives	IDS_THIS_PC_OVERVIEW_DRIVES	5904	{count} 块磁盘	{count} drives	{count} 個磁碟
+ThisPcOverviewSpace	IDS_THIS_PC_OVERVIEW_SPACE	5905	{free} 可用 · 已用 {used} · 共 {total}	{free} free · {used} used · {total} total	{free} 可用 · 已用 {used} · 共 {total}
+PreviewSizeFit	IDS_PREVIEW_SIZE_FIT	5906	适应内容	Fit content	適應內容
+PreviewSizeStandard	IDS_PREVIEW_SIZE_STANDARD	5907	标准	Standard	標準
+PreviewSizeLarge	IDS_PREVIEW_SIZE_LARGE	5908	大	Large	大
+PreviewSizeMaximized	IDS_PREVIEW_SIZE_MAXIMIZED	5909	最大化	Maximized	最大化
+PreviewSizeFullScreen	IDS_PREVIEW_SIZE_FULL_SCREEN	5910	全屏	Full screen	全螢幕
+PreviewRememberSize	IDS_PREVIEW_REMEMBER_SIZE	5911	记住我拖出来的大小	Remember the size I drag to	記住我拖出來的大小
+PreviewRememberDesc	IDS_PREVIEW_REMEMBER_DESC	5912	手动拖过窗口大小后，下次按这个大小打开	After you resize the window, it opens at that size next time	手動拖過視窗大小後，下次按這個大小開啟
+PreviewWindowSection	IDS_PREVIEW_WINDOW_SECTION	5913	预览窗口	Preview window	預覽視窗
+PreviewSizeTitle	IDS_PREVIEW_SIZE_TITLE	5914	打开时的大小	Size when it opens	開啟時的大小
+PreviewSizeDesc	IDS_PREVIEW_SIZE_DESC	5915	适应内容按图片或视频的比例开窗；标题栏也能切换	Fit content follows the picture or video; switch from its title bar too	適應內容按圖片或影片的比例開窗；標題列也能切換
+PreviewSpaceTitle	IDS_PREVIEW_SPACE_TITLE	5916	空格键（视频和动图）	Space on videos and animations	空白鍵（影片和動圖）
+PreviewSpaceDesc	IDS_PREVIEW_SPACE_DESC	5917	选「关闭预览」时，按 K 或单击画面暂停	With Close preview, press K or click the picture to pause	選「關閉預覽」時，按 K 或按一下畫面暫停
+PreviewSpaceClose	IDS_PREVIEW_SPACE_CLOSE	5918	关闭预览	Close preview	關閉預覽
+PreviewSpacePlay	IDS_PREVIEW_SPACE_PLAY	5919	播放 / 暂停	Play / pause	播放 / 暫停
+PreviewLoopTitle	IDS_PREVIEW_LOOP_TITLE	5920	循环播放	Loop	循環播放
+PreviewLoopDesc	IDS_PREVIEW_LOOP_DESC	5921	在预览里按 L 也能切换	Press L in the preview to switch	在預覽裡按 L 也能切換
+PreviewLoopAnimations	IDS_PREVIEW_LOOP_ANIMATIONS	5922	仅动图	Animations	僅動圖
+PreviewLoopAll	IDS_PREVIEW_LOOP_ALL	5923	动图和视频	Both	動圖和影片
+PreviewLoopNone	IDS_PREVIEW_LOOP_NONE	5924	不循环	Off	不循環
+PreviewLoopOn	IDS_PREVIEW_LOOP_ON	5925	循环：开	Loop: on	循環：開
+PreviewLoopOff	IDS_PREVIEW_LOOP_OFF	5926	循环：关	Loop: off	循環：關
+HoldPreviewTitle	IDS_HOLD_PREVIEW_TITLE	5927	按住预览	Press and hold to preview	按住預覽
+HoldPreviewDesc	IDS_HOLD_PREVIEW_DESC	5928	在文件上按住左键预览，松开就关闭	Hold the left button on a file to preview it; let go to close	在檔案上按住左鍵預覽，放開就關閉
+HoldPreviewOff	IDS_HOLD_PREVIEW_OFF	5929	关	Off	關
+HoverSizeXLarge	IDS_HOVER_SIZE_XLARGE	5930	特大	Extra large	特大
+PreviewKeyHint	IDS_PREVIEW_KEY_HINT	5931	空格 关闭 · K 暂停 · L 循环	Space closes · K pauses · L loops	空白鍵 關閉 · K 暫停 · L 循環
+ColumnMediaTaken	IDS_COLUMN_MEDIA_TAKEN	5932	拍摄日期	Date taken	拍攝日期
+ColumnMediaDims	IDS_COLUMN_MEDIA_DIMS	5933	尺寸	Dimensions	尺寸
+ColumnMediaCamera	IDS_COLUMN_MEDIA_CAMERA	5934	相机	Camera	相機
+ColumnMediaTitle	IDS_COLUMN_MEDIA_TITLE	5935	标题	Title	標題
+ColumnMediaArtist	IDS_COLUMN_MEDIA_ARTIST	5936	艺术家	Artist	演出者
+ColumnMediaAlbum	IDS_COLUMN_MEDIA_ALBUM	5937	专辑	Album	專輯
+ColumnMediaDuration	IDS_COLUMN_MEDIA_DURATION	5938	时长	Length	長度
+ColumnMediaResolution	IDS_COLUMN_MEDIA_RESOLUTION	5939	分辨率	Resolution	解析度
+ColumnMediaFps	IDS_COLUMN_MEDIA_FPS	5940	帧率	Frame rate	影格速率
+MediaColumnsTitle	IDS_MEDIA_COLUMNS_TITLE	5941	媒体文件夹使用专用列	Media columns in media folders	媒體資料夾使用專用欄
+MediaColumnsDesc	IDS_MEDIA_COLUMNS_DESC	5942	以图片、音乐或视频为主的文件夹，显示拍摄日期、艺术家、时长等列	Folders that are mostly pictures, music or videos show date taken, artist, length and more	以圖片、音樂或影片為主的資料夾，顯示拍攝日期、演出者、長度等欄
+GroupMediaUnknown	IDS_GROUP_MEDIA_UNKNOWN	5943	未知	Unknown	未知
+GroupMediaMonth	IDS_GROUP_MEDIA_MONTH	5944	%d年%d月	%d/%d	%d年%d月
+GroupByTakenMonth	IDS_GROUP_BY_TAKEN_MONTH	5945	拍摄月份	Month taken	拍攝月份
+GroupWheelClickApply	IDS_GROUP_WHEEL_CLICK_APPLY	5946	单击应用	Click to apply	按一下套用
+AiRichCopyTable	IDS_AI_RICH_COPY_TABLE	5947	复制表格	Copy table	複製表格
+AiRichLines	IDS_AI_RICH_LINES	5948	%d 行	%d lines	%d 行
+AiRichTableSize	IDS_AI_RICH_TABLE_SIZE	5949	%d 行 · %d 列	%d rows · %d columns	%d 列 · %d 欄
+AiRichPlainText	IDS_AI_RICH_PLAIN_TEXT	5950	文本	Text	文字
+AiSelQuote	IDS_AI_SEL_QUOTE	5951	引用	Quote	引用
+AiSelSearch	IDS_AI_SEL_SEARCH	5952	在 Pulse 中搜索	Search in Pulse	在 Pulse 中搜尋
+AiMenuCopyMarkdown	IDS_AI_MENU_COPY_MARKDOWN	5953	复制为 Markdown	Copy as Markdown	複製為 Markdown
+AiMenuSelectAnswer	IDS_AI_MENU_SELECT_ANSWER	5954	全选这条回答	Select this answer	全選這則回答
+AiMenuQuote	IDS_AI_MENU_QUOTE	5955	引用到输入框	Quote in your message	引用到輸入框
+AiMenuSearchFor	IDS_AI_MENU_SEARCH_FOR	5956	在 Pulse 中搜索“%s”	Search Pulse for “%s”	在 Pulse 中搜尋「%s」
+AiMenuLocate	IDS_AI_MENU_LOCATE	5957	在当前标签页定位	Show in current tab	在目前分頁中定位
+AiMenuOpenLink	IDS_AI_MENU_OPEN_LINK	5958	打开链接	Open link	開啟連結
+AiMenuCopyLink	IDS_AI_MENU_COPY_LINK	5959	复制链接	Copy link	複製連結
+AiPathMissing	IDS_AI_PATH_MISSING	5960	找不到“%s”	Can't find “%s”	找不到「%s」
+AiQuoteRemove	IDS_AI_QUOTE_REMOVE	5961	移除引用	Remove quote	移除引用
+AiRegen	IDS_AI_REGEN	5962	重新生成	Regenerate	重新產生
+AiRegenAgain	IDS_AI_REGEN_AGAIN	5963	再试一次	Try again	再試一次
+AiRegenLonger	IDS_AI_REGEN_LONGER	5964	更详细	More detailed	更詳細
+AiRegenShorter	IDS_AI_REGEN_SHORTER	5965	更简洁	More concise	更簡潔
+AiRegenModel	IDS_AI_REGEN_MODEL	5966	换个模型	Try another model	換個模型
+AiRegenMoreModels	IDS_AI_REGEN_MORE_MODELS	5967	更多模型…	More models…	更多模型…
+AiNotHelpful	IDS_AI_NOT_HELPFUL	5968	没帮助	Not helpful	沒幫助
+AiStopVersion	IDS_AI_STOP_VERSION	5969	这个版本你中途停止了	You stopped this version partway	這個版本你中途停止了
+AiContinueGen	IDS_AI_CONTINUE_GEN	5970	继续生成	Continue	繼續產生
+AiUserEdit	IDS_AI_USER_EDIT	5971	编辑后重新发送	Edit and resend	編輯後重新傳送
+AiUserEdited	IDS_AI_USER_EDITED	5972	已编辑	Edited	已編輯
+AiEditWarn	IDS_AI_EDIT_WARN	5973	发送后，这条消息之后的回答会重新生成	Replies after this message will be regenerated	傳送後，這則訊息之後的回答會重新產生
+AiEditSend	IDS_AI_EDIT_SEND	5974	发送	Send	傳送
+AiVerPrev	IDS_AI_VER_PREV	5975	上一个版本	Previous version	上一個版本
+AiVerNext	IDS_AI_VER_NEXT	5976	下一个版本	Next version	下一個版本
+AiHist	IDS_AI_HIST	5977	历史对话	Chat history	歷史對話
+AiHistSearch	IDS_AI_HIST_SEARCH	5978	搜索对话标题和内容	Search titles and messages	搜尋對話標題和內容
+AiHistPinned	IDS_AI_HIST_PINNED	5979	已固定	Pinned	已釘選
+AiHistWeek	IDS_AI_HIST_WEEK	5980	7 天内	Previous 7 days	7 天內
+AiHistEarlier	IDS_AI_HIST_EARLIER	5981	更早	Earlier	更早
+AiHistPin	IDS_AI_HIST_PIN	5982	固定	Pin	釘選
+AiHistUnpin	IDS_AI_HIST_UNPIN	5983	取消固定	Unpin	取消釘選
+AiHistRenameHint	IDS_AI_HIST_RENAME_HINT	5984	Enter 保存 · Esc 取消	Enter to save · Esc to cancel	Enter 儲存 · Esc 取消
+AiHistDeleteNote	IDS_AI_HIST_DELETE_NOTE	5985	删除后无法恢复	This can't be undone	刪除後無法復原
+AiHistFoot	IDS_AI_HIST_FOOT	5986	对话只保存在这台电脑，不含 API Key	Chats stay on this PC, without your API key	對話只儲存在這台電腦，不含 API Key
+AiHistSettings	IDS_AI_HIST_SETTINGS	5987	历史设置	History settings	歷史設定
+AiHistEmpty	IDS_AI_HIST_EMPTY	5988	还没有保存的对话	No saved chats yet	還沒有儲存的對話
+AiHistNoMatch	IDS_AI_HIST_NO_MATCH	5989	没有找到相关对话	No matching chats	沒有找到相關對話
+AiHistOff	IDS_AI_HIST_OFF	5990	对话历史已关闭，新的对话不会保存	Chat history is off; new chats aren't saved	對話歷史已關閉，新的對話不會儲存
+AiHistUntitled	IDS_AI_HIST_UNTITLED	5991	新对话	New chat	新對話
+AiWeekSun	IDS_AI_WEEK_SUN	5992	周日	Sun	週日
+AiWeekMon	IDS_AI_WEEK_MON	5993	周一	Mon	週一
+AiWeekTue	IDS_AI_WEEK_TUE	5994	周二	Tue	週二
+AiWeekWed	IDS_AI_WEEK_WED	5995	周三	Wed	週三
+AiWeekThu	IDS_AI_WEEK_THU	5996	周四	Thu	週四
+AiWeekFri	IDS_AI_WEEK_FRI	5997	周五	Fri	週五
+AiWeekSat	IDS_AI_WEEK_SAT	5998	周六	Sat	週六
+AiHistSaveRow	IDS_AI_HIST_SAVE_ROW	5999	保存对话历史	Save chat history	儲存對話歷史
+AiHistSaveDesc	IDS_AI_HIST_SAVE_DESC	6000	对话只保存在这台电脑，不含 API Key；按 Ctrl+H 打开历史	Chats stay on this PC, without your API key. Press Ctrl+H to open them	對話只儲存在這台電腦，不含 API Key；按 Ctrl+H 開啟歷史
+AiHistKeepRow	IDS_AI_HIST_KEEP_ROW	6001	保留时间	Keep chats for	保留時間
+AiHistKeepDesc	IDS_AI_HIST_KEEP_DESC	6002	超过这个时间且没有固定的对话会被删除	Unpinned chats older than this are deleted	超過這個時間且沒有釘選的對話會被刪除
+AiHistKeepForever	IDS_AI_HIST_KEEP_FOREVER	6003	永久	Forever	永久
+AiHistKeep30	IDS_AI_HIST_KEEP_30	6004	30 天	30 days	30 天
+AiHistKeep90	IDS_AI_HIST_KEEP_90	6005	90 天	90 days	90 天
+AiHistKeep365	IDS_AI_HIST_KEEP_365	6006	1 年	1 year	1 年
+AiHistTip	IDS_AI_HIST_TIP	6007	历史对话（Ctrl+H）	Chat history (Ctrl+H)	歷史對話（Ctrl+H）
+PickerDriveFreeFormat	IDS_PICKER_DRIVE_FREE_FORMAT	2446	可用 %s，共 %s	%s free of %s	可用 %s，共 %s
+WindowManage	IDS_WINDOW_MANAGE	6132	窗口管理	Window management	
+ArrangeSideBySide	IDS_ARRANGE_SIDE_BY_SIDE	6133	左右并排	Side by side	
+ArrangeStacked	IDS_ARRANGE_STACKED	6134	上下堆叠	Stacked	
+ArrangeColumns	IDS_ARRANGE_COLUMNS	6135	三列排列	Three columns	
+ArrangeTile	IDS_ARRANGE_TILE	6136	平铺	Tile	
+ArrangeMain	IDS_ARRANGE_MAIN	6137	主次排列	Main and secondary	
+ArrangeCascade	IDS_ARRANGE_CASCADE	6138	层叠	Cascade	
+ArrangeApplied	IDS_ARRANGE_APPLIED	6139	已排列窗口	Windows arranged	
+ArrangeUndo	IDS_ARRANGE_UNDO	6140	撤销排列	Undo arrangement	
+ArrangeUnavailable	IDS_ARRANGE_UNAVAILABLE	6141	当前窗口状态或屏幕空间不支持此排列。	The current windows or available screen space do not support this arrangement.	
+ArrangeHint	IDS_ARRANGE_HINT	6142	按住 Shift 排列所有显示器上的窗口	Hold Shift to arrange windows on all monitors	
+ArrangeSingleHint	IDS_ARRANGE_SINGLE_HINT	6143	至少打开两个窗口后再排列	Open at least two windows to arrange	
+ArrangeCount	IDS_ARRANGE_COUNT	6144	{windows} 个窗口 · {tabs} 个标签页	{windows} windows · {tabs} tabs	
+SettingsOpenPulseIcon	IDS_SETTINGS_OPEN_PULSE_ICON	6145	点击 Pulse 图标	Clicking the Pulse icon	
+SettingsNewWindowShows	IDS_SETTINGS_NEW_WINDOW_SHOWS	6146	新窗口显示	New windows show	
+SettingsSecOpenWindows	IDS_SETTINGS_SEC_OPEN_WINDOWS	6147	打开与多窗口	Opening and multiple windows	
+SettingsSecArrangeWindows	IDS_SETTINGS_SEC_ARRANGE_WINDOWS	6148	窗口排列	Window arrangement	
+SettingsArrangeMinimized	IDS_SETTINGS_ARRANGE_MINIMIZED	6149	包含最小化窗口	Include minimized windows	
+SettingsArrangeGap	IDS_SETTINGS_ARRANGE_GAP	6150	窗口间距	Window gap	
+OpenWindowActivate	IDS_OPEN_WINDOW_ACTIVATE	6151	激活已有窗口	Activate window	
+OpenWindowStartup	IDS_OPEN_WINDOW_STARTUP	6152	启动位置	Startup	
+OpenWindowThisPc	IDS_OPEN_WINDOW_THIS_PC	6153	此电脑	This PC	
+ArrangeGapNone	IDS_ARRANGE_GAP_NONE	6154	无间距	No gap	
+ArrangeGapSix	IDS_ARRANGE_GAP_SIX	6155	6 DIP	6 DIP	
+OpenBusyNewWindow	IDS_OPEN_BUSY_NEW_WINDOW	6156	当前窗口正在操作，已在新窗口打开	Opened in a new window because the current window is busy	
+IntegrationHandlerExplorer	IDS_INTEGRATION_HANDLER_EXPLORER	6157	Windows 资源管理器	Windows File Explorer	
+IntegrationHandlerPulse	IDS_INTEGRATION_HANDLER_PULSE	6158	Pulse	Pulse	Pulse
+SettingsOpenPulseIconDesc	IDS_SETTINGS_OPEN_PULSE_ICON_DESC	6159	选择再次打开 Pulse 时的行为	Choose what happens when Pulse is opened again	
+SettingsNewWindowShowsDesc	IDS_SETTINGS_NEW_WINDOW_SHOWS_DESC	6160	选择新窗口首先显示的位置	Choose the initial location for a new window	
+SettingsArrangeMinimizedDesc	IDS_SETTINGS_ARRANGE_MINIMIZED_DESC	6161	排列时还原并包含最小化窗口	Restore and include minimized windows when arranging	
+SettingsArrangeGapDesc	IDS_SETTINGS_ARRANGE_GAP_DESC	6162	设置排列后窗口之间的间距	Set the spacing between arranged windows	
+ArrangeSingleTabHint	IDS_ARRANGE_SINGLE_TAB_HINT	6163	至少打开两个窗口后再排列	Open at least two windows to arrange	
+ExternalOpenWaitExpiredTitle	IDS_EXTERNAL_OPEN_WAIT_EXPIRED_TITLE	6164	打开请求等待超时	Open requests timed out	
+ExternalOpenWaitExpiredDetail	IDS_EXTERNAL_OPEN_WAIT_EXPIRED_DETAIL	6165	等待超时 {n} 个，请重试。	Timed out: {n}. Please retry.	
+ExternalOpenQueueFailedTitle	IDS_EXTERNAL_OPEN_QUEUE_FAILED_TITLE	6166	未能完成打开请求	Could not complete open requests	
+ExternalOpenQueueFailedDetail	IDS_EXTERNAL_OPEN_QUEUE_FAILED_DETAIL	6167	处理失败 {n} 个，请重试。	Could not process: {n}. Please retry.	
+ExternalOpenMixedFailureDetail	IDS_EXTERNAL_OPEN_MIXED_FAILURE_DETAIL	6168	超时 {t}，失败 {f}。请重试。	Timed out: {t}; failed: {f}. Retry.	
+ThirdPartyDialogsExperimental	IDS_THIRD_PARTY_DIALOGS_EXPERIMENTAL	6169	第三方对话框（实验）	Third-party dialogs (experimental)	
+ThirdPartyDialogsDescription	IDS_THIRD_PARTY_DIALOGS_DESCRIPTION	6170	开启自动接入后，正常启动的应用也会尝试使用 Pulse 打开、保存窗口。当前支持本用户的 64 位标准接口，旧式、自绘及受限应用不覆盖。已运行的应用请先保存工作再重启。停用恢复原生，不关闭应用。启用期间请勿移动或删除组件包。也可在下方单独选择应用测试。	Automatic integration tries Pulse Open and Save in normally launched apps. Supports standard 64-bit interfaces for this user; legacy, custom and restricted dialogs are not covered. Save your work and restart running apps. Disabling restores native dialogs without closing apps. Keep the bundle in place while enabled. Individual app testing is also available below.	
+ThirdPartyDialogsBundle	IDS_THIRD_PARTY_DIALOGS_BUNDLE	6171	组件包	Component bundle	
+ThirdPartyDialogsApplication	IDS_THIRD_PARTY_DIALOGS_APPLICATION	6172	应用	Application	
+ThirdPartyDialogsChooseBundle	IDS_THIRD_PARTY_DIALOGS_CHOOSE_BUNDLE	6173	选择组件包文件夹	Choose bundle folder	
+ThirdPartyDialogsChooseApplication	IDS_THIRD_PARTY_DIALOGS_CHOOSE_APPLICATION	6174	选择应用	Choose application	
+ThirdPartyDialogsLaunch	IDS_THIRD_PARTY_DIALOGS_LAUNCH	6175	使用 Pulse 启动	Launch with Pulse	
+ThirdPartyDialogsRefresh	IDS_THIRD_PARTY_DIALOGS_REFRESH	6176	刷新状态	Refresh status	
+ThirdPartyDialogsDisable	IDS_THIRD_PARTY_DIALOGS_DISABLE	6177	停用	Disable	
+ThirdPartyDialogsNoBundle	IDS_THIRD_PARTY_DIALOGS_NO_BUNDLE	6178	尚未选择已验证的组件包	No verified bundle selected	
+ThirdPartyDialogsNoApplication	IDS_THIRD_PARTY_DIALOGS_NO_APPLICATION	6179	尚未选择应用	No application selected	
+ThirdPartyDialogsChooseHint	IDS_THIRD_PARTY_DIALOGS_CHOOSE_HINT	6180	选择组件包和应用后，再使用 Pulse 启动。	Choose a bundle and an application, then launch with Pulse.	
+ThirdPartyDialogsWorking	IDS_THIRD_PARTY_DIALOGS_WORKING	6181	正在处理…	Working…	
+ThirdPartyDialogsFailed	IDS_THIRD_PARTY_DIALOGS_FAILED	6182	未能完成操作，错误代码	Could not complete the operation. Error code	
+ThirdPartyDialogsStarted	IDS_THIRD_PARTY_DIALOGS_STARTED	6183	已启动，等待对话框	Started, waiting for a dialog	
+ThirdPartyDialogsBundleVerified	IDS_THIRD_PARTY_DIALOGS_BUNDLE_VERIFIED	6184	组件包已验证；启动时将再次检查。	Bundle verified; it will be checked again before launch.	
+ThirdPartyDialogsSession	IDS_THIRD_PARTY_DIALOGS_SESSION	6185	应用会话	Application session	
+ThirdPartyDialogsStatusUnknown	IDS_THIRD_PARTY_DIALOGS_STATUS_UNKNOWN	6186	无法确认会话状态，错误代码	Could not confirm session status. Error code	
+ThirdPartyDialogsDisabled	IDS_THIRD_PARTY_DIALOGS_DISABLED	6187	已停用	Disabled	
+ThirdPartyDialogsExited	IDS_THIRD_PARTY_DIALOGS_EXITED	6188	已退出	Exited	
+ThirdPartyDialogsNoSessions	IDS_THIRD_PARTY_DIALOGS_NO_SESSIONS	6189	尚无受管启动的会话。	No managed launch sessions yet.	
+ThirdPartyDialogsExecutableFilter	IDS_THIRD_PARTY_DIALOGS_EXECUTABLE_FILTER	6190	应用程序 (*.exe)	Applications (*.exe)	
+DialogAutoEnable	IDS_DIALOG_AUTO_0	6191	启用自动接入打开/保存（实验）	Enable automatic Open/Save (experimental)	
+DialogAutoDisable	IDS_DIALOG_AUTO_1	6192	停用自动接入	Disable automatic Open/Save	
+DialogAutoEnabled	IDS_DIALOG_AUTO_2	6193	自动接入已注册；重启应用后生效。	Automatic Open/Save registered; restart applications to apply.	
+DialogAutoDisabled	IDS_DIALOG_AUTO_3	6194	自动接入已停用。	Automatic Open/Save disabled.	
+DialogAutoConflict	IDS_DIALOG_AUTO_4	6195	自动接入注册冲突；未覆盖其他注册。	Automatic Open/Save registration conflict; other registration was preserved.	
+PickerBackToEdit	IDS_PICKER_BACK_TO_EDIT	6196	返回修改	Back to editing	返回修改
+PickerRenameSave	IDS_PICKER_RENAME_SAVE	6197	改名保存	Save with a new name	重新命名並儲存
+PickerPulseOpenPlaces	IDS_PICKER_PULSE_OPEN_PLACES	6198	在 Pulse 中打开	Open in Pulse	在 Pulse 中開啟
+PickerApplicationPlaces	IDS_PICKER_APPLICATION_PLACES	6199	程序提供的位置	Application locations	程式提供的位置
+StartupIntegrationLead	IDS_STARTUPINTEGRATIONLEAD	6200	决定 Pulse 何时启动，以及代替 Windows 的哪些部分。这些设置只对本机生效。	Choose when Pulse starts and which Windows features it replaces. These settings apply only to this PC.	
+StartupDialogsTitle	IDS_STARTUPDIALOGSTITLE	6201	打开和保存对话框	Open and save dialogs	
+StartupDialogsToggle	IDS_STARTUPDIALOGSTOGGLE	6202	用 Pulse 代替打开和保存对话框	Use Pulse for open and save dialogs	
+StartupDialogsDesc	IDS_STARTUPDIALOGSDESC	6203	其他软件调用受支持的标准文件对话框时，使用 Pulse 的快速访问、搜索和预览。	Use Pulse quick access, search and preview in supported standard file dialogs.	
+StartupDialogsScope	IDS_STARTUPDIALOGSSCOPE	6204	适用范围和使用须知	Scope and usage notes	
+StartupDialogsScopeBody	IDS_STARTUPDIALOGSSCOPEBODY	6205	支持当前组件架构的 Windows 标准 COM 打开、保存对话框。32 位、旧式接口及管理员程序需要对应入口；此开关不代表它们已全部接入。自绘对话框、受限应用和不支持的请求保留原界面。\n开启前已运行的软件，请保存工作后重新打开。仅影响当前用户；不会覆盖其他软件的入口。关闭后，后续请求恢复原生对话框。	Supports standard Windows COM file dialogs matching the installed components. 32-bit, legacy and elevated programs need their corresponding entry points; this switch does not connect them all. Custom, restricted and unsupported dialogs retain their original UI.\nSave your work and restart applications that were already running. Applies to the current user only and preserves other providers. Turning this off restores subsequent requests.	
+StartupDialogsOff	IDS_STARTUPDIALOGSOFF	6206	使用 Windows 对话框	Using Windows dialogs	
+StartupDialogsOn	IDS_STARTUPDIALOGSON	6207	使用 Pulse 对话框	Using Pulse dialogs	
+StartupDialogsChecking	IDS_STARTUPDIALOGSCHECKING	6208	正在检查组件和入口…	Checking components and registration…	
+StartupDialogsMissing	IDS_STARTUPDIALOGSMISSING	6209	组件缺失或校验失败。请修复安装后重试；尚未启用此功能。	Components are missing or invalid. Repair the installation and retry; this feature has not been enabled.	
+StartupDialogsFailed	IDS_STARTUPDIALOGSFAILED	6210	操作未完成。请重试或导出诊断；当前状态以实际入口为准。	The operation did not complete. Retry or export diagnostics; the actual registration determines the current state.	
+StartupDialogsConflict	IDS_STARTUPDIALOGSCONFLICT	6211	打开和保存对话框的入口已被其他组件占用。Pulse 不会覆盖它，请先关闭对应功能再重试。	Another component owns the open/save dialog entry. Pulse will not overwrite it. Turn off that feature before retrying.	
+StartupDialogsEnableTitle	IDS_STARTUPDIALOGSENABLETITLE	6212	开启 Pulse 打开和保存对话框？	Enable Pulse open and save dialogs?	
+StartupDialogsEnableConfirm	IDS_STARTUPDIALOGSENABLECONFIRM	6213	开启	Enable	
+StartupDialogsEnabledHint	IDS_STARTUPDIALOGSENABLEDHINT	6214	已开启。请保存工作后重新打开需要使用此功能的软件。	Enabled. Save your work and restart the applications you want to use with this feature.	
+StartupDiagnostics	IDS_STARTUPDIAGNOSTICS	6215	诊断报告	Diagnostic report	
+StartupDiagnosticsDesc	IDS_STARTUPDIAGNOSTICSDESC	6216	导出组件状态和错误码，不包含所选文件名、文件内容或原始日志。	Export component status and error codes, without selected filenames, file contents or raw logs.	
+StartupDiagnosticsExport	IDS_STARTUPDIAGNOSTICSEXPORT	6217	导出诊断	Export diagnostics	
+StartupDiagnosticsSaved	IDS_STARTUPDIAGNOSTICSSAVED	6218	诊断报告已保存：	Diagnostic report saved: 	
+StartupJumpSettings	IDS_STARTUPJUMPSETTINGS	6219	设置对话框跳转条	Configure the dialog jump bar	
+StartupJumpDesc	IDS_STARTUPJUMPDESC	6220	保留原生对话框时，也可快速跳到 Pulse 中打开的文件夹。	Jump to folders open in Pulse when the original Windows dialog is retained.	
+StartupRestoreSection	IDS_STARTUPRESTORESECTION	6221	恢复 Windows 默认	Restore Windows defaults	
+StartupRestoreTitle	IDS_STARTUPRESTORETITLE	6222	全部交还给 Windows	Return integrations to Windows	
+StartupRestoreDesc	IDS_STARTUPRESTOREDESC	6223	关闭文件夹接管、Pulse 打开和保存对话框以及资源管理器的 Pulse 标签菜单。开机自启和托盘设置保持不变。	Turn off folder takeover, Pulse file dialogs and the Explorer Pulse tags menu. Startup and tray settings stay unchanged.	
+StartupRestoreAction	IDS_STARTUPRESTOREACTION	6224	全部恢复	Restore all	
+StartupRestoreConfirm	IDS_STARTUPRESTORECONFIRM	6225	全部恢复 Windows 默认？	Restore all Windows integrations?	
+StartupRestoreDone	IDS_STARTUPRESTOREDONE	6226	已恢复。开机自启和托盘设置未改变。	Restored. Startup and tray settings were not changed.	
+StartupRestorePartial	IDS_STARTUPRESTOREPARTIAL	6227	部分项目未恢复，请检查文件夹入口状态并导出诊断后重试。	Some integrations could not be restored. Check folder registration and export diagnostics before retrying.	
+StartupFoldersSummary	IDS_STARTUPFOLDERSSUMMARY	6228	文件夹	Folders	
+StartupFoldersOff	IDS_STARTUPFOLDERSOFF	6229	由资源管理器打开	Opened by File Explorer	
+StartupFoldersOn	IDS_STARTUPFOLDERSON	6230	由 Pulse 打开	Opened by Pulse	
+StartupNeedsAttention	IDS_STARTUPNEEDSATTENTION	6231	需要处理	Needs attention	
+StartupLaunchOff	IDS_STARTUPLAUNCHOFF	6232	未开启	Off	
+StartupLaunchOn	IDS_STARTUPLAUNCHON	6233	已开启	On	
+StartupFolderDesc	IDS_STARTUPFOLDERDESC	6234	在桌面等位置双击文件夹或磁盘时	When you double-click folders or drives	
+StartupThisPcDesc	IDS_STARTUPTHISPCDESC	6235	双击桌面上的“此电脑”图标时	When you open This PC from the desktop	
+StartupWinEDesc	IDS_STARTUPWINEDESC	6236	按 Win + E 或点任务栏的资源管理器图标时。管理员应用内的 Win + E 接管需在每次启动 Pulse 时授权；取消后仍保留普通接管。	For Win + E and the taskbar Explorer icon. Handling Win + E in administrator apps requires approval each time Pulse starts; cancelling keeps standard interception enabled.	按 Win + E 或點工作列的檔案總管圖示時。管理員應用程式內的 Win + E 接管需在每次啟動 Pulse 時授權；取消後仍保留一般接管。
+StartupScopeYes	IDS_STARTUPSCOPEYES	6237	会改用 Pulse 对话框	Uses Pulse dialogs	
+StartupScopeYesDesc	IDS_STARTUPSCOPEYESDESC	6238	使用 Windows 标准文件对话框，并已启用对应 Pulse 接入组件的软件。	Applications using standard Windows file dialogs with the corresponding Pulse integration enabled.	
+StartupScopeNo	IDS_STARTUPSCOPENO	6239	仍使用原来的对话框	Keeps the original dialogs	
+StartupScopeNoDesc	IDS_STARTUPSCOPENODESC	6240	自绘对话框、受限或尚未接入的软件保留原界面。暂不支持的标准请求会回退到 Windows 对话框。	Custom dialogs, restricted apps and apps without integration keep their original UI. Unsupported standard requests fall back to Windows dialogs.	
+StartupKnowBefore	IDS_STARTUPKNOWBEFORE	6241	开启前请了解	Before enabling	
+StartupKnowTitle	IDS_STARTUPKNOWTITLE	6242	使用须知	Things to know	
+StartupKnowRestart	IDS_STARTUPKNOWRESTART	6243	重新打开已在运行的软件	Restart applications already running	
+StartupKnowRestartDesc	IDS_STARTUPKNOWRESTARTDESC	6008	开启前已在运行的软件，需要重新打开才会使用 Pulse 对话框。请先保存工作。	Applications already running must be restarted to use Pulse dialogs. Save your work first.	
+StartupKnowUser	IDS_STARTUPKNOWUSER	6009	只影响当前用户	Only affects the current user	
+StartupKnowUserDesc	IDS_STARTUPKNOWUSERDESC	6010	不改动这台电脑上其他用户的设置。	Other users on this computer are not affected.	
+StartupKnowProvider	IDS_STARTUPKNOWPROVIDER	6011	不覆盖其他软件	Preserves other providers	
+StartupKnowProviderDesc	IDS_STARTUPKNOWPROVIDERDESC	6012	如果另一款软件已经接管这些对话框，Pulse 会提示冲突，不会覆盖它。	If another application owns these dialogs, Pulse reports the conflict and leaves it unchanged.	
+StartupKnowRestore	IDS_STARTUPKNOWRESTORE	6013	随时可以恢复	Restore at any time	
+StartupKnowRestoreDesc	IDS_STARTUPKNOWRESTOREDESC	6014	关掉开关后，后续请求恢复 Windows 对话框，不会关闭任何软件；卸载 Pulse 时也会自动恢复。	Turning this off restores native dialogs for subsequent requests. Uninstalling also restores them. Dialogs already open are unaffected.	
+StartupJumpTitle	IDS_STARTUPJUMPTITLE	6015	Windows 对话框里也能快速跳转	Jump quickly in Windows dialogs	
+StartupPreview	IDS_STARTUPPREVIEW	6016	预览	Preview	
+IntegrationEnableKeep	IDS_INTEGRATIONENABLEKEEP	6017	打开「关闭后继续运行」	Enable keep running after close	開啟「關閉後繼續執行」
+IntegrationEnableLaunch	IDS_INTEGRATIONENABLELAUNCH	6018	打开「开机自启」	Enable launch at sign-in	開啟「開機自啟」
+WorkspaceEmptyHint	IDS_WORKSPACEEMPTYHINT	6019	把常用的分栏和文件夹存成工作区，下次一键回到这里。	Save your panes and folders as a workspace, then return with one click.	
+WorkspaceSaveCurrent	IDS_WORKSPACESAVECURRENT	6020	保存当前分栏	Save current panes	
+WorkspaceLayoutChanged	IDS_WORKSPACELAYOUTCHANGED	6021	分栏已变化	Panes have changed	
+WorkspaceRestore	IDS_WORKSPACERESTORE	6022	恢复	Restore	
+WorkspaceUpdate	IDS_WORKSPACEUPDATE	6023	更新	Update	
+WorkspaceRenameTitle	IDS_WORKSPACERENAMETITLE	6024	重命名工作区	Rename workspace	
+WorkspaceNameLabel	IDS_WORKSPACENAMELABEL	6025	工作区名称	Workspace name	
+WorkspaceColor	IDS_WORKSPACECOLOR	6026	颜色	Color	
+WorkspaceMoveUp	IDS_WORKSPACEMOVEUP	6027	上移	Move up	
+WorkspaceMoveDown	IDS_WORKSPACEMOVEDOWN	6028	下移	Move down	
+WorkspaceRemoved	IDS_WORKSPACEREMOVED	6029	已取消工作区	Workspace removed	
+WorkspaceOpenNewWindow	IDS_WORKSPACEOPENNEWWINDOW	6030	在新窗口打开	Open in new window	
+WorkspacePaneClosed	IDS_WORKSPACEPANECLOSED	6031	已关闭窗格	Pane closed	
+WorkspaceClosePane	IDS_WORKSPACECLOSEPANE	6032	关闭此栏	Close pane	
+SetupWindowTitle	IDS_SETUP_WINDOW_TITLE	6033	Pulse 安装程序	Pulse Setup	Pulse 安裝程式
+SetupTagline	IDS_SETUP_TAGLINE	6034	为 Windows 打造的现代文件管理器 —— 浏览、搜索、整理，更顺手。	A modern file manager for Windows — browse, search and organize, effortlessly.	為 Windows 打造的現代檔案管理員 —— 瀏覽、搜尋、整理，更順手。
+SetupInstall	IDS_SETUP_INSTALL	6035	立即安装	Install now	立即安裝
+SetupUpgrade	IDS_SETUP_UPGRADE	6036	立即升级	Upgrade now	立即升級
+SetupInstallTo	IDS_SETUP_INSTALL_TO	6037	安装到	Install to	安裝到
+SetupNeeds	IDS_SETUP_NEEDS	6038	需要 %1 MB	%1 MB required	需要 %1 MB
+SetupAgree	IDS_SETUP_AGREE	6039	我已阅读并同意	I accept the	我已閱讀並同意
+SetupLicense	IDS_SETUP_LICENSE	6040	许可协议	License Agreement	授權合約
+SetupCustom	IDS_SETUP_CUSTOM	6041	自定义安装	Custom install	自訂安裝
+SetupSecLocation	IDS_SETUP_SEC_LOCATION	6042	安装位置	Location	安裝位置
+SetupAppDir	IDS_SETUP_APP_DIR	6043	程序目录	App folder	程式目錄
+SetupAppDirSub	IDS_SETUP_APP_DIR_SUB	6044	升级时会沿用当前目录	Upgrades keep the current folder	升級時會沿用目前目錄
+SetupBrowse	IDS_SETUP_BROWSE	6045	浏览…	Browse…	瀏覽…
+SetupSpaceFree	IDS_SETUP_SPACE_FREE	6046	%1 可用 %2	%2 free on %1	%1 可用 %2
+SetupSecSearch	IDS_SETUP_SEC_SEARCH	6047	搜索与索引	Search & indexing	搜尋與索引
+SetupOptIndex	IDS_SETUP_OPT_INDEX	6048	启用全盘文件索引	Enable full-disk file index	啟用全磁碟檔案索引
+SetupRecommended	IDS_SETUP_RECOMMENDED	6049	推荐	Recommended	建議
+SetupOptIndexSub	IDS_SETUP_OPT_INDEX_SUB	6050	安装 PulseIndex 后台服务，秒级搜索全部 NTFS 磁盘	Installs the PulseIndex service for instant search across NTFS drives	安裝 PulseIndex 背景服務，秒級搜尋所有 NTFS 磁碟
+SetupIndexDir	IDS_SETUP_INDEX_DIR	6051	索引位置	Index location	索引位置
+SetupIndexDirSub	IDS_SETUP_INDEX_DIR_SUB	6052	服务器文件夹可稍后在设置中添加	Server folders can be added later in Settings	伺服器資料夾可稍後在設定中新增
+SetupSecOther	IDS_SETUP_SEC_OTHER	6053	其他	Other	其他
+SetupOptStartup	IDS_SETUP_OPT_STARTUP	6054	开机自动启动 Pulse	Launch Pulse at sign-in	開機自動啟動 Pulse
+SetupOptStartupSub	IDS_SETUP_OPT_STARTUP_SUB	6055	登录 Windows 后在托盘中待命	Waits in the tray after you sign in	登入 Windows 後在系統匣待命
+SetupOptDesktop	IDS_SETUP_OPT_DESKTOP	6056	创建桌面快捷方式	Create desktop shortcut	建立桌面捷徑
+SetupOptDesktopSub	IDS_SETUP_OPT_DESKTOP_SUB	6057	同时会添加到开始菜单	Also added to the Start menu	同時會新增到開始功能表
+SetupBack	IDS_SETUP_BACK	6058	返回	Back	返回
+SetupCancel	IDS_SETUP_CANCEL	6059	取消	Cancel	取消
+SetupOn	IDS_SETUP_ON	6060	开	On	開
+SetupOff	IDS_SETUP_OFF	6061	关	Off	關
+SetupStepExtract	IDS_SETUP_STEP_EXTRACT	6062	解压程序文件	Extracting files	解壓縮程式檔案
+SetupStepShortcuts	IDS_SETUP_STEP_SHORTCUTS	6063	设置文件关联与快捷方式	Setting associations & shortcuts	設定檔案關聯與捷徑
+SetupStepIndex	IDS_SETUP_STEP_INDEX	6064	注册 PulseIndex 服务	Registering PulseIndex service	註冊 PulseIndex 服務
+SetupStepVerbs	IDS_SETUP_STEP_VERBS	6065	缓存右键菜单项	Caching context-menu verbs	快取右鍵選單項目
+SetupStepFinish	IDS_SETUP_STEP_FINISH	6066	完成	Finishing	完成
+SetupS1Title	IDS_SETUP_S1_TITLE	6067	全盘搜索，快到不用等	Search that doesn't make you wait	全磁碟搜尋，快到不用等
+SetupS1Text	IDS_SETUP_S1_TEXT	6068	基于 NTFS 主文件表的实时索引，输入即出结果，支持拼音与内容搜索。	Live NTFS index with results as you type, including pinyin and content search.	基於 NTFS 主檔案表的即時索引，輸入即出結果，支援拼音與內容搜尋。
+SetupS2Title	IDS_SETUP_S2_TITLE	6069	空格键快速预览	Press Space to preview	空白鍵快速預覽
+SetupS2Text	IDS_SETUP_S2_TEXT	6070	图片、视频、PDF、Office 与代码文件，无需打开程序就能看清内容。	Images, video, PDF, Office and code — see what's inside without opening an app.	圖片、影片、PDF、Office 與程式碼檔案，無須開啟程式就能看清內容。
+SetupS3Title	IDS_SETUP_S3_TITLE	6071	双栏与标签页	Dual panes & tabs	雙欄與分頁
+SetupS3Text	IDS_SETUP_S3_TEXT	6072	拖放、批量重命名、管理员授权操作，整理文件一气呵成。	Drag and drop, batch rename and elevated operations, all in one flow.	拖放、批次重新命名、系統管理員授權操作，整理檔案一氣呵成。
+SetupSearchDemo	IDS_SETUP_SEARCH_DEMO	6073	季度报告	quarterly report	季度報告
+SetupDoneTitle	IDS_SETUP_DONE_TITLE	6074	Pulse 已准备就绪	Pulse is ready	Pulse 已準備就緒
+SetupDoneSub	IDS_SETUP_DONE_SUB	6075	安装完成。索引服务已在后台启动，首次建立索引通常只需几十秒。	Setup is complete. The index service is running; the first index usually takes under a minute.	安裝完成。索引服務已在背景啟動，首次建立索引通常只需幾十秒。
+SetupDoneSubNoIndex	IDS_SETUP_DONE_SUB_NO_INDEX	6076	安装完成。随时可以在设置中启用全盘索引。	Setup is complete. You can enable the full-disk index in Settings at any time.	安裝完成。隨時可以在設定中啟用全磁碟索引。
+SetupDoneTitleUp	IDS_SETUP_DONE_TITLE_UP	6077	已升级到 %1	Upgraded to %1	已升級到 %1
+SetupDoneSubUp	IDS_SETUP_DONE_SUB_UP	6078	你的设置、标签和索引都已保留。	Your settings, tags and index were kept.	你的設定、標籤和索引都已保留。
+SetupSumIndex	IDS_SETUP_SUM_INDEX	6079	索引服务运行中	Index service running	索引服務執行中
+SetupSumIndexFailed	IDS_SETUP_SUM_INDEX_FAILED	6080	索引服务未能启动，可在设置中重试	Index service did not start; retry in Settings	索引服務未能啟動，可在設定中重試
+SetupSumMenu	IDS_SETUP_SUM_MENU	6081	右键菜单已注册	Context menu registered	右鍵選單已註冊
+SetupSumStart	IDS_SETUP_SUM_START	6082	开机启动	Launch at sign-in	開機啟動
+SetupClose	IDS_SETUP_CLOSE	6083	关闭	Close	關閉
+SetupLaunch	IDS_SETUP_LAUNCH	6084	启动 Pulse	Launch Pulse	啟動 Pulse
+SetupBusyTitle	IDS_SETUP_BUSY_TITLE	6085	Pulse 正在复制文件	Pulse is copying files	Pulse 正在複製檔案
+SetupBusyText	IDS_SETUP_BUSY_TEXT	6086	有一个复制或移动任务尚未完成，升级会中断它。请等任务结束后点“重试”，安装程序不会强行关闭 Pulse。	A copy or move task is still running and an upgrade would interrupt it. Wait for it to finish, then click Retry. Setup never force-closes Pulse.	有一個複製或移動工作尚未完成，升級會中斷它。請等工作結束後按「重試」，安裝程式不會強制關閉 Pulse。
+SetupRetry	IDS_SETUP_RETRY	6087	重试	Retry	重試
+SetupCancelTitle	IDS_SETUP_CANCEL_TITLE	6088	要取消安装吗？	Cancel setup?	要取消安裝嗎？
+SetupCancelText	IDS_SETUP_CANCEL_TEXT	6089	已复制的文件会被清理，电脑不会留下任何改动。	Copied files will be removed and nothing will be left on this PC.	已複製的檔案會被清除，電腦不會留下任何變更。
+SetupKeepInstalling	IDS_SETUP_KEEP_INSTALLING	6090	继续安装	Keep installing	繼續安裝
+SetupCancelYes	IDS_SETUP_CANCEL_YES	6091	取消安装	Cancel setup	取消安裝
+SetupErrorTitle	IDS_SETUP_ERROR_TITLE	6092	安装没有完成	Setup did not finish	安裝沒有完成
+SetupErrorRolledBack	IDS_SETUP_ERROR_ROLLED_BACK	6093	原来的 Pulse 保持不变，可以稍后重试。	Your existing Pulse was left unchanged. You can try again later.	原來的 Pulse 保持不變，可以稍後重試。
+SetupOpenLog	IDS_SETUP_OPEN_LOG	6094	打开安装日志	Open setup log	開啟安裝記錄
+SetupBadDir	IDS_SETUP_BAD_DIR	6095	请选择一个有效的本地文件夹。	Please choose a valid local folder.	請選擇一個有效的本機資料夾。
+SetupNoSpace	IDS_SETUP_NO_SPACE	6096	磁盘空间不足。	Not enough disk space.	磁碟空間不足。
+SetupMinimize	IDS_SETUP_MINIMIZE	6097	最小化	Minimize	最小化
+SetupUnWindowTitle	IDS_SETUP_UN_WINDOW_TITLE	6098	Pulse 卸载程序	Pulse Uninstall	Pulse 解除安裝程式
+SetupUnTitle	IDS_SETUP_UN_TITLE	6099	卸载 Pulse	Uninstall Pulse	解除安裝 Pulse
+SetupUnSub	IDS_SETUP_UN_SUB	6100	将停止并移除 PulseIndex 服务，然后删除程序文件。	Stops and removes the PulseIndex service, then deletes the app files.	將停止並移除 PulseIndex 服務，然後刪除程式檔案。
+SetupUnClean	IDS_SETUP_UN_CLEAN	6101	同时删除设置、缓存和索引数据	Also remove settings, caches and index data	同時刪除設定、快取和索引資料
+SetupUnCleanSub	IDS_SETUP_UN_CLEAN_SUB	6102	推荐。自定义索引目录只会删除 Pulse 创建的文件	Recommended. Custom index folders only lose Pulse-owned files	建議。自訂索引目錄只會刪除 Pulse 建立的檔案
+SetupUnService	IDS_SETUP_UN_SERVICE	6103	PulseIndex 服务	PulseIndex service	PulseIndex 服務
+SetupUnServiceOn	IDS_SETUP_UN_SERVICE_ON	6104	已安装 · 卸载时会自动停止并移除	Installed · stopped and removed automatically	已安裝 · 解除安裝時會自動停止並移除
+SetupUnServiceNone	IDS_SETUP_UN_SERVICE_NONE	6105	未安装	Not installed	未安裝
+SetupUnBtn	IDS_SETUP_UN_BTN	6106	卸载	Uninstall	解除安裝
+SetupUnDone	IDS_SETUP_UN_DONE	6107	已卸载。感谢使用 Pulse。	Uninstalled. Thanks for using Pulse.	已解除安裝。感謝使用 Pulse。
+SetupUnDoneReboot	IDS_SETUP_UN_DONE_REBOOT	6108	已卸载。部分文件正在使用，将在重启电脑后删除。	Uninstalled. Some files are in use and will be removed after a restart.	已解除安裝。部分檔案正在使用中，將在重新啟動電腦後刪除。
+SetupUnFailed	IDS_SETUP_UN_FAILED	6109	卸载未完成，Pulse 没有被移除。	Uninstall did not finish. Pulse was not removed.	解除安裝未完成，Pulse 沒有被移除。
+SetupUnBusyText	IDS_SETUP_UN_BUSY_TEXT	6110	有一个复制或移动任务尚未完成，卸载会中断它。请等任务结束后点“重试”，卸载程序不会强行关闭 Pulse。	A copy or move task is still running and uninstalling would interrupt it. Wait for it to finish, then click Retry. Pulse is never force-closed.	有一個複製或移動工作尚未完成，解除安裝會中斷它。請等工作結束後按「重試」，解除安裝程式不會強制關閉 Pulse。
+SetupIntegrationIncomplete	IDS_SETUP_INTEGRATION_INCOMPLETE	6111	Pulse 打开命令已移除，但旧版本没有保留完整的原始关联，无法确认全部恢复。现有第三方设置和备份已保留。	Pulse open commands were removed, but old versions did not retain complete original associations. Other settings and backups were preserved.	Pulse 開啟命令已移除，但舊版沒有保留完整的原始關聯，無法確認全部還原。現有第三方設定與備份已保留。
+SetupIntegrationFailed	IDS_SETUP_INTEGRATION_FAILED	6112	部分打开命令仍指向 Pulse，卸载后这些入口可能无法打开。请重新安装 Pulse 后在系统集成设置中恢复，或修复 Windows 文件关联。	Some open commands still point to Pulse. After uninstall they may stop working. Reinstall Pulse to restore integration, or repair Windows file associations.	部分開啟命令仍指向 Pulse，解除安裝後這些入口可能無法開啟。請重新安裝 Pulse 後在系統整合設定中還原，或修復 Windows 檔案關聯。
+SetupOptGlobalSearch	IDS_SETUP_OPT_GLOBAL_SEARCH	6113	全局搜索	Global search	全域搜尋
+SetupOptGlobalSearchSub	IDS_SETUP_OPT_GLOBAL_SEARCH_SUB	6114	在任何程序里连按两次 Ctrl 呼出搜索	Press Ctrl twice in any app to open search	在任何程式裡連按兩次 Ctrl 叫出搜尋
+SetupSecAi	IDS_SETUP_SEC_AI	6115	AI	AI	AI
+SetupOptAiAssistant	IDS_SETUP_OPT_AI_ASSISTANT	6116	AI 助手	AI assistant	AI 助手
+SetupOptAiAssistantSub	IDS_SETUP_OPT_AI_ASSISTANT_SUB	6117	按 Ctrl+J 呼出，帮你找文件、整理文件夹和批量重命名	Press Ctrl+J to find files, organize folders and batch rename	按 Ctrl+J 叫出，幫你找檔案、整理資料夾和批次重新命名
+SetupNew	IDS_SETUP_NEW	6118	新	New	新
+SetupSumGlobalSearch	IDS_SETUP_SUM_GLOBAL_SEARCH	6119	全局搜索 · 双击 Ctrl	Global search · Ctrl twice	全域搜尋 · 按兩下 Ctrl
+SetupSumAiAssistant	IDS_SETUP_SUM_AI_ASSISTANT	6120	AI 助手 · Ctrl+J	AI assistant · Ctrl+J	AI 助手 · Ctrl+J
+SetupS4Title	IDS_SETUP_S4_TITLE	6121	AI 助手，说一句就办好	Your AI file assistant	AI 助手，說一句就辦好
+SetupS4Text	IDS_SETUP_S4_TEXT	6122	按 Ctrl+J 呼出，帮你找文件、整理文件夹和批量重命名；模型服务可在设置中配置。	Press Ctrl+J to find files, organize folders and batch rename. Configure your model service in Settings.	按 Ctrl+J 叫出，幫你找檔案、整理資料夾和批次重新命名；模型服務可在設定中設定。
+SetupS5Title	IDS_SETUP_S5_TITLE	6123	临时暂存托盘	A temporary staging tray	臨時暫存托盤
+SetupS5Text	IDS_SETUP_S5_TEXT	6124	把散落在各处的文件先拖进托盘，凑齐后一次复制或移动到目标位置。	Gather files from different folders in the tray, then copy or move them together.	把散落在各處的檔案先拖進托盤，湊齊後一次複製或移動到目標位置。
+SetupS6Title	IDS_SETUP_S6_TITLE	6125	颜色标签	Color tags	顏色標籤
+SetupS6Text	IDS_SETUP_S6_TEXT	6126	给文件和文件夹打上颜色标签，在侧栏点一下就能找回同一类文件。	Tag files and folders with colors, then find related items together from the sidebar.	給檔案和資料夾打上顏色標籤，在側欄點一下就能找回同一類檔案。
+SetupAiDemoPrompt	IDS_SETUP_AI_DEMO_PROMPT	6127	把下载文件夹按类型整理	Organize Downloads by file type	把下載資料夾按類型整理
+SetupAiDemoReply	IDS_SETUP_AI_DEMO_REPLY	6128	先查看整理方案，再确认执行	Review the plan, then confirm	先檢視整理方案，再確認執行
+SetupAiDemoAction	IDS_SETUP_AI_DEMO_ACTION	6129	查看方案	Review plan	檢視方案
+AsstEnabledTitle	IDS_ASST_ENABLED_TITLE	6130	启用 AI 助手	Enable AI assistant	啟用 AI 助手
+AsstEnabledDesc	IDS_ASST_ENABLED_DESC	6131	关闭后隐藏助手入口并停用 Ctrl+J，已保存的服务和密钥会保留。	Turn off to hide the assistant and disable Ctrl+J. Saved services and keys are kept.	關閉後隱藏助手入口並停用 Ctrl+J，已儲存的服務和金鑰會保留。
+AiJumpLatest	IDS_AI_JUMP_LATEST	6244	回到最新	Jump to latest	回到最新
+OpApplyKnownLead	IDS_OP_APPLY_KNOWN_LEAD	6245	对后续冲突执行相同操作（另有 	Apply to later conflicts (	對後續衝突執行相同操作（另有 
+OpApplyKnownEnd	IDS_OP_APPLY_KNOWN_END	6246	 个已知冲突）	 more currently known)	 個已知衝突）
+OpScanningAndCopying	IDS_OP_SCANNING_AND_COPYING	6247	正在扫描并复制	Scanning and copying	正在掃描並複製
+OpDiscoveredPending	IDS_OP_DISCOVERED_PENDING	6248	已发现待处理	Discovered pending	已發現待處理
+CopyVerificationSourceChanged	IDS_COPY_VERIFICATION_SOURCE_CHANGED	6249	源文件在复制或校验期间发生变化	The source changed during copying or verification	來源檔案在複製或驗證期間發生變更
+CopyVerificationTargetChanged	IDS_COPY_VERIFICATION_TARGET_CHANGED	6250	目标文件在校验期间被替换或修改	The destination was replaced or modified during verification	目標檔案在驗證期間被取代或修改
+Git	IDS_GIT	6251	Git	Git	Git
+PackagedMenuSource	IDS_PACKAGED_MENU_SOURCE	6252	打包应用菜单声明（MSIX）	Packaged app menu declaration (MSIX)	封裝應用程式選單宣告（MSIX）
+PackagedMenuReadOnly	IDS_PACKAGED_MENU_READ_ONLY	6253	由应用包声明，系统级设置只读。可用“在 Pulse 中显示”控制本应用内的菜单。	Declared by an app package; system settings are read-only. Use “Show in Pulse” to control this app’s menu.	由應用程式套件宣告，系統層級設定唯讀。可用「在 Pulse 中顯示」控制本應用程式內的選單。
+ArrangeMainRight	IDS_ARRANGE_MAIN_RIGHT	6254	主窗在右	Main on right	主視窗在右
+ArrangeMainTop	IDS_ARRANGE_MAIN_TOP	6255	主窗在上	Main on top	主視窗在上
+ArrangeMerge	IDS_ARRANGE_MERGE	6256	合并窗口	Merge	合併視窗
+StartupDialogsPathMismatch	IDS_STARTUP_DIALOGS_PATH_MISMATCH	6257	已启用的文件对话框来自其他安装目录。重试可绑定当前已验证组件。	File dialogs use another installation. Retry to bind the current verified components.	已啟用的檔案對話方塊來自其他安裝目錄。重試可綁定目前已驗證元件。
+SetupLockedTitle	IDS_SETUP_LOCKED_TITLE	6258	安装文件被占用	Installation files are in use	安裝檔案被佔用
+SetupLockedText	IDS_SETUP_LOCKED_TEXT	6259	其他程序可能正在使用 Pulse 组件。请关闭下列程序后重试；取消将保留原版本。	Other programs may be using Pulse components. Close the programs listed below, then retry. Cancel keeps the existing version.	其他程式可能正在使用 Pulse 元件。請關閉下列程式後重試；取消將保留原版本。
+SetupLockedUnknown	IDS_SETUP_LOCKED_UNKNOWN	6260	无法识别占用程序。请关闭正在使用下列文件的程序后重试。	The program using these files could not be identified. Close programs using the files below, then retry.	無法識別佔用程式。請關閉正在使用下列檔案的程式後重試。
+SetupLockedLog	IDS_SETUP_LOCKED_LOG	6261	完整信息已保存到安装日志：	Full details are saved in the setup log:	完整資訊已儲存至安裝記錄：
+SetupUnDoneDialogRetained	IDS_SETUP_UN_DONE_DIALOG_RETAINED	6262	已卸载。部分对话框组件仍被其他程序使用或无法安全清理，已保留在安装目录中。详情见卸载日志。	Uninstalled. Some dialog components are still in use or could not be safely removed and remain in the installation folder. See the uninstall log for details.	已解除安裝。部分對話方塊元件仍被其他程式使用或無法安全清理，已保留在安裝目錄中。詳情請見解除安裝記錄。
+SettingsTabLayout	IDS_SETTINGS_TAB_LAYOUT	6263	标签页较多时	When there are many tabs	
+SettingsTabLayoutDesc	IDS_SETTINGS_TAB_LAYOUT_DESC	6264	放不下时滚动单排，或分成多排显示	Scroll one row, or wrap into several rows	
+TabLayoutScroll	IDS_TAB_LAYOUT_SCROLL	6265	单排滚动	One row, scroll	
+TabLayoutGrid	IDS_TAB_LAYOUT_GRID	6266	多排 · 对齐成列	Rows, aligned columns	
+TabLayoutFit	IDS_TAB_LAYOUT_FIT	6267	多排 · 按标题宽度	Rows, fit to titles	
+SettingsTabRows	IDS_SETTINGS_TAB_ROWS	6268	最多显示行数	Most rows shown	
+SettingsTabRowsDesc	IDS_SETTINGS_TAB_ROWS_DESC	6269	超过后右侧出现翻行按钮，滚轮一次翻一行	Extra rows scroll with the arrows or mouse wheel	
+TabRowsTwo	IDS_TAB_ROWS_TWO	6270	2 行	2 rows	
+TabRowsThree	IDS_TAB_ROWS_THREE	6271	3 行	3 rows	
+TabRowsFour	IDS_TAB_ROWS_FOUR	6272	4 行	4 rows	
+TooltipTabRowPrev	IDS_TOOLTIP_TAB_ROW_PREV	6273	上一行	Previous row	
+TooltipTabRowNext	IDS_TOOLTIP_TAB_ROW_NEXT	6274	下一行	Next row	
+PreviewAudioTracks	IDS_PREVIEW_AUDIO_TRACKS	6275	音轨	Audio tracks	音軌
+PreviewSubtitles	IDS_PREVIEW_SUBTITLES	6276	字幕	Subtitles	字幕
+PreviewSubtitlesOff	IDS_PREVIEW_SUBTITLES_OFF	6277	关闭字幕	Subtitles off	關閉字幕
+PreviewTrackUnavailable	IDS_PREVIEW_TRACK_UNAVAILABLE	6278	当前播放引擎不支持切换，或没有可用轨道	This playback engine cannot switch tracks, or no tracks are available	目前播放引擎不支援切換，或沒有可用軌道
+PreviewEnableSubtitles	IDS_PREVIEW_ENABLE_SUBTITLES	6279	启用字幕支持（重新加载视频）	Enable subtitles (reload video)	啟用字幕支援（重新載入影片）
+PreviewSubtitlePackHint	IDS_PREVIEW_SUBTITLE_PACK_HINT	6280	字幕需要媒体预览扩展包，可在设置的扩展包页面添加	Subtitles need the media preview pack. Add it from Packs in Settings.	字幕需要媒體預覽擴充套件，可在設定的擴充套件頁面新增
+PreviewSubtitlePackUnsupported	IDS_PREVIEW_SUBTITLE_PACK_UNSUPPORTED	6281	当前媒体预览扩展包不支持字幕，请在设置的扩展包页面检查更新	This media preview pack does not support subtitles. Check for updates in Settings > Packs.	目前媒體預覽擴充套件不支援字幕，請在設定的擴充套件頁面檢查更新
+PreviewEnableAudioTracks	IDS_PREVIEW_ENABLE_AUDIO_TRACKS	6282	使用增强播放（重新加载视频）	Use enhanced playback (reload video)	使用增強播放（重新載入影片）
+ApplySortAllMessage	IDS_APPLY_SORT_ALL_MESSAGE	6283	将所选排序方式、升降序和文件夹位置应用到所有文件夹，并清除各文件夹单独记忆的排序设置。视图和分组保持不变。	Apply the selected sort order and folder placement to all folders, replacing saved per-folder sorting. Views and grouping will stay unchanged.	
+ExtensionDisable	IDS_EXTENSION_DISABLE	6284	停用开发增强包	Disable development extension	停用開發增強包
+ExtensionEnable	IDS_EXTENSION_ENABLE	6285	启用开发增强包	Enable development extension	啟用開發增強包
+PickerFavoritesUnavailable	IDS_PICKER_FAVORITES_UNAVAILABLE	6286	暂时无法更新共享收藏，请打开 Pulse 后重试。文件没有被移动。	Shared favorites could not be updated. Open Pulse and try again. No files were moved.	暫時無法更新共用收藏，請開啟 Pulse 後重試。檔案沒有被移動。
+PickerFavoritesAdded	IDS_PICKER_FAVORITES_ADDED	6287	已加入共享收藏夹	Added to shared favorites	已加入共用收藏夾
+PickerHidePlace	IDS_PICKER_HIDE_PLACE	6288	在此对话框隐藏	Hide in this dialog	
+PickerRestorePlaces	IDS_PICKER_RESTORE_PLACES	6289	取消隐藏	Unhide	
+PickerRestoreAllPlaces	IDS_PICKER_RESTORE_ALL_PLACES	6290	显示所有隐藏位置	Show all hidden places	
+PickerPlacesUpdateFailed	IDS_PICKER_PLACES_UPDATE_FAILED	6291	无法更新共享位置，请确认 Pulse 正在运行后重试。	Could not update shared places. Make sure Pulse is running and try again.	
+GlobalSearchThumbnails	IDS_GLOBAL_SEARCH_THUMBNAILS	6292	缩略图	Thumbnails	縮圖
+GlobalSearchTimelineResults	IDS_GLOBAL_SEARCH_TIMELINE_RESULTS	6293	当前结果 · 最近 12 周	Current results · last 12 weeks	目前結果 · 最近 12 週
+GlobalSearchEnterFolder	IDS_GLOBAL_SEARCH_ENTER_FOLDER	6294	进入文件夹	Enter folder	進入資料夾
+ExtensionTransferCopyTitle	IDS_EXTENSION_TRANSFER_COPY_TITLE	6295	确认复制冻结的文件计划？	Copy the frozen file plan?	確認複製凍結的檔案計畫？
+ExtensionTransferMoveTitle	IDS_EXTENSION_TRANSFER_MOVE_TITLE	6296	确认移动冻结的文件计划？	Move the frozen file plan?	確認移動凍結的檔案計畫？
+ExtensionTransferPackage	IDS_EXTENSION_TRANSFER_PACKAGE	6297	增强包 ID：{id}	Package ID: {id}	增強包 ID：{id}
+ExtensionTransferName	IDS_EXTENSION_TRANSFER_NAME	6298	显示名称（仅供参考）：{name}	Display name (reference only): {name}	顯示名稱（僅供參考）：{name}
+ExtensionTransferSummary	IDS_EXTENSION_TRANSFER_SUMMARY	6299	源文件：{count} 个，共 {bytes} 字节。	Source files: {count}; total: {bytes} bytes.	來源檔案：{count} 個，共 {bytes} 位元組。
+ExtensionTransferTarget	IDS_EXTENSION_TRANSFER_TARGET	6300	目标目录：{path}	Target directory: {path}	目標資料夾：{path}
+ExtensionTransferSource	IDS_EXTENSION_TRANSFER_SOURCE	6301	源文件：{path}	Source file: {path}	來源檔案：{path}
+ExtensionTransferPolicy	IDS_EXTENSION_TRANSFER_POLICY	6302	不会覆盖现有文件。安装或启用增强包不代表同意此操作。长清单会省略；Ctrl+C 复制全部安全显示文本（控制字符已转义，不是原始路径）。	Existing files will not be overwritten. Installing or enabling an extension is not consent. Long lists are shortened; Ctrl+C copies all display text (controls escaped, not raw paths).	不會覆寫現有檔案。安裝或啟用增強包不代表同意此操作。長清單會省略；Ctrl+C 複製全部安全顯示文字（控制字元已跳脫，不是原始路徑）。
+ExtensionTransferNeedsTwoPanes	IDS_EXTENSION_TRANSFER_NEEDS_TWO_PANES	6303	请打开两个本地文件夹分栏，并在当前栏选择 1–64 个普通文件。每个窗口只能准备一个计划。	Open exactly two local folder panes and select 1–64 regular files in the current pane. Only one plan may be prepared per window.	請開啟兩個本機資料夾分欄，並在目前欄選取 1–64 個一般檔案。每個視窗只能準備一個計畫。
+ExtensionTransferPreparing	IDS_EXTENSION_TRANSFER_PREPARING	6304	正在核验文件，完成后请确认操作清单…	Checking files. Review the confirmation list when ready…	正在核驗檔案，完成後請確認操作清單…
+ExtensionTransferPrepareFailed	IDS_EXTENSION_TRANSFER_PREPARE_FAILED	6305	无法提交此文件计划。请检查文件是否支持、是否发生变化，以及增强包是否仍启用，然后重新操作。	This file plan could not be submitted. Check that the files are supported and unchanged and the extension is still enabled, then try again.	無法提交此檔案計畫。請檢查檔案是否支援、是否發生變更，以及增強包是否仍啟用，然後重新操作。
+ExtensionTransferPartialSummary	IDS_EXTENSION_TRANSFER_PARTIAL_SUMMARY	6306	已完成 {completed} 项；目标已提交但源保留 {retained} 项；未完成 {pending} 项。错误代码：{error}。	Completed {completed}; destination committed but source retained {retained}; unfinished {pending}. Error code: {error}.	已完成 {completed} 項；目標已提交但來源保留 {retained} 項；未完成 {pending} 項。錯誤代碼：{error}。
+ExtensionTransferStatePreparing	IDS_EXTENSION_TRANSFER_STATE_PREPARING	6307	正在核验文件	Checking files	正在核驗檔案
+ExtensionTransferStateWaiting	IDS_EXTENSION_TRANSFER_STATE_WAITING	6308	等待确认（尚未执行）	Waiting for confirmation (not executed)	等待確認（尚未執行）
+ExtensionTransferStateQueued	IDS_EXTENSION_TRANSFER_STATE_QUEUED	6309	已确认，等待执行	Confirmed, queued	已確認，等待執行
+ExtensionTransferStateRunning	IDS_EXTENSION_TRANSFER_STATE_RUNNING	6310	正在传输	Transferring	正在傳輸
+ExtensionTransferStateCancelling	IDS_EXTENSION_TRANSFER_STATE_CANCELLING	6311	正在取消，已完成部分不会回滚	Cancelling; completed changes remain	正在取消，已完成部分不會回復
+ExtensionTransferStateCompleted	IDS_EXTENSION_TRANSFER_STATE_COMPLETED	6312	全部传输完成	All transfers completed	全部傳輸完成
+ExtensionTransferStatePartial	IDS_EXTENSION_TRANSFER_STATE_PARTIAL	6313	部分完成，请查看任务详情	Partially completed; check task details	部分完成，請查看工作詳細資料
+ExtensionTransferStateCancelled	IDS_EXTENSION_TRANSFER_STATE_CANCELLED	6314	已取消	Cancelled	已取消
+ExtensionTransferStateFailed	IDS_EXTENSION_TRANSFER_STATE_FAILED	6315	未完成	Not completed	未完成
+ExtensionScriptFailed	IDS_EXTENSION_SCRIPT_FAILED	6316	增强包运行未完成，请查看开发诊断。	The extension could not finish. Check the development diagnostics.	增強包執行未完成，請查看開發診斷。
+ExtensionPackageDisable	IDS_EXTENSION_PACKAGE_DISABLE	6317	停用	Disable	停用
+ExtensionPackageEnable	IDS_EXTENSION_PACKAGE_ENABLE	6318	启用	Enable	啟用
+PickerCreateMissingFile	IDS_PICKER_CREATE_MISSING_FILE	6319	文件不存在，是否创建？	The file does not exist. Create it?	檔案不存在，是否建立？
+SetupCleanupTitle	IDS_SETUP_CLEANUP_TITLE	6320	清理旧版本组件	Clean up previous versions	清理舊版本元件
+SetupCleanupText	IDS_SETUP_CLEANUP_TEXT	6321	新版已安装。部分旧组件仍被占用，请保存工作并退出下列应用，然后重试清理。	The new version is installed. Some older components are still in use. Save your work, quit the apps below, then retry cleanup.	新版已安裝。部分舊元件仍被佔用，請儲存工作並結束下列應用程式，然後重試清理。
+SetupCleanupKeep	IDS_SETUP_CLEANUP_KEEP	6322	暂时保留	Keep for now	暫時保留
+SetupCleanupHint	IDS_SETUP_CLEANUP_HINT	6323	暂时保留不影响本次安装。退出应用后，可再次运行安装包清理。	Keeping these files does not affect this installation. After quitting the apps, run setup again to retry cleanup.	暫時保留不影響本次安裝。結束應用程式後，可再次執行安裝程式清理。
+SetupCleanupPending	IDS_SETUP_CLEANUP_PENDING	6324	部分旧组件已保留	Some older components retained	部分舊元件已保留
+SetupCleanupApps	IDS_SETUP_CLEANUP_APPS	6325	请退出以下应用	Quit these apps to continue	請結束下列應用程式
+SetupCleanupUnknown	IDS_SETUP_CLEANUP_UNKNOWN	6326	未识别到占用应用，也可能是访问权限不足。详情已记录到安装日志。	No owning app was identified; access permissions may also prevent cleanup. Details are in the setup log.	未識別到佔用的應用程式，也可能是存取權限不足。詳細資訊已記錄至安裝記錄。
+SetupCleanupVersions	IDS_SETUP_CLEANUP_VERSIONS	6327	待清理版本	Versions awaiting cleanup	待清理版本
+OpSkipCurrentItem	IDS_OP_SKIP_CURRENT_ITEM	6328	跳过此项	Skip item	略過此項
+OpKeepOpen	IDS_OP_KEEP_OPEN	6329	保持打开	Keep open	保持開啟
+OpLocateResults	IDS_OP_LOCATE_RESULTS	6330	定位到新文件	Locate new files	定位至新檔案
+OpOpenSource	IDS_OP_OPEN_SOURCE	6331	打开源文件夹	Open source folder	開啟來源資料夾
+OpCopyDestination	IDS_OP_COPY_DESTINATION	6332	复制目标路径	Copy destination path	複製目標路徑
+OpLocateAfter	IDS_OP_LOCATE_AFTER	6333	自动定位到新文件	Locate new files when finished	完成後自動定位至新檔案
+OpKeepWindow	IDS_OP_KEEP_WINDOW	6334	保持这个窗口打开	Keep this window open	保持此視窗開啟
+OpHideToStatus	IDS_OP_HIDE_TO_STATUS	6335	收到状态栏	Minimize to status bar	收至狀態列
+OpAfterCompletion	IDS_OP_AFTER_COMPLETION	6336	完成后	After completion	完成後
+OpHistory	IDS_OP_HISTORY	6337	操作记录	Operation history	操作記錄
+OpClearCompleted	IDS_OP_CLEAR_COMPLETED	6338	清除已完成	Clear completed	清除已完成
+OpLocateShort	IDS_OP_LOCATE_SHORT	6339	定位	Locate	定位
+DragDropParentFormat	IDS_DRAG_DROP_PARENT_FORMAT	6340	放到上一级 %s	Drop into the parent, %s	
+DragDropPause	IDS_DRAG_DROP_PAUSE	6341	停一下打开它	Pause to open	
+DragDropAlreadyHereFormat	IDS_DRAG_DROP_ALREADY_HERE_FORMAT	6342	已在「%s」中	Already in %s	
+DragDropIntoSelf	IDS_DRAG_DROP_INTO_SELF	6343	不能放进它自己里面	Cannot drop into itself	
+DragDropCancelledFormat	IDS_DRAG_DROP_CANCELLED_FORMAT	6344	文件还在「%s」	The files are still in %s	
+DragDropReturn	IDS_DRAG_DROP_RETURN	6345	回去	Go back	
+ToolbarDragRestore	IDS_TOOLBAR_DRAG_RESTORE	6346	还原	Restore	
+ToolbarDragChanged	IDS_TOOLBAR_DRAG_CHANGED	6347	工具栏已更新	Toolbar updated	
+ToolbarDragReleaseMore	IDS_TOOLBAR_DRAG_RELEASE_MORE	6348	松手收进「更多」	Release to move to More	
+HistoryNow	IDS_HISTORY_NOW	6349	现在	Now	
+HistoryUndoTo	IDS_HISTORY_UNDO_TO	6350	撤销到这里	Undo to here	
+HistoryRedoTo	IDS_HISTORY_REDO_TO	6351	重做到这里	Redo to here	
+HistoryLocked	IDS_HISTORY_LOCKED	6352	无法撤销	Cannot undo	
+HistoryFooter	IDS_HISTORY_FOOTER	6353	悬停回看文件 · 撤销到这里包含之后的操作	Hover to preview files · Undo includes newer steps	
+HistoryRedoCleared	IDS_HISTORY_REDO_CLEARED	6354	重做记录已清空	Redo history cleared	
+HistoryRedo	IDS_HISTORY_REDO	6355	重做	Redo	
+HistoryUndoneSteps	IDS_HISTORY_UNDONE_STEPS	6356	已撤销 %u 步	Undid %u steps	
+HistoryRedoneSteps	IDS_HISTORY_REDONE_STEPS	6357	已重做 %u 步	Redid %u steps	
+HistoryStopped	IDS_HISTORY_STOPPED	6358	后续步骤未完成	Remaining steps did not complete	
+HistoryCounts	IDS_HISTORY_COUNTS	6359	可撤销 %u 步 · 可重做 %u 步	%u undo steps · %u redo steps	
+HistoryEmpty	IDS_HISTORY_EMPTY	6360	还没有操作	No operations yet	
+DragHintReleaseCancel	IDS_DRAG_HINT_RELEASE_CANCEL	6361	松手取消	Release to cancel	放開取消
+DragHintNoTarget	IDS_DRAG_HINT_NO_TARGET	6362	这里不能放文件	Cannot drop files here	這裡不能放檔案
+DragHintCtrlCopy	IDS_DRAG_HINT_CTRL_COPY	6363	Ctrl 复制	Ctrl to copy	Ctrl 複製
+DragHintCrossVolume	IDS_DRAG_HINT_CROSS_VOLUME	6364	跨磁盘默认复制 · Shift 移动	Across disks: copy by default · Shift to move	跨磁碟預設複製 · Shift 移動
+DragHintMoveFormat	IDS_DRAG_HINT_MOVE_FORMAT	6365	移动到「%s」	Move to “%s”	移動到「%s」
+DragHintCopyFormat	IDS_DRAG_HINT_COPY_FORMAT	6366	复制到「%s」	Copy to “%s”	複製到「%s」
+StatusIntroHint	IDS_STATUS_INTRO_HINT	6367	空格 快速预览 · 拖到文件夹上停一下可以进入	Space to preview · Hover over a folder while dragging to open it	空白鍵 快速預覽 · 拖到資料夾上停一下可以進入
+PaneZoom	IDS_PANE_ZOOM	6368	展开当前栏	Expand current pane	
+PaneZoomBadge	IDS_PANE_ZOOM_BADGE	6369	临时单栏	Temporary single pane	
+PaneZoomRestore	IDS_PANE_ZOOM_RESTORE	6370	还原 Esc	Restore Esc	
+SettingsStatusLayoutStrip	IDS_SETTINGS_STATUS_LAYOUT_STRIP	6371	状态栏显示分屏布局	Show pane layouts in status bar	
+LayoutPreviewHiddenFormat	IDS_LAYOUT_PREVIEW_HIDDEN_FORMAT	6372	另 %u 栏收到后台	%u other panes kept in background	
+LayoutPreviewCompareOff	IDS_LAYOUT_PREVIEW_COMPARE_OFF	6373	切换后暂停对比	Comparison pauses after switching	
+LayoutPeekHint	IDS_LAYOUT_PEEK_HINT	6374	单击小地图切换展开栏	Click a mini-map cell to expand that pane	
+PeekDropFormat	IDS_PEEK_DROP_FORMAT	6375	拖到这里复制到%s · Shift 移动	Drop here to copy to %s · Shift to move	
+PaneZoomBackgroundFormat	IDS_PANE_ZOOM_BACKGROUND_FORMAT	6376	另 %u 栏在后台	%u other panes in background	另 %u 欄在背景
+PaneTargetBadge	IDS_PANE_TARGET_BADGE	6377	目标栏	Target pane	目標欄
+HistoryUndoneSection	IDS_HISTORY_UNDONE_SECTION	6378	已撤销 · 可以重做	Undone · can be redone	
+ExtensionCrashDisabledTitle	IDS_EXTENSION_CRASH_DISABLED_TITLE	6379	已停用崩溃的增强包	Crashed extension turned off	
+ExtensionCrashDisabledFormat	IDS_EXTENSION_CRASH_DISABLED_FORMAT	6380	Pulse 上次在运行 {names} 时意外退出，已将其停用。更新增强包后会自动恢复，也可以在命令面板中重新启用。	Pulse closed unexpectedly while running {names}, so it has been turned off. It turns back on when the extension is updated, or you can re-enable it from the command palette.	
+ExtensionPublishTitle	IDS_EXTENSION_PUBLISH_TITLE	6381	确认增强包生成的文件	Publish extension files	確認增強包產生的檔案
+ExtensionPublishMessage	IDS_EXTENSION_PUBLISH_MESSAGE	6382	增强包 {name} 请求将以下项目写入：{path}	Extension {name} requests publishing these items to: {path}	增強包 {name} 要求將下列項目寫入：{path}
+ExtensionPublishNote	IDS_EXTENSION_PUBLISH_NOTE	6383	同名项目将使用文件冲突对话框处理。此会话中可以撤销或重做提交。	Name conflicts use the file conflict dialog. You can undo or redo publication during this session.	同名項目將使用檔案衝突對話框處理。此工作階段中可以復原或重做提交。
+NativeExtensionSettingsTitle	IDS_NATIVE_EXTENSION_SETTINGS_TITLE	6384	插件设置	Plugin settings	外掛程式設定
+NativeExtensionSettingsIntro	IDS_NATIVE_EXTENSION_SETTINGS_INTRO	6385	管理已安装增强包提供的设置。	Manage preferences provided by installed extensions.	管理已安裝增強套件提供的設定。
+NativeExtensionSettingsEmpty	IDS_NATIVE_EXTENSION_SETTINGS_EMPTY	6386	没有已启用的增强包提供设置页。	No enabled extensions provide a settings page.	沒有已啟用的增強套件提供設定頁面。
+NativeExtensionSettingsChoose	IDS_NATIVE_EXTENSION_SETTINGS_CHOOSE	6387	选择增强包	Choose an extension	選擇增強套件
+ArchivePluginRequired	IDS_ARCHIVE_PLUGIN_REQUIRED	6388	需要压缩包插件。请安装并启用支持此格式的原生增强包。	An archive plugin is required. Install and enable a native extension supporting this format.	需要壓縮檔外掛程式。請安裝並啟用支援此格式的原生增強套件。
+ArchivePluginMigrationTitle	IDS_ARCHIVE_PLUGIN_MIGRATION_TITLE	6389	压缩包增强功能已迁移	Archive features have moved to plugins	壓縮檔增強功能已移轉
+ArchivePluginMigrationBody	IDS_ARCHIVE_PLUGIN_MIGRATION_BODY	6390	旧的 7-Zip 下载包已停用。请安装并启用压缩包原生增强包以预览和解压 7z、RAR；内置 ZIP 功能不受影响。	The old 7-Zip download pack is retired. Install and enable the native archive extension to preview and extract 7z and RAR files. Built-in ZIP features remain available.	舊的 7-Zip 下載套件已停用。請安裝並啟用壓縮檔原生增強套件以預覽及解壓縮 7z、RAR；內建 ZIP 功能不受影響。
+StoreBrowse	IDS_STORE_BROWSE	6391	浏览商店	Browse store	瀏覽商店
+StoreManage	IDS_STORE_MANAGE	6392	管理增强包	Manage packs	管理增強套件
+StoreIntro	IDS_STORE_INTRO	6393	发现社区增强包，为 Pulse 添加更多功能。	Discover community extensions that add more to Pulse.	探索社群增強套件，為 Pulse 加入更多功能。
+StoreTrust	IDS_STORE_TRUST	6394	社区增强包由各自发布者提供。原生扩展不在沙箱中运行；安装前请核对来源并审阅权限。	Community extensions are supplied by their publishers. Native code runs without a sandbox; verify the source and review permissions before installing.	社群增強套件由各自發行者提供。原生擴充功能不在沙箱中執行；安裝前請核對來源並審閱權限。
+StoreCommunity	IDS_STORE_COMMUNITY	6395	社区增强包	Community extensions	社群增強套件
+StoreIdle	IDS_STORE_IDLE	6396	尚未加载商店	Store not loaded	尚未載入商店
+StoreLoading	IDS_STORE_LOADING	6397	正在加载商店目录…	Loading store catalog…	正在載入商店目錄…
+StoreFailed	IDS_STORE_FAILED	6398	商店目录加载失败	Could not load store catalog	商店目錄載入失敗
+StoreOffline	IDS_STORE_OFFLINE	6399	离线目录	Offline catalog	離線目錄
+StoreOnline	IDS_STORE_ONLINE	6400	在线目录	Online catalog	線上目錄
+StoreEmpty	IDS_STORE_EMPTY	6401	目录中没有可显示的增强包	No extensions to show in this catalog	目錄中沒有可顯示的增強套件
+StoreRestart	IDS_STORE_RESTART	6402	增强包已更改。重启 Pulse 后生效。	Extensions have changed. Restart Pulse to apply.	增強套件已變更。重新啟動 Pulse 後生效。
+StoreOfficialManage	IDS_STORE_OFFICIAL_MANAGE	6403	官方预览、搜索和 AI 增强包与下载源设置 →	Official preview, search and AI packs and download sources →	官方預覽、搜尋及 AI 增強套件與下載來源設定 →
+ExtensionStoreTrustTitle	IDS_EXTENSION_STORE_TRUST_TITLE	6404	信任发布者	Trust publisher	信任發行者
+ExtensionStoreTrustMessage	IDS_EXTENSION_STORE_TRUST_MESSAGE	6405	此操作将信任下列发布者。信任不等于安装或允许运行原生代码。	This trusts the publisher below. Trust does not install extensions or permit native code to run.	此操作將信任下列發行者。信任不等於安裝或允許執行原生程式碼。
+ExtensionStoreTrustAccept	IDS_EXTENSION_STORE_TRUST_ACCEPT	6406	信任此发布者	Trust this publisher	信任此發行者
+ExtensionStoreInstallTitle	IDS_EXTENSION_STORE_INSTALL_TITLE	6407	审阅安装权限	Review installation permissions	檢閱安裝權限
+ExtensionStoreInstallMessage	IDS_EXTENSION_STORE_INSTALL_MESSAGE	6408	原生扩展可执行不受沙箱限制的代码。请仅安装你信任的扩展，并审阅新增权限。	Native extensions can execute code outside the sandbox. Only install extensions you trust and review the additional permissions.	原生擴充套件可執行不受沙箱限制的程式碼。請僅安裝你信任的擴充套件，並檢閱新增權限。
+ExtensionStoreInstallAccept	IDS_EXTENSION_STORE_INSTALL_ACCEPT	6409	同意并安装	Approve and install	同意並安裝
+ExtensionStoreNativeConsent	IDS_EXTENSION_STORE_NATIVE_CONSENT	6410	允许此扩展运行原生代码	Allow this extension to run native code	允許此擴充套件執行原生程式碼
+ExtensionStoreResourcesConsent	IDS_EXTENSION_STORE_RESOURCES_CONSENT	6411	同意上述新增权限	Approve the additional permissions above	同意上述新增權限
+ExtensionStoreEnableConsent	IDS_EXTENSION_STORE_ENABLE_CONSENT	6412	安装后启用（重启后生效）	Enable after installation (takes effect after restart)	安裝後啟用（重新啟動後生效）
+ExtensionStorePreparing	IDS_EXTENSION_STORE_PREPARING	6413	正在验证安装包…	Verifying package…	正在驗證安裝套件…
+ExtensionStoreInstalledRestart	IDS_EXTENSION_STORE_INSTALLED_RESTART	6414	安装已完成，请重新启动 Pulse。	Installation completed. Restart Pulse to apply it.	安裝已完成，請重新啟動 Pulse。
+ExtensionStoreIncompatible	IDS_EXTENSION_STORE_INCOMPATIBLE	6415	此版本与当前 Pulse 或 SDK 不兼容。	This release is incompatible with this Pulse or SDK version.	此版本與目前 Pulse 或 SDK 不相容。
+ExtensionStoreUnavailable	IDS_EXTENSION_STORE_UNAVAILABLE	6416	当前启动模式不支持写入扩展商店。	This launch mode cannot modify the extension store.	目前啟動模式不支援寫入擴充套件商店。
+ExtensionStoreConsentRequired	IDS_EXTENSION_STORE_CONSENT_REQUIRED	6417	请先勾选所需的原生代码和新增权限授权。	Select the required native-code and additional-permission approvals first.	請先勾選所需的原生程式碼及新增權限授權。
+StoreTitle	IDS_STORE_TITLE	6418	扩展商店	Extension store	擴充商店
+StoreInstalled	IDS_STORE_INSTALLED	6419	已安装扩展	Installed extensions	已安裝擴充套件
+StoreInstalledIntro	IDS_STORE_INSTALLED_INTRO	6420	查看已安装的原生扩展，包括已停用的扩展。变更将在重启 Pulse 后生效。	Review installed native extensions, including disabled extensions. Changes take effect after restarting Pulse.	檢視已安裝的原生擴充套件，包括已停用的擴充套件。變更將在重新啟動 Pulse 後生效。
+StoreInstalledLoading	IDS_STORE_INSTALLED_LOADING	6421	正在读取已安装扩展…	Loading installed extensions…	正在讀取已安裝擴充套件…
+StoreInstalledFailed	IDS_STORE_INSTALLED_FAILED	6422	无法读取已安装扩展	Could not load installed extensions	無法讀取已安裝擴充套件
+StoreInstalledEmpty	IDS_STORE_INSTALLED_EMPTY	6423	尚未安装原生扩展。你可以在浏览商店中查看可用扩展。	No native extensions are installed. Browse the store to discover available extensions.	尚未安裝原生擴充套件。你可以在瀏覽商店中檢視可用擴充套件。
+StoreExtensionEnabled	IDS_STORE_EXTENSION_ENABLED	6424	已启用	Enabled	已啟用
+StoreExtensionDisabled	IDS_STORE_EXTENSION_DISABLED	6425	已停用	Disabled	已停用
+StoreNativeCode	IDS_STORE_NATIVE_CODE	6426	原生代码 · 不在沙箱中运行	Native code · Not sandboxed	原生程式碼 · 不在沙箱中執行
+StoreUninstall	IDS_STORE_UNINSTALL	6427	卸载	Uninstall	解除安裝
+StoreRollback	IDS_STORE_ROLLBACK	6428	回滚	Roll back	復原版本
+StoreChangeTitle	IDS_STORE_CHANGE_TITLE	6429	审阅扩展变更	Review extension change	檢閱擴充套件變更
+StoreChangeApprove	IDS_STORE_CHANGE_APPROVE	6430	确认变更	Confirm change	確認變更
+StoreChangeMessage	IDS_STORE_CHANGE_MESSAGE	6431	此操作将在重新启动 Pulse 后生效。请审阅目标扩展与权限。	This change takes effect after restarting Pulse. Review the extension and permissions.	此操作將在重新啟動 Pulse 後生效。請檢閱目標擴充套件與權限。
+ExtensionPublishAlways	IDS_EXTENSION_PUBLISH_ALWAYS	6432	始终允许，不再询问	Always allow	一律允許，不再詢問
+StoreOfficial	IDS_STORE_OFFICIAL	6433	Pulse 官方	Pulse official	
+StoreUpdateItem	IDS_STORE_UPDATE_ITEM	6434	更新	Update	
+StoreCommunityEmpty	IDS_STORE_COMMUNITY_EMPTY	6435	还没有社区扩展	No community extensions yet	
+SetupEndRetry	IDS_SETUP_END_RETRY	6436	结束进程并重试	End processes and retry	結束處理程序並重試
+SetupEndConfirm	IDS_SETUP_END_CONFIRM	6437	将结束列表中可核验的占用进程，未保存的内容可能丢失。请先保存工作。是否继续？	End the verified processes in this list? Unsaved work may be lost. Save your work before continuing.	將結束清單中可核驗的占用處理程序，未儲存的內容可能遺失。請先儲存工作。是否繼續？
+SetupEndFailed	IDS_SETUP_END_FAILED	6438	部分进程未能结束，请查看安装日志或手动退出后重试。	Some processes could not be ended. Check the setup log or quit them manually and retry.	部分處理程序未能結束，請查看安裝記錄或手動結束後重試。

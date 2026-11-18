@@ -18,12 +18,16 @@
 // reasoning_content in the history (the service requires it back). Nothing
 // moves without the user's 整理; the model cannot delete or overwrite.
 #include "ai_agent_internal.h"
+#include "ai_model_list.h"
+#include "extensions/developer_tools.h"
+#include "extensions/developer_tool_catalog.h"
+
+#include <algorithm>
 
 namespace pulse {
 namespace ai_agent {
 using app::ai::ModelEvent;
 
-constexpr wchar_t kBaseUrl[] = L"https://api.deepseek.com";
 constexpr int kMaxRounds = 12;
 constexpr size_t kMaxToolText = 48 * 1024;   // a tool result sent back, in UTF-8 bytes
 
@@ -248,7 +252,7 @@ const json::Value& Tools() {
    "query":{"type":"string","description":"A few words naming the action, e.g. 详情面板 文件夹大小"},
    "domain":{"type":"string","enum":["settings"],"description":"settings: list all settings instead of searching"}}}}},
 {"type":"function","function":{"name":"run_actions",
- "description":"Does things in Pulse itself, in order, as one undo group (at most 12 steps): panes and the folders in them, windows, tabs, view, sort, grouping, panels, selection, the staging tray, tags, favorites, new folders, opening files, settings, and any action find_actions returns. View, organize and settings steps act at once: Pulse shows each step and one result card with old -> new, Undo and the user's own shortcuts. Opening a program or script, Git push / pull, shell menu items, other programs and system actions (cloud keep / free, eject) show the user a confirm card first, every time (Pulse asks, not you): read first with git.refresh / shell.verbs in a call of their own, then ask for the action in the next call. File steps never run at once: file.copy_to / file.move_to {items, dest}, file.paste, file.rename {item, name}, file.group_into_folder {items, name}, file.dissolve {items}, file.recycle {items}, file.delete_permanent {items}, recycle.restore, recycle.empty - Pulse shows the user a plan card (what goes where; Recycle Bin room; a permanent delete takes two clicks) and does them only after they confirm, so do not ask first. One file step per call; a step that opens the folder it makes (window.layout panes, nav.go) goes after it in the same call, and Pulse runs it after the confirm. items: absolute paths, or leave them out for the selection (select.items first); dest: an absolute folder or a known folder (Documents\\Invoices), made if missing; without dest a copy or move goes to the other pane. Use file.delete_permanent and recycle.empty only when the user asks to delete permanently. To sort many files into several folders use organize_files; to rename several, rename_files. Locked settings and actions only the user does (unlocking a BitLocker drive, quitting Pulse, your own permissions) show the user why and where to do it; do not retry them. Stops at the first step that fails; earlier steps stay done. Returns each step's outcome.\nCommon actions (args): window.layout {layout: single|side_by_side|stacked|three|four, panes: [a folder per pane, left or top first; \"\" leaves one]}, nav.go {path, pane}, window.new {path}, tab.new {path}, tab.close, tab.to_window, pane.to_window {pane}, window.merge, window.overview, nav.back, nav.up, view.mode {view: extra_large_icons|large_icons|medium_icons|small_icons|list|details|tiles|content, pane}, view.sort {by: name|modified|type|size|created, desc, pane}, view.group {by: none|name|date|type|size, pane}, sidebar.toggle {show}, favbar.toggle {show}, details.toggle {show}, select.items {pane, name, extensions, items, type: folder|document|image|video|audio|archive|code, modified: today|yesterday|this_week|last_7_days|this_month|last_month|{after, before}, size: {larger_than, smaller_than}, tag, selected, mode: replace|add|remove} (on a search tab Pulse first waits for the search to finish, 10 s at most, then picks among all its results; tag does not work on content search results), select.all, select.clear, tray.add {items}, tag.toggle {tag, items} (a new tag is made), fav.add {path or items}, file.new_folder {name} (in the open folder), nav.open {path} (a file or program), settings.set {key, value}, edit.undo, tab.pin {tab, pin}, tab.color {tab, color: red|orange|yellow|green|teal|blue|purple|pink|none}, tab.rename {tab, name}, tab.group {tab, group}, tab.activate {tab}, tag.create {name, color, group}, keymap.set {action, keys} (keymap.read lists the actions), git.refresh (the open folder's repository: branch, ahead / behind, changes), git.push, git.pull, shell.verbs (the selection's context menu items), shell.run_verb {verb: an item shell.verbs listed; in a submenu \"Parent ▸ Item\"}, toolbar.open_with {app: a program pinned to the toolbar}, cloud.keep, cloud.free, preview.cloud_download {path}, drive.eject {drive: E:}, drive.disconnect {drive}, file.context_menu and toolbar.customize (Pulse opens them; the user chooses). tab: 1 = first as in get_state, a title, \"all\" or a list - several tabs go in ONE step. Words: 标签 is a tag (tag.create, then tag.toggle to put it on items; 加标签 / 打标签 = tag.toggle), 标签页 is a tab (tab.*), 托盘 / 暂存 is the staging tray (only when the user says so). pane: 1-4 in screen order as in get_state, focused, target, or all (view / sort / group). Paths: absolute, a drive (D:) or a known folder (Downloads, Desktop, Documents, Pictures, Videos, Music). items: full paths; omitted = the selection.\nSettings (settings.set key and values; switches take true/false): theme light|dark|system, window_effect none|acrylic|mica|mica_alt, text_rendering auto|sharp|smooth, font_size small|default|large|larger, language system|zh-CN|zh-TW|en-US, menu_acrylic, row_height compact|standard|roomy, click_to_open double|single, name_highlight hover|always, hover_select, item_checkboxes, blank_double_click nothing|back|up, show_hidden, show_protected, folders_first top|follow|mixed, smart_dates, zebra_rows, size_bars, tag_name_color, selection_outline, thumbnail_app_badges, alias_mark, tree_sticky, mtime_marks off|dots|bars|text, mtime_range today|3|7|30, mtime_dim_older, mtime_bold_today, mtime_folders, mtime_other_views, mtime_flash, onedrive_status, svn_status, startup_open last_tabs|default_location, new_tab_open current|default_location, external_open smart|tab|window, vertical_tabs, pinned_tab_names, double_click_closes_tab, close_window_with_last_tab, launch_at_signin (Windows), start_in_tray, keep_running, tray_icon always|background|never, explorer_tag_menu (Windows), open_folders_with_pulse (default file manager; Windows), staging_icon_size small|standard|large, staging_hide_when_empty, change_tracking, change_days today|3|7, lan_discovery, network_recent, hidden_shares, confirm_delete (can only be turned on), global_search (Windows), pinyin_search. Locked (only the user, in Settings): confirm_delete off, assistant_permissions, always_allow, connections, api_key.",
+ "description":"Does things in Pulse itself, in order, as one undo group (at most 12 steps): panes and the folders in them, windows, tabs, view, sort, grouping, panels, selection, the staging tray, tags, favorites, new folders, opening files, settings, and any action find_actions returns. View, organize and settings steps act at once: Pulse shows each step and one result card with old -> new, Undo and the user's own shortcuts. Opening a program or script, Git push / pull, shell menu items, other programs and system actions (cloud keep / free, eject) show the user a confirm card first, every time (Pulse asks, not you): read first with git.refresh / shell.verbs in a call of their own, then ask for the action in the next call. File steps never run at once: file.copy_to / file.move_to {items, dest}, file.paste, file.rename {item, name}, file.group_into_folder {items, name}, file.dissolve {items}, file.recycle {items}, file.delete_permanent {items}, recycle.restore, recycle.empty - Pulse shows the user a plan card (what goes where; Recycle Bin room; a permanent delete takes two clicks) and does them only after they confirm, so do not ask first. One file step per call; a step that opens the folder it makes (window.layout panes, nav.go) goes after it in the same call, and Pulse runs it after the confirm. items: absolute paths, or leave them out for the selection (select.items first); dest: an absolute folder or a known folder (Documents\\Invoices), made if missing; without dest a copy or move goes to the other pane. Use file.delete_permanent and recycle.empty only when the user asks to delete permanently. To sort many files into several folders use organize_files; to rename several, rename_files. Locked settings and actions only the user does (unlocking a BitLocker drive, quitting Pulse, your own permissions) show the user why and where to do it; do not retry them. Stops at the first step that fails; earlier steps stay done. Returns each step's outcome.\nCommon actions (args): window.layout {layout: single|side_by_side|stacked|three|four, panes: [a folder per pane, left or top first; \"\" leaves one]}, nav.go {path, pane}, window.new {path}, tab.new {path}, tab.close, tab.to_window, pane.to_window {pane}, window.merge, window.overview, nav.back, nav.up, view.mode {view: extra_large_icons|large_icons|medium_icons|small_icons|list|details|tiles|content, pane}, view.sort {by: name|modified|type|size|created, desc, pane}, view.group {by: none|name|date|type|size, pane}, sidebar.toggle {show}, favbar.toggle {show}, details.toggle {show}, select.items {pane, name, extensions, items, type: folder|document|image|video|audio|archive|code, modified: today|yesterday|this_week|last_7_days|this_month|last_month|{after, before}, size: {larger_than, smaller_than}, tag, selected, mode: replace|add|remove} (on a search tab Pulse first waits for the search to finish, 10 s at most, then picks among all its results; tag does not work on content search results), select.all, select.clear, tray.add {items}, tag.toggle {tag, items} (a new tag is made), fav.add {path or items}, file.new_folder {name} (in the open folder), nav.open {path} (a file or program), settings.set {key, value}, edit.undo, tab.pin {tab, pin}, tab.color {tab, color: red|orange|yellow|green|teal|blue|purple|pink|none}, tab.rename {tab, name}, tab.group {tab, group}, tab.activate {tab}, tag.create {name, color, group}, keymap.set {action, keys} (keymap.read lists the actions), git.refresh (the open folder's repository: branch, ahead / behind, changes), git.push, git.pull, shell.verbs (the selection's context menu items), shell.run_verb {verb: an item shell.verbs listed; in a submenu \"Parent ▸ Item\"}, toolbar.open_with {app: a program pinned to the toolbar}, cloud.keep, cloud.free, preview.cloud_download {path}, drive.eject {drive: E:}, drive.disconnect {drive}, file.context_menu and toolbar.customize (Pulse opens them; the user chooses). tab: 1 = first as in get_state, a title, \"all\" or a list - several tabs go in ONE step. Words: 标签 is a tag (tag.create, then tag.toggle to put it on items; 加标签 / 打标签 = tag.toggle), 标签页 is a tab (tab.*), 托盘 / 暂存 is the staging tray (only when the user says so). pane: 1-4 in screen order as in get_state, focused, target, or all (view / sort / group). Paths: absolute, a drive (D:) or a known folder (Downloads, Desktop, Documents, Pictures, Videos, Music). items: full paths; omitted = the selection.\nSettings (settings.set key and values; switches take true/false): theme light|dark|system, window_effect none|acrylic|mica|mica_alt, text_rendering auto|sharp|smooth, font_size small|default|large|larger, language system|zh-CN|zh-TW|en-US, menu_acrylic, row_height compact|standard|roomy, click_to_open double|single, name_highlight hover|always, hover_select, item_checkboxes, blank_double_click nothing|back|up, show_hidden, show_protected, folders_first top|bottom|mixed, smart_dates, zebra_rows, size_bars, tag_name_color, selection_outline, thumbnail_app_badges, alias_mark, tree_sticky, mtime_marks off|dots|bars|text, mtime_range today|3|7|30, mtime_dim_older, mtime_bold_today, mtime_folders, mtime_other_views, mtime_flash, onedrive_status, svn_status, startup_open last_tabs|default_location, new_tab_open current|default_location, external_open smart|tab|window, vertical_tabs, pinned_tab_names, double_click_closes_tab, close_window_with_last_tab, launch_at_signin (Windows), start_in_tray, keep_running, tray_icon always|background|never, explorer_tag_menu (Windows), open_folders_with_pulse (default file manager; Windows), staging_icon_size small|standard|large, staging_hide_when_empty, change_tracking, change_days today|3|7, lan_discovery, network_recent, hidden_shares, confirm_delete (can only be turned on), global_search (Windows), pinyin_search. Locked (only the user, in Settings): confirm_delete off, assistant_permissions, always_allow, connections, api_key.",
  "parameters":{"type":"object","properties":{
    "steps":{"type":"array","description":"The steps in order (at most 12)","items":{"type":"object","properties":{
      "action":{"type":"string","description":"An action id, e.g. view.sort"},
@@ -259,6 +263,8 @@ const json::Value& Tools() {
 ])JSON";
         json::Value v;
         json::Parse(kTools, v);
+        const auto extension_tools = extensions::DeveloperFunctionTools();
+        for (const auto& tool : extension_tools.items()) v.push(tool);
         return v;
     }();
     return tools;
@@ -338,7 +344,14 @@ std::string Body(AppState& s, const AiAgent& a) {
     json::Value messages = json::Value::Array();
     json::Value sys = json::Value::Object();
     sys.set("role", "system");
-    sys.set("content", SystemPrompt());
+    std::string prompt = SystemPrompt();
+    // 仅聊天 (ai_model_list.h): no tools go out, and the model says so rather
+    // than pretending to act.
+    if (!a.sent_tools)
+        prompt += "\n- This model cannot call tools here, so you cannot look at or change anything in Pulse. If "
+                  "the user asks for an action, say in one sentence that the current model only chats and that a "
+                  "model with tool support can be chosen from the model menu; then help with words where you can.";
+    sys.set("content", std::move(prompt));
     messages.push(std::move(sys));
     for (const json::Value& m : a.history.items()) messages.push(m);
     body.set("messages", std::move(messages));
@@ -346,15 +359,10 @@ std::string Body(AppState& s, const AiAgent& a) {
     json::Value so = json::Value::Object();
     so.set("include_usage", true);
     body.set("stream_options", std::move(so));
-    body.set("tools", Tools());
-    json::Value thinking = json::Value::Object();
-    const int effort = std::clamp(s.aiAssistant.effort, 0, 3);
-    thinking.set("type", effort == 0 ? "disabled" : "enabled");
-    body.set("thinking", std::move(thinking));
-    if (effort > 0) {
-        static constexpr const char* kEffort[] = {"", "low", "high", "max"};
-        body.set("reasoning_effort", kEffort[effort]);
-    }
+    if (a.sent_tools) body.set("tools", Tools());
+    // Each service takes 思考 in its own field, or not at all (ai_providers.h).
+    app::ai::AddThinking(app::ai::CurrentProvider(), static_cast<app::ai::ThinkLevel>(std::clamp(s.aiAssistant.think, 0, 6)),
+                         Utf8(AiChatModelId(s)), body);
     return json::Serialize(body);
 }
 
@@ -638,7 +646,18 @@ void NextTool(AppState& s) {
         NextTool(s);
         return;
     }
-    if (call.name == "get_state") ToolGetState(s, call);
+    if (call.name == "describe_extension_api" || call.name == "validate_extension_manifest" || call.name == "get_extension_template") {
+        const std::atomic<bool> cancelled{false};
+        const app::ai::ToolCall developer_call{L"Pulse assistant", args, cancelled};
+        const ToolOutcome result = call.name == "describe_extension_api"
+            ? extensions::DescribeExtensionApiTool(developer_call)
+            : call.name == "get_extension_template" ? extensions::GetExtensionTemplateTool(developer_call)
+            : extensions::ValidateExtensionManifestTool(developer_call);
+        AddToolResult(a, call.id, result);
+        ++a.call_index;
+        NextTool(s);
+    }
+    else if (call.name == "get_state") ToolGetState(s, call);
     else if (call.name == "search_files") ToolSearch(s, call, args);
     else if (call.name == "list_folder") ToolListFolder(s, call, std::move(args));
     else if (call.name == "get_properties") ToolGetProperties(s, call, args);
@@ -667,8 +686,21 @@ ui::AiErrButton Btn(AiErrAct act, AiIcon icon, I text, bool primary) {
     return b;
 }
 
-bool Official() { return AiAgentBaseUrl() == AiAgentDefaultBaseUrl(); }
-std::wstring ServiceName() { return Official() ? std::wstring(L"DeepSeek") : AiAgentHost(); }
+// DeepSeek at its own address: the one service whose top-up page Pulse knows.
+bool Official() {
+    return app::ai::IsDefaultProvider(app::ai::CurrentProvider()) && AiAgentBaseUrl() == AiAgentDefaultBaseUrl();
+}
+std::wstring ServiceName() {
+    const app::ai::Provider& p = app::ai::CurrentProvider();
+    return app::ai::IsCustomProvider(p) ? AiAgentHost() : app::ai::ProviderName(p);
+}
+
+// A refusal that names tools: the model cannot call them (function calling).
+bool MentionsTools(const std::string& message) {
+    std::string lower(message);
+    for (char& ch : lower) ch = static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch - 'A' + 'a' : ch);
+    return lower.find("tool") != std::string::npos || lower.find("function") != std::string::npos;
+}
 
 AiChatError CutError() {
     AiChatError e;
@@ -748,6 +780,8 @@ AiChatError BuildError(const ModelEvent& ev) {
     if (!detail.empty()) e.sub = Text(I::AiErrBadS);
     e.detail = detail;
     if (ev.http_status == 404) e.hint = Text(I::AiErrBadHint404);
+    else if ((ev.http_status == 400 || ev.http_status == 422) && MentionsTools(ev.error_message))
+        e.hint = Text(I::AiErrToolsHint);
     else if (ev.http_status == 400 || ev.http_status == 422) e.hint = Text(I::AiErrBadHint);
     e.buttons = {Btn(AiErrAct::SwitchModel, AiIcon::Swap, I::AiErrBtnSwitch, true), retry};
     if (!detail.empty()) e.buttons.push_back(Btn(AiErrAct::CopyDetail, AiIcon::Copy, I::AiErrBtnCopy, false));
@@ -830,22 +864,32 @@ bool Pump(AppState& s) {
             FoldSteps(s, a);
             a.content += ev.text;
             AiBlockView* t = Block(s, a.text_id);
+            if (!t && a.carry_id) {
+                // 继续生成: the words go on after the part already there.
+                t = Block(s, a.carry_id);
+                if (t) {
+                    a.text_id = a.carry_id;
+                    t->streaming = true;
+                }
+            }
             if (!t) {
                 AiBlockView& nt = c.Add(AiBlockKind::Text, Now());
                 nt.streaming = true;
                 a.text_id = nt.id;
                 t = &nt;
             }
-            t->text = Display(a.content);
+            t->text = Display(a.text_id == a.carry_id ? a.carry + a.content : a.content);
             break;
         }
         case ModelEvent::Kind::Finished: {
             FoldThinking(s, a);
             if (AiBlockView* t = Block(s, a.text_id)) {
                 t->streaming = false;
-                t->text = Display(a.content);
+                t->text = Display(a.text_id == a.carry_id ? a.carry + a.content : a.content);
             }
             a.text_id = 0;
+            a.carry.clear();
+            a.carry_id = 0;
             json::Value msg = json::Value::Object();
             msg.set("role", "assistant");
             msg.set("content", ev.content);
@@ -876,6 +920,18 @@ bool Pump(AppState& s) {
             return false;
         }
         case ModelEvent::Kind::Failed:
+            // The service refused the tools (no function calling): remember
+            // the model as 仅聊天 and ask again without them, once a turn.
+            if ((ev.http_status == 400 || ev.http_status == 422) && a.sent_tools && !a.tools_retried &&
+                MentionsTools(ev.error_message)) {
+                app::ai::MarkChatOnlyModel(AiAgentBaseUrl(), Utf8(AiChatModelId(s)));
+                a.tools_retried = true;
+                FoldThinking(s, a);
+                a.stream.reset();
+                --a.rounds;
+                SendRound(s);
+                return false;
+            }
             Fail(s, BuildError(ev));
             return false;
         }
@@ -902,7 +958,7 @@ void SendRound(AppState& s) {
     a.reasoning.clear();
     a.content.clear();
     a.text_id = 0;
-    if (s.aiAssistant.effort > 0) {
+    if (AiAssistantThinks(s) && !a.carry_id) {
         AiBlockView& b = c.Add(AiBlockKind::Thinking, Now());
         b.running = true;
         b.label = Text(I::AiAsstThinking);
@@ -914,6 +970,7 @@ void SendRound(AppState& s) {
     app::ai::ModelEndpoint endpoint;
     endpoint.base_url = AiAgentBaseUrl();
     endpoint.key = std::move(key);
+    a.sent_tools = !app::ai::IsChatOnlyModel(endpoint.base_url, Utf8(AiChatModelId(s)));
     a.stream = app::ai::ModelStream::Start(std::move(endpoint), Body(s, a));
     const uint64_t gen = a.generation;
     AiChatPush(s, 30, [gen](AppState& st) {
@@ -942,36 +999,27 @@ bool AiAgentConnected() {
 void AiAgentKeyChanged() {
     g_key_checked = 0;
     g_base_loaded = false;
+    app::ai::ProvidersChanged();
 }
 
 std::wstring AiAgentBaseUrl() {
     if (!g_base_loaded) {
         g_base_loaded = true;
         const std::string url = app::ai::LoadSettings().assistant.base_url;
-        g_base_url = url.empty() ? std::wstring(kBaseUrl) : json::Wide(url);
+        g_base_url = url.empty() ? AiAgentDefaultBaseUrl() : json::Wide(url);
     }
     return g_base_url;
 }
 
-std::wstring AiAgentDefaultBaseUrl() { return kBaseUrl; }
+// The address of the service in use; empty for a custom one without its own.
+std::wstring AiAgentDefaultBaseUrl() { return app::ai::CurrentProvider().base_url; }
 
 std::wstring AiAgentHost() { return app::ai::ModelHost(AiAgentBaseUrl()); }
 
-void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context) {
-    AiAgent& a = Agent(s);
-    ++a.generation;
-    a.turn_history = a.history.size();
-    a.rounds = 0;
-    a.tool_count = 0;
-    a.organized = false;
-    a.think_id = a.text_id = a.steps_id = 0;
-    a.read_folder.clear();
-    a.read_files = 0;
-    a.pending_query.reset();
-    a.searched = 0;
-    a.did_search = false;
-    a.calls.clear();
-    a.call_index = 0;
+namespace {
+// What the model gets for the user's message: the words, the open folder,
+// a note left from an earlier turn.
+std::wstring UserContent(AppState& s, AiAgent& a, const std::wstring& prompt, bool with_context) {
     std::wstring content = prompt;
     if (with_context) {
         if (app::Tab* tab = ActiveTab(s); tab && !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path)) {
@@ -983,11 +1031,104 @@ void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context) {
         content = a.pending_note + L"\n\n" + content;
         a.pending_note.clear();
     }
-    json::Value user = json::Value::Object();
-    user.set("role", "user");
-    user.set("content", Utf8(content));
-    a.history.push(std::move(user));
+    return content;
+}
+
+void PushMessage(AiAgent& a, const char* role, const std::wstring& content) {
+    json::Value m = json::Value::Object();
+    m.set("role", role);
+    m.set("content", Utf8(content));
+    a.history.push(std::move(m));
+}
+}  // namespace
+
+namespace {
+// A new turn: nothing of the last one carries over.
+AiAgent& ResetTurn(AppState& s) {
+    AiAgent& a = Agent(s);
+    ++a.generation;
+    a.carry.clear();
+    a.carry_id = 0;
+    a.turn_history = a.history.size();
+    a.rounds = 0;
+    a.tools_retried = false;
+    a.tool_count = 0;
+    a.organized = false;
+    a.think_id = a.text_id = a.steps_id = 0;
+    a.read_folder.clear();
+    a.read_files = 0;
+    a.pending_query.reset();
+    a.searched = 0;
+    a.did_search = false;
+    a.calls.clear();
+    a.call_index = 0;
+    return a;
+}
+}  // namespace
+
+void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context, const std::wstring& note) {
+    AiAgent& a = ResetTurn(s);
+    std::wstring content = UserContent(s, a, prompt, with_context);
+    if (!note.empty()) content += L"\n\n[Pulse: " + note + L"]";
+    PushMessage(a, "user", content);
     SendRound(s);
+}
+
+void AiAgentContinue(AppState& s, const std::wstring& prompt, bool with_context, const std::wstring& partial,
+                     uint32_t text_id) {
+    // The stop forgot the turn: the message, the part written so far, and a
+    // request to go on from there.
+    AiAgent& a = ResetTurn(s);
+    PushMessage(a, "user", UserContent(s, a, prompt, with_context));
+    PushMessage(a, "assistant", partial);
+    PushMessage(a, "user",
+                L"[Pulse: the user stopped the answer above partway. Continue exactly where it stopped, "
+                L"without repeating anything already written.]");
+    a.carry = Utf8(partial);
+    a.carry_id = text_id;
+    SendRound(s);
+}
+
+int AiAgentToolCount(AppState& s) {
+    AiChat& c = Chat(s);
+    return c.agent ? c.agent->tool_count : 0;
+}
+
+size_t AiAgentHistorySize(AppState& s) {
+    AiChat& c = Chat(s);
+    return c.agent ? c.agent->history.size() : 0;
+}
+
+json::Value AiAgentHistoryJson(AppState& s) {
+    AiChat& c = Chat(s);
+    return c.agent ? c.agent->history : json::Value::Array();
+}
+
+void AiAgentSetHistory(AppState& s, json::Value history) {
+    if (!history.is_array()) return;
+    Agent(s).history = std::move(history);
+}
+
+std::shared_ptr<AiHistoryTail> AiAgentCutHistory(AppState& s, size_t from) {
+    AiChat& c = Chat(s);
+    auto tail = std::make_shared<AiHistoryTail>();
+    if (!c.agent) return tail;
+    AiAgent& a = *c.agent;
+    const size_t n = a.history.size();
+    if (from >= n) return tail;
+    json::Value kept = json::Value::Array();
+    for (size_t i = 0; i < n; ++i) (i < from ? kept : tail->messages).push(a.history.at(i));
+    a.history = std::move(kept);
+    return tail;
+}
+
+void AiAgentRestoreHistory(AppState& s, size_t from, const std::shared_ptr<AiHistoryTail>& tail) {
+    AiChat& c = Chat(s);
+    if (!c.agent && (!tail || tail->messages.size() == 0)) return;
+    AiAgent& a = Agent(s);
+    AiAgentCutHistory(s, from);
+    if (!tail) return;
+    for (const json::Value& m : tail->messages.items()) a.history.push(m);
 }
 
 void AiAgentStop(AppState& s) {

@@ -1,4 +1,4 @@
-// File-in-use dialog (pulse_ops_dialogs.html §5): Escape cancels, Enter on
+// File-in-use dialog: Escape cancels, Enter on
 // the default focus never ends processes, Tab reaches 结束进程并重试, 跳过此项
 // clicks through, and once the item is free the dialog continues on its own
 // (Retry) without a click. Optional argv[1] is a folder for screenshots.
@@ -101,6 +101,31 @@ void Shot(HWND dialog, const wchar_t* name) {
     Check(SaveShot(dialog, nullptr, path), "screenshot saved");
 }
 
+void CheckOwnerIcons(HWND dialog) {
+    SIZE size{};
+    HBITMAP bitmap = Capture(dialog, size);
+    HDC dc = CreateCompatibleDC(nullptr);
+    HGDIOBJ old = SelectObject(dc, bitmap);
+    POINT origin{};
+    ClientToScreen(dialog, &origin);
+    RECT window{};
+    GetWindowRect(dialog, &window);
+    const float scale = Scale(dialog);
+    int different = 0;
+    for (int y = 0; y < static_cast<int>(24 * scale); ++y) {
+        for (int x = 0; x < static_cast<int>(24 * scale); ++x) {
+            const int px = origin.x - window.left + static_cast<int>(37 * scale) + x;
+            const int py = origin.y - window.top + static_cast<int>(99 * scale) + y;
+            if (GetPixel(dc, px, py) != GetPixel(dc, px, py + static_cast<int>(56 * scale))) ++different;
+        }
+    }
+    SelectObject(dc, old);
+    DeleteDC(dc);
+    DeleteObject(bitmap);
+    std::printf("owner icon differing pixels: %d\n", different);
+    Check(different > 40, "the rendered owner icons are distinct");
+}
+
 void CALLBACK Step(HWND, UINT, UINT_PTR timer, DWORD) {
     HWND dialog = Dialog();
     if (!dialog || !IsWindowVisible(dialog)) {
@@ -113,6 +138,7 @@ void CALLBACK Step(HWND, UINT, UINT_PTR timer, DWORD) {
         if (step < 2) return;
         KillTimer(nullptr, timer);
         Shot(dialog, L"owners");
+        CheckOwnerIcons(dialog);
         SendMessageW(dialog, WM_KEYDOWN, VK_ESCAPE, 0);
         return;
     case 1: // closable owners: Enter on the default focus cancels
@@ -152,8 +178,11 @@ pulse::ui::LockedItemChoice Run(HWND owner, const pulse::ui::LockedItemInfo& inf
 PROCESS_INFORMATION Spawn() {
     STARTUPINFOW startup{ sizeof(startup) };
     PROCESS_INFORMATION process{};
-    wchar_t command[] = L"ping.exe -n 120 127.0.0.1";
-    CreateProcessW(nullptr, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
+    wchar_t system[MAX_PATH]{};
+    GetSystemDirectoryW(system, ARRAYSIZE(system));
+    std::wstring command = L"\"" + std::wstring(system) +
+        L"\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 120\"";
+    CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
     return process;
 }
 
@@ -178,25 +207,27 @@ int wmain(int argc, wchar_t** argv) {
     owner_class.lpfnWndProc = DefWindowProcW;
     owner_class.hInstance = GetModuleHandleW(nullptr);
     owner_class.lpszClassName = L"PulseLockedDialogTestOwner";
+    // A real window-icon fixture exercises the borrowed class-icon path.
+    owner_class.hIcon = LoadIconW(nullptr, IDI_INFORMATION);
     RegisterClassW(&owner_class);
     HWND owner = CreateWindowExW(0, owner_class.lpszClassName, L"Locked dialog test", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                                  80, 80, 900, 700, nullptr, nullptr, owner_class.hInstance, nullptr);
 
-    PROCESS_INFORMATION ping = Spawn();
-    Check(ping.hProcess != nullptr, "a helper process runs");
+    PROCESS_INFORMATION helper_process = Spawn();
+    Check(helper_process.hProcess != nullptr, "a real Windows PowerShell process runs");
 
     pulse::ui::LockedItemInfo info;
     info.type = pulse::ops::OpType::RecycleDelete;
     info.path = g_file;
     pulse::ops::LockOwner self;
     self.pid = GetCurrentProcessId();
-    self.app_name = L"Windows PowerShell";
-    self.image_name = L"powershell.exe";
+    self.app_name = L"Pulse dialog test (window icon fixture)";
+    self.image_name = L"pulse_locked_dialog_test.exe";
     self.closable = false;
     pulse::ops::LockOwner helper;
-    helper.pid = ping.dwProcessId;
-    helper.app_name = L"Microsoft Word";
-    helper.image_name = L"WINWORD.EXE";
+    helper.pid = helper_process.dwProcessId;
+    helper.app_name = L"Windows PowerShell";
+    helper.image_name = L"powershell.exe";
     info.owners = { self, helper };
 
     using pulse::ui::LockedItemChoice;
@@ -245,9 +276,12 @@ int wmain(int argc, wchar_t** argv) {
 
     if (g_hold != INVALID_HANDLE_VALUE) CloseHandle(g_hold);
     DeleteFileW(g_file.c_str());
-    TerminateProcess(ping.hProcess, 0);
-    CloseHandle(ping.hProcess);
-    CloseHandle(ping.hThread);
+    if (helper_process.hProcess) {
+        TerminateProcess(helper_process.hProcess, 0);
+        WaitForSingleObject(helper_process.hProcess, 5000);
+        CloseHandle(helper_process.hProcess);
+        CloseHandle(helper_process.hThread);
+    }
     DestroyWindow(owner);
     Gdiplus::GdiplusShutdown(gdiplus);
     std::printf("%d passed, %d failed\n", g_passed, g_failed);

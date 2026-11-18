@@ -3,11 +3,14 @@
 #include "context_menu.h"
 #include "entry_group.h"
 #include "entry_sort.h"
+#include "media_columns_ui.h"
+#include "window_registry.h"
 #include "../common/text_format.h"
 #include "../common/localization.h"
 #include "../common/string_ids.h"
 #include "../ui/command_icons.h"
 #include "../ui/group_wheel.h"
+#include "../ui/confirm_dialog.h"
 #include "../ui/ui_motion.h"
 #include "../ui/ui_renderer.h"
 
@@ -37,6 +40,20 @@ constexpr ModeStyle kModes[] = {
     {6, l10n::StringId::Location, ui::command_icons::Icon::Folder, 0x22D3EE, 0x0E7490},
 };
 
+// Media folders add groups by what the files hold (media::Kind 1 pictures,
+// 2 music, 3 videos; app::GroupBy::Media*). Session only, like the list.
+struct MediaModeStyle {
+    int kind;
+    ModeStyle style;
+};
+constexpr MediaModeStyle kMediaModes[] = {
+    {1, {10, l10n::StringId::GroupByTakenMonth, ui::command_icons::Icon::History, 0xFB923C, 0xC2410C}},
+    {1, {11, l10n::StringId::ColumnMediaCamera, ui::command_icons::Icon::Camera, 0x38BDF8, 0x0369A1}},
+    {2, {12, l10n::StringId::ColumnMediaAlbum, ui::command_icons::Icon::Music, 0xE879F9, 0xA21CAF}},
+    {2, {13, l10n::StringId::ColumnMediaArtist, ui::command_icons::Icon::Stack, 0x818CF8, 0x4338CA}},
+    {3, {14, l10n::StringId::ColumnMediaResolution, ui::command_icons::Icon::Video, 0xFB923C, 0xC2410C}},
+};
+
 std::wstring Format(l10n::StringId id, int n) {
     wchar_t buf[128]{};
     swprintf_s(buf, l10n::Get(id).c_str(), n);
@@ -45,8 +62,14 @@ std::wstring Format(l10n::StringId id, int n) {
 
 // Header text for a group, matching the list's group headers.
 std::wstring Label(app::GroupBy by, int rank, const std::wstring& key, const fs::DirEntry& e,
-                   const app::TagCatalogSnapshot* tags) {
+                   const app::TagCatalogSnapshot* tags, const app::GroupClock& clock) {
     using l10n::StringId;
+    if (rank == app::kFolderGroupRank) return l10n::Get(StringId::GroupFolders);
+    if (app::IsMediaGroup(by)) {
+        if (rank < 0) return l10n::Get(StringId::GroupFolders);
+        const std::wstring label = app::MediaGroupLabel(clock, rank);
+        return label.empty() ? l10n::Get(StringId::GroupMediaUnknown) : label;
+    }
     switch (by) {
     case app::GroupBy::Name: {
         static const wchar_t* const kNames[] = {L"0 \x2013 9", L"A \x2013 H", L"I \x2013 P", L"Q \x2013 Z"};
@@ -92,7 +115,9 @@ ui::GroupWheelOption BuildOption(const app::Tab& tab, const ModeStyle& mode,
     }
     const app::GroupBy by = app::GroupByFromInt(mode.value);
     app::GroupClock clock = by == app::GroupBy::Date ? app::MakeGroupClock(tab.sort_column) : app::GroupClock{};
+    clock.folders = tab.EffectiveFolderSort();
     if (by == app::GroupBy::Tag) clock.tags = app::TagGroupsForFolder(tab.current_path);
+    if (app::IsMediaGroup(by)) clock.media = app::MediaGroupsForFolder(tab.current_path, by);
     const auto catalog = by == app::GroupBy::Tag ? app::CurrentTagCatalog() : nullptr;
     struct Group { std::wstring key; int rank; size_t sample; int count; };
     std::vector<Group> groups;
@@ -110,7 +135,7 @@ ui::GroupWheelOption BuildOption(const app::Tab& tab, const ModeStyle& mode,
     });
     for (const auto& g : groups) {
         if (o.groups.size() >= 8) break;
-        o.groups.emplace_back(Label(by, g.rank, g.key, entries[g.sample], catalog.get()), g.count);
+        o.groups.emplace_back(Label(by, g.rank, g.key, entries[g.sample], catalog.get(), clock), g.count);
     }
     o.pill = Format(l10n::StringId::GroupWheelGroups, static_cast<int>(groups.size()));
     for (size_t i = 0; i < o.groups.size() && i < 3; ++i) {
@@ -257,6 +282,9 @@ void ApplySort(AppState& s, int value, bool desc, int folder) {
 }
 
 void Kick(AppState& s, HWND hwnd) {
+    // The picker is parent-rendered; remove its footprint from the embedded
+    // child before the first frame, including while the picker fades closed.
+    s.detailsPreview.SetEmbeddedOcclusion(s.renderer.GroupWheelPicker().OcclusionBounds());
     if (s.framePump.Running()) s.framePump.Arm();
     InvalidateRect(hwnd, nullptr, FALSE);
 }
@@ -272,6 +300,52 @@ void Apply(AppState& s, HWND hwnd, int value) {
 int g_wheel_accum = 0;
 
 } // namespace
+
+bool ApplySortToAllFolders(AppState& s, int column, bool desc, int folder, bool confirm) {
+    auto usable = [](const app::Tab* tab) {
+        return tab && !tab->content_results && !tab->search_content_active &&
+            !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path);
+    };
+    const auto option = std::find_if(std::begin(kSortColumns), std::end(kSortColumns),
+        [column](const auto& item) { return static_cast<int>(item.column) == column &&
+            item.column != ui::SortColumn::Path; });
+    if (!usable(ActiveTab(s)) || option == std::end(kSortColumns) || folder < 0 || folder > 2) return false;
+    const std::wstring source = ActiveTab(s)->current_path;
+    if (confirm) {
+        ui::ConfirmDialogSpec spec;
+        spec.title = l10n::Get(l10n::StringId::ApplyViewAllTitle);
+        spec.message = l10n::Get(l10n::StringId::ApplySortAllMessage);
+        spec.confirm_text = l10n::Get(l10n::StringId::ApplyViewAllConfirm);
+        spec.cancel_text = l10n::Get(l10n::StringId::Cancel);
+        if (!ui::ShowConfirmDialog(s.hwnd, spec, s.darkMode, s.accentColor)) return false;
+        if (!usable(ActiveTab(s)) || ActiveTab(s)->current_path != source) return false;
+    }
+    const auto sort_column = static_cast<ui::SortColumn>(column);
+    const auto direction = desc ? ui::SortDirection::Desc : ui::SortDirection::Asc;
+    s.appPrefs.folder_sorts.ApplyToAll({sort_column, direction});
+    s.appPrefs.folder_sort_mode = folder;
+    app::SetFolderSortMode(app::FolderSortModeFromInt(folder));
+    s.appPrefs.Save();
+    app::ForEachWindowSharingCore(s, [&](AppState& window) {
+        std::vector<std::wstring> paths;
+        ForEachPane(window, [&](app::Pane& pane) {
+            auto* tab = pane.ActiveTab();
+            if (!usable(tab)) return;
+            tab->sort_column = sort_column;
+            tab->sort_direction = direction;
+            tab->folder_sort = -1;
+            tab->search_relevance = false;
+            if (std::find(paths.begin(), paths.end(), tab->current_path) == paths.end())
+                paths.push_back(tab->current_path);
+        });
+        for (const auto& path : paths) {
+            window.store.MarkDirty(path);
+            RefreshPath(window, path, RefreshReason::Explicit);
+        }
+        InvalidateRect(window.hwnd, nullptr, FALSE);
+    });
+    return true;
+}
 
 void OpenGroupWheel(AppState& s) {
     app::Tab* tab = ActiveTab(s);
@@ -294,9 +368,18 @@ void OpenGroupWheel(AppState& s) {
         if (tab->group_by == mode.value) data.applied = static_cast<int>(data.options.size());
         data.options.push_back(BuildOption(*tab, mode, entries));
     }
+    if (!multi && !recent) {
+        const int media_kind = app::MediaFolderKindFor(*tab);
+        for (const auto& extra : kMediaModes) {
+            if (extra.kind != media_kind) continue;
+            if (tab->group_by == extra.style.value) data.applied = static_cast<int>(data.options.size());
+            data.options.push_back(BuildOption(*tab, extra.style, entries));
+            data.options.back().apply_all = false;   // session only: never every folder's default
+        }
+    }
     data.current_text = l10n::Get(l10n::StringId::GroupWheelCurrent);
-    data.scroll_text = l10n::Get(l10n::StringId::GroupWheelScroll);
     data.apply_text = l10n::Get(l10n::StringId::GroupWheelApply);
+    data.click_apply_text = l10n::Get(l10n::StringId::GroupWheelClickApply);
     data.cancel_text = l10n::Get(l10n::StringId::Cancel);
     if (!multi && !recent && !tab->content_results && !tab->current_path.empty() &&
         !fs::IsVirtualPath(tab->current_path))
@@ -370,11 +453,14 @@ void OpenSortWheel(AppState& s) {
         data.options.push_back(std::move(o));
     }
     data.current_text = l10n::Get(l10n::StringId::GroupWheelCurrent);
-    data.scroll_text = l10n::Get(l10n::StringId::GroupWheelScroll);
     data.apply_text = l10n::Get(l10n::StringId::GroupWheelApply);
+    data.click_apply_text = l10n::Get(l10n::StringId::GroupWheelClickApply);
     data.cancel_text = l10n::Get(l10n::StringId::Cancel);
     data.direction_text = l10n::Get(l10n::StringId::SortWheelDirection);
     data.folder_text = l10n::Get(l10n::StringId::SortWheelFolders);
+    if (!tab->content_results && !tab->search_content_active && !tab->current_path.empty() &&
+        !fs::IsVirtualPath(tab->current_path))
+        data.apply_all_text = l10n::Get(l10n::StringId::ApplyGroupAllShort);
     data.folder_names = {l10n::Get(l10n::StringId::SortWheelFolderTop), l10n::Get(l10n::StringId::SortWheelFolderFollow),
                          l10n::Get(l10n::StringId::SortWheelFolderMixed)};
 
@@ -390,8 +476,21 @@ void OpenSortWheel(AppState& s) {
     Kick(s, s.hwnd);
 }
 
+// A click that closes the picker can be the first half of a double click: the
+// second half must not reach the list below (it would open an item).
+static ULONGLONG g_swallow_dblclk_until = 0;
+
+static void SwallowNextDoubleClick() {
+    g_swallow_dblclk_until = GetTickCount64() + GetDoubleClickTime();
+}
+
 bool GroupWheelMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto& wheel = s.renderer.GroupWheelPicker();
+    if (msg == WM_LBUTTONDBLCLK && g_swallow_dblclk_until != 0) {
+        const bool swallow = GetTickCount64() < g_swallow_dblclk_until;
+        g_swallow_dblclk_until = 0;
+        if (swallow && !wheel.IsOpen()) return true;
+    }
     if (!wheel.IsOpen()) return false;
     const float x = static_cast<float>(GET_X_LPARAM(lParam));
     const float y = static_cast<float>(GET_Y_LPARAM(lParam));
@@ -422,33 +521,73 @@ bool GroupWheelMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_LBUTTONDBLCLK:
         if (!wheel.Contains(x, y)) {          // outside: dismiss, click swallowed
             wheel.Close();
+            SwallowNextDoubleClick();
             Kick(s, hwnd);
             return true;
         }
-        if (g_kind == WheelKind::Group && wheel.HitApplyAll(x, y)) {
+        if (const int button = wheel.HitFooter(x, y)) {   // Cancel / Apply: act on release
+            wheel.PressFooter(button);
+            wheel.Hover(x, y);
+            SetCapture(hwnd);
+            Kick(s, hwnd);
+            return true;
+        }
+        if (wheel.HitApplyAll(x, y)) {
             const int value = wheel.SelectedValue();
+            const bool desc = wheel.Desc();
+            const int folder = wheel.Folder();
+            SwallowNextDoubleClick();
             wheel.Close();
             Kick(s, hwnd);
-            ApplyGroupToAllFolders(s, value);
+            if (g_kind == WheelKind::Sort) ApplySortToAllFolders(s, value, desc, folder);
+            else ApplyGroupToAllFolders(s, value);
+            Kick(s, hwnd);
+            return true;
+        }
+        // Double click on any row applies it: the first click already rolled it to the centre.
+        if (msg == WM_LBUTTONDBLCLK && wheel.InDrum(x, y)) {
+            SwallowNextDoubleClick();
+            Apply(s, hwnd, wheel.SelectedValue());
             Kick(s, hwnd);
             return true;
         }
         if (wheel.PointerDown(x, y)) SetCapture(hwnd);
+        wheel.Hover(x, y);
         Kick(s, hwnd);
         return true;
     case WM_MOUSEMOVE:
+        if (wheel.FooterPressed()) {
+            if (wheel.Hover(x, y)) Kick(s, hwnd);
+            return true;
+        }
         if (wheel.Dragging()) {
             wheel.PointerMove(y);
             Kick(s, hwnd);
             return true;
         }
-        if (wheel.HoverApplyAll(x, y)) Kick(s, hwnd);
+        if (wheel.Hover(x, y)) Kick(s, hwnd);
         return wheel.Contains(x, y);
     case WM_LBUTTONUP:
+        if (const int pressed = wheel.FooterPressed()) {
+            ReleaseCapture();
+            wheel.PressFooter(0);
+            if (wheel.HitFooter(x, y) == pressed) {
+                SwallowNextDoubleClick();
+                if (pressed == ui::GroupWheel::kFooterApply) Apply(s, hwnd, wheel.SelectedValue());
+                else wheel.Close();
+            }
+            Kick(s, hwnd);
+            return true;
+        }
         if (wheel.Dragging()) {
             ReleaseCapture();
             const int value = wheel.PointerUp(y);
-            if (value >= 0) Apply(s, hwnd, value);
+            if (value >= 0) {
+                SwallowNextDoubleClick();
+                Apply(s, hwnd, value);
+            } else {
+                wheel.Hover(x, y);
+            }
             Kick(s, hwnd);
             return true;
         }

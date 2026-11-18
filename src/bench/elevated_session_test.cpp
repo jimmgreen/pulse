@@ -10,8 +10,9 @@ void Write(const std::filesystem::path& path, const char* text) { std::ofstream 
 }
 int RunReviewTransferTests();
 int RunReviewTemplateTests();
-int RunReviewRoutingTests();
+int RunReviewRoutingTests(bool invoke_only = false);
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring(argv[1]) == L"--invoke-feedback") return RunReviewRoutingTests(true);
     if (argc == 2 && std::wstring(argv[1]) == L"--review-routing") return RunReviewRoutingTests();
     if (argc == 2 && std::wstring(argv[1]) == L"--review-template") return RunReviewTemplateTests();
     if (argc >= 3 && std::wstring(argv[1]) == L"--template-child") {
@@ -47,6 +48,52 @@ int wmain(int argc, wchar_t** argv) {
     if (!GetTempPathW(MAX_PATH, temp)) return 2;
     const auto root = std::filesystem::path(temp) / (L"pulse_session_test_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64()));
     std::atomic<bool> cancel{false};
+    if (argc == 2 && std::wstring(argv[1]) == L"--drive-eject") {
+        pulse::storage::VirtualDiskIdentity identity;
+        identity.volume_name = L"\\\\?\\Volume{01234567-89ab-cdef-0123-456789abcdef}\\";
+        identity.image_path = L"C:\\nonexistent-pulse-fixture.vhdx";
+        cancel = true;
+        auto result = EjectWithElevatedHelper(identity, nullptr, cancel);
+        check(result.cancelled && ElevatedHelperProcessIdForTesting() == 0, "eject cancelled before authorization starts no helper");
+        cancel = false;
+        auto invalid = identity; invalid.volume_name = L"C:\\";
+        result = EjectWithElevatedHelper(invalid, nullptr, cancel);
+        check(FAILED(result.hr) && ElevatedHelperProcessIdForTesting() == 0, "eject rejects drive letters before helper launch");
+        result = EjectWithElevatedHelper(identity, nullptr, cancel);
+        check(FAILED(result.hr) && !result.mutated && ElevatedHelperProcessIdForTesting() != 0,
+              "helper returns identity lookup failure without mutation or replay");
+        ShutdownElevatedTransferHelper();
+        return failed ? 1 : 0;
+    }
+    if (argc == 2 && std::wstring(argv[1]) == L"--create-folder") {
+        std::filesystem::create_directories(root);
+        const auto folder = root / L"新建文件夹 授权测试";
+        ElevatedTransferCallbacks callbacks;
+        std::vector<bool> authorization;
+        callbacks.authorization = [&](bool value) { authorization.push_back(value); };
+        cancel = true;
+        auto result = CreateFolderWithElevatedHelper(folder.wstring(), nullptr, cancel, callbacks);
+        check(result.cancelled && ElevatedHelperProcessIdForTesting() == 0 && !std::filesystem::exists(folder),
+              "cancel before authorization creates nothing and launches no helper");
+        cancel = false;
+        result = CreateFolderWithElevatedHelper(L"relative\\folder", nullptr, cancel, callbacks);
+        check(FAILED(result.hr) && ElevatedHelperProcessIdForTesting() == 0, "relative path rejected before helper launch");
+        result = CreateFolderWithElevatedHelper(folder.wstring(), nullptr, cancel, callbacks);
+        check(SUCCEEDED(result.hr) && result.destinations.size() == 1 &&
+              std::filesystem::is_directory(folder), "authenticated helper creates directory and reports completion");
+        check(authorization == std::vector<bool>({true, false}), "one authorization lifecycle for creation");
+        const auto helper = ElevatedHelperProcessIdForTesting();
+        result = CreateFolderWithElevatedHelper(folder.wstring(), nullptr, cancel, callbacks);
+        check(FAILED(result.hr) && result.destinations.empty(), "existing directory fails without false completion or native conflict dialog");
+        result = CreateFolderWithElevatedHelper((root / L"missing" / L"child").wstring(), nullptr, cancel, callbacks);
+        check(FAILED(result.hr) && !std::filesystem::exists(root / L"missing"), "missing parent fails without creating ancestors");
+        result = CreateFolderWithElevatedHelper((root / L"second").wstring(), nullptr, cancel, callbacks);
+        check(SUCCEEDED(result.hr) && helper == ElevatedHelperProcessIdForTesting() && authorization.size() == 2,
+              "subsequent creation reuses authorized helper without another prompt");
+        ShutdownElevatedTransferHelper();
+        std::filesystem::remove_all(root);
+        return failed ? 1 : 0;
+    }
     try {
         const auto source = root / L"source", destination = root / L"destination", moved = root / L"moved";
         std::filesystem::create_directories(source); std::filesystem::create_directories(destination); std::filesystem::create_directories(moved);

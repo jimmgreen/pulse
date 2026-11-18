@@ -36,12 +36,13 @@ struct WindowOverviewCard {
 
 struct WindowOverviewData {
     std::wstring title, hint, notice;  // notice replaces the hint (accent)
-    std::wstring merge_all, done, switch_to, current, new_window;
+    std::wstring merge_all, done, switch_to, current, new_window, arrange;
+    std::vector<std::wstring> arrangements;
     bool can_merge_all = false;
     std::vector<WindowOverviewCard> cards;
 };
 
-enum class OverviewHitKind { None, Outside, Panel, Card, Chip, Switch, More, NewWindow, MergeAll, Done };
+enum class OverviewHitKind { None, Outside, Panel, Caption, Card, Chip, Switch, More, NewWindow, MergeAll, Done, Arrange };
 
 struct OverviewHit {
     OverviewHitKind kind = OverviewHitKind::None;
@@ -82,9 +83,10 @@ private:
     D2D1_RECT_F client_{};
     D2D1_RECT_F panel_{};
     D2D1_RECT_F area_{};  // where the cards scroll
-    D2D1_RECT_F merge_button_{};
     D2D1_RECT_F done_button_{};
     D2D1_RECT_F new_card_{};
+    std::vector<D2D1_RECT_F> arrange_buttons_;
+    bool arrange_in_header_ = false;
     std::vector<CardRects> rects_;
     float scale_ = 1.0f;
     float scroll_ = 0.0f;  // px

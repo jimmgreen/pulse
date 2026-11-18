@@ -8,6 +8,7 @@ namespace pulse {
 // Builds every pane's tree view for its current snapshot and starts listing
 // newly opened folders. Cheap when nothing changed; called from BuildVm.
 void SyncDetailsTrees(AppState& s);
+void TryRenameDetailsTreeCreation(AppState& s);
 // Called for every worker result before pane handling.
 void NoteDetailsTreeResult(AppState& s, const app::WorkResult& res, bool again = false);
 void AppendDetailsTreeWatchPaths(const app::Tab& tab, std::vector<std::wstring>& paths);

@@ -1,4 +1,4 @@
-// ai_panel_view.h — The Pulse 助手 panel (plans/ai/pulse_ai_assistant_v2.html).
+// ai_panel_view.h — The Pulse 助手 panel.
 //
 // Drawn in the main window by MainRenderer. Docked (the default) it is a
 // column right of the sidebar rail and the toolbar and panes move over;
@@ -8,21 +8,33 @@
 #pragma once
 #include "ai_panel_icons.h"
 #include "FluentTokens.h"
+#include "fluent_components.h"
 
 #include <d2d1_1.h>
 #include <dwrite.h>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
+
+#include <wrl/client.h>
 
 namespace pulse::ui {
 
 class Compositor;
-struct AiConnView;   // 管理连接 (ai_panel_conn.h)
+struct AiRichDoc;     // ai_panel_rich.h
+struct AiRichPiece;
+// A point in the conversation's text: a block, a piece of it, a layout offset.
+struct AiRichSelPos {
+    uint32_t id = 0;
+    int piece = 0;
+    uint32_t offset = 0;
+};
 struct AiVoiceMenuView;   // 语音设置 menu (ai_panel_voice.h)
-struct AiVoiceCardView;   // 语音识别连接 card (ai_panel_voice.h)
 
 enum class AiPanelMode : uint8_t { Docked = 0, Floating = 1 };
 
@@ -44,10 +56,10 @@ enum class AiPanelPart : uint8_t {
     ModelButton,
     Send,
     Input,
-    Menu,           // the model menu's background
-    MenuModel,      // index
-    MenuEffort,     // index 0..3
-    MenuManage,
+    Menu,           // the 思考强度 popover's background
+    MenuModel,      // its 「model ›」: opens the model list
+    MenuSlider,     // its slider; index = the stop under the pointer
+    MenuReset,      // its ↺: back to the default level
     Conversation,
     // Conversation parts; index = block index in AiPanelViewModel::blocks.
     ThinkToggle,
@@ -84,42 +96,62 @@ enum class AiPanelPart : uint8_t {
     DupFile,           // index = block index * 64 + group * 8 + file (that copy stays)
     DupRule,           // 改规则 (block index)
     DupMore,           // 在 Pulse 中查看全部 (block index)
-    // 管理连接 card (the model menu unfolded).
-    ConnCard,       // the card's background (swallows the click)
-    ConnBack,
-    ConnClose,
-    ConnLink,       // 在哪里获取？
-    ConnPaste,
-    ConnEye,
-    ConnChange,
-    ConnAdvanced,
-    ConnTest,
-    ConnSave,
-    ConnRemove,
-    ConnKeyField,
-    ConnUrlField,
+    // Not connected yet: the empty state's 去设置模型服务.
+    GoSettings,
     // 语音输入 (third batch, flow V): the composer's microphone and its menu.
     Mic,
     MicMenu,        // the small chevron beside it
     VoiceMenu,      // the menu's background
-    VoiceManage,    // 管理连接 / 添加 in the menu
+    VoiceManage,    // 语音设置… in the menu
     VoiceMicPick,   // the microphone dropdown
     VoicePause,     // index 0..2: 1 秒 / 2 秒 / 手动
-    // 语音识别连接 card.
-    VoiceCard,      // the card's background
-    VoiceClose,
-    VoiceService,   // index 0..2: 硅基流动 / OpenAI / 自定义
-    VoiceUrlField,
-    VoiceKeyField,
-    VoiceModel,     // the model dropdown
-    VoiceCancel,
-    VoiceSave,
-    VoiceRemove,
     // The bubble above the chip once the panel is closed.
     PeekCard,
     PeekClose,
     PeekUndo,
     PeekOpen,
+    // Rich answers (index = block index * 256 + target): a link, a local path
+    // chip, a code block's 复制, a table's 复制表格.
+    RichLink,
+    RichPath,
+    CodeCopy,
+    TableCopy,
+    // The selection's mini toolbar: 复制 · 引用 · 在 Pulse 中搜索.
+    SelCopy,
+    SelQuote,
+    SelSearch,
+    // The composer's quote chip: its ×.
+    QuoteRemove,
+    // 55 P2 (index = block index): 重新生成's menu caret, 没帮助, the ‹ › of
+    // an answer's versions, the user bubble's 复制 / 编辑, 继续生成 on a
+    // stopped version.
+    ActRegenMenu,
+    ActThumbDown,
+    VerPrev,
+    VerNext,
+    UserCopy,
+    UserEdit,
+    StopContinue,
+    // The message being edited in place (index = its block): the text area
+    // (while the panel draws it), 取消, 发送.
+    EditBox,
+    EditCancel,
+    EditSend,
+    // 55 P3 历史对话: the header button; the layer itself (absorbs clicks),
+    // its search box and foot link; a row (index = row) and its 固定 /
+    // 重命名 / 删除, the inline 取消 · 删除, the title while it is renamed.
+    History,
+    HistArea,
+    HistSearch,
+    HistSettings,
+    HistRow,
+    HistPin,
+    HistRename,
+    HistDelete,
+    HistDelCancel,
+    HistDelOk,
+    HistRenameBox,
+    JumpLatest,   // 55 P4: the 回到最新 pill over the conversation's bottom
 };
 
 struct AiPanelHit {
@@ -132,11 +164,6 @@ struct AiSuggestionView {
     AiIcon icon = AiIcon::Move;
     AiTint tint = AiTint::Image;
     std::wstring title;
-    std::wstring detail;
-};
-
-struct AiModelView {
-    std::wstring name;
     std::wstring detail;
 };
 
@@ -162,6 +189,7 @@ enum class AiBlockKind : uint8_t {
     Clean,      // 清理建议 card: categories with boxes, reasons, 查看, the total
     Funnel,     // 比对过程 card: three local stages with counts and bars (flow E)
     Dup,        // 重复文件 card: keep rules, groups (保留 / 副本), the total
+    Stopped,    // 这个版本你中途停止了 · 继续生成 under a partial answer (55 P2)
 };
 
 // Error card tone: Err needs the user (red, red border), Warn is temporary
@@ -531,13 +559,13 @@ struct AiBlockView {
     // after the buttons in any tone.
     std::vector<AiCheckView> checklist;
     std::wstring note;
-    // P3 (plans/ai/P3_AI接入动作表.html). Result: `partial` some step failed
+    // P3. Result: `partial` some step failed
     // (the amber warn icon). Confirm: `cf_icon` the tile's icon, `tag_amber`
     // the tag in amber (外部效果), `file` + `file_note` the .cf-file row.
     bool partial = false;
     AiIcon cf_icon = AiIcon::Shield;
     bool tag_amber = false;
-    // P4c (plans/ai/P4_全部领域接入.html ② ③). Confirm: `cf_rows` the items
+    // P4c. Confirm: `cf_rows` the items
     // (.cf-rows, at most 3), `cf_more` its grey last row (还有 3 个 · 共 18.4
     // MB), `cf_bin` the accent line with a check under it (.cf-bin: 回收站放得
     // 下…). `arm`: the card takes two clicks (a permanent delete); the first
@@ -545,6 +573,15 @@ struct AiBlockView {
     std::vector<AiConfirmRow> cf_rows;
     std::wstring cf_more, cf_bin, arm;
     bool armed = false;
+    // 55 P2. Acts: `ver` / `ver_count` the ‹ 2 / 3 › of the turn's versions
+    // (shown when ver_count > 1), `ver_only` a row that has nothing else (a
+    // version that failed), `rating` 👍 1 / 👎 -1 (local only). User:
+    // `edited` the text differs from the first version (已编辑).
+    int ver = 0;
+    int ver_count = 0;
+    bool ver_only = false;
+    int rating = 0;
+    bool edited = false;
 };
 
 // 语音输入: the composer while the microphone listens, and the mic button.
@@ -560,7 +597,6 @@ struct AiVoiceView {
     bool recognizing = false;         // 识别中… after the text
     std::wstring recognizing_text;
     std::shared_ptr<const AiVoiceMenuView> menu;   // non-null while the menu is open
-    std::shared_ptr<const AiVoiceCardView> card;   // non-null while the card is open
 };
 
 // The status bar chip (left end): "✦ AI" plus what the assistant is doing.
@@ -597,6 +633,30 @@ struct AiPeekView {
     AiErrTone tone = AiErrTone::Err;
 };
 
+// How the model takes 思考 (app/ai_providers.h ThinkKind).
+enum class AiEffortMode : uint8_t { Levels, Toggle, Fixed };
+
+// 55 P3 历史对话: one saved conversation in the list (grouped in order: a
+// row with `group` set starts 已固定 / 今天 / 昨天 / 7 天内 / 更早).
+struct AiHistoryRowView {
+    std::wstring group;           // the heading above this row (empty: same group)
+    std::wstring title, snippet, when;
+    bool pinned = false;
+    bool current = false;         // the conversation in the panel
+};
+
+struct AiHistoryView {
+    bool open = false;
+    std::wstring search_cue, query;   // query: drawn while the search EDIT is hidden
+    std::wstring empty;               // no rows: 还没有保存的对话 / 没有找到相关对话
+    std::wstring foot, settings;      // 🔒 对话只保存在这台电脑… · 历史设置
+    std::wstring rename_hint, delete_note, cancel, del;
+    std::vector<AiHistoryRowView> rows;
+    int renaming = -1;                // row whose title is an EDIT
+    std::wstring rename_text;         // drawn while that EDIT is hidden
+    int deleting = -1;                // row in its inline confirmation
+};
+
 struct AiPanelViewModel {
     bool dark = false;
     bool high_contrast = false;
@@ -608,6 +668,12 @@ struct AiPanelViewModel {
     std::wstring intro;
     std::vector<AiSuggestionView> suggestions;
     std::wstring safe_note;
+    std::wstring jump_latest;   // 55 P4: 回到最新
+    // No model service yet: the empty state shows the services and a button
+    // to Settings > AI 助手 instead of the greeting and suggestions.
+    bool setup = false;
+    std::wstring setup_title, setup_intro, setup_more, setup_go;
+    std::vector<std::string> setup_marks;   // provider ids, drawn by the mark painter
     // Conversation (shown when !empty).
     std::vector<AiBlockView> blocks;
     // Composer.
@@ -622,33 +688,44 @@ struct AiPanelViewModel {
     bool draw_composer_text = false;
     std::wstring composer_text;
     std::wstring placeholder;
+    // 引用: the chosen words above the input (empty: none).
+    std::wstring quote;
     std::wstring add_files;
     std::wstring model_label;         // deepseek-flash
-    std::wstring effort_label;        // " · 高" (empty when thinking is off)
+    std::wstring effort_label;        // " · 高", " · 始终思考" (empty when thinking is off)
     AiSendState send = AiSendState::Dim;
-    // Model menu.
+    // 思考强度 popover over the model button, as the model takes it: its
+    // levels on the slider, a switch, or 始终思考 with no control. A model
+    // without thinking has none: the button opens the model list (a FluentMenu).
     bool menu_open = false;
-    std::wstring model_heading, effort_heading;
-    std::vector<AiModelView> models;
-    int model = 0;
-    std::array<std::wstring, 4> effort_names;
-    std::wstring effort_detail;       // the selected effort's line
-    int effort = 2;
+    AiEffortMode effort_mode = AiEffortMode::Levels;
+    std::array<std::wstring, 7> effort_names;     // Fixed: [0] 始终思考
+    std::array<std::wstring, 7> effort_details;   // each level's line; Fixed: [0]
+    std::wstring effort_note;         // under the line: 这个模型始终会思考… (may be empty)
+    std::wstring effort_toggle_label; // Toggle: the switch's 深度思考
+    int effort_count = 4;             // stops (2..7; a switch has 2), 0 for Fixed
+    int effort = 2;                   // the selected stop
+    int effort_default = 2;           // the stop ↺ goes back to
     bool connected = false;
-    std::wstring connection_text;     // 已连接 api.deepseek.com / 未连接
-    std::wstring manage_text;         // 管理连接
-    // 管理连接: non-null while the menu is unfolded into the connection card.
-    std::shared_ptr<const AiConnView> conn;
     AiVoiceView voice;
     // Pointer.
     AiPanelHit hover;
+    std::wstring edited_label;        // 已编辑 under a bubble whose text was changed
+    // Editing a message in place (55 P2): its block (-1: none), the EDIT's
+    // line count, its words (drawn while the EDIT is hidden), the note and
+    // the buttons.
+    int edit_block = -1;
+    int edit_lines = 1;
+    std::wstring edit_text, edit_warn, edit_cancel, edit_send;
+    int hover_turn = -1;              // user block whose turn is under the pointer (55 P2: 复制 · 编辑)
     AiPanelHit pressed;
     AiPeekView peek;
+    AiHistoryView history;            // 55 P3
 };
 
 class AiPanelView {
 public:
-    AiPanelView() = default;
+    AiPanelView();
     AiPanelView(const AiPanelView&) = delete;
     AiPanelView& operator=(const AiPanelView&) = delete;
     ~AiPanelView();
@@ -687,9 +764,28 @@ public:
 
     // Conversation scrolling (px). Follows the newest block until the user
     // scrolls up; scrolling back to the end follows again.
-    void ScrollBy(float dy);
+    void ScrollBy(float dy, bool animate = true);
     void ScrollToEnd();
+    bool JumpShown() const noexcept { return jump_shown_; }   // 55 P4
     bool Following() const noexcept { return follow_; }
+    // The overlay scrollbar (conversation or welcome) works like Pulse's other scrollbars: drag the thumb, or press the track
+    // to jump there and keep dragging. Hover widens the bar.
+    bool BeginScrollDrag(float x, float y);   // true when a bar took the press
+    bool DragScroll(float y);                 // true when the view moved
+    void EndScrollDrag() noexcept { scroll_drag_ = 0; }
+    int ScrollDragging() const noexcept { return scroll_drag_; }   // 1 conversation
+    bool SetScrollHot(float x, float y);      // true when the hover changed
+    bool ScrollHot() const noexcept { return scroll_hot_ != 0; }
+
+    // The 思考强度 slider: a press on it starts a drag, the knob follows the
+    // pointer and the level under it shows; the release snaps to a stop.
+    bool BeginSliderDrag(float x, float y);   // true when the press is on the slider
+    int DragSlider(float x);                  // the stop under the knob (-1: no drag)
+    int EndSliderDrag();                      // the stop it snapped to (-1: no drag)
+    bool SliderDragging() const noexcept { return slider_drag_; }
+    // The model list's anchor in the popover (「model ›」; the other is
+    // ModelButtonRect).
+    D2D1_RECT_F ModelLinkRect() const noexcept { return menu_link_; }
 
     // Last drawn geometry.
     AiPanelHit HitTest(float x, float y) const;
@@ -709,20 +805,18 @@ public:
     }
     // The docked column was last drawn as glass.
     bool Glass() const noexcept { return glass_drawn_; }
-    D2D1_COLOR_F BgColor() const noexcept { return bg_color_; }   // the voice card's fields
+    D2D1_COLOR_F BgColor() const noexcept { return bg_color_; }
     D2D1_COLOR_F TextColor() const noexcept { return text_color_; }
     D2D1_COLOR_F PlaceholderColor() const noexcept { return text3_color_; }
     // The composer's text face (13.5), for the LumaText-presented EDIT.
     IDWriteTextFormat* ComposerFormat() const noexcept { return formats_.body; }
     D2D1_RECT_F ModelButtonRect() const noexcept { return model_button_; }
-    // 管理连接 card: the text box of the key (0) or address (1) field when
-    // the card is settled and that field takes an EDIT this frame.
-    bool ConnFieldRect(int field, D2D1_RECT_F& rect) const;
-    // 语音识别连接 card: the address (0) or key (1) field's text box when it
-    // takes an EDIT this frame.
-    bool VoiceFieldRect(int field, D2D1_RECT_F& rect) const;
-    // Where a voice dropdown opens: the card's model box (VoiceModel) or the
-    // menu's microphone box (VoiceMicPick), last frame.
+    // Draws a service's logo (MainRenderer::DrawProviderMark), set before Draw.
+    void SetMarkPainter(std::function<void(std::string_view, const D2D1_RECT_F&)> painter) {
+        mark_painter_ = std::move(painter);
+    }
+    // Where the microphone dropdown opens: the menu's box (VoiceMicPick),
+    // last frame.
     bool VoiceAnchor(AiPanelPart part, D2D1_RECT_F& rect) const;
 
     // The status bar chip; its motion (spinning spark, amber ring) asks for
@@ -737,6 +831,61 @@ public:
     bool PeekVisible() const noexcept { return peek_value_ > 0.0f; }
 
     void ReleaseDeviceResources();
+
+    // Text selection over answers and messages (ai_panel_rich.cpp). A press
+    // starts it (clicks: 1 characters, 2 a word, 3 a paragraph; extend: Shift
+    // moves its end), the drag follows the nearest text and the release shows
+    // the mini toolbar. Buttons, icons and line numbers are never selected.
+    bool OverText(float x, float y) const;     // selectable text under the point
+    int UserTurnAt(float x, float y) const;    // the user block whose turn is there (-1: none)
+    D2D1_RECT_F ConvHitRect(AiPanelHit hit) const;   // where a conversation part was drawn (empty: not shown)
+    // The in-place edit's text area and whether all of it is in view (the
+    // EDIT is shown over it only then).
+    D2D1_RECT_F TurnEditRect() const noexcept { return turn_edit_rect_; }
+    bool TurnEditPlaced() const noexcept { return turn_edit_placed_; }
+    void RevealTurnEdit();   // scrolls the whole edit box into view
+    // 55 P3 历史对话 (ai_panel_history.cpp): how far the layer slid in (0..1),
+    // the search box's and the renamed title's text areas (the app puts its
+    // EDITs there once the layer stands still), and the list's scrolling.
+    float HistoryAmount() const noexcept { return hist_k_; }
+    // The layer is over this point (what is under it takes no pointer).
+    bool HistoryCovers(float x, float y) const noexcept {
+        return hist_k_ > 0.001f && x >= hist_rect_.left && x < hist_rect_.right && y >= hist_rect_.top &&
+               y < hist_rect_.bottom;
+    }
+    bool HistorySettled() const noexcept { return hist_k_ >= 0.999f && hist_open_drawn_; }
+    D2D1_RECT_F HistorySearchRect() const noexcept { return hist_search_rect_; }
+    D2D1_RECT_F HistoryRenameRect() const noexcept { return hist_rename_rect_; }
+    bool HistoryScrollBy(float dy);   // false: the layer is not there
+    void HistoryRevealRow(int row);   // scrolls a row into view
+    void HistoryScrollTop() noexcept { hist_scroll_ = 0.0f; }
+    bool BeginSelect(float x, float y, int clicks, bool extend);
+    void DragSelect(float x, float y);
+    void EndSelect();
+    bool Selecting() const noexcept;
+    bool HasSelection() const;
+    void ClearSelection();
+    void HideSelectionBar();
+    // The answer (its Text blocks back to the message) or the message holding
+    // `block`; -1: the last answer.
+    bool SelectAnswer(int block);
+    int CaretBlock() const;   // the block last clicked in (a selection or just a caret), else -1
+    int RichBlockAt(float x, float y) const;   // block index of the text nearest the point, -1
+    int SelectionBlock() const;                // block index of the selection's end, -1
+    std::wstring SelectionText(bool markdown) const;
+    // While a drag is past the conversation's top or bottom: px to scroll a tick.
+    float SelectScrollSpeed(float y) const;
+    // A link, path, code block or table under a RichLink / RichPath /
+    // CodeCopy / TableCopy hit: its URL, path, code or tab separated cells.
+    struct RichTargetInfo {
+        AiPanelPart part = AiPanelPart::None;
+        std::wstring text;
+    };
+    RichTargetInfo TargetOf(const AiPanelHit& hit) const;
+    // A copy button shows 已复制 for 2 s.
+    void MarkCopied(const AiPanelHit& hit, uint64_t now_ms);
+    // A code block or table under the point scrolls sideways; false elsewhere.
+    bool ScrollBoxAt(float x, float y, float dx);
 
     struct Palette;   // colors of one frame (ai_panel_view.cpp)
 
@@ -782,20 +931,14 @@ private:
     float ComposerHeight(const AiPanelViewModel& vm, float scale) const;
     void DrawComposer(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal,
                       const D2D1_RECT_F& box, float scale, uint64_t now_ms);
-    void DrawModelMenu(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal,
-                       float scale, uint64_t now_ms);
-    // ai_panel_conn.cpp. Lays out (draw = false: only measures) the card in
-    // `card` (its top-left; the width is the card's) and returns its height.
-    float DrawConnCard(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal,
-                       const D2D1_RECT_F& card, float scale, uint64_t now_ms, bool draw);
+    void DrawEffortMenu(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal,
+                        float scale, uint64_t now_ms);
     // ai_panel_voice.cpp: the mic button (in the composer row), the composer
-    // while it listens, the 语音设置 menu and the 语音识别连接 card.
+    // while it listens and the 语音设置 menu.
     void DrawMic(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float scale, uint64_t now_ms);
     void DrawVoiceInput(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float line,
                         float scale, uint64_t now_ms);
     void DrawVoiceMenu(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float scale,
-                       uint64_t now_ms);
-    void DrawVoiceCard(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float scale,
                        uint64_t now_ms);
     // The input's lines: the EDIT's, or while listening the recording lines.
     int InputLines(const AiPanelViewModel& vm) const;
@@ -810,7 +953,7 @@ private:
     bool dock_anim_ = false, float_anim_ = false;
     uint64_t dock_start_ = 0, float_start_ = 0;
     uint64_t opened_at_ = 0;
-    // Model menu pop.
+    // 思考强度 popover pop.
     bool menu_shown_ = false;
     uint64_t menu_at_ = 0;
     bool decor_ = false;
@@ -842,17 +985,72 @@ private:
     D2D1_COLOR_F glass_frame_{};
     D2D1_RECT_F add_files_{}, model_button_{}, send_button_{};
     D2D1_RECT_F mic_button_{}, mic_menu_{};
-    // 语音输入: menu and card motion, hit rects and formats (ai_panel_voice.h).
+    // 语音输入: menu motion, hit rects and formats (ai_panel_voice.h).
     struct VoiceGeom;
     std::shared_ptr<VoiceGeom> voice_;
     D2D1_RECT_F menu_rect_{};
-    std::vector<D2D1_RECT_F> menu_model_rects_;
-    std::array<D2D1_RECT_F, 4> menu_effort_rects_{};
-    D2D1_RECT_F menu_manage_{};
-    // 管理连接 card: morph between the menu and the card, its hit rects and
-    // its own text formats (ai_panel_conn.h).
-    struct ConnGeom;
-    std::shared_ptr<ConnGeom> conn_;
+    D2D1_RECT_F menu_link_{}, menu_slider_{}, menu_reset_{};
+    // The slider's knob, in stops: it follows a drag, then springs onto the
+    // stop with a slight overshoot.
+    float slider_pos_ = 0.0f, slider_from_ = 0.0f;
+    int slider_target_ = -1;          // the stop it settles on (-1: not placed yet)
+    int slider_stops_ = 0;            // 0 while the popover shows a switch or 始终思考
+    int toggle_target_ = -1;          // the switch row: the stop a click picks
+    uint64_t slider_at_ = 0;
+    bool slider_anim_ = false, slider_drag_ = false;
+    // The panel's scrollbars are the shared fluent control (the same look,
+    // fade and drag as settings and the sidebar): the conversation or the
+    // welcome. `spec` is as last drawn; `drawn` is reset each frame.
+    struct Bar {
+        fluent::ScrollbarSpec spec;
+        fluent::ScrollbarFade fade;
+        bool drawn = false;
+    };
+    std::array<Bar, 1> bars_{};
+    int scroll_drag_ = 0;            // 1 conversation
+    int scroll_hot_ = 0;
+    float drag_grab_ = 0.0f;         // pointer offset along the thumb
+    float bar_scale_ = 1.0f;
+    uint64_t bar_now_ = 0;
+    fluent::Painter bar_painter_;
+    int BarAt(float x, float y) const;
+    // Draws bar `which` over `viewport` (its hit zone and track) and records it.
+    void DrawBar(int which, const D2D1_RECT_F& viewport, float offset, float view, float content);
+    D2D1_RECT_F go_settings_{};
+    // Rich text and the selection (ai_panel_rich.h).
+    struct RichCache;
+    std::unique_ptr<RichCache> rich_;
+    D2D1_RECT_F quote_remove_{};
+    void EnsureRichBrushes(ID2D1DeviceContext* dc, const Palette& pal, bool dark);
+    void ReleaseRich();
+    const AiRichDoc* RichFor(Compositor* compositor, const AiBlockView& block, float width, float scale);
+    void BuildRich(Compositor* compositor, const AiBlockView& block, float width, float scale, AiRichDoc& doc,
+                   std::unordered_map<uint64_t, Microsoft::WRL::ComPtr<IDWriteTextLayout>>& reuse);
+    // Draws a laid out block at (ox, oy) and records its pieces for hit tests
+    // (only the latter when `draw` is false: off screen).
+    void DrawRich(Compositor* compositor, const AiRichDoc& doc, const AiBlockView& block, int index, float ox,
+                  float oy, const Palette& pal, const D2D1_RECT_F& area, const AiPanelViewModel& vm, float scale,
+                  uint64_t now_ms, bool draw);
+    bool RichCaret(const AiRichDoc& doc, uint32_t id, float ox, float oy, float& cx, float& cy, float& lh) const;
+    void BeginRichFrame(const AiPanelViewModel& vm);
+    void EndRichFrame();
+    float BoxScroll(uint32_t id, int box) const;
+    bool RichPosAt(float x, float y, bool strict, AiRichSelPos& out) const;
+    bool SelectionIn(uint32_t id, int piece, uint32_t length, uint32_t& a, uint32_t& b) const;
+    int ComparePos(const AiRichSelPos& x, const AiRichSelPos& y) const;
+    const AiRichPiece* PieceOf(const AiRichSelPos& p) const;
+    void UnitAround(const AiRichSelPos& p, int unit, AiRichSelPos& from, AiRichSelPos& to) const;
+    void DrawSelectionBar(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float scale);
+    void DrawHistory(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, const D2D1_RECT_F& panel,
+                     float scale, uint64_t now_ms);
+    AiPanelHit HistoryHitTest(float x, float y) const;
+    float HistorySlide(bool open, uint64_t now_ms);   // eased 0..1 (its own: DrawConversation sweeps tweens_)
+    // The composer's quote chip: its height (0 without a quote, measured
+    // before the composer is placed) and drawing.
+    float MeasureQuote(Compositor* compositor, const AiPanelViewModel& vm, float inner_width, float scale);
+    void DrawQuoteChip(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float left, float right,
+                       float& y, float scale);
+    std::function<void(std::string_view, const D2D1_RECT_F&)> mark_painter_;
     D2D1_RECT_F conversation_rect_{};
     D2D1_COLOR_F card_color_{1, 1, 1, 1};
     D2D1_COLOR_F bg_color_{1, 1, 1, 1};
@@ -884,6 +1082,22 @@ private:
         AiPanelHit hit;
     };
     std::vector<ConvHit> conv_hits_;
+    std::vector<std::pair<D2D1_RECT_F, int>> turn_rects_;   // user turns (bubble .. next turn), visible part
+    D2D1_RECT_F turn_edit_rect_{};
+    bool turn_edit_placed_ = false;
+    // 55 P3 历史对话.
+    D2D1_RECT_F hist_button_{};
+    float hist_k_ = 0.0f;               // slid in (eased)
+    float hist_from_ = 0.0f, hist_to_ = 0.0f;
+    uint64_t hist_start_ = 0;
+    uint32_t hist_ms_ = 0;
+    bool hist_open_drawn_ = false;      // vm.history.open last frame
+    D2D1_RECT_F hist_rect_{}, hist_list_rect_{}, hist_search_rect_{}, hist_rename_rect_{};
+    float hist_scroll_ = 0.0f, hist_content_h_ = 0.0f;
+    D2D1_RECT_F jump_rect_{};   // 55 P4: the 回到最新 pill (drawn only while scrolled up)
+    bool jump_shown_ = false;
+    std::vector<float> hist_row_tops_;  // content y of each row (for reveal)
+    std::vector<ConvHit> hist_hits_;
 
     Formats formats_;
     ID2D1SolidColorBrush* brush_ = nullptr;

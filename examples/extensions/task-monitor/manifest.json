@@ -1,0 +1,130 @@
+{
+  "apiVersion": 1,
+  "id": "sample.task-monitor",
+  "name": "Controlled transfer monitor",
+  "commands": [
+    {
+      "id": "startCopy",
+      "title": "Copy selected items to other pane",
+      "capability": "files.copySelectionToOtherPane"
+    }
+  ],
+  "panel": {
+    "title": "Controlled transfer monitor",
+    "ui": {
+      "version": 1,
+      "state": [
+        {
+          "key": "taskStatus",
+          "value": "idle"
+        },
+        {
+          "key": "taskError",
+          "value": ""
+        },
+        {
+          "key": "taskProgress",
+          "value": "0"
+        }
+      ],
+      "actions": [
+        {
+          "id": "watchTask",
+          "dataOperation": {
+            "target": "owned-task",
+            "operation": "refresh"
+          }
+        },
+        {
+          "id": "cancelTask",
+          "dataOperation": {
+            "target": "owned-task",
+            "operation": "cancel"
+          }
+        },
+        {
+          "id": "retryWatch",
+          "dataOperation": {
+            "target": "owned-task",
+            "operation": "retry"
+          }
+        }
+      ],
+      "root": {
+        "type": "scrollView",
+        "id": "task-root",
+        "children": [
+          {
+            "type": "text",
+            "id": "task-help",
+            "text": "Start a confirmed copy between two visible panes. This panel monitors only its own package transfer."
+          },
+          {
+            "type": "button",
+            "id": "start-copy",
+            "text": "Copy selected items",
+            "kind": "primary",
+            "command": "startCopy"
+          },
+          {
+            "type": "progress",
+            "id": "task-progress",
+            "binding": "state.taskProgress"
+          },
+          {
+            "type": "text",
+            "id": "task-status",
+            "binding": "state.taskStatus"
+          },
+          {
+            "type": "text",
+            "id": "task-error",
+            "binding": "state.taskError"
+          },
+          {
+            "type": "grid",
+            "id": "task-actions",
+            "columns": 3,
+            "children": [
+              {
+                "type": "button",
+                "id": "watch-task",
+                "text": "Refresh monitor",
+                "command": "watchTask"
+              },
+              {
+                "type": "button",
+                "id": "cancel-task",
+                "text": "Cancel owned task",
+                "command": "cancelTask"
+              },
+              {
+                "type": "button",
+                "id": "retry-monitor",
+                "text": "Retry monitor",
+                "command": "retryWatch"
+              }
+            ]
+          },
+          {
+            "type": "virtualList",
+            "id": "owned-task",
+            "minHeight": 100,
+            "dataSource": {
+              "source": "context.transferTask",
+              "pageSize": 1,
+              "statusState": "taskStatus",
+              "errorState": "taskError",
+              "progressState": "taskProgress"
+            }
+          },
+          {
+            "type": "text",
+            "id": "task-boundary",
+            "text": "Refresh and retry only reconnect monitoring. Closing the panel does not cancel the transfer."
+          }
+        ]
+      }
+    }
+  }
+}

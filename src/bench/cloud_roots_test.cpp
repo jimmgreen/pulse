@@ -253,6 +253,17 @@ int main() {
     Check(SameCloudRootPath(L"c:\\users\\user\\WPSDrive\\", L"C:\\Users\\User\\wpsdrive"),
           "path comparison is case-insensitive");
     Check(NormalizeCloudRootPath(L"").empty(), "empty path stays empty");
+    Check(SameCloudRootPath(L"\\\\?\\C:\\Users\\User\\OneDrive", L"C:\\Users\\User\\OneDrive\\"),
+          "extended account path matches ordinary Shell root");
+    Check(SameCloudRootPath(L"\\\\?\\UNC\\server\\share\\Cloud", L"\\\\server\\share\\cloud\\"),
+          "extended UNC path matches ordinary UNC root");
+    std::vector<CloudRoot> account_roots{{L"\\\\?\\C:\\Users\\User\\OneDrive", L"User - Personal", {}, CloudRootSource::Seed}};
+    MergeCloudRoots(account_roots, {{L"C:\\Users\\User\\OneDrive", L"OneDrive", {}, CloudRootSource::SyncRoot}}, {});
+    Check(account_roots.size() == 1 && account_roots[0].label == L"User - Personal",
+          "account and sync registration merge preserving account label");
+    MergeCloudRoots(account_roots, {{L"C:\\Users\\User\\OneDrive - Work", L"Work", {}, CloudRootSource::SyncRoot}}, {});
+    Check(account_roots.size() == 2, "different account directories remain separate");
+
     Check(CurrentUserSidString().rfind(L"S-1-", 0) == 0, "process SID string");
     Check(CloudRootColor({L"", L"OneDrive - Personal", L"", CloudRootSource::Seed}) == 0x2B88D8 &&
               CloudRootColor({L"", L"WPS\x7F51\x76D8", a, CloudRootSource::NavigationPane}) == 0x2F6FD6 &&

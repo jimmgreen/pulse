@@ -12,6 +12,15 @@
 namespace pulse::ui {
 
 struct LumaTextStats {
+    // Enabled in diagnostic builds, or explicitly with PULSE_STARTUP_TRACE.
+    std::uint64_t layout_time_us = 0;
+    std::uint64_t draw_time_us = 0;
+    std::uint64_t frame_end_time_us = 0;
+    std::uint64_t recording_end_time_us = 0;
+    std::uint64_t shaping_time_us = 0;
+    std::uint64_t raster_time_us = 0;
+    std::uint64_t upload_time_us = 0;
+    std::uint64_t composition_time_us = 0;
     std::uint64_t draw_calls = 0;
     std::uint64_t freetype_glyphs = 0;
     std::uint64_t cache_hits = 0;
@@ -19,6 +28,8 @@ struct LumaTextStats {
     std::uint64_t surface_cache_misses = 0;
     std::uint64_t surface_cache_evictions = 0;
     std::uint64_t fallback_draws = 0;
+    std::uint64_t fallback_text = 0, fallback_layout = 0, fallback_split = 0;
+    std::uint64_t fail_input = 0, fail_font = 0, fail_layout = 0, fail_bounds = 0, fail_backend = 0;
     std::uint64_t edit_directwrite_draws = 0;
     std::uint64_t edit_directwrite_hits = 0;
     std::uint64_t edit_layout_builds = 0;
@@ -61,8 +72,13 @@ public:
     bool PaintEdit(HWND hwnd, HDC hdc, IDWriteTextFormat* format,
                    const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background);
 
+    // Called within the main device context BeginDraw/EndDraw. Uses the same
+    // edit bitmap and IME geometry, without writing to a child-window DC.
+    bool DrawEditOnSurface(HWND hwnd, IDWriteTextFormat* format,
+        const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background, const D2D1_RECT_F& bounds);
+
     const LumaTextStats& Stats() const noexcept;
-    void RecordFallback() noexcept;
+    void RecordFallback(unsigned api = 0) noexcept;
 
 private:
     void TrackEdit(HWND hwnd);

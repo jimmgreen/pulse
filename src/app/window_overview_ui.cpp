@@ -1,4 +1,6 @@
 #include "window_overview_ui.h"
+#include "window_management_ui.h"
+#include "window_arrange_ui.h"
 #include "app_internal.h"
 #include "app_navigation.h"
 #include "tab_transfer.h"
@@ -87,6 +89,8 @@ void Refresh(AppState& s) {
     data.title = l10n::Get(l10n::StringId::WindowOverviewTitle);
     data.hint = l10n::Get(l10n::StringId::WindowOverviewHint);
     data.notice = s.overview.notice;
+    data.arrange = l10n::Get(l10n::StringId::SettingsSecArrangeWindows);
+    for (int i=0;i<8;++i) data.arrangements.push_back(l10n::Get(WindowArrangeLabel(static_cast<app::WindowArrangeLayout>(i))));
     data.merge_all = l10n::Get(l10n::StringId::WindowOverviewMergeAll);
     data.done = l10n::Get(l10n::StringId::WindowOverviewDone);
     data.switch_to = l10n::Get(l10n::StringId::WindowOverviewSwitch);
@@ -97,8 +101,10 @@ void Refresh(AppState& s) {
         AppState* w = s.core.windows.Lookup(hwnd);
         data.cards.push_back(w ? CardFor(s, *w) : ui::WindowOverviewCard{});
     }
+    RECT client{};
+    GetClientRect(s.hwnd, &client);
     view.Show(std::move(data),
-              D2D1::RectF(0.0f, 0.0f, static_cast<float>(s.compositor.Width()), static_cast<float>(s.compositor.Height())),
+              D2D1::RectF(0.0f, 0.0f, static_cast<float>(client.right), static_cast<float>(client.bottom)),
               s.scale);
     Kick(s);
 }
@@ -278,9 +284,13 @@ bool WindowOverviewMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam, LPAR
     case WM_NCHITTEST: {
         POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         ScreenToClient(hwnd, &pt);
-        if (view.HitTest(static_cast<float>(pt.x), static_cast<float>(pt.y)).kind == ui::OverviewHitKind::Outside)
-            return false;  // the frame around the panel: resize, caption buttons
-        result = HTCLIENT;  // the panel covers the title bar: its buttons are ours
+        RECT bounds{};
+        GetClientRect(hwnd, &bounds);
+        const int border = static_cast<int>(8*s.scale);
+        if (!IsZoomed(hwnd) && (pt.x < border || pt.y < border || pt.x >= bounds.right-border || pt.y >= bounds.bottom-border))
+            return false;
+        const auto hit = view.HitTest(static_cast<float>(pt.x), static_cast<float>(pt.y));
+        result = hit.kind == ui::OverviewHitKind::Caption || hit.kind == ui::OverviewHitKind::Outside ? HTCAPTION : HTCLIENT;
         return true;
     }
     case WM_SETCURSOR:
@@ -289,8 +299,11 @@ bool WindowOverviewMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam, LPAR
         result = TRUE;
         return true;
     case WM_NCLBUTTONDOWN:
+    case WM_NCLBUTTONDBLCLK:
     case WM_NCRBUTTONDOWN:
-        Close(s);
+        return false;  // Keep the overview open during native move/resize.
+    case WM_CANCELMODE:
+        EndPress(s);
         return false;
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK: {
@@ -317,6 +330,22 @@ bool WindowOverviewMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam, LPAR
         case ui::OverviewHitKind::More:
             GoTo(s, hit.card, std::nullopt);
             return true;
+        case ui::OverviewHitKind::Arrange: {
+            const auto order = s.overview.order;
+            POINT anchor{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            ClientToScreen(hwnd, &anchor);
+            int layout = -1;
+            Busy(s, [&] { layout = PickWindowArrangement(s, anchor); });
+            if (layout == 8) {
+                MergeAll(s);
+            } else if (layout >= 0) {
+                Close(s);
+                ArrangeWindows(s, static_cast<app::WindowArrangeLayout>(layout), (GetKeyState(VK_SHIFT)&0x8000)!=0, order);
+            } else {
+                Refresh(s);
+            }
+            return true;
+        }
         case ui::OverviewHitKind::MergeAll:
             MergeAll(s);
             return true;
@@ -396,7 +425,6 @@ bool WindowOverviewMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam, LPAR
         }
         return false;
     case WM_KILLFOCUS:
-    case WM_CANCELMODE:
         if (!s.overview.busy) Close(s);
         return false;
     case WM_ACTIVATE:

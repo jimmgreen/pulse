@@ -1,0 +1,21 @@
+Win+E game-specific follow-up, 2026-11-04
+Evidence: Pulse-diagnostics-20261104-205058-4812-0.
+Exporting executable SHA256 46fd195e06dfadb428971246ce92420335ef05f09062fd700b5f5c61f2497f98
+matches the delivered win-e-direct runtime. Not an old-binary diagnosis.
+20:50:23 and 20:50:46 local: keyboard request accepted/dispatched, no native fallback.
+20:50:26 and 20:50:49: independent Explorer watcher handoffs, presented after 514/1000 ms.
+These records do not prove whether each pair belongs to a single physical chord.
+User reports laptop + external monitor: fullscreen movie works, fullscreen Wuthering Waves fails.
+No game session is available locally. Input/privilege interference remains a hypothesis.
+
+Confirmed diagnostic defect: win_e_foreground had 13 fields; runtime logger limit is 12.
+Reduced to 12 fields; unknown geometry is represented by kind_at_log=2.
+Shared production emitter tested via actual runtime logger, flush and file read.
+Added win_e_gate for first E with observed/asynchronous Win state, modifiers,
+injection marker, foreground PID, elevation and token-read error. No input text or
+ordinary E events are logged. Modifier observation is diagnostic only, not routing.
+The package does not claim to fix the game failure; fullscreen veto remains removed.
+
+Validation: affected targets pulse/pulse_runtime_log_test built; --win-e-foreground
+6 PASS, zero dropped events, fullscreen/unknown/modifier-disagreement records persisted.
+Evidence: bench_data/win-e-diagnostics-final-build.log and win-e-diagnostics-test.log.

@@ -1,5 +1,4 @@
-// Quick Look shell: the unified header and the full-width footer
-// (plans/Pulse_预览界面重构_设计稿.html, P1).
+// Quick Look shell: the unified header and the full-width footer (P1).
 //
 //   header (50 px): badge | name / meta | type tools | ‹ 6 / 12 › | Open with App | ⋯ | ×
 //   footer (30 px): format facts on the left, type controls on the right
@@ -10,6 +9,7 @@
 // the UI does; high contrast falls back to DirectWrite and system colours.
 #include "quick_preview_window.h"
 #include "FluentTokens.h"
+#include "text_contrast_scope.h"
 #include "command_icons.h"
 #include "legacy_icons.h"
 #include "typography.h"
@@ -42,6 +42,7 @@ constexpr float kGlyphSize = 16.0f * 0.66f;
 constexpr wchar_t kPrevGlyph[] = L"\xE72B";
 constexpr wchar_t kNextGlyph[] = L"\xE72A";
 constexpr wchar_t kMoreGlyph[] = L"\xE712";
+constexpr wchar_t kSizeGlyph[] = L"\xE740";   // 窗口大小 (FullScreen arrows)
 constexpr wchar_t kOpenGlyph[] = L"\xE8A7";   // OpenInNewWindow
 constexpr wchar_t kCloseGlyph[] = L"\xE711";
 constexpr wchar_t kFolderGlyph[] = L"\xE8B7";
@@ -62,9 +63,7 @@ std::wstring ShortAppName(std::wstring name) {
 }
 
 bool HighContrast() {
-    HIGHCONTRASTW value{sizeof(value)};
-    return SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(value), &value, 0) &&
-        (value.dwFlags & HCF_HIGHCONTRASTON);
+    return TextHighContrast();
 }
 
 bool Inside(const D2D1_RECT_F& rect, POINT point) {
@@ -140,8 +139,9 @@ std::wstring Fill(std::wstring text, std::wstring_view key, const std::wstring& 
 
 }  // namespace
 
-float QuickPreviewWindow::HeaderHeight() const noexcept { return kHeaderHeight * scale_; }
-float QuickPreviewWindow::FooterHeight() const noexcept { return kFooterHeight * scale_; }
+// Full screen hides the header and the footer; Esc or F brings them back.
+float QuickPreviewWindow::HeaderHeight() const noexcept { return (embedded_ || fullscreen_) ? 0.0f : kHeaderHeight * scale_; }
+float QuickPreviewWindow::FooterHeight() const noexcept { return fullscreen_ || (embedded_ && video_.active()) ? 0.0f : (embedded_ ? 26.0f : kFooterHeight) * scale_; }
 
 D2D1_RECT_F QuickPreviewWindow::FooterRect() const {
     const float width = static_cast<float>(compositor_.Width());
@@ -150,6 +150,8 @@ D2D1_RECT_F QuickPreviewWindow::FooterRect() const {
 }
 
 void QuickPreviewWindow::SetAccent(const D2D1_COLOR_F& accent) {
+    if (accent_.r == accent.r && accent_.g == accent.g && accent_.b == accent.b && accent_.a == 1.0f)
+        return;
     accent_ = accent;
     accent_.a = 1.0f;
     if (hwnd_ && visible()) InvalidateRect(hwnd_, nullptr, FALSE);
@@ -257,18 +259,101 @@ ComPtr<IDWriteTextLayout> QuickPreviewWindow::UiLayout(std::wstring_view text,
                                                      DWRITE_TEXT_ALIGNMENT alignment) const {
     ComPtr<IDWriteTextLayout> layout;
     if (!format || !compositor_.DwriteFactory() || text.empty()) return layout;
+    const auto generation = typography::Generation();
+    if (ui_layout_generation_ != generation) {
+        ui_layout_cache_.clear();
+        ui_trimming_cache_.clear();
+        ui_layout_text_bytes_ = 0;
+        ui_layout_generation_ = generation;
+    }
+    width = (std::max)(1.0f, width);
+    height = (std::max)(1.0f, height);
+    for (auto it = ui_layout_cache_.begin(); it != ui_layout_cache_.end(); ++it) {
+        if (it->text != text || it->format.get() != format || it->width != width ||
+            it->height != height || it->alignment != alignment) continue;
+        layout.p = it->layout.get();
+        ++ui_layout_hits_;
+        layout->AddRef();
+        auto entry = std::move(*it);
+        ui_layout_cache_.erase(it);
+        ui_layout_cache_.push_back(std::move(entry));
+        return layout;
+    }
     if (FAILED(compositor_.DwriteFactory()->CreateTextLayout(
             text.data(), static_cast<UINT32>(text.size()), format, (std::max)(1.0f, width),
             (std::max)(1.0f, height), &layout)) || !layout.get())
         return layout;
     layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    ++ui_layout_creations_;
     layout->SetTextAlignment(alignment);
     layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
-    ComPtr<IDWriteInlineObject> sign;
-    if (SUCCEEDED(compositor_.DwriteFactory()->CreateEllipsisTrimmingSign(format, &sign)))
-        layout->SetTrimming(&trimming, sign.get());
+    IDWriteInlineObject* sign = nullptr;
+    for (const auto& entry : ui_trimming_cache_) {
+        if (entry.format.get() == format) { sign = entry.sign.get(); break; }
+    }
+    if (!sign) {
+        UiTrimmingEntry entry;
+        if (SUCCEEDED(compositor_.DwriteFactory()->CreateEllipsisTrimmingSign(format, &entry.sign))) {
+            ++ui_sign_creations_;
+            entry.format.p = format;
+            format->AddRef();
+            if (ui_trimming_cache_.size() >= 16) ui_trimming_cache_.pop_front();
+            ui_trimming_cache_.push_back(std::move(entry));
+            sign = ui_trimming_cache_.back().sign.get();
+        }
+    }
+    if (sign) layout->SetTrimming(&trimming, sign);
+    constexpr size_t budget = 128 * 1024;
+    if (text.size() <= budget / sizeof(wchar_t)) {
+        const size_t bytes = text.size() * sizeof(wchar_t);
+        while (!ui_layout_cache_.empty() &&
+               (ui_layout_cache_.size() >= 64 || ui_layout_text_bytes_ + bytes > budget)) {
+            ui_layout_text_bytes_ -= ui_layout_cache_.front().text.size() * sizeof(wchar_t);
+            ui_layout_cache_.pop_front();
+        }
+        UiLayoutEntry entry;
+        entry.text = text;
+        entry.format.p = format;
+        format->AddRef();
+        entry.width = width;
+        entry.height = height;
+        entry.alignment = alignment;
+        entry.layout.p = layout.get();
+        layout->AddRef();
+        ui_layout_cache_.push_back(std::move(entry));
+        ui_layout_text_bytes_ += bytes;
+    }
     return layout;
+}
+
+HRESULT QuickPreviewWindow::CreateUiBrush(ID2D1DeviceContext* dc, const D2D1_COLOR_F& color,
+                                         ID2D1SolidColorBrush** result) {
+    *result = nullptr;
+    ComPtr<ID2D1Device> device;
+    dc->GetDevice(&device);
+    if (device.get() != ui_brush_device_.get()) {
+        ui_brush_cache_.clear();
+        ui_brush_device_ = std::move(device);
+    }
+    for (auto& entry : ui_brush_cache_) {
+        if (entry.color.r == color.r && entry.color.g == color.g &&
+            entry.color.b == color.b && entry.color.a == color.a) {
+            *result = entry.brush.get();
+            (*result)->AddRef();
+            return S_OK;
+        }
+    }
+    UiBrushEntry entry;
+    const HRESULT hr = dc->CreateSolidColorBrush(color, &entry.brush);
+    if (FAILED(hr)) return hr;
+    ++ui_brush_creations_;
+    entry.color = color;
+    *result = entry.brush.get();
+    (*result)->AddRef();
+    if (ui_brush_cache_.size() >= 32) ui_brush_cache_.pop_front();
+    ui_brush_cache_.push_back(std::move(entry));
+    return hr;
 }
 
 float QuickPreviewWindow::UiTextWidth(std::wstring_view text, IDWriteTextFormat* format) const {
@@ -286,7 +371,7 @@ void QuickPreviewWindow::DrawUiText(ID2D1DeviceContext* dc, std::wstring_view te
         UiLayout(text, format, rect.right - rect.left, rect.bottom - rect.top, alignment);
     if (!layout.get()) return;
     ComPtr<ID2D1SolidColorBrush> brush;
-    dc->CreateSolidColorBrush(color, &brush);
+    CreateUiBrush(dc, color, &brush);
     if (!brush.get()) return;
     compositor_.DrawTextLayout(D2D1::Point2F(rect.left, rect.top), layout.get(), brush.get(),
                                D2D1_DRAW_TEXT_OPTIONS_CLIP);
@@ -320,6 +405,7 @@ float QuickPreviewWindow::ToggleSegmentWidth(int segment) const {
 }
 
 void QuickPreviewWindow::LayoutHeader() {
+    if (embedded_) { header_ = {}; return; }
     const float s = scale_;
     const float width = static_cast<float>(compositor_.Width());
     const float header = HeaderHeight();
@@ -339,7 +425,7 @@ void QuickPreviewWindow::LayoutHeader() {
     const float tools_w = has_tools ? ToggleSegmentWidth(0) + ToggleSegmentWidth(1) + 4.0f * s : 0.0f;
     const float left_fixed = (kHeaderPadLeft + kBadgeSize + 10.0f) * s;
     const auto title_room = [&](bool tools, bool open_text, bool counter) {
-        float right = kCloseWidth * s + 2.0f * s + button + 4.0f * s;      // close, more
+        float right = kCloseWidth * s + 2.0f * s + (button + 4.0f * s) * 2.0f;  // close, more, size
         right += open_text ? open_full : button;                           // open
         right += 8.0f * s + button * 2.0f + (counter ? counter_w : 0.0f);  // nav
         if (tools) right += tools_w + 8.0f * s + 13.0f * s;                // pill + separator
@@ -372,6 +458,8 @@ void QuickPreviewWindow::LayoutHeader() {
     float x = h.close.left - 2.0f * s;
     h.more = D2D1::RectF(x - button, cy - button * 0.5f, x, cy + button * 0.5f);
     x = h.more.left - 4.0f * s;
+    h.size = D2D1::RectF(x - button, cy - button * 0.5f, x, cy + button * 0.5f);
+    x = h.size.left - 4.0f * s;
     const float open_w = h.open_text ? open_full : button;
     h.open = D2D1::RectF(x - open_w, cy - button * 0.5f, x, cy + button * 0.5f);
     x = h.open.left - 8.0f * s;
@@ -410,19 +498,20 @@ bool QuickPreviewWindow::HeaderInteractive(POINT client) const {
 }
 
 void QuickPreviewWindow::DrawHeader(ID2D1DeviceContext* dc, const ChromePalette& p) {
+    if (embedded_) return;
     if (!dc) return;
     const float s = scale_;
     const float width = static_cast<float>(compositor_.Width());
     const float header = HeaderHeight();
     ComPtr<ID2D1SolidColorBrush> bg, hover, ink, dim;
-    dc->CreateSolidColorBrush(p.bg, &bg);
-    dc->CreateSolidColorBrush(p.hover, &hover);
-    dc->CreateSolidColorBrush(p.ink2, &ink);
-    dc->CreateSolidColorBrush(p.ink3, &dim);
+    CreateUiBrush(dc, p.bg, &bg);
+    CreateUiBrush(dc, p.hover, &hover);
+    CreateUiBrush(dc, p.ink2, &ink);
+    CreateUiBrush(dc, p.ink3, &dim);
     if (bg.get()) dc->FillRectangle(D2D1::RectF(0, 0, width, header), bg.get());
     if (p.high_contrast) {
         ComPtr<ID2D1SolidColorBrush> line;
-        dc->CreateSolidColorBrush(p.line, &line);
+        CreateUiBrush(dc, p.line, &line);
         if (line.get()) dc->FillRectangle(D2D1::RectF(0, header - 1.0f, width, header), line.get());
     }
 
@@ -434,17 +523,17 @@ void QuickPreviewWindow::DrawHeader(ID2D1DeviceContext* dc, const ChromePalette&
     D2D1_COLOR_F badge_ink = HexColor(0xFFFFFF);
     if (p.high_contrast) {
         ComPtr<ID2D1SolidColorBrush> outline;
-        dc->CreateSolidColorBrush(p.ink, &outline);
+        CreateUiBrush(dc, p.ink, &outline);
         if (outline.get()) dc->DrawRoundedRectangle(badge, outline.get(), (std::max)(1.0f, s));
         badge_ink = p.ink;
     } else {
         ComPtr<ID2D1SolidColorBrush> fill;
-        dc->CreateSolidColorBrush(HexColor(BadgeRgb(ext, folder)), &fill);
+        CreateUiBrush(dc, HexColor(BadgeRgb(ext, folder)), &fill);
         if (fill.get()) dc->FillRoundedRectangle(badge, fill.get());
     }
     if (folder) {
         ComPtr<ID2D1SolidColorBrush> glyph;
-        dc->CreateSolidColorBrush(badge_ink, &glyph);
+        CreateUiBrush(dc, badge_ink, &glyph);
         if (glyph.get())
             command_icons::DrawGlyph(dc, glyph.get(), kFolderGlyph, header_.badge, 14.0f * s);
     } else {
@@ -462,10 +551,10 @@ void QuickPreviewWindow::DrawHeader(ID2D1DeviceContext* dc, const ChromePalette&
     // Type tools: the view toggle (Rendered | Source, Table | System, ...).
     if (header_.tools_visible && markdown_shown_) {
         ComPtr<ID2D1SolidColorBrush> text;
-        dc->CreateSolidColorBrush(p.ink, &text);
+        CreateUiBrush(dc, p.ink, &text);
         DrawMarkdownToggle(dc, text.get());
         ComPtr<ID2D1SolidColorBrush> line;
-        dc->CreateSolidColorBrush(p.high_contrast ? p.line : WithAlpha(p.ink, dark_ ? 0.16f : 0.14f), &line);
+        CreateUiBrush(dc, p.high_contrast ? p.line : WithAlpha(p.ink, dark_ ? 0.16f : 0.14f), &line);
         if (line.get()) dc->FillRectangle(header_.separator, line.get());
     }
 
@@ -478,7 +567,7 @@ void QuickPreviewWindow::DrawHeader(ID2D1DeviceContext* dc, const ChromePalette&
         if (hot && hover.get())
             dc->FillRoundedRectangle(D2D1::RoundedRect(rect, 7.0f * s, 7.0f * s), hover.get());
         ComPtr<ID2D1SolidColorBrush> brush;
-        dc->CreateSolidColorBrush(hot && p.high_contrast ? p.on_hover : enabled ? p.ink2 : p.ink3, &brush);
+        CreateUiBrush(dc, hot && p.high_contrast ? p.on_hover : enabled ? p.ink2 : p.ink3, &brush);
         if (!brush.get()) return;
         if (!command_icons::DrawGlyph(dc, brush.get(), glyph, rect, glyph_size))
             DrawLegacyIcon(dc, compositor_.DwriteFactory(), glyph, rect, brush.get());
@@ -501,12 +590,12 @@ void QuickPreviewWindow::DrawHeader(ID2D1DeviceContext* dc, const ChromePalette&
                                 (std::min)(1.0f, fill.b * k), 1.0f);
         }
         ComPtr<ID2D1SolidColorBrush> brush;
-        dc->CreateSolidColorBrush(fill, &brush);
+        CreateUiBrush(dc, fill, &brush);
         const D2D1_ROUNDED_RECT shape{header_.open, 6.0f * s, 6.0f * s};
         if (brush.get()) dc->FillRoundedRectangle(shape, brush.get());
         if (p.high_contrast && hot) {
             ComPtr<ID2D1SolidColorBrush> ring;
-            dc->CreateSolidColorBrush(p.ink, &ring);
+            CreateUiBrush(dc, p.ink, &ring);
             if (ring.get()) dc->DrawRoundedRectangle(shape, ring.get(), 2.0f * s);
         }
         const float icon = 16.0f * s;
@@ -520,7 +609,7 @@ void QuickPreviewWindow::DrawHeader(ID2D1DeviceContext* dc, const ChromePalette&
             dc->DrawBitmap(app_icon.bitmap, icon_rect, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
         } else {
             ComPtr<ID2D1SolidColorBrush> glyph;
-            dc->CreateSolidColorBrush(p.on_accent, &glyph);
+            CreateUiBrush(dc, p.on_accent, &glyph);
             if (glyph.get() && !command_icons::DrawGlyph(dc, glyph.get(), kOpenGlyph, icon_rect, 14.0f * s))
                 DrawLegacyIcon(dc, compositor_.DwriteFactory(), kOpenGlyph, icon_rect, glyph.get());
         }
@@ -530,16 +619,17 @@ void QuickPreviewWindow::DrawHeader(ID2D1DeviceContext* dc, const ChromePalette&
                                    header_.open.right - 12.0f * s, header_.open.bottom),
                        p.on_accent);
     }
+    icon_button(ChromeButton::Size, header_.size, kSizeGlyph, true);
     icon_button(ChromeButton::More, header_.more, kMoreGlyph, true);
 
     // Close.
     if (close_hover_) {
         ComPtr<ID2D1SolidColorBrush> red;
-        dc->CreateSolidColorBrush(p.high_contrast ? p.hover : HexColor(0xC42B1C), &red);
+        CreateUiBrush(dc, p.high_contrast ? p.hover : HexColor(0xC42B1C), &red);
         if (red.get()) dc->FillRectangle(header_.close, red.get());
     }
     ComPtr<ID2D1SolidColorBrush> close_ink;
-    dc->CreateSolidColorBrush(close_hover_ ? (p.high_contrast ? p.on_hover : HexColor(0xFFFFFF)) : p.ink,
+    CreateUiBrush(dc, close_hover_ ? (p.high_contrast ? p.on_hover : HexColor(0xFFFFFF)) : p.ink,
                               &close_ink);
     if (close_ink.get() && !command_icons::DrawGlyph(dc, close_ink.get(), kCloseGlyph, header_.close, glyph_size))
         DrawLegacyIcon(dc, compositor_.DwriteFactory(), kCloseGlyph, header_.close, close_ink.get());
@@ -645,8 +735,8 @@ void QuickPreviewWindow::DrawInfoDrawer(ID2D1DeviceContext* dc, const ChromePale
     const D2D1_RECT_F panel = D2D1::RectF(content.right, content.top,
                                           static_cast<float>(compositor_.Width()), content.bottom);
     ComPtr<ID2D1SolidColorBrush> bg, line;
-    dc->CreateSolidColorBrush(p.bg, &bg);
-    dc->CreateSolidColorBrush(p.line, &line);
+    CreateUiBrush(dc, p.bg, &bg);
+    CreateUiBrush(dc, p.line, &line);
     if (!bg.get() || !line.get()) return;
     dc->FillRectangle(panel, bg.get());
     dc->FillRectangle(D2D1::RectF(panel.left, panel.top, panel.left + (std::max)(1.0f, std::round(s)),
@@ -738,19 +828,22 @@ void QuickPreviewWindow::DrawInfoDrawer(ID2D1DeviceContext* dc, const ChromePale
         sink->EndFigure(D2D1_FIGURE_END_CLOSED);
         if (FAILED(sink->Close())) break;
         ComPtr<ID2D1SolidColorBrush> fill;
-        dc->CreateSolidColorBrush(D2D1::ColorF(channel.color, alpha), &fill);
+        CreateUiBrush(dc, D2D1::ColorF(channel.color, alpha), &fill);
         if (fill.get()) dc->FillGeometry(path.get(), fill.get());
     }
     dc->PopAxisAlignedClip();
 }
 
 void QuickPreviewWindow::DrawFooter(ID2D1DeviceContext* dc, const ChromePalette& p) {
-    if (!dc) return;
+    if (!dc || FooterHeight() <= 0) {
+        for (auto& control : footer_controls_) control.rect = {};
+        return;
+    }
     const float s = scale_;
     const D2D1_RECT_F bar = FooterRect();
     ComPtr<ID2D1SolidColorBrush> bg, line;
-    dc->CreateSolidColorBrush(p.bg, &bg);
-    dc->CreateSolidColorBrush(p.line, &line);
+    CreateUiBrush(dc, p.bg, &bg);
+    CreateUiBrush(dc, p.line, &line);
     if (bg.get()) dc->FillRectangle(bar, bg.get());
     if (line.get()) dc->FillRectangle(D2D1::RectF(bar.left, bar.top, bar.right, bar.top + (std::max)(1.0f, std::round(s))), line.get());
     IDWriteTextFormat* format = compositor_.SmallFormat();
@@ -764,7 +857,7 @@ void QuickPreviewWindow::DrawFooter(ID2D1DeviceContext* dc, const ChromePalette&
         const bool hot = footer_hover_ == it->id;
         if (hot || it->on) {
             ComPtr<ID2D1SolidColorBrush> hover;
-            dc->CreateSolidColorBrush(p.hover, &hover);
+            CreateUiBrush(dc, p.hover, &hover);
             if (hover.get()) dc->FillRoundedRectangle(D2D1::RoundedRect(it->rect, 6.0f * s, 6.0f * s), hover.get());
         }
         DrawUiText(dc, it->text, format, it->rect, hot && p.high_contrast ? p.on_hover : p.ink2,
@@ -772,7 +865,7 @@ void QuickPreviewWindow::DrawFooter(ID2D1DeviceContext* dc, const ChromePalette&
         if (footer_focus_ == it->id) {
             // Keyboard focus: a 2 px accent ring just outside the chip.
             ComPtr<ID2D1SolidColorBrush> ring;
-            dc->CreateSolidColorBrush(p.accent, &ring);
+            CreateUiBrush(dc, p.accent, &ring);
             const float stroke = (std::max)(1.0f, std::round(2.0f * s));
             const D2D1_RECT_F r = D2D1::RectF(it->rect.left - stroke * 0.5f, it->rect.top - stroke * 0.5f,
                                               it->rect.right + stroke * 0.5f, it->rect.bottom + stroke * 0.5f);
@@ -820,8 +913,8 @@ void QuickPreviewWindow::DrawFooter(ID2D1DeviceContext* dc, const ChromePalette&
     const ComPtr<IDWriteTextLayout> layout = UiLayout(label, format, right - 8.0f * s - left, bar.bottom - bar.top);
     if (!layout.get()) return;
     ComPtr<ID2D1SolidColorBrush> ink, dim;
-    dc->CreateSolidColorBrush(p.ink2, &ink);
-    dc->CreateSolidColorBrush(p.ink3, &dim);
+    CreateUiBrush(dc, p.ink2, &ink);
+    CreateUiBrush(dc, p.ink3, &dim);
     if (dim.get())
         for (const UINT32 at : dots) layout->SetDrawingEffect(dim.get(), DWRITE_TEXT_RANGE{at + 1, 1});
     if (ink.get())

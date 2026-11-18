@@ -1,3 +1,4 @@
+#include "../drive_eject_ui.h"
 // action_args_ext.cpp - The P4b runners of action_args.h: actions whose
 // effect leaves Pulse (Git, shell menu items, other programs) or touches the
 // system (cloud files, drives), with the words of their confirm cards, and
@@ -647,7 +648,7 @@ ArgRun DriveVerb(AppState& s, const json::Value& args, bool eject) {
         return Fail("that drive cannot be ejected", Fill(Text(I::AiDriveNotEjectable), L"{drive}", letter));
     if (!eject && d.type != DRIVE_REMOTE)
         return Fail("that is not a network drive", Fill(Text(I::AiDriveNotRemote), L"{drive}", letter));
-    const bool started = eject ? StartDriveEject(s.hwnd, WM_DRIVE_VERB, d.root, d.type)
+    const bool started = eject ? StartPreparedDriveEject(s, d.root, d.type)
                                : StartDriveDisconnect(s.hwnd, WM_DRIVE_VERB, d.root, false);
     if (!started) return Fail("Windows did not take the request", Text(I::AiActWhyFailed));
     ArgRun r;
@@ -708,7 +709,7 @@ constexpr std::string_view kAskIds[] = {
     "preview.cloud_download", "drive.eject", "drive.disconnect",
 };
 
-constexpr std::string_view kLockIds[] = {"app.exit", "drive.unlock", "assistant.prefs"};
+constexpr std::string_view kLockIds[] = {"app.exit", "drive.unlock", "assistant.prefs", "assistant.organize_here"};
 
 constexpr bool TablesKnown() {
     for (const auto& [id, _] : kExtRunners)
@@ -770,6 +771,10 @@ ArgLock LockFor(AppState& s, std::string_view id, const json::Value& args) {
     } else if (id == "assistant.prefs") {
         k.sub = Text(I::AiSetLockS);
         k.where = Fill(Text(I::AiLockWhereSettings), L"{page}", SettingsPageTitle(13));
+    } else if (id == "assistant.organize_here") {
+        // Task 46: it only fills the assistant's box for the user to send.
+        k.sub = Text(I::AiLockOrgHereS);
+        k.where = Text(I::AiLockOrgHereWhere);
     }
     return k;
 }

@@ -1,3 +1,4 @@
+#include "../common/app_runtime_paths.h"
 // default_file_manager.cpp — see default_file_manager.h.
 #include "default_file_manager.h"
 
@@ -14,11 +15,7 @@ namespace pulse::app {
 namespace {
 
 std::wstring ModulePath() {
-    std::wstring path(32768, L'\0');
-    const DWORD size = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-    if (!size || size >= path.size()) return {};
-    path.resize(size);
-    return path;
+    return app_runtime_paths::StableEntryPath();
 }
 
 } // namespace

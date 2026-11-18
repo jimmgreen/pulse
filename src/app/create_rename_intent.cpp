@@ -26,10 +26,11 @@ void Prune(std::vector<CreateRenameIntent>& intents, std::wstring_view parent, u
 }
 }
 void QueueCreateRenameIntent(std::vector<CreateRenameIntent>& intents, uint64_t task_id,
-    std::wstring_view parent, uint64_t view_generation) {
+    std::wstring_view parent, uint64_t view_generation, std::wstring_view target_parent) {
     Prune(intents, parent, view_generation);
     if (!task_id || parent.empty()) return;
-    intents.push_back({task_id, Canonical(parent), view_generation, {}, false});
+    intents.push_back({task_id, Canonical(parent), view_generation, {}, false,
+        Canonical(target_parent.empty() ? parent : target_parent)});
 }
 bool CompleteCreateRenameIntent(std::vector<CreateRenameIntent>& intents, uint64_t task_id,
     std::wstring_view current_parent, uint64_t view_generation, std::wstring_view actual_created_path) {
@@ -40,7 +41,7 @@ bool CompleteCreateRenameIntent(std::vector<CreateRenameIntent>& intents, uint64
     const auto separator = actual.find_last_of(L'\\');
     const auto parent = separator == 2 ? actual.substr(0, 3) : actual.substr(0, separator);
     if (separator == std::wstring::npos || separator + 1 == actual.size() ||
-        !Same(parent, found->parent)) {
+        !Same(parent, found->target_parent.empty() ? found->parent : found->target_parent)) {
         intents.erase(found);
         return false;
     }
@@ -64,7 +65,12 @@ bool CreateRenameEntryMatches(const CreateRenameIntent& intent, std::wstring_vie
         entry_name.find_first_of(L"\\/") != std::wstring_view::npos) return false;
     const auto leaf = std::wstring_view(intent.actual_path).substr(intent.actual_path.find_last_of(L'\\') + 1);
     if (!path::EqualInsensitive(leaf, entry_name)) return false;
-    auto composed = intent.parent;
+    const auto& target_parent = intent.target_parent.empty() ? intent.parent : intent.target_parent;
+    if (!Same(target_parent, intent.parent)) {
+        // A basename alone could be a different row at the tree root.
+        return !entry_full_path.empty() && Canonical(entry_full_path) == Canonical(intent.actual_path);
+    }
+    auto composed = target_parent;
     if (!composed.ends_with(L'\\')) composed += L'\\';
     composed += entry_name;
     return Same(composed, intent.actual_path) &&

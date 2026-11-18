@@ -1,3 +1,4 @@
+#include "drive_verbs.h"
 #include "app_sidebar_refresh.h"
 #include "app_internal.h"
 #include "sidebar_refresh_schedule.h"
@@ -46,7 +47,8 @@ bool SameEntries(const std::vector<app::SidebarEntry>& a, const std::vector<app:
             !SameColor(x.color, y.color) || !SameColor(x.tag_dot, y.tag_dot) ||
             x.danger != y.danger || x.is_tag != y.is_tag || x.show_count != y.show_count ||
             x.count != y.count || x.path != y.path || x.is_drive != y.is_drive ||
-            std::abs(x.used_ratio - y.used_ratio) > kUsedRatioStep || x.expandable != y.expandable ||
+            std::abs(x.used_ratio - y.used_ratio) > kUsedRatioStep || x.total_bytes != y.total_bytes ||
+            x.expandable != y.expandable ||
             x.builtin != y.builtin) {
             return false;
         }
@@ -89,6 +91,9 @@ void StartPending(AppState& state) {
             // Publish completion even on failure: WorkerPool's outer catch
             // otherwise leaves the sidebar scheduler permanently busy.
         }
+        if (succeeded)
+            for (const auto& drive : result.drives)
+                if (drive.is_drive) app::RefreshDriveEjectable(drive.path, static_cast<uint8_t>(GetDriveTypeW(drive.path.c_str())));
         if (load->cancelled) return;
         std::lock_guard lock(load->mutex);
         load->result = std::move(result);
@@ -159,7 +164,7 @@ bool SyncDeviceSidebar(AppState& state) {
         e.fallback = L"Phone";
         e.color = ui::HexColor(0x60A5FA);
         if (device.locked) {
-            // Waiting for Allow / Trust on the phone (pulse_devices_cloud.html).
+            // Waiting for Allow / Trust on the phone.
             e.badge = l10n::Get(l10n::StringId::DeviceLockedChip);
             e.badge_rgb = 0xB7791F;
         }

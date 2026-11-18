@@ -74,7 +74,7 @@ constexpr KeyActionInfo kActions[] = {
     {X::FavoritesBar, "FavoritesBar", G::Tabs, N::Normal, L"显示收藏栏", L"Show the favorites bar", D(K(C | S, 'B')), 0, 0, 0, false},
     {X::Maximize, "Maximize", G::Tabs, N::Normal, L"最大化", L"Maximize", D(K(0, VK_F11)), 0, 0, 0, false},
     // Windows dispatches this through the configured shell integration.
-    {X::NewWindow, "NewWindow", G::Windows, N::Fixed, L"新建窗口", L"New window", D(K(kKeyWin, 'E')), 0, 0, 0, false},
+    {X::NewWindow, "NewWindow", G::Windows, N::Normal, L"新建窗口", L"New window", D(K(C, 'N')), 0, 0, 0, false},
     {X::CloseWindow, "CloseWindow", G::Windows, N::Normal, L"关闭窗口", L"Close window", D(K(C | S, 'W')), 0, 0, 0, false},
     {X::TabToWindow, "TabToWindow", G::Windows, N::Normal, L"标签页移到新窗口", L"Move tab to a new window", D(K(C | S, 'M')), 0, 0, 0, false},
     {X::ReopenClosed, "ReopenClosed", G::Windows, N::Normal, L"重新打开关闭的窗口", L"Reopen what was closed", D(K(C | S, 'T')), 0, 0, 0, false},
@@ -82,7 +82,14 @@ constexpr KeyActionInfo kActions[] = {
     {X::Overview, "Overview", G::Windows, N::Normal, L"窗口总览", L"Window overview", D(K(C | S, 'O')), 0, 0, 0, false},
     {X::MergeWindows, "MergeWindows", G::Windows, N::Normal, L"合并所有窗口", L"Merge all windows", D(K(C | S, 'J')), 0, 0, 0, false},
     {X::AiAssistant, "AiAssistant", G::Windows, N::Normal, L"Pulse 助手", L"Pulse Assistant", D(K(C, 'J')), 0, 0, 0, false},
+    {X::AiHistory, "AiHistory", G::Windows, N::Normal, L"Pulse 助手历史对话", L"Pulse Assistant chat history", D(K(C, 'H')), 0, 0, 0, false},
     {X::ShortcutHelp, "ShortcutHelp", G::Windows, N::Normal, L"键盘快捷键", L"Keyboard shortcuts", D(K(C, VK_OEM_2)), 0, 0, 0, false},
+    {X::ArrangeSideBySide, "ArrangeSideBySide", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
+    {X::ArrangeStacked, "ArrangeStacked", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
+    {X::ArrangeColumns, "ArrangeColumns", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
+    {X::ArrangeTile, "ArrangeTile", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
+    {X::ArrangeMain, "ArrangeMain", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
+    {X::ArrangeCascade, "ArrangeCascade", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
 };
 static_assert(std::size(kActions) == static_cast<size_t>(kKeyActionCount));
 
@@ -153,6 +160,15 @@ const KeyActionInfo& ActionInfo(KeyAction action) noexcept {
 
 const wchar_t* ActionName(KeyAction action) {
     const auto& info = ActionInfo(action);
+    switch (info.action) {
+    case KeyAction::ArrangeSideBySide: return l10n::Get(l10n::StringId::ArrangeSideBySide).c_str();
+    case KeyAction::ArrangeStacked: return l10n::Get(l10n::StringId::ArrangeStacked).c_str();
+    case KeyAction::ArrangeColumns: return l10n::Get(l10n::StringId::ArrangeColumns).c_str();
+    case KeyAction::ArrangeTile: return l10n::Get(l10n::StringId::ArrangeTile).c_str();
+    case KeyAction::ArrangeMain: return l10n::Get(l10n::StringId::ArrangeMain).c_str();
+    case KeyAction::ArrangeCascade: return l10n::Get(l10n::StringId::ArrangeCascade).c_str();
+    default: break;
+    }
     return l10n::Pick(info.zh, info.en);
 }
 
@@ -560,6 +576,13 @@ Keymap::Translation Keymap::Translate(KeyChord pressed) const {
 }
 
 const Keymap& ActiveKeymap() { return g_active; }
+
+int WorkspaceShortcutIndex(const Keymap& keymap, KeyChord chord) {
+    if (chord.mods != (kKeyCtrl | kKeyAlt) || chord.vk < '1' || chord.vk > '9') return -1;
+    const auto route = keymap.Translate(chord);
+    if (route.kind != Keymap::Translation::Pass || route.action != KeyAction::Count) return -1;
+    return chord.vk - '1';
+}
 void SetActiveKeymap(Keymap keymap) { g_active = std::move(keymap); }
 
 // ---- conflict checks --------------------------------------------------------
@@ -633,7 +656,7 @@ ChordVerdict CheckChord(const Keymap& keymap, KeyAction action, KeyChord chord, 
     }
     if (Contains(keymap.Bindings(action), chord)) return set(ChordIssue::Same, ChordLevel::Info);
     const bool own_global = global && keymap.GlobalHotkeyEnabled() && keymap.GlobalHotkey() == chord;
-    if (env.IsTaken(chord) && !own_global) return set(ChordIssue::Taken, ChordLevel::Block);
+    if (global && env.IsTaken(chord) && !own_global) return set(ChordIssue::Taken, ChordLevel::Block);
     const Keymap::Owner other = keymap.Find(chord, action);
     if (other.found()) {
         v.other = other;
@@ -658,10 +681,7 @@ RangeVerdict CheckRange(const Keymap& keymap, KeyAction action, uint8_t mods, co
     for (const KeyChord chord : keymap.RangeChords(action, mods)) {
         RangeDigitStatus d;
         d.chord = chord;
-        if (env.IsTaken(chord)) {
-            d.issue = ChordIssue::Taken;
-            d.level = ChordLevel::Block;
-        } else if (const auto other = keymap.Find(chord, action); other.found()) {
+        if (const auto other = keymap.Find(chord, action); other.found()) {
             d.issue = ChordIssue::DuplicateFixed;
             d.level = ChordLevel::Block;
             d.other = other;
@@ -690,12 +710,8 @@ std::vector<BindingIssue> CollectIssues(const Keymap& keymap, const ShortcutEnv&
         if (info.kind == KeyKind::Fixed) continue;
         if (info.kind == KeyKind::Global) continue;  // its own registration reports a failure
         for (const KeyChord chord : keymap.EffectiveChords(action)) {
-            // A dismissed chord another program holds leaves the list (and
-            // the badge); CheckChord still blocks recording it.
-            if (env.IsTaken(chord)) {
-                if (!Contains(env.ime_ignored, chord))
-                    out.push_back({action, chord, ChordIssue::Taken, ChordLevel::Block});
-            } else if (env.ImeApplies(chord)) out.push_back({action, chord, ChordIssue::Ime, ChordLevel::Warn});
+            // Global registration availability does not prove local input is blocked.
+            if (env.ImeApplies(chord)) out.push_back({action, chord, ChordIssue::Ime, ChordLevel::Warn});
         }
     }
     std::stable_sort(out.begin(), out.end(), [](const BindingIssue& a, const BindingIssue& b) {
@@ -759,14 +775,8 @@ std::vector<KeyChord> SuggestChords(const Keymap& keymap, KeyAction action, cons
 
 std::vector<KeyChord> ProbeCandidates(const Keymap& keymap) {
     std::vector<KeyChord> out;
-    for (int i = 0; i < kKeyActionCount; ++i) {
-        const auto action = static_cast<KeyAction>(i);
-        const auto& info = ActionInfo(action);
-        if (info.kind == KeyKind::Fixed || info.kind == KeyKind::Global) continue;
-        for (const KeyChord chord : keymap.EffectiveChords(action)) PushUnique(out, chord);
-        for (const KeyChord chord : DefaultBindings(action)) PushUnique(out, chord);
-        for (const KeyChord chord : SuggestionPool(keymap, action)) PushUnique(out, chord);
-    }
+    // Probe only keys intended for system-wide registration. Local shortcuts
+    // are delivered through window messages and do not need RegisterHotKey.
     for (const KeyChord chord : SuggestionPool(keymap, KeyAction::GlobalSearch)) PushUnique(out, chord);
     if (keymap.GlobalHotkeyEnabled()) {
         const KeyChord own = keymap.GlobalHotkey();

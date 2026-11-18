@@ -1,5 +1,7 @@
 #include "group_wheel.h"
 #include "FluentTokens.h"
+#include "fluent_components.h"
+#include "snack_style.h"
 #include "command_icons.h"
 #include "typography.h"
 #include "ui_motion.h"
@@ -16,6 +18,7 @@ constexpr float kRadius = 115.0f;    // cylinder radius (DIP)
 constexpr float kPerspective = 520.0f;
 constexpr float kDragPitch = 60.0f;  // drag distance per row (DIP)
 constexpr float kSpringK = 240.0f;   // critically damped roll
+constexpr float kFooterDip = 52.0f;  // bottom strip: Cancel / Apply (32 DIP buttons)
 
 D2D1_COLOR_F GwRgb(uint32_t rgb, float a) {
     return D2D1::ColorF(static_cast<float>((rgb >> 16) & 0xFF) / 255.0f,
@@ -89,12 +92,16 @@ void GroupWheel::Open(GroupWheelData data, const D2D1_RECT_F& anchor, const D2D1
     const float s = scale_;
     const float w = std::max(360.0f * s, std::min(480.0f * s, (client.right - client.left) - 24.0f * s));
     const float top = anchor.bottom + 6.0f * s;
-    const float h = std::max(220.0f * s, std::min(300.0f * s, client.bottom - top - 12.0f * s));
+    const float h = std::max(232.0f * s, std::min(312.0f * s, client.bottom - top - 12.0f * s));
     const float left = std::clamp(anchor.left, client.left + 12.0f * s,
                                   std::max(client.left + 12.0f * s, client.right - w - 12.0f * s));
     panel_ = D2D1::RectF(left, top, left + w, top + h);
     apply_all_rect_ = {};
     apply_all_hot_ = false;
+    cancel_rect_ = ok_rect_ = {};
+    footer_hot_ = footer_pressed_ = 0;
+    hover_step_ = kNoHover;
+    seg_hot_ = -1;
     const int applied = std::clamp(data_.applied, 0, std::max(0, Count() - 1));
     t_ = static_cast<float>(applied);
     p_ = animate_ ? t_ - 0.6f : t_;   // roll in to the current choice
@@ -127,10 +134,48 @@ bool GroupWheel::HitApplyAll(float x, float y) const noexcept {
     return open_ && r.right > r.left && x >= r.left && x < r.right && y >= r.top && y < r.bottom;
 }
 
-bool GroupWheel::HoverApplyAll(float x, float y) noexcept {
-    const bool hot = HitApplyAll(x, y);
-    if (hot == apply_all_hot_) return false;
-    apply_all_hot_ = hot;
+namespace {
+bool InRect(const D2D1_RECT_F& r, float x, float y) noexcept {
+    return r.right > r.left && x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+}
+}  // namespace
+
+int GroupWheel::HitFooter(float x, float y) const noexcept {
+    if (!open_) return 0;
+    if (InRect(ok_rect_, x, y)) return kFooterApply;
+    if (InRect(cancel_rect_, x, y)) return kFooterCancel;
+    return 0;
+}
+
+bool GroupWheel::InDrum(float x, float y) const noexcept {
+    return open_ && InRect(DrumRect(), x, y);
+}
+
+int GroupWheel::RowStepAt(float x, float y) const noexcept {
+    if (!InDrum(x, y)) return kNoHover;
+    const D2D1_RECT_F drum = DrumRect();
+    const float cy = (drum.top + drum.bottom) * 0.5f;
+    const float rel = std::clamp((y - cy) / (kRadius * scale_), -1.0f, 1.0f);
+    const int step = static_cast<int>(std::lround(std::asin(rel) * 180.0f / kGwPi / kStepDeg));
+    const int target = static_cast<int>(std::lround(Clamp(t_))) + step;
+    return step == 0 || (target >= 0 && target < Count()) ? step : kNoHover;
+}
+
+bool GroupWheel::Hover(float x, float y) noexcept {
+    const bool all = HitApplyAll(x, y);
+    const int footer = HitFooter(x, y);
+    const int step = dragging_ ? kNoHover : RowStepAt(x, y);
+    int seg = -1;
+    if (open_ && data_.sort_controls) {
+        for (int k = 0; k < 2 && seg < 0; ++k)
+            for (int i = 0; i < (k == 0 ? 2 : 3); ++i)
+                if (InRect(SegmentRect(k, i), x, y)) { seg = k * 4 + i; break; }
+    }
+    if (all == apply_all_hot_ && footer == footer_hot_ && step == hover_step_ && seg == seg_hot_) return false;
+    seg_hot_ = seg;
+    apply_all_hot_ = all;
+    footer_hot_ = footer;
+    hover_step_ = step;
     return true;
 }
 
@@ -145,7 +190,7 @@ int GroupWheel::CentreIndex() const noexcept {
 D2D1_RECT_F GroupWheel::DrumRect() const noexcept {
     // The bottom strip under the drum holds the key hints (DrawFooter).
     return D2D1::RectF(panel_.left, panel_.top,
-                       panel_.left + (panel_.right - panel_.left) * 0.56f, panel_.bottom - 40.0f * scale_);
+                       panel_.left + (panel_.right - panel_.left) * 0.56f, panel_.bottom - kFooterDip * scale_);
 }
 
 void GroupWheel::Step(int delta) {
@@ -341,13 +386,18 @@ void GroupWheel::DrawRow(ID2D1DeviceContext* dc, const Theme& theme, int index, 
     // Pill on the right.
     // Sort picker: no pill - the Order segment already shows the direction,
     // and the row needs the width for the name and its explanation.
-    const std::wstring pill_text = data_.sort_controls ? std::wstring() : o.pill;
+    // The pointer on the centre card: the pill says a click applies (both pickers).
+    const bool go = cur && hover_step_ == 0 && !dragging_ && std::abs(p_ - t_) < 0.05f &&
+                    !data_.click_apply_text.empty();
+    const std::wstring pill_text = go ? data_.click_apply_text
+                                 : data_.sort_controls ? std::wstring() : o.pill;
     const float pill_w = g_ink.Measure(f_small_, pill_text) + 16.0f * s;
     const D2D1_RECT_F pill = D2D1::RectF(right - pill_w, -10.0f * s, right, 10.0f * s);
     if (!pill_text.empty()) {
-        g_ink.Fill(pill, 10.0f * s, cur ? GwAlpha(theme.accent, 0.14f * op) : GwAlpha(theme.text, 0.07f * op));
+        g_ink.Fill(pill, 10.0f * s, go ? GwAlpha(theme.accent, op)
+                                 : cur ? GwAlpha(theme.accent, 0.14f * op) : GwAlpha(theme.text, 0.07f * op));
         g_ink.Text(f_small_, pill_text, D2D1::RectF(pill.left + 8.0f * s, pill.top, pill.right, pill.bottom),
-                   GwAlpha(cur ? theme.accent : theme.text_secondary, op));
+                   GwAlpha(go ? theme.accent_text : cur ? theme.accent : theme.text_secondary, op));
     }
     // Name and meta.
     const float tx = left + 44.0f * s, tr = pill_text.empty() ? right : pill.left - 10.0f * s;
@@ -385,68 +435,63 @@ void GroupWheel::DrawPreview(ID2D1DeviceContext* dc, const Theme& theme, const D
     blob(0.76f, 0.80f, 0.55f, 0.62f, o.hue2);
 }
 
-void GroupWheel::DrawFooter(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, const Theme& theme) {
-    (void)dc;
-    (void)dwrite;
-    const float s = scale_;
-    const D2D1_RECT_F drum = DrumRect();
-    // Bottom row across the whole panel, left-aligned with the selection card.
-    const float min_x = drum.left + 16.0f * s;
-    float max_x = panel_.right - 22.0f * s;
-    const float y = panel_.bottom - 32.0f * s, hgt = 20.0f * s;
-    const float a = animate_ ? fade_value_ : 1.0f;
-    // "Apply to all folders" sits at the right end; the key hints shrink around it.
+void GroupWheel::DrawFooter(ID2D1DeviceContext* dc, fluent::Painter* painter) {
     apply_all_rect_ = {};
-    if (!data_.apply_all_text.empty() && !data_.sort_controls && f_small_) {
-        const float bw = g_ink.Measure(f_small_, data_.apply_all_text) + 20.0f * s;
-        const D2D1_RECT_F b = D2D1::RectF(max_x - bw, y - 5.0f * s, max_x, y + hgt + 5.0f * s);
-        apply_all_rect_ = b;
-        g_ink.Fill(b, 6.0f * s, GwAlpha(theme.accent, (apply_all_hot_ ? 0.18f : 0.09f) * a));
-        g_ink.Text(f_small_, data_.apply_all_text, D2D1::RectF(b.left + 10.0f * s, y, b.right, y + hgt),
-                   GwAlpha(theme.accent, a));
-        max_x = b.left - 10.0f * s;
-    }
-    const float gap = 4.0f * s;
-    // Two passes: measure, then draw left-aligned. Only very narrow panels drop the
-    // words and keep the keycaps so the hint never leaves the panel.
-    struct Part { std::wstring t; bool key; };
-    const std::wstring sep = L"\x00B7";
-    std::vector<Part> full = {{L"\x2191", true}, {L"\x2193", true}, {data_.scroll_text + L"  " + sep, false},
-                                    {L"Enter", true}, {data_.apply_text + L"  " + sep, false},
-                                    {L"Esc", true}, {data_.cancel_text, false}};
-    const std::vector<Part> compact = {{L"\x2191", true}, {L"\x2193", true}, {sep, false},
-                                       {L"Enter", true}, {sep, false}, {L"Esc", true}};
-    if (data_.sort_controls) {
-        full.insert(full.begin() + 3, {{L"\x2190", true}, {L"\x2192", true}, {data_.direction_text + L"  " + sep, false}});
-    }
-    auto width_of = [&](const Part& part) {
-        return part.key ? std::max(20.0f * s, g_ink.Measure(f_kbd_, part.t) + 12.0f * s)
-                        : g_ink.Measure(f_small_, part.t);
+    cancel_rect_ = ok_rect_ = {};
+    if (!painter) return;
+    const float s = scale_;
+    const float a = animate_ ? fade_value_ : 1.0f;
+    const float mid = panel_.bottom - kFooterDip * 0.5f * s;
+    const float top = mid - 16.0f * s, bottom = mid + 16.0f * s;
+    // The shared buttons draw opaque: fade them with the panel.
+    const bool layered = a < 0.999f;
+    if (layered)
+        dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                             D2D1::IdentityMatrix(), a), nullptr);
+    // Right: Cancel, Apply (the keys that do the same inside them).
+    static constexpr wchar_t kEnter[] = L"Enter";
+    static constexpr wchar_t kEsc[] = L"Esc";
+    const float pad = 8.0f * s;   // wider than the default 8 DIP sides
+    const float ok_w = painter->MeasureButtonWidth(data_.apply_text, {}, false, kEnter) + pad;
+    const float cancel_w = painter->MeasureButtonWidth(data_.cancel_text, {}, false, kEsc) + pad;
+    const float right = panel_.right - 16.0f * s;
+    ok_rect_ = D2D1::RectF(right - ok_w, top, right, bottom);
+    cancel_rect_ = D2D1::RectF(ok_rect_.left - 8.0f * s - cancel_w, top, ok_rect_.left - 8.0f * s, bottom);
+    auto button = [&](const D2D1_RECT_F& r, const std::wstring& text, const wchar_t* key,
+                      fluent::ButtonKind kind, int id) {
+        fluent::ButtonSpec spec;
+        spec.bounds = r;
+        spec.text = text;
+        spec.keycap = key;
+        spec.kind = kind;
+        spec.state.hovered = footer_hot_ == id;
+        spec.state.pressed = footer_pressed_ == id && footer_hot_ == id;
+        painter->DrawButton(spec);
     };
-    auto total = [&](const std::vector<Part>& parts) {
-        float w = 0.0f;
-        for (const auto& part : parts) w += width_of(part) + gap;
-        return parts.empty() ? 0.0f : w - gap;
-    };
-    const std::vector<Part>& parts = total(full) <= max_x - min_x ? full : compact;
-    float x = min_x;
-    for (const auto& part : parts) {
-        const float w = width_of(part);
-        if (x + w > max_x + 0.5f) break;
-        const D2D1_RECT_F r = D2D1::RectF(x, y, x + w, y + hgt);
-        if (part.key) {
-            g_ink.Stroke(r, 4.0f * s, GwAlpha(theme.text_secondary, 0.45f * a), std::max(1.0f, s));
-            g_ink.Text(f_kbd_, part.t, r, GwAlpha(theme.text_secondary, a));
-        } else {
-            g_ink.Text(f_small_, part.t, D2D1::RectF(x, y, x + w + 2.0f * s, y + hgt),
-                       GwAlpha(theme.text_secondary, a));
+    button(cancel_rect_, data_.cancel_text, kEsc, fluent::ButtonKind::Standard, kFooterCancel);
+    button(ok_rect_, data_.apply_text, kEnter, fluent::ButtonKind::Primary, kFooterApply);
+    // Left: "apply to all folders" (not for session-only groups).
+    const bool apply_all = data_.options.empty() ||
+        data_.options[static_cast<size_t>(std::lround(Clamp(t_)))].apply_all;
+    if (!data_.apply_all_text.empty() && apply_all) {
+        const float left = panel_.left + 12.0f * s;
+        const float w = std::min(painter->MeasureButtonWidth(data_.apply_all_text) + pad,
+                                 cancel_rect_.left - 12.0f * s - left);
+        if (w > 40.0f * s) {
+            apply_all_rect_ = D2D1::RectF(left, top, left + w, bottom);
+            fluent::ButtonSpec spec;
+            spec.bounds = apply_all_rect_;
+            spec.text = data_.apply_all_text;
+            spec.kind = fluent::ButtonKind::Transparent;
+            spec.state.hovered = apply_all_hot_;
+            painter->DrawButton(spec);
         }
-        x += w + gap;
     }
+    if (layered) dc->PopLayer();
 }
 
 void GroupWheel::Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, IDWriteTextFormat* base_format,
-                      const Theme& theme) {
+                      const Theme& theme, fluent::Painter* painter) {
     if (!dc || !dwrite || !Visible() || data_.options.empty()) return;
     const float a = animate_ ? fade_value_ : 1.0f;
     if (a <= 0.001f) return;
@@ -461,14 +506,12 @@ void GroupWheel::Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, IDWriteTex
     dc->GetTransform(&base);
     dc->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, (1.0f - a) * -6.0f * s) * base);
 
-    // Soft shadow, panel, border.
+    // Flyout shadow, as CSS 0 6px 18px + 0 1px 3px: Gaussian, so it fades out
+    // instead of ending in a band; dark themes need it darker to show at all.
     const float radius = 14.0f * s;
-    for (int i = 6; i >= 1; --i) {
-        const float g = static_cast<float>(i) * 2.5f * s;
-        const D2D1_RECT_F r = D2D1::RectF(panel_.left - g, panel_.top - g + 8.0f * s,
-                                          panel_.right + g, panel_.bottom + g + 8.0f * s);
-        g_ink.Fill(r, radius + g, D2D1::ColorF(0, 0, 0, 0.035f * a));
-    }
+    const bool dark = theme.bg.r + theme.bg.g + theme.bg.b < 1.5f;
+    DrawElevationShadow(dc, panel_, radius, 9.0f * s, 6.0f * s, D2D1::ColorF(0, 0, 0, dark ? 0.38f : 0.10f), a);
+    DrawElevationShadow(dc, panel_, radius, 1.5f * s, 1.0f * s, D2D1::ColorF(0, 0, 0, dark ? 0.30f : 0.06f), a);
     const D2D1_COLOR_F surface = GwOpaque(theme.surface_flyout, theme.bg);
     g_ink.Fill(panel_, radius, GwAlpha(surface, a));
     g_ink.Stroke(panel_, radius, GwAlpha(theme.stroke_card, a), std::max(1.0f, s));
@@ -478,7 +521,21 @@ void GroupWheel::Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, IDWriteTex
     dc->PushAxisAlignedClip(drum, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     const float cy = (drum.top + drum.bottom) * 0.5f;
     const D2D1_RECT_F card = D2D1::RectF(drum.left + 12.0f * s, cy - 29.0f * s, drum.right - 12.0f * s, cy + 29.0f * s);
-    g_ink.Fill(card, 10.0f * s, GwAlpha(theme.accent, 0.10f * a));
+    const bool card_hot = hover_step_ == 0 && !dragging_;
+    g_ink.Fill(card, 10.0f * s, GwAlpha(theme.accent, (card_hot ? 0.16f : 0.10f) * a));
+    // A row above or below under the pointer: a click rolls to it.
+    if (hover_step_ != 0 && hover_step_ != kNoHover && !dragging_) {
+        const float row = std::round(Clamp(t_)) + static_cast<float>(hover_step_);
+        const float rad = (row - p_) * kStepDeg * kGwPi / 180.0f;
+        if (std::abs(rad) < 1.5f) {
+            const float radius_px = kRadius * s, persp = kPerspective * s;
+            const float k = persp / (persp - radius_px * (std::cos(rad) - 1.0f));
+            const float yc = cy + radius_px * std::sin(rad) * k;
+            const float half = 21.0f * s * std::cos(rad) * k;
+            g_ink.Fill(D2D1::RectF(card.left, yc - half, card.right, yc + half), 8.0f * s,
+                       GwAlpha(theme.text, 0.045f * a));
+        }
+    }
     g_ink.Stroke(card, 10.0f * s, GwAlpha(theme.accent, 0.38f * a), std::max(1.0f, s));
     g_ink.Fill(D2D1::RectF(card.left - 1.0f * s, card.top + 14.0f * s, card.left + 3.0f * s, card.bottom - 14.0f * s),
                2.0f * s, GwAlpha(theme.accent, a));
@@ -492,7 +549,7 @@ void GroupWheel::Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, IDWriteTex
 
     // Preview: colour wash cross-fades; headers and skeleton rows fade out then in.
     const D2D1_RECT_F pv = D2D1::RectF(drum.right + 22.0f * s, panel_.top + 22.0f * s,
-                                       panel_.right - 22.0f * s, panel_.bottom - 44.0f * s - ControlsHeight());
+                                       panel_.right - 22.0f * s, panel_.bottom - (kFooterDip + 4.0f) * s - ControlsHeight());
     if (pv.right - pv.left > 40.0f * s && pv.bottom - pv.top > 40.0f * s) {
         g_ink.Fill(pv, 12.0f * s, GwAlpha(theme.text, 0.035f * a));
         dc->PushAxisAlignedClip(pv, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -561,7 +618,7 @@ void GroupWheel::Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, IDWriteTex
         dc->PopAxisAlignedClip();
     }
     if (data_.sort_controls) DrawControls(theme, a);
-    DrawFooter(dc, dwrite, theme);
+    DrawFooter(dc, painter);
 
     dc->SetTransform(base);
     g_ink = Ink{};
@@ -577,7 +634,7 @@ D2D1_RECT_F GroupWheel::SegmentRect(int k, int i) const noexcept {
     const float s = scale_;
     const D2D1_RECT_F drum = DrumRect();
     const float x0 = drum.right + 22.0f * s, x1 = panel_.right - 22.0f * s;
-    const float top = panel_.bottom - 44.0f * s - 88.0f * s + (k == 0 ? 16.0f : 64.0f) * s;
+    const float top = panel_.bottom - (kFooterDip + 4.0f) * s - 88.0f * s + (k == 0 ? 16.0f : 64.0f) * s;
     const D2D1_RECT_F bar = D2D1::RectF(x0, top, x1, top + 24.0f * s);
     if (i < 0) return bar;
     const int n = k == 0 ? 2 : 3;
@@ -602,6 +659,7 @@ void GroupWheel::DrawControls(const Theme& theme, float alpha) {
             const D2D1_RECT_F r = SegmentRect(k, i);
             const bool on = i == selected;
             if (on) g_ink.Fill(r, 6.0f * s, GwAlpha(theme.accent, 0.18f * alpha));
+            else if (seg_hot_ == k * 4 + i) g_ink.Fill(r, 6.0f * s, GwAlpha(theme.text, 0.06f * alpha));
             std::wstring t = k == 0 ? (i == 0 ? L"\x2191 " : L"\x2193 ") + o.directions[static_cast<size_t>(i)]
                                     : data_.folder_names[static_cast<size_t>(i)];
             g_ink.Text(f_seg_, t, r, GwAlpha(on ? theme.accent : theme.text_secondary, alpha));

@@ -10,12 +10,14 @@
 
 #include "../common/current_user_security.h"
 #include "../common/recycle_index.h"
+#include "../common/worker_thread.h"
 #include <windows.h>
 #include <shlobj.h>
 #include <knownfolders.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -85,6 +87,31 @@ inline void NotifyShell() {
 }
 
 namespace detail {
+#ifdef PULSE_RESOURCE_REUSE_TEST
+inline size_t metadata_entry_limit = 262144;
+inline size_t file_capacity_growths = 0;
+inline bool reuse_scratch = true;
+#endif
+
+// Preserve whole-item enumeration before mutation, including on resource
+// exhaustion. Account both paths and container nodes before adding them.
+struct MetadataBudget {
+    static constexpr size_t kMaxBytes = 64 * 1024 * 1024;
+    static constexpr size_t kMaxEntries = 262144;
+    size_t bytes = 0, entries = 0;
+    bool Admit(size_t characters, size_t overhead = 128) {
+        if (characters > (kMaxBytes - overhead) / sizeof(wchar_t)) return false;
+        const size_t cost = characters * sizeof(wchar_t) + overhead;
+        size_t limit = kMaxEntries;
+#ifdef PULSE_RESOURCE_REUSE_TEST
+        limit = metadata_entry_limit;
+#endif
+        if (entries >= limit || cost > kMaxBytes - bytes) return false;
+        bytes += cost;
+        ++entries;
+        return true;
+    }
+};
 
 struct Item {
     std::wstring index;   // $I path; empty for a payload without one
@@ -112,11 +139,12 @@ inline uint64_t SizeOf(const WIN32_FIND_DATAW& data) {
 
 // Pairs $I and $R entries by their shared suffix. desktop.ini and anything
 // else in the folder is left alone.
-inline void ListBinFolder(const std::wstring& folder, std::vector<Item>& items) {
+inline DWORD ListBinFolder(const std::wstring& folder, std::vector<Item>& items, MetadataBudget& budget) {
     WIN32_FIND_DATAW data{};
     HANDLE find = FindFirstFileExW((folder + L"\\*").c_str(), FindExInfoBasic, &data,
                                    FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
-    if (find == INVALID_HANDLE_VALUE) return;
+    if (find == INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
+    struct Close { HANDLE handle; ~Close() { FindClose(handle); } } close{find};
     std::map<std::wstring, size_t> by_suffix;
     do {
         const std::wstring name = data.cFileName;
@@ -125,6 +153,7 @@ inline void ListBinFolder(const std::wstring& folder, std::vector<Item>& items) 
         const bool payload = name[1] == L'R' || name[1] == L'r';
         if (!index && !payload) continue;
         if (index && (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (!budget.Admit(folder.size() + name.size() * 3 + 1)) return ERROR_NOT_ENOUGH_MEMORY;
         std::wstring suffix = name.substr(2);
         CharUpperBuffW(suffix.data(), static_cast<DWORD>(suffix.size()));
         auto [it, added] = by_suffix.emplace(suffix, items.size());
@@ -133,23 +162,31 @@ inline void ListBinFolder(const std::wstring& folder, std::vector<Item>& items) 
         (index ? item.index : item.payload) = folder + L"\\" + name;
         if (payload && item.name.empty()) item.name = name;
     } while (FindNextFileW(find, &data));
-    FindClose(find);
+    const DWORD error = GetLastError();
+    return error == ERROR_NO_MORE_FILES ? ERROR_SUCCESS : error;
 }
 
 // Lists a payload without following links: a junction or symbolic link is
 // deleted as itself, never through its target.
-inline void ListPayload(size_t item_index, Item& item, std::vector<File>& files,
-                        const std::function<bool()>& stop) {
+inline DWORD ListPayload(size_t item_index, Item& item, std::vector<File>& files,
+                        const std::function<bool()>& stop, MetadataBudget& budget) {
     WIN32_FILE_ATTRIBUTE_DATA root{};
-    if (!GetFileAttributesExW(item.payload.c_str(), GetFileExInfoStandard, &root)) return;
+    if (!GetFileAttributesExW(item.payload.c_str(), GetFileExInfoStandard, &root)) {
+        const DWORD error = GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? ERROR_SUCCESS : error;
+    }
+    if (!budget.Admit(item.payload.size() * 2)) return ERROR_NOT_ENOUGH_MEMORY;
     if (!(root.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+#ifdef PULSE_RESOURCE_REUSE_TEST
+        if (files.size() == files.capacity()) ++file_capacity_growths;
+#endif
         files.push_back({item.payload,
             (static_cast<uint64_t>(root.nFileSizeHigh) << 32) | root.nFileSizeLow, item_index});
         ++item.files;
-        return;
+        return ERROR_SUCCESS;
     }
     item.folders.push_back(item.payload);
-    if (root.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) return;
+    if (root.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) return ERROR_SUCCESS;
     std::vector<std::wstring> pending{item.payload};
     while (!pending.empty() && !stop()) {
         const std::wstring folder = std::move(pending.back());
@@ -157,21 +194,34 @@ inline void ListPayload(size_t item_index, Item& item, std::vector<File>& files,
         WIN32_FIND_DATAW data{};
         HANDLE find = FindFirstFileExW((folder + L"\\*").c_str(), FindExInfoBasic, &data,
                                        FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
-        if (find == INVALID_HANDLE_VALUE) continue;
+        if (find == INVALID_HANDLE_VALUE) {
+            const DWORD error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND) continue;
+            return error;
+        }
+        struct Close { HANDLE handle; ~Close() { FindClose(handle); } } close{find};
         do {
+            if (stop()) return ERROR_OPERATION_ABORTED;
             if (IsDots(data.cFileName)) continue;
+            if (!budget.Admit((folder.size() + wcslen(data.cFileName) + 1) * 2))
+                return ERROR_NOT_ENOUGH_MEMORY;
             std::wstring child = folder + L"\\" + data.cFileName;
             if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
                 item.folders.push_back(child);
                 if (!(data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
                     pending.push_back(std::move(child));
             } else {
+#ifdef PULSE_RESOURCE_REUSE_TEST
+                if (files.size() == files.capacity()) ++file_capacity_growths;
+#endif
                 files.push_back({std::move(child), SizeOf(data), item_index});
                 ++item.files;
             }
         } while (FindNextFileW(find, &data));
-        FindClose(find);
+        const DWORD error = GetLastError();
+        if (error != ERROR_NO_MORE_FILES) return error;
     }
+    return ERROR_SUCCESS;
 }
 
 inline DWORD DeleteOneFile(const std::wstring& path) {
@@ -205,8 +255,7 @@ inline DWORD RemoveOneFolder(const std::wstring& path) {
 inline Result EmptyFolders(const std::vector<std::wstring>& bin_folders, const CancelFn& cancelled,
                            const ProgressFn& progress, unsigned threads = 0) {
     using namespace detail;
-    // Whole items are listed and deleted in batches of about this many files,
-    // so memory stays bounded however large the bin is.
+    // Batch target; the hard metadata budget is enforced inside enumeration.
     constexpr size_t kBatchFiles = 20000;
     Result result;
     std::atomic<bool> stop{false};
@@ -218,13 +267,21 @@ inline Result EmptyFolders(const std::vector<std::wstring>& bin_folders, const C
     const auto report = [&] { if (progress) progress(state); };
 
     std::vector<Item> items;
-    for (const auto& folder : bin_folders) ListBinFolder(folder, items);
+    MetadataBudget item_budget;
+    for (const auto& folder : bin_folders) {
+        const DWORD error = ListBinFolder(folder, items, item_budget);
+        if (error != ERROR_SUCCESS) { result.first_error = error; result.failed_entries = 1; return result; }
+    }
     for (auto& item : items) {
         if (item.index.empty()) continue;
         recycle::IndexRecord record;
         if (recycle::ReadIndex(item.index, record)) {
             const size_t slash = record.original_path.find_last_of(L"\\/");
-            item.name = record.original_path.substr(slash == std::wstring::npos ? 0 : slash + 1);
+            const size_t offset = slash == std::wstring::npos ? 0 : slash + 1;
+            if (!item_budget.Admit(record.original_path.size() - offset)) {
+                result.first_error = ERROR_NOT_ENOUGH_MEMORY; result.failed_entries = 1; return result;
+            }
+            item.name = record.original_path.substr(offset);
             if (!item.payload.empty()) state.total_bytes += record.size;
         }
         if (!item.payload.empty()) ++state.total_items;
@@ -239,11 +296,30 @@ inline Result EmptyFolders(const std::vector<std::wstring>& bin_folders, const C
         first_error.compare_exchange_strong(none, error);
     };
     size_t begin = 0;
+    std::vector<File> scratch;
     while (begin < items.size() && !should_stop()) {
-        std::vector<File> files;
+#ifdef PULSE_RESOURCE_REUSE_TEST
+        std::vector<File> fresh;
+        auto& files = reuse_scratch ? scratch : fresh;
+#else
+        auto& files = scratch;
+#endif
+        // Keep only a bounded array between batches; clear releases all paths.
+        if (files.capacity() > 2 * 1024 * 1024 / sizeof(File)) std::vector<File>().swap(files);
+        else files.clear();
+        MetadataBudget payload_budget;
         size_t end = begin;
         while (end < items.size() && (end == begin || files.size() < kBatchFiles)) {
-            if (!items[end].payload.empty()) ListPayload(end, items[end], files, should_stop);
+            const size_t previous = files.size();
+            const DWORD error = items[end].payload.empty() ? ERROR_SUCCESS :
+                ListPayload(end, items[end], files, should_stop, payload_budget);
+            if (error != ERROR_SUCCESS && error != ERROR_OPERATION_ABORTED) {
+                files.resize(previous);
+                items[end].files = 0;
+                std::vector<std::wstring>().swap(items[end].folders);
+                ++items[end].failed;
+                note_error(error);
+            }
             items[end].left = items[end].files;
             ++end;
             if (should_stop()) break;
@@ -253,15 +329,26 @@ inline Result EmptyFolders(const std::vector<std::wstring>& bin_folders, const C
         // The disk, not the CPU, is the limit: a few threads delete in parallel.
         std::atomic<size_t> next{0};
         std::atomic<unsigned> running{0};
+        std::mutex completion_mutex;
+        std::condition_variable completed;
         std::mutex counts;
         const unsigned workers = static_cast<unsigned>(
-            (std::min<size_t>)(threads, (std::max<size_t>)(files.size(), 1)));
+            (std::min<size_t>)(threads, files.size()));
         std::vector<std::thread> pool;
         pool.reserve(workers);
-        running = workers;
-        for (unsigned t = 0; t < workers; ++t) {
-            pool.emplace_back([&] {
+        struct JoinWorkers {
+            std::vector<std::thread>& threads;
+            std::atomic<bool>& stop;
+            ~JoinWorkers() {
+                for (auto& thread : threads) if (thread.joinable()) {
+                    stop = true;
+                    thread.join();
+                }
+            }
+        } join_workers{pool, stop};
+        const auto work = [&](bool coordinator) {
                 for (size_t i = next++; i < files.size() && !stop.load(); i = next++) {
+                    if (coordinator && should_stop()) break;
                     const File& file = files[i];
                     const DWORD error = DeleteOneFile(file.path);
                     if (error == ERROR_SUCCESS) {
@@ -275,8 +362,22 @@ inline Result EmptyFolders(const std::vector<std::wstring>& bin_folders, const C
                     --item.left;
                     if (error != ERROR_SUCCESS) ++item.failed;
                 }
-                --running;
-            });
+                {
+                    std::lock_guard lock(completion_mutex);
+                    --running;
+                }
+                completed.notify_one();
+        };
+        for (unsigned t = 0; t < workers; ++t) {
+            ++running;
+            try {
+                pool.push_back(StartWorkerThread([&] { work(false); }));
+            } catch (...) {
+                // Continue from the shared cursor; already deleted files must
+                // never be replayed. Existing workers remain owned until join.
+                work(true);
+                break;
+            }
         }
         for (;;) {
             const bool finished = running.load() == 0;
@@ -287,7 +388,8 @@ inline Result EmptyFolders(const std::vector<std::wstring>& bin_folders, const C
             if (at < files.size()) state.current = items[files[at].item].name;
             report();
             if (finished) break;
-            Sleep(100);
+            std::unique_lock lock(completion_mutex);
+            completed.wait_for(lock, std::chrono::milliseconds(100), [&] { return running.load() == 0; });
         }
         for (auto& thread : pool) thread.join();
 
@@ -309,6 +411,9 @@ inline Result EmptyFolders(const std::vector<std::wstring>& bin_folders, const C
             }
             result.failed_entries += item.failed;
             std::vector<std::wstring>().swap(item.folders);
+            std::wstring().swap(item.index);
+            std::wstring().swap(item.payload);
+            std::wstring().swap(item.name);
         }
         report();
         begin = end;
@@ -323,6 +428,53 @@ inline Result EmptyFolders(const std::vector<std::wstring>& bin_folders, const C
     state.current.clear();
     report();
     return result;
+}
+
+// Confirm the original current-user bin roots only. Do not infer emptiness from
+// the Shell's item count: orphaned or inaccessible payloads may be omitted there.
+inline DWORD ConfirmEmptyFolders(const std::vector<std::wstring>& folders) {
+    for (const auto& folder : folders) {
+        const DWORD attributes = GetFileAttributesW(folder.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES &&
+            (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)))
+            return ERROR_ACCESS_DENIED;
+        WIN32_FIND_DATAW data{};
+        HANDLE find = FindFirstFileExW((folder + L"\\*").c_str(), FindExInfoBasic, &data,
+            FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+        if (find == INVALID_HANDLE_VALUE) {
+            const DWORD error = GetLastError();
+            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) return error;
+            // A missing bin on an online volume is empty; a disconnected or
+            // unreadable volume is unknown and must not clear a prior failure.
+            std::vector<wchar_t> volume(32768);
+            if (!GetVolumePathNameW(folder.c_str(), volume.data(), static_cast<DWORD>(volume.size())) ||
+                !GetVolumeInformationW(volume.data(), nullptr, 0, nullptr, nullptr, nullptr, nullptr, 0))
+                return GetLastError();
+            continue;
+        }
+        struct Close { HANDLE value; ~Close() { FindClose(value); } } close{find};
+        do {
+            const auto* name = data.cFileName;
+            if (name[0] == L'$' && name[1] && name[2] &&
+                (name[1] == L'I' || name[1] == L'i' || name[1] == L'R' || name[1] == L'r'))
+                return ERROR_DIR_NOT_EMPTY;
+        } while (FindNextFileW(find, &data));
+        const DWORD error = GetLastError();
+        if (error != ERROR_NO_MORE_FILES) return error;
+    }
+    return ERROR_SUCCESS;
+}
+
+inline HRESULT FinalizeResult(const Result& native, HRESULT shell_result,
+                              const std::vector<std::wstring>& folders) {
+    if (native.cancelled) return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    if (FAILED(shell_result)) return shell_result;
+    if (!native.failed_entries) return shell_result;
+    if (folders.empty()) return HRESULT_FROM_WIN32(native.first_error ? native.first_error : ERROR_GEN_FAILURE);
+    const DWORD remaining = ConfirmEmptyFolders(folders);
+    if (remaining == ERROR_SUCCESS) return S_OK;
+    return HRESULT_FROM_WIN32(remaining == ERROR_DIR_NOT_EMPTY && native.first_error
+        ? native.first_error : remaining);
 }
 
 } // namespace pulse::recycle_empty

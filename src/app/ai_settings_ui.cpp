@@ -341,7 +341,7 @@ void AiSettingsAction(AppState& s, int index) {
         if (!view->broken) ai::SetAiMcpEnabled(!view->enabled);
     } else if (index == ui::kAiCopyConfig) {
         if (app::CopyTextToClipboard(s.hwnd, AiMcpConfigText()))
-            s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Suggest, Text(I::AiConfigCopied), {}, {}, {}, 3000);
+            ShowStatusFeedback(s, Text(I::AiConfigCopied));
     } else if (index == ui::kAiOpenLog) {
         const std::wstring folder = ai::ActivityDirectory();
         CreateDirectoryW(folder.c_str(), nullptr);

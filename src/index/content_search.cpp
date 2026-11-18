@@ -77,20 +77,6 @@ size_t FindText(std::wstring_view text_value, std::wstring_view needle,
     return std::wstring_view::npos;
 }
 
-std::vector<std::wstring> EffectiveNeedles(const ContentSearchRequest& request) {
-    if (!request.needles.empty()) return request.needles;
-    std::vector<std::wstring> words;
-    size_t i = 0;
-    while (i < request.needle.size()) {
-        while (i < request.needle.size() && iswspace(request.needle[i])) ++i;
-        size_t j = i;
-        while (j < request.needle.size() && !iswspace(request.needle[j])) ++j;
-        if (j > i) words.push_back(request.needle.substr(i, j - i));
-        i = j;
-    }
-    return words;
-}
-
 size_t MatchContent(std::wstring_view text, const ContentSearchRequest& request, const std::atomic<bool>* cancelled = nullptr) {
     for (const auto& excluded : request.excluded_needles) {
         if (FindText(text, excluded, request.case_sensitive, request.whole_word, cancelled) !=
@@ -98,30 +84,39 @@ size_t MatchContent(std::wstring_view text, const ContentSearchRequest& request,
             return std::wstring_view::npos;
     }
     if (request.match_mode == ContentMatchMode::Phrase) {
-        std::wstring phrase = request.needle;
-        if (phrase.empty()) {
-            for (const auto& word : request.needles) {
-                if (!phrase.empty()) phrase.push_back(L' ');
-                phrase.append(word);
-            }
+        if (!request.needle.empty())
+            return FindText(text, request.needle, request.case_sensitive, request.whole_word, cancelled);
+        std::wstring phrase;
+        for (const auto& word : request.needles) {
+            if (!phrase.empty()) phrase.push_back(L' ');
+            phrase.append(word);
         }
         return FindText(text, phrase, request.case_sensitive, request.whole_word, cancelled);
     }
-    const auto needles = EffectiveNeedles(request);
-    if (needles.empty()) return 0;
     size_t first = std::wstring_view::npos;
-    size_t any = std::wstring_view::npos;
-    for (const auto& needle : needles) {
+    bool has_words = false;
+    const auto match_word = [&](std::wstring_view needle) {
+        has_words = true;
         const size_t found = FindText(text, needle, request.case_sensitive, request.whole_word, cancelled);
-        if (found == std::wstring_view::npos) {
-            if (request.match_mode != ContentMatchMode::AnyWord) return std::wstring_view::npos;
-            continue;
+        if (found == std::wstring_view::npos) return request.match_mode == ContentMatchMode::AnyWord;
+        first = (std::min)(first, found);
+        return true;
+    };
+    if (!request.needles.empty()) {
+        for (const auto& needle : request.needles)
+            if (!match_word(needle)) return std::wstring_view::npos;
+    } else {
+        const std::wstring_view words = request.needle;
+        size_t i = 0;
+        while (i < words.size()) {
+            while (i < words.size() && iswspace(words[i])) ++i;
+            size_t j = i;
+            while (j < words.size() && !iswspace(words[j])) ++j;
+            if (j > i && !match_word(words.substr(i, j - i))) return std::wstring_view::npos;
+            i = j;
         }
-        if (any == std::wstring_view::npos || found < any) any = found;
-        if (first == std::wstring_view::npos || found < first) first = found;
     }
-    if (request.match_mode == ContentMatchMode::AnyWord) return any;
-    return first;
+    return has_words ? first : 0;
 }
 
 ContentHit MakeContentHit(const Candidate& file, std::wstring_view content, size_t match) {
@@ -514,8 +509,8 @@ bool MatchContentFilename(const std::wstring& path, uint64_t size, uint64_t modi
         if (path.size() < prefix.size() || CompareStringOrdinal(path.data(), static_cast<int>(prefix.size()), prefix.data(), static_cast<int>(prefix.size()), TRUE) != CSTR_EQUAL ||
             (path.size() > prefix.size() && prefix.back() != L'\\' && path[prefix.size()] != L'\\')) return false;
     }
-    const auto name = path.substr(path.find_last_of(L"\\/") + 1);
     if (q.groups.empty()) return true;
+    const auto name = path.substr(path.find_last_of(L"\\/") + 1);
     for (const auto& group : q.groups) {
         bool match = true;
         for (const auto& term : group) {
@@ -583,13 +578,15 @@ bool RunContentSearch(const ContentSearchRequest& request, const std::atomic<boo
         if(request.sort==ContentResultSort::Size) cmp=a.size<b.size ? -1:a.size>b.size ? 1:0;
         else if(request.sort==ContentResultSort::Mtime) cmp=a.modified<b.modified ? -1:a.modified>b.modified ? 1:0;
         else {
-            auto key=[&](const Candidate& file) {
-                if(request.sort==ContentResultSort::Path) return file.path;
-                if(request.sort==ContentResultSort::Type) {const auto dot=file.name.find_last_of(L'.');return dot==std::wstring::npos ? std::wstring{}:file.name.substr(dot+1);}
-                return file.name;
+            const auto key = [&](const Candidate& file) -> const wchar_t* {
+                if (request.sort == ContentResultSort::Path) return file.path.c_str();
+                if (request.sort == ContentResultSort::Type) {
+                    const auto dot = file.name.find_last_of(L'.');
+                    return dot == std::wstring::npos ? L"" : file.name.c_str() + dot + 1;
+                }
+                return file.name.c_str();
             };
-            const auto x=key(a),y=key(b);
-            cmp=CompareStringOrdinal(x.c_str(),-1,y.c_str(),-1,TRUE)-CSTR_EQUAL;
+            cmp = CompareStringOrdinal(key(a), -1, key(b), -1, TRUE) - CSTR_EQUAL;
         }
         if(!cmp) cmp=CompareStringOrdinal(a.path.c_str(),-1,b.path.c_str(),-1,TRUE)-CSTR_EQUAL;
         return request.sort_desc ? cmp>0:cmp<0;

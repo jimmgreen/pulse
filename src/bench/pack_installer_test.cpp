@@ -162,8 +162,8 @@ int OnlineInstall(const wchar_t* requested_root, const wchar_t* asset_directory 
         };
         std::printf("Source: downloaded catalog assets (network transport is not under test)\n");
     }
-    const PackRelease* releases[] = {&kMediaPackRelease, &kImagePackRelease, &kRawPackRelease, &kArchivePackRelease};
-    const packs::PackId ids[] = {packs::PackId::Media, packs::PackId::Images, packs::PackId::Raw, packs::PackId::Archives};
+    const PackRelease* releases[] = {&kMediaPackRelease, &kImagePackRelease, &kRawPackRelease};
+    const packs::PackId ids[] = {packs::PackId::Media, packs::PackId::Images, packs::PackId::Raw};
     for (size_t p = 0; p < std::size(releases); ++p) {
         const auto& release = *releases[p];
         std::printf("Installing %s: %ls %ls\n", asset_directory ? "downloaded assets" : "online", release.key, release.version);
@@ -225,7 +225,7 @@ int wmain(int argc, wchar_t** argv) {
     Check(!roundtrip.enabled[2] && !roundtrip.enabled[3] && roundtrip.enabled[0] && roundtrip.enabled[1],
           "RAW and archive enable states round-trip independently");
     Check(std::wstring(packs::PackMainTool(packs::PackId::Raw)) == L"pulse-rawpack.exe" &&
-          std::wstring(packs::PackMainTool(packs::PackId::Archives)) == L"7z.exe", "new pack tool routing");
+          std::wstring(packs::PackMainTool(packs::PackId::Archives)).empty(), "retired archive pack has no executable route");
 
     const std::wstring root = MakeRoot();
     const std::wstring base = root + L"\\ffmpeg";
@@ -338,6 +338,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(InstallPack(fx.release, root, progress, error, fx.Reader()) == PackInstallOutcome::Failed,
               "tampered download fails");
         Check(error == ERROR_INVALID_DATA, "tampering reports invalid data");
+        Check(progress.failure.load() == static_cast<uint32_t>(PackFailure::Mismatch), "tampering is a mismatch");
         Check(!Exists(base + L"\\7.2") && !Exists(base + L"\\7.2.partial"), "nothing of the failed version stays");
         std::wstring json;
         Check(ReadUtf8File(base + L"\\installed.json", json) && json.find(L"7.1.1") != std::wstring::npos,
@@ -362,6 +363,7 @@ int wmain(int argc, wchar_t** argv) {
         DWORD error = 0;
         Check(InstallPack(fx.release, root, progress, error, fx.Reader()) == PackInstallOutcome::Failed,
               "oversized response fails");
+        Check(progress.failure.load() == static_cast<uint32_t>(PackFailure::Mismatch), "oversized response is a mismatch");
         Check(!Exists(base + L"\\7.4.partial"), "oversized response leaves no staging");
     }
 
@@ -372,6 +374,55 @@ int wmain(int argc, wchar_t** argv) {
         DWORD error = 0;
         Check(InstallPack(fx.release, root, progress, error, fx.Reader()) == PackInstallOutcome::Failed,
               "404 fails");
+        Check(progress.failure.load() == static_cast<uint32_t>(PackFailure::Network), "404 is a network failure");
+    }
+
+    {   // A release on GitHub: a mirror with another build's file (wrong hash,
+        // then too large) is skipped and the next source installs the pack.
+        Fixture fx(L"7.45");
+        const std::wstring github = L"https://github.com/jimmgreen/pulse/releases/download/v7/";
+        std::map<std::wstring, std::vector<uint8_t>> moved;
+        for (size_t i = 0; i < fx.names.size(); ++i) {
+            const std::wstring asset = github + fx.names[i] + L".lzms";
+            auto tampered = fx.packed[i];
+            tampered[tampered.size() / 2] ^= 0x5a;
+            moved[L"https://ghproxy.net/" + asset] = tampered;
+            auto longer = fx.packed[i];
+            longer.push_back(0);
+            moved[L"https://gh-proxy.com/" + asset] = longer;
+            moved[asset] = fx.packed[i];
+        }
+        fx.server = moved;
+        fx.release.base_url = github.c_str();
+        std::vector<std::wstring> asked;
+        auto inner = fx.Reader();
+        UpdateResponseReader reader = [&](std::wstring_view url, uint64_t maximum, const std::atomic<bool>& cancelled,
+                                          const std::function<bool(const void*, DWORD)>& consume,
+                                          UpdateError& category, DWORD& error) {
+            asked.emplace_back(url);
+            return inner(url, maximum, cancelled, consume, category, error);
+        };
+        PackInstallProgress progress;
+        DWORD error = 0;
+        Check(InstallPack(fx.release, root, progress, error, reader) == PackInstallOutcome::Installed &&
+              error == ERROR_SUCCESS, "wrong mirror files fall back to GitHub");
+        Check(asked.size() == 6 && ReadAll(base + L"\\7.45\\ffmpeg.exe") == fx.plain[0],
+              "each file tries both mirrors once, then GitHub");
+        // Every source wrong: a mismatch, not a network failure.
+        fx.server[github + fx.names[0] + L".lzms"].push_back(1);
+        fx.server.erase(github + fx.names[1] + L".lzms");
+        asked.clear();
+        PackInstallProgress again;
+        Check(InstallPack(fx.release, root, again, error, reader) == PackInstallOutcome::Failed &&
+              again.failure.load() == static_cast<uint32_t>(PackFailure::Mismatch) && asked.size() == 3,
+              "all sources wrong reports a mismatch after three tries");
+        // A fixed source is the only one asked.
+        SetUpdateSource(UpdateSource::Mirror2);
+        asked.clear();
+        PackInstallProgress fixed;
+        Check(InstallPack(fx.release, root, fixed, error, reader) == PackInstallOutcome::Failed && asked.size() == 1 &&
+              asked[0].starts_with(L"https://gh-proxy.com/"), "a chosen source is the only one tried");
+        SetUpdateSource(UpdateSource::Automatic);
     }
 
     {   // Cancelling mid-download.
@@ -416,7 +467,7 @@ int wmain(int argc, wchar_t** argv) {
               !PackUpdateAvailable(L"1.0.1", L"4294967296.0") && !PackUpdateAvailable(L"", L"1.2.3.4.5.6.7.8.9"),
               "unreadable catalog version is never offered");
         bool parses = true;
-        for (const PackRelease* release : {&kMediaPackRelease, &kImagePackRelease, &kRawPackRelease, &kArchivePackRelease})
+        for (const PackRelease* release : {&kMediaPackRelease, &kImagePackRelease, &kRawPackRelease})
             parses &= !release->file_count || PackUpdateAvailable(L"", release->version);
         Check(parses, "published catalog versions can be offered as updates");
     }

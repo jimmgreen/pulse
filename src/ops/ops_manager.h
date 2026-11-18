@@ -15,14 +15,18 @@
 #pragma once
 #include <windows.h>
 #include "file_lock_owner.h"
+#include "operation_item_control.h"
+#include "../common/rename_identity_types.h"
 #include "duplicate_cleanup_guard.h"
 #include "op_speed_graph.h"
+#include "controlled_transfer.h"
 #include "../common/menu_icon.h"
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <atomic>
 #include <optional>
@@ -33,7 +37,7 @@
 
 namespace pulse::ops {
 
-enum class OpType { Copy, Move, RecycleDelete, RealDelete, Rename, CreateFolder, CreateTextFile, RestoreRecycle, EmptyRecycle, BatchRename };
+enum class OpType { Copy, Move, RecycleDelete, RealDelete, Rename, CreateFolder, CreateTextFile, RestoreRecycle, EmptyRecycle, BatchRename, External };
 enum class CollisionPolicy { System, Replace, KeepBoth };
 enum class OpPhase { Queued, Scanning, WaitingForConflict, Running, Paused,
                      Verifying, Cancelling, Completed, Failed };
@@ -68,13 +72,23 @@ struct ConflictItemInfo {
     FILETIME destination_modified{};
     bool source_is_directory = false;
     bool destination_is_directory = false;
-    size_t remaining = 0;     // conflicts still to come, this one included
+    size_t remaining = 0;     // this one included; advisory when remaining_is_snapshot
+    bool remaining_is_snapshot = false;
     size_t ordinal = 0;       // 1-based position among the conflicts asked so far (0 = unknown)
     OpType type = OpType::Copy;
     std::wstring keep_both_name; // leaf name 保留两者 would give the new copy
 };
 
+struct GeneratedDirectoryReceipt {
+    std::wstring path;
+    DWORD volume = 0, index_high = 0, index_low = 0;
+};
 struct OpRequest {
+    std::optional<RenameIdentity> authorized_rename_identity; // Session-only helper identity.
+    // Host-only batch authority; never serialized, replayed, or copied into undo records.
+    std::vector<RenameIdentity> authorized_rename_identities;
+    std::function<bool()> rename_authorized;
+    std::function<void(ControlledTransferResult)> rename_completed;
     OpType type = OpType::Copy;
     std::vector<std::wstring> sources;
     std::wstring dest_dir;    // Copy / Move
@@ -88,6 +102,12 @@ struct OpRequest {
     std::wstring template_file;
     std::vector<uint8_t> template_data;
     CollisionPolicy collision_policy = CollisionPolicy::System; // Copy / Move
+    // Host-only staging publication; excluded from recovery and persisted undo.
+    bool generated_output = false;
+    std::optional<GeneratedDirectoryReceipt> generated_directory_replay;
+    std::vector<std::pair<std::wstring, std::wstring>> generated_backups;
+    std::vector<std::wstring> generated_directories;
+    std::vector<GeneratedDirectoryReceipt> generated_directory_receipts;
     bool is_undo = false;     // undo-originated ops do not re-enter the stack
     // An undo task: the operation it reverses, so it finishes as 已撤销复制
     // rather than as the inverse (删除完成). Session only.
@@ -130,6 +150,11 @@ inline bool IsShellTransferRequest(const OpRequest& req) {
 }
 
 struct UndoEntry {
+    bool generated_output = false;
+    std::map<std::wstring, std::wstring> generated_recycle_payloads;
+    std::vector<std::pair<std::wstring, std::wstring>> generated_backups;
+    std::vector<std::wstring> generated_directories;
+    std::vector<GeneratedDirectoryReceipt> generated_directory_receipts;
     OpType type = OpType::Copy;
     std::vector<std::wstring> sources;
     std::vector<std::wstring> destinations; // actual names, including keep-both results
@@ -139,10 +164,58 @@ struct UndoEntry {
     uint64_t group = 0;       // OpRequest::undo_group (session only, not persisted)
     std::wstring label;       // OpRequest::undo_label
     uint64_t task_id = 0;     // the task that recorded it (session only)
+    bool redo_cleared = false;
+    uint64_t recorded_at = 0; // UTC FILETIME when it was recorded (session only; 0 = unknown)
+};
+
+struct UndoHistoryItem {
+    UndoEntry entry;
+    bool undone = false;
+    bool redo_cleared = false;
+};
+struct UndoHistorySnapshot {
+    std::vector<UndoHistoryItem> entries; // newest original action first
+    bool busy = false;
+    uint64_t completed_sequence = 0; // increases once per replay attempt, including failure
+    size_t completed_steps = 0;      // only fully committed history entries
+    bool completed_redo = false;
+    bool completed_success = false;
+};
+
+// Frequent operation notifications need replay state, never the stored path batches.
+struct UndoHistoryProgress {
+    bool has_entries = false;
+    bool busy = false;
+    uint64_t completed_sequence = 0;
+    size_t completed_steps = 0;
+    bool completed_redo = false;
+    bool completed_success = false;
+};
+
+// Status rendering needs only counts and representative paths, not every file
+// in each operation. Keep this snapshot independent of operation batch size.
+struct UndoHistorySummaryItem {
+    OpType type = OpType::Copy;
+    uint64_t task_id = 0;
+    std::wstring label;
+    size_t source_count = 0;
+    size_t destination_count = 0;
+    std::wstring first_source;
+    std::wstring first_destination;
+    bool supported = true;
+    bool undone = false;
+    bool redo_cleared = false;
+    uint64_t recorded_at = 0; // UndoEntry::recorded_at
+    const std::wstring& PreviewPath() const {
+        return undone || destination_count == 0 ? first_source : first_destination;
+    }
+    size_t PreviewCount() const {
+        return undone || destination_count == 0 ? source_count : destination_count;
+    }
 };
 
 // One item a copy, move or delete could not handle while the rest went on
-// (pulse_ops_dialogs.html, partial failure). A delete's has no destination.
+// (partial failure). A delete's has no destination.
 struct OpFailure {
     std::wstring source;
     std::wstring destination;
@@ -150,9 +223,17 @@ struct OpFailure {
     HRESULT hr = S_OK;
 };
 
+enum class ExternalOutcome { None, Completed, Partial, Failed, Cancelled };
+
 struct OpStatus {
+    bool external = false;
+    std::wstring external_title;
+    std::wstring external_kind;
+    ExternalOutcome external_outcome = ExternalOutcome::None;
+    uint64_t terminal_sequence = 0;
     bool active = false;
     bool can_pause = true;
+    uint64_t current_item_token = 0; // Bound to the individually cancellable item, never the next item.
     // Pause was asked for and not yet resumed. The worker may still be inside
     // a write and only reports Paused at its next check; the UI shows paused
     // from this so a second click resumes instead of pausing again.
@@ -166,6 +247,7 @@ struct OpStatus {
     OpType type = OpType::Copy;
     OpPhase phase = OpPhase::Completed;
     uint64_t task_id = 0;
+    bool enumeration_complete = true; // false: discovered totals are still growing
     float percent = -1.0f;    // <0 = nothing to show
     std::wstring summary;     // one-line status-bar text
     std::wstring last_error;
@@ -217,6 +299,7 @@ struct FinishedTask {
     // the reason that covers them all (Location over Disabled over TooLarge).
     std::vector<std::wstring> recycle_refused;
     RecycleRefusal recycle_refusal = RecycleRefusal::None;
+    std::optional<ControlledTransferResult> controlled_result;
 };
 
 // Failures about the target, the device or the session rather than one item:
@@ -225,6 +308,15 @@ struct FinishedTask {
 bool IsStopTransferError(HRESULT hr);
 
 using TaskResult = FinishedTask;
+
+struct ControlledTaskStatus {
+    extensions::transfer_plan::Error error = extensions::transfer_plan::Error::NotFound;
+    uint64_t task_id = 0;
+    OpPhase phase = OpPhase::Queued;
+    bool cancel_requested = false;
+    OpStatus progress;
+    std::optional<ControlledTransferResult> result;
+};
 
 struct RecoveryEntry {
     uint64_t sequence = 0;
@@ -251,6 +343,7 @@ struct ShellMenuItem {
     std::wstring handler;
     wchar_t mnemonic = 0;        // access key from the Explorer label, 0 = none
     common::MenuIconRef icon;    // the row's app icon, as Explorer shows it
+    uint8_t depth = 0;          // preorder tree depth; legacy child rows default to 1
 };
 
 // One handler of a context-menu answer, in menu order (ipc::CtxHandlerStatus).
@@ -279,7 +372,7 @@ public:
     ~OpsManager();
 
     // notify is invoked from worker/IPC threads whenever status changes.
-    // A picker uses a private copy/move/rename queue without taking ownership
+    // A picker uses a private local-files queue without taking ownership
     // of the main window's singleton Shell client or its callbacks.
     void Start(std::function<void()> notify, bool own_shell_client = true);
     void Stop();
@@ -298,10 +391,23 @@ public:
     HWND UiWindow() const noexcept { return ui_hwnd_.load(); }
 
     uint64_t Submit(OpRequest req);
+    // Registry must outlive this manager's worker and retained task records.
+    // Only host-consumed permits are accepted; no recovery/retry/undo conversion.
+    uint64_t SubmitControlled(extensions::transfer_plan::ExecutionPermit permit,
+                              extensions::authorization::Registry& registry, bool retain_result = false);
+    ControlledTaskStatus QueryControlled(uint64_t task_id,
+        const extensions::authorization::PrincipalBinding& expected) const;
+    bool CancelControlled(uint64_t task_id,
+        const extensions::authorization::PrincipalBinding& expected);
+    // Host request leases survive the ordinary short terminal history.
+    bool ReleaseControlled(uint64_t task_id,
+        const extensions::authorization::PrincipalBinding& expected);
+    bool HasPendingOperations() const;
     // Atomically reject shutdown when work is queued/running and stop new submissions.
-    bool TryPrepareForUpdate();
+    bool TryPrepareForUpdate(bool continue_shutdown = false);
     void CancelUpdatePreparation();
     void CancelCurrent();
+    bool SkipCurrentItem(uint64_t task, uint64_t token);
     void PauseCurrent();
     void ResumeCurrent();
     std::optional<ConflictItemInfo> PendingConflict() const;
@@ -328,6 +434,7 @@ public:
     // How a recent task ended (the last 16). Status() only shows the newest
     // task, so retries that run back to back are looked up here.
     std::optional<OpStatus> FinalStatus(uint64_t task_id) const;
+    std::vector<OpStatus> RecentStatuses() const;
     // The speed history of the newest task, recorded while it runs whether
     // or not a progress card is visible; empty for any other task.
     OpSpeedGraph SpeedGraph(uint64_t task_id) const;
@@ -403,6 +510,18 @@ public:
     bool CanUndo() const;
     // The newest undo step belongs to this task (the pill's 撤销).
     bool CanUndoTask(uint64_t task_id) const;
+    bool UndoTask(uint64_t task_id);
+    UndoHistorySnapshot UndoHistory() const;
+    UndoHistoryProgress HistoryProgress() const;
+    std::vector<UndoHistorySummaryItem> UndoHistorySummary(bool include_rows = true) const;
+    size_t UndoHistoryCount() const;
+    // File operations waiting behind the running one (the status pill's "+N").
+    size_t QueuedTransferCount() const;
+    std::vector<std::wstring> UndoHistoryPreviewPaths(uint64_t task_id) const;
+    bool CanRedo() const;
+    bool Redo();
+    bool UndoTo(uint64_t task_id);
+    bool RedoTo(uint64_t task_id);
     std::wstring UndoLabel() const;   // "撤销移动 xxx" etc; empty if none
     void Undo();
 
@@ -418,20 +537,53 @@ public:
     // undone instead. Pending: part of the group is still queued.
     GroupUndo UndoGroup(uint64_t group);
 
+    uint64_t CreateExternalTask(std::wstring title, std::wstring type_label);
+    bool UpdateExternalTask(uint64_t task_id, const OpStatus& progress);
+    bool ExternalTaskCancelled(uint64_t task_id) const;
+    bool FinishExternalTask(uint64_t task_id, ExternalOutcome outcome, const OpStatus& final_status = {});
+
     OpStatus Status() const;
+    // Query or cancel one exact queued/running/completed task. Unlike the UI
+    // "current operation" controls, these methods never adopt a later task.
+    std::optional<OpStatus> QueryTask(uint64_t task_id) const;
+    // Keeps the terminal snapshot queryable for a caller-owned async request.
+    bool RetainTask(uint64_t task_id);
+    void ReleaseTask(uint64_t task_id);
+    bool CancelTask(uint64_t task_id);
     std::vector<CompletedOperation> DrainCompletions();
+    // Actual output names remain queryable after the UI drains notifications.
+    CompletedOperation TaskLocations(uint64_t task_id) const;
     std::vector<FinishedTask> DrainFinishedTasks();
     std::vector<TaskResult> DrainTaskResults() { return DrainFinishedTasks(); }
 
     // Session persistence of the undo stack (JSON, same style as StagingTray).
     std::wstring UndoToJson() const;
+    std::shared_ptr<const std::wstring> UndoJsonSnapshot() const;
     bool UndoFromJson(const std::wstring& in);
 
 private:
     friend struct OpsManagerAuditAccess;
+    struct ControlledJob {
+        extensions::transfer_plan::ExecutionPermit permit;
+        extensions::authorization::Registry& registry;
+        std::atomic<bool> cancelled{false};
+        bool retained = false;
+        ControlledTaskStatus status;
+        ControlledJob(extensions::transfer_plan::ExecutionPermit value,
+                      extensions::authorization::Registry& authority)
+            : permit(std::move(value)), registry(authority) {}
+    };
+    std::shared_ptr<ControlledJob> FindControlledLocked(uint64_t task_id) const;
+    bool OwnsControlled(const ControlledJob& job,
+        const extensions::authorization::PrincipalBinding& expected) const;
+    void RunControlled(const std::shared_ptr<ControlledJob>& job, uint64_t task_id);
+    void RetainControlledLocked(const std::shared_ptr<ControlledJob>& job);
+    void TrimControlledLocked();
+    std::deque<std::shared_ptr<ControlledJob>> controlled_finished_;
     void RecordShellDone(uint32_t id, uint32_t hr, bool cancelled, std::wstring error);
     struct QueueItem {
         OpRequest req;
+        std::shared_ptr<ControlledJob> controlled;
         std::wstring open_path;   // non-empty => ShellExecuteEx instead
         std::wstring open_verb;   // empty = default action; "open" / "properties" / ...
         std::wstring open_args;   // e.g. -d "<dir>" for wt.exe
@@ -497,7 +649,11 @@ private:
     void PushUndo(const OpRequest& req, uint64_t task_id,
                   const std::vector<std::wstring>* actual_destinations = nullptr);
     // Undo's body; with `required_group` only when the newest step is in it.
-    GroupUndo UndoNewest(const uint64_t* required_group);
+    GroupUndo UndoNewest(const uint64_t* required_group, uint64_t required_task = 0);
+    bool StartHistoryLocked(bool redo, uint64_t target, bool through_target);
+    void QueueHistoryRequestLocked();
+    void FinishHistoryRequestLocked(uint64_t task_id, bool success);
+    void ClearRedoLocked();
     void LoadRecoveryJournal();
     void PersistJournal();
     std::wstring JournalJsonLocked() const;
@@ -539,6 +695,8 @@ private:
     };
     std::deque<FailedItemsRetry> failed_retries_;   // newest last; guarded by mutex_
     std::deque<OpStatus> final_statuses_;            // newest last; guarded by mutex_
+    std::set<uint64_t> retained_task_ids_;
+    std::map<uint64_t, OpStatus> retained_final_statuses_;
     OpSpeedGraph speed_graph_;                       // status_.task_id's; guarded by mutex_
     uint64_t speed_graph_task_ = 0;
     void SampleSpeedLocked();
@@ -547,7 +705,29 @@ private:
     std::wstring journal_path_;
     OpStatus status_;
     std::deque<UndoEntry> undo_;
+    uint64_t undo_json_revision_ = 0;
+    mutable uint64_t undo_json_cached_revision_ = UINT64_MAX;
+    mutable std::shared_ptr<const std::wstring> undo_json_cache_;
+    std::deque<UndoEntry> redo_;
+    struct HistoryReplay {
+        bool redo = false;
+        std::vector<uint64_t> steps;
+        size_t step = 0;
+        std::vector<OpRequest> requests;
+        size_t request = 0;
+        uint64_t active_task = 0;
+    };
+    std::optional<HistoryReplay> history_replay_;
+    // Successful subrequests survive a later failure; retry resumes exactly
+    // there instead of repeating already committed moves/renames/deletes.
+    std::map<std::pair<uint64_t, bool>, size_t> history_progress_;
+    bool redo_cleared_pending_ = false;
+    uint64_t history_completed_sequence_ = 0;
+    size_t history_completed_steps_ = 0;
+    bool history_completed_redo_ = false;
+    bool history_completed_success_ = false;
     std::deque<CompletedOperation> completions_;
+    std::deque<CompletedOperation> recent_completions_;
     std::deque<FinishedTask> finished_tasks_;
     std::vector<std::wstring> moved_sources_; // Worker-owned until terminal publication.
     std::vector<std::wstring> recycle_refused_;     // same; see FinishedTask
@@ -556,12 +736,20 @@ private:
     std::thread thread_;
     bool running_ = false;
     std::atomic<bool> stopping_{false};
+    struct ExternalTaskState {
+        OpStatus status;
+        bool cancelled = false; // guarded by mutex_; no plugin callbacks while locked.
+    };
+    std::map<uint64_t, ExternalTaskState> external_tasks_;
+    std::deque<OpStatus> external_finals_;
+    uint64_t terminal_sequence_ = 0;
     uint64_t next_seq_ = 1;
 
     std::atomic<uint32_t> current_req_id_{0};
     std::atomic<bool> shell_cancel_requested_{false};
     std::atomic<ULONGLONG> shell_activity_tick_{0};
     std::atomic<bool> transfer_active_{false};
+    OperationItemControl item_control_;
     std::atomic<bool> transfer_cancel_{false};
     std::atomic<bool> transfer_pause_{false};
     std::atomic<bool> verify_copies_{false};

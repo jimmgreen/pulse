@@ -83,9 +83,9 @@ bool IsRuntimeArtifact(std::wstring_view name) {
     if (!name.ends_with(L".jsonl")) return false;
     name.remove_suffix(6);
     if (name.ends_with(L".critical")) name.remove_suffix(9);
-    static constexpr std::array<std::wstring_view, 10> prefixes = {
+    static constexpr std::array<std::wstring_view, 13> prefixes = {
         L"app-", L"index-", L"index-service-", L"index-helper-", L"network-agent-",
-        L"content-agent-", L"preview-", L"shell-", L"test-", L"unknown-"
+        L"dialog_auto-", L"content-agent-", L"preview-", L"shell-", L"test-", L"unknown-", L"launcher-", L"hotkey_broker-"
     };
     const auto prefix = std::find_if(prefixes.begin(), prefixes.end(), [name](auto value) {
         return name.starts_with(value) && name.size() > value.size() &&
@@ -93,6 +93,19 @@ bool IsRuntimeArtifact(std::wstring_view name) {
     });
     if (prefix == prefixes.end()) return false;
     name.remove_prefix(prefix->size());
+    return !name.empty() && std::all_of(name.begin(), name.end(),
+        [](wchar_t ch) { return ch >= L'0' && ch <= L'9'; });
+}
+
+bool IsPerfArtifact(std::wstring_view name) {
+    if (name.ends_with(L".1")) name.remove_suffix(2);
+    if (name.starts_with(L"frame-") && name.ends_with(L".log")) {
+        name.remove_prefix(6);
+        name.remove_suffix(4);
+    } else if (name.starts_with(L"perf-environment-") && name.ends_with(L".json")) {
+        name.remove_prefix(17);
+        name.remove_suffix(5);
+    } else return false;
     return !name.empty() && std::all_of(name.begin(), name.end(),
         [](wchar_t ch) { return ch >= L'0' && ch <= L'9'; });
 }
@@ -238,7 +251,8 @@ void CopyDirectoryArtifacts(const ExportOptions& options, std::wstring_view fold
     }
     do {
         const std::wstring_view name(data.cFileName);
-        if (!(runtime ? IsRuntimeArtifact(name) : IsCrashArtifact(name, options.include_dumps)))
+        if (!(folder == L"Perf" ? IsPerfArtifact(name) :
+              runtime ? IsRuntimeArtifact(name) : IsCrashArtifact(name, options.include_dumps)))
             continue;
         if (state.records.size() >= kMaxFiles) {
             RecordError(state, std::wstring(folder) + L"/", ERROR_TOO_MANY_OPEN_FILES);
@@ -311,12 +325,18 @@ bool Export(const ExportOptions& options, std::wstring* error) {
     const bool flushed = options.support_report && runtime::Flush(2000);
     const auto logger_health = runtime::GetHealth();
     DirectoryLocks locks;
-    if (locks.Lock(options.source_root) || locks.Lock(options.destination)) {
+    DWORD lock_error = locks.Lock(options.source_root);
+    unsigned lock_stage = 1;
+    if (!lock_error) { lock_stage = 2; lock_error = locks.Lock(options.destination); }
+    if (lock_error) {
+        runtime::Event("diagnostics_export_lock_failed", {{"stage", lock_stage}, {"error", lock_error}}, runtime::Level::Error);
         SetError(error, l10n::Pick(L"诊断源目录或目标目录不可用，或包含重解析点。",
             L"The diagnostics source or destination folder is unavailable or contains a reparse point."));
+        if (error) *error += L" (" + std::to_wstring(lock_error) + L")";
         return false;
     }
     if (options.require_empty_destination && !IsDirectoryEmpty(options.destination)) {
+        runtime::Event("diagnostics_export_nonempty", {{"error", ERROR_DIR_NOT_EMPTY}}, runtime::Level::Error);
         SetError(error, l10n::Pick(L"诊断导出目标必须为空目录。", L"The diagnostics export destination must be an empty folder."));
         return false;
     }
@@ -329,6 +349,7 @@ bool Export(const ExportOptions& options, std::wstring* error) {
             std::wstring(name), state, true);
     }
     CopyDirectoryArtifacts(options, L"Runtime", true, state, locks);
+    CopyDirectoryArtifacts(options, L"Perf", false, state, locks);
     if (!options.support_report || options.include_dumps)
         CopyDirectoryArtifacts(options, L"Crashes", false, state, locks);
     if (!WriteManifest(options, state)) {

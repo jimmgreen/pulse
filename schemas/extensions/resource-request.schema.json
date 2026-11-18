@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulse.local/schemas/extensions/resource-request.schema.json",
+  "title": "Host-held scoped resource request",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ],
+      "properties": {
+        "op": {
+          "const": "context.get"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ],
+      "properties": {
+        "op": {
+          "const": "files.list"
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256,
+          "default": 64
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "entry"
+      ],
+      "properties": {
+        "op": {
+          "const": "files.stat"
+        },
+        "entry": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "taskId"
+      ],
+      "properties": {
+        "op": {
+          "const": "operations.get"
+        },
+        "taskId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "description": "Canonical positive uint64 decimal string; host enforces <=18446744073709551615."
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "taskId"
+      ],
+      "properties": {
+        "op": {
+          "const": "operations.cancel"
+        },
+        "taskId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "description": "Canonical positive uint64 decimal string; host enforces <=18446744073709551615."
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ],
+      "properties": {
+        "op": {
+          "const": "settings.get"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "key",
+        "value",
+        "expectedVersion"
+      ],
+      "properties": {
+        "op": {
+          "const": "settings.set"
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_.-]{1,64}$"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 1024,
+              "description": "Host enforces decoded UTF-8 byte limit1024."
+            },
+            {
+              "enum": [
+                null
+              ]
+            }
+          ]
+        },
+        "expectedVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ],
+      "properties": {
+        "op": {
+          "const": "audit.list"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128,
+          "default": 64
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "items"
+      ],
+      "properties": {
+        "op": {
+          "const": "files.prepareRename"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "entry",
+              "newLeafName"
+            ],
+            "properties": {
+              "entry": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "newLeafName": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "description": "One valid Windows leaf name, at most 255 UTF-16 code units; no path separators, reserved name, trailing dot or space."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "planId"
+      ],
+      "properties": {
+        "op": {
+          "const": "files.commitRename"
+        },
+        "planId": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{48}$",
+          "minLength": 48,
+          "maxLength": 48
+        }
+      }
+    }
+  ]
+}

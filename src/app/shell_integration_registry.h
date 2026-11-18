@@ -16,6 +16,7 @@ enum class ShellIntegrationKind { Folders, WinE, ThisPc, Directory, Drive, Recyc
 // A false restore result can mean that legacy registrations had no exact
 // backup: matching Pulse overrides are removed, unrelated values stay put.
 bool ApplyShellIntegration(ShellIntegrationKind kind, const std::wstring& exe, bool on);
+bool MigrateLegacyWinECommand(const std::wstring& exe);
 bool ReadShellIntegration(ShellIntegrationKind kind, const std::wstring& exe);
 bool HasShellIntegrationOwnership(ShellIntegrationKind kind, const std::wstring& exe);
 // Exact pre-snapshot orphan signature, used by startup migration and explicit

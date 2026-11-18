@@ -7,9 +7,11 @@
 #include "../common/crash_reporter.h"
 #include "preview_decoders.h"
 #include "gif_decoder.h"
+#include "decode_budget.h"
 #include "folder_thumbnail.h"
 #include "preview_integrity.h"
 #include "../common/runtime_log.h"
+#include "../common/preview_diagnostics.h"
 #include "preview_file_utils.h"
 #include "preview_properties.h"
 #include <windows.h>
@@ -50,7 +52,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     if (__argc < 2) return 2;
     const DWORD owner = wcstoul(__wargv[1], nullptr, 10);
-    const std::wstring pipeName = ipc::PreviewPipeName(owner);
+    const bool process_pipe = __argc > 2 && wcscmp(__wargv[2], L"--process-pipe") == 0;
+    const std::wstring pipeName = ipc::PreviewPipeName(owner, process_pipe ? GetCurrentProcessId() : 0);
     CurrentUserSecurityAttributes pipeSecurity;
     if (!pipeSecurity) return 3;
     HANDLE pipe = CreateNamedPipeW(pipeName.c_str(),
@@ -62,16 +65,26 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     for (;;) {
         ipc::PreviewRequest req;
-        if (!ipc::ReadAll(pipe, &req, sizeof(req)) || req.magic!=ipc::kPreviewMagic ||
+        if (!ipc::ReadAll(pipe, &req, sizeof(req)) || (req.magic!=ipc::kPreviewMagic && req.magic!=ipc::kPreviewBudgetRequestMagic) ||
             req.path_chars==0 || req.path_chars>32768) break;
         std::wstring path(req.path_chars, L'\0');
         if (!ipc::ReadAll(pipe, path.data(), req.path_chars*sizeof(wchar_t))) break;
+        preview::DecodeBudgetSession budget_session{pipe, req.request_id, req.generation};
+        preview::DecodeBudgetScope budget_scope(req.magic == ipc::kPreviewBudgetRequestMagic &&
+            (req.flags & ipc::kPreviewRequestFlagGrid) ? &budget_session : nullptr);
         const auto request_started = GetTickCount64();
+        const auto path_id = preview::DiagnosticPathId(path);
+        if (!(req.flags & ipc::kPreviewRequestFlagGrid)) diagnostics::runtime::TextEvent("preview_host_request",
+            {{"extension", preview::DiagnosticExtension(path)}}, {{"request", req.request_id},
+            {"generation", req.generation}, {"path_id", path_id}, {"pixels", req.pixel_size},
+            {"kind", static_cast<uint32_t>(req.kind)}, {"flags", req.flags}});
         const auto terminal = [&](const char* event, uint32_t stage, DWORD error,
                                   diagnostics::runtime::Level level) {
-            diagnostics::runtime::Event(event, {{"request", req.request_id},
+            diagnostics::runtime::TextEvent(event, {{"extension", preview::DiagnosticExtension(path)}}, {{"request", req.request_id},
                 {"generation", req.generation}, {"elapsed_ms", GetTickCount64() - request_started},
-                {"stage", stage}, {"error", error}, {"flags", req.flags}}, level);
+                {"stage", stage}, {"error", error}, {"flags", req.flags},
+                {"path_id", path_id}, {"pixels", req.pixel_size},
+                {"kind", static_cast<uint32_t>(req.kind)}}, level);
         };
         std::vector<uint8_t> pixels;
         std::wstring previewText;
@@ -127,7 +140,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                      cap <= preview::kGridThumbnailEdge};
             preview::DecodeResult result;
             const ULONGLONG decode_started = GetTickCount64();
-            made = preview::DecodeContent(decode, result);
+            try { made = preview::DecodeContent(decode, result); }
+            catch (const preview::DecodeBudgetDenied&) {
+                result = {}; result.error = L"decode-memory-budget"; made = false;
+            }
             if (result.error == L"pdf-thumbnail-budget")
                 diagnostics::runtime::Event("pdf_thumbnail_budget", {
                     {"elapsed_ms", GetTickCount64() - decode_started},
@@ -166,6 +182,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             response.text_chars = static_cast<uint32_t>(previewText.size());
             response.error_chars = static_cast<uint32_t>(errorText.size());
             response.bytes_read = bytesRead;
+            if (result.embedded_psd) response.flags |= ipc::kPreviewFlagEmbeddedPsd;
             if (truncated) response.flags |= ipc::kPreviewFlagTruncated;
             // Grid thumbnails mark videos with their playing time.
             if (made && response.kind == ipc::PreviewContentKind::Bitmap &&

@@ -1,4 +1,9 @@
 #include "app_internal.h"
+#include "extension_store_ui.h"
+#include "dialog_management_ui.h"
+#include "dialog_management_controller.h"
+#include "picker_appearance.h"
+#include "app_messages.h"
 #include "../common/windows_compat.h"
 #include "../common/localization.h"
 #include "../ui/settings_page_ids.h"
@@ -13,6 +18,9 @@
 #include "content_pack_ui.h"
 #include "ai_pack_ui.h"
 #include "ai_settings_ui.h"
+#include "download_source_probe.h"
+#include "ai_assistant_settings.h"
+#include "update_transport.h"
 #include "../ui/ui_renderer.h"
 #include <shellapi.h>
 #include <shlobj.h>
@@ -28,6 +36,7 @@ ui::FluentMenuItem Item(int command,I title,bool checked=false) {
     ui::FluentMenuItem item;item.command=command;item.text=l10n::Get(title);item.checked=checked;
     return item;
 }
+
 int Popup(AppState& s,std::vector<ui::FluentMenuItem> items) {
     if(!EnsureMenu(s)) return 0;
     s.menu->SetTheme(s.darkMode,s.accentColor);
@@ -58,37 +67,145 @@ constexpr SettingDestination destinations[]={
     {I::SettingsTheme,0,0},{I::SettingsThemeColor,0,0},{I::AccentCustomTitle,0,32},{I::SettingsWindowEffect,0,0},{I::SettingsFrameLook,0,0},{I::MenuAcrylic,0,0},
     {I::SettingsWallpaper,0,0},{I::SettingsWallpaperLook,0,0},{I::SettingsWallpaperBlur,0,0},
     {I::SettingsLanguage,0,0},{I::SettingsTextRender,0,0},{I::SettingsUiFontSize,0,0},
+    {I::NativeExtensionSettingsTitle,ui::kSettingsPageNativeExtensions,0},
     // 9 文件列表
     {I::SettingsClickOpen,9,0},{I::SettingsItemCheckboxes,9,0},{I::SettingsBlankClickBack,9,0},
     {I::SettingsShowHidden,9,0},{I::SettingsShowProtected,9,0},{I::SettingsFolderSort,9,0},
     {I::SettingsRowHeight,9,0},{I::ListZebraRows,9,0},{I::ListSmartDate,9,0},{I::ListSizeBar,9,0},{I::ListTagNameColor,9,0},
-    {I::ListSelectionOutline,9,0},{I::ListThumbnailBadges,9,0},{I::ThumbCache,9,0},{I::AliasMark,9,0},{I::SettingsTreeSticky,9,0},
+    {I::ListSelectionOutline,9,0},{I::ListThumbnailBadges,9,0},{I::MediaColumnsTitle,9,0},{I::ThumbCache,9,0},{I::AliasMark,9,0},{I::SettingsTreeSticky,9,0},
     {I::ListMtimeHint,9,0},{I::ListMtimeRange,9,0},{I::ListMtimePalette,9,0},{I::SyncOneDrive,9,0},{I::SyncSvn,9,0},
     // 10 标签页与窗口
+    {I::SettingsOpenPulseIcon,10,0},
+    {I::SettingsNewWindowShows,10,0},
+    {I::SettingsArrangeMinimized,10,0},
+    {I::SettingsArrangeGap,10,0},
+    {I::SettingsTabLayout,10,0},{I::SettingsTabRows,10,0},
     {I::SettingsHomeFolder,10,0},{I::SettingsStartupOpen,10,0},{I::SettingsNewTabOpen,10,0},{I::SettingsExternalOpen,10,0},
     {I::SettingsVerticalTabs,10,0},{I::PinnedNames,10,0},{I::SettingsCloseTabDoubleClick,10,0},{I::SettingsCloseLastTab,10,0},
     // 11 启动与集成
-    {I::SettingsIntegration,11,0},{I::SettingsDefaultManager,11,0},{I::SettingsOpenFolders,11,0},{I::SettingsWinE,11,0},{I::SettingsThisPc,11,0},
+    {I::StartupDialogsTitle,11,0},{I::SettingsIntegration,11,0},{I::SettingsDefaultManager,11,0},{I::SettingsOpenFolders,11,0},{I::SettingsWinE,11,0},{I::SettingsThisPc,11,0},
     {I::SettingsRecycleBin,11,0},{I::SettingsExplorerWindows,11,0},
     {I::SettingsLaunch,11,0},{I::SettingsStartInTray,11,0},{I::SettingsKeepRunning,11,0},{I::SettingsNotifyIcon,11,0},{I::SettingsShellTags,11,0},
     // 12 文件操作
     {I::SettingsConfirmDelete,12,0},{I::SettingsTrayIcon,12,0},{I::TrayHideWhenEmpty,12,0},
     {I::SettingsLanDiscovery,12,0},{I::SettingsLanCache,12,0},{I::SettingsNetworkRecent,12,0},{I::NetworkShowHiddenShares,12,0},
     {I::SettingsClearNetwork,12,0},{I::SettingsChangeTracking,12,0},
-    {I::GlobalSearch,1,0},{I::GlobalSearchHotkey,1,0},{I::GlobalSearchDoubleCtrl,1,0},{I::GlobalSearchDoubleCtrlGap,1,0},{I::GlobalSearchApps,1,0},{I::DialogJumpBar,1,0},{I::DialogJumpAuto,1,0},{I::SearchPinyin,1,0},{I::JumpHistory,1,0},{I::ContentIndexManage,1,0},{I::IndexLocation,1,2},{I::LocalDrives,1,2},
-    {I::Exclusions,1,2},{I::ServerFolders,1,2},{I::SettingsContextMenu,2,0},{I::SettingsDuplicates,4,0},{I::QuickPreview,5,4},{I::PreviewPacks,8,0},
+    {I::GlobalSearch,1,0},{I::GlobalSearchHotkey,1,0},{I::GlobalSearchDoubleCtrl,1,0},{I::GlobalSearchDoubleCtrlGap,1,0},{I::GlobalSearchApps,1,0},{I::DialogJumpBar,11,0},{I::DialogJumpAuto,11,0},{I::SearchPinyin,1,0},{I::JumpHistory,1,0},{I::ContentIndexManage,1,0},{I::IndexLocation,1,2},{I::LocalDrives,1,2},
+    {I::Exclusions,1,2},{I::ServerFolders,1,2},{I::SettingsContextMenu,2,0},{I::SettingsDuplicates,4,0},{I::QuickPreview,5,4},{I::PreviewPacks,8,0},{I::DownloadSourceTitle,8,0},
     {I::SettingsAboutDiagnostics,3,0},{I::SettingsShowPerformance,3,0},{I::SettingsHints,3,0},{I::SettingsHintsReset,3,0},{I::SettingsTransfer,3,0},{I::SettingsAutoUpdate,3,0},
 };
 std::vector<ui::FluentMenuItem> FilterSettings(const std::wstring& query) {
     std::wstring needle=query;std::transform(needle.begin(),needle.end(),needle.begin(),towlower);
+    std::vector<std::wstring> tokens;
+    for (size_t start = 0; start < needle.size();) {
+        while (start < needle.size() && iswspace(needle[start])) ++start;
+        size_t end = start;
+        while (end < needle.size() && !iswspace(needle[end])) ++end;
+        if (end > start) tokens.push_back(needle.substr(start, end - start));
+        start = end;
+    }
     std::vector<ui::FluentMenuItem> items;
     const I pages[]={I::SettingsAppearance,I::SettingsSearchIndex,I::SettingsContextMenu,I::SettingsAboutDiagnostics,I::SettingsDuplicates,I::QuickPreview,
                      I::SettingsContextMenu,I::KeyboardShortcuts,I::PreviewPacks,I::SettingsFileList,I::SettingsPageTabs,
                      I::SettingsPageSystem,I::SettingsPageFileOps};
     for(size_t i=0;i<std::size(destinations);++i) {
         auto item=Item(static_cast<int>(i)+1,destinations[i].title);
-        item.shortcut=l10n::Get(pages[destinations[i].page]);
+        item.shortcut=l10n::Get(destinations[i].page == ui::kSettingsPageNativeExtensions ? I::PreviewPacks : pages[destinations[i].page]);
         std::wstring haystack=item.text+L" "+item.shortcut;
+        switch (destinations[i].title) {
+        case I::SettingsTheme: haystack += L" " + l10n::Get(I::SettingsThemeDesc); break;
+        case I::SettingsThemeColor: haystack += L" " + l10n::Get(I::SettingsThemeColorDesc); break;
+        case I::SettingsWindowEffect: haystack += L" " + l10n::Get(I::SettingsWindowEffectDesc); break;
+        case I::SettingsFrameLook: haystack += L" " + l10n::Get(I::SettingsFrameLookDesc); break;
+        case I::MenuAcrylic: haystack += L" " + l10n::Get(I::MenuAcrylicDesc); break;
+        case I::SettingsWallpaper: haystack += L" " + l10n::Get(I::SettingsWallpaperDesc); break;
+        case I::SettingsWallpaperLook: haystack += L" " + l10n::Get(I::SettingsWallpaperLookDesc); break;
+        case I::SettingsWallpaperBlur: haystack += L" " + l10n::Get(I::SettingsWallpaperBlurDesc); break;
+        case I::SettingsLanguage: haystack += L" " + l10n::Get(I::SettingsLanguageDesc); break;
+        case I::SettingsTextRender: haystack += L" " + l10n::Get(I::SettingsTextRenderDesc); break;
+        case I::SettingsUiFontSize: haystack += L" " + l10n::Get(I::SettingsUiFontSizeDesc); break;
+        case I::SettingsClickOpen: haystack += L" " + l10n::Get(I::SettingsClickOpenDesc); break;
+        case I::SettingsItemCheckboxes: haystack += L" " + l10n::Get(I::SettingsItemCheckboxesDesc); break;
+        case I::SettingsBlankClickBack: haystack += L" " + l10n::Get(I::SettingsBlankClickBackDesc); break;
+        case I::SettingsShowHidden: haystack += L" " + l10n::Get(I::SettingsShowHiddenDesc); break;
+        case I::SettingsShowProtected: haystack += L" " + l10n::Get(I::SettingsShowProtectedDesc); break;
+        case I::SettingsFolderSort: haystack += L" " + l10n::Get(I::SettingsFolderSortDesc); break;
+        case I::SettingsRowHeight: haystack += L" " + l10n::Get(I::SettingsRowHeightDesc); break;
+        case I::ListZebraRows: haystack += L" " + l10n::Get(I::ListZebraRowsDesc); break;
+        case I::ListSmartDate: haystack += L" " + l10n::Get(I::ListSmartDateDesc); break;
+        case I::ListSizeBar: haystack += L" " + l10n::Get(I::ListSizeBarDesc); break;
+        case I::ListTagNameColor: haystack += L" " + l10n::Get(I::ListTagNameColorDesc); break;
+        case I::ListSelectionOutline: haystack += L" " + l10n::Get(I::ListSelectionOutlineDesc); break;
+        case I::ListThumbnailBadges: haystack += L" " + l10n::Get(I::ListThumbnailBadgesDesc); break;
+        case I::ThumbCache: haystack += L" " + l10n::Get(I::ThumbCacheDesc); break;
+        case I::AliasMark: haystack += L" " + l10n::Get(I::AliasMarkDesc); break;
+        case I::SettingsTreeSticky: haystack += L" " + l10n::Get(I::SettingsTreeStickyDesc); break;
+        case I::ListMtimeHint: haystack += L" " + l10n::Get(I::ListMtimeHintDesc); break;
+        case I::ListMtimeRange: haystack += L" " + l10n::Get(I::ListMtimeRangeDesc); break;
+        case I::ListMtimePalette: haystack += L" " + l10n::Get(I::ListMtimePaletteDesc); break;
+        case I::SyncOneDrive: haystack += L" " + l10n::Get(I::SyncOneDriveDesc); break;
+        case I::SyncSvn: haystack += L" " + l10n::Get(I::SyncSvnDesc); break;
+        case I::SettingsOpenPulseIcon: haystack += L" " + l10n::Get(I::SettingsOpenPulseIconDesc); break;
+        case I::SettingsNewWindowShows: haystack += L" " + l10n::Get(I::SettingsNewWindowShowsDesc); break;
+        case I::SettingsArrangeMinimized: haystack += L" " + l10n::Get(I::SettingsArrangeMinimizedDesc); break;
+        case I::SettingsArrangeGap: haystack += L" " + l10n::Get(I::SettingsArrangeGapDesc); break;
+        case I::SettingsStartupOpen: haystack += L" " + l10n::Get(I::SettingsStartupOpenDesc); break;
+        case I::SettingsTabLayout: haystack += L" " + l10n::Get(I::SettingsTabLayoutDesc) + L" 多排 多行 换行 两排 wrap multi row tab"; break;
+        case I::SettingsTabRows: haystack += L" " + l10n::Get(I::SettingsTabRowsDesc) + L" 多排 多行 rows"; break;
+        case I::SettingsNewTabOpen: haystack += L" " + l10n::Get(I::SettingsNewTabOpenDesc); break;
+        case I::SettingsExternalOpen: haystack += L" " + l10n::Get(I::SettingsExternalOpenDesc); break;
+        case I::SettingsVerticalTabs: haystack += L" " + l10n::Get(I::SettingsVerticalTabsDesc); break;
+        case I::PinnedNames: haystack += L" " + l10n::Get(I::PinnedNamesDesc); break;
+        case I::SettingsCloseTabDoubleClick: haystack += L" " + l10n::Get(I::SettingsCloseTabDoubleClickDesc); break;
+        case I::SettingsCloseLastTab: haystack += L" " + l10n::Get(I::SettingsCloseLastTabDesc); break;
+        case I::SettingsDefaultManager: haystack += L" " + l10n::Get(I::SettingsDefaultManagerDesc); break;
+        case I::SettingsOpenFolders: haystack += L" " + l10n::Get(I::SettingsOpenFoldersDesc); break;
+        case I::SettingsWinE: haystack += L" " + l10n::Get(I::SettingsWinEDesc); break;
+        case I::SettingsThisPc: haystack += L" " + l10n::Get(I::SettingsThisPcDesc); break;
+        case I::SettingsRecycleBin: haystack += L" " + l10n::Get(I::SettingsRecycleBinDesc); break;
+        case I::SettingsExplorerWindows: haystack += L" " + l10n::Get(I::SettingsExplorerWindowsDesc); break;
+        case I::SettingsLaunch: haystack += L" " + l10n::Get(I::SettingsLaunchDesc); break;
+        case I::SettingsStartInTray: haystack += L" " + l10n::Get(I::SettingsStartInTrayDesc); break;
+        case I::SettingsKeepRunning: haystack += L" " + l10n::Get(I::SettingsKeepRunningDesc); break;
+        case I::SettingsNotifyIcon: haystack += L" " + l10n::Get(I::SettingsNotifyIconDesc); break;
+        case I::SettingsShellTags: haystack += L" " + l10n::Get(I::SettingsShellTagsDesc); break;
+        case I::SettingsConfirmDelete: haystack += L" " + l10n::Get(I::SettingsConfirmDeleteDesc); break;
+        case I::SettingsTrayIcon: haystack += L" " + l10n::Get(I::SettingsTrayIconDesc); break;
+        case I::TrayHideWhenEmpty: haystack += L" " + l10n::Get(I::TrayHideWhenEmptyDesc); break;
+        case I::SettingsLanDiscovery: haystack += L" " + l10n::Get(I::SettingsLanDiscoveryDesc); break;
+        case I::SettingsLanCache: haystack += L" " + l10n::Get(I::SettingsLanCacheDesc); break;
+        case I::SettingsNetworkRecent: haystack += L" " + l10n::Get(I::SettingsNetworkRecentDesc); break;
+        case I::SettingsClearNetwork: haystack += L" " + l10n::Get(I::SettingsClearNetworkDesc); break;
+        case I::SettingsChangeTracking: haystack += L" " + l10n::Get(I::SettingsChangeTrackingDesc); break;
+        case I::GlobalSearch: haystack += L" " + l10n::Get(I::GlobalSearchDesc); break;
+        case I::GlobalSearchHotkey: haystack += L" " + l10n::Get(I::GlobalSearchHotkeyDesc); break;
+        case I::GlobalSearchDoubleCtrl: haystack += L" " + l10n::Get(I::GlobalSearchDoubleCtrlDesc); break;
+        case I::GlobalSearchDoubleCtrlGap: haystack += L" " + l10n::Get(I::GlobalSearchDoubleCtrlGapDesc); break;
+        case I::GlobalSearchApps: haystack += L" " + l10n::Get(I::GlobalSearchAppsDesc); break;
+        case I::DialogJumpBar: haystack += L" " + l10n::Get(I::DialogJumpBarDesc); break;
+        case I::DialogJumpAuto: haystack += L" " + l10n::Get(I::DialogJumpAutoDesc); break;
+        case I::SearchPinyin: haystack += L" " + l10n::Get(I::SearchPinyinDesc); break;
+        case I::JumpHistory: haystack += L" " + l10n::Get(I::JumpHistoryDesc); break;
+        case I::SettingsShowPerformance: haystack += L" " + l10n::Get(I::SettingsShowPerformanceDesc); break;
+        case I::SettingsHints: haystack += L" " + l10n::Get(I::SettingsHintsDesc); break;
+        case I::SettingsHintsReset: haystack += L" " + l10n::Get(I::SettingsHintsResetDesc); break;
+        case I::SettingsTransfer: haystack += L" " + l10n::Get(I::SettingsTransferDesc); break;
+        case I::SettingsAutoUpdate: haystack += L" " + l10n::Get(I::SettingsAutoUpdateDesc); break;
+        default: break;
+        }
+        // Search aliases are accepted input tokens, not additional UI labels.
+        if ((needle == L"多开" || needle == L"多開" || needle == L"multiwindow" || needle == L"multi window") &&
+            (destinations[i].title == I::SettingsOpenPulseIcon || destinations[i].title == I::SettingsNewWindowShows))
+            haystack += L" " + needle;
+        if ((needle == L"win+e" || needle == L"win + e") && destinations[i].title == I::SettingsWinE)
+            haystack += L" " + needle;
+        if (destinations[i].page == 10) {
+            for (I alias : {I::SettingsSecOpenWindows, I::SettingsSecArrangeWindows,
+                    I::ExternalOpenWindow, I::ExternalOpenTab, I::OpenWindowActivate,
+                    I::SettingsArrangeMinimized, I::SettingsArrangeGap})
+                haystack += L" " + l10n::Get(alias);
+        }
+
         if (destinations[i].page == 5 || destinations[i].page == 8) {
             // Translate each visible heading separately: the Traditional Chinese
             // phrase table deliberately does not translate unknown concatenations.
@@ -102,30 +219,17 @@ std::vector<ui::FluentMenuItem> FilterSettings(const std::wstring& query) {
             for (const auto& alias : aliases) haystack += L" " + alias;
         }
         std::transform(haystack.begin(),haystack.end(),haystack.begin(),towlower);
-        if(needle.empty() || haystack.find(needle)!=std::wstring::npos) items.push_back(std::move(item));
+        if (std::all_of(tokens.begin(), tokens.end(), [&](const std::wstring& token) {
+            return haystack.find(token) != std::wstring::npos;
+        })) items.push_back(std::move(item));
     }
     if(items.empty()) {auto item=Item(0,I::SettingsNoMatches);item.enabled=false;items.push_back(std::move(item));}
     return items;
 }
 void FindSetting(AppState& s) {
-    if(!EnsureMenu(s)) return;
-    s.menu->SetTheme(s.darkMode,s.accentColor);
-    s.menu->SetFilterPlaceholder(l10n::Get(I::SettingsFind));
-    s.menu->SetFilterMinWidth(420);
-    POINT pt{static_cast<LONG>(s.compositor.Width()/2),static_cast<LONG>(s.renderer.TitleBarHeight()+20*s.scale)};
-    ClientToScreen(s.hwnd,&pt);
-    const int command=s.menu->TrackPopup(pt,FilterSettings(L""),FilterSettings,true);
-    s.menu->SetFilterPlaceholder(L"");
-    if(command>0 && command<=static_cast<int>(std::size(destinations))) {
-        const auto& target=destinations[command-1];
-        OpenSettingsTab(s,target.page);s.settingsExpanded|=target.expanded;
-        // Scroll to the selected setting using the renderer's shared layout.
-        auto vm=BuildVm(s,false);
-        const float offset=s.renderer.SettingsDestinationOffset(vm,static_cast<int>(target.title),static_cast<float>(s.compositor.Width()),static_cast<float>(s.compositor.Height()));
-        const float maximum=s.renderer.SettingsMaxScroll(vm,static_cast<float>(s.compositor.Width()),static_cast<float>(s.compositor.Height()));
-        s.settings.SetScroll(offset,maximum);
-    }
+    StartSettingsSearch(s);
 }
+
 void ContentOptions(AppState& s) {
     auto config = s.contentSearch.GetConfig();
     if (config.roots.empty()) return;
@@ -292,7 +396,49 @@ void SysCtxAction(AppState& s,int index) {
 }
 }
 
-#ifdef PULSE_WITH_SELFTEST
+void FillSettingsSearchVm(AppState& s, ui::WindowViewModel& vm) {
+    vm.settings_search_query = s.settingsSearchQuery;
+    vm.settings_search_edit_visible = s.hwndSettingsSearchEdit && IsWindowVisible(s.hwndSettingsSearchEdit);
+    vm.settings_search_selected = s.settingsSearchSelected;
+    const auto now = GetTickCount64();
+    if (now < s.settingsSearchTargetUntil) {
+        vm.settings_search_target = s.settingsSearchTarget;
+        vm.settings_search_target_alpha = static_cast<float>(s.settingsSearchTargetUntil-now) / 1500.0f;
+    }
+    if (s.settingsSearchQuery.empty()) return;
+    for (const auto& item : FilterSettings(s.settingsSearchQuery)) {
+        if (item.command <= 0) continue;
+        vm.settings_search_results.push_back({item.text, item.shortcut, destinations[item.command-1].page, item.command});
+    }
+}
+void OpenSettingsSearchResult(AppState& s, int index) {
+    const auto items = FilterSettings(s.settingsSearchQuery);
+    if (index < 0 || index >= static_cast<int>(items.size()) || items[index].command <= 0) return;
+    const auto target = destinations[items[index].command-1];
+    if (s.hwndSettingsSearchEdit) {
+        SetWindowTextW(s.hwndSettingsSearchEdit, L"");
+        ShowWindow(s.hwndSettingsSearchEdit, SW_HIDE);
+    }
+    SetFocus(s.hwnd);
+    s.settingsSearchQuery.clear();
+    s.settingsSearchSelected = 0;
+    s.settingsSearchTarget = static_cast<int>(target.title);
+    s.settingsSearchTargetUntil = GetTickCount64()+1500;
+    SetTimer(s.hwnd, 0x5352, 40, [](HWND hwnd, UINT, UINT_PTR id, DWORD) {
+        InvalidateRect(hwnd, nullptr, FALSE);
+        auto* state = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (!state || GetTickCount64() >= state->settingsSearchTargetUntil) KillTimer(hwnd, id);
+    });
+    OpenSettingsTab(s, target.page);
+    s.settingsExpanded |= target.expanded;
+    auto vm = BuildVm(s, false);
+    const float width = static_cast<float>(s.compositor.Width()), height = static_cast<float>(s.compositor.Height());
+    s.settings.SetScroll(s.renderer.SettingsDestinationOffset(vm, static_cast<int>(target.title), width, height),
+                         s.renderer.SettingsMaxScroll(vm, width, height));
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_WITH_TEST_HOOKS)
 bool TestSettingsFilter(const std::wstring& query,I expected) {
     const auto items=FilterSettings(query);
     for(const auto& item:items) if(item.command>0 && destinations[item.command-1].title==expected) return true;
@@ -302,6 +448,26 @@ bool TestSettingsFilter(const std::wstring& query,I expected) {
 
 bool HandleSettingsControl(AppState& s,const H& hit) {
     switch(hit.region) {
+    case H::SettingsOpenPulseIcon: s.settings.OpenPulseIcon(hit.index);break;
+    case H::SettingsNewWindowShows: s.settings.NewWindowShows(hit.index);break;
+    case H::SettingsArrangeGap: s.settings.ArrangeGap(hit.index);break;
+    case H::SettingsStartupOpen: s.settings.StartupOpen(hit.index);break;
+    case H::SettingsTabLayout:
+        if (!s.appPrefs.vertical_tabs && hit.index>=0 && hit.index<3) { s.appPrefs.tab_layout=hit.index; s.appPrefs.Save(); }
+        break;
+    case H::SettingsTabRows:
+        if (!s.appPrefs.vertical_tabs && s.appPrefs.tab_layout && hit.index>=0 && hit.index<3) { s.appPrefs.tab_max_rows=hit.index+2; s.appPrefs.Save(); }
+        break;
+    case H::SettingsNewTabOpen: s.settings.NewTabOpen(hit.index);break;
+    case H::SettingsExternalOpen: s.settings.ExternalOpen(hit.index);break;
+    case H::SettingsDensity: s.settings.RowHeight(hit.index);break;
+    case H::SettingsTextRender: s.settings.TextRendering(hit.index);break;
+    case H::SettingsSearchResult: OpenSettingsSearchResult(s, hit.index); break;
+    case H::SettingsSearchClear:
+        if (s.hwndSettingsSearchEdit) SetWindowTextW(s.hwndSettingsSearchEdit, L"");
+        s.settingsSearchQuery.clear(); s.settingsSearchSelected = 0; s.settings.SetScroll(0,0);
+        StartSettingsSearch(s);
+        InvalidateRect(s.hwnd,nullptr,FALSE); break;
     case H::SettingsFind: FindSetting(s);break;
     case H::SettingsToggle: {
         // Pulse menu preview: pressing a movable row arms a drag (app_input
@@ -332,6 +498,7 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
         const float maximum=s.renderer.SettingsMaxScroll(vm,static_cast<float>(s.compositor.Width()),static_cast<float>(s.compositor.Height()));
         s.settings.SetScroll(s.settings.scroll(),maximum);break;
     }
+    case H::SettingsDialogManagement: DialogManagementAction(s,hit.index);break;
     case H::SettingsIntegration: s.settings.IntegrationAction(hit.index);break;
     case H::SettingsAccentCustom: {
         // 主题色 › 自定义: start the sliders from the colour in use.
@@ -349,7 +516,9 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
     case H::SettingsSysCtx: SysCtxAction(s,hit.index);break;
     case H::SettingsShortcuts: ShortcutsAction(s,hit.index);break;
     case H::SettingsAi: pulse::AiSettingsAction(s,hit.index);break;
+    case H::SettingsAssistant: pulse::AssistantSettingsClick(s,hit.index);break;
     case H::SettingsPackAction: {
+        if (ExtensionStoreAction(s, hit.index)) return true;
         bool refresh=false;
         switch(static_cast<ui::PackAction>(hit.index)) {
         case ui::PackAction::Install: refresh=s.settings.InstallMediaPack(s.hwnd);break;
@@ -361,13 +530,9 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
         case ui::PackAction::RawInstall: refresh=s.settings.InstallRawPack(s.hwnd);break;
         case ui::PackAction::RawRemove: refresh=s.settings.RemoveRawPack();break;
         case ui::PackAction::RawEnable: refresh=s.settings.ToggleRawPack();break;
-        case ui::PackAction::ArchiveInstall: refresh=s.settings.InstallArchivePack(s.hwnd);break;
-        case ui::PackAction::ArchiveRemove: refresh=s.settings.RemoveArchivePack();break;
-        case ui::PackAction::ArchiveEnable: refresh=s.settings.ToggleArchivePack();break;
         case ui::PackAction::Update: refresh=s.settings.UpdatePack(packs::PackId::Media,s.hwnd);break;
         case ui::PackAction::ImagesUpdate: refresh=s.settings.UpdatePack(packs::PackId::Images,s.hwnd);break;
         case ui::PackAction::RawUpdate: refresh=s.settings.UpdatePack(packs::PackId::Raw,s.hwnd);break;
-        case ui::PackAction::ArchiveUpdate: refresh=s.settings.UpdatePack(packs::PackId::Archives,s.hwnd);break;
         case ui::PackAction::UseCustom: refresh=s.settings.ToggleCustomFfmpeg();break;
         case ui::PackAction::UseDetected: refresh=s.settings.UseDetectedFfmpeg();break;
         case ui::PackAction::RemoveOnUninstall: s.settings.ToggleRemovePacksOnUninstall();break;
@@ -377,16 +542,40 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
             if(!state.update_version.empty()) refresh|=s.settings.UpdatePack(packs::PackId::Media,s.hwnd);
             if(!state.images_update_version.empty()) refresh|=s.settings.UpdatePack(packs::PackId::Images,s.hwnd);
             if(!state.raw_update_version.empty()) refresh|=s.settings.UpdatePack(packs::PackId::Raw,s.hwnd);
-            if(!state.archive_update_version.empty()) refresh|=s.settings.UpdatePack(packs::PackId::Archives,s.hwnd);
             break;
         }
-        case ui::PackAction::ManagePacks: OpenSettingsTab(s,8); return true;
+        case ui::PackAction::NativeSettings: OpenSettingsTab(s,ui::kSettingsPageNativeExtensions); return true;
+        case ui::PackAction::ManagePacks: s.settings_store_browse = false; s.settings_store_installed = false; OpenSettingsTab(s,8); return true;
         case ui::PackAction::ContentInstall: OfferContentPack(s); return true;
         case ui::PackAction::ContentManage: OpenSettingsTab(s,1); return true;
         case ui::PackAction::AiInstall: OfferAiPack(s); InvalidateRect(s.hwnd,nullptr,FALSE); return true;
         case ui::PackAction::AiRemove: ConfirmRemoveAiPack(s); InvalidateRect(s.hwnd,nullptr,FALSE); return true;
         case ui::PackAction::AiCancel: CancelAiPackInstall(); return true;
         case ui::PackAction::AiManage: OpenSettingsTab(s,ui::kSettingsPageAi); return true;
+        case ui::PackAction::DownloadSource: {
+            // 自动, 镜像 1, 镜像 2, GitHub (stored values 0, 2, 3, 1); a tested source shows its time.
+            const uint32_t order[]={0,2,3,1};
+            const int probe_row[]={-1,2,0,1};   // by stored value: the 测速 row
+            const I names[]={I::UpdateSourceAuto,I::UpdateSourceGitHub,I::UpdateSourceMirror1,I::UpdateSourceMirror2};
+            const I descs[]={I::UpdateSourceAutoDesc,I::UpdateSourceGitHubDesc,I::UpdateSourceMirror1Desc,I::UpdateSourceMirror2Desc};
+            const uint32_t current=s.settings.Packs().download_source;
+            std::vector<ui::FluentMenuItem> items;
+            for(const uint32_t value:order) {
+                auto item=Item(static_cast<int>(value)+1,names[value],value==current);
+                const int ms=probe_row[value]>=0 ? app::SourceProbeResult(probe_row[value]) : app::kSourceProbeNotRun;
+                if(ms>=0) item.shortcut=ms<1000 ? std::to_wstring(ms)+L" ms" : std::to_wstring(ms/1000)+L"."+std::to_wstring(ms%1000/100)+L" s";
+                else item.shortcut=l10n::Get(descs[value]);
+                items.push_back(std::move(item));
+            }
+            const int command=Dropdown(s,2,std::move(items));
+            if(command>=1 && command<=static_cast<int>(app::kUpdateSourceCount)) s.settings.SetDownloadSource(static_cast<uint32_t>(command-1));
+            InvalidateRect(s.hwnd,nullptr,FALSE);
+            return true;
+        }
+        case ui::PackAction::SpeedTest:
+            if(!app::SourceProbeRunning()) app::StartSourceProbe(s.hwnd);
+            InvalidateRect(s.hwnd,nullptr,FALSE);
+            return true;
         case ui::PackAction::TriggerHover:
         case ui::PackAction::TriggerSpace:
             s.settings.PreviewTrigger(hit.index-static_cast<int>(ui::PackAction::TriggerHover));
@@ -399,7 +588,27 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
         case ui::PackAction::HoverSizeSmall:
         case ui::PackAction::HoverSizeMedium:
         case ui::PackAction::HoverSizeLarge:
+        case ui::PackAction::HoverSizeXLarge:
             s.settings.HoverCardSize(hit.index-static_cast<int>(ui::PackAction::HoverSizeSmall));break;
+        case ui::PackAction::PreviewSizeFit:
+        case ui::PackAction::PreviewSizeStandard:
+        case ui::PackAction::PreviewSizeLarge:
+        case ui::PackAction::PreviewSizeMaximized:
+        case ui::PackAction::PreviewSizeFullScreen:
+            s.settings.PreviewSize(hit.index-static_cast<int>(ui::PackAction::PreviewSizeFit));break;
+        case ui::PackAction::PreviewRememberSize: s.settings.TogglePreviewRememberSize();break;
+        case ui::PackAction::SpaceClose:
+        case ui::PackAction::SpacePlayPause:
+            s.settings.PreviewSpace(hit.index-static_cast<int>(ui::PackAction::SpaceClose));break;
+        case ui::PackAction::LoopAnimations:
+        case ui::PackAction::LoopAll:
+        case ui::PackAction::LoopNone:
+            s.settings.PreviewLoop(hit.index-static_cast<int>(ui::PackAction::LoopAnimations));break;
+        case ui::PackAction::HoldOff:
+        case ui::PackAction::HoldShort:
+        case ui::PackAction::HoldMedium:
+        case ui::PackAction::HoldLong:
+            s.settings.HoldPreview(hit.index-static_cast<int>(ui::PackAction::HoldOff));break;
         case ui::PackAction::Browse: {
             ui::FolderPickerSpec spec;spec.mode=ui::PickerMode::File;
             spec.title=l10n::Get(l10n::StringId::ChooseFfmpegExe).c_str();
@@ -428,11 +637,26 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
     case H::SettingsTheme: SetThemeMode(s,hit.index);break;
     case H::SettingsDropdown: {
         std::vector<ui::FluentMenuItem> items;
-        if(hit.index==0) {
+        if(hit.index>=10 && hit.index<=12) {
+            if(!s.appPrefs.integration_enabled) break;
+            const int kind=hit.index-10;
+            const bool enabled=kind==0 ? s.appPrefs.integration_folders : kind==1 ? s.appPrefs.integration_this_pc : s.appPrefs.integration_win_e;
+            const int value=!enabled ? 0 : kind==0 ? 1 : 1+(kind==1 ? s.appPrefs.open_this_pc : s.appPrefs.open_win_e);
+            items.push_back(Item(1,I::IntegrationHandlerExplorer,value==0));
+            items.push_back(Item(2,kind==0 ? I::IntegrationHandlerPulse : I::ExternalOpenWindow,value==1));
+            if(kind!=0) items.push_back(Item(3,I::ExternalOpenTab,value==2));
+            if(kind==2) items.push_back(Item(4,I::OpenWindowActivate,value==3));
+            const int command=Dropdown(s,hit.index,std::move(items));
+            if(command>=1 && command<=(kind==0 ? 2 : kind==2 ? 4 : 3)) {
+                if(kind==0) { if(s.appPrefs.integration_folders!=(command==2)) s.settings.IntegrationAction(1); }
+                else if(kind==1) s.settings.OpenThisPc(command-1);
+                else s.settings.OpenWinE(command-1);
+            }
+        } else if(hit.index==0) {
             const I labels[]={I::EffectNone,I::EffectAcrylic,I::EffectMica,I::EffectMicaAlt};
             for(int i=0;i<ui::kWindowEffectCount;++i) {
                 auto item=Item(i+1,labels[i],s.appPrefs.window_effect==ui::WindowEffectId(static_cast<ui::WindowEffect>(i)));
-                item.enabled=i==0 || compat::ModernWindows();items.push_back(std::move(item));
+                item.enabled=ui::WindowEffectSupported(static_cast<ui::WindowEffect>(i));items.push_back(std::move(item));
             }
             int command=Dropdown(s,hit.index,std::move(items));if(command>=1 && command<=ui::kWindowEffectCount) s.settings.WindowEffect(ui::WindowEffectId(static_cast<ui::WindowEffect>(command-1)));
         } else {

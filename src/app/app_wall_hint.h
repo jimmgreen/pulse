@@ -1,5 +1,5 @@
 #pragma once
-// Photo wall suggestion (Pulse_视图切换与图标密度方案.html, P2 maybeSuggest):
+// Photo wall suggestion (P2 maybeSuggest):
 // the first time a photo folder (70% or more pictures) shows as an icon grid,
 // a card under the pane header offers the wall, once per folder per session.
 // It hides after 9 s, on Switch, on "don't show again", or when the folder or

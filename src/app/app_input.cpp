@@ -1,14 +1,21 @@
+#include "extensions/native/command_contributions.h"
+#include "pane_layout_controls.h"
+#include "../ui/view_zoom.h"
+#include "file_click_controller.h"
 #include "reopen_closed.h"
 #include "git_ui.h"
 #include "ai_settings_ui.h"
 #include "ai_assistant.h"
+#include "ai_assistant_settings.h"
 #include "folder_alias.h"
 #include "app_wall_hint.h"
 #include "arrival_select.h"
 #include "pane_column_input.h"
+#include "keymap.h"
 #include "../ui/ui_renderer.h"
 // app_input.cpp — extracted from app_main.cpp.
 #include "quick_access.h"
+#include "workspace_sidebar.h"
 #include "tag_manager.h"
 #include "tag_view.h"
 #include "filter_tag_complete.h"
@@ -21,6 +28,8 @@
 #include "tab_shortcuts.h"
 #include "explorer_shortcuts.h"
 #include "window_overview_ui.h"
+#include "window_management_ui.h"
+#include "window_arrange_ui.h"
 #include "app_updates.h"
 #include "app_internal.h"
 #include "global_search_controller.h"
@@ -30,6 +39,7 @@
 #include "partial_redraw.h"
 #include "app_hover_preview.h"
 #include "app_column_view.h"
+#include "column_header_drag.h"
 #include "app_details_tree.h"
 #include "details_column_menu.h"
 #include "../ui/lumatext_renderer.h"
@@ -81,6 +91,55 @@
 using namespace pulse;
 
 namespace pulse {
+std::vector<ui::FluentMenuItem> BuildTitleTabOverflowItems(AppState& state) {
+    const auto vm = BuildVm(state, false);
+    const auto hidden = state.renderer.HiddenTitleTabs(vm, static_cast<float>(state.compositor.Width()));
+    std::vector<ui::FluentMenuItem> items;
+    for (const int index : hidden) {
+        if (index < 0 || static_cast<size_t>(index) >= vm.tabs.size()) continue;
+        const auto& tab = vm.tabs[static_cast<size_t>(index)];
+        ui::FluentMenuItem item;
+        item.command = index + 1;
+        item.text = tab.title;
+        item.glyph = tab.pinned ? L"\xE718" : L"\xE8B7";
+        if (tab.group >= 0 && static_cast<size_t>(tab.group) < vm.tab_groups.size()) {
+            item.badge_text = vm.tab_groups[static_cast<size_t>(tab.group)].name;
+            item.has_swatch = true;
+            item.swatch_color = ui::HexColor(tab.color_rgb);
+        }
+        items.push_back(std::move(item));
+    }
+    return items;
+}
+void ShowTitleTabOverflow(AppState& state, POINT anchor) {
+    if (!EnsureMenu(state)) return;
+    auto items = BuildTitleTabOverflowItems(state);
+    if (items.empty()) return;
+    std::vector<app::LayoutTab*> identities;
+    identities.reserve(state.window_tabs.items.size());
+    for (const auto& tab : state.window_tabs.items) identities.push_back(tab.get());
+    const int command = state.menu->TrackPopup(anchor, std::move(items));
+    if (command <= 0 || static_cast<size_t>(command) > identities.size()) return;
+    const auto* selected = identities[static_cast<size_t>(command-1)];
+    for (size_t i = 0; i < state.window_tabs.items.size(); ++i)
+        if (state.window_tabs.items[i].get() == selected) { SwitchTab(state, i); break; }
+}
+static void ShowBreadcrumbAncestors(AppState& s, const std::wstring& path, POINT anchor) {
+    if (!EnsureMenu(s)) return;
+    const auto ancestors = ui::SplitBreadcrumb(path);
+    std::vector<ui::FluentMenuItem> items;
+    for (size_t i = 0; i + 1 < ancestors.size(); ++i) {
+        ui::FluentMenuItem item;
+        item.command = static_cast<int>(i) + 1;
+        item.text = ancestors[i].text;
+        item.glyph = L"\xE8B7";
+        items.push_back(std::move(item));
+    }
+    if (items.empty()) return;
+    const int command = s.menu->TrackPopup(anchor, std::move(items));
+    if (command > 0 && static_cast<size_t>(command) < ancestors.size())
+        NavigateTo(s, ancestors[static_cast<size_t>(command - 1)].path);
+}
 // The split New button. On the network page and a server's share list it is
 // 连接服务器 (main part: the dialog, chevron: its menu).
 static void PressNewButton(AppState& s, bool arrow) {
@@ -104,7 +163,7 @@ static void NewFolderOrConnect(AppState& s) {
 // Settings toggles that belong to the network page (40-42, 46) are handled
 // by app_network_page; the rest by the settings controller.
 static void ToggleSetting(AppState& s, int index) {
-    if (HandleNetworkSettingToggle(s, index)) return;
+    if (s.settings.page() == 12 && HandleNetworkSettingToggle(s, index)) return;
     s.settings.ToggleUi(index);
 }
 bool HandleBrowserNavigation(AppState& s, LPARAM command) {
@@ -161,7 +220,56 @@ bool UpdateSplitterDrag(AppState& s, int mx, int my) {
     s.hoverControlIndex = s.splitterDragIndex;
     return true;
 }
+bool TickDropEdgeScroll(AppState& s, POINT point) {
+    const auto vm = BuildVm(s, false);
+    const auto bounds = D2D1::RectF(0, 0, static_cast<float>(s.compositor.Width()),
+                                  static_cast<float>(s.compositor.Height()));
+    const auto hit = s.renderer.HitTest(vm, bounds, static_cast<float>(point.x),
+                                      static_cast<float>(point.y));
+    const int index = hit.pane_index;
+    if (index < 0 || index >= static_cast<int>(vm.pane_slots.size())) return false;
+    app::Pane* pane = PaneAtSlot(s, index);
+    app::Tab* tab = pane ? pane->ActiveTab() : nullptr;
+    if (!tab) return false;
+    const auto& slot = vm.pane_slots[static_cast<size_t>(index)];
+    auto list = s.renderer.PaneListRect(slot.pane, slot.rect);
+    list.top = s.renderer.StickyTreeRows(slot.pane, list).Bottom();
+    if (point.x < list.left || point.x >= list.right ||
+        point.y < list.top || point.y >= list.bottom) return false;
+    // List mode flows into horizontal columns; all other lists scroll vertically.
+    const bool horizontal = slot.pane.view_mode == ui::ViewMode::List;
+    const float start = horizontal ? list.left : list.top;
+    const float end = horizontal ? list.right : list.bottom;
+    const float position = static_cast<float>(horizontal ? point.x : point.y);
+    const float edge = std::min(32.0f * s.scale, (end - start) * 0.25f);
+    if (edge <= 0.0f) return false;
+    float penetration = 0.0f;
+    if (position < start + edge) penetration = -(start + edge - position) / edge;
+    else if (position > end - edge) penetration = (position - end + edge) / edge;
+    if (penetration == 0.0f) return false;
+    const float maximum = horizontal ? s.renderer.MaxScrollXForPane(slot.pane, slot.rect)
+                                     : s.renderer.MaxScrollForPane(slot.pane, slot.rect);
+    float& offset = horizontal ? tab->scroll_x : tab->scroll_y;
+    const float step = std::copysign((4.0f + 20.0f * std::abs(penetration)) * s.scale, penetration);
+    const float next = std::clamp(offset + step, 0.0f, maximum);
+    if (next == offset) return false;
+    if (pane == s.pane) CancelScrollAnimation(s);
+    offset = next;
+    if (pane == s.pane) {
+        s.scrollTargetX = tab->scroll_x;
+        s.scrollTargetY = tab->scroll_y;
+        MaybePrefetchSearchPage(s);
+    }
+    // A moving row must not spring-open underneath a stationary pointer.
+    s.springRow = -1;
+    s.springStart = 0;
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+    return true;
+}
+
 void ClearDropFeedback(AppState& s) {
+    HoverPaneLayoutControls(s, ui::HitTestResult{});
+    ui::SetDragVisualFeedback({});
     s.dropLaunchProgram.clear();
     s.dropLaunchShortcut.clear();
     s.toolbarDropMode = false;
@@ -173,6 +281,7 @@ void ClearDropFeedback(AppState& s) {
     s.dropRow = -1;
     s.dropPaneIndex = -1;
     s.dropHeader = false;
+    s.dropParent = false;
     s.dropBreadcrumb = -1;
     s.dropSidebar = -1;
     s.dropTray = false;
@@ -282,6 +391,7 @@ static DWORD RejectDropTarget(AppState& s) {
     s.dropRow = -1;
     s.dropPaneIndex = -1;
     s.dropHeader = false;
+    s.dropParent = false;
     s.dropBreadcrumb = -1;
     s.dropSidebar = -1;
     s.dropTray = false;
@@ -294,7 +404,7 @@ static DWORD RejectDropTarget(AppState& s) {
     s.dropDestDir.clear();
     s.dropLaunchProgram.clear();
     s.dropLaunchShortcut.clear();
-    s.dropBadge.clear();
+    s.dropBadge = l10n::Get(l10n::StringId::DragHintNoTarget);
     s.dropBadgeMove = false;
     InvalidateRect(s.hwnd, nullptr, FALSE);
     return DROPEFFECT_NONE;
@@ -307,6 +417,10 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
 DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
                         POINT pt, DWORD key_state, DWORD allowed,
                         DWORD preferred_effect) {
+    struct FeedbackOnReturn {
+        const AppState& state;
+        ~FeedbackOnReturn() { ui::SetDragVisualFeedback(state.dropBadge); }
+    } feedback{s};
     const DWORD effect = ResolveDropTargetImpl(s, sources, pt, key_state, allowed, preferred_effect);
     if (effect == DROPEFFECT_NONE) return effect;
     if (!g_drag_device_dir.empty() && _wcsicmp(g_drag_device_dir.c_str(), s.dropDestDir.c_str()) == 0)
@@ -328,6 +442,7 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
     s.dropRow = -1;
     s.dropPaneIndex = -1;
     s.dropHeader = false;
+    s.dropParent = false;
     s.dropBreadcrumb = -1;
     s.dropSidebar = -1;
     s.dropTray = false;
@@ -338,8 +453,10 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
     s.dropDestDir.clear();
     s.dropLaunchProgram.clear();
     s.dropLaunchShortcut.clear();
-    s.dropBadge.clear();
+    s.dropBadge = l10n::Get(l10n::StringId::DragHintReleaseCancel);
     s.dropBadgeMove = false;
+    s.dropBadgeX = float(pt.x);
+    s.dropBadgeY = float(pt.y);
     // Files from outside (or another pane) are over the window: the shelf
     // opens its 复制暂存 / 移动暂存 halves. Shift picks the move half anywhere.
     const bool shift = (key_state & MK_SHIFT) != 0;
@@ -351,25 +468,23 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
     if (sources.empty() || !(allowed & (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK)))
         return DROPEFFECT_NONE;
 
-    // Esc after a spring-loaded enter: go back instead of cancelling (self drags).
-    if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) && s.springEntered) {
-        GoBack(s);
-        s.springEntered = false;
-        return DROPEFFECT_NONE;
-    }
-
     // The toolbar holds the pinned apps while files are dragged over the
     // window; the layout (and so the hit test) depends on it.
     UpdateToolbarDropMode(s, sources);
     ui::WindowViewModel vm = BuildVm(s);
     D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s.compositor.Width(), (float)s.compositor.Height());
     ui::HitTestResult hit = s.renderer.HitTest(vm, rect, (float)pt.x, (float)pt.y);
+    HoverPaneLayoutControls(s, hit, true);
+    const std::wstring layout_drop_path = PaneLayoutDropPath(s, hit);
+    const bool layout_drop = hit.region == ui::HitTestResult::PaneLayoutCell || hit.region == ui::HitTestResult::PaneLayoutPeek;
     // Near either end of a long path in the 地址栏: page it that way.
     if ((hit.region == ui::HitTestResult::AddressBar || hit.region == ui::HitTestResult::BreadcrumbSegment) &&
         s.renderer.DragScrollBreadcrumb(vm, rect.right, (float)pt.x)) {
         InvalidateRect(s.hwnd, nullptr, FALSE);
         hit = s.renderer.HitTest(vm, rect, (float)pt.x, (float)pt.y);
     }
+    if ((hit.region == ui::HitTestResult::SidebarWorkspaceAction || hit.region == ui::HitTestResult::SidebarItemExpand) &&
+        WorkspaceIndexFromPath(hit.path) >= 0) hit.region = ui::HitTestResult::SidebarItem;
     DWORD toolbar_effect = DROPEFFECT_NONE;
     if (ResolveToolbarAppDrop(s, vm, hit, sources, pt, key_state, allowed, toolbar_effect)) {
         s.springRow = -1;
@@ -392,7 +507,13 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
     const bool file_row = hit.region == ui::HitTestResult::Row && hit.index >= 0 &&
         tab->snapshot && hit.index < (int)tab->EntryCount() && !tab->EntryAt(hit.index).is_dir;
     const std::wstring launch_program = file_row ? DropLaunchProgramAt(*tab, hit.index) : std::wstring();
-    if (hit.region == ui::HitTestResult::Row && hit.index >= 0 &&
+    if (layout_drop) {
+        if (layout_drop_path.empty() || fs::IsVirtualPath(layout_drop_path)) return RejectDropTarget(s);
+        s.springRow = -1;
+        s.dropDestDir = layout_drop_path;
+        s.dropPaneIndex = -1;
+        destName = BaseName(layout_drop_path);
+    } else if (hit.region == ui::HitTestResult::Row && hit.index >= 0 &&
         tab->snapshot && hit.index < (int)tab->EntryCount() &&
         tab->EntryAt(hit.index).is_dir) {
         if (tab->EntryAt(hit.index).change_record_only ||
@@ -403,6 +524,7 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
         // spring-opens: pausing on it right after the drag starts is common.
         if (ui::DropIntoOwnFolder(sources, full)) {
             s.springRow = -1;
+            s.dropBadge = l10n::Get(l10n::StringId::DragDropIntoSelf);
             InvalidateRect(s.hwnd, nullptr, FALSE);
             return DROPEFFECT_NONE;
         }
@@ -415,7 +537,7 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
         if (s.springRow != hit.index) {
             s.springRow = hit.index;
             s.springStart = GetTickCount64();
-        } else if (!s.springEntered && GetTickCount64() - s.springStart >= 800) {
+        } else if (GetTickCount64() - s.springStart >= 800) {
             s.springEntered = true;
             s.springRow = -1;
             if (hitPane && hitPane != s.pane) FocusPane(s, hitPane);
@@ -452,9 +574,11 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
             s.dropDestDir = view->current_path;
             destName = BaseName(view->current_path);
         }
-    } else if ((hit.region == ui::HitTestResult::FavoritesBarItem ||
-                hit.region == ui::HitTestResult::FavoritesBarChevron) && hit.index < 0) {
-        // 收藏栏's empty part: what is dropped there gets starred.
+    } else if (((hit.region == ui::HitTestResult::FavoritesBarItem ||
+                 hit.region == ui::HitTestResult::FavoritesBarChevron) && hit.index < 0) ||
+               ((hit.region == ui::HitTestResult::SidebarItem ||
+                 hit.region == ui::HitTestResult::SidebarItemExpand) && hit.path == app::MakeStarredPath())) {
+        // Both favorites entry points add references; neither moves source files.
         s.springRow = -1;
         s.dropFavoriteAdd = true;
         s.dropBadge = l10n::Get(l10n::StringId::FavoritesBarDropAdd).c_str();
@@ -504,7 +628,7 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
         } else if (s.springRow != spring_key) {
             s.springRow = spring_key;
             s.springStart = GetTickCount64();
-        } else if (!s.springEntered && GetTickCount64() - s.springStart >= 800) {
+        } else if (GetTickCount64() - s.springStart >= 800) {
             s.springEntered = true;
             s.springRow = -1;
             NavigateTo(s, folder);
@@ -521,6 +645,25 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
         s.dropDestDir = folder;
         s.dropFavorite = hit.index;
         destName = BaseName(folder);
+    } else if (hit.region == ui::HitTestResult::DropParent || hit.region == ui::HitTestResult::NavUp) {
+        if (tab->current_path.empty() || fs::IsVirtualPath(tab->current_path)) return DROPEFFECT_NONE;
+        const std::wstring parent = fs::ParentPath(tab->current_path);
+        if (parent.empty() || parent == tab->current_path || fs::IsVirtualPath(parent)) return DROPEFFECT_NONE;
+        s.dropDestDir = parent;
+        s.dropParent = true;
+        s.dropPaneIndex = hit.pane_index;
+        destName = BaseName(parent);
+        constexpr int parent_key = -1000000;
+        if (s.springRow != parent_key) {
+            s.springRow = parent_key;
+            s.springStart = GetTickCount64();
+        } else if (GetTickCount64() - s.springStart >= 800) {
+            s.springEntered = true;
+            s.springRow = -1;
+            if (hitPane && hitPane != s.pane) FocusPane(s, hitPane);
+            NavigateTo(s, parent);
+            return DROPEFFECT_NONE;
+        }
     } else if (hit.region == ui::HitTestResult::BreadcrumbSegment && !hit.path.empty()) {
         s.dropDestDir = hit.path;
         s.dropBreadcrumb = hit.index;
@@ -574,7 +717,17 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
         }
         s.dropSidebar = hit.index;
         destName = BaseName(s.dropDestDir.empty() ? hit.path : s.dropDestDir);
-        s.springRow = -1;
+        const int sidebar_key = -2000000 - hit.index;
+        if (s.dropDestDir.empty() || ui::DropIntoOwnFolder(sources, s.dropDestDir)) s.springRow = -1;
+        else if (s.springRow != sidebar_key) {
+            s.springRow = sidebar_key;
+            s.springStart = GetTickCount64();
+        } else if (GetTickCount64() - s.springStart >= 800) {
+            s.springEntered = true;
+            s.springRow = -1;
+            NavigateTo(s, s.dropDestDir);
+            return DROPEFFECT_NONE;
+        }
     } else if (hit.pane_index >= 0 &&
                PointOnPaneHeader(s, vm, hit.pane_index,
                                  static_cast<float>(pt.x), static_cast<float>(pt.y))) {
@@ -636,17 +789,15 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
         }
     }
     if (s.dropDestDir.empty()) {
+        if (!hit.path.empty() && fs::IsVirtualPath(hit.path))
+            s.dropBadge = l10n::Get(l10n::StringId::DragHintNoTarget);
         InvalidateRect(s.hwnd, nullptr, FALSE);
         return DROPEFFECT_NONE;
     }
     // A combined tag view takes a drop as its 且 tags (none: no drop).
     if (s.dropDestDir.starts_with(L"pulse:tags:")) {
-        if (!(allowed & DROPEFFECT_COPY) || !TagViewDropTags(s, s.dropDestDir, nullptr)) {
-            s.dropPaneIndex = -1;
-            s.dropDestDir.clear();
-            InvalidateRect(s.hwnd, nullptr, FALSE);
-            return DROPEFFECT_NONE;
-        }
+        if (!(allowed & DROPEFFECT_COPY) || !TagViewDropTags(s, s.dropDestDir, nullptr))
+            return RejectDropTarget(s);
         s.dropBadge = l10n::Get(l10n::StringId::DropTag).c_str();
         s.dropBadgeX = (float)pt.x;
         s.dropBadgeY = (float)pt.y;
@@ -670,19 +821,41 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
         s.dropSidebar = -1;
         s.dropFavorite = -1;
         s.dropDestDir.clear();
+        s.dropBadge = l10n::Get(l10n::StringId::DragDropIntoSelf);
         InvalidateRect(s.hwnd, nullptr, FALSE);
         return DROPEFFECT_NONE;
     }
 
-    DWORD effect = FolderDropEffect(key_state, sources, s.dropDestDir, allowed, preferred_effect);
-    s.dropBadge = (effect == DROPEFFECT_LINK ? l10n::Get(l10n::StringId::DropLink).c_str() :
-                   effect == DROPEFFECT_MOVE ? l10n::Get(l10n::StringId::DropMove).c_str() :
-                   l10n::Get(l10n::StringId::DropCopy).c_str()) + destName;
-    // Say how to switch before the drop, not after (Explorer rules: Ctrl copies, Shift moves).
-    if (effect == DROPEFFECT_MOVE && (allowed & DROPEFFECT_COPY))
-        s.dropBadge += l10n::Get(l10n::StringId::DropAltCopy);
-    else if (effect == DROPEFFECT_COPY && (allowed & DROPEFFECT_MOVE))
-        s.dropBadge += l10n::Get(l10n::StringId::DropAltMove);
+    const bool already_here = !ShellItemDrag(sources) && std::all_of(sources.begin(), sources.end(), [&](const auto& source) {
+        return _wcsicmp(path::StripExtendedPathPrefix(fs::ParentPath(source)).c_str(),
+            path::StripExtendedPathPrefix(s.dropDestDir).c_str()) == 0;
+    });
+    DWORD effect = layout_drop ? ((key_state & MK_SHIFT) ? DROPEFFECT_MOVE : DROPEFFECT_COPY) & allowed
+        : FolderDropEffect(key_state, sources, s.dropDestDir, allowed, preferred_effect);
+    if (already_here && effect == DROPEFFECT_MOVE) {
+        wchar_t badge[1024]{};
+        swprintf_s(badge, l10n::Get(l10n::StringId::DragDropAlreadyHereFormat).c_str(), destName.c_str());
+        s.dropBadge = badge;
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        return DROPEFFECT_NONE;
+    }
+    if (effect == DROPEFFECT_NONE) return RejectDropTarget(s);
+    if (effect == DROPEFFECT_LINK) {
+        s.dropBadge = l10n::Get(l10n::StringId::DropLink) + L"「" + destName + L"」";
+    } else {
+        wchar_t badge[2048]{};
+        swprintf_s(badge, l10n::Get(effect == DROPEFFECT_MOVE ? l10n::StringId::DragHintMoveFormat :
+            l10n::StringId::DragHintCopyFormat).c_str(), destName.c_str());
+        s.dropBadge = badge;
+        const auto source_volume = ui::VolumeRoot(sources.front());
+        const auto target_volume = ui::VolumeRoot(s.dropDestDir);
+        const bool cross_volume = !source_volume.empty() && !target_volume.empty() &&
+            _wcsicmp(source_volume.c_str(), target_volume.c_str()) != 0;
+        if (effect == DROPEFFECT_MOVE)
+            s.dropBadge += std::wstring(1, L'\t') + l10n::Get(l10n::StringId::DragHintCtrlCopy);
+        else if (cross_volume)
+            s.dropBadge += std::wstring(1, L'\t') + l10n::Get(l10n::StringId::DragHintCrossVolume);
+    }
     s.dropBadgeMove = effect == DROPEFFECT_MOVE;
     s.dropBadgeX = (float)pt.x;
     s.dropBadgeY = (float)pt.y;
@@ -999,14 +1172,24 @@ void StartDragOut(AppState& s) {
     if (!device)
         for (auto& path : paths) path = ClipboardPath(path);
 
-    s.clickCollapseIndex = -1;
+    s.listSelection.ClearDeferred();
     CancelScrollAnimation(s); // DoDragDrop's modal loop coexists with on-demand render
     g_internal_drag = true;
     if (device) g_drag_device_dir = tab->current_path;
     // A phone's read-only storage (or its root) gives a copy only.
     const DWORD allowed = device && !caps.cut ? DROPEFFECT_COPY : DROPEFFECT_COPY | DROPEFFECT_MOVE;
-    DWORD effect = ui::DoFileDragDrop(paths, allowed,
-        [&s] { return s.springEntered; }, tab->current_path); // Esc = 退回 when spring-entered
+    const std::wstring source_path = tab->current_path;
+    SetPaneLayoutDragSource(s.pane);
+    DWORD effect = ui::DoFileDragDrop(paths, allowed, {}, source_path, s.darkMode);
+    SetPaneLayoutDragSource(nullptr);
+    if (effect == DROPEFFECT_NONE && s.springEntered) {
+        s.dragReturnPath = source_path;
+        s.dragReturnPaths = paths;
+        wchar_t text[1024]{};
+        swprintf_s(text, l10n::Get(l10n::StringId::DragDropCancelledFormat).c_str(), BaseName(source_path).c_str());
+        s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Undo, text, {},
+            {{l10n::Get(l10n::StringId::DragDropReturn), WM_DRAG_RETURN, 0}}, {}, 4500);
+    }
     g_internal_drag = false;
     g_drag_device_dir.clear();
     s.springEntered = false;
@@ -1033,7 +1216,7 @@ static void StartTrayDragOut(AppState& s, const std::vector<uint64_t>* only = nu
     if (paths.empty()) return;
     CancelScrollAnimation(s);
     s.trayDragOut = true;
-    ui::DoFileDragDrop(paths, DROPEFFECT_COPY, [&s] { return s.springEntered; });
+    ui::DoFileDragDrop(paths, DROPEFFECT_COPY, [&s] { return s.springEntered; }, {}, s.darkMode);
     s.trayDragOut = false;
     s.springEntered = false;
     ClearDropFeedback(s);
@@ -1055,7 +1238,7 @@ static void ToggleTrayOpenCheck(AppState& s, const std::wstring& path) {
         }
 }
 
-// Staging shelf press (pulse_tray_redesign.html). The fan drags the whole
+// Staging shelf press. The fan drags the whole
 // stack out; the main button releases into the current folder; ▾ and ⋯ open
 // their menus; chips send without opening the folder.
 static void HandleTrayShelfPress(AppState& s, HWND hwnd, const ui::HitTestResult& hit, int mx, int my) {
@@ -1167,11 +1350,12 @@ float MaxScrollForActivePane(AppState& s, ui::PaneViewModel* out) {
 void ClampScroll(AppState& s) {
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
-    const float maxScroll = MaxScrollForActivePane(s);
+    ui::PaneViewModel pane;
+    const float maxScroll = MaxScrollForActivePane(s, &pane);
     tab->scroll_y = std::clamp(tab->scroll_y, 0.0f, maxScroll);
     s.scrollTargetY = std::clamp(s.scrollTargetY, 0.0f, maxScroll);
-    ui::PaneViewModel pane;
-    app::FillPaneViewModel(pane, *s.pane, &s.places);
+    // Reuse the same model for both axes on every animation frame.
+    pane.scroll_y = tab->scroll_y;
     const float maxScrollX = s.renderer.MaxScrollXForPane(pane, FocusedPaneRect(s));
     tab->scroll_x = std::clamp(tab->scroll_x, 0.0f, maxScrollX);
     s.scrollTargetX = std::clamp(s.scrollTargetX, 0.0f, maxScrollX);
@@ -1200,226 +1384,6 @@ void EnsureRowVisible(AppState& s, app::Tab& tab, int index) {
 bool PointInList(const AppState& s, int mx, int my) {
     const D2D1_RECT_F list = ListRect(s);
     return mx >= list.left && mx < list.right && my >= list.top && my < list.bottom;
-}
-
-void ResetMarquee(AppState& s) {
-    if (s.marqueeAutoScroll && s.hwnd) KillTimer(s.hwnd, kTimerMarqueeScroll);
-    s.marqueeAutoScroll = false;
-    s.marqueeSelectionDirty = false;
-    s.marqueePending = false;
-    s.marqueeActive = false;
-    s.marqueeAdditive = false;
-    s.marqueeToggle = false;
-    s.marqueeRowIndex = -1;
-    s.marqueeBase.clear();
-    s.marqueeBefore.clear();
-    s.blankClickPane = nullptr;
-    s.blankClickTab = nullptr;
-    s.blankClickGeneration = 0;
-}
-
-POINT MarqueeStartOnScreen(const AppState& s) {
-    POINT start = s.marqueeStart;
-    if (const app::Tab* tab = s.pane ? s.pane->ActiveTab() : nullptr) {
-        start.x -= static_cast<LONG>(std::lround(tab->scroll_x - s.marqueeOriginScrollX));
-        start.y -= static_cast<LONG>(std::lround(tab->scroll_y - s.marqueeOriginScrollY));
-    }
-    return start;
-}
-
-D2D1_RECT_F MarqueeDisplayRect(const AppState& s) {
-    const POINT start = MarqueeStartOnScreen(s);
-    return D2D1::RectF(static_cast<float>(std::min(start.x, s.marqueeCur.x)),
-                       static_cast<float>(std::min(start.y, s.marqueeCur.y)),
-                       static_cast<float>(std::max(start.x, s.marqueeCur.x)),
-                       static_cast<float>(std::max(start.y, s.marqueeCur.y)));
-}
-
-// Bug 4: items are tested in content space, so rows scrolled out of view stay
-// selected and the start stays anchored to the item where the drag began.
-void ApplyMarqueeSelection(AppState& s) {
-    s.marqueeSelectionDirty = false;
-    app::Tab* tab = ActiveTab(s);
-    if (!tab || !tab->snapshot) return;
-    const int n = static_cast<int>(tab->EntryCount());
-    const D2D1_RECT_F list = ListRect(s);
-    const POINT start = MarqueeStartOnScreen(s);
-    // The pointer end stops at the list edge (auto-scroll brings more in);
-    // the start end may lie far off screen.
-    const float curX = std::clamp(static_cast<float>(s.marqueeCur.x), list.left, list.right);
-    const float curY = std::clamp(static_cast<float>(s.marqueeCur.y), list.top, list.bottom);
-    const float left = std::min(static_cast<float>(start.x), curX);
-    const float top = std::min(static_cast<float>(start.y), curY);
-    // A straight vertical (or horizontal) drag still crosses the rows under
-    // it, as in File Explorer: give the band at least 1 px of extent.
-    const float right = std::max(std::max(static_cast<float>(start.x), curX), left + 1.0f);
-    const float bottom = std::max(std::max(static_cast<float>(start.y), curY), top + 1.0f);
-
-    ++tab->selection_revision;
-    tab->all_selected = false;
-    tab->selected.clear();
-    if (s.marqueeAdditive) tab->selected = s.marqueeBase;
-
-    ui::PaneViewModel pane;
-    app::FillPaneViewModel(pane, *s.pane, &s.places);
-    if (n > 0 && right > left && bottom > top) {
-        std::vector<int> hits;
-        s.renderer.ItemsInRectInPane(pane, FocusedPaneRect(s), D2D1::RectF(left, top, right, bottom), hits);
-        for (const int source : hits) {
-            if (IsDetailsTreePlaceholder(*tab, source)) continue;
-            // Ctrl (File Explorer): the band inverts what it covers.
-            if (s.marqueeToggle && s.marqueeBase.contains(source)) tab->selected.erase(source);
-            else tab->selected.insert(source);
-        }
-    }
-
-    if (tab->selected.empty()) {
-        tab->selected_index = -1;
-        return;
-    }
-    int focus = s.renderer.ItemFromPointInPane(pane, FocusedPaneRect(s), curX, curY);
-    if (tab->selected.contains(focus)) tab->selected_index = focus;
-    else tab->selected_index = *tab->selected.begin();
-    if (tab->selection_anchor < 0) tab->selection_anchor = tab->selected_index;
-    if (static_cast<int>(tab->selected.size()) == n) {
-        tab->all_selected = true;
-        tab->selected.clear();
-    }
-}
-
-namespace {
-// Scroll speed in pixels per millisecond for a pointer `beyond` pixels past
-// the edge zone: about 125 px/s at the edge, up to 3750 px/s far outside.
-// Time-based, so uneven frame or timer intervals do not change the speed.
-float MarqueeScrollSpeed(float beyond, float scale) {
-    return std::clamp(beyond * 0.022f, 0.125f * scale, 3.75f * scale);
-}
-
-// Signed distance past the auto-scroll zone on each axis (0 = inside).
-void MarqueeEdgeOverflow(const AppState& s, float& dx, float& dy) {
-    const D2D1_RECT_F list = ListRect(s);
-    const float zone = 12.0f * s.scale;   // a maximized window has no room below the list
-    const float x = static_cast<float>(s.marqueeCur.x), y = static_cast<float>(s.marqueeCur.y);
-    dx = dy = 0.0f;
-    if (y < list.top + zone) dy = y - (list.top + zone);
-    else if (y > list.bottom - zone) dy = y - (list.bottom - zone);
-    if (x < list.left + zone) dx = x - (list.left + zone);
-    else if (x > list.right - zone) dx = x - (list.right - zone);
-}
-
-void StopMarqueeAutoScroll(AppState& s) {
-    if (s.marqueeAutoScroll && s.hwnd) KillTimer(s.hwnd, kTimerMarqueeScroll);
-    s.marqueeAutoScroll = false;
-}
-
-// Requests the next frame: on the display clock when the pump runs.
-void RequestMarqueeFrame(AppState& s) {
-    if (s.framePump.Running()) s.framePump.Arm();
-    else if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
-}
-} // namespace
-
-void UpdateMarqueeAutoScroll(AppState& s) {
-    float dx = 0.0f, dy = 0.0f;
-    if (s.marqueeActive) MarqueeEdgeOverflow(s, dx, dy);
-    const app::Tab* tab = ActiveTab(s);
-    const bool horizontal = tab && tab->view_mode == ui::ViewMode::List;
-    const bool want = s.marqueeActive && (horizontal ? dx != 0.0f : dy != 0.0f);
-    if (want == s.marqueeAutoScroll || !s.hwnd) return;
-    if (!want) { StopMarqueeAutoScroll(s); return; }
-    s.marqueeAutoScroll = true;
-    s.marqueeScrollLast = std::chrono::steady_clock::now();
-    // The timer keeps frames coming while the pointer rests (no mouse moves).
-    SetTimer(s.hwnd, kTimerMarqueeScroll, 16, nullptr);
-    RequestMarqueeFrame(s);
-}
-
-void TickMarqueeAutoScroll(AppState& s) {
-    if (!s.marqueeActive || !ActiveTab(s) || (GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
-        StopMarqueeAutoScroll(s);
-        return;
-    }
-    RequestMarqueeFrame(s);
-}
-
-// Called by Render once per frame before the view model is built.
-void UpdateMarqueeFrame(AppState& s) {
-    if (s.marqueeAutoScroll) {
-        app::Tab* tab = ActiveTab(s);
-        if (!s.marqueeActive || !tab || (GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
-            StopMarqueeAutoScroll(s);
-        } else {
-            // The pointer may rest outside the window; follow it without mouse moves.
-            POINT cursor{};
-            if (GetCursorPos(&cursor) && ScreenToClient(s.hwnd, &cursor)) s.marqueeCur = cursor;
-            const auto now = std::chrono::steady_clock::now();
-            const float elapsed = static_cast<float>(std::clamp(
-                std::chrono::duration<double, std::milli>(now - s.marqueeScrollLast).count(), 0.0, 50.0));
-            s.marqueeScrollLast = now;
-            float dx = 0.0f, dy = 0.0f;
-            MarqueeEdgeOverflow(s, dx, dy);
-            const bool horizontal = tab->view_mode == ui::ViewMode::List;
-            const float over = horizontal ? dx : dy;
-            if (over == 0.0f) {
-                StopMarqueeAutoScroll(s);
-            } else {
-                if (s.scrollAnimating) CancelScrollAnimation(s);
-                float& position = horizontal ? tab->scroll_x : tab->scroll_y;
-                const float before = position;
-                const float step = MarqueeScrollSpeed(std::abs(over), s.scale) * elapsed;
-                position += over < 0.0f ? -step : step;
-                ClampScroll(s);
-                s.scrollTargetX = tab->scroll_x;
-                s.scrollTargetY = tab->scroll_y;
-                if (position != before) {
-                    s.marqueeSelectionDirty = true;
-                    RefreshScrolledHover(s);
-                    MaybePrefetchSearchPage(s);
-                }
-            }
-        }
-    }
-    if (s.marqueeSelectionDirty && s.marqueeActive) ApplyMarqueeSelection(s);
-}
-
-void HandleListRowClick(AppState& s, int index, bool ctrl, bool shift) {
-    app::Tab* tab = ActiveTab(s);
-    if (!tab) return;
-    s.clickCollapseIndex = -1;
-    s.clickToggleOnRelease = false;
-    if (shift) {
-        const int anchor = tab->selection_anchor >= 0 ? tab->selection_anchor
-            : (tab->selected_index >= 0 ? tab->selected_index : index);
-        ui::PaneViewModel view;
-        app::FillPaneViewModel(view, *s.pane, &s.places);
-        // Ctrl+Shift adds the range to what is already selected (Explorer).
-        if (ctrl) tab->AddRange(anchor, index, &view);
-        else tab->SelectRange(anchor, index, &view);
-    } else if (ctrl) {
-        // A selected item remains part of the drag payload. Only a completed
-        // Ctrl-click (without a drag) removes it from the selection.
-        if (tab->IsSelected(index)) {
-            tab->selected_index = index;
-            s.clickCollapseIndex = index;
-            s.clickToggleOnRelease = true;
-        } else {
-            tab->ToggleSelect(index);
-        }
-    } else if (tab->IsSelected(index) && tab->SelectedCount() > 1) {
-        tab->selected_index = index;
-        s.clickCollapseIndex = index;
-    } else {
-        tab->SelectOnly(index);
-    }
-}
-
-void FinishListRowClick(AppState& s) {
-    if (app::Tab* tab = ActiveTab(s); tab && s.clickCollapseIndex >= 0) {
-        if (s.clickToggleOnRelease) tab->ToggleSelect(s.clickCollapseIndex);
-        else tab->SelectOnly(s.clickCollapseIndex);
-    }
-    s.clickCollapseIndex = -1;
-    s.clickToggleOnRelease = false;
 }
 
 // Keyboard navigation to a view row, the way File Explorer treats modifiers:
@@ -1464,6 +1428,8 @@ void ResetSidebarGroupDrag(AppState& s) {
 // ---- Quick-access pin drag: reorders the pinned folders ---------------------
 
 void ResetSidebarPinDrag(AppState& s) {
+    s.workspacePaneDragParent = -1;
+    s.workspacePaneDragFrom = -1;
     s.pinDragPending = false;
     s.pinDragActive = false;
     s.pinDragPath.clear();
@@ -1479,6 +1445,7 @@ void ResetSidebarPinDrag(AppState& s) {
 void UpdateSidebarPinDrag(AppState& s, int my) {
     if (!s.pinDragActive || s.pinDragPath.empty()) return;
     if (UpdateVerticalTabDrag(s, my)) return;  // tab rows share this gesture
+    if (UpdateWorkspaceDrag(s, my)) return;
     if (UpdateSidebarTagDrag(s, my)) return;   // so do tag rows
     ui::WindowViewModel vm = BuildVm(s, false);
     const float w = static_cast<float>(s.compositor.Width());
@@ -1559,21 +1526,12 @@ void CommitSidebarGroupDrag(AppState& s) {
     s.sidebarOrder = app::NormalizeSidebarOrder(rest);
 }
 
-void CancelRenameClick(AppState& s) {
-    s.renameClickCandidate = false;
-    s.renameClickPane = nullptr;
-    s.renameClickTab = nullptr;
-    s.renameClickIndex = -1;
-    s.renameClickDue = 0;
-    s.renameClickStarted = 0;
-    s.renameClickPath.clear();
-}
 
 bool TickHoverSelect(AppState& s, ULONGLONG now) {
     if (!s.appPrefs.single_click_open || !s.appPrefs.hover_select) return false;
     if (s.hoverRow < 0 || s.ctxHoverSince == 0 || s.hoverSelectFired == s.ctxHoverSince ||
         now - s.ctxHoverSince < 500) return false;
-    if (s.dragPending || s.marqueePending || s.marqueeActive || s.renameIndex >= 0 || GetCapture() ||
+    if (s.listSelection.PendingFile() || s.listSelection.PendingBand() || s.listSelection.BandActive() || s.renameIndex >= 0 || GetCapture() ||
         (GetKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetKeyState(VK_RBUTTON) & 0x8000) != 0) return false;
     s.hoverSelectFired = s.ctxHoverSince;
     if (s.hwnd && GetForegroundWindow() != GetAncestor(s.hwnd, GA_ROOT)) return false;
@@ -1597,7 +1555,7 @@ bool TickHoverSelect(AppState& s, ULONGLONG now) {
 static bool HandleItemCheckPress(AppState& s, const ui::HitTestResult& hit) {
     app::Tab* tab = ActiveTab(s);
     if (!tab || IsSettingsTab(tab)) return false;
-    CancelRenameClick(s);
+    CancelFileClick(s);
     if (hit.region == ui::HitTestResult::HeaderCheck) {
         std::vector<int> matches;
         app::CollectFilterMatches(*tab, &s.places, matches);
@@ -1612,28 +1570,16 @@ static bool HandleItemCheckPress(AppState& s, const ui::HitTestResult& hit) {
 }
 
 // Single click opens: arms the open a plain press on a row does on release.
-static void ArmSingleOpen(AppState& s, const ui::WindowViewModel& vm, const ui::HitTestResult& hit,
-                          app::Tab* tab, bool ctrl, bool shift, bool activates) {
-    s.singleOpenCandidate = false;
-    if (!s.appPrefs.single_click_open || !tab || IsSettingsTab(tab) || ctrl || shift || activates ||
-        (GetKeyState(VK_MENU) & 0x8000) != 0 || hit.index < 0 || hit.index >= tab->CountBound()) return;
-    // Column view: selecting a folder already lists it in the next column.
-    const ui::PaneViewModel& pane = hit.pane_index >= 0 && hit.pane_index < static_cast<int>(vm.pane_slots.size())
+static void ArmFileClick(AppState& s, const ui::WindowViewModel& vm, const ui::HitTestResult& hit,
+                         app::Tab* tab, bool ctrl, bool shift, bool activates, bool rename = false) {
+    bool single = s.appPrefs.single_click_open && tab && !IsSettingsTab(tab) && !ctrl && !shift &&
+        !activates && (GetKeyState(VK_MENU) & 0x8000) == 0;
+    const auto& pane = hit.pane_index >= 0 && hit.pane_index < static_cast<int>(vm.pane_slots.size())
         ? vm.pane_slots[static_cast<size_t>(hit.pane_index)].pane : vm.pane;
-    if (pane.column_strip.Active() && tab->snapshot && hit.index < static_cast<int>(tab->EntryCount()) &&
-        tab->EntryAt(hit.index).is_dir) return;
-    s.singleOpenCandidate = true;
-    s.singleOpenPane = s.pane;
-    s.singleOpenTab = tab;
-    s.singleOpenIndex = hit.index;
-}
-
-static void OpenSingleClickRow(AppState& s, int index) {
-    app::Tab* tab = ActiveTab(s);
-    if (!tab || tab != s.singleOpenTab || s.pane != s.singleOpenPane || index >= tab->CountBound()) return;
-    tab->SelectOnly(index);
-    s.singleOpenTick = GetTickCount64();
-    OpenSelected(s);
+    if (tab && pane.column_strip.Active() && hit.index >= 0 &&
+        hit.index < static_cast<int>(tab->EntryCount()) && tab->EntryAt(hit.index).is_dir) single = false;
+    s.fileClick.Begin(FileClickIdentityFor(s, hit.index), static_cast<uint32_t>(GetMessageTime()), single, rename,
+        GetDoubleClickTime());
 }
 
 bool PointInHitItemName(AppState& s, const ui::WindowViewModel& vm,
@@ -1650,7 +1596,7 @@ bool PointInHitItemName(AppState& s, const ui::WindowViewModel& vm,
 static bool PointInHitItemGrip(AppState& s, const ui::WindowViewModel& vm,
                                const ui::HitTestResult& hit, float x, float y) {
     if (hit.region != ui::HitTestResult::Row || hit.index < 0) return true;
-    // Icon grids: a selected item drags from its whole picture.
+    // Selection never expands the content drag target into blank cell space.
     const app::Tab* tab = ActiveTab(s);
     const bool selected = tab && tab->IsSelected(hit.index);
     if (hit.pane_index >= 0 &&
@@ -1661,33 +1607,36 @@ static bool PointInHitItemGrip(AppState& s, const ui::WindowViewModel& vm,
     return s.renderer.PointInItemGrip(vm.pane, FocusedPaneRect(s), hit.index, x, y, selected);
 }
 
+bool DeferFileMouseActivation(AppState& s, POINT client) {
+    if (s.renameIndex >= 0 || s.filterEditing || s.addressEditing || s.addressSearching ||
+        !s.workspaceRenameRoot.empty() || ui::ToolbarPickerOpen()) return false;
+    const auto vm = BuildVm(s, false);
+    const auto bounds = D2D1::RectF(0, 0, static_cast<float>(s.compositor.Width()),
+        static_cast<float>(s.compositor.Height()));
+    const float x = static_cast<float>(client.x), y = static_cast<float>(client.y);
+    const auto hit = s.renderer.HitTest(vm, bounds, x, y);
+    if (hit.region != ui::HitTestResult::Row || hit.index < 0 || hit.pane_index < 0 ||
+        hit.pane_index >= static_cast<int>(vm.pane_slots.size())) return false;
+    const auto* pane = PaneAtSlot(s, hit.pane_index);
+    const auto* tab = pane ? pane->ActiveTab() : nullptr;
+    if (!tab || !tab->snapshot || IsRecycleTab(tab) || IsSettingsTab(tab) ||
+        hit.index >= static_cast<int>(tab->EntryCount())) return false;
+    const auto& slot = vm.pane_slots[static_cast<size_t>(hit.pane_index)];
+    if (slot.pane.tree) {
+        const int view = slot.pane.ViewIndex(hit.index);
+        const auto* row = slot.pane.tree->At(view);
+        if (!row || row->kind != ui::TreeRowKind::Entry ||
+            s.renderer.TreeChevronAt(slot.pane, slot.rect, x, y) == view) return false;
+    }
+    return s.renderer.PointInItemGrip(slot.pane, slot.rect, hit.index, x, y, tab->IsSelected(hit.index));
+}
+
 // How far a press in the file list moves before it becomes a marquee or a
 // drag. SM_CXDRAG stays 4 px at every DPI, a hand's tremor at 150 %; scale
 // it, and give dragging the files away 2 DIP more than the marquee.
 static int ListDragSlop(const AppState& s, int metric, bool drag) {
     const float px = static_cast<float>(GetSystemMetrics(metric)) * s.scale + (drag ? 2.0f * s.scale : 0.0f);
     return (std::max)(1, static_cast<int>(std::lround(px)));
-}
-
-// Esc during a marquee puts this selection back.
-static void RememberSelectionForMarquee(AppState& s, app::Tab* tab) {
-    s.marqueeBefore.clear();
-    s.marqueeBeforeAll = tab && tab->all_selected;
-    s.marqueeBeforeIndex = tab ? tab->selected_index : -1;
-    if (tab && !tab->all_selected) s.marqueeBefore = tab->selected;
-}
-
-static bool CancelMarquee(AppState& s) {
-    if (!s.marqueeActive && !s.marqueePending) return false;
-    if (app::Tab* tab = ActiveTab(s); tab && s.marqueeActive) {
-        ++tab->selection_revision;
-        tab->all_selected = s.marqueeBeforeAll;
-        tab->selected = s.marqueeBefore;
-        tab->selected_index = s.marqueeBeforeIndex;
-    }
-    ResetMarquee(s);
-    if (s.hwnd && GetCapture() == s.hwnd) ReleaseCapture();
-    return true;
 }
 
 void CancelScrollAnimation(AppState& s) {
@@ -1755,7 +1704,6 @@ void TickTabTransitions(AppState& s) {
 void StartSmoothScroll(AppState& s, float delta, bool horizontal) {
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
-    ClampScroll(s);
 
     if (s.scrollAnimating && s.scrollHorizontal != horizontal) CancelScrollAnimation(s);
     s.scrollHorizontal = horizontal;
@@ -1765,6 +1713,7 @@ void StartSmoothScroll(AppState& s, float delta, bool horizontal) {
     if (s.scrollAnimating) {
         UpdateSmoothScroll(s);
     } else {
+        ClampScroll(s);
         s.scrollTargetY = tab->scroll_y;
         s.scrollTargetX = tab->scroll_x;
         s.scrollLastUpdateTime = std::chrono::steady_clock::now();
@@ -1812,7 +1761,7 @@ void UpdateSmoothScroll(AppState& s, const HoverPointerApi& api) {
     ClampScroll(s);
     if (position != previous) {
         // Wheel during a marquee: the band grows with the scrolled content.
-        if (s.marqueeActive) s.marqueeSelectionDirty = true;
+        if (s.listSelection.BandActive()) s.listSelection.dirty = true;
         RefreshScrolledHover(s, api);
     }
 }
@@ -1921,7 +1870,7 @@ void PressPaneSize(AppState& s, HWND hwnd, const ui::HitTestResult& hit, int mx)
     if (hit.region == ui::HitTestResult::PaneSizeButton) {
         if (app::Pane* pane = PaneAtSlot(s, hit.pane_index)) pane->size_slider_open = !pane->size_slider_open;
     } else {
-        s.dragPending = false;
+        s.listSelection.EndFile();
         s.paneSizeDragging = true;
         s.paneSizeDragPane = hit.pane_index;
         SetCapture(hwnd);
@@ -2028,6 +1977,10 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             if (s->hoverRegion != 0 || !s->tooltipText.empty()) HandleMouseLeave(s, hwnd, WM_MOUSELEAVE, 0, 0);
             return 0;
         }
+        if (ColumnHeaderPressTracking(*s)) {   // Details header: click sorts, drag reorders
+            UpdateColumnHeaderDrag(*s, mx, my);
+            return 0;
+        }
         if (FavoritesBarDragging()) {   // 收藏栏: the same, under a dragged favorite
             if (MoveFavoritesBarDrag(*s, POINT{mx, my}) &&
                 (s->hoverRegion != 0 || !s->tooltipText.empty()))
@@ -2058,6 +2011,15 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 if (s->settings.SliderValue(which,
                         s->renderer.SettingsSliderValueAt(vm, rect, which, (float)mx)))
                     InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+        }
+        // Settings > AI 助手 › 思考强度 knob held.
+        if (AssistantThinkDragging(*s)) {
+            if (!(wParam & MK_LBUTTON)) {
+                AssistantThinkDragEnd(*s);  // capture lost without WM_LBUTTONUP
+            } else {
+                AssistantThinkDrag(*s, mx);
                 return 0;
             }
         }
@@ -2206,39 +2168,31 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 ui::WindowViewModel dragVm = BuildVm(*s);
                 D2D1_RECT_F track{}, thumb{};
                 float maxScroll = 0.0f;
+                // The shared drag rule: the thumb stays where it was grabbed.
+                auto dragV = [&] {
+                    return ui::fluent::ScrollbarDragOffset(track.top, track.bottom - track.top,
+                        thumb.bottom - thumb.top, maxScroll, static_cast<float>(my), s->scrollbarGrabOffset);
+                };
                 if (s->scrollbarSettings) {
                     if (s->renderer.SettingsScrollbarGeometry(
                             dragVm, static_cast<float>(s->compositor.Width()),
                             static_cast<float>(s->compositor.Height()), track, thumb, maxScroll)) {
-                        const float travel = std::max(1.0f,
-                            (track.bottom - track.top) - (thumb.bottom - thumb.top));
-                        s->settings.SetScroll(s->scrollbarDragStartScroll +
-                            (my - s->scrollbarDragStartY) * maxScroll / travel, maxScroll);
+                        s->settings.SetScroll(dragV(), maxScroll);
                         InvalidateRect(hwnd, nullptr, FALSE);
                     }
                 } else if (s->scrollbarSidebar && s->renderer.SidebarScrollbarGeometry(
                         dragVm, static_cast<float>(s->compositor.Width()),
                         static_cast<float>(s->compositor.Height()), track, thumb, maxScroll)) {
-                    const float travel = std::max(1.0f,
-                        (track.bottom - track.top) - (thumb.bottom - thumb.top));
-                    s->sidebarScroll = std::clamp(s->scrollbarDragStartScroll +
-                        (my - s->scrollbarDragStartY) * maxScroll / travel, 0.0f, maxScroll);
+                    s->sidebarScroll = dragV();
                     InvalidateRect(hwnd, nullptr, FALSE);
                 } else if (!s->scrollbarSidebar && s->scrollbarHorizontal &&
                     HorizontalScrollbarGeometry(*s, dragVm.pane, track, thumb, maxScroll)) {
-                    const float travel = std::max(1.0f,
-                        (track.right - track.left) - (thumb.right - thumb.left));
-                    tab->scroll_x = std::clamp(s->scrollbarDragStartScroll +
-                        (mx - s->scrollbarDragStartX) * maxScroll / travel, 0.0f, maxScroll);
+                    tab->scroll_x = ui::fluent::ScrollbarDragOffset(track.left, track.right - track.left,
+                        thumb.right - thumb.left, maxScroll, static_cast<float>(mx), s->scrollbarGrabOffset);
                     InvalidateRect(hwnd, nullptr, FALSE);
                 } else if (!s->scrollbarSidebar && !s->scrollbarHorizontal &&
                            ScrollbarGeometry(*s, dragVm.pane, track, thumb, maxScroll)) {
-                    const float travel = std::max(1.0f,
-                        (track.bottom - track.top) - (thumb.bottom - thumb.top));
-                    tab->scroll_y = std::clamp(
-                        (my - track.top - std::min(s->scrollbarGrabOffset, thumb.bottom - thumb.top))
-                            * maxScroll / travel,
-                        0.0f, maxScroll);
+                    tab->scroll_y = dragV();
                     s->scrollTargetY = tab->scroll_y;
                     MaybePrefetchSearchPage(*s);
                     InvalidateRect(hwnd, nullptr, FALSE);
@@ -2248,6 +2202,49 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         }
 
         if (TryDetachDraggedPane(*s, mx, my)) return 0;  // the pane is a window now (M6d)
+        if (s->tabDragPending && (GetKeyState(VK_LBUTTON) & 0x8000)) {
+            auto multi_vm = BuildVm(*s, false);
+            if (!s->appPrefs.vertical_tabs &&
+                (s->tabDragging || std::abs(mx - s->tabDragStartPt.x) + std::abs(my - s->tabDragStartPt.y) >= 3)) {
+                if (!s->tabDragging) {
+                    s->tabDragging = true;
+                    s->tabOrder.resize(multi_vm.tabs.size());
+                    for (size_t i = 0; i < s->tabOrder.size(); ++i) s->tabOrder[i] = static_cast<int>(i);
+                    s->tabDragRunPos = s->tabDragIndex;
+                    s->tabDragRunLen = 1;
+                    s->tabPitch = 0.0f;
+                    s->tabTracks.clear();
+                    s->tabOffsets.clear();
+                    if (s->tabDragFromChip) {
+                        const auto group = s->window_tabs.items[static_cast<size_t>(s->tabDragIndex)]->tab_group;
+                        while (s->tabDragRunPos + s->tabDragRunLen < static_cast<int>(s->tabOrder.size()) &&
+                            s->window_tabs.items[static_cast<size_t>(s->tabDragRunPos + s->tabDragRunLen)]->tab_group == group)
+                            ++s->tabDragRunLen;
+                    }
+                }
+                if (TryDetachDraggedTab(*s, mx, my)) return 0;
+                const float width = static_cast<float>(s->compositor.Width());
+                for (int i = 0; i < static_cast<int>(multi_vm.tabs.size()); ++i) {
+                    D2D1_RECT_F slot{};
+                    if (!s->renderer.TabItemRect(multi_vm, width, i, &slot) ||
+                        mx < slot.left || mx >= slot.right || my < slot.top || my >= slot.bottom) continue;
+                    const int from = s->tabDragRunPos;
+                    if (i >= from && i < from + s->tabDragRunLen) break;
+                    const bool pinned = s->window_tabs.items[static_cast<size_t>(s->tabDragIndex)]->pinned;
+                    if (multi_vm.tabs[static_cast<size_t>(i)].pinned != pinned) break;
+                    const int target = i < from ? i : i - s->tabDragRunLen + 1;
+                    while (s->tabDragRunPos != target) {
+                        const int previous = s->tabDragRunPos;
+                        s->tabDragRunPos = app::MoveTabRun(s->tabOrder, previous, s->tabDragRunLen, target < previous ? -1 : 1);
+                        if (s->tabDragRunPos == previous) break;
+                    }
+                    break;
+                }
+                s->tabDragFloatLeft = static_cast<float>(mx) - 18.0f * s->scale;
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+        }
         if (s->tabDragPending) {
             if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
                 s->tabDragPending = false;
@@ -2782,33 +2779,36 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             }
         }
 
-        if (s->marqueePending || s->marqueeActive) {
-            if ((wParam & MK_LBUTTON) == 0) {
-                if (s->marqueeActive) ApplyMarqueeSelection(*s);
+        if (s->listSelection.PendingBand() || s->listSelection.BandActive()) {
+            if (!MarqueeOwnerMatches(*s, ActiveTab(*s))) {
                 ResetMarquee(*s);
+                if (GetCapture() == hwnd) ReleaseCapture();
+                return 0;
+            }
+            if ((wParam & MK_LBUTTON) == 0) {
+                if ((GetKeyState(VK_LBUTTON) & 0x8000) != 0) return 0;
+                FinishListBand(*s, POINT{mx, my});
+                if (GetCapture() == hwnd) ReleaseCapture();
             } else {
-                s->marqueeCur = POINT{ mx, my };
+                s->listSelection.current = POINT{ mx, my };
                 if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
                     (GetKeyState(VK_SHIFT) & 0x8000) != 0 ||
                     (GetKeyState(VK_MENU) & 0x8000) != 0)
                     s->blankClickTab = nullptr;
-                if (!s->marqueeActive &&
-                    (std::abs(mx - s->marqueeStart.x) >= ListDragSlop(*s, SM_CXDRAG, false) ||
-                     std::abs(my - s->marqueeStart.y) >= ListDragSlop(*s, SM_CYDRAG, false))) {
-                    s->marqueeActive = true;
-                    s->marqueePending = false;
+                if (!s->listSelection.BandActive() &&
+                    (std::abs(mx - s->listSelection.start.x) >= ListDragSlop(*s, SM_CXDRAG, false) ||
+                     std::abs(my - s->listSelection.start.y) >= ListDragSlop(*s, SM_CYDRAG, false))) {
+                    s->listSelection.ActivateBand();
+                    CancelFileClick(*s);
                     s->tooltipText.clear();  // the hover tip of the pressed row would ride along
-                    // A marquee from a row clears the selection only now that
-                    // it really is a marquee (a plain click selects the row).
-                    if (s->marqueeRowIndex >= 0) {
-                        if (!s->marqueeAdditive) {
-                            if (app::Tab* tab = ActiveTab(*s)) tab->ClearSelection();
-                        }
-                        s->marqueeRowIndex = -1;
+                    // The first Apply replaces the row selection if needed;
+                    // do not publish a transient empty selection here.
+                    if (s->listSelection.row_index >= 0) {
+                        s->listSelection.row_index = -1;
                     }
                 }
                 // Applied once per frame in Render (UpdateMarqueeFrame).
-                if (s->marqueeActive) s->marqueeSelectionDirty = true;
+                if (s->listSelection.BandActive()) s->listSelection.dirty = true;
                 UpdateMarqueeAutoScroll(*s);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
@@ -2816,15 +2816,24 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         }
 
         // Drag-out threshold (1B-2): left button held after a row click.
-        if (s->dragPending) {
+        if (s->listSelection.PendingFile()) {
+            if (!FilePressOwnerMatches(*s, ActiveTab(*s))) {
+                CancelFileClick(*s);
+                CancelListSelection(*s);
+                if (GetCapture() == hwnd) ReleaseCapture();
+                return 0;
+            }
             if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
-                s->dragPending = false;
-                if (s->renameClickCandidate && s->renameClickDue == 0)
-                    CancelRenameClick(*s);
-            } else if (std::abs(mx - s->dragStartPt.x) >= ListDragSlop(*s, SM_CXDRAG, true) ||
-                       std::abs(my - s->dragStartPt.y) >= ListDragSlop(*s, SM_CYDRAG, true)) {
-                s->dragPending = false;
-                CancelRenameClick(*s);
+                FinishListRowClick(*s);
+                s->listSelection.EndFile();
+                s->deferredFileActivation = false;
+                CancelFileClick(*s);
+            } else if (std::abs(mx - s->listSelection.file_start.x) >= ListDragSlop(*s, SM_CXDRAG, true) ||
+                       std::abs(my - s->listSelection.file_start.y) >= ListDragSlop(*s, SM_CYDRAG, true)) {
+                s->listSelection.EndFile();
+                s->deferredFileActivation = false;
+                CancelFileClick(*s);
+                diagnostics::runtime::Event("file_drag_start", {{"rebases", s->listSelection.file_rebases}});
                 StartDragOut(*s);
                 return 0;
             }
@@ -2936,6 +2945,8 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         ui::WindowViewModel vm = BuildVm(*s);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
+        HoverPaneLayoutControls(*s, hit);
+        UpdatePaneHoverActivation(*s, vm, hit, POINT{mx,my}, wParam);
         const bool target_changed = static_cast<int>(hit.region) != s->hoverRegion ||
             hit.index != s->hoverControlIndex || hit.sub_index != s->hoverSubIndex ||
             hit.pane_index != s->hoverPaneIndex;
@@ -2965,26 +2976,7 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             else
                 InvalidateRect(hwnd, nullptr, FALSE);
         }
-        D2D1_RECT_F content = s->renderer.ContentRect((float)s->compositor.Width(), (float)s->compositor.Height());
-        float extra = 0.0f;
-        if (app::Tab* tab = ActiveTab(*s); tab) {
-            if (!tab->banner_message.empty()) {
-                const float drawn = s->renderer.FocusedPaneBannerHeight();  // one or two lines
-                extra = drawn > 0.0f ? drawn : 36.0f * s->scale;
-            }
-            std::wstring kind;
-            if (app::ParsePulsePath(tab->current_path, &kind, nullptr) && kind == L"recent")
-                extra += 40.0f * s->scale;
-        }
-        float listTop = content.top + s->renderer.PaneHeaderHeight() + extra + s->renderer.ColumnHeaderHeight();
-        // The settings page has its own bar; the pane one is not drawn there.
-        bool sbHit = !vm.settings_open &&
-            (mx >= content.right - 14 * s->scale && mx < content.right &&
-             my >= listTop && my < content.bottom);
-        if (sbHit != s->scrollbarHovered) {
-            s->scrollbarHovered = sbHit;
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
+
         return 0;
 }
 
@@ -2993,10 +2985,13 @@ LRESULT HandleMouseLeave(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         (void)wParam;
         (void)lParam;
         if (s) {
+            HoverPaneLayoutControls(*s, ui::HitTestResult{});
             AiAssistantMouseLeave(*s);
             if (s->renderer.ReleaseTabWidths()) InvalidateRect(hwnd, nullptr, FALSE);
-            s->scrollbarHovered = false;
             s->sidebarScrollbarHot = false;
+            s->settingsScrollbarHot = false;
+            s->paneScrollbarHot = false;
+            s->paneScrollbarHotPane = -1;
             s->hoverRow = -1;
             s->hoverPaneIndex = -1;
             s->ctxHoverSince = 0;
@@ -3010,7 +3005,7 @@ LRESULT HandleMouseLeave(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             s->hoverSince = 0;
             s->tooltipText.clear();
             s->bloom_accent.SetPointer(0.0f, 0.0f, false);
-            if (GetCapture() != hwnd) s->dragPending = false;
+            if (GetCapture() != hwnd) s->listSelection.EndFile();
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
@@ -3073,14 +3068,21 @@ static void ClickGroupHeader(AppState& s, int pane_slot, int group, bool select)
 
 LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        const bool deferredActivation = s->deferredFileActivation;
+        const bool old_list_press = s->listSelection.PendingBand() || s->listSelection.BandActive() ||
+            s->listSelection.PendingFile();
+        CancelListSelection(*s);
+        if (old_list_press && GetCapture() == hwnd) ReleaseCapture();
         s->blankDoubleTab = nullptr;
         s->blankDoublePending = false;
         int mx = GET_X_LPARAM(lParam);
         int my = GET_Y_LPARAM(lParam);
+        DismissSidebarPeekOutside(*s, mx, my);
+        if (!s->workspaceRenameRoot.empty()) HideWorkspaceRenameOverlay(*s, true);
         if (AiAssistantMouseDown(*s, mx, my)) return 0;   // Pulse 助手
         if (DismissPathEditorOutside(*s, mx, my)) return 0;  // chose a 别名 suggestion
         if (ClickFilterTagSuggestion(*s, mx, my)) return 0;  // the filter box's # completion
-        CancelRenameClick(*s);
+        s->fileClick.InterruptForPress();
         CancelScrollAnimation(*s);
         // Commit explicitly before changing pane/selection; a click on a
         // non-focusable part of the owner need not produce WM_KILLFOCUS.
@@ -3088,20 +3090,42 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         ui::WindowViewModel vm = BuildVm(*s, false);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
+        if (HandlePaneLayoutClick(*s, hit)) return 0;
+        if (s->undoHistoryOpen && hit.region != ui::HitTestResult::UndoHistoryRow &&
+            hit.region != ui::HitTestResult::UndoHistorySurface && hit.region != ui::HitTestResult::StatusUndoHistory &&
+            hit.region != ui::HitTestResult::StatusUndo && hit.region != ui::HitTestResult::StatusRedo) {
+            s->undoHistoryOpen = false; InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        switch (hit.region) {
+        case ui::HitTestResult::StatusUndo: s->ops.Undo(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
+        case ui::HitTestResult::StatusRedo: s->ops.Redo(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
+        case ui::HitTestResult::StatusUndoHistory:
+            s->undoHistoryOpen = !s->undoHistoryOpen; InvalidateRect(hwnd, nullptr, FALSE); return 0;
+        case ui::HitTestResult::UndoHistoryRow:
+            if (hit.sub_index != 2 && hit.index >= 0 && static_cast<size_t>(hit.index) < vm.status.history.size()) {
+                const auto& row = vm.status.history[hit.index];
+                HandleUndoHistoryAction(*s, row.task_id, row.undone, hit.sub_index == 1);
+            }
+            return 0;
+        case ui::HitTestResult::UndoHistorySurface: return 0;
+        default: break;
+        }
         // A narrow pane's opened size slider closes on any press outside it.
         if (hit.region != ui::HitTestResult::PaneSizeSlider && hit.region != ui::HitTestResult::PaneSizeButton) {
             for (int slot = 0; slot < static_cast<int>(vm.pane_slots.size()); ++slot)
                 if (app::Pane* pane = PaneAtSlot(*s, slot)) pane->size_slider_open = false;
         }
-        // Picker T3c: with 自定义工具栏 open, a toolbar pin can be dragged (or
-        // clicked); a press anywhere else closes the picker first.
-        if (ui::ToolbarPickerOpen()) {
-            if (hit.region == ui::HitTestResult::ToolbarPin) {
-                BeginToolbarPinDrag(*s, hit.index, POINT{mx, my});
-                return 0;
-            }
-            ui::CloseToolbarPicker();
+        if (hit.region==ui::HitTestResult::ToolbarSort || hit.region==ui::HitTestResult::ToolbarGroup ||
+            (hit.region==ui::HitTestResult::FilterBox && s->pane && s->pane->filter_expand<=0)) {
+            BeginToolbarViewDrag(*s,hit.region==ui::HitTestResult::ToolbarSort?0:hit.region==ui::HitTestResult::FilterBox?1:2,POINT{mx,my});
+            return 0;
         }
+        if (BeginToolbarSeparatorDrag(*s, POINT{mx, my})) return 0;
+        if (hit.region == ui::HitTestResult::ToolbarPin) {
+            BeginToolbarPinDrag(*s, hit.index, POINT{mx, my});
+            return 0;
+        }
+        if (ui::ToolbarPickerOpen()) ui::CloseToolbarPicker();
         if (s->addressSearching && hit.region != ui::HitTestResult::AddressSearchInput &&
             hit.region != ui::HitTestResult::AddressSearchScope &&
             hit.region != ui::HitTestResult::AddressSearchMode &&
@@ -3120,8 +3144,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         }
         // Single click opens: a press that switches panes or brings the
         // window forward only selects.
-        s->singleOpenCandidate = false;
-        const bool pressActivates =
+        const bool pressActivates = deferredActivation ||
             (hit.pane_index >= 0 && PaneAtSlot(*s, hit.pane_index) != nullptr &&
              PaneAtSlot(*s, hit.pane_index) != s->pane) ||
             (s->activateClickTick != 0 && GetTickCount64() - s->activateClickTick < 500);
@@ -3129,12 +3152,29 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         if (hit.pane_index >= 0) {
             if (app::Pane* p = PaneAtSlot(*s, hit.pane_index)) FocusPane(*s, p);
         }
+        if (hit.region == ui::HitTestResult::SidebarWorkspaceAction) {
+            const int index = WorkspaceIndexFromPath(hit.path);
+            if (hit.sub_index == 0) OpenWorkspaceNewTab(*s, index);
+            else if (hit.sub_index == 1) {
+                POINT point{mx, my}; ClientToScreen(hwnd, &point);
+                ShowWorkspaceMenu(*s, index, point);
+            } else if (hit.sub_index == 2) UpdateWorkspaceFromCurrent(*s, index);
+            else if (hit.sub_index == 3) OpenWorkspace(*s, index);
+            else if (hit.sub_index == 4) SaveCurrentWorkspace(*s);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        if (hit.region == ui::HitTestResult::PaneClose) {
+            CloseWorkspacePane(*s, PaneAtSlot(*s, hit.pane_index));
+            return 0;
+        }
         if (hit.region == ui::HitTestResult::RowCheck || hit.region == ui::HitTestResult::HeaderCheck) {
             if (HandleItemCheckPress(*s, hit)) InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         if (hit.region == ui::HitTestResult::TreeSticky) {
-            ClickTreeSticky(*s, hit.pane_index, hit.index);
+            if (!HandleDetailsTreeMouseDown(*s, vm, hit, mx, my, (GetKeyState(VK_MENU) & 0x8000) != 0))
+                ClickTreeSticky(*s, hit.pane_index, hit.index);
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -3155,13 +3195,11 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             return 0;
         }
         if (hit.region == ui::HitTestResult::TrayShelf) {
-            s->dragPending = false;
             HandleTrayShelfPress(*s, hwnd, hit, mx, my);
             return 0;
         }
         if (hit.region == ui::HitTestResult::StagedBadge) {
             // "已暂存" pill on a row: take that item off the shelf.
-            s->dragPending = false;
             if (!hit.path.empty()) UnstagePath(*s, hit.path);
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -3169,7 +3207,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         if (hit.region == ui::HitTestResult::TrayCard && hit.index == 0) {
             const auto top = TrayDeckEntries(s->tray, static_cast<size_t>(TrayStackTop(*s)), 1);
             if (!top.empty()) {
-                s->dragPending = false;
                 s->trayDrag = AppState::TrayDrag{};
                 s->trayDrag.pending = true;
                 s->trayDrag.path = top.front().item->path;
@@ -3182,39 +3219,28 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             }
         }
         if (hit.region == ui::HitTestResult::TrayPrev) {
-            s->dragPending = false;
             TrayStepBack(*s);
             return 0;
         }
         if (hit.region == ui::HitTestResult::TrayNext) {
-            s->dragPending = false;
             ThrowTrayTop(*s, -1.0f, -30.0f, -10.0f);
             return 0;
         }
         if (HandleColumnStripMouseDown(*s, vm, hit, mx)) {
-            s->dragPending = false;
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         if (hit.region == ui::HitTestResult::DetailsResize) {
-            s->dragPending = false;
             s->detailsPanelResizing = true;
             SetCapture(hwnd);
-            return 0;
-        }
-        if (hit.region == ui::HitTestResult::DetailsCloudDownload) {
-            s->dragPending = false;
-            StartCloudPreviewDownload(*s, vm.details.path, vm.details.size_value);
             return 0;
         }
         if (hit.region == ui::HitTestResult::DetailsPreviewEnable) {
             s->detailsPreviewEnabled = !s->detailsPreviewEnabled;
             s->detailsScroll = 0;
             if (!s->detailsPreviewEnabled) {
-                s->detailsPreviewPanning = false;
-                s->renderer.EndDetailsPreviewPan();
+                s->detailsPreview.Close();
             }
-            s->dragPending = false;
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -3223,7 +3249,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             s->detailsPreviewExpansionFrom = s->detailsPreviewExpansion;
             s->detailsPreviewFoldStart = GetTickCount64();
             s->detailsScroll = 0;
-            s->dragPending = false;
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -3262,11 +3287,9 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             return 0;
         }
         if (hit.region == ui::HitTestResult::DetailsPreview) {
-            s->dragPending = false;
             return 0;
         } else if (hit.region == ui::HitTestResult::ColumnDivider) {
             if (s->renameIndex >= 0) HideRenameOverlay(*s, true);
-            s->dragPending = false;
             s->columnResizing = true;
             if (auto* resizePane = PaneAtSlot(*s, hit.pane_index)) {
                 if (auto* tab = resizePane->ActiveTab(); tab && hit.pane_index >= 0 &&
@@ -3277,11 +3300,15 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     using K = ui::MainRenderer::ColumnKind;
                     for (int i = 0; i < columns.count; ++i) {
                         const K kind = columns.kinds[static_cast<size_t>(i)];
-                        const int stored = ui::MainRenderer::ManualColumnSlot(kind, slot.pane.is_search);
+                        const int media = slot.pane.is_search || !ui::MainRenderer::IsMediaColumn(kind)
+                            ? 0 : slot.pane.media_columns;
+                        const int stored = media ? ui::MainRenderer::MediaColumnSlot(kind, media)
+                            : ui::MainRenderer::ManualColumnSlot(kind, slot.pane.is_search);
                         const float width = columns.widths[static_cast<size_t>(i)] / s->scale;
                         // The search name width is only stored next to a path column.
                         if (stored < 0 || (kind == K::Name && !columns.Has(K::Path))) continue;
                         if (slot.pane.is_search) tab->search_column_dividers[static_cast<size_t>(stored)] = width;
+                        else if (media) tab->media_column_widths[media - 1][stored] = width;
                         else tab->details_column_dividers[static_cast<size_t>(stored)] = width;
                     }
                 }
@@ -3295,7 +3322,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         } else if (hit.region == ui::HitTestResult::Splitter) {
-            s->dragPending = false;
             if (hit.index >= ui::kSplitterSwapIndex) {
                 SwapSplitPanes(*s);
                 return 0;
@@ -3312,7 +3338,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             SetCapture(hwnd);
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::Scrollbar) {
-            s->dragPending = false;
             D2D1_RECT_F track{}, thumb{};
             float maxScroll = 0.0f;
             app::Tab* tab = ActiveTab(*s);
@@ -3330,31 +3355,24 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 ? HorizontalScrollbarGeometry(*s, scrollPane, track, thumb, maxScroll)
                 : ScrollbarGeometry(*s, scrollPane, track, thumb, maxScroll);
             if ((tab || s->scrollbarSettings) && hasGeometry) {
-                const bool outside = s->scrollbarHorizontal
-                    ? (mx < thumb.left || mx >= thumb.right)
-                    : (my < thumb.top || my >= thumb.bottom);
+                // The shared scrollbar rule: a press on the track jumps the
+                // thumb's middle there; on the thumb it holds where pressed.
+                const bool horizontal = s->scrollbarHorizontal;
+                const float pointer = static_cast<float>(horizontal ? mx : my);
+                const float thumbStart = horizontal ? thumb.left : thumb.top;
+                const float thumbLength = horizontal ? thumb.right - thumb.left : thumb.bottom - thumb.top;
+                const bool outside = pointer < thumbStart || pointer >= thumbStart + thumbLength;
+                s->scrollbarGrabOffset = ui::fluent::ScrollbarGrabOffset(thumbStart, thumbLength, pointer);
                 if (outside) {
-                    const float travel = std::max(1.0f,
-                        s->scrollbarHorizontal
-                            ? (track.right-track.left)-(thumb.right-thumb.left)
-                            : (track.bottom-track.top)-(thumb.bottom-thumb.top));
-                    const float pointer = s->scrollbarHorizontal ? mx-track.left : my-track.top;
-                    const float thumbExtent = s->scrollbarHorizontal
-                        ? thumb.right-thumb.left : thumb.bottom-thumb.top;
-                    const float value = std::clamp((pointer-thumbExtent*0.5f)*maxScroll/travel,
-                                                   0.0f,maxScroll);
+                    const float value = ui::fluent::ScrollbarDragOffset(horizontal ? track.left : track.top,
+                        horizontal ? track.right - track.left : track.bottom - track.top,
+                        thumbLength, maxScroll, pointer, s->scrollbarGrabOffset);
                     if (s->scrollbarSettings) s->settings.SetScroll(value, maxScroll);
-                    else if (s->scrollbarSidebar) s->sidebarScroll=value;
-                    else if (s->scrollbarHorizontal) tab->scroll_x=value;
-                    else { tab->scroll_y=value; s->scrollTargetY=value; MaybePrefetchSearchPage(*s); }
+                    else if (s->scrollbarSidebar) s->sidebarScroll = value;
+                    else if (horizontal) tab->scroll_x = value;
+                    else { tab->scroll_y = value; s->scrollTargetY = value; MaybePrefetchSearchPage(*s); }
                 }
-                s->scrollbarGrabOffset = outside ? (thumb.bottom - thumb.top) * 0.5f : my - thumb.top;
                 s->scrollbarDragging = true;
-                s->scrollbarDragStartX = mx;
-                s->scrollbarDragStartY = my;
-                s->scrollbarDragStartScroll = s->scrollbarSettings ? s->settings.scroll()
-                    : s->scrollbarSidebar ? s->sidebarScroll
-                    : s->scrollbarHorizontal ? tab->scroll_x : tab->scroll_y;
                 SetCapture(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
             } else {
@@ -3366,55 +3384,30 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
+            ArmHoldPreview(*s, hit.index, POINT{mx, my});   // 按住预览 (off unless chosen)
             const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             app::Tab* tab = ActiveTab(*s);
-            // File Explorer: in Details / List only the icon and the name drag
-            // the item; the rest of the row starts a marquee (a click there
-            // still selects the row, on release).
+            // Text starts a file drag; all non-text row space starts a marquee,
+            // including whitespace in an already selected row.
             if (tab && !IsSettingsTab(tab) && !PointInHitItemGrip(*s, vm, hit, static_cast<float>(mx), static_cast<float>(my))) {
-                RememberSelectionForMarquee(*s, tab);
-                s->marqueePending = true;
-                s->marqueeActive = false;
-                s->marqueeAdditive = ctrl || shift;
-                s->marqueeToggle = ctrl;
-                s->marqueeRowIndex = hit.index;
-                s->marqueeRowCtrl = ctrl;
-                s->marqueeRowShift = shift;
-                ArmSingleOpen(*s, vm, hit, tab, ctrl, shift, pressActivates);
-                s->blankClickTab = nullptr;
+                BeginListBand(*s, tab, POINT{mx, my}, hit.index, ctrl, shift);
+                ArmFileClick(*s, vm, hit, tab, ctrl, shift, pressActivates);
                 s->blankClickPane = s->pane;
                 s->blankClickGeneration = tab->view_generation;
-                s->marqueeStart = s->marqueeCur = POINT{ mx, my };
-                s->marqueeOriginScrollX = tab->scroll_x;
-                s->marqueeOriginScrollY = tab->scroll_y;
-                s->marqueeBase.clear();
-                if (ctrl || shift) {
-                    tab->MaterializeSelection();
-                    s->marqueeBase = tab->selected;
-                }
                 SetCapture(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
             // Single click opens: no slow-click rename (F2 still renames).
-            const bool renameCandidate = !s->appPrefs.single_click_open && !ctrl && !shift && tab && !tab->net_readonly &&
+            const bool renameCandidate = !pressActivates && !s->appPrefs.single_click_open && !ctrl && !shift && (GetKeyState(VK_MENU) & 0x8000) == 0 && tab && !tab->net_readonly &&
                 s->renameIndex < 0 && tab->SelectedCount() == 1 &&
                 tab->selected_index == hit.index && tab->IsSelected(hit.index) &&
                 PointInHitItemName(*s, vm, hit, static_cast<float>(mx), static_cast<float>(my));
-            HandleListRowClick(*s, hit.index, ctrl, shift);
-            ArmSingleOpen(*s, vm, hit, tab, ctrl, shift, pressActivates);
-            if (renameCandidate && tab == ActiveTab(*s)) {
-                s->renameClickCandidate = true;
-                s->renameClickStarted = GetTickCount64();
-                s->renameClickPane = s->pane;
-                s->renameClickTab = tab;
-                s->renameClickIndex = hit.index;
-                s->renameClickPath = EntryFullPath(*tab, hit.index);
-            }
+            BeginListFilePress(*s, hit.index, ctrl, shift, POINT{mx, my});
+            s->deferredFileActivation = deferredActivation && s->listSelection.PendingFile();
+            ArmFileClick(*s, vm, hit, tab, ctrl, shift, pressActivates, renameCandidate);
             // Potential drag-out start; resolved by movement in WM_MOUSEMOVE.
-            s->dragPending = true;
-            s->dragStartPt = POINT{ mx, my };
             SetCapture(hwnd);
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::TabGroup) {
@@ -3456,12 +3449,20 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // Shares a branch: this else-if chain is at the compiler's nesting limit.
             if (hit.region == ui::HitTestResult::TabNew) {
                 OpenNewTab(*s);
+            } else if (hit.index == 0) {
+                POINT anchor{mx, static_cast<LONG>(s->renderer.TitleBarHeight())};
+                ClientToScreen(hwnd, &anchor);
+                ShowTitleTabOverflow(*s, anchor);
             } else {
                 s->renderer.ScrollTabStripPage(BuildVm(*s, false), static_cast<float>(s->compositor.Width()), hit.index);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
         } else if (hit.region == ui::HitTestResult::ThemeToggle) {
             ToggleTheme(*s);
+        } else if (hit.region == ui::HitTestResult::WindowManageButton) {
+            POINT pt{mx - static_cast<LONG>(16.0f * s->scale), static_cast<LONG>(s->renderer.TitleBarHeight())};
+            ClientToScreen(hwnd, &pt);
+            ShowWindowManagementMenu(*s, pt);
         } else if (hit.region == ui::HitTestResult::SettingsButton) {
             // The button is settings' tab: it opens where you left off and
             // closes again on a second click.
@@ -3489,12 +3490,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 s->settings.WindowEffect(
                     ui::WindowEffectId(static_cast<ui::WindowEffect>(hit.index)));
             InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (hit.region == ui::HitTestResult::SettingsDensity) {
-            s->settings.RowHeight(hit.index);
-            InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (hit.region == ui::HitTestResult::SettingsTextRender) {
-            s->settings.TextRendering(hit.index);
-            InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SettingsFolderSort ||
                    hit.region == ui::HitTestResult::SettingsMtimeStyle ||
                    hit.region == ui::HitTestResult::SettingsMtimeRange ||
@@ -3502,9 +3497,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                    hit.region == ui::HitTestResult::SettingsClickMode ||
                    hit.region == ui::HitTestResult::SettingsNameBand ||
                    hit.region == ui::HitTestResult::SettingsUiFontSize ||
-                   hit.region == ui::HitTestResult::SettingsStartupOpen ||
-                   hit.region == ui::HitTestResult::SettingsNewTabOpen ||
-                   hit.region == ui::HitTestResult::SettingsExternalOpen ||
                    hit.region == ui::HitTestResult::SettingsNotifyIcon ||
                    hit.region == ui::HitTestResult::SettingsBlankClick ||
                    hit.region == ui::HitTestResult::SettingsHomeFolder ||
@@ -3514,9 +3506,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // nesting limit (C1061), so new settings must not lengthen it.
             switch (hit.region) {
             case ui::HitTestResult::SettingsUiFontSize: s->settings.UiFontSize(hit.index); break;
-            case ui::HitTestResult::SettingsStartupOpen: s->settings.StartupOpen(hit.index); break;
-            case ui::HitTestResult::SettingsNewTabOpen: s->settings.NewTabOpen(hit.index); break;
-            case ui::HitTestResult::SettingsExternalOpen: s->settings.ExternalOpen(hit.index); break;
             case ui::HitTestResult::SettingsNotifyIcon: s->settings.NotifyIcon(hit.index); break;
             case ui::HitTestResult::SettingsBlankClick: s->settings.BlankClick(hit.index); break;
             case ui::HitTestResult::SettingsHomeFolder: s->settings.HomeFolder(hit.index); break;
@@ -3649,7 +3638,15 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // Split New button: main part creates a folder (inline rename), chevron opens the menu.
             // One branch on purpose: this else-if chain is at MSVC's nesting limit (C1061).
             PressNewButton(*s, hit.region == ui::HitTestResult::NewButtonArrow);
-        } else if (hit.region == ui::HitTestResult::BreadcrumbSegment) {
+        } else if (hit.region == ui::HitTestResult::BreadcrumbSegment ||
+                   hit.region == ui::HitTestResult::BreadcrumbArrow) {
+            if (hit.region == ui::HitTestResult::BreadcrumbArrow) {
+                POINT anchor{static_cast<LONG>(hit.control_bounds.left), static_cast<LONG>(hit.control_bounds.bottom)};
+                ClientToScreen(hwnd, &anchor);
+                if (hit.index == -2) ShowBreadcrumbAncestors(*s, hit.path, anchor);
+                else ShowBreadcrumbChildren(*s, hit.path, anchor);
+                return 0;
+            }
             // The trailing search segment edits the query instead of reloading it.
             const app::Tab* active = ActiveTab(*s);
             if (active && hit.path == active->current_path && IsAddressSearchResults(active)) ShowAddressSearch(*s);
@@ -3723,6 +3720,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             s->tray.Clear();
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::RowFolderSize && hit.index >= 0) {
+            s->fileClick.Begin(FileClickIdentityFor(*s, hit.index), static_cast<uint32_t>(GetMessageTime()), false, false);
             if (app::Tab* tab = ActiveTab(*s)) {
                 // The label is part of the item (tiles, icons): the press
                 // selects it too, and a second press opens it (DblClk).
@@ -3982,12 +3980,17 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
         } else if (hit.region == ui::HitTestResult::ColumnHeader) {
-            SortBy(*s, hit.column);
+            // Reorderable columns sort on release unless dragged (column_header_drag.h).
+            if (!BeginColumnHeaderPress(*s, vm, hit, mx, my) &&
+                hit.sub_index != static_cast<int>(ui::MainRenderer::ColumnKind::Status))
+                SortBy(*s, hit.column);
         } else if (HandleVerticalTabPress(*s, hit)) {
             // Tab rows, the tabs header and the sidebar toggle.
         } else if (hit.region == ui::HitTestResult::SidebarHeaderAction) {
-            if (hit.sidebar_action == ui::SidebarAddAction::AddNetwork) {
-                RunConnectServerDialog(*s);  // 连接服务器 (pulse_network_design.html §02)
+            if (hit.sidebar_action == ui::SidebarAddAction::SaveWorkspace) {
+                SaveCurrentWorkspace(*s);
+            } else if (hit.sidebar_action == ui::SidebarAddAction::AddNetwork) {
+                RunConnectServerDialog(*s);  // 连接服务器
             } else if (hit.sidebar_action == ui::SidebarAddAction::CreateTag) {
                 POINT point{ mx, my };
                 ClientToScreen(hwnd, &point);
@@ -4022,7 +4025,13 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 s->places.UnpinWorkspace(_wtoi(rest.c_str()));
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SidebarItemExpand) {
-            if (hit.path == app::MakeStarredPath()) {
+            const int workspace = WorkspaceIndexFromPath(hit.path);
+            if (workspace >= 0 && workspace < static_cast<int>(s->places.workspaces.size())) {
+                auto& item = s->places.workspaces[static_cast<size_t>(workspace)];
+                item.expanded = !item.expanded;
+                s->places.Save();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            } else if (hit.path == app::MakeStarredPath()) {
                 s->starredExpanded = !s->starredExpanded;
                 InvalidateRect(hwnd, nullptr, FALSE);
             } else if (app::IsTagGroupPath(hit.path)) {
@@ -4039,6 +4048,10 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             const app::StarredItem* starred = s->places.FindStarred(hit.path);
             const bool in_starred =
                 hit.sidebar_section == static_cast<int>(app::SidebarSectionId::Starred);
+            if (in_starred && starred && starred->kind == app::PlaceItemKind::File) {
+                OpenPath(*s, hit.path);
+                return 0;
+            }
             if (headerless_row) {
                 s->groupDragPending = true;
                 s->groupDragActive = false;
@@ -4092,10 +4105,25 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 s->pinGapVisible = false;
                 s->pinGapLineY = 0.0f;
                 SetCapture(hwnd);
+            } else if (const auto* row = WorkspacePaneRow(vm, hit)) {
+                ResetSidebarPinDrag(*s);
+                s->workspacePaneDragParent = row->workspace_parent_index;
+                s->workspacePaneDragFrom = row->workspace_child_number - 1;
+                s->pinDragPending = true;
+                s->pinDragStartPt = POINT{mx, my};
+                s->pinDragPath = hit.path;
+                s->pinDragRun = hit.index;
+                SetCapture(hwnd);
             } else if (hit.path.starts_with(L"pulse:workspace:")) {
-                std::wstring kind, rest;
-                app::ParsePulsePath(hit.path, &kind, &rest);
-                OpenWorkspace(*s, _wtoi(rest.c_str()));
+                s->pinDragPending = true;
+                s->pinDragActive = false;
+                s->pinDragStartPt = POINT{mx, my};
+                s->pinDragPath = hit.path;
+                s->pinDragKey.clear();
+                s->pinDragRun = hit.index;
+                s->pinDragToIndex = -1;
+                s->pinGapVisible = false;
+                SetCapture(hwnd);
             } else if (!hit.path.empty()) {
                 NavigateTo(*s, hit.path);
             }
@@ -4118,15 +4146,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             }
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::StatusBarTask) {
-            const ops::OpStatus finished = s->ops.Status();
-            if (hit.sub_index == 0) {
-                // 撤销 on the finished pill: only the operation it names.
-                if (s->ops.CanUndoTask(finished.task_id)) s->ops.Undo();
-            } else if (hit.sub_index == 1) {
-                if (!finished.destination_dir.empty()) NavigateTo(*s, finished.destination_dir);
-            } else {
-                PinAndShowOperationWindow(*s);
-            }
+            HandleOperationStatusAction(*s, hit.sub_index);
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::StatusBar) {
             // Left/right status text is not a transfer control.
@@ -4139,27 +4159,13 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // A selection-clearing first click still counts toward the
             // blank double click, so the second click navigates back.
             // Shift keeps the selection (the band adds), Ctrl inverts.
-            RememberSelectionForMarquee(*s, tab);
-            if (tab && !ctrl && !shift) tab->ClearSelection();
-            s->marqueePending = true;
-            s->marqueeActive = false;
-            s->marqueeAdditive = ctrl || shift;
-            s->marqueeToggle = ctrl;
-            s->marqueeRowIndex = -1;
+            BeginListBand(*s, tab, POINT{mx, my}, -1, ctrl, shift);
             s->blankClickPane = s->pane;
             s->blankClickTab = s->appPrefs.blank_click_action != app::kBlankClickOff && tab &&
                 !IsAddressSearchResults(tab) && !ctrl && PointInList(*s, mx, my) &&
                 (GetKeyState(VK_SHIFT) & 0x8000) == 0 &&
                 (GetKeyState(VK_MENU) & 0x8000) == 0 ? tab : nullptr;
             s->blankClickGeneration = tab ? tab->view_generation : 0;
-            s->marqueeStart = s->marqueeCur = POINT{ mx, my };
-            s->marqueeOriginScrollX = tab ? tab->scroll_x : 0.0f;
-            s->marqueeOriginScrollY = tab ? tab->scroll_y : 0.0f;
-            s->marqueeBase.clear();
-            if (tab && (ctrl || shift)) {
-                tab->MaterializeSelection();
-                s->marqueeBase = tab->selected;
-            }
             SetCapture(hwnd);
             InvalidateRect(hwnd, nullptr, FALSE);
         }
@@ -4193,6 +4199,7 @@ static bool HandlePaneHeaderBlankDoubleClick(AppState& s, const ui::HitTestResul
 
 LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        s->fileClick.CancelRename();
         // Pulse 助手: a double click is a second click on its buttons.
         if (AiAssistantMouseOther(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
             AiAssistantMouseDown(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
@@ -4221,12 +4228,17 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
         s->blankClickTab = nullptr;
         int mx = GET_X_LPARAM(lParam);
         int my = GET_Y_LPARAM(lParam);
-        CancelRenameClick(*s);
-        s->dragPending = false;
+        s->listSelection.EndFile();
         // Hit-test only: do not probe details (SHGetFileInfo) before OpenWith.
         ui::WindowViewModel vm = BuildVm(*s, false);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
+        const bool suppress_open = s->fileClick.SuppressesDoubleClick(
+            static_cast<uint32_t>(GetMessageTime()), GetDoubleClickTime());
+        auto double_item = FileClickIdentityFor(*s, hit.index);
+        if (hit.pane_index >= 0 && PaneAtSlot(*s, hit.pane_index) != s->pane) double_item = {};
+        const auto double_action = s->fileClick.DoubleClick(double_item,
+            static_cast<uint32_t>(GetMessageTime()), GetDoubleClickTime());
         pulse::diagnostics::runtime::Event("file_double_click", {
             {"row_hit", hit.region == ui::HitTestResult::Row},
             {"details_view", double_tab && double_tab->view_mode == ui::ViewMode::Details},
@@ -4249,12 +4261,14 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
+        if (HandlePaneLayoutClick(*s, hit)) return 0;
         // Buttons have no double-click meaning: a quick second press (inside
         // the system double-click time - 1 s on some machines) is just another
         // press. Without this the theme toggle and friends swallowed it, so
         // they sometimes needed two clicks.
         switch (hit.region) {
         case ui::HitTestResult::ThemeToggle:
+        case ui::HitTestResult::WindowManageButton:
         case ui::HitTestResult::SettingsButton:
         case ui::HitTestResult::SidebarToggle:
         case ui::HitTestResult::TabNew:
@@ -4288,10 +4302,7 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
         }
         // Single click opens: this press is the second half of a double click
         // whose first click already opened the item.
-        if (s->singleOpenTick != 0 && GetTickCount64() - s->singleOpenTick <= GetDoubleClickTime()) {
-            s->singleOpenTick = 0;
-            return 0;
-        }
+        if (suppress_open) return 0;
         // A second press on a chevron toggles again instead of opening the folder.
         if (HandleDetailsTreeMouseDown(*s, vm, hit, mx, my, (GetKeyState(VK_MENU) & 0x8000) != 0)) {
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -4310,7 +4321,6 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
             return 0;
         }
         if (hit.region == ui::HitTestResult::DetailsPreview) {
-            s->renderer.ToggleDetailsPreviewFit(static_cast<float>(mx), static_cast<float>(my));
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -4354,8 +4364,8 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
                     s->folderSizes.Cancel(path);
             }
             s->folderSizeClickPath.clear();
-            if (tab) tab->SelectOnly(hit.index);
-            OpenSelected(*s, (wParam & MK_SHIFT) != 0);
+            if (double_action == app::FileClickAction::Open)
+                ExecuteFileClickOpen(*s, double_item, (wParam & MK_SHIFT) != 0, false);
         } else if (hit.region == ui::HitTestResult::AddressBar ||
                    hit.region == ui::HitTestResult::BreadcrumbSegment) {
             ShowOmnibar(*s, OmnibarMode::Path);
@@ -4379,6 +4389,10 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             EndFavoritesBarDrag(*s, false);
             return 0;
         }
+        if (s && ColumnHeaderPressTracking(*s)) {   // Details header: sort, or drop the dragged column
+            EndColumnHeaderPress(*s);
+            return 0;
+        }
         if (s) {
             s->paneDragPending = false;
             if (s->paneSizeDragging) {
@@ -4391,6 +4405,10 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 s->settings.EndSlider();
                 if (GetCapture() == hwnd) ReleaseCapture();
                 InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (AssistantThinkDragEnd(*s)) {
+                if (GetCapture() == hwnd) ReleaseCapture();
                 return 0;
             }
             if (SysCtxPreviewDragEnd(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) return 0;
@@ -4457,9 +4475,17 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 const std::wstring path = s->pinDragPath;
                 const bool tab_row = IsVerticalTabPath(path);
                 const std::wstring qa_drag_key = s->pinDragKey;
+                const int workspace_parent = s->workspacePaneDragParent;
+                const int workspace_pane = s->workspacePaneDragFrom;
                 if (was_active && s->pinDragToIndex >= 0) {
-                    if (tab_row)
+                    if (s->workspacePaneDragParent >= 0) {
+                        const int from = s->workspacePaneDragFrom;
+                        const int gap = s->pinDragToIndex;
+                        MoveWorkspacePane(*s, s->workspacePaneDragParent, from, gap > from ? gap - 1 : gap);
+                    } else if (tab_row)
                         CommitVerticalTabDrag(*s, path, static_cast<size_t>(s->pinDragToIndex));
+                    else if (WorkspaceIndexFromPath(path) >= 0)
+                        CommitWorkspaceDrag(*s, path, s->pinDragToIndex);
                     else if (IsSidebarTagPath(path))
                         CommitSidebarTagDrag(*s, path, static_cast<size_t>(s->pinDragToIndex));
                     else if (!qa_drag_key.empty())
@@ -4472,7 +4498,12 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 // Ctrl on a quick-access row opens it in a new tab (#58-2), as the
                 // middle button does.
                 const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-                if (!was_active && !path.empty() && !tab_row && ctrl && !qa_drag_key.empty() &&
+                if (!was_active && workspace_parent >= 0) {
+                    if (ctrl) OpenFolderTab(*s, path);
+                    else ActivateWorkspacePane(*s, workspace_parent, workspace_pane);
+                } else if (!was_active && WorkspaceIndexFromPath(path) >= 0 && ctrl)
+                    OpenWorkspaceNewTab(*s, WorkspaceIndexFromPath(path));
+                else if (!was_active && !path.empty() && !tab_row && ctrl && !qa_drag_key.empty() &&
                     !IsSidebarTagPath(path))
                     OpenFolderTab(*s, path);
                 else if (!was_active && !path.empty() && !tab_row &&
@@ -4629,14 +4660,18 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
-            int singleOpenRow = -1;
-            if (s->marqueeActive || s->marqueePending) {
+            if (s->listSelection.PendingFile() && !FilePressOwnerMatches(*s, ActiveTab(*s))) {
+                CancelFileClick(*s);
+                CancelListSelection(*s);
+            }
+            bool file_click_completed = s->listSelection.PendingFile();
+            if (s->listSelection.BandActive() || s->listSelection.PendingBand()) {
                 const int mx = GET_X_LPARAM(lParam);
                 const int my = GET_Y_LPARAM(lParam);
                 app::Tab* tab = ActiveTab(*s);
                 app::BlankPaneClickRelease click;
-                click.pending = s->marqueePending;
-                click.marquee_active = s->marqueeActive;
+                click.pending = s->listSelection.PendingBand();
+                click.marquee_active = s->listSelection.BandActive();
                 click.owns_capture = GetCapture() == hwnd;
                 // Stored pointers are identity tokens only; dereference the live active tab.
                 click.same_context = s->pane == s->blankClickPane &&
@@ -4645,8 +4680,8 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 click.modified = (GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
                     (GetKeyState(VK_SHIFT) & 0x8000) != 0 ||
                     (GetKeyState(VK_MENU) & 0x8000) != 0;
-                click.delta_x = mx - s->marqueeStart.x;
-                click.delta_y = my - s->marqueeStart.y;
+                click.delta_x = mx - s->listSelection.start.x;
+                click.delta_y = my - s->listSelection.start.y;
                 click.drag_width = GetSystemMetrics(SM_CXDRAG);
                 click.drag_height = GetSystemMetrics(SM_CYDRAG);
                 click.blank_list_hit = PointInList(*s, mx, my);
@@ -4669,49 +4704,37 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 s->blankDoublePane = s->pane;
                 s->blankDoubleGeneration = tab ? tab->view_generation : 0;
                 s->blankDoubleTime = static_cast<DWORD>(GetMessageTime());
-                s->blankDoublePoint = s->marqueeStart;
+                s->blankDoublePoint = s->listSelection.start;
                 goBack = goBack && double_click;
-                const int row_click = s->marqueePending ? s->marqueeRowIndex : -1;
-                const bool row_ctrl = s->marqueeRowCtrl, row_shift = s->marqueeRowShift;
-                if (s->marqueeActive) ApplyMarqueeSelection(*s);
-                ResetMarquee(*s);
+                const int row_click = FinishListBand(*s, POINT{mx, my});
                 if (row_click >= 0) {
-                    // No movement: the press on the row was a click on it.
-                    HandleListRowClick(*s, row_click, row_ctrl, row_shift);
-                    FinishListRowClick(*s);
                     goBack = false;
-                    if (s->singleOpenCandidate && row_click == s->singleOpenIndex) singleOpenRow = row_click;
+                    file_click_completed = row_click == s->fileClick.Item().index;
                 }
                 if (goBack) RunBlankDoubleClick(*s, *tab);
-            } else if (s->clickCollapseIndex >= 0) {
+            } else if (s->listSelection.DeferredIndex() >= 0) {
                 FinishListRowClick(*s);
             }
-            if (s->renameClickCandidate && s->renameClickDue == 0) {
-                const int mx = GET_X_LPARAM(lParam);
-                const int my = GET_Y_LPARAM(lParam);
-                ui::WindowViewModel vm = BuildVm(*s, false);
-                D2D1_RECT_F rect = D2D1::RectF(
-                    0, 0, static_cast<float>(s->compositor.Width()),
-                    static_cast<float>(s->compositor.Height()));
-                const ui::HitTestResult hit = s->renderer.HitTest(
-                    vm, rect, static_cast<float>(mx), static_cast<float>(my));
-                app::Tab* tab = ActiveTab(*s);
-                const bool valid = s->pane == s->renameClickPane &&
-                    tab == s->renameClickTab && tab && tab->SelectedCount() == 1 &&
-                    tab->selected_index == s->renameClickIndex &&
-                    hit.index == s->renameClickIndex &&
-                    PointInHitItemName(*s, vm, hit, static_cast<float>(mx), static_cast<float>(my));
-                if (valid) {
-                    // Double-click recognition starts on press, not release.
-                    s->renameClickDue = s->renameClickStarted + GetDoubleClickTime();
-                } else {
-                    CancelRenameClick(*s);
-                }
-            }
-            s->clickCollapseIndex = -1;
-            if (s->singleOpenCandidate && s->dragPending) singleOpenRow = s->singleOpenIndex;
-            s->singleOpenCandidate = false;
-            s->dragPending = false;
+            const auto click_item = s->fileClick.Item();
+            const auto click_vm = BuildVm(*s, false);
+            const auto click_bounds = D2D1::RectF(0, 0, static_cast<float>(s->compositor.Width()),
+                static_cast<float>(s->compositor.Height()));
+            const float click_x = static_cast<float>(GET_X_LPARAM(lParam));
+            const float click_y = static_cast<float>(GET_Y_LPARAM(lParam));
+            const auto click_hit = s->renderer.HitTest(click_vm, click_bounds, click_x, click_y);
+            auto release_item = FileClickIdentityFor(*s, click_hit.index);
+            if (click_hit.region == ui::HitTestResult::RowFolderSize && s->fileClick.Pressed()) file_click_completed = true;
+            if ((click_hit.region != ui::HitTestResult::Row && click_hit.region != ui::HitTestResult::RowFolderSize) ||
+                (click_hit.pane_index >= 0 && PaneAtSlot(*s, click_hit.pane_index) != s->pane)) release_item = {};
+            const auto* click_tab = ActiveTab(*s);
+            const auto click_action = s->fileClick.Release(release_item, GetTickCount64(), GetDoubleClickTime(),
+                file_click_completed, PointInHitItemName(*s, click_vm, click_hit, click_x, click_y),
+                click_tab && click_tab->SelectedCount() == 1 && click_tab->selected_index == click_item.index,
+                static_cast<uint32_t>(GetMessageTime()));
+            s->listSelection.ClearDeferred();
+            const bool activate = s->deferredFileActivation && s->listSelection.PendingFile();
+            s->deferredFileActivation = false;
+            s->listSelection.EndFile();
             s->scrollbarDragging = false;
             s->scrollbarHorizontal = false;
             s->scrollbarSidebar = false;
@@ -4726,8 +4749,16 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             s->tabDragPending = false;
             s->tabDragging = false;
             s->tabDragIndex = -1;
-            if (GetCapture() == hwnd) ReleaseCapture();
-            if (singleOpenRow >= 0) OpenSingleClickRow(*s, singleOpenRow);
+            if (GetCapture() == hwnd) {
+                s->fileClick.ExpectCaptureRelease();
+                ReleaseCapture();
+            }
+            if (activate) {
+                SetForegroundWindow(hwnd);
+                if (GetForegroundWindow() == hwnd) SetFocus(hwnd);
+            }
+            if (click_action == app::FileClickAction::Open)
+                ExecuteFileClickOpen(*s, click_item, false, true);
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
@@ -4739,6 +4770,7 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
         (void)lParam;
         if (s && ToolbarPinDragging() && reinterpret_cast<HWND>(lParam) != hwnd) EndToolbarPinDrag(*s, true);
         if (s && FavoritesBarDragging() && reinterpret_cast<HWND>(lParam) != hwnd) EndFavoritesBarDrag(*s, true);
+        if (s && reinterpret_cast<HWND>(lParam) != hwnd) CancelColumnHeaderPress(*s);
         if (s) {
             s->columnResizing = false;
             s->columnResizeIndex = -1;
@@ -4749,8 +4781,7 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
                 ReleaseTrayDrag(*s, false);
             }
             EndColumnStripResize(*s);
-            if (s->renameClickCandidate && s->renameClickDue == 0)
-                CancelRenameClick(*s);
+            s->fileClick.CaptureChanged();
             if (s->starDragPending || s->starDragActive) {
                 s->starDragPending = false;
                 s->starDragActive = false;
@@ -4784,11 +4815,8 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
                 s->chipOffsets.clear();
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
-            if (s->marqueeActive) ApplyMarqueeSelection(*s);
-            ResetMarquee(*s);
-            s->clickCollapseIndex = -1;
-            s->singleOpenCandidate = false;
-            s->dragPending = false;
+            CancelListSelection(*s);
+                s->listSelection.EndFile();
             s->scrollbarDragging = false;
             s->scrollbarHorizontal = false;
             s->scrollbarSidebar = false;
@@ -4804,11 +4832,12 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
 
 LRESULT HandleRButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        if (!s->workspaceRenameRoot.empty()) HideWorkspaceRenameOverlay(*s, true);
         if (AiAssistantMouseOther(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) return 0;   // Pulse 助手
         DismissPathEditorOutside(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         if (s->filterEditing) HideFilterEditor(*s, true);
         s->blankClickTab = nullptr;
-        CancelRenameClick(*s);
+        CancelFileClick(*s);
         // Prefetch the Explorer verbs for the menu that WM_RBUTTONUP will
         // open: pulse_shell builds the COM menu during the press + fade-in.
         int mx = GET_X_LPARAM(lParam);
@@ -4847,7 +4876,10 @@ LRESULT HandleRButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
-        if (AiAssistantMouseOther(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) return 0;   // Pulse 助手
+        if (AiAssistantMouseOther(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {   // Pulse 助手
+            AiAssistantContextMenu(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            return 0;
+        }
         int mx = GET_X_LPARAM(lParam);
         int my = GET_Y_LPARAM(lParam);
         ui::WindowViewModel vm = BuildVm(*s);
@@ -4873,6 +4905,18 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             return 0;
         }
         if (HandleFavoritesBarContextMenu(*s, hit, sp)) return 0;   // 收藏栏
+        if (hit.region == ui::HitTestResult::StatusBarAi) {   // ✦ AI: open, or its settings
+            AiChipContextMenu(*s, sp);
+            return 0;
+        }
+        if (hit.region == ui::HitTestResult::ToolbarSort ||
+            hit.region == ui::HitTestResult::ToolbarGroup ||
+            hit.region == ui::HitTestResult::ToolbarGroupClear ||
+            hit.region == ui::HitTestResult::FilterBox ||
+            hit.region == ui::HitTestResult::FilterClear) {
+            ShowToolbarViewMenu(*s, hit.region, sp);
+            return 0;
+        }
         // A pinned tool: separators, remove, 自定义工具栏 (the preview pin and
         // the apps fall through to the popover).
         if (hit.region == ui::HitTestResult::ToolbarPin && hit.index >= 0 && !ui::ToolbarPickerOpen() &&
@@ -4899,7 +4943,11 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             return 0;
         }
         bool shown = false;
-        if (hit.region == ui::HitTestResult::WindowIdentity) {
+        if (hit.region == ui::HitTestResult::WindowManageButton ||
+            (hit.region == ui::HitTestResult::None && my >= 0 && static_cast<float>(my) < s->renderer.TitleBarHeight())) {
+            ShowWindowManagementMenu(*s, sp);
+            shown = true;
+        } else if (hit.region == ui::HitTestResult::WindowIdentity) {
             ShowWindowIdentityMenu(*s, sp);  // M7c
             shown = true;
         } else if (hit.region == ui::HitTestResult::TabGroup && hit.index >= 0 &&
@@ -4977,6 +5025,9 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             app::ParsePulsePath(hit.path, &kind, &rest);
             ShowWorkspaceMenu(*s, _wtoi(rest.c_str()), sp);
             shown = true;
+        } else if (const auto* row = WorkspacePaneRow(vm, hit)) {
+            ShowWorkspacePaneMenu(*s, row->workspace_parent_index, row->workspace_child_number - 1, sp);
+            shown = true;
         } else if (HandleVerticalTabContextMenu(*s, hit, sp)) {
             shown = true;
         } else if (hit.region == ui::HitTestResult::SidebarItem &&
@@ -4989,6 +5040,11 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                    hit.sidebar_section == static_cast<int>(app::SidebarSectionId::Cloud)) {
             // OneDrive has no header to right-click (#80): its rows carry the menu.
             ShowCloudPlaceMenu(*s, hit.path, sp);
+            shown = true;
+        } else if (hit.region == ui::HitTestResult::SidebarItem &&
+                   hit.path.size() >= 2 && hit.path.size() <= 3 && hit.path[1] == L':' &&
+                   (hit.path.size() == 2 || hit.path[2] == L'\\' || hit.path[2] == L'/')) {
+            ShowSidebarDriveMenu(*s, hit.path, sp);
             shown = true;
         } else if (hit.region == ui::HitTestResult::SidebarItem) {
             // The 项目 row of the repository the tab is in: its Git menu.
@@ -5003,7 +5059,7 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             }
             const app::StarredItem* starred = s->places.FindStarred(hit.path);
             const app::SidebarEntry* quick_access = QuickAccessEntryForPath(*s, hit.path);
-            if ((starred && starred->kind == app::PlaceItemKind::Folder) || quick_access) {
+            if (starred || quick_access) {
                 ShowCuratedItemMenu(*s, hit.path, false, sp);
                 shown = true;
             }
@@ -5054,11 +5110,16 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 }
 
 LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        if (s && s->undoHistoryOpen) {
+            const int count = static_cast<int>(s->ops.UndoHistoryCount());
+            s->undoHistoryOffset = std::clamp(s->undoHistoryOffset + (GET_WHEEL_DELTA_WPARAM(wParam) < 0 ? 1 : -1), 0, std::max(0, count - 1));
+            InvalidateRect(hwnd, nullptr, FALSE); return 0;
+        }
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
         {
             POINT wp{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ScreenToClient(hwnd, &wp);
-            if (AiAssistantWheel(*s, wp.x, wp.y, msg == WM_MOUSEWHEEL ? GET_WHEEL_DELTA_WPARAM(wParam) : 0))
+            if (AiAssistantWheel(*s, wp.x, wp.y, GET_WHEEL_DELTA_WPARAM(wParam), msg == WM_MOUSEHWHEEL))
                 return 0;   // Pulse 助手's conversation scrolls
         }
         {
@@ -5077,9 +5138,6 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 return 0;
             }
         }
-        if (msg == WM_MOUSEHWHEEL) return DefWindowProcW(hwnd, msg, wParam, lParam);
-        s->blankClickTab = nullptr;
-        CancelRenameClick(*s);
         {
             // Overflowing tab strip scrolls under the wheel, on any page.
             POINT tp{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -5087,11 +5145,15 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             if (tp.y >= 0 && static_cast<float>(tp.y) < s->renderer.TitleBarHeight() &&
                 s->renderer.ScrollTabStrip(BuildVm(*s, false), static_cast<float>(s->compositor.Width()),
                     static_cast<float>(tp.x), static_cast<float>(tp.y),
+                    (msg == WM_MOUSEHWHEEL ? -1.0f : 1.0f) *
                     static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) / static_cast<float>(WHEEL_DELTA))) {
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
         }
+        if (msg == WM_MOUSEHWHEEL) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        s->blankClickTab = nullptr;
+        CancelFileClick(*s);
         if (IsSettingsTab(ActiveTab(*s))) {
             const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             ui::WindowViewModel svm = BuildVm(*s);
@@ -5151,11 +5213,7 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             pt.x < detailsRc.right && pt.y >= detailsRc.top && pt.y < detailsRc.bottom) {
             const float steps = static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) /
                                 static_cast<float>(WHEEL_DELTA);
-            if (wheelVm.details.multi_count <= 1 && !wheelVm.details.is_dir &&
-                wheelHit.region == ui::HitTestResult::DetailsPreview) {
-                s->renderer.ScrollDetailsPreview(steps, static_cast<float>(pt.x),
-                    static_cast<float>(pt.y));
-            } else {
+            {
                 const float visibleDip = (detailsRc.bottom - detailsRc.top) / s->scale;
                 const float contentDip = s->renderer.DetailsContentHeightDip(
                     wheelVm, wheelRect.right, wheelRect.bottom);
@@ -5168,7 +5226,7 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         // Tray deck: wheel over the panel pages the icon window (handled above,
         // ahead of the sidebar branch that contains it).
         // A marquee belongs to the focused pane: the wheel scrolls it there.
-        const bool marquee = s->marqueeActive || s->marqueePending;
+        const bool marquee = s->listSelection.BandActive() || s->listSelection.PendingBand();
         if (wheelHit.pane_index >= 0 && !marquee) {
             if (app::Pane* p = PaneAtSlot(*s, wheelHit.pane_index)) FocusPane(*s, p);
         }
@@ -5178,16 +5236,9 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         const bool sizeWheel = wheelHit.region == ui::HitTestResult::PaneSizeSlider;
         if (((GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0 || sizeWheel) && !marquee) {
             if (wheelTab && delta != 0) {
-                const ULONGLONG now = GetTickCount64();
-                if (now - s->zoomWheelTick > 400 || (s->zoomWheelRemainder > 0) != (delta > 0))
-                    s->zoomWheelRemainder = 0;
-                s->zoomWheelTick = now;
-                s->zoomWheelRemainder += delta;
-                // At most one size per message: every step relayouts and
-                // requests thumbnails, and a fast spin should not skip a stop.
-                const int step = std::clamp(s->zoomWheelRemainder / WHEEL_DELTA, -1, 1);
+                const int step = ui::ConsumeIconZoomWheel(delta, GetTickCount64(),
+                    s->zoomWheelRemainder, s->zoomWheelTick);
                 if (step != 0) {
-                    s->zoomWheelRemainder = 0;
                     ZoomIconSize(*s, step, sizeWheel ? nullptr : &pt, !sizeWheel);
                     if (sizeWheel) ResetSizeTooltip(*s);
                 }
@@ -5249,7 +5300,14 @@ void ShowKeyboardContextMenu(AppState& s) {
 
 LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
-        if (wParam == VK_ESCAPE && AiAssistantEscape(*s)) return 0;   // Pulse 助手's model menu
+        CancelFileClick(*s);
+        if (wParam == VK_ESCAPE && ToolbarPinDragging()) { EndToolbarPinDrag(*s, true); return 0; }
+        if (wParam == VK_ESCAPE && CancelColumnHeaderPress(*s)) return 0;
+        if (wParam == VK_ESCAPE && DismissPaneLayoutControls(*s)) return 0;
+        if (wParam == VK_ESCAPE && s->undoHistoryOpen) { s->undoHistoryOpen = false; InvalidateRect(hwnd, nullptr, FALSE); return 0; }
+        if (wParam == VK_ESCAPE && AiAssistantEscape(*s)) return 0;
+        if (AiAssistantSelectionKey(*s, wParam)) return 0;   // Pulse 助手: Ctrl+C / Ctrl+A on its text
+        if (AiAssistantMenuKey(*s, wParam)) return 0;   // the 思考强度 slider's keys   // Pulse 助手's model menu
         if (wParam == VK_ESCAPE && SysCtxPreviewDragCancel(*s)) return 0;
         if (wParam == VK_ESCAPE && CancelMarquee(*s)) {
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -5265,14 +5323,33 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         if (HandleWindowSwitcherKey(*s, lParam)) return 0;  // M7d: Ctrl+`
         if (HandleFavoritesBarKey(*s, wParam)) return 0;    // 收藏栏 holding the F6 focus
         s->blankClickTab = nullptr;
-        CancelRenameClick(*s);
+        CancelFileClick(*s);
         app::Tab* tab = ActiveTab(*s);
         if (!tab) return DefWindowProcW(hwnd, msg, wParam, lParam);
         ui::WindowViewModel vm = BuildVm(*s);
         bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
         bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (ctrl && alt && !shift && wParam == VK_RETURN) {
+            if (!(lParam & (1LL << 30))) TogglePaneZoom(*s);
+            return 0;
+        }
         bool handled = true;
+        if (!ctrl && !alt && !shift && (wParam == VK_F2 || wParam == VK_DELETE) &&
+            (GetFocus() == hwnd || GetFocus() == nullptr) &&
+            s->hoverRegion == static_cast<int>(ui::HitTestResult::SidebarItem) &&
+            WorkspaceIndexFromPath(s->hoverPath) >= 0) {
+            const int index = WorkspaceIndexFromPath(s->hoverPath);
+            if (wParam == VK_F2) RenameWorkspace(*s, index);
+            else RemoveWorkspaceWithUndo(*s, index);
+            return 0;
+        }
+        const int workspace_shortcut = app::WorkspaceShortcutIndex(app::ActiveKeymap(),
+            app::CurrentChord(static_cast<UINT>(wParam)));
+        if (workspace_shortcut >= 0 && (GetFocus() == hwnd || GetFocus() == nullptr)) {
+            OpenWorkspace(*s, workspace_shortcut);
+            return 0;
+        }
 
         // Settings has no tab of its own: Esc closes it like a second click on
         // the settings button. Popovers, recorders, the shortcut search box and
@@ -5285,7 +5362,7 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             return 0;
         }
 
-        // Open tray view (pulse_tray_redesign.html): Esc collapses (the compare
+        // Open tray view: Esc collapses (the compare
         // card first), Del takes the checked items off the tray, Enter
         // releases them into this folder. Without checks Del / Enter keep
         // acting on the list.
@@ -5334,7 +5411,8 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             case A::MarkTarget: MarkTargetPane(*s); break;
             case A::NewFolder: NewFolderOrConnect(*s); break;
             case A::Search:
-                if (IsAddressSearchResults(tab)) ShowAddressSearch(*s);
+                if (IsSettingsTab(tab)) StartSettingsSearch(*s);
+            else if (IsAddressSearchResults(tab)) ShowAddressSearch(*s);
                 else ShowFilterEditor(*s);
                 break;
             case A::TabNumber:
@@ -5375,6 +5453,7 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             case A::MoveTabToNewWindow: PostMessageW(hwnd, WM_MOVE_TAB_TO_NEW_WINDOW, 0, 0); break;
             // The other windows go away; this one (whose handler runs) stays.
             case A::MergeWindows: MergeAllWindows(*s); break;
+
             // The commands check the selection themselves (as their menu rows).
             case A::GroupIntoFolder: DispatchMenuCommand(*s, app::CmdGroupIntoFolder); break;
             case A::DissolveFolder: DispatchMenuCommand(*s, app::CmdDissolveFolder); break;
@@ -5382,6 +5461,8 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             }
         } else if (ctrl && !shift && !alt && wParam == L'J') {
             AiAssistantHotkey(*s);   // Pulse 助手: open + focus, focus, or collapse
+        } else if (ctrl && !shift && !alt && wParam == L'H') {
+            AiAssistantHistoryKey(*s);   // Pulse 助手 › 历史对话
         } else if (ctrl && !shift && !alt && wParam == L'B') {
             ToggleSidebarCollapsed(*s);
         } else if (ctrl && shift && !alt && wParam == L'B') {
@@ -5400,7 +5481,8 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         } else if (ctrl && shift && wParam == L'F') {
             ShowAdvancedSearch(*s);
         } else if (ctrl && wParam == L'F') {
-            if (IsAddressSearchResults(tab)) ShowAddressSearch(*s);
+            if (IsSettingsTab(tab)) StartSettingsSearch(*s);
+            else if (IsAddressSearchResults(tab)) ShowAddressSearch(*s);
             else ShowFilterEditor(*s);
         } else if (wParam == VK_F6) {
             if (!CycleFavoritesBarFocus(*s)) CycleFocus(*s);   // panes, then 收藏栏
@@ -5426,6 +5508,9 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             CollectToTray(*s, true);
         } else if (ctrl && wParam == L'V') {
             PasteIntoCurrent(*s);
+        } else if (ctrl && !alt && ((!shift && wParam == L'Y') || (shift && wParam == L'Z'))) {
+            s->ops.Redo();
+            InvalidateRect(hwnd, nullptr, FALSE);
         } else if (ctrl && wParam == L'Z') {
             if (s->ops.CanUndo()) s->ops.Undo();
             else InvalidateRect(hwnd, nullptr, FALSE);
@@ -5485,10 +5570,11 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (tab->search_content_active || tab->search_awaiting_content || tab->search_live_generation) {
                 CancelActiveContentSearch(*s, *tab);
                 InvalidateRect(hwnd, nullptr, FALSE);
+            } else if (RestorePaneZoom(*s)) {
+                // Restoring the split never clears the folder selection.
             } else {
                 tab->ClearSelection();
-                ResetMarquee(*s);
-                s->clickCollapseIndex = -1;
+                CancelListSelection(*s);
             }
         } else if (!shift && !ctrl && (((wParam == VK_LEFT || wParam == VK_RIGHT) &&
                                HandleColumnArrowKey(*s, wParam == VK_RIGHT)) ||
@@ -5555,6 +5641,11 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         } else {
             handled = false;
         }
+
+        if (!handled && !s->addressEditing && !s->addressSearching && !s->filterEditing &&
+            s->renameIndex < 0 && s->tagRenameId.empty() &&
+            (GetFocus() == hwnd || GetFocus() == nullptr))
+            handled = extensions::native::HandleContributedShortcut(*s, wParam);
 
         if (handled) {
             ClampScroll(*s);

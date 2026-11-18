@@ -29,6 +29,8 @@ struct Hit {
     bool is_dir = false;
     uint64_t size = 0;
     uint64_t mtime = 0; // FILETIME as u64
+    // Client-side recycle source only; never inferred from a physical name.
+    std::wstring recycle_path;
 };
 
 enum class ResultSort : uint8_t { Index, Name, Size, Mtime };

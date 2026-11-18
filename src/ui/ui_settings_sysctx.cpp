@@ -1,4 +1,4 @@
-#include "../common/windows_compat.h"
+﻿#include "../common/windows_compat.h"
 #include "ui_renderer.h"
 #include "ui_renderer_internal.h"
 #include "../common/localization.h"
@@ -8,7 +8,7 @@
 #include <cmath>
 
 // Settings > 系统右键菜单 (page 6). Geometry and texts: settings_sysctx_layout.h;
-// data: app::SystemCtxModel. Visual reference: pulse_system_ctx_manager.html.
+// data: app::SystemCtxModel.
 namespace pulse::ui {
 
 namespace {
@@ -221,8 +221,8 @@ void MainRenderer::DrawSettingsSysCtx(const WindowViewModel& vm, const D2D1_RECT
         painter_.FillRoundedRect(d.method, 7 * s, subtle);
         painter_.DrawWrappedCaption(row.method, D2D1::Point2F(d.method.left + 10 * s, d.method.top + 8 * s),
                                     d.method.right - d.method.left - 20 * s, theme.text_secondary);
-        button(d.copy, sysctx_text::CopyKey(), L"\xE8C8", kSysCtxDetailCopy, true);
-        button(d.folder, sysctx_text::OpenFolder(), L"\xE838", kSysCtxDetailFolder, true);
+        button(d.copy, sysctx_text::CopyKey(), L"\xE8C8", kSysCtxDetailCopy, row.registry_copyable);
+        button(d.folder, sysctx_text::OpenFolder(), L"\xE838", kSysCtxDetailFolder, row.registry_copyable);
         button(d.remove, row.deleting ? sysctx_text::KeepLeftover() : sysctx_text::DeleteLeftover(),
                row.deleting ? L"\xE7A7" : L"\xE74D", kSysCtxDetailDelete, ready);
     };
@@ -326,7 +326,7 @@ void MainRenderer::DrawSettingsSysCtx(const WindowViewModel& vm, const D2D1_RECT
         divider(h.left, h.right, o.rows_top.top);
 
         if (v->overview.shown) {
-            // ---- 概览 cards (pulse_system_ctx_manager.html: .ov / .ovc / .stat / .rank / .mini) ----
+            // ---- 概览 cards ----
             const SysCtxOverview& ov = v->overview;
             const SysCtxOverviewLayout& g = o.overview;
             const D2D1_COLOR_F tile = D2D1::ColorF(0, 0, 0, dark ? 0.18f : 0.05f);

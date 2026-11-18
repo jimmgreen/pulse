@@ -2,6 +2,8 @@
 #include "shell_window_plan.h"
 
 #include <windows.h>
+#include <algorithm>
+#include <utility>
 
 namespace pulse::app {
 namespace {
@@ -64,23 +66,36 @@ bool SplitShellItemPath(const std::wstring& path, std::wstring& folder, std::wst
     return true;
 }
 
+unsigned ExplorerSelectionStability::Observe(unsigned age_ms, bool readable,
+        const std::wstring& folder, const std::vector<std::wstring>& names) {
+    if (!readable) { valid_ = false; return 0; }
+    auto sorted = names;
+    std::sort(sorted.begin(), sorted.end());
+    if (!valid_ || folder_ != folder || names_ != sorted || age_ms < since_ms_) {
+        since_ms_ = age_ms;
+        folder_ = folder;
+        names_ = std::move(sorted);
+        valid_ = true;
+    }
+    return age_ms - since_ms_;
+}
+
 ExplorerTakeoverStep DecideExplorerTakeover(const ExplorerWindowProbe& probe) {
-    if (!probe.view_ready)
-        return probe.age_ms >= kExplorerViewTimeoutMs ? ExplorerTakeoverStep::Leave : ExplorerTakeoverStep::Wait;
+    if (probe.age_ms >= kExplorerViewTimeoutMs) return ExplorerTakeoverStep::Leave;
+    if (!probe.view_ready) return ExplorerTakeoverStep::Wait;
     if (!probe.supported) return ExplorerTakeoverStep::Leave;
-    if (probe.selected > 0 || probe.view_age_ms >= kExplorerSelectionGraceMs) return ExplorerTakeoverStep::Take;
-    return ExplorerTakeoverStep::Wait;
+    if (!probe.selection_read) return ExplorerTakeoverStep::Wait;
+    const unsigned required = probe.selected ? kExplorerSelectionGraceMs : kExplorerLateSelectionMs;
+    return probe.stable_age_ms >= required ? ExplorerTakeoverStep::Take : ExplorerTakeoverStep::Wait;
 }
 
 SourceCloseStep DecideSourceClose(const SourceCloseProbe& probe) {
     if (!probe.identity_kept || !probe.single_tab) return SourceCloseStep::Abort;
     if (probe.selection_changed) {
-        // Visible: the user may have picked something else there, unless the
-        // change came right after the view appeared (a late /select).
-        return probe.hidden || probe.view_age_ms < kExplorerProgrammaticSelectionMs
-            ? SourceCloseStep::CloseAndSelect : SourceCloseStep::Abort;
+        return probe.view_age_ms < kExplorerProgrammaticSelectionMs
+            ? SourceCloseStep::SelectAndKeep : SourceCloseStep::Abort;
     }
-    if (probe.hidden && !probe.sent_selection && probe.view_age_ms < kExplorerLateSelectionMs)
+    if (!probe.sent_selection && probe.view_age_ms < kExplorerLateSelectionMs)
         return SourceCloseStep::Wait;
     return SourceCloseStep::Close;
 }

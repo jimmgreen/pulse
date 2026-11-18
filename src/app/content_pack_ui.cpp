@@ -1,6 +1,7 @@
 #include "content_pack_ui.h"
 #include "content_pack.h"
 #include "pack_installer.h"
+#include "pack_failure_ui.h"
 #include "app_internal.h"
 #include "../common/localization.h"
 #include "../common/preview_packs.h"
@@ -165,12 +166,14 @@ void TickContentPackInstall(AppState& s) {
     // The window that asked reports the outcome, unless it was closed.
     if (s.hwnd != g_owner && IsWindow(g_owner)) return;
     DWORD error = 0;
-    const auto outcome = installer.TakeOutcome(error);
+    app::PackFailure failure = app::PackFailure::None;
+    const auto outcome = installer.TakeOutcome(error, &failure);
     if (outcome == app::PackInstallOutcome::None) return;
     const bool silent = g_silent;
     g_owner = nullptr;
     diagnostics::runtime::Event("content_pack_install_done",
-                                {{"outcome", static_cast<uint64_t>(outcome)}, {"error", static_cast<uint64_t>(error)}});
+                                {{"outcome", static_cast<uint64_t>(outcome)}, {"error", static_cast<uint64_t>(error)},
+                                 {"failure", static_cast<uint64_t>(failure)}});
     if (outcome == app::PackInstallOutcome::Installed) {
         app::ForgetVerifiedContentPack();
         if (silent) return;
@@ -180,13 +183,14 @@ void TickContentPackInstall(AppState& s) {
                                      L"You can now search file contents and find duplicates."), false);
         RerunContentSearch(s);
     } else if (outcome == app::PackInstallOutcome::Failed && !silent) {
-        wchar_t code[64]{};
-        swprintf_s(code, l10n::Get(l10n::StringId::ErrorCodeFormat).c_str(), error);
-        s.notification_toast.ShowError(s.hwnd, Zh(L"内容搜索增强包下载失败", L"Content search pack download failed"),
-                                       Zh(L"请稍后重试，或在设置的增强包中更换下载源。",
-                                          L"Try again later, or pick another download source in Settings.") +
-                                           L"\n" + code);
+        ShowPackFailure(s, FailedPack::Content, failure, error);
     }
+}
+
+bool RetryContentPackInstall(AppState& s) {
+    const bool started = StartInstall(s, false);
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+    return started;
 }
 
 bool ContentPackBanner(DWORD error, std::wstring& title, std::wstring& message) {

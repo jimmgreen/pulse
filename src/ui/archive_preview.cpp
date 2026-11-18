@@ -70,11 +70,13 @@ D2D1_RECT_F R(float l, float t, float r, float b) { return D2D1::RectF(l, t, r, 
 // ---------------------------------------------------------------- model
 
 void ArchivePreview::Clear() {
+    payload_identity_.reset();
     parsed_ = false;
-    payload_.clear();
-    nodes_.clear();
-    roots_.clear();
-    visible_.clear();
+    decltype(payload_){}.swap(payload_);
+    shared_payload_.reset();
+    decltype(nodes_){}.swap(nodes_);
+    decltype(roots_){}.swap(roots_);
+    decltype(visible_){}.swap(visible_);
     mix_.clear();
     biggest_.clear();
     filter_.clear();
@@ -86,15 +88,34 @@ void ArchivePreview::Clear() {
     hover_ = selected_ = -1;
 }
 
-bool ArchivePreview::SetPayload(const std::wstring& payload, const std::wstring& file_name,
-                                uint64_t file_size) {
-    if (parsed_ && payload == payload_ && file_name == file_name_) {
+bool ArchivePreview::SetPayload(const std::shared_ptr<const std::wstring>& payload, const std::wstring& file_name, uint64_t file_size) {
+    if (payload && payload_identity_.lock() == payload && parsed_ && file_name == file_name_) {
+        file_size_ = file_size;
+        return true;
+    }
+    if (!payload) return false;
+    const bool accepted = SetPayloadImpl(*payload, file_name, file_size, payload);
+    if (accepted) {
+        StorePayload(*payload, payload);
+        payload_identity_ = payload;
+    }
+    return accepted;
+}
+
+bool ArchivePreview::SetPayload(const std::wstring& payload, const std::wstring& file_name, uint64_t file_size) {
+    return SetPayloadImpl(payload, file_name, file_size, {});
+}
+
+bool ArchivePreview::SetPayloadImpl(const std::wstring& payload, const std::wstring& file_name, uint64_t file_size,
+                           std::shared_ptr<const std::wstring> owner) {
+    payload_identity_.reset();
+    if (parsed_ && payload == Payload() && file_name == file_name_) {
         file_size_ = file_size;
         return true;
     }
     Clear();
     if (payload.rfind(L"PULSEARC\t1\t", 0) != 0) return false;
-    payload_ = payload;
+    StorePayload(payload, std::move(owner));
     file_name_ = file_name;
     file_size_ = file_size;
 
@@ -116,7 +137,7 @@ bool ArchivePreview::SetPayload(const std::wstring& payload, const std::wstring&
         return n;
     };
 
-    std::wstring_view all(payload_);
+    std::wstring_view all(Payload());
     size_t pos = 0;
     bool header = true;
     // Folder listings: whole-folder totals (#S row), as rows may be left out.

@@ -3,8 +3,11 @@
 #include "../ui/ui_renderer.h"
 // app_hosted_edit.cpp — extracted from app_main.cpp.
 #include "app_internal.h"
+#include "address_completion.h"
+#include <unordered_map>
 #include "app_network_page.h"
 #include "address_bar_command.h"
+#include "address_path_open.h"
 #include "filter_tag_complete.h"
 #include "folder_alias.h"
 #include "keymap.h"
@@ -55,11 +58,12 @@
 using namespace pulse;
 
 namespace pulse {
+static void CancelAddressCompletion(HWND hwnd);
 std::wstring FormatAddressPath(const std::wstring& text) {
     std::wstring t = text;
     if (t.empty()) return L"C:\\";
-    auto start = t.find_first_not_of(L" \"");
-    auto end = t.find_last_not_of(L" \"");
+    auto start = t.find_first_not_of(L" \t\r\n\"");
+    auto end = t.find_last_not_of(L" \t\r\n\"");
     if (start == std::wstring::npos) return L"C:\\";
     t = t.substr(start, end - start + 1);
     if (t.size() == 2 && t[1] == L':') t += L'\\';
@@ -94,7 +98,7 @@ std::wstring AddressNavigationTarget(const std::wstring& text, bool* shortcut) {
     }
     const app::AddressShortcut resolved = app::ResolveAddressShortcut(text);
     if (shortcut) *shortcut = resolved.resolved;
-    if (!resolved.resolved) return FormatAddressPath(text);
+    if (!resolved.resolved) return FormatAddressPath(resolved.path);
     if (resolved.path.empty() || resolved.path.starts_with(L"pulse:")) return resolved.path;
     return FormatAddressPath(resolved.path);
 }
@@ -174,7 +178,7 @@ HWND CreateHostedEdit(AppState& s, SUBCLASSPROC proc) {
 void LayoutAddressEditor(AppState& s) {
     if (!s.hwndAddressEdit || !s.hwnd) return;
     SyncSearchBarWidth(s);
-    D2D1_RECT_F addr = s.addressSearching ? s.renderer.SearchBarRect((float)s.compositor.Width()) : s.renderer.AddressBarRect((float)s.compositor.Width());
+    D2D1_RECT_F addr = s.addressSearching ? s.renderer.SearchBarRect((float)s.compositor.Width()) : s.renderer.AddressTextRect((float)s.compositor.Width());
     if (s.addressSearching) {
         PlaceHostedEdit(s.hwndAddressEdit, s.hwnd, ui::LayoutAddressSearch(addr, s.scale).input,
                         s.scale, 0, 0);
@@ -304,16 +308,17 @@ static void RunAddressBarCommand(AppState& s, const app::AddressBarCommand& comm
 
 void HideAddressEditor(AppState& s, bool navigate) {
     if (!s.hwndAddressEdit) return;
+    CancelAddressCompletion(s.hwndAddressEdit);
     FlushAddressSearch(s);
     SaveAddressSearchDraft(s);
     if (navigate) {
-        wchar_t buf[MAX_PATH * 4];
-        GetWindowTextW(s.hwndAddressEdit, buf, ARRAYSIZE(buf));
+        std::wstring buf(static_cast<size_t>(GetWindowTextLengthW(s.hwndAddressEdit)) + 1, L'\0');
+        buf.resize(GetWindowTextW(s.hwndAddressEdit, buf.data(), static_cast<int>(buf.size())));
         // cmd / powershell / pwsh / wt open a console here instead of navigating.
         const app::AddressBarCommand command = app::ParseAddressBarCommand(buf);
         if (command.program != app::AddressBarProgram::None) RunAddressBarCommand(s, command);
         // smb://, a bare IP, or anything typed after 连接服务器 (app_network_page.h).
-        else if (!OpenServerAddressText(s, buf)) NavigateTo(s, AddressNavigationTarget(buf));
+        else if (!OpenServerAddressText(s, buf)) OpenAddressPath(s, AddressNavigationTarget(buf));
     }
     s.addressConnectMode = false;
     s.addressSuggest.clear();
@@ -338,7 +343,7 @@ bool DismissPathEditorOutside(AppState& s, int x, int y) {
     if (row >= 0) {
         const std::wstring path = s.addressSuggest[static_cast<size_t>(row)].path;
         HideAddressEditor(s, false);
-        NavigateTo(s, path);
+        OpenAddressPath(s, path);
         return true;
     }
     if (row == -2) return true;  // the card's padding: keep editing
@@ -347,7 +352,51 @@ bool DismissPathEditorOutside(AppState& s, int x, int y) {
     return false;
 }
 
+static std::unordered_map<HWND, std::shared_ptr<AddressCompletionResult>> address_completion;
+static constexpr UINT_PTR address_completion_timer = 0xAC31;
+static void CancelAddressCompletion(HWND hwnd) {
+    KillTimer(hwnd, address_completion_timer);
+    auto it = address_completion.find(hwnd);
+    if (it != address_completion.end()) {
+        it->second->cancelled = true;
+        address_completion.erase(it);
+    }
+}
+static bool StartAddressCompletion(HWND hwnd, const std::wstring& text, const std::wstring& base) {
+    AddressCompletionQuery query;
+    if (!ParseAddressCompletion(text, query, base)) return false;
+    static AddressCompletionWorker worker;
+    auto result = std::make_shared<AddressCompletionResult>();
+    address_completion[hwnd] = result;
+    worker.Submit(std::move(query), result);
+    SetTimer(hwnd, address_completion_timer, 80, nullptr);
+    return true;
+}
+static void PollAddressCompletion(AppState& s, HWND hwnd) {
+    auto it = address_completion.find(hwnd);
+    if (it == address_completion.end()) return;
+    auto result = it->second;
+    std::unique_lock lock(result->mutex);
+    if (!result->ready) return;
+    if (s.addressEditing && !s.addressSearching && s.hwndAddressEdit == hwnd) {
+        s.addressSuggest.clear();
+        s.addressSuggestHeader.clear();
+        s.addressSuggestSel = -1;
+        for (const auto& entry : result->paths) {
+            const std::wstring completion = entry.path + (entry.directory ? L"\\" : L"");
+            // Rows share the typed prefix, so lead with the part that differs.
+            const size_t cut = entry.path.find_last_of(L'\\');
+            std::wstring name = cut == std::wstring::npos || cut + 1 >= entry.path.size()
+                ? entry.path : entry.path.substr(cut + 1);
+            s.addressSuggest.push_back({std::move(name), completion, L"", true});
+        }
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+    }
+    lock.unlock();
+    CancelAddressCompletion(hwnd);
+}
 void UpdateAddressSuggestions(AppState& s) {
+    CancelAddressCompletion(s.hwndAddressEdit);
     const size_t before = s.addressSuggest.size();
     s.addressSuggest.clear();
     s.addressSuggestHeader.clear();
@@ -355,7 +404,7 @@ void UpdateAddressSuggestions(AppState& s) {
     const auto done = [&] { if (before || !s.addressSuggest.empty()) InvalidateRect(s.hwnd, nullptr, FALSE); };
     if (!s.addressEditing || s.addressSearching || !s.hwndAddressEdit) return done();
     const int len = GetWindowTextLengthW(s.hwndAddressEdit);
-    if (len <= 0 || len > 260) return done();
+    if (len <= 0 || len > 32767) return done();
     std::wstring text(static_cast<size_t>(len) + 1, L'\0');
     text.resize(static_cast<size_t>(GetWindowTextW(s.hwndAddressEdit, text.data(), len + 1)));
     while (!text.empty() && iswspace(text.back())) text.pop_back();
@@ -366,10 +415,22 @@ void UpdateAddressSuggestions(AppState& s) {
     }
     while (!text.empty() && iswspace(text.front())) text.erase(text.begin());
     // "\\..." and 连接服务器: known servers, from memory only (no network).
+    // An alias head ("fbb" → 发布包, "fbb\rest") keeps its suggestions below
+    // rather than being completed as a folder relative to the current one.
+    const bool alias_head = [&] {
+        if (app::AliasStore::Instance().Empty() || text.empty() || text.find_first_of(L":%\"") != std::wstring::npos ||
+            text.front() == L'\\' || text.front() == L'/') return false;
+        std::wstring head = text.substr(0, text.find_first_of(L"\\/"));
+        while (!head.empty() && iswspace(head.back())) head.pop_back();
+        return !head.empty() && !app::AliasStore::Instance().SuggestRanked(head, 1).empty();
+    }();
+    const app::Tab* completion_tab = ActiveTab(s);
+    const bool relative = completion_tab && !alias_head && !app::ResolveAddressShortcut(text).resolved;
+    if (StartAddressCompletion(s.hwndAddressEdit, text, relative ? ClipboardPath(completion_tab->current_path) : std::wstring{})) return done();
     if (FillServerSuggestions(s, text)) return done();
     if (app::AliasStore::Instance().Empty()) return done();
     // Paths, shell: and %VAR% shortcuts keep the plain editor; "别名\rest"
-    // suggests the aliased folder plus the rest (pulse_alias.html).
+    // suggests the aliased folder plus the rest.
     if (text.empty() || text.find_first_of(L":%\"") != std::wstring::npos ||
         text.front() == L'\\' || text.front() == L'/') return done();
     const size_t cut = text.find_first_of(L"\\/");
@@ -452,8 +513,21 @@ void ShowFilterEditor(AppState& s, bool select_mode) {
     if (!s.tagRenameId.empty()) HideTagRenameOverlay(s, true);
     if (s.addressEditing) HideAddressEditor(s, false);
     s.filterEditing = true;
+    if (s.hwndFilterEdit && ui::PulsePaintedChildEditError(s.hwndFilterEdit)) {
+        DestroyWindow(s.hwndFilterEdit);
+        s.hwndFilterEdit = nullptr;
+    }
     if (!s.hwndFilterEdit) {
-        s.hwndFilterEdit = CreateHostedEdit(s, FilterEditProc);
+        EnsureEditVisuals(s);
+        s.hwndFilterEdit = ui::CreatePulsePaintedChildEdit(s.hwnd, L"", 0, true);
+        if (s.hwndFilterEdit) {
+            SetWindowTheme(s.hwndFilterEdit, L"", L"");
+            SendMessageW(s.hwndFilterEdit, WM_SETFONT, reinterpret_cast<WPARAM>(s.editFont), FALSE);
+            if (!SetWindowSubclass(s.hwndFilterEdit, FilterEditProc, 1, reinterpret_cast<DWORD_PTR>(&s))) {
+                DestroyWindow(s.hwndFilterEdit);
+                s.hwndFilterEdit = nullptr;
+            }
+        }
         if (!s.hwndFilterEdit) {
             s.filterEditing = false;
             s.filterSelectMode = false;
@@ -791,6 +865,7 @@ void HideRenameOverlay(AppState& s, bool commit) {
                 if (s.ops.RenameShellItem(shell_id, target)) {
                     tab->pending_selected_name = target;
                     tab->pending_selected_names = { target };
+                    tab->pending_ensure_selection_visible = true;
                     tab->pending_selection_revision = tab->selection_revision;
                     tab->held_renames.push_back({tab->EntryAt(index).name, target});
                 }
@@ -807,6 +882,7 @@ void HideRenameOverlay(AppState& s, bool commit) {
                 }
                 tab->pending_selected_name = target;
                 tab->pending_selected_names = { target };
+                tab->pending_ensure_selection_visible = true;
                 tab->pending_selection_revision = tab->selection_revision;
                 // The renamed row keeps its place even if the refresh beats
                 // the watcher event (#13).
@@ -848,6 +924,72 @@ bool TagRenameCell(AppState& s, const app::TagId& tag_id, D2D1_RECT_F& cell) {
         }
     }
     return false;
+}
+
+void LayoutWorkspaceRenameOverlay(AppState& s) {
+    if (!s.hwndWorkspaceRenameEdit || s.workspaceRenameRoot.empty()) return;
+    const int index = s.places.FindWorkspace(s.workspaceRenameRoot);
+    if (index < 0) { HideWorkspaceRenameOverlay(s, false); return; }
+    const auto vm = BuildVm(s);
+    const auto path = app::MakeWorkspacePath(index);
+    for (const auto& group : vm.sidebar) {
+        for (int item = 0; item < static_cast<int>(group.items.size()); ++item) {
+            if (group.items[static_cast<size_t>(item)].path != path) continue;
+            D2D1_RECT_F cell{};
+            if (!s.renderer.SidebarRowRect(vm, static_cast<float>(s.compositor.Width()),
+                    static_cast<float>(s.compositor.Height()), group.id, item, &cell)) break;
+            cell.left += 46.0f * s.scale;
+            cell.right -= 28.0f * s.scale;
+            cell.top += 2.0f * s.scale;
+            cell.bottom = cell.top + 24.0f * s.scale;
+            if (cell.right > cell.left) PlaceHostedEdit(s.hwndWorkspaceRenameEdit, s.hwnd, cell, s.scale, 0, 0);
+            return;
+        }
+    }
+    HideWorkspaceRenameOverlay(s, false);
+}
+
+void ShowWorkspaceRenameOverlay(AppState& s, int index) {
+    if (index < 0 || index >= static_cast<int>(s.places.workspaces.size())) return;
+    if (s.renameIndex >= 0) HideRenameOverlay(s, false);
+    if (!s.tagRenameId.empty()) HideTagRenameOverlay(s, true);
+    if (s.addressEditing) HideAddressEditor(s, false);
+    if (s.filterEditing) HideFilterEditor(s, true);
+    const auto workspace = s.places.workspaces[static_cast<size_t>(index)];
+    if (!s.hwndWorkspaceRenameEdit) s.hwndWorkspaceRenameEdit = CreateHostedEdit(s, WorkspaceRenameEditProc);
+    if (!s.hwndWorkspaceRenameEdit) return;
+    s.workspaceRenameRoot = workspace.root;
+    s.workspaceRenameIgnoreKillFocus = true;
+    SetWindowTextW(s.hwndWorkspaceRenameEdit, workspace.name.c_str());
+    LayoutWorkspaceRenameOverlay(s);
+    if (!s.workspaceRenameRoot.empty()) {
+        ShowWindow(s.hwndWorkspaceRenameEdit, SW_SHOW);
+        SetForegroundWindow(GetAncestor(s.hwndWorkspaceRenameEdit, GA_ROOT));
+        SetFocus(s.hwndWorkspaceRenameEdit);
+        SendMessageW(s.hwndWorkspaceRenameEdit, EM_SETSEL, 0, -1);
+    }
+    s.workspaceRenameIgnoreKillFocus = false;
+}
+
+void HideWorkspaceRenameOverlay(AppState& s, bool commit) {
+    if (!s.hwndWorkspaceRenameEdit || s.workspaceRenameRoot.empty()) return;
+    const auto root = std::exchange(s.workspaceRenameRoot, {});
+    if (commit) {
+        wchar_t text[512]{};
+        GetWindowTextW(s.hwndWorkspaceRenameEdit, text, ARRAYSIZE(text));
+        std::wstring name(text);
+        while (!name.empty() && iswspace(name.front())) name.erase(name.begin());
+        while (!name.empty() && iswspace(name.back())) name.pop_back();
+        const int index = s.places.FindWorkspace(root);
+        if (!name.empty() && index >= 0) {
+            s.places.workspaces[static_cast<size_t>(index)].name = std::move(name);
+            s.places.Save();
+        }
+    }
+    s.workspaceRenameIgnoreKillFocus = true;
+    ShowWindow(s.hwndWorkspaceRenameEdit, SW_HIDE);
+    s.workspaceRenameIgnoreKillFocus = false;
+    InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
 void LayoutTagRenameOverlay(AppState& s) {
@@ -981,6 +1123,10 @@ LRESULT CALLBACK AddressEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         QueueAddressSearch(*s);
     }
 
+    if (msg == WM_NCDESTROY) CancelAddressCompletion(hwnd);
+    if (s && msg == WM_TIMER && wParam == address_completion_timer) {
+        PollAddressCompletion(*s, hwnd); return 0;
+    }
     if (s && s->addressSearchComposing && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_CHAR))
         return DefPresentedHostedEditProc(s, hwnd, msg, wParam, lParam);
     if (s && msg == WM_LBUTTONUP && s->addressSearching && !s->searchHistoryOpen)
@@ -1016,11 +1162,18 @@ LRESULT CALLBACK AddressEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             InvalidateRect(s->hwnd, nullptr, FALSE);
             return 0;
         }
+        if (wParam == VK_TAB && !s->addressSearching && !s->addressSuggest.empty()) {
+            const size_t selected = s->addressSuggestSel < 0 ? 0 : static_cast<size_t>(s->addressSuggestSel);
+            const std::wstring path = s->addressSuggest[selected].path;
+            SetWindowTextW(hwnd, path.c_str());
+            SendMessageW(hwnd, EM_SETSEL, path.size(), path.size());
+            return 0;
+        }
         if (wParam == VK_RETURN && !s->addressSearching && s->addressSuggestSel >= 0 &&
             s->addressSuggestSel < static_cast<int>(s->addressSuggest.size())) {
             const std::wstring path = s->addressSuggest[static_cast<size_t>(s->addressSuggestSel)].path;
             HideAddressEditor(*s, false);
-            NavigateTo(*s, path);
+            OpenAddressPath(*s, path);
             return 0;
         }
         if (wParam == VK_RETURN) {
@@ -1035,6 +1188,7 @@ LRESULT CALLBACK AddressEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         if (wParam == VK_ESCAPE) {
             if (!s->addressSearching && !s->addressSuggest.empty()) {
+                CancelAddressCompletion(hwnd);
                 // First Esc closes the suggestions, the next one the editor.
                 s->addressSuggest.clear();
                 s->addressSuggestSel = -1;
@@ -1060,7 +1214,9 @@ LRESULT CALLBACK AddressEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         if (s->addressSearching && wParam == VK_RETURN) return 0;
         break;
     case WM_CHAR:
-        if (s->addressSearching && (wParam == VK_RETURN || wParam == VK_ESCAPE || wParam == VK_TAB))
+        // TranslateMessage queues these even when WM_KEYDOWN already handled
+        // navigation or dismissed the editor. A single-line EDIT would beep.
+        if (wParam == VK_RETURN || wParam == VK_ESCAPE || wParam == VK_TAB)
             return 0;
         break;
     case WM_KILLFOCUS:
@@ -1379,6 +1535,24 @@ static LRESULT RenameEditProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         UpdateRenameStatus(*s);
     }
     return result;
+}
+
+LRESULT CALLBACK WorkspaceRenameEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                         UINT_PTR, DWORD_PTR data) {
+    auto* s = reinterpret_cast<AppState*>(data);
+    if (!s) return DefSubclassProc(hwnd, msg, wp, lp);
+    LRESULT handled = 0;
+    if (HandleHostedEditMessage(*s, hwnd, msg, wp, lp, handled)) return handled;
+    // TranslateMessage queues WM_CHAR before the keydown closes this editor.
+    if (msg == WM_CHAR && (wp == VK_RETURN || wp == VK_ESCAPE)) return 0;
+    if (msg == WM_KEYDOWN && (wp == VK_RETURN || wp == VK_ESCAPE)) {
+        HideWorkspaceRenameOverlay(*s, wp == VK_RETURN);
+        SetFocus(s->hwnd);
+        return 0;
+    }
+    if (msg == WM_KILLFOCUS && !s->workspaceRenameIgnoreKillFocus) HideWorkspaceRenameOverlay(*s, true);
+    if (msg == WM_ERASEBKGND) return EraseHostedEditBackground(hwnd, wp, s) ? 1 : 0;
+    return DefPresentedHostedEditProc(s, hwnd, msg, wp, lp);
 }
 
 LRESULT CALLBACK TagRenameEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,

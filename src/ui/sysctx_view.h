@@ -1,4 +1,4 @@
-// sysctx_view.h — what Settings > 系统右键菜单 draws. Built by
+﻿// sysctx_view.h — what Settings > 系统右键菜单 draws. Built by
 // app::SystemCtxModel on the UI thread from its last scan; immutable once
 // published, so view models share it instead of copying ~200 rows per frame.
 #pragma once
@@ -96,6 +96,7 @@ struct SysCtxRowView {
     // Detail panel.
     std::wstring kind_label;  // 静态动词 / Shell 扩展 / …
     std::wstring registry;    // full key path
+    bool registry_copyable = true;
     std::wstring file;        // program / DLL
     std::wstring publisher;
     std::wstring method;      // what switching it off writes

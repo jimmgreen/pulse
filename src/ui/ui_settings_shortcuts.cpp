@@ -8,7 +8,7 @@
 #include <cmath>
 
 // Settings > 快捷键 (page 7). Geometry and texts: settings_shortcuts_layout.h;
-// data: app::ShortcutSettings. Visual reference: pulse_shortcuts_mockup.html v2.
+// data: app::ShortcutSettings.
 namespace pulse::ui {
 
 namespace {

@@ -166,7 +166,11 @@ bool WriteValues(const std::wstring& file, const SavedValues& values) {
     if (file.empty()) return true;
     std::wstring text = L"{\"version\":3,\"folders\":[";
     bool first = true;
+    const auto cache_key = Key(file);
     for (const auto& [path, value] : values) {
+        // Persisting the size of our own ancestor creates a write/size feedback loop.
+        // Keep these totals live, but recompute them instead of storing them.
+        if (Within(cache_key, Key(path))) continue;
         if (!value.has_value) continue;
         if (!first) text += L',';
         first = false;
@@ -179,6 +183,8 @@ bool WriteValues(const std::wstring& file, const SavedValues& values) {
         text += L'"';
     }
     text += L"]}";
+    std::wstring existing;
+    if (ReadUtf8File(file, existing) && existing == text) return true;
     return WriteCacheFile(file, text);
 }
 } // namespace pulse::app::folder_size

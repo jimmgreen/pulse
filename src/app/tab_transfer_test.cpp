@@ -2,6 +2,7 @@
 // tab_transfer_test.cpp - Multi-window M5b: WindowTabs::TakeTab/InsertTab and
 // MoveLayoutTab move a live tab between two windows sharing one core.
 #include "app_internal.h"
+#include "app_column_view.h"
 #include "tab_detach.h"
 #include "pane_drop.h"
 #include "split_tree_shape.h"
@@ -9,6 +10,8 @@
 #include "folder_move_remap.h"
 #include "tab_spring.h"
 #include "tab_transfer.h"
+#include "operation_intent_ui.h"
+#include "create_rename_intent.h"
 #include "window_merge.h"
 #include "context_menu.h"
 #include "../common/localization.h"
@@ -326,9 +329,7 @@ bool RunTabTransferTest() {
         view->scroll_y = 240.0f;
         view->selected_index = 3;
         src->pane = right;
-        src->renameClickCandidate = true;
-        src->renameClickTab = view;
-        src->renameClickPane = right;
+        src->fileClick.Begin({right, view, nullptr, 0, 3, L"fixture"}, 1, false, true);
         src->listTypeAheadTab = view;
         src->tabFlashKey = moved;
         view->current_path = L"pulse:search:report";
@@ -348,7 +349,7 @@ bool RunTabTransferTest() {
         for (const auto& tab : src->window_tabs.items)
             for (const auto& pane : tab->panes) src_bound |= pane.get() == src->pane;
         check(src_bound && src->window_tabs.Active() != moved, "the source window binds one of its own tabs");
-        check(!src->renameClickCandidate && !src->renameClickTab && !src->listTypeAheadTab && !src->tabFlashKey,
+        check(!src->fileClick.Item().Valid() && !src->listTypeAheadTab && !src->tabFlashKey,
               "the source window forgets clicks, type-ahead and flash aimed at the moved tab");
         check(&SearchResultWindow(*src, 12) == dst.get(),
               "a search still running in the moved tab now reaches the window it moved to");
@@ -469,6 +470,78 @@ bool RunTabTransferTest() {
             back->hwnd = nullptr;
         }
         back.reset();
+
+        // A request replaced by another window must rebind all subscribers.
+        {
+            const auto folder = output / L"shared-refresh";
+            std::filesystem::create_directories(folder);
+            const auto path = fs::NormalizePath(folder.wstring());
+            Seed(src->window_tabs, 1);
+            Seed(dst->window_tabs, 1);
+            BindCurrentLayout(*src);
+            BindCurrentLayout(*dst);
+            auto* a = ActiveTab(*src);
+            auto* b = ActiveTab(*dst);
+            a->current_path = b->current_path = path;
+            RefreshPath(*src, path, RefreshReason::OperationCompleted);
+            const auto first = a->pending_generation;
+            RefreshPath(*dst, path, RefreshReason::OperationCompleted);
+            check(first && a->pending_generation == b->pending_generation && a->pending_generation != first,
+                  "replacement refresh rebinds both windows to the same live generation");
+            const auto shared = a->pending_generation;
+            WorkResult stale{};
+            stale.path = path; stale.generation = first;
+            stale.snapshot = std::make_shared<const std::vector<fs::DirEntry>>();
+            ApplyWorkerResult(*dst, stale);
+            check(a->pending_generation == shared && b->pending_generation == shared,
+                  "stale result cannot consume either window subscription");
+            WorkResult current = stale;
+            current.generation = shared;
+            ApplyWorkerResult(*dst, current);
+            check(a->pending_generation == 0 && b->pending_generation == 0 &&
+                      a->applied_generation == shared && b->applied_generation == shared,
+                  "live result is applied by both windows and clears both pending generations");
+            b->sort_direction = a->sort_direction == ui::SortDirection::Asc
+                ? ui::SortDirection::Desc : ui::SortDirection::Asc;
+            RefreshPath(*dst, path, RefreshReason::OperationCompleted);
+            check(a->pending_generation && b->pending_generation && a->pending_generation != b->pending_generation,
+                  "different sort orders retain independent worker generations");
+            QueueCreateRenameIntent(a->create_rename_intents, 900001, path, a->view_generation);
+            ops::CompletedOperation completed{};
+            completed.type = ops::OpType::CreateFolder;
+            completed.task_id = 900001;
+            completed.destinations = {path + L"\\created"};
+            ApplyOperationIntentCompletion(*dst, completed);
+            check(a->create_rename_intents.size() == 1 && a->create_rename_intents.front().ready &&
+                      b->create_rename_intents.empty(),
+                  "create completion delivered to focused window arms only its originating window");
+            QueueCreateRenameIntent(a->create_rename_intents, 900002, path, a->view_generation);
+            ops::FinishedTask finished{};
+            finished.task_id = 900002;
+            FinishOperationIntents(*dst, finished);
+            check(a->create_rename_intents.size() == 1 && a->create_rename_intents.front().task_id == 900001,
+                  "failed terminal task clears originating intent but preserves ready rename");
+            a->create_rename_intents.clear();
+            // A column in the other window must share the pending main listing.
+            b->current_path = path + L"\\nested";
+            b->pending_generation = 0;
+            b->sort_column = a->sort_column;
+            b->sort_direction = a->sort_direction;
+            b->column_layout = true;
+            b->column_strip = {};
+            b->column_strip.for_path = b->current_path;
+            b->column_strip.ancestors.emplace_back();
+            b->column_strip.ancestors.back().path = path;
+            RefreshPath(*src, path, RefreshReason::OperationCompleted);
+            const auto main_generation = a->pending_generation;
+            src->store.MarkDirty(path);
+            SyncColumnStrips(*dst);
+            check(main_generation != 0 && a->pending_generation == main_generation &&
+                      b->column_strip.ancestors.front().generation == main_generation,
+                  "another window column reuses pending main generation without replacing its worker request");
+            b->column_layout = false;
+            b->column_strip = {};
+        }
 
         // --- M6e: the shared folder watches serve every window ------------
         {

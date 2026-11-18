@@ -152,6 +152,12 @@ std::wstring NormalizeCloudRootPath(const std::wstring& raw) {
         if (n > 0 && n <= ARRAYSIZE(expanded)) path = expanded;
     }
     for (auto& c : path) if (c == L'/') c = L'\\';
+    // Account roots use extended paths; Shell registrations use ordinary paths.
+    // Compare both in the same spelling, including extended UNC paths.
+    if (_wcsnicmp(path.c_str(), L"\\\\?\\UNC\\", 8) == 0)
+        path = L"\\\\" + path.substr(8);
+    else if (path.rfind(L"\\\\?\\", 0) == 0)
+        path.erase(0, 4);
     wchar_t full[MAX_PATH * 2]{};
     const DWORD n = GetFullPathNameW(path.c_str(), ARRAYSIZE(full), full, nullptr);
     if (n > 0 && n < ARRAYSIZE(full)) path = full;

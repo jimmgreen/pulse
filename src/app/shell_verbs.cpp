@@ -93,6 +93,16 @@ void CollectVerbsFrom(HKEY root, const std::wstring& shell_key, std::vector<Stat
 
 bool FillStaticVerbFromKey(HKEY root, const std::wstring& verb_key, const std::wstring& verb,
                            bool allow_cascade, bool background, StaticVerb& out) {
+    // CommandStore and ExtendedSubCommandsKey can point back to an ancestor.
+    thread_local std::vector<std::pair<HKEY, std::wstring>> active_keys;
+    const auto key = std::make_pair(root, ToLower(verb_key));
+    if (active_keys.size() >= static_cast<size_t>(ipc::kMaxMenuDepth) ||
+        std::find(active_keys.begin(), active_keys.end(), key) != active_keys.end()) return false;
+    active_keys.push_back(key);
+    struct PopKey {
+        decltype(active_keys)& keys;
+        ~PopKey() { keys.pop_back(); }
+    } pop{active_keys};
     const std::wstring lower = ToLower(verb);
     if (IsSkippedStaticVerb(lower, background)) return false;
 
@@ -108,9 +118,11 @@ bool FillStaticVerbFromKey(HKEY root, const std::wstring& verb_key, const std::w
         !RegReadString(root, verb_key, L"ExplorerCommandHandler").empty();
     const std::wstring subcommands = RegReadString(root, verb_key, L"SubCommands");
     const std::wstring ext_key = RegReadString(root, verb_key, L"ExtendedSubCommandsKey");
-    flags.has_subcommands = !subcommands.empty();
+    flags.has_subcommands = RegValueExists(root, verb_key, L"SubCommands");
     flags.has_extended_subcommands_key = !ext_key.empty();
     if (!ipc::KeepStaticVerb(flags)) return false;
+    // The host asks IExplorerCommand for its actual title, state and children.
+    if (flags.has_explorer_command) return false;
     // AppliesTo is an AQS condition only the shell can evaluate against the
     // item; Explorer hides the verb when it does not match. Not showing it is
     // the safe side (e.g. *\shell\UpdateEncryptionSettingsWork).
@@ -151,8 +163,8 @@ void CollectCascadeChildren(HKEY parent_root, const std::wstring& subcommands,
             const std::wstring store =
                 L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\CommandStore\\shell\\" +
                 cur;
-            if (FillStaticVerbFromKey(HKEY_LOCAL_MACHINE, store, cur, false, background, child) ||
-                FillStaticVerbFromKey(HKEY_CURRENT_USER, store, cur, false, background, child))
+            if (FillStaticVerbFromKey(HKEY_LOCAL_MACHINE, store, cur, true, background, child) ||
+                FillStaticVerbFromKey(HKEY_CURRENT_USER, store, cur, true, background, child))
                 children.push_back(std::move(child));
             cur.clear();
         };
@@ -169,11 +181,11 @@ void CollectCascadeChildren(HKEY parent_root, const std::wstring& subcommands,
         const std::wstring lower = ToLower(shell_key);
         if (lower.size() < 6 || lower.compare(lower.size() - 6, 6, L"\\shell") != 0)
             shell_key += L"\\shell";
-        CollectVerbsFrom(parent_root, shell_key, children, false, background, nullptr);
+        CollectVerbsFrom(parent_root, shell_key, children, true, background, nullptr);
     }
     children.erase(std::remove_if(children.begin(), children.end(),
                                   [](const StaticVerb& child) {
-                                      return child.command.empty() && child.app_path.empty();
+                                      return child.children.empty() && child.command.empty() && child.app_path.empty();
                                   }),
                    children.end());
 }
@@ -557,8 +569,9 @@ bool GetW(const uint8_t*& p, const uint8_t* end, std::wstring& s) {
 // v5: drive verbs from Drive + Folder only; no 打开方式 for programs.
 // v6: a DelegateExecute verb keeps no command (setdesktopwallpaper's
 // placeholder Explorer.exe), so v5 files with that command are discarded.
-constexpr uint32_t kStaticVerbCacheVersion = 6;
-constexpr uint32_t kStaticVerbCacheMinVersion = 6;
+// v7: native ExplorerCommandHandler titles replace registry-name fallback rows.
+constexpr uint32_t kStaticVerbCacheVersion = 9;
+constexpr uint32_t kStaticVerbCacheMinVersion = 9;
 
 void PutVerb(std::vector<uint8_t>& buf, const StaticVerb& v, int depth) {
     PutW(buf, v.verb);
@@ -566,7 +579,7 @@ void PutVerb(std::vector<uint8_t>& buf, const StaticVerb& v, int depth) {
     PutW(buf, v.app_path);
     PutW(buf, v.command);
     PutU32(buf, static_cast<uint32_t>(v.mnemonic));
-    const uint32_t n = depth > 0 ? 0 : static_cast<uint32_t>(
+    const uint32_t n = depth >= ipc::kMaxMenuDepth ? 0 : static_cast<uint32_t>(
         (std::min)(v.children.size(), static_cast<size_t>(ipc::kMaxSubmenuChildren)));
     PutU32(buf, n);
     for (uint32_t i = 0; i < n; ++i) PutVerb(buf, v.children[i], depth + 1);
@@ -583,7 +596,7 @@ bool GetVerb(const uint8_t*& p, const uint8_t* end, StaticVerb& v, int depth, ui
         v.mnemonic = static_cast<wchar_t>(key);
     }
     uint32_t n = 0;
-    if (!GetU32(p, end, n) || n > 16 || (depth > 0 && n != 0)) return false;
+    if (!GetU32(p, end, n) || n > 16 || (depth >= ipc::kMaxMenuDepth && n != 0)) return false;
     v.children.clear();
     v.children.reserve(n);
     for (uint32_t i = 0; i < n; ++i) {

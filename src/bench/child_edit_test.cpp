@@ -211,8 +211,35 @@ void CheckSelectionSync(pulse::ui::Compositor& compositor, HWND edit) {
     set_text(L"show 中文");
 }
 }
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (argc == 2 && std::wstring(argv[1]) == L"--first-frame-alpha") {
+        HWND host = CreateWindowW(L"STATIC", L"", WS_POPUP, -30000, -30000,
+            400, 100, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        for (const bool init_failure : {false, true}) {
+            SetEnvironmentVariableW(L"PULSE_TEST_LUMATEXT_INIT_FAILURE", init_failure ? L"1" : nullptr);
+            pulse::ui::Compositor compositor;
+            Check(host && compositor.Init(host), "first-frame host initializes");
+            Check(compositor.CustomEditEnabled() == !init_failure,
+                "fault injection selects the intended editor backend");
+            HWND edit = pulse::ui::CreateRedirectedChildEdit(host);
+            Check(edit != nullptr, "first-frame editor initializes");
+            SetWindowPos(edit, nullptr, 0, 0, 300, 30, SWP_NOZORDER | SWP_NOACTIVATE);
+            SetLayeredWindowAttributes(edit, 0, 0, LWA_ALPHA);
+            if (init_failure) pulse::ui::SynchronizeChildEditBackend(compositor, edit);
+            else Check(!pulse::ui::PresentChildEdit(compositor, nullptr,
+                D2D1::ColorF(0, 0, 0), D2D1::ColorF(1, 1, 1), edit), "null format forces presentation fallback");
+            BYTE alpha = 255; DWORD flags = 0;
+            Check(GetLayeredWindowAttributes(edit, nullptr, &alpha, &flags) && alpha == 0,
+                init_failure ? "initialization fallback preserves hidden first frame" : "presentation fallback preserves hidden first frame");
+            SetLayeredWindowAttributes(edit, 0, 255, LWA_ALPHA);
+            Check(GetLayeredWindowAttributes(edit, nullptr, &alpha, &flags) && alpha == 255,
+                "host can reveal the prepared native editor");
+            DestroyWindow(edit);
+        }
+        SetEnvironmentVariableW(L"PULSE_TEST_LUMATEXT_INIT_FAILURE", nullptr);
+        DestroyWindow(host); CoUninitialize(); return failures ? 1 : 0;
+    }
     const HWND foreground = GetForegroundWindow();
     HWND parent = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOACTIVATE, L"STATIC", L"",
         WS_POPUP, -30000, -30000, 700, 300, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -361,6 +388,26 @@ int wmain() {
             ShowWindow(parent, SW_HIDE);
             Check(!IsWindowVisible(edit), "parent hide automatically hides the editor");
             DestroyWindow(edit);
+        }
+        {
+            HWND plain = pulse::ui::CreatePulsePaintedChildEdit(parent, L"filter 中文", 0, true);
+            Check(plain && !(GetWindowLongPtrW(plain, GWL_EXSTYLE) & WS_EX_LAYERED),
+                "filter input has no independent layered surface");
+            if (plain) {
+                SetWindowSubclass(plain, EditProc, 1, reinterpret_cast<DWORD_PTR>(&compositor));
+                SetWindowPos(plain, nullptr, 20, 30, 320, 30, SWP_NOZORDER | SWP_NOACTIVATE);
+                SendMessageW(plain, EM_SETSEL, 2, 5);
+                compositor.Dc()->BeginDraw();
+                const bool drawn = pulse::ui::DrawPulsePaintedChildEdit(compositor, nullptr,
+                    D2D1::ColorF(1, 1, 1), D2D1::ColorF(0, 0, 0), plain, D2D1::RectF(20, 30, 340, 60));
+                const HRESULT hr = compositor.Dc()->EndDraw();
+                Check(drawn && SUCCEEDED(hr), "filter raster fallback draws into parent frame");
+                DWORD from = 0, to = 0;
+                SendMessageW(plain, EM_GETSEL, reinterpret_cast<WPARAM>(&from), reinterpret_cast<LPARAM>(&to));
+                Check(from == 2 && to == 5 && GetWindowTextLengthW(plain) == 9,
+                    "parent raster fallback preserves native text and selection");
+                DestroyWindow(plain);
+            }
         }
         for (const bool fail : {false, true}) {
             // A dialog field's first bitmap right after it is shown (#41): a

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 using namespace pulse;
@@ -109,6 +110,32 @@ void PureHelpers() {
     Check(info.video && info.audio, "video and audio streams found");
     Check(info.width == 1024 && info.height == 576, "anamorphic picture gets its display width");
     Check(info.fps == 25.0, "frame rate read");
+
+    const std::string tracks = std::string(dvd) +
+        "  Stream #0:2(eng): Audio: aac, 48000 Hz, stereo\n"
+        "  Stream #0:3(zho): Subtitle: subrip (default)\n"
+        "  Stream #0:4: Subtitle: hdmv_pgs_subtitle\n"
+        "    comment: Stream #0:5: Audio: mp3\n";
+    Check(ParseFfmpegMediaInfo(tracks, info) && info.audio_tracks.size() == 2 &&
+        info.subtitle_tracks.size() == 2, "track enumeration ignores metadata impostors");
+    Check(info.audio_tracks.size() == 2 && info.audio_tracks[1].id == 1 &&
+        info.audio_tracks[1].label.find(L"eng") != std::wstring::npos, "audio map uses type-relative index and language");
+    Check(info.subtitle_tracks.size() == 2 && info.subtitle_tracks[0].supported &&
+        !info.subtitle_tracks[1].supported, "text subtitles supported, bitmap subtitles explicit unsupported");
+    Check(ParseFfmpegSubtitleFilters(" ... subtitles V->V Render\n ... setpts V->V Timestamp\n"), "required subtitle filters detected");
+    Check(ParseFfmpegSubtitleFilters(" .. subtitles V->V Render\n TS setpts V->V Timestamp\n"), "two flag FFmpeg format supported");
+    Check(ParseFfmpegSubtitleFilters(" ... subtitles V->V Render\n TSC setpts V->V Timestamp\n"), "three flag FFmpeg format supported");
+    Check(!ParseFfmpegSubtitleFilters(" xx subtitles V->V Render\n .. setpts V->V Timestamp\n"), "invalid filter flags rejected");
+    Check(!ParseFfmpegSubtitleFilters(" note: subtitles V->V Render\n .. setpts V->V Timestamp\n"), "misleading descriptive text is not a subtitle filter");
+    Check(!ParseFfmpegSubtitleFilters(" .. subtitles A->A Render\n .. setpts V->V Timestamp\n"), "filter stream type must be video");
+    Check(!ParseFfmpegSubtitleFilters(" ... subtitles V->V Render\n"), "setpts is required for subtitle seeking");
+    Check(!ParseFfmpegSubtitleFilters(" ... scale V->V Scale\n"), "limited preview pack has no subtitles");
+    info.subtitle_filters = true;
+    FfmpegPlayback selection(L"", L"", info);
+    Check(selection.SelectTracks(1, 0), "second audio and first subtitle accepted");
+    Check(!selection.SelectTracks(2, 0) && !selection.SelectTracks(0, 1) && !selection.SelectTracks(0, -2),
+        "invalid track and bitmap subtitle rejected");
+    Check(selection.SelectTracks(0, -1), "subtitles can be disabled");
 
     const char* mp3 =
         "Input #0, mp3, from 'file:x.mp3':\n"
@@ -290,6 +317,7 @@ void LevelsMath() {
 }
 
 void ProbeCancellation() {
+    const int children_before = ChildProcesses();
     wchar_t self[32768];
     GetModuleFileNameW(nullptr, self, static_cast<DWORD>(std::size(self)));
     std::atomic<bool> stop{false};
@@ -299,9 +327,70 @@ void ProbeCancellation() {
     Check(!ProbeFfmpegMedia(self, L"cancel-test", info, &stop), "cancelled probe produces no result");
     cancel.join();
     Check(GetTickCount64() - start < 1500, "probe cancels without eight-second timeout");
+    Check(ChildProcesses() == children_before, "cancelled probe child has exited before return");
+    stop = false;
+    const ULONGLONG filters_start = GetTickCount64();
+    std::thread cancel_filters([&] { Sleep(100); stop = true; });
+    Check(!FfmpegSubtitleFilters(self, &stop), "cancelled filter capability probe reports unavailable");
+    cancel_filters.join();
+    Check(GetTickCount64() - filters_start < 1500 && ChildProcesses() == children_before,
+        "filter probe cancellation exits promptly and reaps child");
 }
 
-int main(int argc, char**) {
+void TrackIntegration(const std::wstring& media, bool limited = false) {
+    const std::wstring ffmpeg_exe = Env(L"PULSE_TEST_FFMPEG");
+    Check(!ffmpeg_exe.empty(), "track tests require PULSE_TEST_FFMPEG");
+    if (ffmpeg_exe.empty()) return;
+    FfmpegMediaInfo info;
+    Check(ProbeFfmpegMedia(ffmpeg_exe, media, info), "probe multitrack fixture");
+    Check(info.audio_tracks.size() == 2 && info.subtitle_tracks.size() == 2, "real fixture has two audio and two subtitle tracks");
+    if (info.audio_tracks.size() != 2 || info.subtitle_tracks.size() != 2) return;
+    Check(info.subtitle_filters != limited, limited ? "installed limited pack rejects subtitle filters" : "full pack has subtitle filters");
+    const int before = ChildProcesses();
+    {
+        FfmpegPlayback player(ffmpeg_exe, media, info);
+        if (limited) {
+            Check(!info.subtitle_tracks[0].supported && !info.subtitle_tracks[1].supported, "unsupported pack marks subtitle tracks unavailable");
+            Check(!player.SelectTracks(1, 0), "missing filters reject subtitle selection before starting decoder");
+            Check(player.SelectTracks(1, -1), "limited pack still selects second audio");
+            Check(player.Start(10'000'000, 1.0f, {640, 360}, true), "limited pack starts enhanced audio playback");
+            Check(FirstFrame(player) && PumpFor(player, 500) > 0 && !player.Failed(), "limited pack plays video and second audio without subtitle filters");
+        } else {
+        Check(player.Start(10'000'000, 1.0f, {640, 360}, false), "paused seek with subtitles off");
+        auto off = FirstFrame(player);
+        Check(off && !player.Failed(), "off frame decodes");
+        Check(player.SelectTracks(1, 0), "select second audio and first subtitle");
+        Check(player.Start(10'000'000, 1.0f, {640, 360}, false), "restart at seek with subtitle");
+        auto on = FirstFrame(player);
+        Check(on && !player.Failed(), "subtitle filter decodes after seek");
+        Check(off && on && off->pixels != on->pixels, "embedded text subtitle changes rendered pixels");
+        Check(player.SelectTracks(1, 1), "select second subtitle");
+        player.Start(10'000'000, 1.0f, {640, 360}, false);
+        auto other = FirstFrame(player);
+        Check(on && other && on->pixels != other->pixels, "second subtitle changes rendered pixels");
+        Check(player.SelectTracks(1, -1), "disable subtitles");
+        player.Start(10'000'000, 1.0f, {640, 360}, false);
+        auto restored = FirstFrame(player);
+        Check(off && restored && off->pixels == restored->pixels, "subtitle off restores original frame");
+        player.SetPlaying(true);
+        Check(PumpFor(player, 600) > 0 && !player.Failed(), "second audio track plays without decoder failure");
+        }
+    }
+    Check(ChildProcesses() == before, "track switching leaves no decoder process");
+}
+
+int wmain(int argc, wchar_t** argv) {
+    if (argc == 3 && (wcscmp(argv[1], L"--tracks-only") == 0 || wcscmp(argv[1], L"--limited-pack-only") == 0)) {
+        PureHelpers();
+        TrackIntegration(argv[2], wcscmp(argv[1], L"--limited-pack-only") == 0);
+        std::printf("ffmpeg tracks: %d passed, %d failed\n", g_passed, g_failed);
+        return g_failed ? 1 : 0;
+    }
+    if (argc == 2 && wcscmp(argv[1], L"--cancel") == 0) {
+        ProbeCancellation();
+        std::printf("ffmpeg cancellation: %d passed, %d failed\n", g_passed, g_failed);
+        return g_failed ? 1 : 0;
+    }
     // Deterministic stalled decoder used by ProbeCancellation.
     if (argc > 1) { Sleep(30000); return 1; }
     ProbeCancellation();

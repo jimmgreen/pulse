@@ -78,19 +78,23 @@ void TestSupport() {
     CheckState(vm, L"mp4", Source::BuiltIn, true, "native media remains a playback candidate when enhancement disabled");
 
     // PackOrSystem with available=false means no confirmed pack in this VM.
-    // It does not assert that this machine lacks a system RAW/archive codec.
+    // It does not assert that this machine lacks a system RAW codec.
     CheckState(vm, L"cr3", Source::PackOrSystem, false, "RAW missing pack keeps conditional system source");
     vm.settings_pack_raw_installed = true;
     CheckState(vm, L"cr3", Source::PackOrSystem, true, "RAW installed enabled pack is available");
     vm.settings_pack_raw_enabled = false;
     CheckState(vm, L"cr3", Source::PackOrSystem, false, "RAW disabled pack preserves conditional system source");
-    CheckState(vm, L"7z", Source::PackOrSystem, false, "archive missing pack keeps conditional system source");
-    vm.settings_pack_archive_installed = true;
-    CheckState(vm, L"7z", Source::PackOrSystem, true, "archive installed enabled pack is available");
-    vm.settings_pack_archive_enabled = false;
-    CheckState(vm, L"7z", Source::PackOrSystem, false, "archive disabled pack preserves conditional system source");
+    CheckState(vm, L"7z", Source::Plugin, false, "7z requires an available native provider");
+    CheckState(vm, L"rar", Source::Plugin, false, "RAR requires an available native provider");
+    vm.settings_native_archive_extensions = {L".7z"};
+    CheckState(vm, L"7z", Source::Plugin, true, "registered 7z provider is available");
+    CheckState(vm, L"rar", Source::Plugin, false, "7z provider does not imply RAR support");
+    vm.settings_native_archive_extensions.push_back(L".rar");
+    CheckState(vm, L"rar", Source::Plugin, true, "registered RAR provider is available");
+    vm.settings_native_archive_extensions.clear();
+    CheckState(vm, L"7z", Source::Plugin, false, "unloaded provider is unavailable");
     for (const auto* ext : {L"zip", L"tar", L"iso", L"udf"})
-        CheckState(vm, ext, Source::BuiltIn, true, "builtin archive remains available with archive pack disabled");
+        CheckState(vm, ext, Source::BuiltIn, true, "builtin archive remains available without a native plugin");
 }
 void TestCatalog() {
     namespace f = preview::formats;

@@ -36,6 +36,7 @@ std::thread g_thread;
 size_t UnwindSuspended(CONTEXT ctx, DWORD64* out, size_t cap) noexcept {
     size_t n = 0;
     __try {
+#if defined(_M_X64)
         while (n < cap && ctx.Rip) {
             out[n++] = ctx.Rip;
             DWORD64 image_base = 0;
@@ -51,6 +52,19 @@ size_t UnwindSuspended(CONTEXT ctx, DWORD64* out, size_t cap) noexcept {
                                  &handler_data, &establisher, nullptr);
             }
         }
+#elif defined(_M_IX86)
+        // x86 optimized code may omit frame pointers. Always keep the sampled
+        // instruction; follow only a bounded, monotonic EBP chain when present.
+        if (cap && ctx.Eip) out[n++] = ctx.Eip;
+        DWORD frame = ctx.Ebp;
+        while (n < cap && frame >= ctx.Esp && !(frame & 3) && frame - ctx.Esp < 1024 * 1024) {
+            const auto* words = reinterpret_cast<const DWORD*>(static_cast<uintptr_t>(frame));
+            const DWORD next = words[0], caller = words[1];
+            if (!caller || next <= frame) break;
+            out[n++] = caller;
+            frame = next;
+        }
+#endif
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     return n;
@@ -92,12 +106,12 @@ std::wstring ThreadName(DWORD tid) {
     return name;
 }
 
-std::wstring FrameText(DWORD64 addr) {
+std::wstring FrameText(DWORD64 addr, bool symbols = true) {
     wchar_t line[512];
     HMODULE mod = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(addr), &mod) || !mod) {
+                            reinterpret_cast<LPCWSTR>(static_cast<uintptr_t>(addr)), &mod) || !mod) {
         swprintf_s(line, L"0x%016llx", static_cast<unsigned long long>(addr));
         return line;
     }
@@ -108,7 +122,7 @@ std::wstring FrameText(DWORD64 addr) {
     const DWORD64 rva = addr - reinterpret_cast<DWORD64>(mod);
     swprintf_s(line, L"%s+0x%llx", leaf, static_cast<unsigned long long>(rva));
     std::wstring text = line;
-    if (mod != GetModuleHandleW(nullptr)) {
+    if (symbols && mod != GetModuleHandleW(nullptr)) {
         alignas(SYMBOL_INFOW) char buf[sizeof(SYMBOL_INFOW) + 256 * sizeof(wchar_t)]{};
         auto* sym = reinterpret_cast<SYMBOL_INFOW*>(buf);
         sym->SizeOfStruct = sizeof(SYMBOL_INFOW);
@@ -233,6 +247,70 @@ void Run(HWND hwnd, std::wstring log_path) {
     SymCleanup(GetCurrentProcess());
 }
 
+
+std::atomic<uint64_t> g_frame_id{0}, g_frame_start{0};
+std::atomic<bool> g_frame_enabled{false};
+uint64_t g_frame_sequence = 0; // UI-thread owned; never reused across restarts.
+std::thread g_frame_thread;
+HANDLE g_frame_stop = nullptr;
+ULONGLONG g_frame_recent[3]{};
+size_t g_frame_recent_count = 0, g_frame_recent_next = 0;
+size_t g_frame_total = 0; // Worker-owned, process lifetime budget.
+constexpr LONGLONG kFrameLogLimit = 2 * 1024 * 1024;
+
+bool AppendFrame(HANDLE file, const std::wstring& text) {
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size)) return false;
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, text.data(),
+        static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0 || size.QuadPart + bytes > kFrameLogLimit) return false;
+    std::string utf8(static_cast<size_t>(bytes), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+        utf8.data(), bytes, nullptr, nullptr);
+    DWORD written = 0;
+    return WriteFile(file, utf8.data(), static_cast<DWORD>(bytes), &written, nullptr) &&
+        written == static_cast<DWORD>(bytes);
+}
+
+void RunFrameWatch(DWORD tid, HANDLE file) {
+    uint64_t tracked = 0;
+    size_t frame_samples = 0;
+    auto& recent = g_frame_recent;
+    auto& recent_count = g_frame_recent_count;
+    auto& recent_next = g_frame_recent_next;
+    while (WaitForSingleObject(g_frame_stop, 12) == WAIT_TIMEOUT && g_frame_total < 100) {
+        const uint64_t id = g_frame_id.load(std::memory_order_acquire);
+        if (!id) continue;
+        const uint64_t start = g_frame_start.load(std::memory_order_relaxed);
+        if (id != g_frame_id.load(std::memory_order_acquire)) continue;
+        const ULONGLONG now = GetTickCount64();
+        if (now < start || now - start < 50) continue;
+        if (tracked != id) { tracked = id; frame_samples = 0; }
+        if (frame_samples >= 3 || (recent_count == 3 && now - recent[recent_next] < 1000)) continue;
+        ++frame_samples;
+        ++g_frame_total;
+        recent[recent_next] = now;
+        recent_next = (recent_next + 1) % 3;
+        if (recent_count < 3) ++recent_count;
+        ThreadStack stack;
+        const bool ok = SampleThread(tid, stack);
+        // Never attribute a sample to a completed/replaced frame, even on failure.
+        const bool current = id == g_frame_id.load(std::memory_order_acquire);
+        wchar_t header[256];
+        swprintf_s(header, L"frame_id=%llu tick=%llu elapsed=%llu sample=%zu status=%s\r\n",
+            static_cast<unsigned long long>(id), static_cast<unsigned long long>(now),
+            static_cast<unsigned long long>(now - start), frame_samples,
+            !current ? L"stale_discarded" : ok ? L"captured" : L"capture_failed");
+        std::wstring text = header;
+        if (current && ok) {
+            for (size_t i = 0; i < stack.count; ++i)
+                text += L"  " + FrameText(stack.frames[i], false) + L"\r\n";
+        }
+        if (!AppendFrame(file, text)) break;
+    }
+    CloseHandle(file);
+}
+
 } // namespace
 
 void Start(HWND hwnd, const std::wstring& log_path) {
@@ -244,6 +322,47 @@ void Start(HWND hwnd, const std::wstring& log_path) {
 void Stop() {
     g_stop = true;
     if (g_thread.joinable()) g_thread.join();
+}
+
+bool StartFrameWatch(const std::wstring& log_path) {
+    if (g_frame_thread.joinable()) return true;
+    // A dedicated file and exclusive writer keep append size bounded.
+    HANDLE file = CreateFileW(log_path.c_str(), FILE_APPEND_DATA | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    g_frame_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_frame_stop) { CloseHandle(file); return false; }
+    try {
+        g_frame_thread = std::thread(RunFrameWatch, GetCurrentThreadId(), file);
+        g_frame_enabled.store(true, std::memory_order_release);
+        return true;
+    } catch (...) {
+        CloseHandle(file);
+        CloseHandle(g_frame_stop);
+        g_frame_stop = nullptr;
+        return false;
+    }
+}
+
+void StopFrameWatch() {
+    g_frame_enabled.store(false, std::memory_order_release);
+    g_frame_id.store(0, std::memory_order_release);
+    if (g_frame_stop) SetEvent(g_frame_stop);
+    if (g_frame_thread.joinable()) g_frame_thread.join();
+    if (g_frame_stop) CloseHandle(g_frame_stop);
+    g_frame_stop = nullptr;
+}
+
+uint64_t BeginFrame() {
+    if (!g_frame_enabled.load(std::memory_order_acquire) || g_frame_id.load() != 0) return 0;
+    const uint64_t id = ++g_frame_sequence;
+    g_frame_start.store(GetTickCount64(), std::memory_order_relaxed);
+    g_frame_id.store(id, std::memory_order_release);
+    return id;
+}
+
+void EndFrame(uint64_t id) {
+    if (id) g_frame_id.compare_exchange_strong(id, 0, std::memory_order_release);
 }
 
 // Explicit in-process probes reuse the allocation-free suspended stack walker.

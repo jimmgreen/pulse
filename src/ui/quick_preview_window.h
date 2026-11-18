@@ -1,7 +1,11 @@
+#include <future>
 #pragma once
+#include "plain_highlight_lines.h"
+#include "preview_text_identity.h"
 
 #include "ui_compositor.h"
 #include "thumbnail_cache.h"
+#include "native_preview_view.h"
 #include "archive_preview.h"
 #include "markdown_view.h"
 #include "table_view.h"
@@ -12,17 +16,25 @@
 #include "video_preview.h"
 #include "audio_waveform.h"
 #include "quick_preview_command.h"
+#include "quick_preview_size_probe.h"
 #include "open_with_icons.h"
 
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <deque>
 
 namespace pulse::ui {
 
 class QuickPreviewWindow {
 public:
+    std::vector<std::shared_future<void>> SuspendVolume(const std::wstring& root);
+    void ResumeVolume(const std::wstring& root);
+    // An app popup over the pane hides a shell preview handler's topmost
+    // overlay (kept loaded); false shows it again.
+    void SetHandlerCovered(bool covered);
+
     QuickPreviewWindow() = default;
     ~QuickPreviewWindow();
     QuickPreviewWindow(const QuickPreviewWindow&) = delete;
@@ -32,12 +44,28 @@ public:
                     UINT command_message = 0);
     // zoom_from: screen point of the previewed item's icon; the window grows
     // out of it and shrinks back into it on Close (ui_motion.h rules).
+    // activate false: the press-and-hold peek; focus and the mouse stay with
+    // the owner and media start muted until Activate.
     void Show(const QuickPreviewItem& item, bool dark, WindowEffect effect, bool safe_mode,
-              const POINT* zoom_from = nullptr);
+              const POINT* zoom_from = nullptr, bool activate = true);
+    bool InitializeEmbedded(HWND owner, UINT navigate_message, UINT open_message, UINT command_message);
+    void ShowEmbedded(const QuickPreviewItem& item, RECT bounds, bool dark, bool safe_mode);
+    void SetEmbeddedBounds(RECT bounds);
+    // Subtract a parent-rendered flyout from the child without closing or
+    // reloading its preview. Empty bounds restore the complete child.
+    void SetEmbeddedOcclusion(const D2D1_RECT_F& parent_bounds);
+    bool embedded() const noexcept { return embedded_; }
+    void Activate();
     void Update(const QuickPreviewItem& item);
     void SetStarred(bool starred);
+    // Content-search highlights without opening the interactive find bar.
+    void SetSearchQuery(const std::wstring& query);
     // The app's accent colour (open button); call before Show.
     void SetAccent(const D2D1_COLOR_F& accent);
+    // Settings > 快速预览 > 预览窗口; call before Show. What the window changes
+    // itself is reported with QuickPreviewAction::SaveOptions.
+    void SetOptions(const QuickPreviewOptions& options) { options_ = options; }
+    const QuickPreviewOptions& options() const noexcept { return options_; }
     // The FFmpeg preview pack offer on the codec cards; repaints on change.
     void SetMediaPackOffer(const MediaPackOffer& offer);
     // A pack was installed: a file it can play now is opened again.
@@ -56,14 +84,21 @@ public:
     std::wstring TakeOpenPath() { std::wstring path; path.swap(open_path_); return path; }
 
 private:
-#ifdef PULSE_WITH_SELFTEST
+    bool embedded_ = false;
+    bool embedded_open_ = false;
+    bool embedded_occluded_ = false;
+    bool handler_covered_ = false;
+    RECT embedded_occlusion_{}, embedded_region_bounds_{};
+    std::vector<std::wstring> suspended_volumes_;
+
+    friend struct DetailsPreviewProbe;
+    friend struct NativePreviewProbe;
     friend struct QuickPreviewAuditTest;
-#endif
     friend struct QuickPreviewPlaybackProbe;
     friend struct PreviewDeadlineProbe;
     // Pages: multi-page PDF / AI read as a continuous scroll (quick_preview_pages.cpp).
-    enum class NativeKind { None, Bitmap, Text, Hex, Archive, Pages, Markdown, Table, Tree };
-    enum class ChromeButton { None, Prev, Next, More, Open };
+    enum class NativeKind { None, Bitmap, Text, Hex, Archive, Pages, Markdown, Table, Tree, Model };
+    enum class ChromeButton { None, Prev, Next, More, Open, Size };
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
     LRESULT HandleMessage(UINT message, WPARAM wparam, LPARAM lparam);
@@ -94,12 +129,12 @@ private:
     bool PlaybackMouseDown(POINT point);
     void EndPlaybackDrag(bool resume);
     void DrawPlayback(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* brush);
-    // Icon playback bar (kVideoChrome): buttons | time | track | time | volume | speed | chip.
+    // Timeline row; media add a second row for volume, speed and track menus.
     struct PlaybackGeometry {
         D2D1_RECT_F buttons[3]{};
         int button_count = 0;
         int play_index = 0;
-        D2D1_RECT_F time_left{}, track{}, time_right{}, volume{}, speed{}, chip{};
+        D2D1_RECT_F time_left{}, track{}, time_right{}, volume{}, volume_track{}, volume_value{}, audio_tracks{}, subtitles{}, speed{}, chip{};
     };
     PlaybackGeometry PlaybackLayout() const;
     void DrawPlaybackChrome(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* brush);
@@ -109,7 +144,11 @@ private:
     // FFmpeg playback is composed here, clipped like the video child.
     void DrawFfmpegFrame(ID2D1DeviceContext* dc, const D2D1_RECT_F& frame, float radius);
     bool PlaybackHover(POINT client);             // true when hover state changed
-    bool PlaybackWheel(POINT client, float steps);  // wheel over the volume button
+    void SetPlaybackVolume(float value);
+    void DragPlaybackVolume(float x);
+    std::vector<FluentMenuItem> PlaybackTrackItems(bool subtitles, const VideoPreview::State& state) const;
+    void ShowPlaybackTracks(bool subtitles, POINT point);
+    bool PlaybackWheel(POINT client, float steps);  // wheel over the volume controls
     // Card shown instead of a black frame when no decoder handles the video track.
     bool CodecCardVisible(const VideoPreview::State& state) const;
     void DrawCodecCard(ID2D1DeviceContext* dc, const D2D1_RECT_F& content,
@@ -195,7 +234,7 @@ private:
     bool DrawImageBackdrop(ID2D1DeviceContext* dc, const D2D1_RECT_F& content, const D2D1_RECT_F& draw);
     void DrawFindBar(ID2D1DeviceContext* dc, const D2D1_RECT_F& bar);
     Theme CurrentTheme() const;
-    void EnsureTextLayout(const std::wstring& text, bool hex, float width, bool reading = false);
+    void EnsureTextLayout(const std::wstring& text, bool hex, float width, bool reading = false, bool same_text = false);
     bool PlainTextCandidate() const;
     bool HitTestText(float x, float y, uint32_t& index);
     void CopyTextSelection(bool require_selection) const;
@@ -206,6 +245,9 @@ private:
     void UpdateFindMatches();
     void FindNext(int direction);
     void ScrollMatchIntoView(uint32_t start);
+    void ResetTextDrawingCache();
+    void DrawCachedText(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* text_brush,
+                        float origin_x, float origin_y);
     void DrawTextPreview(ID2D1DeviceContext* dc, const D2D1_RECT_F& content,
                           ID2D1SolidColorBrush* text_brush);
     bool ClientPoint(LPARAM lparam, POINT& out) const;
@@ -217,6 +259,39 @@ private:
     void PaintFindEditLuma(HWND hwnd, HDC hdc);
     LRESULT ForwardFindEditKeepLuma(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
     void ShowContextMenu(POINT screen);
+    // Window size presets (Settings > 快速预览 > 预览窗口, the header's size
+    // button, Ctrl+1/2/3, F).
+    void ShowSizeMenu(POINT screen);
+    void ChooseSizeMode(int mode);           // menu / Ctrl+1..3: also the new default
+    // The rect for the current item: the remembered size, else the preset's
+    // (适应内容 sets fit_pending_ when the size is only known after decoding).
+    RECT PlanRect(int mode, POINT centre, bool use_remembered);
+    void ApplyRect(const RECT& rect);
+    POINT WindowCentre() const;
+    void EnterFullScreen();
+    void LeaveFullScreen(bool restore_rect);
+    bool ContentPixelSize(uint32_t& width, uint32_t& height) const;  // decoded / probed
+    void BeginContentSizeProbe();
+    QuickPreviewSizeProbe size_probe_;
+    uint32_t probe_w_ = 0, probe_h_ = 0;
+    int SizingChromeHeight() const;
+    void FitToContent(uint32_t width, uint32_t height);              // 适应内容, keeps the centre
+    void ReportOptions();
+    void ToggleLoop();
+    bool AnimationLoops() const noexcept { return options_.loop != 2; }
+    bool VideoLoops() const noexcept { return options_.loop == 1; }
+    QuickPreviewOptions options_;
+    bool fullscreen_ = false;
+    RECT pre_fullscreen_{};
+    bool user_sized_ = false;     // resized by hand since Show: presets leave the size alone
+    bool fit_pending_ = false;    // 适应内容 waits for the decoded picture / video size
+    RECT size_move_start_{};
+    ULONGLONG video_loop_at_ = 0;
+    uint32_t fit_w_ = 0, fit_h_ = 0;   // 适应内容 from the first frame (kFitTimer)
+    // "Space closes · K pauses · L loops" in a video's footer, for the first
+    // few videos after Space started closing them.
+    ULONGLONG key_hint_until_ = 0;
+    void StartKeyHint();
     QuickPreviewItem ActionTarget() const;
     void PostAction(QuickPreviewAction action, const QuickPreviewItem* target = nullptr);
     D2D1_RECT_F ChromeButtonRect(ChromeButton button) const;
@@ -230,7 +305,7 @@ private:
     // Unified header and footer (quick_preview_chrome.cpp).
     struct HeaderLayout {
         D2D1_RECT_F badge{}, name{}, meta{}, tools{}, separator{}, prev{}, counter{}, next{},
-            open{}, more{}, close{};
+            open{}, more{}, size{}, close{};
         bool meta_visible = true;     // narrow windows drop the meta line first,
         bool tools_visible = true;    // then fold the type tools into the more menu,
         bool open_text = true;        // then show only the open button's icon,
@@ -272,6 +347,34 @@ private:
     ComPtr<IDWriteTextLayout> UiLayout(std::wstring_view text, IDWriteTextFormat* format,
                                        float width, float height,
                                        DWRITE_TEXT_ALIGNMENT alignment = DWRITE_TEXT_ALIGNMENT_LEADING) const;
+    struct UiLayoutEntry {
+        std::wstring text;
+        ComPtr<IDWriteTextFormat> format;
+        float width = 0, height = 0;
+        DWRITE_TEXT_ALIGNMENT alignment = DWRITE_TEXT_ALIGNMENT_LEADING;
+        ComPtr<IDWriteTextLayout> layout;
+    };
+    mutable std::deque<UiLayoutEntry> ui_layout_cache_;
+    mutable size_t ui_layout_text_bytes_ = 0;
+    mutable uint64_t ui_layout_generation_ = 0;
+    mutable uint64_t ui_layout_creations_ = 0, ui_layout_hits_ = 0, ui_sign_creations_ = 0;
+    uint64_t ui_brush_creations_ = 0;
+    struct UiTrimmingEntry {
+        ComPtr<IDWriteTextFormat> format;
+        ComPtr<IDWriteInlineObject> sign;
+    };
+    mutable std::deque<UiTrimmingEntry> ui_trimming_cache_;
+    struct UiBrushEntry {
+        D2D1_COLOR_F color{};
+        ComPtr<ID2D1SolidColorBrush> brush;
+    };
+    ComPtr<ID2D1Device> ui_brush_device_;
+    std::deque<UiBrushEntry> ui_brush_cache_;
+    ComPtr<ID2D1Device> backdrop_device_;
+    ComPtr<ID2D1BitmapBrush> backdrop_brush_;
+    bool backdrop_dark_ = false;
+    HRESULT CreateUiBrush(ID2D1DeviceContext* dc, const D2D1_COLOR_F& color,
+                          ID2D1SolidColorBrush** result);
     float UiTextWidth(std::wstring_view text, IDWriteTextFormat* format) const;
     void DrawUiText(ID2D1DeviceContext* dc, std::wstring_view text, IDWriteTextFormat* format,
                     const D2D1_RECT_F& rect, const D2D1_COLOR_F& color,
@@ -304,12 +407,15 @@ private:
     Compositor compositor_;
     // Room for every visible PDF page at full size plus the thumbnail strip;
     // a smaller budget would evict an on-screen page and re-request it forever.
-    ThumbnailCache thumbnails_{48ull * 1024ull * 1024ull, 192};
+    // Room for a few full-window pictures (a 4K window's frame is ~32 MB).
+    NativePreviewView native_preview_;
+    ThumbnailCache thumbnails_{160ull * 1024ull * 1024ull, 192};
     PreviewHandlerHost handler_;
     VideoPreview video_;
     AudioWaveform waveform_;
     D2D1_RECT_F audio_wave_rect_{};
     float audio_hover_x_ = -1.0f;                // pointer x over the waveform, or -1
+    bool playback_volume_drag_ = false;
     bool playback_drag_ = false;
     bool playback_resume_ = false;
     bool playback_scrub_pending_ = false;
@@ -317,7 +423,7 @@ private:
     double playback_scrub_fraction_ = 0;
     ULONGLONG playback_last_seek_ms_ = 0;
     float playback_hover_x_ = -1.0f;   // pointer x over the seek track, or -1
-    int playback_hover_button_ = -1;   // 0..2 transport, 3 volume, 4 speed
+    int playback_hover_button_ = -1;   // 0..2 transport, 3 volume, 4 speed, 5 audio, 6 subtitles
     float playback_volume_ = 1.0f;     // session-wide
     bool playback_muted_ = false;      // session-wide
     float playback_rate_ = 1.0f;       // per file
@@ -339,6 +445,15 @@ private:
     ComPtr<IDWriteTextFormat> preview_text_format_;
     ComPtr<IDWriteTextFormat> reading_text_format_;  // .txt reading mode: UI font, 1.75 line height
     ComPtr<IDWriteTextLayout> text_layout_;
+    ComPtr<ID2D1CommandList> text_commands_;
+    ComPtr<ID2D1Device> text_commands_device_;
+    ComPtr<IDWriteRenderingParams> text_commands_params_;
+    D2D1_COLOR_F text_commands_color_{};
+    D2D1_POINT_2F text_commands_origin_{};
+    float text_commands_dpi_x_ = 0.0f;
+    float text_commands_dpi_y_ = 0.0f;
+    D2D1_TEXT_ANTIALIAS_MODE text_commands_aa_ = D2D1_TEXT_ANTIALIAS_MODE_DEFAULT;
+    PlainHighlightLines plain_highlight_lines_;
     QuickPreviewItem item_;
     QuickPreviewCommands commands_;
     std::wstring preview_notice_;
@@ -434,6 +549,7 @@ private:
     bool pages_strip_ = true;
 
     std::wstring preview_text_;
+    PreviewTextIdentity preview_text_identity_;
     float text_layout_width_ = 0.0f;
     float text_layout_scale_ = 0.0f;
     bool text_layout_hex_ = false;
@@ -473,6 +589,8 @@ private:
     bool selecting_ = false;
     bool find_open_ = false;
     std::wstring find_query_;
+    std::wstring search_query_;
+    bool pending_search_reveal_ = false;
     std::vector<uint32_t> find_matches_;
     uint32_t find_index_ = 0;
     HWND find_edit_ = nullptr;

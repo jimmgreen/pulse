@@ -21,14 +21,16 @@
 namespace pulse::ui {
 
 namespace {
-// The bar over the content's right edge; drawing and dragging share it.
-fluent::ScrollbarSpec SettingsScrollbar(const SettingsLayout& lay, float scale) {
+// The shared scrollbar over the content's right edge (thin at rest, full
+// width with its track under the pointer); drawing and dragging share it.
+fluent::ScrollbarSpec SettingsScrollbar(const SettingsLayout& lay, float scale, const WindowViewModel& vm) {
     fluent::ScrollbarSpec bar;
-    bar.viewport = D2D1::RectF(lay.content.right - 10.0f * scale, lay.content.top,
+    bar.viewport = D2D1::RectF(lay.content.right - 12.0f * scale, lay.content.top,
                                lay.content.right - 2.0f * scale, lay.content.bottom);
     bar.viewport_extent = lay.content.bottom - lay.content.top;
     bar.content_extent = lay.content_h;
-    bar.expand_progress = 1.0f;
+    bar.expand_progress = vm.settings_scrollbar_expand;
+    bar.opacity = vm.settings_scrollbar_opacity;
     return bar;
 }
 } // namespace
@@ -52,6 +54,29 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
              lay.nav.bottom - lay.nav.top);
 
     const bool compact_nav = lay.nav.right - lay.nav.left < 100*scale_;
+    const auto search_hint = l10n::Get(l10n::StringId::SettingsFind);
+    fluent::TextFieldSpec search;
+    search.bounds = lay.search_box;
+    search.leading_glyph = kIconSearch;
+    search.compact_leading_glyph = true;
+    search.text = vm.settings_search_query;
+    search.placeholder = search_hint;
+    search.suppress_text = compact_nav || vm.settings_search_edit_visible;
+    search.hosted_edit = vm.settings_search_edit_visible;
+    search.state.focused = vm.settings_search_edit_visible;
+    search.state.hovered = IsHovered(vm, HitTestResult::SettingsFind);
+    if (lay.search_clear.right > lay.search_clear.left) search.trailing_width = 30.0f;
+    else if (!compact_nav && !vm.settings_search_edit_visible) search.trailing_keycap = L"Ctrl+F";
+    painter_.DrawTextField(search);
+    if (lay.search_clear.right > lay.search_clear.left) {
+        DrawButton(lay.search_clear, theme,
+            IsHovered(vm, HitTestResult::SettingsSearchClear) ? theme.fill_hover : kTransparent,
+            L"\xE711", L"", theme.text_secondary, true, true, 0.65f);
+    }
+    if (compact_nav && !vm.settings_search_edit_visible && !vm.settings_search_query.empty()) {
+        MakeBrush(dc, theme.accent, brAccent_);
+        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(lay.search_box.right-7*scale_, lay.search_box.top+7*scale_), 3*scale_, 3*scale_), brAccent_.get());
+    }
     MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
     FillRect(dc, brStrokeDivider_.get(), lay.nav.left+16*scale_, lay.nav_row[3].top-12*scale_,
         lay.nav.right-lay.nav.left-32*scale_, 1);
@@ -74,6 +99,9 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         pulse::l10n::StringId::SettingsPageTabs,
         pulse::l10n::StringId::SettingsPageSystem,
         pulse::l10n::StringId::SettingsPageFileOps,
+        pulse::l10n::StringId::SettingsGeneral,  // 13: AI 与 MCP, no row (title: ai_text)
+        pulse::l10n::StringId::AsstPageTitle,
+        pulse::l10n::StringId::NativeExtensionSettingsTitle,
     };
     static_assert(std::size(kNav) == kSettingsNavCount);
     static constexpr const wchar_t* kNavIcon[] = {
@@ -86,6 +114,9 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         L"\xE737",  // 标签页与窗口
         L"\xE7E8",  // 启动与集成
         L"\xE8DE",  // 文件操作
+        L"\xE99A",  // AI 与 MCP (no row)
+        L"\xF5C2",  // AI 助手 (sparkle, as the status bar chip)
+        L"\xE713",  // Plugin settings (sub-page)
     };
     static_assert(std::size(kNavIcon) == kSettingsNavCount);
     // Page 5 (快速预览) has no string-table entry; see pack_text. Page 2 is
@@ -93,7 +124,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
     auto nav_label = [](int page) -> std::wstring {
         if (page == 2 || page == 6) return std::wstring(sysctx_text::PageTitle());
         if (page == 7) return std::wstring(shortcuts_text::Title());
-        if (page == 8) return std::wstring(pack_text::PacksSection());
+        if (page == 8) return l10n::Get(l10n::StringId::StoreTitle);
         if (page == 0) return pulse::l10n::Get(pulse::l10n::StringId::SettingsAppearance);
         return page == 5 ? std::wstring(pack_text::Title()) : pulse::l10n::Get(kNav[page]);
     };
@@ -115,7 +146,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
     }
     // Sub-pages keep their parent selected: 系统右键菜单 (6) under 右键菜单,
     // AI 与 MCP (kSettingsPageAi) under 增强包.
-    const int nav_page = vm.settings_page == 6 ? 2 : vm.settings_page == kSettingsPageAi ? 8 : vm.settings_page;
+    const int nav_page = vm.settings_page == 6 ? 2 : (vm.settings_page == kSettingsPageAi || vm.settings_page == kSettingsPageNativeExtensions) ? 8 : vm.settings_page;
     // Hover plate and selection pill glide between rows (ui_motion.h); the
     // accent bar travels with the pill.
     {
@@ -143,14 +174,26 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
     }
     for (int i = 0; i < kSettingsNavCount; ++i) {
         if (i == 6) continue;  // no row: reached through the 右键菜单 layer cards
+        if (i == kSettingsPageAi) continue;  // no row: under 增强包
         const bool active = nav_page == i;
         const auto& rc = lay.nav_row[i];
+        const bool matched = vm.settings_search_query.empty() || std::any_of(vm.settings_search_results.begin(), vm.settings_search_results.end(), [i](const auto& result) {
+            return (result.page == 6 ? 2 : result.page == kSettingsPageAi ? 8 : result.page) == i;
+        });
         DrawIconText(rc.left + (compact_nav ? 13.0f : 12.0f) * scale_, rc.top, 22.0f * scale_, rc.bottom - rc.top,
-                     kNavIcon[i], L"*", active ? theme.accent : theme.text_secondary, 0.85f);
-        MakeBrush(dc, theme.text, brText_);
+                     kNavIcon[i], L"*", !matched ? theme.text_disabled : active ? theme.accent : theme.text_secondary, 0.85f);
+        MakeBrush(dc, matched ? theme.text : theme.text_disabled, brText_);
         if (!compact_nav) DrawTextRect(dc, compositor_->TextFormat(), brText_.get(), nav_label(i),
-                     rc.left + 42.0f * scale_, rc.top, rc.right - rc.left - 48.0f * scale_,
+                     rc.left + 42.0f * scale_, rc.top, rc.right - rc.left - (vm.settings_search_query.empty() ? 48.0f : 72.0f) * scale_,
                      rc.bottom - rc.top);
+        if (!vm.settings_search_query.empty()) {
+            const auto count = std::count_if(vm.settings_search_results.begin(), vm.settings_search_results.end(), [i](const auto& result) {
+                return (result.page == 6 ? 2 : result.page == kSettingsPageAi ? 8 : result.page) == i;
+            });
+            if (count > 0) painter_.DrawText(std::to_wstring(count),
+                D2D1::RectF(rc.right-26*scale_, rc.top, rc.right-4*scale_, rc.bottom), compositor_->SmallFormat(), theme.accent);
+            continue;
+        }
         // 快捷键: a red count of the keys that may not work (taken / IME);
         // 增强包: an accent count of the packs with a newer release.
         if ((i == 7 && vm.settings_shortcut_issues > 0) || (i == 8 && vm.settings_pack_updates > 0)) {
@@ -165,9 +208,80 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
             painter_.DrawText(count, badge, compositor_->SmallFormat(), D2D1::ColorF(0xFFFFFF),
                               fluent::HorizontalAlignment::Center);
         }
+        // AI 助手: 新 until it was opened in this run.
+        if (i == kSettingsPageAssistant && vm.settings_assistant_new && !compact_nav) {
+            const std::wstring& label = pulse::l10n::Get(pulse::l10n::StringId::SettingsNavNew);
+            const float bw = painter_.MeasureBadgeWidth(label);
+            const float mid = (rc.top + rc.bottom) * 0.5f;
+            fluent::BadgeSpec spec;
+            spec.bounds = D2D1::RectF(rc.right - 10.0f * scale_ - bw, mid - 10.0f * scale_, rc.right - 10.0f * scale_,
+                                      mid + 10.0f * scale_);
+            spec.text = label;
+            spec.kind = fluent::BadgeKind::Accent;
+            painter_.DrawBadge(spec);
+        }
     }
 
+    if (!vm.settings_search_query.empty()) {
+        dc->PushAxisAlignedClip(lay.content, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        painter_.DrawText(l10n::Get(l10n::StringId::SettingsFind) + L" · " + std::to_wstring(vm.settings_search_results.size()),
+            D2D1::RectF(lay.content.left+20*scale_, lay.content_origin+20*scale_, lay.content.right-20*scale_, lay.content_origin+60*scale_), compositor_->HeaderFormat(), theme.text);
+        if (vm.settings_search_results.empty()) painter_.DrawText(l10n::Get(l10n::StringId::SettingsNoMatches),
+            D2D1::RectF(lay.content.left+20*scale_, lay.content_origin+76*scale_, lay.content.right-20*scale_, lay.content_origin+120*scale_), compositor_->TextFormat(), theme.text_secondary);
+        if (vm.settings_search_results.empty()) {
+            const auto clear_text = l10n::Get(l10n::StringId::Clear);
+            fluent::ButtonSpec clear;
+            clear.bounds = lay.search_empty_clear;
+            clear.text = clear_text;
+            clear.state.hovered = IsHovered(vm, HitTestResult::SettingsSearchClear);
+            painter_.DrawButton(clear);
+        }
+        for (size_t i = 0; i < lay.search_results.size(); ++i) {
+            const auto& bounds = lay.search_results[i];
+            const auto& result = vm.settings_search_results[i];
+            if (bounds.bottom < lay.content.top || bounds.top > lay.content.bottom) continue;
+            MakeBrush(dc, static_cast<int>(i) == vm.settings_search_selected ? WithAlpha(theme.accent, 0.14f) : theme.surface_card, brFillInput_);
+            dc->FillRoundedRectangle(D2D1::RoundedRect(bounds, 8*scale_, 8*scale_), brFillInput_.get());
+            ComPtr<IDWriteTextLayout> matched_title;
+            const float text_width = (std::max)(1.0f, bounds.right-bounds.left-28*scale_);
+            if (SUCCEEDED(compositor_->DwriteFactory()->CreateTextLayout(result.title.c_str(), static_cast<UINT32>(result.title.size()),
+                compositor_->TextFormat(), text_width, 28*scale_, &matched_title))) {
+                matched_title->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                std::wstring folded = result.title, query = vm.settings_search_query;
+                std::transform(folded.begin(), folded.end(), folded.begin(), towlower);
+                std::transform(query.begin(), query.end(), query.begin(), towlower);
+                MakeBrush(dc, theme.accent, brAccent_);
+                for (size_t start = 0; start < query.size();) {
+                    while (start < query.size() && iswspace(query[start])) ++start;
+                    size_t end = start;
+                    while (end < query.size() && !iswspace(query[end])) ++end;
+                    const auto token = query.substr(start, end-start);
+                    if (!token.empty()) for (size_t pos = folded.find(token); pos != std::wstring::npos; pos = folded.find(token, pos+token.size())) {
+                        const DWRITE_TEXT_RANGE range{static_cast<UINT32>(pos), static_cast<UINT32>(token.size())};
+                        matched_title->SetDrawingEffect(brAccent_.get(), range);
+                        matched_title->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, range);
+                    }
+                    start = end;
+                }
+                MakeBrush(dc, theme.text, brText_);
+                compositor_->DrawTextLayout(D2D1::Point2F(bounds.left+14*scale_, bounds.top+6*scale_), matched_title.get(), brText_.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
+            painter_.DrawText(result.category, D2D1::RectF(bounds.left+14*scale_, bounds.top+34*scale_, bounds.right-14*scale_, bounds.bottom-6*scale_), compositor_->SmallFormat(), theme.text_secondary);
+        }
+        dc->PopAxisAlignedClip();
+        if (lay.content_h > lay.content.bottom-lay.content.top) {
+            auto bar = SettingsScrollbar(lay, scale_, vm);
+            bar.offset = vm.settings_scroll;
+            painter_.DrawScrollbar(bar);
+        }
+        return;
+    }
     dc->PushAxisAlignedClip(lay.content, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    if (vm.settings_search_target && vm.settings_search_target_alpha > 0) {
+        const float top = lay.content_origin + 20*scale_ + SettingsDestinationOffset(vm, vm.settings_search_target, rect.right, rect.bottom);
+        MakeBrush(dc, WithAlpha(theme.accent, 0.65f*vm.settings_search_target_alpha), brAccent_);
+        FillRoundedRect(dc, brAccent_.get(), lay.content.left+8*scale_, top, 4*scale_, 60*scale_, 2*scale_);
+    }
     const float pad = 20.0f * scale_;
     const float origin = lay.content_origin;
     const float switch_w = 42.0f * scale_;
@@ -183,8 +297,9 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
     const std::wstring title = vm.settings_page == 2 || vm.settings_page == 6 ? std::wstring(sysctx_text::PageTitle())
         : vm.settings_page == 5 ? std::wstring(pack_text::Title())
         : vm.settings_page == 7 ? std::wstring(shortcuts_text::Title())
-        : vm.settings_page == 8 ? std::wstring(pack_text::PacksSection())
-        : vm.settings_page == kSettingsPageAi ? std::wstring(ai_text::Title()) : l10n::Get(page_title_id);
+        : vm.settings_page == 8 ? l10n::Get(l10n::StringId::StoreTitle)
+        : vm.settings_page == kSettingsPageAi ? std::wstring(ai_text::Title())
+        : vm.settings_page == kSettingsPageAssistant ? asst_text::Title() : l10n::Get(page_title_id);
     ComPtr<IDWriteTextLayout> title_layout;
     compositor_->DwriteFactory()->CreateTextLayout(title.c_str(), static_cast<UINT32>(title.size()),
         compositor_->HeaderFormat(), lay.content.right-lay.content.left-pad*2, 40*scale_, &title_layout);
@@ -193,12 +308,15 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         title_layout->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, {0,static_cast<UINT32>(title.size())});
         compositor_->DrawTextLayout(D2D1::Point2F(lay.content.left+pad,origin+pad),title_layout.get(),brText_.get());
     }
-    if (vm.settings_page == 5 || vm.settings_page == 8 || vm.settings_page == kSettingsPageAi)
-        painter_.DrawWrappedCaption(vm.settings_page == kSettingsPageAi ? ai_text::Intro()
-                                    : vm.settings_page == 8 ? pack_text::PacksIntro() : pack_text::Intro(),
+    if (vm.settings_page == 5 || vm.settings_page == 8 || vm.settings_page == kSettingsPageAi ||
+        vm.settings_page == kSettingsPageAssistant || vm.settings_page == kSettingsPageNativeExtensions)
+        painter_.DrawWrappedCaption(vm.settings_page == kSettingsPageNativeExtensions ? l10n::Get(l10n::StringId::NativeExtensionSettingsIntro).c_str()
+                                    : vm.settings_page == kSettingsPageAssistant ? asst_text::Intro().c_str()
+                                    : vm.settings_page == kSettingsPageAi ? ai_text::Intro()
+                                    : vm.settings_page == 8 ? (vm.settings_store_browse ? l10n::Get(l10n::StringId::StoreIntro).c_str() : vm.settings_store_installed ? l10n::Get(l10n::StringId::StoreInstalledIntro).c_str() : pack_text::PacksIntro()) : pack_text::Intro(),
             D2D1::Point2F(lay.content.left+pad, origin+60*scale_),
             lay.content.right-lay.content.left-2*pad, theme.text_secondary);
-    if (IsGeneralSettingsPage(vm.settings_page) || vm.settings_page == 1)
+    if ((IsGeneralSettingsPage(vm.settings_page) && vm.settings_page != 11) || vm.settings_page == 1)
         painter_.DrawText(l10n::Get(vm.settings_page == 0 ? l10n::StringId::SettingsAppearanceIntro
             : vm.settings_page == 9 ? l10n::StringId::SettingsFileListIntro
             : vm.settings_page == 10 ? l10n::StringId::SettingsTabsIntro
@@ -476,7 +594,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                                                 art_top,
                                                 lay.index_exclude_empty.right - 16.0f * scale_,
                                                 art_bottom);
-            const float svg_opacity = theme.bg.r > 0.5f ? 0.68f : 1.0f;
+            const float svg_opacity = 1.0f;
             if (!DrawExcludeEmptySvg(art, svg_opacity)) {
                 fluent::EmptyStateSpec fallback;
                 fallback.bounds = art;
@@ -1071,6 +1189,8 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         DrawSettingsShortcuts(vm, rect, theme);
     } else if (vm.settings_page == kSettingsPageAi) {
         DrawSettingsAi(vm, rect, theme);
+    } else if (vm.settings_page == kSettingsPageAssistant) {
+        DrawSettingsAssistant(vm, rect, theme);
     } else if (vm.settings_page == 4) {
         auto draw_card = [&](const D2D1_RECT_F& card) {
             if (card.right <= card.left || card.bottom <= card.top) return;
@@ -1091,19 +1211,18 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
             pulse::l10n::StringId::DupScopeDrive,
             pulse::l10n::StringId::DupScopeAll,
         };
+        painter_.DrawSegmentedTrack(D2D1::RectF(lay.dup_scope[0].left, lay.dup_scope[0].top, lay.dup_scope[2].right, lay.dup_scope[2].bottom));
+        if (vm.dup_scope >= 0 && vm.dup_scope < 3) DrawSettingsSegmentPlate(120001, vm.dup_scope, lay.dup_scope[vm.dup_scope], !vm.dup_scanning);
         for (int i = 0; i < 3; ++i) {
             fluent::SegmentedItemSpec segment;
             segment.bounds = lay.dup_scope[i];
-            if (i == 0) painter_.DrawSegmentedTrack(D2D1::RectF(segment.bounds.left,
-                segment.bounds.top, lay.dup_scope[2].right, lay.dup_scope[2].bottom));
-            segment.bounds = D2D1::RectF(segment.bounds.left + 3 * scale_, segment.bounds.top + 3 * scale_,
-                segment.bounds.right - 3 * scale_, segment.bounds.bottom - 3 * scale_);
             segment.shared_track = true;
             segment.text = pulse::l10n::Get(kScope[i]);
             segment.position = i == 0 ? fluent::SegmentPosition::First
                              : i == 2 ? fluent::SegmentPosition::Last
                                       : fluent::SegmentPosition::Middle;
             segment.state.selected = vm.dup_scope == i;
+            segment.suppress_plate = segment.state.selected;
             segment.state.enabled = !vm.dup_scanning;
             segment.state.hovered = segment.state.enabled &&
                 IsHovered(vm, HitTestResult::SettingsDupScope, i);
@@ -1154,19 +1273,18 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                          lay.content.left + pad + 16*scale_, label_top + 20.0f * scale_,
                          lay.content.right - lay.content.left - pad * 2, 18.0f * scale_);
         }
+        painter_.DrawSegmentedTrack(D2D1::RectF(lay.dup_min_size[0].left, lay.dup_min_size[0].top, lay.dup_min_size[2].right, lay.dup_min_size[2].bottom));
+        if (vm.dup_min_size >= 0 && vm.dup_min_size < 3) DrawSettingsSegmentPlate(120002, vm.dup_min_size, lay.dup_min_size[vm.dup_min_size], !vm.dup_scanning);
         for (int i = 0; i < 3; ++i) {
             fluent::SegmentedItemSpec segment;
             segment.bounds = lay.dup_min_size[i];
-            if (i == 0) painter_.DrawSegmentedTrack(D2D1::RectF(segment.bounds.left,
-                segment.bounds.top, lay.dup_min_size[2].right, lay.dup_min_size[2].bottom));
-            segment.bounds = D2D1::RectF(segment.bounds.left + 3 * scale_, segment.bounds.top + 3 * scale_,
-                segment.bounds.right - 3 * scale_, segment.bounds.bottom - 3 * scale_);
             segment.shared_track = true;
             segment.text = pulse::l10n::Get(kMin[i]);
             segment.position = i == 0 ? fluent::SegmentPosition::First
                              : i == 2 ? fluent::SegmentPosition::Last
                                       : fluent::SegmentPosition::Middle;
             segment.state.selected = vm.dup_min_size == i;
+            segment.suppress_plate = segment.state.selected;
             segment.state.enabled = !vm.dup_scanning;
             segment.state.hovered = segment.state.enabled &&
                 IsHovered(vm, HitTestResult::SettingsDupMinSize, i);
@@ -1275,15 +1393,40 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
 
     const float view = lay.content.bottom - lay.content.top;
     if (lay.content_h > view + 1.0f) {
-        fluent::ScrollbarSpec bar = SettingsScrollbar(lay, scale_);
+        fluent::ScrollbarSpec bar = SettingsScrollbar(lay, scale_, vm);
         bar.offset = vm.settings_scroll;
         painter_.DrawScrollbar(bar);
     }
 }
 
+D2D1_RECT_F MainRenderer::NativeSettingsRect(float window_w, float window_h, const WindowViewModel& vm) const {
+    if (vm.settings_page != kSettingsPageNativeExtensions || !vm.settings_search_query.empty()) return {};
+    return MakeSettingsLayout(vm, D2D1::RectF(0, 0, window_w, window_h), scale_,
+        title_bar_height_, status_height_, &painter_).native_settings_content;
+}
+
 D2D1_RECT_F MainRenderer::SettingsDropdownBounds(const WindowViewModel& vm, int index, float window_w, float window_h) const {
     const auto l=MakeSettingsLayout(vm,D2D1::RectF(0,0,window_w,window_h),scale_,title_bar_height_,status_height_,&painter_);
-    return index==0 ? l.effect_choice : l.language_choice;
+    if(index>=10 && index<=12) return l.integration_choice[index-10];
+    if(index==3) return l.assistant.model_choice;
+    if(index==4) return l.assistant.voice_service;
+    if(index==5) return l.assistant.voice_model;
+    if(index==6) return l.assistant.voice_mic;
+    return index==0 ? l.effect_choice : index==2 ? l.pack_dl_choice : l.language_choice;
+}
+
+bool MainRenderer::SettingsAssistantField(AsstField which, D2D1_RECT_F& field, D2D1_RECT_F& clip) const {
+    const D2D1_RECT_F& r=asst_fields_[static_cast<int>(which)];
+    if(!asst_drawn_ || r.right<=r.left) return false;
+    field=r;
+    clip=asst_clip_;
+    return true;
+}
+
+void MainRenderer::SettingsAssistantEditColors(D2D1_COLOR_F& back, D2D1_COLOR_F& fore, D2D1_COLOR_F& hint) const {
+    back=asst_edit_back_;
+    fore=asst_edit_fore_;
+    hint=asst_edit_hint_;
 }
 
 float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int setting_id, float window_w, float window_h) const {
@@ -1296,6 +1439,9 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::SettingsWindowEffect: target=l.effect_card;break;
     case I::MenuAcrylic: target=l.menu_acrylic_row;break;
     case I::SettingsLanguage: target=l.language_card;break;
+    case I::StartupDialogsTitle:
+    case I::ThirdPartyDialogsExperimental: target=l.dialog_management_section;break;
+    case I::SettingsSecStartupTray: target=l.section[2];break;
     case I::SettingsIntegration: target=l.integration_section;break;
     case I::SettingsDefaultManager: target=l.default_manager_row;break;
     case I::SettingsLaunch: target=l.startup_row[0];break;
@@ -1304,7 +1450,13 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::SettingsNotifyIcon: target=l.notify_icon_card;break;
     case I::SettingsHomeFolder: target=l.home_folder_card;break;
     case I::SettingsStartupOpen: target=l.startup_open_card;break;
+    case I::SettingsTabLayout: target=l.tab_layout_card;break;
+    case I::SettingsTabRows: target=l.tab_rows_card;break;
     case I::SettingsNewTabOpen: target=l.new_tab_open_card;break;
+    case I::SettingsOpenPulseIcon: target=l.open_pulse_icon_card;break;
+    case I::SettingsNewWindowShows: target=l.new_window_shows_card;break;
+    case I::SettingsArrangeMinimized: target=l.arrange_minimized_row;break;
+    case I::SettingsArrangeGap: target=l.arrange_gap_card;break;
     case I::SettingsExternalOpen: target=l.external_open_card;break;
     case I::SettingsCloseLastTab: target=l.close_last_tab_row;break;
     case I::SettingsCloseTabDoubleClick: target=l.close_tab_double_click_row;break;
@@ -1319,6 +1471,7 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
         case I::ListTagNameColor: target=l.list_style_row[3];break;
     case I::ListSelectionOutline: target=l.list_style_row[4];break;
     case I::ListThumbnailBadges: target=l.list_style_row[5];break;
+    case I::MediaColumnsTitle: target=l.list_style_row[6];break;
     case I::SettingsClickOpen: target=l.click_open_card;break;
     case I::SettingsItemCheckboxes: target=l.item_checkbox_row;break;
     case I::ListMtimeHint: target=l.mtime_style_card;break;
@@ -1374,6 +1527,7 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::ServerFolders: target=l.network_action[0];break;
     case I::ReleaseNotes: target=l.release_card;break;
     case I::SettingsAutoUpdate: target=l.update_auto_row;break;
+    case I::DownloadSourceTitle: target=l.pack_dl_row;break;
     default: return 0;
     }
     return (std::max)(0.0f,target.top-l.content_origin-20*scale_);
@@ -1395,7 +1549,7 @@ bool MainRenderer::SettingsScrollbarGeometry(const WindowViewModel& vm, float wi
     const float view = (std::max)(0.0f, lay.content.bottom - lay.content.top);
     max_scroll = (std::max)(0.0f, lay.content_h - view);
     if (lay.content_h <= view + 1.0f) return false;   // DrawSettings draws no bar
-    fluent::ScrollbarSpec bar = SettingsScrollbar(lay, scale_);
+    fluent::ScrollbarSpec bar = SettingsScrollbar(lay, scale_, vm);
     bar.offset = vm.settings_scroll;
     track = bar.viewport;
     thumb = fluent::ScrollbarThumbRect(bar, scale_);

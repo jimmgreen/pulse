@@ -21,7 +21,15 @@ FolderThumbnailCache::DebugStats FolderThumbnailCache::ReadDebugStats() {
     }
     return stats;
 }
-FolderThumbnailCache::FolderThumbnailCache() { cache_.SetFolderThumbnail(true); }
+// Keep two eight-item screens even at 512px (CPU recovery + GPU = 2 MiB
+// each). RenderCaches offsets this allowance against the ordinary grid budget.
+FolderThumbnailCache::FolderThumbnailCache() : cache_(32ull * 1024 * 1024, 256) {
+    cache_.SetFolderThumbnail(true);
+    cache_.folder_revisit_ = std::make_unique<ThumbnailCache>(8ull * 1024 * 1024, 128);
+    cache_.folder_revisit_->SetFolderThumbnail(true);
+    cache_.folder_revisit_->preserve_bitmap_on_replace_ = true;
+    cache_.folder_revisit_->ShareUploadBudget(cache_);
+}
 void FolderThumbnailCache::Reset() { visible_.clear(); cache_.Reset(); }
 void FolderThumbnailCache::Refresh() {
     std::lock_guard lock(cache_.mutex_);
@@ -36,6 +44,7 @@ void FolderThumbnailCache::Refresh() {
     }
 }
 void FolderThumbnailCache::BeginFrame() {
+    cache_.BeginFrame();
     visibility_changed_ = false;
     for (auto& [key, visible] : visible_) visible.seen = false;
 }
@@ -87,7 +96,7 @@ PreviewDrawResult FolderThumbnailCache::Draw(ID2D1DeviceContext* dc,
     auto [visible, inserted] = visible_.try_emplace(key, Visible{now, generation, true});
     visible->second.seen = true;
     if (inserted) visibility_changed_ = true;
-    std::lock_guard lock(cache_.mutex_);
+    std::unique_lock lock(cache_.mutex_);
     if (!inserted && visible->second.generation != generation) {
         visibility_changed_ = true;
         visible->second = {now, generation, true, visible->second.force};
@@ -150,31 +159,55 @@ PreviewDrawResult FolderThumbnailCache::Draw(ID2D1DeviceContext* dc,
         if (!cache_.running_.exchange(true)) cache_.worker_ = std::thread([this] { cache_.Worker(); });
         cache_.cv_.notify_one();
     }
+    std::wstring draw_key = key;
     auto* item = found == cache_.items_.end() ? nullptr : &found->second;
     if (!item || item->failed) {
         const auto previous = cache_.still_by_identity_.find(identity);
         if (previous != cache_.still_by_identity_.end()) {
             const auto old = cache_.items_.find(previous->second);
-            if (old != cache_.items_.end() && !old->second.failed) item = &old->second;
+            if (old != cache_.items_.end() && !old->second.failed) { item = &old->second; draw_key = previous->second; }
         }
     }
-    if (item && !item->failed && !item->bitmap.get() && !item->pixels.empty()) {
-        const auto props = D2D1::BitmapProperties(D2D1::PixelFormat(
-            DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-        // Keep CPU pixels for device recovery; StoreResult accounts for both copies.
-        dc->CreateBitmap(D2D1::SizeU(item->w, item->h), item->pixels.data(),
-            item->stride, &props, &item->bitmap);
+    const bool settled_without_artwork = found != cache_.items_.end() ? found->second.failed :
+        visible->second.attempted && !cache_.pending_.contains(key);
+    lock.unlock();
+    auto& revisit = *cache_.folder_revisit_;
+    // Keep a GPU-ready compact copy before the full-size entry can be evicted.
+    revisit.PrepareBitmap(identity, true);
+    {
+        std::lock_guard revisit_lock(revisit.mutex_);
+        if (auto kept = revisit.items_.find(identity); kept != revisit.items_.end()) revisit.Touch(kept->second);
     }
+    cache_.PrepareBitmap(draw_key, true);
+    lock.lock();
+    const auto ready = cache_.items_.find(draw_key);
+    item = ready == cache_.items_.end() ? nullptr : &ready->second;
     if (item && item->bitmap.get()) {
         cache_.Touch(*item);
         const auto fitted = ContainedThumbnailRect(dest, item->w, item->h, item->artwork_bounds, align_bottom);
         if (artwork) *artwork = ThumbnailArtworkRect(fitted, item->artwork_bounds);
-        dc->DrawBitmap(item->bitmap.get(), &fitted, std::clamp(opacity, 0.0f, 1.0f),
+        ComPtr<ID2D1Bitmap> bitmap;
+        bitmap.p = item->bitmap.get();
+        bitmap->AddRef();
+        lock.unlock();
+        dc->DrawBitmap(bitmap.get(), &fitted, std::clamp(opacity, 0.0f, 1.0f),
             D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
         return PreviewDrawResult::Bitmap;
     }
-    const bool settled_without_artwork = found != cache_.items_.end() ? found->second.failed :
-        visible->second.attempted && !cache_.pending_.contains(key);
+    lock.unlock();
+    std::unique_lock revisit_lock(revisit.mutex_);
+    if (auto kept = revisit.items_.find(identity); kept != revisit.items_.end() && kept->second.bitmap.get()) {
+        auto& compact = kept->second;
+        revisit.Touch(compact);
+        const auto fitted = ContainedThumbnailRect(dest, compact.w, compact.h, compact.artwork_bounds, align_bottom);
+        if (artwork) *artwork = ThumbnailArtworkRect(fitted, compact.artwork_bounds);
+        ComPtr<ID2D1Bitmap> bitmap;
+        bitmap.p = compact.bitmap.get(); bitmap->AddRef();
+        revisit_lock.unlock();
+        dc->DrawBitmap(bitmap.get(), &fitted, std::clamp(opacity, 0.0f, 1.0f),
+            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+        return PreviewDrawResult::Bitmap;
+    }
     return settled_without_artwork ? PreviewDrawResult::Failed : PreviewDrawResult::Pending;
 }
 } // namespace pulse::ui

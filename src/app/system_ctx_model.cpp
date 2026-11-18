@@ -1,4 +1,5 @@
-#include "system_ctx_model.h"
+﻿#include "system_ctx_model.h"
+#include "system_ctx_packaged.h"
 
 #include "../common/localization.h"
 #include "../ipc/ctx_menu_util.h"
@@ -34,8 +35,7 @@ const wchar_t* KindGlyph(Kind kind) {
 }
 
 bool Toggleable(const Item& item) {
-    return (item.kind == Kind::Verb || item.kind == Kind::ShellEx || item.kind == Kind::DragDrop) &&
-           !item.is_protected && !item.trusted_installer && item.root != Root::File;
+    return sysctx::SystemItemToggleable(item);
 }
 
 // 删除残留项: the program behind the entry is gone and its key is one Pulse
@@ -438,6 +438,7 @@ bool GenericProduct(const std::wstring& product) {
 }
 
 std::wstring MethodText(const Item& item, bool toggleable) {
+    if (item.source == sysctx::Source::Packaged) return l10n::Get(l10n::StringId::PackagedMenuReadOnly);
     if (item.trusted_installer)
         return l10n::Get(l10n::StringId::WindowsManagesThisEntryItselfTrustedInstallerPulseLeavesItAl).c_str();
     if (item.is_protected)
@@ -589,6 +590,7 @@ void SystemCtxModel::StartJob(ui::SysCtxView::State state, std::vector<Op> ops, 
 
 SystemCtxModel::ScanResult SystemCtxModel::Scan() const {
     const sysctx::Roots roots;
+    const auto packaged = shell::PackagedContextMenuVerbs();
     ScanResult out;
     out.entries.resize(scene_ids_.size());
     out.keys.resize(scene_ids_.size());
@@ -609,7 +611,9 @@ SystemCtxModel::ScanResult SystemCtxModel::Scan() const {
         }
         out.keys[i] = SceneKeys(scene);
         if (scene.id.empty()) continue;
-        for (auto& item : sysctx::Enumerate(roots, scene)) {
+        auto items = sysctx::Enumerate(roots, scene);
+        sysctx::AppendPackagedItems(scene, packaged, items);
+        for (auto& item : items) {
             Entry e;
             e.icon = IconFile(item);
             if (!item.file.empty() && !item.missing) {
@@ -1035,12 +1039,16 @@ std::shared_ptr<const ui::SysCtxView> SystemCtxModel::View() {
                              (item.root == Root::File ? l10n::Get(l10n::StringId::YourSendToFolder).c_str()
                               : row.machine          ? l10n::Get(l10n::StringId::AllUsers).c_str()
                                                      : l10n::Get(l10n::StringId::CurrentUser).c_str());
-            row.registry = item.root == Root::File ? item.key_path
+            row.registry_copyable = item.source == sysctx::Source::Registry;
+            row.registry = item.source == sysctx::Source::Packaged ? l10n::Get(l10n::StringId::PackagedMenuSource)
+                           : item.root == Root::File ? item.key_path
                            : (row.machine ? L"HKLM\\Software\\Classes\\" : L"HKCU\\Software\\Classes\\") + item.key_path;
             row.file = !item.file.empty() ? item.file : !item.command.empty() ? item.command : item.clsid;
             row.publisher = e.publisher;
             row.method = MethodText(item, Toggleable(item));
-            if (handler) {
+            if (item.source == sysctx::Source::Packaged)
+                row.kind_label = l10n::Get(l10n::StringId::PackagedMenuSource);
+            if (handler && item.source == sysctx::Source::Registry) {
                 // What the extension adds, when Pulse's own menu has seen it.
                 const auto labels = labels_.find(UpperClsid(item.clsid));
                 if (labels != labels_.end() && !labels->second.empty()) {
@@ -1557,7 +1565,7 @@ void SystemCtxModel::RestoreAll() {
 std::wstring SystemCtxModel::RowRegistryPath(int row) {
     std::lock_guard lock(mutex_);
     const Entry* e = RowEntryLocked(row);
-    if (!e || e->item.root == Root::File) return {};
+    if (!e || e->item.source != sysctx::Source::Registry || e->item.root == Root::File) return {};
     return (e->item.root == Root::Machine ? L"HKEY_LOCAL_MACHINE" : L"HKEY_CURRENT_USER") +
            std::wstring(L"\\Software\\Classes\\") + e->item.key_path;
 }
