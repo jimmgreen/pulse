@@ -533,7 +533,8 @@ bool WindowEffectUsesBackdrop(WindowEffect effect) noexcept {
 }
 
 bool SystemSupportsDwmBackdrop() noexcept {
-    return compat::ModernWindows() && IsWindows11OrLater() && !IsHighContrast();
+    // DWMWA_SYSTEMBACKDROP_TYPE arrives with Windows 11 22H2 (window_effect_support.h).
+    return WindowEffectSupported(WindowEffect::Mica) && !IsHighContrast();
 }
 
 std::wstring DesktopWallpaperPath() {

@@ -601,7 +601,7 @@ SettingsExternalOpenDesc	IDS_SETTINGS_EXTERNAL_OPEN_DESC	2592	智能：正在用
 ExternalOpenSmart	IDS_EXTERNAL_OPEN_SMART	2593	智能	Smart	智慧
 ExternalOpenTab	IDS_EXTERNAL_OPEN_TAB	2594	标签页	Tab	索引標籤
 ExternalOpenWindow	IDS_EXTERNAL_OPEN_WINDOW	2595	新窗口	New window	新視窗
-ExternalOpenActivate	IDS_EXTERNAL_OPEN_ACTIVATE	5630	只呼出	Activate only	僅叫出
+ExternalOpenActivate	IDS_EXTERNAL_OPEN_ACTIVATE	6439	只呼出	Activate only	僅叫出
 OpenedInNewWindow	IDS_OPENED_IN_NEW_WINDOW	2596	已在新窗口打开	Opened in a new window	已在新視窗開啟
 OpenedInTab	IDS_OPENED_IN_TAB	2597	已在标签页打开	Opened in a tab	已在索引標籤開啟
 OpenConvertToTab	IDS_OPEN_CONVERT_TO_TAB	2598	点击改为标签页	Click to make it a tab	按一下改為索引標籤
