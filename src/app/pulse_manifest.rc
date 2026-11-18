@@ -1,0 +1,4 @@
+// pulse.exe's own manifest resource: the other hosts keep the default one.
+#include <winuser.h>
+
+1 RT_MANIFEST "pulse_admin.manifest"

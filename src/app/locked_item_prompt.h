@@ -13,7 +13,7 @@ struct AppState;
 // matches what the confirm button will do.
 ui::ConfirmDialogSpec LockedItemPromptSpec(const ops::OpStatus& status, bool can_end);
 // True when every owner may be ended (otherwise the prompt only offers retry).
-bool LockedItemOwnersClosable(const ops::OpStatus& status);
+bool LockedItemCanEndAny(const ops::OpStatus& status);
 // Modal; call from the UI thread outside paint. Never blocks on the owners:
 // ending them and retrying run on the ops worker.
 void PromptLockedItem(AppState& s, const ops::OpStatus& status);

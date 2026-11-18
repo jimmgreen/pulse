@@ -116,6 +116,37 @@ void IndexClient::StartStoppedService() {
     CloseServiceHandle(scm);
 }
 
+bool StopIndexServiceOnExit(unsigned timeout_ms) {
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return false;
+    bool stopped = false;
+    if (SC_HANDLE svc = OpenServiceW(scm, kServiceName, SERVICE_QUERY_STATUS | SERVICE_STOP)) {
+        SERVICE_STATUS status{};
+        if (QueryServiceStatus(svc, &status)) {
+            if (status.dwCurrentState == SERVICE_STOPPED) {
+                stopped = true;
+            } else if (status.dwCurrentState != SERVICE_START_PENDING) {
+                // A start in flight is left alone: SCM will not take a stop yet.
+                if (status.dwCurrentState == SERVICE_STOP_PENDING ||
+                    ControlService(svc, SERVICE_CONTROL_STOP, &status)) {
+                    const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+                    while (GetTickCount64() < deadline) {
+                        if (!QueryServiceStatus(svc, &status)) break;
+                        if (status.dwCurrentState == SERVICE_STOPPED) { stopped = true; break; }
+                        Sleep(50);
+                    }
+                    // An index flush can outlast the exit budget: the stop is
+                    // already accepted and SCM finishes it without us.
+                    if (!stopped) stopped = status.dwCurrentState == SERVICE_STOP_PENDING;
+                }
+            }
+        }
+        CloseServiceHandle(svc);
+    }
+    CloseServiceHandle(scm);
+    return stopped;
+}
+
 bool IndexClient::SetServiceSearch(bool enabled, bool purge_index, DWORD* error) {
     DWORD failure = NO_ERROR;
     bool ok = false;

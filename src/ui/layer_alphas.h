@@ -27,15 +27,19 @@ inline float LerpStops(float t, const float (&v)[5]) noexcept {
 }
 // transparency: 0..90 slider; 25/50/75 reproduce the former
 // subtle/balanced/vivid tables exactly.
+// image_base: the window base is the user's background image, drawn as-is for
+// None or sampled as the material for Acrylic/Mica. That image is the whole
+// point of the setting, so it replaces the sheet and card plates instead of
+// sitting under them (only the title scrim still scales).
 // frame: 侧边栏与标题栏 0..100 (AppPrefs::frame_transparency), only for
 // Acrylic / Mica: 10 gives what the three layers gave before it existed.
-inline LayerAlphas ComputeLayerAlphas(bool image_mode, bool backdrop_drawn,
+inline LayerAlphas ComputeLayerAlphas(bool image_base, bool backdrop_drawn,
                                       bool backdrop_enabled, bool dark,
                                       int transparency, int wallpaper_blur,
                                       int frame = 10) noexcept {
     LayerAlphas a;
     const float t = static_cast<float>(std::clamp(transparency, 0, 90)) / 100.0f;
-    if (image_mode) {
+    if (image_base) {
         // Decode failure stays opaque rather than exposing the desktop.
         if (!backdrop_drawn) return a;
         // Dark wallpaper uses the legacy single scrim. Balanced restores

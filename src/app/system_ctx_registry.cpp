@@ -651,11 +651,35 @@ void PruneEmptyParents(HKEY base, std::wstring path, const std::wstring& stop) {
     }
 }
 
+// Drops `path` and its group when that group ends up empty.
+OpResult DropTree(HKEY base, const std::wstring& path) {
+    const LSTATUS st = RegDeleteTreeW(base, path.c_str());
+    if (st != ERROR_SUCCESS) return FromStatus(st);
+    const size_t slash = path.rfind(L'\\');
+    if (slash != std::wstring::npos) {
+        const std::wstring group = path.substr(0, slash);
+        if (IsEmptyKey(base, group)) RegDeleteKeyW(base, group.c_str());
+    }
+    return OpResult::Ok;
+}
+
 // Moves <parent>\\<from>\\<name> to <parent>\\<to>\\<name>, keeping values and subkeys.
-OpResult MoveKey(const Roots& roots, Root root, const std::wstring& src_rel, const std::wstring& dst_rel) {
+// A program can re-register its key while an older copy still sits in the
+// paired group, leaving both present; the keys then must not block each other
+// forever. Disabling keeps the key the program wrote now and drops the stale
+// copy, enabling is already satisfied by the live key and drops the duplicate.
+// Every batch is exported to .reg before it runs, so a dropped copy stays in
+// the Backups folder.
+OpResult MoveKey(const Roots& roots, Root root, const std::wstring& src_rel,
+                 const std::wstring& dst_rel, bool replace_destination) {
     HKEY base = RootKey(roots, root);
     const std::wstring src = FullPath(roots, root, src_rel);
-    const OpResult moved = MoveTree(base, src, FullPath(roots, root, dst_rel));
+    const std::wstring dst = FullPath(roots, root, dst_rel);
+    OpResult moved = MoveTree(base, src, dst);
+    if (moved == OpResult::Conflict) {
+        moved = replace_destination ? DropTree(base, dst) : DropTree(base, src);
+        if (moved == OpResult::Ok && replace_destination) moved = MoveTree(base, src, dst);
+    }
     if (moved != OpResult::Ok) return moved;
     // An emptied (-)ContextMenuHandlers group goes too, so a round trip leaves
     // no trace.
@@ -1049,7 +1073,7 @@ OpResult Apply(const Roots& roots, const Op& op) {
     case Kind::DragDrop: {
         const std::wstring target = KeyPathAfter(op);
         if (IEquals(target, op.key_path)) return OpResult::Ok;  // already in the requested state
-        return MoveKey(roots, op.root, op.key_path, target);
+        return MoveKey(roots, op.root, op.key_path, target, op.action == Action::Disable);
     }
     default: return OpResult::Unsupported;  // ShellNew / SendTo / OpenWith: S3
     }

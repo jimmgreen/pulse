@@ -4346,7 +4346,7 @@ BEGIN
     IDS_LOCK_CLOSE_LEAD "在下面的程序里关闭它，"
     IDS_LOCK_CLOSE_END "会自动继续。"
     IDS_LOCK_WAITING "正在等待文件释放…"
-    IDS_LOCK_RETRY_NOW "立即重试"
+    IDS_LOCK_RELEASE_NOW "立即释放"
     IDS_OP_AUTH_TITLE_COPY "复制到这里需要管理员权限"
     IDS_OP_AUTH_TITLE_MOVE "移动到这里需要管理员权限"
     IDS_OP_AUTH_TITLE_DELETE "删除这些项目需要管理员权限"
@@ -5140,6 +5140,7 @@ BEGIN
     IDS_SETUP_END_RETRY "结束进程并重试"
     IDS_SETUP_END_CONFIRM "将结束列表中可核验的占用进程，未保存的内容可能丢失。请先保存工作。是否继续？"
     IDS_SETUP_END_FAILED "部分进程未能结束，请查看安装日志或手动退出后重试。"
+    IDS_EXTERNAL_OPEN_ACTIVATE "只呼出"
 END
 
 LANGUAGE 0x09, 0x01
@@ -9485,7 +9486,7 @@ BEGIN
     IDS_LOCK_CLOSE_LEAD "Close it in the program below and it will be "
     IDS_LOCK_CLOSE_END " automatically."
     IDS_LOCK_WAITING "Waiting for the file to be released…"
-    IDS_LOCK_RETRY_NOW "Retry now"
+    IDS_LOCK_RELEASE_NOW "Release now"
     IDS_OP_AUTH_TITLE_COPY "Copying here needs administrator permission"
     IDS_OP_AUTH_TITLE_MOVE "Moving here needs administrator permission"
     IDS_OP_AUTH_TITLE_DELETE "Deleting these items needs administrator permission"
@@ -10279,6 +10280,7 @@ BEGIN
     IDS_SETUP_END_RETRY "End processes and retry"
     IDS_SETUP_END_CONFIRM "End the verified processes in this list? Unsaved work may be lost. Save your work before continuing."
     IDS_SETUP_END_FAILED "Some processes could not be ended. Check the setup log or quit them manually and retry."
+    IDS_EXTERNAL_OPEN_ACTIVATE "Activate only"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

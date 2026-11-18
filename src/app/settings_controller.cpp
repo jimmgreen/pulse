@@ -958,7 +958,7 @@ void SettingsController::ArrangeMinimized(int index) {
 }
 
 void SettingsController::ExternalOpen(int index) {
-    static constexpr int values[] = {0, 1, 2};
+    static constexpr int values[] = {0, 1, 2, 3};
     if (prefs_ && SelectValue(index, values, prefs_->external_open))
         SaveAndApply(SettingsEffect::None);
 }

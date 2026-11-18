@@ -53,14 +53,15 @@ struct Holder {
 fsys::path g_holder_exe;
 int g_holder_seq = 0;
 
-bool StartHolder(Holder& holder, const fsys::path& file) {
+bool StartHolder(Holder& holder, const fsys::path& file, const fsys::path& exe = {}) {
+    const fsys::path& run = exe.empty() ? g_holder_exe : exe;
     const std::wstring event_name = L"Local\\pulse-lock-test-" + std::to_wstring(GetCurrentProcessId())
         + L"-" + std::to_wstring(++g_holder_seq);
     HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, event_name.c_str());
-    std::wstring command = L"\"" + g_holder_exe.wstring() + L"\" --hold \"" + file.wstring() + L"\" "
+    std::wstring command = L"\"" + run.wstring() + L"\" --hold \"" + file.wstring() + L"\" "
         + event_name;
     STARTUPINFOW si{sizeof(si)};
-    const bool started = CreateProcessW(g_holder_exe.c_str(), command.data(), nullptr, nullptr, FALSE,
+    const bool started = CreateProcessW(run.c_str(), command.data(), nullptr, nullptr, FALSE,
                                         CREATE_NO_WINDOW, nullptr, nullptr, &si, &holder.pi) != FALSE;
     const bool signalled = started && WaitForSingleObject(ready, 10000) == WAIT_OBJECT_0;
     CloseHandle(ready);
@@ -229,6 +230,38 @@ int wmain(int argc, wchar_t** argv) {
             Check(DeleteFileW(locked.c_str()) != FALSE, "file deletable after the owner ended");
             Check(CloseLockOwner(*other, 100) == CloseOwnerResult::AlreadyGone, "second close is a no-op");
         }
+    }
+
+    // --- inside Pulse's own folder: helpers yes, Pulse itself no -------------
+    {
+        const fsys::path app_dir = root / L"app";
+        fsys::create_directories(app_dir);
+        const fsys::path helper_copy = app_dir / L"Pulse.Index.exe";
+        const fsys::path window_copy = app_dir / L"pulse.exe";
+        std::error_code copy_error;
+        fsys::copy_file(g_holder_exe, helper_copy, fsys::copy_options::overwrite_existing, copy_error);
+        fsys::copy_file(g_holder_exe, window_copy, fsys::copy_options::overwrite_existing, copy_error);
+
+        // The index host is what usually holds a portable copy being deleted;
+        // it restarts on demand, so ending it must be offered.
+        const fsys::path helper_file = root / L"helper" / L"held.txt";
+        Touch(helper_file);
+        Holder helper;
+        Check(StartHolder(helper, helper_file, helper_copy), "helper holder started");
+        const auto helper_owners = FindLockOwners({helper_file.wstring()}, app_dir.wstring());
+        const LockOwner* helper_owner = FindPid(helper_owners, helper.pi.dwProcessId);
+        Check(helper_owner && helper_owner->closable,
+              "Pulse's restartable helper stays closable inside Pulse's own folder");
+
+        // The window process itself is never ended, not even to free a file.
+        const fsys::path window_file = root / L"window" / L"held.txt";
+        Touch(window_file);
+        Holder window;
+        Check(StartHolder(window, window_file, window_copy), "window holder started");
+        const auto window_owners = FindLockOwners({window_file.wstring()}, app_dir.wstring());
+        const LockOwner* window_owner = FindPid(window_owners, window.pi.dwProcessId);
+        Check(window_owner && !window_owner->closable,
+              "Pulse itself is not closable inside its own folder");
     }
 
     // --- folder probe + full failure probe ------------------------------------

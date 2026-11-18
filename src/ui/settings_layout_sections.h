@@ -280,7 +280,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         section(I::SettingsSecOpenWindows);
         l.open_pulse_icon_card=row(narrow ? 108.0f : 64.0f); fitted_segments(l.open_pulse_icon_card,l.open_pulse_icon_row,{I::ExternalOpenWindow,I::ExternalOpenTab,I::OpenWindowActivate});
         l.new_window_shows_card=row(narrow ? 108.0f : 64.0f); fitted_segments(l.new_window_shows_card,l.new_window_shows_row,{I::OpenWindowStartup,I::OpenWindowThisPc,I::NewTabOpenCurrent});
-        l.external_open_card=row(seg_h); fitted_segments(l.external_open_card,l.external_open_row,{I::ExternalOpenSmart,I::ExternalOpenTab,I::ExternalOpenWindow});
+        l.external_open_card=row(seg_h); fitted_segments(l.external_open_card,l.external_open_row,{I::ExternalOpenSmart,I::ExternalOpenTab,I::ExternalOpenWindow,I::ExternalOpenActivate});
 
         section(I::SettingsSecArrangeWindows);
         l.arrange_minimized_row=row(64);

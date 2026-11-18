@@ -2976,6 +2976,7 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             else
                 InvalidateRect(hwnd, nullptr, FALSE);
         }
+
         return 0;
 }
 

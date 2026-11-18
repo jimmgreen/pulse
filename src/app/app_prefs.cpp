@@ -276,7 +276,7 @@ std::wstring AppPrefs::ToJson() const {
     out += L",\n  \"new_tab_open\":";
     out += new_tab_open == 1 ? L"1" : L"0";
     out += L",\n  \"external_open\":";
-    out += std::to_wstring(external_open >= 0 && external_open <= 2 ? external_open : 0);
+    out += std::to_wstring(external_open >= 0 && external_open <= 3 ? external_open : 0);
     out += L",\n  \"open_pulse_icon\":" + std::to_wstring(open_pulse_icon >= 0 && open_pulse_icon <= 2 ? open_pulse_icon : 0);
     out += L",\n  \"open_this_pc\":" + std::to_wstring(open_this_pc >= 0 && open_this_pc <= 1 ? open_this_pc : 0);
     out += L",\n  \"open_win_e\":" + std::to_wstring(open_win_e >= 0 && open_win_e <= 2 ? open_win_e : 0);
@@ -609,7 +609,7 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     if (arrange_gap < 0 || arrange_gap > 1) arrange_gap = 0;
     arrange_include_minimized = pulse::json::ExtractBool(json, L"arrange_include_minimized", false);
     external_open = pulse::json::ExtractInt(json, L"external_open", 0);
-    if (external_open < 0 || external_open > 2) external_open = 0;
+    if (external_open < 0 || external_open > 3) external_open = 0;
     // Missing key = preferences saved before the setting existed: keep their behavior.
     close_window_with_last_tab = pulse::json::ExtractBool(json, L"close_window_with_last_tab", false);
     close_tab_on_double_click = pulse::json::ExtractBool(json, L"close_tab_on_double_click", false);

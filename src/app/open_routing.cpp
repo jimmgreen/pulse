@@ -43,7 +43,7 @@ const void* ActiveLayoutTab(const AppState& s) {
 
 app::ExternalOpenPolicy OpenPolicy(const AppState& s) {
     const int value = s.appPrefs.external_open;
-    return value >= 0 && value <= 2 ? static_cast<app::ExternalOpenPolicy>(value) : app::ExternalOpenPolicy::Smart;
+    return value >= 0 && value <= 3 ? static_cast<app::ExternalOpenPolicy>(value) : app::ExternalOpenPolicy::Smart;
 }
 
 // Rule 7: says where the folder went and offers the other way (one click,
@@ -70,7 +70,12 @@ void ForgetOpenToast(AppCore& core) {
 bool ExternalOpenWindowBusy(const AppState& state) { return IsBusy(state); }
 
 ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw, bool reveal) {
-    const bool activate = raw == L"pulse:activate";
+    // 只呼出 (external_open = 3): a launch without a folder — Win+E, the taskbar
+    // icon, an explicit "raise" — only raises the window instead of opening a
+    // new window or tab. Requests that carry a folder keep their behaviour.
+    const bool bare_launch = raw.empty() || raw == L"pulse:win-e" || raw == L"pulse:activate";
+    const bool activate = raw == L"pulse:activate" ||
+        (bare_launch && OpenPolicy(mru) == app::ExternalOpenPolicy::AlwaysActivate);
     const bool icon = raw.empty();
     const bool win_e = raw == L"pulse:win-e";
     const bool explicit_window = raw == L"pulse:new-window" || raw == L"pulse:this-pc";

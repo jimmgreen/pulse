@@ -2037,7 +2037,13 @@ bool OpsManager::PrepareLockRetry(OpRequest& req, uint64_t task_id) {
     std::wstring failure;
     for (const auto& owner : owners) {
         DWORD error = ERROR_SUCCESS;
-        const CloseOwnerResult result = CloseLockOwner(owner, 5000, &error);
+        CloseOwnerResult result = CloseLockOwner(owner, 5000, &error);
+        if (result == CloseOwnerResult::Denied) {
+            // The window may not end this one (a service, another user, a
+            // higher integrity process): one UAC prompt ends it as admin.
+            error = ERROR_SUCCESS;
+            result = CloseLockOwnerElevated(owner, 5000, &error);
+        }
         if (result == CloseOwnerResult::Closed || result == CloseOwnerResult::AlreadyGone) continue;
         failure = l10n::Get(l10n::StringId::CouldNotEndProcess).c_str() + DescribeLockOwner(owner);
         if (result == CloseOwnerResult::TimedOut) failure += l10n::Get(l10n::StringId::TheProcessDidNotExitInTime).c_str();

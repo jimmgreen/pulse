@@ -2,6 +2,7 @@
 #include "file_lock_owner.h"
 
 #include <restartmanager.h>
+#include <shellapi.h>
 #include <winerror.h>
 #include <algorithm>
 #include <cwctype>
@@ -56,6 +57,22 @@ bool SameFolder(const std::wstring& a, const std::wstring& b) {
     while (!right.empty() && (right.back() == L'\\' || right.back() == L'/')) right.pop_back();
     return CompareStringOrdinal(left.c_str(), static_cast<int>(left.size()),
                                 right.c_str(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
+}
+
+// Pulse's helpers are short-lived and restart on demand, so ending one to free
+// a file is safe even when it runs from Pulse's own folder (the index host is
+// what usually holds a portable copy being deleted). Pulse itself is not here:
+// ending the window the user is working in is never the answer.
+bool IsRestartableHelper(const std::wstring& image_name) {
+    if (image_name.empty()) return false;
+    static constexpr const wchar_t* kNames[] = {
+        L"Pulse.Index.exe", L"Pulse.Preview.exe", L"Pulse.Content.exe", L"Pulse.Document.exe",
+        L"Pulse.AI.exe", L"pulse_shell.exe", L"pulse_integration.exe", L"pulse_elevated.exe",
+    };
+    for (const wchar_t* name : kNames) {
+        if (CompareStringOrdinal(image_name.c_str(), -1, name, -1, TRUE) == CSTR_EQUAL) return true;
+    }
+    return false;
 }
 
 std::wstring ProcessImagePath(HANDLE process) {
@@ -166,11 +183,17 @@ std::vector<LockOwner> FindLockOwners(const std::vector<std::wstring>& files,
             CloseHandle(process);
         }
         owner.image_name = FileNamePart(image_path);
+        const bool helper = IsRestartableHelper(owner.image_name);
+        const bool in_protected = !image_path.empty() &&
+            SameFolder(ParentPart(image_path), protected_dir);
+        // A third-party service is out of scope, but Pulse's own index service
+        // (the usual holder of an old portable copy) is stopped like a helper:
+        // ending it needs administrator rights, which the prompt asks for.
         owner.closable = pid != self && pid > 4
             && info.ApplicationType != RmCritical
-            && info.ApplicationType != RmService
             && info.ApplicationType != RmExplorer
-            && !(image_path.empty() ? false : SameFolder(ParentPart(image_path), protected_dir));
+            && (info.ApplicationType != RmService || helper)
+            && (!in_protected || helper);
         owners.push_back(std::move(owner));
     }
     return owners;
@@ -256,6 +279,68 @@ CloseOwnerResult CloseLockOwner(const LockOwner& owner, DWORD wait_ms, DWORD* er
     }
     CloseHandle(process);
     return result;
+}
+
+CloseOwnerResult CloseLockOwnerElevated(const LockOwner& owner, DWORD wait_ms, DWORD* error) {
+    if (error) *error = ERROR_SUCCESS;
+    if (owner.pid == 0 || owner.pid == GetCurrentProcessId()) return CloseOwnerResult::Refused;
+    const std::wstring helper = CurrentModuleDirectory() + L"\\pulse_integration.exe";
+    if (GetFileAttributesW(helper.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        if (error) *error = ERROR_FILE_NOT_FOUND;
+        return CloseOwnerResult::Failed;
+    }
+    wchar_t temp[MAX_PATH]{};
+    if (!GetTempPathW(MAX_PATH, temp)) {
+        if (error) *error = GetLastError();
+        return CloseOwnerResult::Failed;
+    }
+    const std::wstring result = std::wstring(temp) + L"pulse_kill_" +
+        std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64()) + L".result";
+    DeleteFileW(result.c_str());
+    const unsigned long long start =
+        (static_cast<unsigned long long>(owner.start_time.dwHighDateTime) << 32) | owner.start_time.dwLowDateTime;
+    const std::wstring params = L"--kill-pid " + std::to_wstring(owner.pid) + L" --start " +
+        std::to_wstring(start) + L" --result \"" + result + L"\"";
+
+    SHELLEXECUTEINFOW info{sizeof(info)};
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    info.lpVerb = L"runas";
+    info.lpFile = helper.c_str();
+    info.lpParameters = params.c_str();
+    info.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&info) || !info.hProcess) {
+        const DWORD code = GetLastError();
+        DeleteFileW(result.c_str());
+        if (error) *error = code;
+        // Cancelled consent is the user's decision, not a failure to report.
+        return code == ERROR_CANCELLED ? CloseOwnerResult::Denied : CloseOwnerResult::Failed;
+    }
+    WaitForSingleObject(info.hProcess, INFINITE);
+    CloseHandle(info.hProcess);
+
+    std::wstring text;
+    HANDLE file = CreateFileW(result.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        char buffer[32]{};
+        DWORD read = 0;
+        if (ReadFile(file, buffer, sizeof(buffer) - 1, &read, nullptr) && read > 0)
+            text.assign(buffer, buffer + read);
+        CloseHandle(file);
+    }
+    DeleteFileW(result.c_str());
+    if (text == L"ok") {
+        // Wait for the exit so the retry does not race it.
+        if (HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, owner.pid)) {
+            WaitForSingleObject(process, wait_ms);
+            CloseHandle(process);
+        }
+        return CloseOwnerResult::Closed;
+    }
+    if (text == L"notfound") return CloseOwnerResult::AlreadyGone;
+    if (text == L"denied") return CloseOwnerResult::Denied;
+    if (text == L"timeout") return CloseOwnerResult::TimedOut;
+    if (error && text.empty()) *error = ERROR_INVALID_DATA;
+    return CloseOwnerResult::Failed;
 }
 
 std::wstring DescribeLockOwner(const LockOwner& owner) {

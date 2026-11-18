@@ -389,12 +389,27 @@ int wmain(int argc, wchar_t** argv) {
               "restore without a trashed copy reports NotFound; other kinds are refused");
     }
 
-    // Conflict: both ContextMenuHandlers\\X and -ContextMenuHandlers\\X exist.
+    // A program re-registered its key while an older -ContextMenuHandlers copy
+    // was still there. Disabling keeps the key the program wrote now and drops
+    // the stale copy instead of blocking on it forever (the batch is exported
+    // to .reg first, so the older copy stays in Backups).
     SetString(L"Machine\\*\\shellex\\ContextMenuHandlers\\Clash", nullptr, L"{11111111-2222-3333-4444-555555555555}");
-    SetString(L"Machine\\*\\shellex\\-ContextMenuHandlers\\Clash", nullptr, L"{11111111-2222-3333-4444-555555555555}");
+    SetString(L"Machine\\*\\shellex\\-ContextMenuHandlers\\Clash", nullptr, L"{99999999-8888-7777-6666-555555555555}");
     Op clash{Action::Disable, Kind::ShellEx, Root::Machine, L"*\\shellex\\ContextMenuHandlers\\Clash"};
-    Check(Apply(roots, clash) == OpResult::Conflict && KeyExists(L"Machine\\*\\shellex\\ContextMenuHandlers\\Clash"),
-          "shellex move refuses to overwrite an existing -ContextMenuHandlers key");
+    Check(Apply(roots, clash) == OpResult::Ok &&
+              !KeyExists(L"Machine\\*\\shellex\\ContextMenuHandlers\\Clash") &&
+              GetString(L"Machine\\*\\shellex\\-ContextMenuHandlers\\Clash", nullptr) ==
+                  L"{11111111-2222-3333-4444-555555555555}",
+          "shellex disable replaces a stale -ContextMenuHandlers copy with the live key");
+    // Enabling again while the live key is back: the disabled copy is a duplicate.
+    SetString(L"Machine\\*\\shellex\\ContextMenuHandlers\\Clash", nullptr, L"{11111111-2222-3333-4444-555555555555}");
+    Op unclash{Action::Enable, Kind::ShellEx, Root::Machine, L"*\\shellex\\-ContextMenuHandlers\\Clash"};
+    Check(Apply(roots, unclash) == OpResult::Ok &&
+              KeyExists(L"Machine\\*\\shellex\\ContextMenuHandlers\\Clash") &&
+              GetString(L"Machine\\*\\shellex\\ContextMenuHandlers\\Clash", nullptr) ==
+                  L"{11111111-2222-3333-4444-555555555555}" &&
+              !KeyExists(L"Machine\\*\\shellex\\-ContextMenuHandlers\\Clash"),
+          "shellex enable with the live key back drops the duplicate copy");
     Op gone{Action::Disable, Kind::Verb, Root::Machine, L"*\\shell\\DoesNotExist"};
     Check(Apply(roots, gone) == OpResult::NotFound, "missing key reports NotFound");
 

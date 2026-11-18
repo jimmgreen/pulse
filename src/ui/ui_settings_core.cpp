@@ -677,8 +677,8 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
         segmented(lay.startup_open_card,lay.startup_open_row,startup_open,two_values,vm.settings_startup_open,H::SettingsStartupOpen,I::SettingsStartupOpen,I::SettingsStartupOpenDesc,2,L"\xE81C");
         const I new_tab_open[]={I::NewTabOpenCurrent,I::OpenDefaultLocation};
         segmented(lay.new_tab_open_card,lay.new_tab_open_row,new_tab_open,two_values,vm.settings_new_tab_open,H::SettingsNewTabOpen,I::SettingsNewTabOpen,I::SettingsNewTabOpenDesc,2,L"\xECCD");
-        const I external_open[]={I::ExternalOpenSmart,I::ExternalOpenTab,I::ExternalOpenWindow};const int external_values[]={0,1,2};
-        segmented(lay.external_open_card,lay.external_open_row,external_open,external_values,vm.settings_external_open,H::SettingsExternalOpen,I::SettingsExternalOpen,I::SettingsExternalOpenDesc,3,L"\xE8AD");
+        const I external_open[]={I::ExternalOpenSmart,I::ExternalOpenTab,I::ExternalOpenWindow,I::ExternalOpenActivate};const int external_values[]={0,1,2,3};
+        segmented(lay.external_open_card,lay.external_open_row,external_open,external_values,vm.settings_external_open,H::SettingsExternalOpen,I::SettingsExternalOpen,I::SettingsExternalOpenDesc,4,L"\xE8AD");
         const I open_pulse_icon_labels[]={I::ExternalOpenWindow,I::ExternalOpenTab,I::OpenWindowActivate}; const int open_pulse_icon_values[]={0,1,2};
         segmented(lay.open_pulse_icon_card,lay.open_pulse_icon_row,open_pulse_icon_labels,open_pulse_icon_values,vm.settings_open_pulse_icon,H::SettingsOpenPulseIcon,I::SettingsOpenPulseIcon,I::SettingsOpenPulseIconDesc,3);
         const I new_window_shows_labels[]={I::OpenWindowStartup,I::OpenWindowThisPc,I::NewTabOpenCurrent}; const int new_window_shows_values[]={0,1,2};

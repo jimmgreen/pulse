@@ -469,8 +469,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         return r;
                     }
                 }
-                for (int i = 0; i < 3; ++i) {
-                    if (ContainsPt(lay.notify_icon_row[i], x, y)) {
+                // 4: 外部打开 4 段；其余那几行仍是 3/2 段。只呼出 by max.
+                for (int i = 0; i < 4; ++i) {
+                    if (i < 3 && ContainsPt(lay.notify_icon_row[i], x, y)) {
                         r.region = HitTestResult::SettingsNotifyIcon;
                         r.index = i;
                         return r;
