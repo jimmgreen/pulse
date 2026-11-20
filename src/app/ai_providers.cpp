@@ -26,6 +26,12 @@ const std::vector<Provider> kProviders = {
     {"mimo", L"https://api.xiaomimimo.com/v1", L"https://platform.xiaomimimo.com/#/console/api-keys", true, false, false},
     {"silicon", L"https://api.siliconflow.cn/v1", L"https://cloud.siliconflow.cn/account/ak", true, false, false},
     {"openai", L"https://api.openai.com/v1", L"https://platform.openai.com/api-keys", true, false, false},
+    // OpenCode Go is a gateway over the other makers' models; its Console
+    // refuses a request that does not name the conversation in
+    // x-opencode-session (400 MissingSessionID), which is what session_header
+    // makes ai_model_stream.cpp send.
+    {"opencode", L"https://opencode.ai/inference/go/v1", L"https://opencode.ai/console", true, true, false,
+     "x-opencode-session"},
     {"ollama", L"http://localhost:11434/v1", L"", false, false, false},
     {"custom", L"", L"", true, true, false},
     {"openrouter", L"https://openrouter.ai/api/v1", L"https://openrouter.ai/keys", true, false, true},
@@ -239,6 +245,7 @@ std::wstring ProviderName(const Provider& p) {
     if (id == "mimo") return l10n::Get(I::ProvMimo);
     if (id == "silicon") return l10n::Get(I::ProvSilicon);
     if (id == "openai") return L"OpenAI";
+    if (id == "opencode") return L"OpenCode Go";
     if (id == "openrouter") return L"OpenRouter";
     if (id == "ollama") return L"Ollama";
     if (id == "gemini") return L"Gemini";
@@ -255,6 +262,7 @@ std::wstring ProviderSub(const Provider& p) {
     if (id == "doubao") return l10n::Get(I::ProvSubDoubao);
     if (id == "mimo") return l10n::Get(I::ProvSubMimo);
     if (id == "silicon") return L"SiliconCloud";
+    if (id == "opencode") return L"opencode.ai";
     if (id == "openai" || id == "gemini" || id == "claude") return l10n::Get(I::ProvSubProxy);
     if (id == "openrouter") return l10n::Get(I::ProvSubOpenRouter);
     if (id == "ollama") return l10n::Get(I::ProvSubOllama);
@@ -289,6 +297,9 @@ ThinkSpec ModelThinking(const Provider& p, std::string_view model) {
     if (id == "mimo") return MimoModel(m);
     if (id == "silicon") return SiliconModel(m);
     if (id == "openai") return OpenAiModel(m);
+    // OpenCode Go forwards to whichever maker's model the id names, so the
+    // thinking field follows the model, like a relay.
+    if (id == "opencode") return ByName(m);
     if (id == "ollama") return OllamaModel(m);
     if (id == "gemini") return GeminiModel(m);
     if (id == "openrouter") {

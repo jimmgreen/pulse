@@ -47,10 +47,14 @@ bool Has(const std::string& s, std::string_view part) { return s.find(part) != s
 int main() {
     // Every service by id, MiMo among them and on the first screen.
     Check(KnownProvider("mimo") && !ProviderById("mimo").more, "mimo is a first-screen service");
+    // OpenCode Go routes by conversation, so it must carry the header name.
+    Check(KnownProvider("opencode") && !ProviderById("opencode").more &&
+              std::string_view(ProviderById("opencode").session_header) == "x-opencode-session",
+          "opencode is a first-screen service that names its conversation");
     {
         int first = 0;
         for (const Provider& p : Providers()) first += p.more ? 0 : 1;
-        Check(first == 10 && Providers().size() == 13, "10 tiles + 3 under 更多");
+        Check(first == 11 && Providers().size() == 14, "11 tiles + 3 under 更多");
         Check(std::string_view(Providers()[5].id) == "mimo", "mimo after 豆包");
     }
 
