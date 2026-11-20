@@ -55,6 +55,10 @@ struct Provider {
     bool needs_key;            // false: a local service (Ollama)
     bool partial_list;         // GET /models can leave out ids the service takes
     bool more;                 // listed under 更多 rather than on the first screen
+    // The header that names the conversation when the service routes by it:
+    // OpenCode Go answers 400 MissingSessionID without x-opencode-session.
+    // nullptr: the service takes no such header.
+    const char* session_header = nullptr;
 };
 
 // The services in tile order: the first screen, then 更多.

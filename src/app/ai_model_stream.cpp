@@ -1,13 +1,18 @@
 // ai_model_stream.cpp - Streamed chat completions over WinHTTP (ai_model_stream.h).
 #include "ai_model_stream.h"
 
+#include "ai_providers.h"
+#include "pulse_version.h"
+
 #include "../common/json_value.h"
 
 #include <winhttp.h>
 
 #include <atomic>
+#include <cstdio>
 #include <map>
 #include <mutex>
+#include <string_view>
 #include <thread>
 
 namespace pulse::app::ai {
@@ -148,6 +153,67 @@ struct Assembler {
     }
 };
 
+// The header a service wants the conversation named in, from the provider
+// table: a request carries only its address, and the address is that table's.
+// A typed address may keep the table's path (…/go/v1) or stop at the root
+// (…/go), so the service is recognised by scheme and host rather than by the
+// full path. Only services that declare a header are considered, which keeps
+// a shared host from borrowing another tile's header.
+const char* SessionHeader(const std::wstring& base_url) {
+    for (const Provider& provider : Providers()) {
+        if (!provider.session_header) continue;
+        const std::wstring_view known(provider.base_url);
+        if (known.empty()) continue;
+        const size_t scheme = known.find(L"://");
+        const size_t slash =
+            scheme == std::wstring_view::npos ? std::wstring_view::npos : known.find(L'/', scheme + 3);
+        const std::wstring_view origin = slash == std::wstring_view::npos ? known : known.substr(0, slash);
+        if (base_url.rfind(origin, 0) == 0) return provider.session_header;
+    }
+    return nullptr;
+}
+
+// The id one chat keeps across its turns: OpenCode Go refuses a request that
+// does not name its conversation (400 MissingSessionID) and routes a chat's
+// turns to one place — and caches its prompt — by this name. The first system
+// prompt and the first user message name it, because every turn repeats them.
+std::string SessionId(const std::string& body) {
+    uint64_t hash = 1469598103934665603ull;   // FNV-1a, 64 bit
+    bool fed = false;
+    auto feed = [&](std::string_view text) {
+        if (text.empty()) return;
+        fed = true;
+        for (const char ch : text) {
+            hash ^= static_cast<unsigned char>(ch);
+            hash *= 1099511628211ull;
+        }
+    };
+    json::Value parsed;
+    if (json::Parse(body, parsed) && parsed.is_object()) {
+        const json::Value* messages = parsed.find("messages");
+        if (messages && messages->is_array()) {
+            bool system_seen = false, user_seen = false;
+            for (const json::Value& message : messages->items()) {
+                const std::string role = message.get_string("role");
+                if (role == "system" && !system_seen) {
+                    feed(message.get_string("content"));
+                    system_seen = true;
+                } else if (role == "user" && !user_seen) {
+                    feed(message.get_string("content"));
+                    user_seen = true;
+                }
+                if (system_seen && user_seen) break;
+            }
+        }
+    }
+    // A body past the parser's limit, or one with nothing to name it by: the
+    // head still tells one chat from another, which is all the id has to do.
+    if (!fed) feed(std::string_view(body).substr(0, body.size() < 4096 ? body.size() : 4096));
+    char text[32];
+    std::snprintf(text, sizeof(text), "ses_pulse_%016llx", static_cast<unsigned long long>(hash));
+    return text;
+}
+
 // The service's {"error": {"message", "type", "code"}} body.
 void ReadError(const std::string& body, std::string& type, std::string& message) {
     json::Value v;
@@ -222,6 +288,16 @@ void Run(std::shared_ptr<ModelStream::Shared> sh, ModelEndpoint endpoint, std::s
     std::wstring headers = L"Content-Type: application/json\r\nAccept: text/event-stream\r\nAuthorization: Bearer ";
     headers += endpoint.key;
     headers += L"\r\n";
+    // A service that routes by conversation is told which one this is, and the
+    // client names itself: OpenCode Go's gateway is documented to misroute the
+    // generic SDK user agents.
+    if (const char* session = SessionHeader(endpoint.base_url)) {
+        headers += L"User-Agent: Pulse/" PULSE_VERSION_STRING L"\r\n";
+        headers += json::Wide(session);
+        headers += L": ";
+        headers += json::Wide(SessionId(body));
+        headers += L"\r\n";
+    }
     SecureZeroMemory(endpoint.key.data(), endpoint.key.size() * sizeof(wchar_t));
     const BOOL sent = WinHttpSendRequest(request, headers.c_str(), static_cast<DWORD>(headers.size()), body.data(),
                                          static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0);
@@ -352,6 +428,13 @@ ModelProbe ProbeModelService(ModelEndpoint endpoint) {
         return probe;
     }
     std::wstring headers = L"Accept: application/json\r\nAuthorization: Bearer " + endpoint.key + L"\r\n";
+    // A service that routes by conversation wants the header on the list too;
+    // the probe is not part of a chat, so one fixed name stands in for it.
+    if (const char* session = SessionHeader(endpoint.base_url)) {
+        headers += L"User-Agent: Pulse/" PULSE_VERSION_STRING L"\r\n";
+        headers += json::Wide(session);
+        headers += L": ses_pulse_model_probe\r\n";
+    }
     // Anthropic lists its models only to its own key header (chat takes the bearer).
     const std::wstring anthropic = L"api.anthropic.com";
     if (url.host.size() >= anthropic.size() &&
