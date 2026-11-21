@@ -139,6 +139,10 @@ std::string StepsKey(const std::vector<Step>& steps, const Options& opts) {
     return json::Serialize(PresetToJson(p));
 }
 
+Preset InitialPreset(const PresetStore& store, const Preset& fallback) {
+    return store.has_last && !store.last.steps.empty() ? store.last : fallback;
+}
+
 std::string PresetsToJson(const PresetStore& store) {
     Value root = Value::Object();
     root.set("version", 1);

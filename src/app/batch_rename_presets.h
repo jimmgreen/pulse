@@ -31,6 +31,10 @@ bool SavePresets(const PresetStore& store);
 // Compares step lists: equal keys = the same steps and options.
 std::string StepsKey(const std::vector<Step>& steps, const Options& opts);
 
+// Selects the preset used when the dialog opens without an explicit override.
+// Invalid or empty history falls back to the built-in default.
+Preset InitialPreset(const PresetStore& store, const Preset& fallback);
+
 // The JSON text, for tests.
 std::string PresetsToJson(const PresetStore& store);
 bool PresetsFromJson(const std::string& utf8, PresetStore& out);

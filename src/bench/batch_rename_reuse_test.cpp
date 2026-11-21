@@ -1,10 +1,24 @@
 #include "../app/batch_rename_plan.h"
+#include "../app/batch_rename_presets.h"
 #include <cstdlib>
 #define CHECK(x) do { if (!(x)) { std::printf("[FAIL] %s\n", #x); return 1; } } while (0)
 namespace pulse::app::rename { extern size_t regex_compile_attempts; }
 #include <cstdio>
 using namespace pulse::app::rename;
 int main() {
+    Preset fallback;
+    fallback.name = L"default";
+    fallback.steps.push_back({});
+    PresetStore empty;
+    CHECK(InitialPreset(empty, fallback).name == L"default");
+    PresetStore history;
+    history.has_last = true;
+    history.last.name = L"last";
+    history.last.steps.push_back({});
+    CHECK(InitialPreset(history, fallback).name == L"last");
+    history.last.steps.clear();
+    CHECK(InitialPreset(history, fallback).name == L"default");
+
  for (int count : {1,1000,10000}) {
   std::vector<Source> sources;
   for(int i=0;i<count;++i) sources.push_back({L"C:\\test\\"+std::to_wstring(i)+L".txt",L"Alpha"+std::to_wstring(i)+L".txt"});
@@ -35,4 +49,3 @@ int main() {
     CHECK(collision_plan.rows[2].new_name == L"共同.txt");
     std::puts("[PASS] Unicode collisions share one parent but remain independent across parents");
 }
-

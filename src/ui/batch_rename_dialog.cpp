@@ -436,7 +436,8 @@ public:
             }
             ApplyPreset(p, false);
         } else {
-            ApplyPreset(Builtins().front(), false);
+            const auto builtins = Builtins();
+            ApplyPreset(rn::InitialPreset(store_, builtins.front()), false);
         }
         Recompute(false);
 
