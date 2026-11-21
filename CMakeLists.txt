@@ -2671,7 +2671,8 @@ endif()
 
 target_compile_definitions(pulse_delete_delivery_test PRIVATE PULSE_NATIVE_DELETE_TEST)
 
-add_executable(pulse_batch_rename_reuse_test src/bench/batch_rename_reuse_test.cpp src/app/batch_rename_plan.cpp)
+add_executable(pulse_batch_rename_reuse_test src/bench/batch_rename_reuse_test.cpp src/app/batch_rename_plan.cpp
+    src/app/batch_rename_presets.cpp src/common/json_value.cpp)
 target_compile_definitions(pulse_batch_rename_reuse_test PRIVATE PULSE_TEST_RENAME_REUSE=1)
 target_link_libraries(pulse_batch_rename_reuse_test PRIVATE user32)
 
