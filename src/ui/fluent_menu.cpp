@@ -543,6 +543,7 @@ LRESULT CALLBACK FluentMenu::MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         }
         return 0;
     case WM_LBUTTONDOWN:
+        self->press_on_menu_ = true;
         if (!is_sub) {
             self->OnMouse(POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}, false);
             if (self->hover_row_ >= 0 && self->model_.Items()[static_cast<size_t>(self->hover_row_)].drag_command) {
@@ -561,6 +562,9 @@ LRESULT CALLBACK FluentMenu::MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         if (!is_sub && self->bar_drag_ && reinterpret_cast<HWND>(lParam) != hwnd) self->BarRelease();
         break;
     case WM_LBUTTONUP: {
+        const bool paired = self->press_on_menu_;
+        self->press_on_menu_ = false;
+        if (!paired) return 0;
         self->drag_row_ = -1;
         if (GetCapture() == hwnd && !self->bar_drag_) ReleaseCapture();
         POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -729,8 +733,15 @@ void FluentMenu::LayoutWindow(POINT screen_pt) {
     HMONITOR mon = MonitorFromPoint(screen_pt, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi{ sizeof(mi) };
     GetMonitorInfoW(mon, &mi);
-    ApplyHeightLimit(static_cast<float>(mi.rcWork.bottom - mi.rcWork.top - kShadowMargin * 2) -
-                     FilterHeaderPx());
+    // A dropdown belongs to a control on a page the user is still working with,
+    // so a long list may not swallow the whole screen: it keeps a share of the
+    // work area and the remaining rows scroll under the menu's own bar. Other
+    // popups, such as context menus, keep the full work area. The share is a
+    // fraction rather than a pixel count, so it holds at any size and scaling.
+    const float work_height = static_cast<float>(mi.rcWork.bottom - mi.rcWork.top);
+    constexpr float kDropdownWorkAreaShare = 0.6f;
+    const float available_height = dropdown_ ? work_height * kDropdownWorkAreaShare : work_height;
+    ApplyHeightLimit(available_height - kShadowMargin * 2 - FilterHeaderPx());
     h = static_cast<int>(std::ceil(BodyHeightPx())) + static_cast<int>(FilterHeaderPx()) + kShadowMargin * 2;
     int x = screen_pt.x;
     int y = screen_pt.y;
@@ -2432,6 +2443,7 @@ int FluentMenu::TrackPopup(POINT screen_pt, std::vector<FluentMenuItem> items,
     }
     drag_row_ = -1;
     dragged_command_ = 0;
+    press_on_menu_ = false;
     HideSubWindow(); // stale flyout state from the previous invocation
     // Acrylic is baked from what the window shows now; never reuse a plate.
     acrylic_active_ = AcrylicEnabled() && compositor_ && compositor_->FrameCopy() &&
