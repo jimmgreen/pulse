@@ -733,15 +733,11 @@ void FluentMenu::LayoutWindow(POINT screen_pt) {
     HMONITOR mon = MonitorFromPoint(screen_pt, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi{ sizeof(mi) };
     GetMonitorInfoW(mon, &mi);
-    // A dropdown belongs to a control on a page the user is still working with,
-    // so a long list may not swallow the whole screen: it keeps a share of the
-    // work area and the remaining rows scroll under the menu's own bar. Other
-    // popups, such as context menus, keep the full work area. The share is a
-    // fraction rather than a pixel count, so it holds at any size and scaling.
+    // The work area only guards against a screen too small for the menu; a
+    // dropdown limits its own height by the row count set when it opens, and
+    // every other popup keeps the full work area.
     const float work_height = static_cast<float>(mi.rcWork.bottom - mi.rcWork.top);
-    constexpr float kDropdownWorkAreaShare = 0.6f;
-    const float available_height = dropdown_ ? work_height * kDropdownWorkAreaShare : work_height;
-    ApplyHeightLimit(available_height - kShadowMargin * 2 - FilterHeaderPx());
+    ApplyHeightLimit(work_height - kShadowMargin * 2 - FilterHeaderPx());
     h = static_cast<int>(std::ceil(BodyHeightPx())) + static_cast<int>(FilterHeaderPx()) + kShadowMargin * 2;
     int x = screen_pt.x;
     int y = screen_pt.y;
@@ -2425,8 +2421,17 @@ int FluentMenu::RunModalLoop() {
     return result_;
 }
 
+namespace {
+// A dropdown is a slice of a long list, not the list: it shows a fixed number
+// of rows and scrolls the rest under its own bar, so the control it belongs to
+// stays visible. A row count rather than a share of the work area keeps that
+// true at any display size, DPI and font scale.
+constexpr int kDropdownVisibleRows = 10;
+} // namespace
+
 int FluentMenu::TrackDropdown(RECT control_rect, std::vector<FluentMenuItem> items) {
     SetDropdownRect(control_rect);
+    SetMaxVisibleRows(kDropdownVisibleRows);
     for (auto& item : items) {
         if (item.checked) item.glyph = L"\xE73E";
     }
