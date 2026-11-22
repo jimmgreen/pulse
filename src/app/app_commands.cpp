@@ -182,10 +182,10 @@ void CopySelectedPath(AppState& s) {
 // 新建文件夹 in a writable phone folder: named apart from the rows listed,
 // made by Explorer's engine, then renamed in place like a local one (the
 // completion names its pulse:device: path). A phone takes no empty files.
-static void CreateDeviceFolder(AppState& s, app::Tab& tab) {
+static void CreateDeviceFolder(AppState& s, app::Tab& tab, const std::wstring& dir) {
     auto& devices = app::DeviceRegistry::Instance();
-    if (!devices.FolderWritable(tab.current_path)) return;
-    const std::wstring parent_id = devices.FolderShellId(tab.current_path);
+    if (!devices.FolderWritable(dir)) return;
+    const std::wstring parent_id = devices.FolderShellId(dir);
     if (parent_id.empty()) return;
     const std::wstring base = l10n::Get(l10n::StringId::NewFolder).c_str();
     const auto taken = [&](const std::wstring& name) {
@@ -200,19 +200,20 @@ static void CreateDeviceFolder(AppState& s, app::Tab& tab) {
     req.type = ops::OpType::CreateFolder;
     req.dest_dir = parent_id;
     req.new_name = name;
-    req.refresh_directories.push_back(tab.current_path);
+    req.refresh_directories.push_back(dir);
     const auto task_id = s.ops.Submit(std::move(req));
-    app::QueueCreateRenameIntent(tab.create_rename_intents, task_id, tab.current_path, tab.view_generation);
+    app::QueueCreateRenameIntent(tab.create_rename_intents, task_id, dir, tab.view_generation);
 }
 
 void CreateNewItem(AppState& s, bool folder) {
     app::Tab* tab = ActiveTab(s);
+    if (!tab) return;
+    const std::wstring dir = OperationTargetDirectory(*tab);
     if (folder && IsDeviceTab(tab)) {
-        CreateDeviceFolder(s, *tab);
+        CreateDeviceFolder(s, *tab, dir);
         return;
     }
-    if (!tab || tab->current_path.empty() || fs::IsVirtualPath(tab->current_path) || tab->net_readonly ||
-        app::IsUncServerRoot(tab->current_path))
+    if (dir.empty() || fs::IsVirtualPath(dir) || tab->net_readonly || app::IsUncServerRoot(dir))
         return;
     // 自定义工具栏 "remember the last type": the New button follows what was made last.
     if (s.appPrefs.toolbar_last_new != (folder ? 0 : 1)) {
@@ -220,31 +221,34 @@ void CreateNewItem(AppState& s, bool folder) {
         if (!s.isolatedTest) s.appPrefs.Save();
     }
     std::wstring name = folder
-        ? app::UniqueChildName(tab->current_path,
+        ? app::UniqueChildName(dir,
             l10n::Get(l10n::StringId::NewFolder), L"")
-        : app::UniqueChildName(tab->current_path,
+        : app::UniqueChildName(dir,
             l10n::Get(l10n::StringId::NewTextDocument), L".txt");
-    std::wstring full = tab->current_path;
+    std::wstring full = dir;
     if (!full.ends_with(L"\\")) full += L"\\";
     full += name;
     ops::OpRequest req;
     req.type = folder ? ops::OpType::CreateFolder : ops::OpType::CreateTextFile;
     req.sources.push_back(full);
     const auto task_id = s.ops.Submit(std::move(req));
-    app::QueueCreateRenameIntent(tab->create_rename_intents, task_id,
-        tab->current_path, tab->view_generation);
+    app::QueueCreateRenameIntent(tab->create_rename_intents, task_id, dir, tab->view_generation);
 }
 
 namespace {
 bool CanCreateHere(const app::Tab* tab) {
-    return tab && !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path) && !tab->net_readonly &&
-        !app::IsUncServerRoot(tab->current_path);  // \\server lists shares, not files
+    if (!tab) return false;
+    const std::wstring dir = OperationTargetDirectory(*tab);
+    return !dir.empty() && !fs::IsVirtualPath(dir) && !tab->net_readonly &&
+        !app::IsUncServerRoot(dir);  // \\server lists shares, not files
 }
 
 // Paste also reaches a phone folder (the shell host drops the clipboard on it).
 bool CanPasteHere(const app::Tab* tab) {
+    if (!tab) return false;
+    const std::wstring dir = OperationTargetDirectory(*tab);
     return CanCreateHere(tab) ||
-        (IsDeviceTab(tab) && app::DeviceRegistry::Instance().FolderWritable(tab->current_path));
+        (IsDeviceTab(tab) && app::DeviceRegistry::Instance().FolderWritable(dir));
 }
 
 std::wstring JoinChild(std::wstring dir, const std::wstring& name) {
@@ -259,14 +263,14 @@ void CreateNewFileItem(AppState& s, const std::wstring& stem, const std::wstring
                        std::wstring template_file, std::vector<uint8_t> data) {
     app::Tab* tab = ActiveTab(s);
     if (!CanCreateHere(tab)) return;
+    const std::wstring dir = OperationTargetDirectory(*tab);
     ops::OpRequest req;
     req.type = ops::OpType::CreateTextFile;
-    req.sources.push_back(JoinChild(tab->current_path, app::UniqueChildName(tab->current_path, stem, ext)));
+    req.sources.push_back(JoinChild(dir, app::UniqueChildName(dir, stem, ext)));
     req.template_file = std::move(template_file);
     req.template_data = std::move(data);
     const auto task_id = s.ops.Submit(std::move(req));
-    app::QueueCreateRenameIntent(tab->create_rename_intents, task_id,
-        tab->current_path, tab->view_generation);
+    app::QueueCreateRenameIntent(tab->create_rename_intents, task_id, dir, tab->view_generation);
 }
 
 void CreateNewMarkdown(AppState& s) {
@@ -2965,7 +2969,8 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     // terminal in or pin as a workspace.
     if (!can_create_here) {
         // A writable phone folder takes new folders (not empty files).
-        const bool phone_folder = IsDeviceTab(tab) && app::DeviceRegistry::Instance().FolderWritable(tab->current_path);
+        const std::wstring target = OperationTargetDirectory(*tab);
+        const bool phone_folder = IsDeviceTab(tab) && app::DeviceRegistry::Instance().FolderWritable(target);
         EraseCommand(base_items, app::CmdNewTextFile);
         if (!phone_folder) EraseCommand(base_items, app::CmdNewFolder);
         if (!CanPasteHere(tab)) EraseCommand(base_items, app::CmdPaste);  // a phone folder takes pastes
@@ -3263,7 +3268,7 @@ void LaunchNewCommand(const std::wstring& command_line, const std::wstring& dir)
 void CreateFromNewTemplate(AppState& s, const app::sysctx::NewTemplate& t) {
     app::Tab* tab = ActiveTab(s);
     if (!CanCreateHere(tab)) return;
-    const std::wstring dir = tab->current_path;
+    const std::wstring dir = OperationTargetDirectory(*tab);
     const std::wstring stem = TagLabel(l10n::StringId::NewItemNamed, t.display);
     if (_wcsicmp(t.ext.c_str(), L".lnk") == 0) {
         // Explorer's shortcut creator: an empty .lnk (Explorer's 新建快捷方式
@@ -3393,9 +3398,10 @@ void ShowNewDropdown(AppState& s) {
     const auto templates = NewTemplatesForMenu(s);
     const app::Tab* active = ActiveTab(s);
     const bool can_create = CanCreateHere(active);
+    const std::wstring target = active ? OperationTargetDirectory(*active) : std::wstring();
     // A writable phone folder takes new folders only, not files (CreateDeviceFolder).
     const bool phone_folder = !can_create && IsDeviceTab(active) &&
-        app::DeviceRegistry::Instance().FolderWritable(active->current_path);
+        app::DeviceRegistry::Instance().FolderWritable(target);
     for (auto& item : items) item.enabled = can_create || (phone_folder && item.command == app::CmdNewFolder);
     AppendShellNewRows(items, templates, can_create);
     items.back().separator_after = true;
