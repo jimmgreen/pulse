@@ -153,6 +153,11 @@ bool DecodeBytesToBgra(const std::vector<uint8_t>& bytes, UINT pixels,
     UINT sourceWidth = 0, sourceHeight = 0;
     if (FAILED(frame->GetSize(&sourceWidth, &sourceHeight)) || !sourceWidth || !sourceHeight)
         return false;
+    // The member is size-capped, but WIC still decodes a large PNG/GIF at full
+    // size; charge the shared budget for the real source pixels before any
+    // scaler/converter allocates.
+    if (decode_budget_session)
+        RequireDecodeMemory(DecodeEstimate(uint64_t(sourceWidth) * sourceHeight, 20, pixels));
     Microsoft::WRL::ComPtr<IWICBitmapSource> source = frame;
     Microsoft::WRL::ComPtr<IWICBitmapScaler> scaler;
     const UINT longest = (std::max)(sourceWidth, sourceHeight);
@@ -215,6 +220,7 @@ bool MakeArchiveThumbnail(const std::wstring& path, UINT requested_pixels,
     // cover if one turns up later. Everything else is skipped by libarchive
     // itself, so a pack holding hundreds of photos never stalls the host.
     std::vector<uint8_t> best;
+    std::vector<uint8_t> fallback;  // previous plain picture, if a named cover replaced it
     size_t members = 0;
     for (;;) {
         if (GetTickCount64() - started > kBudgetMs) break;
@@ -223,7 +229,8 @@ bool MakeArchiveThumbnail(const std::wstring& path, UINT requested_pixels,
         const int r = api.next_header(a, &entry);
         if (r == kArchiveEof) break;
         if (r < kArchiveWarn || !entry) break;
-        if ((api.filetype(entry) & 0170000) == 0040000) continue;  // directory
+        // Directories and links have no cover; only regular files are read.
+        if ((api.filetype(entry) & 0170000) != 0100000) continue;
         std::wstring name;
         if (!WideName(api, entry, name)) continue;
         if (name.front() == L'/' || name.front() == L'\\') continue;  // absolute name
@@ -235,17 +242,22 @@ bool MakeArchiveThumbnail(const std::wstring& path, UINT requested_pixels,
         std::vector<uint8_t> candidate;
         if (!ReadCurrentMember(api, a, static_cast<uint64_t>(api.entry_size(entry)), candidate))
             continue;
-        best = std::move(candidate);
-        if (rank == 0) break;  // a named cover wins outright
+        if (rank == 0) {
+            if (!best.empty()) fallback = best;  // keep the plain picture in case this cover is broken
+            best = std::move(candidate);
+        } else if (best.empty()) {
+            best = std::move(candidate);
+        }
     }
     if (best.empty()) {
         if (error) *error = L"archive-no-cover";
         return false;
     }
-    // The member is bounded, but the scaled decode can still allocate; ask the
-    // shared budget before WIC starts (unknown size: subject to the cap).
-    if (decode_budget_session) RequireDecodeMemory(DecodeEstimate(0, 1, pixels), true);
     if (!DecodeBytesToBgra(best, pixels, bgra, width, height, stride)) {
+        bgra.clear();
+        width = height = stride = 0;
+        if (!fallback.empty() && DecodeBytesToBgra(fallback, pixels, bgra, width, height, stride))
+            return true;
         if (error) *error = L"archive-cover-decode-failed";
         return false;
     }

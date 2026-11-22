@@ -208,7 +208,8 @@ int wmain() {
         //    type icon rather than a fabricated thumbnail.
         pulse_test::Result text;
         const bool text_ok = RequestGrid(host, text_zip, text) &&
-            text.response.kind != ipc::PreviewContentKind::Bitmap && text.pixels.empty();
+            text.response.kind != ipc::PreviewContentKind::Bitmap && text.pixels.empty() &&
+            text.response.kind != ipc::PreviewContentKind::Hex && text.text.empty();
         Check(text_ok, "ZIP without a picture does not fabricate a grid bitmap");
         if (!text_ok) std::wprintf(L"  kind=%u pixels=%zu\n",
             static_cast<unsigned>(text.response.kind), text.pixels.size());
