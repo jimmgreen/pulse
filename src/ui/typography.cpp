@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace pulse::ui::typography {
 namespace {
@@ -26,6 +27,36 @@ bool TraditionalChinese() noexcept {
 std::atomic_uint64_t g_generation{1};
 std::atomic_int g_text_render_mode{0};
 std::atomic_int g_ui_font_scale{100};
+
+// Settings > 界面字体. Names are kept as the family's en-us name so a later UI
+// language change resolves the same face. The name buffers handed to
+// CreateFontW and to the text renderer are fixed size and only ever written by
+// SetUiFontFamily / SetUiMonoFamily on the UI thread.
+constexpr size_t kMaxFamilyName = 256;
+std::mutex g_family_mutex;
+std::wstring g_ui_family;
+std::wstring g_ui_mono_family;
+wchar_t g_ui_family_name[kMaxFamilyName]{};
+wchar_t g_ui_mono_family_name[kMaxFamilyName]{};
+// The interface family the resolver last proved installed, so CreateEditFont
+// gives the native EDIT the same face as the drawn text even when the stored
+// name has since been uninstalled. Empty means the language chain.
+wchar_t g_effective_family_name[kMaxFamilyName]{};
+
+void StoreEffectiveFamily(const std::wstring& family) noexcept {
+    if (std::wstring_view(g_effective_family_name) == std::wstring_view(family)) return;
+    const size_t length = (std::min)(family.size(), kMaxFamilyName - 1);
+    std::copy_n(family.begin(), length, g_effective_family_name);
+    g_effective_family_name[length] = L'\0';
+}
+
+// The family chosen for `role`, or empty for the language chain. Icon text
+// never follows the preference, so glyph slots keep their metrics.
+std::wstring SelectedFamily(FontRole role) {
+    if (role == FontRole::Icon) return {};
+    std::lock_guard lock(g_family_mutex);
+    return role == FontRole::Monospace ? g_ui_mono_family : g_ui_family;
+}
 
 template <typename T>
 void Release(T*& value) noexcept {
@@ -46,7 +77,16 @@ bool FamilyExists(IDWriteFactory2* factory, const wchar_t* family) {
     return SUCCEEDED(result) && exists;
 }
 
-const wchar_t* ResolveFamily(IDWriteFactory2* factory, FontRole role) {
+std::wstring ResolveFamily(IDWriteFactory2* factory, FontRole role) {
+    const std::wstring selected = SelectedFamily(role);
+    const bool installed = !selected.empty() && FamilyExists(factory, selected.c_str());
+    // The native EDIT font follows what the resolver proved installed, not the
+    // stored name: an uninstalled family must not leave the address bar on a
+    // face the text around it does not use. Only Text / Display decide it; the
+    // icon and monospace roles have their own chains and must not clear it.
+    if (role == FontRole::Text || role == FontRole::Display)
+        StoreEffectiveFamily(installed ? selected : std::wstring());
+    if (installed) return selected;
     const bool traditional = TraditionalChinese();
     // Taiwan glyph forms; YaHei only if JhengHei is missing.
     const wchar_t* const text_tw[] = {
@@ -74,7 +114,7 @@ const wchar_t* ResolveFamily(IDWriteFactory2* factory, FontRole role) {
     default: candidates = traditional ? text_tw : text_en; break;
     }
     for (size_t i = 0; candidates[i]; ++i) {
-        if (FamilyExists(factory, candidates[i])) return candidates[i];
+        if (FamilyExists(factory, candidates[i])) return std::wstring(candidates[i]);
     }
     return L"Segoe UI";
 }
@@ -144,7 +184,79 @@ bool HasIconFont(IDWriteFactory2* factory) {
     return available;
 }
 
+void StoreFamily(std::wstring& target, wchar_t* name, const std::wstring& family) {
+    const size_t length = (std::min)(family.size(), kMaxFamilyName - 1);
+    bool changed = false;
+    {
+        std::lock_guard lock(g_family_mutex);
+        if (target.size() != length || !std::equal(target.begin(), target.end(), family.begin())) {
+            target.assign(family, 0, length);
+            std::copy(target.begin(), target.end(), name);
+            name[length] = L'\0';
+            changed = true;
+        }
+    }
+    // Formats and measured widths were made for the previous family.
+    if (changed) g_generation.fetch_add(1, std::memory_order_relaxed);
+}
+
+void SetUiFontFamily(const std::wstring& family) {
+    const bool changed = family != std::wstring(g_ui_family_name);
+    StoreFamily(g_ui_family, g_ui_family_name, family);
+    // PreferredTextFamily must not keep the face the previous name proved
+    // installed; the next CreateTextFormat resolves the new one.
+    if (changed) g_effective_family_name[0] = L'\0';
+}
+
+void SetUiMonoFamily(const std::wstring& family) {
+    StoreFamily(g_ui_mono_family, g_ui_mono_family_name, family);
+}
+
+const wchar_t* UiFontFamily() noexcept {
+    return g_ui_family_name;
+}
+
+const wchar_t* UiMonoFamily() noexcept {
+    return g_ui_mono_family_name;
+}
+
+std::vector<std::wstring> InstalledFamilies(IDWriteFactory2* factory) {
+    std::vector<std::wstring> families;
+    if (!factory) return families;
+    IDWriteFontCollection* collection = nullptr;
+    if (FAILED(factory->GetSystemFontCollection(&collection, FALSE)) || !collection) return families;
+    const UINT32 count = collection->GetFontFamilyCount();
+    families.reserve(count);
+    for (UINT32 i = 0; i < count; ++i) {
+        IDWriteFontFamily* family = nullptr;
+        if (FAILED(collection->GetFontFamily(i, &family)) || !family) continue;
+        IDWriteLocalizedStrings* names = nullptr;
+        if (SUCCEEDED(family->GetFamilyNames(&names)) && names) {
+            UINT32 index = 0;
+            BOOL exists = FALSE;
+            if (SUCCEEDED(names->FindLocaleName(L"en-us", &index, &exists)) && exists) {
+                UINT32 length = 0;
+                if (SUCCEEDED(names->GetStringLength(index, &length)) && length > 0 &&
+                    length < kMaxFamilyName) {
+                    std::wstring name(static_cast<size_t>(length) + 1, L'\0');
+                    if (SUCCEEDED(names->GetString(index, name.data(), length + 1))) {
+                        name.resize(length);
+                        families.push_back(std::move(name));
+                    }
+                }
+            }
+            names->Release();
+        }
+        family->Release();
+    }
+    collection->Release();
+    std::sort(families.begin(), families.end());
+    families.erase(std::unique(families.begin(), families.end()), families.end());
+    return families;
+}
+
 const wchar_t* PreferredTextFamily() noexcept {
+    if (g_effective_family_name[0]) return g_effective_family_name;
     switch (pulse::l10n::effective_language()) {
     case pulse::l10n::Language::ZhCN: return L"Microsoft YaHei UI";
     case pulse::l10n::Language::ZhTW: return L"Microsoft JhengHei UI";
@@ -157,11 +269,11 @@ HRESULT CreateTextFormat(IDWriteFactory2* factory, const TextFormatSpec& spec,
     if (!format) return E_POINTER;
     *format = nullptr;
     if (!factory || spec.size <= 0.0f) return E_INVALIDARG;
-    const wchar_t* family = ResolveFamily(factory, spec.role);
+    const std::wstring family = ResolveFamily(factory, spec.role);
     const wchar_t* locale = spec.role == FontRole::Icon ? L"en-US" : LocaleName();
     const float size = spec.role == FontRole::Icon ? spec.size : spec.size * UiFontScale();
     const HRESULT result = factory->CreateTextFormat(
-        family, nullptr, spec.weight, spec.style, spec.stretch, size, locale, format);
+        family.c_str(), nullptr, spec.weight, spec.style, spec.stretch, size, locale, format);
     if (SUCCEEDED(result) && *format && spec.role != FontRole::Icon) {
         ApplyFallbackInternal(factory, *format);
     }
@@ -221,15 +333,19 @@ void SetTextRenderMode(TextRenderMode mode) noexcept {
     const int value = std::clamp(static_cast<int>(mode), 0, 2);
     if (g_text_render_mode.exchange(value, std::memory_order_relaxed) != value) {
         g_generation.fetch_add(1, std::memory_order_relaxed);
-        EnumThreadWindows(GetCurrentThreadId(), [](HWND window, LPARAM) -> BOOL {
-            SendMessageW(window, TextBackendChangedMessage(), 0, 0);
-            EnumChildWindows(window, [](HWND child, LPARAM) -> BOOL {
-                SendMessageW(child, TextBackendChangedMessage(), 0, 0);
-                return TRUE;
-            }, 0);
+        NotifyTextBackendChanged();
+    }
+}
+
+void NotifyTextBackendChanged() {
+    EnumThreadWindows(GetCurrentThreadId(), [](HWND window, LPARAM) -> BOOL {
+        SendMessageW(window, TextBackendChangedMessage(), 0, 0);
+        EnumChildWindows(window, [](HWND child, LPARAM) -> BOOL {
+            SendMessageW(child, TextBackendChangedMessage(), 0, 0);
             return TRUE;
         }, 0);
-    }
+        return TRUE;
+    }, 0);
 }
 
 UINT TextBackendChangedMessage() noexcept {

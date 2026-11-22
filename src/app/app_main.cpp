@@ -1716,6 +1716,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     L"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
             }
             ui::typography::SetUiFontScale(s->appPrefs.ui_font_scale);
+            ui::typography::SetUiFontFamily(s->appPrefs.ui_font_family);
+            ui::typography::SetUiMonoFamily(s->appPrefs.ui_font_family_mono);
             ui::typography::InvalidateCaches();
         }
         s->compositor.RecreateTextFormats(s->scale);
@@ -2274,6 +2276,18 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_CLIPBOARDUPDATE:
         InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+
+    case WM_PULSE_FONTS_CHANGED:
+        // Another window of this process changed the interface font: adopt the
+        // process-wide values it wrote and rebuild this window's text. Only the
+        // window that made the change broadcasts, so this never loops.
+        if (s) {
+            s->appPrefs.ui_font_scale = ui::typography::UiFontScalePercent();
+            s->appPrefs.ui_font_family = ui::typography::UiFontFamily();
+            s->appPrefs.ui_font_family_mono = ui::typography::UiMonoFamily();
+            RefreshTypographyForWindow(*s);
+        }
         return 0;
 
     case WM_SETTINGCHANGE:

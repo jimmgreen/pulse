@@ -5138,4 +5138,10 @@ BEGIN
     IDS_SETUP_END_RETRY "結束處理程序並重試"
     IDS_SETUP_END_CONFIRM "將結束清單中可核驗的占用處理程序，未儲存的內容可能遺失。請先儲存工作。是否繼續？"
     IDS_SETUP_END_FAILED "部分處理程序未能結束，請查看安裝記錄或手動結束後重試。"
+    IDS_SETTINGS_UI_FONT_FAMILY "介面字型"
+    IDS_SETTINGS_UI_FONT_FAMILY_DESC "選擇 Pulse 自身介面文字使用的字型，立即生效；圖示與等寬文字不受影響"
+    IDS_SETTINGS_UI_FONT_MONO "等寬字型"
+    IDS_SETTINGS_UI_FONT_MONO_DESC "程式碼、文字差異和按鍵提示等等寬文字使用的字型；這些文字始終由 DirectWrite 繪製"
+    IDS_FONT_FOLLOW_LANGUAGE "跟隨介面語言"
+    IDS_FONT_FOLLOW_DEFAULT "跟隨預設等寬字型"
 END

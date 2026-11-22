@@ -22,6 +22,7 @@
 #include "ai_assistant_settings.h"
 #include "update_transport.h"
 #include "../ui/ui_renderer.h"
+#include "../ui/typography.h"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <algorithm>
@@ -67,6 +68,7 @@ constexpr SettingDestination destinations[]={
     {I::SettingsTheme,0,0},{I::SettingsThemeColor,0,0},{I::AccentCustomTitle,0,32},{I::SettingsWindowEffect,0,0},{I::SettingsFrameLook,0,0},{I::MenuAcrylic,0,0},
     {I::SettingsWallpaper,0,0},{I::SettingsWallpaperLook,0,0},{I::SettingsWallpaperBlur,0,0},
     {I::SettingsLanguage,0,0},{I::SettingsTextRender,0,0},{I::SettingsUiFontSize,0,0},
+    {I::SettingsUiFontFamily,0,0},{I::SettingsUiFontMono,0,0},
     {I::NativeExtensionSettingsTitle,ui::kSettingsPageNativeExtensions,0},
     // 9 文件列表
     {I::SettingsClickOpen,9,0},{I::SettingsItemCheckboxes,9,0},{I::SettingsBlankClickBack,9,0},
@@ -124,6 +126,8 @@ std::vector<ui::FluentMenuItem> FilterSettings(const std::wstring& query) {
         case I::SettingsLanguage: haystack += L" " + l10n::Get(I::SettingsLanguageDesc); break;
         case I::SettingsTextRender: haystack += L" " + l10n::Get(I::SettingsTextRenderDesc); break;
         case I::SettingsUiFontSize: haystack += L" " + l10n::Get(I::SettingsUiFontSizeDesc); break;
+        case I::SettingsUiFontFamily: haystack += L" " + l10n::Get(I::SettingsUiFontFamilyDesc); break;
+        case I::SettingsUiFontMono: haystack += L" " + l10n::Get(I::SettingsUiFontMonoDesc); break;
         case I::SettingsClickOpen: haystack += L" " + l10n::Get(I::SettingsClickOpenDesc); break;
         case I::SettingsItemCheckboxes: haystack += L" " + l10n::Get(I::SettingsItemCheckboxesDesc); break;
         case I::SettingsBlankClickBack: haystack += L" " + l10n::Get(I::SettingsBlankClickBackDesc); break;
@@ -651,6 +655,33 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
                 if(kind==0) { if(s.appPrefs.integration_folders!=(command==2)) s.settings.IntegrationAction(1); }
                 else if(kind==1) s.settings.OpenThisPc(command-1);
                 else s.settings.OpenWinE(command-1);
+            }
+        } else if(hit.index==7 || hit.index==8) {
+            // 界面字体 / 等宽字体: the same settings dropdown every other row
+            // uses, 显示语言 included. A font list is long, so the shared menu
+            // scrolls it under its own scrollbar like a long context menu.
+            const bool mono=hit.index==8;
+            const auto families=ui::typography::InstalledFamilies(s.compositor.DwriteFactory());
+            const std::wstring current=mono ? s.appPrefs.ui_font_family_mono : s.appPrefs.ui_font_family;
+            const I follow=mono ? I::FontFollowDefault : I::FontFollowLanguage;
+            std::vector<ui::FluentMenuItem> font_items;
+            ui::FluentMenuItem follow_row;
+            follow_row.command=1;follow_row.text=l10n::Get(follow);follow_row.checked=current.empty();
+            font_items.push_back(std::move(follow_row));
+            for(size_t i=0;i<families.size();++i) {
+                ui::FluentMenuItem row;
+                row.command=static_cast<int>(i)+2;row.text=families[i];row.checked=families[i]==current;
+                font_items.push_back(std::move(row));
+            }
+            const int command=Dropdown(s,hit.index,std::move(font_items));
+            if(command>=1) {
+                std::wstring family;
+                if(command>=2) {
+                    const size_t index=static_cast<size_t>(command-2);
+                    if(index<families.size()) family=families[index];
+                }
+                if(mono) s.settings.UiMonoFontFamily(family);
+                else s.settings.UiFontFamily(family);
             }
         } else if(hit.index==0) {
             const I labels[]={I::EffectNone,I::EffectAcrylic,I::EffectMica,I::EffectMicaAlt};

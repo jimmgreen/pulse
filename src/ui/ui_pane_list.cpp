@@ -4042,21 +4042,35 @@ IDWriteTextFormat* MainRenderer::NameSemiboldFormat() {
     IDWriteTextFormat* base = compositor_ ? compositor_->FileNameFormat() : nullptr;
     IDWriteFactory2* factory = compositor_ ? compositor_->DwriteFactory() : nullptr;
     if (!base || !factory) return nullptr;
-    if (name_semibold_format_.get() && name_semibold_base_.get() == base && name_semibold_size_ == base->GetFontSize())
-        return name_semibold_format_.get();
+    // Every typography change recreates the base format. Keep the cache keyed
+    // to that generation: a semibold built for the previous family must never
+    // survive a family change, even when the new base lands at a reused address.
+    const std::uint64_t generation = typography::Generation();
+    if (name_semibold_generation_ != generation) {
+        name_semibold_generation_ = generation;
+        name_semibold_format_.reset();
+        name_semibold_base_.reset();
+        name_semibold_size_ = 0.0f;
+    }
+    const bool same_base = name_semibold_base_.get() == base && name_semibold_size_ == base->GetFontSize();
+    if (same_base && name_semibold_format_.get()) return name_semibold_format_.get();
     name_semibold_format_.reset();
-    base->AddRef();
     name_semibold_base_.reset();
-    name_semibold_base_.p = base;
     name_semibold_size_ = base->GetFontSize();
+    base->AddRef();
+    name_semibold_base_.p = base;
     wchar_t family[128]{};
     wchar_t locale[LOCALE_NAME_MAX_LENGTH]{};
     if (FAILED(base->GetFontFamilyName(family, ARRAYSIZE(family))) ||
         FAILED(base->GetLocaleName(locale, ARRAYSIZE(locale))))
         return nullptr;
+    // A name modified today asks for semibold whatever family is chosen. What
+    // that family can express is the renderer's business; deciding it here as
+    // well would give the list a second weight rule the rest of the UI ignores.
+    const DWRITE_FONT_WEIGHT weight = DWRITE_FONT_WEIGHT_SEMI_BOLD;
     ComPtr<IDWriteFontCollection> collection;
     base->GetFontCollection(&collection);
-    if (FAILED(factory->CreateTextFormat(family, collection.get(), DWRITE_FONT_WEIGHT_SEMI_BOLD, base->GetFontStyle(),
+    if (FAILED(factory->CreateTextFormat(family, collection.get(), weight, base->GetFontStyle(),
                                          base->GetFontStretch(), base->GetFontSize(), locale, &name_semibold_format_)))
         return nullptr;
     IDWriteTextFormat* bold = name_semibold_format_.get();

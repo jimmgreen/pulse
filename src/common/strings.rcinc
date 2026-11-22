@@ -5140,6 +5140,12 @@ BEGIN
     IDS_SETUP_END_RETRY "结束进程并重试"
     IDS_SETUP_END_CONFIRM "将结束列表中可核验的占用进程，未保存的内容可能丢失。请先保存工作。是否继续？"
     IDS_SETUP_END_FAILED "部分进程未能结束，请查看安装日志或手动退出后重试。"
+    IDS_SETTINGS_UI_FONT_FAMILY "界面字体"
+    IDS_SETTINGS_UI_FONT_FAMILY_DESC "选择 Pulse 自身界面文字使用的字体，立即生效；图标与等宽文字不受影响"
+    IDS_SETTINGS_UI_FONT_MONO "等宽字体"
+    IDS_SETTINGS_UI_FONT_MONO_DESC "代码、文本差异和按键提示等等宽文字使用的字体；这些文字始终由 DirectWrite 绘制"
+    IDS_FONT_FOLLOW_LANGUAGE "跟随界面语言"
+    IDS_FONT_FOLLOW_DEFAULT "跟随默认等宽字体"
 END
 
 LANGUAGE 0x09, 0x01
@@ -10279,6 +10285,12 @@ BEGIN
     IDS_SETUP_END_RETRY "End processes and retry"
     IDS_SETUP_END_CONFIRM "End the verified processes in this list? Unsaved work may be lost. Save your work before continuing."
     IDS_SETUP_END_FAILED "Some processes could not be ended. Check the setup log or quit them manually and retry."
+    IDS_SETTINGS_UI_FONT_FAMILY "Interface font"
+    IDS_SETTINGS_UI_FONT_FAMILY_DESC "Font family for Pulse's own interface text; applies immediately. Icons and monospaced text are separate"
+    IDS_SETTINGS_UI_FONT_MONO "Monospaced font"
+    IDS_SETTINGS_UI_FONT_MONO_DESC "Font family for monospaced text such as code, text diffs and key hints; always drawn by DirectWrite"
+    IDS_FONT_FOLLOW_LANGUAGE "Follow the interface language"
+    IDS_FONT_FOLLOW_DEFAULT "Follow the default monospaced faces"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

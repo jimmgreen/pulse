@@ -195,6 +195,16 @@ struct LumaTextRenderer::Impl {
     // One cascade serves every UI string: Segoe UI Variable for Latin, then
     // PingFang SC (when installed) and YaHei for CJK, chosen per grapheme.
     LumaText::FontCascade text_cascade;
+    // The family chosen in Settings > 界面字体. Built on first use and rebuilt
+    // when the name changes; empty means the language chain is in use.
+    std::wstring ui_family;
+    LumaText::FontFace ui_regular;
+    LumaText::FontFace ui_semibold;
+    LumaText::FontFace ui_bold;
+    LumaText::FontCascade ui_cascade;
+    // True when the chosen family has one face only: bold text emboldens that
+    // face instead of pretending it is weight 700.
+    bool ui_synthetic_bold = false;
     Microsoft::WRL::ComPtr<ID2D1DeviceContext> target_dc;
     Microsoft::WRL::ComPtr<ID2D1DeviceContext> recording_dc;
     Microsoft::WRL::ComPtr<ID2D1DeviceContext> blit_dc;
@@ -345,6 +355,9 @@ struct LumaTextRenderer::Impl {
 
     static constexpr std::uint32_t kYaHei = 1;
     static constexpr std::uint32_t kSegoe = 2;
+    // The family chosen in Settings > 界面字体. A separate id keeps its layouts
+    // and surfaces apart from the YaHei / Segoe ones.
+    static constexpr std::uint32_t kUiFamily = 3;
     // Each Compositor owns a renderer. Keep per-window caches deliberately
     // small so opening Quick Look or an operation dialog cannot multiply a
     // large global-looking font cache into the process working set.
@@ -366,11 +379,12 @@ struct LumaTextRenderer::Impl {
     }
 
     bool MakeFace(const std::wstring& path, LumaText::FontFace& face,
-                  float variable_weight = 0.0f) {
+                  float variable_weight = 0.0f, std::uint32_t face_index = 0) {
         if (path.empty() || !std::filesystem::exists(path)) return false;
         lt_font_axis axis{Tag('w', 'g', 'h', 't'), variable_weight};
         auto desc = LumaText::Descriptor<lt_font_source_desc>();
         desc.source_type = LT_FONT_SOURCE_FILE;
+        desc.face_index = face_index;
         desc.file_path = path.c_str();
         if (variable_weight > 0.0f) {
             desc.axes = &axis;
@@ -391,6 +405,163 @@ struct LumaTextRenderer::Impl {
     static void PushFace(std::vector<lt_font_cascade_entry>& entries,
                          const LumaText::FontFace& face, std::uint16_t weight) {
         if (face) entries.push_back({face.get(), weight, 0});
+    }
+
+    // A DirectWrite font face -> the file it lives in and its index inside a
+    // collection (.ttc). LumaText loads faces by file, so a chosen family is
+    // usable only when DirectWrite can name that file.
+    static bool FileOfFace(IDWriteFontFace* face, std::wstring& path,
+                           std::uint32_t& face_index) {
+        if (!face) return false;
+        UINT32 count = 0;
+        if (FAILED(face->GetFiles(&count, nullptr)) || count != 1) return false;
+        Microsoft::WRL::ComPtr<IDWriteFontFile> file;
+        if (FAILED(face->GetFiles(&count, file.GetAddressOf())) || !file) return false;
+        face_index = face->GetIndex();
+        const void* key = nullptr;
+        UINT32 key_size = 0;
+        if (FAILED(file->GetReferenceKey(&key, &key_size)) || !key) return false;
+        Microsoft::WRL::ComPtr<IDWriteFontFileLoader> loader;
+        if (FAILED(file->GetLoader(&loader)) || !loader) return false;
+        Microsoft::WRL::ComPtr<IDWriteLocalFontFileLoader> local;
+        if (FAILED(loader->QueryInterface(IID_PPV_ARGS(local.GetAddressOf()))) || !local) return false;
+        UINT32 length = 0;
+        if (FAILED(local->GetFilePathLengthFromKey(key, key_size, &length)) || length == 0) return false;
+        path.assign(static_cast<size_t>(length) + 1, L'\0');
+        if (FAILED(local->GetFilePathFromKey(key, key_size, path.data(), length + 1))) return false;
+        path.resize(length);
+        return true;
+    }
+
+    // The first face of `family` at `weight`, as a file LumaText can load, and
+    // whether that file is a variable font. A variable file carries every
+    // weight in one face, so the weight has to be passed as an axis.
+    bool ResolveFontFile(const std::wstring& family, DWRITE_FONT_WEIGHT weight,
+                         std::wstring& path, std::uint32_t& face_index, bool& variable) {
+        variable = false;
+        if (!dw_factory || family.empty()) return false;
+        Microsoft::WRL::ComPtr<IDWriteFontCollection> fonts;
+        if (FAILED(dw_factory->GetSystemFontCollection(fonts.GetAddressOf(), FALSE)) || !fonts) return false;
+        UINT32 index = 0;
+        BOOL exists = FALSE;
+        if (FAILED(fonts->FindFamilyName(family.c_str(), &index, &exists)) || !exists) return false;
+        Microsoft::WRL::ComPtr<IDWriteFontFamily> font_family;
+        if (FAILED(fonts->GetFontFamily(index, font_family.GetAddressOf())) || !font_family) return false;
+        // A family may expose only synthesised faces above its real ones: DirectWrite
+        // answers 600 with a lighter file plus a synthetic bold, which LumaText cannot
+        // reproduce because it draws the matched file's own outlines. Pick the upright
+        // face the family really ships whose declared weight is nearest (ties go to the
+        // heavier one) and fall back to DirectWrite's match only when there is none.
+        Microsoft::WRL::ComPtr<IDWriteFont> font;
+        int best_distance = 0;
+        const UINT32 font_count = font_family->GetFontCount();
+        for (UINT32 i = 0; i < font_count; ++i) {
+            Microsoft::WRL::ComPtr<IDWriteFont> candidate;
+            if (FAILED(font_family->GetFont(i, candidate.GetAddressOf())) || !candidate) continue;
+            if (candidate->GetStyle() != DWRITE_FONT_STYLE_NORMAL ||
+                candidate->GetStretch() != DWRITE_FONT_STRETCH_NORMAL ||
+                candidate->GetSimulations() != DWRITE_FONT_SIMULATIONS_NONE)
+                continue;
+            const int candidate_weight = static_cast<int>(candidate->GetWeight());
+            const int distance = std::abs(candidate_weight - static_cast<int>(weight));
+            if (!font || distance < best_distance ||
+                (distance == best_distance && candidate_weight > static_cast<int>(font->GetWeight()))) {
+                font = candidate;
+                best_distance = distance;
+            }
+        }
+        if (!font &&
+            (FAILED(font_family->GetFirstMatchingFont(weight, DWRITE_FONT_STRETCH_NORMAL,
+                                                     DWRITE_FONT_STYLE_NORMAL,
+                                                     font.GetAddressOf())) ||
+             !font))
+            return false;
+        Microsoft::WRL::ComPtr<IDWriteFontFace> face;
+        if (FAILED(font->CreateFontFace(face.GetAddressOf())) || !face) return false;
+        // Only a face that really carries design variations may be asked for a
+        // wght instance. Every face reports the four standard axes through
+        // GetFontAxisValueCount, static ones included, so that count is not the
+        // question. A static face given an axis keeps its file identity but no
+        // longer rasterizes, and every string drawn with it silently falls back
+        // to DirectWrite, which reads as a different weight beside the text that
+        // still goes through LumaText.
+        Microsoft::WRL::ComPtr<IDWriteFontFace5> face5;
+        if (SUCCEEDED(face->QueryInterface(IID_PPV_ARGS(face5.GetAddressOf()))) && face5)
+            variable = face5->HasVariations() != FALSE;
+        return FileOfFace(face.Get(), path, face_index);
+    }
+
+    // The cascade for the chosen family: that family at 400 / 600 / 700, then
+    // PingFang SC and YaHei behind it so Han and symbols the family lacks keep
+    // the faces they have today. allow_system_fallback stays false: a face
+    // outside this list must never be drawn with another family's outlines.
+    bool BuildUiCascade() {
+        ui_regular.reset();
+        ui_semibold.reset();
+        ui_bold.reset();
+        ui_cascade.reset();
+        ui_synthetic_bold = false;
+        ui_family = typography::UiFontFamily();
+        if (ui_family.empty() || !dw_factory || !context) return false;
+
+        struct Slot {
+            std::wstring path;
+            std::uint32_t index = 0;
+            bool variable = false;
+            bool resolved = false;
+        };
+        constexpr DWRITE_FONT_WEIGHT kWeights[3] = {
+            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_WEIGHT_BOLD};
+        Slot slots[3];
+        for (int i = 0; i < 3; ++i) {
+            slots[i].resolved = ResolveFontFile(ui_family, kWeights[i], slots[i].path,
+                                                slots[i].index, slots[i].variable);
+        }
+        if (!slots[0].resolved) return false;
+        LumaText::FontFace* const targets[3] = {&ui_regular, &ui_semibold, &ui_bold};
+        bool built[3] = {false, false, false};
+        for (int i = 0; i < 3; ++i) {
+            if (!slots[i].resolved) continue;
+            // One static file can serve several weights (a family with Regular and
+            // Bold returns Bold for both 600 and 700). Map it once. A variable
+            // file answers every weight out of one file as well, but each weight
+            // is a separate instance of the axis, so those are all built.
+            bool duplicate = false;
+            if (!slots[i].variable) {
+                for (int j = 0; j < i; ++j) {
+                    if (built[j] && slots[j].path == slots[i].path &&
+                        slots[j].index == slots[i].index) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+            }
+            if (duplicate) continue;
+            const float axis = slots[i].variable
+                ? static_cast<float>(i == 0 ? 400 : i == 1 ? 600 : 700) : 0.0f;
+            if (MakeFace(slots[i].path, *targets[i], axis, slots[i].index)) built[i] = true;
+            else if (i == 0) return false;
+        }
+        // No face above 400: bold text emboldens the regular outlines.
+        ui_synthetic_bold = !ui_semibold && !ui_bold;
+
+        std::vector<lt_font_cascade_entry> entries;
+        const auto face_for = [&](std::uint16_t weight) -> const LumaText::FontFace& {
+            if (weight >= 700 && ui_bold) return ui_bold;
+            if (weight >= 600 && ui_semibold) return ui_semibold;
+            return ui_regular;
+        };
+        const auto push_group = [&](std::uint16_t weight) {
+            PushFace(entries, face_for(weight), weight);
+            const bool strong = weight >= 600;
+            PushFace(entries, strong && pingfang_semibold ? pingfang_semibold : pingfang_regular, weight);
+            PushFace(entries, strong ? yahei_bold : yahei_regular, weight);
+        };
+        push_group(400);
+        push_group(600);
+        push_group(700);
+        if (entries.empty()) return false;
+        return MakeCascade(entries, ui_cascade) && static_cast<bool>(ui_cascade);
     }
 
     void ClearSurfaces() {
@@ -492,6 +663,19 @@ struct LumaTextRenderer::Impl {
             std::lround((0.45f + 0.20f * level) * kFit * 64.0f));
     }
 
+    // CJK text shapes as zh-CN so Han falls to PingFang / YaHei with the right
+    // glyph forms; the faces are the same either way.
+    static bool ContainsCjk(std::wstring_view text) noexcept {
+        for (const wchar_t c : text) {
+            if ((c >= 0x2E80 && c <= 0x9FFF) ||
+                (c >= 0xF900 && c <= 0xFAFF) ||
+                (c >= 0xFF00 && c <= 0xFFEF)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void FillLayoutDesc(lt_text_layout_desc& desc, const LayoutKey& key,
                         lt_text_style& style, float font_size,
                         LumaText::FontCascade& cascade) const {
@@ -499,11 +683,16 @@ struct LumaTextRenderer::Impl {
         style.cascade = cascade.get();
         style.font_size = font_size;
         style.weight = key.weight;
+        // A chosen family with a single face has no real bold: embolden the
+        // outlines instead of reporting the regular face as weight 700.
+        if (ui_synthetic_bold && &cascade == &ui_cascade && key.weight >= 600)
+            style.flags |= LT_TEXT_STYLE_ALLOW_SYNTHETIC_BOLD;
         desc = LumaText::Descriptor<lt_text_layout_desc>();
         desc.text = key.text.data();
         desc.text_length = static_cast<std::uint32_t>(key.text.size());
         desc.base_style = style;
-        desc.locale = key.family == kYaHei ? "zh-CN" : "en-US";
+        desc.locale = key.family == kYaHei || (key.family == kUiFamily && ContainsCjk(key.text))
+            ? "zh-CN" : "en-US";
         desc.direction = LT_TEXT_DIRECTION_AUTO;
         desc.alignment = key.alignment == DWRITE_TEXT_ALIGNMENT_CENTER
             ? LT_TEXT_ALIGNMENT_CENTER
@@ -720,6 +909,12 @@ struct LumaTextRenderer::Impl {
         blit_h = 0;
         busy = false;
         text_cascade.reset();
+        ui_cascade.reset();
+        ui_bold.reset();
+        ui_semibold.reset();
+        ui_regular.reset();
+        ui_family.clear();
+        ui_synthetic_bold = false;
         pingfang_semibold.reset();
         pingfang_regular.reset();
         segoe_bold.reset();
@@ -1058,21 +1253,37 @@ struct LumaTextRenderer::Impl {
         return true;
     }
 
-    static bool ContainsCjk(std::wstring_view text) noexcept {
-        for (const wchar_t c : text) {
-            if ((c >= 0x2E80 && c <= 0x9FFF) ||
-                (c >= 0xF900 && c <= 0xFAFF) ||
-                (c >= 0xFF00 && c <= 0xFFEF)) {
-                return true;
-            }
-        }
-        return false;
+    // Same family name ignoring case: DirectWrite returns the name exactly as
+    // it was created, but a stored preference may carry other capitalization.
+    static bool SameFamilyName(std::wstring_view left, std::wstring_view right) noexcept {
+        if (left.size() != right.size()) return false;
+        for (size_t i = 0; i < left.size(); ++i)
+            if (towlower(left[i]) != towlower(right[i])) return false;
+        return true;
+    }
+
+    // Rebuilds the chosen family's cascade after Settings > 界面字体 changed.
+    // The caches go first: their layouts and command lists were shaped with the
+    // previous family and their keys do not carry the family name.
+    void SyncUiCascade() {
+        if (SameFamilyName(typography::UiFontFamily(), ui_family)) return;  // current, or known to fail
+        ClearLayouts();
+        BuildUiCascade();
     }
 
     bool ResolveCascade(IDWriteTextFormat* format, std::wstring_view text,
                         std::uint32_t& family, LumaText::FontCascade*& cascade) {
         if (!format) return false;
         const std::wstring family_name = FontFamily(format);
+        SyncUiCascade();
+        // The chosen family serves every UI string, CJK included: its cascade
+        // keeps PingFang / YaHei behind it for Han and for symbols it lacks.
+        if (!ui_family.empty() && SameFamilyName(family_name, ui_family)) {
+            if (!ui_cascade) return false;  // build failed: DirectWrite draws it
+            family = kUiFamily;
+            cascade = &ui_cascade;
+            return true;
+        }
         const bool yahei = Contains(family_name, L"Microsoft YaHei");
         const bool segoe_text = Contains(family_name, L"Segoe UI") &&
                    !Contains(family_name, L"Icons") &&

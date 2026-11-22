@@ -5165,3 +5165,9 @@ StoreCommunityEmpty	IDS_STORE_COMMUNITY_EMPTY	6435	还没有社区扩展	No comm
 SetupEndRetry	IDS_SETUP_END_RETRY	6436	结束进程并重试	End processes and retry	結束處理程序並重試
 SetupEndConfirm	IDS_SETUP_END_CONFIRM	6437	将结束列表中可核验的占用进程，未保存的内容可能丢失。请先保存工作。是否继续？	End the verified processes in this list? Unsaved work may be lost. Save your work before continuing.	將結束清單中可核驗的占用處理程序，未儲存的內容可能遺失。請先儲存工作。是否繼續？
 SetupEndFailed	IDS_SETUP_END_FAILED	6438	部分进程未能结束，请查看安装日志或手动退出后重试。	Some processes could not be ended. Check the setup log or quit them manually and retry.	部分處理程序未能結束，請查看安裝記錄或手動結束後重試。
+SettingsUiFontFamily	IDS_SETTINGS_UI_FONT_FAMILY	6439	界面字体	Interface font	介面字型
+SettingsUiFontFamilyDesc	IDS_SETTINGS_UI_FONT_FAMILY_DESC	6440	选择 Pulse 自身界面文字使用的字体，立即生效；图标与等宽文字不受影响	Font family for Pulse's own interface text; applies immediately. Icons and monospaced text are separate	選擇 Pulse 自身介面文字使用的字型，立即生效；圖示與等寬文字不受影響
+SettingsUiFontMono	IDS_SETTINGS_UI_FONT_MONO	6441	等宽字体	Monospaced font	等寬字型
+SettingsUiFontMonoDesc	IDS_SETTINGS_UI_FONT_MONO_DESC	6442	代码、文本差异和按键提示等等宽文字使用的字体；这些文字始终由 DirectWrite 绘制	Font family for monospaced text such as code, text diffs and key hints; always drawn by DirectWrite	程式碼、文字差異和按鍵提示等等寬文字使用的字型；這些文字始終由 DirectWrite 繪製
+FontFollowLanguage	IDS_FONT_FOLLOW_LANGUAGE	6443	跟随界面语言	Follow the interface language	跟隨介面語言
+FontFollowDefault	IDS_FONT_FOLLOW_DEFAULT	6444	跟随默认等宽字体	Follow the default monospaced faces	跟隨預設等寬字型

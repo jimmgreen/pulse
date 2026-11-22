@@ -4,9 +4,11 @@
 #include "../ui/edit_host.h"
 #include "../ui/file_name_breaks.h"
 #include "../common/localization.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 #include <chrono>
 #include <limits>
 
@@ -300,15 +302,114 @@ int AdvanceCacheRegression() {
 }
 }
 
+// Settings > 界面字体 / 界面等宽字体: the choice reaches DirectWrite formats,
+// PreferredTextFamily and the native EDIT font; an uninstalled family leaves the
+// language chain and the icon role alone; installed families are listed sorted.
+int FontFamilyPolicy() {
+    using namespace pulse::ui;
+    IDWriteFactory2* factory = nullptr;
+    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory2),
+                                   reinterpret_cast<IUnknown**>(&factory))) || !factory) {
+        Check(false, "create DirectWrite factory for font family policy");
+        return failures ? 1 : 0;
+    }
+    const auto family_of = [](IDWriteTextFormat* format) {
+        if (!format) return std::wstring();
+        const UINT32 length = format->GetFontFamilyNameLength();
+        if (length == 0) return std::wstring();
+        std::wstring name(static_cast<size_t>(length) + 1, L'\0');
+        if (FAILED(format->GetFontFamilyName(name.data(), length + 1))) return std::wstring();
+        name.resize(length);
+        return name;
+    };
+    const auto make = [&](typography::FontRole role) {
+        IDWriteTextFormat* format = nullptr;
+        if (FAILED(typography::CreateTextFormat(factory, {role, 14.0f}, &format)) || !format) return static_cast<IDWriteTextFormat*>(nullptr);
+        return format;
+    };
+    const auto edit_face = [] {
+        HFONT font = typography::CreateEditFont(1.0f);
+        LOGFONTW details{};
+        const bool ok = font && GetObjectW(font, sizeof(details), &details);
+        const std::wstring face = ok ? std::wstring(details.lfFaceName) : std::wstring();
+        if (font) DeleteObject(font);
+        return face;
+    };
+
+    const std::vector<std::wstring> installed = typography::InstalledFamilies(factory);
+    Check(!installed.empty(), "installed families are listed");
+    bool sorted = true;
+    for (size_t i = 1; i < installed.size(); ++i) sorted = sorted && installed[i - 1] <= installed[i];
+    Check(sorted, "installed families are sorted");
+    Check(std::find(installed.begin(), installed.end(), L"Segoe UI") != installed.end(),
+        "installed families contain Segoe UI");
+
+    pulse::l10n::SetLanguage(L"en-US");
+    typography::SetUiFontScale(100);
+    typography::SetUiFontFamily(L"");
+    typography::SetUiMonoFamily(L"");
+    typography::InvalidateCaches();
+    IDWriteTextFormat* fallback = make(typography::FontRole::Text);
+    const std::wstring default_family = family_of(fallback);
+    Check(fallback && !default_family.empty() && default_family != L"Consolas",
+        "empty choice keeps the language chain");
+    if (fallback) fallback->Release();
+
+    const auto generation = typography::Generation();
+    typography::SetUiFontFamily(L"Consolas");
+    Check(typography::Generation() > generation, "choosing a family bumps the format generation");
+    IDWriteTextFormat* chosen = make(typography::FontRole::Text);
+    Check(family_of(chosen) == L"Consolas", "the chosen family reaches DirectWrite text formats");
+    IDWriteTextFormat* display = make(typography::FontRole::Display);
+    Check(family_of(display) == L"Consolas", "the chosen family reaches display formats");
+    IDWriteTextFormat* icon = make(typography::FontRole::Icon);
+    Check(!family_of(icon).empty() && family_of(icon) != L"Consolas",
+        "the icon role keeps its own family");
+    Check(std::wstring(typography::PreferredTextFamily()) == L"Consolas",
+        "PreferredTextFamily follows the choice");
+    Check(edit_face() == L"Consolas", "the native EDIT font follows the choice");
+    if (chosen) chosen->Release();
+    if (display) display->Release();
+    if (icon) icon->Release();
+
+    typography::SetUiFontFamily(L"");
+    typography::SetUiMonoFamily(L"Consolas");
+    typography::InvalidateCaches();
+    IDWriteTextFormat* mono = make(typography::FontRole::Monospace);
+    Check(family_of(mono) == L"Consolas", "the monospace choice is independent of the text family");
+    IDWriteTextFormat* text_after = make(typography::FontRole::Text);
+    Check(family_of(text_after) == default_family,
+        "the monospace choice leaves text formats on the language chain");
+    if (mono) mono->Release();
+    if (text_after) text_after->Release();
+
+    const std::wstring missing = L"Pulse Missing Family 不存在的字体";
+    typography::SetUiFontFamily(missing);
+    IDWriteTextFormat* missing_format = make(typography::FontRole::Text);
+    Check(family_of(missing_format) == default_family,
+        "an uninstalled family falls back to the language chain");
+    Check(std::wstring(typography::PreferredTextFamily()) != missing,
+        "an uninstalled family does not reach the native EDIT font");
+    if (missing_format) missing_format->Release();
+
+    typography::SetUiFontFamily(L"");
+    typography::SetUiMonoFamily(L"");
+    typography::InvalidateCaches();
+    factory->Release();
+    return failures ? 1 : 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
     using namespace pulse::ui;
     if (argc == 2 && std::wstring(argv[1]) == L"--advance-cache") return AdvanceCacheRegression();
+    if (argc == 2 && std::wstring(argv[1]) == L"--font-family") return FontFamilyPolicy();
     if (argc == 2 && std::wstring(argv[1]) == L"--menu-identity") {
         Check(FluentMenuTestPeer::CheckSnapshotReplacement(),
             "open flyout rejects swapped/shifted/reordered snapshots; reopen uses accepted IDs");
         return failures ? 1 : 0;
     }
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    FontFamilyPolicy();
     const HWND foreground = GetForegroundWindow();
     HWND owner = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_NOACTIVATE, L"STATIC", L"",
         WS_POPUP, -30000, -30000, 700, 300, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);

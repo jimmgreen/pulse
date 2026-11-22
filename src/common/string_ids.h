@@ -5158,5 +5158,11 @@
 #define IDS_SETUP_END_RETRY                                                              6436
 #define IDS_SETUP_END_CONFIRM                                                            6437
 #define IDS_SETUP_END_FAILED                                                             6438
+#define IDS_SETTINGS_UI_FONT_FAMILY                                                      6439
+#define IDS_SETTINGS_UI_FONT_FAMILY_DESC                                                 6440
+#define IDS_SETTINGS_UI_FONT_MONO                                                        6441
+#define IDS_SETTINGS_UI_FONT_MONO_DESC                                                   6442
+#define IDS_FONT_FOLLOW_LANGUAGE                                                         6443
+#define IDS_FONT_FOLLOW_DEFAULT                                                          6444
 
 #endif  // PULSE_STRING_IDS_H

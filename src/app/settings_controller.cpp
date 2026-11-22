@@ -1052,6 +1052,18 @@ void SettingsController::UiFontSize(int index) {
         SaveAndApply(SettingsEffect::UiFontSize);
 }
 
+void SettingsController::UiFontFamily(std::wstring_view family) {
+    if (!prefs_ || prefs_->ui_font_family == std::wstring(family)) return;
+    prefs_->ui_font_family.assign(family);
+    SaveAndApply(SettingsEffect::UiFontFamily);
+}
+
+void SettingsController::UiMonoFontFamily(std::wstring_view family) {
+    if (!prefs_ || prefs_->ui_font_family_mono == std::wstring(family)) return;
+    prefs_->ui_font_family_mono.assign(family);
+    SaveAndApply(SettingsEffect::UiMonoFamily);
+}
+
 void SettingsController::TrayIconSize(int index) {
     static constexpr int values[] = {40, 48, 56};
     if (prefs_ && SelectValue(index, values, prefs_->tray_icon_size))
