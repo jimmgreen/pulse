@@ -429,15 +429,11 @@ public:
         if (options_.proposed_names) {
             steps_.clear();
         } else if (options_.preset) {
-            rn::Preset p = *options_.preset;
-            for (auto& st : p.steps) {
-                st.pattern = UiTokens(st.pattern);
-                st.text = UiTokens(st.text);
-            }
+            rn::Preset p = UiTokenPreset(*options_.preset);
             ApplyPreset(p, false);
         } else {
             const auto builtins = Builtins();
-            ApplyPreset(rn::InitialPreset(store_, builtins.front()), false);
+            ApplyPreset(UiTokenPreset(rn::InitialPreset(store_, builtins.front())), false);
         }
         Recompute(false);
 
@@ -737,6 +733,15 @@ private:
                 s.replace(at, from.size(), to);
         }
         return s;
+    }
+
+    static rn::Preset UiTokenPreset(const rn::Preset& preset) {
+        rn::Preset normalized = preset;
+        for (auto& st : normalized.steps) {
+            st.pattern = UiTokens(st.pattern);
+            st.text = UiTokens(st.text);
+        }
+        return normalized;
     }
 
     void ShowAiError(const std::wstring& why) {
@@ -3276,7 +3281,7 @@ private:
         case H::Close: case H::Cancel: Complete(false); return;
         case H::PresetDD: menu_ = was == Menu::Preset ? Menu::None : Menu::Preset; break;
         case H::PresetItem: {
-            if (h.b == 0 && store_.has_last) ApplyPreset(store_.last, true);
+            if (h.b == 0 && store_.has_last) ApplyPreset(UiTokenPreset(store_.last), true);
             else if (h.b == 1) {
                 const auto builtins = Builtins();
                 if (h.a >= 0 && h.a < static_cast<int>(builtins.size())) ApplyPreset(builtins[static_cast<size_t>(h.a)], true);
