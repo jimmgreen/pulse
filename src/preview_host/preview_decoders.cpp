@@ -6,6 +6,7 @@
 #include "../common/preview_extensions.h"
 #include "../common/shell_id.h"
 #include "archive_listing.h"
+#include "archive_thumbnail.h"
 #include "content_sniff.h"
 #include "docx_document.h"
 #include "epub_document.h"
@@ -1423,12 +1424,29 @@ static bool RequiresArchivePlugin(const DecodeRequest& q) {
     return q.extension == L".7z" || q.extension == L".rar";
 }
 
-// Other archives use the built-in contents tree.
+// Other archives use the built-in contents tree. Grid tiles show a cover
+// picture from inside the archive instead (the details pane and Quick Look
+// keep the tree). A ZIP or 7z without a usable picture, a cloud placeholder and
+// RAR (no built-in reader) end the tile with the ordinary type icon: failing
+// here means "no thumbnail", whereas returning Next would dump a huge archive
+// as hex on every repaint.
 static bool AcceptsArchive(const DecodeRequest& q) {
     return !q.is_directory && preview::IsArchiveExtension(q.extension) &&
         (!q.offline || RequiresArchivePlugin(q));
 }
 static DecodeStep RunArchive(const DecodeRequest& q, DecodeResult& r) {
+    if (q.grid) {
+        // A cloud placeholder keeps its type icon: reading the archive would
+        // hydrate the file. ZIP and 7z covers are read through libarchive, so
+        // 7z works without the plugin; RAR has no built-in reader.
+        if (!q.offline && preview::MakeArchiveThumbnail(q.path, q.cap, r.pixels, r.width,
+                                                       r.height, r.stride, &r.error))
+            return MadeBitmap(r);
+        ClearBitmap(r);
+        r.text.clear();
+        if (r.error.empty()) r.error = L"archive-no-cover";
+        return DecodeStep::Failed;
+    }
     if (RequiresArchivePlugin(q)) {
         r.error = L"archive-plugin-required";
         return DecodeStep::Failed;

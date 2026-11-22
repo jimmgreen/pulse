@@ -897,7 +897,8 @@ add_executable(pulse_preview WIN32 src/preview_host/main.cpp src/preview_host/vi
     src/preview_host/folder_thumbnail.cpp
     src/preview_host/svg_raster.cpp src/preview_host/metafile_raster.cpp
     src/preview_host/pdf_raster.cpp src/preview_host/dwg_thumb.cpp
-    src/preview_host/archive_listing.cpp src/preview_host/udf_listing.cpp src/preview_host/psd_raster.cpp
+    src/preview_host/archive_listing.cpp src/preview_host/archive_thumbnail.cpp
+    src/preview_host/udf_listing.cpp src/preview_host/psd_raster.cpp
     src/preview_host/font_raster.cpp src/preview_host/preview_decoders.cpp
     src/preview_host/jpeg_dc_preview.cpp src/preview_host/jpeg_embedded_preview.cpp src/preview_host/tiff_reduce.cpp
     src/preview_host/preview_properties.cpp src/preview_host/preview_file_utils.cpp
@@ -970,6 +971,11 @@ add_dependencies(pulse_preview_regression_test pulse_preview)
 add_executable(pulse_archive_plugin_required_test src/bench/archive_plugin_required_test.cpp)
 target_link_libraries(pulse_archive_plugin_required_test PRIVATE ole32 shell32 shlwapi)
 add_dependencies(pulse_archive_plugin_required_test pulse_preview)
+
+# Grid covers read from inside ZIP/7z archives, driven through Pulse.Preview.exe.
+add_executable(pulse_archive_thumbnail_test src/bench/archive_thumbnail_test.cpp)
+target_link_libraries(pulse_archive_thumbnail_test PRIVATE ole32 shell32 shlwapi)
+add_dependencies(pulse_archive_thumbnail_test pulse_preview)
 
 # Progressive JPEG thumbnails from the DC scan alone, against WIC's full decode.
 add_executable(pulse_jpeg_dc_test src/bench/jpeg_dc_preview_test.cpp src/preview_host/jpeg_dc_preview.cpp)

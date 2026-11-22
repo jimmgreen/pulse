@@ -53,15 +53,29 @@ int wmain() {
             const std::string bytes = extension[1] == L'7'
                 ? std::string("7z\xbc\xaf\x27\x1c", 6) : std::string("Rar!\x1a\x07\0", 7);
             Check(Write(path, bytes), "write isolated archive fixture");
-            for (const uint32_t flags : {ipc::kPreviewRequestFlagRichText, ipc::kPreviewRequestFlagGrid}) {
-                pulse_test::Result result;
-                const bool received = host.Request(path.wstring(), result, MAXDWORD, 256,
-                    ipc::PreviewRequestKind::Content, flags);
-                const bool passed = received && result.error == L"archive-plugin-required" &&
-                    result.response.kind != ipc::PreviewContentKind::Hex && result.text.empty();
-                Check(passed, "7z/RAR requires plugin without hex fallback (pane/grid)");
-                if (!passed) std::wprintf(L"  extension=%ls flags=%u error=%ls kind=%u\n",
-                    extension, flags, result.error.c_str(), static_cast<unsigned>(result.response.kind));
+            // Grid tiles try the built-in cover first and, with no usable
+            // picture, end on the type icon; they never fall back to hex.
+            {
+                pulse_test::Result grid;
+                const bool grid_ok = host.Request(path.wstring(), grid, MAXDWORD, 256,
+                    ipc::PreviewRequestKind::Content, ipc::kPreviewRequestFlagGrid) &&
+                    grid.response.kind != ipc::PreviewContentKind::Hex && grid.pixels.empty();
+                Check(grid_ok, "7z/RAR grid tile is never a hex dump");
+                if (!grid_ok) std::wprintf(L"  extension=%ls kind=%u pixels=%zu error=%ls\n",
+                    extension, static_cast<unsigned>(grid.response.kind), grid.pixels.size(),
+                    grid.error.c_str());
+            }
+            // The details pane (a size above the grid edge) still names the
+            // plugin instead of dumping the bytes.
+            {
+                pulse_test::Result pane;
+                const bool pane_ok = host.Request(path.wstring(), pane, MAXDWORD, 1024,
+                    ipc::PreviewRequestKind::Content, ipc::kPreviewRequestFlagRichText) &&
+                    pane.error == L"archive-plugin-required" &&
+                    pane.response.kind != ipc::PreviewContentKind::Hex && pane.text.empty();
+                Check(pane_ok, "7z/RAR details pane requires the plugin without hex fallback");
+                if (!pane_ok) std::wprintf(L"  extension=%ls error=%ls kind=%u\n",
+                    extension, pane.error.c_str(), static_cast<unsigned>(pane.response.kind));
             }
         }
         const auto zip = directory / L"native.zip";
