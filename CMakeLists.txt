@@ -2103,6 +2103,7 @@ target_link_libraries(pulse_app_controllers_test PRIVATE crypt32)
 add_executable(pulse_single_instance_endpoint_test src/bench/single_instance_endpoint_test.cpp
     src/app/single_instance_coordinator.cpp src/app/open_request_pipe.cpp src/app/shell_tag_command.cpp src/app/this_pc_argument.cpp)
 target_link_libraries(pulse_single_instance_endpoint_test PRIVATE user32 advapi32 ole32)
+add_executable(pulse_search_uri_test src/bench/search_uri_test.cpp)
 add_executable(pulse_host_window_test src/bench/host_window_test.cpp src/app/host_window.cpp
     src/app/single_instance_coordinator.cpp src/app/open_request_pipe.cpp src/app/shell_tag_command.cpp src/app/this_pc_argument.cpp)
 target_link_libraries(pulse_host_window_test PRIVATE user32 advapi32 ole32)

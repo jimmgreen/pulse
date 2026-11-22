@@ -3,6 +3,7 @@
 #include "setup_dialog_migration.h"
 #include "setup_dialog_versions.h"
 #include "setup_runtime_transaction.h"
+#include "setup_url_protocol.h"
 #include "start_pin_registration.h"
 
 #include "setup_common.h"
@@ -470,6 +471,7 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
     };
     if (!tx.Commit(dialog_version.replacements, error, obsolete_files, [&](std::wstring& failure) {
         if (!migration.Apply(failure)) return false;
+        if (real && !ConfigureUrlProtocol(app, true, failure)) return false;
         return !previous_directory.empty() || register_runtime(failure);
     })) return Fail(kExitFatalInstall, error);
     tx.Finish();

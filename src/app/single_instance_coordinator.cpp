@@ -1,4 +1,5 @@
 #include "single_instance_coordinator.h"
+#include "../common/search_uri.h"
 #include "../common/runtime_log.h"
 #include "open_request_pipe.h"
 #include "explorer_submission_port.h"
@@ -203,6 +204,12 @@ void SingleInstanceCoordinator::Release() {
 bool SingleInstanceCoordinator::NormalizeLaunchPath(const std::wstring& input, std::wstring& output) {
     output.clear();
     if (input.find(L'\0') != std::wstring::npos || input.size() >= 32768) return false;
+    if (IsPulseUri(input)) {
+        std::wstring keyword;
+        if (!ParseSearchUri(input, keyword)) return false;
+        output = input;
+        return true;
+    }
     if (input.empty() || input.starts_with(L"pulse:") || IsThisPcArgument(input)) {
         output = input; return true;
     }
@@ -430,6 +437,10 @@ bool SingleInstanceCoordinator::DecodeOpenRequest(const COPYDATASTRUCT* data, Op
         if (path.back() != L'\0') return false;
         path.pop_back();
         if (path.find(L'\0') != std::wstring::npos) return false;
+        if (IsPulseUri(path)) {
+            std::wstring keyword;
+            if (!ParseSearchUri(path, keyword)) return false;
+        }
         request = {header.id, header.deadline, std::move(path)};
         return true;
     } catch (...) { return false; }

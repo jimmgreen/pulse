@@ -24,6 +24,14 @@ void Render(pulse::AppState&);
 int RunSearchManagementTest(AppState& s,const wchar_t* output) {
     std::ofstream log{std::filesystem::path(output)};int failures=0;
     auto check=[&](bool ok,const char* label){log<<(ok ? "[PASS] " : "[FAIL] ")<<label<<std::endl;if(!ok)++failures;};
+    const auto uri_path = ResolveOpenFolderPath(L"pulse://search/%E4%B8%AD%E6%96%87%20%23%25");
+    std::wstring uri_query;
+    app::ParsePulsePath(uri_path, nullptr, &uri_query);
+    const auto uri_spec = app::ParseSearchQuery(uri_query);
+    check(uri_path.starts_with(L"pulse:search:") && uri_spec.name == L"中文 #%" &&
+        uri_spec.location == app::LocationScope::Indexed && uri_spec.content.empty(),
+        "external search URI routes to indexed name search with literal reserved characters");
+    check(ResolveOpenFolderPath(L"pulse://unknown/name").empty(), "unknown external URI has no navigation target");
     s.appPrefs.persist=false;
     auto* tab=ActiveTab(s);
     tab->search_input_path=tab->current_path;tab->search_input_text=L"setup diagnostic";

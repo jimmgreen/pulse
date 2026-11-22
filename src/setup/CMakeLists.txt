@@ -118,6 +118,12 @@ target_compile_definitions(pulse_setup_install_handoff_test PRIVATE UNICODE _UNI
 target_compile_options(pulse_setup_install_handoff_test PRIVATE /W4)
 set_target_properties(pulse_setup_install_handoff_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
+add_executable(pulse_setup_url_protocol_test setup_url_protocol_test.cpp setup_registry.cpp setup_options.cpp setup_common.cpp)
+target_link_libraries(pulse_setup_url_protocol_test PRIVATE advapi32 shell32 ole32 user32)
+target_compile_definitions(pulse_setup_url_protocol_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(pulse_setup_url_protocol_test PRIVATE /W4)
+set_target_properties(pulse_setup_url_protocol_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
 add_executable(pulse_setup_shortcut_test EXCLUDE_FROM_ALL setup_shortcut_test.cpp setup_shortcut.cpp setup_common.cpp)
 target_link_libraries(pulse_setup_shortcut_test PRIVATE pulse_app_identity shell32 ole32 propsys uuid advapi32 user32)
 target_compile_definitions(pulse_setup_shortcut_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

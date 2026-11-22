@@ -1,6 +1,7 @@
 #include "setup_runtime_transaction.h"
 #include "setup_common.h"
 #include "setup_service.h"
+#include "setup_url_protocol.h"
 #include <cstring>
 #include <vector>
 namespace pulse::setup {
@@ -10,8 +11,13 @@ constexpr const wchar_t *keys[] = {L"Software\\Classes\\CLSID\\{B3C9ED45-7A51-48
                                    L"Software\\Classes\\.pulse-start-pin",
                                    L"Software\\Classes\\Pulse.StartPin.Request\\shell\\PulseStartPin",
                                    L"Software\\Classes\\Pulse.StartPin.Request\\shell\\PulseStartPin\\command",
-                                   L"Software\\Classes\\Pulse.StartPin.Request\\shell\\PulseStartPin\\command"};
-constexpr const wchar_t *names[] = {L"", L"ThreadingModel", L"", L"", L"", L"DelegateExecute"};
+                                    L"Software\\Classes\\Pulse.StartPin.Request\\shell\\PulseStartPin\\command",
+                                    kProtocolKeys[0], kProtocolKeys[1], kProtocolKeys[2],
+                                    kProtocolBackup, kProtocolBackup, kProtocolBackup};
+constexpr const wchar_t *names[] = {L"", L"ThreadingModel", L"", L"", L"", L"DelegateExecute",
+                                    kProtocolNames[0], kProtocolNames[1], kProtocolNames[2],
+                                    kProtocolBackupNames[0], kProtocolBackupNames[1], kProtocolBackupNames[2]};
+HKEY Root(size_t i) { return i < 6 ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER; }
 struct ServiceHandle {
     SC_HANDLE h;
     ~ServiceHandle() {
@@ -52,7 +58,7 @@ bool RuntimeRegistrationTransaction::Prepare(std::wstring &error) {
         CloseHandle(file);
         return ok || Fail(error, e);
     }
-    std::string data = "PRT2";
+    std::string data = "PRT3";
     ServiceHandle scm{OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)};
     if (!scm.h)
         return Fail(error, GetLastError());
@@ -83,7 +89,7 @@ bool RuntimeRegistrationTransaction::Prepare(std::wstring &error) {
     }
     for (size_t i = 0; i < std::size(keys); ++i) {
         HKEY key = nullptr;
-        auto r = RegOpenKeyExW(HKEY_LOCAL_MACHINE, keys[i], 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key);
+        auto r = RegOpenKeyExW(Root(i), keys[i], 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key);
         DWORD type = 0, size = 0;
         std::vector<BYTE> bytes;
         if (r == ERROR_SUCCESS) {
@@ -121,7 +127,8 @@ bool RuntimeRegistrationTransaction::Recover(std::wstring &error) {
         return GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND ||
                Fail(error, GetLastError());
     std::string data;
-    if (!ReadWholeFile(path, data) || data.size() > 1024 * 1024 || !data.starts_with("PRT2"))
+    if (!ReadWholeFile(path, data) || data.size() > 1024 * 1024 ||
+        (!data.starts_with("PRT2") && !data.starts_with("PRT3")))
         return Fail(error, ERROR_INVALID_DATA);
     if (api_.restore)
         return api_.restore(data, error);
@@ -154,7 +161,7 @@ bool RuntimeRegistrationTransaction::Recover(std::wstring &error) {
         std::vector<BYTE> bytes;
     };
     std::vector<Value> values;
-    for (size_t i = 0; i < std::size(keys); ++i) {
+    for (size_t i = 0; i < (data.starts_with("PRT2") ? 6 : std::size(keys)); ++i) {
         Value v{};
         if (!Get(data, at, v.exists) || v.exists > 1 || !Get(data, at, v.type) || !Get(data, at, size) ||
             size > 65536 || size > data.size() - at)
@@ -191,9 +198,9 @@ bool RuntimeRegistrationTransaction::Recover(std::wstring &error) {
     for (size_t i = 0; i < values.size(); ++i) {
         HKEY key = nullptr;
         const auto &v = values[i];
-        auto r = v.exists ? RegCreateKeyExW(HKEY_LOCAL_MACHINE, keys[i], 0, nullptr, 0, KEY_SET_VALUE | KEY_WOW64_64KEY,
+        auto r = v.exists ? RegCreateKeyExW(Root(i), keys[i], 0, nullptr, 0, KEY_SET_VALUE | KEY_WOW64_64KEY,
                                             nullptr, &key, nullptr)
-                          : RegOpenKeyExW(HKEY_LOCAL_MACHINE, keys[i], 0, KEY_SET_VALUE | KEY_WOW64_64KEY, &key);
+                          : RegOpenKeyExW(Root(i), keys[i], 0, KEY_SET_VALUE | KEY_WOW64_64KEY, &key);
         if (!v.exists && (r == ERROR_FILE_NOT_FOUND || r == ERROR_PATH_NOT_FOUND))
             continue;
         if (r != ERROR_SUCCESS)

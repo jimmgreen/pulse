@@ -5,6 +5,8 @@
 #include "recycle_shell_watch.h"
 // app_runtime.cpp — extracted from app_main.cpp.
 #include "app_window_title.h"
+#include "../common/search_uri.h"
+#include "search_query.h"
 #include "dialog_management_ui.h"
 #include "../fs/drive_kind.h"
 #include "../fs/bounded_enumeration.h"
@@ -403,6 +405,14 @@ static DWORD QueryLaunchArgumentAttributes(const std::wstring& path) {
 }
 
 std::wstring ResolveOpenFolderPath(std::wstring path, bool reveal) {
+    if (IsPulseUri(path)) {
+        std::wstring keyword;
+        if (!ParseSearchUri(path, keyword)) return {};
+        app::AdvancedSearchSpec spec;
+        spec.name = std::move(keyword);
+        spec.location = app::LocationScope::Indexed;
+        return app::MakeSearchPath(app::CompileSearchQuery(spec));
+    }
     while (!path.empty() && (path.front() == L'"' || path.back() == L'"')) {
         if (path.front() == L'"') path.erase(path.begin());
         if (!path.empty() && path.back() == L'"') path.pop_back();
@@ -422,6 +432,7 @@ std::wstring ResolveOpenFolderPath(std::wstring path, bool reveal) {
 }
 
 void SelectLaunchedFile(AppState& s, const std::wstring& raw, bool reveal) {
+    if (IsPulseUri(raw)) return;
     std::wstring path = raw;
     while (!path.empty() && (path.front() == L'"' || path.back() == L'"')) {
         if (path.front() == L'"') path.erase(path.begin());
