@@ -1,4 +1,5 @@
 #include "../app/single_instance_coordinator.h"
+#include "../common/search_uri.h"
 #include "../app/shell_tag_menu.h"
 #include "../app/open_request_pipe.h"
 #include <cstring>
@@ -104,6 +105,25 @@ int wmain(int argc, wchar_t** argv) {
     namespace fs = std::filesystem;
     int failed = 0;
     auto check = [&](bool ok, const char* label) { printf("[%s] %s\n", ok ? "PASS" : "FAIL", label); failed += !ok; };
+    std::wstring keyword;
+    check(pulse::ParseSearchUri(L"pulse://search/%E4%B8%AD%E6%96%87%20a%2Fb%3F%23%25+", keyword) &&
+        keyword == L"中文 a/b?#%+", "URI decodes UTF-8 and reserved characters exactly once");
+    check(pulse::ParseSearchUri(L"PULSE://search/中文 空格", keyword) && keyword == L"中文 空格",
+        "URI accepts Unicode and case-insensitive scheme");
+    check(pulse::ParseSearchUri(L"pulse://search/%2520", keyword) && keyword == L"%20", "URI decoding is not recursive");
+    for (const auto* invalid : {L"pulse://search/", L"pulse://search/%20", L"pulse://unknown/name",
+        L"pulse://search/%", L"pulse://search/%GG", L"pulse://search/%C0%AF", L"pulse://search/%ED%A0%80",
+        L"pulse://search/%F4%90%80%80", L"pulse://search/%00", L"pulse://search/%0A",
+        L"pulse://search/a?b", L"pulse://search/a#b", L"pulse://search/a/b"}) {
+        check(!pulse::ParseSearchUri(invalid, keyword) && keyword.empty(), "invalid URI fails without partial keyword");
+        check(!Coordinator::NormalizeLaunchPath(invalid, keyword), "launch normalization rejects invalid URI");
+    }
+    check(pulse::ParseSearchUri(L"pulse://search/" + std::wstring(pulse::kSearchKeywordLimit, L'a'), keyword),
+        "keyword length boundary accepted");
+    check(!pulse::ParseSearchUri(L"pulse://search/" + std::wstring(pulse::kSearchKeywordLimit + 1, L'a'), keyword),
+        "overlong keyword rejected");
+    check(!pulse::ParseSearchUri(L"pulse://search/" + std::wstring(pulse::kSearchUriLimit, L'a'), keyword),
+        "overlong URI rejected");
     const auto original = fs::current_path();
     const auto parent = original / L"bench_data";
     fs::create_directories(parent);
@@ -134,7 +154,8 @@ int wmain(int argc, wchar_t** argv) {
     check(!isolated.PublishEndpoint(window), "unowned coordinator cannot publish");
     check(Coordinator::FindPrimaryWindow(name) == window, "discovery verifies published process and nonce");
     fs::current_path(root / L"A");
-    for (const auto& path : {L".", L"..\\B\\file with spaces.txt", L"", L"pulse:starred", L"MyComputerFolder"}) {
+    for (const auto& path : {L".", L"..\\B\\file with spaces.txt", L"", L"pulse:starred", L"MyComputerFolder",
+        L"pulse://search/%E4%B8%AD%E6%96%87%20name%23%25"}) {
         received = L"not received";
         const int before = opens;
         HANDLE sender = Spawn(L"--sender \"" + name + L"\" open \"" + path + L"\"", (root / L"B").wstring());
@@ -188,6 +209,12 @@ int wmain(int argc, wchar_t** argv) {
     pump();
     check(opens == raw_before + 1 && received == L"pulse:win-e" && copydata_calls == copy_before,
         "resumed UI dispatches unchanged WinE marker exactly once without COPYDATA");
+    const int uri_before = opens;
+    HANDLE uri_sender = Spawn(L"--sender \"" + name + L"\" open \"pulse://search/%E4%B8%AD%E6%96%87%20name%23%25\"", root.wstring());
+    check(WaitChild(uri_sender), "running instance acknowledges search URI through existing pipe");
+    pump();
+    check(opens == uri_before + 1 && received == L"pulse://search/%E4%B8%AD%E6%96%87%20name%23%25" &&
+        copydata_calls == copy_before, "queued search URI dispatches exactly once without new IPC");
     const auto endpoint = Coordinator::FindPrimaryEndpoint(name);
     check(endpoint && !endpoint->pipe_name.empty(), "RawV2 sidecar yields verified pipe identity");
     if (endpoint) {

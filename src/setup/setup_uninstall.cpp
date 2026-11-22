@@ -1,6 +1,7 @@
 #include "../common/dialog_auto_registration.h"
 #include "start_pin_registration.h"
 #include "setup_uninstall.h"
+#include "setup_url_protocol.h"
 #include "setup_dialog_versions.h"
 #include "setup_dialog_migration.h"
 #include "../common/dialog_bundle.h"
@@ -275,6 +276,11 @@ UninstallResult RunUninstall(const UninstallRequest& req, const UninstallCallbac
         }
     }
 
+    if (real && !upgrade && !ConfigureUrlProtocol(app, false, result.error)) {
+        Log(result.error);
+        result.exit_code = kExitFailed;
+        return result;
+    }
     if (real && !UnregisterStartPin(app, result.error)) {
         Log(result.error);
         result.exit_code = kExitFailed;
