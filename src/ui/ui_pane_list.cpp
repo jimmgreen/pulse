@@ -6755,19 +6755,28 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                         if (mtimeFresh && mtAvail > 1.0f) {
                             // Changed today: semibold in the text color.
                             IDWriteTextFormat* mtBold = NameSemiboldFormat();
-                            ComPtr<IDWriteTextLayout> mtLayout;
                             const std::wstring mtShown = fit(date, mtAvail * 0.94f);
-                            if (mtBold && SUCCEEDED(compositor_->DwriteFactory()->CreateTextLayout(mtShown.c_str(),
-                                    static_cast<UINT32>(mtShown.size()), mtBold, mtAvail, cell.bottom - cell.top - 2.0f * scale_,
-                                    &mtLayout))) {
-                                mtLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                                mtLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                                mtLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                                MakeBrush(dc, cut ? WithAlpha(theme.text, 0.55f) : theme.text, brText_);
-                                compositor_->DrawTextLayout(D2D1::Point2F(mtLeft, cell.top + scale_), mtLayout.get(), brText_.get(),
-                                                   D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                            } else {
-                                draw_detail_text(fit(date, mtAvail), mtLeft, mtAvail, DWRITE_TEXT_ALIGNMENT_LEADING);
+                            // 仅 Auto 且非高对比度尝试文本通道；成功后本格文字已绘制。
+                            // 文本通道拒绝时保留半粗布局，其他模式直接走原布局以维持强调效果。
+                            const bool mtDrawn = !IsHighContrast() && typography::UseLumaTextForUi() &&
+                                compositor_->DrawLumaText(mtShown, mtBold,
+                                    D2D1::RectF(mtLeft, cell.top + scale_, mtLeft + mtAvail, cell.bottom - scale_),
+                                    cut ? WithAlpha(theme.text, 0.55f) : theme.text, theme.bg,
+                                    DWRITE_TEXT_ALIGNMENT_LEADING);
+                            if (!mtDrawn) {
+                                ComPtr<IDWriteTextLayout> mtLayout;
+                                if (mtBold && SUCCEEDED(compositor_->DwriteFactory()->CreateTextLayout(mtShown.c_str(),
+                                        static_cast<UINT32>(mtShown.size()), mtBold, mtAvail, cell.bottom - cell.top - 2.0f * scale_,
+                                        &mtLayout))) {
+                                    mtLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                                    mtLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                                    mtLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                                    MakeBrush(dc, cut ? WithAlpha(theme.text, 0.55f) : theme.text, brText_);
+                                    compositor_->DrawTextLayout(D2D1::Point2F(mtLeft, cell.top + scale_), mtLayout.get(), brText_.get(),
+                                                       D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                                } else {
+                                    draw_detail_text(fit(date, mtAvail), mtLeft, mtAvail, DWRITE_TEXT_ALIGNMENT_LEADING);
+                                }
                             }
                         } else if (mtimeOld) {
                             // Outside the range: a step lighter, so recent dates lead.
