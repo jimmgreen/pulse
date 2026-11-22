@@ -41,6 +41,20 @@ int main() {
           "description marker and quoted shell-open command");
     Check(ConfigureUrlProtocol(app, false, error) &&
           !ReadString(HKEY_CURRENT_USER, 0, kProtocolKeys[0], L"URL Protocol"), "uninstall removes initially absent values");
+    Check(ConfigureUrlProtocol(app, true, error) &&
+          WriteString(HKEY_CURRENT_USER, 0, kProtocolKeys[2], L"", L"replacement.exe %1") &&
+          ConfigureUrlProtocol(app, false, error) &&
+          ReadString(HKEY_CURRENT_USER, 0, kProtocolKeys[2], L"") == L"replacement.exe %1",
+          "replacement survives uninstall after initially unregistered protocol");
+    HKEY backup_key = nullptr;
+    Check(RegOpenKeyExW(HKEY_CURRENT_USER, kProtocolBackup, 0, KEY_QUERY_VALUE, &backup_key) == ERROR_FILE_NOT_FOUND,
+          "replacement uninstall discards obsolete backup");
+    if (backup_key) RegCloseKey(backup_key);
+    Check(ConfigureUrlProtocol(app, true, error) &&
+          ReadString(HKEY_CURRENT_USER, 0, kProtocolKeys[2], L"") == L"\"C:\\Program Files\\Pulse\\pulse.exe\" --shell-open \"%1\"" &&
+          ConfigureUrlProtocol(app, false, error) &&
+          ReadString(HKEY_CURRENT_USER, 0, kProtocolKeys[2], L"") == L"replacement.exe %1",
+          "reinstall and eventual uninstall restore replacement owner");
     Check(WriteString(HKEY_CURRENT_USER, 0, kProtocolKeys[0], L"", L"Original protocol") &&
           WriteString(HKEY_CURRENT_USER, 0, kProtocolKeys[2], L"", L"original.exe %1") &&
           WriteString(HKEY_CURRENT_USER, 0, kProtocolKeys[0], L"Unrelated", L"keep"), "seed previous owner");

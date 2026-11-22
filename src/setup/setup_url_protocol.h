@@ -33,7 +33,21 @@ inline LSTATUS ReadProtocolValue(const wchar_t* path, const wchar_t* name, DWORD
 inline bool ConfigureUrlProtocol(const std::wstring& app, bool install, std::wstring& error) {
     auto fail = [&](LSTATUS code) { error = L"Pulse URL protocol registration failed: " + std::to_wstring(code); return false; };
     const auto command = L"\"" + app + L"\\pulse.exe\" --shell-open \"%1\"";
-    if (!install && ReadString(HKEY_CURRENT_USER, 0, kProtocolKeys[2], L"") != command) return true;
+    auto clear_backup = [&] {
+        for (auto name : kProtocolBackupNames)
+            if (!DeleteValue(HKEY_CURRENT_USER, 0, kProtocolBackup, name)) return fail(ERROR_WRITE_FAULT);
+        if (!DeleteValue(HKEY_CURRENT_USER, 0, kProtocolBackup, L"InstalledCommand")) return fail(ERROR_WRITE_FAULT);
+        RegDeleteKeyW(HKEY_CURRENT_USER, kProtocolBackup);
+        return true;
+    };
+    const auto current_command = ReadString(HKEY_CURRENT_USER, 0, kProtocolKeys[2], L"");
+    if (!install && current_command != command) {
+        // An older installation must leave a newer Pulse installation's backup
+        // intact. A replacement owner instead ends our backup's lifetime.
+        const auto installed_command = ReadString(HKEY_CURRENT_USER, 0, kProtocolBackup, L"InstalledCommand");
+        if (installed_command && current_command == installed_command) return true;
+        return clear_backup();
+    }
     // Prepare every backup before changing any public value. Never replace the
     // original backup during an in-place or directory-move upgrade.
     std::vector<BYTE> saved[3];
@@ -63,6 +77,7 @@ inline bool ConfigureUrlProtocol(const std::wstring& app, bool install, std::wst
         if (exists > 1) return fail(ERROR_INVALID_DATA);
     }
     if (install) {
+        if (!WriteString(HKEY_CURRENT_USER, 0, kProtocolBackup, L"InstalledCommand", command)) return fail(ERROR_WRITE_FAULT);
         const std::wstring values[] = {L"URL:Pulse Protocol", L"", command};
         for (size_t i = 0; i < 3; ++i)
             if (!WriteString(HKEY_CURRENT_USER, 0, kProtocolKeys[i], kProtocolNames[i], values[i])) return fail(ERROR_WRITE_FAULT);
@@ -78,9 +93,7 @@ inline bool ConfigureUrlProtocol(const std::wstring& app, bool install, std::wst
             RegCloseKey(key);
             if (result != ERROR_SUCCESS && result != ERROR_FILE_NOT_FOUND) return fail(result);
         }
-        for (auto name : kProtocolBackupNames)
-            if (!DeleteValue(HKEY_CURRENT_USER, 0, kProtocolBackup, name)) return fail(ERROR_WRITE_FAULT);
-        RegDeleteKeyW(HKEY_CURRENT_USER, kProtocolBackup);
+        return clear_backup();
     }
     return true;
 }
