@@ -216,11 +216,13 @@ bool MakeArchiveThumbnail(const std::wstring& path, UINT requested_pixels,
         return false;
     }
     const ULONGLONG started = GetTickCount64();
-    // At most two members are inflated: the first picture seen, and a named
-    // cover if one turns up later. Everything else is skipped by libarchive
-    // itself, so a pack holding hundreds of photos never stalls the host.
+    // At most two members are inflated: the first picture seen and the first
+    // named cover (cover/folder/preview/thumb). A later named cover is ignored
+    // rather than inflated again, so a pack holding hundreds of photos never
+    // stalls the host.
     std::vector<uint8_t> best;
-    std::vector<uint8_t> fallback;  // previous plain picture, if a named cover replaced it
+    std::vector<uint8_t> fallback;  // plain picture kept in case the named cover is broken
+    bool named_seen = false;
     size_t members = 0;
     for (;;) {
         if (GetTickCount64() - started > kBudgetMs) break;
@@ -236,7 +238,8 @@ bool MakeArchiveThumbnail(const std::wstring& path, UINT requested_pixels,
         if (name.front() == L'/' || name.front() == L'\\') continue;  // absolute name
         const int rank = CoverRank(name);
         if (rank < 0) continue;  // next_header() skips its data
-        if (rank == 1 && !best.empty()) continue;  // already have a plain picture
+        if (rank == 0 && named_seen) continue;        // already inflated a named cover
+        if (rank == 1 && !best.empty()) continue;     // already inflated a plain picture
         if (!api.size_is_set(entry) || api.entry_size(entry) <= 0 ||
             static_cast<uint64_t>(api.entry_size(entry)) > kMaxMemberBytes) continue;
         std::vector<uint8_t> candidate;
@@ -245,6 +248,7 @@ bool MakeArchiveThumbnail(const std::wstring& path, UINT requested_pixels,
         if (rank == 0) {
             if (!best.empty()) fallback = best;  // keep the plain picture in case this cover is broken
             best = std::move(candidate);
+            named_seen = true;
         } else if (best.empty()) {
             best = std::move(candidate);
         }
