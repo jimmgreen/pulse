@@ -352,16 +352,20 @@ void HandleTrayMessage(AppState& s, UINT message) {
 // Ctrl+C no longer stages.
 void PasteIntoCurrent(AppState& s) {
     app::Tab* tab = ActiveTab(s);
+    if (!tab) return;
+    const std::wstring target = OperationTargetDirectory(*tab);
+    if (target.empty()) return;
+    const bool target_is_current = _wcsicmp(target.c_str(), tab->current_path.c_str()) == 0;
     if (IsDeviceTab(tab)) {
         // A phone folder: files or another phone's items go in as a Pulse
         // task (Explorer's engine, Pulse's progress and conflict dialog).
         auto& devices = app::DeviceRegistry::Instance();
-        if (!devices.FolderWritable(tab->current_path) || !ops::ClipboardHasPasteableFiles()) return;
+        if (!devices.FolderWritable(target) || !ops::ClipboardHasPasteableFiles()) return;
         ops::ClipboardData files;
         std::vector<std::wstring> shell_ids;
         bool shell_cut = false;
         if (ops::ReadClipboard(files)) {
-            const bool submitted = SubmitDeviceTransfer(s, files.paths, tab->current_path, files.cut);
+            const bool submitted = SubmitDeviceTransfer(s, files.paths, target, files.cut);
             pulse::diagnostics::runtime::Event("device_paste", {{"route", 1}, {"submitted", submitted},
                 {"items", files.paths.size()}});
             if (submitted) {
@@ -370,19 +374,18 @@ void PasteIntoCurrent(AppState& s) {
             }
         } else if (ops::ReadClipboardShellItems(shell_ids, shell_cut)) {
             const size_t count = shell_ids.size();
-            const bool submitted = SubmitDeviceTransfer(s, std::move(shell_ids), tab->current_path, shell_cut);
+            const bool submitted = SubmitDeviceTransfer(s, std::move(shell_ids), target, shell_cut);
             pulse::diagnostics::runtime::Event("device_paste", {{"route", 2}, {"submitted", submitted},
                 {"items", count}});
             if (submitted) return;
         }
         pulse::diagnostics::runtime::Event("device_paste", {{"route", 3}});
         // Anything else (a zip's files, an attachment): the shell's own paste.
-        const std::wstring folder_id = devices.FolderShellId(tab->current_path);
+        const std::wstring folder_id = devices.FolderShellId(target);
         if (!folder_id.empty()) RunDeviceVerb(s, {folder_id}, L"paste", true);
         return;
     }
-    if (!tab || tab->current_path.empty() || fs::IsVirtualPath(tab->current_path) || tab->net_readonly ||
-        app::IsUncServerRoot(tab->current_path))
+    if (fs::IsVirtualPath(target) || tab->net_readonly || app::IsUncServerRoot(target))
         return;
     ops::ClipboardData cb;
     const bool clipboard_files = ops::ReadClipboard(cb);
@@ -394,28 +397,28 @@ void PasteIntoCurrent(AppState& s) {
     if (shell_files && ops::ReadClipboardShellItems(shell_ids, shell_cut)) {
         // A phone's items: a Pulse task like any paste, selected on arrival.
         uint64_t task = 0;
-        if (SubmitDeviceTransfer(s, std::move(shell_ids), tab->current_path, shell_cut, &task)) {
-            ArmArrivalSelection(s, nullptr, task, 0);
+        if (SubmitDeviceTransfer(s, std::move(shell_ids), target, shell_cut, &task)) {
+            if (target_is_current) ArmArrivalSelection(s, nullptr, task, 0);
             return;
         }
     }
     if (clipboard_files) {
         ops::OpRequest req;
         req.type = cb.cut ? ops::OpType::Move : ops::OpType::Copy;
-        req.dest_dir = tab->current_path;
+        req.dest_dir = target;
         for (auto& p : cb.paths) req.sources.push_back(fs::NormalizePath(p));
         uint64_t task = 0;
         if (SubmitWithConflictResolution(s, std::move(req), &task)) {
-            ArmArrivalSelection(s, nullptr, task, 0);
+            if (target_is_current) ArmArrivalSelection(s, nullptr, task, 0);
             if (cb.cut) TrackCutClipboard(s, cb);
         }
     } else if (shell_files) {
         // Virtual files (a zip's, an attachment): the shell writes them with
         // no task to follow. The shell host runs the drop so a long copy
         // never holds this thread; in process only if it is not there.
-        ArmArrivalSelection(s, nullptr, 0, 8000);
-        if (!s.ops.RunShellVerb({ClipboardPath(tab->current_path)}, L"paste", true, s.hwnd))
-            ops::PasteShellClipboard(tab->current_path);
+        if (target_is_current) ArmArrivalSelection(s, nullptr, 0, 8000);
+        if (!s.ops.RunShellVerb({ClipboardPath(target)}, L"paste", true, s.hwnd))
+            ops::PasteShellClipboard(target);
     }
 }
 

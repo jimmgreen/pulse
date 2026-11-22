@@ -24,6 +24,7 @@
 #include "../app_hosted_edit.h"
 #include "../app_ops_ui.h"
 #include "../app_runtime.h"
+#include "../selection_caps.h"
 #include "../folder_alias.h"
 #include "../global_search_controller.h"
 #include "../tab_controller.h"
@@ -231,7 +232,13 @@ void FillLayout(AppState& s, ActionView& v) {
 }
 
 void FillPaste(AppState& s, ActionView& v) {
-    if (!NeedFolder(s, v)) return;
+    const Tab* tab = ActiveTab(s);
+    const std::wstring target = tab ? OperationTargetDirectory(*tab) : std::wstring();
+    if (!tab || target.empty() || fs::IsVirtualPath(target) || tab->net_readonly ||
+        ::pulse::app::IsUncServerRoot(target)) {
+        Off(v, I::ActWhyNotFolder);
+        return;
+    }
     if (!ClipboardHasFiles()) Off(v, I::ActWhyNoPaste);
 }
 

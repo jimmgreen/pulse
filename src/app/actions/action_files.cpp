@@ -213,7 +213,8 @@ bool RealFolder(const std::wstring& path) {
 FilePlan PlanTransfer(AppState& s, FilePlan p, const json::Value& args, DestResolver resolve) {
     if (p.paste) {
         app::Tab* tab = ActiveTab(s);
-        if (!tab || !RealFolder(tab->current_path) || tab->net_readonly)
+        const std::wstring target = tab ? OperationTargetDirectory(*tab) : std::wstring();
+        if (!tab || !RealFolder(target) || tab->net_readonly)
             return Fail(std::move(p), "the focused pane is not a folder to paste into", Text(I::AiFoNoDest));
         ops::ClipboardData cb;
         if (!ops::ReadClipboard(cb) || cb.paths.empty())
@@ -225,7 +226,7 @@ FilePlan PlanTransfer(AppState& s, FilePlan p, const json::Value& args, DestReso
                 if (const std::wstring root = SystemFolderOf(path); !root.empty())
                     return Fail(std::move(p), "a cut item is inside a system or program folder",
                                 Fill(Text(I::AiFoSystem), L"{folder}", root));
-        p.dest = pulse::path::StripExtendedPathPrefix(tab->current_path);
+        p.dest = pulse::path::StripExtendedPathPrefix(target);
     } else {
         std::vector<std::wstring> items;
         if (!Items(s, args, items, p)) return p;

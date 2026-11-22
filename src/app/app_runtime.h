@@ -146,6 +146,9 @@ std::wstring TooltipForHover(AppState& s);
 void ApplyHoverTarget(AppState& s, const ui::HitTestResult& hit);
 std::wstring EntryFullPath(const app::Tab& tab, int index);
 std::vector<std::wstring> SelectedFullPaths(const app::Tab& tab);
+// The selected directory itself, or the selected file's parent. Falls back to
+// the tab's current directory for no/multiple/unresolvable selections.
+std::wstring OperationTargetDirectory(const app::Tab& tab);
 // Phone folders (pulse:device:): their file commands are Explorer's own verbs,
 // run by the shell host on the rows' shell ids (DirEntry::shell_id).
 bool IsDeviceTab(const app::Tab* tab);

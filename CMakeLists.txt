@@ -1158,6 +1158,10 @@ add_executable(pulse_search_history_test
     src/bench/search_history_test.cpp
     src/app/search_history.cpp)
 
+add_executable(pulse_selection_target_test
+    src/bench/selection_target_test.cpp
+    src/app/selection_target.cpp)
+
 add_executable(pulse_app_controllers_test
     src/bench/app_controllers_test.cpp
     src/bench/localization_test.rc

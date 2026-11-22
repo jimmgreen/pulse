@@ -15,6 +15,7 @@
 #include "folder_alias.h"
 #include "app_wall_hint.h"
 #include "app_internal.h"
+#include "selection_target.h"
 #include "workspace_sidebar.h"
 #include "app_network_page.h"
 #include "shortcut_page.h"
@@ -4085,6 +4086,20 @@ std::vector<std::wstring> SelectedFullPaths(const app::Tab& tab) {
         if (!full.empty()) out.push_back(std::move(full));
     }
     return out;
+}
+
+std::wstring OperationTargetDirectory(const app::Tab& tab) {
+    if (!tab.snapshot || tab.SelectedCount() != 1) return tab.current_path;
+    const auto indices = tab.SelectedIndices();
+    if (indices.size() != 1) return tab.current_path;
+    const int index = indices.front();
+    if (index < 0 || index >= static_cast<int>(tab.EntryCount())) return tab.current_path;
+    const fs::DirEntry& entry = tab.EntryAt(static_cast<size_t>(index));
+    if (entry.change_record_only || !entry.recycle_path.empty()) return tab.current_path;
+    const std::wstring selected = EntryFullPath(tab, index);
+    if (selected.empty()) return tab.current_path;
+    if (entry.is_dir) return app::SelectionTargetDirectory(tab.current_path, selected, true);
+    return app::SelectionTargetDirectory(tab.current_path, selected, false);
 }
 
 bool IsDeviceTab(const app::Tab* tab) {
