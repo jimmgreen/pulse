@@ -240,7 +240,11 @@ LRESULT CALLBACK OwnerProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 PostMessageW(target, WM_MOUSEMOVE, 0, point);
             }
             if (g_mouse_stage == 3) pulse::ui::FluentMenuTestPeer::SaveCascade(*g_menu);
-            if (g_mouse_click || g_mouse_stage == 3) PostMessageW(target, WM_LBUTTONUP, 0, point);
+            if (g_mouse_click || g_mouse_stage == 3) {
+                // The menu only acts on a release whose press landed on it.
+                PostMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, point);
+                PostMessageW(target, WM_LBUTTONUP, 0, point);
+            }
             ++g_mouse_stage;
         }
         return 0;

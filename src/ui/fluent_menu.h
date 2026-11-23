@@ -387,6 +387,10 @@ private:
     bool top_center_ = false;
     bool topmost_ = false;
     bool activate_on_open_ = false;
+    // A release only counts as a command when its press landed on this menu. A
+    // dropdown opens from the mouse-down, so the release that ends that press
+    // arrives with no press here; it must not pick a row under the pointer.
+    bool press_on_menu_ = false;
     bool activation_confirmed_ = false;
     bool acrylic_active_ = false;  // decided when a popup opens
     HWND external_edit_ = nullptr; // borrowed; never moved, hidden or destroyed
