@@ -118,3 +118,6 @@ constexpr UINT WM_DETAILS_PREVIEW_OPEN = WM_APP + 138;
 constexpr UINT WM_DETAILS_PREVIEW_COMMAND = WM_APP + 139;
 constexpr UINT WM_DRAG_RETURN = WM_APP + 143;
 constexpr UINT WM_HISTORY_REDO = WM_APP + 144;
+// Another window of this process changed the interface font (Settings >
+// 界面字体): take the process-wide typography values and rebuild this window.
+constexpr UINT WM_PULSE_FONTS_CHANGED = WM_APP + 145;

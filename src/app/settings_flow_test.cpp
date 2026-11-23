@@ -1224,6 +1224,22 @@ int RunSettingsFlowTest(AppState& s,const wchar_t* output) {
                     const auto density_layout=ui::MakeSettingsLayout(scrolled,window,scale,s.renderer.TitleBarHeight(),28*scale,&painter);
                     const auto density=density_layout.density_row[2];
                     check(s.renderer.HitTest(scrolled,window,(density.left+density.right)/2,(density.top+density.bottom)/2).region==H::SettingsDensity,"density segments remain reachable after scrolling into view");
+                    {
+                        // 界面字体 / 等宽字体: two dropdown rows under the font size,
+                        // each an ordinary SettingsDropdown target at its own index.
+                        auto font_vm=vm;
+                        font_vm.settings_scroll=layout.ui_font_family_card.top-layout.content.top;
+                        const auto font_layout=ui::MakeSettingsLayout(font_vm,window,scale,s.renderer.TitleBarHeight(),28*scale,&painter);
+                        const auto family=font_layout.ui_font_family_choice,mono=font_layout.ui_font_mono_choice;
+                        check(family.right>family.left && mono.right>mono.left &&
+                              font_layout.ui_font_mono_card.top>=font_layout.ui_font_family_card.bottom,
+                              "font family dropdowns are visible and do not overlap");
+                        const auto family_hit=s.renderer.HitTest(font_vm,window,(family.left+family.right)/2,(family.top+family.bottom)/2);
+                        const auto mono_hit=s.renderer.HitTest(font_vm,window,(mono.left+mono.right)/2,(mono.top+mono.bottom)/2);
+                        check(family_hit.region==H::SettingsDropdown && family_hit.index==7 &&
+                              mono_hit.region==H::SettingsDropdown && mono_hit.index==8,
+                              "font family dropdowns are hit-testable");
+                    }
                     check(layout.wallpaper_card.bottom==0,"collapsed advanced settings have no invisible hit targets");
                     check(layout.integration_cover[0].bottom>layout.integration_cover[0].top && layout.explorer_windows_row.bottom>layout.explorer_windows_row.top,"default file manager choices are visible without expanding");
                     {

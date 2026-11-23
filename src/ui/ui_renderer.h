@@ -1295,6 +1295,8 @@ private:
     std::array<ComPtr<IDWriteTextFormat>, 2> name_nowrap_bases_;
     ComPtr<IDWriteTextFormat> name_semibold_base_;
     float name_semibold_size_ = 0.0f;
+    // typography::Generation the cache was built for.
+    std::uint64_t name_semibold_generation_ = 0;
     // FileNameFormat at semibold (same family, size and fallback).
     IDWriteTextFormat* NameSemiboldFormat();
     // Extra date-column width: the dots' lead and room for a semibold date.

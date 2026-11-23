@@ -103,6 +103,8 @@ int Serve(wire::Channel& channel, HANDLE parent_process, DWORD pid, uint64_t own
     ApplyPickerAppearanceToSpec(appearance, spec);
     l10n::Initialize(GetModuleHandleW(nullptr), appearance.language);
     ui::typography::SetUiFontScale(appearance.ui_font_scale);
+    ui::typography::SetUiFontFamily(appearance.ui_font_family);
+    ui::typography::SetUiMonoFamily(appearance.ui_font_family_mono);
     ui::typography::SetTextRenderMode(static_cast<ui::typography::TextRenderMode>(appearance.text_render));
     const auto colors = ResolveSystemPickerAppearanceColors(appearance);
     if (WaitForSingleObject(parent_process, 0) != WAIT_TIMEOUT) return 4;

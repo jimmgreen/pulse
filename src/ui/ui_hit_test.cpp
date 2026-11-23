@@ -356,6 +356,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             if(ContainsPt(lay.effect_choice,x,y) || ContainsPt(lay.language_choice,x,y)) {
                 r.region=HitTestResult::SettingsDropdown;r.index=ContainsPt(lay.effect_choice,x,y) ? 0 : 1;return r;
             }
+            if(ContainsPt(lay.ui_font_family_choice,x,y)) {r.region=HitTestResult::SettingsDropdown;r.index=7;return r;}
+            if(ContainsPt(lay.ui_font_mono_choice,x,y)) {r.region=HitTestResult::SettingsDropdown;r.index=8;return r;}
             if(ContainsPt(lay.performance_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=4;return r;}
             if(ContainsPt(lay.menu_acrylic_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=36;return r;}
             for(int list_row=0;list_row<7;++list_row)

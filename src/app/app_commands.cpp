@@ -6300,6 +6300,37 @@ static void RefreshEditFonts(AppState& s) {
         SendMessageW(s.hwndTagRenameEdit, WM_SETFONT, reinterpret_cast<WPARAM>(s.editFont), TRUE);
 }
 
+void RefreshTypographyForWindow(AppState& s) {
+    ui::typography::SetUiFontScale(s.appPrefs.ui_font_scale);
+    ui::typography::SetUiFontFamily(s.appPrefs.ui_font_family);
+    ui::typography::SetUiMonoFamily(s.appPrefs.ui_font_family_mono);
+    // Formats, the fallback mapping and measured widths were built from the
+    // previous values; row heights were measured from the old font too.
+    ui::typography::InvalidateCaches();
+    s.compositor.RecreateTextFormats(s.scale);
+    s.renderer.InvalidateTypography();
+    RefreshEditFonts(s);
+    const int row_height =
+        app::EffectiveRowHeightDip(s.appPrefs.row_height, s.appPrefs.ui_font_scale);
+    s.renderer.SetRowHeightDip(static_cast<float>(row_height));
+    if (s.menu) s.menu->SetRowHeightDip(static_cast<float>(app::MenuRowHeightDip(row_height)));
+    // Native EDIT surfaces re-measure and repaint with the new font.
+    ui::typography::NotifyTextBackendChanged();
+    if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+// These values are process-wide, so the other windows of this thread would keep
+// drawing the previous family next to the new one. They copy the values and
+// rebuild in WM_PULSE_FONTS_CHANGED; only the window that made the change
+// broadcasts.
+static void BroadcastTypographyChange(AppState& s) {
+    EnumThreadWindows(GetCurrentThreadId(), [](HWND window, LPARAM parameter) -> BOOL {
+        auto& source = *reinterpret_cast<AppState*>(parameter);
+        if (window != source.hwnd) PostMessageW(window, WM_PULSE_FONTS_CHANGED, 0, 0);
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&s));
+}
+
 void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
     // Cheap when unchanged; 文件夹最近变化 (ChangeTracking) also feeds it.
     s.renderer.SetMtimeHint(app::MtimeHintFromPrefs(s.appPrefs));
@@ -6321,16 +6352,16 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
     }
     if (app::HasEffect(effects, app::SettingsEffect::MenuMaterial))
         ui::FluentMenu::SetAcrylicEnabled(s.appPrefs.menu_acrylic && !s.safeMode);
-    if (app::HasEffect(effects, app::SettingsEffect::UiFontSize)) {
-        ui::typography::SetUiFontScale(s.appPrefs.ui_font_scale);
-        // Formats and cached widths carry the previous size.
-        ui::typography::InvalidateCaches();
-        s.compositor.RecreateTextFormats(s.scale);
-        s.renderer.InvalidateTypography();
-        RefreshEditFonts(s);
+    if (app::HasEffect(effects, app::SettingsEffect::UiFontSize) ||
+        app::HasEffect(effects, app::SettingsEffect::UiFontFamily) ||
+        app::HasEffect(effects, app::SettingsEffect::UiMonoFamily) ||
+        app::HasEffect(effects, app::SettingsEffect::TextRendering)) {
+        if (app::HasEffect(effects, app::SettingsEffect::TextRendering))
+            ui::typography::SetTextRenderMode(static_cast<ui::typography::TextRenderMode>(s.appPrefs.text_render));
+        RefreshTypographyForWindow(s);
+        BroadcastTypographyChange(s);
     }
-    if (app::HasEffect(effects, app::SettingsEffect::RowHeight) ||
-        app::HasEffect(effects, app::SettingsEffect::UiFontSize)) {
+    if (app::HasEffect(effects, app::SettingsEffect::RowHeight)) {
         const int row_height = app::EffectiveRowHeightDip(s.appPrefs.row_height, s.appPrefs.ui_font_scale);
         s.renderer.SetRowHeightDip(static_cast<float>(row_height));
         if (s.menu)
@@ -6358,14 +6389,6 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
         }
         InvalidateRect(s.hwnd, nullptr, FALSE);
     }
-    if (app::HasEffect(effects, app::SettingsEffect::TextRendering)) {
-        ui::typography::SetTextRenderMode(static_cast<ui::typography::TextRenderMode>(s.appPrefs.text_render));
-        s.compositor.UpdateTextRenderingParams(nullptr);
-        // Cached widths were measured by the previous rasterizer.
-        ui::typography::InvalidateCaches();
-        s.compositor.RecreateTextFormats(s.scale);
-        s.renderer.InvalidateTypography();
-    }
     if (app::HasEffect(effects, app::SettingsEffect::TrayDeckIcon))
         s.renderer.SetTrayIconDip(static_cast<float>(s.appPrefs.tray_icon_size));
     if (app::HasEffect(effects, app::SettingsEffect::TrayVisibility))
@@ -6377,10 +6400,10 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
     if (app::HasEffect(effects, app::SettingsEffect::Language)) {
         l10n::SetLanguage(s.appPrefs.language);
         RefreshSidebarModel(s);
-        ui::typography::InvalidateCaches();
-        s.compositor.RecreateTextFormats(s.scale);
-        s.renderer.InvalidateTypography();
-        RefreshEditFonts(s);
+        // The language decides the fallback families and PreferredTextFamily,
+        // so it rebuilds the same things an explicit family change does.
+        RefreshTypographyForWindow(s);
+        BroadcastTypographyChange(s);
         if (s.pane) {
             ForEachPane(s, [&](app::Pane& pane) {
                 if (IsSettingsTab(pane.ActiveTab()))

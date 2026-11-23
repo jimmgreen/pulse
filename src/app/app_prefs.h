@@ -126,6 +126,11 @@ struct AppPrefs {
     int text_render = 0;
     // Interface font size in percent of the built-in sizes: 90 / 100 / 112 / 125.
     int ui_font_scale = 100;
+    // Settings > 界面字体 / 界面等宽字体: an installed family's en-us name, or
+    // empty for the per-language chain. A family that later disappears stays
+    // here and is ignored by the resolver until another one is chosen.
+    std::wstring ui_font_family;
+    std::wstring ui_font_family_mono;
     FolderViewPrefs folder_views;
     FolderSortPrefs folder_sorts;
     FolderGroupPrefs folder_groups;

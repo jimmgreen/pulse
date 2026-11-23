@@ -39,6 +39,8 @@ enum class SettingsEffect : uint32_t {
     FolderSort = 1u << 11,
     TextRendering = 1u << 12,
     UiFontSize = 1u << 13,
+    UiFontFamily = 1u << 16,
+    UiMonoFamily = 1u << 17,
     MenuMaterial = 1u << 14,
     SearchSwitch = 1u << 15,
 };
@@ -284,6 +286,10 @@ public:
     void HomeFolder(int action);
     void TextRendering(int index);
     void UiFontSize(int index);   // 0 small 90%, 1 default 100%, 2 large 112%, 3 larger 125%
+    // Settings > 界面字体 / 界面等宽字体: an installed family name, empty for
+    // the language chain / the default monospace candidates.
+    void UiFontFamily(std::wstring_view family);
+    void UiMonoFontFamily(std::wstring_view family);
     void TrayIconSize(int index);
     void DoubleCtrlGap(int index);   // 连按间隔: 200 / 300 / 400 ms
     // Settings sliders: 0 interface transparency (0..90), 1 wallpaper blur (0..40),

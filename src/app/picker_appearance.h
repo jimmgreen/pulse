@@ -16,6 +16,8 @@ struct PickerAppearanceSnapshot {
     bool accent_follow_system = false;
     std::wstring language = L"system";
     int ui_font_scale = 100;
+    std::wstring ui_font_family;
+    std::wstring ui_font_family_mono;
     int text_render = 0; // 0 Luma Auto, 1 DirectWrite Sharp, 2 Smooth
     int row_height = 34;
     bool selection_outline = false;

@@ -280,6 +280,9 @@ void SyncQuickPreview(AppState& s);
 void StartCloudPreviewDownload(AppState& s, const std::wstring& path, uint64_t size);
 void HandleCloudDownloadMessage(AppState& s, WPARAM event, LPARAM job);
 void ApplySettingsEffects(AppState& s, app::SettingsEffect effects);
+// Rebuilds this window's text for the process-wide typography values in its
+// AppPrefs: formats, measured widths, native EDIT fonts and row heights.
+void RefreshTypographyForWindow(AppState& s);
 app::SettingsTaskCompletion SettingsCompletion(HWND hwnd);
 void SetThemeMode(AppState& s, int mode);
 bool HandleSettingsControl(AppState& s, const ui::HitTestResult& hit);

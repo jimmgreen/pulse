@@ -389,6 +389,12 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
         segmented(lay.text_render_card,lay.text_render_row,text_render,text_render_values,vm.settings_text_render,H::SettingsTextRender,I::SettingsTextRender,I::SettingsTextRenderDesc,3,L"\xE8D2");
         const I ui_font_size[]={I::UiFontSmall,I::UiFontDefault,I::UiFontLarge,I::UiFontLarger};const int ui_font_size_values[]={90,100,112,125};
         segmented(lay.ui_font_size_card,lay.ui_font_size_row,ui_font_size,ui_font_size_values,vm.settings_ui_font_scale,H::SettingsUiFontSize,I::SettingsUiFontSize,I::SettingsUiFontSizeDesc,4,L"\xE8E9");
+        const std::wstring ui_family=vm.settings_ui_font_family.empty()
+            ? l10n::Get(I::FontFollowLanguage) : vm.settings_ui_font_family;
+        dropdown(lay.ui_font_family_card,lay.ui_font_family_choice,I::SettingsUiFontFamily,I::SettingsUiFontFamilyDesc,ui_family,7);
+        const std::wstring mono_family=vm.settings_ui_font_family_mono.empty()
+            ? l10n::Get(I::FontFollowDefault) : vm.settings_ui_font_family_mono;
+        dropdown(lay.ui_font_mono_card,lay.ui_font_mono_choice,I::SettingsUiFontMono,I::SettingsUiFontMonoDesc,mono_family,8);
         if(lay.wallpaper_card.bottom>lay.wallpaper_card.top) {
         const auto& preview = lay.wallpaper_preview;
         MakeBrush(dc, theme.fill_hover, brFillHover_);

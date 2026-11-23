@@ -16,6 +16,10 @@ struct Handle {
 };
 struct CoMemory { PWSTR value = nullptr; ~CoMemory() { CoTaskMemFree(value); } };
 int FontScale(int percent) noexcept { return percent == 90 || percent == 112 || percent == 125 ? percent : 100; }
+// Same bound as typography's fixed name buffer: a longer name cannot come from
+// the font collection, so keeping it would only display a setting that never
+// applies.
+constexpr size_t kMaxPickerFamilyName = 255;
 int Integer(const std::wstring& json, const std::wstring& key, int fallback) {
     size_t pos = pulse::json::ValuePosition(json, key);
     if (pos == std::wstring::npos || pos == json.size()) return fallback;
@@ -50,6 +54,10 @@ void Normalize(PickerAppearanceSnapshot& value) {
     if (value.language != L"system" && value.language != L"en-US" && value.language != L"zh-CN" && value.language != L"zh-TW")
         value.language = L"system";
     value.ui_font_scale = FontScale(value.ui_font_scale);
+    // A family name wider than the typography buffer cannot be one the picker
+    // can use; keep the choice in range so the dropdown and the resolver agree.
+    if (value.ui_font_family.size() > kMaxPickerFamilyName) value.ui_font_family.clear();
+    if (value.ui_font_family_mono.size() > kMaxPickerFamilyName) value.ui_font_family_mono.clear();
     if (value.text_render < 0 || value.text_render > 2) value.text_render = 0;
     if (value.row_height < 24 || value.row_height > 48) value.row_height = 34;
     value.details_columns = ui::NormalizeDetailsColumns(value.details_columns);
@@ -72,6 +80,8 @@ PickerAppearanceSnapshot PickerAppearanceFromPrefs(const AppPrefs& prefs) {
     value.accent_follow_system = prefs.accent_follow_system;
     value.language = prefs.language;
     value.ui_font_scale = prefs.ui_font_scale;
+    value.ui_font_family = prefs.ui_font_family;
+    value.ui_font_family_mono = prefs.ui_font_family_mono;
     value.text_render = prefs.text_render;
     value.row_height = prefs.row_height;
     value.selection_outline = prefs.list_selection_outline;
@@ -95,6 +105,8 @@ bool ParsePickerAppearanceJson(const std::wstring& json, PickerAppearanceSnapsho
     value.accent_follow_system = Integer(json, L"accent_follow_system", 0) != 0;
     value.language = pulse::json::ExtractString(json, L"language", L"system");
     value.ui_font_scale = Integer(json, L"ui_font_scale", 100);
+    value.ui_font_family = pulse::json::ExtractString(json, L"ui_font_family");
+    value.ui_font_family_mono = pulse::json::ExtractString(json, L"ui_font_family_mono");
     value.text_render = Integer(json, L"text_render", 0);
     value.row_height = Integer(json, L"row_height", 34);
     value.selection_outline = pulse::json::ExtractBool(json, L"list_selection_outline", false);
