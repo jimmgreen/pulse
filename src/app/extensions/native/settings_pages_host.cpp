@@ -8,6 +8,7 @@
 #include "../../../ui/extension_panel.h"
 #include "../../../ui/ui_renderer.h"
 #include "../../../ui/settings_page_ids.h"
+#include "../../../ui/store_icons.h"
 #include <algorithm>
 #include <charconv>
 #include <map>
@@ -38,6 +39,7 @@ struct Entry {
     std::wstring title;
     bool has_page = false;
     uint64_t page = 0;
+    std::vector<SettingsTabDescriptor> tabs;
     bool has_commands = false;
     bool operator==(const Entry&) const = default;
 };
@@ -48,7 +50,11 @@ struct Host {
     size_t selected = 0;
     size_t requested = SIZE_MAX; // runtime package to select at the next sync
     int requested_mode = -1;     // -1: keep, 0: plugin settings, 1: context menu
+    int requested_plugin_tab = -1;
     int mode = 0;                // 0: plugin settings, 1: context menu
+    int active_plugin_tab = 0;
+    // Opened for one package (its store card, its own 设置 command): that package's page only, no chooser.
+    bool focused = false;
     bool menu_dirty = true;
     size_t menu_package = SIZE_MAX;
     bool visible = false, syncing = false;
@@ -61,134 +67,147 @@ int EffectiveMode(const Entry& entry, int desired) {
     if (entry.has_page && entry.has_commands) return desired == 1 ? 1 : 0;
     return entry.has_page ? 0 : 1;
 }
+// The real context-menu rows of one package (ContextMenuCommandRows, with the user's placement and
+// hidden commands applied) as menuPreview items: a heading starts a tinted group, a tinted row with
+// children is the collapsed submenu, plain rows stay flat.
+std::string PreviewGlyph(const ui::FluentMenuItem& item) {
+    if (item.custom_icon) return "icon:#" + std::to_string(item.custom_icon);
+    if (item.vector_icon != ui::StoreIcon::None) return "icon:#" + std::to_string(ui::StoreIconToId(item.vector_icon));
+    return {};
+}
+UiMenuItem PreviewItem(const ui::FluentMenuItem& item, const std::string& group) {
+    UiMenuItem out;
+    out.text = Utf8(item.text);
+    out.detail = Utf8(item.detail);
+    out.shortcut = Utf8(item.shortcut);
+    out.glyph = PreviewGlyph(item);
+    out.primary = item.primary;
+    out.checked = item.checked;
+    out.group = group;
+    for (const auto& child : item.children) {
+        out.children.push_back(PreviewItem(child, {}));
+        if (child.separator_after) { UiMenuItem sep; sep.separator = true; out.children.push_back(std::move(sep)); }
+    }
+    if (!out.children.empty() && out.children.back().separator) out.children.pop_back();
+    return out;
+}
+std::vector<UiMenuItem> PreviewMenu(AppState& owner, const std::string& package_id) {
+    std::vector<UiMenuItem> menu;
+    std::string group;
+    for (const auto& row : ContextMenuCommandRows(owner, nullptr, package_id, true)) {
+        if (row.heading) { group = Utf8(row.text); continue; }
+        if (!row.group_tint) group.clear();
+        const std::string row_group = !row.children.empty() && row.group_tint ? Utf8(row.text) : group;
+        menu.push_back(PreviewItem(row, row_group));
+        if (row.separator_after && row_group.empty()) { UiMenuItem sep; sep.separator = true; menu.push_back(std::move(sep)); }
+    }
+    while (!menu.empty() && menu.back().separator) menu.pop_back();
+    return menu;
+}
+
+// 右键菜单 tab: how the package joins the menu (four option cards) and its commands (icon rows with a
+// switch) on the left; the live right-click menu on the right, which drops below on a narrow window.
 UiTree BuildContextMenuTree(AppState& owner, const Entry& entry) {
+    using I = l10n::StringId;
     UiTree tree;
     tree.root.id = "ext-ctx-root";
     tree.root.gap = 12;
-
-    // Card 1: Menu placement selector
-    UiNode placement_card;
-    placement_card.id = "ext-ctx-placement-card";
-    placement_card.type = UiNodeType::Group;
-    placement_card.bordered = true;
-    placement_card.gap = 8;
-
-    UiNode placement_title;
-    placement_title.id = "ext-ctx-placement-title";
-    placement_title.type = UiNodeType::Text;
-    placement_title.text_role = "section";
-    placement_title.text = Utf8(l10n::Get(l10n::StringId::NativeExtMenuPlacementTitle));
-    placement_card.children.push_back(std::move(placement_title));
-
-    UiNode placement_desc;
-    placement_desc.id = "ext-ctx-placement-desc";
-    placement_desc.type = UiNodeType::Text;
-    placement_desc.text_role = "caption";
-    placement_desc.text = Utf8(l10n::Get(l10n::StringId::NativeExtMenuPlacementDesc));
-    placement_card.children.push_back(std::move(placement_desc));
-
-    UiNode seg;
-    seg.id = "ext-ctx-placement-seg";
-    seg.type = UiNodeType::Segmented;
-    seg.state = "placement";
-    seg.options = {
-        Utf8(l10n::Get(l10n::StringId::NativeExtMenuPlacementDefault)),
-        Utf8(l10n::Get(l10n::StringId::NativeExtMenuPlacementFlat)),
-        Utf8(l10n::Get(l10n::StringId::NativeExtMenuPlacementSubmenu)),
-        Utf8(l10n::Get(l10n::StringId::NativeExtMenuPlacementHidden)),
+    const auto text = [](const char* id, const std::wstring& value, const char* role) {
+        UiNode node; node.id = id; node.type = UiNodeType::Text; node.text_role = role; node.text = Utf8(value);
+        return node;
     };
-    placement_card.children.push_back(std::move(seg));
+    const auto card = [](const char* id, const std::wstring& title, int gap) {
+        UiNode node; node.id = id; node.type = UiNodeType::Group; node.bordered = true; node.gap = gap;
+        node.text = Utf8(title);
+        return node;
+    };
+
+    // How the commands join the menu.
     const int current_placement = static_cast<int>(owner.ctxMenuPrefs.PlacementForExtension(entry.package_id));
-    tree.state.push_back({"placement", std::to_string(current_placement)});
-    tree.root.children.push_back(std::move(placement_card));
+    UiNode placement_card = card("ext-ctx-placement-card", l10n::Get(I::NativeExtMenuPlacementTitle), 10);
+    placement_card.children.push_back(text("ext-ctx-placement-desc", l10n::Get(I::NativeExtMenuPlacementDesc), "caption"));
+    UiNode choices; choices.id = "ext-ctx-placement-grid"; choices.type = UiNodeType::Grid; choices.columns = 2; choices.gap = 8;
+    struct Choice { I title, detail; ui::StoreIcon icon; };
+    const Choice kChoices[4] = {
+        {I::NativeExtMenuPlacementDefault, I::NativeExtMenuPlacementDefaultDesc, ui::StoreIcon::Sparkle},
+        {I::NativeExtMenuPlacementFlat, I::NativeExtMenuPlacementFlatDesc, ui::StoreIcon::Lines},
+        {I::NativeExtMenuPlacementSubmenu, I::NativeExtMenuPlacementSubmenuDesc, ui::StoreIcon::ListView},
+        {I::NativeExtMenuPlacementHidden, I::NativeExtMenuPlacementHiddenDesc, ui::StoreIcon::Eye},
+    };
+    for (int i = 0; i < 4; ++i) {
+        UiNode option;
+        option.id = "ext-ctx-placement-" + std::to_string(i);
+        option.type = UiNodeType::OptionCard;
+        option.option_kind = "radio";
+        option.state = "placement" + std::to_string(i);
+        option.glyph = "icon:#" + std::to_string(ui::StoreIconToId(kChoices[i].icon));
+        option.text = Utf8(l10n::Get(kChoices[i].title));
+        option.detail = Utf8(l10n::Get(kChoices[i].detail));
+        choices.children.push_back(std::move(option));
+        tree.state.push_back({"placement" + std::to_string(i), i == current_placement ? "true" : "false"});
+    }
+    placement_card.children.push_back(std::move(choices));
 
-    // Card 2: Per-command visibility switches
-    UiNode commands_card;
-    commands_card.id = "ext-ctx-commands-card";
-    commands_card.type = UiNodeType::Group;
-    commands_card.bordered = true;
-    commands_card.gap = 8;
-
-    UiNode commands_title;
-    commands_title.id = "ext-ctx-commands-title";
-    commands_title.type = UiNodeType::Text;
-    commands_title.text_role = "section";
-    commands_title.text = Utf8(l10n::Get(l10n::StringId::NativeExtMenuCommandsTitle));
-    commands_card.children.push_back(std::move(commands_title));
-
-    UiNode commands_desc;
-    commands_desc.id = "ext-ctx-commands-desc";
-    commands_desc.type = UiNodeType::Text;
-    commands_desc.text_role = "caption";
-    commands_desc.text = Utf8(l10n::Get(l10n::StringId::NativeExtMenuCommandsDesc));
-    commands_card.children.push_back(std::move(commands_desc));
-
+    // Each command, with its own icon, on a row with a switch.
+    UiNode commands_card = card("ext-ctx-commands-card", l10n::Get(I::NativeExtMenuCommandsTitle), 2);
+    commands_card.children.push_back(text("ext-ctx-commands-desc", l10n::Get(I::NativeExtMenuCommandsDesc), "caption"));
     const auto commands = KnownPackageCommands(owner, entry.package);
     bool any_hidden_override = current_placement != 0;
     if (commands.empty()) {
-        UiNode empty;
-        empty.id = "ext-ctx-commands-empty";
-        empty.type = UiNodeType::Text;
-        empty.text = Utf8(l10n::Get(l10n::StringId::NativeExtMenuCommandsEmpty));
-        commands_card.children.push_back(std::move(empty));
-    } else {
-        for (size_t i = 0; i < commands.size(); ++i) {
-            const auto& cmd = commands[i];
-            const bool visible = owner.ctxMenuPrefs.ExtensionCommandVisible(cmd.identity);
-            if (!visible) any_hidden_override = true;
-
-            UiNode row;
-            row.id = "ext-ctx-cmd-row-" + std::to_string(i);
-            row.type = UiNodeType::Stack;
-            row.orientation = "horizontal";
-            row.alignment = "center";
-            row.gap = 8;
-
-            UiNode left;
-            left.id = "ext-ctx-cmd-left-" + std::to_string(i);
-            left.type = UiNodeType::Stack;
-            left.orientation = "vertical";
-            left.gap = 2;
-            left.flex = 1;
-
-            UiNode label;
-            label.id = "ext-ctx-cmd-label-" + std::to_string(i);
-            label.type = UiNodeType::Text;
-            label.glyph = "icon:#" + std::to_string(cmd.icon);
-            label.text = cmd.title;
-            left.children.push_back(std::move(label));
-
-            if (cmd.hidden_by_plugin) {
-                UiNode note;
-                note.id = "ext-ctx-cmd-note-" + std::to_string(i);
-                note.type = UiNodeType::Text;
-                note.text_role = "caption";
-                note.text = Utf8(l10n::Get(l10n::StringId::NativeExtMenuHiddenByPlugin));
-                left.children.push_back(std::move(note));
-            }
-            row.children.push_back(std::move(left));
-
-            const std::string state_key = "cmd:" + cmd.identity;
-            UiNode toggle;
-            toggle.id = "ext-ctx-cmd-sw-" + std::to_string(i);
-            toggle.type = UiNodeType::Switch;
-            toggle.state = state_key;
-            row.children.push_back(std::move(toggle));
-            tree.state.push_back({state_key, visible ? "true" : "false"});
-            commands_card.children.push_back(std::move(row));
-        }
+        commands_card.children.push_back(text("ext-ctx-commands-empty", l10n::Get(I::NativeExtMenuCommandsEmpty), "body"));
     }
-    tree.root.children.push_back(std::move(commands_card));
+    for (size_t i = 0; i < commands.size(); ++i) {
+        const auto& cmd = commands[i];
+        const bool visible = owner.ctxMenuPrefs.ExtensionCommandVisible(cmd.identity);
+        if (!visible) any_hidden_override = true;
+        UiNode row;
+        row.id = "ext-ctx-cmd-row-" + std::to_string(i);
+        row.type = UiNodeType::SettingsRow;
+        row.bordered = false;
+        row.glyph = "icon:#" + std::to_string(ui::IsCustomExtensionIcon(cmd.icon)
+            ? cmd.icon : ui::StoreIconToId(ui::StoreCommandIconFor(cmd.icon, cmd.identity)));
+        row.text = cmd.title;
+        if (cmd.hidden_by_plugin) row.detail = Utf8(l10n::Get(I::NativeExtMenuHiddenByPlugin));
+        const std::string state_key = "cmd:" + cmd.identity;
+        UiNode toggle;
+        toggle.id = "ext-ctx-cmd-sw-" + std::to_string(i);
+        toggle.type = UiNodeType::Switch;
+        toggle.state = state_key;
+        toggle.min_width = toggle.max_width = 48;
+        row.children.push_back(std::move(toggle));
+        tree.state.push_back({state_key, visible ? "true" : "false"});
+        commands_card.children.push_back(std::move(row));
+    }
 
+    UiNode settings_column; settings_column.id = "ext-ctx-settings"; settings_column.type = UiNodeType::Stack;
+    settings_column.gap = 12; settings_column.flex = 1; settings_column.min_width = 420;
+    settings_column.children.push_back(std::move(placement_card));
+    settings_column.children.push_back(std::move(commands_card));
     if (any_hidden_override) {
         UiNode reset_btn;
         reset_btn.id = "ext-ctx-reset";
         reset_btn.type = UiNodeType::Button;
         reset_btn.command = "reset-menu";
-        reset_btn.glyph = "icon:undo";
-        reset_btn.text = Utf8(l10n::Get(l10n::StringId::NativeExtMenuResetOverrides));
-        tree.root.children.push_back(std::move(reset_btn));
+        reset_btn.glyph = "icon:#" + std::to_string(ui::StoreIconToId(ui::StoreIcon::Undo));
+        reset_btn.text = Utf8(l10n::Get(I::NativeExtMenuResetOverrides));
+        settings_column.children.push_back(std::move(reset_btn));
     }
+
+    // The live menu: the host frame around this package's rows as they are right now.
+    UiNode preview_card = card("ext-ctx-preview-card", l10n::Get(I::NativeExtMenuPreviewTitle), 10);
+    preview_card.min_width = preview_card.max_width = 320;
+    preview_card.children.push_back(text("ext-ctx-preview-desc", l10n::Get(I::NativeExtMenuPreviewDesc), "caption"));
+    UiNode menu; menu.id = "ext-ctx-preview-menu"; menu.type = UiNodeType::MenuPreview; menu.menu_kind = "context";
+    menu.menu = PreviewMenu(owner, entry.package_id);
+    const bool hidden = menu.menu.empty();
+    preview_card.children.push_back(std::move(menu));
+    if (hidden) preview_card.children.push_back(text("ext-ctx-preview-hidden", l10n::Get(I::NativeExtMenuPreviewHidden), "caption"));
+
+    UiNode columns; columns.id = "ext-ctx-columns"; columns.type = UiNodeType::Stack; columns.orientation = "horizontal";
+    columns.gap = 16;
+    columns.children.push_back(std::move(settings_column));
+    columns.children.push_back(std::move(preview_card));
+    tree.root.children.push_back(std::move(columns));
     return tree;
 }
 }
@@ -199,8 +218,72 @@ void CloseSettingsPagesHost(HWND owner) {
 void RequestSettingsPagesPackage(HWND owner, size_t package) {
     auto found = hosts.find(owner);
     if (found == hosts.end()) found = hosts.emplace(owner, std::make_unique<Host>()).first;
+    if (found->second->requested != package) found->second->requested_plugin_tab = 0;
     found->second->requested = package;
     found->second->requested_mode = 0;
+}
+std::wstring FocusedSettingsTitle(HWND owner) {
+    const auto found = hosts.find(owner);
+    if (found == hosts.end()) return {};
+    const auto& host = *found->second;
+    if (host.requested == SIZE_MAX)
+        return host.focused && host.selected < host.entries.size() ? host.entries[host.selected].title : std::wstring{};
+    if (auto* pages = PackageSettings(owner, host.requested))
+        if (const auto page = pages->Page(); page && !page->title.empty()) return page->title;
+    const auto* manifest = PackageManifest(host.requested);
+    return manifest ? Wide(manifest->name) : std::wstring{};
+}
+void BindSettingsPagesPath(HWND owner, std::wstring_view path) {
+    constexpr std::wstring_view prefix = L"native-extensions/";
+    if (!path.starts_with(prefix)) return;
+    const auto id = Utf8(std::wstring(path.substr(prefix.size())));
+    for (size_t package = 0; package < PackageCount(); ++package) {
+        const auto* manifest = PackageManifest(package);
+        if (!manifest || !manifest->native || !PackageEnabled(package) || manifest->id != id) continue;
+        const auto current = FocusedSettings(owner);
+        if (current.package_id != id) RequestSettingsPagesPackage(owner, package);
+        return;
+    }
+}
+FocusedSettingsInfo FocusedSettings(HWND owner) {
+    FocusedSettingsInfo info;
+    const auto found = hosts.find(owner);
+    if (found == hosts.end()) return info;
+    const auto& host = *found->second;
+    size_t package = SIZE_MAX;
+    if (host.requested != SIZE_MAX) package = host.requested;
+    else if (host.focused && host.selected < host.entries.size()) package = host.entries[host.selected].package;
+    if (package == SIZE_MAX) return info;
+    if (const auto* manifest = PackageManifest(package)) info.package_id = manifest->id;
+    info.mode = host.requested != SIZE_MAX && host.requested_mode >= 0 ? host.requested_mode : host.mode;
+    for (const auto& entry : host.entries)
+        if (entry.package == package) info.has_menu = entry.has_page && entry.has_commands;
+    if (const auto* pages = PackageSettings(owner, package)) {
+        for (const auto& t : pages->Tabs()) {
+            info.plugin_tabs.push_back({t.id, t.tab_id, t.title});
+        }
+        const int req_tab = host.requested_plugin_tab >= 0 ? host.requested_plugin_tab : host.active_plugin_tab;
+        if (!info.plugin_tabs.empty()) {
+            info.active_plugin_tab = (std::clamp)(req_tab, 0, static_cast<int>(info.plugin_tabs.size()) - 1);
+            const auto st = pages->PageStatus(info.plugin_tabs[static_cast<size_t>(info.active_plugin_tab)].page);
+            info.status_kind = st.kind;
+            info.status_text = st.text;
+        }
+    }
+    return info;
+}
+void SetFocusedSettingsMode(HWND owner, int mode) {
+    const auto found = hosts.find(owner);
+    if (found == hosts.end()) return;
+    // As RequestSettingsPagesContextMenu does: the next sync rebuilds the page in that mode.
+    found->second->requested_mode = mode == 1 ? 1 : 0;
+    InvalidateRect(owner, nullptr, FALSE);
+}
+void SetFocusedSettingsPluginTab(HWND owner, int tab_index) {
+    const auto found = hosts.find(owner);
+    if (found == hosts.end()) return;
+    found->second->requested_plugin_tab = (std::max)(0, tab_index);
+    InvalidateRect(owner, nullptr, FALSE);
 }
 void RequestSettingsPagesContextMenu(HWND owner, size_t package) {
     auto found = hosts.find(owner);
@@ -225,11 +308,13 @@ void SyncSettingsPagesHost(AppState& owner, const ui::WindowViewModel& vm) {
     if (host.syncing) return;
     host.syncing = true;
     struct Unlock { bool& value; ~Unlock() { value = false; } } unlock{host.syncing};
+    const bool was_focused = host.focused;
+    if (host.requested != SIZE_MAX) host.focused = true;
     if (!host.visible) {
         PrepareCommandPackages(owner);
         for (size_t i = 0; i < PackageCount(); ++i) {
             const auto* manifest = PackageManifest(i);
-            if (!manifest || !manifest->native || !PackageEnabled(i) || PackageSessionLoaded(owner.hwnd, i)) continue;
+            if (!manifest || !manifest->native || !PackageEnabled(i) || PackageActive(owner.hwnd, i)) continue;
             if (std::find(manifest->resources.begin(), manifest->resources.end(), "settings.own") != manifest->resources.end())
                 EnsureCommandPackageStarted(owner, i);
         }
@@ -249,27 +334,36 @@ void SyncSettingsPagesHost(AppState& owner, const ui::WindowViewModel& vm) {
     for (size_t i = 0; i < PackageCount(); ++i) {
         const auto* manifest = PackageManifest(i);
         if (!manifest || !manifest->native || !PackageEnabled(i)) continue;
-        std::optional<SettingsPageDescriptor> page_info;
-        if (auto* pages = PackageSettings(owner.hwnd, i)) page_info = pages->Page();
+        std::vector<SettingsTabDescriptor> tabs;
+        if (auto* pages = PackageSettings(owner.hwnd, i)) tabs = pages->Tabs();
         const bool has_cmds = !KnownPackageCommands(owner, i).empty();
-        if (!page_info && !has_cmds) continue;
+        if (tabs.empty() && !has_cmds) continue;
         Entry item;
         item.package = i;
         item.package_id = manifest->id;
-        item.has_page = page_info.has_value();
-        item.page = page_info ? page_info->id : 0;
-        item.title = page_info && !page_info->title.empty() ? page_info->title : Wide(manifest->name);
+        item.has_page = !tabs.empty();
+        item.page = tabs.empty() ? 0 : tabs.front().id;
+        item.title = !tabs.empty() && !tabs.front().title.empty() ? tabs.front().title : Wide(manifest->name);
+        item.tabs = std::move(tabs);
         item.has_commands = has_cmds;
         entries.push_back(std::move(item));
     }
     const bool changed = entries != host.entries;
     const size_t requested = std::exchange(host.requested, SIZE_MAX);
     const int req_mode = std::exchange(host.requested_mode, -1);
+    const int req_plugin_tab = std::exchange(host.requested_plugin_tab, -1);
+    const auto prev_pkg_before = host.selected < host.entries.size() ? host.entries[host.selected].package : SIZE_MAX;
+    if (requested != SIZE_MAX && requested != prev_pkg_before) {
+        host.active_plugin_tab = 0;
+    }
+    if (req_plugin_tab >= 0) {
+        host.active_plugin_tab = req_plugin_tab;
+    }
     if (req_mode >= 0) {
         host.mode = req_mode;
         host.menu_dirty = true;
     }
-    if (changed || !host.selector.IsOpen() || requested != SIZE_MAX || req_mode >= 0) {
+    if (changed || was_focused != host.focused || !host.selector.IsOpen() || requested != SIZE_MAX || req_mode >= 0) {
         const auto previous_pkg = host.selected < host.entries.size() ? host.entries[host.selected].package : SIZE_MAX;
         host.entries = std::move(entries);
         host.selected = 0;
@@ -288,9 +382,9 @@ void SyncSettingsPagesHost(AppState& owner, const ui::WindowViewModel& vm) {
         label.id = "settings-label";
         label.type = UiNodeType::Text;
         label.text = Utf8(l10n::Get(host.entries.empty() ? l10n::StringId::NativeExtensionSettingsEmpty : l10n::StringId::NativeExtensionSettingsChoose));
-        if (host.entries.size() != 1 || host.entries.empty())
+        if (!host.focused && (host.entries.size() != 1 || host.entries.empty()))
             tree.root.children.push_back(std::move(label));
-        if (host.entries.size() > 1) {
+        if (!host.focused && host.entries.size() > 1) {
             UiNode select;
             select.id = "settings-package";
             select.type = UiNodeType::Select;
@@ -299,7 +393,7 @@ void SyncSettingsPagesHost(AppState& owner, const ui::WindowViewModel& vm) {
             tree.root.children.push_back(std::move(select));
             tree.state.push_back({"package", std::to_string(host.selected)});
         }
-        if (has_both_tabs) {
+        if (has_both_tabs && !host.focused) {
             UiNode mode_seg;
             mode_seg.id = "settings-mode";
             mode_seg.type = UiNodeType::Segmented;
@@ -343,11 +437,15 @@ void SyncSettingsPagesHost(AppState& owner, const ui::WindowViewModel& vm) {
 
     const bool has_both_tabs = host.selected < host.entries.size() &&
         host.entries[host.selected].has_page && host.entries[host.selected].has_commands;
-    const bool hide_header = host.entries.size() == 1 && !has_both_tabs;
+    const bool single = host.focused || host.entries.size() == 1;
+    // Opened for one package: its page fills the area (its 右键菜单 view opens from that package's own entry).
+    const bool hide_header = host.focused || (single && !host.entries.empty() && !has_both_tabs);
     const LONG header_dip = host.entries.empty() ? 64
-        : (host.entries.size() > 1 && has_both_tabs ? 148 : (host.entries.size() > 1 ? 104 : 52));
+        : single ? 52 : (has_both_tabs ? 148 : 104);
     const LONG header_bottom = hide_header ? bounds.top : std::min(bounds.bottom, bounds.top + static_cast<LONG>(header_dip * owner.scale));
     RECT header{bounds.left, bounds.top, bounds.right, header_bottom};
+    const D2D1_COLOR_F wash = owner.renderer.EmbeddedBackdropWash();
+    host.selector.SetEmbeddedWash(wash);
     host.selector.UpdateDocked(header, owner.darkMode, owner.accentColor, owner.scale);
     ShowWindow(host.selector.Hwnd(), hide_header ? SW_HIDE : SW_SHOWNOACTIVATE);
 
@@ -366,10 +464,23 @@ void SyncSettingsPagesHost(AppState& owner, const ui::WindowViewModel& vm) {
         if (active_mode == 0) {
             if (host.menu_panel.Hwnd()) ShowWindow(host.menu_panel.Hwnd(), SW_HIDE);
             if (auto* pages = PackageSettings(owner.hwnd, entry.package)) {
-                pages->Show(entry.page, body, owner.darkMode, owner.accentColor, owner.scale);
+                if (!entry.tabs.empty()) {
+                    host.active_plugin_tab = (std::clamp)(host.active_plugin_tab, 0, static_cast<int>(entry.tabs.size()) - 1);
+                } else {
+                    host.active_plugin_tab = 0;
+                }
+                const uint64_t show_page = !entry.tabs.empty() ? entry.tabs[static_cast<size_t>(host.active_plugin_tab)].id : entry.page;
+                pages->Show(show_page, body, owner.darkMode, owner.accentColor, owner.scale, wash);
             }
         } else {
-            if (host.menu_dirty || !host.menu_panel.IsOpen() || host.menu_package != entry.package) {
+            if (host.menu_dirty && host.menu_panel.IsOpen() && host.menu_package == entry.package) {
+                // Same package: refresh in place so the scroll position and focus survive.
+                host.menu_dirty = false;
+                const auto tree = BuildContextMenuTree(owner, entry);
+                host.menu_panel.UpdateTree(tree);
+                host.menu_panel.SetTreeStates(tree.state);
+                host.menu_panel.UpdateDocked(body, owner.darkMode, owner.accentColor, owner.scale);
+            } else if (host.menu_dirty || !host.menu_panel.IsOpen() || host.menu_package != entry.package) {
                 host.menu_package = entry.package;
                 host.menu_dirty = false;
                 const std::string pkg_id = entry.package_id;
@@ -381,20 +492,11 @@ void SyncSettingsPagesHost(AppState& owner, const ui::WindowViewModel& vm) {
                 spec.tree_callbacks.on_state_changed = [window, pkg_id](uint64_t, const std::vector<ui::ExtensionStateChange>& changes) {
                     auto* state = IsWindow(window) ? reinterpret_cast<AppState*>(GetWindowLongPtrW(window, GWLP_USERDATA)) : nullptr;
                     if (!state) return;
-                    const std::string prefix = "native:" + pkg_id + ":";
-                    const auto has_override = [&] {
-                        if (state->ctxMenuPrefs.PlacementForExtension(pkg_id) != app::ExtensionMenuPlacement::Default) return true;
-                        return std::any_of(state->ctxMenuPrefs.extension_hidden_commands.begin(),
-                                           state->ctxMenuPrefs.extension_hidden_commands.end(),
-                                           [&](const std::string& id) { return id.starts_with(prefix); });
-                    };
-                    const bool before = has_override();
                     bool mutated = false;
                     for (const auto& change : changes) {
-                        if (change.key == "placement") {
-                            int idx = 0;
-                            const auto res = std::from_chars(change.value.data(), change.value.data() + change.value.size(), idx);
-                            if (res.ec == std::errc{} && idx >= 0 && idx <= 3) {
+                        if (change.key.size() == 10 && change.key.starts_with("placement") && change.value == "true") {
+                            const int idx = change.key[9] - '0';
+                            if (idx >= 0 && idx <= 3) {
                                 state->ctxMenuPrefs.SetExtensionPlacement(pkg_id, static_cast<app::ExtensionMenuPlacement>(idx));
                                 mutated = true;
                             }
@@ -405,9 +507,8 @@ void SyncSettingsPagesHost(AppState& owner, const ui::WindowViewModel& vm) {
                     }
                     if (mutated) {
                         if (!state->isolatedTest) state->ctxMenuPrefs.Save();
-                        if (before != has_override()) {
-                            if (const auto it = hosts.find(window); it != hosts.end()) it->second->menu_dirty = true;
-                        }
+                        // The preview, the radio choice and the reset button all follow the change.
+                        if (const auto it = hosts.find(window); it != hosts.end()) it->second->menu_dirty = true;
                         InvalidateRect(window, nullptr, FALSE);
                     }
                 };
@@ -433,6 +534,7 @@ void SyncSettingsPagesHost(AppState& owner, const ui::WindowViewModel& vm) {
             } else {
                 host.menu_panel.UpdateDocked(body, owner.darkMode, owner.accentColor, owner.scale);
             }
+            host.menu_panel.SetEmbeddedWash(wash);
             ShowWindow(host.menu_panel.Hwnd(), SW_SHOWNOACTIVATE);
         }
     } else if (host.menu_panel.Hwnd()) {
@@ -440,4 +542,21 @@ void SyncSettingsPagesHost(AppState& owner, const ui::WindowViewModel& vm) {
     }
     host.visible = true;
 }
+#ifdef PULSE_WITH_SELFTEST
+bool ProbeSettingsPagesFocusRetention(AppState& owner, const ui::WindowViewModel& detail) {
+    if (!owner.isolatedTest || hosts.contains(owner.hwnd) || PackageCount() != 0) return false;
+    RequestSettingsPagesPackage(owner.hwnd, 0);
+    SyncSettingsPagesHost(owner, detail);
+    auto& host = *hosts.at(owner.hwnd);
+    const bool entered = host.focused && host.visible;
+    auto hidden = detail;
+    hidden.settings_open = false;
+    SyncSettingsPagesHost(owner, hidden);
+    const bool left = !host.visible;
+    SyncSettingsPagesHost(owner, detail);
+    const bool returned = host.focused && host.visible;
+    CloseSettingsPagesHost(owner.hwnd);
+    return entered && left && returned;
+}
+#endif
 }

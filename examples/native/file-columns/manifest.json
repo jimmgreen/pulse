@@ -1,0 +1,10 @@
+{
+  "apiVersion": 1,
+  "id": "sample.native-file-columns",
+  "name": "File columns example",
+  "resources": [
+    "files.readDirectory",
+    "operations.own",
+    "settings.own"
+  ]
+}

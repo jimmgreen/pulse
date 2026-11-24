@@ -1,0 +1,6 @@
+# Fixture for pulse_native_app_test (regenerate: pulse_ext strings app_strings.tsv --output app_strings.gen.hpp --namespace app_strings)
+key	zh-CN	zh-TW	en
+Hello	你好	妳好	Hello
+Moved	已移动 {0} 个文件到 {1}	已移動 {0} 個檔案到 {1}	Moved {0} files to {1}
+OnlyChinese	仅中文		
+Tricky	引号"、反斜杠\\、换行\n、问号??=		quote" back\\slash\tTab??=

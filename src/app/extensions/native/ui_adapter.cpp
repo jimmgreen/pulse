@@ -21,7 +21,7 @@ struct PauseData {
     explicit PauseData(UiDataAdapter &value) : data(value) { data.Pause(true); }
     ~PauseData() { data.Pause(false); }
 };
-bool Text(PulseStringView input, std::string &output, size_t limit = 1024) {
+bool Text(PulseStringView input, std::string &output, size_t limit = 4096) {
     if (input.length > limit || (input.length && !input.data))
         return false;
     output.assign(input.data ? input.data : "", input.length);
@@ -36,7 +36,7 @@ bool Key(PulseStringView input, std::string &output) {
            });
 }
 bool States(const PulseUiState *input, uint32_t count, std::vector<UiStateEntry> &result) {
-    if (count > 32 || (count && !input))
+    if (count > 64 || (count && !input))
         return false;
     std::set<std::string> keys;
     for (uint32_t i = 0; i < count; ++i) {
@@ -435,9 +435,9 @@ struct UiAdapter::State : std::enable_shared_from_this<State> {
             if (!self.buttons.contains(node))
                 return self.Fail(PULSE_ERROR_ARGUMENT, PULSE_UI_MODEL_INTERFACE, "subscribe_click", node, "command",
                                  "command is not declared in model.commands");
-            if (self.subscriptions.size() + self.state_subscriptions.size() >= 128)
+            if (self.subscriptions.size() + self.state_subscriptions.size() >= 256)
                 return self.Fail(PULSE_ERROR_ARGUMENT, PULSE_UI_MODEL_INTERFACE, "subscribe_click", node, "",
-                                 "panel subscription limit (128) reached");
+                                 "panel subscription limit (256) reached");
             const auto id = ++next_identity;
             self.subscriptions.emplace(id, Subscription{id, node, callback, user});
             *token = id;
@@ -455,7 +455,7 @@ struct UiAdapter::State : std::enable_shared_from_this<State> {
             std::string key;
             if (!token || !callback || !sources || (sources & ~static_cast<uint32_t>(PULSE_UI_STATE_ALL)) ||
                 !Text(input, key, 64) || (!key.empty() && (!Key(input, key) || !self.panel.TreeStateValue(key))) ||
-                self.subscriptions.size() + self.state_subscriptions.size() >= 128)
+                self.subscriptions.size() + self.state_subscriptions.size() >= 256)
                 return self.Fail(PULSE_ERROR_ARGUMENT, PULSE_UI_EVENTS_INTERFACE_NAME, "subscribe_state", key, "key",
                                  "invalid state key, source mask, callback, or subscription limit reached");
             const auto id = ++next_identity;
@@ -615,11 +615,12 @@ bool UiAdapter::Embed() {
     if (GetCurrentThreadId() != state_->thread || state_->stopped || state_->panel.IsOpen()) return false;
     state_->embedded = true; return true;
 }
-bool UiAdapter::ShowEmbedded(RECT bounds, bool dark, D2D1_COLOR_F accent, float scale) {
+bool UiAdapter::ShowEmbedded(RECT bounds, bool dark, D2D1_COLOR_F accent, float scale, D2D1_COLOR_F wash) {
     const auto self = state_;
     if (!self->embedded || !self->Panel(self->panel_id) || bounds.right <= bounds.left || bounds.bottom <= bounds.top ||
         !std::isfinite(scale) || scale <= 0) return false;
     self->dark = dark; self->accent = accent; self->scale = std::clamp(scale, 0.75f, 4.0f);
+    self->panel.SetEmbeddedWash(wash);
     self->panel.UpdateDocked(bounds, dark, accent, self->scale);
     if (!(GetWindowLongPtrW(self->panel.Hwnd(), GWL_STYLE) & WS_VISIBLE)) ShowWindow(self->panel.Hwnd(), SW_SHOWNOACTIVATE);
     self->CaptureMount(); return true;

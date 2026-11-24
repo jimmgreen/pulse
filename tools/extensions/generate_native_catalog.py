@@ -33,6 +33,14 @@ EXPERIMENTAL_INTERFACES = (
     "pulse.diagnostics",
     "pulse.pickers",
     "pulse.workbench",
+    "pulse.tray",
+    "pulse.search",
+    "pulse.shell",
+    "pulse.associations",
+    "pulse.vfs",
+    "pulse.columns",
+    "pulse.statusbar",
+    "pulse.fileevents",
 )
 
 STABILITY_TIERS = {
@@ -65,7 +73,7 @@ def outputs():
     node_types = [{"name": name, "value": int(value)} for name, value in
                   re.findall(r"(PULSE_UI_MODEL_[A-Z_]+)\s*=\s*(\d+)", text)
                   if name != "PULSE_UI_MODEL_COUNT"]
-    if len(node_types) != 28 or "#pragma pack(push, 8)" not in text or "#pragma pack(pop)" not in text:
+    if len(node_types) != 39 or "#pragma pack(push, 8)" not in text or "#pragma pack(pop)" not in text:
         raise ValueError("Unexpected public UI model ABI")
     schema = json.loads((ROOT / "schemas/extensions/ui-model.schema.json").read_text(encoding="utf-8"))
     public_names = {''.join(part.title() if i else part.lower() for i, part in enumerate(item['name'].removeprefix('PULSE_UI_MODEL_').split('_'))) for item in node_types}
@@ -95,15 +103,18 @@ def outputs():
         "name": "pulse.ui.model", "version": 1, "header": "include/pulse/ui_model.h",
         "status": "developer-preview", "operations": ["create", "update", "subscribe_command", "set_states", "get_state", "unsubscribe", "close"],
         "sharedOperations": "All UI creation, state and lifetime operations use this single table",
+        "continuousSlider": "Optional kind=continuous uses options=[min,max] numeric strings and a real floating-point state, not stops/index. Text is the label, helper is the unit, command fires after ordered state delivery on release/capture loss/keyboard completion; Escape restores drag-start state. Existing kind-absent sliders stay stepped. Requires this host build; C structs and numeric enum values are unchanged. Initial tree states max128; set_states and action update batches max64.",
         "nodeTypes": node_types,
         "headerContract": {"sha256": hashlib.sha256(header).hexdigest(), "text": text},
         "constraintSchema": "ui-model.schema.json",
         "fieldMapping": "C snake_case fields map to existing UiTree camelCase; data_columns maps DataTable columns; optional present=0 means absent. Header declares every field and borrowed array type.",
-        "limits": {"utf8Bytes": 65536, "nodes": 128, "depth": 8, "menuItems": 128, "menuDepth": 4, "dataRows": 4096, "dataDepth": 8, "nativeCommandIds": 128},
+        "limits": {"utf8Bytes": 262144, "nodes": 384, "depth": 12, "states": 128, "stateBatch": 64, "actions": 64, "stringBytes": 4096, "menuItems": 128, "menuDepth": 4, "dataRows": 4096, "dataDepth": 8, "nativeCommandIds": 256},
         "copying": "All strings/arrays copied synchronously into a temporary in-memory DOM for shared validation; no JSON text serialization/parsing; not zero-copy",
         "events": "Declared native command IDs, including menu/close/filter/sort/row, use subscribe_command; callback string is command ID, not node ID. Local actions update state without native callbacks.",
         "unavailable": ["non-null data_source", "context.* bindings", "non-null action.data_operation"],
-        "validationStatus": "28 general-purpose types represented; does not assert every interaction or theme/DPI capture passed"
+        "presentationExtras": "Optional PulseUiModelTree.extras keyed by node ID: padding (stack/grid/group, DIP 0..48), tooltip (non-container controls, <=256 UTF-8 bytes), pointer_state (canvas: declared state receiving \"move X Y\", \"leave\", \"click X Y\" in viewBox units before the command callback). A tree without extras may use size PULSE_UI_MODEL_TREE_SIZE_V1 so earlier hosts accept it; node record layout is unchanged.",
+        "typography": "text role: body, caption, section, bodyStrong, subtitle, title, code; text kind (tone): default, secondary, accent, success, warning, danger.",
+        "validationStatus": "39 general-purpose types represented; does not assert every interaction or theme/DPI capture passed"
     }
     data_header = (ROOT / "sdk/native/include/pulse/ui_data.h").read_bytes().replace(b"\r\n", b"\n")
     data_text = data_header.decode("utf-8")
@@ -272,6 +283,9 @@ def outputs():
         "model": "PULSE_PREVIEW_UI_MODEL uses borrowed PulseUiModelTree* model. Host converts and copies on the provider worker; Quick Preview and Details use existing docked controls. Local state/actions are supported; command_count > 0 returns UNAVAILABLE. Limits: 128 nodes, depth 8, 64 KiB. Non-null data_source, context.* bindings and action.data_operation remain unsupported.",
         "publish": "Call request.publish on the callback worker. It synchronously copies borrowed result strings, entries, pixels and UI model. At most one successful publish per callback; returning OK without a result fails. Request and contexts expire when callback returns.",
         "bitmap": "Premultiplied BGRA, positive dimensions, stride >= width*4 and byte_count == stride*height within limits.",
+        "thumbnails": "Appended PulsePreviewProvider.flags PULSE_PREVIEW_PROVIDER_THUMBNAIL (1) also routes grid thumbnails of local files for that extension to the same callback, on host thumbnail threads within the same two-call budget, with appended request.purpose PULSE_PREVIEW_PURPOSE_THUMBNAIL (1) and pixels = wanted longest edge. Only a BITMAP result is used; errors, other kinds, cancellation or no worker slot within ~2 s fall back to the system thumbnail. The host scales larger bitmaps down and caches results in memory and on disk by path, size and modified time. Descriptors sized without flags register as preview-only; unknown flag bits return ARGUMENT. C++: pulse::sdk::PreviewClient / PreviewContext, App::AddPreview(ext, fn, flags).",
+        "providerFlags": {name: int(value) for name, value in re.findall(r"(PULSE_PREVIEW_PROVIDER_THUMBNAIL)\s*=\s*(\d+)u?", preview["headerContract"]["text"])},
+        "purposes": {name: int(value) for name, value in re.findall(r"(PULSE_PREVIEW_PURPOSE_(?:PREVIEW|THUMBNAIL))\s*=\s*(\d+)u?", preview["headerContract"]["text"])},
         "cancellation": "Poll request.cancelled during work and return promptly. Cancellation discards results; stale selection results are not displayed. Unregister retires immediately and returns STATE while callbacks drain; retain userdata and retry on UI thread until OK or retain through destroy. Stop retains the DLL until all provider callbacks return.",
         "errors": "No exceptions cross ABI. Check publish status. Do not retain request/publish/cancel contexts, call UI APIs from workers, or free memory owned by the other side.",
         "unavailable": ["preview native command callbacks (command_count > 0)", "non-null data_source", "context.* bindings", "non-null action.data_operation"],
@@ -305,18 +319,24 @@ def outputs():
         "cleanup": "ID-only asynchronous release for unsubmitted or terminal stage; successful cleanup removes the ID. Cancel is cooperative and not rollback.",
         "documentation": "sdk/native/README.md"
     })
-    settings_pages = header_interface("settings_pages.h", "pulse.settings.pages", "PulseSettingsPagesV1",
-                                      "PULSE_SETTINGS_PAGES_INTERFACE_NAME", "PULSE_SETTINGS_PAGES_VERSION_1",
-                                      ["create", "query", "remove"])
+    settings_pages_v1 = header_interface("settings_pages.h", "pulse.settings.pages", "PulseSettingsPagesV1",
+                                          "PULSE_SETTINGS_PAGES_INTERFACE_NAME", "PULSE_SETTINGS_PAGES_VERSION_1",
+                                          ["create", "query", "remove"])
+    settings_pages = header_interface("settings_pages.h", "pulse.settings.pages", "PulseSettingsPagesV2",
+                                      "PULSE_SETTINGS_PAGES_INTERFACE_NAME", "PULSE_SETTINGS_PAGES_VERSION_2",
+                                      ["create", "query", "remove", "create_tab", "set_status", "set_side_preview"],
+                                      version=2)
     settings_pages.update({
         "thread": "Owner UI thread for all calls and callbacks",
-        "limits": {"pagesPerSession": 1},
-        "presentation": "One existing native UI-model tree embedded under the host extension settings section; independent of the main plugin panel",
-        "query": "Dedicated pulse.ui.model and pulse.ui.events tables; page IDs are panel IDs. No mount/data interfaces",
-        "lifetime": "Title/model arrays and strings copied synchronously; borrowed callback values expire at callback return. remove/stop invalidate page IDs and subscriptions. Keep callback userdata until callbacks return; dedicated contexts retained through session destroy",
+        "supportedVersions": [{"version": 1, "table": "PulseSettingsPagesV1", "operations": settings_pages_v1["operations"]},
+                              {"version": 2, "table": "PulseSettingsPagesV2", "operations": settings_pages["operations"]}],
+        "limits": {"pagesPerSession": 1, "tabsPerSession": 6, "titleUtf8Bytes": 128, "tabIdUtf8Bytes": 64, "tabTitleUtf8Bytes": 64, "statusTextUtf8Bytes": 128, "sidePreviewWidthDip": [240, 440]},
+        "presentation": "Up to 6 embedded UI-model settings tabs per package session (1 in V1), with optional header status pill and responsive side preview panel.",
+        "query": "Dedicated pulse.ui.model, pulse.ui.events, and pulse.ui.data tables per settings page; page IDs are panel IDs. No mount interface.",
+        "lifetime": "Title/descriptor/model arrays and strings copied synchronously; borrowed callback values expire at callback return. remove/stop invalidate page IDs and subscriptions. Keep callback userdata until callbacks return; dedicated contexts retained through session destroy",
         "persistence": "Use existing pulse.resources settings_get/settings_set with expected_version. Acceptance is not save completion; version_conflict never overwrites. Reload current revision, retain draft and require explicit retry",
-        "sample": "Archive destination and future compression format/level preferences; compression remains unimplemented",
-        "validationStatus": "P1.6 settings lifecycle and real-host persistence/conflict/theme/scroll acceptance recorded in the implementation roadmap",
+        "sample": "Archive destination and compression format/level preferences with live context menu preview",
+        "validationStatus": "V1+V2 settings lifecycle and real-host persistence/conflict/theme/scroll acceptance",
         "documentation": "sdk/native/README.md"
     })
     dialogs_v1 = header_interface("dialogs.h", "pulse.dialogs", "PulseDialogsV1",
@@ -338,13 +358,19 @@ def outputs():
         "sample": "extensions/7zip: password prompt, compression options and checksum results",
         "documentation": "sdk/native/include/pulse/dialogs.h"
     })
-    icons = header_interface("icons.h", "pulse.icons", "PulseIconsV1",
-                             "PULSE_ICONS_INTERFACE_NAME", "PULSE_ICONS_VERSION_1",
-                             ["register_icon", "update_icon", "unregister_icon", "resolve_builtin"])
+    icons_v1 = header_interface("icons.h", "pulse.icons", "PulseIconsV1",
+                                "PULSE_ICONS_INTERFACE_NAME", "PULSE_ICONS_VERSION_1",
+                                ["register_icon", "update_icon", "unregister_icon", "resolve_builtin"])
+    icons = header_interface("icons.h", "pulse.icons", "PulseIconsV2",
+                             "PULSE_ICONS_INTERFACE_NAME", "PULSE_ICONS_VERSION_2",
+                             ["register_icon", "update_icon", "unregister_icon", "resolve_builtin", "resolve_icon"],
+                             version=2)
     icons.update({
         "thread": "Owner UI thread for all calls",
-        "limits": {"dynamicIconsPerSession": 64, "layersPerIcon": 16, "pathBytesPerLayer": 4096, "totalPathBytes": 16384},
-        "presentation": "68 built-in Fluent StoreIcon vectors (0..67) plus multi-layer SVG path vector icons (M L H V C S A Z) with semantic theme colors (inherit, accent, success, warning, danger, RGB) cached per D2D factory",
+        "limits": {"dynamicIconsPerSession": 64, "layersPerIcon": 32, "pathBytesPerLayer": 2048, "totalPathBytes": 8192},
+        "supportedVersions": [{"version": 1, "table": "PulseIconsV1", "operations": icons_v1["operations"]},
+                              {"version": 2, "table": "PulseIconsV2", "operations": icons["operations"]}],
+        "presentation": "68 built-in Fluent StoreIcon vectors (0..67) plus multi-layer SVG path vector icons (M L H V C S A Z) with semantic theme colors (inherit, accent, success, warning, danger, RGB) cached per D2D factory; V2 resolve_icon resolves manifest contributes.icons, dynamic icons, qualified package/name, #id, and built-in names to PulseIconId",
         "lifetime": "Descriptor strings and layer arrays copied synchronously; dynamic icons unregistered automatically when session closes",
         "documentation": "sdk/native/include/pulse/icons.h"
     })
@@ -353,7 +379,7 @@ def outputs():
                                    ["get_last_error", "clear_last_error"])
     diagnostics.update({
         "thread": "Owner UI thread for all calls and synchronous callbacks",
-        "presentation": "Per-session structured failure record (status, monotonic sequence, interface_name, operation, subject, field, message) populated by pulse.ui.model, pulse.dialogs, pulse.settings.pages, pulse.pickers, and pulse.workbench.",
+        "presentation": "Per-session structured failure record (status, monotonic sequence, interface_name, operation, subject, field, message) populated by pulse.ui.model, pulse.dialogs, pulse.settings.pages, pulse.pickers, pulse.workbench, pulse.tray, pulse.search, pulse.shell, pulse.associations, pulse.vfs, and pulse.columns.",
         "lifetime": "get_last_error invokes callback synchronously; borrowed PulseStringView slices expire when callback returns. Successful host calls preserve the prior failure until clear_last_error.",
         "documentation": "sdk/native/include/pulse/diagnostics.h"
     })
@@ -367,18 +393,115 @@ def outputs():
         "lifetime": "Request inputs copied synchronously; callback runs at most once with outcome ACCEPTED, CANCELLED, or FAILED unless session stops first (which cancels open pickers and suppresses pending callbacks).",
         "documentation": "sdk/native/include/pulse/pickers.h"
     })
-    workbench = header_interface("workbench.h", "pulse.workbench", "PulseWorkbenchV1",
-                                 "PULSE_WORKBENCH_INTERFACE_NAME", "PULSE_WORKBENCH_VERSION_1",
-                                 ["show_snack", "show_notice", "reveal_path", "show_text_diff", "set_clipboard_text"])
+    workbench_v1 = header_interface("workbench.h", "pulse.workbench", "PulseWorkbenchV1",
+                                    "PULSE_WORKBENCH_INTERFACE_NAME", "PULSE_WORKBENCH_VERSION_1",
+                                    ["show_snack", "show_notice", "reveal_path", "show_text_diff", "set_clipboard_text"])
+    workbench_v2 = header_interface("workbench.h", "pulse.workbench", "PulseWorkbenchV2",
+                                    "PULSE_WORKBENCH_INTERFACE_NAME", "PULSE_WORKBENCH_VERSION_2",
+                                    ["show_snack", "show_notice", "reveal_path", "show_text_diff", "set_clipboard_text",
+                                     "open_search", "reveal_path_from_rect", "query_appearance",
+                                     "subscribe_appearance", "unsubscribe_appearance"],
+                                    version=2)
+    workbench = header_interface("workbench.h", "pulse.workbench", "PulseWorkbenchV3",
+                                 "PULSE_WORKBENCH_INTERFACE_NAME", "PULSE_WORKBENCH_VERSION_3",
+                                 ["show_snack", "show_notice", "reveal_path", "show_text_diff", "set_clipboard_text",
+                                  "open_search", "reveal_path_from_rect", "query_appearance",
+                                  "subscribe_appearance", "unsubscribe_appearance",
+                                  "query_locale", "subscribe_locale", "unsubscribe_locale"],
+                                 version=3)
     workbench.update({
-        "thread": "Owner UI thread for all calls and optional notification action callbacks",
-        "limits": {"actionsPerNotification": 2, "retainedActionTokens": 64, "snackTextBytes": 256, "noticeMessageBytes": 1024},
-        "presentation": "Capsule snacks, corner notice cards with optional action buttons, current-tab/new-tab/selection path reveal, built-in side-by-side text diff viewer, and clipboard UTF-8 text write.",
-        "lifetime": "Inputs copied synchronously; optional action callback fires at most once while session remains active; stopping session invalidates pending action tokens.",
+        "thread": "Owner UI thread for all calls, optional notification action callbacks, and appearance/locale subscriptions",
+        "limits": {"actionsPerNotification": 2, "retainedActionTokens": 64, "snackTextBytes": 256, "noticeMessageBytes": 1024, "appearanceSubscriptionsPerSession": 16, "localeSubscriptionsPerSession": 16, "searchQueryBytes": 512},
+        "supportedVersions": [{"version": 1, "table": "PulseWorkbenchV1", "operations": workbench_v1["operations"]},
+                              {"version": 2, "table": "PulseWorkbenchV2", "operations": workbench_v2["operations"]},
+                              {"version": 3, "table": "PulseWorkbenchV3", "operations": workbench["operations"]}],
+        "presentation": "Capsule snacks, corner notice cards with optional action buttons, current-tab/new-tab/selection path reveal (with optional V2 screen-space origin_rect and hidden-to-tray window reveal), search-tab launch, built-in side-by-side text diff viewer, clipboard UTF-8 text write, host appearance/backdrop/accent observation, and V3 host UI locale query/subscription. V2 reveal_path_from_rect also accepts PREVIEW=3, HOVER_PREVIEW=4, and DISMISS_HOVER_PREVIEW=5 without changing the interface layout. Preview modes use the host preview UI rather than navigating a file tab; hover respects host preview preferences and dwell and does not activate the owner. Dismiss must supply the same path as the hover request so stale cancellation cannot close a different target. Older hosts may return PULSE_ERROR_ARGUMENT or PULSE_ERROR_UNAVAILABLE for these modes; callers must handle that result rather than treating a successful V2 query as preview-mode support.",
+        "lifetime": "Inputs copied synchronously; optional action callback fires at most once while session remains active; appearance and locale subscriptions deliver deferred initial and coalesced updates on session pump; stopping session invalidates pending action tokens and subscriptions.",
         "documentation": "sdk/native/include/pulse/workbench.h"
     })
-    refreshed_names = ("pulse.ui", "pulse.ui.model", "pulse.ui.data", "pulse.directories", "pulse.context", "pulse.fileops", "pulse.ui.mount", "pulse.commands", "pulse.preview", "pulse.tasks", "pulse.staging", "pulse.settings.pages", "pulse.dialogs", "pulse.icons", "pulse.diagnostics", "pulse.pickers", "pulse.workbench")
-    catalog["interfaces"] = [item for item in catalog["interfaces"] if item["name"] not in refreshed_names] + [model, data, directories, context, fileops, mount, commands, preview, tasks, staging, settings_pages, dialogs, icons, diagnostics, pickers, workbench]
+    tray = header_interface("tray.h", "pulse.tray", "PulseTrayV1",
+                            "PULSE_TRAY_INTERFACE_NAME", "PULSE_TRAY_VERSION_1",
+                            ["snapshot", "collect", "remove_item", "clear", "release_to_directory", "subscribe", "unsubscribe"])
+    tray.update({
+        "thread": "Owner UI thread for all calls and synchronous/deferred snapshot callbacks",
+        "limits": {"collectPaths": 256, "subscriptionsPerSession": 16, "pathUtf8Bytes": 32768},
+        "presentation": "Bidirectional bridge to Pulse's shared StagingTray (AppCore::tray): synchronous snapshot inspection, batch collection with copy/move intent, item removal/clear, copy/move release to a destination directory, and coalesced revision subscriptions.",
+        "lifetime": "snapshot invokes callback synchronously; subscribe delivers deferred initial and coalesced updates on session pump; borrowed strings and PulseTrayEntry slices expire when callback returns.",
+        "documentation": "sdk/native/include/pulse/tray.h"
+    })
+    search = header_interface("search.h", "pulse.search", "PulseSearchV1",
+                              "PULSE_SEARCH_INTERFACE_NAME", "PULSE_SEARCH_VERSION_1",
+                              ["query", "cancel"])
+    search.update({
+        "thread": "Owner UI thread for query, cancel, and completion callbacks; search execution runs asynchronously on PulseIndex IPC or a bounded worker fallback",
+        "limits": {"activeRequestsPerSession": 16, "queryUtf8Bytes": 512, "kindTokenBytes": 64, "scopePathUtf8Bytes": 32768, "defaultMaxResults": 20, "maxResults": 50},
+        "presentation": "Bounded asynchronous search over PulseIndex (with kind_token expansion, Pinyin, folder/file filtering, and optional scope_directory), falling back to a cooperative-cancellable directory scan when the index service is disconnected.",
+        "lifetime": "Request inputs copied synchronously; callback runs at most once on owner UI thread unless cancelled or session closes first; borrowed PulseSearchHit slices expire when callback returns.",
+        "documentation": "sdk/native/include/pulse/search.h"
+    })
+    shell = header_interface("shell.h", "pulse.shell", "PulseShellV1",
+                             "PULSE_SHELL_INTERFACE_NAME", "PULSE_SHELL_VERSION_1",
+                             ["get_tag_catalog", "get_path_tags", "set_path_tag", "query_context_menu",
+                              "invoke_context_menu", "close_context_menu", "read_preview", "cancel_preview"])
+    shell.update({
+        "thread": "Owner UI thread for all calls and callbacks; context menus delegate out-of-process to pulse_shell_host.exe and preview thumbnails/excerpts read asynchronously on background workers",
+        "limits": {"menuPaths": 64, "activeMenuSessions": 4, "activePreviewRequests": 8, "textExcerptBytes": 1024, "thumbPxMin": 32, "thumbPxMax": 512, "pathUtf8Bytes": 32768},
+        "presentation": "Color tag catalog and per-path tag assignment (AppCore::places), out-of-process isolated Shell context menu query/invoke/close, and non-blocking Quick Look file metadata, UTF-8 text excerpt, and WIC premultiplied BGRA thumbnail summary.",
+        "lifetime": "Tag callbacks run synchronously; context menu replies stream partial/final callbacks until closed; preview callbacks run at most once on owner UI thread unless cancelled or session stops; borrowed slices expire when callbacks return.",
+        "documentation": "sdk/native/include/pulse/shell.h"
+    })
+    associations = header_interface("associations.h", "pulse.associations", "PulseAssociationsV1",
+                                    "PULSE_ASSOCIATIONS_INTERFACE_NAME", "PULSE_ASSOCIATIONS_VERSION_1",
+                                    ["query", "apply", "remove", "cancel", "open_chooser", "open_default_apps"])
+    associations.update({
+        "thread": "Owner UI thread for all calls and async callbacks; registry and IApplicationAssociationRegistration queries/updates run on a serialized host worker thread while OS chooser/settings dialogs launch on owner UI thread",
+        "limits": {"maxExtensionsPerRequest": 64, "activeRequestsPerSession": 16, "handlerIdBytes": 64, "extensionBytes": 32, "displayNameUtf8Bytes": 128, "verbLabelUtf8Bytes": 128, "iconResourceBytes": 128},
+        "presentation": "Host-managed reversible HKCU file association service restricted to extensions declared in manifest contributes.fileHandlers (never overwriting Windows UserChoice silently; restoring backed-up HKCU defaults automatically on package disable or uninstall).",
+        "lifetime": "Request inputs validated and copied synchronously; async callbacks run at most once on owner UI thread unless cancelled or session stops; borrowed PulseStringView slices expire when callbacks return.",
+        "documentation": "sdk/native/include/pulse/associations.h"
+    })
+    vfs = header_interface("vfs.h", "pulse.vfs", "PulseVfsV1",
+                           "PULSE_VFS_INTERFACE_NAME", "PULSE_VFS_VERSION_1",
+                           ["register_mount", "unregister_mount", "invalidate_path", "open_path"])
+    vfs.update({
+        "thread": "Owner UI thread for register_mount, unregister_mount, invalidate_path, and open_path; provider list_dir, extract_file, and stat callbacks execute asynchronously on host worker threads",
+        "limits": {"maxMountsPerSession": 32, "maxEntriesPerListing": 50000, "mountIdBytes": 64, "displayNameUtf8Bytes": 128, "iconGlyphUtf8Bytes": 16, "entryNameUtf8Bytes": 255, "relPathUtf8Bytes": 4096, "maxPathSegments": 64},
+        "presentation": "Read/extract Virtual File System provider registration under pulse:vfs:<package_id>/<mount_id>[/<rel_path>], integrating asynchronous directory listing, breadcrumb display names, temp extraction on file open, and session drain safety before DLL unload.",
+        "lifetime": "Mount descriptors copied synchronously; provider callbacks receive cooperative cancellation token that asserts automatically when host cancels or unregisters mount; Session::Drain waits for active provider calls via CallbackActive() before closing the module.",
+        "documentation": "sdk/native/include/pulse/vfs.h"
+    })
+    columns = header_interface("columns.h", "pulse.columns", "PulseColumnsV1",
+                               "PULSE_COLUMNS_INTERFACE_NAME", "PULSE_COLUMNS_VERSION_1",
+                               ["register_column", "register_badge", "set_title", "invalidate", "unregister"])
+    columns.update({
+        "thread": "Owner UI thread for register_column, register_badge, set_title, invalidate, and unregister; provider query callbacks execute asynchronously on a host worker thread in batches and must never wait for the UI thread",
+        "limits": {"columnsPerPackage": 4, "badgesPerPackage": 4, "batchItems": 64, "cellTextUtf8Bytes": 256, "idBytes": 64, "titleUtf8Bytes": 64, "extensionsBytes": 512, "cachedValuesPerProvider": 20000, "widthDipMin": 48, "widthDipMax": 480},
+        "presentation": "Display-only Details columns appended after the built-in columns and small icon badges at the top-right of item icons (one per item: the first provider in registration order wins), for local folders; the user hides or shows each provider from the column header menu and resizes its column; values are asked lazily for visible rows and cached until invalidate.",
+        "lifetime": "Descriptors copied synchronously; unregister returns once a running query for the provider has returned (is_cancelled reads nonzero meanwhile); session close unregisters every provider and waits for running queries before DLL unload.",
+        "documentation": "sdk/native/include/pulse/columns.h"
+    })
+    statusbar = header_interface("statusbar.h", "pulse.statusbar", "PulseStatusBarV1",
+                                 "PULSE_STATUSBAR_INTERFACE_NAME", "PULSE_STATUSBAR_VERSION_1",
+                                 ["add_item", "update_item", "set_visible", "remove_item"])
+    statusbar.update({
+        "thread": "Owner UI thread for add_item, update_item, set_visible, and remove_item; on_click callbacks run on the owner UI thread",
+        "limits": {"itemsPerPackage": 2, "idBytes": 64, "textUtf8Bytes": 64, "tooltipUtf8Bytes": 256, "iconBytes": 96},
+        "presentation": "Small text and/or icon items in the main window status bar after the folder text and the Git chip, in registration order, tinted by tone; a click runs the plugin callback and hovering shows the tooltip; items that no longer fit a narrow window are dropped whole.",
+        "lifetime": "Descriptors copied synchronously; remove_item returns after a click callback already running for the item has returned; session close removes every item of the package.",
+        "documentation": "sdk/native/include/pulse/statusbar.h"
+    })
+    fileevents = header_interface("fileevents.h", "pulse.fileevents", "PulseFileEventsV1",
+                                  "PULSE_FILEEVENTS_INTERFACE_NAME", "PULSE_FILEEVENTS_VERSION_1",
+                                  ["subscribe", "unsubscribe"])
+    fileevents.update({
+        "thread": "Owner UI thread for subscribe and unsubscribe; event callbacks run on the owner UI thread after the host applied the operation",
+        "limits": {"subscriptionsPerSession": 8, "itemsPerEvent": 1024},
+        "presentation": "Read-only notifications of file operations Pulse ran (copy, move, rename, recycle, delete, new folder/file, restore, empty Recycle Bin, including undo/redo and plugin requests), one event per operation with the items that really changed; changes made outside Pulse are not reported.",
+        "lifetime": "Event strings are borrowed for the callback; unsubscribe returns after a running callback for the subscription returned; session close removes every subscription.",
+        "documentation": "sdk/native/include/pulse/fileevents.h"
+    })
+    refreshed_names = ("pulse.ui", "pulse.ui.model", "pulse.ui.data", "pulse.directories", "pulse.context", "pulse.fileops", "pulse.ui.mount", "pulse.commands", "pulse.preview", "pulse.tasks", "pulse.staging", "pulse.settings.pages", "pulse.dialogs", "pulse.icons", "pulse.diagnostics", "pulse.pickers", "pulse.workbench", "pulse.tray", "pulse.search", "pulse.shell", "pulse.associations", "pulse.vfs", "pulse.columns", "pulse.statusbar", "pulse.fileevents")
+    catalog["interfaces"] = [item for item in catalog["interfaces"] if item["name"] not in refreshed_names] + [model, data, directories, context, fileops, mount, commands, preview, tasks, staging, settings_pages, dialogs, icons, diagnostics, pickers, workbench, tray, search, shell, associations, vfs, columns, statusbar, fileevents]
     from native_author_mcp import TOOLS
     catalog["authoring"] = {
         "mcpServer": "tools/extensions/native_author_mcp.py",
@@ -405,7 +528,7 @@ def outputs():
         if interface["name"] in ("pulse.files", "pulse.resources"):
             interface["resourceDeclarationPolicy"] = catalog["resourceDeclarationPolicy"]
     if {item["name"] for item in catalog["interfaces"]} != set(STABILITY_TIERS):
-        raise ValueError("Native interface catalog does not match expected 20-interface tier partition")
+        raise ValueError(f"Native interface catalog does not match expected {len(STABILITY_TIERS)}-interface tier partition")
     catalog["stability"] = {
         "sdkPreview": catalog["sdkPreview"],
         "abiMajor": 1,

@@ -18,14 +18,28 @@
 #include "icons_adapter.h"
 #include "pickers_adapter.h"
 #include "workbench_adapter.h"
+#include "tray_adapter.h"
+#include "search_adapter.h"
+#include "shell_adapter.h"
+#include "associations_adapter.h"
+#include "associations_adapter_host.h"
+#include "vfs_adapter.h"
+#include "columns_adapter.h"
+#include "statusbar_adapter.h"
+#include "fileevents_adapter.h"
+#include "vfs_adapter_host.h"
 #include "directories_adapter.h"
 #include "fileops_adapter.h"
 #include "../../../../sdk/native/include/pulse/ui_events.h"
 #include "../../../../sdk/native/include/pulse/ui_data.h"
 #include "../../../../sdk/native/include/pulse/ui_mount.h"
 #include "../runtime.h"
+#include "../command_projection_cache.h"
 #include "../../app_runtime.h"
 #include "../../app_input.h"
+#include "../../app_messages.h"
+#include "../../session.h"
+#include "../../../common/localization.h"
 #include "../../../common/runtime_log.h"
 #include "../../../ui/ui_renderer.h"
 #if __has_include("pulse_version.h")
@@ -39,6 +53,8 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <psapi.h>
 #include <string>
 #include <string_view>
@@ -132,6 +148,26 @@ std::wstring ResolvePackageRevision(const Manifest* manifest, std::string_view b
     return L"unversioned";
 }
 
+std::string EffectiveLanguageTag() {
+    switch (l10n::effective_language()) {
+    case l10n::Language::ZhTW: return "zh-TW";
+    case l10n::Language::EnUS: return "en-US";
+    case l10n::Language::ZhCN:
+    case l10n::Language::System:
+    default: return "zh-CN";
+    }
+}
+
+std::wstring ResolveProjectionDataRoot(const AppState& owner) {
+    if (owner.isolatedTest) {
+        wchar_t value[32768]{};
+        const DWORD size = GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", value, ARRAYSIZE(value));
+        if (!size || size >= ARRAYSIZE(value) || !std::filesystem::path(value).is_absolute()) return {};
+        return std::wstring(value, size);
+    }
+    return app::GetPulseDataDir();
+}
+
 class SlowUiCallbackScope final {
 public:
     SlowUiCallbackScope(std::string_view package_id, uint64_t session_id, std::wstring_view phase) noexcept
@@ -216,6 +252,12 @@ struct Session : std::enable_shared_from_this<Session> {
     std::wstring publisher_fingerprint = L"unsigned";
     std::wstring revision_tag = L"unversioned";
     std::wstring package_dir;
+    std::string projection_revision;
+    std::wstring projection_root;
+    bool projection_eligible = false;
+    bool projection_dirty = false;
+    ULONGLONG projection_dirty_since = 0;
+    std::optional<CommandProjectionSnapshot> last_persisted_projection;
     DWORD thread = GetCurrentThreadId();
     bool closing = false;
     bool close_failed = false;
@@ -241,6 +283,14 @@ struct Session : std::enable_shared_from_this<Session> {
     std::unique_ptr<DiagnosticsAdapter> diagnostics;
     std::unique_ptr<PickersAdapter> pickers;
     std::unique_ptr<WorkbenchAdapter> workbench;
+    std::unique_ptr<TrayAdapter> tray;
+    std::unique_ptr<SearchAdapter> search;
+    std::unique_ptr<ShellAdapter> shell;
+    std::unique_ptr<AssociationsAdapter> associations;
+    std::unique_ptr<VfsAdapter> vfs;
+    std::unique_ptr<ColumnsAdapter> columns;
+    std::unique_ptr<StatusBarAdapter> statusbar;
+    std::unique_ptr<FileEventsAdapter> fileevents;
     std::unique_ptr<IconsAdapter> icons;
     std::unique_ptr<DirectoriesAdapter> directories;
     std::unique_ptr<FileOpsAdapter> fileops;
@@ -264,6 +314,14 @@ struct Session : std::enable_shared_from_this<Session> {
         if (diagnostics && diagnostics->CallbackActive()) ++count;
         if (pickers && pickers->CallbackActive()) ++count;
         if (workbench && workbench->CallbackActive()) ++count;
+        if (tray && tray->CallbackActive()) ++count;
+        if (search && search->CallbackActive()) ++count;
+        if (shell && shell->CallbackActive()) ++count;
+        if (associations && associations->CallbackActive()) ++count;
+        if (vfs && vfs->CallbackActive()) ++count;
+        if (columns && columns->CallbackActive()) ++count;
+        if (statusbar && statusbar->CallbackActive()) ++count;
+        if (fileevents && fileevents->CallbackActive()) ++count;
         if (dialogs && dialogs->CallbackActive()) ++count;
         if (settings_pages && settings_pages->InCallback()) ++count;
         if (tasks && tasks->CallbackActive()) ++count;
@@ -312,10 +370,41 @@ struct Session : std::enable_shared_from_this<Session> {
         if (closing) return true;
         if (staging && staging->HasPendingWork()) return true;
         if (context && context->HasSubscriptions()) return true;
+        if (workbench && workbench->HasSubscriptions()) return true;
+        if (tray && tray->HasSubscriptions()) return true;
+        if (search && search->HasPendingWork()) return true;
+        if (shell && shell->HasPendingWork()) return true;
+        if (associations && associations->HasPendingWork()) return true;
         if (tasks && tasks->CallbackActive()) return true;
         if (directories && directories->HasPendingWatchStart()) return true;
         if (ui && (ui->IsSidebar() || ui->IsWorkspace() || IsWindow(ui->Window()))) return true;
+        if (projection_eligible && projection_dirty) return true;
         return false;
+    }
+    void FlushCommandProjection(bool force) noexcept {
+        try {
+            if (!projection_eligible || !commands || projection_revision.empty()) return;
+            if (!force && !projection_dirty) return;
+            CommandProjectionSnapshot snap;
+            snap.package_id = package_id;
+            snap.revision = projection_revision;
+            snap.language = EffectiveLanguageTag();
+            snap.commands = commands->ExportProjection();
+            const auto* manifest = PackageManifest(package);
+            const bool declared_commands = manifest && manifest->command_contributions_declared;
+            projection_dirty = false;
+            if (snap.commands.empty() && !declared_commands && !last_persisted_projection) return;
+            if (last_persisted_projection && *last_persisted_projection == snap) return;
+            command_projection::PublishLive(snap);
+            last_persisted_projection = snap;
+            if (!projection_root.empty()) {
+                if (auto* app = GetAppState(owner)) {
+                    app->worker.EnqueueIo([root = projection_root, snapshot = std::move(snap)] {
+                        (void)WriteCommandProjectionFile(root, snapshot);
+                    });
+                }
+            }
+        } catch (...) {}
     }
     void UpdateTimer() noexcept {
         if (!timer) {
@@ -332,6 +421,7 @@ struct Session : std::enable_shared_from_this<Session> {
     }
     void Stop() {
         if (closing) return;
+        FlushCommandProjection(true);
         closing = true;
         closing_since_tick = GetTickCount64();
         LARGE_INTEGER before{}, after{};
@@ -341,6 +431,14 @@ struct Session : std::enable_shared_from_this<Session> {
             if (pickers) pickers->Close();
             if (dialogs) dialogs->Close();
             if (workbench) workbench->Close();
+            if (tray) tray->Close();
+            if (search) search->Close();
+            if (shell) shell->Close();
+            if (associations) associations->Close();
+            if (vfs) vfs->Close();
+            if (columns) columns->Close();
+            if (statusbar) statusbar->Close();
+            if (fileevents) fileevents->Close();
             if (diagnostics) diagnostics->Close();
             if (settings_pages) settings_pages->Close();
             if (commands) commands->Close();
@@ -398,6 +496,19 @@ using SessionKey = std::pair<HWND, size_t>;
 auto& sessions = *new std::map<SessionKey, std::shared_ptr<Session>>;
 std::map<SessionKey, PulseStatus> last_status;
 std::map<SessionKey, uint64_t> command_attempts;
+std::map<SessionKey, uint64_t> preview_attempts;
+// Grid thumbnails: the decode lanes see which enabled packages could still
+// register a thumbnail provider (SDK OnStart runs at activation, packages
+// activate lazily). Written on the UI thread, read on any thread.
+struct ThumbnailPackages {
+    std::mutex mutex;
+    HWND owner = nullptr;                  // the window whose sessions serve them
+    bool any = false;                      // an inactive candidate takes every extension
+    std::set<std::string> extensions;      // ".ext" of inactive filtered candidates
+    std::set<std::string> wanted;          // asked for since the last activation
+    bool posted = false;
+};
+ThumbnailPackages& thumbnail_packages() { static ThumbnailPackages state; return state; }
 void RecordStatus(HWND owner, size_t package, PulseStatus status) {
     last_status[{owner, package}] = status;
     if (status == PULSE_OK) return;
@@ -431,6 +542,14 @@ PulseStatus PULSE_CALL Query(void* context, PulseStringView name, uint32_t versi
     if (Name(name, PULSE_DIALOGS_INTERFACE_NAME)) return session->dialogs->Query(version, out, size);
     if (Name(name, PULSE_PICKERS_INTERFACE_NAME)) return session->pickers->Query(version, out, size);
     if (Name(name, PULSE_WORKBENCH_INTERFACE_NAME)) return session->workbench->Query(version, out, size);
+    if (Name(name, PULSE_TRAY_INTERFACE_NAME)) return session->tray->Query(version, out, size);
+    if (Name(name, PULSE_SEARCH_INTERFACE_NAME)) return session->search->Query(version, out, size);
+    if (Name(name, PULSE_SHELL_INTERFACE_NAME)) return session->shell->Query(version, out, size);
+    if (Name(name, PULSE_ASSOCIATIONS_INTERFACE_NAME)) return session->associations->Query(version, out, size);
+    if (Name(name, PULSE_VFS_INTERFACE_NAME)) return session->vfs->Query(version, out, size);
+    if (Name(name, PULSE_COLUMNS_INTERFACE_NAME)) return session->columns->Query(version, out, size);
+    if (Name(name, PULSE_STATUSBAR_INTERFACE_NAME)) return session->statusbar->Query(version, out, size);
+    if (Name(name, PULSE_FILEEVENTS_INTERFACE_NAME)) return session->fileevents->Query(version, out, size);
     if (Name(name, PULSE_ICONS_INTERFACE_NAME)) return session->icons->Query(version, out, size);
     if (Name(name, PULSE_UI_MODEL_INTERFACE)) return session->ui->QueryModel(version, out, size);
     if (Name(name, PULSE_UI_DATA_INTERFACE)) return session->ui->QueryData(version, out, size);
@@ -471,9 +590,18 @@ void PumpSession(const std::shared_ptr<Session>& current) {
         }
         if (current->tasks) current->tasks->Poll();
         if (current->staging) current->staging->Poll();
+        if (!current->closing && current->workbench) current->workbench->Sync();
+        if (!current->closing && current->tray) current->tray->Sync();
+        if (!current->closing && current->search) current->search->Poll();
+        if (!current->closing && current->shell) current->shell->Poll();
+        if (!current->closing && current->associations) current->associations->Poll();
         if (!current->closing && current->previews) current->previews->Poll();
         if (!current->closing && current->context) current->context->Poll();
         if (!current->closing && current->directories) current->directories->Poll();
+        if (!current->closing && current->projection_eligible && current->projection_dirty &&
+            GetTickCount64() - current->projection_dirty_since >= 150) {
+            current->FlushCommandProjection(false);
+        }
     }
     current->RefreshTrackedModules();
     if (current->Drain()) {
@@ -583,6 +711,8 @@ bool Start(AppState& owner, size_t package, const std::wstring& path, bool activ
     session->publisher_fingerprint = ResolvePublisherFingerprint(package);
     session->revision_tag = ResolvePackageRevision(manifest, binding->Package().revision);
     session->package_dir = std::filesystem::path(path).parent_path().wstring();
+    session->projection_revision = manifest->native ? manifest->native->sha256 : std::string{};
+    session->projection_root = ResolveProjectionDataRoot(owner);
     const auto weak = std::weak_ptr<Session>(session);
     const auto wake_signal = session->wake_signal;
     const auto wake = [wake_signal]() noexcept { wake_signal->Request(); };
@@ -600,13 +730,41 @@ bool Start(AppState& owner, size_t package, const std::wstring& path, bool activ
     auto* dialogs_raw = session->dialogs.get();
     session->pickers = std::make_unique<PickersAdapter>(
         owner.hwnd, [dialogs_raw] { return dialogs_raw->ActiveModalWindow(); }, is_live, session->diagnostics_sink);
-    session->workbench = std::make_unique<WorkbenchAdapter>(owner.hwnd, is_live, session->diagnostics_sink);
+    session->workbench = std::make_unique<WorkbenchAdapter>(owner.hwnd, is_live, session->diagnostics_sink, wake);
+    session->tray = std::make_unique<TrayAdapter>(owner.hwnd, is_live, session->diagnostics_sink, wake);
+    session->search = std::make_unique<SearchAdapter>(owner.hwnd, is_live, session->diagnostics_sink, wake);
+    session->shell = std::make_unique<ShellAdapter>(owner.hwnd, is_live, session->diagnostics_sink, wake);
+    session->associations = std::make_unique<AssociationsAdapter>(
+        manifest->id,
+        manifest->file_handlers,
+        MakeAssociationsBackend(owner.hwnd, manifest->id, session->package_dir),
+        is_live,
+        session->diagnostics_sink,
+        wake);
+    session->vfs = std::make_unique<VfsAdapter>(
+        manifest->id,
+        MakeVfsBackend(owner.hwnd),
+        is_live,
+        session->diagnostics_sink,
+        wake);
+    session->columns = std::make_unique<ColumnsAdapter>(manifest->id, is_live, session->diagnostics_sink, wake);
+    session->statusbar = std::make_unique<StatusBarAdapter>(manifest->id, is_live, session->diagnostics_sink);
+    session->fileevents = std::make_unique<FileEventsAdapter>(manifest->id, is_live, session->diagnostics_sink);
     session->icons = std::make_unique<IconsAdapter>(manifest->id, is_live);
     session->files = std::make_unique<FilesAdapter>(owner, *binding);
     session->resources = std::make_unique<ResourcesAdapter>(owner, *binding);
     session->context = std::make_unique<ContextAdapter>(owner, *binding);
     session->context->SetWake(wake, manifest->id);
     session->commands = std::make_unique<CommandsAdapter>(owner.hwnd, manifest->id, session->context->Table(), is_live);
+    session->commands->SetOnChanged([weak]() noexcept {
+        if (const auto self = weak.lock()) {
+            if (!self->closing) {
+                self->projection_dirty = true;
+                self->projection_dirty_since = GetTickCount64();
+                self->UpdateTimer();
+            }
+        }
+    });
     session->previews = std::make_unique<PreviewsAdapter>(owner.hwnd, is_live, wake, manifest->id);
     session->tasks = std::make_unique<TasksAdapter>(owner.hwnd, is_live, MakeTasksBackend(owner.hwnd), wake, manifest->id);
     session->staging = std::make_unique<StagingAdapter>(owner.hwnd, is_live, MakeStagingBackend(owner.hwnd, *binding), wake, manifest->id);
@@ -683,6 +841,9 @@ bool Start(AppState& owner, size_t package, const std::wstring& path, bool activ
     if (attempted_activate) {
         session->EmitLifecycle(L"activate", session->activate_ms, PULSE_OK);
     }
+    session->projection_eligible = true;
+    session->projection_dirty = true;
+    session->projection_dirty_since = GetTickCount64();
     session->RefreshTrackedModules();
     session->UpdateTimer();
     RecordStatus(owner.hwnd, package, PULSE_OK);
@@ -728,6 +889,46 @@ bool StartPackage(AppState& owner, size_t package) {
     }
     return Start(owner, package, PackageNativePath(package));
 }
+bool BackgroundPackageEnabled() {
+    for (size_t package = 0; package < PackageCount(); ++package) {
+        if (!PackageEnabled(package)) continue;
+        const auto* manifest = PackageManifest(package);
+        if (manifest && manifest->native && manifest->id == "pulse.desktop") {
+            return true;
+        }
+    }
+    return false;
+}
+void StartBackgroundPackages(AppState& owner) {
+    if (!IsWindow(owner.hwnd)) return;
+    {
+        auto& thumbs = thumbnail_packages();
+        std::lock_guard lock(thumbs.mutex);
+        if (!thumbs.owner || !IsWindow(thumbs.owner)) {
+            thumbs.owner = owner.hwnd;
+            thumbs.wanted.clear();
+            thumbs.posted = false;
+        }
+    }
+    RefreshThumbnailPackages(owner.hwnd);
+    for (size_t package = 0; package < PackageCount(); ++package) {
+        if (!PackageEnabled(package)) continue;
+        const auto* manifest = PackageManifest(package);
+        if (!manifest || !manifest->native || manifest->id != "pulse.desktop") continue;
+        bool already_active = false;
+        for (const auto& [key, session] : sessions) {
+            if (key.second != package || !session || session->closing) continue;
+            if (IsWindow(key.first) && ValidateCallerBinding(session->caller) &&
+                session->module && session->module->Active()) {
+                already_active = true;
+                break;
+            }
+        }
+        if (!already_active) {
+            Start(owner, package, PackageNativePath(package), true);
+        }
+    }
+}
 bool PackageSessionLoaded(HWND owner, size_t package) {
     const auto found = sessions.find({owner, package});
     return found != sessions.end() && !found->second->closing &&
@@ -741,14 +942,16 @@ bool EnsureCommandPackageStarted(AppState& owner, size_t package) {
         command_attempts.erase(key);
         return false;
     }
-    if (PackageSessionLoaded(owner.hwnd, package)) return true;
+    // Activate, not just load: SDK App plugins register their commands (and
+    // everything else) in OnStart, which runs on activate.
+    if (PackageActive(owner.hwnd, package)) return true;
     const auto generation = PackageGeneration(package);
     if (command_attempts.contains(key) && command_attempts[key] == generation &&
         PackageLastStatus(owner.hwnd, package) != PULSE_OK) {
         return false;
     }
     command_attempts[key] = generation;
-    return Start(owner, package, PackageNativePath(package), false);
+    return Start(owner, package, PackageNativePath(package), true);
 }
 void PrepareCommandPackages(AppState& owner) {
     // Packages that declare static `contributes.commands` in manifest.json are
@@ -764,8 +967,114 @@ void PrepareCommandPackages(AppState& owner) {
         if (attempted.contains(key) && attempted[key] == generation && sessions.contains(key)) continue;
         if (attempted.contains(key) && attempted[key] == generation && PackageLastStatus(owner.hwnd, package) != PULSE_OK) continue;
         attempted[key] = generation;
-        Start(owner, package, PackageNativePath(package), false);
+        Start(owner, package, PackageNativePath(package), true);
     }
+    RefreshThumbnailPackages(owner.hwnd);
+}
+namespace {
+constexpr UINT_PTR kStartupPackagesTimer = 0x50535450;  // 'PSTP'
+constexpr UINT kStartupPackagesDelayMs = 400;           // after the first frames
+}  // namespace
+void ScheduleStartupPackages(HWND owner) {
+    if (IsWindow(owner)) SetTimer(owner, kStartupPackagesTimer, kStartupPackagesDelayMs, nullptr);
+}
+bool HandleStartupPackagesTimer(HWND window, WPARAM timer, AppState& owner) {
+    if (timer != kStartupPackagesTimer) return false;
+    KillTimer(window, kStartupPackagesTimer);
+    ActivateStartupPackages(owner);
+    return true;
+}
+void ActivateStartupPackages(AppState& owner) {
+    if (!IsWindow(owner.hwnd)) return;
+    for (size_t package = 0; package < PackageCount(); ++package) {
+        const auto* manifest = PackageManifest(package);
+        if (!manifest || !manifest->native || !PackageEnabled(package) || !manifest->StartsWithWindow() ||
+            manifest->id == "pulse.desktop" || PackageActive(owner.hwnd, package)) continue;
+        // Same per-build give-up as previews: a package that failed to start is not retried.
+        EnsurePreviewPackageActive(owner, package);
+    }
+    RefreshThumbnailPackages(owner.hwnd);
+}
+namespace {
+// Packages that may answer a preview request for `extension` (".ext", lower
+// case; empty: any extension). Packages without per-extension commands may
+// preview anything; the rest only the extensions their commands name.
+bool PreviewCandidate(const Manifest& manifest, std::string_view extension) {
+    if (!manifest.command_contributions_declared || manifest.command_contributions.empty()) return true;
+    if (extension.empty()) return false;
+    for (const auto& command : manifest.command_contributions)
+        if (!command.exclude_extensions &&
+            std::find(command.extensions.begin(), command.extensions.end(), extension) != command.extensions.end())
+            return true;
+    return false;
+}
+bool PreviewActivationGivenUp(HWND owner, size_t package) {
+    const auto found = preview_attempts.find({owner, package});
+    return found != preview_attempts.end() && found->second == PackageGeneration(package) &&
+        PackageLastStatus(owner, package) != PULSE_OK;
+}
+}  // namespace
+bool EnsurePreviewPackageActive(AppState& owner, size_t package) {
+    const auto* manifest = PackageManifest(package);
+    const auto key = std::make_pair(owner.hwnd, package);
+    if (!manifest || !manifest->native || !PackageEnabled(package) || !IsWindow(owner.hwnd)) {
+        preview_attempts.erase(key);
+        return false;
+    }
+    if (PackageActive(owner.hwnd, package)) return true;
+    if (PreviewActivationGivenUp(owner.hwnd, package)) return false;
+    preview_attempts[key] = PackageGeneration(package);
+    return Start(owner, package, PackageNativePath(package), true);
+}
+void ActivatePreviewPackages(AppState& owner, std::string_view extension) {
+    for (size_t package = 0; package < PackageCount(); ++package) {
+        const auto* manifest = PackageManifest(package);
+        if (!manifest || !manifest->native || !PackageEnabled(package) ||
+            PackageActive(owner.hwnd, package) || !PreviewCandidate(*manifest, extension)) continue;
+        EnsurePreviewPackageActive(owner, package);
+    }
+}
+void RefreshThumbnailPackages(HWND owner) {
+    auto& thumbs = thumbnail_packages();
+    {
+        std::lock_guard lock(thumbs.mutex);
+        if (!owner || thumbs.owner != owner) return;
+    }
+    bool any = false;
+    std::set<std::string> extensions;
+    for (size_t package = 0; package < PackageCount(); ++package) {
+        const auto* manifest = PackageManifest(package);
+        if (!manifest || !manifest->native || !PackageEnabled(package) ||
+            PackageActive(owner, package) || PreviewActivationGivenUp(owner, package)) continue;
+        if (PreviewCandidate(*manifest, {})) { any = true; continue; }
+        for (const auto& command : manifest->command_contributions)
+            if (!command.exclude_extensions) extensions.insert(command.extensions.begin(), command.extensions.end());
+    }
+    std::lock_guard lock(thumbs.mutex);
+    if (thumbs.owner != owner) return;
+    thumbs.any = any;
+    thumbs.extensions = std::move(extensions);
+}
+bool RequestThumbnailPackages(std::string_view extension) {
+    auto& thumbs = thumbnail_packages();
+    std::lock_guard lock(thumbs.mutex);
+    if (!thumbs.owner || extension.empty()) return false;
+    if (!thumbs.any && !thumbs.extensions.contains(std::string(extension))) return false;
+    thumbs.wanted.emplace(extension);
+    if (!thumbs.posted) thumbs.posted = PostMessageW(thumbs.owner, WM_PLUGIN_THUMBNAILS, 0, 0) != FALSE;
+    return thumbs.posted;
+}
+void ActivateThumbnailPackages(AppState& owner) {
+    std::set<std::string> wanted;
+    {
+        auto& thumbs = thumbnail_packages();
+        std::lock_guard lock(thumbs.mutex);
+        thumbs.posted = false;
+        if (thumbs.owner != owner.hwnd) return;
+        wanted.swap(thumbs.wanted);
+    }
+    for (const auto& extension : wanted) ActivatePreviewPackages(owner, extension);
+    RefreshThumbnailPackages(owner.hwnd);
 }
 PackageRuntimeSnapshot QueryPackageRuntime(HWND owner, size_t package) {
     const auto found = sessions.find({owner, package});
@@ -811,15 +1120,18 @@ PackageRuntimeSnapshot QueryPackageRuntime(size_t package) {
 }
 void StopPackage(HWND owner, size_t package) {
     command_attempts.erase({owner, package});
+    preview_attempts.erase({owner, package});
     const auto found = sessions.find({owner, package});
     if (found == sessions.end()) return;
     const auto session = found->second;
     session->Stop();
     if (session->Drain()) Retire(session);
     else session->UpdateTimer();
+    RefreshThumbnailPackages(owner);
 }
 void StopPackage(size_t package) {
     std::erase_if(command_attempts, [package](const auto& item) { return item.first.second == package; });
+    std::erase_if(preview_attempts, [package](const auto& item) { return item.first.second == package; });
     std::vector<HWND> owners;
     for (const auto& [key, session] : sessions) {
         (void)session;
@@ -837,6 +1149,18 @@ void StopOwner(HWND owner) {
     }
     for (const auto package : packages) StopPackage(owner, package);
     std::erase_if(command_attempts, [owner](const auto& entry) { return entry.first.first == owner; });
+    std::erase_if(preview_attempts, [owner](const auto& entry) { return entry.first.first == owner; });
+    {
+        auto& thumbs = thumbnail_packages();
+        std::lock_guard lock(thumbs.mutex);
+        if (thumbs.owner == owner) {
+            thumbs.owner = nullptr;
+            thumbs.any = false;
+            thumbs.extensions.clear();
+            thumbs.wanted.clear();
+            thumbs.posted = false;
+        }
+    }
     std::erase_if(last_status, [owner](const auto& entry) { return entry.first.first == owner; });
 }
 void StopAll() {
@@ -851,6 +1175,7 @@ void StopAll() {
     for (const auto& [owner, package] : keys) StopPackage(owner, package);
     last_status.clear();
     command_attempts.clear();
+    preview_attempts.clear();
 }
 SettingsPagesAdapter* PackageSettings(HWND owner, size_t package) {
     const auto found = sessions.find({owner, package});

@@ -10,6 +10,7 @@
 #include "../../app/extensions/authorization.h"
 #include "../../app/extensions/icon_registry.h"
 #include "../../app/extensions/manifest.h"
+#include "../../app/extensions/native/associations_adapter.h"
 #include "../../app/extensions/native/commands_adapter.h"
 #include "../../app/extensions/native/diagnostics_adapter.h"
 #include "../../app/extensions/native/dialogs_adapter.h"
@@ -17,13 +18,21 @@
 #include "../../app/extensions/native/icons_adapter.h"
 #include "../../app/extensions/native/module.h"
 #include "../../app/extensions/native/pickers_adapter.h"
+#include "../../app/extensions/native/search_adapter.h"
+#include "../../app/extensions/native/shell_adapter.h"
 #include "../../app/extensions/native/tasks_adapter.h"
+#include "../../app/extensions/native/tray_adapter.h"
 #include "../../app/extensions/native/ui_model.h"
+#include "../../app/extensions/native/vfs_adapter.h"
+#include "../../app/extensions/native/columns_adapter.h"
+#include "../../app/extensions/column_registry.h"
 #include "../../app/extensions/native/workbench_adapter.h"
 #include "../../app/extensions/ui_tree.h"
+#include "../../app/extensions/vfs_registry.h"
 #include "../../common/json_value.h"
 
 #include <pulse/abi.h>
+#include <pulse/associations.h>
 #include <pulse/commands.h>
 #include <pulse/context.h>
 #include <pulse/diagnostics.h>
@@ -36,13 +45,18 @@
 #include <pulse/pickers.h>
 #include <pulse/preview.h>
 #include <pulse/resources.h>
+#include <pulse/search.h>
 #include <pulse/settings_pages.h>
+#include <pulse/shell.h>
 #include <pulse/staging.h>
 #include <pulse/tasks.h>
+#include <pulse/tray.h>
 #include <pulse/ui_data.h>
 #include <pulse/ui_events.h>
 #include <pulse/ui_model.h>
 #include <pulse/ui_mount.h>
+#include <pulse/vfs.h>
+#include <pulse/columns.h>
 #include <pulse/workbench.h>
 
 #include <algorithm>
@@ -129,7 +143,7 @@ const char* InterfaceStabilityTier(std::string_view name) noexcept {
         "pulse.settings.pages",
         "pulse.dialogs",
     };
-    static constexpr std::array<std::string_view, 8> kExperimental = {
+    static constexpr std::array<std::string_view, 14> kExperimental = {
         "pulse.ui.model",
         "pulse.ui.events",
         "pulse.ui.data",
@@ -138,6 +152,12 @@ const char* InterfaceStabilityTier(std::string_view name) noexcept {
         "pulse.diagnostics",
         "pulse.pickers",
         "pulse.workbench",
+        "pulse.tray",
+        "pulse.search",
+        "pulse.shell",
+        "pulse.associations",
+        "pulse.vfs",
+        "pulse.columns",
     };
     if (std::find(kFrozen.begin(), kFrozen.end(), name) != kFrozen.end()) {
         return "frozen";
@@ -294,8 +314,8 @@ public:
             std::lock_guard lock(dispatch_mutex_);
             dispatch_closed_ = true;
             dispatch_queue_.clear();
+            deferred_ui_callbacks_.clear();
         }
-        deferred_ui_callbacks_.clear();
     }
 
     void AttachAdapters(
@@ -307,6 +327,12 @@ public:
         pulse::extensions::native::DialogsAdapter* dialogs,
         pulse::extensions::native::PickersAdapter* pickers,
         pulse::extensions::native::WorkbenchAdapter* workbench,
+        pulse::extensions::native::TrayAdapter* tray,
+        pulse::extensions::native::SearchAdapter* search,
+        pulse::extensions::native::ShellAdapter* shell,
+        pulse::extensions::native::AssociationsAdapter* associations,
+        pulse::extensions::native::VfsAdapter* vfs,
+        pulse::extensions::native::ColumnsAdapter* columns,
         std::shared_ptr<pulse::extensions::native::DiagnosticsSink> diagnostics_sink) noexcept {
         commands_ = commands;
         icons_ = icons;
@@ -316,11 +342,21 @@ public:
         dialogs_ = dialogs;
         pickers_ = pickers;
         workbench_ = workbench;
+        tray_ = tray;
+        search_ = search;
+        shell_ = shell;
+        associations_ = associations;
+        vfs_ = vfs;
+        columns_ = columns;
         diagnostics_sink_ = std::move(diagnostics_sink);
     }
 
     void DeferUiCallback(std::function<void()> fn) {
-        if (fn && live_.load(std::memory_order_acquire)) {
+        if (!fn || !live_.load(std::memory_order_acquire)) {
+            return;
+        }
+        std::lock_guard lock(dispatch_mutex_);
+        if (!dispatch_closed_) {
             deferred_ui_callbacks_.push_back(std::move(fn));
         }
     }
@@ -347,24 +383,39 @@ public:
     }
 
     bool HasPendingDeferred() const {
-        std::lock_guard lock(dispatch_mutex_);
-        return !dispatch_queue_.empty() || !deferred_ui_callbacks_.empty();
+        {
+            std::lock_guard lock(dispatch_mutex_);
+            if (!dispatch_queue_.empty() || !deferred_ui_callbacks_.empty()) {
+                return true;
+            }
+        }
+        if (search_ && search_->HasPendingWork()) return true;
+        if (shell_ && shell_->HasPendingWork()) return true;
+        if (associations_ && associations_->HasPendingWork()) return true;
+        return false;
     }
 
     size_t PumpDeferred() {
         size_t executed = 0;
         for (size_t pass = 0; pass < 16; ++pass) {
+            if (live_.load(std::memory_order_acquire)) {
+                if (workbench_) workbench_->Sync();
+                if (tray_) tray_->Sync();
+                if (search_) search_->Poll();
+                if (shell_) shell_->Poll();
+                if (associations_) associations_->Poll();
+            }
             std::vector<DispatchItem> batch;
+            std::vector<std::function<void()>> local_deferred;
             {
                 std::lock_guard lock(dispatch_mutex_);
                 if (!dispatch_closed_ && !dispatch_queue_.empty()) {
                     batch.assign(dispatch_queue_.begin(), dispatch_queue_.end());
                     dispatch_queue_.clear();
                 }
-            }
-            std::vector<std::function<void()>> local_deferred;
-            if (!deferred_ui_callbacks_.empty()) {
-                local_deferred.swap(deferred_ui_callbacks_);
+                if (!dispatch_closed_ && !deferred_ui_callbacks_.empty()) {
+                    local_deferred.swap(deferred_ui_callbacks_);
+                }
             }
             if (batch.empty() && local_deferred.empty()) {
                 break;
@@ -401,7 +452,7 @@ public:
     }
 
     size_t OpenSettingsPageCount() const noexcept {
-        return settings_page_id_ != 0 ? 1u : 0u;
+        return settings_pages_registered_count_;
     }
 
     size_t UnreleasedStageCount() const noexcept {
@@ -497,6 +548,24 @@ private:
         if (name == PULSE_WORKBENCH_INTERFACE_NAME) {
             return workbench_ ? workbench_->Query(version, out_table, out_size) : PULSE_ERROR_UNAVAILABLE;
         }
+        if (name == PULSE_TRAY_INTERFACE_NAME) {
+            return tray_ ? tray_->Query(version, out_table, out_size) : PULSE_ERROR_UNAVAILABLE;
+        }
+        if (name == PULSE_SEARCH_INTERFACE_NAME) {
+            return search_ ? search_->Query(version, out_table, out_size) : PULSE_ERROR_UNAVAILABLE;
+        }
+        if (name == PULSE_SHELL_INTERFACE_NAME) {
+            return shell_ ? shell_->Query(version, out_table, out_size) : PULSE_ERROR_UNAVAILABLE;
+        }
+        if (name == PULSE_ASSOCIATIONS_INTERFACE_NAME) {
+            return associations_ ? associations_->Query(version, out_table, out_size) : PULSE_ERROR_UNAVAILABLE;
+        }
+        if (name == PULSE_VFS_INTERFACE_NAME) {
+            return vfs_ ? vfs_->Query(version, out_table, out_size) : PULSE_ERROR_UNAVAILABLE;
+        }
+        if (name == PULSE_COLUMNS_INTERFACE_NAME) {
+            return columns_ ? columns_->Query(version, out_table, out_size) : PULSE_ERROR_UNAVAILABLE;
+        }
         if (name == PULSE_TASKS_INTERFACE_NAME) {
             return tasks_ ? tasks_->Query(version, out_table, out_size) : PULSE_ERROR_UNAVAILABLE;
         }
@@ -518,16 +587,32 @@ private:
             return WriteTable(table, out_table, out_size);
         }
         if (name == PULSE_SETTINGS_PAGES_INTERFACE_NAME) {
-            if (version != PULSE_SETTINGS_PAGES_VERSION_1) return PULSE_ERROR_ABI;
-            const PulseSettingsPagesV1 table{
-                sizeof(PulseSettingsPagesV1),
-                PULSE_SETTINGS_PAGES_VERSION_1,
-                this,
-                &SettingsPageCreate,
-                &SettingsPageQuery,
-                &SettingsPageRemove,
-            };
-            return WriteTable(table, out_table, out_size);
+            if (version == PULSE_SETTINGS_PAGES_VERSION_1) {
+                const PulseSettingsPagesV1 table{
+                    sizeof(PulseSettingsPagesV1),
+                    PULSE_SETTINGS_PAGES_VERSION_1,
+                    this,
+                    &SettingsPageCreate,
+                    &SettingsPageQuery,
+                    &SettingsPageRemove,
+                };
+                return WriteTable(table, out_table, out_size);
+            }
+            if (version == PULSE_SETTINGS_PAGES_VERSION_2) {
+                const PulseSettingsPagesV2 table{
+                    sizeof(PulseSettingsPagesV2),
+                    PULSE_SETTINGS_PAGES_VERSION_2,
+                    this,
+                    &SettingsPageCreate,
+                    &SettingsPageQuery,
+                    &SettingsPageRemove,
+                    &SettingsPageCreateTab,
+                    &SettingsPageSetStatus,
+                    &SettingsPageSetSidePreview,
+                };
+                return WriteTable(table, out_table, out_size);
+            }
+            return PULSE_ERROR_ABI;
         }
         if (name == PULSE_DIALOGS_INTERFACE_NAME) {
             return dialogs_ ? dialogs_->Query(version, out_table, out_size) : PULSE_ERROR_UNAVAILABLE;
@@ -690,7 +775,7 @@ private:
         const uint64_t id = self->next_handle_++;
         try {
             self->context_subs_.insert(id);
-            self->deferred_ui_callbacks_.push_back([self, id, callback, user]() {
+            self->DeferUiCallback([self, id, callback, user]() {
                 if (self->context_subs_.contains(id)) {
                     ContextGet(self, callback, user);
                 }
@@ -826,20 +911,81 @@ private:
         auto* self = static_cast<HeadlessHostEnvironment*>(ctx);
         if (!self || !model || !out_page || title.length == 0 || title.length > 128) return PULSE_ERROR_ARGUMENT;
         if (!self->OnOwnerThread()) return PULSE_ERROR_STATE;
-        if (self->settings_page_id_ != 0) return PULSE_ERROR_STATE;
+        for (const auto& [existing_id, tab_id] : self->settings_page_tabs_) {
+            if (tab_id == "default" && existing_id != 0) return PULSE_ERROR_STATE;
+        }
+        if (self->settings_page_tabs_.size() >= 6) return PULSE_ERROR_STATE;
         try {
+            pulse::extensions::UiTree parsed;
+            std::set<std::string> commands;
+            std::string error;
+            const PulseStatus st = pulse::extensions::native::ConvertUiModel(model, parsed, commands, error);
+            if (st != PULSE_OK) {
+                if (self->diagnostics_sink_) {
+                    self->diagnostics_sink_->RecordParsed(st, PULSE_SETTINGS_PAGES_INTERFACE_NAME, "create", error);
+                }
+                return st;
+            }
             const uint64_t id = self->next_handle_++;
             PanelRecord rec;
             rec.id = id;
             rec.title = CopyView(title);
             rec.is_settings_page = true;
-            if (model->states && model->state_count > 0) {
-                for (uint32_t i = 0; i < model->state_count; ++i) {
-                    rec.states[CopyView(model->states[i].key)] = CopyView(model->states[i].value);
-                }
+            for (const auto& state : parsed.state) {
+                rec.states[state.key] = state.value;
             }
             self->panels_.emplace(id, std::move(rec));
-            self->settings_page_id_ = id;
+            self->settings_page_tabs_[id] = "default";
+            if (self->settings_page_id_ == 0) self->settings_page_id_ = id;
+            ++self->settings_pages_registered_count_;
+            *out_page = id;
+            return PULSE_OK;
+        } catch (...) {
+            return PULSE_ERROR_ARGUMENT;
+        }
+    }
+
+    static PulseStatus PULSE_CALL SettingsPageCreateTab(
+        void* ctx,
+        const PulseSettingsTabDesc* desc,
+        const PulseUiModelTree* model,
+        uint64_t* out_page) noexcept {
+        if (out_page) *out_page = 0;
+        auto* self = static_cast<HeadlessHostEnvironment*>(ctx);
+        if (!self || !desc || !model || !out_page) return PULSE_ERROR_ARGUMENT;
+        if (desc->size != sizeof(PulseSettingsTabDesc) || desc->flags != 0 ||
+            desc->id.length == 0 || desc->id.length > 64 || !desc->id.data ||
+            desc->title.length == 0 || desc->title.length > 64 || !desc->title.data)
+            return PULSE_ERROR_ARGUMENT;
+        if (!self->OnOwnerThread()) return PULSE_ERROR_STATE;
+        const std::string tab_id(desc->id.data, desc->id.length);
+        for (const auto& [existing_id, existing_tab] : self->settings_page_tabs_) {
+            if (existing_tab == tab_id && existing_id != 0) return PULSE_ERROR_STATE;
+        }
+        if (self->settings_page_tabs_.size() >= 6) return PULSE_ERROR_STATE;
+        try {
+            pulse::extensions::UiTree parsed;
+            std::set<std::string> commands;
+            std::string error;
+            const PulseStatus st = pulse::extensions::native::ConvertUiModel(model, parsed, commands, error);
+            if (st != PULSE_OK) {
+                if (self->diagnostics_sink_) {
+                    self->diagnostics_sink_->RecordParsed(st, PULSE_SETTINGS_PAGES_INTERFACE_NAME, "create_tab", error);
+                }
+                return st;
+            }
+            const uint64_t id = self->next_handle_++;
+            PanelRecord rec;
+            rec.id = id;
+            rec.title = CopyView(desc->title);
+            rec.is_settings_page = true;
+            for (const auto& state : parsed.state) {
+                rec.states[state.key] = state.value;
+            }
+            self->panels_.emplace(id, std::move(rec));
+            self->settings_page_tabs_[id] = tab_id;
+            if (self->settings_page_id_ == 0) self->settings_page_id_ = id;
+            ++self->settings_pages_registered_count_;
             *out_page = id;
             return PULSE_OK;
         } catch (...) {
@@ -856,23 +1002,81 @@ private:
         uint32_t size) noexcept {
         auto* self = static_cast<HeadlessHostEnvironment*>(ctx);
         if (!self || !out || page == 0) return PULSE_ERROR_ARGUMENT;
-        if (!self->OnOwnerThread() || page != self->settings_page_id_) return PULSE_ERROR_STATE;
+        if (!self->OnOwnerThread() || !self->settings_page_tabs_.contains(page)) return PULSE_ERROR_STATE;
         const std::string iface = CopyView(interface_name);
-        if (iface != PULSE_UI_MODEL_INTERFACE && iface != PULSE_UI_EVENTS_INTERFACE_NAME) {
+        if (iface != PULSE_UI_MODEL_INTERFACE &&
+            iface != PULSE_UI_EVENTS_INTERFACE_NAME &&
+            iface != PULSE_UI_DATA_INTERFACE) {
             return PULSE_ERROR_UNAVAILABLE;
         }
-        return self->ResolveInterface(iface, version, out, size);
+        const PulseStatus st = self->ResolveInterface(iface, version, out, size);
+        if (st == PULSE_OK && iface == PULSE_UI_MODEL_INTERFACE) {
+            static_cast<PulseUiModelV1*>(out)->create =
+                [](void*, PulseStringView, const PulseUiModelTree*, uint64_t* out_id) -> PulseStatus {
+                if (out_id) *out_id = 0;
+                return PULSE_ERROR_STATE;
+            };
+        }
+        return st;
     }
 
     static PulseStatus PULSE_CALL SettingsPageRemove(void* ctx, uint64_t page) noexcept {
         auto* self = static_cast<HeadlessHostEnvironment*>(ctx);
         if (!self || page == 0) return PULSE_ERROR_ARGUMENT;
-        if (!self->OnOwnerThread() || page != self->settings_page_id_) return PULSE_ERROR_STATE;
+        if (!self->OnOwnerThread() || !self->settings_page_tabs_.contains(page)) return PULSE_ERROR_STATE;
         if (const auto it = self->panels_.find(page); it != self->panels_.end()) {
             it->second.closed = true;
         }
-        self->settings_page_id_ = 0;
+        self->settings_page_tabs_.erase(page);
+        self->settings_page_status_.erase(page);
+        self->settings_page_previews_.erase(page);
+        self->settings_page_id_ = self->settings_page_tabs_.empty() ? 0 : self->settings_page_tabs_.begin()->first;
         return PULSE_OK;
+    }
+
+    static PulseStatus PULSE_CALL SettingsPageSetStatus(
+        void* ctx,
+        uint64_t page,
+        uint32_t kind,
+        PulseStringView text) noexcept {
+        auto* self = static_cast<HeadlessHostEnvironment*>(ctx);
+        if (!self || page == 0) return PULSE_ERROR_ARGUMENT;
+        if (!self->OnOwnerThread() || !self->settings_page_tabs_.contains(page)) return PULSE_ERROR_STATE;
+        if (kind > PULSE_SETTINGS_STATUS_ERROR || text.length > 128 || (text.length && !text.data))
+            return PULSE_ERROR_ARGUMENT;
+        self->settings_page_status_[page] = {kind, CopyView(text)};
+        return PULSE_OK;
+    }
+
+    static PulseStatus PULSE_CALL SettingsPageSetSidePreview(
+        void* ctx,
+        uint64_t page,
+        const PulseUiModelTree* preview,
+        uint32_t width_dip) noexcept {
+        (void)width_dip;
+        auto* self = static_cast<HeadlessHostEnvironment*>(ctx);
+        if (!self || page == 0) return PULSE_ERROR_ARGUMENT;
+        if (!self->OnOwnerThread() || !self->settings_page_tabs_.contains(page)) return PULSE_ERROR_STATE;
+        if (!preview) {
+            self->settings_page_previews_.erase(page);
+            return PULSE_OK;
+        }
+        try {
+            pulse::extensions::UiTree parsed;
+            std::set<std::string> commands;
+            std::string error;
+            const PulseStatus st = pulse::extensions::native::ConvertUiModel(preview, parsed, commands, error);
+            if (st != PULSE_OK) {
+                if (self->diagnostics_sink_) {
+                    self->diagnostics_sink_->RecordParsed(st, PULSE_SETTINGS_PAGES_INTERFACE_NAME, "set_side_preview", error);
+                }
+                return st;
+            }
+            self->settings_page_previews_.insert(page);
+            return PULSE_OK;
+        } catch (...) {
+            return PULSE_ERROR_ARGUMENT;
+        }
     }
 
     // --- pulse.staging ---
@@ -1564,6 +1768,12 @@ private:
     pulse::extensions::native::DialogsAdapter* dialogs_ = nullptr;
     pulse::extensions::native::PickersAdapter* pickers_ = nullptr;
     pulse::extensions::native::WorkbenchAdapter* workbench_ = nullptr;
+    pulse::extensions::native::TrayAdapter* tray_ = nullptr;
+    pulse::extensions::native::SearchAdapter* search_ = nullptr;
+    pulse::extensions::native::ShellAdapter* shell_ = nullptr;
+    pulse::extensions::native::AssociationsAdapter* associations_ = nullptr;
+    pulse::extensions::native::VfsAdapter* vfs_ = nullptr;
+    pulse::extensions::native::ColumnsAdapter* columns_ = nullptr;
     std::shared_ptr<pulse::extensions::native::DiagnosticsSink> diagnostics_sink_;
 
     std::vector<QueryAuditEntry> queries_;
@@ -1572,6 +1782,10 @@ private:
     std::map<uint64_t, PreviewProviderRecord> previews_;
     std::map<uint64_t, PanelRecord> panels_;
     uint64_t settings_page_id_ = 0;
+    std::map<uint64_t, std::string> settings_page_tabs_;
+    std::map<uint64_t, std::pair<uint32_t, std::string>> settings_page_status_;
+    std::set<uint64_t> settings_page_previews_;
+    size_t settings_pages_registered_count_ = 0;
     std::set<uint64_t> active_stages_;
     std::set<uint64_t> pending_requests_;
     std::map<std::string, std::string> kv_settings_;
@@ -2006,6 +2220,10 @@ int wmain(int argc, wchar_t** argv) {
         [&env]() { return env.Live(); },
         diagnostics_sink);
 
+    const auto wake_harness = [&env]() {
+        env.DeferUiCallback([]() {});
+    };
+
     pulse::extensions::native::WorkbenchBackend workbench_backend;
     workbench_backend.valid_owner = [&env]() { return env.Live(); };
     workbench_backend.show_snack = [](pulse::extensions::native::SnackPresentationSpec) { return true; };
@@ -2013,11 +2231,257 @@ int wmain(int argc, wchar_t** argv) {
     workbench_backend.reveal_path = [](const std::wstring&, uint32_t) { return PULSE_OK; };
     workbench_backend.show_text_diff = [](const std::wstring&, const std::wstring&) { return PULSE_OK; };
     workbench_backend.set_clipboard_text = [](const std::wstring&) { return PULSE_OK; };
+    workbench_backend.open_search = [](const std::wstring&) { return PULSE_OK; };
+    workbench_backend.reveal_path_from_rect = [](const std::wstring&, uint32_t, const PulseScreenRect*) {
+        return PULSE_OK;
+    };
+    workbench_backend.query_appearance = [](PulseHostAppearance& out) {
+        out.size = sizeof(PulseHostAppearance);
+        out.flags = PULSE_APPEARANCE_LIGHT;
+        out.window_effect = PULSE_BACKDROP_MICA;
+        out.opacity_percent = 85u;
+        out.accent_argb = 0xFF0078D4u;
+        out.font_scale_milli = 1000u;
+        return PULSE_OK;
+    };
+    workbench_backend.query_locale = [](PulseHostLocale& out) {
+        out = {};
+        out.size = sizeof(PulseHostLocale);
+        out.flags = PULSE_LOCALE_FOLLOW_SYSTEM;
+        std::memcpy(out.language_tag, "en-US", 6);
+        std::memcpy(out.preference_tag, "system", 7);
+        return PULSE_OK;
+    };
 
     pulse::extensions::native::WorkbenchAdapter workbench(
         std::move(workbench_backend),
         [&env]() { return env.Live(); },
-        diagnostics_sink);
+        diagnostics_sink,
+        wake_harness);
+
+    struct HeadlessTrayState {
+        uint64_t next_item_id = 1;
+        uint64_t next_batch_id = 1;
+        std::vector<pulse::extensions::native::TrayEntryData> entries;
+    } headless_tray;
+
+    pulse::extensions::native::TrayBackend tray_backend;
+    tray_backend.valid_owner = [&env]() { return env.Live(); };
+    tray_backend.snapshot = [&headless_tray](pulse::extensions::native::TraySnapshotData& out) {
+        out.entries = headless_tray.entries;
+        out.total_bytes = 0;
+        for (const auto& entry : out.entries) {
+            out.total_bytes += entry.size_bytes;
+        }
+        return PULSE_OK;
+    };
+    tray_backend.collect = [&headless_tray](const std::vector<std::wstring>& paths, bool move_intent) {
+        const uint64_t batch_id = headless_tray.next_batch_id++;
+        for (const auto& wpath : paths) {
+            pulse::extensions::native::TrayEntryData entry;
+            entry.item_id = headless_tray.next_item_id++;
+            entry.batch_id = batch_id;
+            entry.flags = move_intent ? PULSE_TRAY_ITEM_MOVE_INTENT : PULSE_TRAY_ITEM_NONE;
+            entry.path = pulse::json::Utf8(wpath);
+            entry.name = pulse::json::Utf8(fs::path(wpath).filename().wstring());
+            headless_tray.entries.push_back(std::move(entry));
+        }
+        return PULSE_OK;
+    };
+    tray_backend.remove_item = [&headless_tray](uint64_t item_id) {
+        const auto it = std::find_if(
+            headless_tray.entries.begin(),
+            headless_tray.entries.end(),
+            [item_id](const pulse::extensions::native::TrayEntryData& item) { return item.item_id == item_id; });
+        if (it == headless_tray.entries.end()) return PULSE_ERROR_STATE;
+        headless_tray.entries.erase(it);
+        return PULSE_OK;
+    };
+    tray_backend.clear = [&headless_tray]() {
+        headless_tray.entries.clear();
+        return PULSE_OK;
+    };
+    tray_backend.release_to_directory = [&headless_tray](const std::wstring&, uint32_t) {
+        headless_tray.entries.clear();
+        return PULSE_OK;
+    };
+
+    pulse::extensions::native::TrayAdapter tray(
+        std::move(tray_backend),
+        [&env]() { return env.Live(); },
+        diagnostics_sink,
+        wake_harness);
+
+    pulse::extensions::native::SearchBackend search_backend;
+    search_backend.valid_owner = [&env]() { return env.Live(); };
+    search_backend.start = [&env](
+                               pulse::extensions::native::SearchQuerySpec,
+                               std::function<void(pulse::extensions::native::SearchBackendReply)> complete) {
+        if (!env.Live()) return PULSE_ERROR_STATE;
+        env.DeferUiCallback([complete = std::move(complete)]() mutable {
+            if (complete) {
+                pulse::extensions::native::SearchBackendReply reply;
+                reply.status = PULSE_OK;
+                reply.total_matches = 0;
+                reply.index_connected = false;
+                complete(std::move(reply));
+            }
+        });
+        return PULSE_OK;
+    };
+    search_backend.cancel = [](uint64_t) {};
+
+    pulse::extensions::native::SearchAdapter search(
+        std::move(search_backend),
+        [&env]() { return env.Live(); },
+        diagnostics_sink,
+        wake_harness);
+
+    std::map<std::wstring, std::set<std::string>> headless_path_tags;
+    pulse::extensions::native::ShellBackend shell_backend;
+    shell_backend.valid_owner = [&env]() { return env.Live(); };
+    shell_backend.get_tag_catalog = [](std::vector<pulse::extensions::native::ColorTagInfoData>& out) {
+        out.push_back({"red", "Red", 0xFFE81123u, 1});
+        out.push_back({"blue", "Blue", 0xFF0078D4u, 2});
+        return PULSE_OK;
+    };
+    shell_backend.get_path_tags = [&headless_path_tags](
+                                      const std::wstring& path,
+                                      std::vector<pulse::extensions::native::ColorTagInfoData>& out) {
+        const auto it = headless_path_tags.find(path);
+        if (it != headless_path_tags.end()) {
+            if (it->second.contains("red")) out.push_back({"red", "Red", 0xFFE81123u, 1});
+            if (it->second.contains("blue")) out.push_back({"blue", "Blue", 0xFF0078D4u, 2});
+        }
+        return PULSE_OK;
+    };
+    shell_backend.set_path_tag = [&headless_path_tags](
+                                     const std::wstring& path,
+                                     const std::wstring& tag_id,
+                                     bool tagged) {
+        const std::string utf8_id = pulse::json::Utf8(tag_id);
+        if (utf8_id != "red" && utf8_id != "blue") return PULSE_ERROR_ARGUMENT;
+        if (tagged) {
+            headless_path_tags[path].insert(utf8_id);
+        } else {
+            headless_path_tags[path].erase(utf8_id);
+        }
+        return PULSE_OK;
+    };
+    shell_backend.query_context_menu = [&env](
+                                           uint64_t,
+                                           const std::vector<std::wstring>&,
+                                           uint32_t,
+                                           std::function<void(pulse::extensions::native::ShellMenuBackendReply)> deliver) {
+        if (!env.Live()) return PULSE_ERROR_STATE;
+        env.DeferUiCallback([deliver = std::move(deliver)]() mutable {
+            if (deliver) {
+                pulse::extensions::native::ShellMenuBackendReply reply;
+                reply.status = PULSE_OK;
+                reply.partial = false;
+                deliver(std::move(reply));
+            }
+        });
+        return PULSE_OK;
+    };
+    shell_backend.invoke_context_menu = [](uint64_t, uint32_t, const std::wstring&) { return PULSE_OK; };
+    shell_backend.close_context_menu = [](uint64_t) { return PULSE_OK; };
+    shell_backend.read_preview = [&env](
+                                     uint64_t,
+                                     const std::wstring& path,
+                                     uint32_t,
+                                     std::function<void(pulse::extensions::native::ShellPreviewData)> complete) {
+        if (!env.Live()) return PULSE_ERROR_STATE;
+        env.DeferUiCallback([path, complete = std::move(complete)]() mutable {
+            if (complete) {
+                pulse::extensions::native::ShellPreviewData summary;
+                summary.status = PULSE_OK;
+                summary.path = pulse::json::Utf8(path);
+                summary.display_type = "File";
+                complete(std::move(summary));
+            }
+        });
+        return PULSE_OK;
+    };
+    shell_backend.cancel_preview = [](uint64_t) {};
+
+    pulse::extensions::native::ShellAdapter shell(
+        std::move(shell_backend),
+        [&env]() { return env.Live(); },
+        diagnostics_sink,
+        wake_harness);
+
+    pulse::extensions::native::AssociationsBackend associations_backend;
+    associations_backend.valid_owner = [&env]() { return env.Live(); };
+    associations_backend.query = [&env](
+                                     uint64_t,
+                                     std::vector<std::pair<std::string, std::string>> pairs,
+                                     std::function<void(pulse::extensions::native::AssociationsQueryReply)> complete) -> PulseStatus {
+        env.DeferUiCallback([pairs = std::move(pairs), complete = std::move(complete)]() mutable {
+            if (!complete) return;
+            pulse::extensions::native::AssociationsQueryReply reply;
+            reply.status = PULSE_OK;
+            for (auto& [handler_id, ext] : pairs) {
+                pulse::extensions::AssociationQueryItem item;
+                item.handler_id = std::move(handler_id);
+                item.extension = std::move(ext);
+                item.owner = PULSE_ASSOC_OWNER_FREE;
+                reply.items.push_back(std::move(item));
+            }
+            complete(std::move(reply));
+        });
+        return PULSE_OK;
+    };
+    associations_backend.apply = [&env](
+                                     uint64_t,
+                                     std::vector<pulse::extensions::AssociationEntryRequest>,
+                                     std::function<void(PulseStatus)> complete) -> PulseStatus {
+        env.DeferUiCallback([complete = std::move(complete)]() {
+            if (complete) complete(PULSE_OK);
+        });
+        return PULSE_OK;
+    };
+    associations_backend.remove = [&env](
+                                      uint64_t,
+                                      std::vector<std::string>,
+                                      std::function<void(PulseStatus)> complete) -> PulseStatus {
+        env.DeferUiCallback([complete = std::move(complete)]() {
+            if (complete) complete(PULSE_OK);
+        });
+        return PULSE_OK;
+    };
+    associations_backend.cancel = [](uint64_t) {};
+    associations_backend.open_chooser = [](std::string) { return PULSE_OK; };
+    associations_backend.open_default_apps = []() { return PULSE_OK; };
+
+    pulse::extensions::native::AssociationsAdapter associations(
+        manifest.id,
+        manifest.file_handlers,
+        std::move(associations_backend),
+        [&env]() { return env.Live(); },
+        diagnostics_sink,
+        wake_harness);
+
+    pulse::extensions::vfs::VfsRegistry headless_vfs_registry;
+    pulse::extensions::native::VfsBackend vfs_backend;
+    vfs_backend.valid_owner = [&env]() { return env.Live(); };
+    vfs_backend.invalidate_path = [](std::string_view, std::string_view, std::string_view) {};
+    vfs_backend.open_path = [](const std::wstring&, uint32_t) { return PULSE_OK; };
+    pulse::extensions::native::VfsAdapter vfs(
+        manifest.id,
+        std::move(vfs_backend),
+        [&env]() { return env.Live(); },
+        diagnostics_sink,
+        wake_harness,
+        &headless_vfs_registry);
+
+    pulse::extensions::columns::Registry headless_columns_registry;
+    pulse::extensions::native::ColumnsAdapter columns(
+        manifest.id,
+        [&env]() { return env.Live(); },
+        diagnostics_sink,
+        wake_harness,
+        &headless_columns_registry);
 
     pulse::extensions::native::IconsAdapter icons(
         manifest.id,
@@ -2044,6 +2508,12 @@ int wmain(int argc, wchar_t** argv) {
         &dialogs,
         &pickers,
         &workbench,
+        &tray,
+        &search,
+        &shell,
+        &associations,
+        &vfs,
+        &columns,
         diagnostics_sink);
 
     // Decide verified vs unverified load.
@@ -2074,9 +2544,28 @@ int wmain(int argc, wchar_t** argv) {
     PulseStatus deactivate_status = PULSE_OK;
     PulseStatus close_status = PULSE_OK;
 
+    const auto format_diag_suffix = [&diagnostics_sink]() -> std::string {
+        if (!diagnostics_sink) return {};
+        const auto snap = diagnostics_sink->Read();
+        if (snap.status == PULSE_OK || snap.message.empty()) return {};
+        std::string loc = snap.interface_name;
+        if (!snap.operation.empty()) loc += "/" + snap.operation;
+        std::string target = snap.subject;
+        if (!snap.field.empty()) {
+            if (!target.empty()) target += ".";
+            target += snap.field;
+        }
+        std::string out = " (lastDiagnostic: ";
+        if (!loc.empty()) out += loc + " ";
+        if (!target.empty()) out += target + ": ";
+        out += snap.message + ")";
+        return out;
+    };
+
     Value registered_commands_json = Value::Array();
     Value contributed_commands_json = Value::Array();
     Value command_invocations_json = Value::Array();
+    Value columns_json = Value::Array();
 
     {
         pulse::extensions::native::Module mod;
@@ -2090,14 +2579,14 @@ int wmain(int argc, wchar_t** argv) {
         }
 
         if (load_status != PULSE_OK) {
-            errors.push_back(std::string("Plugin load/entry failed with ") + StatusName(load_status));
+            errors.push_back(std::string("Plugin load/entry failed with ") + StatusName(load_status) + format_diag_suffix());
         } else {
             env.PumpDeferred();
             tasks.Poll();
 
             activate_status = mod.Activate();
             if (activate_status != PULSE_OK) {
-                errors.push_back(std::string("Plugin activate failed with ") + StatusName(activate_status));
+                errors.push_back(std::string("Plugin activate failed with ") + StatusName(activate_status) + format_diag_suffix());
             } else {
                 env.PumpDeferred();
                 tasks.Poll();
@@ -2239,6 +2728,68 @@ int wmain(int argc, wchar_t** argv) {
                 }
             }
 
+            // pulse.columns: every registered column / badge provider is asked
+            // for the --selection items, on its own worker like in Pulse.
+            {
+                using namespace pulse::extensions::columns;
+                std::vector<Item> column_items;
+                for (const auto& sel : selection_items) {
+                    Item item;
+                    item.path = pulse::json::Wide(sel.path);
+                    item.is_dir = (sel.flags & PULSE_CONTEXT_ENTRY_DIRECTORY) != 0;
+                    WIN32_FILE_ATTRIBUTE_DATA data{};
+                    if (GetFileAttributesExW(item.path.c_str(), GetFileExInfoStandard, &data)) {
+                        item.mtime = (static_cast<uint64_t>(data.ftLastWriteTime.dwHighDateTime) << 32) |
+                                     data.ftLastWriteTime.dwLowDateTime;
+                        if (!item.is_dir)
+                            item.size = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+                    }
+                    column_items.push_back(std::move(item));
+                }
+                for (const Kind kind : {Kind::Column, Kind::Badge}) {
+                    for (const ProviderInfo& info : headless_columns_registry.List(kind)) {
+                        const bool column = kind == Kind::Column;
+                        CellValue cell;
+                        BadgeValue badge;
+                        for (const Item& item : column_items) {
+                            if (column) headless_columns_registry.Cell(info.handle, item, cell);
+                            else headless_columns_registry.Badge(info.handle, item, badge);
+                        }
+                        const bool idle = headless_columns_registry.WaitUntilIdle(info.handle, opts.timeout_ms);
+                        Value c = Value::Object();
+                        c.set("id", info.id);
+                        c.set("kind", std::string(column ? "column" : "badge"));
+                        c.set("title", pulse::json::Utf8(info.title));
+                        if (column) {
+                            c.set("widthDip", static_cast<uint64_t>(info.width_dip));
+                            c.set("alignEnd", info.align_end);
+                        }
+                        Value values = Value::Array();
+                        for (const Item& item : column_items) {
+                            Value v = Value::Object();
+                            v.set("path", pulse::json::Utf8(item.path));
+                            const Lookup found = column ? headless_columns_registry.Cell(info.handle, item, cell)
+                                                        : headless_columns_registry.Badge(info.handle, item, badge);
+                            v.set("state", std::string(found == Lookup::Ready     ? "ready"
+                                                       : found == Lookup::Pending ? "pending"
+                                                                                  : "notApplicable"));
+                            if (found == Lookup::Ready && column) {
+                                v.set("text", pulse::json::Utf8(cell.text));
+                                v.set("tone", static_cast<uint64_t>(cell.tone));
+                            } else if (found == Lookup::Ready) {
+                                v.set("shown", badge.shown);
+                                v.set("icon", static_cast<uint64_t>(badge.icon));
+                                v.set("tone", static_cast<uint64_t>(badge.tone));
+                            }
+                            values.push(std::move(v));
+                        }
+                        c.set("values", std::move(values));
+                        columns_json.push(std::move(c));
+                        if (!idle) errors.push_back("Timed out waiting for pulse.columns provider '" + info.id + "'");
+                    }
+                }
+            }
+
             deactivate_status = mod.Deactivate();
             if (deactivate_status != PULSE_OK) {
                 errors.push_back(std::string("Plugin deactivate failed with ") + StatusName(deactivate_status));
@@ -2251,6 +2802,12 @@ int wmain(int argc, wchar_t** argv) {
         pickers.Close();
         dialogs.Close();
         workbench.Close();
+        tray.Close();
+        search.Close();
+        shell.Close();
+        associations.Close();
+        vfs.Close();
+        columns.Close();
         diagnostics.Close();
         commands.Close();
         icons.Close();
@@ -2369,6 +2926,8 @@ int wmain(int argc, wchar_t** argv) {
     tiers.set("experimental", std::move(experimental_json));
     tiers.set("experimentalUiOmitted", opts.omit_experimental_ui);
 
+    const auto final_diag = diagnostics_sink ? diagnostics_sink->Read() : pulse::extensions::native::DiagnosticsSink::Snapshot{};
+
     Value report = Value::Object();
     report.set("ok", ok);
     report.set("id", manifest.id);
@@ -2387,6 +2946,18 @@ int wmain(int argc, wchar_t** argv) {
     report.set("openPanelsAtDeactivate", static_cast<uint64_t>(env.OpenUserPanelCount()));
     report.set("settingsPagesRegistered", static_cast<uint64_t>(env.OpenSettingsPageCount()));
     report.set("commandInvocations", std::move(command_invocations_json));
+    report.set("columnProviders", std::move(columns_json));
+    if (final_diag.status != PULSE_OK) {
+        Value diag_obj = Value::Object();
+        diag_obj.set("status", StatusName(final_diag.status));
+        diag_obj.set("sequence", final_diag.sequence);
+        diag_obj.set("interfaceName", final_diag.interface_name);
+        diag_obj.set("operation", final_diag.operation);
+        diag_obj.set("subject", final_diag.subject);
+        diag_obj.set("field", final_diag.field);
+        diag_obj.set("message", final_diag.message);
+        report.set("lastDiagnostic", std::move(diag_obj));
+    }
     report.set("errors", std::move(errors_json));
 
     PrintJsonReport(report);

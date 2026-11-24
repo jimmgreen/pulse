@@ -1,6 +1,7 @@
 #ifndef PULSE_NATIVE_UI_MODEL_H
 #define PULSE_NATIVE_UI_MODEL_H
 #include "ui.h"
+#include <stddef.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -9,7 +10,8 @@ extern "C" {
 #define PULSE_UI_MODEL_VERSION 1u
 /* General-purpose controls backed by the existing renderer. All borrowed arrays/strings are
    copied synchronously. Optional fields use present=0/1; absent preserves host defaults.
-   UTF-8 byte budget 65536; nodes 128/depth8; menus128/depth4; total data rows4096/depth8.
+   UTF-8 byte budget 262144 (string max 4096); nodes 384/depth 12; states 128 (batch 64);
+   commands 256; actions 64; menus 128/depth 4; total data rows 4096/depth 8.
    This C ABI uses the same property semantics as the existing UiTree contract.
    Structure submission uses a temporary in-memory DOM for shared validation, never
    JSON text serialization/parsing. High-frequency set_states remains typed directly. */
@@ -31,6 +33,7 @@ enum {
     PULSE_UI_MODEL_DIVIDER = 10,
     PULSE_UI_MODEL_TABS = 11,
     PULSE_UI_MODEL_TAB = 12,
+    PULSE_UI_MODEL_LIST = 13,           /* Inline single-choice list: options + index state. */
     PULSE_UI_MODEL_SWITCH = 14,
     PULSE_UI_MODEL_RADIO = 15,
     PULSE_UI_MODEL_SLIDER = 16,
@@ -40,14 +43,24 @@ enum {
     PULSE_UI_MODEL_INFO_BAR = 20,
     PULSE_UI_MODEL_SPLIT_BUTTON = 21,
     PULSE_UI_MODEL_MENU_BUTTON = 22,
+    PULSE_UI_MODEL_SIDEBAR_ITEM = 23,   /* Navigation row: text, glyph, detail, badge_text, selected, command. */
+    PULSE_UI_MODEL_BREADCRUMB = 24,     /* Path segment: text, glyph, current, separator, command. */
     PULSE_UI_MODEL_EMPTY_STATE = 25,
     PULSE_UI_MODEL_VIRTUAL_LIST = 26,
     PULSE_UI_MODEL_TREE = 27,
     PULSE_UI_MODEL_DATA_TABLE = 28,
+    PULSE_UI_MODEL_COMMAND_SEARCH = 30, /* Search box: text label, placeholder, keycap, state, validation. */
     PULSE_UI_MODEL_SPLIT_PANE = 31,
+    PULSE_UI_MODEL_SIDEBAR_SECTION = 32, /* Collapsible section: text, glyph, boolean state, children. */
+    PULSE_UI_MODEL_FILE_ROW = 35,       /* File-style row: text, glyph, modified, file_type, file_size, status. */
+    PULSE_UI_MODEL_STATUS_BAR = 38,     /* Footer strip: text (left), center_text, right_text, ready. */
     PULSE_UI_MODEL_CANVAS = 41,
+    PULSE_UI_MODEL_OPTION_CARD = 42,
+    PULSE_UI_MODEL_SETTINGS_ROW = 43,
+    PULSE_UI_MODEL_IMAGE = 44,
+    PULSE_UI_MODEL_MENU_PREVIEW = 45,
     /* Reserved holes are invalid types; COUNT is the numeric range upper bound. */
-    PULSE_UI_MODEL_COUNT = 42
+    PULSE_UI_MODEL_COUNT = 46
 };
 typedef struct PulseUiModelMenuItem PulseUiModelMenuItem;
 typedef struct PulseUiModelMenus { uint32_t present; const PulseUiModelMenuItem* data; uint32_t count; } PulseUiModelMenus;
@@ -56,7 +69,15 @@ struct PulseUiModelMenuItem {
     PulseUiModelString id, text, command, glyph, shortcut;
     PulseUiModelBool enabled, checked, separator;
     PulseUiModelMenus children;
+    /* Appended in preview 3.1; records sized up to `children` stay valid and leave these absent.
+       menuPreview only. detail: second caption line (the row grows to 40 DIP). group: top-level caption of
+       a tinted item group; consecutive items with the same caption share one band (a lone item with
+       children shows them on an accent rail). primary: semibold label for the group's main action. */
+    PulseUiModelString detail, group;
+    PulseUiModelBool primary;
 };
+/* Size of a PulseUiModelMenuItem record written before detail/group/primary were appended. */
+#define PULSE_UI_MODEL_MENU_ITEM_SIZE_V1 ((uint32_t)offsetof(PulseUiModelMenuItem, detail))
 typedef struct PulseUiModelRow PulseUiModelRow;
 typedef struct PulseUiModelRows { uint32_t present; const PulseUiModelRow* data; uint32_t count; } PulseUiModelRows;
 struct PulseUiModelRow {
@@ -164,6 +185,19 @@ typedef struct PulseUiModelAction {
     PulseUiModelStrings validate;
     const PulseUiModelDataOperation* data_operation; /* Non-null returns UNAVAILABLE. */
 } PulseUiModelAction;
+/* Optional per-node presentation, keyed by node ID (<=384 entries, IDs unique and present in the tree).
+   Kept beside the node records so PulseUiModelNode arrays never change stride.
+   padding: Stack/Grid/Group inner inset in DIP 0..48 (bordered Group default 16x12).
+   tooltip: hover text (<=256 UTF-8 bytes) for any non-container control.
+   pointer_state: Canvas only; a declared state key the host writes on pointer input in viewBox units:
+   "move X Y", "leave", then "click X Y" before the canvas command callback. */
+typedef struct PulseUiModelNodeExtra {
+    uint32_t size;
+    PulseStringView node;
+    PulseUiModelInt padding;
+    PulseUiModelString tooltip;
+    PulseUiModelString pointer_state;
+} PulseUiModelNodeExtra;
 typedef struct PulseUiModelTree {
     uint32_t size;
     const PulseUiModelNode* root;
@@ -173,7 +207,11 @@ typedef struct PulseUiModelTree {
     uint32_t action_count;
     const PulseStringView* commands; /* Declared native callback IDs, <=128; separate from local actions. */
     uint32_t command_count;
+    /* Appended fields: set size = PULSE_UI_MODEL_TREE_SIZE_V1 when unused so earlier hosts accept the tree. */
+    const PulseUiModelNodeExtra* extras;
+    uint32_t extra_count;
 } PulseUiModelTree;
+#define PULSE_UI_MODEL_TREE_SIZE_V1 ((uint32_t)offsetof(PulseUiModelTree, extras))
 typedef struct PulseUiModelV1 {
     uint32_t size, version;
     void* context;

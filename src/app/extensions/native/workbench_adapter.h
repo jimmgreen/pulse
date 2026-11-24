@@ -42,21 +42,30 @@ struct WorkbenchBackend {
     std::function<PulseStatus(const std::wstring& path, uint32_t mode)> reveal_path;
     std::function<PulseStatus(const std::wstring& left_path, const std::wstring& right_path)> show_text_diff;
     std::function<PulseStatus(const std::wstring& text)> set_clipboard_text;
+    std::function<PulseStatus(const std::wstring& query)> open_search;
+    std::function<PulseStatus(const std::wstring& path, uint32_t mode, const PulseScreenRect* origin_rect)> reveal_path_from_rect;
+    std::function<PulseStatus(PulseHostAppearance& out_appearance)> query_appearance;
+    std::function<PulseStatus(PulseHostLocale& out_locale)> query_locale;
 };
 
 class WorkbenchAdapter {
 public:
     WorkbenchAdapter(WorkbenchBackend backend, std::function<bool()> alive,
-                     std::shared_ptr<DiagnosticsSink> diagnostics = nullptr);
+                     std::shared_ptr<DiagnosticsSink> diagnostics = nullptr,
+                     std::function<void()> wake = nullptr);
     WorkbenchAdapter(HWND owner, std::function<bool()> alive,
-                     std::shared_ptr<DiagnosticsSink> diagnostics = nullptr);
+                     std::shared_ptr<DiagnosticsSink> diagnostics = nullptr,
+                     std::function<void()> wake = nullptr);
     ~WorkbenchAdapter();
     WorkbenchAdapter(const WorkbenchAdapter&) = delete;
     WorkbenchAdapter& operator=(const WorkbenchAdapter&) = delete;
 
     void SetDiagnostics(std::shared_ptr<DiagnosticsSink> sink);
+    void SetWake(std::function<void()> wake);
     PulseStatus Query(uint32_t version, void* out, uint32_t size) const noexcept;
     bool InvokeActionToken(uint64_t token) noexcept;
+    void Sync() noexcept;
+    bool HasSubscriptions() const noexcept;
     void Close() noexcept;
     bool CallbackActive() const noexcept;
 

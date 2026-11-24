@@ -1,11 +1,20 @@
-"""Build or describe the source-only native SDK. No host execution or grants."""
+"""Build or describe the source-only native SDK. No host execution or grants.
+
+The SDK ships sources only, plus at most one declared prebuilt tool: the
+headless plugin harness (bin/pulse_plugin_harness.exe, `--harness`), so that
+`pulse_ext test` runs lifecycle and command smoke tests without building the
+Pulse repository. The harness is not the host and grants nothing.
+"""
 import argparse
 import hashlib
 import json
 from pathlib import Path
+import struct
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
+HARNESS_NAME = "bin/pulse_plugin_harness.exe"
+MAX_PREBUILT_BYTES = 16 * 1024 * 1024
 FILES = [
     'sdk/native/README.md',
     'sdk/native/AGENTS.md',
@@ -52,6 +61,14 @@ FILES = [
     'sdk/native/include/pulse/diagnostics.h',
     'sdk/native/include/pulse/pickers.h',
     'sdk/native/include/pulse/workbench.h',
+    'sdk/native/include/pulse/tray.h',
+    'sdk/native/include/pulse/search.h',
+    'sdk/native/include/pulse/shell.h',
+    'sdk/native/include/pulse/associations.h',
+    'sdk/native/include/pulse/vfs.h',
+    'sdk/native/include/pulse/columns.h',
+    'sdk/native/include/pulse/statusbar.h',
+    'sdk/native/include/pulse/fileevents.h',
     'sdk/native/include/pulse/fileops.h',
     'sdk/native/include/pulse/ui_model.h',
     'sdk/native/ui-model.schema.json',
@@ -60,10 +77,21 @@ FILES = [
     'sdk/native/include/pulse/dispatch.h',
     'sdk/native/include/pulse/ui_events.h',
     'sdk/native/include/pulse/client.hpp',
+    'sdk/native/include/pulse/worker.hpp',
     'sdk/native/include/pulse/model_builder.hpp',
+    'sdk/native/include/pulse/app.hpp',
+    'sdk/native/include/pulse/kit.hpp',
     'examples/native/README.md',
     'examples/native/basic/CMakeLists.txt',
     'examples/native/basic/plugin.cpp',
+    'examples/native/quickstart/CMakeLists.txt',
+    'examples/native/quickstart/plugin.cpp',
+    'examples/native/quickstart/manifest.json',
+    'examples/native/quickstart/README.md',
+    'examples/native/file-columns/CMakeLists.txt',
+    'examples/native/file-columns/plugin.cpp',
+    'examples/native/file-columns/manifest.json',
+    'examples/native/file-columns/README.md',
     'examples/native/rename-panel/CMakeLists.txt',
     'examples/native/rename-panel/plugin.cpp',
     'examples/native/rename-panel/manifest.json',
@@ -110,6 +138,8 @@ FILES = [
     'tools/extensions/msvc_env.py',
     'tools/extensions/offline_manifest.py',
     'tools/extensions/pulse_ext.py',
+    'tools/extensions/native_strings.py',
+    'tools/extensions/test_native_strings.py',
     'tools/extensions/project_creator.py',
     'tools/extensions/package_store.py',
     'tools/extensions/native_archive.py',
@@ -123,7 +153,9 @@ FILES = [
     'tools/extensions/test_native_author_mcp_workflow.py',
     'examples/native/catalog.json',
     'schemas/extensions/manifest.schema.json',
+    'schemas/extensions/api_metadata.json',
     'docs/extensions-sdk-quickstart.md',
+    'docs/extensions-sdk-lifecycle-and-support.md',
 ]
 
 
@@ -178,9 +210,37 @@ def source_bytes(root, name):
     return data.replace(b"\r\n", b"\n") if name.startswith("sdk/native/include/pulse/") else data
 
 
-def bundle(output, root=ROOT):
+def harness_bytes(path):
+    """The prebuilt headless harness: an x64 console PE of bounded size."""
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f"Harness not found: {path}")
+    data = path.read_bytes()
+    if len(data) > MAX_PREBUILT_BYTES:
+        raise ValueError(f"Harness is larger than {MAX_PREBUILT_BYTES} bytes: {path}")
+    if len(data) < 64 or data[:2] != b"MZ":
+        raise ValueError(f"Harness is not a PE binary: {path}")
+    offset = struct.unpack_from("<I", data, 60)[0]
+    if offset + 24 > len(data) or data[offset:offset + 4] != b"PE\0\0" or struct.unpack_from("<H", data, offset + 4)[0] != 0x8664:
+        raise ValueError(f"Harness is not an x64 PE binary: {path}")
+    if struct.unpack_from("<H", data, offset + 22)[0] & 0x2000:
+        raise ValueError(f"Harness must be an executable, not a DLL: {path}")
+    return data
+
+
+def bundle(output, root=ROOT, harness=None):
     compat = compatibility_metadata(root)
     payload = {name: source_bytes(root, name) for name in FILES}
+    prebuilt = {}
+    if harness is not None:
+        data = harness_bytes(harness)
+        payload[HARNESS_NAME] = data
+        prebuilt[HARNESS_NAME] = {
+            "purpose": "headless-plugin-harness",
+            "architecture": "windows-x64",
+            "pulseVersion": compat["pulseVersion"],
+            "bytes": len(data),
+        }
     manifest = {
         "formatVersion": 1,
         "delivery": "source-only",
@@ -188,6 +248,8 @@ def bundle(output, root=ROOT):
         "compatibility": compat,
         "files": {name: hashlib.sha256(data).hexdigest() for name, data in payload.items()},
     }
+    if prebuilt:
+        manifest["prebuilt"] = prebuilt
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     # Exclusive creation avoids silently replacing a previously reviewed SDK.
@@ -213,6 +275,7 @@ def compatibility_report(archive_path=None, root=ROOT):
             "archiveBytes": len(raw_archive),
             "delivery": manifest["delivery"],
             "hostIncluded": manifest["hostIncluded"],
+            "prebuilt": sorted(manifest.get("prebuilt", {})),
             "compatibility": manifest["compatibility"],
             "interfaces": [
                 {"name": item["name"], "version": item["version"], "header": item.get("header")}
@@ -243,6 +306,7 @@ def main():
     commands.add_parser("describe")
     pack = commands.add_parser("bundle")
     pack.add_argument("--output", type=Path, required=True)
+    pack.add_argument("--harness", type=Path, help="Prebuilt pulse_plugin_harness.exe to ship as bin/pulse_plugin_harness.exe")
     compat_cmd = commands.add_parser("compatibility")
     compat_cmd.add_argument("--archive", type=Path)
     compat_cmd.add_argument("--output", type=Path)
@@ -250,7 +314,7 @@ def main():
     if args.command == "describe":
         result = catalog()
     elif args.command == "bundle":
-        result = bundle(args.output)
+        result = bundle(args.output, harness=args.harness)
     else:
         result = compatibility_report(archive_path=args.archive)
         if args.output is not None:

@@ -71,7 +71,11 @@ struct StoreTrustWatch::Impl {
                 if (revoked[i]) continue;
                 std::string ignored;
                 bool trusted = false;
-                try { trusted = read && VerifyPackageSignature(snapshots[i].manifest, snapshots[i].signature, policy, ignored); }
+                try {
+                    trusted = read && VerifyPackageSignature(snapshots[i].manifest, snapshots[i].signature, policy, ignored);
+                    if (!trusted && read && snapshots[i].allow_unsigned && snapshots[i].signature.empty() &&
+                        ignored == "signature_required") trusted = true;
+                }
                 catch (...) {}
                 if (!trusted) { revoked[i] = true; result.revoked.push_back(i); }
             }

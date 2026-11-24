@@ -9,6 +9,7 @@
 #include "extension_package_fixture.h"
 #include "pulse_version.h"
 #include "../../sdk/native/include/pulse/abi.h"
+#include "../../sdk/native/include/pulse/icons.h"
 #include <winioctl.h>
 #include <chrono>
 #include <cstdio>
@@ -127,6 +128,33 @@ LocalArchiveSpec BuildNativeArchive(std::string id = "org.test.local",
     return spec;
 }
 
+LocalArchiveSpec BuildRawManifestArchive(std::string id, std::string raw_manifest_bytes) {
+    LocalArchiveSpec spec;
+    spec.id = std::move(id);
+    spec.manifest_bytes = std::move(raw_manifest_bytes);
+    const std::string rev = PackageRevision(spec.manifest_bytes);
+
+    Value meta_native = Value::Object();
+    meta_native.set("library", "test.dll");
+    meta_native.set("sha256", PackageRevision(spec.dll_bytes));
+
+    Value metadata = Value::Object();
+    metadata.set("format", "pulse-extension-local");
+    metadata.set("formatVersion", 2);
+    metadata.set("apiVersion", 1);
+    metadata.set("id", spec.id);
+    metadata.set("manifestSha256", rev);
+    metadata.set("native", std::move(meta_native));
+
+    std::vector<ZipFile> zfiles = {
+        {"manifest.json", spec.manifest_bytes},
+        {"package.json", pulse::json::Serialize(metadata)},
+        {"test.dll", spec.dll_bytes},
+    };
+    spec.archive_bytes = MakeZip(zfiles).bytes;
+    return spec;
+}
+
 InstallServiceConfig MakeConfig(const fs::path& store_root) {
     return {store_root, PULSE_VERSION_STRING_A, static_cast<int>(PULSE_SDK_PREVIEW)};
 }
@@ -191,7 +219,7 @@ struct ScopedTempDir {
 
 } // namespace
 
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     wchar_t mod_buf[32768]{};
     GetModuleFileNameW(nullptr, mod_buf, 32768);
@@ -488,6 +516,58 @@ int wmain() {
                   mixed_service.GetSnapshot().error == "installed_publisher_mismatch",
                 "mixed store (requireSigned: false) also blocks unsigned downgrade of signed package with installed_publisher_mismatch",
                 mixed_service.GetSnapshot().error);
+
+            // Developer mode: the unsigned build may replace the signed one (review says so), the
+            // signed revision stays the rollback target across further unsigned builds, and
+            // rolling back works again after developer mode is turned off.
+            InstalledSnapshot before;
+            std::string read_error;
+            Check(ReadInstalledStore(mixed_store, before, read_error) && before.entries.size() == 1,
+                "read mixed store before the developer-mode override", read_error);
+            const std::string signed_revision = before.entries.empty() ? std::string{} : before.entries[0].revision;
+            const fs::path dev_flag = temp.path / L"extensions-dev" / L"developer-mode.json";
+            Check(WriteBytes(dev_flag, R"({"formatVersion":1,"enabled":true})"), "turn developer mode on beside the mixed store");
+            const auto gm3 = mixed_service.PrepareLocal(downgrade_pkg);
+            const bool awaiting = WaitPhase(mixed_service, gm3, Phase::AwaitingInstall);
+            const auto override_review = mixed_service.GetSnapshot().install_review;
+            Check(awaiting && override_review && override_review->replaces_signed &&
+                  mixed_service.ConfirmInstall(gm3, InstallConsent{true, true, true, true}) &&
+                  WaitPhase(mixed_service, gm3, Phase::Installed),
+                "developer mode lets an unsigned build replace the signed package after a replaces_signed review",
+                mixed_service.GetSnapshot().error);
+            auto second_dll = Pe();
+            second_dll[410] = 'Y';
+            const auto second_unsigned = BuildNativeArchive("org.test.signed", {}, second_dll);
+            const fs::path second_pkg = temp.path / L"downgrade" / L"org.test.signed-9.9.10.pulse-ext";
+            WriteBytes(second_pkg, second_unsigned.archive_bytes);
+            const auto gm4 = mixed_service.PrepareLocal(second_pkg);
+            const bool awaiting_second = WaitPhase(mixed_service, gm4, Phase::AwaitingInstall);
+            const auto second_review = mixed_service.GetSnapshot().install_review;
+            Check(awaiting_second && second_review && !second_review->replaces_signed &&
+                  mixed_service.ConfirmInstall(gm4, InstallConsent{true, true, true, true}) &&
+                  WaitPhase(mixed_service, gm4, Phase::Installed),
+                "a second unsigned build replaces the first without a replaces_signed review",
+                mixed_service.GetSnapshot().error);
+            InstalledSnapshot dev_state;
+            Check(ReadInstalledStore(mixed_store, dev_state, read_error) && dev_state.entries.size() == 1 &&
+                  dev_state.entries[0].revision != signed_revision &&
+                  dev_state.entries[0].previous_revision == signed_revision &&
+                  dev_state.entries[0].publisher_id.empty(),
+                "the signed revision stays the rollback target across unsigned developer builds", read_error);
+            fs::remove(dev_flag);
+            StoreChangeReview rollback;
+            std::string change_error;
+            StoreChangeResult changed;
+            const std::atomic<bool> no_cancel{false};
+            Check(ReviewStoreChange(mixed_store, "org.test.signed", StoreChangeAction::Rollback, rollback, change_error) &&
+                  rollback.publisher_id.empty() &&
+                  CommitStoreChange(mixed_store, rollback, StoreChangeConsent{true, true, true, false}, no_cancel, changed, change_error),
+                "with developer mode off the unsigned build still rolls back to the signed revision", change_error);
+            InstalledSnapshot restored;
+            Check(ReadInstalledStore(mixed_store, restored, read_error) && restored.entries.size() == 1 &&
+                  restored.entries[0].revision == signed_revision && !restored.entries[0].publisher_id.empty() &&
+                  restored.entries[0].error.empty(),
+                "rollback restores the signed revision with its publisher", read_error);
         }
 
         // 8. Reparse-point (NTFS junction), directory, relative, UNC, and device paths fail closed
@@ -575,6 +655,78 @@ int wmain() {
                       !pub_err.empty() && pub_err != L"installed_publisher_mismatch",
                     ("security gate error codes localize to human-readable text in " + lang_utf8).c_str());
             }
+        }
+
+        // 10. Floating-point icon geometry metrics (viewBox/strokeWidth/opacity) allowed; float integer tokens still rejected
+        {
+            const std::string dll_sha = PackageRevision(Pe());
+            const std::string icon_manifest =
+                std::string("{\"apiVersion\":1,\"id\":\"org.test.float.icons\",\"name\":\"Float Icons\",") +
+                "\"contributes\":{\"icons\":[{\"id\":\"ico\",\"viewBox\":16.5,\"layers\":[{\"path\":\"M0 0L10 10\",\"stroke\":true,\"strokeWidth\":1.35,\"opacity\":0.8}]}]}," +
+                "\"native\":{\"version\":1,\"architecture\":\"windows-x64\",\"library\":\"test.dll\",\"sha256\":\"" + dll_sha + "\"}}";
+            const auto ok_spec = BuildRawManifestArchive("org.test.float.icons", icon_manifest);
+            const fs::path ok_pkg = temp.path / L"float-check" / L"ok.pulse-ext";
+            WriteBytes(ok_pkg, ok_spec.archive_bytes);
+            std::atomic<bool> cancel = false;
+            VerifiedPackage ok_out;
+            std::string ok_err;
+            Check(VerifyLocalPackage(ok_pkg, cancel, ok_out, ok_err) &&
+                  ok_out.Declaration().icon_contributions.size() == 1 &&
+                  ok_out.Declaration().icon_contributions[0].view_box_milli == 16500 &&
+                  ok_out.Declaration().icon_contributions[0].layers[0].stroke_width_milli == 1350 &&
+                  ok_out.Declaration().icon_contributions[0].layers[0].opacity_milli == 800,
+                "VerifyLocalPackage accepts floating-point icon viewBox, strokeWidth, and opacity", ok_err);
+
+            const std::string bad_manifest =
+                std::string("{\"apiVersion\":1.0,\"id\":\"org.test.float.bad\",\"name\":\"Bad Float\",") +
+                "\"native\":{\"version\":1,\"architecture\":\"windows-x64\",\"library\":\"test.dll\",\"sha256\":\"" + dll_sha + "\"}}";
+            const auto bad_spec = BuildRawManifestArchive("org.test.float.bad", bad_manifest);
+            const fs::path bad_pkg = temp.path / L"float-check" / L"bad.pulse-ext";
+            WriteBytes(bad_pkg, bad_spec.archive_bytes);
+            VerifiedPackage bad_out;
+            std::string bad_err;
+            Check(!VerifyLocalPackage(bad_pkg, cancel, bad_out, bad_err) &&
+                  bad_err == "invalid_manifest_integer",
+                "VerifyLocalPackage still rejects float syntax on integer manifest fields (apiVersion: 1.0)", bad_err);
+        }
+
+        // Optional real-archive upgrade verification via C++ InstallService + LoadPackageStore
+        if (argc == 4 && std::wstring_view(argv[1]) == L"--verify-real-upgrade") {
+            const fs::path real_store = temp.path / L"real-upgrade-store";
+            InstallService service(MakeConfig(real_store));
+
+            const auto g_old = service.PrepareLocal(fs::path(argv[2]));
+            Check(service.WaitForPhase(g_old, Phase::AwaitingPublisherTrust, 10s) ||
+                  service.WaitForPhase(g_old, Phase::AwaitingInstall, 10s),
+                "real old archive PrepareLocal reaches review phase", service.GetSnapshot().error);
+            if (service.GetSnapshot().phase == Phase::AwaitingPublisherTrust) {
+                Check(service.ConfirmPublisherTrust(g_old, true) &&
+                      service.WaitForPhase(g_old, Phase::AwaitingInstall, 10s),
+                    "real old archive trusts official publisher", service.GetSnapshot().error);
+            }
+            Check(service.ConfirmInstall(g_old, InstallConsent{true, true, true, true}) &&
+                  service.WaitForPhase(g_old, Phase::Installed, 10s),
+                "real old archive installs via InstallService", service.GetSnapshot().error);
+
+            const auto g_new = service.PrepareLocal(fs::path(argv[3]));
+            Check(service.WaitForPhase(g_new, Phase::AwaitingInstall, 10s) &&
+                  service.ConfirmInstall(g_new, InstallConsent{true, true, true, true}) &&
+                  service.WaitForPhase(g_new, Phase::Installed, 10s),
+                "real new signed 7zip package upgrades cleanly via InstallService",
+                service.GetSnapshot().error);
+
+            const auto loaded = pulse::extensions::LoadPackageStore(real_store.wstring());
+            Check(loaded.error.empty() && loaded.packages.size() == 1 &&
+                  loaded.packages[0].id == "pulse.7zip" &&
+                  loaded.packages[0].icon_contributions.size() == 1 &&
+                  loaded.packages[0].icon_contributions[0].id == "sevenzip-browse" &&
+                  loaded.packages[0].file_handlers.size() == 1 &&
+                  loaded.packages[0].showcase.has_value() &&
+                  loaded.packages[0].showcase->builtin_icon == PULSE_ICON_BOX &&
+                  loaded.packages[0].showcase->has_icon_color &&
+                  loaded.packages[0].showcase->icon_color == 0x527D70u,
+                "LoadPackageStore loads upgraded pulse.7zip package with refined box icon, custom icon, fileHandlers, and showcase",
+                loaded.error);
         }
     } catch (const std::exception& ex) {
         std::printf("[FAIL] unhandled exception: %s\n", ex.what());

@@ -278,6 +278,22 @@ class SignatureTests(unittest.TestCase):
                             '--old-public-key', old_pub, '--new-public-key', new_pub)
             self.assertNotEqual(res_wrong.returncode, 0)
 
+            gen_priv = root / 'cli-gen.priv'
+            gen_pub = root / 'cli-gen.pub'
+            gen_manifest = root / 'manifest.json'
+            gen_sig = root / 'manifest.sig.json'
+            gen_manifest.write_bytes(self.data)
+            res_kg = run('keygen', '--private-key', gen_priv, '--public-key', gen_pub)
+            self.assertEqual(res_kg.returncode, 0, res_kg.stderr)
+            kg_doc = json.loads(res_kg.stdout)
+            self.assertTrue(kg_doc['generated'])
+            self.assertEqual(len(kg_doc['publisher']), 64)
+            # Refuses to overwrite existing key files
+            self.assertNotEqual(run('keygen', '--private-key', gen_priv, '--public-key', root / 'other.pub').returncode, 0)
+            res_sign = run('sign', gen_manifest, '--private-key', gen_priv, '--output', gen_sig)
+            self.assertEqual(res_sign.returncode, 0, res_sign.stderr)
+            self.assertEqual(json.loads(res_sign.stdout)['publisher'], kg_doc['publisher'])
+
 
 if __name__ == '__main__':
     unittest.main()

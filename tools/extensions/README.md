@@ -19,6 +19,7 @@ python tools/extensions/pulse_ext.py --json build C:/PulseAuthor/my-rename --con
 
 # 3. Smoke-test headlessly (<1s, zero GUI DLL imports via pulse_plugin_harness.exe + static PE64/manifest checks)
 python tools/extensions/pulse_ext.py --json test C:/PulseAuthor/my-rename --smoke-commands --strict-resources
+python tools/extensions/pulse_ext.py --json strings C:/PulseAuthor/my-rename --check
 
 # 4. Bind DLL SHA-256 into a staged manifest, pack, and verify offline (pass --pulse C:/Pulse/pulse.exe when live host validation is desired)
 python tools/extensions/pulse_ext.py --json native-manifest C:/PulseAuthor/my-rename/manifest.json --library C:/PulseAuthor/my-rename/build/com_example_rename_lower.dll --output C:/PulseAuthor/my-rename/build/manifest.json

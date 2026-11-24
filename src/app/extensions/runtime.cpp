@@ -5,6 +5,7 @@
 #include "development_reload.h"
 #include "package_store.h"
 #include "store_trust_watch.h"
+#include "developer_mode.h"
 #include "audit_persistence.h"
 
 #include <windows.h>
@@ -27,8 +28,12 @@ struct RuntimePackage {
     bool trust_revoked = false;
     std::wstring native_path;
     std::string publisher_id;
+    bool developer_folder = false;
 };
 std::vector<RuntimePackage> packages;
+bool developer_mode_startup = false;
+std::vector<std::pair<std::string, std::string>> developer_folder_errors;
+std::vector<std::string> skipped_unsigned_packages;
 authorization::Registry callers;
 bool identities_ready = false;
 std::unordered_map<uintptr_t, authorization::OwnerHandle> owners;
@@ -195,6 +200,10 @@ void SetPackageEnabled(size_t package, bool enabled) {
 }
 uint64_t PackageGeneration(size_t package) { return package < packages.size() ? packages[package].generation : 0; }
 bool PackageStoreMode() { return package_store_mode; }
+bool DeveloperModeAtStartup() { return developer_mode_startup; }
+bool PackageFromDeveloperFolder(size_t package) { return package < packages.size() && packages[package].developer_folder; }
+std::vector<std::pair<std::string, std::string>> DeveloperFolderLoadErrors() { return developer_folder_errors; }
+std::vector<std::string> SkippedUnsignedPackages() { return skipped_unsigned_packages; }
 std::wstring PackageStoreRoot() { return package_store_mode ? trust_root : std::wstring{}; }
 
 void PrepareShutdown() {
@@ -215,6 +224,9 @@ StartupResult PrepareStartup(int argc, wchar_t** argv) {
     packages.clear();
     SyncCallers();
     package_store_mode = false;
+    developer_mode_startup = false;
+    developer_folder_errors.clear();
+    skipped_unsigned_packages.clear();
     for (int i = 1; i < argc; ++i) {
         if (std::wcscmp(argv[i], L"--extension-script-dev") == 0)
             return Fail("--extension-script-dev has been removed; use a native C++ DLL package.");
@@ -250,7 +262,9 @@ StartupResult PrepareStartup(int argc, wchar_t** argv) {
             (isolated ? std::filesystem::path(L"extensions") : std::filesystem::path(L"Pulse") / L"extensions");
         if (!root.is_absolute()) return {};
         std::error_code error;
-        if (!std::filesystem::exists(root / L"registry.json", error)) return {};
+        // Developer folder packages load even before anything was installed from the store.
+        if (!std::filesystem::exists(root / L"registry.json", error) &&
+            !(devmode::Enabled(root) && !devmode::ReadRegistry(root).empty())) return {};
         discovered_store = root.wstring();
         manifest_path = discovered_store.c_str();
         store_mode = true;
@@ -271,8 +285,13 @@ StartupResult PrepareStartup(int argc, wchar_t** argv) {
         const std::filesystem::path path(manifest_path);
         if (!path.is_absolute()) return Fail("The manifest path must be absolute.");
         if (store_mode) {
-            auto loaded = LoadPackageStore(path.wstring());
+            const bool developer = devmode::Enabled(path);
+            std::error_code missing_error;
+            const bool has_registry = std::filesystem::exists(path / L"registry.json", missing_error);
+            auto loaded = (has_registry || !developer) ? LoadPackageStore(path.wstring(), PackageStoreOptions{developer}) : PackageStoreResult{};
             if (!loaded) return startup_failure(loaded.error);
+            developer_mode_startup = developer;
+            skipped_unsigned_packages = loaded.skipped_unsigned;
             std::vector<RuntimePackage> next;
             next.reserve(loaded.packages.size());
             for (size_t i = 0; i < loaded.packages.size(); ++i) {
@@ -281,12 +300,36 @@ StartupResult PrepareStartup(int argc, wchar_t** argv) {
                 if (i < loaded.publisher_ids.size()) entry.publisher_id = std::move(loaded.publisher_ids[i]);
                 next.push_back(std::move(entry));
             }
+            if (developer) {
+                // Store ids (enabled or not) win; a developer folder never shadows an installed package.
+                std::vector<std::string> taken;
+                if (has_registry) {
+                    for (const auto& manifest : loaded.packages) taken.push_back(manifest.id);
+                    std::string registry_bytes;
+                    json::Value registry;
+                    if (devmode::ReadSmallFile(path / L"registry.json", registry_bytes) &&
+                        json::Parse(registry_bytes, registry, nullptr, {kMaxStoreRegistryBytes, 4}))
+                        if (const auto* items = registry.find("packages"); items && items->is_array())
+                            for (const auto& item : items->items()) taken.push_back(item.get_string("id"));
+                    for (const auto& id : loaded.skipped_unsigned) taken.push_back(id);
+                }
+                for (auto& dev : LoadDevelopmentPackages(path.wstring(), taken)) {
+                    if (!dev.manifest || next.size() >= kMaxStorePackages) {
+                        developer_folder_errors.push_back({dev.id, dev.error.empty() ? "store_full" : dev.error});
+                        continue;
+                    }
+                    RuntimePackage entry{std::move(*dev.manifest), true, ++manifest_generation, dev.revision};
+                    entry.native_path = std::move(dev.native_path);
+                    entry.developer_folder = true;
+                    next.push_back(std::move(entry));
+                }
+            }
             packages = std::move(next);
             if (!SyncCallers()) { packages.clear(); return startup_failure("Cannot establish package identities."); }
             package_store_mode = true;
             trust_root = path.lexically_normal().wstring();
             for (size_t i = 0; i < loaded.manifest_bytes.size(); ++i)
-                trust_snapshots.push_back({std::move(loaded.manifest_bytes[i]), std::move(loaded.signatures[i])});
+                trust_snapshots.push_back({std::move(loaded.manifest_bytes[i]), std::move(loaded.signatures[i]), developer});
             if (!packages.empty()) StartAudit(isolated);
             if (!discovered_store.empty()) RecordDefaultStoreStatus(path, {});
             return {};

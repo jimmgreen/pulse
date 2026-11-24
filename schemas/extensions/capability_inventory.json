@@ -886,6 +886,13 @@
       "publicId": null
     },
     {
+      "internalActionId": "git.source_control",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
       "internalActionId": "git.pull",
       "internalRisk": "External",
       "riskDependsOnTarget": false,

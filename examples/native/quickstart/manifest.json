@@ -1,0 +1,9 @@
+{
+  "apiVersion": 1,
+  "id": "sample.native-quickstart",
+  "name": "Quickstart example",
+  "resources": [
+    "operations.own",
+    "settings.own"
+  ]
+}

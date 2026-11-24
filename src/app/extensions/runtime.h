@@ -4,6 +4,9 @@
 #include "authorization.h"
 #include "package_signature.h"
 #include <functional>
+#include <string>
+#include <utility>
+#include <vector>
 #include "../../common/json_value.h"
 
 namespace pulse::extensions {
@@ -40,6 +43,14 @@ bool PackageStoreMode();
 std::wstring PackageStoreRoot();
 // Host-only UI-thread diagnostic; no policy contents or authorization authority.
 uint64_t StoreTrustCheckSequence();
+// Developer mode (devmode_plan.md), as read once at startup from extensions-dev next to the store.
+bool DeveloperModeAtStartup();
+// Loaded from a developer folder (shadow copy), not from the store registry.
+bool PackageFromDeveloperFolder(size_t package);
+// Startup results for developer folder packages that did not load: {id, error code}.
+std::vector<std::pair<std::string, std::string>> DeveloperFolderLoadErrors();
+// Enabled unsigned store packages left out because developer mode was off at startup.
+std::vector<std::string> SkippedUnsignedPackages();
 // Legacy single-package compatibility refers only to slot zero, never the selected UI panel.
 const Manifest* CurrentManifest();
 bool Enabled();

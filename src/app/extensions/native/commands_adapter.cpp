@@ -1,6 +1,7 @@
 #include "commands_adapter.h"
 #include "crash_guard.h"
 #include "../icon_registry.h"
+#include "../../../../sdk/native/include/pulse/icons.h"
 #include <algorithm>
 #include <atomic>
 #include <cstring>
@@ -92,6 +93,8 @@ struct CommandsAdapter::State : std::enable_shared_from_this<State> {
         CommandInfo info;
         uint32_t kinds = 0, minimum = 0, maximum = 0;
         bool exclude = false;
+        std::string id;        // package-local ASCII command ID
+        std::string icon_name; // optional V3 icon_name
         std::string detail; // template; {stem}/{base} resolve per selection
         std::vector<std::string> extensions;
         PulseCommandFn callback = nullptr;
@@ -102,6 +105,7 @@ struct CommandsAdapter::State : std::enable_shared_from_this<State> {
     std::string package;
     PulseContextV1 context;
     std::function<bool()> live;
+    std::function<void()> on_changed;
     DWORD thread = GetCurrentThreadId();
     bool closed = false, active = false;
     std::map<int, Command> commands;
@@ -192,7 +196,8 @@ struct CommandsAdapter::State : std::enable_shared_from_this<State> {
         if (key && !((key >= 'A' && key <= 'Z') || (key >= '0' && key <= '9') || (key >= VK_F1 && key <= VK_F24))) return PULSE_ERROR_ARGUMENT;
         if ((!key && source->modifiers) || (key && key < VK_F1 && !(source->modifiers & (PULSE_COMMAND_CTRL | PULSE_COMMAND_ALT)))) return PULSE_ERROR_ARGUMENT;
         command = {};
-        command.info.identity = "native:" + package + ":" + Copy(source->id, 64, true);
+        command.id = Copy(source->id, 64, true);
+        command.info.identity = "native:" + package + ":" + command.id;
         command.info.title = Copy(source->title, 128);
         command.info.icon = source->icon;
         command.info.key = key;
@@ -210,6 +215,7 @@ struct CommandsAdapter::State : std::enable_shared_from_this<State> {
             if (!icon_name.empty()) {
                 const auto resolved = icons::GlobalRegistry().ResolveName(package, icon_name);
                 if (!resolved) return PULSE_ERROR_ARGUMENT;
+                command.icon_name = icon_name;
                 command.info.icon = *resolved;
             }
             if (source->group_icon != 0) {
@@ -275,6 +281,7 @@ struct CommandsAdapter::State : std::enable_shared_from_this<State> {
             catch (...) { self->commands.erase(token); throw; }
             *out = static_cast<PulseCommandId>(token);
             NotifyOwnerChanged(self->owner);
+            if (self->on_changed) self->on_changed();
             return PULSE_OK;
         } catch (...) { return PULSE_ERROR_ARGUMENT; }
     }
@@ -293,6 +300,7 @@ struct CommandsAdapter::State : std::enable_shared_from_this<State> {
             updated.info.token = token;
             it->second = std::move(updated);
             NotifyOwnerChanged(self->owner);
+            if (self->on_changed) self->on_changed();
             return PULSE_OK;
         } catch (...) { return PULSE_ERROR_ARGUMENT; }
     }
@@ -305,6 +313,7 @@ struct CommandsAdapter::State : std::enable_shared_from_this<State> {
         if (it == self->commands.end()) return PULSE_ERROR_STATE;
         it->second.info.flags = flags;
         NotifyOwnerChanged(self->owner);
+        if (self->on_changed) self->on_changed();
         return PULSE_OK;
     }
     static PulseStatus PULSE_CALL Unregister(void* context, PulseCommandId id) {
@@ -314,13 +323,43 @@ struct CommandsAdapter::State : std::enable_shared_from_this<State> {
         if (!self->commands.erase(static_cast<int>(id))) return PULSE_ERROR_STATE;
         registry.erase(static_cast<int>(id));
         NotifyOwnerChanged(self->owner);
+        if (self->on_changed) self->on_changed();
         return PULSE_OK;
     }
-    void Close() { closed = true; cached_selection.reset(); for (const auto& [id, command] : commands) { (void)command; registry.erase(id); } commands.clear(); }
+    void Close() { closed = true; on_changed = nullptr; cached_selection.reset(); for (const auto& [id, command] : commands) { (void)command; registry.erase(id); } commands.clear(); }
 };
 CommandsAdapter::CommandsAdapter(HWND owner, std::string package, PulseContextV1 context, std::function<bool()> live)
     : state_(std::make_shared<State>(owner, std::move(package), context, std::move(live))) {}
 CommandsAdapter::~CommandsAdapter() { Close(); }
+void CommandsAdapter::SetOnChanged(std::function<void()> callback) {
+    if (state_) state_->on_changed = std::move(callback);
+}
+std::vector<ProjectedCommand> CommandsAdapter::ExportProjection() const {
+    std::vector<ProjectedCommand> out;
+    if (!state_ || !state_->Ready()) return out;
+    out.reserve(state_->commands.size());
+    for (const auto& [token, cmd] : state_->commands) {
+        (void)token;
+        ProjectedCommand row;
+        row.id = cmd.id;
+        row.title = cmd.info.title;
+        row.detail = cmd.detail;
+        row.group = cmd.info.group;
+        row.icon = cmd.info.icon;
+        row.icon_name = cmd.icon_name;
+        row.group_icon = cmd.info.group_icon;
+        row.kinds = cmd.kinds;
+        row.min_selection = cmd.minimum;
+        row.max_selection = cmd.maximum;
+        row.extensions = cmd.extensions;
+        row.exclude_extensions = cmd.exclude;
+        row.virtual_key = cmd.info.key;
+        row.modifiers = cmd.info.modifiers;
+        row.flags = cmd.info.flags;
+        out.push_back(std::move(row));
+    }
+    return out;
+}
 void CommandsAdapter::Close() noexcept { state_->Close(); }
 bool CommandsAdapter::CallbackActive() const noexcept { return state_->active; }
 PulseStatus CommandsAdapter::Query(uint32_t version, void* out, uint32_t size) const noexcept {
@@ -413,39 +452,38 @@ std::string CommandsAdapter::ResolveLocalizedText(const ManifestLocalizedText& t
     }
     return text.en;
 }
-CommandInfo CommandsAdapter::EvaluateStaticContribution(HWND owner, size_t package,
-                                                        const std::string& package_id,
-                                                        const ManifestCommandContribution& contribution,
-                                                        StaticCommandLanguage language,
-                                                        const CommandSelection& selection) {
+CommandInfo CommandsAdapter::EvaluateProjectedCommand(HWND owner, size_t package,
+                                                    const std::string& package_id,
+                                                    const ProjectedCommand& projected,
+                                                    const CommandSelection& selection) {
     State::Command command;
-    command.info.token = EnsureStaticToken(owner, package, package_id, contribution.id);
-    command.info.identity = "native:" + package_id + ":" + contribution.id;
+    command.info.token = EnsureStaticToken(owner, package, package_id, projected.id);
+    command.info.identity = "native:" + package_id + ":" + projected.id;
     command.info.package = package_id;
-    command.info.title = ResolveLocalizedText(contribution.title, language);
-    command.info.group = ResolveLocalizedText(contribution.group, language);
-    command.detail = ResolveLocalizedText(contribution.detail, language);
-    command.info.flags = contribution.flags | (contribution.submenu ? static_cast<uint32_t>(PULSE_COMMAND_GROUP_SUBMENU) : 0u);
-    command.info.icon = contribution.icon;
-    if (!contribution.icon_name.empty()) {
-        if (const auto resolved = icons::GlobalRegistry().ResolveName(package_id, contribution.icon_name)) {
+    command.info.title = projected.title;
+    command.info.group = projected.group;
+    command.detail = projected.detail;
+    command.info.flags = projected.flags;
+    command.info.icon = projected.icon < PULSE_ICON_CUSTOM_MIN ? projected.icon : 0u;
+    if (!projected.icon_name.empty()) {
+        if (const auto resolved = icons::GlobalRegistry().ResolveName(package_id, projected.icon_name)) {
             command.info.icon = *resolved;
         }
     }
-    command.info.group_icon = contribution.group_icon;
-    if (!contribution.group_icon_name.empty()) {
-        if (const auto resolved = icons::GlobalRegistry().ResolveName(package_id, contribution.group_icon_name)) {
+    command.info.group_icon = projected.group_icon < PULSE_ICON_CUSTOM_MIN ? projected.group_icon : 0u;
+    if (!projected.group_icon_name.empty()) {
+        if (const auto resolved = icons::GlobalRegistry().ResolveName(package_id, projected.group_icon_name)) {
             command.info.group_icon = *resolved;
         }
     }
-    command.info.key = contribution.virtual_key;
-    command.info.modifiers = contribution.modifiers;
-    command.kinds = contribution.kinds;
-    command.minimum = contribution.min_selection;
-    command.maximum = contribution.max_selection;
-    command.exclude = contribution.exclude_extensions;
-    command.extensions.reserve(contribution.extensions.size());
-    for (std::string ext : contribution.extensions) {
+    command.info.key = projected.virtual_key;
+    command.info.modifiers = projected.modifiers;
+    command.kinds = projected.kinds;
+    command.minimum = projected.min_selection;
+    command.maximum = projected.max_selection;
+    command.exclude = projected.exclude_extensions;
+    command.extensions.reserve(projected.extensions.size());
+    for (std::string ext : projected.extensions) {
         for (char& c : ext) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
         command.extensions.push_back(std::move(ext));
     }
@@ -465,6 +503,30 @@ CommandInfo CommandsAdapter::EvaluateStaticContribution(HWND owner, size_t packa
     command.info.enabled = command.info.token != 0 && State::Matches(command, converted);
     if (command.info.enabled) command.info.detail = State::Detail(command.detail, converted);
     return command.info;
+}
+CommandInfo CommandsAdapter::EvaluateStaticContribution(HWND owner, size_t package,
+                                                        const std::string& package_id,
+                                                        const ManifestCommandContribution& contribution,
+                                                        StaticCommandLanguage language,
+                                                        const CommandSelection& selection) {
+    ProjectedCommand projected;
+    projected.id = contribution.id;
+    projected.title = ResolveLocalizedText(contribution.title, language);
+    projected.group = ResolveLocalizedText(contribution.group, language);
+    projected.detail = ResolveLocalizedText(contribution.detail, language);
+    projected.flags = contribution.flags | (contribution.submenu ? static_cast<uint32_t>(PULSE_COMMAND_GROUP_SUBMENU) : 0u);
+    projected.icon = contribution.icon;
+    projected.icon_name = contribution.icon_name;
+    projected.group_icon = contribution.group_icon;
+    projected.group_icon_name = contribution.group_icon_name;
+    projected.virtual_key = contribution.virtual_key;
+    projected.modifiers = contribution.modifiers;
+    projected.kinds = contribution.kinds;
+    projected.min_selection = contribution.min_selection;
+    projected.max_selection = contribution.max_selection;
+    projected.exclude_extensions = contribution.exclude_extensions;
+    projected.extensions = contribution.extensions;
+    return EvaluateProjectedCommand(owner, package, package_id, projected, selection);
 }
 std::optional<StaticCommandTarget> CommandsAdapter::LookupStaticToken(HWND owner, int token) {
     if (token < kFirstStaticCommandToken || token > kLastStaticCommandToken) return std::nullopt;
@@ -525,7 +587,7 @@ bool CommandsAdapter::InvokeIdentity(HWND owner, const std::string& identity) {
     }
     return false;
 }
-bool CommandsAdapter::InvokeHiddenIdentity(HWND owner, const std::string& identity, const CommandSelection& selection) {
+bool CommandsAdapter::InvokeSelectedIdentity(HWND owner, const std::string& identity, const CommandSelection& selection, bool require_hidden) {
     if (identity.empty() || !selection.valid) return false;
     const auto registry = State::registry;
     for (const auto& [token, weak] : registry) {
@@ -534,7 +596,7 @@ bool CommandsAdapter::InvokeHiddenIdentity(HWND owner, const std::string& identi
         const auto item = self->commands.find(token);
         if (item == self->commands.end() || item->second.info.identity != identity) continue;
         auto command = item->second;
-        if (!(command.info.flags & PULSE_COMMAND_HIDDEN)) return false;
+        if (require_hidden && !(command.info.flags & PULSE_COMMAND_HIDDEN)) return false;
         command.info.flags &= ~static_cast<uint32_t>(PULSE_COMMAND_HIDDEN);
         Selection selected;
         selected.valid = selection.valid;
@@ -560,6 +622,12 @@ bool CommandsAdapter::InvokeHiddenIdentity(HWND owner, const std::string& identi
         return invoked;
     }
     return false;
+}
+bool CommandsAdapter::InvokeHiddenIdentity(HWND owner, const std::string& identity, const CommandSelection& selection) {
+    return InvokeSelectedIdentity(owner, identity, selection, true);
+}
+bool CommandsAdapter::InvokeIdentityWithSelection(HWND owner, const std::string& identity, const CommandSelection& selection) {
+    return InvokeSelectedIdentity(owner, identity, selection, false);
 }
 bool CommandsAdapter::Shortcut(HWND owner, uint32_t key, uint32_t modifiers) {
     for (const auto& info : Entries(owner)) if (info.enabled && info.key == key && info.modifiers == modifiers) return Invoke(owner, info.token);

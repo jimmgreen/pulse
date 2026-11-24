@@ -1,3 +1,4 @@
+#include "ui_continuous_slider.h"
 #include "ui_tree.h"
 #include "../../common/json_value.h"
 #include <algorithm>
@@ -7,13 +8,14 @@
 namespace pulse::extensions {
 std::string_view UiNodeTypeName(UiNodeType type) {
     constexpr std::string_view names[] = {
-        "stack",         "grid",        "group",          "scrollView",  "text",          "button",
-        "textInput",     "checkbox",    "select",         "progress",    "divider",       "tabs",
-        "tab",           "list",        "switch",         "radio",       "slider",        "segmented",
-        "badge",         "tag",         "infoBar",        "splitButton", "menuButton",    "sidebarItem",
-        "breadcrumb",    "emptyState",  "virtualList",    "tree",        "dataTable",     "trayCard",
-        "commandSearch", "splitPane",   "sidebarSection", "driveItem",   "paneHeader",    "fileRow",
-        "stagingTray",   "stagingItem", "statusBar",      "tooltip",     "titleBarButton", "canvas"};
+        "stack",         "grid",        "group",          "scrollView",  "text",           "button",
+        "textInput",     "checkbox",    "select",         "progress",    "divider",        "tabs",
+        "tab",           "list",        "switch",         "radio",       "slider",         "segmented",
+        "badge",         "tag",         "infoBar",        "splitButton", "menuButton",     "sidebarItem",
+        "breadcrumb",    "emptyState",  "virtualList",    "tree",        "dataTable",      "trayCard",
+        "commandSearch", "splitPane",   "sidebarSection", "driveItem",   "paneHeader",     "fileRow",
+        "stagingTray",   "stagingItem", "statusBar",      "tooltip",     "titleBarButton", "canvas",
+        "optionCard",    "settingsRow", "image",          "menuPreview"};
     static_assert(std::size(names) == static_cast<size_t>(UiNodeType::Count));
     return static_cast<size_t>(type) < std::size(names) ? names[static_cast<size_t>(type)]
                                                         : std::string_view{};
@@ -51,7 +53,7 @@ bool ValidateUiInput(const UiNode& node, std::string_view value) {
            length <= static_cast<size_t>(rule.max_length);
 }
 bool ValidateUiStateValue(const UiTree& tree, std::string_view key, std::string_view candidate) {
-    if (candidate.size() > 1024 || candidate.find('\0') != std::string_view::npos ||
+    if (candidate.size() > 4096 || candidate.find('\0') != std::string_view::npos ||
         std::none_of(tree.state.begin(), tree.state.end(),
                      [&](const UiStateEntry& entry) { return entry.key == key; })) {
         return false;
@@ -84,7 +86,8 @@ bool ValidateUiStateValue(const UiTree& tree, std::string_view key, std::string_
             const bool toggle = type == UiNodeType::Button &&
                                 (node.button_kind == "toggle" || node.button_kind == "transparentToggle");
             if ((type == UiNodeType::Checkbox || type == UiNodeType::Switch || type == UiNodeType::Radio ||
-                 type == UiNodeType::SidebarSection || type == UiNodeType::StagingTray || toggle) &&
+                 type == UiNodeType::SidebarSection || type == UiNodeType::StagingTray ||
+                 type == UiNodeType::OptionCard || type == UiNodeType::Tag || toggle) &&
                 !Boolean(value)) {
                 return false;
             }
@@ -95,7 +98,7 @@ bool ValidateUiStateValue(const UiTree& tree, std::string_view key, std::string_
             if (type == UiNodeType::Tabs && !Index(value, node.children.size())) {
                 return false;
             }
-            if (type == UiNodeType::Slider && !Index(value, static_cast<size_t>(node.stops))) {
+            if (double number=0; type == UiNodeType::Slider && (ContinuousSlider(node) ? !SliderValue(node,value,number) : !Index(value, static_cast<size_t>(node.stops)))) {
                 return false;
             }
             if (type == UiNodeType::SplitPane && !Index(value, 101)) {
@@ -146,7 +149,7 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
         return true;
     };
     const auto text = [&](const json::Value& v, const char* key, std::string& out, const std::string& path,
-                          size_t limit = 1024) {
+                          size_t limit = 4096) {
         const auto* p = v.find(key);
         if (!p) {
             return true;
@@ -197,8 +200,8 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
     }
     std::set<std::string> states, ids;
     if (const auto* entries = value.find("state")) {
-        if (!entries->is_array() || entries->size() > 32) {
-            return fail("panel.ui.state", "expected at most 32 entries");
+        if (!entries->is_array() || entries->size() > 128) {
+            return fail("panel.ui.state", "expected at most 128 entries");
         }
         for (size_t i = 0; i < entries->size(); ++i) {
             const auto& entry = entries->at(i);
@@ -215,8 +218,8 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
         }
     }
     if (const auto* actions = value.find("actions")) {
-        if (!actions->is_array() || actions->size() > 32) {
-            return fail("panel.ui.actions", "expected at most 32 local actions");
+        if (!actions->is_array() || actions->size() > 64) {
+            return fail("panel.ui.actions", "expected at most 64 local actions");
         }
         for (size_t i = 0; i < actions->size(); ++i) {
             const auto& source = actions->at(i);
@@ -230,8 +233,8 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
                 return fail(path + ".id", "invalid action ID or collision with action/host command");
             }
             const auto* updates = source.find("updates");
-            if (updates && (!updates->is_array() || updates->size() == 0 || updates->size() > 32)) {
-                return fail(path + ".updates", "expected 1..32 state updates");
+            if (updates && (!updates->is_array() || updates->size() == 0 || updates->size() > 64)) {
+                return fail(path + ".updates", "expected 1..64 state updates");
             }
             std::set<std::string> updated;
             for (size_t j = 0; j < (updates ? updates->size() : 0); ++j) {
@@ -267,8 +270,8 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
                 return fail(path, "action requires updates or dataOperation");
             }
             if (const auto* nodes = source.find("validate")) {
-                if (!nodes->is_array() || nodes->size() == 0 || nodes->size() > 32) {
-                    return fail(path + ".validate", "expected 1..32 unique input IDs");
+                if (!nodes->is_array() || nodes->size() == 0 || nodes->size() > 64) {
+                    return fail(path + ".validate", "expected 1..64 unique input IDs");
                 }
                 std::set<std::string> names;
                 for (const auto& node : nodes->items()) {
@@ -292,17 +295,28 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
     };
     size_t menu_count = 0;
     std::set<std::string> menu_ids;
-    std::function<bool(const json::Value&, UiMenuItem&, const std::string&, size_t, bool)> parse_menu;
+    std::function<bool(const json::Value&, UiMenuItem&, const std::string&, size_t, bool, bool)> parse_menu;
     parse_menu = [&](const json::Value& v, UiMenuItem& item, const std::string& path, size_t depth,
-                     bool action) {
+                     bool action, bool preview_mode) {
         if (++menu_count > 128 || depth > 4) {
             return fail(path, "menu exceeds 128 items or depth 4");
         }
         if (!only(
                 v,
-                {"id", "text", "command", "glyph", "shortcut", "enabled", "checked", "separator", "children"},
+                {"id", "text", "command", "glyph", "shortcut", "enabled", "checked", "separator", "children",
+                 "detail", "group", "primary"},
                 path)) {
             return false;
+        }
+        if (!preview_mode && (v.find("detail") || v.find("group") || v.find("primary"))) {
+            return fail(path, "detail/group/primary are menuPreview only");
+        }
+        if (!text(v, "detail", item.detail, path, 256) || !text(v, "group", item.group, path, 128) ||
+            !boolean(v, "primary", item.primary, path)) {
+            return false;
+        }
+        if (depth > 1 && !item.group.empty()) {
+            return fail(path + ".group", "groups are top-level only");
         }
         for (auto pair : {std::pair{"id", &item.id},
                           {"text", &item.text},
@@ -323,7 +337,7 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
         if (!Identifier(item.id) || !menu_ids.insert(item.id).second) {
             return fail(path + ".id", "invalid or duplicate menu ID");
         }
-        if (item.text.empty()) {
+        if ((!preview_mode || !item.separator) && item.text.empty()) {
             return fail(path + ".text", "label required");
         }
         if (const auto* children = v.find("children")) {
@@ -333,7 +347,7 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
             for (size_t i = 0; i < children->size(); ++i) {
                 UiMenuItem child;
                 if (!parse_menu(children->at(i), child, path + ".children[" + std::to_string(i) + "]",
-                                depth + 1, false)) {
+                                depth + 1, false, preview_mode)) {
                     return false;
                 }
                 item.children.push_back(std::move(child));
@@ -343,7 +357,11 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
             if (!item.command.empty()) {
                 return fail(path, "submenu cannot have command");
             }
-        } else if (!command(item.command, path + ".command")) {
+        } else if (!preview_mode) {
+            if (!command(item.command, path + ".command")) {
+                return false;
+            }
+        } else if (!item.command.empty() && !command(item.command, path + ".command")) {
             return false;
         }
         if (action && (v.find("checked") || v.find("separator") || v.find("glyph") || v.find("shortcut"))) {
@@ -355,8 +373,8 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
     std::function<bool(const json::Value&, UiNode&, size_t, const std::string&, bool, bool)> parse;
     parse = [&](const json::Value& v, UiNode& n, size_t depth, const std::string& path, bool tab_parent,
                 bool stack_parent) {
-        if (++node_count > 128 || depth > 8) {
-            return fail(path, "tree exceeds 128 nodes or depth 8");
+        if (++node_count > 384 || depth > 12) {
+            return fail(path, "tree exceeds 384 nodes or depth 12");
         }
         bool found = false;
         for (int i = 0; i < static_cast<int>(UiNodeType::Count); ++i) {
@@ -373,7 +391,7 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
         const bool container = t == UiNodeType::Stack || t == UiNodeType::Grid || t == UiNodeType::Group ||
                                t == UiNodeType::ScrollView || t == UiNodeType::Tabs || t == UiNodeType::Tab ||
                                t == UiNodeType::SplitPane || t == UiNodeType::SidebarSection ||
-                               t == UiNodeType::StagingTray;
+                               t == UiNodeType::StagingTray || t == UiNodeType::SettingsRow;
         const bool data = t == UiNodeType::VirtualList || t == UiNodeType::Tree || t == UiNodeType::DataTable;
         const bool check = t == UiNodeType::Checkbox || t == UiNodeType::Switch || t == UiNodeType::Radio;
         const bool choice = t == UiNodeType::Select || t == UiNodeType::List || t == UiNodeType::Segmented;
@@ -383,9 +401,18 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
         if (t == UiNodeType::ScrollView && depth != 1) {
             n.min_height = 240;
         }
+        if (t == UiNodeType::SettingsRow && !v.find("gap")) {
+            n.gap = 8;
+        }
         std::set<std::string> fields = {
             "type",     "id",       "enabled",   "visible", "enabledBinding", "visibleBinding", "minHeight",
             "minWidth", "maxWidth", "maxHeight", "flex"};
+        if (!container && t != UiNodeType::Divider) {
+            fields.insert("tooltip");
+        }
+        if (t == UiNodeType::Stack || t == UiNodeType::Grid || t == UiNodeType::Group) {
+            fields.insert("padding");
+        }
         const auto allow = [&](std::initializer_list<const char*> extra) {
             for (auto key : extra) {
                 fields.insert(key);
@@ -404,11 +431,11 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
             allow({"columns"});
         }
         if ((!container && t != UiNodeType::Divider) || t == UiNodeType::Group || t == UiNodeType::Tab ||
-            t == UiNodeType::SidebarSection || t == UiNodeType::StagingTray) {
+            t == UiNodeType::SidebarSection || t == UiNodeType::StagingTray || t == UiNodeType::SettingsRow) {
             allow({"text"});
         }
         if (t == UiNodeType::Text) {
-            allow({"binding", "role", "alignment"});
+            allow({"binding", "role", "alignment", "kind"});
         }
         if (t == UiNodeType::Button) {
             allow({"command", "kind", "state", "glyph", "keycap", "iconOnly"});
@@ -432,13 +459,26 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
             allow({"value", "binding", "kind", "status"});
         }
         if (t == UiNodeType::Slider) {
-            allow({"state", "stops", "value", "options"});
+            allow({"state", "stops", "value", "options", "kind", "command", "helper"});
         }
         if (t == UiNodeType::Badge) {
             allow({"kind", "dot"});
         }
         if (t == UiNodeType::Tag) {
-            allow({"color", "bordered"});
+            allow({"color", "bordered", "state", "command", "glyph", "selected", "checked"});
+        }
+        if (t == UiNodeType::OptionCard) {
+            allow({"detail", "glyph", "badgeText", "kind", "state", "checked", "selected", "bordered", "command",
+                   "children"});
+        }
+        if (t == UiNodeType::SettingsRow) {
+            allow({"detail", "binding", "glyph", "badgeText", "bordered", "command"});
+        }
+        if (t == UiNodeType::Image) {
+            allow({"detail", "glyph", "kind", "color", "bordered", "command"});
+        }
+        if (t == UiNodeType::MenuPreview) {
+            allow({"detail", "menu", "bordered", "kind"});
         }
         if (t == UiNodeType::InfoBar) {
             allow({"kind", "message", "glyph", "closeCommand", "actions"});
@@ -502,7 +542,7 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
             allow({"role", "command", "glyph"});
         }
         if (t == UiNodeType::Canvas) {
-            allow({"options", "detail", "state", "color", "bordered", "command"});
+            allow({"options", "detail", "state", "color", "bordered", "command", "pointerState"});
         }
         if (t == UiNodeType::TextInput || t == UiNodeType::CommandSearch) {
             allow({"validation"});
@@ -541,13 +581,31 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
                           {"countLabel", &n.count_label},
                           {"actionText", &n.action_text},
                           {"centerText", &n.center_text},
-                          {"rightText", &n.right_text}}) {
+                          {"rightText", &n.right_text},
+                          {"pointerState", &n.pointer_state}}) {
             if (!text(v, pair.first, *pair.second, path)) {
                 return false;
             }
         }
-        auto& kind = t == UiNodeType::Button                                ? n.button_kind
+        if (!text(v, "tooltip", n.tooltip, path, 256)) {
+            return false;
+        }
+        if (v.find("tooltip") && n.tooltip.empty()) {
+            return fail(path + ".tooltip", "tooltip must not be empty");
+        }
+        if (v.find("pointerState") && !states.contains(n.pointer_state)) {
+            return fail(path + ".pointerState", "undeclared state");
+        }
+        if (!n.pointer_state.empty() && n.pointer_state == n.state) {
+            return fail(path + ".pointerState", "pointer state must differ from the canvas script state");
+        }
+        auto& kind = t == UiNodeType::Text                                  ? n.text_tone
+                     : t == UiNodeType::Button                              ? n.button_kind
+                     : t == UiNodeType::Slider                              ? n.slider_kind
                      : t == UiNodeType::TextInput                           ? n.input_kind
+                     : t == UiNodeType::OptionCard                          ? n.option_kind
+                     : t == UiNodeType::Image                               ? n.image_fit
+                     : t == UiNodeType::MenuPreview                         ? n.menu_kind
                      : (t == UiNodeType::Badge || t == UiNodeType::FileRow) ? n.badge_kind
                      : t == UiNodeType::InfoBar                             ? n.info_kind
                                                                             : n.progress_kind;
@@ -595,6 +653,9 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
             if (!boolean(v, pair.first, *pair.second, path)) {
                 return false;
             }
+        }
+        if (!integer(v, "padding", n.padding, 0, 48, path)) {
+            return false;
         }
         if (!integer(v, "gap", n.gap, 0, 32, path) || !integer(v, "minHeight", n.min_height, 0, 4096, path) ||
             !integer(v, "stops", n.stops, 2, 64, path) ||
@@ -655,18 +716,25 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
                 n.tag_colors.push_back(str);
             }
         }
-        if (t == UiNodeType::Grid && !integer(v, "columns", n.columns, 1, 4, path)) {
+        if (t == UiNodeType::Grid && !integer(v, "columns", n.columns, 1, 8, path)) {
             return false;
         }
         if (!enumeration(n.orientation, {"vertical", "horizontal"}, path + ".orientation") ||
             !enumeration(n.button_kind,
                          {"standard", "primary", "danger", "transparent", "toggle", "transparentToggle"},
                          path + ".kind") ||
+            !enumeration(n.slider_kind, {"stepped", "continuous"}, path + ".kind") ||
             !enumeration(n.progress_kind, {"bar", "ring"}, path + ".kind") ||
             !enumeration(n.input_kind, {"text", "password"}, path + ".kind") ||
+            !enumeration(n.option_kind, {"radio", "toggle"}, path + ".kind") ||
+            !enumeration(n.image_fit, {"contain", "cover", "center", "tile"}, path + ".kind") ||
+            !enumeration(n.menu_kind, {"plain", "context"}, path + ".kind") ||
             !enumeration(n.progress_state, {"normal", "paused", "error", "indeterminate"},
                          path + ".status") ||
-            !enumeration(n.text_role, {"body", "caption", "section"}, path + ".role") ||
+            !enumeration(n.text_role, {"body", "caption", "section", "bodyStrong", "subtitle", "title", "code"},
+                         path + ".role") ||
+            !enumeration(n.text_tone, {"default", "secondary", "accent", "success", "warning", "danger"},
+                         path + ".kind") ||
             !enumeration(n.alignment, {"left", "center", "right"}, path + ".alignment") ||
             !enumeration(n.badge_kind, {"neutral", "accent", "success", "warning", "danger", "keycap"},
                          path + ".kind") ||
@@ -682,11 +750,11 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
             return fail(path + ".color", "expected #RRGGBB");
         }
         if (const auto* options = v.find("options")) {
-            if (!options->is_array() || options->size() == 0 || options->size() > 64) {
-                return fail(path + ".options", "expected 1..64 strings");
+            if (!options->is_array() || options->size() == 0 || options->size() > 128) {
+                return fail(path + ".options", "expected 1..128 strings");
             }
             for (const auto& item : options->items()) {
-                if (!item.is_string() || item.as_string().size() > (t == UiNodeType::Canvas ? 1024u : 128u) ||
+                if (!item.is_string() || item.as_string().size() > (t == UiNodeType::Canvas ? 4096u : 128u) ||
                     item.as_string().find('\0') != std::string::npos) {
                     return fail(path + ".options", "invalid option");
                 }
@@ -696,10 +764,14 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
         if (choice && n.options.empty()) {
             return fail(path + ".options", "required");
         }
-        if ((t == UiNodeType::Group || t == UiNodeType::Canvas) && !v.find("bordered")) {
-            n.bordered = false;  // plain heading/canvas unless explicitly bordered
+        if ((t == UiNodeType::Group || t == UiNodeType::Canvas || t == UiNodeType::SettingsRow ||
+             t == UiNodeType::Image) &&
+            !v.find("bordered")) {
+            n.bordered = false;  // plain heading/canvas/row/image unless explicitly bordered
         }
-        if (t == UiNodeType::Slider && !n.options.empty() && n.options.size() != static_cast<size_t>(n.stops)) {
+        if (ContinuousSlider(n) && (n.state.empty() || v.find("stops") || v.find("value"))) return fail(path + ".kind", "continuous slider requires state and forbids index/stops");
+        if (double minimum=0, maximum=0; ContinuousSlider(n) && !SliderRange(n,minimum,maximum)) return fail(path + ".options", "continuous slider requires two finite increasing bounds");
+        if (t == UiNodeType::Slider && !ContinuousSlider(n) && !n.options.empty() && n.options.size() != static_cast<size_t>(n.stops)) {
             return fail(path + ".options", "one caption per stop");
         }
         if (const auto* children = v.find("children")) {
@@ -718,11 +790,21 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
         if (t == UiNodeType::Tabs && n.children.empty()) {
             return fail(path + ".children", "tabs require children");
         }
+        // An option card may carry one passive canvas as its illustration; the card owns all input.
+        if (t == UiNodeType::OptionCard && !n.children.empty() &&
+            (n.children.size() != 1 || n.children[0].type != UiNodeType::Canvas || !n.children[0].state.empty() ||
+             !n.children[0].command.empty() || !n.children[0].pointer_state.empty() ||
+             !n.children[0].children.empty())) {
+            return fail(path + ".children", "option card takes one canvas illustration without state/command/pointerState");
+        }
         if (t == UiNodeType::TextInput && n.text.empty()) {
             return fail(path + ".text", "accessible label required");
         }
         if (t == UiNodeType::SplitPane && n.children.size() != 2) {
             return fail(path + ".children", "splitPane requires exactly two children");
+        }
+        if (t == UiNodeType::SettingsRow && n.children.size() > 4) {
+            return fail(path + ".children", "settingsRow supports at most 4 inline controls");
         }
         if (t == UiNodeType::StagingTray && !n.action_text.empty() && n.command.empty()) {
             return fail(path + ".command", "actionText requires command");
@@ -751,14 +833,17 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
         }
         for (auto pair : {std::pair{"menu", &n.menu}, {"actions", &n.actions}}) {
             if (const auto* items = v.find(pair.first)) {
-                bool action = std::string_view(pair.first) == "actions";
-                if (!items->is_array() || items->size() == 0 || items->size() > (action ? 2u : 64u)) {
+                const bool action = std::string_view(pair.first) == "actions";
+                const bool preview = (t == UiNodeType::MenuPreview && !action);
+                if (!items->is_array() || (!preview && items->size() == 0) ||
+                    items->size() > (action ? 2u : 64u)) {
                     return fail(path + "." + pair.first, "invalid item count");
                 }
                 for (size_t i = 0; i < items->size(); ++i) {
                     UiMenuItem item;
                     if (!parse_menu(items->at(i), item,
-                                    path + "." + pair.first + "[" + std::to_string(i) + "]", 1, action)) {
+                                    path + "." + pair.first + "[" + std::to_string(i) + "]", 1, action,
+                                    preview)) {
                         return false;
                     }
                     pair.second->push_back(std::move(item));
@@ -772,8 +857,8 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
             UiValidation validation;
             if (!only(*rule, {"required", "minLength", "maxLength", "message"}, path + ".validation") ||
                 !boolean(*rule, "required", validation.required, path + ".validation") ||
-                !integer(*rule, "minLength", validation.min_length, 0, 1024, path + ".validation") ||
-                !integer(*rule, "maxLength", validation.max_length, 0, 1024, path + ".validation") ||
+                !integer(*rule, "minLength", validation.min_length, 0, 4096, path + ".validation") ||
+                !integer(*rule, "maxLength", validation.max_length, 0, 4096, path + ".validation") ||
                 !text(*rule, "message", validation.message, path + ".validation")) {
                 return false;
             }
@@ -944,16 +1029,18 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
         }
         if (!n.state.empty()) {
             const auto content = initial(n.state);
-            if ((check || toggle || t == UiNodeType::SidebarSection || t == UiNodeType::StagingTray) &&
+            if ((check || toggle || t == UiNodeType::SidebarSection || t == UiNodeType::StagingTray ||
+                 t == UiNodeType::OptionCard || t == UiNodeType::Tag) &&
                 !Boolean(content)) {
                 return fail(path + ".state", "expected boolean text");
             }
-            if ((choice || t == UiNodeType::Tabs || t == UiNodeType::Slider) &&
+            if ((choice || t == UiNodeType::Tabs || (t == UiNodeType::Slider && !ContinuousSlider(n))) &&
                 !Index(content, t == UiNodeType::Tabs     ? n.children.size()
                                 : t == UiNodeType::Slider ? static_cast<size_t>(n.stops)
                                                           : n.options.size())) {
                 return fail(path + ".state", "expected canonical valid index");
             }
+            if (double number=0; ContinuousSlider(n) && !SliderValue(n,content,number)) return fail(path + ".state", "continuous slider state outside finite range");
             if (t == UiNodeType::SplitPane && !Index(content, 101)) {
                 return fail(path + ".state", "splitPane state must be canonical percentage 0..100");
             }

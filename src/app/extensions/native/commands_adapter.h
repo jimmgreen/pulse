@@ -1,5 +1,6 @@
 #pragma once
 #include "../../../../sdk/native/include/pulse/commands.h"
+#include "../command_projection_cache.h"
 #include "../manifest.h"
 #include <windows.h>
 #include <cstddef>
@@ -57,6 +58,8 @@ public:
     CommandsAdapter(HWND owner, std::string package, PulseContextV1 context, std::function<bool()> live);
     ~CommandsAdapter();
     PulseStatus Query(uint32_t version, void* out, uint32_t size) const noexcept;
+    void SetOnChanged(std::function<void()> callback);
+    std::vector<ProjectedCommand> ExportProjection() const;
     void Close() noexcept;
     bool CallbackActive() const noexcept;
     static std::vector<CommandInfo> Entries(HWND owner);
@@ -73,6 +76,10 @@ public:
                                                   const ManifestCommandContribution& contribution,
                                                   StaticCommandLanguage language,
                                                   const CommandSelection& selection);
+    static CommandInfo EvaluateProjectedCommand(HWND owner, size_t package,
+                                                const std::string& package_id,
+                                                const ProjectedCommand& projected,
+                                                const CommandSelection& selection);
     static std::optional<StaticCommandTarget> LookupStaticToken(HWND owner, int token);
     static void ClearStaticOwner(HWND owner);
     static std::string Identity(HWND owner, int token);
@@ -80,8 +87,10 @@ public:
     static bool InvokeIdentity(HWND owner, const std::string& identity);
     // Host-only dispatch of a hidden command against an explicit, immutable selection.
     static bool InvokeHiddenIdentity(HWND owner, const std::string& identity, const CommandSelection& selection);
+    static bool InvokeIdentityWithSelection(HWND owner, const std::string& identity, const CommandSelection& selection);
     static bool Shortcut(HWND owner, uint32_t key, uint32_t modifiers);
 private:
+    static bool InvokeSelectedIdentity(HWND owner, const std::string& identity, const CommandSelection& selection, bool require_hidden);
     struct State;
     std::shared_ptr<State> state_;
 };

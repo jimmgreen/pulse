@@ -75,6 +75,28 @@ def _load_extracted_store_modules(extracted_sdk):
                 sys.modules[mod_name] = previous
 
 
+def _verify_bundled_harness(extracted_sdk, generated_projects, temp_root, py_env):
+    """The extracted pulse_ext test finds bin/pulse_plugin_harness.exe on its own and runs it."""
+    env = dict(py_env)
+    env.pop("PULSE_PLUGIN_HARNESS", None)  # only the bundled copy may be used
+    cli_script = extracted_sdk / "tools/extensions/pulse_ext.py"
+    project = next((p for p in generated_projects if p["template"] == "quickstart"), generated_projects[0])
+    library = Path(project["path"]) / "build" / project["primaryLibrary"]
+    proc = subprocess.run(
+        [sys.executable, str(cli_script), "--offline", "--json", "test", project["path"], "--library", str(library)],
+        cwd=temp_root, env=env, capture_output=True, timeout=120,
+    )
+    output = proc.stdout.decode("utf-8", errors="replace")
+    if proc.returncode != 0:
+        raise ValueError(f"Bundled harness test failed for {project['template']}: " + output +
+                         proc.stderr.decode("utf-8", errors="replace"))
+    result = json.loads(output).get("test", {})
+    if not result.get("harnessExecuted") or result.get("unloadClean") is not True:
+        raise ValueError(f"Bundled harness did not run a clean lifecycle: {result}")
+    return {"template": project["template"], "harnessExecuted": True, "unloadClean": True,
+            "commandCount": result.get("commandCount", 0)}
+
+
 def _verify_compiled_lifecycle(extracted_sdk, generated_projects, temp_root):
     """Verify .pulse-ext packing, verification, upgrade, enable/disable, rollback, uninstall, and GC."""
     projects_by_template = {item["template"]: item for item in generated_projects}
@@ -308,12 +330,12 @@ def verify_bundle(archive_path, work_dir=None, compile_projects=False, require_c
         if not contract_report.get("ok"):
             raise ValueError(f"Contract check reported errors: {contract_report.get('errors')}")
 
-        # 2. Scaffold independent projects for all 9 packable templates using extracted pulse_ext.py new.
+        # 2. Scaffold independent projects for all 11 packable templates using extracted pulse_ext.py new.
         cli_script = extracted_sdk / "tools/extensions/pulse_ext.py"
         examples_catalog = json.loads((extracted_sdk / "examples/native/catalog.json").read_text(encoding="utf-8"))
         templates = list(examples_catalog["templates"])
-        if len(templates) != 9:
-            raise ValueError(f"Expected 9 packable templates in SDK, found {len(templates)}: {templates}")
+        if len(templates) != 11:
+            raise ValueError(f"Expected 11 packable templates in SDK, found {len(templates)}: {templates}")
 
         projects_root = temp_root / "generated-projects"
         projects_root.mkdir()
@@ -459,6 +481,8 @@ def verify_bundle(archive_path, work_dir=None, compile_projects=False, require_c
         compile_skipped_reasons = []
         compiled_dlls = []
         lifecycle_summary = None
+        harness_summary = None
+        bundled_harness = test_native_sdk.PREBUILT_ALLOWED & set(sdk_manifest.get("prebuilt", {}))
         if compile_projects:
             toolchain = pulse_ext.inspect_toolchain()
             if not toolchain["ready"]:
@@ -504,6 +528,8 @@ def verify_bundle(archive_path, work_dir=None, compile_projects=False, require_c
                             raise ValueError(f"Expected compiled DLL missing: {dll_file}")
                         package_store.validate_native_binary(dll_file.read_bytes())
                         compiled_dlls.append(dll_file.name)
+                if bundled_harness:
+                    harness_summary = _verify_bundled_harness(extracted_sdk, generated_projects, temp_root, py_env)
                 lifecycle_summary = _verify_compiled_lifecycle(extracted_sdk, generated_projects, temp_root)
                 compiled = True
 
@@ -523,7 +549,11 @@ def verify_bundle(archive_path, work_dir=None, compile_projects=False, require_c
             "compileSkippedReasons": compile_skipped_reasons,
             "compiledDllCount": len(compiled_dlls),
             "lifecycleVerified": lifecycle_summary is not None,
+            "harnessBundled": bool(bundled_harness),
+            "harnessVerified": harness_summary is not None,
         }
+        if harness_summary is not None:
+            report["harness"] = harness_summary
         if lifecycle_summary is not None:
             report["lifecycle"] = lifecycle_summary
         if work_dir is not None:

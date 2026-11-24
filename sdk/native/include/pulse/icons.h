@@ -6,6 +6,7 @@ extern "C" {
 #endif
 #define PULSE_ICONS_INTERFACE_NAME "pulse.icons"
 #define PULSE_ICONS_VERSION_1 1u
+#define PULSE_ICONS_VERSION_2 2u
 #define PULSE_ICON_BUILTIN_MAX 67u
 #define PULSE_ICON_CUSTOM_MIN 0x10000u
 #pragma pack(push, 8)
@@ -119,9 +120,22 @@ typedef struct PulseIconsV1 {
     PulseStatus(PULSE_CALL *unregister_icon)(void*, PulseIconId);
     PulseStatus(PULSE_CALL *resolve_builtin)(void*, PulseStringView, PulseIconId*);
 } PulseIconsV1;
+typedef struct PulseIconsV2 {
+    uint32_t size;
+    uint32_t version;
+    void* context;
+    PulseStatus(PULSE_CALL *register_icon)(void*, const PulseIconDescriptor*, PulseIconId*);
+    PulseStatus(PULSE_CALL *update_icon)(void*, PulseIconId, const PulseIconDescriptor*);
+    PulseStatus(PULSE_CALL *unregister_icon)(void*, PulseIconId);
+    PulseStatus(PULSE_CALL *resolve_builtin)(void*, PulseStringView, PulseIconId*);
+    PulseStatus(PULSE_CALL *resolve_icon)(void*, PulseStringView, PulseIconId*);
+} PulseIconsV2;
 /* UI thread only; <=64 dynamic icons per plugin session. Returned PulseIconId values
    (>= PULSE_ICON_CUSTOM_MIN) work in pulse.commands, pulse.dialogs, toolbar pins,
-   and UiTree glyphs ("icon:#<id>" or "icon:<package>/<name>"). */
+   and UiTree glyphs ("icon:#<id>" or "icon:<package>/<name>"). V2 resolve_icon
+   resolves package-local manifest contributes.icons names, dynamic icon names,
+   qualified "<package>/<name>", "#<id>", or built-in Fluent icon names (optional
+   leading "icon:" prefix accepted). */
 #pragma pack(pop)
 #ifdef __cplusplus
 }

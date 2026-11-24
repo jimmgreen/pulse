@@ -119,8 +119,7 @@ bool RunPackageProbe(AppState& owner, const std::wstring& directory) {
                 const auto overflow = BuildToolbarMoreItems(owner);
                 const auto pinned = ToolbarPinActions(owner);
                 const float width = static_cast<float>(owner.compositor.Width());
-                const float left = owner.renderer.EffectiveSidebarWidth(width);
-                const auto layout = owner.renderer.ToolbarLayoutAt(width, owner.renderer.NewButtonWidthPx(width - left < 600 * owner.scale),
+                const auto layout = owner.renderer.ToolbarLayoutAt(width, owner.renderer.NewButtonWidthPx(owner.renderer.ToolbarCompact(width)),
                     owner.pane ? owner.pane->filter_expand : 0.0f);
                 bool pin_accessible = std::any_of(overflow.begin(), overflow.end(), [token](const auto& row) { return row.command == token && row.enabled; });
                 for (size_t i = 0; i < pinned.size() && i < layout.pins.size(); ++i)

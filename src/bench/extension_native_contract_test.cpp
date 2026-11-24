@@ -3,6 +3,7 @@
 #include "../app/extensions/native/ui_model.h"
 #include "../app/extensions/native_image_verify.h"
 #include "../app/extensions/package_store.h"
+#include "../app/extensions/developer_mode.h"
 #include "../app/extensions/ui_tree.h"
 #include "../common/json_value.h"
 #include <pulse/client.hpp>
@@ -293,6 +294,61 @@ void ImageAndStoreCases() {
         fixture.RejectStore("multi-file native package rejects DLL masquerading as .exe sidecar");
     }
 }
+void DeveloperModeCases() {
+    Fixture fixture;
+    const auto image = Image();
+    const auto hash = PackageRevision(image);
+    fixture.Write(fixture.root / "binaries" / (hash + ".dll"), image);
+    Value declaration;
+    pulse::json::Parse(R"({"apiVersion":1,"id":"plain","name":"plain"})", declaration);
+    const auto plain = fixture.Entry("plain", declaration);
+    const auto native = fixture.Entry("native", Manifest("native", Native(hash)));
+    fixture.Registry({plain, native});
+    fixture.Write(fixture.root / "signature-policy.json", R"({"formatVersion":1,"requireSigned":true,"publishers":[]})");
+    const auto off = LoadPackageStore(fixture.root.wstring(), PackageStoreOptions{false});
+    Check(off && off.packages.empty() && off.skipped_unsigned == std::vector<std::string>({"plain", "native"}),
+        "requireSigned skips unsigned packages one by one when developer mode is off");
+    Check(static_cast<bool>(LoadPackageStore(fixture.root.wstring())), "default store load keeps the store when unsigned packages are skipped");
+    const auto on = LoadPackageStore(fixture.root.wstring(), PackageStoreOptions{true});
+    Check(on && on.packages.size() == 2 && on.publisher_ids.size() == 2 && on.publisher_ids[1].empty() &&
+        on.skipped_unsigned.empty() && on.native_paths[1] == (fixture.root / "binaries" / (hash + ".dll")).wstring(),
+        "developer mode accepts unsigned packages under requireSigned");
+    const auto signature = fixture.root / "versions" / (native.get_string("activeRevision") + ".sig.json");
+    fixture.Write(signature, "{}");
+    Check(!LoadPackageStore(fixture.root.wstring(), PackageStoreOptions{true}), "developer mode never accepts an invalid signature");
+    std::filesystem::remove(signature);
+
+    // Developer folders: shadow copies next to the store, never inside it.
+    const auto store = fixture.root / "store";
+    const auto dev_root = devmode::DeveloperRoot(store);
+    Check(dev_root == fixture.root / "extensions-dev", "developer data lives beside the store root");
+    Check(!devmode::Enabled(store), "developer mode is off without its file");
+    std::filesystem::create_directories(dev_root);
+    fixture.Write(dev_root / "developer-mode.json", R"({"formatVersion":1,"enabled":true})");
+    Check(devmode::Enabled(store), "developer mode reads enabled:true");
+    fixture.Write(dev_root / "developer-mode.json", R"({"formatVersion":1,"enabled":"yes"})");
+    Check(!devmode::Enabled(store), "developer mode treats a malformed file as off");
+    const auto dev_manifest = pulse::json::Serialize(Manifest("dev.pkg", Native(hash)));
+    const auto dev_revision = PackageRevision(dev_manifest);
+    const auto shadow = dev_root / "dev.pkg" / dev_revision;
+    std::filesystem::create_directories(shadow);
+    fixture.Write(shadow / "manifest.json", dev_manifest);
+    fixture.Write(shadow / "plugin.dll", image);
+    fixture.Write(dev_root / "dev-packages.json", R"({"formatVersion":1,"packages":[{"id":"dev.pkg","source":"C:\\dev","revision":")" +
+        dev_revision + R"("},{"id":"native","source":"C:\\other","revision":")" + dev_revision + R"("}]})");
+    auto dev = LoadDevelopmentPackages(store.wstring(), {"native"});
+    Check(dev.size() == 2 && dev[0].manifest && dev[0].error.empty() && dev[0].native_path == (shadow / "plugin.dll").wstring() &&
+        !dev[1].manifest && dev[1].error == "dev_id_conflict",
+        "developer folder loads its verified shadow copy and refuses an installed id");
+    auto changed = image; changed.back() = 7;
+    fixture.Write(shadow / "plugin.dll", changed);
+    dev = LoadDevelopmentPackages(store.wstring(), {});
+    Check(dev.size() == 2 && !dev[0].manifest && !dev[0].error.empty() && dev[0].native_path.empty(),
+        "developer folder rejects a shadow DLL that no longer matches its manifest");
+    fixture.Write(shadow / "manifest.json", dev_manifest + " ");
+    dev = LoadDevelopmentPackages(store.wstring(), {});
+    Check(dev.size() == 2 && dev[0].error == "dev_shadow_changed", "developer folder rejects a changed shadow manifest");
+}
 void IconAndCanvasContractCases() {
     bool all_builtins = icons::kBuiltinIconNames.size() == (PULSE_ICON_BUILTIN_MAX + 1u);
     for (uint32_t i = 0; i <= PULSE_ICON_BUILTIN_MAX; ++i) {
@@ -366,6 +422,7 @@ void IconAndCanvasContractCases() {
                 "separatorBefore": true,
                 "separatorAfter": true,
                 "checked": true,
+                "toolbar": true,
                 "icon": "brand",
                 "kinds": ["background"],
                 "minSelection": 0,
@@ -383,9 +440,9 @@ void IconAndCanvasContractCases() {
         parsed_rich.manifest->command_contributions[0].group_icon == PULSE_ICON_SPARKLE &&
         (parsed_rich.manifest->command_contributions[0].flags &
             (PULSE_COMMAND_GROUP_SUBMENU | PULSE_COMMAND_PRIMARY | PULSE_COMMAND_SEPARATOR_BEFORE |
-             PULSE_COMMAND_SEPARATOR_AFTER | PULSE_COMMAND_CHECKED)) ==
+             PULSE_COMMAND_SEPARATOR_AFTER | PULSE_COMMAND_CHECKED | PULSE_COMMAND_TOOLBAR)) ==
             (PULSE_COMMAND_GROUP_SUBMENU | PULSE_COMMAND_PRIMARY | PULSE_COMMAND_SEPARATOR_BEFORE |
-             PULSE_COMMAND_SEPARATOR_AFTER | PULSE_COMMAND_CHECKED),
+             PULSE_COMMAND_SEPARATOR_AFTER | PULSE_COMMAND_CHECKED | PULSE_COMMAND_TOOLBAR),
         "manifest contributes.icons and extended context-menu command flags parse cleanly");
     SyncManifestIcons(*parsed_rich.manifest);
     const auto brand_id = icons::GlobalRegistry().ResolveName("demo.icons", "brand");
@@ -398,7 +455,7 @@ void IconAndCanvasContractCases() {
         .Clear("surface")
         .Rect(4, 4, 192, 72, 8, "accent", "none", 1.5)
         .Path("none", "accent", 2.0, "M 12 60 L 60 28 L 120 44 L 188 16")
-        .Icon("sparkle", 164, 10, 20, "warning")
+        .Icon("icon:sparkle", 164, 10, 20, "warning")
         .Text(14, 12, 80, 20, "text", 12, "left", "98%")
         .MinHeight(80)
         .State("series")
@@ -409,7 +466,7 @@ void IconAndCanvasContractCases() {
         .String(&PulseUiModelNode::glyph, pulse::sdk::IconGlyph("sparkle"));
     auto tree = pulse::sdk::ModelTree(
         pulse::sdk::ModelNode(PULSE_UI_MODEL_STACK, "root").Children({std::move(canvas_node), std::move(btn_node)}))
-        .State("series", "circle 60 28 4 accent accent 1")
+        .State("series", "circle 60 28 4 fill=accent stroke=accent width=1")
         .Command("run");
     UiTree converted;
     std::set<std::string> declared_cmds;
@@ -419,12 +476,211 @@ void IconAndCanvasContractCases() {
         converted.root.children[0].type == UiNodeType::Canvas &&
         converted.root.children[0].min_height == 80 &&
         converted.root.children[0].options.size() == 6 &&
+        converted.root.children[0].options[2].find("fill=accent stroke=none width=1.50") != std::string::npos &&
+        converted.root.children[0].options[3].find("path d=\"M 12 60 L 60 28 L 120 44 L 188 16\"") != std::string::npos &&
+        converted.root.children[0].options[4] == "icon 164.00 10.00 20.00 sparkle color=warning stroke=1.35" &&
+        converted.root.children[0].options[5].find("text 14.00 12.00 \"98%\" w=80.00 h=20.00 color=text align=left") != std::string::npos &&
         converted.root.children[1].glyph == "icon:sparkle",
-        "PULSE_UI_MODEL_CANVAS converts CanvasBuilder draw commands and icon glyph cleanly");
+        "PULSE_UI_MODEL_CANVAS converts D2D-compatible CanvasBuilder draw commands and icon glyph cleanly");
+}
+void SettingsPagesV2AndBuildersCases() {
+    using namespace pulse::sdk;
+    struct MockSettingsHost {
+        bool expose_v2 = true;
+        int create_calls = 0;
+        int create_tab_calls = 0;
+        int set_status_calls = 0;
+        int set_side_preview_calls = 0;
+        int query_calls = 0;
+        int remove_calls = 0;
+        uint64_t next_id = 10;
+        uint64_t last_page = 0;
+        std::string last_tab_id;
+        std::string last_tab_glyph;
+        int32_t last_tab_order = 0;
+        uint32_t last_status_kind = 0;
+        std::string last_status_text;
+        bool last_preview_present = false;
+        uint32_t last_preview_width = 0;
+        std::string last_queried_interface;
+
+        static std::string Copy(PulseStringView view) {
+            return view.data && view.length ? std::string(view.data, view.length) : std::string();
+        }
+        static PulseStatus PULSE_CALL Create(void* ctx, PulseStringView title, const PulseUiModelTree* tree, uint64_t* page) {
+            auto* self = static_cast<MockSettingsHost*>(ctx);
+            if (!tree || !tree->root || !page || !title.length) return PULSE_ERROR_ARGUMENT;
+            ++self->create_calls;
+            *page = ++self->next_id;
+            self->last_page = *page;
+            return PULSE_OK;
+        }
+        static PulseStatus PULSE_CALL QueryPage(void* ctx, uint64_t page, PulseStringView iface, uint32_t version, void* out, uint32_t size) {
+            auto* self = static_cast<MockSettingsHost*>(ctx);
+            ++self->query_calls;
+            self->last_queried_interface = Copy(iface);
+            if (!page || !out) return PULSE_ERROR_ARGUMENT;
+            if (self->last_queried_interface == PULSE_UI_MODEL_INTERFACE && version == PULSE_UI_MODEL_VERSION && size == sizeof(PulseUiModelV1)) {
+                auto* api = static_cast<PulseUiModelV1*>(out);
+                *api = {}; api->size = sizeof(*api); api->version = PULSE_UI_MODEL_VERSION; api->context = self;
+                return PULSE_OK;
+            }
+            if (self->last_queried_interface == PULSE_UI_EVENTS_INTERFACE_NAME && version == PULSE_UI_EVENTS_VERSION_1 && size == sizeof(PulseUiEventsV1)) {
+                auto* api = static_cast<PulseUiEventsV1*>(out);
+                *api = {}; api->size = sizeof(*api); api->version = PULSE_UI_EVENTS_VERSION_1; api->context = self;
+                return PULSE_OK;
+            }
+            if (self->last_queried_interface == PULSE_UI_DATA_INTERFACE && version == PULSE_UI_DATA_VERSION && size == sizeof(PulseUiDataV1)) {
+                auto* api = static_cast<PulseUiDataV1*>(out);
+                *api = {}; api->size = sizeof(*api); api->version = PULSE_UI_DATA_VERSION; api->context = self;
+                return PULSE_OK;
+            }
+            return PULSE_ERROR_ABI;
+        }
+        static PulseStatus PULSE_CALL Remove(void* ctx, uint64_t page) {
+            auto* self = static_cast<MockSettingsHost*>(ctx);
+            ++self->remove_calls;
+            self->last_page = page;
+            return page ? PULSE_OK : PULSE_ERROR_ARGUMENT;
+        }
+        static PulseStatus PULSE_CALL CreateTab(void* ctx, const PulseSettingsTabDesc* desc, const PulseUiModelTree* tree, uint64_t* page) {
+            auto* self = static_cast<MockSettingsHost*>(ctx);
+            if (!desc || desc->size != sizeof(*desc) || !tree || !tree->root || !page) return PULSE_ERROR_ARGUMENT;
+            ++self->create_tab_calls;
+            self->last_tab_id = Copy(desc->id);
+            self->last_tab_glyph = Copy(desc->glyph);
+            self->last_tab_order = desc->order;
+            *page = ++self->next_id;
+            self->last_page = *page;
+            return PULSE_OK;
+        }
+        static PulseStatus PULSE_CALL SetStatus(void* ctx, uint64_t page, uint32_t kind, PulseStringView text) {
+            auto* self = static_cast<MockSettingsHost*>(ctx);
+            if (!page || kind > PULSE_SETTINGS_STATUS_ERROR) return PULSE_ERROR_ARGUMENT;
+            ++self->set_status_calls;
+            self->last_status_kind = kind;
+            self->last_status_text = Copy(text);
+            return PULSE_OK;
+        }
+        static PulseStatus PULSE_CALL SetSidePreview(void* ctx, uint64_t page, const PulseUiModelTree* preview, uint32_t width_dip) {
+            auto* self = static_cast<MockSettingsHost*>(ctx);
+            if (!page) return PULSE_ERROR_ARGUMENT;
+            ++self->set_side_preview_calls;
+            self->last_preview_present = (preview != nullptr);
+            self->last_preview_width = width_dip;
+            return PULSE_OK;
+        }
+        static PulseStatus PULSE_CALL QueryInterface(void* ctx, PulseStringView name, uint32_t version, void* out, uint32_t size) {
+            auto* self = static_cast<MockSettingsHost*>(ctx);
+            if (Copy(name) != PULSE_SETTINGS_PAGES_INTERFACE_NAME || !out) return PULSE_ERROR_UNAVAILABLE;
+            if (version == PULSE_SETTINGS_PAGES_VERSION_2 && self->expose_v2 && size == sizeof(PulseSettingsPagesV2)) {
+                auto* v2 = static_cast<PulseSettingsPagesV2*>(out);
+                *v2 = {sizeof(*v2), PULSE_SETTINGS_PAGES_VERSION_2, self, &Create, &QueryPage, &Remove, &CreateTab, &SetStatus, &SetSidePreview};
+                return PULSE_OK;
+            }
+            if (version == PULSE_SETTINGS_PAGES_VERSION_1 && size == sizeof(PulseSettingsPagesV1)) {
+                auto* v1 = static_cast<PulseSettingsPagesV1*>(out);
+                *v1 = {sizeof(*v1), PULSE_SETTINGS_PAGES_VERSION_1, self, &Create, &QueryPage, &Remove};
+                return PULSE_OK;
+            }
+            return PULSE_ERROR_ABI;
+        }
+        PulseHostV1 HostTable() { return {sizeof(PulseHostV1), PULSE_ABI_VERSION_1, this, &QueryInterface}; }
+    };
+
+    ModelTree tree(
+        ModelNode(PULSE_UI_MODEL_STACK, "settings_root").Children({
+            ModelNode::OptionCard("card", "Standard mode", "Archive dialog", "mode", "radio", "icon:folder", "Default"),
+            ModelNode::SettingsRow(
+                "row", "Context menu", "Show in Explorer",
+                ModelNode(PULSE_UI_MODEL_SWITCH, "ctx_toggle")
+                    .String(&PulseUiModelNode::text, "Enabled")
+                    .String(&PulseUiModelNode::state, "ctx"),
+                "icon:menu", true),
+            ModelNode::Image("logo", "icon:archive", "Archive badge", "contain", 48),
+            ModelNode::MenuPreview(
+                "preview", "Menu layout",
+                {
+                    ModelMenuItem("extract", "Extract files...", "7z.extract").Glyph("icon:folder").Shortcut("E"),
+                    ModelMenuItem::Separator("sep"),
+                    ModelMenuItem("add", "Add to archive").Checked(true).Children({
+                        ModelMenuItem("zip", "Add to archive.zip", "7z.add_zip")
+                    })
+                },
+                "Windows 11 menu"),
+            ModelNode::Chip("chip_zip", ".zip", "chip_zip", "#0078D4", "icon:archive")
+        }));
+    tree.State("mode", "true")
+        .State("ctx", "true")
+        .State("chip_zip", "true")
+        .Command("7z.extract")
+        .Command("7z.add_zip");
+
+    UiTree converted;
+    std::set<std::string> declared_cmds;
+    std::string ui_error;
+    const PulseStatus conv_status = native::ConvertUiModel(&tree.Build(), converted, declared_cmds, ui_error);
+    if (conv_status != PULSE_OK) std::printf("  ConvertUiModel error: %s\n", ui_error.c_str());
+    Check(conv_status == PULSE_OK &&
+        converted.root.children.size() == 5 &&
+        converted.root.children[0].type == UiNodeType::OptionCard &&
+        converted.root.children[0].badge_text == "Default" &&
+        converted.root.children[0].option_kind == "radio" &&
+        converted.root.children[1].type == UiNodeType::SettingsRow &&
+        converted.root.children[1].children.size() == 1 &&
+        converted.root.children[2].type == UiNodeType::Image &&
+        converted.root.children[2].glyph == "icon:archive" &&
+        converted.root.children[2].image_fit == "contain" &&
+        converted.root.children[3].type == UiNodeType::MenuPreview &&
+        converted.root.children[3].menu.size() == 3 &&
+        converted.root.children[3].menu[1].separator &&
+        converted.root.children[3].menu[2].checked &&
+        converted.root.children[3].menu[2].children.size() == 1 &&
+        converted.root.children[4].type == UiNodeType::Tag &&
+        converted.root.children[4].state == "chip_zip" &&
+        converted.root.children[4].color == "#0078D4",
+        "ModelNode P0-2 builders and ModelMenuItem convert cleanly through native::ConvertUiModel");
+
+    MockSettingsHost v2_mock;
+    const Host v2_host(v2_mock.HostTable());
+    const auto v2_client = SettingsPagesClient::TryQuery(v2_host);
+    uint64_t tab_id = 0;
+    PulseUiModelV1 model_iface{};
+    PulseUiEventsV1 events_iface{};
+    PulseUiDataV1 data_iface{};
+    Check(v2_client.has_value() && v2_client->Available() && v2_client->HasV2() &&
+        v2_client->CreateTab("general", "General", tree.Build(), tab_id, "icon:settings", 15) == PULSE_OK &&
+        tab_id != 0 && v2_mock.create_tab_calls == 1 && v2_mock.last_tab_id == "general" &&
+        v2_mock.last_tab_glyph == "icon:settings" && v2_mock.last_tab_order == 15 &&
+        v2_client->SetStatus(tab_id, PULSE_SETTINGS_STATUS_SAVED, "Saved") == PULSE_OK &&
+        v2_mock.last_status_kind == PULSE_SETTINGS_STATUS_SAVED && v2_mock.last_status_text == "Saved" &&
+        v2_client->SetSidePreview(tab_id, &tree.Build(), 300) == PULSE_OK &&
+        v2_mock.last_preview_present && v2_mock.last_preview_width == 300 &&
+        v2_client->SetSidePreview(tab_id, nullptr, 0) == PULSE_OK && !v2_mock.last_preview_present &&
+        v2_client->QueryModel(tab_id, model_iface) == PULSE_OK &&
+        v2_client->QueryEvents(tab_id, events_iface) == PULSE_OK &&
+        v2_client->QueryData(tab_id, data_iface) == PULSE_OK &&
+        v2_client->Remove(tab_id) == PULSE_OK && v2_mock.remove_calls == 1,
+        "SettingsPagesClient uses pulse.settings.pages V2 tabs, status, side preview, and data queries");
+
+    MockSettingsHost v1_mock;
+    v1_mock.expose_v2 = false;
+    const Host v1_host(v1_mock.HostTable());
+    const auto v1_client = SettingsPagesClient::TryQuery(v1_host);
+    uint64_t v1_page = 0, fallback_tab = 0;
+    Check(v1_client.has_value() && v1_client->Available() && !v1_client->HasV2() &&
+        v1_client->Create("Archive", tree.Build(), v1_page) == PULSE_OK && v1_page != 0 &&
+        v1_mock.create_calls == 1 &&
+        v1_client->CreateTab("general", "General", tree.Build(), fallback_tab) == PULSE_ERROR_UNAVAILABLE && !fallback_tab &&
+        v1_client->SetStatus(v1_page, PULSE_SETTINGS_STATUS_SAVING, "Saving") == PULSE_ERROR_UNAVAILABLE &&
+        v1_client->SetSidePreview(v1_page, &tree.Build(), 320) == PULSE_ERROR_UNAVAILABLE &&
+        v1_client->QueryModel(v1_page, model_iface) == PULSE_OK &&
+        v1_client->Remove(v1_page) == PULSE_OK,
+        "SettingsPagesClient falls back cleanly to pulse.settings.pages V1 when host lacks V2");
 }
 }
 int main() {
-    try { ManifestCases(); ImageAndStoreCases(); IconAndCanvasContractCases(); }
+    try { ManifestCases(); ImageAndStoreCases(); DeveloperModeCases(); IconAndCanvasContractCases(); SettingsPagesV2AndBuildersCases(); }
     catch (const std::exception& exception) { std::printf("[FAIL] native fixture: %s\n", exception.what()); return 1; }
     std::printf("native_contract_test: %d failed\n", failures);
     return failures ? 1 : 0;

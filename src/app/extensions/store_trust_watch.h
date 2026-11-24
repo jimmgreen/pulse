@@ -7,7 +7,11 @@
 #include <thread>
 #include <vector>
 namespace pulse::extensions {
-struct StoreTrustSnapshot { std::string manifest, signature; };
+struct StoreTrustSnapshot {
+    std::string manifest, signature;
+    // Developer mode at startup: an unsigned snapshot is not revoked for signature_required.
+    bool allow_unsigned = false;
+};
 struct StoreTrustUpdate {
     uint64_t generation = 0;
     uint64_t check_sequence = 0;

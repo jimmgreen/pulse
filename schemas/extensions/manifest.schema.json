@@ -48,9 +48,20 @@
       "$ref": "#/$defs/nativePackage",
       "description": "Explicit trusted in-process Windows x64 DLL package. Mutually exclusive with runtime. Discovery grants no execution authority."
     },
+    "activation": {
+      "enum": [
+        "onDemand",
+        "startup"
+      ],
+      "description": "When the native DLL is activated. onDemand: on first use of a contributed command, a preview or the settings page. startup: when each Pulse window opens, for status items, columns and folder/selection/file-operation hooks. Default: startup when no contributes.commands are declared or the context.events resource is declared, otherwise onDemand."
+    },
     "contributes": {
       "$ref": "#/$defs/contributions",
       "description": "Optional static declarations used for zero-load command/shortcut discovery before the native DLL is activated on demand."
+    },
+    "showcase": {
+      "$ref": "#/$defs/showcaseMetadata",
+      "description": "Optional local store showcase metadata (description, tags, highlights, icon, links)."
     }
   },
   "$defs": {
@@ -165,6 +176,13 @@
           "maxItems": 32,
           "items": {
             "$ref": "#/$defs/commandContribution"
+          }
+        },
+        "fileHandlers": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/fileHandlerContribution"
           }
         }
       }
@@ -294,6 +312,9 @@
         "checked": {
           "type": "boolean"
         },
+        "toolbar": {
+          "type": "boolean"
+        },
         "icon": {
           "type": "string",
           "minLength": 1,
@@ -357,6 +378,405 @@
               "type": "boolean"
             }
           }
+        }
+      }
+    },
+    "fileHandlerContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "displayName",
+        "extensions",
+        "command"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "displayName": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "verbLabel": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "extensions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 32,
+            "pattern": "^\\.[a-z0-9][a-z0-9._-]{0,30}$"
+          }
+        },
+        "command": {
+          "$ref": "#/$defs/identifier"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "command",
+            "preview"
+          ]
+        },
+        "iconResource": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 140,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:\\.ico|,-?[0-9]{1,6})$"
+        },
+        "fallbackOnUnassociated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "summaryText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "At most 256 UTF-8 bytes after JSON decoding."
+    },
+    "localizedSummary": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/summaryText"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "zh",
+            "en"
+          ],
+          "properties": {
+            "zh": {
+              "$ref": "#/$defs/summaryText"
+            },
+            "en": {
+              "$ref": "#/$defs/summaryText"
+            },
+            "tw": {
+              "$ref": "#/$defs/summaryText"
+            }
+          }
+        }
+      ]
+    },
+    "descriptionText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "At most 4096 UTF-8 bytes after JSON decoding; newlines allowed."
+    },
+    "localizedDescription": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/descriptionText"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "zh",
+            "en"
+          ],
+          "properties": {
+            "zh": {
+              "$ref": "#/$defs/descriptionText"
+            },
+            "en": {
+              "$ref": "#/$defs/descriptionText"
+            },
+            "tw": {
+              "$ref": "#/$defs/descriptionText"
+            }
+          }
+        }
+      ]
+    },
+    "highlightText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "description": "At most 160 UTF-8 bytes after JSON decoding."
+    },
+    "localizedHighlight": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/highlightText"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "zh",
+            "en"
+          ],
+          "properties": {
+            "zh": {
+              "$ref": "#/$defs/highlightText"
+            },
+            "en": {
+              "$ref": "#/$defs/highlightText"
+            },
+            "tw": {
+              "$ref": "#/$defs/highlightText"
+            }
+          }
+        }
+      ]
+    },
+    "showcaseMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "summary": {
+          "$ref": "#/$defs/localizedSummary"
+        },
+        "description": {
+          "$ref": "#/$defs/localizedDescription"
+        },
+        "category": {
+          "enum": [
+            "archive",
+            "preview",
+            "search",
+            "ai",
+            "files",
+            "utility"
+          ]
+        },
+        "publisher": {
+          "$ref": "#/$defs/displayText"
+        },
+        "engine": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "license": {
+          "$ref": "#/$defs/displayText"
+        },
+        "homepage": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^https?://"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^https?://"
+        },
+        "icon": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 130
+        },
+        "iconColor": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        },
+        "tags": {
+          "type": "array",
+          "maxItems": 12,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          }
+        },
+        "highlights": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/localizedHighlight"
+          }
+        },
+        "quickSettings": {
+          "$ref": "#/$defs/showcaseQuickSettings"
+        }
+      }
+    },
+    "quickSettingsOption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "label"
+      ],
+      "properties": {
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "label": {
+          "$ref": "#/$defs/localizedText"
+        }
+      }
+    },
+    "quickSettingsCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "equals"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/identifier"
+        },
+        "equals": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 64
+        }
+      }
+    },
+    "quickSettingsControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "switch",
+            "select",
+            "button"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/identifier"
+        },
+        "command": {
+          "$ref": "#/$defs/identifier"
+        },
+        "label": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 72,
+          "maximum": 240
+        },
+        "options": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/quickSettingsOption"
+          }
+        },
+        "disabledWhen": {
+          "$ref": "#/$defs/quickSettingsCondition"
+        },
+        "disabledLabel": {
+          "$ref": "#/$defs/localizedText"
+        }
+      }
+    },
+    "quickSettingsRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "controls"
+      ],
+      "properties": {
+        "title": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "description": {
+          "$ref": "#/$defs/localizedHighlight"
+        },
+        "controls": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/quickSettingsControl"
+          }
+        }
+      }
+    },
+    "quickSettingsMenuSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "directory": {
+          "type": "boolean"
+        }
+      }
+    },
+    "quickSettingsMenuPreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sampleEntries"
+      ],
+      "properties": {
+        "caption": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "submenuState": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sampleEntries": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/quickSettingsMenuSample"
+          }
+        }
+      }
+    },
+    "showcaseQuickSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rows"
+      ],
+      "properties": {
+        "title": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "readyState": {
+          "$ref": "#/$defs/identifier"
+        },
+        "statusState": {
+          "$ref": "#/$defs/identifier"
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/quickSettingsRow"
+          }
+        },
+        "menuPreview": {
+          "$ref": "#/$defs/quickSettingsMenuPreview"
         }
       }
     }

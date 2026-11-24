@@ -1,5 +1,7 @@
 # 原生 DLL 示例
 
+- [quickstart](quickstart/README.md)（`pulse_ext new` 默认模板）：用 `pulse/app.hpp` + `pulse/kit.hpp` 约 130 行写完右键命令、Pulse 风格对话框、后台任务、自动保存的设置页，以及跟随 Pulse 语言的简体/繁体/英文文本。新插件从这里开始。
+- [file-columns](file-columns/README.md)：用实验接口 `pulse.columns` 给“详细信息”视图加「行数」「编码」两列，并给 24 小时内改过的文件加图标角标；回调在宿主工作线程按可见行询问、按文件版本缓存，用户可在列标题菜单隐藏或调整宽度。
 - [basic](basic/)：最小入口、接口查询封装与生命周期，不依赖私有头。
 - [rename-panel](rename-panel/README.md)：由 DLL 创建原生页面，自己计算重命名规则，使用宿主准备计划、原生确认和任务服务。同一源码生成 ASCII 小写与大写两个 DLL。
 

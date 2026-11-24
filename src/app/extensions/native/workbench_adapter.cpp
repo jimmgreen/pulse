@@ -1,6 +1,7 @@
 #include "workbench_adapter.h"
 #include "diagnostics_adapter.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <deque>
@@ -67,6 +68,76 @@ struct WorkbenchAdapter::State : std::enable_shared_from_this<State> {
         std::vector<std::pair<uint64_t, std::string>> tokens;
     };
 
+    struct AppearanceSubscriptionRecord {
+        PulseAppearanceSubscription id = 0;
+        PulseWorkbenchAppearanceFn callback = nullptr;
+        void* user = nullptr;
+        bool initial_delivered = false;
+    };
+
+    struct LocaleSubscriptionRecord {
+        PulseLocaleSubscription id = 0;
+        PulseWorkbenchLocaleFn callback = nullptr;
+        void* user = nullptr;
+        bool initial_delivered = false;
+    };
+
+    static bool AppearanceEquals(const PulseHostAppearance& a, const PulseHostAppearance& b) noexcept {
+        return a.flags == b.flags &&
+               a.window_effect == b.window_effect &&
+               a.opacity_percent == b.opacity_percent &&
+               a.accent_argb == b.accent_argb &&
+               a.font_scale_milli == b.font_scale_milli;
+    }
+
+    static PulseHostAppearance NormalizeAppearance(PulseHostAppearance value) noexcept {
+        value.size = sizeof(PulseHostAppearance);
+        value.flags = (value.flags & PULSE_APPEARANCE_DARK) ? PULSE_APPEARANCE_DARK : PULSE_APPEARANCE_LIGHT;
+        value.window_effect = std::min<uint32_t>(value.window_effect, PULSE_BACKDROP_MICA_ALT);
+        value.opacity_percent = std::clamp<uint32_t>(value.opacity_percent, 30u, 100u);
+        if (value.font_scale_milli == 0) value.font_scale_milli = 1000u;
+        return value;
+    }
+
+    static void CopyNormalizedTag(char (&dst)[32], const char* src, const char* fallback) noexcept {
+        std::array<char, 32> clean{};
+        size_t len = 0;
+        if (src) {
+            while (len + 1 < clean.size() && src[len] != '\0') {
+                clean[len] = src[len];
+                ++len;
+            }
+        }
+        if (len == 0 && fallback) {
+            while (len + 1 < clean.size() && fallback[len] != '\0') {
+                clean[len] = fallback[len];
+                ++len;
+            }
+        }
+        std::memcpy(dst, clean.data(), sizeof(dst));
+    }
+
+    static bool LocaleEquals(const PulseHostLocale& a, const PulseHostLocale& b) noexcept {
+        return a.flags == b.flags &&
+               std::strcmp(a.language_tag, b.language_tag) == 0 &&
+               std::strcmp(a.preference_tag, b.preference_tag) == 0;
+    }
+
+    static PulseHostLocale NormalizeLocale(PulseHostLocale value) noexcept {
+        value.size = sizeof(PulseHostLocale);
+        value.flags = (value.flags & PULSE_LOCALE_FOLLOW_SYSTEM) ? PULSE_LOCALE_FOLLOW_SYSTEM : 0u;
+        char lang_tmp[32]{};
+        char pref_tmp[32]{};
+        std::memcpy(lang_tmp, value.language_tag, sizeof(lang_tmp));
+        std::memcpy(pref_tmp, value.preference_tag, sizeof(pref_tmp));
+        lang_tmp[sizeof(lang_tmp) - 1] = '\0';
+        pref_tmp[sizeof(pref_tmp) - 1] = '\0';
+        CopyNormalizedTag(value.language_tag, lang_tmp, "en-US");
+        CopyNormalizedTag(value.preference_tag, pref_tmp,
+                          (value.flags & PULSE_LOCALE_FOLLOW_SYSTEM) ? "system" : value.language_tag);
+        return value;
+    }
+
     static auto& GlobalTokenMap() {
         static auto* table = new std::map<uint64_t, std::weak_ptr<State>>();
         return *table;
@@ -76,13 +147,26 @@ struct WorkbenchAdapter::State : std::enable_shared_from_this<State> {
     WorkbenchBackend backend;
     std::function<bool()> alive;
     std::shared_ptr<DiagnosticsSink> diagnostics;
+    std::function<void()> wake;
     bool closed = false;
     int callbacks = 0;
     uint64_t next_notification_id = 1;
     std::deque<PendingNotification> pending;
+    PulseAppearanceSubscription next_appearance_sub = 1;
+    std::map<PulseAppearanceSubscription, AppearanceSubscriptionRecord> appearance_subs;
+    PulseHostAppearance last_appearance{};
+    bool has_last_appearance = false;
+    PulseLocaleSubscription next_locale_sub = 1;
+    std::map<PulseLocaleSubscription, LocaleSubscriptionRecord> locale_subs;
+    PulseHostLocale last_locale{};
+    bool has_last_locale = false;
 
-    State(WorkbenchBackend impl, std::function<bool()> live, std::shared_ptr<DiagnosticsSink> sink)
-        : backend(std::move(impl)), alive(std::move(live)), diagnostics(std::move(sink)) {}
+    State(WorkbenchBackend impl, std::function<bool()> live, std::shared_ptr<DiagnosticsSink> sink,
+          std::function<void()> wake_fn)
+        : backend(std::move(impl)),
+          alive(std::move(live)),
+          diagnostics(std::move(sink)),
+          wake(std::move(wake_fn)) {}
 
     bool Valid() const noexcept {
         return GetCurrentThreadId() == thread && !closed &&
@@ -337,11 +421,239 @@ struct WorkbenchAdapter::State : std::enable_shared_from_this<State> {
             return PULSE_OK;
         });
     }
+
+    static PulseStatus PULSE_CALL OpenSearch(void* context, PulseStringView query) noexcept {
+        return Guard(context, [&](State& self) -> PulseStatus {
+            std::wstring wide_query;
+            if (!ValidUtf8Wide(query, 512, true, wide_query))
+                return self.Fail(PULSE_ERROR_ARGUMENT, "open_search", "", "query",
+                                 "query must be 1..512 valid UTF-8 bytes without NUL");
+            for (const wchar_t c : wide_query) {
+                if (c < 0x20) {
+                    return self.Fail(PULSE_ERROR_ARGUMENT, "open_search", "", "query",
+                                     "query must not contain control characters");
+                }
+            }
+            if (!self.backend.open_search)
+                return self.Fail(PULSE_ERROR_UNAVAILABLE, "open_search", "", "", "workbench search backend is unavailable");
+            const PulseStatus status = self.backend.open_search(wide_query);
+            if (status != PULSE_OK)
+                return self.Fail(status, "open_search", "", "query", "host rejected search tab open");
+            return PULSE_OK;
+        });
+    }
+
+    static PulseStatus PULSE_CALL RevealPathFromRect(void* context, PulseStringView path, uint32_t mode,
+                                                     const PulseScreenRect* origin_rect) noexcept {
+        return Guard(context, [&](State& self) -> PulseStatus {
+            if (mode > PULSE_NAVIGATE_DISMISS_HOVER_PREVIEW)
+                return self.Fail(PULSE_ERROR_ARGUMENT, "reveal_path_from_rect", "", "mode",
+                                 "unsupported navigation mode");
+            std::wstring wide_path;
+            if (!ValidUtf8Wide(path, 32768, true, wide_path) || !ValidAbsolutePath(wide_path))
+                return self.Fail(PULSE_ERROR_ARGUMENT, "reveal_path_from_rect", "", "path",
+                                 "path must be a valid UTF-8 absolute drive or UNC path");
+            if (origin_rect && (origin_rect->width < 0 || origin_rect->height < 0))
+                return self.Fail(PULSE_ERROR_ARGUMENT, "reveal_path_from_rect", "", "origin_rect",
+                                 "origin_rect width and height must be non-negative");
+            PulseStatus status = PULSE_ERROR_UNAVAILABLE;
+            if (self.backend.reveal_path_from_rect) {
+                status = self.backend.reveal_path_from_rect(wide_path, mode, origin_rect);
+            } else if (self.backend.reveal_path) {
+                status = self.backend.reveal_path(wide_path, mode);
+            } else {
+                return self.Fail(PULSE_ERROR_UNAVAILABLE, "reveal_path_from_rect", "", "",
+                                 "workbench navigation backend is unavailable");
+            }
+            if (status != PULSE_OK)
+                return self.Fail(status, "reveal_path_from_rect", "", "path", "host rejected path navigation/reveal");
+            return PULSE_OK;
+        });
+    }
+
+    static PulseStatus PULSE_CALL QueryAppearance(void* context, PulseHostAppearance* out_appearance) noexcept {
+        return Guard(context, [&](State& self) -> PulseStatus {
+            if (!out_appearance || out_appearance->size < sizeof(PulseHostAppearance))
+                return self.Fail(PULSE_ERROR_ARGUMENT, "query_appearance", "", "out_appearance",
+                                 "out_appearance must be non-null with size >= sizeof(PulseHostAppearance)");
+            if (!self.backend.query_appearance)
+                return self.Fail(PULSE_ERROR_UNAVAILABLE, "query_appearance", "", "",
+                                 "workbench appearance backend is unavailable");
+            PulseHostAppearance resolved{};
+            resolved.size = sizeof(PulseHostAppearance);
+            const PulseStatus status = self.backend.query_appearance(resolved);
+            if (status != PULSE_OK)
+                return self.Fail(status, "query_appearance", "", "", "failed to query host appearance");
+            resolved = NormalizeAppearance(resolved);
+            std::memcpy(out_appearance, &resolved, sizeof(PulseHostAppearance));
+            return PULSE_OK;
+        });
+    }
+
+    static PulseStatus PULSE_CALL SubscribeAppearance(void* context, PulseWorkbenchAppearanceFn callback,
+                                                      void* user,
+                                                      PulseAppearanceSubscription* out_subscription) noexcept {
+        if (out_subscription) *out_subscription = 0;
+        return Guard(context, [&](State& self) -> PulseStatus {
+            if (!callback || !out_subscription)
+                return self.Fail(PULSE_ERROR_ARGUMENT, "subscribe_appearance", "", "callback",
+                                 "callback and out_subscription must be non-null");
+            if (!self.backend.query_appearance)
+                return self.Fail(PULSE_ERROR_UNAVAILABLE, "subscribe_appearance", "", "",
+                                 "workbench appearance backend is unavailable");
+            if (self.appearance_subs.size() >= 16)
+                return self.Fail(PULSE_ERROR_STATE, "subscribe_appearance", "", "subscriptions",
+                                 "maximum 16 appearance subscriptions per session");
+            const PulseAppearanceSubscription id = self.next_appearance_sub++;
+            self.appearance_subs.emplace(id, AppearanceSubscriptionRecord{id, callback, user, false});
+            *out_subscription = id;
+            if (self.wake) self.wake();
+            return PULSE_OK;
+        });
+    }
+
+    static PulseStatus PULSE_CALL UnsubscribeAppearance(void* context,
+                                                        PulseAppearanceSubscription subscription) noexcept {
+        return Guard(context, [&](State& self) -> PulseStatus {
+            if (subscription == 0)
+                return self.Fail(PULSE_ERROR_ARGUMENT, "unsubscribe_appearance", "", "subscription",
+                                 "subscription must be non-zero");
+            if (!self.appearance_subs.erase(subscription))
+                return self.Fail(PULSE_ERROR_STATE, "unsubscribe_appearance", "", "subscription",
+                                 "unknown or already unsubscribed appearance token");
+            return PULSE_OK;
+        });
+    }
+
+    void SyncAppearance() noexcept {
+        if (!Valid() || appearance_subs.empty() || !backend.query_appearance) return;
+        PulseHostAppearance current{};
+        current.size = sizeof(PulseHostAppearance);
+        try {
+            if (backend.query_appearance(current) != PULSE_OK) return;
+        } catch (...) {
+            return;
+        }
+        current = NormalizeAppearance(current);
+        const bool changed = !has_last_appearance || !AppearanceEquals(last_appearance, current);
+        std::vector<AppearanceSubscriptionRecord> due;
+        try {
+            for (auto& [id, sub] : appearance_subs) {
+                (void)id;
+                if (changed || !sub.initial_delivered) {
+                    sub.initial_delivered = true;
+                    due.push_back(sub);
+                }
+            }
+        } catch (...) {
+            return;
+        }
+        last_appearance = current;
+        has_last_appearance = true;
+        for (const auto& sub : due) {
+            if (!Valid() || !appearance_subs.contains(sub.id) || !sub.callback) continue;
+            ++callbacks;
+            try {
+                sub.callback(sub.user, &current);
+            } catch (...) {}
+            --callbacks;
+        }
+    }
+
+    static PulseStatus PULSE_CALL QueryLocale(void* context, PulseHostLocale* out_locale) noexcept {
+        return Guard(context, [&](State& self) -> PulseStatus {
+            if (!out_locale || out_locale->size < sizeof(PulseHostLocale))
+                return self.Fail(PULSE_ERROR_ARGUMENT, "query_locale", "", "out_locale",
+                                 "out_locale must be non-null with size >= sizeof(PulseHostLocale)");
+            if (!self.backend.query_locale)
+                return self.Fail(PULSE_ERROR_UNAVAILABLE, "query_locale", "", "",
+                                 "workbench locale backend is unavailable");
+            PulseHostLocale resolved{};
+            resolved.size = sizeof(PulseHostLocale);
+            const PulseStatus status = self.backend.query_locale(resolved);
+            if (status != PULSE_OK)
+                return self.Fail(status, "query_locale", "", "", "failed to query host locale");
+            resolved = NormalizeLocale(resolved);
+            std::memcpy(out_locale, &resolved, sizeof(PulseHostLocale));
+            return PULSE_OK;
+        });
+    }
+
+    static PulseStatus PULSE_CALL SubscribeLocale(void* context, PulseWorkbenchLocaleFn callback,
+                                                  void* user,
+                                                  PulseLocaleSubscription* out_subscription) noexcept {
+        if (out_subscription) *out_subscription = 0;
+        return Guard(context, [&](State& self) -> PulseStatus {
+            if (!callback || !out_subscription)
+                return self.Fail(PULSE_ERROR_ARGUMENT, "subscribe_locale", "", "callback",
+                                 "callback and out_subscription must be non-null");
+            if (!self.backend.query_locale)
+                return self.Fail(PULSE_ERROR_UNAVAILABLE, "subscribe_locale", "", "",
+                                 "workbench locale backend is unavailable");
+            if (self.locale_subs.size() >= 16)
+                return self.Fail(PULSE_ERROR_STATE, "subscribe_locale", "", "subscriptions",
+                                 "maximum 16 locale subscriptions per session");
+            const PulseLocaleSubscription id = self.next_locale_sub++;
+            self.locale_subs.emplace(id, LocaleSubscriptionRecord{id, callback, user, false});
+            *out_subscription = id;
+            if (self.wake) self.wake();
+            return PULSE_OK;
+        });
+    }
+
+    static PulseStatus PULSE_CALL UnsubscribeLocale(void* context,
+                                                    PulseLocaleSubscription subscription) noexcept {
+        return Guard(context, [&](State& self) -> PulseStatus {
+            if (subscription == 0)
+                return self.Fail(PULSE_ERROR_ARGUMENT, "unsubscribe_locale", "", "subscription",
+                                 "subscription must be non-zero");
+            if (!self.locale_subs.erase(subscription))
+                return self.Fail(PULSE_ERROR_STATE, "unsubscribe_locale", "", "subscription",
+                                 "unknown or already unsubscribed locale token");
+            return PULSE_OK;
+        });
+    }
+
+    void SyncLocale() noexcept {
+        if (!Valid() || locale_subs.empty() || !backend.query_locale) return;
+        PulseHostLocale current{};
+        current.size = sizeof(PulseHostLocale);
+        try {
+            if (backend.query_locale(current) != PULSE_OK) return;
+        } catch (...) {
+            return;
+        }
+        current = NormalizeLocale(current);
+        const bool changed = !has_last_locale || !LocaleEquals(last_locale, current);
+        std::vector<LocaleSubscriptionRecord> due;
+        try {
+            for (auto& [id, sub] : locale_subs) {
+                (void)id;
+                if (changed || !sub.initial_delivered) {
+                    sub.initial_delivered = true;
+                    due.push_back(sub);
+                }
+            }
+        } catch (...) {
+            return;
+        }
+        last_locale = current;
+        has_last_locale = true;
+        for (const auto& sub : due) {
+            if (!Valid() || !locale_subs.contains(sub.id) || !sub.callback) continue;
+            ++callbacks;
+            try {
+                sub.callback(sub.user, &current);
+            } catch (...) {}
+            --callbacks;
+        }
+    }
 };
 
 WorkbenchAdapter::WorkbenchAdapter(WorkbenchBackend backend, std::function<bool()> alive,
-                                   std::shared_ptr<DiagnosticsSink> diagnostics)
-    : state_(std::make_shared<State>(std::move(backend), std::move(alive), std::move(diagnostics))) {}
+                                   std::shared_ptr<DiagnosticsSink> diagnostics,
+                                   std::function<void()> wake)
+    : state_(std::make_shared<State>(std::move(backend), std::move(alive), std::move(diagnostics), std::move(wake))) {}
 
 WorkbenchAdapter::~WorkbenchAdapter() { Close(); }
 
@@ -349,22 +661,49 @@ void WorkbenchAdapter::SetDiagnostics(std::shared_ptr<DiagnosticsSink> sink) {
     if (state_) state_->diagnostics = std::move(sink);
 }
 
+void WorkbenchAdapter::SetWake(std::function<void()> wake) {
+    if (state_) state_->wake = std::move(wake);
+}
+
 PulseStatus WorkbenchAdapter::Query(uint32_t version, void* out, uint32_t size) const noexcept {
     try {
         if (!state_->Valid()) return PULSE_ERROR_STATE;
-        if (version != PULSE_WORKBENCH_VERSION_1) return PULSE_ERROR_ABI;
-        if (!out || size < sizeof(PulseWorkbenchV1)) return PULSE_ERROR_ARGUMENT;
-        const PulseWorkbenchV1 table{
-            sizeof(PulseWorkbenchV1),
-            PULSE_WORKBENCH_VERSION_1,
+        if (version != PULSE_WORKBENCH_VERSION_1 && version != PULSE_WORKBENCH_VERSION_2 &&
+            version != PULSE_WORKBENCH_VERSION_3)
+            return PULSE_ERROR_ABI;
+        if (!out) return PULSE_ERROR_ARGUMENT;
+        PulseWorkbenchV3 table{
+            sizeof(PulseWorkbenchV3),
+            version,
             state_.get(),
             State::ShowSnack,
             State::ShowNotice,
             State::RevealPath,
             State::ShowTextDiff,
             State::SetClipboardText,
+            State::OpenSearch,
+            State::RevealPathFromRect,
+            State::QueryAppearance,
+            State::SubscribeAppearance,
+            State::UnsubscribeAppearance,
+            State::QueryLocale,
+            State::SubscribeLocale,
+            State::UnsubscribeLocale,
         };
-        std::memcpy(out, &table, sizeof(table));
+        if (version == PULSE_WORKBENCH_VERSION_1) {
+            if (size < sizeof(PulseWorkbenchV1)) return PULSE_ERROR_ARGUMENT;
+            table.size = sizeof(PulseWorkbenchV1);
+            std::memcpy(out, &table, sizeof(PulseWorkbenchV1));
+            return PULSE_OK;
+        }
+        if (version == PULSE_WORKBENCH_VERSION_2) {
+            if (size < sizeof(PulseWorkbenchV2)) return PULSE_ERROR_ARGUMENT;
+            table.size = sizeof(PulseWorkbenchV2);
+            std::memcpy(out, &table, sizeof(PulseWorkbenchV2));
+            return PULSE_OK;
+        }
+        if (size < sizeof(PulseWorkbenchV3)) return PULSE_ERROR_ARGUMENT;
+        std::memcpy(out, &table, sizeof(PulseWorkbenchV3));
         return PULSE_OK;
     } catch (...) {
         return PULSE_ERROR_STATE;
@@ -373,6 +712,16 @@ PulseStatus WorkbenchAdapter::Query(uint32_t version, void* out, uint32_t size) 
 
 bool WorkbenchAdapter::InvokeActionToken(uint64_t token) noexcept {
     return state_ && state_->TriggerToken(token);
+}
+
+void WorkbenchAdapter::Sync() noexcept {
+    if (!state_) return;
+    state_->SyncAppearance();
+    state_->SyncLocale();
+}
+
+bool WorkbenchAdapter::HasSubscriptions() const noexcept {
+    return state_ && !state_->closed && (!state_->appearance_subs.empty() || !state_->locale_subs.empty());
 }
 
 bool WorkbenchAdapter::DispatchHostActionToken(uint64_t token) noexcept {
@@ -389,6 +738,8 @@ bool WorkbenchAdapter::DispatchHostActionToken(uint64_t token) noexcept {
 void WorkbenchAdapter::Close() noexcept {
     if (!state_ || GetCurrentThreadId() != state_->thread || state_->closed) return;
     state_->closed = true;
+    state_->appearance_subs.clear();
+    state_->locale_subs.clear();
     state_->ClearAllTokens();
 }
 

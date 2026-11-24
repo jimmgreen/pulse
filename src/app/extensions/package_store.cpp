@@ -1,6 +1,7 @@
 #include "package_store.h"
 #include "package_signature.h"
 #include "native_image_verify.h"
+#include "developer_mode.h"
 #include "../../common/json_value.h"
 #include <windows.h>
 #include <bcrypt.h>
@@ -73,6 +74,9 @@ PackageStoreResult Failure(std::string error) {
 }
 
 PackageStoreResult LoadPackageStore(const std::wstring& directory) {
+    return LoadPackageStore(directory, PackageStoreOptions{});
+}
+PackageStoreResult LoadPackageStore(const std::wstring& directory, const PackageStoreOptions& options) {
     try {
         const auto root = std::filesystem::path(directory).lexically_normal();
         const auto drive = root.root_name().wstring();
@@ -142,7 +146,13 @@ PackageStoreResult LoadPackageStore(const std::wstring& directory) {
             } else if (GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND) {
                 return Failure("Cannot inspect package signature.");
             }
-            if (!VerifyPackageSignature(bytes, signature, signature_policy, error)) return Failure(entry.id + ": " + error);
+            if (!VerifyPackageSignature(bytes, signature, signature_policy, error)) {
+                // Unsigned under requireSigned: developer mode accepts it, otherwise only this
+                // package is left out. A bad or untrusted signature still fails the store.
+                if (!(signature.empty() && error == "signature_required")) return Failure(entry.id + ": " + error);
+                if (!options.allow_unsigned) { result.skipped_unsigned.push_back(entry.id); continue; }
+                error.clear();
+            }
             std::string publisher_id;
             if (!signature.empty()) {
                 json::Value signed_value;
@@ -175,5 +185,44 @@ PackageStoreResult LoadPackageStore(const std::wstring& directory) {
         }
         return result;
     } catch (const std::exception& error) { return Failure(error.what()); }
+}
+std::vector<DevelopmentPackage> LoadDevelopmentPackages(const std::wstring& store_root,
+    const std::vector<std::string>& taken_ids) {
+    std::vector<DevelopmentPackage> out;
+    const auto entries = devmode::ReadRegistry(store_root);
+    for (const auto& entry : entries) {
+        DevelopmentPackage package{entry.id, entry.revision, {}, std::nullopt, {}};
+        try {
+            if (std::find(taken_ids.begin(), taken_ids.end(), entry.id) != taken_ids.end()) {
+                package.error = "dev_id_conflict";
+                out.push_back(std::move(package));
+                continue;
+            }
+            const auto directory = devmode::ShadowDirectory(store_root, entry);
+            std::string bytes, error;
+            if (!Directory(directory) || !Read(directory / "manifest.json", kMaxManifestBytes, bytes, error)) {
+                package.error = "dev_shadow_missing";
+            } else if (PackageRevision(bytes) != entry.revision) {
+                package.error = "dev_shadow_changed";
+            } else if (auto parsed = ParseManifest(bytes); !parsed) {
+                package.error = parsed.error;
+            } else if (parsed.manifest->id != entry.id) {
+                package.error = "dev_id_mismatch";
+            } else {
+                if (parsed.manifest->native) {
+                    const auto& native = *parsed.manifest->native;
+                    package.native_path = (directory / native.library).wstring();
+                    std::vector<HANDLE> locks;
+                    const bool valid = OpenVerifiedNativePackage(package.native_path, native, locks, error);
+                    for (HANDLE handle : locks) CloseHandle(handle);
+                    if (!valid) package.error = error.empty() ? "dev_native_invalid" : error;
+                }
+                if (package.error.empty()) package.manifest = std::move(*parsed.manifest);
+            }
+        } catch (const std::exception& error) { package.error = error.what(); }
+        if (!package.error.empty()) { package.manifest.reset(); package.native_path.clear(); }
+        out.push_back(std::move(package));
+    }
+    return out;
 }
 }

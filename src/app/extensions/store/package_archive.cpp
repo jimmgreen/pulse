@@ -214,6 +214,87 @@ bool IntegerTokens(std::string_view s) {
     }
     return true;
 }
+// Manifest integers follow the strict IntegerTokens rule except the documented
+// floating-point icon geometry fields (contributes.icons[].viewBox and
+// contributes.icons[].layers[].{strokeWidth, opacity}), which ParseManifest parses
+// and validates directly with std::isfinite + bounds checks.
+bool ManifestNumberTokens(std::string_view s) {
+    struct Container {
+        char type;
+        bool expect_key;
+        bool after_colon;
+        std::string key;
+    };
+    std::vector<Container> stack;
+    for (size_t i = 0; i < s.size(); ++i) {
+        const char c = s[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+        if (c == '"') {
+            const bool reading_key = !stack.empty() && stack.back().type == '{' && stack.back().expect_key;
+            std::string key_buf;
+            bool escaped = false;
+            for (++i; i < s.size(); ++i) {
+                const char sc = s[i];
+                if (escaped) {
+                    if (reading_key && key_buf.size() < 64) key_buf.push_back(sc);
+                    escaped = false;
+                } else if (sc == '\\') {
+                    escaped = true;
+                } else if (sc == '"') {
+                    break;
+                } else if (reading_key && key_buf.size() < 64) {
+                    key_buf.push_back(sc);
+                }
+            }
+            if (reading_key) {
+                stack.back().key = std::move(key_buf);
+                stack.back().expect_key = false;
+            }
+            continue;
+        }
+        if (c == '{') {
+            stack.push_back({'{', true, false, {}});
+        } else if (c == '[') {
+            stack.push_back({'[', false, false, {}});
+        } else if (c == '}' || c == ']') {
+            if (!stack.empty()) stack.pop_back();
+        } else if (c == ':') {
+            if (!stack.empty() && stack.back().type == '{') {
+                stack.back().after_colon = true;
+                stack.back().expect_key = false;
+            }
+        } else if (c == ',') {
+            if (!stack.empty() && stack.back().type == '{') {
+                stack.back().expect_key = true;
+                stack.back().after_colon = false;
+                stack.back().key.clear();
+            }
+        } else if (c == '-' || (c >= '0' && c <= '9')) {
+            const bool float_allowed = !stack.empty() && stack.back().type == '{' &&
+                stack.back().after_colon &&
+                (stack.back().key == "viewBox" || stack.back().key == "strokeWidth" ||
+                 stack.back().key == "opacity");
+            bool has_float_marker = false;
+            while (i + 1 < s.size()) {
+                const char next = s[i + 1];
+                if (next == '.' || next == 'e' || next == 'E') {
+                    has_float_marker = true;
+                    ++i;
+                    if ((next == 'e' || next == 'E') && i + 1 < s.size() &&
+                        (s[i + 1] == '+' || s[i + 1] == '-')) {
+                        ++i;
+                    }
+                } else if (next >= '0' && next <= '9') {
+                    ++i;
+                } else {
+                    break;
+                }
+            }
+            if (!float_allowed && has_float_marker) return false;
+        }
+    }
+    return true;
+}
 bool Equal(const json::Value& a, const json::Value& b) {
     if (a.type() != b.type() || a.size() != b.size()) return false;
     if (a.is_object()) {
@@ -577,7 +658,7 @@ bool VerifyCatalogPackage(std::string_view archive_bytes, std::string_view signa
     const auto& manifest_bytes = manifest_entry->second;
     const auto revision = PackageRevision(manifest_bytes);
     if (revision != release.manifest_sha256) return fail("manifest_hash_mismatch");
-    if (!IntegerTokens(manifest_bytes)) return fail("invalid_manifest_integer");
+    if (!ManifestNumberTokens(manifest_bytes)) return fail("invalid_manifest_integer");
     auto parsed = ParseManifest(manifest_bytes);
     if (!parsed) { error = "invalid_manifest: " + parsed.error; return false; }
     const auto& manifest = *parsed.manifest;
@@ -646,7 +727,7 @@ bool VerifyLocalPackageInternal(const std::filesystem::path& archive_path,
     if (manifest_entry == files.end() || metadata_entry == files.end()) return fail("missing_required_package_metadata");
     const auto& manifest_bytes = manifest_entry->second;
     const auto revision = PackageRevision(manifest_bytes);
-    if (!IntegerTokens(manifest_bytes)) return fail("invalid_manifest_integer");
+    if (!ManifestNumberTokens(manifest_bytes)) return fail("invalid_manifest_integer");
     auto parsed = ParseManifest(manifest_bytes);
     if (!parsed) { error = "invalid_manifest: " + parsed.error; return false; }
     const auto& manifest = *parsed.manifest;

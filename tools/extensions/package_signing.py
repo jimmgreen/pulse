@@ -129,6 +129,20 @@ class Cng:
         return result.raw[:size.value]
 
 
+def keygen(bits=2048):
+    if type(bits) is not int or not 2048 <= bits <= 4096 or bits % 8:
+        raise ValueError('Key size must be 2048..4096 bits in 8-bit increments')
+    cng = Cng()
+    try:
+        cng.check(cng.dll.BCryptGenerateKeyPair(cng.algorithm, ctypes.byref(cng.key), bits, 0))
+        cng.check(cng.dll.BCryptFinalizeKeyPair(cng.key, 0))
+        priv = cng.export(True)
+        pub = public_blob(cng.export(False))
+    finally:
+        cng.close()
+    return priv, pub, hashlib.sha256(pub).hexdigest()
+
+
 def sign(manifest, private):
     if len(manifest) > 65536:
         raise ValueError('Manifest exceeds size limit')
@@ -288,6 +302,10 @@ def main(argv=None):
     import package_store as store
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
+    keygen_parser = commands.add_parser('keygen')
+    keygen_parser.add_argument('--private-key', type=Path, required=True)
+    keygen_parser.add_argument('--public-key', type=Path, required=True)
+    keygen_parser.add_argument('--bits', type=int, default=2048)
     sign_parser = commands.add_parser('sign')
     sign_parser.add_argument('manifest', type=Path)
     sign_parser.add_argument('--private-key', type=Path, required=True)
@@ -316,7 +334,22 @@ def main(argv=None):
     verification.add_argument('--signature', type=Path)
     verification.add_argument('--policy', type=Path)
     args = parser.parse_args(argv)
-    if args.command == 'sign':
+    if args.command == 'keygen':
+        store.ordinary(args.private_key)
+        store.ordinary(args.public_key)
+        priv, pub, pin = keygen(args.bits)
+        args.private_key.parent.mkdir(parents=True, exist_ok=True)
+        args.public_key.parent.mkdir(parents=True, exist_ok=True)
+        with args.private_key.open('xb') as stream:
+            stream.write(priv)
+        try:
+            with args.public_key.open('xb') as stream:
+                stream.write(pub)
+        except Exception:
+            args.private_key.unlink(missing_ok=True)
+            raise
+        print(json.dumps({'generated': True, 'bits': args.bits, 'publisher': pin}))
+    elif args.command == 'sign':
         result = sign(store.read_bytes(args.manifest, 65536), store.read_bytes(args.private_key, 8192))
         with args.output.open('x', encoding='utf-8') as stream:
             json.dump(result, stream, indent=2)

@@ -2,6 +2,7 @@
 #include "rename_service.h"
 #include "resource_contract.h"
 #include "resource_settings.h"
+#include "seven_zip_menu_settings.h"
 #include "resource_reference_store.h"
 #include "audit_log.h"
 #include "context.h"
@@ -187,6 +188,8 @@ ResourceService::Cancel ResourceService::Call(AppState& owner,const CallerLease&
                 ? ReadOwnSettings(root,job->caller.Package().id)
                 : WriteOwnSetting(root,job->caller.Package().id,request.key,request.value,request.version,authorized);
         } catch(...) {result=ResourceFailure("io_error");}
+        // A diagnostic/menu cache failure must not alter the result of a committed save.
+        try { if (job->caller.Package().id == "pulse.7zip") seven_zip_menu::Publish(result); } catch (...) {}
         std::lock_guard lock(job->mutex);if(!job->cancelled)job->result=std::move(result);
     });
     return [job]{job->cancelled=true;};

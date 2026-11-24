@@ -16,9 +16,11 @@ TEMPLATE_CMAKELISTS_STEMS = {
     "directory-browser": "pulse_directory_browser",
     "directory-transfer": "pulse_directory_transfer",
     "directory-workbench": "pulse_directory_workbench",
+    "file-columns": "pulse_file_columns",
     "file-operations": "pulse_file_operations",
     "inspector": "pulse_inspector",
     "live-data": "pulse_live_data",
+    "quickstart": "pulse_quickstart",
     "reactive-panel": "pulse_reactive",
     "rename-panel": "pulse_rename",
 }

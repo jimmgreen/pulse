@@ -1,4 +1,5 @@
 #include "dialogs_adapter_host.h"
+#include "../../app_ops_ui.h"
 #include "../../app_runtime.h"
 #include "../../app_state.h"
 #include "../../../ui/form_dialog.h"
@@ -53,7 +54,12 @@ DialogsBackend MakeDialogsBackend(HWND owner, bool dark, D2D1_COLOR_F accent) {
         spec.on_states_changed = std::move(src.on_states_changed);
         spec.on_command = std::move(src.on_command);
         spec.command_enabled = std::move(src.command_enabled);
-        spec.on_closed = std::move(src.on_closed);
+        auto user_closed = std::move(src.on_closed);
+        spec.on_closed = [host, on_closed = std::move(user_closed)](
+                             int button, std::vector<extensions::UiStateEntry> states) mutable {
+            if (auto* app = GetAppState(host->owner)) DeferOperationAutoShow(*app);
+            if (on_closed) on_closed(button, std::move(states));
+        };
         return host->dialog.Show(host->owner, std::move(spec), host->dark, host->accent);
     };
     backend.set_states = [host](const std::vector<extensions::UiStateEntry>& entries) {

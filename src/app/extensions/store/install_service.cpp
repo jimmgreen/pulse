@@ -1,6 +1,8 @@
 #include "install_service.h"
+#include "install_rename.h"
 #include "../package_revision.h"
 #include "../package_signature.h"
+#include "../developer_mode.h"
 #include "../package_store.h"
 #include "../../../common/json_value.h"
 #include <windows.h>
@@ -91,6 +93,31 @@ std::unique_ptr<LocalHandle> LocalOpen(const fs::path& path, bool directory, DWO
     }
     return handle;
 }
+std::unique_ptr<LocalHandle> LocalOpenPublished(const fs::path& path, bool directory, const std::atomic<bool>& cancelled,
+    DWORD access = FILE_READ_ATTRIBUTES, DWORD sharing = FILE_SHARE_READ | FILE_SHARE_WRITE) {
+    for (unsigned attempt = 0;; ++attempt) {
+        LocalCheckCancel(cancelled);
+        auto handle = std::make_unique<LocalHandle>();
+        handle->value = CreateFileW(path.c_str(), access, sharing, nullptr, OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | (directory ? FILE_FLAG_BACKUP_SEMANTICS : 0), nullptr);
+        if (handle->value == INVALID_HANDLE_VALUE) {
+            const DWORD code = GetLastError();
+            if (detail::IsInstallRenameRetryable(code) && attempt < detail::kPayloadRenameMaxAttempts) {
+                detail::SleepCancellableSlice(detail::BackoffDelayMs(attempt), cancelled);
+                continue;
+            }
+            SetLastError(code);
+            LocalIo("store_open");
+        }
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!GetFileInformationByHandle(handle->value, &info)) LocalIo("store_file_info");
+        if (GetFileType(handle->value) != FILE_TYPE_DISK || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+            (!!(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != directory)) {
+            LocalFail("store_requires_ordinary_path");
+        }
+        return handle;
+    }
+}
 std::string LocalRead(const fs::path& path, size_t limit, std::vector<std::unique_ptr<LocalHandle>>* pins = nullptr) {
     auto file = LocalOpen(path, false, GENERIC_READ, FILE_SHARE_READ);
     LARGE_INTEGER length{};
@@ -99,6 +126,25 @@ std::string LocalRead(const fs::path& path, size_t limit, std::vector<std::uniqu
     std::string bytes(static_cast<size_t>(length.QuadPart), '\0');
     size_t offset = 0;
     while (offset < bytes.size()) {
+        DWORD count = 0;
+        const auto wanted = static_cast<DWORD>((std::min)(bytes.size() - offset, size_t{65536}));
+        if (!ReadFile(file->value, bytes.data() + offset, wanted, &count, nullptr) || count != wanted)
+            LocalIo("store_read");
+        offset += count;
+    }
+    if (pins) pins->push_back(std::move(file));
+    return bytes;
+}
+std::string LocalReadPublished(const fs::path& path, size_t limit, const std::atomic<bool>& cancelled,
+    std::vector<std::unique_ptr<LocalHandle>>* pins = nullptr) {
+    auto file = LocalOpenPublished(path, false, cancelled, GENERIC_READ, FILE_SHARE_READ);
+    LARGE_INTEGER length{};
+    if (!GetFileSizeEx(file->value, &length)) LocalIo("store_size");
+    if (length.QuadPart < 0 || static_cast<uint64_t>(length.QuadPart) > limit) LocalFail("store_size_limit");
+    std::string bytes(static_cast<size_t>(length.QuadPart), '\0');
+    size_t offset = 0;
+    while (offset < bytes.size()) {
+        LocalCheckCancel(cancelled);
         DWORD count = 0;
         const auto wanted = static_cast<DWORD>((std::min)(bytes.size() - offset, size_t{65536}));
         if (!ReadFile(file->value, bytes.data() + offset, wanted, &count, nullptr) || count != wanted)
@@ -248,7 +294,11 @@ bool FileDefinitelyAbsent(const fs::path& path) {
     return code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND;
 }
 InstallReview BuildUnsignedReview(UnsignedStoreSession& session, const VerifiedPackage& package, const Value& registry) {
-    const bool policy_requires_signed = InspectUnsignedPolicyRequiresSigned(session, package);
+    // Developer mode (extensions-dev next to the store) accepts unsigned local packages
+    // despite requireSigned. The policy file is not touched; the signed-overwrite and
+    // every other check below still apply.
+    const bool policy_requires_signed = InspectUnsignedPolicyRequiresSigned(session, package) &&
+        !devmode::Enabled(session.root);
     InstallReview review;
     review.root = session.root.native();
     review.id = package.Declaration().id;
@@ -271,10 +321,13 @@ InstallReview BuildUnsignedReview(UnsignedStoreSession& session, const VerifiedP
             old.manifest->id != review.id || old.manifest->name != existing->get_string("name")) {
             LocalFail("invalid_active_revision");
         }
-        // Never allow an unsigned local package to overwrite or downgrade an installed signed package.
+        // Never allow an unsigned local package to overwrite or downgrade an installed signed
+        // package, unless developer mode is on: then the review says so (replaces_signed) and
+        // the signed revision stays the rollback target.
         if (!FileDefinitelyAbsent(session.root / L"versions" / (review.active_revision + ".sig.json")) ||
             !FileDefinitelyAbsent(session.root / L"versions" / (review.active_revision + ".rotation.json"))) {
-            LocalFail("installed_publisher_mismatch");
+            if (!devmode::Enabled(session.root)) LocalFail("installed_publisher_mismatch");
+            review.replaces_signed = true;
         }
         if (policy_requires_signed) LocalFail("signature_required");
         std::erase_if(review.added_resources, [&](const auto& res) {
@@ -288,114 +341,40 @@ InstallReview BuildUnsignedReview(UnsignedStoreSession& session, const VerifiedP
     std::sort(review.added_resources.begin(), review.added_resources.end());
     return review;
 }
-struct LocalTempFile {
-    fs::path path;
-    std::unique_ptr<LocalHandle> handle;
-    bool committed = false;
-    ~LocalTempFile() {
-        if (!committed && handle && handle->value != INVALID_HANDLE_VALUE) {
-            FILE_DISPOSITION_INFO info{TRUE};
-            SetFileInformationByHandle(handle->value, FileDispositionInfo, &info, sizeof(info));
-        }
-    }
-};
-std::unique_ptr<LocalTempFile> WriteLocalTemp(const fs::path& parent, std::string_view bytes,
+detail::StagedTempFile WriteLocalTemp(const fs::path& parent, std::string_view bytes,
     const std::atomic<bool>& cancelled) {
-    static std::atomic<uint64_t> serial{0};
-    auto file = std::make_unique<LocalTempFile>();
-    file->handle = std::make_unique<LocalHandle>();
-    for (int attempt = 0; attempt < 32; ++attempt) {
-        LocalCheckCancel(cancelled);
-        file->path = parent / (L".local-install-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
-            std::to_wstring(GetTickCount64()) + L"-" + std::to_wstring(serial.fetch_add(1)));
-        file->handle->value = CreateFileW(file->path.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
-            FILE_FLAG_OPEN_REPARSE_POINT | FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (file->handle->value != INVALID_HANDLE_VALUE) break;
-        const DWORD code = GetLastError();
-        if (code != ERROR_FILE_EXISTS && code != ERROR_ALREADY_EXISTS) {
-            SetLastError(code);
-            LocalIo("install_create_temporary");
-        }
-    }
-    if (file->handle->value == INVALID_HANDLE_VALUE) LocalFail("install_temporary_collision");
-    size_t offset = 0;
-    while (offset < bytes.size()) {
-        LocalCheckCancel(cancelled);
-        DWORD count = 0;
-        const auto wanted = static_cast<DWORD>((std::min)(bytes.size() - offset, size_t{65536}));
-        if (!WriteFile(file->handle->value, bytes.data() + offset, wanted, &count, nullptr) || count != wanted)
-            LocalIo("install_write");
-        offset += count;
-    }
-    if (!FlushFileBuffers(file->handle->value)) LocalIo("install_flush");
-    return file;
+    return detail::WriteStagedTempFile(parent, L".local-install-", bytes, cancelled);
 }
-void RenameLocalHandle(HANDLE handle, const fs::path& target, bool replace, const std::atomic<bool>* cancelled = nullptr) {
-    const auto& name = target.native();
-    const auto bytes = name.size() * sizeof(wchar_t);
-    if (bytes > 65500) LocalFail("install_path_limit");
-    std::vector<unsigned char> storage(sizeof(FILE_RENAME_INFO) + bytes);
-    auto* info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
-    info->ReplaceIfExists = replace;
-    info->FileNameLength = static_cast<DWORD>(bytes);
-    std::memcpy(info->FileName, name.data(), bytes);
-    for (unsigned attempt = 0;; ++attempt) {
-        if (cancelled) LocalCheckCancel(*cancelled);
-        if (SetFileInformationByHandle(handle, FileRenameInfo, info, static_cast<DWORD>(storage.size()))) return;
-        const DWORD code = GetLastError();
-        if (!cancelled || attempt == 8 ||
-            (code != ERROR_ACCESS_DENIED && code != ERROR_SHARING_VIOLATION && code != ERROR_LOCK_VIOLATION)) {
-            SetLastError(code);
-            LocalIo("install_atomic_rename");
-        }
-        Sleep(25 * (attempt + 1));
-    }
+void RenameLocalStaged(detail::StagedTempFile& staged, const fs::path& target, bool replace,
+    const std::atomic<bool>& cancelled, unsigned max_attempts = detail::kMetadataRenameMaxAttempts) {
+    detail::RenameStagedTempFile(staged, target, replace, cancelled, max_attempts);
 }
 void PublishImmutableLocalFile(UnsignedStoreSession& session, const fs::path& target, std::string_view bytes,
-    const std::atomic<bool>& cancelled, bool pin = true) {
+    const std::atomic<bool>& cancelled, bool pin = true, bool payload_budget = false) {
     if (LocalExists(target)) {
-        if (LocalRead(target, bytes.size(), pin ? &session.pins : nullptr) != bytes)
+        if (LocalReadPublished(target, bytes.size(), cancelled, pin ? &session.pins : nullptr) != bytes)
             LocalFail("immutable_revision_conflict");
         return;
     }
     auto temp = WriteLocalTemp(target.parent_path(), bytes, cancelled);
     LocalCheckCancel(cancelled);
-    RenameLocalHandle(temp->handle->value, target, false);
-    temp->committed = true;
-    temp->handle.reset();
-    if (pin && LocalRead(target, bytes.size(), &session.pins) != bytes)
+    RenameLocalStaged(temp, target, false, cancelled,
+        payload_budget ? detail::kPayloadRenameMaxAttempts : detail::kMetadataRenameMaxAttempts);
+    if (pin && LocalReadPublished(target, bytes.size(), cancelled, &session.pins) != bytes)
         LocalFail("immutable_revision_conflict");
 }
-struct LocalPayloadTemp {
-    fs::path path;
-    std::unique_ptr<LocalHandle> handle;
-    std::vector<std::string> files;
-    bool committed = false;
-    ~LocalPayloadTemp() {
-        if (committed || !handle || handle->value == INVALID_HANDLE_VALUE) return;
-        for (const auto& name : files) {
-            try {
-                auto file = LocalOpen(path / name, false, DELETE, FILE_SHARE_READ);
-                FILE_DISPOSITION_INFO info{TRUE};
-                SetFileInformationByHandle(file->value, FileDispositionInfo, &info, sizeof(info));
-            } catch (...) {}
-        }
-        FILE_DISPOSITION_INFO info{TRUE};
-        SetFileInformationByHandle(handle->value, FileDispositionInfo, &info, sizeof(info));
-    }
-};
 void PublishMultiFileLocalPayload(UnsignedStoreSession& session, const VerifiedPackage& package,
     const std::atomic<bool>& cancelled) {
     const auto parent = session.root / L"packages";
     session.EnsureDirectory(parent);
     const auto target = parent / package.Revision();
     if (LocalExists(target)) {
-        session.pins.push_back(LocalOpen(target, true));
+        session.pins.push_back(LocalOpenPublished(target, true, cancelled));
         std::set<std::string> expected;
         for (const auto& file : package.Files()) {
             LocalCheckCancel(cancelled);
             expected.insert(file.name);
-            if (LocalRead(target / file.name, file.bytes.size(), &session.pins) != file.bytes)
+            if (LocalReadPublished(target / detail::PathFromUtf8(file.name), file.bytes.size(), cancelled, &session.pins) != file.bytes)
                 LocalFail("immutable_revision_conflict");
         }
         for (const auto& item : fs::directory_iterator(target)) {
@@ -404,30 +383,23 @@ void PublishMultiFileLocalPayload(UnsignedStoreSession& session, const VerifiedP
         }
         return;
     }
-    static std::atomic<uint64_t> serial{0};
-    LocalPayloadTemp temp;
-    for (int attempt = 0; attempt < 32; ++attempt) {
-        LocalCheckCancel(cancelled);
-        temp.path = parent / (L".local-pkg-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
-            std::to_wstring(GetTickCount64()) + L"-" + std::to_wstring(serial.fetch_add(1)));
-        if (CreateDirectoryW(temp.path.c_str(), nullptr)) {
-            temp.handle = LocalOpen(temp.path, true, FILE_READ_ATTRIBUTES | DELETE);
-            break;
-        }
-        if (GetLastError() != ERROR_ALREADY_EXISTS) LocalIo("install_payload_directory");
-    }
-    if (!temp.handle) LocalFail("install_payload_collision");
+    auto temp = detail::CreateStagedPayloadDir(parent, L".local-pkg-", cancelled);
     for (const auto& file : package.Files()) {
-        temp.files.push_back(file.name);
-        PublishImmutableLocalFile(session, temp.path / file.name, file.bytes, cancelled, false);
+        detail::WriteStagedMemberFile(temp, file.name, file.bytes, cancelled);
     }
     LocalCheckCancel(cancelled);
-    RenameLocalHandle(temp.handle->value, target, false, &cancelled);
-    temp.committed = true;
+    detail::RenameStagedDirectory(temp, target, cancelled, detail::kPayloadRenameMaxAttempts);
+    session.pins.push_back(LocalOpenPublished(target, true, cancelled));
+    std::set<std::string> expected;
     for (const auto& file : package.Files()) {
         LocalCheckCancel(cancelled);
-        if (LocalRead(target / file.name, file.bytes.size(), &session.pins) != file.bytes)
+        expected.insert(file.name);
+        if (LocalReadPublished(target / detail::PathFromUtf8(file.name), file.bytes.size(), cancelled, &session.pins) != file.bytes)
             LocalFail("immutable_revision_conflict");
+    }
+    for (const auto& item : fs::directory_iterator(target)) {
+        if (!expected.contains(json::Utf8(item.path().filename().wstring())))
+            LocalFail("immutable_revision_extra_member");
     }
 }
 bool ReviewUnsignedLocalInstall(const fs::path& root, const VerifiedPackage& package,
@@ -460,6 +432,7 @@ bool CommitUnsignedLocalInstall(const fs::path& root, const VerifiedPackage& pac
             authorized.publisher_id != review.publisher_id ||
             authorized.previous_publisher_id != review.previous_publisher_id ||
             authorized.publisher_rotated != review.publisher_rotated ||
+            authorized.replaces_signed != review.replaces_signed ||
             authorized.currently_enabled != review.currently_enabled ||
             authorized.native_code != review.native_code ||
             authorized.added_resources != review.added_resources) {
@@ -476,7 +449,7 @@ bool CommitUnsignedLocalInstall(const fs::path& root, const VerifiedPackage& pac
                     [&](const auto& item) { return item.name == native.library; });
                 if (file == package.Files().end()) LocalFail("invalid_verified_payload");
                 PublishImmutableLocalFile(session, session.root / L"binaries" / (native.sha256 + ".dll"),
-                    file->bytes, cancelled);
+                    file->bytes, cancelled, true, true);
             } else {
                 PublishMultiFileLocalPayload(session, package, cancelled);
             }
@@ -500,7 +473,19 @@ bool CommitUnsignedLocalInstall(const fs::path& root, const VerifiedPackage& pac
         replacement.set("name", package.Declaration().name);
         replacement.set("enabled", result.enabled);
         replacement.set("activeRevision", review.revision);
-        if (!review.active_revision.empty()) replacement.set("previousRevision", review.active_revision);
+        // Replacing one unsigned build with the next keeps a signed previous revision (the
+        // official package a developer build replaced) as the rollback target.
+        std::string previous = review.active_revision;
+        if (!review.active_revision.empty() && !review.replaces_signed) {
+            for (const auto& item : registry.find("packages")->items()) {
+                if (item.get_string("id") != review.id) continue;
+                const auto kept = item.get_string("previousRevision");
+                if (!kept.empty() && kept != review.revision && devmode::HexRevision(kept) &&
+                    !FileDefinitelyAbsent(session.root / L"versions" / (kept + ".sig.json"))) previous = kept;
+                break;
+            }
+        }
+        if (!previous.empty()) replacement.set("previousRevision", previous);
         auto packages = Value::Array();
         for (const auto& item : registry.find("packages")->items()) {
             if (item.get_string("id") != review.id) packages.push(item);
@@ -514,8 +499,7 @@ bool CommitUnsignedLocalInstall(const fs::path& root, const VerifiedPackage& pac
         if (LocalExists(session.root / L"registry.json")) {
             auto pin = LocalOpen(session.root / L"registry.json", false);
         }
-        RenameLocalHandle(temp->handle->value, session.root / L"registry.json", true);
-        temp->committed = true;
+        RenameLocalStaged(temp, session.root / L"registry.json", true, cancelled);
         out = std::move(result);
         return true;
     } catch (const std::exception& ex) {

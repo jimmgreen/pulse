@@ -49,7 +49,7 @@ class UiAdapter {
     static bool SidebarOccupied(HWND owner);
     static void SetLegacySidebar(HWND owner, bool occupied);
     bool Embed();
-    bool ShowEmbedded(RECT bounds, bool dark, D2D1_COLOR_F accent, float scale);
+    bool ShowEmbedded(RECT bounds, bool dark, D2D1_COLOR_F accent, float scale, D2D1_COLOR_F wash = {0, 0, 0, 0});
     void HideEmbedded();
     bool HasPanel(uint64_t id) const;
     // Embedded page, host side: read a state, commit one as the user would, or

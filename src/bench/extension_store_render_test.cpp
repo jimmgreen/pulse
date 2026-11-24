@@ -2,6 +2,7 @@
 // data or evidence of a running plugin. No preferences, network, or installation.
 #include "../common/windows_compat.h"
 #include "../common/localization.h"
+#include "../app/extensions/icon_registry.h"
 #include "../ui/ui_renderer.h"
 #include "../ui/store_icons.h"
 #include "../../sdk/native/include/pulse/commands.h"
@@ -31,22 +32,52 @@ WindowViewModel Fixture() {
     item.releases={{L"26.00",L"2026-10-21",L"智能解压；快速压缩无需弹窗；校验值核对",L"1.0.59"},
         {L"25.01",L"2026-09-01",L"首个原生扩展版本",L"1.0.58"}};
     v.items.push_back(item);
+    static const PulseIconId custom_id = pulse::extensions::icons::GlobalRegistry().UpsertManifestIcon(
+        "third.party.demo", "brand", 24000u,
+        {{"M5 5h14v14H5z", PULSE_ICON_DRAW_FILL | PULSE_ICON_DRAW_CLOSED, PULSE_ICON_COLOR_INHERIT, 0u, 0u, 900u},
+         {"M8 12l3 3 5-6", PULSE_ICON_DRAW_STROKE, PULSE_ICON_COLOR_ACCENT, 0u, 2000u, 1000u}});
+    ExtensionStoreItem third_party;
+    third_party.id="third.party.demo"; third_party.name=L"第三方批量工作流";
+    third_party.summary=L"展示自定义 SVG 矢量图标、详细介绍、特性列表、标签与权限声明的完整详情页。";
+    third_party.description=L"这是一个通过公开 manifest.showcase 元数据驱动的通用扩展详情页。\n支持多段落介绍、主要特性、标签过滤以及独立的许可与版本历史展示。";
+    third_party.publisher=L"Community Studio"; third_party.version=L"2.4.0"; third_party.size=L"1.4 MB";
+    third_party.category=L"files"; third_party.icon=StoreIcon::Puzzle; third_party.icon_color=0x3A7E9B;
+    third_party.custom_icon=custom_id; third_party.engine=L"WorkflowEngine 3.1";
+    third_party.license=L"MIT"; third_party.homepage=L"https://example.com/workflow";
+    third_party.source=L"https://github.com/example/workflow";
+    third_party.tags={L"工作流", L"批处理", L"自动化"};
+    third_party.highlights={L"通过公开 contributes.icons 渲染品牌渐变磁贴", L"无需写入宿主 C++ 特判即可展现完整展示页"};
+    third_party.permissions={L"读取所选文件", L"自有设置"};
+    third_party.releases={{L"2.4.0",L"2026-11-20",L"支持商店展示页与自定义品牌图标",L"1.0.61"},
+        {L"2.3.0",L"2026-10-15",L"首个公开发布版本",L"1.0.60"}};
+    third_party.installed=true; third_party.installed_index=1; third_party.enabled=true;
+    third_party.settings_package=1; third_party.has_menu_tab=true;
+    third_party.button_label=L"更新"; third_party.action_enabled=true;
+    v.items.push_back(third_party);
     InstalledExtensionItem installed;
     installed.name=item.name; installed.id=L"pulse.7zip"; installed.version=item.version;
     installed.publisher=item.publisher; installed.enabled=true; installed.native_code=true;
     installed.can_disable=true; installed.can_uninstall=true; installed.can_rollback=true;
     v.installed.push_back(installed);
-    auto& z=v.seven_zip; z.item=0; z.installed_index=0; z.available=true; z.installed=true;
-    z.menu_available=true; z.formats_available=true;
-    z.location=1; z.folder=LR"(C:\Archive fixtures\Extracted)";
-    z.formats_rw={L"7z",L"zip",L"tar",L"gzip",L"xz",L"bzip2"};
-    z.formats_ro={L"RAR",L"ISO",L"CAB",L"WIM",L"VHD",L"DMG",L"NTFS",L"FAT",L"ext4"};
-    z.archive_rows={{L"解压到此处（智能）",L"单文件直接解压，多文件自动建文件夹",PULSE_COMMAND_ICON_EXTRACT},
+    InstalledExtensionItem third_installed;
+    third_installed.name=third_party.name; third_installed.id=L"third.party.demo"; third_installed.version=third_party.version;
+    third_installed.publisher=third_party.publisher; third_installed.enabled=true; third_installed.native_code=true;
+    third_installed.can_disable=true; third_installed.can_uninstall=true;
+    v.installed.push_back(third_installed);
+    // 7-Zip is shown through the generic manifest quick-settings card, like any plugin.
+    ExtensionQuickCardView quick; quick.item_index=0; quick.package_index=0; quick.package_id="pulse.7zip";
+    quick.title=L"常用设置"; quick.available=true; quick.has_menu_preview=true; quick.preview_caption=L"右键压缩包时";
+    quick.preview_rows={{L"解压到此处（智能）",L"单文件直接解压，多文件自动建文件夹",PULSE_COMMAND_ICON_EXTRACT},
         {L"解压到…",L"选择文件夹与其他选项",PULSE_COMMAND_ICON_EXTRACT},
         {L"测试压缩包",L"",PULSE_COMMAND_ICON_ARCHIVE}};
-    z.file_rows={{L"快速压缩为 7z",L"保存为所选文件.7z",PULSE_COMMAND_ICON_ARCHIVE},
-        {L"添加到压缩包…",L"",PULSE_COMMAND_ICON_ARCHIVE},
-        {L"计算校验值",L"",PULSE_COMMAND_ICON_DEFAULT}};
+    {
+        auto control=[](int kind,int action,std::wstring label,bool checked,uint32_t w){
+            ExtensionQuickControlView c;c.kind=kind;c.action=action;c.label=std::move(label);c.checked=checked;c.width_dip=w;return c;};
+        quick.rows.push_back({L"智能解压",L"单文件直接解压到此处，多文件自动新建文件夹",{control(0,91001,L"",true,0)}});
+        quick.rows.push_back({L"快速压缩格式",L"右键「添加到压缩包」时直接使用，不弹出对话框",{control(1,91002,L"7z（推荐）",false,150)}});
+        quick.rows.push_back({L"右键菜单位置",L"",{control(1,91003,L"直接显示",false,150)}});
+    }
+    v.quick_cards.push_back(quick);
     vm.settings_pack_images_available=true; vm.settings_pack_images_installed=true;
     vm.settings_pack_images_version=L"2026.11-long-installed-version"; vm.settings_pack_raw_available=true;
     vm.settings_pack_media_available=true; vm.settings_content_pack_state=2;
@@ -116,32 +147,76 @@ int wmain(int argc,wchar_t** argv) {
     HWND window=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,L"STATIC",L"Store render fixtures",WS_POPUP,
         0,0,1300,2400,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
     if(!window) {CoUninitialize(); return 2;}
+    const bool status_only = argc == 3 && std::wstring_view(argv[2]) == L"--status-notices";
     {
         Compositor comp;
         if(!comp.Init(window)) {DestroyWindow(window); CoUninitialize(); return 2;}
-        Check(FormatChipMetrics(comp),"actual monospace format names fit without wrapping or losing their last character at 100/150 percent DPI");
-        Check(IconPixels(comp),"every drawable StoreIcon has nonempty pixels (None is intentionally empty)");
-        Check(comp.SaveSnapshot((out/L"vector-icons.png").c_str()),"save vector icon atlas");
+        if (!status_only) {
+            Check(FormatChipMetrics(comp),"actual monospace format names fit without wrapping or losing their last character at 100/150 percent DPI");
+            Check(IconPixels(comp),"every drawable StoreIcon has nonempty pixels (None is intentionally empty)");
+            Check(comp.SaveSnapshot((out/L"vector-icons.png").c_str()),"save vector icon atlas");
+        }
         {
             MainRenderer renderer; renderer.SetCompositor(&comp); renderer.SetScale(1.0f);
             for(bool dark:{false,true}) for(bool narrow:{false,true}) {
-                const int width=narrow?424:1300,height=2400;
+                const int width=narrow?424:1300,height=status_only?920:2400;
                 SetWindowPos(window,nullptr,0,0,width,height,SWP_NOACTIVATE|SWP_NOMOVE|SWP_NOZORDER);
                 comp.Resize(width,height); comp.RecreateTextFormats(1.0f);
                 renderer.InvalidateTypography();
-                for(int page=0;page<12;++page) {
+                for(int page=0;page<(status_only?4:16);++page) {
                     auto vm=Fixture(); vm.dark=dark;
                     std::wstring name;
-                    if(page==0) name=L"store";
-                    else if(page<=4) {vm.settings_store_view.detail=true; vm.settings_store_view.detail_tab=page-1; name=L"detail-"+std::to_wstring(page-1);}
+                    if (status_only) {
+                        using I = pulse::l10n::StringId;
+                        using N = ExtensionStoreView::NoticeKind;
+                        auto& view = vm.settings_store_view;
+                        if (page == 0) {
+                            view.notice = pulse::l10n::Get(I::StoreInstallFailed) + L"\n" +
+                                pulse::l10n::Get(I::StoreErrorSignatureRequired);
+                            view.notice_kind = N::Error;
+                            view.state = ExtensionStoreView::State::Offline;
+                            name = L"signature-failure";
+                        } else if (page == 1) {
+                            view.install_completed = true;
+                            view.pending_restart = true;
+                            name = L"install-success-restart";
+                        } else if (page == 2) {
+                            vm.settings_store_browse = false;
+                            view.pending_restart = true;
+                            name = L"manage-restart";
+                        } else {
+                            view.notice = pulse::l10n::Get(I::ExtensionStorePreparing);
+                            view.pending_restart = true;
+                            view.installed_busy = true;
+                            view.busy = true;
+                            name = L"busy-restart-disabled";
+                        }
+                    }
+                    else if(page==0) name=L"store";
+                    else if(page<=4) {vm.settings_store_view.detail=true; vm.settings_store_view.detail_item=0; vm.settings_store_view.detail_tab=(page-1)&1; name=L"detail-"+std::to_wstring(page-1);}
                     else if(page==5) {vm.settings_store_browse=false;vm.settings_store_installed=true;name=L"installed";}
                     else if(page==6) {vm.settings_store_view.state=ExtensionStoreView::State::Loading;vm.settings_store_view.busy=true;name=L"loading";}
                     else if(page==7) {vm.settings_store_view.state=ExtensionStoreView::State::Failed;vm.settings_store_view.notice=L"Fixture network failure: HTTP 503";name=L"failed";}
                     else if(page==8) {vm.settings_store_view.state=ExtensionStoreView::State::Offline;name=L"offline";}
-                    else if(page==9) {vm.settings_store_view.pending_restart=true;vm.settings_store_view.seven_zip.submenu=true;name=L"restart-submenu";}
-                    else {vm.settings_store_view.items[0].enabled=false;vm.settings_store_view.items[0].settings_package=-1;
-                        vm.settings_store_view.seven_zip.available=false;vm.settings_store_view.detail=page==11;
+                    else if(page==9) {vm.settings_store_view.pending_restart=true;vm.settings_store_view.quick_cards[0].preview_submenu=true;name=L"restart-submenu";}
+                    else if(page<=11) {vm.settings_store_view.items[0].enabled=false;vm.settings_store_view.items[0].settings_package=-1;
+                        vm.settings_store_view.quick_cards[0].available=false;vm.settings_store_view.detail=page==11;vm.settings_store_view.detail_item=0;
                         name=page==11?L"disabled-detail":L"disabled-store";}
+                    else if(page==12||page==13) {vm.settings_store_view.detail=true;vm.settings_store_view.detail_item=1;
+                        vm.settings_store_view.detail_tab=page-12;name=page==12?L"ext-detail-overview":L"ext-detail-about";}
+                    else if(page==15) {vm.settings_store_browse=false;vm.settings_store_installed=true;
+                        vm.settings_store_view.developer_mode=true;vm.settings_store_view.pending_restart=true;
+                        InstalledExtensionItem dev;dev.name=L"File columns example";dev.id=L"com.example.file-columns";
+                        dev.version=L"本地构建 · 4800c2a";dev.publisher=L"C:\\Users\\SS\\PulseExtTest\\dev-folders\\file-columns";
+                        dev.status=L"已从文件夹加载";dev.enabled=true;dev.native_code=true;dev.can_uninstall=true;dev.development_index=0;
+                        vm.settings_store_view.installed.push_back(dev);
+                        dev.name=L"broken.dev";dev.id=L"broken.dev";dev.enabled=false;dev.status=L"重启 Pulse 后生效";
+                        dev.notice=L"找不到 manifest 声明的文件：broken.dll";dev.development_index=1;
+                        vm.settings_store_view.installed.push_back(dev);name=L"installed-dev";}
+                    else {vm.settings_store_view.detail=true;vm.settings_store_view.detail_item=1;vm.settings_store_view.detail_tab=0;
+                        vm.settings_store_view.items[1].installed=false;vm.settings_store_view.items[1].enabled=false;
+                        vm.settings_store_view.items[1].settings_package=-1;vm.settings_store_view.items[1].button_label=L"下载并安装";
+                        name=L"ext-detail-uninstalled";}
                     const auto theme=MakeTheme(dark,D2D1::ColorF(0x527d70));
                     auto* dc=comp.Dc(); dc->BeginDraw(); dc->Clear(theme.bg);
                     renderer.Render(vm,D2D1::RectF(0,0,static_cast<float>(width),static_cast<float>(height)),theme);

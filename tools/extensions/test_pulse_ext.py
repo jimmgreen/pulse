@@ -1010,5 +1010,20 @@ class CliTests(unittest.TestCase):
             self.assertEqual(res_bad["error"]["code"], "abi_exports_missing")
 
 
+class ManifestActivationTests(unittest.TestCase):
+    def check(self, extra):
+        import offline_manifest
+        text = '{"apiVersion":1,"id":"sample.activation","name":"Activation"' + extra + "}"
+        return offline_manifest.validate_manifest_bytes(text.encode("utf-8"))
+
+    def test_activation_values(self):
+        self.assertTrue(self.check(',"activation":"startup"')["valid"])
+        self.assertTrue(self.check(',"activation":"onDemand"')["valid"])
+        for bad in ('"eager"', "true", '""'):
+            result = self.check(',"activation":' + bad)
+            self.assertFalse(result["valid"], bad)
+            self.assertIn("activation", result["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

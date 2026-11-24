@@ -119,7 +119,7 @@
         "binaryFreezeCandidate": true
       },
       "experimental": {
-        "count": 8,
+        "count": 16,
         "interfaces": [
           "pulse.ui.model",
           "pulse.ui.events",
@@ -128,7 +128,15 @@
           "pulse.icons",
           "pulse.diagnostics",
           "pulse.pickers",
-          "pulse.workbench"
+          "pulse.workbench",
+          "pulse.tray",
+          "pulse.search",
+          "pulse.shell",
+          "pulse.associations",
+          "pulse.vfs",
+          "pulse.columns",
+          "pulse.statusbar",
+          "pulse.fileevents"
         ],
         "binaryFreezeCandidate": false
       }

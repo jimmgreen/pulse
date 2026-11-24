@@ -4,7 +4,9 @@
 #include "worker_budget.h"
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -44,6 +46,45 @@ bool AbsoluteFilePath(std::wstring_view path) {
     return share != std::wstring_view::npos && share > 0 && share + 1 < path.size() &&
         path.substr(0, share) != L"." && path.substr(0, share) != L"..";
 }
+std::wstring LowerExtension(const std::wstring& path) {
+    const auto dot = path.find_last_of(L'.');
+    const auto slash = path.find_last_of(L"\\/");
+    if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash)) return {};
+    auto extension = path.substr(dot);
+    for (auto& c : extension) if (c >= L'A' && c <= L'Z') c += L'a' - L'A';
+    return extension;
+}
+// Box filter of premultiplied BGRA down to `edge` on the longer side; compacts the stride.
+void ScaleToEdge(const uint8_t* source, uint32_t width, uint32_t height, uint32_t stride,
+                 uint32_t edge, std::vector<uint8_t>& out, uint32_t& out_width, uint32_t& out_height) {
+    const uint32_t longest = (std::max)(width, height);
+    if (longest <= edge) {
+        out_width = width; out_height = height;
+        out.resize(static_cast<size_t>(width) * height * 4);
+        for (uint32_t y = 0; y < height; ++y)
+            std::memcpy(out.data() + static_cast<size_t>(y) * width * 4, source + static_cast<size_t>(y) * stride, width * 4u);
+        return;
+    }
+    out_width = (std::max)(1u, static_cast<uint32_t>(static_cast<uint64_t>(width) * edge / longest));
+    out_height = (std::max)(1u, static_cast<uint32_t>(static_cast<uint64_t>(height) * edge / longest));
+    out.resize(static_cast<size_t>(out_width) * out_height * 4);
+    for (uint32_t y = 0; y < out_height; ++y) {
+        const uint32_t y0 = static_cast<uint32_t>(static_cast<uint64_t>(y) * height / out_height);
+        const uint32_t y1 = (std::max)(y0 + 1, static_cast<uint32_t>(static_cast<uint64_t>(y + 1) * height / out_height));
+        for (uint32_t x = 0; x < out_width; ++x) {
+            const uint32_t x0 = static_cast<uint32_t>(static_cast<uint64_t>(x) * width / out_width);
+            const uint32_t x1 = (std::max)(x0 + 1, static_cast<uint32_t>(static_cast<uint64_t>(x + 1) * width / out_width));
+            uint64_t sums[4]{};
+            for (uint32_t sy = y0; sy < y1; ++sy) {
+                const uint8_t* row = source + static_cast<size_t>(sy) * stride;
+                for (uint32_t sx = x0; sx < x1; ++sx) for (size_t c = 0; c < 4; ++c) sums[c] += row[sx * 4 + c];
+            }
+            const uint64_t count = static_cast<uint64_t>(x1 - x0) * (y1 - y0);
+            uint8_t* pixel = out.data() + (static_cast<size_t>(y) * out_width + x) * 4;
+            for (size_t c = 0; c < 4; ++c) pixel[c] = static_cast<uint8_t>((sums[c] + count / 2) / count);
+        }
+    }
+}
 std::string Utf8(const std::wstring& text) {
     if (text.empty() || text.size() > 32768 || text.find(L'\0') != std::wstring::npos) throw std::invalid_argument("path");
     int count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
@@ -54,7 +95,28 @@ std::string Utf8(const std::wstring& text) {
 }
 }
 struct PreviewsAdapter::State : std::enable_shared_from_this<State> {
-    struct Provider { uint64_t id; std::wstring extension; PulsePreviewFn callback; void* user; bool retiring = false; };
+    // Thumbnail calls in flight for one provider (Unregister reports STATE until they return).
+    struct ThumbSlot { std::atomic<int> active{0}; std::atomic<bool> retired{false}; };
+    struct Provider {
+        uint64_t id; std::wstring extension; PulsePreviewFn callback; void* user; bool retiring = false;
+        std::shared_ptr<ThumbSlot> thumb;  // set when registered with PULSE_PREVIEW_PROVIDER_THUMBNAIL
+    };
+    struct ThumbEntry {
+        std::weak_ptr<State> state;
+        uint64_t id = 0;
+        std::wstring extension;
+        PulsePreviewFn callback = nullptr;
+        void* user = nullptr;
+        std::shared_ptr<ThumbSlot> slot;
+        std::string package_id;
+    };
+    // Unlike `registry` (owner UI thread only) this one is read from thumbnail threads.
+    static inline std::mutex thumb_mutex;
+    static inline std::vector<ThumbEntry> thumbs;
+    static void RemoveThumb(uint64_t id) {
+        std::lock_guard lock(thumb_mutex);
+        std::erase_if(thumbs, [id](const ThumbEntry& entry) { return entry.id == id || entry.state.expired(); });
+    }
     struct Job {
         std::wstring path;
         std::string utf8;
@@ -68,7 +130,12 @@ struct PreviewsAdapter::State : std::enable_shared_from_this<State> {
         std::mutex mutex;
         std::shared_ptr<PreviewResult> result;
         PulseStatus error = PULSE_ERROR_STATE;
-        static uint32_t PULSE_CALL Cancelled(void* context) { return static_cast<Job*>(context)->cancelled.load() ? 1u : 0u; }
+        std::function<bool()> poll;  // thumbnail jobs: closed / retired / caller cancelled
+        static uint32_t PULSE_CALL Cancelled(void* context) {
+            auto& job = *static_cast<Job*>(context);
+            if (job.cancelled.load()) return 1u;
+            try { return job.poll && job.poll() ? 1u : 0u; } catch (...) { return 1u; }
+        }
         static PulseStatus PULSE_CALL Publish(void* context, const PulsePreviewResult* source) {
             auto& job = *static_cast<Job*>(context);
             if (job.cancelled || GetCurrentThreadId() != job.worker) return PULSE_ERROR_STATE;
@@ -115,7 +182,7 @@ struct PreviewsAdapter::State : std::enable_shared_from_this<State> {
                         if (pixel[0] > pixel[3] || pixel[1] > pixel[3] || pixel[2] > pixel[3]) return PULSE_ERROR_ARGUMENT;
                     }
                 } else if (source->kind == PULSE_PREVIEW_UI_MODEL) {
-                    if (!source->model || source->model->size < sizeof(PulseUiModelTree)) return PULSE_ERROR_ARGUMENT;
+                    if (!source->model || source->model->size < PULSE_UI_MODEL_TREE_SIZE_V1) return PULSE_ERROR_ARGUMENT;
                     if (source->model->command_count) return PULSE_ERROR_UNAVAILABLE;
                     auto model = std::make_shared<UiTree>();
                     std::set<std::string> commands;
@@ -183,6 +250,7 @@ struct PreviewsAdapter::State : std::enable_shared_from_this<State> {
             if (job->notify) InvalidateRect(job->notify, nullptr, FALSE);
         }
         for (auto& weak : running) if (auto job = weak.lock()) job->cancelled = true;
+        for (auto& [id, provider] : providers) if (provider.thumb) { provider.thumb->retired = true; RemoveThumb(id); }
         surfaces.clear(); providers.clear();
     }
     void StartWithPermit(const std::shared_ptr<Job>& job, WorkerPermit permit) {
@@ -248,7 +316,10 @@ struct PreviewsAdapter::State : std::enable_shared_from_this<State> {
         if (out) *out = 0;
         try {
             auto* self = static_cast<State*>(context);
-            if (!self || !source || source->size < sizeof(*source) || !source->callback || !out) return PULSE_ERROR_ARGUMENT;
+            constexpr uint32_t size_v1 = static_cast<uint32_t>(offsetof(PulsePreviewProvider, flags));
+            if (!self || !source || source->size < size_v1 || !source->callback || !out) return PULSE_ERROR_ARGUMENT;
+            const uint32_t flags = source->size >= size_v1 + sizeof(uint32_t) ? source->flags : 0u;
+            if (flags & ~static_cast<uint32_t>(PULSE_PREVIEW_PROVIDER_THUMBNAIL)) return PULSE_ERROR_ARGUMENT;
             if (!self->Ready()) return PULSE_ERROR_STATE;
             if (self->providers.size() >= 16) return PULSE_ERROR_UNAVAILABLE;
             auto extension = Wide(source->extension, 32);
@@ -258,7 +329,18 @@ struct PreviewsAdapter::State : std::enable_shared_from_this<State> {
                 for (const auto& [id, provider] : state->providers) { (void)id; if (provider.extension == extension) return PULSE_ERROR_STATE; }
             auto id = next_id.load();
             do { if (id == UINT64_MAX) return PULSE_ERROR_UNAVAILABLE; } while (!next_id.compare_exchange_weak(id, id + 1));
-            self->providers.emplace(id + 1, Provider{id + 1, std::move(extension), source->callback, source->user});
+            std::shared_ptr<ThumbSlot> thumb;
+            if (flags & PULSE_PREVIEW_PROVIDER_THUMBNAIL) {
+                thumb = std::make_shared<ThumbSlot>();
+                ThumbEntry entry;
+                entry.state = self->weak_from_this(); entry.id = id + 1; entry.extension = extension;
+                entry.callback = source->callback; entry.user = source->user; entry.slot = thumb;
+                entry.package_id = self->package_id;
+                std::lock_guard lock(thumb_mutex);
+                std::erase_if(thumbs, [](const ThumbEntry& e) { return e.state.expired(); });
+                thumbs.push_back(std::move(entry));
+            }
+            self->providers.emplace(id + 1, Provider{id + 1, std::move(extension), source->callback, source->user, false, std::move(thumb)});
             *out = id + 1; return PULSE_OK;
         } catch (...) { return PULSE_ERROR_ARGUMENT; }
     }
@@ -269,6 +351,7 @@ struct PreviewsAdapter::State : std::enable_shared_from_this<State> {
         const auto provider = self->providers.find(id);
         if (provider == self->providers.end()) return PULSE_ERROR_STATE;
         provider->second.retiring = true;
+        if (provider->second.thumb) { provider->second.thumb->retired = true; RemoveThumb(id); }
         for (auto it = self->surfaces.begin(); it != self->surfaces.end();) {
             if (it->second->provider.id == id) {
                 it->second->cancelled = true;
@@ -281,6 +364,7 @@ struct PreviewsAdapter::State : std::enable_shared_from_this<State> {
         for (auto& weak : self->running) if (auto job = weak.lock(); job && job->provider.id == id) {
             job->cancelled = true; active = active || !job->done;
         }
+        if (provider->second.thumb && provider->second.thumb->active.load() > 0) active = true;
         if (active) return PULSE_ERROR_STATE;
         self->providers.erase(provider);
         return PULSE_OK;
@@ -375,5 +459,88 @@ PreviewResponse PreviewsAdapter::Request(HWND owner, const std::wstring& path, u
         }
         Cancel(owner, surface); return {};
     } catch (...) { Cancel(owner, surface); return {PreviewStatus::Failed, {}, PULSE_ERROR_ARGUMENT}; }
+}
+bool PreviewsAdapter::ThumbnailAvailable(const std::wstring& path) noexcept {
+    try {
+        if (!AbsoluteFilePath(path)) return false;
+        const auto extension = LowerExtension(path);
+        if (extension.empty()) return false;
+        std::lock_guard lock(State::thumb_mutex);
+        for (const auto& entry : State::thumbs) {
+            if (entry.extension != extension || entry.slot->retired.load()) continue;
+            if (const auto state = entry.state.lock(); state && !state->closed.load()) return true;
+        }
+    } catch (...) {}
+    return false;
+}
+PreviewsAdapter::ThumbnailStatus PreviewsAdapter::Thumbnail(const std::wstring& path, uint64_t modified, uint64_t size,
+    uint32_t pixels, const std::function<bool()>& cancelled, ThumbnailBitmap& out) noexcept {
+    try {
+        out = {};
+        if (!pixels || pixels > 4096 || !AbsoluteFilePath(path)) return ThumbnailStatus::NotHandled;
+        const auto extension = LowerExtension(path);
+        if (extension.empty()) return ThumbnailStatus::NotHandled;
+        State::ThumbEntry entry;
+        std::shared_ptr<State> state;
+        {
+            std::lock_guard lock(State::thumb_mutex);
+            for (const auto& candidate : State::thumbs) {
+                if (candidate.extension != extension || candidate.slot->retired.load()) continue;
+                auto alive = candidate.state.lock();
+                if (!alive || alive->closed.load()) continue;
+                entry = candidate; state = std::move(alive); break;
+            }
+        }
+        if (!state) return ThumbnailStatus::NotHandled;
+        const auto utf8 = Utf8(path);
+        const auto stop = [&]() -> bool {
+            return state->closed.load() || entry.slot->retired.load() || (cancelled && cancelled());
+        };
+        // One of the session's provider slots and a global preview permit, as for previews.
+        WorkerPermit permit;
+        const auto until = GetTickCount64() + 2000;
+        for (;;) {
+            if (stop()) return ThumbnailStatus::Failed;
+            unsigned current = state->workers.load();
+            if (current < kMaxSessionPreviewWorkers && state->workers.compare_exchange_weak(current, current + 1)) {
+                permit = GlobalPreviewWorkerPool().TryAcquire();
+                if (permit) break;
+                --state->workers;
+            }
+            if (GetTickCount64() >= until) return ThumbnailStatus::Busy;
+            Sleep(15);
+        }
+        ++entry.slot->active;
+        struct Release {
+            State& state; State::ThumbSlot& slot; WorkerPermit& permit;
+            ~Release() { --slot.active; --state.workers; permit.Release(); state.NotifyWake(); }
+        } release{*state, *entry.slot, permit};
+        // Re-check after taking the slot: Close / Unregister may have just retired it.
+        if (stop()) return ThumbnailStatus::Failed;
+        auto job = std::make_shared<State::Job>();
+        job->path = path; job->utf8 = utf8; job->modified = modified; job->size = size; job->pixels = pixels;
+        job->provider = State::Provider{entry.id, entry.extension, entry.callback, entry.user};
+        job->started = true; job->worker = GetCurrentThreadId();
+        job->poll = stop;
+        PulseStatus status = PULSE_ERROR_STATE;
+        {
+            const crash_guard::CallScope call_scope(entry.package_id.c_str());
+            PulsePreviewRequest request{sizeof(request), {job->utf8.data(), static_cast<uint32_t>(job->utf8.size())},
+                modified, size, pixels, job.get(), State::Job::Cancelled, State::Job::Publish, PULSE_PREVIEW_PURPOSE_THUMBNAIL};
+            try { status = entry.callback(entry.user, &request); } catch (...) { status = PULSE_ERROR_STATE; }
+        }
+        job->cancelled = true;  // late publish calls from leaked threads are refused
+        job->done = true;
+        std::shared_ptr<PreviewResult> result;
+        { std::lock_guard lock(job->mutex); result = job->result; }
+        if (status != PULSE_OK || !result || result->kind != PULSE_PREVIEW_BITMAP || stop())
+            return ThumbnailStatus::Failed;
+        ScaleToEdge(result->pixels.data(), result->width, result->height, result->stride, pixels,
+                    out.pixels, out.width, out.height);
+        return ThumbnailStatus::Ready;
+    } catch (...) {
+        out = {};
+        return ThumbnailStatus::Failed;
+    }
 }
 }

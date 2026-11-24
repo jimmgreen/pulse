@@ -13,13 +13,14 @@ High-density reference for AI coding agents (Antigravity, Claude Code, Cursor, C
 `tools/extensions/pulse_ext.py` works **100% offline** (no `pulse.exe` GUI required) and **auto-discovers** MSVC `vcvars64.bat`, `cmake`, and `ninja` via `vswhere.exe`. Run from the repository root or extracted SDK root:
 
 ```powershell
-# 1. Scaffold from one of the 8 packable templates (never overwrites existing files)
-python tools/extensions/pulse_ext.py --json new C:/Work/my-plugin --id com.acme.my-plugin --name "Acme Plugin" --template inspector
+# 1. Scaffold from one of the 11 packable templates (default: quickstart; never overwrites existing files)
+python tools/extensions/pulse_ext.py --json new C:/Work/my-plugin --id com.acme.my-plugin --name "Acme Plugin" --template quickstart
 
 # 2. Build x64 DLL (auto-discovers MSVC vcvars64.bat + CMake + Ninja; zero pre-activated prompt needed)
 python tools/extensions/pulse_ext.py --json build C:/Work/my-plugin --config Release
 
 # 3. Smoke-test headlessly (<1s): validates manifest, PE64 exports, ABI lifecycle, commands & clean unload
+#    (the Windows SDK zip ships bin/pulse_plugin_harness.exe, so no Pulse repository build is needed)
 python tools/extensions/pulse_ext.py --json test C:/Work/my-plugin --smoke-commands --strict-resources
 
 # 4. Stage: bind DLL (+ optional --file sidecars) SHA-256 into manifest, pack .pulse-ext, and verify
@@ -34,7 +35,7 @@ python tools/extensions/pulse_ext.py --json enable com.acme.my-plugin --store C:
 
 ### Equivalent MCP Server Loop (`tools/extensions/native_author_mcp.py`)
 
-1. `native_sdk_describe` — inspect interfaces, `templates` (8 packable), `abiSamples`, and `referenceSamples` (`archive`, `sandboxed-worker`).
+1. `native_sdk_describe` — inspect interfaces, `templates` (11 packable), `abiSamples`, and `referenceSamples` (`archive`, `sandboxed-worker`).
 2. `native_project_create` — scaffold `projects/<name>` with collision-free `id` and CMake target names.
 3. `native_project_build` — auto-discover MSVC/CMake/Ninja and compile (`Release`, `RelWithDebInfo`, or `Debug`).
 4. `native_plugin_test` — run offline manifest + PE64 checks and headless lifecycle/command smoke tests (`pulse_plugin_harness.exe`).
@@ -43,10 +44,18 @@ python tools/extensions/pulse_ext.py --json enable com.acme.my-plugin --store C:
 
 ---
 
+### Activation (when `OnStart` runs)
+
+The host activates a package on first use of a `contributes.commands` entry, its settings page, or a preview/thumbnail it may serve. Packages that declare **no** `contributes.commands` (status items, columns, badges, folder/selection/file-operation hooks, or commands registered only at runtime) are activated ~0.4 s after each main window opens; so are packages that declare the `context.events` resource, even with static commands. A package that declares static commands **and** needs status items, columns or badges from the start (without `context.events`) must set the manifest root field `"activation": "startup"`; `"onDemand"` keeps a commandless package lazy.
+
+### Localized strings (`strings.tsv`)
+
+Put user-visible text in `<project>/strings.tsv` (UTF-8, tab-separated, header `key	zh-CN	zh-TW	en`; `zh-CN` required, empty cells fall back to it; placeholders `{0}`..`{9}` must match across languages). `build`/`dev` regenerate `strings.gen.hpp` automatically; `pulse_ext.py --json strings <project> --check` reports `strings_stale` (exit 1) and malformed tables fail with `invalid_strings` (exit 2, with the line number). Use `strings::Key()` / `strings::Key(a, b)` (returns `LocalText`) instead of inline `Tr(...)`; never edit the generated header.
+
 ## 2. C ABI Golden Rules (Non-Negotiable)
 
 1. **Required exports**: Every primary plugin DLL must declare `PULSE_PLUGIN_SDK_PREVIEW()` at file scope (exports `PulsePluginSdkPreview` returning `3`) and `extern "C" __declspec(dllexport) PulseStatus PULSE_CALL PulsePluginEntryV1(const PulseHostV1* host, PulsePluginV1* out)`.
-2. **Never throw C++ exceptions across `PULSE_CALL` boundaries**: Wrap every callback (`activate`, `deactivate`, `destroy`, command/task/preview/data/event callbacks) in `try { ... } catch (...) { return PULSE_ERROR_INTERNAL; }`, or use the RAII wrappers in `pulse/client.hpp` (`CommandRegistration`, `TaskGroup`, `DispatchQueue`, `Subscription`).
+2. **Never throw C++ exceptions across `PULSE_CALL` boundaries**: Wrap every callback (`activate`, `deactivate`, `destroy`, command/task/preview/data/event callbacks) in `try { ... } catch (...) { return PULSE_ERROR_INTERNAL; }`, or use the RAII wrappers in `pulse/client.hpp` (`CommandRegistration`, `TaskGroup`, `DispatchQueue`, `Subscription`). Simplest: derive from `pulse::sdk::App` in `pulse/app.hpp` and finish the file with `PULSE_APP(YourApp)`; it writes the entry points, catches every exception at the ABI and tears everything down on deactivate.
 3. **Strict `size` / `version` negotiation**: Check `host != nullptr && out != nullptr && host->size >= sizeof(PulseHostV1) && host->abi_version == PULSE_ABI_VERSION_1` and `out->size >= sizeof(PulsePluginV1)`. Set `out->size = sizeof(PulsePluginV1)` and initialize every queried descriptor's `.size = sizeof(...)` before calling host functions.
 4. **Borrowed `PulseStringView` lifetime**: Every `PulseStringView` (`{const char* data, size_t size}`, UTF-8, **not guaranteed NUL-terminated**) passed into a plugin callback is **borrowed only until that callback returns**. Copy into `std::string` before capturing in async tasks or storing in plugin state. Conversely, views passed *to* synchronous-copy host APIs (`model.create`, `data.publish`, `tasks.report`, `preview->publish`) need only outlive that call.
 5. **No cross-CRT ownership**: Never `free` / `delete` memory allocated by the host, and never pass `std::string` / `std::vector` across the C ABI.
@@ -91,7 +100,13 @@ python tools/extensions/pulse_ext.py --json enable com.acme.my-plugin --store C:
 
 ## 4. Packable Templates vs Reference Samples
 
-- **9 Packable `new` Templates** (`examples/native/catalog.json`):
+- **11 Packable `new` Templates** (`examples/native/catalog.json`):
+  - `quickstart` (default) — `pulse/app.hpp` + `pulse/kit.hpp`: commands, Pulse-styled dialog, background task, auto-saving settings page, zh-CN/zh-TW/en text that follows the host language. Start here unless a more specific template fits.
+  - `file-columns` — extra Details columns and icon badges (`pulse.columns`, experimental): `AddColumn` / `AddBadge` callbacks on a host worker thread, tones, `RefreshColumns`, retitle on language change.
+  - Status bar items (`pulse.statusbar`, experimental, no template): `App::AddStatusItem` / `UpdateStatusItem` / `SetStatusItemVisible` / `RemoveStatusItem` in `pulse/app.hpp`; up to 2 per package, text and/or icon, tone, tooltip, optional `on_click` on the UI thread; removed on stop.
+  - Toolbar buttons: mark a command with `PULSE_COMMAND_TOOLBAR` (manifest `"toolbar": true`, `Command(...).Toolbar()`); the host pins it once on first sight (max 2 per package, not while hidden); a user unpin is final.
+  - Read-only hooks: `App::OnFolderChange` / `OnSelectionChange` (`pulse.context`, `FolderContext`), `CurrentFolder()` / `CurrentSelection()`, and `OnFileOperation(fn, kinds)` (`pulse.fileevents`, experimental: finished copy/move/rename/delete/create/restore, max 8 subscriptions, 1024 items per event). UI thread; removed on stop.
+  - Previews and thumbnails: `App::AddPreview(".ext", fn, flags)` (`pulse.preview`, `PreviewContext`: `Path()`, `Pixels()`, `Thumbnail()`, `Cancelled()`, `PublishBitmap` / `PublishArchive` / `PublishModel`). `fn` runs on a host worker (max 2 at once, no UI calls). `PULSE_PREVIEW_PROVIDER_THUMBNAIL` also feeds grid thumbnails (bitmap only; host scales down and caches; failure falls back to the system thumbnail).
   - `archive-dialog` — 7-Zip-style host dialog (`pulse.dialogs` V2: heading, icon, subject card, footnote), derived form states, folder picker via `pulse.pickers`.
   - `inspector` — directory stats, CAS settings (`pulse.resources`), audit view.
   - `rename-panel` — two-phase rename plan + host confirmation (`pulse.files`).
@@ -117,4 +132,5 @@ python tools/extensions/pulse_ext.py --json enable com.acme.my-plugin --store C:
 | `plugin_test_failed` (`missingResourceDeclarations`) | Plugin queried `pulse.tasks` / `pulse.context` / `pulse.files` without declaring matching `resources` | Add the missing permission string(s) from Section 3 to `manifest.json` `resources`. |
 | `plugin_test_failed` (`unloadClean: false`) | Detached thread, unreleased `TaskGroup` / open file handle, or `LoadLibrary` cycle pinning DLL | Join threads in `deactivate`/`destroy`, call `tasks.Close()` / `commands.clear()`, close handles before `destroy` returns. |
 | `PULSE_ERROR_INVALID_ARGUMENT` on `model.create` | `Stack`/`ScrollView` node given `.text`, or `TextInput`/`Select` missing accessible `.text` label | Remove `.text` from layout containers; always set `.String(&PulseUiModelNode::text, "Label")` on inputs/selects. |
+| `extras(...)`/`padding`/`tooltip`/`pointerState` rejected | `Padding` on a non-container, `Tooltip` on a container, `PointerState` off a Canvas or undeclared, or an extra naming a missing node ID | Padding only on `VStack`/`HStack`/`Grid`/`Card`; tooltips on controls; declare the pointer state key with `ModelTree::State`. Prefer `ModelTree::Build`, which also keeps the tree at `PULSE_UI_MODEL_TREE_SIZE_V1` when no extras are used. |
 | Sidecar `.exe` / `.dll` missing after install | Helper binary not bound in `manifest.json` `native.files` | Pass `--file path/to/worker.exe` to `pulse_ext.py native-manifest` (or `files=[...]` in `native_package_stage`). |

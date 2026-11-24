@@ -88,6 +88,28 @@ struct IconsAdapter::State {
         *out_id = *resolved;
         return PULSE_OK;
     }
+
+    static PulseStatus PULSE_CALL ResolveIcon(void* context,
+                                              PulseStringView token,
+                                              PulseIconId* out_id) noexcept {
+        if (out_id) *out_id = 0;
+        auto* self = static_cast<State*>(context);
+        if (!self || !self->CheckThread()) return PULSE_ERROR_STATE;
+        if (!out_id || !token.data || token.length == 0 || token.length > 136) {
+            return PULSE_ERROR_ARGUMENT;
+        }
+        std::string_view sv(token.data, token.length);
+        if (sv.starts_with("icon:")) sv.remove_prefix(5);
+        if (sv.empty()) return PULSE_ERROR_ARGUMENT;
+        try {
+            const auto resolved = icons::GlobalRegistry().ResolveName(self->package_id, sv);
+            if (!resolved) return PULSE_ERROR_UNAVAILABLE;
+            *out_id = *resolved;
+            return PULSE_OK;
+        } catch (...) {
+            return PULSE_ERROR_UNAVAILABLE;
+        }
+    }
 };
 
 IconsAdapter::IconsAdapter(std::string package_id, std::function<bool()> live)
@@ -101,17 +123,32 @@ IconsAdapter::~IconsAdapter() {
 }
 
 PulseStatus IconsAdapter::Query(uint32_t version, void* out, uint32_t size) const noexcept {
-    if (version != PULSE_ICONS_VERSION_1) return PULSE_ERROR_ABI;
+    if (version != PULSE_ICONS_VERSION_1 && version != PULSE_ICONS_VERSION_2) return PULSE_ERROR_ABI;
     if (!state_ || !state_->CheckThread()) return PULSE_ERROR_STATE;
-    if (!out || size < sizeof(PulseIconsV1)) return PULSE_ERROR_ARGUMENT;
-    const PulseIconsV1 table{
-        sizeof(PulseIconsV1),
-        PULSE_ICONS_VERSION_1,
+    if (version == PULSE_ICONS_VERSION_1) {
+        if (!out || size < sizeof(PulseIconsV1)) return PULSE_ERROR_ARGUMENT;
+        const PulseIconsV1 table{
+            sizeof(PulseIconsV1),
+            PULSE_ICONS_VERSION_1,
+            state_.get(),
+            State::RegisterIcon,
+            State::UpdateIcon,
+            State::UnregisterIcon,
+            State::ResolveBuiltin,
+        };
+        std::memcpy(out, &table, sizeof(table));
+        return PULSE_OK;
+    }
+    if (!out || size < sizeof(PulseIconsV2)) return PULSE_ERROR_ARGUMENT;
+    const PulseIconsV2 table{
+        sizeof(PulseIconsV2),
+        PULSE_ICONS_VERSION_2,
         state_.get(),
         State::RegisterIcon,
         State::UpdateIcon,
         State::UnregisterIcon,
         State::ResolveBuiltin,
+        State::ResolveIcon,
     };
     std::memcpy(out, &table, sizeof(table));
     return PULSE_OK;

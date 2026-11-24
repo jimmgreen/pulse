@@ -48,7 +48,7 @@ def inventory(include):
                     if not simple:
                         raise ValueError('Unsupported field: ' + declaration)
                     for field in simple[1].split(','):
-                        member = re.fullmatch(r'\s*\**\s*(\w+)\s*', field)
+                        member = re.fullmatch(r'\s*\**\s*(\w+)(?:\[\d+\])?\s*', field)
                         if not member:
                             raise ValueError('Unsupported field: ' + declaration)
                         fields.append(member[1])

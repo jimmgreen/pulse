@@ -188,7 +188,7 @@ template<class Check> void TestBuilder(Check check) {
     tree = ModelTree(ModelNode(PULSE_UI_MODEL_TEXT, "replacement"));
     ModelTree moved = std::move(copied);
     const auto& built = moved.Build();
-    check(built.size == sizeof(built) && Equals(built.root->id, "root") && built.state_count == 1 && Equals(built.states[0].value, "value") && built.command_count == 1 && Equals(built.commands[0], "run"), "builder owns temporary strings across copy move and rebuild");
+    check(built.size == PULSE_UI_MODEL_TREE_SIZE_V1 && built.extra_count == 0 && Equals(built.root->id, "root") && built.state_count == 1 && Equals(built.states[0].value, "value") && built.command_count == 1 && Equals(built.commands[0], "run"), "builder owns temporary strings across copy move and rebuild");
     const auto& node = *built.root;
     check(node.text.present == 1 && node.text.value.length == 0 && node.enabled.present == 1 && node.enabled.value == 0 && node.gap.present == 1 && node.gap.value == 0 && node.placeholder.present == 0, "explicit empty string false and zero differ from absent fields");
     const auto& table = node.children.data[0];

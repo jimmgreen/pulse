@@ -4,8 +4,22 @@ import hashlib
 import json
 import re
 from pathlib import Path, PurePosixPath
+import struct
 import subprocess
 import zipfile
+
+# The one prebuilt tool a source SDK may carry (bundle_native_sdk.py --harness).
+PREBUILT_ALLOWED = frozenset({"bin/pulse_plugin_harness.exe"})
+PREBUILT_MAX_BYTES = 16 * 1024 * 1024
+
+
+def _x64_executable(data):
+    if len(data) < 64 or data[:2] != b"MZ":
+        return False
+    offset = struct.unpack_from("<I", data, 60)[0]
+    return (offset + 24 <= len(data) and data[offset:offset + 4] == b"PE\0\0" and
+            struct.unpack_from("<H", data, offset + 4)[0] == 0x8664 and
+            not struct.unpack_from("<H", data, offset + 22)[0] & 0x2000)
 
 
 def extract(archive, destination):
@@ -15,13 +29,22 @@ def extract(archive, destination):
     with zipfile.ZipFile(archive) as source:
         infos = source.infolist()
         names = [entry.filename for entry in infos]
-        if len(names) != len(set(names)) or sum(entry.file_size for entry in infos) > 4 * 1024 * 1024:
+        if len(names) != len(set(names)):
             raise ValueError("Duplicate names or excessive SDK size")
         for entry in infos:
             name = PurePosixPath(entry.filename)
             if name.is_absolute() or ".." in name.parts or "\\" in entry.filename or ":" in entry.filename or entry.is_dir() or (entry.external_attr >> 16) & 0o170000 == 0o120000:
                 raise ValueError("Unsafe archive entry")
+        if "native-sdk-manifest.json" not in names or source.getinfo("native-sdk-manifest.json").file_size > 1024 * 1024:
+            raise ValueError("Missing or excessive SDK manifest")
         manifest = json.loads(source.read("native-sdk-manifest.json"))
+        prebuilt = manifest.get("prebuilt", {})
+        if not isinstance(prebuilt, dict) or set(prebuilt) - PREBUILT_ALLOWED:
+            raise ValueError("Unexpected prebuilt SDK content")
+        # Sources stay within 4 MiB; the declared harness has its own bound.
+        if (sum(entry.file_size for entry in infos if entry.filename not in prebuilt) > 4 * 1024 * 1024 or
+                any(entry.file_size > PREBUILT_MAX_BYTES for entry in infos if entry.filename in prebuilt)):
+            raise ValueError("Duplicate names or excessive SDK size")
         if set(names) != set(manifest["files"]) | {"native-sdk-manifest.json"}:
             raise ValueError("Unexpected SDK contents")
         for name, digest in manifest["files"].items():
@@ -37,10 +60,28 @@ def validate(root):
     manifest = json.loads((root / "native-sdk-manifest.json").read_text(encoding="utf-8"))
     if manifest["delivery"] != "source-only" or manifest["hostIncluded"] is not False:
         raise ValueError("Expected source SDK without host")
+    prebuilt = manifest.get("prebuilt", {})
+    if not isinstance(prebuilt, dict) or set(prebuilt) - PREBUILT_ALLOWED or not set(prebuilt) <= set(manifest["files"]):
+        raise ValueError("Unexpected prebuilt SDK content")
+    for name, info in prebuilt.items():
+        data = (root / name).read_bytes()
+        if (not isinstance(info, dict) or info.get("purpose") != "headless-plugin-harness" or
+                info.get("architecture") != "windows-x64" or info.get("bytes") != len(data) or not _x64_executable(data)):
+            raise ValueError("Prebuilt harness is not the declared x64 executable")
     allowed = ("sdk/native/", "examples/native/", "tools/extensions/")
-    authoring_files = {"docs/extensions-sdk-quickstart.md", "docs/native-packages.md", "sdk/native/README.md", "sdk/native/README.md", "sdk/native/README.md", "sdk/native/README.md", "sdk/native/README.md", "sdk/native/README.md", "sdk/native/README.md", "schemas/extensions/manifest.schema.json", "examples/native/catalog.json"}
+    authoring_files = {
+        "docs/extensions-sdk-quickstart.md",
+        "docs/extensions-sdk-lifecycle-and-support.md",
+        "docs/native-packages.md",
+        "sdk/native/README.md",
+        "schemas/extensions/manifest.schema.json",
+        "schemas/extensions/api_metadata.json",
+        "examples/native/catalog.json",
+    }
     for name, digest in manifest["files"].items():
-        if (not name.startswith(allowed) and name not in authoring_files) or PurePosixPath(name).suffix.lower() in (".dll", ".exe", ".lib"):
+        if name in prebuilt:
+            pass
+        elif (not name.startswith(allowed) and name not in authoring_files) or PurePosixPath(name).suffix.lower() in (".dll", ".exe", ".lib"):
             raise ValueError("Private or binary content in source SDK")
         path = (root / name).resolve()
         try:
@@ -68,7 +109,7 @@ def validate(root):
     if not {"sdk/native/include/pulse/ui_data.h", "sdk/native/README.md"}.issubset(manifest["files"]):
         raise ValueError("Missing native data authoring files")
     for name, filename in (("pulse.directories", "directories.h"), ("pulse.context", "context.h"),
-                           ("pulse.fileops", "fileops.h"), ("pulse.ui.mount", "ui_mount.h"), ("pulse.commands", "commands.h"), ("pulse.icons", "icons.h"), ("pulse.dialogs", "dialogs.h"), ("pulse.diagnostics", "diagnostics.h"), ("pulse.pickers", "pickers.h"), ("pulse.workbench", "workbench.h"), ("pulse.preview", "preview.h"), ("pulse.tasks", "tasks.h"), ("pulse.staging", "staging.h"), ("pulse.settings.pages", "settings_pages.h")):
+                           ("pulse.fileops", "fileops.h"), ("pulse.ui.mount", "ui_mount.h"), ("pulse.commands", "commands.h"), ("pulse.icons", "icons.h"), ("pulse.dialogs", "dialogs.h"), ("pulse.diagnostics", "diagnostics.h"), ("pulse.pickers", "pickers.h"), ("pulse.workbench", "workbench.h"), ("pulse.tray", "tray.h"), ("pulse.search", "search.h"), ("pulse.shell", "shell.h"), ("pulse.associations", "associations.h"), ("pulse.vfs", "vfs.h"), ("pulse.columns", "columns.h"), ("pulse.statusbar", "statusbar.h"), ("pulse.fileevents", "fileevents.h"), ("pulse.preview", "preview.h"), ("pulse.tasks", "tasks.h"), ("pulse.staging", "staging.h"), ("pulse.settings.pages", "settings_pages.h")):
         interface = next(item for item in catalog["interfaces"] if item["name"] == name)
         header_path = "sdk/native/include/pulse/" + filename
         if header_path not in manifest["files"]:
@@ -131,6 +172,9 @@ def main():
 #include <pulse/diagnostics.h>
 #include <pulse/pickers.h>
 #include <pulse/workbench.h>
+#include <pulse/tray.h>
+#include <pulse/search.h>
+#include <pulse/shell.h>
 #include <pulse/dispatch.h>
 struct RestoredPacking { char c; uint64_t value; };
 #pragma pack(pop)
@@ -146,6 +190,16 @@ static_assert(offsetof(PulseDialogsV2, subscribe_command) == sizeof(PulseDialogs
 static_assert(alignof(PulseDiagnosticsV1) == 8);
 static_assert(alignof(PulsePickersV1) == 8);
 static_assert(alignof(PulseWorkbenchV1) == 8);
+static_assert(alignof(PulseWorkbenchV2) == 8);
+static_assert(offsetof(PulseWorkbenchV2, show_snack) == offsetof(PulseWorkbenchV1, show_snack));
+static_assert(offsetof(PulseWorkbenchV2, set_clipboard_text) == offsetof(PulseWorkbenchV1, set_clipboard_text));
+static_assert(offsetof(PulseWorkbenchV2, open_search) == sizeof(PulseWorkbenchV1));
+static_assert(alignof(PulseWorkbenchV3) == 8);
+static_assert(offsetof(PulseWorkbenchV3, unsubscribe_appearance) == offsetof(PulseWorkbenchV2, unsubscribe_appearance));
+static_assert(offsetof(PulseWorkbenchV3, query_locale) == sizeof(PulseWorkbenchV2));
+static_assert(alignof(PulseTrayV1) == 8);
+static_assert(alignof(PulseSearchV1) == 8);
+static_assert(alignof(PulseShellV1) == 8);
 static_assert(alignof(PulseCommandsV2) == 8);
 static_assert(offsetof(PulseCommandsV2, register_command) == offsetof(PulseCommandsV1, register_command));
 static_assert(offsetof(PulseCommandsV2, unregister_command) == offsetof(PulseCommandsV1, unregister_command));

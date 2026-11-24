@@ -2,6 +2,9 @@
 #include "../../common/json_value.h"
 #include "../../common/windows_compat.h"
 #include "ui_model_fixture.h"
+#include "../../../sdk/native/include/pulse/model_builder.hpp"
+#include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -65,14 +68,16 @@ int wmain(int argc, wchar_t **argv) {
         return 2;
     }
     uint32_t selected_type = PULSE_UI_MODEL_COUNT;
+    bool presentation_only = false;
     if (argc == 4) {
         if (std::wstring_view(argv[2]) != L"--type")
             return 2;
+        presentation_only = std::wstring_view(argv[3]) == L"presentation";
         for (const uint32_t type : native_ui_fixture::kSupportedTypes) {
             if (pulse::json::Wide(native_ui_fixture::kExpectedTypeNames[type]) == argv[3])
                 selected_type = type;
         }
-        if (selected_type == PULSE_UI_MODEL_COUNT)
+        if (selected_type == PULSE_UI_MODEL_COUNT && !presentation_only)
             return 2;
     }
     const std::filesystem::path output(argv[1]);
@@ -112,7 +117,7 @@ int wmain(int argc, wchar_t **argv) {
             return 1;
         }
         for (const uint32_t type : native_ui_fixture::kSupportedTypes) {
-            if (selected_type != PULSE_UI_MODEL_COUNT && type != selected_type)
+            if (presentation_only || (selected_type != PULSE_UI_MODEL_COUNT && type != selected_type))
                 continue;
             native_ui_fixture::Model fixture(type);
             const std::string name(native_ui_fixture::kExpectedTypeNames[type]);
@@ -179,6 +184,98 @@ int wmain(int argc, wchar_t **argv) {
             }
             check(ui.close(ui.context, panel) == PULSE_OK, name + ": model interface closes panel");
         }
+        if (presentation_only || selected_type == PULSE_UI_MODEL_COUNT) {
+            // Presentation extras on the real renderer: type ramp, tones, padding, tooltip, canvas pointer.
+            using pulse::sdk::CanvasBuilder;
+            using pulse::sdk::ModelNode;
+            using pulse::sdk::ModelTree;
+            auto tree = ModelTree(ModelNode::VStack("root", {
+                ModelNode::HStack("crumbs", {ModelNode::Crumb("c1", "Home", "go"), ModelNode::Crumb("c2", "Archives", "go"),
+                                             ModelNode::Crumb("c3", "2026", "go", true)}, 4),
+                ModelNode::Card("card", {}, {
+                    ModelNode::Label("title", "Archive health", "title"),
+                    ModelNode::Label("subtitle", "Last verified 2 minutes ago", "subtitle", "secondary"),
+                    ModelNode::Label("ok", "All 14 volumes passed", "bodyStrong", "success"),
+                    ModelNode::Label("warn", "1 volume is close to its size limit", "body", "warning"),
+                    ModelNode::Label("hash", "sha256  3f1a9c0b7e44d2a1", "code", "secondary"),
+                    ModelNode::HStack("actions", {ModelNode::Button("verify", "Verify again", "go", "primary")
+                                                      .Tooltip("Re-hash every volume").MaxWidth(160)}),
+                }, 6).Padding(24),
+                CanvasBuilder("chart").ViewBox(100, 40).Rect(2, 2, 96, 36, 6, "card", "border", 1)
+                    .Rect(10, 10, 30, 20, 4, "accent").Text(50, 14, "click me", "secondary", "caption")
+                    .PointerState("pointer").Command("go").MinHeight(96).Bordered().BuildNode(),
+                ModelNode::StatusBar("status", "14 volumes", "1 warning", "Ready"),
+            })).State("pointer", "").Command("go");
+            uint64_t panel = 0;
+            const auto created = model.create(model.context, {"Presentation", 12}, &tree.Build(), &panel);
+            check(created == PULSE_OK && panel, "presentation: create panel with extras");
+            if (created == PULSE_OK && panel) {
+                Pump();
+                std::map<std::string, int> events;
+                uint64_t token = 0;
+                check(model.subscribe_command(model.context, panel, {"go", 2}, Command, &events, &token) == PULSE_OK,
+                      "presentation: subscribe canvas command");
+                for (const bool dark : {false, true}) {
+                    const auto path = output / (std::string("presentation-") + (dark ? "dark" : "light") + ".png");
+                    const bool ok = adapter.Snapshot(path.wstring(), dark, 1);
+                    check(ok, std::string("presentation: ") + (dark ? "dark" : "light") + " capture");
+                    if (ok) ++images;
+                }
+                const auto large = output / "presentation-light-150.png";
+                if (adapter.Snapshot(large.wstring(), false, 1.5f)) ++images;
+                const auto read_state = [&](const char *key) {
+                    char buffer[128]{};
+                    uint32_t needed = 0;
+                    const PulseStringView view{key, static_cast<uint32_t>(std::strlen(key))};
+                    if (model.get_state(model.context, panel, view, buffer, sizeof(buffer), &needed) != PULSE_OK)
+                        return std::string("<error>");
+                    return std::string(buffer, needed);
+                };
+                const HWND canvas = adapter.NodeWindow("chart");
+                RECT rc{};
+                if (canvas) GetClientRect(canvas, &rc);
+                const LPARAM centre = MAKELPARAM((rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2);
+                SendMessageW(canvas, WM_MOUSEMOVE, 0, centre);
+                const auto moved = read_state("pointer");
+                float mx = -1, my = -1;
+                const bool parsed_move = sscanf_s(moved.c_str(), "move %f %f", &mx, &my) == 2;
+                check(canvas && parsed_move && std::fabs(mx - 50) <= 1.5f && std::fabs(my - 20) <= 1.5f,
+                      "presentation: hover reports viewBox centre (" + moved + ")");
+                SendMessageW(canvas, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(1, 1));
+                SendMessageW(canvas, WM_LBUTTONUP, 0, MAKELPARAM(1, 1));
+                const auto clicked = read_state("pointer");
+                float cx = -1, cy = -1;
+                const bool parsed_click = sscanf_s(clicked.c_str(), "click %f %f", &cx, &cy) == 2;
+                check(parsed_click && cx >= 0 && cx < 50 && cy >= 0 && cy < 20 && events["go"] == 1,
+                      "presentation: click writes press point then fires command (" + clicked + ")");
+                SendMessageW(canvas, WM_MOUSELEAVE, 0, 0);
+                check(read_state("pointer") == "leave", "presentation: leave reported");
+                // Tooltip: hover the button for longer than the 500 ms delay, then capture the live frame.
+                const HWND button = adapter.NodeWindow("verify");
+                // The real cursor is elsewhere, so TME_LEAVE posts an immediate WM_MOUSELEAVE for this
+                // synthetic hover; drop only that message instead of moving the user's cursor.
+                SendMessageW(button, WM_MOUSEMOVE, 0, MAKELPARAM(10, 10));
+                const auto until = GetTickCount64() + 900;
+                while (GetTickCount64() < until) {
+                    MSG message{};
+                    while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                        if (message.message == WM_MOUSELEAVE && message.hwnd == button)
+                            continue;
+                        TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                    Sleep(15);
+                }
+                // The owner is never shown, so invalidation produces no WM_PAINT; paint the tree host once.
+                if (button)
+                    SendMessageW(GetParent(button), WM_PAINT, 0, 0);
+                const auto tip = output / "presentation-tooltip.png";
+                const bool tip_ok = adapter.SnapshotCurrent(tip.wstring());
+                check(button && tip_ok, "presentation: live frame with tooltip captured");
+                if (tip_ok) ++images;
+                check(ui.close(ui.context, panel) == PULSE_OK, "presentation: close");
+            }
+        }
         adapter.Stop();
     }
     DestroyWindow(owner);
@@ -186,7 +283,7 @@ int wmain(int argc, wchar_t **argv) {
     report.set("passed", passed);
     report.set("failed", failed);
     report.set("images", images);
-    report.set("modelTypes", selected_type == PULSE_UI_MODEL_COUNT ? 27 : 1);
+    report.set("modelTypes", presentation_only ? 0 : selected_type == PULSE_UI_MODEL_COUNT ? 39 : 1);
     report.set("visualReviewRequired", true);
     std::ofstream file(output / "checks.json", std::ios::binary);
     file << pulse::json::Serialize(report) << '\n';

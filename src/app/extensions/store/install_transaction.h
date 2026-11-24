@@ -14,6 +14,9 @@ struct InstallReview {
     bool native_code = false;
     bool currently_enabled = false;
     bool publisher_rotated = false;
+    // Developer mode only: an unsigned local package replaces an installed signed
+    // revision (which stays the rollback target).
+    bool replaces_signed = false;
 };
 struct InstallConsent {
     bool approved = false;
@@ -53,6 +56,7 @@ struct InstallHooks {
     BeforeCommit before_commit;
     std::function<void(const std::filesystem::path&)> before_payload_publish;
     std::function<void(const std::filesystem::path&, unsigned long)> rename_retry;
+    std::function<void(const std::filesystem::path&)> after_temp_write;
 };
 bool CommitInstallWithHooks(const std::filesystem::path& root, const VerifiedPackage& package,
     const InstallReview& review, const InstallConsent& consent,

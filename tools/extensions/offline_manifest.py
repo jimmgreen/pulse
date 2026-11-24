@@ -50,10 +50,37 @@ REMOVED_DECLARATIVE_FIELDS: tuple[str, ...] = (
     "panel",
 )
 
-ALLOWED_ROOT_FIELDS = frozenset({"apiVersion", "id", "name", "resources", "native", "contributes"})
+ALLOWED_ROOT_FIELDS = frozenset({"apiVersion", "id", "name", "resources", "native", "activation", "contributes", "showcase"})
 ALLOWED_NATIVE_FIELDS = frozenset({"version", "architecture", "library", "sha256", "files"})
 ALLOWED_SIDECAR_FIELDS = frozenset({"path", "sha256"})
-ALLOWED_CONTRIBUTES_FIELDS = frozenset({"icons", "commands"})
+ALLOWED_CONTRIBUTES_FIELDS = frozenset({"icons", "commands", "fileHandlers"})
+ALLOWED_FILE_HANDLER_FIELDS = frozenset({
+    "id", "displayName", "verbLabel", "extensions", "command",
+    "action", "iconResource", "fallbackOnUnassociated",
+})
+ALLOWED_SHOWCASE_FIELDS = frozenset({
+    "version", "summary", "description", "category", "publisher", "engine",
+    "license", "homepage", "source", "icon", "iconColor", "tags", "highlights",
+    "quickSettings",
+})
+ALLOWED_QUICK_SETTINGS_FIELDS = frozenset({"title", "readyState", "statusState", "rows", "menuPreview"})
+ALLOWED_QUICK_ROW_FIELDS = frozenset({"title", "description", "controls"})
+ALLOWED_QUICK_CTRL_FIELDS = frozenset({
+    "kind", "state", "command", "label", "width", "options", "disabledWhen", "disabledLabel",
+})
+SHOWCASE_CATEGORIES = frozenset({"archive", "preview", "search", "ai", "files", "utility"})
+FORBIDDEN_ASSOCIATION_EXTENSIONS = frozenset({
+    ".exe", ".com", ".bat", ".cmd", ".msi", ".msp", ".mst", ".scr", ".pif",
+    ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".ps1", ".psm1", ".psd1",
+    ".lnk", ".url", ".reg", ".inf", ".cpl", ".dll", ".sys", ".drv", ".ocx",
+    ".hta", ".jar", ".appref-ms", ".scf", ".shs", ".shb", ".pulse-ext",
+})
+MAX_CONTRIBUTED_FILE_HANDLERS = 32
+MAX_SHOWCASE_SUMMARY_BYTES = 256
+MAX_SHOWCASE_DESCRIPTION_BYTES = 4096
+MAX_SHOWCASE_HIGHLIGHT_BYTES = 160
+MAX_SHOWCASE_TAGS = 12
+MAX_SHOWCASE_HIGHLIGHTS = 8
 ALLOWED_ICON_FIELDS = frozenset({"id", "viewBox", "layers"})
 ALLOWED_ICON_LAYER_FIELDS = frozenset({"path", "stroke", "fill", "closed", "color", "strokeWidth", "opacity"})
 ALLOWED_COMMAND_FIELDS = frozenset({
@@ -68,6 +95,7 @@ ALLOWED_COMMAND_FIELDS = frozenset({
     "separatorAfter",
     "hidden",
     "checked",
+    "toolbar",
     "icon",
     "kinds",
     "minSelection",
@@ -127,7 +155,7 @@ def _is_strict_int(value: object, minimum: int, maximum: int) -> bool:
     return minimum <= value <= maximum
 
 
-def _valid_text(value: object, limit_bytes: int, allow_empty: bool = False) -> bool:
+def _valid_text(value: object, limit_bytes: int, allow_empty: bool = False, allow_newlines: bool = False) -> bool:
     if not isinstance(value, str):
         return False
     encoded = value.encode("utf-8")
@@ -137,11 +165,55 @@ def _valid_text(value: object, limit_bytes: int, allow_empty: bool = False) -> b
         return False
     visible = False
     for b in encoded:
+        if allow_newlines and b in (0x0A, 0x0D):
+            continue
         if b < 0x20 or b == 0x7F:
             return False
         if b != 0x20:
             visible = True
     return visible
+
+
+def _valid_flat_ascii_filename(s: str, reject_manifest: bool = True) -> bool:
+    if not s or len(s.encode("utf-8")) > 128 or s.endswith(".") or ".." in s:
+        return False
+    if not (s[0].isascii() and s[0].isalnum()):
+        return False
+    if not _ID_RE.fullmatch(s):
+        return False
+    lower = s.lower()
+    if reject_manifest and lower in ("manifest.json", "package.json"):
+        return False
+    stem = lower.split(".", 1)[0]
+    if stem in ("con", "prn", "aux", "nul", "clock$", "conin$", "conout$"):
+        return False
+    if len(stem) == 4 and stem[:3] in ("com", "lpt") and "1" <= stem[3] <= "9":
+        return False
+    return True
+
+
+def _valid_icon_resource_spec(value: object) -> bool:
+    if not isinstance(value, str) or not (5 <= len(value) <= 140):
+        return False
+    if "," not in value:
+        return _valid_flat_ascii_filename(value) and value.lower().endswith(".ico")
+    file_part, idx_part = value.split(",", 1)
+    if not _valid_flat_ascii_filename(file_part):
+        return False
+    if not file_part.lower().endswith((".dll", ".exe", ".ico")):
+        return False
+    digits = idx_part[1:] if idx_part.startswith("-") else idx_part
+    return bool(digits) and len(digits) <= 6 and all("0" <= c <= "9" for c in digits)
+
+
+def _valid_http_url(value: object) -> bool:
+    return _valid_text(value, 512, allow_empty=False) and str(value).startswith(("https://", "http://"))
+
+
+def _valid_hex_rgb(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 7 or value[0] != "#":
+        return False
+    return all(c in "0123456789abcdefABCDEF" for c in value[1:])
 
 
 def _valid_id(value: object, limit_bytes: int = MAX_ID_BYTES) -> bool:
@@ -189,20 +261,20 @@ def _valid_sidecar_name(value: object) -> bool:
     return True
 
 
-def _valid_localized_or_plain(value: object, limit_bytes: int, allow_empty: bool) -> bool:
+def _valid_localized_or_plain(value: object, limit_bytes: int, allow_empty: bool, allow_newlines: bool = False) -> bool:
     if value is None:
         return allow_empty
     if isinstance(value, str):
-        return _valid_text(value, limit_bytes, allow_empty=allow_empty)
+        return _valid_text(value, limit_bytes, allow_empty=allow_empty, allow_newlines=allow_newlines)
     if not isinstance(value, dict) or not set(value.keys()).issubset(ALLOWED_LOCALIZED_FIELDS):
         return False
     if "zh" not in value or "en" not in value:
         return False
-    if not _valid_text(value["zh"], limit_bytes, allow_empty=allow_empty):
+    if not _valid_text(value["zh"], limit_bytes, allow_empty=allow_empty, allow_newlines=allow_newlines):
         return False
-    if not _valid_text(value["en"], limit_bytes, allow_empty=allow_empty):
+    if not _valid_text(value["en"], limit_bytes, allow_empty=allow_empty, allow_newlines=allow_newlines):
         return False
-    if "tw" in value and not _valid_text(value["tw"], limit_bytes, allow_empty=allow_empty):
+    if "tw" in value and not _valid_text(value["tw"], limit_bytes, allow_empty=allow_empty, allow_newlines=allow_newlines):
         return False
     return True
 
@@ -390,7 +462,15 @@ def validate_manifest_bytes(data: bytes, path_str: str = "<memory>") -> dict:
     if not set(root.keys()).issubset(ALLOWED_ROOT_FIELDS):
         return {
             "valid": False,
-            "error": "Manifest must be an object containing only apiVersion, id, name, resources, native and contributes",
+            "error": "Manifest must be an object containing only apiVersion, id, name, resources, native, activation, contributes and showcase",
+            "code": "invalid_manifest",
+            "path": path_str,
+        }
+
+    if "activation" in root and root["activation"] not in ("onDemand", "startup"):
+        return {
+            "valid": False,
+            "error": "activation: expected \"onDemand\" or \"startup\"",
             "code": "invalid_manifest",
             "path": path_str,
         }
@@ -446,17 +526,28 @@ def validate_manifest_bytes(data: bytes, path_str: str = "<memory>") -> dict:
                 }
             seen_res.add(res)
 
+    declared_icons: set[str] = set()
+    manifest_id_str = str(root["id"])
+
+    def _valid_manifest_icon_ref(name_obj: object) -> bool:
+        if not isinstance(name_obj, str) or not name_obj:
+            return False
+        if name_obj in declared_icons or name_obj in BUILTIN_ICON_NAMES:
+            return True
+        prefix = manifest_id_str + "/"
+        if name_obj.startswith(prefix) and name_obj[len(prefix):] in declared_icons:
+            return True
+        return False
+
     if "contributes" in root:
         contributes = root["contributes"]
         if not isinstance(contributes, dict) or not set(contributes.keys()).issubset(ALLOWED_CONTRIBUTES_FIELDS):
             return {
                 "valid": False,
-                "error": "contributes: expected only icons and commands",
+                "error": "contributes: expected only icons, commands, and fileHandlers",
                 "code": "invalid_manifest",
                 "path": path_str,
             }
-        declared_icons: set[str] = set()
-        manifest_id_str = str(root["id"])
         if "icons" in contributes:
             icons_list = contributes["icons"]
             if not isinstance(icons_list, list) or len(icons_list) > MAX_CONTRIBUTED_ICONS:
@@ -574,15 +665,102 @@ def validate_manifest_bytes(data: bytes, path_str: str = "<memory>") -> dict:
                             "path": path_str,
                         }
 
-        def _valid_manifest_icon_ref(name_obj: object) -> bool:
-            if not isinstance(name_obj, str) or not name_obj:
-                return False
-            if name_obj in declared_icons or name_obj in BUILTIN_ICON_NAMES:
-                return True
-            prefix = manifest_id_str + "/"
-            if name_obj.startswith(prefix) and name_obj[len(prefix):] in declared_icons:
-                return True
-            return False
+        if "fileHandlers" in contributes:
+            handlers = contributes["fileHandlers"]
+            if not isinstance(handlers, list) or len(handlers) > MAX_CONTRIBUTED_FILE_HANDLERS:
+                return {
+                    "valid": False,
+                    "error": "contributes.fileHandlers: expected an array of at most 32 handlers",
+                    "code": "invalid_manifest",
+                    "path": path_str,
+                }
+            seen_hids: set[str] = set()
+            seen_hexts: set[str] = set()
+            for idx, item in enumerate(handlers):
+                if not isinstance(item, dict) or not set(item.keys()).issubset(ALLOWED_FILE_HANDLER_FIELDS):
+                    return {
+                        "valid": False,
+                        "error": f"contributes.fileHandlers[{idx}]: unexpected or malformed field",
+                        "code": "invalid_manifest",
+                        "path": path_str,
+                    }
+                hid = item.get("id")
+                if not _valid_id(hid, MAX_ID_BYTES) or str(hid) in seen_hids:
+                    return {
+                        "valid": False,
+                        "error": f"contributes.fileHandlers[{idx}]: invalid or duplicate handler id",
+                        "code": "invalid_manifest",
+                        "path": path_str,
+                    }
+                seen_hids.add(str(hid))
+                if not _valid_localized_or_plain(item.get("displayName"), MAX_LABEL_BYTES, allow_empty=False):
+                    return {
+                        "valid": False,
+                        "error": f"contributes.fileHandlers[{idx}]: invalid displayName",
+                        "code": "invalid_manifest",
+                        "path": path_str,
+                    }
+                if "verbLabel" in item and not _valid_localized_or_plain(item.get("verbLabel"), MAX_LABEL_BYTES, allow_empty=False):
+                    return {
+                        "valid": False,
+                        "error": f"contributes.fileHandlers[{idx}]: invalid verbLabel",
+                        "code": "invalid_manifest",
+                        "path": path_str,
+                    }
+                if not _valid_id(item.get("command"), MAX_ID_BYTES):
+                    return {
+                        "valid": False,
+                        "error": f"contributes.fileHandlers[{idx}]: invalid command identifier",
+                        "code": "invalid_manifest",
+                        "path": path_str,
+                    }
+                if "action" in item and item["action"] not in ("command", "preview"):
+                    return {
+                        "valid": False,
+                        "error": f"contributes.fileHandlers[{idx}]: invalid action",
+                        "code": "invalid_manifest",
+                        "path": path_str,
+                    }
+                if "iconResource" in item and not _valid_icon_resource_spec(item["iconResource"]):
+                    return {
+                        "valid": False,
+                        "error": f"contributes.fileHandlers[{idx}]: invalid iconResource",
+                        "code": "invalid_manifest",
+                        "path": path_str,
+                    }
+                if "fallbackOnUnassociated" in item and type(item["fallbackOnUnassociated"]) is not bool:
+                    return {
+                        "valid": False,
+                        "error": f"contributes.fileHandlers[{idx}]: fallbackOnUnassociated must be boolean",
+                        "code": "invalid_manifest",
+                        "path": path_str,
+                    }
+                exts = item.get("extensions")
+                if not isinstance(exts, list) or not (1 <= len(exts) <= 32):
+                    return {
+                        "valid": False,
+                        "error": f"contributes.fileHandlers[{idx}]: extensions must contain 1..32 extensions",
+                        "code": "invalid_manifest",
+                        "path": path_str,
+                    }
+                for ext in exts:
+                    if (not isinstance(ext, str) or not (2 <= len(ext.encode("utf-8")) <= 32) or
+                            not _EXT_RE.fullmatch(ext) or ext.endswith(".") or ".." in ext or
+                            not ext[1].isalnum() or ext in FORBIDDEN_ASSOCIATION_EXTENSIONS):
+                        return {
+                            "valid": False,
+                            "error": f"contributes.fileHandlers[{idx}]: invalid or forbidden extension",
+                            "code": "invalid_manifest",
+                            "path": path_str,
+                        }
+                    if ext in seen_hexts:
+                        return {
+                            "valid": False,
+                            "error": "contributes.fileHandlers: duplicate extension across file handlers",
+                            "code": "invalid_manifest",
+                            "path": path_str,
+                        }
+                    seen_hexts.add(ext)
 
         if "commands" in contributes:
             commands = contributes["commands"]
@@ -634,7 +812,7 @@ def validate_manifest_bytes(data: bytes, path_str: str = "<memory>") -> dict:
                         "code": "invalid_manifest",
                         "path": path_str,
                     }
-                for bool_flag in ("submenu", "primary", "separatorBefore", "separatorAfter", "hidden", "checked"):
+                for bool_flag in ("submenu", "primary", "separatorBefore", "separatorAfter", "hidden", "checked", "toolbar"):
                     if bool_flag in item and type(item[bool_flag]) is not bool:
                         return {
                             "valid": False,
@@ -768,6 +946,141 @@ def validate_manifest_bytes(data: bytes, path_str: str = "<memory>") -> dict:
                             "path": path_str,
                         }
                     seen_shortcuts.add((vk, mods))
+
+    if "showcase" in root:
+        sc = root["showcase"]
+        if not isinstance(sc, dict) or not set(sc.keys()).issubset(ALLOWED_SHOWCASE_FIELDS):
+            return {
+                "valid": False,
+                "error": "showcase: unexpected field",
+                "code": "invalid_manifest",
+                "path": path_str,
+            }
+        if "version" in sc and not _valid_text(sc.get("version"), 64, allow_empty=False):
+            return {"valid": False, "error": "showcase.version: invalid string", "code": "invalid_manifest", "path": path_str}
+        if "summary" in sc and not _valid_localized_or_plain(sc.get("summary"), MAX_SHOWCASE_SUMMARY_BYTES, allow_empty=False):
+            return {"valid": False, "error": "showcase.summary: invalid localized text", "code": "invalid_manifest", "path": path_str}
+        if "description" in sc and not _valid_localized_or_plain(sc.get("description"), MAX_SHOWCASE_DESCRIPTION_BYTES, allow_empty=False, allow_newlines=True):
+            return {"valid": False, "error": "showcase.description: invalid localized text", "code": "invalid_manifest", "path": path_str}
+        if "category" in sc and (not isinstance(sc.get("category"), str) or sc.get("category") not in SHOWCASE_CATEGORIES):
+            return {"valid": False, "error": "showcase.category: unknown category", "code": "invalid_manifest", "path": path_str}
+        if "publisher" in sc and not _valid_text(sc.get("publisher"), MAX_LABEL_BYTES, allow_empty=False):
+            return {"valid": False, "error": "showcase.publisher: invalid string", "code": "invalid_manifest", "path": path_str}
+        if "engine" in sc and not _valid_localized_or_plain(sc.get("engine"), MAX_LABEL_BYTES, allow_empty=False):
+            return {"valid": False, "error": "showcase.engine: invalid localized text", "code": "invalid_manifest", "path": path_str}
+        if "license" in sc and not _valid_text(sc.get("license"), MAX_LABEL_BYTES, allow_empty=False):
+            return {"valid": False, "error": "showcase.license: invalid string", "code": "invalid_manifest", "path": path_str}
+        if "homepage" in sc and not _valid_http_url(sc.get("homepage")):
+            return {"valid": False, "error": "showcase.homepage: expected http(s) URL", "code": "invalid_manifest", "path": path_str}
+        if "source" in sc and not _valid_http_url(sc.get("source")):
+            return {"valid": False, "error": "showcase.source: expected http(s) URL", "code": "invalid_manifest", "path": path_str}
+        if "icon" in sc and not _valid_manifest_icon_ref(sc.get("icon")):
+            return {"valid": False, "error": "showcase.icon: unknown icon", "code": "invalid_manifest", "path": path_str}
+        if "iconColor" in sc and not _valid_hex_rgb(sc.get("iconColor")):
+            return {"valid": False, "error": "showcase.iconColor: expected #RRGGBB", "code": "invalid_manifest", "path": path_str}
+        if "tags" in sc:
+            tags = sc["tags"]
+            if not isinstance(tags, list) or len(tags) > MAX_SHOWCASE_TAGS:
+                return {"valid": False, "error": "showcase.tags: expected an array of at most 12 tags", "code": "invalid_manifest", "path": path_str}
+            seen_tags: set[str] = set()
+            for t in tags:
+                if not _valid_text(t, 32, allow_empty=False) or str(t) in seen_tags:
+                    return {"valid": False, "error": "showcase.tags: invalid or duplicate tag", "code": "invalid_manifest", "path": path_str}
+                seen_tags.add(str(t))
+        if "highlights" in sc:
+            highlights = sc["highlights"]
+            if not isinstance(highlights, list) or len(highlights) > MAX_SHOWCASE_HIGHLIGHTS:
+                return {"valid": False, "error": "showcase.highlights: expected an array of at most 8 highlights", "code": "invalid_manifest", "path": path_str}
+            for h in highlights:
+                if not _valid_localized_or_plain(h, MAX_SHOWCASE_HIGHLIGHT_BYTES, allow_empty=False):
+                    return {"valid": False, "error": "showcase.highlights: invalid localized highlight", "code": "invalid_manifest", "path": path_str}
+        if "quickSettings" in sc:
+            qs = sc["quickSettings"]
+            if not isinstance(qs, dict) or not set(qs.keys()).issubset(ALLOWED_QUICK_SETTINGS_FIELDS):
+                return {"valid": False, "error": "showcase.quickSettings: unexpected field", "code": "invalid_manifest", "path": path_str}
+            if "title" in qs and not _valid_localized_or_plain(qs.get("title"), MAX_LABEL_BYTES, allow_empty=False):
+                return {"valid": False, "error": "showcase.quickSettings.title: invalid localized text", "code": "invalid_manifest", "path": path_str}
+            if "readyState" in qs and not _valid_id(qs.get("readyState"), MAX_ID_BYTES):
+                return {"valid": False, "error": "showcase.quickSettings.readyState: invalid identifier", "code": "invalid_manifest", "path": path_str}
+            if "statusState" in qs and not _valid_id(qs.get("statusState"), MAX_ID_BYTES):
+                return {"valid": False, "error": "showcase.quickSettings.statusState: invalid identifier", "code": "invalid_manifest", "path": path_str}
+            rows = qs.get("rows")
+            if not isinstance(rows, list) or not (1 <= len(rows) <= 4):
+                return {"valid": False, "error": "showcase.quickSettings.rows: expected 1..4 rows", "code": "invalid_manifest", "path": path_str}
+            total_ctrls = 0
+            for ri, row in enumerate(rows):
+                if not isinstance(row, dict) or not set(row.keys()).issubset(ALLOWED_QUICK_ROW_FIELDS):
+                    return {"valid": False, "error": f"showcase.quickSettings.rows[{ri}]: unexpected field", "code": "invalid_manifest", "path": path_str}
+                if not _valid_localized_or_plain(row.get("title"), MAX_LABEL_BYTES, allow_empty=False):
+                    return {"valid": False, "error": f"showcase.quickSettings.rows[{ri}]: invalid title", "code": "invalid_manifest", "path": path_str}
+                if "description" in row and not _valid_localized_or_plain(row.get("description"), MAX_SHOWCASE_HIGHLIGHT_BYTES, allow_empty=False):
+                    return {"valid": False, "error": f"showcase.quickSettings.rows[{ri}]: invalid description", "code": "invalid_manifest", "path": path_str}
+                ctrls = row.get("controls")
+                if not isinstance(ctrls, list) or not (1 <= len(ctrls) <= 2):
+                    return {"valid": False, "error": f"showcase.quickSettings.rows[{ri}]: controls must contain 1..2 items", "code": "invalid_manifest", "path": path_str}
+                total_ctrls += len(ctrls)
+                if total_ctrls > 8:
+                    return {"valid": False, "error": "showcase.quickSettings: at most 8 total controls allowed", "code": "invalid_manifest", "path": path_str}
+                for ci, ctrl in enumerate(ctrls):
+                    loc = f"showcase.quickSettings.rows[{ri}].controls[{ci}]"
+                    if not isinstance(ctrl, dict) or not set(ctrl.keys()).issubset(ALLOWED_QUICK_CTRL_FIELDS):
+                        return {"valid": False, "error": f"{loc}: unexpected field", "code": "invalid_manifest", "path": path_str}
+                    kind = ctrl.get("kind")
+                    if kind not in ("switch", "select", "button"):
+                        return {"valid": False, "error": f"{loc}: unknown kind", "code": "invalid_manifest", "path": path_str}
+                    if "disabledWhen" in ctrl:
+                        dw = ctrl["disabledWhen"]
+                        if not isinstance(dw, dict) or not set(dw.keys()).issubset({"state", "equals"}) or not _valid_id(dw.get("state"), MAX_ID_BYTES):
+                            return {"valid": False, "error": f"{loc}.disabledWhen: invalid field", "code": "invalid_manifest", "path": path_str}
+                        eq = dw.get("equals")
+                        if not isinstance(eq, str) or len(eq.encode("utf-8")) > 64 or any(b < 0x20 or b == 0x7F for b in eq.encode("utf-8")):
+                            return {"valid": False, "error": f"{loc}.disabledWhen: invalid equals", "code": "invalid_manifest", "path": path_str}
+                    if kind == "switch":
+                        if any(k in ctrl for k in ("command", "label", "options", "disabledLabel", "width")) or not _valid_id(ctrl.get("state"), MAX_ID_BYTES):
+                            return {"valid": False, "error": f"{loc}: invalid switch control", "code": "invalid_manifest", "path": path_str}
+                    else:
+                        if "width" in ctrl and not _is_strict_int(ctrl.get("width"), 72, 240):
+                            return {"valid": False, "error": f"{loc}: invalid width", "code": "invalid_manifest", "path": path_str}
+                        if kind == "select":
+                            if "command" in ctrl or "label" in ctrl or not _valid_id(ctrl.get("state"), MAX_ID_BYTES):
+                                return {"valid": False, "error": f"{loc}: invalid select control", "code": "invalid_manifest", "path": path_str}
+                            if "disabledLabel" in ctrl and not _valid_localized_or_plain(ctrl.get("disabledLabel"), MAX_LABEL_BYTES, allow_empty=False):
+                                return {"valid": False, "error": f"{loc}: invalid disabledLabel", "code": "invalid_manifest", "path": path_str}
+                            opts = ctrl.get("options")
+                            if not isinstance(opts, list) or not (1 <= len(opts) <= 16):
+                                return {"valid": False, "error": f"{loc}: invalid options", "code": "invalid_manifest", "path": path_str}
+                            seen_vals: set[str] = set()
+                            for ov in opts:
+                                if (not isinstance(ov, dict) or not set(ov.keys()).issubset({"value", "label"}) or
+                                        not _valid_text(ov.get("value"), 64, allow_empty=False) or
+                                        str(ov["value"]) in seen_vals or
+                                        not _valid_localized_or_plain(ov.get("label"), MAX_LABEL_BYTES, allow_empty=False)):
+                                    return {"valid": False, "error": f"{loc}.options: invalid option", "code": "invalid_manifest", "path": path_str}
+                                seen_vals.add(str(ov["value"]))
+                        else:
+                            if (any(k in ctrl for k in ("state", "options", "disabledLabel")) or
+                                    not _valid_id(ctrl.get("command"), MAX_ID_BYTES) or
+                                    not _valid_localized_or_plain(ctrl.get("label"), MAX_LABEL_BYTES, allow_empty=False)):
+                                return {"valid": False, "error": f"{loc}: invalid button control", "code": "invalid_manifest", "path": path_str}
+            if "menuPreview" in qs:
+                mp = qs["menuPreview"]
+                if not isinstance(mp, dict) or not set(mp.keys()).issubset({"caption", "submenuState", "sampleEntries"}):
+                    return {"valid": False, "error": "showcase.quickSettings.menuPreview: unexpected field", "code": "invalid_manifest", "path": path_str}
+                if "caption" in mp and not _valid_localized_or_plain(mp.get("caption"), MAX_LABEL_BYTES, allow_empty=False):
+                    return {"valid": False, "error": "showcase.quickSettings.menuPreview.caption: invalid localized text", "code": "invalid_manifest", "path": path_str}
+                if "submenuState" in mp and not _valid_id(mp.get("submenuState"), MAX_ID_BYTES):
+                    return {"valid": False, "error": "showcase.quickSettings.menuPreview.submenuState: invalid identifier", "code": "invalid_manifest", "path": path_str}
+                samples = mp.get("sampleEntries")
+                if not isinstance(samples, list) or not (1 <= len(samples) <= 4):
+                    return {"valid": False, "error": "showcase.quickSettings.menuPreview.sampleEntries: expected 1..4 entries", "code": "invalid_manifest", "path": path_str}
+                for sv in samples:
+                    if not isinstance(sv, dict) or not set(sv.keys()).issubset({"name", "directory"}):
+                        return {"valid": False, "error": "showcase.quickSettings.menuPreview.sampleEntries: unexpected field", "code": "invalid_manifest", "path": path_str}
+                    nm = sv.get("name")
+                    if not _valid_text(nm, 128, allow_empty=False) or "/" in str(nm) or "\\" in str(nm) or ".." in str(nm) or nm == ".":
+                        return {"valid": False, "error": "showcase.quickSettings.menuPreview.sampleEntries: invalid name", "code": "invalid_manifest", "path": path_str}
+                    if "directory" in sv and type(sv["directory"]) is not bool:
+                        return {"valid": False, "error": "showcase.quickSettings.menuPreview.sampleEntries: directory must be boolean", "code": "invalid_manifest", "path": path_str}
 
     if "native" in root:
         native = root["native"]

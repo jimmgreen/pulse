@@ -11,7 +11,7 @@
     },
     "state": {
       "type": "array",
-      "maxItems": 32,
+      "maxItems": 128,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -25,7 +25,7 @@
           },
           "value": {
             "type": "string",
-            "maxLength": 1024
+            "maxLength": 4096
           }
         }
       }
@@ -46,7 +46,7 @@
     },
     "actions": {
       "type": "array",
-      "maxItems": 32,
+      "maxItems": 64,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -60,7 +60,7 @@
           "updates": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 32,
+            "maxItems": 64,
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -74,7 +74,7 @@
                 },
                 "value": {
                   "type": "string",
-                  "maxLength": 1024
+                  "maxLength": 4096
                 }
               }
             }
@@ -103,7 +103,7 @@
           "validate": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 32,
+            "maxItems": 64,
             "uniqueItems": true,
             "items": {
               "$ref": "#/$defs/identifier"
@@ -126,8 +126,8 @@
       "description": "Local updates and optional owned data-source operation; at least one required. validate references input IDs with validation; failure blocks the entire action. Host additionally checks references, state types, disjoint IDs and budgets. No scripts or arbitrary paths."
     }
   },
-  "x-maxNodes": 128,
-  "x-maxDepth": 8,
+  "x-maxNodes": 384,
+  "x-maxDepth": 12,
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
     "identifier": {
@@ -137,7 +137,7 @@
       "pattern": "^[A-Za-z0-9._-]+$"
     },
     "uiNode": {
-      "description": "Host additionally enforces UTF-8 byte limits (schema maxLength counts characters), no NUL, 128 nodes/depth8, unique node IDs, declared state and command references. Boolean controls/dynamic bindings use true/false; choices and sliders canonical indices; progress canonical0..100; data selection rowID or empty. Dataset rows total4096/depth8, IDs unique per dataset, cells match columns. Nested scrollView defaults240DIP; root uses viewport. Data selected row must be enabled; splitPane exactly2children and state canonical0..100; sidebarSection/stagingTray state boolean; byte counts exact0..2^53 and free<=total when total known; titlebar actions must reference declared commands. Layout minWidth/minHeight/maxWidth/maxHeight use DIP0..4096; max0 is unbounded. Host enforces min<=nonzero max. flex0..16 only direct stack children. Positive maxHeight containers require scrollView. Narrow viewport takes precedence over requested minimum; constrained horizontal stacks may fall back vertically; defaults preserve previous layout.",
+      "description": "Host additionally enforces UTF-8 byte limits (schema maxLength counts characters), no NUL, 384 nodes/depth12, unique node IDs, declared state and command references. Boolean controls/dynamic bindings use true/false; choices and sliders canonical indices; progress canonical0..100; data selection rowID or empty. Dataset rows total4096/depth8, IDs unique per dataset, cells match columns. Nested scrollView defaults240DIP; root uses viewport. Data selected row must be enabled; splitPane exactly2children and state canonical0..100; sidebarSection/stagingTray state boolean; byte counts exact0..2^53 and free<=total when total known; titlebar actions must reference declared commands. Layout minWidth/minHeight/maxWidth/maxHeight use DIP0..4096; max0 is unbounded. Host enforces min<=nonzero max. flex0..16 only direct stack children. Positive maxHeight containers require scrollView. Narrow viewport takes precedence over requested minimum; constrained horizontal stacks may fall back vertically; defaults preserve previous layout.",
       "oneOf": [
         {
           "type": "object",
@@ -166,7 +166,7 @@
             },
             "children": {
               "type": "array",
-              "maxItems": 128,
+              "maxItems": 384,
               "items": {
                 "$ref": "#/$defs/uiNode"
               }
@@ -221,6 +221,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "padding": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 48,
+              "description": "Inner inset in DIP on every side. Unset keeps the default (bordered group: 16x12). Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -251,7 +257,7 @@
             },
             "children": {
               "type": "array",
-              "maxItems": 128,
+              "maxItems": 384,
               "items": {
                 "allOf": [
                   {
@@ -275,7 +281,7 @@
             "columns": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 4
+              "maximum": 8
             },
             "enabledBinding": {
               "type": "string",
@@ -309,6 +315,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "padding": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 48,
+              "description": "Inner inset in DIP on every side. Unset keeps the default (bordered group: 16x12). Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -343,7 +355,7 @@
             },
             "children": {
               "type": "array",
-              "maxItems": 128,
+              "maxItems": 384,
               "items": {
                 "allOf": [
                   {
@@ -400,6 +412,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "padding": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 48,
+              "description": "Inner inset in DIP on every side. Unset keeps the default (bordered group: 16x12). Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -430,7 +448,7 @@
             },
             "children": {
               "type": "array",
-              "maxItems": 128,
+              "maxItems": 384,
               "items": {
                 "allOf": [
                   {
@@ -525,8 +543,13 @@
               "enum": [
                 "body",
                 "caption",
-                "section"
-              ]
+                "section",
+                "bodyStrong",
+                "subtitle",
+                "title",
+                "code"
+              ],
+              "description": "Type ramp: body 14, caption 12, section 13 semibold, bodyStrong 14 semibold, subtitle 20 semibold, title 28 semibold, code 13 monospace."
             },
             "alignment": {
               "enum": [
@@ -569,6 +592,23 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
+            },
+            "kind": {
+              "enum": [
+                "default",
+                "secondary",
+                "accent",
+                "success",
+                "warning",
+                "danger"
+              ],
+              "description": "Theme-resolved text tone."
             }
           }
         },
@@ -662,6 +702,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           },
           "allOf": [
@@ -795,6 +841,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           },
           "allOf": [
@@ -881,6 +933,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -919,7 +977,7 @@
             },
             "options": {
               "type": "array",
-              "maxItems": 64,
+              "maxItems": 128,
               "items": {
                 "type": "string",
                 "maxLength": 128
@@ -960,6 +1018,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -1051,6 +1115,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -1144,7 +1214,7 @@
             },
             "children": {
               "type": "array",
-              "maxItems": 128,
+              "maxItems": 384,
               "items": {
                 "allOf": [
                   {
@@ -1235,7 +1305,7 @@
             },
             "children": {
               "type": "array",
-              "maxItems": 128,
+              "maxItems": 384,
               "items": {
                 "allOf": [
                   {
@@ -1333,7 +1403,7 @@
             },
             "options": {
               "type": "array",
-              "maxItems": 64,
+              "maxItems": 128,
               "items": {
                 "type": "string",
                 "maxLength": 128
@@ -1374,6 +1444,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -1446,6 +1522,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -1518,6 +1600,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -1566,13 +1654,13 @@
             "options": {
               "type": "array",
               "minItems": 2,
-              "maxItems": 64,
+              "maxItems": 128,
               "items": {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 128
               },
-              "description": "Caption under each stop, in order."
+              "description": "Stepped: captions per stop. Continuous: exactly two finite numeric strings [min,max], min<max; no discrete stops. State is a finite numeric string within the range."
             },
             "enabledBinding": {
               "type": "string",
@@ -1608,8 +1696,68 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "kind": {
+              "enum": [
+                "stepped",
+                "continuous"
+              ],
+              "default": "stepped"
+            },
+            "command": {
+              "$ref": "#/$defs/identifier"
+            },
+            "helper": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
-          }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "continuous"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "then": {
+                "required": [
+                  "state",
+                  "options"
+                ],
+                "properties": {
+                  "options": {
+                    "minItems": 2,
+                    "maxItems": 2
+                  }
+                },
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "stops"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "value"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          ]
         },
         {
           "type": "object",
@@ -1646,7 +1794,7 @@
             },
             "options": {
               "type": "array",
-              "maxItems": 64,
+              "maxItems": 128,
               "items": {
                 "type": "string",
                 "maxLength": 128
@@ -1687,6 +1835,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -1766,6 +1920,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -1785,7 +1945,7 @@
             },
             "text": {
               "type": "string",
-              "maxLength": 1024
+              "maxLength": 4096
             },
             "enabled": {
               "type": "boolean"
@@ -1803,6 +1963,22 @@
               "pattern": "^(#[0-9a-fA-F]{6})?$"
             },
             "bordered": {
+              "type": "boolean"
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "command": {
+              "$ref": "#/$defs/identifier"
+            },
+            "glyph": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "selected": {
+              "type": "boolean"
+            },
+            "checked": {
               "type": "boolean"
             },
             "enabledBinding": {
@@ -1839,6 +2015,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -1955,6 +2137,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -2038,6 +2226,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -2117,6 +2311,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -2201,6 +2401,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -2280,6 +2486,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -2354,6 +2566,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -2434,6 +2652,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           },
           "oneOf": [
@@ -2536,6 +2760,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           },
           "oneOf": [
@@ -2668,6 +2898,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           },
           "oneOf": [
@@ -2771,6 +3007,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -2851,6 +3093,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           },
           "allOf": [
@@ -3007,7 +3255,7 @@
             },
             "children": {
               "type": "array",
-              "maxItems": 128,
+              "maxItems": 384,
               "items": {
                 "allOf": [
                   {
@@ -3154,6 +3402,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -3234,6 +3488,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -3344,6 +3604,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -3386,7 +3652,7 @@
             },
             "children": {
               "type": "array",
-              "maxItems": 128,
+              "maxItems": 384,
               "items": {
                 "allOf": [
                   {
@@ -3529,6 +3795,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -3606,6 +3878,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -3672,6 +3950,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -3755,6 +4039,12 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         },
@@ -3790,10 +4080,10 @@
             "options": {
               "type": "array",
               "minItems": 1,
-              "maxItems": 64,
+              "maxItems": 128,
               "items": {
                 "type": "string",
-                "maxLength": 1024
+                "maxLength": 4096
               }
             },
             "detail": {
@@ -3847,6 +4137,417 @@
               "maximum": 16,
               "default": 0,
               "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
+            },
+            "pointerState": {
+              "$ref": "#/$defs/identifier",
+              "description": "Declared state key the host writes on pointer input in viewBox units: \"move X Y\", \"leave\", and \"click X Y\" before the command callback. Must differ from state. Native: PulseUiModelTree.extras."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "optionCard"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "detail": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "glyph": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "badgeText": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "kind": {
+              "enum": [
+                "radio",
+                "toggle"
+              ]
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "checked": {
+              "type": "boolean"
+            },
+            "selected": {
+              "type": "boolean"
+            },
+            "bordered": {
+              "type": "boolean"
+            },
+            "command": {
+              "$ref": "#/$defs/identifier"
+            },
+            "children": {
+              "type": "array",
+              "maxItems": 1,
+              "items": {
+                "$ref": "#/$defs/uiNode"
+              },
+              "description": "At most one passive canvas illustration (no state, command or pointerState) drawn above the title."
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "settingsRow"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "detail": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "binding": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "glyph": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "badgeText": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "bordered": {
+              "type": "boolean"
+            },
+            "command": {
+              "$ref": "#/$defs/identifier"
+            },
+            "children": {
+              "type": "array",
+              "maxItems": 4,
+              "items": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/uiNode"
+                  },
+                  {
+                    "not": {
+                      "required": [
+                        "flex"
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            "gap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxHeight": {
+              "const": 0,
+              "default": 0
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "image"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "detail": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "glyph": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "kind": {
+              "enum": [
+                "contain",
+                "cover",
+                "center",
+                "tile"
+              ]
+            },
+            "color": {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$"
+            },
+            "bordered": {
+              "type": "boolean"
+            },
+            "command": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "menuPreview"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "detail": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "menu": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "$ref": "#/$defs/uiPreviewMenuItem"
+              }
+            },
+            "bordered": {
+              "type": "boolean"
+            },
+            "kind": {
+              "enum": [
+                "plain",
+                "context"
+              ],
+              "description": "context wraps the items in the host right-click menu frame (quick actions, Open … Properties)."
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0
+            },
+            "tooltip": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Hover text shown after a short delay; host limit 256 UTF-8 bytes. Native: PulseUiModelTree.extras."
             }
           }
         }
@@ -3865,20 +4566,79 @@
         "minLength": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 1024
+          "maximum": 4096
         },
         "maxLength": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 1024
+          "maximum": 4096
         },
         "message": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 1024
+          "maxLength": 4096
         }
       },
       "description": "Lengths count Unicode code points; minLength<=maxLength; required cannot have maxLength0. Incomplete initial/editing values allowed; actions with validate are blocked atomically if a field fails."
+    },
+    "uiPreviewMenuItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "command": {
+          "$ref": "#/$defs/identifier"
+        },
+        "glyph": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "shortcut": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "checked": {
+          "type": "boolean"
+        },
+        "separator": {
+          "type": "boolean"
+        },
+        "children": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/uiPreviewMenuItem"
+          }
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Second caption line under the label; the row grows to 40 DIP."
+        },
+        "group": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Top-level only. Caption of a tinted item group (selection-gradient band with caption and gear); consecutive items with the same caption share the band."
+        },
+        "primary": {
+          "type": "boolean",
+          "description": "Semibold label for the group's main action."
+        }
+      },
+      "description": "Preview menu item for menuPreview nodes; commands are optional and separator items may omit text."
     },
     "uiMenuItem": {
       "type": "object",

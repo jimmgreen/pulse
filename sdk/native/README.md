@@ -6,6 +6,13 @@
 
 ## 开始
 
+**最快的路径**：`pulse_ext.py new` 默认生成 [quickstart](../../examples/native/quickstart/README.md) 模板。它基于两个可选的纯头文件 C++20 层：
+
+- `pulse/app.hpp`：继承 `pulse::sdk::App`、文件末尾写 `PULSE_APP(类名)`，入口、接口查询、生命周期、异常隔离都已写好；提供 `Command(...).Run(...)`、`Toast`、`Alert/Confirm/Ask`、`RunTask`、`Settings()`（带版本检查的键值设置）、`SettingsPage`（控件自动加载与保存）和 `Tr(简, 繁, 英)`（跟随 Pulse 语言，菜单标题自动切换）。
+- `pulse/kit.hpp`：`Page`、`Section`、`SwitchRow`、`ChoiceRow`、`FolderField`、`Notice`、`Empty`、`Facts` 等 Pulse 风格组件，只由公开控件组成，和 Pulse 自带设置页的层级、间距、边框一致。
+
+两者只调用公开 C 接口，不改变 ABI，也不需要新宿主；某个可选接口不存在时返回 `PULSE_ERROR_UNAVAILABLE`。
+
 公开头位于 `include/pulse`；头文件是字段、函数签名和结构布局的事实来源。接口摘要见 [机器清单](api-catalog.json)，上手见 [快速开始](../../docs/extensions-sdk-quickstart.md)。当前具有 UI 模型、数据、挂载、目录/上下文、文件操作、设置和线程派发服务。
 
 原生包的 manifest、生成哈希、显式安装/启用、升级和回退流程见 [Native DLL packages](../../docs/native-packages.md)。`native-manifest` 只生成声明；`install`、`enable`、`rollback` 要求 `--allow-native` 明确确认同进程代码执行。首次安装默认禁用，升级保持启用状态；新 DLL 哈希仍需确认，运行中的实例需重启后应用升级或回退。单包可携带入口 DLL、最多 63 个私有 DLL 或资源文件；每文件校验 SHA-256，升级和回退切换整个包版本。详见打包文档的 files 与 --file。SDK/API 发现与验证不授予执行权限。
@@ -20,6 +27,18 @@ python tools/extensions/pulse_ext.py --json build C:/PulseAuthor/my-rename --con
 python tools/extensions/pulse_ext.py --json test C:/PulseAuthor/my-rename --smoke-commands --strict-resources
 python tools/extensions/test_native_sdk.py --sdk-root "$PWD" --work "$PWD/verification"
 ```
+
+**多语言文本（strings.tsv）**：工程根目录放一个 UTF-8 制表符分隔表，表头 `key	zh-CN	zh-TW	en`，每行一个键；`zh-CN` 必填，繁体或英文留空时回落到简体。占位符写 `{0}`…`{9}`，三种语言须使用同一组；`\t`、`\n`、`\\` 为转义，`#` 开头为注释。`pulse_ext build`（以及 `dev`）在编译前自动生成 `strings.gen.hpp`，也可单独运行 `pulse_ext strings <工程> [--check]`。生成的头在 `strings` 命名空间里为每个键提供一个返回 `LocalText` 的函数，有占位符的键带对应个数的参数：
+
+```cpp
+#include "strings.gen.hpp"
+Command("demo.copy", strings::CopyPath()).Run(...);           // 菜单标题跟随 Pulse 语言
+Toast(strings::Moved(name, target).Get(CurrentLanguage()));  // {0}{1} 依次替换
+```
+
+表格有误（键不是合法 C++ 标识符、重复、占位符不一致、超过 4096 条或 1 MiB）时返回 `invalid_strings` 并指出行号；`--check` 发现头文件过期返回 `strings_stale`。生成的头首行记录表格的 SHA-256，换行风格或 BOM 变化不算过期。
+
+**无界面宿主**：Windows SDK 压缩包在 `bin/pulse_plugin_harness.exe` 附带预编译的无界面宿主（manifest `prebuilt` 列出用途、架构与字节数），解压后 `pulse_ext test` 直接可用，不需要先编译 Pulse 仓库。也可以用 `--harness` 或环境变量 `PULSE_PLUGIN_HARNESS` 指定其他构建。
 
 面向 AI 编码代理（Antigravity、Claude Code、Cursor、Codex）的五步闭环剧本、ABI 黄金法则、`resources` 映射表与故障排查见 `sdk/native/AGENTS.md`，配套代理技能见 `sdk/native/skills/pulse-plugin-author/SKILL.md`，stdio MCP 配置模板见 `sdk/native/mcp.example.json`。对于解析不受信任输入或需要崩溃/内存隔离的场景，推荐采用 `sdk/native/samples/sandboxed-worker` 演示的 Stage D 进程外模式：主进程内仅保留轻薄的 `pulse.commands` + `pulse.tasks` 桥接 DLL，通过 `native.files` 携带零 GUI 依赖的辅助 `worker.exe`，并在受限 Win32 Job Object（`ActiveProcessLimit = 1`、进程内存上限、`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`、`PROCESS_CREATION_CHILD_PROCESS_RESTRICTED`、显式单管道句柄继承）中以帧式命名管道完成计算与合作取消。
 
@@ -52,7 +71,9 @@ extern "C" __declspec(dllexport) PulseStatus PULSE_CALL PulsePluginEntryV1(const
 
 ## 已提供的接口
 
-`pulse.ui.model` V1 是唯一 UI 接口，提供 create/update/subscribe_command/set_states/get_state/unsubscribe/close，公开 28 种通用控件（含 `PULSE_UI_MODEL_CANVAS` 2D 矢量绘图画布）。旧 pulse.ui 查询与宿主外壳模型已移除。选择列表使用 Select，大数据列表使用 VirtualList。公开编号保留空洞，不能用 COUNT 遍历有效控件；机器清单的 nodeTypes 是有效集合。控件 `glyph` 字段支持 `"icon:<name>"` 或 `"icon:#<id>"` 直接渲染内置或插件注册的矢量图标。
+`pulse.ui.model` V1 是唯一 UI 接口，提供 create/update/subscribe_command/set_states/get_state/unsubscribe/close，公开 39 种通用控件（含 `PULSE_UI_MODEL_CANVAS` 2D 矢量绘图画布）。其中 `LIST`（内联单选列表）、`SIDEBAR_ITEM`（导航行）、`BREADCRUMB`（路径段）、`COMMAND_SEARCH`（搜索框）、`SIDEBAR_SECTION`（可折叠分组）、`FILE_ROW`（文件行）、`STATUS_BAR`（底部状态条）使用 Pulse 主界面同一套绘制。标题栏按钮、暂存托盘、驱动器卡片、窗格标题和静态 Tooltip 节点仍是宿主内部外壳模型。选择列表使用 Select 或 List，大数据列表使用 VirtualList。公开编号保留空洞，不能用 COUNT 遍历有效控件；机器清单的 nodeTypes 是有效集合。控件 `glyph` 字段支持 `"icon:<name>"` 或 `"icon:#<id>"` 直接渲染内置或插件注册的矢量图标。
+
+排版与呈现：Text 的 `role` 可取 `body`、`caption`、`section`、`bodyStrong`（14 半粗）、`subtitle`（20 半粗）、`title`（28 半粗）、`code`（13 等宽），`kind` 取 `default`、`secondary`、`accent`、`success`、`warning`、`danger`，颜色随浅色/深色主题解析。`PulseUiModelTree.extras` 按节点 ID 附加可选呈现属性，不改变 `PulseUiModelNode` 记录布局：`padding`（Stack/Grid/Group 内边距 0–48 DIP，带边框 Group 默认 16×12）、`tooltip`（非容器控件悬停提示，最多 256 UTF-8 字节，约 0.5 秒后显示）、`pointer_state`（仅 Canvas，宿主按脚本 viewBox 单位写入 `"move X Y"`、`"leave"`，并在命令回调前写入 `"click X Y"`；键盘激活报告中心点）。不使用 extras 时把 `size` 设为 `PULSE_UI_MODEL_TREE_SIZE_V1`，旧版宿主仍可接受；`ModelTree::Build` 自动处理。水平 Stack 中未设宽度约束的 Breadcrumb 按文字宽度排列。
 
 结构提交同步复制，通过临时内存 DOM 验证，不经 JSON 文本传输。最多128节点、深度8、32个状态键、每值1024 UTF-8字节。更新保留已有状态和仍声明的命令订阅。data_source、context.* 和 action.data_operation 仍返回 UNAVAILABLE。输入事件、挂载与分页数据分别使用 events、mount、data。预览2插件须用预览3重新编译。
 
@@ -72,16 +93,39 @@ extern "C" __declspec(dllexport) PulseStatus PULSE_CALL PulsePluginEntryV1(const
 
 目录分析示例已经由主代理进行真实宿主验收：18 PASS、三张应用内截图、三个原文件保持不变，验证 CAS 版本竞争与重新读取。仓库证据为 `build-extensions/native-inspector-ui-01/report.json`；资源模型测试 36 PASS，日志 `build-extensions/native-resources-test-01.log`。这些测试日志和用户隔离配置不随源码 SDK 分发。此证据不扩大为全模型交互验收。
 
+## 详细信息列与图标角标（pulse.columns，实验）
+
+`pulse.columns` V1（[公开头](include/pulse/columns.h)）让插件给本地文件夹加只读的“详细信息”列和图标右上角的小角标。`register_column` / `register_badge` 同步复制描述（id 1–64 字节 ASCII、标题 1–64 字节、可选扩展名过滤 `.jpg;.png` 最多 512 字节、宽度 48–480 DIP、左/右对齐、只问文件或文件夹）；每包最多 4 列、4 个角标。宿主只为屏幕上可见的行、在工作线程上每批最多 64 项调用 `query`，结果按路径 + 大小 + 修改时间缓存（每提供者最多 20000 项），`invalidate` 丢掉一项或全部缓存，`set_title` 改标题。单元格文本最长 256 字节，可带 `PULSE_COLUMN_TONE_*` 色调；角标图标用内置名、本包图标名或 `<package>/<name>`。每个文件只画一个角标：按注册顺序（包的启动顺序）第一个返回角标的提供者优先，其余提供者仍会被询问并缓存。
+
+呈现规则：列排在内置列之后，只占名称列的空余宽度，放不下时从最后一列隐藏；不参与排序、不能拖动换位。搜索结果、此电脑、网络路径和虚拟文件系统里不显示。用户在列标题右键菜单里逐个隐藏/显示（标注「扩展列 · 包 id」「图标角标 · 包 id」），拖动分隔线改宽，双击恢复插件给的宽度，偏好跨重启保存。`query` 不能等待 UI 线程；`unregister` 和会话关闭会等正在运行的 `query` 返回后才卸载 DLL。C++ 封装为 `ColumnsClient`，`App` 提供 `AddColumn`、`AddBadge`、`RefreshColumns`、`SetColumnTitle`；示例见 [file-columns](../../examples/native/file-columns/README.md)。无界面宿主 `pulse_ext test` 的报告 `columnProviders` 列出每个提供者和问到的值。
+
+## 状态栏项（pulse.statusbar，实验）
+
+`pulse.statusbar` V1（[公开头](include/pulse/statusbar.h)）让插件在主窗口状态栏放小的文字/图标项，排在文件夹信息和 Git 标签之后。每个包最多 2 项，按注册顺序显示；窗口变窄时放不下的项整项隐藏。`add_item` 同步复制描述：id 1–64 字节 ASCII（包内唯一）、文字 0–64 字节 UTF-8、提示 0–256 字节、图标（内置名、包内图标名、`<package>/<name>` 或 `#<id>`，可带 `icon:` 前缀）0–96 字节；文字和图标至少要有一个。`tone` 沿用列的色调（默认/弱化/强调/成功/警告/危险）。
+
+`on_click` 可选，在 UI 线程运行；不给就是纯标签，悬停只显示提示。`update_item` 一次替换文字、图标、提示、色调和点击回调（只重绘一次）；`set_visible` 临时隐藏；`remove_item` 会等正在运行的点击回调返回后才返回，回调里也可以移除自己。会话关闭时宿主移除该包的全部项。所有函数只能在 owner UI 线程调用，其他线程调用返回 `PULSE_ERROR_STATE` 并记录诊断。
+
+`pulse/app.hpp` 里用 `AddStatusItem({.id = "sync", .text = "同步中", .icon = "refresh", .on_click = [this] { ... }})`、`UpdateStatusItem(id, spec)`、`SetStatusItemVisible(id, false)`、`RemoveStatusItem(id)`；插件停止时自动移除。底层客户端是 `pulse/client.hpp` 的 `StatusBarClient`（RAII `StatusBarClient::Item`）。
+
+## 目录、选择与文件操作通知（pulse.context / pulse.fileevents，实验）
+
+都是只读通知，回调在 UI 线程运行，插件停止时自动退订。
+
+- 目录切换、选择变化：已有的 `pulse.context` 订阅（宿主按会话节拍合并，首次投递带 `PULSE_CONTEXT_INITIAL`）。`pulse/app.hpp` 提供 `OnFolderChange(fn)`、`OnSelectionChange(fn)`，回调参数 `FolderContext`（目录、单选名称、选中数量、视图、revision）；需要完整选择时调用 `CurrentSelection()`，当前目录用 `CurrentFolder()`。底层客户端是 `pulse/client.hpp` 的 `ContextClient`。
+- 文件操作完成：`pulse.fileevents` V1（[公开头](include/pulse/fileevents.h)）。Pulse 自己执行的复制、移动、重命名（含批量）、删除到回收站、永久删除、新建文件夹/文件、从回收站还原、清空回收站，在生效并刷新视图后每个操作发一个事件；撤销/重做和插件通过 `pulse.fileops` 发起的操作也算。只列出真正改变的项，失败、跳过、取消的项不列；Pulse 之外的改动不报告（用 `pulse.directories` 的 watch）。`subscribe(kinds, ...)` 用 `PULSE_FILE_EVENT_MASK(kind)` 过滤，0 表示全部；每个会话最多 8 个订阅；单个事件最多 1024 项，超出时 `total_count > item_count`。路径是 UTF-8 绝对路径，只在回调期间有效。`App::OnFileOperation(fn, kinds)` 的回调参数是拥有所有权的 `FileEvent`（`kind`、`items[{source, destination}]`、`Truncated()`）；底层客户端是 `FileEventsClient`。
+
 ## 原生命令与选择
 
-`manifest.json` 支持可选 `contributes.icons`（最多 32 个自定义多图层 SVG Path 矢量图标）与 `contributes.commands`（`id`、`title`、可选 `icon`/`groupIcon`/`primary`/`separatorBefore`/`separatorAfter`/`hidden`/`checked`/`shortcut` 及 `"background"` 空白目录右键类型，最多 32 项）声明静态元数据，使宿主在零加载状态下于命令面板和右键菜单展示入口，并在首次触发时激活 DLL。动态矢量图标可通过 [icons.h](include/pulse/icons.h) 查询 `pulse.icons` V1 注册/更新/注销；动态命令则通过 [commands.h](include/pulse/commands.h) 查询 `pulse.commands` V1/V2，在 `PulsePluginEntryV1` 中注册，支持 `update_command` 与 `set_command_flags`（如 `PULSE_COMMAND_HIDDEN` 动态显隐、`PULSE_COMMAND_CHECKED` 勾选态）且保持命令 ID 与工具栏固定标识不变。图标支持全部 68 个内置 Fluent 矢量图标（`PULSE_ICON_*` `0..67` 或名称）及插件自定义矢量图标。条件支持选择数量范围、文件/目录/空白目录背景（`PULSE_COMMAND_BACKGROUND`）类型以及小写带点扩展名的包含或排除列表。扩展名最多 32 项，每项 32 字节。
+`manifest.json` 支持可选 `contributes.icons`（最多 32 个自定义多图层 SVG Path 矢量图标）与 `contributes.commands`（`id`、`title`、可选 `icon`/`groupIcon`/`primary`/`separatorBefore`/`separatorAfter`/`hidden`/`checked`/`toolbar`/`shortcut` 及 `"background"` 空白目录右键类型，最多 32 项）声明静态元数据，使宿主在零加载状态下于命令面板和右键菜单展示入口，并在首次触发时激活 DLL。动态矢量图标可通过 [icons.h](include/pulse/icons.h) 查询 `pulse.icons` V1/V2 注册/更新/注销（V2 新增 `resolve_icon`，可将本包静态 `contributes.icons`、动态名称、`#id` 或内置图标统一解析为 `PulseIconId`）；动态命令则通过 [commands.h](include/pulse/commands.h) 查询 `pulse.commands` V1/V2，在 `PulsePluginEntryV1` 中注册，支持 `update_command` 与 `set_command_flags`（如 `PULSE_COMMAND_HIDDEN` 动态显隐、`PULSE_COMMAND_CHECKED` 勾选态）且保持命令 ID 与工具栏固定标识不变。图标支持全部 68 个内置 Fluent 矢量图标（`PULSE_ICON_*` `0..67` 或名称）及插件自定义矢量图标。条件支持选择数量范围、文件/目录/空白目录背景（`PULSE_COMMAND_BACKGROUND`）类型以及小写带点扩展名的包含或排除列表。扩展名最多 32 项，每项 32 字节。
 
 命令出现在宿主菜单中，可按稳定标识 `native:package:command` 保存到现有 `toolbar_tools` 工具栏配置。菜单 token 仅当前实例有效，停用或注销后失效。快捷键仅在所属宿主主界面派发，内置快捷键优先，文本编辑器不派发插件快捷键；同 owner 的重复命令标识或快捷键拒绝注册。宿主在调用时重新检查条件，并把最新已加载选择传给命令回调；停用等待在栈回调结束后卸载。
 
 `PulseContextV1.get_selection` 同步回调提供当前目录、条目的绝对路径、名称、目录标志和 `selection_revision`，只读取已加载快照，不访问磁盘。普通目录未选中时成功返回零条，仍含目录。最多4096条、合计4 MiB UTF-8；超限返回 UNAVAILABLE，不截断。加载期间返回 STATE，不支持的虚拟/内容视图返回 STATE 或 UNAVAILABLE。回调字符串和数组仅在回调期间借用，后台任务须先复制；不允许递归读取。停止会抑制后续回调，当前回调可完成。
 
-[sdk/native/samples/archive](samples/archive/plugin.cpp) 是 SDK 多文件归档参考样例，演示“解压到此处”“解压到…”和“添加到压缩包…”命令注册、选择传递、预览读取器（`archive_reader.cpp`）、后台任务（P1.4）、同卷暂存提交（P1.5）、设置页（P1.6）以及本地路径 7z/ZIP 写入参考（P1.10）。主仓库另提供独立官方 `extensions/7zip/` 扩展候选，通过 [dialogs.h](include/pulse/dialogs.h)（`pulse.dialogs` V1 宿主自绘 Fluent 模态对话框，支持 `password` 掩码表单与 1–3 个底部按钮）对接官方 7-Zip 26.00 `7z.dll`，支持加密归档、分卷、tar 变体与校验和计算。
+[sdk/native/samples/archive](samples/archive/plugin.cpp) 是 SDK 多文件归档参考样例，演示“解压到此处”“解压到…”和“添加到压缩包…”命令注册、选择传递、预览读取器（`archive_reader.cpp`）、后台任务（P1.4）、同卷暂存提交（P1.5）、设置页（P1.6）以及本地路径 7z/ZIP 写入参考（P1.10）。主仓库另提供独立官方 `extensions/7zip/` 扩展候选与 [archive-dialog](../../examples/native/archive-dialog/README.md) 脚手架模板，通过 [dialogs.h](include/pulse/dialogs.h)（`pulse.dialogs` V1/V2 宿主自绘 Fluent 模态对话框，支持 `password` 掩码表单、1–3 个底部按钮，V2 新增对话框内命令订阅 `subscribe_command`、动态替换模型 `update_model`、同步读取状态 `get_state` 及嵌套 [pickers.h](include/pulse/pickers.h) 选择器自动父窗口协调）对接归档工作流。
 
+
+**工具栏按钮（`PULSE_COMMAND_TOOLBAR`）**：命令带上这个标志（manifest `"toolbar": true`，或 `App` 里 `Command(...).Toolbar()`），宿主第一次看到它时自动把命令固定到工具栏一次。每个包最多 2 个；工具栏已满或命令处于 `HIDDEN` 时不固定。用户在「自定义工具栏」里移走后不会再自动加回，之后去掉这个标志也不会取消固定。按钮的启用状态按命令的选择条件实时计算，点击和右键菜单里执行同一个回调。
 ## 预览提供者（P1.3 已验收）
 
 通过 [preview.h](include/pulse/preview.h) 查询 `pulse.preview` V1，在入口的 owner UI 线程调用 `register_provider` / `unregister_provider`。每实例最多 16 个提供者，扩展名为 2–32 字节的小写带点 ASCII，如 `.7z`、`.rar`。当前 `PULSE_SDK_PREVIEW` 为 `3`。
@@ -108,7 +152,37 @@ static PulseStatus PULSE_CALL Preview(void*, const PulsePreviewRequest* request)
 
 `PULSE_PREVIEW_UI_MODEL` 结果通过 `model` 借用 `PulseUiModelTree`。宿主在提供者工作线程转换并复制模型，在快速预览与详情窗格使用现有停靠控件显示；支持模型本地状态和动作。最多128节点、深度8、64 KiB，沿用模型对 data_source、context.* 绑定、action.data_operation 的限制。预览没有原生命令回调绑定，`command_count > 0` 返回 `PULSE_ERROR_UNAVAILABLE`。P1.3 已通过真实7z/RAR读取、两处预览、浅色/深色、快速切换、模型本地动作和位图替换验收；证据见实施方案 P1.3。
 
+### 网格缩略图与 C++ 封装
+
+注册时 `PulsePreviewProvider.flags` 带 `PULSE_PREVIEW_PROVIDER_THUMBNAIL`，同一回调还会为该扩展名的本地文件提供图标/大图标等网格视图的缩略图：此时 `request->purpose == PULSE_PREVIEW_PURPOSE_THUMBNAIL`，`pixels` 是想要的长边像素。缩略图只采用位图结果；返回错误、发布其他种类、被取消，或约 2 秒内拿不到工作槽时，宿主回退到系统缩略图。缩略图调用来自宿主缩略图线程，与预览共用每实例 2 个并发调用，可能连续请求很多文件，请保持快速并勤查取消。宿主会把更大的位图缩小，并按路径、大小、修改时间缓存到内存和磁盘；停用插件后，磁盘里已缓存的缩略图要等文件变化或清理缓存后才会消失。
+
+`flags` 与 `purpose` 都是追加字段：按旧头文件大小注册的描述符仍可注册，只是只提供预览；旧宿主会忽略 `flags`，不会请求缩略图。读 `purpose` 前先确认 `request->size` 覆盖该字段（C++ 封装已处理）。未知 `flags` 位返回 `PULSE_ERROR_ARGUMENT`。
+
+C++ 封装（`pulse/client.hpp`、`pulse/app.hpp`）：
+
+```cpp
+PulseStatus OnStart() override {
+    return AddPreview(".sketch", [](const pulse::sdk::PreviewContext& request) -> PulseStatus {
+        if (request.Cancelled()) return PULSE_ERROR_STATE;
+        const uint32_t edge = request.Thumbnail() ? request.Pixels() : 512;
+        std::vector<uint8_t> pbgra = RenderSketch(request.Path(), edge);   // 预乘 BGRA
+        return request.PublishBitmap(edge, edge, pbgra.data());
+    }, PULSE_PREVIEW_PROVIDER_THUMBNAIL);
+}
+```
+
+`PreviewContext` 还提供 `PublishArchive(format, items)` 和 `PublishModel(tree)`。`App` 停止时自动注销；回调仍在运行时会短暂重试，仍未返回则保留回调数据，避免释放工作线程还在使用的内存。不使用 `App` 时可直接用 `PreviewClient::Register(ext, fn, flags, provider)`。
+
 ## 线程和生命周期
+
+**何时激活**：宿主只在需要时加载并激活 DLL（`activate`，SDK 里就是 `OnStart`）。
+
+- 首次使用 `contributes.commands` 声明的命令、打开本包设置页、需要本包预览或缩略图时激活。
+- 没有声明 `contributes.commands` 的包（只放状态栏项、详细信息列、角标或目录/选择/文件操作钩子，或在 `OnStart` 里动态注册命令）在每个主窗口打开约 0.4 秒后激活。
+- 声明了 `context.events` 资源的包（要目录/选择/文件操作事件）即使带静态命令，也默认随窗口启动。
+- manifest 根字段 `activation` 可以改变默认：`"startup"` 让带静态命令的包也随窗口启动（例如命令 + 状态栏项、详细信息列），`"onDemand"` 让上面两类包只按需启动。
+- 激活失败的同一构建不再自动重试；在设置里关闭再打开即可重试。
+
 
 生命周期、接口查询、UI/资源调用与回调均在拥有页面的宿主 UI 线程。例外是 `pulse.dispatch` 的 post/cancel 和 `pulse.ui.data` 的 publish，可从任意线程调用；`pulse.preview` 提供者及其 publish 在宿主工作线程运行；`pulse.tasks` 的work/report及 `pulse.staging` 除choose_destination外的调用遵守下方各自的worker契约。DLL 不应在该线程执行长时间计算或阻塞 I/O；自行管理的后台线程不能直接调用其他 UI 接口。异步文件回调保证晚于发起函数返回，回复内存仅在回调期间借用。DLL 需自行复制数据；数据提供者请求视图也仅在请求回调期间有效，publish 则在返回前同步复制整页借用数据。
 
@@ -122,9 +196,19 @@ static PulseStatus PULSE_CALL Preview(void*, const PulsePreviewRequest* request)
 
 `pulse.dispatch` 提供有界 128 项 worker→UI 投递。回调可能早于 post 返回；cancel 返回 OK 才保证回调不会再开始，STATE 不能作为释放正在运行 userdata 的许可。普通 UI 接口仍不允许后台线程调用。
 
-`client.hpp` 是可选 C++20 层，提供 Panel、Subscription、DispatchQueue 和字符串状态读写。functor 与共享生存期留在 DLL，ABI 仍是 C 函数指针和 userdata。RAII 对象在 UI 线程销毁；销毁队列前必须 join 所有生产线程。队列 Close 不替调用者 join，也不承诺恶意或不可取消任务可安全卸载。
+`client.hpp` 是可选 C++20 层，提供 `Panel`、`Subscription`、`DispatchQueue`、`IconsClient`、`DiagnosticsClient`、`PickerClient`、`DialogSession`、`WorkbenchClient`（均支持 `TryQuery(host)` / `Init(host)` 与移动所有权）以及 `CanvasBuilder`（含 `PointerState`）、`ModelNode::PathRow` / `LabeledField` 和字符串状态读写。`ModelNode` 另有类型化构造（`VStack`、`HStack`、`Card`、`Label`、`Button`、`Toggle`、`Input`、`Search`、`Dropdown`、`ListBox`、`NavItem`、`Crumb`、`Section`、`FileItem`、`StatusBar`）和常用字段简写（`Text`、`Command`、`State`、`Glyph`、`Kind`、`Role`、`Gap`、`Flex`、`Padding`、`Tooltip` 等），无需逐个写 `String(&PulseUiModelNode::text, …)`。functor 与共享生存期留在 DLL，ABI 仍是 C 函数指针和 userdata。RAII 对象在 UI 线程销毁；销毁队列前必须 join 所有生产线程。队列 Close 不替调用者 join，也不承诺恶意或不可取消任务可安全卸载。
 
 [reactive-panel](../../examples/native/reactive-panel/README.md) 使用 std::jthread 合作取消、最新代次与当前输入双重检查。真实宿主验收 9 PASS、两张应用内图、exit 0，仓库证据 `build-extensions/native-reactive-ui-01/report.json`；封装现有 28 项定向生命周期及模型所有权测试。此证据不表示所有宿主能力或全部 UI 模型交互已开放/验收。
+
+### V2 锚定预览与悬停取消
+
+`PulseWorkbenchV2::reveal_path_from_rect` 在原有定位模式之外接受以下模式；`origin_rect` 使用屏幕坐标，接口结构与原有模式 0–2 的值保持不变：
+
+- `PULSE_NAVIGATE_PREVIEW`（3）：调用宿主预览界面，不导航文件标签页。
+- `PULSE_NAVIGATE_HOVER_PREVIEW`（4）：使用宿主悬停预览偏好与停留时间，不激活 owner 窗口。
+- `PULSE_NAVIGATE_DISMISS_HOVER_PREVIEW`（5）：取消时仍须传入此前悬停请求的同一路径，以免旧取消请求关闭已切换目标的预览。
+
+这三个模式仅用于 V2 的 `reveal_path_from_rect`，不扩展 V1 的 `reveal_path`。成功查询 V2 不代表旧宿主实现了新模式；调用方须处理 `PULSE_ERROR_ARGUMENT` / `PULSE_ERROR_UNAVAILABLE`，不得将请求失败视作已经打开或取消预览。
 
 ## 生命周期与崩溃恢复
 
@@ -138,7 +222,7 @@ UI 已统一为 pulse.ui.model。原生命令贡献与多文件包已提供；�
 
 ## Manifest 当前字段
 
-只接受 `apiVersion`、`id`、`name`、`resources`、`contributes` 和 `native`；旧声明式 `commands`、`toolbar`、`palette`、`workflows`、`panel`、`runtime` 均已移除并明确报错。可选 `contributes.commands` 提供零加载静态命令发现，动态命令通过 `pulse.commands` 在入口注册，模态对话框通过 `pulse.dialogs`（[dialogs.h](include/pulse/dialogs.h)）展示，主页面与设置页由 DLL 通过公开 UI 接口创建。模板可暂不含 `native`，打包前由 `native-manifest` 注入 DLL 哈希和入口信息。可选 `native.files` 声明相邻私有 DLL 和资源的文件名与哈希，使用 `native-manifest --file PATH` 生成；整包升级、发布者连续性校验、`package_signing.py rotate` 密钥轮换、回退以及 `pulse_ext.py gc` 孤立版本清理见 [打包文档](../../docs/native-packages.md)。
+只接受 `apiVersion`、`id`、`name`、`resources`、`native`、`activation`、`contributes` 和 `showcase`；`activation` 见「线程和生命周期」；旧声明式 `commands`、`toolbar`、`palette`、`workflows`、`panel`、`runtime` 均已移除并明确报错。可选 `contributes.commands` 提供零加载静态命令发现，动态命令通过 `pulse.commands` 在入口注册，模态对话框通过 `pulse.dialogs`（[dialogs.h](include/pulse/dialogs.h)）展示，主页面与设置页由 DLL 通过公开 UI 接口创建。模板可暂不含 `native`，打包前由 `native-manifest` 注入 DLL 哈希和入口信息。可选 `native.files` 声明相邻私有 DLL 和资源的文件名与哈希，使用 `native-manifest --file PATH` 生成；CNG RSA 密钥生成（`package_signing.py keygen`）、整包升级、发布者连续性校验、`package_signing.py rotate` 密钥轮换、回退以及 `pulse_ext.py gc` 孤立版本清理见 [打包文档](../../docs/native-packages.md)。
 
 `pulse.preview.unregister_provider` 分两阶段完成：调用即撤下提供者并取消工作，之后不再开始新请求；仍有回调运行时返回 `PULSE_ERROR_STATE`。此时必须保留 userdata，在 UI 线程重试至 `PULSE_OK` 后释放，或一直保留到 `destroy`。返回 STATE 不表示回调已停止，不得提前释放读取器或回调共享状态。
 
@@ -251,3 +335,12 @@ python tools/extensions/check_native_abi.py generate
 `archive_writer.cpp` 只在插件worker中调用私有7z.dll。输入为本地绝对路径（含宿主提供的扩展盘符路径），stage必须为空；不支持UNC、重解析点和硬链接。限制：256个来源、4096个成员、64层、输入合计4 GiB。创建成功后由tasks/staging完成确认、冲突、撤销重做；writer不自行发布文件。
 
 构建样例时传 `-DPULSE_ARCHIVE_WRITER_TEST=ON`，运行 `archive_writer_test.exe` 验证10个关键用例。真实宿主验收使用 `tools/extensions/test_native_compression.py`（宿主须开启PULSE_WITH_TEST_HOOKS），证据见主路线图P1.10。ZIP内容由Python zipfile独立回读。
+
+## 连续 Slider（需要同步更新宿主）
+
+`PULSE_UI_MODEL_SLIDER` 不改变 C 结构或枚举值。默认未指定 `kind` 的控件仍是旧版离散 `stops` / index。
+新宿主支持 `kind="continuous"`：`options` 必须是 `[minimum, maximum]` 两个有限数值字符串，最小值小于最大值，范围在 ±1e9 内；它们不是刻度。必须声明 `state`，其值为范围内的浮点数字符串，禁止同时指定 `stops` 或整数 `value`。`text` 是标签、`helper` 是单位；绘制没有离散点。
+
+可选 `command` 必须是已声明的命令。鼠标拖动以连续位置更新状态；释放（含最终坐标）、捕获丢失或失焦时，宿主先派发状态，再派发一次提交命令。键盘方向键按范围的 1% 调节，Home/End 到边界并提交；拖动中 Escape 恢复起始值后提交。插件应在状态回调做节流预览，在提交命令中持久化，不应每个 pointer move 保存文件。
+
+初始树允许最多 64 个 state；`set_states` 及 local action 的单批更新上限仍为 32，较多状态分批更新。节点 128、深度 8 等其他预算不变。旧宿主会拒绝新 kind，而不是将连续值解释为旧 index，因此新控件插件应与本次宿主共同交付。

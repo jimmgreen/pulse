@@ -71,6 +71,7 @@ StagingBackend MakeStagingBackend(HWND owner, CallerBinding caller) {
         const auto choice = always ? ui::ConfirmChoice::Confirm
                                    : ui::ShowConfirmDialogEx(owner, spec, app->darkMode, app->accentColor);
         app = GetAppState(owner);
+        if (!always && app) DeferOperationAutoShow(*app);
         if (app && choice == ui::ConfirmChoice::Secondary && ValidateCallerBinding(caller)) {
             if (GrantPublishTrust(app->appPrefs.extension_publish_trusted, publisher, caller.Package().id) && !app->isolatedTest)
                 app->appPrefs.Save();
@@ -138,6 +139,7 @@ StagingBackend MakeStagingBackend(HWND owner, CallerBinding caller) {
         };
         std::wstring path;
         const bool chosen = ui::ShowFolderPicker(owner, spec, app->darkMode, app->accentColor, path);
+        if (auto* current = GetAppState(owner)) DeferOperationAutoShow(*current);
         return chosen && GetAppState(owner) && ValidateCallerBinding(caller)
             ? std::make_pair(PULSE_OK, std::move(path)) : std::make_pair(PULSE_ERROR_STATE, std::wstring{});
     };

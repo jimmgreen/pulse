@@ -1,4 +1,6 @@
 #include "../app/extensions/store/install_transaction.h"
+#include "../app/extensions/store/installed_store.h"
+#include "../app/extensions/associations_cleanup.h"
 #include "../app/extensions/package_signature.h"
 #include "../app/extensions/package_store.h"
 #include "../common/json_value.h"
@@ -337,6 +339,36 @@ int wmain() {
                 rot_review.publisher_rotated && rot_review.previous_publisher_id == key.publisher.id &&
                 CommitInstall(retired_root, rotated_pkg, rot_review, Consent(), cancel, output, error) && output.changed,
                 "ReviewInstall/CommitInstall discover on-disk .rotation.json even after old pin retired from policy", error);
+        }
+        {
+            const auto assoc_root = Root(L"assoc-cleanup");
+            Check(ReviewInstall(assoc_root, first, review, error) &&
+                CommitInstall(assoc_root, first, review, Consent(true), cancel, output, error) && output.enabled,
+                "prepare enabled package for associations cleanup hook test", error);
+            std::vector<std::string> cleaned_packages;
+            pulse::extensions::SetPackageAssociationsCleanupHook([&](std::string_view pkg_id) {
+                cleaned_packages.emplace_back(pkg_id);
+            });
+            StoreChangeReview disable_rev;
+            StoreChangeResult change_res;
+            Check(ReviewStoreChange(assoc_root, "test.archive", StoreChangeAction::Disable, disable_rev, error) &&
+                CommitStoreChange(assoc_root, disable_rev, StoreChangeConsent{true, false, false, false}, cancel, change_res, error) &&
+                cleaned_packages == std::vector<std::string>{"test.archive"},
+                "CommitStoreChange Disable triggers package associations cleanup hook", error);
+
+            cleaned_packages.clear();
+            StoreChangeReview enable_rev;
+            Check(ReviewStoreChange(assoc_root, "test.archive", StoreChangeAction::Enable, enable_rev, error) &&
+                CommitStoreChange(assoc_root, enable_rev, StoreChangeConsent{true, false, true, false}, cancel, change_res, error) &&
+                cleaned_packages.empty(),
+                "CommitStoreChange Enable does not trigger package associations cleanup hook", error);
+
+            StoreChangeReview uninstall_rev;
+            Check(ReviewStoreChange(assoc_root, "test.archive", StoreChangeAction::Uninstall, uninstall_rev, error) &&
+                CommitStoreChange(assoc_root, uninstall_rev, StoreChangeConsent{true, false, false, false}, cancel, change_res, error) &&
+                cleaned_packages == std::vector<std::string>{"test.archive"},
+                "CommitStoreChange Uninstall triggers package associations cleanup hook", error);
+            pulse::extensions::SetPackageAssociationsCleanupHook(nullptr);
         }
         Check(!TemporaryFiles(base), "no transaction temporary files leaked across cases");
         std::cout << "Install transaction tests: " << passed << " passed, " << failed << " failed\n";

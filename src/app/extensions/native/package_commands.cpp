@@ -1,9 +1,13 @@
 #include "package_commands.h"
+#include "../associations_cleanup.h"
 #include "../runtime.h"
+#include "command_contributions.h"
 #include "session.h"
+#include "../../app_state.h"
 #include "../../actions/action_registry.h"
 #include "../../../common/localization.h"
 #include "crash_guard.h"
+#include "../../window_registry.h"
 #include <windows.h>
 #include <limits>
 
@@ -94,9 +98,19 @@ bool HandlePackageCommand(AppState& state, int command) {
     }
     if (command == kToggleCommand) {
         SetPackageEnabled(package, !PackageEnabled(package));
-        if (!PackageEnabled(package)) StopPackage(package);
-        // Turned back on by the user: this build is trusted again.
-        else crash_guard::ForgetPackageCrash(package);
+        if (!PackageEnabled(package)) {
+            StopPackage(package);
+            extensions::NotifyPackageAssociationsCleanup(manifest->id);
+        }
+        // Turned back on by the user: this build is trusted again; packages that
+        // start with the window start now in every window.
+        else {
+            crash_guard::ForgetPackageCrash(package);
+            if (manifest->StartsWithWindow())
+                app::ForEachWindowSharingCore(state, [](AppState& window) { ScheduleStartupPackages(window.hwnd); });
+        }
+        RefreshThumbnailPackages(state.hwnd);
+        state.ops.SetCustomOpenFallbackExtensions(FallbackOpenExtensions());
         return true;
     }
 

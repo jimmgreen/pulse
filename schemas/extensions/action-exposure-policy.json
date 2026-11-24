@@ -1297,6 +1297,16 @@
       "entryConditions": "读状态先约束仓库范围；pull/push需外部执行与逐次确认模型"
     },
     {
+      "action": "git.source_control",
+      "decision": "restricted",
+      "module": "Git",
+      "ownerSource": "src/app/git_ui.h",
+      "reason": "源代码管理窗口可暂存、提交和放弃更改，副作用由用户逐次确认",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；仅保留用户界面入口",
+      "entryConditions": "提交与放弃须用户在窗口内操作并二次确认"
+    },
+    {
       "action": "git.pull",
       "decision": "restricted",
       "module": "Git",

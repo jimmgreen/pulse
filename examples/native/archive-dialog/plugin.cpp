@@ -13,6 +13,17 @@ using N = PulseUiModelNode;
 using States = std::map<std::string, std::string>;
 
 constexpr const char* kFormats[] = {"7z", "zip", "tar"};
+constexpr const char* kLevels[] = {"Store", "Fast", "Normal", "Maximum"};
+
+size_t ParseIndex(const std::string& text, size_t count, size_t fallback = 0) noexcept {
+    if (text.empty() || text.size() > 2) return fallback;
+    size_t v = 0;
+    for (char c : text) {
+        if (c < '0' || c > '9') return fallback;
+        v = v * 10 + static_cast<size_t>(c - '0');
+    }
+    return v < count ? v : fallback;
+}
 
 struct Plugin {
     pulse::sdk::Host host;
@@ -30,8 +41,7 @@ struct Plugin {
     // password fields show, and the mismatch warning.
     pulse::sdk::DialogSession::StateList Derived() const {
         const auto get = [&](const char* key) { const auto it = values.find(key); return it == values.end() ? std::string() : it->second; };
-        size_t format = 0;
-        for (size_t i = 0; i < std::size(kFormats); ++i) if (get("format") == kFormats[i]) format = i;
+        const size_t format = ParseIndex(get("format"), std::size(kFormats));
         const bool encryptable = format != 2;  // tar has no encryption
         const bool protecting = encryptable && get("protect") == "true";
         const bool mismatch = protecting && !get("confirm").empty() && get("password") != get("confirm");
@@ -65,7 +75,7 @@ struct Plugin {
             ModelNode(PULSE_UI_MODEL_STACK, "level-block").Int(&N::gap, 6).Children({
                 ModelNode(PULSE_UI_MODEL_TEXT, "level-label").String(&N::text, "Compression level"),
                 ModelNode(PULSE_UI_MODEL_SLIDER, "level-input").String(&N::state, "level").Int(&N::stops, 4)
-                    .Options({"Store", "Fast", "Normal", "Maximum"})}),
+                    .Options({kLevels, kLevels + 4})}),
             ModelNode(PULSE_UI_MODEL_STACK, "protect-block").Int(&N::gap, 8).String(&N::visible_binding, "state.encryptable").Children({
                 ModelNode(PULSE_UI_MODEL_SWITCH, "protect-input").String(&N::state, "protect").String(&N::text, "Protect with a password"),
                 ModelNode(PULSE_UI_MODEL_GRID, "password-grid").Int(&N::columns, 2).Int(&N::gap, 10)
@@ -77,11 +87,14 @@ struct Plugin {
                 ModelNode(PULSE_UI_MODEL_TEXT, "output-label").String(&N::text, "Save in"),
                 ModelNode(PULSE_UI_MODEL_STACK, "output-row").String(&N::orientation, "horizontal").Int(&N::gap, 8).Children({
                     ModelNode(PULSE_UI_MODEL_TEXT_INPUT, "output-input").String(&N::text, "Save in").String(&N::state, "output").Int(&N::flex, 1),
-                    ModelNode(PULSE_UI_MODEL_BUTTON, "browse").String(&N::text, "Browse...").String(&N::command, "browse")})})}));
-        values = {{"name", archive_name}, {"format", "7z"}, {"level", "Normal"}, {"protect", "false"},
+                    dialog.SupportsV2()
+                        ? ModelNode(PULSE_UI_MODEL_BUTTON, "browse").String(&N::text, "Browse...").String(&N::command, "browse")
+                        : ModelNode(PULSE_UI_MODEL_BUTTON, "browse").String(&N::text, "Browse...").Bool(&N::enabled, false)})})}));
+        values = {{"name", archive_name}, {"format", "0"}, {"level", "2"}, {"protect", "false"},
                   {"password", ""}, {"confirm", ""}, {"output", directory}};
         for (const auto& [key, value] : values) tree.State(key, value);
         for (const auto& [key, value] : Derived()) tree.State(key, value);
+        if (dialog.SupportsV2()) tree.Command("browse");
 
         const PulseDialogButton buttons[] = {
             {sizeof(PulseDialogButton), PULSE_DIALOG_BUTTON_PRIMARY, View("start"), View("Create")},
@@ -125,7 +138,8 @@ struct Plugin {
         values = chosen;
         std::string ext = ".7z";
         for (const auto& [key, value] : Derived()) if (key == "ext") ext = value;
-        const std::string message = "Would create " + get("name") + ext + " in " + get("output") + " (level " + get("level") +
+        const size_t level = ParseIndex(get("level"), std::size(kLevels), 2);
+        const std::string message = "Would create " + get("name") + ext + " in " + get("output") + " (level " + kLevels[level] +
             (get("protect") == "true" ? ", password protected" : "") + ").";
         const PulseDialogButton ok{sizeof(PulseDialogButton), PULSE_DIALOG_BUTTON_PRIMARY, View("ok"), View("OK")};
         PulseDialogRequest request{};
@@ -146,8 +160,7 @@ struct Plugin {
         code = host.Query(PULSE_DISPATCH_INTERFACE, PULSE_DISPATCH_VERSION, dispatch_api); if (code != PULSE_OK) return code;
         code = dialog.Init(host); if (code != PULSE_OK) return code;
         queue = std::make_unique<pulse::sdk::DispatchQueue>(dispatch_api);
-        PulsePickersV1 picker_table{};  // optional: Browse needs pulse.pickers
-        if (host.Query(PULSE_PICKERS_INTERFACE_NAME, PULSE_PICKERS_VERSION_1, picker_table) == PULSE_OK) pickers.emplace(picker_table);
+        pickers = pulse::sdk::PickerClient::TryQuery(host);  // optional: Browse needs pulse.pickers
         active = true;
         PulseCommandDescriptor descriptor{};
         descriptor.size = sizeof(descriptor);

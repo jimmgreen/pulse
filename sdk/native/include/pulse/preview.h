@@ -11,6 +11,10 @@ extern "C" {
 typedef uint64_t PulsePreviewProviderId;
 enum { PULSE_PREVIEW_ARCHIVE = 1u, PULSE_PREVIEW_BITMAP = 2u, PULSE_PREVIEW_UI_MODEL = 3u };
 enum { PULSE_PREVIEW_ENTRY_DIRECTORY = 1u, PULSE_PREVIEW_ENTRY_ENCRYPTED = 2u };
+/* PulsePreviewProvider.flags: also make grid thumbnails for this extension. */
+enum { PULSE_PREVIEW_PROVIDER_THUMBNAIL = 1u };
+/* PulsePreviewRequest.purpose: what the host asks for. */
+enum { PULSE_PREVIEW_PURPOSE_PREVIEW = 0u, PULSE_PREVIEW_PURPOSE_THUMBNAIL = 1u };
 typedef struct PulsePreviewArchiveEntry {
     PulseStringView path;
     uint64_t size_bytes, packed_bytes, modified_ticks; /* Windows FILETIME ticks. */
@@ -35,6 +39,7 @@ typedef struct PulsePreviewRequest {
     void* context;
     uint32_t(PULSE_CALL *cancelled)(void*);
     PulseStatus(PULSE_CALL *publish)(void*, const PulsePreviewResult*);
+    uint32_t purpose; /* Appended: PULSE_PREVIEW_PURPOSE_*; read only when size covers it. */
 } PulsePreviewRequest;
 typedef PulseStatus(PULSE_CALL *PulsePreviewFn)(void*, const PulsePreviewRequest*);
 typedef struct PulsePreviewProvider {
@@ -42,6 +47,7 @@ typedef struct PulsePreviewProvider {
     PulseStringView extension; /* Lowercase dotted ASCII extension, 2..32 bytes. */
     PulsePreviewFn callback;
     void* user;
+    uint32_t flags; /* Appended: PULSE_PREVIEW_PROVIDER_*; a size without it means 0. */
 } PulsePreviewProvider;
 typedef struct PulsePreviewV1 {
     uint32_t size, version;
@@ -63,7 +69,14 @@ typedef struct PulsePreviewV1 {
    unregister immediately retires the provider and cancels its work. It returns
    STATE while a provider callback is still running; keep userdata alive and retry
    on the UI thread until OK, or keep it through destroy. Retired providers cannot
-   start new requests. Stop cancels but host retains DLL until every provider returns. No exceptions
+   start new requests. Stop cancels but host retains DLL until every provider returns.
+   Thumbnails (flags PULSE_PREVIEW_PROVIDER_THUMBNAIL): the same callback also runs for
+   grid thumbnails of local files with purpose PULSE_PREVIEW_PURPOSE_THUMBNAIL and pixels =
+   the wanted longest edge. Only a BITMAP result is used; anything else, an error or a
+   timeout falls back to the system thumbnail. Calls come from host thumbnail threads,
+   share the 2 concurrent calls, and may arrive for many files in a row: keep them quick.
+   The host scales larger bitmaps down and caches results in memory and on disk by path,
+   size and modified time. Unknown flag bits fail registration with ARGUMENT. No exceptions
    cross ABI. All strings are UTF-8; never free memory from the other side. */
 #pragma pack(pop)
 #ifdef __cplusplus

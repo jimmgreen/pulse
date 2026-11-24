@@ -6,10 +6,12 @@
 #include <vector>
 namespace pulse::json { class Value; }
 namespace pulse::extensions {
-enum class UiNodeType { Stack, Grid, Group, ScrollView, Text, Button, TextInput, Checkbox, Select, Progress, Divider, Tabs, Tab, List, Switch, Radio, Slider, Segmented, Badge, Tag, InfoBar, SplitButton, MenuButton, SidebarItem, Breadcrumb, EmptyState, VirtualList, Tree, DataTable, TrayCard, CommandSearch, SplitPane, SidebarSection, DriveItem, PaneHeader, FileRow, StagingTray, StagingItem, StatusBar, Tooltip, TitleBarButton, Canvas, Count };
+enum class UiNodeType { Stack, Grid, Group, ScrollView, Text, Button, TextInput, Checkbox, Select, Progress, Divider, Tabs, Tab, List, Switch, Radio, Slider, Segmented, Badge, Tag, InfoBar, SplitButton, MenuButton, SidebarItem, Breadcrumb, EmptyState, VirtualList, Tree, DataTable, TrayCard, CommandSearch, SplitPane, SidebarSection, DriveItem, PaneHeader, FileRow, StagingTray, StagingItem, StatusBar, Tooltip, TitleBarButton, Canvas, OptionCard, SettingsRow, Image, MenuPreview, Count };
 struct UiMenuItem {
     std::string id, text, command, glyph, shortcut;
+    std::string detail, group;  // menuPreview: second caption line; tinted group caption
     bool enabled = true, checked = false, separator = false;
+    bool primary = false;       // menuPreview: semibold label
     std::vector<UiMenuItem> children;
 
     bool operator==(const UiMenuItem&) const = default;
@@ -60,6 +62,7 @@ struct UiNode {
     std::string badge_text;
     bool icon_only = false, bordered = true, selected = false, current = false, separator = true;
     int stops = 2;
+    std::string slider_kind = "stepped";
     std::string trailing_glyph, summary, filter_text, filter_command, sort_command;
     std::string modified, file_type, file_size, status_text, helper, count_label, action_text;
     std::string center_text, right_text, title_bar_role = "custom";
@@ -73,6 +76,15 @@ struct UiNode {
     std::optional<UiDataSource> data_source;
     std::optional<UiValidation> validation;
     std::string orientation = "vertical";
+    std::string option_kind = "radio";
+    std::string image_fit = "contain";
+    std::string menu_kind = "plain";  // MenuPreview: "plain" or "context" (host right-click menu frame)
+    // Text tone (kind): default / secondary / accent / success / warning / danger, theme-resolved.
+    std::string text_tone = "default";
+    // Stack/Grid/Group inner inset in DIP; -1 keeps the default (bordered Group card insets).
+    int padding = -1;
+    std::string tooltip;        // hover text for a non-container control
+    std::string pointer_state;  // Canvas: state key receiving "move X Y" / "leave" / "click X Y"
 
     bool operator==(const UiNode&) const = default;
 };

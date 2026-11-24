@@ -1,7 +1,9 @@
 #include "ui_model.h"
 #include "../../../common/json_value.h"
 #include <algorithm>
+#include <cstring>
 #include <iterator>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -26,6 +28,7 @@ constexpr std::pair<uint32_t, std::string_view> kModelTypeNames[] = {
     {PULSE_UI_MODEL_DIVIDER, "divider"},
     {PULSE_UI_MODEL_TABS, "tabs"},
     {PULSE_UI_MODEL_TAB, "tab"},
+    {PULSE_UI_MODEL_LIST, "list"},
     {PULSE_UI_MODEL_SWITCH, "switch"},
     {PULSE_UI_MODEL_RADIO, "radio"},
     {PULSE_UI_MODEL_SLIDER, "slider"},
@@ -35,14 +38,24 @@ constexpr std::pair<uint32_t, std::string_view> kModelTypeNames[] = {
     {PULSE_UI_MODEL_INFO_BAR, "infoBar"},
     {PULSE_UI_MODEL_SPLIT_BUTTON, "splitButton"},
     {PULSE_UI_MODEL_MENU_BUTTON, "menuButton"},
+    {PULSE_UI_MODEL_SIDEBAR_ITEM, "sidebarItem"},
+    {PULSE_UI_MODEL_BREADCRUMB, "breadcrumb"},
     {PULSE_UI_MODEL_EMPTY_STATE, "emptyState"},
     {PULSE_UI_MODEL_VIRTUAL_LIST, "virtualList"},
     {PULSE_UI_MODEL_TREE, "tree"},
     {PULSE_UI_MODEL_DATA_TABLE, "dataTable"},
+    {PULSE_UI_MODEL_COMMAND_SEARCH, "commandSearch"},
     {PULSE_UI_MODEL_SPLIT_PANE, "splitPane"},
+    {PULSE_UI_MODEL_SIDEBAR_SECTION, "sidebarSection"},
+    {PULSE_UI_MODEL_FILE_ROW, "fileRow"},
+    {PULSE_UI_MODEL_STATUS_BAR, "statusBar"},
     {PULSE_UI_MODEL_CANVAS, "canvas"},
+    {PULSE_UI_MODEL_OPTION_CARD, "optionCard"},
+    {PULSE_UI_MODEL_SETTINGS_ROW, "settingsRow"},
+    {PULSE_UI_MODEL_IMAGE, "image"},
+    {PULSE_UI_MODEL_MENU_PREVIEW, "menuPreview"},
 };
-static_assert(std::size(kModelTypeNames) == 28);
+static_assert(std::size(kModelTypeNames) == 39);
 constexpr std::string_view ModelTypeName(uint32_t type) {
     for (const auto &entry : kModelTypeNames)
         if (entry.first == type)
@@ -70,6 +83,9 @@ struct Rejected {
 struct Builder {
     size_t bytes = 0, nodes = 0, menus = 0, rows = 0;
     std::set<const void *> seen_nodes, seen_menus, seen_rows;
+    // Optional presentation keyed by node ID; merged into the matching node's DOM entry.
+    std::map<std::string, std::vector<std::pair<std::string, json::Value>>> extras;
+    std::set<std::string> merged_extras;
     std::vector<std::string> scopes;
 
     struct Scope {
@@ -100,7 +116,7 @@ struct Builder {
     }
 
     std::string Text(PulseStringView view, const char *field = nullptr) {
-        if (view.length > 1024 || (view.length && !view.data) || view.length > 65536 - bytes) {
+        if (view.length > 4096 || (view.length && !view.data) || view.length > 262144 - bytes) {
             if (field) FailField(field, "invalid string or total UTF-8 budget exceeded");
             Fail("invalid string or total UTF-8 budget exceeded");
         }
@@ -147,7 +163,7 @@ struct Builder {
             FailField(field, "invalid bounded array");
         return present != 0;
     }
-    void Strings(json::Value &object, const char *name, PulseUiModelStrings input, uint32_t limit = 64) {
+    void Strings(json::Value &object, const char *name, PulseUiModelStrings input, uint32_t limit = 128) {
         if (!Array(name, input.present, input.data, input.count, limit))
             return;
         auto values = json::Value::Array();
@@ -156,8 +172,8 @@ struct Builder {
         object.set(name, std::move(values));
     }
     json::Value States(const char *collection_name, const PulseUiState *entries, uint32_t count) {
-        if (count > 32 || (count && !entries))
-            FailField(collection_name, "state/update count exceeds 32");
+        if (count > (std::string_view(collection_name) == "states" ? 128u : 64u) || (count && !entries))
+            FailField(collection_name, "state/update count exceeds collection limit");
         auto array = json::Value::Array();
         for (uint32_t i = 0; i < count; ++i) {
             Scope scope(*this, std::string(collection_name) + "[" + std::to_string(i) + "]");
@@ -172,10 +188,24 @@ struct Builder {
         if (!Array(name, input.present, input.data, input.count, 128))
             return;
         auto array = json::Value::Array();
+        // Arrays written before detail/group/primary were appended hold PULSE_UI_MODEL_MENU_ITEM_SIZE_V1
+        // records: step by the first record's size, every record must share it, and fields past it stay absent.
+        const auto *base = reinterpret_cast<const unsigned char *>(input.data);
+        uint32_t stride = 0;
+        if (input.count) {
+            std::memcpy(&stride, base, sizeof(stride));
+            if (stride != sizeof(PulseUiModelMenuItem) && stride != PULSE_UI_MODEL_MENU_ITEM_SIZE_V1) {
+                Scope scope(*this, std::string(name) + "[0]");
+                Fail("menu depth/budget/cycle or invalid record size");
+            }
+        }
+        const bool extended = stride == sizeof(PulseUiModelMenuItem);
         for (uint32_t i = 0; i < input.count; ++i) {
-            const auto &source = input.data[i];
+            const unsigned char *record = base + static_cast<size_t>(i) * stride;
+            PulseUiModelMenuItem source{};
+            std::memcpy(&source, record, stride);
             Scope scope(*this, std::string(name) + "[" + std::to_string(i) + "]");
-            if (depth > 4 || ++menus > 128 || source.size != sizeof(source) || !seen_menus.insert(&source).second)
+            if (depth > 4 || ++menus > 128 || source.size != stride || !seen_menus.insert(record).second)
                 Fail("menu depth/budget/cycle or invalid record size");
             auto value = json::Value::Object();
             Field(value, "id", source.id);
@@ -186,6 +216,11 @@ struct Builder {
             Field(value, "enabled", source.enabled);
             Field(value, "checked", source.checked);
             Field(value, "separator", source.separator);
+            if (extended) {
+                Field(value, "detail", source.detail);
+                Field(value, "group", source.group);
+                Field(value, "primary", source.primary);
+            }
             Menu(value, "children", source.children, depth + 1);
             array.push(std::move(value));
         }
@@ -226,13 +261,17 @@ struct Builder {
             FailField("size", "invalid node record size");
         if (ModelTypeName(source.type).empty())
             FailField("type", "unsupported node type");
-        if (depth > 8 || ++nodes > 128 || !seen_nodes.insert(&source).second)
+        if (depth > 12 || ++nodes > 384 || !seen_nodes.insert(&source).second)
             Fail("node depth/budget/cycle exceeded");
         if (source.data_source)
             FailField("data_source", "native UI data provider is not connected", PULSE_ERROR_UNAVAILABLE);
         auto value = json::Value::Object();
-        value.set("id", Text(source.id, "id"));
+        const auto node_id = Text(source.id, "id");
+        value.set("id", node_id);
         value.set("type", ModelTypeName(source.type));
+        if (const auto extra = extras.find(node_id); extra != extras.end() && merged_extras.insert(node_id).second)
+            for (const auto &[name, field] : extra->second)
+                value.set(name, field);
         // Named scalar mappings follow the existing model/schema property names exactly.
         Field(value, "text", source.text);
         Field(value, "command", source.command);
@@ -329,7 +368,7 @@ struct Builder {
             entry.set("message", Text(validation.message, "message"));
             value.set("validation", std::move(entry));
         }
-        if (Array("children", source.children.present, source.children.data, source.children.count, 128)) {
+        if (Array("children", source.children.present, source.children.data, source.children.count, 384)) {
             auto children = json::Value::Array();
             for (uint32_t i = 0; i < source.children.count; ++i)
                 children.push(Node(source.children.data[i], depth + 1, "children[" + std::to_string(i) + "]"));
@@ -344,8 +383,9 @@ PulseStatus ConvertUiModel(const PulseUiModelTree *input, UiTree &output, std::s
     error.clear();
     try {
         Builder builder;
-        if (!input || input->size != sizeof(*input) || !input->root || input->command_count > 128 ||
-            (input->command_count && !input->commands) || input->action_count > 32 ||
+        if (!input || (input->size != sizeof(*input) && input->size != PULSE_UI_MODEL_TREE_SIZE_V1) ||
+            !input->root || input->command_count > 256 ||
+            (input->command_count && !input->commands) || input->action_count > 64 ||
             (input->action_count && !input->actions))
             builder.FailField("size", "invalid native UI tree");
         std::vector<std::string> command_ids;
@@ -363,10 +403,42 @@ PulseStatus ConvertUiModel(const PulseUiModelTree *input, UiTree &output, std::s
                 builder.Fail("invalid or duplicate callback command ID");
             command_ids.push_back(std::move(id));
         }
+        const bool has_extras = input->size >= sizeof(*input) && (input->extras || input->extra_count);
+        if (has_extras) {
+            if (input->extra_count > 384 || (input->extra_count && !input->extras) ||
+                (!input->extra_count && input->extras))
+                builder.FailField("extras", "invalid bounded array");
+            for (uint32_t i = 0; i < input->extra_count; ++i) {
+                const auto &source = input->extras[i];
+                Builder::Scope scope(builder, "extras[" + std::to_string(i) + "]");
+                if (source.size != sizeof(source))
+                    builder.FailField("size", "invalid extra record size");
+                auto id = builder.Text(source.node, "node");
+                if (id.empty() || builder.extras.contains(id))
+                    builder.FailField("node", "empty or duplicate node ID");
+                auto holder = json::Value::Object();
+                builder.Field(holder, "padding", source.padding);
+                builder.Field(holder, "tooltip", source.tooltip);
+                builder.Field(holder, "pointerState", source.pointer_state);
+                std::vector<std::pair<std::string, json::Value>> fields;
+                for (const auto *name : {"padding", "tooltip", "pointerState"})
+                    if (const auto *field = holder.find(name))
+                        fields.emplace_back(name, *field);
+                if (fields.empty())
+                    builder.Fail("extra sets no property");
+                builder.extras.emplace(std::move(id), std::move(fields));
+            }
+        }
         auto document = json::Value::Object();
         document.set("version", 1);
         document.set("state", builder.States("states", input->states, input->state_count));
         document.set("root", builder.Node(*input->root, 1, "root"));
+        for (const auto &[id, fields] : builder.extras) {
+            if (!builder.merged_extras.contains(id)) {
+                Builder::Scope scope(builder, "extras(" + SafeIdPreview({id.data(), static_cast<uint32_t>(id.size())}) + ")");
+                builder.FailField("node", "no node with this ID");
+            }
+        }
         if (input->action_count) {
             auto actions = json::Value::Array();
             for (uint32_t i = 0; i < input->action_count; ++i) {
@@ -382,7 +454,7 @@ PulseStatus ConvertUiModel(const PulseUiModelTree *input, UiTree &output, std::s
                 auto action = json::Value::Object();
                 action.set("id", builder.Text(source.id, "id"));
                 action.set("updates", builder.States("updates", source.updates, source.update_count));
-                builder.Strings(action, "validate", source.validate, 128);
+                builder.Strings(action, "validate", source.validate, 64);
                 actions.push(std::move(action));
             }
             document.set("actions", std::move(actions));

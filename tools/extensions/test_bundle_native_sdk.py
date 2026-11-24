@@ -39,7 +39,15 @@ class NativeBundleTests(unittest.TestCase):
                          "examples/native/directory-transfer/CMakeLists.txt", "examples/native/directory-transfer/plugin.cpp",
                          "examples/native/directory-transfer/manifest.json", "examples/native/directory-transfer/README.md",
                          "sdk/native/include/pulse/ui_mount.h", "sdk/native/README.md",
-                         "sdk/native/README.md", "sdk/native/README.md",
+                         "sdk/native/include/pulse/tray.h",
+                         "sdk/native/include/pulse/search.h",
+                         "sdk/native/include/pulse/shell.h",
+                         "sdk/native/include/pulse/associations.h",
+                         "sdk/native/include/pulse/vfs.h",
+                         "sdk/native/include/pulse/columns.h",
+                         "sdk/native/include/pulse/statusbar.h",
+                         "sdk/native/include/pulse/fileevents.h",
+                         "sdk/native/include/pulse/worker.hpp",
                          "tools/extensions/native_author_mcp.py", "examples/native/directory-workbench/plugin.cpp",
                          "examples/native/directory-workbench/manifest.json", "examples/native/directory-workbench/README.md"):
                 self.assertIn(name, manifest["files"])
@@ -102,6 +110,75 @@ class NativeBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Missing native directory transfer authoring files"):
                 test_native_sdk.validate(extracted)
 
+    @staticmethod
+    def fake_pe(path, machine=0x8664, characteristics=0x0022, size=4096):
+        data = bytearray(size)
+        data[0:2] = b"MZ"
+        data[60:64] = (64).to_bytes(4, "little")
+        data[64:68] = b"PE\0\0"
+        data[68:70] = machine.to_bytes(2, "little")
+        data[86:88] = characteristics.to_bytes(2, "little")
+        path.write_bytes(bytes(data))
+        return path
+
+    def test_prebuilt_harness_bundled_and_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            harness = self.fake_pe(root / "pulse_plugin_harness.exe")
+            archive = root / "sdk.zip"
+            manifest = bundle_native_sdk.bundle(archive, harness=harness)
+            name = bundle_native_sdk.HARNESS_NAME
+            self.assertEqual(manifest["delivery"], "source-only")
+            self.assertFalse(manifest["hostIncluded"])
+            self.assertEqual(manifest["prebuilt"][name]["purpose"], "headless-plugin-harness")
+            self.assertEqual(manifest["prebuilt"][name]["bytes"], 4096)
+            self.assertIn(name, manifest["files"])
+            self.assertIn("tools/extensions/native_strings.py", manifest["files"])
+            extracted = test_native_sdk.extract(archive, root / "sdk")
+            test_native_sdk.validate(extracted)
+            self.assertEqual((extracted / name).read_bytes(), harness.read_bytes())
+            report = bundle_native_sdk.compatibility_report(archive_path=archive)
+            self.assertEqual(report["prebuilt"], [name])
+            # A swapped binary no longer matches the declaration.
+            self.fake_pe(extracted / name, size=8192)
+            with self.assertRaises(ValueError):
+                test_native_sdk.validate(extracted)
+
+    def test_prebuilt_harness_must_be_x64_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, (machine, characteristics) in enumerate(((0x014C, 0x0022), (0x8664, 0x2022))):
+                harness = self.fake_pe(root / f"h{index}.exe", machine, characteristics)
+                with self.assertRaises(ValueError):
+                    bundle_native_sdk.bundle(root / f"sdk{index}.zip", harness=harness)
+            with self.assertRaises(ValueError):
+                bundle_native_sdk.bundle(root / "missing.zip", harness=root / "nope.exe")
+
+    def test_undeclared_or_unknown_prebuilt_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            harness = self.fake_pe(root / "pulse_plugin_harness.exe")
+            archive = root / "sdk.zip"
+            bundle_native_sdk.bundle(archive, harness=harness)
+            with zipfile.ZipFile(archive) as source:
+                members = {name: source.read(name) for name in source.namelist()}
+            manifest = json.loads(members["native-sdk-manifest.json"])
+            # Undeclared: the binary is listed as a file but not as prebuilt.
+            undeclared = dict(manifest)
+            undeclared.pop("prebuilt")
+            # Unknown: another binary declared as prebuilt.
+            unknown = json.loads(json.dumps(manifest))
+            unknown["prebuilt"]["bin/other.exe"] = unknown["prebuilt"][bundle_native_sdk.HARNESS_NAME]
+            unknown["files"]["bin/other.exe"] = manifest["files"][bundle_native_sdk.HARNESS_NAME]
+            for label, changed, extra in (("undeclared", undeclared, {}),
+                                          ("unknown", unknown, {"bin/other.exe": members[bundle_native_sdk.HARNESS_NAME]})):
+                bad = root / f"{label}.zip"
+                with zipfile.ZipFile(bad, "w") as out:
+                    for name, data in {**members, **extra}.items():
+                        out.writestr(name, json.dumps(changed) if name == "native-sdk-manifest.json" else data)
+                with self.assertRaises(ValueError, msg=label):
+                    test_native_sdk.validate(test_native_sdk.extract(bad, root / f"x-{label}"))
+
     def test_traversal_rejected_before_extract(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -159,11 +236,19 @@ class NativeBundleTests(unittest.TestCase):
                 ("pulse.directories", "directories.h", 1, ["open", "refresh", "list", "open_entry", "watch", "unwatch", "close", "cancel"]),
                 ("pulse.context", "context.h", 1, ["get", "subscribe", "unsubscribe", "get_selection"]),
                 ("pulse.commands", "commands.h", 2, ["register_command", "unregister_command", "update_command", "set_command_flags"]),
-                ("pulse.icons", "icons.h", 1, ["register_icon", "update_icon", "unregister_icon", "resolve_builtin"]),
+                ("pulse.icons", "icons.h", 2, ["register_icon", "update_icon", "unregister_icon", "resolve_builtin", "resolve_icon"]),
                 ("pulse.dialogs", "dialogs.h", 2, ["show", "set_states", "close", "subscribe_command", "unsubscribe_command", "update_model", "get_state"]),
                 ("pulse.diagnostics", "diagnostics.h", 1, ["get_last_error", "clear_last_error"]),
                 ("pulse.pickers", "pickers.h", 1, ["open_files", "save_file", "pick_folders", "quick_pick", "cancel"]),
-                ("pulse.workbench", "workbench.h", 1, ["show_snack", "show_notice", "reveal_path", "show_text_diff", "set_clipboard_text"]),
+                ("pulse.workbench", "workbench.h", 3, ["show_snack", "show_notice", "reveal_path", "show_text_diff", "set_clipboard_text", "open_search", "reveal_path_from_rect", "query_appearance", "subscribe_appearance", "unsubscribe_appearance", "query_locale", "subscribe_locale", "unsubscribe_locale"]),
+                ("pulse.tray", "tray.h", 1, ["snapshot", "collect", "remove_item", "clear", "release_to_directory", "subscribe", "unsubscribe"]),
+                ("pulse.search", "search.h", 1, ["query", "cancel"]),
+                ("pulse.shell", "shell.h", 1, ["get_tag_catalog", "get_path_tags", "set_path_tag", "query_context_menu", "invoke_context_menu", "close_context_menu", "read_preview", "cancel_preview"]),
+                ("pulse.associations", "associations.h", 1, ["query", "apply", "remove", "cancel", "open_chooser", "open_default_apps"]),
+                ("pulse.vfs", "vfs.h", 1, ["register_mount", "unregister_mount", "invalidate_path", "open_path"]),
+                ("pulse.columns", "columns.h", 1, ["register_column", "register_badge", "set_title", "invalidate", "unregister"]),
+                ("pulse.statusbar", "statusbar.h", 1, ["add_item", "update_item", "set_visible", "remove_item"]),
+                ("pulse.fileevents", "fileevents.h", 1, ["subscribe", "unsubscribe"]),
                 ("pulse.preview", "preview.h", 1, ["register_provider", "unregister_provider"]),
                 ("pulse.tasks", "tasks.h", 1, ["create", "cancel", "get", "release"])):
             with self.subTest(interface=name):
@@ -267,11 +352,11 @@ class NativeBundleTests(unittest.TestCase):
             compat_report = bundle_native_sdk.compatibility_report(archive)
             self.assertEqual(compat_report["compatibility"], compat)
             self.assertEqual(compat_report["archiveSha256"], hashlib.sha256(archive.read_bytes()).hexdigest())
-            self.assertEqual(len(compat_report["templates"]), 9)
+            self.assertEqual(len(compat_report["templates"]), 11)
 
             verified = verify_sdk_bundle.verify_bundle(archive, compile_projects=False)
             self.assertTrue(verified["ok"], verified)
-            self.assertEqual(verified["templatesVerified"], 9)
+            self.assertEqual(verified["templatesVerified"], 11)
 
 
 if __name__ == "__main__":

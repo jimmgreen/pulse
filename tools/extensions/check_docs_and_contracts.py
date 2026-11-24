@@ -32,9 +32,11 @@ EXPECTED_TEMPLATES = (
     "directory-browser",
     "directory-transfer",
     "directory-workbench",
+    "file-columns",
     "file-operations",
     "inspector",
     "live-data",
+    "quickstart",
     "reactive-panel",
     "rename-panel",
 )
@@ -86,6 +88,14 @@ EXPECTED_EXPERIMENTAL_INTERFACES = (
     "pulse.diagnostics",
     "pulse.pickers",
     "pulse.workbench",
+    "pulse.tray",
+    "pulse.search",
+    "pulse.shell",
+    "pulse.associations",
+    "pulse.vfs",
+    "pulse.columns",
+    "pulse.statusbar",
+    "pulse.fileevents",
 )
 
 EXPECTED_STABILITY_TIERS = {
@@ -102,6 +112,14 @@ REQUIRED_INTERFACES = (
     "pulse.diagnostics",
     "pulse.pickers",
     "pulse.workbench",
+    "pulse.tray",
+    "pulse.search",
+    "pulse.shell",
+    "pulse.associations",
+    "pulse.vfs",
+    "pulse.columns",
+    "pulse.statusbar",
+    "pulse.fileevents",
     "pulse.files",
     "pulse.fileops",
     "pulse.directories",
@@ -243,7 +261,7 @@ def check_all(root=ROOT):
                 or tuple(experimental_meta.get("interfaces", ())) != EXPECTED_EXPERIMENTAL_INTERFACES
             ):
                 errors.append(
-                    "api-catalog.json stability.tiers.experimental does not match expected 8 experimental interfaces"
+                    "api-catalog.json stability.tiers.experimental does not match expected 11 experimental interfaces"
                 )
 
         support_policy = catalog.get("supportPolicy")

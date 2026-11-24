@@ -7,6 +7,8 @@
 #include <objbase.h>
 #include <oleacc.h>
 #include <thread>
+#include <filesystem>
+#include <fstream>
 namespace {
 enum class PopupAction { SelectSecond, Cancel, CloseView, Recursive };
 struct PopupProbe {
@@ -95,7 +97,240 @@ PopupProbe ExercisePopup(pulse::ui::ExtensionTreeView &view, PopupAction action,
     return probe;
 }
 } // namespace
-int main() {
+int SegmentedRegression(const char* output) {
+    using namespace pulse;
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    INITCOMMONCONTROLSEX common{sizeof(common), ICC_WIN95_CLASSES};
+    InitCommonControlsEx(&common);
+    std::filesystem::create_directories(output);
+    int failed = 0;
+    const auto check = [&](bool ok, const char* name) {
+        std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", name); failed += !ok;
+    };
+    for (bool dark : {false, true}) for (float scale : {1.0f, 1.5f}) {
+        const int width = static_cast<int>(560 * scale), height = static_cast<int>(180 * scale);
+        HWND parent = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"Segmented regression fixture",
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE, 80, 80, width + 40, height + 60,
+            nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        {
+            extensions::UiTree tree;
+            tree.state = {{"material", "3"}};
+            extensions::UiNode segment;
+            segment.id = "material"; segment.type = extensions::UiNodeType::Segmented;
+            segment.options = {"跟随 Pulse", "亚克力", "Mica", "Mica Alt", "无"};
+            segment.state = "material"; segment.min_width = segment.max_width = 380;
+            tree.root.children.push_back(segment);
+            ui::ExtensionTreeView view;
+            check(view.Create(parent, tree, {}, dark, D2D1::ColorF(0.0f, 0.4f, 0.8f, 1.0f), scale), "create five-option settings segment");
+            view.SetBounds({0, 0, width, height});
+            HWND control = view.NodeWindow("material");
+            RECT bounds{}; GetClientRect(control, &bounds);
+            check(TabCtrl_GetItemCount(control) == 5, "all five material options including None exist");
+            HDC dc = CreateCompatibleDC(nullptr);
+            BITMAPINFO info{}; info.bmiHeader = {sizeof(BITMAPINFOHEADER), width, -height, 1, 32, BI_RGB};
+            void* pixels = nullptr;
+            HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+            auto old = SelectObject(dc, bitmap);
+            const auto capture = [&]() {
+                check(view.PaintTo(dc, 0, 0), "capture actual shared settings renderer");
+                const auto* bytes = static_cast<unsigned char*>(pixels);
+                return std::vector<unsigned char>(bytes, bytes + width * height * 4);
+            };
+            for (int selected = 0; selected < 5; ++selected) {
+                const int x = bounds.right * (selected * 2 + 1) / 10;
+                SendMessageW(control, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, 16));
+                SendMessageW(control, WM_LBUTTONUP, 0, MAKELPARAM(x, 16));
+                MSG pending{};
+                while (PeekMessageW(&pending, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&pending); DispatchMessageW(&pending); }
+                check(view.StateValue("material") == std::to_string(selected), "pointer selects requested material including None");
+            }
+            check(view.SetState("material", "4") && view.StateValue("material") == "4", "None survives model refresh");
+            SetFocus(parent);
+            auto unfocused = capture();
+            SetFocus(control);
+            check(GetFocus() == control, "fixture owns real segment focus");
+            auto focused = capture();
+            POINT origin{}; MapWindowPoints(control, view.Hwnd(), &origin, 1);
+            for (int part = 0; part < 5; ++part) {
+                size_t changed = 0;
+                for (int y = origin.y; y < origin.y + bounds.bottom; ++y)
+                    for (int x = origin.x + bounds.right * part / 5 + 1;
+                         x < origin.x + bounds.right * (part + 1) / 5 - 1; ++x) {
+                        if (x < 0 || x >= width || y < 0 || y >= height) continue;
+                        const auto index = (y * width + x) * 4;
+                        if (!std::equal(focused.begin() + index, focused.begin() + index + 3, unfocused.begin() + index)) ++changed;
+                    }
+                std::printf("FOCUS dark=%d scale=%.1f part=%d changed=%zu\n", dark, scale, part, changed);
+                check(part == 4 ? changed > 0 : changed == 0, "only selected segment receives focus border");
+            }
+            const auto path = std::filesystem::path(output) / (std::string(dark ? "dark-" : "light-") + (scale > 1 ? "150.bmp" : "100.bmp"));
+            std::ofstream stream(path, std::ios::binary);
+            BITMAPFILEHEADER file{}; file.bfType = 0x4d42; file.bfOffBits = sizeof(file) + sizeof(BITMAPINFOHEADER);
+            file.bfSize = file.bfOffBits + width * height * 4;
+            stream.write(reinterpret_cast<const char*>(&file), sizeof(file));
+            stream.write(reinterpret_cast<const char*>(&info.bmiHeader), sizeof(BITMAPINFOHEADER));
+            stream.write(reinterpret_cast<const char*>(focused.data()), focused.size());
+            SelectObject(dc, old); DeleteObject(bitmap); DeleteDC(dc);
+            view.Close();
+        }
+        DestroyWindow(parent);
+    }
+    if (SUCCEEDED(com)) CoUninitialize();
+    std::printf("SEGMENTED_RESULT failed=%d\n", failed);
+    return failed ? 1 : 0;
+}
+int GroupedSettingsRegression() {
+    using namespace pulse;
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    INITCOMMONCONTROLSEX common{sizeof(common), ICC_WIN95_CLASSES};
+    InitCommonControlsEx(&common);
+    int failed = 0;
+    for (bool tabs : {false, true}) for (bool dark : {false, true}) for (float scale : {1.0f, 1.5f}) {
+    HWND parent = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"STATIC", L"Grouped settings fixture",
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE, 80, 80, 620, 360, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    {
+        extensions::UiTree tree;
+        tree.state = {{"placement", "0"}};
+        extensions::UiNode card;
+        card.id = "card"; card.type = extensions::UiNodeType::Group; card.bordered = true; card.gap = 8;
+        extensions::UiNode title;
+        title.id = "title"; title.type = extensions::UiNodeType::Text; title.text = "Menu placement";
+        card.children.push_back(title);
+        extensions::UiNode segment;
+        segment.id = "placement"; segment.type = tabs ? extensions::UiNodeType::Tabs : extensions::UiNodeType::Segmented;
+        segment.state = "placement"; segment.options = {"Default", "Flat", "Submenu", "Hidden"};
+        if (tabs) {
+            for (int i = 0; i < 4; ++i) {
+                extensions::UiNode tab;
+                tab.id = "tab-" + std::to_string(i); tab.type = extensions::UiNodeType::Tab; tab.text = segment.options[i];
+                extensions::UiNode content;
+                content.id = "content-" + std::to_string(i); content.type = extensions::UiNodeType::Text;
+                content.text = "Content " + std::to_string(i);
+                tab.children.push_back(content); segment.children.push_back(tab);
+            }
+        }
+        card.children.push_back(segment);
+        tree.root.children.push_back(card);
+        std::string delivered = "0";
+        ui::ExtensionTreeCallbacks callbacks;
+        callbacks.on_state_changed = [&](uint64_t, const std::vector<ui::ExtensionStateChange>& changes) {
+            for (const auto& change : changes) if (change.key == "placement") delivered = change.value;
+        };
+        ui::ExtensionTreeView view;
+        if (!view.Create(parent, tree, callbacks, dark, D2D1::ColorF(0.0f, 0.4f, 0.8f), scale)) ++failed;
+        view.SetBounds({0, 0, 580, 280});
+        UpdateWindow(parent);
+        const HWND control = view.NodeWindow("placement");
+        RECT bounds{}; GetClientRect(control, &bounds);
+        std::printf("CASE tabs=%d dark=%d scale=%.1f\n", tabs, dark, scale);
+        for (int selected : {1, 2, 3, 0}) {
+            GetClientRect(control, &bounds);
+            POINT point{bounds.right * (selected * 2 + 1) / 8, bounds.bottom / 2};
+            ClientToScreen(control, &point);
+            const HWND hit = WindowFromPoint(point);
+            wchar_t name[64]{}; GetClassNameW(hit, name, 64);
+            std::printf("HIT requested=%d control=%d class=%ls width=%ld height=%ld xy=%ld,%ld\n", selected, hit == control, name, bounds.right, bounds.bottom, point.x, point.y);
+            POINT local = point; ScreenToClient(hit, &local);
+            SendMessageW(hit, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(local.x, local.y));
+            SendMessageW(hit, WM_LBUTTONUP, 0, MAKELPARAM(local.x, local.y));
+            MSG pending{};
+            while (PeekMessageW(&pending, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&pending); DispatchMessageW(&pending); }
+            bool ok = hit == control && view.StateValue("placement") == std::to_string(selected) && delivered == std::to_string(selected);
+            std::printf("[%s] grouped placement pointer hit and callback %d\n", ok ? "PASS" : "FAIL", selected);
+            failed += !ok;
+            if (tabs) {
+                for (int i = 0; i < 4; ++i) {
+                    const HWND content = view.NodeWindow("content-" + std::to_string(i));
+                    const bool shown = (GetWindowLongPtrW(content, GWL_STYLE) & WS_VISIBLE) != 0;
+                    failed += shown != (i == selected);
+                }
+                POINT outside{bounds.right / 2, bounds.bottom + 2}; ClientToScreen(control, &outside);
+                failed += WindowFromPoint(outside) == control;
+            }
+        }
+    }
+    DestroyWindow(parent);
+    }
+    if (SUCCEEDED(com)) CoUninitialize();
+    std::printf("GROUPED_SETTINGS_RESULT failed=%d\n", failed);
+    return failed ? 1 : 0;
+}
+int ScrollRegression() {
+    using namespace pulse;
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    l10n::Initialize(GetModuleHandleW(nullptr), L"en");
+    int failed = 0;
+    auto check = [&](bool ok, const char* name) { std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", name); failed += !ok; };
+    HWND parent = CreateWindowExW(0, L"STATIC", L"Scroll fixture", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                                 40, 40, 600, 500, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    extensions::UiTree tree;
+    tree.root.id = "scroll-root"; tree.root.type = extensions::UiNodeType::ScrollView;
+    extensions::UiNode nested; nested.id = "nested"; nested.type = extensions::UiNodeType::ScrollView;
+    nested.min_height = nested.max_height = 140;
+    for (int i = 0; i < 40; ++i) {
+        extensions::UiNode edit; edit.type = extensions::UiNodeType::TextInput;
+        edit.id = "edit-" + std::to_string(i); edit.text = "Desktop text input"; edit.min_height = 36;
+        nested.children.push_back(edit);
+    }
+    tree.root.children.push_back(nested);
+    for (int i = 0; i < 40; ++i) {
+        extensions::UiNode label; label.type = extensions::UiNodeType::Text;
+        label.id = "label-" + std::to_string(i); label.text = "Desktop settings row"; label.min_height = 40;
+        tree.root.children.push_back(label);
+    }
+    int callbacks = 0; ui::ExtensionTreeCallbacks cb;
+    cb.on_state_changed = [&](uint64_t, const std::vector<ui::ExtensionStateChange>&) { ++callbacks; };
+    ui::ExtensionTreeView view;
+    check(view.Create(parent, tree, cb, false, {}, 1), "create native nested scroll tree");
+    view.SetBounds({0, 0, 560, 400});
+    const HWND edit = view.NodeWindow("edit-0");
+    auto top = [&](HWND child) { RECT r{}; GetWindowRect(child, &r); return r.top; };
+    auto wheel = [&](int x, int y, int delta) {
+        POINT p{x, y}; ClientToScreen(view.Hwnd(), &p);
+        SendMessageW(view.Hwnd(), WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(delta)), MAKELPARAM(p.x, p.y));
+    };
+    auto pump = [&](DWORD duration, HWND sample) {
+        const auto until = GetTickCount64() + duration; int changes = 0; LONG previous = top(sample);
+        while (GetTickCount64() < until) {
+            MSG msg{}; while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg); DispatchMessageW(&msg);
+                const LONG current = top(sample);
+                if (current != previous) { ++changes; previous = current; std::printf("SCROLL_POSITION tick=%llu y=%ld\n", GetTickCount64(), current); }
+            }
+            Sleep(2);
+        }
+        return changes;
+    };
+    const LONG before = top(edit);
+    wheel(100, 60, -WHEEL_DELTA);
+    check(top(edit) == before, "wheel enqueues frame-paced movement rather than synchronous jump");
+    const int frames = pump(600, edit);
+    check(frames >= 3 && top(edit) < before, "nested viewport moves through multiple compositor-paced positions");
+    check(view.NodeWindow("edit-0") == edit && callbacks == 0, "scroll preserves native input identity without plugin state callbacks");
+    const HWND label = view.NodeWindow("label-0"); const LONG root_before = top(label);
+    wheel(100, 300, -WHEEL_DELTA * 2); pump(600, label);
+    check(top(label) < root_before, "root scroll uses same frame-paced wheel route");
+    view.SetTheme(true, {}, 1.5f); view.SetBounds({0, 0, 360, 280});
+    wheel(100, 200, -WHEEL_DELTA); pump(400, label);
+    check(view.RevealNode("edit-2"), "reveal after DPI and resize updates nested scroll geometry");
+    const HWND visible_edit = view.NodeWindow("edit-2");
+    RECT er{}; GetWindowRect(visible_edit, &er); POINT center{(er.left + er.right) / 2, (er.top + er.bottom) / 2};
+    check(WindowFromPoint(center) == visible_edit, "native edit screen hit matches displayed bounds after resize and scroll");
+    HRGN region = CreateRectRgn(0, 0, 0, 0); const int kind = GetWindowRgn(visible_edit, region);
+    RECT clip{}; GetRgnBox(region, &clip); DeleteObject(region);
+    check(kind != ERROR && clip.right > clip.left && clip.bottom > clip.top, "visible edit retains nonempty viewport clipping region");
+    wheel(100, 200, -WHEEL_DELTA * 6);
+    const auto closing = GetTickCount64(); view.Close();
+    check(GetTickCount64() - closing < 1000 && !IsWindow(edit), "close during animation joins frame pump and destroys native inputs");
+    DestroyWindow(parent); if (SUCCEEDED(com)) CoUninitialize();
+    std::printf("SCROLL_HWND_RESULT sampled_changes=%d failed=%d\n", frames, failed);
+    return failed ? 1 : 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--scroll") return ScrollRegression();
+    if (argc == 2 && std::string_view(argv[1]) == "--grouped-settings") return GroupedSettingsRegression();
+    if (argc == 3 && std::string_view(argv[1]) == "--segmented") return SegmentedRegression(argv[2]);
     struct ComScope {
         HRESULT result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         ~ComScope() {

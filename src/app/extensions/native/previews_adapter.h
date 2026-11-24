@@ -45,6 +45,18 @@ public:
         uint64_t size, uint32_t pixels, uint64_t surface, HWND notify = nullptr);
     static bool Available(HWND owner, const std::wstring& path);
     static void Cancel(HWND owner, uint64_t surface);
+    // Grid thumbnails from providers registered with PULSE_PREVIEW_PROVIDER_THUMBNAIL.
+    // Any thread (the thumbnail decode lanes); runs the provider on the calling thread
+    // within the session's worker budget. NotHandled: no such provider. Busy: no worker
+    // slot within ~2 s. Failed: the provider produced no usable bitmap.
+    enum class ThumbnailStatus { NotHandled, Ready, Busy, Failed };
+    struct ThumbnailBitmap {
+        std::vector<uint8_t> pixels;  // premultiplied BGRA, top-down, width * 4 per row
+        uint32_t width = 0, height = 0;
+    };
+    static ThumbnailStatus Thumbnail(const std::wstring& path, uint64_t modified, uint64_t size,
+        uint32_t pixels, const std::function<bool()>& cancelled, ThumbnailBitmap& out) noexcept;
+    static bool ThumbnailAvailable(const std::wstring& path) noexcept;
 private:
     struct State;
     std::shared_ptr<State> state_;

@@ -27,6 +27,7 @@ import contract_compat
 import project_creator
 import msvc_env
 import offline_manifest
+import native_strings
 
 ROOT = Path(__file__).resolve().parents[2]
 HOST_TIMEOUT = 30
@@ -280,6 +281,20 @@ def _resolve_sdk_include(sdk_root=None):
     raise Failure("invalid_sdk", "SDK root is missing include/pulse/abi.h.", 2, sdkRoot=str(base))
 
 
+def _decode_tool_output(data):
+    """MSVC and CMake write the console code page (e.g. GBK on Chinese Windows), not UTF-8."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    for codec in ("oem", "mbcs"):
+        try:
+            return data.decode(codec)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 def build_project(project_dir, config="Release", build_dir=None, sdk_root=None):
     project_dir = Path(os.path.abspath(project_dir))
     for ancestor in (project_dir, *project_dir.parents):
@@ -290,6 +305,13 @@ def build_project(project_dir, config="Release", build_dir=None, sdk_root=None):
         raise Failure("usage", f"Invalid build config '{config}'; choose from {', '.join(BUILD_CONFIGS)}.", 2)
 
     sdk_include = _resolve_sdk_include(sdk_root)
+    strings_report = None
+    if (project_dir / native_strings.SOURCE_NAME).is_file():
+        # strings.tsv -> strings.gen.hpp before CMake sees the sources.
+        try:
+            strings_report = native_strings.sync(project_dir)
+        except native_strings.StringsError as exc:
+            raise Failure("invalid_strings", str(exc), 2, path=str(project_dir / native_strings.SOURCE_NAME)) from exc
     resolved = msvc_env.resolve_build_environment(auto_discover=True)
     cmake_exe = resolved["cmake_executable"]
     ninja_exe = resolved["ninja_executable"]
@@ -335,8 +357,8 @@ def build_project(project_dir, config="Release", build_dir=None, sdk_root=None):
         except OSError as exc:
             raise Failure("build_launch_failed", str(exc), 3) from exc
         if completed.returncode != 0:
-            out = (completed.stdout.decode("utf-8", errors="replace") + "\n" +
-                   completed.stderr.decode("utf-8", errors="replace")).strip()
+            out = (_decode_tool_output(completed.stdout) + "\n" +
+                   _decode_tool_output(completed.stderr)).strip()
             raise Failure(
                 "build_failed",
                 f"CMake {step_name} failed with exit code {completed.returncode}.",
@@ -361,6 +383,7 @@ def build_project(project_dir, config="Release", build_dir=None, sdk_root=None):
         "project": str(project_dir),
         "buildDir": str(target_build),
         "config": config,
+        "strings": strings_report,
         "autoDiscoveredToolchain": bool(resolved["auto_discovered"]),
         "libraries": libraries,
         "executables": executables,
@@ -437,6 +460,7 @@ def _run_plugin_harness(
         raise Failure("harness_launch_failed", str(exc), 3) from exc
 
     raw_out = completed.stdout.decode("utf-8", errors="replace").strip()
+    raw_err = completed.stderr.decode("utf-8", errors="replace").strip()
     try:
         report = json.loads(raw_out)
     except ValueError as exc:
@@ -446,8 +470,10 @@ def _run_plugin_harness(
             2,
             exitCode=completed.returncode,
             stdout=raw_out[-4096:],
-            stderr=completed.stderr.decode("utf-8", errors="replace")[-4096:],
+            stderr=raw_err[-4096:],
         ) from exc
+    if raw_err and isinstance(report, dict) and "stderr" not in report:
+        report["stderr"] = raw_err[-4096:]
     return completed.returncode, report
 
 
@@ -602,12 +628,19 @@ def test_package(
             invocations = harness_report.get("commandInvocations", [])
             commands_executed = sum(1 for item in invocations if isinstance(item, dict) and item.get("invoked"))
             if rc != 0 or not harness_report.get("ok"):
+                extra_fields = {
+                    "harness": harness_report,
+                    "staticBinary": static_binary,
+                }
+                if harness_report.get("lastDiagnostic"):
+                    extra_fields["lastDiagnostic"] = harness_report["lastDiagnostic"]
+                if harness_report.get("stderr"):
+                    extra_fields["harnessStderr"] = harness_report["stderr"]
                 raise Failure(
                     "plugin_test_failed",
                     "; ".join(harness_report.get("errors", [])) or "Headless plugin smoke test failed.",
                     2,
-                    harness=harness_report,
-                    staticBinary=static_binary,
+                    **extra_fields,
                 )
         elif invoke_commands or smoke_commands:
             raise Failure(
@@ -859,46 +892,10 @@ def doctor(pulse, check_toolchain=False, manifest_path=None, sdk_root=None):
             "pathsIncluded": False, "environmentIncluded": False}
 
 
-def develop(pulse, path, profile):
-    validated(pulse, path)
-    api = host_call(pulse, "--extension-api")
-    if "isolatedDevReload" not in api.get("developerFeatures", []):
-        raise Failure("dev_unsupported", "This host does not advertise isolated development reload.", 3)
-    try:
-        profile.mkdir(exist_ok=False)
-    except FileExistsError as exc:
-        raise Failure("destination_exists", "Development profile must be a new directory.", 2) from exc
-    except OSError as exc:
-        raise Failure("profile_failed", str(exc)) from exc
-    environment = {key: value for key, value in os.environ.items() if not key.upper().startswith("PULSE_")}
-    environment["PULSE_TEST_DATA_DIR"] = str(profile)
-    command = [str(pulse), "--test-instance", "--extension-dev", str(path)]
-    # Keep child output out of the CLI JSON stream; diagnostics remain in this new profile.
-    process = None
-    interrupted = False
-    try:
-        with (profile / "extension-dev-process.log").open("xb") as log:
-            process = subprocess.Popen(command, shell=False, env=environment, stdin=subprocess.DEVNULL,
-                                       stdout=log, stderr=subprocess.STDOUT)
-            try:
-                exit_code = process.wait()
-            except KeyboardInterrupt:
-                interrupted = True
-                process.terminate()
-                try:
-                    exit_code = process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    exit_code = process.wait()
-    except OSError as exc:
-        raise Failure("dev_launch_failed", str(exc), profile=str(profile)) from exc
-    result = {"profile": str(profile), "diagnostic": str(profile / "extension-dev-status.json"),
-              "processLog": str(profile / "extension-dev-process.log"), "exitCode": exit_code,
-              "stoppedByUser": interrupted, "isolated": True, "reloadVerified": False}
-    if exit_code != 0 and not interrupted:
-        raise Failure("dev_process_failed", "Development host exited unsuccessfully; inspect the isolated diagnostics.",
-                      3, dev=result)
-    return result
+def develop(pulse, project, emit=None, **options):
+    """Build, stage and (re)launch an isolated host with the plugin opened; see native_dev."""
+    import native_dev
+    return native_dev.develop(sys.modules[__name__], pulse, project, emit=emit, validation_host=pulse, **options)
 
 
 def install_archive(pulse, archive, store, accept_capabilities, signature_path=None, allow_native=False,
@@ -1228,7 +1225,7 @@ def main(argv=None):
     command = next((item for item in argv if item in (
         "inspect-sdk", "compare-sdk", "validate", "init", "new", "build", "test", "pack", "verify",
         "doctor", "dev", "install", "list", "enable", "disable", "rollback", "uninstall",
-        "gc", "run", "stop-host", "native-manifest"
+        "gc", "run", "stop-host", "native-manifest", "strings"
     )), None)
     parser = Parser(description=__doc__)
     parser.add_argument("--pulse", type=Path, default=ROOT / "build/pulse.exe")
@@ -1284,6 +1281,11 @@ def main(argv=None):
     build_cmd.add_argument("--config", choices=BUILD_CONFIGS, default="Release")
     build_cmd.add_argument("--build-dir", type=Path)
     build_cmd.add_argument("--sdk-root", type=Path, default=ROOT)
+    strings_cmd = commands.add_parser("strings", help="Generate strings.gen.hpp (LocalText accessors) from strings.tsv")
+    strings_cmd.add_argument("path", help="Project folder or .tsv file")
+    strings_cmd.add_argument("--output", type=Path)
+    strings_cmd.add_argument("--namespace", default="strings")
+    strings_cmd.add_argument("--check", action="store_true", help="Fail when the header is missing or out of date")
     test = commands.add_parser("test")
     test.add_argument("path")
     test.add_argument("--library", type=Path)
@@ -1302,9 +1304,16 @@ def main(argv=None):
     verify.add_argument("path")
     verify.add_argument("--signature", type=Path)
     verify.add_argument("--policy", type=Path)
-    dev = commands.add_parser("dev")
-    dev.add_argument("path")
-    dev.add_argument("--profile", required=True)
+    dev = commands.add_parser("dev", help="Build, stage and launch an isolated Pulse with the plugin open; rerun to reload")
+    dev.add_argument("project")
+    dev.add_argument("--config", choices=BUILD_CONFIGS, default="Debug")
+    dev.add_argument("--data-dir", help="Host test data folder; default PROJECT/.pulse-dev/data, reused between runs")
+    dev.add_argument("--fresh", action="store_true", help="Start from a new empty data folder")
+    dev.add_argument("--watch", action="store_true", help="Rebuild and restart when project files change")
+    dev.add_argument("--no-open", action="store_true", help="Load the package without opening its page")
+    dev.add_argument("--file", action="append", default=[], help="Sidecar file staged beside the DLL; repeatable")
+    dev.add_argument("--interval", type=float, default=0.5)
+    dev.add_argument("--sdk-root", type=Path, default=ROOT)
     validate = commands.add_parser("validate")
     validate.add_argument("path")
     init = commands.add_parser("init")
@@ -1316,7 +1325,7 @@ def main(argv=None):
     new_cmd.add_argument("destination")
     new_cmd.add_argument("--id", required=True)
     new_cmd.add_argument("--name", required=True)
-    new_cmd.add_argument("--template", default="rename-panel")
+    new_cmd.add_argument("--template", default="quickstart")
     new_cmd.add_argument("--sdk-root", type=Path, default=ROOT)
     try:
         args = parser.parse_args(argv)
@@ -1349,6 +1358,16 @@ def main(argv=None):
                 build_dir=Path(os.path.abspath(args.build_dir)) if args.build_dir else None,
                 sdk_root=args.sdk_root,
             )}
+        elif command == "strings":
+            try:
+                report = native_strings.sync(Path(os.path.abspath(args.path)),
+                                             Path(os.path.abspath(args.output)) if args.output else None,
+                                             args.namespace, args.check)
+            except native_strings.StringsError as exc:
+                raise Failure("invalid_strings", str(exc), 2) from exc
+            if args.check and not report["upToDate"]:
+                raise Failure("strings_stale", "strings.gen.hpp is missing or out of date; run pulse_ext strings.", 1, strings=report)
+            payload = {"strings": report}
         elif command == "test":
             payload = {"test": test_package(
                 validation_host,
@@ -1375,7 +1394,27 @@ def main(argv=None):
                 sdk_root=args.sdk_root,
             )}
         elif command == "dev":
-            payload = {"dev": develop(args.pulse, Path(os.path.abspath(args.path)), Path(os.path.abspath(args.profile)))}
+            def emit(event, **fields):
+                if machine:
+                    print(json.dumps({"event": event, **fields}, ensure_ascii=True), flush=True)
+                elif event in ("launched", "reloaded"):
+                    print(f"[{event}] PID {fields.get('processId')} from {fields.get('stage')}", flush=True)
+                elif event == "changed":
+                    print(f"[changed] {', '.join(fields.get('files', [])) or 'project files'}", flush=True)
+                elif event == "reload_failed":
+                    error = fields.get("error", {})
+                    print(f"[reload failed] {error.get('code')}: {error.get('message')}", flush=True)
+                    if error.get("diagnostics"):
+                        print(error["diagnostics"][-4000:], flush=True)
+                else:
+                    print(f"[{event}] {fields.get('message', '')}", flush=True)
+            payload = {"dev": develop(
+                args.pulse, Path(os.path.abspath(args.project)), emit=emit,
+                config=args.config,
+                data_dir=Path(os.path.abspath(args.data_dir)) if args.data_dir else None,
+                fresh=args.fresh, watch=args.watch, open_panel=not args.no_open,
+                files=args.file, sdk_root=args.sdk_root, interval=args.interval,
+            )}
         elif command == "install":
             payload = {"installation": install_archive(
                 validation_host,

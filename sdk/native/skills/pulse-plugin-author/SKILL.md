@@ -10,7 +10,13 @@ Use this workflow whenever asked to create, modify, build, test, package, or deb
 ## 1. Choose the Right Architecture
 
 1. **Standard In-Process Plugin (`pulse_ext.py new` / MCP `native_project_create`)**:
-   - Pick the closest template from the 8 packable templates in `examples/native/catalog.json`:
+   - Pick the closest template from the 11 packable templates in `examples/native/catalog.json`:
+     - Default / most plugins (commands, dialogs, tasks, settings, i18n with `pulse/app.hpp` + `pulse/kit.hpp`): `quickstart`
+     - 7-Zip-style form dialog with derived states: `archive-dialog`
+     - Extra Details columns / icon badges for files (`pulse.columns`): `file-columns`
+     - A small status-bar item (sync state, counter, quick toggle; `pulse.statusbar`): start from `quickstart` and call `AddStatusItem` (max 2 per package)
+     - React to folder / selection changes or finished file operations (read-only): `quickstart` + `OnFolderChange` / `OnSelectionChange` / `OnFileOperation`
+     - Preview pane content or grid thumbnails for a file type: `quickstart` + `AddPreview(".ext", fn, PULSE_PREVIEW_PROVIDER_THUMBNAIL)`
      - Commands / settings / inspection: `inspector`
      - Background C++20 worker + UI state updates: `reactive-panel`
      - Batch rename with native confirmation: `rename-panel`
@@ -31,6 +37,8 @@ Prefer the MCP tools (`native_project_create` -> `native_project_build` -> `nati
 2. **Edit Manifest & C++20 Source**:
    - Keep `PULSE_PLUGIN_SDK_PREVIEW()` at file scope and `PulsePluginEntryV1` exported with `extern "C" __declspec(dllexport)`.
    - Declare every static menu/palette command in `manifest.json` under `contributes.commands` and register matching runtime handlers via `pulse.commands` in `PulsePluginEntryV1`.
+   - Status items, columns or badges in a package that also declares `contributes.commands` need `"activation": "startup"` in `manifest.json` (declaring `context.events` implies it); otherwise they only appear after the first command runs.
+   - Keep user-visible text in `strings.tsv` (`key	zh-CN	zh-TW	en`) and call the generated `strings::Key()` helpers; `build` regenerates `strings.gen.hpp`, and `pulse_ext.py --json strings <project_dir> --check` must report `upToDate: true`.
    - Declare exact `resources` in `manifest.json` matching every host interface your plugin queries (e.g., `["context.read", "operations.own"]` for selection commands + `pulse.tasks`).
 3. **Compile (Auto-MSVC Discovery)**:
    ```powershell
@@ -41,7 +49,7 @@ Prefer the MCP tools (`native_project_create` -> `native_project_build` -> `nati
    python tools/extensions/pulse_ext.py --json test <project_dir> --smoke-commands --strict-resources
    python tools/extensions/pulse_ext.py --json test <project_dir> --omit-experimental-ui
    ```
-   - Verify `valid: true`, `staticBinary.hasEntryV1: true`, `staticBinary.hasSdkPreview: true`, and (when `pulse_plugin_harness.exe` is present) `unloadClean: true` with zero `missingResourceDeclarations` or `unregisteredStaticCommands`.
+   - Verify `valid: true`, `staticBinary.hasEntryV1: true`, `staticBinary.hasSdkPreview: true`, and (the SDK zip ships `bin/pulse_plugin_harness.exe`; a repository checkout needs the `pulse_plugin_harness` target built) `unloadClean: true` with zero `missingResourceDeclarations` or `unregisteredStaticCommands`.
    - Pass `--selection <fixture_file>` and `--invoke-command <cmd_id>` to exercise real command + worker execution against isolated test fixtures.
 5. **Stage, Pack & Verify `.pulse-ext`**:
    ```powershell

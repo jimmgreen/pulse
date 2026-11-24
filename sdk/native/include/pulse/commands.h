@@ -8,7 +8,7 @@ extern "C" {
 #define PULSE_COMMANDS_INTERFACE_NAME "pulse.commands"
 #define PULSE_COMMANDS_VERSION_1 1u
 #define PULSE_COMMANDS_VERSION_2 2u
-#define PULSE_COMMAND_ALL_FLAGS 63u
+#define PULSE_COMMAND_ALL_FLAGS 127u
 #pragma pack(push, 8)
 typedef uint64_t PulseCommandId;
 enum { PULSE_COMMAND_FILES = 1u, PULSE_COMMAND_DIRECTORIES = 2u, PULSE_COMMAND_BACKGROUND = 4u };
@@ -50,7 +50,12 @@ enum {
     PULSE_COMMAND_SEPARATOR_BEFORE = 4u,
     PULSE_COMMAND_SEPARATOR_AFTER = 8u,
     PULSE_COMMAND_HIDDEN = 16u,
-    PULSE_COMMAND_CHECKED = 32u
+    PULSE_COMMAND_CHECKED = 32u,
+    /* Suggests a toolbar button. The host pins the command to the toolbar once, the first
+       time it sees the flag (at most 2 per package, only while the toolbar has room, never
+       while HIDDEN); the user may remove it and it does not come back. Clearing the flag
+       later does not unpin. */
+    PULSE_COMMAND_TOOLBAR = 64u
 };
 /* Descriptors from SDKs before detail/group/flags end here. */
 #define PULSE_COMMAND_DESCRIPTOR_SIZE_V1 ((uint32_t)offsetof(PulseCommandDescriptor, detail))

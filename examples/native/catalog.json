@@ -5,9 +5,11 @@
     "directory-browser",
     "directory-transfer",
     "directory-workbench",
+    "file-columns",
     "file-operations",
     "inspector",
     "live-data",
+    "quickstart",
     "reactive-panel",
     "rename-panel"
   ]

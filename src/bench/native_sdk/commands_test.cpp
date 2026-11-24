@@ -110,6 +110,24 @@ int main() {
             pulse::extensions::icons::IsCustomIconId(icon_reg.Id()),
             "IconRegistration registers custom multi-layer vector icon");
 
+        // PulseIconsV2 resolve_icon resolves manifest contributes.icons, dynamic icons, #id, icon: prefix, and built-ins
+        const PulseIconId manifest_icon_id = pulse::extensions::icons::GlobalRegistry().UpsertManifestIcon(
+            "demo.tools", "manifest-badge", 24000u,
+            {pulse::extensions::icons::CustomIconLayer{"M 2 2 L 22 22", PULSE_ICON_DRAW_STROKE, PULSE_ICON_COLOR_ACCENT, 0, 1500, 1000}});
+        PulseIconsV2 icons_v2{};
+        check(icons_adapter.Query(PULSE_ICONS_VERSION_2, &icons_v2, sizeof(icons_v2)) == PULSE_OK &&
+            icons_v2.resolve_icon != nullptr,
+            "pulse.icons V2 query exposes resolve_icon");
+        pulse::sdk::IconsClient icons_client(icons_v2);
+        PulseIconId resolved_manifest = 0, resolved_dyn = 0, resolved_prefixed = 0, resolved_builtin = 0;
+        check(icons_client.SupportsV2() &&
+            icons_client.Resolve("manifest-badge", resolved_manifest) == PULSE_OK && resolved_manifest == manifest_icon_id &&
+            icons_client.Resolve("plus-accent", resolved_dyn) == PULSE_OK && resolved_dyn == icon_reg.Id() &&
+            icons_client.Resolve(icon_reg.Glyph(), resolved_prefixed) == PULSE_OK && resolved_prefixed == icon_reg.Id() &&
+            icons_client.Resolve("icon:folder", resolved_builtin) == PULSE_OK && resolved_builtin == PULSE_ICON_FOLDER,
+            "PulseIconsV2 / IconsClient::Resolve resolves manifest, dynamic, #id glyph, and built-in icons");
+        pulse::extensions::icons::GlobalRegistry().ClearManifestIconsForMissingPackages({});
+
         PulseCommandsV2 v2{};
         check(v2_adapter.Query(PULSE_COMMANDS_VERSION_2, &v2, sizeof(v2)) == PULSE_OK, "PulseCommandsV2 table available");
 
