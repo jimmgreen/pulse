@@ -8,6 +8,8 @@
 #include "app_commands.h"
 #include "extensions/vfs_path.h"
 #include "extensions/vfs_registry.h"
+#include "extensions/native/command_contributions.h"
+#include "../ui/quick_preview_window.h"
 #include "../ops/clipboard.h"
 #include "../ui/confirm_dialog.h"
 #include "../common/localization.h"
@@ -334,7 +336,106 @@ void VfsWatchLoop() {
     }
 }
 
+// Extracts vfs `paths` into a fresh staging folder while the mouse button is
+// still down (a drag waits for it); Esc cancels. The staged items, or empty.
+std::vector<std::wstring> VfsStagePaths(AppState& s, const std::vector<std::wstring>& paths) {
+    const std::wstring dir = VfsStagingDir();
+    if (dir.empty() || paths.empty()) return {};
+    HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    vfs::VfsOperationHooks hooks;
+    hooks.is_cancelled = [] { return (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0; };
+    const PulseStatus st = VfsExtract(paths, dir, hooks);
+    SetCursor(old);
+    if (st != PULSE_OK) {
+        if (!hooks.is_cancelled())
+            VfsNotice(s, VfsFill(l10n::Get(I::VfsExtractFailed), L"{name}", VfsArchiveName(paths.front())), hooks.message);
+        return {};
+    }
+    return VfsStagedChildren(dir);
+}
+
+// Archive previews (Quick Look, details pane): which archive file each quietly
+// opened mount is, so a finished change reloads the preview showing it.
+std::vector<std::pair<std::wstring, std::wstring>>& PreviewMounts() {  // mount root, archive file
+    static std::vector<std::pair<std::wstring, std::wstring>> mounts;
+    return mounts;
+}
+
+std::wstring VfsPreviewMount(AppState& s, const std::wstring& archive) {
+    std::wstring root = extensions::native::MountArchiveQuietly(s, archive);
+    if (!root.empty()) root = VfsMountRoot(root);
+    if (root.empty()) {
+        VfsNotice(s, l10n::Get(I::ArchivePluginRequired));
+        return {};
+    }
+    auto& mounts = PreviewMounts();
+    std::erase_if(mounts, [&](const auto& m) { return m.first == root || _wcsicmp(m.second.c_str(), archive.c_str()) == 0; });
+    mounts.emplace_back(root, archive);
+    if (mounts.size() > 16) mounts.erase(mounts.begin());
+    return root;
+}
+
+// "a\\b" inside the mount `root`; empty when a name is not valid there.
+std::wstring VfsMemberPath(const std::wstring& root, const std::wstring& member) {
+    std::wstring path = root;
+    size_t start = 0;
+    while (start < member.size()) {
+        size_t end = member.find_first_of(L"\\/", start);
+        if (end == std::wstring::npos) end = member.size();
+        if (end > start) {
+            const auto dir = vfs::ParseVfsPath(path);
+            if (!dir) return {};
+            path = vfs::JoinVfsChild(*dir, std::wstring_view(member).substr(start, end - start));
+            if (path.empty()) return {};
+        }
+        start = end + 1;
+    }
+    return path;
+}
+
+std::vector<std::wstring> PreviewStage(HWND owner, const std::wstring& archive,
+                                       const std::vector<std::wstring>& members, uint64_t bytes) {
+    AppState* s = GetAppState(owner);
+    if (!s) s = GetAppState(GetAncestor(owner, GA_ROOT));
+    if (!s || members.empty()) return {};
+    if (bytes > kVfsDragLimitBytes) {
+        VfsNotice(*s, l10n::Get(I::VfsDragTooLarge));
+        return {};
+    }
+    const std::wstring root = VfsPreviewMount(*s, archive);
+    if (root.empty()) return {};
+    std::vector<std::wstring> paths;
+    for (const std::wstring& m : members) {
+        std::wstring p = VfsMemberPath(root, m);
+        if (p.empty() || p == root) return {};
+        paths.push_back(std::move(p));
+    }
+    return VfsStagePaths(*s, paths);
+}
+
+bool PreviewAdd(HWND owner, const std::wstring& archive, const std::wstring& dir,
+                const std::vector<std::wstring>& files) {
+    AppState* s = GetAppState(owner);
+    if (!s) s = GetAppState(GetAncestor(owner, GA_ROOT));
+    if (!s) return false;
+    std::vector<std::wstring> sources;
+    for (const std::wstring& f : files)
+        if (!f.empty() && _wcsicmp(f.c_str(), archive.c_str()) != 0) sources.push_back(f);
+    if (sources.empty()) return false;
+    const std::wstring root = VfsPreviewMount(*s, archive);
+    if (root.empty()) return false;
+    const std::wstring target = VfsMemberPath(root, dir);
+    return !target.empty() && VfsDropInto(*s, sources, target);
+}
+
 }  // namespace
+
+void InstallPreviewArchiveBridge() {
+    ui::QuickPreviewArchiveBridge bridge;
+    bridge.stage = &PreviewStage;
+    bridge.add = &PreviewAdd;
+    ui::SetQuickPreviewArchiveBridge(bridge);
+}
 
 bool IsVfsFolder(const std::wstring& path) { return vfs::IsVfsPath(path); }
 
@@ -373,20 +474,8 @@ std::vector<std::wstring> VfsStageSelectionForDrag(AppState& s, const app::Tab& 
         VfsNotice(s, l10n::Get(I::VfsDragTooLarge));
         return {};
     }
-    const std::wstring dir = VfsStagingDir();
-    if (dir.empty()) return {};
     // The drag starts once the items are out; the mouse button is still down.
-    HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
-    vfs::VfsOperationHooks hooks;
-    hooks.is_cancelled = [] { return (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0; };
-    const PulseStatus st = VfsExtract(paths, dir, hooks);
-    SetCursor(old);
-    if (st != PULSE_OK) {
-        if (!hooks.is_cancelled())
-            VfsNotice(s, VfsFill(l10n::Get(I::VfsExtractFailed), L"{name}", VfsArchiveName(paths.front())), hooks.message);
-        return {};
-    }
-    return VfsStagedChildren(dir);
+    return VfsStagePaths(s, paths);
 }
 
 bool VfsDropInto(AppState& s, const std::vector<std::wstring>& sources, const std::wstring& vfs_dir) {
@@ -513,6 +602,11 @@ void HandleVfsOpDone(AppState& s, WPARAM kind, LPARAM payload) {
         return;
     }
     if (!r->refresh_dir.empty()) RefreshPath(s, r->refresh_dir, RefreshReason::OperationCompleted);
+    // A preview showing that archive lists it again.
+    for (const auto& [root, file] : PreviewMounts()) {
+        if (root != r->mount_root) continue;
+        ui::QuickPreviewWindow::ReloadEverywhere(file);
+    }
     if (r->kind == VfsOpKind::Undo) {
         VfsNotice(s, VfsFill(l10n::Get(I::VfsUndoneSnack), L"{name}", r->archive_name));
         return;

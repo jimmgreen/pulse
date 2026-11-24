@@ -43,8 +43,9 @@ public:
     bool OverScrollbar(float x, float y) const noexcept;
     bool ScrollbarMouseDown(float x, float y);
     bool ScrollbarMouseMove(float x, float y);
-    void EndScrollbarDrag() noexcept { scrollbar_drag_ = false; }
-    bool DraggingScrollbar() const noexcept { return scrollbar_drag_; }
+    // The thumbnail size slider drags through the same calls.
+    void EndScrollbarDrag() noexcept { scrollbar_drag_ = false; slider_drag_ = false; }
+    bool DraggingScrollbar() const noexcept { return scrollbar_drag_ || slider_drag_; }
     bool Click(float x, float y);
     // Select the hit row without expanding it; blank space clears selection.
     bool SelectAt(float x, float y);
@@ -81,6 +82,39 @@ public:
     using TileArt = std::function<bool(ID2D1DeviceContext* dc, const D2D1_RECT_F& rect,
                                        const std::wstring& path, uint64_t size)>;
     void SetTileArt(TileArt art) { tile_art_ = std::move(art); }
+    // The file type's shell icon for an entry `name` (the main list's icons),
+    // drawn into `rect`; false keeps the coloured extension chip.
+    using TypeIcon = std::function<bool(ID2D1DeviceContext* dc, const D2D1_RECT_F& rect,
+                                        const std::wstring& name, bool dir)>;
+    void SetTypeIcon(TypeIcon icon) { type_icon_ = std::move(icon); }
+
+    // Sorting, for both views: folders first, then by the key. The choice
+    // holds for the next archive this process previews.
+    enum class SortKey { Name, Size, Date, Type };
+    bool SetSort(SortKey key, bool descending);
+    SortKey Sort() const noexcept;
+    bool SortDescending() const noexcept;
+    // Thumbnail size: the main view's icon size (kMinIconDip..kMaxIconDip,
+    // log scale, the shared icon_size_slider), set by the slider or
+    // Ctrl+wheel. Returns true when it changed.
+    bool Zoom(float wheel_steps);
+    float IconSizeDip() const noexcept;
+    float TileSizeDip() const noexcept;  // picture square plus the label margin
+    static constexpr float kTileMarginDip = 26.0f;
+    // The sort button was clicked: the host shows its menu under `anchor`.
+    bool TakeSortMenuRequest(D2D1_RECT_F* anchor);
+
+    // Mouse release after Click: a pressed folder opens (thumbnails) or
+    // toggles (tree) only now, so it can be dragged out instead.
+    bool Release(float x, float y);
+    void CancelPress() noexcept { pending_ = -1; }
+    // The selected entry for a drag-out: its path inside the archive and its
+    // unpacked bytes (a folder counts everything below it).
+    bool DragItem(std::wstring* member, uint64_t* bytes) const;
+    // Where a drop at (x, y) adds files: the folder under the point, else the
+    // folder the thumbnails show, else the root (""). Sets the drop highlight.
+    std::wstring DropFolderAt(float x, float y);
+    void ClearDropHighlight() noexcept { drop_hover_ = -1; }
 
 private:
     struct Node {
@@ -142,6 +176,12 @@ private:
     bool GridUp();
     bool EnterGridFolder(int index);
     bool GridKey(UINT vk);
+    void SortNodes();
+    bool NodeLess(int a, int b) const;
+    float DrawSortChip(ID2D1DeviceContext* dc, float right, float cy, const Theme& theme);
+    float DrawSlider(ID2D1DeviceContext* dc, float right, float cy, const Theme& theme);
+    void DrawSortArrow(ID2D1DeviceContext* dc, const D2D1_RECT_F& label, bool trailing, const Theme& theme);
+    bool SetTileFromX(float x);
     void ClampScroll();
     void RevealSelection();
     float RowHeight() const noexcept;
@@ -201,6 +241,15 @@ private:
     float tile_w_ = 100.0f;
     D2D1_RECT_F toggle_list_{}, toggle_grid_{}, crumb_up_{};
     TileArt tile_art_;
+    TypeIcon type_icon_;
+    // Sorting / size controls (hit rects from the last Draw).
+    D2D1_RECT_F sort_chip_{}, sort_dir_{}, slider_track_{}, slider_hit_{};
+    D2D1_RECT_F head_name_{}, head_size_{}, head_date_{};
+    bool slider_drag_ = false;
+    bool slider_hover_ = false;
+    int drop_hover_ = -1;           // visible row a drop would go into
+    int pending_ = -1;              // folder pressed: opens / toggles on release
+    bool sort_menu_request_ = false;
 
     // Device resources
     ID2D1DeviceContext* brush_owner_ = nullptr;

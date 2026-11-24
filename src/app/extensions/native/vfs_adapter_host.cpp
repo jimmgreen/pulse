@@ -7,6 +7,12 @@
 
 namespace pulse::extensions::native {
 
+namespace {
+std::wstring* g_open_capture = nullptr;
+}
+
+void CaptureVfsOpens(std::wstring* target) { g_open_capture = target; }
+
 VfsBackend MakeVfsBackend(HWND owner) {
     VfsBackend backend;
     backend.valid_owner = [owner] { return IsWindow(owner) != FALSE; };
@@ -26,6 +32,10 @@ VfsBackend MakeVfsBackend(HWND owner) {
         });
     };
     backend.open_path = [owner](const std::wstring& vfs_uri, uint32_t mode) -> PulseStatus {
+        if (g_open_capture) {
+            *g_open_capture = vfs_uri;
+            return PULSE_OK;
+        }
         auto* app = GetAppState(owner);
         if (!app) return PULSE_ERROR_STATE;
         if (app->hidden_to_tray) {

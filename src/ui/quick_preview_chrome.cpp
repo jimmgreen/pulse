@@ -631,21 +631,16 @@ void QuickPreviewWindow::DrawHeader(ID2D1DeviceContext* dc, const ChromePalette&
                        p.on_accent);
     }
     if (always_on_top_) {
+        // On: the main toolbar's checked toggle (selected-pane fill, accent
+        // glyph, hover fill on hover; no outline).
         const bool hot = chrome_hover_ == ChromeButton::Pin;
+        const Theme theme = CurrentTheme();
         const D2D1_ROUNDED_RECT shape{header_.pin, 7.0f * s, 7.0f * s};
-        const AccentShades shades = DeriveAccentShades(p.accent);
-        const D2D1_COLOR_F active_ink = p.high_contrast ? p.on_accent : (dark_ ? shades.light2 : shades.dark1);
-        const D2D1_COLOR_F active_bg = p.high_contrast
-            ? p.accent
-            : WithAlpha(p.accent, dark_ ? (hot ? 0.30f : 0.22f) : (hot ? 0.20f : 0.14f));
+        const D2D1_COLOR_F active_ink = p.high_contrast ? p.on_accent : theme.accent;
+        const D2D1_COLOR_F active_bg = p.high_contrast ? p.accent : hot ? theme.fill_hover : theme.fill_selected;
         ComPtr<ID2D1SolidColorBrush> fill;
         CreateUiBrush(dc, active_bg, &fill);
         if (fill.get()) dc->FillRoundedRectangle(shape, fill.get());
-        if (!p.high_contrast) {
-            ComPtr<ID2D1SolidColorBrush> border;
-            CreateUiBrush(dc, WithAlpha(active_ink, dark_ ? 0.38f : 0.30f), &border);
-            if (border.get()) dc->DrawRoundedRectangle(shape, border.get(), (std::max)(1.0f, s));
-        }
         ComPtr<ID2D1SolidColorBrush> brush;
         CreateUiBrush(dc, active_ink, &brush);
         if (brush.get() && !command_icons::DrawGlyph(dc, brush.get(), kPinGlyph, header_.pin, glyph_size))

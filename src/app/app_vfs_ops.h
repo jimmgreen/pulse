@@ -40,4 +40,9 @@ void VfsWatchOpenedFile(HWND owner, const std::wstring& vfs_path, const std::wst
 void HandleVfsOpDone(AppState& s, WPARAM kind, LPARAM payload);
 void HandleVfsUndo(AppState& s);
 
+// Quick Look / the details pane: dragging an archive member out extracts it,
+// dropping files on the archive preview adds them (through pulse.7zip, opened
+// quietly). Installed once at startup.
+void InstallPreviewArchiveBridge();
+
 }  // namespace pulse

@@ -122,6 +122,9 @@ enum {
     kWindowCmdAlwaysOnTop = 50,
     kSizeCmdFirst = 60,  // + PreviewSizeMode: the header's window size menu
     kSizeCmdRemember = 70,
+    kArchiveSortFirst = 80,  // + ArchivePreview::SortKey
+    kArchiveSortAscending = 88,
+    kArchiveSortDescending,
     kFileCmdBase = 100,  // + static_cast<int>(QuickPreviewAction)
 };
 
@@ -196,7 +199,149 @@ bool IsArchivePictureName(const std::wstring& name) {
     return std::any_of(std::begin(kPictures), std::end(kPictures), [&](const wchar_t* known) { return ext == known; });
 }
 
+QuickPreviewArchiveBridge g_archive_bridge;  // UI thread
+std::vector<QuickPreviewWindow*> g_live_previews;  // UI thread: created, not yet destroyed
+
 } // namespace
+
+void SetQuickPreviewArchiveBridge(const QuickPreviewArchiveBridge& bridge) { g_archive_bridge = bridge; }
+
+void QuickPreviewWindow::ReloadEverywhere(const std::wstring& path) {
+    const std::vector<QuickPreviewWindow*> live = g_live_previews;  // Update may create / destroy windows
+    for (QuickPreviewWindow* window : live)
+        if (std::find(g_live_previews.begin(), g_live_previews.end(), window) != g_live_previews.end())
+            window->ReloadIfShowing(path);
+}
+
+void QuickPreviewWindow::ReloadIfShowing(const std::wstring& path) {
+    if (!hwnd_ || !visible() || item_.path.empty() || _wcsicmp(item_.path.c_str(), path.c_str()) != 0) return;
+    QuickPreviewItem item = item_;
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) {
+        item.size = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+        item.modified = (static_cast<uint64_t>(data.ftLastWriteTime.dwHighDateTime) << 32) |
+                        data.ftLastWriteTime.dwLowDateTime;
+    }
+    item.count = 0;  // keeps its place in the folder
+    Update(item);
+}
+
+void QuickPreviewWindow::ShowArchiveSortMenu(const D2D1_RECT_F& anchor) {
+    if (!text_menu_.Create(hwnd_, &compositor_, scale_)) return;
+    text_menu_.SetTheme(dark_, accent_);
+    text_menu_.SetTopmost(always_on_top_ || native_kind_ == NativeKind::None);
+    using pulse::l10n::StringId;
+    static constexpr StringId kKeys[4] = {StringId::ArcColName, StringId::ArcColSize, StringId::ArcColModified,
+                                          StringId::ColumnType};
+    const int current = static_cast<int>(archive_.Sort());
+    std::vector<FluentMenuItem> items;
+    for (int i = 0; i < 4; ++i) {
+        FluentMenuItem item;
+        item.command = kArchiveSortFirst + i;
+        item.text = pulse::l10n::Get(kKeys[i]);
+        item.radio_group = true;
+        item.radio = i == current;
+        item.separator_after = i == 3;
+        items.push_back(std::move(item));
+    }
+    for (int i = 0; i < 2; ++i) {
+        FluentMenuItem item;
+        item.command = i == 0 ? kArchiveSortAscending : kArchiveSortDescending;
+        item.text = pulse::l10n::Get(i == 0 ? StringId::SortAscending : StringId::SortDescending);
+        item.radio_group = true;
+        item.radio = archive_.SortDescending() == (i == 1);
+        items.push_back(std::move(item));
+    }
+    POINT screen{static_cast<LONG>(anchor.left), static_cast<LONG>(anchor.bottom + 4.0f * scale_)};
+    ClientToScreen(hwnd_, &screen);
+    const uint64_t menu_generation = generation_;
+    const int cmd = text_menu_.TrackPopup(screen, std::move(items));
+    if (!visible() || menu_generation != generation_ || native_kind_ != NativeKind::Archive) return;
+    bool changed = false;
+    if (cmd >= kArchiveSortFirst && cmd < kArchiveSortFirst + 4)
+        changed = archive_.SetSort(static_cast<ArchivePreview::SortKey>(cmd - kArchiveSortFirst), archive_.SortDescending());
+    else if (cmd == kArchiveSortAscending || cmd == kArchiveSortDescending)
+        changed = archive_.SetSort(archive_.Sort(), cmd == kArchiveSortDescending);
+    if (changed) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+// After ArchivePreview::Click: the sort button's menu, or arm a drag-out.
+void QuickPreviewWindow::AfterArchiveClick() {
+    D2D1_RECT_F anchor{};
+    if (archive_.TakeSortMenuRequest(&anchor)) {
+        archive_press_ = false;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        ShowArchiveSortMenu(anchor);
+        return;
+    }
+    archive_press_ = g_archive_bridge.stage && !archive_.IsFolderListing() && archive_.DragItem(nullptr, nullptr);
+    if (archive_press_) GetCursorPos(&archive_press_at_);
+}
+
+// Dragging an entry out of the archive extracts it (the app stages it first,
+// as dragging out of an archive folder tab does) and drags the result.
+void QuickPreviewWindow::StartArchiveDragOut() {
+    archive_press_ = false;
+    std::wstring member;
+    uint64_t bytes = 0;
+    if (!g_archive_bridge.stage || item_.path.empty() || !archive_.DragItem(&member, &bytes)) return;
+    archive_.CancelPress();
+    const uint64_t generation = generation_;
+    const std::wstring archive = item_.path;
+    std::vector<std::wstring> paths = g_archive_bridge.stage(message_owner_, archive, {member}, bytes);
+    if (paths.empty() || generation != generation_ || !hwnd_ || (GetKeyState(VK_LBUTTON) & 0x8000) == 0) return;
+    archive_dragging_ = true;
+    DoFileDragDrop(paths, DROPEFFECT_COPY, {}, std::wstring{}, dark_);
+    archive_dragging_ = false;
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+DWORD QuickPreviewWindow::ArchiveDragOver(const std::vector<std::wstring>& sources, POINT pt, DWORD allowed) {
+    if (archive_dragging_ || native_kind_ != NativeKind::Archive || archive_.IsFolderListing() ||
+        !g_archive_bridge.add || sources.empty() || (allowed & DROPEFFECT_COPY) == 0)
+        return DROPEFFECT_NONE;
+    for (const std::wstring& source : sources)
+        if (IsShellItemId(source) || _wcsicmp(source.c_str(), item_.path.c_str()) == 0) return DROPEFFECT_NONE;
+    archive_.DropFolderAt(static_cast<float>(pt.x), static_cast<float>(pt.y));
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    return DROPEFFECT_COPY;
+}
+
+// Files dropped on an archive preview are added to it: registered only while
+// an archive is shown, so other previews keep the owner's drop behaviour.
+void QuickPreviewWindow::UpdateArchiveDropTarget() {
+    const bool want = hwnd_ && g_archive_bridge.add && native_kind_ == NativeKind::Archive &&
+                      !archive_.IsFolderListing() && !item_.path.empty() && !item_.path.starts_with(L"pulse:");
+    if (!want) {
+        archive_drop_tried_ = false;
+        if (archive_drop_) {
+            RevokeDragDrop(hwnd_);
+            archive_drop_->Release();
+            archive_drop_ = nullptr;
+        }
+        return;
+    }
+    if (archive_drop_ || archive_drop_tried_) return;
+    archive_drop_tried_ = true;
+    DropTargetCallbacks callbacks;
+    callbacks.drag_over = [this](const std::vector<std::wstring>& sources, POINT pt, DWORD, DWORD allowed, DWORD) {
+        return ArchiveDragOver(sources, pt, allowed);
+    };
+    callbacks.drag_leave = [this] {
+        archive_.ClearDropHighlight();
+        if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+    };
+    callbacks.drop = [this](const std::vector<std::wstring>& sources, POINT pt, DWORD, DWORD allowed, DWORD) -> DWORD {
+        if (ArchiveDragOver(sources, pt, allowed) == DROPEFFECT_NONE) return DROPEFFECT_NONE;
+        const std::wstring dir = archive_.DropFolderAt(static_cast<float>(pt.x), static_cast<float>(pt.y));
+        archive_.ClearDropHighlight();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return g_archive_bridge.add(message_owner_, item_.path, dir, sources) ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+    };
+    auto* target = new WindowDropTarget(hwnd_, std::move(callbacks));
+    if (SUCCEEDED(RegisterDragDrop(hwnd_, target))) archive_drop_ = target;
+    else target->Release();
+}
 
 void QuickPreviewWindow::SetHandlerCovered(bool covered) {
     handler_covered_ = covered;
@@ -2013,7 +2158,8 @@ Theme QuickPreviewWindow::CurrentTheme() const {
     HIGHCONTRASTW value{sizeof(value)};
     const bool high_contrast = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(value), &value, 0) &&
         (value.dwFlags & HCF_HIGHCONTRASTON);
-    return high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, HexColor(0x0078D4));
+    // The main window's accent (SetAccent), so shared controls match it.
+    return high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
 }
 
 void QuickPreviewWindow::DrawFindBar(ID2D1DeviceContext* dc, const D2D1_RECT_F& bar) {
@@ -2509,6 +2655,7 @@ void QuickPreviewWindow::RecordFrameEvidence(FrameEvidence evidence, uint64_t te
 }
 
 void QuickPreviewWindow::Render() {
+    UpdateArchiveDropTarget();
     // Phase: 0=frame attempted, 1=recovery pending, 2=no drawing context.
     // Route: 1=offline, 2=media, 3=system handler, 4=pages, 5=local renderer.
     // Draw: 0=not evaluated, otherwise PreviewDrawResult + 1.
@@ -3310,6 +3457,17 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             return tile_thumbs_.DrawGridThumbnail(dc, rect, path, FILE_ATTRIBUTE_NORMAL, pixels, generation_,
                 archive_.IsFolderListing() ? 0 : item_.modified, size, 1.0f, false, nullptr) == PreviewDrawResult::Bitmap;
         });
+        g_live_previews.push_back(this);
+        archive_.SetTypeIcon([this](ID2D1DeviceContext* dc, const D2D1_RECT_F& rect, const std::wstring& name, bool dir) {
+            if (!archive_icons_) {
+                archive_icons_ = std::make_unique<ShellIconCache>();
+                archive_icons_->SetNotifyWindow(hwnd_);
+            }
+            archive_icons_->SetDeviceContext(dc);
+            archive_icons_->SetScale(scale_);
+            // No path: the type's icon (an archive member is not on disk).
+            return archive_icons_->Draw(dc, rect, std::wstring{}, name, dir, dir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL);
+        });
         open_icons_.SetDeviceContext(compositor_.Dc());
         open_icons_.SetNotifyWindow(hwnd_);
         markdown_.SetNotifyWindow(hwnd_);
@@ -3358,7 +3516,12 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             ZoomAt(static_cast<float>(cursor.x), static_cast<float>(cursor.y),
                    std::pow(1.15f, steps));
         } else if (native_kind_ == NativeKind::Archive) {
-            archive_.Scroll(steps);
+            // Ctrl+wheel sizes the thumbnails, as in the main list.
+            if ((GET_KEYSTATE_WPARAM(wparam) & MK_CONTROL) != 0) {
+                if (archive_.GridMode()) archive_.Zoom(steps);
+            } else {
+                archive_.Scroll(steps);
+            }
             archive_.Hover(static_cast<float>(cursor.x), static_cast<float>(cursor.y));
         } else if (native_kind_ == NativeKind::Markdown) {
             if ((GET_KEYSTATE_WPARAM(wparam) & MK_SHIFT) != 0) markdown_.ScrollHorizontal(steps);
@@ -3439,8 +3602,10 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
-            if (archive_.Click(x, y))
+            if (archive_.Click(x, y)) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
+                AfterArchiveClick();
+            }
             return 0;
         }
         if (native_kind_ == NativeKind::Table) {
@@ -3572,8 +3737,10 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             // switched the view); a second one must not open the next level.
             if (archive_.GridMode()) return 0;
             // Second click of a fast pair keeps toggling like a single click.
-            if (archive_.Click(static_cast<float>(point.x), static_cast<float>(point.y)))
+            if (archive_.Click(static_cast<float>(point.x), static_cast<float>(point.y))) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
+                AfterArchiveClick();
+            }
             return 0;
         }
         if (native_kind_ == NativeKind::Pages) {
@@ -3673,6 +3840,17 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         if (!mouse_tracking_) {
             TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, hwnd_, 0};
             mouse_tracking_ = TrackMouseEvent(&tracking) != FALSE;
+        }
+        if (archive_press_ && native_kind_ == NativeKind::Archive && (wparam & MK_LBUTTON) != 0) {
+            POINT now{};
+            GetCursorPos(&now);
+            if (std::abs(now.x - archive_press_at_.x) > GetSystemMetrics(SM_CXDRAG) ||
+                std::abs(now.y - archive_press_at_.y) > GetSystemMetrics(SM_CYDRAG)) {
+                StartArchiveDragOut();
+                return 0;
+            }
+        } else if (archive_press_ && (wparam & MK_LBUTTON) == 0) {
+            archive_press_ = false;
         }
         if (native_kind_ == NativeKind::Archive && !panning_ && !selecting_ &&
             archive_.Hover(static_cast<float>(point.x), static_cast<float>(point.y)))
@@ -3782,6 +3960,17 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         EndPlaybackDrag(message == WM_LBUTTONUP);
         panning_ = false;
         selecting_ = false;
+        if (native_kind_ == NativeKind::Archive) {
+            // A pressed folder opens / toggles now that no drag started.
+            archive_press_ = false;
+            POINT up{};
+            if (message == WM_LBUTTONUP && !archive_.DraggingScrollbar() && ClientPoint(lparam, up)) {
+                if (archive_.Release(static_cast<float>(up.x), static_cast<float>(up.y)))
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+            } else if (message != WM_LBUTTONUP) {
+                archive_.CancelPress();
+            }
+        }
         if (markdown_.DraggingScrollbar()) {
             if (message == WM_LBUTTONUP)
                 markdown_.ScrollbarMouseMove(static_cast<float>(GET_X_LPARAM(lparam)), static_cast<float>(GET_Y_LPARAM(lparam)));
@@ -4301,6 +4490,13 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         Close();
         return 0;
     case WM_DESTROY:
+        std::erase(g_live_previews, this);
+        if (archive_drop_) {
+            RevokeDragDrop(hwnd_);
+            archive_drop_->Release();
+            archive_drop_ = nullptr;
+        }
+        archive_icons_.reset();
         size_probe_.Cancel();
         KillTimer(hwnd_, kSizeProbeTimer);
         ResetPlayback();

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240" fill="none">
   <title>No selection</title>
-  <desc>A standing document and a pointer in the Pulse empty-state style.</desc>
+  <desc>A standing document in the Pulse empty-state style.</desc>
   <defs>
     <radialGradient id="ground" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(160 207) scale(92 10)">
       <stop stop-color="#000000" stop-opacity="0.2"/><stop offset="1" stop-color="#000000" stop-opacity="0"/>
@@ -35,8 +35,4 @@
   <path d="M118 120L134 106L145 115L160 100L184 120V123C184 125.8 181.8 128 179 128H123C120.2 128 118 125.8 118 123Z" fill="#5FA779"/>
   <circle cx="171" cy="97" r="5" fill="#FFF3C4"/>
   <path d="M120 145H190M120 161H180M120 177H158" stroke="#5E6E87" stroke-opacity="0.22" stroke-width="7" stroke-linecap="round"/>
-  <g transform="translate(208 140)">
-    <path d="M0 0V33L8.5 25.5L14.5 39L21.5 36L15.5 22.5H27Z" fill="#000000" fill-opacity="0.16" transform="translate(1.5 2.5)"/>
-    <path d="M0 0V33L8.5 25.5L14.5 39L21.5 36L15.5 22.5H27Z" fill="#FFFFFF" stroke="#30405A" stroke-width="2.2" stroke-linejoin="round"/>
-  </g>
 </svg>

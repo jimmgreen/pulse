@@ -1784,7 +1784,7 @@ target_link_libraries(pulse_image_preview_integrity_test PRIVATE ole32 windowsco
 add_dependencies(pulse_image_preview_integrity_test pulse_preview)
 add_executable(pulse_preview_integrity_ui_test src/bench/preview_integrity_ui_test.cpp
     src/bench/preview_integrity_strings.rc
-    src/ui/archive_preview.cpp src/ui/table_view.cpp src/ui/typography.cpp src/ui/ui_compositor.cpp)
+    src/ui/archive_preview.cpp src/ui/view_layout.cpp src/ui/table_view.cpp src/ui/typography.cpp src/ui/ui_compositor.cpp)
 target_link_libraries(pulse_preview_integrity_ui_test PRIVATE dwrite d2d1 d3d11 dxgi dcomp dwmapi shcore
     windowscodecs ole32 shell32 shlwapi user32 gdi32 comctl32 pulse_localization)
 pulse_enable_lumatext(pulse_preview_integrity_ui_test)
@@ -2507,7 +2507,7 @@ endif()
 get_target_property(PULSE_PREVIEW_BUFFER_SOURCES pulse_preview_view_audit_test SOURCES)
 list(FILTER PULSE_PREVIEW_BUFFER_SOURCES EXCLUDE REGEX "src/bench/")
 add_executable(pulse_preview_buffer_lifetime_test ${PULSE_PREVIEW_BUFFER_SOURCES}
-    src/ui/archive_preview.cpp src/bench/preview_buffer_lifetime_test.cpp)
+    src/ui/archive_preview.cpp src/ui/view_layout.cpp src/bench/preview_buffer_lifetime_test.cpp)
 get_target_property(PULSE_PREVIEW_BUFFER_LIBRARIES pulse_preview_view_audit_test LINK_LIBRARIES)
 target_compile_definitions(pulse_preview_buffer_lifetime_test PRIVATE MD4C_USE_UTF16)
 target_link_libraries(pulse_preview_buffer_lifetime_test PRIVATE ${PULSE_PREVIEW_BUFFER_LIBRARIES})
@@ -2518,7 +2518,7 @@ set_target_properties(pulse_preview_buffer_lifetime_test PROPERTIES COMPILE_OPTI
 
 # Quick Look's archive thumbnail view: grid model and pictures read out of an archive.
 add_executable(pulse_archive_thumbnail_test ${PULSE_PREVIEW_BUFFER_SOURCES}
-    src/ui/archive_preview.cpp src/preview_host/archive_member.cpp src/bench/archive_thumbnail_test.cpp)
+    src/ui/archive_preview.cpp src/ui/view_layout.cpp src/preview_host/archive_member.cpp src/bench/archive_thumbnail_test.cpp)
 target_compile_definitions(pulse_archive_thumbnail_test PRIVATE MD4C_USE_UTF16)
 target_link_libraries(pulse_archive_thumbnail_test PRIVATE ${PULSE_PREVIEW_BUFFER_LIBRARIES} windowscodecs shlwapi ole32)
 pulse_enable_lumatext(pulse_archive_thumbnail_test)
@@ -2547,7 +2547,7 @@ target_include_directories(pulse_index_match_cache_test PRIVATE "${CMAKE_BINARY_
 target_link_libraries(pulse_index_match_cache_test PRIVATE advapi32 shlwapi ole32 shell32 netapi32 mpr pulse_localization pulse_runtime_log)
 
 add_executable(pulse_preview_identity_test ${PULSE_PREVIEW_BUFFER_SOURCES}
-    src/ui/archive_preview.cpp src/bench/preview_identity_test.cpp)
+    src/ui/archive_preview.cpp src/ui/view_layout.cpp src/bench/preview_identity_test.cpp)
 target_compile_definitions(pulse_preview_identity_test PRIVATE MD4C_USE_UTF16)
 target_link_libraries(pulse_preview_identity_test PRIVATE ${PULSE_PREVIEW_BUFFER_LIBRARIES})
 pulse_enable_lumatext(pulse_preview_identity_test)
@@ -2572,7 +2572,7 @@ endif()
 add_executable(pulse_source_identity_test src/bench/source_identity_test.cpp)
 
 add_executable(pulse_preview_storage_test ${PULSE_PREVIEW_BUFFER_SOURCES}
-    src/ui/archive_preview.cpp src/bench/preview_storage_test.cpp)
+    src/ui/archive_preview.cpp src/ui/view_layout.cpp src/bench/preview_storage_test.cpp)
 target_compile_definitions(pulse_preview_storage_test PRIVATE MD4C_USE_UTF16)
 target_link_libraries(pulse_preview_storage_test PRIVATE ${PULSE_PREVIEW_BUFFER_LIBRARIES})
 pulse_enable_lumatext(pulse_preview_storage_test)

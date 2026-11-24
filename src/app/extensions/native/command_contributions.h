@@ -17,6 +17,11 @@ std::vector<ui::FluentMenuItem> ContextMenuCommandRows(AppState&,
 bool HandleContributedCommand(AppState&, int);
 // Shell-open worker confirmed no archive application; use the original path, not the current selection.
 bool HandleArchiveOpenFallback(AppState&, const std::wstring& path);
+// Opens the archive at `path` with pulse.7zip's VFS without showing it (Quick
+// Look and the details pane drag items out of it and drop files into it).
+// Returns the mount's root (pulse:vfs:...), or empty when pulse.7zip is not
+// enabled or cannot open it.
+std::wstring MountArchiveQuietly(AppState&, const std::wstring& path);
 bool HandleExtensionFileOpen(AppState&, std::string_view package_id, std::string_view handler_id,
                              const std::wstring& path, bool force_preview = false);
 std::vector<std::wstring> FallbackOpenExtensions();

@@ -20,6 +20,8 @@
 #include "../../../common/localization.h"
 #include "../../app_runtime.h"
 #include "../../actions/action_registry.h"
+#include "vfs_adapter_host.h"
+#include "../vfs_path.h"
 #include <filesystem>
 #include <set>
 #include <stdexcept>
@@ -565,6 +567,30 @@ bool HandleExtensionFileOpen(AppState& owner,
         return false;
     }
     return false;
+}
+
+std::wstring MountArchiveQuietly(AppState& owner, const std::wstring& path) {
+    if (path.empty() || !ops::archive_open::Supported(path)) return {};
+    for (size_t package = 0; package < PackageCount(); ++package) {
+        const auto* manifest = PackageManifest(package);
+        if (!manifest || manifest->id != "pulse.7zip" || !manifest->native || !PackageEnabled(package)) continue;
+        CommandSelection selection;
+        const std::filesystem::path file(path);
+        CommandSelectionEntry entry;
+        if (!TryUtf8(path, entry.path) || !TryUtf8(file.filename().wstring(), entry.name) ||
+            !TryUtf8(file.parent_path().wstring(), selection.directory)) return {};
+        selection.entries.push_back(std::move(entry));
+        selection.valid = true;
+        if (!EnsureCommandPackageStarted(owner, package)) return {};
+        // 浏览压缩包 registers the mount and asks to open it; the capture
+        // takes that request instead of navigating.
+        std::wstring root;
+        CaptureVfsOpens(&root);
+        const bool invoked = CommandsAdapter::InvokeIdentityWithSelection(owner.hwnd, "native:pulse.7zip:browse-archive", selection);
+        CaptureVfsOpens(nullptr);
+        return invoked && vfs::IsVfsPath(root) ? root : std::wstring{};
+    }
+    return {};
 }
 
 bool HandleArchiveOpenFallback(AppState& owner, const std::wstring& path) {

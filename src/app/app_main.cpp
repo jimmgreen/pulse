@@ -1708,6 +1708,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, 
         s->core.windows.Add(hwnd, s);
         // Status items, columns and hooks of packages that start with the window.
         extensions::native::ScheduleStartupPackages(hwnd);
+        InstallPreviewArchiveBridge();  // archive previews: drag out / drop in
         // Later windows (M4a) skip the process-level setup below: services,
         // saved state and the tray already belong to the first window.
         const bool init_core = !s->core.started;

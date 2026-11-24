@@ -18,14 +18,30 @@
 #include "quick_preview_command.h"
 #include "quick_preview_size_probe.h"
 #include "open_with_icons.h"
+#include "shell_icons.h"
+#include "drag_drop.h"
 
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
 #include <deque>
+#include <memory>
 
 namespace pulse::ui {
+
+// What an archive preview asks of the app (app_vfs_ops.cpp). owner is the
+// window's message owner. stage extracts archive members ("dir\\file") to a
+// staging folder while the button is held and returns the staged paths (empty:
+// cancelled or refused, the app says why); add puts files into the archive
+// folder dir ("" = root) and is true when the change started.
+struct QuickPreviewArchiveBridge {
+    std::vector<std::wstring> (*stage)(HWND owner, const std::wstring& archive,
+                                       const std::vector<std::wstring>& members, uint64_t bytes) = nullptr;
+    bool (*add)(HWND owner, const std::wstring& archive, const std::wstring& dir,
+                const std::vector<std::wstring>& files) = nullptr;
+};
+void SetQuickPreviewArchiveBridge(const QuickPreviewArchiveBridge& bridge);
 
 class QuickPreviewWindow {
 public:
@@ -58,6 +74,12 @@ public:
     bool embedded() const noexcept { return embedded_; }
     void Activate();
     void Update(const QuickPreviewItem& item);
+    // The archive at `path` changed (a file was added from this preview):
+    // reloads it when it is the item shown.
+    void ReloadIfShowing(const std::wstring& path);
+    // ReloadIfShowing on every live preview window (Quick Look, the details
+    // pane, pinned / detached previews).
+    static void ReloadEverywhere(const std::wstring& path);
     void SetStarred(bool starred);
     // Content-search highlights without opening the interactive find bar.
     void SetSearchQuery(const std::wstring& query);
@@ -300,6 +322,12 @@ private:
     // Window size presets (Settings > 快速预览 > 预览窗口, the header's size
     // button, Ctrl+1/2/3, F).
     void ShowSizeMenu(POINT screen);
+    // Archive view: the sort button's menu, drag-out, drop-in.
+    void ShowArchiveSortMenu(const D2D1_RECT_F& anchor);
+    void AfterArchiveClick();
+    void StartArchiveDragOut();
+    void UpdateArchiveDropTarget();
+    DWORD ArchiveDragOver(const std::vector<std::wstring>& sources, POINT pt, DWORD allowed);
     void ChooseSizeMode(int mode);           // menu / Ctrl+1..3: also the new default
     // The rect for the current item: the remembered size, else the preset's
     // (适应内容 sets fit_pending_ when the size is only known after decoding).
@@ -543,6 +571,12 @@ private:
     uint32_t source_h_ = 0;
     NativeKind native_kind_ = NativeKind::None;
     ArchivePreview archive_;
+    std::unique_ptr<ShellIconCache> archive_icons_;  // the main list's type icons, for archive tiles
+    bool archive_press_ = false;     // left button went down on an archive entry
+    POINT archive_press_at_{};
+    bool archive_dragging_ = false;  // our own drag-out is running
+    WindowDropTarget* archive_drop_ = nullptr;  // registered while an archive is shown
+    bool archive_drop_tried_ = false;
     MarkdownView markdown_;
     bool markdown_source_ = false;  // session-wide: Markdown shown as source
     bool markdown_shown_ = false;   // this frame drew a Markdown item (toggle visible)
