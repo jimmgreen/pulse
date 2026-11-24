@@ -1,0 +1,105 @@
+{
+  "apiVersion": 1,
+  "id": "pulse.desktop",
+  "name": "桌面整理",
+  "resources": [
+    "settings.own",
+    "files.readDirectory",
+    "files.watchDirectory",
+    "files.open",
+    "operations.own",
+    "files.transferToDirectory",
+    "files.transferFromDirectory"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "id": "desktop-ai-organize",
+        "title": {
+          "zh": "AI 桌面收纳",
+          "en": "AI desktop organize",
+          "tw": "AI 桌面收納"
+        },
+        "detail": {
+          "zh": "结合 Pulse AI 助手按项目与语义归档桌面文件",
+          "en": "Organize desktop files into folders with Pulse AI Assistant",
+          "tw": "結合 Pulse AI 助手按專案與語意歸檔桌面檔案"
+        },
+        "group": {
+          "zh": "桌面整理",
+          "en": "Desktop Organizer",
+          "tw": "桌面整理"
+        },
+        "submenu": false,
+        "icon": "sparkle",
+        "kinds": ["background"],
+        "minSelection": 0,
+        "maxSelection": 4096
+      },
+      {
+        "id": "desktop-health",
+        "title": {
+          "zh": "桌面体检",
+          "en": "Desktop health check",
+          "tw": "桌面健檢"
+        },
+        "detail": {
+          "zh": "扫描已安装的安装包、旧截图与失效快捷方式",
+          "en": "Scan installed setups, old screenshots and broken links",
+          "tw": "掃描已安裝的安裝檔、舊截圖與失效捷徑"
+        },
+        "group": {
+          "zh": "桌面整理",
+          "en": "Desktop Organizer",
+          "tw": "桌面整理"
+        },
+        "submenu": false,
+        "icon": "shield",
+        "kinds": ["background"],
+        "minSelection": 0,
+        "maxSelection": 4096
+      },
+      {
+        "id": "desktop-beautify",
+        "title": {
+          "zh": "美化桌面",
+          "en": "Beautify desktop",
+          "tw": "美化桌面"
+        },
+        "detail": {
+          "zh": "调整桌面材质、透明度、强调色与场景模式",
+          "en": "Configure desktop material, opacity, accent and scene",
+          "tw": "調整桌面材質、透明度、強調色與場景模式"
+        },
+        "group": {
+          "zh": "桌面整理",
+          "en": "Desktop Organizer",
+          "tw": "桌面整理"
+        },
+        "submenu": false,
+        "icon": "sparkle",
+        "kinds": ["background"],
+        "minSelection": 0,
+        "maxSelection": 4096
+      },
+      {
+        "id": "desktop-toggle-icons",
+        "title": {
+          "zh": "显示/隐藏桌面图标",
+          "en": "Toggle desktop icons",
+          "tw": "顯示/隱藏桌面圖示"
+        },
+        "group": {
+          "zh": "桌面整理",
+          "en": "Desktop Organizer",
+          "tw": "桌面整理"
+        },
+        "submenu": false,
+        "icon": "eye",
+        "kinds": ["background"],
+        "minSelection": 0,
+        "maxSelection": 4096
+      }
+    ]
+  }
+}
