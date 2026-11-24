@@ -8,7 +8,7 @@ namespace pulse::app::sysctx {
 inline bool SystemItemToggleable(const Item& item) {
     return item.source == Source::Registry &&
         (item.kind == Kind::Verb || item.kind == Kind::ShellEx || item.kind == Kind::DragDrop) &&
-        !item.is_protected && !item.trusted_installer && item.root != Root::File;
+        (!item.is_protected || CanRestoreShellLink(item)) && !item.trusted_installer && item.root != Root::File;
 }
 inline std::vector<std::wstring> PackagedSceneTypes(const Scene& scene) {
     if (scene.mode != SceneMode::Menu) return {};

@@ -58,16 +58,15 @@ Action Advice(Reason r) {
     case Reason::Succeeded:case Reason::ShownClosed:return Action::None;
     case Reason::ComponentMismatch:return Action::RestartApplication;
     case Reason::AutomaticDisabled:case Reason::RegistrationConflict:case Reason::AdminAutoEntryFailed:return Action::CheckIntegrationSettings;
-    case Reason::ProviderUnavailable:case Reason::Timeout:return Action::RetryDialog;
+    case Reason::ProviderUnavailable:case Reason::Timeout:case Reason::ShownThenFailed:return Action::RetryDialog;
     case Reason::UnsupportedRequest:case Reason::InitialFolderUnsupported:case Reason::NativeFallback:return Action::UseNativeDialog;
     default:return Action::ExportDiagnostics;
     }
 }
 bool Classify(const Event& e,State& state,Reason& reason) {
-    if (e.name == "admin_auto_target_result") {
-        if (!Number(e.data, "error")) return false; // A ready loader is not a displayed dialog.
-        state = State::Failure; reason = Reason::AdminAutoEntryFailed; return true;
-    }
+    // Process discovery, activation and loader readiness do not prove that the
+    // application requested a dialog. Keep those events in diagnostics only.
+    if (e.name != "dialog_show_terminal") return false;
     const auto terminal=e.data.get_string("terminal_status"),r=e.data.get_string("reason_name"),fallback=e.data.get_string("fallback_reason");
     const auto hr=Number(e.data,"hr");
     if(e.name=="dialog_show_terminal") {
@@ -79,9 +78,6 @@ bool Classify(const Event& e,State& state,Reason& reason) {
         }
         if(terminal=="accepted"&&e.data.get_bool("ui_shown_known")&&e.data.get_bool("ui_shown")&&!e.data.get_bool("native_fallback")) {state=State::Success;reason=Reason::Succeeded;return true;}
         state=e.data.get_bool("native_fallback")?State::Fallback:terminal=="failed"?State::Failure:State::Unknown;
-    } else if(e.name=="token_rejected"||e.name=="activation_gate"||e.name=="resolve_gate"||e.name=="validation_gate") {
-        if(r.empty()||r=="ELIGIBLE"||r=="TRUSTED"||r=="TOKEN_ACCEPTED")return false;
-        state=State::Unknown;
     } else return false;
     if(hr==0x800705b4u||hr==0x8001011fu||Number(e.data,"error")==ERROR_TIMEOUT)reason=Reason::Timeout;
     else if(r=="REGISTERED_MODULE_MISMATCH"||r=="REGISTRATION_CHANGED_OR_NOT_CURRENT")reason=Reason::ComponentMismatch;
@@ -91,8 +87,9 @@ bool Classify(const Event& e,State& state,Reason& reason) {
     else if(r=="ELEVATED_BUNDLE_UNTRUSTED"||r=="RESTRICTED_TOKEN"||r=="APPCONTAINER"||r=="BELOW_MEDIUM_INTEGRITY"||r=="THREAD_IMPERSONATION")reason=Reason::PermissionDenied;
     else if(r=="PROVIDER_UNAVAILABLE"||fallback=="provider-unavailable"||fallback=="resolve-not-ready")reason=Reason::ProviderUnavailable;
     else if(fallback=="initial-folder-unavailable"||fallback=="INITIAL_FOLDER_UNREPRESENTABLE")reason=Reason::InitialFolderUnsupported;
-    else if(fallback=="provider-prepare-failed"||fallback=="provider-failed-before-ui"||fallback=="PROVIDER_START_FAILED_BEFORE_UI")reason=Reason::ProviderFailure;
+    else if(fallback=="provider-prepare-failed"||fallback=="provider-failed-before-ui"||fallback=="PROVIDER_START_FAILED_BEFORE_UI"||fallback=="PROVIDER_PREPARE_FAILED_BEFORE_UI")reason=Reason::ProviderFailure;
     else if(r=="CONTRACT_NOT_CERTIFIED"||fallback=="contract"||fallback=="NATIVE_CONTRACT_FALLBACK"||r.starts_with("Unsupported")||r.starts_with("UNSUPPORTED_"))reason=Reason::UnsupportedRequest;
+    else if(state==State::Failure&&e.data.get_bool("ui_shown_known")&&e.data.get_bool("ui_shown"))reason=Reason::ShownThenFailed;
     else if(state==State::Fallback)reason=Reason::NativeFallback;
     else reason=Reason::Unknown;
     return true;
@@ -131,12 +128,14 @@ bool Decode(const Value& v,History& h) {
     const auto* rows=v.find("records"),*cursors=v.find("cursors"),*ids=v.find("identities");
     if(!rows->is_array()||rows->size()>kRecords||!cursors->is_array()||cursors->size()>kCursors||!ids->is_array()||ids->size()>kIdentities)return false;
     for(const auto& x:rows->items()) {
-        if(!Keys(x,{"app","image","count","state","reason","action","certainty","operation","first","last","resolved","later","producer","seq"})||!EnumValue(x,"state",3)||!EnumValue(x,"reason",14)||!EnumValue(x,"action",5)||!EnumValue(x,"certainty",1)||!EnumValue(x,"operation",2)||!x.find("resolved")->is_bool()||!x.find("later")->is_bool())return false;
+        if(!Keys(x,{"app","image","count","state","reason","action","certainty","operation","first","last","resolved","later","producer","seq"})||!EnumValue(x,"state",3)||!EnumValue(x,"reason",15)||!EnumValue(x,"action",5)||!EnumValue(x,"certainty",1)||!EnumValue(x,"operation",2)||!x.find("resolved")->is_bool()||!x.find("later")->is_bool())return false;
         Record r;r.app_basename=json::Wide(x.get_string("app"));r.app_image_id=Number(x,"image");r.count=Number(x,"count");r.state=static_cast<State>(Number(x,"state"));r.reason=static_cast<Reason>(Number(x,"reason"));r.action=static_cast<Action>(Number(x,"action"));r.certainty=static_cast<Certainty>(Number(x,"certainty"));r.operation=static_cast<Operation>(Number(x,"operation"));r.first_utc=json::Wide(x.get_string("first"));r.last_utc=json::Wide(x.get_string("last"));r.resolved_by_success=x.get_bool("resolved");r.later_success=x.get_bool("later");r.last_producer=x.get_string("producer");r.last_sequence=Number(x,"seq");
         if(!Basename(r.app_basename)||!r.app_image_id||!r.count||!Utc(r.first_utc)||!Utc(r.last_utc)||r.first_utc>r.last_utc||!Token(r.last_producer)||!r.last_sequence||r.action!=Advice(r.reason))return false;if(std::any_of(h.records.begin(),h.records.end(),[&](const Record& old){return old.app_image_id==r.app_image_id&&old.reason==r.reason;}))return false;h.records.push_back(std::move(r));
     }
     for(const auto& x:cursors->items()){if(!Keys(x,{"producer","seq","utc"}))return false;Cursor c{x.get_string("producer"),Number(x,"seq"),json::Wide(x.get_string("utc"))};if(!Token(c.producer)||!c.sequence||!Utc(c.last_utc)||std::any_of(h.cursors.begin(),h.cursors.end(),[&](const Cursor& old){return old.producer==c.producer;}))return false;h.cursors.push_back(std::move(c));}
     for(const auto& x:ids->items()){if(!Keys(x,{"producer","source","session","pid","creation","image","app","ambiguous"}))return false;Identity i;i.producer=x.get_string("producer");i.source=x.get_string("source");i.session=x.get_string("session");const auto pid=Number(x,"pid");if(!pid||pid>0xffffffff)return false;i.pid=static_cast<uint32_t>(pid);i.creation_time=Number(x,"creation");i.image_id=Number(x,"image");i.basename=json::Wide(x.get_string("app"));if(!x.find("ambiguous")->is_bool())return false;i.ambiguous=x.get_bool("ambiguous");if(!i.creation_time||!i.image_id||!Basename(i.basename)||(i.source!="dialog_auto"&&i.source!="managed_runtime"&&i.source!="dialog_admin_auto")||!Token(i.session)||i.producer!=Base(i)+"|"+std::to_string(i.creation_time))return false;if(std::any_of(h.identities.begin(),h.identities.end(),[&](const Identity& old){return old.producer==i.producer;}))return false;h.identities.push_back(std::move(i));}
+    // Migrate old loader-only failures without changing event cursors or logs.
+    std::erase_if(h.records, [](const Record& r) { return r.reason == Reason::AdminAutoEntryFailed; });
     return true;
 }
 }
@@ -255,5 +254,10 @@ DWORD SaveHistory(const std::wstring& directory,const History& h) noexcept {
         } else if(!MoveFileExW(temporary.c_str(),current.c_str(),MOVEFILE_WRITE_THROUGH))return GetLastError();
         return 0;
     }catch(...){return ERROR_NOT_ENOUGH_MEMORY;}
+}
+size_t ForgetRecords(History& h,bool all,uint64_t app_image_id,Reason reason) noexcept {
+    const auto before=h.records.size();
+    std::erase_if(h.records,[&](const Record& r){return all || (r.app_image_id==app_image_id && r.reason==reason);});
+    return before-h.records.size();
 }
 }

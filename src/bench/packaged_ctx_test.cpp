@@ -74,7 +74,7 @@ private:
     std::vector<FakeCommand*> items_;
 };
 
-class FakeCommand final : public IExplorerCommand, public IObjectWithSite {
+class FakeCommand final : public IExplorerCommand, public IObjectWithSite, public IObjectWithSelection {
 public:
     FakeCommand(const wchar_t* title, EXPCMDFLAGS flags = ECF_DEFAULT,
                 EXPCMDSTATE state = ECS_ENABLED)
@@ -91,6 +91,11 @@ public:
         }
         if (riid == IID_IObjectWithSite) {
             *ppv = static_cast<IObjectWithSite*>(this);
+            AddRef();
+            return S_OK;
+        }
+        if (riid == IID_IObjectWithSelection) {
+            *ppv = static_cast<IObjectWithSelection*>(this);
             AddRef();
             return S_OK;
         }
@@ -114,6 +119,18 @@ public:
         if (!ppv) return E_POINTER;
         *ppv = nullptr;
         return site_ ? site_->QueryInterface(riid, ppv) : E_FAIL;
+    }
+    IFACEMETHODIMP SetSelection(IShellItemArray* psia) override {
+        if (psia) psia->AddRef();
+        if (selection_) selection_->Release();
+        selection_ = psia;
+        ++selection_calls;
+        return S_OK;
+    }
+    IFACEMETHODIMP GetSelection(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        return selection_ ? selection_->QueryInterface(riid, ppv) : E_FAIL;
     }
     IFACEMETHODIMP GetTitle(IShellItemArray*, LPWSTR* out) override {
         return SHStrDupW(title_.c_str(), out);
@@ -156,14 +173,18 @@ public:
     int invoked = 0;
     IShellItemArray* last_items = nullptr;
     int site_calls = 0;
+    int selection_calls = 0;
     IUnknown* site() const { return site_; }
+    IShellItemArray* selection() const { return selection_; }
 
 private:
     ~FakeCommand() {
         for (auto* child : children_) child->Release();
         if (site_) site_->Release();
+        if (selection_) selection_->Release();
     }
     IUnknown* site_ = nullptr;
+    IShellItemArray* selection_ = nullptr;
     LONG refs_ = 1;
     std::wstring title_;
     EXPCMDFLAGS flags_;
@@ -418,6 +439,191 @@ void TestFolderViewSite(IShellItemArray* items, const std::wstring& dir) {
     root->Release();
     child->Release();
     site->Release();
+}
+
+void TestFolderViewSiteOwnerAndSelection(const std::wstring& dir) {
+    const std::wstring f1 = dir + L"\\sel1.txt";
+    const std::wstring f2 = dir + L"\\sel2.txt";
+    auto touch = [](const std::wstring& p) {
+        HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    };
+    touch(f1);
+    touch(f2);
+
+    PIDLIST_ABSOLUTE dir_pidl = nullptr;
+    PIDLIST_ABSOLUTE p1 = nullptr;
+    PIDLIST_ABSOLUTE p2 = nullptr;
+    SHParseDisplayName(dir.c_str(), nullptr, &dir_pidl, 0, nullptr);
+    SHParseDisplayName(f1.c_str(), nullptr, &p1, 0, nullptr);
+    SHParseDisplayName(f2.c_str(), nullptr, &p2, 0, nullptr);
+    IShellItemArray* sel = nullptr;
+    if (p1 && p2) {
+        PCIDLIST_ABSOLUTE arr[2] = { p1, p2 };
+        SHCreateShellItemArrayFromIDLists(2, arr, &sel);
+    }
+
+    const HWND owner = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x1234));
+    IUnknown* site = nullptr;
+    const HRESULT hr = (dir_pidl && sel)
+        ? CreateFolderViewSite(dir_pidl, &site, owner, sel)
+        : E_FAIL;
+    Check(SUCCEEDED(hr) && site != nullptr, "site: created with owner HWND and 2-item selection");
+    if (site) {
+        IServiceProvider* sp = nullptr;
+        IOleWindow* ole = nullptr;
+        IOleWindow* top = nullptr;
+        IOleWindow* direct_win = nullptr;
+        IFolderView* fv = nullptr;
+        HWND got_top = nullptr, got_direct = nullptr, got_qi = nullptr;
+        site->QueryInterface(IID_PPV_ARGS(&sp));
+        const bool ole_qi = SUCCEEDED(site->QueryInterface(IID_PPV_ARGS(&ole))) &&
+                            SUCCEEDED(ole->GetWindow(&got_qi)) && got_qi == owner;
+        const bool top_ok = sp && SUCCEEDED(sp->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(&top))) &&
+                            SUCCEEDED(top->GetWindow(&got_top)) && got_top == owner;
+        const bool win_ok = sp && SUCCEEDED(sp->QueryService(IID_IOleWindow, IID_PPV_ARGS(&direct_win))) &&
+                            SUCCEEDED(direct_win->GetWindow(&got_direct)) && got_direct == owner;
+        Check(ole_qi && top_ok && win_ok,
+              "site: IOleWindow and QueryService(SID_STopLevelBrowser/IID_IOleWindow) expose owner HWND");
+
+        int count = 0;
+        IShellItemArray* arr_out = nullptr;
+        IDataObject* do_out = nullptr;
+        const bool fv_ok = sp && SUCCEEDED(sp->QueryService(__uuidof(IFolderView), IID_PPV_ARGS(&fv)));
+        const bool count_ok = fv && SUCCEEDED(fv->ItemCount(SVGIO_SELECTION, &count)) && count == 2;
+        const bool items_arr = fv && SUCCEEDED(fv->Items(SVGIO_SELECTION, IID_PPV_ARGS(&arr_out))) && arr_out;
+        const bool items_do = fv && SUCCEEDED(fv->Items(SVGIO_SELECTION, IID_PPV_ARGS(&do_out))) && do_out;
+        Check(fv_ok && count_ok && items_arr && items_do,
+              "site: IFolderView exposes SVGIO_SELECTION item count and items");
+        if (arr_out) arr_out->Release();
+        if (do_out) do_out->Release();
+        if (fv) fv->Release();
+        if (direct_win) direct_win->Release();
+        if (top) top->Release();
+        if (ole) ole->Release();
+        if (sp) sp->Release();
+        site->Release();
+    }
+
+    if (sel) sel->Release();
+    if (p1) CoTaskMemFree(p1);
+    if (p2) CoTaskMemFree(p2);
+    if (dir_pidl) CoTaskMemFree(dir_pidl);
+    DeleteFileW(f1.c_str());
+    DeleteFileW(f2.c_str());
+}
+
+void TestExplorerCommandMenuMulti(IShellItemArray* items, const std::wstring& dir) {
+    constexpr UINT kFirst = 100;
+    PIDLIST_ABSOLUTE pidl = nullptr;
+    IUnknown* site = nullptr;
+    if (SUCCEEDED(SHParseDisplayName(dir.c_str(), nullptr, &pidl, 0, nullptr)) && pidl) {
+        CreateFolderViewSite(pidl, &site, nullptr, items);
+        CoTaskMemFree(pidl);
+    }
+    auto* root1 = new FakeCommand(L"Group", ECF_HASSUBCOMMANDS);
+    auto* sub = new FakeCommand(L"SubAction");
+    sub->AddRef();
+    root1->Add(sub);
+    auto* root2 = new FakeCommand(L"SecondRoot");
+
+    IContextMenu* menu = nullptr;
+    const HRESULT hr = CreateExplorerCommandMenuMulti({ root1, root2 }, items, &menu, site);
+    Check(SUCCEEDED(hr) && menu != nullptr &&
+              root1->selection_calls == 1 && root2->selection_calls == 1 &&
+              root1->site_calls == 1 && root2->site_calls == 1,
+          "multi-root adapter sites and binds selection to all root commands");
+    if (menu) {
+        HMENU popup = CreatePopupMenu();
+        menu->QueryContextMenu(popup, 0, kFirst, kFirst + 50, CMF_NORMAL);
+        Check(sub->site_calls == 1 && sub->selection_calls == 1,
+              "multi-root adapter sites and binds selection to sub-commands");
+        Check(SUCCEEDED(InvokeOffset(menu, 1)) && sub->invoked == 1 &&
+                  SUCCEEDED(InvokeOffset(menu, 2)) && root2->invoked == 1,
+              "multi-root adapter invokes both sub-command and second root");
+        DestroyMenu(popup);
+        menu->Release();
+        Check(root1->site() == nullptr && root1->site_calls == 2 &&
+                  root2->site() == nullptr && root2->site_calls == 2 &&
+                  sub->site() == nullptr && sub->site_calls == 2,
+              "multi-root adapter clears SetSite(nullptr) on all roots and sub-commands on release");
+    }
+    if (site) site->Release();
+    sub->Release();
+    root1->Release();
+    root2->Release();
+}
+
+void TestRegistryPropertyBag() {
+    const std::wstring key = L"Software\\PulseTestPropBag_" + std::to_wstring(GetCurrentProcessId());
+    HKEY hkey = nullptr;
+    const bool created = RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0,
+                                         KEY_WRITE, nullptr, &hkey, nullptr) == ERROR_SUCCESS;
+    if (created) {
+        const wchar_t str_val[] = L"hello";
+        const wchar_t exp_val[] = L"%SystemRoot%\\test";
+        const DWORD flag_val = 1;
+        RegSetValueExW(hkey, L"StrVal", 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(str_val), sizeof(str_val));
+        RegSetValueExW(hkey, L"ExpVal", 0, REG_EXPAND_SZ,
+                       reinterpret_cast<const BYTE*>(exp_val), sizeof(exp_val));
+        RegSetValueExW(hkey, L"FlagVal", 0, REG_DWORD,
+                       reinterpret_cast<const BYTE*>(&flag_val), sizeof(flag_val));
+        RegCloseKey(hkey);
+    }
+
+    IPropertyBag* bag = nullptr;
+    const HRESULT open_hr = created ? CreateRegistryPropertyBag(HKEY_CURRENT_USER, key, &bag) : E_FAIL;
+    bool str_ok = false, exp_ok = false, dword_ok = false, missing_ok = false, write_ok = false;
+    if (SUCCEEDED(open_hr) && bag) {
+        VARIANT v{};
+        VariantInit(&v);
+        if (SUCCEEDED(bag->Read(L"StrVal", &v, nullptr)) && v.vt == VT_BSTR && v.bstrVal)
+            str_ok = wcscmp(v.bstrVal, L"hello") == 0;
+        VariantClear(&v);
+
+        VariantInit(&v);
+        v.vt = VT_BSTR;
+        if (SUCCEEDED(bag->Read(L"ExpVal", &v, nullptr)) && v.vt == VT_BSTR && v.bstrVal) {
+            const std::wstring s = v.bstrVal;
+            exp_ok = s.find(L"%SystemRoot%") == std::wstring::npos && s.ends_with(L"\\test");
+        }
+        VariantClear(&v);
+
+        VARIANT v_empty{}, v_i4{}, v_bool{};
+        VariantInit(&v_empty);
+        VariantInit(&v_i4);
+        VariantInit(&v_bool);
+        v_i4.vt = VT_I4;
+        v_bool.vt = VT_BOOL;
+        const bool e_ok = SUCCEEDED(bag->Read(L"FlagVal", &v_empty, nullptr)) &&
+                          v_empty.vt == VT_UI4 && v_empty.ulVal == 1;
+        const bool i_ok = SUCCEEDED(bag->Read(L"FlagVal", &v_i4, nullptr)) &&
+                          v_i4.vt == VT_I4 && v_i4.lVal == 1;
+        const bool b_ok = SUCCEEDED(bag->Read(L"FlagVal", &v_bool, nullptr)) &&
+                          v_bool.vt == VT_BOOL && v_bool.boolVal == VARIANT_TRUE;
+        dword_ok = e_ok && i_ok && b_ok;
+        VariantClear(&v_empty);
+        VariantClear(&v_i4);
+        VariantClear(&v_bool);
+
+        VARIANT v_missing{};
+        VariantInit(&v_missing);
+        missing_ok = FAILED(bag->Read(L"DoesNotExist", &v_missing, nullptr));
+        VariantClear(&v_missing);
+
+        VARIANT v_write{};
+        VariantInit(&v_write);
+        v_write.vt = VT_UI4;
+        v_write.ulVal = 2;
+        write_ok = bag->Write(L"FlagVal", &v_write) == E_ACCESSDENIED;
+        VariantClear(&v_write);
+
+        bag->Release();
+    }
+    RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
+    Check(created && SUCCEEDED(open_hr) && str_ok && exp_ok && dword_ok && missing_ok && write_ok,
+          "reg property bag reads SZ/EXPAND_SZ/DWORD types and rejects Write as read-only");
 }
 
 constexpr char kManifest[] = R"(<?xml version="1.0" encoding="utf-8"?>
@@ -734,6 +940,9 @@ int wmain(int argc, wchar_t** argv) {
 
     TestAdapter(items);
     TestFolderViewSite(items, dir);
+    TestFolderViewSiteOwnerAndSelection(dir);
+    TestExplorerCommandMenuMulti(items, dir);
+    TestRegistryPropertyBag();
     TestManifest();
     TestItemTypes(dir, file);
     TestDuplicates();

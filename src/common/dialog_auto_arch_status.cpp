@@ -67,8 +67,22 @@ ArchStatus InspectArchStatus(HKEY root, bool x86, const std::wstring& component_
         else if (present == 2 && enabled == 1) result.registration = ArchRegistrationState::Registered;
         else if (present == 2) result.registration = ArchRegistrationState::DisabledMatching;
         auto component = result.dll_path;
-        if (component.empty() && !component_directory.empty())
-            component = component_directory + L"\\" + (x86 ? L"PulseDialogAuto32.dll" : L"PulseDialogAuto64.dll");
+        if (component.empty() && !component_directory.empty()) {
+            const wchar_t* candidates[] = {
+                x86 ? L"PulseDialogAuto32.dll" : L"PulseDialogAuto64.dll",
+                x86 ? L"PulseDialogCore32.dll" : L"PulseDialogCore64.dll",
+                x86 ? L"PulseDialogStub32.dll" : L"PulseDialogStub64.dll",
+            };
+            component = component_directory + L"\\" + candidates[0];
+            for (const wchar_t* name : candidates) {
+                const auto candidate = component_directory + L"\\" + name;
+                const auto attrs = GetFileAttributesW(candidate.c_str());
+                if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+                    component = candidate;
+                    break;
+                }
+            }
+        }
         if (!component.empty()) {
             const auto attributes = GetFileAttributesW(component.c_str());
             if (attributes != INVALID_FILE_ATTRIBUTES) result.component = (attributes & FILE_ATTRIBUTE_DIRECTORY) ? ArchComponentState::Missing : ArchComponentState::Present;

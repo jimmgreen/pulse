@@ -118,7 +118,7 @@ inline wchar_t MenuMnemonic(std::wstring_view raw) {
     return 0;
 }
 
-// At most this many children per software-owned submenu flyout.
+// Static-verb/cache width; the native COM flyout walk uses the tree budget.
 inline constexpr int kMaxSubmenuChildren = 16;
 inline constexpr int kMaxMenuDepth = 16;
 inline constexpr int kMaxMenuTreeRows = 512;
@@ -143,13 +143,16 @@ struct StaticVerbRegFlags {
     bool has_explorer_command = false;
     bool has_subcommands = false;
     bool has_extended_subcommands_key = false;
+    bool has_drop_target = false;
+    bool has_dde = false;
 };
 
 inline bool KeepStaticVerb(const StaticVerbRegFlags& flags) {
     if (flags.legacy_disable || flags.programmatic || flags.extended) return false;
     return flags.has_command || flags.has_delegate_execute ||
            flags.has_explorer_command || flags.has_subcommands ||
-           flags.has_extended_subcommands_key;
+           flags.has_extended_subcommands_key || flags.has_drop_target ||
+           flags.has_dde;
 }
 
 // A delegate/Explorer command is the real Shell action; a sibling
@@ -158,7 +161,8 @@ inline bool KeepStaticVerb(const StaticVerbRegFlags& flags) {
 // directly when a Shell handler is registered.
 inline bool UseStaticVerbCommand(const StaticVerbRegFlags& flags) {
     return flags.has_command && !flags.has_delegate_execute &&
-           !flags.has_explorer_command;
+           !flags.has_explorer_command && !flags.has_drop_target &&
+           !flags.has_dde;
 }
 
 // One row in a COM flyout after QueryContextMenu. Nested submenus are flattened

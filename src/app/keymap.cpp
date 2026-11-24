@@ -62,7 +62,7 @@ constexpr KeyActionInfo kActions[] = {
     {X::AdvancedSearch, "AdvancedSearch", G::Search, N::Normal, L"高级搜索", L"Advanced search", D(K(C | S, 'F')), 0, 0, 0, false},
     {X::NewTab, "NewTab", G::Tabs, N::Normal, L"新建标签页", L"New tab", D(K(C, 'T')), 0, 0, 0, false},
     {X::CloseTab, "CloseTab", G::Tabs, N::Normal, L"关闭标签页", L"Close tab", D(K(C, 'W')), 0, 0, 0, false},
-    {X::NextTab, "NextTab", G::Tabs, N::Normal, L"下一个标签页", L"Next tab", D(K(C, VK_TAB)), 0, 0, 0, true},
+    {X::NextTab, "NextTab", G::Tabs, N::Normal, L"最近使用的标签", L"Recent tabs", D(K(C, VK_TAB)), 0, 0, 0, true},
     {X::TabNumber, "TabNumber", G::Tabs, N::Range, L"转到第 N 个标签页", L"Go to tab N", D(), C, 1, 9, false},
     {X::Layout, "Layout", G::Tabs, N::Range, L"分栏布局", L"Pane layout", D(), static_cast<uint8_t>(C | A), 1, 4, false},
     {X::ViewMode, "ViewMode", G::Tabs, N::Range, L"视图模式", L"View mode", D(), static_cast<uint8_t>(C | S), 1, 8, false},
@@ -84,12 +84,14 @@ constexpr KeyActionInfo kActions[] = {
     {X::AiAssistant, "AiAssistant", G::Windows, N::Normal, L"Pulse 助手", L"Pulse Assistant", D(K(C, 'J')), 0, 0, 0, false},
     {X::AiHistory, "AiHistory", G::Windows, N::Normal, L"Pulse 助手历史对话", L"Pulse Assistant chat history", D(K(C, 'H')), 0, 0, 0, false},
     {X::ShortcutHelp, "ShortcutHelp", G::Windows, N::Normal, L"键盘快捷键", L"Keyboard shortcuts", D(K(C, VK_OEM_2)), 0, 0, 0, false},
+    {X::OpenSettings, "OpenSettings", G::Windows, N::Normal, L"打开设置", L"Open settings", D(K(C, VK_OEM_COMMA)), 0, 0, 0, false},
     {X::ArrangeSideBySide, "ArrangeSideBySide", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
     {X::ArrangeStacked, "ArrangeStacked", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
     {X::ArrangeColumns, "ArrangeColumns", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
     {X::ArrangeTile, "ArrangeTile", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
     {X::ArrangeMain, "ArrangeMain", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
     {X::ArrangeCascade, "ArrangeCascade", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
+    {X::CloseOtherTabs, "CloseOtherTabs", G::Tabs, N::Normal, L"", L"", D(K(C | A, 'W')), 0, 0, 0, false},
 };
 static_assert(std::size(kActions) == static_cast<size_t>(kKeyActionCount));
 
@@ -161,6 +163,8 @@ const KeyActionInfo& ActionInfo(KeyAction action) noexcept {
 const wchar_t* ActionName(KeyAction action) {
     const auto& info = ActionInfo(action);
     switch (info.action) {
+    case KeyAction::CloseOtherTabs: return l10n::Get(l10n::StringId::TabCloseOthers).c_str();
+    case KeyAction::OpenSettings: return l10n::Get(l10n::StringId::ActOpenSettings).c_str();
     case KeyAction::ArrangeSideBySide: return l10n::Get(l10n::StringId::ArrangeSideBySide).c_str();
     case KeyAction::ArrangeStacked: return l10n::Get(l10n::StringId::ArrangeStacked).c_str();
     case KeyAction::ArrangeColumns: return l10n::Get(l10n::StringId::ArrangeColumns).c_str();

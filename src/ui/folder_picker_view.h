@@ -36,6 +36,8 @@ enum PickerControl : int {
     kPickJumpIndexInfo,
     kPickOverwriteReplace,
     kPickLastLocation, // the strip's "this program last time" chip
+    kPickOpenScrollLeft,
+    kPickOpenScrollRight,
 };
 
 inline constexpr int kPickRemoveSelectionBase = 100;
@@ -100,6 +102,7 @@ struct FolderPickerChrome {
     float context_top = 0.0f, context_left = 0.0f, context_right = 0.0f;
     std::vector<PickerOptionChip> context_filters;
     std::vector<PickerOpenChip> open_folders;
+    float open_scroll = 0.0f;         // horizontal scroll offset (DIP) inside the open-folders strip
     PickerOpenChip last_location;     // label empty: none
     std::wstring strip_caption;       // "已打开"
     std::wstring auto_jump_notice;
@@ -108,6 +111,11 @@ struct FolderPickerChrome {
     std::wstring new_folder_text;     // "新建文件夹"; empty: no button
     std::wstring new_folder_key;      // "Ctrl+Shift+N"
     std::function<bool(size_t, const D2D1_RECT_F&)> draw_recent_thumbnail; // Host thumbnail drawing/async generation; no synchronous IO.
+    std::function<bool(size_t, const D2D1_RECT_F&)> draw_recent_icon;      // Host file-type icon for cards without a thumbnail; async.
+    // Over a window material the list renderer already tinted the title strip and the
+    // sheet with these opacities (the main window's 透明度 settings) left of
+    // frame_left; the chrome adds the same layers only to its right. 1, 1: opaque.
+    float frame_title_alpha = 1.0f, frame_sheet_alpha = 1.0f, frame_left = 0.0f;
     std::vector<PickerRecentCard> recent_files;  // shown when non-empty (open modes)
     std::wstring recent_caption;      // "最近的图片 · 来自 Photoshop 和 Pulse，不限文件夹"
     int recent_selected = -1;
@@ -146,6 +154,10 @@ struct FolderPickerChromeLayout {
     D2D1_RECT_F title{};
     D2D1_RECT_F close{};
     D2D1_RECT_F strip{};
+    D2D1_RECT_F open_viewport{};           // clipped horizontal viewport for open_chips + last_location
+    D2D1_RECT_F open_scroll_left{};        // compact left chevron button when open_scroll_max > 0
+    D2D1_RECT_F open_scroll_right{};       // compact right chevron button when open_scroll_max > 0
+    float open_scroll_max = 0.0f;          // maximum horizontal scroll offset in DIP
     std::vector<D2D1_RECT_F> open_chips;   // one per shown open_folders entry
     std::vector<D2D1_RECT_F> open_keycaps;
     std::vector<bool> open_chip_source;     // the chip had room for its source label

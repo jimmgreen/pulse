@@ -5,11 +5,20 @@
 #include <string_view>
 
 namespace pulse::ops {
-inline std::wstring ExpandShellCommand(std::wstring_view command, const std::wstring& path) {
-    const std::wstring quoted = QuoteWindowsArgument(path::StripExtendedPathPrefix(path));
+inline std::wstring ExpandShellCommand(std::wstring_view command, const std::wstring& path,
+                                      bool* replaced = nullptr) {
+    if (replaced) *replaced = false;
+    const std::wstring clean_path = path::StripExtendedPathPrefix(path);
+    const std::wstring quoted = QuoteWindowsArgument(clean_path);
+    std::wstring dir = clean_path;
+    if (const size_t slash = clean_path.find_last_of(L"\\/"); slash != std::wstring::npos) {
+        const bool drive_root = slash == 2 && clean_path[1] == L':';
+        dir.resize(drive_root ? 3 : slash);
+    }
+    const std::wstring quoted_dir = QuoteWindowsArgument(dir);
     const auto placeholder = [&](size_t offset) {
         return offset + 1 < command.size() && command[offset] == L'%' &&
-            std::wstring_view(L"1LlVv*").find(command[offset + 1]) != std::wstring_view::npos;
+            std::wstring_view(L"1LlVvWw*").find(command[offset + 1]) != std::wstring_view::npos;
     };
     std::wstring expanded;
     expanded.reserve(command.size() + quoted.size());
@@ -18,10 +27,14 @@ inline std::wstring ExpandShellCommand(std::wstring_view command, const std::wst
         // can themselves contain percent sequences and must remain literal.
         if (command[i] == L'"' && placeholder(i + 1) &&
             i + 3 < command.size() && command[i + 3] == L'"') {
-            expanded += quoted;
+            const wchar_t token = command[i + 2];
+            expanded += (token == L'W' || token == L'w') ? quoted_dir : quoted;
+            if (replaced) *replaced = true;
             i += 4;
         } else if (placeholder(i)) {
-            expanded += quoted;
+            const wchar_t token = command[i + 1];
+            expanded += (token == L'W' || token == L'w') ? quoted_dir : quoted;
+            if (replaced) *replaced = true;
             i += 2;
         } else {
             expanded += command[i++];

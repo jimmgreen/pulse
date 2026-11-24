@@ -115,9 +115,10 @@ int wmain(int argc, wchar_t** argv) {
     const bool unsupported_audio_only = argc == 3 && wcscmp(argv[2], L"--unsupported-audio-only") == 0;
     const bool cadence_only = argc == 3 && wcscmp(argv[2], L"--cadence-only") == 0;
     const bool open_only = argc == 3 && wcscmp(argv[2], L"--open-only") == 0;
+    const bool audio_prefs_only = argc == 3 && wcscmp(argv[2], L"--audio-preferences-only") == 0;
     const bool end_seek_only = argc == 3 && wcscmp(argv[2], L"--end-seek-only") == 0;
     using namespace pulse::ui::playback;
-    if (!cadence_only && !open_only && !end_seek_only && !unsupported_audio_only && !tracks_only) {
+    if (!cadence_only && !open_only && !audio_prefs_only && !end_seek_only && !unsupported_audio_only && !tracks_only) {
         Check(FrameAt(0, 20) == 0 && FrameAt(1, 20) == 19, "GIF seek endpoints are valid frame indices");
         Check(FrameAt(.5, 11) == 5, "GIF seek maps progress to frame");
         Check(FrameAt(-1, 10) == 0 && FrameAt(2, 10) == 9, "GIF seek clamps beyond track");
@@ -130,13 +131,32 @@ int wmain(int argc, wchar_t** argv) {
         Check(VideoPreview::Supports(L"test.MP4") && !VideoPreview::Supports(L"test.gif"), "video selection preserves GIF path");
     }
     if (argc == 2 && wcscmp(argv[1], L"--timeline-only") == 0) return failures ? 1 : 0;
-    if (argc != 2 && !cadence_only && !open_only && !end_seek_only && !unsupported_audio_only && !tracks_only) { std::puts("Video runtime tests require an isolated fixture path"); return 2; }
+    if (argc != 2 && !cadence_only && !open_only && !audio_prefs_only && !end_seek_only && !unsupported_audio_only && !tracks_only) { std::puts("Video runtime tests require an isolated fixture path"); return 2; }
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     HWND window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"STATIC",
         L"Pulse playback regression fixture", WS_OVERLAPPEDWINDOW,
         80, 80, 480, 320, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     ShowWindow(window, SW_SHOWNOACTIVATE);
     VideoPreview video;
+    if (audio_prefs_only) {
+        video.Open(window, argv[1], false, true, 0.37f, true);
+        const auto start = video.Snapshot();
+        Check(std::fabs(start.volume - 0.37f) < .001f && start.muted,
+            "player starts with the remembered volume and mute");
+        Check(Until([&] { const auto s = video.Snapshot(); return s.ready || FAILED(s.error); }),
+            "remembered-audio fixture finishes opening");
+        const auto ready = video.Snapshot();
+        Check(ready.ready && SUCCEEDED(ready.error) && std::fabs(ready.volume - 0.37f) < .001f && ready.muted,
+            "production media worker retains the requested audio settings");
+        video.Open(window, argv[1], false, false, 0.0f, false);
+        const auto reopened = video.Snapshot();
+        Check(reopened.volume == 0.0f && !reopened.muted,
+            "reopened preview applies zero gain without inheriting mute");
+        video.Reset();
+        DestroyWindow(window);
+        CoUninitialize();
+        return failures ? 1 : 0;
+    }
     video.Open(window, argv[1]);
     video.Layout(RECT{0, 0, 460, 260}, true);
     HWND child = GetWindow(window, GW_CHILD);

@@ -2,6 +2,7 @@
 #pragma once
 
 #include <windows.h>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -19,6 +20,11 @@ namespace pulse::preview {
 // archive-open-failed, entry-not-found, entry-too-large, entry-read-failed.
 bool ReadZipEntry(const std::wstring& path, std::string_view name, size_t max_bytes,
                   std::vector<unsigned char>& data, std::wstring* error);
+
+// Visits requested members in archive order while retaining their logical indices.
+using ZipEntryVisitor = std::function<bool(size_t, const std::vector<unsigned char>&)>;
+bool VisitZipEntries(const std::wstring& path, const std::vector<std::string>& names, size_t max_bytes,
+                     const ZipEntryVisitor& visit);
 
 // Like ReadZipEntry, but a member larger than max_bytes is not refused: its
 // first max_bytes are returned and *truncated is set. For formats that can be

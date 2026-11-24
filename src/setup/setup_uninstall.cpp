@@ -13,6 +13,8 @@
 #include "setup_process.h"
 #include "setup_registry.h"
 #include "setup_service.h"
+#include "../common/dialog_bridge_paths.h"
+#include "../common/dialog_com_hklm.h"
 
 #include <windows.h>
 #include <knownfolders.h>
@@ -29,45 +31,6 @@ constexpr const wchar_t* kKnownFiles[] = {
     L"msvcp140.dll", L"msvcp140_atomic_wait.dll", L"vcruntime140.dll", L"vcruntime140_1.dll",
     L"uninstall.exe",
 };
-
-bool DirExists(const std::wstring& p) {
-    const DWORD a = GetFileAttributesW(p.c_str());
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-std::wstring Lower(std::wstring s) {
-    if (!s.empty()) CharLowerBuffW(s.data(), static_cast<DWORD>(s.size()));
-    return s;
-}
-
-bool EndsWith(const std::wstring& s, const wchar_t* suffix) {
-    const size_t n = wcslen(suffix);
-    return s.size() >= n && s.compare(s.size() - n, n, suffix) == 0;
-}
-
-// ---- data cleanup (CleanupPulseData and friends) -----------------------
-
-bool IsPulseIndexArtifact(const std::wstring& name) {
-    const std::wstring n = Lower(name);
-    return n == L"pulse-index.bin" || n == L"pulse-index.bin.tmp" || n == L"pulse-index.dlt" ||
-           (n.rfind(L"pulse-index-", 0) == 0 && EndsWith(n, L".dlt"));
-}
-
-void DeletePulseIndexArtifacts(const std::wstring& dir) {
-    if (dir.empty() || !DirExists(dir)) return;
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
-    if (h != INVALID_HANDLE_VALUE) {
-        do {
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && IsPulseIndexArtifact(fd.cFileName)) {
-                const std::wstring path = dir + L"\\" + fd.cFileName;
-                if (!DeleteFileW(path.c_str())) Log(L"Could not delete Pulse index artifact: " + path);
-            }
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
-    }
-    RemoveDirectoryW(dir.c_str());  // only succeeds when the custom directory is now empty
-}
 
 // ReadJsonBool from the iss: "key": true|false, anything else -> fallback.
 bool ReadJsonBool(const std::string& json, const char* key, bool fallback) {
@@ -109,7 +72,7 @@ void DeleteLocalDataKeepingPacks() {
 void CleanupPulseData(const std::wstring& index_path) {
     const std::wstring program_data = KnownFolder(FOLDERID_ProgramData) + L"\\Pulse";
     if (!index_path.empty() && !SameDirectory(index_path, program_data + L"\\Index"))
-        DeletePulseIndexArtifacts(NormalizeDir(index_path));
+        DeletePulseIndexDirectoryArtifacts(index_path);
     if (RemovePreviewPacksOnUninstall()) RemoveTree(LocalPulseDir());
     else DeleteLocalDataKeepingPacks();
     RemoveTree(program_data);
@@ -230,36 +193,60 @@ UninstallResult RunUninstall(const UninstallRequest& req, const UninstallCallbac
         return result;
     }
 
-    if (real) {
+    if (real && SUCCEEDED(dialog_admin_auto::ValidateInstalledRoot(app, false))) {
         const HRESULT stopped = dialog_admin_auto::Remove(app);
         Log(L"Admin auto task removal: " + std::to_wstring(static_cast<unsigned long>(stopped)));
-        if (FAILED(stopped)) {
-            result.exit_code = kExitPrepareFailed;
-            result.error = Win32Error(HRESULT_FACILITY(stopped) == FACILITY_WIN32 ?
-                HRESULT_CODE(stopped) : static_cast<DWORD>(stopped));
-            return result;
+        if (FAILED(stopped) &&
+            stopped != HRESULT_FROM_WIN32(ERROR_LOGON_TYPE_NOT_GRANTED) &&
+            stopped != HRESULT_FROM_WIN32(ERROR_NO_SUCH_LOGON_SESSION)) {
+            Log(L"Admin auto task removal degraded; continuing uninstall.");
         }
     }
 
-    // Restore before removing DLLs, including an install-directory migration.
-    if(real) {
-        DWORD restored=ERROR_SUCCESS;
-        std::vector<dialog_auto::RegistrationTarget> targets;
-        for(const auto arch : {dialog_auto::Architecture::X64,dialog_auto::Architecture::X86}) {
-            const auto status=dialog_auto::Inspect(arch);
-            if(status.error==ERROR_NOT_SUPPORTED && arch!=dialog_auto::CurrentArchitecture) continue;
-            if(status.error) {restored=status.error;break;}
-            if(IsOwnedDialogDll(app,status.dll_path,arch)) targets.push_back({arch,status.dll_path});
+    // Restore before removing DLLs (skip shared Common Files Stub/Broker teardown
+    // during a directory-move upgrade so the newly installed copy keeps them active).
+    if (real && !upgrade) {
+        const DWORD restored = RestoreDialogRegistrationsForUninstall(app);
+        if (restored != ERROR_SUCCESS) {
+            result.exit_code = kExitPrepareFailed;
+            result.error = L"Could not restore Pulse file dialogs. Installation files were kept. " + Win32Error(restored);
+            Log(result.error);
+            return result;
         }
-        if(!restored && !targets.empty()) {
-            const auto changed=dialog_auto::ExecuteRegistrationChange(targets,false);
-            restored=changed.error;
-            if(changed.rollback_error) Log(L"Dialog uninstall registration rollback failed: "+Win32Error(changed.rollback_error));
+        // Phase 2: Restore any HKLM COM Stub registrations and stop/remove PulseDialogBroker service.
+        const DWORD hklm64 = dialog_com_hklm::RestoreBackup(false);
+        const DWORD hklm32 = dialog_com_hklm::RestoreBackup(true);
+        if (hklm64 != ERROR_SUCCESS) Log(L"Restore HKLM64 COM backup: " + Win32Error(hklm64));
+        if (hklm32 != ERROR_SUCCESS) Log(L"Restore HKLM32 COM backup: " + Win32Error(hklm32));
+        const DWORD stop_broker = StopService(kDialogBrokerServiceName, 15000);
+        if (stop_broker != ERROR_SUCCESS) Log(L"Stopping PulseDialogBroker: " + Win32Error(stop_broker));
+        const std::wstring common_bridge = dialog_bridge_paths::CommonDialogBridgeRoot();
+        if (!common_bridge.empty()) {
+            const DWORD del_broker = DeleteOwnedService(kDialogBrokerServiceName, common_bridge);
+            if (del_broker != ERROR_SUCCESS) Log(L"DeleteOwnedService PulseDialogBroker: " + Win32Error(del_broker));
+            dialog_bridge_paths::ActiveBridgePointer ptr;
+            if (dialog_bridge_paths::ReadActiveBridgePointer(common_bridge, ptr) == ERROR_SUCCESS &&
+                (ptr.install_root.empty() || SameDirectory(NormalizeDir(ptr.install_root), app))) {
+                const std::string disabled_json = "{\"schema\":1,\"disabled\":true}\n";
+                const std::wstring tmp = common_bridge + L"\\" + dialog_bridge_paths::kActivePointerFile + L".uninstall.tmp";
+                const std::wstring dst = common_bridge + L"\\" + dialog_bridge_paths::kActivePointerFile;
+                if (WriteWholeFile(tmp, disabled_json.data(), disabled_json.size())) {
+                    if (!MoveFileExW(tmp.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                        DeleteFileW(tmp.c_str());
+                    }
+                }
+            }
         }
-        if(restored!=ERROR_SUCCESS) {
-            result.exit_code=kExitPrepareFailed;
-            result.error=L"Could not restore Pulse file dialogs. Installation files were kept. "+Win32Error(restored);
-            Log(result.error);return result;
+    } else if (real && upgrade) {
+        for (const auto arch : {dialog_auto::Architecture::X64, dialog_auto::Architecture::X86}) {
+            const auto status = dialog_auto::Inspect(arch);
+            if (status.error == ERROR_NOT_SUPPORTED && arch != dialog_auto::CurrentArchitecture) continue;
+            if (!status.error && !status.conflict && status.enabled &&
+                status.dll_path.size() > app.size() + 1 &&
+                _wcsnicmp(status.dll_path.c_str(), app.c_str(), app.size()) == 0 &&
+                status.dll_path[app.size()] == L'\\') {
+                dialog_auto::DisableFor(arch, status.dll_path);
+            }
         }
     }
 
@@ -268,11 +255,13 @@ UninstallResult RunUninstall(const UninstallRequest& req, const UninstallCallbac
     if (real) {
         const DWORD stop = StopService(kServiceName, 15000);
         if (stop != ERROR_SUCCESS) Log(L"Stopping PulseIndex: " + Win32Error(stop));
-        const std::wstring index_exe = InstalledRuntimeFile(app, L"Pulse.Index.exe");
+        const std::wstring index_exe = UninstallRuntimeFile(app, L"Pulse.Index.exe");
         if (FileExists(index_exe)) {
             const auto r = RunProcess(index_exe, L"--uninstall", true);
             Log(L"Pulse.Index.exe --uninstall: " + std::to_wstring(r.exit_code));
         }
+        const DWORD deleted_svc = DeleteOwnedService(kServiceName, app);
+        if (deleted_svc != ERROR_SUCCESS) Log(L"DeleteOwnedService PulseIndex: " + Win32Error(deleted_svc));
     }
     StopPulseHosts(dirs, real);
     WaitUntilImageGone(L"Pulse.Index.exe", dirs, 10000);
@@ -280,9 +269,14 @@ UninstallResult RunUninstall(const UninstallRequest& req, const UninstallCallbac
     // 3. usUninstall: give file associations back (not when only moving the install).
     if (real && !upgrade) {
         progress(18, L"pulse_integration.exe");
-        const auto r = RunProcess(InstalledRuntimeFile(app, L"pulse_integration.exe"),
-                                  L"--restore --exe " + Quote(app + L"\\pulse.exe"), true);
-        result.restore_result = r.started ? static_cast<int>(r.exit_code) : 3;
+        const auto integration_exe = UninstallRuntimeFile(app, L"pulse_integration.exe");
+        if (!integration_exe.empty() && FileExists(integration_exe)) {
+            const auto r = RunProcess(integration_exe,
+                                      L"--restore --exe " + Quote(app + L"\\pulse.exe"), true);
+            result.restore_result = r.started ? static_cast<int>(r.exit_code) : 3;
+        } else {
+            result.restore_result = 3;
+        }
         Log(L"Integration restore: " + std::to_wstring(result.restore_result));
         // Everything was given back: the backups of the original values are
         // done with. After a failure they stay, so a later restore can finish.
@@ -307,10 +301,11 @@ UninstallResult RunUninstall(const UninstallRequest& req, const UninstallCallbac
         CollectTree(app, L"licenses", files);
     }
     const bool dialog_clean = CleanupDialogVersions(app, true);
-    std::erase_if(files, IsDialogVersionFile);
-    if (!dialog_clean) {
+    const bool app_clean = CleanupAppRuntimeVersionsReport(app, true, false).Complete();
+    std::erase_if(files, [](const auto& file) { return IsDialogVersionFile(file) || IsAppRuntimeVersionFile(file); });
+    if (!dialog_clean || !app_clean) {
         result.dialog_cleanup_pending = true;
-        result.error = L"Some dialog versions remain in DialogBridge because they are in use or could not be safely verified. Close their host applications before a later cleanup.";
+        result.error = L"Some application or dialog versions remain because they are in use or could not be safely verified.";
         Log(result.error);
     }
     const std::wstring self_name = L"uninstall.exe";
@@ -331,6 +326,8 @@ UninstallResult RunUninstall(const UninstallRequest& req, const UninstallCallbac
         return a.size() > b.size();
     });
     for (const auto& d : subdirs) RemoveDirectoryW((app + L"\\" + d).c_str());
+    RemoveDirectoryW((app + L"\\AppRuntime").c_str());
+    RemoveDirectoryW((app + L"\\DialogBridge").c_str());
     for (const wchar_t* work : {L"\\.pulse-setup", L"\\.pulse-staging"}) RemoveTree(app + work);
     if (!result.schedule_self_delete && FileExists(app + L"\\uninstall.exe")) result.schedule_self_delete = true;
 

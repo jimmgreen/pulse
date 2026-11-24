@@ -23,7 +23,7 @@ int main(){
  check(!ConfigSupportedByPeer(config.config.open_options,0,0),"old peer rejects active filter before sending Validate or Show");
  check(ConfigSupportedByPeer(config.config.open_options,0,PULSE_PICKER_UI_V2_FEATURE_SHELL_ITEM_FILTER),"new peer explicitly advertises caller-side IncludeItem");
  check(!ConfigSupportedByPeer(config.config.open_options,0,0x80000000u),"unknown feature never borrows filter capability");
- config.config.open_options|=0x100u;check(!Encode(config,bytes)&&!ConfigSupportedByPeer(config.config.open_options,0,0xffffffffu),"unknown config option remains rejected");
+ config.config.open_options|=0x200u;check(!Encode(config,bytes)&&!ConfigSupportedByPeer(config.config.open_options,0,0xffffffffu),"unknown config option remains rejected");
  Message event;event.request_id[0]=1;event.sequence=2;event.kind=Kind::Event;event.event.kind=PULSE_PICKER_UI_V2_EVENT_INCLUDE_ITEM;event.event.show_id=1;event.event.generation=2;event.event.window=3;event.event.proposed_folder=L"C:\\Fixture\\blocked.txt";
  check(Encode(event,bytes)&&Decode(bytes,decoded)&&decoded==event,"IncludeItem uses authenticated existing event/reply RPC with path only");
  OwnedEvent abi(event.event);Event copied;check(FromAbi(abi.Get(),copied)&&copied==event.event,"IncludeItem event ABI conversion preserves path and identity");

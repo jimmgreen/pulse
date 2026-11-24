@@ -9,6 +9,7 @@
 #include "gif_decoder.h"
 #include "decode_budget.h"
 #include "folder_thumbnail.h"
+#include "archive_member.h"
 #include "preview_integrity.h"
 #include "../common/runtime_log.h"
 #include "../common/preview_diagnostics.h"
@@ -18,6 +19,7 @@
 #include <objbase.h>
 #include <cstdlib>
 #include <cstring>
+#include <malloc.h>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -59,17 +61,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     HANDLE pipe = CreateNamedPipeW(pipeName.c_str(),
         PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-        1, 64*1024, 64*1024, 0, pipeSecurity.get());
+        1, 128*1024, 128*1024, 0, pipeSecurity.get());
     if (pipe == INVALID_HANDLE_VALUE) return 3;
     if (!ConnectNamedPipe(pipe, nullptr) && GetLastError()!=ERROR_PIPE_CONNECTED) { CloseHandle(pipe); return 4; }
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    uint64_t request_count = 0;
+    size_t peak_pixels = 0;
+    std::vector<uint8_t> send_buffer;
     for (;;) {
         ipc::PreviewRequest req;
         if (!ipc::ReadAll(pipe, &req, sizeof(req)) || (req.magic!=ipc::kPreviewMagic && req.magic!=ipc::kPreviewBudgetRequestMagic) ||
             req.path_chars==0 || req.path_chars>32768) break;
         std::wstring path(req.path_chars, L'\0');
         if (!ipc::ReadAll(pipe, path.data(), req.path_chars*sizeof(wchar_t))) break;
-        preview::DecodeBudgetSession budget_session{pipe, req.request_id, req.generation};
+        const uint64_t pregranted = (req.flags & ipc::kPreviewRequestFlagPreGranted64M)
+            ? ipc::kPreviewPreGrantedBudgetBytes : 0;
+        preview::DecodeBudgetSession budget_session{pipe, req.request_id, req.generation, pregranted};
         preview::DecodeBudgetScope budget_scope(req.magic == ipc::kPreviewBudgetRequestMagic &&
             (req.flags & ipc::kPreviewRequestFlagGrid) ? &budget_session : nullptr);
         const auto request_started = GetTickCount64();
@@ -131,13 +138,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                     (req.flags & ipc::kPreviewRequestFlagFolderRefresh) != 0);
             response.kind = made ? ipc::PreviewContentKind::Bitmap : ipc::PreviewContentKind::Unsupported;
             response.status = made ? 0 : GetLastError() == ERROR_TIMEOUT ? ERROR_TIMEOUT : 1;
+        } else if ((req.flags & ipc::kPreviewRequestFlagArchiveMember) != 0) {
+            // A picture inside an archive (Quick Look's archive thumbnail view).
+            made = preview::DecodeArchiveMemberThumbnail(path, ipc::ClampPreviewPixelSize(req.pixel_size, false),
+                pixels, w, h, stride, source_w, source_h, &errorText);
+            response.kind = made ? ipc::PreviewContentKind::Bitmap : ipc::PreviewContentKind::Unsupported;
+            response.status = made ? 0 : 1;
+            response.error_chars = static_cast<uint32_t>(errorText.size());
+            response.integrity.state = made ? preview::IntegrityState::Complete : preview::IntegrityState::Failed;
+            if (!made) response.integrity.reason = preview::IntegrityReason::Unavailable;
         } else {
             const std::wstring extension = ExtensionOf(path);
             const UINT cap = ipc::ClampPreviewPixelSize(req.pixel_size, false);
             const preview::DecodeRequest decode{req, path, extension,
                 (req.attrs & FILE_ATTRIBUTE_DIRECTORY) != 0, IsOfflinePlaceholder(req.attrs),
                 cap, (req.flags & ipc::kPreviewRequestFlagGrid) != 0 ||
-                     cap <= preview::kGridThumbnailEdge};
+                     cap <= preview::kGridThumbnailEdge, pipe};
             preview::DecodeResult result;
             const ULONGLONG decode_started = GetTickCount64();
             try { made = preview::DecodeContent(decode, result); }
@@ -193,42 +209,84 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         response.source_width = source_w;
         response.source_height = source_h;
         HANDLE mapping=nullptr; void* view=nullptr; std::wstring mappingName;
+        bool use_inline_bitmap = false;
         if (made && response.kind == ipc::PreviewContentKind::Bitmap) {
-            mappingName=L"Local\\PulsePreviewMap-"+std::to_wstring(GetCurrentProcessId())+L"-"+
-                        std::to_wstring(req.request_id)+L"-"+std::to_wstring(GetTickCount64());
+            peak_pixels = (std::max)(peak_pixels, pixels.size());
 #ifdef PULSE_PREVIEW_MAPPING_TEST
             const bool fail_create = req.request_id == 1 && __argc > 2 && wcscmp(__wargv[2], L"--test-map-create-failure") == 0;
             const bool fail_view = req.request_id == 1 && __argc > 2 && wcscmp(__wargv[2], L"--test-map-view-failure") == 0;
 #else
             constexpr bool fail_create = false, fail_view = false;
 #endif
-            if (fail_create) SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-            if (!fail_create) mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,
-                static_cast<DWORD>(pixels.size()),mappingName.c_str());
-            if (mapping && fail_view) SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-            if (mapping && !fail_view) view=MapViewOfFile(mapping,FILE_MAP_WRITE,0,0,pixels.size());
-            if (!view) {
-                const DWORD error = GetLastError();
-                terminal("preview_host_mapping_failure", mapping ? 2 : 1, error,
-                    diagnostics::runtime::Level::Error);
-                response.status=2; mappingName.clear();
-                if (mapping) { CloseHandle(mapping); mapping = nullptr; }
-                response.integrity.state = preview::IntegrityState::Failed;
-                response.integrity.reason = preview::IntegrityReason::Unavailable;
+            use_inline_bitmap = (req.flags & ipc::kPreviewRequestFlagInlineBitmap) != 0 &&
+                response.status == 0 && !fail_create && !fail_view &&
+                !pixels.empty() && pixels.size() <= ipc::kPreviewMaxInlineBitmapBytes &&
+                static_cast<uint64_t>(stride) * h == pixels.size();
+            if (use_inline_bitmap) {
+                response.flags |= ipc::kPreviewFlagInlineBitmap;
+            } else {
+                mappingName=L"Local\\PulsePreviewMap-"+std::to_wstring(GetCurrentProcessId())+L"-"+
+                            std::to_wstring(req.request_id)+L"-"+std::to_wstring(GetTickCount64());
+                if (fail_create) SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                if (!fail_create) mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,
+                    static_cast<DWORD>(pixels.size()),mappingName.c_str());
+                if (mapping && fail_view) SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                if (mapping && !fail_view) view=MapViewOfFile(mapping,FILE_MAP_WRITE,0,0,pixels.size());
+                if (!view) {
+                    const DWORD error = GetLastError();
+                    terminal("preview_host_mapping_failure", mapping ? 2 : 1, error,
+                        diagnostics::runtime::Level::Error);
+                    response.status=2; mappingName.clear();
+                    if (mapping) { CloseHandle(mapping); mapping = nullptr; }
+                    response.integrity.state = preview::IntegrityState::Failed;
+                    response.integrity.reason = preview::IntegrityReason::Unavailable;
+                }
+                else memcpy(view,pixels.data(),pixels.size());
             }
-            else memcpy(view,pixels.data(),pixels.size());
         }
         response.mapping_chars=static_cast<uint32_t>(mappingName.size());
-        bool ok=ipc::WriteAll(pipe,&response,sizeof(response));
-        if (ok && !mappingName.empty()) ok=ipc::WriteAll(pipe,mappingName.data(),
-            response.mapping_chars*sizeof(wchar_t));
-        if (ok && !previewText.empty())
-            ok=ipc::WriteAll(pipe,previewText.data(),response.text_chars*sizeof(wchar_t));
-        if (ok && !errorText.empty())
-            ok=ipc::WriteAll(pipe,errorText.data(),response.error_chars*sizeof(wchar_t));
+        const size_t inline_bytes = use_inline_bitmap ? pixels.size() : 0;
+        const size_t text_bytes = static_cast<size_t>(response.text_chars) * sizeof(wchar_t);
+        const size_t error_bytes = static_cast<size_t>(response.error_chars) * sizeof(wchar_t);
+        const size_t map_bytes = static_cast<size_t>(response.mapping_chars) * sizeof(wchar_t);
+        size_t props_bytes = 0;
         for (const auto& property : properties) {
-            if (!ok) break;
-            ok = WriteString(pipe, property.label) && WriteString(pipe, property.value);
+            props_bytes += sizeof(uint32_t) * 2u + (property.label.size() + property.value.size()) * sizeof(wchar_t);
+        }
+        const size_t total_wire = sizeof(response) + map_bytes + text_bytes + error_bytes + props_bytes + inline_bytes;
+        bool ok = false;
+        if (total_wire <= (512u * 1024u)) {
+            send_buffer.resize(total_wire);
+            uint8_t* dst = send_buffer.data();
+            auto append = [&](const void* src, size_t n) noexcept {
+                if (!n) return;
+                std::memcpy(dst, src, n);
+                dst += n;
+            };
+            append(&response, sizeof(response));
+            append(mappingName.data(), map_bytes);
+            append(previewText.data(), text_bytes);
+            append(errorText.data(), error_bytes);
+            for (const auto& property : properties) {
+                const uint32_t lc = static_cast<uint32_t>(property.label.size());
+                const uint32_t vc = static_cast<uint32_t>(property.value.size());
+                append(&lc, sizeof(lc));
+                append(property.label.data(), lc * sizeof(wchar_t));
+                append(&vc, sizeof(vc));
+                append(property.value.data(), vc * sizeof(wchar_t));
+            }
+            append(pixels.data(), inline_bytes);
+            ok = ipc::WriteAll(pipe, send_buffer.data(), static_cast<DWORD>(send_buffer.size()));
+        } else {
+            ok = ipc::WriteAll(pipe, &response, sizeof(response));
+            if (ok && !mappingName.empty()) ok = ipc::WriteAll(pipe, mappingName.data(), static_cast<DWORD>(map_bytes));
+            if (ok && !previewText.empty()) ok = ipc::WriteAll(pipe, previewText.data(), static_cast<DWORD>(text_bytes));
+            if (ok && !errorText.empty()) ok = ipc::WriteAll(pipe, errorText.data(), static_cast<DWORD>(error_bytes));
+            for (const auto& property : properties) {
+                if (!ok) break;
+                ok = WriteString(pipe, property.label) && WriteString(pipe, property.value);
+            }
+            if (ok && use_inline_bitmap) ok = ipc::WriteAll(pipe, pixels.data(), static_cast<DWORD>(pixels.size()));
         }
         DWORD response_error = ok ? ERROR_SUCCESS : GetLastError();
         uint32_t response_stage = 3; // Response bytes written; ACK is a separate terminal stage.
@@ -244,7 +302,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                 response.status ? diagnostics::runtime::Level::Error : diagnostics::runtime::Level::Info);
         if (view) UnmapViewOfFile(view); if (mapping) CloseHandle(mapping);
         if (!ok) break;
+        ++request_count;
+        if (peak_pixels >= (1u << 20) || (request_count % 16) == 0) {
+            DWORD queued = 0;
+            if (PeekNamedPipe(pipe, nullptr, 0, nullptr, &queued, nullptr) && queued == 0) {
+                pixels = {};
+                send_buffer = {};
+                _heapmin();
+                HeapCompact(GetProcessHeap(), 0);
+                peak_pixels = 0;
+            }
+        }
     }
+    preview::ReleasePreviewThreadCaches();
+    preview::ShutdownFolderThumbnailResources();
     preview::ResetGifDecodeCache();
     CoUninitialize(); DisconnectNamedPipe(pipe); CloseHandle(pipe); return 0;
 }

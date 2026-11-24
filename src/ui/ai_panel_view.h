@@ -52,7 +52,9 @@ enum class AiPanelPart : uint8_t {
     Suggestion,     // index
     ContextChip,
     ContextRemove,
+    AttachRemove,   // index = attachment chip index
     AddFiles,
+    WebSearch,
     ModelButton,
     Send,
     Input,
@@ -70,6 +72,7 @@ enum class AiPanelPart : uint8_t {
     ResultUndo,
     ResultShow,
     ActCopy,
+    ActSave,        // save answer as .md in current folder
     ActRetry,
     ActThumb,
     ErrAction,      // index = block index * 4 + button (AiBlockView::actions)
@@ -657,6 +660,13 @@ struct AiHistoryView {
     int deleting = -1;                // row in its inline confirmation
 };
 
+struct AiAttachChipView {
+    std::wstring name;
+    std::wstring meta;        // size or WxH
+    bool is_image = false;
+    bool is_dir = false;
+};
+
 struct AiPanelViewModel {
     bool dark = false;
     bool high_contrast = false;
@@ -679,6 +689,9 @@ struct AiPanelViewModel {
     // Composer.
     bool context_visible = false;
     std::wstring context_text;        // 下载 · 12 项
+    std::vector<AiAttachChipView> attachments;
+    std::wstring attach_notice;       // privacy notice shown when attachments exist
+    bool drop_hot = false;            // files dragged over the panel
     bool composer_focused = false;
     bool composer_empty = true;
     int composer_lines = 1;           // the EDIT's line count (input grows to 6)
@@ -691,6 +704,8 @@ struct AiPanelViewModel {
     // 引用: the chosen words above the input (empty: none).
     std::wstring quote;
     std::wstring add_files;
+    bool web_search = false;
+    std::wstring web_search_label;
     std::wstring model_label;         // deepseek-flash
     std::wstring effort_label;        // " · 高", " · 始终思考" (empty when thinking is off)
     AiSendState send = AiSendState::Dim;
@@ -983,8 +998,10 @@ private:
     bool glass_drawn_ = false;
     float glass_alpha_ = 1.0f;
     D2D1_COLOR_F glass_frame_{};
-    D2D1_RECT_F add_files_{}, model_button_{}, send_button_{};
+    D2D1_RECT_F add_files_{}, web_search_{}, model_button_{}, send_button_{};
     D2D1_RECT_F mic_button_{}, mic_menu_{};
+    std::vector<D2D1_RECT_F> attach_removes_;
+    float attach_h_ = 0.0f;
     // 语音输入: menu motion, hit rects and formats (ai_panel_voice.h).
     struct VoiceGeom;
     std::shared_ptr<VoiceGeom> voice_;

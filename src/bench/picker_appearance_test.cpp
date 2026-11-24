@@ -70,6 +70,33 @@ int main() {
     Check(spec.initial_path == L"C:\\fixture" && spec.filename == L"keep.txt" && spec.show_hidden &&
         spec.advisory_file_filters && spec.skip_access_validation && spec.allow_multiselect && spec.filters[0].pattern == L"*.txt",
         "appearance does not overwrite dialog request semantics");
+    {
+        pulse::ui::FolderPickerSpec plain;
+        Check(plain.window_effect == pulse::ui::WindowEffect::Acrylic, "a host without preferences keeps the acrylic dialog");
+        PickerAppearanceSnapshot effect;
+        Check(ParsePickerAppearanceJson(L"{}", effect) && effect.window_effect == L"mica-alt", "missing window effect matches the main window default");
+        for (const auto& [id, expected] : {std::pair{L"mica-alt", pulse::ui::WindowEffect::MicaAlt}, std::pair{L"mica", pulse::ui::WindowEffect::Mica},
+                                           std::pair{L"acrylic-material", pulse::ui::WindowEffect::Acrylic}, std::pair{L"none", pulse::ui::WindowEffect::None}}) {
+            Check(ParsePickerAppearanceJson(std::wstring(L"{\"window_effect\":\"") + id + L"\"}", effect), "window effect parses");
+            pulse::ui::FolderPickerSpec effect_spec;
+            ApplyPickerAppearanceToSpec(effect, effect_spec);
+            Check(effect_spec.window_effect == expected, "the dialog follows the main window effect");
+        }
+        pulse::app::AppPrefs effect_prefs;
+        effect_prefs.window_effect = L"mica";
+        Check(PickerAppearanceFromPrefs(effect_prefs).window_effect == L"mica", "main prefs carry the window effect");
+        Check(ParsePickerAppearanceJson(L"{}", effect) && effect.panel_transparency == 50 && effect.frame_transparency == 10,
+            "missing transparency matches the main window defaults");
+        Check(ParsePickerAppearanceJson(L"{\"wallpaper_look\":1,\"panel_transparency\":30,\"frame_transparency\":100}", effect) &&
+            effect.panel_transparency == 30 && effect.frame_transparency == 100, "saved transparency is read");
+        Check(ParsePickerAppearanceJson(L"{\"wallpaper_look\":2}", effect) && effect.panel_transparency == 75, "legacy transparency level migrates");
+        Check(ParsePickerAppearanceJson(L"{\"panel_transparency\":120,\"frame_transparency\":-1}", effect) &&
+            effect.panel_transparency == 50 && effect.frame_transparency == 10, "out-of-range transparency falls back");
+        pulse::ui::FolderPickerSpec layered;
+        effect.panel_transparency = 20; effect.frame_transparency = 100;
+        ApplyPickerAppearanceToSpec(effect, layered);
+        Check(layered.panel_transparency == 20 && layered.frame_transparency == 100, "the dialog takes the main window transparency");
+    }
     Check(!ParsePickerAppearanceJson(L"{broken}", value) && value.accent_rgb == 0xABCD12u, "malformed input preserves output");
     Check(ParsePickerAppearanceJson(LR"({"nested":{"theme_mode":2,"ui_font_scale":125},"language":"unsupported","theme_mode":99,"text_render":99,"row_height":4,"ui_font_scale":111,"accent_rgb":"oops"})", value) &&
         value.theme_mode == -1 && value.language == L"system" && value.ui_font_scale == 100 && value.text_render == 0 &&

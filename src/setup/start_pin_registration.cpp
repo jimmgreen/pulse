@@ -99,7 +99,14 @@ bool UnregisterStartPin(const std::wstring& app, std::wstring& error) {
         error = L"Cannot inspect Start pin registration: " + Win32Error(status);
         return false;
     }
+    DWORD type = 0, size = 0;
+    const LSTATUS query = RegQueryValueExW(server, L"", nullptr, &type, nullptr, &size);
     RegCloseKey(server);
+    if (query == ERROR_FILE_NOT_FOUND) return true;
+    if (query != ERROR_SUCCESS) {
+        error = L"Cannot read Start pin registration owner: " + Win32Error(query);
+        return false;
+    }
     const auto dll = ReadString(HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY, kServer, L"");
     if (!dll) {
         error = L"Cannot read Start pin registration owner.";
@@ -109,7 +116,7 @@ bool UnregisterStartPin(const std::wstring& app, std::wstring& error) {
     const auto prefix = root + L"\\";
     const bool version_owned = dll->size() > prefix.size() &&
         CompareStringOrdinal(dll->data(), static_cast<int>(prefix.size()), prefix.c_str(), -1, TRUE) == CSTR_EQUAL &&
-        IsDialogVersionFile(dll->substr(prefix.size())) &&
+        (IsDialogVersionFile(dll->substr(prefix.size())) || IsAppRuntimeVersionFile(dll->substr(prefix.size()))) &&
         EqualsNoCase(dll->substr(dll->find_last_of(L"\\")+1), L"pulse_start_pin.dll");
     if (!SameDirectory(*dll, root + L"\\pulse_start_pin.dll") && !version_owned) return true;
     const std::wstring command = std::wstring(kProgId) + L"\\shell\\PulseStartPin\\command";

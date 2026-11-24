@@ -110,11 +110,20 @@ bool ValidInstallPath(const std::wstring& p) {
     return type == DRIVE_FIXED || type == DRIVE_REMOVABLE;
 }
 
+bool ValidIndexInputPath(const std::wstring& raw, const std::wstring& app_dir) {
+    return ValidInstallPath(NormalizeIndexSelection(raw, app_dir, {}, false));
+}
+
 enum Id : int {
     kNone, kMin, kCloseX, kInstall, kAgree, kLicense, kToOptions, kBack, kAppEdit, kBrowseApp, kTglIndex,
     kIndexEdit, kBrowseIndex, kTglStartup, kTglDesktop, kTglGlobal, kTglAi, kOptBack, kOptInstall, kCancelInstall, kLaunch,
     kCloseDone, kOpenLog, kDlgPrimary, kDlgSecondary, kDlgEndRetry, kDot0, kDot1, kDot2, kDot3, kDot4, kDot5, kTglCleanup, kUnStart, kUnClose,
+    kUiZen, kUiStandard, kUiPro, kThemeLight, kThemeDark, kAccent0, kAccent1, kAccent2, kAccent3, kAccent4, kAccent5, kUiChipPick,
 };
+
+// Starting-layout accents (the prototype's first six). The first one is the
+// app's default accent, so picking it records no accent at all.
+constexpr uint32_t kUiAccents[] = {0x0067C0, 0x5B63D9, 0x8E44AD, 0xC2185B, 0xC42B1C, 0xCA5010};
 
 enum class Page { Welcome, Options, Install, Done, Error, Uninstall };
 enum class UnState { Idle, Running, Done, Failed };
@@ -126,14 +135,14 @@ public:
     Wizard(Payload* payload, const std::wstring& self, InstallRequest request, Lang lang,
            const UninstallRequest* un = nullptr)
         : payload_(payload), self_(self), req_(std::move(request)), lang_(lang),
-          theme_(MakeTheme(SystemUsesDarkTheme())) {
+          theme_(MakeTheme(SystemUsesDarkTheme())), index_customized_(req_.index_explicit) {
         if (!req_.options.test) {
             SetEnvironmentVariableW(L"PULSE_SETUP_TEST_THEME", nullptr);
             theme_ = MakeTheme(SystemUsesDarkTheme());
         } else {
             slow_ = GetEnvironmentVariableW(L"PULSE_SETUP_TEST_SLOW", nullptr, 0) != 0;
         }
-        if (payload_) for (const auto& f : payload_->Info().files) total_bytes_ += f.size;
+        if (payload_) total_bytes_ = payload_->Info().stored_bytes;
         if (un) {
             uninstall_ = true;
             ureq_ = *un;
@@ -195,6 +204,11 @@ private:
     void Checkbox(int id, bool on, float x, float y);
     void FocusRing(int id, const D2D1_RECT_F& r, float radius);
     void Icon(int kind, float x, float y, D2D1_COLOR_F c);
+    // Schematic window for a starting layout (the prototype's mini()).
+    void MiniPreview(const D2D1_RECT_F& r, UiMode mode, bool dark, uint32_t accent, bool selection = true);
+    bool UiDark() const { return req_.ui.theme == 0 ? theme_.dark : req_.ui.theme == 2; }
+    uint32_t UiAccent() const { return req_.ui.has_accent ? req_.ui.accent : kUiAccents[0]; }
+    std::wstring UiModeName(UiMode mode) const;
 
     // ---- pages ----
     void Paint();
@@ -203,6 +217,8 @@ private:
     void PaintWelcome();
     void PaintOptions();
     void PaintInstall();
+    void PaintSlides(const D2D1_RECT_F& panel);
+    void PaintUiPanel(const D2D1_RECT_F& panel);
     void PaintDone();
     void PaintError();
     void PaintDialog();
@@ -248,6 +264,7 @@ private:
     WizardOutcome outcome_;
 
     HWND hwnd_ = nullptr, app_edit_ = nullptr, index_edit_ = nullptr;
+    bool index_customized_ = false, syncing_edits_ = false;
     HFONT edit_font_ = nullptr;
     HBRUSH edit_brush_ = nullptr;
     UINT dpi_ = 96;
@@ -300,6 +317,7 @@ private:
     std::atomic<bool> end_locks_{false}, end_locks_failed_{false};
     bool slow_ = false;
     bool probe_ = false;
+    bool ui_recorded_ = false;  // [ui] made it into setup-defaults.ini (fresh installs only)
     int slide_ = 0;
     ULONGLONG slide_time_ = 0;
 };
@@ -561,12 +579,211 @@ void Wizard::Icon(int kind, float x, float y, D2D1_COLOR_F c) {
                       {x + 16.1f, y + 15.8f}, {x + 15.5f, y + 17.4f}, {x + 14.9f, y + 15.8f},
                       {x + 13.3f, y + 15.2f}, {x + 14.9f, y + 14.6f}}, c, w, true);
             break;
+        case 10:  // window layout: frame, title row, sidebar (20 px)
+            rt_->DrawRoundedRectangle(D2D1::RoundedRect({x + 2.5f, y + 3.5f, x + 17.5f, y + 16.5f}, 2, 2), brush_, w);
+            Line(x + 2.5f, y + 7.5f, x + 17.5f, y + 7.5f, c, w);
+            Line(x + 7.5f, y + 7.5f, x + 7.5f, y + 16.5f, c, w);
+            break;
         case 8:  // warning triangle (20 px)
             Polyline({{x + 10, y + 2}, {x + 18.5f, y + 17}, {x + 1.5f, y + 17}}, c, 1.5f, true);
             Line(x + 10, y + 7.5f, x + 10, y + 11.5f, c, 1.6f);
             Line(x + 10, y + 14.2f, x + 10, y + 14.4f, c, 1.8f);
             break;
     }
+}
+
+std::wstring Wizard::UiModeName(UiMode mode) const {
+    return T(mode == UiMode::Zen ? Str::ModeZen : mode == UiMode::Pro ? Str::ModePro : Str::ModeStandard);
+}
+
+// Proportions follow the prototype's .mini CSS: one unit u = width / 120 and a
+// 16:10 window. Colours are the app's light / dark tokens, not the installer's.
+void Wizard::MiniPreview(const D2D1_RECT_F& box, UiMode mode, bool dark, uint32_t accent_rgb, bool selection) {
+    struct Cfg { bool sidebar, peek, lite, tabs, merge, toolbar, inline_cmd, status, tray, icons, roomy; };
+    static const Cfg kCfg[] = {
+        {false, true, true, false, true, false, false, false, false, true, true},     // zen
+        {true, false, true, true, false, false, true, false, false, false, false},    // standard
+        {true, false, false, true, false, true, false, true, true, false, false},     // pro
+    };
+    const Cfg& c = kCfg[static_cast<int>(mode)];
+    const float W = box.right - box.left, H = W * 10.f / 16.f, u = W / 120.f;
+    const float x0 = box.left, y0 = box.top + std::max(0.f, (box.bottom - box.top - H) / 2);
+    const D2D1_COLOR_F accent = Hex(accent_rgb);
+    auto mix = [](D2D1_COLOR_F a, D2D1_COLOR_F b, float k) {
+        return D2D1_COLOR_F{a.r * k + b.r * (1 - k), a.g * k + b.g * (1 - k), a.b * k + b.b * (1 - k), 1};
+    };
+    const D2D1_COLOR_F sheet = Hex(dark ? 0x202020 : 0xF7F8F4), title = Hex(dark ? 0x1A1A1A : 0xF1F3EE),
+        card = Hex(dark ? 0x272727 : 0xFFFFFF), stroke = dark ? Hex(0xFFFFFF, .07f) : Hex(0xDCE3D9),
+        track = dark ? Hex(0xFFFFFF, .059f) : Hex(0x000000, .047f), text3 = dark ? Hex(0xFFFFFF, .40f) : Hex(0x929CAE),
+        tone = dark ? mix(accent, Hex(0xFFFFFF), .70f) : mix(accent, Hex(0x000000), .86f),
+        flyout = Hex(dark ? 0x2B2B2B : 0xFFFFFF), place = Hex(dark ? 0xF3B744 : 0xC7860A),
+        folder_a = Hex(dark ? 0xFFD36E : 0xF6C85A), folder_b = Hex(dark ? 0xF0B347 : 0xE9A93A);
+    const D2D1_RECT_F win{x0, y0, x0 + W, y0 + H};
+
+    // Rounded clip so the title strip follows the window corners.
+    ID2D1RoundedRectangleGeometry* shape = nullptr;
+    ID2D1Layer* layer = nullptr;
+    d2d_->CreateRoundedRectangleGeometry(D2D1::RoundedRect(win, 6, 6), &shape);
+    if (shape && SUCCEEDED(rt_->CreateLayer(&layer)))
+        rt_->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), shape), layer);
+    Fill(win, sheet);
+
+    // Title strip.
+    const float mt = 9 * u, pad = 3 * u;
+    Fill({x0, y0, x0 + W, y0 + mt}, title);
+    float x = x0 + pad;
+    const float mid = y0 + mt / 2;
+    {
+        D2D1_GRADIENT_STOP stops[] = {{0, Hex(0xC3C0FF)}, {1, Hex(0x4B3FC6)}};
+        ID2D1GradientStopCollection* coll = nullptr;
+        ID2D1LinearGradientBrush* grad = nullptr;
+        const D2D1_RECT_F logo{x, mid - 2.25f * u, x + 4.5f * u, mid + 2.25f * u};
+        rt_->CreateGradientStopCollection(stops, 2, &coll);
+        if (coll && SUCCEEDED(rt_->CreateLinearGradientBrush({{logo.left, logo.top}, {logo.right, logo.bottom}}, coll, &grad)))
+            rt_->FillRoundedRectangle(D2D1::RoundedRect(logo, 1.2f * u, 1.2f * u), grad);
+        SafeRelease(grad);
+        SafeRelease(coll);
+        x = logo.right + 2.5f * u;
+    }
+    const float cap_w = 15 * u, right_edge = x0 + W - pad;
+    Fill({right_edge - cap_w, mid - 1.75f * u, right_edge, mid + 1.75f * u}, track, 1.5f * u);
+    auto field = [&](float l, float r, float cy) {
+        const D2D1_RECT_F f{l, cy - 2.5f * u, r, cy + 2.5f * u};
+        Fill(f, card, 1.4f * u);
+        Stroke(f, stroke, 1.4f * u, std::max(.6f, .5f * u));
+    };
+    if (c.tabs && !c.merge) {
+        const D2D1_RECT_F tab{x, y0 + mt - 6.5f * u, x + 20 * u, y0 + mt + 1.6f * u};
+        Fill(tab, sheet, 1.6f * u);
+        Fill({tab.left + 2.5f * u, y0 + mt - 1.9f * u, tab.left + 7.5f * u, y0 + mt - 1.f * u}, accent, .45f * u);
+    }
+    if (c.merge) {
+        // flex: address and spacer split the free space (address capped at 48 %).
+        const float srch = 22 * u, fixed = srch + cap_w + 2 * 2.5f * u;
+        const float addr = std::min(.48f * W, std::max(0.f, (right_edge - x - fixed - 2.5f * u) / 2));
+        field(x, x + addr, mid);
+        field(x + addr + 2.5f * u, x + addr + 2.5f * u + srch, mid);
+    }
+    float y = y0 + mt;
+
+    // Address row.
+    if (!c.merge) {
+        const float h = 8 * u, cy = y + h / 2, srch = 22 * u, gap = 2 * u;
+        float r = x0 + W - pad;
+        if (c.inline_cmd && !c.toolbar) {
+            Fill({r - 11 * u, cy - 2.5f * u, r, cy + 2.5f * u}, accent, 1.2f * u);
+            r -= 11 * u + gap;
+        }
+        field(r - srch, r, cy);
+        field(x0 + pad, r - srch - gap, cy);
+        y += h;
+    }
+    // Command bar.
+    if (c.toolbar) {
+        const float h = 8 * u, cy = y + h / 2, gap = 2.2f * u, sq = 3.4f * u;
+        float bx = x0 + pad;
+        Fill({bx, cy - 2.5f * u, bx + 15 * u, cy + 2.5f * u}, accent, 1.2f * u);
+        bx += 15 * u + gap;
+        auto square = [&](bool colored) {
+            Fill({bx, cy - sq / 2, bx + sq, cy + sq / 2}, colored ? WithAlpha(tone, .8f) : WithAlpha(text3, .55f), .8f * u);
+            bx += sq + gap;
+        };
+        square(true); square(true); square(false); square(false); square(true);
+        bx = x0 + W - pad - 2 * sq - gap;
+        square(false); square(false);
+        y += h;
+    }
+    const float status_h = c.status ? 5 * u : 0;
+    const D2D1_RECT_F body{x0 + 2.5f * u, y, x0 + W - 2.5f * u, y0 + H - status_h - 2.5f * u};
+
+    // Sidebar.
+    float pane_left = body.left;
+    if (c.sidebar) {
+        const float sw = (body.right - body.left) * (c.lite ? .19f : .22f);
+        float sy = body.top + 1.5f * u;
+        const float ih = 2.4f * u, gap = 2.1f * u;
+        auto item = [&](float frac, D2D1_COLOR_F col, float extra_top = 0) {
+            sy += extra_top;
+            Fill({body.left, sy, body.left + sw * frac, sy + ih}, col, 2);
+            sy += ih + gap;
+        };
+        if (c.lite) {
+            const D2D1_COLOR_F t = WithAlpha(tone, .35f);
+            for (float f : {.62f, .70f, .56f, .66f, .52f}) item(f, t);
+            item(.60f, WithAlpha(tone, .35f), 1.5f * u);
+            for (float f : {.86f, .70f}) {
+                const float bh = 1.6f * u;
+                Fill({body.left, sy, body.left + sw * f, sy + bh}, WithAlpha(track, 1), 1);
+                Fill({body.left, sy, body.left + sw * f * .7f, sy + bh}, WithAlpha(place, .7f), 1);
+                sy += bh + gap;
+            }
+        } else {
+            const D2D1_COLOR_F t = WithAlpha(text3, .35f), head = WithAlpha(text3, .6f);
+            item(.55f, head); item(.70f, t); item(.62f, WithAlpha(accent, .75f)); item(.76f, t);
+            item(.55f, head, 1.5f * u); item(.58f, t); item(.66f, t);
+            item(.55f, head, 1.5f * u); item(.50f, Hex(0xE5484D, .6f)); item(.56f, Hex(0x2FB55A, .6f));
+            if (c.tray)
+                Fill({body.left, body.bottom - 5 * u, body.left + sw, body.bottom}, WithAlpha(accent, dark ? .15f : .095f), 1.2f * u);
+        }
+        pane_left = body.left + sw + 2 * u;
+    }
+
+    // File pane.
+    const D2D1_RECT_F pane{pane_left, body.top, body.right, body.bottom};
+    Fill(pane, card, 1.6f * u);
+    Stroke(pane, stroke, 1.6f * u, std::max(.6f, .5f * u));
+    if (c.icons) {
+        const float p = 3.5f * u, cg = 2.5f * u, rg = 3 * u, ih = 6.5f * u;
+        const float cw = (pane.right - pane.left - 2 * p - 4 * cg) / 5;
+        D2D1_GRADIENT_STOP stops[] = {{0, WithAlpha(folder_a, .8f)}, {1, WithAlpha(folder_b, .8f)}};
+        ID2D1GradientStopCollection* coll = nullptr;
+        rt_->CreateGradientStopCollection(stops, 2, &coll);
+        for (int i = 0; i < 10; ++i) {
+            const float ix = pane.left + p + (i % 5) * (cw + cg), iy = pane.top + p + (i / 5) * (ih + rg);
+            if (iy + ih > pane.bottom - 1) break;
+            const D2D1_RECT_F f{ix, iy, ix + cw, iy + ih};
+            ID2D1LinearGradientBrush* grad = nullptr;
+            if (coll && SUCCEEDED(rt_->CreateLinearGradientBrush({{f.left, f.top}, {f.left, f.bottom}}, coll, &grad)))
+                rt_->FillRoundedRectangle(D2D1::RoundedRect(f, u, u), grad);
+            SafeRelease(grad);
+        }
+        SafeRelease(coll);
+    } else {
+        static const float widths[] = {.78f, .62f, .88f, .54f, .70f, .84f, .58f, .66f, .74f, .60f};
+        const int rows = c.roomy ? 5 : 7;
+        const float gap = (c.roomy ? 3.4f : 2.3f) * u, ih = 2.3f * u, p = 2.5f * u;
+        float ry = pane.top + p;
+        for (int i = 0; i < rows && ry + ih <= pane.bottom - p * .5f; ++i, ry += ih + gap)
+            Fill({pane.left + p, ry, pane.left + p + (pane.right - pane.left - 2 * p) * widths[i], ry + ih},
+                 i == 2 ? WithAlpha(accent, .7f) : WithAlpha(text3, .32f), 2);
+    }
+
+    // Status bar.
+    if (c.status) {
+        const float cy = y0 + H - status_h / 2;
+        Fill({x0 + pad, cy - .9f * u, x0 + pad + 10 * u, cy + .9f * u}, WithAlpha(text3, .4f), 2);
+        Fill({x0 + pad + 13 * u, cy - .9f * u, x0 + pad + 20 * u, cy + .9f * u}, WithAlpha(text3, .4f), 2);
+    }
+    // Floating selection actions (no command bar).
+    if (!c.toolbar && selection) {
+        const float fw = 38 * u, fh = 7 * u, fx = x0 + (W - fw) / 2, fy = y0 + H - 4 * u - fh;
+        Fill({fx, fy + .6f * u, fx + fw, fy + fh + .6f * u}, Hex(0x000000, dark ? .30f : .10f), 2 * u);
+        Fill({fx, fy, fx + fw, fy + fh}, flyout, 2 * u);
+        Stroke({fx, fy, fx + fw, fy + fh}, stroke, 2 * u, std::max(.6f, .5f * u));
+        float bx = fx + 3 * u;
+        const float cy = fy + fh / 2, sq = 3.4f * u;
+        Fill({bx, cy - sq / 2, bx + 9 * u, cy + sq / 2}, accent, .8f * u);
+        bx += 9 * u + 2.5f * u;
+        for (int i = 0; i < 3; ++i, bx += sq + 2.5f * u)
+            Fill({bx, cy - sq / 2, bx + sq, cy + sq / 2}, WithAlpha(tone, .7f), .8f * u);
+    }
+    // Edge handle of the floating sidebar.
+    if (!c.sidebar && c.peek)
+        Fill({x0 + .6f * u, y0 + H * .56f - 5 * u, x0 + 1.6f * u, y0 + H * .56f + 5 * u}, WithAlpha(accent, .45f), u);
+
+    if (layer) { rt_->PopLayer(); layer->Release(); }
+    SafeRelease(shape);
+    Stroke(win, stroke, 6, 1);
 }
 
 // ======================================================================
@@ -839,6 +1056,31 @@ void Wizard::PaintWelcome() {
     x += path_w;
     Text(need, {x, 306 + kWelcomeDy, x + need_w + 1, 326 + kWelcomeDy}, 12, theme_.text3);
 
+    // "Layout: Standard · you can change it while installing  [Choose now]" (fresh installs only:
+    // an upgrade keeps the user's own app.json, so a starting layout would not apply).
+    if (!req_.upgrade) {
+        const std::wstring pattern = T(Str::UiChip), name = UiModeName(req_.ui.mode);
+        const size_t at = pattern.find(L"%1");
+        const std::wstring pre = at == std::wstring::npos ? pattern : pattern.substr(0, at);
+        const std::wstring post = at == std::wstring::npos ? L"" : pattern.substr(at + 2);
+        const std::wstring pick = T(Str::UiChipPick);
+        const float pre_w = TextWidth(pre, 12), name_w2 = TextWidth(name, 12), post_w = TextWidth(post, 12);
+        const float pick_w = TextWidth(pick, 12) + 8;
+        const float cy0 = 334 + kWelcomeDy, cy1 = cy0 + 20;
+        float cx = (kW - pre_w - name_w2 - post_w - 4 - pick_w) / 2;
+        Text(pre, {cx, cy0, cx + pre_w + 1, cy1}, 12, theme_.text3);
+        cx += pre_w;
+        Text(name, {cx, cy0, cx + name_w2 + 1, cy1}, 12, theme_.text2);
+        cx += name_w2;
+        Text(post, {cx, cy0, cx + post_w + 1, cy1}, 12, theme_.text3);
+        cx += post_w + 4;
+        const D2D1_RECT_F pr{cx, cy0 + 1, cx + pick_w, cy1 - 1};
+        if (hover_ == kUiChipPick) Fill(pr, theme_.hover, 4);
+        Text(pick, pr, 12, theme_.accent, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
+        FocusRing(kUiChipPick, pr, 4);
+        Hit(kUiChipPick, pr);
+    }
+
     // Footer: agreement + custom install.
     const float fy = kH - 16 - 32;
     Checkbox(kAgree, agree_, 20, fy + 7);
@@ -917,6 +1159,44 @@ void Wizard::PaintOptions() {
                   DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
     };
 
+    if (!req_.upgrade) {
+        // Starting layout: icon + text on the left, three thumbnail buttons on the right.
+        section(Str::SecUi);
+        const float bw = 86, bh = 5 + 76 / 1.6f + 5 + 16 + 6, gap = 6;
+        const D2D1_RECT_F r{L, y, R, y + bh + 28};
+        Fill(r, theme_.card, 7);
+        Stroke(r, theme_.stroke, 7);
+        Icon(10, L + 16, y + 14, WithAlpha(theme_.text, .9f));
+        const float bx0 = R - 16 - 3 * bw - 2 * gap;
+        const std::wstring t1 = T(Str::UiStart);
+        Text(t1, {L + 50, y + 13, bx0 - 12, y + 33}, 13.5f, theme_.text);
+        {
+            const float bx = L + 50 + TextWidth(t1, 13.5f) + 6, nbw = TextWidth(T(Str::New), 11) + 14;
+            const D2D1_RECT_F b{bx, y + 15, bx + nbw, y + 31};
+            Fill(b, WithAlpha(theme_.accent, .22f), 8);
+            Text(T(Str::New), b, 11, theme_.accent, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+        const float sub_w = bx0 - 16 - (L + 50);
+        Text(T(Str::UiStartSub), {L + 50, y + 34, L + 50 + sub_w, y + 34 + TextHeight(T(Str::UiStartSub), 12, sub_w) + 2},
+             12, theme_.text2, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+        for (int i = 0; i < 3; ++i) {
+            const int id = kUiZen + i;
+            const bool on = static_cast<int>(req_.ui.mode) == i, hot = hover_ == id;
+            const D2D1_RECT_F b{bx0 + i * (bw + gap), y + 14, bx0 + i * (bw + gap) + bw, y + 14 + bh};
+            Fill(b, theme_.card_strong, 7);
+            if (on) Fill(b, WithAlpha(theme_.accent, .10f), 7);
+            else if (hot) Fill(b, theme_.hover, 7);
+            Stroke(b, on ? theme_.accent : theme_.stroke, 7, on ? 1.5f : 1.f);
+            MiniPreview({b.left + 5, b.top + 5, b.right - 5, b.top + 5 + 76 / 1.6f}, static_cast<UiMode>(i), UiDark(),
+                        UiAccent(), false);
+            Text(UiModeName(static_cast<UiMode>(i)), {b.left + 2, b.bottom - 22, b.right - 2, b.bottom - 5}, 12,
+                 on ? theme_.text : theme_.text2, on ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+                 DWRITE_TEXT_ALIGNMENT_CENTER);
+            FocusRing(id, b, 7);
+            Hit(id, b);
+        }
+        y = r.bottom + 14;
+    }
     section(Str::SecLocation);
     const auto app_card = card(1, Str::AppDir, Str::AppDirSub, 1);
     field(kAppEdit, kBrowseApp, app_card, 260, app_edit_rect_, app_edit_visible_, true);
@@ -1043,11 +1323,12 @@ void Wizard::PaintInstall() {
             brush_->SetColor(c);
             rt_->DrawEllipse(D2D1::Ellipse({dx, dy}, 7.25f, 7.25f), brush_, 1.5f);
         }
-        Text(T(names[steps[i]]), {70, y, 300, y + 26}, 12.5f, c);
-        if (run && steps[i] == 0) {
+        const bool show_mb = run && steps[i] == 0 && (phase_ == Phase::Preparing || phase_ == Phase::Extracting);
+        Text(T(names[steps[i]]), {70, y, show_mb ? 214.f : 300.f, y + 26}, 12.5f, c);
+        if (show_mb) {
             wchar_t sub[48];
-            swprintf_s(sub, L"%.1f / %.0f MB", done_bytes_.load() / 1048576.0, total_bytes_ / 1048576.0);
-            Text(sub, {250, y, 340, y + 26}, 11, theme_.text3, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            swprintf_s(sub, L"%.1f / %.1f MB", done_bytes_.load() / 1048576.0, total_bytes_ / 1048576.0);
+            Text(sub, {218, y, 340, y + 26}, 11, theme_.text3, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING);
         }
     }
 
@@ -1055,6 +1336,22 @@ void Wizard::PaintInstall() {
     const D2D1_RECT_F panel{360, 58, kW - 24, kH - 50};
     Fill(panel, theme_.card, 10);
     Stroke(panel, theme_.stroke, 10);
+    if (req_.upgrade) PaintSlides(panel);  // upgrades keep their layout: show what's new instead
+    else PaintUiPanel(panel);
+
+    // Footer: current file + cancel.
+    std::wstring file;
+    {
+        std::lock_guard lock(file_mutex_);
+        file = current_file_;
+    }
+    if (phase_ == Phase::Extracting && !file.empty())
+        Text(req_.app_dir + L"\\" + file, {44, kH - 40, 44 + 420, kH - 20}, 12, theme_.text3);
+    if (!committing_ && phase_ != Phase::Done)
+        Button(kCancelInstall, T(Str::Cancel), kW - 20, kH - 44, Btn::Ghost, 0, 30, true, 12);
+}
+
+void Wizard::PaintSlides(const D2D1_RECT_F& panel) {
     if (!probe_ && GetTickCount64() - slide_time_ > 3200) { slide_ = (slide_ + 1) % 6; slide_time_ = GetTickCount64(); }
     const float st = std::min(1.f, (GetTickCount64() - slide_time_) / 500.f);
     const Str titles[] = {Str::S4Title, Str::S1Title, Str::S2Title, Str::S3Title, Str::S5Title, Str::S6Title};
@@ -1187,30 +1484,135 @@ void Wizard::PaintInstall() {
             x += w + 5;
         }
     }
+}
 
-    // Footer: current file + cancel.
-    std::wstring file;
+// Fresh installs: pick the starting layout while the files are copied.
+void Wizard::PaintUiPanel(const D2D1_RECT_F& panel) {
+    const float L = panel.left + 20, R = panel.right - 20;
+    float y = panel.top + 18;
+    Text(T(Str::UiPickTitle), {L, y, R, y + 22}, 16, theme_.text, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    y += 25;
     {
-        std::lock_guard lock(file_mutex_);
-        file = current_file_;
+        const UiMode m = req_.ui.mode;
+        const std::wstring name = UiModeName(m);
+        const Str line = m == UiMode::Zen ? Str::ModeZenLine : m == UiMode::Pro ? Str::ModeProLine : Str::ModeStandardLine;
+        const std::wstring sub = name + (lang_ == Lang::En ? L": " : L"\uFF1A") + T(line) + L"\n" + T(Str::UiPickHint);
+        if (IDWriteTextLayout* layout = Layout(sub, 12, DWRITE_FONT_WEIGHT_NORMAL, R - L, 200, true, DWRITE_TEXT_ALIGNMENT_LEADING)) {
+            layout->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, {0, static_cast<UINT32>(name.size())});
+            DWRITE_TEXT_METRICS metrics{};
+            layout->GetMetrics(&metrics);
+            brush_->SetColor(theme_.text2);
+            rt_->DrawTextLayout({L, y}, layout, brush_, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            y += metrics.height;
+            layout->Release();
+        }
     }
-    if (phase_ == Phase::Extracting && !file.empty())
-        Text(req_.app_dir + L"\\" + file, {44, kH - 40, 44 + 420, kH - 20}, 12, theme_.text3);
-    if (!committing_ && phase_ != Phase::Done)
-        Button(kCancelInstall, T(Str::Cancel), kW - 20, kH - 44, Btn::Ghost, 0, 30, true, 12);
+    y += 10;
+    // Bottom-up: theme / accent row, then the three mode cards; the stage takes the rest.
+    const float row_h = 28, row_top = panel.bottom - 16 - row_h;
+    const float picks_h = 48, picks_top = row_top - 10 - picks_h;
+    const D2D1_RECT_F stage{L, y, R, picks_top - 10};
+    {
+        D2D1_GRADIENT_STOP stops[] = {{0, WithAlpha(theme_.accent, .18f)}, {.7f, WithAlpha(theme_.accent, 0)}};
+        ID2D1GradientStopCollection* coll = nullptr;
+        ID2D1LinearGradientBrush* grad = nullptr;
+        rt_->CreateGradientStopCollection(stops, 2, &coll);
+        if (coll && SUCCEEDED(rt_->CreateLinearGradientBrush({{stage.left, stage.top}, {stage.right, stage.bottom}}, coll, &grad)))
+            rt_->FillRoundedRectangle(D2D1::RoundedRect(stage, 9, 9), grad);
+        SafeRelease(grad);
+        SafeRelease(coll);
+        Stroke(stage, theme_.stroke, 9);
+        const float mw = std::min(stage.right - stage.left - 80, (stage.bottom - stage.top - 18) * 1.6f);
+        const float mx = (stage.left + stage.right - mw) / 2;
+        MiniPreview({mx, stage.top + 9, mx + mw, stage.bottom - 9}, req_.ui.mode, UiDark(), UiAccent());
+    }
+    // Mode cards.
+    {
+        const float gap = 6, cw = (R - L - 2 * gap) / 3;
+        const Str who[] = {Str::ModeZenWho, Str::ModeStandardWho, Str::ModeProWho};
+        for (int i = 0; i < 3; ++i) {
+            const int id = kUiZen + i;
+            const bool on = static_cast<int>(req_.ui.mode) == i, hot = hover_ == id;
+            const D2D1_RECT_F r{L + i * (cw + gap), picks_top, L + i * (cw + gap) + cw, picks_top + picks_h};
+            Fill(r, theme_.card_strong, 8);
+            if (on) Fill(r, WithAlpha(theme_.accent, .12f), 8);
+            else if (hot) Fill(r, theme_.hover, 8);
+            Stroke(r, on ? theme_.accent : theme_.stroke, 8, on ? 1.5f : 1.f);
+            Text(UiModeName(static_cast<UiMode>(i)), {r.left + 4, r.top + 7, r.right - 4, r.top + 25}, 13, theme_.text,
+                 DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
+            Text(T(who[i]), {r.left + 4, r.top + 26, r.right - 4, r.top + 42}, 11, on ? theme_.accent : theme_.text3,
+                 DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
+            FocusRing(id, r, 8);
+            Hit(id, r);
+        }
+    }
+    // Light / dark segment.
+    {
+        const float sh = 24, cy = row_top + row_h / 2;
+        const std::wstring labels[] = {T(Str::ThemeLight), T(Str::ThemeDark)};
+        float widths[2];
+        for (int i = 0; i < 2; ++i) widths[i] = TextWidth(labels[i], 12, DWRITE_FONT_WEIGHT_SEMI_BOLD) + 18;
+        const D2D1_RECT_F seg{L, cy - sh / 2 - 2, L + widths[0] + widths[1] + 4, cy + sh / 2 + 2};
+        Fill(seg, theme_.hover, 7);
+        Stroke(seg, theme_.divider, 7);
+        float bx = seg.left + 2;
+        for (int i = 0; i < 2; ++i) {
+            const int id = kThemeLight + i;
+            const bool on = UiDark() == (i == 1);
+            const D2D1_RECT_F b{bx, cy - sh / 2, bx + widths[i], cy + sh / 2};
+            if (on) { Fill(b, theme_.card_strong, 5); Stroke(b, theme_.stroke, 5); }
+            else if (hover_ == id) Fill(b, theme_.hover, 5);
+            Text(labels[i], b, 12, on ? theme_.accent : theme_.text2,
+                 on ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
+            FocusRing(id, b, 5);
+            Hit(id, b);
+            bx += widths[i];
+        }
+        // Accent swatches, right aligned.
+        const int count = static_cast<int>(std::size(kUiAccents));
+        float sx = R - count * 18.f - (count - 1) * 5.f;
+        for (int i = 0; i < count; ++i, sx += 23) {
+            const int id = kAccent0 + i;
+            const bool on = UiAccent() == kUiAccents[i];
+            const D2D1_POINT_2F cpt{sx + 9, cy};
+            const float rad = hover_ == id ? 10.f : 9.f;
+            brush_->SetColor(Hex(kUiAccents[i]));
+            rt_->FillEllipse(D2D1::Ellipse(cpt, rad, rad), brush_);
+            brush_->SetColor(Hex(0x000000, .12f));
+            rt_->DrawEllipse(D2D1::Ellipse(cpt, rad - .5f, rad - .5f), brush_, 1);
+            if (on) {
+                brush_->SetColor(Hex(kUiAccents[i]));
+                rt_->DrawEllipse(D2D1::Ellipse(cpt, 12.25f, 12.25f), brush_, 1.5f);
+            }
+            const D2D1_RECT_F hit{sx - 2, cy - 11, sx + 20, cy + 11};
+            if (keyboard_focus_ && focus_ == id) {
+                brush_->SetColor(theme_.text);
+                rt_->DrawEllipse(D2D1::Ellipse(cpt, 14.5f, 14.5f), brush_, 2);
+            }
+            Hit(id, hit);
+        }
+    }
 }
 
 void Wizard::PaintDone() {
     const float t = std::min(1.f, (GetTickCount64() - page_time_) / 900.f);
+    const bool index_ok = result_.index_configured && result_.index_running;
     std::vector<std::pair<std::wstring, D2D1_COLOR_F>> pills;
     if (req_.tasks.index_service && !req_.options.test && (result_.index_running || !result_.index_configured))
-        pills.push_back(result_.index_running ? std::pair{std::wstring(T(Str::SumIndex)), theme_.success}
-                                              : std::pair{std::wstring(T(Str::SumIndexFailed)), theme_.warn});
+        pills.push_back(index_ok ? std::pair{std::wstring(T(Str::SumIndex)), theme_.success}
+                                 : std::pair{std::wstring(T(Str::SumIndexFailed)), theme_.warn});
     if (result_.defaults_written && req_.tasks.global_search) pills.push_back({T(Str::SumGlobalSearch), theme_.success});
     if (result_.defaults_written && req_.tasks.ai_assistant) pills.push_back({T(Str::SumAiAssistant), theme_.success});
     if (result_.verbs_seeded) pills.push_back({T(Str::SumMenu), theme_.success});
     if (result_.startup) pills.push_back({T(Str::SumStart), theme_.success});
     if (result_.dialog_cleanup_pending) pills.push_back({T(Str::CleanupPending), theme_.warn});
+    const bool show_ui = !req_.upgrade && ui_recorded_;
+    std::wstring ui_label;
+    if (show_ui) {
+        const Str th = req_.ui.theme == 1 ? Str::ThemeLight : req_.ui.theme == 2 ? Str::ThemeDark : Str::ThemeSystem;
+        ui_label = Format(T(Str::SumUi), UiModeName(req_.ui.mode), std::wstring(T(th)));
+        pills.push_back({ui_label, theme_.accent});
+    }
     std::vector<float> row_widths;
     std::vector<size_t> row_starts;
     for (size_t i = 0; i < pills.size(); ++i) {
@@ -1222,9 +1624,15 @@ void Wizard::PaintDone() {
     }
     const float pills_height = row_widths.empty() ? 0.f : 30.f * static_cast<float>(row_widths.size()) + 18.f;
     const std::wstring sub_measure = req_.upgrade ? T(Str::DoneSubUp)
-                                     : result_.index_running ? T(Str::DoneSub) : T(Str::DoneSubNoIndex);
+                                     : index_ok ? T(Str::DoneSub) : T(Str::DoneSubNoIndex);
     // icon 84 + 18 + title 44 + text + 16 + pills 48 + buttons 32, centred in the stage
-    const float content = 84 + 18 + 44 + TextHeight(sub_measure, 13.5f, 420) + 16 + pills_height + 32;
+    const float base = 84 + 18 + 44 + TextHeight(sub_measure, 13.5f, 420) + 16 + pills_height + 32;
+    // The layout thumbnail takes what is left (up to 110 px tall) and is dropped when that gets too small,
+    // e.g. long English text plus two rows of pills.
+    float thumb_h = show_ui ? std::min(110.f, kH - kTitle - 28 - base - 18) : 0.f;
+    if (thumb_h < 56) thumb_h = 0;
+    const float thumb_w = thumb_h * 1.6f;
+    const float content = base + (thumb_h > 0 ? thumb_h + 18 : 0.f);
     const float cx = kW / 2, top = kTitle + (kH - kTitle - content) / 2 - 6;
     // Check mark that draws itself.
     const float circle = std::min(1.f, t / .65f);
@@ -1242,7 +1650,7 @@ void Wizard::PaintDone() {
     Text(title, {48, y, kW - 48, y + 36}, 28, theme_.text, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
     y += 44;
     const std::wstring sub = req_.upgrade ? T(Str::DoneSubUp)
-                             : result_.index_running ? T(Str::DoneSub) : T(Str::DoneSubNoIndex);
+                             : index_ok ? T(Str::DoneSub) : T(Str::DoneSubNoIndex);
     const float sh = TextHeight(sub, 13.5f, 420);
     Text(sub, {(kW - 420) / 2, y, (kW + 420) / 2, y + sh + 2}, 13.5f, theme_.text2, DWRITE_FONT_WEIGHT_NORMAL,
          DWRITE_TEXT_ALIGNMENT_CENTER, true);
@@ -1259,14 +1667,20 @@ void Wizard::PaintDone() {
         const auto& [label, color] = pills[i];
         const float w = TextWidth(label, 11.5f) + 32;
         const D2D1_RECT_F r{x, y, x + w, y + 24};
+        const bool ui_pill = show_ui && label == ui_label;
         Fill(r, theme_.card, 12);
-        Stroke(r, theme_.stroke, 12);
+        Stroke(r, ui_pill ? WithAlpha(theme_.accent, .45f) : theme_.stroke, 12);
         brush_->SetColor(color);
         rt_->FillEllipse(D2D1::Ellipse({x + 13, y + 12}, 3, 3), brush_);
-        Text(label, {x + 22, y, x + w, y + 24}, 11.5f, theme_.text2);
+        Text(label, {x + 22, y, x + w, y + 24}, 11.5f, ui_pill ? theme_.text : theme_.text2);
         x += w + 6;
     }
     y += pills.empty() ? 0 : 24 + 24;
+    if (thumb_h > 0) {
+        y -= 8;
+        MiniPreview({(kW - thumb_w) / 2, y, (kW + thumb_w) / 2, y + thumb_h}, req_.ui.mode, UiDark(), UiAccent(), false);
+        y += thumb_h + 18 + 8;
+    }
     // Buttons
     const float lw = std::max(120.f, TextWidth(T(Str::Launch), 13, DWRITE_FONT_WEIGHT_SEMI_BOLD) + 32);
     const float cw = TextWidth(T(Str::Close), 13) + 32;
@@ -1554,6 +1968,7 @@ void Wizard::Activate(int id) {
             ShellExecuteW(hwnd_, L"open", L"https://www.apache.org/licenses/LICENSE-2.0", nullptr, nullptr, SW_SHOWNORMAL);
             break;
         case kToOptions: Show(Page::Options); break;
+        case kUiChipPick: scroll_ = 0; Show(Page::Options); break;
         case kBack: case kOptBack: Show(Page::Welcome); break;
         case kAppEdit: SetFocus(app_edit_); break;
         case kIndexEdit: if (req_.tasks.index_service) SetFocus(index_edit_); break;
@@ -1600,6 +2015,12 @@ void Wizard::Activate(int id) {
             dialog_ = Dialog::None;
             break;
         case kDot0: case kDot1: case kDot2: case kDot3: case kDot4: case kDot5: slide_ = id - kDot0; slide_time_ = GetTickCount64(); break;
+        case kUiZen: case kUiStandard: case kUiPro: req_.ui.mode = static_cast<UiMode>(id - kUiZen); break;
+        case kThemeLight: case kThemeDark: req_.ui.theme = id == kThemeDark ? 2 : 1; break;
+        case kAccent0: case kAccent1: case kAccent2: case kAccent3: case kAccent4: case kAccent5:
+            req_.ui.has_accent = id != kAccent0;  // the first swatch is the app default
+            req_.ui.accent = req_.ui.has_accent ? kUiAccents[id - kAccent0] : 0;
+            break;
     }
     Invalidate();
 }
@@ -1615,8 +2036,19 @@ void Wizard::StartInstall() {
             free_bytes.QuadPart < total_bytes_ * 2)  // staging + backup
             path_error_ = T(Str::NoSpace);
     }
-    if (req_.tasks.index_service && !ValidInstallPath(req_.index_path) && path_error_.empty())
-        path_error_ = T(Str::BadDir);
+    if (req_.tasks.index_service) {
+        const std::wstring normalized = NormalizeIndexSelection(req_.index_path, req_.app_dir, {}, false);
+        if (!ValidIndexInputPath(req_.index_path, req_.app_dir) && path_error_.empty()) {
+            path_error_ = T(Str::BadDir);
+        } else if (!normalized.empty()) {
+            req_.index_path = normalized;
+            if (index_edit_) {
+                syncing_edits_ = true;
+                SetWindowTextW(index_edit_, req_.index_path.c_str());
+                syncing_edits_ = false;
+            }
+        }
+    }
     if (!path_error_.empty()) { Show(Page::Options); return; }
 
     done_bytes_ = 0;
@@ -1736,8 +2168,21 @@ void Wizard::Browse(bool app) {
                 const auto slash = p.find_last_of(L'\\');
                 const std::wstring last = slash == std::wstring::npos ? p : p.substr(slash + 1);
                 if (!EqualsNoCase(last, L"Pulse")) p += (p.back() == L'\\' ? L"" : L"\\") + std::wstring(L"Pulse");
+                syncing_edits_ = true;
+                SetWindowTextW(app_edit_, p.c_str());
+                if (!index_customized_ && index_edit_) {
+                    req_.index_path = DefaultIndexPathForApp(p, req_.options.test);
+                    SetWindowTextW(index_edit_, req_.index_path.c_str());
+                }
+                syncing_edits_ = false;
+            } else {
+                const std::wstring current_cfg = req_.options.test ? std::wstring{} : ConfiguredIndexPath();
+                p = NormalizeIndexSelection(p, req_.app_dir, current_cfg, true);
+                index_customized_ = true;
+                syncing_edits_ = true;
+                SetWindowTextW(index_edit_, p.c_str());
+                syncing_edits_ = false;
             }
-            SetWindowTextW(app ? app_edit_ : index_edit_, p.c_str());
             SyncFromEdits();
             path_error_.clear();
         }
@@ -1871,8 +2316,16 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
                 glow_frame_ = GetTickCount64();
                 Invalidate();
             }
-            if (page_ == Page::Install && engine_done_ && shown_progress_ >= .999f && GetTickCount64() - done_time_ > 550)
+            if (page_ == Page::Install && engine_done_ && shown_progress_ >= .999f && GetTickCount64() - done_time_ > 550) {
+                if (result_.exit_code == kExitOk && !req_.upgrade) {
+                    const std::wstring ini = result_.app_dir + L"\\setup-defaults.ini";
+                    const bool recorded = WriteUiChoice(ini, req_.ui);
+                    ui_recorded_ = recorded;
+                    Log(std::wstring(L"Starting layout: ") + (recorded ? L"recorded " : L"not recorded ") +
+                        UiModeName(req_.ui.mode) + L" theme=" + std::to_wstring(req_.ui.theme));
+                }
                 Show(result_.exit_code == kExitOk ? Page::Done : Page::Error);
+            }
             return 0;
         case WM_MOUSEMOVE: {
             TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd_, 0};
@@ -1942,7 +2395,22 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case WM_COMMAND:
             if (HIWORD(wp) == EN_SETFOCUS || HIWORD(wp) == EN_KILLFOCUS) Invalidate();
-            if (HIWORD(wp) == EN_CHANGE) { path_error_.clear(); SyncFromEdits(); Invalidate(); }
+            if (HIWORD(wp) == EN_CHANGE && !syncing_edits_) {
+                const HWND changed = reinterpret_cast<HWND>(lp);
+                path_error_.clear();
+                SyncFromEdits();
+                if (changed == index_edit_) {
+                    index_customized_ = true;
+                } else if (changed == app_edit_ && !index_customized_ && ValidInstallPath(req_.app_dir)) {
+                    req_.index_path = DefaultIndexPathForApp(req_.app_dir, req_.options.test);
+                    if (index_edit_) {
+                        syncing_edits_ = true;
+                        SetWindowTextW(index_edit_, req_.index_path.c_str());
+                        syncing_edits_ = false;
+                    }
+                }
+                Invalidate();
+            }
             return 0;
         case WM_CTLCOLOREDIT: {
             HDC dc = reinterpret_cast<HDC>(wp);
@@ -2091,6 +2559,11 @@ WizardOutcome Wizard::Run() {
             if (page >= 0 && page <= 4) page_ = static_cast<Page>(page);
         }
         if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_SLIDE", value, 16)) slide_ = std::clamp(_wtoi(value), 0, 5);
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_UPGRADE", value, 16)) req_.upgrade = _wtoi(value) != 0;
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_UIMODE", value, 16)) req_.ui.mode = static_cast<UiMode>(std::clamp(_wtoi(value), 0, 2));
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_UITHEME", value, 16)) req_.ui.theme = std::clamp(_wtoi(value), 0, 2);
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_UIACCENT", value, 16)) Activate(kAccent0 + std::clamp(_wtoi(value), 0, 5));
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_HOVER", value, 16)) hover_ = _wtoi(value);
         if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_SCROLL", value, 16)) scroll_ = static_cast<float>(std::max(0, _wtoi(value)));
         if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_LOCKS", value, 16)) {
             page_ = prev_page_ = Page::Install;
@@ -2108,6 +2581,7 @@ WizardOutcome Wizard::Run() {
             keyboard_focus_ = true;
         }
         result_.defaults_written = true;
+        ui_recorded_ = true;
         result_.verbs_seeded = true;
         result_.startup = true;
         phase_ = Phase::Extracting;

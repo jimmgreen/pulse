@@ -10,6 +10,7 @@
 #include "../shell_bridge/file_dialog_ui_provider.h"
 #include "../shell_bridge/file_dialog_wrapper.h"
 #include "../shell_bridge/file_dialog_runtime.h"
+#include "legacy_template_save_web_test.h"
 #endif
 using namespace pulse::shell_bridge;
 struct State { const void* original=nullptr; const wchar_t* expected=nullptr; unsigned waits=0; bool setup_failed=false,undersized=false,early_submit=false; int template_commands=0; bool ansi=false,cancel=false;int init=0,ready=0,fileok=0,compat_fileok=0,destroy=0; };
@@ -42,6 +43,10 @@ if(s.fileok==1 && !s.undersized){SetWindowLongPtrW(child,DWLP_MSGRESULT,1);PostM
 }
 int wmain(int argc,wchar_t** argv){
  std::setvbuf(stdout,nullptr,_IONBF,0);
+#if defined(PULSE_LEGACY_HOOK_LOCAL_UI_TEST)
+ if(argc >= 2 && std::wstring_view(argv[1])==L"--save-for-web")
+     return pulse::bench::save_web::Run(argc-2,argv+2);
+#endif
  bool oracle=false,small_buffer=false,small_preflight=false,early_submit=false;
  for(int i=1;i<argc;++i){oracle|=std::wstring_view(argv[i])==L"--native";small_buffer|=std::wstring_view(argv[i])==L"--small-buffer";small_preflight|=std::wstring_view(argv[i])==L"--small-preflight";early_submit|=std::wstring_view(argv[i])==L"--early-submit";}
  small_buffer|=small_preflight;

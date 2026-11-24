@@ -25,49 +25,46 @@ struct ExtensionStoreItem {
     std::wstring license, source, released; // the newest release, for 关于
     std::vector<ExtensionStoreRelease> releases; // verified catalog metadata, no synthetic release history
     std::vector<std::wstring> history;      // "26.00 · 2026-10-21", newest first
+    uint32_t custom_icon = 0;               // resolved custom package icon id (>= kCustomExtensionIconMin)
+    std::wstring description, engine, homepage;
+    std::vector<std::wstring> tags, highlights, permissions;
+    bool installed = false;
+    int installed_index = -1;
+    bool has_menu_tab = false;
 };
-// The official 7-Zip extension as the store shows it: read from, and edited through,
-// its own settings page states (the plugin saves and re-registers its commands).
+// One row of a plugin's context-menu preview (manifest quickSettings menu preview).
 struct SevenZipMenuRow {
     std::wstring title, detail;
     uint32_t icon = 0; // PULSE_COMMAND_ICON_*
     StoreIcon vector_icon = StoreIcon::File; // its drawn icon (StoreCommandIconFor)
 };
-// 接管压缩包: one format (or the legacy group) as the extension reports it.
-struct SevenZipTakeRow {
-    std::wstring label, extensions, status; // "GZ", ".gz .tgz", "现在由「Bandizip」打开"
-    enum class Owner { Off, Pulse, Other, Free } owner = Owner::Off;
-    bool included = true;     // its checkbox
-    bool ask = false;         // offer Windows' chooser
-    bool ask_windows = false; // the current owner is Windows' archive folder (设为, not 改为)
-    int icon = 0;             // resource id in SevenZipView::icon_library
+struct ExtensionQuickControlView {
+    int kind = 0; // 0 = switch, 1 = select, 2 = button
+    int action = -1;
+    std::wstring label;
+    bool checked = false;
+    bool disabled = false;
+    uint32_t width_dip = 0;
+    std::vector<std::wstring> option_labels;
+    int selected_option = 0;
 };
-struct SevenZipView {
-    bool available = false; // the package runs and its page answers
-    bool needs_restart = false; // installed/toggled on disk, awaiting full Pulse restart
-    bool needs_update = false;  // running DLL predates settings page support
-    bool menu_available = false; // older packages do not publish menu settings
-    bool formats_available = false;
-    bool TabAvailable(int tab) const {
-        return available && (tab != 1 || menu_available) && (tab != 2 || formats_available);
-    }
-    bool installed = false; // the catalog item is installed (may be loading/off)
-    int item = -1;          // index in ExtensionStoreView::items
-    int installed_index = -1; // index in ExtensionStoreView::installed
-    int mode = 0, location = 0, format = 0, level = 3;
-    bool remember = true, submenu = false;
-    uint32_t commands = 0x3f; // bit per command, plugin order
-    std::wstring folder;
-    std::wstring status;      // the page's own save line ("已保存。", errors)
-    std::vector<std::wstring> formats_rw, formats_ro;
-    std::vector<SevenZipMenuRow> archive_rows, file_rows; // the live menu for sample selections
-    // 接管压缩包 (older packages publish none of it: take_available stays false).
-    bool take_available = false, take = false, take_busy = false, ask_any = false, ask_many = false;
-    int double_click = 0;     // 0 smart extract, 1 open in Pulse
-    std::wstring take_head;   // the summary line over the formats
-    std::string take_config;  // "<take>|<double-click>|<formats hex>", edited back as a whole
-    std::wstring icon_library;
-    std::vector<SevenZipTakeRow> take_rows;
+struct ExtensionQuickRowView {
+    std::wstring title;
+    std::wstring description;
+    std::vector<ExtensionQuickControlView> controls;
+};
+struct ExtensionQuickCardView {
+    int item_index = -1;
+    int package_index = -1;
+    std::string package_id;
+    std::wstring title;
+    std::wstring status;
+    bool available = false;
+    std::vector<ExtensionQuickRowView> rows;
+    bool has_menu_preview = false;
+    bool preview_submenu = false;
+    std::wstring preview_caption;
+    std::vector<SevenZipMenuRow> preview_rows;
 };
 // Registry snapshot, including disabled packages; never derived from the running runtime.
 struct InstalledExtensionItem {
@@ -76,26 +73,32 @@ struct InstalledExtensionItem {
     bool enabled = false;
     bool native_code = false;
     bool can_enable = false, can_disable = false, can_uninstall = false, can_rollback = false;
+    // >= 0: a developer folder row (devmode registry index), not a store registry entry.
+    // Its 更多 menu offers 重新加载 / 移除 / 打开文件夹; it has no enable switch.
+    int development_index = -1;
 };
 struct ExtensionStoreView {
     enum class State { Idle, Loading, Failed, Offline, Online };
+    enum class NoticeKind { Information, Success, Warning, Error };
     State state = State::Idle;
     std::wstring notice;
+    NoticeKind notice_kind = NoticeKind::Information;
+    bool install_completed = false;
     bool pending_restart = false;
+    bool developer_mode = false; // the saved setting (takes effect after a restart)
     bool busy = false; // Shows StoreCancel; app decides whether cancellation is available.
     std::vector<ExtensionStoreItem> items;
     std::vector<InstalledExtensionItem> installed;
     bool installed_loading = false;
     bool installed_busy = false; // Local mutation/review only; independent of catalog network loading.
     std::wstring installed_error;
-    // Browse filters and the 7-Zip views (feature card, detail page).
+    // Browse filters and the extension detail page.
     int category = 0;          // chip: 0 all, 1 archives, 2 preview, 3 search, 4 AI
     std::wstring search;       // the search box's text
-    bool detail = false;       // the 7-Zip detail page replaces browse
-    int detail_tab = 0;        // 常用设置 / 右键菜单 / 支持格式 / 关于
-    int preview_kind = 0;      // menu preview: 0 archive, 1 files
+    bool detail = false;       // an extension detail page replaces browse
+    int detail_item = -1;      // index in items
+    int detail_tab = 0;        // 0 overview, 1 about
     bool saved = false;        // "已保存" flashes after an edit
-    float level_drag = -1.0f;
-    SevenZipView seven_zip;
+    std::vector<ExtensionQuickCardView> quick_cards;
 };
 } // namespace pulse::ui

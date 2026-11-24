@@ -1,4 +1,5 @@
 #include "operation_intent_ui.h"
+#include "operation_refresh.h"
 #include "app_navigation.h"
 #include "create_rename_intent.h"
 #include "app_details_tree.h"
@@ -6,7 +7,23 @@
 #include <shlwapi.h>
 
 namespace pulse {
-static void ApplyWindowOperationIntentCompletion(AppState& state, const ops::CompletedOperation& completed) {
+static void ApplyWindowOperationIntentCompletion(AppState& state, const ops::CompletedOperation& completed,
+                                                 app::OperationRefreshPlan* refresh_plan) {
+    if (!completed.refresh_only && completed.type == ops::OpType::Rename &&
+        completed.destinations.size() == 1 && completed.sources.size() == 1) {
+        ForEachPane(state, [&](app::Pane& pane) {
+            auto* tab = pane.ActiveTab();
+            if (!tab || !tab->inline_rename_selection.Complete(completed.task_id,
+                tab->view_generation, completed.destinations.front())) return;
+            const auto leaf = [](const std::wstring& path) { return path.substr(path.find_last_of(L"\\/") + 1); };
+            // Transfer the thumbnail using the worker's actual numbered leaf.
+            if (!fs::IsVirtualPath(tab->current_path) &&
+                _wcsicmp(fs::ParentPath(completed.sources.front()).c_str(), tab->current_path.c_str()) == 0)
+                tab->held_renames.push_back({leaf(completed.sources.front()), leaf(completed.destinations.front())});
+            if (refresh_plan) refresh_plan->Add(tab->current_path);
+        });
+        return;
+    }
     // 合并到文件夹 arms its rename on the move into the new folder, so the
     // editor opens once the grouped items have left the listing.
     const bool grouped_move = completed.type == ops::OpType::Move && !completed.destinations.empty();
@@ -39,13 +56,23 @@ static void ApplyWindowOperationIntentCompletion(AppState& state, const ops::Com
         }
     });
     // A watcher may already have delivered the new item while its owner was
-    // unfocused. Request a fresh identity-checked snapshot for that owner too.
-    for (const auto& parent : parents) RefreshPath(state, parent, RefreshReason::OperationCompleted);
+    // unfocused. Request a fresh identity-checked snapshot for that owner too,
+    // coalesced into the caller's refresh plan when present so CreateFolder
+    // does not fire two back-to-back enumerations on the same directory.
+    for (const auto& parent : parents) {
+        if (refresh_plan) {
+            state.store.MarkDirty(parent);
+            refresh_plan->Add(parent);
+        } else {
+            RefreshPath(state, parent, RefreshReason::OperationCompleted);
+        }
+    }
     for (const auto& parent : tree_parents) NoteDetailsTreeChange(state, fs::NormalizePath(parent));
     if (!tree_parents.empty() && state.hwnd) InvalidateRect(state.hwnd, nullptr, FALSE);
 }
 
-static void FinishWindowOperationIntents(AppState& state, const ops::FinishedTask& finished) {
+static void FinishWindowOperationIntents(AppState& state, const ops::FinishedTask& finished,
+                                         app::OperationRefreshPlan* refresh_plan) {
     state.tray.CompleteTask(finished.task_id, finished.moved_sources);
     // 解散文件夹: the chain renames, moves and recycles under one listing; its
     // last step lists the parent afresh rather than trusting the patched snapshot.
@@ -54,22 +81,31 @@ static void FinishWindowOperationIntents(AppState& state, const ops::FinishedTas
             ++it;
             continue;
         }
-        RefreshPath(state, it->parent, RefreshReason::OperationCompleted);
+        if (refresh_plan) {
+            state.store.MarkDirty(it->parent);
+            refresh_plan->Add(it->parent);
+        } else {
+            RefreshPath(state, it->parent, RefreshReason::OperationCompleted);
+        }
         it = state.dissolveSteps.erase(it);
     }
     ForEachPane(state, [&](app::Pane& pane) {
-        if (auto* tab = pane.ActiveTab())
+        if (auto* tab = pane.ActiveTab()) {
             app::FinishCreateRenameIntent(tab->create_rename_intents, finished.task_id);
+            tab->inline_rename_selection.Finish(finished.task_id);
+        }
     });
 }
-void ApplyOperationIntentCompletion(AppState& state, const ops::CompletedOperation& completed) {
+void ApplyOperationIntentCompletion(AppState& state, const ops::CompletedOperation& completed,
+                                    app::OperationRefreshPlan* refresh_plan) {
     app::ForEachWindowSharingCore(state, [&](AppState& window) {
-        ApplyWindowOperationIntentCompletion(window, completed);
+        ApplyWindowOperationIntentCompletion(window, completed, refresh_plan);
     });
 }
-void FinishOperationIntents(AppState& state, const ops::FinishedTask& finished) {
+void FinishOperationIntents(AppState& state, const ops::FinishedTask& finished,
+                            app::OperationRefreshPlan* refresh_plan) {
     app::ForEachWindowSharingCore(state, [&](AppState& window) {
-        FinishWindowOperationIntents(window, finished);
+        FinishWindowOperationIntents(window, finished, refresh_plan);
     });
 }
 

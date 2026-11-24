@@ -547,10 +547,16 @@ TiffReduceStatus ReduceTiff(TiffByteSource& source, uint32_t min_edge, unsigned 
     if (job.failure) return TiffReduceStatus::Corrupt;
 
     const uint32_t channels = job.out_channels;
-    std::vector<uint32_t> sums(size_t{job.out_width} * out_height * channels, 0);
-    for (const Band& band : bands) {
-        uint32_t* target = &sums[size_t{band.first_row} * job.out_width * channels];
-        for (size_t i = 0; i < band.sums.size(); ++i) target[i] += band.sums[i];
+    // Adjacent workers can share only their boundary output row. Carry it
+    // forward, including when several short bands fall inside the same box.
+    const size_t row_cells = size_t{job.out_width} * channels;
+    for (size_t i = 1; i < bands.size(); ++i) {
+        const Band& prev = bands[i - 1];
+        Band& next = bands[i];
+        if (next.first_row < prev.first_row + prev.rows) {
+            const uint32_t* tail = prev.sums.data() + (prev.rows - 1) * row_cells;
+            for (size_t j = 0; j < row_cells; ++j) next.sums[j] += tail[j];
+        }
     }
     out.width = job.out_width;
     out.height = out_height;
@@ -560,11 +566,15 @@ TiffReduceStatus ReduceTiff(TiffByteSource& source, uint32_t min_edge, unsigned 
     out.channels = channels;
     out.stride = (job.out_width * channels + 3u) & ~3u;
     out.pixels.assign(size_t{out.stride} * out_height, 0);
+    size_t owner = 0;
     for (uint32_t oy = 0; oy < out_height; ++oy) {
+        while (owner + 1 < bands.size() && bands[owner + 1].first_row <= oy) ++owner;
+        const Band& band = bands[owner];
+        const uint32_t* row = band.sums.data() + (oy - band.first_row) * row_cells;
         const uint32_t box_h = (std::min)(factor, layout.height - oy * factor);
         for (uint32_t ox = 0; ox < job.out_width; ++ox) {
             const uint32_t box = box_h * (std::min)(factor, layout.width - ox * factor);
-            const uint32_t* sum = &sums[(size_t{oy} * job.out_width + ox) * channels];
+            const uint32_t* sum = row + size_t{ox} * channels;
             uint8_t* pixel = &out.pixels[size_t{oy} * out.stride + size_t{ox} * channels];
             for (uint32_t c = 0; c < channels; ++c)
                 pixel[c] = static_cast<uint8_t>((sum[c] + box / 2) / box);

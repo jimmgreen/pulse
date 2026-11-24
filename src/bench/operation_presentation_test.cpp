@@ -1,4 +1,5 @@
 #include "../ops/operation_presentation.h"
+#include "../common/path_utils.h"
 #include <cstdio>
 
 int main() {
@@ -14,6 +15,13 @@ int main() {
     check(FriendlyPathText(L"失败：\\??\\unc\\server\\share") == L"失败：\\\\server\\share", "embedded NT UNC path");
     check(FriendlyPathText(L"C:\\文件 → \\\\server\\share") == L"C:\\文件 → \\\\server\\share", "ordinary paths unchanged");
     check(FriendlyPathText(L"\\\\?\\Volume{abc}\\") == L"\\\\?\\Volume{abc}\\", "unknown device path preserved");
+    check(FriendlyPathText(L"无法从“\\\\?\\D:\\带空格 源.zip”写入“\\\\?\\unc\\server\\share\\目录”") ==
+          L"无法从“D:\\带空格 源.zip”写入“\\\\server\\share\\目录”", "multiple paths in the same prompt are presented normally");
+    using pulse::path::StripExtendedPathPrefix;
+    check(StripExtendedPathPrefix(L"\\\\?\\c:\\目录") == L"c:\\目录" &&
+          StripExtendedPathPrefix(L"\\\\?\\unc\\server\\share\\目录") == L"\\\\server\\share\\目录" &&
+          StripExtendedPathPrefix(L"\\\\?\\Volume{abc}\\") == L"\\\\?\\Volume{abc}\\",
+          "Shell boundary shares drive/UNC conversion and preserves real device namespaces");
     pulse::ops::OpStatus status;
     status.type = pulse::ops::OpType::RecycleDelete;
     status.phase = pulse::ops::OpPhase::Completed;

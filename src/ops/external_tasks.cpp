@@ -50,6 +50,7 @@ uint64_t OpsManager::CreateExternalTask(std::wstring title, std::wstring type_la
         task.status.active = true;
         task.status.can_pause = false;
         task.status.phase = OpPhase::Running;
+        task.status.started_tick = GetTickCount64();
         external_tasks_.emplace(id, std::move(task));
     }
     NotifyStatusChanged();
@@ -74,6 +75,8 @@ bool OpsManager::UpdateExternalTask(uint64_t id, const OpStatus& progress) {
             status.bytes_per_second = rate.speed();
             status.peak_bytes_per_second = (std::max)(status.peak_bytes_per_second, status.bytes_per_second);
             status.eta_seconds = rate.eta_seconds();
+            if (task->second.speed_graph.Due(now))
+                task->second.speed_graph.Sample(now, status.percent, status.bytes_per_second);
         } else if (status.external_linked != 0) {
             status.bytes_per_second = 0.0;
             status.eta_seconds = 0;
@@ -104,7 +107,11 @@ bool OpsManager::FinishExternalTask(uint64_t id, ExternalOutcome outcome, const 
             outcome == ExternalOutcome::Cancelled ? I::Canceled : I::OpFailed;
         final.summary = final.external_title + L" \u00b7 " + l10n::Get(label);
         final.phase = outcome == ExternalOutcome::Completed ? OpPhase::Completed : OpPhase::Failed;
-        if (outcome == ExternalOutcome::Completed) final.percent = 100.0f;
+        if (outcome == ExternalOutcome::Completed) {
+            final.percent = 100.0f;
+            task->second.speed_graph.Complete();
+        }
+        final.ended_tick = GetTickCount64();
         final.terminal_sequence = ++terminal_sequence_;
         final.completed_ops = status_.completed_ops;
         external_finals_.push_back(std::move(final));
@@ -112,6 +119,8 @@ bool OpsManager::FinishExternalTask(uint64_t id, ExternalOutcome outcome, const 
             external_action_handlers_.erase(external_finals_.front().task_id);
             external_finals_.pop_front();
         }
+        external_graphs_.emplace_back(id, std::move(task->second.speed_graph));
+        while (external_graphs_.size() > 16) external_graphs_.pop_front();
         external_tasks_.erase(task);
     }
     NotifyStatusChanged();

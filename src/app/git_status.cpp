@@ -101,7 +101,18 @@ GitMark StrongerGitMark(GitMark a, GitMark b) { return Rank(b) > Rank(a) ? b : a
 std::wstring GitLowerPath(std::wstring path) {
     std::replace(path.begin(), path.end(), L'/', L'\\');
     while (!path.empty() && path.back() == L'\\') path.pop_back();
-    if (!path.empty()) CharLowerBuffW(path.data(), static_cast<DWORD>(path.size()));
+    if (!path.empty()) {
+        const int src_len = static_cast<int>(path.size());
+        const int dst_len = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, path.data(), src_len,
+                                          nullptr, 0, nullptr, nullptr, 0);
+        if (dst_len > 0) {
+            std::wstring lower(static_cast<size_t>(dst_len), L'\0');
+            if (LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, path.data(), src_len,
+                              lower.data(), dst_len, nullptr, nullptr, 0) > 0) {
+                return lower;
+            }
+        }
+    }
     return path;
 }
 
@@ -177,6 +188,7 @@ bool ParseGitStatusV2(std::string_view out, GitRepoStatus& st) {
         if (untracked_dir) {
             st.untracked_dirs.insert(rel);
             st.dirs[rel] = StrongerGitMark(st.dirs[rel], GitMark::Added);
+            ++st.dir_counts[rel];
         } else {
             st.files[rel] = mark;
         }
@@ -187,6 +199,7 @@ bool ParseGitStatusV2(std::string_view out, GitRepoStatus& st) {
             rel.resize(slash);
             GitMark& dir = st.dirs[rel];
             dir = StrongerGitMark(dir, up);
+            ++st.dir_counts[rel];
         }
     }
     return header;
@@ -205,6 +218,19 @@ GitMark GitMarkFor(const GitRepoStatus& st, const std::wstring& rel, bool is_dir
         }
     }
     return GitMark::None;
+}
+
+int GitDirChangeCount(const GitRepoStatus& st, const std::wstring& rel) {
+    if (const auto it = st.dir_counts.find(rel); it != st.dir_counts.end()) return it->second;
+    if (!st.untracked_dirs.empty()) {
+        std::wstring up = rel;
+        if (st.untracked_dirs.contains(up)) return 1;
+        for (size_t slash = up.rfind(L'\\'); slash != std::wstring::npos; slash = up.rfind(L'\\')) {
+            up.resize(slash);
+            if (st.untracked_dirs.contains(up)) return 1;
+        }
+    }
+    return 0;
 }
 
 std::wstring GitBranchLabel(const GitRepoStatus& st) {
@@ -256,7 +282,11 @@ GitRunResult RunGit(const std::wstring& cwd, const std::wstring& args, DWORD tim
     char buffer[16384];
     auto drain = [&] {
         DWORD avail = 0;
-        while (PeekNamedPipe(read_end, nullptr, 0, nullptr, &avail, nullptr) && avail) {
+        // A noisy git/helper must yield to the process-exit and timeout checks.
+        // Keep all output, but bound the work performed by each polling pass.
+        constexpr unsigned kMaxReadsPerPass = 16;
+        for (unsigned reads = 0; reads < kMaxReadsPerPass &&
+             PeekNamedPipe(read_end, nullptr, 0, nullptr, &avail, nullptr) && avail; ++reads) {
             DWORD got = 0;
             if (!ReadFile(read_end, buffer, (std::min)(avail, static_cast<DWORD>(sizeof(buffer))), &got, nullptr) || !got)
                 return;

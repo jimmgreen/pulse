@@ -39,6 +39,13 @@ int wmain(int argc,wchar_t** argv) {
     auto accepted=Data();accepted.set("terminal_status","accepted");accepted.set("ui_shown_known",true);accepted.set("ui_shown",true);
     ApplyLocalExcerpt(h,Line(3,"dialog_show_terminal",accepted));Check(h.records.size()==2&&h.records[0].resolved_by_success,"synthetic UI proof success resolves same-instance fallback");
     auto cancelled=Data();cancelled.set("terminal_status","cancelled");ApplyLocalExcerpt(h,Line(4,"dialog_show_terminal",cancelled));Check(h.records.size()==2&&h.records[1].count==1,"cancel only advances cursor");
+    {
+        History forget=h;const auto first=forget.records[0];
+        Check(ForgetRecords(forget,false,first.app_image_id,first.reason)==1&&forget.records.size()==1&&forget.records[0].reason!=first.reason,"deleting one record keeps the others");
+        Check(ForgetRecords(forget,false,first.app_image_id+1,first.reason)==0&&forget.records.size()==1,"an unknown record deletes nothing");
+        ApplyLocalExcerpt(forget,fallback);Check(forget.records.size()==1,"a deleted record does not return from events already read");
+        Check(ForgetRecords(forget,true)==1&&forget.records.empty()&&!forget.cursors.empty(),"clearing removes every record but keeps the read cursors");
+    }
     History shown;ApplyLocalExcerpt(shown,fallback);
     auto shown_cancel=Data();shown_cancel.set("terminal_status","cancelled");shown_cancel.set("ui_shown_known",true);shown_cancel.set("ui_shown",true);
     ApplyLocalExcerpt(shown,Line(3,"dialog_show_terminal",shown_cancel));
@@ -46,12 +53,27 @@ int wmain(int argc,wchar_t** argv) {
     auto not_shown=shown_cancel;not_shown.set("ui_shown",false);History unseen;ApplyLocalExcerpt(unseen,Line(1,"dialog_show_terminal",not_shown));Check(unseen.records.empty(),"cancel before UI is not takeover success");
     auto shown_closed=shown_cancel;shown_closed.set("terminal_status","closed");History closed;ApplyLocalExcerpt(closed,Line(1,"dialog_show_terminal",shown_closed));Check(closed.records.size()==1&&static_cast<unsigned>(closed.records[0].reason)==13,"shown programmatic close is not file acceptance");
     auto shown_failed=shown_cancel;shown_failed.set("terminal_status","failed");History failed;ApplyLocalExcerpt(failed,Line(1,"dialog_show_terminal",shown_failed));Check(failed.records.size()==1&&failed.records[0].state==State::Failure,"failure after UI remains failure");
+    Check(failed.records.size()==1&&failed.records[0].reason==Reason::ShownThenFailed&&failed.records[0].action==Action::RetryDialog&&failed.records[0].certainty==Certainty::Observed,"failure after visible UI gets its own reason, not unknown");
+    {const auto sf_dir=root/L"shown_failed";fs::create_directories(sf_dir);History sf_loaded;Check(SaveHistory(sf_dir.wstring(),failed)==0&&LoadHistory(sf_dir.wstring(),sf_loaded)==0&&sf_loaded.records.size()==1&&sf_loaded.records[0].reason==Reason::ShownThenFailed,"shown-then-failed reason persists");}
+    auto hidden_failed=shown_failed;hidden_failed.set("ui_shown",false);History hidden;ApplyLocalExcerpt(hidden,Line(1,"dialog_show_terminal",hidden_failed));Check(hidden.records.size()==1&&hidden.records[0].reason==Reason::Unknown,"failure without visible UI stays unknown");
+    {
+        // The provider accepted the contract, then Prepare failed before any UI.
+        // The contract reason name is still attached; it must not turn this into
+        // an unsupported request or a generic native fallback.
+        auto prepare=Data();prepare.set("terminal_status","native");prepare.set("native_fallback",true);prepare.set("reason_name","UnsupportedOptions");prepare.set("fallback_reason","PROVIDER_PREPARE_FAILED_BEFORE_UI");prepare.set("hr","2147500037");
+        History p;ApplyLocalExcerpt(p,Line(1,"dialog_show_terminal",prepare));
+        Check(p.records.size()==1&&p.records[0].reason==Reason::ProviderFailure&&p.records[0].state==State::Fallback,"prepare failure before UI is a provider failure, not unsupported or plain fallback");
+        auto start=prepare;start.set("fallback_reason","PROVIDER_START_FAILED_BEFORE_UI");start.set("reason_name","None");
+        History q;ApplyLocalExcerpt(q,Line(1,"dialog_show_terminal",start));
+        Check(q.records.size()==1&&q.records[0].reason==Reason::ProviderFailure,"start failure before UI stays a provider failure");
+    }
     const auto shown_dir=root/L"shown-cancel";fs::create_directories(shown_dir);History shown_loaded;
     Check(SaveHistory(shown_dir.wstring(),shown)==0&&LoadHistory(shown_dir.wstring(),shown_loaded)==0&&shown_loaded.records.size()==2&&static_cast<unsigned>(shown_loaded.records[1].reason)==13,"shown cancellation persists with distinct reason");
     {
-        auto helper_line = [](uint64_t sequence, uint32_t pid, uint64_t image, DWORD error) {
-            auto data = Data(true, image); data.set("target_pid", pid);
-            data.set("target_creation_time_filetime", "134000000000000004"); data.set("error", error); data.set("ready", error ? 0 : 1);
+        auto helper_line = [](uint64_t sequence, uint32_t pid, uint64_t image, DWORD error, const char* stage = nullptr) {
+            auto data = Data(true, image); data.set("target_pid", static_cast<uint64_t>(pid));
+            data.set("target_creation_time_filetime", "134000000000000004"); data.set("error", static_cast<uint64_t>(error)); data.set("ready", error ? 0 : 1);
+            if (stage) data.set("attach_stage_name", stage);
             auto line = Line(sequence, "admin_auto_target_result", data); pulse::json::Value event;
             pulse::json::Parse(line, event); event.set("source", "dialog_admin_auto");
             return pulse::json::Serialize(event) + "\n";
@@ -59,19 +81,25 @@ int wmain(int argc,wchar_t** argv) {
         History admin;
         ApplyLocalExcerpt(admin, helper_line(1, 1234, 400, ERROR_ACCESS_DENIED));
         ApplyLocalExcerpt(admin, helper_line(2, 1235, 401, ERROR_TIMEOUT));
-        Check(admin.records.size() == 2 && admin.records[0].app_image_id == 400 && admin.records[1].app_image_id == 401,
-            "one helper attributes failures to distinct verified target identities");
-        Check(admin.records[0].reason == Reason::AdminAutoEntryFailed && admin.records[0].action == Action::CheckIntegrationSettings,
-            "admin loader failure has actionable service diagnosis");
+        Check(admin.records.empty(), "process startup failures do not create dialog history");
+        ApplyLocalExcerpt(admin, helper_line(4, 1235, 401, 0x80070005u, "runtime_status"));
+        ApplyLocalExcerpt(admin, helper_line(5, 1235, 401, ERROR_TIMEOUT, "runtime_status_unavailable"));
         ApplyLocalExcerpt(admin, helper_line(3, 1234, 400, 0));
-        Check(admin.records.size() == 2 && !admin.records[0].resolved_by_success && !admin.records[0].later_success,
-            "loader readiness never claims displayed-dialog success");
+        Check(admin.records.empty(), "loader status and readiness remain diagnostics only");
+        History old; ApplyLocalExcerpt(old, fallback);
+        auto obsolete = old.records.front();
+        obsolete.app_image_id = 400; obsolete.reason = Reason::AdminAutoEntryFailed;
+        obsolete.action = Action::CheckIntegrationSettings; obsolete.operation = Operation::Unknown;
+        old.records.push_back(obsolete);
         const auto dir = root / L"admin-auto"; fs::create_directories(dir); History loaded;
-        Check(SaveHistory(dir.wstring(), admin) == 0 && LoadHistory(dir.wstring(), loaded) == 0 && loaded.records.size() == 2,
-            "admin target identities and failure reasons survive persistence");
+        Check(SaveHistory(dir.wstring(), old) == 0 && LoadHistory(dir.wstring(), loaded) == 0 &&
+            loaded.records.size() == 1 && loaded.records.front().reason == old.records.front().reason &&
+            loaded.cursors.size() == old.cursors.size(),
+            "migration removes old loader failures but preserves real dialog and cursors");
+
     }
     History nativecancel;auto nd=d;nd.set("terminal_status","cancelled");nd.set("hr",static_cast<uint64_t>(0x800704c7u));ApplyLocalExcerpt(nativecancel,Line(1,"dialog_show_terminal",nd));Check(nativecancel.records.size()==1&&nativecancel.records[0].state==State::Fallback,"native fallback followed by user cancel remains fallback never failure");
-    History gate;auto gd=Data();gd.set("reason_name","REGISTERED_MODULE_MISMATCH");ApplyLocalExcerpt(gate,Line(1,"activation_gate",gd));Check(gate.records.size()==1&&gate.records[0].state==State::Unknown&&gate.records[0].operation==Operation::Unknown&&gate.records[0].action==Action::RestartApplication,"activation mismatch does not prove native fallback");
+    History gate;auto gd=Data();gd.set("reason_name","REGISTERED_MODULE_MISMATCH");ApplyLocalExcerpt(gate,Line(1,"activation_gate",gd));Check(gate.records.empty(),"activation alone is not a dialog request");
     History legacy;auto missing=Data(false);missing.set("terminal_status","failed");ApplyLocalExcerpt(legacy,Line(1,"dialog_show_terminal",missing));ApplyLocalExcerpt(legacy,Line(1,"dialog_show_terminal",missing));Check(legacy.records.empty()&&legacy.unattributed_events==1,"legacy identity remains anonymous and deduplicated");
     History reused;ApplyLocalExcerpt(reused,fallback);auto other=Data(true,999,134000000000000002ull);other.set("terminal_status","failed");ApplyLocalExcerpt(reused,Line(1,"dialog_show_terminal",other,"101"));Check(reused.records.size()==2&&reused.records[1].app_image_id==999,"PID reuse different creation and session never borrows identity");
     History newprocess;ApplyLocalExcerpt(newprocess,fallback);auto later=accepted;later.set("creation_time_filetime","134000000000000003");ApplyLocalExcerpt(newprocess,Line(1,"dialog_show_terminal",later,"102","2026-11-11T10:01:00.000Z"));Check(newprocess.records.size()==2&&!newprocess.records[0].resolved_by_success&&newprocess.records[0].later_success,"new process success is not global repair proof");

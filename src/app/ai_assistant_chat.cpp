@@ -7,12 +7,17 @@
 #include "ai_assistant_chat.h"
 
 #include "ai_assistant.h"
+#include "ai_tools_fs.h"
 #include "app_internal.h"
+#include "app_navigation.h"
 #include "../common/localization.h"
+#include "../common/utf8_file.h"
+#include "../ui/ai_list_overlay.h"
 #include "../ui/ui_motion.h"
 #include "../ui/ui_renderer.h"
 
 #include <shellapi.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <cstring>
@@ -1011,14 +1016,15 @@ void BeginTurn(AppState& s, AiChat& c) {
 }
 
 // Asks the user block `user` (its words, its folder) as the turn.
-void RunTurn(AppState& s, AiChat& c, size_t user, const std::wstring& note) {
+void RunTurn(AppState& s, AiChat& c, size_t user, const std::wstring& note,
+             std::vector<AiPendingAttach> attachments = {}) {
     const uint32_t uid = c.blocks[user].id;
     const std::wstring prompt = c.blocks[user].text;
     const bool with_context = !c.blocks[user].context.empty();
     c.last_prompt = prompt;
     c.turn_hist[uid] = AiAgentHistorySize(s);
     if (!DemoMode()) {
-        AiAgentStart(s, prompt, with_context, note);
+        AiAgentStart(s, prompt, with_context, note, std::move(attachments));
         Schedule(s);
         return;
     }
@@ -1096,7 +1102,8 @@ int AiChatUserOf(const AiChat& c, int block) {
     return -1;
 }
 
-void AiChatSubmit(AppState& s, const std::wstring& prompt, const std::wstring& context) {
+void AiChatSubmit(AppState& s, const std::wstring& prompt, const std::wstring& context,
+                  std::vector<AiPendingAttach> attachments) {
     AiChat& c = Chat(s);
     if (c.busy) return;
     if (DemoMode() && !c.noted) {
@@ -1107,9 +1114,23 @@ void AiChatSubmit(AppState& s, const std::wstring& prompt, const std::wstring& c
     }
     AiBlockView& u = c.Add(AiBlockKind::User, Now());
     u.text = prompt;
-    u.context = context;
+    std::wstring ctx = context;
+    if (!attachments.empty()) {
+        std::wstring names;
+        for (size_t i = 0; i < attachments.size(); ++i) {
+            if (i) names += L" \u00B7 ";
+            names += attachments[i].name;
+            if (i == 2 && attachments.size() > 3) {
+                names += L" +" + std::to_wstring(attachments.size() - 3);
+                break;
+            }
+        }
+        if (!ctx.empty()) ctx += L" \u00B7 ";
+        ctx += names;
+    }
+    u.context = std::move(ctx);
     BeginTurn(s, c);
-    RunTurn(s, c, c.blocks.size() - 1, {});
+    RunTurn(s, c, c.blocks.size() - 1, {}, std::move(attachments));
     Redraw(s);
 }
 
@@ -1340,6 +1361,66 @@ void AiChatActivate(AppState& s, ui::AiPanelPart part, int block) {
             if (t.kind == AiBlockKind::Text) text = Plain(t.text) + (text.empty() ? L"" : L"\n") + text;
         }
         CopyText(s.hwnd, text);
+        break;
+    }
+    case P::ActSave: {
+        // Save the turn's Markdown answer into the active folder (or Documents)
+        // as a non-overwriting .md file and flash it in the file list.
+        std::wstring md;
+        for (int i = block - 1; i >= 0; --i) {
+            const AiBlockView& t = c.blocks[static_cast<size_t>(i)];
+            if (t.kind == AiBlockKind::User) break;
+            if (t.kind == AiBlockKind::Text) md = t.text + (md.empty() ? L"" : L"\n\n") + md;
+        }
+        if (md.empty()) break;
+        std::wstring dir;
+        if (app::Tab* tab = ActiveTab(s); tab && !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path)) {
+            dir = tab->current_path;
+        } else {
+            PWSTR docs = nullptr;
+            if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &docs)) && docs) {
+                dir = docs;
+                CoTaskMemFree(docs);
+            }
+        }
+        if (dir.empty()) break;
+        // Derive a short safe filename stem from the first heading or non-empty line.
+        std::wstring stem;
+        {
+            size_t pos = 0;
+            while (pos < md.size() && (md[pos] == L'#' || md[pos] == L'*' || md[pos] == L'>' || md[pos] == L' ' || md[pos] == L'\n' || md[pos] == L'\r'))
+                ++pos;
+            while (pos < md.size() && md[pos] != L'\n' && md[pos] != L'\r' && stem.size() < 40) {
+                const wchar_t ch = md[pos++];
+                if (ch == L'\\' || ch == L'/' || ch == L':' || ch == L'*' || ch == L'?' || ch == L'"' ||
+                    ch == L'<' || ch == L'>' || ch == L'|')
+                    continue;
+                stem.push_back(ch);
+            }
+            while (!stem.empty() && (stem.back() == L' ' || stem.back() == L'.')) stem.pop_back();
+            if (stem.empty()) {
+                SYSTEMTIME st{};
+                GetLocalTime(&st);
+                wchar_t buf[48]{};
+                swprintf_s(buf, L"Pulse-AI-%04u%02u%02u-%02u%02u%02u", st.wYear, st.wMonth, st.wDay, st.wHour,
+                           st.wMinute, st.wSecond);
+                stem = buf;
+            }
+        }
+        std::wstring filename = stem + L".md";
+        std::wstring full = (dir.back() == L'\\' ? dir : dir + L"\\") + filename;
+        for (int n = 2; GetFileAttributesW(app::ai::Win32Path(full).c_str()) != INVALID_FILE_ATTRIBUTES && n < 1000; ++n) {
+            filename = stem + L" (" + std::to_wstring(n) + L").md";
+            full = (dir.back() == L'\\' ? dir : dir + L"\\") + filename;
+        }
+        if (WriteUtf8FileAtomic(app::ai::Win32Path(full), md)) {
+            RefreshPath(s, dir);
+            AiListFlashRows(dir, {filename});
+            s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Suggest,
+                                           Fill(Text(I::AiAsstSavedDoc), L"{name}", filename), {}, {}, {}, 2500);
+        } else {
+            s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Suggest, Text(I::AiAsstSaveDocFail), {}, {}, {}, 2500);
+        }
         break;
     }
     case P::CutRetry:

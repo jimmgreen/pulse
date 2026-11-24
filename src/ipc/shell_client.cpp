@@ -3,6 +3,7 @@
 #include "deadline_pipe.h"
 #include "../common/localization.h"
 #include "../common/module_location.h"
+#include <chrono>
 
 namespace pulse::ipc {
 #ifdef PULSE_SHELL_CLIENT_TEST
@@ -24,6 +25,11 @@ ShellClient::~ShellClient() {
 
 void ShellClient::Start(Callbacks cb) {
     if (running_.exchange(true)) return;
+    {
+        std::lock_guard lock(send_mutex_);
+        idle_suspended_ = false;
+    }
+    last_activity_tick_.store(GetTickCount64(), std::memory_order_relaxed);
     cb_ = std::move(cb);
     reader_ = std::thread([this] { ReaderThread(); });
 }
@@ -32,11 +38,13 @@ void ShellClient::Stop() {
     if (!running_.exchange(false)) return;
     {
         std::lock_guard lock(send_mutex_);
+        idle_suspended_ = false;
         if (connection_) {
             connection_->retired = true;
             CancelIoEx(connection_->pipe, nullptr);
         }
     }
+    wake_cv_.notify_all();
     if (reader_.joinable()) reader_.join();
     {
         std::lock_guard lock(send_mutex_);
@@ -45,6 +53,28 @@ void ShellClient::Stop() {
         std::lock_guard pending_lock(pending_mutex_);
         pending_.clear(); // never carry an old generation into a later Start
     }
+}
+
+bool ShellClient::SuspendIfIdle(ULONGLONG min_idle_ms) {
+    std::lock_guard lock(send_mutex_);
+    if (!running_.load() || idle_suspended_) return false;
+    {
+        std::lock_guard pending_lock(pending_mutex_);
+        if (!pending_.empty()) return false;
+    }
+    if (min_idle_ms > 0) {
+        const ULONGLONG last = last_activity_tick_.load(std::memory_order_relaxed);
+        const ULONGLONG now = GetTickCount64();
+        if (now >= last && now - last < min_idle_ms) return false;
+    }
+    idle_suspended_ = true;
+    last_spawn_try_ = 0;
+    if (connection_) {
+        connection_->suspended_by_idle = true;
+        RetireConnectionLocked(connection_);
+    }
+    KillChild();
+    return true;
 }
 
 void ShellClient::RetireConnectionLocked(const std::shared_ptr<Connection>& connection) {
@@ -59,6 +89,7 @@ void ShellClient::RetireConnectionLocked(const std::shared_ptr<Connection>& conn
 void ShellClient::KillChild() {
     if (child_started_) {
         TerminateProcess(child_.hProcess, 1);
+        WaitForSingleObject(child_.hProcess, 500);
         CloseHandle(child_.hProcess);
         CloseHandle(child_.hThread);
         child_ = {};
@@ -206,6 +237,7 @@ bool InterceptShellSubmitForReview(ShellClient&, uint32_t type, uint32_t id);
 uint32_t ShellClient::Submit(uint32_t type, const std::vector<uint8_t>& payload, const Accepted& accepted,
                              bool retry) {
     if (!running_.load()) return 0;
+    last_activity_tick_.store(GetTickCount64(), std::memory_order_relaxed);
     Pending p;
     p.type = type; p.payload = payload;
     p.retried = !retry;  // HandleDisconnect fails a request that already had its one retry
@@ -219,6 +251,8 @@ uint32_t ShellClient::Submit(uint32_t type, const std::vector<uint8_t>& payload,
     std::shared_ptr<Connection> failed_connection;
     {
         std::lock_guard lock(send_mutex_);
+        const bool woke = idle_suspended_;
+        idle_suspended_ = false;
         if (EnsureConnected()) {
             p.generation = connection_->generation;
             {
@@ -231,6 +265,7 @@ uint32_t ShellClient::Submit(uint32_t type, const std::vector<uint8_t>& payload,
                 RetireConnectionLocked(failed_connection);
             }
         } else error = UnreachableMessage();
+        if (woke) wake_cv_.notify_all();
     }
     if (failed_connection) HandleDisconnect(failed_connection);
     else if (!sent) FireDone(p.id, HRESULT_FROM_WIN32(ERROR_PIPE_NOT_CONNECTED), false, error);
@@ -353,6 +388,7 @@ uint32_t ShellClient::InvokeContextMenu(uint32_t session_id, uint32_t item_id,
 // Fire-and-forget like Cancel: no pending entry, no retry-on-restart (a fresh
 // host has no such session anyway).
 void ShellClient::CloseContextMenu(uint32_t session_id) {
+    last_activity_tick_.store(GetTickCount64(), std::memory_order_relaxed);
     PayloadWriter w;
     w.PutU32(session_id);
     std::lock_guard<std::mutex> lock(send_mutex_);
@@ -408,11 +444,15 @@ void ShellClient::ReaderThread() {
     while (running_.load()) {
         std::shared_ptr<Connection> connection;
         {
-            std::lock_guard<std::mutex> lock(send_mutex_);
+            std::unique_lock<std::mutex> lock(send_mutex_);
+            wake_cv_.wait(lock, [this] { return !running_.load() || !idle_suspended_; });
+            if (!running_.load()) break;
             if (EnsureConnected()) connection = connection_;
         }
         if (!connection) {
-            for (int i = 0; i < 30 && running_.load(); ++i) Sleep(50);
+            std::unique_lock<std::mutex> lock(send_mutex_);
+            wake_cv_.wait_for(lock, std::chrono::milliseconds(1500),
+                              [this] { return !running_.load() || idle_suspended_; });
             continue;
         }
 
@@ -423,6 +463,7 @@ void ShellClient::ReaderThread() {
             std::vector<uint8_t> payload(h.payload_size);
             if (h.payload_size && !ReadFull(connection, payload.data(), h.payload_size)) break;
 
+            last_activity_tick_.store(GetTickCount64(), std::memory_order_relaxed);
             PayloadReader r(payload.data(), payload.size());
             if (h.type == RSP_PROGRESS) {
                 float pct = 0.0f;
@@ -504,6 +545,15 @@ void ShellClient::ReaderThread() {
         }
 
         if (!running_.load()) break;
+        bool was_idle_suspended = false;
+        {
+            std::lock_guard<std::mutex> lock(send_mutex_);
+            was_idle_suspended = connection->suspended_by_idle || idle_suspended_;
+            if (was_idle_suspended && connection_ == connection) {
+                RetireConnectionLocked(connection_);
+            }
+        }
+        if (was_idle_suspended) continue;
 #ifdef PULSE_SHELL_CLIENT_TEST
         if (shell_test_before_disconnect) shell_test_before_disconnect();
 #endif

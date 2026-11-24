@@ -10,19 +10,24 @@ inline bool IsReleaseButton(const ui::HitTestResult& hit) {
     switch (hit.region) {
     case H::SettingsToggle:
         return hit.index < ui::kSettingsMenuFixedHit;
+    case H::SettingsUiLayout:
+        // 标题栏按钮 rows (100 + row*4 + 1) arm a drag on press; the rest click on release.
+        return hit.index < 100 || hit.index >= 100 + 4 * 12 || (hit.index - 100) % 4 != 1;
     case H::SettingsSysCtx:
         return hit.index < ui::kSysCtxPreviewBase || hit.index >= ui::kSysCtxSlowSkipBase;
     case H::SettingsAssistant:
         return hit.index < ui::kAsstThinkBase || hit.index >= ui::kAsstOtherBase;
     case H::SettingsPackAction:
-        return hit.index < static_cast<int>(ui::PackAction::SzLevelBase) ||
-            hit.index >= static_cast<int>(ui::PackAction::SzLevelBase) + 6;
+        return true;
     case H::Close:
     case H::Minimize:
     case H::Maximize:
     case H::TabClose:
     case H::TabNew:
     case H::ThemeToggle:
+    case H::TitleLayoutButton:
+    case H::TitleAiButton:
+    case H::TitleTrayButton:
     case H::WindowManageButton:
     case H::SettingsButton:
     case H::NavBack:
@@ -137,8 +142,17 @@ inline bool IsReleaseButton(const ui::HitTestResult& hit) {
     case H::SettingsFolderSort:
     case H::SettingsStartupOpen:
     case H::SettingsNotifyIcon:
+    case H::SettingsTabActiveStyle:
     case H::SettingsTabLayout:
     case H::SettingsTabRows:
+    case H::SettingsUiSidebar:
+    case H::SettingsUiCommands:
+    case H::SettingsUiAddress:
+    case H::SettingsUiDensity:
+    case H::SettingsUiView:
+    case H::SettingsUiLite:
+    case H::SettingsUiTray:
+    case H::SettingsUiLabels:
     case H::SettingsNewTabOpen:
     case H::SettingsOpenPulseIcon:
     case H::SettingsNewWindowShows:
@@ -151,6 +165,8 @@ inline bool IsReleaseButton(const ui::HitTestResult& hit) {
     case H::SettingsTextRender:
     case H::SettingsUiFontSize:
     case H::SettingsTrayIcon:
+    case H::SettingsShelfSensitivity:
+    case H::SettingsShelfPosition:
     case H::SettingsDoubleCtrlGap:
     case H::SettingsLanguage:
     case H::SettingsIndexVolume:

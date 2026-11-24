@@ -1,16 +1,20 @@
 #include "extension_store_ui.h"
+#include "extension_store_item_state.h"
 #include "extension_store_permissions.h"
 #include "extension_store_review.h"
 #include "extension_store_management_ui.h"
 #include "settings_transfer_ui.h"
 #include "app_state.h"
 #include "extensions/runtime.h"
+#include "extensions/icon_registry.h"
+#include "extensions/native/command_contributions.h"
 #include "extensions/store/catalog_service.h"
 #include "extensions/store/install_service.h"
 #include "extensions/native/settings_pages_host.h"
-#include "extension_store_seven_zip.h"
+#include "extension_store_quick.h"
 #include "extension_store_actions.h"
 #include "extension_store_edits.h"
+#include "extension_developer_mode.h"
 #include "app_navigation.h"
 #include "../ui/settings_page_ids.h"
 #include "../ui/ui_view_model.h"
@@ -26,6 +30,8 @@
 
 namespace pulse {
 namespace {
+// Catalog icon/category fallback for the official archive extension (not a UI surface).
+constexpr char kSevenZipExtensionId[] = "pulse.7zip";
 using Id = l10n::StringId;
 namespace store = extensions::store;
 using Phase = store::InstallServicePhase;
@@ -35,13 +41,31 @@ std::wstring Localized(const store::LocalizedText& value) {
     const auto& selected = language == l10n::Language::EnUS ? value.en : language == l10n::Language::ZhTW ? value.tw : value.zh;
     return json::Wide(selected.empty() ? value.en : selected);
 }
+std::wstring LocalizedManifest(const extensions::ManifestLocalizedText& value) {
+    const auto language = l10n::effective_language();
+    if (language == l10n::Language::EnUS) return json::Wide(value.en.empty() ? value.zh : value.en);
+    if (language == l10n::Language::ZhTW) {
+        if (!value.tw.empty()) return json::Wide(value.tw);
+        if (!value.zh.empty()) return l10n::HantText(json::Wide(value.zh));
+        return json::Wide(value.en);
+    }
+    return json::Wide(value.zh.empty() ? value.en : value.zh);
+}
 bool Busy(Phase phase) { return phase == Phase::Preparing || phase == Phase::Committing; }
-extensions::UiNode Label(const char* id, const std::wstring& text) {
-    extensions::UiNode node; node.type = extensions::UiNodeType::Text; node.id = id; node.text = json::Utf8(text); return node;
 }
-extensions::UiNode Check(const char* key, Id label) {
-    extensions::UiNode node; node.type = extensions::UiNodeType::Checkbox; node.id = key; node.state = key; node.text = json::Utf8(Text(label)); return node;
-}
+// Review dialog: a built-in icon name for each resource permission row.
+static const char* ResourceGlyph(std::string_view resource) {
+    if (resource.starts_with("context.")) return "eye";
+    if (resource == "files.renameCurrentDirectory") return "rename";
+    if (resource == "files.deleteCurrentSelection") return "trash";
+    if (resource == "files.open") return "open";
+    if (resource == "files.watchDirectory") return "refresh";
+    if (resource.starts_with("files.transfer")) return "copy";
+    if (resource.starts_with("files.")) return "folder";
+    if (resource == "operations.own") return "lines";
+    if (resource == "settings.own") return "gear";
+    if (resource == "audit.own") return "list-view";
+    return "shield";
 }
 // Catalog icon names use the store's vector icon contract.
 static ui::StoreIcon IconGlyph(const std::string& name) {
@@ -52,6 +76,9 @@ static ui::StoreIcon IconGlyph(const std::string& name) {
         {"ocr", Icon::TextSearch}, {"git", Icon::Copy}, {"rename", Icon::Rename},
         {"duplicate", Icon::Duplicate}, {"cloud", Icon::Download}, {"puzzle", Icon::Puzzle}};
     for (const auto& [key, icon] : icons) if (name == key) return icon;
+    if (const auto builtin = extensions::icons::ResolveBuiltinIconName(name)) {
+        return ui::StoreIconFromId(*builtin);
+    }
     return Icon::Box;
 }
 static uint32_t IconColor(const std::string& hex) {
@@ -95,6 +122,8 @@ public:
     std::unique_ptr<store::InstallService> installer;
     std::unique_ptr<ExtensionManagementUi> management;
     uint64_t refreshed_installation = 0;
+    uint64_t logged_install_generation = 0;
+    Phase logged_install_phase = Phase::Idle;
     std::filesystem::path root, cache;
     ui::FormDialog dialog;
     HWND prompt_owner = nullptr;
@@ -120,70 +149,117 @@ public:
             else installer->ConfirmInstall(snapshot.generation, store::InstallConsent{true, true, true, true});
             return;
         }
+        // Review card: heading, the extension as a tile with its trust badge, warnings as info
+        // bars, what it will be able to do as a card of rows, and each consent as a toggle card.
+        const auto& decl = snapshot.package->Declaration();
+        const std::string& pub_id = snapshot.package->PublisherId();
+        const auto* review = trust ? nullptr : snapshot.install_review.get();
+        const bool is_update = review && !review->active_revision.empty();
         ui::FormDialogSpec spec;
         spec.title = Text(trust ? Id::ExtensionStoreTrustTitle : Id::ExtensionStoreInstallTitle);
-        spec.message = Text(trust ? Id::ExtensionStoreTrustMessage : Id::ExtensionStoreInstallMessage);
-        if (!trust && consent_missing) spec.message += L"\n" + Text(Id::ExtensionStoreConsentRequired);
+        spec.heading = Text(trust ? Id::StoreReviewTrustHeading : is_update ? Id::StoreReviewUpdateHeading : Id::StoreReviewInstallHeading);
+        spec.icon = trust ? ui::FormDialogIcon::Key : pub_id.empty() ? ui::FormDialogIcon::Warning : ui::FormDialogIcon::Lock;
         spec.buttons = {{Text(trust ? Id::ExtensionStoreTrustAccept : Id::ExtensionStoreInstallAccept), ui::FormDialogButtonKind::Primary}, {Text(Id::Cancel)}};
-        spec.default_button = -1; spec.cancel_button = 1; spec.width_dip = 620;
-        extensions::UiTree tree; tree.root.id = "review"; tree.root.gap = 8;
-        const auto& decl = snapshot.package->Declaration();
-        tree.root.children.push_back(Label("package", json::Wide(decl.name)));
-        tree.root.children.push_back(Label("source", Text(snapshot.is_local_package ? Id::StoreSourceLocalFile : Id::StoreSourceCatalog)));
-        const std::string& pub_id = snapshot.package->PublisherId();
-        std::wstring publisher_status;
+        spec.default_button = -1; spec.cancel_button = 1; spec.width_dip = 580;
+        if (!trust) { spec.footnote = Text(Id::StoreReviewManageNote); spec.footnote_icon = ui::FormDialogIcon::Info; }
+
+        // The subject card: tile from the catalog entry when there is one.
+        spec.subject_kind = ui::FormDialogSubject::Extension;
+        spec.subject = json::Wide(decl.name);
+        ui::StoreIcon tile = ui::StoreIcon::Puzzle;
+        uint32_t tile_color = 0x5B6B8C;
+        std::wstring pub_name;
+        if (const auto cat = catalog.GetSnapshot().result) {
+            for (const auto& ext : cat->catalog.extensions) {
+                if (ext.id != decl.id) continue;
+                tile = IconGlyph(ext.icon_glyph); tile_color = IconColor(ext.icon_color);
+                break;
+            }
+            for (const auto& p : cat->catalog.publishers) {
+                if (p.id == pub_id) { pub_name = json::Wide(p.name); break; }
+            }
+        }
+        if (decl.id == kSevenZipExtensionId) { tile = ui::StoreIcon::Box; tile_color = 0x527D70; }
+        else if (decl.id == "pulse.desktop") { tile = ui::StoreIcon::Pc; tile_color = 0x3F6AD8; }
+        spec.subject_tile_icon = static_cast<int>(tile);
+        spec.subject_tile_color = tile_color;
+        std::wstring detail_line;
+        if (!snapshot.version.empty()) detail_line = ReplaceStoreToken(Text(Id::StoreReviewVersion), L"{v}", json::Wide(snapshot.version));
+        const auto add_detail = [&](const std::wstring& part) {
+            if (part.empty()) return;
+            if (!detail_line.empty()) detail_line += L" \u00B7 ";
+            detail_line += part;
+        };
+        add_detail(Text(snapshot.is_local_package ? Id::StoreSourceLocalFile : Id::StoreSourceCatalog));
         if (pub_id.empty()) {
-            publisher_status = Text(Id::StorePublisherUnsigned);
+            spec.subject_badge = Text(Id::StoreReviewBadgeUnsigned); spec.subject_badge_kind = 3;
         } else if (pub_id == store::kOfficialCatalogPublisher) {
-            publisher_status = Text(Id::StoreOfficial);
+            spec.subject_badge = Text(Id::StoreOfficial); spec.subject_badge_kind = 2;
         } else {
-            std::wstring pub_name;
-            if (const auto cat = catalog.GetSnapshot().result) {
-                for (const auto& p : cat->catalog.publishers) {
-                    if (p.id == pub_id) { pub_name = json::Wide(p.name); break; }
-                }
-            }
-            const std::wstring key_label = ReplaceStoreToken(
-                Text(trust ? Id::StorePublisherNewKey : Id::StorePublisherVerified),
-                L"{id}", AbbreviateHexDigest(pub_id));
-            publisher_status = pub_name.empty() ? key_label : (pub_name + L" · " + key_label);
+            add_detail(pub_name);
+            spec.subject_badge = Text(trust ? Id::StoreReviewBadgeNewKey : Id::StoreReviewBadgeVerified);
+            spec.subject_badge_kind = trust ? 1 : 2;
         }
-        tree.root.children.push_back(Label("publisher", Text(Id::Publisher) + L": " + publisher_status));
-        if (!trust && pub_id.empty()) {
-            tree.root.children.push_back(Label("unsigned_warning", Text(Id::StoreUnsignedLocalWarning)));
-        }
-        if (!trust && snapshot.install_review && snapshot.install_review->publisher_rotated) {
-            std::wstring rotated = Text(Id::ExtensionStorePublisherRotated);
-            const auto prev_short = AbbreviateHexDigest(snapshot.install_review->previous_publisher_id);
-            rotated = ReplaceStoreToken(std::move(rotated), L"{old}", prev_short);
-            tree.root.children.push_back(Label("publisher_rotation", rotated));
-        }
-        extensions::UiNode scroll; scroll.type = extensions::UiNodeType::ScrollView; scroll.id = "details"; scroll.min_height = 96; scroll.max_height = 144;
-        std::wstring details = ReplaceStoreToken(Text(Id::StoreExtensionIdLabel), L"{id}", json::Wide(decl.id));
+        spec.subject_detail = detail_line;
+
+        extensions::UiTree tree; tree.root.id = "review"; tree.root.gap = 10;
+        const auto info = [&](const char* id, const char* kind, std::wstring title, std::wstring message) {
+            extensions::UiNode node; node.type = extensions::UiNodeType::InfoBar; node.id = id; node.info_kind = kind;
+            node.text = json::Utf8(title); node.message = json::Utf8(message);
+            tree.root.children.push_back(std::move(node));
+        };
+        if (!trust && consent_missing) info("consent_missing", "error", Text(Id::ExtensionStoreConsentRequired), {});
         if (trust) {
-            details += L"\n" + Text(Id::StoreTrustKeyHint);
-        } else if (snapshot.install_review) {
-            if (!snapshot.install_review->added_resources.empty()) {
-                details += L"\n" + Text(Id::StorePermissionsAddedHeading);
-                for (const auto& permission : snapshot.install_review->added_resources) {
-                    details += L"\n• " + LocalizedResourcePermission(permission);
-                }
-            } else {
-                details += L"\n" + Text(snapshot.install_review->active_revision.empty()
-                    ? Id::StorePermissionsNone
-                    : Id::StorePermissionsUnchanged);
-            }
+            const std::wstring key = ReplaceStoreToken(Text(Id::StorePublisherNewKey), L"{pin}", AbbreviateHexDigest(pub_id));
+            info("trust", "informational", Text(Id::ExtensionStoreTrustMessage), key + L"\n" + Text(Id::StoreTrustKeyHint));
         }
-        scroll.children.push_back(Label("permissions", details)); tree.root.children.push_back(std::move(scroll));
+        if (!trust && pub_id.empty() && !(review && review->replaces_signed)) info("unsigned_warning", "warning", Text(Id::StoreReviewUnsignedTitle), Text(Id::StoreReviewUnsignedBody));
+        if (review && review->replaces_signed) info("replaces_signed", "warning", Text(Id::StoreReviewReplacesTitle), Text(Id::StoreUnsignedReplacesSigned));
+        if (review && review->publisher_rotated) {
+            info("publisher_rotation", "warning", Text(Id::StoreReviewRotatedTitle),
+                 ReplaceStoreToken(Text(Id::ExtensionStorePublisherRotated), L"{old}", AbbreviateHexDigest(review->previous_publisher_id)));
+        }
+
         bool native = false, resources = false, is_new = false;
-        if (!trust && snapshot.install_review) {
-            native = snapshot.install_review->native_code; resources = !snapshot.install_review->added_resources.empty(); is_new = snapshot.install_review->active_revision.empty();
-            if (native) tree.root.children.push_back(Check("native", Id::ExtensionStoreNativeConsent));
-            if (resources) tree.root.children.push_back(Check("resources", Id::ExtensionStoreResourcesConsent));
-            if (is_new) tree.root.children.push_back(Check("enable", Id::ExtensionStoreEnableConsent));
+        if (review) {
+            native = review->native_code; resources = !review->added_resources.empty(); is_new = !is_update;
+            // What it can do: one row per capability, in a card.
+            extensions::UiNode card; card.type = extensions::UiNodeType::Group; card.id = "capabilities"; card.bordered = true; card.gap = 4;
+            card.text = json::Utf8(Text(is_update ? Id::StoreReviewNewPermissions : Id::StoreReviewCanDo));
+            const auto row = [&](const char* glyph, const std::wstring& text, const std::wstring& detail) {
+                extensions::UiNode r; r.type = extensions::UiNodeType::SettingsRow; r.glyph = std::string("icon:") + glyph; r.bordered = false;
+                r.text = json::Utf8(text); r.detail = json::Utf8(detail);
+                card.children.push_back(std::move(r));
+            };
+            if (native) row("cube", Text(Id::StoreReviewNativeRow), Text(Id::StoreReviewNativeDetail));
+            for (const auto& permission : review->added_resources) {
+                row(ResourceGlyph(permission), LocalizedResourcePermission(permission), {});
+            }
+            if (!native && !resources) row("check", Text(is_update ? Id::StorePermissionsUnchanged : Id::StorePermissionsNone), {});
+            tree.root.children.push_back(std::move(card));
+
+            if (native || resources || is_new) {
+                extensions::UiNode heading; heading.type = extensions::UiNodeType::Text; heading.text_role = "section";
+                heading.text = json::Utf8(Text(Id::StoreReviewConfirm));
+                tree.root.children.push_back(std::move(heading));
+            }
+            const auto consent = [&](const char* key, Id label, const std::wstring& detail) {
+                extensions::UiNode node; node.type = extensions::UiNodeType::OptionCard; node.option_kind = "toggle";
+                node.id = key; node.state = key; node.text = json::Utf8(Text(label)); node.detail = json::Utf8(detail);
+                tree.root.children.push_back(std::move(node));
+            };
+            if (native) consent("native", Id::ExtensionStoreNativeConsent, Text(Id::StoreReviewNativeConsentDetail));
+            if (resources) consent("resources", Id::ExtensionStoreResourcesConsent, Text(Id::StoreReviewResourcesConsentDetail));
+            if (is_new) consent("enable", Id::ExtensionStoreEnableConsent, Text(Id::StoreReviewEnableConsentDetail));
             tree.state = draft_generation == snapshot.generation ? draft_states : std::vector<extensions::UiStateEntry>{{"native", "false"}, {"resources", "false"}, {"enable", "false"}};
         }
-        spec.form = std::move(tree); spec.form_height_dip = trust ? 232.0f : 376.0f;
+        extensions::UiNode id_line; id_line.type = extensions::UiNodeType::Text; id_line.text_role = "caption"; id_line.id = "ext_id";
+        std::wstring id_text = ReplaceStoreToken(Text(Id::StoreExtensionIdLabel), L"{id}", json::Wide(decl.id));
+        if (!trust && !pub_id.empty() && pub_id != store::kOfficialCatalogPublisher)
+            id_text += L"\n" + ReplaceStoreToken(Text(Id::StorePublisherVerified), L"{pin}", AbbreviateHexDigest(pub_id));
+        id_line.text = json::Utf8(id_text);
+        tree.root.children.push_back(std::move(id_line));
+        spec.form = std::move(tree); spec.form_height_dip = trust ? 260.0f : 600.0f;
         const auto weak = weak_from_this(); const auto generation = snapshot.generation;
         spec.on_closed = [weak, generation, trust](int button, std::vector<extensions::UiStateEntry> states) {
             if (const auto self = weak.lock()) {
@@ -216,6 +292,57 @@ int SettingsPackage(const std::string& id) {
             return static_cast<int>(p);
     return -1;
 }
+const extensions::Manifest* PackageManifestById(const std::string& id) {
+    for (size_t p = 0; p < extensions::PackageCount(); ++p)
+        if (const auto* manifest = extensions::PackageManifest(p); manifest && manifest->id == id)
+            return manifest;
+    return nullptr;
+}
+void EnrichItemFromManifest(AppState& s, ui::ExtensionStoreItem& item) {
+    if (item.settings_package >= 0) {
+        item.has_menu_tab = !extensions::native::KnownPackageCommands(s, static_cast<size_t>(item.settings_package)).empty();
+    }
+    const auto* manifest = PackageManifestById(item.id);
+    if (!manifest) return;
+    if (item.name.empty() && !manifest->name.empty()) item.name = json::Wide(manifest->name);
+    if (item.permissions.empty() && !manifest->resources.empty()) {
+        for (const auto& perm : manifest->resources) {
+            item.permissions.push_back(app::LocalizedResourcePermission(perm));
+        }
+    }
+    if (!manifest->showcase) return;
+    const auto& sc = *manifest->showcase;
+    if (item.version.empty() && !sc.version.empty()) item.version = json::Wide(sc.version);
+    if (item.summary.empty()) item.summary = LocalizedManifest(sc.summary);
+    if (item.description.empty()) item.description = LocalizedManifest(sc.description);
+    if (item.category.empty() && !sc.category.empty()) item.category = json::Wide(sc.category);
+    if (item.publisher.empty() && !sc.publisher.empty()) item.publisher = json::Wide(sc.publisher);
+    if (item.engine.empty()) item.engine = LocalizedManifest(sc.engine);
+    if (item.license.empty() && !sc.license.empty()) item.license = json::Wide(sc.license);
+    if (item.homepage.empty() && !sc.homepage.empty()) item.homepage = json::Wide(sc.homepage);
+    if (item.source.empty() && !sc.source.empty()) item.source = json::Wide(sc.source);
+    if (item.tags.empty()) {
+        for (const auto& t : sc.tags) item.tags.push_back(json::Wide(t));
+    }
+    if (item.highlights.empty()) {
+        for (const auto& h : sc.highlights) {
+            if (auto text = LocalizedManifest(h); !text.empty()) item.highlights.push_back(std::move(text));
+        }
+    }
+    const bool first_party_product_tile =
+        sc.icon_name.empty() && (item.id == kSevenZipExtensionId || item.id == "pulse.desktop");
+    if (sc.has_icon_color && !first_party_product_tile) item.icon_color = sc.icon_color;
+    if (!sc.icon_name.empty()) {
+        if (const auto custom = extensions::icons::GlobalRegistry().ResolveName(manifest->id, sc.icon_name);
+            custom && ui::IsCustomExtensionIcon(*custom)) {
+            item.custom_icon = *custom;
+        }
+    } else if (sc.builtin_icon != 0 && item.custom_icon == 0 && !first_party_product_tile) {
+        item.icon = sc.builtin_icon == PULSE_ICON_ARCHIVE
+            ? ui::StoreIcon::Box
+            : ui::StoreIconFromId(sc.builtin_icon);
+    }
+}
 std::shared_ptr<app::ExtensionStoreController> Controller(AppState& s) {
     if (!s.core.extension_store) s.core.extension_store = std::make_shared<app::ExtensionStoreController>(s.appPrefs.persist);
     return s.core.extension_store;
@@ -241,42 +368,77 @@ void FillExtensionStoreView(AppState& s, ui::WindowViewModel& vm) {
     store::InstallServiceSnapshot installation;
     if (controller->installer) installation = controller->installer->GetSnapshot();
     view.pending_restart = installation.pending_restart;
-    view.busy = catalog.state == store::CatalogServiceState::Loading || Busy(installation.phase) || installation.phase == Phase::AwaitingInstall || installation.phase == Phase::AwaitingPublisherTrust;
+    const bool installing = Busy(installation.phase) || installation.phase == Phase::AwaitingInstall ||
+        installation.phase == Phase::AwaitingPublisherTrust;
+    view.busy = catalog.state == store::CatalogServiceState::Loading || installing;
+    view.installed_busy = installing;
     if (controller->management) {
-        controller->management->Fill(s, view, Busy(installation.phase) || installation.phase == Phase::AwaitingInstall || installation.phase == Phase::AwaitingPublisherTrust);
+        controller->management->Fill(s, view, installing);
         view.busy = view.busy || controller->management->Active();
     } else view.installed_error = Text(Id::ExtensionStoreUnavailable);
-    if (installation.phase == Phase::Failed) view.notice = Text(Id::StoreInstallFailed) + L"\n" + app::LocalizedStoreInstallError(installation.error);
-    else if (installation.phase == Phase::Incompatible) view.notice = Text(Id::ExtensionStoreIncompatible);
-    else if (Busy(installation.phase)) view.notice = Text(Id::ExtensionStorePreparing);
-    else if (installation.phase == Phase::Installed) view.notice = Text(Id::ExtensionStoreInstalledRestart);
-    else if (catalog.result && catalog.result->expired) view.notice = Text(Id::StoreCatalogExpired);
-    else if (catalog.result && catalog.result->stale_offline) view.notice = Text(Id::StoreCatalogStaleOffline);
-    // Match immutable manifest identity, never assume the latest release is installed.
-    if (catalog.result) for (auto& installed : view.installed) {
-        for (const auto& extension : catalog.result->catalog.extensions) {
+    // Developer folder rows follow the registry entries (their indices stay action indices).
+    app::FillDeveloperRows(s, controller->root, view);
+    using Notice = ui::ExtensionStoreView::NoticeKind;
+    if (installation.phase == Phase::Failed) {
+        view.notice = Text(Id::StoreInstallFailed) + L"\n" + app::LocalizedStoreInstallError(installation.error);
+        view.notice_kind = Notice::Error;
+    } else if (installation.phase == Phase::Incompatible) {
+        view.notice = Text(Id::ExtensionStoreIncompatible);
+        view.notice_kind = Notice::Warning;
+    } else if (Busy(installation.phase)) {
+        view.notice = Text(Id::ExtensionStorePreparing);
+    } else if (installation.phase == Phase::Installed) {
+        view.install_completed = true;
+        if (!view.pending_restart) {
+            view.notice = Text(Id::Installed);
+            view.notice_kind = Notice::Success;
+        }
+    } else if (catalog.result && (catalog.result->expired || catalog.result->stale_offline)) {
+        view.notice = Text(catalog.result->expired ? Id::StoreCatalogExpired : Id::StoreCatalogStaleOffline);
+        view.notice_kind = Notice::Warning;
+    }
+    // Match immutable manifest identity, never assume the latest release is installed. A package the
+    // catalog does not list (installed from a file) has no version of its own: it says so, with its revision.
+    const auto local_build = [](const std::string& revision) {
+        return Text(Id::StoreLocalBuild) + L" · " + json::Wide(revision.substr(0, 7));
+    };
+    for (auto& installed : view.installed) {
+        bool listed = false;
+        if (catalog.result) for (const auto& extension : catalog.result->catalog.extensions) {
             if (installed.id != json::Wide(extension.id)) continue;
             for (const auto& release : extension.versions)
-                if (installed.revision == release.manifest_sha256) { installed.version = json::Wide(release.version); break; }
+                if (installed.revision == release.manifest_sha256) { installed.version = json::Wide(release.version); listed = true; break; }
             break;
         }
+        if (!listed && !installed.revision.empty() && installed.version.empty()) installed.version = local_build(installed.revision);
     }
     // One view item per catalog extension: the item index is the action index (StoreItemBase + i).
     if (catalog.result) for (const auto& extension : catalog.result->catalog.extensions) {
         ui::ExtensionStoreItem item;
         item.name = Localized(extension.name); item.summary = Localized(extension.summary);
+        item.description = Localized(extension.description);
         item.id = extension.id; item.category = json::Wide(extension.category);
-        item.license = json::Wide(extension.license); item.source = json::Wide(extension.source.empty() ? extension.homepage : extension.source);
+        item.license = json::Wide(extension.license);
+        item.homepage = json::Wide(extension.homepage);
+        item.source = json::Wide(extension.source.empty() ? extension.homepage : extension.source);
+        for (const auto& t : extension.tags) item.tags.push_back(json::Wide(t));
         for (const auto& release : extension.versions) {
             item.history.push_back(json::Wide(release.version) + (release.released.empty() ? std::wstring{} : L" · " + json::Wide(release.released)));
             item.releases.push_back({json::Wide(release.version),json::Wide(release.released),Localized(release.notes),json::Wide(release.min_pulse)});
         }
-        if (!extension.versions.empty()) item.released = json::Wide(extension.versions.front().released);
+        if (!extension.versions.empty()) {
+            item.released = json::Wide(extension.versions.front().released);
+            for (const auto& perm : extension.versions.front().resources) {
+                item.permissions.push_back(app::LocalizedResourcePermission(perm));
+            }
+        }
         item.icon = IconGlyph(extension.icon_glyph); item.icon_color = IconColor(extension.icon_color);
         if (extension.id == kSevenZipExtensionId) { item.icon = ui::StoreIcon::Box; item.icon_color = 0x527D70; }
+        // 桌面整理: a desktop (monitor), not the generic extension piece the catalog entry carries.
+        if (extension.id == "pulse.desktop") { item.icon = ui::StoreIcon::Pc; item.icon_color = 0x3F6AD8; }
         for (const auto& publisher : catalog.result->catalog.publishers)
             if (publisher.id == extension.publisher) { item.publisher = json::Wide(publisher.name); item.official = publisher.official; break; }
-        if (extension.versions.empty()) { view.items.push_back(std::move(item)); continue; }
+        if (extension.versions.empty()) { EnrichItemFromManifest(s, item); view.items.push_back(std::move(item)); continue; }
         const auto& release = extension.versions.front();
         item.version = json::Wide(release.version);
         item.size = SizeText(release.package.size);
@@ -285,46 +447,69 @@ void FillExtensionStoreView(AppState& s, ui::WindowViewModel& vm) {
         item.action_enabled = controller->installer && !view.busy && compatible && view.state==State::Online;
         if (!compatible) item.status = Text(Id::ExtensionStoreIncompatible);
         else if (!controller->installer) item.status = Text(Id::ExtensionStoreUnavailable);
-        for (const auto& installed : view.installed) {
+        for (size_t idx = 0; idx < view.installed.size(); ++idx) {
+            const auto& installed = view.installed[idx];
             if (installed.id != json::Wide(extension.id)) continue;
+            // What is installed names itself (a package can be renamed before the catalog is republished).
+            if (!installed.name.empty()) item.name = installed.name;
             item.status = Text(Id::Installed) + L" · " + installed.status;
             item.enabled = installed.enabled;
+            item.installed = true;
+            item.installed_index = static_cast<int>(idx);
             // Its loaded, enabled package may provide a settings page (opened from 设置).
             if (installed.enabled) item.settings_package = SettingsPackage(extension.id);
             // The catalog's newest release is what is installed: nothing to download.
             const bool known_revision = std::any_of(extension.versions.begin(), extension.versions.end(),
                 [&](const auto& candidate) { return candidate.manifest_sha256 == installed.revision; });
-            // An unlisted local build is not evidence of an older version.
-            // Do not offer the public catalog's older package as its "update".
-            if (!known_revision || installed.revision == release.manifest_sha256) { item.button_label = Text(Id::Installed); item.action_enabled = false; }
-            else item.button_label = Text(Id::StoreUpdateItem);
+            app::ApplyInstalledStoreItem(item, known_revision,
+                installed.revision == release.manifest_sha256, installed.version);
             break;
         }
+        EnrichItemFromManifest(s, item);
         view.items.push_back(std::move(item));
     }
     // Installed settings do not depend on a network catalog. This local row has
     // no package/download action and never supplies install authorization data.
-    if(std::none_of(view.items.begin(),view.items.end(),[](const auto& item){return item.id==kSevenZipExtensionId;})) {
-        for(const auto& installed:view.installed) if(installed.id==json::Wide(kSevenZipExtensionId)) {
-            ui::ExtensionStoreItem item;
-            item.id=kSevenZipExtensionId; item.name=installed.name; item.version=installed.version;
-            item.publisher=installed.publisher; item.enabled=installed.enabled; item.status=installed.status;
-            item.category=L"archive"; item.icon=ui::StoreIcon::Box;
-            if(installed.native_code) item.summary=Text(Id::StoreNativeCode);
-            if(installed.enabled) item.settings_package=SettingsPackage(kSevenZipExtensionId);
-            view.items.push_back(std::move(item)); break;
-        }
+    for (size_t idx = 0; idx < view.installed.size(); ++idx) {
+        const auto& installed = view.installed[idx];
+        if (installed.development_index >= 0) continue;  // developer folders live on 已安装 only
+        const auto id = json::Utf8(installed.id);
+        if (std::any_of(view.items.begin(), view.items.end(), [&](const auto& item) { return item.id == id; })) continue;
+        ui::ExtensionStoreItem item;
+        item.id=id;item.name=installed.name;item.version=installed.version;
+        item.publisher=installed.publisher;
+        item.enabled=installed.enabled;item.status=installed.status;
+        item.installed = true;
+        item.installed_index = static_cast<int>(idx);
+        item.official=installed.publisher==Text(Id::StoreOfficial);
+        item.icon = ui::StoreIcon::Puzzle;
+        if (id == kSevenZipExtensionId) { item.category=L"archive";item.icon=ui::StoreIcon::Box; }
+        else if (id == "pulse.desktop") { item.icon=ui::StoreIcon::Pc;item.icon_color=0x3F6AD8; }
+        if (installed.enabled) item.settings_package=SettingsPackage(id);
+        EnrichItemFromManifest(s, item);
+        if (!item.official && item.summary.empty()) item.summary = installed.publisher;
+        view.items.push_back(std::move(item));
     }
     view.category = s.store_category;
     view.search = s.store_search;
     view.detail = s.store_detail;
     view.detail_tab = s.store_detail_tab;
-    view.preview_kind = s.store_preview_kind;
     view.saved = s.store_saved_at && GetTickCount64() - s.store_saved_at < 1600;
-    view.level_drag = s.store_level_drag;
-    FillSevenZipView(s, view);
-    // The detail page needs the extension; without it the store shows browse again.
-    if (view.detail && view.seven_zip.item < 0) view.detail = false;
+    // Every package, 7-Zip included, uses the manifest quick settings card and the
+    // shared detail/settings pages; the store has no per-extension surfaces.
+    FillGenericQuickCards(s, view);
+    if (view.detail) {
+        if (!s.store_detail_id.empty()) {
+            for (size_t i = 0; i < view.items.size(); ++i) {
+                if (view.items[i].id == s.store_detail_id) {
+                    view.detail_item = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+        // The detail page needs a backing extension item; otherwise show browse again.
+        if (view.detail_item < 0) view.detail = false;
+    }
 }
 bool IsExtensionPackageFilePath(std::wstring_view path) {
     while (!path.empty() && path.front() == L'"') path.remove_prefix(1);
@@ -345,7 +530,12 @@ bool OpenExtensionPackageInStore(AppState& s, const std::wstring& raw_path) {
     while (!path.empty() && path.front() == L'"') path.erase(path.begin());
     while (!path.empty() && path.back() == L'"') path.pop_back();
     if (!IsExtensionPackageFilePath(path)) return false;
+    // The file list hands over long-path forms (\\?\C:\...); the local package reader takes
+    // plain drive paths only, so opening a .pulse-ext from a folder failed (local_package_path_invalid).
+    if (path.size() > 7 && path.starts_with(L"\\\\?\\") && path[5] == L':' && (path[6] == L'\\' || path[6] == L'/'))
+        path.erase(0, 4);
     s.store_detail = false;
+    s.store_detail_id.clear();
     if (!s.settings_store_browse && !s.settings_store_installed) {
         s.settings_store_browse = true;
     }
@@ -407,11 +597,34 @@ std::wstring PickExtensionPackageFile(HWND owner) {
     return chosen;
 }
 }
+std::filesystem::path ExtensionStoreRoot(AppState& s) { return Controller(s)->root; }
+std::vector<std::string> DeveloperTakenIds(AppState& s) {
+    std::vector<std::string> ids;
+    ui::WindowViewModel vm;
+    FillExtensionStoreView(s, vm);
+    for (const auto& installed : vm.settings_store_view.installed)
+        if (installed.development_index < 0) ids.push_back(json::Utf8(installed.id));
+    for (size_t p = 0; p < extensions::PackageCount() && p < 10000; ++p)
+        if (const auto* manifest = extensions::PackageManifest(p); manifest && !extensions::PackageFromDeveloperFolder(p))
+            ids.push_back(manifest->id);
+    return ids;
+}
 bool ExtensionStoreAction(AppState& s, int action) {
     using Action = ui::PackAction;
     if (action == static_cast<int>(Action::StoreRestartNow)) {
+        const auto controller = Controller(s);
+        const auto phase = controller->installer ? controller->installer->GetSnapshot().phase : Phase::Idle;
+        if (Busy(phase) || phase == Phase::AwaitingInstall || phase == Phase::AwaitingPublisherTrust ||
+            (controller->management && controller->management->Active())) return true;
         RestartPulse(s);
         return true;
+    }
+    if (action == static_cast<int>(Action::StoreDeveloper)) {
+        const auto controller = Controller(s);
+        const auto phase = controller->installer ? controller->installer->GetSnapshot().phase : Phase::Idle;
+        if (Busy(phase) || phase == Phase::AwaitingInstall || phase == Phase::AwaitingPublisherTrust ||
+            (controller->management && controller->management->Active())) return true;
+        return app::DeveloperButtonAction(s, controller->root, DeveloperTakenIds(s));
     }
     if (action == static_cast<int>(Action::StoreInstallFromFile)) {
         const auto controller = Controller(s);
@@ -422,6 +635,33 @@ bool ExtensionStoreAction(AppState& s, int action) {
         if (!chosen.empty()) OpenExtensionPackageInStore(s, chosen);
         return true;
     }
+    // Before the detail handler: it claims every action from StoreChipBase up.
+    if (action >= static_cast<int>(Action::NativeTabBase) && action <= static_cast<int>(Action::NativeTabBase) + 3) {
+        const int tab = action - static_cast<int>(Action::NativeTabBase);
+        if (tab <= 1) {
+            if (tab == 0) extensions::native::SetFocusedSettingsPluginTab(s.hwnd, 0);
+            extensions::native::SetFocusedSettingsMode(s.hwnd, tab);
+        } else {
+            const auto focused = extensions::native::FocusedSettings(s.hwnd);
+            if (!focused.package_id.empty()) {
+                s.store_detail = true;
+                s.store_detail_id = focused.package_id;
+                s.store_detail_tab = tab == 3 ? 1 : 0;
+                s.settings_store_browse = true;
+                s.settings_store_installed = false;
+                OpenSettingsTab(s, 8);
+                s.settings.SetScroll(0, 0);
+                InvalidateRect(s.hwnd, nullptr, FALSE);
+            }
+        }
+        return true;
+    }
+    if (action >= static_cast<int>(Action::NativeCustomTabBase) && action < static_cast<int>(Action::NativeCustomTabBase) + 6) {
+        const int custom_index = action - static_cast<int>(Action::NativeCustomTabBase);
+        extensions::native::SetFocusedSettingsPluginTab(s.hwnd, 1 + custom_index);
+        extensions::native::SetFocusedSettingsMode(s.hwnd, 0);
+        return true;
+    }
     if (ExtensionStoreDetailAction(s, action)) return true;
     if (action >= static_cast<int>(Action::StoreItemSettingsBase) && action < static_cast<int>(Action::StoreItemSettingsBase) + 10000) {
         // 设置 on a card: the plugin settings page, opened on that package. The view
@@ -429,26 +669,17 @@ bool ExtensionStoreAction(AppState& s, int action) {
         const auto index = static_cast<size_t>(action - static_cast<int>(Action::StoreItemSettingsBase));
         const auto catalog = Controller(s)->catalog.GetSnapshot();
         if (catalog.revision == s.store_view_generation && catalog.result && index < catalog.result->catalog.extensions.size()) {
-            if (catalog.result->catalog.extensions[index].id == kSevenZipExtensionId) {
-                s.store_detail = true; s.store_detail_tab = 0;
-                s.settings_store_browse = true; s.settings_store_installed = false;
-                if (s.settings.page() != 8) OpenSettingsTab(s, 8);
-                s.settings.SetScroll(0, 0); InvalidateRect(s.hwnd, nullptr, FALSE);
-                return true;
-            }
             const int package = SettingsPackage(catalog.result->catalog.extensions[index].id);
             if (package >= 0) extensions::native::RequestSettingsPagesPackage(s.hwnd, static_cast<size_t>(package));
         }
         const size_t catalog_count=catalog.result ? catalog.result->catalog.extensions.size() : 0;
-        if(catalog.revision==s.store_view_generation && index==catalog_count) {
+        if(catalog.revision==s.store_view_generation && index>=catalog_count) {
             ui::WindowViewModel current;
             FillExtensionStoreView(s,current);
-            if(index<current.settings_store_view.items.size() && current.settings_store_view.items[index].id==kSevenZipExtensionId) {
-                s.store_detail=true; s.store_detail_tab=0;
-                s.settings_store_browse=true; s.settings_store_installed=false;
-                if(s.settings.page()!=8) OpenSettingsTab(s,8);
-                s.settings.SetScroll(0,0); InvalidateRect(s.hwnd,nullptr,FALSE);
-                return true;
+            if(index<current.settings_store_view.items.size()) {
+                const auto& item=current.settings_store_view.items[index];
+                if(item.settings_package>=0)
+                    extensions::native::RequestSettingsPagesPackage(s.hwnd,static_cast<size_t>(item.settings_package));
             }
         }
         OpenSettingsTab(s, ui::kSettingsPageNativeExtensions);
@@ -456,6 +687,7 @@ bool ExtensionStoreAction(AppState& s, int action) {
     }
     if (action == static_cast<int>(Action::StoreBrowse) || action == static_cast<int>(Action::StoreManage) || action == static_cast<int>(Action::StoreInstalled)) {
         s.store_detail = false;
+        s.store_detail_id.clear();
         s.settings_store_browse = action == static_cast<int>(Action::StoreBrowse);
         s.settings_store_installed = action == static_cast<int>(Action::StoreInstalled);
         // From the plugin settings page (its "‹ 扩展商店"), go back to the store itself.
@@ -509,6 +741,41 @@ void TickExtensionStoreUi(AppState& s) {
             {{"diagnostic",json::Wide(diagnostic)}},{{"generation",catalog.generation},{"revision",catalog.revision},
             {"state",static_cast<uint64_t>(catalog.state)}},diagnostics::runtime::Level::Warning);
         InvalidateRect(s.hwnd, nullptr, FALSE);
+    }
+    if (controller->installer &&
+        installation.generation != 0 &&
+        (controller->logged_install_generation != installation.generation ||
+         controller->logged_install_phase != installation.phase)) {
+        controller->logged_install_generation = installation.generation;
+        controller->logged_install_phase = installation.phase;
+        const bool log_phase = installation.phase == Phase::Preparing ||
+            installation.phase == Phase::Committing ||
+            installation.phase == Phase::Installed ||
+            installation.phase == Phase::Failed ||
+            installation.phase == Phase::Incompatible;
+        if (log_phase) {
+            const auto id_w = json::Wide(installation.id);
+            const auto version_w = json::Wide(installation.version);
+            const auto error_w = json::Wide(installation.error);
+            const auto level = installation.phase == Phase::Failed
+                ? diagnostics::runtime::Level::Error
+                : installation.phase == Phase::Incompatible
+                ? diagnostics::runtime::Level::Warning
+                : diagnostics::runtime::Level::Info;
+            const std::initializer_list<diagnostics::runtime::Field> fields = {
+                {"generation", installation.generation},
+                {"phase", static_cast<uint64_t>(installation.phase)},
+                {"local", installation.is_local_package ? 1ULL : 0ULL},
+                {"pending_restart", installation.pending_restart ? 1ULL : 0ULL}
+            };
+            if (error_w.empty()) {
+                diagnostics::runtime::TextEvent("extension_install_status",
+                    {{"id", id_w}, {"version", version_w}}, fields, level);
+            } else {
+                diagnostics::runtime::TextEvent("extension_install_status",
+                    {{"id", id_w}, {"version", version_w}, {"error", error_w}}, fields, level);
+            }
+        }
     }
     if (controller->management) {
         if (installation.phase == Phase::Installed && controller->refreshed_installation != installation.generation && !controller->management->Active()) {

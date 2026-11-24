@@ -18,6 +18,9 @@ struct ShellCommandApi {
 };
 ShellCommandResult LaunchShellCommand(const std::wstring& command, const std::wstring& directory,
     HWND owner, const ShellCommandApi& api = {});
+// Legacy Shell New wizard (.lnk), or a Command-only ShellNew registry entry.
+DWORD LaunchShellNew(const std::wstring& directory, const std::wstring& stem,
+    const std::wstring& extension, const std::wstring& command, const ShellCommandApi& api = {});
 struct ShellItemResult {
     DWORD error = ERROR_SUCCESS;
     DWORD process_id = 0; // zero is valid for a delegated/packaged activation

@@ -26,6 +26,11 @@ bool SaveVoiceKey(std::wstring_view key);
 bool LoadVoiceKey(std::wstring& key);
 bool HasVoiceKey();
 bool ClearVoiceKey();
+// 联网搜索 API key (Tavily / Bocha / Serper): DPAPI-encrypted in search_key.bin.
+bool SaveSearchKey(std::wstring_view key);
+bool LoadSearchKey(std::wstring& key);
+bool HasSearchKey();
+bool ClearSearchKey();
 // "sk-…a1b2" for the settings page; empty for an empty key.
 std::wstring MaskModelKey(std::wstring_view key);
 

@@ -195,10 +195,6 @@ void AddProfileFolders(const std::wstring& suffix, std::vector<std::wstring>& ou
     RegCloseKey(list);
 }
 
-bool IsNtfs(const std::wstring& fs) {
-    return CompareStringOrdinal(fs.c_str(), -1, L"NTFS", -1, TRUE) == CSTR_EQUAL;
-}
-
 } // namespace
 
 bool IndexConfig::IsExcluded(const std::wstring& id) const {
@@ -516,13 +512,15 @@ std::vector<VolumeInfo> EnumerateLocalVolumes(const IndexConfig& config) {
         if (info.online) {
             info.label = label;
             info.file_system = fs;
+            info.serial = serial;
         }
         if (info.online && ::pulse::fs::IsRemoteLikeFileSystemName(info.file_system)) continue;
-        info.supported = info.online && IsNtfs(info.file_system);
+        info.backend = info.online ? SelectVolumeBackend(info.file_system) : VolumeBackend::Unsupported;
+        info.supported = info.online && info.backend != VolumeBackend::Unsupported;
         const bool auto_include = info.kind == VolumeKind::Fixed
             ? config.include_fixed_ntfs : config.include_removable_ntfs;
         info.enabled = info.supported && auto_include && !config.IsExcluded(info.id);
-        info.state = !info.online ? L"离线" : !info.supported ? L"非 NTFS" :
+        info.state = !info.online ? L"离线" : !info.supported ? L"不支持" :
                      info.enabled ? L"等待索引" : L"已排除";
         out.push_back(std::move(info));
     }

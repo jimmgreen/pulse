@@ -20,6 +20,7 @@
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstring>
 #include <ctime>
@@ -29,6 +30,7 @@
 #include <numeric>
 #include <iterator>
 #include <limits>
+#include <malloc.h>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -121,6 +123,22 @@ std::wstring StatusDriveProgress(wchar_t letter, size_t count) {
     text += std::to_wstring(count);
     text += L" 项";
     return text;
+}
+
+VolumeBackend EffectiveBackend(const VolumeInfo& volume) {
+    if (volume.backend != VolumeBackend::Unsupported) return volume.backend;
+    return SelectVolumeBackend(volume.file_system);
+}
+
+std::wstring DeltaKeyForId(std::wstring_view id) {
+    return NormalizeVolumeId(std::wstring(id));
+}
+
+bool SameVolumeEntry(const VolumeInfo& drive, std::wstring_view state_id,
+                     VolumeBackend state_backend, VolumeFsTag state_fs_tag,
+                     uint32_t state_serial) {
+    return VolumeIdentityMatches(drive.id, drive.file_system, drive.serial,
+                                 state_id, state_backend, state_fs_tag, state_serial);
 }
 
 std::wstring Display(std::wstring p) {
@@ -478,6 +496,33 @@ void Engine::CaptureMemoryState() {
         retained.usn_queue_overflows += memory.overflows;
     }
 }
+
+void Engine::TrimIdleMemory() {
+    const ULONGLONG last = last_search_tick_.load(std::memory_order_relaxed);
+    if (!last) return;
+    const ULONGLONG now = GetTickCount64();
+    if (now < last || now - last < 30000) return;
+    std::unique_lock<std::mutex> query_guard(query_mu_, std::try_to_lock);
+    if (!query_guard.owns_lock()) return;
+    std::unique_lock<std::shared_mutex> lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) return;
+    const ULONGLONG recheck = last_search_tick_.load(std::memory_order_relaxed);
+    if (!recheck || now < recheck || now - recheck < 30000) return;
+    last_search_tick_.store(0, std::memory_order_relaxed);
+    const bool large = cache_set_.ids.capacity() > 1024 || cache_set_.bits.capacity() > 64 || !cache_raw_.empty();
+    if (!large) return;
+    std::vector<int32_t>().swap(cache_set_.ids);
+    std::vector<uint64_t>().swap(cache_set_.bits);
+    cache_set_.dense = false;
+    cache_set_.total = 0;
+    cache_set_.universe = 0;
+    std::wstring().swap(cache_raw_);
+    std::wstring().swap(cache_path_prefix_);
+    cache_epoch_ = 0;
+    lock.unlock();
+    query_guard.unlock();
+    _heapmin();
+}
 FileFeedPage Engine::ReadFeed(bool changes, const std::wstring& root, uint64_t epoch, uint64_t cursor) const {
     std::shared_lock lock(mutex_);
     FileFeedPage page; page.epoch=feed_epoch_; page.sequence=feed_sequence_;
@@ -492,20 +537,61 @@ FileFeedPage Engine::ReadFeed(bool changes, const std::wstring& root, uint64_t e
         if (!page.records.empty()) page.next = page.records.back().id;
         page.done=page.next==feed_sequence_;return page;
     }
-    const auto count=static_cast<uint64_t>(LiveCount());
-    uint64_t scan=cursor;
-    for(;scan<count && scan<cursor+8192 && page.records.size()<512;++scan) {
-        const auto id=static_cast<int32_t>(scan);
-        if(IsTomb(id) || (NodeAt(id).flags & (kFlagHidden|kFlagDir))) continue;
-        const auto path=BuildPathLocked(id);
+    const auto count = static_cast<uint64_t>(LiveCount());
+    int32_t filter_root = -1;
+    if (!root.empty()) {
+        filter_root = ResolvePathLocked(root);
+        if (filter_root < 0 && (!child_map_.empty() || (map_ && map_->child_order))) {
+            page.next = count;
+            page.done = true;
+            return page;
+        }
+    }
+    const bool check_base_spans = subtree_intervals_valid_ && !vols_.empty();
+    uint64_t scan = cursor;
+    for (; scan < count && scan < cursor + 8192 && page.records.size() < 512; ++scan) {
+        const auto id = static_cast<int32_t>(scan);
+        // Skip entire inactive/unrelated volume spans in O(1) when base intervals are valid.
+        if (check_base_spans && id < BaseCount() && NodeAt(id).parent < 0) {
+            const VolState* hit_vol = nullptr;
+            int32_t span_hi = -1;
+            for (const auto& v : vols_) {
+                int32_t lo = -1, hi = -1;
+                if (VolumeSpan(v, lo, hi) && id == lo) {
+                    hit_vol = &v;
+                    span_hi = hi;
+                    break;
+                }
+            }
+            if (hit_vol && (IsRootInactiveLocked(hit_vol->root_idx) ||
+                            (filter_root >= 0 && !InSubtreeLocked(filter_root, hit_vol->root_idx) &&
+                             !InSubtreeLocked(hit_vol->root_idx, filter_root)))) {
+                const uint64_t skip_to = static_cast<uint64_t>(span_hi);
+                if (skip_to > scan) {
+                    scan = skip_to - 1;
+                    continue;
+                }
+            }
+        }
+        if (IsTomb(id)) continue;
+        bool hidden_root = false;
+        for (int32_t inactive_root : inactive_volume_roots_) {
+            if (InSubtreeLocked(id, inactive_root)) {
+                hidden_root = true;
+                break;
+            }
+        }
+        if (hidden_root || (NodeAt(id).flags & (kFlagHidden | kFlagDir))) continue;
+        if (filter_root >= 0 && !InSubtreeLocked(id, filter_root)) continue;
+        const auto path = BuildPathLocked(id);
         if (path.empty()) { page.gap = true; continue; }
-        if(IsExcludedPath(path) || (!root.empty() && !(path.size()>=root.size() &&
-            CompareStringOrdinal(path.data(),static_cast<int>(root.size()),root.data(),static_cast<int>(root.size()),TRUE)==CSTR_EQUAL &&
-            (path.size()==root.size() || root.back()==L'\\' || path[root.size()]==L'\\')))) continue;
-        ChangeRecord record;record.path=path;record.kind=ChangeKind::Created;record.file_id=scan;
+        if (IsExcludedPath(path) || (!root.empty() && !(path.size() >= root.size() &&
+            CompareStringOrdinal(path.data(), static_cast<int>(root.size()), root.data(), static_cast<int>(root.size()), TRUE) == CSTR_EQUAL &&
+            (path.size() == root.size() || root.back() == L'\\' || path[root.size()] == L'\\')))) continue;
+        ChangeRecord record; record.path = path; record.kind = ChangeKind::Created; record.file_id = scan;
         page.records.push_back(std::move(record));
     }
-    page.next=scan;page.done=scan>=count;return page;
+    page.next = scan; page.done = scan >= count; return page;
 }
 
 void Engine::PublishExcludedPaths(const IndexConfig& config,
@@ -555,6 +641,73 @@ void Engine::RequestRebuild() {
     PingNotify(true);
 }
 
+void Engine::NotifyTopologyChange() {
+    topology_dirty_ = true;
+    if (change_signal_) SetEvent(change_signal_);
+}
+
+void Engine::QueueVolumeReconcile(std::wstring_view id) {
+    if (id.empty()) return;
+    const std::wstring norm = NormalizeVolumeId(std::wstring(id));
+    if (norm.empty()) return;
+    std::lock_guard<std::mutex> lock(reconcile_mu_);
+    pending_reconcile_volumes_.insert(norm);
+}
+
+bool Engine::IsVolumeReconcilePending(std::wstring_view id) const {
+    if (id.empty()) return false;
+    const std::wstring norm = NormalizeVolumeId(std::wstring(id));
+    if (norm.empty()) return false;
+    std::lock_guard<std::mutex> lock(reconcile_mu_);
+    return pending_reconcile_volumes_.contains(norm);
+}
+
+void Engine::ClearVolumeReconcile(std::wstring_view id) {
+    if (id.empty()) return;
+    const std::wstring norm = NormalizeVolumeId(std::wstring(id));
+    std::lock_guard<std::mutex> lock(reconcile_mu_);
+    pending_reconcile_volumes_.erase(norm);
+}
+
+std::vector<std::wstring> Engine::TakePendingReconcileVolumes() {
+    std::vector<std::wstring> out;
+    std::lock_guard<std::mutex> lock(reconcile_mu_);
+    out.assign(pending_reconcile_volumes_.begin(), pending_reconcile_volumes_.end());
+    pending_reconcile_volumes_.clear();
+    return out;
+}
+
+DWORD CALLBACK Engine::VolumeInterfaceCallback(
+    HCMNOTIFICATION, void* context, CM_NOTIFY_ACTION action,
+    PCM_NOTIFY_EVENT_DATA, DWORD) {
+    if (context && (action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL ||
+                    action == CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL)) {
+        static_cast<Engine*>(context)->NotifyTopologyChange();
+    }
+    return ERROR_SUCCESS;
+}
+
+void Engine::RegisterVolumeNotifications() {
+    if (volume_interface_notify_) return;
+    static constexpr GUID kVolumeInterfaceGuid = {
+        0x53F5630D, 0xB6BF, 0x11D0, {0x94, 0xF2, 0x00, 0xA0, 0xC9, 0x1E, 0xFB, 0x8B}};
+    CM_NOTIFY_FILTER filter{};
+    filter.cbSize = sizeof(filter);
+    filter.FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE;
+    filter.u.DeviceInterface.ClassGuid = kVolumeInterfaceGuid;
+    if (CM_Register_Notification(&filter, this, &Engine::VolumeInterfaceCallback,
+                                 &volume_interface_notify_) != CR_SUCCESS) {
+        volume_interface_notify_ = nullptr;
+    }
+}
+
+void Engine::UnregisterVolumeNotifications() {
+    if (volume_interface_notify_) {
+        CM_Unregister_Notification(volume_interface_notify_);
+        volume_interface_notify_ = nullptr;
+    }
+}
+
 std::vector<VolumeInfo> Engine::Volumes() const {
     IndexConfig config;
     if (MachineIndexScope() && !LoadMachineConfig(config, nullptr)) return {};
@@ -562,31 +715,41 @@ std::vector<VolumeInfo> Engine::Volumes() const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     for (auto& volume : result) {
         auto it = std::find_if(vols_.begin(), vols_.end(), [&](const VolState& state) {
-            if (!state.volume_id.empty() && !volume.id.empty())
-                return NormalizeVolumeId(state.volume_id) == NormalizeVolumeId(volume.id);
+            if (!state.volume_id.empty() && !volume.id.empty()) {
+                return SameVolumeEntry(volume, state.volume_id, state.backend,
+                                       state.fs_tag, state.serial);
+            }
             return volume.mount_point.size() >= 2 && state.letter == towupper(volume.mount_point[0]);
         });
+        const bool pending_reconcile = IsVolumeReconcilePending(volume.id);
         if (it != vols_.end()) {
             volume.indexed_items = it->item_count;
             volume.progress = 100;
-            volume.state = volume.online ? L"已就绪" : L"离线 · 仍可搜索";
-        } else if (volume.enabled && building_) {
+            if (!volume.online) volume.state = L"离线 · 仍可搜索";
+            else if (pending_reconcile) volume.state = L"已就绪 · 正在重新核对";
+            else volume.state = L"已就绪";
+        } else if (volume.enabled && (building_ || pending_reconcile)) {
             volume.state = L"正在建立索引";
         } else if (volume.enabled && ready_) {
             volume.state = L"索引失败";
-            volume.error = L"无法读取该磁盘的文件变更记录";
+            volume.error = EffectiveBackend(volume) == VolumeBackend::DirectoryWalk
+                ? L"无法扫描该磁盘的目录内容"
+                : L"无法读取该磁盘的文件变更记录";
         }
     }
     for (const auto& state : vols_) {
         const bool present = std::any_of(result.begin(), result.end(), [&](const VolumeInfo& volume) {
-            return !state.volume_id.empty() &&
-                   NormalizeVolumeId(volume.id) == NormalizeVolumeId(state.volume_id);
+            return SameVolumeEntry(volume, state.volume_id, state.backend,
+                                   state.fs_tag, state.serial);
         });
         if (present || state.kind != VolumeKind::Removable) continue;
         VolumeInfo offline;
         offline.id = state.volume_id;
         offline.mount_point = std::wstring(1, state.letter) + L":\\";
         offline.kind = state.kind;
+        offline.backend = state.backend;
+        offline.serial = state.serial;
+        offline.file_system = std::wstring(FsNameFromTag(state.fs_tag, state.backend));
         offline.supported = true;
         offline.online = false;
         offline.enabled = !config.IsExcluded(offline.id);
@@ -613,10 +776,15 @@ ChangeState Engine::ChangeCoverage(const std::wstring& requested_path) const {
     if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\') return ChangeState::NotCovered;
     std::shared_lock lock(mutex_);
     if (path.size() > 1 && path[1] == L':') {
-        for (const auto& volume : vols_)
-            if (towupper(volume.letter) == towupper(path[0]) &&
-                std::find(inactive_volume_roots_.begin(), inactive_volume_roots_.end(), volume.root_idx) != inactive_volume_roots_.end())
-                return ChangeState::Offline;
+        const wchar_t target_letter = static_cast<wchar_t>(towupper(path[0]));
+        bool has_active = false;
+        bool has_offline = false;
+        for (const auto& volume : vols_) {
+            if (static_cast<wchar_t>(towupper(volume.letter)) != target_letter) continue;
+            if (IsRootInactiveLocked(volume.root_idx)) has_offline = true;
+            else has_active = true;
+        }
+        if (!has_active && has_offline) return ChangeState::Offline;
     }
     const auto index = ResolvePathLocked(path);
     return index >= 0 && !(NodeAt(index).flags & kFlagHidden) && !IsExcludedPath(path) ? ChangeState::Gap : ChangeState::NotCovered;
@@ -646,6 +814,11 @@ void Engine::SeedChanges(const std::wstring& owner) {
         std::shared_lock lock(mutex_);
         for (int32_t i = 0; running_ && i < LiveCount() && baseline.size() < 100000; ++i) {
             if (IsTomb(i) || (NodeAt(i).flags & kFlagHidden)) continue;
+            bool inactive = false;
+            for (int32_t root : inactive_volume_roots_) {
+                if (IsUnderLocked(i, root)) { inactive = true; break; }
+            }
+            if (inactive) continue;
             const auto attr = AttrAt(i);
             if (attr.mtime < since) continue;
             ChangeRecord event; event.path = BuildPathLocked(i); event.time = attr.mtime;
@@ -662,10 +835,16 @@ void Engine::Start(HWND notify, UINT msg) {
     changes_.Open(DataDir());
     notify_ = notify;
     notify_msg_ = msg;
+    topology_dirty_ = false;
+    {
+        std::lock_guard<std::mutex> rlock(reconcile_mu_);
+        pending_reconcile_volumes_.clear();
+    }
     running_ = true;
     ready_ = false;
     folder_size_background_ = true;
     change_signal_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    RegisterVolumeNotifications();
     thread_ = std::thread(&Engine::Worker, this);
 }
 
@@ -673,6 +852,7 @@ void Engine::Stop() {
     running_ = false;
     if (change_signal_) SetEvent(change_signal_);
     if (thread_.joinable()) thread_.join();
+    UnregisterVolumeNotifications();
     journal_streams_.clear();
     if (change_signal_) { CloseHandle(change_signal_); change_signal_ = nullptr; }
     StopPinyinWorker();
@@ -680,7 +860,14 @@ void Engine::Stop() {
     StopWalkWatches();
     FlushDeltas();
     CloseDeltas();
+    {
+        std::lock_guard<std::mutex> rlock(reconcile_mu_);
+        pending_reconcile_volumes_.clear();
+    }
     std::unique_lock<std::shared_mutex> lock(mutex_);
+    pinyin_snapshot_ = nullptr;
+    pinyin_version_ = 0;
+    pinyin_postings_.Reset();
     if (map_) map_->Close();
     map_.reset();
     ++layout_epoch_;
@@ -812,6 +999,7 @@ int32_t Engine::FindChildLiveLocked(int32_t parent, std::wstring_view name) cons
     auto range = child_map_.equal_range(key);
     for (auto it = range.first; it != range.second; ++it) {
         if (IsTomb(it->second)) continue;
+        if (parent < 0 && IsRootInactiveLocked(it->second)) continue;
         if (NodeAt(it->second).parent != parent) continue;
         if (EqualsI(NameOf(it->second), name)) return it->second;
     }
@@ -830,6 +1018,7 @@ int32_t Engine::FindChildLiveLocked(int32_t parent, std::wstring_view name) cons
             if (base_node.parent != parent ||
                 CompareFolded(std::wstring_view(map_->pool + base_node.off, base_node.len), name) != 0) break;
             if (IsTomb(idx) || NodeAt(idx).parent != parent) continue;
+            if (parent < 0 && IsRootInactiveLocked(idx)) continue;
             if (EqualsI(NameOf(idx), name)) return idx;
         }
     }
@@ -1029,11 +1218,130 @@ bool Engine::MatchNodeLocked(int32_t i, const CompiledQuery& q, int32_t prefix_n
     return false;
 }
 
+bool Engine::IsRootInactiveLocked(int32_t root_idx) const {
+    return root_idx >= 0 &&
+        std::find(inactive_volume_roots_.begin(), inactive_volume_roots_.end(), root_idx) !=
+            inactive_volume_roots_.end();
+}
+
+void Engine::CollectLiveSubtreeLocked(int32_t root, std::vector<int32_t>& out) const {
+    out.clear();
+    const int32_t total = LiveCount();
+    if (root < 0 || root >= total || IsTomb(root)) return;
+    const int32_t base_n = BaseCount();
+    const bool has_child_order = map_ && map_->child_order && map_->nodes && base_n > 0;
+    std::unordered_map<int32_t, std::vector<int32_t>> overlay;
+    if (!has_child_order) {
+        for (int32_t i = 0; i < base_n; ++i) {
+            if (IsTomb(i)) continue;
+            overlay[NodeAt(i).parent].push_back(i);
+        }
+    } else {
+        for (const auto& [id, pt] : patches_) {
+            if (id < 0 || id >= base_n || IsTomb(id)) continue;
+            const int32_t cur_parent = pt.has_meta
+                ? pt.parent
+                : map_->nodes[static_cast<size_t>(id)].parent;
+            if (cur_parent != map_->nodes[static_cast<size_t>(id)].parent) {
+                overlay[cur_parent].push_back(id);
+            }
+        }
+    }
+    for (int32_t i = base_n; i < total; ++i) {
+        if (IsTomb(i)) continue;
+        overlay[NodeAt(i).parent].push_back(i);
+    }
+
+    std::vector<int32_t> stack{root};
+    std::unordered_set<int32_t> seen;
+    seen.insert(root);
+    while (!stack.empty()) {
+        const int32_t cur = stack.back();
+        stack.pop_back();
+        out.push_back(cur);
+        if ((NodeAt(cur).flags & kFlagDir) == 0) continue;
+        if (has_child_order && cur < base_n) {
+            const int32_t* first = map_->child_order;
+            const int32_t* last = first + map_->n;
+            auto it = std::lower_bound(first, last, cur, [&](int32_t idx, int32_t value) {
+                return map_->nodes[static_cast<size_t>(idx)].parent < value;
+            });
+            for (; it != last; ++it) {
+                const int32_t child = *it;
+                if (map_->nodes[static_cast<size_t>(child)].parent != cur) break;
+                if (!IsTomb(child) && NodeAt(child).parent == cur && seen.insert(child).second) {
+                    stack.push_back(child);
+                }
+            }
+        }
+        if (const auto ov = overlay.find(cur); ov != overlay.end()) {
+            for (int32_t child : ov->second) {
+                if (!IsTomb(child) && NodeAt(child).parent == cur && seen.insert(child).second) {
+                    stack.push_back(child);
+                }
+            }
+        }
+    }
+}
+
+void Engine::RelocateVolumeLetterLocked(VolState& v, wchar_t new_letter) {
+    const wchar_t upper = static_cast<wchar_t>(towupper(new_letter));
+    const wchar_t old_letter = v.letter;
+    if (!upper || v.root_idx < 0 || v.root_idx >= LiveCount() ||
+        static_cast<wchar_t>(towupper(old_letter)) == upper) {
+        return;
+    }
+    if (!v.volume_id.empty()) journal_streams_.erase(v.volume_id);
+    ChildMapRemove(-1, NameOf(v.root_idx), v.root_idx);
+    v.letter = upper;
+    const std::wstring new_name = std::wstring(1, upper) + L":";
+    const int32_t base = BaseCount();
+    if (v.root_idx >= base) {
+        Node& n = live_.nodes[static_cast<size_t>(v.root_idx - base)];
+        pool_waste_ += n.len;
+        n.off = static_cast<uint32_t>(live_.pool.size());
+        n.len = static_cast<uint16_t>(new_name.size());
+        live_.pool.insert(live_.pool.end(), new_name.begin(), new_name.end());
+    } else {
+        const Node old = NodeAt(v.root_idx);
+        Patch& pt = patches_[v.root_idx];
+        pt.parent = -1;
+        pt.flags = old.flags;
+        pt.has_meta = true;
+        if (pt.has_name) pool_waste_ += pt.len;
+        pt.has_name = true;
+        pt.off = static_cast<uint32_t>(live_.pool.size());
+        pt.len = static_cast<uint16_t>(new_name.size());
+        live_.pool.insert(live_.pool.end(), new_name.begin(), new_name.end());
+    }
+    ChildMapAdd(-1, new_name, v.root_idx);
+    DeltaLog* delta = DeltaForVolume(v.volume_id, old_letter ? old_letter : upper);
+    if (delta) {
+        const Node node = NodeAt(v.root_idx);
+        const Attr attr = AttrAt(v.root_idx);
+        delta->QueuePatch(v.root_idx,
+            static_cast<uint8_t>(PatchBits::Meta) | static_cast<uint8_t>(PatchBits::Name) |
+            static_cast<uint8_t>(PatchBits::Attr),
+            -1, node.flags, attr.mtime, attr.size, new_name);
+    }
+    RefreshSubtreeVisibilityLocked(v.root_idx, delta);
+    GapFeed();
+    InvalidateFilterLocked();
+    ++struct_changes_;
+    last_struct_tick_ = GetTickCount64();
+    ++revision_;
+}
+
 void Engine::UpdateVolumeVisibilityLocked(const std::vector<VolumeInfo>& active, bool only_hide) {
     std::vector<int32_t> inactive;
     for (const auto& state : vols_) {
         const bool on = std::any_of(active.begin(), active.end(), [&](const VolumeInfo& volume) {
-            return NormalizeVolumeId(volume.id) == NormalizeVolumeId(state.volume_id);
+            if (!state.volume_id.empty()) {
+                return SameVolumeEntry(volume, state.volume_id, state.backend,
+                                       state.fs_tag, state.serial);
+            }
+            return volume.mount_point.size() >= 2 &&
+                towupper(volume.mount_point[0]) == towupper(state.letter);
         });
         if (!on && state.root_idx >= 0) inactive.push_back(state.root_idx);
     }
@@ -1071,14 +1379,75 @@ void Engine::CollectMatchesLocked(const CompiledQuery& cq, int32_t prefix_node,
     // that term's postings bound the candidates; the remaining filters are
     // verified per candidate instead of scanning every record.
     size_t driver = SIZE_MAX;
-    if (map_ && cq.groups.size() == 1) {
+    uint32_t driver_bucket = 0;
+    uint32_t driver_count = UINT32_MAX;
+    bool has_second_bucket = false;
+    uint32_t second_bucket = 0;
+    uint32_t second_count = UINT32_MAX;
+    if (map_ && map_->n > 0 && cq.groups.size() == 1) {
         const auto& group = cq.groups[0];
+        auto bucket_span = [&](const uint32_t* starts, uint32_t bucket) -> uint32_t {
+            if (!starts) return UINT32_MAX;
+            const uint32_t a = starts[bucket], b = starts[bucket + 1];
+            return (a <= b && b <= starts[kPrefixBuckets]) ? (b - a) : UINT32_MAX;
+        };
         for (size_t i = 0; i < group.size(); ++i) {
             const Term& t = group[i];
             if (t.name_not || t.name_in_path || t.name.empty() ||
                 (t.name_how != NameHow::Substring && t.name_how != NameHow::Exact)) continue;
-            if (t.name.size() == 1 ? !map_->prefix1_all_chars : !map_->prefix2_start) continue;
-            if (driver == SIZE_MAX || t.name.size() > group[driver].name.size()) driver = i;
+            if (t.name.size() == 1) {
+                if (!map_->prefix1_all_chars || !map_->prefix1_start || !map_->prefix1_ids) continue;
+                const uint32_t b = PrefixChar(t.name);
+                const uint32_t cnt = bucket_span(map_->prefix1_start, b);
+                if (cnt != UINT32_MAX && (driver == SIZE_MAX || cnt < driver_count)) {
+                    driver = i;
+                    driver_bucket = b;
+                    driver_count = cnt;
+                }
+                continue;
+            }
+            if (!map_->prefix2_start || !map_->prefix2_ids) continue;
+            const size_t max_k = map_->prefix1_all_chars ? (t.name.size() - 1) : 1;
+            for (size_t k = 0; k < max_k; ++k) {
+                const uint32_t b = PairBucket(std::wstring_view(t.name).substr(k, 2));
+                const uint32_t cnt = bucket_span(map_->prefix2_start, b);
+                if (cnt == UINT32_MAX) continue;
+                if (driver == SIZE_MAX || cnt < driver_count) {
+                    if (driver != SIZE_MAX && !group[driver].pinyin &&
+                        group[driver].name.size() >= 2 && driver_bucket != b &&
+                        (!has_second_bucket || driver_count < second_count)) {
+                        has_second_bucket = true;
+                        second_bucket = driver_bucket;
+                        second_count = driver_count;
+                    }
+                    driver = i;
+                    driver_bucket = b;
+                    driver_count = cnt;
+                } else if (driver != SIZE_MAX && group[driver].name.size() >= 2 &&
+                           b != driver_bucket && (!t.pinyin || i == driver) &&
+                           (!has_second_bucket || cnt < second_count)) {
+                    has_second_bucket = true;
+                    second_bucket = b;
+                    second_count = cnt;
+                }
+            }
+        }
+        // Reset or populate the second bigram consistently after picking driver.
+        if (driver != SIZE_MAX) {
+            if (group[driver].name.size() == 1) {
+                has_second_bucket = false;
+            } else if (!has_second_bucket && map_->prefix1_all_chars && group[driver].name.size() >= 3) {
+                for (size_t k = 0; k + 1 < group[driver].name.size(); ++k) {
+                    const uint32_t b = PairBucket(std::wstring_view(group[driver].name).substr(k, 2));
+                    if (b == driver_bucket) continue;
+                    const uint32_t cnt = bucket_span(map_->prefix2_start, b);
+                    if (cnt != UINT32_MAX && (!has_second_bucket || cnt < second_count)) {
+                        has_second_bucket = true;
+                        second_bucket = b;
+                        second_count = cnt;
+                    }
+                }
+            }
         }
     }
     if (driver != SIZE_MAX) {
@@ -1086,7 +1455,8 @@ void Engine::CollectMatchesLocked(const CompiledQuery& cq, int32_t prefix_node,
         CompiledQuery literal_cq = cq;
         literal_cq.groups[0][driver].pinyin = false;
         const bool single_char = term.name.size() == 1;
-        const uint32_t bucket = single_char ? PrefixChar(term.name) : PairBucket(term.name);
+        const uint32_t bucket = driver_bucket;
+        const int32_t subtree_end = (prefix_node >= 0) ? SubtreeEndLocked(prefix_node) : -1;
         // Overlay visibility changes are written as patches (see
         // RefreshSubtreeVisibilityLocked), so an id without a patch or tombstone
         // still matches exactly as its mapped node says, even with a backlog.
@@ -1097,12 +1467,59 @@ void Engine::CollectMatchesLocked(const CompiledQuery& cq, int32_t prefix_node,
             const uint32_t* starts = single_char ? mapped.prefix1_start : mapped.prefix2_start;
             const int32_t* postings = single_char ? mapped.prefix1_ids : mapped.prefix2_ids;
             if (!starts || !postings || (single_char && !mapped.prefix1_all_chars)) return;
-            const uint32_t first = starts[bucket];
-            const uint32_t last = starts[bucket + 1];
+            uint32_t first = starts[bucket];
+            uint32_t last = starts[bucket + 1];
             if (first > last || last > starts[kPrefixBuckets]) return;
+            const bool can_slice_subtree = global_first == 0 && subtree_end > prefix_node && patches_.empty();
+            const int32_t slice_lo = prefix_node;
+            const int32_t slice_hi = can_slice_subtree ? (std::min)(subtree_end, BaseCount()) : INT32_MAX;
+            if (can_slice_subtree) {
+                first = static_cast<uint32_t>(
+                    std::lower_bound(postings + first, postings + last, slice_lo) - postings);
+                last = static_cast<uint32_t>(
+                    std::lower_bound(postings + first, postings + last, slice_hi) - postings);
+            }
+            const int32_t* postings2 = nullptr;
+            uint32_t p2 = 0;
+            uint32_t last2 = 0;
+            if (!single_char && has_second_bucket && second_bucket != bucket &&
+                mapped.prefix2_start && mapped.prefix2_ids) {
+                uint32_t f2 = mapped.prefix2_start[second_bucket];
+                uint32_t l2 = mapped.prefix2_start[second_bucket + 1];
+                if (f2 <= l2 && l2 <= mapped.prefix2_start[kPrefixBuckets]) {
+                    if (can_slice_subtree) {
+                        f2 = static_cast<uint32_t>(
+                            std::lower_bound(mapped.prefix2_ids + f2, mapped.prefix2_ids + l2, slice_lo) - mapped.prefix2_ids);
+                        l2 = static_cast<uint32_t>(
+                            std::lower_bound(mapped.prefix2_ids + f2, mapped.prefix2_ids + l2, slice_hi) - mapped.prefix2_ids);
+                    }
+                    const uint32_t len1 = last - first;
+                    const uint32_t len2 = l2 - f2;
+                    if (len1 > 64 && len2 <= len1 * 32) {
+                        postings2 = mapped.prefix2_ids;
+                        p2 = f2;
+                        last2 = l2;
+                    }
+                }
+            }
             for (uint32_t p = first; p < last; ++p) {
                 if ((p & 0x3ffu) == 0 && latest && latest->load() != expected) return;
                 const int32_t local_id = postings[p];
+                if (postings2) {
+                    if (p2 >= last2) break;
+                    if (postings2[p2] < local_id) {
+                        uint32_t step = 1;
+                        while (p2 + step < last2 && postings2[p2 + step] < local_id) {
+                            p2 += step;
+                            step <<= 1;
+                        }
+                        const uint32_t hi = (std::min)(last2, p2 + step + 1);
+                        p2 = static_cast<uint32_t>(
+                            std::lower_bound(postings2 + p2, postings2 + hi, local_id) - postings2);
+                    }
+                    if (p2 >= last2) break;
+                    if (postings2[p2] != local_id) continue;
+                }
                 if (local_id < 0 || static_cast<uint32_t>(local_id) >= mapped.n ||
                     global_first < 0 || local_id >= BaseCount() - global_first) continue;
                 const int32_t id = global_first + local_id;
@@ -1125,16 +1542,15 @@ void Engine::CollectMatchesLocked(const CompiledQuery& cq, int32_t prefix_node,
         collect_table(*map_, 0);
         if (term.pinyin && pinyin_ready_.load() && pinyin_snapshot_ == map_.get() &&
             pinyin_version_ == kPinyinDataVersion) {
-            const std::vector<int32_t>* candidate_ids = &pinyin_chinese_ids_;
+            std::span<const int32_t> candidates = PinyinChineseIdsLocked();
             // Every adjacent Latin pair in a successful match must exist in the
             // pronunciation graph. Pick its smallest posting without expanding paths.
             for (size_t i = 1; i < term.name.size(); ++i) {
                 const wchar_t a = FoldChar(term.name[i - 1]), b = FoldChar(term.name[i]);
                 if (a < L'a' || a > L'z' || b < L'a' || b > L'z') continue;
-                const auto& posting = pinyin_pair_ids_[(a - L'a') * 26 + b - L'a'];
-                if (posting.size() < candidate_ids->size()) candidate_ids = &posting;
+                const auto posting = PinyinPairIdsLocked(static_cast<size_t>((a - L'a') * 26 + (b - L'a')));
+                if (posting.size() < candidates.size()) candidates = posting;
             }
-            const auto& candidates = *candidate_ids;
             size_t checked = 0;
             for (int32_t id : candidates) {
                 if ((checked++ & 0x3ff) == 0 && latest && latest->load() != expected) return;
@@ -1394,6 +1810,7 @@ void Engine::PartialSortPage(std::vector<int32_t>& ids, size_t offset, size_t li
 
 SearchResult Engine::Search(const Query& q, const std::atomic<uint32_t>* latest,
                             uint32_t expected, const DirVisibility* visibility) const {
+    last_search_tick_.store(GetTickCount64(), std::memory_order_relaxed);
     SearchResult out;
     std::lock_guard<std::mutex> query_guard(query_mu_);
     if (latest && latest->load() != expected) return out;
@@ -1672,31 +2089,53 @@ bool Engine::WriteIndexFile(const std::wstring& path, const Store& s,
     // Posting tables are counted here and filled straight into a mapped view of
     // the output file below, so the heap never holds both id tables (about 35
     // ids per node) next to the flattened snapshot.
-    // Each bucket is reported once per name. A per-bucket epoch stamp replaces
-    // sort+unique per name; postings stay identical because ids are appended
-    // in node order whatever the order of buckets within one name.
-    std::vector<uint32_t> seen(kPrefixBuckets, 0);
+    // Each bucket is reported once per name. Fusing char folding + prefix1 +
+    // prefix2 passes avoids redundant scanning and 4x case-folding per node.
+    std::vector<uint32_t> seen1(kPrefixBuckets, 0);
+    std::vector<uint32_t> seen2(kPrefixBuckets, 0);
     uint32_t epoch = 0;
-    auto visit = [&](bool pair, std::wstring_view name, auto&& fn) {
+    std::wstring folded_heap;
+    auto fold_into = [&](std::wstring_view name, wchar_t* stack_buf, size_t stack_cap) -> const wchar_t* {
+        if (name.size() <= stack_cap) {
+            for (size_t k = 0; k < name.size(); ++k) stack_buf[k] = FoldChar(name[k]);
+            return stack_buf;
+        }
+        folded_heap.resize(name.size());
+        for (size_t k = 0; k < name.size(); ++k) folded_heap[k] = FoldChar(name[k]);
+        return folded_heap.data();
+    };
+    auto next_epoch = [&] {
         if (++epoch == 0) {
-            std::fill(seen.begin(), seen.end(), 0u);
+            std::fill(seen1.begin(), seen1.end(), 0u);
+            std::fill(seen2.begin(), seen2.end(), 0u);
             epoch = 1;
         }
-        auto once = [&](uint32_t bucket) {
-            if (seen[bucket] == epoch) return;
-            seen[bucket] = epoch;
-            fn(bucket);
-        };
-        if (!pair) {
-            for (wchar_t c : name) once(static_cast<uint16_t>(FoldChar(c)));
-            return;
-        }
-        for (size_t k = 0; k + 1 < name.size(); ++k) once(PairBucket(name.substr(k, 2)));
+        return epoch;
     };
-    auto count_prefix = [&](bool pair) {
-        std::vector<uint32_t> counts(kPrefixBuckets, 0);
-        for (int32_t i = 0; i < static_cast<int32_t>(s.nodes.size()); ++i)
-            visit(pair, name_of(i), [&](uint32_t bucket) { ++counts[bucket]; });
+    std::vector<uint32_t> counts1(kPrefixBuckets, 0);
+    std::vector<uint32_t> counts2(kPrefixBuckets, 0);
+    wchar_t stack_buf[256];
+    for (int32_t i = 0; i < static_cast<int32_t>(s.nodes.size()); ++i) {
+        const std::wstring_view name = name_of(i);
+        const wchar_t* folded = fold_into(name, stack_buf, ARRAYSIZE(stack_buf));
+        const uint32_t ep = next_epoch();
+        const size_t nlen = name.size();
+        for (size_t k = 0; k < nlen; ++k) {
+            const uint32_t b1 = static_cast<uint16_t>(folded[k]);
+            if (seen1[b1] != ep) {
+                seen1[b1] = ep;
+                ++counts1[b1];
+            }
+        }
+        for (size_t k = 0; k + 1 < nlen; ++k) {
+            const uint32_t b2 = (static_cast<uint32_t>(folded[k]) * 131u + folded[k + 1]) & 65535u;
+            if (seen2[b2] != ep) {
+                seen2[b2] = ep;
+                ++counts2[b2];
+            }
+        }
+    }
+    auto build_starts = [&](const std::vector<uint32_t>& counts) {
         std::vector<uint32_t> start(kPrefixBuckets + 1, 0);
         uint64_t posting_count = 0;
         for (uint32_t i = 0; i < kPrefixBuckets; ++i) {
@@ -1709,13 +2148,8 @@ bool Engine::WriteIndexFile(const std::wstring& path, const Store& s,
         }
         return start;
     };
-    auto fill_prefix = [&](bool pair, const std::vector<uint32_t>& start, int32_t* ids) {
-        std::vector<uint32_t> cursor(start.begin(), start.end() - 1);
-        for (int32_t i = 0; i < static_cast<int32_t>(s.nodes.size()); ++i)
-            visit(pair, name_of(i), [&](uint32_t bucket) { ids[cursor[bucket]++] = i; });
-    };
-    const auto prefix1_start = count_prefix(false);
-    const auto prefix2_start = prefix_overflow ? std::vector<uint32_t>{} : count_prefix(true);
+    const auto prefix1_start = build_starts(counts1);
+    const auto prefix2_start = prefix_overflow ? std::vector<uint32_t>{} : build_starts(counts2);
     if (prefix_overflow) {
         CloseHandle(h);
         DeleteFileW(tmp.c_str());
@@ -1819,15 +2253,35 @@ bool Engine::WriteIndexFile(const std::wstring& path, const Store& s,
                 static_cast<SIZE_T>(hdr.vols_off - view_begin)));
             ok = checked(view != nullptr);
             if (ok) {
-                auto store = [&](bool pair, uint64_t position, const std::vector<uint32_t>& start) {
-                    BYTE* at = view + (position - view_begin);
-                    memcpy(at, start.data(), start.size() * sizeof(uint32_t));
-                    fill_prefix(pair, start,
-                                reinterpret_cast<int32_t*>(at + start.size() * sizeof(uint32_t)));
-                };
-                store(false, prefix1_position, prefix1_start);
+                BYTE* at1 = view + (prefix1_position - view_begin);
+                memcpy(at1, prefix1_start.data(), prefix1_start.size() * sizeof(uint32_t));
+                int32_t* ids1 = reinterpret_cast<int32_t*>(at1 + prefix1_start.size() * sizeof(uint32_t));
+                BYTE* at2 = view + (hdr.prefix2_off - view_begin);
+                memcpy(at2, prefix2_start.data(), prefix2_start.size() * sizeof(uint32_t));
+                int32_t* ids2 = reinterpret_cast<int32_t*>(at2 + prefix2_start.size() * sizeof(uint32_t));
+                std::vector<uint32_t> cursor1(prefix1_start.begin(), prefix1_start.end() - 1);
+                std::vector<uint32_t> cursor2(prefix2_start.begin(), prefix2_start.end() - 1);
+                for (int32_t i = 0; i < static_cast<int32_t>(s.nodes.size()); ++i) {
+                    const std::wstring_view name = name_of(i);
+                    const wchar_t* folded = fold_into(name, stack_buf, ARRAYSIZE(stack_buf));
+                    const uint32_t ep = next_epoch();
+                    const size_t nlen = name.size();
+                    for (size_t k = 0; k < nlen; ++k) {
+                        const uint32_t b1 = static_cast<uint16_t>(folded[k]);
+                        if (seen1[b1] != ep) {
+                            seen1[b1] = ep;
+                            ids1[cursor1[b1]++] = i;
+                        }
+                    }
+                    for (size_t k = 0; k + 1 < nlen; ++k) {
+                        const uint32_t b2 = (static_cast<uint32_t>(folded[k]) * 131u + folded[k + 1]) & 65535u;
+                        if (seen2[b2] != ep) {
+                            seen2[b2] = ep;
+                            ids2[cursor2[b2]++] = i;
+                        }
+                    }
+                }
                 filename_timing_.Memory().Capture(IndexMemoryPoint::WritePrefix1);
-                store(true, hdr.prefix2_off, prefix2_start);
                 filename_timing_.Memory().Capture(IndexMemoryPoint::WritePrefix2);
                 ok = checked(UnmapViewOfFile(view) != FALSE);
             }
@@ -1873,10 +2327,15 @@ bool Engine::WriteIndexFile(const std::wstring& path, const Store& s,
     uint64_t frn_cur = hdr.frn_off;
     for (size_t i = 0; i < vols.size(); ++i) {
         dvols[i].letter = static_cast<uint16_t>(vols[i].letter);
-        dvols[i].kind = static_cast<uint16_t>(vols[i].kind);
+        dvols[i].kind = PackDiskVolKind(vols[i].kind, vols[i].backend, vols[i].fs_tag);
         dvols[i].item_count = vols[i].item_count;
-        dvols[i].journal_id = vols[i].journal_id;
-        dvols[i].next_usn = vols[i].next_usn;
+        if (vols[i].backend == VolumeBackend::DirectoryWalk) {
+            dvols[i].journal_id = 0;
+            dvols[i].next_usn = static_cast<int64_t>(vols[i].serial);
+        } else {
+            dvols[i].journal_id = vols[i].journal_id;
+            dvols[i].next_usn = vols[i].next_usn;
+        }
         dvols[i].root_idx = vols[i].root_idx;
         dvols[i].first_idx = vols[i].first_idx;
         dvols[i].frn_count = static_cast<uint32_t>(vols[i].frn_build.size());
@@ -2089,8 +2548,7 @@ void Engine::AdoptMappedLocked(std::unique_ptr<MappedFile> mapped) {
     feed_changes_.Clear();
     pinyin_snapshot_ = nullptr;
     pinyin_version_ = 0;
-    pinyin_chinese_ids_.clear();
-    pinyin_pair_ids_.clear();
+    pinyin_postings_.Reset();
     map_ = std::move(mapped);
     ++layout_epoch_;
     live_.Clear();
@@ -2111,10 +2569,11 @@ void Engine::AdoptMappedLocked(std::unique_ptr<MappedFile> mapped) {
             const DiskVol& d = map_->vols[i];
             VolState& v = vols_[i];
             v.letter = static_cast<wchar_t>(d.letter);
-            v.kind = static_cast<VolumeKind>(d.kind);
+            UnpackDiskVolMeta(d.kind, d.journal_id, d.next_usn,
+                              v.kind, v.backend, v.fs_tag, v.serial);
             v.item_count = d.item_count;
             v.volume_id = d.volume_id;
-            v.journal_id = d.journal_id;
+            v.journal_id = (v.backend == VolumeBackend::DirectoryWalk) ? 0 : d.journal_id;
             v.next_usn = d.next_usn;
             v.root_idx = d.root_idx;
             v.first_idx = d.first_idx;
@@ -2138,7 +2597,7 @@ void Engine::PreserveOfflineVolumesLocked(const std::vector<VolumeInfo>& active,
     for (const auto& old : vols_) {
         if (old.kind != VolumeKind::Removable || config.IsExcluded(old.volume_id)) continue;
         const bool online = std::any_of(active.begin(), active.end(), [&](const VolumeInfo& volume) {
-            return NormalizeVolumeId(volume.id) == NormalizeVolumeId(old.volume_id);
+            return SameVolumeEntry(volume, old.volume_id, old.backend, old.fs_tag, old.serial);
         });
         if (online || old.root_idx < 0) continue;
         std::fill(remap.begin(), remap.end(), -1);
@@ -2174,6 +2633,7 @@ void Engine::PreserveOfflineVolumesLocked(const std::vector<VolumeInfo>& active,
         }
         if (old.root_idx >= n || remap[static_cast<size_t>(old.root_idx)] < 0) continue;
         kept.root_idx = remap[static_cast<size_t>(old.root_idx)];
+        kept.first_idx = kept.root_idx;
         auto keep_frn = [&](uint64_t frn, int32_t idx) {
             if (idx >= 0 && idx < n && remap[static_cast<size_t>(idx)] >= 0)
                 kept.frn_build.emplace_back(frn, remap[static_cast<size_t>(idx)]);
@@ -2314,10 +2774,49 @@ void Engine::SaveCache() {
     MergeBase(true);
 }
 
+DeltaLog* Engine::DeltaForVolume(std::wstring_view volume_id, wchar_t fallback_letter) {
+    if (!volume_id.empty()) {
+        const std::wstring key = DeltaKeyForId(volume_id);
+        if (const auto it = delta_logs_.find(key); it != delta_logs_.end()) {
+            return it->second.get();
+        }
+    }
+    if (fallback_letter != 0) {
+        const wchar_t upper = static_cast<wchar_t>(towupper(fallback_letter));
+        const VolState* fallback_vol = nullptr;
+        for (const auto& v : vols_) {
+            if (static_cast<wchar_t>(towupper(v.letter)) != upper) continue;
+            if (!IsRootInactiveLocked(v.root_idx)) {
+                fallback_vol = &v;
+                break;
+            }
+            if (!fallback_vol) fallback_vol = &v;
+        }
+        if (fallback_vol && !fallback_vol->volume_id.empty()) {
+            const std::wstring key = DeltaKeyForId(fallback_vol->volume_id);
+            if (const auto it = delta_logs_.find(key); it != delta_logs_.end()) {
+                return it->second.get();
+            }
+        }
+        const std::wstring letter_key = std::wstring(L"__LETTER_") + upper;
+        if (const auto it = delta_logs_.find(letter_key); it != delta_logs_.end()) {
+            return it->second.get();
+        }
+    }
+    if (vols_.empty()) {
+        if (const auto it = delta_logs_.find(L""); it != delta_logs_.end()) {
+            return it->second.get();
+        }
+    }
+    return nullptr;
+}
+
 DeltaLog* Engine::DeltaFor(wchar_t letter) {
-    wchar_t key = letter ? static_cast<wchar_t>(towupper(letter)) : 0;
-    auto it = delta_logs_.find(key);
-    return it == delta_logs_.end() ? nullptr : it->second.get();
+    if (letter == 0) {
+        const auto it = delta_logs_.find(L"");
+        return it == delta_logs_.end() ? nullptr : it->second.get();
+    }
+    return DeltaForVolume({}, letter);
 }
 
 void Engine::CloseDeltas() {
@@ -2347,7 +2846,7 @@ void Engine::OpenDeltasLocked() {
             DeleteFileW(path.c_str());
             if (!log->Open(path, built_unix_)) return;
         }
-        delta_logs_[0] = std::move(log);
+        delta_logs_[L""] = std::move(log);
         return;
     }
     for (const auto& v : vols_) {
@@ -2365,7 +2864,11 @@ void Engine::OpenDeltasLocked() {
             DeleteFileW(path.c_str());
             log->Open(path, built_unix_);
         }
-        delta_logs_[static_cast<wchar_t>(towupper(v.letter))] = std::move(log);
+        const wchar_t upper = static_cast<wchar_t>(towupper(v.letter));
+        const std::wstring key = !v.volume_id.empty()
+            ? DeltaKeyForId(v.volume_id)
+            : (upper ? (std::wstring(L"__LETTER_") + upper) : std::wstring(L""));
+        delta_logs_[key] = std::move(log);
     }
 }
 
@@ -2543,6 +3046,9 @@ bool Engine::ReplayDeltasLocked() {
                 p.len = static_cast<uint16_t>(name.size());
                 live_.pool.insert(live_.pool.end(), name.begin(), name.end());
                 p.has_name = true;
+                if (vol && idx == vol->root_idx && !name.empty()) {
+                    vol->letter = static_cast<wchar_t>(towupper(name[0]));
+                }
             }
         }
     };
@@ -2652,13 +3158,15 @@ void Engine::MergeBase(bool force, const char* reason) {
     Store snap;
     const auto timing = FilenameTiming::Begin();
     const auto pending = struct_changes_;
-    const auto previous_built = built_unix_;
+    uint64_t previous_built = 0;
     filename_timing_.Memory().Capture(IndexMemoryPoint::MergeBefore);
     std::vector<VolState> vols;
-    uint64_t built = static_cast<uint64_t>(std::time(nullptr));
+    uint64_t built = 0;
     TraceSearch("filename_merge_begin", revision_.load());
     {
         std::unique_lock<std::shared_mutex> lock(mutex_);
+        previous_built = built_unix_;
+        built = (std::max)(static_cast<uint64_t>(std::time(nullptr)), previous_built + 1);
         if (LiveCount() == 0) {
             TraceSearch("filename_merge_empty", revision_.load());
             filename_timing_.End(FilenameStage::Merge, timing, 0, ERROR_SUCCESS, "empty");
@@ -2729,6 +3237,7 @@ void Engine::MergeBase(bool force, const char* reason) {
     }
     CaptureMemoryState();
     filename_timing_.Flush();
+    _heapmin();
     merging_ = false;
 }
 
@@ -3039,7 +3548,7 @@ Engine::UsnApply Engine::ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec) {
         }
         RecordFeed(event); changes_.Record(std::move(event));
     };
-    DeltaLog* delta = DeltaFor(v.letter);
+    DeltaLog* delta = DeltaForVolume(v.volume_id, v.letter);
     UsnApply effect = UsnApply::None;
 
     auto refresh = [&](int32_t i) {
@@ -3366,7 +3875,7 @@ bool Engine::CatchUpVolume(VolState& v, bool* changed, bool* structural) {
     }
     v.next_usn = last;
     v.folder_size_current = true;
-    if (DeltaLog* delta = DeltaFor(v.letter)) delta->QueueUsn(v.journal_id, v.next_usn);
+    if (DeltaLog* delta = DeltaForVolume(v.volume_id, v.letter)) delta->QueueUsn(v.journal_id, v.next_usn);
     indexed_.store(static_cast<size_t>(LiveCount()) > deleted_ ? LiveCount() - deleted_ : 0);
     if (any_struct) {
         ++struct_changes_;
@@ -3407,12 +3916,16 @@ bool Engine::IndexVolumeMft(const VolumeInfo& volume) {
         SetLastError(error);
         return false;
     };
+    if (EffectiveBackend(volume) == VolumeBackend::DirectoryWalk) return IndexVolumeWalk(volume);
     HANDLE h = OpenVolume(letter);
     if (h == INVALID_HANDLE_VALUE) return fail(GetLastError(), 1);
 
     VolState vol;
     vol.letter = letter;
     vol.kind = volume.kind;
+    vol.backend = VolumeBackend::NtfsMftUsn;
+    vol.fs_tag = VolumeFsTag::UnknownOrNtfs;
+    vol.serial = volume.serial;
     vol.volume_id = volume.id;
     if (!QueryJournal(h, vol.journal_id, vol.next_usn)) {
         vol.journal_id = 0;
@@ -3583,6 +4096,47 @@ bool Engine::BuildMftTree(VolState vol, uint64_t root_frn, std::vector<FrnNode> 
             [&](int32_t current) { return build_.nodes[static_cast<size_t>(current)].parent; },
             build_name);
     };
+    struct DirBuildInfo {
+        std::wstring path;
+        bool hidden_parent = false;
+        bool may_contain_exclusion = false;
+    };
+    auto may_have_excluded = [&](std::wstring_view dir_path) -> bool {
+        if (excluded_paths_.empty() || dir_path.empty()) return false;
+        for (const auto& ex : excluded_paths_) {
+            if (ex.empty()) continue;
+            if (dir_path.size() >= ex.size()) {
+                if (CompareStringOrdinal(dir_path.data(), static_cast<int>(ex.size()),
+                                         ex.data(), static_cast<int>(ex.size()), TRUE) == CSTR_EQUAL &&
+                    (dir_path.size() == ex.size() || dir_path[ex.size()] == L'\\' ||
+                     dir_path[ex.size()] == L'/')) {
+                    return true;
+                }
+            } else {
+                if (CompareStringOrdinal(ex.data(), static_cast<int>(dir_path.size()),
+                                         dir_path.data(), static_cast<int>(dir_path.size()), TRUE) == CSTR_EQUAL &&
+                    (dir_path.back() == L'\\' || ex[dir_path.size()] == L'\\' ||
+                     ex[dir_path.size()] == L'/')) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    std::unordered_map<int32_t, DirBuildInfo> dir_cache;
+    dir_cache.reserve(frn_nodes.size() / 8 + 64);
+    auto get_dir_info = [&](int32_t dir_idx) -> const DirBuildInfo* {
+        if (auto it = dir_cache.find(dir_idx); it != dir_cache.end()) return &it->second;
+        DirBuildInfo info;
+        info.path = build_path(dir_idx);
+        if (info.path.empty()) return nullptr;
+        info.hidden_parent = dir_idx >= 0 && dir_idx != vol.root_idx &&
+            (build_.nodes[static_cast<size_t>(dir_idx)].flags & kFlagHidden) != 0;
+        info.may_contain_exclusion = !info.hidden_parent && may_have_excluded(info.path);
+        auto [it, inserted] = dir_cache.emplace(dir_idx, std::move(info));
+        return &it->second;
+    };
+    std::wstring scratch_path;
     size_t added = 0;
     for (FrnNode& node : frn_nodes) {
         if (!running_ || added >= kIndexCap) break;
@@ -3614,10 +4168,32 @@ bool Engine::BuildMftTree(VolState vol, uint64_t root_frn, std::vector<FrnNode> 
             if (current->parent == cur) break;
             cur = current->parent;
         }
-        std::wstring candidate = build_path(parent_idx);
-        if (candidate.empty()) return false;
-        bool hidden_parent = parent_idx >= 0 && parent_idx != vol.root_idx &&
-            (build_.nodes[static_cast<size_t>(parent_idx)].flags & kFlagHidden) != 0;
+        const DirBuildInfo* parent_info = get_dir_info(parent_idx);
+        if (!parent_info) return false;
+        if (stack.size() == 1 && !stack[0]->is_dir) {
+            FrnNode& n = *stack[0];
+            if (!IsIndexArtifactName(n.name)) {
+                const size_t sep = (!parent_info->path.empty() && parent_info->path.back() != L'\\') ? 1 : 0;
+                if (parent_info->path.size() + sep + n.name.size() > 32766) return false;
+                bool hidden = parent_info->hidden_parent || ShouldSkipChild(parent_idx == vol.root_idx, n.name);
+                if (!hidden && parent_info->may_contain_exclusion) {
+                    scratch_path.assign(parent_info->path);
+                    if (sep) scratch_path.push_back(L'\\');
+                    scratch_path.append(n.name);
+                    hidden = IsExcludedPath(scratch_path);
+                }
+                const uint8_t flags = hidden ? kFlagHidden : 0;
+                const int32_t idx = AddNodeLocked(build_, parent_idx, n.name, flags, n.frn, n.size, n.mtime);
+                n.index = idx;
+                vol.frn_build.emplace_back(n.frn, idx);
+                ++added;
+                indexed_.store(build_.nodes.size());
+                if ((added & 0x3FFF) == 0) PingNotify();
+            }
+            continue;
+        }
+        std::wstring candidate = parent_info->path;
+        bool hidden_parent = parent_info->hidden_parent;
         for (auto rit = stack.rbegin(); rit != stack.rend(); ++rit) {
             FrnNode& n = **rit;
             if (IsIndexArtifactName(n.name)) continue;
@@ -3630,6 +4206,10 @@ bool Engine::BuildMftTree(VolState vol, uint64_t root_frn, std::vector<FrnNode> 
             parent_idx = AddNodeLocked(build_, parent_idx, n.name, flags, n.frn, n.size, n.mtime);
             n.index = parent_idx;
             hidden_parent = (flags & kFlagHidden) != 0;
+            if (n.is_dir) {
+                dir_cache.emplace(parent_idx, DirBuildInfo{
+                    candidate, hidden_parent, !hidden_parent && may_have_excluded(candidate)});
+            }
             vol.frn_build.emplace_back(n.frn, parent_idx);
             ++added;
         }
@@ -3654,15 +4234,18 @@ bool Engine::BuildMftTree(VolState vol, uint64_t root_frn, std::vector<FrnNode> 
             link.size = primary->size;
             link.mtime = primary->mtime;
         }
-        std::wstring path = build_path(parent_idx);
-        if (path.empty()) continue;
-        if (path.back() != L'\\') path += L'\\';
-        path += link.name;
-        if (path.size() > 32766) continue;
-        const bool hidden_parent = parent_idx != vol.root_idx &&
-            (build_.nodes[static_cast<size_t>(parent_idx)].flags & kFlagHidden) != 0;
-        const uint8_t flags = hidden_parent || ShouldSkipChild(parent_idx == vol.root_idx, link.name) || IsExcludedPath(path)
-            ? kFlagHidden : 0;
+        const DirBuildInfo* parent_info = get_dir_info(parent_idx);
+        if (!parent_info) continue;
+        const size_t sep = (!parent_info->path.empty() && parent_info->path.back() != L'\\') ? 1 : 0;
+        if (parent_info->path.size() + sep + link.name.size() > 32766) continue;
+        bool hidden = parent_info->hidden_parent || ShouldSkipChild(parent_idx == vol.root_idx, link.name);
+        if (!hidden && parent_info->may_contain_exclusion) {
+            scratch_path.assign(parent_info->path);
+            if (sep) scratch_path.push_back(L'\\');
+            scratch_path.append(link.name);
+            hidden = IsExcludedPath(scratch_path);
+        }
+        const uint8_t flags = hidden ? kFlagHidden : 0;
         const int32_t idx = AddNodeLocked(build_, parent_idx, link.name, flags, link.frn, link.size, link.mtime);
         vol.frn_build.emplace_back(link.frn, idx);
         ++added;
@@ -3678,19 +4261,181 @@ bool Engine::BuildMftTree(VolState vol, uint64_t root_frn, std::vector<FrnNode> 
     return true;
 }
 
+bool Engine::IndexVolumeForBackend(const VolumeInfo& volume) {
+    switch (EffectiveBackend(volume)) {
+    case VolumeBackend::NtfsMftUsn:
+        return IndexVolumeMft(volume);
+    case VolumeBackend::DirectoryWalk:
+        return IndexVolumeWalk(volume);
+    case VolumeBackend::Unsupported:
+    default:
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return false;
+    }
+}
+
+bool Engine::IndexVolumeWalk(const VolumeInfo& volume) {
+    if (volume.mount_point.size() < 2) {
+        SetLastError(ERROR_INVALID_NAME);
+        return false;
+    }
+    const wchar_t letter = static_cast<wchar_t>(towupper(volume.mount_point[0]));
+    const std::wstring root_path = std::wstring(1, letter) + L":\\";
+    const std::wstring root_name = std::wstring(1, letter) + L":";
+    if (!running_.load() || VolumePauseRequestedOrActive(volume.id, root_path)) {
+        SetLastError(ERROR_OPERATION_ABORTED);
+        return false;
+    }
+
+    std::vector<std::wstring> local_excluded;
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        local_excluded = excluded_paths_;
+    }
+    auto is_excluded_local = [&](std::wstring_view path) -> bool {
+        for (const auto& ex : local_excluded) {
+            if (ex.empty() || path.size() < ex.size()) continue;
+            if (CompareStringOrdinal(path.data(), static_cast<int>(ex.size()),
+                                     ex.data(), static_cast<int>(ex.size()), TRUE) != CSTR_EQUAL) continue;
+            if (path.size() == ex.size() || path[ex.size()] == L'\\' || path[ex.size()] == L'/') return true;
+        }
+        return false;
+    };
+    auto may_contain_exclusion_local = [&](std::wstring_view dir) -> bool {
+        for (const auto& ex : local_excluded) {
+            if (ex.empty()) continue;
+            if (dir.size() <= ex.size()) {
+                if (CompareStringOrdinal(ex.data(), static_cast<int>(dir.size()),
+                                         dir.data(), static_cast<int>(dir.size()), TRUE) == CSTR_EQUAL &&
+                    (ex.size() == dir.size() || dir.back() == L'\\' || ex[dir.size()] == L'\\' ||
+                     ex[dir.size()] == L'/')) {
+                    return true;
+                }
+            } else if (CompareStringOrdinal(dir.data(), static_cast<int>(ex.size()),
+                                            ex.data(), static_cast<int>(ex.size()), TRUE) == CSTR_EQUAL &&
+                       (dir[ex.size()] == L'\\' || dir[ex.size()] == L'/')) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    const size_t start_nodes = build_.nodes.size();
+    const size_t start_pool = build_.pool.size();
+    if (start_nodes >= kIndexCap) {
+        SetLastError(ERROR_FILE_TOO_LARGE);
+        return false;
+    }
+
+    VolState vol;
+    vol.letter = letter;
+    vol.kind = volume.kind;
+    vol.backend = VolumeBackend::DirectoryWalk;
+    vol.fs_tag = FsTagFromName(volume.file_system);
+    if (vol.fs_tag == VolumeFsTag::UnknownOrNtfs) vol.fs_tag = VolumeFsTag::Fat32;
+    vol.serial = volume.serial;
+    vol.volume_id = volume.id;
+    vol.journal_id = 0;
+    vol.next_usn = static_cast<int64_t>(volume.serial);
+    vol.root_idx = AddNodeLocked(build_, -1, root_name, kFlagDir | kFlagHidden);
+    vol.first_idx = vol.root_idx;
+    indexed_.store(build_.nodes.size());
+
+    SetStatus(L"正在扫描 " + root_path + L"…");
+    PingNotify();
+
+    WalkCallbacks cb;
+    cb.should_cancel = [&]() {
+        return !running_.load() || VolumePauseRequestedOrActive(volume.id, root_path);
+    };
+    cb.should_skip_name = [this](bool parent_is_root, std::wstring_view name) {
+        return ShouldSkipChild(parent_is_root, name) || IsIndexArtifactName(name);
+    };
+    cb.is_excluded_path = is_excluded_local;
+    cb.may_contain_exclusion = may_contain_exclusion_local;
+    cb.emit_node = [&](int32_t parent_id, std::wstring_view name, bool is_dir,
+                       bool hidden, uint64_t size, uint64_t mtime_ft) -> int32_t {
+        const uint8_t flags = static_cast<uint8_t>((is_dir ? kFlagDir : 0) | (hidden ? kFlagHidden : 0));
+        const int32_t idx = AddNodeLocked(build_, parent_id, name, flags, 0, size, mtime_ft);
+        indexed_.store(build_.nodes.size());
+        return idx;
+    };
+    cb.on_progress = [&](size_t count) {
+        SetStatus(StatusDriveProgress(letter, count));
+        PingNotify();
+    };
+
+    WalkStats stats;
+    const size_t cap = kIndexCap > build_.nodes.size() ? kIndexCap - build_.nodes.size() : 0;
+    std::wstring walk_root = root_path;
+    if (!test_walk_roots_.empty()) {
+        const auto it = test_walk_roots_.find(NormalizeVolumeId(volume.id));
+        if (it != test_walk_roots_.end() && !it->second.empty()) {
+            walk_root = it->second;
+        }
+    }
+    const bool ok = WalkDirectoryTree(walk_root, vol.root_idx, true, cap, cb, &stats);
+    if (!ok) {
+        build_.nodes.resize(start_nodes);
+        build_.attrs.resize(start_nodes);
+        build_.pool.resize(start_pool);
+        indexed_.store(build_.nodes.size());
+        const DWORD err = stats.cancelled ? ERROR_OPERATION_ABORTED :
+            (stats.hit_cap ? ERROR_FILE_TOO_LARGE :
+             (stats.root_error ? stats.root_error : ERROR_READ_FAULT));
+        diagnostics::runtime::Event(
+            err == ERROR_OPERATION_ABORTED ? "index_volume_scan_cancelled" : "index_volume_scan_failed",
+            {{"operation", index_operation}, {"drive", static_cast<uint64_t>(letter)},
+             {"phase", stats.cancelled ? 6ull : 1ull}, {"records", stats.added},
+             {"limit", kIndexCap}, {"error", err}},
+            IndexErrorLevel(err));
+        SetLastError(err);
+        return false;
+    }
+    build_.nodes[static_cast<size_t>(vol.root_idx)].unused =
+        static_cast<uint32_t>(build_.nodes.size());
+    indexed_.store(build_.nodes.size());
+    vol.item_count = static_cast<uint64_t>(stats.added) + 1;
+    build_vols_.push_back(std::move(vol));
+    return true;
+}
+
 bool Engine::RebuildVolumeMft(const VolumeInfo& volume) {
     if (VolumePaused(volume.id)) return true;
     if (!MachineIndexScope() || volume.id.empty()) return false;
+    return RebuildVolume(volume);
+}
 
-    // Flatten the current live view first. This gives the replacement build a
-    // stable snapshot of every healthy volume while excluding only the failed
-    // volume's DFS span. No query-visible state changes until the new V9 base
-    // is fully written and mmap validation succeeds.
+bool Engine::RebuildVolume(const VolumeInfo& volume) {
+    if (VolumePauseRequestedOrActive(volume.id, volume.mount_point)) return true;
+    if (volume.id.empty()) return false;
+    const VolumeBackend backend = EffectiveBackend(volume);
+    if (backend == VolumeBackend::Unsupported) {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return false;
+    }
+    if (backend == VolumeBackend::NtfsMftUsn && !IsAdmin()) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return false;
+    }
+    const std::wstring path = CachePath();
+    if (path.empty()) return false;
+
+    // Flatten the current live view first so healthy volumes stay intact while
+    // only the target volume's span is rebuilt (or appended if newly arrived).
     Store current;
     std::vector<VolState> current_volumes;
+    std::vector<std::wstring> inactive_ids;
+    uint64_t previous_built = 0;
     {
         std::unique_lock<std::shared_mutex> lock(mutex_);
-        if (LiveCount() == 0 || !FlattenLocked(current, current_volumes)) return false;
+        previous_built = built_unix_;
+        for (const auto& v : vols_) {
+            if (!v.volume_id.empty() && IsRootInactiveLocked(v.root_idx)) {
+                inactive_ids.push_back(NormalizeVolumeId(v.volume_id));
+            }
+        }
+        if (LiveCount() > 0 && !FlattenLocked(current, current_volumes)) return false;
     }
 
     const std::wstring target_id = NormalizeVolumeId(volume.id);
@@ -3698,66 +4443,77 @@ bool Engine::RebuildVolumeMft(const VolumeInfo& volume) {
         [&](const VolState& state) {
             return NormalizeVolumeId(state.volume_id) == target_id;
         });
-    if (target_it == current_volumes.end()) return false;
-
-    int32_t skip_first = target_it->first_idx;
-    int32_t skip_last = skip_first + static_cast<int32_t>(target_it->item_count);
-    if (skip_first < 0 || skip_last <= skip_first ||
-        skip_last > static_cast<int32_t>(current.nodes.size())) return false;
 
     Store replacement;
-    replacement.pool.reserve(current.pool.size());
-    replacement.nodes.reserve(current.nodes.size() - static_cast<size_t>(skip_last - skip_first));
-    replacement.attrs.reserve(replacement.nodes.capacity());
-    std::vector<int32_t> remap(current.nodes.size(), -1);
-    std::vector<uint32_t> kept_before(current.nodes.size() + 1, 0);
-    for (size_t i = 0; i < current.nodes.size(); ++i)
-        kept_before[i + 1] = kept_before[i] +
-            (i >= static_cast<size_t>(skip_first) && i < static_cast<size_t>(skip_last) ? 0u : 1u);
+    std::vector<VolState> healthy;
+    bool replacing_existing = false;
+    if (target_it != current_volumes.end()) {
+        replacing_existing = true;
+        const int32_t skip_first = target_it->first_idx;
+        const int32_t skip_last = skip_first + static_cast<int32_t>(target_it->item_count);
+        if (skip_first < 0 || skip_last <= skip_first ||
+            skip_last > static_cast<int32_t>(current.nodes.size())) return false;
 
-    for (int32_t i = 0; i < static_cast<int32_t>(current.nodes.size()); ++i) {
-        if (i >= skip_first && i < skip_last) continue;
-        const Node source = current.nodes[static_cast<size_t>(i)];
-        Node node = source;
-        node.parent = source.parent >= 0 ? remap[static_cast<size_t>(source.parent)] : -1;
-        const std::wstring_view name(current.pool.data() + source.off, source.len);
-        node.off = static_cast<uint32_t>(replacement.pool.size());
-        replacement.pool.insert(replacement.pool.end(), name.begin(), name.end());
-        if (source.unused > 0 && source.unused <= current.nodes.size())
-            node.unused = kept_before[source.unused];
-        else
-            node.unused = 0;
-        remap[static_cast<size_t>(i)] = static_cast<int32_t>(replacement.nodes.size());
-        replacement.nodes.push_back(node);
-        replacement.attrs.push_back(current.attrs[static_cast<size_t>(i)]);
+        replacement.pool.reserve(current.pool.size());
+        replacement.nodes.reserve(current.nodes.size() - static_cast<size_t>(skip_last - skip_first));
+        replacement.attrs.reserve(replacement.nodes.capacity());
+        std::vector<int32_t> remap(current.nodes.size(), -1);
+        std::vector<uint32_t> kept_before(current.nodes.size() + 1, 0);
+        for (size_t i = 0; i < current.nodes.size(); ++i)
+            kept_before[i + 1] = kept_before[i] +
+                (i >= static_cast<size_t>(skip_first) && i < static_cast<size_t>(skip_last) ? 0u : 1u);
+
+        for (int32_t i = 0; i < static_cast<int32_t>(current.nodes.size()); ++i) {
+            if (i >= skip_first && i < skip_last) continue;
+            const Node source = current.nodes[static_cast<size_t>(i)];
+            Node node = source;
+            node.parent = source.parent >= 0 ? remap[static_cast<size_t>(source.parent)] : -1;
+            const std::wstring_view name(current.pool.data() + source.off, source.len);
+            node.off = static_cast<uint32_t>(replacement.pool.size());
+            replacement.pool.insert(replacement.pool.end(), name.begin(), name.end());
+            if (source.unused > 0 && source.unused <= current.nodes.size())
+                node.unused = kept_before[source.unused];
+            else
+                node.unused = 0;
+            remap[static_cast<size_t>(i)] = static_cast<int32_t>(replacement.nodes.size());
+            replacement.nodes.push_back(node);
+            replacement.attrs.push_back(current.attrs[static_cast<size_t>(i)]);
+        }
+
+        healthy.reserve(current_volumes.size() - 1);
+        for (const auto& source : current_volumes) {
+            if (NormalizeVolumeId(source.volume_id) == target_id) continue;
+            VolState state = source;
+            if (state.root_idx < 0 || state.root_idx >= static_cast<int32_t>(remap.size()) ||
+                remap[static_cast<size_t>(state.root_idx)] < 0) return false;
+            state.root_idx = remap[static_cast<size_t>(state.root_idx)];
+            state.first_idx = state.root_idx;
+            const uint32_t old_end = source.first_idx + static_cast<uint32_t>(source.item_count);
+            const uint32_t new_end = old_end <= current.nodes.size()
+                ? kept_before[old_end] : static_cast<uint32_t>(replacement.nodes.size());
+            state.item_count = new_end > static_cast<uint32_t>(state.first_idx)
+                ? new_end - static_cast<uint32_t>(state.first_idx) : 0;
+            state.frn_base = nullptr;
+            state.frn_base_n = 0;
+            state.frn_new.clear();
+            state.frn_new_tail.clear();
+            state.frn_new_prev.clear();
+            state.frn_build.clear();
+            for (const auto& entry : source.frn_build) {
+                if (entry.second >= 0 && entry.second < static_cast<int32_t>(remap.size()) &&
+                    remap[static_cast<size_t>(entry.second)] >= 0)
+                    state.frn_build.emplace_back(entry.first, remap[static_cast<size_t>(entry.second)]);
+            }
+            healthy.push_back(std::move(state));
+        }
+    } else {
+        replacement = std::move(current);
+        healthy = std::move(current_volumes);
     }
 
-    std::vector<VolState> healthy;
-    healthy.reserve(current_volumes.size() - 1);
-    for (const auto& source : current_volumes) {
-        if (NormalizeVolumeId(source.volume_id) == target_id) continue;
-        VolState state = source;
-        if (state.root_idx < 0 || state.root_idx >= static_cast<int32_t>(remap.size()) ||
-            remap[static_cast<size_t>(state.root_idx)] < 0) return false;
-        state.root_idx = remap[static_cast<size_t>(state.root_idx)];
-        state.first_idx = state.root_idx;
-        const uint32_t old_end = source.first_idx + static_cast<uint32_t>(source.item_count);
-        const uint32_t new_end = old_end <= current.nodes.size()
-            ? kept_before[old_end] : static_cast<uint32_t>(replacement.nodes.size());
-        state.item_count = new_end > static_cast<uint32_t>(state.first_idx)
-            ? new_end - static_cast<uint32_t>(state.first_idx) : 0;
-        state.frn_base = nullptr;
-        state.frn_base_n = 0;
-        state.frn_new.clear();
-        state.frn_new_tail.clear();
-        state.frn_new_prev.clear();
-        state.frn_build.clear();
-        for (const auto& entry : source.frn_build) {
-            if (entry.second >= 0 && entry.second < static_cast<int32_t>(remap.size()) &&
-                remap[static_cast<size_t>(entry.second)] >= 0)
-                state.frn_build.emplace_back(entry.first, remap[static_cast<size_t>(entry.second)]);
-        }
-        healthy.push_back(std::move(state));
+    if (backend == VolumeBackend::DirectoryWalk && volume.online && volume.enabled) {
+        // Arm before scanning so changes occurring during directory walk are queued.
+        EnsureVolumeWalkWatch(volume);
     }
 
     {
@@ -3767,17 +4523,19 @@ bool Engine::RebuildVolumeMft(const VolumeInfo& volume) {
         building_ = true;
         indexed_.store(build_.nodes.size());
     }
-    SetStatus(L"正在重建 " + volume.mount_point + L" 的索引…");
-    if (!IndexVolumeMft(volume)) {
+    const bool walk_reconcile = backend == VolumeBackend::DirectoryWalk && replacing_existing;
+    SetStatus(walk_reconcile
+        ? (L"正在重新核对 " + volume.mount_point + L" 的索引…")
+        : (L"正在重建 " + volume.mount_point + L" 的索引…"));
+    if (!IndexVolumeForBackend(volume)) {
         std::unique_lock<std::shared_mutex> lock(mutex_);
         build_.Clear();
         build_vols_.clear();
         building_ = false;
         return false;
     }
-    const uint64_t built = static_cast<uint64_t>(std::time(nullptr));
-    const std::wstring path = CachePath();
-    const bool wrote = !path.empty() && WriteIndexFile(path, build_, build_vols_, built);
+    const uint64_t built = (std::max)(static_cast<uint64_t>(std::time(nullptr)), previous_built + 1);
+    const bool wrote = WriteIndexFile(path, build_, build_vols_, built);
     if (!wrote) {
         std::unique_lock<std::shared_mutex> lock(mutex_);
         build_.Clear();
@@ -3786,68 +4544,77 @@ bool Engine::RebuildVolumeMft(const VolumeInfo& volume) {
         return false;
     }
 
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    built_unix_ = built;
-    if (!CommitMappedFile(path)) {
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        const uint64_t saved_built = built_unix_;
+        built_unix_ = built;
+        if (!CommitMappedFile(path)) {
+            built_unix_ = saved_built;
+            build_.Clear();
+            build_vols_.clear();
+            building_ = false;
+            return false;
+        }
         build_.Clear();
+        build_.Shrink();
         build_vols_.clear();
+        // Restore offline hidden state for any unrelated offline removable volumes.
+        for (const auto& v : vols_) {
+            if (v.root_idx < 0 || v.volume_id.empty()) continue;
+            const std::wstring norm = NormalizeVolumeId(v.volume_id);
+            if (norm == target_id && volume.online) continue;
+            if (std::find(inactive_ids.begin(), inactive_ids.end(), norm) != inactive_ids.end()) {
+                inactive_volume_roots_.push_back(v.root_idx);
+            }
+        }
+        if (!inactive_volume_roots_.empty()) ++filter_epoch_;
+        OpenDeltasLocked();
+        ClearVolumeReconcile(volume.id);
+        GapFeed();
         building_ = false;
-        return false;
+        ready_ = true;
     }
-    build_.Clear();
-    build_.Shrink();
-    build_vols_.clear();
-    OpenDeltasLocked();
-    building_ = false;
-    ready_ = true;
-    SetStatus(volume.mount_point + L" 的索引已重建完成");
+    if (backend == VolumeBackend::DirectoryWalk) PollWalkWatches();
+    SetStatus(walk_reconcile
+        ? (volume.mount_point + L" 的索引已核对完成")
+        : (volume.mount_point + L" 的索引已重建完成"));
     PingNotify(true);
+    if (notify_ && notify_msg_) PostMessageW(notify_, notify_msg_, 1, 0);
     return true;
 }
 
 void Engine::WalkTree(int32_t parent, const std::wstring& dir, int depth) {
-    if (!running_ || depth > 18) return;
-    std::vector<fs::DirEntry> entries;
-    try {
-        fs::EnumerateDirectory(dir, entries);
-    } catch (...) {
-        return;
+    (void)depth;
+    if (!running_ || parent < 0) return;
+    std::vector<std::wstring> local_excluded;
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        local_excluded = excluded_paths_;
     }
-    std::wstring base = dir;
-    if (!base.empty() && base.back() != L'\\' && !fs::IsVirtualPath(base)) base += L'\\';
-
-    struct Child {
-        std::wstring name;
-        bool is_dir = false;
-        bool rec = false;
-        uint64_t size = 0;
-        uint64_t mtime = 0;
-        int32_t idx = -1;
+    WalkCallbacks cb;
+    cb.should_cancel = [this]() { return !running_.load(); };
+    cb.should_skip_name = [this](bool, std::wstring_view name) {
+        return ShouldSkipName(name) || IsIndexArtifactName(name);
     };
-    std::vector<Child> kids;
-    kids.reserve(entries.size());
-    for (const auto& e : entries) {
-        if (!running_) return;
-        if (ShouldSkipName(e.name) || IsIndexArtifactName(e.name)) continue;
-        if (IsExcludedPath(base + e.name)) continue;
-        Child c;
-        c.name = e.name;
-        c.is_dir = e.is_dir;
-        c.rec = e.is_dir && !e.is_reparse;
-        c.size = e.size;
-        c.mtime = (static_cast<uint64_t>(e.mtime.dwHighDateTime) << 32) | e.mtime.dwLowDateTime;
-        kids.push_back(std::move(c));
-    }
-    for (auto& c : kids) {
-        c.idx = AddNodeLocked(build_, parent, c.name, c.is_dir ? kFlagDir : 0, 0, c.size, c.mtime);
+    cb.is_excluded_path = [&](std::wstring_view path) -> bool {
+        for (const auto& ex : local_excluded) {
+            if (ex.empty() || path.size() < ex.size()) continue;
+            if (CompareStringOrdinal(path.data(), static_cast<int>(ex.size()),
+                                     ex.data(), static_cast<int>(ex.size()), TRUE) != CSTR_EQUAL) continue;
+            if (path.size() == ex.size() || path[ex.size()] == L'\\' || path[ex.size()] == L'/') return true;
+        }
+        return false;
+    };
+    cb.emit_node = [&](int32_t node_parent, std::wstring_view name, bool is_dir,
+                       bool hidden, uint64_t size, uint64_t mtime_ft) -> int32_t {
+        if (hidden) return -1;
+        const int32_t idx = AddNodeLocked(build_, node_parent, name, is_dir ? kFlagDir : 0, 0, size, mtime_ft);
         indexed_.store(build_.nodes.size());
-        if (indexed_.load() >= kIndexCap) return;
-    }
-    PingNotify();
-    for (const auto& c : kids) {
-        if (!running_ || indexed_.load() >= kIndexCap) return;
-        if (c.rec) WalkTree(c.idx, base + c.name, depth + 1);
-    }
+        return idx;
+    };
+    cb.on_progress = [this](size_t) { PingNotify(); };
+    const size_t cap = kIndexCap > build_.nodes.size() ? kIndexCap - build_.nodes.size() : 0;
+    WalkDirectoryTree(dir, parent, false, cap, cb, nullptr);
 }
 
 void Engine::FullRebuild(const char* reason) {
@@ -3910,19 +4677,32 @@ void Engine::FullRebuild(const char* reason) {
     PingNotify(true);
 
     bool incomplete = false;
+    bool used_volumes = false;
     const auto previous_count = indexed_.load();
-    if (IsAdmin() && fixture_root_.empty()) {
+    if ((IsAdmin() || MachineIndexScope()) && fixture_root_.empty()) {
+        const bool has_walk_volumes = std::any_of(configured_volumes.begin(), configured_volumes.end(),
+            [](const VolumeInfo& v) { return EffectiveBackend(v) == VolumeBackend::DirectoryWalk; });
+        if (has_walk_volumes) SyncWalkWatches(configured_volumes);
         for (const auto& volume : configured_volumes) {
             if (!running_) break;
-            if (IndexVolumeMft(volume)) used_mft = true;
-            else {
+            const VolumeBackend backend = EffectiveBackend(volume);
+            if (backend == VolumeBackend::Unsupported) continue;
+            if (backend == VolumeBackend::NtfsMftUsn && !IsAdmin()) {
+                if (!incomplete) build_error = ERROR_ACCESS_DENIED;
+                incomplete = true;
+                continue;
+            }
+            if (IndexVolumeForBackend(volume)) {
+                used_volumes = true;
+                if (backend == VolumeBackend::NtfsMftUsn) used_mft = true;
+            } else {
                 const DWORD error = GetLastError();
                 if (!incomplete) build_error = error ? error : ERROR_READ_FAULT;
                 incomplete = true;
             }
         }
     }
-    if (!used_mft && !incomplete && running_ && !MachineIndexScope()) {
+    if (!used_volumes && !incomplete && running_ && !MachineIndexScope()) {
         walk_roots_.clear();
         auto walk_root = [this](const std::wstring& path) {
             walk_roots_.push_back(path);
@@ -3974,15 +4754,30 @@ void Engine::FullRebuild(const char* reason) {
             PingNotify(true);
             RemoveLegacyVolumeShards();
         }
+        bool any_walk_vol = false;
         {
             std::unique_lock<std::shared_mutex> lock(mutex_);
             build_.Clear();
             build_.Shrink();
             build_vols_.clear();
             UpdateVolumeVisibilityLocked(configured_volumes);
+            for (const auto& v : vols_) {
+                if (v.backend == VolumeBackend::DirectoryWalk && !IsRootInactiveLocked(v.root_idx)) {
+                    any_walk_vol = true;
+                    break;
+                }
+            }
             const bool live_tracked = !vols_.empty() &&
-                std::all_of(vols_.begin(), vols_.end(),
-                            [](const VolState& v) { return v.journal_id != 0; });
+                std::all_of(vols_.begin(), vols_.end(), [&](const VolState& v) {
+                    if (IsRootInactiveLocked(v.root_idx)) return true;
+                    if (v.journal_id != 0) return true;
+                    if (v.backend != VolumeBackend::DirectoryWalk) return false;
+                    return std::any_of(watches_.begin(), watches_.end(), [&](const WalkWatch& w) {
+                        return !w.volume_id.empty() &&
+                            NormalizeVolumeId(w.volume_id) == NormalizeVolumeId(v.volume_id) &&
+                            w.dir != INVALID_HANDLE_VALUE;
+                    });
+                });
             SetStatus(committed ? StatusItemCount(indexed_.load(),
                       live_tracked ? L"实时更新" : L"正在监视")
                       : L"索引可用，但保存失败，请检查索引目录权限及磁盘空间");
@@ -3990,8 +4785,16 @@ void Engine::FullRebuild(const char* reason) {
             building_ = false;
             folder_size_gap_ = false;
         }
-        if (used_mft) StopWalkWatches();
-        else PollWalkWatches();
+        if (used_volumes) {
+            if (any_walk_vol) {
+                SyncWalkWatches(configured_volumes);
+                PollWalkWatches();
+            } else {
+                StopWalkWatches();
+            }
+        } else {
+            PollWalkWatches();
+        }
         PingNotify(true);
         if (notify_ && notify_msg_) PostMessageW(notify_, notify_msg_, 1, 0);
     } else {
@@ -4008,6 +4811,7 @@ void Engine::FullRebuild(const char* reason) {
         SetStatus(L"索引扫描未完成，保留上次结果，请稍后重试");
         PingNotify(true);
     }
+    _heapmin();
     finish();
 }
 
@@ -4096,7 +4900,7 @@ void Engine::Worker() {
     PingNotify(true);
 
     bool fresh = false;
-    if (have_cache && !needs_search_rebuild && IsAdmin()) {
+    if (have_cache && !needs_search_rebuild && (IsAdmin() || MachineIndexScope())) {
         bool have_vols = false;
         {
             std::shared_lock<std::shared_mutex> lock(mutex_);
@@ -4108,50 +4912,75 @@ void Engine::Worker() {
             fresh = true;
             {
                 std::shared_lock<std::shared_mutex> lock(mutex_);
-                for (const auto& drive : drives)
-                    if (std::none_of(vols_.begin(), vols_.end(), [&](const VolState& v) {
-                            return NormalizeVolumeId(drive.id) == NormalizeVolumeId(v.volume_id);
-                        })) fresh = false;
-                for (const auto& v : vols_)
+                for (const auto& v : vols_) {
                     if (std::any_of(mounted.begin(), mounted.end(), [&](const VolumeInfo& drive) {
                             return !drive.enabled &&
-                                   NormalizeVolumeId(drive.id) == NormalizeVolumeId(v.volume_id);
-                        })) fresh = false;
+                                   SameVolumeEntry(drive, v.volume_id, v.backend, v.fs_tag, v.serial);
+                        })) {
+                        fresh = false;
+                        break;
+                    }
+                }
             }
             if (fresh) {
                 std::vector<VolumeInfo> startup_failed;
                 std::unique_lock<std::shared_mutex> lock(mutex_);
                 for (auto& v : vols_) {
-                    const bool online = std::any_of(drives.begin(), drives.end(), [&](const VolumeInfo& drive) {
-                        return NormalizeVolumeId(drive.id) == NormalizeVolumeId(v.volume_id);
+                    auto it = std::find_if(drives.begin(), drives.end(), [&](const VolumeInfo& drive) {
+                        return SameVolumeEntry(drive, v.volume_id, v.backend, v.fs_tag, v.serial);
                     });
-                    if (!online) continue;
-                    lock.unlock();
-                    if (!CatchUpVolume(v, nullptr)) {
-                        auto it = std::find_if(drives.begin(), drives.end(), [&](const VolumeInfo& drive) {
-                            return NormalizeVolumeId(drive.id) == NormalizeVolumeId(v.volume_id);
-                        });
-                        if (it != drives.end()) startup_failed.push_back(*it);
+                    if (it != drives.end() && it->mount_point.size() >= 2 &&
+                        static_cast<wchar_t>(towupper(it->mount_point[0])) !=
+                            static_cast<wchar_t>(towupper(v.letter))) {
+                        RelocateVolumeLetterLocked(v, it->mount_point[0]);
                     }
+                }
+                UpdateVolumeVisibilityLocked(drives);
+                for (auto& v : vols_) {
+                    auto it = std::find_if(drives.begin(), drives.end(), [&](const VolumeInfo& drive) {
+                        return SameVolumeEntry(drive, v.volume_id, v.backend, v.fs_tag, v.serial);
+                    });
+                    if (it == drives.end()) continue;
+                    if (v.backend == VolumeBackend::DirectoryWalk ||
+                        EffectiveBackend(*it) == VolumeBackend::DirectoryWalk) {
+                        QueueVolumeReconcile(it->id);
+                        GapFeed();
+                        continue;
+                    }
+                    if (!IsAdmin()) {
+                        startup_failed.push_back(*it);
+                        continue;
+                    }
+                    lock.unlock();
+                    if (!CatchUpVolume(v, nullptr)) startup_failed.push_back(*it);
                     lock.lock();
+                }
+                for (const auto& drive : drives) {
+                    const bool tracked = std::any_of(vols_.begin(), vols_.end(), [&](const VolState& v) {
+                        return SameVolumeEntry(drive, v.volume_id, v.backend, v.fs_tag, v.serial);
+                    });
+                    if (!tracked) QueueVolumeReconcile(drive.id);
                 }
                 lock.unlock();
                 if (!startup_failed.empty()) {
                     fresh = true;
                     for (const auto& volume : startup_failed) {
-                        if (!RebuildVolumeMft(volume)) {
+                        if (!RebuildVolume(volume)) {
                             fresh = false;
                             break;
                         }
                     }
                 }
             }
-            if (fresh)
+            if (fresh) {
+                ready_ = true;
+                SyncWalkWatches(drives);
                 SetStatus(StatusItemCount(indexed_.load(), L"实时更新"));
+            }
         }
     }
     // Walk snapshots have no offline journal cursor. Replay provides a useful
-    // initial view, but every startup must reconcile changes while we were away.
+    // initial view, but every startup reconciles DirectoryWalk / new volumes.
 
     if (fresh) {
         if (notify_ && notify_msg_) PostMessageW(notify_, notify_msg_, 1, 0);
@@ -4184,14 +5013,54 @@ void Engine::Worker() {
     last_merge_tick_ = GetTickCount64();
     auto online = initial_drives;
     auto topology_tick = GetTickCount64();
+    std::array<ULONGLONG, 2> hotplug_probes{0, 0};
     StartJournalStreams();
+    if (running_ && !walk_mode) SyncWalkWatches(online);
     while (running_) {
         ApplyVolumePauses();
         SeedPendingChanges();
+        DWORD wait_ms = 15000;
+        const ULONGLONG wait_now = GetTickCount64();
+        if (topology_dirty_.load() || rebuild_requested_.load()) {
+            wait_ms = 0;
+        } else {
+            const std::vector<std::wstring> queued_reconciles = [this] {
+                std::lock_guard<std::mutex> rlock(reconcile_mu_);
+                return std::vector<std::wstring>(pending_reconcile_volumes_.begin(),
+                                                 pending_reconcile_volumes_.end());
+            }();
+            for (const auto& norm_id : queued_reconciles) {
+                const auto drive_it = std::find_if(online.begin(), online.end(), [&](const VolumeInfo& d) {
+                    return NormalizeVolumeId(d.id) == norm_id;
+                });
+                if (drive_it == online.end() || !drive_it->enabled || !drive_it->online) continue;
+                if (VolumePaused(drive_it->id) || PathPaused(drive_it->mount_point)) continue;
+                const auto retry_it = volume_retry_after_.find(drive_it->id);
+                if (retry_it == volume_retry_after_.end() || wait_now >= retry_it->second) {
+                    wait_ms = 0;
+                    break;
+                }
+                const ULONGLONG rem = retry_it->second - wait_now;
+                if (rem < wait_ms) wait_ms = static_cast<DWORD>(rem);
+            }
+            for (ULONGLONG& probe : hotplug_probes) {
+                if (!probe) continue;
+                if (wait_now >= probe) {
+                    wait_ms = 0;
+                    break;
+                }
+                const ULONGLONG rem = probe - wait_now;
+                if (rem < wait_ms) wait_ms = static_cast<DWORD>(rem);
+            }
+        }
         std::vector<HANDLE> events{change_signal_};
-        for (auto& watch : watches_) if (events.size() < MAXIMUM_WAIT_OBJECTS) if (watch.dir != INVALID_HANDLE_VALUE) events.push_back(watch.event);
+        for (auto& watch : watches_) {
+            if (events.size() < MAXIMUM_WAIT_OBJECTS && watch.dir != INVALID_HANDLE_VALUE && watch.event) {
+                events.push_back(watch.event);
+            }
+        }
         const auto wait_timing = FilenameTiming::Begin();
-        const DWORD wake = WaitForMultipleObjects(static_cast<DWORD>(events.size()), events.data(), FALSE, 15000);
+        const DWORD wake = WaitForMultipleObjects(static_cast<DWORD>(events.size()), events.data(), FALSE, wait_ms);
         filename_timing_.End(FilenameStage::Wait, wait_timing, wake == WAIT_TIMEOUT ? 0 : 1,
             wake == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS, wake == WAIT_TIMEOUT ? "maintenance" : "event");
         ApplyVolumePauses();
@@ -4201,8 +5070,17 @@ void Engine::Worker() {
         if (volume_pauses_.empty() && rebuild_requested_.exchange(false)) {
             journal_streams_.clear();
             volume_retry_after_.clear();
+            {
+                std::lock_guard<std::mutex> rlock(reconcile_mu_);
+                pending_reconcile_volumes_.clear();
+            }
             FullRebuild();
             StartJournalStreams();
+            {
+                std::shared_lock<std::shared_mutex> lock(mutex_);
+                walk_mode = vols_.empty() && !MachineIndexScope();
+            }
+            if (!walk_mode) SyncWalkWatches(online);
             last_merge_tick_ = GetTickCount64();
             topology_tick = 0;
             continue;
@@ -4215,25 +5093,92 @@ void Engine::Worker() {
         bool failed = false;
         std::vector<VolumeInfo> failed_volumes;
         const auto loop_tick = GetTickCount64();
-        if (fixture_root_.empty() && loop_tick - topology_tick >= 30000) {
+        const bool dirty_topology = topology_dirty_.exchange(false);
+        bool probe_due = false;
+        for (ULONGLONG& probe : hotplug_probes) {
+            if (probe && loop_tick >= probe) {
+                probe = 0;
+                probe_due = true;
+            }
+        }
+        if (dirty_topology) {
+            hotplug_probes = {loop_tick + 600, loop_tick + 2000};
+        }
+        const bool refresh_topology = fixture_root_.empty() &&
+            (dirty_topology || probe_due || loop_tick - topology_tick >= 30000);
+        if (refresh_topology) {
             const auto timing = FilenameTiming::Begin();
             IndexConfig topology_config;
             if (!MachineIndexScope() || LoadMachineConfig(topology_config, nullptr))
                 online = ConfiguredVolumes(topology_config);
             topology_tick = loop_tick;
-            filename_timing_.End(FilenameStage::Topology, timing, online.size(), ERROR_SUCCESS, "periodic");
+            filename_timing_.End(FilenameStage::Topology, timing, online.size(), ERROR_SUCCESS,
+                dirty_topology ? "hotplug" : (probe_due ? "hotplug_followup" : "periodic"));
+        }
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex_);
+            if (!vols_.empty()) {
+                if (refresh_topology) {
+                    const std::vector<int32_t> prev_inactive = inactive_volume_roots_;
+                    for (auto& v : vols_) {
+                        auto it = std::find_if(online.begin(), online.end(), [&](const VolumeInfo& drive) {
+                            return SameVolumeEntry(drive, v.volume_id, v.backend, v.fs_tag, v.serial);
+                        });
+                        if (it != online.end() && it->mount_point.size() >= 2 &&
+                            static_cast<wchar_t>(towupper(it->mount_point[0])) !=
+                                static_cast<wchar_t>(towupper(v.letter))) {
+                            RelocateVolumeLetterLocked(v, it->mount_point[0]);
+                            changed = true;
+                        }
+                    }
+                    UpdateVolumeVisibilityLocked(online);
+                    if (prev_inactive != inactive_volume_roots_) changed = true;
+                    for (const auto& v : vols_) {
+                        if (v.backend != VolumeBackend::DirectoryWalk || IsRootInactiveLocked(v.root_idx)) continue;
+                        const bool was_inactive = std::find(prev_inactive.begin(), prev_inactive.end(), v.root_idx) !=
+                            prev_inactive.end();
+                        if (was_inactive && !v.volume_id.empty()) {
+                            QueueVolumeReconcile(v.volume_id);
+                            GapFeed();
+                        }
+                    }
+                    for (const auto& drive : online) {
+                        const bool tracked = std::any_of(vols_.begin(), vols_.end(), [&](const VolState& v) {
+                            return SameVolumeEntry(drive, v.volume_id, v.backend, v.fs_tag, v.serial);
+                        });
+                        if (!tracked && !drive.id.empty()) {
+                            volume_retry_after_.erase(drive.id);
+                            QueueVolumeReconcile(drive.id);
+                            GapFeed();
+                        }
+                    }
+                } else {
+                    UpdateVolumeVisibilityLocked(online);
+                }
+            } else if (refresh_topology && !walk_mode) {
+                for (const auto& drive : online) {
+                    if (!drive.id.empty()) {
+                        volume_retry_after_.erase(drive.id);
+                        QueueVolumeReconcile(drive.id);
+                    }
+                }
+            }
+        }
+        if (refresh_topology && !walk_mode) {
+            SyncWalkWatches(online);
         }
         {
             std::unique_lock<std::shared_mutex> lock(mutex_);
             if (!vols_.empty()) {
                 std::vector<size_t> idx(vols_.size());
                 for (size_t i = 0; i < idx.size(); ++i) idx[i] = i;
-                UpdateVolumeVisibilityLocked(online);
                 lock.unlock();
                 for (size_t i : idx) {
+                    if (vols_[i].backend == VolumeBackend::DirectoryWalk) continue;
                     if (VolumePaused(vols_[i].volume_id)) continue;
                     const bool present = std::any_of(online.begin(), online.end(), [&](const VolumeInfo& drive) {
-                        return NormalizeVolumeId(drive.id) == NormalizeVolumeId(vols_[i].volume_id);
+                        return SameVolumeEntry(drive, vols_[i].volume_id, vols_[i].backend,
+                                               vols_[i].fs_tag, vols_[i].serial);
                     });
                     if (!present) continue;
                     const auto retry = volume_retry_after_.find(vols_[i].volume_id);
@@ -4242,15 +5187,24 @@ void Engine::Worker() {
                         GapFeed();
                         failed = true;
                         auto it = std::find_if(online.begin(), online.end(), [&](const VolumeInfo& drive) {
-                            return NormalizeVolumeId(drive.id) == NormalizeVolumeId(vols_[i].volume_id);
+                            return SameVolumeEntry(drive, vols_[i].volume_id, vols_[i].backend,
+                                                   vols_[i].fs_tag, vols_[i].serial);
                         });
                         if (it != online.end()) failed_volumes.push_back(*it);
                     }
                 }
                 lock.lock();
                 if (changed) {
-                    const bool live_tracked = std::all_of(vols_.begin(), vols_.end(),
-                        [](const VolState& v) { return v.journal_id != 0; });
+                    const bool live_tracked = std::all_of(vols_.begin(), vols_.end(), [&](const VolState& v) {
+                        if (IsRootInactiveLocked(v.root_idx)) return true;
+                        if (v.journal_id != 0) return true;
+                        if (v.backend != VolumeBackend::DirectoryWalk) return false;
+                        return std::any_of(watches_.begin(), watches_.end(), [&](const WalkWatch& w) {
+                            return !w.volume_id.empty() &&
+                                NormalizeVolumeId(w.volume_id) == NormalizeVolumeId(v.volume_id) &&
+                                w.dir != INVALID_HANDLE_VALUE;
+                        });
+                    });
                     SetStatus(StatusItemCount(indexed_.load(),
                               live_tracked ? L"实时更新" : L"部分磁盘未实时更新"));
                 }
@@ -4258,7 +5212,36 @@ void Engine::Worker() {
         }
         if (failed && running_) {
             RecoverFailedVolumes(failed_volumes, loop_tick,
-                [this](const VolumeInfo& volume) { return RebuildVolumeMft(volume); });
+                [this](const VolumeInfo& volume) { return RebuildVolume(volume); });
+        }
+        if (running_ && !walk_mode) {
+            for (const std::wstring& norm_id : TakePendingReconcileVolumes()) {
+                if (!running_) break;
+                auto it = std::find_if(online.begin(), online.end(), [&](const VolumeInfo& drive) {
+                    return NormalizeVolumeId(drive.id) == norm_id;
+                });
+                if (it == online.end() || !it->online || !it->enabled) continue;
+                if (VolumePauseRequestedOrActive(it->id, it->mount_point)) {
+                    QueueVolumeReconcile(norm_id);
+                    continue;
+                }
+                const auto retry = volume_retry_after_.find(it->id);
+                if (retry != volume_retry_after_.end() && GetTickCount64() < retry->second) {
+                    QueueVolumeReconcile(norm_id);
+                    continue;
+                }
+                if (RebuildVolume(*it)) {
+                    volume_retry_after_.erase(it->id);
+                    SyncWalkWatches(online);
+                    if (EffectiveBackend(*it) == VolumeBackend::NtfsMftUsn) {
+                        StartJournalStreams();
+                    }
+                    changed = true;
+                } else {
+                    volume_retry_after_[it->id] = GetTickCount64() + 60000;
+                    QueueVolumeReconcile(norm_id);
+                }
+            }
         }
         if (changed && notify_ && notify_msg_) PostMessageW(notify_, notify_msg_, 2, 0);
 
@@ -4283,6 +5266,7 @@ void Engine::Worker() {
         if (merge_reason) {
             MergeBase(std::strcmp(merge_reason, "quiet_changes") != 0, merge_reason);
         }
+        TrimIdleMemory();
         if (filename_timing_.Due()) CaptureMemoryState();
         filename_timing_.Flush();
     }
@@ -4293,83 +5277,513 @@ void Engine::Worker() {
     SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
 }
 
-void Engine::StopWalkWatches() {
-    for (auto& w : watches_) {
+DWORD CALLBACK Engine::WalkWatchRemovalCallback(
+    HCMNOTIFICATION, void* context, CM_NOTIFY_ACTION action,
+    PCM_NOTIFY_EVENT_DATA, DWORD) {
+    auto* io = static_cast<WalkWatchIo*>(context);
+    if (!io) return ERROR_SUCCESS;
+    if (action == CM_NOTIFY_ACTION_DEVICEQUERYREMOVE ||
+        action == CM_NOTIFY_ACTION_DEVICEREMOVEPENDING ||
+        action == CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE) {
+        {
+            std::lock_guard<std::mutex> lock(io->mu);
+            if (io->dir != INVALID_HANDLE_VALUE) {
+                io->eject_closed = true;
+                CancelIoEx(io->dir, &io->ov);
+                ::CloseHandle(io->dir);
+                io->dir = INVALID_HANDLE_VALUE;
+                if (io->event) SetEvent(io->event);
+            }
+        }
+        if (io->engine) io->engine->NotifyTopologyChange();
+    } else if (action == CM_NOTIFY_ACTION_DEVICEQUERYREMOVEFAILED) {
+        io->reopen_needed = true;
+        if (io->engine) io->engine->NotifyTopologyChange();
+    }
+    return ERROR_SUCCESS;
+}
+
+bool Engine::OpenWalkWatchHandle(WalkWatch& w) {
+    if (w.path.empty()) return false;
+    if (!w.io) w.io = std::make_unique<WalkWatchIo>();
+    w.io->engine = this;
+    w.io->buf.resize(64 * 1024);
+    if (!w.event) w.event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!w.event) return false;
+    w.io->event = w.event;
+    if (PathPaused(w.path) || (!w.volume_id.empty() && VolumePaused(w.volume_id))) {
+        w.dir = INVALID_HANDLE_VALUE;
+        return false;
+    }
+
+    const std::wstring open_path = ToWin32LongPath(w.path);
+    HANDLE h = CreateFileW(open_path.c_str(), FILE_LIST_DIRECTORY,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        w.dir = INVALID_HANDLE_VALUE;
+        return false;
+    }
+
+    CM_NOTIFY_FILTER filter{};
+    filter.cbSize = sizeof(filter);
+    filter.FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEHANDLE;
+    filter.u.DeviceHandle.hTarget = h;
+    HCMNOTIFICATION removal = nullptr;
+    if (CM_Register_Notification(&filter, w.io.get(), &Engine::WalkWatchRemovalCallback,
+                                 &removal) != CR_SUCCESS) {
+        removal = nullptr;
+    }
+
+    bool armed = false;
+    {
+        std::lock_guard<std::mutex> lock(w.io->mu);
+        w.io->dir = h;
+        w.io->removal = removal;
+        w.io->eject_closed = false;
+        w.io->reopen_needed = false;
+        ResetEvent(w.event);
+        ZeroMemory(&w.io->ov, sizeof(w.io->ov));
+        w.io->ov.hEvent = w.event;
+        const BOOL ok = ReadDirectoryChangesW(
+            h, w.io->buf.data(), static_cast<DWORD>(w.io->buf.size()), TRUE,
+            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+            FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE,
+            nullptr, &w.io->ov, nullptr);
+        armed = ok != FALSE || GetLastError() == ERROR_IO_PENDING;
+        if (!armed) {
+            w.io->dir = INVALID_HANDLE_VALUE;
+            w.io->removal = nullptr;
+        }
+    }
+    if (!armed) {
+        if (removal) CM_Unregister_Notification(removal);
+        ::CloseHandle(h);
+        w.dir = INVALID_HANDLE_VALUE;
+        return false;
+    }
+    w.dir = h;
+    return true;
+}
+
+void Engine::CloseWalkWatchHandle(WalkWatch& w) {
+    if (!w.io) {
         if (w.dir != INVALID_HANDLE_VALUE) {
-            CancelIoEx(w.dir, &w.ov);
-            DWORD completed = 0; GetOverlappedResult(w.dir, &w.ov, &completed, TRUE);
-            CloseHandle(w.dir);
+            ::CloseHandle(w.dir);
             w.dir = INVALID_HANDLE_VALUE;
         }
-        if (w.event) { CloseHandle(w.event); w.event = nullptr; }
+        return;
+    }
+    HCMNOTIFICATION removal = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(w.io->mu);
+        removal = w.io->removal;
+        w.io->removal = nullptr;
+    }
+    // Never hold io->mu while unregistering CM notifications (callbacks also take io->mu).
+    if (removal) CM_Unregister_Notification(removal);
+    {
+        std::lock_guard<std::mutex> lock(w.io->mu);
+        if (w.io->dir != INVALID_HANDLE_VALUE) {
+            CancelIoEx(w.io->dir, &w.io->ov);
+            DWORD completed = 0;
+            GetOverlappedResult(w.io->dir, &w.io->ov, &completed, TRUE);
+            ::CloseHandle(w.io->dir);
+            w.io->dir = INVALID_HANDLE_VALUE;
+        }
+        w.io->eject_closed = false;
+        w.io->reopen_needed = false;
+    }
+    w.dir = INVALID_HANDLE_VALUE;
+}
+
+void Engine::StopWalkWatches() {
+    for (auto& w : watches_) {
+        CloseWalkWatchHandle(w);
+        if (w.event) {
+            if (w.io) w.io->event = nullptr;
+            ::CloseHandle(w.event);
+            w.event = nullptr;
+        }
     }
     watches_.clear();
 }
 
 void Engine::StartWalkWatches(const std::vector<std::wstring>& roots) {
     StopWalkWatches();
-    // OVERLAPPED must stay at the address passed to the kernel until its IO
-    // completes. Reserve and construct in place before arming any watch.
     watches_.reserve(roots.size());
     for (const auto& path : roots) {
         if (path.empty()) continue;
         watches_.emplace_back();
         auto& w = watches_.back();
         w.path = path;
-        w.buf.resize(64 * 1024);
         w.event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        w.io = std::make_unique<WalkWatchIo>();
+        w.io->engine = this;
+        w.io->event = w.event;
+        w.io->buf.resize(64 * 1024);
         if (PathPaused(path)) continue;
-        w.dir = CreateFileW(path.c_str(), FILE_LIST_DIRECTORY,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                            nullptr, OPEN_EXISTING,
-                            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr);
-        if (w.dir == INVALID_HANDLE_VALUE) {
-            if (w.event) CloseHandle(w.event);
+        if (!OpenWalkWatchHandle(w)) {
+            CloseWalkWatchHandle(w);
+            if (w.event) {
+                w.io->event = nullptr;
+                ::CloseHandle(w.event);
+            }
             watches_.pop_back();
+        }
+    }
+}
+
+void Engine::EnsureVolumeWalkWatch(const VolumeInfo& volume) {
+    if (!volume.online || !volume.enabled || volume.id.empty() ||
+        volume.mount_point.size() < 2 || EffectiveBackend(volume) != VolumeBackend::DirectoryWalk) {
+        return;
+    }
+    const std::wstring norm_id = NormalizeVolumeId(volume.id);
+    const std::wstring root_path =
+        std::wstring(1, static_cast<wchar_t>(towupper(volume.mount_point[0]))) + L":\\";
+    for (auto& w : watches_) {
+        if (w.volume_id.empty() || NormalizeVolumeId(w.volume_id) != norm_id) continue;
+        if (CompareStringOrdinal(w.path.data(), static_cast<int>(w.path.size()),
+                                 root_path.data(), static_cast<int>(root_path.size()), TRUE) != CSTR_EQUAL) {
+            CloseWalkWatchHandle(w);
+            walk_pending_renames_.erase(w.path);
+            w.path = root_path;
+        }
+        if (w.dir == INVALID_HANDLE_VALUE && !PathPaused(w.path) && !VolumePaused(w.volume_id)) {
+            OpenWalkWatchHandle(w);
+        }
+        return;
+    }
+    watches_.emplace_back();
+    auto& w = watches_.back();
+    w.path = root_path;
+    w.volume_id = volume.id;
+    w.event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    w.io = std::make_unique<WalkWatchIo>();
+    w.io->engine = this;
+    w.io->event = w.event;
+    w.io->buf.resize(64 * 1024);
+    if (!PathPaused(w.path) && !VolumePaused(w.volume_id) && !OpenWalkWatchHandle(w)) {
+        CloseWalkWatchHandle(w);
+        if (w.event) {
+            w.io->event = nullptr;
+            ::CloseHandle(w.event);
+            w.event = nullptr;
+        }
+        watches_.pop_back();
+    }
+}
+
+void Engine::SyncWalkWatches(const std::vector<VolumeInfo>& online) {
+    for (auto it = watches_.begin(); it != watches_.end();) {
+        if (it->volume_id.empty()) {
+            ++it;
             continue;
         }
-        w.ov.hEvent = w.event;
-        const BOOL subtree = TRUE;
-        ReadDirectoryChangesW(w.dir, w.buf.data(), static_cast<DWORD>(w.buf.size()), subtree,
-            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
-            FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE,
-            nullptr, &w.ov, nullptr);
+        const std::wstring norm_id = NormalizeVolumeId(it->volume_id);
+        const auto match = std::find_if(online.begin(), online.end(), [&](const VolumeInfo& v) {
+            return v.online && v.enabled &&
+                EffectiveBackend(v) == VolumeBackend::DirectoryWalk &&
+                v.mount_point.size() >= 2 &&
+                NormalizeVolumeId(v.id) == norm_id;
+        });
+        if (match == online.end()) {
+            walk_pending_renames_.erase(it->path);
+            CloseWalkWatchHandle(*it);
+            if (it->event) {
+                if (it->io) it->io->event = nullptr;
+                ::CloseHandle(it->event);
+                it->event = nullptr;
+            }
+            it = watches_.erase(it);
+            continue;
+        }
+        const std::wstring desired_path =
+            std::wstring(1, static_cast<wchar_t>(towupper(match->mount_point[0]))) + L":\\";
+        if (CompareStringOrdinal(it->path.data(), static_cast<int>(it->path.size()),
+                                 desired_path.data(), static_cast<int>(desired_path.size()), TRUE) != CSTR_EQUAL) {
+            walk_pending_renames_.erase(it->path);
+            CloseWalkWatchHandle(*it);
+            it->path = desired_path;
+            OpenWalkWatchHandle(*it);
+        } else if (it->io && it->io->reopen_needed.exchange(false)) {
+            CloseWalkWatchHandle(*it);
+            if (OpenWalkWatchHandle(*it)) {
+                QueueVolumeReconcile(it->volume_id);
+                GapFeed();
+            }
+        } else if (it->io) {
+            std::lock_guard<std::mutex> lock(it->io->mu);
+            if (it->io->dir == INVALID_HANDLE_VALUE) it->dir = INVALID_HANDLE_VALUE;
+        }
+        ++it;
+    }
+    for (const auto& volume : online) {
+        EnsureVolumeWalkWatch(volume);
     }
 }
 
 void Engine::PollWalkWatches() {
+    auto is_device_gone_error = [](DWORD err) {
+        return err == ERROR_ACCESS_DENIED || err == ERROR_INVALID_HANDLE ||
+            err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND ||
+            err == ERROR_DEVICE_NOT_CONNECTED || err == ERROR_BAD_COMMAND ||
+            err == ERROR_GEN_FAILURE || err == ERROR_NOT_READY;
+    };
+
     for (auto& w : watches_) {
-        if (w.dir == INVALID_HANDLE_VALUE) continue;
+        if (!w.io) continue;
         DWORD n = 0;
-        if (!GetOverlappedResult(w.dir, &w.ov, &n, FALSE)) {
-            if (GetLastError() == ERROR_IO_INCOMPLETE) continue;
-            n = 0;
-        }
-        if (n == 0) { GapFeed(); walk_pending_renames_.erase(w.path); rebuild_requested_ = true; }
-        if (n > 0) {
-            const auto timing = FilenameTiming::Begin();
-            std::unique_lock<std::shared_mutex> lock(mutex_);
-            const auto applied = ApplyNotifyLocked(w.path, w.buf.data(), n);
-            if (applied) {
-                ++revision_; TraceSearch("filename_commit", revision_.load(), w.path);
-                if (notify_ && notify_msg_) PostMessageW(notify_, notify_msg_, 2, 0);
+        DWORD ov_error = ERROR_SUCCESS;
+        std::vector<BYTE> packet;
+        bool had_handle = false;
+        bool device_gone = false;
+        bool eject_closed = false;
+        bool overflow = false;
+
+        {
+            std::lock_guard<std::mutex> lock(w.io->mu);
+            eject_closed = w.io->eject_closed.exchange(false);
+            if (w.io->dir == INVALID_HANDLE_VALUE) {
+                w.dir = INVALID_HANDLE_VALUE;
+                if (eject_closed) {
+                    if (w.event) ResetEvent(w.event);
+                    walk_pending_renames_.erase(w.path);
+                    topology_dirty_ = true;
+                }
+                continue;
             }
-            filename_timing_.End(FilenameStage::Notify, timing, applied, ERROR_SUCCESS, "directory_changes");
+            had_handle = true;
+            if (!GetOverlappedResult(w.io->dir, &w.io->ov, &n, FALSE)) {
+                ov_error = GetLastError();
+                if (ov_error == ERROR_IO_INCOMPLETE) continue;
+                n = 0;
+            }
+            if (n > 0) {
+                packet.assign(w.io->buf.data(), w.io->buf.data() + n);
+            }
+            if (w.event) ResetEvent(w.event);
+            ZeroMemory(&w.io->ov, sizeof(w.io->ov));
+            w.io->ov.hEvent = w.event;
+            const BOOL armed = ReadDirectoryChangesW(
+                w.io->dir, w.io->buf.data(), static_cast<DWORD>(w.io->buf.size()), TRUE,
+                FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE,
+                nullptr, &w.io->ov, nullptr);
+            if (!armed && GetLastError() != ERROR_IO_PENDING) {
+                const DWORD arm_err = GetLastError();
+                if (is_device_gone_error(arm_err) || is_device_gone_error(ov_error)) {
+                    device_gone = true;
+                    ::CloseHandle(w.io->dir);
+                    w.io->dir = INVALID_HANDLE_VALUE;
+                    w.dir = INVALID_HANDLE_VALUE;
+                } else {
+                    overflow = true;
+                }
+            } else if (n == 0) {
+                if (ov_error == ERROR_NOTIFY_ENUM_DIR || ov_error == ERROR_SUCCESS) {
+                    overflow = true;
+                } else if (is_device_gone_error(ov_error)) {
+                    device_gone = true;
+                    ::CloseHandle(w.io->dir);
+                    w.io->dir = INVALID_HANDLE_VALUE;
+                    w.dir = INVALID_HANDLE_VALUE;
+                } else if (!eject_closed) {
+                    overflow = true;
+                }
+            }
         }
-        ResetEvent(w.event);
-        ZeroMemory(&w.ov, sizeof(w.ov));
-        w.ov.hEvent = w.event;
-        const BOOL subtree = TRUE;
-        ReadDirectoryChangesW(w.dir, w.buf.data(), static_cast<DWORD>(w.buf.size()), subtree,
-            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
-            FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE,
-            nullptr, &w.ov, nullptr);
+        if (!had_handle) continue;
+
+        if (n == 0) {
+            walk_pending_renames_.erase(w.path);
+            if (eject_closed || device_gone) {
+                topology_dirty_ = true;
+            } else if (overflow) {
+                GapFeed();
+                if (!w.volume_id.empty()) {
+                    QueueVolumeReconcile(w.volume_id);
+                } else {
+                    rebuild_requested_ = true;
+                }
+            }
+        }
+        if (n > 0) {
+            std::vector<std::wstring> added_dirs;
+            uint64_t applied = 0;
+            const auto timing = FilenameTiming::Begin();
+            {
+                std::unique_lock<std::shared_mutex> lock(mutex_);
+                applied = ApplyNotifyLocked(w.path, packet.data(), n, w.volume_id, &added_dirs);
+                if (applied) {
+                    ++revision_;
+                    TraceSearch("filename_commit", revision_.load(), w.path);
+                }
+            }
+            if (applied && notify_ && notify_msg_) PostMessageW(notify_, notify_msg_, 2, 0);
+            filename_timing_.End(FilenameStage::Notify, timing, applied, ERROR_SUCCESS, "directory_changes");
+            if (!added_dirs.empty()) IndexAddedDirectories(added_dirs, w.volume_id);
+        }
     }
 }
 
-uint64_t Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DWORD len) {
+void Engine::IndexAddedDirectories(const std::vector<std::wstring>& dirs, std::wstring_view volume_id) {
+    if (dirs.empty() || !running_.load()) return;
+    constexpr size_t kAddedDirCap = 4096;
+
+    std::vector<std::wstring> local_excluded;
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        local_excluded = excluded_paths_;
+    }
+    auto is_excluded_local = [&](std::wstring_view path) -> bool {
+        for (const auto& ex : local_excluded) {
+            if (ex.empty() || path.size() < ex.size()) continue;
+            if (CompareStringOrdinal(path.data(), static_cast<int>(ex.size()),
+                                     ex.data(), static_cast<int>(ex.size()), TRUE) != CSTR_EQUAL) continue;
+            if (path.size() == ex.size() || path[ex.size()] == L'\\' || path[ex.size()] == L'/') return true;
+        }
+        return false;
+    };
+
+    struct PendingItem {
+        int32_t parent_local = -1;
+        std::wstring path;
+        bool is_dir = false;
+        bool hidden = false;
+        uint64_t size = 0;
+        uint64_t mtime_ft = 0;
+    };
+
+    std::vector<PendingItem> collected;
+    bool hit_cap = false;
+    for (const auto& dir : dirs) {
+        if (!running_.load() || collected.size() >= kAddedDirCap) break;
+        std::wstring root_clean = dir;
+        while (root_clean.size() > 3 && (root_clean.back() == L'\\' || root_clean.back() == L'/')) {
+            root_clean.pop_back();
+        }
+        if (root_clean.empty()) continue;
+
+        std::vector<std::wstring> paths_by_id;
+        paths_by_id.push_back(root_clean);
+
+        WalkCallbacks cb;
+        cb.should_cancel = [this]() { return !running_.load(); };
+        cb.should_skip_name = [this](bool, std::wstring_view name) {
+            return ShouldSkipName(name) || IsIndexArtifactName(name);
+        };
+        cb.is_excluded_path = is_excluded_local;
+        cb.emit_node = [&](int32_t local_parent, std::wstring_view name, bool is_dir,
+                           bool hidden, uint64_t size, uint64_t mtime_ft) -> int32_t {
+            if (local_parent < 0 || static_cast<size_t>(local_parent) >= paths_by_id.size()) return -1;
+            std::wstring full = paths_by_id[static_cast<size_t>(local_parent)];
+            if (!full.empty() && full.back() != L'\\') full.push_back(L'\\');
+            full.append(name);
+            const int32_t local_id = static_cast<int32_t>(paths_by_id.size());
+            paths_by_id.push_back(full);
+            collected.push_back(PendingItem{local_parent, std::move(full), is_dir, hidden, size, mtime_ft});
+            return local_id;
+        };
+
+        WalkStats stats;
+        const size_t remaining = kAddedDirCap - collected.size();
+        const bool ok = WalkDirectoryTree(root_clean, 0, false, remaining, cb, &stats);
+        if (!ok && stats.hit_cap) {
+            hit_cap = true;
+            break;
+        }
+    }
+
+    if (hit_cap) {
+        GapFeed();
+        if (!volume_id.empty()) QueueVolumeReconcile(volume_id);
+        else rebuild_requested_ = true;
+        return;
+    }
+    if (collected.empty()) return;
+
+    bool any_added = false;
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        const int32_t previous_count = LiveCount();
+        for (const auto& item : collected) {
+            const int32_t existing = ResolvePathLocked(item.path);
+            if (existing >= 0 && !IsTomb(existing)) continue;
+            const int32_t idx = EnsureChainLocked(live_, item.path, item.is_dir, true);
+            if (idx < 0) continue;
+            if (item.hidden) {
+                const int32_t base = BaseCount();
+                if (idx >= base) live_.nodes[static_cast<size_t>(idx - base)].flags |= kFlagHidden;
+                else {
+                    Patch& pt = patches_[idx];
+                    Node n = NodeAt(idx);
+                    pt.parent = n.parent;
+                    pt.flags = n.flags | kFlagHidden;
+                    pt.has_meta = true;
+                }
+            }
+            Attr a;
+            a.size = item.is_dir ? 0 : item.size;
+            a.mtime = FtToUnix(item.mtime_ft);
+            const int32_t base = BaseCount();
+            if (idx >= base) live_.attrs[static_cast<size_t>(idx - base)] = a;
+            else {
+                Patch& pt = patches_[idx];
+                Node n = NodeAt(idx);
+                pt.parent = n.parent;
+                pt.flags = n.flags;
+                pt.has_meta = true;
+                pt.has_attr = true;
+                pt.attr = a;
+            }
+            if (!item.hidden && !IsExcludedPath(item.path)) {
+                ChangeRecord event;
+                event.path = item.path;
+                event.kind = ChangeKind::Created;
+                event.is_dir = item.is_dir;
+                event.time = a.mtime;
+                RecordFeed(event);
+                changes_.Record(std::move(event));
+            }
+            any_added = true;
+        }
+        if (LiveCount() > previous_count) {
+            const wchar_t hint_letter = !dirs.front().empty() && dirs.front().size() >= 2 && dirs.front()[1] == L':'
+                ? dirs.front()[0] : 0;
+            DeltaLog* delta = (!volume_id.empty() || !vols_.empty())
+                ? DeltaForVolume(volume_id, hint_letter) : DeltaFor(0);
+            if (delta) {
+                for (int32_t id = previous_count; id < LiveCount(); ++id) {
+                    const auto node = NodeAt(id);
+                    const auto attr = AttrAt(id);
+                    delta->QueueAdd(id, node.parent, node.flags, attr.mtime, attr.size, NameOf(id), 0);
+                }
+            } else {
+                GapFeed();
+                if (!volume_id.empty()) QueueVolumeReconcile(volume_id);
+                else rebuild_requested_ = true;
+            }
+            indexed_.store(static_cast<size_t>(LiveCount()) > deleted_ ? LiveCount() - deleted_ : 0);
+            InvalidateFilterLocked();
+            ++struct_changes_;
+            last_struct_tick_ = GetTickCount64();
+            ++revision_;
+        }
+    }
+    if (any_added && notify_ && notify_msg_) PostMessageW(notify_, notify_msg_, 2, 0);
+}
+
+uint64_t Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DWORD len,
+                                   std::wstring_view volume_id,
+                                   std::vector<std::wstring>* added_dirs) {
     uint64_t applied = 0;
     std::wstring& pending_old = walk_pending_renames_[root];
+    const wchar_t fallback_letter = (root.size() >= 2 && root[1] == L':') ? root[0] : 0;
+    DeltaLog* delta = (!volume_id.empty() || !vols_.empty())
+        ? DeltaForVolume(volume_id, fallback_letter) : DeltaFor(0);
     const BYTE* p = buf;
     const BYTE* end = buf + len;
     while (p + sizeof(FILE_NOTIFY_INFORMATION) <= end) {
@@ -4413,9 +5827,10 @@ uint64_t Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DW
         ChangeRecord event; event.path = full;
         const int32_t known = ResolvePathLocked(full);
         event.is_dir = known >= 0 && (NodeAt(known).flags & kFlagDir) != 0;
+        const std::wstring long_full = ToWin32LongPath(full);
         if (info->Action == FILE_ACTION_ADDED) {
             event.kind = ChangeKind::Created;
-            DWORD attributes = GetFileAttributesW(full.c_str());
+            DWORD attributes = GetFileAttributesW(long_full.c_str());
             event.is_dir = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         } else if (info->Action == FILE_ACTION_REMOVED) event.kind = ChangeKind::Deleted;
         else if (info->Action == FILE_ACTION_RENAMED_NEW_NAME) { event.kind = ChangeKind::Renamed; event.old_path = pending_old;
@@ -4429,9 +5844,32 @@ uint64_t Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DW
         switch (info->Action) {
         case FILE_ACTION_ADDED: {
             WIN32_FILE_ATTRIBUTE_DATA fad{};
-            const bool ok = GetFileAttributesExW(full.c_str(), GetFileExInfoStandard, &fad);
-            const bool is_dir = ok && (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+            const bool ok = GetFileAttributesExW(long_full.c_str(), GetFileExInfoStandard, &fad);
+            const bool is_dir = ok && (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            const bool is_reparse = ok && (fad.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
             int32_t idx = EnsureChainLocked(live_, full, is_dir, true);
+            bool should_hide = false;
+            if (idx >= 0) {
+                const auto leaf_slash = full.find_last_of(L"\\/");
+                const std::wstring_view leaf = leaf_slash == std::wstring::npos
+                    ? std::wstring_view(full) : std::wstring_view(full).substr(leaf_slash + 1);
+                const int32_t parent_id = NodeAt(idx).parent;
+                const bool parent_is_root = parent_id >= 0 && NodeAt(parent_id).parent < 0;
+                const bool hidden_parent = parent_id >= 0 && NodeAt(parent_id).parent >= 0 &&
+                    (NodeAt(parent_id).flags & kFlagHidden) != 0;
+                should_hide = hidden_parent || ShouldSkipChild(parent_is_root, leaf) || IsExcludedPath(full);
+                if (should_hide) {
+                    const int32_t base = BaseCount();
+                    if (idx >= base) live_.nodes[static_cast<size_t>(idx - base)].flags |= kFlagHidden;
+                    else {
+                        Patch& pt = patches_[idx];
+                        Node n = NodeAt(idx);
+                        pt.parent = n.parent;
+                        pt.flags = n.flags | kFlagHidden;
+                        pt.has_meta = true;
+                    }
+                }
+            }
             if (idx >= 0 && ok) {
                 Attr a;
                 a.size = (static_cast<uint64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
@@ -4449,16 +5887,41 @@ uint64_t Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DW
                     pt.attr = a;
                 }
             }
-            indexed_.store(static_cast<size_t>(LiveCount()));
+            if (idx >= 0 && is_dir && !is_reparse && !should_hide && added_dirs) {
+                added_dirs->push_back(full);
+            }
+            indexed_.store(static_cast<size_t>(LiveCount()) > deleted_ ? LiveCount() - deleted_ : 0);
             InvalidateFilterLocked();
             break;
         }
         case FILE_ACTION_REMOVED: {
             int32_t idx = ResolvePathLocked(full);
             if (idx >= 0 && !IsTomb(idx)) {
-                ChildMapRemove(NodeAt(idx).parent, NameOf(idx), idx);
-                tombstones_.insert(idx);
-                ++deleted_;
+                const bool removed_dir = (NodeAt(idx).flags & kFlagDir) != 0;
+                std::vector<int32_t> subtree;
+                if (removed_dir) CollectLiveSubtreeLocked(idx, subtree);
+                else subtree.push_back(idx);
+                for (auto it = subtree.rbegin(); it != subtree.rend(); ++it) {
+                    const int32_t sub = *it;
+                    if (sub < 0 || IsTomb(sub)) continue;
+                    if (sub != idx) {
+                        ChangeRecord child_ev;
+                        child_ev.path = BuildPathLocked(sub);
+                        child_ev.kind = ChangeKind::Deleted;
+                        child_ev.is_dir = (NodeAt(sub).flags & kFlagDir) != 0;
+                        if (!child_ev.path.empty()) {
+                            RecordFeed(child_ev);
+                            changes_.Record(std::move(child_ev));
+                        }
+                    }
+                    ChildMapRemove(NodeAt(sub).parent, NameOf(sub), sub);
+                    tombstones_.insert(sub);
+                    ++deleted_;
+                    if (delta && sub < previous_count && sub != changed_id) {
+                        delta->QueueTomb(sub);
+                    }
+                }
+                indexed_.store(static_cast<size_t>(LiveCount()) > deleted_ ? LiveCount() - deleted_ : 0);
                 InvalidateFilterLocked();
             }
             break;
@@ -4467,7 +5930,7 @@ uint64_t Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DW
             int32_t idx = ResolvePathLocked(full);
             if (idx >= 0) {
                 WIN32_FILE_ATTRIBUTE_DATA fad{};
-                if (GetFileAttributesExW(full.c_str(), GetFileExInfoStandard, &fad)) {
+                if (GetFileAttributesExW(long_full.c_str(), GetFileExInfoStandard, &fad)) {
                     Attr a;
                     a.size = (static_cast<uint64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
                     a.mtime = FtToUnix((static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) |
@@ -4503,10 +5966,18 @@ uint64_t Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DW
                 const int32_t new_parent = slash == std::wstring::npos ? old.parent : EnsureChainLocked(live_, full.substr(0, slash), true, true);
                 if (old.parent != new_parent) subtree_intervals_valid_ = false;
                 ChildMapRemove(old.parent, NameOf(idx), idx);
+                const bool parent_is_root = new_parent >= 0 && NodeAt(new_parent).parent < 0;
+                const bool hidden_parent = new_parent >= 0 && NodeAt(new_parent).parent >= 0 &&
+                    (NodeAt(new_parent).flags & kFlagHidden) != 0;
+                uint8_t updated_flags = static_cast<uint8_t>(old.flags & ~kFlagHidden);
+                if (hidden_parent || ShouldSkipChild(parent_is_root, new_name) || IsExcludedPath(full)) {
+                    updated_flags |= kFlagHidden;
+                }
                 const int32_t base = BaseCount();
                 if (idx >= base) {
                     Node& n = live_.nodes[static_cast<size_t>(idx - base)];
                     n.parent = new_parent;
+                    n.flags = updated_flags;
                     pool_waste_ += n.len;
                     n.off = static_cast<uint32_t>(live_.pool.size());
                     n.len = static_cast<uint16_t>((std::min)(new_name.size(), static_cast<size_t>(65535)));
@@ -4514,7 +5985,7 @@ uint64_t Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DW
                 } else {
                     Patch& pt = patches_[idx];
                     pt.parent = new_parent;
-                    pt.flags = old.flags;
+                    pt.flags = updated_flags;
                     pt.has_meta = true;
                     if (pt.has_name) pool_waste_ += pt.len;
                     pt.has_name = true;
@@ -4523,6 +5994,9 @@ uint64_t Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DW
                     live_.pool.insert(live_.pool.end(), new_name.begin(), new_name.begin() + pt.len);
                 }
                 ChildMapAdd(new_parent, new_name, idx);
+                if (updated_flags & kFlagDir) {
+                    RefreshSubtreeVisibilityLocked(idx, delta);
+                }
                 InvalidateFilterLocked();
             } else {
                 EnsureChainLocked(live_, full, false, true);
@@ -4535,7 +6009,7 @@ uint64_t Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DW
         }
         if (info->Action != FILE_ACTION_RENAMED_OLD_NAME &&
             info->Action >= FILE_ACTION_ADDED && info->Action <= FILE_ACTION_RENAMED_NEW_NAME) {
-            if (auto* delta = DeltaFor(0)) {
+            if (delta) {
                 // EnsureChain may create missing ancestors: persist each new ID
                 // in order before records that refer to it.
                 for (int32_t id = previous_count; id < LiveCount(); ++id) {
@@ -4554,6 +6028,9 @@ uint64_t Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DW
                             attr.mtime, attr.size, NameOf(changed_id));
                     }
                 }
+            } else if (!volume_id.empty()) {
+                GapFeed();
+                QueueVolumeReconcile(volume_id);
             } else {
                 rebuild_requested_ = true;
                 SetStatus(L"索引更新尚未保存，需要重新扫描；请检查索引目录权限及磁盘空间");

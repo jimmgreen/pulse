@@ -68,7 +68,10 @@ int AutoIconNameLines(std::vector<int>& needed, bool has_folders) noexcept {
         return needed[std::min(needed.size() - 1, needed.size() * percent / 100)];
     };
     if (at(95) <= 1 && !has_folders) return 1;
-    return std::clamp(at(75), 2, kIconGridMaxNameLines);
+    // `needed` measures names, while the last slot is reserved for a folder's
+    // size. Do not take that slot away from the two-line name budget.
+    const int size_line = has_folders ? 1 : 0;
+    return std::clamp(at(75) + size_line, 2 + size_line, kIconGridMaxNameLines);
 }
 
 const wchar_t* ViewModeName(ViewMode mode) noexcept {
@@ -297,8 +300,10 @@ ViewLayout::ViewLayout(ViewMode mode, D2D1_RECT_F viewport, size_t item_count,
             ? std::clamp(static_cast<int>(std::lround((row_height_dip - 2.0f) / kIconGridNameLineDip)),
                          1, kIconGridMaxNameLines)
             : kIconGridNameLines;
+        metrics_.name_line_px = std::max(kIconGridNameLineDip, params.icon_name_line_dip) * scale_;
         metrics_.cell_width = cell_w;
-        metrics_.cell_height = slot_h + (kIconGridChromeDip + IconGridNameBlockDip(metrics_.name_lines)) * scale_;
+        metrics_.cell_height = slot_h + (kIconGridChromeDip + 2.0f) * scale_ +
+                               metrics_.name_lines * metrics_.name_line_px;
         metrics_.icon_size = slot_w;
         metrics_.slot_height = slot_h;
         metrics_.columns = cols;
@@ -563,7 +568,7 @@ D2D1_RECT_F ViewLayout::NameRect(int index) const noexcept {
         const D2D1_RECT_F slot = ThumbnailRect(index);
         const float top = std::min(cell.bottom - 4.0f * scale_,
                                    slot.bottom + kIconGridNameGapDip * scale_);
-        const float lines_h = IconGridNameBlockDip(metrics_.name_lines) * scale_;
+        const float lines_h = metrics_.name_lines * metrics_.name_line_px + 2.0f * scale_;
         const float inset = kIconGridNameInsetDip * scale_;
         return {cell.left + inset, top, cell.right - inset, top + lines_h};
     }
@@ -586,7 +591,7 @@ D2D1_RECT_F ViewLayout::FolderSizeRect(int index) const noexcept {
                       mode_ == ViewMode::MediumIcons;
     if (grid) {
         const float above = static_cast<float>(std::max(1, metrics_.name_lines - 1));
-        return {name.left, name.top + above * kIconGridNameLineDip * scale_, name.right, name.bottom};
+        return {name.left, name.top + above * metrics_.name_line_px, name.right, name.bottom};
     }
     const float top = name.top + 25.0f * scale_;
     return {name.left, top, name.right, top + 22.0f * scale_};

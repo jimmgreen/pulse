@@ -176,7 +176,7 @@ BuiltinMenuItem BuiltinItemForRow(const ui::FluentMenuItem& item) {
     if (child >= CmdMoveToWindowBase && child < CmdMoveToWindowBase + kMaxWindowTransferTargets)
         return BuiltinMenuItem::MoveToWindow;
     if (item.glyph == L"\xE710") return BuiltinMenuItem::NewTemplates;
-    if (item.glyph == L"\xE8B7") return BuiltinMenuItem::Git;
+    if (item.glyph == L"\xE8B7" || item.glyph == L"\xF003") return BuiltinMenuItem::Git;
     if (item.glyph == kGlyphViewMenu) return BuiltinMenuItem::View;
     if (item.glyph == kGlyphSortMenu) return BuiltinMenuItem::Sort;
     if (item.glyph == kGlyphGroupMenu) return BuiltinMenuItem::Group;
@@ -402,6 +402,33 @@ std::vector<ui::FluentMenuItem> BuildBreadcrumbMenu(bool filesystem) {
     return items;
 }
 
+std::vector<ui::FluentMenuItem> BuildSidebarDriveMenu(const SidebarDriveMenuOptions& options) {
+    std::vector<ui::FluentMenuItem> items;
+    items.push_back(Item(CmdOpen, l10n::Get(l10n::StringId::Open).c_str(), kGlyphOpen));
+    if (options.locked)
+        items.push_back(Item(CmdUnlockDrive, l10n::Get(l10n::StringId::UnlockDrive).c_str(), L"\xE785"));
+    if (options.ejectable)
+        items.push_back(Item(CmdEjectDrive, l10n::Get(l10n::StringId::Eject).c_str(),
+                             options.eject_glyph ? options.eject_glyph : L"\xE88E"));
+    if (options.remote)
+        items.push_back(Item(CmdDisconnectDrive, l10n::Get(l10n::StringId::DisconnectNetworkDrive).c_str(), L"\xE8CD"));
+    items.back().separator_after = true;
+    if (!options.locked)
+        items.push_back(Item(CmdOpenInNewTab, l10n::Get(l10n::StringId::OpenNewTab).c_str(), kGlyphOpenInNewTab));
+    items.push_back(Item(CmdCopyPath, l10n::Get(l10n::StringId::CopyPath).c_str(), kGlyphCopyPath));
+    if (!options.locked)
+        items.push_back(Item(CmdOpenTerminal, l10n::Get(l10n::StringId::OpenTerminalHere).c_str(), kGlyphTerminal));
+    items.push_back(Item(CmdProperties, l10n::Get(l10n::StringId::Properties).c_str(), kGlyphProperties));
+    if (!options.locked) {
+        items.back().separator_after = true;
+        items.push_back(Item(CmdPinWorkspace,
+                             l10n::Get(options.workspace_pinned ? l10n::StringId::UnpinWorkspace
+                                                                : l10n::StringId::PinWorkspace).c_str(),
+                             kGlyphPinWorkspace));
+    }
+    return items;
+}
+
 std::vector<ui::FluentMenuItem> BuildSortMenu(const BackgroundViewOptions& options) {
     auto sort = Item(CmdNone, l10n::Get(l10n::StringId::SortBy).c_str(), L"\xE8CB",
                      nullptr, options.can_sort);
@@ -556,8 +583,11 @@ std::vector<ui::FluentMenuItem> BuildViewMenu(ui::ViewMode current_mode, bool de
         l10n::StringId::ViewTiles, l10n::StringId::ViewContent,
     };
     static constexpr const wchar_t* glyphs[] = {
-        L"\xE7F4", L"\xE7F4", L"\xE7F4", L"\xECA5",
-        L"\xEA37", L"\xE8A5", L"\xECA5", L"\xE8FD"
+        // One shape per mode (command_icons ViewXL/ViewLarge/Grid/ViewSmall,
+        // ViewTiles/ViewContent): the three sizes shared E7F4, 小图标 and 平铺
+        // shared ECA5, 内容 drew 列表's lines.
+        L"\xF5D5", L"\xF5D6", L"\xE80A", L"\xF5D7",
+        L"\xEA37", L"\xE8A5", L"\xF5D8", L"\xF5D9"
     };
     std::vector<ui::FluentMenuItem> items;
     items.reserve(10);

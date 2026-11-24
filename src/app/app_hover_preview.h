@@ -42,6 +42,8 @@ void WriteHoverVideoProbe(AppState& s, const std::wstring& shot_output);
 // card content and video start; false when not asked for.
 bool RunHoverBench(AppState& s);
 void FillHoverPreviewView(AppState& s, const ui::WindowViewModel& vm, ui::HoverPreviewView& view);
+// Keep parent-drawn overlays in front of the embedded Details preview HWND.
+void SyncDetailsPreviewOcclusion(AppState& s);
 // After the card was drawn: keeps or stops the repaint timer it asked for.
 void AfterHoverPreviewDraw(AppState& s);
 } // namespace pulse

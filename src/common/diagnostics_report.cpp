@@ -1,5 +1,6 @@
 #include "diagnostics_report.h"
 #include "diagnostics_exporter.h"
+#include "dialog_diagnostic_values.h"
 #include "json_utils.h"
 #include "utf8_file.h"
 #include "preview_packs.h"
@@ -30,6 +31,74 @@ bool Token(std::wstring_view s, size_t limit = 80) {
         return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') ||
             (c >= L'0' && c <= L'9') || c == L'_' || c == L'-' || c == L'.' || c == L':' || c == L'+';
     });
+}
+bool SafeBasename(std::wstring_view name) {
+    return !name.empty() && name.size() <= 255 && name != L"." && name != L".." &&
+        name.find_first_of(L"\\/:\"<>|?*") == name.npos &&
+        std::none_of(name.begin(), name.end(), [](wchar_t c) {
+            return c < 32 || (c >= 127 && c <= 159);
+        });
+}
+bool DialogRequestToken(std::wstring_view request) {
+    const auto digits = [](std::wstring_view text) {
+        return !text.empty() && text.size() <= 20 &&
+            text.find_first_not_of(L"0123456789") == text.npos;
+    };
+    const auto separator = request.find(L':');
+    return separator != request.npos && digits(request.substr(0, separator)) &&
+        digits(request.substr(separator + 1));
+}
+void AddDiagnosticText(std::string& fields, const wchar_t* key, const std::wstring& value) {
+    fields.pop_back();
+    if (fields.size() > 1) fields += ',';
+    fields += "\"" + Narrow(key) + "\":" + PathJson(value) + '}';
+}
+bool IsDialogComponent(std::wstring_view component) {
+    return component == L"dialog_auto" || component == L"dialog_runtime" ||
+        component == L"dialog_admin_auto" || component == L"dialog_user_auto";
+}
+bool SafeExeBasename(std::wstring_view name) {
+    return SafeBasename(name) && name.size() > 4 &&
+        CompareStringOrdinal(name.data() + name.size() - 4, 4, L".exe", 4, TRUE) == CSTR_EQUAL;
+}
+void AddDialogText(std::string& fields, std::wstring_view event, const std::wstring& data) {
+    if (event == L"dialog_identity") {
+        const auto name = json::ExtractString(data, L"app_basename");
+        if (SafeExeBasename(name))
+            AddDiagnosticText(fields, L"app_basename", name);
+        return;
+    }
+    if (event == L"user_dialog_auto") {
+        const auto stage = json::ExtractString(data, L"stage");
+        if (Token(stage)) AddDiagnosticText(fields, L"stage", stage);
+        const auto name = json::ExtractString(data, L"app_basename");
+        if (SafeExeBasename(name)) AddDiagnosticText(fields, L"app_basename", name);
+        return;
+    }
+    if (event == L"dialog_legacy_decline" || event == L"dialog_browse_decline") {
+        const auto family = json::ExtractString(data, L"entry_family");
+        if (Token(family) && dialog_diagnostics::KnownDiagnosticValue("entry_family", Narrow(family)))
+            AddDiagnosticText(fields, L"entry_family", family);
+        const auto reason = json::ExtractString(data, L"reason");
+        if (Token(reason)) AddDiagnosticText(fields, L"reason", reason);
+        return;
+    }
+    const bool show = event == L"dialog_show_begin" || event == L"dialog_show_terminal";
+    if (show) {
+        const auto request = json::ExtractString(data, L"request");
+        if (DialogRequestToken(request)) AddDiagnosticText(fields, L"request", request);
+        for (const wchar_t* key : {L"entry_family", L"launch_route", L"dialog_kind", L"terminal_status", L"fallback_reason"}) {
+            const auto value = json::ExtractString(data, key);
+            if (Token(value) && dialog_diagnostics::KnownDiagnosticValue(Narrow(key), Narrow(value)))
+                AddDiagnosticText(fields, key, value);
+        }
+    }
+    if (show || event == L"contract_decision" || event == L"activation_gate" ||
+        event == L"validation_gate" || event == L"resolve_gate" || event == L"token_rejected") {
+        const auto reason = json::ExtractString(data, L"reason_name");
+        if (Token(reason) && dialog_diagnostics::KnownDiagnosticValue("reason_name", Narrow(reason)))
+            AddDiagnosticText(fields, L"reason_name", reason);
+    }
 }
 std::wstring Wide(std::string_view bytes) {
     std::wstring result;
@@ -179,31 +248,20 @@ std::string SanitizeRuntime(std::string_view text, uint64_t& rejected) {
         std::string fields = data.empty() ? "{}" : NumericObject(data);
         if (event == L"win_e_context_process") {
             const auto program = json::ExtractString(data, L"program");
-            const bool basename = !program.empty() && program.size() <= 255 &&
-                program != L"." && program != L".." &&
-                program.find_first_of(L"\\/:\"<>|?*") == std::wstring::npos &&
-                std::none_of(program.begin(), program.end(), [](wchar_t c) {
-                    return c < 32 || (c >= 127 && c <= 159);
-                });
-            if (basename) {
-                fields.pop_back();
-                if (fields.size() > 1) fields += ',';
-                fields += "\"program\":" + PathJson(program) + '}';
-            }
+            if (SafeBasename(program)) AddDiagnosticText(fields, L"program", program);
         }
-        if (json::ExtractString(w, L"component") == L"dialog_auto") {
+        const auto component = json::ExtractString(w, L"component");
+        if (IsDialogComponent(component) || event == L"user_dialog_auto") AddDialogText(fields, event, data);
+        if (component == L"dialog_auto") {
             std::vector<const wchar_t*> allowed;
             if (event == L"loaded_bridge" || event == L"loaded_picker" || event == L"caller_process") allowed = {L"path"};
             else if (event == L"registration_snapshot") allowed = {L"registered_dll", L"loaded_dll"};
             else if (event == L"provider_load") allowed = {L"host"};
             else if (event == L"bridge_trace") allowed = {L"detail"};
-            else if (event == L"contract_decision") allowed = {L"reason_name"};
             for (const auto* key : allowed) {
                 const auto value = json::ExtractString(data, key);
                 if (value.empty() || value.size() > 8192) continue;
-                fields.pop_back();
-                if (fields.size() > 1) fields += ',';
-                fields += "\"" + Narrow(key) + "\":" + PathJson(value) + '}';
+                AddDiagnosticText(fields, key, value);
             }
         }
         record += ",\"data\":" + fields + "}\n";

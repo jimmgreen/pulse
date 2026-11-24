@@ -68,8 +68,13 @@ constexpr SettingDestination destinations[]={
     {I::SettingsWallpaper,0,0},{I::SettingsWallpaperLook,0,0},{I::SettingsWallpaperBlur,0,0},
     {I::SettingsLanguage,0,0},{I::SettingsTextRender,0,0},{I::SettingsUiFontSize,0,0},
     {I::NativeExtensionSettingsTitle,ui::kSettingsPageNativeExtensions,0},
+    // 16 界面布局
+    {I::SettingsPageUiLayout,ui::kSettingsPageUiLayout,0},{I::UilSecStart,ui::kSettingsPageUiLayout,0},{I::LayoutRowSidebar,ui::kSettingsPageUiLayout,0},
+    {I::LayoutTglTabs,ui::kSettingsPageUiLayout,0},{I::LayoutRowAddress,ui::kSettingsPageUiLayout,0},{I::LayoutRowCommands,ui::kSettingsPageUiLayout,0},
+    {I::UilToolbarLabels,ui::kSettingsPageUiLayout,0},{I::LayoutTglStatus,ui::kSettingsPageUiLayout,0},{I::UilView,ui::kSettingsPageUiLayout,0},
+    {I::UilSecTitle,ui::kSettingsPageUiLayout,0},
     // 9 文件列表
-    {I::SettingsClickOpen,9,0},{I::SettingsItemCheckboxes,9,0},{I::SettingsBlankClickBack,9,0},
+    {I::SettingsDoubleClickInterval,9,0},{I::SettingsClickOpen,9,0},{I::SettingsItemCheckboxes,9,0},{I::SettingsBlankClickBack,9,0},
     {I::SettingsShowHidden,9,0},{I::SettingsShowProtected,9,0},{I::SettingsFolderSort,9,0},
     {I::SettingsRowHeight,9,0},{I::ListZebraRows,9,0},{I::ListSmartDate,9,0},{I::ListSizeBar,9,0},{I::ListTagNameColor,9,0},
     {I::ListSelectionOutline,9,0},{I::ListThumbnailBadges,9,0},{I::MediaColumnsTitle,9,0},{I::ThumbCache,9,0},{I::AliasMark,9,0},{I::SettingsTreeSticky,9,0},
@@ -79,7 +84,7 @@ constexpr SettingDestination destinations[]={
     {I::SettingsNewWindowShows,10,0},
     {I::SettingsArrangeMinimized,10,0},
     {I::SettingsArrangeGap,10,0},
-    {I::SettingsTabLayout,10,0},{I::SettingsTabRows,10,0},
+    {I::SettingsTabActiveStyle,10,0},{I::SettingsTabLayout,10,0},{I::SettingsTabRows,10,0},
     {I::SettingsHomeFolder,10,0},{I::SettingsStartupOpen,10,0},{I::SettingsNewTabOpen,10,0},{I::SettingsExternalOpen,10,0},
     {I::SettingsVerticalTabs,10,0},{I::PinnedNames,10,0},{I::SettingsCloseTabDoubleClick,10,0},{I::SettingsCloseLastTab,10,0},
     // 11 启动与集成
@@ -87,7 +92,7 @@ constexpr SettingDestination destinations[]={
     {I::SettingsRecycleBin,11,0},{I::SettingsExplorerWindows,11,0},
     {I::SettingsLaunch,11,0},{I::SettingsStartInTray,11,0},{I::SettingsKeepRunning,11,0},{I::SettingsNotifyIcon,11,0},{I::SettingsShellTags,11,0},
     // 12 文件操作
-    {I::SettingsConfirmDelete,12,0},{I::SettingsTrayIcon,12,0},{I::TrayHideWhenEmpty,12,0},
+    {I::SettingsConfirmDelete,12,0},{I::SettingsShelfShake,12,0},{I::SettingsShelfSensitivity,12,0},{I::SettingsShelfPosition,12,0},{I::SettingsShelfAutoHide,12,0},{I::SettingsTrayIcon,12,0},{I::TrayHideWhenEmpty,12,0},
     {I::SettingsLanDiscovery,12,0},{I::SettingsLanCache,12,0},{I::SettingsNetworkRecent,12,0},{I::NetworkShowHiddenShares,12,0},
     {I::SettingsClearNetwork,12,0},{I::SettingsChangeTracking,12,0},
     {I::GlobalSearch,1,0},{I::GlobalSearchHotkey,1,0},{I::GlobalSearchDoubleCtrl,1,0},{I::GlobalSearchDoubleCtrlGap,1,0},{I::GlobalSearchApps,1,0},{I::DialogJumpBar,11,0},{I::DialogJumpAuto,11,0},{I::SearchPinyin,1,0},{I::JumpHistory,1,0},{I::ContentIndexManage,1,0},{I::IndexLocation,1,2},{I::LocalDrives,1,2},
@@ -110,7 +115,8 @@ std::vector<ui::FluentMenuItem> FilterSettings(const std::wstring& query) {
                      I::SettingsPageSystem,I::SettingsPageFileOps};
     for(size_t i=0;i<std::size(destinations);++i) {
         auto item=Item(static_cast<int>(i)+1,destinations[i].title);
-        item.shortcut=l10n::Get(destinations[i].page == ui::kSettingsPageNativeExtensions ? I::PreviewPacks : pages[destinations[i].page]);
+        item.shortcut=l10n::Get(destinations[i].page == ui::kSettingsPageNativeExtensions ? I::PreviewPacks
+            : destinations[i].page == ui::kSettingsPageUiLayout ? I::SettingsPageUiLayout : pages[destinations[i].page]);
         std::wstring haystack=item.text+L" "+item.shortcut;
         switch (destinations[i].title) {
         case I::SettingsTheme: haystack += L" " + l10n::Get(I::SettingsThemeDesc); break;
@@ -126,6 +132,7 @@ std::vector<ui::FluentMenuItem> FilterSettings(const std::wstring& query) {
         case I::SettingsUiFontSize: haystack += L" " + l10n::Get(I::SettingsUiFontSizeDesc); break;
         case I::SettingsClickOpen: haystack += L" " + l10n::Get(I::SettingsClickOpenDesc); break;
         case I::SettingsItemCheckboxes: haystack += L" " + l10n::Get(I::SettingsItemCheckboxesDesc); break;
+        case I::SettingsDoubleClickInterval: haystack += L" " + l10n::Get(I::SettingsDoubleClickIntervalDesc); break;
         case I::SettingsBlankClickBack: haystack += L" " + l10n::Get(I::SettingsBlankClickBackDesc); break;
         case I::SettingsShowHidden: haystack += L" " + l10n::Get(I::SettingsShowHiddenDesc); break;
         case I::SettingsShowProtected: haystack += L" " + l10n::Get(I::SettingsShowProtectedDesc); break;
@@ -150,6 +157,7 @@ std::vector<ui::FluentMenuItem> FilterSettings(const std::wstring& query) {
         case I::SettingsArrangeMinimized: haystack += L" " + l10n::Get(I::SettingsArrangeMinimizedDesc); break;
         case I::SettingsArrangeGap: haystack += L" " + l10n::Get(I::SettingsArrangeGapDesc); break;
         case I::SettingsStartupOpen: haystack += L" " + l10n::Get(I::SettingsStartupOpenDesc); break;
+        case I::SettingsTabActiveStyle: haystack += L" " + l10n::Get(I::SettingsTabActiveStyleDesc) + L" " + l10n::Get(I::TabActiveStyleLift) + L" " + l10n::Get(I::TabActiveStyleGradient) + L" 渐变 托起 active tab style gradient"; break;
         case I::SettingsTabLayout: haystack += L" " + l10n::Get(I::SettingsTabLayoutDesc) + L" 多排 多行 换行 两排 wrap multi row tab"; break;
         case I::SettingsTabRows: haystack += L" " + l10n::Get(I::SettingsTabRowsDesc) + L" 多排 多行 rows"; break;
         case I::SettingsNewTabOpen: haystack += L" " + l10n::Get(I::SettingsNewTabOpenDesc); break;
@@ -172,6 +180,10 @@ std::vector<ui::FluentMenuItem> FilterSettings(const std::wstring& query) {
         case I::SettingsConfirmDelete: haystack += L" " + l10n::Get(I::SettingsConfirmDeleteDesc); break;
         case I::SettingsTrayIcon: haystack += L" " + l10n::Get(I::SettingsTrayIconDesc); break;
         case I::TrayHideWhenEmpty: haystack += L" " + l10n::Get(I::TrayHideWhenEmptyDesc); break;
+        case I::SettingsShelfShake: haystack += L" " + l10n::Get(I::SettingsShelfShakeDesc) + L" dropshelf shake 浮动架 晃一晃"; break;
+        case I::SettingsShelfSensitivity: haystack += L" " + l10n::Get(I::SettingsShelfSensitivityDesc); break;
+        case I::SettingsShelfPosition: haystack += L" " + l10n::Get(I::SettingsShelfPositionDesc); break;
+        case I::SettingsShelfAutoHide: haystack += L" " + l10n::Get(I::SettingsShelfAutoHideDesc); break;
         case I::SettingsLanDiscovery: haystack += L" " + l10n::Get(I::SettingsLanDiscoveryDesc); break;
         case I::SettingsLanCache: haystack += L" " + l10n::Get(I::SettingsLanCacheDesc); break;
         case I::SettingsNetworkRecent: haystack += L" " + l10n::Get(I::SettingsNetworkRecentDesc); break;
@@ -447,13 +459,28 @@ bool TestSettingsFilter(const std::wstring& query,I expected) {
 #endif
 
 bool HandleSettingsControl(AppState& s,const H& hit) {
+    // 设置 › 界面布局 toggles (300 + LayoutPanelToggle, 308 按钮文字).
+    if(hit.region==H::SettingsToggle && hit.index>=300 && hit.index<313) {HandleUiLayoutSetting(s,hit.index);return true;}
     switch(hit.region) {
+    case H::SettingsUiLayout: HandleUiLayoutSetting(s,hit.index);break;
+    case H::SettingsUiSidebar: HandleUiLayoutSetting(s,10+hit.index);break;
+    case H::SettingsUiCommands: HandleUiLayoutSetting(s,13+hit.index);break;
+    case H::SettingsUiAddress: HandleUiLayoutSetting(s,16+hit.index);break;
+    case H::SettingsUiDensity: HandleUiLayoutSetting(s,19+hit.index);break;
+    case H::SettingsUiView: HandleUiLayoutSetting(s,22+hit.index);break;
+    case H::SettingsUiLite: HandleUiLayoutSetting(s,30+hit.index);break;
+    case H::SettingsUiTabLayout: HandleUiLayoutSetting(s,36+hit.index);break;
+    case H::SettingsUiTray: HandleUiLayoutSetting(s,32+hit.index);break;
+    case H::SettingsUiLabels: HandleUiLayoutSetting(s,34+hit.index);break;
     case H::SettingsOpenPulseIcon: s.settings.OpenPulseIcon(hit.index);break;
     case H::SettingsNewWindowShows: s.settings.NewWindowShows(hit.index);break;
     case H::SettingsArrangeGap: s.settings.ArrangeGap(hit.index);break;
     case H::SettingsStartupOpen: s.settings.StartupOpen(hit.index);break;
+    case H::SettingsTabActiveStyle:
+        if (hit.index >= 0 && hit.index < 2) { s.appPrefs.tab_active_style = hit.index; s.appPrefs.Save(); }
+        break;
     case H::SettingsTabLayout:
-        if (!s.appPrefs.vertical_tabs && hit.index>=0 && hit.index<3) { s.appPrefs.tab_layout=hit.index; s.appPrefs.Save(); }
+        if (!s.appPrefs.vertical_tabs && hit.index>=0 && hit.index<3) { s.appPrefs.tab_layout=hit.index; s.appPrefs.tab_overflow_list=false; s.appPrefs.Save(); }
         break;
     case H::SettingsTabRows:
         if (!s.appPrefs.vertical_tabs && s.appPrefs.tab_layout && hit.index>=0 && hit.index<3) { s.appPrefs.tab_max_rows=hit.index+2; s.appPrefs.Save(); }
@@ -637,7 +664,16 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
     case H::SettingsTheme: SetThemeMode(s,hit.index);break;
     case H::SettingsDropdown: {
         std::vector<ui::FluentMenuItem> items;
-        if(hit.index>=10 && hit.index<=12) {
+        if(hit.index==13) {
+            constexpr int values[] = {0,200,300,400,500,600,700,800,900,1000};
+            for (int i=0;i<static_cast<int>(std::size(values));++i) {
+                auto item=Item(i+1,I::DoubleClickSystem,s.appPrefs.double_click_interval_ms==values[i]);
+                if (values[i]) item.text=std::to_wstring(values[i])+L" ms";
+                items.push_back(std::move(item));
+            }
+            const int command=Dropdown(s,hit.index,std::move(items));
+            if(command>=1 && command<=static_cast<int>(std::size(values))) s.settings.DoubleClickInterval(values[command-1]);
+        } else if(hit.index>=10 && hit.index<=12) {
             if(!s.appPrefs.integration_enabled) break;
             const int kind=hit.index-10;
             const bool enabled=kind==0 ? s.appPrefs.integration_folders : kind==1 ? s.appPrefs.integration_this_pc : s.appPrefs.integration_win_e;

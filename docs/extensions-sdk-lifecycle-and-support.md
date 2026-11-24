@@ -17,9 +17,9 @@ Related references:
 Pulse partitions its public Native SDK surface (`sdk/native/include/pulse/*.h`) into two machine-enforced stability tiers recorded in `sdk/native/api-catalog.json` (`interfaces[*].stabilityTier` and top-level `stability`) and `schemas/extensions/api_metadata.json`:
 
 - **`frozen` (Core Entry ABI + 12 host service interfaces)**: Binary layout, struct field offsets, calling convention (`PULSE_CALL` / `__cdecl` under `#pragma pack(push, 8)`), function pointer signatures, status codes, and ownership/cancellation semantics are locked for the `1.x` ABI major line (`PULSE_ABI_MAJOR = 1` / `PULSE_ABI_VERSION_1 = 1u`). Evolution is strictly append-only via versioned struct prefixes or new interface names.
-- **`experimental` (8 declarative/retained UI, vector drawing, diagnostics, picker & workbench interfaces)**: Available for opt-in use in Preview 3 (`PULSE_SDK_PREVIEW = 3`), but still undergoing layout, control-set, vector drawing, and data-binding refinement prior to binary freeze. Extensions querying `experimental` interfaces **must** handle `PULSE_ERROR_UNAVAILABLE` or `PULSE_ERROR_ABI` (`std::nullopt` in C++20 `pulse::sdk::Host`) gracefully and degrade to `frozen` command/task/dialog flows when unavailable.
+- **`experimental` (11 declarative/retained UI, vector drawing, diagnostics, picker, workbench, tray, search & shell interfaces)**: Available for opt-in use in Preview 3 (`PULSE_SDK_PREVIEW = 3`), but still undergoing layout, control-set, vector drawing, and data-binding refinement prior to binary freeze. Extensions querying `experimental` interfaces **must** handle `PULSE_ERROR_UNAVAILABLE` or `PULSE_ERROR_ABI` (`std::nullopt` in C++20 `pulse::sdk::Host`) gracefully and degrade to `frozen` command/task/dialog flows when unavailable.
 
-### 1.1 Core Entry ABI & 20-Interface Stability Matrix
+### 1.1 Core Entry ABI & 23-Interface Stability Matrix
 
 | Surface / Interface Name | Header | Published Version(s) | Primary Table / Symbols | Thread Affinity | Stability Tier |
 |---|---|---|---|---|---|
@@ -40,10 +40,18 @@ Pulse partitions its public Native SDK surface (`sdk/native/include/pulse/*.h`) 
 | `pulse.ui.events` | `include/pulse/ui_events.h` | `1` | `PulseUiEventsV1` | Owner UI thread | `experimental` |
 | `pulse.ui.data` | `include/pulse/ui_data.h` | `1` | `PulseUiDataV1` | `publish` any thread; registration/binding/requests on owner UI thread | `experimental` |
 | `pulse.ui.mount` | `include/pulse/ui_mount.h` | `1` | `PulseUiMountV1` | Owner UI thread | `experimental` |
-| `pulse.icons` | `include/pulse/icons.h` | `1` | `PulseIconsV1` | Owner UI thread | `experimental` |
+| `pulse.icons` | `include/pulse/icons.h` | `1`, `2` | `PulseIconsV1` ⊂ `PulseIconsV2` | Owner UI thread | `experimental` |
 | `pulse.diagnostics` | `include/pulse/diagnostics.h` | `1` | `PulseDiagnosticsV1` | Owner UI thread | `experimental` |
 | `pulse.pickers` | `include/pulse/pickers.h` | `1` | `PulsePickersV1` | Owner UI thread | `experimental` |
-| `pulse.workbench` | `include/pulse/workbench.h` | `1` | `PulseWorkbenchV1` | Owner UI thread | `experimental` |
+| `pulse.workbench` | `include/pulse/workbench.h` | `1`, `2`, `3` | `PulseWorkbenchV1` ⊂ `PulseWorkbenchV2` ⊂ `PulseWorkbenchV3` | Owner UI thread | `experimental` |
+| `pulse.tray` | `include/pulse/tray.h` | `1` | `PulseTrayV1` | Owner UI thread | `experimental` |
+| `pulse.search` | `include/pulse/search.h` | `1` | `PulseSearchV1` | Owner UI thread (async search on `PulseIndex` / worker) | `experimental` |
+| `pulse.shell` | `include/pulse/shell.h` | `1` | `PulseShellV1` | Owner UI thread (context menus in `pulse_shell_host`; previews on worker) | `experimental` |
+| `pulse.associations` | `include/pulse/associations.h` | `1` | `PulseAssociationsV1` | Owner UI thread (registry work on background worker) | `experimental` |
+| `pulse.vfs` | `include/pulse/vfs.h` | `1` | `PulseVfsV1` | Owner UI thread (provider list/extract/stat on background worker) | `experimental` |
+| `pulse.columns` | `include/pulse/columns.h` | `1` | `PulseColumnsV1` | Owner UI thread (provider query batches on background worker) | `experimental` |
+| `pulse.statusbar` | `include/pulse/statusbar.h` | `1` | `PulseStatusBarV1` | Owner UI thread (click callbacks on the owner UI thread) | `experimental` |
+| `pulse.fileevents` | `include/pulse/fileevents.h` | `1` | `PulseFileEventsV1` | Owner UI thread (event callbacks on the owner UI thread) | `experimental` |
 
 ### 1.2 Criteria for Promoting `PULSE_SDK_PREVIEW` (`3` → `0` GA `1.0`)
 
@@ -141,7 +149,7 @@ No `"frozen"` interface, operation, manifest `resources` declaration, or publish
 | **Stage 2 — Template & Authoring Sunset** | `>= 1` minor release after Stage 1 | Templates & samples updated to replacement API | `pulse_ext.py new` scaffolds only replacement APIs; existing installed/packed extensions continue to run unmodified. |
 | **Stage 3 — Major-ABI Retirement** | `>= 2` minor releases **and** `>= 180` days, at `abiMajor + 1` | Retired from new major ABI catalog | Legacy `abiMajor` queries fail closed with `PULSE_ERROR_ABI` / `PULSE_ERROR_UNAVAILABLE` rather than crashing. |
 
-*Note on `experimental` interfaces*: Interfaces in the `"experimental"` tier (`pulse.ui.model`, `pulse.ui.events`, `pulse.ui.data`, `pulse.ui.mount`, `pulse.icons`, `pulse.diagnostics`, `pulse.pickers`, `pulse.workbench`) may evolve across `PULSE_SDK_PREVIEW` increments prior to promotion into `"frozen"`. Once an interface is promoted to `"frozen"`, it immediately inherits the full 2-minor-release + 180-day protection above.
+*Note on `experimental` interfaces*: Interfaces in the `"experimental"` tier (`pulse.ui.model`, `pulse.ui.events`, `pulse.ui.data`, `pulse.ui.mount`, `pulse.icons`, `pulse.diagnostics`, `pulse.pickers`, `pulse.workbench`, `pulse.tray`, `pulse.search`, `pulse.shell`, `pulse.associations`, `pulse.vfs`, `pulse.columns`, `pulse.statusbar`, `pulse.fileevents`) may evolve across `PULSE_SDK_PREVIEW` increments prior to promotion into `"frozen"`. Once an interface is promoted to `"frozen"`, it immediately inherits the full 2-minor-release + 180-day protection above.
 
 ### 3.4 Emergency Revocation Exception (`revokedPackages` / `revokedRevisions`)
 

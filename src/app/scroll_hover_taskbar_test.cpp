@@ -5,7 +5,7 @@
 #include "app_input.h"
 #include "app_navigation.h"
 #include "app_window_title.h"
-#include "../ui/ui_renderer.h"
+#include "../ui/window_material.h"
 #include "../common/localization.h"
 #include <chrono>
 #include <cstdio>
@@ -202,8 +202,11 @@ bool RunScrollHoverTaskbarTest() {
     RefreshScrolledHover(*state, api);
     check(state->hoverRow == -1, "pointer outside the client cannot retain stale file hover");
 
+    const LONG_PTR style_before = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    ui::ApplyWindowEffect(hwnd, ui::WindowEffect::MicaAlt, false);
     SyncTaskbarWindowTitle(*state);
     check(Caption(hwnd) == L"Alpha 目录 — Pulse", "native HWND caption contains the active folder name");
+    check(GetWindowLongPtrW(hwnd, GWL_STYLE) == style_before, "ApplyWindowEffect + SyncTaskbarWindowTitle preserves window style");
     const int stable_title_count = title_messages;
     SyncTaskbarWindowTitle(*state);
     BuildVm(*state, false);

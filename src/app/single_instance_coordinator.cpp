@@ -117,6 +117,13 @@ bool ExplorerSubmissionPort::Submit(std::shared_ptr<const ExplorerOpenContext> c
     // a retry may refer to an already dispatched lease which this port cannot revoke.
     return false;
 }
+bool ExplorerSubmissionPort::WakePresentation() noexcept {
+    std::lock_guard lock(mutex_);
+    DWORD pid = 0;
+    if (!owner_ || !host_ || !wake_ || !GetWindowThreadProcessId(host_, &pid) ||
+        pid != GetCurrentProcessId()) return false;
+    return PostMessageW(host_, wake_, 0, 0) != FALSE;
+}
 void ExplorerSubmissionPort::Revoke() noexcept {
     std::lock_guard lock(mutex_); owner_ = nullptr;
 }
@@ -402,9 +409,10 @@ bool SingleInstanceCoordinator::ForwardOpenPath(const std::wstring& path,
 
 std::vector<unsigned char> SingleInstanceCoordinator::EncodeOpenRequest(const OpenRequest& request) {
     try {
-        if (request.reveal || request.explorer || request.explorer_received || request.path.size() >= kMaxForwardedPathChars || request.path.find(L'\0') != std::wstring::npos)
+        if (request.explorer || request.explorer_received || request.path.size() >= kMaxForwardedPathChars || request.path.find(L'\0') != std::wstring::npos)
             return {};
         OpenRequestHeader header;
+        header.version = request.reveal ? 3 : request.wire_direct_open ? 4 : 2;
         header.chars = static_cast<uint32_t>(request.path.size() + 1);
         header.deadline = request.deadline;
         header.id = request.id;
@@ -421,7 +429,7 @@ bool SingleInstanceCoordinator::DecodeOpenRequest(const COPYDATASTRUCT* data, Op
             data->cbData < sizeof(OpenRequestHeader)) return false;
         OpenRequestHeader header;
         std::memcpy(&header, data->lpData, sizeof(header));
-        if (header.version != 2 || !header.chars || header.chars > kMaxForwardedPathChars ||
+        if ((header.version != 2 && header.version != 3 && header.version != 4) || !header.chars || header.chars > kMaxForwardedPathChars ||
             data->cbData != sizeof(header) + header.chars * sizeof(wchar_t) ||
             std::all_of(header.id.begin(), header.id.end(), [](unsigned char c) { return c == 0; })) return false;
         std::wstring path(header.chars, L'\0');
@@ -430,7 +438,11 @@ bool SingleInstanceCoordinator::DecodeOpenRequest(const COPYDATASTRUCT* data, Op
         if (path.back() != L'\0') return false;
         path.pop_back();
         if (path.find(L'\0') != std::wstring::npos) return false;
+        if ((header.version == 3 || header.version == 4) && (path.size() < 3 || path[1] != L':' || path[2] != L'\\' ||
+            !((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')))) return false;
         request = {header.id, header.deadline, std::move(path)};
+        request.reveal = request.wire_reveal = header.version == 3;
+        request.wire_direct_open = header.version == 4;
         return true;
     } catch (...) { return false; }
 }
@@ -438,7 +450,7 @@ bool SingleInstanceCoordinator::DecodeOpenRequest(const COPYDATASTRUCT* data, Op
 SingleInstanceCoordinator::OpenAcceptance SingleInstanceCoordinator::AcceptOpenRequest(
     const OpenRequest& request, uint64_t now) {
     std::lock_guard lock(requests_mutex_);
-    if (!accepting_requests_ || request.explorer || request.explorer_received) return OpenAcceptance::Invalid;
+    if (!accepting_requests_ || request.wire_reveal || request.wire_direct_open || request.explorer || request.explorer_received) return OpenAcceptance::Invalid;
     if (now >= request.deadline || request.deadline - now > 60000) return OpenAcceptance::Invalid;
     std::erase_if(accepted_, [now](const auto& item) { return item.second.deadline <= now &&
         (!item.second.delivery || item.second.delivery->load() != OpenDeliveryState::Queued); });
@@ -518,6 +530,7 @@ SingleInstanceCoordinator::OpenSubmission SingleInstanceCoordinator::SubmitOpenR
         (!item.second.delivery || item.second.delivery->load() != OpenDeliveryState::Queued); });
     if (const auto found = accepted_.find(RequestKey(request)); found != accepted_.end())
         return report(found->second.path == request.path && found->second.reveal == request.reveal && found->second.deadline == request.deadline && found->second.explorer == request.explorer ? OpenSubmission::Duplicate : OpenSubmission::Invalid);
+    if ((request.wire_reveal || request.wire_direct_open) && !reveal_enabled_.load(std::memory_order_relaxed)) return report(OpenSubmission::Invalid);
     if (open_queue_.size() + (open_claim_ ? 1u : 0u) + (keyboard_open_ ? 1u : 0u) >= OpenQueueCapacity || accepted_.size() >= 256) return report(OpenSubmission::Retry);
     DWORD pid = 0;
     if (!host || !IsWindow(host) || !GetWindowThreadProcessId(host, &pid) || pid != GetCurrentProcessId() || !wake || !post)

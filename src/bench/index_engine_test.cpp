@@ -873,11 +873,10 @@ struct EngineTestAccess {
             for (int i = 0; ok && i < 1200 && !engine.pinyin_ready_.load(); ++i) Sleep(50);
             {
                 std::shared_lock lock(engine.mutex_);
-                size_t pair_bytes = engine.pinyin_pair_ids_.capacity() * sizeof(std::vector<int32_t>);
-                for (const auto& ids : engine.pinyin_pair_ids_) pair_bytes += ids.capacity() * sizeof(int32_t);
-                std::cout << "pinyin_ready=" << engine.pinyin_ready_.load() << " pinyin_chinese_mib="
-                          << mib(engine.pinyin_chinese_ids_.capacity() * sizeof(int32_t))
-                          << " pinyin_pairs_mib=" << mib(pair_bytes) << "\n";
+                std::cout << "pinyin_ready=" << engine.pinyin_ready_.load() << " pinyin_mapped="
+                          << engine.PinyinIsMappedLocked() << " pinyin_chinese="
+                          << engine.PinyinChineseIdsLocked().size() << " pinyin_private_mib="
+                          << mib(engine.PinyinPrivateHeapBytesLocked()) << "\n";
             }
             phase("pinyin_ready");
             if (ok) {
@@ -2368,6 +2367,309 @@ struct EngineTestAccess {
         memcpy(bytes.data() + rec->FileNameOffset, name, length);
         e.ApplyUsnLocked(e.vols_.front(), rec);
     }
+
+    static bool Stage2NonNtfsFixture() {
+        bool ok = true;
+        auto check = [&](bool passed, const char* label) {
+            std::cout << (passed ? "[PASS] " : "[FAIL] ") << label << '\n';
+            ok &= passed;
+        };
+
+        auto make_file = [](const std::filesystem::path& p) {
+            std::filesystem::create_directories(p.parent_path());
+            std::ofstream out(p, std::ios::binary);
+            out << "fixture";
+        };
+        auto has_hit = [](Engine& eng, const wchar_t* needle, const wchar_t* expected_path) {
+            Query q;
+            q.needle = needle;
+            q.limit = 100;
+            const SearchResult res = eng.Search(q);
+            return std::any_of(res.hits.begin(), res.hits.end(), [&](const Hit& h) {
+                return CompareStringOrdinal(h.path.c_str(), -1, expected_path, -1, TRUE) == CSTR_EQUAL;
+            });
+        };
+        auto hit_count = [](Engine& eng, const wchar_t* needle) {
+            Query q;
+            q.needle = needle;
+            q.limit = 100;
+            return eng.Search(q).total;
+        };
+        auto make_notify = [](DWORD action, const std::wstring& rel_name) {
+            const size_t bytes_needed = offsetof(FILE_NOTIFY_INFORMATION, FileName) +
+                rel_name.size() * sizeof(wchar_t);
+            std::vector<BYTE> buf(bytes_needed);
+            auto* info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buf.data());
+            info->NextEntryOffset = 0;
+            info->Action = action;
+            info->FileNameLength = static_cast<DWORD>(rel_name.size() * sizeof(wchar_t));
+            std::memcpy(info->FileName, rel_name.data(), info->FileNameLength);
+            return buf;
+        };
+
+        std::error_code ec;
+        const std::filesystem::path fixture_dir = std::filesystem::absolute(
+            std::filesystem::path(L"bench_data") /
+            (L"stage2_engine_" + std::to_wstring(GetCurrentProcessId()) + L"_" +
+             std::to_wstring(GetTickCount64())));
+        const std::filesystem::path index_dir = fixture_dir / L"index";
+        const std::filesystem::path usb_e_v1 = fixture_dir / L"usb_e_v1";
+        const std::filesystem::path usb_g = fixture_dir / L"usb_g";
+        const std::filesystem::path usb_e_v2 = fixture_dir / L"usb_e_v2";
+        const std::filesystem::path card_v2 = fixture_dir / L"card_v2";
+        const std::filesystem::path real_root = fixture_dir / L"real_notify_root";
+        std::filesystem::create_directories(index_dir, ec);
+        make_file(usb_e_v1 / L"readme_fat.txt");
+        make_file(usb_e_v1 / L"DCIM" / L"photo1.jpg");
+        make_file(usb_g / L"exfat_archive.zip");
+        make_file(usb_e_v2 / L"usb2_only.txt");
+        make_file(card_v2 / L"card_swapped.bin");
+        make_file(real_root / L"sub" / L"nested" / L"deep_doc.txt");
+
+        const bool prev_machine = MachineIndexScope();
+        SetActiveIndexDirectory(index_dir.wstring());
+        SetMachineIndexScope(true);
+
+        VolumeInfo vol_c;
+        vol_c.id = L"\\\\?\\Volume{00000000-0000-0000-0000-000000000001}";
+        vol_c.mount_point = L"C:\\";
+        vol_c.file_system = L"NTFS";
+        vol_c.kind = VolumeKind::Fixed;
+        vol_c.backend = VolumeBackend::NtfsMftUsn;
+        vol_c.supported = true;
+        vol_c.online = true;
+        vol_c.enabled = true;
+
+        VolumeInfo vol_e_fat32;
+        vol_e_fat32.id = L"\\\\?\\Volume{00000000-0000-0000-0000-0000000000E1}";
+        vol_e_fat32.mount_point = L"E:\\";
+        vol_e_fat32.file_system = L"FAT32";
+        vol_e_fat32.kind = VolumeKind::Removable;
+        vol_e_fat32.backend = VolumeBackend::DirectoryWalk;
+        vol_e_fat32.serial = 0x11112222u;
+        vol_e_fat32.supported = true;
+        vol_e_fat32.online = true;
+        vol_e_fat32.enabled = true;
+
+        VolumeInfo vol_g_exfat;
+        vol_g_exfat.id = L"\\\\?\\Volume{00000000-0000-0000-0000-0000000000A1}";
+        vol_g_exfat.mount_point = L"G:\\";
+        vol_g_exfat.file_system = L"exFAT";
+        vol_g_exfat.kind = VolumeKind::Removable;
+        vol_g_exfat.backend = VolumeBackend::DirectoryWalk;
+        vol_g_exfat.serial = 0x33334444u;
+        vol_g_exfat.supported = true;
+        vol_g_exfat.online = true;
+        vol_g_exfat.enabled = true;
+
+        Engine e;
+        if (!Build(e)) {
+            SetMachineIndexScope(prev_machine);
+            SetActiveIndexDirectory(L"");
+            std::filesystem::remove_all(fixture_dir, ec);
+            return false;
+        }
+        e.vols_[0].volume_id = vol_c.id;
+        e.vols_[0].kind = VolumeKind::Fixed;
+        e.vols_[0].backend = VolumeBackend::NtfsMftUsn;
+        e.built_unix_ = 123456;
+        {
+            SetMachineIndexScope(false);
+            const bool saved_legacy = Save(e, CacheFilePath());
+            SetMachineIndexScope(true);
+            const bool init_ok = saved_legacy && e.TryLoadCache();
+            e.ready_ = init_ok;
+            check(init_ok, "stage 2 seed C: base shard");
+        }
+
+        e.test_walk_roots_[NormalizeVolumeId(vol_e_fat32.id)] = usb_e_v1.wstring();
+        e.test_walk_roots_[NormalizeVolumeId(vol_g_exfat.id)] = usb_g.wstring();
+        const bool built_e = e.RebuildVolume(vol_e_fat32);
+        const bool built_g = e.RebuildVolume(vol_g_exfat);
+        check(built_e && built_g, "stage 2 RebuildVolume indexes FAT32 E: and exFAT G: alongside NTFS C:");
+
+        {
+            Engine reloaded;
+            reloaded.running_ = true;
+            const bool mapped_ok = reloaded.TryLoadCache();
+            if (mapped_ok) reloaded.ready_ = true;
+            const bool meta_ok = mapped_ok && reloaded.vols_.size() == 3 &&
+                reloaded.vols_[0].backend == VolumeBackend::NtfsMftUsn &&
+                reloaded.vols_[1].backend == VolumeBackend::DirectoryWalk &&
+                reloaded.vols_[1].fs_tag == VolumeFsTag::Fat32 &&
+                reloaded.vols_[1].serial == 0x11112222u &&
+                reloaded.vols_[2].backend == VolumeBackend::DirectoryWalk &&
+                reloaded.vols_[2].fs_tag == VolumeFsTag::ExFat &&
+                reloaded.vols_[2].serial == 0x33334444u;
+            check(meta_ok, "V9 snapshot round-trip preserves C:/E:/G: backends, fs_tag, and serial");
+
+            check(has_hit(reloaded, L"readme_fat.txt", L"E:\\readme_fat.txt") &&
+                  has_hit(reloaded, L"photo1.jpg", L"E:\\DCIM\\photo1.jpg") &&
+                  has_hit(reloaded, L"exfat_archive.zip", L"G:\\exfat_archive.zip") &&
+                  has_hit(reloaded, L"sample.codex", L"C:\\Users\\TestUser\\sample.codex"),
+                  "mixed NTFS + FAT32 + exFAT search hits across all indexed volumes");
+
+            const FileFeedPage e_feed = reloaded.ReadFeed(false, L"E:\\", 0, 0);
+            bool only_e = e_feed.ready && e_feed.done && !e_feed.gap && !e_feed.records.empty();
+            bool saw_readme = false;
+            for (const auto& rec : e_feed.records) {
+                if (rec.path.size() < 3 || (rec.path[0] != L'E' && rec.path[0] != L'e') ||
+                    rec.path[1] != L':' || rec.path[2] != L'\\') {
+                    only_e = false;
+                }
+                if (CompareStringOrdinal(rec.path.c_str(), -1, L"E:\\readme_fat.txt", -1, TRUE) == CSTR_EQUAL) {
+                    saw_readme = true;
+                }
+            }
+            check(only_e && saw_readme, "ReadFeed(E:\\) isolates E: span and skips C:/G:");
+
+            // Per-volume_id WAL isolation & replay
+            {
+                std::unique_lock<std::shared_mutex> lock(reloaded.mutex_);
+                reloaded.OpenDeltasLocked();
+                const auto pkt = make_notify(FILE_ACTION_ADDED, L"wal_note.txt");
+                reloaded.ApplyNotifyLocked(L"E:\\", pkt.data(), static_cast<DWORD>(pkt.size()),
+                                           vol_e_fat32.id);
+            }
+            reloaded.FlushDeltas();
+            reloaded.CloseDeltas();
+
+            Engine wal_reloaded;
+            wal_reloaded.running_ = true;
+            const bool wal_ok = wal_reloaded.TryLoadCache();
+            if (wal_ok) wal_reloaded.ready_ = true;
+            check(wal_ok &&
+                  has_hit(wal_reloaded, L"wal_note.txt", L"E:\\wal_note.txt") &&
+                  has_hit(wal_reloaded, L"exfat_archive.zip", L"G:\\exfat_archive.zip") &&
+                  has_hit(wal_reloaded, L"sample.codex", L"C:\\Users\\TestUser\\sample.codex"),
+                  "per-volume_id WAL replay restores E: additions without disturbing C:/G:");
+            wal_reloaded.Stop();
+
+            // Unplug visibility hide + ReadFeed filtering
+            {
+                std::unique_lock<std::shared_mutex> lock(reloaded.mutex_);
+                reloaded.UpdateVolumeVisibilityLocked({vol_c}, false);
+            }
+            const FileFeedPage hidden_e_feed = reloaded.ReadFeed(false, L"E:\\", 0, 0);
+            const FileFeedPage all_feed = reloaded.ReadFeed(false, L"", 0, 0);
+            const bool leaked_offline = std::any_of(all_feed.records.begin(), all_feed.records.end(),
+                [](const ChangeRecord& r) {
+                    return !r.path.empty() && (r.path[0] == L'E' || r.path[0] == L'e' ||
+                                               r.path[0] == L'G' || r.path[0] == L'g');
+                });
+            check(hit_count(reloaded, L"readme_fat.txt") == 0 &&
+                  hit_count(reloaded, L"exfat_archive.zip") == 0 &&
+                  has_hit(reloaded, L"sample.codex", L"C:\\Users\\TestUser\\sample.codex") &&
+                  hidden_e_feed.records.empty() && !leaked_offline,
+                  "unplugging E:/G: hides offline items from Search and ReadFeed");
+
+            // Drive-letter relocation E: -> F: and back
+            VolumeInfo vol_e_at_f = vol_e_fat32;
+            vol_e_at_f.mount_point = L"F:\\";
+            {
+                std::unique_lock<std::shared_mutex> lock(reloaded.mutex_);
+                reloaded.RelocateVolumeLetterLocked(reloaded.vols_[1], L'F');
+                reloaded.UpdateVolumeVisibilityLocked({vol_c, vol_e_at_f}, false);
+            }
+            check(has_hit(reloaded, L"readme_fat.txt", L"F:\\readme_fat.txt") &&
+                  !has_hit(reloaded, L"readme_fat.txt", L"E:\\readme_fat.txt"),
+                  "RelocateVolumeLetterLocked moves E: volume root to F:");
+            {
+                std::unique_lock<std::shared_mutex> lock(reloaded.mutex_);
+                reloaded.RelocateVolumeLetterLocked(reloaded.vols_[1], L'E');
+                reloaded.UpdateVolumeVisibilityLocked({vol_c, vol_e_fat32}, false);
+            }
+            check(has_hit(reloaded, L"readme_fat.txt", L"E:\\readme_fat.txt"),
+                  "RelocateVolumeLetterLocked restores volume root back to E:");
+            reloaded.Stop();
+        }
+
+        // Real on-disk ApplyNotifyLocked + IndexAddedDirectories + FILE_ACTION_REMOVED subtree tombstoning
+        {
+            Engine notify_eng;
+            notify_eng.running_ = true;
+            notify_eng.AddForTest(real_root.wstring(), real_root.filename().wstring(), true);
+            notify_eng.ready_ = true;
+
+            std::vector<std::wstring> added_dirs;
+            {
+                std::unique_lock<std::shared_mutex> lock(notify_eng.mutex_);
+                const auto pkt = make_notify(FILE_ACTION_ADDED, L"sub");
+                notify_eng.ApplyNotifyLocked(real_root.wstring(), pkt.data(),
+                                             static_cast<DWORD>(pkt.size()), {}, &added_dirs);
+            }
+            check(added_dirs.size() == 1, "ApplyNotifyLocked queues newly created directory for subtree walk");
+            notify_eng.IndexAddedDirectories(added_dirs, {});
+            const std::wstring deep_doc = (real_root / L"sub" / L"nested" / L"deep_doc.txt").wstring();
+            check(has_hit(notify_eng, L"deep_doc.txt", deep_doc.c_str()),
+                  "IndexAddedDirectories indexes nested files inside newly added directory");
+
+            {
+                std::unique_lock<std::shared_mutex> lock(notify_eng.mutex_);
+                const auto pkt = make_notify(FILE_ACTION_REMOVED, L"sub");
+                notify_eng.ApplyNotifyLocked(real_root.wstring(), pkt.data(),
+                                             static_cast<DWORD>(pkt.size()));
+            }
+            check(hit_count(notify_eng, L"deep_doc.txt") == 0 && hit_count(notify_eng, L"sub") == 0,
+                  "FILE_ACTION_REMOVED tombstones removed directory and its nested subtree");
+            notify_eng.Stop();
+        }
+
+        // Same-letter swap (offline USB-1 vs active USB-2 on E:) and card-reader media swap
+        VolumeInfo vol_e_usb2;
+        vol_e_usb2.id = L"\\\\?\\Volume{00000000-0000-0000-0000-0000000000E2}";
+        vol_e_usb2.mount_point = L"E:\\";
+        vol_e_usb2.file_system = L"FAT32";
+        vol_e_usb2.kind = VolumeKind::Removable;
+        vol_e_usb2.backend = VolumeBackend::DirectoryWalk;
+        vol_e_usb2.serial = 0x55556666u;
+        vol_e_usb2.supported = true;
+        vol_e_usb2.online = true;
+        vol_e_usb2.enabled = true;
+
+        e.test_walk_roots_[NormalizeVolumeId(vol_e_usb2.id)] = usb_e_v2.wstring();
+        const bool built_usb2 = e.RebuildVolume(vol_e_usb2);
+        int32_t active_e_root = -1;
+        int32_t resolved_e_root = -2;
+        {
+            std::unique_lock<std::shared_mutex> lock(e.mutex_);
+            e.UpdateVolumeVisibilityLocked({vol_c, vol_e_usb2}, false);
+            for (const auto& v : e.vols_) {
+                if (NormalizeVolumeId(v.volume_id) == NormalizeVolumeId(vol_e_usb2.id)) {
+                    active_e_root = v.root_idx;
+                }
+            }
+            resolved_e_root = e.ResolvePathLocked(L"E:\\");
+        }
+        check(built_usb2 && active_e_root >= 0 && resolved_e_root == active_e_root &&
+              has_hit(e, L"usb2_only.txt", L"E:\\usb2_only.txt") &&
+              hit_count(e, L"readme_fat.txt") == 0,
+              "same-letter swap shows active USB-2 on E: and keeps offline USB-1 hidden");
+
+        VolumeInfo card_v2_info = vol_e_usb2;
+        card_v2_info.serial = 0x77776666u;
+        check(!VolumeIdentityMatches(card_v2_info.id, card_v2_info.file_system, card_v2_info.serial,
+                                     vol_e_usb2.id, VolumeBackend::DirectoryWalk,
+                                     VolumeFsTag::Fat32, vol_e_usb2.serial),
+              "card-reader swap with different serial triggers VolumeIdentityMatches mismatch");
+        e.test_walk_roots_[NormalizeVolumeId(card_v2_info.id)] = card_v2.wstring();
+        const bool built_card2 = e.RebuildVolume(card_v2_info);
+        {
+            std::unique_lock<std::shared_mutex> lock(e.mutex_);
+            e.UpdateVolumeVisibilityLocked({vol_c, card_v2_info}, false);
+        }
+        check(built_card2 &&
+              has_hit(e, L"card_swapped.bin", L"E:\\card_swapped.bin") &&
+              hit_count(e, L"usb2_only.txt") == 0 &&
+              has_hit(e, L"sample.codex", L"C:\\Users\\TestUser\\sample.codex"),
+              "card-reader RebuildVolume replaces E: span without touching C:");
+
+        e.Stop();
+        SetMachineIndexScope(prev_machine);
+        SetActiveIndexDirectory(L"");
+        std::filesystem::remove_all(fixture_dir, ec);
+        return ok;
+    }
 };
 
 } // namespace pulse::index
@@ -2402,6 +2704,21 @@ void CheckSearch(Engine& e) {
         incremental = Has(e, filename.substr(0, length).c_str(), log_path) && incremental;
     Check(incremental, "incremental filename search preserves temp log result");
     Check(Has(e, L"Debug.log", log_path), "interior filename bigram finds temp log");
+    Check(Has(e, L"ShowBox .log", log_path), "conjunctive query intersects rarest bigrams");
+    Check(Has(e, L"debug s", log_path), "conjunctive query with single char selects multi-char driver");
+    Check(Has(e, L"no_such_zz | Debug.log", log_path), "disjunctive query falls back without bigram starvation");
+    {
+        Query scoped;
+        scoped.needle = L"settings";
+        scoped.limit = 100;
+        scoped.path_prefix = L"C:\\Users\\TestUser\\.codex";
+        const auto hit = e.Search(scoped);
+        Check(hit.total == 1 && hit.hits.size() == 1 &&
+                  hit.hits[0].path == L"C:\\Users\\TestUser\\.codex\\settings.toml",
+              "scoped literal query finds descendant via DFS subtree slice");
+        scoped.path_prefix = L"C:\\Users\\TestUser\\.config";
+        Check(e.Search(scoped).total == 0, "scoped literal query excludes sibling subtree");
+    }
     Check(Has(e, L".codex", L"C:\\Users\\TestUser\\.codex"), "dot folder searchable");
     Check(Has(e, L"settings", L"C:\\Users\\TestUser\\.codex\\settings.toml"), "descendant searchable");
     Check(Has(e, L".config", L"C:\\Users\\TestUser\\.config"), "other dot folders searchable");
@@ -2662,6 +2979,33 @@ int wmain(int argc, wchar_t** argv) {
         Check(EngineTestAccess::Load(fallback, active) && EngineTestAccess::NeedsRebuild(fallback),
               "legacy fallback still requests repair");
     }
+    {
+        Engine builder;
+        Check(EngineTestAccess::Load(builder, (dir / L"repaired.bin").wstring()),
+              "load repaired snapshot for 2-bigram intersection test");
+        for (int i = 0; i < 100; ++i) {
+            const std::wstring name = L"common_prefix_tag_item_" + std::to_wstring(i) + L".txt";
+            EngineTestAccess::Usn(builder, 5000 + static_cast<uint64_t>(i), 20, name.c_str(), USN_REASON_FILE_CREATE);
+        }
+        const auto intersect_path = (dir / L"intersect.bin").wstring();
+        Check(EngineTestAccess::Save(builder, intersect_path), "save snapshot with >64 postings per bigram");
+        Engine intersected;
+        Check(EngineTestAccess::Load(intersected, intersect_path), "reload intersection snapshot");
+        Check(Search(intersected, L"common_prefix").total == 100 &&
+              Search(intersected, L"common_prefix_tag_item_42").total == 1 &&
+              Has(intersected, L"common_prefix_tag_item_42", L"C:\\Users\\TestUser\\common_prefix_tag_item_42.txt"),
+              "2-bigram galloping intersection finds exact match cleanly");
+        Query scoped_intersect;
+        scoped_intersect.needle = L"common_prefix";
+        scoped_intersect.path_prefix = L"C:\\Users\\TestUser";
+        scoped_intersect.limit = 200;
+        Check(intersected.Search(scoped_intersect).total == 100,
+              "scoped 2-bigram intersection retains all descendants under TestUser");
+        scoped_intersect.path_prefix = L"C:\\Users\\TestUser\\.codex";
+        Check(intersected.Search(scoped_intersect).total == 0,
+              "scoped 2-bigram intersection rejects unrelated subtree");
+    }
+    Check(EngineTestAccess::Stage2NonNtfsFixture(), "stage 2 non-NTFS per-volume engine fixture");
     // This directory was created exclusively by this process under bench_data.
     std::filesystem::remove_all(dir);
     return failures ? 1 : 0;

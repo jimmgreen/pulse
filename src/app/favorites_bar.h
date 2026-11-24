@@ -23,7 +23,7 @@ bool HandleFavoritesBarContextMenu(AppState& s, const ui::HitTestResult& hit, PO
 bool FavoritesBarDragging();
 // True once the press became a drag (the hover then goes away).
 bool MoveFavoritesBarDrag(AppState& s, POINT client);
-void EndFavoritesBarDrag(AppState& s, bool cancel);
+void EndFavoritesBarDrag(AppState& s, bool cancel, POINT client = {});
 // WM_FAVORITE_UNDO: the favorite dragged off the bar comes back in its place.
 void UndoFavoriteRemoval(AppState& s);
 // Middle click on a favorite folder: the path to open in a new tab ("" none).

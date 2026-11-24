@@ -1,4 +1,5 @@
 #include "dialog_auto_registration.h"
+#include "dialog_registration_mutex.h"
 #include "runtime_log.h"
 #include <vector>
 namespace pulse::dialog_auto {
@@ -20,7 +21,7 @@ constexpr const wchar_t* roots[] = {
     L"Software\\Classes\\CLSID\\{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}"};
 // Win32 mutexes are recursive: Enable may invoke Disable during journal recovery.
 struct MutationLock {
-    HANDLE handle = CreateMutexW(nullptr, FALSE, L"Global\\Pulse.DialogAuto.Registration.v1");
+    HANDLE handle = CreateRegistrationMutex();
     DWORD error = ERROR_SUCCESS;
     bool acquired = false;
     MutationLock() {
@@ -69,9 +70,13 @@ DWORD RequireZeroFlag(HKEY key, const wchar_t* name) {
     return value == 0 ? ERROR_SUCCESS : ERROR_ALREADY_EXISTS;
 }
 bool Empty(HKEY k) { DWORD sub = 0, values = 0; return !RegQueryInfoKeyW(k, nullptr, nullptr, nullptr, &sub, nullptr, nullptr, &values, nullptr, nullptr, nullptr, nullptr) && !sub && !values; }
-DWORD Validate(Architecture architecture, const std::wstring& p) {
+DWORD ValidatePathSyntax(Architecture architecture, const std::wstring& p) {
     if (const DWORD error = ArchitectureError(architecture)) return error;
-    if (p.size() < 4 || p[1] != L':' || p[2] != L'\\' || _wcsicmp(p.substr(p.find_last_of(L'\\') + 1).c_str(), DllNameFor(architecture))) return ERROR_INVALID_NAME;
+    if (p.size() < 4 || p[1] != L':' || p[2] != L'\\' ||
+        !((p[0] >= L'A' && p[0] <= L'Z') || (p[0] >= L'a' && p[0] <= L'z')) ||
+        !IsAllowedDialogDllName(architecture, p.c_str() + p.find_last_of(L'\\') + 1)) {
+        return ERROR_INVALID_NAME;
+    }
     if (p.find_first_of(L"/\0", 0, 2) != std::wstring::npos || p.find(L':', 2) != std::wstring::npos) return ERROR_INVALID_NAME;
     size_t start = 3;
     for (size_t i = 3; i <= p.size(); ++i) {
@@ -80,6 +85,10 @@ DWORD Validate(Architecture architecture, const std::wstring& p) {
         if (component.empty() || component == L"." || component == L".." || component.back() == L'.' || component.back() == L' ') return ERROR_INVALID_NAME;
         start = i + 1;
     }
+    return ERROR_SUCCESS;
+}
+DWORD Validate(Architecture architecture, const std::wstring& p) {
+    if (const DWORD error = ValidatePathSyntax(architecture, p)) return error;
     for (size_t i = 3; i <= p.size(); ++i) {
         if (i != p.size() && p[i] != L'\\') continue;
         DWORD a = GetFileAttributesW(p.substr(0, i).c_str());
@@ -159,9 +168,28 @@ const wchar_t* DllNameFor(Architecture architecture) noexcept {
     if (architecture == Architecture::X86) return L"PulseDialogAuto32.dll";
     return nullptr;
 }
+const wchar_t* StubDllNameFor(Architecture architecture) noexcept {
+    if (architecture == Architecture::X64) return L"PulseDialogStub64.dll";
+    if (architecture == Architecture::X86) return L"PulseDialogStub32.dll";
+    return nullptr;
+}
+bool IsAllowedDialogDllName(Architecture architecture, const wchar_t* file_name) noexcept {
+    if (!file_name || !*file_name) return false;
+    const wchar_t* auto_name = DllNameFor(architecture);
+    const wchar_t* stub_name = StubDllNameFor(architecture);
+    return (auto_name && _wcsicmp(file_name, auto_name) == 0) ||
+           (stub_name && _wcsicmp(file_name, stub_name) == 0);
+}
 Status Inspect(Architecture architecture) {
     if (const DWORD error = ArchitectureError(architecture)) return {false, false, error, {}};
-    MutationLock lock; if (lock.error) return {false, false, lock.error, {}};
+    MutationLock lock;
+    if (lock.error) {
+        diagnostics::runtime::TextEvent("dialog_auto_inspect_failed",
+            {{"stage", lock.handle ? L"mutex_wait" : L"mutex_open"}},
+            {{"error", lock.error}, {"architecture", static_cast<uint64_t>(architecture)}},
+            diagnostics::runtime::Level::Warning);
+        return {false, false, lock.error, {}};
+    }
     Status s; Key c; DWORD e = Open(architecture, ConfigFor(architecture), c); if (e && e != ERROR_FILE_NOT_FOUND) { s.error = e; return s; }
     s.dll_path = c.h ? Read(c.h, L"DllPath") : std::wstring{}; bool complete = !s.dll_path.empty();
     for (auto root : roots) { Key k, v; e = Open(architecture, root, k); if (e == ERROR_FILE_NOT_FOUND) { complete = false; continue; } if (e) { s.error = e; complete = false; continue; }
@@ -245,14 +273,18 @@ DWORD EnableIfUnclaimed(Architecture architecture, const std::wstring& p) {
 DWORD EnableIfDisabledFor(Architecture architecture, const std::wstring& expected_old_dll, const std::wstring& new_dll) {
     MutationLock lock;
     if (lock.error) return lock.error;
-    DWORD error = Validate(architecture, expected_old_dll);
+    DWORD error = ValidatePathSyntax(architecture, expected_old_dll);
     if (error) return error;
     if ((error = Validate(architecture, new_dll))) return error;
     Key key;
     if ((error = Open(architecture, ConfigFor(architecture), key))) return error;
     const auto recorded = Read(key.h, L"DllPath", &error);
     if (error) return error;
-    if (recorded != expected_old_dll) return ERROR_ALREADY_EXISTS;
+    if (recorded.size() != expected_old_dll.size() ||
+        CompareStringOrdinal(recorded.c_str(), static_cast<int>(recorded.size()),
+            expected_old_dll.c_str(), static_cast<int>(expected_old_dll.size()), TRUE) != CSTR_EQUAL) {
+        return ERROR_ALREADY_EXISTS;
+    }
     if ((error = RequireZeroFlag(key.h, L"Enabled")) || (error = RequireZeroFlag(key.h, L"Stage"))) return error;
     for (auto root : roots) {
         Key existing;

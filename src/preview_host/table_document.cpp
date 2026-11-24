@@ -1,12 +1,15 @@
 // table_document.cpp — see table_document.h.
 #include "table_document.h"
 #include "xlsx_parts.h"
+#include "utf32_text.h"
 
 #include "zip_entry.h"
 
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
+#include <optional>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -37,12 +40,15 @@ size_t SafePrefix(std::wstring_view text, size_t limit) {
 }
 
 void AppendEscaped(std::wstring& out, std::wstring_view text) {
-    for (const wchar_t c : text) {
+    for (size_t i = 0; i < text.size(); ++i) {
+        const wchar_t c = text[i];
         if (c == L'\x0001') out += L"\\B";  // bold marker (XLSX)
         else if (c == L'\\') out += L"\\\\";
         else if (c == L'\t') out += L"\\t";
         else if (c == L'\n') out += L"\\n";
-        else if (c == L'\r') continue;
+        else if (c == L'\r') {
+            if (i + 1 == text.size() || text[i + 1] != L'\n') out += L"\\n";
+        }
         else out += c;
     }
 }
@@ -104,6 +110,13 @@ bool LooksNumeric(std::wstring_view s) {
 bool DecodeBytes(std::vector<char>& bytes, bool cut, std::wstring& text,
                  ipc::PreviewTextEncoding& encoding) {
     encoding = ipc::PreviewTextEncoding::Utf8;
+    const std::span<const uint8_t> raw_bytes(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+    const auto utf32 = Utf32Bom(raw_bytes);
+    if (utf32 != ipc::PreviewTextEncoding::Unknown) {
+        encoding = utf32;
+        AppendUtf32(raw_bytes, utf32, cut, text);
+        return true;
+    }
     size_t offset = 0;
     if (bytes.size() >= 2 && static_cast<uint8_t>(bytes[0]) == 0xFF &&
         static_cast<uint8_t>(bytes[1]) == 0xFE) {
@@ -129,7 +142,7 @@ bool DecodeBytes(std::vector<char>& bytes, bool cut, std::wstring& text,
     size_t size = bytes.size();
     if (cut) {
         // A partial read may end inside a multi-byte sequence: stop at the last line.
-        while (size > offset && bytes[size - 1] != '\n') --size;
+        while (size > offset && bytes[size - 1] != '\n' && bytes[size - 1] != '\r') --size;
     }
     const char* raw = bytes.data() + offset;
     const int raw_size = static_cast<int>(size - offset);
@@ -155,22 +168,35 @@ wchar_t DetectDelimiter(std::wstring_view text, std::wstring_view extension) {
     const wchar_t candidates[] = {L',', L';', L'\t', L'|'};
     size_t best_score = 0;
     wchar_t best = L',';
-    for (const wchar_t d : candidates) {
-        // Count per line outside quotes over the first lines; prefer
-        // delimiters that appear the same number of times on every line.
-        std::vector<size_t> counts;
-        size_t count = 0;
-        bool quoted = false;
-        for (size_t i = 0; i < text.size() && counts.size() < 30; ++i) {
-            const wchar_t c = text[i];
-            if (c == L'"') quoted = !quoted;
-            else if (!quoted && c == d) ++count;
-            else if (!quoted && c == L'\n') { counts.push_back(count); count = 0; }
+    std::array<std::map<size_t, size_t>, 4> histograms;
+    std::array<size_t, 4> counts{};
+    auto finish = [&] {
+        for (size_t i = 0; i < counts.size(); ++i)
+            if (counts[i]) ++histograms[i][counts[i]];
+        counts.fill(0);
+    };
+    size_t lines = 0;
+    bool quoted = false;
+    for (size_t i = 0; i < text.size() && lines < 30; ++i) {
+        const wchar_t c = text[i];
+        if (c == L'"') quoted = !quoted;
+        else if (!quoted) {
+            switch (c) {
+            case L',': ++counts[0]; break;
+            case L';': ++counts[1]; break;
+            case L'\t': ++counts[2]; break;
+            case L'|': ++counts[3]; break;
+            case L'\r':
+                if (i + 1 < text.size() && text[i + 1] == L'\n') ++i;
+                [[fallthrough]];
+            case L'\n': finish(); ++lines; break;
+            }
         }
-        if (count) counts.push_back(count);
-        if (counts.empty()) continue;
-        std::map<size_t, size_t> histogram;
-        for (const size_t n : counts) if (n) ++histogram[n];
+    }
+    finish();
+    for (size_t i = 0; i < histograms.size(); ++i) {
+        const wchar_t d = candidates[i];
+        const auto& histogram = histograms[i];
         size_t mode = 0, freq = 0;
         for (const auto& [n, f] : histogram) if (f > freq) { mode = n; freq = f; }
         const size_t score = freq * 1000 + mode;
@@ -217,6 +243,9 @@ bool ParseCsv(std::wstring_view text, wchar_t delimiter, std::vector<Row>& rows,
             if (c == L'"') {
                 if (i + 1 < text.size() && text[i + 1] == L'"') { push(L'"'); ++i; }
                 else quoted = false;
+            } else if (c == L'\r') {
+                if (i + 1 < text.size() && text[i + 1] == L'\n') ++i;
+                push(L'\n');
             } else {
                 push(c);
             }
@@ -224,8 +253,8 @@ bool ParseCsv(std::wstring_view text, wchar_t delimiter, std::vector<Row>& rows,
         }
         if (c == L'"' && !cell_started) { quoted = true; cell_started = true; }
         else if (c == delimiter) end_cell();
-        else if (c == L'\r') continue;
-        else if (c == L'\n') {
+        else if (c == L'\r' || c == L'\n') {
+            if (c == L'\r' && i + 1 < text.size() && text[i + 1] == L'\n') ++i;
             if (!end_row()) { ++i; break; }
         } else { push(c); cell_started = true; }
     }
@@ -279,6 +308,7 @@ public:
     // Open with self_closing() true and no matching Close.
     Kind Next() {
         attrs_.clear();
+        cdata_ = false;
         self_closing_ = false;
         while (pos_ < s_.size()) {
             if (s_[pos_] != '<') {
@@ -338,7 +368,7 @@ public:
     // Decoded text of the current Text node.
     std::wstring Text() {
         std::wstring out = Utf8(text_);
-        if (cdata_) { cdata_ = false; return out; }
+        if (cdata_ || text_.find('&') == std::string_view::npos) return out;
         return Unescape(out);
     }
     // Skips to the end of the element just opened.
@@ -353,6 +383,9 @@ public:
     static std::wstring Utf8(std::string_view s) {
         std::wstring out;
         if (s.empty()) return out;
+        // Short ASCII labels and numeric values dominate many worksheet string tables.
+        if (s.size() <= 64 && std::all_of(s.begin(), s.end(), [](unsigned char c) { return c < 0x80; }))
+            return std::wstring(s.begin(), s.end());
         const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
         if (n <= 0) return out;
         out.resize(static_cast<size_t>(n));
@@ -658,7 +691,8 @@ size_t ColumnIndex(std::string_view ref) {
     return any ? col - 1 : static_cast<size_t>(-1);
 }
 
-void ReadSheet(std::string_view xml, const std::vector<std::wstring>& shared, const Styles& styles,
+template<class SharedStrings>
+bool ReadSheet(std::string_view xml, SharedStrings&& get_shared, const Styles& styles,
                std::vector<Row>& rows, size_t& columns, bool& truncated, bool date1904) {
     XmlReader x(xml);
     size_t row_index = 0, next_col = 0;
@@ -671,8 +705,8 @@ void ReadSheet(std::string_view xml, const std::vector<std::wstring>& shared, co
     unsigned formula_group = 0;
     SharedFormulas formulas;
     auto store = [&] {
-        if (col >= kMaxColumns) { truncated = true; return; }
-        if (row_index >= kMaxRows) { truncated = true; return; }
+        if (col >= kMaxColumns) { truncated = true; return true; }
+        if (row_index >= kMaxRows) { truncated = true; return true; }
         std::wstring text;
         if (value.empty() && !formula.empty()) {
             // Never calculated (generators often write no cached <v>): an
@@ -684,7 +718,9 @@ void ReadSheet(std::string_view xml, const std::vector<std::wstring>& shared, co
                 if (ch < L'0' || ch > L'9' || idx > 100000000u) break;
                 idx = idx * 10 + static_cast<unsigned>(ch - L'0');
             }
-            if (idx < shared.size()) text = shared[idx];
+            const auto* shared = get_shared();
+            if (!shared) return false;
+            if (idx < shared->size()) text = (*shared)[idx];
         } else if (type == "b") {
             text = value == L"1" ? L"TRUE" : L"FALSE";
         } else if (type == "str" || type == "inlineStr" || type == "e") {
@@ -696,7 +732,7 @@ void ReadSheet(std::string_view xml, const std::vector<std::wstring>& shared, co
             text.resize(SafePrefix(text, kMaxCellChars)); text += L'\x2026'; truncated = true;
         }
         const unsigned fill = style < styles.fill.size() ? styles.fill[style] : 0;
-        if (text.empty() && !fill) return;
+        if (text.empty() && !fill) return true;
         if (rows.size() <= row_index) rows.resize(row_index + 1);
         Row& row = rows[row_index];
         if (row.size() <= col) row.resize(col + 1);
@@ -704,6 +740,7 @@ void ReadSheet(std::string_view xml, const std::vector<std::wstring>& shared, co
         row[col] = bold ? std::wstring(1, L'\x0001') + text : text;
         if (fill) { wchar_t color[9]; swprintf_s(color, L"%08X", fill); row[col] = std::wstring(1, L'\x0002') + color + row[col]; }
         columns = (std::max)(columns, col + 1);
+        return true;
     };
     for (auto k = x.Next(); k != XmlReader::Kind::End; k = x.Next()) {
         if (k == XmlReader::Kind::Open) {
@@ -724,7 +761,7 @@ void ReadSheet(std::string_view xml, const std::vector<std::wstring>& shared, co
                 value.clear();
                 formula.clear();
                 in_cell = !x.self_closing();
-                if (!in_cell) { value.clear(); store(); }
+                if (!in_cell) { value.clear(); if (!store()) return false; }
             } else if (in_cell && n == "v") {
                 in_value = !x.self_closing();
             } else if (in_cell && n == "is") {
@@ -745,7 +782,7 @@ void ReadSheet(std::string_view xml, const std::vector<std::wstring>& shared, co
             }
         } else if (k == XmlReader::Kind::Close) {
             const auto n = x.name();
-            if (n == "c" && in_cell) { store(); in_cell = false; }
+            if (n == "c" && in_cell) { if (!store()) return false; in_cell = false; }
             else if (n == "v") in_value = false;
             else if (n == "f" && in_formula) {
                 in_formula = false;
@@ -764,6 +801,7 @@ void ReadSheet(std::string_view xml, const std::vector<std::wstring>& shared, co
     }
     // Drop trailing empty rows.
     while (!rows.empty() && rows.back().empty()) rows.pop_back();
+    return true;
 }
 
 constexpr std::string_view kDefaultWorkbook = "xl/workbook.xml";
@@ -835,7 +873,7 @@ bool MakeXlsxTable(const std::wstring& path, std::wstring& payload, uint32_t& by
     bytes_read = 0;
     const ULONGLONG started = GetTickCount64();
     uint64_t total = 0;
-    std::string workbook, rels, shared_xml, styles_xml;
+    std::string workbook, rels, styles_xml;
     // Parts are found through relationships: not every generator names the
     // workbook, its sheets, shared strings and styles the way Excel does,
     // and a missed shared-strings part left every text cell empty.
@@ -908,10 +946,18 @@ bool MakeXlsxTable(const std::wstring& path, std::wstring& payload, uint32_t& by
         }
     }
     if (sheet_index >= sheets.size()) return false;
-    std::vector<std::wstring> shared;
+    std::optional<std::vector<std::wstring>> shared;
+    auto get_shared = [&]() -> const std::vector<std::wstring>* {
+        if (!shared) {
+            std::string xml;
+            shared.emplace();
+            if (ReadPart(path, shared_part, xml, nullptr, total)) *shared = ReadSharedStrings(xml);
+            if (GetTickCount64() - started >= kXlsxBudgetMs) return nullptr;
+        }
+        return &*shared;
+    };
     Styles styles;
     if (!sheets[sheet_index].hidden && !sheets[sheet_index].part.empty()) {
-        if (ReadPart(path, shared_part, shared_xml, nullptr, total)) shared = ReadSharedStrings(shared_xml);
         if (ReadPart(path, styles_part, styles_xml, nullptr, total)) {
             std::string theme_xml;
             ReadPart(path, theme_part, theme_xml, nullptr, total);
@@ -937,7 +983,16 @@ bool MakeXlsxTable(const std::wstring& path, std::wstring& payload, uint32_t& by
             read = ReadPart(path, sheet.part, xml, &cut, total);
             if (!read) reason = L"read-failed";
         }
-        if (read) { ++loaded; ReadSheet(xml, shared, styles, rows, columns, truncated, date1904); }
+        if (read) {
+            if (!ReadSheet(xml, get_shared, styles, rows, columns, truncated, date1904)) {
+                rows.clear();
+                columns = 0;
+                read = false;
+                reason = L"time-limit";
+            } else {
+                ++loaded;
+            }
+        }
         metadata_chars -= sheet.name.size() * 2 + 512;
         AppendSheet(payload, L"xlsx", sheet.name, rows, columns,
                     truncated || cut || (!read && reason != L"not-loaded"), reason, false,

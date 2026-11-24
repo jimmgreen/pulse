@@ -174,6 +174,24 @@ void RunCommandLine(AppState& s, const wchar_t* exe, const wchar_t* args) {
     s.ops.OpenProgramIn(std::wstring(system) + L"\\" + exe, std::wstring(), args);
 }
 
+std::wstring DisplayFtpUrl(const app::ServerAddress& address) {
+    if (!address.url.starts_with(L"ftp://")) return address.url;
+    const size_t slash = address.url.find(L'/', 6);
+    const size_t at = address.url.find(L'@', 6);
+    if (at == std::wstring::npos || (slash != std::wstring::npos && at >= slash)) return address.url;
+    const std::wstring prefix = address.user.empty() ? L"ftp://" : L"ftp://" + address.user + L"@";
+    return prefix + address.url.substr(at + 1);
+}
+
+void OpenFtpInExplorer(AppState& s, const std::wstring& url) {
+    if (url.empty()) return;
+    wchar_t windows_dir[MAX_PATH]{};
+    const UINT n = GetWindowsDirectoryW(windows_dir, ARRAYSIZE(windows_dir));
+    if (!n || n >= ARRAYSIZE(windows_dir)) return;
+    s.ops.OpenProgramIn(std::wstring(windows_dir) + L"\\explorer.exe",
+                        std::wstring(), L"\"" + url + L"\"");
+}
+
 void ExplainAddress(AppState& s, const app::ServerAddress& address) {
     std::wstring message;
     if (address.kind == app::ServerAddressKind::Unsupported || address.kind == app::ServerAddressKind::WebDav) {
@@ -286,6 +304,13 @@ ui::ConnectServerPreview PreviewServerAddress(const std::wstring& text) {
         preview.ok = true;
         preview.can_map = app::UncShareRoot(address.unc) == address.unc;
         break;
+    case app::ServerAddressKind::Ftp:
+        swprintf_s(line, l10n::Get(l10n::StringId::ConnectServerFtpFormat).c_str(),
+                   DisplayFtpUrl(address).c_str());
+        preview.ok = true;
+        preview.can_pin = false;
+        preview.can_map = false;
+        break;
     case app::ServerAddressKind::WebDav:
     case app::ServerAddressKind::Unsupported:
         swprintf_s(line, l10n::Get(l10n::StringId::ServerAddressUnsupportedFormat).c_str(),
@@ -341,6 +366,10 @@ void RunConnectServerDialog(AppState& s) {
     const auto result = ui::ShowConnectServerDialog(s.hwnd, spec, s.darkMode, s.accentColor);
     if (!result.accepted) return;
     const app::ServerAddress address = app::ParseServerAddress(result.text, true);
+    if (address.kind == app::ServerAddressKind::Ftp) {
+        OpenFtpInExplorer(s, address.url);
+        return;
+    }
     if (address.kind != app::ServerAddressKind::Server && address.kind != app::ServerAddressKind::Share) {
         ExplainAddress(s, address);
         return;
@@ -488,6 +517,9 @@ bool OpenServerAddressText(AppState& s, const std::wstring& text) {
     case app::ServerAddressKind::Server:
     case app::ServerAddressKind::Share:
         NavigateTo(s, address.unc);
+        return true;
+    case app::ServerAddressKind::Ftp:
+        OpenFtpInExplorer(s, address.url);
         return true;
     case app::ServerAddressKind::WebDav:
     case app::ServerAddressKind::Unsupported:

@@ -9,6 +9,7 @@
 #include "../common/runtime_log.h"
 #include "../ops/transfer_rate_estimator.h"
 #include "../ops/verification_worker.h"
+#include "../ops/large_file_copy.h"
 #include "../app/update_shutdown.h"
 #include "../ops/clipboard.h"
 #include "../ipc/shell_client.h"
@@ -20,6 +21,7 @@
 #include <oleidl.h>
 #include <shlobj.h>
 #include <winioctl.h>
+#include <psapi.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -613,7 +615,736 @@ static int RunUndoRedoHistoryTests(bool progress_only = false) {
     return g_fail ? 1 : 0;
 }
 
+// Source trees (node_modules, site-packages): a deep subtree past MAX_PATH and
+// a run of more than 64 failing files must not end the whole task midway.
+int RunItemFailureRunTests() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const auto base = SandboxRoot();
+    if (base.empty()) return 2;
+    const std::wstring root = (std::filesystem::path(base).parent_path() /
+        (L"item_failure_run_" + std::to_wstring(GetCurrentProcessId()))).wstring();
+    const auto api = [](const std::wstring& path) { return L"\\\\?\\" + path; };
+    std::error_code error;
+    std::filesystem::remove_all(api(root), error);
+    std::filesystem::create_directories(root, error);
+    g_ops.SetVerifyCopies(false);
+    g_ops.Start([] {});
+    Sleep(800);
+    const char payload[] = "module.exports = 1;\n";
+
+    // 100 files at ~330 characters, behind 5 shallow ones.
+    const std::wstring deep_src = root + L"\\proj";
+    std::wstring deep_rel;
+    for (int i = 0; i < 8; ++i) deep_rel += L"\\node_modules\\package-with-a-long-name-" + std::to_wstring(i);
+    std::filesystem::create_directories(api(deep_src + deep_rel), error);
+    for (int i = 0; i < 5; ++i) MakeFile(deep_src + L"\\index" + std::to_wstring(i) + L".js", payload, sizeof(payload) - 1);
+    for (int i = 0; i < 100; ++i)
+        MakeFile(api(deep_src + deep_rel + L"\\module_file_" + std::to_wstring(i) + L".js"), payload, sizeof(payload) - 1);
+    const auto count_deep = [&](const std::wstring& tree) {
+        int found = 0;
+        for (int i = 0; i < 100; ++i)
+            if (Exists(api(tree + deep_rel + L"\\module_file_" + std::to_wstring(i) + L".js"))) ++found;
+        return found;
+    };
+    Check((deep_src + deep_rel).size() > MAX_PATH && count_deep(deep_src) == 100, L"deep fixture created past MAX_PATH");
+
+    const std::wstring copy_dst = root + L"\\copy";
+    MakeDir(copy_dst);
+    auto copy_st = RunOp(SimpleOp(ops::OpType::Copy, {deep_src.c_str()}, copy_dst.c_str()));
+    wprintf(L"[INFO] deep copy: phase=%d failed=%llu items=%llu/%llu error=%s\n", static_cast<int>(copy_st.phase),
+            copy_st.failed_items, copy_st.completed_items, copy_st.total_items, copy_st.last_error.c_str());
+    Check(copy_st.phase == ops::OpPhase::Completed && count_deep(copy_dst + L"\\proj") == 100 &&
+              Exists(copy_dst + L"\\proj\\index4.js"),
+          L"copy: a subtree past MAX_PATH is copied, not failed file by file");
+
+    // Same volume into an existing folder of that name: per-file copy, flush, delete.
+    const std::wstring move_dst = root + L"\\move";
+    MakeDir(move_dst);
+    MakeDir(move_dst + L"\\proj");
+    auto move_st = RunOp(SimpleOp(ops::OpType::Move, {deep_src.c_str()}, move_dst.c_str()));
+    wprintf(L"[INFO] deep move: phase=%d failed=%llu error=%s\n", static_cast<int>(move_st.phase),
+            move_st.failed_items, move_st.last_error.c_str());
+    Check(move_st.phase == ops::OpPhase::Completed && count_deep(move_dst + L"\\proj") == 100 && count_deep(deep_src) == 0,
+          L"move: a subtree past MAX_PATH is merged and its sources removed");
+
+    // 80 files another program holds, then 10 free ones: the held run is
+    // listed and the free files still go through.
+    const std::wstring held_src = root + L"\\held";
+    MakeDir(held_src);
+    std::vector<HANDLE> held;
+    for (int i = 0; i < 80; ++i) {
+        wchar_t name[32];
+        swprintf_s(name, L"\\a%03d.js", i);
+        MakeFile(held_src + name, payload, sizeof(payload) - 1);
+        held.push_back(CreateFileW((held_src + name).c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr));
+    }
+    for (int i = 0; i < 10; ++i) {
+        wchar_t name[32];
+        swprintf_s(name, L"\\z%03d.js", i);
+        MakeFile(held_src + name, payload, sizeof(payload) - 1);
+    }
+    const std::wstring held_dst = root + L"\\held_copy";
+    MakeDir(held_dst);
+    auto held_st = RunOp(SimpleOp(ops::OpType::Copy, {held_src.c_str()}, held_dst.c_str()));
+    for (HANDLE handle : held) if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+    int free_copied = 0;
+    for (int i = 0; i < 10; ++i) {
+        wchar_t name[32];
+        swprintf_s(name, L"\\held\\z%03d.js", i);
+        if (Exists(held_dst + name)) ++free_copied;
+    }
+    wprintf(L"[INFO] held run: phase=%d failed=%llu listed=%zu free_copied=%d error=%s\n",
+            static_cast<int>(held_st.phase), held_st.failed_items, held_st.failures.size(), free_copied,
+            held_st.last_error.c_str());
+    Check(held_st.phase == ops::OpPhase::Failed && held_st.failed_items == 80 && held_st.failures.size() == 80 &&
+              free_copied == 10,
+          L"copy: 80 held files in a row are listed and the task goes on to the rest");
+
+    g_ops.Stop();
+    std::filesystem::remove_all(api(root), error);
+    Check(!error, L"item-failure-run fixture cleanup");
+    CoUninitialize();
+    wprintf(L"item-failure-run: %d passed, %d failed\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
+
+// --soak-lanes <srcA> <dstA> <srcB> <dstB> <rounds>: each round copies A and B
+// at once (two lanes), then deletes both copies at once; prints memory and
+// handles per round, so growth in the lane machinery shows as a trend.
+int RunLaneSoak(int, wchar_t** argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const std::wstring src_a = argv[2], dst_a = argv[3], src_b = argv[4], dst_b = argv[5];
+    const int rounds = _wtoi(argv[6]);
+    std::error_code error;
+    std::filesystem::create_directories(dst_a, error);
+    std::filesystem::create_directories(dst_b, error);
+    g_ops.SetVerifyCopies(false);
+    g_ops.Start([] {});
+    Sleep(800);
+    const auto finish = [&](std::vector<uint64_t> tasks) {
+        int failed = 0;
+        for (const auto task : tasks) {
+            for (;;) {
+                if (const auto st = g_ops.QueryTask(task); st && !st->active && st->phase != ops::OpPhase::Queued) {
+                    failed += st->phase != ops::OpPhase::Completed;
+                    break;
+                }
+                g_ops.DrainFinishedTasks();
+                g_ops.DrainCompletions();
+                Sleep(5);
+            }
+        }
+        return failed;
+    };
+    const auto leaf = [](const std::wstring& path) { return std::filesystem::path(path).filename().wstring(); };
+    int failures = 0;
+    for (int round = 0; round <= rounds; ++round) {
+        size_t peak = 0;
+        uint64_t copy_ms = 0, delete_ms = 0;
+        if (round > 0) {
+            const auto started = GetTickCount64();
+            const auto a = g_ops.Submit(SimpleOp(ops::OpType::Copy, {src_a.c_str()}, dst_a.c_str()));
+            const auto b = g_ops.Submit(SimpleOp(ops::OpType::Copy, {src_b.c_str()}, dst_b.c_str()));
+            for (int i = 0; i < 200; ++i) { peak = (std::max)(peak, g_ops.ActiveStatuses().size()); Sleep(5); }
+            failures += finish({a, b});
+            copy_ms = GetTickCount64() - started;
+            const auto removed = GetTickCount64();
+            const auto copy_a = dst_a + L"\\" + leaf(src_a), copy_b = dst_b + L"\\" + leaf(src_b);
+            const auto da = g_ops.Submit(SimpleOp(ops::OpType::RealDelete, {copy_a.c_str()}));
+            const auto db = g_ops.Submit(SimpleOp(ops::OpType::RealDelete, {copy_b.c_str()}));
+            failures += finish({da, db});
+            delete_ms = GetTickCount64() - removed;
+            failures += Exists(copy_a) || Exists(copy_b);
+        }
+        PROCESS_MEMORY_COUNTERS_EX memory{};
+        GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory));
+        DWORD handles = 0;
+        GetProcessHandleCount(GetCurrentProcess(), &handles);
+        wprintf(L"ROUND %d copy_ms=%llu delete_ms=%llu peak_running=%zu private_kb=%llu working_set_kb=%llu handles=%lu\n",
+                round, copy_ms, delete_ms, peak, static_cast<unsigned long long>(memory.PrivateUsage / 1024),
+                static_cast<unsigned long long>(memory.WorkingSetSize / 1024), handles);
+    }
+    g_ops.Stop();
+    wprintf(L"LANESOAK rounds=%d failures=%d\n", rounds, failures);
+    return failures ? 1 : 0;
+}
+
+// --multi [--serial] <copy|move|delete> <source> <dest|-> [...]: submits the
+// operations together (or each after the previous one ends with --serial) and
+// prints when each finished and the total, to compare running them at once.
+int RunMulti(int argc, wchar_t** argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    int at = 2;
+    const bool serial = argc > at && std::wstring_view(argv[at]) == L"--serial";
+    if (serial) ++at;
+    std::vector<ops::OpRequest> requests;
+    for (; at + 2 < argc; at += 3) {
+        const std::wstring_view op = argv[at];
+        ops::OpRequest request;
+        request.type = op == L"delete" ? ops::OpType::RealDelete : op == L"move" ? ops::OpType::Move : ops::OpType::Copy;
+        request.sources = {argv[at + 1]};
+        if (request.type != ops::OpType::RealDelete) {
+            request.dest_dir = argv[at + 2];
+            std::error_code error;
+            std::filesystem::create_directories(request.dest_dir, error);
+        }
+        requests.push_back(std::move(request));
+    }
+    g_ops.SetVerifyCopies(false);
+    g_ops.Start([] {});
+    Sleep(800);
+    const auto started = GetTickCount64();
+    std::vector<uint64_t> tasks;
+    std::vector<ULONGLONG> finished(requests.size(), 0);
+    std::vector<int> phases(requests.size(), -1);
+    const auto wait = [&](size_t index) {
+        for (;;) {
+            if (const auto st = g_ops.QueryTask(tasks[index]); st && !st->active && st->phase != ops::OpPhase::Queued) {
+                finished[index] = GetTickCount64();
+                phases[index] = static_cast<int>(st->phase);
+                return;
+            }
+            g_ops.DrainFinishedTasks();
+            g_ops.DrainCompletions();
+            Sleep(5);
+        }
+    };
+    size_t max_running = 0;
+    if (serial) {
+        for (size_t i = 0; i < requests.size(); ++i) {
+            tasks.push_back(g_ops.Submit(requests[i]));
+            wait(i);
+        }
+    } else {
+        for (const auto& request : requests) tasks.push_back(g_ops.Submit(request));
+        for (size_t done = 0; done < tasks.size();) {
+            max_running = (std::max)(max_running, g_ops.ActiveStatuses().size());
+            done = 0;
+            for (size_t i = 0; i < tasks.size(); ++i) {
+                if (!finished[i]) {
+                    if (const auto st = g_ops.QueryTask(tasks[i]); st && !st->active && st->phase != ops::OpPhase::Queued) {
+                        finished[i] = GetTickCount64();
+                        phases[i] = static_cast<int>(st->phase);
+                    }
+                }
+                done += finished[i] != 0;
+            }
+            g_ops.DrainFinishedTasks();
+            g_ops.DrainCompletions();
+            Sleep(20);
+        }
+    }
+    int failed = 0;
+    for (size_t i = 0; i < tasks.size(); ++i) {
+        wprintf(L"TASK %zu phase=%d done_at=%.1fs\n", i, phases[i], (finished[i] - started) / 1000.0);
+        failed += phases[i] != static_cast<int>(ops::OpPhase::Completed);
+    }
+    wprintf(L"MULTI %s total=%.1fs max_running=%zu failed=%d\n", serial ? L"serial" : L"together",
+            (GetTickCount64() - started) / 1000.0, max_running, failed);
+    g_ops.Stop();
+    return failed ? 1 : 0;
+}
+
+// Several operations at once: separate paths run side by side, a shared path
+// waits for the operation it shares, and each can be paused or cancelled alone.
+int RunLaneTests() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const auto base = SandboxRoot();
+    if (base.empty()) return 2;
+    const std::wstring root = (std::filesystem::path(base).parent_path() /
+        (L"lanes_" + std::to_wstring(GetCurrentProcessId()))).wstring();
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    for (const wchar_t* dir : {L"\\big", L"\\dst1", L"\\tree", L"\\dst2", L"\\big2", L"\\dst3", L"\\tree4", L"\\dst4"})
+        std::filesystem::create_directories(root + dir, error);
+    Check(MakePatternFile(root + L"\\big\\movie.bin", 512ull << 20) && MakePatternFile(root + L"\\big2\\movie.bin", 512ull << 20),
+          L"lanes: fixtures created");
+    const char payload[] = "lane payload";
+    for (int i = 0; i < 200; ++i) MakeFile(root + L"\\tree\\f" + std::to_wstring(i) + L".txt", payload, sizeof(payload) - 1);
+    for (int i = 0; i < 50; ++i) MakeFile(root + L"\\tree4\\g" + std::to_wstring(i) + L".txt", payload, sizeof(payload) - 1);
+    // The big copy merges into an existing folder: what is in it is the copy's to touch.
+    std::filesystem::create_directories(root + L"\\dst1\\big", error);
+    MakeFile(root + L"\\dst1\\big\\old.txt", payload, sizeof(payload) - 1);
+    std::filesystem::create_directories(root + L"\\dst5", error);
+    MakeFile(root + L"\\dst1\\sibling.txt", payload, sizeof(payload) - 1);
+    diagnostics::runtime::Initialize(std::filesystem::path(base).parent_path().wstring() + L"\\lanes_diag", "lanes");
+    const std::wstring journal = root + L"\\operations.json";
+    g_ops.SetJournalPath(journal);
+    g_ops.SetVerifyCopies(false);
+    g_ops.Start([] {});
+    Sleep(800);
+    const auto wait_final = [&](uint64_t task, ULONGLONG ms) -> std::optional<ops::OpStatus> {
+        const auto deadline = GetTickCount64() + ms;
+        while (GetTickCount64() < deadline) {
+            if (auto st = g_ops.QueryTask(task); st && !st->active && st->phase != ops::OpPhase::Queued) return st;
+            g_ops.DrainFinishedTasks();
+            g_ops.DrainCompletions();
+            Sleep(5);
+        }
+        return std::nullopt;
+    };
+    // A task can be paused once it runs: keep asking until it takes.
+    const auto pause_when_running = [&](uint64_t task) {
+        const auto deadline = GetTickCount64() + 10000;
+        while (GetTickCount64() < deadline) {
+            if (g_ops.PauseTask(task)) return true;
+            Sleep(1);
+        }
+        return false;
+    };
+
+    // 1. A big copy, held paused from its start, and an unrelated folder copy.
+    const uint64_t big = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\big").c_str()}, (root + L"\\dst1").c_str()));
+    Check(pause_when_running(big), L"lanes: the big copy is paused while running");
+    const uint64_t tree = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\tree").c_str()}, (root + L"\\dst2").c_str()));
+    bool both_listed = false;
+    for (int i = 0; i < 400 && !both_listed; ++i) {
+        const auto active = g_ops.ActiveStatuses();
+        both_listed = std::any_of(active.begin(), active.end(), [&](const auto& st) { return st.task_id == big; }) &&
+                      std::any_of(active.begin(), active.end(), [&](const auto& st) { return st.task_id == tree; });
+        if (!both_listed) Sleep(5);
+    }
+    const auto tree_final = wait_final(tree, 30000);
+    const auto big_while_tree = g_ops.QueryTask(big);
+    Check(tree_final && tree_final->phase == ops::OpPhase::Completed && FileHash(root + L"\\dst2\\tree\\f199.txt") != 0,
+          L"lanes: an unrelated folder copy finishes while a big copy is paused");
+    Check(both_listed && big_while_tree && big_while_tree->active, L"lanes: both operations are listed as running at once");
+
+    // 2. Beside the copy's target is fine; inside it waits for the copy, untouched.
+    const uint64_t beside = g_ops.Submit(SimpleOp(ops::OpType::RealDelete, {(root + L"\\dst1\\sibling.txt").c_str()}));
+    const auto beside_final = wait_final(beside, 30000);
+    Check(beside_final && beside_final->phase == ops::OpPhase::Completed && !Exists(root + L"\\dst1\\sibling.txt"),
+          L"lanes: deleting a file next to the paused copy's target runs at once");
+    const uint64_t overlap = g_ops.Submit(SimpleOp(ops::OpType::RealDelete, {(root + L"\\dst1\\big\\old.txt").c_str()}));
+    Sleep(1500);
+    const auto overlap_waiting = g_ops.QueryTask(overlap);
+    Check(overlap_waiting && overlap_waiting->phase == ops::OpPhase::Queued && Exists(root + L"\\dst1\\big\\old.txt"),
+          L"lanes: deleting inside the paused copy's target waits and changes nothing");
+    {
+        // The task list shows it waiting, and why; the plain list stays running-only.
+        const auto listed = g_ops.ActiveStatuses(true);
+        const auto found = std::find_if(listed.begin(), listed.end(), [&](const auto& st) { return st.task_id == overlap; });
+        Check(found != listed.end() && found->phase == ops::OpPhase::Queued &&
+              found->wait_reason == ops::OpWaitReason::SamePlace && found->source_label == L"old.txt",
+              L"lanes: the waiting delete is listed as queued for the same place");
+        const auto running = g_ops.ActiveStatuses();
+        Check(std::none_of(running.begin(), running.end(), [&](const auto& st) { return st.task_id == overlap; }),
+              L"lanes: the running list leaves the queued delete out");
+    }
+    {
+        // Two copies only read their common source: the second runs beside the
+        // paused first instead of waiting for it.
+        const uint64_t again = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\big").c_str()}, (root + L"\\dst5").c_str()));
+        bool again_running = false;
+        for (int i = 0; i < 1000 && !again_running; ++i) {
+            const auto st = g_ops.QueryTask(again);
+            again_running = st && st->active && st->phase != ops::OpPhase::Queued;
+            if (!again_running) Sleep(5);
+        }
+        Check(again_running, L"lanes: a second copy of the same source runs while the first is paused");
+        g_ops.CancelTask(again);
+        const auto again_final = wait_final(again, 30000);
+        Check(again_final && !again_final->active, L"lanes: the second copy of the same source ends when cancelled");
+        const auto first = g_ops.QueryTask(big);
+        Check(first && first->active, L"lanes: the paused first copy is untouched by the second");
+    }
+
+    // 3. Another big copy in a lane, paused, then cancelled alone.
+    const uint64_t other = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\big2").c_str()}, (root + L"\\dst3").c_str()));
+    Check(pause_when_running(other), L"lanes: the second big copy is paused while running in a lane");
+    bool other_running = false;
+    for (int i = 0; i < 400 && !other_running; ++i) {
+        const auto st = g_ops.QueryTask(other);
+        other_running = st && st->active && st->phase != ops::OpPhase::Queued;
+        if (!other_running) Sleep(5);
+    }
+    const uint64_t third = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\tree4").c_str()}, (root + L"\\dst4").c_str()));
+    // The journal is replaced atomically on every change: read until a whole one shows both.
+    size_t active_entries = 0;
+    for (int attempt = 0; attempt < 100 && active_entries < 2; ++attempt) {
+        std::string journal_text;
+        {
+            std::ifstream in(journal, std::ios::binary);
+            journal_text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        active_entries = 0;
+        for (size_t at = journal_text.find("\"active\":true"); at != std::string::npos; at = journal_text.find("\"active\":true", at + 1))
+            ++active_entries;
+        if (active_entries < 2) Sleep(10);
+    }
+    Check(active_entries >= 2, L"lanes: the journal records the running operations");
+    const auto third_final = wait_final(third, 30000);
+    {
+        const auto third_now = g_ops.QueryTask(third);
+        wprintf(L"[INFO] third: phase=%d active=%d err=%s\n", third_now ? static_cast<int>(third_now->phase) : -1,
+                third_now ? third_now->active : 0, third_now ? third_now->last_error.c_str() : L"");
+    }
+    Check(other_running && third_final && third_final->phase == ops::OpPhase::Completed,
+          L"lanes: three operations run side by side (two paused copies and a third that finishes)");
+    g_ops.CancelTask(other);
+    const auto other_final = wait_final(other, 30000);
+    const auto big_after_cancel = g_ops.QueryTask(big);
+    Check(other_final && other_final->phase != ops::OpPhase::Completed && big_after_cancel && big_after_cancel->active,
+          L"lanes: cancelling one operation leaves the others running");
+
+    // 4. Resuming the first finishes it, and the waiting delete then runs.
+    g_ops.ResumeTask(big);
+    const auto big_final = wait_final(big, 60000);
+    const auto overlap_final = wait_final(overlap, 30000);
+    Check(big_final && big_final->phase == ops::OpPhase::Completed &&
+              FileHash(root + L"\\dst1\\big\\movie.bin") == FileHash(root + L"\\big\\movie.bin"),
+          L"lanes: the resumed big copy completes intact");
+    Check(overlap_final && overlap_final->phase == ops::OpPhase::Completed && !Exists(root + L"\\dst1\\big\\old.txt"),
+          L"lanes: the waiting operation runs once the one it waited for is done");
+    const auto snapshot = g_ops.CaptureUiSnapshot(true);
+    const auto recorded = [&](uint64_t task) {
+        return std::any_of(snapshot.undo_summary.begin(), snapshot.undo_summary.end(), [&](const auto& e) { return e.task_id == task; });
+    };
+    Check(recorded(big) && recorded(tree) && recorded(third), L"lanes: each completed operation can be undone");
+    Check(g_ops.ActiveStatuses().empty(), L"lanes: nothing is listed as running afterwards");
+
+    g_ops.Stop();
+    g_ops.SetJournalPath(L"");
+    std::filesystem::remove_all(root, error);
+    Check(!error, L"lanes fixture cleanup");
+    wprintf(L"lanes: %d passed, %d failed\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
+
+// Same-volume move into an existing folder: what has a free target is renamed
+// (same file identity, nothing copied), conflicts still ask, undo puts it back.
+int RunMergeMoveTests() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const auto base = SandboxRoot();
+    if (base.empty()) return 2;
+    const std::wstring root = (std::filesystem::path(base).parent_path() /
+        (L"merge_move_" + std::to_wstring(GetCurrentProcessId()))).wstring();
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    const std::wstring src = root + L"\\src\\proj", dst = root + L"\\dst";
+    const char payload[] = "merge move payload";
+    std::filesystem::create_directories(src + L"\\lib\\deep", error);
+    std::filesystem::create_directories(src + L"\\shared", error);
+    std::filesystem::create_directories(dst + L"\\proj\\shared", error);
+    for (int i = 0; i < 50; ++i) MakeFile(src + L"\\lib\\deep\\m" + std::to_wstring(i) + L".js", payload, sizeof(payload) - 1);
+    MakeFile(src + L"\\README.md", payload, sizeof(payload) - 1);
+    MakeFile(src + L"\\shared\\new.txt", payload, sizeof(payload) - 1);
+    MakeFile(src + L"\\shared\\same.txt", payload, sizeof(payload) - 1);
+    SetFileAttributesW((src + L"\\README.md").c_str(), FILE_ATTRIBUTE_READONLY);
+    MakeFile(dst + L"\\proj\\keep.txt", "existing", 8);
+    MakeFile(dst + L"\\proj\\shared\\same.txt", "existing", 8);
+    const auto file_id = [](const std::wstring& path) {
+        HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        BY_HANDLE_FILE_INFORMATION info{};
+        const bool ok = h != INVALID_HANDLE_VALUE && GetFileInformationByHandle(h, &info);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        return ok ? (static_cast<uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow : 0ull;
+    };
+    const uint64_t deep_id = file_id(src + L"\\lib\\deep\\m7.js"), readme_id = file_id(src + L"\\README.md"),
+                   lib_id = file_id(src + L"\\lib"), new_id = file_id(src + L"\\shared\\new.txt");
+    g_ops.SetVerifyCopies(false);
+    g_ops.Start([] {});
+    Sleep(800);
+    size_t asked = 0;
+    const auto moved = RunConflictOp(SimpleOp(ops::OpType::Move, {src.c_str()}, dst.c_str()),
+                                     ops::ConflictChoice::KeepBoth, false, &asked);
+    wprintf(L"[INFO] merge move: phase=%d asked=%zu failed=%llu error=%s\n", static_cast<int>(moved.phase), asked,
+            moved.failed_items, moved.last_error.c_str());
+    Check(moved.phase == ops::OpPhase::Completed && asked == 1, L"merge move: completes, asking only about the taken name");
+    Check(file_id(dst + L"\\proj\\lib") == lib_id && file_id(dst + L"\\proj\\lib\\deep\\m7.js") == deep_id,
+          L"merge move: a folder with a free name is renamed whole, not copied");
+    Check(file_id(dst + L"\\proj\\README.md") == readme_id && file_id(dst + L"\\proj\\shared\\new.txt") == new_id &&
+              (GetFileAttributesW((dst + L"\\proj\\README.md").c_str()) & FILE_ATTRIBUTE_READONLY),
+          L"merge move: files with free names are renamed, read-only kept");
+    int keep_both = 0;
+    for (const auto& item : std::filesystem::directory_iterator(dst + L"\\proj\\shared", error))
+        if (item.path().filename().wstring().starts_with(L"same") && item.path().filename() != L"same.txt") ++keep_both;
+    Check(FileSize(dst + L"\\proj\\shared\\same.txt") == 8 && keep_both == 1 && FileSize(dst + L"\\proj\\keep.txt") == 8,
+          L"merge move: the taken name gets a keep-both copy; existing files are untouched");
+    Check(!Exists(src), L"merge move: the emptied source folder is gone");
+    const auto before_undo = g_ops.Status().completed_ops;
+    const bool could_undo = g_ops.CanUndo();
+    g_ops.Undo();
+    // Undoing a merge can take several operations (one per source folder): wait for all of them.
+    bool undo_done = WaitOpDone(before_undo);
+    for (int i = 0; i < 3000 && undo_done && g_ops.HasPendingOperations(); ++i) Sleep(10);
+    undo_done = undo_done && !g_ops.HasPendingOperations();
+    {
+        const auto st = g_ops.Status();
+        wprintf(L"[INFO] undo: could=%d done=%d phase=%d type=%d err=%s lib_back=%d readme_back=%d new_back=%d\n",
+                could_undo, undo_done, static_cast<int>(st.phase), static_cast<int>(st.type), st.last_error.c_str(),
+                file_id(src + L"\\lib\\deep\\m7.js") == deep_id, Exists(src + L"\\README.md"), Exists(src + L"\\shared\\new.txt"));
+    }
+    Check(undo_done && file_id(src + L"\\lib\\deep\\m7.js") == deep_id && Exists(src + L"\\README.md") &&
+              Exists(src + L"\\shared\\new.txt") && !Exists(dst + L"\\proj\\lib") && !Exists(dst + L"\\proj\\README.md") &&
+              FileSize(dst + L"\\proj\\keep.txt") == 8 && FileSize(dst + L"\\proj\\shared\\same.txt") == 8,
+          L"merge move: undo moves the renamed items back and leaves what was there");
+    // "Replace": the moving file takes the taken name by a replacing rename.
+    const std::wstring replace_src = root + L"\\src2\\proj";
+    std::filesystem::create_directories(replace_src + L"\\shared", error);
+    MakeFile(replace_src + L"\\shared\\same.txt", payload, sizeof(payload) - 1);
+    const uint64_t replacing_id = file_id(replace_src + L"\\shared\\same.txt");
+    const auto replaced = RunConflictOp(SimpleOp(ops::OpType::Move, {replace_src.c_str()}, dst.c_str()),
+                                        ops::ConflictChoice::Replace, true);
+    Check(replaced.phase == ops::OpPhase::Completed && file_id(dst + L"\\proj\\shared\\same.txt") == replacing_id &&
+              FileSize(dst + L"\\proj\\shared\\same.txt") == sizeof(payload) - 1 && !Exists(replace_src),
+          L"merge move: replace swaps the file in by a rename and removes the source");
+    g_ops.Stop();
+    SetFileAttributesW((src + L"\\README.md").c_str(), FILE_ATTRIBUTE_NORMAL);
+    std::filesystem::remove_all(root, error);
+    Check(!error, L"merge move fixture cleanup");
+    wprintf(L"merge-move: %d passed, %d failed\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
+
+// Big-chunk unbuffered copy (large_file_copy.h) leaves what CopyFile2 leaves.
+int RunBigChunkCopyTests() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    const auto base = SandboxRoot();
+    if (base.empty()) return 2;
+    const std::wstring root = (std::filesystem::path(base).parent_path() /
+        (L"big_chunk_copy_" + std::to_wstring(GetCurrentProcessId()))).wstring();
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    std::filesystem::create_directories(root, error);
+    const std::wstring source = root + L"\\movie.bin";
+    // Not a whole number of sectors or chunks: the tail is written rounded up, then trimmed.
+    Check(MakePatternFile(source, (70ull << 20) + 12345), L"big chunk: source created");
+    {
+        std::ofstream zone(source + L":Zone.Identifier");
+        zone << "[ZoneTransfer]\nZoneId=3\n";
+    }
+    FILETIME stamp{};
+    SYSTEMTIME when{2020, 1, 0, 2, 3, 4, 5, 0};
+    SystemTimeToFileTime(&when, &stamp);
+    {
+        HANDLE file = CreateFileW(source.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        SetFileTime(file, nullptr, nullptr, &stamp);
+        CloseHandle(file);
+    }
+    SetFileAttributesW(source.c_str(), FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE);
+    const auto stream_text = [](const std::wstring& path) {
+        std::ifstream in(path + L":Zone.Identifier", std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const auto same_as_source = [&](const std::wstring& copy) {
+        WIN32_FILE_ATTRIBUTE_DATA a{}, b{};
+        return GetFileAttributesExW(source.c_str(), GetFileExInfoStandard, &a) &&
+            GetFileAttributesExW(copy.c_str(), GetFileExInfoStandard, &b) &&
+            a.dwFileAttributes == b.dwFileAttributes && CompareFileTime(&a.ftLastWriteTime, &b.ftLastWriteTime) == 0 &&
+            a.nFileSizeLow == b.nFileSizeLow && a.nFileSizeHigh == b.nFileSizeHigh &&
+            FileHash(source) == FileHash(copy) && stream_text(copy) == stream_text(source) && !stream_text(copy).empty();
+    };
+    ops::LargeCopyControl control;
+    std::vector<std::pair<uint64_t, uint64_t>> reports;
+    control.report = [&](uint64_t done, uint64_t total) { reports.emplace_back(done, total); };
+    for (const bool overlap : {false, true}) {
+        ops::LargeCopyPlan plan;
+        plan.chunk = 16u << 20;
+        plan.overlap = overlap;
+        const std::wstring copy = root + (overlap ? L"\\overlap.bin" : L"\\same_disk.bin");
+        reports.clear();
+        std::shared_ptr<ops::VerificationStamp> owned;
+        const HRESULT hr = ops::CopyLargeFile(source, copy, true, plan, control, &owned);
+        Check(hr == S_OK && same_as_source(copy) && owned,
+              overlap ? L"big chunk (two disks): bytes, stream, attributes and modified time match"
+                      : L"big chunk (one disk): bytes, stream, attributes and modified time match");
+        Check(!reports.empty() && reports.back().first == reports.back().second && reports.size() == 5,
+              L"big chunk: progress per chunk, ending at the file size");
+        SetFileAttributesW(copy.c_str(), FILE_ATTRIBUTE_NORMAL);
+    }
+    {
+        ops::LargeCopyPlan plan;
+        plan.chunk = 16u << 20;
+        const std::wstring existing = root + L"\\overlap.bin";
+        const uint64_t before = FileHash(existing);
+        Check(ops::CopyLargeFile(source, existing, true, plan, control) == HRESULT_FROM_WIN32(ERROR_FILE_EXISTS) &&
+                  FileHash(existing) == before,
+              L"big chunk: an existing target is reported and left untouched");
+        std::atomic<bool> cancel{false}, skip{false}, pause{false};
+        ops::LargeCopyControl stop_control;
+        stop_control.cancel = &cancel;
+        stop_control.skip = &skip;
+        stop_control.report = [&](uint64_t, uint64_t) { cancel.store(true); };
+        const std::wstring cancelled = root + L"\\cancelled.bin";
+        Check(ops::CopyLargeFile(source, cancelled, true, plan, stop_control) == HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED) &&
+                  !Exists(cancelled),
+              L"big chunk: cancel mid-file leaves no partial target");
+        cancel.store(false);
+        stop_control.report = [&](uint64_t, uint64_t) { skip.store(true); };
+        Check(ops::CopyLargeFile(source, cancelled, true, plan, stop_control) == HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED) &&
+                  !Exists(cancelled),
+              L"big chunk: skip mid-file leaves no partial target");
+        skip.store(false);
+        int waits = 0;
+        stop_control.pause = &pause;
+        stop_control.report = [&](uint64_t done, uint64_t) { if (done == (16ull << 20)) pause.store(true); };
+        stop_control.wait_while_paused = [&] { ++waits; pause.store(false); return true; };
+        const std::wstring paused = root + L"\\paused.bin";
+        Check(ops::CopyLargeFile(source, paused, true, plan, stop_control) == S_OK && waits == 1 && same_as_source(paused),
+              L"big chunk: pause waits between chunks and the copy completes");
+        SetFileAttributesW(paused.c_str(), FILE_ATTRIBUTE_NORMAL);
+        SetFileAttributesW(source.c_str(), FILE_ATTRIBUTE_NORMAL);
+        HANDLE file = CreateFileW(source.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        USHORT format = COMPRESSION_FORMAT_DEFAULT;
+        DWORD returned = 0;
+        const bool compressed = DeviceIoControl(file, FSCTL_SET_COMPRESSION, &format, sizeof(format), nullptr, 0,
+                                                &returned, nullptr) != FALSE;
+        CloseHandle(file);
+        const std::wstring declined = root + L"\\declined.bin";
+        if (compressed) Check(ops::CopyLargeFile(source, declined, true, plan, control) == S_FALSE && !Exists(declined),
+                              L"big chunk: a compressed file is left to CopyFile2, nothing created");
+        else wprintf(L"[SKIP] big chunk: compression unavailable here\n");
+    }
+    std::filesystem::remove_all(root, error);
+    Check(!error, L"big chunk fixture cleanup");
+    wprintf(L"big-chunk-copy: %d passed, %d failed\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
+
+// Soak: --soak <source> <dest_dir> <rounds>. One OpsManager copies the source
+// and permanently deletes the copy, round after round; after each round it
+// prints the process's private bytes, working set and handle count, so growth
+// across rounds (a leak) shows as a trend rather than a single reading.
+int RunSoak(int, wchar_t** argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const std::wstring source = argv[2], dest = argv[3];
+    const int rounds = _wtoi(argv[4]);
+    std::error_code error;
+    std::filesystem::create_directories(dest, error);
+    g_ops.Start([] {});
+    Sleep(800);
+    const auto run = [&](ops::OpRequest request) {
+        const uint64_t task = g_ops.Submit(std::move(request));
+        for (;;) {
+            for (auto& done : g_ops.DrainFinishedTasks())
+                if (done.task_id == task) {
+                    const auto final = done.final_status ? done.final_status : g_ops.FinalStatus(task);
+                    return final ? final->phase : ops::OpPhase::Failed;
+                }
+            g_ops.DrainCompletions();
+            Sleep(5);
+        }
+    };
+    const auto sample = [](int round, uint64_t copy_ms, uint64_t delete_ms, ops::OpPhase copy, ops::OpPhase removed) {
+        PROCESS_MEMORY_COUNTERS_EX memory{};
+        GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory));
+        DWORD handles = 0;
+        GetProcessHandleCount(GetCurrentProcess(), &handles);
+        wprintf(L"ROUND %d copy_ms=%llu delete_ms=%llu copy=%d delete=%d private_kb=%llu working_set_kb=%llu handles=%lu\n",
+                round, copy_ms, delete_ms, static_cast<int>(copy), static_cast<int>(removed),
+                static_cast<unsigned long long>(memory.PrivateUsage / 1024),
+                static_cast<unsigned long long>(memory.WorkingSetSize / 1024), handles);
+    };
+    sample(0, 0, 0, ops::OpPhase::Completed, ops::OpPhase::Completed);
+    const std::wstring copied = dest + L"\\" + std::filesystem::path(source).filename().wstring();
+    int failures = 0;
+    for (int round = 1; round <= rounds; ++round) {
+        ops::OpRequest copy;
+        copy.type = ops::OpType::Copy;
+        copy.sources = {source};
+        copy.dest_dir = dest;
+        const auto copy_started = GetTickCount64();
+        const auto copy_phase = run(std::move(copy));
+        const auto copy_ms = GetTickCount64() - copy_started;
+        ops::OpRequest remove;
+        remove.type = ops::OpType::RealDelete;
+        remove.sources = {copied};
+        const auto delete_started = GetTickCount64();
+        const auto delete_phase = run(std::move(remove));
+        failures += copy_phase != ops::OpPhase::Completed || delete_phase != ops::OpPhase::Completed ||
+            GetFileAttributesW(copied.c_str()) != INVALID_FILE_ATTRIBUTES;
+        sample(round, copy_ms, GetTickCount64() - delete_started, copy_phase, delete_phase);
+    }
+    g_ops.Stop();
+    wprintf(L"SOAK rounds=%d failures=%d\n", rounds, failures);
+    return failures ? 1 : 0;
+}
+
+// Manual stress run against a real tree:
+//   --bulk-transfer copy|move <source> <dest_dir> [log_dir]
+//   --bulk-transfer delete <path> - [log_dir]        (permanent delete)
+// Prints progress every 2 s, and SUBMIT_TICK/FINISH_TICK (GetTickCount64) so a
+// benchmark can line the task up with when its writes reach the disk.
+int RunBulkTransfer(int argc, wchar_t** argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const std::wstring_view mode = argv[2];
+    const bool remove = mode == L"delete";
+    const std::wstring source = argv[3], dest = argv[4];
+    if (argc > 5) diagnostics::runtime::Initialize(argv[5], "bulk_transfer");
+    if (!remove) {
+        std::error_code dir_error;
+        std::filesystem::create_directories(dest, dir_error);
+        if (dir_error) { fprintf(stderr, "cannot create dest: %s\n", dir_error.message().c_str()); return 2; }
+    }
+    if (argc > 5) g_ops.SetJournalPath(std::wstring(argv[5]) + L"\\operations.json");
+    g_ops.Start([] {});
+    Sleep(800);
+    ops::OpRequest request;
+    request.type = remove ? ops::OpType::RealDelete : mode == L"move" ? ops::OpType::Move : ops::OpType::Copy;
+    request.sources = {source};
+    if (!remove) request.dest_dir = dest;
+    const auto started = GetTickCount64();
+    wprintf(L"SUBMIT_TICK=%llu\n", started);
+    const uint64_t task = g_ops.Submit(std::move(request));
+    uint64_t last_items = ~0ull, last_bytes = ~0ull, last_change = started, last_print = started;
+    std::optional<ops::FinishedTask> finished;
+    while (!finished) {
+        for (auto& done : g_ops.DrainFinishedTasks())
+            if (done.task_id == task) finished = done;
+        if (finished) break;
+        const auto now = GetTickCount64();
+        const auto st = g_ops.QueryTask(task).value_or(g_ops.Status());
+        if (st.completed_items != last_items || st.transferred_bytes != last_bytes) {
+            last_change = now;
+            last_items = st.completed_items;
+            last_bytes = st.transferred_bytes;
+        }
+        if (now - last_print >= 2000) {
+            last_print = now;
+            wprintf(L"[%6.1fs] phase=%d items=%llu/%llu bytes=%llu/%llu idle=%llus cur=%s err=%s\n",
+                    (now - started) / 1000.0, static_cast<int>(st.phase), st.completed_items, st.total_items,
+                    st.transferred_bytes, st.total_bytes, (now - last_change) / 1000,
+                    st.current_item.c_str(), st.last_error.c_str());
+            if (const auto conflict = g_ops.PendingConflict())
+                wprintf(L"  pending conflict token=%llu\n", conflict->token);
+        }
+        Sleep(5);
+    }
+    const auto finish = GetTickCount64();
+    wprintf(L"FINISH_TICK=%llu\n", finish);
+    const auto st = finished->final_status ? *finished->final_status : g_ops.FinalStatus(task).value_or(g_ops.Status());
+    wprintf(L"FINISHED in %.1fs phase=%d items=%llu/%llu bytes=%llu/%llu failures=%zu summary=%s err=%s\n",
+            (finish - started) / 1000.0, static_cast<int>(st.phase), st.completed_items,
+            st.total_items, st.transferred_bytes, st.total_bytes, static_cast<size_t>(st.failed_items),
+            st.summary.c_str(), st.last_error.c_str());
+    size_t shown = 0;
+    for (const auto& failure : st.failures) {
+        if (shown++ >= 40) break;
+        wprintf(L"  FAIL %s hr=0x%08lx %s\n", failure.source.c_str(), static_cast<unsigned long>(failure.hr),
+                failure.reason.c_str());
+    }
+    g_ops.Stop();
+    return st.phase == ops::OpPhase::Completed ? 0 : 1;
+}
+
 int wmain(int argc, wchar_t** argv) {
+    if (argc >= 5 && std::wstring_view(argv[1]) == L"--bulk-transfer") return RunBulkTransfer(argc, argv);
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--item-failure-run-only") return RunItemFailureRunTests();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--big-chunk-copy-only") return RunBigChunkCopyTests();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--merge-move-only") return RunMergeMoveTests();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--lanes-only") return RunLaneTests();
+    if (argc >= 5 && std::wstring_view(argv[1]) == L"--multi") return RunMulti(argc, argv);
+    if (argc == 7 && std::wstring_view(argv[1]) == L"--soak-lanes") return RunLaneSoak(argc, argv);
+    if (argc == 5 && std::wstring_view(argv[1]) == L"--soak") return RunSoak(argc, argv);
     if (argc == 2 && std::wstring_view(argv[1]) == L"--undo-history-persistence-only") return RunUndoHistoryPersistenceTests();
     if (argc == 2 && std::wstring_view(argv[1]) == L"--undo-history-progress-behavior") return RunUndoRedoHistoryTests(true);
     if (argc == 2 && std::wstring_view(argv[1]) == L"--undo-history-progress-only") return RunUndoHistoryProgressTests(false);
@@ -1499,6 +2230,13 @@ int wmain(int argc, wchar_t** argv) {
         Check(status.phase == ops::OpPhase::Completed && completions.size() == 1 &&
               completions.front().refresh_directories == request.refresh_directories,
               L"completion preserves explicitly affected directories for visible-pane refresh");
+        request.collision_policy = ops::CollisionPolicy::KeepBoth;
+        request.template_data = {42};
+        const auto unique = RunOp(request);
+        const auto second = srcDir + L"\\refresh (2).txt";
+        Check(unique.phase == ops::OpPhase::Completed && Exists(second) &&
+              std::filesystem::file_size(second) == 1 && std::filesystem::file_size(request.sources.front()) == 0,
+              L"worker creates numbered sibling without changing the original");
         g_ops.Stop();
         CoUninitialize();
         return g_fail ? 1 : 0;
@@ -2788,6 +3526,102 @@ int wmain(int argc, wchar_t** argv) {
         Check(merge_st.last_error.empty() && moved == 20 && !Exists(merge_src),
               L"parallel move: merged files moved and the source folder removed");
         SetFileAttributesW((merge_dst + par_name(0)).c_str(), FILE_ATTRIBUTE_NORMAL);
+
+        // Read-only source directories (root + nested child) must be removed
+        // cleanly after all files move out, never leaving an empty folder with
+        // ERROR_ACCESS_DENIED.
+        const std::wstring ro_src = par_src + L"\\ro_folder";
+        const std::wstring ro_sub = ro_src + L"\\nested";
+        const std::wstring ro_dst = par_dst + L"\\ro_folder";
+        MakeDir(ro_src);
+        MakeDir(ro_sub);
+        MakeDir(ro_dst);
+        MakeFile(ro_src + L"\\root.txt", payload, sizeof(payload) - 1);
+        MakeFile(ro_sub + L"\\child.txt", payload, sizeof(payload) - 1);
+        SetFileAttributesW((ro_sub + L"\\child.txt").c_str(), FILE_ATTRIBUTE_READONLY);
+        SetFileAttributesW(ro_sub.c_str(), FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY);
+        SetFileAttributesW(ro_src.c_str(), FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY);
+        auto ro_st = RunOp(SimpleOp(ops::OpType::Move, { ro_src.c_str() }, par_dst.c_str()));
+        wprintf(L"[INFO] ro_move: phase=%d failed=%llu error=%s src_exists=%d\n",
+                static_cast<int>(ro_st.phase), static_cast<unsigned long long>(ro_st.failed_items),
+                ro_st.last_error.c_str(), Exists(ro_src) ? 1 : 0);
+        Check(ro_st.phase == ops::OpPhase::Completed && ro_st.last_error.empty() &&
+                  Exists(ro_dst + L"\\root.txt") && Exists(ro_dst + L"\\nested\\child.txt") &&
+                  !Exists(ro_src),
+              L"move: read-only source root and nested directories are removed after move");
+        SetFileAttributesW((ro_dst + L"\\nested\\child.txt").c_str(), FILE_ATTRIBUTE_NORMAL);
+        SetFileAttributesW((ro_dst + L"\\nested").c_str(), FILE_ATTRIBUTE_DIRECTORY);
+        SetFileAttributesW(ro_dst.c_str(), FILE_ATTRIBUTE_DIRECTORY);
+
+        // A read-only source folder that still holds a locked/skipped file must
+        // stay retained without reporting an extra access-denied failure on the
+        // directory itself, and must preserve its original read-only attribute.
+        const std::wstring ro_keep_src = par_src + L"\\ro_keep";
+        const std::wstring ro_keep_dst = par_dst + L"\\ro_keep";
+        MakeDir(ro_keep_src);
+        MakeDir(ro_keep_dst);
+        MakeFile(ro_keep_src + L"\\ok.txt", payload, sizeof(payload) - 1);
+        MakeFile(ro_keep_src + L"\\locked.txt", payload, sizeof(payload) - 1);
+        SetFileAttributesW(ro_keep_src.c_str(), FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY);
+        HANDLE ro_held = CreateFileW((ro_keep_src + L"\\locked.txt").c_str(), GENERIC_READ, 0,
+                                     nullptr, OPEN_EXISTING, 0, nullptr);
+        auto ro_keep_st = RunOp(SimpleOp(ops::OpType::Move, { ro_keep_src.c_str() }, par_dst.c_str()));
+        const DWORD ro_keep_attrs = GetFileAttributesW(ro_keep_src.c_str());
+        if (ro_held != INVALID_HANDLE_VALUE) CloseHandle(ro_held);
+        const bool only_locked_failed = ro_keep_st.failures.size() == 1 &&
+            _wcsicmp(ro_keep_st.failures[0].source.c_str(), (ro_keep_src + L"\\locked.txt").c_str()) == 0;
+        wprintf(L"[INFO] ro_keep: phase=%d failed=%llu listed=%zu attrs=0x%lX error=%s\n",
+                static_cast<int>(ro_keep_st.phase), static_cast<unsigned long long>(ro_keep_st.failed_items),
+                ro_keep_st.failures.size(), static_cast<unsigned long>(ro_keep_attrs), ro_keep_st.last_error.c_str());
+        Check(ro_keep_st.phase == ops::OpPhase::Failed && ro_keep_st.failed_items == 1 &&
+                  only_locked_failed && Exists(ro_keep_dst + L"\\ok.txt") &&
+                  Exists(ro_keep_src + L"\\locked.txt") &&
+                  ro_keep_attrs != INVALID_FILE_ATTRIBUTES &&
+                  (ro_keep_attrs & FILE_ATTRIBUTE_READONLY) != 0,
+              L"move: retained non-empty read-only source keeps its attribute without false access-denied");
+        SetFileAttributesW(ro_keep_src.c_str(), FILE_ATTRIBUTE_DIRECTORY);
+
+        // A read-only directory junction moved via per-item merge removes the
+        // junction itself without touching its target's read-only attribute.
+        const std::wstring ro_junc_target = par_src + L"\\ro_junc_target";
+        const std::wstring ro_junc_src_dir = par_src + L"\\ro_junc_wrap";
+        const std::wstring ro_junc_dst_dir = par_dst + L"\\ro_junc_wrap";
+        const std::wstring ro_junc_src = ro_junc_src_dir + L"\\link";
+        const std::wstring ro_junc_dst = ro_junc_dst_dir + L"\\link";
+        MakeDir(ro_junc_target);
+        MakeDir(ro_junc_src_dir);
+        MakeDir(ro_junc_dst_dir);
+        SetFileAttributesW(ro_junc_target.c_str(), FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY);
+        if (MakeJunction(ro_junc_src, ro_junc_target)) {
+            HANDLE lh = CreateFileW(ro_junc_src.c_str(), FILE_WRITE_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+            if (lh != INVALID_HANDLE_VALUE) {
+                FILE_BASIC_INFO bi{};
+                bi.FileAttributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_READONLY;
+                SetFileInformationByHandle(lh, FileBasicInfo, &bi, sizeof(bi));
+                CloseHandle(lh);
+            }
+            auto ro_junc_st = RunOp(SimpleOp(ops::OpType::Move, { ro_junc_src_dir.c_str() }, par_dst.c_str()));
+            const DWORD target_attrs_after = GetFileAttributesW(ro_junc_target.c_str());
+            Check(ro_junc_st.phase == ops::OpPhase::Completed && ro_junc_st.last_error.empty() &&
+                      !Exists(ro_junc_src) && Exists(ro_junc_dst) &&
+                      target_attrs_after != INVALID_FILE_ATTRIBUTES &&
+                      (target_attrs_after & FILE_ATTRIBUTE_READONLY) != 0,
+                  L"move: read-only directory junction is removed without stripping target read-only attribute");
+            // Clean up moved junction before final rmdir.
+            HANDLE dh = CreateFileW(ro_junc_dst.c_str(), FILE_WRITE_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+            if (dh != INVALID_HANDLE_VALUE) {
+                FILE_BASIC_INFO bi{};
+                bi.FileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+                SetFileInformationByHandle(dh, FileBasicInfo, &bi, sizeof(bi));
+                CloseHandle(dh);
+            }
+            RemoveDirectoryW(ro_junc_dst.c_str());
+        }
+        SetFileAttributesW(ro_junc_target.c_str(), FILE_ATTRIBUTE_DIRECTORY);
 
         // Partial failure: files another program holds are listed with a
         // reason, the rest go through, and a retry finishes them.

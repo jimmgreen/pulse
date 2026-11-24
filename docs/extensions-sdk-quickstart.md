@@ -204,6 +204,21 @@ uint64_t panel = 0;
 auto status = model.create(model.context, View("Example"), &tree.Build(), &panel);
 ```
 
+同一棵树也可用类型化构造和简写，排版、内边距与提示由 `ModelTree` 收集进 `extras`：
+
+```cpp
+auto page = ModelTree(ModelNode::VStack("root", {
+    ModelNode::Card("summary", {}, {
+        ModelNode::Label("title", "Archive health", "title"),
+        ModelNode::Label("ok", "All volumes verified", "bodyStrong", "success"),
+        ModelNode::Button("verify", "Verify again", "verify", "primary").Tooltip("Re-hash every volume"),
+    }).Padding(24),
+    ModelNode::Search("find", "Find", "query", "Type to filter"),
+    CanvasBuilder("chart").ViewBox(100, 40).Rect(10, 10, 30, 20, 4, "accent")
+        .PointerState("pointer").Command("chart.click").MinHeight(96).BuildNode(),
+})).State("query", "").State("pointer", "").Command("verify").Command("chart.click");
+```
+
 构建器拥有字符串及子节点；Build 返回借用视图，只可在所属对象下次修改、Build、移动或销毁之前使用，宿主 create/update 同步复制。复制或移动后重新 Build，禁止缓存旧指针。显式空字符串、false、0、空数组与未设置属性不同。
 
 `Subscription` 管理 UI 订阅，`CommandRegistration::Register` 接受命令描述符与 lambda，移动句柄转移注销责任；回调可自行 Reset，异常不会跨 C ABI。`DispatchQueue` 支持工作线程投递 UI lambda；Close 不负责 join，销毁前必须结束生产线程。

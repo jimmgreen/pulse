@@ -48,6 +48,29 @@ int wmain(int argc, wchar_t** argv) {
     if (!GetTempPathW(MAX_PATH, temp)) return 2;
     const auto root = std::filesystem::path(temp) / (L"pulse_session_test_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64()));
     std::atomic<bool> cancel{false};
+    if (argc == 2 && std::wstring(argv[1]) == L"--list-folder") {
+        std::filesystem::create_directories(root / L"子目录");
+        Write(root / L"sample.txt", "hello");
+        std::vector<WIN32_FIND_DATAW> rows;
+        check(FAILED(ListWithElevatedHelper(L"relative", nullptr, rows)) && !ElevatedHelperProcessIdForTesting(),
+              "relative listing rejected without launching helper");
+        check(ListWithElevatedHelper(root.wstring(), nullptr, rows, [] { return true; }) == HRESULT_FROM_WIN32(ERROR_CANCELLED)
+              && !ElevatedHelperProcessIdForTesting(), "stale navigation starts no authorization or helper");
+        const auto hr = ListWithElevatedHelper(root.wstring(), nullptr, rows);
+        bool dir = false, file = false;
+        for (const auto& row : rows) {
+            dir |= !wcscmp(row.cFileName, L"子目录") && (row.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+            file |= !wcscmp(row.cFileName, L"sample.txt") && row.nFileSizeLow == 5;
+        }
+        check(SUCCEEDED(hr) && rows.size() == 2 && dir && file, "authenticated listing returns exact names, kinds and size");
+        check(SUCCEEDED(ListWithElevatedHelper((root / L"子目录").wstring(), nullptr, rows)) && rows.empty(),
+              "empty folder succeeds without synthetic rows");
+        check(FAILED(ListWithElevatedHelper((root / L"missing").wstring(), nullptr, rows)) && rows.empty(),
+              "missing folder fails without publishing partial data");
+        ShutdownElevatedTransferHelper();
+        std::filesystem::remove_all(root);
+        return failed ? 1 : 0;
+    }
     if (argc == 2 && std::wstring(argv[1]) == L"--drive-eject") {
         pulse::storage::VirtualDiskIdentity identity;
         identity.volume_name = L"\\\\?\\Volume{01234567-89ab-cdef-0123-456789abcdef}\\";
@@ -90,6 +113,15 @@ int wmain(int argc, wchar_t** argv) {
         result = CreateFolderWithElevatedHelper((root / L"second").wstring(), nullptr, cancel, callbacks);
         check(SUCCEEDED(result.hr) && helper == ElevatedHelperProcessIdForTesting() && authorization.size() == 2,
               "subsequent creation reuses authorized helper without another prompt");
+        const auto empty = root / L"empty.txt";
+        result = CreateEmptyFileWithElevatedHelper(empty.wstring(), nullptr, cancel, callbacks);
+        check(SUCCEEDED(result.hr) && result.destinations.size() == 1 &&
+              std::filesystem::is_regular_file(empty) && std::filesystem::file_size(empty) == 0,
+              "authenticated helper creates a new empty file, not a folder");
+        Write(empty, "keep");
+        result = CreateEmptyFileWithElevatedHelper(empty.wstring(), nullptr, cancel, callbacks);
+        check(FAILED(result.hr) && result.destinations.empty() && std::filesystem::file_size(empty) == 4,
+              "creating an existing file never truncates it");
         ShutdownElevatedTransferHelper();
         std::filesystem::remove_all(root);
         return failed ? 1 : 0;

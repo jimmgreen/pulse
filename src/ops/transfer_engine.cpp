@@ -7,6 +7,9 @@
 #include <winioctl.h>
 #include <algorithm>
 #include <chrono>
+#include <cwctype>
+#include <mutex>
+#include <unordered_map>
 
 namespace pulse::ops {
 namespace {
@@ -21,60 +24,86 @@ std::wstring VolumeRoot(const std::wstring& path) {
 }
 
 Storage StorageOf(const std::wstring& path, uint64_t endpoint = 0) {
-    const bool diagnostic = diagnostics::runtime::Enabled();
-    const auto started = GetTickCount64();
-    uint64_t drive_type = 0, bus = 0, seek_bytes = 0;
-    DWORD query_error = 0, bus_error = 0;
-    const auto finish = [&](Storage storage, DWORD error = ERROR_SUCCESS) {
-        if (diagnostic) diagnostics::runtime::Event("copy_storage_probe", {
-            {"storage", static_cast<uint64_t>(storage)}, {"endpoint", endpoint}, {"drive_type", drive_type},
-            {"bus_type", bus}, {"error", error}, {"seek_query_error", query_error},
-            {"seek_descriptor_bytes", seek_bytes}, {"bus_query_error", bus_error},
-            {"elapsed_ms", GetTickCount64() - started}});
-        return storage;
-    };
     const std::wstring root = VolumeRoot(path);
-    if (root.empty()) return finish(Storage::Unknown, GetLastError());
-    if (::pulse::fs::IsRemoteLikeDrive(root)) return finish(Storage::Remote);  // includes cloud mounts
-    drive_type = GetDriveTypeW(root.c_str());
-    switch (drive_type) {
-    case DRIVE_REMOTE: return finish(Storage::Remote);
-    case DRIVE_REMOVABLE:
-    case DRIVE_CDROM: return finish(Storage::Removable);
-    case DRIVE_FIXED: break;
-    default: return finish(Storage::Unknown);
+    if (!root.empty()) {
+        std::wstring key = root;
+        for (auto& ch : key) ch = static_cast<wchar_t>(towupper(ch));
+        static std::mutex cache_mutex;
+        struct CachedStorage { Storage value; ULONGLONG cached_at; };
+        static std::unordered_map<std::wstring, CachedStorage> cache;
+        constexpr ULONGLONG kStorageCacheTtlMs = 30000;
+        const ULONGLONG now = GetTickCount64();
+        {
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            if (const auto it = cache.find(key); it != cache.end() && now - it->second.cached_at < kStorageCacheTtlMs)
+                return it->second.value;
+        }
+        const bool diagnostic = diagnostics::runtime::Enabled();
+        const auto started = now;
+        uint64_t drive_type = 0, bus = 0, seek_bytes = 0;
+        DWORD query_error = 0, bus_error = 0;
+        const auto finish = [&](Storage storage, DWORD error = ERROR_SUCCESS) {
+            if (storage != Storage::Unknown) {
+                std::lock_guard<std::mutex> lock(cache_mutex);
+                if (cache.size() >= 64) cache.clear();
+                cache.insert_or_assign(key, CachedStorage{storage, GetTickCount64()});
+            }
+            if (diagnostic) diagnostics::runtime::Event("copy_storage_probe", {
+                {"storage", static_cast<uint64_t>(storage)}, {"endpoint", endpoint}, {"drive_type", drive_type},
+                {"bus_type", bus}, {"error", error}, {"seek_query_error", query_error},
+                {"seek_descriptor_bytes", seek_bytes}, {"bus_query_error", bus_error},
+                {"elapsed_ms", GetTickCount64() - started}});
+            return storage;
+        };
+        if (::pulse::fs::IsRemoteLikeDrive(root)) return finish(Storage::Remote);  // includes cloud mounts
+        drive_type = GetDriveTypeW(root.c_str());
+        switch (drive_type) {
+        case DRIVE_REMOTE: return finish(Storage::Remote);
+        case DRIVE_REMOVABLE:
+        case DRIVE_CDROM: return finish(Storage::Removable);
+        case DRIVE_FIXED: break;
+        default: return finish(Storage::Unknown);
+        }
+        // \\?\Volume{...}\ works for drive letters and mount points alike; the
+        // device is opened without the trailing backslash and without access.
+        wchar_t volume[MAX_PATH]{};
+        if (!GetVolumeNameForVolumeMountPointW(root.c_str(), volume, MAX_PATH)) return finish(Storage::Unknown, GetLastError());
+        std::wstring device = volume;
+        if (!device.empty() && device.back() == L'\\') device.pop_back();
+        HANDLE handle = CreateFileW(device.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                    OPEN_EXISTING, 0, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) return finish(Storage::Unknown, GetLastError());
+        STORAGE_PROPERTY_QUERY query{};
+        query.PropertyId = StorageDeviceSeekPenaltyProperty;
+        query.QueryType = PropertyStandardQuery;
+        DEVICE_SEEK_PENALTY_DESCRIPTOR seek{};
+        DWORD returned = 0;
+        const BOOL ok = DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query),
+                                        &seek, sizeof(seek), &returned, nullptr);
+        query_error = ok ? ERROR_SUCCESS : GetLastError();
+        seek_bytes = returned;
+        if (diagnostic) {
+            query.PropertyId = StorageDeviceProperty;
+            STORAGE_DEVICE_DESCRIPTOR descriptor{};
+            DWORD descriptor_bytes = 0;
+            const BOOL bus_ok = DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query),
+                    &descriptor, sizeof(descriptor), &descriptor_bytes, nullptr);
+            if (bus_ok && descriptor_bytes >= sizeof(descriptor)) bus = descriptor.BusType;
+            else bus_error = bus_ok ? ERROR_INVALID_DATA : GetLastError();
+        }
+        CloseHandle(handle);
+        // A volume over several disks has no single answer.
+        if (!ok || returned < sizeof(seek)) return finish(Storage::Unknown, query_error ? query_error : ERROR_INVALID_DATA);
+        return finish(seek.IncursSeekPenalty ? Storage::Spinning : Storage::Solid);
     }
-    // \\?\Volume{...}\ works for drive letters and mount points alike; the
-    // device is opened without the trailing backslash and without access.
-    wchar_t volume[MAX_PATH]{};
-    if (!GetVolumeNameForVolumeMountPointW(root.c_str(), volume, MAX_PATH)) return finish(Storage::Unknown, GetLastError());
-    std::wstring device = volume;
-    if (!device.empty() && device.back() == L'\\') device.pop_back();
-    HANDLE handle = CreateFileW(device.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                OPEN_EXISTING, 0, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) return finish(Storage::Unknown, GetLastError());
-    STORAGE_PROPERTY_QUERY query{};
-    query.PropertyId = StorageDeviceSeekPenaltyProperty;
-    query.QueryType = PropertyStandardQuery;
-    DEVICE_SEEK_PENALTY_DESCRIPTOR seek{};
-    DWORD returned = 0;
-    const BOOL ok = DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query),
-                                    &seek, sizeof(seek), &returned, nullptr);
-    query_error = ok ? ERROR_SUCCESS : GetLastError();
-    seek_bytes = returned;
-    if (diagnostic) {
-        query.PropertyId = StorageDeviceProperty;
-        STORAGE_DEVICE_DESCRIPTOR descriptor{};
-        DWORD descriptor_bytes = 0;
-        const BOOL bus_ok = DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query),
-                &descriptor, sizeof(descriptor), &descriptor_bytes, nullptr);
-        if (bus_ok && descriptor_bytes >= sizeof(descriptor)) bus = descriptor.BusType;
-        else bus_error = bus_ok ? ERROR_INVALID_DATA : GetLastError();
+    if (diagnostics::runtime::Enabled()) {
+        diagnostics::runtime::Event("copy_storage_probe", {
+            {"storage", static_cast<uint64_t>(Storage::Unknown)}, {"endpoint", endpoint},
+            {"drive_type", 0}, {"bus_type", 0}, {"error", GetLastError()},
+            {"seek_query_error", 0}, {"seek_descriptor_bytes", 0}, {"bus_query_error", 0},
+            {"elapsed_ms", 0}});
     }
-    CloseHandle(handle);
-    // A volume over several disks has no single answer.
-    if (!ok || returned < sizeof(seek)) return finish(Storage::Unknown, query_error ? query_error : ERROR_INVALID_DATA);
-    return finish(seek.IncursSeekPenalty ? Storage::Spinning : Storage::Solid);
+    return Storage::Unknown;
 }
 
 unsigned ThreadsFor(Storage storage) {
@@ -99,6 +128,21 @@ constexpr auto kTakeWait = std::chrono::milliseconds(100);
 
 unsigned TransferThreadCount(const std::wstring& source, const std::wstring& dest_dir) {
     return (std::min)(ThreadsFor(StorageOf(source, 1)), ThreadsFor(StorageOf(dest_dir, 2)));
+}
+
+std::vector<long> SpinningDisksFor(const std::wstring& source, const std::wstring& dest_dir) {
+    std::vector<long> disks;
+    for (const auto* path : {&source, &dest_dir}) {
+        if (path->empty() || StorageOf(*path) != Storage::Spinning) continue;
+        const long disk = large_copy_detail::DiskNumber(*path);
+        if (disk >= 0 && std::find(disks.begin(), disks.end(), disk) == disks.end()) disks.push_back(disk);
+    }
+    std::sort(disks.begin(), disks.end());
+    return disks;
+}
+
+bool IsSolidStateStorage(const std::wstring& path) {
+    return StorageOf(path) == Storage::Solid;
 }
 
 bool IsSolidToSpinningTransfer(const std::wstring& source, const std::wstring& dest_dir) {
@@ -237,6 +281,7 @@ void SmallCopyPool::Stop() {
 
 void SmallCopyPool::Worker() {
     std::unique_ptr<SHA256VerificationWorker> verifier;
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     std::unique_ptr<SmallCopyWorkerProfile> profile;
     if (phase_profile_) profile = std::make_unique<SmallCopyWorkerProfile>();
     struct MergeProfile {
@@ -269,20 +314,28 @@ void SmallCopyPool::Worker() {
             queue_.pop_front();
             received_job = true;
         }
+        // The disk turn comes before the device permit, always (spindle_gate.h):
+        // a job never waits for a turn while holding a permit someone else needs.
+        SpindleTurn turn;
+        bool dropped = false;
+        if (job.spindles && !job.spindles->empty() &&
+            !turn.Acquire(*job.spindles, budget_task_.get(), [&] { return cancel_.load() || stopping_.load(); }))
+            dropped = true;
         TransferDeviceBudget::Lease device_lease;
         TransferDeviceBudget::Waiter budget_waiter;
-        bool dropped = false;
         bool waited_for_budget = false;
         std::chrono::steady_clock::time_point budget_started{};
-        for (;;) {
+        for (; !dropped;) {
             while (pause_.load() && !cancel_.load() && !stopping_.load()) {
                 budget_waiter.Reset();
+                turn.Release();  // paused: others on this disk carry on
                 std::unique_lock control(control_mutex_);
                 control_cv_.wait_for(control, kTakeWait, [&] {
                     return cancel_.load() || stopping_.load() || !pause_.load();
                 });
             }
             if (cancel_.load() || stopping_.load()) { dropped = true; break; }
+            if (!turn.Reacquire([&] { return cancel_.load() || stopping_.load(); })) { dropped = true; break; }
             if (!job.devices) break;
             device_lease = budget_waiter ? job.devices->budget.TryAcquire(budget_waiter)
                 : job.devices->budget.TryAcquire(job.devices->source, job.devices->target, job.AdmissionBytes());
@@ -307,10 +360,11 @@ void SmallCopyPool::Worker() {
         if (waited_for_budget)
             profile->budget_wait_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - budget_started).count());
-        SmallCopyResult result = dropped ? SmallCopyResult{job.index, false} : Run(job, verifier, profile.get());
+        SmallCopyResult result = dropped ? SmallCopyResult{job.index, false} : Run(job, verifier, profile.get(), device_lease, turn);
         // Copy, verification and per-file move flush are finished. Do not make
         // workers depend on the coordinator consuming done_ before they continue.
         device_lease.Reset();
+        turn.Release();
         {
             std::lock_guard lock(mutex_);
             done_.push_back(std::move(result));
@@ -383,6 +437,9 @@ COPYFILE2_MESSAGE_ACTION CALLBACK SmallCopyPool::Progress(const COPYFILE2_MESSAG
             if (CaptureOwnedOutputStamp(target, stamp)) *context.owned_output = std::make_shared<VerificationStamp>(stamp);
         }
     }
+    if (pool.pause_.load() && context.job && context.lease && context.turn) {
+        if (!pool.WaitWhilePaused(*context.job, *context.lease, *context.turn)) return COPYFILE2_PROGRESS_CANCEL;
+    }
     while (pool.pause_.load() && !pool.cancel_.load() && !pool.stopping_.load()) {
         std::unique_lock control(pool.control_mutex_);
         pool.control_cv_.wait_for(control, kTakeWait, [&] {
@@ -399,8 +456,40 @@ COPYFILE2_MESSAGE_ACTION CALLBACK SmallCopyPool::Progress(const COPYFILE2_MESSAG
     return COPYFILE2_PROGRESS_CONTINUE;
 }
 
+bool SmallCopyPool::AcquireDevice(const SmallCopyJob& job, TransferDeviceBudget::Lease& lease) {
+    if (!job.devices || lease) return true;
+    TransferDeviceBudget::Waiter waiter;
+    for (;;) {
+        if (cancel_.load() || stopping_.load()) return false;
+        lease = waiter ? job.devices->budget.TryAcquire(waiter)
+            : job.devices->budget.TryAcquire(job.devices->source, job.devices->target, job.AdmissionBytes());
+        if (lease) return true;
+        if (!waiter) waiter = job.devices->budget.Wait(job.devices->source, job.devices->target, job.AdmissionBytes(), budget_task_);
+        if (waiter) waiter.WaitForChange();
+        else {
+            std::unique_lock control(control_mutex_);
+            control_cv_.wait_for(control, std::chrono::milliseconds(2), [&] { return cancel_.load() || stopping_.load(); });
+        }
+    }
+}
+
+bool SmallCopyPool::WaitWhilePaused(const SmallCopyJob& job, TransferDeviceBudget::Lease& lease, SpindleTurn& turn) {
+    if (!pause_.load() || cancel_.load() || stopping_.load()) return !cancel_.load() && !stopping_.load();
+    lease.Reset();
+    turn.Release();
+    while (pause_.load() && !cancel_.load() && !stopping_.load()) {
+        std::unique_lock control(control_mutex_);
+        control_cv_.wait_for(control, kTakeWait, [&] {
+            return !pause_.load() || cancel_.load() || stopping_.load();
+        });
+    }
+    if (cancel_.load() || stopping_.load()) return false;
+    const auto abort = [&] { return cancel_.load() || stopping_.load(); };
+    return turn.Reacquire(abort) && AcquireDevice(job, lease);
+}
+
 SmallCopyResult SmallCopyPool::Run(const SmallCopyJob& job, std::unique_ptr<SHA256VerificationWorker>& verifier,
-                                  SmallCopyWorkerProfile* profile) {
+                                  SmallCopyWorkerProfile* profile, TransferDeviceBudget::Lease& lease, SpindleTurn& turn) {
     SmallCopyResult result;
     result.index = job.index;
     result.ran = true;
@@ -425,7 +514,8 @@ SmallCopyResult SmallCopyPool::Run(const SmallCopyJob& job, std::unique_ptr<SHA2
             }
         }
     }
-    ProgressContext context{this, job.index, (job.verify || job.staged || job.unbuffered) ? &result.owned_output : nullptr};
+    ProgressContext context{this, job.index, (job.verify || job.staged || job.unbuffered) ? &result.owned_output : nullptr,
+                            &job, &lease, &turn};
     // Link semantics survive an unsupported no-buffering retry unchanged.
     COPYFILE2_EXTENDED_PARAMETERS parameters{};
     parameters.dwSize = sizeof(parameters);
@@ -446,8 +536,31 @@ SmallCopyResult SmallCopyPool::Run(const SmallCopyJob& job, std::unique_ptr<SHA2
         SetLastError(error);
         return hr;
     };
-    result.hr = copy();
-    if (result.hr == HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER) && job.unbuffered) {
+    bool chunked = false;
+    if (job.chunked && !job.verify) {
+        LargeCopyControl control;
+        control.cancel = &cancel_;
+        control.skip = &stopping_;
+        control.pause = &pause_;
+        control.wait_while_paused = [this, &job, &lease, &turn] { return WaitWhilePaused(job, lease, turn); };
+        control.report = [this, &job](uint64_t done, uint64_t total) {
+            std::lock_guard lock(mutex_);
+            progress_[job.index] = {job.index, done, total};
+        };
+        const auto started = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        const HRESULT hr = CopyLargeFile(job.source, job.destination, true, *job.chunked, control, &result.owned_output);
+        if (profile) {
+            profile->copy_work_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - started).count());
+            ++profile->copy_calls;
+        }
+        if (hr != S_FALSE) {
+            result.hr = hr;
+            chunked = true;
+        }
+    }
+    if (!chunked) result.hr = copy();
+    if (!chunked && result.hr == HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER) && job.unbuffered) {
         result.buffering_fallback_error = result.hr;
         if (result.owned_output) {
             if (!DeleteVerifiedOutput(job.destination, *result.owned_output, result.buffering_cleanup_error))
@@ -464,7 +577,8 @@ SmallCopyResult SmallCopyPool::Run(const SmallCopyJob& job, std::unique_ptr<SHA2
         // A name lost to another writer is that writer's file.
         // Callback CANCEL already removes the partial destination. A second
         // delete could remove another writer's replacement of that name.
-        if (result.hr != HRESULT_FROM_WIN32(ERROR_FILE_EXISTS) &&
+        // A big-chunk copy removes its own failed output; nothing else is ours to delete.
+        if (!chunked && result.hr != HRESULT_FROM_WIN32(ERROR_FILE_EXISTS) &&
             result.hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) &&
             !(parameters.pProgressRoutine && result.hr == HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED))) {
             if (job.verify || job.staged || job.unbuffered) {
@@ -485,13 +599,8 @@ SmallCopyResult SmallCopyPool::Run(const SmallCopyJob& job, std::unique_ptr<SHA2
         if (!verifier) verifier = std::make_unique<SHA256VerificationWorker>();
         std::atomic<bool> verification_cancel{cancel_.load() || stopping_.load()};
         const auto wait = [&] {
-            while (pause_.load() && !cancel_.load() && !stopping_.load()) {
-                std::unique_lock control(control_mutex_);
-                control_cv_.wait_for(control, kTakeWait, [&] {
-                    return !pause_.load() || cancel_.load() || stopping_.load();
-                });
-            }
-            verification_cancel.store(cancel_.load() || stopping_.load());
+            if (!WaitWhilePaused(job, lease, turn)) verification_cancel.store(true);
+            verification_cancel.store(verification_cancel.load() || cancel_.load() || stopping_.load());
         };
         {
             std::lock_guard lock(mutex_);

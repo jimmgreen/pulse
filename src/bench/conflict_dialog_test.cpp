@@ -375,6 +375,35 @@ int wmain(int argc, wchar_t** argv) {
     result = Run(owner, folders, true);
     Check(result.choice == pulse::ops::ConflictChoice::Skip, "S skips a folder conflict");
 
+    // The file manager's asynchronous prompt must not inherit the picker's
+    // modal message loop, owner disable, or unconditional focus transfer.
+    HWND next_owner = CreateWindowExW(0, L"STATIC", L"second file window", WS_OVERLAPPEDWINDOW,
+        20, 20, 400, 300, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    HWND edit = CreateWindowExW(0, L"EDIT", L"editing", WS_CHILD | WS_VISIBLE,
+        10, 10, 100, 22, owner, nullptr, GetModuleHandleW(nullptr), nullptr);
+    SetFocus(edit);
+    unsigned answers = 0;
+    auto answer = [&](pulse::ui::ConflictDialogResult response) {
+        ++answers;
+        Check(response.choice == pulse::ops::ConflictChoice::Skip, "modeless S resolves the matching prompt");
+    };
+    auto prompt = pulse::ui::PresentFileConflict(owner, folders, true,
+        D2D1_COLOR_F{0.0f, 0.47f, 0.83f, 1.0f}, answer);
+    HWND popup = Dialog();
+    Check(prompt && popup && IsWindowEnabled(owner) && GetFocus() == edit && !answers,
+        "presenting a background conflict leaves the editing owner enabled and focused");
+    Check(prompt && prompt->Reparent(next_owner) && GetWindow(popup, GW_OWNER) == next_owner,
+        "outstanding conflict transfers to the new operation owner");
+    if (popup) SendMessageW(popup, WM_KEYDOWN, 'S', 0);
+    Check(answers == 1 && !IsWindow(popup), "modeless choice closes once without a nested pump");
+    prompt = pulse::ui::PresentFileConflict(next_owner, folders, false,
+        D2D1_COLOR_F{0.0f, 0.47f, 0.83f, 1.0f}, answer);
+    popup = Dialog();
+    Check(prompt && IsWindow(popup), "second independent prompt exists");
+    prompt.reset();
+    Check(!IsWindow(popup) && answers == 1 && IsWindowEnabled(next_owner),
+        "dismissing a superseded prompt never answers a different conflict");
+    DestroyWindow(next_owner);
     DestroyWindow(owner);
     Gdiplus::GdiplusShutdown(gdiplus);
     std::printf("%d passed, %d failed\n", g_passed, g_failed);

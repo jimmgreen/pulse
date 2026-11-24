@@ -293,9 +293,12 @@ public:
         if (!GetClassInfoExW(wc.hInstance, kClass, &wc)) RegisterClassExW(&wc);
 
         const int width = static_cast<int>(kDlgW * scale_);
+        // Born on the owner's monitor: CW_USEDEFAULT lands on the primary one and
+        // the move to a screen of another scale rescaled the size (WM_DPICHANGED).
+        const POINT origin = OwnedWindowOrigin(owner, width, static_cast<int>(560.0f * scale_));
         hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kClass,
             l10n::Get(I::AdvancedSearch).c_str(),
-            WS_POPUP | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, width,
+            WS_POPUP | WS_SYSMENU, origin.x, origin.y, width,
             static_cast<int>(560.0f * scale_), owner, nullptr, wc.hInstance, this);
         if (!hwnd_) return result_;
         Recompute(false);

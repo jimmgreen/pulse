@@ -1,0 +1,5 @@
+option(PULSE_COPY_DIAGNOSTICS_PROBE "Build isolated copy diagnostics injection/export probe" OFF)
+if(PULSE_COPY_DIAGNOSTICS_PROBE)
+    target_sources(pulse PRIVATE src/bench/copy_diagnostics_probe.cpp)
+    set_property(SOURCE src/app/app_main.cpp APPEND PROPERTY COMPILE_DEFINITIONS PULSE_COPY_DIAGNOSTICS_PROBE=1)
+endif()

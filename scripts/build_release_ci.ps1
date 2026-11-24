@@ -200,7 +200,20 @@ if ($Channel -eq 'windows') {
     $sdkArchivePath = Join-Path $sdkDist $sdkArchiveName
     $sdkShaPath = "$sdkArchivePath.sha256"
     $sdkCompatPath = Join-Path $sdkDist 'native-sdk-compatibility.json'
-    & python (Join-Path $repo 'tools/extensions/bundle_native_sdk.py') bundle --output $sdkArchivePath
+    # The SDK carries the headless plugin harness so `pulse_ext test` needs no repository build.
+    $harnessBatch = Join-Path $build 'build-plugin-harness.bat'
+    @"
+@echo off
+call "$vcvars"
+if errorlevel 1 exit /b 1
+$toolsetEnvironment
+cmake --build "$build" --target pulse_plugin_harness
+exit /b %errorlevel%
+"@ | Set-Content -LiteralPath $harnessBatch -Encoding ascii
+    & $harnessBatch
+    if ($LASTEXITCODE -ne 0) { throw 'Plugin harness build failed' }
+    $harnessExe = Join-Path $build 'pulse_plugin_harness.exe'
+    & python (Join-Path $repo 'tools/extensions/bundle_native_sdk.py') bundle --output $sdkArchivePath --harness $harnessExe
     if ($LASTEXITCODE -ne 0) { throw 'Native SDK ZIP bundling failed' }
     $sdkHash = (Get-FileHash -LiteralPath $sdkArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText($sdkShaPath, "$sdkHash *$sdkArchiveName`n", [Text.UTF8Encoding]::new($false))

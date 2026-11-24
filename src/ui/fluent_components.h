@@ -133,6 +133,9 @@ struct MenuItemSpec {
     bool accent_glyph = false;     // glyph in the accent colour (assistant hand-off)
     bool shortcut_inline = false;
     float inline_label_width = 0.0f;
+    bool detail_inline = false;    // detail after the label on the same line
+    bool current = false;          // selected entry: selection fill + accent bar
+    float trailing_reserve = 0.0f; // px kept free at the right for a trailing button
     // Explorer-style app icon (premultiplied, same device as the painter's
     // context); wins over glyph/pictogram and is drawn 16 DIP like Explorer's.
     ID2D1Bitmap* icon_bitmap = nullptr;
@@ -221,6 +224,7 @@ private:
 struct StepSliderSpec {
     D2D1_RECT_F bounds{};   // the slider's row, StepSliderHeight tall
     int stops = 2;
+    bool continuous = false; // position is normalized 0..1, no discrete dots
     float position = 0.0f;  // in stops, 0..stops-1 (fractional while it moves)
     ControlState state{};   // hovered, pressed (dragging), keyboard_focus, enabled
 };
@@ -255,6 +259,7 @@ struct SidebarItemSpec {
     bool tag_dot = false;
     bool status_dot = false;
     bool suppress_text = false;
+    bool ellipsize = false;
     bool skip_glyph = false;
     float trailing_reserve = 0.0f;
     bool alias_mark = false;   // the label is a 别名: the mark follows it
@@ -412,6 +417,9 @@ struct FileRowContentSpec {
     size_t tag_count = 0;
     bool cut = false;
     bool drop_target = false;
+    // Size columns to their text and drop type, then modified, when the row is narrow
+    // (extension panels). The file list keeps its proportional columns.
+    bool adaptive = false;
 };
 
 struct StagingTrayPanelSpec {
@@ -529,6 +537,10 @@ public:
     // plate_drawn: an acrylic plate is already under bounds; only the border is drawn.
     void DrawMenuSurface(const D2D1_RECT_F& bounds, bool plate_drawn = false);
     void DrawMenuItem(const MenuItemSpec& spec);
+    // Rounded rect filled left to right from `from` to `to` (a declared menu item group uses the
+    // list selection pair, list_selected_start -> list_selected_end).
+    void FillHorizontalGradientRect(const D2D1_RECT_F& bounds, float radius, const D2D1_COLOR_F& from,
+                                    const D2D1_COLOR_F& to);
     void DrawTooltip(const D2D1_RECT_F& bounds, std::wstring_view text);
     void DrawListRowBackground(const ListRowSpec& spec);
     void DrawSidebarItem(const SidebarItemSpec& spec);
@@ -567,6 +579,13 @@ public:
     float MeasureWrappedSectionHeight(std::wstring_view text, float width) const;
     void DrawWrappedSection(std::wstring_view text, D2D1_POINT_2F origin, float width,
                             const D2D1_COLOR_F& color);
+    // Fluent type ramp. Body/Caption/Section are the standing formats; the rest are created on first
+    // use: BodyStrong 14 semibold, Subtitle 20 semibold, Title 28 semibold, Code 13 monospace.
+    enum class TextRamp { BodyStrong, Subtitle, Title, Code, Body, Caption, Section };
+    IDWriteTextFormat* RampFormat(TextRamp ramp) const;
+    float MeasureWrappedHeight(IDWriteTextFormat* format, std::wstring_view text, float width) const;
+    void DrawWrapped(IDWriteTextFormat* format, std::wstring_view text, D2D1_POINT_2F origin, float width,
+                     const D2D1_COLOR_F& color);
     bool HighContrast() const noexcept { return high_contrast_; }
     D2D1_RECT_F FitButtonBounds(D2D1_RECT_F bounds, std::wstring_view text,
                                 std::wstring_view glyph = {},
@@ -705,6 +724,9 @@ private:
     ComPtr<IDWriteTextFormat> nav_format_;
     ComPtr<IDWriteTextFormat> section_format_;
     ComPtr<IDWriteTextFormat> caption_format_;
+    mutable ComPtr<IDWriteTextFormat> ramp_formats_[4];
+    mutable float ramp_scale_ = 0.0f;
+    mutable std::uint64_t ramp_generation_ = 0;
     ComPtr<IDWriteTextFormat> small_icon_format_;
     ComPtr<IDWriteTextFormat> menu_icon_format_;
     ComPtr<IDWriteTextFormat> micro_icon_format_;

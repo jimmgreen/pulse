@@ -17,6 +17,7 @@ add_executable(pulse_extension_local_install_test EXCLUDE_FROM_ALL
     "${PULSE_LOCAL_INSTALL_ROOT}/src/app/extensions/package_signature.cpp"
     "${PULSE_LOCAL_INSTALL_ROOT}/src/app/extensions/native_image_verify.cpp"
     "${PULSE_LOCAL_INSTALL_ROOT}/src/app/extensions/resource_settings.cpp"
+    "${PULSE_LOCAL_INSTALL_ROOT}/src/app/extensions/command_projection_cache.cpp"
     "${PULSE_LOCAL_INSTALL_ROOT}/src/app/update_transport.cpp"
     "${PULSE_LOCAL_INSTALL_ROOT}/src/common/json_value.cpp"
     "${PULSE_LOCAL_INSTALL_ROOT}/src/common/localization.cpp"

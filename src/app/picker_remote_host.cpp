@@ -1,6 +1,9 @@
 #include "picker_remote_host.h"
+#include "picker_remote_wake.h"
 #include "../ipc/picker_remote_protocol.h"
 #include "../ipc/picker_transport.h"
+#include "../common/dialog_auto_registration.h"
+#include "../common/dialog_bridge_paths.h"
 #include "../common/picker_owner_guard.h"
 #include "../common/runtime_log.h"
 #include <objbase.h>
@@ -9,7 +12,10 @@
 #include <mutex>
 #include <thread>
 #include <optional>
-namespace pulse::picker_inprocess { HRESULT ConfigureRemoteParent(DWORD) noexcept; }
+namespace pulse::picker_inprocess {
+HRESULT ConfigureRemoteParent(DWORD) noexcept;
+void ClearRemoteParent() noexcept;
+}
 namespace pulse::app {
 namespace {
 namespace wire = pulse::ipc::picker::remote;
@@ -35,8 +41,10 @@ struct Host {
     Channel channel;
     PipeHandle parent_process;
     PulsePickerUiV2Api api{};
+    uint32_t max_control_items = PULSE_PICKER_UI_V2_LEGACY_CONTROL_ITEMS;
     PulsePickerUiV2Session session = 0;
     PipeHandle cancel{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    PipeHandle wake{CreateEventW(nullptr, FALSE, FALSE, nullptr)};
     HWND window = nullptr;
     std::mutex mutex;
     std::deque<wire::Message> incoming;
@@ -67,7 +75,7 @@ struct Host {
             // instead of raising a nested event that must be rejected.
             if (PeekMessageW(&msg, window, 0, 0, PM_REMOVE)) { DispatchMessageW(&msg); return; }
             if (PeekMessageW(&msg, nullptr, WM_QUIT, WM_QUIT, PM_NOREMOVE)) { Fail(); return; }
-            MsgWaitForMultipleObjectsEx(0, nullptr, INFINITE, QS_ALLINPUT, 0);
+            if (WaitPickerRemoteWake(wake.Get()) == WAIT_FAILED) Fail();
             return;
         }
         if (GetMessageW(&msg, nullptr, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
@@ -83,6 +91,7 @@ struct Host {
             sent = static_cast<bool>(channel.SendFrame(bytes, {cancel.Get(), 10000}));
             complete = true;
             PostMessageW(window, WM_NULL, 0, 0);
+            SetEvent(wake.Get());
         });
         while (!complete) PumpOnce();
         writer.join();
@@ -97,9 +106,11 @@ struct Host {
                     if (!channel.ReceiveFrame(bytes, {cancel.Get(), INFINITE}) || !wire::Decode(bytes, message)) break;
                     { std::lock_guard lock(mutex); if (incoming.size() >= 64) break; incoming.push_back(std::move(message)); }
                     if (!PostMessageW(window, kDispatch, 0, 0)) break;
+                    SetEvent(wake.Get());
                 }
             } catch (...) {}
             failed = true; PostMessageW(window, kDispatch, 0, 0);
+            SetEvent(wake.Get());
         });
     }
     void Dispatch(wire::Message message);
@@ -158,7 +169,10 @@ void Host::Dispatch(wire::Message message) {
     HRESULT hr = E_INVALIDARG;
     if (message.kind == wire::Kind::Hello) {
         hr = !hello && message.version == PULSE_PICKER_UI_V2_VERSION ? S_OK : E_INVALIDARG;
-        if (SUCCEEDED(hr)) { hello = true; reply.version = api.version; reply.capabilities = api.capabilities; reply.features = api.implemented_features; }
+        if (SUCCEEDED(hr)) {
+            hello = true; reply.version = api.version; reply.capabilities = api.capabilities;
+            reply.features = api.implemented_features; reply.response = max_control_items;
+        }
     } else if (!hello) { Fail(); return; }
     else if (message.kind == wire::Kind::SetNavigationRoot && (api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_NAVIGATION_ROOT)) {
         if (!session) { PulsePickerUiV2Initialize init{sizeof(init), PULSE_PICKER_UI_V2_VERSION, {0,0}}; hr = api.Initialize(&init, &session); }
@@ -181,7 +195,7 @@ void Host::Dispatch(wire::Message message) {
             else {
                 if (!session) { PulsePickerUiV2Initialize init{sizeof(init), PULSE_PICKER_UI_V2_VERSION, {0,0}}; hr = api.Initialize(&init, &session); }
                 else hr = S_OK;
-                if (SUCCEEDED(hr) && !wire::ConfigSupportedByPeer(message.config, api.implemented_features))
+                if (SUCCEEDED(hr) && !wire::ConfigSupportedByPeer(message.config, api.implemented_features, max_control_items))
                     hr = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
                 if (SUCCEEDED(hr)) {
                     wire::OwnedConfig config(message.config);
@@ -207,7 +221,10 @@ void Host::Dispatch(wire::Message message) {
     } else if (message.kind == wire::Kind::GetWindow) {
         HWND hwnd = nullptr; hr = api.GetWindow(session, message.show_id, &hwnd); reply.window = reinterpret_cast<uintptr_t>(hwnd);
     } else if (message.kind == wire::Kind::Close) hr = api.Close(session, message.show_id, static_cast<HRESULT>(message.hresult));
-    else if (message.kind == wire::Kind::UpdateControl) { wire::OwnedControl control(message.control); hr = api.UpdateControl(session, message.show_id, &control.Get()); }
+    else if (message.kind == wire::Kind::UpdateControl) {
+        if (message.control.items.size() > max_control_items) hr = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+        else { wire::OwnedControl control(message.control); hr = api.UpdateControl(session, message.show_id, &control.Get()); }
+    }
     else if (message.kind == wire::Kind::Navigate) hr = api.Navigate(session, message.show_id, {message.folder.data(), static_cast<uint32_t>(message.folder.size())});
     else if (message.kind == wire::Kind::UpdateText && (api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_DYNAMIC_TEXT))
         hr = PulsePickerUiUpdateTextV2(session, message.show_id, message.text_kind, {message.text.data(), static_cast<uint32_t>(message.text.size())});
@@ -228,24 +245,145 @@ void Host::Dispatch(wire::Message message) {
     if (!failed) Send(reply);
     if (failed) Fail();
 }
+
+std::wstring OwnExePath() {
+    std::wstring path(32768, L'\0');
+    const DWORD size = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    path.resize(size && size < path.size() ? size : 0);
+    return path;
+}
+
+std::wstring DirOf(const std::wstring& path) {
+    const auto slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+}
+
+int ServeConnectedSession(Channel&& channel, DWORD parent_pid, const PulsePickerUiV2Api& api,
+                          uint32_t max_control_items, ULONGLONG t_start) {
+    // Declare ParentGuard BEFORE Host so ~Host() shuts down the V2 session
+    // before ClearRemoteParent() clears remote_parent_pid for the next warm session.
+    struct ParentGuard {
+        bool armed = false;
+        ~ParentGuard() {
+            if (armed) pulse::picker_inprocess::ClearRemoteParent();
+        }
+    } parent_guard;
+    Host host;
+    if (!host.cancel || !host.wake) return ERROR_NOT_ENOUGH_MEMORY;
+    host.parent_process.Reset(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, parent_pid));
+    if (!host.parent_process) return static_cast<int>(GetLastError());
+    host.channel = std::move(channel);
+    if (FAILED(pulse::picker_inprocess::ConfigureRemoteParent(parent_pid))) return ERROR_INVALID_PARAMETER;
+    parent_guard.armed = true;
+    host.api = api;
+    host.max_control_items = max_control_items;
+    WNDCLASSW wc{}; wc.lpfnWndProc = Host::WindowProc; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"Pulse.PickerRemoteHost";
+    if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return static_cast<int>(GetLastError());
+    host.window = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, &host);
+    if (!host.window) return static_cast<int>(GetLastError());
+    const ULONGLONG t_ready = GetTickCount64();
+    pulse::diagnostics::runtime::Event("picker_remote_host_ready", {
+        {"parent_pid", parent_pid}, {"total_ms", t_ready - t_start}});
+    host.StartReader();
+    while (!host.done) host.PumpOnce();
+    return host.failed ? ERROR_BROKEN_PIPE : ERROR_SUCCESS;
+}
 }
 int RunPickerRemoteHost(const std::wstring& pipe, DWORD parent_pid) {
     try {
-        Host host;
-        if (!host.cancel) return ERROR_NOT_ENOUGH_MEMORY;
-        host.parent_process.Reset(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, parent_pid));
-        if (!host.parent_process) return static_cast<int>(GetLastError());
-        const auto connected = pulse::ipc::picker::Connect(pipe, host.parent_process.Get(), host.channel);
-        if (!connected) return static_cast<int>(connected.error);
-        if (FAILED(pulse::picker_inprocess::ConfigureRemoteParent(parent_pid))) return ERROR_INVALID_PARAMETER;
-        if (FAILED(PulsePickerUiGetApiV2(PULSE_PICKER_UI_V2_VERSION, sizeof(host.api), &host.api))) return ERROR_NOT_SUPPORTED;
-        WNDCLASSW wc{}; wc.lpfnWndProc = Host::WindowProc; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"Pulse.PickerRemoteHost";
-        if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return static_cast<int>(GetLastError());
-        host.window = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, &host);
-        if (!host.window) return static_cast<int>(GetLastError());
-        host.StartReader();
-        while (!host.done) host.PumpOnce();
-        return host.failed ? ERROR_BROKEN_PIPE : ERROR_SUCCESS;
+        const ULONGLONG t0 = GetTickCount64();
+        PipeHandle parent_process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, parent_pid));
+        if (!parent_process) return static_cast<int>(GetLastError());
+        Channel channel;
+        const auto connected = pulse::ipc::picker::Connect(pipe, parent_process.Get(), channel);
+        const ULONGLONG t_connect = GetTickCount64();
+        if (!connected) {
+            pulse::diagnostics::runtime::Event("picker_remote_host_connect_failed", {
+                {"parent_pid", parent_pid}, {"error", connected.error}, {"connect_ms", t_connect - t0}});
+            return static_cast<int>(connected.error);
+        }
+        PulsePickerUiV2ApiControlLimits extended{};
+        if (FAILED(PulsePickerUiGetApiV2(PULSE_PICKER_UI_V2_VERSION, sizeof(extended), &extended.base)) ||
+            extended.reserved || extended.max_control_items < PULSE_PICKER_UI_V2_LEGACY_CONTROL_ITEMS) return ERROR_NOT_SUPPORTED;
+        return ServeConnectedSession(std::move(channel), parent_pid, extended.base,
+                                     wire::PeerControlItemLimit(extended.max_control_items), t0);
+    } catch (...) { return ERROR_NOT_ENOUGH_MEMORY; }
+}
+
+int RunPickerWarmRemoteHost(const std::wstring& override_pipe, const std::wstring& stop_event_name) {
+    try {
+        const auto self = OwnExePath();
+        if (self.empty()) return 2;
+
+        const bool isolated = !override_pipe.empty();
+        auto still_current = [&]() -> bool {
+            if (isolated) return true;
+            if (!pulse::dialog_auto::PreferOutOfProcess() || !pulse::dialog_auto::PreferRemoteHost()) return false;
+            const auto common = pulse::dialog_bridge_paths::CommonDialogBridgeRoot();
+            pulse::dialog_bridge_paths::ActiveBridgePointer ptr{};
+            if (!common.empty() &&
+                pulse::dialog_bridge_paths::ReadActiveBridgePointer(common, ptr) == ERROR_SUCCESS &&
+                !ptr.host_exe.empty() &&
+                CompareStringOrdinal(ptr.host_exe.c_str(), -1, self.c_str(), -1, TRUE) == CSTR_EQUAL) {
+                return true;
+            }
+            const auto st = pulse::dialog_auto::Inspect();
+            if (!st.enabled || st.conflict || st.error || st.dll_path.empty()) return false;
+            const std::wstring expected = DirOf(st.dll_path) + L"\\pulse.exe";
+            return CompareStringOrdinal(expected.c_str(), -1, self.c_str(), -1, TRUE) == CSTR_EQUAL;
+        };
+
+        PipeHandle singleton;
+        if (!isolated) {
+            if (!still_current()) return 0;
+            const std::wstring mutex_name = pulse::ipc::picker::StandbyIdleMutexName(self) + L".WarmV2";
+            singleton.Reset(CreateMutexW(nullptr, TRUE, mutex_name.c_str()));
+            if (!singleton || GetLastError() == ERROR_ALREADY_EXISTS) return 0;
+        }
+
+        // Pre-warm GPU, DirectWrite, DirectComposition, and LumaText once while idle.
+        for (const wchar_t* library : {L"d2d1.dll", L"dwrite.dll", L"d3d11.dll", L"dxgi.dll",
+                                       L"dcomp.dll", L"windowscodecs.dll", L"uxtheme.dll"}) {
+            LoadLibraryExW(library, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        }
+        LoadLibraryExW((DirOf(self) + L"\\lumatext.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+
+        PulsePickerUiV2ApiControlLimits extended{};
+        if (FAILED(PulsePickerUiGetApiV2(PULSE_PICKER_UI_V2_VERSION, sizeof(extended), &extended.base)) ||
+            extended.reserved || extended.max_control_items < PULSE_PICKER_UI_V2_LEGACY_CONTROL_ITEMS) {
+            return ERROR_NOT_SUPPORTED;
+        }
+        const uint32_t max_items = wire::PeerControlItemLimit(extended.max_control_items);
+
+        PipeHandle stop_event;
+        if (!stop_event_name.empty()) {
+            stop_event.Reset(OpenEventW(SYNCHRONIZE, FALSE, stop_event_name.c_str()));
+            if (!stop_event) stop_event.Reset(CreateEventW(nullptr, TRUE, FALSE, stop_event_name.c_str()));
+        }
+
+        pulse::ipc::picker::WarmRemoteServer server;
+        const auto started = server.Start(override_pipe);
+        if (!started) return static_cast<int>(started.error);
+
+        pulse::diagnostics::runtime::Event("picker_warm_remote_host_listening", {
+            {"isolated", isolated ? 1u : 0u}});
+
+        for (;;) {
+            if (stop_event && WaitForSingleObject(stop_event.Get(), 0) == WAIT_OBJECT_0) break;
+            Channel channel;
+            DWORD client_pid = 0;
+            const auto accepted = server.AcceptNext(channel, client_pid, {stop_event.Get(), 60000});
+            if (accepted.error == ERROR_CANCELLED) break;
+            if (accepted.error == ERROR_TIMEOUT) {
+                if (!still_current()) break;
+                continue;
+            }
+            if (!accepted) continue;
+            const ULONGLONG t_session = GetTickCount64();
+            ServeConnectedSession(std::move(channel), client_pid, extended.base, max_items, t_session);
+        }
+        server.Stop();
+        return ERROR_SUCCESS;
     } catch (...) { return ERROR_NOT_ENOUGH_MEMORY; }
 }
 }

@@ -15,6 +15,10 @@ namespace ui { struct WindowViewModel; }
 struct ExplorerFrameTab { app::Tab* tab = nullptr; uint64_t generation = 0, selection_revision = 0; };
 using ExplorerFrame = std::vector<ExplorerFrameTab>;
 
+// Initializes process-level Explorer/Win+E integration once the service
+// endpoint is ready, even when the main window stays hidden.
+void SyncExplorerTakeover(AppState& s);
+
 // After each frame: publishes the panes' folders when they changed (while
 // Pulse opens folders) and starts/stops the experimental Explorer window
 // takeover with its setting. Never in shot or test runs.

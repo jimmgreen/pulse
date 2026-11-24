@@ -9,6 +9,7 @@
 // shown as reported. tools/l10n/check_service_text.py keeps the tables in sync
 // with the helper sources.
 #include "localization.h"
+#include "display_path.h"
 
 #include <optional>
 #include <string>
@@ -63,16 +64,19 @@ constexpr ServicePhrase kServiceExact[] = {
     {L"排除项必须是本地文件夹路径", L"Exclusions must be local folder paths"},
     {L"离线", L"Offline"},
     {L"非 NTFS", L"Not NTFS"},
+    {L"不支持", L"Unsupported"},
     {L"等待索引", L"Waiting to index"},
     {L"已排除", L"Excluded"},
 
     // index engine
     {L"索引配置已更改，准备重建…", L"Index settings changed, preparing to rebuild…"},
     {L"已就绪", L"Ready"},
+    {L"正在重新核对", L"Reconciling"},
     {L"仍可搜索", L"Still searchable"},
     {L"正在建立索引", L"Building index"},
     {L"正在建立索引…", L"Building index…"},
     {L"索引失败", L"Indexing failed"},
+    {L"无法扫描该磁盘的目录内容", L"Could not scan the folders on this drive"},
     {L"无法读取该磁盘的文件变更记录", L"Could not read the change journal of this drive"},
     {L"索引更新暂时无法保存，正在等待重试；请检查磁盘空间和权限",
      L"Index updates cannot be saved right now and will be retried. Check disk space and permissions"},
@@ -213,6 +217,9 @@ constexpr ServicePhrase kServicePatterns[] = {
     {L"已加载 {n} 项", L"{n} items loaded"},
     {L"正在索引 {} 项", L"Indexing {} items"},
     {L"{}: 的变更跟踪失效，正在重建索引…", L"Change tracking for {}: was lost, rebuilding the index…"},
+    {L"正在扫描 {}…", L"Scanning {}…"},
+    {L"正在重新核对 {} 的索引…", L"Reconciling the index for {}…"},
+    {L"{} 的索引已核对完成", L"Index for {} reconciled"},
     {L"正在重建 {} 的索引…", L"Rebuilding the index for {}…"},
     {L"{} 的索引已重建完成", L"Index for {} rebuilt"},
     {L"{} 的变更跟踪暂不可用，稍后重试", L"Change tracking for {} is unavailable, retrying later"},
@@ -362,13 +369,13 @@ bool IsKnownServiceText(std::wstring_view text) {
 }
 
 std::wstring ServiceErrorText(std::wstring_view text) {
-    // "message | item path": only a known message is localized; the item part and
-    // unknown messages (which may embed file names) are shown as reported.
+    // "message | item path": only a known message is localized. Present any
+    // embedded file paths as DOS/UNC without altering the stored error.
     const size_t bar = text.find(L" | ");
     const std::wstring_view message = text.substr(0, bar);
     std::wstring out = IsKnownServiceText(message) ? ServiceText(message) : std::wstring(message);
     if (bar != std::wstring_view::npos) out += text.substr(bar);
-    return out;
+    return path::FriendlyPathText(out);
 }
 
 } // namespace pulse::l10n

@@ -74,12 +74,17 @@ HRESULT ActivateFileDialogClass(const FileDialogClassActivation& activation, REF
     if (!activation.original) return E_INVALIDARG;
     detail::ActivationScope recursion;
     HRESULT created = E_FAIL;
+    const auto trace = [&](const char* stage, HRESULT hr) {
+        if (activation.outcome) *activation.outcome = stage;
+        detail::TraceActivation(activation.services.on_native_reason, recursion.nested, clsid, stage, context, hr);
+    };
     try { created = activation.original(clsid, context, server, iid, output); }
     catch (const std::bad_alloc&) { if (output) *output = nullptr; return E_OUTOFMEMORY; }
     catch (...) { if (output) *output = nullptr; return E_FAIL; }
-    if (FAILED(created)) { if (output) *output = nullptr; return created; }
-    if (created != S_OK || !activation.enabled || recursion.nested || !output || !*output || server ||
-        !detail::InprocActivationContext(context) || (iid != IID_IUnknown && iid != IID_IClassFactory) || !Sta() ||
+    if (FAILED(created)) { if (output) *output = nullptr; trace("class-original-failed", created); return created; }
+    if (created != S_OK || !activation.enabled || recursion.nested || !output || !*output || server) return created;
+    if (!detail::InprocActivationContext(context)) { trace("class-native-context", created); return created; }
+    if ((iid != IID_IUnknown && iid != IID_IClassFactory) || !Sta() ||
         (clsid != CLSID_FileOpenDialog && clsid != CLSID_FileSaveDialog)) return created;
     // Retain exactly the requested native interface until all preparation works.
     ComPtr<IUnknown> original;
@@ -92,7 +97,7 @@ HRESULT ActivateFileDialogClass(const FileDialogClassActivation& activation, REF
             void* wrapped = nullptr;
             const auto hr = proxy->QueryInterface(iid, &wrapped);
             proxy->Release();
-            if (SUCCEEDED(hr) && wrapped) { *output = wrapped; return created; }
+            if (SUCCEEDED(hr) && wrapped) { *output = wrapped; trace("class-factory-wrapper-published", hr); return created; }
         }
     } catch (...) {
         // A service copy/allocation failure must preserve the native factory.

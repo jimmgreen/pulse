@@ -19,6 +19,24 @@ set_property(TARGET pulse_detours PROPERTY COMPILE_OPTIONS "${_detours_options}"
 set_property(TARGET pulse_detours PROPERTY CXX_STANDARD 14)
 target_compile_options(pulse_detours PRIVATE /W0 /permissive)
 
+add_library(pulse_dialog_sink_hooks STATIC src/shell_bridge/dialog_sink_hooks.cpp)
+target_link_libraries(pulse_dialog_sink_hooks PUBLIC pulse_detours)
+add_executable(pulse_dialog_sink_hooks_test EXCLUDE_FROM_ALL src/bench/dialog_sink_hooks_test.cpp)
+target_link_libraries(pulse_dialog_sink_hooks_test PRIVATE pulse_dialog_sink_hooks ole32 uuid user32)
+
+add_library(pulse_dialog_core_fixture_v1 SHARED EXCLUDE_FROM_ALL src/bench/dialog_core_fixture.cpp)
+target_compile_definitions(pulse_dialog_core_fixture_v1 PRIVATE PULSE_TEST_CORE_BUILD_ID=101)
+target_link_libraries(pulse_dialog_core_fixture_v1 PRIVATE pulse_dialog_sink_hooks ole32 uuid)
+add_library(pulse_dialog_core_fixture_v2 SHARED EXCLUDE_FROM_ALL src/bench/dialog_core_fixture.cpp)
+target_compile_definitions(pulse_dialog_core_fixture_v2 PRIVATE PULSE_TEST_CORE_BUILD_ID=202)
+target_link_libraries(pulse_dialog_core_fixture_v2 PRIVATE pulse_dialog_sink_hooks ole32 uuid)
+add_executable(pulse_dialog_stub_hot_switch_test EXCLUDE_FROM_ALL src/bench/dialog_stub_hot_switch_test.cpp)
+target_link_libraries(pulse_dialog_stub_hot_switch_test PRIVATE pulse_dialog_bridge_paths ole32 uuid)
+# Real Core DLL: legacy A/W and SHBrowseForFolder sink routes (pass the Core path).
+add_executable(pulse_dialog_core_legacy_route_test EXCLUDE_FROM_ALL src/bench/dialog_core_legacy_route_test.cpp
+    src/ipc/picker_transport.cpp src/ipc/picker_protocol.cpp)
+target_link_libraries(pulse_dialog_core_legacy_route_test PRIVATE comdlg32 shell32 ole32 user32 advapi32 bcrypt)
+
 add_library(pulse_dialog_bundle STATIC
     src/common/dialog_bundle.cpp src/common/json_value.cpp)
 target_link_libraries(pulse_dialog_bundle PRIVATE bcrypt)
@@ -33,6 +51,77 @@ add_library(pulse_dialog_admin_trust STATIC src/common/dialog_admin_trust.cpp)
 target_link_libraries(pulse_dialog_admin_trust PUBLIC advapi32)
 add_executable(pulse_dialog_admin_trust_test EXCLUDE_FROM_ALL src/bench/dialog_admin_trust_test.cpp)
 target_link_libraries(pulse_dialog_admin_trust_test PRIVATE advapi32)
+add_library(pulse_dialog_bridge_paths STATIC src/common/dialog_bridge_paths.cpp)
+target_link_libraries(pulse_dialog_bridge_paths PUBLIC pulse_dialog_bundle pulse_dialog_admin_trust advapi32 shell32)
+add_executable(pulse_dialog_bridge_paths_test EXCLUDE_FROM_ALL src/bench/dialog_bridge_paths_test.cpp)
+target_link_libraries(pulse_dialog_bridge_paths_test PRIVATE pulse_dialog_bridge_paths pulse_dialog_admin_trust)
+
+# Phase 2: Shared memory state page, transactional HKLM COM registration, PulseDialogBroker service & WOW64 helper.
+add_library(pulse_dialog_bridge_state STATIC src/common/dialog_bridge_state.cpp)
+target_link_libraries(pulse_dialog_bridge_state PUBLIC advapi32)
+
+add_library(pulse_dialog_com_hklm STATIC src/common/dialog_com_hklm.cpp)
+target_link_libraries(pulse_dialog_com_hklm PUBLIC advapi32)
+
+add_library(pulse_dialog_broker_lib STATIC
+    src/dialog_broker/deferred_cleanup.cpp
+    src/dialog_broker/process_admission.cpp
+    src/dialog_broker/etw_process_watcher.cpp
+    src/dialog_broker/stub_injector.cpp)
+target_link_libraries(pulse_dialog_broker_lib PUBLIC pulse_dialog_bridge_state pulse_dialog_bridge_paths pulse_dialog_admin_trust advapi32 psapi)
+
+add_executable(pulse_dialog_broker EXCLUDE_FROM_ALL src/dialog_broker/broker_service_main.cpp)
+target_link_libraries(pulse_dialog_broker PRIVATE pulse_dialog_broker_lib pulse_dialog_bridge_paths pulse_dialog_com_hklm pulse_runtime_log advapi32 shell32)
+set_target_properties(pulse_dialog_broker PROPERTIES OUTPUT_NAME "PulseDialogBroker")
+
+add_executable(pulse_dialog_broker_cleanup_test EXCLUDE_FROM_ALL src/bench/dialog_broker_cleanup_test.cpp)
+target_link_libraries(pulse_dialog_broker_cleanup_test PRIVATE pulse_dialog_broker_lib pulse_dialog_bridge_paths)
+
+add_executable(pulse_dialog_inject32 EXCLUDE_FROM_ALL src/dialog_broker/inject32_main.cpp)
+target_link_libraries(pulse_dialog_inject32 PRIVATE pulse_dialog_broker_lib pulse_dialog_admin_trust advapi32)
+set_target_properties(pulse_dialog_inject32 PROPERTIES OUTPUT_NAME "PulseDialogInject32")
+
+add_executable(pulse_dialog_phase2_test EXCLUDE_FROM_ALL
+    src/bench/dialog_phase2_test.cpp
+    src/ipc/picker_transport.cpp
+    src/ipc/picker_protocol.cpp)
+target_link_libraries(pulse_dialog_phase2_test PRIVATE
+    pulse_dialog_broker_lib pulse_dialog_bridge_paths pulse_dialog_bridge_state
+    pulse_dialog_com_hklm advapi32 shell32 user32 ole32 uuid)
+
+# Phase 3: Layer 3 non-invasive window-level fallback (PulseDialogOverlay.exe).
+option(PULSE_OVERLAY_UIACCESS "Embed uiAccess=true manifest in PulseDialogOverlay.exe (requires Authenticode signing + secure install location)" OFF)
+add_library(pulse_dialog_overlay_lib STATIC
+    src/dialog_overlay/dialog_classifier.cpp
+    src/dialog_overlay/companion_bar.cpp)
+target_link_libraries(pulse_dialog_overlay_lib PUBLIC pulse_dialog_bridge_state user32 gdi32 shell32 ole32)
+
+add_executable(pulse_dialog_overlay WIN32 EXCLUDE_FROM_ALL
+    src/dialog_overlay/overlay_main.cpp)
+target_link_libraries(pulse_dialog_overlay PRIVATE pulse_dialog_overlay_lib pulse_dialog_bridge_state user32 gdi32 shell32 ole32)
+set_target_properties(pulse_dialog_overlay PROPERTIES OUTPUT_NAME "PulseDialogOverlay")
+if(MSVC)
+    if(PULSE_OVERLAY_UIACCESS)
+        set(_overlay_manifest "${CMAKE_SOURCE_DIR}/src/dialog_overlay/overlay_uiaccess.manifest")
+    else()
+        set(_overlay_manifest "${CMAKE_SOURCE_DIR}/src/dialog_overlay/overlay_dev.manifest")
+    endif()
+    target_link_options(pulse_dialog_overlay PRIVATE "/MANIFEST:EMBED" "/MANIFESTINPUT:${_overlay_manifest}")
+endif()
+
+add_executable(pulse_dialog_overlay_test EXCLUDE_FROM_ALL src/bench/dialog_overlay_test.cpp)
+target_link_libraries(pulse_dialog_overlay_test PRIVATE pulse_dialog_overlay_lib pulse_dialog_bridge_state user32 gdi32 ole32)
+
+# End-to-end verification: real pulse.exe warm vs cold V2 remote host + real Stub64 -> Core64 integration.
+add_executable(pulse_warm_remote_e2e_test EXCLUDE_FROM_ALL
+    src/bench/warm_remote_e2e_test.cpp
+    src/shell_bridge/file_dialog_remote_provider.cpp
+    src/ipc/picker_remote_protocol.cpp
+    src/ipc/picker_transport.cpp
+    src/ipc/picker_protocol.cpp
+    src/common/picker_owner_guard.cpp)
+target_link_libraries(pulse_warm_remote_e2e_test PRIVATE
+    pulse_dialog_bridge_paths pulse_dialog_admin_trust ole32 uuid user32 advapi32 shell32)
 # Administrator apps of the same user and session: the logon task (Task Scheduler,
 # highest available, interactive token) that runs PulseDialogAdminAuto.exe.
 add_library(pulse_dialog_admin_auto_task STATIC src/common/dialog_admin_auto_task.cpp)
@@ -54,19 +143,19 @@ add_executable(pulse_dialog_management_controller_test EXCLUDE_FROM_ALL
     src/app/dialog_management_controller.cpp
     src/dialog_launcher/managed_launch_profile.cpp)
 target_link_libraries(pulse_dialog_management_controller_test PRIVATE
-    pulse_dialog_bundle pulse_dialog_session pulse_dialog_process_diagnostics pulse_dialog_log_excerpt
-    pulse_dialog_admin_auto_task user32 ole32 advapi32)
+    pulse_dialog_bundle pulse_dialog_bridge_paths pulse_dialog_session pulse_dialog_process_diagnostics pulse_dialog_log_excerpt
+    pulse_dialog_admin_auto_task pulse_crash_reporter pulse_dialog_user_auto user32 ole32 advapi32)
 add_executable(pulse_dialog_controller_dual_test EXCLUDE_FROM_ALL
     src/bench/dialog_controller_dual_test.cpp src/app/dialog_management_controller.cpp
     src/common/dialog_auto_arch_status.cpp src/dialog_launcher/managed_launch_profile.cpp)
 target_link_libraries(pulse_dialog_controller_dual_test PRIVATE pulse_dialog_process_diagnostics pulse_dialog_log_excerpt
-    pulse_dialog_admin_auto_task)
+    pulse_dialog_admin_auto_task pulse_crash_reporter pulse_dialog_user_auto)
 target_link_libraries(pulse_dialog_controller_dual_test PRIVATE
-    pulse_dialog_bundle pulse_dialog_session pulse_dialog_auto_registration user32 ole32 advapi32)
+    pulse_dialog_bundle pulse_dialog_bridge_paths pulse_dialog_session pulse_dialog_auto_registration user32 ole32 advapi32)
 if(TARGET pulse)
     target_link_libraries(pulse PRIVATE pulse_dialog_process_diagnostics pulse_dialog_log_excerpt pulse_dialog_admin_auto_task)
     target_sources(pulse PRIVATE src/dialog_launcher/managed_launch_profile.cpp)
-    target_link_libraries(pulse PRIVATE pulse_dialog_bundle pulse_dialog_session)
+    target_link_libraries(pulse PRIVATE pulse_dialog_bundle pulse_dialog_bridge_paths pulse_dialog_session)
 endif()
 add_executable(pulse_dialog_launcher src/dialog_launcher/main.cpp
     src/dialog_launcher/managed_launch_profile.cpp src/dialog_launcher/target_preflight.cpp)
@@ -147,9 +236,15 @@ else()
 endif()
 add_library(pulse_file_dialog_auto_entry_runtime SHARED EXCLUDE_FROM_ALL ${_admin_auto_sources})
 target_sources(pulse_file_dialog_auto_entry_runtime PRIVATE src/shell_bridge/runtime_auto_imports.cpp
-    src/shell_bridge/runtime_auto_lease.cpp src/common/dialog_auto_binding.cpp)
-target_compile_definitions(pulse_file_dialog_auto_entry_runtime PRIVATE PULSE_RUNTIME_AUTO_ENTRY=1)
-target_link_libraries(pulse_file_dialog_auto_entry_runtime PRIVATE pulse_detours shell32 ole32 uuid advapi32 bcrypt user32 comdlg32 pulse_dialog_admin_trust pulse_dialog_bundle)
+    src/shell_bridge/runtime_auto_lease.cpp src/common/dialog_auto_binding.cpp
+    src/shell_bridge/direct_reveal_hook.cpp src/app/open_request_pipe.cpp)
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    target_sources(pulse_file_dialog_auto_entry_runtime PRIVATE
+        src/shell_bridge/file_dialog_remote_provider.cpp src/ipc/picker_remote_protocol.cpp)
+endif()
+target_compile_definitions(pulse_file_dialog_auto_entry_runtime PRIVATE
+    PULSE_RUNTIME_AUTO_ENTRY=1 PULSE_DIALOG_HISTORY_GLOBAL=1 PULSE_RUNTIME_REMOTE_PROVIDER=1)
+target_link_libraries(pulse_file_dialog_auto_entry_runtime PRIVATE pulse_runtime_log pulse_detours pulse_dialog_sink_hooks shell32 ole32 uuid advapi32 bcrypt user32 comdlg32 pulse_dialog_admin_trust pulse_dialog_bundle)
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(_auto_runtime_name "PulseFileDialogAutoRuntime64")
 else()
@@ -157,23 +252,49 @@ else()
 endif()
 set_target_properties(pulse_file_dialog_auto_entry_runtime PROPERTIES OUTPUT_NAME "${_auto_runtime_name}")
 
+# Non-elevated adaptive user-mode auto-attach library (shared by pulse.exe and PulseDialogAdminAuto.exe --user-adaptive).
+add_library(pulse_dialog_user_auto STATIC
+    src/common/dialog_adaptive_attach.cpp
+    src/dialog_launcher/user_auto_attach.cpp
+    src/dialog_launcher/window_show_watch.cpp
+    src/common/dialog_auto_binding.cpp)
+target_link_libraries(pulse_dialog_user_auto PUBLIC
+    pulse_dialog_bundle pulse_dialog_admin_trust pulse_dialog_auto_registration
+    advapi32 ole32 shell32 user32 version)
+# Read-only field probe for native dialogs Pulse did not replace (not shipped).
+add_executable(pulse_dialog_coverage_probe EXCLUDE_FROM_ALL src/bench/dialog_coverage_probe.cpp)
+target_link_libraries(pulse_dialog_coverage_probe PRIVATE pulse_dialog_user_auto psapi)
+add_executable(pulse_dialog_adaptive_attach_test EXCLUDE_FROM_ALL
+    src/bench/dialog_adaptive_attach_test.cpp)
+target_link_libraries(pulse_dialog_adaptive_attach_test PRIVATE pulse_dialog_user_auto comdlg32)
+add_executable(pulse_dialog_window_watch_test EXCLUDE_FROM_ALL
+    src/bench/dialog_window_watch_test.cpp src/dialog_launcher/window_show_watch.cpp)
+target_link_libraries(pulse_dialog_window_watch_test PRIVATE user32 ole32)
+
 # The elevated same-session helper the logon task runs: finds administrator apps of
 # this user and session, publishes their binding and attaches the runtime above.
 add_executable(pulse_dialog_admin_auto WIN32
-    src/dialog_launcher/admin_auto_main.cpp src/dialog_launcher/admin_auto_attach.cpp src/common/dialog_auto_binding.cpp)
-target_link_libraries(pulse_dialog_admin_auto PRIVATE pulse_dialog_bundle pulse_dialog_admin_trust pulse_dialog_auto_registration
+    src/dialog_launcher/admin_auto_main.cpp src/dialog_launcher/admin_auto_attach.cpp
+    src/dialog_launcher/admin_session_prune.cpp src/dialog_launcher/admin_version_retry.cpp)
+target_link_libraries(pulse_dialog_admin_auto PRIVATE pulse_dialog_user_auto pulse_dialog_bundle pulse_dialog_admin_trust pulse_dialog_auto_registration
     pulse_runtime_log advapi32 ole32 shell32 bcrypt user32)
 set_target_properties(pulse_dialog_admin_auto PROPERTIES OUTPUT_NAME "PulseDialogAdminAuto")
+if(TARGET pulse)
+    target_sources(pulse PRIVATE src/app/user_dialog_auto_controller.cpp)
+    target_link_libraries(pulse PRIVATE pulse_dialog_user_auto)
+endif()
 add_executable(pulse_dialog_admin_auto_attach_test EXCLUDE_FROM_ALL
-    src/bench/dialog_admin_auto_attach_test.cpp src/dialog_launcher/admin_auto_attach.cpp src/common/dialog_auto_binding.cpp)
+    src/bench/dialog_admin_auto_attach_test.cpp src/dialog_launcher/admin_auto_attach.cpp src/dialog_launcher/window_show_watch.cpp
+    src/dialog_launcher/admin_session_prune.cpp src/dialog_launcher/admin_version_retry.cpp src/common/dialog_auto_binding.cpp)
 target_link_libraries(pulse_dialog_admin_auto_attach_test PRIVATE pulse_dialog_bundle pulse_dialog_admin_trust
     pulse_dialog_auto_registration pulse_runtime_log advapi32 ole32 shell32 bcrypt user32)
 add_executable(pulse_file_dialog_auto_entry_test EXCLUDE_FROM_ALL
     src/bench/file_dialog_auto_entry_test.cpp src/shell_bridge/runtime_auto_imports.cpp
-    src/shell_bridge/runtime_auto_lease.cpp src/common/dialog_auto_binding.cpp ${_runtime_entry_sources})
+    src/shell_bridge/runtime_auto_lease.cpp src/common/dialog_auto_binding.cpp
+    src/shell_bridge/direct_reveal_hook.cpp src/app/open_request_pipe.cpp ${_runtime_entry_sources})
 target_compile_definitions(pulse_file_dialog_auto_entry_test PRIVATE PULSE_RUNTIME_AUTO_ENTRY=1)
 target_include_directories(pulse_file_dialog_auto_entry_test PRIVATE third_party/detours/src)
-target_link_libraries(pulse_file_dialog_auto_entry_test PRIVATE pulse_detours shell32 ole32 uuid advapi32 bcrypt user32 comdlg32 pulse_dialog_admin_trust pulse_dialog_bundle)
+target_link_libraries(pulse_file_dialog_auto_entry_test PRIVATE comctl32 pulse_detours pulse_dialog_sink_hooks shell32 ole32 uuid advapi32 bcrypt user32 comdlg32 pulse_dialog_admin_trust pulse_dialog_bundle)
 
 add_library(pulse_runtime_auto_imports_probe SHARED EXCLUDE_FROM_ALL
     src/bench/runtime_auto_imports_probe.cpp src/shell_bridge/runtime_auto_imports.cpp)
@@ -237,7 +358,7 @@ target_link_libraries(pulse_process_token_restriction_test PRIVATE advapi32)
 
 # Explicit protected administrator sessions share the existing bundle verifier.
 foreach(_admin_target pulse_dialog_launcher pulse_file_dialog_runtime pulse_file_dialog_ui_proof_runtime pulse_file_dialog_runtime_entry_test)
-    target_link_libraries(${_admin_target} PRIVATE pulse_dialog_admin_trust pulse_dialog_bundle)
+    target_link_libraries(${_admin_target} PRIVATE pulse_dialog_admin_trust pulse_dialog_bundle pulse_dialog_sink_hooks)
 endforeach()
 
 add_executable(pulse_legacy_com_provider_test EXCLUDE_FROM_ALL
@@ -250,8 +371,8 @@ add_executable(pulse_browse_folder_runtime_test EXCLUDE_FROM_ALL
 target_include_directories(pulse_browse_folder_runtime_test PRIVATE third_party/detours/src)
 target_sources(pulse_browse_folder_runtime_test PRIVATE
     src/shell_bridge/file_dialog_client_state.cpp src/shell_bridge/file_dialog_properties.cpp src/shell_bridge/save_as_item_model.cpp)
-target_link_libraries(pulse_browse_folder_runtime_test PRIVATE pulse_detours shell32 ole32 uuid
-    advapi32 bcrypt user32 comdlg32 propsys pulse_dialog_admin_trust pulse_dialog_bundle)
+target_link_libraries(pulse_browse_folder_runtime_test PRIVATE pulse_detours pulse_dialog_sink_hooks shell32 ole32 uuid
+    advapi32 bcrypt user32 comdlg32 comctl32 propsys pulse_dialog_admin_trust pulse_dialog_bundle)
 
 add_executable(pulse_browse_folder_managed_smoke EXCLUDE_FROM_ALL src/bench/browse_folder_managed_smoke.cpp)
 target_link_libraries(pulse_browse_folder_managed_smoke PRIVATE shell32 ole32 user32)
@@ -326,6 +447,14 @@ add_library(pulse_dialog_takeover_history STATIC src/common/dialog_takeover_hist
 target_link_libraries(pulse_dialog_takeover_history PUBLIC pulse_dialog_log_excerpt advapi32)
 add_executable(pulse_dialog_takeover_history_test EXCLUDE_FROM_ALL src/bench/dialog_takeover_history_test.cpp)
 target_link_libraries(pulse_dialog_takeover_history_test PRIVATE pulse_dialog_takeover_history)
+add_executable(pulse_dialog_auto_global_history_test EXCLUDE_FROM_ALL
+    src/bench/dialog_auto_global_history_test.cpp src/shell_bridge/runtime_auto_imports.cpp
+    src/shell_bridge/file_dialog_client_state.cpp src/shell_bridge/file_dialog_properties.cpp src/shell_bridge/save_as_item_model.cpp
+    src/shell_bridge/runtime_auto_lease.cpp src/common/dialog_auto_binding.cpp ${_runtime_entry_sources})
+target_compile_definitions(pulse_dialog_auto_global_history_test PRIVATE PULSE_RUNTIME_AUTO_ENTRY=1 PULSE_DIALOG_HISTORY_GLOBAL=1)
+target_include_directories(pulse_dialog_auto_global_history_test PRIVATE third_party/detours/src)
+target_link_libraries(pulse_dialog_auto_global_history_test PRIVATE pulse_runtime_log pulse_dialog_takeover_history
+    pulse_detours pulse_dialog_sink_hooks shell32 ole32 uuid advapi32 bcrypt user32 comdlg32 comctl32 propsys pulse_dialog_admin_trust pulse_dialog_bundle)
 foreach(_history_target pulse pulse_dialog_management_controller_test pulse_dialog_controller_dual_test)
     if(TARGET ${_history_target})
         target_link_libraries(${_history_target} PRIVATE pulse_dialog_takeover_history)
@@ -376,3 +505,7 @@ target_link_libraries(pulse_legacy_template_provider_test PRIVATE comdlg32 shell
 add_executable(pulse_picker_property_presentation_test EXCLUDE_FROM_ALL
     src/bench/picker_property_presentation_test.cpp src/ipc/picker_remote_protocol.cpp)
 target_link_libraries(pulse_picker_property_presentation_test PRIVATE user32)
+
+# Header-only rebind policy regression; no elevated target or installed bundle needed.
+add_executable(pulse_dialog_admin_auto_rebind_test EXCLUDE_FROM_ALL
+    src/bench/dialog_admin_auto_rebind_test.cpp)

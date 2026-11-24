@@ -4,9 +4,12 @@
 #include "ai_assistant_chat.h"
 #include "ai_assistant_settings.h"
 #include "ai_assistant_voice.h"
+#include "ai_file_reader.h"
 #include "ai_model_list.h"
 #include "ai_providers.h"
 #include "ai_settings.h"
+#include "ai_tools_fs.h"
+#include "ai_vision.h"
 #include "app_internal.h"
 #include "app_commands.h"
 #include "app_navigation.h"
@@ -23,7 +26,9 @@
 
 #include <commctrl.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <uxtheme.h>
+#include <wrl/client.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -107,6 +112,7 @@ void LoadPrefs(AiAssistantState& a) {
     a.enabled = settings.enabled;
     a.floating = settings.assistant.floating;
     a.think = std::clamp(settings.assistant.thinking, 0, 6);
+    a.web_search = settings.assistant.web_search.enabled;
     a.model = 0;
     if (!settings.assistant.model.empty()) g_model = settings.assistant.model;
 }
@@ -118,6 +124,7 @@ void SavePrefs(const AiAssistantState& a) {
     settings.assistant.floating = a.floating;
     settings.assistant.model = g_model;
     settings.assistant.thinking = a.think;
+    settings.assistant.web_search.enabled = a.web_search;
     (void)ai::SaveSettings(settings);
 }
 
@@ -182,12 +189,86 @@ std::wstring ContextText(AppState& s) {
 }
 
 std::wstring QuoteMarkdown(const std::wstring& quote);
+void Snack(AppState& s, std::wstring text);
+
+constexpr size_t kMaxAttachments = 8;
+
+bool AttachOneClipboardImage(AppState& s, HWND owner) {
+    AiAssistantState& a = s.aiAssistant;
+    if (a.attachments.size() >= kMaxAttachments) {
+        Snack(s, Text(I::AiAsstAttachTooMany));
+        return true;
+    }
+    const ai::EncodedImage img = ai::EncodeClipboardImageForVision(owner);
+    if (!img.ok) return false;
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    wchar_t name_buf[64]{};
+    swprintf_s(name_buf, L"%s_%02u%02u%02u.jpg", Text(I::AiAsstScreenshotName).c_str(), st.wHour, st.wMinute,
+               st.wSecond);
+    AiPendingAttach att;
+    att.name = name_buf;
+    att.size = img.encoded_bytes;
+    att.is_image = true;
+    att.image_data_url = img.data_url;
+    att.img_w = img.width;
+    att.img_h = img.height;
+    a.attachments.push_back(std::move(att));
+    Snack(s, Text(I::AiAsstImagePasted));
+    Redraw(s);
+    return true;
+}
+
+void PickAttachFiles(AppState& s) {
+    Microsoft::WRL::ComPtr<IFileOpenDialog> dlg;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))) || !dlg)
+        return;
+    DWORD opts = 0;
+    if (SUCCEEDED(dlg->GetOptions(&opts))) {
+        dlg->SetOptions(opts | FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
+    }
+    std::wstring cur_path, cur_name;
+    size_t cur_count = 0;
+    if (CurrentFolder(s, cur_path, cur_name, cur_count)) {
+        Microsoft::WRL::ComPtr<IShellItem> folder_item;
+        if (SUCCEEDED(SHCreateItemFromParsingName(cur_path.c_str(), nullptr, IID_PPV_ARGS(&folder_item))) && folder_item) {
+            dlg->SetFolder(folder_item.Get());
+        }
+    }
+    if (FAILED(dlg->Show(s.hwnd))) return;
+    Microsoft::WRL::ComPtr<IShellItemArray> items;
+    if (FAILED(dlg->GetResults(&items)) || !items) return;
+    DWORD count = 0;
+    if (FAILED(items->GetCount(&count)) || count == 0) return;
+    std::vector<std::wstring> paths;
+    paths.reserve(count);
+    for (DWORD i = 0; i < count; ++i) {
+        Microsoft::WRL::ComPtr<IShellItem> it;
+        PWSTR p = nullptr;
+        if (SUCCEEDED(items->GetItemAt(i, &it)) && it && SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &p)) && p) {
+            paths.emplace_back(p);
+            CoTaskMemFree(p);
+        }
+    }
+    if (!paths.empty()) AiAssistantAttachFiles(s, paths);
+}
 
 bool Submit(AppState& s, const std::wstring& text) {
     if (Chat(s).busy) return false;
     // 引用: the quoted words lead the message as a Markdown block quote.
     AiAssistantState& a = s.aiAssistant;
-    AiChatSubmit(s, a.quote.empty() ? text : QuoteMarkdown(a.quote) + L"\n\n" + text, ContextText(s));
+    std::vector<AiPendingAttach> atts = std::move(a.attachments);
+    a.attachments.clear();
+    std::wstring prompt = text;
+    if (prompt.empty() && !atts.empty()) {
+        bool all_images = true;
+        for (const AiPendingAttach& att : atts) {
+            if (!att.is_image) { all_images = false; break; }
+        }
+        prompt = Text(all_images ? I::AiAsstImageDefaultPrompt : I::AiAsstAttachDefaultPrompt);
+    }
+    AiChatSubmit(s, a.quote.empty() ? prompt : QuoteMarkdown(a.quote) + L"\n\n" + prompt, ContextText(s),
+                 std::move(atts));
     a.quote.clear();
     return true;
 }
@@ -196,7 +277,7 @@ void SubmitComposer(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
     std::wstring text = ComposerText(a);
     while (!text.empty() && (text.back() == L'\n' || text.back() == L'\r' || text.back() == L' ')) text.pop_back();
-    if (text.empty()) return;
+    if (text.empty() && a.attachments.empty()) return;
     if (Submit(s, text) && a.edit) SetWindowTextW(a.edit, L"");
 }
 
@@ -298,6 +379,31 @@ LRESULT CALLBACK ComposerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PT
             return 0;
         }
         break;
+    case WM_PASTE: {
+        if (ai::ClipboardHasImage()) {
+            if (AttachOneClipboardImage(s, hwnd)) return 0;
+        }
+        if (IsClipboardFormatAvailable(CF_HDROP) && OpenClipboard(hwnd)) {
+            std::vector<std::wstring> paths;
+            if (HDROP drop = static_cast<HDROP>(GetClipboardData(CF_HDROP))) {
+                const UINT count = DragQueryFileW(drop, 0xFFFFFFFFu, nullptr, 0);
+                for (UINT i = 0; i < count; ++i) {
+                    const UINT len = DragQueryFileW(drop, i, nullptr, 0);
+                    if (len == 0) continue;
+                    std::wstring p(static_cast<size_t>(len) + 1, L'\0');
+                    DragQueryFileW(drop, i, p.data(), len + 1);
+                    p.resize(len);
+                    paths.push_back(std::move(p));
+                }
+            }
+            CloseClipboard();
+            if (!paths.empty()) {
+                AiAssistantAttachFiles(s, paths);
+                return 0;
+            }
+        }
+        break;
+    }
     case WM_SETFOCUS:
     case WM_KILLFOCUS: {
         LRESULT r = 0;
@@ -795,10 +901,10 @@ void OpenServiceSettings(AppState& s) {
 bool HasTip(ui::AiPanelPart part) {
     using P = ui::AiPanelPart;
     return part == P::History || part == P::HistPin || part == P::HistRename || part == P::HistDelete ||
-           part == P::NewChat || part == P::Mode || part == P::Close || part == P::ActCopy || part == P::ActRetry ||
-           part == P::ActThumb || part == P::ActThumbDown || part == P::VerPrev || part == P::VerNext ||
-           part == P::UserCopy || part == P::UserEdit || part == P::MenuReset || part == P::MenuSlider ||
-           AiVoiceHasTip(part);
+           part == P::NewChat || part == P::Mode || part == P::Close || part == P::WebSearch || part == P::ActCopy ||
+           part == P::ActSave || part == P::ActRetry || part == P::ActThumb || part == P::ActThumbDown ||
+           part == P::VerPrev || part == P::VerNext || part == P::UserCopy || part == P::UserEdit ||
+           part == P::MenuReset || part == P::MenuSlider || AiVoiceHasTip(part);
 }
 
 // The model list: the shared FluentMenu (the dropdown of Pulse's other menus),
@@ -1140,6 +1246,8 @@ void HistoryClick(AppState& s, const ui::AiPanelHit& hit) {
         // Another conversation came in: nothing of the old one stays around.
         if (a.edit) SetWindowTextW(a.edit, L"");
         a.context_removed_for.clear();
+        a.attachments.clear();
+        a.drop_hot = false;
         a.quote.clear();
         s.renderer.AiPanel().ClearSelection();
     }
@@ -1199,6 +1307,8 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
         AiChatReset(s);
         if (a.edit) SetWindowTextW(a.edit, L"");
         a.context_removed_for.clear();
+        a.attachments.clear();
+        a.drop_hot = false;
         a.quote.clear();
         s.renderer.AiPanel().ClearSelection();
         s.renderer.AiPanel().Rewake(ui::motion::NowMs());
@@ -1322,6 +1432,7 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
     case P::RenameMore:
     case P::ConfirmExtra:
     case P::ActCopy:
+    case P::ActSave:
     case P::ActRetry:
     case P::ActThumb:
     case P::ActThumbDown:
@@ -1400,7 +1511,23 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
         }
         break;
     }
+    case P::WebSearch:
+        CloseMenu(s);
+        a.web_search = !a.web_search;
+        SavePrefs(a);
+        a.focus_pending = true;
+        break;
     case P::AddFiles:
+        CloseMenu(s);
+        PickAttachFiles(s);
+        a.focus_pending = true;
+        break;
+    case P::AttachRemove:
+        if (hit.index >= 0 && hit.index < static_cast<int>(a.attachments.size())) {
+            a.attachments.erase(a.attachments.begin() + hit.index);
+        }
+        a.focus_pending = true;
+        break;
     case P::ContextChip:
     case P::Input:
     case P::Panel:
@@ -1434,6 +1561,7 @@ void AiAssistantAppendComposer(AppState& s, const std::wstring& words) {
 }
 
 void AiAssistantFillComposer(AppState& s, const std::wstring& text, size_t select_from) {
+    if (!AiAssistantEnabled(s)) return;
     AiAssistantState& a = s.aiAssistant;
     EnsureEdit(s);
     if (!a.edit) return;
@@ -1446,10 +1574,15 @@ void AiAssistantFillComposer(AppState& s, const std::wstring& text, size_t selec
     Redraw(s);
 }
 
+bool AiAssistantEnabled(AppState& s) {
+    LoadPrefs(s.aiAssistant);
+    return s.aiAssistant.enabled;
+}
+
 bool AiAssistantIsOpen(const AppState& s) { return s.aiAssistant.open; }
 
 void AiChipContextMenu(AppState& s, POINT screen_pt) {
-    if (!EnsureMenu(s)) return;
+    if (!AiAssistantEnabled(s) || !EnsureMenu(s)) return;
     s.menu->SetTheme(s.darkMode, s.accentColor);
     std::vector<ui::FluentMenuItem> items(2);
     items[0].command = 1;
@@ -1472,8 +1605,7 @@ void AiChipContextMenu(AppState& s, POINT screen_pt) {
 
 void AiAssistantOpen(AppState& s, bool animate) {
     AiAssistantState& a = s.aiAssistant;
-    LoadPrefs(a);
-    if (!a.enabled) return;
+    if (!AiAssistantEnabled(s)) return;
     if (a.open) return;
     a.open = true;
     a.focus_pending = true;
@@ -1526,19 +1658,17 @@ void AiAssistantHotkey(AppState& s) {
 }
 
 void AiAssistantHistoryKey(AppState& s) {
-    AiAssistantState& a = s.aiAssistant;
-    if (!a.open) {
+    if (!s.aiAssistant.open) {
         AiAssistantOpen(s);
-        OpenHistory(s, true);
+        if (s.aiAssistant.open) OpenHistory(s, true);
         return;
     }
-    OpenHistory(s, !a.hist_open);
+    OpenHistory(s, !s.aiAssistant.hist_open);
 }
 
 void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
     AiAssistantState& a = s.aiAssistant;
-    LoadPrefs(a);
-    if (!a.enabled) {
+    if (!AiAssistantEnabled(s)) {
         vm.status.ai_state = ui::StatusAiState::Hidden;
         vm.status.ai_open = false;
         return;
@@ -1607,6 +1737,22 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
     p.context_visible = has_folder && a.context_removed_for != path;
     if (p.context_visible)
         p.context_text = Fill(Fill(Text(I::AiAsstContext), L"{folder}", folder), L"{n}", std::to_wstring(count));
+    p.attachments.clear();
+    p.attachments.reserve(a.attachments.size());
+    for (const AiPendingAttach& att : a.attachments) {
+        ui::AiAttachChipView chip;
+        chip.name = att.name;
+        chip.is_image = att.is_image;
+        chip.is_dir = att.is_dir;
+        if (att.is_image && att.img_w > 0 && att.img_h > 0) {
+            chip.meta = std::to_wstring(att.img_w) + L"\u00D7" + std::to_wstring(att.img_h);
+        } else if (!att.is_dir && att.size > 0) {
+            chip.meta = AiChatFormatSize(att.size);
+        }
+        p.attachments.push_back(std::move(chip));
+    }
+    p.attach_notice = a.attachments.empty() ? std::wstring() : Text(I::AiAsstAttachNotice);
+    p.drop_hot = a.drop_hot;
     p.composer_focused = a.focused && a.edit_visible;
     p.composer_empty = a.text_len == 0;
     p.composer_lines = a.lines;
@@ -1619,6 +1765,8 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
     p.placeholder = Text(I::AiAsstPlaceholder);
     p.quote = a.quote;
     p.add_files = Text(I::AiAsstAddFiles);
+    p.web_search = a.web_search;
+    p.web_search_label = Text(I::AiAsstWebSearch);
     p.model_label = json::Wide(CurrentModel());
     const ai::ThinkSpec think = CurrentThinking();
     const ai::ThinkLevel level = ai::SnapThinking(think, Preferred(a));
@@ -1634,7 +1782,9 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
         p.effort_label = L" \u00B7 " + Text(I::AiAsstThinkShort);
     else if (think.kind == ai::ThinkKind::Levels && level != ai::ThinkLevel::Off)
         p.effort_label = L" \u00B7 " + LevelName(level);
-    p.send = chat.busy ? ui::AiSendState::Busy : p.composer_empty ? ui::AiSendState::Dim : ui::AiSendState::Ready;
+    p.send = chat.busy ? ui::AiSendState::Busy
+                       : (p.composer_empty && a.attachments.empty()) ? ui::AiSendState::Dim
+                                                                     : ui::AiSendState::Ready;
 
     p.menu_open = a.menu_open && think.kind != ai::ThinkKind::None;
     p.effort_names = {};
@@ -1687,6 +1837,8 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
                 vm.tooltip_text = p.effort_names[static_cast<size_t>(a.hover.index)];
         } else if (part == P::HistPin) {
             vm.tooltip_text = Text(AiHistoryRowPinned(s, a.hover.index) ? I::AiHistUnpin : I::AiHistPin);
+        } else if (part == P::WebSearch) {
+            vm.tooltip_text = Text(a.web_search ? I::AiAsstWebSearchOnTip : I::AiAsstWebSearchOffTip);
         } else vm.tooltip_text = Text(part == P::MenuReset ? I::RestoreDefaults
                                : part == P::History ? I::AiHistTip
                                : part == P::HistRename ? I::Rename
@@ -1694,6 +1846,7 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
                                : part == P::NewChat ? I::AiAsstNewChat
                                : part == P::Close ? I::AiAsstCollapse
                                : part == P::ActCopy || part == P::UserCopy ? I::AiAsstCopy
+                               : part == P::ActSave ? I::AiAsstActSave
                                : part == P::ActRetry ? I::AiRegen
                                : part == P::ActThumb ? I::AiAsstHelpful
                                : part == P::ActThumbDown ? I::AiNotHelpful
@@ -2246,6 +2399,145 @@ void AiAssistantDestroy(AppState& s) {
     a.font = nullptr;
     if (a.brush) DeleteObject(a.brush);
     a.brush = nullptr;
+}
+
+bool AiAssistantAttachFiles(AppState& s, const std::vector<std::wstring>& paths) {
+    AiAssistantState& a = s.aiAssistant;
+    bool added = false;
+    bool hit_limit = false;
+    for (std::wstring raw : paths) {
+        if (raw.empty()) continue;
+        for (wchar_t& ch : raw)
+            if (ch == L'/') ch = L'\\';
+        while (raw.size() > 3 && raw.back() == L'\\') raw.pop_back();
+        if (raw.rfind(L"pulse:", 0) == 0) continue;
+        bool dup = false;
+        for (const AiPendingAttach& existing : a.attachments) {
+            if (!existing.path.empty() && _wcsicmp(existing.path.c_str(), raw.c_str()) == 0) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) continue;
+        if (a.attachments.size() >= kMaxAttachments) {
+            hit_limit = true;
+            break;
+        }
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (!GetFileAttributesExW(ai::Win32Path(raw).c_str(), GetFileExInfoStandard, &fad)) continue;
+        AiPendingAttach att;
+        att.path = raw;
+        const size_t slash = raw.find_last_of(L'\\');
+        att.name = (slash == std::wstring::npos || slash + 1 >= raw.size()) ? raw : raw.substr(slash + 1);
+        att.is_dir = (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        att.size = att.is_dir ? 0 : (static_cast<uint64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+        att.is_image = !att.is_dir && ai::IsSupportedImageExtension(ai::LowerExtension(raw));
+        a.attachments.push_back(std::move(att));
+        added = true;
+    }
+    if (hit_limit) Snack(s, Text(I::AiAsstAttachTooMany));
+    if (added) {
+        if (!a.open) AiAssistantOpen(s);
+        a.focus_pending = true;
+        Redraw(s);
+    }
+    return added;
+}
+
+bool AiAssistantDragOver(AppState& s, const std::vector<std::wstring>& sources, POINT pt) {
+    AiAssistantState& a = s.aiAssistant;
+    const bool hit = a.open && !sources.empty() &&
+                     s.renderer.AiPanel().Contains(static_cast<float>(pt.x), static_cast<float>(pt.y));
+    if (a.drop_hot != hit) {
+        a.drop_hot = hit;
+        Redraw(s);
+    }
+    return hit;
+}
+
+void AiAssistantDragLeave(AppState& s) {
+    if (s.aiAssistant.drop_hot) {
+        s.aiAssistant.drop_hot = false;
+        Redraw(s);
+    }
+}
+
+bool AiAssistantDrop(AppState& s, const std::vector<std::wstring>& sources, POINT pt) {
+    AiAssistantState& a = s.aiAssistant;
+    const bool hit = a.open && !sources.empty() &&
+                     s.renderer.AiPanel().Contains(static_cast<float>(pt.x), static_cast<float>(pt.y));
+    a.drop_hot = false;
+    if (!hit) return false;
+    AiAssistantAttachFiles(s, sources);
+    Redraw(s);
+    return true;
+}
+
+void StageAiPanelShot(AppState& s) {
+    if (!s.isolatedTest) return;
+    wchar_t mode[48]{};
+    if (!GetEnvironmentVariableW(L"PULSE_SHOT_AI_PANEL", mode, ARRAYSIZE(mode))) return;
+    AiAssistantState& a = s.aiAssistant;
+    LoadPrefs(a);
+    a.enabled = true;
+    a.web_search = wcscmp(mode, L"web_off") != 0;
+    AiAssistantOpen(s, false);
+    if (wcscmp(mode, L"attachments") == 0) {
+        a.attachments.clear();
+        AiPendingAttach doc;
+        doc.path = L"C:\\Users\\Demo\\Documents\\Q3_\u62A5\u4EF7\u5355.pdf";
+        doc.name = L"Q3_\u62A5\u4EF7\u5355.pdf";
+        doc.size = 482 * 1024;
+        a.attachments.push_back(std::move(doc));
+        AiPendingAttach img;
+        img.name = L"\u622A\u56FE_142530.jpg";
+        img.is_image = true;
+        img.img_w = 1280;
+        img.img_h = 720;
+        img.size = 196 * 1024;
+        a.attachments.push_back(std::move(img));
+    }
+    if (wcscmp(mode, L"rich_web") == 0 || wcscmp(mode, L"rich_web_answer") == 0 || wcscmp(mode, L"web_on") == 0) {
+        AiChat& c = Chat(s);
+        c.blocks.clear();
+        auto& u = c.Add(ui::AiBlockKind::User, 0);
+        u.text = L"\u5e2e\u6211\u67e5\u4e00\u4e0b CMake \u914d\u5408 Ninja \u7684\u5e38\u7528\u547d\u4ee4\uff0c\u5e76\u6574\u7406\u4e2a\u5bf9\u6bd4\u8868";
+        auto& st = c.Add(ui::AiBlockKind::Steps, 0);
+        const bool fold = wcscmp(mode, L"rich_web_answer") == 0;
+        st.collapsed = fold;
+        st.open = !fold;
+        if (fold) st.label = Fill(Text(I::AiAsstStepsWeb), L"{n}", L"2");
+        ui::AiStepView s1;
+        s1.icon = ui::AiIcon::Globe;
+        s1.title = Text(I::AiAsstStepWebSearch);
+        s1.arg = L"CMake Ninja generator";
+        s1.sub = Fill(Text(I::AiAsstStepWebSearchDone), L"{n}", L"5");
+        s1.state = ui::AiStepState::Done;
+        ui::AiStepView s2;
+        s2.icon = ui::AiIcon::Globe;
+        s2.title = Text(I::AiAsstStepWebFetch);
+        s2.arg = L"cmake.org";
+        s2.sub = Fill(Text(I::AiAsstStepWebFetchDone), L"{n}", L"2484");
+        s2.state = ui::AiStepState::Done;
+        st.steps = {std::move(s1), std::move(s2)};
+        auto& ans = c.Add(ui::AiBlockKind::Text, 0);
+        ans.text =
+            L"## CMake + Ninja \u5feb\u901f\u53c2\u8003\n\n"
+            L"\u5e38\u7528\u914d\u7f6e\u4e0e\u6784\u5efa\u547d\u4ee4\uff1a\n\n"
+            L"```powershell\n"
+            L"cmake -B build -G Ninja\n"
+            L"cmake --build build --target pulse\n"
+            L"```\n\n"
+            L"| \u751f\u6210\u5668 | \u589e\u91cf\u901f\u5ea6 | \u5e76\u884c\u5ea6 |\n"
+            L"| --- | --- | ---: |\n"
+            L"| Ninja | \u6781\u5feb | \u81ea\u52a8\u6ee1\u6838 |\n"
+            L"| MSBuild | \u4e2d\u7b49 | \u9700 `/m` |\n\n"
+            L"---\n"
+            L"**\u53c2\u8003\u6765\u6e90**: [CMake Official](https://cmake.org/) \u00B7 [Ninja Build](https://ninja-build.org/)";
+        AiChatAddActs(s, 2);
+        if (!c.blocks.empty()) c.blocks.back().born_ms = 0;
+    }
+    Redraw(s);
 }
 
 } // namespace pulse

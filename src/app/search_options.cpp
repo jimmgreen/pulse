@@ -78,7 +78,15 @@ void StartIndexedContentSearch(AppState& s, app::Tab& tab, const std::wstring& r
         const auto path = NormalScope(root.path);
         overlaps |= Within(scope, path) || Within(path, scope);
     }
-    if (!scan && !overlaps) {
+    bool uncovered_allowed = false;
+    if (!scan && !overlaps && !split.path_prefix.empty()) {
+        std::vector<index::VolumeInfo> volumes;
+        std::vector<std::wstring> excluded;
+        const bool scope_known = s.index.GetScope(volumes, excluded);
+        uncovered_allowed = app::ShouldAllowUncoveredContentScope(
+            s.index.Ready(), scope_known, volumes, excluded, split.path_prefix, s.isolatedTest);
+    }
+    if (!scan && !overlaps && !uncovered_allowed) {
         tab.loading = false;
         tab.banner_title = l10n::Get(scope.empty() ? I::ContentIndexEmpty : I::ContentIndexNotCovered);
         tab.banner_message = l10n::Get(scope.empty() ? I::ContentIndexEmptyDesc : I::ContentIndexNotCoveredDesc);
@@ -95,6 +103,7 @@ void StartIndexedContentSearch(AppState& s, app::Tab& tab, const std::wstring& r
     request.task_scan = !scan;
     request.generation = ++s.nextIndexReq;
     request.indexed = !scan;
+    request.allow_uncovered_root = uncovered_allowed;
     request.root = split.path_prefix;
     if (request.root.empty()) request.roots = app::DefaultContentSearchRoots(config.shared_scope);
     request.filename_query = split.filename_needle;

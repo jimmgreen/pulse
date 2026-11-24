@@ -212,8 +212,9 @@ void HandleListRowClick(AppState& s, int index, bool ctrl, bool shift) {
     if (!tab) return;
     s.listSelection.ClearDeferred();
     if (shift) {
+        const int focus = tab->FocusIndex();
         const int anchor = tab->selection_anchor >= 0 ? tab->selection_anchor
-            : (tab->selected_index >= 0 ? tab->selected_index : index);
+            : (focus >= 0 ? focus : index);
         ui::PaneViewModel view;
         app::FillPaneViewModel(view, *s.pane, &s.places);
         // Ctrl+Shift adds the range to what is already selected (Explorer).

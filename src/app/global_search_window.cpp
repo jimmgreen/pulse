@@ -1,8 +1,10 @@
 #include "global_search_window.h"
 #include "recycle_search.h"
 #include "../common/runtime_log.h"
+#include "../common/navigation_known_folders.h"
 #include "global_search_result_state.h"
 #include "global_search_query.h"
+#include "live_folder_scope.h"
 #include "app_catalog.h"
 #include "folder_alias.h"
 #include "../fs/fs_enum.h"
@@ -64,6 +66,7 @@ constexpr UINT kPreviewNavigate = WM_APP + 189, kPreviewOpen = WM_APP + 190;
 constexpr UINT kAppsReady = WM_APP + 186;  // the Start menu app list is in
 constexpr UINT kRecycleResult = WM_APP + 187;
 constexpr UINT kDirectoryResult = WM_APP + 188;
+constexpr UINT kLiveResult = WM_APP + 191;
 constexpr UINT_PTR kDebounce = 1;
 constexpr UINT_PTR kConnectTimeout = 2;
 constexpr UINT_PTR kScopeTooltipTimer = 3;
@@ -101,13 +104,6 @@ bool UnderFolder(const std::wstring& path, const std::wstring& folder) {
     if (p.size() < f.size()) return false;
     if (CompareStringOrdinal(p.data(), static_cast<int>(f.size()), f.data(), static_cast<int>(f.size()), TRUE) != CSTR_EQUAL) return false;
     return p.size() == f.size() || f.back() == L'\\' || p[f.size()] == L'\\';
-}
-std::wstring KnownFolder(REFKNOWNFOLDERID id) {
-    PWSTR raw = nullptr;
-    std::wstring out;
-    if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY, nullptr, &raw)) && raw) out = raw;
-    if (raw) CoTaskMemFree(raw);
-    return out;
 }
 // Shell providers may block. This worker owns all its data and outlives the popup safely.
 void OpenResult(std::wstring path, bool location) {
@@ -204,6 +200,13 @@ struct GlobalSearchWindow::Impl {
     };
     std::shared_ptr<RecycleRequest> recycle_request;
     bool recycle_ready = true;
+    struct LiveRequest {
+        std::atomic<bool> cancelled{false};
+        std::mutex mutex;
+        index::LiveNetworkMatches matches;
+        index::Query query;
+    };
+    std::shared_ptr<LiveRequest> live_request;
     app::GlobalProviderStatus providers;
     index::ContentSearchClient contents;
     ComPtr<ID2D1Factory> factory;
@@ -240,7 +243,14 @@ struct GlobalSearchWindow::Impl {
 
     // --- redesign state -------------------------------------------------
     enum class ScopeKind : uint8_t { All, Current, Known, Pinned, Network };
-    struct Scope { ScopeKind kind = ScopeKind::All; std::wstring label, path; const wchar_t* glyph = L""; size_t count = 0; bool counted = false; };
+    struct Scope {
+        ScopeKind kind = ScopeKind::All;
+        std::wstring label, path;
+        const wchar_t* glyph = L"";
+        size_t count = 0;
+        bool counted = false;
+        const KNOWNFOLDERID* known_id = nullptr;
+    };
     std::vector<Scope> scopes;
     int scope = 0, kind_filter = 0, date_filter = 0;
     std::wstring counts_key;
@@ -322,8 +332,12 @@ struct GlobalSearchWindow::Impl {
     float Header() const { return kHeader + grow; }
     float ListTop() const { return Header() + 43; }
     float ListBottom() const { return height - kFooter; }
-    float SideWidth() const { return width >= 700 ? kSide : 0; }
-    float PreviewWidth() const { return preview_open && width >= 760 ? kPreview : 0; }
+    float SideWidth() const {
+        // At compact widths use the space for the requested preview, keeping
+        // the result list usable. Closing preview restores the scope sidebar.
+        return width >= (preview_open ? 760.0f : 700.0f) ? kSide : 0.0f;
+    }
+    float PreviewWidth() const { return preview_open ? std::min(kPreview, width * 0.5f) : 0.0f; }
     float ListLeft() const { return SideWidth() + (SideWidth() > 0 ? 1.0f : 0.0f); }
     float ListRight() const { return width - PreviewWidth(); }
     float RowHeight() const { return content_mode && !showing_recent ? kContentRow : kRow; }
@@ -406,6 +420,8 @@ struct GlobalSearchWindow::Impl {
         if (recycle_request) recycle_request->cancelled = true;
         recycle_request.reset();
         recycle_ready = true;
+        if (live_request) live_request->cancelled = true;
+        live_request.reset();
         ++generation;
         filenames.CancelSession(kSession);
         contents.Suspend();
@@ -421,6 +437,7 @@ struct GlobalSearchWindow::Impl {
         handoff_hover = false;
         hover_kind = HotNone; hover_index = -1;
         if (hwnd) ShowWindow(hwnd, SW_HIDE);
+        grid_thumbnails.TrimToBytes(0);
     }
     void FillRecent() {
         rows.clear();
@@ -544,10 +561,32 @@ struct GlobalSearchWindow::Impl {
             const auto config = contents.GetConfig();
             request.maximum_file_bytes = config.maximum_file_bytes;
             request.maximum_document_bytes = config.maximum_document_bytes;
-            if (!folder.empty()) request.root = folder;
+            if (!folder.empty()) {
+                request.root = folder;
+                const auto scope_key = app::NormalizeLiveScopeKey(folder);
+                const bool covered = std::any_of(config.roots.begin(), config.roots.end(), [&](const auto& root) {
+                    const auto root_key = app::NormalizeLiveScopeKey(root.path);
+                    return app::LiveScopePathUnder(scope_key, root_key) || app::LiveScopePathUnder(root_key, scope_key);
+                });
+                if (!covered) {
+                    std::vector<index::VolumeInfo> volumes;
+                    std::vector<std::wstring> excluded;
+                    const bool scope_known = filenames.GetScope(volumes, excluded);
+                    request.allow_uncovered_root = app::ShouldAllowUncoveredContentScope(
+                        filenames.Ready(), scope_known, volumes, excluded, folder, false);
+                }
+            }
             else request.roots = app::DefaultContentSearchRoots(config.shared_scope);
             contents.SearchAsync(std::move(request));
         } else {
+            if (live_request) live_request->cancelled = true;
+            live_request.reset();
+            if (recycle_request) recycle_request->cancelled = true;
+            recycle_request.reset();
+            providers = {};
+            local_result = {};
+            network_result = {};
+            recycle_result = {};
             index::Query request;
             request.session_id = kSession; request.needle = query + FilterTokens(); request.limit = kMaximumResults;
             if (!search_pinyin) request.needle = L"nopinyin: " + request.needle;
@@ -563,11 +602,38 @@ struct GlobalSearchWindow::Impl {
                     if (!job->cancelled) PostMessageW(notify, kRecycleResult, id, 0);
                 }).detach();
             }
-            filenames.SearchAsync(request, generation);
-            const bool network_scope = folder.empty() || IsNetworkPath(folder);
-            providers.ExpectNetwork(network_scope && !network.Roots().empty());
-            if (network_scope) network.SearchAsync(request, generation);
-            SetTimer(hwnd, kConnectTimeout, 10000, nullptr);
+            std::vector<index::VolumeInfo> volumes;
+            std::vector<std::wstring> excluded;
+            const bool scope_known = filenames.GetScope(volumes, excluded);
+            const auto live_kind = app::ClassifyLiveFolderSearch(
+                filenames.Ready(), scope_known, volumes, excluded, network.Roots(), folder, false);
+            if (live_kind != app::LiveFolderSearchKind::None) {
+                providers.Accept(false, 0);
+                providers.ExpectNetwork(true);
+                auto job = std::make_shared<LiveRequest>();
+                job->query = request;
+                live_request = job;
+                std::thread([job, notify = hwnd, id = generation] {
+                    index::LiveNetworkWalk(
+                        job->query, job->matches, job->mutex,
+                        [job] { return job->cancelled.load(); },
+                        [job, notify, id] {
+                            if (!job->cancelled.load()) PostMessageW(notify, kLiveResult, id, 0);
+                        });
+                    {
+                        std::lock_guard lock(job->mutex);
+                        job->matches.finished = true;
+                        if (job->cancelled.load()) job->matches.error = ERROR_CANCELLED;
+                    }
+                    if (!job->cancelled.load()) PostMessageW(notify, kLiveResult, id, 0);
+                }).detach();
+            } else {
+                filenames.SearchAsync(request, generation);
+                const bool network_scope = folder.empty() || IsNetworkPath(folder);
+                providers.ExpectNetwork(network_scope && !network.Roots().empty());
+                if (network_scope) network.SearchAsync(request, generation);
+                SetTimer(hwnd, kConnectTimeout, 10000, nullptr);
+            }
         }
     }
     bool StartsWithQuery(const std::wstring& name) const {
@@ -988,8 +1054,8 @@ struct GlobalSearchWindow::Impl {
         Changed();
     }
     void BuildScopes() {
-        const std::wstring selected_path = scope > 0 && scope < static_cast<int>(scopes.size()) ? scopes[static_cast<size_t>(scope)].path : L"";
-        const auto selected_kind = scope > 0 && scope < static_cast<int>(scopes.size()) ? scopes[static_cast<size_t>(scope)].kind : ScopeKind::All;
+        const Scope selected = scope > 0 && scope < static_cast<int>(scopes.size())
+            ? scopes[static_cast<size_t>(scope)] : Scope{};
         scopes.clear();
         scopes.push_back({ScopeKind::All, Text(StringId::GlobalSearchEverywhere), L"", L"\xE774"});
         if (!current_folder.empty()) scopes.push_back({ScopeKind::Current, Text(StringId::GlobalSearchCurrentFolder), current_folder, L"\xE8B7"});
@@ -998,10 +1064,11 @@ struct GlobalSearchWindow::Impl {
             {FOLDERID_Downloads, StringId::Downloads, L"\xE896"}};
         std::vector<std::wstring> taken;
         for (const auto& folder : known) {
-            auto path = KnownFolder(folder.id);
+            auto path = known_folders::CurrentPath(folder.id);
             if (path.empty()) continue;
             taken.push_back(path);
             scopes.push_back({ScopeKind::Known, Text(folder.label), std::move(path), folder.glyph});
+            scopes.back().known_id = &folder.id;
         }
         size_t pinned = 0;
         for (const auto& path : context.pinned_folders) {
@@ -1017,9 +1084,16 @@ struct GlobalSearchWindow::Impl {
             scopes.push_back({ScopeKind::Network, LeafName(root.path), root.path, L"\xE8CE"});
         }
         scope = 0;
-        if (selected_kind == ScopeKind::Current && !current_folder.empty()) scope = 1;
-        else if (!selected_path.empty())
-            for (size_t i = 1; i < scopes.size(); ++i) if (path::EqualInsensitive(scopes[i].path, selected_path)) scope = static_cast<int>(i);
+        if (selected.kind == ScopeKind::Current && !current_folder.empty()) scope = 1;
+        else if (!selected.path.empty()) {
+            for (size_t i = 1; i < scopes.size(); ++i) {
+                if (selected.known_id ? scopes[i].known_id == selected.known_id :
+                    scopes[i].kind == selected.kind && path::EqualInsensitive(scopes[i].path, selected.path)) {
+                    scope = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
         counts_key.clear();
     }
     bool Key(WPARAM key) {
@@ -1851,7 +1925,7 @@ struct GlobalSearchWindow::Impl {
         items.back().separator_after = true;
         add(4, StringId::CopyPath, L"\xE71B", L"Ctrl+C");
         add(7, StringId::Copy, L"\xE8C8");
-        if (events.stage_paths) add(5, StringId::CtxAddToTray, L"\xE7B8", L"Alt+A");
+        if (events.stage_paths) add(5, StringId::CtxAddToTray, L"\xE8A1", L"Alt+A");
         if (handoff) add(6, StringId::GlobalSearchHandoff, L"\xE721", L"Shift+Enter");
         const auto menu_generation = generation;
         const auto menu_path = rows[static_cast<size_t>(selected)].path;
@@ -1896,8 +1970,11 @@ struct GlobalSearchWindow::Impl {
             D2D1_RECT_F art{x + 8, y + 8, x + cell - 14, y + TileHeight() - 54};
             FillC(art, p.chip, 7);
             const DWORD attrs = row.directory ? FILE_ATTRIBUTE_DIRECTORY : 0;
+            const long raw_px = std::clamp(static_cast<long>(Px(tile_width)), 32l, 512l);
+            const uint32_t thumb_px = static_cast<uint32_t>(
+                raw_px <= 64 ? 64l : raw_px <= 128 ? 128l : raw_px <= 256 ? 256l : 512l);
             const auto result = grid_thumbnails.DrawGridThumbnail(compositor.Dc(), art, row.path, attrs,
-                static_cast<uint32_t>(Px(tile_width)), generation, row.mtime, row.size, 1, false, nullptr);
+                thumb_px, generation, row.mtime, row.size, 1, false, nullptr);
             if (result != ui::PreviewDrawResult::Bitmap) {
                 const float cx = (art.left + art.right) / 2, cy = (art.top + art.bottom) / 2;
                 icons.Draw(compositor.Dc(), {cx - 24, cy - 24, cx + 24, cy + 24}, row.path, row.name, row.directory, attrs);
@@ -2357,8 +2434,16 @@ struct GlobalSearchWindow::Impl {
             SetFocus(edit);
             return 0;
         }
-        case WM_THEMECHANGED:
         case WM_SETTINGCHANGE:
+            if (known_folders::IsSettingsArea(reinterpret_cast<const wchar_t*>(lp))) {
+                if (IsWindowVisible(hwnd)) {
+                    BuildScopes();
+                    Changed();
+                }
+                return 0;
+            }
+            [[fallthrough]];
+        case WM_THEMECHANGED:
             ui::RefreshHighContrast();
             ApplyAppearance(); return 0;
         case WM_DWMCOLORIZATIONCOLORCHANGED:
@@ -2543,6 +2628,21 @@ struct GlobalSearchWindow::Impl {
             }
             return 0;
         }
+        case kLiveResult: {
+            if (static_cast<uint32_t>(wp) == generation && !content_mode && live_request && IsWindowVisible(hwnd)) {
+                index::SearchResult result;
+                bool done = false;
+                {
+                    std::lock_guard lock(live_request->mutex);
+                    result = index::SelectLiveNetworkHits(live_request->query, live_request->matches);
+                    done = live_request->matches.finished;
+                }
+                network_result = std::move(result);
+                if (done) providers.Accept(true, network_result.error);
+                MergeFilenames();
+            }
+            return 0;
+        }
         case kContentResult: {
             index::ContentSearchUpdate update;
             while (contents.TakeUpdate(update)) {
@@ -2587,7 +2687,8 @@ struct GlobalSearchWindow::Impl {
         }
         return self ? self->Message(message, wp, lp) : DefWindowProcW(window, message, wp, lp);
     }
-    bool Show(HWND owner, bool use_dark, float requested_scale, const std::wstring& folder, bool pinyin) {
+    bool Show(HWND owner, bool use_dark, float requested_scale, const std::wstring& folder, bool pinyin,
+              const std::wstring& initial_query = {}) {
         diagnostic_id = diagnostics::runtime::NextId();
         diagnostic_events = 0;
         const uint64_t show_started = GetTickCount64();
@@ -2631,6 +2732,7 @@ struct GlobalSearchWindow::Impl {
         phase(1); // window and preview/search clients
         if (folder_changed && scope > 0 && scope < static_cast<int>(scopes.size()) && scopes[static_cast<size_t>(scope)].kind == ScopeKind::Current) scope = 0;
         Prepare();
+        if (!initial_query.empty()) SetWindowTextW(edit, initial_query.c_str());
         phase(2); // context, application catalogue and appearance
         BOOL is_dark = dark; DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &is_dark, sizeof(is_dark));
         const int corner = DWMWCP_ROUND;
@@ -2690,7 +2792,9 @@ struct GlobalSearchWindow::Impl {
                 {"foreground_thread", active_thread},
                 {"elapsed_ms", GetTickCount64() - show_started}}, diagnostics::runtime::Level::Warning);
         }
-        SendMessageW(edit, EM_SETSEL, 0, -1);
+        // Text carried in from elsewhere keeps being typed; a fresh summon selects the old query.
+        if (initial_query.empty()) SendMessageW(edit, EM_SETSEL, 0, -1);
+        else SendMessageW(edit, EM_SETSEL, initial_query.size(), initial_query.size());
         diagnostic_until = diagnostics::runtime::Enabled() ? GetTickCount64() + 10000 : 0;
         Trace("search_show_end");
         if (diagnostic_until) SetTimer(hwnd, kDiagnosticTimer, 50, nullptr);
@@ -2830,9 +2934,10 @@ struct GlobalSearchWindow::Impl {
 };
 GlobalSearchWindow::GlobalSearchWindow() = default;
 GlobalSearchWindow::~GlobalSearchWindow() = default;
-bool GlobalSearchWindow::Show(HWND owner, bool dark, float scale, const std::wstring& current_folder, bool search_pinyin) {
+bool GlobalSearchWindow::Show(HWND owner, bool dark, float scale, const std::wstring& current_folder, bool search_pinyin,
+                              const std::wstring& initial_query) {
     if (!impl_) impl_ = std::make_unique<Impl>();
-    return impl_->Show(owner, dark, scale, current_folder, search_pinyin);
+    return impl_->Show(owner, dark, scale, current_folder, search_pinyin, initial_query);
 }
 void GlobalSearchWindow::SetAppearance(bool dark, ui::WindowEffect effect, const std::wstring& background_image, D2D1_COLOR_F accent) {
     if (!impl_) impl_ = std::make_unique<Impl>();

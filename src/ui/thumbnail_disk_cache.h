@@ -11,22 +11,30 @@
 // PULSE_TEST_THUMB_CACHE=off disables it; any other value is the folder.
 #pragma once
 #include "thumbnail_cache.h"
+#include "thumbnail_pack_store.h"
+#include <array>
 #include <mutex>
 #include <condition_variable>
 #include <deque>
 #include <thread>
 #include <string>
+#include <unordered_set>
 
 namespace pulse::ui {
 
 class ThumbnailDiskCache final : public ThumbnailStore {
 public:
     static constexpr uint64_t kBudgetBytes = 512ull << 20;
-    static constexpr uint32_t kMinDecodeMs = 30;
+    static constexpr uint32_t kMinDecodeMs = 8;
+    static constexpr uint64_t kMinSourceBytesForKeep = 512ull << 10;
     static ThumbnailDiskCache& Shared();
 
     bool Load(const ThumbnailStoreKey& key, StoredThumbnail& out) override;
+    bool LoadMicro(const ThumbnailStoreKey& key, MicroThumbData& out) override;
+    bool ShouldSave(const ThumbnailStoreKey& key, uint32_t decode_ms) const override;
     void Save(const ThumbnailStoreKey& key, uint32_t decode_ms, const StoredThumbnail& thumb) override;
+    void SaveMoved(const ThumbnailStoreKey& key, uint32_t decode_ms, StoredThumbnail&& thumb) override;
+    void SaveMicro(const ThumbnailStoreKey& key, MicroThumbData&& micro) override;
     // Deletes every entry (Settings). Entries being written meanwhile survive.
     void Clear();
     bool FlushForTesting(uint32_t timeout_ms);
@@ -39,13 +47,19 @@ private:
     ThumbnailDiskCache() = default;
     ~ThumbnailDiskCache();
     void WriterLoop();
+    void EnqueueSave(const ThumbnailStoreKey& key, uint32_t decode_ms, StoredThumbnail thumb);
     void SaveNow(const ThumbnailStoreKey& key, uint32_t decode_ms, const StoredThumbnail& thumb);
+    bool EnsurePackOpen();
+    void EnsurePtShardLocked(uint8_t shard);
     struct WriteRequest { std::wstring path; DWORD attrs = 0; uint32_t pixels = 0; uint64_t modified = 0, size = 0; bool keep_always = false; uint32_t decode_ms = 0; StoredThumbnail thumb; };
     std::mutex writer_mutex_;
     std::condition_variable writer_cv_;
     std::deque<WriteRequest> writes_;
+    std::deque<MicroThumbPack::PendingRecord> micro_writes_;
     std::thread writer_;
     size_t writer_bytes_ = 0;
+    size_t micro_bytes_ = 0;
+    bool writer_busy_ = false;
     bool stopping_ = false;
     std::wstring EntryPath(const ThumbnailStoreKey& key) const;
     void ScanLocked();
@@ -56,6 +70,12 @@ private:
     std::mutex mutex_;
     bool scanned_ = false;
     uint64_t bytes_ = 0;
+    std::mutex pt_index_mutex_;
+    std::array<bool, 256> pt_shard_ready_{};
+    std::unordered_set<uint64_t> known_pt_hashes_;
+    std::mutex pack_open_mutex_;
+    bool pack_opened_ = false;
+    MicroThumbPack pack_;
 };
 
 } // namespace pulse::ui

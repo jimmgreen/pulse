@@ -57,6 +57,8 @@ void Normalize(PickerAppearanceSnapshot& value) {
     value.preview_trigger = NormalizePreviewTrigger(value.preview_trigger);
     value.hover_preview_delay_ms = NormalizeHoverPreviewDelay(value.hover_preview_delay_ms);
     value.hover_card_size = NormalizeHoverCardSize(value.hover_card_size);
+    if (value.panel_transparency < 0 || value.panel_transparency > 90) value.panel_transparency = 50;
+    if (value.frame_transparency < 0 || value.frame_transparency > 100) value.frame_transparency = 10;
 }
 PickerAppearanceReadResult Failure(DWORD error) {
     PickerAppearanceReadResult result;
@@ -84,6 +86,9 @@ PickerAppearanceSnapshot PickerAppearanceFromPrefs(const AppPrefs& prefs) {
     value.preview_trigger = prefs.preview_trigger;
     value.hover_preview_delay_ms = prefs.hover_preview_delay_ms;
     value.hover_card_size = prefs.hover_card_size;
+    value.window_effect = prefs.window_effect;
+    value.panel_transparency = prefs.wallpaper_look;
+    value.frame_transparency = prefs.frame_transparency;
     Normalize(value);
     return value;
 }
@@ -94,6 +99,16 @@ bool ParsePickerAppearanceJson(const std::wstring& json, PickerAppearanceSnapsho
     value.accent_rgb = Accent(pulse::json::ExtractString(json, L"accent_rgb"));
     value.accent_follow_system = Integer(json, L"accent_follow_system", 0) != 0;
     value.language = pulse::json::ExtractString(json, L"language", L"system");
+    value.window_effect = pulse::json::ExtractString(json, L"window_effect", L"mica-alt");
+    {
+        // As AppPrefs::Load: the former 0/1/2 levels when panel_transparency is absent.
+        static constexpr int kLookLevels[] = {25, 50, 75};
+        int legacy = Integer(json, L"wallpaper_look", 1);
+        if (legacy < 0 || legacy > 2) legacy = 1;
+        value.panel_transparency = Integer(json, L"panel_transparency", kLookLevels[legacy]);
+        if (value.panel_transparency < 0 || value.panel_transparency > 90) value.panel_transparency = kLookLevels[legacy];
+    }
+    value.frame_transparency = Integer(json, L"frame_transparency", 10);
     value.ui_font_scale = Integer(json, L"ui_font_scale", 100);
     value.text_render = Integer(json, L"text_render", 0);
     value.row_height = Integer(json, L"row_height", 34);
@@ -173,5 +188,8 @@ void ApplyPickerAppearanceToSpec(const PickerAppearanceSnapshot& snapshot, ui::F
     spec.hover_card_size = snapshot.hover_card_size;
     spec.details_columns = snapshot.details_columns;
     spec.explicit_details_columns = true;
+    spec.window_effect = ui::WindowEffectFromId(snapshot.window_effect);
+    spec.panel_transparency = snapshot.panel_transparency;
+    spec.frame_transparency = snapshot.frame_transparency;
 }
 }

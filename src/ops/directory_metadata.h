@@ -3,6 +3,23 @@
 #include <string>
 
 namespace pulse::ops {
+// Attributes of an open handle, reparse bit included. FAT32 and exFAT do not
+// answer FileAttributeTagInfo (ERROR_INVALID_PARAMETER) and have no reparse
+// points, so their basic attributes say the same. False: GetLastError says why.
+inline bool QueryHandleAttributes(HANDLE handle, DWORD& attributes) {
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    if (GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &tag, sizeof(tag))) {
+        attributes = tag.FileAttributes;
+        return true;
+    }
+    const DWORD error = GetLastError();
+    if (error != ERROR_INVALID_PARAMETER && error != ERROR_NOT_SUPPORTED && error != ERROR_INVALID_FUNCTION) return false;
+    FILE_BASIC_INFO basic{};
+    if (!GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic))) return false;
+    attributes = basic.FileAttributes;
+    return true;
+}
+
 // One handle binds both metadata writes to the opened directory. Do not follow
 // a replacement junction, or mutate an object that is no longer a directory.
 inline bool ApplyDirectoryMetadata(const std::wstring& destination, const FILETIME& created,
@@ -13,10 +30,10 @@ inline bool ApplyDirectoryMetadata(const std::wstring& destination, const FILETI
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (handle == INVALID_HANDLE_VALUE) { error = GetLastError(); return false; }
-    FILE_ATTRIBUTE_TAG_INFO type{};
-    bool ok = GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &type, sizeof(type)) != FALSE;
+    DWORD current = 0;
+    bool ok = QueryHandleAttributes(handle, current);
     if (!ok) error = GetLastError();
-    else if (!(type.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (type.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    else if (!(current & FILE_ATTRIBUTE_DIRECTORY) || (current & FILE_ATTRIBUTE_REPARSE_POINT)) {
         ok = false;
         error = ERROR_DIRECTORY;
     }

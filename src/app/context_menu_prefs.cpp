@@ -4,6 +4,7 @@
 #include "session.h"
 #include "../common/json_utils.h"
 #include "../common/utf8_file.h"
+#include "../common/async_file_writer.h"
 #include <algorithm>
 #include <iterator>
 #include <unordered_set>
@@ -710,7 +711,16 @@ bool ContextMenuPrefs::Save() const {
     if (load_failed) return false;
     const std::wstring dir = GetPulseDataDir();
     if (dir.empty()) return false;
+    GlobalAsyncFileWriter().Flush();
     return WriteUtf8FileAtomic(dir + L"\\context_menu.json", ToJson());
+}
+
+bool ContextMenuPrefs::SaveAsync() const {
+    if (!persist) return true;
+    if (load_failed) return false;
+    const std::wstring dir = GetPulseDataDir();
+    if (dir.empty()) return false;
+    return GlobalAsyncFileWriter().Submit(dir + L"\\context_menu.json", ToJson());
 }
 
 } // namespace pulse::app

@@ -8,6 +8,7 @@
 #include "extensions/store/catalog.h"
 #include "../ui/form_dialog.h"
 #include "../common/json_value.h"
+#include <algorithm>
 #include "../common/localization.h"
 
 namespace pulse::app {
@@ -147,11 +148,19 @@ void ExtensionManagementUi::Fill(AppState& s, ui::ExtensionStoreView& view, bool
             break;
         }
         item.notice = unsigned_local ? std::wstring{} : json::Wide(entry.error);
+        // Left out at startup: unsigned under requireSigned while developer mode was off.
+        if (unsigned_local) {
+            const auto skipped = extensions::SkippedUnsignedPackages();
+            if (std::find(skipped.begin(), skipped.end(), entry.id) != skipped.end())
+                item.notice = Text(entry.previous_revision.empty() ? Id::StoreUnsignedNeedsDevMode
+                                                                   : Id::StoreUnsignedNeedsDevModeRollback);
+        }
         const bool ready = !view.installed_busy && !view.installed_loading;
         item.can_enable = ready && !entry.enabled && entry.error.empty();
         item.can_disable = ready && entry.enabled;
         item.can_uninstall = ready;
-        item.can_rollback = ready && !entry.previous_revision.empty() && entry.error.empty();
+        // An unsigned (developer-mode) revision can always be rolled back, e.g. to the official build it replaced.
+        item.can_rollback = ready && !entry.previous_revision.empty() && (entry.error.empty() || unsigned_local);
         view.installed.push_back(std::move(item));
     }
 }
@@ -172,7 +181,8 @@ bool ExtensionManagementUi::Action(AppState& s, int action, bool installation_ac
     const auto& entry = snapshot.installed->entries[index];
     if ((change == store::StoreChangeAction::Enable && (entry.enabled || !entry.error.empty())) ||
         (change == store::StoreChangeAction::Disable && !entry.enabled) ||
-        (change == store::StoreChangeAction::Rollback && (entry.previous_revision.empty() || !entry.error.empty()))) return true;
+        (change == store::StoreChangeAction::Rollback && (entry.previous_revision.empty() ||
+            !(entry.error.empty() || (entry.publisher_id.empty() && entry.error == "store_open:2"))))) return true;
     impl_->owner = s.hwnd; impl_->owner_state = &s; impl_->missing_consent = false;
     impl_->draft.clear(); impl_->draft_generation = 0;
     impl_->service.PrepareChange(impl_->root, entry.id, change);

@@ -21,6 +21,7 @@ struct PreviousInstall {
     std::wstring dir;               // 'Inno Setup: App Path' or InstallLocation
     std::wstring uninstall_string;  // as registered
     std::optional<Tasks> tasks;     // remembered task selection
+    std::optional<std::wstring> index_path;
     bool inno = false;              // written by Inno Setup (not by this setup)
 };
 
@@ -31,6 +32,7 @@ struct UninstallEntry {
     std::wstring dir, version, uninstaller, tasks;
     std::wstring uninstall_args;
     std::wstring display_suffix;  // " (Windows 8.1 x64)" for the win81 channel, as AppVerName in the iss  // appended to UninstallString (test installs)
+    std::wstring index_path;
     uint64_t estimated_kb = 0;
 };
 bool WriteUninstallEntry(const RegLocation& where, const wchar_t* key, const UninstallEntry& e, std::wstring& error);

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "windows_path_prefix.h"
+
 #include <string>
 #include <string_view>
 
@@ -12,19 +14,14 @@ inline std::wstring FriendlyPathText(std::wstring_view text) {
                                           std::wstring_view(L"\\??\\")}) {
         size_t pos = 0;
         while ((pos = result.find(prefix, pos)) != std::wstring::npos) {
-            const size_t start = pos + prefix.size();
-            if (result.size() >= start + 4 &&
-                (result[start] == L'U' || result[start] == L'u') &&
-                (result[start + 1] == L'N' || result[start + 1] == L'n') &&
-                (result[start + 2] == L'C' || result[start + 2] == L'c') &&
-                result[start + 3] == L'\\') {
-                result.replace(pos, prefix.size() + 4, L"\\\\");
+            const auto kind = detail::ClassifyExtendedDosPrefix(std::wstring_view(result).substr(pos));
+            if (kind == detail::ExtendedDosPrefix::Unc) {
+                result.replace(pos, 8, L"\\\\");
                 pos += 2;
-            } else if (result.size() >= start + 3 && result[start + 1] == L':' &&
-                       result[start + 2] == L'\\') {
-                result.erase(pos, prefix.size());
+            } else if (kind == detail::ExtendedDosPrefix::Drive) {
+                result.erase(pos, 4);
             } else {
-                pos = start;
+                pos += prefix.size();
             }
         }
     }

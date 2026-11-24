@@ -41,6 +41,10 @@ struct LayoutTabSnapshot {
     std::vector<PaneFolderSnapshot> panes;
 };
 
+// Collapsible sections in the right details panel: bit 0 基本信息, 1 属性,
+// 2 标签, 3 安全, 4 其他. 属性 / 安全 / 其他 start collapsed by default.
+inline constexpr uint32_t kDefaultDetailsCollapsedMask = (1u << 1) | (1u << 3) | (1u << 4);
+
 // The layout around one window's tabs (sidebar and details panel). Session
 // version 8 keeps one per window; field meanings as in SessionSnapshot.
 struct WindowLayoutSnapshot {
@@ -53,6 +57,7 @@ struct WindowLayoutSnapshot {
     int details_panel_width = 340;
     bool details_preview_only = false;
     bool details_preview = true;
+    uint32_t details_collapsed = kDefaultDetailsCollapsedMask;
 };
 
 // One window of a version-8 session.
@@ -94,6 +99,7 @@ struct SessionSnapshot {
     int details_panel_width = 340;
     bool details_preview_only = false;
     bool details_preview = true; // preview pane enabled (session remembers it)
+    uint32_t details_collapsed = kDefaultDetailsCollapsedMask; // bitmask of collapsed details sections
     std::array<float, 3> details_column_dividers{}; // version 3 migration only
     std::vector<LayoutTabSnapshot> layout_tabs;
     std::vector<GroupSessionSnapshot> tab_groups;
@@ -115,6 +121,7 @@ bool SaveSession(const SessionSnapshot& snap);
 // Autosave compares the serialized form with the last write and skips unchanged state.
 std::wstring SessionToJson(const SessionSnapshot& snap);
 bool WriteSessionJson(const std::wstring& json);
+bool WriteSessionJsonAsync(const std::wstring& json);
 bool LoadSession(SessionSnapshot& snap);
 // LoadSession's parser, for tests.
 bool ParseSessionJson(const std::wstring& json, SessionSnapshot& snap);

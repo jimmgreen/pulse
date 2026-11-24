@@ -11,6 +11,7 @@
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -23,6 +24,9 @@ struct FileOperationCallbacks {
     std::function<void()> pause;
     std::function<void()> resume;
     std::function<void()> dismiss;
+    std::function<void(uint64_t)> pause_task;
+    std::function<void(uint64_t)> resume_task;
+    std::function<void(uint64_t)> dismiss_task;
     std::function<void(uint64_t, uint64_t)> skip_current;
     std::function<void(uint64_t)> retry_authorization;
     std::function<void(uint64_t)> skip_authorization;
@@ -30,6 +34,7 @@ struct FileOperationCallbacks {
     // and open the destination folder.
     std::function<std::vector<ops::OpsManager::RetrySpawn>(uint64_t, const std::vector<size_t>&)> retry_failed;
     std::function<void(const std::wstring&)> open_folder;
+    std::function<void(const std::wstring&)> open_native_folder;
     std::function<void(uint64_t)> locate_results;
     std::function<void(uint64_t, int)> more_action;
     // A button of an ended plugin task (OpsManager::InvokeExternalTaskAction).
@@ -45,10 +50,13 @@ struct FileOperationCallbacks {
     // The engine's background speed history (OpsManager::SpeedGraph): a card
     // first shown late, or shown again after hiding, draws the whole run.
     std::function<ops::OpSpeedGraph(uint64_t)> speed_history;
+    // A row of the other-operations strip was clicked: show that task here.
+    std::function<void(uint64_t)> select_task;
 };
 
 // What the footer offers while failed items are listed.
 struct TransferFailureView {
+    bool native_handoff = false;
     bool on = false;
     bool can_retry = false;   // a listed item can be retried
     bool can_open = false;    // the destination folder is known
@@ -74,6 +82,10 @@ public:
     void SetTaskStart(uint64_t task_id, std::chrono::steady_clock::time_point started);
     // A successful live task stays visible briefly; explicit summaries can opt out.
     void SetAutoClose(bool on);
+    // The other operations running or queued beside the shown one (the app
+    // passes OpsManager::ActiveStatuses(true) minus status.task_id). They are
+    // listed above the footer, each with its progress, pause and cancel.
+    void SetOtherTasks(std::vector<ops::OpStatus> tasks);
 
 private:
     friend struct FileOperationWindowTestAccess;
@@ -94,12 +106,16 @@ private:
     void EndZoom();
     void FinishHideToStatus();
     void FinishShowFromStatus();
+    bool TickSuccessDismiss(ULONGLONG now);
     bool Shown() const;
     void CreateCardFormats();
     std::vector<FluentMenuItem> MoreItems() const;
     void RunMoreAction(int command);
     void ShowMoreMenu();
-    void SampleGraph(ULONGLONG now);
+    bool SampleGraph(ULONGLONG now);
+    bool NeedsContinuousAnimation() const;
+    void SyncRenderTimer();
+    void FlushPaintStats();
     TransferFailureView FailureView() const;
 public:
     // A retry started from the failed-items list: its outcome is shown in the
@@ -119,6 +135,18 @@ private:
     fluent::Painter painter_;
     FileOperationCallbacks callbacks_;
     ops::OpStatus status_;
+    void ObservePresentation(unsigned kind, ULONGLONG now, ULONGLONG elapsed = 0);
+    ULONGLONG presentation_tick_[5]{};
+    ULONGLONG presentation_report_[5]{};
+    ULONGLONG status_update_tick_ = 0;
+    bool presentation_minimized_ = false;
+    UINT render_timer_ms_ = 0;
+    uint64_t last_rendered_elapsed_sec_ = UINT64_MAX;
+    uint64_t paint_task_id_ = 0;
+    uint64_t paint_count_ = 0;
+    uint64_t slow_paint_count_ = 0;
+    uint64_t paint_total_ms_ = 0;
+    uint64_t paint_max_ms_ = 0;
     // Speed graph: x is progress when the task
     // reports a percentage, otherwise sample order.
     ops::OpSpeedGraph graph_;
@@ -199,12 +227,29 @@ private:
     size_t board_scroll_ = 0;
     // Row retry buttons as last drawn: visible row, bounds (pixels).
     std::vector<std::pair<size_t, D2D1_RECT_F>> failure_buttons_;
+
+    // Other-operations strip: the tasks as listed (needing a choice first,
+    // then running, then queued), and its rows' geometry in DIPs.
+    std::vector<ops::OpStatus> other_tasks_;
+    size_t TaskStripRows() const;
+    float TaskStripDip() const;
+    struct TaskRowGeometry { D2D1_RECT_F row, pause, cancel; bool has_pause; };
+    TaskRowGeometry TaskRow(size_t index) const;
 };
 
 struct ConflictDialogResult {
     ops::ConflictChoice choice = ops::ConflictChoice::Cancel;
     bool apply_to_all = false;
 };
+
+// A background transfer awaits the answer; the file manager keeps its normal message loop.
+class PendingFileConflict {
+public:
+    virtual ~PendingFileConflict() = default;
+    virtual bool Reparent(HWND owner) = 0;
+};
+std::shared_ptr<PendingFileConflict> PresentFileConflict(HWND owner, const ops::ConflictItemInfo& conflict,
+    bool dark, D2D1_COLOR_F accent, std::function<void(ConflictDialogResult)> answer);
 
 ConflictDialogResult ShowFileConflictDialog(HWND owner,
                                             const ops::ConflictItemInfo& conflict,

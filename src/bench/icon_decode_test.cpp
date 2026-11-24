@@ -95,6 +95,22 @@ int main() {
         check(!preview::MakeIconEntryFile(bytes, bad, cursor, invalid) && invalid.empty(),
               "out-of-bounds icon payload is rejected");
     }
+    for (bool cursor : {false, true}) {
+        const auto bytes = Icon({256, 16, 256}, cursor);
+        std::vector<preview::IconEntry> entries;
+        std::vector<uint8_t> one, reference;
+        size_t selected = 0, bytes_read = 0;
+        const auto read = [&](size_t offset, uint8_t* dst, size_t n) {
+            if (offset > bytes.size() || n > bytes.size() - offset) return false;
+            std::copy_n(bytes.data() + offset, n, dst);
+            bytes_read += n;
+            return true;
+        };
+        check(preview::ReadIconSelection(bytes.size(), read, 2, entries, selected, one) &&
+              selected == 1 && entries.size() == 3 && bytes_read < 2048 &&
+              preview::MakeIconEntryFile(bytes, entries[selected], cursor, reference) && one == reference,
+              "large bundle reads only directory, entry prefixes and selected 16px payload");
+    }
     const auto small_path = root / L"small.ico";
     Save(small_path, Icon({16}, false));
     pulse_test::Result result;

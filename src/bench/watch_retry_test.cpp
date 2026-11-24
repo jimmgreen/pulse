@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include "../app/dir_notify_queue.h"
+#include "../fs/fs_enum.h"
 
 namespace {
 std::atomic<int> attempts{0};
@@ -167,6 +168,65 @@ void RunQueue() {
     Check(queue.size() == 1 && !queue[0].overflow && queue[0].events.size() == 1,
           "new events are accepted after the queue is drained");
 }
+void RunQueueBudget() {
+    struct Batch { std::wstring path; bool overflow; std::vector<pulse::fs::DirNotifyEvent> events; };
+    std::vector<Batch> queue;
+    for (int i = 0; i < 10000; ++i)
+        pulse::app::QueueDirNotify(queue, L"busy", false, {{FILE_ACTION_ADDED, std::to_wstring(i), {}}});
+    Check(queue.size() == 1 && queue[0].overflow && queue[0].events.empty(),
+          "BUDGET-01 backlog requests full reconciliation instead of unbounded detail");
+    queue.clear();
+    pulse::app::QueueDirNotify(queue, L"armed", true, {{0, {}, {}, 123}});
+    pulse::app::QueueDirNotify(queue, L"armed", false, {{FILE_ACTION_RENAMED_NEW_NAME, L"new", L"old"}});
+    Check(queue.size() == 2 && pulse::fs::ArmedAt(queue[0].overflow, queue[0].events) == 123 &&
+          queue[1].events[0].old_name == L"old", "BUDGET-02 armed overflow preserves subsequent rename");
+    queue.clear();
+    std::vector<pulse::fs::DirNotifyEvent> large(513, {FILE_ACTION_ADDED, L"item", {}});
+    pulse::app::QueueDirNotify(queue, L"large", false, std::move(large));
+    Check(queue.size() == 1 && queue[0].overflow && queue[0].events.empty(),
+          "BUDGET-03 one oversized callback requests reconciliation");
+    pulse::app::DirNotifyPacer<Batch> pacer;
+    std::vector<Batch> incoming{{L"paced", false, {{FILE_ACTION_ADDED, L"first", {}}}}}, due;
+    pacer.Take(incoming, 1000, due);
+    due.clear();
+    for (int i = 0; i < 10000; ++i) {
+        incoming.push_back({L"paced", false, {{FILE_ACTION_ADDED, std::to_wstring(i), {}}}});
+        pacer.Take(incoming, 1001, due);
+    }
+    pacer.Take(incoming, 1200, due);
+    Check(due.size() == 1 && due[0].overflow && due[0].events.empty() && !pacer.Holding(),
+          "BUDGET-04 paced backlog requests one final reconciliation");
+    const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
+        (L"queue-budget-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
+    std::filesystem::create_directory(root);
+    queue.clear();
+    for (int i = 0; i < 70; ++i) {
+        const auto name = std::to_wstring(i);
+        std::filesystem::create_directory(root / name);
+        pulse::app::QueueDirNotify(queue, root.wstring(), false, {{FILE_ACTION_ADDED, name, {}}});
+    }
+    std::filesystem::rename(root / L"69", root / L"renamed");
+    pulse::app::QueueDirNotify(queue, root.wstring(), false,
+        {{FILE_ACTION_RENAMED_NEW_NAME, L"renamed", L"69"}});
+    std::filesystem::remove(root / L"0");
+    pulse::app::QueueDirNotify(queue, root.wstring(), false, {{FILE_ACTION_REMOVED, L"0", {}}});
+    std::vector<pulse::fs::DirEntry> snapshot;
+    if (queue.size() == 1 && queue[0].overflow)
+        pulse::fs::EnumerateDirectory(root.wstring(), snapshot);
+    bool consistent = snapshot.size() == 69;
+    for (int i = 1; i < 69; ++i)
+        consistent = consistent && std::any_of(snapshot.begin(), snapshot.end(), [&](const auto& entry) {
+            return entry.name == std::to_wstring(i);
+        });
+    consistent = consistent && std::any_of(snapshot.begin(), snapshot.end(), [](const auto& entry) {
+        return entry.name == L"renamed";
+    });
+    Check(consistent, "BUDGET-05 production enumeration after overflow includes later rename and removal");
+    for (int i = 1; i < 69; ++i) std::filesystem::remove(root / std::to_wstring(i));
+    std::filesystem::remove(root / L"renamed");
+    Check(std::filesystem::remove(root), "BUDGET-06 owned reconciliation fixture removed");
+}
+
 void RunPacer() {
     struct Batch { std::wstring path; bool overflow; std::vector<pulse::fs::DirNotifyEvent> events; };
     using Pacer = pulse::app::DirNotifyPacer<Batch>;
@@ -227,7 +287,12 @@ void RunPacer() {
     Check(due.size() == 1 && due[0].overflow && overflow.Holding(), "PACE-10 an overflow starts a window");
 }
 }
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring(argv[1]) == L"--queue") {
+        RunQueue(); RunPacer(); RunQueueBudget();
+        std::cout << "Failures: " << failures << std::endl;
+        return failures ? 1 : 0;
+    }
     const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
         (L"watch-retry-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
     if (!std::filesystem::create_directory(root)) return 2;

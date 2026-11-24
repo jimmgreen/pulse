@@ -8,6 +8,8 @@ struct FileDialogActivationEx {
     bool enabled = false;
     CoCreateInstanceExFunction original = &::CoCreateInstanceEx;
     FileDialogBridgeServices services;
+    // Optional call-local output; stage names have static storage and contain no caller data.
+    const char** outcome = nullptr;
 };
 
 // Explicit local adapter, not an installed hook. original receives every input

@@ -1,4 +1,5 @@
 #include "extension_tree_layout.h"
+#include "extension_tree_extra_controls.h"
 #include <algorithm>
 #include <numeric>
 namespace pulse::ui {
@@ -15,10 +16,14 @@ bool Contains(D2D1_RECT_F rect, float x, float y) {
 }
 constexpr float kCardPadX = 16, kCardPadY = 12;
 bool Card(const UiNode &node) { return node.type == UiNodeType::Group && node.bordered; }
+// Inner inset (DIP): explicit padding wins; a bordered group keeps its card insets by default.
+float PadX(const UiNode &node) { return node.padding >= 0 ? static_cast<float>(node.padding) : Card(node) ? kCardPadX : 0.0f; }
+float PadY(const UiNode &node) { return node.padding >= 0 ? static_cast<float>(node.padding) : Card(node) ? kCardPadY : 0.0f; }
 bool Container(UiNodeType type) {
     return type == UiNodeType::Stack || type == UiNodeType::Grid || type == UiNodeType::Group ||
            type == UiNodeType::Tabs || type == UiNodeType::Tab || type == UiNodeType::ScrollView ||
-           type == UiNodeType::SplitPane || type == UiNodeType::SidebarSection || type == UiNodeType::StagingTray;
+           type == UiNodeType::SplitPane || type == UiNodeType::SidebarSection ||
+           type == UiNodeType::StagingTray || type == UiNodeType::SettingsRow;
 }
 void Distribute(std::vector<float> &sizes, const std::vector<float> &limits, const std::vector<int> &weights,
                 float available) {
@@ -63,9 +68,15 @@ ExtensionTreeLayout::Flow ExtensionTreeLayout::ChildFlow(const UiNode &node, flo
                                                          const ExtensionLayoutCallbacks &callbacks) const {
     Flow flow;
     const float gap = node.gap * scale_;
+    const auto intrinsic = [&](const UiNode &child) {
+        return !child.min_width && !child.max_width && !child.flex && callbacks.intrinsic_width
+                   ? callbacks.intrinsic_width(child)
+                   : 0.0f;
+    };
     bool constrained = node.type == UiNodeType::Stack && node.orientation == "horizontal" &&
-                       std::any_of(node.children.begin(), node.children.end(),
-                                   [](const auto &child) { return child.min_width || child.max_width || child.flex; });
+                       std::any_of(node.children.begin(), node.children.end(), [&](const auto &child) {
+                           return child.min_width || child.max_width || child.flex || intrinsic(child) > 0;
+                       });
     if (constrained) {
         std::vector<float> limits;
         std::vector<int> weights;
@@ -73,8 +84,9 @@ ExtensionTreeLayout::Flow ExtensionTreeLayout::ChildFlow(const UiNode &node, flo
         for (size_t index = 0; index < node.children.size(); ++index) {
             const auto &child = node.children[index];
             bool visible = ChildVisible(node, index, callbacks);
-            float limit = child.max_width ? child.max_width * scale_ : 1.0e9f;
-            float base = std::min(limit, (child.min_width ? child.min_width : 160) * scale_);
+            const float natural = intrinsic(child);
+            float limit = natural > 0 ? natural : child.max_width ? child.max_width * scale_ : 1.0e9f;
+            float base = natural > 0 ? natural : std::min(limit, (child.min_width ? child.min_width : 160) * scale_);
             flow.widths.push_back(visible ? base : 0);
             limits.push_back(visible ? limit : 0);
             weights.push_back(visible ? child.flex : 0);
@@ -118,10 +130,50 @@ float ExtensionTreeLayout::Measure(const UiNode &node, float width, const Extens
         return ConstrainHeight(node, std::max(32, node.min_height ? node.min_height : 240) * scale_);
     if (node.type == UiNodeType::SplitPane)
         return ConstrainHeight(node, std::max(240, node.min_height) * scale_);
+    if (node.type == UiNodeType::SettingsRow) {
+        const bool bordered = node.bordered;
+        const float pad_x = bordered ? 16.0f * scale_ : 0.0f;
+        const float pad_y = bordered ? 12.0f * scale_ : 4.0f * scale_;
+        const float inner_w = std::max(1.0f, width - 2.0f * pad_x);
+        const float row_gap = node.gap * scale_;
+        std::vector<float> child_widths;
+        size_t vis_count = 0;
+        for (size_t i = 0; i < node.children.size(); ++i) vis_count += ChildVisible(node, i, callbacks) ? 1 : 0;
+        const float controls_w = ExtensionSettingsRowInlineWidths(node, inner_w, row_gap, scale_,
+            [&](size_t i) { return ChildVisible(node, i, callbacks); }, child_widths);
+        if (controls_w > 0.0f) {
+            const float left_w = std::max(1.0f, inner_w - controls_w - 16.0f * scale_);
+            float row_h = callbacks.measure(node, left_w);
+            for (size_t i = 0; i < node.children.size(); ++i) {
+                if (child_widths[i] > 0.0f)
+                    row_h = std::max(row_h, Measure(node.children[i], child_widths[i], callbacks));
+            }
+            return ConstrainHeight(node, row_h + 2.0f * pad_y);
+        }
+        const float left_h = callbacks.measure(node, inner_w);
+        float stacked_h = 0.0f;
+        if (vis_count > 0) {
+            auto flow = ChildFlow(node, inner_w, callbacks);
+            float r = 0.0f;
+            int col = 0;
+            for (size_t i = 0; i < node.children.size(); ++i) {
+                if (!ChildVisible(node, i, callbacks)) continue;
+                r = std::max(r, Measure(node.children[i], flow.widths[i], callbacks));
+                if (++col == flow.columns) {
+                    stacked_h += r + row_gap;
+                    r = 0.0f;
+                    col = 0;
+                }
+            }
+            if (col) stacked_h += r + row_gap;
+            if (stacked_h > 0.0f) stacked_h = std::max(0.0f, stacked_h - row_gap) + 8.0f * scale_;
+        }
+        return ConstrainHeight(node, left_h + stacked_h + 2.0f * pad_y);
+    }
     const float gap = node.gap * scale_;
     const bool card = Card(node);
-    if (card)
-        width = std::max(1.0f, width - 2 * kCardPadX * scale_);
+    const float pad_x = PadX(node) * scale_, pad_y = PadY(node) * scale_;
+    width = std::max(1.0f, width - 2 * pad_x);
     float used = 0;
     if ((node.type == UiNodeType::Group && (!card || !node.text.empty())) || node.type == UiNodeType::Tabs ||
         node.type == UiNodeType::SidebarSection || node.type == UiNodeType::StagingTray)
@@ -141,21 +193,61 @@ float ExtensionTreeLayout::Measure(const UiNode &node, float width, const Extens
     }
     if (column)
         used += row + gap;
-    return ConstrainHeight(node, std::max(0.0f, used - gap) + (card ? 2 * kCardPadY * scale_ : 0.0f));
+    return ConstrainHeight(node, std::max(0.0f, used - gap) + 2 * pad_y);
 }
 void ExtensionTreeLayout::Reset() {
+    cached_root_ = nullptr;
+    measure_cache_.clear(); feedback_cache_.clear();
+    visible_cache_.clear(); enabled_cache_.clear(); selected_cache_.clear();
     viewports_.clear();
     placements_.clear();
 }
 float ExtensionTreeLayout::Arrange(const UiNode &root, D2D1_RECT_F viewport, float outer_offset, float scale,
-                                   const ExtensionLayoutCallbacks &callbacks) {
+                                   const ExtensionLayoutCallbacks &callbacks, bool scroll_only, float bleed_x) {
+    const float width = viewport.right - viewport.left, height = viewport.bottom - viewport.top;
+    if (!scroll_only || cached_root_ != &root || scale_ != scale || cached_width_ != width || cached_height_ != height) {
+        measure_cache_.clear(); feedback_cache_.clear();
+        visible_cache_.clear(); enabled_cache_.clear(); selected_cache_.clear();
+    }
+    cached_root_ = &root; cached_width_ = width; cached_height_ = height;
+    auto cached = callbacks;
+    cached.measure = [&](const UiNode& node, float w) {
+        const auto key = std::make_pair(&node, w);
+        auto at = measure_cache_.find(key);
+        if (at != measure_cache_.end()) return at->second;
+        return measure_cache_[key] = callbacks.measure(node, w);
+    };
+    cached.feedback_height = [&](const UiNode& node, float w) {
+        const auto key = std::make_pair(&node, w);
+        auto at = feedback_cache_.find(key);
+        if (at != feedback_cache_.end()) return at->second;
+        return feedback_cache_[key] = callbacks.feedback_height ? callbacks.feedback_height(node, w) : 0;
+    };
+    cached.visible = [&](const UiNode& node) {
+        auto [at, inserted] = visible_cache_.try_emplace(&node);
+        if (inserted) at->second = callbacks.visible(node);
+        return at->second;
+    };
+    cached.enabled = [&](const UiNode& node) {
+        auto [at, inserted] = enabled_cache_.try_emplace(&node);
+        if (inserted) at->second = callbacks.enabled(node);
+        return at->second;
+    };
+    cached.selected = [&](const UiNode& node) {
+        auto [at, inserted] = selected_cache_.try_emplace(&node);
+        if (inserted) at->second = callbacks.selected(node);
+        return at->second;
+    };
     scale_ = scale;
     placements_.clear();
     for (auto &entry : viewports_)
         entry.second.visible = false;
     std::vector<const UiNode *> ancestors;
+    // Controls flush with the content edge (a checkbox's stroke, any focus ring) may
+    // paint into the host's horizontal content inset; nothing scrolls sideways there.
+    const D2D1_RECT_F clip{viewport.left - bleed_x, viewport.top, viewport.right + bleed_x, viewport.bottom};
     return Place(root, viewport.left, viewport.top - outer_offset, viewport.right - viewport.left,
-                 viewport.bottom - viewport.top, viewport, true, true, ancestors, callbacks, true);
+                 viewport.bottom - viewport.top, clip, true, true, ancestors, cached, true);
 }
 float ExtensionTreeLayout::Place(const UiNode &node, float x, float y, float width, float root_height, D2D1_RECT_F clip,
                                  bool visible, bool enabled, std::vector<const UiNode *> &ancestors,
@@ -198,14 +290,80 @@ float ExtensionTreeLayout::Place(const UiNode &node, float x, float y, float wid
         }
         return visible ? height : 0;
     }
+    if (node.type == UiNodeType::SettingsRow) {
+        const bool bordered = node.bordered;
+        const float pad_x = bordered ? 16.0f * scale_ : 0.0f;
+        const float pad_y = bordered ? 12.0f * scale_ : 4.0f * scale_;
+        const float inner_w = std::max(1.0f, width - 2.0f * pad_x);
+        std::vector<float> child_widths;
+        size_t vis_count = 0;
+        for (size_t i = 0; i < node.children.size(); ++i) vis_count += ChildVisible(node, i, callbacks) ? 1 : 0;
+        const float controls_w = ExtensionSettingsRowInlineWidths(node, inner_w, gap, scale_,
+            [&](size_t i) { return ChildVisible(node, i, callbacks); }, child_widths);
+        float total_h = 0.0f;
+        if (controls_w > 0.0f) {
+            const float left_w = std::max(1.0f, inner_w - controls_w - 16.0f * scale_);
+            std::vector<float> child_heights(node.children.size(), 0.0f);
+            float row_h = callbacks.measure(node, left_w);
+            for (size_t i = 0; i < node.children.size(); ++i) {
+                if (!ChildVisible(node, i, callbacks)) continue;
+                child_heights[i] = Measure(node.children[i], child_widths[i], callbacks);
+                row_h = std::max(row_h, child_heights[i]);
+            }
+            float cx = x + width - pad_x - controls_w;
+            const float cy_base = y + pad_y;
+            for (size_t i = 0; i < node.children.size(); ++i) {
+                const bool child_visible = visible && ChildVisible(node, i, callbacks);
+                if (!child_visible) {
+                    Place(node.children[i], cx, cy_base, child_widths[i], root_height, clip, false, enabled, ancestors,
+                          callbacks, false, 0.0f);
+                    continue;
+                }
+                const float offset_y = std::max(0.0f, (row_h - child_heights[i]) * 0.5f);
+                Place(node.children[i], cx, cy_base + offset_y, child_widths[i], root_height, clip, true, enabled,
+                      ancestors, callbacks, false, child_heights[i]);
+                cx += child_widths[i] + gap;
+            }
+            total_h = ConstrainHeight(node, std::max(allocated_height, row_h + 2.0f * pad_y));
+        } else {
+            const float left_h = callbacks.measure(node, inner_w);
+            auto flow = ChildFlow(node, inner_w, callbacks);
+            float used = left_h + (vis_count > 0 ? 8.0f * scale_ : 0.0f);
+            float row = 0.0f, left = x + pad_x;
+            int column = 0;
+            for (size_t i = 0; i < node.children.size(); ++i) {
+                const bool child_visible = visible && ChildVisible(node, i, callbacks);
+                const float ch = Place(node.children[i], left, y + pad_y + used, flow.widths[i], root_height, clip,
+                                       child_visible, enabled, ancestors, callbacks, false, 0.0f);
+                if (!child_visible) continue;
+                row = std::max(row, ch);
+                left += flow.widths[i] + gap;
+                if (++column == flow.columns) {
+                    used += row + gap;
+                    row = 0.0f;
+                    column = 0;
+                    left = x + pad_x;
+                }
+            }
+            if (column) used += row + gap;
+            const float content_h = vis_count > 0 ? std::max(left_h, used - gap) : left_h;
+            total_h = ConstrainHeight(node, std::max(allocated_height, content_h + 2.0f * pad_y));
+        }
+        const D2D1_RECT_F bounds{x, y, x + width, y + total_h};
+        placements_[&node] = {bounds, own_ancestors};
+        callbacks.place(node, bounds, clip, visible, enabled);
+        return visible ? total_h : 0.0f;
+    }
     // A bordered group is a card: its heading and children sit inside the padding; the card's own
     // bounds (placed last) cover the whole card so it can paint the surface under them.
     const bool card = Card(node);
     const float card_x = x, card_y = y, card_width = width;
-    if (card) {
-        x += kCardPadX * scale_;
-        y += kCardPadY * scale_;
-        width = std::max(1.0f, width - 2 * kCardPadX * scale_);
+    const float pad_x = PadX(node) * scale_, pad_y = PadY(node) * scale_;
+    const bool padded = pad_x > 0 || pad_y > 0;
+    if (padded) {
+        x += pad_x;
+        y += pad_y;
+        width = std::max(1.0f, width - 2 * pad_x);
     }
     float heading = 0;
     if ((node.type == UiNodeType::Group && (!card || !node.text.empty())) || node.type == UiNodeType::Tabs ||
@@ -229,7 +387,8 @@ float ExtensionTreeLayout::Place(const UiNode &node, float x, float y, float wid
         auto &viewport = viewports_[&node];
         viewport.node = &node;
         viewport.bounds = {x, y, x + width, y + viewport_height};
-        viewport.clip = Intersect(clip, viewport.bounds);
+        viewport.clip = Intersect(clip, root ? D2D1_RECT_F{clip.left, viewport.bounds.top, clip.right, viewport.bounds.bottom}
+                                             : viewport.bounds);
         viewport.visible = visible;
         viewport.enabled = enabled;
         viewport.depth = ancestors.size();
@@ -257,7 +416,8 @@ float ExtensionTreeLayout::Place(const UiNode &node, float x, float y, float wid
             weights[index] = child.flex;
             ++count;
         }
-        float available = allocated_height > 0 ? allocated_height : root ? root_height : node.min_height * scale_;
+        float available = (allocated_height > 0 ? allocated_height : root ? root_height : node.min_height * scale_) -
+                          2 * pad_y;
         Distribute(heights, limits, weights, available - (count ? gap * static_cast<float>(count - 1) : 0));
     }
     // A horizontal stack with alignment "center" centres each child on the row (a title beside a switch).
@@ -310,14 +470,14 @@ float ExtensionTreeLayout::Place(const UiNode &node, float x, float y, float wid
         return visible ? viewport_height : 0;
     }
     if (card) {
-        const float height = ConstrainHeight(node, std::max(allocated_height, content + 2 * kCardPadY * scale_));
+        const float height = ConstrainHeight(node, std::max(allocated_height, content + 2 * pad_y));
         const D2D1_RECT_F bounds{card_x, card_y, card_x + card_width, card_y + height};
         placements_[&node] = {bounds, own_ancestors};
         callbacks.place(node, bounds, clip, visible, enabled);
         return visible ? height : 0;
     }
-    float height = ConstrainHeight(node, std::max(allocated_height, content));
-    placements_[&node] = {{x, y, x + width, y + height}, own_ancestors};
+    float height = ConstrainHeight(node, std::max(allocated_height, content + 2 * pad_y));
+    placements_[&node] = {{card_x, card_y, card_x + card_width, card_y + height}, own_ancestors};
     return visible ? height : 0;
 }
 fluent::ScrollbarSpec ExtensionTreeLayout::Scrollbar(const UiNode *node, bool expanded) const {

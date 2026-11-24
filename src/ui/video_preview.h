@@ -66,7 +66,9 @@ public:
     // pointer through to the owner, and decodes FFmpeg frames at card size.
     // Four process-wide workers include retired decoders. At capacity Open
     // reports ERROR_BUSY; selecting/opening again retries after a worker exits.
-    void Open(HWND owner, const std::wstring& path, bool card = false);
+    // autoplay is applied before decoding starts, including backend fallback.
+    void Open(HWND owner, const std::wstring& path, bool card = false, bool autoplay = true,
+              float volume = 1.0f, bool muted = false);
     void Reset();
     std::vector<std::shared_future<void>> SuspendVolume(const std::wstring& root);
     // corner_radius > 0 clips the video window to a rounded rectangle.

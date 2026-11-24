@@ -1,9 +1,31 @@
 #include "workspace_sidebar.h"
 #include "app_navigation.h"
 #include "quick_access.h"
+#include "workspace_path.h"
+#include "../common/localization.h"
 #include "../ui/ui_renderer.h"
 
 namespace pulse {
+namespace {
+std::wstring TrimWorkspaceSlash(std::wstring path) {
+    for (wchar_t& ch : path) if (ch == L'/') ch = L'\\';
+    while (path.size() > 3 && path.back() == L'\\') path.pop_back();
+    return path;
+}
+bool WorkspacePathWithinOrSame(const std::wstring& path, const std::wstring& root) {
+    if (path.empty() || root.empty()) return false;
+    const std::wstring p = TrimWorkspaceSlash(path);
+    const std::wstring r = TrimWorkspaceSlash(root);
+    if (_wcsicmp(p.c_str(), r.c_str()) == 0) return true;
+    if (p.size() <= r.size() || _wcsnicmp(p.c_str(), r.c_str(), r.size()) != 0) return false;
+    return r.back() == L'\\' || p[r.size()] == L'\\';
+}
+bool WorkspaceIsStrictAncestor(const std::wstring& candidate, const std::wstring& child) {
+    return !candidate.empty() && !child.empty() &&
+           _wcsicmp(TrimWorkspaceSlash(candidate).c_str(), TrimWorkspaceSlash(child).c_str()) != 0 &&
+           WorkspacePathWithinOrSame(child, candidate);
+}
+} // namespace
 const ui::SidebarItem* WorkspacePaneRow(const ui::WindowViewModel& vm, const ui::HitTestResult& hit) {
     if (hit.region != ui::HitTestResult::SidebarItem || hit.sidebar_item < 0) return nullptr;
     for (const auto& group : vm.sidebar) {
@@ -51,7 +73,10 @@ void ActivateWorkspacePane(AppState& s, int workspace, int pane) {
     const size_t count = saved.pane_paths.empty() ? 1 : saved.pane_paths.size();
     if (static_cast<size_t>(pane) >= count) return;
     auto visible = LiveLayout(s).VisiblePanes();
-    if (s.places.active_workspace != workspace || static_cast<size_t>(pane) >= visible.size()) {
+    const auto* lt = s.window_tabs.Active();
+    const bool bound = lt && !lt->workspace_root.empty() &&
+        _wcsicmp(lt->workspace_root.c_str(), saved.root.c_str()) == 0;
+    if (!bound || s.places.active_workspace != workspace || static_cast<size_t>(pane) >= visible.size()) {
         OpenWorkspace(s, workspace);
         visible = LiveLayout(s).VisiblePanes();
     }
@@ -68,14 +93,33 @@ int WorkspaceIndexFromPath(const std::wstring& path) {
 void FillWorkspaceSidebarState(AppState& s, ui::WindowViewModel& vm) {
     const auto paths = CollectPanePaths(s);
     const int layout = static_cast<int>(WorkspaceLayoutOf(s));
+    const app::LayoutTab* lt = s.window_tabs.Active();
     for (auto& group : vm.sidebar) for (auto& item : group.items) {
         item.editing = !s.workspaceRenameRoot.empty() && s.places.FindWorkspace(s.workspaceRenameRoot) == item.workspace_index;
-        if (!item.workspace_active || item.workspace_index < 0 ||
+        if (item.workspace_index < 0 ||
             item.workspace_index >= static_cast<int>(s.places.workspaces.size())) continue;
         const auto& saved = s.places.workspaces[static_cast<size_t>(item.workspace_index)];
         const auto expected = saved.pane_paths.empty() ? std::vector<std::wstring>{saved.root} : saved.pane_paths;
+        bool active = lt && !lt->workspace_root.empty() &&
+            _wcsicmp(lt->workspace_root.c_str(), saved.root.c_str()) == 0;
+        if (active && !paths.empty()) {
+            bool any_inside = false;
+            bool any_ancestor = false;
+            for (const auto& p : paths) {
+                for (const auto& exp : expected) {
+                    const std::wstring resolved = app::ResolveWorkspaceFolderPath(exp, s.places.workspaces);
+                    if (WorkspacePathWithinOrSame(p, resolved)) any_inside = true;
+                    if (WorkspaceIsStrictAncestor(p, resolved)) any_ancestor = true;
+                }
+            }
+            if (!any_inside && (any_ancestor || expected.size() <= 1 || layout == saved.layout))
+                active = false;
+        }
+        item.workspace_active = active;
+        item.badge = active ? l10n::Get(l10n::StringId::Current)
+                            : (fs::IsUncPath(saved.root) ? l10n::Get(l10n::StringId::Server) : std::wstring{});
         // Browsing folders and changing view mode do not change the pane layout.
-        item.workspace_dirty = layout != saved.layout || paths.size() != expected.size();
+        item.workspace_dirty = active && (layout != saved.layout || paths.size() != expected.size());
     }
 }
 bool UpdateWorkspaceDrag(AppState& s, int y) {

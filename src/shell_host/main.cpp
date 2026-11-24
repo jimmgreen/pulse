@@ -25,6 +25,7 @@
 #include "../common/recycle_index.h"
 #include "../common/crash_reporter.h"
 #include <windows.h>
+#include <ocidl.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -35,7 +36,9 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <cwctype>
 
@@ -657,6 +660,308 @@ HRESULT DropItemsInto(const std::wstring& dir, const std::vector<std::wstring>& 
     return hr;
 }
 
+std::string WideToAnsi(const std::wstring& text) {
+    if (text.empty()) return {};
+    const int bytes = WideCharToMultiByte(CP_ACP, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 1) return {};
+    std::string out(static_cast<size_t>(bytes), '\0');
+    if (WideCharToMultiByte(CP_ACP, 0, text.c_str(), -1, out.data(), bytes, nullptr, nullptr) <= 0)
+        return {};
+    out.resize(strlen(out.c_str()));
+    return out;
+}
+
+DWORD CurrentInvokeMask(DWORD base_mask) {
+    if (GetKeyState(VK_SHIFT) < 0) base_mask |= CMIC_MASK_SHIFT_DOWN;
+    if (GetKeyState(VK_CONTROL) < 0) base_mask |= CMIC_MASK_CONTROL_DOWN;
+    return base_mask;
+}
+
+bool IsTransientSystemWindowClass(HWND hwnd) {
+    wchar_t cls[64]{};
+    if (GetClassNameW(hwnd, cls, ARRAYSIZE(cls)) <= 0) return false;
+    return _wcsicmp(cls, L"IME") == 0 ||
+           _wcsicmp(cls, L"MSCTFIME UI") == 0 ||
+           _wcsicmp(cls, L"tooltips_class32") == 0 ||
+           _wcsicmp(cls, L"SysShadow") == 0 ||
+           _wcsicmp(cls, L"OleMainThreadWndClass") == 0 ||
+           _wcsicmp(cls, L"CicMarshalWndClass") == 0 ||
+           _wcsicmp(cls, L"MSCTFIME Composition") == 0 ||
+           _wcsicmp(cls, L"GDI+ Hook Window Class") == 0;
+}
+
+std::set<HWND> SnapshotThreadWindows(DWORD tid) {
+    std::set<HWND> windows;
+    EnumThreadWindows(tid, [](HWND hwnd, LPARAM lp) -> BOOL {
+        reinterpret_cast<std::set<HWND>*>(lp)->insert(hwnd);
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&windows));
+    return windows;
+}
+
+void PumpPostInvokeMessages(DWORD tid, const std::set<HWND>& windows_before,
+                            ULONGLONG hidden_grace_ms = 3000,
+                            ULONGLONG quiet_ms = 250,
+                            ULONGLONG max_quiet_total_ms = 1500) {
+    const auto classify_new_windows = [&](bool& any_visible, bool& any_hidden_app) {
+        struct Probe {
+            const std::set<HWND>* before;
+            bool visible = false;
+            bool hidden = false;
+        } probe{&windows_before, false, false};
+        EnumThreadWindows(tid, [](HWND hwnd, LPARAM lp) -> BOOL {
+            auto* p = reinterpret_cast<Probe*>(lp);
+            if (!hwnd || p->before->contains(hwnd) || IsTransientSystemWindowClass(hwnd))
+                return TRUE;
+            if (IsWindowVisible(hwnd)) p->visible = true;
+            else p->hidden = true;
+            return p->visible ? FALSE : TRUE;
+        }, reinterpret_cast<LPARAM>(&probe));
+        any_visible = probe.visible;
+        any_hidden_app = probe.hidden;
+    };
+
+    const ULONGLONG started = GetTickCount64();
+    ULONGLONG last_activity = started;
+    for (;;) {
+        if (!g.running.load(std::memory_order_acquire)) break;
+        MSG msg{};
+        bool saw_message = false;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            saw_message = true;
+            if (msg.message == WM_QUIT) return;
+            if (msg.message == WM_CTX_CLOSE || msg.message == WM_CTX_INVOKE) continue;
+            HWND root = msg.hwnd ? GetAncestor(msg.hwnd, GA_ROOT) : nullptr;
+            wchar_t cls[32]{};
+            if (root && !windows_before.contains(root) &&
+                GetClassNameW(root, cls, ARRAYSIZE(cls)) > 0 &&
+                wcscmp(cls, L"#32770") == 0 && IsDialogMessageW(root, &msg))
+                continue;
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        const ULONGLONG now = GetTickCount64();
+        if (saw_message) last_activity = now;
+        bool any_visible = false, any_hidden = false;
+        classify_new_windows(any_visible, any_hidden);
+        DWORD wait_ms = 50;
+        if (any_visible) {
+            wait_ms = 200;
+        } else if (any_hidden) {
+            if (now - started >= hidden_grace_ms) break;
+            wait_ms = static_cast<DWORD>((std::min<ULONGLONG>)(50, hidden_grace_ms - (now - started)));
+        } else {
+            if (now - last_activity >= quiet_ms || now - started >= max_quiet_total_ms) break;
+            const ULONGLONG left_quiet = quiet_ms - (now - last_activity);
+            const ULONGLONG left_total = max_quiet_total_ms - (now - started);
+            wait_ms = static_cast<DWORD>((std::min<ULONGLONG>)(50, (std::min)(left_quiet, left_total)));
+        }
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, wait_ms ? wait_ms : 1, QS_ALLINPUT);
+    }
+}
+
+HKEY RegRootFromCode(const std::wstring& code) {
+    if (code == L"1") return HKEY_LOCAL_MACHINE;
+    if (code == L"2") return HKEY_CURRENT_USER;
+    return HKEY_CLASSES_ROOT;
+}
+
+std::vector<std::wstring> SplitLines(const std::wstring& text) {
+    std::vector<std::wstring> parts;
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = text.find(L'\n', start);
+        if (end == std::wstring::npos) {
+            parts.push_back(text.substr(start));
+            break;
+        }
+        parts.push_back(text.substr(start, end - start));
+        start = end + 1;
+    }
+    return parts;
+}
+
+HRESULT ExecuteDelegateCommand(const Request& req) {
+    const bool background = (req.flags & SVF_BACKGROUND) != 0;
+    const HWND owner = reinterpret_cast<HWND>(static_cast<uintptr_t>(req.owner));
+    const HWND valid_owner = (owner && IsWindow(owner)) ? owner : nullptr;
+    const auto parts = SplitLines(req.new_name.substr(9)); // after "delegate:"
+    if (parts.empty() || parts[0].empty()) return E_INVALIDARG;
+    CLSID clsid{};
+    HRESULT hr = CLSIDFromString(parts[0].c_str(), &clsid);
+    if (FAILED(hr)) return hr;
+    const std::wstring verb = parts.size() > 1 ? parts[1] : std::wstring();
+    const std::wstring root_code = parts.size() > 2 ? parts[2] : std::wstring();
+    const std::wstring reg_key = parts.size() > 3 ? parts[3] : std::wstring();
+
+    AllowSetForegroundWindow(ASFW_ANY);
+    pulse::shell::CtxBind bind;
+    if (!pulse::shell::BindCtxSelection(req.sources, background, bind)) return E_FAIL;
+    IShellItemArray* items = nullptr;
+    if (bind.data)
+        SHCreateShellItemArrayFromDataObject(bind.data, IID_PPV_ARGS(&items));
+    if (!items && !req.sources.empty()) {
+        IShellItem* first = nullptr;
+        if (SUCCEEDED(MakeItem(req.sources.front(), &first)) && first) {
+            SHCreateShellItemArrayFromShellItem(first, IID_PPV_ARGS(&items));
+            first->Release();
+        }
+    }
+    IUnknown* site = nullptr;
+    if (bind.folder || valid_owner || items)
+        pulse::shell::CreateFolderViewSite(bind.folder, &site, valid_owner, items);
+
+    IUnknown* unk = nullptr;
+    hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER,
+                          IID_IUnknown, reinterpret_cast<void**>(&unk));
+    std::set<HWND> windows_before;
+    if (SUCCEEDED(hr) && unk) {
+        windows_before = SnapshotThreadWindows(GetCurrentThreadId());
+        IObjectWithSite* with_site = nullptr;
+        if (site && SUCCEEDED(unk->QueryInterface(IID_PPV_ARGS(&with_site))) && with_site)
+            with_site->SetSite(site);
+        IInitializeCommand* init_cmd = nullptr;
+        if (!verb.empty() && SUCCEEDED(unk->QueryInterface(IID_PPV_ARGS(&init_cmd))) && init_cmd) {
+            IPropertyBag* bag = nullptr;
+            if (!reg_key.empty())
+                pulse::shell::CreateRegistryPropertyBag(RegRootFromCode(root_code), reg_key, &bag);
+            hr = init_cmd->Initialize(verb.c_str(), bag);
+            if (bag) bag->Release();
+            init_cmd->Release();
+        }
+        IObjectWithSelection* with_sel = nullptr;
+        if (SUCCEEDED(hr) && items && SUCCEEDED(unk->QueryInterface(IID_PPV_ARGS(&with_sel))) && with_sel) {
+            hr = with_sel->SetSelection(items);
+            with_sel->Release();
+        }
+        IExecuteCommand* exec = nullptr;
+        if (SUCCEEDED(hr)) {
+            hr = unk->QueryInterface(IID_PPV_ARGS(&exec));
+            if (SUCCEEDED(hr) && exec) {
+                const auto dir = pulse::shell::ContextWorkingDirectory(ToParsingPath(req.sources.front()), background);
+                if (!dir.empty()) exec->SetDirectory(dir.c_str());
+                exec->SetShowWindow(SW_SHOWNORMAL);
+                DWORD key_state = 0;
+                if (GetKeyState(VK_SHIFT) < 0) key_state |= MK_SHIFT;
+                if (GetKeyState(VK_CONTROL) < 0) key_state |= MK_CONTROL;
+                exec->SetKeyState(key_state);
+                POINT pt{};
+                GetCursorPos(&pt);
+                exec->SetPosition(pt);
+                exec->SetNoShowUI(FALSE);
+                hr = exec->Execute();
+                exec->Release();
+            }
+        }
+        const bool cancelled = hr == HRESULT_FROM_WIN32(ERROR_CANCELLED);
+        SendDone(req.id, cancelled ? S_OK : hr, cancelled,
+                 FAILED(hr) && !cancelled ? DescribeHresult(hr) : L"");
+        if (SUCCEEDED(hr)) PumpPostInvokeMessages(GetCurrentThreadId(), windows_before);
+        if (with_site) {
+            with_site->SetSite(nullptr);
+            with_site->Release();
+        }
+        unk->Release();
+        if (site) site->Release();
+        if (items) items->Release();
+        return S_OK; // SendDone already sent
+    }
+    if (site) site->Release();
+    if (items) items->Release();
+    return FAILED(hr) ? hr : E_FAIL;
+}
+
+HRESULT ExecuteDropTargetCommand(const Request& req) {
+    const bool background = (req.flags & SVF_BACKGROUND) != 0;
+    const HWND owner = reinterpret_cast<HWND>(static_cast<uintptr_t>(req.owner));
+    const HWND valid_owner = (owner && IsWindow(owner)) ? owner : nullptr;
+    const std::wstring clsid_text = req.new_name.substr(11); // after "droptarget:"
+    if (clsid_text.empty()) return E_INVALIDARG;
+    CLSID clsid{};
+    HRESULT hr = CLSIDFromString(clsid_text.c_str(), &clsid);
+    if (FAILED(hr)) return hr;
+
+    AllowSetForegroundWindow(ASFW_ANY);
+    pulse::shell::CtxBind bind;
+    if (!pulse::shell::BindCtxSelection(req.sources, background, bind) || !bind.data)
+        return E_FAIL;
+    IShellItemArray* items = nullptr;
+    SHCreateShellItemArrayFromDataObject(bind.data, IID_PPV_ARGS(&items));
+    IUnknown* site = nullptr;
+    if (bind.folder || valid_owner || items)
+        pulse::shell::CreateFolderViewSite(bind.folder, &site, valid_owner, items);
+
+    IDropTarget* drop = nullptr;
+    hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER,
+                          IID_PPV_ARGS(&drop));
+    if (SUCCEEDED(hr) && drop) {
+        const std::set<HWND> windows_before = SnapshotThreadWindows(GetCurrentThreadId());
+        IObjectWithSite* with_site = nullptr;
+        if (site && SUCCEEDED(drop->QueryInterface(IID_PPV_ARGS(&with_site))) && with_site)
+            with_site->SetSite(site);
+        DWORD keys = MK_LBUTTON;
+        if (GetKeyState(VK_SHIFT) < 0) keys |= MK_SHIFT;
+        if (GetKeyState(VK_CONTROL) < 0) keys |= MK_CONTROL;
+        POINT pt{};
+        GetCursorPos(&pt);
+        POINTL ptl{ pt.x, pt.y };
+        DWORD effect = DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK;
+        hr = drop->DragEnter(bind.data, keys, ptl, &effect);
+        if (SUCCEEDED(hr)) {
+            if (effect == DROPEFFECT_NONE) {
+                drop->DragLeave();
+                hr = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+            } else {
+                hr = drop->Drop(bind.data, keys, ptl, &effect);
+            }
+        }
+        const bool cancelled = hr == HRESULT_FROM_WIN32(ERROR_CANCELLED);
+        SendDone(req.id, cancelled ? S_OK : hr, cancelled,
+                 FAILED(hr) && !cancelled ? DescribeHresult(hr) : L"");
+        if (SUCCEEDED(hr)) PumpPostInvokeMessages(GetCurrentThreadId(), windows_before);
+        if (with_site) {
+            with_site->SetSite(nullptr);
+            with_site->Release();
+        }
+        drop->Release();
+        if (site) site->Release();
+        if (items) items->Release();
+        return S_OK; // SendDone already sent
+    }
+    if (site) site->Release();
+    if (items) items->Release();
+    return FAILED(hr) ? hr : E_FAIL;
+}
+
+DWORD WINAPI ShellVerbAsyncThread(LPVOID param) {
+    std::unique_ptr<Request> req(static_cast<Request*>(param));
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    HRESULT hr = FAILED(co) ? co : E_INVALIDARG;
+    if (SUCCEEDED(co)) {
+        if (req->new_name.starts_with(L"delegate:"))
+            hr = ExecuteDelegateCommand(*req);
+        else if (req->new_name.starts_with(L"droptarget:"))
+            hr = ExecuteDropTargetCommand(*req);
+    }
+    // ExecuteDelegateCommand / ExecuteDropTargetCommand return S_OK after already
+    // sending SendDone (preserving the true failure HRESULT over the pipe).
+    if (FAILED(hr)) {
+        const bool cancelled = hr == HRESULT_FROM_WIN32(ERROR_CANCELLED);
+        if (!cancelled) {
+            wchar_t line[160];
+            _snwprintf_s(line, _TRUNCATE, L"shell verb '%.64ls' failed hr=0x%08lX",
+                         req->new_name.c_str(), static_cast<unsigned long>(hr));
+            HostLog(line);
+        }
+        SendDone(req->id, cancelled ? S_OK : hr, cancelled,
+                 FAILED(hr) && !cancelled ? DescribeHresult(hr) : L"");
+    }
+    if (SUCCEEDED(co)) CoUninitialize();
+    g.requests_in_flight.fetch_sub(1);
+    PostMessageW(g.hwnd_msg, WM_RECYCLE_CHECK, 0, 0);
+    return 0;
+}
+
 void ExecuteShellVerb(Request* req) {
     // Copy / cut / paste go through the OLE clipboard, which needs OLE (not
     // just COM) on this thread. Kept for the process: the clipboard data a
@@ -665,6 +970,20 @@ void ExecuteShellVerb(Request* req) {
     const bool background = (req->flags & SVF_BACKGROUND) != 0;
     const HWND owner = reinterpret_cast<HWND>(static_cast<uintptr_t>(req->owner));
     const std::wstring& verb = req->new_name;
+    if (!req->sources.empty() &&
+        (verb.starts_with(L"delegate:") || verb.starts_with(L"droptarget:"))) {
+        g.requests_in_flight.fetch_add(1);
+        HANDLE thread = CreateThread(nullptr, 0, ShellVerbAsyncThread, req, 0, nullptr);
+        if (thread) {
+            CloseHandle(thread);
+            return;
+        }
+        g.requests_in_flight.fetch_sub(1);
+        const HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
+        SendDone(req->id, hr, false, DescribeHresult(hr));
+        delete req;
+        return;
+    }
     HRESULT hr = FAILED(ole) ? ole : S_OK;
     if (SUCCEEDED(hr) && req->sources.empty()) hr = E_INVALIDARG;
     const bool drop_copy = _wcsicmp(verb.c_str(), L"drop:copy") == 0;
@@ -677,6 +996,7 @@ void ExecuteShellVerb(Request* req) {
                            std::vector<std::wstring>(req->sources.begin() + 1, req->sources.end()),
                            drop_move);
     } else if (SUCCEEDED(hr)) {
+        AllowSetForegroundWindow(ASFW_ANY);
         IContextMenu* menu = nullptr;
         hr = ShellVerbMenu(req->sources, background, owner, &menu);
         HMENU hmenu = SUCCEEDED(hr) ? CreatePopupMenu() : nullptr;
@@ -700,11 +1020,15 @@ void ExecuteShellVerb(Request* req) {
         }
         if (SUCCEEDED(hr)) {
             const auto dir = pulse::shell::ContextWorkingDirectory(ToParsingPath(req->sources.front()), background);
+            const std::string dir_a = WideToAnsi(dir);
+            const HWND valid_owner = (owner && IsWindow(owner)) ? owner : nullptr;
             CMINVOKECOMMANDINFOEX info{};
             info.cbSize = sizeof(info);
-            info.fMask = CMIC_MASK_UNICODE;
-            info.hwnd = owner;
+            info.fMask = CurrentInvokeMask(CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE);
+            info.hwnd = valid_owner;
+            info.lpDirectory = dir_a.empty() ? nullptr : dir_a.c_str();
             info.lpDirectoryW = dir.empty() ? nullptr : dir.c_str();
+            GetCursorPos(&info.ptInvoke);
             if (verb.empty()) {
                 info.lpVerb = MAKEINTRESOURCEA(default_id);
                 info.lpVerbW = MAKEINTRESOURCEW(default_id);
@@ -713,7 +1037,7 @@ void ExecuteShellVerb(Request* req) {
                 info.lpVerbW = verb.c_str();
             }
             info.nShow = SW_SHOWNORMAL;
-            hr = menu->InvokeCommand(reinterpret_cast<CMINVOKECOMMANDINFO*>(&info));
+            hr = pulse::shell::SafeInvokeCommand(menu, reinterpret_cast<CMINVOKECOMMANDINFO*>(&info));
         }
         if (hmenu) DestroyMenu(hmenu);
         if (menu) menu->Release();
@@ -1180,6 +1504,8 @@ struct CtxSessionData {
 struct CtxSlot {
     DWORD thread_id = 0;       // 0 until the session thread has a message queue
     bool close_requested = false;
+    bool has_pending_invoke = false;
+    CtxInvokeMsg pending_invoke;
 };
 
 std::mutex g_ctx_mutex;
@@ -1397,10 +1723,7 @@ void CtxInvoke(const CtxSessionData& d, IContextMenu* menu, UINT id_first,
     // manager is unavailable the verb is invoked normally below.
     wchar_t verb_buf[64]{};
     if (!d.background &&
-        SUCCEEDED(menu->GetCommandString(item_id - id_first, GCS_VERBW, nullptr,
-                                         reinterpret_cast<LPSTR>(verb_buf),
-                                         ARRAYSIZE(verb_buf)))) {
-        verb_buf[ARRAYSIZE(verb_buf) - 1] = L'\0';  // some handlers fill the buffer unterminated
+        pulse::shell::SafeGetCommandVerbW(menu, item_id - id_first, verb_buf, ARRAYSIZE(verb_buf))) {
         if (!_wcsicmp(verb_buf, L"PinToStartScreen") || !_wcsicmp(verb_buf, L"UnpinFromStartScreen")) {
             const HRESULT hr = InvokeStartPinPaths(d.paths, !_wcsicmp(verb_buf, L"PinToStartScreen"));
             SendDone(invoke_req_id, hr, false, FAILED(hr) ? L"context menu invoke failed" : L"");
@@ -1422,18 +1745,52 @@ void CtxInvoke(const CtxSessionData& d, IContextMenu* menu, UINT id_first,
             HostLog(L"taskbarpin: TaskbarPinManager unavailable, using InvokeCommand");
         }
     }
+    AllowSetForegroundWindow(ASFW_ANY);
     const auto dir = pulse::shell::ContextWorkingDirectory(ToParsingPath(d.paths.front()), d.background);
+    const std::string dir_a = WideToAnsi(dir);
+    const HWND valid_owner = (d.owner && IsWindow(d.owner)) ? d.owner : nullptr;
     CMINVOKECOMMANDINFOEX info{};
     info.cbSize = sizeof(info);
-    info.fMask = CMIC_MASK_UNICODE;
-    info.hwnd = d.owner;
+    info.fMask = CurrentInvokeMask(CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE);
+    info.hwnd = valid_owner;
     info.lpVerb = MAKEINTRESOURCEA(item_id - id_first);
     info.lpVerbW = MAKEINTRESOURCEW(item_id - id_first);
+    info.lpDirectory = dir_a.empty() ? nullptr : dir_a.c_str();
     info.lpDirectoryW = dir.empty() ? nullptr : dir.c_str();
+    GetCursorPos(&info.ptInvoke);
     info.nShow = SW_SHOWNORMAL;
-    const HRESULT hr = menu->InvokeCommand(reinterpret_cast<CMINVOKECOMMANDINFO*>(&info));
+    const DWORD tid = GetCurrentThreadId();
+    const std::set<HWND> windows_before = SnapshotThreadWindows(tid);
+    const ULONGLONG invoke_started = GetTickCount64();
+    const HWND foreground_before = GetForegroundWindow();
+    {
+        wchar_t line[256]{};
+        swprintf_s(line, L"ctx-focus begin owner=%p foreground=%p owner_visible=%d owner_enabled=%d",
+            static_cast<void*>(valid_owner), static_cast<void*>(foreground_before),
+            valid_owner ? IsWindowVisible(valid_owner) : 0,
+            valid_owner ? IsWindowEnabled(valid_owner) : 0);
+        HostLog(line);
+    }
+    const HRESULT hr = pulse::shell::SafeInvokeCommand(menu, reinterpret_cast<CMINVOKECOMMANDINFO*>(&info));
+    {
+        wchar_t line[256]{};
+        swprintf_s(line, L"ctx-focus end owner=%p foreground=%p elapsed_ms=%llu hr=0x%08lX",
+            static_cast<void*>(valid_owner), static_cast<void*>(GetForegroundWindow()),
+            GetTickCount64() - invoke_started, static_cast<unsigned long>(hr));
+        HostLog(line);
+    }
+    if (FAILED(hr)) {
+        wchar_t line[160]{};
+        swprintf_s(line, L"CtxInvoke failed id=%u first=%u offset=%u hr=0x%08lX",
+                   item_id, id_first, item_id - id_first, static_cast<unsigned long>(hr));
+        HostLog(line);
+    }
     SendDone(invoke_req_id, hr, false,
              FAILED(hr) ? L"context menu invoke failed" : L"");
+    if (FAILED(hr)) return;
+    // Keep the STA apartment and COM object alive while any modeless dialog,
+    // hidden IPC window, or post-invoke message/timer callback completes.
+    PumpPostInvokeMessages(tid, windows_before);
 }
 
 bool SessionCloseRequested(uint32_t sid) {
@@ -1464,7 +1821,9 @@ struct HandlerWorker {
     pulse::shell::CtxHandlerSlot slot;
     std::unique_ptr<pulse::shell::IsolatedStartPinSession> isolated_start_pin;
     std::vector<CtxItemOut> items;
+    std::vector<uint32_t> wire_ids;
     std::vector<pulse::shell::SendToTarget> send_to;   // native 发送到 only
+    bool wire_assigned = false;
     HANDLE done_event = nullptr;
     HANDLE exit_event = nullptr;
     HANDLE thread = nullptr;
@@ -1661,6 +2020,7 @@ struct CtxSessionApi {
     decltype(&pulse::shell::EnumerateCtxHandlers) enumerate = pulse::shell::EnumerateCtxHandlers;
     decltype(&BuildCtxMenu) fallback = BuildCtxMenu;
     decltype(&HostLog) log = HostLog;
+    decltype(&SendCtxItems) send_items = SendCtxItems;
     HandlerWorkerApi worker;
 };
 
@@ -1668,7 +2028,7 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
     std::unique_ptr<CtxSessionData> data(static_cast<CtxSessionData*>(param));
     const uint32_t sid = data->session_id;
     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) {
-        SendCtxItems(sid, {});
+        api.send_items(sid, {}, 0, {}, {});
         std::lock_guard<std::mutex> lock(g_ctx_mutex);
         g_ctx_sessions.erase(sid);
         return 0;
@@ -1676,22 +2036,33 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
     MSG msg;
     PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
     bool closed_early = false;
+    std::unique_ptr<CtxInvokeMsg> pending_invoke;
     {
         std::lock_guard<std::mutex> lock(g_ctx_mutex);
         auto it = g_ctx_sessions.find(sid);
         if (it == g_ctx_sessions.end() || it->second.close_requested) {
             closed_early = true;
+            if (it != g_ctx_sessions.end() && it->second.has_pending_invoke) {
+                pending_invoke = std::make_unique<CtxInvokeMsg>(std::move(it->second.pending_invoke));
+                it->second.has_pending_invoke = false;
+            }
             g_ctx_sessions.erase(sid);
         } else {
             it->second.thread_id = GetCurrentThreadId();
+            if (it->second.has_pending_invoke) {
+                pending_invoke = std::make_unique<CtxInvokeMsg>(std::move(it->second.pending_invoke));
+                it->second.has_pending_invoke = false;
+            }
         }
     }
     if (closed_early) {
+        if (pending_invoke)
+            SendDone(pending_invoke->invoke_req_id, HRESULT_FROM_WIN32(ERROR_CANCELLED), true, L"");
         CoUninitialize();
         return 0;
     }
 
-    constexpr UINT kIdsPerHandler = 256;
+    constexpr UINT kWireIdLast = 0x7EFF; // clear of ContextMenuController::kPredictedIdFirst (0x7F00)
     constexpr DWORD kFastBudgetMs = 80;
     // Handlers still busy by then are not responding: the menu settles
     // without them and they are reported as timed out (#65).
@@ -1723,7 +2094,6 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
     std::vector<pulse::ipc::CtxHandlerStatus> statuses;
     IContextMenu* fallback_menu = nullptr;
     HMENU fallback_hmenu = nullptr;
-    std::unique_ptr<CtxInvokeMsg> pending_invoke;
 
     auto pump_session_messages = [&] {
         MSG m{};
@@ -1779,19 +2149,16 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
 
     // Ownership transfer after starting a thread must not allocate/throw.
     workers.reserve(handlers.size());
-    UINT next_id = kCtxIdFirst;
     for (const auto& handler : handlers) {
-        if (next_id + kIdsPerHandler > kCtxIdLast) break;
         auto worker = std::make_unique<HandlerWorker>();
         worker->session_id = sid;
         worker->desc = handler;
         worker->paths = data->paths;
         worker->background = data->background;
         worker->owner = data->owner;
-        worker->id_first = next_id;
-        worker->id_last = next_id + kIdsPerHandler - 1;
+        worker->id_first = kCtxIdFirst;
+        worker->id_last = kCtxIdLast;
         worker->qcm_flags = qcm_flags;
-        next_id += kIdsPerHandler;
         if (!StartHandlerWorker(*worker, api.worker)) continue;
         workers.push_back(std::move(worker));
     }
@@ -1830,12 +2197,51 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
         for (const auto& t : native_only) line += L" [" + t + L"]";
         HostLog(line.c_str());
     };
+    struct WireRoute {
+        HandlerWorker* worker = nullptr;
+        uint32_t raw_id = 0;
+    };
+    std::unordered_map<uint32_t, WireRoute> wire_routes;
+    UINT next_wire_id = kCtxIdFirst;
+    auto assign_worker_wire_ids = [&](HandlerWorker& w) {
+        if (w.wire_assigned) return;
+        w.wire_assigned = true;
+        w.wire_ids.resize(w.items.size(), 0);
+        for (size_t i = 0; i < w.items.size(); ++i) {
+            const auto& item = w.items[i];
+            if (item.has_children || item.id == 0) continue;
+            const uint32_t raw_id = item.id;
+            uint32_t wire_id = 0;
+            if (raw_id >= kCtxIdFirst && raw_id <= kWireIdLast && !wire_routes.contains(raw_id)) {
+                wire_id = raw_id;
+            } else {
+                while (next_wire_id <= kWireIdLast && wire_routes.contains(next_wire_id))
+                    ++next_wire_id;
+                if (next_wire_id <= kWireIdLast)
+                    wire_id = next_wire_id++;
+            }
+            w.wire_ids[i] = wire_id;
+            if (wire_id != 0) wire_routes.emplace(wire_id, WireRoute{&w, raw_id});
+        }
+    };
+    auto worker_wire_items = [](const HandlerWorker& w) {
+        std::vector<CtxItemOut> mapped = w.items;
+        const size_t n = (std::min)(mapped.size(), w.wire_ids.size());
+        for (size_t i = 0; i < n; ++i)
+            if (!mapped[i].has_children && mapped[i].id != 0) mapped[i].id = w.wire_ids[i];
+        return mapped;
+    };
     auto collect_items = [&](std::vector<pulse::ipc::CtxHandlerStatus>& statuses) {
+        for (const auto& w : workers)
+            if (w && worker_done(*w)) assign_worker_wire_ids(*w);
         const HandlerWorker* native_send_to = nullptr;
+        std::vector<CtxItemOut> native_mapped;
         for (const auto& w : workers)
             if (w && IsNativeSendToClsid(w->desc.clsid_text) && worker_done(*w) &&
-                !w->items.empty())
+                !w->items.empty()) {
                 native_send_to = w.get();
+                native_mapped = worker_wire_items(*w);
+            }
         std::vector<std::wstring> classic_rows;
         for (const auto& w : workers)
             if (w && worker_done(*w) && !w->desc.explorer_command)
@@ -1856,17 +2262,20 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
                 if (w->desc.explorer_command &&
                     pulse::shell::PackagedRowsDuplicate(rows, classic_rows)) {
                     status.flags |= pulse::ipc::CTX_HANDLER_DUPLICATE;
-                } else if (native_send_to && IsSendToHandlerClsid(w->desc.clsid_text)) {
-                    std::vector<std::wstring> slot_only;
-                    std::vector<std::wstring> native_only;
-                    const auto merged = pulse::shell::MergeNativeSendTo(
-                        native_send_to->items, w->items, &slot_only, &native_only);
-                    check_send_to(slot_only, native_only);
-                    out.insert(out.end(), merged.begin(), merged.end());
-                    status.rows = static_cast<uint32_t>(merged.size());
                 } else {
-                    out.insert(out.end(), w->items.begin(), w->items.end());
-                    status.rows = static_cast<uint32_t>(w->items.size());
+                    const std::vector<CtxItemOut> mapped = worker_wire_items(*w);
+                    if (native_send_to && IsSendToHandlerClsid(w->desc.clsid_text)) {
+                        std::vector<std::wstring> slot_only;
+                        std::vector<std::wstring> native_only;
+                        const auto merged = pulse::shell::MergeNativeSendTo(
+                            native_mapped, mapped, &slot_only, &native_only);
+                        check_send_to(slot_only, native_only);
+                        out.insert(out.end(), merged.begin(), merged.end());
+                        status.rows = static_cast<uint32_t>(merged.size());
+                    } else {
+                        out.insert(out.end(), mapped.begin(), mapped.end());
+                        status.rows = static_cast<uint32_t>(mapped.size());
+                    }
                 }
             }
             statuses.push_back(std::move(status));
@@ -1932,7 +2341,7 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
                 if (!sent_partial ||
                     (done != partial_done && elapsed - partial_at >= kPartialGapMs)) {
                     items = collect_items(statuses);
-                    SendCtxItems(sid, items, CTX_ITEMS_PARTIAL, {}, statuses);
+                    api.send_items(sid, items, CTX_ITEMS_PARTIAL, {}, statuses);
                     sent_partial = true;
                     partial_done = done;
                     partial_at = elapsed;
@@ -1991,21 +2400,18 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
                 std::to_wstring(item.enabled) + L" child=" + std::to_wstring(item.child) +
                 L" verb=" + DiagnosticText(item.verb) + L" text=" + DiagnosticText(item.text));
     }
-    SendCtxItems(sid, items, 0, collect_hung(), statuses);
+    api.send_items(sid, items, 0, collect_hung(), statuses);
 
     auto dispatch_invoke = [&](std::unique_ptr<CtxInvokeMsg> inv) {
         if (!inv) return;
-        uint32_t live = pulse::shell::FindItemId(
+        const uint32_t live = pulse::shell::FindItemId(
             items, inv->item_id, inv->verb, inv->text);
         if (!workers.empty()) {
-            HandlerWorker* target = nullptr;
-            for (auto& w : workers) {
-                if (w && live >= w->id_first && live <= w->id_last) {
-                    target = w.get();
-                    break;
-                }
-            }
-            if (target && target->thread_id && live != 0) {
+            const auto found = wire_routes.find(live);
+            HandlerWorker* target = found != wire_routes.end() ? found->second.worker : nullptr;
+            const uint32_t raw_id = found != wire_routes.end() ? found->second.raw_id : 0;
+            if (target && target->thread_id && live != 0 && raw_id != 0) {
+                inv->item_id = raw_id;
                 CtxInvokeMsg* raw = inv.release();
                 if (!PostThreadMessageW(target->thread_id, WM_CTX_INVOKE, 0,
                                         reinterpret_cast<LPARAM>(raw))) {
@@ -2159,11 +2565,14 @@ void PostCtxMessage(uint32_t session_id, UINT message, WPARAM wParam, LPARAM lPa
         return;
     }
     if (it->second.thread_id == 0) {
-        it->second.close_requested = true;
-        if (message == WM_CTX_INVOKE) {
+        if (message == WM_CTX_CLOSE) {
+            it->second.close_requested = true;
+        } else if (message == WM_CTX_INVOKE) {
             std::unique_ptr<CtxInvokeMsg> inv(reinterpret_cast<CtxInvokeMsg*>(lParam));
-            SendDone(inv->invoke_req_id, HRESULT_FROM_WIN32(ERROR_NOT_READY), false,
-                     L"context menu session not ready");
+            if (inv) {
+                it->second.has_pending_invoke = true;
+                it->second.pending_invoke = std::move(*inv);
+            }
         }
         return;
     }

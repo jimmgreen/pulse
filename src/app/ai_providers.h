@@ -96,6 +96,13 @@ std::wstring ThinkLevelLabel(ThinkLevel level);
 // Adds the preferred level, snapped to the model, to a chat request body in
 // the field the model takes; nothing for None and Fixed.
 void AddThinking(const Provider& p, ThinkLevel preferred, std::string_view model, json::Value& body);
+// True when the service+model accepts a provider-native web search option on
+// its OpenAI-compatible chat endpoint (Qwen enable_search, OpenRouter web
+// plugin, Zhipu web_search tool).
+bool SupportsNativeWebSearch(const Provider& p, std::string_view model);
+// Adds provider-native web search parameters to `body` when supported. Returns
+// true if `body` was modified.
+bool AddNativeWebSearch(const Provider& p, std::string_view model, json::Value& body);
 // A serialized chat request with thinking switched off (or as low as the
 // model goes), for the quick structured asks (批量重命名). Unchanged when it
 // does not parse.

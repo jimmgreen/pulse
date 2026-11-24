@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 namespace pulse {
 struct AppState;
 struct GlobalSearchEvents;
@@ -6,6 +7,9 @@ GlobalSearchEvents MakeGlobalSearchEvents(AppState& s);
 void ApplyGlobalSearchSettings(AppState& s);
 // double_ctrl: summoned by two Ctrl taps rather than the registered hotkey.
 void ToggleGlobalSearch(AppState& s, bool double_ctrl = false);
+// Opens quick search with text typed elsewhere (the desktop pack). Independent of the summon hotkey;
+// false when search is turned off or the window cannot open.
+bool ShowGlobalSearchWithQuery(AppState& s, const std::wstring& query);
 // Settings > Search master switch: asks before turning it off (and whether to
 // delete the index), saves the preference and applies it.
 void ToggleSearchSwitch(AppState& s);

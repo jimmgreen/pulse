@@ -1,5 +1,6 @@
 #include "../app/thumbnail_rename.h"
 #include "../ui/thumbnail_cache.h"
+#include "../ui/thumbnail_pack_store.h"
 #include "../ui/thumbnail_retry_timer.h"
 #include "../ui/thumbnail_artwork_layout.h"
 #include <cstdio>
@@ -10,9 +11,41 @@
 
 namespace pulse::ui {
 struct ThumbnailCacheTestAccess {
+    static bool LaneWakeRegression() {
+        ThumbnailCache cache;
+        cache.running_ = true; // The two observers stand in for otherwise idle workers.
+        cache.visible_order_ = true;
+        std::condition_variable observed;
+        unsigned waiting = 0, awake = 0;
+        bool stop = false;
+        const auto observer = [&] {
+            std::unique_lock lock(cache.mutex_);
+            ++waiting;
+            observed.notify_all();
+            cache.cv_.wait(lock, [&] { return stop || !cache.queue_.empty(); });
+            if (!stop) ++awake;
+            observed.notify_all();
+        };
+        std::thread first(observer), second(observer);
+        {
+            std::unique_lock lock(cache.mutex_);
+            observed.wait(lock, [&] { return waiting == 2; });
+        }
+        const bool queued = cache.Prefetch(L"lane-wake.png", 0, 128, 1, 1, 256);
+        std::unique_lock lock(cache.mutex_);
+        const bool all = observed.wait_for(lock, std::chrono::seconds(2), [&] { return awake == 2; });
+        std::printf("[%s] single cold prefetch wakes both decode waiters: %u/2\n",
+            queued && all ? "PASS" : "FAIL", awake);
+        stop = true;
+        cache.cv_.notify_all();
+        lock.unlock();
+        first.join(); second.join();
+        return queued && all;
+    }
+#include "thumbnail_orientation_zoom_test.inc"
 #include "thumbnail_editor_save_test.inc"
 #include "thumbnail_rename_test.inc"
-    static bool RealDownloadRetryRegression() {
+    static bool RealDownloadRetryRegression(bool empty = false) {
         bool ok = true;
         const auto check = [&](bool value, const char* name) {
             std::printf("[%s] %s\n", value ? "PASS" : "FAIL", name); std::fflush(stdout); ok &= value;
@@ -67,10 +100,10 @@ struct ThumbnailCacheTestAccess {
                 output.close();
                 return output.good();
             };
-            check(write(24), "write only PNG header to same download path");
+            check(write(empty ? 0 : 24), empty ? "create empty PNG before first write" : "write only PNG header to same download path");
             ThumbnailCache cache;
             cache.SetParallelism(1); cache.SetDeviceContext(dc.get());
-            const uint64_t frozen_size = complete.size();
+            const uint64_t frozen_size = empty ? 0 : complete.size();
             const auto key = cache.Key(path.wstring(), 128, 10, frozen_size);
             const auto draw = [&] {
                 return cache.DrawGridThumbnail(dc.get(), D2D1::RectF(0, 0, 128, 128),
@@ -716,8 +749,116 @@ struct ThumbnailCacheTestAccess {
             !animation.transient_failures_.contains(L"frame0");
         std::printf("[%s] animation frame eviction clears only retired retry metadata\n", animation_ok ? "PASS" : "FAIL");
         ok &= animation_ok;
+
+        {
+            ThumbnailCache slack_cache(16u * 1024u * 1024u, 64);
+            for (const wchar_t* name : {L"off1", L"vis1", L"off2", L"off3"}) {
+                ThumbnailCache::Request req;
+                req.key = name;
+                req.epoch = slack_cache.epoch_.load();
+                ThumbnailCache::Item item;
+                item.kind = ipc::PreviewContentKind::Bitmap;
+                item.cost = 1024;
+                ok &= slack_cache.StoreResult(req, std::move(item));
+            }
+            const HWND fake_hwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(1));
+            slack_cache.interests_[fake_hwnd].committed.insert(L"vis1");
+            const size_t freed_active = slack_cache.TrimInactiveToSlack(1024, 0);
+            const bool active_ok = freed_active == 2048 && slack_cache.items_.size() == 2 &&
+                slack_cache.items_.contains(L"vis1") && slack_cache.items_.contains(L"off3") &&
+                slack_cache.cache_bytes_ == 2048;
+            slack_cache.interests_.clear();
+            const size_t freed_idle = slack_cache.TrimInactiveToSlack(1024, 0);
+            const bool idle_ok = freed_idle == 2048 && slack_cache.items_.empty() &&
+                slack_cache.cache_bytes_ == 0;
+            std::printf("[%s] TrimInactiveToSlack retains active viewport plus slack and clears idle items\n",
+                        (active_ok && idle_ok) ? "PASS" : "FAIL");
+            ok &= active_ok && idle_ok;
+        }
         std::printf("[%s] live retry backoff survives replacement; eviction clears metadata\n", backoff_ok ? "PASS" : "FAIL");
         return ok && backoff_ok;
+    }
+
+    static bool InlineAndWarmPrimaryRegression() {
+        bool ok = true;
+        const auto check = [&](bool value, const char* name) {
+            std::printf("[%s] %s\n", value ? "PASS" : "FAIL", name);
+            std::fflush(stdout);
+            ok &= value;
+        };
+        const auto count_children = []() -> size_t {
+            size_t count = 0;
+            HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            PROCESSENTRY32W entry{sizeof(entry)};
+            if (snapshot == INVALID_HANDLE_VALUE) return 0;
+            if (Process32FirstW(snapshot, &entry)) do {
+                if (entry.th32ParentProcessID == GetCurrentProcessId() &&
+                    _wcsicmp(entry.szExeFile, L"Pulse.Preview.exe") == 0) {
+                    ++count;
+                }
+            } while (Process32NextW(snapshot, &entry));
+            CloseHandle(snapshot);
+            return count;
+        };
+        const auto path = std::filesystem::temp_directory_path() /
+            (L"pulse-inline-probe-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + L".bmp");
+        BITMAPFILEHEADER file{};
+        BITMAPINFOHEADER bitmap{};
+        bitmap.biSize = sizeof(bitmap);
+        bitmap.biWidth = 512;
+        bitmap.biHeight = 512;
+        bitmap.biPlanes = 1;
+        bitmap.biBitCount = 24;
+        bitmap.biSizeImage = 512 * 512 * 3;
+        file.bfType = 0x4d42;
+        file.bfOffBits = sizeof(file) + sizeof(bitmap);
+        file.bfSize = file.bfOffBits + bitmap.biSizeImage;
+        {
+            std::ofstream stream(path, std::ios::binary);
+            std::vector<char> pixels(bitmap.biSizeImage, 80);
+            stream.write(reinterpret_cast<const char*>(&file), sizeof(file));
+            stream.write(reinterpret_cast<const char*>(&bitmap), sizeof(bitmap));
+            stream.write(pixels.data(), pixels.size());
+            check(stream.good(), "create isolated BMP fixture for inline bitmap and WarmPrimary");
+        }
+        ThumbnailCache cache;
+        cache.SetParallelism(4);
+        cache.WarmPrimary();
+        Sleep(500);
+        check(count_children() == 1, "WarmPrimary starts only primary preview host before burst");
+        {
+            std::lock_guard lock(cache.mutex_);
+            ThumbnailCache::Request req;
+            req.id = 1;
+            req.epoch = cache.epoch_.load();
+            req.path = path.wstring();
+            req.key = L"inline-probe-128";
+            req.pixels = 128;
+            req.timeout_ms = 5000;
+            cache.pending_.insert(req.key);
+            cache.queue_.push_back(std::move(req));
+            cache.cv_.notify_all();
+        }
+        bool decoded = false;
+        const auto until = GetTickCount64() + 10000;
+        while (GetTickCount64() < until) {
+            {
+                std::lock_guard lock(cache.mutex_);
+                if (const auto it = cache.items_.find(L"inline-probe-128"); it != cache.items_.end()) {
+                    decoded = !it->second.failed && it->second.w == 128 && it->second.h == 128 &&
+                        it->second.pixels.size() == 128u * 128u * 4u;
+                    break;
+                }
+            }
+            Sleep(10);
+        }
+        check(decoded, "inline bitmap IPC decodes <=256 KiB thumbnail completely");
+        check(count_children() == 1, "single thumbnail completes without spawning spare preview hosts");
+        cache.Reset();
+        std::error_code error;
+        std::filesystem::remove(path, error);
+        check(!error, "inline probe cleanup");
+        return ok;
     }
 
     static bool VolumeReleaseRegression() {
@@ -1254,9 +1395,16 @@ bool RunThumbnailInterestRegression() { return pulse::ui::ThumbnailCacheTestAcce
 
 bool RunThumbnailRetryRegression() { return pulse::ui::ThumbnailCacheTestAccess::RetryRegression(); }
 bool RunThumbnailDownloadRetryRegression() { return pulse::ui::ThumbnailCacheTestAccess::DownloadRetryRegression(); }
+bool RunThumbnailLaneWakeRegression() { return pulse::ui::ThumbnailCacheTestAccess::LaneWakeRegression(); }
+bool RunEmptyThumbnailDownloadRegression() { return pulse::ui::ThumbnailCacheTestAccess::RealDownloadRetryRegression(true); }
 bool RunThumbnailEditorSaveRegression() { return pulse::ui::ThumbnailCacheTestAccess::EditorSaveRegression(); }
 bool RunPsdProgressiveRegression(const char* fixture) { return pulse::ui::ThumbnailCacheTestAccess::PsdProgressiveRegression(fixture); }
 
 bool RunBoundedImageRetryRegression() { return pulse::ui::ThumbnailCacheTestAccess::BoundedImageRetryRegression(); }
 
 bool RunThumbnailRenameRegression() { return pulse::ui::ThumbnailCacheTestAccess::RenameRegression(); }
+
+bool RunThumbnailInlineWarmRegression() { return pulse::ui::ThumbnailCacheTestAccess::InlineAndWarmPrimaryRegression(); }
+
+bool RunThumbnailOrientationZoomRegression() { return pulse::ui::ThumbnailCacheTestAccess::OrientationZoomRegression(); }
+

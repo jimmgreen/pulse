@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace pulse::ui {
 
@@ -71,6 +72,44 @@ inline RECT PreviewWindowRect(const PreviewSizeInput& in) {
     const int width = std::clamp(static_cast<int>(std::lround(w)), min_w, work_w);
     const int height = std::clamp(static_cast<int>(std::lround(h)), min_h, work_h);
     return CentredPreviewRect(in.centre, width, height, in.work);
+}
+
+// Nudge a newly opened preview away from already-visible pinned previews so a
+// topmost window does not completely cover it in place.
+inline RECT CascadePreviewRect(RECT rect, const RECT& work, const std::vector<RECT>& occupied, float scale) {
+    const int width = rect.right - rect.left;
+    const int height = rect.bottom - rect.top;
+    const int work_w = work.right - work.left;
+    const int work_h = work.bottom - work.top;
+    if (occupied.empty() || width <= 0 || height <= 0 || work_w <= width || work_h <= height)
+        return rect;
+    const float s = scale > 0.0f ? scale : 1.0f;
+    const int step = (std::max)(24, static_cast<int>(std::lround(36.0f * s)));
+    const int threshold = (std::max)(16, static_cast<int>(std::lround(24.0f * s)));
+    const auto collides = [&](int x, int y) {
+        for (const RECT& other : occupied) {
+            if (other.right <= other.left || other.bottom <= other.top) continue;
+            if (std::abs(x - static_cast<int>(other.left)) < threshold &&
+                std::abs(y - static_cast<int>(other.top)) < threshold)
+                return true;
+        }
+        return false;
+    };
+    const int max_x = static_cast<int>(work.right) - width;
+    const int max_y = static_cast<int>(work.bottom) - height;
+    int x = std::clamp(static_cast<int>(rect.left), static_cast<int>(work.left), max_x);
+    int y = std::clamp(static_cast<int>(rect.top), static_cast<int>(work.top), max_y);
+    if (!collides(x, y)) return RECT{x, y, x + width, y + height};
+    const int span_x = (std::max)(1, max_x - static_cast<int>(work.left));
+    const int span_y = (std::max)(1, max_y - static_cast<int>(work.top));
+    for (int i = 1; i <= 16; ++i) {
+        int nx = x + step * i;
+        int ny = y + step * i;
+        if (nx > max_x) nx = static_cast<int>(work.left) + ((nx - static_cast<int>(work.left)) % span_x);
+        if (ny > max_y) ny = static_cast<int>(work.top) + ((ny - static_cast<int>(work.top)) % span_y);
+        if (!collides(nx, ny)) return RECT{nx, ny, nx + width, ny + height};
+    }
+    return RECT{x, y, x + width, y + height};
 }
 
 namespace preview_probe {

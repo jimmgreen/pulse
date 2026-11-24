@@ -13,6 +13,8 @@ DWORD PulsePaintedChildEditError(HWND hwnd);
 bool DrawPulsePaintedChildEdit(Compositor& compositor, IDWriteTextFormat* format,
     D2D1_COLOR_F foreground, D2D1_COLOR_F background, HWND hwnd, const D2D1_RECT_F& bounds);
 UINT PulsePaintedChildEditFailureMessage();
+// Keep redirected surfaces transparent through show/resize until synchronous paint completes.
+void GuardRedirectedChildEditFrames(HWND hwnd);
 // Applies the selected backend to existing child surfaces; returns custom mode.
 bool SynchronizeChildEditBackend(Compositor& compositor, HWND hwnd);
 bool HandleChildEditMessage(Compositor& compositor, IDWriteTextFormat* format,

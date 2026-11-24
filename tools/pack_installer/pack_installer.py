@@ -15,10 +15,11 @@ trailer (56 bytes, little-endian):
     byte[32] payload_sha  SHA-256 of the xz stream
 
 The xz stream decompresses to:
-    char[4]  "PPKM"
+    char[4]  "PPKM" (v1) or "PPK2" (v2)
     uint32   manifest_len
     byte[]   manifest (UTF-8 JSON: {"version":..,"files":[{"path","size","sha256"}]})
     byte[]   file contents, concatenated in manifest order
+             (v2 omits link_to entries, which identify a prior canonical file)
 
 Only the Python standard library is used.
 """
@@ -28,6 +29,8 @@ import argparse
 import hashlib
 import json
 import lzma
+import re
+import shutil
 import struct
 import sys
 import time
@@ -60,6 +63,19 @@ DEFAULT_LAYOUT = [
     ("third_party/md4c/LICENSE.md", "licenses/md4c/LICENSE.md"),
 ]
 
+# Phase 1-3 decoupled Common Files DialogBridge stage files (included automatically when built).
+OPTIONAL_DIALOG_BRIDGE_STAGE_X64 = [
+    ("PulseDialogStub64.dll", "DialogBridgeStage/PulseDialogStub64.dll"),
+    ("PulseDialogCore64.dll", "DialogBridgeStage/PulseDialogCore64.dll"),
+    ("PulseDialogBroker.exe", "DialogBridgeStage/PulseDialogBroker.exe"),
+    ("PulseDialogOverlay.exe", "DialogBridgeStage/PulseDialogOverlay.exe"),
+]
+OPTIONAL_DIALOG_BRIDGE_STAGE_X86 = [
+    ("PulseDialogStub32.dll", "DialogBridgeStage/PulseDialogStub32.dll"),
+    ("PulseDialogCore32.dll", "DialogBridgeStage/PulseDialogCore32.dll"),
+    ("PulseDialogInject32.exe", "DialogBridgeStage/PulseDialogInject32.exe"),
+]
+
 
 def collect(root: Path, build: Path) -> list[tuple[Path, str]]:
     items: list[tuple[Path, str]] = []
@@ -79,6 +95,30 @@ def collect(root: Path, build: Path) -> list[tuple[Path, str]]:
     return items
 
 
+def collect_dialog_bridge_stage(build: Path, dialog_build_x86: Path | None = None) -> list[tuple[Path, str]]:
+    staged: list[tuple[Path, str]] = []
+    for name, dest in OPTIONAL_DIALOG_BRIDGE_STAGE_X64:
+        candidate = build / name
+        if candidate.is_file():
+            staged.append((candidate, dest))
+    if dialog_build_x86 is not None:
+        for name, dest in OPTIONAL_DIALOG_BRIDGE_STAGE_X86:
+            candidate = dialog_build_x86 / name
+            if candidate.is_file():
+                staged.append((candidate, dest))
+    return staged
+
+
+def has_decoupled_dialog_bridge_stage(staged: list[tuple[Path, str]]) -> bool:
+    dests = {dest.lower() for _, dest in staged}
+    required = {
+        "dialogbridgestage/pulsedialogstub64.dll",
+        "dialogbridgestage/pulsedialogcore64.dll",
+        "dialogbridgestage/pulsedialogbroker.exe",
+    }
+    return required.issubset(dests)
+
+
 # Channel -> minimum Windows build ([Setup] MinVersion in the iss: 10.0 / 6.3).
 CHANNELS = {"windows": 10240, "win81": 9600}
 
@@ -90,16 +130,51 @@ def payload_dictionary_size(raw_size: int) -> int:
     return max(4096, min(64 << 20, 1 << (max(raw_size, 1) - 1).bit_length()))
 
 
-def build_payload(items, version: str, channel: str = "windows") -> tuple[bytes, dict]:
+def payload_order_key(item) -> tuple:
+    # Keep matching roles together across content-addressed bundles. Hash-first
+    # traversal otherwise changes the solid stream order whenever a build changes.
+    destination = Path(item[1])
+    layout = {Path(dest).name.lower(): i for i, (_, dest) in enumerate(DEFAULT_LAYOUT)}
+    return (layout.get(destination.name.lower(), 999), destination.suffix.lower(),
+            destination.name.lower(), item[1])
+
+
+_ADDRESS = re.compile(r"[0-9a-f]{64}")
+
+
+def _shared_member(destination):
+    parts = destination.split("/", 2)
+    if len(parts) != 3 or not _ADDRESS.fullmatch(parts[1]):
+        return None
+    root, _, member = parts
+    if root not in ("AppRuntime", "DialogBridge") or member.lower() in ("manifest.json", "verified.json"):
+        return None
+    return root, member
+
+
+def build_payload(items, version: str, channel: str = "windows", *, deduplicate=False) -> tuple[bytes, dict]:
     files, blobs = [], []
+    app_members = {}
+    aliases = 0
     for src, dest in items:
         data = src.read_bytes()
-        files.append({"path": dest, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
-        blobs.append(data)
-    manifest = {"format": 1, "version": version, "channel": channel,
+        signature = len(data), hashlib.sha256(data).hexdigest()
+        entry = {"path": dest, "size": signature[0], "sha256": signature[1]}
+        pair = _shared_member(dest) if deduplicate else None
+        if pair and pair[0] == "AppRuntime":
+            app_members[(pair[1], signature)] = len(files)
+        elif pair:
+            source = app_members.get((pair[1], signature))
+            if source is not None:
+                entry["link_to"] = source
+                aliases += 1
+        files.append(entry)
+        if "link_to" not in entry:
+            blobs.append(data)
+    manifest = {"format": 2 if aliases else 1, "version": version, "channel": channel,
                 "min_windows_build": CHANNELS[channel], "files": files}
     mbytes = json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    raw = b"PPKM" + struct.pack("<I", len(mbytes)) + mbytes + b"".join(blobs)
+    raw = (b"PPK2" if aliases else b"PPKM") + struct.pack("<I", len(mbytes)) + mbytes + b"".join(blobs)
     filters = [
         {"id": lzma.FILTER_X86},
         {"id": lzma.FILTER_LZMA2, "preset": 9 | lzma.PRESET_EXTREME,
@@ -117,15 +192,26 @@ def _dialog_tools():
 
 
 def verify_dialog_payload(directory: Path) -> dict:
-    """Verify the legacy main pointer and an optional architecture-pure x86 peer."""
+    """Verify installed app and dialog pointers, including an optional x86 peer."""
     dialog_pack = _dialog_tools()
     directory = Path(directory)
     primary = dialog_pack.verify_installed(directory)
+    app_files = [directory / name for name in ('.pulse-app-layout', 'app-current.json', 'AppRuntime')]
+    main = None
+    if any(path.exists() or path.is_symlink() for path in app_files):
+        app = dialog_pack.verify_app_pointer(directory)
+        main = dialog_pack.verify(directory / primary["directory"])
+        if (app['version'], app['architecture']) != (main['version'], main['architecture']):
+            raise dialog_pack.PackageError('application and dialog generations differ')
+        shared = {entry['path'].lower(): entry['sha256'] for entry in main['files']}
+        if any(shared.get(entry['path'].lower()) != entry['sha256'] for entry in app['files']):
+            raise dialog_pack.PackageError('application and dialog package shared files differ')
     try:
         (directory / "dialog-x86-current.json").lstat()
     except FileNotFoundError:
         return primary
-    main = dialog_pack.verify(directory / primary["directory"])
+    if main is None:
+        main = dialog_pack.verify(directory / primary["directory"])
     if main["architecture"] != "x64":
         raise dialog_pack.PackageError("x86 companion requires an x64 primary bundle")
     pointer_path = dialog_pack.no_links(directory / "dialog-x86-current.json")
@@ -157,7 +243,7 @@ def verify_dialog_payload(directory: Path) -> dict:
 
 
 def package_installed_dual(root: Path, build: Path, output: Path, version: str,
-                         items, dialog_build_x86: Path | None = None) -> dict:
+                         items, dialog_build_x86: Path | None = None, *, split_app_runtime=False) -> dict:
     dialog_pack = _dialog_tools()
     root, build = Path(root).resolve(), Path(build).resolve()
     machine = dialog_pack.PE(build / "pulse.exe").machine
@@ -172,6 +258,8 @@ def package_installed_dual(root: Path, build: Path, output: Path, version: str,
         # mixed-bitness, or silently borrowed from the main build.
         dialog_pack.plan(dialog_build_x86, version, "x86", root, thin=True, host_digest='0' * 64)
     primary = dialog_pack.package_installed(build, output, version, arch, root, items)
+    if split_app_runtime:
+        dialog_pack.package_app_runtime(build, output, version, arch, root, items)
     if dialog_build_x86 is not None:
         pointer = dialog_pack.package_addressed(dialog_build_x86, Path(output) / "DialogBridge",
                                                version, "x86", root, thin=True,
@@ -180,6 +268,35 @@ def package_installed_dual(root: Path, build: Path, output: Path, version: str,
             json.dump(pointer, stream, separators=(",", ":"))
             stream.write("\n")
     return verify_dialog_payload(output)
+
+def package_app_runtime_only(root: Path, build: Path, output: Path, version: str, items) -> dict:
+    """Package root pulse.exe launcher + AppRuntime/<sha256> without legacy DialogBridge/."""
+    dialog_pack = _dialog_tools()
+    root, build, output = Path(root).resolve(), Path(build).resolve(), Path(output)
+    if not output.is_absolute():
+        raise dialog_pack.PackageError("absolute NEW output required")
+    dialog_pack.no_links(output.parent)
+    if output.exists() or output.is_symlink():
+        raise dialog_pack.PackageError("output already exists; never overwrite or clean")
+    if output.is_relative_to(build):
+        raise dialog_pack.PackageError("output must be outside build directory")
+    machine = dialog_pack.PE(build / "pulse.exe").machine
+    arch = next((name for name, value in dialog_pack.MACHINES.items() if value == machine), None)
+    if arch is None:
+        raise dialog_pack.PackageError("unsupported Pulse architecture for app runtime")
+    launcher = build / "pulse_launcher.exe"
+    launcher_record = dialog_pack.record(launcher, "pulse.exe", "entry", arch)
+    if any(not dialog_pack.system(dep) for dep in launcher_record["imports"] + launcher_record["delay_imports"]):
+        raise dialog_pack.PackageError("stable launcher requires non-system dependency")
+    output.mkdir()
+    with launcher.open("rb") as src, (output / "pulse.exe").open("xb") as dst:
+        shutil.copyfileobj(src, dst)
+    if dialog_pack.digest(output / "pulse.exe") != launcher_record["sha256"]:
+        raise dialog_pack.PackageError("launcher changed during copy")
+    pointer = dialog_pack.package_app_runtime(build, output, version, arch, root, items)
+    dialog_pack.verify_app_pointer(output)
+    return pointer
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -198,18 +315,28 @@ def main() -> int:
     stub = Path(args.stub)
     started = time.time()
     items = collect(root, build)
-    # Ship one verified application/dialog runtime under its content hash;
-    # the root contains only the stable launcher and version pointer.
+    # The app launcher consumes its own immutable runtime independently of the
+    # optional dialog closure. Both are packaged from the same source generation.
     actual_build = build if build.is_absolute() else root / build
     dialog_x86 = Path(args.dialog_build_x86) if args.dialog_build_x86 else None
     if dialog_x86 is not None and not dialog_x86.is_absolute():
         dialog_x86 = root / dialog_x86
     with tempfile.TemporaryDirectory(prefix="pulse-dialog-") as staging:
         bundle = Path(staging) / "installed"
-        package_installed_dual(root, actual_build, bundle, args.version, items, dialog_x86)
+        dialog_stage = collect_dialog_bridge_stage(actual_build, dialog_x86)
+        if has_decoupled_dialog_bridge_stage(dialog_stage):
+            # Clean AppRuntime-only layout + Common Files Stub+Core stage; retires
+            # legacy per-install C:\Program Files\Pulse\DialogBridge\<hash>\ bundles.
+            package_app_runtime_only(root, actual_build, bundle, args.version + "-compact1", items)
+        else:
+            # Fallback for builds without decoupled Stub+Core+Broker binaries.
+            package_installed_dual(root, actual_build, bundle, args.version + "-compact1", items, dialog_x86,
+                                  split_app_runtime=True)
         items = [(f, f.relative_to(bundle).as_posix())
                  for f in sorted(bundle.rglob("*")) if f.is_file()]
-        xz, stats = build_payload(items, args.version, args.channel)
+        items.extend(dialog_stage)
+        items.sort(key=payload_order_key)
+        xz, stats = build_payload(items, args.version, args.channel, deduplicate=True)
     stub_bytes = stub.read_bytes()
     trailer = TRAILER.pack(MAGIC, len(stub_bytes), len(xz), hashlib.sha256(xz).digest())
     # Keep the image 8-byte aligned so Authenticode signing appends its

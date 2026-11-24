@@ -328,7 +328,29 @@ int main(int argc, char** argv) {
                 "wildcard first pattern restores original default after literal change without guessing later xlsx");
             options.filter_index=2;result=validate({L"fallback"});
             Check(result && !result->error && result->paths==std::vector<std::wstring>{(base/L"fallback.txt").wstring()},"all-files type restores original default extension");
+            options.filter_index=0;
+            for (const auto& [pattern, expected] : {std::pair{L"Makefile;report-*.md", L"fallback.md"},
+                    {L"Makefile;*.m*;*.md", L"fallback.txt"}, {L"Makefile", L"fallback.txt"},
+                    {L"project.md", L"fallback.md"}, {L"bundle.tar.gz", L"literal.tar.gz"},
+                    {L"Makefile?;frame-??.md", L"fallback.md"}, {L"*.m?;*.md", L"fallback.txt"}}) {
+                options.filters={{L"Project",pattern}};
+                result=validate({std::wstring(expected).starts_with(L"literal") ? L"literal" : L"fallback"});
+                Check(result && !result->error && result->paths==std::vector<std::wstring>{(base/expected).wstring()},
+                    "typed name follows first dotted alternative or retains caller default");
+            }
         }
+        PickerOptions projects; projects.filters={{L"Projects",L"Makefile;RÉSUMÉ-*.csv;CMakeLists.txt;项目配置.txt;.gitignore;*-report.csv"}};
+        for(const auto* name:{L"MAKEFILE",L"RÉSUMÉ-April.CSV",L"cmakelists.TXT",L"项目配置.txt",L".gitignore",L"x-report.csv"})
+            Check(PickerMatchesFilter(name,PickerMode::File,projects),"project row matches native ASCII case and exact non-ASCII spelling");
+        for(const auto* name:{L"Makefile.txt",L"other.csv",L"NotCMakeLists.txt",L"项目.txt",L"other.gitignore",L"résumé-q.csv"})
+            Check(!PickerMatchesFilter(name,PickerMode::File,projects),"project patterns do not admit suffix-only or partial basename matches");
+        PickerOptions shell_questions;
+        shell_questions.advisory_file_filters=true;
+        shell_questions.filters={{L"Build outputs",L"Makefile?;frame-??.png;*.tx?"}};
+        for(const auto* name:{L"Makefile",L"Makefile1",L"frame-12.png",L"frame-\U0001F31F.png",L"report.tx",L"report.txt"})
+            Check(PickerMatchesFilter(name,PickerMode::File,shell_questions),"Shell includes observed row, including terminal ? and surrogate pair");
+        for(const auto* name:{L"Makefile12",L"frame-1.png",L"frame-.png",L"frame-123.png",L"report.txxx"})
+            Check(!PickerMatchesFilter(name,PickerMode::File,shell_questions),"Shell excludes names outside question-mark mask");
         PickerOptions masks;masks.filters={{L"Generic",L"*.xl*;*.xlsx"}};
         PickerOptions pipe_masks; pipe_masks.filters = {{L"Drawing shape", L"*.txt;*.md||"}};
         const auto pipe_listing = ReadPickerListing(base.wstring(), PickerMode::File, pipe_masks);

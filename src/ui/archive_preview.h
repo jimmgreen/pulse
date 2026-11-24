@@ -7,6 +7,7 @@
 #include <dwrite_2.h>
 #include <wrl/client.h>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <memory>
 #include <vector>
@@ -39,6 +40,11 @@ public:
     // view changed and needs a repaint.
     bool Scroll(float wheel_steps);
     bool ScrollPixels(float dy);
+    bool OverScrollbar(float x, float y) const noexcept;
+    bool ScrollbarMouseDown(float x, float y);
+    bool ScrollbarMouseMove(float x, float y);
+    void EndScrollbarDrag() noexcept { scrollbar_drag_ = false; }
+    bool DraggingScrollbar() const noexcept { return scrollbar_drag_; }
     bool Click(float x, float y);
     // Select the hit row without expanding it; blank space clears selection.
     bool SelectAt(float x, float y);
@@ -61,6 +67,21 @@ public:
     // Selected row as a path relative to the listed folder; empty if none.
     std::wstring SelectedPath() const;
 
+    // Thumbnail view: one folder's items as tiles, entered with a click and
+    // left with the back button or Backspace, instead of the tree. The
+    // list/thumbnail toggle sits in the header; the last choice holds for the
+    // next archive this process previews.
+    bool GridMode() const noexcept { return grid_; }
+    bool SetGridMode(bool on);
+    // Folder the thumbnail view shows, relative ('\'); empty at the top.
+    std::wstring GridFolderPath() const;
+    // Draws the picture of a file tile (`path` relative to the archive or
+    // listed folder, '\' separators) into `rect`. False (no picture yet, not
+    // a picture) keeps the type tile.
+    using TileArt = std::function<bool(ID2D1DeviceContext* dc, const D2D1_RECT_F& rect,
+                                       const std::wstring& path, uint64_t size)>;
+    void SetTileArt(TileArt art) { tile_art_ = std::move(art); }
+
 private:
     struct Node {
         std::wstring name;
@@ -81,6 +102,13 @@ private:
     };
     struct Family { uint32_t rgb; uint64_t bytes; int label; };
 
+    friend struct QuickPreviewAuditTest;
+    struct ScrollbarGeometry {
+        D2D1_RECT_F hit{}, thumb{};
+        float travel = 0.0f, maximum = 0.0f;
+    };
+    ScrollbarGeometry Scrollbar() const noexcept;
+    void DrawScrollbar(ID2D1DeviceContext* dc, const Theme& theme);
     void RebuildVisible();
     void AppendVisible(int index);
     void EnsureResources(ID2D1DeviceContext* dc, Compositor* compositor, float scale);
@@ -101,6 +129,19 @@ private:
                   bool large);
     void DrawChip(ID2D1DeviceContext* dc, const Node& node, float x, float cy);
     int RowAt(float x, float y) const;
+    // Thumbnail view.
+    std::wstring NodePath(int index) const;
+    float DrawViewToggle(ID2D1DeviceContext* dc, float left, float cy, const Theme& theme);
+    void DrawCrumb(ID2D1DeviceContext* dc, const D2D1_RECT_F& rect, const Theme& theme);
+    void DrawGrid(ID2D1DeviceContext* dc, const D2D1_RECT_F& rect, const Theme& theme);
+    void DrawFolderArt(ID2D1DeviceContext* dc, const D2D1_RECT_F& rect);
+    int TileAt(float x, float y) const;
+    float TileHeight() const noexcept;
+    float ContentHeight() const noexcept;
+    bool CanGoUp() const noexcept;
+    bool GridUp();
+    bool EnterGridFolder(int index);
+    bool GridKey(UINT vk);
     void ClampScroll();
     void RevealSelection();
     float RowHeight() const noexcept;
@@ -144,12 +185,22 @@ private:
 
     // View state
     float scroll_ = 0.0f;
+    bool scrollbar_drag_ = false;
+    bool scrollbar_hover_ = false;
+    float scrollbar_press_ = 0.0f;
+    float scrollbar_start_ = 0.0f;
     int hover_ = -1;       // index into visible_
     int selected_ = -1;    // index into visible_
     D2D1_RECT_F tree_rect_{};
     D2D1_RECT_F view_rect_{};
     bool large_ = false;
     float scale_ = 1.0f;
+    bool grid_ = false;
+    int grid_dir_ = -1;        // node shown by the thumbnail view, -1 = top
+    int grid_cols_ = 1;
+    float tile_w_ = 100.0f;
+    D2D1_RECT_F toggle_list_{}, toggle_grid_{}, crumb_up_{};
+    TileArt tile_art_;
 
     // Device resources
     ID2D1DeviceContext* brush_owner_ = nullptr;
@@ -157,7 +208,7 @@ private:
     IDWriteFactory2* factory_ = nullptr;
     Compositor* compositor_ = nullptr;
     float format_scale_ = 0.0f;
-    Microsoft::WRL::ComPtr<IDWriteTextFormat> body_, small_, chip_, value_, title_, icon_;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> body_, small_, chip_, value_, title_, icon_, tile_chip_;
 };
 
 } // namespace pulse::ui

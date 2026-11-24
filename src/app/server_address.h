@@ -12,8 +12,9 @@ enum class ServerAddressKind {
     Invalid,      // empty, a local path, or a malformed host
     Server,       // \\host (the share list)
     Share,        // \\host\share[\more]
+    Ftp,          // ftp://host[:port][/path] (opened in File Explorer)
     WebDav,       // http(s)://: unc holds the WebClient form, not opened in P1
-    Unsupported,  // ftp://, afp://, nfs://, sftp://, ...
+    Unsupported,  // ftps://, afp://, nfs://, sftp://, ...
 };
 
 struct ServerAddress {
@@ -21,7 +22,8 @@ struct ServerAddress {
     std::wstring unc;     // normalized \\host[\share...] (no trailing separator)
     std::wstring host;    // host as it appears in unc
     std::wstring scheme;  // lower-case scheme for URL input ("smb", "ftp", ...)
-    std::wstring user;    // smb://user@host: dropped from unc, kept for sign-in
+    std::wstring user;    // smb:// or ftp:// user@host: dropped password, kept for display/sign-in
+    std::wstring url;     // normalized ftp://... URL for Explorer
 };
 
 // `allow_bare_host`: "nas" or "nas\share" count as a server (the connect

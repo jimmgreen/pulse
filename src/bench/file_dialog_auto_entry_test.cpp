@@ -38,6 +38,21 @@ int main() {
     config::PulseRuntimeAutoCoverageV1 coverage;
     check(SUCCEEDED(PulseFileDialogRuntimeAutoQuery(&coverage, sizeof(coverage))) && !coverage.api_mask && !coverage.patched_slots,
         "failed initialization reports no patched import coverage");
+    config::PulseRuntimeAutoDiagnosticV1 diagnostic;
+    auto_rebind_ready = false; auto_started = false;
+    check(PulseFileDialogRuntimeAutoDiagnose(&diagnostic) == ERROR_SUCCESS &&
+        diagnostic.initialization != config::kAutoReadyForRebind,
+        "initialization failure never implies permission to rebind");
+    auto_rebind_ready = true;
+    check(PulseFileDialogRuntimeAutoDiagnose(&diagnostic) == ERROR_SUCCESS &&
+        diagnostic.initialization == config::kAutoReadyForRebind && !diagnostic.api_mask &&
+        !diagnostic.patched_slots && diagnostic.protection_restored,
+        "explicit restored monitor state publishes rebind receipt");
+    auto_started = true;
+    check(PulseFileDialogRuntimeAutoDiagnose(&diagnostic) == ERROR_SUCCESS &&
+        diagnostic.initialization != config::kAutoReadyForRebind,
+        "active initialization never publishes stale rebind receipt");
+    auto_rebind_ready = false; auto_started = false;
     std::printf("failures=%u\n", failures);
     return failures ? 1 : 0;
 }

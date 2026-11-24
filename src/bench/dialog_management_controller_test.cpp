@@ -292,11 +292,46 @@ int wmain(int argc,wchar_t** argv){
         if(!failures)Check(SafeCleanup(bench,root,owned_name,bench_id,root_id),"owned history poll fixture cleanup");
         std::printf("Checks: %d, failures: %d\n",checks,failures);return failures?1:0;
     }
+    if(argc==2 && wcscmp(argv[1],L"--resume-paused")==0) {
+        // The helper's store sits next to the controller's state directory, as in
+        // %LOCALAPPDATA%\Pulse\{dialog_adaptive_targets.json,DialogManagement}.
+        diagnostics_test_data=(root/L"data").wstring();
+        const auto store_path=root/L"dialog_adaptive_targets.json";
+        {
+            pulse::dialog_adaptive::AdaptiveTargetStore store;
+            Check(store.RecordFailure("v2-fixture-a",L"PausedEditor.exe",true) && store.RecordFailure("v2-fixture-b",L"PausedEditor.exe",true) &&
+                  store.RecordFailure("v2-fixture-c",L"OtherTool.exe",true) && store.Save(store_path),"write paused-program fixture");
+        }
+        DialogManagementController c(nullptr,0,(root/L"state").wstring());
+        auto result=Await(c,c.PollHistory());
+        Check(result && result->paused.size()==3,"history poll lists the paused programs");
+        Check(c.ResumePaused({})==0,"empty program name is rejected without a worker request");
+        result=Await(c,c.ResumePaused(L"pausededitor.exe"));
+        Check(result && !result->error && !result->history_error,"resume completes without error");
+        Check(result && result->paused.size()==1 && result->paused[0].basename=="OtherTool.exe","resume ends every pause of that program only");
+        pulse::dialog_adaptive::AdaptiveTargetStore after;
+        Check(after.Load(store_path) && !after.IsBlocked("v2-fixture-a") && !after.IsBlocked("v2-fixture-b") && after.IsBlocked("v2-fixture-c"),
+              "resume is persisted for the automatic helper");
+        result=Await(c,c.PollHistory());
+        Check(result && result->paused.size()==1,"the next poll keeps the resumed state");
+        if(!failures)Check(SafeCleanup(bench,root,owned_name,bench_id,root_id),"owned resume fixture cleanup");
+        std::printf("Checks: %d, failures: %d\n",checks,failures);return failures?1:0;
+    }
     if(argc==2 && wcscmp(argv[1],L"--diagnostics-export")==0){
         diagnostics_test_data=(root/L"data").wstring();
         const auto logs=fs::path(diagnostics_test_data)/L"Diagnostics"/L"Runtime";
         fs::create_directories(logs);
-        std::ofstream(logs/L"dialog_auto-42.jsonl")<<"{\"schema\":1,\"component\":\"dialog_auto\",\"utc\":\"2026-11-11T04:00:00.000Z\",\"session\":134388388389325565,\"pid\":42,\"seq\":1,\"event\":\"token_rejected\",\"data\":{\"reason\":5,\"error\":5,\"reason_name\":\"ELEVATED_BUNDLE_UNTRUSTED\",\"stage\":\"activation\",\"detail\":\"private-document.dwg\"}}\n";
+        const std::string raw_log="{\"schema\":1,\"component\":\"dialog_auto\",\"utc\":\"2026-11-11T04:00:00.000Z\",\"session\":134388388389325565,\"pid\":42,\"seq\":1,\"event\":\"token_rejected\",\"data\":{\"reason\":5,\"error\":5,\"reason_name\":\"ELEVATED_BUNDLE_UNTRUSTED\",\"stage\":\"activation\",\"detail\":\"private-document.dwg\"}}\n";
+        std::ofstream(logs/L"dialog_auto-42.jsonl",std::ios::binary)<<raw_log;
+        SYSTEMTIME now_utc{};
+        GetSystemTime(&now_utc);
+        char utc[32]{};
+        std::snprintf(utc,sizeof(utc),"%04u-%02u-%02uT%02u:%02u:%02u.%03uZ",
+            unsigned(now_utc.wYear),unsigned(now_utc.wMonth),unsigned(now_utc.wDay),unsigned(now_utc.wHour),
+            unsigned(now_utc.wMinute),unsigned(now_utc.wSecond),unsigned(now_utc.wMilliseconds));
+        std::ofstream(logs/L"app-42.jsonl")<<"{\"schema\":1,\"component\":\"app\",\"utc\":\""<<utc
+            <<"\",\"session\":134388388389325565,\"pid\":42,\"seq\":1,\"event\":\"explorer_window_shown\","
+              "\"data\":{\"window\":123,\"source_pid\":456,\"path\":\"unrelated-log-sentinel\"}}\n";
         {
             DialogManagementController controller(nullptr,0,(root/L"state").wstring());
             auto result=Await(controller,controller.ExportDiagnostics());
@@ -310,6 +345,7 @@ int wmain(int argc,wchar_t** argv){
                     "export includes a readable rejection with exact logger session identity");
                 Check(text.find("private-document")==std::string::npos && text.find("dialog_log_collection")!=std::string::npos,
                     "export strips private event details and states collection limits");
+                Check(text.find("explorer_window_shown")==std::string::npos, "status-only export does not attach Explorer traces");
                 Check(text.find("restart_applications=")!=std::string::npos && text.find("restart_query_errors=")!=std::string::npos &&
                     text.find("history_records=")!=std::string::npos && text.find("history_error=")!=std::string::npos &&
                     text.find("history_unattributed=")!=std::string::npos,"export includes local history completeness without application names");
@@ -324,6 +360,46 @@ int wmain(int argc,wchar_t** argv){
                 Check(text.find("auto_enabled=")!=std::string::npos && text.find("C:")==std::string::npos,
                     "export retains registration status without process paths or command lines");
             }
+            const auto chosen=root/L"user-chosen-output";
+            fs::create_directory(chosen);
+            result=Await(controller,controller.ExportDiagnostics(chosen.wstring()));
+            Check(result && !result->error && result->diagnostics_raw_files==1 &&
+                fs::path(result->diagnostics_path).parent_path()==chosen && fs::path(result->diagnostics_path).extension()==L".zip",
+                "raw takeover ZIP written to the chosen folder");
+            if(result && !result->diagnostics_path.empty()) {
+                std::ifstream input(fs::path(result->diagnostics_path),std::ios::binary);
+                const std::string zip((std::istreambuf_iterator<char>(input)),{});
+                Check(zip.starts_with("PK\x03\x04") && zip.find("report.txt")!=zip.npos &&
+                    zip.find("runtime/dialog_auto-42.jsonl")!=zip.npos && zip.find(raw_log)!=zip.npos,
+                    "ZIP contains summary and byte-exact raw dialog log including original fields");
+                Check(zip.find("unrelated-log-sentinel")==zip.npos && zip.find("app-42.jsonl")==zip.npos,
+                    "ZIP excludes unrelated app logs");
+                Check(zip.find("explorer_log_collection")!=zip.npos && zip.find("explorer_window_shown")!=zip.npos &&
+                    zip.find("\"window\":123,\"source_pid\":456")!=zip.npos,
+                    "ZIP includes a correlated Explorer trace without copying raw app logs");
+                Check(zip.find("request_evidence=no_request_observed")!=zip.npos &&
+                    zip.find("raw_files=1")!=zip.npos,"raw records are not counted as observed dialog requests");
+            }
+            const auto missing=Await(controller,controller.ExportDiagnostics((root/L"missing-output").wstring()));
+            Check(missing && missing->error && missing->diagnostics_path.empty(),"invalid destination cannot create an export elsewhere");
+            FILETIME now{};SystemTimeToFileTime(&now_utc,&now);
+            const auto stamp=(static_cast<uint64_t>(now.dwHighDateTime)<<32)|now.dwLowDateTime;
+            const pulse::dialog_diagnostics::ReproductionWindow timed{stamp-10000000,stamp,GetCurrentProcessId(),2};
+            auto feedback=Await(controller,controller.ExportFeedback(timed,chosen.wstring()));
+            Check(feedback && !feedback->error && !feedback->diagnostics_path.empty() &&
+                fs::path(feedback->diagnostics_path).parent_path()==chosen,"guided reproduction exports a ZIP through the same bounded collector");
+            if(feedback && !feedback->diagnostics_path.empty()) {
+                std::ifstream input(fs::path(feedback->diagnostics_path),std::ios::binary);
+                const std::string zip((std::istreambuf_iterator<char>(input)),{});
+                Check(zip.find("user_reproduction")!=zip.npos && zip.find("\"reported_operation\":\"save\"")!=zip.npos &&
+                    zip.find("\"foreground_is_hint\":true")!=zip.npos && zip.find(std::to_string(timed.start_filetime))!=zip.npos,
+                    "feedback ZIP contains reproduction time, reported action and a non-authoritative process hint");
+                Check(zip.find("request_evidence=no_request_observed")!=zip.npos && zip.find(raw_log)!=zip.npos,
+                    "feedback still retains original evidence, without inventing a hook event");
+                Check(zip.find("explorer_window_shown")!=zip.npos && zip.find("unrelated-log-sentinel")==zip.npos,
+                    "guided feedback includes Explorer events from the reproduction window, without private fields");
+            }
+            Check(!controller.ExportFeedback({}),"unstarted feedback never queues an export");
         }
         if(!failures)Check(SafeCleanup(bench,root,owned_name,bench_id,root_id),"owned diagnostic export fixture cleanup");
         std::printf("Checks: %d, failures: %d\n",checks,failures);return failures?1:0;

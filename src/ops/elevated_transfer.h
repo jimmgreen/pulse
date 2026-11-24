@@ -10,6 +10,7 @@ enum class ShellCollisionPolicy { System, Replace, KeepBoth };
 struct ShellTransferResult {
     HRESULT hr = S_OK;
     std::wstring error;
+    bool helper_unavailable = false; // Helper executable missing before submission.
     bool cancelled = false;
     bool mutated = false; // Includes completed descendants of a partial folder transfer.
     // True only for ordinary file transfers to previously absent destinations;

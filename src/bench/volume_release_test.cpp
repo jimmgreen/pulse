@@ -1,6 +1,8 @@
 #include "../app/folder_sizes.h"
+#include "../fs/drive_kind.h"
 #include "../fs/fs_watch.h"
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <chrono>
 #include <thread>
@@ -58,6 +60,40 @@ int main() {
     check(wait([&] { return sizes.ReadStats().active_watches == 1; }), "size watches resume");
     check(completed(sizes.SuspendVolume(base.wstring())), "size cleanup release completes");
     sizes.Stop();
+    {
+        // Spinning HDDs defer automatic recursive walks, skip recursive watches
+        // and emptiness probes, and still honor explicit manual Calculate().
+        const auto hdd_dir = base / L"hdd_folder";
+        std::filesystem::create_directories(hdd_dir);
+        { std::ofstream f(hdd_dir / L"sample.bin", std::ios::binary); f << std::string(1234, 'x'); }
+        const wchar_t letter = pulse::fs::DriveLetterOf(hdd_dir.wstring());
+        const std::wstring letter_str(1, letter);
+        SetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", base.c_str());
+        SetEnvironmentVariableW(L"PULSE_TEST_SPINNING_DRIVES", letter_str.c_str());
+        pulse::fs::InvalidateDriveKindCache();
+        check(pulse::fs::IsKnownSpinningDrive(hdd_dir.wstring()), "spinning drive test mark detected");
+        pulse::app::FolderSizes hdd_sizes;
+        hdd_sizes.SetIndexEnabled(false);
+        hdd_sizes.Sync({{hdd_dir.wstring(), true, true}}, {base.wstring()});
+        hdd_sizes.Probe({hdd_dir.wstring()});
+        check(wait([&] {
+            return hdd_sizes.GetWork(hdd_dir.wstring()).activity == pulse::app::FolderSizeActivity::Deferred;
+        }), "spinning drive auto-size request settles as deferred");
+        std::this_thread::sleep_for(250ms);
+        const auto stats = hdd_sizes.ReadStats();
+        check(stats.jobs_started == 0 && stats.active_watches == 0 &&
+              hdd_sizes.Content(hdd_dir.wstring()) == 0,
+              "spinning drive skips automatic walk, recursive watch, and emptiness probe");
+        hdd_sizes.Calculate(hdd_dir.wstring());
+        check(wait([&] {
+            const auto v = hdd_sizes.Get(hdd_dir.wstring());
+            return v.state == pulse::app::FolderSizeState::Ready && v.bytes == 1234;
+        }), "spinning drive explicit manual Calculate still succeeds");
+        hdd_sizes.Stop();
+        SetEnvironmentVariableW(L"PULSE_TEST_SPINNING_DRIVES", nullptr);
+        SetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr);
+        pulse::fs::InvalidateDriveKindCache();
+    }
     for (auto& future : watches.SuspendVolume(base.wstring())) check(completed(future), "watch cleanup release completes");
     std::error_code error;
     std::filesystem::remove_all(base, error);

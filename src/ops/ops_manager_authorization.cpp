@@ -4,6 +4,7 @@
 
 namespace pulse::ops {
 void OpsManager::ResolveAuthorization(uint64_t task_id, bool retry) {
+    if (auto executor = InteractiveExecutor(task_id)) { executor->ResolveAuthorization(task_id, retry); return; }
     {
         std::lock_guard lock(transfer_control_mutex_);
         if (authorization_task_ != task_id || authorization_choice_) return;

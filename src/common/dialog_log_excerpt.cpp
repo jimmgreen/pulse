@@ -1,8 +1,10 @@
 #include "dialog_log_excerpt.h"
+#include "dialog_diagnostic_values.h"
 #include "json_value.h"
 #include <windows.h>
 #include <algorithm>
 #include <charconv>
+#include <cstdio>
 #include <filesystem>
 #include <limits>
 #include <string_view>
@@ -17,6 +19,7 @@ struct Handle {
     ~Handle() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
 };
 struct Summary {
+    ExcerptCounts evidence;
     uint64_t entries = 0, eligible = 0, files = 0, bytes = 0, lines = 0, records = 0, ignored = 0, invalid = 0;
     uint64_t omitted = 0, partial = 0, oversized_lines = 0, oversized_files = 0, rejected_files = 0, tails = 0, read_errors = 0;
     DWORD directory_error = 0, enumeration_error = 0, last_read_error = 0;
@@ -87,6 +90,54 @@ bool Word(std::string_view word, std::string_view list) {
     return false;
 }
 std::string Quote(std::string_view value) { return json::Serialize(json::Value(value)); }
+std::string FilterDecision(std::string_view line, Summary& s) {
+    const auto token = [&line](std::string_view key) {
+        if (!line.starts_with(key)) return std::string_view{};
+        line.remove_prefix(key.size());
+        const auto end = line.find(' ');
+        const auto value = line.substr(0, end);
+        line.remove_prefix(end == line.npos ? line.size() : end + 1);
+        return value;
+    };
+    const auto entry = token("interface=");
+    const auto tick = token("tick=");
+    const auto reason = token("reason=");
+    const auto options = token("options=0x");
+    const auto category = token("category=");
+    if (!line.empty() || !Word(entry,
+        "runtime auto-runtime CoCreateInstance CoCreateInstanceEx CoGetClassObject GetOpenFileNameW GetSaveFileNameW "
+        "GetOpenFileNameA GetSaveFileNameA SHBrowseForFolderW SHBrowseForFolderA") ||
+        !Unsigned(tick) || !Unsigned(category, 0xffffffffu) || options.size() != 8 ||
+        options.find_first_not_of("0123456789ABCDEFabcdef") != options.npos) {
+        ++s.invalid;
+        return {};
+    }
+    // Free-form traces and unknown values are not part of the report's schema.
+    if (!Word(reason,
+        "activation-adapter-entered activation-session-disabled resolve-disabled-native resolve-ready resolve-not-ready-native "
+        "show-session-disabled-native native-contract-or-validation-fallback thin-companion-remote-provider "
+        "inprocess-ui-proof-load legacy-adapter-declined browse-family-entered browse-session-or-token-native "
+        "browse-result-hresult browse-service-construction-native adapter-return service-construction-failed-native "
+        "validated-session-provider-published static-iat-slots-late-delay-dynamic-imports-native "
+        "single-native-aggregation single-native-context single-native-class single-native-requested-interface "
+        "single-native-apartment single-original-failed single-wrapper-published single-native-wrapper-creation "
+        "class-original-failed class-native-context class-factory-wrapper-published "
+        "ex-missing-original ex-native-disabled ex-native-nested ex-native-aggregation ex-native-server-info "
+        "ex-native-context ex-native-result-array ex-native-class ex-native-apartment-unavailable ex-native-apartment "
+        "ex-native-input-iid ex-native-input-pointer ex-native-requested-interface ex-original-failed "
+        "ex-native-aggregate-result ex-native-output-state ex-native-identity-query ex-native-mixed-identities "
+        "ex-native-wrapper-creation ex-native-wrapper-interface ex-wrapper-published ex-native-wrapper-exception "
+        "early-wrapper-created initialization-revoked-marker-failed initialization-revoked-marker-written") &&
+        !KnownDiagnosticValue("reason_name", reason) && !KnownDiagnosticValue("fallback_reason", reason)) {
+        ++s.ignored;
+        return {};
+    }
+    if (reason.empty()) { ++s.invalid; return {}; }
+    return "{\"schema\":1,\"kind\":\"dialog_log_excerpt\",\"source\":\"managed_runtime_decisions\","
+           "\"event\":\"runtime_decision\",\"tick_ms\":" + std::string(tick) + ",\"data\":{\"interface\":" + Quote(entry) +
+           ",\"reason\":" + Quote(reason) + ",\"options_hex\":" + Quote(options) +
+           ",\"category\":" + std::string(category) + "}}\n";
+}
 bool Utc(std::string_view value) {
     if (value.size() != 24) return false;
     for (size_t i = 0; i < value.size(); ++i) {
@@ -115,8 +166,8 @@ constexpr Policy kPolicies[]{
     {"observe_contract", "reason disposition call options native_options native shown subscriptions"},
     {"contract", "accepted category"}, {"pulse_show", "request"}, {"pulse_result", "request status hr flags count"},
     {"native_result", "hr request"},
-    {"dialog_show_begin", "request dialog show_sequence process_arch entry_family launch_route"},
-    {"dialog_show_terminal", "request dialog show_sequence process_arch hr native_fallback provider_started ui_shown_known ui_shown entry_family launch_route terminal_status reason_name fallback_reason"}
+    {"dialog_show_begin", "request dialog show_sequence process_arch entry_family launch_route dialog_kind"},
+    {"dialog_show_terminal", "request dialog show_sequence process_arch hr native_fallback provider_started ui_shown_known ui_shown entry_family launch_route dialog_kind terminal_status reason_name fallback_reason"}
 };
 bool Enum(std::string_view key, std::string_view value) {
     if (key == "warning") return Word(value, "existing_target scan_incomplete none");
@@ -124,12 +175,7 @@ bool Enum(std::string_view key, std::string_view value) {
     if (key == "stage") return Word(value, "initialize activation resolve validation");
     if (key == "elevation_type_name") return Word(value, "default full limited unknown");
     if (key == "token_type_name") return Word(value, "primary impersonation unknown");
-    if (key == "entry_family") return Word(value, "COM OFN_W OFN_A SHBROWSE_W SHBROWSE_A");
-    if (key == "launch_route") return Word(value, "ordinary managed");
-    if (key == "terminal_status") return Word(value, "pending native accepted cancelled failed closed");
-    if (key == "fallback_reason") return value.empty() || Word(value, "none unknown resolve-not-ready provider-unavailable initial-folder-unavailable contract provider-prepare-failed provider-failed-before-ui ENTRY_DISABLED_OR_UNAVAILABLE INITIAL_FOLDER_UNREPRESENTABLE PROVIDER_START_FAILED_BEFORE_UI NATIVE_CONTRACT_FALLBACK");
-    if (key != "reason_name") return false;
-    return Word(value, "TOKEN_ACCEPTED PROCESS_TOKEN_OBSERVED THREAD_IMPERSONATION THREAD_TOKEN_QUERY_FAILED PROCESS_TOKEN_QUERY_FAILED ELEVATION_QUERY_FAILED ELEVATED_BUNDLE_UNTRUSTED RESTRICTED_TOKEN APPCONTAINER_QUERY_FAILED APPCONTAINER INTEGRITY_QUERY_FAILED INVALID_INTEGRITY_SID BELOW_MEDIUM_INTEGRITY ELIGIBLE AUTOMATIC_DISABLED REGISTRATION_QUERY_FAILED REGISTRATION_CONFLICT REGISTERED_MODULE_MISMATCH REGISTRATION_CHANGED_OR_NOT_CURRENT PROVIDER_UNAVAILABLE CONTRACT_NOT_CERTIFIED TRUSTED None SetterFailed UnrecognizedSuccess UnknownSetting UnsupportedOptions FilesystemNotForced RecentItemsPolicy MissingValidationOptions DefaultDirectoryPolicy NonFilesystemFolder UnsupportedFilename UnsupportedExtension UnsupportedFilter UnsupportedSettingOrder FolderFileSettings SaveContract Events Customization Labels Places Persistence SaveMetadata ShellFilter InvalidData Limit Unknown NONE SETTER_FAILED UNRECOGNIZED_SUCCESS UNKNOWN_SETTING UNSUPPORTED_OPTIONS FILESYSTEM_NOT_FORCED RECENT_ITEMS_POLICY MISSING_VALIDATION_OPTIONS DEFAULT_DIRECTORY_POLICY NON_FILESYSTEM_FOLDER UNSUPPORTED_FILENAME UNSUPPORTED_EXTENSION UNSUPPORTED_FILTER UNSUPPORTED_SETTING_ORDER FOLDER_FILE_SETTINGS SAVE_CONTRACT EVENTS CUSTOMIZATION LABELS PLACES PERSISTENCE SAVE_METADATA SHELL_FILTER INVALID_DATA LIMIT UNKNOWN");
+    return KnownDiagnosticValue(key, value);
 }
 bool Guid(std::string_view value) {
     if (value.size() != 38 || value.front() != '{' || value.back() != '}') return false;
@@ -139,7 +185,24 @@ bool Guid(std::string_view value) {
     }
     return true;
 }
-std::string Filter(std::string_view line, bool managed, bool launcher, Summary& s, bool local) {
+uint64_t EventFileTime(std::string_view utc, std::string_view event_filetime) {
+    uint64_t precise = 0;
+    if (!event_filetime.empty()) {
+        const auto parsed = std::from_chars(event_filetime.data(),event_filetime.data()+event_filetime.size(),precise);
+        if (parsed.ec == std::errc{} && parsed.ptr == event_filetime.data()+event_filetime.size() && precise) return precise;
+    }
+    if (!Utc(utc)) return 0;
+    unsigned year=0,month=0,day=0,hour=0,minute=0,second=0,millis=0;
+    const std::string text(utc);
+    if (sscanf_s(text.c_str(),"%4u-%2u-%2uT%2u:%2u:%2u.%3u",&year,&month,&day,&hour,&minute,&second,&millis)!=7) return 0;
+    SYSTEMTIME time{static_cast<WORD>(year),static_cast<WORD>(month),0,static_cast<WORD>(day),
+        static_cast<WORD>(hour),static_cast<WORD>(minute),static_cast<WORD>(second),static_cast<WORD>(millis)};
+    FILETIME file{};
+    if(!SystemTimeToFileTime(&time,&file)) return 0;
+    return (static_cast<uint64_t>(file.dwHighDateTime)<<32)|file.dwLowDateTime;
+}
+std::string Filter(std::string_view line, bool managed, bool launcher, Summary& s, bool local,
+                   const ReproductionWindow* reproduction, bool& foreground) {
     json::Value value;
     if (!json::Parse(line, value, nullptr, {kLine, 8}) || !value.is_object()) { ++s.invalid; return {}; }
     const auto event = value.get_string("event");
@@ -160,6 +223,14 @@ std::string Filter(std::string_view line, bool managed, bool launcher, Summary& 
     if (managed) {
         const auto id = value.get_string("session");
         if (id.substr(0, id.find('-')) != pid) { ++s.invalid; return {}; }
+    }
+    if (reproduction && Word(event, "dialog_show_begin dialog_show_terminal")) {
+        const auto precise=Get(Fields(Get(fields,"data")),"event_time_filetime");
+        const auto when=EventFileTime(value.get_string("utc"),precise);
+        if (!when || when<reproduction->start_filetime || when>reproduction->end_filetime) return {};
+        uint32_t process=0;
+        std::from_chars(pid.data(),pid.data()+pid.size(),process);
+        foreground=process==reproduction->foreground_pid;
     }
     std::string result = "{\"schema\":1,\"kind\":\"dialog_log_excerpt\",\"source\":" + Quote(launcher ? "managed_launcher" : managed ? "managed_runtime" : value.get_string("component")=="dialog_admin_auto" ? "dialog_admin_auto" : value.get_string("component")=="dialog_runtime" ? "dialog_runtime" : "dialog_auto") +
         ",\"event\":" + Quote(event) + ",\"pid\":" + std::string(pid) + ",\"session\":" +
@@ -183,8 +254,6 @@ std::string Filter(std::string_view line, bool managed, bool launcher, Summary& 
                 const bool clean=!wide.empty() && wide.size()<=255 && wide.find_first_of(L"\\/:<>\"|?*")==wide.npos &&
                     std::none_of(wide.begin(),wide.end(),[](wchar_t c){return c<32;}) && wide.size()>4 && _wcsicmp(wide.c_str()+wide.size()-4,L".exe")==0;
                 if(clean) accepted=Quote(name);
-            } else if(local && key=="dialog_kind" && parsed && parsed->is_string()) {
-                if(Word(parsed->as_string(),"open save unknown")) accepted=Quote(parsed->as_string());
             } else if(local && Word(key,"target_creation_time_filetime creation_time_filetime app_instance_id event_time_filetime event_sequence source_session source_event_sequence app_image_id") && Unsigned(field.second)) {
                 accepted=Quote(field.second);
             } else if (key == "request") {
@@ -197,7 +266,7 @@ std::string Filter(std::string_view line, bool managed, bool launcher, Summary& 
                 if (field.second == "false" || field.second == "0") accepted = "false";
             } else if (parsed && parsed->is_string()) {
                 if (Enum(key, parsed->as_string())) accepted = Quote(parsed->as_string());
-            } else if (!Word(key, "warning existing_target_managed reason_name stage elevation_type_name token_type_name entry_family launch_route terminal_status fallback_reason") &&
+            } else if (!Word(key, "warning existing_target_managed reason_name stage elevation_type_name token_type_name entry_family launch_route dialog_kind terminal_status fallback_reason") &&
                 Unsigned(field.second, Word(key, "dialog show_sequence call app_image_id") ? (std::numeric_limits<uint64_t>::max)() : 0xffffffffu)) {
                 if (!Word(key, "process_arch process_arch_bits") || field.second == "32" || field.second == "64") accepted = field.second;
             }
@@ -208,12 +277,69 @@ std::string Filter(std::string_view line, bool managed, bool launcher, Summary& 
     }
     return result + "}}\n";
 }
-bool Name(const std::wstring& name, bool& managed, bool& launcher, bool /*local*/) {
-    launcher = name == L"launcher-preflight.jsonl";
-    if (launcher) return true;
-    managed = name == L"runtime-dialog-shows.jsonl";
-    if (managed) return true;
-    const std::wstring_view prefix = name.starts_with(L"dialog_admin_auto-") ? L"dialog_admin_auto-" : name.starts_with(L"dialog_runtime-") ? L"dialog_runtime-" : L"dialog_auto-";
+std::string FilterExplorer(std::string_view line, Summary& s, const ReproductionWindow* reproduction) {
+    static constexpr Policy policies[]{
+        {"explorer_takeover_config", "enabled integration takeover compat this_pc isolated folders_requested folders_direct_desired folders_direct_active"},
+        {"explorer_watcher_start", "phase hr baseline_windows window_hook"},
+        {"explorer_watcher_ready", "attempt"},
+        {"explorer_watcher_retry", "attempt delay_ms"},
+        {"explorer_watcher_scan", "complete"},
+        {"explorer_window_shown", "window source_pid already_known event_tick"},
+        {"explorer_candidate", "window source_pid candidate_id reason age_ms view_age_ms stable_age_ms view_ready supported selection_read selected tabs source_exists scoped_view window_identity_matches"},
+        {"explorer_candidate_link", "window source_pid candidate_id request_id"},
+        {"explorer_handoff", "request_id phase code detail elapsed_ms"},
+        {"explorer_source_close_unconfirmed", "request_id source_exists marker_matches source_pid"},
+        {"explorer_presentation_wake", "request_id posted"},
+        {"external_open", "id_high id_low phase code entry handoff_id"},
+    };
+    json::Value value;
+    if (!json::Parse(line, value, nullptr, {kLine, 8}) || !value.is_object()) { ++s.invalid; return {}; }
+    const auto event = value.get_string("event");
+    const auto policy = std::find_if(std::begin(policies), std::end(policies),
+        [&](const Policy& item) { return item.event == event; });
+    if (policy == std::end(policies) || value.get_string("component") != "app") { ++s.ignored; return {}; }
+    const auto fields = Fields(Trim(line));
+    const auto pid = Get(fields, "pid"), seq = Get(fields, "seq"), session = Get(fields, "session");
+    const auto utc = value.get_string("utc");
+    const auto* data = value.find("data");
+    if (Get(fields, "schema") != "1" || !Unsigned(pid, 0xffffffffu) || pid == "0" ||
+        !Unsigned(seq) || !Unsigned(session) || session == "0" || !Utc(utc) ||
+        !data || !data->is_object()) { ++s.invalid; return {}; }
+    const auto raw = Fields(Get(fields, "data"));
+    if (event == "external_open" && Get(raw, "entry") != "1" && Get(raw, "entry") != "2") {
+        ++s.ignored;
+        return {};
+    }
+    if (reproduction) {
+        const auto when = EventFileTime(utc, {});
+        const bool state = Word(event, "explorer_takeover_config explorer_watcher_start explorer_watcher_ready explorer_watcher_retry explorer_watcher_scan");
+        const auto max = (std::max)(reproduction->start_filetime, reproduction->end_filetime);
+        if (!when || when / 10000 > max / 10000 || (!state && when / 10000 < reproduction->start_filetime / 10000))
+            return {};
+    }
+    std::string result = "{\"schema\":1,\"kind\":\"explorer_log_excerpt\",\"source\":\"app\",\"event\":" +
+        Quote(event) + ",\"pid\":" + std::string(pid) + ",\"session\":" + Quote(session) +
+        ",\"utc\":" + Quote(utc) + ",\"seq\":" + Quote(seq) + ",\"data\":{";
+    bool first = true;
+    for (const auto& [key, literal] : raw) {
+        if (!Word(key, policy->fields) || (!Unsigned(literal) && literal != "true" && literal != "false")) {
+            ++s.omitted;
+            continue;
+        }
+        if (!first) result += ',';
+        first = false;
+        result += Quote(key) + ":" + std::string(literal);
+    }
+    return result + "}}\n";
+}
+bool Name(const std::wstring& name, bool& managed, bool& launcher, bool /*local*/, bool explorer = false) {
+    if (!explorer) {
+        launcher = name == L"launcher-preflight.jsonl";
+        if (launcher) return true;
+        managed = name == L"runtime-dialog-shows.jsonl";
+        if (managed) return true;
+    }
+    const std::wstring_view prefix = explorer ? L"app-" : name.starts_with(L"dialog_admin_auto-") ? L"dialog_admin_auto-" : name.starts_with(L"dialog_runtime-") ? L"dialog_runtime-" : L"dialog_auto-";
     if (!name.starts_with(prefix)) return false;
     size_t p = prefix.size();
     const size_t first = p;
@@ -228,10 +354,10 @@ std::wstring FinalName(HANDLE file) {
     if (!size || size >= value.size()) return {};
     value.resize(size); return value;
 }
-std::string Finish(std::string output, const Summary& s) {
+std::string Finish(std::string output, const Summary& s, bool explorer = false) {
     auto value = json::Value::Object();
     value.set("schema", 1);
-    value.set("event", "dialog_log_collection");
+    value.set("event", explorer ? "explorer_log_collection" : "dialog_log_collection");
     value.set("scope", "direct_whitelisted_log_excerpt");
     value.set("no_entry_inference", true);
     value.set("process_snapshot_joined", false);
@@ -243,6 +369,9 @@ std::string Finish(std::string output, const Summary& s) {
     value.set("directory_error", static_cast<uint64_t>(s.directory_error));
     value.set("enumeration_error", static_cast<uint64_t>(s.enumeration_error));
     value.set("last_read_error", static_cast<uint64_t>(s.last_read_error));
+    value.set("show_begin_events", static_cast<uint64_t>(s.evidence.shows_started));
+    value.set("show_terminal_events", static_cast<uint64_t>(s.evidence.shows_finished));
+    value.set("runtime_decision_events", static_cast<uint64_t>(s.evidence.runtime_decisions));
     for (const auto& item : std::initializer_list<std::pair<const char*, uint64_t>>{{"entries_scanned",s.entries},{"eligible_files",s.eligible},{"files_read",s.files},{"bytes_read",s.bytes},{"lines_scanned",s.lines},{"records_emitted",s.records},{"non_diagnostic_lines",s.ignored},{"invalid_lines",s.invalid},{"fields_omitted",s.omitted},{"partial_lines_discarded",s.partial},{"oversized_lines",s.oversized_lines},{"oversized_files",s.oversized_files},{"rejected_files",s.rejected_files},{"tail_files",s.tails}}) value.set(item.first,item.second);
     value.set("enumeration_limited",s.enumeration_limited);
     value.set("files_limited",s.files_limited);
@@ -259,35 +388,42 @@ std::string Finish(std::string output, const Summary& s) {
 }
 }
 
-static std::string CollectExcerpt(const std::wstring& directory, const std::function<bool()>& cancelled, bool local) {
+static std::string CollectExcerpt(const std::wstring& directory, const std::function<bool()>& cancelled,
+                                  bool local, ExcerptCounts* counts = nullptr, bool verified_managed = false,
+                                  const ReproductionWindow* reproduction = nullptr, bool explorer = false) {
     Summary s;
+    const auto finish = [&](std::string output) { return Finish(std::move(output), s, explorer); };
+    struct Publish { ExcerptCounts* out; const Summary& summary;
+        ~Publish() { if (out) *out = summary.evidence; }
+    } publish{counts, s};
     std::string output;
     try {
-        if (Cancel(cancelled,s)) return Finish({},s);
+        if (Cancel(cancelled,s)) return finish({});
         if (directory.empty() || directory.size() > 32760 || directory.find(L'\0') != directory.npos || !std::filesystem::path(directory).is_absolute() || directory.starts_with(L"\\\\.\\")) {
-            s.directory_error = ERROR_INVALID_NAME; return Finish({},s);
+            s.directory_error = ERROR_INVALID_NAME; return finish({});
         }
         constexpr DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
         Handle root{CreateFileW(directory.c_str(),FILE_READ_ATTRIBUTES,share,nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr)};
         BY_HANDLE_FILE_INFORMATION root_info{};
-        if (root.value == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(root.value,&root_info)) { s.directory_error=GetLastError();return Finish({},s); }
-        if (!(root_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (root_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {s.directory_error=ERROR_ACCESS_DENIED;return Finish({},s);}
-        struct Candidate {std::wstring name;uint64_t modified;bool managed;bool launcher;};
+        if (root.value == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(root.value,&root_info)) { s.directory_error=GetLastError();return finish({}); }
+        if (!(root_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (root_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {s.directory_error=ERROR_ACCESS_DENIED;return finish({});}
+        struct Candidate {std::wstring name;uint64_t modified;bool managed;bool launcher;bool decision;};
         std::vector<Candidate> selected;
         WIN32_FIND_DATAW found{};
         const auto pattern=(std::filesystem::path(directory)/L"*").wstring();
         HANDLE search=FindFirstFileExW(pattern.c_str(),FindExInfoBasic,&found,FindExSearchNameMatch,nullptr,0);
-        if(search==INVALID_HANDLE_VALUE){const auto error=GetLastError();if(error!=ERROR_FILE_NOT_FOUND)s.enumeration_error=error;return Finish({},s);}
+        if(search==INVALID_HANDLE_VALUE){const auto error=GetLastError();if(error!=ERROR_FILE_NOT_FOUND)s.enumeration_error=error;return finish({});}
         do {
             if(Cancel(cancelled,s))break;
             if(++s.entries>kDirectoryEntries){s.enumeration_limited=true;break;}
             bool managed=false,launcher=false;
-            if(!Name(found.cFileName,managed,launcher,local))continue;
+            const bool decision=verified_managed && std::wstring_view(found.cFileName)==L"runtime-decisions.tsv";
+            if(!decision && !Name(found.cFileName,managed,launcher,local,explorer))continue;
             if(found.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY)){++s.rejected_files;continue;}
             const uint64_t size=(static_cast<uint64_t>(found.nFileSizeHigh)<<32)|found.nFileSizeLow;
             if(size>kFileSize){++s.oversized_files;continue;}
             ++s.eligible;
-            selected.push_back({found.cFileName,(static_cast<uint64_t>(found.ftLastWriteTime.dwHighDateTime)<<32)|found.ftLastWriteTime.dwLowDateTime,managed,launcher});
+            selected.push_back({found.cFileName,(static_cast<uint64_t>(found.ftLastWriteTime.dwHighDateTime)<<32)|found.ftLastWriteTime.dwLowDateTime,managed,launcher,decision});
             std::sort(selected.begin(),selected.end(),[](const Candidate& a,const Candidate& b){return a.modified!=b.modified?a.modified>b.modified:a.name>b.name;});
             if(selected.size()>kFiles){selected.pop_back();s.files_limited=true;}
         }while(FindNextFileW(search,&found));
@@ -328,23 +464,131 @@ static std::string CollectExcerpt(const std::wstring& directory, const std::func
                 auto line=Trim(std::string_view(buffer).substr(start,newline-start));end=start;
                 if(line.size()>kLine){++s.oversized_lines;continue;}
                 if(line.empty())continue;
-                auto record=Filter(line,file.managed,file.launcher,s,local);
+                bool foreground=false;
+                auto record=explorer ? FilterExplorer(line,s,reproduction) :
+                    file.decision ? FilterDecision(line,s) : Filter(line,file.managed,file.launcher,s,local,reproduction,foreground);
                 if(record.empty())continue;
                 if(s.records>=kRecords||output.size()+record_bytes+record.size()>kOutput-4096){s.output_limited=true;stop=true;break;}
+                if(file.decision)++s.evidence.runtime_decisions;
+                else if(record.find("\"event\":\"dialog_show_begin\"")!=record.npos) {
+                    ++s.evidence.shows_started;if(foreground)++s.evidence.foreground_shows_started;
+                } else if(record.find("\"event\":\"dialog_show_terminal\"")!=record.npos) {
+                    ++s.evidence.shows_finished;if(foreground)++s.evidence.foreground_shows_finished;
+                }
                 record_bytes+=record.size();records.push_back(std::move(record));++s.records;
             }
             // Selection favors recent records; presentation preserves the file's
             // original sequence so downstream last-record decisions stay valid.
             for(auto record=records.rbegin();record!=records.rend();++record)output+=*record;
         }
-        return Finish(std::move(output),s);
-    }catch(...){s.read_errors++;s.last_read_error=ERROR_INVALID_DATA;return Finish(std::move(output),s);}
+        return finish(std::move(output));
+    }catch(...){s.read_errors++;s.last_read_error=ERROR_INVALID_DATA;return finish(std::move(output));}
 }
-std::string CollectDialogLogExcerpt(const std::wstring& directory,const std::function<bool()>& cancelled) {
-    return CollectExcerpt(directory,cancelled,false);
+std::string CollectDialogLogExcerpt(const std::wstring& directory,const std::function<bool()>& cancelled,
+                                   ExcerptCounts* counts,bool verified_managed_directory,const ReproductionWindow* reproduction) {
+    return CollectExcerpt(directory,cancelled,false,counts,verified_managed_directory,reproduction);
 }
 std::string CollectLocalTakeoverExcerpt(const std::wstring& directory,const std::function<bool()>& cancelled) {
     return CollectExcerpt(directory,cancelled,true);
+}
+std::string CollectExplorerLogExcerpt(const std::wstring& directory,const std::function<bool()>& cancelled,
+                                      const ReproductionWindow* reproduction) {
+    return CollectExcerpt(directory,cancelled,false,nullptr,false,reproduction,true);
+}
+
+void CopyDialogRawLogs(const std::wstring& source,const std::wstring& destination,bool managed,
+    RawLogCopy& result,const std::function<bool()>& cancelled) {
+    namespace fs=std::filesystem;
+    constexpr DWORD share=FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE;
+    constexpr uint64_t max_file=16ull*1024*1024, max_total=64ull*1024*1024;
+    constexpr unsigned max_files=64, max_entries=512;
+    const auto failed=[&](DWORD error){++result.read_errors;result.last_error=error;};
+    const auto stop=[&]{return cancelled && cancelled();};
+    const auto eligible=[&](const std::wstring& name){
+        if(managed) return name==L"launcher.log" || name==L"launcher-preflight.jsonl" ||
+            name==L"runtime-dialog-shows.jsonl" || name==L"runtime-decisions.tsv";
+        bool session=false,launcher=false;
+        if(Name(name,session,launcher,false)) return !session && !launcher;
+        for(const std::wstring_view prefix:{L"dialog_auto_control-",L"picker_ui-"}) {
+            if(!name.starts_with(prefix)) continue;
+            auto tail=std::wstring_view(name).substr(prefix.size());
+            const auto dot=tail.find(L'.');
+            if(dot==tail.npos || dot==0 || dot>10 || tail.substr(0,dot).find_first_not_of(L"0123456789")!=tail.npos) return false;
+            tail.remove_prefix(dot);
+            return tail==L".jsonl" || tail==L".jsonl.1" || tail==L".critical.jsonl" || tail==L".critical.jsonl.1";
+        }
+        return false;
+    };
+    if(stop()) return;
+    if(source.empty() || !fs::path(source).is_absolute() || source.starts_with(L"\\\\.\\")) {
+        failed(ERROR_INVALID_NAME);return;
+    }
+    Handle root{CreateFileW(source.c_str(),FILE_READ_ATTRIBUTES,share,nullptr,OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr)};
+    BY_HANDLE_FILE_INFORMATION root_info{};
+    if(root.value==INVALID_HANDLE_VALUE || !GetFileInformationByHandle(root.value,&root_info)) {
+        failed(GetLastError());return;
+    }
+    const auto root_name=FinalName(root.value);
+    if(root_name.empty() || !(root_info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY) ||
+       (root_info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)) {failed(ERROR_INVALID_NAME);return;}
+    struct Candidate {std::wstring name;uint64_t modified;};
+    std::vector<Candidate> files;
+    std::error_code ec;
+    unsigned entries=0;
+    for(fs::directory_iterator it(source,ec),end; !ec && it!=end;it.increment(ec)) {
+        if(stop()) return;
+        if(++entries>max_entries) {result.limited=true;break;}
+        const auto name=it->path().filename().wstring();
+        if(!eligible(name)) continue;
+        WIN32_FILE_ATTRIBUTE_DATA attributes{};
+        if(!GetFileAttributesExW(it->path().c_str(),GetFileExInfoStandard,&attributes)) {failed(GetLastError());continue;}
+        if(attributes.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT)) {++result.skipped;continue;}
+        files.push_back({name,(static_cast<uint64_t>(attributes.ftLastWriteTime.dwHighDateTime)<<32)|attributes.ftLastWriteTime.dwLowDateTime});
+    }
+    if(ec) failed(static_cast<DWORD>(ec.value()));
+    std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){
+        return a.modified!=b.modified ? a.modified>b.modified : a.name<b.name;
+    });
+    std::vector<char> buffer(64*1024);
+    for(const auto& file:files) {
+        if(stop()) return;
+        if(result.files>=max_files) {++result.skipped;result.limited=true;continue;}
+        const auto input_path=fs::path(source)/file.name;
+        Handle input{CreateFileW(input_path.c_str(),GENERIC_READ,share,nullptr,OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_SEQUENTIAL_SCAN,nullptr)};
+        BY_HANDLE_FILE_INFORMATION info{};
+        if(input.value==INVALID_HANDLE_VALUE || !GetFileInformationByHandle(input.value,&info)) {failed(GetLastError());continue;}
+        const auto parent=fs::path(FinalName(input.value)).parent_path().wstring();
+        if((info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT)) ||
+            info.nNumberOfLinks!=1 || parent.empty() || _wcsicmp(parent.c_str(),root_name.c_str())!=0) {++result.skipped;continue;}
+        const uint64_t size=(static_cast<uint64_t>(info.nFileSizeHigh)<<32)|info.nFileSizeLow;
+        if(size>max_file || size>max_total-result.bytes) {++result.skipped;result.limited=true;continue;}
+        const auto output_path=fs::path(destination)/file.name;
+        DWORD error=ERROR_SUCCESS;
+        {
+            Handle output{CreateFileW(output_path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr)};
+            if(output.value==INVALID_HANDLE_VALUE) {failed(GetLastError());continue;}
+            uint64_t left=size;
+            while(left && !error) {
+                if(stop()) {error=ERROR_CANCELLED;break;}
+                const auto chunk=static_cast<DWORD>((std::min)(left,static_cast<uint64_t>(buffer.size())));
+                DWORD read=0,written=0;
+                if(!ReadFile(input.value,buffer.data(),chunk,&read,nullptr)) error=GetLastError();
+                else if(read!=chunk) error=ERROR_HANDLE_EOF;
+                else if(!WriteFile(output.value,buffer.data(),read,&written,nullptr)) error=GetLastError();
+                else if(written!=read) error=ERROR_WRITE_FAULT;
+                else left-=written;
+            }
+        }
+        if(error) {
+            DeleteFileW(output_path.c_str());
+            if(error==ERROR_CANCELLED) return;
+            failed(error);
+        } else {
+            ++result.files;result.bytes+=size;
+        }
+    }
 }
 
 }

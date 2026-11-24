@@ -4,9 +4,12 @@
 #include "../ui/file_operation_progress_state.h"
 
 #include <cstdio>
+#include <fstream>
+#include "../common/runtime_log.h"
 #include <filesystem>
 #include <cmath>
 #include <thread>
+#include <commctrl.h>
 
 namespace pulse::ui {
 struct FileOperationWindowTestAccess {
@@ -14,8 +17,9 @@ struct FileOperationWindowTestAccess {
     static bool EmptyingSubtitle(FileOperationWindow& window) { return TransferShowsEmptyingSubtitle(window.status_); }
     static void Press(FileOperationWindow& window, bool pressed) { window.pressed_ = pressed ? 1 : 0; }
     static HWND Handle(FileOperationWindow& window) { return window.hwnd_; }
-    static void Size(FileOperationWindow& window, UINT dpi) {
-        RECT rect{0, 0, MulDiv(468, dpi, 96), MulDiv(348, dpi, 96)};
+    static void RenderFrame(FileOperationWindow& window) { window.Render(); }
+    static void Size(FileOperationWindow& window, UINT dpi, int width = 468) {
+        RECT rect{0, 0, MulDiv(width, dpi, 96), MulDiv(348, dpi, 96)};
         SendMessageW(window.hwnd_, WM_DPICHANGED, MAKELONG(dpi, dpi), reinterpret_cast<LPARAM>(&rect));
         window.ResizeForDetails(false);   // the height the current state asks for
     }
@@ -60,6 +64,42 @@ void Click(pulse::ui::FileOperationWindow& window, POINT point) {
     const HWND hwnd = pulse::ui::FileOperationWindowTestAccess::Handle(window);
     SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(point.x, point.y));
     SendMessageW(hwnd, WM_LBUTTONUP, 0, MAKELPARAM(point.x, point.y));
+}
+template<class Callbacks>
+void BindTaskCallbacks(Callbacks& callbacks, uint64_t& paused, uint64_t& resumed, uint64_t& dismissed) {
+    if constexpr (requires { callbacks.pause_task; callbacks.resume_task; callbacks.dismiss_task; }) {
+        callbacks.pause_task = [&](uint64_t task) { paused = task; };
+        callbacks.resume_task = [&](uint64_t task) { resumed = task; };
+        callbacks.dismiss_task = [&](uint64_t task) { dismissed = task; };
+    }
+}
+int TaskBindingCases() {
+    using namespace pulse;
+    using Access = ui::FileOperationWindowTestAccess;
+    uint64_t paused = 0, resumed = 0, dismissed = 0;
+    constexpr uint64_t displayed = 501, backend_current = 502;
+    ui::FileOperationCallbacks callbacks;
+    callbacks.pause = [&] { paused = backend_current; };
+    callbacks.resume = [&] { resumed = backend_current; };
+    callbacks.dismiss = [&] { dismissed = backend_current; };
+    BindTaskCallbacks(callbacks, paused, resumed, dismissed);
+    ui::FileOperationWindow window;
+    Check(window.Create(nullptr, std::move(callbacks)), "create isolated task-binding window");
+    ops::OpStatus status;
+    status.task_id = displayed; status.active = true; status.type = ops::OpType::Copy;
+    status.phase = ops::OpPhase::Running; status.percent = 25; status.total_items = 100;
+    window.Update(status); window.Show(false);
+    const auto pause = Access::Button(window, 3);
+    Check(pause.x >= 0, "displayed transfer exposes pause control");
+    Click(window, pause);
+    Check(paused == displayed, "pause binds displayed task despite changed backend current task");
+    status.phase = ops::OpPhase::Paused; status.pause_requested = true;
+    window.Update(status);
+    Click(window, Access::Button(window, 3));
+    Check(resumed == displayed, "resume binds displayed task despite changed backend current task");
+    SendMessageW(Access::Handle(window), WM_SYSCOMMAND, SC_MINIMIZE, 0);
+    Check(dismissed == displayed, "minimize dismisses displayed task not backend current task");
+    return failures ? 1 : 0;
 }
 int TerminalCases(const std::filesystem::path& output) {
     using namespace pulse;
@@ -153,11 +193,157 @@ int TerminalCases(const std::filesystem::path& output) {
 }
 }
 
+namespace {
+constexpr UINT kPresentationLoad = WM_APP + 0x361;
+constexpr UINT kPresentationInput = WM_APP + 0x362;
+struct PresentationLoad {
+    pulse::ui::FileOperationWindow* window;
+    pulse::ui::FileOperationWindow* frame_host;
+    pulse::ops::OpStatus status;
+    ULONGLONG until = 0, last_update = 0;
+    unsigned posted = 0, paints = 0, timers = 0, inputs = 0;
+    ULONGLONG input_max = 0;
+};
+LRESULT CALLBACK PresentationLoadProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) {
+    auto& load = *reinterpret_cast<PresentationLoad*>(data);
+    if (message == kPresentationInput) {
+        ++load.inputs;
+        load.input_max = (std::max)(load.input_max, GetTickCount64() - static_cast<ULONGLONG>(wp));
+        return 0;
+    }
+    if (message == kPresentationLoad) {
+        ++load.posted;
+        const auto frame_started = GetTickCount64();
+        pulse::ui::FileOperationWindowTestAccess::RenderFrame(*load.frame_host);
+        const auto render_elapsed = GetTickCount64() - frame_started;
+        if (render_elapsed < 16) Sleep(static_cast<DWORD>(16 - render_elapsed)); // test-only display cadence
+        const auto now = GetTickCount64();
+        if (now - load.last_update >= 16) {
+            load.last_update = now;
+            load.status.percent = static_cast<float>((load.posted % 80) + 1);
+            load.window->Update(load.status);
+        }
+        if (now < load.until) {
+            PostMessageW(hwnd, kPresentationInput, static_cast<WPARAM>(GetTickCount64()), 0);
+            PostMessageW(hwnd, kPresentationLoad, 0, 0);
+        }
+        return 0;
+    }
+    if (message == WM_PAINT) ++load.paints;
+    if (message == WM_TIMER) ++load.timers;
+    return DefSubclassProc(hwnd, message, wp, lp);
+}
+int PresentationStarvation() {
+    using namespace pulse;
+    using Access = ui::FileOperationWindowTestAccess;
+    ui::FileOperationWindow window;
+    Check(window.Create(nullptr, {}), "create real operation window for posted-load regression");
+    ops::OpStatus status;
+    status.task_id = 876543; status.active = true;
+    status.type = ops::OpType::Copy; status.phase = ops::OpPhase::Running; status.percent = 25;
+    window.Update(status); window.Show(false, false);
+    const auto hwnd = Access::Handle(window);
+    UpdateWindow(hwnd);
+    ui::FileOperationWindow frame_host;
+    Check(frame_host.Create(nullptr, {}), "create independent compositor for finite display-frame load");
+    frame_host.Update(status); frame_host.Show(false, false);
+    PresentationLoad load{&window, &frame_host, status};
+    SetWindowSubclass(hwnd, PresentationLoadProc, 1, reinterpret_cast<DWORD_PTR>(&load));
+    load.until = GetTickCount64() + 1200;
+    PostMessageW(hwnd, kPresentationLoad, 0, 0);
+    while (GetTickCount64() < load.until) {
+        MSG message{};
+        if (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&message); DispatchMessageW(&message);
+        } else Sleep(1);
+    }
+    RemoveWindowSubclass(hwnd, PresentationLoadProc, 1);
+    std::printf("POSTED_LOAD messages=%u paints=%u timers=%u duration_ms=1200\n", load.posted, load.paints, load.timers);
+    Check(load.posted >= 20 && load.posted <= 90, "bounded display-frame messages remain serviced during finite load");
+    Check(load.paints >= 8, "real operation window continues painting during sustained posted load");
+    std::printf("POSTED_INPUT samples=%u max_ms=%llu\n", load.inputs, load.input_max);
+    Check(load.inputs >= 20 && load.input_max < 250, "presentation pulses leave posted-input service within bounded frame budget");
+    load.paints = 0;
+    SetWindowSubclass(hwnd, PresentationLoadProc, 1, reinterpret_cast<DWORD_PTR>(&load));
+    const auto idle_end = GetTickCount64() + 1200;
+    while (GetTickCount64() < idle_end) {
+        MSG message{};
+        if (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&message); DispatchMessageW(&message);
+        } else Sleep(1);
+    }
+    RemoveWindowSubclass(hwnd, PresentationLoadProc, 1);
+    std::printf("IDLE_PRESENTATION paints=%u duration_ms=1200\n", load.paints);
+    Check(load.paints <= 12, "dirty-driven determinate timer does not flood idle repaints");
+    return failures ? 1 : 0;
+}
+int PresentationDiagnostics(const std::filesystem::path& root) {
+    using namespace pulse;
+    using Access = ui::FileOperationWindowTestAccess;
+    std::filesystem::create_directories(root);
+    ui::FileOperationWindow window;
+    Check(window.Create(nullptr, {}), "diagnostic real operation window created on private desktop");
+    ops::OpStatus status;
+    status.task_id = 987654;
+    status.type = ops::OpType::Copy;
+    status.active = true;
+    status.phase = ops::OpPhase::Running;
+    status.percent = 25;
+    window.Update(status);
+    window.Show(false, false);
+    const auto pump = [](DWORD duration) {
+        const auto end = GetTickCount64() + duration;
+        do {
+            MSG msg{};
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg); DispatchMessageW(&msg);
+            }
+            Sleep(1);
+        } while (GetTickCount64() < end);
+    };
+    pump(600); // compositor/font startup is outside the healthy interval
+    Check(diagnostics::runtime::Initialize(root.wstring(), "app"), "private diagnostic runtime initialized");
+    pump(180);
+    const auto flush = [] { std::thread writer([] { diagnostics::runtime::Flush(5000); }); writer.join(); };
+    flush();
+    const auto read = [&] {
+        std::ifstream input(root / L"Diagnostics" / L"Runtime" / (L"app-" + std::to_wstring(GetCurrentProcessId()) + L".jsonl"));
+        return std::string(std::istreambuf_iterator<char>(input), {});
+    };
+    Check(read().find("operation_window_slow") == std::string::npos, "healthy operation-window pumping has no slow-gap report");
+    window.Hide();
+    Sleep(350);
+    window.Show(false, false);
+    pump(100);
+    flush();
+    Check(read().find("\"kind\":1") == std::string::npos && read().find("\"kind\":2") == std::string::npos,
+          "hidden interval and reshow do not produce false presentation gaps");
+    status.active = false;
+    window.Update(status);
+    Sleep(350);
+    status.active = true;
+    window.Update(status);
+    pump(100);
+    flush();
+    Check(read().find("\"kind\":1") == std::string::npos && read().find("\"kind\":2") == std::string::npos,
+          "inactive to active transition resets presentation sampling");
+    Sleep(350); // deliberate test-only UI blockage, not a production delay
+    pump(80);
+    flush();
+    const auto text = read();
+    Check(text.find("operation_window_slow") != std::string::npos && text.find("\"task\":987654") != std::string::npos,
+          "injected delay records actual operation-window gap and task identity");
+    Check(text.find("\"kind\":1") != std::string::npos, "render-timer starvation is identified separately");
+    diagnostics::runtime::Shutdown();
+    return failures ? 1 : 0;
+}
+}
+
 int wmain(int argc, wchar_t** argv) {
     using namespace pulse;
     using Access = ui::FileOperationWindowTestAccess;
     compat::EnableDpiAwareness();
-    if (argc > 1 && std::wstring_view(argv[1]) == L"--terminal") {
+    if (argc > 1 && (std::wstring_view(argv[1]) == L"--terminal" || std::wstring_view(argv[1]) == L"--task-binding" || std::wstring_view(argv[1]) == L"--diagnostics" || std::wstring_view(argv[1]) == L"--starvation")) {
         const std::filesystem::path output = argc > 2 ? argv[2] : L"";
         const auto name = L"PulseTransferTerminal-" + std::to_wstring(GetCurrentProcessId());
         HDESK desktop = CreateDesktopW(name.c_str(), nullptr, nullptr, 0, GENERIC_ALL, nullptr);
@@ -167,7 +353,9 @@ int wmain(int argc, wchar_t** argv) {
             if (!SetThreadDesktop(desktop)) return;
             CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
             l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
-            result = TerminalCases(output);
+            result = std::wstring_view(argv[1]) == L"--starvation" ? PresentationStarvation() :
+                std::wstring_view(argv[1]) == L"--diagnostics" ? PresentationDiagnostics(output) :
+                std::wstring_view(argv[1]) == L"--task-binding" ? TaskBindingCases() : TerminalCases(output);
             CoUninitialize();
         });
         worker.join(); CloseDesktop(desktop); return result;
@@ -179,7 +367,11 @@ int wmain(int argc, wchar_t** argv) {
     {
         uint64_t retry = 0, skip = 0;
         int cancel = 0, pause = 0;
+        std::wstring handed_off;
+        uint64_t stopped_task = 0;
         ui::FileOperationCallbacks callbacks;
+        callbacks.open_native_folder = [&](const std::wstring& path) { handed_off = path; };
+        callbacks.cancel_task = [&](uint64_t id) { ++cancel; stopped_task = id; };
         callbacks.retry_authorization = [&](uint64_t id) { retry = id; };
         callbacks.skip_authorization = [&](uint64_t id) { skip = id; };
         callbacks.cancel = [&] { ++cancel; };
@@ -279,6 +471,41 @@ int wmain(int argc, wchar_t** argv) {
         Check(enabled_retry.x >= 0 && retry == 0 && Access::Button(window, 6).x < 0 &&
               Access::Button(window, 3).x < 0,
               "retry in flight keeps the authorization view and ignores clicks");
+        status.authorization_retrying = false;
+        status.native_handoff_directory = L"C:\\fixture";
+        status.can_skip_authorization = true;
+        window.Update(status);
+        Sleep(450);
+        window.Update(status);
+        for (const wchar_t* lang : {L"en-US", L"zh-CN", L"zh-TW"}) {
+            l10n::SetLanguage(lang);
+            for (UINT dpi : {96u, 192u}) {
+                Access::Size(window, dpi, 440);
+                for (const auto& [id, label] : {
+                    std::pair{6, l10n::StringId::OpRetryAuthorization}, {7, l10n::StringId::OpSkipAuthorization},
+                    {8, l10n::StringId::SettingsSecExplorer}, {4, l10n::StringId::Cancel}}) {
+                    int pixels = 0;
+                    Access::Button(window, id, &pixels);
+                    Check(pixels >= std::floor(Access::Width(window, label)),
+                        "native handoff footer fits all four actions at minimum width");
+                }
+            }
+        }
+        Click(window, Access::Button(window, 8));
+        Check(handed_off == status.native_handoff_directory && stopped_task == status.task_id,
+            "native handoff stops the waiting task and opens its folder without retrying");
+        handed_off.clear(); stopped_task = 0;
+        status.type = ops::OpType::RecycleDelete;
+        status.active = false;
+        status.authorization = ops::AuthorizationState::None;
+        status.phase = ops::OpPhase::Failed;
+        window.Update(status);
+        Click(window, Access::Button(window, 8));
+        Check(handed_off == status.native_handoff_directory && !stopped_task,
+            "terminal deletion hands off source parent even without a destination");
+        status.native_handoff_directory.clear();
+        window.Update(status);
+        Check(Access::Button(window, 8).x < 0, "no native action without a handoff target");
         Check(!window.IsVisible(), "test never displays or activates a user window");
     }
     CoUninitialize();

@@ -24,6 +24,21 @@ C::OpenRequest Ordinary(unsigned id) {
 int main() {
     HWND host=Host(); Check(host!=nullptr,"private message-only host"); if (!host) return 1;
     {
+        C c; auto port=c.CreateExplorerSubmissionPort(host,wake);
+        Check(port && port->WakePresentation(), "handoff completion wakes hidden UI without idle timer");
+        MSG message{};
+        Check(PeekMessageW(&message,host,wake,wake,PM_REMOVE) && message.wParam==0 && message.lParam==0,
+            "presentation wake contains no source pointers");
+        Check(!c.TakeQueuedOpenRequest(), "presentation wake does not enqueue another navigation");
+        if (port) port->Revoke();
+        Check(port && !port->WakePresentation(), "revoked producer cannot wake a later endpoint");
+    }
+    {
+        C c; HWND doomed=Host(); auto port=c.CreateExplorerSubmissionPort(doomed,wake);
+        DestroyWindow(doomed);
+        Check(port && !port->WakePresentation(), "destroyed presentation endpoint rejects wake");
+    }
+    {
         C c; auto port=c.CreateExplorerSubmissionPort(host,wake); auto source=Context();
         Check(port && source,"port and immutable source creation"); if (!port || !source) return 1;
         Check(port->Submit(source) && port->Submit(source),"same internal identity accepted then duplicate");

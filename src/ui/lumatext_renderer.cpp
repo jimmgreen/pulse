@@ -185,6 +185,9 @@ struct LumaTextRenderer::Impl {
     // colour) straight onto the window target with LumaText glyphs. A second
     // renderer, because retargeting one would flush its device caches.
     LumaText::Renderer layout_renderer;
+    // Dedicated LumaText renderer bound to blit_dc so child inputs get the
+    // exact same FreeType + optical-weight rasterization as the surrounding UI.
+    LumaText::Renderer edit_renderer;
     LumaText::FontFace yahei_regular;
     LumaText::FontFace yahei_bold;
     LumaText::FontFace segoe_regular;
@@ -513,6 +516,29 @@ struct LumaTextRenderer::Impl {
         desc.max_width = key.width_64 / 64.0f;
     }
 
+    bool EnsureBlitContext() {
+        if (!target_dc || !context) return false;
+        if (!blit_dc) {
+            Microsoft::WRL::ComPtr<ID2D1Device> device;
+            target_dc->GetDevice(&device);
+            if (!device || FAILED(device->CreateDeviceContext(
+                    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &blit_dc)) || !blit_dc) {
+                return false;
+            }
+            blit_dc->SetDpi(96.0f, 96.0f);
+            blit_dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        }
+        if (!edit_renderer) {
+            auto desc = LumaText::Descriptor<lt_d2d_desc>();
+            desc.render_target = blit_dc.Get();
+            desc.manage_begin_end_draw = false;
+            if (lt_d2d_renderer_create(context.get(), &desc, edit_renderer.put()) != LT_OK) {
+                edit_renderer.reset();
+            }
+        }
+        return true;
+    }
+
     bool Init(IDWriteFactory* dwrite, ID2D1RenderTarget* target) {
         wchar_t trace[16]{};
         const DWORD trace_length = GetEnvironmentVariableW(L"PULSE_STARTUP_TRACE", trace, ARRAYSIZE(trace));
@@ -539,12 +565,6 @@ struct LumaTextRenderer::Impl {
         }
         recording_dc->SetDpi(96.0f, 96.0f);
         recording_dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-        if (FAILED(device->CreateDeviceContext(
-                D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &blit_dc)) || !blit_dc) {
-            return false;
-        }
-        blit_dc->SetDpi(96.0f, 96.0f);
-        blit_dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
         auto renderer_desc = LumaText::Descriptor<lt_d2d_desc>();
         renderer_desc.render_target = recording_dc.Get();
@@ -556,6 +576,7 @@ struct LumaTextRenderer::Impl {
         if (lt_d2d_renderer_create(context.get(), &renderer_desc, layout_renderer.put()) != LT_OK) {
             layout_renderer.reset();
         }
+        if (!EnsureBlitContext()) return false;
 
         if (!MakeFace(FontPath(L"msyh.ttc"), yahei_regular) ||
             !MakeFace(FontPath(L"msyhbd.ttc"), yahei_bold)) {
@@ -707,12 +728,25 @@ struct LumaTextRenderer::Impl {
         return ok;
     }
 
+    void TrimCaches() noexcept {
+        ClearLayouts();
+        ReleasePresent();
+        edit_renderer.reset();
+        blit_target.Reset();
+        blit_staging.Reset();
+        blit_dc.Reset();
+        blit_w = 0;
+        blit_h = 0;
+        busy = false;
+    }
+
     void Shutdown() noexcept {
         ClearLayouts();
         ReleasePresent();
         dw_params.Reset();
         dw_factory.Reset();
         dw_params_monitor = nullptr;
+        edit_renderer.reset();
         blit_target.Reset();
         blit_staging.Reset();
         blit_dc.Reset();
@@ -947,16 +981,17 @@ struct LumaTextRenderer::Impl {
     // A DirectWrite layout keeps its own shaping, fallback fonts, wrapping and
     // trimming; LumaText only rasterizes the glyph runs. Ranges coloured with
     // SetDrawingEffect(ID2D1SolidColorBrush) keep their colour.
-    bool DrawLayout(D2D1_POINT_2F origin, IDWriteTextLayout* layout,
-                    const D2D1_COLOR_F& foreground, bool clip) {
-        if (!layout_renderer || !target_dc || !layout) return Fail(stats.fail_input);
+    bool DrawLayoutWith(lt_renderer* active_renderer, ID2D1DeviceContext* active_dc,
+                        D2D1_POINT_2F origin, IDWriteTextLayout* layout,
+                        const D2D1_COLOR_F& foreground, bool clip) {
+        if (!active_renderer || !active_dc || !layout) return Fail(stats.fail_input);
         float dpi_x = 96.0f, dpi_y = 96.0f;
-        target_dc->GetDpi(&dpi_x, &dpi_y);
+        active_dc->GetDpi(&dpi_x, &dpi_y);
         auto frame_desc = LumaText::Descriptor<lt_frame_desc>();
         frame_desc.dpi_x = dpi_x;
         frame_desc.dpi_y = dpi_y;
         LumaText::Frame frame;
-        if (lt_frame_begin(layout_renderer.get(), &frame_desc, frame.put()) != LT_OK) return Fail(stats.fail_backend);
+        if (lt_frame_begin(active_renderer, &frame_desc, frame.put()) != LT_OK) return Fail(stats.fail_backend);
         auto draw = LumaText::Descriptor<lt_draw_text_desc>();
         draw.origin_x = origin.x;
         draw.origin_y = origin.y;
@@ -988,6 +1023,16 @@ struct LumaTextRenderer::Impl {
         TraceElapsed(end_start, stats.frame_end_time_us);
         stats.draw_calls++;
         return (result == LT_OK && end_result == LT_OK) || Fail(stats.fail_backend);
+    }
+
+    bool DrawLayout(D2D1_POINT_2F origin, IDWriteTextLayout* layout,
+                    const D2D1_COLOR_F& foreground, bool clip) {
+        return DrawLayoutWith(layout_renderer.get(), target_dc.Get(), origin, layout, foreground, clip);
+    }
+
+    bool DrawEditLayout(D2D1_POINT_2F origin, IDWriteTextLayout* layout,
+                        const D2D1_COLOR_F& foreground) {
+        return DrawLayoutWith(edit_renderer.get(), blit_dc.Get(), origin, layout, foreground, false);
     }
 
     // Locate the extension with the complete shaped line, not a separately
@@ -1241,6 +1286,50 @@ struct LumaTextRenderer::Impl {
         return true;
     }
 
+    // Native single-line EDIT only stores (min, max) and puts its internal caret
+    // at max, so Shift+Left/Right/Home/End after a reverse selection moved the
+    // anchor instead of the active end (#617).
+    bool MoveEditHorizontal(HWND hwnd, WPARAM key) {
+        if ((GetWindowLongPtrW(hwnd, GWL_STYLE) & ES_MULTILINE) != 0) return false;
+        const int length = GetWindowTextLengthW(hwnd);
+        DWORD lo = 0, hi = 0;
+        SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&lo), reinterpret_cast<LPARAM>(&hi));
+        int anchor = static_cast<int>(lo), caret = static_cast<int>(hi);
+        if (const auto saved = edit_selections.find(hwnd); saved != edit_selections.end() &&
+            std::min(saved->second.first, saved->second.second) == static_cast<int>(lo) &&
+            std::max(saved->second.first, saved->second.second) == static_cast<int>(hi)) {
+            anchor = saved->second.first;
+            caret = saved->second.second;
+        }
+        anchor = std::clamp(anchor, 0, length);
+        caret = std::clamp(caret, 0, length);
+        int target = caret;
+        if (key == VK_HOME) {
+            target = 0;
+        } else if (key == VK_END) {
+            target = length;
+        } else if (key == VK_LEFT && caret > 0) {
+            std::wstring text(static_cast<size_t>(length), L'\0');
+            GetWindowTextW(hwnd, text.data(), length + 1);
+            target = caret - 1;
+            if (target > 0 && IS_LOW_SURROGATE(text[static_cast<size_t>(target)]) &&
+                IS_HIGH_SURROGATE(text[static_cast<size_t>(target - 1)])) --target;
+            else if (target > 0 && text[static_cast<size_t>(target)] == L'\n' &&
+                     text[static_cast<size_t>(target - 1)] == L'\r') --target;
+        } else if (key == VK_RIGHT && caret < length) {
+            std::wstring text(static_cast<size_t>(length), L'\0');
+            GetWindowTextW(hwnd, text.data(), length + 1);
+            target = caret + 1;
+            if (target < length && IS_HIGH_SURROGATE(text[static_cast<size_t>(caret)]) &&
+                IS_LOW_SURROGATE(text[static_cast<size_t>(target)])) ++target;
+            else if (target < length && text[static_cast<size_t>(caret)] == L'\r' &&
+                     text[static_cast<size_t>(target)] == L'\n') ++target;
+        }
+        line_goal_hwnd = nullptr;
+        SendMessageW(hwnd, EM_SETSEL, static_cast<WPARAM>(anchor), static_cast<LPARAM>(target));
+        return true;
+    }
+
     static float DwCaretX(IDWriteTextLayout* layout, int position, int length) {
         if (!layout || length <= 0) return 0.0f;
         const bool trailing = position >= length;
@@ -1448,12 +1537,12 @@ struct LumaTextRenderer::Impl {
     }
 
     bool EnsureBlit(int w, int h) {
+        if (w <= 0 || h <= 0 || !EnsureBlitContext()) return false;
         if (blit_target && blit_staging && blit_w == w && blit_h == h) return true;
         blit_target.Reset();
         blit_staging.Reset();
         blit_w = 0;
         blit_h = 0;
-        if (!blit_dc || w <= 0 || h <= 0) return false;
         const D2D1_SIZE_U size{static_cast<UINT32>(w), static_cast<UINT32>(h)};
         const auto pixel = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
                                              D2D1_ALPHA_MODE_PREMULTIPLIED);
@@ -1476,7 +1565,7 @@ struct LumaTextRenderer::Impl {
 
     bool PaintEdit(HWND hwnd, HDC hdc, IDWriteTextFormat* format,
                    const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background, const D2D1_RECT_F* surface_bounds = nullptr) {
-        if (!hwnd || !format || !blit_dc || !dw_factory) return false;
+        if (!hwnd || !format || !dw_factory) return false;
         RECT rc{};
         GetClientRect(hwnd, &rc);
         const int w = rc.right - rc.left;
@@ -1676,10 +1765,14 @@ struct LumaTextRenderer::Impl {
                         visible_layout->SetDrawingEffect(lead_brush.Get(), lead_range);
                     }
                 }
-                blit_dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-                blit_dc->SetTextRenderingParams(params);
-                blit_dc->DrawTextLayout(D2D1::Point2F(std::round(pad - scroll), y), visible_layout.Get(),
-                                        brush.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+                const bool use_luma = edit_renderer && pulse::ui::typography::UseLumaTextForUi();
+                const D2D1_POINT_2F text_origin = D2D1::Point2F(std::round(pad - scroll), y);
+                if (!use_luma || !DrawEditLayout(text_origin, visible_layout.Get(), visible_color)) {
+                    blit_dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+                    blit_dc->SetTextRenderingParams(params);
+                    blit_dc->DrawTextLayout(text_origin, visible_layout.Get(),
+                                            brush.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+                }
                 // The layout is cached and shared: leave no brush on it.
                 if (ext_range.length) visible_layout->SetDrawingEffect(nullptr, ext_range);
                 if (lead_range.length) visible_layout->SetDrawingEffect(nullptr, lead_range);
@@ -1691,9 +1784,15 @@ struct LumaTextRenderer::Impl {
                         const float gap = std::round(format->GetFontSize() * 0.5f);
                         const float tx = std::round(pad - scroll + metrics.widthIncludingTrailingWhitespace + gap);
                         const float ty = std::round((static_cast<float>(h) - tm.height) * 0.5f) - tm.top;
-                        brush->SetColor(D2D1::ColorF(foreground.r, foreground.g, foreground.b, foreground.a * 0.45f));
-                        blit_dc->DrawTextLayout(D2D1::Point2F(tx, ty), tail_layout.Get(), brush.Get(),
-                                                D2D1_DRAW_TEXT_OPTIONS_NONE);
+                        const D2D1_COLOR_F tail_color = D2D1::ColorF(foreground.r, foreground.g, foreground.b, foreground.a * 0.45f);
+                        const D2D1_POINT_2F tail_origin = D2D1::Point2F(tx, ty);
+                        if (!use_luma || !DrawEditLayout(tail_origin, tail_layout.Get(), tail_color)) {
+                            brush->SetColor(tail_color);
+                            blit_dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+                            blit_dc->SetTextRenderingParams(params);
+                            blit_dc->DrawTextLayout(tail_origin, tail_layout.Get(), brush.Get(),
+                                                    D2D1_DRAW_TEXT_OPTIONS_NONE);
+                        }
                     }
                 }
                 blit_dc->SetTextRenderingParams(nullptr);
@@ -1785,6 +1884,7 @@ struct LumaTextRenderer::Impl {
     }
 #else
     bool Init(IDWriteFactory*, ID2D1RenderTarget*) { return false; }
+    void TrimCaches() noexcept {}
     void Shutdown() noexcept {}
 #endif
 };
@@ -1806,6 +1906,7 @@ LRESULT CALLBACK LumaTextRenderer::EditSelectionProc(HWND hwnd, UINT message, WP
         // an explicit EM_SETSEL replaces it.
         switch (message) {
         case WM_KEYDOWN: case WM_SYSKEYDOWN: case WM_CHAR: case WM_IME_STARTCOMPOSITION:
+        case WM_RBUTTONDOWN: case WM_CONTEXTMENU:
         case WM_KILLFOCUS: case WM_SETTEXT: case EM_REPLACESEL: case WM_CUT: case WM_COPY:
         case WM_PASTE: case WM_CLEAR: case WM_UNDO: case EM_UNDO:
             self->impl_->CommitMouseSelection(hwnd);
@@ -1820,6 +1921,12 @@ LRESULT CALLBACK LumaTextRenderer::EditSelectionProc(HWND hwnd, UINT message, WP
     if (message == WM_KEYDOWN && (wparam == VK_UP || wparam == VK_DOWN) && self->impl_ &&
         (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
         self->impl_->MoveEditLine(hwnd, wparam == VK_DOWN, (GetKeyState(VK_SHIFT) & 0x8000) != 0))
+        return 0;
+    if (message == WM_KEYDOWN &&
+        (wparam == VK_LEFT || wparam == VK_RIGHT || wparam == VK_HOME || wparam == VK_END) &&
+        self->impl_ && (GetKeyState(VK_SHIFT) & 0x8000) != 0 &&
+        (GetKeyState(VK_CONTROL) & 0x8000) == 0 && (GetKeyState(VK_MENU) & 0x8000) == 0 &&
+        self->impl_->MoveEditHorizontal(hwnd, wparam))
         return 0;
 #endif
     const LRESULT result = DefSubclassProc(hwnd, message, wparam, lparam);
@@ -1952,6 +2059,8 @@ LRESULT LumaTextRenderer::CallEditDefaultMouse(HWND hwnd, UINT msg, WPARAM wPara
             break;
         }
     }
+#else
+    (void)format;
 #endif
     SendMessageW(hwnd, WM_SETREDRAW, FALSE, 0);
     const LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
@@ -1984,6 +2093,10 @@ void LumaTextRenderer::Shutdown() noexcept {
     }
 #endif
     if (impl_) impl_->Shutdown();
+}
+
+void LumaTextRenderer::TrimCaches() noexcept {
+    if (impl_) impl_->TrimCaches();
 }
 
 bool LumaTextRenderer::Enabled() const noexcept {

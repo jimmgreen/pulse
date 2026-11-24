@@ -29,6 +29,7 @@ public:
     std::wstring IndexPath() const;
     bool ServiceMode() const;
     bool Connected() const { return connected_.load(); }
+    bool Ready() const { return connected_.load() && ready_.load(); }
     // Owner-thread snapshot; the eject worker probes this and the service pipe without starting either.
     std::wstring ReleasePipeName() const { return pipe_name_; }
     bool PinyinReady() const { return connected_.load() && pinyin_ready_.load(); }

@@ -6,6 +6,7 @@
 #include "../ui/panel_metrics.h"
 #include "../common/json_utils.h"
 #include "../common/utf8_file.h"
+#include "../common/async_file_writer.h"
 #include <commctrl.h>
 #include <prsht.h>
 #include <shlobj.h>
@@ -187,6 +188,12 @@ int ClampDetailsPanelWidth(int width) {
                       static_cast<int>(ui::kPanelWidthMaxDip));
 }
 
+uint32_t ParseDetailsCollapsedMask(const std::wstring& json_obj) {
+    const int raw = pulse::json::ExtractInt(
+        json_obj, L"detailsCollapsed", static_cast<int>(kDefaultDetailsCollapsedMask));
+    return raw < 0 ? kDefaultDetailsCollapsedMask : static_cast<uint32_t>(raw);
+}
+
 // One windows[] element; same key names as the single-window fields.
 std::wstring WindowToJson(const WindowSessionSnapshot& w) {
     const WindowLayoutSnapshot& l = w.layout;
@@ -202,7 +209,8 @@ std::wstring WindowToJson(const WindowSessionSnapshot& w) {
     f << L"     \"detailsPanel\":" << (l.details_panel ? 1 : 0)
       << L",\"detailsPanelWidth\":" << ClampDetailsPanelWidth(l.details_panel_width)
       << L",\"detailsPreviewOnly\":" << (l.details_preview_only ? L"true" : L"false")
-      << L",\"detailsPreview\":" << (l.details_preview ? L"true" : L"false") << L",\n";
+      << L",\"detailsPreview\":" << (l.details_preview ? L"true" : L"false")
+      << L",\"detailsCollapsed\":" << l.details_collapsed << L",\n";
     // M7c: "windowName" "" = named after its folders; unique keys, since
     // the lookups below also see the nested groups' "name" and "color".
     std::wstring name;
@@ -424,6 +432,7 @@ std::wstring SessionToJson(const SessionSnapshot& snap) {
       << L",\n";
     f << L"  \"detailsPreviewOnly\":" << (snap.details_preview_only ? L"true" : L"false") << L",\n";
     f << L"  \"detailsPreview\":" << (snap.details_preview ? L"true" : L"false") << L",\n";
+    f << L"  \"detailsCollapsed\":" << snap.details_collapsed << L",\n";
     f << L"  \"tray\":" << trayJson << L",\n";
     f << L"  \"undo\":";
     if (snap.undo_snapshot) f << *snap.undo_snapshot;
@@ -463,7 +472,14 @@ std::wstring SessionToJson(const SessionSnapshot& snap) {
 bool WriteSessionJson(const std::wstring& json) {
     const std::wstring dir = GetPulseDataDir();
     if (dir.empty()) return false;
+    GlobalAsyncFileWriter().Flush();
     return WriteUtf8FileAtomic(dir + L"\\session.json", json);
+}
+
+bool WriteSessionJsonAsync(const std::wstring& json) {
+    const std::wstring dir = GetPulseDataDir();
+    if (dir.empty()) return false;
+    return GlobalAsyncFileWriter().Submit(dir + L"\\session.json", json);
 }
 
 bool SaveSession(const SessionSnapshot& snap) {
@@ -497,6 +513,7 @@ static WindowSessionSnapshot ParseWindowJson(const std::wstring& wj, int file_ve
         l.details_panel_width = 340;
     l.details_preview_only = pulse::json::ExtractBool(wj, L"detailsPreviewOnly", false);
     l.details_preview = pulse::json::ExtractBool(wj, L"detailsPreview", true);
+    l.details_collapsed = ParseDetailsCollapsedMask(wj);
     w.active_layout_tab = pulse::json::ExtractInt(wj, L"activeTab");
     w.identity.name = NormalizeWindowName(pulse::json::ExtractString(wj, L"windowName"));
     w.identity.color = pulse::json::ExtractInt(wj, L"windowColor", -1);
@@ -600,6 +617,7 @@ bool ParseSessionJson(const std::wstring& json, SessionSnapshot& snap) {
     // always-on behaviour.
     snap.details_preview = json.find(L"\"detailsPreview\"") == std::wstring::npos
         ? true : pulse::json::ExtractBool(scalars, L"detailsPreview", true);
+    snap.details_collapsed = ParseDetailsCollapsedMask(scalars);
     snap.details_panel_width = pulse::json::ExtractInt(scalars, L"detailsPanelWidth");
     // The stored value is the user's intent; the window caps it while drawing.
     if (snap.details_panel_width < static_cast<int>(ui::kDetailsMinWidthDip) ||
@@ -655,7 +673,8 @@ bool ParseSessionJson(const std::wstring& json, SessionSnapshot& snap) {
         w.maximized = snap.maximized;
         w.layout = {snap.sidebar_collapsed, snap.sidebar_hidden, snap.sidebar_order,
                     snap.quick_access_hidden, snap.starred_expanded, snap.details_panel,
-                    snap.details_panel_width, snap.details_preview_only, snap.details_preview};
+                    snap.details_panel_width, snap.details_preview_only, snap.details_preview,
+                    snap.details_collapsed};
         w.layout_tabs = snap.layout_tabs;
         w.tab_groups = snap.tab_groups;
         w.active_layout_tab = snap.active_layout_tab;

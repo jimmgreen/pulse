@@ -84,6 +84,7 @@ void IdentifyLoadedModules(FileLockReport& report, const std::vector<std::wstrin
 FileLockReport InspectReplacementLocks(const std::wstring& root, const std::vector<std::wstring>& relative_files, bool known_blocked) {
     FileLockReport result;
     std::vector<std::wstring> candidates;
+    std::vector<std::wstring> unconfirmed_candidates;
     for (const auto& relative : relative_files) {
         const std::filesystem::path rel(relative);
         bool invalid = relative.empty() || rel.has_root_path() || relative.find(L':') != std::wstring::npos;
@@ -93,27 +94,47 @@ FileLockReport InspectReplacementLocks(const std::wstring& root, const std::vect
         candidates.push_back(path);
         HANDLE file = CreateFileW(path.c_str(), DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                   nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-        if (file != INVALID_HANDLE_VALUE) { CloseHandle(file); continue; }
+        if (file != INVALID_HANDLE_VALUE) {
+            CloseHandle(file);
+            if (known_blocked) unconfirmed_candidates.push_back(path);
+            continue;
+        }
         const DWORD error = GetLastError();
         if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) continue;
         if (error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION) result.files.push_back(path);
         else { result.error = error; result.files.push_back(path); }
     }
     if (result.files.empty() && !known_blocked) return result;
+    struct RestartMgr {
+        HMODULE mod = LoadLibraryExW(L"rstrtmgr.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        DWORD load_error = mod ? ERROR_SUCCESS : GetLastError();
+        decltype(&RmStartSession) start = mod ? reinterpret_cast<decltype(&RmStartSession)>(GetProcAddress(mod, "RmStartSession")) : nullptr;
+        decltype(&RmEndSession) end = mod ? reinterpret_cast<decltype(&RmEndSession)>(GetProcAddress(mod, "RmEndSession")) : nullptr;
+        decltype(&RmRegisterResources) reg = mod ? reinterpret_cast<decltype(&RmRegisterResources)>(GetProcAddress(mod, "RmRegisterResources")) : nullptr;
+        decltype(&RmGetList) list = mod ? reinterpret_cast<decltype(&RmGetList)>(GetProcAddress(mod, "RmGetList")) : nullptr;
+        ~RestartMgr() { if (mod) FreeLibrary(mod); }
+        bool Ready() const { return start && end && reg && list; }
+    } rm;
+    if (!rm.Ready()) {
+        result.identification_error = rm.load_error ? rm.load_error : ERROR_PROC_NOT_FOUND;
+        IdentifyLoadedModules(result, candidates);
+        return result;
+    }
     DWORD session = 0;
     WCHAR key[CCH_RM_SESSION_KEY + 1]{};
-    result.identification_error = RmStartSession(&session, 0, key);
+    result.identification_error = rm.start(&session, 0, key);
     if (result.identification_error != ERROR_SUCCESS) { IdentifyLoadedModules(result, candidates); return result; }
-    struct SessionGuard { DWORD id; ~SessionGuard() { RmEndSession(id); } } guard{session};
+    struct SessionGuard { decltype(&RmEndSession) end; DWORD id; ~SessionGuard() { end(id); } } guard{rm.end, session};
     std::vector<LPCWSTR> paths;
-    for (const auto& path : (result.files.empty() ? candidates : result.files)) paths.push_back(path.c_str());
-    DWORD error = RmRegisterResources(session, static_cast<UINT>(paths.size()), paths.data(), 0, nullptr, 0, nullptr);
+    const auto& rm_targets = (known_blocked || result.files.empty()) ? candidates : result.files;
+    for (const auto& path : rm_targets) paths.push_back(path.c_str());
+    DWORD error = rm.reg(session, static_cast<UINT>(paths.size()), paths.data(), 0, nullptr, 0, nullptr);
     if (error == ERROR_SUCCESS) {
         UINT needed = 0, count = 0; DWORD reasons = 0;
         std::vector<RM_PROCESS_INFO> processes;
         for (int retry = 0; retry != 4; ++retry) {
             count = static_cast<UINT>(processes.size());
-            error = RmGetList(session, &needed, &count, processes.empty() ? nullptr : processes.data(), &reasons);
+            error = rm.list(session, &needed, &count, processes.empty() ? nullptr : processes.data(), &reasons);
             if (error != ERROR_MORE_DATA) break;
             processes.resize(needed);
         }
@@ -121,7 +142,13 @@ FileLockReport InspectReplacementLocks(const std::wstring& root, const std::vect
             result.programs.push_back({processes[i].Process.dwProcessId, processes[i].strAppName, processes[i].Process.ProcessStartTime});
     }
     result.identification_error = error;
-    if (error != ERROR_SUCCESS || result.programs.empty()) IdentifyLoadedModules(result, candidates);
+    if (error != ERROR_SUCCESS || result.programs.empty()) {
+        IdentifyLoadedModules(result, candidates);
+    } else if (known_blocked && !unconfirmed_candidates.empty()) {
+        // Mixed batches can combine handle-locked files (Win32 32) with mapped DLLs
+        // (Win32 5, where CreateFileW(DELETE) succeeds); inspect the unconfirmed ones too.
+        IdentifyLoadedModules(result, unconfirmed_candidates);
+    }
     return result;
 }
 DWORD EndLockedProgram(const LockedProgram& program) {

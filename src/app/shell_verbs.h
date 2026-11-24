@@ -10,6 +10,7 @@
 #pragma once
 #include "../common/menu_icon.h"
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -29,6 +30,12 @@ struct StaticVerb {
     // the live pass fills it.
     std::wstring icon;
     common::MenuIconRef icon_pixels;  // ResolveStaticVerbIcons' result for `icon`
+    std::wstring delegate_clsid;
+    std::wstring drop_target_clsid;
+    std::wstring reg_key;
+    uint8_t reg_root = 0;             // 0 = HKCR, 1 = HKLM, 2 = HKCU
+    uint8_t multi_select_model = 0;   // 0 = Document/default, 1 = Player, 2 = Single
+    bool has_dde = false;
 };
 
 // 以管理员身份运行 / 以其他用户身份运行: the registry command beside these verbs

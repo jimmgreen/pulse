@@ -32,7 +32,7 @@ bool Valid(const State& s) {
             if (CompareStringOrdinal(path.c_str(), -1, s.hidden_places[j].c_str(), -1, TRUE) == CSTR_EQUAL) return false;
     }
     auto finite = [](float v) { return std::isfinite(v); };
-    if (s.view_mode < 0 || s.view_mode > 7 || s.sort < 0 || s.sort > 3 || s.collapsed_mask > 255 ||
+    if (s.view_mode < 0 || s.view_mode > 7 || s.sort < 0 || s.sort > 3 || s.collapsed_mask > 511 ||
         !finite(s.sidebar_width) || s.sidebar_width < 100 || s.sidebar_width > 1000 ||
         !finite(s.icon_dip) || s.icon_dip < 0 || s.icon_dip > 10000) return false;
     for (float v : s.column_widths) if (!finite(v) || v < 0 || v > 10000) return false;

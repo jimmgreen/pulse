@@ -2,6 +2,7 @@
 #include "app_internal.h"
 #include "app_messages.h"
 #include "app_navigation.h"
+#include "app_commands.h"
 #include "keymap.h"
 #include "window_arrange_ui.h"
 #include "window_overview_ui.h"
@@ -118,11 +119,13 @@ void ShowWindowManagementMenu(AppState &s, POINT screen) {
         item.shortcut = app::ShownShortcut(key);
         items.push_back(std::move(item));
     };
-    add(1, l10n::StringId::ActNewWindow, L"\xE78B", L"Ctrl+N");
+    // Own shapes (command_icons): NewWindow, WinOverview, TabToWindow;
+    // E78B / E8A7 both drew 用其他程序打开's arrow, E8A9 the icon view's grid.
+    add(1, l10n::StringId::ActNewWindow, L"\xF5D3", L"Ctrl+N");
     items.back().pictogram = ui::fluent::MenuPictogram::WindowNew;
-    add(2, l10n::StringId::WindowOverviewTitle, L"\xE8A9", L"Ctrl+Shift+O");
+    add(2, l10n::StringId::WindowOverviewTitle, L"\xF5D4", L"Ctrl+Shift+O");
     items.back().pictogram = ui::fluent::MenuPictogram::WindowOverview;
-    add(3, l10n::StringId::ActTabToWindow, L"\xE8A7", L"Ctrl+Shift+M");
+    add(3, l10n::StringId::ActTabToWindow, L"\xF5D2", L"Ctrl+Shift+M");
     items.back().pictogram = ui::fluent::MenuPictogram::WindowDetach;
     items.back().enabled = s.window_tabs.items.size() > 1;
     if (auto *tab = ActiveTab(s))
@@ -157,6 +160,9 @@ void ShowWindowManagementMenu(AppState &s, POINT screen) {
         items.push_back(hint);
     }
     items.back().separator_after = true;
+    // Settings stays one right-click away with its title button hidden.
+    add(30, l10n::StringId::ActOpenSettings, L"\xE713", L"Ctrl+,");
+    add(31, l10n::StringId::TitleBtnCustomize, L"\xF5CF");  // TitleButtons, not 重命名's pencil
     RECT owner{};
     GetWindowRect(s.hwnd, &owner);
     screen.x = (std::max)(owner.left + static_cast<LONG>(8*s.scale),
@@ -170,6 +176,10 @@ void ShowWindowManagementMenu(AppState &s, POINT screen) {
         PostMessageW(s.hwnd, WM_MOVE_TAB_TO_NEW_WINDOW, 0, 0);
     else if (cmd == 18)
         MergeAllWindows(s);
+    else if (cmd == 30)
+        OpenSettingsTab(s, s.settings.page());
+    else if (cmd == 31)
+        OpenTitleButtonSettings(s);
     else if (cmd >= 10 && cmd < 18)
         ArrangeWindows(s, static_cast<app::WindowArrangeLayout>(cmd - 10), (GetKeyState(VK_SHIFT) & 0x8000) != 0);
 }

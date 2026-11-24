@@ -47,6 +47,7 @@ struct BatchRenameDialogOptions {
     // Internal isolated-host probe only; delivered after two actual preview frames.
     std::function<void(HWND, std::function<bool(const std::wstring&)>)> on_review_ready;
 
+    bool ai_enabled = true;     // the assistant master switch, independent of connection
     std::wstring ai_model;   // shown in the AI bar and sent as "model"; empty = no connection
     // Starts a chat/completions request with this body. Null (with error
     // set) when it cannot start. Unset: the AI bar cannot send.
@@ -76,5 +77,15 @@ BatchRenameDialogResult ShowBatchRenameDialog(HWND owner,
                                               bool dark,
                                               D2D1_COLOR_F accent,
                                               const BatchRenameDialogOptions& options = {});
+
+#if defined(PULSE_TEST_BATCH_RENAME_PRESENT)
+enum class BatchRenameControlForTest {
+    Picker, Builtin, User, Last, DeleteUser, Save, ConfirmSave, AiExample, ContentMode, AddStep, PreviewFilter
+};
+using BatchRenameControlPointForTest = std::function<std::optional<POINT>(BatchRenameControlForTest, int)>;
+void BatchRenameShownForTest(HWND hwnd, const BatchRenameControlPointForTest& point);
+float BatchRenameScaleForTest();
+bool BatchRenameUsePresetStoreForTest();
+#endif
 
 } // namespace pulse::ui

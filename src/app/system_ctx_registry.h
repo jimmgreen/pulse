@@ -128,6 +128,8 @@ enum class OpResult { Ok, NotFound, Conflict, AccessDenied, Unsupported, Failed 
 
 Op MakeOp(const Item& item, Action action);
 Op MakePositionOp(const Item& item, Place place);
+bool CanRestoreShellLink(const Item& item);
+bool IsShellLinkRestore(const Op& op);
 // Reads the current verb values and fixes op.mask (no-op for other kinds).
 void PlanOp(const Roots& roots, Op& op);
 // Location of the item after `op` ran (shellex keys move between

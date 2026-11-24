@@ -34,7 +34,7 @@ enum class PreviewFamily {
 namespace formats {
 
 inline constexpr std::wstring_view kText[] = {
-    L".txt", L".md", L".log", L".json", L".xml", L".yaml", L".yml",
+    L".txt", L".md", L".log", L".json", L".jsonl", L".ndjson", L".xml", L".yaml", L".yml",
     L".ini", L".cfg", L".conf", L".csv", L".tsv", L".cpp", L".c",
     L".h", L".hpp", L".cc", L".cxx", L".cs", L".java", L".js",
     L".jsx", L".ts", L".tsx", L".py", L".rs", L".go", L".php",
@@ -44,7 +44,7 @@ inline constexpr std::wstring_view kText[] = {
 };
 
 inline constexpr std::wstring_view kImage[] = {
-    L".jpg", L".jpeg", L".png", L".gif", L".bmp", L".tif", L".tiff",
+    L".jpg", L".jpeg", L".jpe", L".jfif", L".png", L".apng", L".gif", L".bmp", L".tif", L".tiff",
     L".webp", L".heic", L".heif", L".hif", L".avif", L".ico", L".cur"
 };
 
@@ -59,8 +59,8 @@ inline constexpr std::wstring_view kVideo[] = {
     L".mpg", L".mpeg", L".m2ts", L".mts", L".3gp"
 };
 inline constexpr std::wstring_view kAudio[] = {
-    L".mp3", L".wav", L".flac", L".m4a", L".aac", L".wma", L".ogg",
-    L".oga", L".opus", L".aif", L".aiff"
+    L".mp3", L".wav", L".flac", L".m4a", L".m4b", L".aac", L".wma", L".ogg",
+    L".oga", L".opus", L".aif", L".aiff", L".aifc"
 };
 
 // Vector documents WIC cannot decode but Direct2D renders natively. They are

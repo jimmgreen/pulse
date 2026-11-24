@@ -14,6 +14,9 @@ void Check(bool ok, const char* what) {
 }
 int W(const RECT& r) { return r.right - r.left; }
 int H(const RECT& r) { return r.bottom - r.top; }
+bool SameRect(const RECT& a, const RECT& b) {
+    return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
+}
 bool Inside(const RECT& r, const RECT& work) {
     return r.left >= work.left && r.top >= work.top && r.right <= work.right && r.bottom <= work.bottom;
 }
@@ -110,6 +113,30 @@ int main() {
         in.work = RECT{0, 0, 0, 0};
         const RECT none = PreviewWindowRect(in);
         Check(W(none) == 0, "empty work area gives an empty rect");
+    }
+    {   // CascadePreviewRect keeps newly opened previews visible beside pinned ones.
+        const RECT work{0, 0, 1920, 1040};
+        const RECT base{460, 170, 1460, 870};
+        const RECT untouched = CascadePreviewRect(base, work, {}, 1.0f);
+        Check(SameRect(base, untouched),
+              "cascade: untouched when no pinned preview exists");
+        const RECT shifted1 = CascadePreviewRect(base, work, {base}, 1.0f);
+        Check(Inside(shifted1, work) && W(shifted1) == W(base) && H(shifted1) == H(base) &&
+              (shifted1.left != base.left || shifted1.top != base.top),
+              "cascade: nudges away from a pinned window at the same origin");
+        const RECT shifted2 = CascadePreviewRect(base, work, {base, shifted1}, 1.0f);
+        Check(Inside(shifted2, work) &&
+              (shifted2.left != base.left || shifted2.top != base.top) &&
+              (shifted2.left != shifted1.left || shifted2.top != shifted1.top),
+              "cascade: avoids multiple stacked pinned windows");
+        const RECT corner{920, 340, 1920, 1040};
+        const RECT wrapped = CascadePreviewRect(corner, work, {corner}, 1.0f);
+        Check(Inside(wrapped, work) && (wrapped.left != corner.left || wrapped.top != corner.top),
+              "cascade: wraps inside work area near bottom-right corner");
+        const RECT full = work;
+        const RECT full_out = CascadePreviewRect(full, work, {full}, 1.0f);
+        Check(SameRect(full, full_out),
+              "cascade: full work-area preview stays anchored");
     }
 
     uint32_t w = 0, h = 0;

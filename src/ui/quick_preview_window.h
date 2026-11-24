@@ -41,13 +41,14 @@ public:
     QuickPreviewWindow& operator=(const QuickPreviewWindow&) = delete;
 
     bool Initialize(HWND owner, UINT navigate_message, UINT open_message,
-                    UINT command_message = 0);
+                    UINT command_message = 0, HWND message_receiver = nullptr, bool detached_popup = false);
     // zoom_from: screen point of the previewed item's icon; the window grows
     // out of it and shrinks back into it on Close (ui_motion.h rules).
     // activate false: the press-and-hold peek; focus and the mouse stay with
     // the owner and media start muted until Activate.
     void Show(const QuickPreviewItem& item, bool dark, WindowEffect effect, bool safe_mode,
-              const POINT* zoom_from = nullptr, bool activate = true);
+              const POINT* zoom_from = nullptr, bool activate = true,
+              const std::vector<RECT>* avoid_rects = nullptr);
     bool InitializeEmbedded(HWND owner, UINT navigate_message, UINT open_message, UINT command_message);
     void ShowEmbedded(const QuickPreviewItem& item, RECT bounds, bool dark, bool safe_mode);
     void SetEmbeddedBounds(RECT bounds);
@@ -64,7 +65,7 @@ public:
     void SetAccent(const D2D1_COLOR_F& accent);
     // Settings > 快速预览 > 预览窗口; call before Show. What the window changes
     // itself is reported with QuickPreviewAction::SaveOptions.
-    void SetOptions(const QuickPreviewOptions& options) { options_ = options; }
+    void SetOptions(const QuickPreviewOptions& options);
     const QuickPreviewOptions& options() const noexcept { return options_; }
     // The FFmpeg preview pack offer on the codec cards; repaints on change.
     void SetMediaPackOffer(const MediaPackOffer& offer);
@@ -77,6 +78,14 @@ public:
     void OnExtraPackInstalled();
     void Close();
     bool visible() const noexcept;
+    bool closing() const noexcept { return closing_; }
+    bool always_on_top() const noexcept { return always_on_top_; }
+    bool pinned() const noexcept { return pinned_detached_; }
+    void SetAlwaysOnTop(bool on_top);
+    void ToggleAlwaysOnTop();
+    void DetachAsIndependent(HWND new_message_receiver = nullptr, UINT new_open_message = 0,
+                             UINT new_command_message = 0);
+    void SetMessageReceiver(HWND receiver, UINT open_message = 0, UINT command_message = 0);
     HWND hwnd() const noexcept { return hwnd_; }
     const QuickPreviewItem& item() const noexcept { return item_; }
     bool TakeCommand(UINT_PTR token, QuickPreviewCommand& command) { return commands_.Take(token, command); }
@@ -84,6 +93,7 @@ public:
     std::wstring TakeOpenPath() { std::wstring path; path.swap(open_path_); return path; }
 
 private:
+    friend void ClipEmbeddedPreview(QuickPreviewWindow&, const D2D1_RECT_F&, const D2D1_RECT_F&);
     bool embedded_ = false;
     bool embedded_open_ = false;
     bool embedded_occluded_ = false;
@@ -98,13 +108,22 @@ private:
     friend struct PreviewDeadlineProbe;
     // Pages: multi-page PDF / AI read as a continuous scroll (quick_preview_pages.cpp).
     enum class NativeKind { None, Bitmap, Text, Hex, Archive, Pages, Markdown, Table, Tree, Model };
-    enum class ChromeButton { None, Prev, Next, More, Open, Size };
+    enum class ChromeButton { None, Prev, Next, More, Open, Size, Pin };
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
     LRESULT HandleMessage(UINT message, WPARAM wparam, LPARAM lparam);
     void Render();
     void SchedulePreviewDeadline();
     uint64_t preview_deadline_ = 0;
+    struct FrameEvidence {
+        uint32_t phase = 0, route = 0, draw = 0, content = 0, flags = 0;
+        uint32_t end_draw = 0, present = 0;
+        bool operator==(const FrameEvidence&) const = default;
+    };
+    void RecordFrameEvidence(FrameEvidence evidence, uint64_t text_units);
+    FrameEvidence diagnostic_frame_{};
+    uint64_t diagnostic_generation_ = 0;
+    uint64_t diagnostic_view_id_ = 0;
     void Resize();
     void ResetView();
     void RecreateFormats();
@@ -145,6 +164,8 @@ private:
     void DrawFfmpegFrame(ID2D1DeviceContext* dc, const D2D1_RECT_F& frame, float radius);
     bool PlaybackHover(POINT client);             // true when hover state changed
     void SetPlaybackVolume(float value);
+    float PlaybackVolume() const noexcept { return static_cast<float>(options_.volume_percent) / 100.0f; }
+    void FinishPlaybackVolumeDrag();
     void DragPlaybackVolume(float x);
     std::vector<FluentMenuItem> PlaybackTrackItems(bool subtitles, const VideoPreview::State& state) const;
     void ShowPlaybackTracks(bool subtitles, POINT point);
@@ -180,6 +201,10 @@ private:
     void ResetTextState();
 
     // Paged documents (quick_preview_pages.cpp).
+    struct OverlayScrollbar {
+        D2D1_RECT_F hit{}, thumb{};
+        float travel = 0.0f, maximum = 0.0f;
+    };
     struct PagesLayout {
         D2D1_RECT_F strip{};   // thumbnail strip; empty when hidden
         D2D1_RECT_F view{};    // page area
@@ -189,6 +214,19 @@ private:
     };
     void ResetPages();
     PagesLayout ComputePagesLayout() const;
+    OverlayScrollbar PagesScrollbar() const;
+    bool OverPagesScrollbar(float x, float y) const;
+    bool PagesScrollbarMouseDown(float x, float y);
+    bool PagesScrollbarMouseMove(float y);
+    bool PagesScrollbarHover(float x, float y);
+    OverlayScrollbar TextScrollbar() const;
+    bool OverTextScrollbar(float x, float y) const;
+    bool TextScrollbarMouseDown(float x, float y);
+    bool TextScrollbarMouseMove(float y);
+    bool TextScrollbarHover(float x, float y);
+    bool OverPreviewScrollbar(float x, float y) const;
+    bool DraggingPreviewScrollbar() const noexcept;
+    void EndPreviewScrollbarDrags() noexcept;
     float PageAspect(uint32_t page) const noexcept;
     float PageTop(const PagesLayout& layout, uint32_t page) const;
     float PagesDocHeight(const PagesLayout& layout) const;
@@ -305,7 +343,8 @@ private:
     // Unified header and footer (quick_preview_chrome.cpp).
     struct HeaderLayout {
         D2D1_RECT_F badge{}, name{}, meta{}, tools{}, separator{}, prev{}, counter{}, next{},
-            open{}, more{}, size{}, close{};
+            open{}, pin{}, size{}, more{}, close{};
+        bool nav_visible = true;      // detached/independent windows hide list navigation
         bool meta_visible = true;     // narrow windows drop the meta line first,
         bool tools_visible = true;    // then fold the type tools into the more menu,
         bool open_text = true;        // then show only the open button's icon,
@@ -400,6 +439,13 @@ private:
 
     HWND hwnd_ = nullptr;
     HWND owner_ = nullptr;
+    HWND message_owner_ = nullptr;
+    bool detached_popup_ = false;
+    bool always_on_top_ = false;
+    bool pinned_detached_ = false;
+    bool window_active_ = true;
+    void ApplyAlwaysOnTopWindowPos();
+    bool HasNavigation() const noexcept { return !pinned_detached_ && navigate_message_ != 0; }
     UINT navigate_message_ = 0;
     UINT open_message_ = 0;
     std::wstring open_path_;  // folder listing item for open_message_ (wParam 1)
@@ -410,6 +456,9 @@ private:
     // Room for a few full-window pictures (a 4K window's frame is ~32 MB).
     NativePreviewView native_preview_;
     ThumbnailCache thumbnails_{160ull * 1024ull * 1024ull, 192};
+    // Tiles of the archive / folder thumbnail view (ArchivePreview), kept
+    // apart so they never evict the previewed file itself.
+    ThumbnailCache tile_thumbs_{32ull * 1024ull * 1024ull, 256};
     PreviewHandlerHost handler_;
     VideoPreview video_;
     AudioWaveform waveform_;
@@ -424,8 +473,6 @@ private:
     ULONGLONG playback_last_seek_ms_ = 0;
     float playback_hover_x_ = -1.0f;   // pointer x over the seek track, or -1
     int playback_hover_button_ = -1;   // 0..2 transport, 3 volume, 4 speed, 5 audio, 6 subtitles
-    float playback_volume_ = 1.0f;     // session-wide
-    bool playback_muted_ = false;      // session-wide
     float playback_rate_ = 1.0f;       // per file
     std::wstring playback_note_;       // transient chip text (volume / speed)
     ULONGLONG playback_note_until_ = 0;
@@ -506,16 +553,15 @@ private:
     TableView table_;
     uint32_t sheet_request_ = 0;
     bool table_source_ = false;   // session-wide: CSV shown as source
-    bool table_handler_ = false;  // session-wide: XLSX in the system preview handler
     TreeView tree_;
     bool tree_source_ = false;      // session-wide: JSON/XML shown as source
     bool notebook_source_ = false;  // session-wide: notebooks shown as source
-    bool doc_handler_ = false;      // explicit system preview choice for the current document
     uint32_t icon_request_ = 0;     // frame_index for .ico/.cur: 0 largest, k entry k-1
     std::vector<IconSize> icon_sizes_;
     int icon_selected_ = -1;
     std::vector<D2D1_RECT_F> icon_pill_rects_;
     bool& ToggleSecond() noexcept;  // the flag the title-bar pill switches
+    void SetToggleSecond(bool second);
     bool panning_ = false;
     POINT pan_anchor_{};
     float pan_start_x_ = 0.0f;
@@ -547,6 +593,14 @@ private:
     float pages_strip_scroll_ = 0.0f;
     uint32_t pages_follow_ = UINT32_MAX; // strip auto-follows when the current page changes
     bool pages_strip_ = true;
+    bool pages_scrollbar_drag_ = false;
+    bool pages_scrollbar_hover_ = false;
+    float pages_scrollbar_press_ = 0.0f;
+    float pages_scrollbar_start_ = 0.0f;
+    bool text_scrollbar_drag_ = false;
+    bool text_scrollbar_hover_ = false;
+    float text_scrollbar_press_ = 0.0f;
+    float text_scrollbar_start_ = 0.0f;
 
     std::wstring preview_text_;
     PreviewTextIdentity preview_text_identity_;

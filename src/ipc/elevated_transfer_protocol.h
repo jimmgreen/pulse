@@ -25,7 +25,7 @@ inline bool SafeTransferName(const std::wstring& name, size_t count, bool move) 
     return name.empty() || (move && count == 1 && name.size() <= kMaxString && pulse::IsRenameFilename(name));
 }
 using Nonce = std::array<unsigned char, 16>;
-enum class Kind : uint16_t { Hello = 1, Transfer, Cancel, Pause, Resume, ConflictReply, Progress, Conflict, CompletedItem, Result, Shutdown, RecycleDelete, PermanentDelete, DeletedItem, CreateFolder, EjectVirtualDisk };
+enum class Kind : uint16_t { Hello = 1, Transfer, Cancel, Pause, Resume, ConflictReply, Progress, Conflict, CompletedItem, Result, Shutdown, RecycleDelete, PermanentDelete, DeletedItem, CreateFolder, EjectVirtualDisk, ListFolder, FolderRows };
 #pragma pack(push, 1)
 struct Header {
     uint32_t magic = kMagic;
@@ -39,7 +39,7 @@ struct Header {
 static_assert(sizeof(Header) == 36);
 inline bool ValidHeader(const Header& header, const Nonce& nonce) {
     return header.magic == kMagic && header.version == kVersion && header.bytes <= kMaxPayload &&
-        header.nonce == nonce && header.kind >= Kind::Hello && header.kind <= Kind::EjectVirtualDisk;
+        header.nonce == nonce && header.kind >= Kind::Hello && header.kind <= Kind::FolderRows;
 }
 struct Writer {
     std::vector<unsigned char> bytes;

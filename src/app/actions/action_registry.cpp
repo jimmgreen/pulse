@@ -16,6 +16,7 @@
 #include "../drive_verbs.h"
 #include "../git_ui.h"
 #include "../app_messages.h"
+#include "../ai_assistant.h"
 #include "../ai_assistant_chat.h"
 #include "../context_menu.h"
 #include "../favorites_bar.h"
@@ -665,7 +666,7 @@ constexpr Def kDefs[] = {
      +[](AppState& s) { CloseActiveTab(s); }, kAlways},
     {"window.reopen", I::ActReopenClosed, I::ActDomTabs, L"\xE7A7", P::None, L"Ctrl+Shift+T", 0,
      +[](AppState& s) { ReopenLastClosed(s); }, kAlways},
-    {"tab.to_window", I::ActTabToWindow, I::ActDomTabs, L"\xE8A7", P::None, L"Ctrl+Shift+M", 0,
+    {"tab.to_window", I::ActTabToWindow, I::ActDomTabs, L"\xF5D2", P::None, L"Ctrl+Shift+M", 0,
      +[](AppState& s) { Post(s, WM_MOVE_TAB_TO_NEW_WINDOW); }, kAlways},
     // 窗口与分栏
     {"window.layout", I::ActLayout, I::ActDomWindow, nullptr, P::LayoutSideBySide, kNoKey, 0,
@@ -674,23 +675,23 @@ constexpr Def kDefs[] = {
      +[](AppState& s) { MarkTargetPane(s); }, FillPanes},
     {"pane.to_window", I::ActPaneToWindow, I::ActDomWindow, L"\xE8A7", P::None, kNoKey, 0, PaneToWindow,
      FillPanes},
-    {"window.new", I::ActNewWindow, I::ActDomWindow, L"\xE78B", P::None, L"Ctrl+N", 0,
+    {"window.new", I::ActNewWindow, I::ActDomWindow, L"\xF5D3", P::None, L"Ctrl+N", 0,
      +[](AppState& s) { Post(s, WM_NEW_WINDOW); }, kAlways},
     {"window.close", I::ActCloseWindow, I::ActDomWindow, L"\xE8BB", P::None, L"Ctrl+Shift+W", 0,
      +[](AppState& s) { Post(s, WM_CLOSE); }, kAlways},
-    {"window.overview", I::WindowOverviewTitle, I::ActDomWindow, L"\xE7C4", P::None, L"Ctrl+Shift+O", 0,
+    {"window.overview", I::WindowOverviewTitle, I::ActDomWindow, L"\xF5D4", P::None, L"Ctrl+Shift+O", 0,
      +[](AppState& s) { ToggleWindowOverview(s); }, kAlways},
-    {"window.arrange", I::ArrangeSideBySide, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+    {"window.arrange", I::ArrangeSideBySide, I::ActDomWindow, L"\xF5DC", P::None, kNoKey, 0,
      +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::SideBySide); }, kAlways},
-    {"window.arrange", I::ArrangeStacked, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+    {"window.arrange", I::ArrangeStacked, I::ActDomWindow, L"\xF5DC", P::None, kNoKey, 0,
      +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Stacked); }, kAlways},
-    {"window.arrange", I::ArrangeColumns, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+    {"window.arrange", I::ArrangeColumns, I::ActDomWindow, L"\xF5DC", P::None, kNoKey, 0,
      +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Columns); }, kAlways},
-    {"window.arrange", I::ArrangeTile, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+    {"window.arrange", I::ArrangeTile, I::ActDomWindow, L"\xF5DC", P::None, kNoKey, 0,
      +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Tile); }, kAlways},
-    {"window.arrange", I::ArrangeMain, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+    {"window.arrange", I::ArrangeMain, I::ActDomWindow, L"\xF5DC", P::None, kNoKey, 0,
      +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Main); }, kAlways},
-    {"window.arrange", I::ArrangeCascade, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+    {"window.arrange", I::ArrangeCascade, I::ActDomWindow, L"\xF5DC", P::None, kNoKey, 0,
      +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Cascade); }, kAlways},
     {"window.merge", I::ActMergeWindows, I::ActDomWindow, L"\xE8C8", P::None, L"Ctrl+Shift+J", 0,
      +[](AppState& s) { MergeAllWindows(s); }, kAlways},
@@ -785,7 +786,7 @@ constexpr Def kDefs[] = {
     {"alias.manage", I::ManageAliasesEllipsis, I::ActDomTags, L"\xE8EC", P::None, kNoKey,
      CmdManageAliases, kNoRun, kAlways},
     // 暂存区
-    {"tray.add", I::ActStageToTray, I::ActDomTray, L"\xE7B8", P::None, L"Ctrl+Shift+S", CmdStageToTray,
+    {"tray.add", I::ActStageToTray, I::ActDomTray, L"\xE8A1", P::None, L"Ctrl+Shift+S", CmdStageToTray,
      kNoRun, FillSelection},
     // 搜索
     {"search.advanced", I::AdvancedSearch, I::ActDomSearch, L"\xF5B7", P::None, L"Ctrl+Shift+F",
@@ -811,9 +812,9 @@ constexpr Def kDefs[] = {
     {"tab.group", I::ActTabGroup, I::ActDomTabs, L"\xF168", P::None, kNoKey, 0, kNoRun, FillTabGroup, PickTabGroup},
     {"tab.duplicate", I::TabDuplicate, I::ActDomTabs, L"\xE8C8", P::None, kNoKey, 0,
      +[](AppState& s) { RunTab(s, CmdTabDuplicate); }, kAlways},
-    {"tab.close_others", I::TabCloseOthers, I::ActDomTabs, L"\xE711", P::None, kNoKey, 0,
+    {"tab.close_others", I::TabCloseOthers, I::ActDomTabs, L"\xE711", P::None, L"Ctrl+Alt+W", 0,
      +[](AppState& s) { RunTab(s, CmdTabCloseOthers); }, FillManyTabs},
-    {"tab.activate", I::ActTabActivate, I::ActDomTabs, L"\xE7C4", P::None, L"Ctrl+Tab", 0, kNoRun, FillTabList, PickTab},
+    {"tab.activate", I::ActTabActivate, I::ActDomTabs, L"\xF5C7", P::None, L"Ctrl+Tab", 0, kNoRun, FillTabList, PickTab},
     {"pane.focus", I::ActPaneFocus, I::ActDomWindow, L"\xE7C4", P::None, L"Tab", 0, kNoRun, FillPaneList, PickPane},
     {"window.activate", I::ActWindowActivate, I::ActDomWindow, L"\xE78B", P::None, kNoKey, 0, kNoRun, FillWindowList,
      PickWindow},
@@ -888,12 +889,20 @@ constexpr Def kDefs[] = {
     {"toolbar.tools", I::ActToolbarTools, I::ActDomApp, L"\xE9E9", P::None, kNoKey, CmdCustomizeToolbar, kNoRun,
      kAlways, nullptr, true},
     // P4b: Git
+    {"git.source_control", I::GitScMenu, I::ActDomFiles, L"\xF003", P::None, kNoKey, 0,
+     +[](AppState& s) { RunGitCommand(s, kCmdGitSourceControl); }, FillGit},
     {"git.refresh", I::GitRefresh, I::ActDomFiles, L"\xE72C", P::None, kNoKey, 0,
      +[](AppState& s) { RunGitCommand(s, kCmdGitRefresh); }, FillGit},
     {"git.pull", I::GitPull, I::ActDomFiles, L"\xE896", P::None, kNoKey, 0,
      +[](AppState& s) { RunGitCommand(s, kCmdGitPull); }, FillGit},
     {"git.push", I::GitPush, I::ActDomFiles, L"\xE898", P::None, kNoKey, 0,
      +[](AppState& s) { RunGitCommand(s, kCmdGitPush); }, FillGit},
+    {"git.sync", I::GitSyncLabel, I::ActDomFiles, L"\xE895", P::None, kNoKey, 0,
+     +[](AppState& s) { RunGitCommand(s, kCmdGitSync); }, FillGit},
+    {"git.branches", I::GitScBranch, I::ActDomFiles, L"\xF003", P::None, kNoKey, 0,
+     +[](AppState& s) { RunGitCommand(s, kCmdGitBranches); }, FillGit},
+    {"git.history", I::GitHistoryGit, I::ActDomFiles, L"\xE81C", P::None, kNoKey, 0,
+     +[](AppState& s) { RunGitCommand(s, kCmdGitHistory); }, FillGit},
     // P4b: 云盘与驱动器
     {"cloud.keep", I::CloudKeepOnDevice, I::ActDomFiles, L"\xE718", P::None, kNoKey, CmdCloudKeep, kNoRun,
      FillCloudPin},
@@ -910,7 +919,7 @@ constexpr Def kDefs[] = {
     {"assistant.prefs", I::ActAssistantPrefs, I::ActDomApp, L"\xE713", P::None, kNoKey, 0,
      +[](AppState& s) { OpenSettingsTab(s, 13); }, kAlways},
     // 应用
-    {"app.settings_page", I::ActOpenSettings, I::ActDomApp, L"\xE713", P::None, kNoKey, CmdSettings,
+    {"app.settings_page", I::ActOpenSettings, I::ActDomApp, L"\xE713", P::None, L"Ctrl+,", CmdSettings,
      kNoRun, kAlways},
     {"app.shortcut_help", I::ShortcutHints, I::ActDomApp, L"\xE765", P::None, L"Ctrl+/", CmdShortcutHelp,
      kNoRun, kAlways},
@@ -938,7 +947,7 @@ constexpr std::pair<std::string_view, const wchar_t*> kSettingGlyphs[] = {
     {"theme", L"\xE706"}, {"window_effect", L"\xE81E"}, {"text_rendering", L"\xE8D2"},
     {"font_size", L"\xE8E9"}, {"language", L"\xE774"}, {"row_height", L"\xECE7"},
     {"click_to_open", L"\xE8B0"}, {"name_highlight", L"\xE7E6"}, {"blank_double_click", L"\xE72B"},
-    {"folders_first", L"\xE8CB"}, {"alias_mark", L"\xE8AC"}, {"tree_sticky", L"\xE840"}, {"mtime_marks", L"\xE916"},
+    {"folders_first", L"\xE8CB"}, {"alias_mark", L"\xE8AC"}, {"tree_sticky", L"\xE840"}, {"mtime_marks", L"\xEC92"},
     {"mtime_range", L"\xEC92"}, {"startup_open", L"\xE81C"}, {"new_tab_open", L"\xECCD"},
     {"external_open", L"\xE8AD"}, {"tray_icon", L"\xECAA"}, {"open_folders_with_pulse", L"\xEC50"},
     {"staging_icon_size", L"\xED1E"}, {"change_days", L"\xE9D5"},
@@ -951,6 +960,7 @@ constexpr std::pair<std::string_view, const wchar_t*> kSettingGlyphs[] = {
     {"vertical_tabs", L"\xE8A0"}, {"pinned_tab_names", L"\xE718"}, {"double_click_closes_tab", L"\xEA39"},
     {"close_window_with_last_tab", L"\xE89F"}, {"launch_at_signin", L"\xEC57"}, {"start_in_tray", L"\xE896"},
     {"keep_running", L"\xE9F5"}, {"explorer_tag_menu", L"\xE838"}, {"staging_hide_when_empty", L"\xE8F6"},
+    {"shelf_shake", L"\xE7C2"}, {"shelf_sensitivity", L"\xE8A4"}, {"shelf_position", L"\xE8A7"}, {"shelf_auto_hide", L"\xE718"},
     {"change_tracking", L"\xE823"}, {"lan_discovery", L"\xE701"}, {"network_recent", L"\xE81C"},
     {"hidden_shares", L"\xED1A"}, {"confirm_delete", L"\xE897"}, {"global_search", L"\xE721"},
     {"pinyin_search", L"\xE721"},
@@ -993,6 +1003,7 @@ std::vector<ActionView> ListActions(AppState& s) {
     out.reserve(static_cast<size_t>(kDefCount) + settings.size());
     for (int i = 0; i < kDefCount; ++i) {
         const Def& d = kDefs[i];
+        if (d.command == CmdAiOrganizeHere && !AiAssistantEnabled(s)) continue;
         ActionView v;
         v.index = i;
         v.id = d.id;
@@ -1035,6 +1046,7 @@ bool RunAction(AppState& s, int index, int choice) {
         return true;
     }
     const Def& d = kDefs[index];
+    if (d.command == CmdAiOrganizeHere && !AiAssistantEnabled(s)) return false;
     ActionView v;
     if (d.fill) d.fill(s, v);
     if (!v.enabled) return false;

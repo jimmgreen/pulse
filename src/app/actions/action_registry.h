@@ -68,10 +68,10 @@ enum class PaletteMode {
 };
 // The rows for `needle` (already without ">"). `used` holds the actions run
 // this session, newest first. Commands mode with an empty needle lists the
-// used ones and the fixed 常用 rows.
+// used ones and the fixed 常用 rows. The no-match assistant suggestion is optional.
 std::vector<ui::FluentMenuItem> PaletteRows(const std::vector<ActionView>& views,
                                             std::wstring_view needle, PaletteMode mode,
-                                            const std::vector<int>& used);
+                                            const std::vector<int>& used, bool offer_assistant);
 // The view's palette row (its choices renumbered to palette commands).
 ui::FluentMenuItem PaletteRow(const ActionView& view);
 

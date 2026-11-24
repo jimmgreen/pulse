@@ -4,6 +4,7 @@
 
 #include <appmodel.h>
 #include <ocidl.h>
+#include <oleauto.h>
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <xmllite.h>
@@ -13,6 +14,7 @@
 #include <mutex>
 #include <new>
 
+#pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "xmllite.lib")
 
@@ -33,6 +35,15 @@ void SetSiteOf(IUnknown* object, IUnknown* site) {
     if (object && SUCCEEDED(object->QueryInterface(IID_PPV_ARGS(&with_site))) && with_site) {
         with_site->SetSite(site);
         with_site->Release();
+    }
+}
+
+void SetSelectionOf(IUnknown* object, IShellItemArray* items) {
+    if (!object || !items) return;
+    IObjectWithSelection* with_sel = nullptr;
+    if (SUCCEEDED(object->QueryInterface(IID_PPV_ARGS(&with_sel))) && with_sel) {
+        with_sel->SetSelection(items);
+        with_sel->Release();
     }
 }
 
@@ -146,13 +157,14 @@ std::vector<PackagedCtxVerb> ScanPackages() {
 
 class ExplorerCommandMenu final : public IContextMenu {
 public:
-    ExplorerCommandMenu(IExplorerCommand* command, IShellItemArray* items, IUnknown* site)
-        : root_(command), items_(items), site_(site) {
-        root_->AddRef();
+    ExplorerCommandMenu(std::vector<IExplorerCommand*> roots, IShellItemArray* items, IUnknown* site)
+        : roots_(std::move(roots)), items_(items), site_(site) {
         if (items_) items_->AddRef();
-        if (site_) {
-            site_->AddRef();
-            SetSiteOf(root_, site_);
+        if (site_) site_->AddRef();
+        for (auto* root : roots_) {
+            root->AddRef();
+            if (site_) SetSiteOf(root, site_);
+            if (items_) SetSelectionOf(root, items_);
         }
     }
 
@@ -178,7 +190,7 @@ public:
         ReleaseCommands();
         if (!menu || (flags & CMF_DEFAULTONLY)) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
         UINT next = first;
-        AddCommand(menu, index, root_, last, next, 0);
+        for (auto* root : roots_) AddCommand(menu, index, root, last, next, 0);
         return MAKE_HRESULT(SEVERITY_SUCCESS, 0, static_cast<USHORT>(next - first));
     }
 
@@ -196,17 +208,24 @@ public:
 private:
     ~ExplorerCommandMenu() {
         ReleaseCommands();
-        if (site_) {
-            SetSiteOf(root_, nullptr);
-            site_->Release();
+        for (auto* root : roots_) {
+            if (site_) SetSiteOf(root, nullptr);
+            root->Release();
         }
+        if (site_) site_->Release();
         if (items_) items_->Release();
-        root_->Release();
+    }
+
+    bool IsRootCommand(IExplorerCommand* command) const noexcept {
+        return std::find(roots_.begin(), roots_.end(), command) != roots_.end();
     }
 
     void ReleaseCommands() {
-        for (auto* command : commands_)
-            if (command) command->Release();
+        for (auto* command : commands_) {
+            if (!command) continue;
+            if (site_ && !IsRootCommand(command)) SetSiteOf(command, nullptr);
+            command->Release();
+        }
         commands_.clear();
         for (auto bitmap : bitmaps_) DeleteObject(bitmap);
         bitmaps_.clear();
@@ -274,20 +293,34 @@ private:
     // for a submenu parent), so InvokeCommand's offset indexes commands_.
     bool AddCommand(HMENU menu, UINT& position, IExplorerCommand* command, UINT last,
                     UINT& next, int depth) {
-        if (site_ && depth > 0) SetSiteOf(command, site_);
+        auto clear_child_site = [&]() {
+            if (depth > 0 && site_ && !IsRootCommand(command)) SetSiteOf(command, nullptr);
+        };
+        if (depth > 0) {
+            if (site_) SetSiteOf(command, site_);
+            if (items_) SetSelectionOf(command, items_);
+        }
         EXPCMDSTATE state = ECS_ENABLED;
         if (FAILED(command->GetState(items_, TRUE, &state))) state = ECS_ENABLED;
-        if (state & ECS_HIDDEN) return false;
+        if (state & ECS_HIDDEN) {
+            clear_child_site();
+            return false;
+        }
         EXPCMDFLAGS flags = ECF_DEFAULT;
         if (FAILED(command->GetFlags(&flags))) flags = ECF_DEFAULT;
         if (flags & ECF_ISSEPARATOR) {
+            clear_child_site();
             if (depth > 0) InsertSeparator(menu, position);
             return depth > 0;
         }
-        if (next > last) return false;
+        if (next > last) {
+            clear_child_site();
+            return false;
+        }
         LPWSTR title = nullptr;
         if (FAILED(command->GetTitle(items_, &title)) || !title || !title[0]) {
             CoTaskMemFree(title);
+            clear_child_site();
             return false;
         }
         MENUITEMINFOW info{ sizeof(info) };
@@ -319,8 +352,12 @@ private:
                 // A flyout without visible children is not shown by Explorer either;
                 // give back its id so the returned count matches the menu.
                 if (submenu) DestroyMenu(submenu);
-                for (size_t i = first_slot; i < commands_.size(); ++i)
-                    if (commands_[i]) commands_[i]->Release();
+                for (size_t i = first_slot; i < commands_.size(); ++i) {
+                    if (!commands_[i]) continue;
+                    if (site_ && !IsRootCommand(commands_[i])) SetSiteOf(commands_[i], nullptr);
+                    commands_[i]->Release();
+                }
+                if (site_ && !IsRootCommand(command)) SetSiteOf(command, nullptr);
                 commands_.resize(first_slot);
                 next = first_id;
                 CoTaskMemFree(title);
@@ -329,6 +366,7 @@ private:
             info.fMask |= MIIM_SUBMENU;
             info.hSubMenu = submenu;
         } else if (flags & ECF_HASSUBCOMMANDS) {
+            clear_child_site();
             CoTaskMemFree(title);
             return false;
         } else {
@@ -349,18 +387,117 @@ private:
     }
 
     LONG refs_ = 1;
-    IExplorerCommand* root_ = nullptr;
+    std::vector<IExplorerCommand*> roots_;
     IShellItemArray* items_ = nullptr;
     IUnknown* site_ = nullptr;
     std::vector<IExplorerCommand*> commands_;
     std::vector<HBITMAP> bitmaps_;
 };
 
+// --- read-only registry property bag ---------------------------------------
+
+class RegPropertyBag final : public IPropertyBag {
+public:
+    explicit RegPropertyBag(HKEY key) : key_(key) {}
+
+    IFACEMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IPropertyBag) {
+            *ppv = static_cast<IPropertyBag*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    IFACEMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&refs_); }
+    IFACEMETHODIMP_(ULONG) Release() override {
+        const ULONG refs = InterlockedDecrement(&refs_);
+        if (refs == 0) delete this;
+        return refs;
+    }
+
+    IFACEMETHODIMP Read(LPCOLESTR prop_name, VARIANT* var, IErrorLog*) override {
+        if (!var) return E_POINTER;
+        if (!prop_name || !key_) return E_INVALIDARG;
+        const VARTYPE requested = var->vt;
+        DWORD type = 0;
+        DWORD bytes = 0;
+        if (RegQueryValueExW(key_, prop_name, nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS)
+            return E_INVALIDARG;
+        VARIANT raw{};
+        VariantInit(&raw);
+        if (type == REG_SZ || type == REG_EXPAND_SZ) {
+            const size_t cch = (bytes / sizeof(wchar_t)) + 1;
+            std::vector<wchar_t> buf(cch, L'\0');
+            if (RegQueryValueExW(key_, prop_name, nullptr, &type,
+                                 reinterpret_cast<LPBYTE>(buf.data()), &bytes) != ERROR_SUCCESS)
+                return E_FAIL;
+            buf.back() = L'\0';
+            std::wstring value(buf.data());
+            if (type == REG_EXPAND_SZ && !value.empty()) {
+                const DWORD needed = ExpandEnvironmentStringsW(value.c_str(), nullptr, 0);
+                if (needed > 0 && needed <= 32768) {
+                    std::wstring expanded(needed, L'\0');
+                    const DWORD written = ExpandEnvironmentStringsW(value.c_str(), expanded.data(), needed);
+                    if (written > 0 && written <= needed) {
+                        expanded.resize(wcsnlen(expanded.c_str(), expanded.size()));
+                        value = std::move(expanded);
+                    }
+                }
+            }
+            raw.vt = VT_BSTR;
+            raw.bstrVal = SysAllocStringLen(value.c_str(), static_cast<UINT>(value.size()));
+            if (!raw.bstrVal) return E_OUTOFMEMORY;
+        } else if (type == REG_DWORD && bytes == sizeof(DWORD)) {
+            DWORD value = 0;
+            if (RegQueryValueExW(key_, prop_name, nullptr, &type,
+                                 reinterpret_cast<LPBYTE>(&value), &bytes) != ERROR_SUCCESS)
+                return E_FAIL;
+            if (requested == VT_I4) {
+                raw.vt = VT_I4;
+                raw.lVal = static_cast<LONG>(value);
+            } else if (requested == VT_BOOL) {
+                raw.vt = VT_BOOL;
+                raw.boolVal = value ? VARIANT_TRUE : VARIANT_FALSE;
+            } else {
+                raw.vt = VT_UI4;
+                raw.ulVal = value;
+            }
+        } else {
+            return E_INVALIDARG;
+        }
+
+        if (requested == VT_EMPTY || requested == raw.vt) {
+            *var = raw;
+            return S_OK;
+        }
+        VARIANT converted{};
+        VariantInit(&converted);
+        const HRESULT hr = VariantChangeType(&converted, &raw, 0, requested);
+        VariantClear(&raw);
+        if (SUCCEEDED(hr)) *var = converted;
+        return hr;
+    }
+
+    IFACEMETHODIMP Write(LPCOLESTR, VARIANT*) override { return E_ACCESSDENIED; }
+
+private:
+    ~RegPropertyBag() {
+        if (key_) RegCloseKey(key_);
+    }
+    LONG refs_ = 1;
+    HKEY key_ = nullptr;
+};
+
 // --- minimal folder view site ------------------------------------------------
 
-class FolderViewSite final : public IServiceProvider, public IFolderView {
+class FolderViewSite final : public IServiceProvider, public IFolderView, public IOleWindow {
 public:
-    explicit FolderViewSite(PIDLIST_ABSOLUTE folder) : folder_(folder) {}
+    FolderViewSite(PIDLIST_ABSOLUTE folder, HWND owner, IShellItemArray* selection)
+        : folder_(folder), owner_(owner), selection_(selection) {
+        if (selection_) selection_->AddRef();
+    }
 
     IFACEMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
@@ -368,6 +505,8 @@ public:
             *ppv = static_cast<IServiceProvider*>(this);
         } else if (riid == IID_IFolderView) {
             *ppv = static_cast<IFolderView*>(this);
+        } else if (riid == IID_IOleWindow) {
+            *ppv = static_cast<IOleWindow*>(this);
         } else {
             *ppv = nullptr;
             return E_NOINTERFACE;
@@ -382,18 +521,29 @@ public:
         return refs;
     }
 
-    // IServiceProvider: only the folder view (SID_SFolderView is IID_IFolderView).
+    // IServiceProvider
     IFACEMETHODIMP QueryService(REFGUID service, REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
         *ppv = nullptr;
-        if (service == IID_IFolderView) return QueryInterface(riid, ppv);
+        if (service == IID_IFolderView || service == SID_STopLevelBrowser ||
+            service == IID_IShellBrowser || service == IID_IOleWindow)
+            return QueryInterface(riid, ppv);
         return E_NOINTERFACE;
     }
+
+    // IOleWindow
+    IFACEMETHODIMP GetWindow(HWND* phwnd) override {
+        if (!phwnd) return E_POINTER;
+        *phwnd = owner_;
+        return owner_ ? S_OK : E_FAIL;
+    }
+    IFACEMETHODIMP ContextSensitiveHelp(BOOL) override { return E_NOTIMPL; }
 
     // IFolderView
     IFACEMETHODIMP GetFolder(REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
         *ppv = nullptr;
+        if (!folder_) return E_FAIL;
         if (riid == IID_IShellItem || riid == IID_IShellItem2)
             return SHCreateItemFromIDList(folder_, riid, ppv);
         // IShellFolder and the like: the folder's own handler (the desktop's
@@ -416,12 +566,30 @@ public:
         if (pidl) *pidl = nullptr;
         return E_NOTIMPL;
     }
-    IFACEMETHODIMP ItemCount(UINT, int* count) override {
-        if (count) *count = 0;
+    IFACEMETHODIMP ItemCount(UINT flags, int* count) override {
+        if (!count) return E_POINTER;
+        *count = 0;
+        const UINT type = flags & SVGIO_TYPE_MASK;
+        if (selection_ && (type == SVGIO_SELECTION || type == SVGIO_ALLVIEW)) {
+            DWORD n = 0;
+            if (SUCCEEDED(selection_->GetCount(&n))) {
+                *count = static_cast<int>(n);
+                return S_OK;
+            }
+        }
         return E_NOTIMPL;
     }
-    IFACEMETHODIMP Items(UINT, REFIID, void** ppv) override {
-        if (ppv) *ppv = nullptr;
+    IFACEMETHODIMP Items(UINT flags, REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        const UINT type = flags & SVGIO_TYPE_MASK;
+        if (selection_ && (type == SVGIO_SELECTION || type == SVGIO_ALLVIEW)) {
+            if (riid == IID_IDataObject)
+                return selection_->BindToHandler(nullptr, BHID_DataObject, riid, ppv);
+            if (riid == IID_IEnumShellItems)
+                return selection_->EnumItems(reinterpret_cast<IEnumShellItems**>(ppv));
+            return selection_->QueryInterface(riid, ppv);
+        }
         return E_NOTIMPL;
     }
     IFACEMETHODIMP GetSelectionMarkedItem(int* item) override {
@@ -442,9 +610,14 @@ public:
     }
 
 private:
-    ~FolderViewSite() { ILFree(folder_); }
+    ~FolderViewSite() {
+        if (folder_) ILFree(folder_);
+        if (selection_) selection_->Release();
+    }
     LONG refs_ = 1;
     PIDLIST_ABSOLUTE folder_ = nullptr;
+    HWND owner_ = nullptr;
+    IShellItemArray* selection_ = nullptr;
 };
 
 } // namespace
@@ -607,19 +780,54 @@ HRESULT CreateExplorerCommandMenu(IExplorerCommand* command, IShellItemArray* it
     if (!out) return E_POINTER;
     *out = nullptr;
     if (!command) return E_INVALIDARG;
-    *out = new (std::nothrow) ExplorerCommandMenu(command, items, site);
+    *out = new (std::nothrow) ExplorerCommandMenu({command}, items, site);
     return *out ? S_OK : E_OUTOFMEMORY;
 }
 
-HRESULT CreateFolderViewSite(PCIDLIST_ABSOLUTE folder, IUnknown** out) {
+HRESULT CreateExplorerCommandMenuMulti(const std::vector<IExplorerCommand*>& commands,
+                                       IShellItemArray* items, IContextMenu** out,
+                                       IUnknown* site) {
     if (!out) return E_POINTER;
     *out = nullptr;
-    if (!folder) return E_INVALIDARG;
-    PIDLIST_ABSOLUTE copy = ILCloneFull(folder);
-    if (!copy) return E_OUTOFMEMORY;
-    auto* site = new (std::nothrow) FolderViewSite(copy);
+    std::vector<IExplorerCommand*> valid;
+    valid.reserve(commands.size());
+    for (auto* cmd : commands)
+        if (cmd) valid.push_back(cmd);
+    if (valid.empty()) return E_INVALIDARG;
+    *out = new (std::nothrow) ExplorerCommandMenu(std::move(valid), items, site);
+    return *out ? S_OK : E_OUTOFMEMORY;
+}
+
+HRESULT CreateRegistryPropertyBag(HKEY root, const std::wstring& subkey,
+                                  IPropertyBag** out) {
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    if (!root || subkey.empty()) return E_INVALIDARG;
+    HKEY key = nullptr;
+    const LSTATUS status = RegOpenKeyExW(root, subkey.c_str(), 0, KEY_READ, &key);
+    if (status != ERROR_SUCCESS) return HRESULT_FROM_WIN32(status);
+    auto* bag = new (std::nothrow) RegPropertyBag(key);
+    if (!bag) {
+        RegCloseKey(key);
+        return E_OUTOFMEMORY;
+    }
+    *out = bag;
+    return S_OK;
+}
+
+HRESULT CreateFolderViewSite(PCIDLIST_ABSOLUTE folder, IUnknown** out,
+                             HWND owner, IShellItemArray* selection) {
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    if (!folder && !owner && !selection) return E_INVALIDARG;
+    PIDLIST_ABSOLUTE copy = nullptr;
+    if (folder) {
+        copy = ILCloneFull(folder);
+        if (!copy) return E_OUTOFMEMORY;
+    }
+    auto* site = new (std::nothrow) FolderViewSite(copy, owner, selection);
     if (!site) {
-        ILFree(copy);
+        if (copy) ILFree(copy);
         return E_OUTOFMEMORY;
     }
     *out = static_cast<IServiceProvider*>(site);

@@ -1,5 +1,6 @@
 #include "../app/picker_bridge_model.h"
 #include <cstdio>
+#include <string_view>
 
 namespace {
 int failures = 0;
@@ -9,7 +10,80 @@ void Check(bool ok, const char* label) {
 }
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--project-filters") {
+        using namespace pulse;
+        namespace wire = ipc::picker;
+        wire::Message request;
+        request.request_id[0] = 1;
+        wire::Request body;
+        body.operation = wire::Operation::OpenFiles;
+        body.required_capabilities = wire::Open | wire::Filters | wire::LocalOpenAccessV1;
+        body.options = wire::ValidateLocalOpenAccessV1;
+        body.initial_directory = u"C:\\fixture";
+        body.filters = {{u"Build project", u"Makefile;report-*.csv;CMakeLists.txt"}};
+        request.body=body;
+        const auto strict=app::PreparePickerBridge(request);
+        Check(std::holds_alternative<wire::Message>(strict) && std::get<wire::Response>(std::get<wire::Message>(strict).body).status==wire::Status::Unsupported,
+            "strict peer retains native fallback for new project mask");
+        body.required_capabilities |= wire::AdvisoryFilters;
+        body.options |= wire::AdvisoryFileFilters;
+        request.body=body;
+        const auto advisory=app::PreparePickerBridge(request);
+        const auto* spec=std::get_if<ui::FolderPickerSpec>(&advisory);
+        Check(spec && spec->filters.size()==1 && spec->filters.front().pattern==L"Makefile;report-*.csv;CMakeLists.txt" &&
+            spec->validate_local_open_access_v1 && spec->advisory_file_filters,
+            "negotiated project mask reaches bridge intact without waiving file access checks");
+        body.filters.front().pattern=u"Makefile?";
+        request.body=body;
+        const auto dos=app::PreparePickerBridge(request);
+        const auto* question=std::get_if<ui::FolderPickerSpec>(&dos);
+        Check(question && question->advisory_file_filters && question->filters.size()==1 &&
+            question->filters.front().pattern==L"Makefile?", "Shell question-mark reaches advisory Open intact");
+        body.filters.front().pattern=u"../Makefile?";
+        request.body=body;
+        const auto invalid=app::PreparePickerBridge(request);
+        Check(std::holds_alternative<wire::Message>(invalid) && std::get<wire::Response>(std::get<wire::Message>(invalid).body).status==wire::Status::Unsupported,
+            "question-mark does not admit path syntax");
+        return failures ? 1 : 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--local-save-draft") {
+        using namespace pulse;
+        namespace wire = ipc::picker;
+        wire::Message request;
+        request.request_id[0] = 9;
+        wire::Request body;
+        body.operation = wire::Operation::SaveFile;
+        body.required_capabilities = wire::Save | wire::Filters | wire::LocalSaveAccessV1;
+        body.options = wire::OverwritePrompt | wire::ValidateLocalSaveAccessV1 | wire::SaveNativeDefaults;
+        body.filters = {{u"All", u"*.*"}};
+        const auto check = [&](const char* label, const wchar_t* normalized,
+                               std::u16string folder, std::u16string filename) {
+            body.initial_directory = std::move(folder);
+            body.filename = std::move(filename);
+            request.body = body;
+            const auto result = app::PreparePickerBridge(request);
+            const auto* spec = std::get_if<ui::FolderPickerSpec>(&result);
+            if (normalized) {
+                Check(spec && spec->validate_local_save_access_v1 && !spec->skip_access_validation &&
+                    !spec->no_test_file_create && spec->initial_path == normalized &&
+                    spec->filename == std::wstring(body.filename.begin(), body.filename.end()), label);
+            } else {
+                const auto* rejected = std::get_if<wire::Message>(&result);
+                Check(rejected && std::get<wire::Response>(rejected->body).status == wire::Status::Unsupported, label);
+            }
+        };
+        check("ordinary local filename stays managed", LR"(C:\fixture)", uR"(C:\fixture)", u"normal.txt");
+        check("extended drive initial folder normalizes once", LR"(C:\fixture)", uR"(\\?\C:\fixture)", u"normal.txt");
+        check("absolute filename remains actionable", LR"(C:\fixture)", uR"(C:\fixture)", uR"(D:\other\normal.txt)");
+        check("relative nested filename remains actionable", LR"(C:\fixture)", uR"(C:\fixture)", uR"(sub\normal.txt)");
+        check("invalid leaf stays editable, never silently rewritten", LR"(C:\fixture)", uR"(C:\fixture)", u"normal.txt.");
+        check("UNC initial folder remains outside local-save policy", nullptr, uR"(\\server\share)", u"normal.txt");
+        check("UNC filename does not bypass local-save policy", nullptr, uR"(C:\fixture)", uR"(\\server\share\normal.txt)");
+        check("device namespace never passes", nullptr, uR"(C:\fixture)", uR"(\\.\pipe\normal.txt)");
+        check("relative traversal never passes", nullptr, uR"(C:\fixture)", uR"(..\normal.txt)");
+        return failures ? 1 : 0;
+    }
     using namespace pulse;
     namespace wire = ipc::picker;
     wire::Message request;
@@ -133,9 +207,17 @@ int main() {
     prepared = app::PreparePickerBridge(changed);
     spec = std::get_if<ui::FolderPickerSpec>(&prepared);
     Check(spec && spec->mode == ui::PickerMode::Folder && spec->show_hidden && !spec->allow_multiselect,
-        "folder request is prepared without unsupported multiselect");
-    std::get<wire::Request>(changed.body).filename = u"ignored-by-folder-ui";
-    Check(rejected(changed, wire::Status::Unsupported), "folder filename cannot be silently ignored");
+        "folder request is prepared without multiselect");
+    folder.required_capabilities |= wire::MultiSelect;
+    folder.options |= wire::AllowMultiSelect;
+    folder.filename = u"project-folder";
+    changed.body = folder;
+    prepared = app::PreparePickerBridge(changed);
+    spec = std::get_if<ui::FolderPickerSpec>(&prepared);
+    Check(spec && spec->mode == ui::PickerMode::Folder && spec->allow_multiselect && spec->filename == L"project-folder",
+        "folder multiselect and valid leaf filename are prepared directly for Pulse UI");
+    std::get<wire::Request>(changed.body).filename = u"bad\\folder";
+    Check(rejected(changed, wire::Status::Unsupported), "folder filename with path separators is rejected");
     ui::FilePickerOutcome outcome;
     outcome.status = ui::FilePickerStatus::Accepted;
     outcome.result = {{L"C:\\fixture\\one.txt", L"C:\\fixture\\two.txt"}, 0};

@@ -31,7 +31,9 @@ void ApplyOperationTaskResults(AppState& s, const std::vector<ProbeTaskResult>& 
             completed.destinations = result.sources;
             ApplyOperationIntentCompletion(s, completed);
         }
-        FinishOperationIntents(s, {result.task_id, result.moved_sources});
+        ops::FinishedTask finished;
+        finished.task_id = result.task_id; finished.moved_sources = result.moved_sources;
+        FinishOperationIntents(s, finished);
     }
 }
 std::vector<ProbeTaskResult> DrainProbeTasks(AppState& s) {

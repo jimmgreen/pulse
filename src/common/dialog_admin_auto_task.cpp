@@ -56,7 +56,7 @@ public:
   ComPtr<ITaskDefinition> definition;hr=task->get_Definition(&definition);if(FAILED(hr))return hr;
   ComPtr<IPrincipal> principal;hr=definition->get_Principal(&principal);if(FAILED(hr))return hr;Bstr sid;hr=principal->get_UserId(&sid.p);if(FAILED(hr))return hr;
   TASK_LOGON_TYPE logon;TASK_RUNLEVEL_TYPE level;if(FAILED(hr=principal->get_LogonType(&logon))||FAILED(hr=principal->get_RunLevel(&level)))return hr;
-  if(!sid.p||!Same(sid.p,plan.sid)||logon!=TASK_LOGON_INTERACTIVE_TOKEN||level!=TASK_RUNLEVEL_HIGHEST)return E_ACCESSDENIED;
+  if(!sid.p||!SameTaskUser(sid.p,plan.sid)||logon!=TASK_LOGON_INTERACTIVE_TOKEN||level!=TASK_RUNLEVEL_HIGHEST)return E_ACCESSDENIED;
   ComPtr<IActionCollection> actions;hr=definition->get_Actions(&actions);if(FAILED(hr))return hr;LONG count=0;hr=actions->get_Count(&count);if(FAILED(hr)||count!=1)return E_ACCESSDENIED;
   ComPtr<IAction> action;hr=actions->get_Item(1,&action);if(FAILED(hr))return hr;ComPtr<IExecAction> exec;hr=action.As(&exec);if(FAILED(hr))return E_ACCESSDENIED;
   Bstr path,args;hr=exec->get_Path(&path.p);if(FAILED(hr))return hr;hr=exec->get_Arguments(&args.p);if(FAILED(hr))return hr;
@@ -110,6 +110,18 @@ HRESULT BuildTaskPlan(const std::wstring& root,const std::wstring& pf,const Iden
 HRESULT MatchInteractiveIdentity(const Identity& caller,const Identity& interactive) noexcept {
  return !caller.sid.empty()&&caller.session!=0&&caller.session==interactive.session&&caller.sid==interactive.sid?S_OK:HRESULT_FROM_WIN32(ERROR_LOGON_TYPE_NOT_GRANTED);
 }
+bool SameTaskUser(const std::wstring& user_id,const std::wstring& sid) noexcept try {
+ if(user_id.empty()||sid.empty())return false;
+ if(Same(user_id,sid))return true;
+ PSID expected=nullptr;if(!ConvertStringSidToSidW(sid.c_str(),&expected))return false;
+ BYTE buffer[SECURITY_MAX_SID_SIZE]{};DWORD size=sizeof(buffer),domain_size=0;SID_NAME_USE use{};
+ // Two calls: the first sizes the domain name, the second resolves the account.
+ LookupAccountNameW(nullptr,user_id.c_str(),buffer,&size,nullptr,&domain_size,&use);
+ std::wstring domain(domain_size?domain_size:1,L'\0');size=sizeof(buffer);
+ const bool resolved=domain_size&&LookupAccountNameW(nullptr,user_id.c_str(),buffer,&size,domain.data(),&domain_size,&use);
+ const bool same=resolved&&IsValidSid(buffer)&&EqualSid(buffer,expected);
+ LocalFree(expected);return same;
+} catch(...){return false;}
 HRESULT InteractiveIdentity(Identity& identity,bool require_elevated) noexcept try {
  if(require_elevated&&!dialog_admin::IsElevated())return HRESULT_FROM_WIN32(ERROR_ELEVATION_REQUIRED);
  DWORD pid=0;GetWindowThreadProcessId(GetShellWindow(),&pid);if(!pid)return HRESULT_FROM_WIN32(ERROR_NO_SUCH_LOGON_SESSION);

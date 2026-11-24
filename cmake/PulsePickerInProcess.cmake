@@ -32,7 +32,7 @@ set(PULSE_PICKER_INPROCESS_SOURCES
     src/ui/dialog_lifecycle.cpp
     src/ui/edit_host.cpp
     src/ui/fluent_components.cpp
-    src/ui/fluent_menu.cpp
+    src/ui/fluent_menu.cpp src/ui/native_menu_surface.cpp
     src/ui/tab_shape.cpp
     src/ui/typography.cpp
     src/ui/ui_compositor.cpp
@@ -52,6 +52,7 @@ set(PULSE_PICKER_INPROCESS_SOURCES
     src/ui/ui_toolbar.cpp
     src/ui/ui_sidebar.cpp
     src/ui/ui_settings_core.cpp
+    src/ui/layout_panel.cpp
     src/ui/ui_settings_assistant.cpp
     src/ui/ui_settings_ai.cpp
     src/ui/ui_settings_context.cpp
@@ -120,6 +121,7 @@ set(PULSE_PICKER_INPROCESS_SOURCES
     src/ui/group_wheel.cpp
     src/ui/window_overview_view.cpp
     src/ui/window_switcher_view.cpp
+    src/ui/tab_mru_view.cpp
     src/ui/archive_preview.cpp
     src/ui/wall_aspects.cpp
     src/ui/toolbar_picker.cpp

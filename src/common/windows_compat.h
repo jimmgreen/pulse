@@ -40,6 +40,18 @@ inline UINT WindowDpi(HWND hwnd) noexcept {
     return dpi > 0 ? static_cast<UINT>(dpi) : 96;
 }
 
+// Effective DPI of a monitor (before any window exists on it); 96 when unknown.
+inline UINT MonitorDpi(HMONITOR monitor) noexcept {
+    UINT x = 96, y = 96;
+    using MonitorFn = HRESULT(WINAPI*)(HMONITOR, MONITOR_DPI_TYPE, UINT*, UINT*);
+    static const auto monitor_fn = reinterpret_cast<MonitorFn>(ScalingApi("GetDpiForMonitor"));
+    if (!LegacyMode() && monitor && monitor_fn && SUCCEEDED(monitor_fn(monitor, MDT_EFFECTIVE_DPI, &x, &y)) && x) return x;
+    HDC dc = GetDC(nullptr);
+    const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSX) : 96;
+    if (dc) ReleaseDC(nullptr, dc);
+    return dpi > 0 ? static_cast<UINT>(dpi) : 96;
+}
+
 inline int SystemMetricsForDpi(int metric, UINT dpi) noexcept {
     using Fn = int(WINAPI*)(int, UINT);
     static const auto fn = reinterpret_cast<Fn>(UserApi("GetSystemMetricsForDpi"));

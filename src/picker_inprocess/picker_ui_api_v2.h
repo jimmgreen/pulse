@@ -36,8 +36,9 @@
 #define PULSE_PICKER_UI_V2_PROPERTY_GROUP 5u
 #define PULSE_PICKER_UI_V2_MAX_PROPERTIES 16u
 #define PULSE_PICKER_UI_V2_MAX_PROPERTY_VALUES 16u
-#define PULSE_PICKER_UI_V2_MAX_CONTROLS 16u
-#define PULSE_PICKER_UI_V2_MAX_CONTROL_ITEMS 32u
+#define PULSE_PICKER_UI_V2_MAX_CONTROLS 64u
+#define PULSE_PICKER_UI_V2_LEGACY_CONTROL_ITEMS 32u
+#define PULSE_PICKER_UI_V2_MAX_CONTROL_ITEMS 128u
 #define PULSE_PICKER_UI_V2_FEATURE_CUSTOM_LABELS 0x1u
 #define PULSE_PICKER_UI_V2_FEATURE_CUSTOM_COMBOBOX 0x2u
 #define PULSE_PICKER_UI_V2_FEATURE_MULTI_SELECT 0x4u
@@ -62,6 +63,7 @@
 #define PULSE_PICKER_UI_V2_CONTROL_CHECK 7u
 #define PULSE_PICKER_UI_V2_CONTROL_EDIT 8u
 #define PULSE_PICKER_UI_V2_CONTROL_SEPARATOR 9u
+#define PULSE_PICKER_UI_V2_CONTROL_TEXT 10u
 #define PULSE_PICKER_UI_V2_FEATURE_CUSTOM_RADIO 0x400u
 #define PULSE_PICKER_UI_V2_FEATURE_CUSTOM_CHECK 0x800u
 #define PULSE_PICKER_UI_V2_FEATURE_CUSTOM_EDIT 0x1000u
@@ -88,6 +90,8 @@
 #define PULSE_PICKER_UI_V2_TEXT_FILENAME 4u
 #define PULSE_PICKER_UI_V2_TEXT_DEFAULT_EXTENSION 5u
 #define PULSE_PICKER_UI_V2_FOLDER_ALLOW_AUTO_JUMP 0x1u
+#define PULSE_PICKER_UI_V2_FOLDER_LEGACY_BROWSE 0x2u
+#define PULSE_PICKER_UI_V2_FOLDER_HIDE_NEW_FOLDER 0x4u
 // Common to Open/Save/folder: caller-side IncludeItem for view enumeration only.
 // No COM pointer crosses this ABI; EVENT_INCLUDE_ITEM carries a counted path.
 // Only exact S_FALSE hides a row; any other HRESULT includes it (native oracle).
@@ -122,6 +126,7 @@
 #define PULSE_PICKER_UI_V2_ACCESS_FOLDER_V1 3u
 #define PULSE_PICKER_UI_V2_SAVE_OVERWRITE_PROMPT 0x1u
 #define PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT 0x40u
+#define PULSE_PICKER_UI_V2_SAVE_NO_READONLY_RETURN 0x80u
 #define PULSE_PICKER_UI_V2_SAVE_REQUIRE_UNENCRYPTED 0x2u
 #define PULSE_PICKER_UI_V2_SAVE_SKIP_ACCESS_VALIDATION 0x4u
 #define PULSE_PICKER_UI_V2_SAVE_NATIVE_DEFAULTS 0x8u
@@ -193,7 +198,7 @@ typedef struct PulsePickerUiV2Control {
     uint32_t state;
     PulsePickerUiV2Text label;
     uint32_t reserved[2];
-    const PulsePickerUiV2ControlItem* items; // COMBO only; copied, at most MAX_CONTROL_ITEMS.
+    const PulsePickerUiV2ControlItem* items; // Combo, menu, open dropdown or radio; copied, bounded by negotiated limit.
     uint32_t item_count;
     uint32_t has_selected; // Distinguishes no selection from item ID zero.
     uint32_t selected_item_id;
@@ -252,7 +257,7 @@ typedef struct PulsePickerUiV2CancelLabelConfig {
 // Optional FEATURE_FOLDER_PROVENANCE tail. Existing config/API layouts remain
 // frozen. Unknown/legacy callers never opt in to replacing the initial folder.
 // LABEL_CANCEL is optional here; its text must be empty when the flag is absent.
-// folder_policy only accepts FOLDER_ALLOW_AUTO_JUMP; reserved must be zero.
+// folder_policy accepts the documented FOLDER_* bits; reserved must be zero.
 typedef struct PulsePickerUiV2FolderPolicyConfig {
     PulsePickerUiV2CancelLabelConfig base;
     uint32_t folder_policy;
@@ -421,6 +426,15 @@ typedef struct PulsePickerUiV2Api {
     // Same Show STA. Copies the path; veto/failure retains committed state.
     HRESULT (WINAPI* Navigate)(PulsePickerUiV2Session, uint64_t show_id, PulsePickerUiV2Text folder);
 } PulsePickerUiV2Api;
+
+// Optional GetApiV2 output layout. Pass sizeof(PulsePickerUiV2ApiControlLimits)
+// and &result.base. Base size is unchanged. Legacy providers return E_INVALIDARG
+// for this size: retry the base table and retain the 32-item limit.
+typedef struct PulsePickerUiV2ApiControlLimits {
+    PulsePickerUiV2Api base;
+    uint32_t max_control_items;
+    uint32_t reserved;
+} PulsePickerUiV2ApiControlLimits;
 
 // Show clears output status/length/path before work. ACCEPTED alone carries a
 // path. CANCELLED => HRESULT_FROM_WIN32(ERROR_CANCELLED); FAILED => actual failure;

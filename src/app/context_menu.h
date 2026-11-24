@@ -136,6 +136,7 @@ enum MenuCmd : int {
     CmdManageAliases = 3916,    // 查看 menu: 管理别名… (list, remove, export, import)
     CmdExportAliases = 3917,
     CmdImportAliases = 3918,
+    CmdVfsExtractSelected = 3919, // archive-as-folder items: 解压所选到… (app_vfs_ops)
     CmdAliasBase = 3920,        // omnibar: +0..15 aliased folders matching the query
     CmdAliasOpenBase = 3940,    // 管理别名: +0..29 open the item
     CmdAliasRemoveBase = 3970,  // 管理别名: +0..29 remove the alias (row's trailing ×)
@@ -301,6 +302,15 @@ std::vector<ui::FluentMenuItem> BuildRecyclePlaceMenu(bool can_empty);
 std::vector<ui::FluentMenuItem> BuildNewMenu();
 
 std::vector<ui::FluentMenuItem> BuildBreadcrumbMenu(bool filesystem);
+
+struct SidebarDriveMenuOptions {
+    bool locked = false;
+    bool ejectable = false;
+    bool remote = false;
+    bool workspace_pinned = false;
+    const wchar_t* eject_glyph = L"\xE88E";
+};
+std::vector<ui::FluentMenuItem> BuildSidebarDriveMenu(const SidebarDriveMenuOptions& options);
 
 // Split-button layout presets.
 std::vector<ui::FluentMenuItem> BuildSplitMenu(int current_preset);

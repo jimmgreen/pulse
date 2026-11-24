@@ -56,6 +56,26 @@ int main() {
     const auto folder = std::filesystem::current_path() / L"bench_data" /
         (L"decode-budget-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
     if (!std::filesystem::create_directory(folder)) return 2;
+    {
+        const auto psd = folder / L"poster_9000x18000.psd";
+        const uint8_t psd_header[26] = {
+            '8', 'B', 'P', 'S', 0, 1, 0, 0, 0, 0, 0, 0,
+            0, 4,                       // 4 channels
+            0, 0, 0x46, 0x50,           // height = 18000
+            0, 0, 0x23, 0x28,           // width = 9000
+            0, 8,                       // 8-bit depth
+            0, 3                        // RGB mode
+        };
+        { std::ofstream out(psd, std::ios::binary); out.write(reinterpret_cast<const char*>(psd_header), sizeof(psd_header)); }
+        const uint64_t full_canvas = pulse::preview::DecodeEstimate(9000ull * 18000ull, 20, 256);
+        const uint64_t streaming = pulse::preview::PsdDecodeEstimate(psd, 256);
+        DecodeMemoryBudget grid_budget(1024);
+        DecodeMemoryBudget::Lease psd_lease;
+        const uint64_t streaming_mib = (streaming + (1ull << 20) - 1) >> 20;
+        check(full_canvas > (1024ull << 20) && streaming > (32ull << 20) && streaming < (256ull << 20) &&
+              grid_budget.Reserve(psd_lease, streaming_mib, false),
+            "large 9000x18000 PSD uses bounded streaming estimate within 1 GiB grid budget (#646)");
+    }
     const auto file = folder / L"first.gif";
     pulse_test::gif_fixture::Bytes gif{'G','I','F','8','9','a'};
     pulse_test::gif_fixture::Word(gif, 4); pulse_test::gif_fixture::Word(gif, 2);

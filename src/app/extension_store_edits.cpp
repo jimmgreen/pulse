@@ -1,6 +1,5 @@
 #include "extension_store_edits.h"
 #include "app_state.h"
-#include "extension_store_seven_zip.h"
 #include "../common/json_value.h"
 #include "../common/localization.h"
 #include "../ui/edit_host.h"
@@ -19,13 +18,12 @@ namespace pulse {
 namespace {
 constexpr UINT_PTR kSubclass = 0x53544544;
 struct Edits {
-    HWND search = nullptr, folder = nullptr;
+    HWND search = nullptr;
     HFONT font = nullptr;
     HBRUSH brush = nullptr;
     COLORREF background = CLR_INVALID;
     float scale = 0;
-    bool updating = false, dirty = false, destroying = false, composing = false;
-    std::wstring folder_value;
+    bool updating = false, destroying = false, composing = false;
 };
 // Window-thread owned; ReleaseOwner must call DestroyStoreEdits before AppState dies.
 std::unordered_map<AppState*, std::unique_ptr<Edits>> owners;
@@ -51,16 +49,6 @@ std::wstring Text(HWND edit) {
     return text;
 }
 void Redraw(AppState& s) { InvalidateRect(s.hwnd, nullptr, FALSE); }
-void Commit(AppState& s, Edits& edits) {
-    if (edits.destroying || edits.updating || !edits.dirty || edits.composing) return;
-    const auto value = Text(edits.folder);
-    if (SetSevenZipState(s, "folder", json::Utf8(value))) {
-        edits.folder_value = value;
-        edits.dirty = false;
-        s.store_saved_at = GetTickCount64();
-    }
-    Redraw(s);
-}
 LRESULT CALLBACK EditProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
     auto& s = *reinterpret_cast<AppState*>(ref);
     auto* edits = Find(s);
@@ -69,17 +57,8 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp, UINT_PT
     if (message == WM_IME_STARTCOMPOSITION) edits->composing = true;
     if (message == WM_IME_ENDCOMPOSITION) edits->composing = false;
     if (message == WM_KEYDOWN && !edits->composing) {
-        if (wp == VK_RETURN) {
-            if (hwnd == edits->folder) Commit(s, *edits);
-            return 0;
-        }
+        if (wp == VK_RETURN) return 0;
         if (wp == VK_ESCAPE) {
-            if (hwnd == edits->folder) {
-                edits->updating = true;
-                SetWindowTextW(hwnd, edits->folder_value.c_str());
-                edits->dirty = false;
-                edits->updating = false;
-            }
             SetFocus(s.hwnd);
             Redraw(s);
             return 0;
@@ -102,7 +81,6 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp, UINT_PT
     if (message == WM_NCDESTROY) {
         RemoveWindowSubclass(hwnd, EditProc, kSubclass);
         if (edits->search == hwnd) edits->search = nullptr;
-        if (edits->folder == hwnd) edits->folder = nullptr;
         return result;
     }
     if (!edits->updating && !edits->destroying) {
@@ -115,14 +93,11 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp, UINT_PT
                 s.store_search = value;
                 s.settings.SetScroll(0, 0);
                 Redraw(s);
-            } else if (hwnd == edits->folder) {
-                edits->dirty = value != edits->folder_value;
             }
             break;
         }
         default: break;
         }
-        if (message == WM_KILLFOCUS && hwnd == edits->folder) Commit(s, *edits);
         if (message == WM_SETFOCUS || message == WM_KILLFOCUS) Redraw(s);
     }
     return result;
@@ -135,7 +110,7 @@ void Hide(AppState& s, HWND edit) {
 }
 HBRUSH StoreEditsCtlColor(AppState& s, HDC hdc, HWND edit) {
     auto* edits = Find(s);
-    if (!edits || !edit || (edit != edits->search && edit != edits->folder)) return nullptr;
+    if (!edits || !edit || edit != edits->search) return nullptr;
     D2D1_COLOR_F back{}, fore{};
     Colors(s, back, fore);
     const auto color = Color(back);
@@ -151,10 +126,9 @@ void SyncStoreEdits(AppState& s, const ui::WindowViewModel& vm) {
     const auto& view = vm.settings_store_view;
     const bool store = vm.settings_open && vm.settings_page == 8;
     const bool search = store && !view.detail;
-    const bool folder = store && view.detail && view.detail_tab == 0 && view.seven_zip.available && view.seven_zip.location == 1;
     auto* edits = Find(s);
-    if (!search && !folder) {
-        if (edits) { Hide(s, edits->search); Hide(s, edits->folder); }
+    if (!search) {
+        if (edits) Hide(s, edits->search);
         return;
     }
     if (!edits) {
@@ -169,17 +143,17 @@ void SyncStoreEdits(AppState& s, const ui::WindowViewModel& vm) {
         SendMessageW(edit, EM_LIMITTEXT, 32767, 0);
         SetWindowSubclass(edit, EditProc, kSubclass, reinterpret_cast<DWORD_PTR>(&s));
     };
-    if (search) ensure(edits->search);
-    if (folder) ensure(edits->folder);
+    ensure(edits->search);
     if (!edits->font || edits->scale != s.scale) {
         HFONT replacement = ui::typography::CreateEditFont(s.scale);
         if (replacement) {
             HFONT previous = edits->font; edits->font = replacement; edits->scale = s.scale;
-            for (HWND edit : {edits->search, edits->folder}) if (edit) SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(replacement), TRUE);
+            if (HWND edit = edits->search) SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(replacement), TRUE);
             if (previous) DeleteObject(previous);
         }
     }
-    auto place = [&](HWND edit, int field, bool visible, const std::wstring& value) {
+    auto place = [&](HWND edit, bool visible, const std::wstring& value) {
+        constexpr int field = 0;
         if (!edit) return;
         auto bounds = s.renderer.SettingsStoreField(field);
         const auto clip = s.renderer.SettingsStoreClip();
@@ -190,15 +164,14 @@ void SyncStoreEdits(AppState& s, const ui::WindowViewModel& vm) {
         const auto& panel = s.renderer.AiPanel();
         if (panel.FloatingVisible() && (panel.Contains(bounds.left, bounds.top) || panel.Contains(bounds.right, bounds.top) ||
             panel.Contains(bounds.left, bounds.bottom) || panel.Contains(bounds.right, bounds.bottom))) { Hide(s, edit); return; }
-        if (GetFocus() != edit && !(field == 1 && edits->dirty) && Text(edit) != value) {
+        if (GetFocus() != edit && Text(edit) != value) {
             edits->updating = true; SetWindowTextW(edit, value.c_str()); edits->updating = false;
         }
-        if (field == 1 && !edits->dirty && GetFocus() != edit) edits->folder_value = value;
-        const auto hint = l10n::Get(field == 0 ? l10n::StringId::StoreSearchHint : l10n::StringId::SzFolderHint);
+        const auto& hint = l10n::Get(l10n::StringId::StoreSearchHint);
         SendMessageW(edit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(hint.c_str()));
         SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(edits->font), FALSE);
         SendMessageW(edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
-        bounds.left += (field == 0 ? 32.0f : 10.0f) * s.scale;
+        bounds.left += 32.0f * s.scale;
         bounds.right -= 10.0f * s.scale;
         const int height = ui::EditLineHeight(edit, edits->font, (std::max)(1, static_cast<int>(bounds.bottom - bounds.top - 4*s.scale)));
         const int x = static_cast<int>(std::lround(bounds.left));
@@ -210,15 +183,13 @@ void SyncStoreEdits(AppState& s, const ui::WindowViewModel& vm) {
         D2D1_COLOR_F back{}, fore{}; Colors(s, back, fore);
         ui::PresentChildEdit(s.compositor, s.compositor.TextFormat(), fore, back, edit);
     };
-    place(edits->search, 0, search, s.store_search);
-    place(edits->folder, 1, folder, view.seven_zip.folder);
+    place(edits->search, search, s.store_search);
 }
 void DestroyStoreEdits(AppState& s) {
     auto* edits = Find(s);
     if (!edits) return;
     edits->destroying = true;
     if (edits->search) DestroyWindow(edits->search);
-    if (edits->folder) DestroyWindow(edits->folder);
     if (edits->font) DeleteObject(edits->font);
     if (edits->brush) DeleteObject(edits->brush);
     owners.erase(&s);

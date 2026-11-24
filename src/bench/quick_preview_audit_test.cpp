@@ -480,6 +480,263 @@ struct QuickPreviewAuditTest {
         if (owner) DestroyWindow(owner);
         OleUninitialize(); return ok;
     }
+    static bool ScrollbarBorderConflict(QuickPreviewWindow& q) {
+        q.thumbnails_.running_ = true;
+        QuickPreviewItem item;
+        item.path = L"C:\\PulseAuditFixtures\\scroll.txt";
+        item.name = L"scroll.txt";
+        item.modified = 2;
+        item.size = 65536;
+        q.Show(item, false, WindowEffect::None, true);
+        SetWindowPos(q.hwnd_, nullptr, 40, 40, 960, 640, SWP_NOZORDER | SWP_NOACTIVATE);
+        q.Resize();
+        bool ok = true;
+        const auto point_lp = [](float x, float y) {
+            return MAKELPARAM(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)));
+        };
+        const auto nc_hit = [&](float x, float y) -> LRESULT {
+            POINT pt{static_cast<LONG>(std::floor(x)), static_cast<LONG>(std::floor(y))};
+            ClientToScreen(q.hwnd_, &pt);
+            return SendMessageW(q.hwnd_, WM_NCHITTEST, 0, MAKELPARAM(pt.x, pt.y));
+        };
+        const HCURSOR arrow = LoadCursorW(nullptr, IDC_ARROW);
+        const auto verify_bar = [&](const char* label, bool horizontal, auto get_bar,
+                                    auto get_scroll, auto is_dragging, auto no_side_effect) {
+            const auto initial = get_bar();
+            const auto& hit = initial.hit;
+            const auto& thumb = initial.thumb;
+            const float travel = initial.travel;
+            RECT client{};
+            GetClientRect(q.hwnd_, &client);
+            const int outer = (std::max)(1, static_cast<int>(3.0f * q.scale_));
+            const float cx = (thumb.left + thumb.right) * 0.5f;
+            const float cy = (thumb.top + thumb.bottom) * 0.5f;
+            const bool clear_of_outer = horizontal
+                ? (thumb.bottom <= static_cast<float>(client.bottom - outer) - 1.0f)
+                : (thumb.right <= static_cast<float>(client.right - outer) - 1.0f);
+            ok &= Check(travel > 0.0f && clear_of_outer,
+                        (std::string(label) + ": painted thumb clears outer resize edge").c_str());
+            if (travel <= 0.0f) return;
+            const LRESULT hit_center = nc_hit(cx, cy);
+            const LRESULT hit_right = nc_hit(horizontal ? cx : thumb.right - 0.5f,
+                                             horizontal ? thumb.bottom - 0.5f : cy);
+            const float track_x = horizontal ? (hit.right - 2.0f) : cx;
+            const float track_y = horizontal ? cy : (hit.bottom - 2.0f);
+            const LRESULT hit_track = nc_hit(track_x, track_y);
+            const LRESULT hit_outer = horizontal
+                ? nc_hit(cx, static_cast<float>(client.bottom - 1))
+                : nc_hit(static_cast<float>(client.right - 1), cy);
+            ok &= Check(hit_center == HTCLIENT && hit_right == HTCLIENT && hit_track == HTCLIENT,
+                        (std::string(label) + ": WM_NCHITTEST gives thumb and track HTCLIENT").c_str());
+            if (!horizontal) {
+                ok &= Check(hit_outer == HTRIGHT,
+                            (std::string(label) + ": outer 3 DIP edge preserves HTRIGHT resize").c_str());
+            }
+            const POINT cursor_pt{static_cast<LONG>(std::floor(cx)), static_cast<LONG>(std::floor(cy))};
+            ok &= Check(q.ContentCursor(cursor_pt) == arrow,
+                        (std::string(label) + ": cursor over scrollbar is IDC_ARROW").c_str());
+            const float before = get_scroll();
+            SendMessageW(q.hwnd_, WM_LBUTTONDOWN, MK_LBUTTON, point_lp(cx, cy));
+            ok &= Check(is_dragging() && GetCapture() == q.hwnd_ && no_side_effect(),
+                        (std::string(label) + ": thumb press starts scrollbar drag without side effects").c_str());
+            const float delta = (std::min)(travel * 0.4f, 60.0f * q.scale_);
+            const float nx = cx + (horizontal ? delta : 0.0f);
+            const float ny = cy + (horizontal ? 0.0f : delta);
+            SendMessageW(q.hwnd_, WM_MOUSEMOVE, MK_LBUTTON, point_lp(nx, ny));
+            const float after = get_scroll();
+            ok &= Check(after > before && no_side_effect(),
+                        (std::string(label) + ": thumb drag moves scroll on intended axis").c_str());
+            SendMessageW(q.hwnd_, WM_LBUTTONUP, 0, point_lp(nx, ny));
+            ok &= Check(!is_dragging() && GetCapture() != q.hwnd_ && get_scroll() == after,
+                        (std::string(label) + ": button up preserves scroll and releases capture").c_str());
+            q.Render();
+            const auto moved = get_bar();
+            const float page_x = horizontal ? moved.hit.left + 1.0f : (moved.thumb.left + moved.thumb.right) * 0.5f;
+            const float page_y = horizontal ? (moved.thumb.top + moved.thumb.bottom) * 0.5f : moved.hit.top + 1.0f;
+            SendMessageW(q.hwnd_, WM_LBUTTONDOWN, MK_LBUTTON, point_lp(page_x, page_y));
+            SendMessageW(q.hwnd_, WM_LBUTTONUP, 0, point_lp(page_x, page_y));
+            ok &= Check(!is_dragging() && get_scroll() < after && no_side_effect(),
+                        (std::string(label) + ": track click pages back without starting drag or side effects").c_str());
+            q.Render();
+            const auto current = get_bar();
+            const float dcx = (current.thumb.left + current.thumb.right) * 0.5f;
+            const float dcy = (current.thumb.top + current.thumb.bottom) * 0.5f;
+            // Double-click directly on thumb must start drag cleanly and cancel on WM_CANCELMODE.
+            SendMessageW(q.hwnd_, WM_LBUTTONDBLCLK, MK_LBUTTON, point_lp(dcx, dcy));
+            ok &= Check(is_dragging() && GetCapture() == q.hwnd_ && no_side_effect(),
+                        (std::string(label) + ": double-click on thumb drags without side effects").c_str());
+            SendMessageW(q.hwnd_, WM_CANCELMODE, 0, 0);
+            ok &= Check(!is_dragging() && GetCapture() != q.hwnd_,
+                        (std::string(label) + ": WM_CANCELMODE stops drag and releases capture").c_str());
+        };
+
+        for (const float scale : {1.0f, 1.25f, 1.5f}) {
+            q.scale_ = scale;
+            q.RecreateFormats();
+            const std::string tag = "s=" + std::to_string(static_cast<int>(std::lround(scale * 100.0f)));
+
+            // 1. Plain Text
+            item.path = L"C:\\PulseAuditFixtures\\long.log";
+            item.name = L"long.log";
+            q.Update(item);
+            {
+                std::wstring body;
+                for (int i = 0; i < 200; ++i)
+                    body += L"Line " + std::to_wstring(i) + L" preview scrollbar regression text content\n";
+                ThumbnailCache::Item payload;
+                payload.kind = ipc::PreviewContentKind::Text;
+                payload.text = body;
+                Store(q, 0, std::move(payload));
+            }
+            q.Render();
+            verify_bar(("Text " + tag).c_str(), false, [&] { return q.TextScrollbar(); },
+                       [&] { return q.text_scroll_; },
+                       [&] { return q.text_scrollbar_drag_; },
+                       [&] { return !q.selecting_ && q.sel_anchor_ == q.sel_focus_; });
+
+            // 2. Hex dump
+            item.path = L"C:\\PulseAuditFixtures\\dump.bin";
+            item.name = L"dump.bin";
+            q.Update(item);
+            {
+                std::wstring hex;
+                for (int i = 0; i < 160; ++i) {
+                    wchar_t line[96];
+                    swprintf_s(line, L"%08X  00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F  ................\n", i * 16);
+                    hex += line;
+                }
+                ThumbnailCache::Item payload;
+                payload.kind = ipc::PreviewContentKind::Hex;
+                payload.text = hex;
+                Store(q, 0, std::move(payload));
+            }
+            q.Render();
+            verify_bar(("Hex " + tag).c_str(), false, [&] { return q.TextScrollbar(); },
+                       [&] { return q.text_scroll_; },
+                       [&] { return q.text_scrollbar_drag_; },
+                       [&] { return !q.selecting_ && q.hex_selected_ < 0; });
+
+            // 3. Markdown (vertical)
+            item.path = L"C:\\PulseAuditFixtures\\doc.md";
+            item.name = L"doc.md";
+            q.Update(item);
+            {
+                std::wstring md = L"PULSEMD\t1\n";
+                for (int i = 0; i < 120; ++i)
+                    md += L"B\tp\t\t0\t0\t\tParagraph " + std::to_wstring(i) + L" with long prose for scrolling.\t\n";
+                ThumbnailCache::Item payload;
+                payload.kind = ipc::PreviewContentKind::Markdown;
+                payload.text = md;
+                Store(q, 0, std::move(payload));
+            }
+            q.Render();
+            verify_bar(("Markdown " + tag).c_str(), false, [&] { return q.markdown_.Scrollbar(false); },
+                       [&] { return q.markdown_.scroll_; },
+                       [&] { return q.markdown_.DraggingScrollbar(); },
+                       [&] { return !q.selecting_ && q.sel_anchor_ == q.sel_focus_; });
+
+            // 4. Table (vertical + horizontal)
+            item.path = L"C:\\PulseAuditFixtures\\sheet.xlsx";
+            item.name = L"sheet.xlsx";
+            q.Update(item);
+            {
+                std::wstring tbl = L"PULSETBL\t1\nW\t1\t1\t0\nS\txlsx\tSheet1\t120\t12\t0\t\t1\nR";
+                for (int c = 0; c < 12; ++c) tbl += L"\tColumn" + std::to_wstring(c);
+                tbl += L"\n";
+                for (int r = 0; r < 119; ++r) {
+                    tbl += L"R";
+                    for (int c = 0; c < 12; ++c) tbl += L"\tLongCellValue_" + std::to_wstring(r) + L"_" + std::to_wstring(c);
+                    tbl += L"\n";
+                }
+                ThumbnailCache::Item payload;
+                payload.kind = ipc::PreviewContentKind::Table;
+                payload.text = tbl;
+                Store(q, 0, std::move(payload));
+            }
+            q.Render();
+            verify_bar(("TableV " + tag).c_str(), false, [&] { return q.table_.Scrollbar(false); },
+                       [&] { return q.table_.Current() ? q.table_.Current()->sy : 0.0f; },
+                       [&] { return q.table_.DraggingScrollbar(); },
+                       [&] { return !q.table_.HasSelection(); });
+            verify_bar(("TableH " + tag).c_str(), true, [&] { return q.table_.Scrollbar(true); },
+                       [&] { return q.table_.Current() ? q.table_.Current()->sx : 0.0f; },
+                       [&] { return q.table_.DraggingScrollbar(); },
+                       [&] { return !q.table_.HasSelection(); });
+
+            // 5. Tree (JSON)
+            item.path = L"C:\\PulseAuditFixtures\\data.json";
+            item.name = L"data.json";
+            q.Update(item);
+            {
+                std::wstring tree = L"PULSETREE\t1\nH\tjson\t\t0\t\t0\t0\nN\t0\to\t\t\t120\t\n";
+                for (int i = 0; i < 120; ++i)
+                    tree += L"N\t1\ts\tkey_" + std::to_wstring(i) + L"\tvalue_" + std::to_wstring(i) + L"\t0\t\n";
+                ThumbnailCache::Item payload;
+                payload.kind = ipc::PreviewContentKind::Tree;
+                payload.text = tree;
+                Store(q, 0, std::move(payload));
+            }
+            q.Render();
+            verify_bar(("Tree " + tag).c_str(), false, [&] { return q.tree_.Scrollbar(); },
+                       [&] { return q.tree_.sy_; },
+                       [&] { return q.tree_.Dragging(); },
+                       [&] { return !q.tree_.HasCurrent(); });
+
+            // 6. Archive (compact list + grid, and large list)
+            item.path = L"C:\\PulseAuditFixtures\\bundle.zip";
+            item.name = L"bundle.zip";
+            q.Update(item);
+            {
+                std::wstring arc = L"PULSEARC\t1\tZIP\t102400\t0\n";
+                for (int i = 0; i < 90; ++i)
+                    arc += L"0\tf\t2048\t1024\t2026-11-23 12:00\tfile_" + std::to_wstring(i) + L".txt\n";
+                ThumbnailCache::Item payload;
+                payload.kind = ipc::PreviewContentKind::Archive;
+                payload.text = arc;
+                Store(q, 0, std::move(payload));
+            }
+            SetWindowPos(q.hwnd_, nullptr, 40, 40, static_cast<int>(520 * scale), static_cast<int>(480 * scale),
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            q.Resize();
+            for (bool grid : {false, true}) {
+                q.archive_.SetGridMode(grid);
+                q.Render();
+                verify_bar(((grid ? "ArchiveGridCompact " : "ArchiveListCompact ") + tag).c_str(), false,
+                           [&] { return q.archive_.Scrollbar(); },
+                           [&] { return q.archive_.scroll_; },
+                           [&] { return q.archive_.DraggingScrollbar(); },
+                           [&] { return !q.archive_.HasSelection(); });
+            }
+            q.archive_.SetGridMode(false);
+            SetWindowPos(q.hwnd_, nullptr, 40, 40, 960, 640, SWP_NOZORDER | SWP_NOACTIVATE);
+            q.Resize();
+            q.Render();
+            verify_bar(("ArchiveListLarge " + tag).c_str(), false, [&] { return q.archive_.Scrollbar(); },
+                       [&] { return q.archive_.scroll_; },
+                       [&] { return q.archive_.DraggingScrollbar(); },
+                       [&] { return !q.archive_.HasSelection(); });
+
+            // 7. Pages (multi-page PDF)
+            item.path = L"C:\\PulseAuditFixtures\\slides.pdf";
+            item.name = L"slides.pdf";
+            q.Update(item);
+            q.pages_count_ = 12;
+            q.page_aspect_.assign(12, 1.4f);
+            q.Render();
+            {
+                const float zoom_before = q.pages_zoom_;
+                verify_bar(("Pages " + tag).c_str(), false, [&] { return q.PagesScrollbar(); },
+                           [&] { return q.pages_scroll_; },
+                           [&] { return q.pages_scrollbar_drag_; },
+                           [&] { return !q.panning_ && q.pages_zoom_ == zoom_before; });
+            }
+        }
+        q.scale_ = 1.0f;
+        q.RecreateFormats();
+        q.Close();
+        q.thumbnails_.running_ = false;
+        return ok;
+    }
     static bool Run(){
         OleInitialize(nullptr);INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES};InitCommonControlsEx(&controls);
         struct OleScope { ~OleScope() { OleUninitialize(); } } ole_scope;
@@ -499,6 +756,11 @@ struct QuickPreviewAuditTest {
             }
             if (GetEnvironmentVariableW(L"PULSE_TEST_PDF_SWITCH", nullptr, 0)) {
                 ok &= PdfSwitch(q);
+                DestroyWindow(owner);
+                return ok;
+            }
+            if (GetEnvironmentVariableW(L"PULSE_TEST_PREVIEW_SCROLLBAR", nullptr, 0)) {
+                ok &= ScrollbarBorderConflict(q);
                 DestroyWindow(owner);
                 return ok;
             }
@@ -729,6 +991,68 @@ struct QuickPreviewAuditTest {
             const bool tabbed=q.CycleFooterFocus(false) && q.footer_focus_==q.footer_controls_.front().id;
             q.CycleFooterFocus(true);
             ok &= Check(tabbed && q.footer_focus_==0,"Tab enters the footer controls and Shift+Tab leaves them");
+            // --- Always-on-top pin & detach behaviour on a real Win32 QuickPreviewWindow. ---
+            {
+                QuickPreviewWindow pinned;
+                constexpr UINT kPinCmd = WM_APP + 209;
+                ok &= Check(pinned.Initialize(owner, WM_APP + 207, WM_APP + 208, kPinCmd),
+                            "initialize Quick Look window for pin audit");
+                QuickPreviewItem pin_item = item;
+                pin_item.position = 2;
+                pin_item.count = 5;
+                pinned.Show(pin_item, false, WindowEffect::None, true, nullptr, false);
+                pinned.Render();
+                const auto disjoint = [](const D2D1_RECT_F& a, const D2D1_RECT_F& b) {
+                    return a.right <= b.left + 0.5f || b.right <= a.left + 0.5f ||
+                           a.bottom <= b.top + 0.5f || b.bottom <= a.top + 0.5f;
+                };
+                ok &= Check(!pinned.always_on_top() && !pinned.pinned() &&
+                            !(GetWindowLongPtrW(pinned.hwnd(), GWL_EXSTYLE) & WS_EX_TOPMOST) &&
+                            GetWindow(pinned.hwnd(), GW_OWNER) == owner &&
+                            pinned.header_.nav_visible &&
+                            pinned.header_.pin.right > pinned.header_.pin.left &&
+                            disjoint(pinned.header_.open, pinned.header_.pin) &&
+                            disjoint(pinned.header_.pin, pinned.header_.size) &&
+                            disjoint(pinned.header_.size, pinned.header_.more) &&
+                            disjoint(pinned.header_.more, pinned.header_.close),
+                            "unpinned Quick Look starts non-topmost with owned window and non-overlapping pin button");
+                // Toggle via keyboard shortcut T: promotes to WS_EX_TOPMOST and detaches owner/nav.
+                SendMessageW(pinned.hwnd(), WM_KEYDOWN, 'T', 0);
+                pinned.Render();
+                ok &= Check(pinned.always_on_top() && pinned.pinned() &&
+                            (GetWindowLongPtrW(pinned.hwnd(), GWL_EXSTYLE) & WS_EX_TOPMOST) != 0 &&
+                            GetWindow(pinned.hwnd(), GW_OWNER) == nullptr &&
+                            !pinned.header_.nav_visible &&
+                            pinned.header_.prev.right <= pinned.header_.prev.left &&
+                            pinned.header_.next.right <= pinned.header_.next.left &&
+                            pinned.header_.pin.right > pinned.header_.pin.left &&
+                            disjoint(pinned.header_.open, pinned.header_.pin) &&
+                            disjoint(pinned.header_.pin, pinned.header_.size),
+                            "pressing T promotes Quick Look to topmost, detaches owner and hides list navigation");
+                // Narrow minimum width (480 DIP) still lays out header controls without overlap.
+                SetWindowPos(pinned.hwnd(), nullptr, 0, 0, 480, 320, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                pinned.Render();
+                ok &= Check(pinned.header_.name.right <= pinned.header_.open.left + 0.5f &&
+                            disjoint(pinned.header_.open, pinned.header_.pin) &&
+                            disjoint(pinned.header_.pin, pinned.header_.size) &&
+                            disjoint(pinned.header_.size, pinned.header_.more) &&
+                            disjoint(pinned.header_.more, pinned.header_.close),
+                            "narrow pinned Quick Look header keeps all chrome controls disjoint");
+                // Second toggle drops topmost while keeping window independent.
+                pinned.ActivateChromeButton(QuickPreviewWindow::ChromeButton::Pin);
+                ok &= Check(!pinned.always_on_top() && pinned.pinned() &&
+                            !(GetWindowLongPtrW(pinned.hwnd(), GWL_EXSTYLE) & WS_EX_TOPMOST) &&
+                            GetWindow(pinned.hwnd(), GW_OWNER) == nullptr,
+                            "clicking pin button again clears topmost while keeping detached independence");
+                // Re-pinning restores topmost.
+                pinned.ActivateChromeButton(QuickPreviewWindow::ChromeButton::Pin);
+                ok &= Check(pinned.always_on_top() &&
+                            (GetWindowLongPtrW(pinned.hwnd(), GWL_EXSTYLE) & WS_EX_TOPMOST) != 0,
+                            "re-pinning detached Quick Look restores topmost state");
+                pinned.Close();
+                ok &= Check(!pinned.visible() && !pinned.always_on_top(),
+                            "closing pinned Quick Look resets always-on-top state");
+            }
             // --- P5 performance: a full-size text payload scrolled frame by frame. ---
             item.path=L"C:\\PulseAuditFixtures\\long.log";item.name=L"long.log";q.Update(item);
             {

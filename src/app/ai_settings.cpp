@@ -193,6 +193,43 @@ Settings ParseSettings(std::string_view utf8, bool* malformed) {
             const std::string mic = v->get_string("mic");
             if (mic.size() <= 512) voice.mic = mic;
         }
+        if (const auto* ws = a->find("web_search")) {
+            WebSearchPrefs& web = s.assistant.web_search;
+            if (ws->is_bool()) {
+                web.enabled = ws->as_bool();
+            } else if (ws->is_object()) {
+                web.enabled = ws->get_bool("enabled", true);
+                const std::string prov = ws->get_string("provider");
+                if (prov == "auto" || prov == "ddg" || prov == "bing" || prov == "tavily" ||
+                    prov == "bocha" || prov == "serper" || prov == "searxng")
+                    web.provider = prov;
+                const std::string ep = ws->get_string("endpoint");
+                if (UsableUrl(ep)) web.endpoint = ep;
+                web.native = ws->get_bool("native", false);
+            }
+        }
+        if (const auto* ms = a->find("mcp_servers"); ms && ms->is_array()) {
+            for (const json::Value& item : ms->items()) {
+                if (!item.is_object() || s.assistant.mcp_servers.size() >= 16) continue;
+                ExternalMcpServer srv;
+                srv.name = item.get_string("name");
+                srv.transport = item.get_string("transport", "stdio");
+                if (srv.transport != "stdio" && srv.transport != "http") continue;
+                srv.command = item.get_string("command");
+                if (const auto* av = item.find("args"); av && av->is_array()) {
+                    for (const json::Value& arg : av->items()) {
+                        if (arg.is_string() && srv.args.size() < 32) srv.args.push_back(arg.as_string());
+                    }
+                }
+                const std::string u = item.get_string("url");
+                if (UsableUrl(u)) srv.url = u;
+                srv.enabled = item.get_bool("enabled", true);
+                if (srv.name.empty() || srv.name.size() > 48) continue;
+                if (srv.transport == "stdio" && srv.command.empty()) continue;
+                if (srv.transport == "http" && srv.url.empty()) continue;
+                s.assistant.mcp_servers.push_back(std::move(srv));
+            }
+        }
     }
     return s;
 }
@@ -281,6 +318,32 @@ std::string SerializeSettings(const Settings& s) {
         voice.set("pause", vp.pause);
         if (!vp.mic.empty()) voice.set("mic", vp.mic);
         assistant.set("voice", std::move(voice));
+    }
+    if (const WebSearchPrefs& ws = s.assistant.web_search; !ws.IsDefault()) {
+        json::Value web = json::Value::Object();
+        web.set("enabled", ws.enabled);
+        if (!ws.provider.empty() && ws.provider != "auto") web.set("provider", ws.provider);
+        if (!ws.endpoint.empty()) web.set("endpoint", ws.endpoint);
+        if (ws.native) web.set("native", true);
+        assistant.set("web_search", std::move(web));
+    }
+    if (!s.assistant.mcp_servers.empty()) {
+        json::Value arr = json::Value::Array();
+        for (const ExternalMcpServer& srv : s.assistant.mcp_servers) {
+            json::Value item = json::Value::Object();
+            item.set("name", srv.name);
+            item.set("transport", srv.transport);
+            if (!srv.command.empty()) item.set("command", srv.command);
+            if (!srv.args.empty()) {
+                json::Value av = json::Value::Array();
+                for (const std::string& arg : srv.args) av.push(arg);
+                item.set("args", std::move(av));
+            }
+            if (!srv.url.empty()) item.set("url", srv.url);
+            if (!srv.enabled) item.set("enabled", false);
+            arr.push(std::move(item));
+        }
+        assistant.set("mcp_servers", std::move(arr));
     }
     if (!s.assistant.history) assistant.set("history", false);
     if (s.assistant.history_days > 0) assistant.set("history_days", s.assistant.history_days);

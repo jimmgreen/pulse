@@ -22,6 +22,10 @@ bool ExternalOpenWindowBusy(const AppState& state);
 // "pulse:extract:<archive>" / "pulse:archive-preview:<archive>": File Explorer opening an archive
 // type of the 7-Zip extension's 接管压缩包. OpenExternalFolder shows it, then extracts or previews it.
 bool IsArchiveLaunch(const std::wstring& raw);
+// "pulse:ext-open:<pkg>/<handler>/<path>" / "pulse:ext-preview:<pkg>/<handler>/<path>".
+bool IsExtensionOpenLaunch(const std::wstring& raw);
+// Preview the requested archive after its selection arrives; never preview a different selection.
+void PreviewArchiveWhenSelected(AppState& target, const std::wstring& path);
 
 // WM_CONVERT_EXTERNAL_OPEN, the toast after such an open was clicked (M7b,
 // plan §6 rule 7): a folder opened in window `s` goes back as a tab (with

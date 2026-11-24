@@ -1,5 +1,7 @@
 #pragma once
 #include "preview_grab_cursor.h"
+#include "preview_thumb_tracking.h"
+#include "../common/windows_compat.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -126,6 +128,12 @@ private:
         HWND pending_target = nullptr;
         UINT pending_generation = 0;
         std::atomic<HWND> target{nullptr};
+        HWND thumb_host = nullptr;
+        HWND thumb_target = nullptr;
+        POINT thumb_press{};
+        UINT thumb_generation = 0;
+        UINT_PTR thumb_timer = 0;
+        PreviewThumbTracking thumb_tracking;
     };
 
     static void SetHook(InputState& input, HHOOK& hook, bool install) {
@@ -148,6 +156,7 @@ private:
     static constexpr UINT kMove = kBegin + 1;
     static constexpr UINT kEnd = kBegin + 2;
     static constexpr UINT kHookCommand = kBegin + 3;
+    static constexpr UINT kThumbPress = kBegin + 4;
     inline static thread_local InputState* current_input_ = nullptr;
 
     Axis FindAxis(HWND target, int bar) const {
@@ -226,6 +235,12 @@ private:
         vertical_ = {};
     }
 
+    static void StopThumbTracking(InputState& input) {
+        if (input.thumb_timer) KillTimer(nullptr, input.thumb_timer);
+        input.thumb_timer = 0;
+        input.thumb_host = nullptr;
+    }
+
     static bool QueueBegin(InputState& input, HWND host, POINT point, HWND target = nullptr) {
         input.target = target ? target : host;
         input.suppress_left_up = true;
@@ -239,12 +254,24 @@ private:
 
     static bool CanGrabContent(HWND host, HWND target, POINT point) {
         if (!host || !target || (target != host && !IsChild(host, target))) return false;
-        RECT client{};
-        if (!GetClientRect(target, &client)) return false;
-        POINT local = point;
-        ScreenToClient(target, &local);
-        if (!PtInRect(&client, local)) return false; // Native scrollbar/border.
-        for (HWND window = target; window && window != host; window = GetParent(window)) {
+        const UINT dpi = compat::WindowDpi(host);
+        const int minimum = MulDiv(20, static_cast<int>(dpi), 96);
+        const int right_lane = std::max(minimum, compat::SystemMetricsForDpi(SM_CXVSCROLL, dpi));
+        const int bottom_lane = std::max(minimum, compat::SystemMetricsForDpi(SM_CYHSCROLL, dpi));
+        for (HWND window = target; window; window = GetParent(window)) {
+            RECT client{};
+            POINT local = point;
+            const bool in_client = GetClientRect(window, &client) &&
+                ScreenToClient(window, &local) && PtInRect(&client, local);
+            if (window == target && !in_client) return false; // Native scrollbar or border.
+            // A provider can draw its scrollbar inside the client HWND. Don't
+            // hand-pan from the edge of its canvas (or an enclosing viewport).
+            const auto ex_style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+            if (in_client && (local.x >= client.right - right_lane ||
+                local.y >= client.bottom - bottom_lane ||
+                ((ex_style & (WS_EX_LEFTSCROLLBAR | WS_EX_LAYOUTRTL)) &&
+                    local.x < client.left + right_lane))) return false;
+            if (window == host) break;
             wchar_t name[128]{};
             GetClassNameW(window, name, ARRAYSIZE(name));
             if (_wcsicmp(name, L"Button") == 0 || _wcsicmp(name, L"ScrollBar") == 0 ||
@@ -267,6 +294,7 @@ private:
         if (input.pending && (input.stop || !input.desired_hook || host != input.pending_host ||
             input.generation.load() != input.pending_generation)) input.pending = false;
         if (message == WM_LBUTTONUP) {
+            StopThumbTracking(input);
             input.pending = false;
             if (!input.suppress_left_up) return false;
             input.suppress_left_up = false;
@@ -278,14 +306,24 @@ private:
         }
         if (!host || input.stop || !input.desired_hook) return false;
         if (message == WM_LBUTTONDOWN && !input.active && !input.suppress_left_up) {
+            StopThumbTracking(input);
             HWND target = input.api.window_from_point(point);
-            if (IsWindowVisible(host) && CanGrabContent(host, target, point))
-                TrackPress(input, host, target, point);
+            if (IsWindowVisible(host) && target && (target == host || IsChild(host, target))) {
+                if (CanGrabContent(host, target, point)) TrackPress(input, host, target, point);
+                else if (const DWORD thread = input.thread_id.load()) {
+                    input.thumb_host = host;
+                    input.thumb_target = target;
+                    input.thumb_press = point;
+                    input.thumb_generation = input.generation.load();
+                    PostThreadMessageW(thread, kThumbPress, 0, 0);
+                }
+            }
             // Let the provider receive the real press and release for clicks,
             // including custom PDF buttons drawn inside its content HWND.
             return false;
         }
         if (message == WM_RBUTTONDOWN) {
+            StopThumbTracking(input);
             input.pending = false;
             if (input.active.exchange(false))
                 PostMessageW(host, kEnd, input.generation.load(), 0);
@@ -335,11 +373,31 @@ private:
             // even after the preview is hidden or this owner is destroyed.
             SetHook(*input, hook, (!input->stop && input->desired_hook) || input->suppress_left_up);
             if (input->stop && !input->suppress_left_up) break;
+            if (input->thumb_host && (!input->desired_hook || input->stop ||
+                input->host != input->thumb_host ||
+                input->generation != input->thumb_generation)) StopThumbTracking(*input);
             if (input->api.get_message(&message, nullptr, 0, 0) <= 0) break;
             if (message.message == kHookCommand) continue;
+            if (message.message == kThumbPress) {
+                if (input->thumb_host && !input->thumb_timer && input->thumb_tracking.Begin(
+                    input->thumb_host, input->thumb_target, input->thumb_press)) {
+                    // The provider can be in a native scrollbar modal loop.
+                    // Poll on our own queue, never in the hook callback.
+                    input->thumb_timer = SetTimer(nullptr, 0, 32, nullptr);
+                }
+                if (!input->thumb_timer) StopThumbTracking(*input);
+                continue;
+            }
+            if (message.message == WM_TIMER && !message.hwnd && input->thumb_timer &&
+                message.wParam == input->thumb_timer) {
+                if (input->host != input->thumb_host || input->generation != input->thumb_generation ||
+                    !input->thumb_tracking.Tick()) StopThumbTracking(*input);
+                continue;
+            }
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+        StopThumbTracking(*input);
         SetHook(*input, hook, false);
         current_input_ = nullptr;
         return 0;

@@ -25,18 +25,23 @@ size_t Index(Architecture architecture) { return architecture == x64 ? 0 : 1; }
 std::wstring Path(Architecture architecture) { return std::wstring(L"C:\\PulseFixture\\") + DllNameFor(architecture); }
 std::wstring OtherPath(Architecture architecture) { return std::wstring(L"C:\\OtherFixture\\") + DllNameFor(architecture); }
 std::vector<RegistrationTarget> Targets() { return {{x64, Path(x64)}, {x86, Path(x86)}}; }
-enum class Operation { Enable, EnableIfUnclaimed, DisableFor };
-struct Call { Operation operation; Architecture architecture; std::wstring path; };
+enum class Operation { Enable, EnableIfUnclaimed, EnableIfDisabledFor, DisableFor };
+struct Call { Operation operation; Architecture architecture; std::wstring path; std::wstring old_path = {}; };
 struct Fake {
     std::array<Status, 2> states;
     std::array<unsigned, 2> reads{};
     std::vector<Call> calls;
     std::function<std::optional<DWORD>(Operation, Architecture, const std::wstring&)> hook;
     std::function<void(Architecture, unsigned)> on_inspect;
-    DWORD Change(Operation operation, Architecture architecture, const std::wstring& path) {
-        calls.push_back({operation, architecture, path});
+    DWORD Change(Operation operation, Architecture architecture, const std::wstring& path, const std::wstring& old_path = {}) {
+        calls.push_back({operation, architecture, path, old_path});
         if (hook) if (const auto result = hook(operation, architecture, path)) return *result;
         auto& state = states[Index(architecture)];
+        if (operation == Operation::EnableIfDisabledFor) {
+            if (state.enabled || state.conflict || state.dll_path != old_path) return ERROR_ALREADY_EXISTS;
+            state = {true, false, ERROR_SUCCESS, path};
+            return ERROR_SUCCESS;
+        }
         if (!state.dll_path.empty() && state.dll_path != path) return ERROR_ALREADY_EXISTS;
         if (operation == Operation::DisableFor) { state.enabled = false; state.conflict = false; state.error = 0; }
         else state = {true, false, ERROR_SUCCESS, path};
@@ -53,6 +58,13 @@ struct Fake {
             [this](Architecture architecture, const std::wstring& path) { return Change(Operation::EnableIfUnclaimed, architecture, path); },
             [this](Architecture architecture, const std::wstring& path) { return Change(Operation::DisableFor, architecture, path); },
         };
+    }
+    RegistrationApi ApiWithRebind() {
+        auto api = Api();
+        api.enable_if_disabled_for = [this](Architecture architecture, const std::wstring& old_path, const std::wstring& new_path) {
+            return Change(Operation::EnableIfDisabledFor, architecture, new_path, old_path);
+        };
+        return api;
     }
     void Seed(bool enabled) {
         states[0] = {enabled, false, 0, Path(x64)};
@@ -261,6 +273,53 @@ void Cases() {
         const auto result = ExecuteRegistrationChange({{x64, Path(x64)}, {x86, path}}, true, fake.Api());
         Check(result.error == ERROR_INVALID_NAME && fake.calls.empty() && fake.reads[0] == 0,
             "all target paths are validated before the first snapshot or write");
+    }
+    {
+        // Mixed x64 disabled-rebind + x86 unclaimed in a single transaction.
+        Fake fake;
+        const std::wstring old_x64 = L"C:\\OldPulse\\DialogBridge\\aaaa\\PulseDialogAuto64.dll";
+        fake.states[0] = {false, false, 0, old_x64};
+        fake.states[1] = {};
+        const std::vector<RegistrationTarget> mixed{
+            {x64, Path(x64), old_x64},
+            {x86, Path(x86)}
+        };
+        const auto ok = ExecuteRegistrationChange(mixed, true, fake.ApiWithRebind());
+        Check(!ok.error && ok.attempted_count == 2 && fake.calls.size() == 2 &&
+            fake.calls[0].operation == Operation::EnableIfDisabledFor && fake.calls[0].old_path == old_x64 &&
+            fake.calls[0].path == Path(x64) && fake.calls[1].operation == Operation::EnableIfUnclaimed &&
+            fake.states[0].enabled && fake.states[0].dll_path == Path(x64) &&
+            fake.states[1].enabled && fake.states[1].dll_path == Path(x86),
+            "mixed x64 disabled-rebind and x86 unclaimed succeed in one transaction");
+
+        // Rollback after x64 disabled-rebind succeeds and x86 fails: must disable new x64 target path.
+        Fake rb;
+        rb.states[0] = {false, false, 0, old_x64};
+        rb.states[1] = {};
+        rb.hook = [&](Operation operation, Architecture architecture, const std::wstring&) -> std::optional<DWORD> {
+            if (operation == Operation::EnableIfUnclaimed && architecture == x86) return ERROR_ACCESS_DENIED;
+            return {};
+        };
+        const auto rolled = ExecuteRegistrationChange(mixed, true, rb.ApiWithRebind());
+        Check(rolled.error == ERROR_ACCESS_DENIED && rolled.rollback_complete && !rb.states[0].enabled &&
+            rb.calls.size() == 4 &&
+            rb.calls[2].operation == Operation::DisableFor && rb.calls[2].architecture == x86 &&
+            rb.calls[3].operation == Operation::DisableFor && rb.calls[3].architecture == x64 &&
+            rb.calls[3].path == Path(x64),
+            "rollback of completed x64 disabled-rebind disables newly bound x64 target path");
+
+        // Foreign disabled dll_path (!= expected_old_dll_path) is still refused before any writes.
+        Fake foreign;
+        foreign.states[0] = {false, false, 0, OtherPath(x64)};
+        const auto refused = ExecuteRegistrationChange(mixed, true, foreign.ApiWithRebind());
+        Check(refused.error == ERROR_ALREADY_EXISTS && foreign.calls.empty(),
+            "foreign disabled dll_path still fails preflight with ERROR_ALREADY_EXISTS");
+
+        // Disable mode must reject targets carrying expected_old_dll_path.
+        Fake invalid_disable;
+        Check(ExecuteRegistrationChange(mixed, false, invalid_disable.ApiWithRebind()).error == ERROR_INVALID_PARAMETER &&
+            invalid_disable.calls.empty(),
+            "disable transaction rejects expected_old_dll_path");
     }
 }
 int Baseline() {

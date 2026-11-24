@@ -8,6 +8,8 @@ struct FileDialogClassActivation {
     bool enabled = false;
     CoGetClassObjectFunction original = &::CoGetClassObject;
     FileDialogBridgeServices services;
+    // Optional call-local output; stage names have static storage and contain no caller data.
+    const char** outcome = nullptr;
 };
 
 // Explicit local STA/exact-INPROC Open/Save adapter, not an installed hook.

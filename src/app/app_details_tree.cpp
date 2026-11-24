@@ -629,6 +629,14 @@ void NoteDetailsTreeResult(AppState& s, const app::WorkResult& res, bool again) 
     if (changed && s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
+bool ExpandDetailsTreeDropFolder(AppState& s, app::Tab& tab, const std::wstring& path) {
+    if (!tab.TreeEntries() || path.empty()) return false;
+    SetExpanded(tab, path, true);
+    SyncDetailsTrees(s);
+    if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
+    return true;
+}
+
 bool HandleDetailsTreeMouseDown(AppState& s, const ui::WindowViewModel& vm,
                                 const ui::HitTestResult& hit, int x, int y, bool alt) {
     const bool sticky = hit.region == ui::HitTestResult::TreeSticky;

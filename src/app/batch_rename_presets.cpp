@@ -146,6 +146,17 @@ std::string PresetsToJson(const PresetStore& store) {
     for (const Preset& p : store.presets) list.push(PresetToJson(p));
     root.set("presets", std::move(list));
     if (store.has_last) root.set("last", PresetToJson(store.last));
+    using Kind = PresetSelection::Kind;
+    if (store.selection.kind != Kind::None) {
+        Value selected = Value::Object();
+        if (store.selection.kind == Kind::Last) {
+            selected.set("kind", "last");
+        } else {
+            selected.set("kind", store.selection.kind == Kind::Builtin ? "builtin" : "user");
+            selected.set("key", json::Utf8(store.selection.key));
+        }
+        root.set("selected", std::move(selected));
+    }
     return json::Serialize(root);
 }
 
@@ -160,6 +171,14 @@ bool PresetsFromJson(const std::string& utf8, PresetStore& out) {
         }
     if (const Value* last = root.find("last"); last && last->is_object())
         out.has_last = PresetFromJson(*last, out.last) && !out.last.steps.empty();
+    if (const Value* selected = root.find("selected"); selected && selected->is_object()) {
+        using Kind = PresetSelection::Kind;
+        const std::string kind = selected->get_string("kind");
+        std::wstring key = json::Wide(selected->get_string("key"));
+        if (kind == "last") out.selection = {Kind::Last, {}};
+        else if (kind == "builtin" && !key.empty()) out.selection = {Kind::Builtin, std::move(key)};
+        else if (kind == "user" && !key.empty()) out.selection = {Kind::User, std::move(key)};
+    }
     return true;
 }
 

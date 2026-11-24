@@ -3,6 +3,7 @@
 
 #include <d2d1.h>
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 namespace pulse::ui {
@@ -14,6 +15,7 @@ inline constexpr float kColumnStripDefaultDip = 240.0f;
 inline constexpr float kColumnStripChildDefaultDip = 240.0f;
 inline constexpr float kColumnStripMinDip = 120.0f;
 inline constexpr float kColumnStripMaxDip = 560.0f;
+inline constexpr float kColumnStripMinAnchorViewportDip = 48.0f;
 // Column id of the trailing "contents of the selected folder" column.
 // Ancestor columns use their index into the root-to-parent chain.
 inline constexpr int kColumnStripChildId = 10000;
@@ -55,6 +57,7 @@ struct ColumnStripLayout {
 ColumnStripLayout LayoutColumnStrip(const D2D1_RECT_F& pane_bounds, float top,
                                     size_t ancestor_count, bool child_slot,
                                     const std::vector<float>& widths_dip,
-                                    float scale, float scroll_from_right_dip = 0.0f) noexcept;
+                                    float scale, float scroll_from_right_dip = 0.0f,
+                                    std::optional<float> ancestor_viewport_limit_dip = std::nullopt) noexcept;
 
 } // namespace pulse::ui

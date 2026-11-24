@@ -1,3 +1,4 @@
+#include "../ui/settings_page_ids.h"
 #include "extensions/native/command_contributions.h"
 #include "shell_cache_readers.h"
 #include "window_management_ui.h"
@@ -5,10 +6,15 @@
 #include "../ui/view_zoom.h"
 #include "extensions/native/package_commands.h"
 #include "drive_eject_ui.h"
+#include "../fs/drive_kind.h"
 #include "group_selection_plan.h"
 #include "quick_preview_navigation.h"
 #include "tag_color_commands.h"
 #include "picker_appearance.h"
+#include "ui_layout.h"
+#include "about_info.h"
+#include "../common/json_utils.h"
+#include "../common/utf8_file.h"
 #include "git_ui.h"
 #include "mtime_hint_prefs.h"
 #include "tag_ads_sync.h"
@@ -26,7 +32,9 @@
 #include "app_column_view.h"
 #include "../ui/toolbar_layout.h"
 #include "../ui/command_icons.h"
+#include "app_vfs_ops.h"
 #include "app_internal.h"
+#include "app_hover_preview.h"
 #include "app_sidebar_refresh.h"
 #include "favorites_bar.h"
 #include "tray_reveal.h"
@@ -54,6 +62,7 @@
 #include "tag_rules.h"
 #include "entry_sort.h"
 #include "media_columns_ui.h"
+#include "extension_columns_ui.h"
 #include "session.h"
 #include "context_menu.h"
 #include "actions/action_registry.h"
@@ -218,18 +227,16 @@ void CreateNewItem(AppState& s, bool folder) {
     // 自定义工具栏 "remember the last type": the New button follows what was made last.
     if (s.appPrefs.toolbar_last_new != (folder ? 0 : 1)) {
         s.appPrefs.toolbar_last_new = folder ? 0 : 1;
-        if (!s.isolatedTest) s.appPrefs.Save();
+        if (!s.isolatedTest) s.appPrefs.SaveAsync();
     }
-    std::wstring name = folder
-        ? app::UniqueChildName(tab->current_path,
-            l10n::Get(l10n::StringId::NewFolder), L"")
-        : app::UniqueChildName(tab->current_path,
-            l10n::Get(l10n::StringId::NewTextDocument), L".txt");
+    std::wstring name = folder ? std::wstring(l10n::Get(l10n::StringId::NewFolder))
+        : std::wstring(l10n::Get(l10n::StringId::NewTextDocument)) + L".txt";
     std::wstring full = tab->current_path;
     if (!full.ends_with(L"\\")) full += L"\\";
     full += name;
     ops::OpRequest req;
     req.type = folder ? ops::OpType::CreateFolder : ops::OpType::CreateTextFile;
+    req.collision_policy = ops::CollisionPolicy::KeepBoth;
     req.sources.push_back(full);
     const auto task_id = s.ops.Submit(std::move(req));
     app::QueueCreateRenameIntent(tab->create_rename_intents, task_id,
@@ -262,7 +269,8 @@ void CreateNewFileItem(AppState& s, const std::wstring& stem, const std::wstring
     if (!CanCreateHere(tab)) return;
     ops::OpRequest req;
     req.type = ops::OpType::CreateTextFile;
-    req.sources.push_back(JoinChild(tab->current_path, app::UniqueChildName(tab->current_path, stem, ext)));
+    req.collision_policy = ops::CollisionPolicy::KeepBoth;
+    req.sources.push_back(JoinChild(tab->current_path, stem + ext));
     req.template_file = std::move(template_file);
     req.template_data = std::move(data);
     const auto task_id = s.ops.Submit(std::move(req));
@@ -460,13 +468,17 @@ std::vector<uint64_t> DissolveFolders(AppState& s, app::Tab& tab_ref, const std:
 
 void QueueTagAds(AppState& s, std::vector<app::TagAdsUpdate> updates) {
     const HWND notify = ServiceWindow(s);
+    // Startup / background retries pass an empty batch: they may update or clear an
+    // existing sync banner, but must not pop up a new banner unprompted.
+    const bool allow_new_banner = !updates.empty();
     app::QueueTagAdsDrain(std::move(updates), [&worker = s.worker](std::function<void()> task) {
         worker.EnqueueSerialIo(std::move(task));
-    }, [notify](std::vector<app::TagAdsFailure> failures) {
+    }, [notify, allow_new_banner](std::vector<app::TagAdsFailure> failures) {
         static std::atomic<uint64_t> revision{0};
         auto result = std::make_unique<app::TagAdsResult>();
         result->failures = std::move(failures);
         result->revision = ++revision;
+        result->allow_new_banner = allow_new_banner;
         if (notify && PostMessageW(notify, WM_TAG_ADS_WARNING, 0,
                 reinterpret_cast<LPARAM>(result.get()))) result.release();
     });
@@ -1505,7 +1517,7 @@ std::wstring TerminalTarget(AppState& s) {
 
 void RefreshAfterDriveChange(AppState& s) {
     RefreshPath(s, L"", RefreshReason::Explicit);  // This PC
-    RequestSidebarRefresh(s);
+    RequestSidebarRefresh(s, true);
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
@@ -1627,7 +1639,8 @@ static void FlipToolbarTool(AppState& s, size_t index);
 // folder (or the selection) and selects its editable end; never sends.
 static void AiOrganizeHere(AppState& s) {
     const app::Tab* tab = ActiveTab(s);
-    if (!tab || tab->current_path.empty() || fs::IsVirtualPath(tab->current_path) || !AiAgentConnected()) return;
+    if (!tab || tab->current_path.empty() || fs::IsVirtualPath(tab->current_path) ||
+        !AiAssistantEnabled(s) || !AiAgentConnected()) return;
     const size_t picked = tab->SelectedCount();
     std::wstring head = l10n::Get(picked > 0 ? l10n::StringId::AiOrgHereSel : l10n::StringId::AiOrgHere);
     const std::wstring key = picked > 0 ? L"{n}" : L"{folder}";
@@ -1655,14 +1668,16 @@ void AddNativePinSwatch(AppState& state, ui::FluentMenuItem& row) {
     row.quick_swatches.push_back(std::move(pin));
 }
 }
-void AppendNativeCommandRows(AppState& state, std::vector<ui::FluentMenuItem>& items) {
-    auto rows = extensions::native::ContextMenuCommandRows(state);
-    if (rows.empty()) return;
+bool AppendNativeCommandRows(AppState& state, std::vector<ui::FluentMenuItem>& items) {
+    bool waiting_for_seven_zip = false;
+    auto rows = extensions::native::ContextMenuCommandRows(state, &waiting_for_seven_zip);
+    if (rows.empty()) return waiting_for_seven_zip;
     auto at = std::find_if(items.begin(), items.end(), [](const auto& row) { return row.command == app::CmdCopyPath; });
     if (at == items.end()) at = std::find_if(items.begin(), items.end(), [](const auto& row) { return row.command == app::CmdProperties; });
     if (at != items.begin()) std::prev(at)->separator_after = true;
     if (at != items.end()) rows.back().separator_after = true;
     items.insert(at, std::make_move_iterator(rows.begin()), std::make_move_iterator(rows.end()));
+    return waiting_for_seven_zip;
 }
 
 void DispatchMenuCommand(AppState& s, int cmd) {
@@ -1674,6 +1689,7 @@ void DispatchMenuCommand(AppState& s, int cmd) {
     if (extensions::native::HandleContributedCommand(s, cmd)) return;
     if (extensions::native::HandlePackageCommand(s, cmd)) return;
     if (HandleNetworkPageCommand(s, cmd)) return;  // 连接服务器, 最近访问, ...
+    if (const app::Tab* git_tab = ActiveTab(s); git_tab && HandleGitCommand(s, cmd, git_tab->git_root)) return;  // toolbar Git pins
     if (cmd >= app::CmdToolbarToolBase && cmd < app::CmdToolbarToolEnd &&
         cmd < app::CmdToolbarToolBase + static_cast<int>(app::kToolbarToolCount)) {
         const size_t tool = static_cast<size_t>(cmd - app::CmdToolbarToolBase);
@@ -1829,9 +1845,20 @@ void DispatchMenuCommand(AppState& s, int cmd) {
         }
         break;
     }
-    case app::CmdCut: CollectToTray(s, true); break;
-    case app::CmdCopy: CollectToTray(s, false); break;
-    case app::CmdPaste: PasteIntoCurrent(s); break;
+    case app::CmdCut:
+    case app::CmdCopy:
+    case app::CmdPaste:
+        if (s.renameIndex >= 0 && s.hwndRenameEdit && IsWindowVisible(s.hwndRenameEdit)) {
+            SendMessageW(s.hwndRenameEdit,
+                         cmd == app::CmdCut ? WM_CUT : cmd == app::CmdCopy ? WM_COPY : WM_PASTE, 0, 0);
+            if (IsWindow(s.hwndRenameEdit) && GetFocus() != s.hwndRenameEdit) SetFocus(s.hwndRenameEdit);
+            InvalidateRect(s.hwnd, nullptr, FALSE);
+            break;
+        }
+        if (cmd == app::CmdCut) CollectToTray(s, true);
+        else if (cmd == app::CmdCopy) CollectToTray(s, false);
+        else PasteIntoCurrent(s);
+        break;
     case app::CmdDelete: DeleteSelected(s, (GetKeyState(VK_SHIFT) & 0x8000) != 0); break;
     case app::CmdRename: RenameSelected(s); break;
     case app::CmdEjectDrive:
@@ -1847,6 +1874,7 @@ void DispatchMenuCommand(AppState& s, int cmd) {
     case app::CmdDupReapplyRules: app::dup::ReapplyRules(s); break;
     case app::CmdDissolveFolder: DissolveSelectedFolders(s); break;
     case app::CmdSetAlias: ShowAliasOverlay(s); break;
+    case app::CmdVfsExtractSelected: VfsExtractSelectionTo(s); break;
     case app::CmdStageToTray: StageSelection(s); break;
     case app::CmdCloudKeep: RunCloudPin(s, fs::CloudPinAction::Keep); break;
     case app::CmdCloudFree: RunCloudPin(s, fs::CloudPinAction::Free); break;
@@ -2111,6 +2139,29 @@ void AdaptItemMenu(AppState& s, std::vector<ui::FluentMenuItem>& items, const ap
             EraseCommand(items, command);
         return;
     }
+    if (caps.kind == app::SelectionKind::Vfs) {
+        // Items inside an archive: 解压所选到… under 打开. Pulse's path-based
+        // features (pins, aliases, terminal, history, zip, cloud) need a real path.
+        for (int command : {app::CmdOpenTerminal, app::CmdPinWorkspace, app::CmdPinQuickAccess,
+                            app::CmdUnpinQuickAccess, app::CmdPinNetwork, app::CmdViewRecentChanges,
+                            app::CmdCompareSideBySide, app::CmdSetAlias, app::CmdStageToTray,
+                            app::CmdCompressZip, app::CmdOpenPath, app::CmdCloudKeep, app::CmdCloudFree,
+                            app::CmdProperties})
+            EraseCommand(items, command);
+        auto at = std::find_if(items.begin(), items.end(),
+                               [](const ui::FluentMenuItem& item) { return item.command == app::CmdOpen; });
+        auto row = VerbRow(app::CmdVfsExtractSelected, l10n::Get(l10n::StringId::VfsExtractSelectedTo),
+                           ui::command_icons::kGlyphExtractSel);
+        if (at == items.end()) {
+            row.separator_after = !items.empty();
+            items.insert(items.begin(), std::move(row));
+        } else {
+            row.separator_after = at->separator_after;  // it joins 打开's group
+            at->separator_after = false;
+            items.insert(std::next(at), std::move(row));
+        }
+        return;
+    }
     std::vector<ui::FluentMenuItem> verbs;
     const app::Tab* tab = ActiveTab(s);
     if (caps.kind == app::SelectionKind::Drives && tab) {
@@ -2310,7 +2361,7 @@ std::vector<ui::FluentMenuItem> BuildFinderItemMenu(
         ui::FluentMenuItem stage;
         stage.command = app::CmdStageToTray;
         stage.text = l10n::Get(l10n::StringId::CtxAddToTray);
-        stage.glyph = L"\xE7B8";  // package
+        stage.glyph = L"\xE8A1";  // 暂存区 (Tray); the package is 增强包's
         stage.shortcut = app::ShownShortcut(L"Ctrl+Shift+S");
         auto at = std::find_if(items.begin(), items.end(), [](const ui::FluentMenuItem& item) {
             return item.command == app::CmdSetAlias || item.command == app::CmdCopyPath;
@@ -2688,6 +2739,39 @@ void MaybePrefetchHoverCtxMenu(AppState& s) {
     if (s.hoverRow >= tab->CountBound()) return;
     std::wstring path = EntryFullPath(*tab, s.hoverRow);
     if (path.empty() || path == s.ctxHoverPrefetched) return;
+    if (!IsDeviceTab(tab)) {
+        // Speculative COM menu queries spin up dozens of shell-extension threads
+        // that contend with the single head on mechanical HDDs and stall on
+        // network/cloud/removable media. Defer until the user actually right-clicks.
+        if (fs::IsUncPath(path) || fs::IsRemoteLikeDrive(path)) {
+            s.ctxHoverPrefetched = path;
+            return;
+        }
+        const wchar_t letter = fs::DriveLetterOf(path);
+        if (letter) {
+            const wchar_t root[4] = {letter, L':', L'\\', L'\0'};
+            const UINT dtype = GetDriveTypeW(root);
+            if (dtype != DRIVE_FIXED && dtype != DRIVE_RAMDISK) {
+                s.ctxHoverPrefetched = path;
+                return;
+            }
+            if (dtype == DRIVE_FIXED) {
+                const auto seek = fs::CachedSeekPenalty(path);
+                if (seek == fs::SeekPenalty::Spinning) {
+                    s.ctxHoverPrefetched = path;
+                    return;
+                }
+                if (seek == fs::SeekPenalty::Unknown && !fs::SeekPenaltyProbed(path)) {
+                    if (fs::TryBeginSeekPenaltyProbe(path)) {
+                        s.worker.EnqueueIo([probe_root = std::wstring(root)] {
+                            fs::ProbeSeekPenalty(probe_root);
+                        });
+                    }
+                    return;
+                }
+            }
+        }
+    }
     s.ctxHoverPrefetched = path;
     if (std::wstring phone = PcDeviceShellId(*tab, {s.hoverRow}); !phone.empty()) {
         StartCtxQuery(s, {std::move(phone)}, false, std::wstring(kDeviceVerbKeyPrefix) + L"pc");
@@ -2714,12 +2798,17 @@ void MaybePrefetchHoverCtxMenu(AppState& s) {
 // then swap in this session's live ids when RSP_CTX_ITEMS lands.
 void PumpShellMenuMessages(AppState& s) {
     MSG msg{};
-    // Static verb reads report to the host window (host_routing.h).
-    const HWND verbs_window = ServiceWindow(s);
-    while (PeekMessageW(&msg, s.hwnd, WM_SHELLCTX_ITEMS, WM_SHELLCTX_ITEMS, PM_REMOVE) ||
-           PeekMessageW(&msg, verbs_window, WM_SHELL_VERBS, WM_SHELL_VERBS, PM_REMOVE)) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+    const HWND service_window = ServiceWindow(s);
+    for (;;) {
+        if (PeekMessageW(&msg, service_window, WM_SHELLCTX_ITEMS, WM_SHELLCTX_ITEMS, PM_REMOVE) ||
+            PeekMessageW(&msg, service_window, WM_SHELL_VERBS, WM_SHELL_VERBS, PM_REMOVE) ||
+            (s.hwnd && s.hwnd != service_window &&
+             PeekMessageW(&msg, s.hwnd, WM_SHELLCTX_ITEMS, WM_SHELLCTX_ITEMS, PM_REMOVE))) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+            continue;
+        }
+        break;
     }
 }
 
@@ -2747,7 +2836,7 @@ std::vector<ui::FluentMenuItem> ExplorerMenu(
     AppState& s, const std::vector<ui::FluentMenuItem>& base) {
     bool changed = false;
     auto display = s.context_menu.BuildOpenDisplay(s.ctxMenuPrefs, base, changed);
-    if (changed) s.ctxMenuPrefs.Save();
+    if (changed) s.ctxMenuPrefs.SaveAsync();
     return display;
 }
 
@@ -2759,13 +2848,25 @@ void RefreshOpenCtxMenu(AppState& s) {
     if (!s.context_menu.menu_open() || !s.menu || !s.menu->IsOpen()) return;
     bool changed = false;
     auto display = s.context_menu.ReconcileDisplay(s.ctxMenuPrefs, changed, GetTickCount64());
-    if (changed) s.ctxMenuPrefs.Save();
+    if (changed) s.ctxMenuPrefs.SaveAsync();
     const size_t rows = display.size();
     auto shown = display;
     if (s.menu->ReplaceItems(std::move(display))) {
         s.context_menu.CommitDisplay(std::move(shown));
         s.context_menu.NoteDisplayUpdate(rows, GetTickCount64());
     }
+}
+
+constexpr UINT_PTR kColdSevenZipMenuTimer = 0x375A;
+static void CALLBACK PollColdSevenZipMenu(HWND hwnd, UINT, UINT_PTR timer, DWORD) {
+    auto* s = GetAppState(hwnd);
+    if (!s || !s->context_menu.menu_open() || !s->menu || !s->menu->IsOpen()) {
+        KillTimer(hwnd, timer);
+        return;
+    }
+    if (!extensions::native::SevenZipMenuPreferencesReady()) return;
+    if (s->context_menu.AppendDeferredBaseItems()) RefreshOpenCtxMenu(*s);
+    if (!s->context_menu.DeferredBaseItemsPending()) KillTimer(hwnd, timer);
 }
 
 // Right before TrackPopup: the input message that asked for the menu is the
@@ -2795,29 +2896,87 @@ bool HandleShellMenuCommand(AppState& s, int cmd) {
 
 void ShowSidebarDriveMenu(AppState& s, std::wstring path, POINT screen_pt) {
     if (!IsDriveRootPath(path) || !EnsureMenu(s)) return;
-    s.context_menu.Close();
+    path = fs::NormalizePath(std::move(path));
+    const std::wstring root = fs::DriveRootOf(path);
+    if (root.empty()) return;
+    const std::wstring shell_path = ClipboardPath(path);
+    uint8_t drive_type = 0;
+    bool drive_locked = false;
+    for (const auto& entry : s.sidebar.drives) {
+        if (_wcsicmp(fs::DriveRootOf(entry.path).c_str(), root.c_str()) == 0) {
+            drive_type = entry.drive_type;
+            drive_locked = entry.drive_locked;
+            break;
+        }
+    }
+    if (!drive_type) drive_type = static_cast<uint8_t>(GetDriveTypeW(root.c_str()));
+    const bool ejectable = app::DriveEjectable(root, drive_type);
+    const bool remote = drive_type == DRIVE_REMOTE;
+
     StartCtxQuery(s, {path}, false, std::wstring(ipc::kDriveVerbKey));
     s.context_menu.SeedComItemsFromCache();
-    auto items = app::BuildBreadcrumbMenu(true);
+    const bool seeded = s.context_menu.com_predicted();
+
+    app::SidebarDriveMenuOptions opts;
+    opts.locked = drive_locked;
+    opts.ejectable = ejectable;
+    opts.remote = remote;
+    opts.workspace_pinned = s.places.FindWorkspace(path) >= 0;
+    opts.eject_glyph = app::EjectGlyph();
+    auto items = app::BuildSidebarDriveMenu(opts);
+    if (!drive_locked) AppendQuickAccessCommand(s, items, {path});
     app::ApplyBuiltinMenuPrefs(items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Item);
     s.context_menu.OpenMenu(items);
-    const int cmd = s.menu->TrackPopup(screen_pt, ExplorerMenu(s, s.context_menu.base_items()));
+    auto display = ExplorerMenu(s, s.context_menu.base_items());
+    BeginCtxTiming(s, display.size(), seeded);
+    const int cmd = s.menu->TrackPopup(screen_pt, std::move(display));
     s.context_menu.CloseMenu();
+    LogCtxTiming(s, cmd);
     if (HandleShellMenuCommand(s, cmd)) return;
+    if (!drive_locked && HandleQuickAccessCommand(s, cmd, {path})) return;
     // Sidebar commands belong to the clicked drive, never the active selection.
     switch (cmd) {
-    case app::CmdOpen: NavigateTo(s, path); break;
-    case app::CmdOpenInNewTab: OpenFolderTab(s, path); break;
-    case app::CmdCopyPath: ops::WriteClipboardText(path); break;
-    case app::CmdCopy: ops::WriteClipboard({path}, false); break;
-    case app::CmdOpenTerminal: s.ops.OpenTerminal(path); break;
-    case app::CmdProperties: s.ops.ShowProperties(path); break;
+    case app::CmdOpen:
+        if (drive_locked) app::StartBitLockerUnlock(s.hwnd, ServiceWindow(s), WM_BITLOCKER_UNLOCK, root);
+        else NavigateTo(s, path);
+        break;
+    case app::CmdOpenInNewTab:
+        if (!drive_locked) OpenFolderTab(s, path);
+        break;
+    case app::CmdUnlockDrive:
+        if (drive_locked) app::StartBitLockerUnlock(s.hwnd, ServiceWindow(s), WM_BITLOCKER_UNLOCK, root);
+        break;
+    case app::CmdEjectDrive:
+        if (ejectable) StartPreparedDriveEject(s, root, drive_type);
+        break;
+    case app::CmdDisconnectDrive:
+        if (remote) app::StartDriveDisconnect(s.hwnd, WM_DRIVE_VERB, root, false);
+        break;
+    case app::CmdCopyPath:
+        ops::WriteClipboardText(shell_path);
+        break;
+    case app::CmdOpenTerminal:
+        if (!drive_locked) s.ops.OpenTerminal(shell_path);
+        break;
+    case app::CmdProperties:
+        s.ops.ShowProperties(shell_path);
+        break;
+    case app::CmdPinWorkspace:
+        if (!drive_locked) {
+            if (s.places.FindWorkspace(path) >= 0) s.places.UnpinWorkspace(path);
+            else s.places.PinWorkspace(path, L"", 0, {path});
+            InvalidateRect(s.hwnd, nullptr, FALSE);
+        }
+        break;
+    case app::CmdSettingsContextMenu:
+        OpenSettingsTab(s, 2);
+        break;
     default: break;
     }
 }
 
-void ShowItemContextMenu(AppState& s, POINT screen_pt, bool from_chip) {
-    if(DeferContentSelection(s,[=](AppState& v){ShowItemContextMenu(v,screen_pt,from_chip);})) return;
+void ShowItemContextMenu(AppState& s, POINT screen_pt, std::optional<RECT> chip_anchor) {
+    if (DeferContentSelection(s, [=](AppState& v) { ShowItemContextMenu(v, screen_pt, chip_anchor); })) return;
     if (!EnsureMenu(s)) return;
     app::Tab* tab = ActiveTab(s);
     if (tab && app::RecycleSelectionOf(*tab) == app::RecycleSelection::Mixed) return;
@@ -2852,11 +3011,20 @@ void ShowItemContextMenu(AppState& s, POINT screen_pt, bool from_chip) {
     } else {
         app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs);
     }
-    AppendNativeCommandRows(s, base_items);
+    const bool waiting_for_seven_zip = AppendNativeCommandRows(s, base_items);
     s.context_menu.OpenMenu(base_items);
+    if (waiting_for_seven_zip && !recycle_selection && !paths.empty()) {
+        s.context_menu.DeferBaseItems([&s, paths] {
+            const auto* current = ActiveTab(s);
+            if (!current || SelectedFullPaths(*current) != paths)
+                return std::vector<ui::FluentMenuItem>{};
+            return extensions::native::ContextMenuCommandRows(s, nullptr, "pulse.7zip");
+        });
+        SetTimer(s.hwnd, kColdSevenZipMenuTimer, 50, PollColdSevenZipMenu);
+    }
     auto display = recycle_selection ? std::move(base_items)
                                      : ExplorerMenu(s, s.context_menu.base_items());
-    if (from_chip && !recycle_selection) {
+    if (chip_anchor && !recycle_selection) {
         // Chip ⋯: 用 <pinned app> 打开 and
         // 固定到工具栏 ▸ lead the item menu.
         auto apps = ToolbarAppMenuItems(s);
@@ -2868,12 +3036,15 @@ void ShowItemContextMenu(AppState& s, POINT screen_pt, bool from_chip) {
     }
 
     if (!recycle_selection) BeginCtxTiming(s, display.size(), seeded);
+    // The chip opens on press; its release must stay outside the active menu rows.
+    if (chip_anchor) s.menu->SetDropdownRect(*chip_anchor);
     const int cmd = s.menu->TrackPopup(screen_pt, std::move(display));
+    if (waiting_for_seven_zip) KillTimer(s.hwnd, kColdSevenZipMenuTimer);
     const int favorite_index = cmd >= app::CmdTagBase && cmd < app::CmdTagBase + app::kMaxFavoriteTags
         ? s.places.FavoriteTagIndex(cmd - app::CmdTagBase + 1) : -1;
     s.context_menu.CloseMenu();
     LogCtxTiming(s, cmd);
-    if (from_chip && RunToolbarAppMenuCommand(s, cmd)) return;
+    if (chip_anchor && RunToolbarAppMenuCommand(s, cmd)) return;
     if (HandleShellMenuCommand(s, cmd)) return;
     if (HandleQuickAccessCommand(s, cmd, quick_paths)) return;
     const auto window_folder = [&](int base) {
@@ -2895,7 +3066,7 @@ std::vector<app::sysctx::NewTemplate> NewTemplatesForMenu(AppState& s, bool wait
 bool RunShellNewCommand(AppState& s, int cmd, const std::vector<app::sysctx::NewTemplate>& templates);
 void AppendBackgroundNewMenu(std::vector<ui::FluentMenuItem>& items,
                              const std::vector<app::sysctx::NewTemplate>& templates);
-void AppendFolderTools(std::vector<ui::FluentMenuItem>& items);
+void AppendFolderTools(AppState& s, std::vector<ui::FluentMenuItem>& items);
 } // namespace
 
 void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
@@ -2966,7 +3137,7 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
                                                : std::vector<app::sysctx::NewTemplate>{};
     if (can_create_here) AppendBackgroundNewMenu(base_items, new_templates);
     if (!tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path) && !app::IsUncServerRoot(tab->current_path))
-        AppendFolderTools(base_items);
+        AppendFolderTools(s, base_items);
     // This PC, a server's share list, the Network view and other Pulse views
     // take no new items or pastes, and have no folder of their own to open a
     // terminal in or pin as a workspace.
@@ -2993,7 +3164,7 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     }
     // In-app Git: pull / push / refresh for a folder inside a repository.
     const std::wstring git_root = tab->git_root;
-    if (view_options.filesystem) AppendGitMenu(*tab, base_items);
+    if (view_options.filesystem) AppendGitMenu(s, *tab, base_items);
     app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Background);
     AppendNativeCommandRows(s, base_items);
     s.context_menu.OpenMenu(std::move(base_items));
@@ -3253,19 +3424,6 @@ std::vector<app::sysctx::NewTemplate> NewTemplatesForMenu(AppState& s, bool wait
     return list;
 }
 
-void LaunchNewCommand(const std::wstring& command_line, const std::wstring& dir) {
-    wchar_t expanded[2048]{};
-    const DWORD n = ExpandEnvironmentStringsW(command_line.c_str(), expanded, ARRAYSIZE(expanded));
-    std::wstring line = n > 0 && n <= ARRAYSIZE(expanded) ? expanded : command_line;
-    STARTUPINFOW si{sizeof(si)};
-    PROCESS_INFORMATION pi{};
-    if (CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, 0, nullptr,
-                       dir.empty() ? nullptr : dir.c_str(), &si, &pi)) {
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-    }
-}
-
 // One 新建 entry, the way Explorer makes it.
 void CreateFromNewTemplate(AppState& s, const app::sysctx::NewTemplate& t) {
     app::Tab* tab = ActiveTab(s);
@@ -3273,27 +3431,12 @@ void CreateFromNewTemplate(AppState& s, const app::sysctx::NewTemplate& t) {
     const std::wstring dir = tab->current_path;
     const std::wstring stem = TagLabel(l10n::StringId::NewItemNamed, t.display);
     if (_wcsicmp(t.ext.c_str(), L".lnk") == 0) {
-        // Explorer's shortcut creator: an empty .lnk (Explorer's 新建快捷方式
-        // name) handed to the classic wizard, which renames it on 完成 and
-        // removes it on 取消.
-        const std::wstring lnk_stem = l10n::Get(l10n::StringId::NewShortcutName);
-        const std::wstring full = JoinChild(dir, app::UniqueChildName(dir, lnk_stem, t.ext));
-        HANDLE file = CreateFileW(full.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (file == INVALID_HANDLE_VALUE) return;
-        CloseHandle(file);
-        wchar_t system[MAX_PATH]{};
-        GetSystemDirectoryW(system, ARRAYSIZE(system));
-        LaunchNewCommand(L"\"" + std::wstring(system) + L"\\rundll32.exe\" appwiz.cpl,NewLinkHere " + full, dir);
+        s.ops.CreateShellNew(dir, l10n::Get(l10n::StringId::NewShortcutName), t.ext, {});
         return;
     }
     if (!t.command.empty() && t.template_file.empty() && t.data.empty() && !t.null_file) {
         // Command-only entries (联系人 …) create the file themselves.
-        const std::wstring full = JoinChild(dir, app::UniqueChildName(dir, stem, t.ext));
-        std::wstring line = t.command;
-        const size_t at = line.find(L"%1");
-        if (at != std::wstring::npos) line.replace(at, 2, full);
-        else line += L" \"" + full + L"\"";
-        LaunchNewCommand(line, dir);
+        s.ops.CreateShellNew(dir, stem, t.ext, t.command);
         return;
     }
     CreateNewFileItem(s, stem, t.ext, t.template_file, t.data);
@@ -3338,9 +3481,8 @@ bool RunShellNewCommand(AppState& s, int cmd, const std::vector<app::sysctx::New
 // The background menu's 新建 flyout: the toolbar New menu's rows, minus the
 // flat 新建文件夹 / 新建文本文档 rows the menu already shows (those stay
 // separately configurable on the 右键菜单 page), right after them.
-// 查找重复文件 and, with a model connected, AI 整理此文件夹… under 新建 ›
-// (task 46 ①); not shown at all without AI (the palette greys it instead).
-void AppendFolderTools(std::vector<ui::FluentMenuItem>& items) {
+// 查找重复文件 and, if the assistant is enabled and connected, AI 整理此文件夹….
+void AppendFolderTools(AppState& s, std::vector<ui::FluentMenuItem>& items) {
     size_t at = 0;
     const std::wstring new_text = l10n::Get(l10n::StringId::New);
     for (size_t i = 0; i < items.size(); ++i) {
@@ -3349,7 +3491,7 @@ void AppendFolderTools(std::vector<ui::FluentMenuItem>& items) {
     }
     std::vector<ui::FluentMenuItem> rows;
     rows.push_back(VerbRow(app::CmdFindDuplicates, l10n::Get(l10n::StringId::ActFindDuplicates), L"\xE8C8"));
-    if (AiAgentConnected())
+    if (AiAssistantEnabled(s) && AiAgentConnected())
         rows.push_back(VerbRow(app::CmdAiOrganizeHere, l10n::Get(l10n::StringId::ActOrganizeHere),
                                ui::command_icons::kGlyphSparkle));
     if (at > 0) {
@@ -3397,7 +3539,8 @@ void ShowNewDropdown(AppState& s) {
     auto items = app::BuildNewMenu();
     // Prototype: Pulse's types, 快捷方式…, then what the system 新建 menu
     // offers (with the file type icons Explorer shows), then 自定义工具栏.
-    const auto templates = NewTemplatesForMenu(s);
+    // Never block the UI thread waiting for cold HKCR ShellNew enumeration.
+    const auto templates = NewTemplatesForMenu(s, false);
     const app::Tab* active = ActiveTab(s);
     const bool can_create = CanCreateHere(active);
     // A writable phone folder takes new folders only, not files (CreateDeviceFolder).
@@ -3440,8 +3583,7 @@ void ShowSplitDropdown(AppState& s) {
     if (!EnsureMenu(s)) return;
     // Under the split pin when it is on the toolbar (T3d), else under More.
     const float width = static_cast<float>(s.compositor.Width());
-    const float left = s.renderer.EffectiveSidebarWidth(width);
-    const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(width - left < 600 * s.scale),
+    const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(s.renderer.ToolbarCompact(width)),
                                                    s.pane ? s.pane->filter_expand : 0.0f);
     D2D1_RECT_F anchor = layout.overflow;
     size_t slot = 0;
@@ -3586,7 +3728,7 @@ void ShowStarredBadgeEditor(AppState& s, const std::wstring& path,
 }
 
 void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
-                                bool recent, POINT screen_pt) {
+                                bool recent, POINT screen_pt, int builtin) {
     if (path.empty() || !EnsureMenu(s)) return;
     constexpr int kCustomColor = 30100;
     // 收藏夹分组与分隔线: 放进分组 › (each group, 新建分组…, 移出分组) and the
@@ -3725,10 +3867,11 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
         return;
     }
     if (cmd == kOpenNewTab) {
-        OpenFolderTab(s, path);
+        if (!OpenSidebarKnownFolder(s, builtin, SidebarFolderOpenMode::NewTab)) OpenFolderTab(s, path);
         return;
     }
     if (cmd == app::CmdOpen) {
+        if (OpenSidebarKnownFolder(s, builtin, SidebarFolderOpenMode::Current)) return;
         const DWORD attrs = GetFileAttributesW(path.c_str());
         const bool is_dir = attrs != INVALID_FILE_ATTRIBUTES &&
                             (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -4084,8 +4227,7 @@ void ShowSortDropdown(AppState& s) {
         }
     }
     const float width = static_cast<float>(s.compositor.Width());
-    const float left = s.renderer.EffectiveSidebarWidth(width);
-    const auto layout = s.renderer.ToolbarLayoutAt(width,s.renderer.NewButtonWidthPx(width-left < 600*s.scale),
+    const auto layout = s.renderer.ToolbarLayoutAt(width,s.renderer.NewButtonWidthPx(s.renderer.ToolbarCompact(width)),
                                                    s.pane ? s.pane->filter_expand : 0.0f);
     POINT anchor{static_cast<LONG>(layout.sort.left),static_cast<LONG>(layout.sort.bottom)};
     ClientToScreen(s.hwnd,&anchor);
@@ -4118,7 +4260,7 @@ void ShowGroupDropdown(AppState& s) {
     } else {
         const float width = static_cast<float>(s.compositor.Width());
         const float left = s.renderer.EffectiveSidebarWidth(width);
-        const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(width - left < 600 * s.scale),
+        const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(s.renderer.ToolbarCompact(width)),
                                                        s.pane ? s.pane->filter_expand : 0.0f);
         POINT anchor{static_cast<LONG>(layout.group.left), static_cast<LONG>(layout.group.bottom)};
         ClientToScreen(s.hwnd, &anchor);
@@ -4443,11 +4585,14 @@ void RunToolbarSelectionAction(AppState& s, int action) {
     }
     // Menus and pickers open under the clicked chip button.
     const float width = static_cast<float>(s.compositor.Width());
-    const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(width - s.renderer.EffectiveSidebarWidth(width) < 600 * s.scale),
+    const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(s.renderer.ToolbarCompact(width)),
                                                    s.pane ? s.pane->filter_expand : 0.0f);
     const auto actions = SelectionChipActions(s);
-    const auto chip = s.renderer.SelectionChipAt(layout, width, static_cast<int>(tab->SelectedCount()),
-                                                 static_cast<int>(actions.size()));
+    auto chip = s.renderer.SelectionChipAt(layout, width, static_cast<int>(tab->SelectedCount()),
+                                           static_cast<int>(actions.size()));
+    if (chip.chip.right <= chip.chip.left)
+        chip = s.renderer.FloatingSelectionChip(width, static_cast<float>(s.compositor.Height()),
+                                                static_cast<int>(tab->SelectedCount()), static_cast<int>(actions.size()));
     const D2D1_RECT_F button = action == ui::kSelChipLabel ? chip.label
         : chip.buttons[static_cast<size_t>(std::min(action, ui::kSelChipClear))];
     POINT anchor{static_cast<LONG>(button.left), static_cast<LONG>(button.bottom)};
@@ -4461,7 +4606,9 @@ void RunToolbarSelectionAction(AppState& s, int action) {
         return;
     }
     if (action == ui::kSelChipMore) {
-        ShowItemContextMenu(s, anchor, true);
+        POINT top_right{static_cast<LONG>(button.right), static_cast<LONG>(button.top)};
+        ClientToScreen(s.hwnd, &top_right);
+        ShowItemContextMenu(s, anchor, RECT{anchor.x, top_right.y, top_right.x, anchor.y});
         return;
     }
     if (action >= static_cast<int>(actions.size())) return;
@@ -4475,9 +4622,8 @@ std::vector<ui::FluentMenuItem> BuildToolbarMoreItems(AppState& s) {
     auto* tab=ActiveTab(s);
     if (!tab) return {};
     const float width=static_cast<float>(s.compositor.Width());
-    const float left=s.renderer.EffectiveSidebarWidth(width);
     // The toolbar as drawn: an open filter folds pins in here too.
-    const auto layout=s.renderer.ToolbarLayoutAt(width,s.renderer.NewButtonWidthPx(width-left < 600*s.scale),
+    const auto layout=s.renderer.ToolbarLayoutAt(width,s.renderer.NewButtonWidthPx(s.renderer.ToolbarCompact(width)),
                                                  s.pane ? s.pane->filter_expand : 0.0f);
     // The customize button (T5, in place of More): pins without room on the
     // toolbar (all of them in the narrow tier) come first, in a menu that
@@ -4499,13 +4645,20 @@ std::vector<ui::FluentMenuItem> BuildToolbarMoreItems(AppState& s) {
     const auto pins=ToolbarPinActions(s);
     const uint64_t separators=app::ToolbarSeparatorMask(s.appPrefs.toolbar_tools);
     size_t pin=0;
+    bool pending_separator=false;
+    bool previous_pin=false;
     for (const auto& id : s.appPrefs.toolbar_tools) {
         const int tool=app::ToolbarToolIndex(id);
         if (!app::IsToolbarTool(id) || pin>=pins.size()) continue;
         const size_t slot=pin++;
+        pending_separator |= slot<64 && (separators>>slot & 1);
+        if (!pins[slot].visible) continue;
+        const bool separator_before=previous_pin && pending_separator;
+        previous_pin=true;
+        pending_separator=false;
         if (slot<layout.pins.size() && layout.pins[slot].right>layout.pins[slot].left) continue;
         // The user's groups carry over into the menu as separator lines.
-        if (!items.empty() && slot<64 && (separators>>slot & 1)) items.back().separator_after=true;
+        if (!items.empty() && separator_before) items.back().separator_after=true;
         if (tool < 0) {
             ui::FluentMenuItem item;
             item.command = pins[slot].command; item.text = pins[slot].label;
@@ -4592,11 +4745,15 @@ void ShowToolbarMore(AppState& s) {
     auto items = BuildToolbarMoreItems(s);
     if (items.empty()) { ShowToolbarCustomize(s, 0); return; }
     const float width = static_cast<float>(s.compositor.Width());
-    const float left = s.renderer.EffectiveSidebarWidth(width);
-    const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(width - left < 600 * s.scale),
+    const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(s.renderer.ToolbarCompact(width)),
         s.pane ? s.pane->filter_expand : 0.0f);
     POINT anchor{static_cast<LONG>(layout.overflow.left),static_cast<LONG>(layout.overflow.bottom)};
+    POINT top{static_cast<LONG>(layout.overflow.left),static_cast<LONG>(layout.overflow.top)};
+    POINT right{static_cast<LONG>(layout.overflow.right),static_cast<LONG>(layout.overflow.bottom)};
     ClientToScreen(s.hwnd,&anchor);
+    ClientToScreen(s.hwnd,&top);
+    ClientToScreen(s.hwnd,&right);
+    s.menu->SetDropdownRect({top.x, top.y, right.x, right.y});
     const int cmd=s.menu->TrackPopup(anchor,items);
     if (cmd == -6100) { ShowWindowManagementMenu(s, anchor); return; }
     if (s.menu->DraggedCommand() > 0) {
@@ -4783,8 +4940,16 @@ void PushToolbarPinDrag(AppState& s) {
 std::vector<ui::SelectionChipAction> ToolbarPinActions(AppState& s) {
     std::vector<ui::SelectionChipAction> out;
     const app::Tab* tab = ActiveTab(s);
-    if ((s.appPrefs.toolbar_tools.empty() && g_toolbar_preview < 0) || !tab) return out;
+    if ((s.appPrefs.toolbar_tools.empty() && g_toolbar_preview < 0 && (!tab || tab->git_root.empty())) || !tab) return out;
     const bool has_selection = tab->SelectedCount() > 0;
+    const bool renaming = s.renameIndex >= 0 && s.hwndRenameEdit && IsWindowVisible(s.hwndRenameEdit);
+    DWORD rename_from = 0, rename_to = 0;
+    if (renaming) {
+        SendMessageW(s.hwndRenameEdit, EM_GETSEL,
+                     reinterpret_cast<WPARAM>(&rename_from), reinterpret_cast<LPARAM>(&rename_to));
+    }
+    const bool rename_has_sel = renaming && rename_from != rename_to;
+    const bool rename_can_paste = renaming && IsClipboardFormatAvailable(CF_UNICODETEXT) != FALSE;
     app::SelectionCaps caps{};
     bool caps_known = false;
     std::vector<std::wstring> ids = s.appPrefs.toolbar_tools;
@@ -4795,9 +4960,15 @@ std::vector<ui::SelectionChipAction> ToolbarPinActions(AppState& s) {
     size_t native_pin = 0;
     for (const auto& id : ids) {
         if (app::IsNativeToolbarTool(id)) {
-            if (native_pin < native_pins.size() && out.size() < static_cast<size_t>(ui::kToolbarCommandPins)) {
-                const auto& row = native_pins[native_pin];
+            if (out.size() < static_cast<size_t>(ui::kToolbarCommandPins)) {
                 ui::SelectionChipAction action;
+                if (native_pin >= native_pins.size() || native_pins[native_pin].tooltip != id) {
+                    // Keep the saved slot for drag, separators and following app pins.
+                    action.enabled = action.visible = false;
+                    out.push_back(std::move(action));
+                    continue;
+                }
+                const auto& row = native_pins[native_pin++];
                 action.command = row.command;
                 action.glyph = !row.glyph.empty() ? row.glyph
                     : row.custom_icon != 0 ? (L"icon:#" + std::to_wstring(row.custom_icon))
@@ -4806,7 +4977,6 @@ std::vector<ui::SelectionChipAction> ToolbarPinActions(AppState& s) {
                 action.label = row.text; action.enabled = row.enabled;
                 out.push_back(std::move(action));
             }
-            ++native_pin;
             continue;
         }
         const int tool = app::ToolbarToolIndex(id);
@@ -4833,14 +5003,19 @@ std::vector<ui::SelectionChipAction> ToolbarPinActions(AppState& s) {
         // (a drive takes a rename only); paste needs files or a tray batch
         // and a folder that takes them. Worked out once, when asked for.
         case app::CmdCut: case app::CmdCopy: case app::CmdRename: case app::CmdDelete: {
+            if (renaming && (def.command == app::CmdCut || def.command == app::CmdCopy)) {
+                action.enabled = rename_has_sel;
+                break;
+            }
             if (!caps_known) { caps = SelectionCapsOf(s); caps_known = true; }
             action.enabled = def.command == app::CmdCut ? caps.cut : def.command == app::CmdCopy ? caps.copy
                            : def.command == app::CmdRename ? caps.rename : caps.del;
             break;
         }
         case app::CmdPaste:
-            action.enabled = CanCreateHere(tab) ? (!s.tray.batches().empty() || ClipboardHasFiles())
-                                                : CanPasteHere(tab) && ClipboardHasFiles();
+            action.enabled = renaming ? rename_can_paste
+                : (CanCreateHere(tab) ? (!s.tray.batches().empty() || ClipboardHasFiles())
+                                      : CanPasteHere(tab) && ClipboardHasFiles());
             break;
         case app::CmdSelectAll: case app::CmdInvertSelection: case app::CmdSelectWildcard:
             action.enabled = tab->snapshot && tab->EntryCount() > 0;
@@ -4852,6 +5027,9 @@ std::vector<ui::SelectionChipAction> ToolbarPinActions(AppState& s) {
         }
         out.push_back(std::move(action));
     }
+    // Inside a repository: the Git group (Source Control, pull, push), after
+    // the user's tools like the preview pin (not dragged, not saved).
+    AppendGitToolbarPins(s, *tab, out, static_cast<size_t>(ui::kToolbarCommandPins));
     return out;
 }
 
@@ -4877,8 +5055,7 @@ bool ToolbarNewCreatesFolder(const AppState& s) {
 // Screen rect of the toolbar's More button (the picker hangs from it).
 static RECT ToolbarMoreScreenRect(AppState& s) {
     const float width = static_cast<float>(s.compositor.Width());
-    const float left = s.renderer.EffectiveSidebarWidth(width);
-    const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(width - left < 600 * s.scale),
+    const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(s.renderer.ToolbarCompact(width)),
                                                    s.pane ? s.pane->filter_expand : 0.0f);
     POINT a{static_cast<LONG>(layout.overflow.left), static_cast<LONG>(layout.overflow.top)};
     POINT b{static_cast<LONG>(layout.overflow.right), static_cast<LONG>(layout.overflow.bottom)};
@@ -5214,8 +5391,7 @@ void ShowToolbarCustomize(AppState& s, int page) {
 // rereads the toolbar and takes the activation back.
 static ui::ToolbarLayout CurrentToolbarLayout(AppState& s) {
     const float width = static_cast<float>(s.compositor.Width());
-    const float left = s.renderer.EffectiveSidebarWidth(width);
-    return s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(width - left < 600 * s.scale),
+    return s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(s.renderer.ToolbarCompact(width)),
                                       s.pane ? s.pane->filter_expand : 0.0f);
 }
 
@@ -5368,8 +5544,14 @@ void MoveToolbarPinDrag(AppState& s, POINT pt) {
     for(int view=0;view<3;++view) if(view_slots[view]<0 && view_rects[view].right>view_rects[view].left)
         right_edge=std::min(right_edge,view_rects[view].left);
     float boundary = (layout.create.right + right_edge) * 0.5f;
-    if (right_from > 0 && right_from < tools && layout.pins[right_from].right > layout.pins[right_from].left)
-        boundary = (layout.pins[right_from-1].right + layout.pins[right_from].left) * 0.5f;
+    if (right_from > 0 && right_from < tools) {
+        const auto shown = [&layout](int slot) { return layout.pins[slot].right > layout.pins[slot].left; };
+        int left = right_from - 1, right = right_from;
+        while (left >= 0 && !shown(left)) --left;
+        while (right < tools && !shown(right)) ++right;
+        if (left >= 0 && right < tools)
+            boundary = (layout.pins[left].right + layout.pins[right].left) * 0.5f;
+    }
     d.right = static_cast<float>(pt.x) > boundary;
     // The slot whose centre is nearest the pin's, in its own group.
     const int from = is_tool ? 0 : pins, to = is_tool ? tools : pins + apps;
@@ -5909,7 +6091,7 @@ void ShowOmnibar(AppState& s, OmnibarMode mode) {
             commands = app::actions::PaletteRows(actions, parsed.needle,
                 parsed.kind == app::OmnibarQuery::Kind::Command ? app::actions::PaletteMode::Commands
                                                                 : app::actions::PaletteMode::Mixed,
-                PaletteUsed());
+                PaletteUsed(), AiAssistantEnabled(s));
         if (parsed.kind == app::OmnibarQuery::Kind::Command) {
             auto native_commands = extensions::native::CommandRows(s, parsed.needle);
             commands.insert(commands.begin(), std::make_move_iterator(native_commands.begin()), std::make_move_iterator(native_commands.end()));
@@ -5974,6 +6156,7 @@ void ShowOmnibar(AppState& s, OmnibarMode mode) {
     if (extensions::native::HandlePackageCommand(s, cmd)) return;
     if (cmd == app::actions::kPaletteAskAssistant) {
         // Fills the assistant's box; the user reads it and presses Enter.
+        if (!AiAssistantEnabled(s)) return;
         const auto q = app::ParseOmnibarQuery(s.paletteQuery, project_only);
         AiAssistantOpen(s);
         AiAssistantFillComposer(s, q.needle);
@@ -6088,6 +6271,8 @@ void ApplyAccentFromPrefs(AppState& s, bool snap_picker) {
     s.bloom_accent.SetSelection(follow, rgb, snap_picker);
     if (s.menu) s.menu->SetTheme(s.darkMode, s.accentColor);
     if (s.operationWindow) s.operationWindow->SetTheme(s.darkMode, s.accentColor);
+    if (s.quickPreview && s.quickPreview->visible()) s.quickPreview->SetAccent(s.accentColor);
+    SyncPinnedPreviewsAccent(s.core, s.accentColor);
 }
 
 namespace {
@@ -6152,8 +6337,8 @@ bool SelectedQuickPreviewItem(AppState& s, ui::QuickPreviewItem& item) {
 
 void ToggleQuickPreview(AppState& s) {
     if (HoldPreviewPin(s)) return;   // Space while holding the button keeps the peek open
-    if (s.quickPreview.visible()) {
-        s.quickPreview.Close();
+    if (s.quickPreview->visible()) {
+        s.quickPreview->Close();
         return;
     }
     if(DeferContentSelection(s,[](AppState& v){ToggleQuickPreview(v);},true)) return;
@@ -6163,6 +6348,7 @@ void ToggleQuickPreview(AppState& s) {
 
 void OpenQuickPreview(AppState& s, const ui::QuickPreviewItem& item, bool activate) {
     s.detailsPreview.Close();
+    PruneClosedPinnedPreviews(s.core);
     {
         const auto effect = s.appPrefs.background_image.empty()
             ? ui::WindowEffectFromId(s.appPrefs.window_effect)
@@ -6191,11 +6377,13 @@ void OpenQuickPreview(AppState& s, const ui::QuickPreviewItem& item, bool activa
                 }
             }
         }
-        s.quickPreview.Initialize(s.hwnd, WM_QUICK_PREVIEW_NAVIGATE,
-                                  WM_QUICK_PREVIEW_OPEN, WM_QUICK_PREVIEW_COMMAND);
-        s.quickPreview.SetAccent(s.accentColor);
-        s.quickPreview.SetOptions(QuickPreviewOptionsFromPrefs(s.appPrefs));
-        s.quickPreview.Show(item, s.darkMode, effect, s.safeMode, zoom_from, activate);
+        const auto occupied = VisiblePinnedPreviewRects(s.core);
+        s.quickPreview->Initialize(s.hwnd, WM_QUICK_PREVIEW_NAVIGATE,
+                                   WM_QUICK_PREVIEW_OPEN, WM_QUICK_PREVIEW_COMMAND);
+        s.quickPreview->SetAccent(s.accentColor);
+        s.quickPreview->SetOptions(QuickPreviewOptionsFromPrefs(s.appPrefs));
+        s.quickPreview->Show(item, s.darkMode, effect, s.safeMode, zoom_from, activate,
+                             occupied.empty() ? nullptr : &occupied);
         s.quickPreviewSelection.Reset(item.path);
     }
 }
@@ -6213,7 +6401,7 @@ void NavigateQuickPreview(AppState& s, int direction) {
     EnsureRowVisible(s, *tab, tab->selected_index);
     auto update=[](AppState& v) {
         ui::QuickPreviewItem item;
-        if(v.quickPreview.visible() && SelectedQuickPreviewItem(v,item)) v.quickPreview.Update(item);
+        if(v.quickPreview->visible() && SelectedQuickPreviewItem(v,item)) v.quickPreview->Update(item);
     };
     if(!DeferContentSelection(s,update,true)) update(s);
     InvalidateRect(s.hwnd, nullptr, FALSE);
@@ -6223,8 +6411,8 @@ void SyncDetailsPreview(AppState& s) {
     auto* tab = ActiveTab(s);
     const auto bounds = s.renderer.DetailsPreviewBounds();
     ui::QuickPreviewItem item;
-    if (!s.showDetailsPanel || !s.detailsPreviewEnabled || IsIconic(s.hwnd) ||
-        s.quickPreview.visible() || !tab || tab->loading || tab->SelectedCount() != 1 ||
+    if (s.hidden_to_tray || !s.showDetailsPanel || !s.detailsPreviewEnabled || IsIconic(s.hwnd) ||
+        s.quickPreview->visible() || !tab || tab->loading || tab->SelectedCount() != 1 ||
         bounds.right <= bounds.left || bounds.bottom <= bounds.top ||
         !SelectedQuickPreviewItem(s, item)) {
         s.detailsPreview.Close();
@@ -6250,17 +6438,18 @@ void SyncDetailsPreview(AppState& s) {
     }
     // Visible() includes the closing animation. Keep the same preview session
     // and scroll position; restore its whole region only once the flyout is gone.
-    s.detailsPreview.SetEmbeddedOcclusion(s.renderer.GroupWheelPicker().OcclusionBounds());
+    SyncDetailsPreviewOcclusion(s);
 }
 
 void SyncQuickPreview(AppState& s) {
-    if (!s.quickPreview.visible()) {
+    SyncPinnedPreviewsStarred(s.core, s.places);
+    if (!s.quickPreview->visible()) {
         s.quickPreviewAnchorView = -1;
         return;
     }
     app::Tab* tab = ActiveTab(s);
     if (!tab || !tab->snapshot || tab->loading) return;
-    const ui::QuickPreviewItem shown = s.quickPreview.item();
+    const ui::QuickPreviewItem shown = s.quickPreview->item();
     const int index = QuickPreviewEntryIndex(*tab, shown);
     if (index >= 0) {
         s.quickPreviewAnchorView = -1;
@@ -6268,9 +6457,9 @@ void SyncQuickPreview(AppState& s) {
         if (!QuickPreviewItemAt(s, *tab, index, fresh)) return;
         if (fresh.modified != shown.modified || fresh.size != shown.size ||
             fresh.attrs != shown.attrs) {
-            s.quickPreview.Update(fresh);  // content changed on disk: reload
+            s.quickPreview->Update(fresh);  // content changed on disk: reload
         } else {
-            s.quickPreview.SetStarred(fresh.starred);
+            s.quickPreview->SetStarred(fresh.starred);
         }
         return;
     }
@@ -6289,7 +6478,7 @@ void SyncQuickPreview(AppState& s) {
                 if (!QuickPreviewItemAt(s, *tab, source, next)) return false;
                 tab->SelectOnly(source);
                 EnsureRowVisible(s, *tab, source);
-                s.quickPreview.Update(next);
+                s.quickPreview->Update(next);
                 InvalidateRect(s.hwnd, nullptr, FALSE);
                 return true;
             };
@@ -6297,7 +6486,7 @@ void SyncQuickPreview(AppState& s) {
             for (int view = start - 1; view >= 0; --view) if (try_row(view)) return;
         }
     }
-    s.quickPreview.Close();
+    s.quickPreview->Close();
 }
 
 void EnsureEditVisuals(AppState& s);
@@ -6365,6 +6554,7 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
             s.ctxMenuPrefs.BuiltinOrder(app::BuiltinMenuSurface::RowButtons)));
         s.renderer.SetThumbnailBadges(s.appPrefs.list_thumbnail_badges);
         app::SetMediaColumnsEnabled(s.appPrefs.media_columns);
+        app::SetExtensionColumnPrefs(s.appPrefs.extension_columns_hidden, s.appPrefs.extension_column_widths);
     }
     if (app::HasEffect(effects, app::SettingsEffect::FolderSort)) {
         app::SetFolderSortMode(app::FolderSortModeFromInt(s.appPrefs.folder_sort_mode));
@@ -6459,6 +6649,392 @@ void SetThemeMode(AppState& s, int mode) {
     if (s.hwndFilterEdit) InvalidateRect(s.hwndFilterEdit, nullptr, TRUE);
     if (s.operationWindow) s.operationWindow->SetTheme(s.darkMode, s.accentColor);
     InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+// ---- 界面 quick panel (ui_modes_mockup flyout) ----
+namespace {
+constexpr std::wstring_view kUiModeIds[3] = {L"zen", L"standard", L"pro"};
+
+int UiModeIndex(const app::AppPrefs& p) {
+    return p.ui_mode == L"zen" ? 0 : p.ui_mode == L"standard" ? 1 : 2;
+}
+
+ui::LayoutPanelState LayoutPanelStateOf(const AppState& s) {
+    const app::AppPrefs& p = s.appPrefs;
+    ui::LayoutPanelState st;
+    st.mode = UiModeIndex(p);
+    st.changed = static_cast<int>(app::UiLayoutDiff(p).size());
+    using T = ui::LayoutPanelToggle;
+    const auto set = [&](T t, bool on) { st.toggles[static_cast<size_t>(t)] = on; };
+    set(T::Tabs, p.ui_show_tabs);
+    set(T::SidebarLite, p.ui_sidebar_lite);
+    set(T::Details, s.showDetailsPanel);
+    set(T::StatusBar, p.ui_status_bar);
+    set(T::Tray, !p.tray_hide_when_empty);
+    set(T::Zebra, p.list_zebra_rows);
+    set(T::SelectionFloat, p.ui_selection_float);
+    set(T::Extensions, p.show_file_extensions);
+    using G = ui::LayoutPanelSegment;
+    st.segments[static_cast<size_t>(G::Sidebar)] = std::clamp(p.ui_sidebar_mode, 0, 2);
+    st.segments[static_cast<size_t>(G::Commands)] = std::clamp(p.ui_command_mode, 0, 2);
+    st.segments[static_cast<size_t>(G::Address)] = p.ui_address_in_title ? 1 : 0;
+    st.segments[static_cast<size_t>(G::Density)] = app::DensityOfRowHeight(p.row_height);
+    return st;
+}
+
+// After a layout option changes: save, apply what the renderers cache (row
+// height, list style) in every window, redraw, and show the panel the result.
+void CommitUiLayout(AppState& s, app::SettingsEffect effects) {
+    if (!s.isolatedTest) s.appPrefs.Save();
+    app::ForEachWindowSharingCore(s, [&](AppState& window) { ApplySettingsEffects(window, effects); });
+    if (s.layoutPanel && s.layoutPanel->IsOpen())
+        s.layoutPanel->Update(LayoutPanelStateOf(s), s.darkMode, s.accentColor);
+}
+
+void FlipLayoutToggle(AppState& s, ui::LayoutPanelToggle toggle) {
+    app::AppPrefs& p = s.appPrefs;
+    app::SettingsEffect effect = app::SettingsEffect::None;
+    using T = ui::LayoutPanelToggle;
+    switch (toggle) {
+    case T::Tabs: p.ui_show_tabs = !p.ui_show_tabs; break;
+    case T::SidebarLite: p.ui_sidebar_lite = !p.ui_sidebar_lite; break;
+    case T::Details:  // a window setting, as the toolbar's 详情窗格 button
+        s.showDetailsPanel = !s.showDetailsPanel;
+        s.renderer.SetDetailsPanelVisible(s.showDetailsPanel, true);
+        break;
+    case T::StatusBar: p.ui_status_bar = !p.ui_status_bar; break;
+    case T::Tray: p.tray_hide_when_empty = !p.tray_hide_when_empty; break;
+    case T::Zebra: p.list_zebra_rows = !p.list_zebra_rows; effect = app::SettingsEffect::ListStyle; break;
+    case T::SelectionFloat: p.ui_selection_float = !p.ui_selection_float; break;
+    case T::Extensions: p.show_file_extensions = !p.show_file_extensions; effect = app::SettingsEffect::ListStyle; break;
+    case T::Count: return;
+    }
+    CommitUiLayout(s, effect);
+}
+
+void SetLayoutSegment(AppState& s, ui::LayoutPanelSegment segment, int value) {
+    app::AppPrefs& p = s.appPrefs;
+    app::SettingsEffect effect = app::SettingsEffect::None;
+    using G = ui::LayoutPanelSegment;
+    switch (segment) {
+    case G::Sidebar:
+        if (p.ui_sidebar_mode == value) return;
+        p.ui_sidebar_mode = std::clamp(value, 0, 2);
+        app::ForEachWindowSharingCore(s, [](AppState& window) { CloseSidebarPeek(window); });
+        break;
+    case G::Commands: p.ui_command_mode = std::clamp(value, 0, 2); break;
+    case G::Address: p.ui_address_in_title = value == 1; break;
+    case G::Density:
+        p.row_height = app::RowHeightOfDensity(value);
+        effect = app::SettingsEffect::RowHeight;
+        break;
+    case G::Count: return;
+    }
+    CommitUiLayout(s, effect);
+}
+// Open folders in every window take prefs' default view (SwitchUiMode, 默认视图).
+void ApplyDefaultViewEverywhere(AppState& s) {
+    // The default view went to every folder: open folders take it now, as with
+    // 应用到所有文件夹 (re-sorted where grouping turns on or off).
+    const ui::ViewMode view = s.appPrefs.folder_views.Default();
+    app::ForEachWindowSharingCore(s, [&](AppState& window) {
+        std::vector<std::wstring> paths;
+        ForEachPane(window, [&](app::Pane& pane) {
+            app::Tab* tab = pane.ActiveTab();
+            if (!tab || tab->current_path.empty() || fs::IsVirtualPath(tab->current_path) ||
+                tab->view_mode == view) return;
+            const int old_group = tab->EffectiveGroup();
+            tab->view_mode = view;
+            if (ui::IsZoomIconMode(view)) {
+                tab->icon_dip = ui::NormalizeIconDip(view, 0.0f, window.scale);
+                tab->wall = false;
+            }
+            ++tab->view_generation;
+            tab->scroll_x = 0.0f;
+            tab->scroll_y = 0.0f;
+            if (tab->EffectiveGroup() != old_group &&
+                std::find(paths.begin(), paths.end(), tab->current_path) == paths.end())
+                paths.push_back(tab->current_path);
+        });
+        window.scrollTargetY = 0.0f;
+        window.scrollAnimating = false;
+        CloseSidebarPeek(window);
+        for (const auto& path : paths) RefreshPath(window, path, RefreshReason::Explicit);
+        ClampScroll(window);
+    });
+}
+
+void SetDefaultView(AppState& s, int value) {
+    const bool details = s.appPrefs.folder_views.Default() == ui::ViewMode::Details;
+    if ((value == 0) == details) return;
+    s.appPrefs.folder_views.ApplyToAll(value == 0 ? ui::ViewMode::Details : ui::ViewMode::MediumIcons);
+    ApplyDefaultViewEverywhere(s);
+    CommitUiLayout(s, app::SettingsEffect::ListStyle);
+}
+
+// A press on a 标题栏按钮 row arms the settings menu drag (app_input follows
+// the pointer, drops, or treats a release without travel as a click).
+void ArmTitleButtonDrag(AppState& s, int row) {
+    POINT pt{};
+    GetCursorPos(&pt);
+    ScreenToClient(s.hwnd, &pt);
+    const ui::WindowViewModel vm = BuildVm(s, false);
+    const auto rect = D2D1::RectF(0, 0, static_cast<float>(s.compositor.Width()), static_cast<float>(s.compositor.Height()));
+    const float top = s.renderer.SettingsTitleRowTop(vm, rect, row);
+    if (std::isnan(top)) return;
+    s.settings.BeginMenuDrag(kSettingsTitleDragBase + row, static_cast<float>(pt.y), static_cast<float>(pt.y) - top);
+    SetCapture(s.hwnd);
+}
+
+// 标题栏按钮 list on the settings page: 90 add a divider, 91 the mode's default
+// set, 100 + row*4 + {0 show/hide, 1 press (drag), 3 remove a divider}.
+void EditTitleButtons(AppState& s, int index) {
+    auto buttons = app::ParseTitleButtons(s.appPrefs.ui_title_buttons);
+    std::wstring spec;
+    if (index == 90) {
+        if (!buttons.empty() && buttons.back().Divider()) return;
+        buttons.push_back({});
+    } else if (index == 91) {
+        spec = app::UiPreset(kUiModeIds[static_cast<size_t>(UiModeIndex(s.appPrefs))]).title_buttons;
+    } else {
+        const int row = (index - 100) / 4, op = (index - 100) % 4;
+        if (index < 100 || row >= static_cast<int>(buttons.size())) return;
+        const size_t i = static_cast<size_t>(row);
+        if (op == 1) { ArmTitleButtonDrag(s, row); return; }
+        if (op == 0 && !buttons[i].Divider()) buttons[i].shown = !buttons[i].shown;
+        else if (op == 3 && buttons[i].Divider()) buttons.erase(buttons.begin() + static_cast<std::ptrdiff_t>(i));
+        else return;
+    }
+    s.appPrefs.ui_title_buttons = spec.empty() ? app::FormatTitleButtons(buttons) : spec;
+    CommitUiLayout(s, app::SettingsEffect::None);
+}
+}  // namespace
+
+void MoveTitleButton(AppState& s, int from, int to) {
+    auto buttons = app::ParseTitleButtons(s.appPrefs.ui_title_buttons);
+    const int n = static_cast<int>(buttons.size());
+    if (from < 0 || from >= n || to < 0 || to >= n || from == to) return;
+    auto held = buttons[static_cast<size_t>(from)];
+    buttons.erase(buttons.begin() + from);
+    buttons.insert(buttons.begin() + to, std::move(held));
+    s.appPrefs.ui_title_buttons = app::FormatTitleButtons(buttons);
+    CommitUiLayout(s, app::SettingsEffect::None);
+}
+
+void OpenTitleButtonSettings(AppState& s) {
+    OpenSettingsTab(s, ui::kSettingsPageUiLayout);
+    const auto vm = BuildVm(s, false);
+    const float width = static_cast<float>(s.compositor.Width()), height = static_cast<float>(s.compositor.Height());
+    s.settings.SetScroll(s.renderer.SettingsDestinationOffset(vm, static_cast<int>(l10n::StringId::UilSecTitle), width, height),
+                         s.renderer.SettingsMaxScroll(vm, width, height));
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+void SwitchUiMode(AppState& s, int mode) {
+    if (mode < 0 || mode > 2) return;
+    app::ApplyUiPreset(s.appPrefs, kUiModeIds[mode]);
+    ApplyDefaultViewEverywhere(s);
+    CommitUiLayout(s, app::SettingsEffect::RowHeight | app::SettingsEffect::ListStyle);
+}
+
+namespace {
+bool g_uil_show_profile = false;  // 设置 › 界面布局 › 方案内容 expanded
+
+// 界面方案: the starting point and every layout option, as JSON (app.json key names).
+std::wstring BuildUiProfile(const app::AppPrefs& p) {
+    auto b = [](bool v) { return std::wstring(v ? L"true" : L"false"); };
+    std::wstring o = L"{\n  \"pulseUiProfile\": 1";
+    o += L",\n  \"base\": \"" + p.ui_mode + L"\"";
+    o += L",\n  \"ui_sidebar\": " + std::to_wstring(p.ui_sidebar_mode);
+    o += L",\n  \"ui_sidebar_lite\": " + b(p.ui_sidebar_lite);
+    o += L",\n  \"tray_hide_when_empty\": " + b(p.tray_hide_when_empty);
+    o += L",\n  \"ui_tabs\": " + b(p.ui_show_tabs);
+    o += L",\n  \"tab_layout\": " + std::to_wstring(p.tab_layout);
+    o += L",\n  \"tab_max_rows\": " + std::to_wstring(p.tab_max_rows);
+    o += L",\n  \"tab_overflow_list\": " + b(p.tab_overflow_list);
+    o += L",\n  \"ui_address_in_title\": " + b(p.ui_address_in_title);
+    o += L",\n  \"ui_commands\": " + std::to_wstring(p.ui_command_mode);
+    o += L",\n  \"ui_toolbar_labels\": " + b(p.ui_toolbar_labels);
+    o += L",\n  \"ui_selection_float\": " + b(p.ui_selection_float);
+    o += L",\n  \"ui_status_bar\": " + b(p.ui_status_bar);
+    o += L",\n  \"ui_rounded\": " + b(p.ui_rounded);
+    o += L",\n  \"default_view\": \"" + std::wstring(p.folder_views.Default() == ui::ViewMode::Details ? L"details" : L"icons") + L"\"";
+    o += L",\n  \"row_height\": " + std::to_wstring(p.row_height);
+    o += L",\n  \"list_zebra_rows\": " + b(p.list_zebra_rows);
+    o += L",\n  \"show_file_extensions\": " + b(p.show_file_extensions);
+    o += L",\n  \"toolbar_show_sort\": " + b(p.toolbar_show_sort);
+    o += L",\n  \"toolbar_show_filter\": " + b(p.toolbar_show_filter);
+    o += L",\n  \"toolbar_show_group\": " + b(p.toolbar_show_group);
+    o += L",\n  \"ui_title_buttons\": \"" + app::NormalizeTitleButtons(p.ui_title_buttons) + L"\"";
+    o += L"\n}";
+    return o;
+}
+
+void ExportUiProfile(AppState& s) {
+    std::wstring file;
+    if (!PickJsonFile(s.hwnd, true, L"Pulse-ui.json", file)) return;
+    if (!pulse::WriteUtf8FileAtomic(file, BuildUiProfile(s.appPrefs) + L"\n")) MessageBeep(MB_ICONWARNING);
+}
+
+void ImportUiProfile(AppState& s) {
+    std::wstring file, text;
+    if (!PickJsonFile(s.hwnd, false, nullptr, file)) return;
+    namespace J = pulse::json;
+    const std::wstring base = pulse::ReadUtf8File(file, text) && text.find(L"\"pulseUiProfile\"") != std::wstring::npos
+        ? J::ExtractString(text, L"base", L"") : L"";
+    if (base != L"zen" && base != L"standard" && base != L"pro") {
+        MessageBoxW(s.hwnd, l10n::Get(l10n::StringId::UilPfImportBad).c_str(), L"Pulse", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    static constexpr l10n::StringId kNames[] = {l10n::StringId::SetupModeZen, l10n::StringId::SetupModeStandard, l10n::StringId::SetupModePro};
+    std::wstring ask = l10n::Get(l10n::StringId::UilPfImportConfirm);
+    if (const auto at = ask.find(L"{mode}"); at != std::wstring::npos)
+        ask.replace(at, 6, l10n::Get(kNames[base == L"zen" ? 0 : base == L"standard" ? 1 : 2]));
+    if (MessageBoxW(s.hwnd, ask.c_str(), L"Pulse", MB_OKCANCEL | MB_ICONQUESTION) != IDOK) return;
+    app::AppPrefs& p = s.appPrefs;
+    p.ui_mode = base;
+    p.ui_sidebar_mode = std::clamp(J::ExtractInt(text, L"ui_sidebar", p.ui_sidebar_mode), 0, 2);
+    p.ui_sidebar_lite = J::ExtractBool(text, L"ui_sidebar_lite", p.ui_sidebar_lite);
+    p.tray_hide_when_empty = J::ExtractBool(text, L"tray_hide_when_empty", p.tray_hide_when_empty);
+    p.ui_show_tabs = J::ExtractBool(text, L"ui_tabs", p.ui_show_tabs);
+    p.tab_layout = std::clamp(J::ExtractInt(text, L"tab_layout", p.tab_layout), 0, 2);
+    p.tab_max_rows = std::clamp(J::ExtractInt(text, L"tab_max_rows", p.tab_max_rows), 2, 4);
+    p.tab_overflow_list = J::ExtractBool(text, L"tab_overflow_list", p.tab_overflow_list);
+    p.ui_address_in_title = J::ExtractBool(text, L"ui_address_in_title", p.ui_address_in_title);
+    p.ui_command_mode = std::clamp(J::ExtractInt(text, L"ui_commands", p.ui_command_mode), 0, 2);
+    p.ui_toolbar_labels = J::ExtractBool(text, L"ui_toolbar_labels", p.ui_toolbar_labels);
+    p.ui_selection_float = J::ExtractBool(text, L"ui_selection_float", p.ui_selection_float);
+    p.ui_status_bar = J::ExtractBool(text, L"ui_status_bar", p.ui_status_bar);
+    p.ui_rounded = J::ExtractBool(text, L"ui_rounded", p.ui_rounded);
+    p.row_height = std::clamp(J::ExtractInt(text, L"row_height", p.row_height), 20, 64);
+    p.list_zebra_rows = J::ExtractBool(text, L"list_zebra_rows", p.list_zebra_rows);
+    p.show_file_extensions = J::ExtractBool(text, L"show_file_extensions", p.show_file_extensions);
+    p.toolbar_show_sort = J::ExtractBool(text, L"toolbar_show_sort", p.toolbar_show_sort);
+    p.toolbar_show_filter = J::ExtractBool(text, L"toolbar_show_filter", p.toolbar_show_filter);
+    p.toolbar_show_group = J::ExtractBool(text, L"toolbar_show_group", p.toolbar_show_group);
+    p.ui_title_buttons = app::NormalizeTitleButtons(J::ExtractString(text, L"ui_title_buttons", p.ui_title_buttons));
+    CommitUiLayout(s, static_cast<app::SettingsEffect>(static_cast<uint32_t>(app::SettingsEffect::ListStyle) |
+                                                       static_cast<uint32_t>(app::SettingsEffect::RowHeight)));
+    const std::wstring view = J::ExtractString(text, L"default_view", L"");
+    if (view == L"details" || view == L"icons") SetDefaultView(s, view == L"details" ? 0 : 1);
+}
+} // namespace
+
+void HandleUiLayoutSetting(AppState& s, int index) {
+    if (index == 4) { CloseSettings(s); return; }                // 回到文件夹看效果
+    if (index == 5) { ShowToolbarCustomize(s, 0); return; }      // 自定义命令栏…
+    if (index >= 30 && index < 36) {                             // 侧边栏内容 / 暂存入口 / 按钮文字
+        app::AppPrefs& p = s.appPrefs;
+        const bool first = index % 2 == 0;
+        if (index < 32) p.ui_sidebar_lite = first;
+        else if (index < 34) p.tray_hide_when_empty = !first;
+        else p.ui_toolbar_labels = first;
+        CommitUiLayout(s, app::SettingsEffect::None);
+        return;
+    }
+    if (index >= 36 && index < 40) {                             // 标签多时: 收进列表 / 单排滚动 / 多排×2
+        app::AppPrefs& p = s.appPrefs;
+        if (p.vertical_tabs) return;
+        p.tab_overflow_list = index == 36;
+        p.tab_layout = index == 36 ? 0 : index - 37;
+        CommitUiLayout(s, app::SettingsEffect::None);
+        return;
+    }
+    if (index >= 310 && index < 313) {                           // 排序 / 筛选 / 分组
+        bool& shown = index == 310 ? s.appPrefs.toolbar_show_sort : index == 311 ? s.appPrefs.toolbar_show_filter : s.appPrefs.toolbar_show_group;
+        shown = !shown;
+        CommitUiLayout(s, app::SettingsEffect::None);
+        return;
+    }
+    if (index == 60) { ExportUiProfile(s); return; }
+    if (index == 61) { ImportUiProfile(s); return; }
+    if (index == 62) { g_uil_show_profile = !g_uil_show_profile; InvalidateRect(s.hwnd, nullptr, FALSE); return; }
+    if (index == 63) { app::CopyTextToClipboard(s.hwnd, BuildUiProfile(s.appPrefs)); return; }
+    if (index >= 0 && index <= 2) { SwitchUiMode(s, index); return; }
+    if (index == 3) { SwitchUiMode(s, UiModeIndex(s.appPrefs)); return; }  // 恢复为「X」
+    if (index >= 10 && index < 25) {
+        const int row = (index - 10) / 3, value = (index - 10) % 3;
+        if (row < ui::kLayoutPanelSegmentCount) SetLayoutSegment(s, static_cast<ui::LayoutPanelSegment>(row), value);
+        else SetDefaultView(s, value);
+        return;
+    }
+    if (index >= 300 && index < 300 + ui::kLayoutPanelToggleCount) {
+        FlipLayoutToggle(s, static_cast<ui::LayoutPanelToggle>(index - 300));
+        return;
+    }
+    if (index == 300 + ui::kLayoutPanelToggleCount) {  // 按钮文字
+        s.appPrefs.ui_toolbar_labels = !s.appPrefs.ui_toolbar_labels;
+        CommitUiLayout(s, app::SettingsEffect::None);
+        return;
+    }
+    if (index == 90 || index == 91 || (index >= 100 && index < 100 + 4 * 12)) EditTitleButtons(s, index);
+}
+
+void FillUiLayoutSettingsVm(const AppState& s, ui::WindowViewModel& vm) {
+    if (s.settings.page() != ui::kSettingsPageUiLayout) return;
+    const app::AppPrefs& p = s.appPrefs;
+    const ui::LayoutPanelState st = LayoutPanelStateOf(s);
+    vm.settings_uil_mode = st.mode;
+    for (int i = 0; i < ui::kLayoutPanelToggleCount; ++i) vm.settings_uil_toggle[static_cast<size_t>(i)] = st.toggles[static_cast<size_t>(i)];
+    vm.settings_uil_toggle[8] = p.ui_toolbar_labels;
+    for (int i = 0; i < ui::kLayoutPanelSegmentCount; ++i) vm.settings_uil_seg[static_cast<size_t>(i)] = st.segments[static_cast<size_t>(i)];
+    vm.settings_uil_seg[4] = p.folder_views.Default() == ui::ViewMode::Details ? 0 : 1;
+    using I = l10n::StringId;
+    static constexpr I kKeyNames[] = {I::LayoutRowSidebar, I::LayoutTglLite, I::LayoutTglTabs, I::LayoutRowAddress,
+        I::LayoutRowCommands, I::UilToolbarLabels, I::LayoutTglStatus, I::LayoutTglTray, I::LayoutTglSelection,
+        I::LayoutRowDensity, I::UilView, I::LayoutTglZebra, I::UilMinimalColumns, I::ListThumbnailBadges,
+        I::UilRounded, I::UilSecTitle};
+    static_assert(std::size(kKeyNames) == static_cast<size_t>(app::kUiLayoutKeyCount));
+    vm.settings_uil_diff.clear();
+    for (const auto key : app::UiLayoutDiff(p)) vm.settings_uil_diff.push_back(static_cast<int>(kKeyNames[static_cast<size_t>(key)]));
+    vm.settings_uil_title.clear();
+    bool settings_shown = false, layout_shown = false;
+    for (const auto& b : app::ParseTitleButtons(p.ui_title_buttons)) {
+        int kind = -1;
+        for (size_t k = 0; k < app::kTitleButtonIds.size(); ++k) if (b.id == app::kTitleButtonIds[k]) kind = static_cast<int>(k);
+        vm.settings_uil_title.push_back({kind, b.shown});
+        if (kind == 1) layout_shown = b.shown;
+        if (kind == 2) settings_shown = b.shown;
+    }
+    vm.settings_uil_title_warn = !settings_shown && !layout_shown;
+    if (s.settings.menu_drag_live() && s.settings.menu_drag_item() >= kSettingsTitleDragBase) {
+        vm.settings_uil_title_drag = s.settings.menu_drag_item() - kSettingsTitleDragBase;
+        vm.settings_uil_title_drag_pos = s.settings.menu_drag_pos();
+        vm.settings_uil_title_drag_grab = s.settings.menu_drag_grab();
+    }
+    vm.settings_uil_title_default = app::NormalizeTitleButtons(p.ui_title_buttons) ==
+        app::UiPreset(kUiModeIds[static_cast<size_t>(st.mode)]).title_buttons;
+    vm.settings_uil_tb_shown = {p.toolbar_show_sort, p.toolbar_show_filter, p.toolbar_show_group};
+    vm.settings_uil_show_profile = g_uil_show_profile;
+    vm.settings_uil_profile = g_uil_show_profile ? BuildUiProfile(p) : std::wstring();
+}
+
+void ToggleLayoutPanel(AppState& s, const POINT* anchor) {
+    if (!s.layoutPanel) s.layoutPanel = std::make_unique<ui::LayoutPanel>();
+    if (s.layoutPanel->IsOpen()) {
+        s.layoutPanel->Hide();
+        return;
+    }
+    // The click on 界面 that took the activation away has just closed it.
+    if (anchor && GetTickCount64() - s.layoutPanel->LastHideTick() < 300) return;
+    POINT at{};
+    if (anchor) {
+        at = *anchor;
+    } else {
+        // mockup .fly: right 96, under the title bar.
+        RECT client{};
+        GetClientRect(s.hwnd, &client);
+        at = {client.right - static_cast<LONG>(96.0f * s.scale),
+              static_cast<LONG>(s.renderer.TitleBarHeight() + 4.0f * s.scale)};
+        ClientToScreen(s.hwnd, &at);
+    }
+    ui::LayoutPanelCallbacks cb;
+    cb.on_preset = [&s](int mode) { SwitchUiMode(s, mode); };
+    cb.on_toggle = [&s](ui::LayoutPanelToggle t) { FlipLayoutToggle(s, t); };
+    cb.on_segment = [&s](ui::LayoutPanelSegment g, int v) { SetLayoutSegment(s, g, v); };
+    cb.on_more_settings = [&s] { OpenSettingsTab(s, ui::kSettingsPageUiLayout); };
+    cb.on_closed = [hwnd = s.hwnd] { if (IsWindow(hwnd)) InvalidateRect(hwnd, nullptr, FALSE); };
+    s.layoutPanel->Show(s.hwnd, at, s.darkMode, s.accentColor, LayoutPanelStateOf(s), std::move(cb));
 }
 
 } // namespace pulse

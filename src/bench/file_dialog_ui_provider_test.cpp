@@ -56,6 +56,8 @@ int wmain(int argc, wchar_t** argv) {
             "actual complete versioned API metadata");
         Check(api.capabilities == 0 && output->allow_unverified_proof,
             "cap-zero implementation is explicitly proof-only, not production certification");
+        Check(output->max_control_items == PULSE_PICKER_UI_V2_MAX_CONTROL_ITEMS,
+            "local loader negotiates the provider control item limit");
         Check(InModule(module, reinterpret_cast<const void*>(api.Initialize)) &&
             InModule(module, reinterpret_cast<const void*>(api.ValidateConfig)) &&
             InModule(module, reinterpret_cast<const void*>(api.Show)) &&

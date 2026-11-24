@@ -53,7 +53,43 @@ std::optional<SaveConfirmationSnapshot> Capture(const std::filesystem::path& pat
     return std::move(capture.snapshot);
 }
 }
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--existing-overwrite-preserves-file") {
+        const auto base = std::filesystem::absolute(L"bench_data") /
+            (L"save-overwrite-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+        if (!CreateDirectoryW(base.c_str(), nullptr)) return 2;
+        const auto file = base / L"download.txt";
+        if (!CreateOwned(file, "existing download bytes")) { RemoveDirectoryW(base.c_str()); return 2; }
+        const DWORD attributes = GetFileAttributesW(file.c_str());
+        auto initial = Capture(file);
+        Check(attributes != INVALID_FILE_ATTRIBUTES && !(attributes &
+            (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_TEMPORARY)), "existing download starts visible");
+        if (initial) {
+            // The picker checks once before FileOk and once after the callback.
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                auto result = ValidateLocalSaveAccessV1(*initial); Evidence(result);
+                auto current = Capture(file);
+                Check(result.state == SaveAccessState::Ready && result.error == ERROR_SUCCESS &&
+                    result.cleanup == SaveAccessCleanup::NotRequired, "overwrite access check succeeds without deletion cleanup");
+                Check(current && current->TargetIdentity() == initial->TargetIdentity(), "overwrite access check preserves file identity");
+                Check(GetFileAttributesW(file.c_str()) == attributes, "overwrite access check preserves every attribute including Hidden/System/Temporary");
+                Check(Contents(file) == "existing download bytes", "overwrite access check preserves existing contents");
+                WIN32_FIND_DATAW found{};
+                HANDLE find = FindFirstFileW(file.c_str(), &found);
+                Check(find != INVALID_HANDLE_VALUE && found.dwFileAttributes == attributes,
+                    "directory enumeration still exposes the existing file and unchanged attributes");
+                if (find != INVALID_HANDLE_VALUE) FindClose(find);
+            }
+            bool cancel = false;
+            auto result = ValidateLocalSaveAccessV1(*initial, [&] { return cancel; }, [&](SaveAccessStage stage) {
+                if (stage == SaveAccessStage::Identity) cancel = true;
+            });
+            Check(result.error == ERROR_CANCELLED && GetFileAttributesW(file.c_str()) == attributes &&
+                Contents(file) == "existing download bytes", "cancellation after existing-file open preserves attributes and bytes");
+        }
+        Check(DeleteFileW(file.c_str()) != FALSE && RemoveDirectoryW(base.c_str()) != FALSE, "isolated overwrite fixture cleanup");
+        return failures ? 1 : 0;
+    }
     Check(ValidateSaveAccessAttributes(FILE_ATTRIBUTE_ENCRYPTED, true)==ERROR_NOT_SUPPORTED,"readonly schema rejects encrypted target metadata");
     Check(ValidateSaveAccessAttributes(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_ENCRYPTED, true)==ERROR_NOT_SUPPORTED,"readonly schema rejects encrypted ancestor metadata");
     Check(ValidateSaveAccessAttributes(FILE_ATTRIBUTE_ENCRYPTED, false)==ERROR_SUCCESS,"ordinary Save attribute contract remains unchanged");

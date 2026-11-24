@@ -25,6 +25,7 @@ enum class SelectionKind : uint8_t {
     NetworkPlaces,  // pulse:networks (pinned and system network locations)
     Recycle,        // Recycle Bin items
     Device,         // a phone's files and storages: Explorer's verbs via the shell host
+    Vfs,            // inside an archive opened as a folder (pulse:vfs:): copy out; change if writable
 };
 
 struct SelectionCaps {
@@ -85,6 +86,23 @@ inline SelectionCaps ComputeSelectionCaps(const Tab& tab, const PlacesCatalog* p
     if (recycle != RecycleSelection::None) {
         caps.kind = SelectionKind::Recycle;
         caps.del = recycle == RecycleSelection::All;
+        return caps;
+    }
+    if (tab.current_path.size() > 10 && _wcsnicmp(tab.current_path.c_str(), L"pulse:vfs:", 10) == 0) {
+        // Archive items: copied out through a staging folder (app_vfs_ops). A
+        // format the plugin cannot rewrite lists its items read-only.
+        caps.kind = SelectionKind::Vfs;
+        caps.copy = true;
+        bool read_only = false;
+        for (int index : tab.SelectedIndices()) {
+            if (index < 0 || static_cast<size_t>(index) >= tab.EntryCount()) continue;
+            if (tab.EntryAt(static_cast<size_t>(index)).attrs & FILE_ATTRIBUTE_READONLY) {
+                read_only = true;
+                break;
+            }
+        }
+        caps.del = !read_only;
+        caps.rename = count == 1 && !read_only;
         return caps;
     }
     std::wstring kind;

@@ -98,7 +98,7 @@ bool TocPointsTo(const std::wstring& payload, size_t section, size_t block, cons
 }
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     const auto root = std::filesystem::path(L"bench_data") /
         (L"document_completeness_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64()));
     std::filesystem::create_directories(root);
@@ -160,6 +160,28 @@ int main() {
         payload.find(L"S\txlsx\tBroken\t0\t0\t1\tread-failed") != std::wstring::npos,
         "failed selected-sheet read retains its original position and an explicit reason");
 
+    const auto lazy = root / L"lazy.xlsx";
+    const std::string label(4096, 'x');
+    Check(Zip(lazy, {
+        {"xl/workbook.xml", "<workbook><sheets><sheet name='Num' id='n'/><sheet name='Text' id='s'/></sheets></workbook>"},
+        {"xl/_rels/workbook.xml.rels", "<Relationships><Relationship Id='n' Target='n.xml'/><Relationship Id='s' Target='s.xml'/></Relationships>"},
+        {"xl/n.xml", "<worksheet><sheetData><row><c><v>123</v></c></row></sheetData></worksheet>"},
+        {"xl/s.xml", "<worksheet><sheetData><row><c t='s'><v>1</v></c></row></sheetData></worksheet>"},
+        {"xl/sharedStrings.xml", "<sst><si><t>" + label + "</t></si><si><t>resolved</t></si></sst>"}
+    }), "write shared string admission fixture");
+    Check(pulse::preview::MakeXlsxTable(lazy.wstring(), payload, bytes, 0) && bytes < label.size() &&
+          payload.find(L"\nR\t123\n") != payload.npos, "numeric sheet does not read unused string table");
+    Check(pulse::preview::MakeXlsxTable(lazy.wstring(), payload, bytes, 1) && bytes > label.size() &&
+          payload.find(L"\nR\tresolved\n") != payload.npos, "shared string sheet loads its table on demand");
+    const auto classic = root / L"classic.csv";
+    std::ofstream(classic, std::ios::binary) << "City;Note\rA;\"left;right\rnext\"\rB;END\r";
+    pulse::ipc::PreviewTextEncoding encoding{};
+    Check(pulse::preview::MakeCsvTable(classic.wstring(), L".csv", payload, bytes, truncated, encoding) &&
+          Count(payload, L"\nR\t") == 3 && payload.find(L"\nR\tA\tleft;right\\nnext\n") != payload.npos &&
+          payload.find(L"\nR\tB\tEND\n") != payload.npos &&
+          payload.find(L"X\tCity;Note\\nA;") != payload.npos, "classic CR CSV preserves quoted newline and rows");
+    if (argc == 2 && std::string_view(argv[1]) == "--tables") return failures ? 1 : 0;
+
     const auto epub = root / L"chapters.epub";
     std::vector<Entry> entries{
         {"META-INF/container.xml", "<container><rootfiles><rootfile full-path=\"book.opf\"/></rootfiles></container>"},
@@ -179,6 +201,12 @@ int main() {
     Check(TocPointsTo(payload, 4, 1, L"last-marker"),
         "EPUB TOC resolves the actual second block after three unavailable chapters");
     Check(payload.size() <= pulse::ipc::kPreviewMaxTableChars, "EPUB payload stays within protocol budget");
+    const auto explicit_nav = entries[4].second;
+    entries[4].second = "<html><head><title>toc notes</title></head><body><nav><ol><li>"
+        "<a href='last.xhtml#target'>Last</a></li></ol></nav></body></html>";
+    Check(Zip(epub, entries) && pulse::preview::MakeEpubDocument(epub.wstring(), payload, bytes, truncated) &&
+        TocPointsTo(payload, 4, 1, L"last-marker"), "untyped EPUB navigation retains its target despite incidental toc text");
+    entries[4].second = explicit_nav;
     const std::string boundary_body = "<html><body><p>exact-boundary-marker</p></body></html><!--";
     entries[5].second = boundary_body + std::string(16u * 1024u * 1024u - boundary_body.size() - 3, 'x') + "-->";
     Check(Zip(epub, entries) && pulse::preview::MakeEpubDocument(epub.wstring(), payload, bytes, truncated) &&

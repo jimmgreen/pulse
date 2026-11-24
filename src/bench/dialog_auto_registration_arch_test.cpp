@@ -95,6 +95,9 @@ LSTATUS WINAPI Flush(HKEY) { return ERROR_SUCCESS; }
 HANDLE WINAPI CreateMutex(LPSECURITY_ATTRIBUTES, BOOL, LPCWSTR name) {
     mutex_name_ok &= name && std::wstring(name) == L"Global\\Pulse.DialogAuto.Registration.v1"; return mutex;
 }
+HANDLE WINAPI CreateMutexEx(LPSECURITY_ATTRIBUTES, LPCWSTR name, DWORD, DWORD) {
+    mutex_name_ok &= name && std::wstring(name) == L"Global\\Pulse.DialogAuto.Registration.v1"; return mutex;
+}
 DWORD WINAPI Wait(HANDLE handle, DWORD milliseconds) {
     if (handle != mutex) return ::WaitForSingleObject(handle, milliseconds);
     ++depth; max_depth = (std::max)(max_depth, depth); return WAIT_OBJECT_0;
@@ -115,6 +118,7 @@ void WINAPI NativeInfo(LPSYSTEM_INFO out) { SYSTEM_INFO value{}; value.wProcesso
 #define RegDeleteKeyExW fixture::DeleteKey
 #define RegFlushKey fixture::Flush
 #define CreateMutexW fixture::CreateMutex
+#define CreateMutexExW fixture::CreateMutexEx
 #define WaitForSingleObject fixture::Wait
 #define ReleaseMutex fixture::Release
 #define CloseHandle fixture::CloseHandle
@@ -131,12 +135,16 @@ void WINAPI NativeInfo(LPSYSTEM_INFO out) { SYSTEM_INFO value{}; value.wProcesso
 #undef RegDeleteKeyExW
 #undef RegFlushKey
 #undef CreateMutexW
+#undef CreateMutexExW
 #undef WaitForSingleObject
 #undef ReleaseMutex
 #undef CloseHandle
 #undef GetNativeSystemInfo
 
-namespace pulse::diagnostics::runtime { void Event(const char*, std::initializer_list<Field>, Level) noexcept {} }
+namespace pulse::diagnostics::runtime {
+void Event(const char*, std::initializer_list<Field>, Level) noexcept {}
+void TextEvent(const char*, std::initializer_list<TextField>, std::initializer_list<Field>, Level) noexcept {}
+}
 namespace {
 unsigned checks = 0, failures = 0;
 void Check(bool value, const char* text) { ++checks; failures += !value; std::printf("[%s] %s\n", value ? "PASS" : "FAIL", text); }

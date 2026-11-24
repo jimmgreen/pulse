@@ -12,6 +12,7 @@
 #include "../common/preview_extensions.h"
 #include "../ui/video_preview.h"
 #include "../ui/hover_preview_content.h"
+#include "../ui/quick_preview_occlusion.h"
 #include "../ui/ui_renderer.h"
 #include <windowsx.h>
 #include <shellapi.h>
@@ -70,7 +71,7 @@ bool PointerFree(const AppState& s) {
 
 bool CanShow(AppState& s) {
     return s.hwnd && HoverPreviewOn(s) && GetForegroundWindow() == s.hwnd && !IsIconic(s.hwnd) &&
-        !s.shot.active && !s.menushot && !s.quickPreview.visible() && !s.context_menu.menu_open() &&
+        !s.shot.active && !s.menushot && !s.quickPreview->visible() && !s.context_menu.menu_open() &&
         s.renameIndex < 0 && PointerFree(s) &&
         s.hoverRegion == static_cast<int>(ui::HitTestResult::Row);
 }
@@ -378,12 +379,12 @@ void SetFolderCard(AppState& s, const app::Tab& tab, const fs::DirEntry& entry, 
         return;
     }
     StartFolderJob(s, tab, entry, card.path, wait);
-    // Its size: what the folder size service knows, else a count of its own
-    // (local folders; a drive shows its capacity instead).
+    // Opening the card requests a fresh count when only an old total is
+    // available, including when automatic folder sizes are turned off.
     if (card.drive || fs::IsUncPath(card.path)) return;
     const auto value = s.folderSizes.Get(card.path);
     const auto work = s.folderSizes.GetWork(card.path);
-    if (!value.has_value && !work.Running()) {
+    if ((!value.has_value || value.state == app::FolderSizeState::Cached) && !work.Running()) {
         s.folderSizes.Calculate(card.path);
         card.size_started = true;
     }
@@ -395,8 +396,10 @@ void FolderSizeFact(AppState& s, const std::wstring& path, std::wstring& text, b
     const auto work = s.folderSizes.GetWork(path);
     running = work.Running();
     if (running) {
-        const uint64_t bytes = (std::max)(work.bytes, value.has_value ? value.bytes : 0ull);
-        text = bytes ? L"\u2265 " + format::ByteSize(bytes) : std::wstring(L"\u2026");
+        // The folder may have shrunk. Only the current scan is a lower bound.
+        text = work.bytes ? L"\u2265 " + format::ByteSize(work.bytes) : std::wstring(L"\u2026");
+    } else if (value.has_value && value.state == app::FolderSizeState::Cached) {
+        text = L"\u2248 " + format::ByteSize(value.bytes);
     } else if (value.has_value) {
         text = (value.partial ? L"\u2265 " : L"") + format::ByteSize(value.bytes);
     } else {
@@ -454,7 +457,10 @@ void Arm(AppState& s) {
             delay += kFolderExtraDwellMs;
     }
     SetTimer(s.hwnd, kTimerHoverPreview, static_cast<UINT>(delay), nullptr);
-    if (browsing) return;
+    if (browsing) {
+        SetTimer(s.hwnd, kTimerHoverPrefetch, 20, nullptr);
+        return;
+    }
     // Decoding starts once the pointer has settled, not when the card opens:
     // the dwell then covers most of it (a pointer only passing over the
     // row starts nothing).
@@ -679,7 +685,7 @@ bool OpenHoverPreviewInQuickLook(AppState& s) {
     app::Tab* tab = pane ? pane->ActiveTab() : nullptr;
     if (!tab || !tab->snapshot || row < 0 || row >= static_cast<int>(tab->EntryCount())) return false;
     if (pane != s.pane) FocusPane(s, pane);
-    if (s.quickPreview.visible()) s.quickPreview.Close();
+    if (s.quickPreview->visible()) s.quickPreview->Close();
     tab->SelectOnly(row);
     EnsureRowVisible(s, *tab, row);
     ToggleQuickPreview(s);
@@ -794,7 +800,7 @@ void FillHoverPreviewView(AppState& s, const ui::WindowViewModel& vm, ui::HoverP
     };
     const bool staged = s.shot.active; // --shot-hover-preview: no foreground, no pointer
     if (!HoverPreviewOn(s) || card.row != s.hoverRow || card.pane != s.hoverPaneIndex ||
-        s.quickPreview.visible() || s.renameIndex >= 0 || s.context_menu.menu_open() ||
+        s.quickPreview->visible() || s.renameIndex >= 0 || s.context_menu.menu_open() ||
         (!staged && (GetForegroundWindow() != s.hwnd || !PointerFree(s)))) {
         drop();
         return;
@@ -1037,7 +1043,16 @@ bool RunHoverBench(AppState& s) {
     return true;
 }
 
+void SyncDetailsPreviewOcclusion(AppState& s) {
+    if (!s.detailsPreview.visible()) return;
+    // A detail sync can run after dismissal but before the parent repaints.
+    // Keep clipping to the card in the last drawn frame until Draw clears it.
+    ui::ClipEmbeddedPreview(s.detailsPreview, s.renderer.GroupWheelPicker().OcclusionBounds(),
+        s.renderer.HoverCardRect());
+}
+
 void AfterHoverPreviewDraw(AppState& s) {
+    SyncDetailsPreviewOcclusion(s);
     auto& card = s.hoverPreview;
     UINT ms = s.renderer.HoverPreviewFrameMs();
     // A card whose video is still opening keeps polling until it plays.

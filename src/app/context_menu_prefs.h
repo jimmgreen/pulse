@@ -119,6 +119,7 @@ struct ContextMenuPrefs {
     bool FromJson(const std::wstring& json);
     bool Load();
     bool Save() const;
+    bool SaveAsync() const;
 
 private:
     void CoalesceCompressCatalog();

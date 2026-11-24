@@ -381,6 +381,11 @@ constexpr IconPart k_history[] = {
 constexpr IconPart k_chat[] = {
     {"M5 6.5A2 2 0 0 1 7 4.5h10a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-6l-4 3.5v-3.5H7a2 2 0 0 1-2-2z", 0, 0x000000u, 1.6f, 1.0f},
 };
+constexpr IconPart k_globe[] = {
+    {"M3.5 12A8.5 8.5 0 1 0 20.5 12A8.5 8.5 0 1 0 3.5 12Z", 0, 0x000000u, 1.6f, 1.0f},
+    {"M3.8 12h16.4", 0, 0x000000u, 1.6f, 1.0f},
+    {"M12 3.5a11.5 11.5 0 0 1 0 17a11.5 11.5 0 0 1 0-17z", 0, 0x000000u, 1.6f, 1.0f},
+};
 
 constexpr IconDef kIcons[] = {
     {k_spark, std::size(k_spark)},
@@ -469,6 +474,7 @@ constexpr IconDef kIcons[] = {
     {k_model, std::size(k_model)},
     {k_history, std::size(k_history)},
     {k_chat, std::size(k_chat)},
+    {k_globe, std::size(k_globe)},
 };
 
 static_assert(std::size(kIcons) == static_cast<size_t>(AiIcon::Count), "one table entry per AiIcon");

@@ -9,7 +9,9 @@ namespace pulse::dialog_history {
 enum class State : uint32_t { Unknown=0, Fallback=1, Failure=2, Success=3 };
 enum class Reason : uint32_t { Unknown=0, UnsupportedRequest=1, ProviderUnavailable=2, Timeout=3,
     PermissionDenied=4, PermissionUndiagnosable=5, ComponentMismatch=6, AutomaticDisabled=7,
-    RegistrationConflict=8, InitialFolderUnsupported=9, ProviderFailure=10, NativeFallback=11, Succeeded=12, ShownClosed=13, AdminAutoEntryFailed=14 };
+    RegistrationConflict=8, InitialFolderUnsupported=9, ProviderFailure=10, NativeFallback=11, Succeeded=12, ShownClosed=13, AdminAutoEntryFailed=14,
+    // The Pulse dialog was visibly shown and then failed without a native fallback.
+    ShownThenFailed=15 };
 enum class Action : uint32_t { None=0, RestartApplication=1, CheckIntegrationSettings=2,
     RetryDialog=3, UseNativeDialog=4, ExportDiagnostics=5 };
 enum class Certainty : uint32_t { Incomplete=0, Observed=1 };
@@ -56,4 +58,7 @@ CollectionResult CollectTakeoverHistory(const std::wstring& runtime_root,
 // No implicit directory creation. The controller supplies its own state directory.
 DWORD LoadHistory(const std::wstring& state_directory,History&) noexcept;
 DWORD SaveHistory(const std::wstring& state_directory,const History&) noexcept;
+// Removes every record (all) or the one record of (app_image_id, reason). Cursors
+// stay, so events already read never return; later events start new records.
+size_t ForgetRecords(History&,bool all,uint64_t app_image_id=0,Reason reason=Reason::Unknown) noexcept;
 }

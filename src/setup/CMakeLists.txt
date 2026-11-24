@@ -44,6 +44,7 @@ set_source_files_properties(setup.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_B
 add_executable(pulse_setup WIN32
     setup_desktop_launch.cpp
     setup_dialog_admin_task_transaction.cpp ../common/dialog_admin_auto_task.cpp ../common/dialog_admin_trust.cpp
+    ../common/dialog_bridge_paths.cpp ../common/dialog_com_hklm.cpp setup_dialog_bridge.cpp
     setup_runtime_transaction.cpp setup_dialog_versions.cpp setup_dialog_migration.cpp setup_file_locks.cpp setup_main.cpp setup_engine.cpp setup_common.cpp setup_log.cpp setup_options.cpp setup_process.cpp
     setup_registry.cpp setup_service.cpp setup_shortcut.cpp setup_transaction.cpp setup_strings.cpp
     start_pin_registration.cpp
@@ -51,13 +52,20 @@ add_executable(pulse_setup WIN32
 target_link_libraries(pulse_setup PRIVATE oleaut32 taskschd)
 
 add_executable(pulse_setup_dialog_admin_task_transaction_test EXCLUDE_FROM_ALL setup_dialog_admin_task_transaction_test.cpp
-    setup_dialog_admin_task_transaction.cpp ../common/dialog_admin_auto_task.cpp ../common/dialog_admin_trust.cpp)
+    setup_dialog_admin_task_transaction.cpp ../common/dialog_admin_auto_task.cpp ../common/dialog_admin_trust.cpp
+    ../common/dialog_bridge_paths.cpp ../common/dialog_com_hklm.cpp setup_dialog_bridge.cpp)
 target_link_libraries(pulse_setup_dialog_admin_task_transaction_test PRIVATE pulse_setup_dialog_bundle taskschd oleaut32 ole32 advapi32 shell32)
 target_compile_definitions(pulse_setup_dialog_admin_task_transaction_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 set_target_properties(pulse_setup_dialog_admin_task_transaction_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 add_executable(pulse_setup_desktop_launch_test setup_desktop_launch_test.cpp setup_desktop_launch.cpp)
 target_link_libraries(pulse_setup_desktop_launch_test PRIVATE shell32 ole32 oleaut32 uuid advapi32 user32)
 set_target_properties(pulse_setup_desktop_launch_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+add_executable(pulse_setup_dialog_bridge_test EXCLUDE_FROM_ALL
+    setup_dialog_bridge_test.cpp setup_dialog_bridge.cpp setup_service.cpp
+    ../common/dialog_bridge_paths.cpp ../common/dialog_com_hklm.cpp ../common/dialog_admin_trust.cpp)
+target_link_libraries(pulse_setup_dialog_bridge_test PRIVATE pulse_setup_dialog_bundle bcrypt advapi32 shell32 ole32)
+target_compile_definitions(pulse_setup_dialog_bridge_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+set_target_properties(pulse_setup_dialog_bridge_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 target_include_directories(pulse_setup PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 add_library(pulse_setup_dialog_bundle STATIC ../common/dialog_bundle.cpp ../common/json_value.cpp)
 target_compile_definitions(pulse_setup_dialog_bundle PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

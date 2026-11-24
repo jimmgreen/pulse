@@ -1,4 +1,9 @@
 #include "thumbnail_rename.h"
+#include "extensions/vfs_path.h"
+#include "extensions/vfs_registry.h"
+#include "app_vfs_ops.h"
+#include <filesystem>
+#include "../ops/elevated_transfer_client.h"
 #include "../ui/ui_renderer.h"
 #include "media_props.h"
 #include "pane_layout_controls.h"
@@ -13,6 +18,8 @@
 #include "app_window_title.h"
 // app_navigation.cpp — extracted from app_main.cpp.
 #include "app_internal.h"
+#include "tree_transfer_destination.h"
+#include "extensions/native/search_adapter_host.h"
 #include "extension_store_ui.h"
 #include "window_factory.h"
 #include "quick_access.h"
@@ -25,6 +32,7 @@
 #include "dup_finder.h"
 #include "../fs/bitlocker_volume.h"
 #include "../fs/device_path.h"
+#include "../fs/drive_kind.h"
 #include "../fs/device_source.h"
 #include "../fs/wsl_path.h"
 #include "device_registry.h"
@@ -89,6 +97,9 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+
+#include "../common/command_line.h"
+#include "../common/display_path.h"
 
 using namespace pulse;
 
@@ -183,7 +194,8 @@ std::wstring PinCandidate(AppState& s) {
 }
 
 std::wstring ProjectSearchRoot(AppState& s) {
-    if (s.places.active_workspace >= 0 &&
+    if (const auto* lt = s.window_tabs.Active(); lt && !lt->workspace_root.empty() &&
+        s.places.active_workspace >= 0 &&
         s.places.active_workspace < static_cast<int>(s.places.workspaces.size())) {
         return s.places.workspaces[static_cast<size_t>(s.places.active_workspace)].root;
     }
@@ -196,12 +208,14 @@ std::wstring ProjectSearchRoot(AppState& s) {
 
 static void RestoreWorkspace(AppState& s, int index, bool new_tab) {
     if (index < 0 || index >= static_cast<int>(s.places.workspaces.size())) return;
+    const std::wstring saved_root = s.places.workspaces[static_cast<size_t>(index)].root;
     app::Workspace w = s.places.workspaces[static_cast<size_t>(index)];
     w.root = app::ResolveWorkspaceFolderPath(w.root, s.places.workspaces);
     for (auto& path : w.pane_paths)
         path = app::ResolveWorkspaceFolderPath(path, s.places.workspaces);
     s.places.active_workspace = index;
     if (new_tab || s.window_tabs.items.empty()) NewTab(s, w.root.empty() ? L"C:\\" : w.root);
+    if (auto* lt = s.window_tabs.Active()) lt->workspace_root = saved_root;
     ApplyLayoutPreset(s, static_cast<app::LayoutPreset>(std::clamp(w.layout, 0, 4)));
     if (w.pane_paths.empty()) {
         NavigateTo(s, w.root);
@@ -247,6 +261,9 @@ void SaveCurrentWorkspace(AppState& s) {
     const bool is_new = s.places.FindWorkspace(paths.front()) < 0;
     const int index = s.places.PinWorkspace(paths.front(), L"", static_cast<int>(WorkspaceLayoutOf(s)),
                                            paths, CollectPaneViews(s));
+    if (auto* lt = s.window_tabs.Active(); lt && index >= 0 &&
+        index < static_cast<int>(s.places.workspaces.size()))
+        lt->workspace_root = s.places.workspaces[static_cast<size_t>(index)].root;
     s.sidebarCollapsedMask &= ~(1u << static_cast<unsigned>(app::SidebarSectionId::Workspaces));
     InvalidateRect(s.hwnd, nullptr, FALSE);
     if (is_new) RenameWorkspace(s, index);
@@ -290,10 +307,14 @@ index::Query MakeSearchPageQuery(const app::Tab& tab, const std::wstring& rest,
 // #74: the local index never holds SMB paths, and the network index only
 // answers for roots added in Settings whose crawl has finished. A name search
 // scoped anywhere else on the network walks the folder live, like Explorer.
-static bool NeedsLiveNetworkSearch(AppState& s, const index::Query& query) {
-    if (query.path_prefix.empty() || fs::IsVirtualPath(query.path_prefix)) return false;
-    if (!index::IsNetworkFolderPath(query.path_prefix)) return false;
-    return !index::NetworkRootsCover(s.networkIndex.Roots(), query.path_prefix, true);
+static app::LiveFolderSearchKind ClassifyLiveFolderSearchForApp(
+    const AppState& s, const index::Query& query) {
+    std::vector<index::VolumeInfo> volumes;
+    std::vector<std::wstring> excluded;
+    const bool scope_known = s.index.GetScope(volumes, excluded);
+    return app::ClassifyLiveFolderSearch(
+        s.index.Ready(), scope_known, volumes, excluded, s.networkIndex.Roots(),
+        query.path_prefix, s.isolatedTest);
 }
 
 static void PostLiveNetworkProgress(HWND hwnd, const std::shared_ptr<LiveNetworkSearch>& live) {
@@ -366,7 +387,7 @@ void AcceptLiveNetworkProgress(AppState& s, const std::shared_ptr<LiveNetworkSea
 }
 
 static void ApplyLiveNetworkBanner(AppState& s, uint32_t id, const std::wstring& root,
-                                   bool done, DWORD error) {
+                                   app::LiveFolderSearchKind kind, bool done, DWORD error) {
     ForEachPane(s, [&](app::Pane& pane) {
         app::Tab* tab = pane.ActiveTab();
         if (!tab || tab->filename_live_generation != id) return;
@@ -375,6 +396,12 @@ static void ApplyLiveNetworkBanner(AppState& s, uint32_t id, const std::wstring&
             wchar_t text[128]{};
             swprintf_s(text, l10n::Get(l10n::StringId::ErrorCodeFormat).c_str(), error);
             tab->banner_message = text;
+            tab->network_live_root.clear();
+        } else if (kind == app::LiveFolderSearchKind::Local) {
+            tab->banner_title = l10n::Get(l10n::StringId::LocalLiveTitle);
+            tab->banner_message = l10n::Get(!done
+                ? l10n::StringId::LocalLiveRunning
+                : l10n::StringId::LocalLiveDone);
             tab->network_live_root.clear();
         } else {
             // Mapped drives normalize to their share; the button adds that share.
@@ -458,11 +485,14 @@ void DispatchIndexSearch(AppState& s, const index::Query& query, uint32_t id) {
     std::erase_if(s.pendingIndexSearches, [&](const auto& item) { if (item.second.query.session_id != query.session_id) return false; if (item.second.recycle_cancel) *item.second.recycle_cancel = true; return true; });
     AppState::PendingIndexSearch pending;
     pending.query = query;
-    const bool live_network = NeedsLiveNetworkSearch(s, query);
-    pending.network_snapshot = app::UsesNetworkSnapshot(s.networkIndex.Roots(), query, live_network);
-    pending.network_expected = live_network || !s.networkIndex.Roots().empty();
+    const auto live_kind = ClassifyLiveFolderSearchForApp(s, query);
+    const bool live_walk = live_kind != app::LiveFolderSearchKind::None;
+    pending.live_walk_kind = live_kind;
+    pending.network_snapshot = app::UsesNetworkSnapshot(s.networkIndex.Roots(), query, live_walk);
+    pending.network_expected = live_walk || !s.networkIndex.Roots().empty();
     pending.network_ready = !pending.network_expected;
-    if (live_network) pending.live_network_root = query.path_prefix;
+    if (live_kind == app::LiveFolderSearchKind::Local) pending.local_ready = true;
+    if (live_walk) pending.live_network_root = query.path_prefix;
     if (!s.appPrefs.search_pinyin) pending.query.needle = L"nopinyin: " + pending.query.needle;
     s.pendingIndexSearches.emplace(id, std::move(pending));
     StartRecycleSearch(s, provider_query, id);
@@ -473,8 +503,10 @@ void DispatchIndexSearch(AppState& s, const index::Query& query, uint32_t id) {
         recycle_only.network_expected = false;
         return;
     }
-    s.index.SearchAsync(provider_query, id);
-    if (live_network) StartLiveNetworkSearch(s, provider_query, id);
+    if (live_kind != app::LiveFolderSearchKind::Local) {
+        s.index.SearchAsync(provider_query, id);
+    }
+    if (live_walk) StartLiveNetworkSearch(s, provider_query, id);
     else {
         DropLiveNetworkSearch(s, query.session_id);
         s.networkIndex.SearchAsync(provider_query, id);
@@ -693,6 +725,21 @@ void RequestSavedSearch(AppState& s, app::Tab& tab, size_t saved_index) {
     request.root = search.root;
     request.needle = search.query;
     request.indexed = search.mode == app::SavedSearchMode::Content;
+    if (request.indexed && !search.root.empty()) {
+        const auto config = s.contentSearch.GetConfig();
+        const auto scope = app::NormalizeLiveScopeKey(search.root);
+        const bool overlaps = std::any_of(config.roots.begin(), config.roots.end(), [&](const auto& root) {
+            const auto path = app::NormalizeLiveScopeKey(root.path);
+            return app::LiveScopePathUnder(scope, path) || app::LiveScopePathUnder(path, scope);
+        });
+        if (!overlaps) {
+            std::vector<index::VolumeInfo> volumes;
+            std::vector<std::wstring> excluded;
+            const bool scope_known = s.index.GetScope(volumes, excluded);
+            request.allow_uncovered_root = app::ShouldAllowUncoveredContentScope(
+                s.index.Ready(), scope_known, volumes, excluded, search.root, s.isolatedTest);
+        }
+    }
     request.subscribe=request.indexed;tab.search_live_generation=request.subscribe ? generation : 0;
     request.recursive = search.recursive;
     s.contentSearch.SearchAsync(std::move(request));
@@ -869,6 +916,7 @@ void ApplyContentSearchUpdate(AppState& s, index::ContentSearchUpdate update) {
 
 void DeliverIndexSearchResult(AppState& s, uint32_t id,
                                       index::SearchResult&& result, bool network_snapshot) {
+    if (extensions::native::SearchAdapterHostDeliver(id, std::move(result))) return;
     if (id != 0 && id == s.advancedCountId) {
         s.advancedCountId = 0;
         if (IsWindow(s.advancedCountHwnd))
@@ -966,12 +1014,13 @@ void AcceptIndexProviderResult(AppState& s, uint32_t id,
     if (!candidates.error) candidates.error = pending.recycle.error;
     index::SearchResult merged = index::MergeSearchResults(pending.query, candidates, pending.network);
     const std::wstring live_root = pending.live_network_root;
+    const auto live_kind = pending.live_walk_kind;
     const bool network_done = pending.network_ready;
     const DWORD live_error = pending.network.error;
     const bool network_snapshot = pending.network_snapshot;
     if (!pending.query.subscribe && pending.network_ready && pending.recycle_ready) s.pendingIndexSearches.erase(found);
     DeliverIndexSearchResult(s, id, std::move(merged), network_snapshot);
-    if (!live_root.empty()) ApplyLiveNetworkBanner(s, id, live_root, network_done, live_error);
+    if (!live_root.empty()) ApplyLiveNetworkBanner(s, id, live_root, live_kind, network_done, live_error);
 }
 
 void MaybePrefetchSearchPage(AppState& s) {
@@ -1120,6 +1169,69 @@ static std::wstring DeviceUpTarget(const std::wstring& path) {
     if (skips) return L"";
     where->storage.clear();
     return fs::FormatDevicePath(*where);
+}
+
+static std::wstring VfsViewTitle(const pulse::extensions::vfs::ParsedVfsPath& parsed) {
+    if (!parsed.segments.empty()) return parsed.segments.back();
+    pulse::extensions::vfs::VfsMountInfo info;
+    if (pulse::extensions::vfs::VfsRegistry::Instance().DescribeMount(
+            parsed.package_id, parsed.mount_id, info) &&
+        !info.display_name.empty()) {
+        return info.display_name;
+    }
+    std::wstring wide_mount;
+    if (pulse::extensions::vfs::Utf8ToWideStrict(parsed.mount_id, wide_mount) && !wide_mount.empty()) {
+        return wide_mount;
+    }
+    return L"VFS";
+}
+
+static std::wstring SanitizeVfsTempLeaf(std::wstring_view name) {
+    std::wstring out;
+    out.reserve(name.size());
+    for (const wchar_t ch : name) {
+        if (ch < 0x20 || ch == L'<' || ch == L'>' || ch == L':' || ch == L'"' ||
+            ch == L'/' || ch == L'\\' || ch == L'|' || ch == L'?' || ch == L'*') {
+            out.push_back(L'_');
+        } else {
+            out.push_back(ch);
+        }
+    }
+    while (!out.empty() && (out.back() == L' ' || out.back() == L'.')) out.pop_back();
+    if (out.empty() || out == L"." || out == L"..") return L"item";
+    return out;
+}
+
+static void OpenVfsFileAsync(AppState& s, const std::wstring& vfs_path, const std::wstring& leaf_name) {
+    static std::atomic<uint64_t> next_vfs_temp_seq{1};
+    const uint64_t seq = next_vfs_temp_seq.fetch_add(1, std::memory_order_relaxed);
+    const HWND owner_hwnd = s.hwnd;
+    ops::OpsManager* ops = &s.ops;
+    const std::wstring safe_leaf = SanitizeVfsTempLeaf(leaf_name);
+
+    s.worker.EnqueueIo([owner_hwnd, ops, vfs_path, safe_leaf, seq] {
+        wchar_t temp_buf[MAX_PATH + 2]{};
+        const DWORD n = GetTempPathW(static_cast<DWORD>(std::size(temp_buf)), temp_buf);
+        if (n == 0 || n >= std::size(temp_buf)) return;
+        std::filesystem::path dir(std::wstring_view(temp_buf, n));
+        dir /= L"Pulse";
+        dir /= L"vfs_cache";
+        dir /= std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(seq);
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        if (ec) return;
+        const std::wstring dest = (dir / safe_leaf).wstring();
+        const PulseStatus st = pulse::extensions::vfs::VfsRegistry::Instance().ExtractFile(
+            vfs_path,
+            dest,
+            [owner_hwnd]() noexcept { return IsWindow(owner_hwnd) == FALSE; });
+        if (st == PULSE_OK && IsWindow(owner_hwnd)) {
+            // Saved in the app that opens it: written back into the archive
+            // (7z / zip / tar; a read-only archive is not watched).
+            VfsWatchOpenedFile(owner_hwnd, vfs_path, dest);
+            ops->OpenWith(dest, false);
+        }
+    });
 }
 
 static bool IsDeviceBannerTitle(const std::wstring& title) {
@@ -1344,6 +1456,54 @@ void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path, PathL
         tab.banner_message.clear();
         tab.pending_generation = s.worker.Refresh(
             path, tab.sort_column, tab.sort_direction, tab.EffectiveGroup(), nullptr, tab.EffectiveFolderSort());
+        return;
+    } else if (kind == L"vfs") {
+        const auto parsed = pulse::extensions::vfs::ParseVfsPath(path);
+        if (!parsed) {
+            tab.virtual_title = L"VFS";
+            tab.loading = false;
+            tab.SetSnapshot(std::make_shared<std::vector<fs::DirEntry>>());
+            tab.banner_title = l10n::Get(l10n::StringId::CannotOpen);
+            tab.banner_message = l10n::Get(l10n::StringId::DirectoryUnavailable);
+            return;
+        }
+        tab.virtual_title = VfsViewTitle(*parsed);
+        tab.loading = true;
+        tab.SetSnapshot(nullptr);
+        tab.banner_title.clear();
+        tab.banner_message.clear();
+        tab.pending_generation = s.worker.Refresh(
+            path,
+            tab.sort_column,
+            tab.sort_direction,
+            tab.EffectiveGroup(),
+            nullptr,
+            tab.EffectiveFolderSort(),
+            [parsed = *parsed, path](std::vector<fs::DirEntry>& out,
+                                      const std::function<bool()>& cancelled) -> HRESULT {
+                std::vector<pulse::extensions::vfs::VfsEntryData> vfs_rows;
+                const PulseStatus st = pulse::extensions::vfs::VfsRegistry::Instance().ListDirectory(
+                    path, vfs_rows, cancelled);
+                if (cancelled && cancelled()) return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+                if (st != PULSE_OK) return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
+                out.reserve(vfs_rows.size());
+                for (auto& src : vfs_rows) {
+                    const std::wstring child_uri =
+                        pulse::extensions::vfs::JoinVfsChild(parsed, src.name);
+                    if (child_uri.empty()) continue;
+                    fs::DirEntry dst;
+                    dst.name = std::move(src.name);
+                    dst.full_path = child_uri;
+                    dst.is_dir = (src.flags & PULSE_VFS_ENTRY_DIRECTORY) != 0u;
+                    dst.size = dst.is_dir ? 0u : src.size_bytes;
+                    dst.attrs = dst.is_dir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+                    if (src.flags & PULSE_VFS_ENTRY_READONLY) dst.attrs |= FILE_ATTRIBUTE_READONLY;
+                    if (src.flags & PULSE_VFS_ENTRY_HIDDEN) dst.attrs |= FILE_ATTRIBUTE_HIDDEN;
+                    dst.mtime = pulse::extensions::vfs::UnixMsToFileTime(src.modified_unix_ms);
+                    out.push_back(std::move(dst));
+                }
+                return S_OK;
+            });
         return;
     } else if (kind == L"recycle") {
         tab.virtual_title = l10n::Get(l10n::StringId::RecycleBin);
@@ -1581,6 +1741,16 @@ void StartLoadingPath(AppState& s, app::Tab& tab, const std::wstring& path, Path
         : s.worker.Refresh(normalized, tab.sort_column, tab.sort_direction, tab.EffectiveGroup(),
                            SortFolderSizes(s, tab, normalized), tab.EffectiveFolderSort());
     if (fs::IsUncPath(normalized)) RequestUncProbe(s, normalized);
+    else if (!normalized.empty() && !fs::IsVirtualPath(normalized) &&
+             fs::TryBeginSeekPenaltyProbe(normalized)) {
+        const wchar_t letter = fs::DriveLetterOf(normalized);
+        if (letter) {
+            std::wstring probe_root = {letter, L':', L'\\'};
+            s.worker.EnqueueIo([root = std::move(probe_root)] {
+                fs::ProbeSeekPenalty(root);
+            });
+        }
+    }
 }
 
 // Data layer of a worker result (multi-window M3b): the snapshot store and Git
@@ -1614,7 +1784,7 @@ static void TraceArmEligibility(AppState& s, app::Tab& tab, const char* phase, u
     ExplorerTakeoverProbeNavigation(s, &tab, reason, gates);
 }
 static ListingRefresh ApplyWorkerResultData(AppCore& core, const app::WorkResult& res) {
-    if (res.error) return {};
+    if (res.error || res.authorized_listing) return {};
     ListingRefresh refresh;
     if (res.snapshot && !fs::IsVirtualPath(res.path)) {
         // Also again when a watch armed after this listing had begun.
@@ -1655,6 +1825,58 @@ static void ShowConnectingBanner(app::Tab& tab) {
 
 // Window layer: the panes of one window that wait for this listing. Returns
 // whether a failed listing was awaited here (that window owns the unlock prompt).
+static void RequestAuthorizedFolder(AppState& s, app::Tab& tab) {
+    const auto folder = tab.current_path;
+    tab.loading = true;
+    tab.banner_title.clear();
+    tab.banner_message.clear();
+    tab.pending_generation = s.worker.Refresh(folder, tab.sort_column, tab.sort_direction, tab.EffectiveGroup(),
+        SortFolderSizes(s, tab, folder), tab.EffectiveFolderSort(), [folder, owner = s.hwnd](auto& entries, const auto& stale) {
+            std::vector<WIN32_FIND_DATAW> rows;
+            const auto hr = ops::ListWithElevatedHelper(folder, owner, rows, [&] { return stale() || GetForegroundWindow() != owner; });
+            if (FAILED(hr)) return hr;
+            entries.reserve(rows.size());
+            for (const auto& row : rows) {
+                fs::DirEntry item;
+                item.name = row.cFileName;
+                item.attrs = row.dwFileAttributes;
+                item.is_dir = (item.attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                item.is_reparse = (item.attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+                item.reparse_tag = item.is_reparse ? row.dwReserved0 : 0;
+                item.cloud_recall = (item.attrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0;
+                item.size = (uint64_t(row.nFileSizeHigh) << 32) | row.nFileSizeLow;
+                item.ctime = row.ftCreationTime; item.mtime = row.ftLastWriteTime; item.atime = row.ftLastAccessTime;
+                entries.push_back(std::move(item));
+            }
+            return S_OK;
+        });
+}
+// Restore only the submitted editor's selection, using the worker's full
+// destination rather than a guessed leaf. A user click/navigation wins; a
+// watcher-only reindex may advance the selection revision without cancelling it.
+static bool RestoreInlineRenameSelection(app::Tab& tab, uint64_t before, bool complete_listing) {
+    auto& intent = tab.inline_rename_selection;
+    if (!intent.task) return false;
+    intent.Carry(tab.view_generation, before, tab.selection_revision);
+    if (intent.destination.empty()) return false;
+    const auto* entries = tab.TreeEntries();
+    if (!entries && !tab.content_results) entries = tab.snapshot.get();
+    const auto index = intent.Find(entries ? entries->size() : tab.EntryCount(),
+        [&](size_t i, std::wstring_view leaf) {
+            return entries ? path::EqualInsensitive((*entries)[i].name, leaf)
+                           : path::EqualInsensitive(tab.EntryAt(i).name, leaf);
+        },
+        [&](size_t i) { return EntryFullPath(tab, static_cast<int>(i)); },
+        [&](size_t i) { return tab.EntryVisible(static_cast<int>(i)); });
+    if (index >= 0) {
+        tab.SelectOnly(index);
+        intent = {};
+        return true;
+    }
+    if (complete_listing) intent = {}; // removed again, or hidden by the current view
+    return false;
+}
+
 static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool again, bool arm_only, unsigned evidence) {
     if (Panes(s).empty()) return false;
     NoteColumnStripResult(s, res);
@@ -1694,6 +1916,17 @@ static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool ag
             } else if (res.bitlocker_locked) {
                 tab->banner_title = l10n::Get(l10n::StringId::DriveLockedTitle);
                 tab->banner_message = l10n::Get(l10n::StringId::DriveLockedMessage);
+            } else if (res.authorized_listing) {
+                tab->banner_title = l10n::Get(l10n::StringId::LocalFolderPermissionTitle);
+                if (res.listing_error != ERROR_CANCELLED && &pane == s.pane && GetForegroundWindow() == s.hwnd)
+                    OpenNativePermissionFolder(s, res.path);
+            } else if ((res.listing_error == ERROR_ACCESS_DENIED || res.listing_error == ERROR_PRIVILEGE_NOT_HELD) &&
+                       !tab->net_readonly && !fs::IsVirtualPath(res.path) && !fs::IsDevicePath(res.path)) {
+                tab->banner_title = l10n::Get(l10n::StringId::LocalFolderPermissionTitle);
+                if (tab->interactive_permission_generation == res.generation && &pane == s.pane && GetForegroundWindow() == s.hwnd) {
+                    tab->interactive_permission_generation = 0;
+                    RequestAuthorizedFolder(s, *tab);
+                }
             } else if (tab->net_readonly && app::NetworkConnectPending(res.path)) {
                 // A second listing failed while the logon runs; ApplyNetworkConnect says how it went.
                 ShowConnectingBanner(*tab);
@@ -1713,6 +1946,7 @@ static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool ag
         TraceArmEligibility(s, *tab, "arm-window-before-selection", res.generation, arm_only, evidence);
         const bool reconcile_lease = TransferableArm(*tab, arm_only);
         const bool focusedTab = (&pane == s.pane);
+            const auto before_selection = tab->selection_revision;
             auto selection_restore = app::TakeListingSelection(*tab, res.path);
             auto& pendingNames = selection_restore.names;
             auto& pendingFocus = selection_restore.focus;
@@ -1743,22 +1977,13 @@ static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool ag
                         s.places.SetRecentKind(entry.full_path, item_kind);
                 }
             }
-            // A background refresh keeps the rows where they are; F5 and a
-            // new sort take the worker's order as is (#13).
+            // Background and explicit refreshes both use the worker's sorted order.
+            // Selection follows names rather than retaining obsolete row positions.
             if (res.snapshot && !tab->held_renames.empty())
                 app::FollowHeldRenames(tab->held_renames, *res.snapshot, pendingNames, pendingFocus);
             fs::SnapshotPtr listing = res.snapshot;
             const bool keep_order = tab->refresh_keeps_order && res.snapshot && tab->snapshot &&
                 tab->snapshot_path == res.path && !fs::IsVirtualPath(res.path);
-            if (keep_order) {
-                const app::ScopedEntryGrouping grouping(tab->EffectiveGroup(), tab->current_path);
-                const app::ScopedFolderSortMode folder_mode(tab->EffectiveFolderSort());
-                // A rescan of an unchanged folder (the watch's first report
-                // after opening) keeps the worker's vector: no 100k-row merge.
-                if (!app::SameEntryOrder(*tab->snapshot, *res.snapshot, tab->sort_column, tab->sort_direction))
-                    listing = std::make_shared<std::vector<fs::DirEntry>>(app::KeepEntryOrder(
-                        *tab->snapshot, *res.snapshot, tab->sort_column, tab->sort_direction));
-            }
             if (keep_order && !tab->held_renames.empty()) {
                 std::vector<fs::DirNotifyEvent> renames;
                 for (const auto& rename : tab->held_renames) {
@@ -1771,7 +1996,7 @@ static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool ag
                         s.renderer.RenameImageThumbnail(from, to, modified, size);
                     });
             }
-            tab->order_held = keep_order;
+            tab->order_held = false;
             tab->refresh_keeps_order = false;
             if (keep_order) app::PruneHeldRenames(tab->held_renames, *res.snapshot);
             else tab->held_renames.clear();
@@ -1829,11 +2054,14 @@ static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool ag
                     if (s.renameIndex >= 0) HideRenameOverlay(s, false);
                 }
             }
+            bool followed_inline = false;
+            if (startedRename) tab->inline_rename_selection = {};
             if (!startedRename) {
                 app::RestoreListingSelection(*tab, selection_restore, &pane, &s.places);
+                followed_inline = RestoreInlineRenameSelection(*tab, before_selection, true);
                 ApplyArrivalSelection(s, pane, *tab, focusedTab);
             }
-            if (ensurePendingVisible && tab->selected_index >= 0) {
+            if ((followed_inline || ensurePendingVisible) && tab->selected_index >= 0) {
                 CenterResultInPane(s, pane, *tab, tab->selected_index);
             }
             if (tab->explorer_handoff) ExplorerTakeoverProbeNavigation(s, tab, "listing-record-before", static_cast<unsigned>(res.generation));
@@ -1852,7 +2080,7 @@ static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool ag
             if (tab->explorer_handoff) ExplorerTakeoverProbeNavigation(s, tab, "listing-record-after", again ? 1u : 0u);
     });
     if (!any) return false;
-    if (res.snapshot && !res.cancelled && !res.error)
+    if (res.snapshot && !res.cancelled && !res.error && !res.authorized_listing)
         diagnostics::deletion::Snapshot(res.path, *res.snapshot, res.generation, 1,
             reinterpret_cast<uintptr_t>(s.hwnd));
     SyncQuickPreview(s);
@@ -2017,8 +2245,8 @@ static void RefreshPathImpl(AppState& s, const std::wstring& path, RefreshReason
             transfer ? "initial-arm-transfer" : "refresh-reset", static_cast<unsigned>(reason));
         if (!transfer && !committed_refresh) tab->explorer_handoff.reset();
         else if (committed_refresh) tab->explorer_handoff->listing_complete = false;
-        // F5 re-sorts; anything else merges into the rows on screen unless an
-        // in-flight load (navigation, F5) already wants sort order (#13).
+        // Background refreshes retain rename reconciliation, not stale row order.
+        // An in-flight explicit load still owns its selection/rename lifecycle.
         if (reason == RefreshReason::Explicit) tab->refresh_keeps_order = false;
         else if (tab->pending_generation == 0) tab->refresh_keeps_order = true;
         const bool reveal = reason == RefreshReason::Explicit && tab->order_held;
@@ -2244,12 +2472,40 @@ static bool ApplyNotifiesToVisible(AppState& s, const std::wstring& path,
         if (need_full) return;
         app::Tab* tab = pane.ActiveTab();
         if (!tab || tab->current_path != path || !tab->snapshot) return;
+        // Incremental EntryLess has no media keys or recursive folder totals.
+        // Let the listing worker use those caches instead of merging incompatible orders.
+        const auto is_folder = [](const auto& entry) {
+            return entry.is_dir || (!entry.link_target.empty() && entry.link_target_is_dir);
+        };
+        const bool size_uses_folder_totals = tab->sort_column == ui::SortColumn::Size &&
+            (std::any_of(tab->snapshot->begin(), tab->snapshot->end(), is_folder) ||
+             (prepared && std::any_of(prepared->metadata.begin(), prepared->metadata.end(),
+                 [&](const auto& item) { return item.second && is_folder(*item.second); })));
+        if (tab->sort_column >= ui::SortColumn::MediaTaken ||
+            app::IsMediaGroup(app::GroupByFromInt(tab->EffectiveGroup())) || size_uses_folder_totals) {
+            need_full = true;
+            return;
+        }
+        // Only slow aggregate UI phases are recorded; Event enqueues to the
+        // runtime writer and does not perform file I/O on this thread.
+        const size_t notify_entry_count = tab->snapshot->size();
+        const auto log_notify_phase = [&](uint64_t phase, ULONGLONG started) {
+            const auto elapsed = GetTickCount64() - started;
+            if (elapsed >= 50)
+                diagnostics::runtime::Event("dir_notify_ui_slow", {{"phase", phase},
+                    {"elapsed_ms", elapsed}, {"entries", notify_entry_count},
+                    {"events", events.size()}, {"prepared", prepared != nullptr}});
+        };
+        const auto notify_copy_started = GetTickCount64();
         auto copy = std::make_shared<std::vector<fs::DirEntry>>(*tab->snapshot);
+        log_notify_phase(1, notify_copy_started);
+        const auto notify_patch_started = GetTickCount64();
         const app::ScopedEntryGrouping grouping(tab->EffectiveGroup(), tab->current_path);
         const app::ScopedFolderSortMode folder_mode(tab->EffectiveFolderSort());
         const auto patch = prepared
             ? app::ApplyPreparedDirNotifyBatch(*copy, *prepared, tab->sort_column, tab->sort_direction)
             : app::ApplyDirNotifyBatch(*copy, path, events, tab->sort_column, tab->sort_direction);
+        log_notify_phase(2, notify_patch_started);
         if (patch == app::NotifyPatch::NeedFullEnum) {
             need_full = true;
             return;
@@ -2277,11 +2533,15 @@ static bool ApplyNotifiesToVisible(AppState& s, const std::wstring& path,
             [&](const std::wstring& from, const std::wstring& to, uint64_t modified, uint64_t size) {
                 s.renderer.RenameImageThumbnail(from, to, modified, size);
             });
+        const auto before_selection = tab->selection_revision;
+        const auto notify_snapshot_started = GetTickCount64();
         tab->SetSnapshot(std::move(copy));
-        tab->order_held = true;
+        log_notify_phase(3, notify_snapshot_started);
+        tab->order_held = false;
         if (!selection_restore.names.empty()) app::RestoreListingSelection(*tab, selection_restore, &pane, &s.places);
         else if (tab->snapshot && tab->EntryCount() != 0 && tab->selected_index < 0)
             tab->FocusFirstEntry();
+        RestoreInlineRenameSelection(*tab, before_selection, false);
         ApplyArrivalSelection(s, pane, *tab, &pane == s.pane);
         if (!store_snap) store_snap = tab->snapshot;
         any = true;
@@ -2575,6 +2835,7 @@ bool DrainDirNotifies(AppState& s) {
             });
         });
         if (!visible) { s.store.MarkDirty(result.path); continue; }
+        if (!result.fallback) s.core.new_picture_probes.Observe(result.path, result.prepared, GetTickCount64());
         if (!stale) {
             app::ForEachWindowSharingCore(s, [&](AppState& window) {
                 if (!WindowShowsFolder(window, result.path)) return;
@@ -2615,6 +2876,9 @@ bool DrainDirNotifies(AppState& s) {
         else keep.push_back(std::move(patch));
     }
     s.size_patches = std::move(keep);
+    s.core.new_picture_probes.Tick(now, [&](const auto& path, const auto& name) {
+        due.push_back({path, name, now});
+    });
     const bool poll_unc = now - s.last_unc_poll >= 1000;
     if (poll_unc) s.last_unc_poll = now;
     std::vector<std::wstring> shown;
@@ -2687,14 +2951,16 @@ void NavigateTo(AppState& s, const std::wstring& path) {
     const std::wstring returnedChild =
         app::NavigationReturnChildName(tab->current_path, normalized);
     tab->NavigateTo(normalized);
-    // A phone folder is no place to come back to later (the phone moves on).
-    const bool device = fs::IsDevicePath(normalized);
-    if (!device) RecordSearchHistory(s, normalized);
+    // A phone or VFS folder is transient to the connected device / plugin mount.
+    const bool ephemeral_virtual =
+        fs::IsDevicePath(normalized) || pulse::extensions::vfs::IsVfsPath(normalized);
+    if (!ephemeral_virtual) RecordSearchHistory(s, normalized);
     StartLoadingPath(s, *tab, normalized);
+    tab->interactive_permission_generation = tab->pending_generation;
     SyncTaskbarWindowTitle(s);
     RestoreNavigationReturnSelection(s, *tab, returnedChild);
     RememberPath(s, normalized);
-    if (!device) RecordRecentOpen(s, normalized, app::PlaceItemKind::Folder);
+    if (!ephemeral_virtual) RecordRecentOpen(s, normalized, app::PlaceItemKind::Folder);
     s.timing.first_frame_recorded = false;
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
@@ -2970,15 +3236,11 @@ void TransferToTarget(AppState& s, bool move) {
         app::IsUncServerRoot(dst->current_path)) return;
     std::vector<std::wstring> paths = SelectedFullPaths(*src);
     if (paths.empty()) return;
-    ops::OpRequest req;
-    req.type = move ? ops::OpType::Move : ops::OpType::Copy;
-    req.dest_dir = dst->current_path;
-    req.sources = std::move(paths);
-    if (move) s.cutPaths.clear();
-    // #58-13: the items are selected in the target pane as they arrive, as a
-    // paste selects them in its own.
-    uint64_t task = 0;
-    if (SubmitWithConflictResolution(s, std::move(req), &task)) ArmArrivalSelection(s, target, task, 0);
+    const auto destinations = TreeTransferDestinationsForTab(*dst);
+    bool moved = false;
+    if (SubmitTreeTransfer(s, paths, destinations, move, target, &moved) && moved)
+        s.cutPaths.clear();
+
 }
 
 std::vector<std::wstring> WindowTransferFolders(AppState& s) {
@@ -3239,7 +3501,9 @@ void OpenSelected(AppState& s, bool folder_in_new_window) {
         }
         std::wstring full = EntryFullPath(*tab, indices[0]);
         if (e.is_dir) open_folder(full);
-        else if (e.link_target.empty() && IsExtensionPackageFilePath(full) && OpenExtensionPackageInStore(s, full)) {
+        else if (pulse::extensions::vfs::IsVfsPath(full)) {
+            OpenVfsFileAsync(s, full, e.name);
+        } else if (e.link_target.empty() && IsExtensionPackageFilePath(full) && OpenExtensionPackageInStore(s, full)) {
             RecordRecentOpen(s, full, app::PlaceItemKind::File);
         } else {
             s.ops.OpenWith(full);
@@ -3248,6 +3512,7 @@ void OpenSelected(AppState& s, bool folder_in_new_window) {
         return;
     }
     std::vector<std::wstring> device_files;
+    size_t vfs_open_count = 0;
     for (int index : indices) {
         const fs::DirEntry& e = tab->EntryAt(static_cast<size_t>(index));
         if (!e.is_dir && !e.pc_device && fs::IsDevicePath(e.full_path)) {
@@ -3259,8 +3524,15 @@ void OpenSelected(AppState& s, bool folder_in_new_window) {
         if (e.is_dir || (!e.link_target.empty() && e.link_target_is_dir)) continue;
         std::wstring full = EntryFullPath(*tab, index);
         if (!full.empty()) {
-            s.ops.OpenWith(full);
-            RecordRecentOpen(s, full, app::PlaceItemKind::File);
+            if (pulse::extensions::vfs::IsVfsPath(full)) {
+                if (vfs_open_count < 8) {
+                    OpenVfsFileAsync(s, full, e.name);
+                    ++vfs_open_count;
+                }
+            } else {
+                s.ops.OpenWith(full);
+                RecordRecentOpen(s, full, app::PlaceItemKind::File);
+            }
         }
     }
     if (!device_files.empty()) RunDeviceVerb(s, std::move(device_files), L"");
@@ -3294,6 +3566,12 @@ bool HandlePaneBannerPress(AppState& s, const ui::HitTestResult& hit) {
     case A::GoUp:
         GoUp(s);
         break;
+    case A::OpenNativeFolder: {
+        const auto* tab = ActiveTab(s);
+        if (!tab || tab->banner_title != l10n::Get(l10n::StringId::LocalFolderPermissionTitle)) break;
+        OpenNativePermissionFolder(s, tab->current_path);
+        break;
+    }
     case A::LanRescan:
         RequestLanDiscovery(s, true);
         break;
@@ -3318,6 +3596,7 @@ bool HandlePaneBannerPress(AppState& s, const ui::HitTestResult& hit) {
         if (app::Tab* tab = ActiveTab(s)) {
             tab->banner_title.clear();
             tab->banner_message.clear();
+            tab->tag_ads_notice = {};
         }
         break;
     default:
@@ -3336,6 +3615,14 @@ void GoUp(AppState& s) {
     }
     if (fs::IsDevicePath(tab->current_path)) {
         NavigateTo(s, DeviceUpTarget(tab->current_path));
+        return;
+    }
+    if (pulse::extensions::vfs::IsVfsPath(tab->current_path)) {
+        if (const auto up = pulse::extensions::vfs::ParentVfsPath(tab->current_path)) {
+            NavigateTo(s, *up);
+        } else if (tab->CanGoBack()) {
+            GoBack(s);
+        }
         return;
     }
     if (fs::IsVirtualPath(tab->current_path)) {
@@ -3438,7 +3725,10 @@ constexpr ULONGLONG kTabFlashMs = 900;
 
 // Window-tab index whose pane currently shows `path`, or -1.
 int FindFolderTab(AppState& s, const std::wstring& path, app::Pane** pane_out) {
-    if (s.window_tabs.items.empty() || path.empty() || fs::IsVirtualPath(path)) return -1;
+    // The external Recycle Bin verb opens a single canonical view. Preserve
+    // the existing behavior for other virtual locations and This PC.
+    if (s.window_tabs.items.empty() || path.empty() ||
+        (fs::IsVirtualPath(path) && !fs::IsRecycleViewPath(path))) return -1;
     const std::wstring normalized = fs::NormalizePath(path);
     for (size_t i = 0; i < s.window_tabs.items.size(); ++i) {
         app::LayoutTab& layout = *s.window_tabs.items[i];

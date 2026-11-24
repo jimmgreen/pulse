@@ -58,10 +58,29 @@ void ParseTests() {
     const auto user = ParseServerAddress(L"smb://alice:secret@ds920/home");
     Check(user.kind == K::Share && user.unc == L"\\\\ds920\\home" && user.user == L"alice", "user kept, password dropped");
     const auto ftp = ParseServerAddress(L"ftp://files.example.com/pub");
-    Check(ftp.kind == K::Unsupported && ftp.scheme == L"ftp" && ftp.host == L"files.example.com", "ftp unsupported");
+    Check(ftp.kind == K::Ftp && ftp.scheme == L"ftp" && ftp.host == L"files.example.com" &&
+          ftp.url == L"ftp://files.example.com/pub", "ftp routed for explorer");
+    const auto ftp_root = ParseServerAddress(L"FTP://192.168.1.20");
+    Check(ftp_root.kind == K::Ftp && ftp_root.url == L"ftp://192.168.1.20/", "ftp root normalized");
+    const auto ftp_user = ParseServerAddress(L"ftp://alice:secret@nas.local:2121/pub,1/a b");
+    Check(ftp_user.kind == K::Ftp && ftp_user.user == L"alice" && ftp_user.host == L"nas.local" &&
+          ftp_user.url == L"ftp://alice:secret@nas.local:2121/pub%2C1/a%20b",
+          "ftp encodes commas and spaces in explorer url");
+    const auto ftp_v6 = ParseServerAddress(L"ftp://[::1]:2121/dir");
+    Check(ftp_v6.kind == K::Ftp && ftp_v6.host == L"[::1]" && ftp_v6.url == L"ftp://[::1]:2121/dir",
+          "ftp ipv6 host and port");
+    Check(ParseServerAddress(L"ftp://").kind == K::Invalid, "empty ftp host invalid");
+    Check(ParseServerAddress(L"ftp:///pub").kind == K::Invalid, "missing ftp host invalid");
+    Check(ParseServerAddress(L"ftp://host:0/x").kind == K::Invalid, "ftp port 0 invalid");
+    Check(ParseServerAddress(L"ftp://host:70000/x").kind == K::Invalid, "ftp port > 65535 invalid");
+    const auto ftps = ParseServerAddress(L"ftps://files.example.com/pub");
+    Check(ftps.kind == K::Unsupported && ftps.scheme == L"ftps", "ftps stays unsupported");
+    const auto sftp = ParseServerAddress(L"sftp://files.example.com/pub");
+    Check(sftp.kind == K::Unsupported && sftp.scheme == L"sftp", "sftp stays unsupported");
     Check(ParseServerAddress(L"mailto://x").kind == K::Invalid, "unknown scheme is not a server");
 
     Check(pulse::app::IsServerUrlText(L"smb://x/y"), "url text smb");
+    Check(pulse::app::IsServerUrlText(L"ftp://files.example.com/pub"), "url text ftp");
     Check(pulse::app::IsServerUrlText(L"10.0.0.2\\share"), "url text ipv4");
     Check(!pulse::app::IsServerUrlText(L"\\\\x\\y"), "plain unc handled elsewhere");
     Check(!pulse::app::IsServerUrlText(L"Downloads"), "folder name");

@@ -11,7 +11,7 @@ bool CloseWorkspacePane(AppState& s, app::Pane* pane) {
     if (s.renameIndex >= 0) HideRenameOverlay(s, false);
     if (s.addressEditing) HideAddressEditor(s, false);
     if (s.filterEditing) HideFilterEditor(s, true);
-    if (s.quickPreview.visible()) s.quickPreview.Close();
+    if (s.quickPreview->visible()) s.quickPreview->Close();
     CancelFileClick(s);
     s.blankClickPane = nullptr;
     s.blankClickTab = nullptr;

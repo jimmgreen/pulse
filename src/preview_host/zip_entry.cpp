@@ -1,6 +1,7 @@
 // zip_entry.cpp - see zip_entry.h.
 #include "zip_entry.h"
 #include <cstdint>
+#include <map>
 #include <type_traits>
 
 namespace pulse::preview {
@@ -78,28 +79,68 @@ std::string EntryName(const ZipApi& api, archive_entry* entry) {
     return out;
 }
 
+ZipApi& Api() {
+    static ZipApi api;
+    return api;
+}
+
+struct ZipReader {
+    ZipApi& api = Api();
+    archive* handle = nullptr;
+    ZipReader() = default;
+    ZipReader(const ZipReader&) = delete;
+    ZipReader& operator=(const ZipReader&) = delete;
+    ~ZipReader() { if (handle) api.read_free(handle); }
+    bool Open(const std::wstring& path) {
+        if (!api.ready || !(handle = api.read_new())) return false;
+        api.support_format_zip_seekable(handle);
+        return api.open_filename_w(handle, path.c_str(), 64 * 1024) == kArchiveOk;
+    }
+};
+
+bool ReadCurrent(ZipApi& api, archive* a, archive_entry* entry, size_t max_bytes, bool allow_prefix,
+                 std::vector<unsigned char>& data, bool* truncated, std::wstring* error) {
+    if (api.size_is_set(entry) && api.entry_size(entry) >= 0 &&
+        static_cast<uint64_t>(api.entry_size(entry)) > max_bytes && !allow_prefix) {
+        SetError(error, L"entry-too-large");
+        return false;
+    }
+    unsigned char buffer[64 * 1024];
+    for (;;) {
+        const int64_t got = api.read_data(a, buffer, sizeof(buffer));
+        if (got == 0) return true;
+        if (got < 0) {
+            data.clear();
+            SetError(error, L"entry-read-failed");
+            return false;
+        }
+        if (data.size() + static_cast<size_t>(got) > max_bytes) {
+            if (allow_prefix) {
+                data.insert(data.end(), buffer, buffer + (max_bytes - data.size()));
+                if (truncated) *truncated = true;
+                return true;
+            }
+            data.clear();
+            SetError(error, L"entry-too-large");
+            return false;
+        }
+        data.insert(data.end(), buffer, buffer + got);
+    }
+}
+
 // Shared body: with allow_prefix a member larger than max_bytes yields its
 // first max_bytes and sets *truncated instead of failing.
 bool ReadMember(const std::wstring& path, std::string_view name, size_t max_bytes, bool allow_prefix,
                 std::vector<unsigned char>& data, bool* truncated, std::wstring* error) {
     data.clear();
     if (truncated) *truncated = false;
-    static ZipApi api;
-    if (!api.ready) {
-        SetError(error, L"libarchive-unavailable");
+    ZipReader reader;
+    auto& api = reader.api;
+    if (!reader.Open(path)) {
+        SetError(error, api.ready ? L"archive-open-failed" : L"libarchive-unavailable");
         return false;
     }
-    archive* a = api.read_new();
-    if (!a) {
-        SetError(error, L"archive-open-failed");
-        return false;
-    }
-    struct Owner { archive* a; ~Owner() { api.read_free(a); } } owner{a};
-    api.support_format_zip_seekable(a);
-    if (api.open_filename_w(a, path.c_str(), 64 * 1024) != kArchiveOk) {
-        SetError(error, L"archive-open-failed");
-        return false;
-    }
+    auto* a = reader.handle;
     for (;;) {
         archive_entry* entry = nullptr;
         const int r = api.next_header(a, &entry);
@@ -109,38 +150,41 @@ bool ReadMember(const std::wstring& path, std::string_view name, size_t max_byte
             return false;
         }
         if (!SameName(EntryName(api, entry), name)) continue;
-        if (api.size_is_set(entry) && api.entry_size(entry) >= 0 &&
-            static_cast<uint64_t>(api.entry_size(entry)) > max_bytes && !allow_prefix) {
-            SetError(error, L"entry-too-large");
-            return false;
-        }
-        unsigned char buffer[64 * 1024];
-        for (;;) {
-            const int64_t got = api.read_data(a, buffer, sizeof(buffer));
-            if (got == 0) return true;
-            if (got < 0) {
-                data.clear();
-                SetError(error, L"entry-read-failed");
-                return false;
-            }
-            if (data.size() + static_cast<size_t>(got) > max_bytes) {
-                if (allow_prefix) {
-                    data.insert(data.end(), buffer, buffer + (max_bytes - data.size()));
-                    if (truncated) *truncated = true;
-                    return true;
-                }
-                data.clear();
-                SetError(error, L"entry-too-large");
-                return false;
-            }
-            data.insert(data.end(), buffer, buffer + got);
-        }
+        return ReadCurrent(api, a, entry, max_bytes, allow_prefix, data, truncated, error);
     }
     SetError(error, L"entry-not-found");
     return false;
 }
 
 } // namespace
+
+bool VisitZipEntries(const std::wstring& path, const std::vector<std::string>& names, size_t max_bytes,
+                     const ZipEntryVisitor& visit) {
+    auto key = [](std::string name) {
+        if (!name.empty() && name.front() == '/') name.erase(0, 1);
+        for (char& c : name) c = c == '\\' ? '/' : AsciiLower(c);
+        return name;
+    };
+    std::map<std::string, std::vector<size_t>> pending;
+    for (size_t i = 0; i < names.size(); ++i) pending[key(names[i])].push_back(i);
+    ZipReader reader;
+    if (!reader.Open(path)) return false;
+    std::vector<unsigned char> data;
+    while (!pending.empty()) {
+        archive_entry* entry = nullptr;
+        const int r = reader.api.next_header(reader.handle, &entry);
+        if (r == kArchiveEof || r < kArchiveWarn || !entry) return false;
+        auto it = pending.find(key(EntryName(reader.api, entry)));
+        if (it == pending.end()) continue;
+        data.clear();
+        if (!ReadCurrent(reader.api, reader.handle, entry, max_bytes, false, data, nullptr, nullptr))
+            return false;
+        for (size_t i : it->second)
+            if (!visit(i, data)) return false;
+        pending.erase(it);
+    }
+    return true;
+}
 
 bool ReadZipEntry(const std::wstring& path, std::string_view name, size_t max_bytes,
                   std::vector<unsigned char>& data, std::wstring* error) {

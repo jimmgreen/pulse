@@ -2,6 +2,7 @@
 
 #include "context_menu.h"
 #include "last_tab_close.h"
+#include "keymap.h"
 #include "../common/localization.h"
 
 #include <algorithm>
@@ -321,6 +322,7 @@ void TabController::ShowTabMenu(WindowTabs& tabs, int tab_index, POINT screen_pt
         callbacks_.last_tab_closes_window());
     items.back().enabled = closes_window || (!tab.pinned && tabs.items.size() > 1);
     items.push_back(MenuItem(CmdTabCloseOthers, TabText(Text::TabCloseOthers)));
+    items.back().shortcut = ShownShortcut(L"Ctrl+Alt+W");
     items.push_back(MenuItem(CmdTabCloseRight, TabText(Text::TabCloseRight)));
 
     const int command = menu.TrackPopup(screen_pt, std::move(items));

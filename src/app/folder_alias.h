@@ -9,6 +9,7 @@
 #pragma once
 #include "../common/json_utils.h"
 #include "../common/utf8_file.h"
+#include "../common/async_file_writer.h"
 
 #include <windows.h>
 
@@ -39,6 +40,7 @@ public:
 
     // Reads `file` (a missing file is an empty store). Called once at start.
     void Load(const std::wstring& file) {
+        GlobalAsyncFileWriter().Flush();
         std::wstring text;
         std::unordered_map<std::wstring, AliasEntry> loaded;
         int display = 0;
@@ -139,7 +141,10 @@ public:
             file = file_;
             json = SerializeLocked();
         }
-        if (!file.empty()) WriteUtf8FileAtomic(file, json);
+        if (!file.empty()) {
+            GlobalAsyncFileWriter().Flush();
+            WriteUtf8FileAtomic(file, json);
+        }
         return true;
     }
 
@@ -170,7 +175,7 @@ public:
             file = file_;
             json = SerializeLocked();
         }
-        if (!file.empty()) WriteUtf8FileAtomic(file, json);
+        if (!file.empty()) GlobalAsyncFileWriter().Submit(std::move(file), std::move(json));
     }
 
     // 导出: writes every alias to `file` in the store's own format.

@@ -87,12 +87,22 @@ void OpsManager::RunAuthorizedTransfer(const OpRequest& req, uint64_t task_id) {
         received_progress = false;
         result = TransferWithElevatedHelper(pending, req.dest_dir,
             req.type == OpType::Move, UiWindow(), transfer_cancel_, policy, callbacks, req.new_name);
+        if (result.helper_unavailable && !result.cancelled && !result.mutated &&
+            !transfer_cancel_.load() && !verify_copies_.load() && req.new_name.empty() &&
+            !req.is_undo && !req.generated_output && !transfer_pause_.load()) {
+            SetStatus([](OpStatus& status) { status.can_pause = false; });
+            result = TransferWithShell(pending, req.dest_dir, req.type == OpType::Move,
+                UiWindow(), transfer_cancel_, policy);
+            break; // No automatic repeat after Shell execution.
+        }
+        if (result.cancelled) break;
         if (SUCCEEDED(result.hr) || result.mutated || transfer_cancel_.load()) break;
         // A denied UAC dialog has changed no files. Keep the task in its own
         // window; only an explicit retry can launch another authorization.
         const std::wstring reason = result.error.empty()
             ? l10n::Get(l10n::StringId::AdministratorPermissionWasNotGrantedRetryOrSkipThisItem).c_str()
             : result.error;
+        SetStatus([&](OpStatus& status) { status.native_handoff_directory = req.dest_dir; });
         bool retry = false;
         while (!pending.empty() && !transfer_cancel_.load()) {
             const auto choice = WaitForAuthorization(task_id, reason, pending.front());
@@ -153,6 +163,7 @@ void OpsManager::RunAuthorizedTransfer(const OpRequest& req, uint64_t task_id) {
         status.total_items = (std::max)(status.total_items, status.completed_items);
         status.bytes_per_second = 0;
         status.eta_seconds = 0;
+        status.native_handoff_directory.clear();
         if (result.cancelled) {
             status.phase = OpPhase::Failed;
             status.last_error = l10n::Get(l10n::StringId::Canceled).c_str();
@@ -160,6 +171,7 @@ void OpsManager::RunAuthorizedTransfer(const OpRequest& req, uint64_t task_id) {
         } else if (FAILED(result.hr)) {
             status.phase = OpPhase::Failed;
             status.last_error = error;
+            status.native_handoff_directory = req.dest_dir;
             status.summary = l10n::Get(l10n::StringId::FileOperationFailed).c_str();
         } else {
             status.phase = OpPhase::Completed;

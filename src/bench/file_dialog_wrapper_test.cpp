@@ -207,6 +207,52 @@ void SaveAsItemRouting(const std::filesystem::path& folder, const std::filesyste
     source.Reset(); second.Reset(); directory.Reset(); other_directory.Reset();
     Check(DeleteFileW(replacement.c_str()) != FALSE && RemoveDirectoryW(other.c_str()) != FALSE, "remove only owned replacement item fixtures");
 }
+void ResolveRetry(const std::filesystem::path& folder) {
+    for (const bool throw_first : {false, true}) {
+        Counters counts;
+        int resolves = 0, validations = 0, begins = 0, ends = 0;
+        bool authorized = false;
+        auto services = Services(counts, false);
+        services.observe_show = [&](bool begin, const FileDialogShowObservation&) { begin ? ++begins : ++ends; };
+        services.resolve_on_show = [&](FileDialogBridgeServices& resolved) {
+            ++resolves;
+            resolved = Services(counts, true);
+            resolved.validation_verified = [&](const ContractDecision&) { ++validations; return authorized; };
+            if (resolves == 1) {
+                if (throw_first) throw E_FAIL;
+                return false;
+            }
+            return true;
+        };
+        using Entry = HRESULT (WINAPI*)(REFCLSID, REFIID, void**);
+        static const auto module = LoadLibraryExW(L"comdlg32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        static const auto entry = module ? reinterpret_cast<Entry>(GetProcAddress(module, "DllGetClassObject")) : nullptr;
+        ComPtr<IClassFactory> factory;
+        ComPtr<IFileDialog> native, dialog;
+        HRESULT hr = entry ? entry(CLSID_FileOpenDialog, IID_PPV_ARGS(&factory)) : E_FAIL;
+        if (SUCCEEDED(hr)) hr = factory->CreateInstance(nullptr, IID_PPV_ARGS(&native));
+        if (SUCCEEDED(hr)) hr = WrapNativeFileDialog(DialogFactory::Open, native.Get(), services, IID_PPV_ARGS(&dialog));
+        Check(hr == S_OK && dialog, "create isolated retry wrapper without registered override");
+        if (!dialog) continue;
+        Check(Configure(dialog.Get(), folder), "configure resolve retry fixture");
+        Check(dialog->Show(nullptr) == HRESULT_FROM_WIN32(ERROR_CANCELLED) && resolves == 1 &&
+            counts.native == 1 && counts.bridge == 0 && validations == 0,
+            throw_first ? "resolver exception falls back once without using partial services" :
+                          "resolver not ready falls back once without using partial services");
+        Check(dialog->Show(nullptr) == HRESULT_FROM_WIN32(ERROR_CANCELLED) && resolves == 2 &&
+            counts.native == 2 && counts.bridge == 0 && validations == 1,
+            "same dialog retries resolver but still rejects unverified authorization");
+        authorized = true;
+        Check(dialog->Show(nullptr) == HRESULT_FROM_WIN32(ERROR_CANCELLED) && resolves == 2 &&
+            counts.native == 2 && counts.bridge == 1 && validations == 2,
+            "recovered dialog bridges only after current validation succeeds");
+        authorized = false;
+        Check(dialog->Show(nullptr) == HRESULT_FROM_WIN32(ERROR_CANCELLED) &&
+            counts.native == 3 && counts.bridge == 1 && validations == 3,
+            "successful binding does not bypass later authorization revocation");
+        Check(begins == 4 && ends == 4, "retry retains one begin and end observation per Show");
+    }
+}
 void ShowDiagnostics(const std::filesystem::path& folder, const std::filesystem::path& fixture) {
     const auto make_isolated = [](const FileDialogBridgeServices& services) {
         using Entry = HRESULT (WINAPI*)(REFCLSID, REFIID, void**);
@@ -286,6 +332,56 @@ void ShowDiagnostics(const std::filesystem::path& folder, const std::filesystem:
             "deferred binding preserves original per-Show diagnostic observer");
     }
 }
+void YjkParameters(const std::filesystem::path& folder, const std::filesystem::path& fixture) {
+    for (const auto factory : {DialogFactory::Open, DialogFactory::Save}) {
+        for (const bool replace_name : {false, true}) {
+            Counters counts;
+            auto services = Services(counts, true);
+            services.prefer_bridge = true;
+            services.access_policy = AccessPolicy::LocalOpenV1; services.save_access_policy = AccessPolicy::LocalSaveV1;
+            auto dialog = Make(services, factory);
+            Check(Configure(dialog.Get(), folder, factory), "configure local-policy native-backed YJK dialog");
+            if (replace_name) Check(dialog->SetFileName(L"obsolete?.txt") == S_OK, "native accepts intermediate filename before replacement");
+            Check(dialog->SetFileName(fixture.c_str()) == S_OK, "native accepts absolute caller filename");
+            const HRESULT hr = dialog->Show(nullptr);
+            Check(hr == HRESULT_FROM_WIN32(ERROR_CANCELLED) && counts.bridge == 1 && counts.native == 0 &&
+                counts.last && counts.last->filename == U16(fixture),
+                "absolute filename uses final native evidence and reaches provider without splitting caller state", hr);
+        }
+    }
+    for (const auto extension : {L"yjk", L"tar.gz", L".yjk"}) {
+        Counters counts;
+        auto services = Services(counts, true);
+        services.prefer_bridge = true;
+        services.save_access_policy = AccessPolicy::LocalSaveV1;
+        auto dialog = Make(services, DialogFactory::Save);
+        Check(Configure(dialog.Get(), folder, DialogFactory::Save) &&
+            dialog->SetDefaultExtension(extension) == S_OK && dialog->SetFileName(L"result") == S_OK,
+            "configure native save extension before filename");
+        const HRESULT hr = dialog->Show(nullptr);
+        Check(hr == HRESULT_FROM_WIN32(ERROR_CANCELLED) && counts.bridge == 1 && counts.native == 0 &&
+            counts.last && counts.last->default_extension == std::u16string(extension, extension + wcslen(extension)),
+            "save extension including internal dot reaches native-default-capable provider", hr);
+    }
+    {
+        Counters counts;
+        auto services = Services(counts, true);
+        services.prefer_bridge = true;
+        services.access_policy = AccessPolicy::LocalOpenV1;
+        std::string diagnostic;
+        services.on_native_reason = [&](const char* text, const IID*) {
+            if (std::string_view(text).starts_with("contract-input-shape")) diagnostic = text;
+        };
+        auto dialog = Make(services);
+        Check(Configure(dialog.Get(), folder) && dialog->SetFileName(L"confidential?.txt") == S_OK,
+            "configure unsupported wildcard filename");
+        Check(dialog->Show(nullptr) == HRESULT_FROM_WIN32(ERROR_CANCELLED) && counts.native == 1 && counts.bridge == 0 &&
+            diagnostic.find("shape=0x") != std::string::npos && diagnostic.find("confidential") == std::string::npos &&
+            diagnostic.find(".txt") == std::string::npos,
+            "unsupported input retains native route and reports shape without caller text");
+    }
+}
+
 }
 int main(int argc, char** argv) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
@@ -295,6 +391,11 @@ int main(int argc, char** argv) {
     if (!CreateDirectoryW(folder.c_str(), nullptr)) { CoUninitialize(); return 2; }
     const auto fixture = folder / L"selected.txt";
     std::ofstream(fixture) << "wrapper fixture";
+    if (argc == 2 && std::string_view(argv[1]) == "--yjk-parameters") {
+        std::cout << std::unitbuf; YjkParameters(folder, fixture);
+        Check(DeleteFileW(fixture.c_str()) != FALSE && RemoveDirectoryW(folder.c_str()) != FALSE, "YJK parameter fixtures cleaned up");
+        CoUninitialize(); std::cout << "YJK_WRAPPER checks=" << checks << " failures=" << failures << '\n'; return failures ? 1 : 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--navigation-root") {
         std::cout << std::unitbuf;
         NavigationRootFallback(folder);
@@ -307,6 +408,11 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--save-as-item") {
         std::cout << std::unitbuf; SaveAsItemRouting(folder, fixture);
         Check(DeleteFileW(fixture.c_str()) != FALSE && RemoveDirectoryW(folder.c_str()) != FALSE, "SaveAsItem routing fixtures cleaned up");
+        CoUninitialize(); std::cout << "Checks: " << checks << ", failures: " << failures << '\n'; return failures ? 1 : 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--resolve-retry") {
+        std::cout << std::unitbuf; ResolveRetry(folder);
+        Check(DeleteFileW(fixture.c_str()) != FALSE && RemoveDirectoryW(folder.c_str()) != FALSE, "resolve retry fixtures cleaned up");
         CoUninitialize(); std::cout << "Checks: " << checks << ", failures: " << failures << '\n'; return failures ? 1 : 0;
     }
     if (argc == 2 && std::string_view(argv[1]) == "--show-diagnostics") {
@@ -487,8 +593,29 @@ int main(int argc, char** argv) {
     {
         Counters counts; counts.result = wire::Status::Unsupported;
         auto dialog = Make(Services(counts, true)); Configure(dialog.Get(), folder);
-        Check(dialog->Show(nullptr) == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) && counts.bridge == 1 && counts.native == 0,
-            "late host Unsupported cannot reopen native dialog");
+        Check(dialog->Show(nullptr) == HRESULT_FROM_WIN32(ERROR_CANCELLED) && counts.bridge == 1 && counts.native == 1,
+            "pre-UI host Unsupported falls back cleanly to native dialog");
+    }
+    {
+        // Cursor / Electron "Open Folder" shape: FOS_PICKFOLDERS | FOS_ALLOWMULTISELECT + title + ok label + ignored SetFileTypes.
+        Counters counts; counts.result = wire::Status::Accepted; counts.paths = {U16(folder)};
+        auto services = Services(counts, true); services.prefer_bridge = true;
+        services.access_policy = AccessPolicy::LocalOpenV1;
+        auto dialog = Make(services, DialogFactory::Open);
+        ComPtr<IShellItem> initial;
+        SHCreateItemFromParsingName(folder.c_str(), nullptr, IID_PPV_ARGS(&initial));
+        dialog->SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST);
+        dialog->SetFileName(L"");
+        dialog->SetTitle(L"Open Folder");
+        dialog->SetOkButtonLabel(L"Select");
+        const COMDLG_FILTERSPEC ignored_filter{L"All", L"*.*"};
+        (void)dialog->SetFileTypes(1, &ignored_filter);
+        dialog->SetFolder(initial.Get());
+        const auto hr = dialog->Show(nullptr);
+        Check(hr == S_OK && counts.bridge == 1 && counts.native == 0 && counts.last &&
+            counts.last->operation == wire::Operation::PickFolder &&
+            (counts.last->options & wire::AllowMultiSelect) != 0,
+            "Cursor/Electron multiselect folder dialog routes cleanly through pulse.exe bridge", hr);
     }
     {
         // pulse.exe route: a basic local Save with a caller title crosses the
@@ -718,6 +845,63 @@ int main(int argc, char** argv) {
         Check(matches, "bridge GetFolder returns accepted file parent rather than native initial folder");
         CoTaskMemFree(returned_folder);
         Check(created && RemoveDirectoryW(initial.c_str()) != FALSE, "owned initial directory cleaned");
+    }
+    {
+        // Phase 0 regression: benign Customize probes (RemoveAllControlItems E_NOTIMPL /
+        // RemoveControlItem E_INVALIDARG / absent GetControlState E_INVALIDARG) without an
+        // inprocess provider must not force native fallback.
+        Counters counts; counts.result = wire::Status::Accepted; counts.paths = {U16(fixture)};
+        auto services = Services(counts, true);
+        auto dialog = Make(services);
+        ComPtr<IFileDialogCustomize> customize;
+        Check(dialog && SUCCEEDED(dialog.As(&customize)) && customize, "QI Customize without inprocess provider");
+        CDCONTROLSTATEF state{};
+        Check(customize && customize->RemoveAllControlItems(26409) == E_NOTIMPL &&
+              customize->RemoveControlItem(26409, 1) == E_INVALIDARG &&
+              customize->GetControlState(26409, &state) == E_INVALIDARG,
+              "benign Customize probes preserve native E_NOTIMPL / E_INVALIDARG");
+        Check(Configure(dialog.Get(), folder) && dialog->Show(nullptr) == S_OK && counts.bridge == 1 && counts.native == 0,
+              "benign Customize probes do not poison bridge routing");
+    }
+    {
+        // Phase 0 regression: bridge Save route propagates allow_missing (FOS_NOTESTFILECREATE)
+        // and records ShellItemMaterializeFailed when materialization fails.
+        const auto missing_save = folder / L"nonexistent-subdir-notest" / L"out.txt";
+        Counters counts; counts.result = wire::Status::Accepted; counts.paths = {U16(missing_save)};
+        auto services = Services(counts, true);
+        services.save_access_policy = AccessPolicy::LocalSaveV1;
+        services.prefer_bridge = true;
+        FileDialogShowObservation terminal;
+        services.observe_show = [&](bool begin, const FileDialogShowObservation& obs) { if (!begin) terminal = obs; };
+        auto dialog = Make(services, DialogFactory::Save);
+        ComPtr<IShellItem> folder_item;
+        Check(SUCCEEDED(SHCreateItemFromParsingName(folder.c_str(), nullptr, IID_PPV_ARGS(&folder_item))),
+              "resolve folder item for bridge Save materialization test");
+        Check(dialog &&
+              SUCCEEDED(dialog->SetOptions(FOS_OVERWRITEPROMPT | FOS_NOREADONLYRETURN | FOS_FORCEFILESYSTEM |
+                                           FOS_NOCHANGEDIR | FOS_DONTADDTORECENT | FOS_NOTESTFILECREATE)) &&
+              SUCCEEDED(dialog->SetFolder(folder_item.Get())) &&
+              SUCCEEDED(dialog->SetFileName(L"out.txt")),
+              "configure bridge Save with FOS_NOTESTFILECREATE");
+        const HRESULT show_hr = dialog ? dialog->Show(nullptr) : E_FAIL;
+        ComPtr<IShellItem> result_item;
+        Check(show_hr == S_OK && counts.bridge == 1 && counts.native == 0 &&
+              SUCCEEDED(dialog->GetResult(&result_item)) && result_item &&
+              terminal.failure_phase == FileDialogShowFailurePhase::None,
+              "bridge Save with FOS_NOTESTFILECREATE materializes nonexistent target");
+    }
+    {
+        // Phase 0 regression: materialization failure after bridge acceptance sets failure_phase.
+        Counters counts; counts.result = wire::Status::Accepted;
+        counts.paths = {U16(folder / L"does-not-exist-open.txt")};
+        auto services = Services(counts, true);
+        FileDialogShowObservation terminal;
+        services.observe_show = [&](bool begin, const FileDialogShowObservation& obs) { if (!begin) terminal = obs; };
+        auto dialog = Make(services, DialogFactory::Open);
+        Check(Configure(dialog.Get(), folder), "configure Open for materialization failure phase test");
+        const HRESULT show_hr = dialog ? dialog->Show(nullptr) : E_FAIL;
+        Check(FAILED(show_hr) && terminal.failure_phase == FileDialogShowFailurePhase::ShellItemMaterializeFailed,
+              "bridge Open materialization failure reports ShellItemMaterializeFailed");
     }
     Check(DeleteFileW(fixture.c_str()) != FALSE && RemoveDirectoryW(folder.c_str()) != FALSE, "wrapper fixtures cleaned up");
     CoUninitialize();

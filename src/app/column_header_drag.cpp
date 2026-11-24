@@ -34,14 +34,15 @@ bool BeginColumnHeaderPress(AppState& s, const ui::WindowViewModel& vm, const ui
     ui::MainRenderer::DetailsColumnLayout layout;
     if (hit.region != ui::HitTestResult::ColumnHeader || !SlotLayout(s, vm, hit.pane_index, layout)) return false;
     const int from = hit.index;
-    if (!layout.reorderable || from < layout.FirstOrderable() || from >= layout.count ||
+    if (!layout.reorderable || from < layout.FirstOrderable() || from >= layout.OrderableEnd() ||
         static_cast<int>(layout.kinds[static_cast<size_t>(from)]) != hit.sub_index)
         return false;
     auto& d = s.columnHeaderDrag;
     d.pending = true;
     d.pane = hit.pane_index;
     d.from = from;
-    d.sortable = layout.kinds[static_cast<size_t>(from)] != K::Status;
+    d.sortable = layout.kinds[static_cast<size_t>(from)] != K::Status &&
+                 !ui::MainRenderer::IsExtensionColumn(layout.kinds[static_cast<size_t>(from)]);
     d.column = hit.column;
     d.start = POINT{mx, my};
     const float left = layout.DividerX(from - 1);

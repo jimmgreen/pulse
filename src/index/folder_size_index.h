@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -35,40 +36,87 @@ public:
     }
     template<class Read> bool Build(int32_t count, Read read) {
         Reset(); ++builds_;
-        std::vector<uint64_t> sums(static_cast<size_t>(count));
-        std::vector<uint32_t> children(static_cast<size_t>(count));
-        std::vector<int32_t> queue;
-        queue.reserve(static_cast<size_t>(count));
-        size_t live = 0, directories = 0;
+        if (count < 0) return false;
+        if (count == 0) { live_ = 0; valid_ = true; return true; }
+
+        // Pass 1: validate parent invariants and collect only live directory IDs
+        // (~10% of nodes), eliminating count-sized sums/children/queue vectors.
         for (int32_t i = 0; i < count; ++i) {
             const auto n = read(i);
             if (!n.alive) continue;
-            ++live; sums[i] = n.directory ? 0 : n.bytes;
-            if (n.directory) ++directories;
-            if (n.parent >= count || n.parent == i) return false;
-            if (n.parent >= 0 && read(n.parent).alive) {
-                if (!read(n.parent).directory) return false;
-                ++children[n.parent];
+            if (n.parent >= count || n.parent == i) { Reset(); return false; }
+            if (n.parent >= 0) {
+                const auto p = read(n.parent);
+                if (p.alive && !p.directory) { Reset(); return false; }
             }
+            if (n.directory) ids_.push_back(i);
         }
-        for (int32_t i = 0; i < count; ++i) if (read(i).alive && !children[i]) queue.push_back(i);
-        for (size_t at = 0; at < queue.size(); ++at) {
-            const auto i = queue[at]; const auto n = read(i);
-            if (n.parent >= 0 && read(n.parent).alive) {
-                if (UINT64_MAX - sums[n.parent] < sums[i]) { Reset(); return false; }
-                sums[n.parent] += sums[i];
-                if (--children[n.parent] == 0) queue.push_back(n.parent);
+
+        const size_t dir_count = ids_.size();
+        if (dir_count == 0) { live_ = 0; valid_ = true; return true; }
+
+        constexpr int kBlockShift = 8;
+        constexpr size_t kInvalidSlot = (std::numeric_limits<size_t>::max)();
+        const size_t num_blocks = static_cast<size_t>((count - 1) >> kBlockShift) + 1;
+        std::vector<uint32_t> block_start(num_blocks + 1, 0);
+        {
+            size_t cursor = 0;
+            for (size_t b = 0; b < num_blocks; ++b) {
+                block_start[b] = static_cast<uint32_t>(cursor);
+                const int64_t limit = static_cast<int64_t>(b + 1) << kBlockShift;
+                while (cursor < dir_count && static_cast<int64_t>(ids_[cursor]) < limit) ++cursor;
             }
+            block_start[num_blocks] = static_cast<uint32_t>(cursor);
         }
-        if (queue.size() != live) return false;
-        ids_.reserve(directories);
-        totals_.reserve(directories);
+
+        auto find_dir_slot = [&](int32_t id) noexcept -> size_t {
+            if (id < 0 || id >= count) return kInvalidSlot;
+            const size_t b = static_cast<size_t>(id >> kBlockShift);
+            const auto begin = ids_.begin() + block_start[b];
+            const auto end = ids_.begin() + block_start[b + 1];
+            const auto it = std::lower_bound(begin, end, id);
+            return (it != end && *it == id) ? static_cast<size_t>(it - ids_.begin()) : kInvalidSlot;
+        };
+
+        totals_.assign(dir_count, 0);
+        std::vector<uint32_t> dir_children(dir_count, 0);
+
+        // Pass 2: fold leaf file sizes straight into their live parent directory
+        // and count directory-to-directory edges only.
         for (int32_t i = 0; i < count; ++i) {
             const auto n = read(i);
-            if (!n.alive || !n.directory) continue;
-            if (sums[i] == kRemoved) { Reset(); return false; }
-            ids_.push_back(i);
-            totals_.push_back(sums[i]);
+            if (!n.alive || n.parent < 0) continue;
+            const size_t p_slot = find_dir_slot(n.parent);
+            if (p_slot == kInvalidSlot) continue;
+            if (n.directory) {
+                ++dir_children[p_slot];
+            } else {
+                if (UINT64_MAX - totals_[p_slot] < n.bytes) { Reset(); return false; }
+                totals_[p_slot] += n.bytes;
+            }
+        }
+
+        // Pass 3: topological aggregation over directories only.
+        std::vector<uint32_t> queue;
+        queue.reserve(dir_count);
+        for (size_t d = 0; d < dir_count; ++d) {
+            if (!dir_children[d]) queue.push_back(static_cast<uint32_t>(d));
+        }
+        for (size_t at = 0; at < queue.size(); ++at) {
+            const uint32_t d = queue[at];
+            const auto n = read(ids_[d]);
+            if (n.parent >= 0) {
+                const size_t p_slot = find_dir_slot(n.parent);
+                if (p_slot != kInvalidSlot) {
+                    if (UINT64_MAX - totals_[p_slot] < totals_[d]) { Reset(); return false; }
+                    totals_[p_slot] += totals_[d];
+                    if (--dir_children[p_slot] == 0) queue.push_back(static_cast<uint32_t>(p_slot));
+                }
+            }
+        }
+        if (queue.size() != dir_count) { Reset(); return false; }
+        for (uint64_t total : totals_) {
+            if (total == kRemoved) { Reset(); return false; }
         }
         live_ = ids_.size();
         valid_ = true;

@@ -1,5 +1,6 @@
 #include "../common/runtime_log.h"
 #include "../common/picker_places_snapshot.h"
+#include "../common/dialog_auto_registration.h"
 #include "global_search_controller.h"
 #include "global_search_handoff.h"
 #include "shortcut_page.h"
@@ -228,6 +229,7 @@ void ApplyGlobalSearchSettings(AppState& s) {
     if (!HotkeyAllowed(s)) return;
     s.core.dialogJump.Update(ServiceWindow(s), WM_DIALOG_JUMP_CONTEXT, s.appPrefs.dialog_jump_bar);
     SendDialogJumpContext(s);
+    s.core.userDialogAuto.Update(s.appPrefs.dialog_adaptive_legacy && dialog_auto::Inspect().enabled, app::GetPulseDataDir());
     const bool enabled = s.appPrefs.global_search_enabled && s.appPrefs.search_enabled;
     const bool ok = s.globalSearchHotkey.Update(ServiceWindow(s), enabled,
         s.appPrefs.global_search_modifiers, s.appPrefs.global_search_key);
@@ -318,6 +320,10 @@ void PublishPickerPlaces(AppState& s, bool force) {
     snapshot.endpoint = s.core.host.Hwnd();
     for (const auto& w : window->places.workspaces)
         snapshot.workspaces.push_back({w.root, w.name, w.color_rgb});
+    for (const auto& entry : window->places.networks)
+        snapshot.networks.push_back({entry.unc, entry.name});
+    for (const auto& entry : window->sidebar.system_networks)
+        snapshot.networks.push_back({entry.path, entry.label});
     for (const auto& item : window->places.starred_items)
         snapshot.starred_items.push_back({item.path, static_cast<uint32_t>(item.kind), item.group});
     for (const auto& group : window->places.starred_groups)
@@ -382,10 +388,18 @@ void ToggleGlobalSearch(AppState& s, bool double_ctrl) {
     }
 }
 
+bool ShowGlobalSearchWithQuery(AppState& s, const std::wstring& query) {
+    if (!s.appPrefs.search_enabled) return false;
+    diagnostics::runtime::Event("search_summon_external", {{"visible", s.globalSearchWindow.Visible()}});
+    PrepareGlobalSearchWindow(s);
+    return s.globalSearchWindow.Show(s.hwnd, s.darkMode, s.scale, std::wstring{}, s.appPrefs.search_pinyin, query);
+}
+
 void ShutdownGlobalSearch(AppState& s) {
     s.globalSearchHotkey.Reset();
     s.core.doubleCtrl.Stop();
     s.core.dialogJump.Stop();
+    s.core.userDialogAuto.Stop();
     s.globalSearchWindow.Shutdown();
 }
 }

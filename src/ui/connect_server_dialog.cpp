@@ -58,9 +58,12 @@ public:
 
         const int width = static_cast<int>(kDlgW * scale_);
         const int height = static_cast<int>(height_ * scale_);
+        // Born on the owner's monitor: CW_USEDEFAULT lands on the primary one and
+        // the move to a screen of another scale rescaled the size (WM_DPICHANGED).
+        const POINT origin = pulse::ui::OwnedWindowOrigin(owner, width, height);
         hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kClass, spec_.title.c_str(),
             WS_POPUP | WS_THICKFRAME | WS_SYSMENU,
-            CW_USEDEFAULT, CW_USEDEFAULT, width, height, owner, nullptr, wc.hInstance, this);
+            origin.x, origin.y, width, height, owner, nullptr, wc.hInstance, this);
         if (!hwnd_) return result_;
         pulse::ui::CenterOwnedWindow(hwnd_, owner_, width, height);
         if (owner_) EnableWindow(owner_, FALSE);
@@ -114,6 +117,7 @@ private:
     D2D1_RECT_F CancelRect() const { return Rect(scale_, kDlgW - 196, height_ - 48, 80, 32); }
     D2D1_RECT_F ConfirmRect() const { return Rect(scale_, kDlgW - 108, height_ - 48, 88, 32); }
 
+    bool PinEnabled() const { return preview_.can_pin; }
     bool MapEnabled() const { return preview_.can_map && !spec_.free_letters.empty(); }
     bool CanConfirm() const { return spec_.rename || preview_.ok; }
     D2D1_COLOR_F EditForeground() const { return ColorFromRef(EditTextColor(dark_)); }
@@ -191,7 +195,7 @@ private:
             if (!CanConfirm()) return;
             result_.accepted = true;
             result_.text = EditText();
-            result_.pin = !spec_.rename && pin_;
+            result_.pin = !spec_.rename && pin_ && PinEnabled();
             result_.map = !spec_.rename && map_ && MapEnabled() && letter_ != 0;
             result_.letter = result_.map ? letter_ : 0;
         }
@@ -292,10 +296,12 @@ private:
                                   compositor_.SmallFormat(), theme.text_secondary, fluent::HorizontalAlignment::Right);
             }
 
+            const bool pin_enabled = PinEnabled();
             fluent::ControlState pin{};
-            pin.checked = pin_;
-            pin.hovered = hover_ == kHitPin;
-            pin.pressed = pressed_ == kHitPin;
+            pin.enabled = pin_enabled;
+            pin.checked = pin_ && pin_enabled;
+            pin.hovered = pin_enabled && hover_ == kHitPin;
+            pin.pressed = pin_enabled && pressed_ == kHitPin;
             painter_.DrawCheckBox(PinRect(), l10n::Get(l10n::StringId::ConnectServerPinAfter), pin);
 
             const bool map_enabled = MapEnabled();
@@ -341,7 +347,7 @@ private:
     void Click(int hit) {
         if (hit == kHitConfirm) Complete(true);
         else if (hit == kHitCancel || hit == kHitClose) Complete(false);
-        else if (hit == kHitPin) pin_ = !pin_;
+        else if (hit == kHitPin && PinEnabled()) pin_ = !pin_;
         else if (hit == kHitMap && MapEnabled()) map_ = !map_;
         else if (hit >= kHitLetter && hit < kHitLetter + kMaxLetters && MapEnabled()) {
             map_ = true;

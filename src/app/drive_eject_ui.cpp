@@ -74,10 +74,13 @@ void ApplyDriveEjectReady(AppState* state, LPARAM raw) {
             app::ForEachWindowSharingCore(*state, [&](AppState& window) {
                 if (path::OnVolume(window.hoverPreview.path, root)) HideHoverPreview(window);
                 Append(releases, window.renderer.SuspendVolume(root));
-                Append(releases, window.quickPreview.SuspendVolume(root));
+                Append(releases, window.quickPreview->SuspendVolume(root));
                 Append(releases, window.detailsPreview.SuspendVolume(root));
                 InvalidateRect(window.hwnd, nullptr, FALSE);
             });
+            for (auto& pinned : state->core.pinned_previews) {
+                if (pinned) Append(releases, pinned->SuspendVolume(root));
+            }
         }
         std::thread([task, releases = std::move(releases)] {
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -112,7 +115,7 @@ void InheritDriveEjectSuspension(AppState& state) {
     // objects have not opened files yet; shared caches are already suspended.
     for (const auto& root : task->plan.roots) {
         state.renderer.SuspendVolume(root);
-        state.quickPreview.SuspendVolume(root);
+        state.quickPreview->SuspendVolume(root);
         state.detailsPreview.SuspendVolume(root);
     }
 }
@@ -131,9 +134,12 @@ void CompletePreparedDriveEject(AppState& state, const std::wstring& root) {
             caches.hover.ResumeVolume(volume);
             app::ForEachWindowSharingCore(state, [&](AppState& window) {
                 window.renderer.ResumeVolume(volume);
-                window.quickPreview.ResumeVolume(volume);
+                window.quickPreview->ResumeVolume(volume);
                 window.detailsPreview.ResumeVolume(volume);
             });
+            for (auto& pinned : state.core.pinned_previews) {
+                if (pinned) pinned->ResumeVolume(volume);
+            }
         }
         SyncVisibleWatches(state);
     }

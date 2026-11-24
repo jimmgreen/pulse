@@ -41,7 +41,8 @@ int MemoryRegression() {
         const Patch patches[] = {
             {0,0,16,16,0,1,false}, {0,0,16,16,1,3,false},
             {3,5,4,6,2,3,false}, {14,13,2,3,3,3,true},
-            {13,12,3,4,1,3,false}, {0,0,1,1,2,1,false}};
+            {13,12,3,4,1,3,false}, {0,0,1,1,2,1,false},
+            {0,11,16,5,1,3,false}, {0,15,16,1,2,1,false}};
         Bytes bytes{'G','I','F','8','9','a'}; Word(bytes,16); Word(bytes,16);
         bytes.insert(bytes.end(), {0x81,0,0,255,0,0,0,255,0,0,0,255,255,255,255});
         std::vector<Bytes> expected;
@@ -61,7 +62,7 @@ int MemoryRegression() {
         Check(Write(fixture,bytes),"write full, partial, edge, transparent and consecutive disposal-3 fixture");
         GifDecoder decoder; GifFrame frame;
         bool pixels=true;
-        for (uint32_t i : {0u,1u,2u,3u,4u,5u,2u,5u,0u,4u,3u,1u,5u})
+        for (uint32_t i : {0u,1u,2u,3u,4u,5u,6u,7u,2u,5u,0u,4u,3u,1u,7u})
             pixels &= decoder.Decode(fixture,16,i,frame) && frame.pixels==expected[i];
         Check(pixels,"all pixels match independent full-canvas reference after forward/reverse/repeated seeks");
 

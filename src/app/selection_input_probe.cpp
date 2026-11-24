@@ -908,29 +908,64 @@ int RunSelectionInputProbe(AppState& s, const wchar_t* output) {
     check(tab->selected_index >= 0 && tab->EntryAt(tab->selected_index).name == L"apricot.txt",
           "WM_CHAR cycles to next matching fixture");
     ToggleQuickPreview(s);
-    const auto original = s.quickPreview.item().path;
-    check(s.quickPreview.visible() && original.find(L"apricot.txt") != std::wstring::npos,
+    const auto original = s.quickPreview->item().path;
+    check(s.quickPreview->visible() && original.find(L"apricot.txt") != std::wstring::npos,
           "preview opens selected fixture");
     SetFocus(s.hwnd);
     s.listTypeAhead = {};
     SendMessageW(s.hwnd, WM_CHAR, L'b', 0);
     const auto now = GetTickCount64();
     TickQuickPreviewSelection(s, now);
-    check(s.quickPreview.item().path == original, "selection update is debounced");
+    check(s.quickPreview->item().path == original, "selection update is debounced");
     TickQuickPreviewSelection(s, now + 121);
-    check(s.quickPreview.item().path.find(L"banana.txt") != std::wstring::npos,
+    check(s.quickPreview->item().path.find(L"banana.txt") != std::wstring::npos,
           "open preview follows the newly selected file");
-    ui::QuickPreviewItem internal = s.quickPreview.item();
+    ui::QuickPreviewItem internal = s.quickPreview->item();
     internal.path = original;
     internal.name = L"apricot.txt";
-    s.quickPreview.Update(internal);
+    s.quickPreview->Update(internal);
     TickQuickPreviewSelection(s, now + 300);
-    check(s.quickPreview.item().path == original, "unchanged list selection preserves preview navigation");
+    check(s.quickPreview->item().path == original, "unchanged list selection preserves preview navigation");
     tab->ClearSelection();
     TickQuickPreviewSelection(s, now + 400);
     TickQuickPreviewSelection(s, now + 521);
-    check(s.quickPreview.visible(), "empty selection keeps the preview accessible");
-    s.quickPreview.Close();
+    check(s.quickPreview->visible(), "empty selection keeps the preview accessible");
+    // Pinning detaches the current preview as an independent topmost window so
+    // the main window can open another preview simultaneously.
+    HWND first_hwnd = s.quickPreview->hwnd();
+    s.quickPreview->SetAlwaysOnTop(true);
+    check(s.core.pinned_previews.size() == 1 && !s.quickPreview->visible() &&
+          s.core.pinned_previews[0]->hwnd() == first_hwnd &&
+          s.core.pinned_previews[0]->always_on_top() &&
+          s.core.pinned_previews[0]->pinned() &&
+          (GetWindowLongPtrW(first_hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0 &&
+          GetWindow(first_hwnd, GW_OWNER) == nullptr,
+          "pinning moves preview into independent topmost pool and frees follow slot");
+    SetFocus(s.hwnd);
+    s.listTypeAhead = {};
+    SendMessageW(s.hwnd, WM_CHAR, L'b', 0);
+    TickQuickPreviewSelection(s, now + 600);
+    TickQuickPreviewSelection(s, now + 730);
+    check(s.core.pinned_previews[0]->item().path == original,
+          "list selection changes never hijack a pinned preview window");
+    ToggleQuickPreview(s);
+    RECT pinned_rect{}, second_rect{};
+    if (s.core.pinned_previews[0]->hwnd()) GetWindowRect(s.core.pinned_previews[0]->hwnd(), &pinned_rect);
+    if (s.quickPreview->hwnd()) GetWindowRect(s.quickPreview->hwnd(), &second_rect);
+    check(s.quickPreview->visible() && s.quickPreview->hwnd() != first_hwnd &&
+          s.quickPreview->item().path.find(L"banana.txt") != std::wstring::npos &&
+          s.core.pinned_previews[0]->visible() &&
+          (second_rect.left != pinned_rect.left || second_rect.top != pinned_rect.top),
+          "Space opens a second preview alongside the pinned one without exact overlap");
+    s.core.pinned_previews[0]->Close();
+    MSG msg{};
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    check(s.core.pinned_previews.empty(),
+          "closing a detached pinned preview reaps it asynchronously without UAF");
+    s.quickPreview->Close();
     std::fclose(log);
     return failures ? 1 : 0;
 }

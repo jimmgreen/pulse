@@ -1,4 +1,5 @@
 #include "shell_command.h"
+#include "shell_command_template.h"
 #include "../common/path_utils.h"
 #include <vector>
 
@@ -73,6 +74,107 @@ ShellCommandResult LaunchShellCommand(const std::wstring& command, const std::ws
     if (execute.hProcess) CloseHandle(execute.hProcess);
     return {ERROR_SUCCESS, error, true};
 }
+
+DWORD LaunchShellNew(const std::wstring& directory, const std::wstring& stem,
+    const std::wstring& extension, const std::wstring& command, const ShellCommandApi& api) {
+    if (directory.empty() || stem.empty() || extension.empty()) return ERROR_INVALID_PARAMETER;
+    const bool shortcut = path::EqualInsensitive(extension, L".lnk");
+    const std::wstring working = path::StripExtendedPathPrefix(directory);
+    if (working.starts_with(L"\\\\?\\") || working.starts_with(L"\\??\\"))
+        return ERROR_NOT_SUPPORTED;
+    std::wstring image, line;
+    if (shortcut) {
+        wchar_t system[MAX_PATH]{};
+        const UINT count = GetSystemDirectoryW(system, ARRAYSIZE(system));
+        if (!count) return GetLastError();
+        if (count >= ARRAYSIZE(system)) return ERROR_INSUFFICIENT_BUFFER;
+        image = std::wstring(system, count) + L"\\rundll32.exe";
+        line = pulse::QuoteWindowsArgument(image) + L" " +
+            pulse::QuoteWindowsArgument(std::wstring(system, count) + L"\\appwiz.cpl") + L",NewLinkHere ";
+    } else {
+        if (command.empty()) return ERROR_INVALID_PARAMETER;
+        const DWORD capacity = ExpandEnvironmentStringsW(command.c_str(), nullptr, 0);
+        if (!capacity) return GetLastError();
+        if (capacity > 32767) return ERROR_FILENAME_EXCED_RANGE;
+        line.resize(capacity);
+        const DWORD written = ExpandEnvironmentStringsW(command.c_str(), line.data(), capacity);
+        if (!written) return GetLastError();
+        if (written > capacity) return ERROR_INSUFFICIENT_BUFFER;
+        line.resize(written - 1);
+    }
+
+    std::wstring full;
+    BY_HANDLE_FILE_INFORMATION created{};
+    bool identified = false;
+    for (unsigned i = 1;; ++i) {
+        full = directory;
+        if (!full.ends_with(L"\\")) full += L'\\';
+        full += stem;
+        if (i > 1) full += L" (" + std::to_wstring(i) + L")";
+        full += extension;
+        if (!shortcut) {
+            if (GetFileAttributesW(full.c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+            const DWORD error = GetLastError();
+            if (error != ERROR_FILE_NOT_FOUND) return error;
+            break;
+        }
+        // The legacy wizard opens with an extended path but cannot save from
+        // it. Reject oversized paths before creating a zero-byte placeholder.
+        if (path::StripExtendedPathPrefix(full).size() >= MAX_PATH) return ERROR_FILENAME_EXCED_RANGE;
+        const HANDLE file = CreateFileW(full.c_str(), GENERIC_WRITE, 0, nullptr,
+                                        CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            identified = GetFileInformationByHandle(file, &created) != FALSE;
+            CloseHandle(file);
+            break;
+        }
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
+            if (error == ERROR_ACCESS_DENIED && GetFileAttributesW(full.c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+            return error;
+        }
+    }
+
+    if (shortcut) {
+        // Rundll passes the remainder verbatim: NewLinkHere expects an
+        // unquoted, literal path, including spaces and percent signs.
+        line += path::StripExtendedPathPrefix(full);
+    } else {
+        bool replaced = false;
+        line = ExpandShellCommand(line, full, &replaced);
+        if (!replaced) line += L" " + pulse::QuoteWindowsArgument(path::StripExtendedPathPrefix(full));
+    }
+    STARTUPINFOW startup{sizeof(startup)};
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_SHOWNORMAL;
+    PROCESS_INFORMATION process{};
+    if (api.create_process(image.empty() ? nullptr : image.c_str(), line.data(), nullptr, nullptr, FALSE, 0,
+                           nullptr, working.c_str(), &startup, &process)) {
+        if (process.hThread) CloseHandle(process.hThread);
+        if (process.hProcess) CloseHandle(process.hProcess);
+        return ERROR_SUCCESS;
+    }
+
+    const DWORD error = GetLastError();
+    if (identified) {
+        // Launch failed. Remove only the still-empty file we created, not a
+        // shortcut another process might have written or put in its place.
+        const HANDLE file = CreateFileW(full.c_str(), DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+            nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            BY_HANDLE_FILE_INFORMATION info{};
+            if (GetFileInformationByHandle(file, &info) && !info.nFileSizeLow && !info.nFileSizeHigh &&
+                info.dwVolumeSerialNumber == created.dwVolumeSerialNumber &&
+                info.nFileIndexHigh == created.nFileIndexHigh && info.nFileIndexLow == created.nFileIndexLow) {
+                FILE_DISPOSITION_INFO disposition{TRUE};
+                SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition));
+            }
+            CloseHandle(file);
+        }
+    }
+    return error;
+}
+
 ShellItemResult LaunchShellItem(const std::wstring& file, const std::wstring& verb,
     const std::wstring& arguments, const std::wstring& directory, HWND owner,
     const ShellCommandApi& api) {

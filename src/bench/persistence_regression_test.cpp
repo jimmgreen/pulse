@@ -1,15 +1,18 @@
 #include "../app/app_prefs.h"
+#include "../app/ui_layout.h"
 #include "../app/places.h"
 #include "../app/session.h"
 #include "../app/app_model.h"
 #include "../app/io_task_queue.h"
 #include "../app/tag_ads_sync.h"
 #include "../common/utf8_file.h"
+#include "../common/async_file_writer.h"
 #include <filesystem>
 #include <cstdio>
 #include <string_view>
 #include <deque>
-namespace pulse::app { static std::wstring fixture; std::wstring GetPulseDataDir() { return fixture; } }
+#include <atomic>
+namespace pulse::app { static std::wstring fixture; static std::atomic<unsigned> directory_queries{}; std::wstring GetPulseDataDir() { ++directory_queries; return fixture; } }
 static int failures;
 static void Check(bool ok, const char* label) { printf("[%s] %s\n", ok ? "PASS" : "FAIL", label); failures += !ok; }
 static int TagAdsOnly() {
@@ -21,7 +24,19 @@ static int TagAdsOnly() {
     const auto file = fixture + L"\\private.txt";
     Check(pulse::WriteUtf8FileAtomic(file, L"private"), "create exclusive private fixture");
     Check(WriteTagAdsV2(file, {}), "deleting absent ADS is idempotent");
+    const std::wstring stream = file + L":Pulse.Tag";
+    HANDLE legacy = CreateFileW(stream.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, 0, nullptr);
+    constexpr wchar_t names[] = L"alpha,beta";
+    DWORD bytes = 0;
+    if (legacy != INVALID_HANDLE_VALUE) {
+        WriteFile(legacy, names, sizeof(names) - sizeof(wchar_t), &bytes, nullptr);
+        CloseHandle(legacy);
+    }
+    std::vector<std::wstring> old_names;
+    Check(ReadTagAdsV2(file, &old_names).empty() && old_names == std::vector<std::wstring>{L"alpha", L"beta"},
+          "single discovery reads legacy names from actual stream");
     Check(WriteTagAdsV2(file, {{L"t", L"label", 0x123456}}), "create private ADS");
+    Check(ReadTagAdsV2(file, &old_names).size() == 1 && old_names.empty(), "v2 discovery clears legacy fallback");
     HANDLE held = CreateFileW((file + L":Pulse.Tag").c_str(), GENERIC_READ, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING, 0, nullptr);
     Check(held != INVALID_HANDLE_VALUE, "hold private ADS against deletion");
@@ -195,6 +210,19 @@ static int TagAdsOnly() {
     ApplyTagAdsNotice(notice, {{fixture, TagAdsFailureStage::JournalRead, ERROR_INVALID_DATA}},
         title, message, true, L"D:\\Music");
     Check(!message.empty(), "global journal failure remains visible in current folder");
+    notice = {}; title.clear(); message.clear();
+    ApplyTagAdsNotice(notice, {old_path}, title, message, true, std::wstring{});
+    Check(title.empty() && message.empty(), "This PC (empty path) does not display offline drive stream retry");
+    ApplyTagAdsNotice(notice, {old_path}, title, message, true, L"pulse:recent");
+    Check(title.empty() && message.empty(), "virtual views do not display per-file stream retry");
+    ApplyTagAdsNotice(notice, {{L"D:\\Music\\batch-064.txt", TagAdsFailureStage::Pending, ERROR_IO_PENDING}},
+        title, message, true, L"D:\\Music");
+    Check(title.empty() && message.empty(), "in-progress pending batch does not pop up a new banner");
+    ApplyTagAdsNotice(notice, {local}, title, message, false, L"D:\\Music");
+    Check(title.empty() && message.empty(), "silent background retry does not pop up a new banner");
+    ApplyTagAdsNotice(notice, {{fixture, TagAdsFailureStage::JournalRead, ERROR_INVALID_DATA}},
+        title, message, true, std::wstring{});
+    Check(!message.empty(), "global journal failure remains visible on This PC when explicitly prompted");
     uint64_t revision = 0;
     Check(AcceptTagAdsResult(revision, 2) && !AcceptTagAdsResult(revision, 1) &&
         !AcceptTagAdsResult(revision, 2) && AcceptTagAdsResult(revision, 3),
@@ -204,7 +232,52 @@ static int TagAdsOnly() {
     Check(!error, "remove only exclusive private fixture");
     return failures ? 1 : 0;
 }
+static int OperationHintSave() {
+    using namespace pulse;
+    using namespace pulse::app;
+    const auto dir = std::filesystem::absolute(L"bench_data/operation-hint-" +
+        std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    std::filesystem::create_directories(dir.parent_path());
+    if (!std::filesystem::create_directory(dir)) return 2;
+    fixture = dir.wstring();
+    AppPrefs prefs;
+    prefs.persist = false; // fixture load must not change shell integration
+    prefs.Load();
+    prefs.persist = true;
+    const auto before = directory_queries.load();
+    prefs.status_hints_learned = true;
+    Check(prefs.SaveAsync() && before == directory_queries, "first operation queues hint without re-probing profile directory");
+    GlobalAsyncFileWriter().Flush();
+    std::wstring json;
+    AppPrefs readback;
+    Check(ReadUtf8File((dir / L"app.json").wstring(), json) && readback.FromJson(json) &&
+        readback.status_hints_learned, "async writer persists the hint in the previously loaded profile");
+    std::filesystem::remove_all(dir);
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "--operation-hint") return OperationHintSave();
+    if (argc == 2 && std::string_view(argv[1]) == "--preview-preferences") {
+        pulse::app::AppPrefs prefs, reloaded;
+        const auto check_json = [&](const wchar_t* input, bool system, int volume, bool muted, const char* label) {
+            const bool parsed = prefs.FromJson(input) && reloaded.FromJson(prefs.ToJson());
+            const auto roundtrip = reloaded.ToJson();
+            Check(parsed &&
+                roundtrip.find(system ? L"\"preview_prefer_system\":true" : L"\"preview_prefer_system\":false") != std::wstring::npos &&
+                roundtrip.find(L"\"preview_volume_percent\":" + std::to_wstring(volume) + L",") != std::wstring::npos &&
+                roundtrip.find(muted ? L"\"preview_muted\":true" : L"\"preview_muted\":false") != std::wstring::npos,
+                label);
+        };
+        check_json(L"{}", false, 100, false, "old profile defaults to native preview and full volume");
+        check_json(LR"({"preview_prefer_system":true,"preview_volume_percent":37,"preview_muted":true})",
+            true, 37, true, "system preview choice, adjusted volume, and mute survive reload");
+        check_json(LR"({"preview_prefer_system":false,"preview_volume_percent":0,"preview_muted":false})",
+            false, 0, false, "switching back and zero volume survive reload");
+        check_json(LR"({"preview_volume_percent":200})", false, 100, false, "high volume is clamped");
+        check_json(LR"({"preview_volume_percent":-4})", false, 0, false, "negative volume is clamped");
+        return failures ? 1 : 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--folder-bottom") {
         pulse::app::AppPrefs prefs, reloaded;
         Check(prefs.FromJson(LR"({"folder_sort_mode":1,"sort_folders_follow":["C:\\Legacy"],"sort_folders_top":["C:\\Top"],"sort_folders_mixed":["C:\\Mixed"]})") &&
@@ -358,6 +431,15 @@ int main(int argc, char** argv) {
         chip.toolbar_selection={L"tags",L"bogus",L"compare",L"tags"};
         AppPrefs chip_again; chip_again.persist=false;
         Check(chip_again.FromJson(chip.ToJson()) && chip_again.toolbar_selection==Tools{L"tags",L"compare"}, "TOOLBAR-06 chip action list round trips; unknown and repeated ids dropped");
+        AppPrefs suggested; suggested.persist=false;
+        suggested.toolbar_suggested={L"native:demo.pkg:run",L"bogus",L"native:demo.pkg:other"};
+        AppPrefs suggested_again; suggested_again.persist=false;
+        Check(suggested_again.FromJson(suggested.ToJson()) &&
+              suggested_again.toolbar_suggested==Tools{L"native:demo.pkg:run",L"native:demo.pkg:other"},
+              "TOOLBAR-16 commands already pinned for PULSE_COMMAND_TOOLBAR round trip; non-plugin ids dropped");
+        AppPrefs suggested_none; suggested_none.persist=false;
+        Check(suggested_none.FromJson(LR"({"toolbar_tools":[]})") && suggested_none.toolbar_suggested.empty(),
+              "TOOLBAR-17 prefs without toolbar_suggested start empty");
         AppPrefs chip_none; chip_none.persist=false;
         Check(chip_none.FromJson(LR"({"toolbar_selection":[]})") && chip_none.toolbar_selection.empty(), "TOOLBAR-07 an emptied chip list stays empty");
         AppPrefs v1; v1.persist=false;
@@ -450,6 +532,80 @@ int main(int argc, char** argv) {
               "FOLDERS-06 an older settings file: every folder follows the settings default");
     }
     {
+        {   // Interface layout: installer defaults on first run, legacy profiles stay pro.
+            AppPrefs fresh, legacy, picked, kept;
+            Check(fresh.ui_mode == L"pro" && pulse::app::UiLayoutDiff(fresh).empty(),
+                  "UIMODE-01 a profile without installer choice is pro, matching its defaults");
+            Check(legacy.FromJson(LR"({"theme_mode":2})") && legacy.ui_mode == L"pro",
+                  "UIMODE-02 a profile saved before ui_mode reads as pro (unchanged interface)");
+            AppPrefs again;
+            picked.ui_mode = L"zen";
+            Check(again.FromJson(picked.ToJson()) && again.ui_mode == L"zen", "UIMODE-03 ui_mode round trips");
+            Check(again.FromJson(LR"({"ui_mode":"compact"})") && again.ui_mode == L"pro", "UIMODE-04 unknown ui_mode falls back to pro");
+            const std::wstring ini = (dir / L"setup-defaults.ini").wstring();
+            Check(pulse::WriteUtf8FileAtomic(ini, L"[features]\r\nglobal_search=0\r\n[ui]\r\nmode=zen\r\ntheme=dark\r\naccent=8e44ad\r\n"),
+                  "UIMODE-05 write setup-defaults fixture");
+            AppPrefs first_run;
+            first_run.global_search_enabled = true;
+            const bool named = first_run.ApplySetupDefaults(ini);
+            Check(first_run.ui_mode == L"zen" && first_run.theme_mode == 2 && first_run.accent_rgb == L"8E44AD" &&
+                  !first_run.accent_follow_system && !first_run.global_search_enabled && named,
+                  "UIMODE-06 installer [ui] mode/theme/accent and [features] apply on first run");
+            Check(pulse::WriteUtf8FileAtomic(ini, L"[ui]\r\nmode=bogus\r\ntheme=system\r\naccent=xyz\r\n"), "UIMODE-07 write odd fixture");
+            Check(!kept.ApplySetupDefaults(ini) && kept.ui_mode == L"pro" && kept.theme_mode == -1 && kept.accent_rgb.empty(),
+                  "UIMODE-08 system theme, bad mode and bad accent keep the defaults");
+            AppPrefs none;
+            Check(!none.ApplySetupDefaults((dir / L"missing.ini").wstring()) && none.ui_mode == L"pro" && none.theme_mode == -1 && none.accent_rgb.empty(),
+                  "UIMODE-09 a missing ini changes nothing");
+            std::filesystem::remove(ini);
+        }
+        {   // Layout presets (ui_layout.h): 工作台 is today's defaults; presets write every option.
+            using pulse::app::UiLayoutKey;
+            AppPrefs legacy;
+            Check(legacy.FromJson(L"{}") && legacy.ui_mode == L"pro" && pulse::app::UiLayoutDiff(legacy).empty(),
+                  "UILAYOUT-01 an old profile is exactly the pro preset (nothing reads as changed)");
+            AppPrefs zen;
+            zen.details_columns = ui::kDetailsColumnsDefault | ui::kDetailsColumnCreated;
+            zen.folder_views.Set(L"C:\\Photos", ui::ViewMode::LargeIcons);
+            pulse::app::ApplyUiPreset(zen, L"zen");
+            Check(zen.ui_mode == L"zen" && zen.ui_sidebar_mode == 1 && zen.ui_sidebar_lite && !zen.ui_show_tabs &&
+                  zen.ui_address_in_title && zen.ui_command_mode == 2 && !zen.ui_status_bar && zen.tray_hide_when_empty &&
+                  zen.ui_selection_float && zen.row_height == 40 && !zen.list_zebra_rows && !zen.list_thumbnail_badges &&
+                  zen.ui_rounded && zen.details_columns == pulse::app::kDetailsColumnsMinimal,
+                  "UILAYOUT-02 zen preset writes the window structure, density, zebra, ref1 columns/badges/radius");
+            Check(zen.folder_views.Default() == ui::ViewMode::MediumIcons && !zen.folder_views.Find(L"C:\\Photos"),
+                  "UILAYOUT-03 a preset's view applies to all folders, remembered ones included");
+            Check(pulse::app::UiLayoutDiff(zen).empty(), "UILAYOUT-04 right after a preset nothing differs");
+            zen.ui_status_bar = true;
+            zen.row_height = 28;
+            const auto diff = pulse::app::UiLayoutDiff(zen);
+            Check(diff == std::vector<UiLayoutKey>{UiLayoutKey::StatusBar, UiLayoutKey::Density},
+                  "UILAYOUT-05 changed options are listed in order");
+            AppPrefs zen_again;
+            Check(zen_again.FromJson(zen.ToJson()) && pulse::app::UiLayoutDiff(zen_again) == diff &&
+                  zen_again.ui_title_buttons == zen.ui_title_buttons,
+                  "UILAYOUT-06 all layout options round trip through app.json");
+            pulse::app::ApplyUiPreset(zen, L"standard");
+            Check(zen.ui_sidebar_mode == 0 && zen.ui_sidebar_lite && zen.ui_show_tabs && zen.ui_command_mode == 1 &&
+                  zen.row_height == 34 && zen.details_columns == ui::kDetailsColumnsDefault &&
+                  zen.folder_views.Default() == ui::ViewMode::Details && pulse::app::UiLayoutDiff(zen).empty(),
+                  "UILAYOUT-07 leaving zen restores the default columns and details view");
+            AppPrefs custom_cols;
+            custom_cols.details_columns = ui::kDetailsColumnsDefault | ui::kDetailsColumnCreated;
+            pulse::app::ApplyUiPreset(custom_cols, L"pro");
+            Check(custom_cols.details_columns == (ui::kDetailsColumnsDefault | ui::kDetailsColumnCreated),
+                  "UILAYOUT-08 presets without minimal columns keep a custom column choice");
+            AppPrefs bad;
+            Check(bad.FromJson(LR"({"ui_mode":"zen","ui_sidebar":7,"ui_commands":-1,"ui_title_buttons":"settings,bogus,settings,|,|,-theme"})") &&
+                  bad.ui_sidebar_mode == 2 && bad.ui_command_mode == 0 &&
+                  bad.ui_title_buttons == L"settings,|,-theme,-win,-layout,-ai",
+                  "UILAYOUT-09 out-of-range options clamp; title buttons drop unknown/repeated ids and list every id once");
+            const auto shown = pulse::app::VisibleTitleButtons(L"|,-win,settings,|,|,-theme,layout,|");
+            Check(shown.size() == 3 && shown[0].id == L"settings" && shown[1].Divider() && shown[2].id == L"layout",
+                  "UILAYOUT-10 visible title buttons skip hidden ones and stray dividers");
+            Check(pulse::app::FormatTitleButtons(pulse::app::ParseTitleButtons(L"win,layout,settings,|,theme,-ai")) ==
+                  L"win,layout,settings,|,theme,-ai", "UILAYOUT-11 the pro title buttons are already normal");
+        }
         // #58-7b: picture folders without a saved view open in Large icons.
         using pulse::app::IsPictureName;
         using pulse::app::MostlyPictures;

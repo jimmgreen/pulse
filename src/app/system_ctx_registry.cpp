@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <map>
 #include <set>
 #include <utility>
 
@@ -17,6 +18,9 @@ namespace {
 
 constexpr DWORD kVelocityHideId = 0x639bc8;  // the value ContextMenuManager writes
 constexpr wchar_t kBatchHeader[] = L"PULSE-SYSCTX 1";
+constexpr wchar_t kShellLinkClsid[] = L"{00021401-0000-0000-C000-000000000046}";
+constexpr wchar_t kDisabledShellLinkKey[] =
+    L"lnkfile\\shellex\\-ContextMenuHandlers\\{00021401-0000-0000-C000-000000000046}";
 int g_velocity_override = -1;
 
 struct Key {
@@ -191,6 +195,7 @@ bool IsProtectedVerb(std::wstring_view verb) {
 
 bool IsProtectedClsid(std::wstring_view clsid) {
     static const wchar_t* const kClsids[] = {
+        kShellLinkClsid,                            // Provides the open verb for .lnk files
         L"{09799AFB-AD67-11d1-ABCD-00C04FC30936}",  // Open With
         L"{D969A300-E7FF-11d0-A93B-00A0C90F2719}",  // New
         L"{37ea3a21-7493-4208-a011-7f9ea79ce9f5}",  // Open containing folder
@@ -652,10 +657,29 @@ void PruneEmptyParents(HKEY base, std::wstring path, const std::wstring& stop) {
 }
 
 // Moves <parent>\\<from>\\<name> to <parent>\\<to>\\<name>, keeping values and subkeys.
-OpResult MoveKey(const Roots& roots, Root root, const std::wstring& src_rel, const std::wstring& dst_rel) {
+OpResult MoveKey(const Roots& roots, Root root, const std::wstring& src_rel, const std::wstring& dst_rel,
+                 bool replace_stale) {
     HKEY base = RootKey(roots, root);
     const std::wstring src = FullPath(roots, root, src_rel);
-    const OpResult moved = MoveTree(base, src, FullPath(roots, root, dst_rel));
+    const std::wstring dst = FullPath(roots, root, dst_rel);
+    {
+        Key src_key;
+        const LSTATUS st = Open(base, src, KEY_READ, src_key);
+        if (st != ERROR_SUCCESS) return FromStatus(st);
+    }
+    // An app update may re-register ContextMenuHandlers\X while a prior disabled
+    // -ContextMenuHandlers\X copy remains (#620); clear the stale copy first.
+    if (replace_stale) {
+        Key stale;
+        if (Open(base, dst, KEY_READ, stale) == ERROR_SUCCESS) {
+            RegCloseKey(stale.h);
+            stale.h = nullptr;
+            const LSTATUS del = RegDeleteTreeW(base, dst.c_str());
+            if (del != ERROR_SUCCESS && del != ERROR_FILE_NOT_FOUND && del != ERROR_PATH_NOT_FOUND)
+                return FromStatus(del);
+        }
+    }
+    const OpResult moved = MoveTree(base, src, dst);
     if (moved != OpResult::Ok) return moved;
     // An emptied (-)ContextMenuHandlers group goes too, so a round trip leaves
     // no trace.
@@ -862,9 +886,11 @@ std::vector<Item> Enumerate(const Roots& roots, const Scene& scene) {
             }
         break;
     }
-    // HKCR shows one entry per key; the user layer wins over the machine one.
+    // HKCR shows one entry per key; the user layer wins over the machine one,
+    // except that a dash-renamed User marker (-ContextMenuHandlers, etc.) never
+    // masks a still-live Machine key in Explorer (#620).
     std::vector<Item> out;
-    std::set<std::wstring> seen;
+    std::map<std::wstring, size_t> seen;
     for (auto& it : raw) {
         std::wstring id = Lower(it.key_path);
         if (it.kind == Kind::ShellEx || it.kind == Kind::DragDrop) {
@@ -875,7 +901,12 @@ std::vector<Item> Enumerate(const Roots& roots, const Scene& scene) {
             id = Lower(it.key_path.substr(0, it.key_path.size() - 10)) + L"\\shellnew";
         }
         id = std::wstring(KindToken(it.kind)) + L"|" + id;
-        if (!seen.insert(id).second) continue;
+        const auto [pos, inserted] = seen.emplace(std::move(id), out.size());
+        if (!inserted) {
+            if (!out[pos->second].enabled && out[pos->second].dash_marker && it.enabled)
+                out[pos->second] = std::move(it);
+            continue;
+        }
         out.push_back(std::move(it));
     }
     return out;
@@ -1035,10 +1066,37 @@ Op Inverse(const Op& op) {
 
 bool CanWriteWithoutElevation(const Op& op) { return op.root != Root::Machine; }
 
+bool CanRestoreShellLink(const Item& item) {
+    return item.kind == Kind::ShellEx && item.source == Source::Registry && !item.enabled && item.dash_marker &&
+           IEquals(item.key_path, kDisabledShellLinkKey);
+}
+
+bool IsShellLinkRestore(const Op& op) {
+    return op.kind == Kind::ShellEx && op.action == Action::Enable && IEquals(op.key_path, kDisabledShellLinkKey);
+}
+
 OpResult Apply(const Roots& roots, const Op& op) {
     if (op.root == Root::File) return OpResult::Unsupported;
     if (!IsAllowedKeyPath(op.kind, op.key_path)) return OpResult::Unsupported;
     if (op.action == Action::Position && op.kind != Kind::Verb) return OpResult::Unsupported;
+    if (op.kind == Kind::ShellEx && (op.action == Action::Disable || op.action == Action::Delete)) {
+        const std::wstring_view path = op.key_path;
+        const size_t last = path.rfind(L'\\');
+        const auto parent = path.substr(0, last);
+        if (IEquals(parent, L"lnkfile\\shellex\\ContextMenuHandlers") ||
+            IEquals(parent, L"lnkfile\\shellex\\-ContextMenuHandlers")) {
+            const auto name = path.substr(last + 1);
+            if (IEquals(name, kShellLinkClsid)) return OpResult::Unsupported;
+            if (!LooksLikeGuid(name)) {
+                Key handler;
+                const LSTATUS st = Open(RootKey(roots, op.root), FullPath(roots, op.root, op.key_path), KEY_READ, handler);
+                if (st != ERROR_SUCCESS) return FromStatus(st);
+                std::wstring clsid;
+                if (ReadString(handler.h, nullptr, clsid) && IEquals(clsid, kShellLinkClsid))
+                    return OpResult::Unsupported;
+            }
+        }
+    }
     if (op.action == Action::Delete || op.action == Action::Restore) {
         if (op.kind != Kind::Verb && op.kind != Kind::ShellEx && op.kind != Kind::DragDrop) return OpResult::Unsupported;
         return ApplyTrash(roots, op);
@@ -1049,7 +1107,7 @@ OpResult Apply(const Roots& roots, const Op& op) {
     case Kind::DragDrop: {
         const std::wstring target = KeyPathAfter(op);
         if (IEquals(target, op.key_path)) return OpResult::Ok;  // already in the requested state
-        return MoveKey(roots, op.root, op.key_path, target);
+        return MoveKey(roots, op.root, op.key_path, target, !IsShellLinkRestore(op));
     }
     default: return OpResult::Unsupported;  // ShellNew / SendTo / OpenWith: S3
     }

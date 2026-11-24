@@ -5,14 +5,18 @@
 #include "app_commands.h"
 #include "extension_store_ui.h"
 #include "extensions/native/command_contributions.h"
+#include "extensions/native/associations_adapter_host.h"
+#include "extensions/ext_open_intent.h"
 #include "../ops/archive_open_fallback.h"
 #include "../../extensions/7zip/takeover_record.h"
 #include "../common/localization.h"
 #include "../common/path_utils.h"
+#include "../common/reveal_item_entry.h"
 #include "app_messages.h"
 #include "closed_windows.h"
 #include "default_file_manager.h"
 #include "external_open.h"
+#include "search_tab_handoff.h"
 #include "tray_reveal.h"
 #include "window_factory.h"
 #include "window_merge.h"
@@ -98,10 +102,9 @@ std::map<HWND, PendingPreview>& PendingPreviews() {
     return pending;
 }
 bool SamePath(std::wstring_view a, std::wstring_view b) {
-    constexpr std::wstring_view extended = L"\\\\?\\";
-    if (a.starts_with(extended)) a.remove_prefix(extended.size());
-    if (b.starts_with(extended)) b.remove_prefix(extended.size());
-    return CompareStringOrdinal(a.data(), static_cast<int>(a.size()), b.data(), static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
+    const auto lhs = path::StripExtendedPathPrefix(a);
+    const auto rhs = path::StripExtendedPathPrefix(b);
+    return CompareStringOrdinal(lhs.c_str(), -1, rhs.c_str(), -1, TRUE) == CSTR_EQUAL;
 }
 void CALLBACK PreviewTick(HWND hwnd, UINT, UINT_PTR id, DWORD) {
     auto& pending = PendingPreviews();
@@ -114,18 +117,35 @@ void CALLBACK PreviewTick(HWND hwnd, UINT, UINT_PTR id, DWORD) {
     if (at != pending.end()) pending.erase(at);
     if (ready) OpenQuickPreview(*s, item, true);
 }
-void PreviewWhenSelected(AppState& target, const std::wstring& path) {
+}  // namespace
+
+void PreviewArchiveWhenSelected(AppState& target, const std::wstring& path) {
+    ui::QuickPreviewItem item;
+    if (SelectedQuickPreviewItem(target, item) && SamePath(item.path, path)) {
+        KillTimer(target.hwnd, kArchivePreviewTimer);
+        PendingPreviews().erase(target.hwnd);
+        OpenQuickPreview(target, item, true);
+        return;
+    }
     PendingPreviews()[target.hwnd] = {path, 0};
     SetTimer(target.hwnd, kArchivePreviewTimer, 200, PreviewTick);
 }
-
-}  // namespace
 
 bool ExternalOpenWindowBusy(const AppState& state) { return IsBusy(state); }
 
 bool IsArchiveLaunch(const std::wstring& raw) { return ParseArchiveLaunch(raw).has_value(); }
 
-ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw, bool reveal) {
+bool IsExtensionOpenLaunch(const std::wstring& raw) { return extensions::IsExtOpenIntent(raw); }
+
+ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& intent, bool reveal) {
+    std::wstring item;
+    if (intent.starts_with(reveal_item_entry::kIntent)) {
+        const auto target = std::wstring_view(intent).substr(reveal_item_entry::kIntent.size());
+        if (!reveal_item_entry::ValidTarget(target)) return {ExternalOpenStatus::Failed, nullptr};
+        item.assign(target);
+        reveal = true;
+    }
+    const auto& raw = item.empty() ? intent : item;
     // The archive is shown selected in its folder (as any file Pulse is asked to open), then extracted
     // there or previewed. Nothing runs until a window has taken it, so a deferred request is retried whole.
     if (const auto archive = ParseArchiveLaunch(raw)) {
@@ -141,7 +161,20 @@ ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw, bo
                 target.ops.OpenWith(archive->path, false);
             }
         } else {
-            PreviewWhenSelected(target, archive->path);
+            PreviewArchiveWhenSelected(target, archive->path);
+        }
+        return result;
+    }
+    if (const auto ext_open = extensions::ParseExtOpenIntent(raw)) {
+        const DWORD attributes = GetFileAttributesW(ext_open->path.c_str());
+        const bool file = attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+        const auto result = OpenExternalFolder(mru, ext_open->path, false);
+        if (!file || result.status != ExternalOpenStatus::Dispatched || !result.target) return result;
+        AppState& target = *result.target;
+        if (!extensions::native::HandleExtensionFileOpen(
+                target, ext_open->package_id, ext_open->handler_id, ext_open->path, ext_open->preview)) {
+            extensions::native::RemovePackageAssociationsOnHost(ext_open->package_id);
+            target.ops.OpenWith(ext_open->path, false);
         }
         return result;
     }
@@ -193,8 +226,9 @@ ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw, bo
     const std::wstring path = icon || win_e || raw == L"pulse:new-window" || explicit_tab
         ? (mru.appPrefs.new_window_shows == 0 ? mru.appPrefs.home_folder :
            mru.appPrefs.new_window_shows == 1 ? std::wstring() :
-           current ? current->current_path : std::wstring())
+           current ? app::AddressSearchHandoffPath(*current) : std::wstring())
         : this_pc ? std::wstring() : ResolveOpenFolderPath(raw, reveal);
+    if (!item.empty() && path.empty()) return {ExternalOpenStatus::Failed, nullptr};
     // Screenshot runs stay one window (plan §8.7); nothing to open stays as before.
     if (mru.shot.active || (!this_pc && path.empty())) {
         OpenFolderInNewTab(mru, raw, reveal);

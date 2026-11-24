@@ -1,5 +1,9 @@
 // shell_window_sync.cpp — see shell_window_sync.h.
 #include "shell_window_sync.h"
+#include "../common/shell_open_entry.h"
+#include "../common/display_path.h"
+#include "../common/localization.h"
+#include "direct_reveal_bootstrap.h"
 #include "../common/runtime_log.h"
 #include "explorer_takeover_probe.h"
 
@@ -46,7 +50,11 @@ bool ExplorerTakeoverEnabled(const AppState& s) {
            (s.appPrefs.take_over_explorer_windows || s.appPrefs.integration_folders_compat);
 }
 
+} // namespace
+
 void SyncExplorerTakeover(AppState& s) {
+    s.single_instance.SetRevealEnabled(ShellWindowsEnabled(s) && !s.core.exiting);
+    app::ConfigureDirectRevealBootstrap(ShellWindowsEnabled(s) && !s.core.exiting);
     const bool win_e_enabled = ShellIntegrationAllowed(s, L"PULSE_TEST_WIN_E_HOTKEY") &&
         s.appPrefs.integration_enabled && s.appPrefs.integration_win_e && s.appPrefs.take_over_win_e &&
         s.single_instance.OwnsEndpoint(ServiceWindow(s)) && !s.core.exiting;
@@ -83,6 +91,8 @@ void SyncExplorerTakeover(AppState& s) {
     }
     if (s.explorer_takeover) s.explorer_takeover->SetTakeThisPc(s.isolatedTest || s.appPrefs.integration_this_pc);
 }
+
+namespace {
 
 // Explorer held the foreground; the takeover request arrives while it still
 // does, so share its input state long enough to take the foreground over.
@@ -219,7 +229,27 @@ void HandleShellSelect(AppState& s, const app::ShellSelectRequest& request) {
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
+static std::vector<std::pair<std::wstring, ULONGLONG>> native_permission_folders;
+void OpenNativePermissionFolder(AppState& s, const std::wstring& folder) {
+    const auto now = GetTickCount64();
+    std::erase_if(native_permission_folders, [now](const auto& item) { return item.second <= now; });
+    const auto target = path::FriendlyPathText(folder);
+    const DWORD error = shell_open_entry::OpenNative(target);
+    if (!error) {
+        native_permission_folders.emplace_back(target, now + 30000);
+    } else {
+        diagnostics::runtime::Event("permission_explorer_launch_failed", {{"win32_error", error}});
+        wchar_t system_text[512]{};
+        FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, error, 0,
+                       system_text, ARRAYSIZE(system_text), nullptr);
+        const auto message = target + L"\n" + system_text + L" (" + std::to_wstring(error) + L")";
+        MessageBoxW(s.hwnd, message.c_str(), l10n::Get(l10n::StringId::CannotOpen).c_str(), MB_OK | MB_ICONERROR);
+    }
+}
+
 ExternalOpenResult HandleExplorerTakeover(AppState& mru, const app::ExplorerOpenContext& request) {
+    for (const auto& [folder, until] : native_permission_folders)
+        if (GetTickCount64() < until && path::EqualInsensitive(folder, path::FriendlyPathText(request.folder))) return {};
     const bool isolated_rollback_probe = mru.isolatedTest &&
         GetEnvironmentVariableW(L"PULSE_TEST_EXPLORER_ROLLBACK_ONLY", nullptr, 0) != 0;
     if (!request.handoff || (!ExplorerTakeoverEnabled(mru) && !isolated_rollback_probe) ||

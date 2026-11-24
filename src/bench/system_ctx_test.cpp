@@ -2,6 +2,7 @@
 // trips and batch validation, all against a scratch key under HKCU.
 
 #include "../app/system_ctx_registry.h"
+#include "../app/system_ctx_packaged.h"
 
 #include <windows.h>
 
@@ -21,10 +22,11 @@ void Check(bool ok, const char* name) {
 }
 
 std::wstring g_base;
+HKEY g_registry_root = HKEY_CURRENT_USER;
 
 void SetString(const std::wstring& rel, const wchar_t* name, const std::wstring& value) {
     HKEY k = nullptr;
-    RegCreateKeyExW(HKEY_CURRENT_USER, (g_base + L"\\" + rel).c_str(), 0, nullptr, 0, KEY_ALL_ACCESS, nullptr, &k,
+    RegCreateKeyExW(g_registry_root, (g_base + L"\\" + rel).c_str(), 0, nullptr, 0, KEY_ALL_ACCESS, nullptr, &k,
                     nullptr);
     if (!k) return;
     RegSetValueExW(k, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
@@ -34,7 +36,7 @@ void SetString(const std::wstring& rel, const wchar_t* name, const std::wstring&
 
 void SetDword(const std::wstring& rel, const wchar_t* name, DWORD value) {
     HKEY k = nullptr;
-    RegCreateKeyExW(HKEY_CURRENT_USER, (g_base + L"\\" + rel).c_str(), 0, nullptr, 0, KEY_ALL_ACCESS, nullptr, &k,
+    RegCreateKeyExW(g_registry_root, (g_base + L"\\" + rel).c_str(), 0, nullptr, 0, KEY_ALL_ACCESS, nullptr, &k,
                     nullptr);
     if (!k) return;
     RegSetValueExW(k, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value));
@@ -43,7 +45,7 @@ void SetDword(const std::wstring& rel, const wchar_t* name, DWORD value) {
 
 bool HasValue(const std::wstring& rel, const wchar_t* name) {
     HKEY k = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, (g_base + L"\\" + rel).c_str(), 0, KEY_READ, &k) != ERROR_SUCCESS)
+    if (RegOpenKeyExW(g_registry_root, (g_base + L"\\" + rel).c_str(), 0, KEY_READ, &k) != ERROR_SUCCESS)
         return false;
     const bool has = RegQueryValueExW(k, name, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
     RegCloseKey(k);
@@ -53,7 +55,7 @@ bool HasValue(const std::wstring& rel, const wchar_t* name) {
 DWORD GetDword(const std::wstring& rel, const wchar_t* name) {
     HKEY k = nullptr;
     DWORD v = 0, size = sizeof(v);
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, (g_base + L"\\" + rel).c_str(), 0, KEY_READ, &k) != ERROR_SUCCESS) return 0;
+    if (RegOpenKeyExW(g_registry_root, (g_base + L"\\" + rel).c_str(), 0, KEY_READ, &k) != ERROR_SUCCESS) return 0;
     RegQueryValueExW(k, name, nullptr, nullptr, reinterpret_cast<BYTE*>(&v), &size);
     RegCloseKey(k);
     return v;
@@ -61,7 +63,7 @@ DWORD GetDword(const std::wstring& rel, const wchar_t* name) {
 
 std::wstring GetString(const std::wstring& rel, const wchar_t* name) {
     HKEY k = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, (g_base + L"\\" + rel).c_str(), 0, KEY_READ, &k) != ERROR_SUCCESS) return {};
+    if (RegOpenKeyExW(g_registry_root, (g_base + L"\\" + rel).c_str(), 0, KEY_READ, &k) != ERROR_SUCCESS) return {};
     wchar_t buf[256] = {};
     DWORD type = 0, size = sizeof(buf) - sizeof(wchar_t);
     const LSTATUS st = RegQueryValueExW(k, name, nullptr, &type, reinterpret_cast<BYTE*>(buf), &size);
@@ -71,7 +73,7 @@ std::wstring GetString(const std::wstring& rel, const wchar_t* name) {
 
 bool KeyExists(const std::wstring& rel) {
     HKEY k = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, (g_base + L"\\" + rel).c_str(), 0, KEY_READ, &k) != ERROR_SUCCESS)
+    if (RegOpenKeyExW(g_registry_root, (g_base + L"\\" + rel).c_str(), 0, KEY_READ, &k) != ERROR_SUCCESS)
         return false;
     RegCloseKey(k);
     return true;
@@ -96,6 +98,68 @@ std::wstring Snapshot(const Roots& roots) {
         out += ExportReg(r, {all});
     }
     return out;
+}
+
+int ShortcutProtection(const Roots& roots) {
+    const Scene scene{L"lnk", {L"lnkfile"}};
+    const std::wstring clsid = L"{00021401-0000-0000-C000-000000000046}";
+    const std::wstring live = L"lnkfile\\shellex\\ContextMenuHandlers\\" + clsid;
+    const std::wstring dashed = L"lnkfile\\shellex\\-ContextMenuHandlers\\" + clsid;
+    const auto machine = [](const std::wstring& rel) { return L"Machine\\" + rel; };
+    const auto op = [](Action action, const std::wstring& key_path) {
+        return Op{action, Kind::ShellEx, Root::Machine, key_path};
+    };
+
+    SetString(machine(live), nullptr, L"");
+    {
+        const auto items = Enumerate(roots, scene);
+        const Item* shortcut = Find(items, clsid);
+        Check(shortcut && shortcut->enabled && shortcut->is_protected && !SystemItemToggleable(*shortcut),
+              "#444 Settings: active Shortcut handler is protected");
+    }
+    const auto disabled = Apply(roots, op(Action::Disable, live));
+    std::printf("[OBSERVED] disable=%d live=%d dashed=%d\n", static_cast<int>(disabled),
+                KeyExists(machine(live)), KeyExists(machine(dashed)));
+    Check(disabled == OpResult::Unsupported && KeyExists(machine(live)) && !KeyExists(machine(dashed)),
+          "#444 writer: disable cannot move the live Shortcut handler");
+    if (!KeyExists(machine(live))) Apply(roots, op(Action::Enable, dashed));
+    Check(Apply(roots, op(Action::Delete, live)) == OpResult::Unsupported && KeyExists(machine(live)),
+          "#444 writer: delete cannot move the live Shortcut handler to trash");
+    if (!KeyExists(machine(live))) Apply(roots, op(Action::Restore, live));
+
+    RegDeleteTreeW(g_registry_root, (g_base + L"\\" + machine(live)).c_str());
+    SetString(machine(dashed) + L"\\Preserved", L"Data", L"legacy shortcut data");
+    {
+        const auto items = Enumerate(roots, scene);
+        const Item* legacy = Find(items, clsid);
+        Check(legacy && !legacy->enabled && legacy->is_protected && SystemItemToggleable(*legacy),
+              "#444 Settings: older disabled Shortcut handler can be turned back on");
+    }
+    Check(Apply(roots, op(Action::Delete, dashed)) == OpResult::Unsupported && KeyExists(machine(dashed)),
+          "#444 writer: legacy repair data cannot be deleted");
+    if (!KeyExists(machine(dashed))) Apply(roots, op(Action::Restore, dashed));
+    const auto enabled = Apply(roots, op(Action::Enable, dashed));
+    std::printf("[OBSERVED] enable=%d live=%d dashed=%d\n", static_cast<int>(enabled),
+                KeyExists(machine(live)), KeyExists(machine(dashed)));
+    Check(enabled == OpResult::Ok && KeyExists(machine(live)) && !KeyExists(machine(dashed)) &&
+              GetString(machine(live) + L"\\Preserved", L"Data") == L"legacy shortcut data",
+          "#444 writer: repair restores the original registration tree");
+    SetString(machine(dashed), L"Data", L"stale copy");
+    Check(Apply(roots, op(Action::Enable, dashed)) == OpResult::Conflict && KeyExists(machine(dashed)) &&
+              GetString(machine(live) + L"\\Preserved", L"Data") == L"legacy shortcut data",
+          "#444 writer: stale repair cannot overwrite an existing live registration");
+
+    const std::wstring alias = L"lnkfile\\shellex\\ContextMenuHandlers\\ShortcutAlias";
+    SetString(machine(alias), nullptr, clsid);
+    Check(Apply(roots, op(Action::Disable, alias)) == OpResult::Unsupported && KeyExists(machine(alias)),
+          "#444 writer: a named registration pointing to ShellLink is also protected");
+    const std::wstring third_party = L"lnkfile\\shellex\\ContextMenuHandlers\\OtherExtension";
+    SetString(machine(third_party), nullptr, L"{11111111-2222-3333-4444-555555555555}");
+    Check(Apply(roots, op(Action::Disable, third_party)) == OpResult::Ok && !KeyExists(machine(third_party)),
+          "#444 control: third-party .lnk extensions remain configurable");
+    const LSTATUS cleanup = RegDeleteTreeW(g_registry_root, g_base.c_str());
+    Check(cleanup == ERROR_SUCCESS && !KeyExists(L"Machine"), "#444 scratch registry cleaned up");
+    return g_failures == 0 ? 0 : 1;
 }
 
 // Read-only: lists what Settings would show for the real registry.
@@ -150,6 +214,20 @@ int wmain(int argc, wchar_t** argv) {
     roots.machine_trash = g_base + L"\\TrashMachine";
     roots.check_owner = false;
     roots.resolve_strings = false;
+    if (argc == 3 && wcscmp(argv[1], L"--shortcut-protection") == 0) {
+        // Use a new app-private hive so neither HKCU nor HKLM is changed.
+        if (GetFileAttributesW(argv[2]) != INVALID_FILE_ATTRIBUTES || GetLastError() != ERROR_FILE_NOT_FOUND) return 2;
+        HKEY hive = nullptr;
+        const LSTATUS loaded = RegLoadAppKeyW(argv[2], &hive, KEY_ALL_ACCESS, REG_PROCESS_APPKEY, 0);
+        if (loaded != ERROR_SUCCESS) {
+            std::printf("[ERROR] RegLoadAppKey=%ld\n", loaded);
+            return 2;
+        }
+        roots.user = roots.machine = g_registry_root = hive;
+        const int result = ShortcutProtection(roots);
+        RegCloseKey(hive);
+        return result;
+    }
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
     roots.sendto_dir = std::wstring(tmp) + L"pulse_sysctx_sendto_" + std::to_wstring(GetCurrentProcessId());
@@ -389,12 +467,21 @@ int wmain(int argc, wchar_t** argv) {
               "restore without a trashed copy reports NotFound; other kinds are refused");
     }
 
-    // Conflict: both ContextMenuHandlers\\X and -ContextMenuHandlers\\X exist.
-    SetString(L"Machine\\*\\shellex\\ContextMenuHandlers\\Clash", nullptr, L"{11111111-2222-3333-4444-555555555555}");
+    // Stale disabled copy (#620): re-registered ContextMenuHandlers\\X replaces older -ContextMenuHandlers\\X.
+    SetString(L"Machine\\*\\shellex\\ContextMenuHandlers\\Clash", nullptr, L"{22222222-2222-3333-4444-555555555555}");
     SetString(L"Machine\\*\\shellex\\-ContextMenuHandlers\\Clash", nullptr, L"{11111111-2222-3333-4444-555555555555}");
     Op clash{Action::Disable, Kind::ShellEx, Root::Machine, L"*\\shellex\\ContextMenuHandlers\\Clash"};
-    Check(Apply(roots, clash) == OpResult::Conflict && KeyExists(L"Machine\\*\\shellex\\ContextMenuHandlers\\Clash"),
-          "shellex move refuses to overwrite an existing -ContextMenuHandlers key");
+    Check(Apply(roots, clash) == OpResult::Ok && !KeyExists(L"Machine\\*\\shellex\\ContextMenuHandlers\\Clash") &&
+              KeyExists(L"Machine\\*\\shellex\\-ContextMenuHandlers\\Clash"),
+          "shellex disable replaces stale -ContextMenuHandlers copy after app re-registration (#620)");
+    SetString(L"User\\*\\shellex\\-ContextMenuHandlers\\CrossRoot", nullptr, L"{11111111-2222-3333-4444-555555555555}");
+    SetString(L"Machine\\*\\shellex\\ContextMenuHandlers\\CrossRoot", nullptr, L"{22222222-2222-3333-4444-555555555555}");
+    {
+        const auto cross_items = Enumerate(roots, file);
+        const Item* cross = Find(cross_items, L"CrossRoot");
+        Check(cross && cross->enabled && cross->root == Root::Machine,
+              "inactive User -ContextMenuHandlers marker does not hide live Machine handler (#620)");
+    }
     Op gone{Action::Disable, Kind::Verb, Root::Machine, L"*\\shell\\DoesNotExist"};
     Check(Apply(roots, gone) == OpResult::NotFound, "missing key reports NotFound");
 

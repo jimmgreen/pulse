@@ -125,8 +125,10 @@ struct AiChatError {
 };
 
 AiChat& Chat(AppState& s);
+struct AiPendingAttach;
 // Starts a turn for `prompt`; `context` is the composer's folder chip text.
-void AiChatSubmit(AppState& s, const std::wstring& prompt, const std::wstring& context);
+void AiChatSubmit(AppState& s, const std::wstring& prompt, const std::wstring& context,
+                  std::vector<AiPendingAttach> attachments = {});
 void AiChatStop(AppState& s);
 void AiChatReset(AppState& s);
 // Conversation parts the panel reports (block index into blocks).
@@ -192,7 +194,8 @@ std::wstring AiAssistantModelName(const AppState& s);   // the model a request u
 bool AiAssistantThinks(const AppState& s);
 std::wstring AiAssistantThinkName(const AppState& s);
 // `note`: one more line for the model only (重新生成's 更详细 / 更简洁).
-void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context, const std::wstring& note = {});
+void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context, const std::wstring& note = {},
+                  std::vector<AiPendingAttach> attachments = {});
 // 继续生成: the turn again with the part already written; what comes goes
 // on in the text block `text_id`, without a thinking block.
 void AiAgentContinue(AppState& s, const std::wstring& prompt, bool with_context, const std::wstring& partial,

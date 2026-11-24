@@ -42,7 +42,7 @@ template<class T> DWORD ReadToken(HANDLE token, TOKEN_INFORMATION_CLASS type, T&
     if (!GetTokenInformation(token, type, &value, sizeof(value), &returned)) return Error();
     return returned == sizeof(value) ? ERROR_SUCCESS : ERROR_BAD_LENGTH;
 }
-DWORD CaptureIdentity(HANDLE process, ProcessIdentityV1& output) noexcept {
+DWORD CaptureIdentity(HANDLE process, bool require_elevated, ProcessIdentityV1& output) noexcept {
     ProcessIdentityV1 value{};
     value.pid = GetProcessId(process);
     if (!value.pid) return Error();
@@ -53,7 +53,18 @@ DWORD CaptureIdentity(HANDLE process, ProcessIdentityV1& output) noexcept {
     if (const DWORD error = pulse::security::CheckUnrestrictedToken(token.value)) return error;
     TOKEN_ELEVATION elevation{};
     if (const DWORD error = ReadToken(token.value, TokenElevation, elevation)) return error;
-    if (!elevation.TokenIsElevated) return ERROR_ELEVATION_REQUIRED;
+    if (require_elevated) {
+        if (!elevation.TokenIsElevated) return ERROR_ELEVATION_REQUIRED;
+    } else {
+        if (elevation.TokenIsElevated) return ERROR_ACCESS_DENIED;
+        alignas(TOKEN_MANDATORY_LABEL) BYTE integrity_buffer[1024]{};
+        DWORD integrity_returned = 0;
+        if (!GetTokenInformation(token.value, TokenIntegrityLevel, integrity_buffer, sizeof(integrity_buffer), &integrity_returned)) return Error();
+        const auto* label = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(integrity_buffer);
+        if (!label->Label.Sid || !IsValidSid(label->Label.Sid)) return ERROR_INVALID_SID;
+        const UCHAR count = *GetSidSubAuthorityCount(label->Label.Sid);
+        if (!count || *GetSidSubAuthority(label->Label.Sid, count - 1) < SECURITY_MANDATORY_MEDIUM_RID) return ERROR_ACCESS_DENIED;
+    }
     DWORD container = 0;
     if (const DWORD error = ReadToken(token.value, TokenIsAppContainer, container)) return error;
     if (container) return ERROR_ACCESS_DENIED;
@@ -72,6 +83,34 @@ DWORD CaptureIdentity(HANDLE process, ProcessIdentityV1& output) noexcept {
     if (value.sid_size > returned - (sid - base)) return ERROR_INVALID_SID;
     std::memcpy(value.user_sid, bytes, value.sid_size);
     if (const DWORD error = ValidateIdentity(value)) return error;
+    output = value;
+    return ERROR_SUCCESS;
+}
+DWORD CaptureProcessWithHelperInternal(HANDLE target, HANDLE helper, uint64_t generation,
+    const GUID& nonce, bool require_elevated, BindingV1& output) noexcept {
+    output = {};
+    if (!generation || !NonzeroGuid(nonce)) return ERROR_INVALID_PARAMETER;
+    if (const DWORD error = LiveHandle(target)) return error;
+    if (const DWORD error = LiveHandle(helper)) return error;
+    Handle impersonation;
+    if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &impersonation.value)) return ERROR_ACCESS_DENIED;
+    const DWORD thread_error = GetLastError();
+    if (thread_error != ERROR_NO_TOKEN) return thread_error ? thread_error : ERROR_GEN_FAILURE;
+    ProcessIdentityV1 caller{}, target_identity{}, helper_identity{};
+    if (const DWORD error = CaptureIdentity(GetCurrentProcess(), require_elevated, caller)) return error;
+    if (const DWORD error = CaptureIdentity(target, require_elevated, target_identity)) return error;
+    if (const DWORD error = CaptureIdentity(helper, require_elevated, helper_identity)) return error;
+    if (!SameUserSession(caller, target_identity) || !SameUserSession(caller, helper_identity)) return ERROR_ACCESS_DENIED;
+    // A handle remains bound to one process instance even if its PID is reused.
+    // Recheck both handles after token sampling; the lease owner keeps the helper
+    // handle and checks liveness again at each routing decision.
+    if (const DWORD error = LiveHandle(target)) return error;
+    if (const DWORD error = LiveHandle(helper)) return error;
+    BindingV1 value{};
+    value.magic = kMagic; value.version = kVersion; value.size = sizeof(value);
+    value.target = target_identity; value.generation = generation;
+    value.helper_pid = helper_identity.pid; value.helper_created = helper_identity.created; value.nonce = nonce;
+    if (const DWORD error = ValidateFormat(value)) return error;
     output = value;
     return ERROR_SUCCESS;
 }
@@ -114,33 +153,16 @@ DWORD LocatorBasename(const ProcessIdentityV1& identity, std::wstring& output) n
 }
 DWORD CaptureProcessWithHelper(HANDLE target, HANDLE helper, uint64_t generation,
     const GUID& nonce, BindingV1& output) noexcept {
-    output = {};
-    if (!generation || !NonzeroGuid(nonce)) return ERROR_INVALID_PARAMETER;
-    if (const DWORD error = LiveHandle(target)) return error;
-    if (const DWORD error = LiveHandle(helper)) return error;
-    Handle impersonation;
-    if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &impersonation.value)) return ERROR_ACCESS_DENIED;
-    const DWORD thread_error = GetLastError();
-    if (thread_error != ERROR_NO_TOKEN) return thread_error ? thread_error : ERROR_GEN_FAILURE;
-    ProcessIdentityV1 caller{}, target_identity{}, helper_identity{};
-    if (const DWORD error = CaptureIdentity(GetCurrentProcess(), caller)) return error;
-    if (const DWORD error = CaptureIdentity(target, target_identity)) return error;
-    if (const DWORD error = CaptureIdentity(helper, helper_identity)) return error;
-    if (!SameUserSession(caller, target_identity) || !SameUserSession(caller, helper_identity)) return ERROR_ACCESS_DENIED;
-    // A handle remains bound to one process instance even if its PID is reused.
-    // Recheck both handles after token sampling; the lease owner keeps the helper
-    // handle and checks liveness again at each routing decision.
-    if (const DWORD error = LiveHandle(target)) return error;
-    if (const DWORD error = LiveHandle(helper)) return error;
-    BindingV1 value{};
-    value.magic = kMagic; value.version = kVersion; value.size = sizeof(value);
-    value.target = target_identity; value.generation = generation;
-    value.helper_pid = helper_identity.pid; value.helper_created = helper_identity.created; value.nonce = nonce;
-    if (const DWORD error = ValidateFormat(value)) return error;
-    output = value;
-    return ERROR_SUCCESS;
+    return CaptureProcessWithHelperInternal(target, helper, generation, nonce, true, output);
 }
 DWORD CaptureCurrentWithHelper(HANDLE helper, uint64_t generation, const GUID& nonce, BindingV1& output) noexcept {
     return CaptureProcessWithHelper(GetCurrentProcess(), helper, generation, nonce, output);
+}
+DWORD CaptureProcessWithHelperUser(HANDLE target, HANDLE helper, uint64_t generation,
+    const GUID& nonce, BindingV1& output) noexcept {
+    return CaptureProcessWithHelperInternal(target, helper, generation, nonce, false, output);
+}
+DWORD CaptureCurrentWithHelperUser(HANDLE helper, uint64_t generation, const GUID& nonce, BindingV1& output) noexcept {
+    return CaptureProcessWithHelperUser(GetCurrentProcess(), helper, generation, nonce, output);
 }
 }

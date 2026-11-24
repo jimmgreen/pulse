@@ -2,6 +2,7 @@
 #include "broker_client.h"
 #include "mcp_tools.h"
 #include "../common/json_value.h"
+#include "../common/mcp_update_gate.h"
 #include <atomic>
 #include <list>
 #include <memory>
@@ -101,11 +102,31 @@ public:
         : options_(options), broker_(options.pipe_name, options.server_image, options.version) {}
 
     int Run() {
+        const auto gate = mcp_update::GatePath(mcp_update::InstallRootForHost(options_.server_image));
+        if (mcp_update::IsGated(gate)) {
+            Diagnostic(mcp_update::kRetryMessage);
+            return static_cast<int>(mcp_update::kRetryAfterUpdate);
+        }
+        std::atomic<bool> update{false};
+        HANDLE reader = nullptr;
+        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &reader, 0, FALSE, DUPLICATE_SAME_ACCESS);
+        const HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        std::jthread watcher;
+        if (reader && done) watcher = std::jthread([&] {
+            do {
+                if (update || mcp_update::IsGated(gate)) {
+                    update = true;
+                    // Repeat to cover the race between checking update in the
+                    // main loop and entering the client's synchronous ReadFile.
+                    CancelSynchronousIo(reader);
+                }
+            } while (WaitForSingleObject(done, update ? 25 : 200) == WAIT_TIMEOUT);
+        });
         Diagnostic("Pulse.AI: MCP server ready");
         std::string buffer;
         std::string chunk(64 * 1024, '\0');
         bool discarding = false;   // inside a line that was too long
-        for (;;) {
+        while (!update) {
             DWORD n = 0;
             if (!ReadFile(options_.input, chunk.data(), static_cast<DWORD>(chunk.size()), &n, nullptr) || n == 0) break;
             buffer.append(chunk.data(), n);
@@ -126,10 +147,14 @@ public:
             Reap(false);
             if (output_broken_) break;
         }
-        if (!discarding && !output_broken_) HandleLine(buffer);   // a last line without newline
-        Diagnostic("Pulse.AI: input closed");
+        if (!update && !discarding && !output_broken_) HandleLine(buffer);   // a last line without newline
         Reap(true);
-        return 0;
+        if (update) Diagnostic(mcp_update::kRetryMessage);
+        else Diagnostic("Pulse.AI: input closed");
+        if (watcher.joinable()) { SetEvent(done); watcher.join(); }
+        if (done) CloseHandle(done);
+        if (reader) CloseHandle(reader);
+        return update ? static_cast<int>(mcp_update::kRetryAfterUpdate) : 0;
     }
 
 private:

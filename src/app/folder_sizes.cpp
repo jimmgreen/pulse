@@ -190,6 +190,7 @@ struct FolderSizes::Impl {
     uint8_t ProbeFolder(const std::wstring& key) {
         const auto type = DriveType(key);
         if (type != DRIVE_FIXED && type != DRIVE_RAMDISK) return 0;
+        if (type == DRIVE_FIXED && IsSpinning(key)) return 0;
         constexpr DWORD kSkip = FILE_ATTRIBUTE_REPARSE_POINT | ::pulse::fs::kCloudPlaceholderAttrs;
         const DWORD attrs = GetFileAttributesW(key.c_str());
         if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY) || (attrs & kSkip)) return 0;
@@ -222,7 +223,7 @@ struct FolderSizes::Impl {
             std::lock_guard lock(mutex);
             const auto now = GetTickCount64();
             for (const auto& key : probe_wanted) {
-                if (Suspended(key)) continue;
+                if (Suspended(key) || ::pulse::fs::IsKnownSpinningDrive(key)) continue;
                 const auto found = probes.find(key);
                 if (found != probes.end() && ProbeFresh(key, found->second, now)) continue;
                 batch.push_back(key);
@@ -257,6 +258,9 @@ struct FolderSizes::Impl {
         const auto key = Key(path);
         { std::lock_guard lock(mutex); InvalidateLocked(key); kick = true; }
         wake.notify_all();
+    }
+    bool IsSpinning(const std::wstring& path) {
+        return ::pulse::fs::ProbeSeekPenalty(path) == ::pulse::fs::SeekPenalty::Spinning;
     }
     UINT DriveType(const std::wstring& path) {
         const auto plain = pulse::path::StripExtendedPathPrefix(path);
@@ -322,7 +326,7 @@ struct FolderSizes::Impl {
             return !item.second.valid() || item.second.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
         });
         for (const auto& root : create) {
-            if (stopping || DriveType(root) == DRIVE_REMOTE) continue;
+            if (stopping || DriveType(root) == DRIVE_REMOTE || IsSpinning(root)) continue;
             auto watch = std::make_shared<fs::DirWatch>();
             uint64_t instance = 0;
             {
@@ -529,6 +533,7 @@ struct FolderSizes::Impl {
             if (found->second.completed && !manual.contains(path)) at(found->second.completed + kFreshMs);
         }
         for (const auto& key : probe_wanted) {
+            if (::pulse::fs::IsKnownSpinningDrive(key)) continue;
             const auto found = probes.find(key);
             if (found == probes.end() || found->second.stale) continue;
             if (found->second.generation != 0 && Coverage(key) == found->second.generation) continue;
@@ -605,6 +610,21 @@ struct FolderSizes::Impl {
                     std::lock_guard lock(mutex);
                     if (wanted.contains(path) && !manual.contains(path)) {
                         blocked_auto.insert(path); wanted[path] = false; changed = true;
+                    }
+                } else if (type == DRIVE_FIXED && IsSpinning(path)) {
+                    // Spinning HDDs skip automatic recursive walks (keeping
+                    // zero-I/O Pulse.Index lookups and explicit user clicks).
+                    std::lock_guard lock(mutex);
+                    if (const auto found = store.entries.find(path);
+                        found != store.entries.end() && !manual.contains(path)) {
+                        if (!found->second.auto_deferred ||
+                            (!found->second.work.Running() &&
+                             found->second.work.activity != FolderSizeActivity::Deferred)) {
+                            found->second.auto_deferred = true;
+                            if (!found->second.work.Running())
+                                found->second.work.activity = FolderSizeActivity::Deferred;
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -858,6 +878,10 @@ void FolderSizes::Sync(std::vector<FolderSizeRequest> visible, std::vector<std::
         // Visibility is not a data revision. Preserve published bytes and completion age.
         if (!entry->value.has_value && entry->completed == 0 && !entry->work.Running())
             entry->not_before = (std::max)(entry->not_before, now + 150);
+        if (!state.manual.contains(request.path) && ::pulse::fs::IsKnownSpinningDrive(request.path)) {
+            entry->auto_deferred = true;
+            if (!entry->work.Running()) entry->work.activity = FolderSizeActivity::Deferred;
+        }
         wanted[request.path] = !state.Suspended(request.path) && ((request.automatic && !NetworkPath(request.path) &&
             !state.blocked_auto.contains(request.path)) || state.manual.contains(request.path));
         order.push_back(request.path);

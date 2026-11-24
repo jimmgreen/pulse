@@ -1,4 +1,5 @@
 #include "session.h"
+#include "search_tab_handoff.h"
 #include "split_tree_shape.h"
 
 #include <algorithm>
@@ -72,7 +73,7 @@ LayoutTabSnapshot CaptureLayoutTab(const LayoutTab& tab) {
             snapshot.panes.emplace_back();
             continue;
         }
-        snapshot.panes.push_back({view->current_path, view->view_mode,
+        snapshot.panes.push_back({AddressSearchHandoffPath(*view), view->view_mode,
             view->details_column_dividers, view->search_column_dividers,
             view->column_layout, view->column_widths_dip});
     }

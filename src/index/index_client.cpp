@@ -505,6 +505,7 @@ void IndexClient::Worker() {
             continue;
         }
         WriteMsg(REQ_IDX_STATUS, 0, {});
+        WriteMsg(REQ_IDX_VOLUMES, 0, {});
         pending_cv_.notify_one();
         while (running_) {
             ipc::MsgHeader hdr{};

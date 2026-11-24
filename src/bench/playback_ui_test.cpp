@@ -369,22 +369,22 @@ struct QuickPreviewPlaybackProbe {
         POINT point{static_cast<LONG>((g.volume_track.left + g.volume_track.right) * 0.5f),
             static_cast<LONG>((g.volume_track.top + g.volume_track.bottom) * 0.5f)};
         q.PlaybackMouseDown(point);
-        Check(q.playback_volume_drag_ && GetCapture() == q.hwnd_ && std::abs(q.playback_volume_ - 0.5f) < .03f,
+        Check(q.playback_volume_drag_ && GetCapture() == q.hwnd_ && std::abs(q.PlaybackVolume() - 0.5f) < .03f,
             "visible volume slider captures and sets volume");
         SendMessageW(q.hwnd_, WM_MOUSEMOVE, MK_LBUTTON,
             MAKELPARAM(static_cast<int>(g.volume_track.right + 30), point.y));
-        Check(q.playback_volume_ == 1.0f, "drag outside slider clamps volume to maximum");
+        Check(q.PlaybackVolume() == 1.0f, "drag outside slider clamps volume to maximum");
         SendMessageW(q.hwnd_, WM_LBUTTONUP, 0,
             MAKELPARAM(static_cast<int>(g.volume_track.left - 30), point.y));
-        Check(q.playback_volume_ == 0 && !q.playback_volume_drag_ && GetCapture() != q.hwnd_,
+        Check(q.PlaybackVolume() == 0 && !q.playback_volume_drag_ && GetCapture() != q.hwnd_,
             "slider release clamps to zero and releases capture");
         q.PlaybackWheel(point, 5);
-        Check(std::abs(q.playback_volume_ - .25f) < .001f, "wheel adjusts visible volume slider");
+        Check(std::abs(q.PlaybackVolume() - .25f) < .001f, "wheel adjusts visible volume slider");
         POINT mute{static_cast<LONG>((g.volume.left + g.volume.right) * .5f), point.y};
         q.PlaybackMouseDown(mute);
-        Check(q.playback_muted_ && std::abs(q.playback_volume_ - .25f) < .001f, "mute preserves slider volume");
+        Check(q.options_.muted && std::abs(q.PlaybackVolume() - .25f) < .001f, "mute preserves slider volume");
         q.PlaybackMouseDown(mute);
-        Check(!q.playback_muted_, "mute toggles off");
+        Check(!q.options_.muted, "mute toggles off");
         q.PlaybackMouseDown(point);
         SendMessageW(q.hwnd_, WM_CANCELMODE, 0, 0);
         Check(!q.playback_volume_drag_ && GetCapture() != q.hwnd_, "cancel clears volume dragging");

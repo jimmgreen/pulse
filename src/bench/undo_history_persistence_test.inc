@@ -79,6 +79,32 @@ static int RunUndoHistoryPersistenceTests() {
     Check(newest.size() == 1 && newest.front().task_id == full.front().task_id &&
         newest.front().type == ops::OpType::CreateTextFile && newest.front().source_count == 1 &&
         manager.UndoHistoryCount() == full.size(), L"collapsed summary preserves newest identity type and counts");
+    {
+        // Snapshots reserialize only changed entries; after appends and
+        // trimming they must still match the original serializer exactly.
+        const auto current_entries = [&] {
+            std::vector<ops::UndoEntry> entries;
+            for (const auto& item : manager.UndoHistory().entries) if (!item.undone) entries.push_back(item.entry);
+            std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.task_id < b.task_id; });
+            return entries;
+        };
+        std::wstring steps = L"[";
+        for (int step = 0; step < 100; ++step) {
+            const std::wstring n = std::to_wstring(step);
+            if (step) steps += L",";
+            steps += L"{\"type\":1,\"sup\":" + std::wstring(step % 7 ? L"true" : L"false") +
+                L",\"dest\":\"D:\\\\t \\\"" + n + L"\\\"\",\"name\":\"n" + n + L"\",\"src\":[\"C:\\\\a" + n +
+                L"\",\"C:\\\\b\u00e9\"],\"dst\":[\"D:\\\\a" + n + L"\"]}";
+        }
+        steps += L"]";
+        bool incremental_exact = manager.UndoFromJson(steps) && BaselineUndoToJson(current_entries()) == *manager.UndoJsonSnapshot();
+        for (int i = 0; i < 5; ++i) {
+            manager.RecordExternalCreate(L"C:\\source\\incremental-" + std::to_wstring(i) + L".txt", 0, L"");
+            incremental_exact = incremental_exact && BaselineUndoToJson(current_entries()) == *manager.UndoJsonSnapshot();
+        }
+        Check(incremental_exact && manager.UndoHistoryCount() == 100,
+              L"incremental snapshots match the original serializer after appends and trimming");
+    }
     Check(manager.UndoFromJson(L"[]") && *manager.UndoJsonSnapshot() == L"[\n]",
         L"restoring empty history invalidates previous persisted content");
     Check(manager.UndoHistorySummary(false).empty() && manager.UndoHistoryCount() == 0,

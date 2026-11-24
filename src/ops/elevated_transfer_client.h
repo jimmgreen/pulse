@@ -27,6 +27,9 @@ ShellTransferResult DeleteWithElevatedHelper(const std::vector<std::wstring>& so
 ShellTransferResult EjectWithElevatedHelper(const storage::VirtualDiskIdentity& identity, HWND owner,
     std::atomic<bool>& cancel);
 void ShutdownElevatedTransferHelper();
+HRESULT ListWithElevatedHelper(const std::wstring&, HWND, std::vector<WIN32_FIND_DATAW>&, const std::function<bool()>& stale = {});
+ShellTransferResult CreateEmptyFileWithElevatedHelper(const std::wstring& path, HWND owner,
+    std::atomic<bool>& cancel, ElevatedTransferCallbacks callbacks = {});
 ShellTransferResult CreateFolderWithElevatedHelper(const std::wstring& path, HWND owner,
     std::atomic<bool>& cancel, ElevatedTransferCallbacks callbacks = {});
 #ifdef PULSE_ELEVATED_TEST_CLIENT

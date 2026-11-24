@@ -216,8 +216,8 @@ bool MediaPackPlayable() {
 // Formats Media Foundation is asked to open at all.
 bool NativeExtension(const std::wstring& ext) {
     for (const auto* known : {L".mp4", L".m4v", L".mov", L".wmv", L".avi", L".mkv", L".webm", L".mpg",
-                              L".mpeg", L".m2ts", L".mts", L".3gp", L".mp3", L".wav", L".flac", L".m4a",
-                              L".aac", L".wma", L".ogg", L".oga", L".opus", L".aif", L".aiff"})
+                              L".mpeg", L".m2ts", L".mts", L".3gp", L".mp3", L".wav", L".flac", L".m4a", L".m4b",
+                              L".aac", L".wma", L".ogg", L".oga", L".opus", L".aif", L".aiff", L".aifc"})
         if (ext == known) return true;
     return false;
 }
@@ -304,7 +304,8 @@ LRESULT CALLBACK VideoPreview::VideoProc(HWND hwnd, UINT message, WPARAM wparam,
     return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
-void VideoPreview::Open(HWND owner, const std::wstring& path, bool card) {
+void VideoPreview::Open(HWND owner, const std::wstring& path, bool card, bool autoplay,
+                        float volume, bool muted) {
     Reset();
     auto lease = VideoWorkerBudget().TryAcquire();
     if (!lease) {
@@ -332,7 +333,9 @@ void VideoPreview::Open(HWND owner, const std::wstring& path, bool card) {
     state_->path = path;
     state_->child = child_;
     state_->card = card;
-    if (card) state_->snapshot.muted = true;
+    state_->playing = autoplay;
+    state_->snapshot.volume = std::clamp(volume, 0.0f, 1.0f);
+    state_->snapshot.muted = card || muted;
     if (!child_) { state_->snapshot.error = HRESULT_FROM_WIN32(GetLastError()); state_->finished = true; state_->released.set_value(); return; }
     SetWindowLongPtrW(child_, GWLP_USERDATA,
         reinterpret_cast<LONG_PTR>(new std::shared_ptr<Shared>(state_)));
@@ -795,6 +798,41 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
                 }
             }
         }
+        // Restore the saved gain and mute before an autoplay Play request.
+        if (ready) {
+            bool apply = false;
+            float volume = 1.0f, rate = 1.0f;
+            bool muted = false;
+            {
+                std::lock_guard lock(state->mutex);
+                apply = std::exchange(state->audio_dirty, false);
+                volume = state->snapshot.volume;
+                muted = state->snapshot.muted;
+                rate = state->snapshot.rate;
+            }
+            if (apply) {
+                const HRESULT volume_hr = player->SetVolume(volume);
+                const HRESULT mute_hr = player->SetMute(muted ? TRUE : FALSE);
+                if (FAILED(volume_hr) || FAILED(mute_hr)) {
+                    diagnostics::runtime::Event("playback_audio_control_error", {{"session", state->session},
+                        {"volume_hr", static_cast<uint32_t>(volume_hr)}, {"mute_hr", static_cast<uint32_t>(mute_hr)}}, diagnostics::runtime::Level::Warning);
+                    std::lock_guard lock(state->mutex);
+                    state->snapshot.control_error = FAILED(volume_hr) ? volume_hr : mute_hr;
+                }
+                float applied_rate = 1.0f;
+                HRESULT rate_hr = player->SetRate(rate);
+                if (SUCCEEDED(rate_hr)) rate_hr = player->GetRate(&applied_rate);
+                if (FAILED(rate_hr)) {
+                    applied_rate = 1.0f;
+                    diagnostics::runtime::Event("playback_control_error", {{"session", state->session},
+                        {"hr", static_cast<uint32_t>(rate_hr)}, {"control", 4}}, diagnostics::runtime::Level::Warning);
+                    std::lock_guard lock(state->mutex);
+                    state->snapshot.control_error = rate_hr;
+                }
+                std::lock_guard lock(state->mutex);
+                if (!state->audio_dirty) state->snapshot.rate = applied_rate;
+            }
+        }
         HRESULT control = S_OK;
         bool issued = false;
         if (ready && (!busy || (positioning && seek)) && !operation_error) {
@@ -845,40 +883,6 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
             state->snapshot.busy = false;
             state->playing = false;
             state->steps = 0;
-        }
-        if (ready) {
-            bool apply = false;
-            float volume = 1.0f, rate = 1.0f;
-            bool muted = false;
-            {
-                std::lock_guard lock(state->mutex);
-                apply = std::exchange(state->audio_dirty, false);
-                volume = state->snapshot.volume;
-                muted = state->snapshot.muted;
-                rate = state->snapshot.rate;
-            }
-            if (apply) {
-                const HRESULT volume_hr = player->SetVolume(volume);
-                const HRESULT mute_hr = player->SetMute(muted ? TRUE : FALSE);
-                if (FAILED(volume_hr) || FAILED(mute_hr)) {
-                    diagnostics::runtime::Event("playback_audio_control_error", {{"session", state->session},
-                        {"volume_hr", static_cast<uint32_t>(volume_hr)}, {"mute_hr", static_cast<uint32_t>(mute_hr)}}, diagnostics::runtime::Level::Warning);
-                    std::lock_guard lock(state->mutex);
-                    state->snapshot.control_error = FAILED(volume_hr) ? volume_hr : mute_hr;
-                }
-                float applied_rate = 1.0f;
-                HRESULT rate_hr = player->SetRate(rate);
-                if (SUCCEEDED(rate_hr)) rate_hr = player->GetRate(&applied_rate);
-                if (FAILED(rate_hr)) {
-                    applied_rate = 1.0f;
-                    diagnostics::runtime::Event("playback_control_error", {{"session", state->session},
-                        {"hr", static_cast<uint32_t>(rate_hr)}, {"control", 4}}, diagnostics::runtime::Level::Warning);
-                    std::lock_guard lock(state->mutex);
-                    state->snapshot.control_error = rate_hr;
-                }
-                std::lock_guard lock(state->mutex);
-                if (!state->audio_dirty) state->snapshot.rate = applied_rate;
-            }
         }
         // Repaint paused frames as well after exposure/resize; no provider calls on UI.
         if (ready && state->repaint.exchange(false)) player->UpdateVideo();

@@ -11,11 +11,17 @@
 
 namespace pulse::shell {
 
+struct ExplorerVerbReg {
+    std::wstring verb;
+    std::wstring reg_key;
+};
+
 struct CtxHandlerDesc {
     CLSID clsid{};
     std::wstring clsid_text;
     std::wstring name;
     bool explorer_command = false; // packaged IExplorerCommand verb (#48)
+    std::vector<ExplorerVerbReg> explorer_verbs; // registered ExplorerCommandHandler verbs
     // SendTo slot only. Registry verbs with an AppliesTo condition: the
     // default Shell menu evaluates those itself (启用 BitLocker on a drive), so
     // they are taken from it like 创建快捷方式.
@@ -46,6 +52,7 @@ struct CtxHandlerSlot {
     IContextMenu* menu = nullptr;
     IContextMenu2* menu2 = nullptr;
     IContextMenu3* menu3 = nullptr;
+    IUnknown* site = nullptr;
     HMENU hmenu = nullptr;
     UINT id_first = 0;
     UINT id_last = 0;
@@ -106,6 +113,9 @@ bool BindCtxSelection(const std::vector<std::wstring>& paths, bool background,
 HRESULT QueryOneHandler(const CtxHandlerDesc& handler, const CtxBind& bind,
                         HWND owner, UINT id_first, UINT id_last, UINT qcm_flags,
                         CtxHandlerSlot& slot, std::atomic<int>* phase = nullptr);
+
+bool SafeGetCommandVerbW(IContextMenu* menu, UINT offset, wchar_t* buf, UINT cch);
+HRESULT SafeInvokeCommand(IContextMenu* menu, CMINVOKECOMMANDINFO* info);
 
 void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
                          std::vector<CtxItemOut>& out);

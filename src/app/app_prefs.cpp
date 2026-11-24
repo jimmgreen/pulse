@@ -2,6 +2,7 @@
 #include "../common/app_runtime_paths.h"
 // app_prefs.cpp — Persist general settings; sync 开机自启 with the Run key.
 #include "app_prefs.h"
+#include "ui_layout.h"
 #include "blank_pane_click.h"
 #include "startup_launch.h"
 #include "default_file_manager.h"
@@ -13,6 +14,7 @@
 #include "../common/json_utils.h"
 #include "../common/config_json.h"
 #include "../common/utf8_file.h"
+#include "../common/async_file_writer.h"
 #include "../common/runtime_log.h"
 #include <windows.h>
 #include <shlwapi.h>
@@ -82,8 +84,9 @@ void AppPrefs::ResetToDefaults() {
     list_mtime_range = 7;
     list_mtime_palette = 0;
     list_mtime_fade = list_mtime_tree = list_mtime_other_views = list_mtime_bold = list_mtime_flash = true;
-    sync_onedrive = sync_svn = true;
+    sync_onedrive = sync_svn = git_plain_terms = true;
     single_click_open = hover_select = item_checkboxes = false;
+    double_click_interval_ms = 0;
     name_highlight = 0;
     folder_sort_mode = 0;
     details_columns = ui::kDetailsColumnsDefault;
@@ -121,6 +124,7 @@ void AppPrefs::ResetToDefaults() {
     global_search_double_ctrl_ms = 300;
     dialog_jump_bar = true;
     dialog_jump_auto = false;
+    dialog_adaptive_legacy = true;
     jump_history = true;
     global_search_apps = true;
     show_hidden_files = false;
@@ -137,9 +141,23 @@ void AppPrefs::ResetToDefaults() {
     preview_loop = kPreviewLoopAnimations;
     hold_preview_ms = 0;
     preview_key_hint_left = 3;
+    preview_prefer_system = false;
+    preview_volume_percent = 100;
+    preview_muted = false;
     change_tracking_enabled = false;
     change_tracking_days = 7;
     theme_mode = -1;
+    ui_mode = L"pro";
+    ui_sidebar_mode = 0;
+    ui_sidebar_lite = false;
+    ui_show_tabs = true;
+    ui_address_in_title = false;
+    ui_command_mode = 0;
+    ui_toolbar_labels = true;
+    ui_status_bar = true;
+    ui_selection_float = false;
+    ui_rounded = false;
+    ui_title_buttons = L"win,layout,settings,|,theme,-ai";
     language = L"system";
     window_effect = L"mica-alt";
     menu_acrylic = true;
@@ -153,6 +171,14 @@ void AppPrefs::ResetToDefaults() {
     address_search_content = false;
     content_scope = 0;
     tray_icon_size = 48;
+    shelf_shake_enabled = true;
+    shelf_shake_sensitivity = 1;
+    shelf_summon_pos = 0;
+    shelf_auto_hide = true;
+    shelf_has_last_pos = false;
+    shelf_last_x = shelf_last_y = 0;
+    shelf_pinned = false;
+    shelf_view_grid = true;
     show_hints = true;
     status_hints_learned = false;
     auto_check_updates = true;
@@ -160,6 +186,7 @@ void AppPrefs::ResetToDefaults() {
     toolbar_new_primary = 0;
     toolbar_last_new = 0;
     toolbar_tools = app::DefaultToolbarTools();
+    toolbar_suggested.clear();
     toolbar_view_order = app::NormalizeToolbarViewOrder({});
     toolbar_selection = app::DefaultToolbarSelection();
     toolbar_apps.clear();
@@ -169,6 +196,8 @@ void AppPrefs::ResetToDefaults() {
     custom_tag_colors.clear();
     recent_tags.clear();
     extension_publish_trusted.clear();
+    extension_columns_hidden.clear();
+    extension_column_widths.clear();
     picker_folders.clear();
     shortcuts.clear();
     duplicate_scan_scope = 0;
@@ -243,6 +272,7 @@ std::wstring AppPrefs::ToJson() const {
         {L"list_mtime_fade", list_mtime_fade}, {L"list_mtime_tree", list_mtime_tree},
         {L"list_mtime_other_views", list_mtime_other_views}, {L"list_mtime_bold", list_mtime_bold},
         {L"list_mtime_flash", list_mtime_flash}, {L"sync_onedrive", sync_onedrive}, {L"sync_svn", sync_svn},
+        {L"git_plain_terms", git_plain_terms},
         {L"single_click_open", single_click_open}, {L"hover_select", hover_select},
         {L"item_checkboxes", item_checkboxes}};
     for (const auto& [name, on] : mtime_flags) {
@@ -253,14 +283,30 @@ std::wstring AppPrefs::ToJson() const {
     }
     out += L",\n  \"vertical_tabs\":";
     out += vertical_tabs ? L"true" : L"false";
+    out += L",\n  \"tab_active_style\":" + std::to_wstring(tab_active_style);
     out += L",\n  \"tab_layout\":" + std::to_wstring(tab_layout);
     out += L",\n  \"tab_max_rows\":" + std::to_wstring(tab_max_rows);
+    out += L",\n  \"tab_overflow_list\":" + std::wstring(tab_overflow_list ? L"true" : L"false");
     out += L",\n  \"favorites_bar\":";
     out += favorites_bar ? L"true" : L"false";
     out += L",\n  \"favorites_bar_icon_only\":";
     out += favorites_bar_icon_only ? L"true" : L"false";
     out += L",\n  \"tray_hide_when_empty\":";
     out += tray_hide_when_empty ? L"true" : L"false";
+    out += L",\n  \"shelf_shake_enabled\":";
+    out += shelf_shake_enabled ? L"true" : L"false";
+    out += L",\n  \"shelf_shake_sensitivity\":" + std::to_wstring(std::clamp(shelf_shake_sensitivity, 0, 2));
+    out += L",\n  \"shelf_summon_pos\":" + std::to_wstring(std::clamp(shelf_summon_pos, 0, 2));
+    out += L",\n  \"shelf_auto_hide\":";
+    out += shelf_auto_hide ? L"true" : L"false";
+    out += L",\n  \"shelf_has_last_pos\":";
+    out += shelf_has_last_pos ? L"true" : L"false";
+    out += L",\n  \"shelf_last_x\":" + std::to_wstring(shelf_last_x);
+    out += L",\n  \"shelf_last_y\":" + std::to_wstring(shelf_last_y);
+    out += L",\n  \"shelf_pinned\":";
+    out += shelf_pinned ? L"true" : L"false";
+    out += L",\n  \"shelf_view_grid\":";
+    out += shelf_view_grid ? L"true" : L"false";
     out += L",\n  \"sidebar_collapsed\":";
     out += sidebar_collapsed ? L"true" : L"false";
     out += L",\n  \"folder_sort_mode\":";
@@ -334,10 +380,13 @@ std::wstring AppPrefs::ToJson() const {
     out += dialog_jump_bar ? L"true" : L"false";
     out += L",\n  \"dialog_jump_auto\":";
     out += dialog_jump_auto ? L"true" : L"false";
+    out += L",\n  \"dialog_adaptive_legacy\":";
+    out += dialog_adaptive_legacy ? L"true" : L"false";
     out += L",\n  \"jump_history\":";
     out += jump_history ? L"true" : L"false";
     out += L",\n  \"global_search_apps\":";
     out += global_search_apps ? L"true" : L"false";
+    out += L",\n  \"double_click_interval_ms\":" + std::to_wstring(NormalizeDoubleClickInterval(double_click_interval_ms));
     out += L",\n  \"blank_click_action\":";
     out += std::to_wstring(blank_click_action);
     // Kept for older builds, which only know on/off.
@@ -358,12 +407,28 @@ std::wstring AppPrefs::ToJson() const {
     out += L",\n  \"preview_loop\":" + std::to_wstring(NormalizePreviewLoop(preview_loop));
     out += L",\n  \"hold_preview_ms\":" + std::to_wstring(NormalizeHoldPreview(hold_preview_ms));
     out += L",\n  \"preview_key_hint_left\":" + std::to_wstring(std::clamp(preview_key_hint_left, 0, 3));
+    out += L",\n  \"preview_prefer_system\":";
+    out += preview_prefer_system ? L"true" : L"false";
+    out += L",\n  \"preview_volume_percent\":" + std::to_wstring(std::clamp(preview_volume_percent, 0, 100));
+    out += L",\n  \"preview_muted\":";
+    out += preview_muted ? L"true" : L"false";
     out += L",\n  \"change_tracking_enabled\":";
     out += change_tracking_enabled ? L"true" : L"false";
     out += L",\n  \"change_tracking_days\":";
     out += std::to_wstring(change_tracking_days == 1 || change_tracking_days == 3 ? change_tracking_days : 7);
     out += L",\n  \"theme_mode\":";
     out += std::to_wstring(theme_mode);
+    out += L",\n  \"ui_mode\":\"" + ui_mode + L"\"";  // always one of three plain ids
+    out += L",\n  \"ui_sidebar\":" + std::to_wstring(ui_sidebar_mode);
+    out += L",\n  \"ui_sidebar_lite\":" + std::wstring(ui_sidebar_lite ? L"true" : L"false");
+    out += L",\n  \"ui_tabs\":" + std::wstring(ui_show_tabs ? L"true" : L"false");
+    out += L",\n  \"ui_address_in_title\":" + std::wstring(ui_address_in_title ? L"true" : L"false");
+    out += L",\n  \"ui_commands\":" + std::to_wstring(ui_command_mode);
+    out += L",\n  \"ui_toolbar_labels\":" + std::wstring(ui_toolbar_labels ? L"true" : L"false");
+    out += L",\n  \"ui_status_bar\":" + std::wstring(ui_status_bar ? L"true" : L"false");
+    out += L",\n  \"ui_selection_float\":" + std::wstring(ui_selection_float ? L"true" : L"false");
+    out += L",\n  \"ui_rounded\":" + std::wstring(ui_rounded ? L"true" : L"false");
+    out += L",\n  \"ui_title_buttons\":\"" + NormalizeTitleButtons(ui_title_buttons) + L"\"";  // ids, commas, '-', '|' only
     out += L",\n  \"language\":\"";
     out += escaped_language;
     out += L"\"";
@@ -399,6 +464,14 @@ std::wstring AppPrefs::ToJson() const {
     }
     out += L"]";
     out += L",\n  \"toolbar_tools_v\":" + std::to_wstring(app::kToolbarToolsVersion);
+    out += L",\n  \"toolbar_suggested\":[";
+    for (size_t i = 0; i < toolbar_suggested.size(); ++i) {
+        std::wstring escaped_id;
+        pulse::json::Escape(toolbar_suggested[i], escaped_id);
+        if (i > 0) out += L",";
+        out += L"\"" + escaped_id + L"\"";
+    }
+    out += L"]";
     out += L",\n  \"toolbar_show_sort\":";
     out += toolbar_show_sort ? L"true" : L"false";
     out += L",\n  \"toolbar_show_filter\":";
@@ -482,6 +555,16 @@ std::wstring AppPrefs::ToJson() const {
         pulse::json::Escape(extension_publish_trusted[i], escaped);
         if (i > 0) out += L",";
         out += L"\"" + escaped + L"\"";
+    }
+    for (const auto* list : {&extension_columns_hidden, &extension_column_widths}) {
+        out += list == &extension_columns_hidden ? L"],\n  \"extension_columns_hidden\":["
+                                                 : L"],\n  \"extension_column_widths\":[";
+        for (size_t i = 0; i < list->size(); ++i) {
+            std::wstring escaped;
+            pulse::json::Escape((*list)[i], escaped);
+            if (i > 0) out += L",";
+            out += L"\"" + escaped + L"\"";
+        }
     }
     out += L"],\n  \"picker_folders\":[";
     for (size_t i = 0; i < picker_folders.size(); ++i) {
@@ -573,16 +656,29 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     list_mtime_flash = pulse::json::ExtractBool(json, L"list_mtime_flash", true);
     sync_onedrive = pulse::json::ExtractBool(json, L"sync_onedrive", true);
     sync_svn = pulse::json::ExtractBool(json, L"sync_svn", true);
+    git_plain_terms = pulse::json::ExtractBool(json, L"git_plain_terms", true);
     single_click_open = pulse::json::ExtractBool(json, L"single_click_open", false);
+    double_click_interval_ms = NormalizeDoubleClickInterval(pulse::json::ExtractInt(json, L"double_click_interval_ms", 0));
     name_highlight = std::clamp(pulse::json::ExtractInt(json, L"name_highlight", 0), 0, 1);
     hover_select = pulse::json::ExtractBool(json, L"hover_select", false);
     item_checkboxes = pulse::json::ExtractBool(json, L"item_checkboxes", false);
     vertical_tabs = pulse::json::ExtractBool(json, L"vertical_tabs", false);
+    tab_active_style = std::clamp(pulse::json::ExtractInt(json, L"tab_active_style", 0), 0, 1);
     tab_layout = std::clamp(pulse::json::ExtractInt(json, L"tab_layout", 0), 0, 2);
     tab_max_rows = std::clamp(pulse::json::ExtractInt(json, L"tab_max_rows", 3), 2, 4);
+    tab_overflow_list = pulse::json::ExtractBool(json, L"tab_overflow_list", false);
     favorites_bar = pulse::json::ExtractBool(json, L"favorites_bar", false);
     favorites_bar_icon_only = pulse::json::ExtractBool(json, L"favorites_bar_icon_only", false);
     tray_hide_when_empty = pulse::json::ExtractBool(json, L"tray_hide_when_empty", false);
+    shelf_shake_enabled = pulse::json::ExtractBool(json, L"shelf_shake_enabled", true);
+    shelf_shake_sensitivity = std::clamp(pulse::json::ExtractInt(json, L"shelf_shake_sensitivity", 1), 0, 2);
+    shelf_summon_pos = std::clamp(pulse::json::ExtractInt(json, L"shelf_summon_pos", 0), 0, 2);
+    shelf_auto_hide = pulse::json::ExtractBool(json, L"shelf_auto_hide", true);
+    shelf_has_last_pos = pulse::json::ExtractBool(json, L"shelf_has_last_pos", false);
+    shelf_last_x = pulse::json::ExtractInt(json, L"shelf_last_x", 0);
+    shelf_last_y = pulse::json::ExtractInt(json, L"shelf_last_y", 0);
+    shelf_pinned = pulse::json::ExtractBool(json, L"shelf_pinned", false);
+    shelf_view_grid = pulse::json::ExtractBool(json, L"shelf_view_grid", true);
     sidebar_collapsed = pulse::json::ExtractBool(json, L"sidebar_collapsed", false);
     folder_sort_mode = pulse::json::ExtractInt(json, L"folder_sort_mode", 0);
     if (folder_sort_mode < 0 || folder_sort_mode > 2) folder_sort_mode = 0;
@@ -638,6 +734,7 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     global_search_double_ctrl = pulse::json::ExtractBool(json, L"global_search_double_ctrl", true);
     dialog_jump_bar = pulse::json::ExtractBool(json, L"dialog_jump_bar", true);
     dialog_jump_auto = pulse::json::ExtractBool(json, L"dialog_jump_auto", false);
+    dialog_adaptive_legacy = pulse::json::ExtractBool(json, L"dialog_adaptive_legacy", true);
     jump_history = pulse::json::ExtractBool(json, L"jump_history", true);
     global_search_apps = pulse::json::ExtractBool(json, L"global_search_apps", true);
     {
@@ -666,12 +763,28 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     preview_loop = NormalizePreviewLoop(pulse::json::ExtractInt(json, L"preview_loop", kPreviewLoopAnimations));
     hold_preview_ms = NormalizeHoldPreview(pulse::json::ExtractInt(json, L"hold_preview_ms", 0));
     preview_key_hint_left = std::clamp(pulse::json::ExtractInt(json, L"preview_key_hint_left", 3), 0, 3);
+    preview_prefer_system = pulse::json::ExtractBool(json, L"preview_prefer_system", false);
+    preview_volume_percent = std::clamp(pulse::json::ExtractInt(json, L"preview_volume_percent", 100), 0, 100);
+    preview_muted = pulse::json::ExtractBool(json, L"preview_muted", false);
     change_tracking_enabled = pulse::json::ExtractBool(json, L"change_tracking_enabled", false);
     change_tracking_days = pulse::json::ExtractInt(json, L"change_tracking_days", 7);
     if (change_tracking_days != 1 && change_tracking_days != 3 && change_tracking_days != 7)
         change_tracking_days = 7;
     theme_mode = pulse::json::ExtractInt(json, L"theme_mode", -1);
     if (theme_mode < -1 || theme_mode > 2) theme_mode = -1;
+    ui_mode = pulse::json::ExtractString(json, L"ui_mode", L"pro");
+    if (ui_mode != L"zen" && ui_mode != L"standard" && ui_mode != L"pro") ui_mode = L"pro";
+    ui_sidebar_mode = std::clamp(pulse::json::ExtractInt(json, L"ui_sidebar", 0), 0, 2);
+    ui_sidebar_lite = pulse::json::ExtractBool(json, L"ui_sidebar_lite", false);
+    ui_show_tabs = pulse::json::ExtractBool(json, L"ui_tabs", true);
+    ui_address_in_title = pulse::json::ExtractBool(json, L"ui_address_in_title", false);
+    ui_command_mode = std::clamp(pulse::json::ExtractInt(json, L"ui_commands", 0), 0, 2);
+    ui_toolbar_labels = pulse::json::ExtractBool(json, L"ui_toolbar_labels", true);
+    ui_status_bar = pulse::json::ExtractBool(json, L"ui_status_bar", true);
+    ui_selection_float = pulse::json::ExtractBool(json, L"ui_selection_float", false);
+    ui_rounded = pulse::json::ExtractBool(json, L"ui_rounded", false);
+    ui_title_buttons = NormalizeTitleButtons(
+        pulse::json::ExtractString(json, L"ui_title_buttons", L"win,layout,settings,|,theme,-ai"));
     language = pulse::json::ExtractString(json, L"language", L"system");
     if (language != L"system" && language != L"zh-CN" && language != L"zh-TW" &&
         language != L"en-US")
@@ -700,6 +813,9 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     const int new_primary = pulse::json::ExtractInt(json, L"toolbar_new_primary", 0);
     toolbar_new_primary = new_primary >= 0 && new_primary <= 2 ? new_primary : 0;
     toolbar_last_new = pulse::json::ExtractInt(json, L"toolbar_last_new", 0) == 1 ? 1 : 0;
+    toolbar_suggested.clear();
+    for (auto& id : pulse::json::ExtractStringArray(json, L"toolbar_suggested"))
+        if (app::IsNativeToolbarTool(id) && toolbar_suggested.size() < 512) toolbar_suggested.push_back(std::move(id));
     if (json.find(L"\"toolbar_tools\"") != std::wstring::npos) {
         toolbar_tools = app::NormalizeToolbarTools(pulse::json::ExtractStringArray(json, L"toolbar_tools"));
         if (pulse::json::ExtractInt(json, L"toolbar_tools_v", 1) < app::kToolbarToolsVersion)
@@ -772,6 +888,10 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     if (recent_tags.size() > 5) recent_tags.resize(5);
     extension_publish_trusted = pulse::json::ExtractStringArray(json, L"extension_publish_trusted");
     if (extension_publish_trusted.size() > 64) extension_publish_trusted.resize(64);
+    extension_columns_hidden = pulse::json::ExtractStringArray(json, L"extension_columns_hidden");
+    if (extension_columns_hidden.size() > 128) extension_columns_hidden.resize(128);
+    extension_column_widths = pulse::json::ExtractStringArray(json, L"extension_column_widths");
+    if (extension_column_widths.size() > 128) extension_column_widths.resize(128);
     picker_folders = pulse::json::ExtractStringArray(json, L"picker_folders");
     std::erase_if(picker_folders, [](const std::wstring& line) {
         const size_t bar = line.find(L'|');
@@ -1003,6 +1123,7 @@ bool AppPrefs::Load() {
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     }
     const std::wstring dir = GetPulseDataDir();
+    loaded_data_dir = dir;
     if (dir.empty()) {
         launch_on_startup = ReadLaunchOnStartup();
         open_folders_in_pulse = ReadFolderOpen();
@@ -1032,9 +1153,8 @@ bool AppPrefs::Load() {
         const std::wstring exe = ExePath();
         const auto slash = exe.find_last_of(L"\\/");
         if (slash != std::wstring::npos) {
-            const std::wstring defaults = exe.substr(0, slash + 1) + L"setup-defaults.ini";
-            global_search_enabled = GetPrivateProfileIntW(L"features", L"global_search",
-                global_search_enabled ? 1 : 0, defaults.c_str()) != 0;
+            // A new profile from the new installer starts from its layout's preset.
+            if (ApplySetupDefaults(exe.substr(0, slash + 1) + L"setup-defaults.ini")) ApplyUiPreset(*this, ui_mode);
         }
     }
     if (persist) MigrateLegacyWinECommand(ExePath());
@@ -1052,6 +1172,28 @@ bool AppPrefs::Load() {
     MigrateIntegration();
     UpgradeCompatibleFolderOpen();
     return true;
+}
+
+bool AppPrefs::ApplySetupDefaults(const std::wstring& ini_path) {
+    const wchar_t* ini = ini_path.c_str();
+    global_search_enabled = GetPrivateProfileIntW(L"features", L"global_search", global_search_enabled ? 1 : 0, ini) != 0;
+    wchar_t value[32]{};
+    GetPrivateProfileStringW(L"ui", L"mode", L"", value, 32, ini);
+    const bool has_mode = IsUiModeId(value);
+    if (has_mode) ui_mode = value;
+    GetPrivateProfileStringW(L"ui", L"theme", L"", value, 32, ini);
+    if (std::wstring_view theme(value); theme == L"light") theme_mode = 1;
+    else if (theme == L"dark") theme_mode = 2;
+    // "system" keeps -1: a fresh profile has no legacy session theme, so it follows Windows.
+    GetPrivateProfileStringW(L"ui", L"accent", L"", value, 32, ini);
+    uint32_t rgb = 0;
+    if (value[0] && ParseAccentRgb(value, rgb)) {
+        wchar_t hex[8]{};
+        swprintf_s(hex, L"%06X", rgb);
+        accent_rgb = hex;
+        accent_follow_system = false;
+    }
+    return has_mode;
 }
 
 namespace {
@@ -1087,7 +1229,16 @@ bool AppPrefs::Save() const {
     if (load_failed) return false;
     const std::wstring dir = GetPulseDataDir();
     if (dir.empty()) return false;
+    GlobalAsyncFileWriter().Flush();
     return WriteUtf8FileAtomic(dir + L"\\app.json", ToJson());
+}
+
+bool AppPrefs::SaveAsync() const {
+    if (!persist) return true;
+    if (load_failed) return false;
+    const std::wstring dir = loaded_data_dir.empty() ? GetPulseDataDir() : loaded_data_dir;
+    if (dir.empty()) return false;
+    return GlobalAsyncFileWriter().Submit(dir + L"\\app.json", ToJson());
 }
 
 } // namespace pulse::app

@@ -30,16 +30,29 @@ inline std::vector<std::wstring> ContentTaskRoots(const ContentIndexConfig& conf
             if (ContentPathUnder(single, path)) path = single;
             else if (!ContentPathUnder(path, single)) continue;
         }
+        bool added_from_config = false;
         for (const auto& configured : config.roots) {
             const auto scope = ContentScopeKey(configured.path);
             std::wstring effective;
             if (ContentPathUnder(path, scope)) effective = path;
             else if (request.recursive && ContentPathUnder(scope, path)) effective = scope;
             else continue;
+            added_from_config = true;
             if (std::any_of(roots.begin(), roots.end(), [&](const auto& old) {
                     return effective == old || (request.recursive && ContentPathUnder(effective, old)); })) continue;
             if (request.recursive) std::erase_if(roots, [&](const auto& old) { return ContentPathUnder(old, effective); });
             roots.push_back(std::move(effective));
+        }
+        if (!added_from_config && request.allow_uncovered_root && !request.root.empty()) {
+            const auto uncovered = ContentScopeKey(request.root);
+            if (ContentPathUnder(path, uncovered)) {
+                const auto effective = path;
+                if (!std::any_of(roots.begin(), roots.end(), [&](const auto& old) {
+                        return effective == old || (request.recursive && ContentPathUnder(effective, old)); })) {
+                    if (request.recursive) std::erase_if(roots, [&](const auto& old) { return ContentPathUnder(old, effective); });
+                    roots.push_back(effective);
+                }
+            }
         }
     }
     return roots;
@@ -61,13 +74,20 @@ inline ContentIndexConfig SharedContentScope(const ContentIndexConfig& previous,
     config.roots.clear();
     config.excluded_directories.clear();
     config.excluded_paths = excluded;
-    for (const auto& volume : volumes) {
-        if (!volume.enabled || !volume.supported || volume.mount_point.empty()) continue;
-        ContentIndexRoot root{ContentScopeKey(volume.mount_point), config.default_encoding};
+    auto add_volume = [&](const VolumeInfo& volume) {
+        if (!volume.enabled || !volume.supported || volume.mount_point.empty()) return;
+        const std::wstring key = ContentScopeKey(volume.mount_point);
+        if (std::any_of(config.roots.begin(), config.roots.end(),
+                        [&](const ContentIndexRoot& existing) { return existing.path == key; })) {
+            return;
+        }
+        ContentIndexRoot root{key, config.default_encoding};
         for (const auto& old : previous.roots)
             if (ContentScopeKey(old.path) == root.path) root.encoding = old.encoding;
         config.roots.push_back(std::move(root));
-    }
+    };
+    for (const auto& volume : volumes) if (volume.online) add_volume(volume);
+    for (const auto& volume : volumes) if (!volume.online) add_volume(volume);
     std::sort(config.roots.begin(), config.roots.end(), [](const auto& a, const auto& b) { return a.path < b.path; });
     for (auto& path : config.excluded_paths) path = ContentScopeKey(std::move(path));
     std::sort(config.excluded_paths.begin(), config.excluded_paths.end());

@@ -14,6 +14,8 @@
 #include <d2d1effects_2.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <uxtheme.h>
+#pragma comment(lib, "uxtheme.lib")
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -198,20 +200,22 @@ struct TargetGuard {
     }
 };
 
-FILE* MaterialLogFile() {
-    static FILE* file = []() -> FILE* {
+void AppendMaterialLog(const char* line) {
+    static const std::wstring path = []() -> std::wstring {
         wchar_t dir[MAX_PATH]{};
-        wchar_t path[MAX_PATH]{};
-        if (!GetEnvironmentVariableW(L"LOCALAPPDATA", dir, MAX_PATH))
-            return nullptr;
-        swprintf_s(path, L"%s\\Pulse", dir);
-        CreateDirectoryW(path, nullptr);
-        swprintf_s(path, L"%s\\Pulse\\material.log", dir);
-        FILE* f = nullptr;
-        _wfopen_s(&f, path, L"a");
-        return f;
+        const DWORD count = GetEnvironmentVariableW(L"LOCALAPPDATA", dir, MAX_PATH);
+        if (!count || count >= MAX_PATH) return {};
+        std::wstring folder = std::wstring(dir) + L"\\Pulse";
+        CreateDirectoryW(folder.c_str(), nullptr);
+        return folder + L"\\material.log";
     }();
-    return file;
+    if (path.empty()) return;
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(file, line, static_cast<DWORD>(std::strlen(line)), &written, nullptr);
+    CloseHandle(file);
 }
 
 struct DecodedPixels {
@@ -334,7 +338,6 @@ struct WindowMaterial::DecodeWorker {
 };
 
 void LogWindowMaterial(const char* fmt, ...) {
-    FILE* f = MaterialLogFile();
     SYSTEMTIME st{};
     GetLocalTime(&st);
     char line[1024];
@@ -346,10 +349,7 @@ void LogWindowMaterial(const char* fmt, ...) {
     char out[1200];
     sprintf_s(out, "%02u:%02u:%02u.%03u %s\n", st.wHour, st.wMinute, st.wSecond,
               st.wMilliseconds, line);
-    if (f) {
-        fputs(out, f);
-        fflush(f);
-    }
+    AppendMaterialLog(out);
     OutputDebugStringA(out);
     fputs(out, stderr);
     fflush(stderr);
@@ -534,10 +534,17 @@ bool WindowEffectUsesBackdrop(WindowEffect effect) noexcept {
 bool ApplyWindowEffect(HWND hwnd, WindowEffect effect, bool dark) noexcept {
     if (!hwnd) return false;
     UpdateWindowTheme(hwnd, dark);
+    // Keep custom-frame WS_CAPTION windows (animations) from painting UXTheme/DWM title text
+    // or the 16x16 app icon into row 0 on Windows 10 when SetWindowTextW fires.
+    WTA_OPTIONS wta{};
+    wta.dwFlags = WTNCA_NODRAWCAPTION | WTNCA_NODRAWICON | WTNCA_NOSYSMENU | WTNCA_NOMIRRORHELP;
+    wta.dwMask = WTNCA_VALIDBITS;
+    SetWindowThemeAttribute(hwnd, WTA_NONCLIENT, &wta, sizeof(wta));
     const DWORD corner = DWMWCP_ROUND;
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
 
-    if (IsHighContrast() || !compat::ModernWindows() || pulse::os::TrueWindowsBuild() < 22000) {
+    const bool win11_or_newer = pulse::os::TrueWindowsBuild() >= 22000;
+    if (IsHighContrast() || !compat::ModernWindows() || !win11_or_newer) {
         effect = WindowEffect::None;
     }
 
@@ -567,7 +574,9 @@ bool ApplyWindowEffect(HWND hwnd, WindowEffect effect, bool dark) noexcept {
         DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
     }
 
-    const MARGINS margins{ -1 };
+    // Windows 11 system backdrops need a sheet-of-glass extension (-1); on Windows 10 a
+    // 1 px bottom margin keeps DWM shadow & animations without extending a non-client top frame.
+    const MARGINS margins = win11_or_newer ? MARGINS{ -1 } : MARGINS{ 0, 0, 0, 1 };
     DwmExtendFrameIntoClientArea(hwnd, &margins);
     return WindowEffectUsesBackdrop(effect) && SUCCEEDED(hr);
 }
@@ -954,6 +963,35 @@ WindowMaterial::Recipe WindowMaterial::RecipeFor(WindowEffect effect, bool dark)
         break;
     }
     return recipe;
+}
+
+HRESULT WindowMaterial::BuildMicaImage(ID2D1DeviceContext* dc, ID2D1Image* input,
+    bool alternate, bool dark, float blur_std, ID2D1Image** output) noexcept {
+    const auto recipe = RecipeFor(alternate ? WindowEffect::MicaAlt : WindowEffect::Mica, dark);
+    return BuildMicaImageWithProfile(dc, input, alternate, dark, blur_std,
+        recipe.luminosity_opacity, recipe.tint_opacity, output);
+}
+
+HRESULT WindowMaterial::BuildMicaImageWithProfile(ID2D1DeviceContext* dc, ID2D1Image* input,
+    bool alternate, bool dark, float blur_std, float luminosity_opacity,
+    float tint_opacity, ID2D1Image** output) noexcept {
+    if (!output) return E_POINTER;
+    *output = nullptr;
+    const auto recipe = RecipeFor(alternate ? WindowEffect::MicaAlt : WindowEffect::Mica, dark);
+    MaterialGraph graph;
+    const HRESULT hr = BuildMaterialGraph(dc, input, recipe.tint, blur_std,
+        std::clamp(luminosity_opacity, 0.0f, 1.0f), std::clamp(tint_opacity, 0.0f, 1.0f), graph);
+    if (FAILED(hr)) return hr;
+    // Composition's documented historical mode-name inversion also applies to
+    // the D2D numeric modes used by this desktop profile. Other callers of the
+    // internal main-window graph retain their existing behavior.
+    graph.lum_blend->SetValue(D2D1_BLEND_PROP_MODE, D2D1_BLEND_MODE_COLOR);
+    graph.color_blend->SetValue(D2D1_BLEND_PROP_MODE, D2D1_BLEND_MODE_LUMINOSITY);
+    // A desktop shares this graph across many rounded cards; retain its output
+    // until the wallpaper/theme/DPI cache is invalidated by the caller.
+    graph.color_blend->SetValue(D2D1_PROPERTY_CACHED, TRUE);
+    graph.color_blend->GetOutput(output);
+    return *output ? S_OK : E_FAIL;
 }
 
 ID2D1Bitmap* WindowMaterial::SourceBitmap(const std::wstring& path) {

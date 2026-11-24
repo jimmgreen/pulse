@@ -52,6 +52,7 @@ public:
 
     bool Init(IDWriteFactory* dwrite, ID2D1RenderTarget* target);
     void Shutdown() noexcept;
+    void TrimCaches() noexcept;
     bool Enabled() const noexcept;
 
     bool Draw(std::wstring_view text, IDWriteTextFormat* format,

@@ -7,6 +7,7 @@
 #include "../common/file_placeholder.h"
 #include "../common/path_utils.h"
 #include "../common/runtime_log.h"
+#include <dwmapi.h>
 #include <shobjidl.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -22,6 +23,7 @@
 #include <optional>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -30,6 +32,7 @@ namespace pulse::ui {
 #ifdef PULSE_PREVIEW_HANDLER_TESTING
 IUnknown* (*g_preview_handler_factory_for_test)() = nullptr;
 std::atomic<uint32_t> g_preview_handler_provider_for_test{0};
+HRESULT g_preview_handler_activation_hr_for_test = E_FAIL;
 #endif
 namespace {
 
@@ -73,6 +76,22 @@ struct SlowProvider {
 };
 std::mutex g_slow_provider_mutex;
 std::unordered_map<std::wstring, SlowProvider> g_slow_providers;
+std::unordered_set<std::wstring> g_unavailable_providers;
+std::mutex g_association_mutex;
+std::unordered_map<std::wstring, CLSID> g_clsid_cache;
+std::unordered_map<std::wstring, ULONGLONG> g_clsid_negative;
+
+void ResetAssociationCache() {
+    std::lock_guard<std::mutex> lock(g_association_mutex);
+    g_clsid_cache.clear();
+    g_clsid_negative.clear();
+}
+
+void EvictAssociationCache(const std::wstring& extension) {
+    if (extension.empty()) return;
+    std::lock_guard<std::mutex> lock(g_association_mutex);
+    g_clsid_cache.erase(extension);
+}
 
 ULONGLONG CommandBudgetMs() {
 #ifdef PULSE_PREVIEW_HANDLER_TESTING
@@ -123,8 +142,27 @@ bool ProviderCoolingDown(const std::wstring& extension) {
 }
 
 void ResetSlowProvidersForTest() {
+    {
+        std::lock_guard<std::mutex> lock(g_slow_provider_mutex);
+        g_slow_providers.clear();
+        g_unavailable_providers.clear();
+    }
+    ResetAssociationCache();
+}
+
+void NoteUnavailableProvider(const std::wstring& extension) {
+    if (extension.empty()) return;
+    {
+        std::lock_guard<std::mutex> lock(g_slow_provider_mutex);
+        g_unavailable_providers.insert(extension);
+    }
+    EvictAssociationCache(extension);
+}
+
+bool ProviderUnavailable(const std::wstring& extension) {
+    if (extension.empty()) return false;
     std::lock_guard<std::mutex> lock(g_slow_provider_mutex);
-    g_slow_providers.clear();
+    return g_unavailable_providers.count(extension) != 0;
 }
 
 // A provider that answered - however long it took, and whether or not the pane
@@ -135,6 +173,7 @@ void ClearSlowProvider(const std::wstring& extension) {
     if (extension.empty()) return;
     std::lock_guard<std::mutex> lock(g_slow_provider_mutex);
     g_slow_providers.erase(extension);
+    g_unavailable_providers.erase(extension);
 }
 
 // Provider HWNDs have no cross-thread Win32 owner. Their logical owner is
@@ -160,8 +199,8 @@ struct ClsidEq {
     }
 };
 
-thread_local std::unordered_map<CLSID, ComPtr<IClassFactory>, ClsidHash, ClsidEq> g_factories;
-std::mutex g_association_mutex;
+thread_local std::unordered_map<CLSID, ComPtr<IClassFactory>, ClsidHash, ClsidEq> g_factories_64;
+thread_local std::unordered_map<CLSID, ComPtr<IClassFactory>, ClsidHash, ClsidEq> g_factories_32;
 std::once_flag g_register_class_once;
 #ifdef PULSE_PREVIEW_HANDLER_TESTING
 std::atomic<uint32_t> g_test_open_attempts{0};
@@ -217,26 +256,230 @@ bool ExtensionHasTextContentType(const std::wstring& extension) {
     return text;
 }
 
+std::wstring TrimWhitespace(std::wstring_view text) {
+    size_t start = 0;
+    while (start < text.size() && std::iswspace(text[start])) ++start;
+    size_t end = text.size();
+    while (end > start && std::iswspace(text[end - 1])) --end;
+    return std::wstring(text.substr(start, end - start));
+}
+
+std::wstring ExpandEnvString(std::wstring_view raw) {
+    std::wstring value(raw);
+    if (value.find(L'%') == std::wstring::npos) return value;
+    const DWORD needed = ExpandEnvironmentStringsW(value.c_str(), nullptr, 0);
+    if (needed <= 1 || needed >= 32768) return value;
+    std::wstring buf(needed, L'\0');
+    const DWORD written = ExpandEnvironmentStringsW(value.c_str(), buf.data(), needed);
+    if (written == 0 || written > needed) return value;
+    while (!buf.empty() && buf.back() == L'\0') buf.pop_back();
+    return buf;
+}
+
+bool ReadRegStringValue(HKEY key, const wchar_t* value_name, std::wstring& out, bool* exists = nullptr) {
+    out.clear();
+    if (exists) *exists = false;
+    if (!key) return false;
+    DWORD type = 0;
+    DWORD bytes = 0;
+    LSTATUS status = RegQueryValueExW(key, value_name, nullptr, &type, nullptr, &bytes);
+    if (status != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ))
+        return false;
+    if (exists) *exists = true;
+    std::wstring buf(bytes / sizeof(wchar_t) + 1, L'\0');
+    DWORD read_bytes = static_cast<DWORD>(buf.size() * sizeof(wchar_t));
+    status = RegQueryValueExW(key, value_name, nullptr, &type,
+        reinterpret_cast<BYTE*>(buf.data()), &read_bytes);
+    if (status != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ))
+        return false;
+    size_t chars = read_bytes / sizeof(wchar_t);
+    if (chars > buf.size()) chars = buf.size();
+    buf.resize(chars);
+    while (!buf.empty() && buf.back() == L'\0') buf.pop_back();
+    out = TrimWhitespace(buf);
+    return !out.empty();
+}
+
+bool ReadSubkeyStringValue(HKEY parent, REGSAM view, const wchar_t* subkey,
+                           const wchar_t* value_name, std::wstring& out) {
+    out.clear();
+    HKEY child = nullptr;
+    if (RegOpenKeyExW(parent, subkey, 0, view, &child) != ERROR_SUCCESS)
+        return false;
+    const bool ok = ReadRegStringValue(child, value_name, out);
+    RegCloseKey(child);
+    return ok;
+}
+
+bool FileExistsNoDir(const std::wstring& path) {
+    if (path.empty()) return false;
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+bool ServerBinaryExists(const wchar_t* raw, bool is_exe) {
+    if (!raw) return false;
+    const std::wstring trimmed = TrimWhitespace(raw);
+    if (trimmed.empty()) return false;
+    const std::wstring expanded = ExpandEnvString(trimmed);
+    if (expanded.empty()) return false;
+
+    auto exists_or_search = [&](const std::wstring& candidate) -> bool {
+        if (candidate.empty()) return false;
+        if (FileExistsNoDir(candidate)) return true;
+        const bool bare_name = candidate.find(L'\\') == std::wstring::npos &&
+                               candidate.find(L'/') == std::wstring::npos;
+        if (!bare_name) return false;
+        return SearchPathW(nullptr, candidate.c_str(), is_exe ? L".exe" : L".dll",
+                           0, nullptr, nullptr) > 0;
+    };
+
+    if (FileExistsNoDir(expanded)) return true;
+    if (expanded.front() == L'"') {
+        const size_t close = expanded.find(L'"', 1);
+        if (close == std::wstring::npos || close <= 1) return false;
+        return exists_or_search(expanded.substr(1, close - 1));
+    }
+    for (size_t pos = expanded.find(L' '); pos != std::wstring::npos; pos = expanded.find(L' ', pos + 1)) {
+        if (exists_or_search(expanded.substr(0, pos))) return true;
+    }
+    return expanded.find(L' ') == std::wstring::npos && exists_or_search(expanded);
+}
+
+bool IsAppIdSurrogateActivatable(const wchar_t* appid_raw, REGSAM clsid_view) {
+    if (!appid_raw) return false;
+    const std::wstring trimmed = TrimWhitespace(appid_raw);
+    if (trimmed.empty()) return false;
+    CLSID appid{};
+    if (FAILED(CLSIDFromString(trimmed.c_str(), &appid))) return false;
+    wchar_t guid[64]{};
+    if (StringFromGUID2(appid, guid, static_cast<int>(ARRAYSIZE(guid))) <= 0) return false;
+    const std::wstring appid_path = std::wstring(L"AppID\\") + guid;
+    const REGSAM views[] = {clsid_view, KEY_READ | KEY_WOW64_64KEY, KEY_READ | KEY_WOW64_32KEY};
+    for (size_t idx = 0; idx < ARRAYSIZE(views); ++idx) {
+        if (idx > 0 && views[idx] == clsid_view) continue;
+        HKEY appid_key = nullptr;
+        if (RegOpenKeyExW(HKEY_CLASSES_ROOT, appid_path.c_str(), 0, views[idx], &appid_key) != ERROR_SUCCESS)
+            continue;
+        bool activatable = false;
+        std::wstring local_service;
+        if (ReadRegStringValue(appid_key, L"LocalService", local_service)) {
+            activatable = true;
+        } else {
+            bool surrogate_exists = false;
+            std::wstring surrogate;
+            (void)ReadRegStringValue(appid_key, L"DllSurrogate", surrogate, &surrogate_exists);
+            if (surrogate_exists) {
+                if (surrogate.empty()) {
+                    activatable = true;
+                } else if (ServerBinaryExists(surrogate.c_str(), true)) {
+                    activatable = true;
+#ifdef _WIN64
+                    if ((clsid_view & KEY_WOW64_32KEY) != 0) {
+                        const std::wstring expanded_sur = ExpandEnvString(surrogate);
+                        std::wstring lower_sur;
+                        lower_sur.reserve(expanded_sur.size());
+                        for (wchar_t ch : expanded_sur) {
+                            lower_sur.push_back(ch == L'/' ? L'\\' : static_cast<wchar_t>(std::towlower(ch)));
+                        }
+                        constexpr std::wstring_view kSys32Prevhost = L"\\system32\\prevhost.exe";
+                        if (lower_sur.size() >= kSys32Prevhost.size() &&
+                            lower_sur.compare(lower_sur.size() - kSys32Prevhost.size(),
+                                              kSys32Prevhost.size(), kSys32Prevhost) == 0) {
+                            activatable = false;
+                        }
+                    }
+#endif
+                }
+            }
+        }
+        RegCloseKey(appid_key);
+        if (activatable) return true;
+    }
+    return false;
+}
+
+bool IsPreviewHandlerClsidActivatable(const CLSID& clsid, int depth = 0) {
+    wchar_t guid[64]{};
+    if (StringFromGUID2(clsid, guid, static_cast<int>(ARRAYSIZE(guid))) <= 0)
+        return false;
+    const std::wstring packaged_key = std::wstring(L"PackagedCom\\ClassIndex\\") + guid;
+    HKEY packaged = nullptr;
+    if (RegOpenKeyExW(HKEY_CLASSES_ROOT, packaged_key.c_str(), 0, KEY_READ, &packaged) == ERROR_SUCCESS) {
+        RegCloseKey(packaged);
+        return true;
+    }
+    const std::wstring clsid_path = std::wstring(L"CLSID\\") + guid;
+    const REGSAM views[] = {KEY_READ | KEY_WOW64_64KEY, KEY_READ | KEY_WOW64_32KEY};
+    for (const REGSAM view : views) {
+        HKEY clsid_key = nullptr;
+        if (RegOpenKeyExW(HKEY_CLASSES_ROOT, clsid_path.c_str(), 0, view, &clsid_key) != ERROR_SUCCESS)
+            continue;
+        bool activatable = false;
+        std::wstring server_exec;
+        std::wstring local_server;
+        if ((ReadSubkeyStringValue(clsid_key, view, L"LocalServer32", L"ServerExecutable", server_exec) &&
+             ServerBinaryExists(server_exec.c_str(), true)) ||
+            (ReadSubkeyStringValue(clsid_key, view, L"LocalServer32", nullptr, local_server) &&
+             ServerBinaryExists(local_server.c_str(), true))) {
+            activatable = true;
+        } else {
+            std::wstring appid;
+            std::wstring inproc;
+            if (ReadRegStringValue(clsid_key, L"AppID", appid) &&
+                ReadSubkeyStringValue(clsid_key, view, L"InprocServer32", nullptr, inproc) &&
+                ServerBinaryExists(inproc.c_str(), false) &&
+                IsAppIdSurrogateActivatable(appid.c_str(), view)) {
+                activatable = true;
+            } else if (depth == 0) {
+                std::wstring treat_as;
+                CLSID treated{};
+                if (ReadSubkeyStringValue(clsid_key, view, L"TreatAs", nullptr, treat_as) &&
+                    SUCCEEDED(CLSIDFromString(treat_as.c_str(), &treated)) &&
+                    !IsEqualCLSID(treated, clsid) &&
+                    IsPreviewHandlerClsidActivatable(treated, 1)) {
+                    activatable = true;
+                }
+            }
+        }
+        RegCloseKey(clsid_key);
+        if (activatable) return true;
+    }
+    return false;
+}
+
+DWORD ActivationContextForBit(bool activate_32) noexcept {
+#ifdef _WIN64
+    return activate_32 ? (CLSCTX_LOCAL_SERVER | CLSCTX_ACTIVATE_32_BIT_SERVER) : CLSCTX_LOCAL_SERVER;
+#else
+    (void)activate_32;
+    return CLSCTX_LOCAL_SERVER;
+#endif
+}
+
+HRESULT QueryIsolatedClassObject(const CLSID& clsid, bool activate_32, ComPtr<IClassFactory>& factory) {
+    factory.Reset();
+    return CoGetClassObject(clsid, ActivationContextForBit(activate_32), nullptr, IID_PPV_ARGS(&factory));
+}
+
 bool FindPreviewHandlerClsid(const std::wstring& extension, CLSID& clsid) {
 #ifdef PULSE_PREVIEW_HANDLER_TESTING
     if (g_preview_handler_factory_for_test) { clsid = GUID_NULL; clsid.Data1 = g_preview_handler_provider_for_test.load(); return true; }
 #endif
-    static std::unordered_map<std::wstring, CLSID> cache;
     // A lookup that found nothing is remembered, but only for a while: the shell
     // can fail this query while it is busy with something else, and carrying
     // that answer for the whole session leaves the type unpreviewable until the
     // application restarts.
     constexpr ULONGLONG kNegativeTtlMs = 30 * 1000;
-    static std::unordered_map<std::wstring, ULONGLONG> negative;
     {
         std::lock_guard<std::mutex> lock(g_association_mutex);
-        if (auto it = cache.find(extension); it != cache.end()) {
+        if (auto it = g_clsid_cache.find(extension); it != g_clsid_cache.end()) {
             clsid = it->second;
             return true;
         }
-        if (auto it = negative.find(extension); it != negative.end()) {
+        if (auto it = g_clsid_negative.find(extension); it != g_clsid_negative.end()) {
             if (GetTickCount64() - it->second < kNegativeTtlMs) return false;
-            negative.erase(it);
+            g_clsid_negative.erase(it);
         }
     }
 
@@ -244,51 +487,121 @@ bool FindPreviewHandlerClsid(const std::wstring& extension, CLSID& clsid) {
     // path too, and a lookup queued behind another thread's slow call used to
     // freeze the window along with it. Resolving the same extension twice is
     // harmless.
-    ComPtr<IQueryAssociations> assoc;
-    HRESULT hr = AssocCreate(kQueryAssociations, IID_PPV_ARGS(&assoc));
-    if (FAILED(hr)) {
-        return false;
+    std::vector<CLSID> candidates;
+    auto push_candidate = [&](const CLSID& c) {
+        if (IsEqualCLSID(c, GUID_NULL)) return;
+        for (const auto& existing : candidates) {
+            if (IsEqualCLSID(existing, c)) return;
+        }
+        candidates.push_back(c);
+    };
+    auto try_parse_and_push = [&](const std::wstring& text) {
+        if (text.empty()) return;
+        CLSID parsed{};
+        if (SUCCEEDED(CLSIDFromString(text.c_str(), &parsed))) push_candidate(parsed);
+    };
+    auto query_shellex_from_key = [&](HKEY root, REGSAM view, const std::wstring& base_subkey) {
+        if (base_subkey.empty()) return;
+        const std::wstring subkey = base_subkey + L"\\ShellEx\\" + kPreviewHandlerIid;
+        std::wstring guid_text;
+        if (ReadSubkeyStringValue(root, view, subkey.c_str(), nullptr, guid_text)) {
+            try_parse_and_push(guid_text);
+        }
+    };
+    auto query_progid_handlers = [&](const std::wstring& progid) {
+        if (progid.empty()) return;
+        for (const REGSAM view : {KEY_READ | KEY_WOW64_64KEY, KEY_READ | KEY_WOW64_32KEY}) {
+            query_shellex_from_key(HKEY_CLASSES_ROOT, view, progid);
+            std::wstring curver;
+            if (ReadSubkeyStringValue(HKEY_CLASSES_ROOT, view, (progid + L"\\CurVer").c_str(), nullptr, curver) &&
+                curver != progid) {
+                query_shellex_from_key(HKEY_CLASSES_ROOT, view, curver);
+            }
+        }
+    };
+
+    {
+        wchar_t guid[64]{};
+        DWORD chars = ARRAYSIZE(guid);
+        if (SUCCEEDED(AssocQueryStringW(ASSOCF_NOTRUNCATE, ASSOCSTR_SHELLEXTENSION,
+                                      extension.c_str(), kPreviewHandlerIid, guid, &chars))) {
+            try_parse_and_push(TrimWhitespace(guid));
+        }
     }
-    hr = assoc->Init(ASSOCF_INIT_DEFAULTTOSTAR, extension.c_str(), nullptr, nullptr);
-    if (FAILED(hr)) {
-        return false;
+    {
+        std::wstring user_progid;
+        const std::wstring user_choice_key =
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\" + extension + L"\\UserChoice";
+        if (ReadSubkeyStringValue(HKEY_CURRENT_USER, KEY_READ, user_choice_key.c_str(), L"ProgId", user_progid)) {
+            query_progid_handlers(user_progid);
+        }
     }
-    wchar_t guid[64]{};
-    DWORD chars = ARRAYSIZE(guid);
-    CLSID resolved{};
-    const bool found =
-        SUCCEEDED(assoc->GetString(ASSOCF_NOTRUNCATE, ASSOCSTR_SHELLEXTENSION,
-                                   kPreviewHandlerIid, guid, &chars)) &&
-        SUCCEEDED(CLSIDFromString(guid, &resolved));
+    {
+        ComPtr<IQueryAssociations> assoc;
+        if (SUCCEEDED(AssocCreate(kQueryAssociations, IID_PPV_ARGS(&assoc))) &&
+            SUCCEEDED(assoc->Init(ASSOCF_INIT_DEFAULTTOSTAR, extension.c_str(), nullptr, nullptr))) {
+            wchar_t guid[64]{};
+            DWORD chars = ARRAYSIZE(guid);
+            if (SUCCEEDED(assoc->GetString(ASSOCF_NOTRUNCATE, ASSOCSTR_SHELLEXTENSION,
+                                           kPreviewHandlerIid, guid, &chars))) {
+                try_parse_and_push(TrimWhitespace(guid));
+            }
+        }
+    }
+    for (const REGSAM view : {KEY_READ | KEY_WOW64_64KEY, KEY_READ | KEY_WOW64_32KEY}) {
+        query_shellex_from_key(HKEY_CLASSES_ROOT, view, extension);
+        std::wstring default_progid;
+        if (ReadSubkeyStringValue(HKEY_CLASSES_ROOT, view, extension.c_str(), nullptr, default_progid)) {
+            query_progid_handlers(default_progid);
+        }
+    }
+
     // The TXT previewer means the native text path is the faster preview of the
     // same content, so its extensions are not handed to a COM server at all.
-    const bool native_text = found && IsEqualCLSID(resolved, kWindowsTxtPreviewer);
+    CLSID resolved{};
+    bool activatable = false;
+    if (candidates.empty() || !IsEqualCLSID(candidates.front(), kWindowsTxtPreviewer)) {
+        for (const CLSID& candidate : candidates) {
+            if (IsEqualCLSID(candidate, kWindowsTxtPreviewer)) continue;
+            if (IsPreviewHandlerClsidActivatable(candidate)) {
+                resolved = candidate;
+                activatable = true;
+                break;
+            }
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(g_association_mutex);
-        if (found && !native_text) cache[extension] = resolved;
-        else negative[extension] = GetTickCount64();
+        if (activatable) {
+            g_clsid_cache[extension] = resolved;
+            g_clsid_negative.erase(extension);
+        } else {
+            g_clsid_negative[extension] = GetTickCount64();
+        }
     }
-    if (!found || native_text) {
+    if (!activatable) {
         return false;
     }
     clsid = resolved;
     return true;
 }
 
-ComPtr<IClassFactory> FactoryFor(const CLSID& clsid) {
-    if (auto it = g_factories.find(clsid); it != g_factories.end()) {
+ComPtr<IClassFactory> FactoryFor(const CLSID& clsid, bool activate_32, HRESULT& hr_out) {
+    auto& factories = activate_32 ? g_factories_32 : g_factories_64;
+    if (auto it = factories.find(clsid); it != factories.end()) {
+        hr_out = S_OK;
         return it->second;
     }
     ComPtr<IClassFactory> factory;
-    HRESULT hr = CoGetClassObject(clsid, CLSCTX_LOCAL_SERVER, nullptr,
-                                  IID_PPV_ARGS(&factory));
-    if (FAILED(hr) || !factory) return {};
-    g_factories[clsid] = factory;
+    hr_out = QueryIsolatedClassObject(clsid, activate_32, factory);
+    if (FAILED(hr_out) || !factory) return {};
+    factories[clsid] = factory;
     return factory;
 }
 
-void EvictFactory(const CLSID& clsid) {
-    g_factories.erase(clsid);
+void EvictFactory(const CLSID& clsid, bool activate_32) {
+    auto& factories = activate_32 ? g_factories_32 : g_factories_64;
+    factories.erase(clsid);
 }
 
 ComPtr<IUnknown> CreateHandler(const CLSID& clsid, HRESULT& result) {
@@ -296,28 +609,57 @@ ComPtr<IUnknown> CreateHandler(const CLSID& clsid, HRESULT& result) {
     if (g_preview_handler_factory_for_test) {
         ComPtr<IUnknown> handler;
         handler.Attach(g_preview_handler_factory_for_test());
-        result = handler ? S_OK : E_FAIL;
+        result = handler ? S_OK : g_preview_handler_activation_hr_for_test;
         return handler;
     }
 #endif
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        ComPtr<IClassFactory> factory = FactoryFor(clsid);
-        if (factory) {
-            ComPtr<IUnknown> unknown;
-            const HRESULT hr = factory->CreateInstance(nullptr, IID_PPV_ARGS(&unknown));
-            result = hr;
-            if (SUCCEEDED(hr) && unknown) return unknown;
-            EvictFactory(clsid);
-            if (hr != kServerExecFailure && attempt == 0) break;
-            continue;
+    HRESULT best_hr = E_FAIL;
+    bool has_best_hr = false;
+    auto record_hr = [&](HRESULT hr) {
+        if (!has_best_hr) {
+            best_hr = hr;
+            has_best_hr = true;
+            return;
         }
-        ComPtr<IUnknown> unknown;
-        HRESULT hr = CoCreateInstance(clsid, nullptr, CLSCTX_LOCAL_SERVER,
-                                      IID_PPV_ARGS(&unknown));
-        result = hr;
-        if (SUCCEEDED(hr) && unknown) return unknown;
-        if (hr != kServerExecFailure) break;
+        if (best_hr == REGDB_E_CLASSNOTREG && hr != REGDB_E_CLASSNOTREG) {
+            best_hr = hr;
+        }
+    };
+    auto try_context = [&](bool activate_32) -> ComPtr<IUnknown> {
+        const DWORD ctx = ActivationContextForBit(activate_32);
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            HRESULT factory_hr = S_OK;
+            ComPtr<IClassFactory> factory = FactoryFor(clsid, activate_32, factory_hr);
+            if (factory) {
+                ComPtr<IUnknown> unknown;
+                const HRESULT hr = factory->CreateInstance(nullptr, IID_PPV_ARGS(&unknown));
+                record_hr(hr);
+                if (SUCCEEDED(hr) && unknown) return unknown;
+                EvictFactory(clsid, activate_32);
+                if (hr != kServerExecFailure && attempt == 0) break;
+                continue;
+            }
+            record_hr(factory_hr);
+            ComPtr<IUnknown> unknown;
+            const HRESULT hr = CoCreateInstance(clsid, nullptr, ctx, IID_PPV_ARGS(&unknown));
+            record_hr(hr);
+            if (SUCCEEDED(hr) && unknown) return unknown;
+            if (hr != kServerExecFailure) break;
+        }
+        return {};
+    };
+
+    if (ComPtr<IUnknown> unknown = try_context(false)) {
+        result = S_OK;
+        return unknown;
     }
+#ifdef _WIN64
+    if (ComPtr<IUnknown> unknown = try_context(true)) {
+        result = S_OK;
+        return unknown;
+    }
+#endif
+    result = has_best_hr ? best_hr : E_FAIL;
     return {};
 }
 
@@ -410,9 +752,9 @@ bool PreviewHandlerHost::CanHost(const std::wstring& path) {
     // below - renders instantly in the native text view; a handler process is
     // only started for previews the pane cannot draw itself.
     if (ExtensionHasTextContentType(extension)) return false;
-    // A provider that just stalled is left alone until it has warmed up: the
-    // caller then takes the thumbnail path, which answers on its own process.
-    if (ProviderCoolingDown(extension)) return false;
+    // A provider that just stalled or failed activation as unregistered/missing is
+    // left alone so the caller falls back to the native/thumbnail path.
+    if (ProviderCoolingDown(extension) || ProviderUnavailable(extension)) return false;
     CLSID clsid{};
     return FindPreviewHandlerClsid(extension, clsid);
 }
@@ -453,6 +795,7 @@ struct PreviewHandlerHost::WorkerState {
     bool EnsureWindow() {
         if (hwnd && IsWindow(hwnd)) return true;
         hwnd = nullptr;
+        surface_cloaked = false;
         overlay.store(nullptr, std::memory_order_release);
         if (!owner || !IsWindow(owner)) return false;
         RegisterClassOnce();
@@ -482,12 +825,18 @@ struct PreviewHandlerHost::WorkerState {
         return false;
     }
 
+    void SetPresented(bool visible) {
+        if (presented.exchange(visible, std::memory_order_acq_rel) != visible && notify)
+            InvalidateRect(notify, nullptr, FALSE);
+    }
+
     void HideWindow() {
         pan.Disable();
         if (hwnd) {
             SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW);
         }
+        SetPresented(false);
         shown = false;
         placed_x = INT_MIN;
         placed_y = INT_MIN;
@@ -503,8 +852,23 @@ struct PreviewHandlerHost::WorkerState {
         pan.Enable(hwnd);
     }
 
+    bool SetSurfaceCloak(bool cloaked) {
+        if (surface_cloaked == cloaked) return true;
+        const BOOL value = cloaked ? TRUE : FALSE;
+        if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &value, sizeof(value))))
+            return false;
+        surface_cloaked = cloaked;
+        return true;
+    }
+
     void PlaceOverlay() {
-        if (!hwnd || !owner) return;
+        // A provider can pump owner events while inside DoPreview. Keep the
+        // staging surface stable and off screen until that call finishes.
+        if (initializing_surface) return;
+        if (!hwnd || !owner) {
+            SetPresented(false);
+            return;
+        }
         if (!IsWindow(owner) || !IsWindowVisible(owner) || IsIconic(owner_root)) {
             HideWindow();
             return;
@@ -519,7 +883,10 @@ struct PreviewHandlerHost::WorkerState {
         } place_done;
 #endif
         POINT origin{bounds.left, bounds.top};
-        if (!ClientToScreen(owner, &origin)) return;
+        if (!ClientToScreen(owner, &origin)) {
+            HideWindow();
+            return;
+        }
         const int width = std::max(1L, bounds.right - bounds.left);
         const int height = std::max(1L, bounds.bottom - bounds.top);
         if (embedded) {
@@ -530,6 +897,10 @@ struct PreviewHandlerHost::WorkerState {
                 MapWindowPoints(ancestor, nullptr, reinterpret_cast<POINT*>(&client), 2);
                 IntersectRect(&visible, &visible, &client);
                 if (!(GetWindowLongPtrW(ancestor, GWL_STYLE) & WS_CHILD)) break;
+            }
+            if (IsRectEmpty(&visible)) {
+                HideWindow();
+                return;
             }
             OffsetRect(&visible, -origin.x, -origin.y);
             if (!EqualRect(&visible, &placed_clip)) {
@@ -546,26 +917,50 @@ struct PreviewHandlerHost::WorkerState {
             pan.Disable();
             SetWindowPos(hwnd, HWND_NOTOPMOST, origin.x, origin.y, width, height,
                          SWP_NOACTIVATE | SWP_HIDEWINDOW);
+            SetPresented(false);
             return;
         }
+        uint64_t pending_raise = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            pending_raise = raise_serial;
+        }
+        const bool force_raise = shown && pending_raise != applied_raise_serial;
         const bool size_changed = width != placed_w || height != placed_h;
         const bool moved = origin.x != placed_x || origin.y != placed_y || size_changed;
-        if (!moved && shown && IsWindowVisible(hwnd)) {
+        const bool visible = IsWindowVisible(hwnd) != FALSE;
+        if (!moved && !force_raise && shown && visible && !surface_cloaked) {
+            SetPresented(true);
             if (handler) EnablePan();
             return;
         }
+        pan.Disable();
+        // A hidden overlay may have yielded its z-order to a popup. Restore
+        // its band when showing it again, even if the rectangle did not change.
+        const bool reveal = shown && (!visible || surface_cloaked);
+        const bool raise = !shown || reveal || size_changed || force_raise;
+        if (!SetWindowPos(hwnd, raise ? (embedded ? HWND_TOP : HWND_TOPMOST) : nullptr,
+                          origin.x, origin.y, width, height,
+                          SWP_NOACTIVATE | (raise ? 0 : SWP_NOZORDER) |
+                              (shown ? SWP_SHOWWINDOW : SWP_NOREDRAW))) {
+            HideWindow();
+            return;
+        }
+        if (force_raise) applied_raise_serial = pending_raise;
         placed_x = origin.x;
         placed_y = origin.y;
         placed_w = width;
         placed_h = height;
-        pan.Disable();
-        // A move keeps the z-order it already has. Re-asserting HWND_TOPMOST on
-        // every step of a window drag only makes the window manager re-evaluate
-        // the topmost band, with the provider's window (another process) inside.
-        const bool raise = !shown || size_changed;
-        SetWindowPos(hwnd, raise ? (embedded ? HWND_TOP : HWND_TOPMOST) : nullptr, origin.x, origin.y, width, height,
-                     SWP_NOACTIVATE | (raise ? 0 : SWP_NOZORDER) |
-                         (shown ? SWP_SHOWWINDOW : SWP_NOREDRAW));
+        if (shown && !SetSurfaceCloak(false)) {
+            HideWindow();
+            return;
+        }
+        SetPresented(shown && IsWindowVisible(hwnd));
+        if (reveal) {
+            // Do not erase content a handler painted directly into the HWND.
+            RedrawWindow(hwnd, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_NOERASE);
+        }
         if (handler && shown && size_changed) {
             ComPtr<IPreviewHandler> preview;
             if (SUCCEEDED(handler->QueryInterface(IID_PPV_ARGS(&preview)))) {
@@ -631,15 +1026,20 @@ struct PreviewHandlerHost::WorkerState {
         }
 #endif
         if (path.empty() || !IsCurrent(opening_identity) || !EnsureWindow()) return false;
+        const std::wstring extension = ExtensionOf(path);
         CLSID clsid{};
-        if (!FindPreviewHandlerClsid(ExtensionOf(path), clsid)) return false;
+        if (!FindPreviewHandlerClsid(extension, clsid)) return false;
         wchar_t provider_key[40]{};
         StringFromGUID2(clsid, provider_key, static_cast<int>(std::size(provider_key)));
         auto opening_lease = PreviewProviderBudget().TryAcquire(provider_key);
         if (!opening_lease) { report(9, HRESULT_FROM_WIN32(ERROR_BUSY)); return false; }
         HRESULT activation = E_FAIL;
         ComPtr<IUnknown> unknown = CreateHandler(clsid, activation);
-        if (!unknown) { report(2, activation); return false; }
+        if (!unknown) {
+            if (IsCurrent(opening_identity)) NoteUnavailableProvider(extension);
+            report(2, activation);
+            return false;
+        }
 
         site = new PreviewFrame(hwnd);
         ComPtr<IObjectWithSite> object_with_site;
@@ -647,26 +1047,28 @@ struct PreviewHandlerHost::WorkerState {
             object_with_site->SetSite(site);
 
         const std::wstring open_path = ShellPath(path);
-        const HRESULT file_hr = InitWithFile(unknown.Get(), open_path);
-        const HRESULT item_hr = FAILED(file_hr) ? InitWithItem(unknown.Get(), open_path) : S_OK;
-        const HRESULT stream_hr = FAILED(file_hr) && FAILED(item_hr)
-            ? InitWithStream(unknown.Get(), open_path, &stream) : S_OK;
-        if (FAILED(file_hr) && FAILED(item_hr) && FAILED(stream_hr)) {
-            // Keep each attempted initialization HRESULT; optional interfaces often
-            // return E_NOINTERFACE while another initializer reports the real error.
+        const HRESULT stream_hr = InitWithStream(unknown.Get(), open_path, &stream);
+        const HRESULT item_hr = FAILED(stream_hr) ? InitWithItem(unknown.Get(), open_path) : S_OK;
+        const HRESULT file_hr = (FAILED(stream_hr) && FAILED(item_hr))
+            ? InitWithFile(unknown.Get(), open_path) : S_OK;
+        if (FAILED(stream_hr) && FAILED(item_hr) && FAILED(file_hr)) {
+            // Initialization and rendering errors belong to this document, not
+            // its registered provider. Keep each attempted initialization HRESULT.
             report(3, file_hr); report(4, item_hr); report(5, stream_hr);
             Unload(); return false;
         }
         ComPtr<IPreviewHandler> preview;
         const HRESULT preview_hr = unknown.As(&preview);
         if (FAILED(preview_hr) || !preview) {
+            if (IsCurrent(opening_identity)) NoteUnavailableProvider(extension);
             report(6, preview_hr);
             Unload(); return false;
         }
         handler = unknown.Detach();
         if (!IsCurrent(opening_identity)) { Unload(); return false; }
-        // Keep the parent hidden throughout provider initialization. A slow
-        // SetWindow/DoPreview must never make an obsolete request visible.
+        // Some handlers skip creating content for a hidden HWND but still
+        // report S_OK. Make it Win32-visible without exposing incomplete or
+        // cancelled content on the desktop. If DWM fails, stay hidden.
         PlaceOverlay();
         pan.Disable();
         RECT client{};
@@ -674,38 +1076,37 @@ struct PreviewHandlerHost::WorkerState {
         if (client.right <= client.left || client.bottom <= client.top) {
             Unload(); HideWindow(); return false;
         }
+        initializing_surface = true;
+        if (SetSurfaceCloak(true)) {
+            SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+        const auto abandon_surface = [&] {
+            HideWindow();
+            initializing_surface = false;
+            Unload();
+            return false;
+        };
         const HRESULT window_hr = preview->SetWindow(hwnd, &client);
         if (FAILED(window_hr)) {
             report(7, window_hr);
-            Unload();
-            HideWindow();
-            return false;
+            return abandon_surface();
         }
         if (!IsCurrent(opening_identity)) {
             report(8, HRESULT_FROM_WIN32(ERROR_CANCELLED));
-            Unload(); HideWindow(); return false;
+            return abandon_surface();
         }
         const HRESULT preview_result = preview->DoPreview();
         if (FAILED(preview_result)) {
             report(8, preview_result);
-            Unload();
-            HideWindow();
-            return false;
+            return abandon_surface();
         }
         preview->SetRect(&client);
         if (!IsCurrent(opening_identity)) {
             report(8, HRESULT_FROM_WIN32(ERROR_CANCELLED));
-            Unload();
-            HideWindow();
-            return false;
+            return abandon_surface();
         }
-        shown = true;
-        PlaceOverlay();
-        // Office handlers may paint directly into the host. Wake their child
-        // windows without erasing the pixels DoPreview has already produced.
-        RedrawWindow(hwnd, nullptr, nullptr,
-                     RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_NOERASE);
-        EnablePan();
+        initializing_surface = false;
         provider_lease = std::move(opening_lease);
         return true;
     }
@@ -720,6 +1121,8 @@ struct PreviewHandlerHost::WorkerState {
     std::mutex mutex;
     Command command;
     uint64_t command_version = 0;
+    uint64_t raise_serial = 0;
+    uint64_t applied_raise_serial = 0;
     ULONGLONG command_tick = 0;
     bool stop = false;
     HANDLE wake = nullptr;
@@ -733,6 +1136,7 @@ struct PreviewHandlerHost::WorkerState {
     std::atomic<uint64_t> opens_finished{0};
     std::atomic<ULONGLONG> open_started_tick{0};
     std::atomic<HWND> overlay{nullptr};
+    std::atomic<bool> presented{false};
 
     HWND hwnd = nullptr;
     HWND owner = nullptr;
@@ -752,6 +1156,8 @@ struct PreviewHandlerHost::WorkerState {
     bool app_active = true;
     bool covered = false;
     bool shown = false;
+    bool surface_cloaked = false;
+    bool initializing_surface = false;
     bool embedded = false;
     HWND owner_root = nullptr;
     RECT placed_clip{LONG_MIN, LONG_MIN, LONG_MIN, LONG_MIN};
@@ -845,14 +1251,14 @@ PreviewHandlerHost::~PreviewHandlerHost() {
 
 void PreviewHandlerHost::EnsureWorker() {
     if (worker_) return;
-    if (GetTickCount64() < admission_retry_) return;
+    const auto now = GetTickCount64();
+    if (now < admission_retry_) return;
+    // Resource or Win32 startup failure must surface as Failed rather than
+    // leaving an Idle request that can never finish loading.
+    apartment_busy_ = true;
+    admission_retry_ = now + 1000;
     auto lease = PreviewApartmentBudget().TryAcquire();
-    if (!lease) {
-        apartment_busy_ = true;
-        admission_retry_ = GetTickCount64() + 1000;
-        return;
-    }
-    apartment_busy_ = false;
+    if (!lease) return;
     auto worker = std::make_shared<WorkerState>();
     worker->apartment_lease = std::move(lease);
     worker->wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -864,10 +1270,19 @@ void PreviewHandlerHost::EnsureWorker() {
         return;
     }
     worker_ = std::move(worker);
+    apartment_busy_ = false;
+    admission_retry_ = 0;
 }
 
 PreviewHandlerHost::State PreviewHandlerHost::state() const {
     return worker_ ? worker_->state.load(std::memory_order_acquire) : (apartment_busy_ ? State::Failed : State::Idle);
+}
+
+bool PreviewHandlerHost::Presented() const noexcept {
+    const auto worker = worker_;
+    return worker && last_enabled_ && !covered_ &&
+           worker->state.load(std::memory_order_acquire) == State::Shown &&
+           worker->presented.load(std::memory_order_acquire);
 }
 
 void PreviewHandlerHost::SetNotifyWindow(HWND hwnd) {
@@ -930,12 +1345,13 @@ void PreviewHandlerHost::Reset() {
     last_bounds_ = {};
 }
 
-void PreviewHandlerHost::Reposition() {
+void PreviewHandlerHost::Reposition(bool raise_zorder) {
     auto worker = worker_;
     if (!worker || !last_enabled_) return;
     {
         std::lock_guard<std::mutex> lock(worker->mutex);
         if (!worker->command.enabled) return;
+        if (raise_zorder) ++worker->raise_serial;
         worker->BumpLocked();
     }
     SetEvent(worker->wake);
@@ -1264,22 +1680,31 @@ DWORD WINAPI PreviewHandlerHost::WorkerMain(void* parameter) {
             self->opens_finished.fetch_add(1, std::memory_order_release);
             if (opened) ClearSlowProvider(ExtensionOf(self->path));
             bool current = false;
+            bool placement_current = false;
             {
                 std::lock_guard<std::mutex> lock(self->mutex);
                 self->working_identity.clear();
-                current = !self->stop && self->command.enabled &&
+                current = !self->stop && self->command.enabled && self->command.owner == self->owner &&
                     self->command.identity == opening_identity;
+                placement_current = self->command_version == version;
             }
             if (current) {
                 self->identity = opening_identity;
                 self->pending_identity.clear();
+                self->shown = opened;
+                if (opened) {
+                    // A cover/activation or resize change received during COM
+                    // must be applied before putting the surface on screen.
+                    if (placement_current) self->PlaceOverlay();
+                } else {
+                    self->HideWindow();
+                }
                 self->state.store(opened ? State::Shown : State::Failed,
                                   std::memory_order_release);
-                if (!opened) self->HideWindow();
                 if (self->notify) InvalidateRect(self->notify, nullptr, FALSE);
             } else {
-                self->Unload();
                 self->HideWindow();
+                self->Unload();
             }
             open_due.reset();
             continue;
@@ -1308,7 +1733,8 @@ DWORD WINAPI PreviewHandlerHost::WorkerMain(void* parameter) {
     if (self->hwnd) DestroyWindow(self->hwnd);
     self->hwnd = nullptr;
     self->state.store(State::Idle, std::memory_order_release);
-    g_factories.clear();
+    g_factories_64.clear();
+    g_factories_32.clear();
     CoUninitialize();
     return 0;
 }
@@ -1351,8 +1777,12 @@ bool PreviewHandlerCanActivateIsolatedForTest(const std::wstring& path) {
     CLSID clsid{};
     if (!FindPreviewHandlerClsid(ExtensionOf(path), clsid)) return false;
     ComPtr<IClassFactory> factory;
-    return SUCCEEDED(CoGetClassObject(clsid, CLSCTX_LOCAL_SERVER, nullptr,
-                                     IID_PPV_ARGS(&factory))) && factory;
+    if (SUCCEEDED(QueryIsolatedClassObject(clsid, false, factory)) && factory) return true;
+#ifdef _WIN64
+    return SUCCEEDED(QueryIsolatedClassObject(clsid, true, factory)) && factory;
+#else
+    return false;
+#endif
 }
 #endif
 

@@ -215,6 +215,36 @@ bool SearchSpecFromArgs(const json::Value& args, AdvancedSearchSpec& spec, ToolO
         spec.size = SizePreset::Custom;
         spec.size_custom = size;
     }
+    if (const json::Value* v = args.find("content"); v && !v->as_string().empty()) {
+        const std::wstring content = Trimmed(json::Wide(v->as_string()));
+        if (!OneLine(content, 128)) {
+            error = Invalid("content must be 1 to 128 characters on one line, without quotes");
+            return false;
+        }
+        if (spec.kind == index::SearchKind::Folder) {
+            error = Invalid("content search applies to files, not type \"folder\"");
+            return false;
+        }
+        spec.content = content;
+    }
+    if (const json::Value* v = args.find("content_exclude"); v && !v->as_string().empty()) {
+        const std::wstring ex = Trimmed(json::Wide(v->as_string()));
+        if (!OneLine(ex, 64)) {
+            error = Invalid("content_exclude must be 1 to 64 characters on one line, without quotes");
+            return false;
+        }
+        spec.content_exclude = ex;
+    }
+    if (const json::Value* v = args.find("content_mode"); v && !v->as_string().empty()) {
+        const std::string& m = v->as_string();
+        if (m == "all") spec.content_mode = index::ContentMatchMode::AllWords;
+        else if (m == "any") spec.content_mode = index::ContentMatchMode::AnyWord;
+        else if (m == "phrase") spec.content_mode = index::ContentMatchMode::Phrase;
+        else {
+            error = Invalid("content_mode must be one of: all, any, phrase");
+            return false;
+        }
+    }
     if (const json::Value* v = args.find("folder"); v && !v->as_string().empty()) {
         std::wstring folder;
         if (!CheckPathArg(*v, "folder", folder, error)) return false;
@@ -222,7 +252,7 @@ bool SearchSpecFromArgs(const json::Value& args, AdvancedSearchSpec& spec, ToolO
         spec.custom_folder = folder;
     }
     if (!SearchHasCondition(spec)) {
-        error = Invalid("give at least one condition: name, type, extensions, a modified date or a size");
+        error = Invalid("give at least one condition: name, content, type, extensions, a modified date or a size");
         return false;
     }
     return true;

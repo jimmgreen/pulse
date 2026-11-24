@@ -17,6 +17,7 @@ struct Snapshot {
     std::wstring current;
     std::vector<Entry> folders;
     std::vector<Workspace> workspaces;
+    std::vector<Entry> networks;
     std::vector<StarredItem> starred_items;
     std::vector<StarredGroup> starred_groups;
     HWND endpoint = nullptr;

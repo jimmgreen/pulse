@@ -8,6 +8,8 @@
 #include "../common/string_ids.h"
 #include "../fs/fs_enum.h"
 #include "../ui/ui_renderer.h"
+#include "keymap.h"
+#include "tab_mru.h"
 
 #include <windowsx.h>
 
@@ -158,7 +160,173 @@ void Commit(AppState& s) {
 
 bool Down(int vk) { return (GetKeyState(vk) & 0x8000) != 0; }
 
+// ---- Ctrl+Tab recent tabs (ui modes step 7) ----
+
+// The folder holding the tab's folder ("D:\Work" for D:\Work\Pulse).
+std::wstring MruParent(const app::LayoutTab& tab) {
+    const app::Tab* view = tab.ActiveFolder();
+    if (!view || view->current_path.empty() || fs::IsVirtualPath(view->current_path)) return {};
+    std::wstring path = path::StripExtendedPathPrefix(view->current_path);
+    while (path.size() > 3 && (path.back() == L'\\' || path.back() == L'/')) path.pop_back();
+    const size_t cut = path.find_last_of(L"\\/");
+    if (cut == std::wstring::npos || cut + 1 >= path.size()) return {};
+    std::wstring parent = path.substr(0, cut);
+    if (parent.size() == 2 && parent[1] == L':') parent += L'\\';
+    return parent;
+}
+
+const app::LayoutTab* MruLive(const AppState& s, const app::LayoutTab* t) {
+    for (const auto& item : s.window_tabs.items)
+        if (item.get() == t) return item.get();
+    return nullptr;
+}
+
+void MruHide(AppState& s) {
+    app::CancelTabMru(s.tabMru);
+    if (!s.switcher.IsOpen()) UnhookEsc();
+    s.renderer.TabMru().Hide();
+    Kick(s);
+}
+
+void MruRefresh(AppState& s) {
+    app::PruneTabMru(s.tabMru, s.window_tabs);
+    if (!s.tabMru.IsOpen()) {
+        MruHide(s);
+        return;
+    }
+    HookEsc(s.hwnd);
+    using I = l10n::StringId;
+    ui::TabMruData data;
+    for (const app::LayoutTab* t : s.tabMru.shown) {
+        ui::TabMruRow row;
+        if (const app::LayoutTab* tab = MruLive(s, t)) {
+            row.name = app::LayoutTabTitle(*tab);
+            row.parent = MruParent(*tab);
+        }
+        data.rows.push_back(std::move(row));
+    }
+    data.selected = s.tabMru.selected;
+    data.title = l10n::Get(I::TabMruTitle);
+    wchar_t buf[64]{};
+    swprintf_s(buf, l10n::Get(I::TabMruCount).c_str(), static_cast<int>(data.rows.size()));
+    data.count = buf;
+    data.current = l10n::Get(I::TabMruCurrent);
+    data.hints = {{{true, L"Ctrl"}, {false, l10n::Get(I::TabMruHold)}, {true, L"Tab"}, {false, l10n::Get(I::TabMruDown)}},
+                  {{true, L"Shift"}, {false, l10n::Get(I::TabMruBack)}},
+                  {{false, l10n::Get(I::TabMruRelease)}},
+                  {{true, L"Esc"}, {false, l10n::Get(I::TabMruCancel)}}};
+    s.renderer.TabMru().Show(std::move(data),
+                             D2D1::RectF(0.0f, 0.0f, static_cast<float>(s.compositor.Width()),
+                                         static_cast<float>(s.compositor.Height())),
+                             s.scale, s.hwnd);
+    Kick(s);
+}
+
+void MruCommit(AppState& s) {
+    const int target = app::CommitTabMru(s.tabMru, s.window_tabs);
+    MruHide(s);
+    if (target >= 0) SwitchTabFromKeyboard(s, static_cast<size_t>(target));
+}
+
+void MruStep(AppState& s, int dir) {
+    app::StepTabMru(s.tabMru, dir);
+    MruRefresh(s);
+}
+
+// The key the user bound to "recent tabs" (Ctrl+Tab unless rebound).
+bool IsMruKey(WPARAM vk) {
+    if (vk == VK_TAB) return true;
+    if (app::IsModifierKey(static_cast<UINT>(vk))) return false;
+    const auto t = app::ActiveKeymap().Translate(app::CurrentChord(static_cast<UINT>(vk)));
+    return t.kind == app::Keymap::Translation::Rewrite && t.action == app::KeyAction::NextTab;
+}
+
+bool TabMruInput(AppState& s, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto& view = s.renderer.TabMru();
+    const float x = static_cast<float>(GET_X_LPARAM(lParam));
+    const float y = static_cast<float>(GET_Y_LPARAM(lParam));
+    switch (msg) {
+    case WM_KEYDOWN:
+        if (IsMruKey(wParam)) { MruStep(s, Down(VK_SHIFT) ? -1 : 1); return true; }
+        switch (wParam) {
+        case VK_ESCAPE: MruHide(s); break;
+        case VK_RETURN:
+        case VK_SPACE: MruCommit(s); break;
+        case VK_DOWN:
+        case VK_RIGHT: MruStep(s, 1); break;
+        case VK_UP:
+        case VK_LEFT: MruStep(s, -1); break;
+        default: break;  // swallowed: Ctrl+W and friends must not act behind the panel
+        }
+        return true;
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+        if ((wParam == VK_CONTROL || wParam == VK_MENU) && !Down(VK_CONTROL) && !Down(VK_MENU)) MruCommit(s);
+        return true;
+    case WM_CHAR:
+    case WM_DEADCHAR:
+    case WM_SYSCHAR:
+        return true;
+    case WM_SYSKEYDOWN:
+        if (IsMruKey(wParam)) { MruStep(s, Down(VK_SHIFT) ? -1 : 1); return true; }
+        if (wParam == VK_MENU) return true;
+        MruHide(s);
+        return false;
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDBLCLK: {
+        const int row = view.HitRow(x, y);
+        if (row >= 0) {
+            app::SelectTabMru(s.tabMru, row);
+            MruCommit(s);
+        } else if (!view.Contains(x, y)) {
+            MruHide(s);
+        }
+        return true;
+    }
+    case WM_MOUSEMOVE:
+        if (view.SetHover(view.HitRow(x, y))) Kick(s);
+        return true;
+    case WM_LBUTTONUP:
+    case WM_RBUTTONUP:
+    case WM_MBUTTONUP:
+        return true;
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+        MruHide(s);
+        return true;
+    case WM_MOUSEWHEEL:
+        MruStep(s, GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1);
+        return true;
+    case WM_KILLFOCUS:
+    case WM_SIZE:
+    case WM_CANCELMODE:
+        MruHide(s);
+        return false;
+    case WM_ACTIVATE:
+        if (LOWORD(wParam) == WA_INACTIVE) MruHide(s);
+        return false;
+    default:
+        return false;
+    }
+}
+
 }  // namespace
+
+bool HandleTabMruKey(AppState& s, bool back) {
+    if (s.tabMru.IsOpen()) {
+        MruStep(s, back ? -1 : 1);
+        return true;
+    }
+    if (s.switcher.IsOpen()) return false;
+    if (!app::OpenTabMru(s.tabMru, s.window_tabs, back)) return false;
+    if (!Down(VK_CONTROL) && !Down(VK_MENU)) {  // bound without a held modifier: just flip
+        MruCommit(s);
+        return true;
+    }
+    if (s.hwnd && GetFocus() != s.hwnd) SetFocus(s.hwnd);  // the modifier's release must reach this window
+    MruRefresh(s);
+    return true;
+}
 
 bool HandleWindowSwitcherKey(AppState& s, LPARAM key_lparam) {
     if (!app::IsWindowSwitcherScanCode(key_lparam) || !Down(VK_CONTROL) || Down(VK_MENU)) return false;
@@ -175,8 +343,10 @@ bool WindowSwitcherMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam, LPAR
     // The hook's Esc can arrive after the switcher closed: drop it.
     if (msg == WM_KEYDOWN && wParam == VK_ESCAPE && lParam == kHookedEsc) {
         if (s.switcher.IsOpen()) Close(s);
+        if (s.tabMru.IsOpen()) MruHide(s);
         return true;
     }
+    if (s.tabMru.IsOpen() && hwnd == s.hwnd) return TabMruInput(s, msg, wParam, lParam);
     if (!s.switcher.IsOpen() || hwnd != s.hwnd) return false;
     auto& view = s.renderer.WindowSwitcher();
     const float x = static_cast<float>(GET_X_LPARAM(lParam));

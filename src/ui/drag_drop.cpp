@@ -2,11 +2,13 @@
 #include "drag_drop.h"
 #include "../fs/fs_recycle.h"
 #include "../common/shell_id.h"
+#include "../common/rename_filename.h"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <shlguid.h>
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <cwctype>
@@ -16,6 +18,71 @@
 namespace pulse::ui {
 
 namespace {
+thread_local WindowDropTarget* g_wheel_target = nullptr;
+
+bool ReadVirtualDrop(IDataObject* obj, std::vector<std::wstring>& names, std::vector<FILEDESCRIPTORW>& files) {
+    if (!obj) return false;
+    const auto descriptor = static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_FILEDESCRIPTORW));
+    const auto content = static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_FILECONTENTS));
+    if (!descriptor || !content) return false;
+    FORMATETC format{descriptor, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    if (obj->QueryGetData(&format) != S_OK) return false;
+
+    struct Medium {
+        STGMEDIUM value{};
+        ~Medium() { ReleaseStgMedium(&value); }
+    } medium;
+    if (FAILED(obj->GetData(&format, &medium.value)) || medium.value.tymed != TYMED_HGLOBAL ||
+        !medium.value.hGlobal) return false;
+    constexpr size_t header = offsetof(FILEGROUPDESCRIPTORW, fgd);
+    const auto bytes = GlobalSize(medium.value.hGlobal);
+    if (bytes < header) return false;
+    struct Locked {
+        HGLOBAL memory;
+        const FILEGROUPDESCRIPTORW* group;
+        ~Locked() { if (group) GlobalUnlock(memory); }
+    } locked{medium.value.hGlobal, static_cast<const FILEGROUPDESCRIPTORW*>(GlobalLock(medium.value.hGlobal))};
+    if (!locked.group || locked.group->cItems == 0 || locked.group->cItems > 128 ||
+        locked.group->cItems > (bytes - header) / sizeof(FILEDESCRIPTORW)) return false;
+
+    std::vector<std::wstring> labels;
+    std::vector<FILEDESCRIPTORW> descriptors;
+    labels.reserve(locked.group->cItems);
+    descriptors.reserve(locked.group->cItems);
+    for (UINT i = 0; i < locked.group->cItems; ++i) {
+        const auto& file = locked.group->fgd[i];
+        const size_t length = wcsnlen_s(file.cFileName, std::size(file.cFileName));
+        if (length == std::size(file.cFileName) || length > 255 ||
+            ((file.dwFlags & FD_ATTRIBUTES) && (file.dwFileAttributes &
+                (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE)))) return false;
+        std::wstring name(file.cFileName, length);
+        if (!IsRenameFilename(name)) return false;
+        // A browser can advertise a synthesized bookmark in the same format.
+        // Do not turn a web image drop into a shortcut operation.
+        const auto dot = name.rfind(L'.');
+        if (dot != std::wstring::npos && (_wcsicmp(name.c_str() + dot, L".url") == 0 ||
+            _wcsicmp(name.c_str() + dot, L".lnk") == 0 || _wcsicmp(name.c_str() + dot, L".website") == 0)) return false;
+        if (std::any_of(labels.begin(), labels.end(), [&](const auto& old) {
+            return CompareStringOrdinal(name.c_str(), -1, old.c_str(), -1, TRUE) == CSTR_EQUAL;
+        })) return false;
+        FORMATETC contents{content, nullptr, DVASPECT_CONTENT, static_cast<LONG>(i), TYMED_ISTREAM | TYMED_HGLOBAL};
+        if (obj->QueryGetData(&contents) != S_OK) return false;
+        FILEDESCRIPTORW snapshot{};
+        // These describe a regular file, not a link, directory or provider UI.
+        snapshot.dwFlags = (file.dwFlags & (FD_FILESIZE | FD_WRITESTIME)) | FD_ATTRIBUTES |
+                           static_cast<DWORD>(FD_UNICODE);
+        snapshot.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+        snapshot.ftLastWriteTime = file.ftLastWriteTime;
+        snapshot.nFileSizeHigh = file.nFileSizeHigh;
+        snapshot.nFileSizeLow = file.nFileSizeLow;
+        std::copy_n(name.c_str(), length + 1, snapshot.cFileName);
+        labels.push_back(std::move(name));
+        descriptors.push_back(snapshot);
+    }
+    names.swap(labels);
+    files.swap(descriptors);
+    return true;
+}
 
 UINT PreferredEffectFormat() {
     static UINT fmt = RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT);
@@ -360,10 +427,12 @@ private:
 // ---------------------------------------------------------------------------
 // FileDataObject
 // ---------------------------------------------------------------------------
-FileDataObject::FileDataObject(const std::vector<std::wstring>& paths) : paths_(paths) {}
+FileDataObject::FileDataObject(const std::vector<std::wstring>& paths, DWORD preferred_effect)
+    : paths_(paths), preferred_effect_(preferred_effect) {}
 
-FileDataObject* FileDataObject::Create(const std::vector<std::wstring>& paths) {
-    return new FileDataObject(paths);
+FileDataObject* FileDataObject::Create(const std::vector<std::wstring>& paths,
+                                       DWORD preferred_effect) {
+    return new FileDataObject(paths, preferred_effect);
 }
 
 HRESULT FileDataObject::QueryInterface(REFIID riid, void** out) {
@@ -533,7 +602,7 @@ HRESULT FileDataObject::GetData(FORMATETC* fmt, STGMEDIUM* out) {
     if (fmt->cfFormat == CF_HDROP) {
         h = RenderHDrop();
     } else if (fmt->cfFormat == (CLIPFORMAT)PreferredEffectFormat()) {
-        h = RenderDword(DROPEFFECT_COPY | DROPEFFECT_MOVE);
+        h = RenderDword(preferred_effect_);
     } else if (fmt->cfFormat == (CLIPFORMAT)PerformedEffectFormat()) {
         h = RenderDword(performed_effect_);
     } else if (fmt->cfFormat == (CLIPFORMAT)LogicalPerformedEffectFormat()) {
@@ -560,7 +629,9 @@ HRESULT FileDataObject::SetData(FORMATETC* fmt, STGMEDIUM* medium, BOOL release)
         return DV_E_FORMATETC;
     if (medium->tymed != TYMED_HGLOBAL || !medium->hGlobal) return DV_E_TYMED;
     if (DWORD* p = static_cast<DWORD*>(GlobalLock(medium->hGlobal))) {
-        (logical ? logical_effect_ : performed_effect_) = *p;
+        if (fmt->cfFormat == (CLIPFORMAT)PreferredEffectFormat()) preferred_effect_ = *p;
+        else if (logical) logical_effect_ = *p;
+        else performed_effect_ = *p;
         GlobalUnlock(medium->hGlobal);
     }
     if (release) ReleaseStgMedium(medium);
@@ -675,23 +746,18 @@ DWORD DoFileDragDrop(const std::vector<std::wstring>& paths, DWORD allowed_effec
 
     IDataObject* data = nullptr;
     FileDataObject* fallback = nullptr;
-    if (FAILED(CreateShellFilesDataObject(paths, &data)) || !data) {
-        // Shell item ids have no CF_HDROP form: without the shell's object
-        // there is nothing a target could read.
-        if (IsShellItemId(paths.front())) return DROPEFFECT_NONE;
-        fallback = FileDataObject::Create(paths);
-        data = fallback;
+    // Filesystem drags use the in-memory FileDataObject directly so starting a
+    // drag never hits SHParseDisplayName on every selected path on the UI thread
+    // (CFSTR_SHELLIDLIST is still rendered lazily if an external shell target
+    // asks for it). Shell item ids (phone/MTP) have no CF_HDROP form and still
+    // build the shell IDataObject.
+    if (IsShellItemId(paths.front())) {
+        if (FAILED(CreateShellFilesDataObject(paths, &data)) || !data)
+            return DROPEFFECT_NONE;
+        WriteDwordFormat(data, (CLIPFORMAT)PreferredEffectFormat(), allowed_effects);
     } else {
-        FORMATETC fmt{ (CLIPFORMAT)PreferredEffectFormat(), nullptr, DVASPECT_CONTENT, -1,
-                       TYMED_HGLOBAL };
-        STGMEDIUM medium{};
-        medium.tymed = TYMED_HGLOBAL;
-        medium.hGlobal = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(DWORD));
-        if (medium.hGlobal) {
-            *static_cast<DWORD*>(GlobalLock(medium.hGlobal)) = allowed_effects;
-            GlobalUnlock(medium.hGlobal);
-            if (FAILED(data->SetData(&fmt, &medium, TRUE))) ReleaseStgMedium(&medium);
-        }
+        fallback = FileDataObject::Create(paths, allowed_effects);
+        data = fallback;
     }
 
     auto* source = new ListDropSource();
@@ -742,7 +808,43 @@ DWORD DoFileDragDrop(const std::vector<std::wstring>& paths, DWORD allowed_effec
 WindowDropTarget::WindowDropTarget(HWND hwnd, DropTargetCallbacks cb)
     : hwnd_(hwnd), cb_(std::move(cb)) {}
 
-WindowDropTarget::~WindowDropTarget() { StopScroll(); }
+WindowDropTarget::~WindowDropTarget() { StopWheelHook(); StopScroll(); }
+
+void WindowDropTarget::StartWheelHook() {
+    if (wheel_hook_ || !IsWindow(hwnd_) || GetWindowThreadProcessId(hwnd_, nullptr) != GetCurrentThreadId()) return;
+    wheel_hook_ = SetWindowsHookExW(WH_GETMESSAGE, &WheelHook, nullptr, GetCurrentThreadId());
+    if (wheel_hook_) g_wheel_target = this;
+}
+
+void WindowDropTarget::StopWheelHook() {
+    if (g_wheel_target == this) g_wheel_target = nullptr;
+    if (wheel_hook_) UnhookWindowsHookEx(wheel_hook_);
+    wheel_hook_ = nullptr;
+    wheel_refresh_until_ = 0;
+}
+
+LRESULT CALLBACK WindowDropTarget::WheelHook(int code, WPARAM remove, LPARAM message) {
+    auto* target = g_wheel_target;
+    auto* msg = reinterpret_cast<MSG*>(message);
+    if (code >= 0 && remove == PM_REMOVE && target && !target->wheel_forwarding_ && msg &&
+        (msg->message == WM_MOUSEWHEEL || msg->message == WM_MOUSEHWHEEL)) {
+        const POINT pt{static_cast<short>(LOWORD(msg->lParam)), static_cast<short>(HIWORD(msg->lParam))};
+        const HWND hit = WindowFromPoint(pt);
+        if (hit == target->hwnd_ || IsChild(target->hwnd_, hit)) {
+            const UINT type = msg->message;
+            const WPARAM keys = msg->wParam;
+            const LPARAM position = msg->lParam;
+            msg->message = WM_NULL;
+            target->wheel_refresh_until_ = GetTickCount64() + 400;
+            target->wheel_forwarding_ = true;
+            target->AddRef();
+            SendMessageW(target->hwnd_, type, keys, position);
+            target->wheel_forwarding_ = false;
+            target->Release();
+        }
+    }
+    return CallNextHookEx(nullptr, code, remove, message);
+}
 
 void WindowDropTarget::StopScroll() {
     if (scrolling_) KillTimer(hwnd_, kScrollTimer);
@@ -754,8 +856,8 @@ void WindowDropTarget::TickScroll() {
     POINT point{};
     if (!GetCursorPos(&point) || WindowFromPoint(point) != hwnd_) return;
     ScreenToClient(hwnd_, &point);
-    if (cb_.drag_scroll(point) && cb_.drag_over)
-        cb_.drag_over(sources_, point, keys_, allowed_, preferred_);
+    if (cb_.drag_scroll(point) || GetTickCount64() < wheel_refresh_until_)
+        RouteDragOver(point, keys_, allowed_);
 }
 
 HRESULT WindowDropTarget::QueryInterface(REFIID riid, void** out) {
@@ -781,24 +883,41 @@ POINT WindowDropTarget::ClientPoint(POINTL pt) const {
     return p;
 }
 
+DWORD WindowDropTarget::RouteDragOver(POINT pt, DWORD keys, DWORD allowed) const {
+    if (virtual_files_) {
+        allowed &= DROPEFFECT_COPY;
+        return allowed && cb_.virtual_drag_over ? cb_.virtual_drag_over(sources_, pt, keys, allowed) & allowed
+                                                : DROPEFFECT_NONE;
+    }
+    return allowed && cb_.drag_over ? cb_.drag_over(sources_, pt, keys, allowed, preferred_) & allowed
+                                    : DROPEFFECT_NONE;
+}
+
 HRESULT WindowDropTarget::DragEnter(IDataObject* obj, DWORD key_state, POINTL pt,
                                     DWORD* effect) {
     if (!effect) return E_POINTER;
     StopScroll();
     sources_.clear();
+    StopWheelHook();
     preferred_ = 0;
-    if (!ExtractHDropPaths(obj, sources_) && !ExtractShellItemIds(obj, sources_)) {
-        *effect = DROPEFFECT_NONE;
-        return S_OK;
-    }
-    preferred_ = PreferredDropEffect(obj);
+    virtual_files_ = false;
     const DWORD allowed = *effect & (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK);
+    if (!ExtractHDropPaths(obj, sources_) && !ExtractShellItemIds(obj, sources_)) {
+        std::vector<FILEDESCRIPTORW> files;
+        if (!(allowed & DROPEFFECT_COPY) || !cb_.virtual_drag_over || !cb_.virtual_drop ||
+            !ReadVirtualDrop(obj, sources_, files)) {
+            *effect = DROPEFFECT_NONE;
+            return S_OK;
+        }
+        virtual_files_ = true;
+    }
+    preferred_ = virtual_files_ ? DROPEFFECT_COPY : PreferredDropEffect(obj);
     allowed_ = allowed;
+    if (allowed) StartWheelHook();
     keys_ = key_state;
     if (hwnd_ && allowed && cb_.drag_scroll && !scrolling_)
         scrolling_ = SetTimer(hwnd_, kScrollTimer, 50, nullptr) != 0;
-    *effect = allowed && cb_.drag_over ? cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed, preferred_) & allowed
-                            : DROPEFFECT_NONE;
+    *effect = RouteDragOver(ClientPoint(pt), key_state, allowed);
     return S_OK;
 }
 
@@ -814,27 +933,39 @@ HRESULT WindowDropTarget::DragOver(DWORD key_state, POINTL pt, DWORD* effect) {
     if (!allowed) StopScroll();
     else if (hwnd_ && cb_.drag_scroll && !scrolling_)
         scrolling_ = SetTimer(hwnd_, kScrollTimer, 50, nullptr) != 0;
-    *effect = allowed && cb_.drag_over ? cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed, preferred_) & allowed
-                            : DROPEFFECT_NONE;
+    *effect = RouteDragOver(ClientPoint(pt), key_state, allowed);
     return S_OK;
 }
 
 HRESULT WindowDropTarget::DragLeave() {
+    StopWheelHook();
     StopScroll();
     sources_.clear();
+    virtual_files_ = false;
     preferred_ = 0;
     if (cb_.drag_leave) cb_.drag_leave();
     return S_OK;
 }
 
 HRESULT WindowDropTarget::Drop(IDataObject* obj, DWORD key_state, POINTL pt, DWORD* effect) {
+    StopWheelHook();
     StopScroll();
     if (!effect) return E_POINTER;
     const DWORD allowed = *effect & (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK);
     std::vector<std::wstring> sources;
-    if (!allowed || (!ExtractHDropPaths(obj, sources) && !ExtractShellItemIds(obj, sources))) {
+    if (!allowed) {
         *effect = DROPEFFECT_NONE;
         DragLeave();
+        return S_OK;
+    }
+    if (!ExtractHDropPaths(obj, sources) && !ExtractShellItemIds(obj, sources)) {
+        std::vector<FILEDESCRIPTORW> files;
+        if ((allowed & DROPEFFECT_COPY) && cb_.virtual_drop && ReadVirtualDrop(obj, sources, files))
+            *effect = cb_.virtual_drop(sources, std::move(files), obj, ClientPoint(pt), key_state, DROPEFFECT_COPY)
+                       & DROPEFFECT_COPY;
+        else
+            *effect = DROPEFFECT_NONE;
+        DragLeave(); // reset feedback even when the worker rejected the request
         return S_OK;
     }
     // Read the preference from the dropped object itself rather than the
@@ -853,6 +984,7 @@ HRESULT WindowDropTarget::Drop(IDataObject* obj, DWORD key_state, POINTL pt, DWO
     WriteDwordFormat(obj, (CLIPFORMAT)PerformedEffectFormat(), reported);
     WriteDwordFormat(obj, (CLIPFORMAT)LogicalPerformedEffectFormat(), performed);
     sources_.clear();
+    virtual_files_ = false;
     return S_OK;
 }
 

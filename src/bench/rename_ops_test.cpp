@@ -4,6 +4,8 @@
 #include "../ipc/shell_client.h"
 #include "../common/localization.h"
 #include "../app/batch_rename.h"
+#include "../app/inline_rename_selection.h"
+#include "../app/operation_refresh.h"
 #include <filesystem>
 #include <aclapi.h>
 #include <sddl.h>
@@ -171,9 +173,71 @@ int AuthorizationRenameTest() {
     return failures ? 1 : 0;
 }
 
+static int InlineSelectionTest() {
+    namespace fs = std::filesystem;
+    using pulse::app::InlineRenameSelection;
+    const auto root = fs::absolute(fs::path(L"bench_data") / (L"inline-selection-" +
+        std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
+    fs::create_directories(root.parent_path());
+    if (!fs::create_directory(root)) return 2;
+    const auto source = root / L"A.txt", occupied = root / L"B.txt", actual = root / L"B (2).txt";
+    std::ofstream(source) << "original";
+    std::ofstream(occupied) << "do not replace";
+    SetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", (root / L"prefs").c_str());
+    OpsManager ops;
+    ops.Start([] {}, false);
+    OpRequest req;
+    req.type = OpType::Rename; req.sources = {source.wstring()}; req.new_name = occupied.filename().wstring();
+    req.collision_policy = CollisionPolicy::KeepBoth;
+    const auto task = ops.Submit(std::move(req));
+    InlineRenameSelection intent{task, 7, 10, {}};
+    intent.Carry(7, 10, 11); // A watcher delivered a listing while the request was running.
+    const auto end = GetTickCount64() + 10000;
+    bool received = false;
+    do {
+        for (const auto& result : ops.DrainCompletions())
+            if (result.destinations.size() == 1)
+                received = intent.Complete(result.task_id, 7, result.destinations[0]) || received;
+        if (!received) Sleep(5);
+    } while (!received && GetTickCount64() < end);
+    ops.Stop();
+    Check(received && intent.Current(7, 11), "real KeepBoth completion reaches originating task after watcher update");
+    std::vector<fs::path> rows{root.parent_path() / actual.filename()};
+    for (const auto& row : fs::directory_iterator(root)) rows.push_back(row.path());
+    const auto index = intent.Find(rows.size(),
+        [&](size_t i, std::wstring_view leaf) { return pulse::path::EqualInsensitive(rows[i].filename().wstring(), leaf); },
+        [&](size_t i) { return rows[i].wstring(); }, [](size_t) { return true; });
+    std::string keep, renamed;
+    std::getline(std::ifstream(occupied), keep); std::getline(std::ifstream(actual), renamed);
+    Check(index > 0 && rows[index] == actual && keep == "do not replace" && renamed == "original" &&
+        !fs::exists(source), "selection follows actual numbered file, not the occupant or duplicate leaf in another folder");
+    auto changed = intent; changed.Carry(7, 12, 13);
+    Check(!changed.task, "user changed selection while pending: completion cannot steal it back");
+    changed = intent; changed.Carry(8, 11, 12);
+    Check(!changed.task, "navigation to another generation invalidates pending rename selection");
+    size_t predictions = 0;
+    auto predict = [&] { ++predictions; return actual.filename().wstring(); };
+    Check(pulse::app::InlineRenameHint(2, L"B.txt", predict) == actual.filename().wstring() && predictions == 1,
+        "small listings retain the numbered rename preview");
+    Check(pulse::app::InlineRenameHint(100000, L"B.txt", predict) == L"B.txt" && predictions == 1,
+        "100000-row listing does not invoke snapshot prediction while typing");
+    pulse::app::OperationRefreshPlan plan;
+    plan.Add(root.wstring()); plan.NoteRenamedDrive(source.wstring());
+    size_t refreshes = 0;
+    plan.RefreshVisible({L"", root.parent_path().wstring(), root.wstring()},
+        [&](const auto& dir) { ++refreshes; Check(dir == root.wstring(), "only the mutated physical directory is refreshed"); });
+    Check(refreshes == 1, "ordinary rename does not enumerate This PC or the unrelated focused directory");
+    plan.NoteRenamedDrive(L"\\\\?\\C:\\"); refreshes = 0;
+    plan.RefreshVisible({L"", L"", root.parent_path().wstring()}, [&](const auto& dir) { if (dir.empty()) ++refreshes; });
+    Check(refreshes == 1, "volume-label rename still invalidates This PC once");
+    fs::remove_all(root);
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc > 1 && std::string_view(argv[1]) == "--rename-authorization") return AuthorizationRenameTest();
+    if (argc > 1 && std::string_view(argv[1]) == "--inline-selection") return InlineSelectionTest();
     // Assertions compare Simplified error text from the embedded string table.
     pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
     const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
@@ -354,6 +418,35 @@ int main(int argc, char** argv) {
         ops.Status().phase == OpPhase::Failed && ops.Status().last_error != L"操作层未启动",
         "existing target rejected without replacing either file");
     Check(ops.Status().last_error == L"目标名称已存在", "existing target keeps the message the UI localizes");
+    {
+        // KeepBoth (used by snapshot-only inline rename) resolves stale collisions on the worker thread.
+        const auto before_keep = ops.Status().completed_ops;
+        OpRequest request;
+        request.type = OpType::Rename;
+        request.collision_policy = CollisionPolicy::KeepBoth;
+        request.sources = {(root / L"conflict-source.txt").wstring()};
+        request.new_name = L"conflict-target.txt";
+        ops.Submit(std::move(request));
+        Check(Wait(ops, before_keep) && ops.Status().phase == OpPhase::Completed &&
+            !std::filesystem::exists(root / L"conflict-source.txt") &&
+            Exact(root / L"conflict-target.txt") &&
+            Exact(root / L"conflict-target (2).txt"),
+            "KeepBoth single rename auto-numbers file on collision without touching UI thread");
+        std::filesystem::create_directory(root / L"folder-src");
+        std::filesystem::create_directory(root / L"folder.v1");
+        const auto before_dir = ops.Status().completed_ops;
+        OpRequest dir_req;
+        dir_req.type = OpType::Rename;
+        dir_req.collision_policy = CollisionPolicy::KeepBoth;
+        dir_req.sources = {(root / L"folder-src").wstring()};
+        dir_req.new_name = L"folder.v1";
+        ops.Submit(std::move(dir_req));
+        Check(Wait(ops, before_dir) && ops.Status().phase == OpPhase::Completed &&
+            !std::filesystem::exists(root / L"folder-src") &&
+            std::filesystem::is_directory(root / L"folder.v1") &&
+            std::filesystem::is_directory(root / L"folder.v1 (2)"),
+            "KeepBoth folder rename appends suffix at end even when name contains a dot");
+    }
     auto create = [&](OpType type, const std::filesystem::path& path) {
         const auto before = ops.Status().completed_ops;
         OpRequest request; request.type = type; request.sources = {path.wstring()};

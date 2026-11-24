@@ -390,6 +390,58 @@ std::string WithoutThinking(const Provider& p, std::string body) {
     return json::Serialize(v);
 }
 
+bool SupportsNativeWebSearch(const Provider& p, std::string_view model) {
+    const std::string m = Tail(model);
+    if (m.empty()) return false;
+    const std::string_view id = p.id;
+    if (id == "qwen") {
+        // DashScope native web search works on official Qwen chat models, not coder/vl/third-party hosts.
+        if (Has(m, "coder") || Has(m, "-vl") || Has(m, "audio") || Has(m, "ocr")) return false;
+        return Starts(m, "qwen-plus") || Starts(m, "qwen-max") || Starts(m, "qwen-turbo") || Starts(m, "qwen-flash") ||
+               Starts(m, "qwen3");
+    }
+    if (id == "openrouter") return true;
+    if (id == "zhipu") return Starts(m, "glm-4") || Starts(m, "glm-5");
+    return false;
+}
+
+bool AddNativeWebSearch(const Provider& p, std::string_view model, json::Value& body) {
+    if (!SupportsNativeWebSearch(p, model) || !body.is_object()) return false;
+    const std::string_view id = p.id;
+    if (id == "qwen") {
+        body.set("enable_search", true);
+        json::Value opts = json::Value::Object();
+        opts.set("enable_source", true);
+        opts.set("enable_citation", true);
+        body.set("search_options", std::move(opts));
+        return true;
+    }
+    if (id == "openrouter") {
+        json::Value plugins = json::Value::Array();
+        json::Value web = json::Value::Object();
+        web.set("id", "web");
+        plugins.push(std::move(web));
+        body.set("plugins", std::move(plugins));
+        return true;
+    }
+    if (id == "zhipu") {
+        json::Value ws_tool = json::Value::Object();
+        ws_tool.set("type", "web_search");
+        json::Value ws = json::Value::Object();
+        ws.set("enable", true);
+        ws.set("search_result", true);
+        ws_tool.set("web_search", std::move(ws));
+        json::Value tools = json::Value::Array();
+        if (const json::Value* existing = body.find("tools"); existing && existing->is_array()) {
+            tools = *existing;
+        }
+        tools.push(std::move(ws_tool));
+        body.set("tools", std::move(tools));
+        return true;
+    }
+    return false;
+}
+
 std::wstring AddressForKey(const Provider& p, const std::wstring& url, std::wstring_view key) {
     if (std::string_view(p.id) != "mimo") return url;
     const bool token_plan = key.substr(0, 3) == L"tp-";

@@ -1,5 +1,6 @@
 #include "network_index.h"
 #include "../fs/drive_kind.h"
+#include "../fs/nt_directory_record.h"
 #include "../fs/wsl_path.h"
 #include "network_crawl_schedule.h"
 #include "index_config.h"
@@ -1854,10 +1855,18 @@ void LiveNetworkWalk(const Query& query, LiveNetworkMatches& out, std::mutex& ou
     bool stopped = false;
     bool unreported = false;
     const bool ordered = query.rank || query.sort != ResultSort::Index;
+    const bool query_uses_path = std::any_of(
+        compiled.groups.begin(), compiled.groups.end(), [](const auto& group) {
+            return std::any_of(group.begin(), group.end(),
+                               [](const Term& term) { return term.name_in_path; });
+        });
     const auto better = [&](const Hit& a, const Hit& b) { return BetterHit(a, b, query, compiled); };
     constexpr size_t kBatchSize = 256;
     std::vector<Hit> found;
     found.reserve(kBatchSize);
+#ifndef FindFirstFileExW
+    std::vector<BYTE> nt_buffer;
+#endif
     const auto flush = [&] {
         if (!found.empty()) {
             std::lock_guard lock(out_mutex);
@@ -1889,50 +1898,193 @@ void LiveNetworkWalk(const Query& query, LiveNetworkMatches& out, std::mutex& ou
         }
         std::wstring directory = std::move(stack.back());
         stack.pop_back();
-        std::wstring pattern = LongPath(directory);
-        if (pattern.back() != L'\\') pattern += L'\\';
-        pattern += L'*';
-        WIN32_FIND_DATAW find{};
-        HANDLE handle = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &find,
-                                         FindExSearchNameMatch, nullptr,
-                                         FIND_FIRST_EX_LARGE_FETCH);
-        if (handle == INVALID_HANDLE_VALUE && GetLastError() == ERROR_INVALID_PARAMETER) {
-            handle = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &find,
-                                      FindExSearchNameMatch, nullptr, 0);
-        }
-        if (handle == INVALID_HANDLE_VALUE) {
-            const DWORD error = GetLastError();
-            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_NO_MORE_FILES) {
-                std::lock_guard<std::mutex> lock(out_mutex);
-                if (!out.error) out.error = error ? error : ERROR_GEN_FAILURE;
-            }
-            continue;
-        }
         const std::wstring base = directory.back() == L'\\' ? directory : directory + L'\\';
-        do {
-            if (cancelled && cancelled()) { stopped = true; break; }
-            if (wcscmp(find.cFileName, L".") == 0 || wcscmp(find.cFileName, L"..") == 0)
-                continue;
-            const bool is_dir = (find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-            std::wstring full = base + find.cFileName;
+        auto process_entry = [&](std::wstring_view name, DWORD attrs, uint64_t size, uint64_t mtime) {
+            if (name == L"." || name == L"..") return;
+            const bool is_dir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            const bool descend = is_dir && !(attrs & FILE_ATTRIBUTE_REPARSE_POINT);
             NetworkRecord record{};
             record.flags = is_dir ? kRecordDirectory : 0;
-            record.size = is_dir ? 0
-                : (static_cast<uint64_t>(find.nFileSizeHigh) << 32) | find.nFileSizeLow;
-            record.mtime = FileTimeValue(find.ftLastWriteTime);
-            const std::wstring_view name(find.cFileName);
-            if (MatchNetworkRecord(record, full, name, compiled, query.folders_only))
-                found.push_back(Hit{full, std::wstring(name), is_dir, record.size, record.mtime});
-            if (found.size() >= kBatchSize) flush();
-            if (is_dir && !(find.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
-                stack.push_back(std::move(full));
-        } while (FindNextFileW(handle, &find));
-        const DWORD enumeration_error = GetLastError();
-        if (!stopped && enumeration_error != ERROR_NO_MORE_FILES) {
-            std::lock_guard<std::mutex> lock(out_mutex);
-            if (!out.error) out.error = enumeration_error ? enumeration_error : ERROR_GEN_FAILURE;
+            record.size = is_dir ? 0 : size;
+            record.mtime = mtime;
+            if (!query_uses_path) {
+                const bool matched = MatchNetworkRecord(record, {}, name, compiled, query.folders_only);
+                if (!matched && !descend) return;
+                std::wstring full;
+                full.reserve(base.size() + name.size());
+                full.assign(base);
+                full.append(name.data(), name.size());
+                if (matched) {
+                    found.push_back(Hit{descend ? full : std::move(full),
+                                        std::wstring(name), is_dir, record.size, record.mtime});
+                    if (found.size() >= kBatchSize) flush();
+                }
+                if (descend) stack.push_back(std::move(full));
+                return;
+            }
+            std::wstring full;
+            full.reserve(base.size() + name.size());
+            full.assign(base);
+            full.append(name.data(), name.size());
+            if (MatchNetworkRecord(record, full, name, compiled, query.folders_only)) {
+                found.push_back(Hit{descend ? full : std::move(full),
+                                    std::wstring(name), is_dir, record.size, record.mtime});
+                if (found.size() >= kBatchSize) flush();
+            }
+            if (descend) stack.push_back(std::move(full));
+        };
+
+        bool handled = false;
+#ifndef FindFirstFileExW
+        if (!IsNetworkFolderPath(directory)) {
+            using NtStatus = LONG;
+            struct NtIoStatusBlock {
+                union {
+                    NtStatus Status;
+                    PVOID Pointer;
+                };
+                ULONG_PTR Information;
+            };
+            using NtQueryDirectoryFileFn = NtStatus(NTAPI*)(
+                HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext,
+                NtIoStatusBlock* IoStatusBlock, PVOID FileInformation, ULONG Length,
+                ULONG FileInformationClass, BOOLEAN ReturnSingleEntry,
+                PVOID FileName, BOOLEAN RestartScan);
+            using RtlNtStatusToDosErrorFn = ULONG(NTAPI*)(NtStatus Status);
+            static const NtQueryDirectoryFileFn nt_query_dir = []() -> NtQueryDirectoryFileFn {
+                if (HMODULE ntdll = GetModuleHandleW(L"ntdll.dll")) {
+                    return reinterpret_cast<NtQueryDirectoryFileFn>(
+                        GetProcAddress(ntdll, "NtQueryDirectoryFile"));
+                }
+                return nullptr;
+            }();
+            static const RtlNtStatusToDosErrorFn nt_to_dos = []() -> RtlNtStatusToDosErrorFn {
+                if (HMODULE ntdll = GetModuleHandleW(L"ntdll.dll")) {
+                    return reinterpret_cast<RtlNtStatusToDosErrorFn>(
+                        GetProcAddress(ntdll, "RtlNtStatusToDosError"));
+                }
+                return nullptr;
+            }();
+            if (nt_query_dir) {
+                const std::wstring dir_open = LongPath(directory);
+                HANDLE dir_handle = CreateFileW(
+                    dir_open.c_str(), FILE_LIST_DIRECTORY | SYNCHRONIZE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+                if (dir_handle == INVALID_HANDLE_VALUE) {
+                    const DWORD error = GetLastError();
+                    if (error != ERROR_FILE_NOT_FOUND && error != ERROR_NO_MORE_FILES) {
+                        std::lock_guard<std::mutex> lock(out_mutex);
+                        if (!out.error) out.error = error ? error : ERROR_GEN_FAILURE;
+                    }
+                    handled = true;
+                } else {
+                    if (nt_buffer.size() < 64 * 1024) nt_buffer.resize(64 * 1024);
+                    bool restart = true;
+                    bool first_call = true;
+                    for (;;) {
+                        if (cancelled && cancelled()) { stopped = true; break; }
+                        NtIoStatusBlock iosb{};
+                        constexpr ULONG kNtFileFullDirectoryInformation = 2;
+                        const NtStatus status = nt_query_dir(
+                            dir_handle, nullptr, nullptr, nullptr, &iosb,
+                            nt_buffer.data(), static_cast<ULONG>(nt_buffer.size()),
+                            kNtFileFullDirectoryInformation, FALSE, nullptr,
+                            restart ? TRUE : FALSE);
+                        restart = false;
+                        if (status == static_cast<NtStatus>(0x80000006L) ||
+                            status == static_cast<NtStatus>(0xC000000FL)) {
+                            handled = true;
+                            break;
+                        }
+                        if (status < 0) {
+                            if (first_call &&
+                                (status == static_cast<NtStatus>(0xC0000002L) ||
+                                 status == static_cast<NtStatus>(0xC0000003L) ||
+                                 status == static_cast<NtStatus>(0xC00000BBL) ||
+                                 status == static_cast<NtStatus>(0xC000000DL))) {
+                                handled = false;
+                                break;
+                            }
+                            const DWORD error = nt_to_dos ? nt_to_dos(status) : ERROR_GEN_FAILURE;
+                            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_NO_MORE_FILES) {
+                                std::lock_guard<std::mutex> lock(out_mutex);
+                                if (!out.error) out.error = error ? error : ERROR_GEN_FAILURE;
+                            }
+                            handled = true;
+                            break;
+                        }
+                        first_call = false;
+                        const size_t bytes_returned = static_cast<size_t>(iosb.Information);
+                        if (bytes_returned == 0 || bytes_returned > nt_buffer.size()) {
+                            handled = true;
+                            break;
+                        }
+                        size_t offset = 0;
+                        for (;;) {
+                            if (cancelled && cancelled()) { stopped = true; break; }
+                            const auto* info = reinterpret_cast<const pulse::fs::NtFileFullDirInformation*>(
+                                nt_buffer.data() + offset);
+                            try {
+                                pulse::fs::ValidateNtDirectoryRecord(info, bytes_returned - offset);
+                            } catch (...) {
+                                std::lock_guard<std::mutex> lock(out_mutex);
+                                if (!out.error) out.error = ERROR_INVALID_DATA;
+                                handled = true;
+                                break;
+                            }
+                            const std::wstring_view entry_name(
+                                info->FileName, info->FileNameLength / sizeof(WCHAR));
+                            const uint64_t entry_size = (info->FileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                                ? 0ull : static_cast<uint64_t>(info->EndOfFile.QuadPart);
+                            const uint64_t entry_mtime = static_cast<uint64_t>(info->LastWriteTime.QuadPart);
+                            process_entry(entry_name, info->FileAttributes, entry_size, entry_mtime);
+                            if (info->NextEntryOffset == 0) break;
+                            offset += info->NextEntryOffset;
+                            if (offset >= bytes_returned) break;
+                        }
+                        if (stopped) { handled = true; break; }
+                    }
+                    CloseHandle(dir_handle);
+                }
+            }
         }
-        FindClose(handle);
+#endif
+        if (!handled) {
+            std::wstring pattern = LongPath(directory);
+            if (pattern.back() != L'\\') pattern += L'\\';
+            pattern += L'*';
+            WIN32_FIND_DATAW find{};
+            HANDLE handle = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &find,
+                                             FindExSearchNameMatch, nullptr,
+                                             FIND_FIRST_EX_LARGE_FETCH);
+            if (handle == INVALID_HANDLE_VALUE && GetLastError() == ERROR_INVALID_PARAMETER) {
+                handle = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &find,
+                                          FindExSearchNameMatch, nullptr, 0);
+            }
+            if (handle == INVALID_HANDLE_VALUE) {
+                const DWORD error = GetLastError();
+                if (error != ERROR_FILE_NOT_FOUND && error != ERROR_NO_MORE_FILES) {
+                    std::lock_guard<std::mutex> lock(out_mutex);
+                    if (!out.error) out.error = error ? error : ERROR_GEN_FAILURE;
+                }
+                continue;
+            }
+            do {
+                if (cancelled && cancelled()) { stopped = true; break; }
+                const uint64_t entry_size = (find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                    ? 0ull
+                    : (static_cast<uint64_t>(find.nFileSizeHigh) << 32) | find.nFileSizeLow;
+                process_entry(find.cFileName, find.dwFileAttributes, entry_size,
+                              FileTimeValue(find.ftLastWriteTime));
+            } while (FindNextFileW(handle, &find));
+            const DWORD enumeration_error = GetLastError();
+            if (!stopped && enumeration_error != ERROR_NO_MORE_FILES) {
+                std::lock_guard<std::mutex> lock(out_mutex);
+                if (!out.error) out.error = enumeration_error ? enumeration_error : ERROR_GEN_FAILURE;
+            }
+            FindClose(handle);
+        }
         flush();
     }
     std::lock_guard<std::mutex> lock(out_mutex);

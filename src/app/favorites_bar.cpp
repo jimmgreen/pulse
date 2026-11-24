@@ -1,6 +1,7 @@
 #include "favorites_bar.h"
 #include "app_commands.h"
 #include "app_navigation.h"
+#include "quick_access.h"
 #include "../common/display_path.h"
 #include "../common/localization.h"
 #include "keymap.h"
@@ -646,6 +647,22 @@ bool MoveFavoritesBarDrag(AppState& s, POINT pt) {
         static_cast<size_t>(d.slot) >= rows.size())
         return true;
     const auto& list = s.places.starred_items;
+    if (d.item < list.size()) {
+        const auto& item = list[d.item];
+        const auto source = item.kind == app::PlaceItemKind::Folder
+            ? ShortcutDragSource::FavoriteFolder : ShortcutDragSource::FavoriteFile;
+        const auto rect = D2D1::RectF(0, 0, static_cast<float>(s.compositor.Width()),
+                                     static_cast<float>(s.compositor.Height()));
+        const auto hit = s.renderer.HitTest(vm, rect, static_cast<float>(pt.x), static_cast<float>(pt.y));
+        if (PreviewShortcutCrossDrop(s, source, item.path, hit, pt)) {
+            // A collection is not the bar's "drag down to remove" gesture.
+            d.out = false;
+            d.into.clear();
+            d.into_slot = -1;
+            InvalidateRect(s.hwnd, nullptr, FALSE);
+            return true;
+        }
+    }
     const auto folder_row = [&](const app::StarredRow& row) {
         return row.kind == app::StarredRow::Kind::Group || IsFolder(list[row.index]);
     };
@@ -710,10 +727,11 @@ bool MoveFavoritesBarDrag(AppState& s, POINT pt) {
     return true;
 }
 
-void EndFavoritesBarDrag(AppState& s, bool cancel) {
+void EndFavoritesBarDrag(AppState& s, bool cancel, POINT client) {
     const FavoriteDrag d = g_drag;
     if (!d.down) return;
     g_drag = FavoriteDrag{};
+    if (d.owner == &s && d.active && d.item != SIZE_MAX) ClearShortcutCrossDropHint(s);
     if (GetCapture() == s.hwnd) ReleaseCapture();
     InvalidateRect(s.hwnd, nullptr, FALSE);
     if (d.owner != &s || cancel || d.slot < 0) return;
@@ -724,6 +742,12 @@ void EndFavoritesBarDrag(AppState& s, bool cancel) {
         return;
     }
     if (d.order.size() != list.size()) return;
+    if (d.item < list.size()) {
+        const auto& item = list[d.item];
+        const auto source = item.kind == app::PlaceItemKind::Folder
+            ? ShortcutDragSource::FavoriteFolder : ShortcutDragSource::FavoriteFile;
+        if (CommitShortcutCrossDrop(s, source, item.path, HitShortcutCrossDrop(s, client))) return;
+    }
     if (d.out) {
         if (d.item < list.size()) RemoveFavorite(s, d.item);
         return;

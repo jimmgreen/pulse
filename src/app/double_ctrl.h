@@ -2,6 +2,8 @@
 #include <windows.h>
 #include <atomic>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <thread>
 
 namespace pulse {
@@ -31,8 +33,8 @@ private:
 
 // Listens for the double tap on a small thread of its own (Raw Input sink on a
 // message-only window: no keyboard hook, so it cannot slow typing anywhere)
-// and posts `message` to `target`. Mouse buttons are only watched while a tap
-// is in progress, so pointer movement never wakes the thread.
+// and posts `message` to `target`. The shelf can share this listener and
+// optionally request periodic pointer samples.
 class DoubleCtrlWatcher {
 public:
     DoubleCtrlWatcher() = default;
@@ -40,6 +42,9 @@ public:
     DoubleCtrlWatcher(const DoubleCtrlWatcher&) = delete;
     DoubleCtrlWatcher& operator=(const DoubleCtrlWatcher&) = delete;
     void Update(HWND target, UINT message, bool enabled, uint32_t gap_ms);
+    using InputObserver = std::function<void(const RAWINPUT&)>;
+    using InputPoll = std::function<void()>;
+    void SetInputObserver(InputObserver observe, InputPoll poll = {});
     void Stop();
     bool Running() const { return thread_.joinable(); }
     // Full-screen games, presentations and other "do not disturb" states.
@@ -49,13 +54,21 @@ private:
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
     void OnInput(HRAWINPUT input);
     void WatchMouse(bool on);
+    void RefreshInputDevices();
+    struct Observer {
+        InputObserver on_input;
+        InputPoll poll;
+    };
     std::thread thread_;
     std::atomic<DWORD> thread_id_{0};
     std::atomic<HWND> target_{nullptr};
     std::atomic<UINT> message_{0};
     std::atomic<uint32_t> gap_{300};
+    std::atomic<bool> enabled_{false};
+    std::atomic<std::shared_ptr<const Observer>> observer_;
     HWND window_ = nullptr;          // listener thread only
     bool mouse_ = false;             // listener thread only
+    bool polling_ = false;           // listener thread only
     DoubleCtrlDetector detector_;    // listener thread only
 };
 }

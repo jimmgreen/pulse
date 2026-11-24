@@ -335,14 +335,30 @@ int wmain(int argc, wchar_t** argv) {
             const auto made = request.sources;
             Report("recycle", Run(request), static_cast<double>(made.size()), "items");
             // Put everything back so the user's Recycle Bin is unchanged.
+            // Wait for the whole history step, not the first of its requests:
+            // a recycle undo may run as several restore requests.
+            bool undo_done = false, undo_ok = false;
+            double undo_ms = 0.0;
             if (g_ops.CanUndo()) {
-                const uint64_t before = g_ops.Status().completed_ops;
+                const uint64_t before = g_ops.HistoryProgress().completed_sequence;
+                const auto started = std::chrono::steady_clock::now();
                 g_ops.Undo();
-                for (int wait = 0; wait < 60000 && g_ops.Status().completed_ops == before; ++wait) Sleep(1);
+                for (;;) {
+                    const auto progress = g_ops.HistoryProgress();
+                    undo_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+                    if (progress.completed_sequence != before && !progress.busy) {
+                        undo_done = true;
+                        undo_ok = progress.completed_success;
+                        break;
+                    }
+                    if (undo_ms > 600000.0) break;
+                    Sleep(5);
+                }
             }
             size_t restored = 0;
             for (const auto& path : made) restored += GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
-            printf("recycle-undo   restored %zu of %zu\n", restored, made.size());
+            printf("recycle-undo   restored %zu of %zu  %.0f ms  done=%d success=%d\n", restored, made.size(),
+                   undo_ms, undo_done ? 1 : 0, undo_ok ? 1 : 0);
             RemoveTree(folder);
         }
     }

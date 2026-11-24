@@ -26,7 +26,7 @@ bool LowerOwnIntegrity() {
     if (ok) { TOKEN_MANDATORY_LABEL label{{sid, SE_GROUP_INTEGRITY}}; ok = SetTokenInformation(token, TokenIntegrityLevel, &label, sizeof(label) + GetLengthSid(sid)) != FALSE; LocalFree(sid); }
     CloseHandle(token); return ok;
 }
-int Child(const wchar_t* mapping_arg, const wchar_t* owner_arg, bool low) {
+int Child(const wchar_t* mapping_arg, const wchar_t* owner_arg, bool low, bool lease) {
     const auto mapping = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(_wcstoui64(mapping_arg, nullptr, 10)));
     auto* shared = static_cast<Shared*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(Shared)));
     if (!shared) return 2;
@@ -46,7 +46,7 @@ int Child(const wchar_t* mapping_arg, const wchar_t* owner_arg, bool low) {
     shared->pid = GetCurrentProcessId(); shared->thread = GetCurrentThreadId();
     std::unique_ptr<pulse::PickerOwnerGuard> guard;
     const auto guarded = reinterpret_cast<HWND>(static_cast<uintptr_t>(_wcstoui64(owner_arg, nullptr, 10)));
-    if (guarded) { guard = std::make_unique<pulse::PickerOwnerGuard>(guarded); shared->guard_error = guard->Error(); }
+    if (guarded) { wchar_t self[32768]{}; GetModuleFileNameW(nullptr, self, 32768); guard = lease ? std::make_unique<pulse::PickerOwnerGuard>(guarded, self) : std::make_unique<pulse::PickerOwnerGuard>(guarded); shared->guard_error = guard->Error(); }
     InterlockedExchange(&shared->ready, 1);
     MSG message{}; while (GetMessageW(&message, nullptr, 0, 0) > 0) DispatchMessageW(&message);
     guard.reset(); UnmapViewOfFile(shared); CloseHandle(mapping); return 0;
@@ -56,7 +56,7 @@ struct Process {
     Shared* shared = nullptr;
     PROCESS_INFORMATION process{};
     bool ready = false;
-    Process(HWND guarded = nullptr, bool low = false) {
+    Process(HWND guarded = nullptr, bool low = false, bool lease = false) {
         SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
         mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE, 0, sizeof(Shared), nullptr);
         if (!mapping) return;
@@ -65,12 +65,13 @@ struct Process {
         *shared = {};
         wchar_t self[32768]{}; GetModuleFileNameW(nullptr, self, 32768);
         std::wstring command = L"\"" + std::wstring(self) + L"\" --child " + std::to_wstring(reinterpret_cast<uintptr_t>(mapping)) +
-            L" " + std::to_wstring(reinterpret_cast<uintptr_t>(guarded)) + (low ? L" 1" : L" 0");
+            L" " + std::to_wstring(reinterpret_cast<uintptr_t>(guarded)) + (lease ? L" 2" : low ? L" 1" : L" 0");
         STARTUPINFOW startup{}; startup.cb = sizeof(startup);
         if (!CreateProcessW(self, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) return;
         const auto end = GetTickCount64() + 5000;
         while (!InterlockedCompareExchange(&shared->ready, 0, 0) && GetTickCount64() < end && WaitForSingleObject(process.hProcess, 0) == WAIT_TIMEOUT) Sleep(10);
         DWORD pid = 0;
+        if (shared->setup_error || shared->guard_error) std::printf("FIXTURE setup_error=%lu guard_error=%lu pid=%lu\n", shared->setup_error, shared->guard_error, process.dwProcessId);
         ready = shared->ready && !shared->setup_error && !shared->guard_error && shared->pid == process.dwProcessId &&
             GetWindowThreadProcessId(shared->window, &pid) == process.dwThreadId && pid == process.dwProcessId;
     }
@@ -118,7 +119,7 @@ void ThreeProcesses(bool low) {
         SendMessageW(window, kEnable, TRUE, 0);
         Check(!guard.Alive(), "owner enabling invalidates remote lifetime guard");
         const auto enabled = pulse::ValidateRemotePickerOwner(window, caller.process.hProcess, false);
-        Check(enabled.error == ERROR_NOT_SUPPORTED && enabled.stage == pulse::PickerOwnerFailureStage::ForeignEnabled, "enabled third-process owner rejected with readable stage");
+        Check(enabled.error == ERROR_SUCCESS, "enabled third-process owner preflight accepted before lease acquisition");
     }
     Check(IsWindowEnabled(window), "remote guard destruction never undoes caller-managed enable state");
     SendMessageW(window, kEnable, FALSE, 0);
@@ -174,6 +175,32 @@ void ForeignFocus(bool direct) {
         Check(!IsWindowEnabled(a),"foreign owner never enabled by restoration");
     }
     DestroyWindow(b);
+}
+void EnabledLease(const wchar_t* executable = nullptr) {
+    Process owner;
+    Check(owner.ready, "enabled foreign lease fixture ready"); if (!owner.ready) return;
+    HWND window = owner.shared->window;
+    SendMessageW(window, kEnable, TRUE, 0);
+    wchar_t self[32768]{}; GetModuleFileNameW(nullptr, self, 32768);
+    {
+        pulse::PickerOwnerGuard guard(window, executable ? executable : self);
+        std::printf("LEASE error=%lu stage=%u\n", guard.Error(), static_cast<unsigned>(guard.FailureStage()));
+        Check(!guard.Error() && guard.Alive() && !IsWindowEnabled(window), "enabled foreign lease disables third-process owner");
+    }
+    const auto deadline = GetTickCount64() + 5000;
+    while (!IsWindowEnabled(window) && GetTickCount64() < deadline) Sleep(10);
+    Check(IsWindowEnabled(window), "lease destruction restores third-process enabled owner");
+    {
+        Process caller(window, false, true);
+        Check(caller.ready && !IsWindowEnabled(window), "broker lease fixture acquires enabled third-process owner");
+        if (caller.ready) {
+            TerminateProcess(caller.process.hProcess, 77);
+            WaitForSingleObject(caller.process.hProcess, 5000);
+            const auto end = GetTickCount64() + 5000;
+            while (!IsWindowEnabled(window) && GetTickCount64() < end) Sleep(10);
+            Check(IsWindowEnabled(window), "broker crash restores enabled third-process owner");
+        }
+    }
 }
 void CallerExit() {
     Process owner; Process caller(owner.ready ? owner.shared->window : nullptr);
@@ -293,8 +320,10 @@ void HostRoundtrip(const wchar_t* executable) {
 #endif
 }
 int wmain(int argc, wchar_t** argv) {
+    if (argc >= 2 && std::wstring_view(argv[1]) == L"--picker-owner-lease") return pulse::RunPickerOwnerLease(argc, argv);
+    if (argc == 3 && std::wstring_view(argv[1]) == L"--lease-host") { EnabledLease(argv[2]); std::printf("Checks: %u, failures: %u\n", checks, failures); return failures ? 1 : 0; }
     if(argc==2 && (std::wstring_view(argv[1])==L"--focus-foreign" || std::wstring_view(argv[1])==L"--focus-direct")){ForeignFocus(std::wstring_view(argv[1])==L"--focus-direct");printf("Checks: %u, failures: %u\n",checks,failures);return failures?1:0;}
-    if (argc == 5 && std::wstring_view(argv[1]) == L"--child") return Child(argv[2], argv[3], std::wstring_view(argv[4]) == L"1");
+    if (argc == 5 && std::wstring_view(argv[1]) == L"--child") return Child(argv[2], argv[3], std::wstring_view(argv[4]) == L"1", std::wstring_view(argv[4]) == L"2");
 #if defined(PULSE_REMOTE_PROVIDER_TEST)
     if (argc == 3 && std::wstring_view(argv[1]) == L"--policy-validate") {
         PolicyValidate(argv[2]); std::printf("Checks: %u, failures: %u\n", checks, failures); return failures ? 1 : 0;
@@ -303,7 +332,7 @@ int wmain(int argc, wchar_t** argv) {
         HostRoundtrip(argv[2]); std::printf("Checks: %u, failures: %u\n", checks, failures); return failures ? 1 : 0;
     }
 #endif
-    Policy(); ThreeProcesses(false); ThreeProcesses(true); CallerExit();
+    Policy(); EnabledLease(); ThreeProcesses(false); ThreeProcesses(true); CallerExit();
     std::printf("Checks: %u, failures: %u\n", checks, failures);
     return failures ? 1 : 0;
 }

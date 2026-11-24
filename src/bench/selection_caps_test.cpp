@@ -89,6 +89,12 @@ int RunTrayRefreshTest() {
     tray.ReplacePath(unc, file.wstring());
     SetEnvironmentVariableW(L"PULSE_TEST_REMOTE_LIKE_DRIVES", nullptr);
     Check(!fs::IsRemoteLikeDrive(file.wstring()), "fixture returns to ordinary local drive");
+    auto stale = tray.SnapshotExistence();
+    stale.ReadLocalAttributes();
+    tray.ReplacePath(file.wstring(), unc);
+    Check(!tray.ApplyExistence(stale) && tray.batches()[0].items[0].exists,
+          "late local deletion must not mark renamed entry missing");
+    tray.ReplacePath(unc, file.wstring());
     Check(tray.RefreshExists() && !tray.batches()[0].items[0].exists,
           "local deletion still updates tray existence");
     SetEnvironmentVariableW(L"PULSE_TEST_REMOTE_LIKE_DRIVES", marked);

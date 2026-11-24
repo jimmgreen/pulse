@@ -20,6 +20,7 @@
 #include <windows.h>
 #include <dbt.h>
 #include <cwchar>
+#include "../common/navigation_known_folders.h"
 #include "app_messages.h"
 #include "tray_controller.h"
 
@@ -75,7 +76,7 @@ constexpr bool IsHostRoutedMessage(UINT message) noexcept {
 // System broadcasts with a Pulse handler (M3c). The shared part (theme flag,
 // drive list, places) runs once; the per-window part (accent, DWM chrome,
 // repaint) runs for every window.
-enum class SystemBroadcast { None, Theme, Volumes, Devices, QueryEndSession, EndSession };
+enum class SystemBroadcast { None, Theme, KnownFolders, Volumes, Devices, QueryEndSession, EndSession };
 
 // GUID_DEVINTERFACE_WPD: phones and cameras (MTP / PTP). DeviceRegistry
 // registers for these; volume broadcasts reach every window anyway.
@@ -89,6 +90,7 @@ inline SystemBroadcast ClassifySystemBroadcast(UINT message, WPARAM wparam, LPAR
         const auto* area = reinterpret_cast<const wchar_t*>(lparam);
         if (wparam == SPI_SETHIGHCONTRAST || !area || wcscmp(area, L"ImmersiveColorSet") == 0 || wcscmp(area, L"HighContrast") == 0)
             return SystemBroadcast::Theme;
+        if (known_folders::IsSettingsArea(area)) return SystemBroadcast::KnownFolders;
         return SystemBroadcast::None;
     }
     case WM_DEVICECHANGE: {

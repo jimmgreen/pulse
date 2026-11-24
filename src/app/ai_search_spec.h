@@ -14,9 +14,9 @@
 
 namespace pulse::app::ai {
 
-// search_files {name?, exclude?, type?, extensions?, modified_after?,
-// modified_before?, larger_than?, smaller_than?, folder?}: at least one
-// condition. False with `error` (invalid_args) when refused.
+// search_files {name?, exclude?, type?, extensions?, content?, content_exclude?,
+// content_mode?, modified_after?, modified_before?, larger_than?, smaller_than?,
+// folder?}: at least one condition. False with `error` (invalid_args) when refused.
 bool SearchSpecFromArgs(const json::Value& args, AdvancedSearchSpec& spec, ToolOutcome& error);
 
 enum class SearchField : uint8_t { Name, Exclude, Type, Content, Date, Size, Folder };

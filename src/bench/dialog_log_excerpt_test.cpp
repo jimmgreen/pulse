@@ -2,6 +2,7 @@
 #include "../common/json_value.h"
 #include <windows.h>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -60,6 +61,66 @@ bool Counter(const std::string& text, const char* name, uint64_t expected) {
 }
 bool Flag(const std::string& text, const char* name) { return Summary(text).get_bool(name); }
 bool Contains(const std::string& text, const char* value) { return text.find(value) != std::string::npos; }
+void Reproduction() {
+    using namespace pulse::dialog_diagnostics;
+    Fixture f(451);
+    auto other=Auto("dialog_show_terminal","\"request\":13,\"event_time_filetime\":250");
+    other.replace(other.find("\"pid\":42"),8,"\"pid\":77");
+    f.Write(L"dialog_auto-42.jsonl",
+        Auto("dialog_show_begin","\"request\":10,\"event_time_filetime\":199")+
+        Auto("dialog_show_begin","\"request\":11,\"event_time_filetime\":200")+
+        Auto("dialog_show_terminal","\"request\":11,\"event_time_filetime\":300")+
+        Auto("dialog_show_terminal","\"request\":12,\"event_time_filetime\":301"));
+    f.Write(L"dialog_auto-77.jsonl",other);
+    ExcerptCounts counts;
+    const ReproductionWindow window{200,300,42,2};
+    const auto out=CollectDialogLogExcerpt(f.root.wstring(),{},&counts,false,&window);
+    Check(counts.shows_started==1 && counts.shows_finished==2,"feedback counts only Show events in the requested UTC window");
+    Check(counts.foreground_shows_started==1 && counts.foreground_shows_finished==1,"foreground hint is counted separately, not attributed to other processes");
+    Check(Contains(out,"\"request\":13") && !Contains(out,"\"request\":10") && !Contains(out,"\"request\":12"),"report keeps another in-window process but excludes stale/future Show receipts");
+    const auto unfiltered=CollectDialogLogExcerpt(f.root.wstring(),{},&counts);
+    Check(counts.shows_started==2 && counts.shows_finished==3 && Contains(unfiltered,"\"request\":12"),"existing diagnostics export remains unfiltered");
+    SYSTEMTIME timestamp{2026,11,0,10,12,34,56,789};FILETIME utc{};
+    if(!SystemTimeToFileTime(&timestamp,&utc)) throw std::runtime_error("fixture timestamp invalid");
+    const uint64_t time=(static_cast<uint64_t>(utc.dwHighDateTime)<<32)|utc.dwLowDateTime;
+    f.Write(L"dialog_auto-88.jsonl",Auto("dialog_show_begin","\"request\":23"));
+    const ReproductionWindow millis{time,time,42,1};
+    const auto timed=CollectDialogLogExcerpt(f.root.wstring(),{},&counts,false,&millis);
+    Check(counts.shows_started==1 && Contains(timed,"\"request\":23"),"millisecond UTC timestamps work when old events lack FILETIME");
+}
+void ExplorerReproduction() {
+    using namespace pulse::dialog_diagnostics;
+    Fixture f(452);
+    const auto app = [](std::string event, std::string data, const char* time) {
+        auto line = Auto(std::move(event), std::move(data));
+        line.replace(line.find("\"dialog_auto\""), 13, "\"app\"");
+        line.replace(line.find("56.789"), 6, time);
+        return line;
+    };
+    f.Write(L"app-42.jsonl", app("explorer_watcher_ready", "\"attempt\":2", "55.000") +
+        app("explorer_window_shown", "\"window\":101,\"source_pid\":123,\"already_known\":0", "56.789") +
+        app("explorer_candidate_link", "\"window\":101,\"candidate_id\":17,\"request_id\":18446744073709551614,\"path\":\"PRIVATE_SENTINEL\"", "56.789") +
+        app("explorer_candidate", "\"window\":102", "56.788") +
+        app("explorer_handoff", "\"request_id\":18446744073709551614,\"phase\":5,\"detail\":\"PRIVATE_SENTINEL\"", "56.789") +
+        app("explorer_handoff", "\"request_id\":99", "56.790") +
+        app("external_open", "\"entry\":0,\"handoff_id\":91", "56.789") +
+        app("external_open", "\"entry\":1,\"handoff_id\":17", "56.789") +
+        app("navigation_snapshot_applied", "\"private\":\"PRIVATE_SENTINEL\"", "56.789"));
+    f.Write(L"dialog_auto-43.jsonl", app("explorer_candidate", "\"window\":103", "56.789"));
+    SYSTEMTIME timestamp{2026,11,0,10,12,34,56,789}; FILETIME utc{};
+    if (!SystemTimeToFileTime(&timestamp, &utc)) throw std::runtime_error("fixture timestamp invalid");
+    const uint64_t time = (static_cast<uint64_t>(utc.dwHighDateTime) << 32) | utc.dwLowDateTime;
+    const ReproductionWindow window{time + 50, time + 90, 900, 0};
+    const auto out = CollectExplorerLogExcerpt(f.root.wstring(), {}, &window);
+    Check(Counter(out, "files_read", 1) && Counter(out, "records_emitted", 5),
+        "Explorer feedback includes preceding watcher state plus in-window show, decision, delivery and handoff");
+    Check(Contains(out, "\"window\":101") && Contains(out, "\"request_id\":18446744073709551614") &&
+        Contains(out, "\"handoff_id\":17") && Contains(out, "\"source_pid\":123"), "Explorer correlation IDs survive exactly");
+    Check(!Contains(out, "PRIVATE_SENTINEL") && !Contains(out, "\"window\":102") && !Contains(out, "\"window\":103") &&
+        !Contains(out, "\"request_id\":99") && !Contains(out, "\"handoff_id\":91"),
+        "Explorer export excludes private, unrelated, out-of-window and wrong-file records");
+    Check(!Contains(f.Collect(), "\"window\":101"), "ordinary dialog excerpts do not include app logs");
+}
 void Privacy() {
     Fixture f(1);
     f.Write(L"dialog_auto-42.jsonl", Auto("token_rejected", "\"reason\":5,\"reason_name\":\"ELEVATED_BUNDLE_UNTRUSTED\",\"stage\":\"activation\",\"detail\":\"PRIVATE_SENTINEL\",\"path\":\"C:\\\\secret\",\"filename\":\"PRIVATE_SENTINEL\",\"commandline\":\"PRIVATE_SENTINEL\",\"unknown\":\"PRIVATE_SENTINEL\",\"process_arch_bits\":64,\"process_elevated\":1") +
@@ -89,6 +150,20 @@ void Filtering() {
     Check(Counter(out, "non_diagnostic_lines", 1) && Counter(out, "files_read", 1), "event and filename whitelist");
     Check(Flag(out, "incomplete") && !Contains(out, "PRIVATE_SENTINEL"), "invalid input reported without raw input");
 }
+void ActivationRoutes() {
+    Fixture f(452);
+    f.Write(L"runtime-decisions.tsv",
+        "interface=CoCreateInstance tick=1 reason=single-native-context options=0x00000000 category=23\r\n"
+        "interface=CoCreateInstanceEx tick=2 reason=ex-original-failed options=0x80070005 category=23\r\n"
+        "interface=CoGetClassObject tick=3 reason=class-factory-wrapper-published options=0x00000000 category=1\r\n"
+        "interface=CoCreateInstance tick=4 reason=single-native-PRIVATE_SENTINEL options=0x00000000 category=1\r\n");
+    const auto out = pulse::dialog_diagnostics::CollectDialogLogExcerpt(f.root.wstring(), {}, nullptr, true);
+    Check(Counter(out, "records_emitted", 3) && Contains(out, "single-native-context") &&
+        Contains(out, "ex-original-failed") && Contains(out, "class-factory-wrapper-published"),
+        "managed export distinguishes context bypass, original COM failure, and factory publication");
+    Check(!Contains(out, "PRIVATE_SENTINEL") && f.Collect().find("single-native-context") == std::string::npos,
+        "arbitrary reason suffixes and unverified decision sources stay excluded");
+}
 void LaunchPreflight() {
     Fixture f(77);
     const std::string line = R"({"schema":1,"session":"{12345678-1234-1234-1234-123456789ABC}","pid":42,"event":"target_preflight","data":{"existing_target_count":1,"scan_complete":0,"query_errors":2,"vanished_processes":1,"cancelled":0,"warning":"existing_target","existing_target_managed":"unknown","certified":0,"path":"PRIVATE_SENTINEL","commandline":"PRIVATE_SENTINEL"}})";
@@ -98,6 +173,32 @@ void LaunchPreflight() {
     Check(Contains(out, "managed_launcher") && Contains(out, "existing_target_count") && Contains(out, "scan_complete"), "launcher counters are separate from dialog shows");
     Check(Contains(out, "\"existing_target_managed\":\"unknown\"") && Contains(out, "\"certified\":false"), "launcher never certifies old process takeover");
     Check(!Contains(out, "PRIVATE_SENTINEL") && !Contains(out, "commandline"), "launcher private paths and commands stripped");
+}
+void RawCopy() {
+    Fixture source(78), global(79), managed(80);
+    std::string original="private path C:\\source\\drawing.dwg\r\n";
+    original.push_back('\0');
+    source.Write(L"dialog_auto-42.jsonl",original);
+    source.Write(L"dialog_runtime-43.jsonl.1","rotated\n");
+    source.Write(L"runtime-decisions.tsv","interface=GetSaveFileNameW tick=44 reason=legacy-adapter-declined options=0x00000000 category=1\r\n");
+    const auto unrelated=source.Write(L"app-42.jsonl","unrelated");
+    const auto link=source.root/L"dialog_auto-99.jsonl";
+    const bool linked=CreateHardLinkW(link.c_str(),unrelated.c_str(),nullptr)!=FALSE;
+    if(linked)source.files.push_back(link);
+    using namespace pulse::dialog_diagnostics;
+    RawLogCopy counters;
+    CopyDialogRawLogs(source.root.wstring(),global.root.wstring(),false,counters);
+    for(const auto* name:{L"dialog_auto-42.jsonl",L"dialog_runtime-43.jsonl.1"})global.files.push_back(global.root/name);
+    std::ifstream input(global.root/L"dialog_auto-42.jsonl",std::ios::binary);
+    const std::string copied((std::istreambuf_iterator<char>(input)),{});
+    Check(counters.files==2 && copied==original,"raw copied bytes include original fields, CRLF and NUL");
+    Check(linked && counters.skipped==1 && !fs::exists(global.root/L"dialog_auto-99.jsonl") &&
+        !fs::exists(global.root/L"app-42.jsonl") && !fs::exists(global.root/L"runtime-decisions.tsv"),
+        "raw collection ignores app logs and rejects links and unverified session names");
+    CopyDialogRawLogs(source.root.wstring(),managed.root.wstring(),true,counters);
+    managed.files.push_back(managed.root/L"runtime-decisions.tsv");
+    Check(counters.files==3 && fs::exists(managed.root/L"runtime-decisions.tsv"),
+        "verified managed source includes original runtime decisions");
 }
 void Managed() {
     Fixture f(3);
@@ -164,13 +265,14 @@ void Errors() {
 }
 }
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--activation-routes") { ActivationRoutes(); return failures ? 1 : 0; }
     if (argc == 2 && std::wstring_view(argv[1]) == L"--preflight-only") { LaunchPreflight(); return failures ? 1 : 0; }
     if (argc == 3 && std::wstring_view(argv[1]) == L"--collect") {
         std::cout << pulse::dialog_diagnostics::CollectDialogLogExcerpt(argv[2]);
         return 0;
     }
     if (argc != 1) return 2;
-    try { Privacy(); Filtering(); Managed(); LaunchPreflight(); Limits(); Errors(); }
+    try { Privacy(); Filtering(); Managed(); ActivationRoutes(); LaunchPreflight(); RawCopy(); Limits(); Errors(); Reproduction(); ExplorerReproduction(); }
     catch (const std::exception& error) { ++failures; std::cout << "[FAIL] fixture exception: " << error.what() << '\n'; }
     std::cout << "DIALOG_LOG_EXCERPT " << checks << " checks " << failures << " failures\n";
     return failures ? 1 : 0;

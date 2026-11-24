@@ -1,4 +1,5 @@
 #include "../common/rename_identity.h"
+#include "../common/display_path.h"
 #include "elevated_transfer_client.h"
 #include "../ipc/elevated_transfer_transport.h"
 #include "../ipc/elevated_transfer_messages.h"
@@ -77,14 +78,21 @@ HRESULT StartSession(Session& session, HWND owner, const std::function<void(bool
 }
 }
 static ShellTransferResult RunAuthorizedRequest(elevated::Kind kind, const elevated::Writer& request,
-    HWND owner, std::atomic<bool>& cancel, ElevatedTransferCallbacks callbacks) {
+    HWND owner, std::atomic<bool>& cancel, ElevatedTransferCallbacks callbacks, std::vector<WIN32_FIND_DATAW>* rows = nullptr,
+    const std::function<bool()>& stale = {}) {
     using namespace elevated;
     ShellTransferResult result;
     auto& session = Shared();
     std::lock_guard lock(session.mutex);
+    if (stale && stale()) { result.hr = HRESULT_FROM_WIN32(ERROR_CANCELLED); result.cancelled = true; return result; }
     if (cancel.load()) { result.hr = HRESULT_FROM_WIN32(ERROR_CANCELLED); result.cancelled = true; return result; }
     result.hr = StartSession(session, owner, callbacks.authorization);
-    if (FAILED(result.hr)) { result.cancelled = result.hr == HRESULT_FROM_WIN32(ERROR_CANCELLED); return result; }
+    if (FAILED(result.hr)) {
+        result.cancelled = result.hr == HRESULT_FROM_WIN32(ERROR_CANCELLED);
+        result.helper_unavailable = result.hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) ||
+            result.hr == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
+        return result;
+    }
     if (cancel.load()) { result.hr = HRESULT_FROM_WIN32(ERROR_CANCELLED); result.cancelled = true; return result; }
     const uint64_t sequence = ++session.sequence;
     if (!WriteFrame(session.pipe.Get(), session.process.Get(), session.nonce, kind, sequence, request)) {
@@ -143,6 +151,14 @@ static ShellTransferResult RunAuthorizedRequest(elevated::Kind kind, const eleva
                 auto from = reader.Text();
                 if (!reader.Done() || !SafePath(from) || result.sources.size() >= kMaxPaths) break;
                 result.sources.push_back(std::move(from)); result.mutated = true;
+            } else if (header.kind == Kind::FolderRows && kind == Kind::ListFolder && rows) {
+                while (reader.good && reader.offset < payload.size()) {
+                    const auto row = reader.Number<WIN32_FIND_DATAW>();
+                    if (!reader.good || !wmemchr(row.cFileName, 0, MAX_PATH) || !row.cFileName[0] ||
+                        wcspbrk(row.cFileName, L"\\/:") || rows->size() >= 65536) { reader.good = false; break; }
+                    rows->push_back(row);
+                }
+                if (!reader.Done()) break;
             } else if (header.kind == Kind::Result) {
                 result.hr = reader.Number<HRESULT>(); result.cancelled = reader.Number<uint32_t>() != 0;
                 result.mutated = reader.Number<uint32_t>() != 0 || result.mutated;
@@ -204,18 +220,28 @@ ShellTransferResult DeleteWithElevatedHelper(const std::vector<std::wstring>& so
     return RunAuthorizedRequest(permanent ? Kind::PermanentDelete : Kind::RecycleDelete, request, owner, cancel, std::move(callbacks));
 }
 
-ShellTransferResult CreateFolderWithElevatedHelper(const std::wstring& path, HWND owner,
-    std::atomic<bool>& cancel, ElevatedTransferCallbacks callbacks) {
+static ShellTransferResult CreateWithElevatedHelper(const std::wstring& path, HWND owner,
+    std::atomic<bool>& cancel, ElevatedTransferCallbacks callbacks, bool empty_file) {
     using namespace elevated;
     ShellTransferResult result;
     if (cancel.load()) { result.hr = HRESULT_FROM_WIN32(ERROR_CANCELLED); result.cancelled = true; return result; }
     if (!SafePath(path)) { result.hr = E_INVALIDARG; return result; }
     Writer request;
     request.Text(path);
+    if (empty_file) request.Number<uint32_t>(1); // Old hosts reject trailing data before creation.
     if (!request.good) { result.hr = E_INVALIDARG; return result; }
     callbacks.paused = {};
     callbacks.conflict = {};
     return RunAuthorizedRequest(Kind::CreateFolder, request, owner, cancel, std::move(callbacks));
+}
+
+ShellTransferResult CreateFolderWithElevatedHelper(const std::wstring& path, HWND owner,
+    std::atomic<bool>& cancel, ElevatedTransferCallbacks callbacks) {
+    return CreateWithElevatedHelper(path, owner, cancel, std::move(callbacks), false);
+}
+ShellTransferResult CreateEmptyFileWithElevatedHelper(const std::wstring& path, HWND owner,
+    std::atomic<bool>& cancel, ElevatedTransferCallbacks callbacks) {
+    return CreateWithElevatedHelper(path, owner, cancel, std::move(callbacks), true);
 }
 
 ShellTransferResult EjectWithElevatedHelper(const storage::VirtualDiskIdentity& identity, HWND owner,
@@ -230,6 +256,20 @@ ShellTransferResult EjectWithElevatedHelper(const storage::VirtualDiskIdentity& 
     return RunAuthorizedRequest(elevated::Kind::EjectVirtualDisk, request, owner, cancel, {});
 }
 
+HRESULT ListWithElevatedHelper(const std::wstring& path, HWND owner, std::vector<WIN32_FIND_DATAW>& rows,
+    const std::function<bool()>& stale) {
+    rows.clear();
+    if (!elevated::SafePath(path)) return E_INVALIDARG;
+    const auto friendly = pulse::path::FriendlyPathText(path);
+    const auto drive = friendly.size() >= 3 && friendly[1] == L':' ?
+        GetDriveTypeW(friendly.substr(0, 3).c_str()) : DRIVE_UNKNOWN;
+    if (drive != DRIVE_FIXED && drive != DRIVE_REMOVABLE) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    elevated::Writer request; request.Text(path);
+    std::atomic<bool> cancel{false};
+    const auto result = RunAuthorizedRequest(elevated::Kind::ListFolder, request, owner, cancel, {}, &rows, stale);
+    if (FAILED(result.hr)) rows.clear();
+    return result.hr;
+}
 void ShutdownElevatedTransferHelper() {
     auto& session = Shared(); std::lock_guard lock(session.mutex);
     if (session.pipe) elevated::WriteFrame(session.pipe.Get(), session.process.Get(), session.nonce, elevated::Kind::Shutdown, 0, {}, 1000);

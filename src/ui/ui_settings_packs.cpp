@@ -1,6 +1,7 @@
 #include "../common/windows_compat.h"
 #include "ui_renderer.h"
 #include "ui_renderer_internal.h"
+#include "ui_settings_store_status.h"
 #include "../common/localization.h"
 #include "store_icons.h"
 #include <algorithm>
@@ -133,14 +134,10 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
     if (vm.settings_page == 8) {
         using I = l10n::StringId;
         settings_store_fields_[0] = lay.store_search;
-        settings_store_fields_[1] = lay.sz.folder;
-        settings_store_fields_[2] = lay.store_quick.mode;
-        settings_store_fields_[3] = lay.store_quick.format;
-        settings_store_fields_[4] = lay.store_quick.level;
-        settings_store_fields_[5] = lay.sz.more;
-        settings_store_fields_[6] = lay.sz.level_track;
+        for (int field = 1; field < 7; ++field) settings_store_fields_[field] = {};
+        settings_store_fields_[5] = lay.ext_detail.more;
         settings_store_clip_ = lay.content;
-        if (lay.sz.on) { DrawSevenZipDetail(vm, rect, theme); return; }
+        if (lay.ext_detail.on) { DrawExtensionDetail(vm, rect, theme); return; }
         // Pivot: labels on a hairline, the current one in full text with an accent bar under it.
         {
             const int selected=vm.settings_store_browse ? 0 : vm.settings_store_installed ? 1 : 2;
@@ -182,12 +179,6 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
                 if (r.bottom<=r.top) return;
                 painter_.DrawWrappedCaption(value,D2D1::Point2F(r.left,r.top),r.right-r.left,color);
             };
-            auto bar=[&](std::wstring_view value,D2D1_RECT_F r,fluent::InfoBarKind kind) {
-                if (r.bottom<=r.top) return;
-                const auto color=painter_.StatusToneColor(kind);
-                painter_.FillRoundedRect(D2D1::RectF(r.left-12*s,r.top-6*s,r.right+12*s,r.bottom+6*s),6*s,WithAlpha(color,vm.dark?0.12f:0.07f));
-                caption(value,r,theme.text_secondary);
-            };
             if (lay.store_search.right > lay.store_search.left) {
                 painter_.DrawTextFieldFrame(lay.store_search, {}, true);
                 DrawStoreIcon(dc, StoreIcon::Search,
@@ -199,23 +190,11 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
                 fluent::ButtonKind::Standard,store_text::CanRefreshInstalled(view));
             button(lay.store_install_file,l10n::Get(I::StoreInstallFromFile),PackAction::StoreInstallFromFile,
                 fluent::ButtonKind::Standard,store_text::CanInstallFromFile(view));
+            button(lay.store_developer,store_text::Developer(view),PackAction::StoreDeveloper,
+                fluent::ButtonKind::Standard,store_text::CanInstallFromFile(view));
             caption(l10n::Get(view.installed_loading ? I::StoreInstalledLoading : I::StoreInstalledFailed),
                 lay.store_state,view.installed_loading ? theme.text_secondary : painter_.StatusToneColor(fluent::InfoBarKind::Error));
-            bar(view.installed_error,lay.store_notice,fluent::InfoBarKind::Error);
-            if (lay.store_restart.bottom > lay.store_restart.top) {
-                auto banner = lay.store_restart;
-                if (lay.store_restart_button.bottom > lay.store_restart_button.top && lay.store_restart_button.right > lay.store_restart_button.left) {
-                    banner.left = (std::min)(banner.left, lay.store_restart_button.left);
-                    banner.top = (std::min)(banner.top, lay.store_restart_button.top);
-                    banner.right = (std::max)(banner.right, lay.store_restart_button.right);
-                    banner.bottom = (std::max)(banner.bottom, lay.store_restart_button.bottom);
-                }
-                const auto color = painter_.StatusToneColor(fluent::InfoBarKind::Warning);
-                painter_.FillRoundedRect(D2D1::RectF(banner.left-12*s,banner.top-6*s,banner.right+12*s,banner.bottom+6*s),
-                    6*s,WithAlpha(color,vm.dark?0.12f:0.07f));
-                caption(l10n::Get(I::StoreRestart),lay.store_restart,theme.text_secondary);
-                button(lay.store_restart_button,l10n::Get(I::StoreRestartNow),PackAction::StoreRestartNow);
-            }
+            store_notify::DrawStatusBanners(painter_, lay, view, theme, false, true, hovered(PackAction::StoreRestartNow));
             caption(l10n::Get(I::StoreInstalledEmpty),lay.store_empty,theme.text_secondary);
             for (size_t i=0;i<lay.installed_items.size() && i<view.installed.size();++i) {
                 const auto& c=lay.installed_items[i]; const auto& item=view.installed[i];
@@ -226,14 +205,21 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
                 });
                 const auto icon = catalog == view.items.end() ? (item.id == L"pulse.7zip" ? StoreIcon::Box : StoreIcon::Puzzle) : catalog->icon;
                 const auto icon_color = catalog == view.items.end() ? (item.id == L"pulse.7zip" ? HexColor(0x527D70) : theme.accent) : HexColor(catalog->icon_color);
-                painter_.FillRoundedRect(c.icon, 11*s, icon_color);
-                {
-                    const D2D1_GRADIENT_STOP stops[]={{0,MixColor(icon_color,D2D1::ColorF(1,1,1),.17f)},{1,MixColor(icon_color,D2D1::ColorF(0,0,0),.16f)}};
-                    ComPtr<ID2D1GradientStopCollection> stops_collection;ComPtr<ID2D1LinearGradientBrush> gradient;
-                    if(SUCCEEDED(dc->CreateGradientStopCollection(stops,2,&stops_collection))&&SUCCEEDED(dc->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties({c.icon.left,c.icon.top},{c.icon.right,c.icon.bottom}),stops_collection.get(),&gradient)))
-                        dc->FillRoundedRectangle(D2D1::RoundedRect(c.icon,11*s,11*s),gradient.get());
+                const uint32_t custom_icon = catalog == view.items.end() ? 0 : catalog->custom_icon;
+                if (!IsHighContrast()) {
+                    DrawProductTile(dc, c.icon, ProductArtFor(icon), icon_color, icon, custom_icon, &theme);
+                } else {
+                    painter_.FillRoundedRect(c.icon, 11*s, icon_color);
+                    {
+                        const D2D1_GRADIENT_STOP stops[]={{0,MixColor(icon_color,D2D1::ColorF(1,1,1),.17f)},{1,MixColor(icon_color,D2D1::ColorF(0,0,0),.16f)}};
+                        ComPtr<ID2D1GradientStopCollection> stops_collection;ComPtr<ID2D1LinearGradientBrush> gradient;
+                        if(SUCCEEDED(dc->CreateGradientStopCollection(stops,2,&stops_collection))&&SUCCEEDED(dc->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties({c.icon.left,c.icon.top},{c.icon.right,c.icon.bottom}),stops_collection.get(),&gradient)))
+                            dc->FillRoundedRectangle(D2D1::RoundedRect(c.icon,11*s,11*s),gradient.get());
+                    }
+                    const auto icon_bounds = D2D1::RectF(c.icon.left+11*s,c.icon.top+11*s,c.icon.right-11*s,c.icon.bottom-11*s);
+                    if (!IsCustomExtensionIcon(custom_icon) || !DrawExtensionIcon(dc, custom_icon, icon_bounds, D2D1::ColorF(1,1,1), &theme))
+                        DrawStoreIcon(dc, icon, icon_bounds, D2D1::ColorF(1,1,1));
                 }
-                DrawStoreIcon(dc, icon, D2D1::RectF(c.icon.left+11*s,c.icon.top+11*s,c.icon.right-11*s,c.icon.bottom-11*s), D2D1::ColorF(1,1,1));
                 if (c.name.bottom > c.name.top)
                     painter_.DrawWrappedSection(item.name, D2D1::Point2F(c.name.left, c.name.top), c.name.right - c.name.left, theme.text);
                 caption(item.id,c.id,theme.text_secondary);
@@ -277,6 +263,8 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
             DrawSettingsStore(vm, rect, theme);
             return;
         }
+        store_notify::DrawStatusBanners(painter_, lay, vm.settings_store_view, theme,
+            false, false, hovered(PackAction::StoreRestartNow));
     }
 
     if (vm.settings_page != 8) {

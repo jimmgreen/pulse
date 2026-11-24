@@ -2,6 +2,7 @@
 #include "shell_icons.h"
 #include "../common/path_utils.h"
 #include "../common/shell_id.h"
+#include "../fs/drive_kind.h"
 
 #include <commoncontrols.h>
 #include <shellapi.h>
@@ -69,7 +70,9 @@ bool ConvertIconPixels(uint64_t key, std::unordered_map<int, IImageList*>& lists
                        ComPtr<IWICImagingFactory>& wic, UINT& width, UINT& height,
                        std::vector<uint8_t>& data) {
     const int list_id = static_cast<int>(static_cast<uint32_t>(key >> 32));
-    const int index = static_cast<int>(static_cast<uint32_t>(key & 0xffffffffu));
+    const uint32_t packed = static_cast<uint32_t>(key);
+    const int index = static_cast<int>(packed & 0x00ffffffu);
+    const UINT overlay = (packed >> 24) & 0x0fu;
     IImageList* list = nullptr;
     if (const auto it = lists.find(list_id); it != lists.end()) {
         list = it->second;
@@ -84,7 +87,8 @@ bool ConvertIconPixels(uint64_t key, std::unordered_map<int, IImageList*>& lists
                                               IID_PPV_ARGS(&wic)))) return false;
     if (!wic.get()) return false;
     HICON icon = nullptr;
-    if (FAILED(list->GetIcon(index, ILD_TRANSPARENT, &icon)) || !icon) return false;
+    if (FAILED(list->GetIcon(index, ILD_TRANSPARENT | INDEXTOOVERLAYMASK(overlay), &icon)) || !icon)
+        return false;
     ComPtr<IWICBitmap> source;
     const HRESULT hr = wic->CreateBitmapFromHICON(icon, &source);
     DestroyIcon(icon);
@@ -193,6 +197,25 @@ void ShellIconCache::Reset() {
     ready_pixels_.clear();
 }
 
+void ShellIconCache::InvalidateAssociations() {
+    bitmaps_.clear();
+    artwork_bounds_.clear();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++association_generation_;
+        generic_index_.clear();
+        exact_index_.clear();
+        retry_after_.clear();
+        last_used_.clear();
+        queued_.clear();
+        while (!queue_.empty()) queue_.pop();
+        convert_queue_.clear();
+        convert_pending_.clear();
+        ready_pixels_.clear();
+    }
+    repaint_.InvalidateAll();
+}
+
 int ShellIconCache::ImageListId(float desired_pixels) noexcept {
     if (desired_pixels <= 16.0f) return SHIL_SMALL;
     if (desired_pixels <= 32.0f) return SHIL_LARGE;
@@ -201,11 +224,28 @@ int ShellIconCache::ImageListId(float desired_pixels) noexcept {
 }
 
 bool ShellIconCache::NeedsExactIcon(const std::wstring& name, bool is_dir,
-                                    const std::wstring& path) {
-    (void)name;
-    (void)is_dir;
+                                    const std::wstring& path, DWORD attrs) {
+    if (path.empty()) return false;
+    // On spinning HDDs, avoid per-file SHGetFileInfoW + third-party overlay COM
+    // handler queries for ordinary files/folders (which contend for the single
+    // disk head). Still resolve per-file icon types, drive roots, shell
+    // namespace items, and folders with desktop.ini (READONLY/SYSTEM).
+    if (!path.starts_with(L"::") && !path.starts_with(L"shell:") &&
+        ::pulse::fs::IsKnownSpinningDrive(path)) {
+        if (is_dir) {
+            if ((attrs & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM)) != 0) return true;
+            const auto plain = pulse::path::StripExtendedPathPrefix(path);
+            return plain.size() >= 2 && plain.size() <= 3 && plain[1] == L':';
+        }
+        const std::wstring ext = LowerExt(name.empty() ? path : name);
+        for (const wchar_t* per_file : {L".exe", L".lnk", L".ico", L".cur", L".ani",
+                                        L".url", L".scr", L".msi", L".appref-ms", L".cpl"}) {
+            if (ext == per_file) return true;
+        }
+        return false;
+    }
     // Folder customizations and registered icon handlers are path-dependent.
-    return !path.empty();
+    return true;
 }
 
 int ShellIconCache::GenericIndex(const std::wstring& name, bool is_dir, DWORD attrs) {
@@ -252,16 +292,21 @@ void ShellIconCache::StartWorkerLocked() {
 
 void ShellIconCache::WorkerLoop() {
     const HRESULT com_hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    // Pulse draws its own link badge. Only suppress this system overlay, not
+    // a third-party encryption/status overlay on the same kind of file.
+    const int link_overlay = SHGetIconOverlayIndexW(nullptr, IDO_SHGIOI_LINK);
     std::unordered_map<int, IImageList*> worker_lists;
     ComPtr<IWICImagingFactory> worker_wic;
     for (;;) {
         std::wstring path;
         uint64_t convert_key = 0;
         bool convert = false;
+        uint64_t generation = 0;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [&] { return !running_ || !queue_.empty() || !convert_queue_.empty(); });
             if (!running_) break;
+            generation = association_generation_;
             if (!convert_queue_.empty()) {
                 // Publish available artwork before resolving more paths. Shell
                 // queries for a directory of program shortcuts are not cheap.
@@ -284,6 +329,7 @@ void ShellIconCache::WorkerLoop() {
             }
             {
                 std::lock_guard<std::mutex> lock(mutex_);
+                if (generation != association_generation_) continue;
                 convert_pending_.erase(convert_key);
                 if (ok) {
                     if (ready_pixels_.size() >= kReadyPixelsLimit) ready_pixels_.erase(ready_pixels_.begin());
@@ -305,6 +351,7 @@ void ShellIconCache::WorkerLoop() {
                                SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES))
                 index = info.iIcon;
             std::lock_guard<std::mutex> lock(mutex_);
+            if (generation != association_generation_) continue;
             if (index >= 0) {
                 if (generic_index_.size() >= 512) {
                     const auto victim = std::find_if(generic_index_.begin(), generic_index_.end(),
@@ -314,7 +361,8 @@ void ShellIconCache::WorkerLoop() {
                 generic_index_[key] = index;
             }
         } else {
-            const UINT flags = SHGFI_SYSICONINDEX | SHGFI_SMALLICON;
+            const UINT flags = SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_ICON |
+                               SHGFI_OVERLAYINDEX | SHGFI_ADDOVERLAYS;
             const std::wstring query = ShellPath(path);
             bool found = false;
             if (query.starts_with(L"::") || query.starts_with(L"shell:")) {
@@ -331,15 +379,25 @@ void ShellIconCache::WorkerLoop() {
             }
             if (found) {
                 index = info.iIcon;
+                if (index >= 0) {
+                    const auto packed = static_cast<uint32_t>(index);
+                    const auto overlay = packed >> 24;
+                    if (overlay == static_cast<uint32_t>(link_overlay) || overlay > 15)
+                        index = static_cast<int>(packed & 0x00ffffffu);
+                }
                 if (info.hIcon) DestroyIcon(info.hIcon);
             }
         }
+        bool visual_changed = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (generation != association_generation_) continue;
             queued_.erase(path);
             if (index >= 0) {
                 retry_after_.erase(path);
-                if (!path.starts_with(prefix)) {
+                if (path.starts_with(prefix)) {
+                    visual_changed = true;
+                } else {
                     if (exact_index_.size() >= kExactIndexLimit) {
                         const auto oldest = std::min_element(last_used_.begin(), last_used_.end(),
                             [](const auto& a, const auto& b) { return a.second < b.second; });
@@ -348,15 +406,36 @@ void ShellIconCache::WorkerLoop() {
                             last_used_.erase(oldest);
                         }
                     }
+                    const auto prev = exact_index_.find(path);
+                    const bool changed_from_prev = prev == exact_index_.end() || prev->second != index;
                     exact_index_[path] = index;
                     last_used_[path] = ++access_clock_;
+                    // Skip redundant full-window repaints when the exact icon
+                    // resolved without an overlay to the exact generic icon
+                    // index the UI already painted.
+                    if (changed_from_prev) {
+                        const bool has_overlay = (static_cast<uint32_t>(index) >> 24) != 0;
+                        bool matches_generic = false;
+                        if (!has_overlay) {
+                            const size_t slash = path.find_last_of(L"\\/");
+                            const std::wstring leaf = slash == std::wstring::npos ? path : path.substr(slash + 1);
+                            const std::wstring ext = LowerExt(leaf);
+                            const auto matches_key = [&](const wchar_t* key) {
+                                const auto g = generic_index_.find(key);
+                                return g != generic_index_.end() && g->second == index;
+                            };
+                            if (!ext.empty()) matches_generic = matches_key(ext.c_str());
+                            else matches_generic = matches_key(L"<dir>") || matches_key(L"<file>");
+                        }
+                        visual_changed = !matches_generic;
+                    }
                 }
             } else {
                 if (retry_after_.size() >= kExactIndexLimit) retry_after_.erase(retry_after_.begin());
                 retry_after_[path] = GetTickCount64() + 2000;
             }
         }
-        repaint_.InvalidateAll();
+        if (visual_changed) repaint_.InvalidateAll();
     }
     for (auto& [_, list] : worker_lists)
         if (list) list->Release();
@@ -421,7 +500,7 @@ ID2D1Bitmap* ShellIconCache::UploadReady(uint64_t key) {
 void ShellIconCache::Prefetch(const std::wstring& path, const std::wstring& name,
                               bool is_dir, DWORD attrs, float desired_dips) {
     int index = -1;
-    const bool exact = NeedsExactIcon(name, is_dir, path) && !path.empty();
+    const bool exact = NeedsExactIcon(name, is_dir, path, attrs) && !path.empty();
     if (exact) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (const auto it = exact_index_.find(path); it != exact_index_.end()) index = it->second;
@@ -436,7 +515,8 @@ void ShellIconCache::Prefetch(const std::wstring& path, const std::wstring& name
 
 bool ShellIconCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                           const std::wstring& path, const std::wstring& name,
-                          bool is_dir, DWORD attrs, float opacity) {
+                          bool is_dir, DWORD attrs, float opacity,
+                          ID2D1Effect* color_effect) {
     if (!dc) return false;
     const float desired = std::max(dest.right - dest.left, dest.bottom - dest.top);
     ID2D1Bitmap* bitmap = BitmapFor(path, name, is_dir, attrs, desired);
@@ -456,6 +536,21 @@ bool ShellIconCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
         }
         break;
     }
+    if (color_effect) {
+        const D2D1_SIZE_F bmp_size = bitmap->GetSize();
+        if (bmp_size.width > 0.0f && bmp_size.height > 0.0f) {
+            D2D1_MATRIX_3X2_F saved{};
+            dc->GetTransform(&saved);
+            dc->SetTransform(D2D1::Matrix3x2F::Scale((target.right - target.left) / bmp_size.width,
+                                                     (target.bottom - target.top) / bmp_size.height) *
+                             D2D1::Matrix3x2F::Translation(target.left, target.top) * saved);
+            color_effect->SetInput(0, bitmap);
+            dc->DrawImage(color_effect, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+            color_effect->SetInput(0, nullptr);
+            dc->SetTransform(saved);
+            return true;
+        }
+    }
     dc->DrawBitmap(bitmap, &target, opacity, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
                    nullptr, nullptr);
     return true;
@@ -465,7 +560,7 @@ bool ShellIconCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
 ID2D1Bitmap* ShellIconCache::BitmapFor(const std::wstring& path, const std::wstring& name,
                                        bool is_dir, DWORD attrs, float desired_dips) {
     int index = -1;
-    const bool exact = NeedsExactIcon(name, is_dir, path) && !path.empty();
+    const bool exact = NeedsExactIcon(name, is_dir, path, attrs) && !path.empty();
     if (exact) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = exact_index_.find(path);
@@ -483,8 +578,7 @@ ID2D1Bitmap* ShellIconCache::BitmapFor(const std::wstring& path, const std::wstr
 
 ID2D1Bitmap* ShellIconCache::CachedBitmapFor(const std::wstring& path, const std::wstring& name,
                                              bool is_dir, DWORD attrs, float desired_dips) {
-    (void)attrs;  // generic icons are keyed by extension only (see GenericIndex)
-    const auto key = CachedBitmapKey(path, name, is_dir, desired_dips, true);
+    const auto key = CachedBitmapKey(path, name, is_dir, attrs, desired_dips, true);
     return key ? bitmaps_.at(*key).get() : nullptr;
 }
 
@@ -507,8 +601,7 @@ ID2D1Bitmap* ShellIconCache::ExactBitmapFor(const std::wstring& path, float desi
 
 D2D1_RECT_F ShellIconCache::CachedArtworkBounds(const std::wstring& path,
     const std::wstring& name, bool is_dir, DWORD attrs, float desired_dips) {
-    (void)attrs;
-    const auto key = CachedBitmapKey(path, name, is_dir, desired_dips, false);
+    const auto key = CachedBitmapKey(path, name, is_dir, attrs, desired_dips, false);
     if (key) {
         if (const auto it = artwork_bounds_.find(*key); it != artwork_bounds_.end()) {
             const auto& b = it->second;
@@ -520,17 +613,16 @@ D2D1_RECT_F ShellIconCache::CachedArtworkBounds(const std::wstring& path,
 
 uint32_t ShellIconCache::CachedNativeSide(const std::wstring& path, const std::wstring& name,
                                           bool is_dir, DWORD attrs, float desired_dips) {
-    (void)attrs;
-    const auto key = CachedBitmapKey(path, name, is_dir, desired_dips, false);
+    const auto key = CachedBitmapKey(path, name, is_dir, attrs, desired_dips, false);
     if (!key) return 0;
     const auto it = artwork_bounds_.find(*key);
     return it == artwork_bounds_.end() ? 0 : it->second.native_side;
 }
 
 std::optional<uint64_t> ShellIconCache::CachedBitmapKey(const std::wstring& path,
-    const std::wstring& name, bool is_dir, float desired_dips, bool upload_ready) {
+    const std::wstring& name, bool is_dir, DWORD attrs, float desired_dips, bool upload_ready) {
     int exact = -1;
-    if (NeedsExactIcon(name, is_dir, path) && !path.empty()) {
+    if (NeedsExactIcon(name, is_dir, path, attrs) && !path.empty()) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (const auto it = exact_index_.find(path); it != exact_index_.end()) exact = it->second;
     }

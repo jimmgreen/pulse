@@ -441,6 +441,8 @@ bool RunContentTaskSupplement(const ContentIndexConfig &config, const ContentSea
             bool complete = true;
             try {
                 PdfGroups pdf_groups;
+                const std::wstring uncovered_root = (request.allow_uncovered_root && !request.root.empty())
+                    ? ContentScopeKey(request.root) : std::wstring{};
                 auto visit = [&](const std::wstring &path) {
                     if (interrupted())
                         return false;
@@ -452,7 +454,9 @@ bool RunContentTaskSupplement(const ContentIndexConfig &config, const ContentSea
                         return true;
                     const auto root = std::find_if(config.roots.begin(), config.roots.end(),
                                                    [&](const auto &scope) { return InScope(path, scope.path, true); });
-                    if (root == config.roots.end() ||
+                    const bool uncovered_match = root == config.roots.end() &&
+                        !uncovered_root.empty() && InScope(path, uncovered_root, request.recursive);
+                    if ((root == config.roots.end() && !uncovered_match) ||
                         (!request.root.empty() && !InScope(path, request.root, request.recursive)) ||
                         (!request.roots.empty() &&
                          std::none_of(request.roots.begin(), request.roots.end(),
@@ -463,15 +467,19 @@ bool RunContentTaskSupplement(const ContentIndexConfig &config, const ContentSea
                         (std::min)(document ? config.maximum_document_bytes : config.maximum_file_bytes,
                                    document ? request.maximum_document_bytes : request.maximum_file_bytes);
                     const size_t lane = ContentScopeKey(std::wstring(ext)) == L".pdf" ? 0 : document ? 1 : 2;
-                    const auto root_index = static_cast<size_t>(root - config.roots.begin());
+                    const std::wstring& root_path = uncovered_match ? uncovered_root : root->path;
+                    const pulse::text::Encoding root_encoding = uncovered_match ? config.default_encoding : root->encoding;
+                    const size_t root_index = uncovered_match ? config.roots.size()
+                                                              : static_cast<size_t>(root - config.roots.begin());
+                    const size_t root_count = uncovered_match ? config.roots.size() + 1 : config.roots.size();
                     // Only PDF has the long backlog that needs directory fairness.
                     // Office/text retain their original global admission order.
-                    const auto group = lane == 0 ? pdf_groups.Select(path, root->path, root_index, config.roots.size()) : 0;
+                    const auto group = lane == 0 ? pdf_groups.Select(path, root_path, root_index, root_count) : 0;
                     std::unique_lock lock(mutex);
                     ++total;
-                    current_root = root->path;
+                    current_root = root_path;
                     const auto enqueued = timing.Enqueue(static_cast<ContentTimingLane>(lane));
-                    if (!queues[lane].Push(group, {path, {}, 0, 0, maximum, root->encoding, enqueued}, queued_bytes)) {
+                    if (!queues[lane].Push(group, {path, {}, 0, 0, maximum, root_encoding, enqueued}, queued_bytes)) {
                         const auto code = GetLastError();
                         lock.unlock();
                         fail(code);
@@ -554,6 +562,11 @@ bool RunContentTaskSupplement(const ContentIndexConfig &config, const ContentSea
                             if (ContentPathUnder(scope, configured_root)) add_root(scope, configured_root);
                             else if (walk_recursive && ContentPathUnder(configured_root, scope))
                                 add_root(configured_root, configured_root);
+                        }
+                    }
+                    if (!uncovered_root.empty()) {
+                        for (const auto& scope : scopes) {
+                            if (ContentPathUnder(scope, uncovered_root)) add_root(scope, uncovered_root);
                         }
                     }
                     // Starting below a configured root must not bypass the DFS

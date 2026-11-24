@@ -8,9 +8,11 @@
 #include "icon_artwork_bounds.h"
 #include "cover_palette.h"
 #include "../ipc/preview_protocol.h"
+#include "thumbnail_bc1.h"
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -48,8 +50,14 @@ class ThumbnailStore {
 public:
     virtual ~ThumbnailStore() = default;
     virtual bool Load(const ThumbnailStoreKey& key, StoredThumbnail& out) = 0;
+    virtual bool LoadMicro(const ThumbnailStoreKey& /*key*/, MicroThumbData& /*out*/) { return false; }
+    virtual bool ShouldSave(const ThumbnailStoreKey& /*key*/, uint32_t /*decode_ms*/) const { return true; }
     // decode_ms: how long the host took; quick results are not worth keeping.
     virtual void Save(const ThumbnailStoreKey& key, uint32_t decode_ms, const StoredThumbnail& thumb) = 0;
+    virtual void SaveMoved(const ThumbnailStoreKey& key, uint32_t decode_ms, StoredThumbnail&& thumb) {
+        Save(key, decode_ms, thumb);
+    }
+    virtual void SaveMicro(const ThumbnailStoreKey& /*key*/, MicroThumbData&& /*micro*/) {}
 };
 
 struct DocumentImageSession {
@@ -98,16 +106,50 @@ public:
     // The store SetParallelism caches read before asking a host and write
     // after a slow decode; null (tests, tools) keeps memory only.
     static void SetGridStore(ThumbnailStore* store);
+    // Files of a virtual folder (pulse:vfs:..., an archive opened as a
+    // folder) have no path the host can open: on the decode lane `resolver`
+    // copies one out to a local file and the host decodes that copy. False
+    // (or no resolver) leaves the file without a thumbnail.
+    using VirtualFileResolver = std::function<bool(const std::wstring& path, uint64_t modified,
+                                                   uint64_t size, std::wstring& local)>;
+    static void SetVirtualFileResolver(VirtualFileResolver resolver);
+    // Plugin thumbnails (pulse.preview providers that opted in): asked on the decode
+    // lane for grid thumbnails of local files after the disk store and before the
+    // host. Ready results are cached like host ones; Busy retries later; NotHandled
+    // and Failed fall through to the host's usual thumbnail.
+    enum class PluginThumbnailStatus { NotHandled, Ready, Busy, Failed };
+    struct PluginThumbnail {
+        std::vector<uint8_t> pixels;  // premultiplied BGRA, top-down, width * 4 per row
+        uint32_t width = 0, height = 0;
+    };
+    using PluginThumbnailProvider = std::function<PluginThumbnailStatus(const std::wstring& path,
+        uint64_t modified, uint64_t size, uint32_t pixels, const std::function<bool()>& cancelled,
+        PluginThumbnail& out)>;
+    static void SetPluginThumbnailProvider(PluginThumbnailProvider provider);
     // Grid caches: queue the thumbnail of an item just past the visible ones,
     // behind everything drawn. Quick formats only. False when the queue is
     // too busy to take it now (try again on a later frame).
     bool Prefetch(const std::wstring& path, DWORD attrs, uint32_t pixel_size,
                   uint64_t generation, uint64_t modified, uint64_t size);
+    // Grid caches: during high-velocity viewport jumps over large directories,
+    // serve resident L1/L2 thumbnails immediately and defer cold host decodes
+    // until scrolling slows or settles.
+    void SetFastScrollGlide(bool on) noexcept {
+        fast_scroll_glide_.store(on, std::memory_order_relaxed);
+    }
+    void SetFolderParallelism(uint32_t lanes) {
+        std::lock_guard lock(mutex_);
+        if (!running_) lane_count_ = std::clamp<uint32_t>(lanes ? lanes : 1u, 1u, 2u);
+    }
+    void WakeAllLanesLocked() { cv_.notify_all(); }
     // Grid caches: start the hosts before the first request (a folder shown
     // as thumbnails is still being listed).
     void Warm();
+    void WarmPrimary();
     void Reset();
     void Evict();
+    void TrimToBytes(size_t max_bytes);
+    size_t TrimInactiveToSlack(size_t active_slack_bytes, size_t idle_max_bytes);
     // Caller verifies unchanged file metadata; only matching image extensions transfer.
     void RenameImage(const std::wstring& from, const std::wstring& to, uint64_t modified, uint64_t size);
     std::shared_future<void> SuspendVolume(const std::wstring& root);
@@ -173,6 +215,10 @@ public:
                     std::vector<PreviewProperty>& properties);
     bool CachedProperties(const std::wstring& path, uint64_t modified, uint64_t size,
                           std::vector<PreviewProperty>& properties);
+    // In-memory dimensions of any cached thumbnail/content bitmap or micro-thumb
+    // for this file (never blocks on disk or starts a decode).
+    bool CachedDimensions(const std::wstring& path, uint64_t modified, uint64_t size,
+                          uint32_t& width, uint32_t& height);
     // Quick Look only: the cover colours of the still bitmap Draw shows for
     // this file (the exact size, else the stale one drawn meanwhile). False
     // until decoded, and for covers without a usable colour.
@@ -238,6 +284,7 @@ private:
         bool interest_tracked = false;
         // Set when taken: on screen and quick, so its host runs a step higher.
         bool urgent = false;
+        bool store_checked = false;
         uint32_t timeout_ms = 0;
         uint32_t budget_deferrals = 0;
         uint32_t flags = 0;
@@ -317,6 +364,7 @@ private:
     std::mutex mutex_;
     uint64_t draw_retry_deadline_ = 0;
     std::condition_variable cv_;
+    uint64_t trim_children_seq_ = 0;
     std::deque<Request> queue_;
     std::unordered_set<std::wstring> pending_;
     std::unordered_set<std::wstring> retry_interest_;
@@ -338,9 +386,26 @@ private:
     };
     bool VolumeSuspendedLocked(const std::wstring& path) const;
     std::unordered_map<std::wstring, std::shared_ptr<VolumeRelease>> suspended_volumes_;
+    struct MicroThumbAtlas;
+    struct StagedMicro {
+        uint64_t identity_hash = 0;
+        uint64_t modified = 0;
+        uint64_t size = 0;
+        MicroThumbData data;
+    };
+    void StoreWorker();
+    void StageMicroLocked(uint64_t identity_hash, uint64_t modified, uint64_t size, const MicroThumbData& micro);
+    void FlushStagedMicros(ID2D1DeviceContext* dc, uint64_t priority_hash, uint32_t max_uploads);
+    bool HasMicroInAtlas(uint64_t identity_hash, uint64_t modified, uint64_t size);
+    PreviewDrawResult TryDrawMicroThumb(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
+                                        uint64_t identity_hash, uint64_t modified, uint64_t size,
+                                        float opacity, bool align_artwork_bottom, D2D1_RECT_F* artwork_rect,
+                                        uint32_t* decoded_width, uint32_t* decoded_height,
+                                        uint32_t* source_width, uint32_t* source_height);
     std::wstring lane_paths_[kMaxLanes];
     std::shared_ptr<VolumeRelease> release_lanes_[kMaxLanes];
     std::thread worker_;
+    std::thread store_worker_;
     ExtraLane extra_lanes_[kMaxLanes - 1];
     uint32_t lane_count_ = 1;
     bool visible_order_ = false;
@@ -348,7 +413,17 @@ private:
     uint32_t slow_in_flight_ = 0;
     uint32_t psd_refinements_in_flight_ = 0;
     bool lane_busy_[kMaxLanes]{};
+    HANDLE wake_event_ = nullptr;
+    std::deque<Request> store_queue_;
+    std::condition_variable store_cv_;
+    std::mutex atlas_mutex_;
+    std::unique_ptr<MicroThumbAtlas> micro_atlas_;
+    std::deque<uint64_t> staged_micro_order_;
+    std::unordered_map<uint64_t, StagedMicro> staged_micros_;
+    std::atomic<bool> has_staged_micros_{false};
+    std::atomic<bool> fast_scroll_glide_{false};
     std::atomic<bool> warm_{false};
+    std::atomic<bool> warm_primary_only_{false};
     uint64_t frame_ = 1;
     uint64_t draw_sequence_ = 0;
     // Visible order: queued key -> (frame, paint sequence) of its latest draw.

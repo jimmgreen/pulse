@@ -213,9 +213,122 @@ int RunSessionHistorySaveTests() {
     return g_failures ? 1 : 0;
 }
 
+int RunStagingShelfTests() {
+    const std::wstring root = L"bench_data\\pulse-shelf-test-" +
+        std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+    const auto setup_failed = [](const char* action) {
+        std::printf("[FAIL] fixture: %s (Win32 %lu)\n", action, GetLastError());
+        return 2;
+    };
+    if (!CreateDirectoryW(root.c_str(), nullptr)) return setup_failed("create root");
+    const std::wstring dest = root + L"\\dest";
+    const std::wstring pic = root + L"\\picture.png", cut = root + L"\\cut.txt",
+                       extra = root + L"\\extra.txt", now_there = dest + L"\\same.txt",
+                       missing = root + L"\\missing.txt";
+    struct Fixtures {
+        std::wstring root, dest;
+        std::vector<std::wstring> files;
+        ~Fixtures() {
+            for (const auto& file : files) DeleteFileW(file.c_str());
+            if (!dest.empty()) RemoveDirectoryW(dest.c_str());
+            RemoveDirectoryW(root.c_str());
+        }
+    } fixture{root, {}, {}};
+    if (!CreateDirectoryW(dest.c_str(), nullptr)) return setup_failed("create destination");
+    fixture.dest = dest;
+    for (const auto* path : {&pic, &cut, &extra, &now_there}) {
+        HANDLE h = CreateFileW(path->c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return setup_failed("create file");
+        fixture.files.push_back(*path);
+        CloseHandle(h);
+    }
+
+    StagingTray tray;
+    TrayItem snippet, file;
+    snippet.path = pic;
+    snippet.content_kind = 1;
+    snippet.owned_snippet = true;
+    snippet.display_name = L"Picture";
+    snippet.domain = L"example.com";
+    snippet.source_label = L"Clipboard";
+    file.path = cut;
+    Check(tray.CollectRichToShelf(0, {snippet, file}, true) == 2 &&
+              tray.batches().size() == 1 && tray.batches()[0].move_intent,
+          "shelf: snippet-first intake preserves move intent for its files");
+    if (tray.batches().empty() || tray.batches()[0].items.size() < 2) return 1;
+    const uint64_t pic_id = tray.batches()[0].items[0].id, cut_id = tray.batches()[0].items[1].id;
+    tray.Collect({extra, now_there, missing}, false);
+
+    auto plan = tray.PlanRelease(dest, TrayReleaseMode::Staged);
+    Check(plan.copies.item_ids.size() == 2 && plan.moves.item_ids == std::vector{cut_id} &&
+              plan.missing == 1 && plan.already_there == 1,
+          "shelf: staged release partitions copy and move and omits missing / already-there items");
+    plan = tray.PlanRelease(dest, TrayReleaseMode::Move, {pic_id, cut_id});
+    Check(plan.copies.item_ids == std::vector{pic_id} && plan.moves.item_ids == std::vector{cut_id},
+          "shelf: checked forced move copies snippets and moves regular files only");
+    plan = tray.PlanRelease(dest, TrayReleaseMode::Copy, {cut_id});
+    Check(plan.copies.item_ids == std::vector{cut_id} && plan.moves.sources.empty(),
+          "shelf: checked forced copy overrides the staged move");
+
+    tray.MarkInFlight(91, {cut_id}, true);
+    const auto origin = tray.active_shelf_id();
+    auto cleared = tray.TakeIdleBatches();
+    Check(tray.batches().size() == 1 && tray.batches()[0].items.size() == 1 &&
+              tray.batches()[0].items[0].id == cut_id && !tray.RemoveItemById(cut_id),
+          "shelf: clear and remove do not discard an active transfer card");
+    Check(tray.SaveTempAsNamed(origin) && tray.active_shelf_id() == origin,
+          "shelf: saving temporary shelf keeps its identity");
+    tray.CompleteTask(91, {cut});
+    Check(tray.batches().empty(), "shelf: only a confirmed moved source is consumed");
+    const auto temp_id = tray.shelves().front().id;
+    tray.SwitchShelf(temp_id);
+    tray.Collect({cut}, false);
+    Check(tray.RestoreClearedBatches(origin, std::move(cleared)) && tray.active_shelf_id() == temp_id &&
+              tray.batches().size() == 1 && tray.batches()[0].items.size() == 1,
+          "shelf: clear undo restores rich cards to the original shelf after switching");
+    tray.SwitchShelf(origin);
+    const bool has_snippet = !tray.batches().empty() && !tray.batches()[0].items.empty();
+    Check(has_snippet && tray.batches()[0].items[0].id == pic_id &&
+              tray.batches()[0].items[0].source_label == snippet.source_label,
+          "shelf: clear undo keeps snippet ownership, labels and stable item ID");
+
+    StagingTray reopened;
+    Check(reopened.LoadNamedShelvesFromJson(tray.NamedShelvesToJson()) &&
+              reopened.active_shelf_id() == origin && reopened.shelves().size() == 2 &&
+              reopened.shelves().front().temp && reopened.shelves().front().batches.empty(),
+          "shelf: named round trip restores active named shelf but never temporary items");
+    const auto* saved = reopened.FindShelf(origin);
+    const auto* saved_item = saved && !saved->batches.empty() && !saved->batches[0].items.empty()
+        ? &saved->batches[0].items[0] : nullptr;
+    Check(saved_item && IsTraySnippet(*saved_item) && saved_item->owned_snippet &&
+              saved_item->display_name == snippet.display_name && saved_item->domain == snippet.domain,
+          "shelf: named round trip preserves owned snippet metadata");
+    Check(!reopened.LoadNamedShelvesFromJson(LR"({"shelves":[{"id":2},{"id":2}]})") &&
+              reopened.shelves().size() == 2 && reopened.active_shelf_id() == origin,
+          "shelf: duplicate persisted shelf IDs do not replace working model");
+
+    StagingTray duplicates;
+    duplicates.Collect({extra}, false);
+    duplicates.Collect({extra}, true);
+    const auto copy_plan = duplicates.PlanRelease(dest, TrayReleaseMode::Staged);
+    Check(copy_plan.copies.sources.size() == 1 && copy_plan.copies.item_ids.size() == 2 &&
+              copy_plan.moves.sources.empty(),
+          "shelf: duplicate copy/move cards transfer one source without consuming a copy card");
+    const auto other = duplicates.CreateShelf(L"Other");
+    duplicates.CollectRichToShelf(other, {TrayItem{.path = extra}}, false);
+    const auto original = duplicates.active_shelf_id();
+    Check(duplicates.MoveItemsBetweenShelves(original, other, {}) == 0 &&
+              duplicates.batches().size() == 2,
+          "shelf: moving to an existing duplicate does not silently discard the source card");
+
+    std::printf("staging-shelf: %d failed\n", g_failures);
+    return g_failures ? 1 : 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--staging-shelf-only") == 0) return RunStagingShelfTests();
     if (argc == 2 && std::strcmp(argv[1], "--history-save-only") == 0) return RunSessionHistorySaveTests();
     const SessionSnapshot sample = SampleSession();
     const std::wstring json = SessionToJson(sample);
@@ -446,6 +559,52 @@ int main(int argc, char** argv) {
         Check(QuickAccessDisplayKeys(links, nullptr, 0, true) ==
                   Keys{L"builtin:recent", L"builtin:desktop", L"builtin:music"},
               "quick-access order without places lists the links");
+    }
+
+    {
+        // Details panel collapsible section mask persists across restarts, per window,
+        // and distinguishes 0 (all expanded) from older sessions missing the key.
+        constexpr uint32_t kCustomMask = (1u << 0) | (1u << 2) | (1u << 4); // 基本信息/标签/其他 folded, 属性/安全 open
+        SessionSnapshot s = SampleThreeWindows();
+        s.details_collapsed = kCustomMask;
+        s.windows[0].layout.details_collapsed = 0u; // all sections expanded
+        s.windows[1].layout.details_collapsed = kCustomMask;
+        s.windows[2].layout.details_collapsed = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4); // all folded
+        SessionSnapshot details_parsed;
+        Check(ParseSessionJson(SessionToJson(s), details_parsed) &&
+                  details_parsed.details_collapsed == kCustomMask &&
+                  details_parsed.windows.size() == 3 &&
+                  details_parsed.windows[0].layout.details_collapsed == 0u &&
+                  details_parsed.windows[1].layout.details_collapsed == kCustomMask &&
+                  details_parsed.windows[2].layout.details_collapsed == 0x1Fu,
+              "detailsCollapsed: custom mask, all-expanded (0), and all-collapsed round-trip per window");
+
+        SessionSnapshot v7_defaults;
+        Check(ParseSessionJson(kFrozenV7, v7_defaults) &&
+                  v7_defaults.details_collapsed == kDefaultDetailsCollapsedMask &&
+                  v7_defaults.windows.size() == 1 &&
+                  v7_defaults.windows[0].layout.details_collapsed == kDefaultDetailsCollapsedMask,
+              "detailsCollapsed: legacy v7 session without key gets default collapsed mask");
+
+        SessionSnapshot bad_mask;
+        Check(ParseSessionJson(L"{\"version\":9,\"detailsCollapsed\":-5,\"windows\":[{\"detailsCollapsed\":-1}]}",
+                               bad_mask) &&
+                  bad_mask.details_collapsed == kDefaultDetailsCollapsedMask &&
+                  bad_mask.windows.size() == 1 &&
+                  bad_mask.windows[0].layout.details_collapsed == kDefaultDetailsCollapsedMask,
+              "detailsCollapsed: negative corrupt mask falls back to default");
+
+        // Toggling a section triggers SaveChangedSessionSnapshot to write the new state.
+        std::wstring saved, layout_buf;
+        std::shared_ptr<const std::wstring> undo_buf;
+        int writes = 0;
+        const auto writer = [&](const std::wstring&) { ++writes; return true; };
+        Check(SaveChangedSessionSnapshot(s, saved, layout_buf, undo_buf, false, writer) && writes == 1,
+              "detailsCollapsed: initial autosave writes");
+        s.details_collapsed ^= (1u << 3);
+        s.windows[1].layout.details_collapsed ^= (1u << 3);
+        Check(SaveChangedSessionSnapshot(s, saved, layout_buf, undo_buf, false, writer) && writes == 2,
+              "detailsCollapsed: toggling a details section marks session dirty and saves");
     }
 
     std::printf("session_window_test: %d failure(s)\n", g_failures);

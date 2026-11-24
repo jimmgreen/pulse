@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -23,6 +24,10 @@ enum class QuickPreviewAction : int {
     DownloadCloud,      // 下载并预览 on the cloud-only card
     OpenInNewTab,       // the previewed folder, in a new tab
     SaveOptions,        // the window changed QuickPreviewOptions itself (size menu, L, a drag)
+    SaveSystemPreview,  // commit the explicit Office preview choice
+    SavePlaybackAudio,  // commit a volume gesture or mute toggle
+    PinDetach,          // pinned always-on-top: move out of the main follow slot into multi-preview pool
+    DetachedClosed,     // a detached preview finished closing; reap it asynchronously
 };
 
 // Quick Look behaviour from Settings > 快速预览 (app prefs preview_*). The
@@ -35,10 +40,15 @@ struct QuickPreviewOptions {
     bool space_closes = true;       // false: Space plays / pauses videos and animations
     int loop = 0;                   // app::kPreviewLoop*: 0 animations, 1 all, 2 none
     int key_hint_left = 3;          // how many more videos show the key hint
+    bool prefer_system = false;
+    int volume_percent = 100;
+    bool muted = false;
     bool operator==(const QuickPreviewOptions& other) const {
         return size_mode == other.size_mode && remember_size == other.remember_size &&
                EqualRect(&remembered, &other.remembered) && space_closes == other.space_closes &&
-               loop == other.loop && key_hint_left == other.key_hint_left;
+               loop == other.loop && key_hint_left == other.key_hint_left &&
+               prefer_system == other.prefer_system && volume_percent == other.volume_percent &&
+               muted == other.muted;
     }
 };
 
@@ -77,9 +87,10 @@ class QuickPreviewCommands {
 public:
     UINT_PTR Push(QuickPreviewCommand command) {
         if (pending_.size() >= 32) return 0;
-        do { ++next_; } while (!next_ || pending_.contains(next_));
-        pending_.emplace(next_, std::move(command));
-        return next_;
+        UINT_PTR token = 0;
+        do { token = NextGlobalToken(); } while (!token || pending_.contains(token));
+        pending_.emplace(token, std::move(command));
+        return token;
     }
     bool Take(UINT_PTR token, QuickPreviewCommand& command) {
         const auto it = pending_.find(token);
@@ -90,7 +101,10 @@ public:
     }
     void Clear() { pending_.clear(); }
 private:
-    UINT_PTR next_ = 0;
+    static UINT_PTR NextGlobalToken() noexcept {
+        static std::atomic<UINT_PTR> global_next{0};
+        return global_next.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
     std::map<UINT_PTR, QuickPreviewCommand> pending_;
 };
 

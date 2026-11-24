@@ -32,6 +32,7 @@ private:
     LPOFNHOOKPROC hook_ = nullptr;
     HWND child_ = nullptr;
     HWND parent_ = nullptr;
+    bool owns_parent_ = false;
     bool attached_ = false;
     DWORD thread_ = 0;
     bool ansi_ = false;

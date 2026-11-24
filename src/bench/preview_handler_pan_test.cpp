@@ -4,11 +4,17 @@
 namespace pulse::ui {
 
 struct PreviewHandlerPanTest {
-    struct NativeCanvas { int clicks = 0, cancellations = 0; bool pressed = false; };
+    struct NativeCanvas {
+        int clicks = 0, cancellations = 0, drag_moves = 0;
+        bool pressed = false;
+    };
+    static inline HWND hit_window = nullptr;
+    static HWND WINAPI HitFixture(POINT) { return hit_window; }
     static LRESULT CALLBACK CanvasProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         auto* canvas = reinterpret_cast<NativeCanvas*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (canvas) {
             if (msg == WM_LBUTTONDOWN) { canvas->pressed = true; SetCapture(hwnd); return 0; }
+            if (msg == WM_MOUSEMOVE && canvas->pressed) { ++canvas->drag_moves; return 0; }
             if (msg == WM_LBUTTONUP) {
                 if (canvas->pressed) ++canvas->clicks;
                 canvas->pressed = false;
@@ -212,6 +218,44 @@ struct PreviewHandlerPanTest {
               PreviewGrabCursor(false) != PreviewGrabCursor(true),
             "distinct open and closed hand cursors created");
         pan.Disable();
+
+        // Provider-drawn rails live inside the HWND's client rect and have
+        // no ScrollBar control or WS_VSCROLL/WS_HSCROLL for the hook to see.
+        SetWindowPos(host, nullptr, -30000, -30000, 0, 0,
+                     SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE | SWP_SHOWWINDOW);
+        HWND painted = CreateWindowW(wc.lpszClassName, L"", WS_CHILD | WS_VISIBLE,
+            0, 0, 250, 220, host, nullptr, wc.hInstance, nullptr);
+        check(painted != nullptr, "create owner-drawn provider canvas");
+        if (painted) {
+            NativeCanvas rail;
+            SetWindowLongPtrW(painted, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&rail));
+            POINT down{245, 55}, moved{245, 140}, bottom{85, 215}, middle{100, 100};
+            for (POINT* point : {&down, &moved, &bottom, &middle}) ClientToScreen(painted, point);
+            check(!PreviewHandlerPan::CanGrabContent(host, painted, down) &&
+                  !PreviewHandlerPan::CanGrabContent(host, painted, bottom),
+                "owner-drawn vertical and horizontal scrollbar lanes take priority");
+            check(PreviewHandlerPan::CanGrabContent(host, painted, middle),
+                "the same owner-drawn canvas still pans away from its scrollbars");
+
+            PreviewHandlerPan::InputState rail_input;
+            rail_input.host = host;
+            rail_input.desired_hook = true;
+            rail_input.api.window_from_point = HitFixture;
+            hit_window = painted;
+            PreviewHandlerPan::ConsumeMouse(rail_input, WM_LBUTTONDOWN, down);
+            SendMessageW(painted, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(245, 55));
+            PreviewHandlerPan::ConsumeMouse(rail_input, WM_MOUSEMOVE, moved);
+            if (PeekMessageW(&message, painted, WM_CANCELMODE, WM_CANCELMODE, PM_REMOVE))
+                DispatchMessageW(&message);
+            SendMessageW(painted, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(245, 140));
+            const bool swallowed = PreviewHandlerPan::ConsumeMouse(rail_input, WM_LBUTTONUP, moved);
+            if (!swallowed) SendMessageW(painted, WM_LBUTTONUP, 0, MAKELPARAM(245, 140));
+            check(!swallowed && rail.cancellations == 0 && rail.drag_moves == 1 &&
+                  rail.clicks == 1 && GetCapture() != painted,
+                "drawn vertical thumb receives the entire native drag and release");
+            hit_window = nullptr;
+            DestroyWindow(painted);
+        }
         DestroyWindow(host);
         return failures;
     }

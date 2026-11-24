@@ -89,6 +89,13 @@ struct AiAgent {
     bool organized = false;                       // organize_files ran this turn
     bool sent_tools = false;                      // this round's request carried the tools
     bool tools_retried = false;                   // a tools refusal was resent once this turn
+    bool sent_native_search = false;              // this round's request carried provider-native web search
+    bool native_search_retried = false;           // native search refusal retried once this turn
+    bool sent_images = false;                     // current turn sent multimodal image_url blocks
+    bool images_retried = false;                  // image input refusal retried once as text-only
+    bool compacted_noted = false;                 // quiet compaction note already shown this turn
+    std::unordered_set<std::wstring> attached_paths;  // user-attached paths in this turn (explicitly consented)
+    size_t web_sources = 0;                       // web search results / pages checked this turn
     uint32_t think_id = 0;
     uint32_t text_id = 0;
     uint32_t steps_id = 0;
@@ -173,6 +180,18 @@ std::wstring Secs(uint64_t ms);
 void AwaitSearch(AppState& s, const std::wstring& path, std::function<void(AppState&, const app::Tab*, uint64_t)> done);
 void ToolSearch(AppState& s, const app::ai::ModelToolCall& call, const json::Value& args);
 void AddQueryCard(AppState& s, AiAgent& a);
+
+// ai_agent_web.cpp
+void ToolWebSearch(AppState& s, const app::ai::ModelToolCall& call, const json::Value& args);
+void ToolFetchUrl(AppState& s, const app::ai::ModelToolCall& call, const json::Value& args);
+
+// ai_agent_read.cpp
+void ToolReadFile(AppState& s, const app::ai::ModelToolCall& call, const json::Value& args);
+
+// ai_agent_extras.cpp
+void ToolInspectArchive(AppState& s, const app::ai::ModelToolCall& call, const json::Value& args);
+void ToolExtractArchive(AppState& s, const app::ai::ModelToolCall& call, const json::Value& args);
+void ToolCompareFolders(AppState& s, const app::ai::ModelToolCall& call, const json::Value& args);
 
 // ai_agent_organize.cpp
 bool ValidName(const std::wstring& name);

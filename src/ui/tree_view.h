@@ -52,6 +52,7 @@ public:
     void Reveal(uint32_t offset);  // expands ancestors, makes it current
 
     bool MouseDown(float x, float y);  // true when handled (repaint)
+    bool OverScrollbar(float x, float y) const noexcept;
     bool MouseMove(float x, float y);  // scrollbar drag; true to repaint
     void MouseUp() noexcept { dragging_ = false; }
     bool Dragging() const noexcept { return dragging_; }
@@ -68,6 +69,7 @@ public:
     void ExpandAll(bool expand);
 
 private:
+    friend struct QuickPreviewAuditTest;
     struct Node {
         uint32_t depth = 0;
         wchar_t type = L's';
@@ -82,6 +84,11 @@ private:
     };
     struct Piece { uint32_t start, length; int color; };
 
+    struct ScrollbarGeometry {
+        D2D1_RECT_F hit{}, thumb{};
+        float travel = 0.0f, maximum = 0.0f;
+    };
+    ScrollbarGeometry Scrollbar() const noexcept;
     bool IsContainer(size_t i) const noexcept;
     bool Expandable(size_t i) const noexcept { return nodes_[i].end > i + 1; }
     std::wstring RowText(size_t i, std::vector<Piece>* pieces) const;
@@ -123,6 +130,7 @@ private:
     int hover_row_ = -1;
     float sy_ = 0.0f;
     bool dragging_ = false;
+    bool scrollbar_hover_ = false;
     float drag_origin_ = 0.0f, drag_scroll_ = 0.0f;
     D2D1_RECT_F thumb_{};
 

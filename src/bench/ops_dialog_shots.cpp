@@ -188,6 +188,16 @@ int wmain(int argc, wchar_t** argv) {
     uint64_t action_task = 0;
     std::string action_id;
     callbacks.task_action = [&](uint64_t task, const std::string& action) { action_task = task; action_id = action; };
+    // The other-operations strip acts on tasks by id; only its own mode sets
+    // these, the other modes check the card's plain pause/cancel callbacks.
+    const bool task_strip_mode = argc > 3 && wcscmp(argv[3], L"--task-strip-only") == 0;
+    uint64_t selected_task = 0, paused_task = 0, resumed_task = 0, cancelled_task = 0;
+    if (task_strip_mode) {
+        callbacks.select_task = [&](uint64_t task) { selected_task = task; };
+        callbacks.pause_task = [&](uint64_t task) { paused_task = task; };
+        callbacks.resume_task = [&](uint64_t task) { resumed_task = task; };
+        callbacks.cancel_task = [&](uint64_t task) { cancelled_task = task; };
+    }
     ui::FileOperationWindow window;
     Check(window.Create(nullptr, std::move(callbacks)), "create hidden operation window");
     const double mb = 1024.0 * 1024.0;
@@ -366,6 +376,103 @@ int wmain(int argc, wchar_t** argv) {
                 shot(L"pipeline-verifying-99" + suffix);
             }
         }
+        std::printf("%s\n", failures == 0 ? "ALL PASS" : "FAILURES");
+        window.Destroy();
+        CoUninitialize();
+        return failures == 0 ? 0 : 1;
+    }
+    if (task_strip_mode) {
+        // Several operations at once: the card shows one, the strip above the
+        // footer lists the others with their state, pause and cancel.
+        constexpr int kRow = 60;  // kHitTaskRow + row * 4 + part
+        auto other = [](uint64_t id, ops::OpType type, ops::OpPhase phase, float percent, const wchar_t* name) {
+            ops::OpStatus st;
+            st.task_id = id; st.active = true; st.type = type; st.phase = phase; st.percent = percent;
+            st.source_label = name; st.destination_label = L"D:\\Backup";
+            return st;
+        };
+        auto queued_same = other(24, ops::OpType::Copy, ops::OpPhase::Queued, -1.0f, L"site-packages");
+        queued_same.wait_reason = ops::OpWaitReason::SamePlace;
+        auto queued_full = other(25, ops::OpType::RealDelete, ops::OpPhase::Queued, -1.0f, L"dist");
+        queued_full.wait_reason = ops::OpWaitReason::LanesFull;
+        auto paused_delete = other(22, ops::OpType::RecycleDelete, ops::OpPhase::Paused, 18.0f, L"build-cache");
+        const std::vector<ops::OpStatus> others = {
+            Running(ops::OpType::Copy, 63.0f),  // the shown task (id 11): left out of the strip
+            other(21, ops::OpType::Move, ops::OpPhase::Running, 37.0f, L"node_modules"),
+            paused_delete,
+            queued_same,
+            other(23, ops::OpType::Copy, ops::OpPhase::WaitingForConflict, 52.0f, L"Photos 2025"),
+            queued_full,
+        };
+        struct StripScale { UINT dpi; const wchar_t* tag; };
+        for (const bool dark : {false, true}) {
+            window.SetTheme(dark, ui::HexColor(0x6474C7));
+            window.SetAutoClose(false);
+            const std::wstring theme = dark ? L"dark" : L"light";
+            for (const StripScale scale : { StripScale{96, L"100"}, StripScale{144, L"150"}, StripScale{192, L"200"} }) {
+                const std::wstring sfx = L"-" + theme + L"-" + scale.tag;
+                window.SetOtherTasks({});
+                Access::Size(window, scale.dpi, false);
+                Access::Place(window, -4000, -4000);
+                window.Update(Running(ops::OpType::Copy, 63.0f));
+                Access::Graph(window, 0.63f, 212.0 * mb);
+                Access::Elapsed(window, 61000, false);
+                const int base_height = Access::Height(window);
+                window.SetOtherTasks(others);
+                const int strip = Access::Height(window) - base_height;
+                // 4 rows of 44 + padding 2 * 6 + the "+N" line 20 = 208 DIPs.
+                const int expected = MulDiv(208, static_cast<int>(scale.dpi), 96);
+                Check(std::abs(strip - expected) <= 2, "strip grows the card by its rows");
+                shot(L"strip-4rows-more" + sfx);
+                window.SetOtherTasks({others[1], paused_delete});
+                shot(L"strip-2rows" + sfx);
+                if (scale.dpi == 144) {
+                    window.SetOtherTasks({});
+                    Access::Size(window, scale.dpi, true);
+                    window.SetOtherTasks({others[1], queued_same});
+                    shot(L"strip-detailed" + sfx);
+                    window.SetOtherTasks({});
+                    Access::Size(window, scale.dpi, false);
+                }
+                window.SetOtherTasks({});
+                Check(std::abs(Access::Height(window) - base_height) <= 1, "strip leaves no gap once the others end");
+            }
+        }
+        // Behaviour at 100%: order, which controls exist, and what clicks do.
+        window.SetTheme(false, ui::HexColor(0x6474C7));
+        Access::Size(window, 96, false);
+        window.Update(Running(ops::OpType::Copy, 63.0f));
+        window.SetOtherTasks(others);
+        auto click = [&](POINT at) {
+            const LPARAM where = MAKELPARAM(at.x, at.y);
+            SendMessageW(Access::Handle(window), WM_MOUSEMOVE, 0, where);
+            SendMessageW(Access::Handle(window), WM_LBUTTONDOWN, MK_LBUTTON, where);
+            SendMessageW(Access::Handle(window), WM_LBUTTONUP, 0, where);
+        };
+        // Row 0 needs a choice (no pause), row 1 runs, row 2 is paused, row 3
+        // is the first queued one; the other queued one falls under "+N".
+        Check(Access::FindControl(window, kRow + 0 * 4 + 1).x < 0, "a task waiting for a choice offers no pause");
+        const POINT pause_running = Access::FindControl(window, kRow + 1 * 4 + 1);
+        Check(pause_running.x >= 0, "a running task in the strip has a pause button");
+        click(pause_running);
+        Check(paused_task == 21, "strip pause pauses that task");
+        click(Access::FindControl(window, kRow + 2 * 4 + 1));
+        Check(resumed_task == 22, "strip button resumes a paused task");
+        click(Access::FindControl(window, kRow + 0 * 4 + 2));
+        Check(cancelled_task == 23, "strip cancel cancels that task");
+        click(Access::FindControl(window, kRow + 1 * 4 + 0));
+        Check(selected_task == 21, "clicking a strip row shows that task");
+        Check(Access::FindControl(window, kRow + 3 * 4 + 1).x < 0 && Access::FindControl(window, kRow + 3 * 4 + 2).x >= 0,
+              "the fourth row is the first queued task, with cancel only");
+        // Queued rows: cancel only, nothing to show in the card yet.
+        window.SetOtherTasks({queued_same});
+        Check(Access::FindControl(window, kRow + 0).x < 0, "a queued row cannot be opened in the card");
+        Check(Access::FindControl(window, kRow + 1).x < 0, "a queued row has no pause");
+        cancelled_task = 0;
+        click(Access::FindControl(window, kRow + 2));
+        Check(cancelled_task == 24, "a queued task can be cancelled from the strip");
+        Check(paused == 0 && resumed == 0 && cancelled == 0 && dismissed == 0,
+              "strip buttons leave the shown task alone");
         std::printf("%s\n", failures == 0 ? "ALL PASS" : "FAILURES");
         window.Destroy();
         CoUninitialize();

@@ -155,6 +155,8 @@ bool ParseJpegHeader(const uint8_t* data, size_t size, JpegHeaderInfo& out) {
             if (length < 7) return false;
             out.height = Be16(body + 1);
             out.width = Be16(body + 3);
+            out.is_progressive = (marker == 0xC2);
+            out.non_baseline_sof = (marker != 0xC0 && marker != 0xC1);
         } else if (marker == 0xDA) {
             return out.width && out.height;
         }
@@ -163,8 +165,10 @@ bool ParseJpegHeader(const uint8_t* data, size_t size, JpegHeaderInfo& out) {
     return false;
 }
 
-bool ReadJpegEmbeddedPreview(const std::wstring& path, uint32_t min_edge, JpegEmbeddedPreview& out) {
+bool ReadJpegEmbeddedPreview(const std::wstring& path, uint32_t min_edge, JpegEmbeddedPreview& out,
+                             JpegProbeSummary* summary) {
     out = JpegEmbeddedPreview{};
+    if (summary) *summary = {};
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                               nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (file == INVALID_HANDLE_VALUE) return false;
@@ -172,29 +176,41 @@ bool ReadJpegEmbeddedPreview(const std::wstring& path, uint32_t min_edge, JpegEm
     std::vector<uint8_t> header;
     JpegHeaderInfo info;
     bool found = false;
-    if (GetFileSizeEx(file, &file_size) && file_size.QuadPart > 4 &&
-        ReadAt(file, 0, header, static_cast<uint32_t>((std::min<int64_t>)(file_size.QuadPart, kHeaderBytes))) &&
-        ParseJpegHeader(header.data(), header.size(), info) && !info.colour_profile) {
-        const auto take = [&](std::vector<uint8_t>&& bytes) {
-            uint32_t w = 0, h = 0;
-            if (!JpegFrameSize(bytes.data(), bytes.size(), w, h) || (std::max)(w, h) < min_edge ||
-                (std::max)(w, h) > kMaxPreviewEdge || !SameShape(w, h, info.width, info.height)) return false;
-            out.jpeg = std::move(bytes);
-            out.width = w; out.height = h;
-            return true;
-        };
-        // The Exif thumbnail is already read; most are 160 x 120.
-        if (info.exif_thumbnail_size)
-            found = take(std::vector<uint8_t>(header.begin() + info.exif_thumbnail_offset,
-                header.begin() + info.exif_thumbnail_offset + info.exif_thumbnail_size));
-        // Smallest first: the 640 px one when it is enough.
-        std::sort(info.mpf_previews.begin(), info.mpf_previews.end(),
-                  [](const auto& a, const auto& b) { return a.size < b.size; });
-        for (const auto& entry : info.mpf_previews) {
-            if (found) break;
-            if (entry.offset + entry.size > static_cast<uint64_t>(file_size.QuadPart)) continue;
-            std::vector<uint8_t> bytes;
-            if (ReadAt(file, entry.offset, bytes, entry.size)) found = take(std::move(bytes));
+    if (GetFileSizeEx(file, &file_size) && file_size.QuadPart > 4) {
+        if (summary) {
+            summary->has_size = true;
+            summary->file_size = static_cast<uint64_t>(file_size.QuadPart);
+        }
+        if (ReadAt(file, 0, header, static_cast<uint32_t>((std::min<int64_t>)(file_size.QuadPart, kHeaderBytes))) &&
+            ParseJpegHeader(header.data(), header.size(), info)) {
+            if (summary) {
+                summary->valid = true;
+                summary->is_progressive = info.is_progressive;
+                summary->needs_coefficients = info.non_baseline_sof;
+            }
+            if (!info.colour_profile) {
+                const auto take = [&](std::vector<uint8_t>&& bytes) {
+                    uint32_t w = 0, h = 0;
+                    if (!JpegFrameSize(bytes.data(), bytes.size(), w, h) || (std::max)(w, h) < min_edge ||
+                        (std::max)(w, h) > kMaxPreviewEdge || !SameShape(w, h, info.width, info.height)) return false;
+                    out.jpeg = std::move(bytes);
+                    out.width = w; out.height = h;
+                    return true;
+                };
+                // The Exif thumbnail is already read; most are 160 x 120.
+                if (info.exif_thumbnail_size)
+                    found = take(std::vector<uint8_t>(header.begin() + info.exif_thumbnail_offset,
+                        header.begin() + info.exif_thumbnail_offset + info.exif_thumbnail_size));
+                // Smallest first: the 640 px one when it is enough.
+                std::sort(info.mpf_previews.begin(), info.mpf_previews.end(),
+                          [](const auto& a, const auto& b) { return a.size < b.size; });
+                for (const auto& entry : info.mpf_previews) {
+                    if (found) break;
+                    if (entry.offset + entry.size > static_cast<uint64_t>(file_size.QuadPart)) continue;
+                    std::vector<uint8_t> bytes;
+                    if (ReadAt(file, entry.offset, bytes, entry.size)) found = take(std::move(bytes));
+                }
+            }
         }
     }
     CloseHandle(file);

@@ -105,6 +105,8 @@ enum class AiIcon : uint8_t {
     // 55 P3: 历史对话 and its rows.
     History,
     Chat,
+    // Web search & webpage reading.
+    Globe,
     Count
 };
 

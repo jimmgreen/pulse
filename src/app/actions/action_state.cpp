@@ -681,9 +681,9 @@ json::Value StateSnapshot(AppState& s) {
     if (tray_count) tray.set("names", std::move(tray_names));
     out.set("tray", std::move(tray));
 
-    if (s.quickPreview.visible()) {
+    if (s.quickPreview->visible()) {
         json::Value preview = json::Value::Object();
-        preview.set("path", U8(Shown(s.quickPreview.item().path)));
+        preview.set("path", U8(Shown(s.quickPreview->item().path)));
         out.set("preview", std::move(preview));
     } else {
         out.set("preview", nullptr);
@@ -1104,9 +1104,9 @@ bool WaitReady(AppState& s, const WaitSpec& spec, json::Value& out) {
         return true;
     }
     case WaitKind::PreviewOpen:
-        if (!s.quickPreview.visible()) return false;
+        if (!s.quickPreview->visible()) return false;
         out.set("ok", true);
-        out.set("path", U8(Shown(s.quickPreview.item().path)));
+        out.set("path", U8(Shown(s.quickPreview->item().path)));
         return true;
     }
     return true;

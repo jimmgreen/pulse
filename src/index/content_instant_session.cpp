@@ -94,16 +94,24 @@ bool RunInstantContentSession(ContentIndex& index, ContentSearchRequest request,
         }
         SetEvent(changes.stop); changes.wake.notify_all();
     });
+    const bool uncovered_scope = request.allow_uncovered_root && !request.root.empty() &&
+        std::none_of(config.roots.begin(), config.roots.end(), [&](const auto& root) {
+            return Under(request.root, root.path);
+        });
+    const auto in_root = [&](const std::wstring& path) {
+        return std::any_of(config.roots.begin(), config.roots.end(),
+                           [&](const auto& root) { return Under(path, root.path); }) ||
+            (uncovered_scope && Under(path, request.root));
+    };
     const auto included = [&](const std::wstring& path) {
         return !path.empty() && !IsInternalContentPath(path) && !ContentPathExcluded(config, path) &&
-            std::any_of(config.roots.begin(), config.roots.end(), [&](const auto& root) { return Under(path, root.path); }) &&
+            in_root(path) &&
             (request.root.empty() ? request.roots.empty() ||
                 std::any_of(request.roots.begin(), request.roots.end(), [&](const auto& root) { return Under(path, root); })
                 : Under(path, request.root));
     };
     auto enqueue = [&](const std::wstring& path, bool imported = false) {
-        const bool ancestor = !request.root.empty() && Under(request.root, path) &&
-            std::any_of(config.roots.begin(), config.roots.end(), [&](const auto& root) { return Under(path, root.path); });
+        const bool ancestor = !request.root.empty() && Under(request.root, path) && in_root(path);
         if (path.empty() || IsInternalContentPath(path) || ContentPathExcluded(config, path) || (!included(path) && !ancestor)) return;
         std::lock_guard lock(changes.mutex);
         if (changes.sealed) return;
@@ -124,7 +132,7 @@ bool RunInstantContentSession(ContentIndex& index, ContentSearchRequest request,
     FileFeedPage initial;
     uint64_t epoch = 0, cursor = 0;
     if (request.subscribe && hooks && hooks->arm) hooks->arm(enqueue, fail);
-    if (request.subscribe && !hooks && config.shared_scope) {
+    if (request.subscribe && !hooks && config.shared_scope && !uncovered_scope) {
         const bool connected = feed.Request(true, L"", 0, 0, initial);
         if (connected && initial.ready && !initial.gap) {
             epoch = initial.epoch; cursor = initial.next;
@@ -132,10 +140,10 @@ bool RunInstantContentSession(ContentIndex& index, ContentSearchRequest request,
             ContentSubscriptionFailure::FeedGap : ContentSubscriptionFailure::FeedNotReady);
     }
     std::vector<std::unique_ptr<fs::DirWatch>> watches;
-    if (request.subscribe && !hooks && !config.shared_scope) for (const auto& root : config.roots) {
+    const auto start_dir_watch = [&](const std::wstring& watch_root) {
         auto watch = std::make_unique<fs::DirWatch>();
         auto armed = std::make_shared<std::atomic<bool>>(false);
-        watch->Start(root.path, [&, base = root.path, armed](bool overflow, auto events) {
+        watch->Start(watch_root, [&, base = watch_root, armed](bool overflow, auto events) {
             // Recursive DirWatch publishes its initial arming as a resync notification.
             // Wait for that barrier before scanning; later resyncs are real gaps.
             if (overflow && !armed->exchange(true)) return;
@@ -150,9 +158,13 @@ bool RunInstantContentSession(ContentIndex& index, ContentSearchRequest request,
         while (!cancelled && (!armed->load() || !watch->Armed()) && GetTickCount64() < until) Sleep(10);
         if (!armed->load() || !watch->Armed()) fail(ContentSubscriptionFailure::WatchNotReady);
         watches.push_back(std::move(watch));
+    };
+    if (request.subscribe && !hooks) {
+        if (uncovered_scope) start_dir_watch(request.root);
+        else if (!config.shared_scope) for (const auto& root : config.roots) start_dir_watch(root.path);
     }
     std::jthread collector;
-    if (request.subscribe && !hooks && config.shared_scope && epoch) collector = std::jthread([&] {
+    if (request.subscribe && !hooks && config.shared_scope && !uncovered_scope && epoch) collector = std::jthread([&] {
         while (WaitForSingleObject(changes.stop, 0) != WAIT_OBJECT_0) {
             FileFeedPage page;
             const bool connected = feed.Request(true, L"", epoch, cursor, page);

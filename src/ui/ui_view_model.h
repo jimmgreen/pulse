@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <array>
 #include <memory>
+#include <optional>
 #include <deque>
 #include <functional>
 #include <string>
@@ -39,6 +40,7 @@
 namespace pulse::app { class PlacesCatalog; }
 
 namespace pulse::ui {
+inline constexpr int kSidebarFavoritesScrollbar = 4;
 
 // SettingsToggle indexes of the Pulse menu preview (右键菜单 page): rows
 // are kSettingsMenuRowHit + BuiltinMenuItem, the fixed rows
@@ -151,6 +153,7 @@ struct RowPresentationCache {
     fs::SnapshotPtr snapshot;
     uint64_t alias_revision = 0;   // rows rebuild when an alias changes
     uint64_t extension_revision = 0;  // ... or when 文件扩展名 is switched
+    uint64_t places_revision = 0;     // favorite state and badges
     std::unordered_map<size_t, ListEntryView> rows;
     std::deque<size_t> order;
 };
@@ -200,6 +203,7 @@ struct ColumnStripView {
     ColumnStripColumnView child;
     std::vector<float> widths_dip; // see ColumnStripWidthDip
     float scroll_from_right_dip = 0.0f; // ancestor strip scroll (0 = parent visible)
+    std::optional<float> ancestor_viewport_limit_dip; // current column anchor after an ancestor click
     int resize_column = -1;       // column id whose divider is being dragged
     bool hscroll_pressed = false; // ancestor scrollbar thumb is being dragged
 
@@ -212,7 +216,7 @@ enum class CompareMark : uint8_t { Same = 0, OnlyHere = 1, Newer = 2, Older = 3,
 enum class PaneBannerAction : int {
     None = 0, Retry, GoUp, Reconnect, Unlock, Refresh, ManageIndex, AddNetworkIndex, Dismiss,
     NetworkSettings, LanRescan,
-    DupRecycle, DupRule, DupCancel   // the 重复文件 tab (app/dup_finder.h)
+    DupRecycle, DupRule, DupCancel, OpenNativeFolder   // the 重复文件 tab (app/dup_finder.h)
 };
 
 // The 重复文件 tab while it compares: the three passes as cards under the
@@ -300,6 +304,20 @@ struct PaneViewModel {
     // empty while it is unknown or still being read.
     uint8_t media_columns = 0;
     std::function<std::wstring(int source, SortColumn column)> media_cell;
+    // Extension columns (pulse.columns) of a local folder in details view,
+    // after the other columns; display-only. extension_cell gives a row's
+    // text and tone (PULSE_COLUMN_TONE_*) for one of them, false while it is
+    // still being asked for. extension_badge: the badge on a row's icon
+    // (any view), false = none.
+    struct ExtensionColumnView {
+        std::wstring key;      // "<package>/<id>": user width and hidden list
+        std::wstring title;
+        float width_dip = 120.0f;
+        bool align_end = false;
+    };
+    std::vector<ExtensionColumnView> extension_columns;   // at most 4
+    std::function<bool(int source, size_t column, std::wstring& text, uint32_t& tone)> extension_cell;
+    std::function<bool(int source, uint32_t& icon, uint32_t& tone)> extension_badge;
     bool dup_chips = false;           // 重复文件 tab: 保留 / 多出 / 都留 as colored chips
     std::wstring dup_empty_title;     // 重复文件 tab with nothing left: its empty-state title
     // 重复文件 tab: the 路径 column names a folder under one of these roots
@@ -338,10 +356,17 @@ struct PaneViewModel {
     // In-app Git: source index -> working-tree state (git_mark.h). Rows tint
     // their name; Details files also get a pill in the badge slot.
     std::shared_ptr<const std::unordered_map<int, GitMark>> git_marks;
+    std::function<GitMark(int)> git_mark_lookup;
+    bool git_plain_terms = true;
+    std::function<int(int)> git_dir_count_lookup;
     GitMark GitMarkAt(int source) const {
+        if (git_mark_lookup) return git_mark_lookup(source);
         if (!git_marks) return GitMark::None;
         const auto it = git_marks->find(source);
         return it == git_marks->end() ? GitMark::None : it->second;
+    }
+    int GitDirCountAt(int source) const {
+        return git_dir_count_lookup ? git_dir_count_lookup(source) : 0;
     }
     // The folder is inside a OneDrive root: rows show their sync state.
     bool onedrive_status = false;
@@ -604,6 +629,8 @@ struct TrayCardView {
     float opacity = 1.0f;
     bool ghost = false;        // exiting: drawn, never hit-tested
     bool on_top = false;       // painted above the stack (dragged / flying out)
+    uint8_t content_kind = 0;  // 0=File, 1=Pic, 2=Text, 3=Link
+    std::wstring domain;       // Link domain initial
 };
 
 // One smoke puff of the dismiss effect, anchored at the top card's × badge.
@@ -614,11 +641,13 @@ struct TrayPuffView {
     float size = 1.0f;         // final scale
 };
 
-// One row of the open tray view.
+// One row/cell of the expanded shelf view (grid or source-grouped list).
 struct TrayOpenRow {
     uint64_t id = 0;
-    std::wstring path, name, size;
+    std::wstring path, name, size, domain;
     DWORD attrs = 0;
+    uint8_t content_kind = 0;  // 0=File, 1=Pic, 2=Text, 3=Link
+    bool move_intent = false;  // shows orange "移" badge
     bool is_dir = false;
     bool exists = true;
     bool checked = false;
@@ -626,6 +655,14 @@ struct TrayOpenRow {
     std::wstring group, group_path;  // source folder name / path
     float in_t = 1.0f;               // 0..1 stagger entrance
     float out_t = 0.0f;              // 0..1 Del slide-out
+};
+
+struct TrayShelfChipView {
+    uint64_t id = 0;
+    std::wstring name;
+    uint32_t color_rgb = 0x0067C0;
+    bool temp = false;
+    int live_count = 0;
 };
 
 // Staging tray recent drop destination (chip row under the deck).
@@ -688,27 +725,56 @@ struct TrayDeckView {
     float flash_t = 1.0f;            // 0..1 flash progress
     int clip_count = 0;              // Ctrl+C offer (剪贴板 N 项 · 收入), 0 none
     float clip_t = 1.0f;             // 0..1 offer pop-in (450 ms)
-    // Open view (stage 3).
+    // Open view (Floating Shelf expanded: grid / source-grouped list).
     std::vector<TrayOpenRow> open_rows;  // filtered, grouped by source folder
-    int filter = 0;                  // 0 all, 1 images, 2 documents, 3 other
-    int filter_counts[4]{};          // per filter (0 = every item)
+    int filter = 0;                  // 0 all, 1 images, 2 documents, 3 snippets, 4 other
+    int filter_counts[5]{};          // per filter (0 = every item)
     int checked = 0;                 // checked live items
     int live_total = 0;              // existing items (未勾选 · 对全部 N 项)
     int target_count = 0;            // items the main button acts on
     float open_scroll = 0.0f;        // DIPs
     bool cmp_shown = false;          // compare card beside the sidebar
     float cmp_t = 1.0f;              // 0..1 card entrance
+
+    // Dropshelf fusion: multi-shelf, tear-off / dock, mixed release, content snippets.
+    uint64_t active_shelf_id = 1;
+    std::wstring active_shelf_name;
+    uint32_t active_shelf_color = 0x0067C0;
+    bool active_shelf_temp = true;
+    std::vector<TrayShelfChipView> shelves;
+    bool drop_content = false;       // dragging web image / text / link (single 收入 zone)
+    int drop_hover_target = 0;       // 0=copy, 1=move, 2=newshelf, >=10=shelves[target-10]
+    int release_mode = 0;            // 0=auto per item, 1=copy all, 2=move all
+    int release_copy_count = 0;
+    int release_move_count = 0;
+    std::wstring snippet_note;       // "其中 N 个网页内容会存成 .png / .txt"
+    bool dragging_out = false;       // pile dimmed while dragging out
+    bool floated = false;            // Floating Shelf window is shown
+    bool dock_hot = false;           // Floating Shelf dragged over this sidebar
+    bool pinned = false;             // Floating Shelf pin toggle
+    bool view_grid = true;           // Expanded view: true=3-col grid, false=grouped list
+    float tear_dx = 0.0f;            // Visual tear-off offset while dragging sidebar head
+    float tear_dy = 0.0f;
 };
 
-enum class TrayStage : int { Strip = 0, Drop = 1, Shelf = 2, Open = 3 };
+enum class TrayStage : int {
+    Strip = 0,
+    Drop = 1,
+    Shelf = 2,
+    Open = 3,
+    Floated = 4,
+    Dock = 5,
+};
 
-// Panel height of each layer, DIPs (the drop layer never shrinks the panel).
+// Panel height of each sidebar layer, DIPs (the drop layer never shrinks the panel).
 inline float TrayShelfStageHeightDip(int stage, bool clip = false) {
     switch (static_cast<TrayStage>(stage)) {
-    case TrayStage::Drop: return 112.0f;
-    case TrayStage::Shelf: return clip ? 184.0f : 150.0f;  // + the 收入 row
-    case TrayStage::Open: return 476.0f;  // capped at the sidebar height - 20
-    default: return 40.0f;
+    case TrayStage::Drop: return 164.0f;
+    case TrayStage::Shelf: return clip ? 206.0f : 174.0f;
+    case TrayStage::Floated: return 68.0f;
+    case TrayStage::Dock: return 74.0f;
+    case TrayStage::Open: return 476.0f;
+    default: return clip ? 68.0f : 40.0f;
     }
 }
 
@@ -765,6 +831,17 @@ enum class TrayShelfHit : int {
     Card,            // background: swallows the click
     CardAction,      // result line: compare content / view diff
     CardClose,
+    // Dropshelf fusion controls.
+    ShelfSwitch,     // [● 临时 ▾] switch shelf / double-click rename
+    HeadDrag,        // draggable header area (tear-off / move float)
+    Popout,          // [↗] pop out as floating shelf
+    Dock,            // [收回侧栏] dock back to sidebar
+    Pin,             // [📌] pin floating shelf
+    StaleRemove,     // "移出" link next to missing count
+    ViewToggle,      // Grid ↔ List toggle in expanded bar
+    ItemRemove,      // circular × on grid cell / list row
+    DropShelfChip,   // "或放进" shelf chip (sub_index: shelf index)
+    DropNewShelf,    // "＋ 新架" chip in drop layer
 };
 
 // Right-side details panel for the current selection (ui.md §7.2 视图簇).
@@ -785,7 +862,7 @@ struct DetailsPanelView {
     bool preview_only = false;
     bool preview_enabled = true;    // off: no preview request, placeholder only
     float preview_expansion = 0.0f;
-    uint32_t collapsed_mask = 0;    // bit per section: 0基本信息 1属性 2标签 3安全 4其他
+    uint32_t collapsed_mask = 0;    // bit per section: 0基本信息 1属性 2标签 3安全 4其他 5Git
     std::wstring location_text, size_text, contains_text;
     std::wstring created_text, modified_text, accessed_text;
     std::wstring attributes_text;
@@ -807,6 +884,28 @@ struct DetailsPanelView {
         bool assigned = false;      // current selection already has this tag
     };
     std::vector<TagChip> preset_tags; // full catalog with per-selection state
+    // The Git section (git_ui.cpp FillGitDetails); hidden while git_branch_text is empty.
+    std::wstring git_branch_text, git_state_text;
+    GitMark git_mark = GitMark::None;
+    bool git_plain_terms = true;
+    std::wstring git_root_path, git_rel_path;
+    bool git_has_head = true;
+    bool git_staged = false;
+    bool git_unstaged = false;
+    bool git_untracked = false;
+    bool git_summary_ready = false;
+    int git_added = 0;
+    int git_deleted = 0;
+    struct GitMiniDiffRow {
+        wchar_t sign = L' ';
+        int line_no = 0;
+        std::wstring text;
+    };
+    struct GitMiniHistRow {
+        std::wstring hash, subject, author, time_text;
+    };
+    std::vector<GitMiniDiffRow> git_preview_lines;
+    std::vector<GitMiniHistRow> git_history;
 };
 
 // Interactive rects inside the details panel, shared by draw and hit-test.
@@ -815,6 +914,11 @@ struct DetailsHitRects {
     D2D1_RECT_F tag_add{}, preview{}, preview_toggle{}, preview_enable{};
     D2D1_RECT_F attr_readonly{}, attr_hidden{}, attr_advanced{};
     D2D1_RECT_F security_change{};
+    D2D1_RECT_F git_open{};          // Git section: open Source Control / View diff
+    D2D1_RECT_F git_stage{};         // Git section: Stage / Unstage
+    D2D1_RECT_F git_discard{};       // Git section: Discard changes
+    D2D1_RECT_F git_history{};       // Git section: All history ->
+    D2D1_RECT_F git_hist_restore[3]{}; // Git section: restore recent file version
     std::vector<D2D1_RECT_F> preset_chips;
     std::vector<int> preset_ids;    // tag_index per chip
     std::vector<D2D1_RECT_F> section_headers;
@@ -833,6 +937,15 @@ struct UndoHistoryRowView {
     std::wstring icon_glyph = L"\xE8A5";
 };
 
+// A plugin item in the status bar (pulse.statusbar).
+struct StatusExtensionItemView {
+    std::wstring text, tooltip;
+    uint32_t icon = 0;      // icon registry id; 0 = none
+    uint32_t tone = 0;      // PULSE_STATUS_TONE_*
+    bool clickable = false;
+    uint64_t handle = 0;
+};
+
 struct StatusBarView {
     bool can_undo = false, can_redo = false, history_open = false;
     int history_offset = 0;
@@ -842,7 +955,10 @@ struct StatusBarView {
     bool query_cancellable = false;
     float query_progress = -1.0f; // 0..1 of this query's candidates; negative means unknown.
     std::wstring query_text;
+    std::wstring active_pane_label; // split-pane focus label ("左栏" / "右栏" ...); empty for single pane
     std::wstring status_text;
+    std::wstring git_text;         // "Git main ↑1 · 3 处更改": a chip that opens the Git menu; empty outside a repo
+    std::vector<StatusExtensionItemView> extension_items; // plugin chips after the Git chip
     std::wstring selection_text;
     std::wstring hint_text;        // contextual shortcut / hover prompt
     // Clickable action at the right end of the hint ("Compare →"); hint_action is
@@ -856,7 +972,7 @@ struct StatusBarView {
     bool task_failed = false;      // last operation ended with an error: no success check
     uint64_t task_id = 0;          // resets completion age when another operation becomes current
     bool task_paused = false;      // paused or pausing: amber pill
-    uint32_t task_queued = 0;      // operations waiting behind the running one ("+N")
+    uint32_t task_queued = 0;      // other operations, running beside it or waiting ("+N")
     uint64_t task_failed_items = 0; // partial failure: red pill until the next operation
     bool task_can_undo = false;    // finished pill offers 撤销 (sub_index 0)
     bool task_can_open = false;    // finished pill offers locate (sub_index 1); resume uses 2
@@ -1048,35 +1164,26 @@ enum class PackAction : int {
     StoreBrowse, StoreManage, StoreRefresh, StoreCancel,
     StoreItemBase = 10000, // plus the index in settings_store_view.items (stable)
     StoreInstalled = 1000, InstalledRefresh = 1001,
-    StoreInstallFromFile = 1002, StoreRestartNow = 1003,
+    StoreInstallFromFile = 1002, StoreRestartNow = 1003, StoreDeveloper = 1004,
     InstalledEnableBase = 20000, // plus displayed index in settings_store_view.installed
     InstalledDisableBase = 30000,
     InstalledUninstallBase = 40000,
     InstalledRollbackBase = 50000,
     StoreItemSettingsBase = 60000, // plus the index in settings_store_view.items: open its settings page
-    // Store browse extras and the 7-Zip detail page (settings_layout_store.h).
+    // Store browse extras and the generic store detail page (settings_layout_store.h).
     StoreChipBase = 70000,          // + chip 0..4
     StoreRetry = 70010, StoreSources = 70011,
-    StoreQuickMode = 70020, StoreQuickFormat, StoreQuickLevel, StoreQuickRemember,
     StoreDetailBack = 70030, StoreDetailTabBase = 70031,   // + tab 0..3
     StoreDetailEnable = 70040, StoreDetailMore = 70041,
-    SzModeBase = 70050,             // + 0..2
-    SzLocationBase = 70055,         // + 0..1
-    SzBrowse = 70058,
-    SzFormatBase = 70060,           // + 0..5
-    SzLevelBase = 70070,            // + 0..5
-    SzRemember = 70080,
-    SzPlacementBase = 70085,        // + 0..1
-    SzCommandBase = 70090,          // + 0..5
-    SzPreviewBase = 70100,          // + 0..1
-    SzHistoryRollback = 70110,
-    SzTake = 70120,                 // 接管压缩包 switch
-    SzTakeIncBase = 70130,          // + format 0..15: its checkbox
-    SzTakeAskBase = 70150,          // + format 0..15: 设为/改为 Pulse…
-    SzTakeNext = 70170, SzTakeWinSettings = 70171,
-    SzDoubleClickBase = 70175,      // + 0..1
-    SzSource = 70400,
+    StoreDetailInstall = 70042, StoreDetailOpenSettings = 70043, StoreDetailOpenMenu = 70044,
+    SzHistoryRollback = 70110,      // detail About history: roll back to the previous registry revision
+    SzSource = 70400,               // detail facts/About: open the package source link
+    StoreDetailHomepage = 70401,
+    NativeTabBase = 70410,          // + 0 常用设置, 1 右键菜单, 2 概览, 3 关于: a plugin page opened for one package
+    NativeCustomTabBase = 70420,    // + 0..5: extra plugin settings tabs created via pulse.settings.pages V2
     InstalledMoreBase = 80000, // plus displayed installed index; existing management menu actions
+    StoreItemDetailBase = 90000, // plus the index in settings_store_view.items: open its store detail/showcase page
+    StoreQuickControlBase = 100000, // + card*16 + control_idx (up to 8 generic quick cards x 8 controls)
 };
 
 // A tab dragged out of another window, over this one (multi-window M7h): the
@@ -1195,6 +1302,8 @@ struct WindowViewModel {
     std::vector<SplitterView> splitters;
     std::vector<SidebarGroup> sidebar;
     float sidebar_scroll = 0.0f;
+    float sidebar_favorites_scroll = 0.0f;
+    bool sidebar_favorites_scrollbar_dragging = false;
     // Sidebar scrollbar fade (#44): 0 hidden .. 1 shown; expand 0 thin thumb .. 1 thumb + track.
     float sidebar_scrollbar_opacity = 1.0f;
     float sidebar_scrollbar_expand = 1.0f;
@@ -1282,6 +1391,7 @@ struct WindowViewModel {
     int settings_global_search_double_ctrl_ms = 300;
     bool settings_dialog_jump_bar = true;
     bool settings_dialog_jump_auto = false;
+    bool settings_dialog_adaptive_legacy = true;
     bool settings_jump_history = true;
     bool settings_jump_history_empty = true;
     bool settings_global_search_apps = true;
@@ -1310,6 +1420,7 @@ struct WindowViewModel {
     float column_drag_cursor_x = 0.0f;
     float column_drag_grab_dx = 0.0f;   // pointer x minus the column's left edge
     int hover_pane_index = -1;
+    bool toolbar_hovered = false;
 
     struct ContentFolderView { std::wstring path, status; bool error = false; };
     std::vector<ContentFolderView> settings_content_folders;
@@ -1366,6 +1477,27 @@ struct WindowViewModel {
     std::vector<SettingsSearchResult> settings_search_results;
     int settings_page = 0;
     bool settings_store_browse = true;
+    // Plugin settings opened for one package: its name replaces 插件设置 and the intro.
+    std::wstring native_settings_title;
+    // The same header as the 7-Zip detail page for that package: tile, name, verified publisher, chips, tabs.
+    struct NativeSettingsHeader {
+        bool present = false;
+        std::wstring name, summary, version;
+        StoreIcon icon = StoreIcon::Puzzle;
+        uint32_t icon_color = 0x527D70;
+        bool official = false, enabled = true;
+        bool has_menu_tab = false;
+        int tab = 0;  // 0 常用设置, 1 右键菜单
+        uint32_t custom_icon = 0;
+        bool has_about_tab = false;
+        bool installed = true;
+        std::wstring action_label;
+        bool action_enabled = false;
+        std::vector<std::wstring> extra_tabs;
+        int active_plugin_tab = 0;
+        uint32_t status_kind = 0;
+        std::wstring status_text;
+    } native_settings_header;
     bool settings_store_installed = false; // browse wins; both false select legacy packs management
     ExtensionStoreView settings_store_view;
     // Settings > AI 助手 (filled on that page); the sidebar's 新 until it was opened.
@@ -1390,11 +1522,28 @@ struct WindowViewModel {
     bool settings_keep_running = false;
     bool settings_show_hidden_files = false;
     bool settings_show_protected_os_files = false;
+    int tab_active_style = 0; // 0: C soft lift, 1: B gradient fill
+    bool window_active = true;
     int tab_layout = 0; // 0: single row, 1: aligned, 2: title width
+    bool tab_overflow_list = false; // single row that does not scroll; the rest in the 「⧉ N」 list
     int tab_max_rows = 3;
     bool show_pinned_tab_names = true;
     bool settings_list_smart_date = true;
     bool settings_list_zebra_rows = true;
+    // 设置 › 界面布局 (filled only while that page is open).
+    int settings_uil_mode = 2;                       // 0 专注, 1 标准, 2 工作台
+    std::vector<int> settings_uil_diff;              // l10n::StringId of each changed option
+    std::array<bool, 9> settings_uil_toggle{};       // LayoutPanelToggle order, then 按钮文字
+    std::array<int, 5> settings_uil_seg{};           // sidebar, commands, address, density, view
+    std::vector<std::pair<int, bool>> settings_uil_title;  // title buttons: kind (-1 divider), shown
+    bool settings_uil_title_default = true;
+    bool settings_uil_title_warn = false;            // 设置 and 界面 both hidden
+    int settings_uil_title_drag = -1;                // 标题栏按钮 row being dragged (settings menu drag)
+    float settings_uil_title_drag_pos = 0.0f;        // pointer y
+    float settings_uil_title_drag_grab = 0.0f;       // pointer y - the row's top at the press
+    std::array<bool, 3> settings_uil_tb_shown{};     // 命令栏按钮: 排序, 筛选, 分组
+    bool settings_uil_show_profile = false;          // 界面方案 › 方案内容 expanded
+    std::wstring settings_uil_profile;               // its text while expanded
     bool settings_list_tree_sticky = true;
     bool settings_menu_acrylic = true;
     bool settings_list_size_bar = false;
@@ -1410,12 +1559,17 @@ struct WindowViewModel {
     MtimeHint settings_mtime;            // 修改时间提示
     bool settings_sync_onedrive = true;
     bool settings_sync_svn = true;
+    int settings_double_click_interval_ms = 0;
     bool settings_single_click = false;  // 鼠标与选择
     int settings_name_highlight = 0;
     bool settings_hover_select = false;
     bool settings_item_checkboxes = false;
     bool settings_vertical_tabs = false;
     bool settings_tray_hide_empty = false;
+    bool settings_shelf_shake = true;
+    int settings_shelf_sensitivity = 1;  // 0 low, 1 med, 2 high
+    int settings_shelf_position = 0;     // 0 cursor, 1 last, 2 right edge
+    bool settings_shelf_auto_hide = true;
     // 文件操作 → 网络位置 (AppPrefs lan_discovery ...).
     bool settings_lan_discovery = true;
     bool settings_network_recent = true;
@@ -1453,6 +1607,8 @@ struct WindowViewModel {
     // Pure snapshots: layout/render tests may populate these without a controller.
     std::wstring settings_dialog_bundle, settings_dialog_application, settings_dialog_status;
     bool settings_dialog_available = false, settings_dialog_busy = false;
+    bool settings_dialog_api_test_running = false;
+    bool settings_dialog_feedback_recording = false;
     bool settings_dialog_enabled = false, settings_dialog_conflict = false, settings_dialog_failed = false;
     bool settings_dialog_scope_expanded = false;
     bool settings_integration_restore_busy = false;
@@ -1468,7 +1624,9 @@ struct WindowViewModel {
         int tone = 0;               // chip color: 0 neutral, 1 success, 2 warning, 3 danger
         std::wstring later;         // a later success, in the success color
         common::MenuIconRef icon;   // null: a neutral program mark
-        int group = 0;              // a caption starts each group: 1 needs reopening, 2 recent, 0 none
+        int group = 0;              // a caption starts each group: 1 needs reopening, 3 paused, 2 recent, 0 none
+        bool removable = false;     // a stored record the user may delete (not a live restart row)
+        bool retry = false;         // a paused program: the row button resumes automatic takeover
     };
     std::vector<DialogTakeoverRow> settings_dialog_records;
     std::wstring settings_dialog_history_note;
@@ -1713,7 +1871,11 @@ struct HitTestResult {
         SettingsFolderSort,
         SettingsStartupOpen,
         SettingsNotifyIcon,
-        SettingsTabLayout, SettingsTabRows,
+        SettingsTabActiveStyle, SettingsTabLayout, SettingsTabRows,
+        // 设置 › 界面布局: 0-2 starting point, 3 恢复, 90 add divider, 91 default
+        // buttons, 100+row*4+{0 show, 1 up, 2 down, 3 remove}; one region per segment row.
+        SettingsUiLayout, SettingsUiSidebar, SettingsUiCommands, SettingsUiAddress, SettingsUiDensity, SettingsUiView,
+        SettingsUiLite, SettingsUiTray, SettingsUiLabels, SettingsUiTabLayout,  // 侧边栏内容, 暂存入口, 按钮文字 segments
         SettingsNewTabOpen,
         SettingsOpenPulseIcon,
         SettingsNewWindowShows,
@@ -1726,6 +1888,8 @@ struct HitTestResult {
         SettingsTextRender,
         SettingsUiFontSize,
         SettingsTrayIcon,
+        SettingsShelfSensitivity,
+        SettingsShelfPosition,
         SettingsDoubleCtrlGap,
         SettingsLanguage,
         SettingsIndexVolume,
@@ -1797,6 +1961,16 @@ struct HitTestResult {
         SidebarBarSwitch,      // 收藏夹 root row: move the list to the 收藏栏; index = run
         FavoritesBarDock,      // 收藏栏's right end: put the list back in the sidebar
         SettingsAssistant,     // Settings > AI 助手: index = AssistantHit
+        StatusBarGit,          // status-bar Git chip (branch, changes): the Git menu
+        DetailsGitOpen,        // details panel Git section: open Source Control / View diff
+        DetailsGitStage,       // details panel Git section: Stage / Unstage
+        DetailsGitDiscard,     // details panel Git section: Discard changes
+        DetailsGitHistory,     // details panel Git section: All history ->
+        DetailsGitRestore,     // details panel Git section: restore commit version; index = 0..2
+        TitleLayoutButton,     // title button group: 界面 (界面布局)
+        TitleAiButton,         // title button group: Pulse 助手
+        TitleTrayButton,       // title button group: 暂存区 (no docked sidebar, tray not empty)
+        StatusBarExtension,    // plugin status-bar item (pulse.statusbar): index = extension_items
     } region = None;
     SidebarAddAction sidebar_action = SidebarAddAction::None;
     int index = -1;          // tab/row/sidebar item/tray batch/tray item.

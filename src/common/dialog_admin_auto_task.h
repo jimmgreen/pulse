@@ -19,6 +19,9 @@ HRESULT BuildTaskPlan(const std::wstring& root, const std::wstring& program_file
     const Identity& identity, const std::wstring& helper, TaskPlan& plan) noexcept;
 Result ApplyTaskPlan(const TaskPlan& plan, bool start, const Backend& backend) noexcept;
 HRESULT MatchInteractiveIdentity(const Identity& caller, const Identity& interactive) noexcept;
+// A registered task's principal reports its user as an account name ("SS") even
+// when it was registered with a SID: true when `user_id` is `sid` or names that account.
+bool SameTaskUser(const std::wstring& user_id, const std::wstring& sid) noexcept;
 HRESULT InteractiveIdentity(Identity& identity, bool require_elevated) noexcept;
 HRESULT ValidateInstalledRoot(const std::wstring& root, bool require_helper = true) noexcept;
 // Worker-thread APIs: bundle/ACL checks and bounded Scheduler/helper readiness waits.

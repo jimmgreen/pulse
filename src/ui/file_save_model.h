@@ -18,6 +18,7 @@ struct SaveTargetRequest {
     size_t filter_index = 0; // zero-based, like the existing picker
     std::wstring default_extension; // original SetDefaultExtension value, without a dot
     bool caller_validates_access = false; // explicit in-process policy, never inferred from filename
+    bool reject_readonly_save = false; // enforce FOS_NOREADONLYRETURN even when caller validates access
     bool filter_changed = false; // user changed type after the initial default was set
     bool no_test_file_create = false; // metadata/overwrite only; never create or test write access
     bool require_existing_save_parent = false;
@@ -37,10 +38,32 @@ struct SaveTargetResult {
 // Complex wildcard patterns and trailing dot/space semantics require native fallback.
 SaveTargetResult ResolveSaveTarget(const SaveTargetRequest& request);
 
+// Lexical preflight shared by all LocalSaveV1 routes. It never reads a drive,
+// contacts a share, or replaces the permissions and identity checks at OK.
+enum class LocalSaveDraftState { Ready, EditableName, InvalidDirectory, UnsupportedTarget };
+struct LocalSaveDraft {
+    LocalSaveDraftState state = LocalSaveDraftState::InvalidDirectory;
+    std::wstring directory;
+    explicit operator bool() const noexcept {
+        return state == LocalSaveDraftState::Ready || state == LocalSaveDraftState::EditableName;
+    }
+};
+bool NormalizeLocalSaveDirectory(std::wstring_view path, std::wstring& normalized);
+LocalSaveDraft PrepareLocalSaveDraft(const SaveTargetRequest& request);
+
+bool UsesSaveNameMask(const std::vector<PickerFilter>& filters);
+std::wstring NativeSaveMaskFilename(std::wstring_view filename, const std::vector<PickerFilter>& filters,
+    size_t index, std::wstring_view default_extension, bool type_change);
+
 // Pure filename inference for user edits only. Never rewrites the filename or
-// guesses between caller formats sharing an extension. Wildcard filters are not candidates.
+// prefers an already matching type, then a dedicated single-pattern type. Equally
+// specific caller formats are not guessed; wildcard filters are not candidates.
 std::optional<size_t> InferSaveFilterFromFilename(std::wstring_view filename,
     const std::vector<PickerFilter>& filters, size_t current_filter);
+
+// Explicit save-type selection only; preserves path prefix and matching suffixes.
+std::wstring RewriteSaveFilenameForFilter(std::wstring_view filename,
+    const std::vector<PickerFilter>& filters, size_t selected_filter);
 
 // Attribute reads only; run off the UI thread. Never creates/truncates a file.
 // Ready is not a guarantee of write access. Confirmation cannot prevent later races.

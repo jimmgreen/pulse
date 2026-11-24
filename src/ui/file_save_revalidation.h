@@ -34,6 +34,7 @@ private:
     std::wstring path_, parent_;
     size_t filter_index_ = 0;
     bool caller_validates_access_ = false;
+    bool reject_readonly_save_ = false;
     bool no_test_file_create_ = false, require_existing_parent_ = false;
     bool parent_exists_ = true;
     SaveObjectIdentity parent_identity_;

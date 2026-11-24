@@ -1,5 +1,6 @@
 #include "../ipc/picker_remote_protocol.h"
 #include "../picker_inprocess/picker_dynamic_text.h"
+#include <algorithm>
 #include <iostream>
 #include <string_view>
 #include <shobjidl.h>
@@ -56,8 +57,17 @@ int NoOverwriteTest() {
     std::vector<uint8_t> bytes; Message copy;
     named(SaveOptionsSupportedByPeer(legacy.config.save_options, 0) && Encode(legacy, bytes) && Decode(bytes, copy) && copy == legacy,
         "legacy overwrite-prompt Save remains wire-compatible with old peer");
-    auto unknown = message; unknown.config.save_options |= 0x80u;
+    auto unknown = message; unknown.config.save_options |= 0x100u;
     named(!Encode(unknown, bytes) && !SaveOptionsSupportedByPeer(unknown.config.save_options, 0xffffffffu), "unknown Save option is rejected before display");
+    auto stray_readonly = message; stray_readonly.config.save_options |= PULSE_PICKER_UI_V2_SAVE_NO_READONLY_RETURN;
+    named(!Encode(stray_readonly, bytes) && !SaveOptionsSupportedByPeer(stray_readonly.config.save_options, 0xffffffffu),
+        "no-readonly-return without skip-access-validation is rejected");
+    auto caller_readonly = message;
+    caller_readonly.config.save_options = PULSE_PICKER_UI_V2_SAVE_OVERWRITE_PROMPT | PULSE_PICKER_UI_V2_SAVE_SKIP_ACCESS_VALIDATION | PULSE_PICKER_UI_V2_SAVE_NO_READONLY_RETURN;
+    named(Encode(caller_readonly, bytes) && Decode(bytes, copy) && copy == caller_readonly &&
+        SaveOptionsSupportedByPeer(caller_readonly.config.save_options, PULSE_PICKER_UI_V2_FEATURE_SAVE_SKIP_ACCESS) &&
+        !SaveOptionsSupportedByPeer(caller_readonly.config.save_options, 0),
+        "caller-validated Save no-readonly-return roundtrips with explicit skip capability");
     auto contradictory = message; contradictory.config.save_options |= PULSE_PICKER_UI_V2_SAVE_OVERWRITE_PROMPT;
     named(!Encode(contradictory, bytes) && !SaveOptionsSupportedByPeer(contradictory.config.save_options, 0xffffffffu),
         "contradictory prompt and no-prompt options are rejected before display");
@@ -65,7 +75,7 @@ int NoOverwriteTest() {
     return failures ? 1 : 0;
 }
 void FolderPolicyTest() {
-    for (bool cancel : {false, true}) for (uint32_t policy : {0u, 1u}) {
+    for (bool cancel : {false, true}) for (uint32_t policy : {0u, 1u, 2u, 4u, 6u, 7u}) {
         PulsePickerUiV2FolderPolicyConfig input{};
         auto& a = input.base.base; a.size = sizeof(input); a.version = 2; a.access_policy = 1;
         input.folder_policy = policy;
@@ -78,7 +88,7 @@ void FolderPolicyTest() {
         Check(!ConfigSupportedByPeer(c, 0));
         Check(ConfigSupportedByPeer(c, PULSE_PICKER_UI_V2_FEATURE_FOLDER_PROVENANCE |
             (cancel ? PULSE_PICKER_UI_V2_FEATURE_CANCEL_LABEL : 0u)));
-        input.folder_policy = 2; Check(!FromAbi(a, again)); input.folder_policy = policy;
+        input.folder_policy = 8; Check(!FromAbi(a, again)); input.folder_policy = policy;
         input.reserved = 1; Check(!FromAbi(a, again)); input.reserved = 0;
         a.label_flags |= 0x80000000u; Check(!FromAbi(a, again)); a.label_flags &= ~0x80000000u;
         if (!cancel) { input.base.cancel_button_label = {L"", 0}; Check(!FromAbi(a, again)); }
@@ -93,7 +103,87 @@ void FolderPolicyTest() {
     old.folder_policy = 1; Message invalid; invalid.request_id[0] = 1; invalid.sequence = 1; invalid.config = old;
     std::vector<uint8_t> bytes; Check(!Encode(invalid, bytes));
 }
+void LargeControlItemsTest() {
+    const auto named = [](bool ok, const char* name) {
+        Check(ok); std::cout << (ok ? "[PASS] " : "[FAIL] ") << name << '\n';
+    };
+    const auto round = [](const Message& m) {
+        Message copy; std::vector<uint8_t> bytes;
+        return Encode(m, bytes) && Decode(bytes, copy) && copy == m;
+    };
+    const auto set_frame_size = [](std::vector<uint8_t>& frame) {
+        for (int i = 0; i < 4; ++i) frame[8 + i] = static_cast<uint8_t>(frame.size() >> (8 * i));
+    };
+    Message m; m.sequence = 1; m.request_id[0] = 5;
+    Control c; c.id = 8; c.kind = PULSE_PICKER_UI_V2_CONTROL_COMBO; c.state = 3;
+    named(PeerControlItemLimit(0) == 32 && PeerControlItemLimit(32) == 32 &&
+        PeerControlItemLimit(1) == 0 && PeerControlItemLimit(9999) == 128, "bound legacy, invalid and newer Hello limits");
+    Message hello_reply = m; hello_reply.kind = Kind::Reply; hello_reply.version = 2;
+    named(round(hello_reply), "legacy Hello reply decodes with no limit word set");
+    hello_reply.response = 128;
+    named(round(hello_reply), "128-item Hello reply uses the existing reply frame");
+    for (const uint32_t count : {32u, 33u, 128u}) {
+        while (c.items.size() < count) {
+            const auto ordinal = static_cast<uint32_t>(c.items.size());
+            c.items.push_back({10000u - 3u * ordinal, ordinal % 4, L"Item " + std::to_wstring(ordinal)});
+        }
+        c.has_selected = 1; c.selected_item_id = c.items.back().id;
+        m.kind = Kind::ValidateConfig; m.config.controls = {c};
+        OwnedConfig abi(m.config); Config copy;
+        named(FromAbi(abi.Get(), copy) && copy == m.config && round(m), "Validate preserves count/order/IDs/labels/state/selection");
+        named(ConfigSupportedByPeer(m.config, 0, PeerControlItemLimit(0)) == (count <= 32) &&
+            ConfigSupportedByPeer(m.config, 0, PeerControlItemLimit(128)), "old/new host negotiation before display");
+        m.kind = Kind::Show; named(round(m), "Show preserves full control");
+        Message live; live.kind = Kind::UpdateControl; live.show_id = 22; live.sequence = 4; live.request_id[0] = 6;
+        live.control = c; OwnedControl control(c); Control converted;
+        named(FromAbi(control.Get(), converted) && converted == c && round(live), "live ABI and UpdateControl preserve tail item");
+    }
+    Message live; live.kind = Kind::UpdateControl; live.show_id = 22; live.sequence = 4; live.request_id[0] = 6; live.control = c;
+    std::vector<uint8_t> bytes; Message copy;
+    if (Encode(live, bytes)) {
+        // Header, show id, five fixed control fields, then an empty label length.
+        const size_t count_at = 44 + 8 + 5 * 4 + 4;
+        const size_t first_id = count_at + 4;
+        auto bad_wire = bytes;
+        bad_wire[count_at] = 129;
+        // Add a complete and otherwise valid extra first item (unique id, empty label).
+        const uint8_t extra[]{1,0,0,0, 3,0,0,0, 0,0,0,0};
+        bad_wire.insert(bad_wire.begin() + first_id, std::begin(extra), std::end(extra));
+        set_frame_size(bad_wire);
+        named(!Decode(bad_wire, copy) && copy == Message{}, "well-framed 129th item rejected without altering output");
+        const auto second_id = first_id + 12 + 2 * c.items[0].label.size();
+        std::copy_n(bytes.begin() + first_id, 4, bytes.begin() + second_id);
+        named(!Decode(bytes, copy) && copy == Message{}, "duplicate ID rejected on decode");
+    } else named(false, "encode 128 for malformed frame cases");
+    live.control.items.push_back({123, 3, L"extra"});
+    OwnedControl excessive(live.control); Control untouched = c;
+    named(!Encode(live, bytes) && !FromAbi(excessive.Get(), untouched) && untouched == c, "ABI and encode reject 129 without truncation");
+    live.control = c; live.control.selected_item_id = 234;
+    named(!Encode(live, bytes), "missing selected ID rejected");
+    live.control = c; live.control.items.back().label.assign(257, L'x');
+    named(!Encode(live, bytes), "257-unit tail item label rejected");
+
+    for (auto& item : c.items) item.label.assign(256, L'z');
+    m.config.controls = {c, c}; m.config.controls.back().id++;
+    named(round(m), "two large controls exactly fill aggregate UTF-16 budget");
+    if (Encode(m, bytes)) {
+        // First two config strings are empty; add one UTF-16 unit to the title.
+        constexpr size_t title_at = 44 + 5 * 4 + 8 + 2 * 4;
+        bytes[title_at] = 1; bytes.insert(bytes.begin() + title_at + 4, {'x', 0});
+        set_frame_size(bytes);
+        named(!Decode(bytes, copy) && copy == Message{}, "well-framed aggregate of 65537 UTF-16 units rejected");
+    } else named(false, "encode exact-limit config for over-budget frame");
+    OwnedConfig exact(m.config); Config dest;
+    named(FromAbi(exact.Get(), dest) && dest == m.config, "exact config budget accepted from ABI");
+    m.config.title = L"x";
+    OwnedConfig excess(m.config);
+    named(!FromAbi(excess.Get(), dest) && dest.title.empty() && !Encode(m, bytes),
+        "one extra UTF-16 unit across controls rejected atomically");
+}
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--large-control-items") {
+        LargeControlItemsTest(); std::cout << "Checks: " << checks << ", failures: " << failures << '\n'; return failures ? 1 : 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--navigation-root") {
         Message message; message.kind = Kind::SetNavigationRoot; message.sequence = 1; message.request_id[0] = 9;
         for (const auto* path : {L"C:\\owned-root", L"\\\\server\\share\\\u76ee\u5f55"}) { message.folder = path; Round(message); }
@@ -129,6 +219,7 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--folder-policy") { FolderPolicyTest(); std::cout << "Checks: " << checks << ", failures: " << failures << '\n'; return failures ? 1 : 0; }
     if (argc == 2 && std::string_view(argv[1]) == "--save-no-overwrite") return NoOverwriteTest();
     if (argc != 1) return 2;
+    LargeControlItemsTest();
     FolderPolicyTest();
     Message m;
     m.request_id[0] = 7;
@@ -194,7 +285,16 @@ int main(int argc, char** argv) {
     separator.kind = Kind::UpdateControl;
     separator.control = separator.config.controls[0];
     Round(separator);
-    separator.control.kind = PULSE_PICKER_UI_V2_CONTROL_SEPARATOR + 1;
+    auto text_control = m;
+    text_control.config.controls = {{}};
+    text_control.config.controls[0].kind = PULSE_PICKER_UI_V2_CONTROL_TEXT;
+    text_control.config.controls[0].id = 2010;
+    text_control.config.controls[0].state = 3;
+    Round(text_control);
+    OwnedConfig text_owned(text_control.config);
+    Config text_copy;
+    Check(FromAbi(text_owned.Get(), text_copy) && text_copy == text_control.config);
+    separator.control.kind = PULSE_PICKER_UI_V2_CONTROL_TEXT + 1;
     std::vector<uint8_t> invalid_separator;
     Check(!Encode(separator, invalid_separator));
     m.kind = Kind::Show;
@@ -286,6 +386,7 @@ int main(int argc, char** argv) {
     m.kind = Kind::Hello;
     m.version = 2;
     Round(m);
+    m.version = 1;
     m.kind = Kind::Show;
     m.config.filename.assign(1, static_cast<wchar_t>(0xd800));
     std::vector<uint8_t> wire{42};
@@ -293,7 +394,15 @@ int main(int argc, char** argv) {
     m.config.filename.assign(32768, L'x');
     Check(!Encode(m, wire));
     m.config.filename = L"x";
-    m.config.controls.resize(17);
+    m.config.controls.assign(32, {});
+    for (size_t i = 0; i < m.config.controls.size(); ++i) {
+        m.config.controls[i].kind = PULSE_PICKER_UI_V2_CONTROL_BUTTON;
+        m.config.controls[i].id = static_cast<uint32_t>(100 + i);
+        m.config.controls[i].state = 3;
+        m.config.controls[i].label = L"Control";
+    }
+    Round(m);
+    m.config.controls.resize(PULSE_PICKER_UI_V2_MAX_CONTROLS + 1);
     Check(!Encode(m, wire));
     m.config.controls.clear();
     m.config.native_options = 1;

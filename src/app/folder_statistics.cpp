@@ -21,7 +21,9 @@ FolderStatistics ScanFolder(const std::wstring& root, const std::atomic_bool& ca
         auto path = std::move(stack.back());
         stack.pop_back();
         const DWORD attrs = GetFileAttributesW(path.c_str());
-        if (attrs == INVALID_FILE_ATTRIBUTES || fs::IsCloudPlaceholder(attrs)) {
+        // The selected root (or a child replaced after enumeration) can be a link.
+        if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY) ||
+            (attrs & FILE_ATTRIBUTE_REPARSE_POINT) || fs::IsCloudPlaceholder(attrs)) {
             result.partial = true;
             continue;
         }

@@ -11,4 +11,7 @@ namespace pulse::preview {
 // Runs the decoder table for one Content request; true when a preview was made.
 bool DecodeContent(const DecodeRequest& request, DecodeResult& result);
 
+// Releases thread-local COM factories cached by decoders before CoUninitialize.
+void ReleasePreviewThreadCaches() noexcept;
+
 } // namespace pulse::preview

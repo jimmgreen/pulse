@@ -22,7 +22,7 @@ struct FormDialogButton {
 };
 
 enum class FormDialogIcon { None, Key, Archive, Checksum, Info, Warning, Folder, Lock };
-enum class FormDialogSubject { None, File, Folder, Archive };
+enum class FormDialogSubject { None, File, Folder, Archive, Extension };
 
 struct FormDialogSpec {
     std::wstring title;
@@ -34,6 +34,12 @@ struct FormDialogSpec {
     std::optional<uint32_t> extension_icon;
     FormDialogSubject subject_kind = FormDialogSubject::None;
     std::wstring subject, subject_detail;
+    // Extension subject: a product tile (StoreIcon value + tint) and a trust badge at the
+    // card's right edge (badge kind: 0 neutral, 1 accent, 2 success, 3 warning, 4 danger).
+    int subject_tile_icon = 0;
+    uint32_t subject_tile_color = 0x5B6B8C;
+    std::wstring subject_badge;
+    int subject_badge_kind = 0;
     std::wstring footnote;
     FormDialogIcon footnote_icon = FormDialogIcon::None;
     std::optional<uint32_t> extension_footnote_icon;

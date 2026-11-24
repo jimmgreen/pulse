@@ -13,12 +13,12 @@ struct SharedPayload {
     SharedRow rows[384]{};
 };
 struct SharedBlob { volatile LONG sequence; SharedPayload payload; };
-inline std::wstring SharedName() { auto name = Name(); return name.empty() ? name : name + L".v2"; }
+inline std::wstring SharedName(bool networks = false) { auto name = Name(); return name.empty() ? name : name + (networks ? L".v3" : L".v2"); }
 struct SharedWriter {
     HANDLE mapping = nullptr, mutex = nullptr;
     SharedBlob* blob = nullptr;
-    SharedWriter() {
-        const auto name = SharedName();
+    explicit SharedWriter(bool networks = false, const std::wstring& override_name = {}) {
+        const auto name = override_name.empty() ? SharedName(networks) : override_name;
         if (name.empty()) return;
         mutex = CreateMutexW(nullptr, FALSE, (name + L".Lock").c_str());
         mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(SharedBlob), name.c_str());
@@ -42,25 +42,24 @@ inline bool DiskPath(const std::wstring& path) {
 }
 inline bool ValidShared(const SharedPayload& p) {
     const auto now = GetTickCount64();
-    if (p.magic != kMagic || p.version != 2 || !p.pid || p.count > 384 ||
+    if (p.magic != kMagic || (p.version != 2 && p.version != 3) || !p.pid || p.count > 384 ||
         p.timestamp > now || now - p.timestamp > 10000) return false;
     DWORD owner = 0;
     GetWindowThreadProcessId(reinterpret_cast<HWND>(static_cast<ULONG_PTR>(p.endpoint)), &owner);
     if (owner != p.pid) return false;
     for (DWORD i = 0; i < p.count; ++i) {
         const auto& r = p.rows[i];
-        if (r.type < 1 || r.type > 3 || r.kind > 2 || !wmemchr(r.path, 0, 1024) ||
+        if (r.type < 1 || r.type > (p.version == 3 ? 4u : 3u) || r.kind > 2 || !wmemchr(r.path, 0, 1024) ||
             !wmemchr(r.name, 0, 128) || !wmemchr(r.group, 0, 128)) return false;
         if ((r.type != 3 && !DiskPath(r.path)) || (r.type == 3 && !r.group[0])) return false;
     }
     return true;
 }
 }
-inline void PublishShared(const Snapshot& snapshot) {
-    static detail::SharedWriter writer;
+inline void PublishSharedVersion(const Snapshot& snapshot, detail::SharedWriter& writer, bool networks) {
     if (!writer.blob || !writer.mutex || !snapshot.endpoint) return;
     auto p = std::make_unique<detail::SharedPayload>();
-    p->magic = detail::kMagic; p->version = 2; p->pid = GetCurrentProcessId();
+    p->magic = detail::kMagic; p->version = networks ? 3 : 2; p->pid = GetCurrentProcessId();
     p->timestamp = GetTickCount64(); p->endpoint = reinterpret_cast<ULONG_PTR>(snapshot.endpoint);
     auto add = [&](DWORD type, const std::wstring& path, const std::wstring& name,
                    const std::wstring& group, DWORD kind, DWORD color) {
@@ -74,6 +73,7 @@ inline void PublishShared(const Snapshot& snapshot) {
     for (const auto& w : snapshot.workspaces) add(1, w.root, w.name, {}, 0, w.color_rgb);
     for (const auto& g : snapshot.starred_groups) add(3, {}, g.name, g.id, 0, 0);
     for (const auto& i : snapshot.starred_items) add(2, i.path, {}, i.group, i.kind, 0);
+    if (networks) for (const auto& entry : snapshot.networks) add(4, entry.path, entry.label, {}, 0, 0);
     const auto wait = WaitForSingleObject(writer.mutex, 0);
     if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED) return;
     if (InterlockedCompareExchange(&writer.blob->sequence, 0, 0) & 1) InterlockedIncrement(&writer.blob->sequence);
@@ -82,8 +82,13 @@ inline void PublishShared(const Snapshot& snapshot) {
     InterlockedIncrement(&writer.blob->sequence);
     ReleaseMutex(writer.mutex);
 }
-inline void ReadShared(Snapshot& snapshot) {
-    const auto name = detail::SharedName();
+inline void PublishShared(const Snapshot& snapshot) {
+    static detail::SharedWriter legacy, current(true);
+    PublishSharedVersion(snapshot, legacy, false);
+    PublishSharedVersion(snapshot, current, true);
+}
+inline void ReadSharedVersion(Snapshot& snapshot, bool networks, const std::wstring& override_name = {}) {
+    const auto name = override_name.empty() ? detail::SharedName(networks) : override_name;
     if (name.empty()) return;
     HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, name.c_str());
     if (!mapping) return;
@@ -109,7 +114,12 @@ inline void ReadShared(Snapshot& snapshot) {
         if (r.type == 1) snapshot.workspaces.push_back({r.path, r.name, r.color});
         if (r.type == 2) snapshot.starred_items.push_back({r.path, r.kind, r.group});
         if (r.type == 3) snapshot.starred_groups.push_back({r.group, r.name});
+        if (r.type == 4) snapshot.networks.push_back({r.path, r.name});
     }
+}
+inline void ReadShared(Snapshot& snapshot) {
+    ReadSharedVersion(snapshot, true);
+    if (!snapshot.shared_available) ReadSharedVersion(snapshot, false);
 }
 struct AddStarredRequest { std::wstring path; uint32_t kind = 0; std::wstring group; };
 inline bool LiveEndpoint(const Snapshot& snapshot) {

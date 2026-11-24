@@ -14,6 +14,7 @@ namespace pulse::app { class RecycleShellWatch; class ExtensionStoreController; 
 #include "../index/index_client.h"
 #include "../index/network_agent_client.h"
 #include "../ops/ops_manager.h"
+#include "ops_notify_gate.h"
 #include "../ui/FluentTokens.h"
 #include "../ui/render_caches.h"
 #include "app_change_tracking.h"
@@ -26,6 +27,7 @@ namespace pulse::app { class RecycleShellWatch; class ExtensionStoreController; 
 #include "context_menu_prefs.h"
 #include "dir_notify_queue.h"
 #include "dir_notify_async.h"
+#include "new_picture_probes.h"
 #include "duplicate_scan.h"
 #include "explorer_window_takeover.h"
 #include "win_e_hotkey.h"
@@ -33,6 +35,7 @@ namespace pulse::app { class RecycleShellWatch; class ExtensionStoreController; 
 #include "external_open_notice.h"
 #include "folder_sizes.h"
 #include "dialog_jump.h"
+#include "user_dialog_auto_controller.h"
 #include "double_ctrl.h"
 #include "global_search_hotkey.h"
 #include "global_search_window.h"
@@ -40,6 +43,7 @@ namespace pulse::app { class RecycleShellWatch; class ExtensionStoreController; 
 #include "host_window.h"
 #include "window_registry.h"
 #include "live_network_search.h"
+#include "live_folder_scope.h"
 #include "places.h"
 #include "saved_search.h"
 #include "search_history.h"
@@ -62,6 +66,7 @@ namespace pulse::app { class RecycleShellWatch; class ExtensionStoreController; 
 #include <vector>
 
 namespace pulse {
+namespace ui { class QuickPreviewWindow; }
 
 struct SidebarRefreshLoad;
 struct NetworkLocationLoad;
@@ -70,6 +75,7 @@ struct NetworkPageLoad;
 struct AppState;
 struct DialogManagementUiState;
 struct DriveEjectTask;
+class StagingShelfController;
 
 struct AppCore {
     AppCore() = default;
@@ -93,6 +99,7 @@ struct AppCore {
     // batches of folders that were patched moments ago.
     app::DirNotifyPacer<DirNotifyBatch> notify_pacer;
     app::DirNotifyAsync notify_async;
+    app::NewPictureProbes new_picture_probes;
     uint64_t notify_async_round = 0;
     struct CoalescedSizePatch {
         std::wstring path;
@@ -119,6 +126,7 @@ struct AppCore {
     bool recycle_info_guard = false;
 
     app::StagingTray tray;
+    std::shared_ptr<StagingShelfController> staging_shelf;
     app::PlacesCatalog places;
     app::ContextMenuPrefs ctxMenuPrefs;
     // Explorer COM/static menu session, caches, and delayed refresh state.
@@ -179,6 +187,7 @@ struct AppCore {
         bool network_ready = false;
         bool network_snapshot = false; // Captured for this request, not global root configuration.
         bool network_expected = true;  // Network roots or a live walk exist; else its failure is ignored.
+        app::LiveFolderSearchKind live_walk_kind = app::LiveFolderSearchKind::None;
         std::wstring live_network_root;  // #74: scope walked live instead of the network index
     };
     std::unordered_map<uint32_t, PendingIndexSearch> pendingIndexSearches;
@@ -222,6 +231,8 @@ struct AppCore {
 
     // Stage 1B-1: ops layer (queue + undo), inline rename overlay.
     ops::OpsManager ops;
+    std::shared_ptr<app::OpsNotifyGate> ops_notify_gate = std::make_shared<app::OpsNotifyGate>();
+    ULONGLONG ops_notify_due = 0; // UI-thread-only cooldown deadline.
 
     // Panes as shell windows for "open file location" (shell_window_sync.h).
     std::unique_ptr<app::ShellWindowRegistry> shell_windows;
@@ -254,6 +265,10 @@ struct AppCore {
     app::ClosedTabStack closed_tabs;
     uint64_t close_seq = 0;
     bool exiting = false;
+    ULONGLONG all_windows_hidden_since_tick = 0;
+    bool tray_hibernated = false;
+    ULONGLONG last_shell_idle_check_tick = 0;
+    ULONGLONG last_thumb_working_set_trim_tick = 0;
     // Session v8 (M4d): the windows of the last session other than the focused
     // one (which the first window restores), most recent first. The first
     // window opens them once it has been shown (WM_OPEN_SESSION_WINDOWS); until
@@ -283,6 +298,15 @@ struct AppCore {
     // state its handler reads, after management has revoked its worker wake.
     app::HostWindow host;
     std::shared_ptr<DialogManagementUiState> dialogManagement;
+    app::UserDialogAutoController userDialogAuto;
+    struct TrayProbeJob {
+        app::StagingTray::ExistenceProbe probe;
+        std::atomic_bool ready{false};
+    };
+    std::shared_ptr<TrayProbeJob> tray_probe;
+    ULONGLONG tray_probe_tick = 0;
+    // Independent always-on-top / detached Quick Look windows opened for multi-preview.
+    std::vector<std::shared_ptr<ui::QuickPreviewWindow>> pinned_previews;
 };
 
 // Owns the AppCore of a stand-alone AppState. A base class, so the core exists

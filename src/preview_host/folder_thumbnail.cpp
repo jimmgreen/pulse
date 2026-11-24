@@ -1,6 +1,7 @@
 #include "folder_thumbnail.h"
 #include "shell_bitmap.h"
 #include "shared_image_file.h"
+#include "../common/fast_bmp_thumb.h"
 #include "../fs/cloud_state.h"
 #include <objidl.h>
 #include <gdiplus.h>
@@ -10,12 +11,15 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <memory>
-#include <cstdio>
+#include <mutex>
+#include <unordered_map>
 
 namespace pulse::preview {
 namespace {
@@ -63,17 +67,29 @@ struct DiagnosticTrace {
     }
 };
 void Trace(const char* stage, uint64_t detail = 0) { if (active_trace) active_trace->Log(stage, detail); }
-struct GdiSession {
-    ULONG_PTR token = 0;
-    GdiSession() {
-        Trace("gdi_start_begin");
-        Gdiplus::GdiplusStartupInput input; const auto status = Gdiplus::GdiplusStartup(&token, &input, nullptr);
-        Trace("gdi_start_end", status);
-    }
-    ~GdiSession() {
-        Trace("gdi_shutdown_begin"); if (token) Gdiplus::GdiplusShutdown(token); Trace("gdi_shutdown_end");
-    }
+std::mutex g_gdiplus_mutex;
+ULONG_PTR g_gdiplus_token = 0;
+bool EnsureGdiPlusStarted() {
+    std::lock_guard lock(g_gdiplus_mutex);
+    if (g_gdiplus_token) return true;
+    Trace("gdi_start_begin");
+    Gdiplus::GdiplusStartupInput input;
+    const auto status = Gdiplus::GdiplusStartup(&g_gdiplus_token, &input, nullptr);
+    Trace("gdi_start_end", status);
+    return status == Gdiplus::Ok && g_gdiplus_token != 0;
+}
+struct ExplorerFolderCacheState {
+    bool hit = false;
+    unsigned misses = 0;
 };
+std::mutex g_folder_explorer_mutex;
+std::unordered_map<std::wstring, ExplorerFolderCacheState> g_folder_explorer_states;
+std::wstring FolderCacheKey(const std::wstring& file_path) {
+    const size_t slash = file_path.find_last_of(L"\\/");
+    std::wstring dir = slash == std::wstring::npos ? std::wstring() : file_path.substr(0, slash);
+    if (!dir.empty()) CharLowerBuffW(dir.data(), static_cast<DWORD>(dir.size()));
+    return dir;
+}
 struct FindHandle { HANDLE value; ~FindHandle() { if (value != INVALID_HANDLE_VALUE) FindClose(value); } };
 uint64_t HashBytes(uint64_t hash, const void* bytes, size_t size) {
     const auto* p = static_cast<const uint8_t*>(bytes);
@@ -136,39 +152,70 @@ bool Pixels(IWICImagingFactory* factory, IWICBitmapSource* source, UINT cap, Pic
     Trace("copy_pixels_end", static_cast<uint32_t>(copied));
     return SUCCEEDED(copied);
 }
-bool CachedPicture(IWICImagingFactory* factory, const std::wstring& path, UINT cap, Picture& out, bool extract = false, bool force = false) {
+bool CachedPicture(IWICImagingFactory* factory, IThumbnailCache*& cache_slot, bool& cache_attempted,
+                   const std::wstring& path, UINT cap, Picture& out, bool extract = false, bool force = false) {
+    const std::wstring dir_key = FolderCacheKey(path);
+    if (!extract && !force) {
+        std::lock_guard lock(g_folder_explorer_mutex);
+        const auto it = g_folder_explorer_states.find(dir_key);
+        if (it != g_folder_explorer_states.end() && !it->second.hit && it->second.misses >= 2) return false;
+    }
     ComPtr<IShellItem> item;
-    ComPtr<IThumbnailCache> cache;
     Trace("shell_item_begin");
     const HRESULT item_status = SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item));
     Trace("shell_item_end", static_cast<uint32_t>(item_status));
     if (FAILED(item_status)) return false;
-    Trace("shell_cache_create_begin");
-    const HRESULT cache_status = CoCreateInstance(CLSID_LocalThumbnailCache, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&cache));
-    Trace("shell_cache_create_end", static_cast<uint32_t>(cache_status));
-    if (FAILED(cache_status)) return false;
+    if (!cache_slot && !cache_attempted) {
+        cache_attempted = true;
+        Trace("shell_cache_create_begin");
+        const HRESULT cache_status = CoCreateInstance(CLSID_LocalThumbnailCache, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&cache_slot));
+        Trace("shell_cache_create_end", static_cast<uint32_t>(cache_status));
+        if (FAILED(cache_status)) cache_slot = nullptr;
+    }
+    if (!cache_slot) return false;
     ComPtr<ISharedBitmap> shared;
     WTS_CACHEFLAGS flags{}; WTS_THUMBNAILID id{};
     Trace("shell_get_begin", force ? 2 : extract ? 1 : 0);
-    const HRESULT thumbnail_status = cache->GetThumbnail(item.Get(), cap,
+    const HRESULT thumbnail_status = cache_slot->GetThumbnail(item.Get(), cap,
         force ? WTS_FORCEEXTRACTION : (extract ? WTS_EXTRACT : WTS_INCACHEONLY), &shared, &flags, &id);
     Trace("shell_get_end", static_cast<uint32_t>(thumbnail_status));
-    if (FAILED(thumbnail_status) || !shared) return false;
+    bool made = false;
     HBITMAP bitmap = nullptr;
-    if (FAILED(shared->GetSharedBitmap(&bitmap)) || !bitmap) return false;
-    WTS_ALPHATYPE alpha = WTSAT_UNKNOWN;
-    if (FAILED(shared->GetFormat(&alpha))) alpha = WTSAT_UNKNOWN;
-    // Straight-alpha cache entries labelled ARGB were read as premultiplied
-    // (washed-out pictures); shell_bitmap.h settles what the alpha means.
-    std::vector<uint8_t> pbgra;
-    UINT width = 0, height = 0, stride = 0;
-    if (!ShellBitmapToPbgra(bitmap, alpha, pbgra, width, height, stride)) return false;
-    ComPtr<IWICBitmap> source;
-    return SUCCEEDED(factory->CreateBitmapFromMemory(width, height, GUID_WICPixelFormat32bppPBGRA,
-               stride, static_cast<UINT>(pbgra.size()), pbgra.data(), &source)) &&
-        Pixels(factory, source.Get(), cap, out);
+    if (SUCCEEDED(thumbnail_status) && shared &&
+        SUCCEEDED(shared->GetSharedBitmap(&bitmap)) && bitmap) {
+        WTS_ALPHATYPE alpha = WTSAT_UNKNOWN;
+        if (FAILED(shared->GetFormat(&alpha))) alpha = WTSAT_UNKNOWN;
+        // Straight-alpha cache entries labelled ARGB were read as premultiplied
+        // (washed-out pictures); shell_bitmap.h settles what the alpha means.
+        std::vector<uint8_t> pbgra;
+        UINT width = 0, height = 0, stride = 0;
+        ComPtr<IWICBitmap> source;
+        made = ShellBitmapToPbgra(bitmap, alpha, pbgra, width, height, stride) &&
+            SUCCEEDED(factory->CreateBitmapFromMemory(width, height, GUID_WICPixelFormat32bppPBGRA,
+                stride, static_cast<UINT>(pbgra.size()), pbgra.data(), &source)) &&
+            Pixels(factory, source.Get(), cap, out);
+    }
+    if (!extract && !force) {
+        std::lock_guard lock(g_folder_explorer_mutex);
+        if (g_folder_explorer_states.size() > 256) g_folder_explorer_states.clear();
+        auto& st = g_folder_explorer_states[dir_key];
+        if (made) { st.hit = true; st.misses = 0; }
+        else ++st.misses;
+    }
+    return made;
 }
 bool ReadPicture(IWICImagingFactory* factory, const std::wstring& path, UINT cap, Picture& out) {
+    const std::wstring ext = Extension(path);
+    if (ext == L".bmp" || ext == L".dib") {
+        std::vector<uint8_t> pbgra;
+        uint32_t w = 0, h = 0, stride = 0, sw = 0, sh = 0;
+        if (DecodeFastBmpThumbnailFile(path, cap, pbgra, w, h, stride, sw, sh) && stride == w * 4) {
+            out.data = std::move(pbgra);
+            out.width = w;
+            out.height = h;
+            return true;
+        }
+    }
     pulse::preview::SharedImageFile file;  // outlives the decoder
     ComPtr<IWICBitmapDecoder> decoder;
     ComPtr<IWICBitmapFrameDecode> frame;
@@ -194,24 +241,65 @@ fs::path CacheDirectory() {
 struct CacheHeader { uint64_t magic = 0x32544d4854465055ull, signature = 0, created = 0; uint32_t size = 0, bytes = 0; };
 uint64_t Now() { FILETIME time{}; GetSystemTimeAsFileTime(&time); return (uint64_t(time.dwHighDateTime) << 32) | time.dwLowDateTime; }
 bool LoadCache(const fs::path& file, uint64_t signature, UINT cap, std::vector<uint8_t>& out, bool& negative) {
-    std::ifstream stream(file, std::ios::binary); CacheHeader h;
-    if (!stream.read(reinterpret_cast<char*>(&h), sizeof(h)) || h.magic != CacheHeader{}.magic ||
-        h.signature != signature || h.size != cap || (h.bytes && h.bytes != cap * cap * 4)) return false;
-    if (!h.bytes) { negative = true; return Now() >= h.created && Now() - h.created < 10ull * 10000000; }
-    out.resize(h.bytes);
-    return bool(stream.read(reinterpret_cast<char*>(out.data()), h.bytes));
+    HANDLE handle = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    CacheHeader h;
+    DWORD read = 0;
+    bool ok = ReadFile(handle, &h, sizeof(h), &read, nullptr) && read == sizeof(h) &&
+        h.magic == CacheHeader{}.magic && h.signature == signature && h.size == cap &&
+        (!h.bytes || h.bytes == cap * cap * 4);
+    if (ok && !h.bytes) {
+        negative = true;
+        const uint64_t now = Now();
+        ok = now >= h.created && now - h.created < 10ull * 10000000;
+    } else if (ok) {
+        out.resize(h.bytes);
+        DWORD total = 0;
+        while (total < h.bytes) {
+            DWORD chunk = 0;
+            if (!ReadFile(handle, out.data() + total, h.bytes - total, &chunk, nullptr) || !chunk) {
+                ok = false;
+                break;
+            }
+            total += chunk;
+        }
+    }
+    CloseHandle(handle);
+    if (!ok) out.clear();
+    return ok;
 }
 void SaveCache(const fs::path& file, uint64_t signature, UINT cap, const std::vector<uint8_t>& out) {
     Trace("cache_save_begin", out.size());
     std::error_code ec; fs::create_directories(file.parent_path(), ec); if (ec) return;
     auto temporary = file; temporary += L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp";
     CacheHeader h; h.signature = signature; h.created = Now(); h.size = cap; h.bytes = static_cast<uint32_t>(out.size());
-    { std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
-      stream.write(reinterpret_cast<const char*>(&h), sizeof(h));
-      if (!out.empty()) stream.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
-      if (!stream) { stream.close(); fs::remove(temporary, ec); return; } }
-    if (!MoveFileExW(temporary.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING)) fs::remove(temporary, ec);
+    std::vector<uint8_t> payload(sizeof(h) + out.size());
+    std::memcpy(payload.data(), &h, sizeof(h));
+    if (!out.empty()) std::memcpy(payload.data() + sizeof(h), out.data(), out.size());
+    bool wrote_ok = false;
+    HANDLE handle = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+        size_t offset = 0;
+        wrote_ok = true;
+        while (offset < payload.size()) {
+            const DWORD want = static_cast<DWORD>(std::min<size_t>(payload.size() - offset, 1u << 20));
+            DWORD written = 0;
+            if (!WriteFile(handle, payload.data() + offset, want, &written, nullptr) || written != want) {
+                wrote_ok = false;
+                break;
+            }
+            offset += written;
+        }
+        CloseHandle(handle);
+    }
+    if (!wrote_ok || !MoveFileExW(temporary.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING)) fs::remove(temporary, ec);
     Trace("cache_write_end");
+    static std::atomic<uint32_t> save_count{0};
+    if ((++save_count & 63u) != 1u) {
+        Trace("cache_save_end", 0);
+        return;
+    }
     struct Old { fs::path path; fs::file_time_type time; uint64_t size; };
     std::vector<Old> files; uint64_t total = 0;
     for (fs::directory_iterator it(file.parent_path(), ec), end; !ec && it != end; it.increment(ec)) {
@@ -338,7 +426,7 @@ void FitCard(const Picture& pic, float max_w, float max_h, float& w, float& h) {
     w = iw + border; h = ih + border;
 }
 bool Render(std::vector<Picture>& pictures, UINT cap, bool single, std::vector<uint8_t>& out) {
-    GdiSession session; if (!session.token) return false;
+    if (!EnsureGdiPlusStarted()) return false;
     out.assign(size_t(cap)*cap*4, 0);
     Gdiplus::Bitmap bitmap(static_cast<INT>(cap),static_cast<INT>(cap),static_cast<INT>(cap*4),PixelFormat32bppPARGB,out.data());
     Gdiplus::Graphics g(&bitmap); g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
@@ -459,6 +547,10 @@ bool DecodeFolderThumbnail(const std::wstring& path, UINT pixels, std::vector<ui
     Trace("wic_factory_end");
     std::vector<Picture> pictures;
     const size_t count = single ? 1 : 3;
+    const UINT card_cap = std::clamp<UINT>((cap * (single ? 176u : 150u) + 255u) / 256u, 32u, cap);
+    ComPtr<IThumbnailCache> thumb_cache;
+    IThumbnailCache* raw_thumb_cache = nullptr;
+    bool thumb_cache_attempted = false;
     bool video_extraction_attempted = false;
     unsigned candidate_index = 0;
     for (const auto& entry : entries) {
@@ -468,14 +560,20 @@ bool DecodeFolderThumbnail(const std::wstring& path, UINT pixels, std::vector<ui
         Picture picture;
         const auto file = (fs::path(path)/entry.name).wstring();
         if (entry.rank < 2) {
-            bool made = !force_refresh && CachedPicture(factory.Get(),file,cap,picture);
+            const std::wstring ext = Extension(entry.name);
+            const bool fast_local_bmp = entry.rank == 0 && (ext == L".bmp" || ext == L".dib") &&
+                !entry.data.nFileSizeHigh && entry.data.nFileSizeLow <= 32 * 1024 * 1024;
+            bool made = (!force_refresh && !fast_local_bmp) &&
+                CachedPicture(factory.Get(), raw_thumb_cache, thumb_cache_attempted, file, card_cap, picture);
+            if (!thumb_cache && raw_thumb_cache) thumb_cache.Attach(raw_thumb_cache);
             if (!made && Expired()) return Timeout();
             if (!made && entry.rank == 0 && !entry.data.nFileSizeHigh && entry.data.nFileSizeLow <= 32*1024*1024)
-                made = ReadPicture(factory.Get(),file,cap,picture);
+                made = ReadPicture(factory.Get(), file, card_cap, picture);
             if (!made && Expired()) return Timeout();
             if (!made && entry.rank == 1 && !video_extraction_attempted) {
                 video_extraction_attempted = true;
-                made = CachedPicture(factory.Get(),file,cap,picture,true,force_refresh);
+                made = CachedPicture(factory.Get(), raw_thumb_cache, thumb_cache_attempted, file, card_cap, picture, true, force_refresh);
+                if (!thumb_cache && raw_thumb_cache) thumb_cache.Attach(raw_thumb_cache);
             }
             if (!made && Expired()) return Timeout();
             if (!made) continue;
@@ -496,6 +594,13 @@ bool DecodeFolderThumbnail(const std::wstring& path, UINT pixels, std::vector<ui
     if (!root.empty()) SaveCache(cache_file,signature,cap,bgra);
     if (made) { width=height=cap; stride=cap*4; }
     return made;
+}
+void ShutdownFolderThumbnailResources() noexcept {
+    std::lock_guard lock(g_gdiplus_mutex);
+    if (g_gdiplus_token) {
+        Gdiplus::GdiplusShutdown(g_gdiplus_token);
+        g_gdiplus_token = 0;
+    }
 }
 #ifdef PULSE_FOLDER_THUMBNAIL_TESTING
 void SetFolderThumbnailBudgetForTest(DWORD budget_ms, unsigned completed_pictures) {

@@ -4,8 +4,8 @@
 #include "picker_appearance_ui.h"
 #include "../common/localization.h"
 #include "../ui/typography.h"
-#include "../ui/file_save_model.h"
 #include "../common/dialog_auto_registration.h"
+#include "../common/dialog_bridge_paths.h"
 #include "picker_bridge_model.h"
 #include "../ipc/picker_transport.h"
 
@@ -81,24 +81,6 @@ int Serve(wire::Channel& channel, HANDLE parent_process, DWORD pid, uint64_t own
         return 3;
     }
     auto spec = std::get<ui::FolderPickerSpec>(std::move(preparation));
-    if (spec.validate_local_save_access_v1) {
-        // As the in-process provider: a local save whose starting target does
-        // not resolve is declined before any UI, so the caller may stay native.
-        ui::SaveTargetRequest target;
-        target.directory = spec.initial_path; target.filename = spec.filename.empty() ? L"pulse-validation" : spec.filename;
-        target.filters = spec.filters; target.filter_index = spec.filter_index; target.default_extension = spec.default_extension;
-        target.native_save_defaults = spec.native_save_defaults;
-        target.no_test_file_create = spec.no_test_file_create;
-        target.require_existing_save_parent = spec.require_existing_save_parent;
-        if (ui::ResolveSaveTarget(target).state != ui::SaveTargetState::Resolved) {
-            wire::Response unsupported;
-            unsupported.operation = wire::Operation::SaveFile;
-            unsupported.status = wire::Status::Unsupported;
-            unsupported.error_source = wire::ErrorSource::Win32;
-            unsupported.error_code = ERROR_NOT_SUPPORTED;
-            return channel.Send({request.request_id, std::move(unsupported)}, {nullptr, 5000}) ? 0 : 4;
-        }
-    }
     spec.cancel_event = cancel.Get();
     const auto appearance = ReadUserPickerAppearanceReadOnly().snapshot;
     ApplyPickerAppearanceToSpec(appearance, spec);
@@ -167,6 +149,12 @@ std::wstring DirectoryOf(const std::wstring& path) {
 // route is on; empty otherwise. That is the executable clients will expect.
 std::wstring RegisteredStandbyExecutable() {
     if (!dialog_auto::PreferOutOfProcess()) return {};
+    const auto common = dialog_bridge_paths::CommonDialogBridgeRoot();
+    dialog_bridge_paths::ActiveBridgePointer ptr{};
+    if (!common.empty() && dialog_bridge_paths::ReadActiveBridgePointer(common, ptr) == ERROR_SUCCESS &&
+        !ptr.host_exe.empty()) {
+        return ptr.host_exe;
+    }
     const auto status = dialog_auto::Inspect();
     if (!status.enabled || status.conflict || status.error || status.dll_path.empty()) return {};
     return DirectoryOf(status.dll_path) + L"\\pulse.exe";
@@ -228,6 +216,20 @@ void SeedPickerStandbyAsync() {
         if (executable.empty()) return;
         wire::PipeHandle existing(OpenMutexW(SYNCHRONIZE, FALSE, wire::StandbyIdleMutexName(executable).c_str()));
         if (!existing) LaunchStandby(executable);
+        if (dialog_auto::PreferRemoteHost()) {
+            const std::wstring warm_mutex = wire::StandbyIdleMutexName(executable) + L".WarmV2";
+            wire::PipeHandle existing_warm(OpenMutexW(SYNCHRONIZE, FALSE, warm_mutex.c_str()));
+            if (!existing_warm) {
+                std::wstring cmd = L"\"" + executable + L"\" --picker-warm-remote-host";
+                STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+                PROCESS_INFORMATION info{};
+                if (CreateProcessW(executable.c_str(), cmd.data(), nullptr, nullptr, FALSE,
+                                   CREATE_NO_WINDOW, nullptr, nullptr, &startup, &info)) {
+                    CloseHandle(info.hThread);
+                    CloseHandle(info.hProcess);
+                }
+            }
+        }
     }).detach();
 }
 } // namespace pulse::app

@@ -22,6 +22,7 @@
 #include "network_agent_host.h"
 #include "../common/current_user_security.h"
 #include <windows.h>
+#include <dbt.h>
 #include <sddl.h>
 #include <shellapi.h>
 #include <winsvc.h>
@@ -956,6 +957,10 @@ LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
     }
+    if (msg == WM_DEVICECHANGE) {
+        g.engine.NotifyTopologyChange();
+        return TRUE;
+    }
     if (msg == WM_QUIT_HOST) {
         g.running = false;
         if (g.stop) SetEvent(g.stop);
@@ -1116,6 +1121,13 @@ int RunHost(bool as_service, bool test_mode = false,
         return 1;
     }
     ServiceTrace(L"message window ready");
+    constexpr GUID kVolumeInterfaceGuid = {
+        0x53F5630D, 0xB6BF, 0x11D0, {0x94, 0xF2, 0x00, 0xA0, 0xC9, 0x1E, 0xFB, 0x8B}};
+    DEV_BROADCAST_DEVICEINTERFACE_W dev_filter{};
+    dev_filter.dbcc_size = sizeof(dev_filter);
+    dev_filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+    dev_filter.dbcc_classguid = kVolumeInterfaceGuid;
+    HDEVNOTIFY dev_notify = RegisterDeviceNotificationW(g.hwnd, &dev_filter, DEVICE_NOTIFY_WINDOW_HANDLE);
     g.stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (as_service) SetSvc(SERVICE_RUNNING);
     ServiceTrace(L"service running reported");
@@ -1173,6 +1185,7 @@ int RunHost(bool as_service, bool test_mode = false,
     g.engine.Stop();
     TraceSearch("filename_shutdown_engine_done");
     ServiceTrace(L"engine stopped");
+    if (dev_notify) UnregisterDeviceNotification(dev_notify);
     if (as_service) ApplySearchSwitch(g_switch_request.exchange(SearchSwitchRequest::None), validated_index_path);
     if (g.mutex) {
         ReleaseMutex(g.mutex);

@@ -115,14 +115,21 @@ bool Pptx(const std::wstring& path, std::vector<Slide>& slides, size_t& total, u
     std::wstring filename = main.substr(slash == std::wstring::npos ? 0 : slash + 1);
     std::map<std::wstring, Rel> rels;
     if (!part(dir + L"_rels/" + filename + L".rels") || !Rels(bytes, rels)) return false;
+    std::vector<std::string> parts;
+    parts.reserve(ids.size());
     for (const auto& id : ids) {
         auto found = rels.find(id);
         if (found == rels.end() || !found->second.type.ends_with(L"/slide")) return false;
-        if (!part(ResolvePartName(dir, found->second.target))) return false;
+        parts.push_back(ToUtf8(ResolvePartName(dir, found->second.target)));
+    }
+    slides.resize(ids.size());
+    return VisitZipEntries(path, parts, kPartLimit, [&](size_t index, const auto& slide_bytes) {
+        if (slide_bytes.size() > kTotalLimit - read) return false;
+        read += static_cast<uint32_t>(slide_bytes.size());
         Slide slide;
         bool in_text = false, root = false;
         std::wstring paragraph;
-        if (!Xml(bytes,
+        if (!Xml(slide_bytes,
                  [&](IXmlReader* r, XmlNodeType t, std::wstring_view n) {
                      if (t == XmlNodeType_Element) {
                          if (n == L"sld") root = true;
@@ -146,9 +153,9 @@ bool Pptx(const std::wstring& path, std::vector<Slide>& slides, size_t& total, u
             !root)
             return false;
         if (!paragraph.empty()) slide.text.push_back(std::move(paragraph));
-        slides.push_back(std::move(slide));
-    }
-    return true;
+        slides[index] = std::move(slide);
+        return true;
+    });
 }
 struct Rec {
     uint16_t type = 0, instance = 0;

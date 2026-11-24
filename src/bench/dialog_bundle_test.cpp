@@ -75,16 +75,121 @@ struct Fixture {
     void Commit(){const auto text=pulse::json::Serialize(manifest);WriteText(dir/L"manifest.json",text);auto marker=Value::Object();marker.set("manifest_sha256",Hash({text.begin(),text.end()}));marker.set("integrity_only",true);WriteText(dir/L"VERIFIED.json",pulse::json::Serialize(marker));}
     ~Fixture(){std::error_code error;fs::remove_all(dir,error);if(error){++failures;std::cerr<<"[FAIL] synthetic fixture cleanup "<<error.value()<<'\n';}}
 };
+
+void TestAppStartupLog(const fs::path& root) {
+    using bundle::ResolveStage;
+    Fixture app(root / L"source");
+    auto core_files = Value::Array();
+    for (const auto& entry : app.manifest.find("files")->items()) {
+        const auto name = entry.get_string("path");
+        if (name.starts_with("PulseDialog") || name.starts_with("PulseFileDialog") ||
+            name == "PulsePickerUiProof.dll") {
+            Need(fs::remove(app.dir / pulse::json::Wide(name)));
+        } else {
+            core_files.push(entry);
+        }
+    }
+    auto contract = Value::Object();
+    contract.set("manifest", 1);
+    contract.set("kind", "AppRuntime");
+    app.manifest.set("schema", 4);
+    app.manifest.set("contract", std::move(contract));
+    app.manifest.set("files", std::move(core_files));
+    app.Commit();
+    const auto raw = pulse::json::Serialize(app.manifest);
+    const auto digest = Hash({raw.begin(), raw.end()});
+    const auto family = root / bundle::kAppRuntimeDirectory;
+    Need(fs::create_directory(family));
+    const auto runtime = family / pulse::json::Wide(digest);
+    fs::copy(app.dir, runtime, fs::copy_options::recursive);
+    auto pointer = Value::Object();
+    pointer.set("schema", 1);
+    pointer.set("directory", "AppRuntime/" + digest);
+    pointer.set("manifest_sha256", digest);
+    WriteText(root / L"app-current.json", pulse::json::Serialize(pointer));
+
+    const auto verify_start = [&](const char* label, DWORD error, ResolveStage expected_stage) {
+        bundle::BundleLease lease;
+        ResolveStage stage{};
+        const DWORD result = bundle::ResolveStartupBundle(root.wstring(), lease, &stage);
+        Check(result == error && stage == expected_stage && static_cast<bool>(lease) == (error == ERROR_SUCCESS),
+            label, result);
+    };
+    verify_start("clean AppRuntime launches without DialogBridge", ERROR_SUCCESS, ResolveStage::None);
+    const auto log = runtime / L"log";
+    Need(fs::create_directory(log));
+    verify_start("plain empty root log permits process launch", ERROR_SUCCESS, ResolveStage::None);
+    {
+        bundle::BundleLease lease;
+        const DWORD result = bundle::VerifyAppRuntimeForStartup(runtime.wstring(), digest, lease);
+        Check(result == ERROR_SUCCESS && !!lease, "main runtime identity tolerates the same empty log", result);
+        Need(result == ERROR_SUCCESS);
+        Check(bundle::RecheckDirectory(lease) == ERROR_SUCCESS, "empty log permits launch lease recheck");
+        WriteText(log / L"activity.txt", "not in the manifest");
+        Check(bundle::RecheckDirectory(lease) == ERROR_INVALID_DATA, "recheck rejects a log that became nonempty");
+    }
+    verify_start("nonempty root log remains rejected", ERROR_INVALID_DATA, ResolveStage::DirectoryContents);
+    Need(fs::remove(log / L"activity.txt"));
+    {
+        bundle::BundleLease lease;
+        const DWORD result = bundle::ResolveInstalledAppRuntime(root.wstring(), lease);
+        Check(result == ERROR_INVALID_DATA && !lease, "strict installer validation still rejects empty log", result);
+    }
+    const auto other = runtime / L"logs";
+    Need(fs::create_directory(other));
+    verify_start("unlisted empty directory other than log still rejected", ERROR_INVALID_DATA, ResolveStage::DirectoryContents);
+    Need(fs::remove(other));
+    WriteText(runtime / L"extra.dll", "unlisted");
+    verify_start("unlisted root DLL still rejected", ERROR_INVALID_DATA, ResolveStage::DirectoryContents);
+    Need(fs::remove(runtime / L"extra.dll"));
+    const auto pdfium = runtime / L"pdfium.dll";
+    auto altered = Image();
+    altered.back() = 1;
+    Write(pdfium, altered);
+    verify_start("known binary hash mismatch still rejected", ERROR_CRC, ResolveStage::Member);
+    Need(fs::remove(pdfium));
+    verify_start("missing packaged binary still rejected", ERROR_FILE_NOT_FOUND, ResolveStage::Member);
+    Write(pdfium, Image());
+    Need(fs::remove(log));
+    WriteText(log, "");
+    verify_start("root file named log is not a directory exception", ERROR_INVALID_DATA, ResolveStage::DirectoryContents);
+    Need(fs::remove(log));
+    const auto outside = root / L"outside";
+    Need(fs::create_directory(outside));
+    if (CreateSymbolicLinkW(log.c_str(), outside.c_str(), SYMBOLIC_LINK_FLAG_DIRECTORY | 0x2)) {
+        verify_start("log reparse directory still rejected", ERROR_NOT_SUPPORTED, ResolveStage::DirectoryContents);
+        Need(RemoveDirectoryW(log.c_str()) != FALSE);
+    } else {
+        std::cout << "[SKIP] log reparse fixture requires symlink permission error=" << GetLastError() << '\n';
+    }
+    Need(fs::remove(outside));
+    verify_start("cleanup restores clean AppRuntime", ERROR_SUCCESS, ResolveStage::None);
+    Need(fs::remove(root / L"app-current.json"));
+    Need(fs::remove_all(runtime) != 0);
+}
 }
 int wmain(int argc,wchar_t** argv){
     std::cout<<std::unitbuf;
+    if (argc == 3 && std::wstring_view(argv[1]) == L"--resolve-startup") {
+        bundle::BundleLease lease;
+        const DWORD error = bundle::ResolveStartupBundle(argv[2], lease);
+        Check(error == ERROR_SUCCESS && !!lease, "read-only startup bundle verification", error);
+        return failures ? 1 : 0;
+    }
     if(argc==3&&std::wstring_view(argv[1])==L"--resolve-installed") {bundle::BundleLease lease;DWORD e=bundle::ResolveInstalledBundle(argv[2],lease);Check(e==0,"read-only installed pointer verification",e);if(!e)Check(bundle::RecheckDirectory(lease)==0,"retained installed snapshot recheck");return failures?1:0;}
     if(argc==3&&std::wstring_view(argv[1])==L"--verify") {bundle::BundleLease lease;DWORD e=bundle::VerifyBundle(argv[2],{},lease);Check(e==0,"read-only supplied bundle verification",e);if(!e)Check(bundle::RecheckDirectory(lease)==0,"retained supplied bundle directory recheck");return failures?1:0;}
     const bool installed_only=argc==2 && std::wstring_view(argv[1])==L"--installed-pointer";
-    if(argc!=1 && !installed_only)return 2;
+    const bool app_log_only = argc == 2 && std::wstring_view(argv[1]) == L"--app-runtime-empty-log";
+    if (argc != 1 && !installed_only && !app_log_only) return 2;
     try {
         const auto bench=fs::path(Self()).parent_path().parent_path()/L"bench_data";fs::create_directories(bench);
         const auto root=bench/(L"dialog-bundle-test-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64()));Need(CreateDirectoryW(root.c_str(),nullptr)!=FALSE);
+        if (app_log_only) {
+            TestAppStartupLog(root);
+            Check(fs::remove(root / bundle::kAppRuntimeDirectory) && fs::remove(root), "remove only the owned launch fixture");
+            std::cout << "checks=" << checks << " failures=" << failures << '\n';
+            return failures ? 1 : 0;
+        }
         unsigned next=0;
         if(installed_only) {
             const auto app=root/L"app";fs::create_directories(app/L"DialogBridge");
@@ -97,7 +202,13 @@ int wmain(int argc,wchar_t** argv){
             auto publish=[&](const Value& value){WriteText(app/L"dialog-current.json",pulse::json::Serialize(value));};
             bundle::BundleLease lease;
             auto reject=[&](const char* label){const auto e=bundle::ResolveInstalledBundle(app.wstring(),lease);Check(e!=0&&!lease,label,e);};
-            reject("missing pointer never falls back to root");
+            using bundle::ResolveStage;
+            ResolveStage stage{};
+            auto reject_at = [&](const char* label, DWORD expected, ResolveStage expected_stage) {
+                const auto result = bundle::ResolveInstalledBundle(app.wstring(), lease, &stage);
+                Check(result == expected && !lease && stage == expected_stage, label, result);
+            };
+            reject_at("missing pointer reports pointer open", ERROR_FILE_NOT_FOUND, ResolveStage::PointerOpen);
             publish(pointer);
             {
                 const auto pointer_path=app/L"dialog-current.json";
@@ -120,8 +231,9 @@ int wmain(int argc,wchar_t** argv){
                 CloseHandle(snapshot);
                 publish(pointer);
             }
-            auto error=bundle::ResolveInstalledBundle(app.wstring(),lease);
-            Check(error==0&&lease.Directory()==selected.wstring(),"pointer resolves digest-bound private bundle",error);
+            auto error=bundle::ResolveInstalledBundle(app.wstring(),lease,&stage);
+            Check(error==0&&stage==ResolveStage::None&&lease.Directory()==selected.wstring(),
+                "pointer resolves digest-bound private bundle and clears failure stage",error);
             Check(lease.Host()==(selected/L"pulse.exe").wstring(),"host belongs to private directory");
             WriteText(app/L"pulse.exe","main application replaceable");
             Check(DeleteFileW((app/L"pulse.exe").c_str())!=FALSE,"lease does not pin root executable");
@@ -129,13 +241,29 @@ int wmain(int argc,wchar_t** argv){
             publish(pointer);
             Check(bundle::RecheckDirectory(lease)==0,"selected snapshot survives pointer replacement");
             lease=bundle::BundleLease{};
+            Need(fs::remove(selected / L"manifest.json"));
+            reject_at("missing manifest is distinct from missing pointer", ERROR_FILE_NOT_FOUND, ResolveStage::Manifest);
+            WriteText(selected / L"manifest.json", manifest);
+            Need(fs::remove(selected / L"pulse.exe"));
+            reject_at("missing host reports bundle member", ERROR_FILE_NOT_FOUND, ResolveStage::Member);
+            auto host = Image();
+            Put(host, 0x96, IMAGE_FILE_EXECUTABLE_IMAGE, 2);
+            Write(selected / L"pulse.exe", host);
+            Need(fs::create_directory(selected / L"log"));
+            reject_at("unlisted log directory remains rejected", ERROR_INVALID_DATA, ResolveStage::DirectoryContents);
+            Need(fs::remove(selected / L"log"));
+            error = bundle::ResolveInstalledBundle(app.wstring(), lease, &stage);
+            Check(error == ERROR_SUCCESS && !!lease && stage == ResolveStage::None,
+                "clean bundle still resolves after fixture cleanup", error);
+            lease = bundle::BundleLease{};
             auto bad=pointer;bad.set("directory","DialogBridge/../"+digest);publish(bad);reject("pointer path traversal rejected");
             bad=pointer;bad.set("directory","DialogBridge\\"+digest);publish(bad);reject("pointer backslash path rejected");
             bad=pointer;bad.set("manifest_sha256",std::string(64,'A'));publish(bad);reject("nonlowercase digest rejected");
             bad=pointer;bad.set("unexpected",true);publish(bad);reject("unknown pointer key rejected");
             bad=pointer;bad.set("schema",2);publish(bad);reject("unknown pointer schema rejected");
             WriteText(app/L"dialog-current.json",std::string(1025,' '));reject("oversized pointer rejected");
-            WriteText(app/L"dialog-current.json","{broken");reject("malformed pointer rejected");
+            WriteText(app/L"dialog-current.json","{broken");
+            reject_at("malformed pointer reports pointer data", ERROR_INVALID_DATA, ResolveStage::PointerData);
             WriteText(app/L"dialog-current.json","{\"schema\":1,\"schema\":1,\"directory\":\"DialogBridge/"+digest+"\",\"manifest_sha256\":\""+digest+"\"}");reject("duplicate pointer keys rejected");
             publish(pointer);WriteText(selected/L"manifest.json",manifest+" ");reject("manifest raw byte digest mismatch rejected");
             WriteText(selected/L"manifest.json",manifest);

@@ -2,6 +2,7 @@
 #include "../ipc/elevated_transfer_transport.h"
 #include "../ipc/elevated_transfer_messages.h"
 #include "../common/path_utils.h"
+#include "../common/display_path.h"
 #include "../ops/elevated_delete.h"
 #include <shellapi.h>
 #include <objbase.h>
@@ -118,9 +119,11 @@ int Run(DWORD parent_id, const Nonce& nonce) {
             } else if (header.kind == Kind::CreateFolder) {
                 if (active_request.load() || header.request <= last_request) break;
                 auto path = reader.Text();
+                const bool empty_file = !reader.Done();
+                if (empty_file && reader.Number<uint32_t>() != 1) break;
                 if (!reader.Done() || !SafePath(path)) break;
                 ops::OpRequest request;
-                request.type = ops::OpType::CreateFolder;
+                request.type = empty_file ? ops::OpType::CreateTextFile : ops::OpType::CreateFolder;
                 request.sources.push_back(std::move(path));
                 request.is_undo = true;
                 cancelled.store(false);
@@ -130,6 +133,50 @@ int Run(DWORD parent_id, const Nonce& nonce) {
                 last_request = header.request;
                 active_task.store(manager.Submit(std::move(request)));
                 SetEvent(changed.Get());
+            } else if (header.kind == Kind::ListFolder) {
+                if (active_request.load() || header.request <= last_request) break;
+                const auto folder = reader.Text();
+                if (!reader.Done() || !SafePath(folder)) break;
+                last_request = header.request;
+                const auto friendly = path::FriendlyPathText(folder);
+                DWORD error = ERROR_INVALID_NAME;
+                const auto drive = friendly.size() >= 3 && friendly[1] == L':' ?
+                    GetDriveTypeW(friendly.substr(0, 3).c_str()) : DRIVE_UNKNOWN;
+                if (drive == DRIVE_FIXED || drive == DRIVE_REMOVABLE) {
+                    auto pattern = folder;
+                    if (pattern.back() != L'\\') pattern += L'\\';
+                    WIN32_FIND_DATAW row{};
+                    const auto find = FindFirstFileW((pattern + L"*").c_str(), &row);
+                    if (find == INVALID_HANDLE_VALUE) {
+                        error = GetLastError();
+                        if (error == ERROR_FILE_NOT_FOUND) error = ERROR_SUCCESS;
+                    } else {
+                        Writer batch;
+                        size_t total = 0;
+                        do {
+                            if (!wcscmp(row.cFileName, L".") || !wcscmp(row.cFileName, L"..")) continue;
+                            if (++total > 65536) { error = ERROR_BUFFER_OVERFLOW; break; }
+                            batch.Number(row);
+                            if (batch.bytes.size() >= 65536) {
+                                if (!WriteFrame(pipe.Get(), parent.Get(), nonce, Kind::FolderRows, header.request, batch)) {
+                                    error = ERROR_BROKEN_PIPE; break;
+                                }
+                                batch.bytes.clear();
+                            }
+                        } while (FindNextFileW(find, &row));
+                        if (error == ERROR_INVALID_NAME) {
+                            error = GetLastError();
+                            if (error == ERROR_NO_MORE_FILES) error = ERROR_SUCCESS;
+                        }
+                        FindClose(find);
+                        if (!error && !batch.bytes.empty() && !WriteFrame(pipe.Get(), parent.Get(), nonce, Kind::FolderRows, header.request, batch))
+                            error = ERROR_BROKEN_PIPE;
+                    }
+                }
+                Writer result;
+                result.Number<HRESULT>(HRESULT_FROM_WIN32(error)); result.Number<uint32_t>(0);
+                result.Number<uint32_t>(0); result.Text({});
+                if (!WriteFrame(pipe.Get(), parent.Get(), nonce, Kind::Result, header.request, result)) break;
             } else if (header.kind == Kind::EjectVirtualDisk) {
                 if (active_request.load() || header.request <= last_request) break;
                 storage::VirtualDiskIdentity identity;

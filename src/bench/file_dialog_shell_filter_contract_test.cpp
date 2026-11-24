@@ -20,6 +20,11 @@ int main(){
     check(!BridgeRequestFor(supported),"basic picker pipe without callback RPC never drops active filter");
     calls.back().value=2;check(PrepareFileDialogContract(DialogFactory::Open,calls,id,AccessPolicy::LocalOpenV1,context).disposition==Disposition::InvalidArgument,"invalid filter presence field is not coerced to true");
     calls.back().value=1;calls.front().value|=FOS_SUPPORTSTREAMABLEITEMS;context.native_options_supported=true;
+    auto streamable=PrepareFileDialogContract(DialogFactory::Open,calls,id,AccessPolicy::LocalOpenV1,context);
+    check(streamable.disposition==Disposition::Prepared&&streamable.shell_item_filter,"forced file-system results keep a streamable caller's filter (brokered FileOpenPicker)");
+    calls.front().value&=~static_cast<uint32_t>(FOS_FORCEFILESYSTEM);
     check(PrepareFileDialogContract(DialogFactory::Open,calls,id,AccessPolicy::LocalOpenV1,context).reason==NativeReason::ShellFilter,"unsupported Shell stream enumeration stays native before display");
+    calls.front().value|=FOS_FORCEFILESYSTEM|FOS_ALLNONSTORAGEITEMS;
+    check(PrepareFileDialogContract(DialogFactory::Open,calls,id,AccessPolicy::LocalOpenV1,context).reason==NativeReason::ShellFilter,"non-storage enumeration stays native even with forced file-system");
     std::printf("SHELL_FILTER_CONTRACT checks=%u failures=%u\n",checks,failures);return failures?1:0;
 }

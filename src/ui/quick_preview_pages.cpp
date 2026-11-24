@@ -46,6 +46,8 @@ void QuickPreviewWindow::ResetPages() {
     pages_zoom_ = 1.0f;
     pages_strip_scroll_ = 0.0f;
     pages_follow_ = UINT32_MAX;
+    pages_scrollbar_drag_ = false;
+    pages_scrollbar_hover_ = false;
 }
 
 QuickPreviewWindow::PagesLayout QuickPreviewWindow::ComputePagesLayout() const {
@@ -165,8 +167,76 @@ bool QuickPreviewWindow::PagesWheel(POINT client, float steps, bool ctrl, bool s
     return true;
 }
 
+QuickPreviewWindow::OverlayScrollbar QuickPreviewWindow::PagesScrollbar() const {
+    OverlayScrollbar bar;
+    if (native_kind_ != NativeKind::Pages || !pages_count_) return bar;
+    const PagesLayout layout = ComputePagesLayout();
+    const float view_h = layout.view.bottom - layout.view.top;
+    const float doc_h = PagesDocHeight(layout);
+    if (view_h <= 0.0f || doc_h <= view_h + 1.0f) return bar;
+    const float track_top = layout.view.top + 4.0f * scale_;
+    const float track_h = (std::max)(0.0f, view_h - 8.0f * scale_);
+    const float thumb_h = (std::min)(track_h, (std::max)(24.0f * scale_, track_h * view_h / doc_h));
+    bar.maximum = doc_h - view_h;
+    bar.travel = track_h - thumb_h;
+    const float y = track_top + bar.travel * std::clamp(pages_scroll_ / bar.maximum, 0.0f, 1.0f);
+    // Keep the painted thumb clear of Quick Look's outer 3 DIP resize edge.
+    bar.thumb = D2D1::RectF(layout.view.right - 9.0f * scale_, y,
+                            layout.view.right - 5.0f * scale_, y + thumb_h);
+    bar.hit = D2D1::RectF((std::max)(layout.view.left, layout.view.right - 14.0f * scale_),
+                          track_top, layout.view.right, track_top + track_h);
+    return bar;
+}
+
+bool QuickPreviewWindow::OverPagesScrollbar(float x, float y) const {
+    const auto bar = PagesScrollbar();
+    return bar.maximum > 0.0f && x >= bar.hit.left && x < bar.hit.right &&
+        y >= bar.hit.top && y < bar.hit.bottom;
+}
+
+bool QuickPreviewWindow::PagesScrollbarMouseDown(float x, float y) {
+    pages_scrollbar_drag_ = false;
+    const auto bar = PagesScrollbar();
+    if (bar.maximum <= 0.0f || x < bar.hit.left || x >= bar.hit.right ||
+        y < bar.hit.top || y >= bar.hit.bottom)
+        return false;
+    if (y >= bar.thumb.top && y < bar.thumb.bottom && bar.travel > 0.0f) {
+        pages_scrollbar_drag_ = true;
+        pages_scrollbar_press_ = y;
+        pages_scrollbar_start_ = pages_scroll_;
+        SetCapture(hwnd_);
+    } else {
+        const PagesLayout layout = ComputePagesLayout();
+        const float view_h = layout.view.bottom - layout.view.top;
+        pages_scroll_ += (y < bar.thumb.top ? -1.0f : 1.0f) * view_h * 0.9f;
+        ClampPages(layout);
+    }
+    return true;
+}
+
+bool QuickPreviewWindow::PagesScrollbarMouseMove(float y) {
+    if (!pages_scrollbar_drag_) return false;
+    const auto bar = PagesScrollbar();
+    if (bar.travel <= 0.0f) { pages_scrollbar_drag_ = false; return false; }
+    const float before = pages_scroll_;
+    pages_scroll_ = pages_scrollbar_start_ + (y - pages_scrollbar_press_) * bar.maximum / bar.travel;
+    ClampPages(ComputePagesLayout());
+    return pages_scroll_ != before;
+}
+
+bool QuickPreviewWindow::PagesScrollbarHover(float x, float y) {
+    const bool over = native_kind_ == NativeKind::Pages && OverPagesScrollbar(x, y);
+    if (over == pages_scrollbar_hover_) return false;
+    pages_scrollbar_hover_ = over;
+    return true;
+}
+
 bool QuickPreviewWindow::PagesMouseDown(POINT client) {
     if (native_kind_ != NativeKind::Pages) return false;
+    if (PagesScrollbarMouseDown(static_cast<float>(client.x), static_cast<float>(client.y))) {
+        panning_ = false;
+        return true;
+    }
     const PagesLayout layout = ComputePagesLayout();
     if (layout.strip.right > layout.strip.left && Inside(layout.strip, client)) {
         const float pad = kStripPad * scale_;
@@ -373,22 +443,17 @@ void QuickPreviewWindow::DrawPages(ID2D1DeviceContext* dc, ID2D1SolidColorBrush*
         }
     }
 
-    // --- Scroll indicator. ---
-    const float doc_h = PagesDocHeight(layout);
-    if (doc_h > view_h + 1.0f) {
-        const float track_top = layout.view.top + 4.0f * scale_;
-        const float track_h = view_h - 8.0f * scale_;
-        const float thumb_h = (std::max)(24.0f * scale_, track_h * view_h / doc_h);
-        const float t = pages_scroll_ / (doc_h - view_h);
-        const float y = track_top + (track_h - thumb_h) * t;
-        const float w = 4.0f * scale_;
+    // --- Scroll indicator (draggable thumb). ---
+    const auto scrollbar = PagesScrollbar();
+    if (scrollbar.maximum > 0.0f) {
+        const float alpha = pages_scrollbar_drag_ ? 0.50f
+                          : pages_scrollbar_hover_ ? 0.42f
+                          : (dark_ ? 0.35f : 0.30f);
         ComPtr<ID2D1SolidColorBrush> bar;
-        dc->CreateSolidColorBrush(dark_ ? D2D1::ColorF(0xFFFFFF, 0.35f)
-                                        : D2D1::ColorF(0x000000, 0.30f), &bar);
+        dc->CreateSolidColorBrush(dark_ ? D2D1::ColorF(0xFFFFFF, alpha)
+                                        : D2D1::ColorF(0x000000, alpha), &bar);
         if (bar.get())
-            dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(
-                layout.view.right - w - 3.0f * scale_, y, layout.view.right - 3.0f * scale_,
-                y + thumb_h), w * 0.5f, w * 0.5f), bar.get());
+            dc->FillRoundedRectangle(D2D1::RoundedRect(scrollbar.thumb, 2.0f * scale_, 2.0f * scale_), bar.get());
     }
 
     // --- Page and zoom live in the footer. ---

@@ -20,7 +20,8 @@ size_t ColumnStripWidthSlot(int column_id, size_t ancestor_count) noexcept {
 ColumnStripLayout LayoutColumnStrip(const D2D1_RECT_F& pane_bounds, float top,
                                     size_t ancestor_count, bool child_slot,
                                     const std::vector<float>& widths_dip,
-                                    float scale, float scroll_from_right_dip) noexcept {
+                                    float scale, float scroll_from_right_dip,
+                                    std::optional<float> ancestor_viewport_limit_dip) noexcept {
     ColumnStripLayout out;
     out.body = pane_bounds;
     const float unit = std::max(0.5f, scale);
@@ -41,7 +42,12 @@ ColumnStripLayout LayoutColumnStrip(const D2D1_RECT_F& pane_bounds, float top,
         if (body_w + w <= width) trail_w = w;
         else if (width - body_w >= min_w) trail_w = width - body_w;
     }
-    const float viewport_w = std::max(0.0f, std::min(content, width - body_w - trail_w));
+    float viewport_w = std::max(0.0f, std::min(content, width - body_w - trail_w));
+    if (ancestor_viewport_limit_dip) {
+        // Keep a usable strip for ancestors that were clipped at the left edge.
+        const float limit = std::max(kColumnStripMinAnchorViewportDip, *ancestor_viewport_limit_dip);
+        viewport_w = std::min(viewport_w, limit * unit);
+    }
 
     out.active = true;
     const float bottom = std::max(top, pane_bounds.bottom);

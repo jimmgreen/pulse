@@ -119,11 +119,12 @@ bool WriteClipboardText(const std::wstring& text) {
     return true;
 }
 
-bool ReadClipboard(ClipboardData& out) {
-    out = {};
-    if (!IsClipboardFormatAvailable(CF_HDROP)) return false;
-    if (!OpenClipboardWithRetry(nullptr)) return false;
+namespace {
+struct CloseClipboardOnExit {
+    ~CloseClipboardOnExit() { CloseClipboard(); }
+};
 
+bool ReadOpenClipboard(ClipboardData& out) {
     bool ok = false;
     if (HANDLE h = GetClipboardData(CF_HDROP)) {
         if (HDROP hdrop = static_cast<HDROP>(GlobalLock(h))) {
@@ -147,9 +148,25 @@ bool ReadClipboard(ClipboardData& out) {
             GlobalUnlock(h);
         }
     }
-    CloseClipboard();
     if (ok) out.sequence = GetClipboardSequenceNumber();
     return ok;
+}
+} // namespace
+
+bool ReadClipboard(ClipboardData& out) {
+    out = {};
+    if (!IsClipboardFormatAvailable(CF_HDROP) || !OpenClipboardWithRetry(nullptr)) return false;
+    const CloseClipboardOnExit close;
+    return ReadOpenClipboard(out);
+}
+
+ClipboardFileRead TryReadClipboardFiles(ClipboardData& out, uint32_t expected_sequence) {
+    out = {};
+    if (!OpenClipboard(nullptr)) return ClipboardFileRead::Busy;
+    const CloseClipboardOnExit close;
+    if (GetClipboardSequenceNumber() != expected_sequence) return ClipboardFileRead::Changed;
+    if (!IsClipboardFormatAvailable(CF_HDROP) || !ReadOpenClipboard(out)) return ClipboardFileRead::Missing;
+    return ClipboardFileRead::Ready;
 }
 
 bool PasteShellClipboard(const std::wstring& dir) {

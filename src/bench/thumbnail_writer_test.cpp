@@ -117,6 +117,43 @@ int wmain(int argc, wchar_t** argv) {
     const bool recovered = failed_write_finished && store.FlushForTesting(10000) && store.Load(key, read);
     std::printf("[%s] writer recovers after cache directory write failure\n", recovered ? "PASS" : "FAIL");
     ok = ok && recovered;
+    {
+        const std::wstring fast_path = root.wstring() + L"\\small.png";
+        const std::wstring heic_path = root.wstring() + L"\\photo.heic";
+        const pulse::ui::ThumbnailStoreKey small_fast{fast_path, 0, 128, 123, 1024, false};
+        const pulse::ui::ThumbnailStoreKey large_fast{fast_path, 0, 128, 123, 512ull << 10, false};
+        const pulse::ui::ThumbnailStoreKey always_heic{heic_path, 0, 128, 123, 1024, false};
+        const bool policy_ok = !store.ShouldSave(small_fast, 5) &&
+            store.ShouldSave(small_fast, 8) &&
+            store.ShouldSave(large_fast, 2) &&
+            store.ShouldSave(always_heic, 1);
+        std::printf("[%s] ShouldSave gates fast small decodes while keeping large and slow formats\n",
+                    policy_ok ? "PASS" : "FAIL");
+        ok = ok && policy_ok;
+
+        pulse::ui::StoredThumbnail moved = image;
+        store.SaveMoved(large_fast, 2, std::move(moved));
+        bool moved_flushed = store.FlushForTesting(10000);
+        std::wstring entry_file;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+            if (entry.is_regular_file() && entry.path().extension() == L".pt") {
+                if (entry.path().filename() != std::filesystem::path(
+                        pulse::ui::ThumbnailWriterTest::LegacyEntryPath(store, key)).filename()) {
+                    entry_file = entry.path().wstring();
+                }
+            }
+        }
+        bool ro_hit = false;
+        if (moved_flushed && !entry_file.empty()) {
+            SetFileAttributesW(entry_file.c_str(), FILE_ATTRIBUTE_READONLY);
+            pulse::ui::StoredThumbnail hit;
+            ro_hit = store.Load(large_fast, hit) && hit.width == 32;
+            SetFileAttributesW(entry_file.c_str(), FILE_ATTRIBUTE_NORMAL);
+        }
+        std::printf("[%s] SaveMoved round-trips and fresh Load stays pure read-only\n",
+                    ro_hit ? "PASS" : "FAIL");
+        ok = ok && ro_hit;
+    }
     store.Clear(); std::filesystem::remove_all(root);
     CoUninitialize();
     return ok ? 0 : 1;

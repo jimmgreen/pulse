@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <shlwapi.h>
+#pragma comment(lib, "shlwapi.lib")
 
 namespace pulse::ui {
 namespace {
@@ -52,12 +54,24 @@ bool PickerMatchesFilter(std::wstring_view name, PickerMode mode, const PickerOp
     if (mode == PickerMode::Image && !IsPickerImageName(name)) return false;
     if (options.filters.empty()) return true;
     const auto& patterns = options.filters[std::min(options.filter_index, options.filters.size() - 1)].pattern;
-    auto match = [](std::wstring_view text, std::wstring_view pattern) {
+    auto match = [&](std::wstring_view text, std::wstring_view pattern) {
         if (pattern == L"*.*") return true;
+        if (mode == PickerMode::File && options.advisory_file_filters && pattern.find(L'?') != pattern.npos) {
+            // A terminal ? can also match the end of a leaf. Use the same Shell
+            // matcher as the native dialog; S_FALSE means no match, not success.
+            return PathMatchSpecExW(std::wstring(text).c_str(), std::wstring(pattern).c_str(), PMSF_NORMAL) == S_OK;
+        }
+        // Native project-name filters fold ASCII, but RÉSUMÉ-*.csv and
+        // résumé-*.csv produced different rows in the same system dialog.
+        const bool project_name = !pattern.starts_with(L"*.");
+        auto fold = [project_name](wchar_t c) -> wint_t {
+            if (!project_name) return std::towlower(c);
+            return c >= L'A' && c <= L'Z' ? c + (L'a' - L'A') : c;
+        };
         size_t t = 0, p = 0, star = std::wstring_view::npos, retry = 0;
         while (t < text.size()) {
-            if (p < pattern.size() && (pattern[p] == L'?' || std::towlower(pattern[p]) == std::towlower(text[t]))) { ++p; ++t; }
-            else if (p < pattern.size() && pattern[p] == L'*') { star = p++; retry = t; }
+            if (p < pattern.size() && pattern[p] == L'*') { star = p++; retry = t; }
+            else if (p < pattern.size() && (pattern[p] == L'?' || fold(pattern[p]) == fold(text[t]))) { ++p; ++t; }
             else if (star != std::wstring_view::npos) { p = star + 1; t = ++retry; }
             else return false;
         }

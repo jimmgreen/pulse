@@ -1,5 +1,5 @@
 #include "app_internal.h"
-#include "extension_store_seven_zip.h"
+#include "seven_zip_store_probe.h"
 #include "extensions/native/command_contributions.h"
 #include "extensions/native/staging_adapter_host.h"
 #include "../common/json_value.h"
@@ -80,10 +80,10 @@ int RunExtensionStoreOperationsTest(pulse::AppState& s, const wchar_t* directory
     const auto fixture=root/(L"fixture-"+std::to_wstring(GetTickCount64()));
     fs::create_directories(fixture);
     std::ofstream(fixture/L"payload.txt",std::ios::binary)<<"abc";
-    SetSevenZipState(s,"format","1"); SetSevenZipState(s,"level","1");
-    SetSevenZipState(s,"mode","1"); SetSevenZipState(s,"location","0");
-    SetSevenZipState(s,"placement0","true");
-    for(int i=0;i<6;++i)SetSevenZipState(s,"cmd"+std::to_string(i),"true");
+    pulse::store_probe::SetSevenZipState(s,"format","1"); pulse::store_probe::SetSevenZipState(s,"level","1");
+    pulse::store_probe::SetSevenZipState(s,"mode","1"); pulse::store_probe::SetSevenZipState(s,"location","0");
+    pulse::store_probe::SetSevenZipState(s,"placement0","true");
+    for(int i=0;i<6;++i)pulse::store_probe::SetSevenZipState(s,"cmd"+std::to_string(i),"true");
     CloseSettings(s);
     NavigateTo(s,fixture.wstring());
     const bool loaded = Await([&] {
@@ -101,9 +101,13 @@ int RunExtensionStoreOperationsTest(pulse::AppState& s, const wchar_t* directory
         auto* tab=ActiveTab(s);bool selected=false;
         for(size_t i=0;tab && i<tab->EntryCount();++i)if(tab->EntryAt(i).name==file){tab->SelectOnly(static_cast<int>(i));selected=true;break;}
         if(!check(selected,"select actual fixture file"))return uint64_t{0};
-        auto rows=extensions::native::ContextMenuCommandRows(s);
+        // Settings commits re-register the plugin's commands asynchronously; wait for this one.
         ui::FluentMenuItem chosen;
-        for(const auto& row:rows)if(extensions::native::CommandIdentity(s,row.command)==id)chosen=row;
+        Await([&]{
+            for(const auto& row:extensions::native::ContextMenuCommandRows(s))
+                if(extensions::native::CommandIdentity(s,row.command)==id){chosen=row;return true;}
+            return false;
+        });
         log<<"command="<<json::Utf8(id)<<" token="<<chosen.command<<std::endl;
         if(!check(chosen.command!=0 && EnsureMenu(s),"real plugin command is registered"))return uint64_t{0};
         // Keep the production row and click it through the real popup loop.

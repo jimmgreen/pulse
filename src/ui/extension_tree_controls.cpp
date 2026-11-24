@@ -1,6 +1,8 @@
+#include "../app/extensions/ui_continuous_slider.h"
 #include "extension_tree_controls.h"
 #include "edit_host.h"
 #include "extension_tree_extra_controls.h"
+#include "store_icons.h"
 #include <algorithm>
 #include <charconv>
 #include <commctrl.h>
@@ -59,9 +61,28 @@ struct InfoSpec {
     }
 };
 } // namespace
+IDWriteTextFormat *ExtensionTextFormat(const UiNode &node, fluent::Painter &painter) {
+    using Ramp = fluent::Painter::TextRamp;
+    const auto &role = node.text_role;
+    return painter.RampFormat(role == "caption"      ? Ramp::Caption
+                              : role == "section"    ? Ramp::Section
+                              : role == "bodyStrong" ? Ramp::BodyStrong
+                              : role == "subtitle"   ? Ramp::Subtitle
+                              : role == "title"      ? Ramp::Title
+                              : role == "code"       ? Ramp::Code
+                                                     : Ramp::Body);
+}
+D2D1_COLOR_F ExtensionTextColor(const UiNode &node, const Theme &theme, bool dark) {
+    D2D1_COLOR_F color = theme.text;
+    if (node.text_tone != "default" && !ResolveExtensionColorToken(node.text_tone, theme, dark, color))
+        color = theme.text;
+    return color;
+}
 bool IsExtensionBooleanControl(const UiNode &node) {
     return node.type == UiNodeType::Checkbox || node.type == UiNodeType::Switch || node.type == UiNodeType::Radio ||
            node.type == UiNodeType::SidebarSection || node.type == UiNodeType::StagingTray ||
+           (node.type == UiNodeType::OptionCard && !node.state.empty()) ||
+           (node.type == UiNodeType::Tag && !node.state.empty()) ||
            (node.type == UiNodeType::Button &&
             (node.button_kind == "toggle" || node.button_kind == "transparentToggle"));
 }
@@ -76,10 +97,10 @@ float MeasureExtensionControl(const UiNode &node, std::wstring_view text, float 
         height = std::max(height, 240 * scale);
     if (node.type == UiNodeType::Text && !node.min_height)
         height = 0;  // text takes the height of its lines; a control's 32 DIP floor only padded it
+    if (node.type == UiNodeType::Divider && !node.min_height)
+        height = scale;  // a hairline; the container's gap spaces it, as between settings rows
     if (node.type == UiNodeType::Text)
-        height = std::max(height, node.text_role == "caption"   ? painter.MeasureWrappedCaptionHeight(text, width)
-                                  : node.text_role == "section" ? painter.MeasureWrappedSectionHeight(text, width)
-                                                                : painter.MeasureWrappedBodyHeight(text, width));
+        height = std::max(height, painter.MeasureWrappedHeight(ExtensionTextFormat(node, painter), text, width));
     if (node.type == UiNodeType::List || IsExtensionDataControl(node))
         height = std::max(height, (IsExtensionDataControl(node) ? 240 : 120) * scale);
     if (node.type == UiNodeType::InfoBar) {
@@ -90,7 +111,7 @@ float MeasureExtensionControl(const UiNode &node, std::wstring_view text, float 
         height = std::max(height, 180 * scale);
     if (node.type == UiNodeType::Slider)
         height = std::max(height, fluent::StepSliderHeight(scale) +
-                                      (node.options.empty() ? 0.0f : painter.MeasureWrappedCaptionHeight(L"0", width)));
+                                      (extensions::ContinuousSlider(node) ? 24.0f * scale : node.options.empty() ? 0.0f : painter.MeasureWrappedCaptionHeight(L"0", width)));
     return height;
 }
 int ExtensionControlPart(const UiNode &node, D2D1_RECT_F bounds, float x, float y, float scale,
@@ -205,6 +226,20 @@ bool DrawExtensionControl(const UiNode &node, const ExtensionControlVisual &valu
         fluent::StepSliderSpec spec;
         spec.bounds = bounds;
         spec.state = state;
+        if (extensions::ContinuousSlider(node)) {
+            wchar_t raw[96]{}; GetWindowTextW(value.window, raw, 96);
+            std::string number; for (const auto ch : std::wstring_view(raw)) number.push_back(static_cast<char>(ch));
+            double minimum=0,maximum=1,current=0; extensions::SliderRange(node,minimum,maximum);
+            if (!extensions::SliderValue(node,number,current)) current=minimum;
+            spec.continuous=true; spec.stops=2;
+            spec.position=static_cast<float>((current-minimum)/(maximum-minimum));
+            spec.bounds.top+=24*scale;
+            painter.DrawText(Wide(node.text), {bounds.left,bounds.top,bounds.right-104*scale,bounds.top+22*scale}, compositor.TextFormat(), theme.text);
+            wchar_t caption[96]{}; swprintf_s(caption,L"%.2f",current);
+            std::wstring exact(caption); if(!node.helper.empty())exact+=L" "+Wide(node.helper);
+            painter.DrawText(exact,{bounds.right-104*scale,bounds.top,bounds.right,bounds.top+22*scale},compositor.SmallFormat(),theme.text,fluent::HorizontalAlignment::Right);
+            painter.DrawStepSlider(spec); break;
+        }
         spec.stops = node.stops;
         spec.position = static_cast<float>(SendMessageW(value.window, TBM_GETPOS, 0, 0));
         // Options name the stops: a caption under each one, the current stop in the text color.
@@ -239,6 +274,10 @@ bool DrawExtensionControl(const UiNode &node, const ExtensionControlVisual &valu
             auto caption = Wide(node.type == UiNodeType::Tabs ? node.children[index].text : node.options[index]);
             auto part = state;
             part.selected = selected == static_cast<int>(index);
+            if (node.type == UiNodeType::Segmented) {
+                part.focused = state.focused && part.selected;
+                part.keyboard_focus = state.keyboard_focus && part.selected;
+            }
             part.hovered = state.hovered && value.hover_part == static_cast<int>(index);
             part.pressed = state.pressed && value.pressed_part == static_cast<int>(index);
             if (node.type == UiNodeType::Tabs) {
@@ -255,12 +294,18 @@ bool DrawExtensionControl(const UiNode &node, const ExtensionControlVisual &valu
                 spec.bounds = cell;
                 spec.text = caption;
                 spec.state = part;
+                spec.state.keyboard_focus = false;
                 spec.shared_track = true;
                 spec.position = count == 1           ? fluent::SegmentPosition::Single
                                 : index == 0         ? fluent::SegmentPosition::First
                                 : index + 1 == count ? fluent::SegmentPosition::Last
                                                      : fluent::SegmentPosition::Middle;
                 painter.DrawSegmentedItem(spec);
+                // Keep the ring inside this plate, not across its neighbour's
+                // edge (the generic focus ring expands its supplied bounds).
+                if (part.keyboard_focus)
+                    painter.DrawFocusRing(D2D1::RectF(cell.left + 3 * scale, cell.top + 3 * scale,
+                        cell.right - 3 * scale, cell.bottom - 3 * scale), 6 * scale);
             }
         }
         break;
@@ -316,17 +361,56 @@ bool DrawExtensionControl(const UiNode &node, const ExtensionControlVisual &valu
         break;
     }
     case UiNodeType::Tag: {
-        fluent::TagSpec spec;
-        spec.bounds = bounds;
-        spec.text = label;
-        spec.color = theme.accent;
-        spec.bordered = node.bordered;
+        D2D1_COLOR_F chip_color = theme.accent;
         if (node.color.size() == 7) {
             unsigned color = 0;
             auto result = std::from_chars(node.color.data() + 1, node.color.data() + 7, color, 16);
             if (result.ec == std::errc{})
-                spec.color = HexColor(color);
+                chip_color = HexColor(color);
         }
+        if (!node.state.empty() || !node.command.empty()) {
+            const bool active = state.checked || node.selected;
+            const float radius = std::min(16.0f * scale, (bounds.bottom - bounds.top) * 0.5f);
+            painter.FillRoundedRect(bounds, radius,
+                                    active ? WithAlpha(chip_color, value.dark ? 0.24f : 0.14f) : theme.surface_card);
+            if (state.enabled) {
+                if (state.pressed)
+                    painter.FillRoundedRect(bounds, radius, theme.fill_pressed);
+                else if (state.hovered)
+                    painter.FillRoundedRect(bounds, radius, theme.fill_hover);
+            }
+            if (active) {
+                painter.StrokeRoundedRect(bounds, radius, chip_color, 1.5f * scale);
+            } else if (node.bordered) {
+                painter.StrokeRoundedRect(bounds, radius, theme.stroke_card);
+            }
+            const D2D1_COLOR_F fg = !state.enabled ? theme.text_disabled
+                                  : active         ? theme.text
+                                                   : theme.text;
+            D2D1_RECT_F inner{bounds.left + 10.0f * scale, bounds.top + 2.0f * scale,
+                              bounds.right - 10.0f * scale, bounds.bottom - 2.0f * scale};
+            if (!glyph.empty() && dc) {
+                const float icon_side = 14.0f * scale;
+                const float iy = (inner.top + inner.bottom - icon_side) * 0.5f;
+                const D2D1_RECT_F icon_rc{inner.left, iy, inner.left + icon_side, iy + icon_side};
+                if (!DrawExtensionIconGlyph(dc, glyph, icon_rc, active ? chip_color : fg, &theme, 1.35f * scale)) {
+                    painter.DrawGlyph(glyph, icon_rc, active ? chip_color : fg);
+                }
+                inner.left += icon_side + 5.0f * scale;
+            }
+            if (inner.right > inner.left) {
+                painter.DrawText(label, inner, compositor.SmallFormat(), fg, fluent::HorizontalAlignment::Center);
+            }
+            if (state.keyboard_focus) {
+                painter.DrawFocusRing(bounds, radius);
+            }
+            break;
+        }
+        fluent::TagSpec spec;
+        spec.bounds = bounds;
+        spec.text = label;
+        spec.color = chip_color;
+        spec.bordered = node.bordered;
         painter.DrawTag(spec);
         break;
     }
@@ -376,32 +460,35 @@ bool DrawExtensionControl(const UiNode &node, const ExtensionControlVisual &valu
                                  bounds.top + (bounds.bottom - bounds.top) / 2 + scale},
                                 0, theme.stroke_divider);
         break;
-    case UiNodeType::Text:
-        if (node.alignment != "left") {
+    case UiNodeType::Text: {
+        const auto color = ExtensionTextColor(node, theme, value.dark);
+        const bool legacy = node.text_role == "body" || node.text_role == "caption" || node.text_role == "section";
+        if (node.alignment != "left" && legacy) {
             painter.DrawText(text, bounds,
                              node.text_role == "caption"   ? compositor.SmallFormat()
                              : node.text_role == "section" ? compositor.HeaderFormat()
                                                            : compositor.TextFormat(),
-                             theme.text,
+                             color,
                              node.alignment == "center" ? fluent::HorizontalAlignment::Center
                                                         : fluent::HorizontalAlignment::Right);
         } else {
             // Text shorter than its control-height box is centred in it, so a label lines up with
             // the field beside it in a grid row.
             const float width = bounds.right - bounds.left;
-            const float measured = node.text_role == "caption"   ? painter.MeasureWrappedCaptionHeight(text, width)
-                                   : node.text_role == "section" ? painter.MeasureWrappedSectionHeight(text, width)
-                                                                 : painter.MeasureWrappedBodyHeight(text, width);
+            auto *format = ExtensionTextFormat(node, painter);
+            const float measured = painter.MeasureWrappedHeight(format, text, width);
             const D2D1_POINT_2F origin{bounds.left,
                                        bounds.top + std::max(0.0f, (bounds.bottom - bounds.top - measured) / 2)};
-            if (node.text_role == "caption")
-                painter.DrawWrappedCaption(text, origin, width, theme.text);
-            else if (node.text_role == "section")
-                painter.DrawWrappedSection(text, origin, width, theme.text);
-            else
-                painter.DrawWrappedBody(text, origin, width, theme.text);
+            if (node.alignment != "left") {
+                painter.DrawText(text, {bounds.left, origin.y, bounds.right, origin.y + measured}, format, color,
+                                 node.alignment == "center" ? fluent::HorizontalAlignment::Center
+                                                            : fluent::HorizontalAlignment::Right);
+            } else {
+                painter.DrawWrapped(format, text, origin, width, color);
+            }
         }
         break;
+    }
     case UiNodeType::SplitPane: {
         float ratio = static_cast<float>(SendMessageW(value.window, TBM_GETPOS, 0, 0)) / 100;
         bool horizontal = node.orientation == "horizontal";

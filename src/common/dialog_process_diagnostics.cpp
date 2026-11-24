@@ -36,9 +36,11 @@ unsigned Architecture(HANDLE process) {
     return info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ? (wow ? 32u : 64u) : 0u;
 }
 void Component(ProcessSnapshot& result, const wchar_t* name) {
-    if (!_wcsicmp(name, L"PulseDialogAuto64.dll") || !_wcsicmp(name, L"PulseDialogAuto32.dll")) result.loaded_components[0] = true;
+    if (!_wcsicmp(name, L"PulseDialogAuto64.dll") || !_wcsicmp(name, L"PulseDialogAuto32.dll") ||
+        !_wcsicmp(name, L"PulseDialogStub64.dll") || !_wcsicmp(name, L"PulseDialogStub32.dll")) result.loaded_components[0] = true;
     if (!_wcsicmp(name, L"PulseFileDialogRuntime64.dll") || !_wcsicmp(name, L"PulseFileDialogRuntime32.dll") ||
-        !_wcsicmp(name, L"PulseFileDialogRuntimeUiProof64R8.dll") || !_wcsicmp(name, L"PulseFileDialogRuntimeUiProof32R8.dll")) result.loaded_components[1] = true;
+        !_wcsicmp(name, L"PulseFileDialogRuntimeUiProof64R8.dll") || !_wcsicmp(name, L"PulseFileDialogRuntimeUiProof32R8.dll") ||
+        !_wcsicmp(name, L"PulseDialogCore64.dll") || !_wcsicmp(name, L"PulseDialogCore32.dll")) result.loaded_components[1] = true;
     if (!_wcsicmp(name, L"PulsePickerUiProof.dll")) result.loaded_components[2] = true;
 }
 struct Windows {

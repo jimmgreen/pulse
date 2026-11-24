@@ -1,11 +1,13 @@
 #include "dialog_auto_transaction.h"
+#include "dialog_registration_mutex.h"
+#include "runtime_log.h"
 #include <new>
 #include <string_view>
 
 namespace pulse::dialog_auto {
 namespace {
 struct MutationLock {
-    HANDLE handle = CreateMutexW(nullptr, FALSE, L"Global\\Pulse.DialogAuto.Registration.v1");
+    HANDLE handle = CreateRegistrationMutex();
     DWORD error = ERROR_SUCCESS;
     bool acquired = false, abandoned = false;
     MutationLock() noexcept {
@@ -34,9 +36,7 @@ bool Reserved(std::wstring_view component) noexcept {
             (CompareStringOrdinal(component.data(), 3, L"COM", 3, TRUE) == CSTR_EQUAL ||
              CompareStringOrdinal(component.data(), 3, L"LPT", 3, TRUE) == CSTR_EQUAL));
 }
-DWORD ValidateTarget(const RegistrationTarget& target) {
-    if (target.architecture != Architecture::X64 && target.architecture != Architecture::X86) return ERROR_INVALID_PARAMETER;
-    const auto& path = target.dll_path;
+DWORD ValidatePath(Architecture architecture, const std::wstring& path) {
     // Match the native registration API's canonical, local DOS path contract.
     if (path.size() < 4 || path.size() >= 32768 || path[1] != L':' || path[2] != L'\\' ||
         !((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')) ||
@@ -52,13 +52,20 @@ DWORD ValidateTarget(const RegistrationTarget& target) {
         begin = n + 1;
     }
     const auto leaf = path.substr(path.find_last_of(L'\\') + 1);
-    if (!SamePath(leaf, DllNameFor(target.architecture))) return ERROR_INVALID_NAME;
+    if (!IsAllowedDialogDllName(architecture, leaf.c_str())) return ERROR_INVALID_NAME;
     std::wstring full(32768, L'\0');
     const DWORD length = GetFullPathNameW(path.c_str(), static_cast<DWORD>(full.size()), full.data(), nullptr);
     if (!length) return GetLastError();
     if (length >= full.size()) return ERROR_FILENAME_EXCED_RANGE;
     full.resize(length);
     return SamePath(path, full) ? ERROR_SUCCESS : ERROR_INVALID_NAME;
+}
+DWORD ValidateTarget(const RegistrationTarget& target, bool enable) {
+    if (target.architecture != Architecture::X64 && target.architecture != Architecture::X86) return ERROR_INVALID_PARAMETER;
+    if (!enable && !target.expected_old_dll_path.empty()) return ERROR_INVALID_PARAMETER;
+    if (const DWORD error = ValidatePath(target.architecture, target.dll_path)) return error;
+    if (!target.expected_old_dll_path.empty()) return ValidatePath(target.architecture, target.expected_old_dll_path);
+    return ERROR_SUCCESS;
 }
 DWORD Inspect(const RegistrationApi& api, Architecture architecture, Status& result) noexcept {
     try { result = api.inspect(architecture); return result.error; }
@@ -69,6 +76,12 @@ DWORD Inspect(const RegistrationApi& api, Architecture architecture, Status& res
 DWORD Change(const std::function<DWORD(Architecture, const std::wstring&)>& call,
     Architecture architecture, const std::wstring& path) noexcept {
     try { return call(architecture, path); }
+    catch (const std::bad_alloc&) { return ERROR_NOT_ENOUGH_MEMORY; }
+    catch (...) { return ERROR_UNHANDLED_EXCEPTION; }
+}
+DWORD ChangeRebind(const std::function<DWORD(Architecture, const std::wstring&, const std::wstring&)>& call,
+    Architecture architecture, const std::wstring& old_path, const std::wstring& new_path) noexcept {
+    try { return call(architecture, old_path, new_path); }
     catch (const std::bad_alloc&) { return ERROR_NOT_ENOUGH_MEMORY; }
     catch (...) { return ERROR_UNHANDLED_EXCEPTION; }
 }
@@ -95,7 +108,10 @@ void Rollback(RegistrationChangeResult& result, const RegistrationApi& api) noex
             // A same-path partial write may be marked conflicting. The native
             // helpers still enforce subtree ownership before modifying it.
             item.rollback_attempted = true; ++result.rollback_attempted_count;
-            const auto& bound_path = item.before.dll_path.empty() ? item.target.dll_path : item.before.dll_path;
+            const auto bound_path = item.before.enabled
+                ? (item.before.dll_path.empty() ? item.target.dll_path : item.before.dll_path)
+                : (!current.dll_path.empty() ? current.dll_path
+                    : (item.before.dll_path.empty() ? item.target.dll_path : item.before.dll_path));
             error = Change(item.before.enabled ? api.enable : api.disable_for, item.target.architecture, bound_path);
             const DWORD observed = Inspect(api, item.target.architecture, item.after);
             if (!error) error = observed;
@@ -113,12 +129,25 @@ void Rollback(RegistrationChangeResult& result, const RegistrationApi& api) noex
 RegistrationChangeResult ExecuteRegistrationChange(const std::vector<RegistrationTarget>& targets,
     bool enable, const RegistrationApi& api) noexcept {
     RegistrationChangeResult result;
+    struct LogScope {
+        const RegistrationChangeResult& result;
+        bool enable;
+        ~LogScope() noexcept {
+            diagnostics::runtime::Event("dialog_auto_transaction",
+                {{"enable", enable ? 1ULL : 0ULL},
+                 {"targets", static_cast<uint64_t>(result.targets.size())},
+                 {"attempted", static_cast<uint64_t>(result.attempted_count)},
+                 {"error", result.error},
+                 {"rollback_error", result.rollback_error}},
+                result.error ? diagnostics::runtime::Level::Warning : diagnostics::runtime::Level::Info);
+        }
+    } log_scope{result, enable};
     MutationLock lock;
     result.abandoned_lock = lock.abandoned;
     if (lock.error) { result.error = lock.error; return result; }
     RegistrationApi resolved;
     try {
-        const bool any = api.inspect || api.enable || api.enable_if_unclaimed || api.disable_for;
+        const bool any = api.inspect || api.enable || api.enable_if_unclaimed || api.disable_for || api.enable_if_disabled_for;
         if (any && !(api.inspect && api.enable && api.enable_if_unclaimed && api.disable_for)) {
             result.error = ERROR_INVALID_PARAMETER; return result;
         }
@@ -128,11 +157,14 @@ RegistrationChangeResult ExecuteRegistrationChange(const std::vector<Registratio
             resolved.enable = [](Architecture architecture, const std::wstring& path) { return dialog_auto::Enable(architecture, path); };
             resolved.enable_if_unclaimed = [](Architecture architecture, const std::wstring& path) { return dialog_auto::EnableIfUnclaimed(architecture, path); };
             resolved.disable_for = [](Architecture architecture, const std::wstring& path) { return dialog_auto::DisableFor(architecture, path); };
+            resolved.enable_if_disabled_for = [](Architecture architecture, const std::wstring& old_path, const std::wstring& new_path) {
+                return dialog_auto::EnableIfDisabledFor(architecture, old_path, new_path);
+            };
         }
         if (targets.empty() || targets.size() > 2) { result.error = ERROR_INVALID_PARAMETER; return result; }
         result.targets.reserve(targets.size());
         for (const auto& target : targets) {
-            const DWORD error = ValidateTarget(target);
+            const DWORD error = ValidateTarget(target, enable);
             if (error) { result.error = error; return result; }
             for (const auto& item : result.targets) if (item.target.architecture == target.architecture) {
                 result.error = ERROR_INVALID_PARAMETER; return result;
@@ -144,8 +176,12 @@ RegistrationChangeResult ExecuteRegistrationChange(const std::vector<Registratio
             DWORD error = Inspect(resolved, item.target.architecture, item.before);
             if (!error && item.before.conflict) error = ERROR_ALREADY_EXISTS;
             if (!error && item.before.enabled && item.before.dll_path.empty()) error = ERROR_INVALID_DATA;
-            if (!error && !item.before.dll_path.empty() && ValidateTarget({item.target.architecture, item.before.dll_path})) error = ERROR_INVALID_DATA;
-            if (!error && !item.before.dll_path.empty() && !SamePath(item.before.dll_path, item.target.dll_path)) error = ERROR_ALREADY_EXISTS;
+            if (!error && !item.before.dll_path.empty() && ValidatePath(item.target.architecture, item.before.dll_path)) error = ERROR_INVALID_DATA;
+            const bool matching_current = !item.before.dll_path.empty() && SamePath(item.before.dll_path, item.target.dll_path);
+            const bool matching_expected_old = enable && !item.before.enabled && !item.target.expected_old_dll_path.empty() &&
+                SamePath(item.before.dll_path, item.target.expected_old_dll_path);
+            if (!error && !item.before.dll_path.empty() && !matching_current && !matching_expected_old) error = ERROR_ALREADY_EXISTS;
+            if (!error && matching_expected_old && !matching_current && !resolved.enable_if_disabled_for) error = ERROR_INVALID_PARAMETER;
             if (!error && !enable && item.before.dll_path.empty()) error = ERROR_NOT_FOUND;
             item.error = error;
             if (error) { result.error = error; return result; }
@@ -159,8 +195,12 @@ RegistrationChangeResult ExecuteRegistrationChange(const std::vector<Registratio
             if (!error && enable && item.before.enabled) continue;
             if (!error) {
                 item.attempted = true; ++result.attempted_count;
-                const auto& path = item.before.dll_path.empty() ? item.target.dll_path : item.before.dll_path;
-                error = Change(enable ? resolved.enable_if_unclaimed : resolved.disable_for, item.target.architecture, path);
+                if (enable && !item.before.dll_path.empty() && !SamePath(item.before.dll_path, item.target.dll_path)) {
+                    error = ChangeRebind(resolved.enable_if_disabled_for, item.target.architecture, item.before.dll_path, item.target.dll_path);
+                } else {
+                    const auto& path = item.before.dll_path.empty() ? item.target.dll_path : item.before.dll_path;
+                    error = Change(enable ? resolved.enable_if_unclaimed : resolved.disable_for, item.target.architecture, path);
+                }
                 const DWORD observed = Inspect(resolved, item.target.architecture, item.after);
                 if (!error) error = observed;
                 if (!error && (item.after.conflict || !AllowedPath(item, item.after))) error = ERROR_REVISION_MISMATCH;

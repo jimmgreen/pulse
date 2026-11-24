@@ -533,6 +533,54 @@ int wmain(int argc, wchar_t** argv) {
             }
             if (scale == 1.5f) {
                 const wchar_t* names[] = {L"light", L"dark", L"hc"};
+                // Overflowing open-folder strip: mouse-wheel / chevron horizontal scrolling.
+                for (int t = 0; t < 2; ++t) {
+                    const int sw = static_cast<int>(900.0f * scale), sh = static_cast<int>(300.0f * scale);
+                    compositor.Resize(sw, sh);
+                    FolderPickerChrome sc = MakeChrome(PickerMode::Save);
+                    sc.strip_top = kPickerTitleDip + 46.0f;
+                    sc.strip_left = 0.0f;
+                    sc.strip_caption = L"已打开";
+                    sc.new_folder_text = L"新建文件夹";
+                    sc.open_folders.clear();
+                    for (int k = 0; k < 12; ++k) {
+                        sc.open_folders.push_back({L"项目目录-" + std::to_wstring(k + 1), L"", L"D:\\Work\\Project" + std::to_wstring(k + 1), k == 10});
+                    }
+                    const auto l0 = LayoutPickerChrome(static_cast<float>(sw), static_cast<float>(sh), sc, painter, scale);
+                    Check(l0.open_scroll_max > 100.0f && l0.open_chips.size() == 12 && l0.open_keycaps.size() == 9,
+                          "overflowing open strip computes scroll range and keeps 12 chips with 9 keycaps", scale, t);
+                    Check(l0.open_scroll_left.right > l0.open_scroll_left.left &&
+                          l0.open_scroll_right.right > l0.open_scroll_right.left &&
+                          !Overlaps(l0.open_scroll_left, l0.open_viewport) &&
+                          !Overlaps(l0.open_scroll_right, l0.open_viewport),
+                          "scroll chevron buttons flank open_viewport cleanly", scale, t);
+                    Check(HitTestPickerChrome(l0, sc, CenterX(l0.open_scroll_left), CenterY(l0.open_scroll_left)) == kPickNone &&
+                          HitTestPickerChrome(l0, sc, CenterX(l0.open_scroll_right), CenterY(l0.open_scroll_right)) == kPickOpenScrollRight,
+                          "at scroll=0 left chevron is disabled and right chevron is actionable", scale, t);
+                    sc.open_scroll = l0.open_scroll_max;
+                    const auto l1 = LayoutPickerChrome(static_cast<float>(sw), static_cast<float>(sh), sc, painter, scale);
+                    Check(HitTestPickerChrome(l1, sc, CenterX(l1.open_scroll_left), CenterY(l1.open_scroll_left)) == kPickOpenScrollLeft &&
+                          HitTestPickerChrome(l1, sc, CenterX(l1.open_scroll_right), CenterY(l1.open_scroll_right)) == kPickNone,
+                          "at scroll=max left chevron is actionable and right chevron is disabled", scale, t);
+                    Check(HitTestPickerChrome(l1, sc, CenterX(l1.open_chips[11]), CenterY(l1.open_chips[11])) == kPickOpenFolderBase + 11 &&
+                          HitTestPickerChrome(l1, sc, CenterX(l1.open_chips[0]), CenterY(l1.open_chips[0])) != kPickOpenFolderBase,
+                          "scrolled strip exposes chip 12 inside viewport and clips off-screen chip 1", scale, t);
+                    sc.open_scroll = l0.open_scroll_max * 0.55f;
+                    const auto lmid = LayoutPickerChrome(static_cast<float>(sw), static_cast<float>(sh), sc, painter, scale);
+                    const Theme stheme = MakeTheme(t == 1, HexColor(0x527D70));
+                    auto* sdc = compositor.Dc();
+                    sdc->BeginDraw();
+                    sdc->Clear(stheme.surface_sheet);
+                    painter.BeginFrame(stheme, false);
+                    DrawPickerChrome(compositor, painter, stheme, sc, lmid, false);
+                    const std::wstring strip_out = output + L"\\strip_scroll_" + names[t] + L".png";
+                    if (SUCCEEDED(sdc->EndDraw()) &&
+                        compositor.SaveSnapshot(strip_out.c_str())) {
+                        ++written;
+                    } else {
+                        ++g_failures;
+                    }
+                }
                 for (int t = 0; t < 2; ++t) {
                     const auto open = output + L"\\jump_" + names[t] + L"_recent.png";
                     if (!RenderShowcase(compositor, painter, scale, t, false, open, false, true)) ++g_failures;

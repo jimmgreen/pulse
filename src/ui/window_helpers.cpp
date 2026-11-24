@@ -1,6 +1,7 @@
 #include "../common/windows_compat.h"
 #include "../common/os_version.h"
 #include "window_helpers.h"
+#include "dialog_dpi_placement.h"
 #include "surface_capture.h"
 
 #include <algorithm>
@@ -381,7 +382,9 @@ void SuppressWindowShadow(HWND hwnd) {
     }
 }
 
-bool ApplyBackdrop(HWND hwnd, bool dark) {
+bool ApplyBackdrop(HWND hwnd, bool dark) { return ApplyBackdrop(hwnd, dark, WindowEffect::Acrylic); }
+
+bool ApplyBackdrop(HWND hwnd, bool dark, WindowEffect effect) {
     UpdateWindowTheme(hwnd, dark);
     if (DrawsOwnCorners()) {
         // Windows 10 has no system acrylic: the dialog draws the Pulse window
@@ -399,16 +402,20 @@ bool ApplyBackdrop(HWND hwnd, bool dark) {
     }
     const DWORD corner = DWMWCP_ROUND;
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
-    const bool solid = IsHighContrast() || !SystemTransparencyEnabled();
+    const bool solid = IsHighContrast() || !SystemTransparencyEnabled() || effect == WindowEffect::None;
     HRESULT result = E_FAIL;
     DWORD backdrop = DWMSBT_NONE;
     if (solid) {
         result = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop));
     } else {
-        // Acrylic like the context menus; Mica Alt / Mica where it is missing.
-        for (const DWORD type : {DWORD{DWMSBT_TRANSIENTWINDOW}, DWORD{DWMSBT_TABBEDWINDOW},
-                                 DWORD{DWMSBT_MAINWINDOW}}) {
-            backdrop = type;
+        // The requested material first; Mica Alt / Mica where it is missing.
+        const DWORD acrylic_first[] = {DWMSBT_TRANSIENTWINDOW, DWMSBT_TABBEDWINDOW, DWMSBT_MAINWINDOW};
+        const DWORD mica_alt_first[] = {DWMSBT_TABBEDWINDOW, DWMSBT_MAINWINDOW};
+        const DWORD mica_first[] = {DWMSBT_MAINWINDOW};
+        const DWORD* order = effect == WindowEffect::Mica ? mica_first : effect == WindowEffect::MicaAlt ? mica_alt_first : acrylic_first;
+        const size_t count = effect == WindowEffect::Mica ? std::size(mica_first) : effect == WindowEffect::MicaAlt ? std::size(mica_alt_first) : std::size(acrylic_first);
+        for (size_t i = 0; i < count; ++i) {
+            backdrop = order[i];
             result = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop));
             if (SUCCEEDED(result)) break;
         }
@@ -508,27 +515,59 @@ void RedirectStrayModalKey(MSG& message, HWND dialog) {
     }
 }
 
-void CenterOwnedWindow(HWND hwnd, HWND owner, int width, int height,
-                       bool clamp_to_work_area) {
+namespace {
+// The rect a dialog centres on: its owner, else the work area of `fallback`.
+RECT OwnedAnchor(HWND owner, HMONITOR fallback, RECT* work, bool* has_work) {
     RECT anchor{};
     if (!owner || !GetWindowRect(owner, &anchor)) {
         MONITORINFO monitor{ sizeof(monitor) };
-        GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor);
+        GetMonitorInfoW(fallback, &monitor);
         anchor = monitor.rcWork;
     }
-    int x = anchor.left + ((anchor.right - anchor.left) - width) / 2;
-    int y = anchor.top + ((anchor.bottom - anchor.top) - height) / 2;
-    if (clamp_to_work_area) {
-        MONITORINFO monitor{ sizeof(monitor) };
-        GetMonitorInfoW(MonitorFromRect(&anchor, MONITOR_DEFAULTTONEAREST), &monitor);
-        x = std::clamp(x, static_cast<int>(monitor.rcWork.left),
-                       (std::max)(static_cast<int>(monitor.rcWork.left),
-                                  static_cast<int>(monitor.rcWork.right) - width));
-        y = std::clamp(y, static_cast<int>(monitor.rcWork.top),
-                       (std::max)(static_cast<int>(monitor.rcWork.top),
-                                  static_cast<int>(monitor.rcWork.bottom) - height));
-    }
-    SetWindowPos(hwnd, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    MONITORINFO monitor{ sizeof(monitor) };
+    *has_work = GetMonitorInfoW(MonitorFromRect(&anchor, MONITOR_DEFAULTTONEAREST), &monitor) != FALSE;
+    *work = monitor.rcWork;
+    return anchor;
+}
+
+RECT OwnedRect(HWND owner, HMONITOR fallback, int width, int height, bool clamp_to_work_area) {
+    RECT work{};
+    bool has_work = false;
+    const RECT anchor = OwnedAnchor(owner, fallback, &work, &has_work);
+    return placement::CenteredRect(anchor, clamp_to_work_area && has_work ? &work : nullptr, width, height);
+}
+} // namespace
+
+void CenterOwnedWindow(HWND hwnd, HWND owner, int width, int height,
+                       bool clamp_to_work_area) {
+    const RECT rect = OwnedRect(owner, MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
+                                width, height, clamp_to_work_area);
+    SetWindowPos(hwnd, HWND_TOP, rect.left, rect.top, width, height, SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+}
+
+POINT OwnedWindowOrigin(HWND owner, int width, int height, bool clamp_to_work_area) {
+    // Without an owner CenterOwnedWindow falls back to the monitor the window
+    // is on, which for a window not created yet is the primary one.
+    const POINT origin_point{ 0, 0 };
+    const RECT rect = OwnedRect(owner, MonitorFromPoint(origin_point, MONITOR_DEFAULTTOPRIMARY),
+                                width, height, clamp_to_work_area);
+    return POINT{ rect.left, rect.top };
+}
+
+UINT CenterOwnedWindowDip(HWND hwnd, HWND owner, float width_dip, float height_dip,
+                          bool clamp_to_work_area) {
+    // The move can cross onto a monitor of another scale (WM_DPICHANGED runs
+    // inside SetWindowPos and may resize the window). Settle on the DPI the
+    // window ends up with and size it from DIP for exactly that DPI.
+    return placement::SettleDipSize(pulse::compat::WindowDpi(hwnd), width_dip, height_dip,
+        [&](int width, int height) { CenterOwnedWindow(hwnd, owner, width, height, clamp_to_work_area); },
+        [&] {
+            RECT placed{};
+            GetWindowRect(hwnd, &placed);
+            return placement::Placed{ pulse::compat::WindowDpi(hwnd),
+                                      static_cast<int>(placed.right - placed.left),
+                                      static_cast<int>(placed.bottom - placed.top) };
+        });
 }
 
 void BeginSurface(Compositor& compositor, fluent::Painter& painter,

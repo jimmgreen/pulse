@@ -37,9 +37,16 @@ void AppendEscaped(std::wstring& out, std::wstring_view text) {
     }
 }
 
+size_t TreePrefix(std::wstring_view s, size_t limit) {
+    if (s.size() <= limit) return s.size();
+    if (limit && s[limit - 1] >= 0xD800 && s[limit - 1] <= 0xDBFF &&
+        s[limit] >= 0xDC00 && s[limit] <= 0xDFFF) --limit;
+    return limit;
+}
+
 void Clip(std::wstring& s) {
     if (s.size() > kMaxValueChars) {
-        s.resize(kMaxValueChars);
+        s.resize(TreePrefix(s, kMaxValueChars));
         s += L'\x2026';
     }
 }
@@ -51,13 +58,34 @@ struct Failure {
 
 // ---------------------------------------------------------------- JSON ----
 
+bool IsJsonNumber(std::wstring_view word) {
+    size_t i = 0;
+    auto digit = [&] { return i < word.size() && word[i] >= L'0' && word[i] <= L'9'; };
+    if (i < word.size() && word[i] == L'-') ++i;
+    if (!digit()) return false;
+    if (word[i] == L'0') ++i;
+    else while (digit()) ++i;
+    if (i < word.size() && word[i] == L'.') {
+        ++i;
+        if (!digit()) return false;
+        while (digit()) ++i;
+    }
+    if (i < word.size() && (word[i] == L'e' || word[i] == L'E')) {
+        ++i;
+        if (i < word.size() && (word[i] == L'+' || word[i] == L'-')) ++i;
+        if (!digit()) return false;
+        while (digit()) ++i;
+    }
+    return i == word.size();
+}
+
 class JsonParser {
 public:
     JsonParser(std::wstring_view text, std::vector<Node>& nodes) : s_(text), nodes_(nodes) {}
 
-    bool Parse(Failure& failure, bool& truncated) {
+    bool Parse(Failure& failure, bool& truncated, int depth = 0) {
         Skip();
-        if (!Value(0, {}, failure)) return false;
+        if (!Value(depth, {}, failure)) return false;
         Skip();
         if (pos_ < s_.size() && ok_) { Fail(L"trailing", failure); return false; }
         truncated = truncated_;
@@ -112,11 +140,18 @@ private:
             case L'f': decoded = L'\f'; break;
             case L'u': {
                 if (pos_ + 4 > s_.size()) { Fail(L"escape", failure); return false; }
-                const std::wstring hex(s_.substr(pos_, 4));
-                wchar_t* end = nullptr;
-                decoded = static_cast<wchar_t>(std::wcstoul(hex.c_str(), &end, 16));
-                if (!end || *end) { Fail(L"escape", failure); return false; }
-                pos_ += 4;
+                unsigned unit = 0;
+                for (int n = 0; n < 4; ++n) {
+                    const wchar_t h = s_[pos_];
+                    unsigned digit;
+                    if (h >= L'0' && h <= L'9') digit = h - L'0';
+                    else if (h >= L'A' && h <= L'F') digit = h - L'A' + 10;
+                    else if (h >= L'a' && h <= L'f') digit = h - L'a' + 10;
+                    else { Fail(L"escape", failure); return false; }
+                    unit = (unit << 4) | digit;
+                    ++pos_;
+                }
+                decoded = static_cast<wchar_t>(unit);
                 break;
             }
             default: break;  // \" \\ \/ and lenient others
@@ -176,8 +211,8 @@ private:
         const std::wstring_view word = s_.substr(start, pos_ - start);
         if (word == L"true" || word == L"false") Emit(depth, L'b', std::move(key), std::wstring(word));
         else if (word == L"null") Emit(depth, L'z', std::move(key), L"null");
-        else if (!word.empty() && (word[0] == L'-' || (word[0] >= L'0' && word[0] <= L'9')))
-            Emit(depth, L'n', std::move(key), std::wstring(word));
+        else if (IsJsonNumber(word))
+            Emit(depth, L'n', std::move(key), std::wstring(word.substr(0, kMaxValueChars + 1)));
         else { pos_ = start; Fail(L"value", failure); return false; }
         return true;
     }
@@ -211,25 +246,48 @@ std::wstring XmlUnescape(std::wstring_view s) {
     out.reserve(s.size());
     for (size_t i = 0; i < s.size(); ++i) {
         if (s[i] != L'&') { out += s[i]; continue; }
-        const size_t semi = s.find(L';', i);
-        if (semi == std::wstring_view::npos || semi - i > 10) { out += s[i]; continue; }
+        if (i + 1 < s.size() && s[i + 1] == L'#') {
+            size_t end = i + 2;
+            const bool hex = end < s.size() && (s[end] == L'x' || s[end] == L'X');
+            if (hex) ++end;
+            const size_t first = end;
+            const unsigned base = hex ? 16 : 10;
+            uint32_t cp = 0;
+            for (; end < s.size(); ++end) {
+                const wchar_t c = s[end];
+                unsigned digit;
+                if (c >= L'0' && c <= L'9') digit = c - L'0';
+                else if (hex && c >= L'a' && c <= L'f') digit = c - L'a' + 10;
+                else if (hex && c >= L'A' && c <= L'F') digit = c - L'A' + 10;
+                else break;
+                if (cp <= 0x10FFFF) cp = cp * base + digit;
+            }
+            const bool valid = cp == 9 || cp == 10 || cp == 13 || (cp >= 32 && cp <= 0xD7FF) ||
+                (cp >= 0xE000 && cp <= 0xFFFD) || (cp >= 0x10000 && cp <= 0x10FFFF);
+            if (end > first && end < s.size() && s[end] == L';' && valid) {
+                if (cp >= 0x10000) {
+                    cp -= 0x10000;
+                    out += static_cast<wchar_t>(0xD800 + (cp >> 10));
+                    cp = 0xDC00 + (cp & 0x3FF);
+                }
+                out += static_cast<wchar_t>(cp);
+                i = end;
+            } else {
+                out += L'&';  // Keep malformed references readable as typed.
+            }
+            continue;
+        }
+        const auto ahead = s.substr(i, 11);
+        const size_t delta = ahead.find(L';');
+        if (delta == ahead.npos) { out += s[i]; continue; }
+        const size_t semi = i + delta;
         const std::wstring_view entity = s.substr(i + 1, semi - i - 1);
         if (entity == L"amp") out += L'&';
         else if (entity == L"lt") out += L'<';
         else if (entity == L"gt") out += L'>';
         else if (entity == L"quot") out += L'"';
         else if (entity == L"apos") out += L'\'';
-        else if (!entity.empty() && entity[0] == L'#') {
-            const bool hex = entity.size() > 1 && (entity[1] == L'x' || entity[1] == L'X');
-            const unsigned long code = std::wcstoul(std::wstring(entity.substr(hex ? 2 : 1)).c_str(),
-                                                    nullptr, hex ? 16 : 10);
-            if (code >= 0x10000 && code <= 0x10FFFF) {
-                out += static_cast<wchar_t>(0xD800 + ((code - 0x10000) >> 10));
-                out += static_cast<wchar_t>(0xDC00 + ((code - 0x10000) & 0x3FF));
-            } else if (code) {
-                out += static_cast<wchar_t>(code);
-            }
-        } else {
+        else {
             out.append(s.substr(i, semi - i + 1));
         }
         i = semi;
@@ -287,7 +345,7 @@ bool ParseXml(std::wstring_view s, std::vector<Node>& nodes, Failure& failure, b
             const std::wstring_view raw = s.substr(pos, (end == std::wstring_view::npos ? s.size() : end) - pos);
             pos = end == std::wstring_view::npos ? s.size() : end;
             if (open.empty()) continue;  // whitespace around the root
-            std::wstring text = Collapse(XmlUnescape(raw));
+            std::wstring text = raw.find(L'&') == raw.npos ? Collapse(raw) : Collapse(XmlUnescape(raw));
             if (!text.empty()) emit(L't', {}, std::move(text));
             continue;
         }
@@ -413,11 +471,15 @@ void LineColumn(std::wstring_view text, size_t offset, size_t& line, size_t& col
 
 }  // namespace
 
+static bool IsJsonLines(std::wstring_view extension) {
+    return extension == L".jsonl" || extension == L".ndjson";
+}
+
 bool IsJsonExtension(std::wstring_view extension) {
     static constexpr std::wstring_view kJson[] = {
         L".json", L".jsonc", L".geojson", L".webmanifest", L".har", L".topojson", L".jsonld",
         L".babelrc", L".eslintrc", L".prettierrc", L".code-workspace"};
-    return std::find(std::begin(kJson), std::end(kJson), extension) != std::end(kJson);
+    return IsJsonLines(extension) || std::find(std::begin(kJson), std::end(kJson), extension) != std::end(kJson);
 }
 
 bool IsXmlExtension(std::wstring_view extension) {
@@ -433,21 +495,45 @@ bool MakeTreeDocument(const std::wstring& path, std::wstring_view extension, std
                       uint32_t& bytes_read, bool& truncated, ipc::PreviewTextEncoding& encoding) {
     std::wstring text;
     bool cut = false;
-    if (!ReadTextFile(path, kMaxBytes, text, cut, bytes_read, encoding)) return false;
+    const bool lines = IsJsonLines(extension);
+    if (!ReadTextFile(path, lines ? 256u * 1024u : kMaxBytes, text, cut, bytes_read, encoding)) return false;
     if (text.find(L'\0') != std::wstring::npos) return false;  // binary (bplist...)
     size_t first = 0;
     while (first < text.size() && (text[first] == L' ' || text[first] == L'\t' || text[first] == L'\r' ||
                                    text[first] == L'\n' || text[first] == L'\xFEFF'))
         ++first;
     const bool json = IsJsonExtension(extension);
-    if (first >= text.size()) return false;
-    if (json && text[first] != L'{' && text[first] != L'[' && text[first] != L'/') return false;
+    if (first >= text.size() && !lines) return false;
     if (!json && text[first] != L'<') return false;
     std::vector<Node> nodes;
     Failure failure;
     bool more = false;
     bool parsed = false;
-    if (cut) {
+    if (lines) {
+        nodes.push_back({0, L'a', {}, {}, {}, 0, {}});
+        const std::wstring_view input(text);
+        parsed = true;
+        more = cut;
+        for (size_t pos = 0; pos < input.size();) {
+            const size_t end = input.find(L'\n', pos);
+            if (end == input.npos && cut) break;  // Never present a partial record.
+            const auto record = input.substr(pos, end == input.npos ? input.npos : end - pos);
+            if (record.find_first_not_of(L" \t\r") != record.npos) {
+                if (nodes.front().children >= 512) { more = true; break; }
+                JsonParser parser(record, nodes);
+                bool limited = false;
+                if (!parser.Parse(failure, limited, 1)) {
+                    failure.offset += pos;
+                    parsed = false;
+                    break;
+                }
+                ++nodes.front().children;
+                if (limited) { more = true; break; }
+            }
+            if (end == input.npos) break;
+            pos = end + 1;
+        }
+    } else if (cut) {
         failure.reason = L"too-large";
         failure.offset = text.size();
     } else if (json) {
@@ -458,7 +544,7 @@ bool MakeTreeDocument(const std::wstring& path, std::wstring_view extension, std
     }
     if (!parsed) nodes.clear();
     std::wstring source;
-    AppendEscaped(source, std::wstring_view(text).substr(0, kMaxSourceChars));
+    AppendEscaped(source, std::wstring_view(text).substr(0, TreePrefix(text, kMaxSourceChars)));
     const size_t budget = ipc::kPreviewMaxTableChars - source.size() - 256;
     std::wstring body;
     size_t written = 0;

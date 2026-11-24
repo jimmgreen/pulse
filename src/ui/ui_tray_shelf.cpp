@@ -363,6 +363,39 @@ void MainRenderer::DrawTrayShelfLayer(const WindowViewModel& vm, int stage, cons
     D2D1_MATRIX_3X2_F old;
     dc->GetTransform(&old);
 
+    if (stage == static_cast<int>(TrayStage::Floated) || stage == static_cast<int>(TrayStage::Dock)) {
+        const bool dock = stage == static_cast<int>(TrayStage::Dock);
+        const D2D1_RECT_F body = D2D1::RectF(rc.left + 10.0f * s, rc.top + 7.0f * s,
+                                            rc.right - 10.0f * s, rc.bottom - 7.0f * s);
+        if (body.bottom <= body.top + 12.0f * s) return;
+        fill(body, 8.0f * s, Alpha(p.acc, dock || hot(TrayShelfHit::Dock) ? 0.24f : 0.10f));
+        dc->DrawRoundedRectangle(D2D1::RoundedRect(body, 8.0f * s, 8.0f * s), B(Alpha(p.acc2, 0.38f)), s);
+        ShelfText(compositor_, ShelfFormat(0), B(p.acc2),
+            l10n::Get(dock ? StringId::ShelfDockDropMsg : StringId::ShelfDockTip),
+            D2D1::RectF(body.left + 8.0f * s, body.top + 3.0f * s, body.right - 8.0f * s,
+                        body.top + 24.0f * s));
+        if (!dock) ShelfText(compositor_, ShelfFormat(1), B(p.sub),
+            Fill(l10n::Get(StringId::ShelfFloatedStatusFormat), L"{n}", std::to_wstring(d.total_count)),
+            D2D1::RectF(body.left + 8.0f * s, body.top + 25.0f * s, body.right - 8.0f * s, body.bottom));
+        return;
+    }
+
+    if (!d.active_shelf_name.empty() && (stage == static_cast<int>(TrayStage::Shelf) ||
+        (stage == static_cast<int>(TrayStage::Strip) && d.clip_count == 0))) {
+        if (hot(TrayShelfHit::ShelfSwitch)) fill(g.shelf_switch, 6.0f * s, Alpha(p.acc, 0.12f));
+        const float cy = (g.shelf_header.top + g.shelf_header.bottom) * 0.5f;
+        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(g.shelf_switch.left + 8.0f * s, cy), 3.5f * s, 3.5f * s),
+                        B(D2D1::ColorF(d.active_shelf_color)));
+        const D2D1_RECT_F title = D2D1::RectF(g.shelf_switch.left + 17.0f * s, g.shelf_switch.top,
+                                             g.shelf_switch.right - 20.0f * s, g.shelf_switch.bottom);
+        ShelfText(compositor_, ShelfFormat(0), B(p.text), d.active_shelf_name, title);
+        DrawShelfIcon(dc, B(p.sub), ShelfIcon::Down, D2D1::RectF(title.right, title.top,
+                      g.shelf_switch.right, title.bottom), 12.0f * s);
+        if (hot(TrayShelfHit::Popout)) fill(g.shelf_popout, 6.0f * s, Alpha(p.acc, 0.16f));
+        ShelfText(compositor_, ShelfFormat(0), B(p.acc2), L"\u2197", g.shelf_popout, DWRITE_TEXT_ALIGNMENT_CENTER);
+        if (stage == static_cast<int>(TrayStage::Strip)) return;
+    }
+
     if (stage == static_cast<int>(TrayStage::Strip)) {
         DrawShelfIcon(dc, B(p.acc2), ShelfIcon::Tray, g.strip_icon, 16.0f * s);
         ShelfText(compositor_, ShelfFormat(0), B(p.acc2), l10n::Get(StringId::TrayShelfTitle), g.strip_title);

@@ -12,6 +12,8 @@ PTP_WORK WINAPI TestCreateWork(PTP_WORK_CALLBACK callback, PVOID context, PTP_CA
 }
 void WINAPI TestCloseWork(PTP_WORK work) { ++work_closed; CloseThreadpoolWork(work); }
 void ResetWorkCounts() { work_attempts = work_created = work_closed = 0; }
+// Keeps a parallel delete running long enough for its 50 ms progress tick on any disk.
+void SlowMutation() { Sleep(1); }
 }
 #define CreateThreadpoolWork TestCreateWork
 #define CloseThreadpoolWork TestCloseWork
@@ -178,6 +180,98 @@ int wmain() {
     cancel.store(true);
     check(run(outside).cancelled && fs::exists(outside / L"keep"), "pre-cancel preserves tree");
     cancel.store(false);
+
+    // DeleteNativeParallel: folders on several threads, items relative to each folder's guard.
+    using pulse::ops::native_delete::DeleteNativeParallel;
+    auto prun = [&](const fs::path& path) { return DeleteNativeParallel(path.wstring(), cancel, [](const auto&, float) {}, 4); };
+    const auto make_tree = [&](const fs::path& base, int folders, int files) {
+        for (int d = 0; d < folders; ++d) {
+            const auto dir = base / (L"pkg" + std::to_wstring(d)) / L"node_modules" / L"dep" / L"lib";
+            fs::create_directories(dir);
+            for (int f = 0; f < files; ++f) std::ofstream(dir / (L"f" + std::to_wstring(f) + L".js")) << "fixture";
+        }
+    };
+    auto ptree = root / L"parallel";
+    make_tree(ptree, 40, 25);
+    std::ofstream(ptree / L"readonly.txt") << "fixture";
+    SetFileAttributesW((ptree / L"readonly.txt").c_str(), FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN);
+    SetFileAttributesW((ptree / L"pkg0").c_str(), FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY);
+    const fs::path inner_junction = ptree / L"pkg1" / L"linked";
+    {
+        HANDLE h = INVALID_HANDLE_VALUE;
+        fs::create_directory(inner_junction);
+        h = CreateFileW(inner_junction.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        DWORD bytes = 0;
+        const BOOL ok = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, &data, data.length + 8, nullptr, 0, &bytes, nullptr);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        check(ok != FALSE, "parallel: junction inside the tree created");
+    }
+    const auto full = prun(ptree);
+    check(full.done && full.mutated && !full.error && !fs::exists(ptree),
+          "parallel: nested tree with read-only file, read-only folder and junction is removed");
+    check(fs::exists(outside / L"keep"), "parallel: junction inside the tree does not follow its target");
+
+    // Past MAX_PATH: folders are opened by \\?\ path, items relative to them.
+    std::wstring deep = L"\\\\?\\" + (root / L"deep").wstring();
+    CreateDirectoryW(deep.c_str(), nullptr);
+    for (int i = 0; i < 12; ++i) {
+        deep += L"\\node_modules_package_with_long_name_" + std::to_wstring(i);
+        CreateDirectoryW(deep.c_str(), nullptr);
+    }
+    for (int i = 0; i < 20; ++i) {
+        HANDLE h = CreateFileW((deep + L"\\file" + std::to_wstring(i) + L".js").c_str(), GENERIC_WRITE, 0, nullptr,
+                               CREATE_ALWAYS, 0, nullptr);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    }
+    check(deep.size() > MAX_PATH + 4 && GetFileAttributesW((deep + L"\\file19.js").c_str()) != INVALID_FILE_ATTRIBUTES,
+          "parallel: deep fixture past MAX_PATH");
+    check(prun(root / L"deep").done && !fs::exists(root / L"deep"), "parallel: tree past MAX_PATH is removed");
+
+    make_tree(ptree, 40, 25);
+    pulse::ops::native_delete::after_mutation = SlowMutation;
+    auto pstopped = DeleteNativeParallel(ptree.wstring(), cancel, [&](const auto&, float) { cancel.store(true); }, 4);
+    pulse::ops::native_delete::after_mutation = nullptr;
+    check(pstopped.cancelled && pstopped.mutated && !pstopped.done && fs::exists(ptree), "parallel: cancellation keeps the root");
+    cancel.store(false);
+    check(prun(ptree).done, "parallel: a new request removes what was left");
+
+    make_tree(ptree, 10, 10);
+    pulse::ops::native_delete::deny_first_enumeration = true;
+    const auto pdenied = prun(ptree);
+    check(!pdenied.done && !pdenied.mutated && pdenied.error == ERROR_ACCESS_DENIED,
+          "parallel: denied root listing changes nothing, so elevation can take over");
+    pulse::ops::native_delete::deny_first_enumeration = false;
+
+    const auto held = ptree / L"pkg3" / L"held.js";
+    std::ofstream(held) << "fixture";
+    HANDLE held_handle = CreateFileW(held.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    const auto pheld = prun(ptree);
+    check(!pheld.done && pheld.error != ERROR_SUCCESS && fs::exists(held) && fs::exists(ptree),
+          "parallel: a file in use stops the root with its error and keeps it");
+    if (held_handle != INVALID_HANDLE_VALUE) CloseHandle(held_handle);
+    check(prun(ptree).done, "parallel: cleanup after the in-use failure");
+
+    make_tree(ptree, 5, 8);
+    pulse::ops::native_delete::force_disposition_unsupported = true;
+    pulse::ops::native_delete::disposition_probes = 0;
+    check(prun(ptree).done && !fs::exists(ptree), "parallel: classic delete when POSIX delete is not understood");
+    check(pulse::ops::native_delete::disposition_probes <= 4,
+          "parallel: FAT-style volume is probed once per worker at most, not once per file");
+    pulse::ops::native_delete::force_disposition_unsupported = false;
+
+    make_tree(ptree, 40, 25);
+    pulse::ops::native_delete::after_mutation = SlowMutation;
+    bool pthrew = false;
+    try {
+        DeleteNativeParallel(ptree.wstring(), cancel,
+            [](const auto&, float) { throw std::runtime_error("fixture progress exception"); }, 4);
+    } catch (const std::runtime_error&) { pthrew = true; }
+    pulse::ops::native_delete::after_mutation = nullptr;
+    check(pthrew && fs::exists(ptree), "parallel: a progress exception stops and joins the workers");
+    check(prun(ptree).done, "parallel: cleanup after the progress exception");
+    std::ofstream(root / L"plainfile") << "fixture";
+    check(prun(root / L"plainfile").done && !fs::exists(root / L"plainfile"), "parallel: a single file goes the serial way");
     // Only this process-created root is removed; no external fixtures are touched.
     check(run(root).done && !fs::exists(root), "isolated fixture cleanup");
     return failures ? 1 : 0;

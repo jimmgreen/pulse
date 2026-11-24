@@ -40,7 +40,7 @@ bool Toggleable(const Item& item) {
 
 // 删除残留项: the program behind the entry is gone and its key is one Pulse
 // may write (the switch's own rules).
-bool Deletable(const Item& item) { return item.missing && Toggleable(item); }
+bool Deletable(const Item& item) { return item.missing && !item.is_protected && Toggleable(item); }
 
 std::wstring Expand(const std::wstring& s) {
     if (s.find(L'%') == std::wstring::npos) return s;
@@ -441,6 +441,9 @@ std::wstring MethodText(const Item& item, bool toggleable) {
     if (item.source == sysctx::Source::Packaged) return l10n::Get(l10n::StringId::PackagedMenuReadOnly);
     if (item.trusted_installer)
         return l10n::Get(l10n::StringId::WindowsManagesThisEntryItselfTrustedInstallerPulseLeavesItAl).c_str();
+    if (sysctx::CanRestoreShellLink(item))
+        return std::wstring(l10n::Get(l10n::StringId::PutBack).c_str()) +
+               l10n::Get(l10n::StringId::NothingIsWrittenUntilYouChooseApplyChanges).c_str();
     if (item.is_protected)
         return l10n::Get(l10n::StringId::ABasicWindowsCommandSwitchingItOffBreaksFileExplorerSoThereI).c_str();
     if (!toggleable)
@@ -803,13 +806,17 @@ void SystemCtxModel::RunJob(std::vector<Op> ops, size_t pop_undo, bool record_un
                 if (op.root != Root::Machine || !cancelled) pending_.erase(PendingKey(op));
             }
             if (record_undo && !done.empty()) {
-                undo_.push_back({done});
-                const std::wstring time = Timestamp(false);  // yyyy-mm-ddThh:mm:ss
-                Change change;
-                change.title = done.size() == ops.size() && !title.empty() ? title : ChangeTitleLocked(done);
-                change.caption = time.size() >= 16 ? time.substr(11, 5) : time;
-                if (!backup.empty()) change.caption += L" · " + backup;
-                changes_.push_back(std::move(change));
+                // Undo must not turn the core handler back off after an upgrade repair.
+                std::erase_if(done, sysctx::IsShellLinkRestore);
+                if (!done.empty()) {
+                    undo_.push_back({done});
+                    const std::wstring time = Timestamp(false);  // yyyy-mm-ddThh:mm:ss
+                    Change change;
+                    change.title = done.size() == ops.size() && !title.empty() ? title : ChangeTitleLocked(done);
+                    change.caption = time.size() >= 16 ? time.substr(11, 5) : time;
+                    if (!backup.empty()) change.caption += L" · " + backup;
+                    changes_.push_back(std::move(change));
+                }
             }
             // Undo keeps its step until the reversal actually ran.
             if (!record_undo && !cancelled) {
@@ -1019,7 +1026,7 @@ std::shared_ptr<const ui::SysCtxView> SystemCtxModel::View() {
             row.deleting = deleting;
             row.machine = item.root == Root::Machine;
             row.missing = item.missing;
-            row.locked = item.is_protected || item.trusted_installer;
+            row.locked = (item.is_protected && !sysctx::CanRestoreShellLink(item)) || item.trusted_installer;
             row.system_owned = item.trusted_installer;
             row.read_only = !row.locked && !Toggleable(item);
             row.extended = item.extended;

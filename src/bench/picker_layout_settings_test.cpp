@@ -10,9 +10,9 @@ int main() {
     State original; original.icon_dip=112; original.has_placement=true; original.x=120; original.width=940; original.view_mode=4; original.sort=2; original.descending=true; original.column_widths[0]=240; original.hidden_places={L"C:\\hidden", L"D:\\other"};
     check(SaveForIdentity(root,L"C:\\host-a.exe",0,original),"save including canceled dialog state");
     State read;
-    original.collapsed_mask = 192;
+    original.collapsed_mask = 448;
     check(SaveForIdentity(root,L"C:\\host-a.exe",0,original) &&
-        LoadForIdentity(root,L"C:\\host-a.exe",0,read) && read.collapsed_mask == 192,
+        LoadForIdentity(root,L"C:\\host-a.exe",0,read) && read.collapsed_mask == 448,
         "shared favorites and workspace collapse state persists");
     check(LoadForIdentity(root,L"C:\\host-a.exe",0,read) && read.view_mode==4 && read.descending && read.column_widths[0]==240 && read.hidden_places==original.hidden_places && read.icon_dip==112 && read.has_placement && read.x==120 && read.width==940,"round trip including custom icon size and placement");
     check(!LoadForIdentity(root,L"C:\\host-b.exe",0,read) && !LoadForIdentity(root,L"C:\\host-a.exe",1,read),"host and mode isolation");

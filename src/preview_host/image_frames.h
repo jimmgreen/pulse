@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -50,6 +51,9 @@ struct IconEntry {
 // .ico (type 1) and .cur (type 2) directories. Entries keep file order, which
 // need not match a decoder's frame order. Returns false for anything else.
 bool ParseIconDirectory(const std::vector<uint8_t>& file, std::vector<IconEntry>& entries, bool& cursor);
+using IconRangeReader = std::function<bool(size_t offset, uint8_t* data, size_t bytes)>;
+bool ReadIconSelection(size_t size, const IconRangeReader& read, uint32_t requested,
+                       std::vector<IconEntry>& entries, size_t& selected, std::vector<uint8_t>& out);
 // Index of the entry shown by default: the largest, then the deepest colour.
 size_t DefaultIconEntry(const std::vector<IconEntry>& entries);
 // Give WIC exactly one selected entry so codec-specific frame ordering cannot

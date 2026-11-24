@@ -35,11 +35,12 @@ enum class PreviewRequestKind : uint32_t {
     Properties = 1,
 };
 constexpr uint32_t kPreviewFlagEmbeddedPsd = 1u << 1;
+constexpr uint32_t kPreviewFlagInlineBitmap = 1u << 2;
 constexpr uint32_t kPreviewFlagTruncated = 1u << 0;
 // Source encoding of a Text preview, stored in response flag bits 8..11.
 constexpr uint32_t kPreviewFlagEncodingShift = 8;
 constexpr uint32_t kPreviewFlagEncodingMask = 0xFu << kPreviewFlagEncodingShift;
-enum class PreviewTextEncoding : uint32_t { Unknown = 0, Utf8, Utf8Bom, Utf16Le, Utf16Be, Ansi };
+enum class PreviewTextEncoding : uint32_t { Unknown = 0, Utf8, Utf8Bom, Utf16Le, Utf16Be, Ansi, Utf32Le, Utf32Be };
 // PreviewRequest::flags. Grid: a list/grid/sidebar thumbnail (as opposed to
 // the details pane or Quick Look), whatever its pixel size - extra large icons
 // on high-DPI screens ask for more than kGridThumbnailEdge.
@@ -61,6 +62,18 @@ constexpr uint32_t kPreviewRequestFlagDocumentImage = 1u << 6;
 // path would spend seconds on something the card cannot use.
 constexpr uint32_t kPreviewRequestFlagCard = 1u << 7;
 constexpr uint32_t kPreviewRequestFlagPsdRefine = 1u << 8;
+constexpr uint32_t kPreviewRequestFlagInlineBitmap = 1u << 9;
+constexpr uint32_t kPreviewRequestFlagPreGranted64M = 1u << 10;
+// A picture inside an archive: the path is "<archive path>|<member path>"
+// ('|' never occurs in a Windows path). Quick Look's archive thumbnail view.
+constexpr uint32_t kPreviewRequestFlagArchiveMember = 1u << 11;
+constexpr wchar_t kPreviewArchiveMemberSeparator = L'|';
+inline bool IsArchiveMemberPath(const std::wstring& path) noexcept {
+    const size_t bar = path.find(kPreviewArchiveMemberSeparator);
+    return bar != std::wstring::npos && bar > 0 && bar + 1 < path.size();
+}
+constexpr size_t kPreviewMaxInlineBitmapBytes = 256u * 1024u;
+constexpr uint64_t kPreviewPreGrantedBudgetBytes = 64ull << 20;
 constexpr uint32_t kPreviewMaxTextChars = 32768;
 constexpr uint32_t kPreviewMaxArchiveChars = 512u * 1024u;
 constexpr uint32_t kPreviewMaxTableChars = 2u * 1024u * 1024u;

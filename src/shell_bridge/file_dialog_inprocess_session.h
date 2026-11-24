@@ -19,6 +19,7 @@ struct FileDialogInprocessProvider {
     bool allow_unverified_proof = false;
     // Remote providers bind HWND to their authenticated live child and session.
     std::function<bool(PulsePickerUiV2Session, HWND)> validate_remote_window;
+    uint32_t max_control_items = PULSE_PICKER_UI_V2_LEGACY_CONTROL_ITEMS;
 };
 struct FileDialogInprocessSnapshot {
     uint64_t show = 0, generation = 0;
@@ -58,7 +59,7 @@ public:
     ~FileDialogInprocessSession();
     FileDialogInprocessSession(const FileDialogInprocessSession&) = delete;
     FileDialogInprocessSession& operator=(const FileDialogInprocessSession&) = delete;
-    HRESULT Prepare(const ContractDecision&, HWND owner, const std::vector<FileDialogCustomControl>& controls = {}, const std::vector<FileDialogPlace>& places = {}, const std::vector<FileDialogPropertyView>& properties = {}, bool allow_auto_jump = false, const std::wstring& navigation_root = {});
+    HRESULT Prepare(const ContractDecision&, HWND owner, const std::vector<FileDialogCustomControl>& controls = {}, const std::vector<FileDialogPlace>& places = {}, const std::vector<FileDialogPropertyView>& properties = {}, bool allow_auto_jump = false, const std::wstring& navigation_root = {}, uint32_t legacy_browse_policy = 0);
     HRESULT UpdateControl(const FileDialogCustomControl&);
     HRESULT Navigate(const std::wstring& folder);
     HRESULT Show(const PulsePickerUiV2Callbacks&, PulsePickerUiV2Result&, std::wstring& path);
@@ -78,8 +79,12 @@ public:
     bool SupportsDynamicItems() const noexcept {
         return (provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_DYNAMIC_ITEMS) != 0;
     }
+    bool SupportsControlItemCount(size_t count) const noexcept {
+        return count <= provider_->max_control_items && count <= PULSE_PICKER_UI_V2_MAX_CONTROL_ITEMS;
+    }
     bool InFileOk() const noexcept { return event_kind_ == PULSE_PICKER_UI_V2_EVENT_FILE_OK; }
     const std::vector<std::wstring>& AcceptedPaths() const noexcept { return accepted_paths_; }
+    const std::wstring& AcceptedFolder() const noexcept { return accepted_folder_; }
     bool Closed() const noexcept { return close_requested_; }
     HRESULT CloseResult() const noexcept { return close_result_; }
 private:
@@ -103,6 +108,7 @@ private:
     uint64_t show_ = 0, event_generation_ = 0, accepted_generation_ = 0;
     bool fileok_invalidated_ = false;
     std::wstring accepted_candidate_;
+    std::wstring accepted_folder_;
     std::vector<std::wstring> accepted_paths_;
     uint32_t accepted_index_ = 0;
     uint32_t event_kind_ = 0;

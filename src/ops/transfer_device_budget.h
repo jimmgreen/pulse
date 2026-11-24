@@ -34,9 +34,16 @@ public:
     TransferDeviceIdentityCache();
     explicit TransferDeviceIdentityCache(bool remote_budget_enabled) : remote_budget_enabled_(remote_budget_enabled) {}
     TransferDeviceIdentity Resolve(const std::wstring& path);
+    // GetVolumePathNameW calls made so far (tests and diagnostics).
+    size_t VolumePathQueries() const { return volume_path_queries_; }
 private:
+    std::wstring VolumeRootOf(const std::wstring& path);
     const bool remote_budget_enabled_;
     std::unordered_map<std::wstring, TransferDeviceIdentity> volumes_;
+    // Case-folded path -> volume root for paths already resolved. A path under
+    // one of them through plain (non-reparse) folders is on the same volume.
+    std::unordered_map<std::wstring, std::wstring> roots_;
+    size_t volume_path_queries_ = 0;
 };
 
 class TransferDeviceBudget {

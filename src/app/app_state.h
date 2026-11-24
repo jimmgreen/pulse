@@ -17,6 +17,8 @@
 #include "file_click_gesture.h"
 #include "button_press.h"
 #include "../ui/text_diff_window.h"
+#include "../ui/git_window.h"
+#include "../ui/layout_panel.h"
 #include "../ui/bloom_accent_picker.h"
 #include "../fs/fs_enum.h"
 #include "../fs/fs_recycle.h"
@@ -26,6 +28,7 @@
 #include "window_identity.h"
 #include "window_overview.h"
 #include "window_switcher.h"
+#include "tab_mru.h"
 #include "live_network_search.h"
 #include "tray_compare_metadata.h"
 #include "frame_pump.h"
@@ -143,6 +146,7 @@ struct TrayTextProbe {
 };
 
 struct SidebarRefreshLoad;
+struct SidebarKnownFolderOpen;
 // The last window merged into this one (M6c), for the toast's undo: the
 // merged tabs in their old order with their old groups, the active one, and
 // the window's place and layout (`place` has no tab snapshots).
@@ -155,9 +159,14 @@ struct WindowMergeUndo {
 };
 
 struct DeletePreflight;
+struct FileClipboardPaste;
+struct QueuedTransferNotice { uint64_t task = 0; ULONGLONG due = 0; };
 struct AppState : AppCoreOwner {
     ClosedPane closedPane;
     std::shared_ptr<DeletePreflight> delete_preflight;
+    std::shared_ptr<FileClipboardPaste> file_clipboard_paste;
+    // Transfers started here, watched for a "queued" notice (app_ops_ui.cpp).
+    std::vector<QueuedTransferNotice> queuedTransferNotices;
     ui::FileOperationWindow delete_preflight_window;
     // Stand-alone window state with its own AppCore (tests and selftest probes).
     AppState() : AppCoreOwner(std::make_unique<AppCore>()), core(*owned_core) {}
@@ -269,7 +278,7 @@ struct AppState : AppCoreOwner {
     ui::MainRenderer& renderer = *renderer_owner;
     // Vsync-paced frames while highlight glides / list shifts run (frame_pump.h).
     app::FramePump framePump;
-    ui::QuickPreviewWindow quickPreview;
+    std::shared_ptr<ui::QuickPreviewWindow> quickPreview = std::make_shared<ui::QuickPreviewWindow>();
     ui::QuickPreviewWindow detailsPreview;
     bool detailsPreviewDark = false;
     // View row the quick preview was anchored to when Delete ran from inside
@@ -295,6 +304,7 @@ struct AppState : AppCoreOwner {
     uint32_t sidebarQuickAccessHiddenMask = app::kDefaultQuickAccessHiddenMask;
     bool starredExpanded = true;
     float sidebarScroll = 0.0f;
+    float sidebarFavoritesScroll = 0.0f;
     int settingsReleaseExpanded = 0;   // Settings > About release-note row that is open, -1 none
     app::TabController tabs;
     bool hidden_to_tray = false;       // the close button hid the window (tray_reveal.h)
@@ -313,6 +323,8 @@ struct AppState : AppCoreOwner {
     HICON identity_overlay = nullptr;
     // The Ctrl+` switcher while this window shows it (M7d, window_switcher_ui.h).
     app::WindowSwitcherState switcher;
+    // Ctrl+Tab recent tabs: last-active order and the open panel (tab_mru.h).
+    app::TabMruState tabMru;
     // The Ctrl+Shift+O overview while this window shows it (M7e, window_overview_ui.h).
     app::WindowOverviewState overview;
     int tabDropIndex = -1;  // a tab dragged from another window would land here (M6b)
@@ -354,9 +366,8 @@ struct AppState : AppCoreOwner {
     std::wstring store_search;
     bool store_detail = false;
     int store_detail_tab = 0;
-    int store_preview_kind = 0;
+    std::string store_detail_id;
     uint64_t store_saved_at = 0; // GetTickCount64 of the last edit, for "已保存"
-    float store_level_drag = -1.0f;
     float scale = 1.0f;
     bool maximized = false;
     bool backdropActive = true;
@@ -374,6 +385,7 @@ struct AppState : AppCoreOwner {
 
     int hoverRow = -1;
     int hoverPaneIndex = -1;
+    bool toolbarHovered = false;
     ULONGLONG ctxHoverSince = 0;
     std::wstring ctxHoverPrefetched;
     // The hover preview card (app_hover_preview.cpp): the file it shows, and
@@ -416,6 +428,7 @@ struct AppState : AppCoreOwner {
     bool scrollbarDragging = false;
     bool scrollbarHorizontal = false;
     bool scrollbarSidebar = false;
+    bool scrollbarFavorites = false;
     bool scrollbarSettings = false;   // dragging the settings page's scrollbar
     float scrollbarGrabOffset = 0.0f;   // pointer offset along the grabbed thumb
     // Sidebar scrollbar shows while scrolling or hovered, then fades (#44).
@@ -511,6 +524,8 @@ struct AppState : AppCoreOwner {
     // so whole WHEEL_DELTA notches are counted (reset on reversal or a pause).
     int zoomWheelRemainder = 0;
     ULONGLONG zoomWheelTick = 0;
+    int tabWheelRemainder = 0;
+    ULONGLONG tabWheelTick = 0;
     // Pane header size slider being dragged; folder prefs are saved on release.
     bool paneSizeDragging = false;
     int paneSizeDragPane = -1;
@@ -604,6 +619,8 @@ struct AppState : AppCoreOwner {
     uint64_t tagGroupsRevision = 0;
     uint64_t mediaPropsRevision = 0;  // media::Revision this window has painted
     bool mediaResortWaiting = false;  // a media-column re-sort is waiting (ResortForMediaProps)
+    uint64_t extensionColumnsRevision = 0;  // pulse.columns values / providers this window has painted
+    uint64_t extensionStatusRevision = 0;   // pulse.statusbar items this window has painted
     uint64_t cloudSyncRevision = 0;  // CloudSyncProbe answers this window has painted  // tag catalog revision last published for grouping
     float addressSearchAnimation = 0.0f;
     float addressScopeAnimation = 0.0f;
@@ -619,6 +636,27 @@ struct AppState : AppCoreOwner {
 
     std::wstring pending_undo_json; // loaded from session, imported in WM_CREATE
     uint64_t opsCompleted = 0;
+    // Cached UI-thread snapshot of OpsManager state keyed by lock-free UiRevision.
+    // Avoids 6-7 mutex locks per BuildVm (including every WM_SETCURSOR mouse move).
+    struct OpsUiSnapshotCache {
+        uint64_t revision = 0;
+        bool include_rows = false;
+        bool valid = false;
+        ops::OpsManager::UiStatusSnapshot snapshot;
+    } opsUiCache;
+    // Last status-bar pill signature painted by WM_OPS_NOTIFY; skips redundant
+    // 20 Hz full-window invalidations on unchanged/sub-100ms progress ticks.
+    struct OpsPillNotifyState {
+        uint64_t task_id = 0;
+        bool active = false;
+        ops::OpPhase phase = ops::OpPhase::Completed;
+        bool paused = false;
+        int percent_int = -1;
+        uint64_t failed_items = 0;
+        std::wstring summary;
+        std::wstring last_error;
+        ULONGLONG last_paint_ms = 0;
+    } opsPillNotify;
     // Rows on their way to the Recycle Bin slide out before the listing drops
     // them (motion 5b). Cleared when the delete fails, shortly after it ends.
     std::vector<std::wstring> leavingPaths;
@@ -680,13 +718,18 @@ struct AppState : AppCoreOwner {
     std::vector<ZipJob> zipJobs;
     std::unique_ptr<ui::FileOperationWindow> operationWindow;
     uint64_t operationUiTaskId = 0;
+    // Another running task picked in the card's strip: the card shows it
+    // until it ends (or something needs the person's answer). 0 = none.
+    uint64_t operationSelectedTaskId = 0;
     bool undoHistoryOpen = false;
     int undoHistoryOffset = 0;
     uint64_t undoHistoryNotified = 0;
     uint64_t operationHistoryTaskId = 0;
     std::unordered_set<uint64_t> hiddenOperationHistory;
     uint64_t operationDismissedTaskId = 0;
+    std::unordered_set<uint64_t> operationFailureNotified;
     uint64_t conflictUiToken = 0;
+    std::shared_ptr<ui::PendingFileConflict> pendingFileConflict;
     uint64_t lockPromptTaskId = 0;   // failed op whose "file in use" prompt was shown
     std::wstring taskResultPath;     // the plugin task result snack's 打开文件夹 target
     bool operationAutoShown = false;
@@ -696,6 +739,9 @@ struct AppState : AppCoreOwner {
     std::chrono::steady_clock::time_point operationFinishedAt{};
     HWND hwndRenameEdit = nullptr;
     int renameIndex = -1;
+    // The edited item's full path when the field opened. Rows re-sort while it
+    // is open (a move into a sibling updates its date); SyncRenameIndex follows it.
+    std::wstring renameEntryPath;
     bool renameAlias = false;   // the rename field edits the 别名, not the name
     // Last key press, click or wheel turn in this window, any of its child
     // controls included (GetTickCount64; the message loop, NoteUserInput).
@@ -777,12 +823,14 @@ struct AppState : AppCoreOwner {
     float dropBadgeY = 0.0f;
     bool dropBadgeMove = false;
     bool trayDragOut = false;          // tray contents are being dragged out (not a tray target)
-    ULONGLONG trayProbeAt = 0;         // last staging-tray existence probe (UI timer, 2 s)
     bool trayCompare = false;          // two-file compare table replaces the card stack
     std::unique_ptr<app::TrayCompareMetadata> trayMetadata;
     std::shared_ptr<TrayCompareJob> trayCmpJob; // on-demand byte comparison
     std::shared_ptr<TrayTextProbe> trayTextProbe; // text/binary probe for "view diff"
     std::unique_ptr<ui::TextDiffWindow> textDiff; // stand-alone text compare window
+    std::unique_ptr<ui::GitWindow> gitWindow;     // Source Control window (git_ui.cpp)
+    std::unique_ptr<ui::GitBranchPopup> gitBranchPopup; // Shared Branch & Sync popover (git_ui.cpp)
+    std::unique_ptr<ui::LayoutPanel> layoutPanel;      // 界面 quick panel (app_commands.cpp)
     // One-time teaching bubbles (tips_seen bits in appPrefs).
     int teachTip = -1;                 // visible tip, -1 = none
     int teachCandidate = -1;           // trigger currently holding
@@ -848,6 +896,7 @@ struct AppState : AppCoreOwner {
     POINT pinDragStartPt{};
     std::wstring pinDragPath;
     std::wstring pinDragKey;             // quick-access layout key of the dragged row
+    std::shared_ptr<SidebarKnownFolderOpen> sidebarKnownFolderOpen;
     int pinDragRun = -1;                 // slot.run of the dragged row (highlight)
     int pinDragToIndex = -1;             // target position among the pins
     float pinGapLineY = 0.0f;
@@ -960,11 +1009,14 @@ struct AppState : AppCoreOwner {
     bool dragFilesOver = false;      // an OLE file drag is over this window (drop layer)
     bool dropTrayMove = false;       // drop layer: the 移动暂存 half is active
     struct TrayReleaseNote {
-        uint64_t task = 0;           // copy / move submitted by the shelf
-        size_t count = 0;
-        bool move = false;
-        std::wstring dest;           // target folder
-    } trayRelease;
+        uint64_t copy_task = 0;
+        uint64_t move_task = 0;
+        size_t copied = 0;
+        size_t moved = 0;
+        uint64_t undo_group = 0;
+        std::wstring dest;
+    };
+    std::vector<TrayReleaseNote> trayReleases;
     // Ctrl+C / Ctrl+X inside Pulse only write the system clipboard; the shelf
     // then offers to stage that copy (剪贴板 N 项 · 收入). The offer is gone
     // once anything else changes the clipboard.
@@ -988,7 +1040,9 @@ struct AppState : AppCoreOwner {
         ULONGLONG remove_at = 0;
     } trayView;
     std::wstring trayReleaseOpen;    // folder the release snack's 打开 opens
-    std::wstring trayClearedJson;    // tray before 清空, for the snack's 撤销
+    uint64_t trayReleaseUndoGroup = 0;
+    uint64_t trayClearedShelf = 0;
+    std::vector<app::TrayBatch> trayClearedBatches;
     struct TrayZipJob {
         uint64_t id = 0;             // zipJobs id while the shelf ring spins
         std::shared_ptr<std::atomic<float>> progress;

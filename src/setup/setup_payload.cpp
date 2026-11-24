@@ -5,6 +5,8 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include <set>
+#include <string_view>
 
 extern "C" {
 #include "7zCrc.h"
@@ -202,7 +204,11 @@ public:
     }
     bool Number(uint64_t& v) {
         Ws(); v = 0; size_t start = i_;
-        while (i_ < s_.size() && s_[i_] >= '0' && s_[i_] <= '9') v = v * 10 + static_cast<uint64_t>(s_[i_++] - '0');
+        while (i_ < s_.size() && s_[i_] >= '0' && s_[i_] <= '9') {
+            const auto digit = static_cast<uint64_t>(s_[i_++] - '0');
+            if (v > (UINT64_MAX - digit) / 10) return false;
+            v = v * 10 + digit;
+        }
         return i_ > start;
     }
     bool Skip() {  // skips any scalar / nested value
@@ -226,14 +232,60 @@ private:
     size_t i_ = 0;
 };
 
-bool ParseManifest(const std::string& text, PayloadInfo& info) {
+bool LowerHex(std::string_view text, size_t length) {
+    if (text.size() != length) return false;
+    for (const char c : text)
+        if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) return false;
+    return true;
+}
+
+struct OrdinalPathLess {
+    bool operator()(const std::wstring& a, const std::wstring& b) const {
+        return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+    }
+};
+
+bool SafeMemberPath(const std::wstring& path) {
+    if (path.empty() || path.size() > 1024 || path.find(L"..") != path.npos) return false;
+    for (const wchar_t ch : path)
+        if (ch < 32 || wcschr(L":\"<>|?*", ch)) return false;
+    const OrdinalPathLess less;
+    for (size_t start = 0;;) {
+        const size_t end = path.find(L'\\', start);
+        const auto part = path.substr(start, end == path.npos ? path.npos : end - start);
+        if (part.empty() || part.back() == L'.' || part.back() == L' ') return false;
+        constexpr wchar_t suffix[] = L".pulse-new";
+        if (part.size() >= std::size(suffix) - 1) {
+            const auto tail = part.substr(part.size() - (std::size(suffix) - 1));
+            if (!less(tail, suffix) && !less(suffix, tail)) return false;
+        }
+        if (end == path.npos) return true;
+        start = end + 1;
+    }
+}
+
+std::wstring_view SharedMember(std::wstring_view path, std::wstring_view family) {
+    if (!path.starts_with(family) || path.size() <= family.size() + 65 ||
+        path[family.size() + 64] != L'\\') return {};
+    for (const wchar_t ch : path.substr(family.size(), 64))
+        if (!(ch >= L'0' && ch <= L'9') && !(ch >= L'a' && ch <= L'f')) return {};
+    const auto member = path.substr(family.size() + 65);
+    if (_wcsicmp(member.data(), L"manifest.json") == 0 || _wcsicmp(member.data(), L"VERIFIED.json") == 0)
+        return {};
+    return member;
+}
+
+bool ParseManifest(const std::string& text, PayloadInfo& info, bool compact) {
     Json j(text);
+    uint64_t format = 1;
+    std::set<std::wstring, OrdinalPathLess> paths;
     if (!j.Eat('{')) return false;
     if (j.Eat('}')) return false;
     do {
         std::string key;
         if (!j.String(key) || !j.Eat(':')) return false;
         if (key == "version") { if (!j.String(info.version)) return false; }
+        else if (key == "format") { if (!j.Number(format)) return false; }
         else if (key == "channel") { if (!j.String(info.channel)) return false; }
         else if (key == "min_windows_build") { if (!j.Number(info.min_windows_build)) return false; }
         else if (key == "files") {
@@ -249,23 +301,131 @@ bool ParseManifest(const std::string& text, PayloadInfo& info) {
                         if (k == "path") { if (!j.String(path)) return false; }
                         else if (k == "size") { if (!j.Number(f.size)) return false; }
                         else if (k == "sha256") { if (!j.String(f.sha256)) return false; }
+                        else if (k == "link_to") {
+                            uint64_t index = 0;
+                            if (!compact || f.link_to || !j.Number(index) || index >= info.files.size()) return false;
+                            f.link_to = static_cast<size_t>(index);
+                        }
                         else if (!j.Skip()) return false;
                     } while (j.Eat(','));
                     if (!j.Eat('}')) return false;
                     f.path = Utf8ToWide(path);
                     for (auto& ch : f.path) if (ch == L'/') ch = L'\\';
                     // Reject absolute paths and traversal before anything touches disk.
-                    if (f.path.empty() || f.path[0] == L'\\' || f.path.find(L':') != std::wstring::npos ||
-                        f.path.find(L"..") != std::wstring::npos || f.sha256.size() != 64)
+                    if (!SafeMemberPath(f.path) || !LowerHex(f.sha256, 64) || !paths.insert(f.path).second ||
+                        info.files.size() >= 4096 || f.size > UINT64_MAX - info.total_bytes)
                         return false;
+                    if (f.link_to) {
+                        const auto& source = info.files[*f.link_to];
+                        const auto member = SharedMember(f.path, L"DialogBridge\\");
+                        if (source.link_to || source.size != f.size || source.sha256 != f.sha256 || member.empty() ||
+                            member != SharedMember(source.path, L"AppRuntime\\")) return false;
+                    }
                     info.total_bytes += f.size;
+                    if (!f.link_to) info.stored_bytes += f.size;
                     info.files.push_back(std::move(f));
                 } while (j.Eat(','));
                 if (!j.Eat(']')) return false;
             }
         } else if (!j.Skip()) return false;
     } while (j.Eat(','));
-    return j.Eat('}') && !info.files.empty();
+    return j.Eat('}') && format == (compact ? 2u : 1u) && !info.files.empty();
+}
+
+bool PlainFile(HANDLE file, BY_HANDLE_FILE_INFORMATION& info) {
+    return file && file != INVALID_HANDLE_VALUE && GetFileInformationByHandle(file, &info) &&
+        !(info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT));
+}
+
+bool SameFile(const BY_HANDLE_FILE_INFORMATION& a, const BY_HANDLE_FILE_INFORMATION& b) {
+    return a.dwVolumeSerialNumber == b.dwVolumeSerialNumber && a.nFileIndexHigh == b.nFileIndexHigh &&
+        a.nFileIndexLow == b.nFileIndexLow;
+}
+
+// Hold parent directories against replacement while linking. In particular an
+// untrusted directory junction must not redirect a link out of the staging tree.
+bool PinParents(const std::filesystem::path& parent, std::vector<UniqueHandle>& pins,
+                const std::filesystem::path& create_under = {}) {
+    auto pin = [&](const std::filesystem::path& path) {
+        UniqueHandle h(CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (h.get() == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(h.get(), &info) ||
+            !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            return false;
+        pins.push_back(std::move(h));
+        return true;
+    };
+    auto path = parent.root_path();
+    if (path.empty() || !pin(path)) return false;
+    bool can_create = path == create_under;
+    for (const auto& part : parent.relative_path()) {
+        path /= part;
+        if (can_create && !CreateDirectoryW(path.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
+            return false;
+        if (!pin(path)) return false;
+        can_create = can_create || path == create_under;
+    }
+    return true;
+}
+
+bool WriteAlias(const std::filesystem::path& root, const std::filesystem::path& source_path,
+                const std::filesystem::path& target,
+                const PayloadFile& item, Byte* buffer, std::wstring& error) {
+    std::vector<UniqueHandle> directories;
+    std::error_code ec;
+    const auto source_parent = std::filesystem::absolute(source_path.parent_path(), ec).lexically_normal();
+    if (ec || !PinParents(source_parent, directories)) { error = L"Unsafe shared payload source directory."; return false; }
+    const auto staging = std::filesystem::absolute(root, ec).lexically_normal();
+    if (ec) { error = L"Cannot resolve shared payload staging directory."; return false; }
+    const auto target_parent = std::filesystem::absolute(target.parent_path(), ec).lexically_normal();
+    if (ec || !PinParents(target_parent, directories, staging)) { error = L"Unsafe shared payload destination directory."; return false; }
+    UniqueHandle source(CreateFileW(source_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                   FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
+    BY_HANDLE_FILE_INFORMATION identity{};
+    if (!PlainFile(source.get(), identity) ||
+        ((uint64_t{identity.nFileSizeHigh} << 32) | identity.nFileSizeLow) != item.size) {
+        error = L"Shared payload source is not a verified regular file.";
+        return false;
+    }
+    CSha256 sha;
+    Sha256_Init(&sha);
+    for (uint64_t left = item.size; left;) {
+        const DWORD want = static_cast<DWORD>(left < kInputChunk ? left : kInputChunk);
+        if (!ReadExact(source.get(), buffer, want)) { error = Win32Message(L"Cannot read shared payload source"); return false; }
+        Sha256_Update(&sha, buffer, want);
+        left -= want;
+    }
+    Byte digest[SHA256_DIGEST_SIZE];
+    Sha256_Final(&sha, digest);
+    if (HexDigest(digest) != item.sha256) { error = L"Checksum mismatch for shared payload " + item.path; return false; }
+    auto temp = target;
+    temp += L".pulse-new";
+    if (CreateHardLinkW(temp.c_str(), source_path.c_str(), nullptr)) {
+        UniqueHandle linked(CreateFileW(temp.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                       FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        BY_HANDLE_FILE_INFORMATION check{};
+        const bool same = PlainFile(linked.get(), check) && SameFile(identity, check);
+        linked.reset();
+        source.reset();
+        if (!same) { DeleteFileW(temp.c_str()); error = L"Shared payload file changed while linking."; return false; }
+    } else {
+        const DWORD failure = GetLastError();
+        if (failure != ERROR_NOT_SUPPORTED && failure != ERROR_INVALID_FUNCTION && failure != ERROR_NOT_SAME_DEVICE) {
+            error = Win32Message(L"Cannot link shared payload", failure);
+            return false;
+        }
+        if (!CopyFileW(source_path.c_str(), temp.c_str(), TRUE)) {
+            error = Win32Message(L"Cannot copy shared payload on this filesystem");
+            return false;
+        }
+    }
+    if (!MoveFileExW(temp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        error = Win32Message(L"Cannot place shared payload");
+        DeleteFileW(temp.c_str());
+        return false;
+    }
+    return true;
 }
 
 
@@ -356,12 +516,13 @@ bool Payload::ReadManifest(std::wstring& error) {
     XzReader reader(file.get(), info_.payload_offset, info_.payload_size);
     unsigned char header[8];
     if (!reader.Start() || !reader.Read(header, sizeof(header), error)) return false;
-    if (std::memcmp(header, "PPKM", 4) != 0) { error = L"Setup manifest is missing."; return false; }
+    const bool compact = std::memcmp(header, "PPK2", 4) == 0;
+    if (!compact && std::memcmp(header, "PPKM", 4) != 0) { error = L"Setup manifest is missing."; return false; }
     const uint32_t len = header[4] | (header[5] << 8) | (header[6] << 16) | (static_cast<uint32_t>(header[7]) << 24);
     if (len == 0 || len > (16u << 20)) { error = L"Setup manifest size is invalid."; return false; }
     std::string text(len, '\0');
     if (!reader.Read(text.data(), len, error)) return false;
-    if (!ParseManifest(text, info_)) { error = L"Setup manifest is invalid."; return false; }
+    if (!ParseManifest(text, info_, compact)) { error = L"Setup manifest is invalid."; return false; }
     return true;
 }
 
@@ -378,17 +539,23 @@ bool Payload::ExtractTo(const std::filesystem::path& target, const ProgressCallb
 
     std::unique_ptr<Byte[]> buffer(new Byte[kInputChunk]);
     ExtractProgress state;
-    state.total_bytes = info_.total_bytes;
+    state.total_bytes = info_.stored_bytes;  // aliases are hard links: no bytes to write
     for (const auto& f : info_.files) {
         state.current = &f;
         if (progress && !progress(state)) { error = L"Canceled."; return false; }
         const auto final_path = target / f.path;
+        if (f.link_to) {
+            if (!WriteAlias(target, target / info_.files[*f.link_to].path, final_path, f, buffer.get(), error))
+                return false;
+            if (progress && !progress(state)) { error = L"Canceled."; return false; }
+            continue;
+        }
         std::error_code ec;
         std::filesystem::create_directories(final_path.parent_path(), ec);
         if (ec) { error = L"Cannot create folder " + final_path.parent_path().wstring(); return false; }
         auto temp_path = final_path;
         temp_path += L".pulse-new";
-        UniqueHandle out(CreateFileW(temp_path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+        UniqueHandle out(CreateFileW(temp_path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                                      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
         if (out.get() == INVALID_HANDLE_VALUE) { out.release(); error = Win32Message((L"Cannot write " + temp_path.wstring()).c_str()); return false; }
         CSha256 sha;
@@ -422,6 +589,22 @@ bool Payload::ExtractTo(const std::filesystem::path& target, const ProgressCallb
         }
     }
     return reader.Finish(error);
+}
+
+uint64_t Payload::SharedBytesAt(const std::filesystem::path& target) const {
+    const auto inspect = [&](const std::wstring& name, BY_HANDLE_FILE_INFORMATION& info) {
+        UniqueHandle file(CreateFileW((target / name).c_str(), FILE_READ_ATTRIBUTES,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                      OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        return PlainFile(file.get(), info);
+    };
+    uint64_t total = 0;
+    for (const auto& f : info_.files) {
+        BY_HANDLE_FILE_INFORMATION source{}, dest{};
+        if (f.link_to && inspect(info_.files[*f.link_to].path, source) && inspect(f.path, dest) &&
+            SameFile(source, dest)) total += f.size;
+    }
+    return total;
 }
 
 }  // namespace pulse::setup

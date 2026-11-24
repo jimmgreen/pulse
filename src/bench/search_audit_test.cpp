@@ -1,6 +1,7 @@
 #include "../index/content_index.h"
 #include "../index/network_index.h"
 #include "../app/global_search_handoff.h"
+#include "../app/live_folder_scope.h"
 #include "../app/search_query.h"
 #include "../app/live_network_search.h"
 #include <algorithm>
@@ -133,13 +134,113 @@ void Sessions() {
     }
     Check(a->cancel, "window teardown cancels remaining worker");
 }
+void LiveLocalScopeTests(const std::filesystem::path& base) {
+    using namespace pulse::app;
+    std::vector<index::VolumeInfo> vols;
+    {
+        index::VolumeInfo c;
+        c.id = L"\\\\?\\Volume{c}\\";
+        c.mount_point = L"C:\\";
+        c.file_system = L"NTFS";
+        c.online = true; c.supported = true; c.enabled = true;
+        c.indexed_items = 1000;
+        vols.push_back(c);
+
+        index::VolumeInfo d;
+        d.id = L"\\\\?\\Volume{d}\\";
+        d.mount_point = L"D:\\";
+        d.file_system = L"NTFS";
+        d.online = true; d.supported = true; d.enabled = false;
+        vols.push_back(d);
+
+        index::VolumeInfo usb;
+        usb.id = L"\\\\?\\Volume{usb}\\";
+        usb.mount_point = L"E:\\";
+        usb.file_system = L"exFAT";
+        usb.online = true; usb.supported = false; usb.enabled = false;
+        vols.push_back(usb);
+    }
+    const std::vector<std::wstring> excluded = {L"C:\\Excluded"};
+    const std::vector<index::NetworkRootInfo> net_roots;
+
+    Check(IsPathCoveredByLocalIndex(true, true, vols, excluded, L"C:\\Users\\demo"),
+          "enabled online NTFS folder is covered by local index");
+    Check(IsPathCoveredByLocalIndex(true, true, vols, excluded, L"C:\\ExcludedSibling"),
+          "exclusion check enforces path boundary");
+    Check(!IsPathCoveredByLocalIndex(true, true, vols, excluded, L"C:\\Excluded\\sub"),
+          "excluded subtree under NTFS is not covered");
+    Check(!IsPathCoveredByLocalIndex(true, true, vols, excluded, L"E:\\USB\\Photos"),
+          "exFAT volume is not covered by local NTFS index");
+    Check(ClassifyLiveFolderSearch(true, true, vols, excluded, net_roots, L"E:\\USB\\Photos") ==
+              LiveFolderSearchKind::Local,
+          "exFAT scoped search routes to local live folder walk");
+    Check(ClassifyLiveFolderSearch(true, true, vols, excluded, net_roots, L"C:\\Users\\demo") ==
+              LiveFolderSearchKind::None,
+          "covered NTFS scoped search uses local index without live walk");
+    Check(ClassifyLiveFolderSearch(true, true, vols, excluded, net_roots, L"\\\\nas\\share") ==
+              LiveFolderSearchKind::Network,
+          "uncovered UNC search routes to network live walk");
+    Check(ClassifyLiveFolderSearch(true, true, vols, excluded, net_roots, L"C:\\Users\\demo", true) ==
+              LiveFolderSearchKind::None &&
+              ClassifyLiveFolderSearch(true, false, vols, excluded, net_roots, L"C:\\Users\\demo", true) ==
+              LiveFolderSearchKind::None,
+          "isolated test without scope preserves direct local routing");
+    Check(ShouldAllowUncoveredContentScope(true, true, vols, excluded, L"E:\\USB\\Photos"),
+          "exFAT scoped folder allows uncovered content search");
+    Check(!ShouldAllowUncoveredContentScope(true, true, vols, excluded, L"D:\\DisabledNtfs"),
+          "explicitly disabled NTFS volume does not bypass content scope opt-out");
+    Check(!ShouldAllowUncoveredContentScope(true, true, vols, excluded, L"C:\\Excluded\\sub"),
+          "excluded path does not allow uncovered content search");
+    Check(!ShouldAllowUncoveredContentScope(false, false, vols, excluded, L"C:\\fixture", true),
+          "isolated test without known volume scope stays gated for scope recovery");
+
+    // Local directory walk via fast NtQueryDirectoryFile + precheck + cancellation.
+    const auto walk_root = base / L"local_live";
+    const auto nested = walk_root / L"nested";
+    std::filesystem::create_directories(nested);
+    std::ofstream(walk_root / L"alpha_report.txt") << "a";
+    std::ofstream(nested / L"beta_report.log") << "b";
+    std::ofstream(nested / L"ignored.bin") << "c";
+
+    index::Query q;
+    q.path_prefix = walk_root.wstring();
+    q.needle = L"report";
+    q.rank = true;
+    q.limit = 50;
+    index::LiveNetworkMatches matches;
+    std::mutex mu;
+    std::atomic<bool> cancel{false};
+    index::LiveNetworkWalk(q, matches, mu, [&] { return cancel.load(); }, {});
+    Check(matches.complete && matches.error == 0 && matches.total == 2 && matches.hits.size() == 2,
+          "local live walk finds recursive matches with zero errors");
+
+    q.offset = 1; q.limit = 1;
+    const auto page = index::SelectLiveNetworkHits(q, matches);
+    Check(page.total == 2 && page.hits.size() == 1,
+          "local live walk result selector supports pagination offset and limit");
+
+    index::Query path_q = q;
+    path_q.offset = 0; path_q.limit = 50;
+    path_q.needle = L"path: nested .log";
+    index::LiveNetworkMatches path_matches;
+    index::LiveNetworkWalk(path_q, path_matches, mu, [&] { return false; }, {});
+    Check(path_matches.complete && path_matches.total == 1 &&
+              path_matches.hits.front().name == L"beta_report.log",
+          "local live walk evaluates path-prefixed queries correctly");
+
+    index::LiveNetworkMatches cancelled_matches;
+    std::atomic<bool> pre_cancel{true};
+    index::LiveNetworkWalk(q, cancelled_matches, mu, [&] { return pre_cancel.load(); }, {});
+    Check(!cancelled_matches.complete && cancelled_matches.hits.empty(),
+          "local live walk stops cleanly when cancelled");
+}
 }
 int wmain() {
     wchar_t module[32768]{}; GetModuleFileNameW(nullptr, module, ARRAYSIZE(module));
     const auto base = std::filesystem::path(module).parent_path().parent_path() / L"bench_data" /
         (L"search-audit-" + std::to_wstring(GetCurrentProcessId()));
     std::filesystem::create_directories(base);
-    FilenamePredicates(base); Handoff(); Merge(); Sessions();
+    FilenamePredicates(base); Handoff(); Merge(); Sessions(); LiveLocalScopeTests(base);
     std::filesystem::remove_all(base);
     return failed ? 1 : 0;
 }

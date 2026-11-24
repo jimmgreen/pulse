@@ -1,6 +1,8 @@
 #pragma once
 
 #include "../common/localization.h"
+#include "../common/json_value.h"
+#include <charconv>
 
 #include <optional>
 #include <string>
@@ -66,12 +68,30 @@ inline std::wstring ReplaceStoreToken(std::wstring text, std::wstring_view token
 
 inline std::wstring LocalizedStoreInstallError(std::string_view error) {
     using Id = l10n::StringId;
+    constexpr std::string_view rename_prefix = "install_atomic_rename:";
+    if (error.starts_with(rename_prefix)) {
+        const auto detail = error.substr(rename_prefix.size());
+        const auto end = detail.find(':');
+        const auto code_text = detail.substr(0, end);
+        unsigned code = 0;
+        const auto parsed = std::from_chars(code_text.data(), code_text.data() + code_text.size(), code);
+        if (parsed.ec == std::errc{} && parsed.ptr == code_text.data() + code_text.size() &&
+            (code == 5 || code == 32 || code == 33)) {
+            std::wstring message = l10n::Get(code == 5 ? Id::StoreErrorInstallDenied : Id::StoreErrorInstallBusy);
+            message += L" (" + AsciiIdentifierWide(code_text) + L")";
+            if (end != std::string_view::npos && detail.substr(end).starts_with(":target=")) {
+                message += L"\n" + json::Wide(detail.substr(end + std::string_view(":target=").size()));
+            }
+            return message;
+        }
+        return AsciiIdentifierWide(error);
+    }
     if (error == "package_signature_invalid" ||
         (error.find("signature") != std::string_view::npos && error != "signature_required")) {
         return l10n::Get(Id::StoreErrorSignatureInvalid) + L" (" + AsciiIdentifierWide(error) + L")";
     }
     if (error == "signature_required" || error.find("unsigned package rejected") != std::string_view::npos) {
-        return l10n::Get(Id::StoreErrorSignatureRequired);
+        return l10n::Get(Id::StoreErrorSignatureRequired) + L"\n" + l10n::Get(Id::StoreUnsignedDevHint);
     }
     if (error == "installed_publisher_mismatch") {
         return l10n::Get(Id::StoreErrorPublisherMismatch);

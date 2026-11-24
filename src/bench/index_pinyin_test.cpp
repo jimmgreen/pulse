@@ -49,7 +49,9 @@ struct EngineTestAccess {
         e.InvalidateFilterLocked();
     }
     static void ClearQueryCache(Engine& e) { e.InvalidateFilterLocked(); }
-    static size_t ChineseCandidates(const Engine& e) { return e.pinyin_chinese_ids_.size(); }
+    static size_t ChineseCandidates(const Engine& e) { return e.PinyinChineseIdsLocked().size(); }
+    static bool IsMapped(const Engine& e) { return e.PinyinIsMappedLocked(); }
+    static size_t PrivateHeapBytes(const Engine& e) { return e.PinyinPrivateHeapBytesLocked(); }
 };
 }
 int wmain(int argc, wchar_t** argv) {
@@ -72,6 +74,7 @@ int wmain(int argc, wchar_t** argv) {
         check(search(L"chongqing nopinyin:").total == 0, "disabled pinyin snapshot");
         check(search(L"zgbg").total == static_cast<size_t>(count / 20), "all Chinese-only candidates found");
         check(EngineTestAccess::ChineseCandidates(engine) == static_cast<size_t>(count / 20 + 1), "auxiliary IDs contain only Chinese names");
+        check(EngineTestAccess::IsMapped(engine) && EngineTestAccess::PrivateHeapBytes(engine) == 0, "pinyin sidecar mapped zero-copy with zero private heap");
         check(search(L"z").total == 0 && search(L"zh").total != 0, "typing transition invalidates narrow reuse");
         EngineTestAccess::Rename(engine, count + 1, L"银行.txt");
         check(search(L"chongqing").total == 0 && search(L"yinhang").total == 1, "rename replaces cached pronunciation");

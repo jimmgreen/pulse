@@ -42,6 +42,7 @@ inline PaneBannerStyle ClassifyPaneBanner(const Tab& tab, bool can_go_up, bool c
     if (is(I::DeviceDisconnectedTitle) || is(I::DeviceWaitingTitle))
         return with(2, A::Retry, can_go_up ? A::GoUp : A::None);
     if (is(I::DeviceNoResponseTitle)) return with(3, A::Retry, can_go_up ? A::GoUp : A::None);
+    if (is(I::LocalFolderPermissionTitle)) return with(2, A::OpenNativeFolder, A::Retry);
     if (is(I::DriveLockedTitle)) return with(2, A::Unlock);
     if (is(I::Offline)) return with(2, A::Reconnect);
     if (is(I::CannotOpen)) {
@@ -59,7 +60,13 @@ inline PaneBannerStyle ClassifyPaneBanner(const Tab& tab, bool can_go_up, bool c
         st.dismissible = true;
         return st;
     }
+    if (is(I::FileTagSync)) {
+        st.kind = 0;
+        st.dismissible = true;
+        return st;
+    }
     if (is(I::NetworkLiveTitle)) return with(0, network_live_action ? A::AddNetworkIndex : A::None);
+    if (is(I::LocalLiveTitle)) return with(0, A::None);
     if (is(I::ContentUpdatesPaused)) return with(0, A::Refresh);
     if (is(I::RecycleBin) || is(I::Cache)) return with(4, A::None);
     if (title.empty() && tab.banner_message == l10n::Get(I::NetworkSearchSnapshot)) return with(0, A::Refresh);

@@ -27,20 +27,21 @@ public:
     // Hidden to the tray or minimized: background results only need to be
     // picked up eventually, and showing the window is activity (fast again).
     static constexpr UINT kHiddenMs = 1000;
+    static constexpr UINT kTrayHibernatedMs = 5000;
     // How long the fast period lasts after the last activity.
     static constexpr ULONGLONG kLingerMs = 1000;
 
     void NoteActivity(ULONGLONG now) noexcept { active_until_ = now + kLingerMs; }
 
-    UINT Want(bool visible, ULONGLONG now) const noexcept {
-        if (!visible) return kHiddenMs;
+    UINT Want(bool visible, ULONGLONG now, bool tray_hibernated = false) const noexcept {
+        if (!visible) return tray_hibernated ? kTrayHibernatedMs : kHiddenMs;
         if (now < active_until_) return kActiveMs;
         return now < active_until_ + kQuietAfterMs ? kIdleMs : kQuietMs;
     }
 
     // True when the period changes; `period` then holds the new value.
-    bool Update(bool visible, ULONGLONG now, UINT& period) noexcept {
-        const UINT want = Want(visible, now);
+    bool Update(bool visible, ULONGLONG now, UINT& period, bool tray_hibernated = false) noexcept {
+        const UINT want = Want(visible, now, tray_hibernated);
         if (want == current_) return false;
         current_ = want;
         period = want;

@@ -27,7 +27,7 @@ std::wstring Seconds(int64_t t) {
 
 bool ParseFfmpegMediaInfo(std::string_view log, FfmpegMediaInfo& info) {
     info = {};
-    info.duration = static_cast<int64_t>(ffmpeg::ParseDurationMs(log)) * 10'000;
+    info.duration = ffmpeg::ParseDuration100ns(log);
     info.video = ffmpeg::HasStream(log, "Video");
     info.audio = ffmpeg::HasStream(log, "Audio");
     std::istringstream lines{std::string(log)};
@@ -60,6 +60,7 @@ bool ParseFfmpegMediaInfo(std::string_view log, FfmpegMediaInfo& info) {
             const double display = static_cast<double>(w) * num / den;
             info.width = static_cast<uint32_t>(std::clamp(std::lround(display), 1L, 65535L));
             info.height = h;
+            if (ffmpeg::ParseVideoQuarterTurn(log)) std::swap(info.width, info.height);
             info.fps = ffmpeg::ParseFrameRate(log);
         }
     }
@@ -168,12 +169,17 @@ SIZE FfmpegFrameSize(uint32_t width, uint32_t height, SIZE box) {
     if (!width || !height) return {16, 16};
     const double bw = (std::max)(16L, box.cx), bh = (std::max)(16L, box.cy);
     const double scale = (std::min)({1.0, bw / width, bh / height});
-    auto even = [](double v) { return (std::max)(16L, static_cast<LONG>(std::lround(v / 2.0)) * 2); };
-    return {even(width * scale), even(height * scale)};
+    auto even = [](double scaled, double limit) {
+        const LONG nearest = static_cast<LONG>(std::lround(scaled * 0.5)) * 2;
+        const LONG largest = static_cast<LONG>(limit) & ~1L;
+        return (std::max)(16L, (std::min)(nearest, largest));
+    };
+    return {even(width * scale, (std::min)(bw, static_cast<double>(width))),
+            even(height * scale, (std::min)(bh, static_cast<double>(height)))};
 }
 
 double FfmpegOutputRate(double source_fps) {
-    if (!(source_fps > 0.5)) return 25.0;
+    if (!(source_fps >= 0.0001)) return 25.0;
     return (std::min)(source_fps, 30.0);
 }
 
@@ -292,8 +298,17 @@ bool FfmpegPlayback::Start(int64_t position, float rate, SIZE box, bool playing)
         frame_size_ = FfmpegFrameSize(info_.width, info_.height,
                                       {(std::min)(box.cx, 1920L), (std::min)(box.cy, 1080L)});
         out_fps_ = FfmpegOutputRate(info_.fps);
+        // FFmpeg normally drops non-discontinuous timestamps that jump more than
+        // 30 hours. A sparse recording can legitimately span its entire duration.
+        const bool long_timeline = info_.duration >= 30ll * 3600 * kSecond;
+        const std::wstring gap_option = long_timeline
+            ? L" -dts_error_threshold " + std::to_wstring(info_.duration / kSecond + 1) : L"";
+        // A whole clip shorter than one output interval still needs a poster.
+        const bool keep_last = long_timeline ||
+            (info_.duration > 0 && info_.duration < static_cast<int64_t>(kSecond / out_fps_));
         wchar_t filter[160];
-        swprintf_s(filter, L"fps=%.4f,scale=%ld:%ld:flags=bilinear,format=bgra", out_fps_,
+        swprintf_s(filter, L"fps=%.4f%ls,scale=%ld:%ld:flags=bilinear,format=bgra", out_fps_,
+                   keep_last ? L":eof_action=pass" : L"",
                    frame_size_.cx, frame_size_.cy);
         std::wstring video_filter = filter;
         if (subtitle_track_ >= 0) {
@@ -312,7 +327,7 @@ bool FfmpegPlayback::Start(int64_t position, float rate, SIZE box, bool playing)
             video_filter = L"setpts=PTS+" + Seconds(start_) + L"/TB,subtitles=filename=" + filename +
                 L":si=" + std::to_wstring(subtitle_track_) + L",setpts=PTS-STARTPTS," + video_filter;
         }
-        const std::wstring args = L"-hide_banner -nostdin -nostats -loglevel error" + seek + L" -i " + input +
+        const std::wstring args = L"-hide_banner -nostdin -nostats -loglevel error" + gap_option + seek + L" -i " + input +
             L" -map 0:v:0 -an -sn -dn -vf " + ffmpeg::QuoteArgument(video_filter) + L" -f rawvideo -pix_fmt bgra pipe:1";
         ffmpeg::LaunchOptions options;
         options.priority = NORMAL_PRIORITY_CLASS;
@@ -571,6 +586,13 @@ bool FfmpegPlayback::Ended() {
     {
         std::lock_guard lock(queue_mutex_);
         if (info_.video) video_done = video_eof_ && queue_.empty() && !stepped_frame_;
+    }
+    // At slideshow rates the final decoded frame can remain on screen for
+    // seconds. Decoder EOF alone does not mean its presentation time is over.
+    if (video_done && info_.video && first_shown_ && out_fps_ <= 0.5 && info_.duration > shown_time_) {
+        const int64_t hold = (std::min)(info_.duration - shown_time_,
+                                        static_cast<int64_t>(std::llround(kSecond / out_fps_)));
+        if (Position() < shown_time_ + hold) return false;
     }
     return video_done && AudioDrained();
 }

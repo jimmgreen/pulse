@@ -7,10 +7,10 @@
 
 namespace pulse::app {
 
-// A modified row (same name, new size or date) retains its displayed position
-// within its group until F5, a sort change, or reopening the folder, and so
-// does a file saved through a temp file or a backup rename. New and renamed
-// rows, and rows whose group changes, take their sort position.
+// Live updates obey the same sorting and grouping as a full enumeration.
+// Only entries with equivalent ordering keys can retain their slot.
+bool SameEntrySortPosition(const fs::DirEntry& a, const fs::DirEntry& b,
+                           ui::SortColumn col, ui::SortDirection dir);
 
 // True when `a` and `b` fall in the same group (always true when ungrouped).
 bool SameEntryGroup(const fs::DirEntry& a, const fs::DirEntry& b,
@@ -25,8 +25,8 @@ bool GroupBefore(const fs::DirEntry& a, const fs::DirEntry& b,
 void InsertAtGroupEnd(std::vector<fs::DirEntry>& entries, fs::DirEntry entry,
                       ui::SortColumn col, ui::SortDirection dir);
 
-// Puts `entry` in row `slot` when that row is in the same group, otherwise
-// drops the row (if any) and inserts `entry` at the end of its group.
+// Replaces an equivalent ordering key in place; otherwise reinserts the row
+// at its current sort position (including grouping and folder placement).
 void PlaceEntryHeld(std::vector<fs::DirEntry>& entries, int slot, fs::DirEntry entry,
                     ui::SortColumn col, ui::SortDirection dir);
 
@@ -36,10 +36,8 @@ struct EntryRename {
     std::wstring new_name;
 };
 
-// Merges a freshly enumerated listing (`fresh`, in sort order) into the order
-// on screen (`shown`): existing rows in the same group keep their place with
-// fresh metadata, removed rows drop out, and new rows (renamed ones included,
-// or rows whose group changed) merge in at their sort position.
+// Returns the worker's freshly sorted listing without restoring obsolete positions.
+// Kept for callers of the historical refresh reconciliation helper.
 std::vector<fs::DirEntry> KeepEntryOrder(const std::vector<fs::DirEntry>& shown,
                                          const std::vector<fs::DirEntry>& fresh,
                                          ui::SortColumn col, ui::SortDirection dir);

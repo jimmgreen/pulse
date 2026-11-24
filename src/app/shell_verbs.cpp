@@ -43,6 +43,31 @@ bool RegValueExists(HKEY root, const std::wstring& subkey, const wchar_t* value)
                         nullptr) == ERROR_SUCCESS;
 }
 
+bool RegSubkeyExists(HKEY root, const std::wstring& subkey) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(root, subkey.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return false;
+    RegCloseKey(key);
+    return true;
+}
+
+std::wstring ExpandRegCommandEnv(const std::wstring& cmd) {
+    if (cmd.empty() || cmd.find(L'%') == std::wstring::npos) return cmd;
+    const DWORD needed = ExpandEnvironmentStringsW(cmd.c_str(), nullptr, 0);
+    if (needed == 0 || needed > 32768) return cmd;
+    std::wstring expanded(needed, L'\0');
+    const DWORD written = ExpandEnvironmentStringsW(cmd.c_str(), expanded.data(), needed);
+    if (written == 0 || written > needed) return cmd;
+    expanded.resize(wcsnlen(expanded.c_str(), expanded.size()));
+    return expanded;
+}
+
+uint8_t EncodeRegRoot(HKEY root) {
+    if (root == HKEY_LOCAL_MACHINE) return 1;
+    if (root == HKEY_CURRENT_USER) return 2;
+    return 0;
+}
+
 std::wstring StripMnemonics(const std::wstring& in) {
     std::wstring out;
     out.reserve(in.size());
@@ -84,7 +109,8 @@ std::wstring KnownVerbDisplay(const std::wstring& lower) {
 
 bool FillStaticVerbFromKey(HKEY root, const std::wstring& verb_key, const std::wstring& verb,
                            bool allow_cascade, bool background, StaticVerb& out);
-void CollectCascadeChildren(HKEY parent_root, const std::wstring& subcommands,
+void CollectCascadeChildren(HKEY parent_root, const std::wstring& verb_key,
+                            bool has_subcommands, const std::wstring& subcommands,
                             const std::wstring& ext_key, bool background,
                             std::vector<StaticVerb>& children);
 void CollectVerbsFrom(HKEY root, const std::wstring& shell_key, std::vector<StaticVerb>& out,
@@ -110,10 +136,17 @@ bool FillStaticVerbFromKey(HKEY root, const std::wstring& verb_key, const std::w
     flags.legacy_disable = RegValueExists(root, verb_key, L"LegacyDisable");
     flags.programmatic = RegValueExists(root, verb_key, L"ProgrammaticAccessOnly");
     flags.extended = RegValueExists(root, verb_key, L"Extended");
-    const std::wstring command = RegReadString(root, verb_key + L"\\command", nullptr);
+    const std::wstring command = ExpandRegCommandEnv(
+        RegReadString(root, verb_key + L"\\command", nullptr));
+    const std::wstring delegate_clsid =
+        RegReadString(root, verb_key + L"\\command", L"DelegateExecute");
+    const std::wstring drop_target_clsid =
+        RegReadString(root, verb_key + L"\\DropTarget", L"CLSID");
+    const bool has_dde = RegSubkeyExists(root, verb_key + L"\\ddeexec");
     flags.has_command = !command.empty();
-    flags.has_delegate_execute =
-        !RegReadString(root, verb_key + L"\\command", L"DelegateExecute").empty();
+    flags.has_delegate_execute = !delegate_clsid.empty();
+    flags.has_drop_target = !drop_target_clsid.empty();
+    flags.has_dde = has_dde;
     flags.has_explorer_command =
         !RegReadString(root, verb_key, L"ExplorerCommandHandler").empty();
     const std::wstring subcommands = RegReadString(root, verb_key, L"SubCommands");
@@ -134,6 +167,11 @@ bool FillStaticVerbFromKey(HKEY root, const std::wstring& verb_key, const std::w
     if (display.empty()) display = KnownVerbDisplay(lower);
     if (display.empty()) display = verb;
 
+    const std::wstring msm = ToLower(RegReadString(root, verb_key, L"MultiSelectModel"));
+    uint8_t multi_select_model = 0;
+    if (msm == L"player") multi_select_model = 1;
+    else if (msm == L"single") multi_select_model = 2;
+
     out.verb = verb;
     out.display = StripMnemonics(display);
     out.mnemonic = ipc::MenuMnemonic(display);
@@ -143,16 +181,26 @@ bool FillStaticVerbFromKey(HKEY root, const std::wstring& verb_key, const std::w
     // the registered handler rather than launch that fallback on the file.
     out.command = ipc::UseStaticVerbCommand(flags) ? command : std::wstring();
     out.icon = RegReadString(root, verb_key, L"Icon");
+    out.icon_pixels.reset();
+    out.delegate_clsid = delegate_clsid;
+    out.drop_target_clsid = drop_target_clsid;
+    out.reg_key = verb_key;
+    out.reg_root = EncodeRegRoot(root);
+    out.multi_select_model = multi_select_model;
+    out.has_dde = has_dde;
     out.children.clear();
     if (allow_cascade)
-        CollectCascadeChildren(root, subcommands, ext_key, background, out.children);
+        CollectCascadeChildren(root, verb_key, flags.has_subcommands, subcommands, ext_key,
+                               background, out.children);
     if ((flags.has_subcommands || flags.has_extended_subcommands_key) &&
-        out.children.empty() && !flags.has_command)
+        out.children.empty() && !flags.has_command && !flags.has_delegate_execute &&
+        !flags.has_drop_target && !flags.has_dde)
         return false;
     return true;
 }
 
-void CollectCascadeChildren(HKEY parent_root, const std::wstring& subcommands,
+void CollectCascadeChildren(HKEY parent_root, const std::wstring& verb_key,
+                            bool has_subcommands, const std::wstring& subcommands,
                             const std::wstring& ext_key, bool background,
                             std::vector<StaticVerb>& children) {
     if (!subcommands.empty()) {
@@ -173,6 +221,9 @@ void CollectCascadeChildren(HKEY parent_root, const std::wstring& subcommands,
             else cur += c;
         }
         flush();
+    } else if (has_subcommands && !verb_key.empty()) {
+        // SubCommands="" means inline sub-verbs under <verb>\shell\<child>.
+        CollectVerbsFrom(parent_root, verb_key + L"\\shell", children, true, background, nullptr);
     }
     if (!ext_key.empty()) {
         std::wstring shell_key = ext_key;
@@ -185,7 +236,9 @@ void CollectCascadeChildren(HKEY parent_root, const std::wstring& subcommands,
     }
     children.erase(std::remove_if(children.begin(), children.end(),
                                   [](const StaticVerb& child) {
-                                      return child.children.empty() && child.command.empty() && child.app_path.empty();
+                                      return child.children.empty() && child.command.empty() &&
+                                             child.app_path.empty() && child.delegate_clsid.empty() &&
+                                             child.drop_target_clsid.empty() && !child.has_dde;
                                   }),
                    children.end());
 }
@@ -491,8 +544,9 @@ bool GetW(const uint8_t*& p, const uint8_t* end, std::wstring& s) {
 // v6: a DelegateExecute verb keeps no command (setdesktopwallpaper's
 // placeholder Explorer.exe), so v5 files with that command are discarded.
 // v7: native ExplorerCommandHandler titles replace registry-name fallback rows.
-constexpr uint32_t kStaticVerbCacheVersion = 9;
-constexpr uint32_t kStaticVerbCacheMinVersion = 9;
+// v10: delegate/drop-target CLSIDs, reg key, MultiSelectModel and DDE flags.
+constexpr uint32_t kStaticVerbCacheVersion = 10;
+constexpr uint32_t kStaticVerbCacheMinVersion = 10;
 
 void PutVerb(std::vector<uint8_t>& buf, const StaticVerb& v, int depth) {
     PutW(buf, v.verb);
@@ -500,6 +554,12 @@ void PutVerb(std::vector<uint8_t>& buf, const StaticVerb& v, int depth) {
     PutW(buf, v.app_path);
     PutW(buf, v.command);
     PutU32(buf, static_cast<uint32_t>(v.mnemonic));
+    PutW(buf, v.delegate_clsid);
+    PutW(buf, v.drop_target_clsid);
+    PutW(buf, v.reg_key);
+    PutU32(buf, static_cast<uint32_t>(v.reg_root));
+    PutU32(buf, static_cast<uint32_t>(v.multi_select_model));
+    PutU32(buf, v.has_dde ? 1u : 0u);
     const uint32_t n = depth >= ipc::kMaxMenuDepth ? 0 : static_cast<uint32_t>(
         (std::min)(v.children.size(), static_cast<size_t>(ipc::kMaxSubmenuChildren)));
     PutU32(buf, n);
@@ -515,6 +575,16 @@ bool GetVerb(const uint8_t*& p, const uint8_t* end, StaticVerb& v, int depth, ui
         uint32_t key = 0;
         if (!GetU32(p, end, key) || key > 0xFFFF) return false;
         v.mnemonic = static_cast<wchar_t>(key);
+    }
+    if (version >= 10) {
+        uint32_t reg_root = 0, msm = 0, dde = 0;
+        if (!GetW(p, end, v.delegate_clsid) || !GetW(p, end, v.drop_target_clsid) ||
+            !GetW(p, end, v.reg_key) || !GetU32(p, end, reg_root) || reg_root > 2 ||
+            !GetU32(p, end, msm) || msm > 2 || !GetU32(p, end, dde) || dde > 1)
+            return false;
+        v.reg_root = static_cast<uint8_t>(reg_root);
+        v.multi_select_model = static_cast<uint8_t>(msm);
+        v.has_dde = dde != 0;
     }
     uint32_t n = 0;
     if (!GetU32(p, end, n) || n > 16 || (depth >= ipc::kMaxMenuDepth && n != 0)) return false;

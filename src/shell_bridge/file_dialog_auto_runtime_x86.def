@@ -3,4 +3,6 @@ EXPORTS
     PulseFileDialogRuntimeQuery=_PulseFileDialogRuntimeQuery@8
     PulseFileDialogRuntimeAutoStart=_PulseFileDialogRuntimeAutoStart@8
     PulseFileDialogRuntimeAutoAttach=_PulseFileDialogRuntimeAutoAttach@4
+    PulseFileDialogRuntimeUserAutoAttach=_PulseFileDialogRuntimeUserAutoAttach@4
     PulseFileDialogRuntimeAutoQuery=_PulseFileDialogRuntimeAutoQuery@8
+    PulseFileDialogRuntimeAutoDiagnose=_PulseFileDialogRuntimeAutoDiagnose@4

@@ -24,7 +24,7 @@ void ReleaseLeavingTab(AppState& s, const app::LayoutTab& tab, bool active) {
         if (s.renameIndex >= 0) HideRenameOverlay(s, false);
         if (s.addressEditing) HideAddressEditor(s, false);
         if (s.filterEditing) HideFilterEditor(s, true);
-        if (s.quickPreview.visible()) s.quickPreview.Close();
+        if (s.quickPreview->visible()) s.quickPreview->Close();
     }
     if (OwnsView(tab, static_cast<const app::Tab*>(s.fileClick.Item().tab)) || OwnsPane(tab, static_cast<const app::Pane*>(s.fileClick.Item().pane))) CancelFileClick(s);
     if (OwnsView(tab, s.blankClickTab) || OwnsPane(tab, s.blankClickPane)) {

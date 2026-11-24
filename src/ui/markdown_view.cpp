@@ -170,6 +170,7 @@ void MarkdownView::Clear() {
     toc_follow_ = true;
     scroll_ = 0.0f;
     scroll_x_ = 0.0f;
+    scrollbar_hover_ = 0;
     relayout_ = true;
     doc_height_ = 0.0f;
 }
@@ -1012,8 +1013,10 @@ bool MarkdownView::DrawDocument(ID2D1DeviceContext* dc, IDWriteFactory2* factory
     for (bool horizontal : {false, true}) {
         const auto bar = Scrollbar(horizontal);
         if (bar.maximum <= 0.0f) continue;
-        brush_->SetColor(WithAlpha(theme.text, 0.25f));
-        dc->FillRoundedRectangle(D2D1::RoundedRect(bar.thumb, 1.5f * s, 1.5f * s), brush_.Get());
+        const int axis = horizontal ? 2 : 1;
+        const float alpha = scrollbar_drag_ == axis ? 0.45f : scrollbar_hover_ == axis ? 0.36f : 0.25f;
+        brush_->SetColor(WithAlpha(theme.text, alpha));
+        dc->FillRoundedRectangle(D2D1::RoundedRect(bar.thumb, 2.0f * s, 2.0f * s), brush_.Get());
     }
     dc->PopAxisAlignedClip();
     return repaint;
@@ -1033,18 +1036,19 @@ MarkdownView::ScrollbarGeometry MarkdownView::Scrollbar(bool horizontal) const {
     if (extent <= viewport + 1.0f) return bar;
     const bool other = horizontal ? doc_height_ > height + 1.0f : extent_x > width + 1.0f;
     const float start = (horizontal ? view_.left : view_.top) + 4.0f * scale_;
-    const float track = (std::max)(0.0f, viewport - (other ? 16.0f : 8.0f) * scale_);
+    const float track = (std::max)(0.0f, viewport - (other ? 18.0f : 8.0f) * scale_);
     const float thumb = (std::min)(track, (std::max)(24.0f * scale_, track * viewport / extent));
     bar.maximum = extent - viewport;
     bar.travel = track - thumb;
     const float position = horizontal ? scroll_x_ : scroll_;
     const float offset = start + bar.travel * std::clamp(position / bar.maximum, 0.0f, 1.0f);
+    // Keep the painted thumb clear of Quick Look's outer 3 DIP resize edge.
     if (horizontal) {
-        bar.hit = R(start, (std::max)(view_.top, view_.bottom - 12.0f * scale_), start + track, view_.bottom);
-        bar.thumb = R(offset, view_.bottom - 6.0f * scale_, offset + thumb, view_.bottom - 3.0f * scale_);
+        bar.hit = R(start, (std::max)(view_.top, view_.bottom - 14.0f * scale_), start + track, view_.bottom);
+        bar.thumb = R(offset, view_.bottom - 9.0f * scale_, offset + thumb, view_.bottom - 5.0f * scale_);
     } else {
-        bar.hit = R((std::max)(view_.left, view_.right - 12.0f * scale_), start, view_.right, start + track);
-        bar.thumb = R(view_.right - 6.0f * scale_, offset, view_.right - 3.0f * scale_, offset + thumb);
+        bar.hit = R((std::max)(view_.left, view_.right - 14.0f * scale_), start, view_.right, start + track);
+        bar.thumb = R(view_.right - 9.0f * scale_, offset, view_.right - 5.0f * scale_, offset + thumb);
     }
     return bar;
 }
@@ -1056,6 +1060,27 @@ bool MarkdownView::OverScrollbar(float x, float y) const {
             y >= bar.hit.top && y < bar.hit.bottom) return true;
     }
     return false;
+}
+
+bool MarkdownView::ScrollbarHover(float x, float y) {
+    int hit = 0;
+    for (bool horizontal : {false, true}) {
+        const auto bar = Scrollbar(horizontal);
+        if (bar.maximum > 0.0f && x >= bar.hit.left && x < bar.hit.right &&
+            y >= bar.hit.top && y < bar.hit.bottom) {
+            hit = horizontal ? 2 : 1;
+            break;
+        }
+    }
+    if (hit == scrollbar_hover_) return false;
+    scrollbar_hover_ = hit;
+    return true;
+}
+
+bool MarkdownView::Leave() {
+    if (scrollbar_hover_ == 0) return false;
+    scrollbar_hover_ = 0;
+    return true;
 }
 
 bool MarkdownView::ScrollbarMouseDown(float x, float y) {

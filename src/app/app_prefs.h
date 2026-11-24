@@ -7,6 +7,8 @@
 #include "toolbar_selection.h"
 #include "toolbar_tools.h"
 #include "toolbar_view_order.h"
+#include "title_buttons.h"
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -80,16 +82,30 @@ struct AppPrefs {
     // 鼠标与选择: single-click opens items (0 = double-click), the name band
     // that hints it (0 on hover, 1 always), hover selection, item check boxes.
     bool single_click_open = false;
+    int double_click_interval_ms = 0; // 0 follows Windows; custom file-click interval in ms.
     int name_highlight = 0;
     bool hover_select = false;
     bool item_checkboxes = false;
     // 同步状态: OneDrive placeholders and SVN working copies.
     bool sync_onedrive = true;
     bool sync_svn = true;
+    bool git_plain_terms = true;     // Git UI: plain wording by default (vs Git terms)
+    int tab_active_style = 0; // 0: C soft lift, 1: B gradient fill
     int tab_layout = 0;
     int tab_max_rows = 3;
+    bool tab_overflow_list = false;   // with tab_layout 0: 收进列表 — one row, the rest in the 「⧉ N」 list
     bool vertical_tabs = false;       // tabs as the first sidebar section
     bool tray_hide_when_empty = false; // staging tray folds away while empty (drags still show it)
+    // Floating staging shelf (Dropshelf fusion):
+    bool shelf_shake_enabled = true;   // shake mouse while dragging to summon shelf
+    int shelf_shake_sensitivity = 1;   // 0 low, 1 medium, 2 high
+    int shelf_summon_pos = 0;          // 0 near pointer, 1 last position, 2 right screen edge
+    bool shelf_auto_hide = true;       // auto-hide 1.5s after last item leaves (unless pinned)
+    bool shelf_has_last_pos = false;
+    int shelf_last_x = 0;              // screen pixels
+    int shelf_last_y = 0;
+    bool shelf_pinned = false;
+    bool shelf_view_grid = true;
     // 网络位置 (Settings → 文件操作): machine-local, not in settings export.
     bool lan_discovery = true;           // look for LAN devices when the network page opens
     bool network_recent_enabled = true;  // remember and list 最近访问
@@ -147,6 +163,7 @@ struct AppPrefs {
     bool dialog_jump_bar = true;             // jump bar under other programs' Open / Save dialogs
     bool dialog_jump_auto = false;           // a new dialog goes to the current Pulse folder once
     bool jump_history = true;                // frequent places first (jump_history.tsv)
+    bool dialog_adaptive_legacy = true;      // non-elevated adaptive legacy Win32/WinForms/WinUI dialog takeover
     bool global_search_apps = true;          // Start menu programs in quick search results
     bool show_hidden_files = false;
     // 文件扩展名 (a toolbar switch): off draws files of a registered type
@@ -183,10 +200,30 @@ struct AppPrefs {
     int hold_preview_ms = 0;
     // How many more times a video shows the "Space closes" key hint.
     int preview_key_hint_left = 3;
+    bool preview_prefer_system = false; // Office previews with a native/system switch
+    int preview_volume_percent = 100;
+    bool preview_muted = false;
     bool change_tracking_enabled = false;
     int change_tracking_days = 7;
     // system / zh-CN / en-US
     int theme_mode = -1; // legacy session theme, or 0 system / 1 light / 2 dark
+    // Interface layout (ui_modes_mockup): "zen" 专注 / "standard" 标准 / "pro" 工作台.
+    // Installs from the new setup start at its pick (标准 by default) with that
+    // preset applied; everything else - profiles saved before the key existed,
+    // portable and test profiles - reads as pro, the interface they already have.
+    std::wstring ui_mode = L"pro";
+    // Window-structure options of the layouts (ui_layout.h); defaults are the
+    // 工作台 values, i.e. Pulse as it was before the modes.
+    int ui_sidebar_mode = 0;          // 0 docked, 1 floating (edge hover), 2 hidden
+    bool ui_sidebar_lite = false;     // only quick access, starred, cloud and drives
+    bool ui_show_tabs = true;         // off: the title shows the current tab and a tab list
+    bool ui_address_in_title = false; // the address row moves into the title bar
+    int ui_command_mode = 0;          // 0 full command row, 1 a few commands in the address row, 2 none
+    bool ui_toolbar_labels = true;
+    bool ui_status_bar = true;
+    bool ui_selection_float = false;  // selection quick actions float at the bottom
+    bool ui_rounded = false;          // larger corner radius (专注)
+    std::wstring ui_title_buttons = L"win,layout,settings,|,theme,-ai"; // title_buttons.h
     std::wstring language = L"system";
     // none / acrylic-material / mica / mica-alt  (legacy dwm-blur → acrylic)
     std::wstring window_effect = L"mica-alt";
@@ -224,6 +261,9 @@ struct AppPrefs {
     // Saved as json toolbar_tools (+ toolbar_tools_v); older prefs had the
     // toolbar_pins mask. A fresh install gets the prototype's default.
     std::vector<std::wstring> toolbar_tools = DefaultToolbarTools();
+    // Plugin commands already pinned once for PULSE_COMMAND_TOOLBAR ("native:<pkg>:<cmd>"):
+    // a command the user unpinned is not pinned again.
+    std::vector<std::wstring> toolbar_suggested;
     // 排序 / 筛选 / 分组 at the toolbar's right (自定义工具栏 → 排序与筛选).
     // An active filter or grouping shows its control even when hidden.
     bool toolbar_show_sort = true;
@@ -249,6 +289,11 @@ struct AppPrefs {
     std::vector<std::wstring> recent_tags;
     // Extension package ids whose generated files publish without asking each time.
     std::vector<std::wstring> extension_publish_trusted;
+    // Extension columns and icon badges (pulse.columns) the user hid in the
+    // column menu, as "<package>/<id>"; and the widths dragged for columns,
+    // as "<package>/<id>|<dip>".
+    std::vector<std::wstring> extension_columns_hidden;
+    std::vector<std::wstring> extension_column_widths;
     // Pulse's folder picker, per entry point (#58-9): one "key|folder" line
     // each, newest first, so the tray, duplicate scan, quick access... each
     // open where they were last used instead of overwriting one another.
@@ -263,11 +308,17 @@ struct AppPrefs {
     std::wstring last_seen_version;
     std::wstring tray_dests; // staging tray: recent drop folders, newest first, '|'-joined (max 3)
     bool had_file = false; // runtime only: app.json existed when Load() ran
+    std::wstring loaded_data_dir; // runtime only: avoid shell/directory probes on interactive async saves
     bool load_failed = false; // blocks saving defaults over an unreadable/damaged existing file
 
     void ResetToDefaults();
     bool Load();
+    // First run only (no app.json): adopt the installer's setup-defaults.ini choices,
+    // [features] global_search and [ui] mode / theme / accent. Missing keys keep defaults.
+    // Returns whether [ui] named a layout (the caller then applies its preset).
+    bool ApplySetupDefaults(const std::wstring& ini_path);
     bool Save() const;
+    bool SaveAsync() const;
     std::wstring ToJson() const;
     bool FromJson(const std::wstring& json);
     // The folder last picked from `key`; empty when none is remembered.
@@ -311,6 +362,10 @@ constexpr int kPreviewTriggerSpace = 1;
 inline int NormalizePreviewTrigger(int value) noexcept {
     return value == kPreviewTriggerSpace ? kPreviewTriggerSpace : kPreviewTriggerHover;
 }
+inline int NormalizeDoubleClickInterval(int ms) noexcept {
+    return ms == 0 ? 0 : std::clamp(ms, 200, 1000);
+}
+
 inline int NormalizeHoverPreviewDelay(int ms) noexcept {
     return ms == 300 || ms == 800 ? ms : 500;
 }

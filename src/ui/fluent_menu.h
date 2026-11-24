@@ -23,6 +23,7 @@
 #include "store_icons.h"
 #include "fluent_components.h"
 #include "ui_motion.h"
+#include "native_menu_surface.h"
 #include "../common/menu_icon.h"
 
 #include <dwrite_3.h>
@@ -77,6 +78,9 @@ struct FluentMenuItem {
     bool accent_glyph = false;     // Glyph drawn in the accent colour (assistant hand-off).
     bool shortcut_inline = false; // Search paths follow a shared, compact filename column.
     int trailing_command = 0;     // Optional hover-revealed close action at the right edge.
+    bool trailing_on_hover = false; // the × takes the shortcut's place on hover; no column otherwise (tab list)
+    bool detail_inline = false;   // detail follows the label on its line, grey; single-height row (tab list .pp)
+    bool current = false;         // the selected entry: selection fill and a 3 DIP accent bar (tab list .on)
     std::wstring tooltip;
     // Keyboard access key like a native menu's "&X" (case-insensitive). 0 falls
     // back to a trailing "(X)" in text, which Explorer's CJK labels keep.
@@ -190,6 +194,14 @@ public:
     // (drawing happens on the UI thread between its own BeginDraw/EndDraw).
     bool Create(HWND owner, Compositor* compositor, float scale);
     void SetTheme(bool dark, D2D1_COLOR_F accent);
+    void SetNativeAcrylic(bool enabled, NativeMenuSurface::BackdropFactory factory = {}) {
+        native_acrylic_requested_ = enabled;
+        native_backdrop_factory_ = std::move(factory);
+    }
+    using MaterialPainter = std::function<bool(ID2D1DeviceContext*, const D2D1_RECT_F&,
+        POINT, float, bool)>;
+    // Draws only the supplied wallpaper material, in physical pixels at 96 DPI.
+    void SetMaterialPainter(MaterialPainter painter) { material_painter_ = std::move(painter); }
     // Row height of this menu and its submenus, in DIPs (follows list density, #27).
     void SetRowHeightDip(float dip);
 
@@ -207,7 +219,13 @@ public:
     int DraggedCommand() const { return dragged_command_; }
     POINT DragPoint() const { return drag_point_; }
     bool IsOpen() const { return open_; }
-    void Dismiss(); // immediate (no animation); safe anytime
+    void Dismiss();
+    // Stop this modal loop before a queued replacement opens. TrackPopup still owns cleanup.
+    void DismissImmediately() {
+        if (!open_) return;
+        result_ = 0;
+        open_ = false;
+    }
     // Safe from the owner window while TrackPopup's modal loop is running
     // (e.g. async index hits arrived). No-op if the menu is closed.
     void RequestFilterRefresh();
@@ -279,7 +297,9 @@ public:
 
 private:
     // ULW staging buffer (GDI DIB); the main menu and the flyout each own one.
+    int ShadowMargin() const noexcept { return native_acrylic_active_ ? 0 : kShadowMargin; }
     struct Surface {
+        NativeMenuSurface native;
         HDC mem_dc = nullptr;
         HBITMAP dib = nullptr;
         void* bits = nullptr;
@@ -299,11 +319,14 @@ private:
         ComPtr<ID2D1Bitmap1> readback;
     };
 
+    bool EnsurePresentationWindow(bool native);
     bool EnsureWindow();
+    std::wstring FilterPlaceholder() const;
     bool EnsureFilterEdit();
     void ApplyFilterLead();   // SetFilterLead's props on edit_ (none: removed)
     void PlaceFilterEdit(int y_offset_px);
     void HideFilterEdit();
+    void HideRootWindow();
     void SyncFilterFromEdit();
     bool IsPaletteHwnd(HWND hwnd) const;
     bool RenderSurface(const FluentMenuModel& model, int hover_row, int hover_swatch,
@@ -315,12 +338,21 @@ private:
     // Bakes s.plate for `card` (bitmap px) of a window at screen `origin` from
     // the owner compositor's frame copy; false keeps the solid plate.
     bool EnsurePlate(Surface& s, const D2D1_RECT_F& card, POINT origin, ID2D1Image* target);
+    void AbortNativePresentation();
     void Present(BYTE alpha, int y_offset_px);
     // Cascading flyouts share one modal loop and preserve each parent card.
     bool EnsureSubWindow();
     void OpenSubmenu(int row, size_t depth = 0);
     void CloseSubmenu();
     void OnSubMouse(POINT client_pt, bool button_up);
+    HWND SubmenuWheelTarget(POINT screen_pt) const;
+    float SubMaxScrollPx() const;
+    bool ScrollSubTo(float offset, bool keep_hover = false);
+    bool ScrollSubRows(int rows);
+    void SetSubKeyboardHover(int row, int swatch = -1);
+    fluent::ScrollbarSpec SubBarSpec() const;
+    bool SubBarPress(float x, float y);
+    bool SubBarDrag(float y);
     bool RenderSub();
     void PresentSub(BYTE alpha);
     bool TickSubMotion();            // flyout fade/slide or glide; true while running
@@ -400,6 +432,10 @@ private:
     bool topmost_ = false;
     bool activate_on_open_ = false;
     bool activation_confirmed_ = false;
+    MaterialPainter material_painter_;
+    NativeMenuSurface::BackdropFactory native_backdrop_factory_;
+    bool native_acrylic_requested_ = false;
+    bool native_acrylic_active_ = false;
     bool acrylic_active_ = false;  // decided when a popup opens
     HWND external_edit_ = nullptr; // borrowed; never moved, hidden or destroyed
     HWND edit_ = nullptr;
@@ -445,6 +481,8 @@ private:
         int hover = -1;
         int hover_swatch = -1;
         int x = 0, y = 0;
+        float viewport_px = 0.0f, scroll_y = 0.0f, bar_grab = 0.0f;
+        bool bar_hot = false, bar_drag = false;
         ::pulse::ui::motion::SpringRectMotion plate;
         uint64_t plate_frame = 0;
         bool animating = false, fade = false;

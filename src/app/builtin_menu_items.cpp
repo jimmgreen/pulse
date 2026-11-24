@@ -94,7 +94,7 @@ constexpr BuiltinMenuRow kItemRows[] = {
     { B::OpenInNewTab, F::None, L"\xE8A7", nullptr, false, false },
     { B::CopyPath, F::None, ui::command_icons::kGlyphCopyPath, L"Ctrl+Shift+C", false, false },
     { B::SetAlias, F::None, L"\xE8EC", L"Shift+F2", false, false },
-    { B::StageToTray, F::None, L"\xE7B8", L"Ctrl+Shift+S", false, false },
+    { B::StageToTray, F::None, L"\xE8A1", L"Ctrl+Shift+S", false, false },
     { B::CopyToTarget, F::None, ui::command_icons::kGlyphCopyToPane, L"Ctrl+Alt+C", false, false },
     { B::MoveToTarget, F::None, ui::command_icons::kGlyphMoveToPane, L"Ctrl+Alt+X", false, false },
     { B::CopyToWindow, F::None, L"\xE8C8", nullptr, false, true },

@@ -17,8 +17,7 @@ static int SortUpdatesTest() {
         return nullptr;
     };
 
-    // 1. Ungrouped: saving/modifying a file updates metadata in place without
-    //    jumping its row position, even when sorted by Size or Mtime.
+    // 1. Saving/modifying and atomic replacement follow the current sort.
     for (const auto col : {ui::SortColumn::Name, ui::SortColumn::Size, ui::SortColumn::Mtime}) {
         for (const auto dir : {ui::SortDirection::Asc, ui::SortDirection::Desc}) {
             app::ScopedEntryGrouping grouping(static_cast<int>(app::GroupBy::None));
@@ -34,22 +33,22 @@ static int SortUpdatesTest() {
             prepared.metadata[b.name] = b;
             auto rows = before;
             Check(app::ApplyPreparedDirNotifyBatch(rows, prepared, col, dir) == app::NotifyPatch::Applied &&
-                names(rows) == names(before) && find_row(rows, L"b.txt") &&
+                names(rows) == names(fresh_sorted) && find_row(rows, L"b.txt") &&
                 find_row(rows, L"b.txt")->size == 10000000 &&
                 find_row(rows, L"b.txt")->mtime.dwLowDateTime == 90,
-                "modified metadata updates in place without jumping row order");
+                "modified metadata moves to current sort position");
 
             const auto kept = app::KeepEntryOrder(before, fresh_sorted, col, dir);
-            Check(names(kept) == names(before) && find_row(kept, L"b.txt") &&
+            Check(names(kept) == names(fresh_sorted) && find_row(kept, L"b.txt") &&
                 find_row(kept, L"b.txt")->size == 10000000,
-                "background refresh preserves row order when metadata changes");
+                "background refresh follows current sort when metadata changes");
 
             prepared.events[0].action = FILE_ACTION_ADDED;
             rows = before;
             app::ApplyPreparedDirNotifyBatch(rows, prepared, col, dir);
-            Check(names(rows) == names(before) && find_row(rows, L"b.txt") &&
+            Check(names(rows) == names(fresh_sorted) && find_row(rows, L"b.txt") &&
                 find_row(rows, L"b.txt")->size == 10000000,
-                "same-name replacement retains displayed row");
+                "same-name replacement follows current sort");
 
             // MoveFileExW(tmp, b.txt, MOVEFILE_REPLACE_EXISTING): single batch
             // [ADDED ~tmp.tmp, REMOVED b.txt, RENAMED ~tmp.tmp -> b.txt]
@@ -62,9 +61,9 @@ static int SortUpdatesTest() {
             move_single.metadata[b.name] = b;
             rows = before;
             Check(app::ApplyPreparedDirNotifyBatch(rows, move_single, col, dir) == app::NotifyPatch::Applied &&
-                names(rows) == names(before) && find_row(rows, L"b.txt") &&
+                names(rows) == names(fresh_sorted) && find_row(rows, L"b.txt") &&
                 find_row(rows, L"b.txt")->size == 10000000,
-                "single-batch MoveFileExW atomic save retains target row");
+                "single-batch MoveFileExW atomic save sorts target row");
 
             // MoveFileExW split across two batches: Batch 1 inserts ~WRD0001.tmp;
             // Batch 2 removes b.txt and renames ~WRD0001.tmp -> b.txt.
@@ -82,9 +81,9 @@ static int SortUpdatesTest() {
                 {FILE_ACTION_RENAMED_NEW_NAME, b.name, tmp.name}};
             split_b2.metadata[b.name] = b;
             Check(app::ApplyPreparedDirNotifyBatch(rows, split_b2, col, dir) == app::NotifyPatch::Applied &&
-                names(rows) == names(before) && find_row(rows, L"b.txt") &&
+                names(rows) == names(fresh_sorted) && find_row(rows, L"b.txt") &&
                 find_row(rows, L"b.txt")->size == 10000000,
-                "split-batch MoveFileExW atomic save drops temp row and retains target row");
+                "split-batch MoveFileExW atomic save drops temp row and sorts target row");
 
             // Direct rename overwrite without preceding REMOVED (dup != at).
             rows = before;
@@ -93,9 +92,9 @@ static int SortUpdatesTest() {
             direct_overwrite.events = {{FILE_ACTION_RENAMED_NEW_NAME, b.name, tmp.name}};
             direct_overwrite.metadata[b.name] = b;
             Check(app::ApplyPreparedDirNotifyBatch(rows, direct_overwrite, col, dir) == app::NotifyPatch::Applied &&
-                names(rows) == names(before) && find_row(rows, L"b.txt") &&
+                names(rows) == names(fresh_sorted) && find_row(rows, L"b.txt") &&
                 find_row(rows, L"b.txt")->size == 10000000,
-                "rename overwrite onto existing row keeps target slot instead of temp slot");
+                "rename overwrite onto existing row sorts the replacement instead of holding either slot");
 
             // ReplaceFileW(b.txt, ~tmp2.tmp, b.bak) + DeleteFileW(b.bak)
             auto tmp2 = Entry(L"~tmp2.tmp");
@@ -113,9 +112,9 @@ static int SortUpdatesTest() {
             replace_deleted_bak.metadata[b.name] = b;
             rows = before;
             Check(app::ApplyPreparedDirNotifyBatch(rows, replace_deleted_bak, col, dir) == app::NotifyPatch::Applied &&
-                names(rows) == names(before) && find_row(rows, L"b.txt") &&
+                names(rows) == names(fresh_sorted) && find_row(rows, L"b.txt") &&
                 find_row(rows, L"b.txt")->size == 10000000,
-                "ReplaceFileW save with deleted backup retains target row");
+                "ReplaceFileW save with deleted backup sorts target row");
 
             std::vector<std::wstring> sel{L"b.txt"};
             std::wstring focus = L"b.txt";
@@ -123,8 +122,7 @@ static int SortUpdatesTest() {
             Check(sel.size() == 1 && sel[0] == L"b.txt" && focus == L"b.txt",
                 "ReplaceFileW save keeps selection and focus on saved target file");
 
-            // ReplaceFileW where editor retains b.bak on disk: b.txt keeps its
-            // original slot relative to a.txt and c.txt while b.bak merges sorted.
+            // ReplaceFileW with a retained backup sorts both target and backup.
             app::PreparedDirNotifyBatch replace_kept_bak;
             replace_kept_bak.events = {
                 {FILE_ACTION_RENAMED_NEW_NAME, bak.name, b.name},
@@ -133,12 +131,12 @@ static int SortUpdatesTest() {
             replace_kept_bak.metadata[b.name] = b;
             rows = before;
             Check(app::ApplyPreparedDirNotifyBatch(rows, replace_kept_bak, col, dir) == app::NotifyPatch::Applied &&
-                rows.size() == 4 && find_row(rows, L"b.bak") != nullptr,
+                names(rows) == names(sorted({a, b, c, bak}, col, dir)),
                 "ReplaceFileW with retained backup keeps both target and backup");
             std::vector<fs::DirEntry> without_bak;
             for (const auto& r : rows) if (r.name != L"b.bak") without_bak.push_back(r);
-            Check(names(without_bak) == names(before),
-                "ReplaceFileW with retained backup never moves target relative to peers");
+            Check(names(without_bak) == names(fresh_sorted),
+                "ReplaceFileW with retained backup sorts target relative to peers");
 
             // Delete + recreate in same batch: [REMOVED b.txt, ADDED b.txt].
             app::PreparedDirNotifyBatch del_add;
@@ -148,14 +146,13 @@ static int SortUpdatesTest() {
             del_add.metadata[b.name] = b;
             rows = before;
             Check(app::ApplyPreparedDirNotifyBatch(rows, del_add, col, dir) == app::NotifyPatch::Applied &&
-                names(rows) == names(before) && find_row(rows, L"b.txt") &&
+                names(rows) == names(fresh_sorted) && find_row(rows, L"b.txt") &&
                 find_row(rows, L"b.txt")->size == 10000000,
-                "delete-and-recreate save retains target row");
+                "delete-and-recreate save sorts target row");
         }
     }
 
-    // 2. Grouped by Size: same-group edit stays in place; cross-group edit moves
-    //    into the new group so grouped headers stay accurate.
+    // 2. Both same-group and cross-group edits follow current sort/group order.
     for (const auto col : {ui::SortColumn::Size, ui::SortColumn::Mtime}) {
         for (const auto dir : {ui::SortDirection::Asc, ui::SortDirection::Desc}) {
             app::ScopedEntryGrouping grouping(static_cast<int>(app::GroupBy::Size));
@@ -171,8 +168,8 @@ static int SortUpdatesTest() {
             same_group_mod.metadata[a.name] = a_same_group;
             auto rows = before;
             Check(app::ApplyPreparedDirNotifyBatch(rows, same_group_mod, col, dir) == app::NotifyPatch::Applied &&
-                names(rows) == names(before),
-                "grouped modification within same group retains displayed row");
+                names(rows) == names(sorted({a_same_group, b, c}, col, dir)),
+                "grouped modification within same group follows current sort");
 
             a.size = 10000000; a.mtime.dwLowDateTime = 40;
             const auto expected = sorted({a, b, c}, col, dir);
@@ -200,13 +197,13 @@ static int SortUpdatesTest() {
         app::FillDirEntry(dir_path.wstring(), L"a.txt", ea);
         app::FillDirEntry(dir_path.wstring(), L"b.txt", eb);
         app::FillDirEntry(dir_path.wstring(), L"~tmp.tmp", etmp);
-        std::vector<fs::DirEntry> single_rows{ea, eb, etmp};
+        auto single_rows = sorted({ea, eb, etmp}, ui::SortColumn::Size, ui::SortDirection::Asc);
         MoveFileExW((dir_path / L"~tmp.tmp").c_str(), (dir_path / L"a.txt").c_str(), MOVEFILE_REPLACE_EXISTING);
         Check(app::ApplyDirNotify(single_rows, dir_path.wstring(),
             {FILE_ACTION_RENAMED_NEW_NAME, L"a.txt", L"~tmp.tmp"},
-            ui::SortColumn::Name, ui::SortDirection::Asc) == app::NotifyPatch::Applied &&
-            names(single_rows) == L"a.txt|b.txt|" && single_rows[0].size == 12,
-            "single ApplyDirNotify temp-overwrite keeps target slot");
+            ui::SortColumn::Size, ui::SortDirection::Asc) == app::NotifyPatch::Applied &&
+            names(single_rows) == L"b.txt|a.txt|" && single_rows[1].size == 12,
+            "single ApplyDirNotify temp-overwrite reorders by replacement size");
         MoveFileExW((dir_path / L"b.txt").c_str(), (dir_path / L"0.txt").c_str(), 0);
         Check(app::ApplyDirNotify(single_rows, dir_path.wstring(),
             {FILE_ACTION_RENAMED_NEW_NAME, L"0.txt", L"b.txt"},
@@ -228,7 +225,7 @@ static int SortUpdatesTest() {
     app::ApplyPreparedDirNotifyBatch(rows, unchanged, ui::SortColumn::Name, ui::SortDirection::Asc);
     Check(names(rows) == names(held) && names(app::KeepEntryOrder(held,
         sorted({z, b}, ui::SortColumn::Name, ui::SortDirection::Asc),
-        ui::SortColumn::Name, ui::SortDirection::Asc)) == names(held), "held row survives metadata update");
+        ui::SortColumn::Name, ui::SortDirection::Asc)) == L"b.txt|z.txt|", "unchanged name key stays stable while refresh adopts sorted snapshot");
     auto a = Entry(L"a.txt");
     app::PreparedDirNotifyBatch rename;
     rename.events = {{FILE_ACTION_RENAMED_NEW_NAME, z.name, a.name}};
@@ -251,9 +248,9 @@ static int SortUpdatesTest() {
         app::PreparedDirNotifyBatch case_only;
         case_only.events = {{FILE_ACTION_RENAMED_NEW_NAME, upper.name, a.name}};
         case_only.metadata[upper.name] = upper;
-        list = {b, a, c};  // a held out of order: a case-only rename leaves it there
+        list = {b, a, c};  // The comparator uses case-sensitive tie breaking for this rename.
         app::ApplyPreparedDirNotifyBatch(list, case_only, ui::SortColumn::Name, ui::SortDirection::Asc);
-        Check(names(list) == L"b.txt|A.TXT|c.txt|", "case-only rename keeps its row");
+        Check(names(list) == L"A.TXT|b.txt|c.txt|", "case-only rename follows comparator tie breaking");
     }
     {
         std::vector<std::wstring> sel{L"a.txt"};
@@ -264,6 +261,116 @@ static int SortUpdatesTest() {
         Check(sel.size() == 1 && sel[0] == L"z.txt" && focus == L"z.txt",
             "FollowNotifyRenames follows real rename chains when old name is gone");
     }
+    // Folder modes and every ordinary mutation share the same comparator.
+    for (const auto mode : {app::FolderSortMode::FoldersFirst, app::FolderSortMode::FoldersLast,
+                            app::FolderSortMode::Mixed}) {
+        app::ScopedFolderSortMode folders(mode);
+        for (const auto col : {ui::SortColumn::Name, ui::SortColumn::Size, ui::SortColumn::Mtime}) {
+            for (const auto direction : {ui::SortDirection::Asc, ui::SortDirection::Desc}) {
+                app::ScopedEntryGrouping grouping(static_cast<int>(app::GroupBy::None));
+                auto folder = Entry(L"folder"), first = Entry(L"a.txt"), last = Entry(L"z.txt");
+                folder.is_dir = true;
+                folder.mtime.dwLowDateTime = 20;
+                first.size = 10; first.mtime.dwLowDateTime = 10;
+                last.size = 30; last.mtime.dwLowDateTime = 30;
+                auto list = sorted({folder, first, last}, col, direction);
+                first.size = 50; first.mtime.dwLowDateTime = 50;
+                app::PreparedDirNotifyBatch patch;
+                patch.events = {{FILE_ACTION_MODIFIED, first.name, {}}};
+                patch.metadata[first.name] = first;
+                Check(app::ApplyPreparedDirNotifyBatch(list, patch, col, direction) == app::NotifyPatch::Applied &&
+                    names(list) == names(sorted({folder, first, last}, col, direction)),
+                    "file metadata reorder respects folder mode and direction");
+                auto added = Entry(L"m.txt"); added.size = 25; added.mtime.dwLowDateTime = 25;
+                patch.events = {{FILE_ACTION_ADDED, added.name, {}}}; patch.metadata[added.name] = added;
+                app::ApplyPreparedDirNotifyBatch(list, patch, col, direction);
+                Check(names(list) == names(sorted({folder, first, last, added}, col, direction)),
+                    "new entry inserts in current sort with folder mode");
+                patch.events = {{FILE_ACTION_REMOVED, last.name, {}}};
+                app::ApplyPreparedDirNotifyBatch(list, patch, col, direction);
+                Check(names(list) == names(sorted({folder, first, added}, col, direction)),
+                    "deletion preserves remaining current sort");
+                auto renamed = first; renamed.name = L"zz.txt";
+                patch.events = {{FILE_ACTION_RENAMED_NEW_NAME, renamed.name, first.name}};
+                patch.metadata[renamed.name] = renamed;
+                app::ApplyPreparedDirNotifyBatch(list, patch, col, direction);
+                std::vector<std::wstring> selected{first.name}; std::wstring focused = first.name;
+                app::FollowNotifyRenames(patch.events, list, selected, focused);
+                Check(names(list) == names(sorted({folder, renamed, added}, col, direction)) &&
+                    selected == std::vector<std::wstring>{renamed.name} && focused == renamed.name,
+                    "rename sorts and selection follows identity across folder modes");
+            }
+        }
+    }
     printf("SORT_UPDATES failures=%d\n", failures);
+    return failures ? 1 : 0;
+}
+
+
+static int SortUpdatesLiveWatchTest() {
+    const auto root = std::filesystem::absolute(L"bench_data/sort_live_watch_" +
+        std::to_wstring(GetCurrentProcessId()));
+    std::filesystem::create_directories(root);
+    for (const auto col : {ui::SortColumn::Size, ui::SortColumn::Mtime}) {
+        for (const auto direction : {ui::SortDirection::Asc, ui::SortDirection::Desc}) {
+            const auto write = [&](const wchar_t* name, size_t size, ULONGLONG time) {
+                std::ofstream(root / name, std::ios::binary | std::ios::trunc) << std::string(size, 'x');
+                HANDLE file = CreateFileW((root / name).c_str(), FILE_WRITE_ATTRIBUTES,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+                FILETIME stamp{static_cast<DWORD>(time), static_cast<DWORD>(time >> 32)};
+                const bool ok = file != INVALID_HANDLE_VALUE && SetFileTime(file, nullptr, nullptr, &stamp);
+                if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+                return ok;
+            };
+            Check(write(L"a.txt", 2, 130000000000000000ULL) && write(L"b.txt", 4, 131000000000000000ULL),
+                "live watcher fixture has deterministic size and modification time");
+            fs::DirEntry a, b;
+            app::FillDirEntry(root.wstring(), L"a.txt", a);
+            app::FillDirEntry(root.wstring(), L"b.txt", b);
+            std::vector<fs::DirEntry> rows{a, b};
+            app::SortEntries(rows, col, direction);
+            HANDLE directory = CreateFileW(root.c_str(), FILE_LIST_DIRECTORY,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr);
+            OVERLAPPED operation{};
+            operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            alignas(FILE_NOTIFY_INFORMATION) BYTE buffer[4096]{};
+            const bool armed = directory != INVALID_HANDLE_VALUE && operation.hEvent &&
+                ReadDirectoryChangesW(directory, buffer, sizeof(buffer), FALSE,
+                    FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE, nullptr, &operation, nullptr);
+            Check(armed, "real ReadDirectoryChangesW request arms before write");
+            Check(write(L"a.txt", 12, 132000000000000000ULL), "real file write changes size and modification time");
+            DWORD received = 0;
+            const bool completed = armed && WaitForSingleObject(operation.hEvent, 5000) == WAIT_OBJECT_0 &&
+                GetOverlappedResult(directory, &operation, &received, FALSE) && received > 0;
+            std::vector<fs::DirNotifyEvent> events;
+            if (completed) {
+                DWORD offset = 0;
+                for (;;) {
+                    const auto* event = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(buffer + offset);
+                    events.push_back({event->Action, std::wstring(event->FileName,
+                        event->FileNameLength / sizeof(wchar_t)), {}});
+                    if (!event->NextEntryOffset) break;
+                    offset += event->NextEntryOffset;
+                }
+            }
+            Check(completed && !events.empty(), "real watcher delivers filesystem modification events");
+            if (directory != INVALID_HANDLE_VALUE) {
+                CancelIoEx(directory, &operation);
+                if (armed) GetOverlappedResult(directory, &operation, &received, TRUE);
+                CloseHandle(directory);
+            }
+            if (operation.hEvent) CloseHandle(operation.hEvent);
+            app::PreparedDirNotifyBatch prepared;
+            std::thread worker([&] { prepared = app::PrepareDirNotifyBatch(root.wstring(), events); });
+            worker.join();
+            const auto result = app::ApplyPreparedDirNotifyBatch(rows, prepared, col, direction);
+            const std::wstring expected = direction == ui::SortDirection::Asc ? L"b.txt" : L"a.txt";
+            Check(completed && result == app::NotifyPatch::Applied && rows.size() == 2 && rows[0].name == expected,
+                "real watcher metadata preparation and patch reorder ascending and descending");
+        }
+    }
+    std::filesystem::remove_all(root);
+    printf("SORT_LIVE_WATCH failures=%d\n", failures);
     return failures ? 1 : 0;
 }

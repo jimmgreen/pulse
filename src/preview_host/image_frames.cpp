@@ -19,22 +19,35 @@ uint32_t Le32(const uint8_t* p) {
            (static_cast<uint32_t>(p[3]) << 24);
 }
 
-const std::array<uint32_t, 256>& CrcTable() {
-    static const std::array<uint32_t, 256> table = [] {
-        std::array<uint32_t, 256> t{};
+const auto& CrcTables() {
+    static constexpr auto tables = [] {
+        std::array<std::array<uint32_t, 256>, 8> t{};
         for (uint32_t n = 0; n < 256; ++n) {
             uint32_t c = n;
             for (int k = 0; k < 8; ++k) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-            t[n] = c;
+            t[0][n] = c;
+        }
+        for (size_t k = 1; k < t.size(); ++k) {
+            for (uint32_t n = 0; n < 256; ++n) {
+                const uint32_t c = t[k - 1][n];
+                t[k][n] = t[0][c & 255] ^ (c >> 8);
+            }
         }
         return t;
     }();
-    return table;
+    return tables;
 }
 
 uint32_t Crc(const uint8_t* data, size_t size, uint32_t crc = 0xFFFFFFFFu) {
-    const auto& table = CrcTable();
-    for (size_t i = 0; i < size; ++i) crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    const auto& t = CrcTables();
+    while (size >= 8) {
+        const uint32_t c = crc ^ Le32(data);
+        crc = t[7][c & 255] ^ t[6][(c >> 8) & 255] ^ t[5][(c >> 16) & 255] ^ t[4][c >> 24] ^
+              t[3][data[4]] ^ t[2][data[5]] ^ t[1][data[6]] ^ t[0][data[7]];
+        data += 8;
+        size -= 8;
+    }
+    while (size--) crc = t[0][(crc ^ *data++) & 255] ^ (crc >> 8);
     return crc;
 }
 
@@ -175,6 +188,36 @@ std::vector<uint8_t> BuildApngFramePng(const std::vector<uint8_t>& file, const A
     return out;
 }
 
+template<class Prefix>
+static bool InspectIconEntry(const uint8_t* e, uint16_t i, bool cursor, size_t file_size,
+                             Prefix&& prefix, IconEntry& entry) {
+    entry.frame = i;
+    entry.width = e[0] ? e[0] : 256;
+    entry.height = e[1] ? e[1] : 256;
+    entry.bits = cursor ? 0 : Le16(e + 6);
+    entry.size = Le32(e + 8);
+    entry.offset = Le32(e + 12);
+    if (entry.offset >= file_size || entry.size > file_size - entry.offset || entry.size < 16) return false;
+    const uint8_t* img = prefix(entry.offset, (std::min)(entry.size, 40u));
+    if (!img) return false;
+    if (std::memcmp(img, kPngSignature, 8) == 0) {
+        entry.png = true;
+        if (entry.size >= 8 + 8 + 13 && IsType(img + 12, "IHDR")) {
+            entry.width = Be32(img + 16);
+            entry.height = Be32(img + 20);
+            const uint8_t depth = img[24], colour = img[25];
+            const uint32_t channels = colour == 6 ? 4 : colour == 2 ? 3 : colour == 4 ? 2 : 1;
+            entry.bits = colour == 3 ? depth : depth * channels;
+        }
+    } else if (entry.size >= 40 && Le32(img) >= 40) {
+        // BITMAPINFOHEADER: height counts the AND mask too.
+        const uint16_t bits = Le16(img + 14);
+        if (bits) entry.bits = bits;
+    }
+    if (!entry.width || !entry.height || entry.width > 4096 || entry.height > 4096) return false;
+    return true;
+}
+
 bool ParseIconDirectory(const std::vector<uint8_t>& file, std::vector<IconEntry>& entries, bool& cursor) {
     entries.clear();
     cursor = false;
@@ -186,32 +229,56 @@ bool ParseIconDirectory(const std::vector<uint8_t>& file, std::vector<IconEntry>
     for (uint16_t i = 0; i < count && i < 256; ++i) {
         const uint8_t* e = &file[6 + 16 * i];
         IconEntry entry;
-        entry.frame = i;
-        entry.width = e[0] ? e[0] : 256;
-        entry.height = e[1] ? e[1] : 256;
-        entry.bits = cursor ? 0 : Le16(e + 6);
-        entry.size = Le32(e + 8);
-        entry.offset = Le32(e + 12);
-        if (entry.offset >= file.size() || entry.size > file.size() - entry.offset || entry.size < 16) continue;
-        const uint8_t* img = &file[entry.offset];
-        if (std::memcmp(img, kPngSignature, 8) == 0) {
-            entry.png = true;
-            if (entry.size >= 8 + 8 + 13 && IsType(img + 12, "IHDR")) {
-                entry.width = Be32(img + 16);
-                entry.height = Be32(img + 20);
-                const uint8_t depth = img[24], colour = img[25];
-                const uint32_t channels = colour == 6 ? 4 : colour == 2 ? 3 : colour == 4 ? 2 : 1;
-                entry.bits = colour == 3 ? depth : depth * channels;
-            }
-        } else if (entry.size >= 40 && Le32(img) >= 40) {
-            // BITMAPINFOHEADER: height counts the AND mask too.
-            const uint16_t bits = Le16(img + 14);
-            if (bits) entry.bits = bits;
-        }
-        if (!entry.width || !entry.height || entry.width > 4096 || entry.height > 4096) continue;
+        if (!InspectIconEntry(e, i, cursor, file.size(), [&](uint32_t off, uint32_t) {
+                return file.data() + off;
+            }, entry)) continue;
         entries.push_back(entry);
     }
     return !entries.empty();
+}
+
+bool ReadIconSelection(size_t size, const IconRangeReader& read, uint32_t requested,
+                       std::vector<IconEntry>& entries, size_t& selected, std::vector<uint8_t>& out) {
+    entries.clear();
+    out.clear();
+    if (size < 6 || size > (32u << 20)) return false;
+    if (size <= (512u << 10)) {
+        std::vector<uint8_t> file(size);
+        bool cursor = false;
+        if (!read(0, file.data(), size) || !ParseIconDirectory(file, entries, cursor)) return false;
+        selected = requested ? (std::min<size_t>)(requested - 1, entries.size() - 1) : DefaultIconEntry(entries);
+        return MakeIconEntryFile(file, entries[selected], cursor, out);
+    }
+    uint8_t header[6];
+    if (!read(0, header, sizeof(header)) || Le16(header) != 0) return false;
+    const auto type = Le16(header + 2), count = Le16(header + 4);
+    if ((type != 1 && type != 2) || !count || size < 6u + size_t(count) * 16) return false;
+    const size_t used = (std::min<size_t>)(count, 256);
+    std::vector<uint8_t> directory(used * 16);
+    if (!read(6, directory.data(), directory.size())) return false;
+    bool io_ok = true;
+    uint8_t scratch[40];
+    for (uint16_t i = 0; i < used; ++i) {
+        IconEntry entry;
+        if (InspectIconEntry(directory.data() + size_t(i) * 16, i, type == 2, size,
+                [&](uint32_t off, uint32_t n) -> const uint8_t* {
+                    io_ok = read(off, scratch, n);
+                    return io_ok ? scratch : nullptr;
+                }, entry)) entries.push_back(entry);
+        if (!io_ok) return false;
+    }
+    if (entries.empty()) return false;
+    selected = requested ? (std::min<size_t>)(requested - 1, entries.size() - 1) : DefaultIconEntry(entries);
+    const auto& e = entries[selected];
+    out.assign(22u + size_t(e.size), 0);
+    out[2] = out[4] = 1;
+    std::memcpy(out.data() + 6, directory.data() + size_t(e.frame) * 16, 16);
+    out[18] = 22; out[19] = out[20] = out[21] = 0;
+    if (type == 2) {
+        out[10] = 1; out[11] = 0;
+        out[12] = static_cast<uint8_t>(e.bits); out[13] = static_cast<uint8_t>(e.bits >> 8);
+    }
+    return read(e.offset, out.data() + 22, e.size);
 }
 
 bool MakeIconEntryFile(const std::vector<uint8_t>& file, const IconEntry& entry,

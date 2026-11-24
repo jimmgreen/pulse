@@ -33,6 +33,10 @@ inline Snapshot ParseSaved(const std::wstring& text) {
             static_cast<uint32_t>(json::ExtractInt(block, L"color_rgb", 0x4CC2FF)) & 0xFFFFFF};
         if (detail::DiskPath(w.root)) result.workspaces.push_back(std::move(w));
     }
+    for (const auto& block : detail::SavedObjects(text, L"networks")) {
+        Entry entry{json::ExtractString(block, L"unc"), json::ExtractString(block, L"name")};
+        if (detail::DiskPath(entry.path)) result.networks.push_back(std::move(entry));
+    }
     for (const auto& block : detail::SavedObjects(text, L"starred_groups")) {
         StarredGroup group{json::ExtractString(block, L"id"), json::ExtractString(block, L"name")};
         if (!group.id.empty() && !group.name.empty()) result.starred_groups.push_back(std::move(group));

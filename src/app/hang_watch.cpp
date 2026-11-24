@@ -1,4 +1,7 @@
 #include "hang_watch.h"
+#include "../common/runtime_log.h"
+#include <array>
+#include <mutex>
 
 #include <dbghelp.h>
 #include <tlhelp32.h>
@@ -249,14 +252,139 @@ void Run(HWND hwnd, std::wstring log_path) {
 
 
 std::atomic<uint64_t> g_frame_id{0}, g_frame_start{0};
+std::atomic<uint64_t> g_dispatch_id{0}, g_dispatch_start{0}, g_dispatch_heartbeat{0};
+std::atomic<UINT> g_dispatch_msg{0};
+std::atomic<int> g_modal_depth{0};
 std::atomic<bool> g_frame_enabled{false};
 uint64_t g_frame_sequence = 0; // UI-thread owned; never reused across restarts.
+uint64_t g_dispatch_sequence = 0; // UI-thread owned; never reused across restarts.
 std::thread g_frame_thread;
 HANDLE g_frame_stop = nullptr;
 ULONGLONG g_frame_recent[3]{};
 size_t g_frame_recent_count = 0, g_frame_recent_next = 0;
 size_t g_frame_total = 0; // Worker-owned, process lifetime budget.
+size_t g_dispatch_total = 0; // Worker-owned, process lifetime budget.
 constexpr LONGLONG kFrameLogLimit = 2 * 1024 * 1024;
+constexpr ULONGLONG kDispatchStallMs = 400;
+constexpr ULONGLONG kDispatchResampleMs = 700;
+
+struct OperationContext {
+    uint64_t task = 0, phase = 0, completed = 0, total = 0, updated = 0;
+};
+struct DispatchRecord {
+    uint64_t id = 0, message = 0, elapsed = 0, modal = 0, nested = 0, ended = 0;
+    OperationContext context;
+};
+struct ProbeCorrelation {
+    uint64_t dispatch = 0, message = 0, modal = 0, nested = 0;
+    OperationContext context;
+};
+struct ProbeState {
+    HWND window = nullptr;
+    uint64_t sequence = 0, pending = 0, sent_tick = 0, ack_tick = 0, next_post = 0;
+    bool late = false, sampled = false, config_due = true;
+    ProbeCorrelation correlation;
+    uint64_t sent = 0, acked = 0, late_count = 0, post_failures = 0, post_error = 0, maximum = 0;
+    uint64_t abandoned = 0, rejected_acks = 0;
+    uint64_t last_health = 0, slow_window = 0, slow_logged = 0, slow_dropped = 0;
+    size_t slow_in_window = 0, head = 0, count = 0;
+    std::array<DispatchRecord, 64> slow{};
+    OperationContext context;
+};
+std::mutex g_probe_mutex;
+ProbeState g_probe;
+std::atomic<bool> g_dispatch_nested{false}, g_dispatch_modal{false};
+size_t g_probe_stack_total = 0; // Process-lifetime stack budget, monitor owned.
+
+uint64_t ContextAge(const OperationContext& context, uint64_t now) {
+    return context.updated && now >= context.updated ? now - context.updated : UINT64_MAX;
+}
+void LogProbe(const char* name, uint64_t token, uint64_t elapsed, const ProbeCorrelation& correlation) {
+    const auto& context = correlation.context;
+    diagnostics::runtime::Event(name, {{"token", token}, {"elapsed_ms", elapsed},
+        {"dispatch_id", correlation.dispatch}, {"message", correlation.message},
+        {"task", context.task}, {"phase", context.phase}, {"completed", context.completed},
+        {"total", context.total}, {"context_age_ms", ContextAge(context, GetTickCount64())},
+        {"modal", correlation.modal}, {"nested", correlation.nested}});
+}
+
+void MarkProbeCovered(uint64_t sampled_tick) {
+    std::lock_guard lock(g_probe_mutex);
+    if (g_probe.pending && g_probe.sent_tick <= sampled_tick) g_probe.sampled = true;
+}
+void PollDiagnostics(bool final = false) {
+    const uint64_t now = GetTickCount64();
+    bool late = false, recovered = false, health = false, config = false;
+    uint64_t token = 0, elapsed = 0;
+    ProbeCorrelation correlation;
+    ProbeState snapshot;
+    std::array<DispatchRecord, 4> records{};
+    size_t record_count = 0;
+    {
+        std::lock_guard lock(g_probe_mutex);
+        if (g_probe.pending && g_probe.window && !IsWindow(g_probe.window)) { ++g_probe.abandoned; g_probe.pending = 0; }
+        if (g_probe.pending) {
+            token = g_probe.pending;
+            elapsed = (g_probe.ack_tick ? g_probe.ack_tick : now) - g_probe.sent_tick;
+            if (elapsed >= 150 && !g_probe.late) {
+                g_probe.late = true; ++g_probe.late_count; late = true;
+                const auto dispatch = g_dispatch_id.load(std::memory_order_acquire);
+                const auto message = g_dispatch_msg.load();
+                const bool current = dispatch == g_dispatch_id.load(std::memory_order_acquire);
+                g_probe.correlation = {current ? dispatch : 0, current && dispatch ? message : 0,
+                    static_cast<uint64_t>(g_modal_depth.load() > 0), g_dispatch_nested.load(), g_probe.context};
+            }
+            correlation = g_probe.correlation;
+            if (g_probe.ack_tick) {
+                recovered = g_probe.late;
+                g_probe.pending = 0; g_probe.ack_tick = 0;
+                g_probe.next_post = now + 500;
+            }
+        }
+        if (!final && g_probe.window && !g_probe.pending && now >= g_probe.next_post) {
+            g_probe.pending = ++g_probe.sequence;
+            g_probe.sent_tick = now; g_probe.ack_tick = 0; g_probe.late = false; g_probe.sampled = false;
+            g_probe.next_post = now + 500;
+            if (PostMessageW(g_probe.window, UiProbeMessage(), static_cast<WPARAM>(g_probe.pending), 0)) ++g_probe.sent;
+            else { ++g_probe.post_failures; g_probe.post_error = GetLastError(); g_probe.pending = 0; }
+        }
+        if (now - g_probe.slow_window >= 1000) { g_probe.slow_window = now; g_probe.slow_in_window = 0; }
+        while (g_probe.count && record_count < records.size()) {
+            const auto record = g_probe.slow[g_probe.head];
+            g_probe.head = (g_probe.head + 1) % g_probe.slow.size(); --g_probe.count;
+            if (g_probe.slow_in_window >= 4) { ++g_probe.slow_dropped; continue; }
+            ++g_probe.slow_in_window; ++g_probe.slow_logged;
+            records[record_count++] = record;
+        }
+        config = g_probe.config_due; g_probe.config_due = false;
+        health = final || now - g_probe.last_health >= 5000;
+        if (health) g_probe.last_health = now;
+        snapshot = g_probe;
+    }
+    if (config) diagnostics::runtime::Event("ui_probe_config", {{"schema", 1}, {"probe_message", UiProbeMessage()},
+        {"period_ms", 500}, {"late_threshold_ms", 150}, {"slow_dispatch_ms", 100}, {"stack_threshold_ms", 400},
+        {"health_period_ms", 5000}, {"frame_stack_budget", 100}, {"dispatch_stack_budget", 60}, {"probe_stack_budget", 20}});
+    if (late) LogProbe("ui_probe_late", token, elapsed, correlation);
+    if (recovered) LogProbe("ui_probe_recovered", token, elapsed, correlation);
+    for (size_t i = 0; i < record_count; ++i) {
+        const auto& r = records[i];
+        diagnostics::runtime::Event("ui_slow_dispatch", {{"dispatch_id", r.id}, {"message", r.message},
+            {"elapsed_ms", r.elapsed}, {"modal", r.modal}, {"nested", r.nested},
+            {"task", r.context.task}, {"phase", r.context.phase}, {"completed", r.context.completed},
+            {"total", r.context.total}, {"context_age_ms", ContextAge(r.context, r.ended)}});
+    }
+    if (health) {
+        diagnostics::runtime::Event("ui_probe_health", {{"sent", snapshot.sent}, {"acked", snapshot.acked},
+            {"late", snapshot.late_count}, {"post_failures", snapshot.post_failures}, {"post_error", snapshot.post_error},
+            {"max_latency_ms", snapshot.maximum}, {"pending_ms", snapshot.pending ? now - snapshot.sent_tick : 0},
+            {"task", snapshot.context.task}, {"phase", snapshot.context.phase}, {"completed", snapshot.context.completed},
+            {"total", snapshot.context.total}, {"context_age_ms", ContextAge(snapshot.context, now)}});
+        diagnostics::runtime::Event("ui_dispatch_health", {{"slow_logged", snapshot.slow_logged},
+            {"slow_dropped", snapshot.slow_dropped}, {"slow_pending", snapshot.count},
+            {"frame_samples", g_frame_total}, {"dispatch_samples", g_dispatch_total}, {"probe_samples", g_probe_stack_total},
+            {"target_set", snapshot.window != nullptr}, {"abandoned", snapshot.abandoned}, {"rejected_acks", snapshot.rejected_acks}});
+    }
+}
 
 bool AppendFrame(HANDLE file, const std::wstring& text) {
     LARGE_INTEGER size{};
@@ -275,43 +403,135 @@ bool AppendFrame(HANDLE file, const std::wstring& text) {
 void RunFrameWatch(DWORD tid, HANDLE file) {
     uint64_t tracked = 0;
     size_t frame_samples = 0;
+    uint64_t tracked_dispatch = 0;
+    size_t dispatch_samples = 0;
+    ULONGLONG last_dispatch_sample = 0;
     auto& recent = g_frame_recent;
     auto& recent_count = g_frame_recent_count;
     auto& recent_next = g_frame_recent_next;
-    while (WaitForSingleObject(g_frame_stop, 12) == WAIT_TIMEOUT && g_frame_total < 100) {
+    bool stack_logging = true;
+    while (WaitForSingleObject(g_frame_stop, 12) == WAIT_TIMEOUT) {
+        PollDiagnostics(); // Must precede every sampling budget/early continue.
+        uint64_t probe_token = 0, probe_start = 0;
+        {
+            std::lock_guard lock(g_probe_mutex);
+            if (stack_logging && g_probe_stack_total < 20 && g_probe.pending && !g_probe.ack_tick &&
+                !g_probe.sampled && GetTickCount64() - g_probe.sent_tick >= 400 &&
+                !g_frame_id.load() && !g_dispatch_id.load() && g_modal_depth.load() == 0) {
+                probe_token = g_probe.pending; probe_start = g_probe.sent_tick; g_probe.sampled = true;
+            }
+        }
+        if (probe_token) {
+            ++g_probe_stack_total;
+            ThreadStack stack;
+            const bool ok = SampleThread(tid, stack);
+            bool current = false;
+            { std::lock_guard lock(g_probe_mutex); current = probe_token == g_probe.pending && !g_probe.ack_tick; }
+            wchar_t header[256];
+            swprintf_s(header, L"probe_token=%llu tick=%llu elapsed=%llu status=%s\r\n", probe_token,
+                GetTickCount64(), GetTickCount64() - probe_start,
+                !current ? L"stale_discarded" : ok ? L"captured" : L"capture_failed");
+            std::wstring text = header;
+            if (current && ok) for (size_t i = 0; i < stack.count; ++i) text += L"  " + FrameText(stack.frames[i], false) + L"\r\n";
+            if (!AppendFrame(file, text)) stack_logging = false;
+        }
         const uint64_t id = g_frame_id.load(std::memory_order_acquire);
-        if (!id) continue;
-        const uint64_t start = g_frame_start.load(std::memory_order_relaxed);
-        if (id != g_frame_id.load(std::memory_order_acquire)) continue;
+        if (id) {
+            if (!stack_logging || g_frame_total >= 100) continue;
+            const uint64_t start = g_frame_start.load(std::memory_order_relaxed);
+            if (id != g_frame_id.load(std::memory_order_acquire)) continue;
+            const ULONGLONG now = GetTickCount64();
+            if (now < start || now - start < 50) continue;
+            if (tracked != id) { tracked = id; frame_samples = 0; }
+            if (frame_samples >= 3 || (recent_count == 3 && now - recent[recent_next] < 1000)) continue;
+            ++frame_samples;
+            ++g_frame_total;
+            recent[recent_next] = now;
+            recent_next = (recent_next + 1) % 3;
+            if (recent_count < 3) ++recent_count;
+            ThreadStack stack;
+            const bool ok = SampleThread(tid, stack);
+            // Never attribute a sample to a completed/replaced frame, even on failure.
+            const bool current = id == g_frame_id.load(std::memory_order_acquire);
+            if (current && ok) MarkProbeCovered(now);
+            wchar_t header[256];
+            swprintf_s(header, L"frame_id=%llu tick=%llu elapsed=%llu sample=%zu status=%s\r\n",
+                static_cast<unsigned long long>(id), static_cast<unsigned long long>(now),
+                static_cast<unsigned long long>(now - start), frame_samples,
+                !current ? L"stale_discarded" : ok ? L"captured" : L"capture_failed");
+            std::wstring text = header;
+            if (current && ok) {
+                for (size_t i = 0; i < stack.count; ++i)
+                    text += L"  " + FrameText(stack.frames[i], false) + L"\r\n";
+            }
+            if (!AppendFrame(file, text)) stack_logging = false;
+            continue;
+        }
+        if (!stack_logging || g_dispatch_total >= 60 || g_modal_depth.load(std::memory_order_acquire) > 0) continue;
+        const uint64_t did = g_dispatch_id.load(std::memory_order_acquire);
+        if (!did) continue;
+        const uint64_t start = g_dispatch_start.load(std::memory_order_relaxed);
+        const uint64_t hb = g_dispatch_heartbeat.load(std::memory_order_relaxed);
+        const UINT msg = g_dispatch_msg.load(std::memory_order_relaxed);
+        if (did != g_dispatch_id.load(std::memory_order_acquire)) continue;
         const ULONGLONG now = GetTickCount64();
-        if (now < start || now - start < 50) continue;
-        if (tracked != id) { tracked = id; frame_samples = 0; }
-        if (frame_samples >= 3 || (recent_count == 3 && now - recent[recent_next] < 1000)) continue;
-        ++frame_samples;
-        ++g_frame_total;
-        recent[recent_next] = now;
-        recent_next = (recent_next + 1) % 3;
-        if (recent_count < 3) ++recent_count;
+        if (now < hb || now - hb < kDispatchStallMs) continue;
+        if (tracked_dispatch != did) {
+            tracked_dispatch = did;
+            dispatch_samples = 0;
+            last_dispatch_sample = 0;
+        }
+        if (dispatch_samples >= 3 || (last_dispatch_sample && now - last_dispatch_sample < kDispatchResampleMs))
+            continue;
+        ++dispatch_samples;
+        ++g_dispatch_total;
+        last_dispatch_sample = now;
         ThreadStack stack;
         const bool ok = SampleThread(tid, stack);
-        // Never attribute a sample to a completed/replaced frame, even on failure.
-        const bool current = id == g_frame_id.load(std::memory_order_acquire);
+        const bool current = did == g_dispatch_id.load(std::memory_order_acquire);
+        if (current && ok) MarkProbeCovered(now);
         wchar_t header[256];
-        swprintf_s(header, L"frame_id=%llu tick=%llu elapsed=%llu sample=%zu status=%s\r\n",
-            static_cast<unsigned long long>(id), static_cast<unsigned long long>(now),
-            static_cast<unsigned long long>(now - start), frame_samples,
+        swprintf_s(header, L"dispatch_id=%llu msg=0x%x tick=%llu elapsed=%llu sample=%zu status=%s\r\n",
+            static_cast<unsigned long long>(did), static_cast<unsigned>(msg),
+            static_cast<unsigned long long>(now),
+            static_cast<unsigned long long>(now >= start ? now - start : 0),
+            dispatch_samples,
             !current ? L"stale_discarded" : ok ? L"captured" : L"capture_failed");
         std::wstring text = header;
         if (current && ok) {
             for (size_t i = 0; i < stack.count; ++i)
                 text += L"  " + FrameText(stack.frames[i], false) + L"\r\n";
         }
-        if (!AppendFrame(file, text)) break;
+        if (!AppendFrame(file, text)) stack_logging = false;
     }
+    PollDiagnostics(true);
     CloseHandle(file);
 }
 
 } // namespace
+
+UINT UiProbeMessage() {
+    static const UINT message = RegisterWindowMessageW(L"Pulse.Diagnostics.UiProbe.v1");
+    return message;
+}
+void SetProbeWindow(HWND window) {
+    std::lock_guard lock(g_probe_mutex);
+    if (g_probe.pending && !g_probe.ack_tick) ++g_probe.abandoned;
+    g_probe.window = window;
+    g_probe.pending = 0; g_probe.ack_tick = 0; g_probe.next_post = 0;
+}
+void AckUiProbe(uint64_t token) {
+    std::lock_guard lock(g_probe_mutex);
+    if (token && token == g_probe.pending && !g_probe.ack_tick) {
+        g_probe.ack_tick = GetTickCount64();
+        ++g_probe.acked;
+        g_probe.maximum = (std::max)(g_probe.maximum, g_probe.ack_tick - g_probe.sent_tick);
+    } else ++g_probe.rejected_acks;
+}
+void SetOperationContext(uint64_t task, uint32_t phase, uint64_t completed, uint64_t total) {
+    std::lock_guard lock(g_probe_mutex);
+    g_probe.context = {task, phase, completed, total, GetTickCount64()};
+}
 
 void Start(HWND hwnd, const std::wstring& log_path) {
     if (g_thread.joinable() || !hwnd) return;
@@ -332,6 +552,8 @@ bool StartFrameWatch(const std::wstring& log_path) {
     if (file == INVALID_HANDLE_VALUE) return false;
     g_frame_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!g_frame_stop) { CloseHandle(file); return false; }
+    { std::lock_guard lock(g_probe_mutex); g_probe.last_health = GetTickCount64(); g_probe.config_due = true; }
+    (void)UiProbeMessage();
     try {
         g_frame_thread = std::thread(RunFrameWatch, GetCurrentThreadId(), file);
         g_frame_enabled.store(true, std::memory_order_release);
@@ -347,10 +569,13 @@ bool StartFrameWatch(const std::wstring& log_path) {
 void StopFrameWatch() {
     g_frame_enabled.store(false, std::memory_order_release);
     g_frame_id.store(0, std::memory_order_release);
+    g_dispatch_id.store(0, std::memory_order_release);
+    g_modal_depth.store(0, std::memory_order_release);
     if (g_frame_stop) SetEvent(g_frame_stop);
     if (g_frame_thread.joinable()) g_frame_thread.join();
     if (g_frame_stop) CloseHandle(g_frame_stop);
     g_frame_stop = nullptr;
+    SetProbeWindow(nullptr);
 }
 
 uint64_t BeginFrame() {
@@ -363,6 +588,52 @@ uint64_t BeginFrame() {
 
 void EndFrame(uint64_t id) {
     if (id) g_frame_id.compare_exchange_strong(id, 0, std::memory_order_release);
+}
+
+uint64_t BeginDispatch(UINT message) {
+    if (!g_frame_enabled.load(std::memory_order_acquire)) return 0;
+    if (g_dispatch_id.load() != 0) { g_dispatch_nested.store(true); return 0; }
+    g_dispatch_nested.store(false);
+    g_dispatch_modal.store(g_modal_depth.load() > 0);
+    const uint64_t id = ++g_dispatch_sequence;
+    const uint64_t now = GetTickCount64();
+    g_dispatch_msg.store(message, std::memory_order_relaxed);
+    g_dispatch_start.store(now, std::memory_order_relaxed);
+    g_dispatch_heartbeat.store(now, std::memory_order_relaxed);
+    g_dispatch_id.store(id, std::memory_order_release);
+    return id;
+}
+
+void EndDispatch(uint64_t id) {
+    if (!id || id != g_dispatch_id.load()) return;
+    const auto now = GetTickCount64();
+    const auto elapsed = now - g_dispatch_start.load();
+    if (elapsed >= 100) {
+        std::lock_guard lock(g_probe_mutex);
+        if (g_probe.count == g_probe.slow.size()) ++g_probe.slow_dropped;
+        else {
+            const auto index = (g_probe.head + g_probe.count++) % g_probe.slow.size();
+            g_probe.slow[index] = {id, g_dispatch_msg.load(), elapsed, g_dispatch_modal.load(),
+                g_dispatch_nested.load(), now, g_probe.context};
+        }
+    }
+    g_dispatch_id.compare_exchange_strong(id, 0, std::memory_order_release);
+}
+
+void NoteDispatchHeartbeat() {
+    if (g_dispatch_id.load(std::memory_order_relaxed) != 0)
+        g_dispatch_heartbeat.store(GetTickCount64(), std::memory_order_relaxed);
+}
+
+void PushModalPause() {
+    if (g_dispatch_id.load()) g_dispatch_modal.store(true);
+    g_modal_depth.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void PopModalPause() {
+    int current = g_modal_depth.load(std::memory_order_acquire);
+    while (current > 0 && !g_modal_depth.compare_exchange_weak(current, current - 1, std::memory_order_acq_rel)) {
+    }
 }
 
 // Explicit in-process probes reuse the allocation-free suspended stack walker.

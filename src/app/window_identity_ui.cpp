@@ -213,7 +213,7 @@ void ShowWindowIdentityMenu(AppState& s, POINT screen) {
         ui::FluentMenuItem overview;  // M7e: every window at once
         overview.command = kCmdOverview;
         overview.text = l10n::Get(l10n::StringId::WindowOverviewTitle);
-        overview.glyph = L"\uE8A9";  // ViewAll
+        overview.glyph = L"\xF5D4";  // WinOverview (E8A9 is the icon view's grid)
         overview.shortcut = app::ShownShortcut(L"Ctrl+Shift+O");
         items.push_back(std::move(overview));
         return items;

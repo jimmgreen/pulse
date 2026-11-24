@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include <cstdio>
 #include <vector>
 
 #include "setup_common.h"
@@ -62,6 +63,7 @@ Options ParseOptions(const wchar_t* command_line) {
         else if (EqualsNoCase(name, L"/UNINSTALL")) o.uninstall = true;
         else if (EqualsNoCase(name, L"/PULSETEST")) o.test = true;
         else if (EqualsNoCase(name, L"/PULSE-ELEVATED")) o.elevated_child = true;
+        else if (EqualsNoCase(name, L"/CLEANUPVERSIONS")) o.cleanup_versions = true;
         else if (EqualsNoCase(name, L"/DIR")) o.dir = value;
         else if (EqualsNoCase(name, L"/LOG")) { o.log_requested = true; o.log = value; }
         else if (EqualsNoCase(name, L"/LANG")) o.lang = value;
@@ -106,6 +108,43 @@ std::wstring FormatTaskList(const Tasks& tasks) {
     add(tasks.startup, L"startup");
     add(tasks.desktop_icon, L"desktopicon");
     return out;
+}
+
+const char* UiModeKey(UiMode mode) {
+    switch (mode) {
+        case UiMode::Zen: return "zen";
+        case UiMode::Pro: return "pro";
+        case UiMode::Standard: break;
+    }
+    return "standard";
+}
+
+std::string SetupDefaultsIni(const Tasks& tasks, const UiChoice& ui) {
+    std::string out = std::string("[features]\r\nglobal_search=") + (tasks.global_search ? "1" : "0") +
+        "\r\nai_assistant=" + (tasks.ai_assistant ? "1" : "0") + "\r\n";
+    static const char* const kThemes[] = {"system", "light", "dark"};
+    out += std::string("[ui]\r\nmode=") + UiModeKey(ui.mode) + "\r\ntheme=" +
+        kThemes[ui.theme >= 0 && ui.theme <= 2 ? ui.theme : 0] + "\r\n";
+    if (ui.has_accent) {
+        char hex[8]{};
+        std::snprintf(hex, sizeof(hex), "%06X", static_cast<unsigned>(ui.accent & 0xFFFFFFu));
+        out += std::string("accent=") + hex + "\r\n";
+    }
+    return out;
+}
+
+bool WriteUiChoice(const std::wstring& ini_path, const UiChoice& ui) {
+    static const wchar_t* const kThemes[] = {L"system", L"light", L"dark"};
+    std::wstring mode;
+    for (const char* p = UiModeKey(ui.mode); *p; ++p) mode += static_cast<wchar_t>(*p);
+    wchar_t hex[8]{};
+    swprintf_s(hex, L"%06X", static_cast<unsigned>(ui.accent & 0xFFFFFFu));
+    const wchar_t* file = ini_path.c_str();
+    bool ok = WritePrivateProfileStringW(L"ui", L"mode", mode.c_str(), file) != FALSE;
+    ok = WritePrivateProfileStringW(L"ui", L"theme", kThemes[ui.theme >= 0 && ui.theme <= 2 ? ui.theme : 0], file) != FALSE && ok;
+    // A null value deletes the key: no accent keeps the theme default.
+    ok = WritePrivateProfileStringW(L"ui", L"accent", ui.has_accent ? hex : nullptr, file) != FALSE && ok;
+    return ok;
 }
 
 }  // namespace pulse::setup

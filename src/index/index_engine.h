@@ -7,6 +7,7 @@
 #pragma once
 #include "usn_stream.h"
 #include "index_volume_pause.h"
+#include "index_volume_walk.h"
 #include "filename_timing.h"
 #include "index_feed.h"
 #include "folder_size_index.h"
@@ -18,6 +19,7 @@
 #include "change_tracking.h"
 #include "change_feed_history.h"
 #include "index_types.h"
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cstdint>
@@ -27,6 +29,7 @@
 #include <map>
 #include <mutex>
 #include <shared_mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -91,6 +94,84 @@ struct DiskFrn {
 };
 #pragma pack(pop)
 
+struct PinyinPostingStore {
+    HANDLE file = INVALID_HANDLE_VALUE;
+    HANDLE mapping = nullptr;
+    const void* view = nullptr;
+    size_t view_bytes = 0;
+    const int32_t* chinese_ptr = nullptr;
+    uint32_t chinese_count = 0;
+    const uint32_t* pair_offsets_ptr = nullptr;
+    const int32_t* pair_ids_ptr = nullptr;
+
+    std::vector<int32_t> mem_chinese;
+    std::array<uint32_t, 677> mem_offsets{};
+    std::vector<int32_t> mem_pairs;
+
+    PinyinPostingStore() = default;
+    ~PinyinPostingStore() { Reset(); }
+    PinyinPostingStore(const PinyinPostingStore&) = delete;
+    PinyinPostingStore& operator=(const PinyinPostingStore&) = delete;
+    PinyinPostingStore(PinyinPostingStore&& other) noexcept { *this = std::move(other); }
+    PinyinPostingStore& operator=(PinyinPostingStore&& other) noexcept {
+        if (this == &other) return *this;
+        Reset();
+        file = std::exchange(other.file, INVALID_HANDLE_VALUE);
+        mapping = std::exchange(other.mapping, nullptr);
+        view = std::exchange(other.view, nullptr);
+        view_bytes = std::exchange(other.view_bytes, 0);
+        chinese_ptr = std::exchange(other.chinese_ptr, nullptr);
+        chinese_count = std::exchange(other.chinese_count, 0);
+        pair_offsets_ptr = std::exchange(other.pair_offsets_ptr, nullptr);
+        pair_ids_ptr = std::exchange(other.pair_ids_ptr, nullptr);
+        mem_chinese = std::move(other.mem_chinese);
+        mem_offsets = other.mem_offsets;
+        other.mem_offsets.fill(0);
+        mem_pairs = std::move(other.mem_pairs);
+        return *this;
+    }
+
+    void Reset() noexcept {
+        if (view) UnmapViewOfFile(view);
+        if (mapping) CloseHandle(mapping);
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        file = INVALID_HANDLE_VALUE;
+        mapping = nullptr;
+        view = nullptr;
+        view_bytes = 0;
+        chinese_ptr = nullptr;
+        chinese_count = 0;
+        pair_offsets_ptr = nullptr;
+        pair_ids_ptr = nullptr;
+        std::vector<int32_t>().swap(mem_chinese);
+        mem_offsets.fill(0);
+        std::vector<int32_t>().swap(mem_pairs);
+    }
+
+    bool IsMapped() const noexcept { return view != nullptr; }
+
+    std::span<const int32_t> ChineseIds() const noexcept {
+        if (view) return chinese_count ? std::span<const int32_t>(chinese_ptr, chinese_count) : std::span<const int32_t>{};
+        return mem_chinese;
+    }
+
+    std::span<const int32_t> PairIds(size_t bucket) const noexcept {
+        if (bucket >= 676) return {};
+        const uint32_t* offsets = view ? pair_offsets_ptr : mem_offsets.data();
+        const int32_t* ids = view ? pair_ids_ptr : mem_pairs.data();
+        if (!offsets || !ids) return {};
+        const uint32_t begin = offsets[bucket];
+        const uint32_t end = offsets[bucket + 1];
+        if (end <= begin) return {};
+        return { ids + begin, static_cast<size_t>(end - begin) };
+    }
+
+    size_t PrivateHeapBytes() const noexcept {
+        if (view) return 0;
+        return mem_chinese.capacity() * sizeof(int32_t) + mem_pairs.capacity() * sizeof(int32_t);
+    }
+};
+
 static_assert(sizeof(Node) == 16, "v6 node is 16 bytes");
 static_assert(sizeof(Attr) == 12, "v6 attr is 12 bytes");
 static_assert(sizeof(DiskHeader) == 128, "v8 header fills the 128-byte prefix");
@@ -120,6 +201,7 @@ public:
     std::wstring Status() const;
     std::vector<VolumeInfo> Volumes() const;
     void RequestRebuild();
+    void NotifyTopologyChange();
     std::shared_ptr<VolumePause> PauseVolumes(std::vector<std::wstring> ids, std::vector<std::wstring> roots);
     void ResumeVolumes(const std::shared_ptr<VolumePause>& lease);
     ChangeState ChangeCoverage(const std::wstring& path) const;
@@ -131,8 +213,10 @@ public:
 private:
     void ApplyVolumePauses();
     bool VolumePaused(const std::wstring& id) const;
+    bool VolumePauseRequestedOrActive(std::wstring_view id, std::wstring_view path);
     bool PathPaused(const std::wstring& path) const;
     std::mutex volume_pause_mutex_;
+    std::atomic<uint32_t> pending_pause_requests_{0};
     std::vector<std::shared_ptr<VolumePause>> volume_pause_requests_;
     std::vector<std::shared_ptr<VolumePause>> volume_pauses_;
     FolderSizeIndex folder_sizes_;
@@ -216,6 +300,9 @@ private:
         std::unordered_map<uint64_t, std::wstring> tracking_paths;
         wchar_t letter = 0;
         VolumeKind kind = VolumeKind::Other;
+        VolumeBackend backend = VolumeBackend::NtfsMftUsn;
+        VolumeFsTag fs_tag = VolumeFsTag::UnknownOrNtfs;
+        uint32_t serial = 0;
         std::wstring volume_id;
         uint64_t item_count = 0;
         uint64_t journal_id = 0;
@@ -286,6 +373,7 @@ private:
     ChangeFeedHistory feed_changes_;
     void RecordFeed(const ChangeRecord& record);
     void CaptureMemoryState();
+    void TrimIdleMemory();
     void GapFeed() { changes_.Gap(); ++feed_epoch_; folder_size_gap_ = true; }
     void PinyinWorker();
     void RequestPinyinBuildLocked();
@@ -301,12 +389,21 @@ private:
     void OpenDeltasLocked();
     void CloseDeltas();
     bool ReplayDeltasLocked();
+    DeltaLog* DeltaForVolume(std::wstring_view volume_id, wchar_t fallback_letter = 0);
     DeltaLog* DeltaFor(wchar_t letter);
     void FullRebuild(const char* reason = "requested_or_watch_gap");
     void PreserveOfflineVolumesLocked(const std::vector<VolumeInfo>& active,
                                       const IndexConfig& config);
     bool IndexVolumeMft(const VolumeInfo& volume);
+    bool IndexVolumeWalk(const VolumeInfo& volume);
+    bool IndexVolumeForBackend(const VolumeInfo& volume);
+    bool RebuildVolume(const VolumeInfo& volume);
     bool RebuildVolumeMft(const VolumeInfo& volume);
+    void RelocateVolumeLetterLocked(VolState& v, wchar_t new_letter);
+    void QueueVolumeReconcile(std::wstring_view id);
+    bool IsVolumeReconcilePending(std::wstring_view id) const;
+    void ClearVolumeReconcile(std::wstring_view id);
+    std::vector<std::wstring> TakePendingReconcileVolumes();
     void WalkTree(int32_t parent, const std::wstring& dir, int depth);
     void CompactLocked();
     bool FlattenLocked(Store& out, std::vector<VolState>& vols_out) const;
@@ -329,10 +426,39 @@ private:
     void PartialSortPage(std::vector<int32_t>& ids, size_t offset, size_t limit,
                          ResultSort sort, bool desc) const;
 
+    struct WalkWatch;
+    struct WalkWatchIo {
+        std::mutex mu;
+        HANDLE dir = INVALID_HANDLE_VALUE;
+        HANDLE event = nullptr;
+        OVERLAPPED ov{};
+        std::vector<BYTE> buf;
+        HCMNOTIFICATION removal = nullptr;
+        Engine* engine = nullptr;
+        std::atomic<bool> eject_closed{false};
+        std::atomic<bool> reopen_needed{false};
+    };
+    static DWORD CALLBACK WalkWatchRemovalCallback(
+        HCMNOTIFICATION notify, void* context, CM_NOTIFY_ACTION action,
+        PCM_NOTIFY_EVENT_DATA event_data, DWORD event_data_size);
+    static DWORD CALLBACK VolumeInterfaceCallback(
+        HCMNOTIFICATION notify, void* context, CM_NOTIFY_ACTION action,
+        PCM_NOTIFY_EVENT_DATA event_data, DWORD event_data_size);
+    void RegisterVolumeNotifications();
+    void UnregisterVolumeNotifications();
+    bool OpenWalkWatchHandle(WalkWatch& w);
+    void CloseWalkWatchHandle(WalkWatch& w);
     void StartWalkWatches(const std::vector<std::wstring>& roots);
+    void SyncWalkWatches(const std::vector<VolumeInfo>& online);
+    void EnsureVolumeWalkWatch(const VolumeInfo& volume);
     void StopWalkWatches();
     void PollWalkWatches();
-    uint64_t ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DWORD len);
+    uint64_t ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DWORD len,
+                               std::wstring_view volume_id = {},
+                               std::vector<std::wstring>* added_dirs = nullptr);
+    void IndexAddedDirectories(const std::vector<std::wstring>& dirs, std::wstring_view volume_id);
+    void CollectLiveSubtreeLocked(int32_t root, std::vector<int32_t>& out) const;
+    bool IsRootInactiveLocked(int32_t root_idx) const;
 
     bool CatchUpVolume(VolState& v, bool* changed, bool* structural = nullptr);
     enum class UsnApply : uint8_t { None, Attr, Structure };
@@ -415,7 +541,12 @@ private:
     OverlaySet tombstones_;
     OverlayMap<Patch> patches_;
     std::unordered_multimap<uint64_t, int32_t> child_map_;
-    std::unordered_map<wchar_t, std::unique_ptr<DeltaLog>> delta_logs_;
+    std::unordered_map<std::wstring, std::unique_ptr<DeltaLog>> delta_logs_;
+    std::atomic<bool> topology_dirty_{false};
+    HCMNOTIFICATION volume_interface_notify_ = nullptr;
+    mutable std::mutex reconcile_mu_;
+    std::unordered_set<std::wstring> pending_reconcile_volumes_;
+    std::unordered_map<std::wstring, std::wstring> test_walk_roots_;
     size_t deleted_ = 0;
     size_t pool_waste_ = 0;
     ULONGLONG name_pool_retry_after_tick_ = 0;
@@ -438,10 +569,10 @@ private:
 
     struct WalkWatch {
         std::wstring path;
+        std::wstring volume_id;
         HANDLE dir = INVALID_HANDLE_VALUE;
         HANDLE event = nullptr;
-        OVERLAPPED ov{};
-        std::vector<BYTE> buf;
+        std::unique_ptr<WalkWatchIo> io;
     };
     std::vector<WalkWatch> watches_;
     std::vector<std::wstring> walk_roots_;
@@ -451,6 +582,11 @@ private:
 
     // Auxiliary IDs are tied to one immutable filename snapshot, never persisted
     // in the filename format. Mutable names always use the current overlay.
+    std::span<const int32_t> PinyinChineseIdsLocked() const noexcept { return pinyin_postings_.ChineseIds(); }
+    std::span<const int32_t> PinyinPairIdsLocked(size_t bucket) const noexcept { return pinyin_postings_.PairIds(bucket); }
+    bool PinyinIsMappedLocked() const noexcept { return pinyin_postings_.IsMapped(); }
+    size_t PinyinPrivateHeapBytesLocked() const noexcept { return pinyin_postings_.PrivateHeapBytes(); }
+
     std::thread pinyin_thread_;
     std::mutex pinyin_build_mutex_;
     std::condition_variable pinyin_build_cv_;
@@ -459,8 +595,8 @@ private:
     std::atomic<bool> pinyin_ready_{false};
     mutable const MappedFile* pinyin_snapshot_ = nullptr;
     mutable uint32_t pinyin_version_ = 0;
-    mutable std::vector<int32_t> pinyin_chinese_ids_;
-    mutable std::vector<std::vector<int32_t>> pinyin_pair_ids_;
+    mutable PinyinPostingStore pinyin_postings_;
+    mutable std::atomic<ULONGLONG> last_search_tick_{0};
     mutable uint64_t filter_epoch_ = 1;
     mutable uint64_t cache_epoch_ = 0;
     mutable std::wstring cache_raw_;

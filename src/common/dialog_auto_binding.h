@@ -42,4 +42,9 @@ DWORD CaptureCurrentWithHelper(HANDLE helper, uint64_t generation, const GUID& n
 // Publisher form: caller, target and helper must share elevated SID/session.
 DWORD CaptureProcessWithHelper(HANDLE target, HANDLE helper, uint64_t generation,
     const GUID& nonce, BindingV1& output) noexcept;
+// Non-elevated user-mode adaptive attach: caller, target and helper must ALL be
+// non-elevated, unrestricted, non-AppContainer, Medium+ integrity, same SID/session.
+DWORD CaptureCurrentWithHelperUser(HANDLE helper, uint64_t generation, const GUID& nonce, BindingV1& output) noexcept;
+DWORD CaptureProcessWithHelperUser(HANDLE target, HANDLE helper, uint64_t generation,
+    const GUID& nonce, BindingV1& output) noexcept;
 }

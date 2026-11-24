@@ -13,7 +13,7 @@ public:
     AutoLease(const AutoLease&) = delete;
     AutoLease& operator=(const AutoLease&) = delete;
     ~AutoLease();
-    DWORD Open(const std::wstring& control, const std::wstring& nonce, bool required = false) noexcept;
+    DWORD Open(const std::wstring& control, const std::wstring& nonce, bool required = false, bool user_mode = false) noexcept;
     bool Alive() const noexcept;
     bool Bound() const noexcept { return helper_ != nullptr; }
 private:

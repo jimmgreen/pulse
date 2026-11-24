@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <shellapi.h>
+#include <string_view>
 
 namespace pulse::index {
 namespace {
@@ -12,6 +13,41 @@ using pulse::ipc::PayloadReader;
 using pulse::ipc::PayloadWriter;
 using pulse::ipc::PipeRead;
 using pulse::ipc::PipeWrite;
+
+bool LocalNetworkConfigHasPossibleRoots() {
+    wchar_t local_app[MAX_PATH]{};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", local_app, ARRAYSIZE(local_app));
+    if (n == 0 || n >= ARRAYSIZE(local_app)) return false;
+    std::wstring path(local_app, n);
+    if (!path.empty() && path.back() != L'\\') path.push_back(L'\\');
+    path += L"Pulse\\network-index.json";
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0) {
+        CloseHandle(file);
+        return false;
+    }
+    if (size.QuadPart > 65536) {
+        CloseHandle(file);
+        return true;
+    }
+    std::string bytes(static_cast<size_t>(size.QuadPart), '\0');
+    DWORD read = 0;
+    const BOOL ok = ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr);
+    CloseHandle(file);
+    if (!ok) return true;
+    bytes.resize(read);
+    return bytes.find("\"path\"") != std::string::npos;
+}
+
+bool AgentPipePresent(const std::wstring& pipe_name) {
+    if (pipe_name.empty()) return false;
+    if (WaitNamedPipeW(pipe_name.c_str(), 1) != FALSE) return true;
+    return GetLastError() == ERROR_PIPE_BUSY;
+}
 
 std::vector<uint8_t> QueryPayload(const Query& query) {
     PayloadWriter writer;
@@ -142,29 +178,45 @@ bool NetworkAgentClient::Request(uint32_t type, uint32_t id,
     };
     // Cancel a silent peer on the owning I/O thread; retain normal handle ownership.
     struct Deadline {
-        HANDLE thread = nullptr;
-        std::mutex mutex;
-        std::condition_variable_any changed;
-        std::jthread worker;
+        struct State {
+            HANDLE thread = nullptr;
+            std::atomic<bool> stopped{false};
+        } state;
+        HANDLE timer = nullptr;
+
+        static VOID CALLBACK OnTimer(PVOID param, BOOLEAN) {
+            auto* st = static_cast<State*>(param);
+            if (st && !st->stopped.load(std::memory_order_acquire) && st->thread) {
+                CancelSynchronousIo(st->thread);
+            }
+        }
+
         Deadline() {
             if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
-                                 &thread, 0, FALSE, DUPLICATE_SAME_ACCESS)) return;
-            worker = std::jthread([this](std::stop_token stop) {
-                std::unique_lock lock(mutex);
-                changed.wait_for(lock, stop, std::chrono::seconds(5), [] { return false; });
-                while (!stop.stop_requested()) {
-                    CancelSynchronousIo(thread);
-                    changed.wait_for(lock, stop, std::chrono::milliseconds(10), [] { return false; });
-                }
-            });
+                                 &state.thread, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+                return;
+            }
+            if (!CreateTimerQueueTimer(&timer, nullptr, &Deadline::OnTimer, &state,
+                                       5000, 15, WT_EXECUTEINTIMERTHREAD)) {
+                CloseHandle(state.thread);
+                state.thread = nullptr;
+                timer = nullptr;
+            }
         }
+
         ~Deadline() {
-            worker.request_stop();
-            if (worker.joinable()) worker.join();
-            if (thread) CloseHandle(thread);
+            state.stopped.store(true, std::memory_order_release);
+            if (timer) {
+                DeleteTimerQueueTimer(nullptr, timer, INVALID_HANDLE_VALUE);
+                timer = nullptr;
+            }
+            if (state.thread) {
+                CloseHandle(state.thread);
+                state.thread = nullptr;
+            }
         }
     } deadline;
-    if (!deadline.thread) { close_pipe(); return false; }
+    if (!deadline.state.thread) { close_pipe(); return false; }
     const MsgHeader header = agent::MakeHeader(type, id, static_cast<uint32_t>(payload.size()));
     const bool sent = PipeWrite(pipe, reinterpret_cast<const uint8_t*>(&header), sizeof(header)) &&
                       (payload.empty() || PipeWrite(pipe, payload.data(), static_cast<DWORD>(payload.size())));
@@ -232,8 +284,14 @@ void NetworkAgentClient::SearchLoop() {
         if (std::chrono::steady_clock::now() >= roots_due) {
             lock.unlock();
             RefreshRoots();
+            bool empty_roots = false;
+            {
+                std::lock_guard<std::mutex> rlock(mu_);
+                empty_roots = roots_.empty();
+            }
             lock.lock();
-            roots_due = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            roots_due = std::chrono::steady_clock::now() +
+                (empty_roots ? std::chrono::seconds(5) : std::chrono::seconds(1));
             continue;
         }
         search_cv_.wait_until(lock, roots_due, [this] { return !running_ || have_pending_search_; });
@@ -292,6 +350,16 @@ bool NetworkAgentClient::TakeResult(uint32_t id, SearchResult& result) {
 }
 
 void NetworkAgentClient::RefreshRoots() {
+    if (pipe_name_ == agent::PipeName()) {
+        bool currently_empty = false;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            currently_empty = roots_.empty();
+        }
+        if (currently_empty && !LocalNetworkConfigHasPossibleRoots() && !AgentPipePresent(pipe_name_)) {
+            return;
+        }
+    }
     uint32_t response_type = 0;
     std::vector<uint8_t> payload;
     if (!Request(agent::REQ_ROOTS, 1, {}, response_type, payload) || response_type != agent::RSP_ROOTS)
@@ -347,6 +415,7 @@ bool NetworkAgentClient::AddRoot(const std::wstring& path, std::wstring* error) 
     if (!reader.GetU32(ok) || !reader.GetString(message)) return false;
     if (!ok && error) *error = std::move(message);
     RefreshRoots();
+    search_cv_.notify_all();
     return ok != 0;
 }
 
@@ -363,6 +432,7 @@ bool NetworkAgentClient::RemoveRoot(const std::wstring& path, std::wstring* erro
     if (!reader.GetU32(ok) || !reader.GetString(message)) return false;
     if (!ok && error) *error = std::move(message);
     RefreshRoots();
+    search_cv_.notify_all();
     return ok != 0;
 }
 
@@ -373,6 +443,7 @@ void NetworkAgentClient::Rebuild(const std::wstring& path) {
     std::vector<uint8_t> ignored;
     Request(agent::REQ_REBUILD, 4, writer.data(), response_type, ignored);
     RefreshRoots();
+    search_cv_.notify_all();
 }
 
 } // namespace pulse::index

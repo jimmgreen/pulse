@@ -1,5 +1,8 @@
 #include "setup_dialog_migration.h"
 #include "setup_common.h"
+#include "../common/dialog_auto_ownership.h"
+#include "../common/dialog_auto_transaction.h"
+#include "../common/dialog_registration_mutex.h"
 #include <algorithm>
 namespace pulse::setup {
 namespace {
@@ -7,14 +10,7 @@ bool Same(const std::wstring& a, const std::wstring& b) {
     return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
 }
 bool OwnedDll(const std::wstring& app, const std::wstring& path, dialog_auto::Architecture architecture) {
-    const wchar_t* name = dialog_auto::DllNameFor(architecture);
-    if (!name) return false;
-    if (Same(path, app + L"\\" + name) || Same(path, app + L"\\DialogBridge\\" + name)) return true;
-    const auto prefix = app + L"\\DialogBridge\\";
-    if (path.size() != prefix.size() + 65 + wcslen(name) || !Same(path.substr(0, prefix.size()), prefix)) return false;
-    const auto digest = path.substr(prefix.size(), 64);
-    return std::all_of(digest.begin(), digest.end(), [](wchar_t c) { return (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f'); }) &&
-        Same(path.substr(prefix.size() + 64), L"\\" + std::wstring(name));
+    return dialog_auto::IsOwnedDialogAutoDll(app, true, architecture, path);
 }
 }
 DialogMigrationApi SystemDialogMigrationApi() {
@@ -34,6 +30,206 @@ DWORD DisableOwnedDialogRegistration(const std::wstring& app, const dialog_auto:
     if (!OwnedDll(app, status.dll_path, architecture)) return ERROR_SUCCESS;
     return disable(status.dll_path);
 }
+DWORD RestoreDialogRegistrationsForUninstall(const std::wstring& app, const UninstallDialogRestoreApi& custom_api) {
+    const bool use_custom = static_cast<bool>(custom_api.read_clsid) || static_cast<bool>(custom_api.clear_clsid) ||
+        static_cast<bool>(custom_api.read_config) || static_cast<bool>(custom_api.reset_config);
+    if (use_custom && (!custom_api.read_clsid || !custom_api.clear_clsid || !custom_api.read_config || !custom_api.reset_config))
+        return ERROR_INVALID_PARAMETER;
+
+    struct ScopedMutex {
+        HANDLE handle = nullptr;
+        bool acquired = false;
+        DWORD error = ERROR_SUCCESS;
+        explicit ScopedMutex(bool active) {
+            if (!active) return;
+            handle = dialog_auto::CreateRegistrationMutex();
+            if (!handle) { error = GetLastError(); return; }
+            const DWORD wait = WaitForSingleObject(handle, 30000);
+            acquired = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+            if (!acquired) error = wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+        }
+        ~ScopedMutex() {
+            if (acquired) ReleaseMutex(handle);
+            if (handle) CloseHandle(handle);
+        }
+    } lock(!use_custom);
+    if (lock.error) return lock.error;
+
+    struct RegHandle {
+        HKEY h = nullptr;
+        ~RegHandle() { if (h) RegCloseKey(h); }
+    };
+    auto read_str = [](HKEY key, const wchar_t* name, std::wstring& out, bool& exists, bool& corrupt) -> DWORD {
+        out.clear(); exists = false; corrupt = false;
+        DWORD type = 0, size = 0;
+        LSTATUS status = RegQueryValueExW(key, name, nullptr, &type, nullptr, &size);
+        if (status == ERROR_FILE_NOT_FOUND) return ERROR_SUCCESS;
+        if (status != ERROR_SUCCESS) return static_cast<DWORD>(status);
+        exists = true;
+        if (type != REG_SZ || size < sizeof(wchar_t) || size > 65536 || (size % sizeof(wchar_t)) != 0) {
+            corrupt = true;
+            return ERROR_SUCCESS;
+        }
+        std::vector<wchar_t> buffer(size / sizeof(wchar_t));
+        const DWORD expected = size;
+        status = RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(buffer.data()), &size);
+        if (status != ERROR_SUCCESS) return static_cast<DWORD>(status);
+        if (type != REG_SZ || size != expected || buffer.back() != L'\0') {
+            corrupt = true;
+            return ERROR_SUCCESS;
+        }
+        for (size_t i = 0; i + 1 < buffer.size(); ++i) {
+            if (buffer[i] == L'\0') { corrupt = true; return ERROR_SUCCESS; }
+        }
+        out.assign(buffer.data(), buffer.size() - 1);
+        return ERROR_SUCCESS;
+    };
+    auto key_empty = [](HKEY key) -> bool {
+        DWORD subkeys = 0, values = 0;
+        return RegQueryInfoKeyW(key, nullptr, nullptr, nullptr, &subkeys, nullptr, nullptr, &values,
+            nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS && subkeys == 0 && values == 0;
+    };
+
+    constexpr const wchar_t* kClsids[] = {
+        L"Software\\Classes\\CLSID\\{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}",
+        L"Software\\Classes\\CLSID\\{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}",
+    };
+    UninstallDialogRestoreApi sys_api;
+    if (!use_custom) {
+        std::vector<dialog_auto::RegistrationTarget> clean_targets;
+        for (const auto arch : {dialog_auto::Architecture::X64, dialog_auto::Architecture::X86}) {
+            const auto status = dialog_auto::Inspect(arch);
+            if (status.error == ERROR_NOT_SUPPORTED && arch != dialog_auto::CurrentArchitecture) continue;
+            if (!status.error && !status.conflict && OwnedDll(app, status.dll_path, arch)) {
+                clean_targets.push_back({arch, status.dll_path});
+            }
+        }
+        if (!clean_targets.empty()) {
+            dialog_auto::ExecuteRegistrationChange(clean_targets, false);
+        }
+
+        sys_api.read_config = [&](dialog_auto::Architecture arch, UninstallDialogConfigState& out) -> DWORD {
+            out = {};
+            const REGSAM view = arch == dialog_auto::Architecture::X64 ? KEY_WOW64_64KEY : KEY_WOW64_32KEY;
+            const wchar_t* cfg_path = arch == dialog_auto::Architecture::X64
+                ? L"Software\\Pulse\\DialogAuto" : L"Software\\Pulse\\DialogAuto32";
+            RegHandle cfg;
+            const LSTATUS opened = RegOpenKeyExW(HKEY_CURRENT_USER, cfg_path, 0, KEY_READ | view, &cfg.h);
+            if (opened == ERROR_FILE_NOT_FOUND || opened == ERROR_PATH_NOT_FOUND) return ERROR_SUCCESS;
+            if (opened != ERROR_SUCCESS) return static_cast<DWORD>(opened);
+            out.present = true;
+            bool val_exists = false;
+            return read_str(cfg.h, L"DllPath", out.dll_path, val_exists, out.dll_corrupt);
+        };
+        sys_api.read_clsid = [&](dialog_auto::Architecture arch, size_t index, UninstallDialogClsidState& out) -> DWORD {
+            out = {};
+            const REGSAM view = arch == dialog_auto::Architecture::X64 ? KEY_WOW64_64KEY : KEY_WOW64_32KEY;
+            const std::wstring clsid_path = kClsids[index];
+            const std::wstring inproc_path = clsid_path + L"\\InprocServer32";
+            RegHandle clsid;
+            const LSTATUS opened = RegOpenKeyExW(HKEY_CURRENT_USER, clsid_path.c_str(), 0, KEY_READ | view, &clsid.h);
+            if (opened == ERROR_FILE_NOT_FOUND || opened == ERROR_PATH_NOT_FOUND) return ERROR_SUCCESS;
+            if (opened != ERROR_SUCCESS) return static_cast<DWORD>(opened);
+            out.present = true;
+            bool owner_exists = false;
+            if (const DWORD err = read_str(clsid.h, L"PulseDialogAutoOwner", out.owner, owner_exists, out.owner_corrupt))
+                return err;
+            RegHandle inproc;
+            const LSTATUS sub_opened = RegOpenKeyExW(HKEY_CURRENT_USER, inproc_path.c_str(), 0, KEY_READ | view, &inproc.h);
+            if (sub_opened != ERROR_SUCCESS && sub_opened != ERROR_FILE_NOT_FOUND && sub_opened != ERROR_PATH_NOT_FOUND)
+                return static_cast<DWORD>(sub_opened);
+            if (inproc.h) {
+                out.inproc_present = true;
+                bool inproc_val_exists = false;
+                if (const DWORD err = read_str(inproc.h, nullptr, out.inproc_dll, inproc_val_exists, out.inproc_corrupt))
+                    return err;
+            }
+            return ERROR_SUCCESS;
+        };
+        sys_api.clear_clsid = [&](dialog_auto::Architecture arch, size_t index, bool pulse_token) -> DWORD {
+            const REGSAM view = arch == dialog_auto::Architecture::X64 ? KEY_WOW64_64KEY : KEY_WOW64_32KEY;
+            const std::wstring clsid_path = kClsids[index];
+            const std::wstring inproc_path = clsid_path + L"\\InprocServer32";
+            DWORD remove_error = ERROR_SUCCESS;
+            {
+                RegHandle inproc;
+                if (RegOpenKeyExW(HKEY_CURRENT_USER, inproc_path.c_str(), 0, KEY_READ | KEY_WRITE | view, &inproc.h) == ERROR_SUCCESS) {
+                    const LSTATUS del_default = RegDeleteValueW(inproc.h, nullptr);
+                    if (del_default != ERROR_SUCCESS && del_default != ERROR_FILE_NOT_FOUND)
+                        remove_error = static_cast<DWORD>(del_default);
+                    RegDeleteValueW(inproc.h, L"ThreadingModel");
+                    const bool empty = key_empty(inproc.h);
+                    RegCloseKey(inproc.h);
+                    inproc.h = nullptr;
+                    if (empty) {
+                        RegDeleteKeyExW(HKEY_CURRENT_USER, inproc_path.c_str(), view, 0);
+                    } else if (pulse_token) {
+                        RegHandle clsid_write;
+                        if (RegOpenKeyExW(HKEY_CURRENT_USER, clsid_path.c_str(), 0, KEY_READ | KEY_WRITE | DELETE | view, &clsid_write.h) == ERROR_SUCCESS) {
+                            RegDeleteTreeW(clsid_write.h, L"InprocServer32");
+                        }
+                        RegDeleteKeyExW(HKEY_CURRENT_USER, inproc_path.c_str(), view, 0);
+                    }
+                }
+                RegHandle clsid;
+                if (RegOpenKeyExW(HKEY_CURRENT_USER, clsid_path.c_str(), 0, KEY_READ | KEY_WRITE | view, &clsid.h) == ERROR_SUCCESS) {
+                    RegDeleteValueW(clsid.h, L"PulseDialogAutoOwner");
+                    const bool empty = key_empty(clsid.h);
+                    RegCloseKey(clsid.h);
+                    clsid.h = nullptr;
+                    if (empty) RegDeleteKeyExW(HKEY_CURRENT_USER, clsid_path.c_str(), view, 0);
+                }
+            }
+            return remove_error;
+        };
+        sys_api.reset_config = [&](dialog_auto::Architecture arch, bool clear_dll_path) -> DWORD {
+            const REGSAM view = arch == dialog_auto::Architecture::X64 ? KEY_WOW64_64KEY : KEY_WOW64_32KEY;
+            const wchar_t* cfg_path = arch == dialog_auto::Architecture::X64
+                ? L"Software\\Pulse\\DialogAuto" : L"Software\\Pulse\\DialogAuto32";
+            RegHandle cfg;
+            if (RegOpenKeyExW(HKEY_CURRENT_USER, cfg_path, 0, KEY_READ | KEY_WRITE | view, &cfg.h) == ERROR_SUCCESS) {
+                const DWORD zero = 0;
+                RegSetValueExW(cfg.h, L"Enabled", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&zero), sizeof(zero));
+                RegSetValueExW(cfg.h, L"Stage", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&zero), sizeof(zero));
+                if (clear_dll_path) RegDeleteValueW(cfg.h, L"DllPath");
+            }
+            return ERROR_SUCCESS;
+        };
+    }
+    const UninstallDialogRestoreApi& api = use_custom ? custom_api : sys_api;
+
+    SYSTEM_INFO sys_info{};
+    GetNativeSystemInfo(&sys_info);
+    for (const auto arch : {dialog_auto::Architecture::X64, dialog_auto::Architecture::X86}) {
+        if (!use_custom && sys_info.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_AMD64 && arch != dialog_auto::CurrentArchitecture)
+            continue;
+        UninstallDialogConfigState cfg;
+        if (const DWORD err = api.read_config(arch, cfg)) return err;
+        const bool owned_cfg = !cfg.dll_path.empty() && OwnedDll(app, cfg.dll_path, arch);
+        const bool foreign_cfg = !cfg.dll_path.empty() && !owned_cfg;
+
+        for (size_t idx = 0; idx < std::size(kClsids); ++idx) {
+            UninstallDialogClsidState clsid;
+            if (const DWORD err = api.read_clsid(arch, idx, clsid)) return err;
+            if (!clsid.present) continue;
+            const bool pulse_token = clsid.owner == L"Pulse.DialogAuto.v1";
+            const bool owned_inproc = !clsid.inproc_dll.empty() && OwnedDll(app, clsid.inproc_dll, arch);
+            const bool partial_owned = pulse_token && (clsid.inproc_dll.empty() || clsid.inproc_corrupt) && !foreign_cfg;
+            if (!owned_inproc && !partial_owned) continue;
+
+            const DWORD remove_error = api.clear_clsid(arch, idx, pulse_token);
+            UninstallDialogClsidState verify;
+            if (const DWORD err = api.read_clsid(arch, idx, verify)) return err;
+            if (verify.inproc_present && !verify.inproc_dll.empty() && OwnedDll(app, verify.inproc_dll, arch))
+                return remove_error ? remove_error : ERROR_ACCESS_DENIED;
+        }
+
+        if (cfg.present && (owned_cfg || (!foreign_cfg && (cfg.dll_corrupt || cfg.dll_path.empty())))) {
+            api.reset_config(arch, owned_cfg || cfg.dll_corrupt);
+        }
+    }
+    return ERROR_SUCCESS;
+}
 std::vector<std::wstring> RetiredRuntimeFiles(const std::vector<std::wstring>& shipped) {
     std::vector<std::wstring> result;
     for (const wchar_t* stale : {L"msvcp140.dll", L"msvcp140_atomic_wait.dll", L"vcruntime140.dll", L"vcruntime140_1.dll"})
@@ -41,8 +237,27 @@ std::vector<std::wstring> RetiredRuntimeFiles(const std::vector<std::wstring>& s
     return result;
 }
 std::vector<std::wstring> LegacyDialogFiles(const std::wstring& app, const std::vector<std::wstring>& shipped) {
-    std::string manifest;
     std::vector<std::wstring> result;
+    auto push_unique_plain = [&](const std::wstring& rel) {
+        if (std::any_of(shipped.begin(), shipped.end(), [&](const auto& file) { return Same(rel, file); })) return;
+        const DWORD attrs = GetFileAttributesW((app + L"\\" + rel).c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
+            std::none_of(result.begin(), result.end(), [&](const auto& file) { return Same(rel, file); })) {
+            result.push_back(rel);
+        }
+    };
+    const bool retiring_dialog_bridge =
+        std::any_of(shipped.begin(), shipped.end(), [](const auto& path) { return Same(path, L"app-current.json"); }) &&
+        std::none_of(shipped.begin(), shipped.end(), [](const auto& path) { return Same(path, L"dialog-current.json"); });
+    if (retiring_dialog_bridge) {
+        for (const wchar_t* legacy_root : {
+                L"dialog-current.json", L"dialog-x86-current.json",
+                L".pulse-dialog-previous", L".pulse-dialog-x86-previous",
+                L"PulseDialogAdminAuto.exe"}) {
+            push_unique_plain(legacy_root);
+        }
+    }
+    std::string manifest;
     if (!ReadWholeFile(app + L"\\.pulse-files", manifest)) return result;
     for (size_t pos = 0; pos < manifest.size();) {
         size_t end = manifest.find('\n', pos); if (end == std::string::npos) end = manifest.size();
@@ -63,17 +278,18 @@ std::vector<std::wstring> LegacyDialogFiles(const std::wstring& app, const std::
         constexpr const wchar_t* old_runtime[] = {L"Pulse.AI.exe",L"Pulse.Content.exe",L"Pulse.Document.exe",L"Pulse.Index.exe",
             L"Pulse.Preview.exe",L"pulse_elevated.exe",L"pulse_shell.exe",L"pulse_start_pin.dll",L"pulse_integration.exe",L"lumatext.dll",L"pdfium.dll"};
         const bool full_version = std::any_of(shipped.begin(), shipped.end(), [](const auto& path) {
-            return path.starts_with(L"DialogBridge\\") && path.ends_with(L"\\pulse_integration.exe");
+            return (path.starts_with(L"DialogBridge\\") || path.starts_with(L"AppRuntime\\")) &&
+                   path.ends_with(L"\\pulse_integration.exe");
         });
         const bool runtime = full_version && std::any_of(std::begin(old_runtime), std::end(old_runtime), [&](const auto* name) { return Same(rel,name); });
         if (flat || runtime) {
-            if (std::any_of(shipped.begin(), shipped.end(), [&](const auto& file) { return Same(rel, file); })) continue;
-            const DWORD attrs = GetFileAttributesW((app + L"\\" + rel).c_str());
-            if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
-                std::none_of(result.begin(), result.end(), [&](const auto& file) { return Same(rel, file); })) result.push_back(rel);
+            push_unique_plain(rel);
             continue;
         }
-        if (rel.size() <= 13 || !Same(rel.substr(0, 13), L"DialogBridge\\") || rel.find(L"..") != std::wstring::npos || rel.find(L':') != std::wstring::npos) continue;
+        const bool legacy_bridge_file = rel.size() > 13 && Same(rel.substr(0, 13), L"DialogBridge\\");
+        const bool legacy_stage_file = retiring_dialog_bridge && rel.size() > 18 && Same(rel.substr(0, 18), L"DialogBridgeStage\\");
+        if ((!legacy_bridge_file && !legacy_stage_file) || rel.find(L"..") != std::wstring::npos || rel.find(L':') != std::wstring::npos) continue;
+        if (legacy_stage_file && std::any_of(shipped.begin(), shipped.end(), [&](const auto& file) { return Same(rel, file); })) continue;
         const DWORD file_attrs = GetFileAttributesW((app + L"\\" + rel).c_str());
         if (file_attrs != INVALID_FILE_ATTRIBUTES && (file_attrs & FILE_ATTRIBUTE_DIRECTORY)) continue;
         // Never follow an installed manifest through a user-created reparse directory.
@@ -125,7 +341,7 @@ DWORD DialogLayoutMigration::Enable(dialog_auto::Architecture architecture, cons
 }
 bool DialogLayoutMigration::Lock(std::wstring& error) {
     if (mutex_ || !real_) return true;
-    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Global\\Pulse.DialogAuto.Registration.v1");
+    HANDLE mutex = dialog_auto::CreateRegistrationMutex();
     const DWORD wait = mutex ? WaitForSingleObject(mutex, 30000) : WAIT_FAILED;
     if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED) {
         error = L"Cannot lock dialog registration: " + Win32Error(wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError());

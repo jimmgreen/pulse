@@ -233,6 +233,33 @@ struct ShellIconCacheTestAccess {
         }
         return false;
     }
+    static bool Associations() {
+        ShellIconCache cache;
+        cache.generic_index_[L".zip"] = 123;
+        cache.exact_index_[L"fixture.zip"] = 123;
+        cache.retry_after_[L"fixture.zip"] = 999;
+        cache.last_used_[L"fixture.zip"] = 1;
+        cache.queued_.insert(L"fixture.zip");
+        cache.queue_.push(L"fixture.zip");
+        cache.convert_queue_.push_back(123);
+        cache.convert_pending_.insert(123);
+        cache.ready_pixels_[123] = {};
+        cache.bitmaps_[123] = {};
+        cache.artwork_bounds_[123] = {};
+#ifndef PULSE_ASSOC_BASELINE
+        cache.InvalidateAssociations();
+#endif
+        const bool cleared = cache.generic_index_.empty() && cache.exact_index_.empty() &&
+            cache.retry_after_.empty() && cache.last_used_.empty() && cache.queued_.empty() &&
+            cache.queue_.empty() && cache.convert_queue_.empty() && cache.convert_pending_.empty() &&
+            cache.ready_pixels_.empty() && cache.bitmaps_.empty() && cache.artwork_bounds_.empty();
+        std::printf("[%s] association change clears all file icon caches and pending work\n", cleared ? "PASS" : "FAIL");
+        if (!cleared) return false;
+        cache.GenericIndex(L"fixture.zip", false, FILE_ATTRIBUTE_NORMAL);
+        const bool rebuilt = Wait(cache) && cache.generic_index_.contains(L".zip");
+        std::printf("[%s] association change permits fresh Shell icon resolution\n", rebuilt ? "PASS" : "FAIL");
+        return rebuilt;
+    }
     static bool Run() {
         ShellIconCache cache;
         bool ok = true;
@@ -409,6 +436,8 @@ struct ShellIconCacheTestAccess {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--associations-only") == 0)
+        return pulse::ui::ShellIconCacheTestAccess::Associations() ? 0 : 1;
     if (argc == 3 && std::strcmp(argv[1], "--shortcut-latency") == 0) {
         const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         const bool ok = pulse::ui::ShellIconCacheTestAccess::MeasureShortcuts(std::filesystem::path(argv[2]));

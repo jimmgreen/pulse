@@ -1,5 +1,6 @@
 #include "../app/shell_window_registry.h"
 #include "../app/shell_window_registry_test.h"
+#include "../app/shell_select_delivery.h"
 #include <atomic>
 #include <mutex>
 #include <set>
@@ -28,6 +29,22 @@ bool Fail(std::atomic<int>& remaining) {
     return false;
 }
 int failures = 0;
+std::unique_ptr<pulse::app::ShellSelectRequest> delivered;
+unsigned delivery_calls = 0;
+BOOL WINAPI AcceptSelection(HWND, UINT, WPARAM, LPARAM value) {
+    ++delivery_calls;
+    delivered.reset(reinterpret_cast<pulse::app::ShellSelectRequest*>(value));
+    return TRUE;
+}
+BOOL WINAPI RejectSelection(HWND, UINT, WPARAM, LPARAM) {
+    ++delivery_calls;
+    SetLastError(ERROR_NOT_ENOUGH_QUOTA);
+    return FALSE;
+}
+BOOL WINAPI RejectSelectionWithoutError(HWND, UINT, WPARAM, LPARAM) {
+    ++delivery_calls;
+    return FALSE;
+}
 void Check(bool ok, const char* label) {
     std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", label); failures += !ok;
 }
@@ -147,6 +164,29 @@ void ShellRegistryTestApplied(const std::vector<ShellWindowEntry>& acknowledged)
 int main() {
     using namespace pulse::app;
     setvbuf(stdout, nullptr, _IONBF, 0);
+    const auto selection = [] {
+        auto request = std::make_unique<ShellSelectRequest>();
+        request->key = 42;
+        request->path = L"C:\\fixture\\selected.txt";
+        request->flags = SVSI_SELECT | SVSI_ENSUREVISIBLE;
+        return request;
+    };
+    const HWND receiver = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(1));
+    Check(PostShellSelect(nullptr, WM_APP + 17, selection(), AcceptSelection) ==
+        HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE) && delivery_calls == 0,
+        "reveal delivery: missing receiver rejects rather than posting an unowned thread message");
+    Check(PostShellSelect(receiver, WM_APP + 17, selection(), RejectSelection) ==
+        HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_QUOTA) && !delivered,
+        "reveal delivery: queue rejection preserves failing HRESULT");
+    SetLastError(ERROR_ACCESS_DENIED);
+    Check(PostShellSelect(receiver, WM_APP + 17, selection(), RejectSelectionWithoutError) ==
+        HRESULT_FROM_WIN32(ERROR_GEN_FAILURE),
+        "reveal delivery: failure without last-error never becomes S_OK or a stale error");
+    Check(PostShellSelect(receiver, WM_APP + 17, selection(), AcceptSelection) == S_OK &&
+        delivered && delivered->key == 42 && delivered->path == L"C:\\fixture\\selected.txt" &&
+        delivered->flags == (SVSI_SELECT | SVSI_ENSUREVISIBLE),
+        "reveal delivery: accepted queue owns the unchanged request");
+    delivered.reset();
     ShellWindowRegistry registry(nullptr, WM_APP + 17);
     registry.Publish({{1, L"C:\\fake-A"}});
     Check(Wait([] { return Ack(L"C:\\fake-A"); }, &registry), "one Publish survives thread/init/COM/pending/register/navigate transient failures");

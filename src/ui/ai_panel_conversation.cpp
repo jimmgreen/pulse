@@ -1509,6 +1509,10 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
                 if (!b.ver_only) {
                     mini(28.0f * s, AiPanelPart::ActCopy, AiIcon::Copy, 15.0f * s, false, true);
                     x += 2.0f * s;
+                    if (!b.done) {
+                        mini(28.0f * s, AiPanelPart::ActSave, AiIcon::Download, 15.0f * s, false, true);
+                        x += 2.0f * s;
+                    }
                     // 重新生成 and its caret (16 wide, chevron 11) side by side.
                     mini(28.0f * s, AiPanelPart::ActRetry, AiIcon::Retry, 15.0f * s, false, true);
                     mini(16.0f * s, AiPanelPart::ActRegenMenu, AiIcon::ChevronDown, 11.0f * s, false, true);

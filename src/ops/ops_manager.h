@@ -29,11 +29,13 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <array>
 #include <atomic>
 #include <optional>
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace pulse::ops {
@@ -150,6 +152,26 @@ inline bool IsShellTransferRequest(const OpRequest& req) {
     return false;
 }
 
+// The persisted JSON text of one UndoEntry, cached by OpsManager::UndoJsonSnapshot
+// so each snapshot serializes only entries that changed. A copied entry starts
+// without it (a copy may be edited); a moved entry keeps it. The text is used
+// only while the entry still has the shape it was built from (type, flags,
+// names, path counts), so an in-place append invalidates it on its own.
+struct UndoJsonFragment {
+    UndoJsonFragment() = default;
+    UndoJsonFragment(const UndoJsonFragment&) {}
+    UndoJsonFragment& operator=(const UndoJsonFragment&) { text.reset(); return *this; }
+    UndoJsonFragment(UndoJsonFragment&&) = default;
+    UndoJsonFragment& operator=(UndoJsonFragment&&) = default;
+    std::shared_ptr<const std::wstring> text;
+    int type = 0;
+    bool supported = false;
+    size_t sources = 0;
+    size_t destinations = 0;
+    std::wstring dest_dir;
+    std::wstring new_name;
+};
+
 struct UndoEntry {
     bool generated_output = false;
     std::map<std::wstring, std::wstring> generated_recycle_payloads;
@@ -167,6 +189,7 @@ struct UndoEntry {
     uint64_t task_id = 0;     // the task that recorded it (session only)
     bool redo_cleared = false;
     uint64_t recorded_at = 0; // UTC FILETIME when it was recorded (session only; 0 = unknown)
+    mutable UndoJsonFragment json;  // persistence cache, guarded by OpsManager::mutex_
 };
 
 struct UndoHistoryItem {
@@ -231,6 +254,13 @@ struct ExternalAction {
     bool primary = false;
 };
 
+// Why a queued operation has not started (OpsManager::ActiveStatuses).
+enum class OpWaitReason : uint8_t {
+    None,       // not queued, or not looked at yet: starts after those ahead of it
+    SamePlace,  // touches a place an operation running or queued ahead of it uses
+    LanesFull,  // as many operations as run at once already run
+};
+
 struct OpStatus {
     bool external = false;
     std::wstring external_title;
@@ -244,6 +274,8 @@ struct OpStatus {
     std::wstring external_result, external_result_path; // completed: the result notice and what it opens
     std::vector<ExternalAction> external_actions;
     uint64_t external_linked = 0; // host operation shown as this task while it runs
+    uint64_t started_tick = 0;
+    uint64_t ended_tick = 0;
     uint64_t terminal_sequence = 0;
     bool active = false;
     bool can_pause = true;
@@ -260,11 +292,13 @@ struct OpStatus {
     bool authorization_retrying = false;
     OpType type = OpType::Copy;
     OpPhase phase = OpPhase::Completed;
+    OpWaitReason wait_reason = OpWaitReason::None;  // phase Queued only
     uint64_t task_id = 0;
     bool enumeration_complete = true; // false: discovered totals are still growing
     float percent = -1.0f;    // <0 = nothing to show
     std::wstring summary;     // one-line status-bar text
     std::wstring last_error;
+    std::wstring native_handoff_directory; // Manual Explorer inspection; never replays a failed request.
     std::wstring source_label;
     std::wstring destination_label;
     std::wstring destination_dir;   // copy / move: the folder items go to
@@ -273,6 +307,8 @@ struct OpStatus {
     uint64_t transferred_bytes = 0;
     uint64_t total_items = 0;
     uint64_t completed_items = 0;
+    uint64_t scanned_items = 0;
+    uint64_t scanned_bytes = 0;
     double bytes_per_second = 0.0;
     double peak_bytes_per_second = 0.0;
     double items_per_second = 0.0;
@@ -304,6 +340,7 @@ enum class RecycleRefusal { None, TooLarge, Disabled, Location };
 
 struct FinishedTask {
     uint64_t task_id = 0;
+    std::optional<OpStatus> final_status; // Failure evidence survives bounded query-history eviction.
     std::vector<std::wstring> moved_sources; // Confirmed whole request roots, never descendants alone.
     OpType type = OpType::Copy;
     bool success = false;
@@ -422,6 +459,8 @@ public:
     void CancelUpdatePreparation();
     void CancelCurrent();
     bool SkipCurrentItem(uint64_t task, uint64_t token);
+    bool PauseTask(uint64_t task_id);
+    bool ResumeTask(uint64_t task_id);
     void PauseCurrent();
     void ResumeCurrent();
     std::optional<ConflictItemInfo> PendingConflict() const;
@@ -457,6 +496,7 @@ public:
     // Double-click open: ShellExecuteEx on a dedicated open thread (plan §6.2).
     void OpenWith(const std::wstring& path, bool allow_archive_fallback = true);
     void EnableArchiveOpenFallback() { archive_open_fallback_enabled_ = true; }
+    void SetCustomOpenFallbackExtensions(std::vector<std::wstring> extensions);
     std::vector<std::wstring> TakeArchiveOpenFallbacks();
 
     // Shell "properties" verb on the ops worker thread. Compile-verified only
@@ -475,6 +515,8 @@ public:
 
     // Expand a registry command template (%1/%L) and launch it on the open thread.
     void ExecuteCommand(const std::wstring& command, const std::wstring& path);
+    void CreateShellNew(const std::wstring& directory, const std::wstring& stem,
+                        const std::wstring& extension, const std::wstring& command);
 
     // `wt.exe -d <dir>` on the ops worker thread. Compile-verified only.
     void OpenTerminal(const std::wstring& dir);
@@ -563,6 +605,28 @@ public:
     bool FinishExternalTask(uint64_t task_id, ExternalOutcome outcome, const OpStatus& final_status = {});
 
     OpStatus Status() const;
+    // Every operation running right now (the main worker's and each lane's),
+    // oldest first. Empty when idle. Each can be paused or cancelled by task id.
+    // include_queued adds the copies, moves and deletes waiting for their turn
+    // (phase Queued, with wait_reason); those can be cancelled.
+    std::vector<OpStatus> ActiveStatuses(bool include_queued = false) const;
+    // Called by the UI thread once when servicing WM_OPS_NOTIFY so worker-side
+    // notification coalescing resets only after delivery, not on every BuildVm read.
+    void AcknowledgeNotify() const;
+    // Single-lock UI frame snapshot: avoids 6-7 independent mutex acquisitions
+    // per BuildVm during heavy file transfers.
+    struct UiStatusSnapshot {
+        uint64_t revision = 0;
+        OpStatus status;
+        bool can_undo = false;
+        bool can_redo = false;
+        bool can_undo_status_task = false;
+        UndoHistoryProgress history_progress;
+        std::vector<UndoHistorySummaryItem> undo_summary;
+        size_t queued_transfers = 0;
+    };
+    uint64_t UiRevision() const noexcept { return ui_revision_.load(std::memory_order_acquire); }
+    UiStatusSnapshot CaptureUiSnapshot(bool include_history_rows = false) const;
     // Query or cancel one exact queued/running/completed task. Unlike the UI
     // "current operation" controls, these methods never adopt a later task.
     std::optional<OpStatus> QueryTask(uint64_t task_id) const;
@@ -617,6 +681,7 @@ private:
         bool transfer_cancelled = false;
         bool transfer_paused = false;
         ULONGLONG enqueued_at = 0; // diagnostics: queue wait vs shell cost
+        OpWaitReason wait_reason = OpWaitReason::None; // the scheduler's last verdict
     };
 
     QueueItem* CurrentTransferLocked(); // mutex_ held; active request or queue front
@@ -647,6 +712,34 @@ private:
     void DispatchMenuJob(const MenuJob& job);
     void RegisterShellRequest(uint32_t id);
     void WorkerThread();
+    void InteractiveThread();
+    OpStatus ExecutionStatus() const;
+    // The lane running `task_id` (0: none). Lanes are child OpsManagers, each a
+    // whole engine with its own status, pause, cancel and conflict prompt, so
+    // operations on separate paths run at the same time (ops_manager_interactive.inl).
+    std::shared_ptr<OpsManager> InteractiveExecutor(uint64_t task_id) const;
+    // The lane the single operation window should show: one waiting on the
+    // user, or any busy lane while the main worker is idle.
+    std::shared_ptr<OpsManager> PresentedInteractiveExecutor() const;
+    bool InteractiveBlocksLocked(const QueueItem& item) const;
+    bool AnyLaneBusyLocked() const;
+    std::thread interactive_thread_;
+    static constexpr size_t kLaneCount = 3;
+    struct Lane {
+        std::shared_ptr<OpsManager> executor;  // set in Start, never replaced
+        std::optional<QueueItem> item;         // guarded by mutex_
+    };
+    std::array<Lane, kLaneCount> lanes_;
+    bool interactive_child_ = false;
+    std::set<uint64_t> interactive_serial_only_;
+    struct PrimaryTargetTreeState {
+        uint64_t task_id = 0;
+        bool ready = false;
+        bool safe_without_walk = false;
+        bool unsafe = false;
+        std::vector<std::wstring> preexisting_dirs;
+    };
+    PrimaryTargetTreeState primary_target_tree_;
     void MenuThread();
     void OpenThread();
     // front = interactive dialog request (打开方式…, 属性): it jumps ahead of
@@ -666,7 +759,9 @@ private:
     // Per-file progress: the status always changes, but the UI is told at
     // most every kProgressNotifyMs. Phase changes and results use SetStatus.
     void SetProgressStatus(const std::function<void(OpStatus&)>& fn);
-    void NotifyStatusChanged();
+    void NotifyStatusChanged(bool urgent = true);
+    void BumpUiRevision() const noexcept { ui_revision_.fetch_add(1, std::memory_order_release); }
+    OpStatus StatusLocked() const;
     void PushUndo(const OpRequest& req, uint64_t task_id,
                   const std::vector<std::wstring>* actual_destinations = nullptr);
     // Undo's body; with `required_group` only when the newest step is in it.
@@ -675,6 +770,7 @@ private:
     void QueueHistoryRequestLocked();
     void FinishHistoryRequestLocked(uint64_t task_id, bool success);
     void ClearRedoLocked();
+    void InsertUndoLocked(UndoEntry entry);
     void LoadRecoveryJournal();
     void PersistJournal();
     std::wstring JournalJsonLocked() const;
@@ -690,6 +786,7 @@ private:
     // reads Status() is still told again after kNotifyPendingMs.
     mutable std::atomic<ULONGLONG> notify_pending_since_{0};
     std::atomic<ULONGLONG> last_status_notify_{0};
+    mutable std::atomic<uint64_t> ui_revision_{1};
 
     mutable std::mutex mutex_;            // guards queue_ + status_ + undo_
     std::condition_variable cv_;
@@ -724,6 +821,7 @@ private:
     void ApplyUndoSummaryLocked();
     std::vector<RecoveryEntry> pending_recovery_;
     std::wstring journal_path_;
+    std::mutex journal_write_mutex_;
     OpStatus status_;
     std::deque<UndoEntry> undo_;
     uint64_t undo_json_revision_ = 0;
@@ -742,6 +840,13 @@ private:
     // Successful subrequests survive a later failure; retry resumes exactly
     // there instead of repeating already committed moves/renames/deletes.
     std::map<std::pair<uint64_t, bool>, size_t> history_progress_;
+    // Undo of a recycle restores originals in batches (one Recycle Bin index
+    // scan per request, not per item). The exact originals each batch put back
+    // are kept per undo step, so a retry after a partial failure skips those
+    // and nothing else. restored_by_last_request_ is worker-thread scratch.
+    std::map<uint64_t, std::set<std::wstring>> history_restored_;
+    std::vector<std::wstring> restored_by_last_request_;
+    bool CompleteHistoryStepLocked();
     bool redo_cleared_pending_ = false;
     uint64_t history_completed_sequence_ = 0;
     size_t history_completed_steps_ = 0;
@@ -763,9 +868,11 @@ private:
         // Speed and remaining time from the reported bytes, like a built-in copy.
         TransferRateEstimator rate;
         bool rate_started = false;
+        OpSpeedGraph speed_graph;
     };
     std::map<uint64_t, ExternalTaskState> external_tasks_;
     std::deque<OpStatus> external_finals_;
+    std::deque<std::pair<uint64_t, OpSpeedGraph>> external_graphs_;
     std::map<uint64_t, std::function<void(const std::string&)>> external_action_handlers_;
     uint64_t terminal_sequence_ = 0;
     uint64_t next_seq_ = 1;
@@ -829,6 +936,7 @@ private:
     std::condition_variable open_cv_;
     std::deque<QueueItem> open_queue_;
     std::atomic<bool> archive_open_fallback_enabled_{false};
+    std::vector<std::wstring> custom_open_fallback_extensions_;
     std::vector<std::wstring> archive_open_fallbacks_;
 };
 

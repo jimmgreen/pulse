@@ -1,4 +1,5 @@
 #include "context_menu_controller.h"
+#include "ctx_session_lease.h"
 #include "../common/context_diagnostics.h"
 #include "../common/localization.h"
 
@@ -66,6 +67,11 @@ bool SameStaticVerbs(const std::vector<StaticVerb>& a, const std::vector<StaticV
         if (a[i].verb != b[i].verb || a[i].display != b[i].display ||
             a[i].app_path != b[i].app_path || a[i].command != b[i].command ||
             a[i].mnemonic != b[i].mnemonic || a[i].icon_pixels != b[i].icon_pixels ||
+            a[i].delegate_clsid != b[i].delegate_clsid ||
+            a[i].drop_target_clsid != b[i].drop_target_clsid ||
+            a[i].reg_key != b[i].reg_key || a[i].reg_root != b[i].reg_root ||
+            a[i].multi_select_model != b[i].multi_select_model ||
+            a[i].has_dde != b[i].has_dde ||
             !SameStaticVerbs(a[i].children, b[i].children))
             return false;
     }
@@ -311,7 +317,8 @@ void ContextMenuController::StartQuery(
     }
     auto disabled_handlers = prefs.DisabledHandlerClsids();
     std::sort(disabled_handlers.begin(), disabled_handlers.end());
-    if (token_ != 0 && background_ == background && paths_ == paths &&
+    if (token_ != 0 && CanReuseContextSession(query_started_at_, GetTickCount64()) &&
+        background_ == background && paths_ == paths &&
         extended_ == extended && disabled_handlers_ == disabled_handlers) {
         if (prefetch_static) prefetch_static(extension);
         return;
@@ -463,7 +470,7 @@ std::vector<ui::FluentMenuItem> ContextMenuController::BuildOpenDisplay(
     auto display = BuildDisplay(prefs, base_items, prefs_changed);
     reconcile_stats_ = {};
     pending_stats_ = {};
-    may_grow_at_open_ = MayGrowAfterOpen();
+    may_grow_at_open_ = deferred_base_items_ || MayGrowAfterOpen();
     late_since_ = 0;
     shown_ = display;
     return display;
@@ -505,6 +512,7 @@ void ContextMenuController::CommitDisplay(std::vector<ui::FluentMenuItem> shown)
     const uint32_t withheld = pending_stats_.withheld;
     pending_stats_ = {};
     pending_stats_.withheld = withheld;
+    if (withheld == 0) deferred_base_items_pending_ = false;
     NotePatchedDisplay();
     if (timing_active_) {
         timing_.late = reconcile_stats_.late;
@@ -518,19 +526,28 @@ bool ContextMenuController::ExecuteShellCommand(
     const std::function<void()>& refresh_folder) {
     if (command >= CmdShellComBase && command <= CmdShellComLast) {
         const uint32_t clicked = static_cast<uint32_t>(command - CmdShellComBase);
-        std::wstring text, verb;
-        if (const auto* snapshot = FindComItemIn(menu_com_items_, clicked)) {
-            text = snapshot->text;
-            verb = snapshot->verb;
-        } else if (const auto* live_item = FindComItem(clicked)) {
-            text = live_item->text;
-            verb = live_item->verb;
-        }
+        bool has_snapshot = false;
+        ops::ShellMenuItem snapshot;
+        std::wstring snap_parent;
+        auto capture_snapshot = [&](const std::vector<ops::ShellMenuItem>& source) {
+            const auto parents = ParentKeys(source);
+            for (size_t i = 0; i < source.size(); ++i) {
+                if (source[i].id != clicked) continue;
+                snapshot = source[i];
+                snap_parent = parents[i];
+                has_snapshot = true;
+                return true;
+            }
+            return false;
+        };
+        if (!capture_snapshot(menu_com_items_))
+            capture_snapshot(com_items_);
         if (!com_ready_ && wait_until_ready) wait_until_ready();
-        uint32_t live = FindLiveComId(verb, text);
+        const uint32_t live = has_snapshot ? ResolveLiveComId(snapshot, snap_parent) : 0;
         // A recycled session-local ID cannot stand in for a missing action.
-        if (token_ && (live != 0 || (!com_ready_ && (!text.empty() || !verb.empty())))) {
-            if (operations_.invoke) operations_.invoke(token_, live, verb, text);
+        if (token_ && (live != 0 ||
+                       (!com_ready_ && (!snapshot.text.empty() || !snapshot.verb.empty())))) {
+            if (operations_.invoke) operations_.invoke(token_, live, snapshot.verb, snapshot.text);
             token_ = 0;
         }
         Close();
@@ -546,7 +563,12 @@ bool ContextMenuController::ExecuteShellCommand(
             const StaticVerb* verb = &displayed[index];
             const auto same = [](const StaticVerb& a, const StaticVerb& b) {
                 return a.verb == b.verb && a.command == b.command &&
-                       a.app_path == b.app_path && a.display == b.display;
+                       a.app_path == b.app_path && a.display == b.display &&
+                       a.delegate_clsid == b.delegate_clsid &&
+                       a.drop_target_clsid == b.drop_target_clsid &&
+                       a.reg_key == b.reg_key && a.reg_root == b.reg_root &&
+                       a.multi_select_model == b.multi_select_model &&
+                       a.has_dde == b.has_dde;
             };
             const auto live = std::find_if(static_verbs_.begin(), static_verbs_.end(),
                 [&](const StaticVerb& candidate) { return same(*verb, candidate); });
@@ -570,19 +592,57 @@ bool ContextMenuController::ExecuteShellCommand(
             if (live == static_verbs_.end()) verb = nullptr;
             else if (verb && child > 0 && !contains(contains, *live)) verb = nullptr;
             if (verb && !verb->children.empty()) verb = nullptr;
-            constexpr size_t kMaxTargets = 16;
             if (verb) {
-                for (size_t i = 0; i < paths_.size() && i < kMaxTargets; ++i) {
-                    if (!verb->app_path.empty()) {
-                        if (operations_.open_with_app)
-                            operations_.open_with_app(verb->app_path, paths_[i]);
-                    } else if (!verb->command.empty() && !ShellOwnsStaticVerb(verb->verb)) {
-                        if (operations_.execute_command)
-                            operations_.execute_command(verb->command, paths_[i]);
-                    } else if (operations_.execute_verb) {
-                        operations_.execute_verb(paths_[i], verb->verb);
+                if (!verb->delegate_clsid.empty() && operations_.execute_shell_verb) {
+                    std::vector<std::wstring> targets;
+                    if (verb->multi_select_model == 2) {
+                        if (!paths_.empty()) targets.push_back(paths_.front());
+                    } else {
+                        const size_t limit = (std::min)(paths_.size(), size_t{256});
+                        targets.assign(paths_.begin(),
+                                       paths_.begin() + static_cast<std::ptrdiff_t>(limit));
                     }
-                    if (verb->verb == L"openas") break;
+                    if (!targets.empty()) {
+                        const std::wstring cmd_verb = L"delegate:" + verb->delegate_clsid +
+                            L"\n" + verb->verb + L"\n" + std::to_wstring(verb->reg_root) +
+                            L"\n" + verb->reg_key;
+                        operations_.execute_shell_verb(targets, cmd_verb, background_);
+                    }
+                } else if (!verb->drop_target_clsid.empty() && operations_.execute_shell_verb) {
+                    std::vector<std::wstring> targets;
+                    if (verb->multi_select_model == 2) {
+                        if (!paths_.empty()) targets.push_back(paths_.front());
+                    } else {
+                        const size_t limit = (std::min)(paths_.size(), size_t{256});
+                        targets.assign(paths_.begin(),
+                                       paths_.begin() + static_cast<std::ptrdiff_t>(limit));
+                    }
+                    if (!targets.empty()) {
+                        operations_.execute_shell_verb(
+                            targets, L"droptarget:" + verb->drop_target_clsid, background_);
+                    }
+                } else if ((verb->has_dde ||
+                            (verb->command.empty() && verb->app_path.empty() &&
+                             verb->verb != L"openas")) &&
+                           paths_.size() > 1 && operations_.execute_shell_verb) {
+                    const size_t limit = (std::min)(paths_.size(), size_t{256});
+                    std::vector<std::wstring> targets(
+                        paths_.begin(), paths_.begin() + static_cast<std::ptrdiff_t>(limit));
+                    operations_.execute_shell_verb(targets, verb->verb, background_);
+                } else {
+                    constexpr size_t kMaxTargets = 16;
+                    for (size_t i = 0; i < paths_.size() && i < kMaxTargets; ++i) {
+                        if (!verb->app_path.empty()) {
+                            if (operations_.open_with_app)
+                                operations_.open_with_app(verb->app_path, paths_[i]);
+                        } else if (!verb->command.empty() && !ShellOwnsStaticVerb(verb->verb)) {
+                            if (operations_.execute_command)
+                                operations_.execute_command(verb->command, paths_[i]);
+                        } else if (operations_.execute_verb) {
+                            operations_.execute_verb(paths_[i], verb->verb);
+                        }
+                        if (verb->verb == L"openas" || verb->multi_select_model == 2) break;
+                    }
                 }
             }
         }
@@ -841,6 +901,7 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
                         com_items_[i + 1].child &&
                         ipc::IsOpenWithSubmenuVerb(com_items_[i].verb);
     }
+    const bool multi = paths_.size() > 1;
     for (size_t i = 0; i < static_verbs_.size() && i < static_cast<size_t>(ipc::kMaxStaticVerbParents);
          ++i) {
         const auto& verb = static_verbs_[i];
@@ -862,6 +923,7 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
                 row.verb = child.verb;
                 row.icon = child.icon_pixels;
                 row.children = self(self, child.children);
+                if (multi && child.multi_select_model == 2) continue;
                 if (!child.children.empty() && row.children.empty()) continue;
                 if (row.children.empty()) row.command = CmdShellStaticBase +
                     static_cast<int>(i) * ipc::kStaticVerbStride + slot;
@@ -870,6 +932,7 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
             return rows;
         };
         entry.children = children(children, verb.children);
+        if (multi && verb.multi_select_model == 2) continue;
         if (verb.children.empty()) entry.command = CmdShellStaticBase +
             static_cast<int>(i) * ipc::kStaticVerbStride;
         else if (entry.children.empty()) continue;
@@ -950,31 +1013,120 @@ uint32_t ContextMenuController::FindLiveComId(const std::wstring& text) const {
     return FindLiveComId({}, text);
 }
 
-uint32_t ContextMenuController::FindLiveComId(const std::wstring& verb,
-                                              const std::wstring& text) const {
-    // A row still painted from the cache has no host id yet.
+uint32_t ContextMenuController::ResolveLiveComId(
+    const ops::ShellMenuItem& snapshot, const std::wstring& parent_key) const {
     const auto live_id = [&](const ops::ShellMenuItem& item) {
         return !item.has_children && item.id != 0 &&
                !(com_predicted_ && item.id >= kPredictedIdFirst && item.id <= kPredictedIdLast);
     };
-    if (!verb.empty()) {
-        for (const auto& item : com_items_) {
-            if (live_id(item) && item.verb == verb) return item.id;
+    const auto parents = ParentKeys(com_items_);
+    const bool snapshot_predicted =
+        snapshot.id >= kPredictedIdFirst && snapshot.id <= kPredictedIdLast;
+    if (snapshot.id != 0 && !snapshot_predicted) {
+        for (size_t i = 0; i < com_items_.size(); ++i) {
+            const auto& item = com_items_[i];
+            if (item.id == snapshot.id && live_id(item) &&
+                item.clsid == snapshot.clsid && parents[i] == parent_key &&
+                item.child == snapshot.child && item.depth == snapshot.depth &&
+                item.text == snapshot.text && item.verb == snapshot.verb)
+                return item.id;
         }
     }
-    if (text.empty()) return 0;
-    for (const auto& item : com_items_) {
-        if (live_id(item) && item.text == text) return item.id;
+    for (size_t i = 0; i < com_items_.size(); ++i) {
+        const auto& item = com_items_[i];
+        if (live_id(item) && item.clsid == snapshot.clsid && parents[i] == parent_key &&
+            item.child == snapshot.child && item.depth == snapshot.depth &&
+            item.verb == snapshot.verb && item.text == snapshot.text)
+            return item.id;
+    }
+    if (!snapshot.text.empty()) {
+        for (size_t i = 0; i < com_items_.size(); ++i) {
+            const auto& item = com_items_[i];
+            if (live_id(item) && item.clsid == snapshot.clsid && parents[i] == parent_key &&
+                item.child == snapshot.child && item.depth == snapshot.depth &&
+                item.text == snapshot.text)
+                return item.id;
+        }
+    }
+    if (!snapshot.verb.empty()) {
+        uint32_t unique_in_parent = 0;
+        int matches_in_parent = 0;
+        for (size_t i = 0; i < com_items_.size(); ++i) {
+            const auto& item = com_items_[i];
+            if (live_id(item) && item.clsid == snapshot.clsid && parents[i] == parent_key &&
+                item.child == snapshot.child && item.depth == snapshot.depth &&
+                item.verb == snapshot.verb) {
+                unique_in_parent = item.id;
+                if (++matches_in_parent > 1) break;
+            }
+        }
+        if (matches_in_parent == 1) return unique_in_parent;
+    }
+    const auto same_clsid = [&](const ops::ShellMenuItem& item) {
+        return snapshot.clsid.empty() || item.clsid.empty() || item.clsid == snapshot.clsid;
+    };
+    if (!snapshot.verb.empty() && !snapshot.text.empty()) {
+        for (const auto& item : com_items_) {
+            if (live_id(item) && same_clsid(item) &&
+                item.verb == snapshot.verb && item.text == snapshot.text)
+                return item.id;
+        }
+    }
+    if (!snapshot.verb.empty()) {
+        uint32_t unique_global = 0;
+        int matches_global = 0;
+        for (const auto& item : com_items_) {
+            if (live_id(item) && same_clsid(item) && item.verb == snapshot.verb) {
+                unique_global = item.id;
+                if (++matches_global > 1 && !snapshot.text.empty()) break;
+            }
+        }
+        if (matches_global == 1 || (matches_global > 0 && snapshot.text.empty()))
+            return unique_global;
+    }
+    if (!snapshot.text.empty()) {
+        for (const auto& item : com_items_) {
+            if (live_id(item) && same_clsid(item) && item.text == snapshot.text) return item.id;
+        }
     }
     return 0;
 }
 
+uint32_t ContextMenuController::FindLiveComId(const std::wstring& verb,
+                                              const std::wstring& text) const {
+    ops::ShellMenuItem snapshot;
+    snapshot.verb = verb;
+    snapshot.text = text;
+    return ResolveLiveComId(snapshot, {});
+}
+
 void ContextMenuController::OpenMenu(std::vector<ui::FluentMenuItem> base_items) {
+    deferred_base_items_ = {};
+    deferred_base_items_pending_ = false;
     base_items_ = std::move(base_items);
     menu_com_items_ = com_items_;
     menu_static_verbs_ = static_verbs_;
     display_snapshot_valid_ = true;
     menu_open_ = true;
+}
+
+void ContextMenuController::DeferBaseItems(std::function<std::vector<ui::FluentMenuItem>()> resolve) {
+    deferred_base_items_ = std::move(resolve);
+}
+
+bool ContextMenuController::AppendDeferredBaseItems() {
+    if (!menu_open_) return false;
+    if (deferred_base_items_) {
+        auto resolve = std::move(deferred_base_items_);
+        deferred_base_items_ = {};
+        auto rows = resolve();
+        if (!rows.empty()) {
+            if (!base_items_.empty()) base_items_.back().separator_after = true;
+            for (auto& row : rows) base_items_.push_back(std::move(row));
+            deferred_base_items_pending_ = true;
+        }
+    }
+    return deferred_base_items_pending_;
 }
 
 void ContextMenuController::BeginTiming(uint32_t input_to_open_ms, size_t rows,

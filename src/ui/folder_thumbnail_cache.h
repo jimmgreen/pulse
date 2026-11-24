@@ -20,6 +20,8 @@ public:
     void RemoveNotifyWindow(HWND hwnd) { cache_.RemoveNotifyWindow(hwnd); }
     void Reset();
     void Refresh();
+    void TrimForBackground(size_t max_bytes);
+    size_t TrimInactiveWorkingSet();
     void BeginFrame();
     void ShareUploadBudget(ThumbnailCache& other) { cache_.ShareUploadBudget(other); }
     bool TakeUploadFrameRequest() {

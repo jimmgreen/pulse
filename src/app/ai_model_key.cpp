@@ -23,6 +23,7 @@ struct Slot {
     const wchar_t* description;
 };
 const Slot kVoiceSlot{L"voice_key.bin", "Pulse.AI.VoiceKey.v1", L"Pulse voice key"};
+const Slot kSearchSlot{L"search_key.bin", "Pulse.AI.SearchKey.v1", L"Pulse search key"};
 
 // DeepSeek keeps the file every earlier version wrote; each other service
 // has its own (model_key_qwen.bin …), so switching back needs no new paste.
@@ -140,6 +141,11 @@ bool SaveVoiceKey(std::wstring_view key) { return SaveKey(kVoiceSlot, key); }
 bool LoadVoiceKey(std::wstring& key) { return LoadKey(kVoiceSlot, key); }
 bool HasVoiceKey() { return HasKey(kVoiceSlot); }
 bool ClearVoiceKey() { return ClearKey(kVoiceSlot); }
+
+bool SaveSearchKey(std::wstring_view key) { return SaveKey(kSearchSlot, key); }
+bool LoadSearchKey(std::wstring& key) { return LoadKey(kSearchSlot, key); }
+bool HasSearchKey() { return HasKey(kSearchSlot); }
+bool ClearSearchKey() { return ClearKey(kSearchSlot); }
 
 std::wstring MaskModelKey(std::wstring_view key) {
     if (key.empty()) return {};

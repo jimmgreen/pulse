@@ -165,9 +165,12 @@ public:
             : spec.title;
         const int width_px = static_cast<int>(std::lround(kDlgW * scale_));
         const int height_px = static_cast<int>(std::lround(dlg_h_ * scale_));
+        // Born on the owner's monitor: CW_USEDEFAULT lands on the primary one and
+        // the move to a screen of another scale rescaled the size (WM_DPICHANGED).
+        const POINT origin = OwnedWindowOrigin(owner, width_px, height_px);
         hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kClass, window_title.c_str(),
                                 WS_POPUP | WS_THICKFRAME | WS_SYSMENU,
-                                CW_USEDEFAULT, CW_USEDEFAULT, width_px, height_px,
+                                origin.x, origin.y, width_px, height_px,
                                 owner, nullptr, wc.hInstance, this);
         if (!hwnd_) {
             outcome.status = QuickPickDialogStatus::Failed;

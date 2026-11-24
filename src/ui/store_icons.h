@@ -57,10 +57,11 @@ inline StoreIcon StoreCommandIconFor(uint32_t icon, std::string_view identity) {
 }
 // Product artwork for store tiles (archive_ux_mockup.html): a coloured gradient tile with
 // white two-tone artwork. Generic draws `icon` in white on the tile colour instead.
-enum class ProductArt { Generic, SevenZip, Images, Raw, Media, Content, Ai };
+enum class ProductArt { Generic, SevenZip, Images, Raw, Media, Content, Ai, Desktop };
 ProductArt ProductArtFor(StoreIcon icon);
 void DrawProductTile(ID2D1DeviceContext* dc, D2D1_RECT_F bounds, ProductArt art,
-                     D2D1_COLOR_F generic_color, StoreIcon generic_icon);
+                     D2D1_COLOR_F generic_color, StoreIcon generic_icon,
+                     uint32_t custom_icon_id = 0, const Theme* theme = nullptr);
 void DrawStoreIcon(ID2D1DeviceContext* dc, ID2D1Brush* brush, D2D1_RECT_F bounds,
                    StoreIcon icon, float stroke_dip = 1.35f);
 void DrawStoreIcon(ID2D1DeviceContext* dc, StoreIcon icon, D2D1_RECT_F bounds,

@@ -160,6 +160,25 @@ int main() {
     management->action = static_cast<DWORD>(Action::RenameGroup); std::wmemset(management->name, L'x', 128);
     check(!DecodeManagePlaces(&management_data, management_request), "management rejects unterminated name");
     check(!RequestRemoveStarred({}, {L"C:\\one"}) && !RequestPinWorkspace({}, L"C:\\root"), "management refuses offline endpoint");
+    const auto network_saved = ParseSaved(LR"({"networks":[{"unc":"\\\\server\\share","name":"NAS"},{"unc":"relative","name":"bad"}],"workspaces":[{"root":"\\\\server\\share\\work","name":"Remote"}]})");
+    check(network_saved.networks.size() == 1 && network_saved.networks[0].label == L"NAS" &&
+        network_saved.workspaces.size() == 1, "saved network and UNC workspace load without network IO");
+    const auto network_name = isolated_name + L".network";
+    detail::SharedWriter network_writer(true, network_name);
+    HWND network_endpoint = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
+    Snapshot published = network_saved;
+    published.endpoint = network_endpoint;
+    PublishSharedVersion(published, network_writer, true);
+    Snapshot loaded;
+    ReadSharedVersion(loaded, true, network_name);
+    check(loaded.shared_available && loaded.networks.size() == 1 && loaded.workspaces.size() == 1,
+        "v3 isolated network and workspace mapping roundtrip");
+    PublishSharedVersion(published, network_writer, false);
+    Snapshot legacy;
+    ReadSharedVersion(legacy, false, network_name);
+    check(legacy.shared_available && legacy.networks.empty() && legacy.workspaces.size() == 1 &&
+        network_writer.blob->payload.version == 2, "legacy v2 remains readable without network rows");
+    if (network_endpoint) DestroyWindow(network_endpoint);
     return failed ? 1 : 0;
 }
 

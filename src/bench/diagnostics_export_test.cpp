@@ -64,6 +64,7 @@ void Run(const fs::path& root) {
     Write(runtime / L"index-102.jsonl.1", "index-old\n");
     Write(runtime / L"index-service-102.jsonl", "service\n");
     Write(runtime / L"index-helper-102.jsonl.1", "helper\n");
+    Write(runtime / L"dialog_user_auto-106.jsonl", "user_auto\n");
     Write(runtime / L"private.jsonl", "private");
     Write(runtime / L"app-not-a-pid.jsonl", "private");
     Write(runtime / L"app-101.jsonl.2", "private");
@@ -81,8 +82,9 @@ void Run(const fs::path& root) {
           Read(good / L"Runtime" / L"index-102.jsonl.1") == "index-old\n",
           "rotation contents preserved");
     Check(Read(good / L"Runtime" / L"index-service-102.jsonl") == "service\n" &&
-          Read(good / L"Runtime" / L"index-helper-102.jsonl.1") == "helper\n",
-          "service and helper component names included");
+          Read(good / L"Runtime" / L"index-helper-102.jsonl.1") == "helper\n" &&
+          Read(good / L"Runtime" / L"dialog_user_auto-106.jsonl") == "user_auto\n",
+          "service, helper and dialog_user_auto component names included");
     Check(!fs::exists(good / L"Runtime" / L"private.jsonl") &&
           !fs::exists(good / L"Runtime" / L"app-not-a-pid.jsonl") &&
           !fs::exists(good / L"Runtime" / L"app-101.jsonl.2") &&
@@ -425,6 +427,57 @@ int wmain(int argc, wchar_t** argv) {
             Check(exported.find("bridge.dll") != std::string::npos && exported.find("SetterFailed") != std::string::npos &&
                 exported.find("omit-me") == std::string::npos && exported.find("\"text_truncated\":true") != std::string::npos,
                 "allowlisted dialog diagnostic text and truncation survive export without unrelated strings");
+        } else if (argc == 2 && std::wstring_view(argv[1]) == L"--dialog-coverage") {
+            const auto source = root / L"source";
+            const auto runtime = source / L"Diagnostics" / L"Runtime";
+            const auto destination = root / L"export";
+            fs::create_directories(runtime);
+            fs::create_directory(destination);
+            const std::string begin = R"({"schema":1,"pid":123,"session":456,"event":"dialog_show_begin","component":"dialog_runtime","data":{"dialog":42,"show_sequence":7,"request":"42:7","entry_family":"OFN_W","launch_route":"managed","dialog_kind":"save","filename":"private-document.pptx"}})";
+            const std::string terminal = R"({"schema":1,"pid":123,"session":456,"event":"dialog_show_terminal","component":"dialog_runtime","data":{"dialog":42,"show_sequence":7,"request":"42:7","terminal_status":"native","reason_name":"UnsupportedOptions","fallback_reason":"PROVIDER_PREPARE_FAILED_BEFORE_UI","hr":2147500037}})";
+            Write(runtime / L"dialog_runtime-123.jsonl", begin + '\n' + terminal + '\n');
+            Write(runtime / L"dialog_runtime-123.jsonl.1", begin + '\n');
+            Write(runtime / L"dialog_runtime-123.critical.jsonl", terminal + '\n');
+            Write(runtime / L"dialog_admin_auto-124.jsonl",
+                "{\"event\":\"admin_auto_target_result\",\"component\":\"dialog_admin_auto\",\"data\":{\"target_pid\":123,\"error\":5}}\n");
+            Write(runtime / L"dialog_runtime-sample.jsonl", begin + '\n');
+            Write(runtime / L"dialog_admin_auto-private.jsonl", begin + '\n');
+            const std::string rejected =
+                R"({"event":"dialog_show_begin","component":"dialog_auto","data":{"request":"private.docx","entry_family":"SECRET","launch_route":"SECRET","dialog_kind":"SECRET"}})";
+            const std::string identity =
+                R"({"event":"dialog_identity","component":"dialog_auto","data":{"app_basename":"msedge.exe","creation_time_filetime":123456}})";
+            const std::string path_identity =
+                R"({"event":"dialog_identity","component":"dialog_auto","data":{"app_basename":"C:\\Users\\Private\\wrong.exe"}})";
+            Write(runtime / L"dialog_auto-123.jsonl", identity + '\n' + rejected + '\n' + path_identity + '\n');
+            pulse::diagnostics::ExportOptions options;
+            options.source_root = source.wstring();
+            options.destination = destination.wstring();
+            options.support_report = true;
+            Check(pulse::diagnostics::Export(options), "dialog coverage support export succeeds");
+            const auto exported = Read(destination / L"Runtime" / L"dialog_runtime-123.jsonl");
+            Check(exported.find("\"request\":\"42:7\"") != std::string::npos &&
+                exported.find("\"entry_family\":\"OFN_W\"") != std::string::npos &&
+                exported.find("\"launch_route\":\"managed\"") != std::string::npos &&
+                exported.find("\"dialog_kind\":\"save\"") != std::string::npos,
+                "managed dialog begin survives with request and route");
+            Check(exported.find("\"terminal_status\":\"native\"") != std::string::npos &&
+                exported.find("\"reason_name\":\"UnsupportedOptions\"") != std::string::npos &&
+                exported.find("\"fallback_reason\":\"PROVIDER_PREPARE_FAILED_BEFORE_UI\"") != std::string::npos,
+                "dialog terminal retains cause and result");
+            Check(fs::exists(destination / L"Runtime" / L"dialog_runtime-123.jsonl.1") &&
+                fs::exists(destination / L"Runtime" / L"dialog_runtime-123.critical.jsonl") &&
+                Read(destination / L"Runtime" / L"dialog_admin_auto-124.jsonl").find("\"error\":5") != std::string::npos,
+                "rotated and critical runtime files and admin events are exported");
+            const auto automatic = Read(destination / L"Runtime" / L"dialog_auto-123.jsonl");
+            Check(automatic.find("\"app_basename\":\"msedge.exe\"") != std::string::npos,
+                "application basename remains available for PID attribution");
+            Check(!fs::exists(destination / L"Runtime" / L"dialog_runtime-sample.jsonl") &&
+                !fs::exists(destination / L"Runtime" / L"dialog_admin_auto-private.jsonl") &&
+                automatic.find("SECRET") == std::string::npos &&
+                automatic.find("wrong.exe") == std::string::npos &&
+                automatic.find("private.docx") == std::string::npos &&
+                exported.find("private-document.pptx") == std::string::npos,
+                "export excludes unrecognised metadata, paths and user file names");
         } else Run(root);
     } catch (const std::exception& error) {
         std::printf("[FAIL] Exception: %s\n", error.what());

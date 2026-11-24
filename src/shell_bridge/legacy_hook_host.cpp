@@ -18,7 +18,13 @@ LegacyHookHost::LegacyHookHost(OPENFILENAMEA* input) noexcept : input_(input),
     hook_(input && (input->Flags & OFN_ENABLEHOOK) ? input->lpfnHook : nullptr), thread_(GetCurrentThreadId()), ansi_(true) {}
 LegacyHookHost::~LegacyHookHost() {
     if (child_ && GetCurrentThreadId() == thread_) DestroyWindow(child_);
-    if (parent_ && GetCurrentThreadId() == thread_) RemoveWindowSubclass(parent_, ParentProc, reinterpret_cast<UINT_PTR>(this));
+    if (parent_ && GetCurrentThreadId() == thread_) {
+        HWND owned = owns_parent_ ? parent_ : nullptr;
+        owns_parent_ = false;
+        RemoveWindowSubclass(parent_, ParentProc, reinterpret_cast<UINT_PTR>(this));
+        parent_ = nullptr;
+        if (owned && IsWindow(owned)) DestroyWindow(owned);
+    }
 }
 INT_PTR CALLBACK LegacyHookHost::DialogProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
     auto* self = reinterpret_cast<LegacyHookHost*>(GetPropW(window, kProperty));
@@ -93,41 +99,83 @@ LRESULT CALLBACK LegacyHookHost::ParentProc(HWND window, UINT message, WPARAM wp
     if (message == WM_NCDESTROY) {
         RemoveWindowSubclass(window, ParentProc, id);
         self->parent_ = nullptr;
+        self->owns_parent_ = false;
+    } else if (message == WM_CLOSE && self->owns_parent_) {
+        if (self->parent_message_) {
+            try { self->parent_message_(WM_CLOSE, wp, lp); } catch (...) {}
+        }
+        return 0;
     } else if (message >= CDM_FIRST && message <= CDM_SETDEFEXT && self->parent_message_) {
         try { return self->parent_message_(message, wp, lp); } catch (...) { return -1; }
     }
     return DefSubclassProc(window, message, wp, lp);
 }
 HRESULT LegacyHookHost::Create(HWND parent, ParentMessage message) {
-    DWORD pid = 0;
-    if (!input_ || child_ || GetCurrentThreadId() != thread_ ||
-        GetWindowThreadProcessId(parent, &pid) != thread_ || pid != GetCurrentProcessId())
+    if (!input_ || child_ || GetCurrentThreadId() != thread_ || !parent || !IsWindow(parent))
         return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
     const auto* wide = static_cast<OPENFILENAMEW*>(input_);
     const auto* narrow = static_cast<OPENFILENAMEA*>(input_);
     const DWORD flags = ansi_ ? narrow->Flags : wide->Flags;
     const HINSTANCE instance = ansi_ ? narrow->hInstance : wide->hInstance;
     if ((flags & OFN_ENABLEHOOK) && !hook_) return E_INVALIDARG;
+    const bool has_template = (flags & (OFN_ENABLETEMPLATE | OFN_ENABLETEMPLATEHANDLE)) != 0;
+    DWORD pid = 0;
+    const DWORD tid = GetWindowThreadProcessId(parent, &pid);
+    const bool same_thread = tid == thread_ && pid == GetCurrentProcessId();
+    HWND host_parent = parent;
+    bool created_proxy = false;
+    if (!same_thread) {
+        // Templates must visibly attach to a same-thread in-process host window.
+        // Hook-only dialogs only need a caller-thread parent for CDM_* messages.
+        if (has_template) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+        RECT rc{0, 0, 800, 600};
+        GetWindowRect(parent, &rc);
+        const int width = rc.right > rc.left ? (rc.right - rc.left) : 800;
+        const int height = rc.bottom > rc.top ? (rc.bottom - rc.top) : 600;
+        host_parent = CreateWindowExW(WS_EX_NOACTIVATE, L"STATIC", L"", WS_POPUP,
+            rc.left, rc.top, width, height, nullptr, nullptr, nullptr, nullptr);
+        if (!host_parent) {
+            const DWORD err = GetLastError();
+            return HRESULT_FROM_WIN32(err ? err : ERROR_INVALID_WINDOW_HANDLE);
+        }
+        created_proxy = true;
+    }
+    struct ProxyGuard {
+        LegacyHookHost* host;
+        HWND proxy;
+        bool committed = false;
+        ~ProxyGuard() {
+            if (committed || !proxy) return;
+            if (host->parent_ == proxy) {
+                RemoveWindowSubclass(proxy, ParentProc, reinterpret_cast<UINT_PTR>(host));
+                host->parent_ = nullptr;
+                host->owns_parent_ = false;
+            }
+            if (IsWindow(proxy)) DestroyWindow(proxy);
+        }
+    } guard{this, created_proxy ? host_parent : nullptr};
     parent_message_ = std::move(message);
-    parent_ = parent;
-    if (parent_message_ && !SetWindowSubclass(parent, ParentProc, reinterpret_cast<UINT_PTR>(this), reinterpret_cast<DWORD_PTR>(this))) {
-        parent_ = nullptr; return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
+    parent_ = host_parent;
+    owns_parent_ = created_proxy;
+    if (parent_message_ && !SetWindowSubclass(host_parent, ParentProc, reinterpret_cast<UINT_PTR>(this), reinterpret_cast<DWORD_PTR>(this))) {
+        parent_ = nullptr; owns_parent_ = false; return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
     }
     if (!prepared_) { const HRESULT ready=Prepare(); if(FAILED(ready)) return ready; }
     EmptyTemplate empty{};
     empty.dialog.style = WS_CHILD | DS_CONTROL;
     const DLGTEMPLATE* layout = template_.empty() ? &empty.dialog : reinterpret_cast<const DLGTEMPLATE*>(template_.data());
-    const HWND result = ansi_ ? CreateDialogIndirectParamA(instance, layout, parent, DialogProc, reinterpret_cast<LPARAM>(this)) :
-        CreateDialogIndirectParamW(instance, layout, parent, DialogProc, reinterpret_cast<LPARAM>(this));
+    const HWND result = ansi_ ? CreateDialogIndirectParamA(instance, layout, host_parent, DialogProc, reinterpret_cast<LPARAM>(this)) :
+        CreateDialogIndirectParamW(instance, layout, host_parent, DialogProc, reinterpret_cast<LPARAM>(this));
     if (!result || result != child_ || !IsWindow(result)) return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
-    if (flags & (OFN_ENABLETEMPLATE | OFN_ENABLETEMPLATEHANDLE)) {
-        if (GetParent(result) != parent || !(GetWindowLongPtrW(result, GWL_STYLE) & WS_CHILD) ||
-            SendMessageW(parent, AttachMessage(), reinterpret_cast<WPARAM>(result), 0) != kAttached) {
+    if (has_template) {
+        if (GetParent(result) != host_parent || !(GetWindowLongPtrW(result, GWL_STYLE) & WS_CHILD) ||
+            SendMessageW(host_parent, AttachMessage(), reinterpret_cast<WPARAM>(result), 0) != kAttached) {
             DestroyWindow(result); return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
         }
-        parent_ = parent; attached_ = true;
+        parent_ = host_parent; attached_ = true;
         ShowWindow(result, SW_SHOWNOACTIVATE);
     }
+    guard.committed = true;
     return S_OK;
 }
 bool LegacyHookHost::Notify(UINT code) {

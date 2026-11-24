@@ -135,7 +135,8 @@ int SettingsController::PageFromName(std::wstring_view name) noexcept {
     if (name == L"tabs") return 10;
     if (name == L"system") return 11;
     if (name == L"file-ops") return 12;
-    if (name == L"native-extensions") return ui::kSettingsPageNativeExtensions;
+    if (name == L"layout") return ui::kSettingsPageUiLayout;
+    if (name == L"native-extensions" || name.starts_with(L"native-extensions/")) return ui::kSettingsPageNativeExtensions;
     if (name == L"assistant") return ui::kSettingsPageAssistant;
     return 0;
 }
@@ -154,6 +155,7 @@ const wchar_t* SettingsController::PageName(int page) noexcept {
     if (page == 10) return L"tabs";
     if (page == 11) return L"system";
     if (page == 12) return L"file-ops";
+    if (page == ui::kSettingsPageUiLayout) return L"layout";
     if (page == ui::kSettingsPageAssistant) return L"assistant";
     if (page == ui::kSettingsPageNativeExtensions) return L"native-extensions";
     return L"general";
@@ -161,7 +163,7 @@ const wchar_t* SettingsController::PageName(int page) noexcept {
 
 void SettingsController::SelectPage(int page) noexcept {
     CancelGlobalSearchHotkeyCapture();
-    page_ = std::clamp(page, 0, ui::kSettingsPageNativeExtensions);
+    page_ = std::clamp(page, 0, ui::kSettingsPageUiLayout);
     scroll_ = 0.0f;
     packs_checked_ = 0;  // re-read the packs when their page opens
 }
@@ -873,6 +875,14 @@ void SettingsController::MtimePalette(int index) {
         SaveAndApply(SettingsEffect::ListStyle);
 }
 
+void SettingsController::DoubleClickInterval(int milliseconds) {
+    if (!prefs_) return;
+    const int next = NormalizeDoubleClickInterval(milliseconds);
+    if (prefs_->double_click_interval_ms == next) return;
+    prefs_->double_click_interval_ms = next;
+    SaveAndApply(SettingsEffect::ListStyle);
+}
+
 void SettingsController::ClickMode(int index) {
     if (!prefs_ || index < 0 || index > 3) return;
     bool changed = false;
@@ -897,6 +907,14 @@ void SettingsController::DetailsColumnOrder(const ui::DetailsColumnOrder& order)
     const ui::DetailsColumnOrder next = ui::NormalizeDetailsColumnOrder(order);
     if (!prefs_ || prefs_->details_column_order == next) return;
     prefs_->details_column_order = next;
+    SaveAndApply(SettingsEffect::ListStyle);
+}
+
+void SettingsController::ExtensionColumns(const std::vector<std::wstring>& hidden,
+                                          const std::vector<std::wstring>& widths) {
+    if (!prefs_ || (prefs_->extension_columns_hidden == hidden && prefs_->extension_column_widths == widths)) return;
+    prefs_->extension_columns_hidden = hidden;
+    prefs_->extension_column_widths = widths;
     SaveAndApply(SettingsEffect::ListStyle);
 }
 
@@ -1056,6 +1074,18 @@ void SettingsController::TrayIconSize(int index) {
     static constexpr int values[] = {40, 48, 56};
     if (prefs_ && SelectValue(index, values, prefs_->tray_icon_size))
         SaveAndApply(SettingsEffect::TrayDeckIcon);
+}
+
+void SettingsController::ShelfShakeSensitivity(int index) {
+    static constexpr int values[] = {0, 1, 2};
+    if (prefs_ && SelectValue(index, values, prefs_->shelf_shake_sensitivity))
+        SaveAndApply(SettingsEffect::ShelfWatcher);
+}
+
+void SettingsController::ShelfSummonPosition(int index) {
+    static constexpr int values[] = {0, 1, 2};
+    if (prefs_ && SelectValue(index, values, prefs_->shelf_summon_pos))
+        SaveAndApply(SettingsEffect::None);
 }
 
 void SettingsController::DoubleCtrlGap(int index) {
@@ -1411,6 +1441,12 @@ void SettingsController::ToggleUi(int index) {
     } else if (index == 37) {
         prefs_->tray_hide_when_empty = !prefs_->tray_hide_when_empty;
         SaveAndApply(SettingsEffect::None);
+    } else if (index == 82) {
+        prefs_->shelf_shake_enabled = !prefs_->shelf_shake_enabled;
+        SaveAndApply(SettingsEffect::ShelfWatcher);
+    } else if (index == 83) {
+        prefs_->shelf_auto_hide = !prefs_->shelf_auto_hide;
+        SaveAndApply(SettingsEffect::None);
     } else if (index == 24) {
         prefs_->show_hints = !prefs_->show_hints;
         SaveAndApply(SettingsEffect::None);
@@ -1443,6 +1479,9 @@ void SettingsController::ToggleUi(int index) {
         SaveAndApply(SettingsEffect::GlobalSearch);
     } else if (index == 44) {
         prefs_->jump_history = !prefs_->jump_history;
+        SaveAndApply(SettingsEffect::GlobalSearch);
+    } else if (index == 45) {
+        prefs_->dialog_adaptive_legacy = !prefs_->dialog_adaptive_legacy;
         SaveAndApply(SettingsEffect::GlobalSearch);
     } else if (index == 15) {
         prefs_->global_search_enabled = !prefs_->global_search_enabled;

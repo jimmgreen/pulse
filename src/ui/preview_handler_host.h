@@ -35,7 +35,8 @@ public:
     uint64_t NextWatchdogDeadline() const;
     // Re-evaluates the popup overlay's screen position after its owner moves.
     // This only wakes the STA worker; it does not reopen the preview content.
-    void Reposition();
+    // raise_zorder re-asserts overlay z-order above a newly topmost owner.
+    void Reposition(bool raise_zorder = false);
     // Main window WM_ACTIVATE / WM_ACTIVATEAPP. Overlay is WS_EX_NOACTIVATE so
     // it never receives those; TOPMOST must drop here or it covers other apps.
     void NotifyAppActivate(bool active);
@@ -50,6 +51,9 @@ public:
               bool immediate = false);
 
     State state() const;
+    // COM completion is not sufficient when the independent overlay is
+    // hidden, clipped out, or has failed to attach to its current bounds.
+    bool Presented() const noexcept;
     uint64_t NextDeadline() const;
 #ifdef PULSE_WITH_SELFTEST
     void PrimeStalledOpenForTest();
@@ -95,5 +99,18 @@ private:
     bool last_enabled_ = false;
     std::map<std::wstring, std::shared_future<void>> suspended_volumes_;
 };
+
+enum class PreviewHandlerContent { Loading, Overlay, Concealed, NativeFallback, Unavailable };
+
+constexpr PreviewHandlerContent ResolvePreviewHandlerContent(PreviewHandlerHost::State state,
+                                                               bool presented,
+                                                               bool has_native_fallback) noexcept {
+    if (presented) return PreviewHandlerContent::Overlay;
+    using State = PreviewHandlerHost::State;
+    if (state == State::Shown) return PreviewHandlerContent::Concealed;
+    if (state == State::Failed)
+        return has_native_fallback ? PreviewHandlerContent::NativeFallback : PreviewHandlerContent::Unavailable;
+    return PreviewHandlerContent::Loading;
+}
 
 } // namespace pulse::ui

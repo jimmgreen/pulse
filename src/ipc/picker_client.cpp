@@ -35,7 +35,7 @@ struct Child {
 // A warm standby host, when one of this bundle listens. nullopt: none answered,
 // and the caller starts a host the usual way. Once connected, negotiation or
 // request failures are terminal; never retry a potentially delivered request.
-std::optional<Message> ExchangeStandby(const std::wstring& executable, const std::wstring& desktop, const Message& request, HWND owner, HANDLE cancel) {
+std::optional<PickerClientOutcome> ExchangeStandby(const std::wstring& executable, const std::wstring& desktop, const Message& request, HWND owner, HANDLE cancel) {
     Channel channel;
     DWORD server_pid = 0;
     if (!ConnectStandby(executable, desktop, channel, server_pid, {cancel, 200})) return std::nullopt;
@@ -46,31 +46,33 @@ std::optional<Message> ExchangeStandby(const std::wstring& executable, const std
     }
     AllowSetForegroundWindow(server_pid);
     const auto negotiated = NegotiatePickerSession(channel, sent, {cancel, 5000});
-    if (!negotiated) return Terminal(request, negotiated.error == ERROR_CANCELLED ? Status::Cancelled : Status::Failed,
-                                    negotiated.error == ERROR_CANCELLED ? ERROR_SUCCESS : negotiated.error);
+    if (!negotiated) return PickerClientOutcome{Terminal(request, negotiated.error == ERROR_CANCELLED ? Status::Cancelled : Status::Failed,
+                                    negotiated.error == ERROR_CANCELLED ? ERROR_SUCCESS : negotiated.error), false, false};
     const auto delivered = channel.Send(sent, {cancel, 5000});
-    if (!delivered) return Terminal(request, delivered.error == ERROR_CANCELLED ? Status::Cancelled : Status::Failed,
-                                   delivered.error == ERROR_CANCELLED ? ERROR_SUCCESS : delivered.error);
+    if (!delivered) return PickerClientOutcome{Terminal(request, delivered.error == ERROR_CANCELLED ? Status::Cancelled : Status::Failed,
+                                   delivered.error == ERROR_CANCELLED ? ERROR_SUCCESS : delivered.error), true, false};
     Message response;
     const auto received = channel.Receive(response, {cancel, INFINITE});
     // Leaving closes the pipe, which closes the standby's dialog on cancellation.
-    if (!received) return Terminal(request, received.error == ERROR_CANCELLED ? Status::Cancelled : Status::Failed,
-                                   received.error == ERROR_CANCELLED ? ERROR_SUCCESS : received.error);
-    if (!ValidateResponse(sent, response)) return Terminal(request, Status::Failed, ERROR_INVALID_DATA);
-    return response;
+    if (!received) return PickerClientOutcome{Terminal(request, received.error == ERROR_CANCELLED ? Status::Cancelled : Status::Failed,
+                                   received.error == ERROR_CANCELLED ? ERROR_SUCCESS : received.error), true, false};
+    if (!ValidateResponse(sent, response)) return PickerClientOutcome{Terminal(request, Status::Failed, ERROR_INVALID_DATA), true, false};
+    const auto* body = std::get_if<Response>(&response.body);
+    const bool shown = body && (body->status == Status::Accepted || body->status == Status::Cancelled);
+    return PickerClientOutcome{std::move(response), true, shown};
 }
-Message Exchange(const std::wstring& executable, const std::wstring& desktop,
-                 const Message& request, HWND owner, HANDLE cancel) {
+PickerClientOutcome Exchange(const std::wstring& executable, const std::wstring& desktop,
+                             const Message& request, HWND owner, HANDLE cancel) {
     Server server;
     auto transport = Server::Create(server);
-    if (!transport) return Terminal(request, Status::Failed, transport.error);
+    if (!transport) return {Terminal(request, Status::Failed, transport.error), false, false};
     Child child;
     child.job.Reset(CreateJobObjectW(nullptr, nullptr));
-    if (!child.job) return Terminal(request, Status::Failed, GetLastError());
+    if (!child.job) return {Terminal(request, Status::Failed, GetLastError()), false, false};
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!SetInformationJobObject(child.job.Get(), JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
-        return Terminal(request, Status::Failed, GetLastError());
+        return {Terminal(request, Status::Failed, GetLastError()), false, false};
     std::wstring command = L"\"" + executable + L"\" --picker-host " + server.Name() + L" " +
         std::to_wstring(GetCurrentProcessId());
     // The host owns its dialog by this window (it verifies that the window is
@@ -82,69 +84,75 @@ Message Exchange(const std::wstring& executable, const std::wstring& desktop,
     PROCESS_INFORMATION info{};
     if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED,
                         nullptr, nullptr, &startup, &info))
-        return Terminal(request, Status::Failed, GetLastError());
+        return {Terminal(request, Status::Failed, GetLastError()), false, false};
     child.process.Reset(info.hProcess);
     PipeHandle thread(info.hThread);
     if (!AssignProcessToJobObject(child.job.Get(), child.process.Get())) {
         const DWORD error = GetLastError();
         TerminateProcess(child.process.Get(), error); // Only our still-suspended child.
-        return Terminal(request, Status::Failed, error);
+        return {Terminal(request, Status::Failed, error), false, false};
     }
     // Our caller is in the foreground; let the host's dialog take it over.
     AllowSetForegroundWindow(info.dwProcessId);
     if (ResumeThread(thread.Get()) == static_cast<DWORD>(-1))
-        return Terminal(request, Status::Failed, GetLastError());
+        return {Terminal(request, Status::Failed, GetLastError()), false, false};
     Channel channel;
+    bool request_delivered = false;
     transport = server.Accept(child.process.Get(), channel, {cancel, 10000});
     if (transport) transport = NegotiatePickerSession(channel, request, {cancel, 10000});
-    if (transport) transport = channel.Send(request, {cancel, 10000});
+    if (transport) {
+        request_delivered = true;
+        transport = channel.Send(request, {cancel, 10000});
+    }
     Message response;
     if (transport) transport = channel.Receive(response, {cancel, INFINITE});
-    if (!transport) return Terminal(request, transport.error == ERROR_CANCELLED ? Status::Cancelled : Status::Failed,
-                                    transport.error == ERROR_CANCELLED ? ERROR_SUCCESS : transport.error);
-    if (!ValidateResponse(request, response)) return Terminal(request, Status::Failed, ERROR_INVALID_DATA);
+    if (!transport) return {Terminal(request, transport.error == ERROR_CANCELLED ? Status::Cancelled : Status::Failed,
+                                     transport.error == ERROR_CANCELLED ? ERROR_SUCCESS : transport.error), request_delivered, false};
+    if (!ValidateResponse(request, response)) return {Terminal(request, Status::Failed, ERROR_INVALID_DATA), request_delivered, false};
     // No result reaches the caller until the private host is cleaned up.
     WaitForSingleObject(child.process.Get(), 2000);
-    return response;
+    const auto* body = std::get_if<Response>(&response.body);
+    const bool shown = body && (body->status == Status::Accepted || body->status == Status::Cancelled);
+    return {std::move(response), request_delivered, shown};
 }
 }
 
-Message RunPickerClient(std::wstring executable, Message request, HWND owner, HANDLE cancel) {
+PickerClientOutcome RunPickerClientDetailed(std::wstring executable, Message request, HWND owner, HANDLE cancel) {
     static thread_local bool active = false;
-    if (active) return Terminal(request, Status::Failed, ERROR_BUSY);
+    if (active) return {Terminal(request, Status::Failed, ERROR_BUSY), false, false};
     ClientGuard call(active);
     std::vector<uint8_t> encoded;
     if (!std::holds_alternative<Request>(request.body) || Encode(request, encoded) != CodecError::None)
-        return Terminal(request, Status::Failed, ERROR_INVALID_DATA);
+        return {Terminal(request, Status::Failed, ERROR_INVALID_DATA), false, false};
     if (owner && !IsWindow(owner))
-        return Terminal(request, Status::Failed, ERROR_INVALID_WINDOW_HANDLE);
+        return {Terminal(request, Status::Failed, ERROR_INVALID_WINDOW_HANDLE), false, false};
     if (executable.find(L'"') != std::wstring::npos || !std::filesystem::path(executable).is_absolute())
-        return Terminal(request, Status::Failed, ERROR_INVALID_NAME);
+        return {Terminal(request, Status::Failed, ERROR_INVALID_NAME), false, false};
     if (cancel) {
         const DWORD state = WaitForSingleObject(cancel, 0);
-        if (state == WAIT_OBJECT_0) return Terminal(request, Status::Cancelled);
-        if (state != WAIT_TIMEOUT) return Terminal(request, Status::Failed, ERROR_INVALID_HANDLE);
+        if (state == WAIT_OBJECT_0) return {Terminal(request, Status::Cancelled), false, false};
+        if (state != WAIT_TIMEOUT) return {Terminal(request, Status::Failed, ERROR_INVALID_HANDLE), false, false};
     }
     wchar_t desktop[32768]{};
     DWORD needed = 0;
     if (!GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()), UOI_NAME, desktop, sizeof(desktop), &needed))
-        return Terminal(request, Status::Failed, GetLastError());
+        return {Terminal(request, Status::Failed, GetLastError()), false, false};
     PipeHandle stop(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     PipeHandle done(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-    if (!stop || !done) return Terminal(request, Status::Failed, GetLastError());
-    Message response = Terminal(request, Status::Failed, ERROR_GEN_FAILURE);
+    if (!stop || !done) return {Terminal(request, Status::Failed, GetLastError()), false, false};
+    PickerClientOutcome outcome{Terminal(request, Status::Failed, ERROR_GEN_FAILURE), false, false};
     pulse::PickerOwnerGuard modality(owner);
-    if (modality.Error()) return Terminal(request, Status::Failed, modality.Error());
-    if (!modality.Alive()) return Terminal(request, Status::Cancelled);
+    if (modality.Error()) return {Terminal(request, Status::Failed, modality.Error()), false, false};
+    if (!modality.Alive()) return {Terminal(request, Status::Cancelled), false, false};
     std::thread worker;
     try {
         worker = std::thread([&] {
             try { auto warm = ExchangeStandby(executable, desktop, request, owner, stop.Get());
-                response = warm ? std::move(*warm) : Exchange(executable, desktop, request, owner, stop.Get()); }
-            catch (...) { response = Terminal(request, Status::Failed, ERROR_NOT_ENOUGH_MEMORY); }
+                outcome = warm ? std::move(*warm) : Exchange(executable, desktop, request, owner, stop.Get()); }
+            catch (...) { outcome = {Terminal(request, Status::Failed, ERROR_NOT_ENOUGH_MEMORY), outcome.request_delivered, false}; }
             SetEvent(done.Get());
         });
-    } catch (const std::system_error&) { return Terminal(request, Status::Failed, ERROR_NOT_ENOUGH_MEMORY); }
+    } catch (const std::system_error&) { return {Terminal(request, Status::Failed, ERROR_NOT_ENOUGH_MEMORY), false, false}; }
     bool quit = false;
     int quit_code = 0;
     DWORD pump_error = ERROR_SUCCESS;
@@ -154,12 +162,19 @@ Message RunPickerClient(std::wstring executable, Message request, HWND owner, HA
             WaitForSingleObject(done.Get(), INFINITE); // Worker cleanup never requires caller UI dispatch.
             break;
         }
-        HANDLE handles[]{done.Get(), cancel};
-        const DWORD count = cancel && !cancelling ? 2 : 1;
+        HANDLE handles[3]{done.Get(), nullptr, nullptr};
+        DWORD count = 1;
+        DWORD cancel_index = 0, pre_hide_index = 0;
+        if (cancel && !cancelling) { cancel_index = count; handles[count++] = cancel; }
+        if (HANDLE pre_hide = modality.PreHideEvent()) { pre_hide_index = count; handles[count++] = pre_hide; }
         const DWORD wait = MsgWaitForMultipleObjectsEx(count, handles, 100, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         if (wait == WAIT_OBJECT_0) break;
         if (wait == WAIT_FAILED) { pump_error = GetLastError(); SetEvent(stop.Get()); cancelling = true; }
-        if ((count == 2 && wait == WAIT_OBJECT_0 + 1) || !modality.Alive()) {
+        if (pre_hide_index && wait == WAIT_OBJECT_0 + pre_hide_index) {
+            modality.CompletePreHideRestore();
+            continue;
+        }
+        if ((cancel_index && wait == WAIT_OBJECT_0 + cancel_index) || !modality.Alive()) {
             SetEvent(stop.Get()); cancelling = true;
         }
         MSG message{};
@@ -172,6 +187,9 @@ Message RunPickerClient(std::wstring executable, Message request, HWND owner, HA
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
+            if (HANDLE pre_hide = modality.PreHideEvent(); pre_hide && WaitForSingleObject(pre_hide, 0) == WAIT_OBJECT_0) {
+                modality.CompletePreHideRestore();
+            }
             if (WaitForSingleObject(done.Get(), 0) == WAIT_OBJECT_0) break;
         }
     }
@@ -183,10 +201,14 @@ Message RunPickerClient(std::wstring executable, Message request, HWND owner, HA
         quit_code = static_cast<int>(pending_quit.wParam);
     }
     if (quit) PostQuitMessage(quit_code);
-    if (pump_error) return Terminal(request, Status::Failed, pump_error);
+    if (pump_error) return {Terminal(request, Status::Failed, pump_error), outcome.request_delivered, outcome.ui_shown};
     if (cancelling || quit || !modality.Alive() ||
         (cancel && WaitForSingleObject(cancel, 0) == WAIT_OBJECT_0))
-        return Terminal(request, Status::Cancelled);
-    return response;
+        return {Terminal(request, Status::Cancelled), outcome.request_delivered, outcome.ui_shown};
+    return outcome;
+}
+
+Message RunPickerClient(std::wstring executable, Message request, HWND owner, HANDLE cancel) {
+    return RunPickerClientDetailed(std::move(executable), std::move(request), owner, cancel).response;
 }
 } // namespace pulse::ipc::picker

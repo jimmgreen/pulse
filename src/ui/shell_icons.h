@@ -39,12 +39,16 @@ public:
     void AddNotifyWindow(HWND hwnd);
     void RemoveNotifyWindow(HWND hwnd);
     void Reset();
+    // Discards association-dependent results without waiting for Shell work.
+    void InvalidateAssociations();
 
     // Returns false while native icons are loading or the device is unavailable.
-    // opacity lets callers fade the icon (hidden entries, cut items).
+    // opacity lets callers fade the icon (hidden entries, cut items); color_effect
+    // optionally runs a caller-owned D2D effect (e.g. inactive-pane desaturation).
     bool Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
               const std::wstring& path, const std::wstring& name,
-              bool is_dir, DWORD attrs, float opacity = 1.0f);
+              bool is_dir, DWORD attrs, float opacity = 1.0f,
+              ID2D1Effect* color_effect = nullptr);
 
     // Icon bitmap at (about) desired_dips, or nullptr while unresolved —
     // caller draws its fallback. Extraction/conversion runs on the worker.
@@ -98,11 +102,11 @@ private:
     ID2D1Bitmap* StoreBitmap(uint64_t key, ComPtr<ID2D1Bitmap> bitmap,
                             IconArtworkBounds bounds = {});
     std::optional<uint64_t> CachedBitmapKey(const std::wstring& path,
-        const std::wstring& name, bool is_dir, float desired_dips, bool upload_ready);
+        const std::wstring& name, bool is_dir, DWORD attrs, float desired_dips, bool upload_ready);
     void StartWorkerLocked();
     void WorkerLoop();
     static bool NeedsExactIcon(const std::wstring& name, bool is_dir,
-                               const std::wstring& path);
+                               const std::wstring& path, DWORD attrs = 0);
 
     D2DDeviceBinding device_binding_;
     ID2D1DeviceContext* dc_ = nullptr;  // device_binding_'s private context
@@ -130,6 +134,7 @@ private:
     std::unordered_set<uint64_t> convert_pending_;
     std::unordered_map<uint64_t, IconPixels> ready_pixels_;
     uint64_t access_clock_ = 0;
+    uint64_t association_generation_ = 0;
     std::thread worker_;
     std::atomic<bool> running_{false};
 };

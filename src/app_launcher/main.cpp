@@ -1,6 +1,7 @@
 #include "../app/win_e_fast_entry.h"
 #include "../app/single_instance_coordinator.h"
 #include "../common/dialog_bundle.h"
+#include "../common/mcp_update_gate.h"
 #include "../common/app_identity.h"
 #include "../common/runtime_log.h"
 #include "../common/shell_open_entry.h"
@@ -12,13 +13,15 @@
 #include <vector>
 
 namespace {
-int LaunchFailed(DWORD error, const std::wstring& shell_target, uint64_t phase) {
+int LaunchFailed(DWORD error, const std::wstring& shell_target, uint64_t phase,
+                 pulse::dialog_bundle::ResolveStage bundle_stage = pulse::dialog_bundle::ResolveStage::None) {
     const DWORD native_error = shell_target.empty() ? ERROR_NOT_SUPPORTED : pulse::shell_open_entry::OpenNative(shell_target);
     PWSTR local = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &local))) {
         pulse::diagnostics::runtime::Initialize(std::wstring(local) + L"\\Pulse", "launcher");
         CoTaskMemFree(local);
         pulse::diagnostics::runtime::Event("shell_entry_launch_failed", {{"phase", phase}, {"error", error},
+            {"bundle_stage", static_cast<uint64_t>(bundle_stage)},
             {"native_attempted", shell_target.empty() ? 0u : 1u}, {"native_error", native_error}},
             pulse::diagnostics::runtime::Level::Error);
         pulse::diagnostics::runtime::Shutdown();
@@ -37,6 +40,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR arguments, int show) {
     }
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW((L"pulse.exe " + tail).c_str(), &argc);
+    const bool mcp = argv && argc == 2 && wcscmp(argv[1], L"--mcp-stdio") == 0;
     const auto shell_target = pulse::shell_open_entry::Parse(argc, argv);
     for (int i = 1; argv && i < argc; ++i)
         if (wcscmp(argv[i], L"--ai") == 0 || wcscmp(argv[i], L"--mcp") == 0 || wcscmp(argv[i], L"--mcp-stdio") == 0 ||
@@ -54,14 +58,25 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR arguments, int show) {
     image.resize(size);
     pulse::dialog_bundle::BundleLease lease;
     const auto root = std::filesystem::path(image).parent_path().wstring();
-    DWORD error = pulse::dialog_bundle::ResolveInstalledBundle(root, lease);
+    if (mcp && pulse::mcp_update::IsGated(pulse::mcp_update::GatePath(root))) {
+        const auto err = GetStdHandle(STD_ERROR_HANDLE);
+        if (err && err != INVALID_HANDLE_VALUE) {
+            const std::string message = std::string(pulse::mcp_update::kRetryMessage) + '\n';
+            DWORD written = 0;
+            WriteFile(err, message.data(), static_cast<DWORD>(message.size()), &written, nullptr);
+        }
+        return static_cast<int>(pulse::mcp_update::kRetryAfterUpdate);
+    }
+    pulse::dialog_bundle::ResolveStage bundle_stage{};
+    DWORD error = pulse::dialog_bundle::ResolveStartupBundle(root, lease, &bundle_stage);
     // The setup pointer transaction can briefly have no current file. Never
     // fall back to another executable or retry an invalid manifest/pointer.
-    for (DWORD delay = 10; error == ERROR_FILE_NOT_FOUND && delay <= 160; delay *= 2) {
+    for (DWORD delay = 10; error == ERROR_FILE_NOT_FOUND &&
+         bundle_stage == pulse::dialog_bundle::ResolveStage::PointerOpen && delay <= 160; delay *= 2) {
         Sleep(delay);
-        error = pulse::dialog_bundle::ResolveInstalledBundle(root, lease);
+        error = pulse::dialog_bundle::ResolveStartupBundle(root, lease, &bundle_stage);
     }
-    if (error) return LaunchFailed(error, shell_target, 1);
+    if (error) return LaunchFailed(error, shell_target, 1, bundle_stage);
     // GUI launches release the stable entry promptly. Scripts can explicitly
     // wait; redirected streams and the stdio AI entry always preserve lifetime.
     std::wstring command = L"\"" + lease.Host() + L"\"";

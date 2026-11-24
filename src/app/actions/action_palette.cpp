@@ -121,7 +121,7 @@ ui::FluentMenuItem PaletteRow(const ActionView& view) {
 
 std::vector<ui::FluentMenuItem> PaletteRows(const std::vector<ActionView>& views,
                                             std::wstring_view raw_needle, PaletteMode mode,
-                                            const std::vector<int>& used) {
+                                            const std::vector<int>& used, bool offer_assistant) {
     std::vector<ui::FluentMenuItem> rows;
     const std::wstring_view typed = Trim(raw_needle);
     const std::wstring needle = Fold(typed);
@@ -193,8 +193,9 @@ std::vector<ui::FluentMenuItem> PaletteRows(const std::vector<ActionView>& views
         ui::FluentMenuItem none;
         none.text = Text(I::ActPalNoCommand);
         none.enabled = false;
-        none.separator_after = true;
+        none.separator_after = offer_assistant;
         rows.push_back(std::move(none));
+        if (!offer_assistant) return rows;
         std::wstring said(typed);
         if (said.size() > kMaxAskChars) said = said.substr(0, kMaxAskChars) + L"\x2026";
         ui::FluentMenuItem ask;

@@ -4,12 +4,15 @@
 #include "../ui/ui_renderer.h"
 #include "app_input.h"
 #include "app_ops_ui.h"
+#include "extension_store_actions.h"
 #include "global_search_controller.h"
 #include "../ui/ui_renderer_internal.h"
 #include "../ui/tab_pager_layout.h"
 #include <fstream>
 #include <filesystem>
 #include <string_view>
+#include <string>
+#include <cstdio>
 #include <objbase.h>
 
 namespace pulse { bool TestDialogManagementBackgroundVm(AppState&); }
@@ -27,6 +30,8 @@ int RunDialogManagementUiTest(pulse::AppState& s,const wchar_t* output) {
     auto fixture=[&](int variant) {
         auto vm=BuildVm(s,false);vm.settings_open=true;vm.settings_page=11;vm.settings_scroll=0;
         vm.settings_dialog_available=true;vm.settings_dialog_busy=variant==1 || variant==7;
+        vm.settings_dialog_api_test_running=variant==10;
+        vm.settings_dialog_feedback_recording=variant==9;
         vm.settings_dialog_records.clear();
         vm.settings_dialog_history_note=l10n::Get(variant>=6 ? I::DialogHistoryNote : I::DialogHistoryEmpty);
         if(variant>=6) {
@@ -52,6 +57,12 @@ int RunDialogManagementUiTest(pulse::AppState& s,const wchar_t* output) {
             restart.status=l10n::Get(I::DialogRecordStatusRestart);restart.tone=2;restart.group=1;
             for(auto& row:vm.settings_dialog_records) row.group=2;
             vm.settings_dialog_records.insert(vm.settings_dialog_records.begin(),std::move(restart));
+            ui::WindowViewModel::DialogTakeoverRow paused;
+            paused.application=paused.file=L"Paused application with a long name.exe";
+            paused.detail=l10n::Get(I::DialogPausedReason)+L"\n"+l10n::Get(I::DialogPausedNext);paused.attention=true;
+            paused.status=l10n::Get(I::DialogRecordStatusPaused);paused.tone=2;paused.group=3;paused.retry=true;
+            paused.last_event=133760000000000000ull;
+            vm.settings_dialog_records.insert(vm.settings_dialog_records.begin()+1,std::move(paused));
         }
         vm.settings_dialog_enabled=variant==2;vm.settings_dialog_conflict=variant==3;
         vm.settings_dialog_failed=variant==4 || variant==5;vm.settings_dialog_scope_expanded=false;
@@ -59,27 +70,54 @@ int RunDialogManagementUiTest(pulse::AppState& s,const wchar_t* output) {
         vm.settings_integration_enabled=true;vm.settings_integration_state=1;
         return vm;
     };
-    bool bounds=true,hits=true,wrapped=true,old_hidden=true;
+    bool bounds=true,hits=true,wrapped=true,old_hidden=true,paused_ok=true;
+    // Diagnostics: the first failing bounds condition and its fixture.
+    std::string first_bounds;const wchar_t* cur_locale=L"";float cur_scale=0,cur_width=0;int cur_variant=-1;
+    auto B=[&](bool ok,int id) {
+        if(!ok && first_bounds.empty()) {
+            char text[160];std::snprintf(text,sizeof(text),"bounds#%d variant=%d scale=%.1f width=%.0f locale=%ls",id,cur_variant,cur_scale,cur_width,cur_locale);
+            first_bounds=text;
+        }
+        return ok;
+    };
     bool shortcut_bounds=true,shortcut_hits=true,shortcut_hidden=true;
     for(const auto* locale:{L"zh-CN",L"zh-TW",L"en-US"}) {
         l10n::SetLanguage(locale);painter.InvalidateTypography();
         for(float scale:{1.0f,1.5f,2.0f}) {
             s.compositor.RecreateTextFormats(scale);s.renderer.SetScale(scale);painter.SetScale(scale);
             for(float width:{620.0f,1280.0f}) for(int variant=0;variant<11;++variant) {
+                cur_locale=locale;cur_scale=scale;cur_width=width;cur_variant=variant;
                 auto vm=fixture(variant);const auto window=D2D1::RectF(0,0,width*scale,1100*scale);
                 const auto l=ui::MakeSettingsLayout(vm,window,scale,s.renderer.TitleBarHeight(),28*scale,&painter);
-                const D2D1_RECT_F controls[]={l.dialog_toggle_row,l.dialog_retry_button,l.dialog_export_button,l.dialog_scope_button,l.startup_restore_button,l.dialog_refresh_button};
-                const int actions[]={10,11,12,13,15,4};
-                for(int i=0;i<6;++i) {
+                const D2D1_RECT_F controls[]={l.dialog_toggle_row,l.dialog_retry_button,l.dialog_export_button,l.dialog_scope_button,l.startup_restore_button,l.dialog_refresh_button,l.dialog_api_test_button,l.dialog_feedback_button};
+                const int actions[]={10,11,12,13,15,4,17,18};
+                for(int i=0;i<8;++i) {
                     const auto r=controls[i];if(r.bottom<=r.top) continue;
-                    bounds&=r.right>r.left && r.left>=l.content.left && r.right<=l.content.right;
+                    bounds&=B(r.right>r.left && r.left>=l.content.left && r.right<=l.content.right,1);
                     auto shown=vm;shown.settings_scroll=r.top-l.content.top-20*scale;
                     const auto hit=s.renderer.HitTest(shown,window,(r.left+r.right)/2,(r.top+r.bottom)/2-shown.settings_scroll);
-                    hits&=(hit.region==H::SettingsDialogManagement && hit.index==actions[i])==(i==3 || (!vm.settings_dialog_busy));
+                    hits&=(hit.region==H::SettingsDialogManagement && hit.index==actions[i])==
+                        (i==3 || (!vm.settings_dialog_busy && (i<6 || !vm.settings_dialog_api_test_running) &&
+                            (i!=6 || !vm.settings_dialog_feedback_recording)));
                 }
+                if(l.dialog_retry_button.bottom>l.dialog_retry_button.top) {
+                    const auto bar=D2D1::RectF(l.dialog_management_status.left+16*scale,l.dialog_management_status.top+8*scale,
+                        l.dialog_management_status.right-16*scale,l.dialog_management_status.bottom-8*scale);
+                    const auto r=l.dialog_retry_button;
+                    const bool inline_retry=r.left>bar.left+60*scale;
+                    const float msg_w=(inline_retry ? r.left-14*scale : bar.right-12*scale)-(bar.left+40*scale);
+                    const float msg_h=painter.MeasureWrappedCaptionHeight(vm.settings_dialog_status,(std::max)(40*scale,msg_w));
+                    bounds&=B(r.left>=bar.left && r.right<=bar.right && r.top>=bar.top && r.bottom<=bar.bottom &&
+                        (inline_retry ? bar.top+32*scale+msg_h<=bar.bottom-10*scale+0.5f : bar.top+32*scale+msg_h<=r.top+0.5f),10);
+                }
+                bounds&=B(l.dialog_api_test_button.right>l.dialog_api_test_button.left &&
+                    l.dialog_api_test_button.top>=l.dialog_api_test_row.top && l.dialog_api_test_button.bottom<=l.dialog_api_test_row.bottom &&
+                    l.dialog_api_test_row.bottom<=l.dialog_history_heading.top,2);
+                bounds&=B(l.dialog_feedback_button.right>l.dialog_feedback_button.left && l.dialog_feedback_button.top>=l.dialog_feedback_row.top &&
+                    l.dialog_feedback_button.bottom<=l.dialog_feedback_row.bottom && l.dialog_feedback_row.bottom<=l.dialog_api_test_row.top,3);
                 for(int j=0;j<2;++j) {
                     const auto r=j ? l.dialog_jump_auto_row : l.dialog_jump_row;
-                    bounds&=r.right>r.left && r.left>=l.content.left && r.right<=l.content.right;
+                    bounds&=B(r.right>r.left && r.left>=l.content.left && r.right<=l.content.right,4);
                     auto shown=vm;shown.settings_dialog_jump_bar=true;
                     shown.settings_scroll=r.top-l.content.top-20*scale;
                     const auto hit=s.renderer.HitTest(shown,window,(r.left+r.right)/2,(r.top+r.bottom)/2-shown.settings_scroll);
@@ -94,25 +132,42 @@ int RunDialogManagementUiTest(pulse::AppState& s,const wchar_t* output) {
                     for(int j=0;j<4;++j) {
                         const auto r=info.notes[j];
                         wrapped&=ui::startup_info::BlockHeight(&painter,ui::startup_info::note_titles[j],ui::startup_info::note_bodies[j],r.right-r.left-26*scale,scale)<=r.bottom-r.top+0.5f;
-                        bounds&=r.left>=l.content.left && r.right<=l.content.right && r.bottom<=info.bottom;
+                        bounds&=B(r.left>=l.content.left && r.right<=l.content.right && r.bottom<=info.bottom,5);
                     }
                     for(int j=0;j<2;++j) {
                         const auto r=info.scope[j];
                         wrapped&=ui::startup_info::BlockHeight(&painter,ui::startup_info::scope_titles[j],ui::startup_info::scope_bodies[j],r.right-r.left-28*scale,scale)<=r.bottom-r.top+0.5f;
                     }
                 }
-                bounds&=(l.dialog_scope_button.bottom>l.dialog_scope_button.top)==vm.settings_dialog_enabled;
-                bounds&=l.dialog_application_row.bottom>l.dialog_application_row.top;
+                bounds&=B((l.dialog_scope_button.bottom>l.dialog_scope_button.top)==vm.settings_dialog_enabled,6);
+                bounds&=B(l.dialog_application_row.bottom>l.dialog_application_row.top,7);
                 old_hidden&=l.dialog_bundle_button.bottom==0 && l.dialog_disable_buttons.empty() &&
                     l.dialog_application_button.bottom==0 && l.dialog_launch_button.bottom==0 && l.dialog_admin_button.bottom==0;
-                bounds&=l.dialog_refresh_button.bottom>l.dialog_refresh_button.top && l.dialog_history_rows.size()==vm.settings_dialog_records.size();
+                bounds&=B(l.dialog_refresh_button.bottom>l.dialog_refresh_button.top && l.dialog_history_rows.size()==vm.settings_dialog_records.size(),8);
                 float previous=l.dialog_history_note.bottom;
                 for(size_t i=0;i<l.dialog_history_rows.size();++i) {
                     const auto row=l.dialog_history_rows[i];const auto& record=vm.settings_dialog_records[i];
                     const float needed=ui::dialog_records::RowHeight(painter,record,row.right-row.left,scale);
                     wrapped&=needed<=row.bottom-row.top+0.5f;
-                    bounds&=row.top>=previous && row.left>=l.content.left && row.right<=l.content.right;
+                    bounds&=B(row.top>=previous && row.left>=l.content.left && row.right<=l.content.right,9);
                     previous=row.bottom;
+                }
+                if(variant==10) {
+                    // Restart row: no button; paused row: the retry button (100+1); the
+                    // fixture's record is not removable, so it has no button either.
+                    const auto& buttons=l.dialog_history_delete_buttons;
+                    const bool shaped=buttons.size()==3 && buttons[0].right<=buttons[0].left && buttons[1].right>buttons[1].left && buttons[2].right<=buttons[2].left;
+                    const bool grouped=l.dialog_history_groups.size()==3 && l.dialog_history_groups[1].second==3;
+                    if((!shaped || !grouped) && paused_ok) log<<"[DIAG] paused shaped="<<shaped<<" grouped="<<grouped<<" buttons="<<buttons.size()<<" groups="<<l.dialog_history_groups.size()<<'\n';
+                    paused_ok&=shaped && grouped;
+                    if(shaped) {
+                        const auto r=buttons[1];
+                        paused_ok&=r.left>=l.content.left && r.right<=l.content.right;
+                        auto shown=vm;shown.settings_scroll=r.top-l.content.top-20*scale;
+                        const auto hit=s.renderer.HitTest(shown,window,(r.left+r.right)/2,(r.top+r.bottom)/2-shown.settings_scroll);
+                        if(!(hit.region==H::SettingsDialogManagement && hit.index==101) && paused_ok) log<<"[DIAG] paused hit index="<<hit.index<<'\n';
+                        paused_ok&=hit.region==H::SettingsDialogManagement && hit.index==101;
+                    }
                 }
                 if(variant==0) for(int mode=0;mode<5;++mode) {
                     auto quick=vm;
@@ -135,7 +190,9 @@ int RunDialogManagementUiTest(pulse::AppState& s,const wchar_t* output) {
             }
         }
     }
+    if(!first_bounds.empty()) log<<"[DIAG] "<<first_bounds<<'\n';
     check(bounds,"formal controls fit at 620/1280 DIP and 100/150/200 percent");
+    check(paused_ok,"paused program row: own caption, retry button inside the row hits 100+i, restart row has no button");
     check(hits,"formal action hit regions and busy-state disabling match rendering");
     check(wrapped,"scope explanation fits in all three languages");
     check(old_hidden,"manual permission and architecture launch controls stay hidden; application history is the daily entry");
@@ -333,8 +390,120 @@ int RunAssistantToggleHitTest(const wchar_t* output) {
 
 #ifdef PULSE_WITH_SELFTEST
 namespace pulse { bool TestSettingsFilter(const std::wstring&,l10n::StringId); }
+namespace pulse::extensions::native {
+bool ProbeSettingsPagesFocusRetention(AppState&, const ui::WindowViewModel&);
+}
 int RunShortcutFlowTest(pulse::AppState& s, const wchar_t* output);
 using namespace pulse;
+int RunNativeSettingsHeaderTest(AppState& s, const wchar_t* output) {
+    std::ofstream log{std::filesystem::path(output)};
+    int failures = 0;
+    auto check = [&](bool ok, const char* label) {
+        log << (ok ? "[PASS] " : "[FAIL] ") << label << '\n';
+        if (!ok) ++failures;
+    };
+    const auto base = std::filesystem::path(output).parent_path();
+    s.compositor.SetFrameCopyEnabled(true);
+    for (int scenario = 0; scenario < 12; ++scenario) {
+        const float scale = scenario % 4 == 3 ? 1.5f : 1.0f;
+        const int width = scenario % 4 == 2 ? 560 : 1200;
+        s.scale = scale;
+        s.compositor.Resize(width, 900);
+        s.compositor.RecreateTextFormats(scale);
+        s.renderer.SetScale(scale);
+        auto vm = BuildVm(s, false);
+        vm.settings_open = true;
+        vm.settings_page = ui::kSettingsPageNativeExtensions;
+        vm.settings_scroll = 0;
+        vm.settings_ui_font_scale = 100;
+        vm.settings_search_query.clear();
+        vm.dark = scenario % 4 == 1;
+        vm.backdrop_enabled = false;
+        auto& header = vm.native_settings_header;
+        header.present = true;
+        header.name = L"桌面整理";
+        header.summary = L"智能整理桌面，保持工作空间井然有序";
+        header.version = L"本地构建 · aca98bf";
+        header.icon = ui::StoreIcon::Pc;
+        header.official = true;
+        header.has_menu_tab = true;
+        header.tab = scenario % 4 == 1 ? 1 : 0;
+        vm.native_settings_title = header.name;
+        const int package = scenario / 4;
+        if (package == 1) {
+            header.name = L"7-Zip";
+            header.summary = L"Archive creation and extraction";
+            header.icon = ui::StoreIcon::Box;
+        } else if (package == 2) {
+            header.name = L"Example extension";
+            header.summary = L"Package metadata supplies this description";
+            header.official = false;
+            header.has_menu_tab = false;
+        }
+        if (package == 1) {
+            vm.settings_page = 8;
+            vm.settings_store_browse = true;
+            auto& store = vm.settings_store_view;
+            store.detail = true; store.detail_tab = header.tab;
+            store.detail_item = 0;
+            store.items.emplace_back();
+            auto& item = store.items.back();
+            item.name=header.name;item.summary=header.summary;item.version=header.version;
+            item.icon=header.icon;item.icon_color=header.icon_color;item.enabled=header.enabled;item.official=header.official;
+        }
+        const auto window = D2D1::RectF(0, 0, static_cast<float>(width), 900);
+        ui::fluent::Painter painter(&s.compositor);
+        painter.SetScale(scale);
+        painter.BeginFrame(ui::MakeTheme(vm.dark, s.accentColor));
+        const auto layout = ui::MakeSettingsLayout(vm, window, scale,
+            s.renderer.TitleBarHeight(), 28 * scale, &painter);
+        const ui::SettingsLayout::DetailHeader& h = package == 1 ? static_cast<const ui::SettingsLayout::DetailHeader&>(layout.ext_detail) : layout.native_head;
+        check(h.on && h.crumb.right > h.crumb.left && h.crumb_name.right > h.crumb_name.left,
+            "focused detail includes store and package breadcrumbs");
+        check(h.icon.right <= h.name.left && h.name.right <= layout.content.right && h.name.bottom <= h.sub.top,
+            "icon title and subtitle do not overlap");
+        const int tab_count = package == 1 ? 2 : header.has_menu_tab ? 2 : 1; // generic detail: overview + about
+        bool tabs_fit = true;
+        for (int i=0;i<tab_count;++i) {
+            tabs_fit = tabs_fit && h.tabs[i].right <= layout.content.right && h.tabs[i].top >= h.icon.bottom;
+            if(i) tabs_fit = tabs_fit && (h.tabs[i].left >= h.tabs[i-1].right || h.tabs[i].top >= h.tabs[i-1].bottom);
+        }
+        check(tabs_fit,"shared tabs wrap without overlap");
+        check(h.more.right <= layout.content.right && h.enable.right < h.more.left &&
+            h.enable_label.right < h.enable.left && h.tabs[0].top >= h.more.bottom,
+            "shared enable and more controls fit before tabs");
+        check(h.badges[1].right == h.badges[1].left,"technical native-code pill absent");
+        const auto subtitle=ui::ExtensionDetailSubtitle(header.official,header.summary);
+        check(painter.MeasureWrappedCaptionHeight(subtitle,h.sub.right-h.sub.left-(header.official?20*scale:0)) <= h.sub.bottom-h.sub.top+.5f,
+            "description geometry measures the exact publisher prefix and metadata text");
+        auto hit_action = [&](D2D1_RECT_F r) {
+            return s.renderer.HitTest(vm,window,(r.left+r.right)/2,(r.top+r.bottom)/2).index;
+        };
+        check(hit_action(h.enable)==static_cast<int>(ui::PackAction::StoreDetailEnable),"all packages use common enable action");
+        check(hit_action(h.more)==static_cast<int>(ui::PackAction::StoreDetailMore),"all packages use common management action");
+        auto* dc = s.compositor.Dc();
+        dc->BeginDraw();
+        s.renderer.Render(vm, window, ui::MakeTheme(vm.dark, s.accentColor));
+        check(SUCCEEDED(dc->EndDraw()), "real application renderer draws focused detail");
+        check(s.compositor.SaveSnapshot((base / (L"native-header-" + std::to_wstring(scenario) + L".png")).c_str()),
+            "real compositor snapshot saved");
+        if (scenario == 0)
+            check(extensions::native::ProbeSettingsPagesFocusRetention(s, vm),
+                "real settings host retains focused mode after leave and reentry");
+    }
+    ui::ExtensionStoreView routing;
+    for (const auto* id : {L"pulse.desktop", L"pulse.7zip", L"example.extension"}) {
+        routing.installed.emplace_back();routing.installed.back().id=id;
+    }
+    for (int i=0;i<3;++i)
+        check(ExtensionDetailInstalledIndex(routing,routing.installed[i].id)==i,"management resolves each package by identity");
+    std::swap(routing.installed[0],routing.installed[2]);
+    check(ExtensionDetailInstalledIndex(routing,L"pulse.desktop")==2,"management follows reordered installed list");
+    check(ExtensionDetailInstalledIndex(routing,L"missing")==-1 && ExtensionDetailInstalledIndex(routing,L"")==-1,
+          "missing focus never targets another installed package");
+
+    return failures ? 1 : 0;
+}
 int RunSettingsWidthBorderTest(AppState& s, const wchar_t* output) {
     using H = ui::HitTestResult;
     std::ofstream log{std::filesystem::path(output)};
@@ -1172,6 +1341,7 @@ int RunStableEntryRegistrationTest(const wchar_t* output) {
 #endif
 #ifdef PULSE_WITH_SELFTEST
 int RunSettingsFlowTest(AppState& s,const wchar_t* output) {
+    if (GetEnvironmentVariableW(L"PULSE_TEST_NATIVE_HEADER", nullptr, 0)) return RunNativeSettingsHeaderTest(s, output);
     if (GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_SEARCH", nullptr, 0)) return RunSettingsSearchTest(s, output);
     if (GetEnvironmentVariableW(L"PULSE_TEST_ASSISTANT_TOGGLE_HIT", nullptr, 0))
         return RunAssistantToggleHitTest(output);
@@ -1252,6 +1422,8 @@ int RunSettingsFlowTest(AppState& s,const wchar_t* output) {
                 check(layout.nav_row[0].top <= layout.nav.top + 48*scale,
                     "settings navigation starts without a search-box gap");
                 check(layout.nav_row[4].bottom<layout.nav_row[3].top,"about is pinned below primary navigation");
+                check(layout.nav_row[ui::kSettingsPageNativeExtensions].bottom<=layout.nav_row[ui::kSettingsPageNativeExtensions].top,
+                    "native extension sub-page has no phantom top-left nav row");
                 if(page==0) {
                     check(hit(layout.theme_tile[0]).region==H::SettingsTheme && hit(layout.theme_tile[0]).index==1,"light theme preview hit target");
                     check(hit(layout.accent_picker).region==H::SettingsAccent,"original color wheel remains interactive");

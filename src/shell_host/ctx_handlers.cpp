@@ -5,6 +5,7 @@
 #include "../common/shell_id.h"
 #include "../ipc/ctx_menu_util.h"
 
+#include <ocidl.h>
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
@@ -27,7 +28,6 @@ using pulse::ipc::IsDisabledHandler;
 using pulse::ipc::IsDefaultMenuExtraVerb;
 using pulse::ipc::IsOpenWithSubmenuVerb;
 using pulse::ipc::KeepFlyoutParentWithoutLeaves;
-using pulse::ipc::kMaxSubmenuChildren;
 using pulse::ipc::ToLowerVerb;
 
 namespace pulse::shell {
@@ -345,11 +345,31 @@ std::wstring PerceivedType(const std::wstring& ext) {
     return type;
 }
 
-bool SafeGetVerbW(IContextMenu* menu, UINT offset, wchar_t* buf, UINT cch) {
+bool SafeGetVerbWImpl(IContextMenu* menu, UINT offset, wchar_t* buf, UINT cch) {
+    if (!menu || !buf || cch == 0) return false;
+    buf[0] = L'\0';
     __try {
-        return SUCCEEDED(menu->GetCommandString(offset, GCS_VERBW, nullptr,
-                                                reinterpret_cast<CHAR*>(buf), cch));
+        if (FAILED(menu->GetCommandString(offset, GCS_VERBW, nullptr,
+                                          reinterpret_cast<CHAR*>(buf), cch)))
+            return false;
+        buf[cch - 1] = L'\0';
+        return buf[0] != L'\0';
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        buf[0] = L'\0';
+        return false;
+    }
+}
+
+bool SafeGetVerbAImpl(IContextMenu* menu, UINT offset, char* buf, UINT cch) {
+    if (!menu || !buf || cch == 0) return false;
+    buf[0] = '\0';
+    __try {
+        if (FAILED(menu->GetCommandString(offset, GCS_VERBA, nullptr, buf, cch)))
+            return false;
+        buf[cch - 1] = '\0';
+        return buf[0] != '\0';
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        buf[0] = '\0';
         return false;
     }
 }
@@ -365,8 +385,17 @@ HRESULT SafeQueryContextMenu(IContextMenu* menu, HMENU hmenu, UINT index,
 
 std::wstring CtxVerbOf(IContextMenu* menu, UINT id, UINT id_first) {
     if (id < id_first) return {};
+    const UINT offset = id - id_first;
     wchar_t buf[128]{};
-    if (SafeGetVerbW(menu, id - id_first, buf, ARRAYSIZE(buf) - 1)) return buf;
+    if (SafeGetVerbWImpl(menu, offset, buf, ARRAYSIZE(buf))) return buf;
+    char abuf[128]{};
+    if (SafeGetVerbAImpl(menu, offset, abuf, ARRAYSIZE(abuf))) {
+        wchar_t wbuf[128]{};
+        if (MultiByteToWideChar(CP_ACP, 0, abuf, -1, wbuf, ARRAYSIZE(wbuf)) > 0) {
+            wbuf[ARRAYSIZE(wbuf) - 1] = L'\0';
+            return wbuf;
+        }
+    }
     return {};
 }
 
@@ -577,9 +606,10 @@ bool ContainsVerb(const std::vector<std::wstring>& verbs, const std::wstring& ve
 
 void CollectSubmenuLeaves(IContextMenu* menu, IContextMenu2* menu2, IContextMenu3* menu3,
                           HMENU submenu, UINT pos, bool background, UINT id_first,
-                          bool parent_enabled, int depth, ULONGLONG deadline,
-                          std::vector<CtxItemOut>& kids, bool open_with = false,
+                          UINT max_id, bool parent_enabled, int depth, ULONGLONG deadline,
+                          std::vector<CtxItemOut>& kids, int& scan_budget, bool open_with = false,
                           int fill_target = 0) {
+    if (scan_budget <= 0) return;
     if (GetTickCount64() < deadline) {
         InitMenuPopup(menu2, menu3, submenu, pos);
         // Off the first-paint path: these workers stream in a later partial.
@@ -588,8 +618,9 @@ void CollectSubmenuLeaves(IContextMenu* menu, IContextMenu2* menu2, IContextMenu
             deadline = GetTickCount64() + kNestedFlyoutBudgetMs;
     }
     const int sub_count = GetMenuItemCount(submenu);
-    for (int j = 0; j < sub_count && j < kMaxSubmenuChildren &&
+    for (int j = 0; j < sub_count && scan_budget > 0 &&
          static_cast<int>(kids.size()) < pulse::ipc::kMaxMenuTreeRows; ++j) {
+        --scan_budget;
         MENUITEMINFOW sub{ sizeof(sub) };
         sub.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_SUBMENU;
         if (!GetMenuItemInfoW(submenu, j, TRUE, &sub)) continue;
@@ -610,11 +641,14 @@ void CollectSubmenuLeaves(IContextMenu* menu, IContextMenu2* menu2, IContextMenu
             const size_t index = kids.size();
             kids.push_back(std::move(header));
             CollectSubmenuLeaves(menu, menu2, menu3, sub.hSubMenu, static_cast<UINT>(j),
-                                 background, id_first, kids[index].enabled, depth + 1, deadline,
-                                 kids, open_with);
+                                 background, id_first, max_id, kids[index].enabled, depth + 1,
+                                 deadline, kids, scan_budget, open_with);
             if (kids.size() == index + 1) kids.pop_back();
             continue;
         }
+        if (sub.wID == 0 || sub.wID == 0xFFFF || sub.wID == static_cast<UINT>(-1) ||
+            sub.wID < id_first || sub.wID > max_id)
+            continue;
         wchar_t child_mnemonic = 0;
         const std::wstring child_text =
             MenuItemText(submenu, static_cast<UINT>(j), &child_mnemonic);
@@ -636,6 +670,19 @@ void CollectSubmenuLeaves(IContextMenu* menu, IContextMenu2* menu2, IContextMenu
 
 } // namespace
 
+bool SafeGetCommandVerbW(IContextMenu* menu, UINT offset, wchar_t* buf, UINT cch) {
+    return SafeGetVerbWImpl(menu, offset, buf, cch);
+}
+
+HRESULT SafeInvokeCommand(IContextMenu* menu, CMINVOKECOMMANDINFO* info) {
+    if (!menu || !info) return E_INVALIDARG;
+    __try {
+        return menu->InvokeCommand(info);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return E_FAIL;
+    }
+}
+
 CtxBind::~CtxBind() {
     if (data) data->Release();
     if (folder) CoTaskMemFree(folder);
@@ -644,13 +691,22 @@ CtxBind::~CtxBind() {
 
 void ReleaseHandlerSlot(CtxHandlerSlot& slot) noexcept {
     if (slot.hmenu) DestroyMenu(slot.hmenu);
+    if (slot.menu && slot.site) {
+        IObjectWithSite* with_site = nullptr;
+        if (SUCCEEDED(slot.menu->QueryInterface(IID_PPV_ARGS(&with_site))) && with_site) {
+            with_site->SetSite(nullptr);
+            with_site->Release();
+        }
+    }
     if (slot.menu3) slot.menu3->Release();
     if (slot.menu2) slot.menu2->Release();
     if (slot.menu) slot.menu->Release();
+    if (slot.site) slot.site->Release();
     slot.hmenu = nullptr;
     slot.menu3 = nullptr;
     slot.menu2 = nullptr;
     slot.menu = nullptr;
+    slot.site = nullptr;
 }
 
 std::vector<std::wstring> CtxHandlerKeysForFile(const std::wstring& progid,
@@ -771,7 +827,6 @@ std::vector<CtxHandlerDesc> EnumerateCtxHandlers(
     auto add = [&](const wchar_t* relative) {
         AddHandlersFromKey(HKEY_CLASSES_ROOT, relative, out, seen, disabled_clsids);
         const std::wstring key(relative);
-        if (background && key != L"Directory\\Background\\shellex\\ContextMenuHandlers") return;
         const auto suffix = key.find(L"\\shellex\\");
         if (suffix == std::wstring::npos) return;
         HKEY shell = nullptr;
@@ -795,21 +850,33 @@ std::vector<CtxHandlerDesc> EnumerateCtxHandlers(
             if (present(L"LegacyDisable") || present(L"ProgrammaticAccessOnly") ||
                 present(L"Extended") || present(L"AppliesTo")) continue;
             desc.clsid_text = ClsidText(desc.clsid);
-            if (IsDisabledHandler(desc.clsid_text, disabled_clsids) ||
-                !seen.insert(desc.clsid_text).second) continue;
+            if (IsDisabledHandler(desc.clsid_text, disabled_clsids)) continue;
+            const std::wstring verb_reg_key = key.substr(0, suffix) + L"\\shell\\" + name;
+            if (!seen.insert(desc.clsid_text).second) {
+                for (auto& existing : out) {
+                    if (!existing.explorer_command || existing.clsid_text != desc.clsid_text)
+                        continue;
+                    const bool dup_verb = std::any_of(existing.explorer_verbs.begin(),
+                        existing.explorer_verbs.end(), [&](const ExplorerVerbReg& reg) {
+                            return _wcsicmp(reg.verb.c_str(), name) == 0;
+                        });
+                    if (!dup_verb) existing.explorer_verbs.push_back({name, verb_reg_key});
+                    break;
+                }
+                continue;
+            }
             desc.name = name;
             desc.explorer_command = true;
+            desc.explorer_verbs.push_back({name, verb_reg_key});
             out.push_back(std::move(desc));
         }
         RegCloseKey(shell);
     };
     if (background) {
+        // A filesystem background is not a selected directory, drive or file.
+        // Their handlers can publish item-only verbs for the bound folder.
+        // Library and device backgrounds are separate shell surfaces as well.
         add(L"Directory\\Background\\shellex\\ContextMenuHandlers");
-        add(L"Directory\\shellex\\ContextMenuHandlers");
-        add(L"Folder\\shellex\\ContextMenuHandlers");
-        add(L"LibraryFolder\\Background\\shellex\\ContextMenuHandlers");
-        add(L"Drive\\shellex\\ContextMenuHandlers");
-        add(L"*\\shellex\\ContextMenuHandlers");
         AddPackagedHandlers(true, path, out, seen, disabled_clsids);
         return out;
     }
@@ -920,14 +987,21 @@ bool BindCtxSelection(const std::vector<std::wstring>& paths, bool background,
         array->Release();
     }
     for (auto pidl : pidls) CoTaskMemFree(pidl);
-    const std::wstring ext = ExtensionOf(paths.front());
-    const std::wstring progid = ProgIdForExt(ext);
-    if (!progid.empty())
-        RegOpenKeyExW(HKEY_CLASSES_ROOT, progid.c_str(), 0, KEY_READ, &out.assoc);
-    else if (!ext.empty())
-        RegOpenKeyExW(HKEY_CLASSES_ROOT, ext.c_str(), 0, KEY_READ, &out.assoc);
-    else
-        RegOpenKeyExW(HKEY_CLASSES_ROOT, L"*", 0, KEY_READ, &out.assoc);
+    const std::wstring first_parsing = ToParsingPath(paths.front());
+    const DWORD attr = GetFileAttributesW(first_parsing.c_str());
+    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        const bool drive_root = PathIsRootW(first_parsing.c_str()) && !PathIsUNCW(first_parsing.c_str());
+        RegOpenKeyExW(HKEY_CLASSES_ROOT, drive_root ? L"Drive" : L"Directory", 0, KEY_READ, &out.assoc);
+    } else {
+        const std::wstring ext = ExtensionOf(paths.front());
+        const std::wstring progid = ProgIdForExt(ext);
+        if (!progid.empty())
+            RegOpenKeyExW(HKEY_CLASSES_ROOT, progid.c_str(), 0, KEY_READ, &out.assoc);
+        else if (!ext.empty())
+            RegOpenKeyExW(HKEY_CLASSES_ROOT, ext.c_str(), 0, KEY_READ, &out.assoc);
+        else
+            RegOpenKeyExW(HKEY_CLASSES_ROOT, L"*", 0, KEY_READ, &out.assoc);
+    }
     return out.data != nullptr;
 }
 
@@ -945,46 +1019,97 @@ HRESULT QueryOneHandler(const CtxHandlerDesc& handler, const CtxBind& bind,
 
     HRESULT hr = E_FAIL;
     if (handler.explorer_command) {
-        // Packaged verbs are IExplorerCommand servers, usually out of process
-        // (dllhost surrogate); the selection is the bound data object, which is
+        // Packaged and registry verbs are IExplorerCommand servers (in-proc or
+        // local surrogate); the selection is the bound data object, which is
         // the folder itself for a background click.
-        IExplorerCommand* command = nullptr;
-        hr = CoCreateInstance(handler.clsid, nullptr, CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER,
-                              IID_PPV_ARGS(&command));
-        if (FAILED(hr) || !command) return FAILED(hr) ? hr : E_FAIL;
         IShellItemArray* items = nullptr;
         if (bind.data)
             SHCreateShellItemArrayFromDataObject(bind.data, IID_PPV_ARGS(&items));
         // Explorer's view site: verbs such as PowerToys New+ read the folder
         // to work in from it, not from the items (#58-6).
         IUnknown* site = nullptr;
-        if (bind.folder) CreateFolderViewSite(bind.folder, &site);
-        if (phase) phase->store(1);
-        hr = items ? CreateExplorerCommandMenu(command, items, &slot.menu, site) : E_FAIL;
+        if (bind.folder || owner || items)
+            CreateFolderViewSite(bind.folder, &site, owner, items);
+        if (!handler.explorer_verbs.empty()) {
+            std::vector<IExplorerCommand*> commands;
+            commands.reserve(handler.explorer_verbs.size());
+            if (phase) phase->store(1);
+            for (const auto& reg : handler.explorer_verbs) {
+                IExplorerCommand* command = nullptr;
+                hr = CoCreateInstance(handler.clsid, nullptr, CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER,
+                                      IID_PPV_ARGS(&command));
+                if (FAILED(hr) || !command) continue;
+                IInitializeCommand* init_cmd = nullptr;
+                if (SUCCEEDED(command->QueryInterface(IID_PPV_ARGS(&init_cmd))) && init_cmd) {
+                    IPropertyBag* bag = nullptr;
+                    CreateRegistryPropertyBag(HKEY_CLASSES_ROOT, reg.reg_key, &bag);
+                    const HRESULT init_hr = init_cmd->Initialize(reg.verb.c_str(), bag);
+                    if (bag) bag->Release();
+                    init_cmd->Release();
+                    if (FAILED(init_hr)) {
+                        command->Release();
+                        continue;
+                    }
+                }
+                commands.push_back(command);
+            }
+            hr = items && !commands.empty()
+                ? CreateExplorerCommandMenuMulti(commands, items, &slot.menu, site)
+                : E_FAIL;
+            for (auto* command : commands) command->Release();
+        } else {
+            IExplorerCommand* command = nullptr;
+            hr = CoCreateInstance(handler.clsid, nullptr, CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER,
+                                  IID_PPV_ARGS(&command));
+            if (FAILED(hr) || !command) {
+                if (site) site->Release();
+                if (items) items->Release();
+                return FAILED(hr) ? hr : E_FAIL;
+            }
+            if (phase) phase->store(1);
+            hr = items ? CreateExplorerCommandMenu(command, items, &slot.menu, site) : E_FAIL;
+            command->Release();
+        }
         if (site) site->Release();
         if (items) items->Release();
-        command->Release();
     } else {
         IUnknown* unk = nullptr;
-        hr = CoCreateInstance(handler.clsid, nullptr, CLSCTX_INPROC_SERVER,
+        hr = CoCreateInstance(handler.clsid, nullptr, CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER,
                               IID_IUnknown, reinterpret_cast<void**>(&unk));
         if (FAILED(hr) || !unk) return FAILED(hr) ? hr : E_FAIL;
 
+        IObjectWithSite* with_site = nullptr;
+        if (SUCCEEDED(unk->QueryInterface(IID_PPV_ARGS(&with_site))) && with_site) {
+            IShellItemArray* items = nullptr;
+            if (bind.data)
+                SHCreateShellItemArrayFromDataObject(bind.data, IID_PPV_ARGS(&items));
+            if (bind.folder || owner || items) {
+                CreateFolderViewSite(bind.folder, &slot.site, owner, items);
+                if (slot.site) with_site->SetSite(slot.site);
+            }
+            if (items) items->Release();
+        }
         hr = InitContextMenuExtension(unk, bind, &slot.menu);
+        if (FAILED(hr) || !slot.menu) {
+            if (with_site && slot.site) with_site->SetSite(nullptr);
+            if (slot.site) {
+                slot.site->Release();
+                slot.site = nullptr;
+            }
+        }
+        if (with_site) with_site->Release();
         unk->Release();
     }
     if (FAILED(hr) || !slot.menu) {
-        slot.menu = nullptr;
+        ReleaseHandlerSlot(slot);
         return FAILED(hr) ? hr : E_FAIL;
     }
 
     slot.hmenu = CreatePopupMenu();
     if (!slot.hmenu) {
-        slot.menu->Release();
-        slot.menu = nullptr;
+        ReleaseHandlerSlot(slot);
         return E_OUTOFMEMORY;
     }
-    (void)owner;
     if (phase) phase->store(1);
     hr = SafeQueryContextMenu(slot.menu, slot.hmenu, 0, id_first, id_last, qcm_flags);
     if (FAILED(hr)) {
@@ -1055,7 +1180,9 @@ void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
     if (!slot.menu || !slot.hmenu) return;
     if (!slot.send_to_title.empty()) InitMenuPopup(slot.menu2, slot.menu3, slot.hmenu, 0);
     const int count = GetMenuItemCount(slot.hmenu);
-    const ULONGLONG deadline = GetTickCount64() + kNestedFlyoutBudgetMs;
+    const UINT max_id = (slot.send_to_title.empty() && slot.id_last == 0x7FFF)
+        ? 0xFFFEu : slot.id_last;
+    const ULONGLONG handler_cap_deadline = GetTickCount64() + 400;
     bool pending_separator = false;
     auto push = [&](CtxItemOut item) {
         if (item.text.empty()) return;
@@ -1108,12 +1235,18 @@ void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
             // does 打开方式, which also enumerates its apps on first open.
             const bool send_to = !slot.send_to_title.empty() ||
                                  pulse::ipc::ToLowerVerb(parent_verb) == L"sendto";
+            const ULONGLONG now = GetTickCount64();
+            const ULONGLONG flyout_deadline = (send_to || open_with)
+                ? now + kNestedFlyoutBudgetMs
+                : (std::min)(now + kNestedFlyoutBudgetMs, handler_cap_deadline);
             std::vector<CtxItemOut> kids;
+            // Limit the complete tree, not each flyout. Count skipped native
+            // rows too, so empty/filtered branches cannot make the walk unbounded.
+            int scan_budget = pulse::ipc::kMaxMenuTreeRows * 2;
             CollectSubmenuLeaves(slot.menu, slot.menu2, slot.menu3, mii.hSubMenu,
-                                 static_cast<UINT>(i), background, slot.id_first, enabled, 0,
-                                 send_to || open_with ? GetTickCount64() + kNestedFlyoutBudgetMs
-                                                      : deadline,
-                                 kids, open_with, send_to ? slot.send_to_expected : 0);
+                                 static_cast<UINT>(i), background, slot.id_first, max_id, enabled, 0,
+                                 flyout_deadline,
+                                 kids, scan_budget, open_with, send_to ? slot.send_to_expected : 0);
             // An empty 打开方式 adds nothing over Pulse's own 打开方式… row.
             if (kids.empty() && open_with) continue;
             if (kids.empty()) {
@@ -1146,7 +1279,7 @@ void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
             }
             continue;
         }
-        if (mii.wID < slot.id_first || mii.wID > slot.id_last) continue;
+        if (mii.wID < slot.id_first || mii.wID > max_id) continue;
         const std::wstring verb = CtxVerbOf(slot.menu, mii.wID, slot.id_first);
         if (IsBuiltinContextVerb(verb, background) &&
             !(slot.shell_namespace && _wcsicmp(verb.c_str(), L"pintohome") == 0)) continue;
@@ -1163,17 +1296,35 @@ void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
 
 uint32_t FindItemId(const std::vector<CtxItemOut>& items, uint32_t id,
                     const std::wstring& verb, const std::wstring& text) {
+    const auto invokable = [](const CtxItemOut& item) {
+        return !item.has_children && item.id != 0;
+    };
     if (id != 0) {
         for (const auto& item : items)
-            if (item.id == id) return item.id;
+            if (invokable(item) && item.id == id) return item.id;
+    }
+    if (!verb.empty() && !text.empty()) {
+        for (const auto& item : items)
+            if (invokable(item) && item.verb == verb && item.text == text) return item.id;
     }
     if (!verb.empty()) {
-        for (const auto& item : items)
-            if (!item.has_children && item.id != 0 && item.verb == verb) return item.id;
+        uint32_t unique_id = 0;
+        int matches = 0;
+        for (const auto& item : items) {
+            if (invokable(item) && item.verb == verb) {
+                unique_id = item.id;
+                if (++matches > 1 && !text.empty()) break;
+            }
+        }
+        if (matches == 1 || (matches > 0 && text.empty())) return unique_id;
     }
     if (!text.empty()) {
         for (const auto& item : items)
-            if (!item.has_children && item.id != 0 && item.text == text) return item.id;
+            if (invokable(item) && item.text == text) return item.id;
+    }
+    if (!verb.empty()) {
+        for (const auto& item : items)
+            if (invokable(item) && item.verb == verb) return item.id;
     }
     return 0;
 }

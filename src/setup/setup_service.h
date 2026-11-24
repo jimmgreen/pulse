@@ -19,5 +19,6 @@ DWORD DisableService(const wchar_t* name);
 DWORD SwitchServiceRuntime(const wchar_t* name, const std::wstring& executable, bool& exists);
 bool WaitUntilServiceGone(const wchar_t* name, unsigned timeout_ms);
 std::wstring ServiceBinaryPath(const wchar_t* name);
+DWORD DeleteOwnedService(const wchar_t* name, const std::wstring& app_dir);
 
 }  // namespace pulse::setup

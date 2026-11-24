@@ -80,6 +80,37 @@ class DualDialogPayloadTest(unittest.TestCase):
         self.output = self.base / 'installed'
     def tearDown(self):
         self.temporary.cleanup()
+    def test_app_runtime_only_omits_legacy_dialog_bridge(self):
+        pointer = installer.package_app_runtime_only(
+            self.repo, self.builds['x64'], self.output, 'app-only',
+            installer.collect(self.repo, self.builds['x64']))
+        core = dialog.verify_app_pointer(self.output)
+        self.assertEqual(core['schema'], 4)
+        self.assertEqual(pointer['directory'], f"AppRuntime/{pointer['manifest_sha256']}")
+        self.assertEqual({p.name for p in self.output.iterdir()},
+                         {'pulse.exe', 'app-current.json', '.pulse-app-layout', 'AppRuntime'})
+        self.assertFalse((self.output / 'DialogBridge').exists())
+        self.assertFalse((self.output / 'dialog-current.json').exists())
+        self.assertFalse((self.output / 'dialog-x86-current.json').exists())
+        self.assertFalse(any(dialog.dialog_binary(entry['path']) for entry in core['files']))
+        self.assertFalse(installer.has_decoupled_dialog_bridge_stage([]))
+        fake_stage = [
+            (self.base / 'a', 'DialogBridgeStage/PulseDialogStub64.dll'),
+            (self.base / 'b', 'DialogBridgeStage/PulseDialogCore64.dll'),
+            (self.base / 'c', 'DialogBridgeStage/PulseDialogBroker.exe'),
+        ]
+        self.assertTrue(installer.has_decoupled_dialog_bridge_stage(fake_stage))
+    def test_split_runtime_with_thin_companion(self):
+        primary = installer.package_installed_dual(self.repo, self.builds['x64'], self.output, 'split',
+            installer.collect(self.repo, self.builds['x64']), self.builds['x86'], split_app_runtime=True)
+        core = dialog.verify_app_pointer(self.output)
+        self.assertEqual(core['schema'], 4)
+        self.assertFalse(any(dialog.dialog_binary(entry['path']) for entry in core['files']))
+        self.assertEqual(installer.verify_dialog_payload(self.output), primary)
+        pointer = self.output / 'app-current.json'
+        pointer.write_text(json.dumps(primary), encoding='utf-8')
+        with self.assertRaisesRegex(dialog.PackageError, 'application pointer directory'):
+            installer.verify_dialog_payload(self.output)
     def test_single_pointer_remains_unchanged(self):
         primary = stage(self.repo, self.builds, self.output, companion=False)
         self.assertEqual(set(primary), {'schema', 'directory', 'manifest_sha256'})

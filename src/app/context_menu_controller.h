@@ -48,6 +48,7 @@ public:
         std::function<void(const std::wstring&, const std::wstring&)> execute_verb;
         std::function<void(const std::wstring&, const std::wstring&)> open_with_app;
         std::function<void(const std::wstring&, const std::wstring&)> execute_command;
+        std::function<void(const std::vector<std::wstring>&, const std::wstring&, bool)> execute_shell_verb;
     };
     struct QueryCompletion {
         bool accepted = false;
@@ -164,11 +165,17 @@ public:
     std::map<std::wstring, std::vector<std::wstring>> ComHandlerLabels() const;
 
     void OpenMenu(std::vector<ui::FluentMenuItem> base_items);
+    // A deferred provider may add rows, but may not reposition existing rows.
+    void DeferBaseItems(std::function<std::vector<ui::FluentMenuItem>()> resolve);
+    bool AppendDeferredBaseItems();
+    bool DeferredBaseItemsPending() const noexcept { return deferred_base_items_pending_; }
     void NotePatchedDisplay() { menu_com_items_ = com_items_; menu_static_verbs_ = static_verbs_; }
     void CloseMenu() noexcept {
         menu_open_ = false;
         shown_.clear();
         may_grow_at_open_ = false;
+        deferred_base_items_ = {};
+        deferred_base_items_pending_ = false;
     }
     bool menu_open() const noexcept { return menu_open_; }
     const std::vector<ui::FluentMenuItem>& base_items() const noexcept {
@@ -192,6 +199,8 @@ private:
                                             uint32_t id) const;
     uint32_t FindLiveComId(const std::wstring& text) const;
     uint32_t FindLiveComId(const std::wstring& verb, const std::wstring& text) const;
+    uint32_t ResolveLiveComId(const ops::ShellMenuItem& snapshot,
+                              const std::wstring& parent_key) const;
 
     uint32_t token_ = 0;
     std::vector<std::wstring> paths_;
@@ -208,6 +217,8 @@ private:
     bool display_snapshot_valid_ = false;
     std::wstring extension_;
     std::vector<ui::FluentMenuItem> base_items_;
+    std::function<std::vector<ui::FluentMenuItem>()> deferred_base_items_;
+    bool deferred_base_items_pending_ = false;
     std::vector<ui::FluentMenuItem> shown_;  // rows on screen (BuildOpenDisplay)
     bool may_grow_at_open_ = false;          // MayGrowAfterOpen at the first frame
     uint64_t late_since_ = 0;                // first withheld late row (0 = none)

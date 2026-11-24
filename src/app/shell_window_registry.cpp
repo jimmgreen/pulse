@@ -1,5 +1,6 @@
 // shell_window_registry.cpp — see shell_window_registry.h.
 #include "shell_window_registry.h"
+#include "shell_select_delivery.h"
 #include "../common/runtime_log.h"
 
 // shlobj.h first: it brings in objbase (`interface`) under WIN32_LEAN_AND_MEAN.
@@ -217,8 +218,11 @@ public:
         request->path = PidlName(full.get(), SIGDN_DESKTOPABSOLUTEPARSING);
         request->flags = flags;
         if (request->path.empty()) return E_FAIL;
-        if (PostMessageW(window_, message_, 0, reinterpret_cast<LPARAM>(request.get()))) request.release();
-        return S_OK;
+        const HRESULT posted = PostShellSelect(window_, message_, std::move(request));
+        TraceShellWindows(L"SelectItem delivery key=%llx hr=0x%08lx",
+            static_cast<unsigned long long>(key_), static_cast<unsigned long>(posted));
+        if (delivery_logs_ < 16) { ++delivery_logs_; BridgeEvent(7, key_, posted, flags); }
+        return posted;
     }
     IFACEMETHODIMP GetItemObject(UINT, REFIID, void** ppv) override {
         if (ppv) *ppv = nullptr;
@@ -233,6 +237,7 @@ private:
     const UINT message_;
     UniquePidl folder_;
     unsigned select_logs_ = 0;
+    unsigned delivery_logs_ = 0;
 };
 
 // IWebBrowserApp::get_Document result. The shell only queries it for

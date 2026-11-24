@@ -427,10 +427,11 @@ bool DecodeComposite(Reader& r, const Header& h, UINT max_edge, std::vector<unsi
     }
 
     // Column/row -> output cell maps and per-cell sample counts.
-    std::vector<uint32_t> col_to(h.width), rows_in(out_h, 0), cols_in(out_w, 0);
+    std::vector<uint32_t> col_to(h.mode == Indexed ? h.width : 0), rows_in(out_h, 0), cols_in(out_w, 0);
     for (uint32_t x = 0; x < h.width; ++x) {
-        col_to[x] = (std::min)(out_w - 1, static_cast<UINT>(static_cast<uint64_t>(x) * out_w / h.width));
-        ++cols_in[col_to[x]];
+        const auto column = (std::min)(out_w - 1, static_cast<UINT>(static_cast<uint64_t>(x) * out_w / h.width));
+        if (!col_to.empty()) col_to[x] = column;
+        ++cols_in[column];
     }
     for (uint32_t y = 0; y < h.height; ++y)
         ++rows_in[(std::min)(out_h - 1, static_cast<UINT>(static_cast<uint64_t>(y) * out_h / h.height))];
@@ -442,7 +443,7 @@ bool DecodeComposite(Reader& r, const Header& h, UINT max_edge, std::vector<unsi
         return fail(L"psd-output-limit");
     std::vector<std::vector<uint64_t>> acc(accumulated, std::vector<uint64_t>(static_cast<size_t>(out_w) * out_h, 0));
     std::vector<unsigned char> raw(row_bytes), packed;
-    std::vector<uint8_t> row8(h.width);
+    std::vector<uint8_t> row8(h.depth == 8 ? 0 : h.width);
     const ULONGLONG deadline = GetTickCount64() + kDecodeBudgetMs;
 
     for (int c = 0; c < h.channels; ++c) {
@@ -472,7 +473,7 @@ bool DecodeComposite(Reader& r, const Header& h, UINT max_edge, std::vector<unsi
                 for (uint32_t x = 0; x < h.width; ++x)
                     row8[x] = (raw[x >> 3] >> (7 - (x & 7)) & 1) ? 0 : 255;
                 break;
-            case 8: std::memcpy(row8.data(), raw.data(), h.width); break;
+            case 8: break;
             case 16: for (uint32_t x = 0; x < h.width; ++x) row8[x] = raw[x * 2]; break;
             case 32:
                 for (uint32_t x = 0; x < h.width; ++x) {
@@ -483,16 +484,29 @@ bool DecodeComposite(Reader& r, const Header& h, UINT max_edge, std::vector<unsi
                 }
                 break;
             }
+            const auto* samples = h.depth == 8 ? raw.data() : row8.data();
             const UINT oy = (std::min)(out_h - 1, static_cast<UINT>(static_cast<uint64_t>(y) * out_h / h.height));
             if (h.mode == Indexed) {
                 for (int component = 0; component < 3; ++component) {
                     auto* dst = acc[component].data() + static_cast<size_t>(oy) * out_w;
                     for (uint32_t x = 0; x < h.width; ++x)
-                        dst[col_to[x]] += h.palette[component * 256 + row8[x]];
+                        dst[col_to[x]] += h.palette[component * 256 + samples[x]];
                 }
             } else {
                 auto* dst = acc[c].data() + static_cast<size_t>(oy) * out_w;
-                for (uint32_t x = 0; x < h.width; ++x) dst[col_to[x]] += row8[x];
+                if (out_w == h.width) {
+                    for (uint32_t x = 0; x < out_w; ++x) dst[x] += samples[x];
+                } else {
+                    // A box covers consecutive source samples. Add once to the 64-bit
+                    // vertical accumulator rather than scattering one write per source pixel.
+                    for (uint32_t x = 0; x < out_w; ++x) {
+                        const uint32_t n = cols_in[x];
+                        uint64_t sum = 0;
+                        for (uint32_t k = 0; k < n; ++k) sum += samples[k];
+                        dst[x] += sum;
+                        samples += n;
+                    }
+                }
             }
         }
     }

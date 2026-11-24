@@ -9,6 +9,7 @@
 #include "protocol.h"
 #include <windows.h>
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <functional>
 #include <map>
@@ -64,6 +65,7 @@ public:
 
     void Start(Callbacks cb);
     void Stop();
+    bool SuspendIfIdle(ULONGLONG min_idle_ms = 0);
 
     uint32_t DeleteRecycle(const std::vector<std::wstring>& paths, const Accepted& accepted = {});
     uint32_t RealDelete(const std::vector<std::wstring>& paths, const Accepted& accepted = {});
@@ -115,6 +117,7 @@ private:
         HANDLE pipe = INVALID_HANDLE_VALUE;
         uint64_t generation = 0;
         bool retired = false; // send_mutex_ held for every access
+        bool suspended_by_idle = false; // send_mutex_ held
         ~Connection() { if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe); }
     };
     struct Pending {
@@ -153,6 +156,9 @@ private:
     ULONGLONG last_spawn_try_ = 0;
 
     std::thread reader_;
+    std::condition_variable wake_cv_;
+    bool idle_suspended_ = false;
+    std::atomic<ULONGLONG> last_activity_tick_{0};
     std::atomic<bool> running_{false};
     std::atomic<uint32_t> next_id_{1};
 };

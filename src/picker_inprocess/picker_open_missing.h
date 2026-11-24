@@ -13,7 +13,8 @@ inline constexpr bool MissingOpenOptionsSupported(uint32_t open, uint32_t native
     return !(open & PULSE_PICKER_UI_V2_OPEN_REQUIRE_EXISTING_PARENT) || allow;
 }
 inline constexpr uint32_t RemotePickerFeatures(uint32_t features) {
-    // The remote wire keeps its existing 0xff Open-options contract.
-    return features & ~PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING_VALIDATED;
+    // The remote wire explicitly negotiates PULSE_PICKER_UI_V2_OPEN_MISSING_VALIDATED
+    // via ConfigSupportedByPeer when the peer advertises this feature bit.
+    return features;
 }
 }

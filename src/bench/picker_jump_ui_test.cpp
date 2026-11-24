@@ -64,6 +64,7 @@ struct State {
     std::atomic<unsigned> filter_index=0,filter_events=0;
     std::atomic<bool> replace_filename_on_type=false;
     std::thread driver; std::function<bool(HWND,HWND,State&)> drive; bool driven=false;
+    std::function<void(const PulsePickerUiV2Event&)> ready_action;
 };
 HRESULT WINAPI Event(void* context,const PulsePickerUiV2Event* event) {
     auto& state=*static_cast<State*>(context);
@@ -82,6 +83,7 @@ HRESULT WINAPI Event(void* context,const PulsePickerUiV2Event* event) {
             SendMessageW(GetDlgItem(event->window,102),WM_SETTEXT,0,reinterpret_cast<LPARAM>(L"host-owned.txt"));
     }
     if(event->kind==PULSE_PICKER_UI_V2_EVENT_READY) {
+        if (state.ready_action) state.ready_action(*event);
         const auto desktop=GetThreadDesktop(GetCurrentThreadId()); const auto window=event->window;
         state.driver=std::thread([&state,desktop,window] {
             SetThreadDesktop(desktop);
@@ -123,10 +125,12 @@ bool JumpFixture(HWND window,HWND sender,const std::wstring& path,bool file,bool
     return Send(window,pulse::ui::kPickerInteractionTestMessage,0,reinterpret_cast<LPARAM>(&key));
 }
 void Run(PulsePickerUiV2Api& api,PulsePickerUiV2Session session,PulsePickerUiV2Config& config,
-         const std::function<bool(HWND,HWND,State&)>& drive,const char* label,const std::wstring& expected={},uint32_t expected_filter=UINT32_MAX) {
+         const std::function<bool(HWND,HWND,State&)>& drive,const char* label,const std::wstring& expected={},uint32_t expected_filter=UINT32_MAX,
+         std::function<void(const PulsePickerUiV2Event&)> ready_action={}) {
     const auto validated=api.ValidateConfig(session,&config);
     std::printf("CONFIG validate=%08lX access=%u options=%u save=%u controls=%u properties=%u\n",static_cast<unsigned long>(validated),config.access_policy,config.open_options,config.save_options,config.control_count,config.property_count);
     State state;state.drive=drive;state.api=&api;state.session=session;
+    state.ready_action=std::move(ready_action);
     PulsePickerUiV2Callbacks callbacks{sizeof(callbacks),0,Event,&state};
     std::vector<wchar_t> path(PULSE_PICKER_UI_V2_MAX_UNITS+1),paths(PULSE_PICKER_UI_V2_MAX_PACKED_UNITS+1);
     PulsePickerUiV2Result result{};result.size=sizeof(result);result.path={path.data(),static_cast<uint32_t>(path.size())};result.paths={paths.data(),static_cast<uint32_t>(paths.size())};
@@ -137,12 +141,78 @@ void Run(PulsePickerUiV2Api& api,PulsePickerUiV2Session session,PulsePickerUiV2C
         result.status==PULSE_PICKER_UI_V2_ACCEPTED && state.file_ok==1 && std::wstring(path.data())==expected &&
         (expected_filter==UINT32_MAX || result.filter_index==expected_filter)),label);
 }
+// Measure two genuine edit HWNDs. Separate cases distinguish blank row
+// suppression from accidentally removing a meaningful group or caption.
+int PlaceholderRows(PulsePickerUiV2Api& api, PulsePickerUiV2Session session, const std::wstring& folder) {
+    int reference = -1;
+    for (int variant = 0; variant < 5; ++variant) {
+        std::vector<PulsePickerUiV2Control> controls;
+        const std::wstring context = L"Import options", group = variant == 3 ? L"Sequence options" : L"",
+            text = variant == 4 ? L"PNG sequence" : (variant == 2 ? L" " : L"");
+        const auto add = [&](uint32_t kind, DWORD id, const std::wstring& label, bool child) {
+            PulsePickerUiV2Control c{}; c.size = sizeof(c); c.kind = kind; c.id = id; c.state = 3;
+            c.has_parent = child; c.parent_id = child ? 20 : 0; c.label = Text(label);
+            controls.push_back(c);
+        };
+        const std::wstring empty;
+        add(PULSE_PICKER_UI_V2_CONTROL_TEXT, 1, context, false);
+        add(PULSE_PICKER_UI_V2_CONTROL_EDIT, 2, empty, false);
+        if (variant) {
+            add(PULSE_PICKER_UI_V2_CONTROL_GROUP, 20, group, false);
+            add(PULSE_PICKER_UI_V2_CONTROL_TEXT, 21, text, true);
+        }
+        add(PULSE_PICKER_UI_V2_CONTROL_EDIT, 3, empty, variant != 0);
+        PulsePickerUiV2Config config{}; config.size = sizeof(config); config.version = 2;
+        config.initial_folder = Text(folder); config.access_policy = PULSE_PICKER_UI_V2_ACCESS_LOCAL_OPEN_V1;
+        config.controls = controls.data(); config.control_count = static_cast<uint32_t>(controls.size());
+        Run(api, session, config, [&](HWND window, HWND, State&) {
+            RECT first{}, second{};
+            HWND a = GetDlgItem(window, 2001), b = GetDlgItem(window, 2000 + static_cast<int>(controls.size()) - 1);
+            if (!a || !b || !IsWindowVisible(a) || !IsWindowVisible(b) ||
+                !GetWindowRect(a, &first) || !GetWindowRect(b, &second)) return false;
+            const int distance = second.top - first.top;
+            if (variant == 0) reference = distance;
+            std::printf("PLACEHOLDER variant=%d gap_px=%d base_px=%d\n", variant, distance, reference);
+            Check(reference > 0 && (variant >= 3 ? distance > reference : distance == reference),
+                "only a meaningful group title or static label reserves a row between editable fields");
+            return true;
+        }, "both actual input controls remain visible on the same picker", {}, UINT32_MAX,
+        [&](const PulsePickerUiV2Event& event) {
+            if (variant != 2) return;
+            const HWND top = GetDlgItem(event.window, 2001), bottom = GetDlgItem(event.window, 2004);
+            const auto gap = [&] {
+                // Provider callbacks restore the caller's DPI context. Measure
+                // in the same window context as the post-READY driver.
+                const auto previous = SetThreadDpiAwarenessContext(GetWindowDpiAwarenessContext(event.window));
+                if (!previous) return -1L;
+                RECT a{}, b{};
+                const auto distance = IsWindowVisible(top) && IsWindowVisible(bottom) &&
+                    GetWindowRect(top, &a) && GetWindowRect(bottom, &b) ? b.top - a.top : -1L;
+                SetThreadDpiAwarenessContext(previous);
+                return distance;
+            };
+            const auto before = gap();
+            auto changed = controls[3];
+            const std::wstring meaningful = L"PNG sequence";
+            changed.label = Text(meaningful);
+            const HRESULT updated = api.UpdateControl(session, event.show_id, &changed);
+            const auto during = gap();
+            const HRESULT restored = api.UpdateControl(session, event.show_id, &controls[3]);
+            const auto after = gap();
+            std::printf("LIVE_LABEL before=%ld during=%ld after=%ld update=%08lX restore=%08lX\n",
+                before, during, after, static_cast<unsigned long>(updated), static_cast<unsigned long>(restored));
+            Check(updated == S_OK && restored == S_OK && reference > 0 && before == reference &&
+                during > before && after == before, "same-window relabel expands then releases exactly one caption row");
+        });
+    }
+    return failures.load() ? 1 : 0;
+}
 }
 int wmain(int argc,wchar_t** argv) {
     if(argc<3){std::puts("Usage: picker_jump_ui_test ABSOLUTE_DLL ABSOLUTE_OUTPUT_DIR [--interactive] [--case=options|multi|create|save|jump|complex|context]");return 2;}
     bool interactive=false;std::wstring selected_case;
     for(int i=3;i<argc;++i){const std::wstring_view arg=argv[i];if(arg==L"--interactive")interactive=true;else if(arg.starts_with(L"--case="))selected_case=arg.substr(7);else return 2;}
-    if(!selected_case.empty() && selected_case!=L"options" && selected_case!=L"multi" && selected_case!=L"create" && selected_case!=L"save" && selected_case!=L"jump" && selected_case!=L"complex" && selected_case!=L"context" && selected_case!=L"extension" && selected_case!=L"recentthumb" && selected_case!=L"hostmenu")return 2;
+    if(!selected_case.empty() && selected_case!=L"options" && selected_case!=L"multi" && selected_case!=L"create" && selected_case!=L"save" && selected_case!=L"jump" && selected_case!=L"complex" && selected_case!=L"context" && selected_case!=L"extension" && selected_case!=L"recentthumb" && selected_case!=L"hostmenu" && selected_case!=L"placeholder-rows")return 2;
     const auto run_case=[&](const wchar_t* name){return selected_case.empty() || selected_case==name;};
     const auto desktop_name=L"PulseJumpUi_"+std::to_wstring(GetCurrentProcessId());
     const auto desktop=interactive ? OpenInputDesktop(0,FALSE,DESKTOP_CREATEWINDOW|DESKTOP_READOBJECTS|DESKTOP_WRITEOBJECTS) :
@@ -157,6 +227,13 @@ int wmain(int argc,wchar_t** argv) {
     const auto module=LoadLibraryExW(argv[1],nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     const auto get=module?reinterpret_cast<decltype(&PulsePickerUiGetApiV2)>(GetProcAddress(module,"PulsePickerUiGetApiV2")):nullptr;
     PulsePickerUiV2Api api{};api.size=sizeof(api);if(!get || get(2,sizeof(api),&api)!=S_OK){Check(false,"load real UI DLL");return 1;}
+    if (selected_case == L"placeholder-rows") {
+        PulsePickerUiV2Initialize init{sizeof(init), 2}; PulsePickerUiV2Session session = 0;
+        if (api.Initialize(&init, &session) != S_OK) return 2;
+        PlaceholderRows(api, session, root.wstring());
+        Check(api.Shutdown(session) == S_OK, "release actual picker session");
+        CoUninitialize(); std::printf("FAILURES=%u\n", failures.load()); return failures.load() ? 1 : 0;
+    }
     const auto layout=reinterpret_cast<int(WINAPI*)()>(GetProcAddress(module,"PulsePickerJumpLayoutTest"));
     Check(layout && layout()==0,"real DLL full-width navigation and jump-strip layout regression");
     PulsePickerUiV2Initialize initialize{sizeof(initialize),2};PulsePickerUiV2Session session=0;

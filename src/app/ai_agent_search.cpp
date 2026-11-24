@@ -16,27 +16,31 @@ struct SearchStats {
     uint64_t bytes = 0;
     bool dirs = false;
     std::vector<std::pair<std::wstring, size_t>> folders;   // parent, count; most first
-    std::vector<const fs::DirEntry*> items;                  // the page Pulse loaded
+    std::vector<fs::DirEntry> items;                         // the page Pulse loaded (name or content search)
 };
 
 SearchStats StatsOf(const app::Tab& tab) {
     SearchStats st;
     std::unordered_map<std::wstring, size_t> at;   // lower-case parent -> index in folders
-    if (tab.search_entries) {
-        for (const fs::DirEntry& e : *tab.search_entries) {
-            st.items.push_back(&e);
-            if (e.is_dir) st.dirs = true;
-            else st.bytes += e.size;
-            const std::wstring parent = app::ai::ParentFolder(NormDir(e.full_path));
-            const std::wstring key = ui::AiListLower(parent);
-            auto it = at.find(key);
-            if (it == at.end()) {
-                at.emplace(key, st.folders.size());
-                st.folders.push_back({parent, 1});
-            } else {
-                ++st.folders[it->second].second;
-            }
+    const auto record = [&](const fs::DirEntry& e) {
+        st.items.push_back(e);
+        if (e.is_dir) st.dirs = true;
+        else st.bytes += e.size;
+        const std::wstring parent = app::ai::ParentFolder(NormDir(e.full_path));
+        const std::wstring key = ui::AiListLower(parent);
+        auto it = at.find(key);
+        if (it == at.end()) {
+            at.emplace(key, st.folders.size());
+            st.folders.push_back({parent, 1});
+        } else {
+            ++st.folders[it->second].second;
         }
+    };
+    if (tab.search_entries) {
+        for (const fs::DirEntry& e : *tab.search_entries) record(e);
+    } else if (tab.content_results) {
+        const size_t n = (std::min)(tab.EntryCount(), static_cast<size_t>(500));
+        for (size_t i = 0; i < n; ++i) record(tab.EntryAt(i));
     }
     st.total = (std::max)(static_cast<size_t>(tab.search_total), st.items.size());
     std::stable_sort(st.folders.begin(), st.folders.end(),
@@ -67,21 +71,29 @@ std::wstring SearchRest(const std::wstring& path) {
 }
 
 // Calls `done` once Pulse's search of `path` in the active tab has its first
-// page (nullptr: the tab went elsewhere or the index did not answer).
+// page (or content search finishes / reaches timeout with hits).
 void AwaitSearch(AppState& s, const std::wstring& path, std::function<void(AppState&, const app::Tab*, uint64_t)> done) {
     const uint64_t started = Now();
-    AiChatPush(s, 0, [path, started, done = std::move(done)](AppState& st) {
+    const bool is_content = path.find(L"content:") != std::wstring::npos;
+    const uint64_t limit_ms = is_content ? 25000u : 15000u;
+    AiChatPush(s, 0, [path, started, limit_ms, done = std::move(done)](AppState& st) {
         app::Tab* tab = ActiveTab(st);
         const bool here = tab && tab->current_path == path;
-        if (here && !tab->loading && tab->pending_generation == 0) {
-            done(st, tab, Now() - started);
-            return -1;
-        }
-        if (!here || Now() - started > 15000) {
+        if (!here) {
             done(st, nullptr, Now() - started);
             return -1;
         }
-        return 16;
+        const bool busy = tab->loading || tab->pending_generation != 0 || tab->search_content_active ||
+                          tab->search_awaiting_content;
+        if (!busy) {
+            done(st, tab, Now() - started);
+            return -1;
+        }
+        if (Now() - started > limit_ms) {
+            done(st, tab->search_total > 0 ? tab : nullptr, Now() - started);
+            return -1;
+        }
+        return 25;
     });
 }
 
@@ -124,7 +136,7 @@ void FillChips(AppState& s, AiAgent::QueryCard& q, bool pop) {
 void FillCounts(AppState& s, AiAgent::QueryCard& q, const SearchStats& st, uint64_t ms, bool rerun) {
     q.count = st.total;
     q.paths.clear();
-    for (const fs::DirEntry* e : st.items) q.paths.push_back(NormDir(e->full_path));
+    for (const fs::DirEntry& e : st.items) q.paths.push_back(NormDir(e.full_path));
     if (AiBlockView* b = Block(s, q.block_id)) {
         b->title = Text(I::AiQTitle);
         b->meta = Fill(Text(I::AiQMeta), L"{t}", Secs(ms));
@@ -177,7 +189,7 @@ json::Value SearchResultForModel(const AiAgent::QueryCard& q, const SearchStats&
     out.set("folders", std::move(folders));
     json::Value items = json::Value::Array();
     for (size_t i = 0; i < st.items.size() && i < 40; ++i) {
-        const fs::DirEntry& e = *st.items[i];
+        const fs::DirEntry& e = st.items[i];
         json::Value it = json::Value::Object();
         it.set("path", Utf8(NormDir(e.full_path)));
         it.set("type", e.is_dir ? "folder" : "file");

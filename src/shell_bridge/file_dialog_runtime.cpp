@@ -7,11 +7,13 @@
 #include "../common/dialog_bundle.h"
 #include "../common/process_token_restriction.h"
 #include "file_dialog_runtime.h"
+#include "dialog_sink_hooks.h"
 #include "runtime_config.h"
 #if defined(PULSE_EXPERIMENTAL_WINRT_PICKER)
 #include "winrt_picker_activation.h"
 #endif
 #if defined(PULSE_RUNTIME_AUTO_ENTRY)
+#include "direct_reveal_hook.h"
 #include "runtime_auto_entry.h"
 #include "runtime_auto_imports.h"
 #include "runtime_auto_lease.h"
@@ -35,6 +37,7 @@
 #include "file_dialog_activation_ex.h"
 #include "file_dialog_class_factory.h"
 #include "../ipc/picker_client.h"
+#include <wrl/client.h>
 #include <detours.h>
 #include <atomic>
 #include <filesystem>
@@ -61,10 +64,13 @@ shell::CoCreateInstanceExFunction original_ex = &::CoCreateInstanceEx;
 shell::CoGetClassObjectFunction original_class = &::CoGetClassObject;
 #if defined(PULSE_EXPERIMENTAL_WINRT_PICKER)
 shell::winrt_picker::GetActivationFactoryFunction original_ro_factory = &::RoGetActivationFactory;
+shell::winrt_picker::ActivateInstanceFunction original_ro_activate = &::RoActivateInstance;
 #endif
 #if defined(PULSE_RUNTIME_AUTO_ENTRY)
 std::atomic<bool> auto_started{false};
+std::atomic<bool> auto_rebind_ready{false};
 std::atomic<bool> auto_require_binding{false};
+std::atomic<bool> auto_user_mode{false};
 HMODULE auto_module = nullptr;
 std::atomic<uint32_t> auto_mask{0}, auto_slots{0}, auto_skipped{0}, auto_foreign{0}, auto_protection_restored{1};
 void RecordAutoImports(const config::AutoImportResult& result) noexcept {
@@ -76,7 +82,7 @@ void RecordAutoImports(const config::AutoImportResult& result) noexcept {
 constexpr uint32_t kCoverage = config::kCoCreateInstance | config::kCoCreateInstanceEx | config::kCoGetClassObject | config::kCreateProcessW |
     config::kSHBrowseForFolderW | config::kSHBrowseForFolderA
 #if defined(PULSE_EXPERIMENTAL_WINRT_PICKER)
-    | config::kRoGetActivationFactory
+    | config::kRoGetActivationFactory | config::kRoActivateInstance
 #endif
     ;
 #endif
@@ -92,12 +98,14 @@ struct Configuration {
     config::AutoLease auto_lease;
 #endif
     bool admin = false;
+    bool user_auto = false;
     std::wstring host, control;
     std::once_flag ui_once;
     std::shared_ptr<const shell::FileDialogInprocessProvider> ui_provider;
     std::shared_ptr<pulse::dialog_bundle::BundleLease> bundle;
     HANDLE directory = INVALID_HANDLE_VALUE;
     std::atomic<unsigned> log_records{0};
+    std::atomic<unsigned> monitor_scan_errors{0};
 #if defined(PULSE_RUNTIME_ENTRY_TEST)
     // Existing in-source runtime fixtures opt out of filesystem diagnostics.
     std::atomic<unsigned> show_log_records{512};
@@ -161,12 +169,12 @@ bool Disabled(const Configuration& state) noexcept {
         // directory or any other error cannot authorize it.
         if (error != ERROR_FILE_NOT_FOUND) return true;
         return GetFileAttributesW(state.control.c_str()) == INVALID_FILE_ATTRIBUTES ||
-            (!state.admin && config::ValidateReadyParentChain(state.control) != ERROR_SUCCESS);
+            (!state.admin && !state.user_auto && config::ValidateReadyParentChain(state.control) != ERROR_SUCCESS);
     } catch (...) { return true; }
 }
-void Log(Configuration& state, const char* reason, unsigned options = 0, unsigned category = 0, const char* entry = "runtime") noexcept {
+void Log(Configuration& state, const char* reason, unsigned options = 0, unsigned category = 0, const char* entry = "runtime", bool terminal = false) noexcept {
     try {
-        if (state.log_records.fetch_add(1) >= 256) return;
+        if (state.log_records.fetch_add(1) >= 256 && !terminal) return;
         char line[256]{};
         const int count = std::snprintf(line, sizeof(line),
             "interface=%s tick=%llu reason=%s options=0x%08X category=%u\r\n",
@@ -207,8 +215,7 @@ const char* FallbackReasonName(shell::FileDialogShowFallback reason) noexcept {
     return index < std::size(names) ? names[index] : "unknown";
 }
 #if defined(PULSE_DIALOG_HISTORY_GLOBAL)
-void LogGlobalShow(Configuration& state, const char* entry, uint64_t dialog, bool begin,
-    const shell::FileDialogShowObservation& value, uint64_t sequence) {
+void EnsureGlobalLog(Configuration& state) {
     namespace log = pulse::diagnostics::runtime;
     std::call_once(state.global_log_once, [&state] {
         if (!log::Enabled()) {
@@ -223,6 +230,37 @@ void LogGlobalShow(Configuration& state, const char* entry, uint64_t dialog, boo
             {{"source_session", state.log_session}, {"creation_time_filetime", identity.creation_time}, {"app_image_id", identity.image_id},
              {"app_instance_id", identity.instance_id}, {"identity_revision", 2}, {"process_arch", sizeof(void*) * 8}});
     });
+}
+void LogGlobalDecline(Configuration& state, const char* event_name, const char* entry, const char* reason,
+    DWORD flags, DWORD flags_ex, bool save, HRESULT error) noexcept {
+    try {
+        EnsureGlobalLog(state);
+        const char* family = EntryFamily(entry);
+        const std::wstring wide_family(family, family + std::strlen(family));
+        const char* safe_reason = reason && *reason ? reason : "unknown";
+        const std::wstring wide_reason(safe_reason, safe_reason + std::strlen(safe_reason));
+        pulse::diagnostics::runtime::TextEvent(event_name,
+            {{"entry_family", wide_family}, {"reason", wide_reason}},
+            {{"flags", flags}, {"flags_ex", flags_ex}, {"save", save ? 1u : 0u},
+             {"hr", static_cast<unsigned>(error)}, {"process_arch", sizeof(void*) * 8}},
+            pulse::diagnostics::runtime::Level::Info);
+    } catch (...) {}
+}
+const char* FailurePhaseName(shell::FileDialogShowFailurePhase phase) noexcept {
+    switch (phase) {
+    case shell::FileDialogShowFailurePhase::ProviderShowFailed: return "PROVIDER_SHOW_FAILED";
+    case shell::FileDialogShowFailurePhase::BridgeResponseInvalid: return "BRIDGE_RESPONSE_INVALID";
+    case shell::FileDialogShowFailurePhase::BridgeResultFailed: return "BRIDGE_RESULT_FAILED";
+    case shell::FileDialogShowFailurePhase::ShellItemMaterializeFailed: return "SHELL_ITEM_MATERIALIZE_FAILED";
+    case shell::FileDialogShowFailurePhase::CloseRequested: return "CLOSE_REQUESTED";
+    case shell::FileDialogShowFailurePhase::UnhandledException: return "UNHANDLED_EXCEPTION";
+    default: return "";
+    }
+}
+void LogGlobalShow(Configuration& state, const char* entry, uint64_t dialog, bool begin,
+    const shell::FileDialogShowObservation& value, uint64_t sequence) {
+    namespace log = pulse::diagnostics::runtime;
+    EnsureGlobalLog(state);
     const auto request = std::to_wstring(dialog) + L":" + std::to_wstring(value.sequence);
     const wchar_t* kind = !value.factory ? L"unknown" : *value.factory == shell::DialogFactory::Save ? L"save" : L"open";
     const char* family = EntryFamily(entry);
@@ -235,8 +273,11 @@ void LogGlobalShow(Configuration& state, const char* entry, uint64_t dialog, boo
             value.result == HRESULT_FROM_WIN32(ERROR_CANCELLED) ? L"cancelled" : FAILED(value.result) ? L"failed" : L"closed";
         const char* reason = ContractReasonName(value.contract_reason);
         const char* fallback = FallbackReasonName(value.fallback);
+        const char* phase = FailurePhaseName(value.failure_phase);
         log::TextEvent("dialog_show_terminal", {{"request", request}, {"terminal_status", terminal},
-            {"reason_name", std::wstring(reason, reason + std::strlen(reason))}, {"fallback_reason", std::wstring(fallback, fallback + std::strlen(fallback))}},
+            {"reason_name", std::wstring(reason, reason + std::strlen(reason))},
+            {"fallback_reason", std::wstring(fallback, fallback + std::strlen(fallback))},
+            {"failure_phase", std::wstring(phase, phase + std::strlen(phase))}},
             {{"dialog", dialog}, {"show_sequence", value.sequence}, {"source_session", state.log_session}, {"source_event_sequence", sequence},
              {"hr", static_cast<unsigned>(value.result)}, {"native_fallback", value.native_fallback},
              {"provider_started", value.provider_started}, {"ui_shown_known", value.ui_shown.has_value()}, {"ui_shown", value.ui_shown.value_or(false)}});
@@ -252,23 +293,33 @@ void LogShow(Configuration& state, const char* entry, uint64_t dialog, bool begi
             FAILED(value.result) ? "failed" : "closed";
         const auto sequence = ++state.event_sequence;
 #if defined(PULSE_DIALOG_HISTORY_GLOBAL)
-        LogGlobalShow(state, entry, dialog, begin, value, sequence);
+        try { LogGlobalShow(state, entry, dialog, begin, value, sequence); } catch (...) {}
 #endif
         const auto& identity = shell::application_identity::CurrentApplication();
         FILETIME now{}; GetSystemTimeAsFileTime(&now);
         const char* kind = !value.factory ? "unknown" : *value.factory == shell::DialogFactory::Save ? "save" : "open";
+        const char* phase = "";
+        switch (value.failure_phase) {
+        case shell::FileDialogShowFailurePhase::ProviderShowFailed: phase = "PROVIDER_SHOW_FAILED"; break;
+        case shell::FileDialogShowFailurePhase::BridgeResponseInvalid: phase = "BRIDGE_RESPONSE_INVALID"; break;
+        case shell::FileDialogShowFailurePhase::BridgeResultFailed: phase = "BRIDGE_RESULT_FAILED"; break;
+        case shell::FileDialogShowFailurePhase::ShellItemMaterializeFailed: phase = "SHELL_ITEM_MATERIALIZE_FAILED"; break;
+        case shell::FileDialogShowFailurePhase::CloseRequested: phase = "CLOSE_REQUESTED"; break;
+        case shell::FileDialogShowFailurePhase::UnhandledException: phase = "UNHANDLED_EXCEPTION"; break;
+        default: break;
+        }
         char line[4096]{};
         const int count = std::snprintf(line, sizeof(line),
             "{\"session\":\"%lu-%llu\",\"pid\":%lu,\"event\":\"dialog_show_%s\",\"data\":{"
             "\"event_sequence\":%llu,\"app_basename\":\"%s\",\"app_image_id\":%llu,\"app_instance_id\":%llu,\"identity_revision\":2,\"creation_time_filetime\":%llu,\"event_time_filetime\":%llu,\"dialog_kind\":\"%s\","
             "\"request\":\"%llu:%llu\",\"dialog\":%llu,\"show_sequence\":%llu,\"process_arch\":%u,"
             "\"entry_family\":\"%s\",\"launch_route\":\"managed\",\"terminal_status\":\"%s\",\"hr\":%lu,"
-            "\"provider_started\":%s,\"ui_shown_known\":%s,\"ui_shown\":%s,\"reason_name\":\"%s\",\"fallback_reason\":\"%s\"}}\r\n",
+            "\"provider_started\":%s,\"ui_shown_known\":%s,\"ui_shown\":%s,\"reason_name\":\"%s\",\"fallback_reason\":\"%s\",\"failure_phase\":\"%s\"}}\r\n",
             GetCurrentProcessId(), state.log_session, GetCurrentProcessId(), begin ? "begin" : "terminal",
             sequence, identity.json_basename.c_str(), identity.image_id, identity.instance_id, identity.creation_time, shell::application_identity::Filetime(now), kind,
             dialog, value.sequence, dialog, value.sequence, static_cast<unsigned>(sizeof(void*) * 8), EntryFamily(entry), terminal,
             static_cast<unsigned long>(value.result), value.provider_started ? "true" : "false", value.ui_shown.has_value() ? "true" : "false",
-            value.ui_shown.value_or(false) ? "true" : "false", ContractReasonName(value.contract_reason), FallbackReasonName(value.fallback));
+            value.ui_shown.value_or(false) ? "true" : "false", ContractReasonName(value.contract_reason), FallbackReasonName(value.fallback), phase);
         if (count <= 0 || count >= static_cast<int>(sizeof(line))) return;
         const auto path = state.control + L"\\runtime-dialog-shows.jsonl";
         AcquireSRWLockExclusive(&state.log_lock);
@@ -372,15 +423,41 @@ shell::FileDialogBridgeServices Services(Configuration* state, const char* entry
     shell::FileDialogBridgeServices services;
     services.observe_show = ShowObserver(state, entry);
     services.executable = state->host;
+#if !defined(_WIN64) || defined(PULSE_RUNTIME_REMOTE_PROVIDER)
+    const bool use_remote_provider =
 #if !defined(_WIN64)
-    if (state->bundle && state->bundle->IsThinCompanion()) {
+        (state->bundle && state->bundle->IsThinCompanion()) ||
+#endif
+        state->user_auto;
+    if (use_remote_provider) {
         services.prefer_bridge = false;
         services.load_inprocess_provider = [state, entry] {
+            struct ThreadRemoteCache {
+                std::wstring host_path;
+                std::weak_ptr<const shell::FileDialogInprocessProvider> provider;
+            };
+            static thread_local ThreadRemoteCache cached;
+            const std::wstring host_path = (state->bundle && !state->bundle->Host().empty()) ? state->bundle->Host() : state->host;
+            if (cached.host_path == host_path) {
+                if (auto alive = cached.provider.lock()) return alive;
+            }
             std::shared_ptr<const shell::FileDialogInprocessProvider> provider;
-            const HRESULT loaded = shell::LoadFileDialogRemoteProvider(state->bundle->Host(), provider, true);
-            Log(*state, "thin-companion-remote-provider", static_cast<unsigned>(loaded), 0, entry);
-            return SUCCEEDED(loaded) ? shell::RetainCompanionProvider(std::move(provider), state->bundle) :
-                std::shared_ptr<const shell::FileDialogInprocessProvider>{};
+            shell::RemoteProviderTimings timings{};
+            const HRESULT loaded = shell::LoadFileDialogRemoteProvider(host_path, provider, true, &timings);
+            Log(*state, state->user_auto ? "user-auto-remote-provider" : "thin-companion-remote-provider", static_cast<unsigned>(loaded), 0, entry);
+            pulse::diagnostics::runtime::Event("remote_provider", {
+                {"hr", static_cast<unsigned>(loaded)},
+                {"features", provider ? provider->api.implemented_features : 0},
+                {"host_pid", timings.host_pid},
+                {"spawn_ms", timings.spawn_ms},
+                {"accept_ms", timings.accept_ms},
+                {"hello_ms", timings.hello_ms},
+                {"total_ms", timings.total_ms}});
+            if (FAILED(loaded)) return std::shared_ptr<const shell::FileDialogInprocessProvider>{};
+            auto retained = state->bundle ? shell::RetainCompanionProvider(std::move(provider), state->bundle) : std::move(provider);
+            cached.host_path = host_path;
+            cached.provider = retained;
+            return retained;
         };
     } else
 #endif
@@ -527,17 +604,38 @@ BOOL RouteLegacy(Ofn* input, Original original, bool save, const char* entry) {
     if (enabled) {
         BOOL result = FALSE;
         try {
-            const bool wants_hook = input && input->lStructSize == sizeof(Ofn) &&
-                (input->Flags & (OFN_ENABLEHOOK | OFN_ENABLETEMPLATE | OFN_ENABLETEMPLATEHANDLE));
+            const bool has_template = input && input->lStructSize == sizeof(Ofn) &&
+                (input->Flags & (OFN_ENABLETEMPLATE | OFN_ENABLETEMPLATEHANDLE)) != 0;
+            const bool hook_only = input && input->lStructSize == sizeof(Ofn) &&
+                (input->Flags & OFN_ENABLEHOOK) != 0 && !has_template;
+            const bool wants_hook = has_template || hook_only;
             shell::FileDialogBridgeServices hook_services;
             bool verified_local_hook_host = false;
+            bool verified_remote_hook_host = false;
             if (wants_hook) {
                 hook_services = Services(state, entry);
-                // Services only assigns this member after the guarded same-bitness
-                // local DLL loader succeeds; thin companions use the remote loader.
+#if defined(_WIN64)
+                // Only template-customized dialogs need an in-process parent HWND to
+                // visibly attach WS_CHILD controls. Hook-only OFN_ENABLEHOOK dialogs
+                // run out-of-process over RemoteProvider via a caller-thread proxy parent.
+                if (has_template && state->user_auto && !hook_services.inprocess_provider) {
+                    std::call_once(state->ui_once, [state, entry] {
+                        const HRESULT loaded = shell::LoadFileDialogUiProvider(state->host, state->ui_provider, true);
+                        Log(*state, "user-auto-local-hook-ui-load", static_cast<unsigned>(loaded), 0, entry);
+                    });
+                    if (state->ui_provider) {
+                        hook_services.inprocess_provider = state->ui_provider;
+                        hook_services.load_inprocess_provider = {};
+                    }
+                }
+#endif
+                // Services only assigns inprocess_provider after the guarded same-bitness
+                // local DLL loader succeeds; thin x86 companions and user_auto use the remote loader.
                 verified_local_hook_host = static_cast<bool>(hook_services.inprocess_provider) && !hook_services.load_inprocess_provider;
+                verified_remote_hook_host = !verified_local_hook_host && static_cast<bool>(hook_services.load_inprocess_provider);
             }
-            const shell::LegacyDialogFactory create = [state, entry, wants_hook, &hook_services](bool saving, IFileDialog** output) {
+            bool use_original = false;
+            const shell::LegacyDialogFactory create = [state, entry, wants_hook, &hook_services, &use_original](bool saving, IFileDialog** output) {
                 IUnknown* native = nullptr;
                 HRESULT hr = shell::CreateSystemLegacyDialog(saving, &native);
                 if (FAILED(hr)) return hr;
@@ -545,20 +643,40 @@ BOOL RouteLegacy(Ofn* input, Original original, bool save, const char* entry) {
 #if defined(PULSE_RUNTIME_ENTRY_TEST)
                     if (legacy_test_services) legacy_test_services(services);
 #endif
+                    // IFileDialog is the adapter, not the caller's original API.
+                    // If the wrapper declines before UI, retry the original Win32
+                    // entry with the untouched OPENFILENAME instead.
+                    services.show_native = [&use_original](IFileDialog*, HWND) {
+                        use_original = true;
+                        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+                    };
+                    auto prev_observe = std::move(services.observe_show);
+                    services.observe_show = [prev_observe = std::move(prev_observe), &use_original, wants_hook](bool begin, const shell::FileDialogShowObservation& obs) {
+                        if (prev_observe) prev_observe(begin, obs);
+                        if (!begin && !wants_hook && FAILED(obs.result) &&
+                            obs.result != HRESULT_FROM_WIN32(ERROR_CANCELLED) && !obs.ui_shown.value_or(false)) {
+                            use_original = true;
+                        }
+                    };
                     hr = shell::WrapNativeFileDialog(saving ? shell::DialogFactory::Save : shell::DialogFactory::Open,
                     native, services, IID_IFileDialog, reinterpret_cast<void**>(output)); }
                 catch (...) { hr = E_FAIL; }
                 native->Release();
                 return hr;
             };
-            const shell::LegacyDiagnostic diagnostic = [state, entry](const shell::LegacyComDiagnostic& value) {
+            const shell::LegacyDiagnostic diagnostic = [state, entry, save](const shell::LegacyComDiagnostic& value) {
                 char detail[240]{};
                 std::snprintf(detail, sizeof(detail), "legacy-input size=%lu flags=%lu flags_ex=%lu presence=%lu max_file=%lu max_title=%lu max_custom=%lu filter_index=%lu",
                     value.structure_size, value.flags, value.flags_ex, value.presence, value.max_file, value.max_title, value.max_custom_filter, value.filter_index);
                 Log(*state, detail, value.flags, value.presence, entry);
                 Log(*state, value.reason, static_cast<unsigned>(value.error), 0, entry);
+#if defined(PULSE_DIALOG_HISTORY_GLOBAL)
+                LogGlobalDecline(*state, "dialog_legacy_decline", entry, value.reason, value.flags, value.flags_ex, save, value.error);
+#else
+                (void)save;
+#endif
             };
-            if (shell::RunLegacyComDialog(input, save, create, result, diagnostic, verified_local_hook_host)) return result;
+            if (shell::RunLegacyComDialog(input, save, create, result, diagnostic, verified_local_hook_host, &use_original, verified_remote_hook_host)) return result;
             Log(*state, "legacy-adapter-declined", 0, save ? 1u : 0u, entry);
         } catch (...) { /* Service construction failed before any Show. */ }
     }
@@ -582,7 +700,7 @@ PIDLIST_ABSOLUTE RouteBrowse(Input* input, Original original, const char* entry)
     if (enabled) {
         PIDLIST_ABSOLUTE result = nullptr;
         try {
-            const shell::LegacyDialogFactory create = [state, entry](bool, IFileDialog** output) {
+            const shell::BrowseFolderFactory create = [state, entry](const shell::BrowseFolderPolicy& policy, IFileDialog** output) {
                 IUnknown* native = nullptr;
                 HRESULT hr = shell::CreateSystemLegacyDialog(false, &native);
                 if (FAILED(hr)) return hr;
@@ -591,6 +709,30 @@ PIDLIST_ABSOLUTE RouteBrowse(Input* input, Original original, const char* entry)
 #if defined(PULSE_RUNTIME_ENTRY_TEST)
                     if (legacy_test_services) legacy_test_services(services);
 #endif
+                    if (policy.restricted || policy.hide_new_folder || policy.callback) {
+                        services.prefer_bridge = false;
+                        services.legacy_browse_policy = PULSE_PICKER_UI_V2_FOLDER_LEGACY_BROWSE |
+                            (policy.hide_new_folder ? PULSE_PICKER_UI_V2_FOLDER_HIDE_NEW_FOLDER : 0u);
+                        // Modern native fallback loses the old BROWSEINFO/BFFM contract.
+                        // Return to RouteBrowse so the actual legacy API keeps it.
+                        services.show_native = [fallback = policy.use_original](IFileDialog*, HWND) {
+                            *fallback = true;
+                            return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+                        };
+                        if (policy.callback) services.legacy_browse_callback = [policy](HWND hwnd, UINT event, LPARAM value) {
+                            policy.callback(hwnd, event, value, policy.callback_data);
+                        };
+                    }
+                    if (policy.use_original) {
+                        auto prev_observe = std::move(services.observe_show);
+                        services.observe_show = [prev_observe = std::move(prev_observe), fallback = policy.use_original, has_callback = policy.callback != nullptr](bool begin, const shell::FileDialogShowObservation& obs) {
+                            if (prev_observe) prev_observe(begin, obs);
+                            if (!begin && !has_callback && FAILED(obs.result) &&
+                                obs.result != HRESULT_FROM_WIN32(ERROR_CANCELLED) && !obs.ui_shown.value_or(false)) {
+                                *fallback = true;
+                            }
+                        };
+                    }
                     hr = shell::WrapNativeFileDialog(shell::DialogFactory::Open, native, services,
                         IID_IFileDialog, reinterpret_cast<void**>(output));
                 } catch (...) { hr = E_FAIL; }
@@ -600,6 +742,11 @@ PIDLIST_ABSOLUTE RouteBrowse(Input* input, Original original, const char* entry)
             const shell::BrowseFolderObserver observer = [state, entry](const shell::BrowseFolderDiagnostic& value) {
                 Log(*state, value.reason, value.flags, value.presence, entry);
                 if (FAILED(value.error)) Log(*state, "browse-result-hresult", static_cast<unsigned>(value.error), 0, entry);
+#if defined(PULSE_DIALOG_HISTORY_GLOBAL)
+                if (value.reason && std::strncmp(value.reason, "browse-decline-", 15) == 0) {
+                    LogGlobalDecline(*state, "dialog_browse_decline", entry, value.reason, value.flags, value.presence, false, value.error);
+                }
+#endif
             };
             if (shell::RunBrowseFolderDialog(input, create, result, observer)) return result;
         } catch (...) { Log(*state, "browse-service-construction-native", 0, 0, entry); }
@@ -608,20 +755,103 @@ PIDLIST_ABSOLUTE RouteBrowse(Input* input, Original original, const char* entry)
 }
 PIDLIST_ABSOLUTE WINAPI HookBrowseW(LPBROWSEINFOW input) { return RouteBrowse(input, original_browse_w, "SHBrowseForFolderW"); }
 PIDLIST_ABSOLUTE WINAPI HookBrowseA(LPBROWSEINFOA input) { return RouteBrowse(input, original_browse_a, "SHBrowseForFolderA"); }
+bool IsStaApartment() noexcept {
+    APTTYPE apartment{};
+    APTTYPEQUALIFIER qualifier{};
+    return SUCCEEDED(CoGetApartmentType(&apartment, &qualifier)) &&
+        (apartment == APTTYPE_STA || apartment == APTTYPE_MAINSTA);
+}
+bool IsUserAutoInprocDialogContext(DWORD context) noexcept {
+    constexpr DWORD allowed = CLSCTX_ALL | CLSCTX_NO_CODE_DOWNLOAD | CLSCTX_NO_FAILURE_LOG | CLSCTX_DISABLE_AAA;
+    return (context & CLSCTX_INPROC_SERVER) != 0 && (context & ~allowed) == 0;
+}
+HRESULT SystemComDlgGetClassObject(REFCLSID clsid, REFIID iid, void** output) noexcept {
+    if (!output) return E_POINTER;
+    *output = nullptr;
+    using Entry = HRESULT (WINAPI*)(REFCLSID, REFIID, void**);
+    static const Entry entry = []() -> Entry {
+        wchar_t path[32768]{};
+        const UINT count = GetSystemDirectoryW(path, 32768);
+        if (!count || count >= 32768) return nullptr;
+        const auto dll = LoadLibraryExW((std::wstring(path, count) + L"\\comdlg32.dll").c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        return dll ? reinterpret_cast<Entry>(GetProcAddress(dll, "DllGetClassObject")) : nullptr;
+    }();
+    shell::sink_hooks::ScopedNativeComDlgBypass bypass;
+    return entry ? entry(clsid, iid, output) : CLASS_E_CLASSNOTAVAILABLE;
+}
+HRESULT WINAPI SystemComDlgClass(REFCLSID clsid, DWORD context, LPVOID server, REFIID iid, LPVOID* output) noexcept {
+    if ((clsid != CLSID_FileOpenDialog && clsid != CLSID_FileSaveDialog) ||
+        server || !IsUserAutoInprocDialogContext(context) || !IsStaApartment()) {
+        return original_class(clsid, context, server, iid, output);
+    }
+    return SystemComDlgGetClassObject(clsid, iid, output);
+}
+HRESULT WINAPI SystemComDlgCreate(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, LPVOID* output) noexcept {
+    if ((clsid != CLSID_FileOpenDialog && clsid != CLSID_FileSaveDialog) ||
+        outer || !IsUserAutoInprocDialogContext(context) || !IsStaApartment()) {
+        return original_create(clsid, outer, context, iid, output);
+    }
+    if (!output) return E_POINTER;
+    *output = nullptr;
+    Microsoft::WRL::ComPtr<IClassFactory> factory;
+    const HRESULT hr = SystemComDlgGetClassObject(clsid, IID_PPV_ARGS(&factory));
+    if (FAILED(hr)) return hr;
+    return factory->CreateInstance(nullptr, iid, output);
+}
+HRESULT WINAPI SystemComDlgCreateEx(REFCLSID clsid, IUnknown* outer, DWORD context, COSERVERINFO* server,
+    DWORD count, MULTI_QI* results) noexcept {
+    if ((clsid != CLSID_FileOpenDialog && clsid != CLSID_FileSaveDialog) ||
+        outer || server || !count || !results || !IsUserAutoInprocDialogContext(context) || !IsStaApartment()) {
+        return original_ex(clsid, outer, context, server, count, results);
+    }
+    for (DWORD i = 0; i < count; ++i) {
+        if (!results[i].pIID) return original_ex(clsid, outer, context, server, count, results);
+    }
+    for (DWORD i = 0; i < count; ++i) {
+        results[i].pItf = nullptr;
+        results[i].hr = E_NOINTERFACE;
+    }
+    Microsoft::WRL::ComPtr<IClassFactory> factory;
+    HRESULT hr = SystemComDlgGetClassObject(clsid, IID_PPV_ARGS(&factory));
+    if (FAILED(hr)) return hr;
+    Microsoft::WRL::ComPtr<IUnknown> object;
+    hr = factory->CreateInstance(nullptr, IID_PPV_ARGS(&object));
+    if (FAILED(hr)) return hr;
+    DWORD succeeded = 0;
+    for (DWORD i = 0; i < count; ++i) {
+        void* iface = nullptr;
+        results[i].hr = object->QueryInterface(*results[i].pIID, &iface);
+        if (SUCCEEDED(results[i].hr) && iface) {
+            results[i].pItf = static_cast<IUnknown*>(iface);
+            ++succeeded;
+        }
+    }
+    if (succeeded == count) return S_OK;
+    return succeeded ? CO_S_NOTALLINTERFACES : E_NOINTERFACE;
+}
 HRESULT WINAPI HookCreate(REFCLSID clsid, LPUNKNOWN outer, DWORD context, REFIID iid, LPVOID* output) noexcept {
     bool deferred = false;
     auto* state = Enter(0, clsid, deferred);
     if (!state && !deferred) return original_create(clsid, outer, context, iid, output);
+    // In user_auto mode bypass HKCU/MSIX virtualized CLSID shadows (e.g. stale
+    // per-package PulseDialogAuto64.dll) and avoid double-wrapping by creating the
+    // real system comdlg32.dll dialog directly on STA inproc calls.
+    const bool bypass_registry = state && state->user_auto && !outer &&
+        IsUserAutoInprocDialogContext(context) && IsStaApartment();
     try {
         shell::FileDialogActivation activation;
-        activation.original = original_create; activation.enabled = true;
+        activation.original = bypass_registry ? SystemComDlgCreate : original_create;
+        activation.enabled = true;
         activation.services = state ? Services(state, entry_names[0]) : DeferredServices(entry_names[0]);
-        const auto hr = shell::ActivateFileDialog(activation, clsid, outer, context, iid, output);
-        if (state) Log(*state, "adapter-return", static_cast<unsigned>(hr), context, entry_names[0]);
+        const char* outcome = "adapter-return";
+        activation.outcome = &outcome;
+        const DWORD effective_context = bypass_registry ? CLSCTX_INPROC_SERVER : context;
+        const auto hr = shell::ActivateFileDialog(activation, clsid, outer, effective_context, iid, output);
+        if (state) Log(*state, outcome, static_cast<unsigned>(hr), context, entry_names[0]);
         return hr;
     } catch (...) {
         if (state) Log(*state, "service-construction-failed-native", 0, 0, entry_names[0]);
-        return original_create(clsid, outer, context, iid, output);
+        return (bypass_registry ? SystemComDlgCreate : original_create)(clsid, outer, context, iid, output);
     }
 }
 HRESULT WINAPI HookEx(REFCLSID clsid, IUnknown* outer, DWORD context, COSERVERINFO* server,
@@ -629,46 +859,94 @@ HRESULT WINAPI HookEx(REFCLSID clsid, IUnknown* outer, DWORD context, COSERVERIN
     bool deferred = false;
     auto* state = Enter(1, clsid, deferred);
     if (!state && !deferred) return original_ex(clsid, outer, context, server, count, results);
+    const bool bypass_registry = state && state->user_auto && !outer && !server &&
+        IsUserAutoInprocDialogContext(context) && IsStaApartment();
     try {
         shell::FileDialogActivationEx activation;
-        activation.original = original_ex; activation.enabled = true;
+        activation.original = bypass_registry ? SystemComDlgCreateEx : original_ex;
+        activation.enabled = true;
         activation.services = state ? Services(state, entry_names[1]) : DeferredServices(entry_names[1]);
-        const auto hr = shell::ActivateFileDialogEx(activation, clsid, outer, context, server, count, results);
-        if (state) Log(*state, "adapter-return", static_cast<unsigned>(hr), context, entry_names[1]);
+        const char* outcome = "adapter-return";
+        activation.outcome = &outcome;
+        const DWORD effective_context = bypass_registry ? CLSCTX_INPROC_SERVER : context;
+        const auto hr = shell::ActivateFileDialogEx(activation, clsid, outer, effective_context, server, count, results);
+        if (state) Log(*state, outcome, static_cast<unsigned>(hr), context, entry_names[1]);
         return hr;
     } catch (...) {
         if (state) Log(*state, "service-construction-failed-native", 0, 0, entry_names[1]);
-        return original_ex(clsid, outer, context, server, count, results);
+        return (bypass_registry ? SystemComDlgCreateEx : original_ex)(clsid, outer, context, server, count, results);
     }
 }
 HRESULT WINAPI HookClass(REFCLSID clsid, DWORD context, LPVOID server, REFIID iid, LPVOID* output) noexcept {
     bool deferred = false;
     auto* state = Enter(2, clsid, deferred);
     if (!state && !deferred) return original_class(clsid, context, server, iid, output);
+    const bool bypass_registry = state && state->user_auto && !server &&
+        IsUserAutoInprocDialogContext(context) && IsStaApartment();
     try {
         shell::FileDialogClassActivation activation;
-        activation.original = original_class; activation.enabled = true;
+        activation.original = bypass_registry ? SystemComDlgClass : original_class;
+        activation.enabled = true;
         activation.services = state ? Services(state, entry_names[2]) : DeferredServices(entry_names[2]);
-        const auto hr = shell::ActivateFileDialogClass(activation, clsid, context, server, iid, output);
-        if (state) Log(*state, "adapter-return", static_cast<unsigned>(hr), context, entry_names[2]);
+        const char* outcome = "adapter-return";
+        activation.outcome = &outcome;
+        const DWORD effective_context = bypass_registry ? CLSCTX_INPROC_SERVER : context;
+        const auto hr = shell::ActivateFileDialogClass(activation, clsid, effective_context, server, iid, output);
+        if (state) Log(*state, outcome, static_cast<unsigned>(hr), context, entry_names[2]);
         return hr;
     } catch (...) {
         if (state) Log(*state, "service-construction-failed-native", 0, 0, entry_names[2]);
-        return original_class(clsid, context, server, iid, output);
+        return (bypass_registry ? SystemComDlgClass : original_class)(clsid, context, server, iid, output);
     }
 }
 #if defined(PULSE_EXPERIMENTAL_WINRT_PICKER)
+shell::winrt_picker::Services WinRtBridgeServices(Configuration* state, const char* entry_name) {
+    shell::winrt_picker::Services bridge;
+    bridge.run = [state, entry_name](const wire::Message& request, HWND owner, HANDLE cancel) {
+        if (Disabled(*state)) winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_CANCELLED));
+        wire::Message sent = request;
+        HWND modal_owner = owner;
+        if (owner && IsWindow(owner)) {
+            DWORD owner_pid = 0;
+            const DWORD owner_tid = GetWindowThreadProcessId(owner, &owner_pid);
+            if (owner_pid == GetCurrentProcessId() && owner_tid != GetCurrentThreadId()) {
+                if (auto* body = std::get_if<wire::Request>(&sent.body)) {
+                    body->required_capabilities |= wire::CallerWindow;
+                    body->caller_window = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(owner));
+                }
+                modal_owner = nullptr;
+            }
+        }
+        Log(*state, "winrt-bridge-run", modal_owner ? 1u : 0u, owner ? 1u : 0u, entry_name);
+        const auto response = wire::RunPickerClient(AdminDrivePath(state->host), sent, modal_owner, cancel);
+        if (const auto* body = std::get_if<wire::Response>(&response.body)) {
+            Log(*state, "winrt-bridge-done", static_cast<unsigned>(body->status), body->error_code, entry_name);
+        }
+        return response;
+    };
+    return bridge;
+}
 HRESULT WINAPI HookRoFactory(HSTRING name, REFIID iid, void** output) noexcept {
+    if (shell::sink_hooks::ScopedWinRtActivationBypass::Active()) return original_ro_factory(name, iid, output);
     auto* state = current.load(std::memory_order_acquire);
-    if (!state || Disabled(*state)) return original_ro_factory(name, iid, output);
+    if (!state || Disabled(*state) || !TokenSafe(state->admin)) return original_ro_factory(name, iid, output);
     try {
-        shell::winrt_picker::Services bridge;
-        bridge.run = [state](const wire::Message& request, HWND owner, HANDLE cancel) {
-            if (Disabled(*state)) winrt::throw_hresult(HRESULT_FROM_WIN32(ERROR_CANCELLED));
-            return wire::RunPickerClient(state->host, request, owner, cancel);
-        };
-        return shell::winrt_picker::GetActivationFactory(name, iid, output, bridge, original_ro_factory);
+        return shell::winrt_picker::GetActivationFactory(name, iid, output,
+            WinRtBridgeServices(state, "RoGetActivationFactory"), original_ro_factory);
     } catch (...) { return original_ro_factory(name, iid, output); }
+}
+HRESULT WINAPI HookRoActivateInstance(HSTRING name, IInspectable** output) noexcept {
+    if (shell::sink_hooks::ScopedWinRtActivationBypass::Active()) return original_ro_activate(name, output);
+    auto* state = current.load(std::memory_order_acquire);
+    if (!state || Disabled(*state) || !TokenSafe(state->admin)) return original_ro_activate(name, output);
+    try {
+        shell::sink_hooks::ScopedWinRtActivationBypass bypass;
+        return shell::winrt_picker::ActivateInstance(name, output,
+            WinRtBridgeServices(state, "RoActivateInstance"), original_ro_activate);
+    } catch (...) {
+        shell::sink_hooks::ScopedWinRtActivationBypass bypass;
+        return original_ro_activate(name, output);
+    }
 }
 #endif
 void StartupDiagnostics(Configuration& state) noexcept {
@@ -791,10 +1069,208 @@ bool ResolveEarlyChildRouting(config::EarlyChildRouting& output) noexcept {
         return true;
     } catch (...) { return false; }
 }
+#if defined(PULSE_RUNTIME_AUTO_ENTRY)
+decltype(&SHOpenFolderAndSelectItems) original_reveal_items = &SHOpenFolderAndSelectItems;
+decltype(&ShellExecuteW) original_shell_execute_w = &ShellExecuteW;
+decltype(&ShellExecuteExW) original_shell_execute_ex_w = &ShellExecuteExW;
+decltype(&ShellExecuteA) original_shell_execute_a = &ShellExecuteA;
+decltype(&ShellExecuteExA) original_shell_execute_ex_a = &ShellExecuteExA;
+
+bool PeerDirectRevealInstalled() noexcept {
+#if defined(_WIN64)
+    HMODULE peer = GetModuleHandleW(L"PulseDialogAuto64.dll");
+#else
+    HMODULE peer = GetModuleHandleW(L"PulseDialogAuto32.dll");
+#endif
+    if (!peer) return false;
+    using Query = BOOL(WINAPI*)() noexcept;
+    const auto query = reinterpret_cast<Query>(GetProcAddress(peer, "PulseIsDirectRevealInstalled"));
+    return query && query() != FALSE;
+}
+
+bool AutoDirectShellActive() noexcept {
+    const auto* state = current.load(std::memory_order_acquire);
+    return state && !Disabled(*state) && TokenSafe(state->admin) && !PeerDirectRevealInstalled();
+}
+
+thread_local bool auto_shell_entering = false;
+struct AutoShellScope {
+    bool entered = false;
+    AutoShellScope() noexcept {
+        if (!auto_shell_entering) {
+            auto_shell_entering = true;
+            entered = true;
+        }
+    }
+    ~AutoShellScope() {
+        if (entered) auto_shell_entering = false;
+    }
+};
+
+HRESULT WINAPI HookSHOpenFolderAndSelectItems(PCIDLIST_ABSOLUTE folder, UINT count, PCUITEMID_CHILD_ARRAY children, DWORD flags) {
+    AutoShellScope scope;
+    if (scope.entered && AutoDirectShellActive()) {
+        if (config::DispatchDirectRevealPidl(folder, count, children, flags) == pulse::DirectRevealResult::Accepted)
+            return S_OK;
+    }
+    return original_reveal_items(folder, count, children, flags);
+}
+
+HINSTANCE WINAPI HookShellExecuteW(HWND window, LPCWSTR verb, LPCWSTR file, LPCWSTR parameters, LPCWSTR directory, INT show) {
+    AutoShellScope scope;
+    if (scope.entered && AutoDirectShellActive()) {
+        if (config::DispatchDirectShellExecuteW(verb, file, parameters, directory, show) == pulse::DirectRevealResult::Accepted)
+            return reinterpret_cast<HINSTANCE>(33);
+    }
+    return original_shell_execute_w(window, verb, file, parameters, directory, show);
+}
+
+BOOL WINAPI HookShellExecuteExW(SHELLEXECUTEINFOW* info) {
+    AutoShellScope scope;
+    if (scope.entered && AutoDirectShellActive()) {
+        if (config::DispatchDirectShellExecuteExW(info) == pulse::DirectRevealResult::Accepted) {
+            info->hInstApp = reinterpret_cast<HINSTANCE>(33);
+            return TRUE;
+        }
+    }
+    return original_shell_execute_ex_w(info);
+}
+
+HINSTANCE WINAPI HookShellExecuteA(HWND window, LPCSTR verb, LPCSTR file, LPCSTR parameters, LPCSTR directory, INT show) {
+    AutoShellScope scope;
+    if (scope.entered && AutoDirectShellActive()) {
+        if (config::DispatchDirectShellExecuteA(verb, file, parameters, directory, show) == pulse::DirectRevealResult::Accepted)
+            return reinterpret_cast<HINSTANCE>(33);
+    }
+    return original_shell_execute_a(window, verb, file, parameters, directory, show);
+}
+
+BOOL WINAPI HookShellExecuteExA(SHELLEXECUTEINFOA* info) {
+    AutoShellScope scope;
+    if (scope.entered && AutoDirectShellActive()) {
+        if (config::DispatchDirectShellExecuteExA(info) == pulse::DirectRevealResult::Accepted) {
+            info->hInstApp = reinterpret_cast<HINSTANCE>(33);
+            return TRUE;
+        }
+    }
+    return original_shell_execute_ex_a(info);
+}
+
+constexpr uint32_t kUserAutoDetourMask = config::kCoCreateInstance | config::kCoCreateInstanceEx |
+    config::kCoGetClassObject | config::kComDlgDllGetClassObject |
+    config::kGetOpenFileNameW | config::kGetSaveFileNameW |
+    config::kGetOpenFileNameA | config::kGetSaveFileNameA | config::kCommDlgExtendedError |
+    config::kSHBrowseForFolderW | config::kSHBrowseForFolderA |
+    config::kSHOpenFolderAndSelectItems | config::kShellExecuteW | config::kShellExecuteExW |
+    config::kShellExecuteA | config::kShellExecuteExA
+#if defined(PULSE_EXPERIMENTAL_WINRT_PICKER)
+    | config::kRoGetActivationFactory | config::kRoActivateInstance
+#endif
+    ;
+constexpr uint32_t kUserAutoDetourCount =
+#if defined(PULSE_EXPERIMENTAL_WINRT_PICKER)
+    18u
+#else
+    16u
+#endif
+    ;
+LONG AttachUserAutoHooks() noexcept {
+    LONG result = DetourTransactionBegin();
+    if (result != NO_ERROR) return result;
+    result = DetourUpdateThread(GetCurrentThread());
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_create), reinterpret_cast<PVOID>(HookCreate));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_ex), reinterpret_cast<PVOID>(HookEx));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_class), reinterpret_cast<PVOID>(HookClass));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_open_w), reinterpret_cast<PVOID>(ObserveOpenW));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_save_w), reinterpret_cast<PVOID>(ObserveSaveW));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_open_a), reinterpret_cast<PVOID>(ObserveOpenA));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_save_a), reinterpret_cast<PVOID>(ObserveSaveA));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_dialog_error), reinterpret_cast<PVOID>(HookDialogError));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_browse_w), reinterpret_cast<PVOID>(HookBrowseW));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_browse_a), reinterpret_cast<PVOID>(HookBrowseA));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_reveal_items), reinterpret_cast<PVOID>(HookSHOpenFolderAndSelectItems));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_shell_execute_w), reinterpret_cast<PVOID>(HookShellExecuteW));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_shell_execute_ex_w), reinterpret_cast<PVOID>(HookShellExecuteExW));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_shell_execute_a), reinterpret_cast<PVOID>(HookShellExecuteA));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_shell_execute_ex_a), reinterpret_cast<PVOID>(HookShellExecuteExA));
+#if defined(PULSE_EXPERIMENTAL_WINRT_PICKER)
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_ro_factory), reinterpret_cast<PVOID>(HookRoFactory));
+    if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_ro_activate), reinterpret_cast<PVOID>(HookRoActivateInstance));
+#endif
+    if (result != NO_ERROR) {
+        DetourTransactionAbort();
+        return result;
+    }
+    result = DetourTransactionCommit();
+    if (result != NO_ERROR) return result;
+
+    // Also attach comdlg32!DllGetClassObject sink hook (with LdrRegisterDllNotification
+    // for late-loaded comdlg32.dll) so direct DllGetClassObject and delay-loaded callers
+    // are caught identically without fragile caller-module IAT scanning.
+    shell::sink_hooks::SinkCallbacks sink_cb;
+    sink_cb.on_comdlg_class_object = [](REFCLSID clsid, REFIID iid, void** out,
+                                        shell::sink_hooks::ComDlgGetClassObjectFn orig) -> HRESULT {
+        bool deferred = false;
+        auto* state = Enter(2, clsid, deferred);
+        if (!state && !deferred) {
+            shell::sink_hooks::ScopedNativeComDlgBypass bypass;
+            return orig(clsid, iid, out);
+        }
+        try {
+            shell::FileDialogClassActivation activation;
+            activation.original = SystemComDlgClass;
+            activation.enabled = true;
+            activation.services = state ? Services(state, entry_names[2]) : DeferredServices(entry_names[2]);
+            const char* outcome = "adapter-return";
+            activation.outcome = &outcome;
+            const auto hr = shell::ActivateFileDialogClass(activation, clsid, CLSCTX_INPROC_SERVER, nullptr, iid, out);
+            if (state) Log(*state, outcome, static_cast<unsigned>(hr), CLSCTX_INPROC_SERVER, "comdlg32!DllGetClassObject");
+            return hr;
+        } catch (...) {
+            shell::sink_hooks::ScopedNativeComDlgBypass bypass;
+            return orig(clsid, iid, out);
+        }
+    };
+    shell::sink_hooks::InstallOptions sink_opts;
+    sink_opts.requested_mask = shell::sink_hooks::kSinkComDlgClassObject;
+    sink_opts.watch_late_dll_loads = true;
+    shell::sink_hooks::Install(std::move(sink_cb), sink_opts);
+    return NO_ERROR;
+}
+LONG DetachUserAutoHooks() noexcept {
+    shell::sink_hooks::Uninstall();
+    LONG result = DetourTransactionBegin();
+    if (result != NO_ERROR) return result;
+    result = DetourUpdateThread(GetCurrentThread());
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_create), reinterpret_cast<PVOID>(HookCreate));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_ex), reinterpret_cast<PVOID>(HookEx));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_class), reinterpret_cast<PVOID>(HookClass));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_open_w), reinterpret_cast<PVOID>(ObserveOpenW));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_save_w), reinterpret_cast<PVOID>(ObserveSaveW));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_open_a), reinterpret_cast<PVOID>(ObserveOpenA));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_save_a), reinterpret_cast<PVOID>(ObserveSaveA));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_dialog_error), reinterpret_cast<PVOID>(HookDialogError));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_browse_w), reinterpret_cast<PVOID>(HookBrowseW));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_browse_a), reinterpret_cast<PVOID>(HookBrowseA));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_reveal_items), reinterpret_cast<PVOID>(HookSHOpenFolderAndSelectItems));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_shell_execute_w), reinterpret_cast<PVOID>(HookShellExecuteW));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_shell_execute_ex_w), reinterpret_cast<PVOID>(HookShellExecuteExW));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_shell_execute_a), reinterpret_cast<PVOID>(HookShellExecuteA));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_shell_execute_ex_a), reinterpret_cast<PVOID>(HookShellExecuteExA));
+#if defined(PULSE_EXPERIMENTAL_WINRT_PICKER)
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_ro_factory), reinterpret_cast<PVOID>(HookRoFactory));
+    if (result == NO_ERROR) result = DetourDetach(reinterpret_cast<PVOID*>(&original_ro_activate), reinterpret_cast<PVOID>(HookRoActivateInstance));
+#endif
+    if (result == NO_ERROR) return DetourTransactionCommit();
+    DetourTransactionAbort();
+    return result;
+}
+#endif
 [[maybe_unused]] DWORD WINAPI Initialize(void* parameter) noexcept {
 #if defined(PULSE_RUNTIME_AUTO_ENTRY)
     std::unique_ptr<config::PulseRuntimeAutoStartV1> explicit_request(static_cast<config::PulseRuntimeAutoStartV1*>(parameter));
     config::AutoImportPatch auto_import_patch;
+    bool user_detours_installed = false;
 #else
     (void)parameter;
 #endif
@@ -802,6 +1278,7 @@ bool ResolveEarlyChildRouting(config::EarlyChildRouting& output) noexcept {
         bool active = true;
 #if defined(PULSE_RUNTIME_AUTO_ENTRY)
         config::AutoImportPatch* imports = nullptr;
+        bool* user_detours = nullptr;
 #endif
         ~FinishInitialization() {
             if (!active) return;
@@ -809,7 +1286,16 @@ bool ResolveEarlyChildRouting(config::EarlyChildRouting& output) noexcept {
             initialization.compare_exchange_strong(pending, E_FAIL);
             if (FAILED(initialization.load(std::memory_order_acquire))) {
 #if defined(PULSE_RUNTIME_AUTO_ENTRY)
-                RecordAutoImports(imports->Rollback());
+                if (user_detours && *user_detours) {
+                    const LONG detached = DetachUserAutoHooks();
+                    *user_detours = false;
+                    config::AutoImportResult cleared{};
+                    cleared.status = detached == NO_ERROR ? S_OK : HRESULT_FROM_WIN32(detached);
+                    cleared.protection_restored = (detached == NO_ERROR);
+                    RecordAutoImports(cleared);
+                } else {
+                    RecordAutoImports(imports->Rollback());
+                }
                 install_result = ERROR_NOT_READY;
 #endif
                 if (const auto* control = early_authority_control.load(std::memory_order_acquire)) {
@@ -827,7 +1313,7 @@ bool ResolveEarlyChildRouting(config::EarlyChildRouting& output) noexcept {
         }
     } finish_initialization
 #if defined(PULSE_RUNTIME_AUTO_ENTRY)
-        {true, &auto_import_patch}
+        {true, &auto_import_patch, &user_detours_installed}
 #endif
         ;
     try {
@@ -839,7 +1325,9 @@ bool ResolveEarlyChildRouting(config::EarlyChildRouting& output) noexcept {
             initialization = HRESULT_FROM_WIN32(GetLastError()); return 0;
         }
 #if defined(PULSE_RUNTIME_AUTO_ENTRY)
-        if (!explicit_request || !pulse::dialog_admin::IsElevated() || !TokenSafe(true)) {
+        const bool requested_user_mode = auto_user_mode.load(std::memory_order_acquire);
+        if (!explicit_request ||
+            (requested_user_mode ? (pulse::dialog_admin::IsElevated() || !TokenSafe(false)) : (!pulse::dialog_admin::IsElevated() || !TokenSafe(true)))) {
             initialization = E_ACCESSDENIED; return 0;
         }
         const std::wstring nonce = explicit_request->nonce;
@@ -871,7 +1359,7 @@ bool ResolveEarlyChildRouting(config::EarlyChildRouting& output) noexcept {
             size.QuadPart != static_cast<LONGLONG>(sizeof(config::Session)) ||
             !ReadFile(file.value, session.get(), sizeof(config::Session), &read, nullptr) || read != sizeof(config::Session)) return 0;
         if (session->magic != config::kConfigMagic || session->version != config::kVersion ||
-            session->size != sizeof(config::Session) || (session->reserved & ~config::kAdminSession) || session->nonce[39] ||
+            session->size != sizeof(config::Session) || (session->reserved & ~(config::kAdminSession | config::kUserAutoSession)) || session->nonce[39] ||
             session->host_path[config::kPathUnits - 1] || session->target_path[config::kPathUnits - 1] ||
             session->control_path[config::kPathUnits - 1] || session->launcher_path[config::kPathUnits - 1] ||
             session->target_pid != GetCurrentProcessId() || nonce != session->nonce) return 0;
@@ -892,8 +1380,11 @@ bool ResolveEarlyChildRouting(config::EarlyChildRouting& output) noexcept {
             !Same(Canonical(session->target_path, false), Canonical(image, false)) ||
             Canonical(session->launcher_path, false).empty()) return 0;
         const bool admin = session->reserved == config::kAdminSession;
+        const bool user_auto = session->reserved == config::kUserAutoSession;
 #if defined(PULSE_RUNTIME_AUTO_ENTRY)
-        if (!admin) { initialization = E_ACCESSDENIED; return 0; }
+        if (requested_user_mode ? !user_auto : !admin) { initialization = E_ACCESSDENIED; return 0; }
+#else
+        if (user_auto) { initialization = E_ACCESSDENIED; return 0; }
 #endif
         wchar_t module[32768]{};
         const DWORD module_count = GetModuleFileNameW(pinned, module, 32768);
@@ -908,7 +1399,7 @@ bool ResolveEarlyChildRouting(config::EarlyChildRouting& output) noexcept {
             if (error) { initialization = HRESULT_FROM_WIN32(error); return 0; }
         }
         std::shared_ptr<pulse::dialog_bundle::BundleLease> bound_bundle;
-        if (external_host || admin) {
+        if (external_host || admin || user_auto) {
             bound_bundle = std::make_shared<pulse::dialog_bundle::BundleLease>();
             DWORD error = pulse::dialog_bundle::VerifyBundle(bundle_root.wstring(), {}, *bound_bundle);
             if (!error && ((external_host && !bound_bundle->IsThinCompanion()) || bound_bundle->Machine() != machine ||
@@ -934,12 +1425,10 @@ bool ResolveEarlyChildRouting(config::EarlyChildRouting& output) noexcept {
             if (error) { initialization = HRESULT_FROM_WIN32(error); return 0; }
         }
         auto state = std::make_unique<Configuration>();
-        state->host = host; state->control = control; state->admin = admin;
+        state->host = host; state->control = control; state->admin = admin; state->user_auto = user_auto;
 #if defined(PULSE_RUNTIME_AUTO_ENTRY)
-        const DWORD lease_error = state->auto_lease.Open(AdminDrivePath(control), nonce, auto_require_binding.load());
+        const DWORD lease_error = state->auto_lease.Open(AdminDrivePath(control), nonce, auto_require_binding.load(), user_auto);
         if (lease_error) { initialization = HRESULT_FROM_WIN32(lease_error); return 0; }
-        config::AutoModuleEpoch module_epoch;
-        if (!module_epoch.Start()) { initialization = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED); return 0; }
 #endif
         state->bundle = std::move(bound_bundle);
         state->directory = CreateFileW(control.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -951,31 +1440,23 @@ bool ResolveEarlyChildRouting(config::EarlyChildRouting& output) noexcept {
         ready.target_created = created;
         wcscpy_s(ready.nonce, session->nonce);
 #if defined(PULSE_RUNTIME_AUTO_ENTRY)
-        // All session, token, bundle and path checks precede atomic data-slot writes.
-        const std::array<config::AutoImportHook, 11> hooks{{
-            {reinterpret_cast<void*>(original_create), reinterpret_cast<void*>(&HookCreate)},
-            {reinterpret_cast<void*>(original_ex), reinterpret_cast<void*>(&HookEx)},
-            {reinterpret_cast<void*>(original_class), reinterpret_cast<void*>(&HookClass)},
-#if defined(PULSE_EXPERIMENTAL_WINRT_PICKER)
-            {reinterpret_cast<void*>(original_ro_factory), reinterpret_cast<void*>(&HookRoFactory)},
-#else
-            {},
-#endif
-            {reinterpret_cast<void*>(original_open_w), reinterpret_cast<void*>(&ObserveOpenW)},
-            {reinterpret_cast<void*>(original_save_w), reinterpret_cast<void*>(&ObserveSaveW)},
-            {reinterpret_cast<void*>(original_open_a), reinterpret_cast<void*>(&ObserveOpenA)},
-            {reinterpret_cast<void*>(original_save_a), reinterpret_cast<void*>(&ObserveSaveA)},
-            {reinterpret_cast<void*>(original_dialog_error), reinterpret_cast<void*>(&HookDialogError)},
-            {reinterpret_cast<void*>(original_browse_w), reinterpret_cast<void*>(&HookBrowseW)},
-            {reinterpret_cast<void*>(original_browse_a), reinterpret_cast<void*>(&HookBrowseA)}
-        }};
-        const auto permit = [](void* context) noexcept { return static_cast<Configuration*>(context)->auto_lease.Alive(); };
-        const auto imports = auto_import_patch.Install(pinned, hooks, permit, state.get());
-        RecordAutoImports(imports);
-        if (FAILED(imports.status) || !imports.patched_slots || !imports.api_mask) {
-            initialization = FAILED(imports.status) ? imports.status : HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
+        // Phase 1: Both user_auto and elevated admin_auto now share the unified
+        // Detours inline hook path + comdlg32!DllGetClassObject sink hook instead
+        // of fragile caller-module IAT scanning (which suffered skipped modules and
+        // ERROR_PROC_NOT_FOUND / 1460 timeouts across diverse builds).
+        if (!state->auto_lease.Alive()) { initialization = HRESULT_FROM_WIN32(ERROR_PROCESS_ABORTED); return 0; }
+        const LONG attached = AttachUserAutoHooks();
+        if (attached != NO_ERROR) {
+            initialization = HRESULT_FROM_WIN32(attached);
             return 0;
         }
+        user_detours_installed = true;
+        config::AutoImportResult coverage{};
+        coverage.status = S_OK;
+        coverage.api_mask = kUserAutoDetourMask;
+        coverage.patched_slots = kUserAutoDetourCount;
+        coverage.protection_restored = true;
+        RecordAutoImports(coverage);
         install_result = NO_ERROR;
 #endif
         const LONG installed = install_result.load();
@@ -997,7 +1478,7 @@ bool ResolveEarlyChildRouting(config::EarlyChildRouting& output) noexcept {
             // complete. Child routing cannot observe current == nullptr here.
             if (!publication.Publish(state)) { initialization = HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED); return 0; }
             published = publication.value;
-            child_configured = !published->admin && !runtime_dll.empty() && config::ConfigureChildRouting(control, runtime_dll, ChildEnabled, ChildLog, ChildDiagnostic);
+            child_configured = !published->admin && !published->user_auto && !runtime_dll.empty() && config::ConfigureChildRouting(control, runtime_dll, ChildEnabled, ChildLog, ChildDiagnostic);
         }
         const auto temporary = control + L"\\runtime-ready.tmp";
         Handle receipt{CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)};
@@ -1020,7 +1501,6 @@ bool ResolveEarlyChildRouting(config::EarlyChildRouting& output) noexcept {
         }
         publication.Commit();
 #if defined(PULSE_RUNTIME_AUTO_ENTRY)
-        auto_import_patch.Commit();
         finish_initialization.active = false;
 #endif
         initialization = ready.status;
@@ -1048,13 +1528,27 @@ bool ResolveEarlyChildRouting(config::EarlyChildRouting& output) noexcept {
                 value->routing_enabled.store(false, std::memory_order_release);
                 Configuration* expected = value; current.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
             };
-            const auto restored = config::MonitorAutoImports(pinned, hooks, auto_import_patch, module_epoch,
-                permit, published, enabled, revoke, RecordAutoImports);
+            config::AutoImportResult restored{};
+            while (enabled(published)) Sleep(200);
+            revoke(published);
+            const LONG detached = DetachUserAutoHooks();
+            restored.status = detached == NO_ERROR ? HRESULT_FROM_WIN32(ERROR_PROCESS_ABORTED) : HRESULT_FROM_WIN32(detached);
+            restored.api_mask = detached == NO_ERROR ? 0u : kUserAutoDetourMask;
+            restored.patched_slots = detached == NO_ERROR ? 0u : kUserAutoDetourCount;
+            restored.protection_restored = (detached == NO_ERROR);
+            RecordAutoImports(restored);
             install_result = ERROR_NOT_READY; initialization = restored.status;
             const bool rebound = !restored.api_mask && restored.protection_restored;
-            Log(*published, rebound ? "auto-lease-ended-slots-restored-ready-for-rebind" :
-                "auto-restore-incomplete-native-restart-target", restored.patched_slots, 0, "auto-runtime");
-            if (rebound) auto_started.store(false, std::memory_order_release);
+            Log(*published, "auto-monitor-stopped", static_cast<unsigned>(restored.status),
+                published->auto_lease.Alive() ? 1u : 0u, "auto-runtime", true);
+            Log(*published, rebound ? "auto-slots-restored-ready-for-rebind" :
+                "auto-restore-incomplete-native-restart-target", restored.api_mask,
+                restored.patched_slots, "auto-runtime", true);
+            Log(*published, "auto-restoration-protection", restored.protection_restored ? 1u : 0u, 0, "auto-runtime", true);
+            if (rebound) {
+                auto_rebind_ready.store(true, std::memory_order_release);
+                auto_started.store(false, std::memory_order_release);
+            }
         }
 #endif
     } catch (...) { initialization = E_FAIL; }
@@ -1079,21 +1573,27 @@ bool CopyAutoRequest(const void* source, config::PulseRuntimeAutoStartV1& output
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 }
-static HRESULT QueueAutoStart(const void* request, uint32_t size, bool require_binding) noexcept {
+static HRESULT QueueAutoStart(const void* request, uint32_t size, bool require_binding, bool user_mode = false) noexcept {
     if (!request || size != sizeof(config::PulseRuntimeAutoStartV1)) return E_INVALIDARG;
     try {
         auto copied = std::make_unique<config::PulseRuntimeAutoStartV1>();
         if (!CopyAutoRequest(request, *copied) || !ValidAutoRequest(copied.get(), size)) return E_INVALIDARG;
-    if (auto_started.load(std::memory_order_acquire)) return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
-    if (!pulse::dialog_admin::IsElevated() || !TokenSafe(true)) return E_ACCESSDENIED;
+        if (auto_started.load(std::memory_order_acquire)) return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
+        if (user_mode) {
+            if (pulse::dialog_admin::IsElevated() || !TokenSafe(false)) return E_ACCESSDENIED;
+        } else {
+            if (!pulse::dialog_admin::IsElevated() || !TokenSafe(true)) return E_ACCESSDENIED;
+        }
         HMODULE pinned = nullptr;
         if (!auto_module) return E_UNEXPECTED;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
             reinterpret_cast<LPCWSTR>(&PulseFileDialogRuntimeAutoStart), &pinned)) return HRESULT_FROM_WIN32(GetLastError());
         bool expected = false;
         if (!auto_started.compare_exchange_strong(expected, true)) return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
+        auto_rebind_ready.store(false, std::memory_order_release);
         initialization.store(E_PENDING, std::memory_order_release);
         auto_require_binding.store(require_binding, std::memory_order_release);
+        auto_user_mode.store(user_mode, std::memory_order_release);
         auto* payload = copied.release();
         HANDLE worker = CreateThread(nullptr, 0, Initialize, payload, 0, nullptr);
         if (!worker) { const auto error = HRESULT_FROM_WIN32(GetLastError()); delete payload; initialization = error; return error; }
@@ -1102,9 +1602,12 @@ static HRESULT QueueAutoStart(const void* request, uint32_t size, bool require_b
     } catch (...) { return E_OUTOFMEMORY; }
 }
 extern "C" __declspec(dllexport) HRESULT WINAPI PulseFileDialogRuntimeAutoStart(
-    const config::PulseRuntimeAutoStartV1* request, uint32_t size) noexcept { return QueueAutoStart(request, size, false); }
+    const config::PulseRuntimeAutoStartV1* request, uint32_t size) noexcept { return QueueAutoStart(request, size, false, false); }
 extern "C" __declspec(dllexport) HRESULT WINAPI PulseFileDialogRuntimeAutoAttach(void* request) noexcept {
-    return QueueAutoStart(request, sizeof(config::PulseRuntimeAutoStartV1), true);
+    return QueueAutoStart(request, sizeof(config::PulseRuntimeAutoStartV1), true, false);
+}
+extern "C" __declspec(dllexport) HRESULT WINAPI PulseFileDialogRuntimeUserAutoAttach(void* request) noexcept {
+    return QueueAutoStart(request, sizeof(config::PulseRuntimeAutoStartV1), true, true);
 }
 extern "C" __declspec(dllexport) HRESULT WINAPI PulseFileDialogRuntimeAutoQuery(
     config::PulseRuntimeAutoCoverageV1* output, uint32_t size) noexcept {
@@ -1115,6 +1618,17 @@ extern "C" __declspec(dllexport) HRESULT WINAPI PulseFileDialogRuntimeAutoQuery(
     value.protection_restored = auto_protection_restored.load();
     *output = value;
     return S_OK;
+}
+extern "C" __declspec(dllexport) DWORD WINAPI PulseFileDialogRuntimeAutoDiagnose(void* output) noexcept {
+    auto* value = static_cast<config::PulseRuntimeAutoDiagnosticV1*>(output);
+    if (!value || value->size != sizeof(*value) || value->version != 1) return ERROR_INVALID_PARAMETER;
+    value->initialization = auto_rebind_ready.load(std::memory_order_acquire) &&
+        !auto_started.load(std::memory_order_acquire) ? config::kAutoReadyForRebind :
+        initialization.load(std::memory_order_acquire);
+    value->api_mask = auto_mask.load(); value->patched_slots = auto_slots.load();
+    value->skipped_modules = auto_skipped.load(); value->foreign_slots = auto_foreign.load();
+    value->protection_restored = auto_protection_restored.load();
+    return ERROR_SUCCESS;
 }
 #endif
 extern "C" HRESULT WINAPI PulseFileDialogRuntimeQuery(PulseFileDialogRuntimeStatus* output, uint32_t size) noexcept {
@@ -1152,6 +1666,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
         if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_class), reinterpret_cast<PVOID>(HookClass));
 #if defined(PULSE_EXPERIMENTAL_WINRT_PICKER)
         if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_ro_factory), reinterpret_cast<PVOID>(HookRoFactory));
+        if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_ro_activate), reinterpret_cast<PVOID>(HookRoActivateInstance));
 #endif
         if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&config::original_create_process), reinterpret_cast<PVOID>(config::HookCreateProcessW));
         if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(&original_open_w), reinterpret_cast<PVOID>(ObserveOpenW));

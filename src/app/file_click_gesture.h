@@ -22,7 +22,7 @@ class FileClickGesture {
 public:
     void Cancel() { *this = {}; }
     // A new down cancels the old action, but not the recent completed click.
-    // Windows may send DOWN again instead of DBLCLK after a tiny pointer drift.
+    // Custom intervals recognize both DOWN and DBLCLK against the completed press.
     void InterruptForPress() {
         item_ = {};
         pressed_ = single_open_ = opened_ = rename_ = releasing_capture_ = false;
@@ -31,16 +31,16 @@ public:
     }
     void CancelRename() { rename_ = false; rename_due_ = 0; }
     void Begin(FileClickIdentity item, uint32_t message_time, bool single_open, bool rename,
-               uint32_t interval = 500) {
-        const bool rapid_repeat = recent_item_ == item && recent_item_.Valid() &&
-            static_cast<uint32_t>(message_time - recent_release_time_) <= interval;
+               uint32_t interval = 500, int x = 0, int y = 0) {
+        (void)interval;
         InterruptForPress();
         if (!item.Valid()) return;
         item_ = std::move(item);
         pressed_ = true;
         first_time_ = message_time;
         single_open_ = single_open;
-        rename_ = rename && !single_open && !rapid_repeat;
+        rename_ = rename && !single_open;
+        press_x_ = x; press_y_ = y;
     }
     FileClickAction Release(const FileClickIdentity& item, uint64_t now, uint32_t interval,
                             bool click, bool name, bool selected_only) {
@@ -52,19 +52,30 @@ public:
         if (!click || item != item_) { Cancel(); return FileClickAction::None; }
         pressed_ = false;
         recent_item_ = item_;
-        recent_release_time_ = message_time;
+        recent_press_time_ = first_time_;
+        recent_x_ = press_x_; recent_y_ = press_y_;
         if (single_open_) {
             opened_ = true;
             return FileClickAction::Open;
         }
-        if (rename_ && name && selected_only) rename_due_ = now + interval;
+        if (rename_ && name && selected_only) {
+            const auto elapsed = static_cast<uint32_t>(message_time - first_time_);
+            rename_due_ = now + (elapsed < interval ? interval - elapsed : 0);
+        }
         return FileClickAction::None;
     }
     FileClickAction DoubleClick(const FileClickIdentity& item, uint32_t message_time, uint32_t interval) {
-        const bool within = static_cast<uint32_t>(message_time - first_time_) <= interval;
-        const bool open = !opened_ && item.Valid() && item == item_ && within;
+        (void)message_time; (void)interval;
+        const bool open = !opened_ && item.Valid();
         Cancel();
         return open ? FileClickAction::Open : FileClickAction::None;
+    }
+    bool MatchesDoublePress(const FileClickIdentity& item, uint32_t time, uint32_t interval,
+                            int x, int y, int slop_x, int slop_y) const {
+        return recent_item_.Valid() && recent_item_.pane == item.pane && recent_item_.tab == item.tab &&
+            recent_item_.path == item.path && static_cast<uint32_t>(time - recent_press_time_) <= interval &&
+            x - recent_x_ >= -slop_x && x - recent_x_ <= slop_x &&
+            y - recent_y_ >= -slop_y && y - recent_y_ <= slop_y;
     }
     FileClickAction Tick(const FileClickIdentity& item, uint64_t now, bool eligible, bool quiet) {
         if (!item_.Valid()) return FileClickAction::None;
@@ -92,7 +103,8 @@ public:
 private:
     FileClickIdentity item_;
     FileClickIdentity recent_item_;
-    uint32_t recent_release_time_ = 0;
+    uint32_t recent_press_time_ = 0;
+    int press_x_ = 0, press_y_ = 0, recent_x_ = 0, recent_y_ = 0;
     uint32_t first_time_ = 0;
     uint64_t rename_due_ = 0;
     bool pressed_ = false;

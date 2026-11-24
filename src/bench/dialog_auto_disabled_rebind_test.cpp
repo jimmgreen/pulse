@@ -117,6 +117,25 @@ int main() {
             "original absence is not an expected-disabled receipt");
         Check(EnableIfUnclaimed(arch, new_path.wstring()) == ERROR_SUCCESS && Inspect(arch).enabled,
             "original absence still uses the unchanged strict unclaimed entry");
+#if !defined(PULSE_DISABLED_REBIND_BASELINE)
+        {
+            const auto deleted_dir = root / L"deleted-old-bundle";
+            const auto deleted_old = deleted_dir / DllNameFor(arch);
+            Reset();
+            HKEY cfg = nullptr;
+            fixture::Create(HKEY_CURRENT_USER, Config(arch), 0, nullptr, 0, KEY_READ | KEY_WRITE | View(arch), nullptr, &cfg, nullptr);
+            const auto deleted_str = deleted_old.wstring();
+            fixture::Set(cfg, L"DllPath", 0, REG_SZ, reinterpret_cast<const BYTE*>(deleted_str.c_str()),
+                static_cast<DWORD>((deleted_str.size() + 1) * sizeof(wchar_t)));
+            Flag(arch, L"Enabled", 0);
+            Flag(arch, L"Stage", 0);
+            const DWORD missing_rebind = EnableIfDisabledFor(arch, deleted_str, new_path.wstring());
+            Check(GetFileAttributesW(deleted_old.c_str()) == INVALID_FILE_ATTRIBUTES &&
+                GetFileAttributesW(deleted_dir.c_str()) == INVALID_FILE_ATTRIBUTES &&
+                missing_rebind == ERROR_SUCCESS && Inspect(arch).enabled && Inspect(arch).dll_path == new_path,
+                "disabled rebind succeeds even after previous DialogBridge directory was deleted from disk");
+        }
+#endif
         DeleteFileW(old_path.c_str()); DeleteFileW(new_path.c_str()); DeleteFileW(other_path.c_str()); DeleteFileW(wrong_path.c_str());
     }
     Check(fixture::mutex_name_ok && fixture::depth == 0 && fixture::max_depth >= 3,

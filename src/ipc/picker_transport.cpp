@@ -357,6 +357,195 @@ TransportResult ConnectStandby(const std::wstring& expected_executable, const st
     return {};
 }
 
+namespace {
+bool CurrentProcessHighIlOrAbove() noexcept {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+    alignas(TOKEN_MANDATORY_LABEL) BYTE buf[1024]{};
+    DWORD size = 0;
+    bool high = false;
+    if (GetTokenInformation(token, TokenIntegrityLevel, buf, sizeof(buf), &size)) {
+        PSID sid = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(buf)->Label.Sid;
+        if (sid && IsValidSid(sid)) {
+            const UCHAR count = *GetSidSubAuthorityCount(sid);
+            if (count > 0 && *GetSidSubAuthority(sid, count - 1) >= SECURITY_MANDATORY_HIGH_RID) {
+                high = true;
+            }
+        }
+    }
+    CloseHandle(token);
+    return high;
+}
+
+DWORD ProcessIntegrityRid(HANDLE process) noexcept {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(process, TOKEN_QUERY, &token)) return 0;
+    alignas(TOKEN_MANDATORY_LABEL) BYTE buf[1024]{};
+    DWORD size = 0;
+    DWORD rid = 0;
+    if (GetTokenInformation(token, TokenIntegrityLevel, buf, sizeof(buf), &size)) {
+        PSID sid = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(buf)->Label.Sid;
+        if (sid && IsValidSid(sid)) {
+            const UCHAR count = *GetSidSubAuthorityCount(sid);
+            if (count > 0) rid = *GetSidSubAuthority(sid, count - 1);
+        }
+    }
+    CloseHandle(token);
+    return rid;
+}
+} // namespace
+
+std::wstring WarmRemotePipeName(const std::wstring& caller_desktop, const std::wstring& override_name) {
+    if (!override_name.empty()) return override_name;
+    DWORD session = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &session);
+    std::wstring desktop = caller_desktop;
+    if (desktop.empty()) {
+        wchar_t name[256]{};
+        DWORD needed = 0;
+        if (GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()), UOI_NAME, name, sizeof(name), &needed)) {
+            desktop = name;
+        }
+    }
+    std::wstring sid = CurrentUserSidString();
+    if (sid.empty()) sid = L"unknown";
+    const wchar_t* il_suffix = CurrentProcessHighIlOrAbove() ? L"-hi" : L"";
+    return L"\\\\.\\pipe\\PulsePickerHost-" + sid + L"-s" + std::to_wstring(session) +
+           L"-" + Hash64(Lower(desktop)) + L"-v2" + il_suffix;
+}
+
+WarmRemoteServer::~WarmRemoteServer() { Stop(); }
+
+TransportResult WarmRemoteServer::Start(const std::wstring& override_name) {
+    Stop();
+    CurrentUserSecurityAttributes security;
+    if (!security) return {ERROR_ACCESS_DENIED};
+    const std::wstring name = WarmRemotePipeName({}, override_name);
+    PipeHandle pipe(CreateNamedPipeW(
+        name.c_str(),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        1, 4096, 4096, 0, security.get()));
+    if (!pipe) return {GetLastError()};
+    pipe_name_ = name;
+    pipe_ = std::move(pipe);
+    return {};
+}
+
+TransportResult WarmRemoteServer::AcceptNext(Channel& output, DWORD& client_pid, WaitOptions wait) {
+    client_pid = 0;
+    if (!pipe_) return {ERROR_INVALID_HANDLE};
+
+    PipeHandle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!event) return {GetLastError()};
+    OVERLAPPED overlap{};
+    overlap.hEvent = event.Get();
+    if (!ConnectNamedPipe(pipe_.Get(), &overlap)) {
+        DWORD error = GetLastError();
+        if (error == ERROR_IO_PENDING) {
+            HANDLE handles[2]{event.Get(), wait.cancel};
+            const DWORD waited = WaitForMultipleObjects(wait.cancel ? 2 : 1, handles, FALSE, wait.timeout_ms);
+            DWORD bytes = 0;
+            if (waited == WAIT_OBJECT_0) {
+                error = GetOverlappedResult(pipe_.Get(), &overlap, &bytes, FALSE) ? ERROR_SUCCESS : GetLastError();
+            } else {
+                error = waited == WAIT_OBJECT_0 + 1 ? ERROR_CANCELLED
+                      : waited == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+                CancelIoEx(pipe_.Get(), &overlap);
+                GetOverlappedResult(pipe_.Get(), &overlap, &bytes, TRUE);
+            }
+        }
+        if (error != ERROR_SUCCESS && error != ERROR_PIPE_CONNECTED) return {error};
+    }
+
+    struct DisconnectGuard {
+        HANDLE h;
+        ~DisconnectGuard() { if (h) DisconnectNamedPipe(h); }
+    } disconnect{pipe_.Get()};
+
+    ULONG pid = 0;
+    if (!GetNamedPipeClientProcessId(pipe_.Get(), &pid) || !pid) return {ERROR_ACCESS_DENIED};
+    PipeHandle client(OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+    if (!client || !SameUserSession(pid, client.Get())) return {ERROR_ACCESS_DENIED};
+
+    // Enforce same integrity level to keep Medium-IL and High-IL channels isolated.
+    const DWORD own_rid = ProcessIntegrityRid(GetCurrentProcess());
+    const DWORD peer_rid = ProcessIntegrityRid(client.Get());
+    if (own_rid && peer_rid && own_rid != peer_rid) return {ERROR_ACCESS_DENIED};
+
+    Server private_server;
+    if (const auto created = Server::Create(private_server); !created) return created;
+    const auto& priv_name = private_server.Name();
+    uint32_t units = static_cast<uint32_t>(priv_name.size());
+    if (const DWORD sent = RawTransfer(pipe_.Get(), &units, sizeof(units), true, 2000)) return {sent};
+    if (const DWORD sent = RawTransfer(pipe_.Get(), const_cast<wchar_t*>(priv_name.data()),
+                                       units * sizeof(wchar_t), true, 2000)) return {sent};
+    FlushFileBuffers(pipe_.Get());
+
+    // Immediately disconnect rendezvous pipe so it stays armed for the next dialog while
+    // completing the private channel handshake.
+    DisconnectNamedPipe(pipe_.Get());
+    disconnect.h = nullptr;
+
+    if (const auto accepted = private_server.Accept(client.Get(), output, {wait.cancel, 5000}); !accepted) {
+        return accepted;
+    }
+    client_pid = pid;
+    return {};
+}
+
+void WarmRemoteServer::Stop() {
+    pipe_.Reset();
+    pipe_name_.clear();
+}
+
+TransportResult ConnectWarmRemote(const std::wstring& expected_executable, const std::wstring& desktop,
+                                  Channel& output, DWORD& server_pid, WaitOptions wait,
+                                  const std::wstring& override_name) {
+    server_pid = 0;
+    if (expected_executable.empty()) return {ERROR_INVALID_NAME};
+    const auto rendezvous_name = WarmRemotePipeName(desktop, override_name);
+    const Deadline deadline{wait};
+    PipeHandle rendezvous;
+    for (;;) {
+        if (const auto stopped = deadline.Check(nullptr)) return {stopped};
+        rendezvous.Reset(CreateFileW(
+            rendezvous_name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
+        if (rendezvous) break;
+        const DWORD error = GetLastError();
+        if (error != ERROR_PIPE_BUSY) return {error};
+        if (!WaitNamedPipeW(rendezvous_name.c_str(),
+                            (std::max)(DWORD{1}, (std::min)(deadline.Remaining(), DWORD{40}))) &&
+            GetLastError() != ERROR_SEM_TIMEOUT) {
+            return {GetLastError()};
+        }
+    }
+
+    uint32_t units = 0;
+    if (const DWORD read = RawTransfer(rendezvous.Get(), &units, sizeof(units), false, 2000)) return {read};
+    if (!units || units > 256) return {ERROR_INVALID_DATA};
+    std::wstring name(units, L'\0');
+    if (const DWORD read = RawTransfer(rendezvous.Get(), name.data(), units * sizeof(wchar_t), false, 2000)) return {read};
+    rendezvous.Reset();
+
+    const DWORD pid = PidFromPrivateName(name);
+    if (!pid) return {ERROR_INVALID_DATA};
+    PipeHandle server(OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+    if (!server || !SameUserSession(pid, server.Get()) || !ImageIs(server.Get(), expected_executable)) {
+        return {ERROR_ACCESS_DENIED};
+    }
+    const DWORD own_rid = ProcessIntegrityRid(GetCurrentProcess());
+    const DWORD peer_rid = ProcessIntegrityRid(server.Get());
+    if (own_rid && peer_rid && own_rid != peer_rid) return {ERROR_ACCESS_DENIED};
+
+    if (const auto connected = Connect(name, server.Get(), output, {wait.cancel, 5000}); !connected) {
+        return connected;
+    }
+    server_pid = pid;
+    return {};
+}
+
 
 TransportResult Channel::Send(const Message& message, WaitOptions wait) {
     std::vector<uint8_t> wire;

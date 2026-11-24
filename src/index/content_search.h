@@ -30,6 +30,7 @@ struct ContentSearchRequest {
     std::vector<std::wstring> roots;
     std::vector<std::wstring> candidate_paths;
     bool indexed = true;
+    bool allow_uncovered_root = false;
     bool task_scan = false; // Interactive query also examines uncached files.
     ContentResultSort sort = ContentResultSort::Index;
     bool sort_desc = false;

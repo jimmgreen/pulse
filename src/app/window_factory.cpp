@@ -32,6 +32,7 @@ void InheritWindowLayout(const AppState& from, AppState& to) {
     to.detailsPreviewOnly = from.detailsPreviewOnly;
     to.detailsPreviewEnabled = from.detailsPreviewEnabled;
     to.detailsPreviewExpansion = from.detailsPreviewExpansion;
+    to.detailsCollapsedMask = from.detailsCollapsedMask;
     to.showFps = from.showFps;
     to.forceStatusPerformance = from.forceStatusPerformance;
 }
@@ -140,6 +141,7 @@ app::WindowLayoutSnapshot CaptureWindowLayout(const AppState& s) {
     layout.details_panel_width = static_cast<int>(std::lround(s.detailsPanelWidth));
     layout.details_preview_only = s.detailsPreviewOnly;
     layout.details_preview = s.detailsPreviewEnabled;
+    layout.details_collapsed = s.detailsCollapsedMask;
     return layout;
 }
 
@@ -154,6 +156,7 @@ void ApplyWindowLayout(AppState& s, const app::WindowLayoutSnapshot& layout) {
     s.detailsPreviewOnly = layout.details_preview_only;
     s.detailsPreviewEnabled = layout.details_preview;
     s.detailsPreviewExpansion = layout.details_preview_only ? 1.0f : 0.0f;
+    s.detailsCollapsedMask = layout.details_collapsed;
     s.detailsPanelWidth = static_cast<float>(layout.details_panel_width);
     s.renderer.SetDetailsPanelWidth(s.detailsPanelWidth);
 }

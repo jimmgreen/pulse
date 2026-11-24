@@ -33,8 +33,8 @@ int main() {
     hit.index = ui::kAsstThinkBase;
     check(!app::IsReleaseButton(hit), "assistant thinking slider stays continuous");
     hit.region = H::SettingsPackAction;
-    hit.index = static_cast<int>(ui::PackAction::SzLevelBase);
-    check(!app::IsReleaseButton(hit), "archive level slider stays continuous");
+    hit.index = static_cast<int>(ui::PackAction::StoreBrowse);
+    check(app::IsReleaseButton(hit), "store actions activate on release (no host slider remains)");
 
     hit.region = H::TabClose;
     hit.index = 2;

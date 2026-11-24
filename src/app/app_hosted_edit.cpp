@@ -3,6 +3,7 @@
 #include "../ui/ui_renderer.h"
 // app_hosted_edit.cpp — extracted from app_main.cpp.
 #include "app_internal.h"
+#include "app_vfs_ops.h"
 #include "address_completion.h"
 #include <unordered_map>
 #include "app_network_page.h"
@@ -17,6 +18,7 @@
 #include <imm.h>
 #include <chrono>
 #include "../ui/address_search_layout.h"
+#include "../ui/command_icons.h"
 #include "../ui/lumatext_renderer.h"
 #include "../ui/fluent_menu.h"
 #include "../ui/drag_drop.h"
@@ -213,31 +215,38 @@ static std::wstring TrimNameEnd(std::wstring name) {
     return name;
 }
 
-// Another item in the renamed item's folder already has `name` (on disk,
-// not the possibly stale listing). The item itself never counts: changing
-// only the case of its name is a rename too.
-static bool NameTakenBesides(const app::Tab& tab, int index, const std::wstring& name) {
-    if (_wcsicmp(name.c_str(), tab.EntryAt(static_cast<size_t>(index)).name.c_str()) == 0) return false;
-    const std::wstring full = EntryFullPath(tab, index);
-    const size_t slash = full.find_last_of(L"\\/");
-    if (slash == std::wstring::npos) return false;
-    return GetFileAttributesW((full.substr(0, slash + 1) + name).c_str()) != INVALID_FILE_ATTRIBUTES;
-}
-
-// The name a rename to `typed` takes: trimmed like Windows trims it, and
-// numbered "name (2).ext" when another item has it - the rename itself
-// never replaces anything (MoveFileEx without REPLACE_EXISTING).
+// The shell device route needs a concrete unused name. For local files the
+// bounded edit hint uses the same numbering, but the worker decides on commit.
 static std::wstring RenameTarget(const app::Tab& tab, int index, const std::wstring& typed) {
     std::wstring name = TrimNameEnd(typed);
-    if (name.empty() || !NameTakenBesides(tab, index, name)) return name;
-    const bool dir = tab.EntryAt(static_cast<size_t>(index)).is_dir;
-    const size_t dot = dir ? std::wstring::npos : name.find_last_of(L'.');
-    const bool has_ext = dot != std::wstring::npos && dot > 0;
-    const std::wstring stem = has_ext ? name.substr(0, dot) : name;
-    const std::wstring ext = has_ext ? name.substr(dot) : std::wstring();
+    if (name.empty() || index < 0 || static_cast<size_t>(index) >= tab.EntryCount() ||
+        _wcsicmp(name.c_str(), tab.EntryAt(index).name.c_str()) == 0) return name;
+    const auto* tree = tab.TreeEntries();
+    const size_t count = tree ? tree->size() : (tab.snapshot ? tab.snapshot->size() : 0);
+    const bool flat = !tree && tab.snapshot_path == tab.current_path && !fs::IsVirtualPath(tab.current_path);
+    const auto parent = [](std::wstring path) {
+        const auto slash = path.find_last_of(L"\\/");
+        path.resize(slash == std::wstring::npos ? 0 : slash + 1);
+        return path;
+    };
+    const auto dir = flat ? std::wstring{} : parent(EntryFullPath(tab, index));
+    const bool folder = tab.EntryAt(index).is_dir;
+    const size_t dot = folder ? std::wstring::npos : name.find_last_of(L'.');
+    const bool ext = dot != std::wstring::npos && dot != 0;
+    const auto stem = ext ? name.substr(0, dot) : name;
+    const auto suffix = ext ? name.substr(dot) : std::wstring{};
+    std::unordered_set<std::wstring> occupied;
+    for (size_t i = 0; i < count; ++i) {
+        if (i == static_cast<size_t>(index)) continue;
+        const auto& other = tree ? (*tree)[i].name : (*tab.snapshot)[i].name;
+        if (other.size() < stem.size() || _wcsnicmp(stem.c_str(), other.c_str(), stem.size()) != 0) continue;
+        if (!flat && _wcsicmp(dir.c_str(), parent(EntryFullPath(tab, static_cast<int>(i))).c_str()) != 0) continue;
+        occupied.insert(path::FoldedKey(other));
+    }
+    if (!occupied.contains(path::FoldedKey(name))) return name;
     for (int n = 2; n < 1000; ++n) {
-        std::wstring candidate = stem + L" (" + std::to_wstring(n) + L")" + ext;
-        if (!NameTakenBesides(tab, index, candidate)) return candidate;
+        auto candidate = stem + L" (" + std::to_wstring(n) + L")" + suffix;
+        if (!occupied.contains(path::FoldedKey(candidate))) return candidate;
     }
     return name;
 }
@@ -513,21 +522,9 @@ void ShowFilterEditor(AppState& s, bool select_mode) {
     if (!s.tagRenameId.empty()) HideTagRenameOverlay(s, true);
     if (s.addressEditing) HideAddressEditor(s, false);
     s.filterEditing = true;
-    if (s.hwndFilterEdit && ui::PulsePaintedChildEditError(s.hwndFilterEdit)) {
-        DestroyWindow(s.hwndFilterEdit);
-        s.hwndFilterEdit = nullptr;
-    }
     if (!s.hwndFilterEdit) {
-        EnsureEditVisuals(s);
-        s.hwndFilterEdit = ui::CreatePulsePaintedChildEdit(s.hwnd, L"", 0, true);
-        if (s.hwndFilterEdit) {
-            SetWindowTheme(s.hwndFilterEdit, L"", L"");
-            SendMessageW(s.hwndFilterEdit, WM_SETFONT, reinterpret_cast<WPARAM>(s.editFont), FALSE);
-            if (!SetWindowSubclass(s.hwndFilterEdit, FilterEditProc, 1, reinterpret_cast<DWORD_PTR>(&s))) {
-                DestroyWindow(s.hwndFilterEdit);
-                s.hwndFilterEdit = nullptr;
-            }
-        }
+        s.hwndFilterEdit = CreateHostedEdit(s, FilterEditProc);
+        if (s.hwndFilterEdit) ui::GuardRedirectedChildEditFrames(s.hwndFilterEdit);
         if (!s.hwndFilterEdit) {
             s.filterEditing = false;
             s.filterSelectMode = false;
@@ -785,6 +782,7 @@ void ShowRenameOverlay(AppState& s) {
     }
 
     const std::wstring& name = tab->EntryAt(s.renameIndex).name;
+    s.renameEntryPath = EntryFullPath(*tab, s.renameIndex);
     std::wstring initial = name;
     if (s.renameAlias) {
         const std::wstring alias = app::AliasStore::Instance().Find(EntryFullPath(*tab, s.renameIndex));
@@ -820,6 +818,25 @@ void ShowAliasOverlay(AppState& s) {
     if (s.renameIndex < 0) s.renameAlias = false;
 }
 
+bool SyncRenameIndex(AppState& s, bool relayout) {
+    if (s.renameIndex < 0 || s.renameEntryPath.empty()) return true;
+    app::Tab* tab = ActiveTab(s);
+    if (!tab || !tab->snapshot) return true;
+    const int count = static_cast<int>(tab->EntryCount());
+    if (s.renameIndex < count && EntryFullPath(*tab, s.renameIndex) == s.renameEntryPath) return true;
+    int found = -1;
+    for (int i = 0; i < count && found < 0; ++i)
+        if (EntryFullPath(*tab, i) == s.renameEntryPath) found = i;
+    for (int i = 0; i < count && found < 0; ++i)
+        if (_wcsicmp(EntryFullPath(*tab, i).c_str(), s.renameEntryPath.c_str()) == 0) found = i;
+    if (found < 0) return false;
+    const bool selected = tab->SelectedCount() == 1 && tab->selected_index == s.renameIndex;
+    s.renameIndex = found;
+    if (selected) tab->SelectOnly(found);
+    if (relayout) LayoutRenameOverlay(s);
+    return true;
+}
+
 void HideRenameOverlay(AppState& s, bool commit) {
     if (!s.hwndRenameEdit) return;
     if (s.renameIndex < 0) {
@@ -827,8 +844,11 @@ void HideRenameOverlay(AppState& s, bool commit) {
             ShowWindow(s.hwndRenameEdit, SW_HIDE);
         return;
     }
+    // Never commit the typed name onto whatever row now sits at the old index.
+    if (!SyncRenameIndex(s)) commit = false;
     const int index = s.renameIndex;
     s.renameIndex = -1;
+    s.renameEntryPath.clear();
     const bool alias_edit = s.renameAlias;
     s.renameAlias = false;
     if (s.renameConfirmExt) commit = false;  // an unanswered extension question never commits
@@ -858,9 +878,16 @@ void HideRenameOverlay(AppState& s, bool commit) {
         if (tab && buf[0] && index < (int)(tab->snapshot ? tab->EntryCount() : 0)) {
             std::wstring full = EntryFullPath(*tab, index);
             // As the note under the field said: trimmed, numbered if taken.
-            const std::wstring target = RenameTarget(*tab, index, buf);
+            const std::wstring target = fs::IsDevicePath(full) ? RenameTarget(*tab, index, buf) : TrimNameEnd(buf);
             const std::wstring shell_id = tab->EntryAt(index).shell_id;
-            if (fs::IsDevicePath(full) && !target.empty() && target != tab->EntryAt(index).name) {
+            if (IsVfsFolder(full) && !target.empty() && target != tab->EntryAt(index).name) {
+                // An archive item: the archive is rewritten (a Pulse task, one undo).
+                tab->pending_selected_name = target;
+                tab->pending_selected_names = { target };
+                tab->pending_ensure_selection_visible = true;
+                tab->pending_selection_revision = tab->selection_revision;
+                VfsRenameItem(s, full, target);
+            } else if (fs::IsDevicePath(full) && !target.empty() && target != tab->EntryAt(index).name) {
                 // A phone file: the shell host renames it (no undo, as in Explorer).
                 if (s.ops.RenameShellItem(shell_id, target)) {
                     tab->pending_selected_name = target;
@@ -872,6 +899,7 @@ void HideRenameOverlay(AppState& s, bool commit) {
             } else if (!full.empty() && !target.empty() && target != tab->EntryAt(index).name) {
                 ops::OpRequest req;
                 req.type = ops::OpType::Rename;
+                req.collision_policy = ops::CollisionPolicy::KeepBoth;
                 req.sources.push_back(full);
                 req.new_name = target;
                 // Naming the folder 合并到文件夹 just made is part of that
@@ -880,14 +908,8 @@ void HideRenameOverlay(AppState& s, bool commit) {
                     req.undo_group = s.groupRenameUndo;
                     req.undo_label = l10n::Get(l10n::StringId::NewFolderWithSelection).c_str();
                 }
-                tab->pending_selected_name = target;
-                tab->pending_selected_names = { target };
-                tab->pending_ensure_selection_visible = true;
-                tab->pending_selection_revision = tab->selection_revision;
-                // Selection and thumbnail follow the renamed row (now at its
-                // sort position) even if the refresh beats the watcher event.
-                tab->held_renames.push_back({tab->EntryAt(index).name, target});
-                s.ops.Submit(std::move(req));  // its 别名 follows on completion (app_main)
+                const auto task = s.ops.Submit(std::move(req));
+                tab->inline_rename_selection = {task, tab->view_generation, tab->selection_revision, {}};
             }
         }
     }
@@ -1097,7 +1119,9 @@ bool HandleHostedEditMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam,
         // that follow (Esc, arrows), so the focus moves there first.
         WPARAM vk = wParam;
         if (vk == VK_PROCESSKEY) vk = ImmGetVirtualKey(hwnd);
-        if (IsWindowOverviewKey(vk) || app::IsWindowSwitcherScanCode(lParam)) {
+        // Ctrl+, (打开设置) too: no edit box uses it.
+        const bool settings_key = vk == VK_OEM_COMMA && !(GetKeyState(VK_SHIFT) & 0x8000);
+        if (IsWindowOverviewKey(vk) || app::IsWindowSwitcherScanCode(lParam) || settings_key) {
             SetFocus(s.hwnd);
             result = SendMessageW(s.hwnd, WM_KEYDOWN, vk, lParam);
             return true;
@@ -1114,6 +1138,176 @@ static LRESULT DefPresentedHostedEditProc(AppState* s, HWND hwnd, UINT msg, WPAR
     return ui::DefPresentedChildEditProc(s->compositor, HostedEditFormat(*s, hwnd),
         HostedEditForeground(*s), HostedEditBackground(*s), hwnd, msg, wParam, lParam);
 }
+
+namespace {
+constexpr int kCmdEditAddress = 1;
+
+void PrepareAddressPopupMenu(AppState& s) {
+    s.context_menu.Close();
+    s.tooltipText.clear();
+    s.hoverSince = 0;
+    s.hoverRegion = 0;
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+    UpdateWindow(s.hwnd);
+}
+
+std::wstring ActiveAddressCopyText(const AppState& s) {
+    const app::Tab* tab = ActiveTab(const_cast<AppState&>(s));
+    if (!tab || tab->current_path.empty()) return {};
+    return fs::IsDevicePath(tab->current_path)
+        ? DeviceFriendlyPath(tab->current_path)
+        : ClipboardPath(tab->current_path);
+}
+} // namespace
+
+std::vector<ui::FluentMenuItem> BuildAddressEditContextMenu(HWND hwnd) {
+    DWORD sel_start = 0, sel_end = 0;
+    if (hwnd) {
+        SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&sel_start), reinterpret_cast<LPARAM>(&sel_end));
+    }
+    if (sel_start > sel_end) std::swap(sel_start, sel_end);
+    const int text_len = hwnd ? GetWindowTextLengthW(hwnd) : 0;
+    const bool has_selection = sel_start != sel_end;
+    const bool can_undo = hwnd && SendMessageW(hwnd, EM_CANUNDO, 0, 0) != 0;
+    const bool can_paste = IsClipboardFormatAvailable(CF_UNICODETEXT) != 0;
+    const bool can_select_all = text_len > 0 && !(sel_start == 0 && sel_end == static_cast<DWORD>(text_len));
+
+    const auto make_item = [](int cmd, l10n::StringId label, const wchar_t* glyph,
+                              const wchar_t* shortcut, bool enabled, wchar_t mnemonic) {
+        ui::FluentMenuItem it;
+        it.command = cmd;
+        it.text = l10n::Get(label);
+        it.glyph = glyph;
+        if (shortcut) it.shortcut = shortcut;
+        it.enabled = enabled;
+        it.mnemonic = mnemonic;
+        return it;
+    };
+
+    std::vector<ui::FluentMenuItem> items;
+    items.reserve(6);
+    items.push_back(make_item(app::CmdUndo, l10n::StringId::Undo, L"\xE7A7", L"Ctrl+Z",
+                              can_undo, app::BuiltinMenuMnemonic(app::CmdUndo)));
+    items.back().separator_after = true;
+    items.push_back(make_item(app::CmdCut, l10n::StringId::Cut, L"\xE8C6", L"Ctrl+X",
+                              has_selection, app::BuiltinMenuMnemonic(app::CmdCut)));
+    items.push_back(make_item(app::CmdCopy, l10n::StringId::Copy, L"\xE8C8", L"Ctrl+C",
+                              has_selection, app::BuiltinMenuMnemonic(app::CmdCopy)));
+    items.push_back(make_item(app::CmdPaste, l10n::StringId::Paste, L"\xE77F", L"Ctrl+V",
+                              can_paste, app::BuiltinMenuMnemonic(app::CmdPaste)));
+    items.push_back(make_item(app::CmdDelete, l10n::StringId::Delete, L"\xE74D", L"Del",
+                              has_selection, app::BuiltinMenuMnemonic(app::CmdDelete)));
+    items.back().separator_after = true;
+    items.push_back(make_item(app::CmdSelectAll, l10n::StringId::SelectAll, L"\xE8B3", L"Ctrl+A",
+                              can_select_all, L'A'));
+    return items;
+}
+
+void ShowAddressEditContextMenu(AppState& s, HWND hwnd, POINT screen_pt) {
+    if (!hwnd || s.hwndAddressEdit != hwnd || (!s.addressEditing && !s.addressSearching) ||
+        !IsWindowVisible(hwnd)) return;
+    if (s.menu && s.menu->IsOpen()) {
+        // History shares this menu. Stop its modal loop before reopening it;
+        // reposting during the dismissal animation restarts the animation on every delivery.
+        s.menu->DismissImmediately();
+        PostMessageW(hwnd, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(hwnd),
+                     MAKELPARAM(screen_pt.x, screen_pt.y));
+        return;
+    }
+    if (!EnsureMenu(s)) return;
+    DWORD sel_start = 0, sel_end = 0;
+    SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&sel_start), reinterpret_cast<LPARAM>(&sel_end));
+    auto items = BuildAddressEditContextMenu(hwnd);
+    PrepareAddressPopupMenu(s);
+    const bool prev_ignore = s.addressIgnoreKillFocus;
+    s.addressIgnoreKillFocus = true;
+    const int command = s.menu->TrackPopup(screen_pt, std::move(items));
+    s.addressIgnoreKillFocus = prev_ignore;
+
+    const bool still_open = (s.addressEditing || s.addressSearching) &&
+                            s.hwndAddressEdit == hwnd && IsWindow(hwnd) && IsWindowVisible(hwnd);
+    if (!still_open) return;
+    const HWND root = GetAncestor(hwnd, GA_ROOT);
+    if (command == 0 && GetForegroundWindow() != root) {
+        if (!s.addressSearching) HideAddressEditor(s, false);
+        return;
+    }
+    if (GetFocus() != hwnd) {
+        SetForegroundWindow(root);
+        SetFocus(hwnd);
+        SendMessageW(hwnd, EM_SETSEL, sel_start, sel_end);
+    }
+    switch (command) {
+    case app::CmdUndo: SendMessageW(hwnd, WM_UNDO, 0, 0); break;
+    case app::CmdCut: SendMessageW(hwnd, WM_CUT, 0, 0); break;
+    case app::CmdCopy: SendMessageW(hwnd, WM_COPY, 0, 0); break;
+    case app::CmdPaste: SendMessageW(hwnd, WM_PASTE, 0, 0); break;
+    case app::CmdDelete: SendMessageW(hwnd, WM_CLEAR, 0, 0); break;
+    case app::CmdSelectAll: SendMessageW(hwnd, EM_SETSEL, 0, -1); break;
+    default: break;
+    }
+}
+
+std::vector<ui::FluentMenuItem> BuildAddressBarContextMenu(const AppState& s) {
+    const std::wstring copy_text = ActiveAddressCopyText(s);
+    const bool can_paste = IsClipboardFormatAvailable(CF_UNICODETEXT) != 0;
+
+    std::vector<ui::FluentMenuItem> items;
+    items.reserve(3);
+
+    ui::FluentMenuItem edit;
+    edit.command = kCmdEditAddress;
+    edit.text = l10n::Get(l10n::StringId::EditAddress);
+    edit.glyph = L"\xE8AC";
+    edit.shortcut = app::ShownShortcut(L"Ctrl+L");
+    edit.separator_after = true;
+    items.push_back(std::move(edit));
+
+    ui::FluentMenuItem copy_path;
+    copy_path.command = app::CmdCopyPath;
+    copy_path.text = l10n::Get(l10n::StringId::CopyPath);
+    copy_path.glyph = ui::command_icons::kGlyphCopyPath;
+    copy_path.shortcut = app::ShownShortcut(L"Ctrl+Shift+C");
+    copy_path.enabled = !copy_text.empty();
+    copy_path.mnemonic = app::BuiltinMenuMnemonic(app::CmdCopyPath);
+    items.push_back(std::move(copy_path));
+
+    ui::FluentMenuItem paste;
+    paste.command = app::CmdPaste;
+    paste.text = l10n::Get(l10n::StringId::Paste);
+    paste.glyph = L"\xE77F";
+    paste.shortcut = app::ShownShortcut(L"Ctrl+V");
+    paste.enabled = can_paste;
+    paste.mnemonic = app::BuiltinMenuMnemonic(app::CmdPaste);
+    items.push_back(std::move(paste));
+
+    return items;
+}
+
+void ShowAddressBarContextMenu(AppState& s, POINT screen_pt) {
+    if (!EnsureMenu(s)) return;
+    const std::wstring copy_text = ActiveAddressCopyText(s);
+    auto items = BuildAddressBarContextMenu(s);
+    PrepareAddressPopupMenu(s);
+    const int command = s.menu->TrackPopup(screen_pt, std::move(items));
+    switch (command) {
+    case kCmdEditAddress:
+        ShowAddressEditor(s);
+        break;
+    case app::CmdCopyPath:
+        if (!copy_text.empty()) ops::WriteClipboardText(copy_text);
+        break;
+    case app::CmdPaste:
+        ShowAddressEditor(s);
+        if (s.hwndAddressEdit && IsWindowVisible(s.hwndAddressEdit))
+            SendMessageW(s.hwndAddressEdit, WM_PASTE, 0, 0);
+        break;
+    default:
+        break;
+    }
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
 LRESULT CALLBACK AddressEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                         UINT_PTR /*uIdSubclass*/, DWORD_PTR dwRefData) {
     AppState* s = reinterpret_cast<AppState*>(dwRefData);
@@ -1223,6 +1417,18 @@ LRESULT CALLBACK AddressEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         if (s->addressSearching && reinterpret_cast<HWND>(wParam) == s->hwnd) break;
         if (!s->addressIgnoreKillFocus) HideAddressEditor(*s, false);
         break;
+    case WM_CONTEXTMENU: {
+        if (!s) return 0;
+        POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (pt.x == -1 && pt.y == -1) {
+            RECT rc{};
+            GetWindowRect(hwnd, &rc);
+            pt.x = rc.left + static_cast<LONG>(std::lround(8.0f * s->scale));
+            pt.y = rc.bottom + static_cast<LONG>(std::lround(4.0f * s->scale));
+        }
+        ShowAddressEditContextMenu(*s, hwnd, pt);
+        return 0;
+    }
     case WM_ERASEBKGND: {
         return EraseHostedEditBackground(hwnd, wParam, s) ? 1 : 0;
     }
@@ -1297,7 +1503,9 @@ static void UpdateRenameStatus(AppState& s) {
     if (!tab || !tab->snapshot || s.renameIndex >= static_cast<int>(tab->EntryCount())) return;
     std::wstring note;
     const std::wstring trimmed = TrimNameEnd(typed);
-    const std::wstring target = RenameTarget(*tab, s.renameIndex, typed);
+    const auto hint_rows = (std::max)(tab->EntryCount(), tab->snapshot->size());
+    const auto target = app::InlineRenameHint(hint_rows, trimmed,
+        [&] { return RenameTarget(*tab, s.renameIndex, typed); });
     if (!target.empty() && target != trimmed) {
         wchar_t line[700]{};
         swprintf_s(line, l10n::Get(l10n::StringId::RenameWillBecomeNumbered).c_str(), target.c_str());

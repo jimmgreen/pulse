@@ -9,6 +9,7 @@
 namespace pulse::ui {
 inline constexpr int kPickerFavoritesSection = 7;
 inline constexpr int kPickerWorkspacesSection = 8;
+inline constexpr int kPickerNetworksSection = 9;
 inline constexpr wchar_t kPickerGroupPrefix[] = L"pulse:star-group:";
 
 inline void FilterPickerHiddenPlaces(WindowViewModel& vm, const std::vector<std::wstring>& hidden) {
@@ -78,6 +79,27 @@ inline void AppendPickerSharedPlaces(WindowViewModel& vm, const picker_places::S
         workspaces.items.push_back(std::move(item));
     }
     vm.sidebar.push_back(std::move(workspaces));
+}
+
+template<class LeafName>
+inline void AppendPickerNetworkPlaces(WindowViewModel& vm, const picker_places::Snapshot& data,
+    bool collapsed, LeafName leaf_name) {
+    SidebarGroup network;
+    network.id = kPickerNetworksSection;
+    network.header = l10n::Get(l10n::StringId::SidebarNetworkLocations);
+    network.collapsed = collapsed;
+    for (const auto& entry : data.networks) {
+        if (!picker_places::detail::DiskPath(entry.path) ||
+            std::any_of(network.items.begin(), network.items.end(), [&](const auto& item) {
+                return SamePickerPath(item.path, entry.path);
+            })) continue;
+        SidebarItem item;
+        item.path = entry.path;
+        item.label = entry.label.empty() ? leaf_name(entry.path) : entry.label;
+        item.icon_glyph = L"\xE968";
+        network.items.push_back(std::move(item));
+    }
+    vm.sidebar.push_back(std::move(network));
 }
 
 struct PickerPlacesDrop {

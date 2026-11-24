@@ -1,7 +1,9 @@
 #include "edit_host.h"
 #include "typography.h"
 #include <commctrl.h>
+#include <dwmapi.h>
 #include <algorithm>
+#pragma comment(lib, "dwmapi.lib")
 #include <memory>
 #include <new>
 namespace pulse::ui {
@@ -48,6 +50,8 @@ void RecordPaintFailure(HWND hwnd) {
             reinterpret_cast<WPARAM>(hwnd), state->error);
     }
 }
+constexpr wchar_t kGuardFrames[] = L"Pulse.EditGuardFrames";
+constexpr wchar_t kFramePending[] = L"Pulse.EditFramePending";
 constexpr wchar_t kNativeEdit[] = L"Pulse.NativeEditFallback";
 constexpr wchar_t kPolicyNative[] = L"Pulse.NativeEditPolicy";
 constexpr wchar_t kRestoreUploaded[] = L"Pulse.EditRestoreUploaded";
@@ -85,7 +89,15 @@ EditCaretState ReadCaretState(HWND hwnd) {
 void ReportNativeCaret(HWND hwnd, const EditCaretState& state) {
     if (GetFocus() != hwnd) return;
     const LRESULT pos = SendMessageW(hwnd, EM_POSFROMCHAR, state.to, 0);
-    if (pos != -1) SetCaretPos(static_cast<short>(LOWORD(pos)), static_cast<short>(HIWORD(pos)));
+    if (pos != -1) {
+        SetCaretPos(static_cast<short>(LOWORD(pos)), static_cast<short>(HIWORD(pos)));
+    } else if (state.length > 0) {
+        const LRESULT prev = SendMessageW(hwnd, EM_POSFROMCHAR, static_cast<WPARAM>(state.length - 1), 0);
+        if (prev != -1) SetCaretPos(static_cast<short>(LOWORD(prev)) + 1, static_cast<short>(HIWORD(prev)));
+    } else {
+        const DWORD margins = static_cast<DWORD>(SendMessageW(hwnd, EM_GETMARGINS, 0, 0));
+        SetCaretPos(static_cast<short>(LOWORD(margins)), 0);
+    }
     NotifyWinEvent(EVENT_OBJECT_LOCATIONCHANGE, hwnd, OBJID_CARET, CHILDID_SELF);
     NotifyWinEvent(EVENT_OBJECT_SHOW, hwnd, OBJID_CARET, CHILDID_SELF);
 }
@@ -237,6 +249,19 @@ bool DrawPulsePaintedChildEdit(Compositor& compositor, IDWriteTextFormat* format
     if (FAILED(hr)) RecordPaintFailure(hwnd);
     return SUCCEEDED(hr);
 }
+// The guarded EDIT has just painted its new frame at alpha 0. DWM picks up a
+// redirected child's GDI content on its own schedule, so raising the alpha at
+// once could compose the new size/visibility over the not-yet-copied surface:
+// a black block for a frame where the placeholder belongs. Wait for one
+// composition (DwmFlush) so the painted content is on screen, then reveal it.
+static void RevealRedirectedFrame(HWND hwnd) {
+    GdiFlush();
+    DwmFlush();
+    SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+}
+void GuardRedirectedChildEditFrames(HWND hwnd) {
+    SetPropW(hwnd, kGuardFrames, reinterpret_cast<HANDLE>(1));
+}
 bool SynchronizeChildEditBackend(Compositor& compositor, HWND hwnd) {
     return hwnd && CustomEdit(compositor, hwnd);
 }
@@ -255,7 +280,26 @@ bool HandleChildEditMessage(Compositor& compositor, IDWriteTextFormat* format,
         result = DefSubclassProc(hwnd, msg, wParam, lParam);
         return true;
     }
+    if (GetPropW(hwnd, kGuardFrames) && msg == WM_WINDOWPOSCHANGING) {
+        const auto* position = reinterpret_cast<const WINDOWPOS*>(lParam);
+        if ((position->flags & SWP_SHOWWINDOW) || !(position->flags & SWP_NOSIZE)) {
+            // Suppress publication before USER resizes/allocates its redirected bitmap.
+            SetPropW(hwnd, kFramePending, reinterpret_cast<HANDLE>(1));
+            SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
+        }
+    }
+    if (GetPropW(hwnd, kFramePending) && msg == WM_WINDOWPOSCHANGED) {
+        result = DefSubclassProc(hwnd, msg, wParam, lParam);
+        if (IsWindowVisible(hwnd)) {
+            RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+            RemovePropW(hwnd, kFramePending);
+            RevealRedirectedFrame(hwnd);
+        }
+        return true;
+    }
     if (msg == WM_NCDESTROY) {
+        RemovePropW(hwnd, kGuardFrames);
+        RemovePropW(hwnd, kFramePending);
         compositor.SynchronizeEditSelection(hwnd, msg, wParam, lParam);
         RemovePropW(hwnd, kNativeEdit);
         RemovePropW(hwnd, kPolicyNative);
@@ -357,6 +401,7 @@ LRESULT DefPresentedChildEditProc(Compositor& compositor, IDWriteTextFormat* for
         msg == EM_SETCUEBANNER;
     const bool custom_paint = changes_visual && CustomEdit(compositor, hwnd) && IsWindowVisible(hwnd);
     const EditCaretState before = custom_paint ? ReadCaretState(hwnd) : EditCaretState{};
+    const bool frame_pending_before = GetPropW(hwnd, kFramePending) != nullptr;
     if (custom_paint) SendMessageW(hwnd, WM_SETREDRAW, FALSE, 0);
     const LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
     if (changes_visual) compositor.SynchronizeEditSelection(hwnd, msg, wParam, lParam);
@@ -368,6 +413,13 @@ LRESULT DefPresentedChildEditProc(Compositor& compositor, IDWriteTextFormat* for
         RestartCaretBlink(hwnd);
         PresentEdit(compositor, hwnd, format,
             foreground, background);
+        // EN_CHANGE may resize the filter while WM_SETREDRAW has temporarily
+        // removed WS_VISIBLE. Its guarded WM_WINDOWPOSCHANGED cannot publish
+        // then; finish only after redraw and the current text frame are ready.
+        if (!frame_pending_before && GetPropW(hwnd, kFramePending) && IsWindowVisible(hwnd)) {
+            RemovePropW(hwnd, kFramePending);
+            RevealRedirectedFrame(hwnd);
+        }
     }
     return result;
 }

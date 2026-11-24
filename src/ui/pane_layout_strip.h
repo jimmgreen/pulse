@@ -10,6 +10,9 @@
 #include <vector>
 
 namespace pulse::ui {
+inline bool PaneLayoutControlsVisible(const WindowViewModel& vm, bool embedded) {
+    return !embedded && vm.layout_controls.visible;
+}
 // HTML: 26x22 buttons, 1 DIP gap, 1 DIP horizontal padding;
 // the divider occupies 1 + 4 + 4 DIP, with one extra flex gap.
 inline D2D1_RECT_F PaneLayoutButtonBounds(D2D1_RECT_F strip, int index, float scale) {
@@ -49,7 +52,7 @@ inline float PaneLayoutStripWidth(const WindowViewModel& vm, float width, float 
     }
     const auto& status=vm.status;
     const auto measure=[&](const std::wstring& value) { return PaneLayoutMeasure(value,scale,factory,format); };
-    const float text_budget=measure(status.status_text)+measure(status.selection_text);
+    const float text_budget=measure(status.status_text)+measure(status.git_text)+measure(status.selection_text);
     const float ai_budget=status.ai_state==StatusAiState::Hidden?0:68*scale;
     const float history_budget=std::min(240.0f*scale,measure(status.undo_label)+(status.can_redo?98:70)*scale);
     const float task_budget=status.task_active||!status.task_text.empty()?190*scale:0;

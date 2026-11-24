@@ -18,6 +18,28 @@ int main() {
         check(first.left > 0 && last.right < 900 && xl.HitTest(first.left - 1, 20) == -1 &&
               xl.HitTest(last.right + 1, 20) == -1, "extra-large row margins are blank");
     }
+    {
+        bool label_fits = true, size_slot = true, bottom_hit = true;
+        for (float dpi : {1.0f, 1.5f, 2.0f}) for (float font : {1.0f, 1.12f, 1.25f})
+        for (auto mode : {ViewMode::MediumIcons, ViewMode::LargeIcons, ViewMode::ExtraLargeIcons}) {
+            const float line = kIconGridNameLineDip * font;
+            const ViewLayout layout(mode, {0, 0, 900 * dpi, 700 * dpi}, 30, 0, 0, dpi,
+                ViewLayoutParams(IconGridNameBlockDip(4), 0, line));
+            const auto label = layout.NameRect(0);
+            const auto cell = layout.ItemRect(0);
+            const auto second_row = layout.ItemRect(layout.Metrics().columns);
+            const auto size = layout.FolderSizeRect(0);
+            label_fits &= layout.Metrics().name_lines == 4 && label.bottom <= cell.bottom &&
+                cell.bottom < second_row.top &&
+                std::abs((label.bottom - label.top) - (4 * line + 2) * dpi) < 0.01f;
+            size_slot &= std::abs(size.top - (label.top + 3 * line * dpi)) < 0.01f &&
+                size.bottom == label.bottom;
+            bottom_hit &= layout.HitTest((label.left + label.right) * 0.5f, label.bottom - 1) == 0;
+        }
+        check(label_fits, "scaled four-line name block fits without clipping into the next row");
+        check(size_slot, "folder size reserves a complete scaled name line");
+        check(bottom_hit, "last visible name line belongs to the same item");
+    }
     check(ViewLayout(ViewMode::List, {0, 0, 800, 250}, 30, 0, 0, 1).HitTest(30, 245) == -1,
           "column-major bottom remainder is blank");
     for (int mode = 0; mode < 8; ++mode) {

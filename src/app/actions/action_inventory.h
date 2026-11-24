@@ -196,8 +196,12 @@ inline constexpr ActionEntry kActions[] = {
     {"net.system_settings", ActionRisk::View},
     // 工具
     {"git.refresh", ActionRisk::Read},
+    {"git.source_control", ActionRisk::View},
     {"git.pull", ActionRisk::External},
     {"git.push", ActionRisk::External},
+    {"git.sync", ActionRisk::External},
+    {"git.branches", ActionRisk::View},
+    {"git.history", ActionRisk::View},
     {"toolbar.open_with", ActionRisk::External},
     {"toolbar.pin_app", ActionRisk::Organize},
     {"toolbar.customize", ActionRisk::View},
@@ -272,12 +276,14 @@ inline constexpr KeyActionLink kKeyActionLinks[] = {
     {KeyAction::AiAssistant, {"", "the assistant itself"}},
     {KeyAction::AiHistory, {"", "the assistant's own chat history"}},
     {KeyAction::ShortcutHelp, {"app.shortcut_help"}},
+    {KeyAction::OpenSettings, {"app.settings_page"}},
     {KeyAction::ArrangeSideBySide, {"window.arrange"}},
     {KeyAction::ArrangeStacked, {"window.arrange"}},
     {KeyAction::ArrangeColumns, {"window.arrange"}},
     {KeyAction::ArrangeTile, {"window.arrange"}},
     {KeyAction::ArrangeMain, {"window.arrange"}},
     {KeyAction::ArrangeCascade, {"window.arrange"}},
+    {KeyAction::CloseOtherTabs, {"tab.close_others"}},
 };
 
 inline constexpr MenuCmdLink kMenuCmdLinks[] = {
@@ -429,6 +435,10 @@ inline constexpr MenuCmdLink kMenuCmdLinks[] = {
     {kCmdGitPull, {"git.pull"}},
     {kCmdGitPush, {"git.push"}},
     {kCmdGitRefresh, {"git.refresh"}},
+    {kCmdGitSourceControl, {"git.source_control"}},
+    {kCmdGitSync, {"git.sync"}},
+    {kCmdGitBranches, {"git.branches"}},
+    {kCmdGitHistory, {"git.history"}},
 };
 
 constexpr const ActionEntry* FindAction(std::string_view id) noexcept {

@@ -91,6 +91,18 @@ Art Make(ProductArt art) {
         add(Rect(28, 28.6f, 4, 2.8f, 1), true, .5f);
         add("M35.3 35.3l5 5", true, 1, 3.6f);
         break;
+    case ProductArt::Desktop:
+        // 桌面整理: a monitor whose screen holds a large tile and two small ones.
+        a.light = 0x5B8DEF; a.dark = 0x2C55B3;
+        add(Rect(6, 8.5f, 36, 25.5f, 4), false, 1);
+        add(Rect(9, 11.5f, 30, 19.5f, 2.2f), true, .24f);
+        add(Rect(11.5f, 14, 12, 14.5f, 2), false, .96f);
+        add(Rect(25.5f, 14, 11, 6.5f, 1.8f), false, .85f);
+        add(Rect(25.5f, 22, 11, 6.5f, 1.8f), false, .7f);
+        add(Rect(14, 18, 5, 1.8f, .9f), true, .4f);
+        add(Rect(21.5f, 34, 5, 4.5f, 0), false, .9f);
+        add(Rect(15, 38.5f, 18, 3, 1.5f), false, 1);
+        break;
     case ProductArt::Ai:
         a.light = 0xB08AE2; a.dark = 0x6B48B5;
         add("M21 9.5c.9 6.4 4.1 9.6 10.5 10.5-6.4.9-9.6 4.1-10.5 10.5-.9-6.4-4.1-9.6-10.5-10.5 6.4-.9 9.6-4.1 10.5-10.5z", false, 1);
@@ -122,7 +134,7 @@ struct Built { std::vector<ComPtr<ID2D1PathGeometry>> geometry; bool done = fals
 struct Cache {
     ComPtr<ID2D1Factory> factory;
     ComPtr<ID2D1StrokeStyle> round;
-    std::array<Built, 7> arts;
+    std::array<Built, 8> arts;
 };
 }
 
@@ -134,12 +146,14 @@ ProductArt ProductArtFor(StoreIcon icon) {
     case StoreIcon::Film: return ProductArt::Media;
     case StoreIcon::TextSearch: return ProductArt::Content;
     case StoreIcon::Sparkle: return ProductArt::Ai;
+    case StoreIcon::Pc: return ProductArt::Desktop;
     default: return ProductArt::Generic;
     }
 }
 
 void DrawProductTile(ID2D1DeviceContext* dc, D2D1_RECT_F bounds, ProductArt art,
-                     D2D1_COLOR_F generic_color, StoreIcon generic_icon) {
+                     D2D1_COLOR_F generic_color, StoreIcon generic_icon,
+                     uint32_t custom_icon_id, const Theme* theme) {
     if (!dc) return;
     const float size = (std::min)(bounds.right - bounds.left, bounds.bottom - bounds.top);
     if (size < 4) return;
@@ -153,6 +167,8 @@ void DrawProductTile(ID2D1DeviceContext* dc, D2D1_RECT_F bounds, ProductArt art,
         props.lineJoin = D2D1_LINE_JOIN_ROUND;
         factory->CreateStrokeStyle(props, nullptr, 0, cache.round.GetAddressOf());
     }
+    const bool use_custom = IsCustomExtensionIcon(custom_icon_id);
+    if (use_custom) art = ProductArt::Generic;
     const Art model = Make(art);
     auto& built = cache.arts[static_cast<size_t>(art)];
     if (!built.done) {
@@ -197,8 +213,10 @@ void DrawProductTile(ID2D1DeviceContext* dc, D2D1_RECT_F bounds, ProductArt art,
     if (clip) dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), clip.Get()), nullptr);
     if (art == ProductArt::Generic) {
         const float pad = size * .26f;
-        DrawStoreIcon(dc, generic_icon, D2D1::RectF(tile.left + pad, tile.top + pad, tile.right - pad, tile.bottom - pad),
-                      Hex(0xFFFFFF), (std::max)(1.35f, size / 22.0f));
+        const auto inner = D2D1::RectF(tile.left + pad, tile.top + pad, tile.right - pad, tile.bottom - pad);
+        const float stroke = (std::max)(1.35f, size / 22.0f);
+        if (!use_custom || !DrawExtensionIcon(dc, custom_icon_id, inner, Hex(0xFFFFFF), theme, stroke))
+            DrawStoreIcon(dc, generic_icon, inner, Hex(0xFFFFFF), stroke);
     } else {
         D2D1_MATRIX_3X2_F old;
         dc->GetTransform(&old);

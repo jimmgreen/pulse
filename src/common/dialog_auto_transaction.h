@@ -8,12 +8,14 @@ namespace pulse::dialog_auto {
 struct RegistrationTarget {
     Architecture architecture = Architecture::X64;
     std::wstring dll_path;
+    std::wstring expected_old_dll_path{};
 };
 struct RegistrationApi {
     std::function<Status(Architecture)> inspect;
     std::function<DWORD(Architecture, const std::wstring&)> enable;
     std::function<DWORD(Architecture, const std::wstring&)> enable_if_unclaimed;
     std::function<DWORD(Architecture, const std::wstring&)> disable_for;
+    std::function<DWORD(Architecture, const std::wstring&, const std::wstring&)> enable_if_disabled_for{};
 };
 struct RegistrationTargetResult {
     RegistrationTarget target;

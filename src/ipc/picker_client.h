@@ -11,6 +11,16 @@ namespace pulse::ipc::picker {
 // Owner HWND/process creation identity and a window property guard cancellation;
 // externally re-enabling/destroying it cancels the exchange.
 // The optional cancellation event is borrowed and must remain valid until return.
+struct PickerClientOutcome {
+    Message response;
+    // True once the host pipe accepted the request payload (never retry native).
+    bool request_delivered = false;
+    // True when the host completed a dialog session (Accepted or Cancelled).
+    bool ui_shown = false;
+};
+
+PickerClientOutcome RunPickerClientDetailed(std::wstring executable, Message request,
+                                            HWND owner = nullptr, HANDLE cancel = nullptr);
 Message RunPickerClient(std::wstring executable, Message request,
                         HWND owner = nullptr, HANDLE cancel = nullptr);
 } // namespace pulse::ipc::picker

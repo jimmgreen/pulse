@@ -1,5 +1,6 @@
 #include "column_view_model.h"
 #include "app_model.h"
+#include "../common/path_utils.h"
 
 namespace pulse::app {
 
@@ -26,11 +27,14 @@ void FillColumnStripView(ui::ColumnStripView& out, const Tab& tab) {
     out.enabled = tab.column_layout;
     out.widths_dip = tab.column_widths_dip;
     out.scroll_from_right_dip = state.scroll_from_right_dip;
+    out.ancestor_viewport_limit_dip.reset();
     out.eligible = tab.column_layout && !state.for_path.empty() &&
                    state.for_path == tab.current_path;
     out.ancestors.clear();
     out.has_child = false;
     if (!out.eligible) return;
+    if (state.click_anchor && path::EqualInsensitive(state.click_anchor->path, tab.current_path))
+        out.ancestor_viewport_limit_dip = state.click_anchor->viewport_dip;
     out.ancestors.reserve(state.ancestors.size());
     for (const ColumnStripColumn& column : state.ancestors) out.ancestors.push_back(ToView(column));
     // Only a selected folder gets a column; file properties live in the

@@ -1,5 +1,7 @@
 #include "../preview_host/preview_integrity.h"
+#include "../preview_host/svg_fallback.h"
 #include <cstdio>
+#include <cstring>
 
 int main() {
     using namespace pulse::preview;
@@ -49,5 +51,115 @@ int main() {
     result.kind = pulse::ipc::PreviewContentKind::Hex;
     check(DescribeIntegrity(result, true).reason == IntegrityReason::SourceFallback,
         "binary fallback never claims complete format rendering");
+
+    const std::wstring svg_path = L"C:\\test\\diagram.svg";
+    const std::wstring svg_ext = L".svg";
+    const auto svg_accepts = [](const DecodeRequest& q) { return !q.is_directory && q.extension == L".svg"; };
+
+    {
+        pulse::ipc::PreviewRequest raw{};
+        raw.flags = pulse::ipc::kPreviewRequestFlagGrid;
+        DecodeRequest req(raw, svg_path, svg_ext, false, false, 256, true);
+        const DecoderEntry table[] = {{"svg", svg_accepts, [](const DecodeRequest& q, DecodeResult& r) {
+            return ResolveSvgDecode(
+                q, r,
+                [](const DecodeRequest&, DecodeResult& out) {
+                    out.error = L"svg-unsupported:element:text";
+                    return false;
+                },
+                [](const DecodeRequest&, DecodeResult& out) {
+                    out.pixels = {1, 2, 3, 4};
+                    out.width = out.height = 1;
+                    out.stride = 4;
+                    return true;
+                },
+                [](const DecodeRequest&, DecodeResult&) { return false; });
+        }}};
+        DecodeResult svg_res;
+        const bool made = RunDecoders(table, req, svg_res);
+        const auto st = DescribeIntegrity(svg_res, made);
+        check(made && svg_res.kind == pulse::ipc::PreviewContentKind::Bitmap &&
+            svg_res.error.empty() && svg_res.decoder &&
+            std::strcmp(svg_res.decoder, "shell-thumbnail") == 0 &&
+            st.state == IntegrityState::Unknown && st.reason == IntegrityReason::ProviderDefined,
+            "SVG fallback to shell thumbnail clears warning and keeps shell-thumbnail integrity");
+    }
+
+    {
+        pulse::ipc::PreviewRequest raw{};
+        DecodeRequest req(raw, svg_path, svg_ext, false, false, 1024, false);
+        const DecoderEntry table[] = {{"svg", svg_accepts, [](const DecodeRequest& q, DecodeResult& r) {
+            return ResolveSvgDecode(
+                q, r,
+                [](const DecodeRequest&, DecodeResult& out) {
+                    out.error = L"svg-unsupported:element:text";
+                    return false;
+                },
+                [](const DecodeRequest&, DecodeResult&) { return false; },
+                [](const DecodeRequest&, DecodeResult& out) {
+                    out.kind = pulse::ipc::PreviewContentKind::Text;
+                    out.text = L"<svg><text>hi</text></svg>";
+                    return true;
+                });
+        }}};
+        DecodeResult svg_res;
+        const bool made = RunDecoders(table, req, svg_res);
+        const auto st = DescribeIntegrity(svg_res, made);
+        check(made && svg_res.kind == pulse::ipc::PreviewContentKind::Text &&
+            svg_res.error == L"svg-unsupported:element:text" && svg_res.decoder &&
+            std::strcmp(svg_res.decoder, "svg") == 0 &&
+            st.state == IntegrityState::Partial && st.reason == IntegrityReason::SourceFallback,
+            "non-grid SVG keeps source fallback and warning when shell provider misses");
+    }
+
+    {
+        bool text_called = false;
+        pulse::ipc::PreviewRequest raw{};
+        raw.flags = pulse::ipc::kPreviewRequestFlagGrid;
+        DecodeRequest req(raw, svg_path, svg_ext, false, false, 256, true);
+        const auto run = [&](const DecodeRequest& q, DecodeResult& r) {
+            return ResolveSvgDecode(
+                q, r,
+                [](const DecodeRequest&, DecodeResult& out) {
+                    out.error = L"svg-unsupported:element:text";
+                    return false;
+                },
+                [](const DecodeRequest&, DecodeResult&) { return false; },
+                [&](const DecodeRequest&, DecodeResult&) {
+                    text_called = true;
+                    return true;
+                });
+        };
+        DecodeResult svg_res;
+        const DecodeStep step = run(req, svg_res);
+        check(step == DecodeStep::Failed && !text_called && svg_res.text.empty() &&
+            svg_res.error == L"svg-unsupported:element:text",
+            "grid SVG fails cleanly without text payload when shell provider misses");
+    }
+
+    {
+        bool shell_called = false;
+        bool text_called = false;
+        pulse::ipc::PreviewRequest raw{};
+        DecodeRequest req(raw, svg_path, svg_ext, false, false, 1024, false);
+        DecodeResult svg_res;
+        const DecodeStep step = ResolveSvgDecode(
+            req, svg_res,
+            [](const DecodeRequest&, DecodeResult& out) {
+                out.error = L"svg-unreadable";
+                return false;
+            },
+            [&](const DecodeRequest&, DecodeResult&) {
+                shell_called = true;
+                return false;
+            },
+            [&](const DecodeRequest&, DecodeResult& out) {
+                text_called = true;
+                out.kind = pulse::ipc::PreviewContentKind::Text;
+                return false;
+            });
+        check(step == DecodeStep::Failed && !shell_called && text_called,
+            "unreadable SVG skips shell provider and preserves fallback");
+    }
     return failures ? 1 : 0;
 }

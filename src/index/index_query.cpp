@@ -457,15 +457,19 @@ std::wstring Fold(std::wstring_view s) {
 }
 
 bool ContainsFolded(const wchar_t* s, uint32_t n, const std::wstring& needle) {
-    if (needle.empty()) return true;
-    if (needle.size() > n) return false;
+    const size_t m = needle.size();
+    if (m == 0) return true;
+    if (m > n) return false;
     const wchar_t* lut = Lut();
     const wchar_t first = needle[0];
-    const uint32_t last = n - static_cast<uint32_t>(needle.size());
+    const wchar_t last_ch = needle[m - 1];
+    const uint32_t last = n - static_cast<uint32_t>(m);
+    const size_t mid = m > 1 ? m - 1 : 1;
     for (uint32_t i = 0; i <= last; ++i) {
         if (lut[static_cast<uint16_t>(s[i])] != first) continue;
+        if (m > 1 && lut[static_cast<uint16_t>(s[i + m - 1])] != last_ch) continue;
         bool ok = true;
-        for (size_t j = 1; j < needle.size(); ++j) {
+        for (size_t j = 1; j < mid; ++j) {
             if (lut[static_cast<uint16_t>(s[i + j])] != needle[j]) { ok = false; break; }
         }
         if (ok) return true;
@@ -676,6 +680,37 @@ bool MatchTerm(std::wstring_view path, std::wstring_view name, bool is_dir,
     return true;
 }
 
+int ScoreLiteralFolded(const wchar_t* s, uint32_t n, const std::wstring& needle) {
+    const size_t m = needle.size();
+    if (m == 0) return n == 0 ? 600 : 500;
+    if (m > n) return 0;
+    const wchar_t* lut = Lut();
+    const wchar_t first = needle[0];
+    const wchar_t last_ch = needle[m - 1];
+    const uint32_t last = n - static_cast<uint32_t>(m);
+    const size_t mid = m > 1 ? m - 1 : 1;
+    auto matches_at = [&](uint32_t i) {
+        for (size_t j = 1; j < mid; ++j) {
+            if (lut[static_cast<uint16_t>(s[i + j])] != needle[j]) return false;
+        }
+        return true;
+    };
+    if (lut[static_cast<uint16_t>(s[0])] == first &&
+        (m == 1 || lut[static_cast<uint16_t>(s[m - 1])] == last_ch) &&
+        matches_at(0)) {
+        return n == m ? 600 : 500;
+    }
+    int score = 0;
+    for (uint32_t i = 1; i <= last; ++i) {
+        if (lut[static_cast<uint16_t>(s[i])] != first) continue;
+        if (m > 1 && lut[static_cast<uint16_t>(s[i + m - 1])] != last_ch) continue;
+        if (!matches_at(i)) continue;
+        if (!(std::iswalnum(s[i - 1]) || s[i - 1] > 127)) return 400;
+        score = 300;
+    }
+    return score;
+}
+
 int RankName(const wchar_t* s, uint32_t n, bool is_dir, const CompiledQuery& q) {
     int best = 0;
     for (const auto& g : q.groups) {
@@ -684,14 +719,8 @@ int RankName(const wchar_t* s, uint32_t n, bool is_dir, const CompiledQuery& q) 
             int sc = 0;
             if (t.name_how == NameHow::Wildcard) {
                 if (WildcardFolded(s, n, t.name)) sc = 150;
-            } else if (EqualsFolded(s, n, t.name)) {
-                sc = 600;
-            } else if (StartsWithFolded(s, n, t.name)) {
-                sc = 500;
-            } else if (WordStartFolded(s, n, t.name)) {
-                sc = 400;
-            } else if (ContainsFolded(s, n, t.name)) {
-                sc = 300;
+            } else {
+                sc = ScoreLiteralFolded(s, n, t.name);
             }
             if (!sc && t.pinyin) {
                 const auto match = FindPinyinMatch({s, n}, t.name);

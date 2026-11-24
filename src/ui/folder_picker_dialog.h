@@ -9,6 +9,7 @@
 #include "folder_picker_model.h"
 #include "../common/picker_places_snapshot.h"
 #include "../common/menu_icon.h"
+#include "window_effect_support.h"
 
 #include <d2d1.h>
 #include <windows.h>
@@ -107,6 +108,7 @@ struct FolderPickerSpec {
     std::wstring filename;
     std::wstring default_extension; // Without leading period
     std::wstring navigation_root;
+    bool legacy_browse = false, hide_new_folder_button = false;
     bool use_open_default_extension = false;
     bool no_test_file_create = false;
     bool require_existing_save_parent = false;
@@ -127,6 +129,11 @@ struct FolderPickerSpec {
     int preview_trigger = 0;
     int hover_preview_delay_ms = 500;
     int hover_card_size = 1;
+    // The main window's 窗口效果 (Mica Alt, Mica, Acrylic or none); hosts without
+    // the user's preferences keep acrylic, the dialog material before this setting.
+    WindowEffect window_effect = WindowEffect::Acrylic;
+    int panel_transparency = 50;  // 界面透明度 (AppPrefs::wallpaper_look)
+    int frame_transparency = 10;  // 侧边栏与标题栏 (AppPrefs::frame_transparency)
     uint32_t details_columns = 0;         // Without explicit_details_columns, 0 uses defaults.
     bool explicit_details_columns = false;
     // ---- Jump strip (HTML 跳转条): all optional, filled by the host process. ----
@@ -169,6 +176,7 @@ struct FolderPickerSpec {
     // Explicit Open contract only. The loader still checks existence; it does
     // not implement a read-access probe for either value of this field.
     bool skip_access_validation = false;
+    bool reject_readonly_save = false;
     bool allow_missing_open = false;
     bool require_existing_open_parent = false;
     bool validate_local_open_access_v1 = false;
@@ -195,10 +203,24 @@ struct FilePickerResult {
 };
 
 enum class FilePickerStatus { Accepted, Cancelled, Failed };
+// First failure observed inside the picker window, for release diagnostics.
+// stage is a fixed identifier literal (never user data); line is the failing
+// call site in folder_picker_dialog.cpp of the same build.
+struct FilePickerFailure {
+    const char* stage = nullptr;
+    uint32_t line = 0;
+    DWORD error = ERROR_SUCCESS;
+    HRESULT hr = S_OK;  // underlying D2D/DXGI HRESULT when the stage has one
+    DWORD rename_edit_error = ERROR_SUCCESS, filename_edit_error = ERROR_SUCCESS;
+    uint64_t painted_frame = 0;
+    bool first_present_occluded = false, submit_ready = false, rendering_frame = false;
+    uint32_t hidden = 0;  // window hidden from the user: 1 iconic, 2 owner iconic, 4 shell/owner cloaked, 8 not visible, 16 app cloaked
+};
 struct FilePickerOutcome {
     FilePickerStatus status = FilePickerStatus::Failed;
     DWORD error = ERROR_SUCCESS;
     FilePickerResult result;
+    FilePickerFailure failure;
 };
 
 HRESULT NavigatePickerFolder(HWND window, const std::wstring& path);

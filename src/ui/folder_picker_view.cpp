@@ -37,6 +37,30 @@ std::wstring FitEnd(Compositor& compositor, IDWriteTextFormat* format, const std
     });
 }
 
+// A file name with the ellipsis in the middle, keeping its end (version, suffix,
+// extension) so sibling names such as installers of one product stay apart.
+std::wstring FitNameMiddle(Compositor& compositor, IDWriteTextFormat* format, const std::wstring& text, float width) {
+    const auto measure = [&](std::wstring_view s) { return typography::MeasureLine(&compositor, format, s); };
+    if (text.empty() || measure(text) <= width) return text;
+    const auto cut = [&](size_t kept) {
+        size_t head = kept * 2 / 5, tail = kept - head;
+        if (head && head < text.size() && IS_LOW_SURROGATE(text[head])) --head;
+        size_t from = text.size() - tail;
+        if (from < text.size() && IS_LOW_SURROGATE(text[from])) ++from;
+        return text.substr(0, head) + L"\u2026" + text.substr(from);
+    };
+    size_t lo = 0, hi = text.size() - 1;
+    std::wstring best = L"\u2026";
+    while (lo <= hi) {
+        const size_t mid = (lo + hi) / 2;
+        auto candidate = cut(mid);
+        if (measure(candidate) <= width) { best = std::move(candidate); lo = mid + 1; }
+        else if (!mid) break;
+        else hi = mid - 1;
+    }
+    return best;
+}
+
 // Text widths from the painter's own measure (body and caption faces).
 float BodyWidth(const fluent::Painter& p, float scale, const std::wstring& text) {
     return text.empty() ? 0.0f : std::max(0.0f, p.MeasureButtonWidth(text) - Dip(scale, 16.0f));
@@ -203,49 +227,81 @@ FolderPickerChromeLayout LayoutPickerChrome(float width, float height,
             return end;
         };
         const float first_x = strip_x + Dip(scale, kChipIcon + 6.0f) + BodyWidth(painter, scale, chrome.strip_caption) + Dip(scale, 8.0f);
+        constexpr size_t kMaxOpenStripChips = 96;
+        const size_t shown = std::min<size_t>(chrome.open_folders.size(), kMaxOpenStripChips);
         float end = place_buttons(true);
         {
             float need = first_x;
-            for (size_t i = 0; i < chrome.open_folders.size() && i < 9; ++i) {
+            for (size_t i = 0; i < shown; ++i) {
                 PickerOpenChip bare = chrome.open_folders[i];
                 bare.source.clear();
-                need += ChipWidth(painter, scale, bare, static_cast<int>(i)) + Dip(scale, 6.0f);
+                need += ChipWidth(painter, scale, bare, i < 9 ? static_cast<int>(i) : -1) + Dip(scale, 6.0f);
             }
             if (need > end) end = place_buttons(false);
         }
-        float x = first_x;
-        const float last_w = chrome.last_location.label.empty() ? 0.0f : ChipWidth(painter, scale, chrome.last_location, -1) + Dip(scale, 17.0f);
-        // Source labels give way before any chip does: the "Pulse" ones first, then the
-        // Explorer ones, so the chips and the last location stay on the row.
-        const size_t shown = std::min<size_t>(chrome.open_folders.size(), 9);
+        const float last_chip_w = chrome.last_location.label.empty() ? 0.0f : ChipWidth(painter, scale, chrome.last_location, -1);
+        // Source labels give way before scrolling kicks in: the "Pulse" ones first, then
+        // Explorer ones, so the chips and the last location fit without scrolling when possible.
         std::vector<bool> keep_source(shown);
         const auto row_width = [&] {
-            float total = first_x + last_w;
+            float total = first_x;
             for (size_t i = 0; i < shown; ++i) {
                 PickerOpenChip chip = chrome.open_folders[i];
                 if (!keep_source[i]) chip.source.clear();
-                total += ChipWidth(painter, scale, chip, static_cast<int>(i)) + Dip(scale, 6.0f);
+                if (i > 0) total += Dip(scale, 6.0f);
+                total += ChipWidth(painter, scale, chip, i < 9 ? static_cast<int>(i) : -1);
+            }
+            if (last_chip_w > 0.0f) {
+                if (shown > 0) total += Dip(scale, 17.0f);
+                total += last_chip_w;
             }
             return total;
         };
         for (size_t i = 0; i < shown; ++i) keep_source[i] = !chrome.open_folders[i].source.empty();
         if (row_width() > end) for (size_t i = 0; i < shown; ++i) if (!chrome.open_folders[i].window) keep_source[i] = false;
         if (row_width() > end) for (size_t i = 0; i < shown; ++i) keep_source[i] = false;
+
+        std::vector<float> chip_widths(shown);
+        float content_w = 0.0f;
         for (size_t i = 0; i < shown; ++i) {
             PickerOpenChip chip = chrome.open_folders[i];
-            const bool source = keep_source[i];
-            if (!source) chip.source.clear();
-            const float w = ChipWidth(painter, scale, chip, static_cast<int>(i));
-            if (x + w > end) break;  // open folders first; the last location takes what is left
+            if (!keep_source[i]) chip.source.clear();
+            chip_widths[i] = ChipWidth(painter, scale, chip, i < 9 ? static_cast<int>(i) : -1);
+            if (i > 0) content_w += Dip(scale, 6.0f);
+            content_w += chip_widths[i];
+        }
+        if (last_chip_w > 0.0f) {
+            if (shown > 0) content_w += Dip(scale, 17.0f);
+            content_w += last_chip_w;
+        }
+        const float raw_avail = std::max(0.0f, end - first_x);
+        if (content_w > raw_avail + 0.5f && raw_avail > Dip(scale, 76.0f)) {
+            const float btn_w = Dip(scale, 22.0f);
+            const float btn_gap = Dip(scale, 4.0f);
+            l.open_scroll_left = D2D1::RectF(first_x, cy, first_x + btn_w, cy + ch);
+            l.open_scroll_right = D2D1::RectF(end - btn_w, cy, end, cy + ch);
+            l.open_viewport = D2D1::RectF(l.open_scroll_left.right + btn_gap, l.strip.top,
+                                          std::max(l.open_scroll_left.right + btn_gap, l.open_scroll_right.left - btn_gap), l.strip.bottom);
+        } else {
+            l.open_viewport = D2D1::RectF(first_x, l.strip.top, std::max(first_x, end), l.strip.bottom);
+        }
+        const float vp_w = std::max(0.0f, l.open_viewport.right - l.open_viewport.left);
+        l.open_scroll_max = scale > 0.0f ? std::max(0.0f, (content_w - vp_w) / scale) : 0.0f;
+        const float scroll_px = Dip(scale, std::clamp(chrome.open_scroll, 0.0f, l.open_scroll_max));
+        float x = l.open_viewport.left - scroll_px;
+        for (size_t i = 0; i < shown; ++i) {
+            const float w = chip_widths[i];
             l.open_chips.push_back(D2D1::RectF(x, cy, x + w, cy + ch));
-            l.open_keycaps.push_back(D2D1::RectF(x + Dip(scale, 6.0f), cy + Dip(scale, 5.0f),
-                x + Dip(scale, 6.0f) + KeyWidth(painter, scale, static_cast<int>(i)), cy + Dip(scale, 23.0f)));
-            l.open_chip_source.push_back(source);
+            if (i < 9) {
+                l.open_keycaps.push_back(D2D1::RectF(x + Dip(scale, 6.0f), cy + Dip(scale, 5.0f),
+                    x + Dip(scale, 6.0f) + KeyWidth(painter, scale, static_cast<int>(i)), cy + Dip(scale, 23.0f)));
+            }
+            l.open_chip_source.push_back(keep_source[i]);
             x += w + Dip(scale, 6.0f);
         }
-        if (last_w > 0.0f && x + last_w <= end) {
-            x += Dip(scale, 11.0f);
-            l.last_location = D2D1::RectF(x, cy, x + last_w - Dip(scale, 17.0f), cy + ch);
+        if (last_chip_w > 0.0f) {
+            if (shown > 0) x += Dip(scale, 11.0f);
+            l.last_location = D2D1::RectF(x, cy, x + last_chip_w, cy + ch);
         }
     }
 
@@ -384,9 +440,13 @@ int HitTestPickerChrome(const FolderPickerChromeLayout& l, const FolderPickerChr
     if (ContainsRect(l.more_options, x, y)) return kPickMoreOptions;
     for (size_t i = 0; i < l.option_chips.size(); ++i)
         if (ContainsRect(l.option_chips[i], x, y)) return c.options[i].enabled ? c.options[i].id : kPickNone;
-    for (size_t i = 0; i < l.open_chips.size(); ++i)
-        if (ContainsRect(l.open_chips[i], x, y)) return kPickOpenFolderBase + static_cast<int>(i);
-    if (ContainsRect(l.last_location, x, y)) return kPickLastLocation;
+    if (ContainsRect(l.open_scroll_left, x, y)) return c.open_scroll > 0.5f ? kPickOpenScrollLeft : kPickNone;
+    if (ContainsRect(l.open_scroll_right, x, y)) return c.open_scroll < l.open_scroll_max - 0.5f ? kPickOpenScrollRight : kPickNone;
+    if (ContainsRect(l.open_viewport, x, y)) {
+        for (size_t i = 0; i < l.open_chips.size(); ++i)
+            if (ContainsRect(l.open_chips[i], x, y)) return kPickOpenFolderBase + static_cast<int>(i);
+        if (ContainsRect(l.last_location, x, y)) return kPickLastLocation;
+    }
     for (size_t i = 0; i < l.recent_cards.size(); ++i)
         if (ContainsRect(l.recent_cards[i], x, y)) return kPickRecentBase + static_cast<int>(i);
     if (!c.undo_jump_text.empty() && ContainsRect(l.undo_jump, x, y)) return kPickUndoJump;
@@ -410,8 +470,19 @@ void DrawPickerChrome(Compositor& compositor, fluent::Painter& painter, const Th
     const float scale = l.scale;
     const float radius = Dip(scale, theme.radius_control);
 
-    painter.FillRoundedRect(l.title, 0, theme.surface_title);
-    painter.FillRoundedRect(l.footer, 0, theme.surface_sheet);
+    if (high_contrast || (c.frame_title_alpha >= 1.0f && c.frame_sheet_alpha >= 1.0f)) {
+        painter.FillRoundedRect(l.title, 0, theme.surface_title);
+        painter.FillRoundedRect(l.footer, 0, theme.surface_sheet);
+    } else {
+        // Translucent frame: the title layer over everything, the sheet below the title.
+        const auto right_of = [&](D2D1_RECT_F r) { r.left = std::max(r.left, c.frame_left); return r; };
+        const auto title = right_of(l.title), footer = right_of(l.footer);
+        if (title.right > title.left) painter.FillRoundedRect(title, 0, WithAlpha(theme.surface_title, c.frame_title_alpha));
+        if (footer.right > footer.left) {
+            painter.FillRoundedRect(footer, 0, WithAlpha(theme.surface_title, c.frame_title_alpha));
+            painter.FillRoundedRect(footer, 0, WithAlpha(theme.surface_sheet, c.frame_sheet_alpha));
+        }
+    }
 
     // Title strip: the program that asked (HTML 标题栏), then what it asked for.
     auto* dc = compositor.Dc();
@@ -497,13 +568,39 @@ void DrawPickerChrome(Compositor& compositor, fluent::Painter& painter, const Th
                 painter.DrawText(item.source, D2D1::RectF(r.right - Dip(scale, 10.0f) - source_w, r.top, r.right - Dip(scale, 8.0f), r.bottom),
                                  compositor.SmallFormat(), faint);
         };
-        for (size_t i = 0; i < l.open_chips.size() && i < c.open_folders.size(); ++i)
-            chip(l.open_chips[i], c.open_folders[i], static_cast<int>(i), kPickOpenFolderBase + static_cast<int>(i), false, i < l.open_chip_source.size() && l.open_chip_source[i]);
-        if (l.last_location.right > l.last_location.left) {
-            const float vx = l.last_location.left - Dip(scale, 6.0f);
-            painter.FillRoundedRect(D2D1::RectF(vx, mid_y - Dip(scale, 9.0f), vx + std::max(1.0f, Dip(scale, 1.0f)), mid_y + Dip(scale, 9.0f)), 0, theme.stroke_divider);
-            chip(l.last_location, c.last_location, -1, kPickLastLocation, true, true);
+        auto draw_scroll_btn = [&](const D2D1_RECT_F& r, int id, StoreIcon icon, bool enabled) {
+            if (r.right <= r.left || r.bottom <= r.top) return;
+            auto st = StateFor(c, id, enabled);
+            if (enabled && (st.hovered || st.pressed)) {
+                painter.FillRoundedRect(r, Dip(scale, 6.0f), WithAlpha(theme.text, st.pressed ? 0.11f : 0.06f));
+            }
+            const float cx = (r.left + r.right) * 0.5f;
+            const float cy_b = (r.top + r.bottom) * 0.5f;
+            const float half = Dip(scale, 6.0f);
+            const D2D1_COLOR_F ink = !enabled ? WithAlpha(theme.text, 0.24f)
+                : (st.hovered || st.pressed ? theme.text : theme.text_secondary);
+            DrawStoreIcon(dc, icon, D2D1::RectF(cx - half, cy_b - half, cx + half, cy_b + half), ink, 1.4f);
+        };
+        draw_scroll_btn(l.open_scroll_left, kPickOpenScrollLeft, StoreIcon::ChevronLeft, c.open_scroll > 0.5f);
+        const bool has_vp = l.open_viewport.right > l.open_viewport.left && l.open_viewport.bottom > l.open_viewport.top;
+        if (has_vp) {
+            dc->PushAxisAlignedClip(l.open_viewport, D2D1_ANTIALIAS_MODE_ALIASED);
+            for (size_t i = 0; i < l.open_chips.size() && i < c.open_folders.size(); ++i) {
+                const auto& r = l.open_chips[i];
+                if (r.right <= l.open_viewport.left || r.left >= l.open_viewport.right) continue;
+                chip(r, c.open_folders[i], i < 9 ? static_cast<int>(i) : -1,
+                     kPickOpenFolderBase + static_cast<int>(i), false,
+                     i < l.open_chip_source.size() && l.open_chip_source[i]);
+            }
+            if (l.last_location.right > l.last_location.left &&
+                l.last_location.right > l.open_viewport.left && l.last_location.left < l.open_viewport.right) {
+                const float vx = l.last_location.left - Dip(scale, 6.0f);
+                painter.FillRoundedRect(D2D1::RectF(vx, mid_y - Dip(scale, 9.0f), vx + std::max(1.0f, Dip(scale, 1.0f)), mid_y + Dip(scale, 9.0f)), 0, theme.stroke_divider);
+                chip(l.last_location, c.last_location, -1, kPickLastLocation, true, true);
+            }
+            dc->PopAxisAlignedClip();
         }
+        draw_scroll_btn(l.open_scroll_right, kPickOpenScrollRight, StoreIcon::ChevronRight, c.open_scroll < l.open_scroll_max - 0.5f);
         if (!c.undo_jump_text.empty() && l.undo_jump.right > l.undo_jump.left && l.auto_jump_notice.right <= l.auto_jump_notice.left) {
             fluent::ButtonSpec undo{l.undo_jump, c.undo_jump_text, L"\xE7A7", fluent::ButtonKind::Transparent, StateFor(c, kPickUndoJump)};
             undo.skip_glyph = true;
@@ -599,8 +696,16 @@ void DrawPickerChrome(Compositor& compositor, fluent::Painter& painter, const Th
                 else if (ext == L"pptx" || ext == L"ppt") rgb = 0xC9542F;
                 painter.FillRoundedRect(thumb, Dip(scale, 5.0f), high_contrast ? theme.bg : HexColor(rgb, 0.16f));
                 const float mx = (thumb.left + thumb.right) * 0.5f, my = (thumb.top + thumb.bottom) * 0.5f;
-                DrawStoreIcon(dc, StoreIcon::File, D2D1::RectF(mx - Dip(scale, 14.0f), my - Dip(scale, 14.0f), mx + Dip(scale, 14.0f), my + Dip(scale, 14.0f)),
-                              high_contrast ? theme.text : HexColor(rgb), 1.4f);
+                // The program's own file icon says more than a generic sheet.
+                const float half = std::min(Dip(scale, 20.0f), (thumb.bottom - thumb.top) * 0.36f);
+                const auto mark = D2D1::RectF(mx - half, my - half, mx + half, my + half);
+                bool icon_drawn = false;
+                if (c.draw_recent_icon && !high_contrast) {
+                    try { icon_drawn = c.draw_recent_icon(i, mark); } catch (...) { icon_drawn = false; }
+                }
+                if (!icon_drawn)
+                    DrawStoreIcon(dc, StoreIcon::File, D2D1::RectF(mx - Dip(scale, 14.0f), my - Dip(scale, 14.0f), mx + Dip(scale, 14.0f), my + Dip(scale, 14.0f)),
+                                  high_contrast ? theme.text : HexColor(rgb), 1.4f);
                 if (!ext.empty()) {
                     std::wstring tag = ext;
                     CharUpperBuffW(tag.data(), static_cast<DWORD>(tag.size()));
@@ -609,10 +714,12 @@ void DrawPickerChrome(Compositor& compositor, fluent::Painter& painter, const Th
                 }
             }
             const float tw = r.right - r.left - Dip(scale, 14.0f);
-            painter.DrawText(FitEnd(compositor, compositor.TextFormat(), card.name, tw),
+            // Name keeps its distinguishing end; the folder keeps its last segments.
+            painter.DrawText(FitNameMiddle(compositor, compositor.TextFormat(), card.name, tw),
                              l.recent_names[i],
                              compositor.TextFormat(), theme.text);
-            painter.DrawText(FitEnd(compositor, compositor.SmallFormat(), card.detail, tw),
+            painter.DrawText(FitPathMiddle(card.detail, tw, [&](std::wstring_view s) {
+                                 return typography::MeasureLine(&compositor, compositor.SmallFormat(), s); }),
                              l.recent_details[i],
                              compositor.SmallFormat(), theme.text_secondary);
         }

@@ -27,6 +27,9 @@ void UpdateSidebarPeek(AppState& s, int x, int y);
 bool TickSidebarPeek(AppState& s, ULONGLONG now);
 void CloseSidebarPeek(AppState& s);
 void DismissSidebarPeekOutside(AppState& s, int x, int y);
+// Files dragged over the window (client point): with the sidebar 浮起, the
+// left edge opens the overlay and leaving it closes it again.
+void DragSidebarPeek(AppState& s, POINT client);
 // Middle click closes a tab (title strip or sidebar row).
 bool HandleTabMiddleClick(AppState& s, int x, int y);
 // Double-click close (Settings > Startup and close): a press on a tab arms it,

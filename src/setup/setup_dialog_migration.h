@@ -18,6 +18,29 @@ DWORD DisableOwnedDialogRegistration(const std::wstring& app, const dialog_auto:
     const std::function<DWORD(const std::wstring&)>& disable);
 DWORD DisableOwnedDialogRegistration(const std::wstring& app, const dialog_auto::Status& status,
     const std::function<DWORD(const std::wstring&)>& disable, dialog_auto::Architecture architecture);
+struct UninstallDialogClsidState {
+    bool present = false;
+    std::wstring owner;
+    bool owner_corrupt = false;
+    bool inproc_present = false;
+    std::wstring inproc_dll;
+    bool inproc_corrupt = false;
+};
+struct UninstallDialogConfigState {
+    bool present = false;
+    std::wstring dll_path;
+    bool dll_corrupt = false;
+};
+struct UninstallDialogRestoreApi {
+    std::function<DWORD(dialog_auto::Architecture, size_t, UninstallDialogClsidState&)> read_clsid;
+    std::function<DWORD(dialog_auto::Architecture, size_t, bool force_tree)> clear_clsid;
+    std::function<DWORD(dialog_auto::Architecture, UninstallDialogConfigState&)> read_config;
+    std::function<DWORD(dialog_auto::Architecture, bool clear_dll_path)> reset_config;
+};
+// Restores native file dialogs for any CLSID registration owned by `app` while
+// tolerating corrupted DialogAuto metadata, version mismatches, or third-party owners.
+DWORD RestoreDialogRegistrationsForUninstall(const std::wstring& app,
+    const UninstallDialogRestoreApi& api = {});
 std::vector<std::wstring> RetiredRuntimeFiles(const std::vector<std::wstring>& shipped);
 std::vector<std::wstring> LegacyDialogFiles(const std::wstring& app,
     const std::vector<std::wstring>& shipped = {});

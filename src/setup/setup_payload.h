@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,7 @@ struct PayloadFile {
     std::wstring path;      // relative, forward slashes converted to backslashes
     uint64_t size = 0;
     std::string sha256;     // lowercase hex
+    std::optional<size_t> link_to;  // earlier canonical member in compact payloads
 };
 
 struct PayloadInfo {
@@ -24,6 +26,7 @@ struct PayloadInfo {
     uint64_t payload_offset = 0;
     uint64_t payload_size = 0;
     uint64_t total_bytes = 0;
+    uint64_t stored_bytes = 0;  // decompressed and written; hard-link aliases excluded
 };
 
 struct ExtractProgress {
@@ -46,6 +49,8 @@ public:
     // it is renamed into place. Existing files are replaced.
     bool ExtractTo(const std::filesystem::path& target, const ProgressCallback& progress,
                    std::wstring& error);
+    // Only count physically shared bytes, including when a version is reused.
+    uint64_t SharedBytesAt(const std::filesystem::path& target) const;
 
 private:
     bool ReadManifest(std::wstring& error);

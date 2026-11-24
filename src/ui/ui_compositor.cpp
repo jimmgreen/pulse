@@ -49,6 +49,7 @@ struct SharedGraphics {
     ComPtr<IDXGIDevice1> dxgi;
     ComPtr<ID2D1Factory1> factory;
     ComPtr<ID2D1Device> d2d;
+    ComPtr<IDCompositionDevice> dcomp;
     unsigned users = 0;
 };
 thread_local SharedGraphics* t_shared_graphics = nullptr;
@@ -157,13 +158,7 @@ bool Compositor::Init(HWND hwnd) {
 void Compositor::Shutdown() {
     t_compositors.erase(std::remove(t_compositors.begin(), t_compositors.end(), this), t_compositors.end());
     if (!dc_.get() && !d3dDevice_.get()) return; // already shut down
-    SharedGraphics* shared = t_shared_graphics;
-    if (shared && d3dDevice_.get() && d3dDevice_.get() == shared->d3d.get() &&
-        --shared->users == 0) {
-        // Last window on this thread: the device goes away with it.
-        t_shared_graphics = nullptr;
-        delete shared;
-    }
+    ReleaseSharedThreadDevices(d3dDevice_.get());
     if (lumaText_) lumaText_->Shutdown();
     frameCopy_.reset();
     held_.reset();
@@ -195,6 +190,7 @@ void Compositor::Shutdown() {
     transparentComposition_ = false;
     hwnd_ = nullptr;
     device_lost_ = false;
+    hibernated_ = false;
 }
 
 void Compositor::PrefetchSharedDevice() {
@@ -222,6 +218,74 @@ void Compositor::PrefetchSharedDevice() {
     } catch (...) {
         std::lock_guard<std::mutex> lock(prefetch.mutex);
         prefetch.done = true;  // InitD3D creates the device itself
+    }
+}
+
+bool Compositor::AcquireSharedThreadDevices(SharedThreadDevices& out) {
+    out = {};
+    SharedGraphics* shared = t_shared_graphics;
+    if (shared && shared->d3d->GetDeviceRemovedReason() != S_OK) {
+        t_shared_graphics = nullptr;
+        delete shared;
+        shared = nullptr;
+    }
+    if (!shared) {
+        auto created = std::make_unique<SharedGraphics>();
+        created->d3d = TakePrefetchedDevice();
+        if (created->d3d.get() && created->d3d->GetDeviceRemovedReason() != S_OK) created->d3d.reset();
+        if (!created->d3d.get() && FAILED(CreateD3DDevice(created->d3d))) return false;
+        if (FAILED(created->d3d->QueryInterface(&created->dxgi))) return false;
+        // Latency 2 allows a secondary tool/progress swap chain on the same UI
+        // thread to submit without forcing mid-scene D3D11 stalls on the main window.
+        created->dxgi->SetMaximumFrameLatency(2);
+
+        D2D1_FACTORY_OPTIONS opts{};
+#ifdef _DEBUG
+        opts.debugLevel = D2D1_DEBUG_LEVEL_INFORMATION;
+#endif
+        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1),
+                &opts, reinterpret_cast<void**>(&created->factory)))) {
+            return false;
+        }
+        if (FAILED(created->factory->CreateDevice(created->dxgi.get(), &created->d2d))) return false;
+        shared = created.release();
+        t_shared_graphics = shared;
+    }
+    if (!shared->dcomp.get()) {
+        DCompositionCreateDevice(shared->dxgi.get(), __uuidof(IDCompositionDevice),
+            reinterpret_cast<void**>(&shared->dcomp));
+    }
+    ++shared->users;
+    out.d3d = shared->d3d.get();
+    out.dxgi = shared->dxgi.get();
+    out.d2d_factory = shared->factory.get();
+    out.d2d = shared->d2d.get();
+    out.dcomp = shared->dcomp.get();
+    return true;
+}
+
+HRESULT Compositor::CreateCompositionOnlyDevice(IDCompositionDevice** out) noexcept {
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    using CreateDevice2Fn = HRESULT(WINAPI*)(IUnknown*, REFIID, void**);
+    static const auto create2 = []() noexcept -> CreateDevice2Fn {
+        HMODULE mod = GetModuleHandleW(L"dcomp.dll");
+        if (!mod) mod = LoadLibraryExW(L"dcomp.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        return mod ? reinterpret_cast<CreateDevice2Fn>(
+            reinterpret_cast<void*>(GetProcAddress(mod, "DCompositionCreateDevice2"))) : nullptr;
+    }();
+    if (create2) {
+        const HRESULT hr2 = create2(nullptr, __uuidof(IDCompositionDevice), reinterpret_cast<void**>(out));
+        if (SUCCEEDED(hr2) && *out) return hr2;
+    }
+    return DCompositionCreateDevice(nullptr, __uuidof(IDCompositionDevice), reinterpret_cast<void**>(out));
+}
+
+void Compositor::ReleaseSharedThreadDevices(ID3D11Device* d3d) noexcept {
+    SharedGraphics* shared = t_shared_graphics;
+    if (shared && d3d && d3d == shared->d3d.get() && --shared->users == 0) {
+        t_shared_graphics = nullptr;
+        delete shared;
     }
 }
 
@@ -264,6 +328,10 @@ bool Compositor::InitD3D() {
         if (!CheckGraphics(hr, L"D2D CreateDevice")) return false;
         shared = created.release();
         t_shared_graphics = shared;
+    }
+    if (!shared->dcomp.get()) {
+        DCompositionCreateDevice(shared->dxgi.get(), __uuidof(IDCompositionDevice),
+            reinterpret_cast<void**>(&shared->dcomp));
     }
     // Init without Shutdown keeps its existing share of the device.
     if (d3dDevice_.get() != shared->d3d.get()) ++shared->users;
@@ -423,6 +491,16 @@ bool Compositor::CreateSwapChain() {
 
     HRESULT hr = DCompositionCreateDevice(dxgiDevice_.get(), __uuidof(IDCompositionDevice),
         reinterpret_cast<void**>(&compositionDevice_));
+    if (FAILED(hr)) {
+        // A shared thread IDXGIDevice may already be bound to another IDCompositionDevice
+        // (e.g. DesktopRenderer's virtual surface); a composition-only device accepts
+        // CreateSwapChainForComposition swap chains without owning a rendering device.
+        hr = CreateCompositionOnlyDevice(&compositionDevice_);
+    }
+    if (FAILED(hr) && t_shared_graphics && t_shared_graphics->dcomp.get()) {
+        AssignRef(compositionDevice_, t_shared_graphics->dcomp.get());
+        hr = S_OK;
+    }
     if (SUCCEEDED(hr)) {
         hr = factory->CreateSwapChainForComposition(
             d3dDevice_.get(), &desc, nullptr, &swapChain_);
@@ -469,7 +547,11 @@ bool Compositor::PartialRedrawEnabled() {
 }
 
 void Compositor::ResizeSwapChain() {
-    if (!swapChain_.get() || width_ <= 0 || height_ <= 0) return;
+    ResizeSwapChainTo(width_, height_);
+}
+
+bool Compositor::ResizeSwapChainTo(int width, int height) {
+    if (!swapChain_.get() || width <= 0 || height <= 0) return false;
     full_next_ = true;
     frameCopy_.reset();
     held_.reset();
@@ -488,12 +570,12 @@ void Compositor::ResizeSwapChain() {
     // size is already recorded, so nothing would ask for it again and every
     // frame would draw into no target (a white window after the monitor it
     // was on went away).
-    HRESULT hr = swapChain_->ResizeBuffers(0, (UINT)width_, (UINT)height_,
+    HRESULT hr = swapChain_->ResizeBuffers(0, static_cast<UINT>(width), static_cast<UINT>(height),
         DXGI_FORMAT_UNKNOWN, 0);
     if (FAILED(hr)) {
         CheckGraphics(hr, L"ResizeBuffers");
         NotifyDeviceLost(hr);
-        return;
+        return false;
     }
 
     ComPtr<IDXGISurface> surface;
@@ -501,7 +583,7 @@ void Compositor::ResizeSwapChain() {
     if (FAILED(hr)) {
         CheckGraphics(hr, L"SwapChain GetBuffer");
         NotifyDeviceLost(hr);
-        return;
+        return false;
     }
     // Layout, hit-testing, and text formats already apply the window scale.
     // Keep the D2D target at 96 DPI so per-monitor scaling happens exactly once.
@@ -516,15 +598,56 @@ void Compositor::ResizeSwapChain() {
     if (FAILED(hr)) {
         CheckGraphics(hr, L"CreateBitmapFromDxgiSurface");
         NotifyDeviceLost(hr);
-        return;
+        return false;
     }
     dc_->SetTarget(targetBitmap_.get());
+    return true;
 }
 
 void Compositor::Resize(int width, int height) {
     width_ = width;
     height_ = height;
+    if (width > 0 && height > 0) hibernated_ = false;
     if (swapChain_.get()) ResizeSwapChain();
+}
+
+void Compositor::HibernateHiddenSurface() noexcept {
+    if (lumaText_) lumaText_->TrimCaches();
+    frameCopy_.reset();
+    held_.reset();
+    if (!hwnd_ || IsWindowVisible(hwnd_) || !swapChain_.get() || !dc_.get()) return;
+    if (!hibernated_ && (width_ > 1 || height_ > 1)) {
+        if (ResizeSwapChainTo(1, 1)) {
+            hibernated_ = true;
+        }
+    }
+    full_next_ = true;
+}
+
+void Compositor::EnsureAwake() noexcept {
+    if (!hibernated_) return;
+    hibernated_ = false;
+    if (swapChain_.get() && width_ > 0 && height_ > 0) {
+        ResizeSwapChainTo(width_, height_);
+    }
+    full_next_ = true;
+}
+
+void Compositor::TrimThreadGraphicsForBackground() noexcept {
+    for (Compositor* comp : t_compositors) {
+        if (comp) comp->HibernateHiddenSurface();
+    }
+    if (t_shared_graphics) {
+        if (t_shared_graphics->d2d.get()) {
+            t_shared_graphics->d2d->ClearResources(0);
+        }
+        ComPtr<IDXGIDevice3> dxgi3;
+        if (t_shared_graphics->dxgi.get() &&
+            SUCCEEDED(t_shared_graphics->dxgi->QueryInterface(IID_PPV_ARGS(&dxgi3))) &&
+            dxgi3.get()) {
+            dxgi3->Trim();
+        }
+    }
 }
 
 bool Compositor::UpdateTextRenderingParams(HMONITOR monitor) {
@@ -699,6 +822,7 @@ HRESULT Compositor::Present(const RECT* dirty) {
     if (inject_failure) return E_FAIL;
 #endif
     if (device_lost_) return DXGI_ERROR_DEVICE_REMOVED;
+    EnsureAwake();
     if (hwnd_) UpdateTextRenderingParams(
         MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST));
     PULSE_PICKER_TRACE_POINT("copy-frame-before");
@@ -723,11 +847,11 @@ HRESULT Compositor::Present(const RECT* dirty) {
             params.DirtyRectsCount = 1;
             params.pDirtyRects = &rect;
             PULSE_PICKER_TRACE_POINT("swapchain-present-partial-before");
-            hr = swapChain_->Present1(1, 0, &params);
+            hr = swapChain_->Present1(sync_interval_, 0, &params);
             PULSE_PICKER_TRACE_POINT("swapchain-present-partial-after");
         } else {
             PULSE_PICKER_TRACE_POINT("swapchain-present-before");
-            hr = swapChain_->Present(1, 0);
+            hr = swapChain_->Present(sync_interval_, 0);
             PULSE_PICKER_TRACE_POINT("swapchain-present-after");
         }
     }
@@ -769,6 +893,7 @@ bool Compositor::Recover() {
 }
 
 bool Compositor::SaveSnapshot(const wchar_t* path) {
+    EnsureAwake();
     if (!dc_.get() || !targetBitmap_.get()) return false;
     // Present rotates flip-model buffers. A pre-Present frame copy identifies
     // the frame actually drawn, rather than the next writable back buffer.

@@ -68,6 +68,7 @@ int CreateDirectoriesTest() {
 int PathTargetsTest() {
     using namespace pulse::ui;
     using S = SaveTargetState;
+
     for (bool no_test : {false, true}) {
         SaveTargetRequest request;
         request.directory = L"C:\\fixture";
@@ -193,6 +194,26 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--create-directories") return CreateDirectoriesTest();
     using namespace pulse::ui;
     using S = SaveTargetState;
+    if (argc == 2 && std::string_view(argv[1]) == "--sync-filter") {
+        const std::vector<PickerFilter> filters = {{L"Text", L"*.txt"}, {L"Images", L"*.png;*.jpg"},
+            {L"All", L"*.*"}, {L"Tar", L"*.tar.gz"}, {L"Gzip", L"*.gz"}, {L"Wildcard", L"*.xl*"}};
+        const auto rewrite = [&](std::wstring_view name, size_t index) { return RewriteSaveFilenameForFilter(name, filters, index); };
+        Check(rewrite(L"report", 0) == L"report.txt", "missing suffix appended");
+        Check(rewrite(L"report.txt", 1) == L"report.png", "dropdown replaces known suffix without doubling");
+        Check(rewrite(L"report.JPG", 1) == L"report.JPG", "secondary pattern and case preserved");
+        Check(rewrite(L"archive.TAR.GZ", 0) == L"archive.txt", "longest known compound suffix replaced");
+        Check(rewrite(L"archive.txt", 3) == L"archive.tar.gz", "compound target appended once");
+        Check(rewrite(L"report.unknown", 1) == L"report.png", "explicit type replaces unknown final suffix");
+        Check(rewrite(L"folder.v1/report.txt", 1) == L"folder.v1/report.png", "path prefix unchanged");
+        Check(rewrite(L"report.txt", 2) == L"report.txt", "all files preserves filename");
+        Check(rewrite(L"report.txt", 5) == L"report.txt", "nonconcrete filter preserves filename");
+        for (const auto* name : {L"", L"report.", L"report ", L".hidden", L"report?.txt"})
+            Check(rewrite(name, 1) == name, "incomplete or invalid edit preserved");
+        Check(rewrite(L"report.txt", 99) == L"report.txt", "invalid filter preserves filename");
+        Check(rewrite(rewrite(L"report.txt", 1), 1) == L"report.png", "repeat synchronization idempotent");
+        std::printf("FAILURES=%d\n", failures);
+        return failures ? 1 : 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--infer-filter") {
         const std::vector<PickerFilter> filters = {{L"Text", L"*.txt"}, {L"Images", L"*.png;*.jpg"}, {L"All", L"*.*"}};
         const auto infer = [&](std::wstring_view name, size_t current = 0) {
@@ -208,7 +229,9 @@ int main(int argc, char** argv) {
             Check(!infer(name), "ambiguous incomplete or unknown filename does not infer type");
         Check(!infer(L"report.png", 9), "invalid current index cannot infer");
         const std::vector<PickerFilter> duplicate = {{L"All", L"*.*"}, {L"PNG one", L"*.png"}, {L"PNG two", L"*.PNG;*.jpg"}};
-        Check(!InferSaveFilterFromFilename(L"report.png", duplicate, 0), "two caller formats sharing extension are not guessed");
+        Check(InferSaveFilterFromFilename(L"report.png", duplicate, 0) == 1, "dedicated type preferred over broad multi-pattern type");
+        const std::vector<PickerFilter> equal = {{L"All", L"*.*"}, {L"PNG one", L"*.png"}, {L"PNG two", L"*.PNG"}};
+        Check(!InferSaveFilterFromFilename(L"report.png", equal, 0), "equally dedicated caller formats remain ambiguous");
         Check(!InferSaveFilterFromFilename(L"report.png", duplicate, 2), "already matching caller format stays unchanged despite ambiguity");
         const std::vector<PickerFilter> wildcard = {{L"Text", L"*.txt"}, {L"Mixed", L"*.png;*.*"}, {L"Excel", L"*.xl*"}, {L"Loose", L"report*.png"}};
         Check(!InferSaveFilterFromFilename(L"report.png", wildcard, 0), "mixed and arbitrary wildcard masks cannot infer a format");
@@ -223,6 +246,46 @@ int main(int argc, char** argv) {
         return failures ? 1 : 0;
     }
     if (argc == 2 && std::string_view(argv[1]) == "--path-targets") return PathTargetsTest();
+    if (argc == 2 && std::string_view(argv[1]) == "--native-save-name-masks") {
+        struct Case { const wchar_t* mask; const wchar_t* ext; const wchar_t* input; const wchar_t* expected; };
+        const Case cases[] = {
+            {L"*", L"", L"draft", L"draft"}, {L"*", L"bak", L"draft", L"draft.bak"},
+            {L"Makefile", L"", L"Makefile", L"Makefile"}, {L"Makefile", L"bak", L"draft", L"draft.bak"},
+            {L"CMakeLists.txt", L"", L"draft", L"draft"}, {L"CMakeLists.txt", L"bak", L"draft", L"draft.txt"},
+            {L"report-*.csv", L"", L"draft", L"draft"}, {L"report-*.csv", L"bak", L"draft", L"draft.csv"},
+            {L"*.txt;Makefile", L"", L"Makefile", L"Makefile"}, {L"*.txt;Makefile", L"bak", L"Makefile", L"Makefile.txt"},
+            {L"Makefile;*.txt", L"bak", L"draft", L"draft.txt"}, {L"report-*.csv", L"bak", L"report-1.csv", L"report-1.csv"},
+            {L"report-*.csv", L"bak", L"draft.pulseunregistered", L"draft.pulseunregistered.csv"},
+            {L".gac", L"", L"model.gac", L"model.gac"}, {L".xml", L"bak", L"draft", L"draft.xml"}
+        };
+        for (const auto& test : cases) {
+            SaveTargetRequest request;
+            request.directory = L"C:\\fixture"; request.filename = test.input; request.default_extension = test.ext;
+            request.filters = {{L"Prior", L"*.prior"}, {L"Test", test.mask}};
+            request.filter_index = 1; request.native_save_defaults = true;
+            const auto result = ResolveSaveTarget(request);
+            Check(result.state == S::Resolved && result.path == request.directory + L"\\" + test.expected &&
+                result.filter_index == 1, "negotiated Save returns exact oracle path and selected index");
+            request.native_save_defaults = false;
+            Check(ResolveSaveTarget(request).state == S::Unsupported, "older Save policy does not silently adopt new masks");
+        }
+        return failures ? 1 : 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--native-parameter-defaults") {
+        SaveTargetRequest request;
+        request.directory = L"C:\\fixture"; request.filename = L"archive";
+        request.native_save_defaults = true;
+        for (const auto* extension : {L"tar.gz", L".yjk"}) {
+            request.default_extension = extension;
+            Check(ResolveSaveTarget(request).path == L"C:\\fixture\\archive." + std::wstring(extension), "native literal extension appended without stripping dots");
+            request.filters = {{L"Tar", L"*.tar.gz"}};
+            Check(ResolveSaveTarget(request).path == L"C:\\fixture\\archive.tar.gz", "native selected filter overrides literal default");
+            request.filters.clear();
+        }
+        request.native_save_defaults = false; request.default_extension = L".yjk";
+        Check(ResolveSaveTarget(request).state == S::Unsupported, "leading-dot default requires native-defaults policy");
+        return failures ? 1 : 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--native-defaults") {
         SaveTargetRequest native;
         native.directory = L"C:\\fixture"; native.native_save_defaults = true;
@@ -242,7 +305,7 @@ int main(int argc, char** argv) {
         Check(ResolveSaveTarget(native).state == S::Unsupported, "All filter does not strip wildcard default");
         native.filename = L"export.custom";
         Check(ResolveSaveTarget(native).path.ends_with(L"export.custom"), "explicit extension ignores simple wildcard default");
-        for (const auto* invalid : {L"../html", L"C:\\html", L"*.html;*.txt", L"*.h*", L".html"}) {
+        for (const auto* invalid : {L"../html", L"C:\\html", L"*.html;*.txt", L"*.h*", L"..html"}) {
             native.default_extension = invalid;
             Check(ResolveSaveTarget(native).state == S::Unsupported, "unverified default syntax stays rejected");
         }

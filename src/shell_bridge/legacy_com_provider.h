@@ -15,7 +15,8 @@ struct LegacyComDiagnostic {
 // Presence bits: file, file-title, filter, custom-filter, initial-dir, title,
 // default-extension, hook, template, reserved-pointer, reserved-DWORD, custom-data.
 using LegacyDiagnostic = std::function<void(const LegacyComDiagnostic&)>;
-// False is a pre-display bypass. Once Show is called the operation is consumed.
-bool RunLegacyComDialog(OPENFILENAMEW* input, bool save, const LegacyDialogFactory& create, BOOL& result, const LegacyDiagnostic& diagnostic = {}, bool verified_local_hook_host = false);
-bool RunLegacyComDialog(OPENFILENAMEA* input, bool save, const LegacyDialogFactory& create, BOOL& result, const LegacyDiagnostic& diagnostic = {}, bool verified_local_hook_host = false);
+// False is a pre-display bypass, including when the wrapper explicitly reports
+// that it declined before opening any window. All shown outcomes are consumed.
+bool RunLegacyComDialog(OPENFILENAMEW* input, bool save, const LegacyDialogFactory& create, BOOL& result, const LegacyDiagnostic& diagnostic = {}, bool verified_local_hook_host = false, const bool* use_original = nullptr, bool verified_remote_hook_host = false);
+bool RunLegacyComDialog(OPENFILENAMEA* input, bool save, const LegacyDialogFactory& create, BOOL& result, const LegacyDiagnostic& diagnostic = {}, bool verified_local_hook_host = false, const bool* use_original = nullptr, bool verified_remote_hook_host = false);
 }

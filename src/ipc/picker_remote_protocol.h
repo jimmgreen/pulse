@@ -5,22 +5,31 @@
 
 namespace pulse::ipc::picker::remote {
 constexpr uint32_t kMaxFrame = 4 * 1024 * 1024;
+constexpr uint32_t kOpenOptionsMask = 0xffu | PULSE_PICKER_UI_V2_OPEN_MISSING_VALIDATED;
 constexpr uint32_t kSaveOptionsMask = PULSE_PICKER_UI_V2_SAVE_OVERWRITE_PROMPT |
     PULSE_PICKER_UI_V2_SAVE_REQUIRE_UNENCRYPTED | PULSE_PICKER_UI_V2_SAVE_SKIP_ACCESS_VALIDATION |
     PULSE_PICKER_UI_V2_SAVE_NATIVE_DEFAULTS | PULSE_PICKER_UI_V2_SAVE_NO_TEST_CREATE |
-    PULSE_PICKER_UI_V2_SAVE_REQUIRE_EXISTING_PARENT | PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT;
+    PULSE_PICKER_UI_V2_SAVE_REQUIRE_EXISTING_PARENT | PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT |
+    PULSE_PICKER_UI_V2_SAVE_NO_READONLY_RETURN;
 constexpr bool SaveOptionsKnown(uint32_t options) noexcept {
     constexpr uint32_t contradictory = PULSE_PICKER_UI_V2_SAVE_OVERWRITE_PROMPT | PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT;
-    return !(options & ~kSaveOptionsMask) && (options & contradictory) != contradictory;
+    const bool readonly_without_skip = (options & PULSE_PICKER_UI_V2_SAVE_NO_READONLY_RETURN) &&
+        !(options & PULSE_PICKER_UI_V2_SAVE_SKIP_ACCESS_VALIDATION);
+    return !(options & ~kSaveOptionsMask) && (options & contradictory) != contradictory && !readonly_without_skip;
 }
 constexpr bool SaveOptionsSupportedByPeer(uint32_t options, uint32_t features) noexcept {
-    return SaveOptionsKnown(options) && (!(options & PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT) ||
-        (features & PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_OVERWRITE));
+    return SaveOptionsKnown(options) &&
+        (!(options & PULSE_PICKER_UI_V2_SAVE_NO_OVERWRITE_PROMPT) ||
+         (features & PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_OVERWRITE)) &&
+        (!(options & PULSE_PICKER_UI_V2_SAVE_NO_READONLY_RETURN) ||
+         (features & PULSE_PICKER_UI_V2_FEATURE_SAVE_SKIP_ACCESS));
 }
 constexpr bool ConfigSupportedByPeer(uint32_t open_options, uint32_t save_options, uint32_t features) noexcept {
-    return !(open_options & ~0xffu) && SaveOptionsSupportedByPeer(save_options, features) &&
+    return !(open_options & ~kOpenOptionsMask) && SaveOptionsSupportedByPeer(save_options, features) &&
         (!(open_options & PULSE_PICKER_UI_V2_OPEN_SHELL_ITEM_FILTER) ||
-         (features & PULSE_PICKER_UI_V2_FEATURE_SHELL_ITEM_FILTER));
+         (features & PULSE_PICKER_UI_V2_FEATURE_SHELL_ITEM_FILTER)) &&
+        (!(open_options & PULSE_PICKER_UI_V2_OPEN_MISSING_VALIDATED) ||
+         (features & PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING_VALIDATED));
 }
 
 enum class Kind : uint32_t {
@@ -86,7 +95,16 @@ struct Config {
     uint32_t folder_policy = 0;
     bool operator==(const Config &) const = default;
 };
-inline bool ConfigSupportedByPeer(const Config& config, uint32_t features) noexcept {
+// Hello replies reuse their previously zero response word. Legacy clients ignore it.
+constexpr uint32_t PeerControlItemLimit(uint32_t advertised) noexcept {
+    if (!advertised) return PULSE_PICKER_UI_V2_LEGACY_CONTROL_ITEMS;
+    if (advertised < PULSE_PICKER_UI_V2_LEGACY_CONTROL_ITEMS) return 0;
+    return advertised < PULSE_PICKER_UI_V2_MAX_CONTROL_ITEMS ? advertised : PULSE_PICKER_UI_V2_MAX_CONTROL_ITEMS;
+}
+inline bool ConfigSupportedByPeer(const Config& config, uint32_t features,
+                                  uint32_t item_limit = PULSE_PICKER_UI_V2_LEGACY_CONTROL_ITEMS) noexcept {
+    for (const auto& control : config.controls)
+        if (control.items.size() > item_limit) return false;
     for (const auto& property : config.properties)
         if (property.kind > PULSE_PICKER_UI_V2_PROPERTY_LIST && !(features & PULSE_PICKER_UI_V2_FEATURE_PROPERTY_PRESENTATION)) return false;
     return ConfigSupportedByPeer(config.open_options, config.save_options, features) &&

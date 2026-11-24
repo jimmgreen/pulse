@@ -1,14 +1,13 @@
-// settings_layout_store.h - geometry of the 扩展商店 browse page and of the 7-Zip
-// detail page (archive_store_mockup.html). Included by settings_layout_sections.h
+// settings_layout_store.h - geometry of the 扩展商店 browse page and of the generic
+// extension detail page. Included by settings_layout_sections.h
 // after pack_text / store_text; shared by drawing (ui_settings_store.cpp) and hit tests.
 #pragma once
 
 namespace store_view {
 inline bool Has(D2D1_RECT_F r) { return r.right>r.left && r.bottom>r.top; }
 inline bool HasSettings(const ExtensionStoreView& view, const ExtensionStoreItem& item) {
-    const int seven_zip=view.seven_zip.item;
-    return item.settings_package>=0 || (view.seven_zip.installed && seven_zip>=0 &&
-        seven_zip<static_cast<int>(view.items.size()) && &item==&view.items[static_cast<size_t>(seven_zip)]);
+    (void)view;
+    return item.settings_package>=0;
 }
 // Chip of a catalog category: 1 archives, 2 preview, 3 search, 4 AI, 0 none of these.
 inline int CategoryChip(std::wstring_view category) {
@@ -137,40 +136,6 @@ inline PackCard Pack(const WindowViewModel& vm, int pack) {
 }
 inline constexpr int kPackCount = 5;
 
-// The 7-Zip texts the host draws (catalog.tsv), by setting value.
-inline const std::wstring& ModeTitle(int mode) {
-    using I = l10n::StringId;
-    return l10n::Get(mode == 1 ? I::SzModeFolder : mode == 2 ? I::SzModeHere : I::SzModeSmart);
-}
-inline const std::wstring& ModeDesc(int mode) {
-    using I = l10n::StringId;
-    return l10n::Get(mode == 1 ? I::SzModeFolderDesc : mode == 2 ? I::SzModeHereDesc : I::SzModeSmartDesc);
-}
-inline const wchar_t* FormatName(int format) {
-    static constexpr const wchar_t* names[] = {L"7z", L"zip", L"tar", L"tar.gz", L"tar.xz", L"tar.bz2"};
-    return names[format < 0 || format > 5 ? 0 : format];
-}
-inline const std::wstring& FormatDesc(int format) {
-    using I = l10n::StringId;
-    static constexpr I ids[] = {I::SzFmt7z, I::SzFmtZip, I::SzFmtTar, I::SzFmtTarGz, I::SzFmtTarXz, I::SzFmtTarBz2};
-    return l10n::Get(ids[format < 0 || format > 5 ? 0 : format]);
-}
-inline const std::wstring& LevelName(int level) {
-    using I = l10n::StringId;
-    static constexpr I ids[] = {I::SzLevel0, I::SzLevel1, I::SzLevel2, I::SzLevel3, I::SzLevel4, I::SzLevel5};
-    return l10n::Get(ids[level < 0 || level > 5 ? 3 : level]);
-}
-inline const std::wstring& CommandName(int index) {
-    using I = l10n::StringId;
-    static constexpr I ids[] = {I::SzCmdExtract, I::SzCmdTo, I::SzCmdTest, I::SzCmdQuick, I::SzCmdAdd, I::SzCmdHash};
-    return l10n::Get(ids[index < 0 || index > 5 ? 0 : index]);
-}
-inline std::wstring CommandTag(int index) {
-    using I = l10n::StringId;
-    if (index <= 2) return l10n::Get(I::SzForArchives) + (index == 0 ? L" · " + l10n::Get(I::SzWithResult) : std::wstring{});
-    if (index <= 4) return l10n::Get(I::SzForFiles) + (index == 3 ? L" · " + l10n::Get(I::SzWithResult) : std::wstring{});
-    return l10n::Get(I::SzForFile);
-}
 inline std::wstring Fill(std::wstring text, std::wstring_view key, std::wstring_view value) {
     const auto at = text.find(key);
     if (at != std::wstring::npos) text.replace(at, key.size(), value);
@@ -184,9 +149,19 @@ inline std::wstring InstalledVersion(const ExtensionStoreView& view,const Extens
 inline std::wstring AboutValue(const ExtensionStoreView& view,const ExtensionStoreItem& item,int row) {
     using I=l10n::StringId;
     if(row==0)return item.official?l10n::Get(I::StoreOfficial):item.publisher;
-    if(row==2)return item.id=="pulse.7zip"?L"7-Zip 26.00 (Igor Pavlov)":std::wstring{};
+    if(row==2)return item.engine;
     if(row==3)return item.license;
-    if(row==4)return l10n::Get(I::SzAboutPermissionsValue);
+    if(row==4) {
+        if(!item.permissions.empty()) {
+            std::wstring joined;
+            for(size_t i=0;i<item.permissions.size();++i) {
+                if(i)joined+=L" · ";
+                joined+=item.permissions[i];
+            }
+            return joined;
+        }
+        return l10n::Get(I::StorePermissionsNone);
+    }
     if(row==5)return item.source;
     std::wstring version=InstalledVersion(view,item);
     if(version.empty()) {
@@ -216,11 +191,17 @@ inline std::wstring HistoryNote(const ExtensionStoreItem& item,size_t index) {
     const auto& text=item.history[index];const auto start=text.find(L" · ");
     return start==std::wstring::npos?std::wstring{}:text.substr(start+3);
 }
-// Rows of the context menu preview: a caption "7-Zip" then the commands (a detail line adds height).
+// The context menu preview is the host right-click menu around the plugin's rows
+// (StorePainter::Menu draws it with the same steps): quick actions, Open, the
+// plugin group (caption + rows, or its submenu item with the rows on a rail and
+// Settings), Properties. A detail line makes a row 40 DIP instead of 28.
+inline float MenuPreviewGroupHeight(const std::vector<SevenZipMenuRow>& rows, bool submenu) {
+    float h = submenu ? 30.0f : 26.0f;
+    for (const auto& row : rows) h += (row.detail.empty() ? 28.0f : 40.0f) + 2.0f;
+    return h + (submenu ? 9.0f + 28.0f : 0.0f) + 4.0f;
+}
 inline float MenuPreviewHeight(const std::vector<SevenZipMenuRow>& rows, bool submenu, float s) {
-    float h = (8 + (submenu ? 30 : 26)) * s;
-    for (const auto& row : rows) h += (row.detail.empty() ? 30.0f : 42.0f) * s;
-    return h + (6 + (submenu ? 37 : 0)) * s;
+    return (8 + 32 + 28 + 9 + MenuPreviewGroupHeight(rows, submenu) + 9 + 28 + 6) * s;
 }
 inline int GridColumns(float width,float scale) {
     return (std::clamp)(static_cast<int>((width+12*scale)/(272*scale)),1,3);
@@ -238,6 +219,50 @@ inline void LayoutSearch(SettingsLayout& l,float s,float font,float& y) {
         y=l.store_search.bottom+14*s;
     }
 }
+
+inline void LayoutStatusBanner(D2D1_RECT_F& surface, D2D1_RECT_F& text, D2D1_RECT_F* restart,
+    std::wstring_view message, float left, float right, float s, float font, float& y,
+    const fluent::Painter* painter) {
+    if (message.empty() || right - left < 68*s) return;
+    const float text_left = left + 36*s; // space for the standard InfoBar glyph
+    const float text_right = right - 12*s;
+    const float available = text_right - text_left;
+    const float action_height = 32*s*font;
+    const auto& label = l10n::Get(l10n::StringId::StoreRestartNow);
+    const float action_width = restart ? (std::min)(available, painter ? painter->MeasureButtonWidth(label) : 144*s*font) : 0.0f;
+    const bool inline_action = restart && available - action_width - 12*s >= 180*s;
+    const float end = inline_action ? text_right - action_width - 12*s : text_right;
+    const float message_height = painter ? painter->MeasureWrappedCaptionHeight(message, end - text_left) : 40*s*font;
+    const float row_height = (std::max)(16*s, inline_action ? (std::max)(message_height, action_height) : message_height);
+    const float top = y + 8*s;
+    const float text_top = top + (row_height - message_height) * 0.5f;
+    text = D2D1::RectF(text_left, text_top, end, text_top + message_height);
+    float bottom = top + row_height + 8*s;
+    if (restart) {
+        const float button_top = inline_action ? top + (row_height - action_height) * 0.5f : bottom;
+        const float button_left = inline_action ? text_right - action_width : text_left;
+        *restart = D2D1::RectF(button_left, button_top, button_left + action_width, button_top + action_height);
+        bottom = (std::max)(bottom, restart->bottom + 8*s);
+    }
+    surface = D2D1::RectF(left, y, right, bottom);
+    y = bottom + 12*s;
+}
+
+inline void LayoutStatusBanners(SettingsLayout& l, const ExtensionStoreView& view, bool browse, bool installed,
+    bool package_needs_restart, float left, float right, float s, float font, float& y, const fluent::Painter* painter) {
+    LayoutStatusBanner(l.store_notice_surface, l.store_notice, nullptr, store_text::Notice(view, browse, installed).text,
+        left, right, s, font, y, painter);
+    if (view.pending_restart || package_needs_restart) {
+        LayoutStatusBanner(l.store_restart_surface, l.store_restart, &l.store_restart_button,
+            store_text::RestartNotice(view).text, left, right, s, font, y, painter);
+    }
+}
+
+inline int ActiveDetailItem(const ExtensionStoreView& view) {
+    if (!view.detail) return -1;
+    const int index = view.detail_item;
+    return index >= 0 && index < static_cast<int>(view.items.size()) ? index : -1;
+}
 } // namespace store_view
 
 // Browse: the store home.
@@ -245,7 +270,6 @@ float LayoutSettingsStore(SettingsLayout& l, const WindowViewModel& vm, float s,
                           float y, const fluent::Painter* painter) {
     using I = l10n::StringId;
     const auto& view = vm.settings_store_view;
-    const auto& z = view.seven_zip;
     const float left = l.content.left + 20*s, right = l.content.right - 20*s;
     const float font = static_cast<float>(vm.settings_ui_font_scale)/100;
     auto height = [&](std::wstring_view value, float w) {
@@ -263,28 +287,9 @@ float LayoutSettingsStore(SettingsLayout& l, const WindowViewModel& vm, float s,
     const bool loading = view.state == ExtensionStoreView::State::Loading;
     const bool failed = view.state == ExtensionStoreView::State::Failed;
     const bool listed = view.state == ExtensionStoreView::State::Online || view.state == ExtensionStoreView::State::Offline;
-    // Banners: the last action's notice and the pending restart, each its own tinted line.
-    if ((!view.notice.empty() || view.state==ExtensionStoreView::State::Offline) && !failed) { l.store_notice = caption(view.state==ExtensionStoreView::State::Offline ? l10n::Get(I::StoreOfflineDesc) : view.notice, 14*s); y += 10*s; }
-    if (view.pending_restart) {
-        const float rbw = (std::min)(right - left - 28*s, width(l10n::Get(I::StoreRestartNow)));
-        const bool inline_btn = right - left - 28*s - rbw - 12*s >= 180*s;
-        if (inline_btn) {
-            const float text_w = right - left - 28*s - rbw - 12*s;
-            const float th = height(l10n::Get(I::StoreRestart), text_w);
-            const float row_h = (std::max)(th, bh);
-            const float ty = y + (row_h - th) / 2;
-            const float by = y + (row_h - bh) / 2;
-            l.store_restart = D2D1::RectF(left + 14*s, ty, right - 14*s - rbw - 12*s, ty + th);
-            l.store_restart_button = D2D1::RectF(right - 14*s - rbw, by, right - 14*s, by + bh);
-            y += row_h + 22*s;
-        } else {
-            l.store_restart = caption(l10n::Get(I::StoreRestart), 14*s);
-            l.store_restart_button = D2D1::RectF(left + 14*s, y - 4*s, (std::min)(right - 14*s, left + 14*s + rbw), y - 4*s + bh);
-            y = l.store_restart_button.bottom + 18*s;
-        }
-    }
+    store_view::LayoutStatusBanners(l, view, true, false, false, left, right, s, font, y, painter);
     if (failed) {
-        // The failed card: what happened, what to try, the diagnostic, retry, and local file install.
+        // The catalog failure has its own retry/recovery actions, separate from installation notices.
         const float rw = width(l10n::Get(I::RecoveryRetry)), sw2 = width(l10n::Get(I::StoreDownloadSources));
         const float fw = width(l10n::Get(I::StoreInstallFromFile));
         const float max_bw = (std::max)(rw, (std::max)(sw2, fw));
@@ -296,7 +301,6 @@ float LayoutSettingsStore(SettingsLayout& l, const WindowViewModel& vm, float s,
         l.store_state = D2D1::RectF(tx, cy, text_r, cy + 22*s*font); cy = l.store_state.bottom + 4*s;
         const float desc_h = height(l10n::Get(I::StoreFailedDesc), text_r - tx);
         cy += desc_h + 6*s;
-        if (!view.notice.empty()) { l.store_notice = D2D1::RectF(tx, cy, text_r, cy + height(view.notice, text_r - tx)); cy = l.store_notice.bottom + 4*s; }
         l.store_failed = D2D1::RectF(left, top, right, (std::max)(cy + 14*s, top + 18*s + 3*bh + 16*s + 18*s));
         const float bx = right - 16*s - max_bw;
         l.store_refresh = D2D1::RectF(bx, top + 18*s, right - 16*s, top + 18*s + bh);
@@ -310,28 +314,21 @@ float LayoutSettingsStore(SettingsLayout& l, const WindowViewModel& vm, float s,
         }
         y = l.store_failed.bottom + 24*s;
     }
-    // The 7-Zip card: full width, its quick settings and the menu it makes.
-    const bool hero_has_settings = z.item >= 0 && z.item < static_cast<int>(view.items.size()) &&
-        store_view::HasSettings(view, view.items[static_cast<size_t>(z.item)]);
-    const int hero = z.item >= 0 && z.item < static_cast<int>(view.items.size()) && (hero_has_settings || listed) &&
-        store_view::Shown(view, 1, view.items[static_cast<size_t>(z.item)].name, view.items[static_cast<size_t>(z.item)].summary) ? z.item : -1;
     l.store_items.assign(view.items.size(), {});
-    if (hero >= 0) {
-        const auto& item = view.items[static_cast<size_t>(hero)];
-        SettingsLayout::StoreCard c;
+    auto layout_hero_header = [&](SettingsLayout::StoreCard& c, const ExtensionStoreItem& item,
+                                  bool has_settings, float& out_body) {
         c.feature = true;
         const float pad = 22*s, tile = 72*s;
         const float top = y;
         c.icon = D2D1::RectF(left + pad, top + pad, left + pad + tile, top + pad + tile);
-        // Actions at the top right: 全部设置 › (when installed), and the catalog action (下载并安装 / 更新).
         const auto& all = l10n::Get(I::StoreAllSettings);
         const float aw = (std::min)(right - left - 2*pad, width(all) + 14*s);
         float actions_left = right - pad;
-        if (hero_has_settings) {
+        if (has_settings) {
             c.settings = D2D1::RectF(right - pad - aw, top + pad, right - pad, top + pad + bh);
             actions_left = c.settings.left - 8*s;
         }
-        if (!item.button_label.empty() && (item.action_enabled || !hero_has_settings)) {
+        if (!item.button_label.empty() && (item.action_enabled || !has_settings)) {
             const float bw = (std::min)(right - left - 2*pad, width(item.button_label));
             c.button = D2D1::RectF(actions_left - bw, top + pad, actions_left, top + pad + bh);
             actions_left = c.button.left - 8*s;
@@ -340,94 +337,137 @@ float LayoutSettingsStore(SettingsLayout& l, const WindowViewModel& vm, float s,
         const float text_r = actions_left - 12*s > tx + 160*s ? actions_left - 12*s : right - pad;
         const float name_h = painter ? painter->MeasureWrappedSectionHeight(item.name, (std::max)(1.0f, text_r - tx)) : 28*s*font;
         c.name = D2D1::RectF(tx, top + pad - 2*s, text_r, top + pad - 2*s + (std::max)(26*s*font, name_h));
-        float publisher_top=c.name.bottom+3*s;
-        if(item.enabled) {
-            const float bw=(std::min)(text_r-tx,(painter ? painter->MeasureBadgeWidth(l10n::Get(I::StoreExtensionEnabled)) : 100*s*font) + 12*s);
-            // The title draws at 20 dip semibold; the button measure is 14 dip body text plus
-            // 16 dip padding, so scale its text part (with a little slack for the weight).
-            const float nw=painter ? (painter->MeasureButtonWidth(item.name) - 16*s) * 1.5f + 8*s : 160*s*font;
-            if(tx+nw+8*s+bw<=text_r) {
-                c.name.right=tx+nw;
+        float publisher_top = c.name.bottom + 3*s;
+        if (item.enabled) {
+            const float bw = (std::min)(text_r - tx, (painter ? painter->MeasureBadgeWidth(l10n::Get(I::StoreExtensionEnabled)) : 100*s*font) + 12*s);
+            const float nw = painter ? (painter->MeasureButtonWidth(item.name) - 16*s) * 1.5f + 8*s : 160*s*font;
+            if (tx + nw + 8*s + bw <= text_r) {
+                c.name.right = tx + nw;
                 const float badge_h = 22*s*font;
                 const float badge_y = (c.name.top + c.name.bottom - badge_h) / 2;
-                c.enabled_badge=D2D1::RectF(c.name.right+8*s,badge_y,c.name.right+8*s+bw,badge_y+badge_h);
+                c.enabled_badge = D2D1::RectF(c.name.right + 8*s, badge_y, c.name.right + 8*s + bw, badge_y + badge_h);
             } else {
-                c.enabled_badge=D2D1::RectF(tx,publisher_top,tx+bw,publisher_top+22*s*font);
-                publisher_top=c.enabled_badge.bottom+4*s;
+                c.enabled_badge = D2D1::RectF(tx, publisher_top, tx + bw, publisher_top + 22*s*font);
+                publisher_top = c.enabled_badge.bottom + 4*s;
             }
         }
         c.publisher = D2D1::RectF(tx, publisher_top, text_r, publisher_top + 20*s*font);
         c.summary = D2D1::RectF(tx, c.publisher.bottom + 6*s, text_r, c.publisher.bottom + 6*s + height(item.summary, text_r - tx));
         float body = (std::max)(c.icon.bottom, c.summary.bottom) + 18*s;
         if (text_r > actions_left - 12*s && (store_view::Has(c.settings) || store_view::Has(c.button))) {
-            // Narrow: the actions move under the text.
             if (store_view::Has(c.settings)) {
-                c.settings = D2D1::RectF(left+pad, body, left+pad+aw, body+bh);
+                c.settings = D2D1::RectF(left + pad, body, left + pad + aw, body + bh);
                 if (store_view::Has(c.button)) {
-                    const float bw = c.button.right-c.button.left;
-                    const bool wrap = c.settings.right+8*s+bw > right-pad;
-                    const float bx = wrap ? left+pad : c.settings.right+8*s;
-                    const float by = wrap ? c.settings.bottom+8*s : body;
-                    c.button = D2D1::RectF(bx,by,bx+bw,by+bh);
+                    const float bw = c.button.right - c.button.left;
+                    const bool wrap = c.settings.right + 8*s + bw > right - pad;
+                    const float bx = wrap ? left + pad : c.settings.right + 8*s;
+                    const float by = wrap ? c.settings.bottom + 8*s : body;
+                    c.button = D2D1::RectF(bx, by, bx + bw, by + bh);
                 }
-                body = (std::max)(c.settings.bottom,c.button.bottom)+18*s;
+                body = (std::max)(c.settings.bottom, c.button.bottom) + 18*s;
             } else if (store_view::Has(c.button)) {
-                const float bw = c.button.right-c.button.left;
-                c.button = D2D1::RectF(left+pad, body, left+pad+bw, body+bh);
+                const float bw = c.button.right - c.button.left;
+                c.button = D2D1::RectF(left + pad, body, left + pad + bw, body + bh);
                 body = c.button.bottom + 18*s;
             }
         }
-        if (hero_has_settings) {
-            auto& q = l.store_quick;
-            q.on = true;
-            q.section = D2D1::RectF(left, body, right, body);
-            const bool split = right - left >= 680*s;
-            const float preview_w = split ? 256*s : 0.0f;
-            const float ql = left + pad, qr = right - preview_w - pad;
-            float qy = body + 16*s;
-            q.title = D2D1::RectF(ql, qy, qr, qy + 22*s*font);
-            const auto& saved_str = z.status.empty() ? l10n::Get(view.saved ? I::StoreSaved : I::StoreAutoSaved) : z.status;
-            const float saved_w = (std::min)(qr - ql, (painter ? painter->MeasureBadgeWidth(saved_str) : 138*s*font) + 22*s);
-            q.saved = D2D1::RectF((std::max)(ql, qr - saved_w), qy, qr, qy + 22*s*font);
-            const bool stacked_quick = qr-ql < 520*s*font;
-            if (stacked_quick) { q.saved = D2D1::RectF(ql, q.title.bottom+4*s, (std::min)(qr, ql+saved_w), q.title.bottom+4*s+22*s*font); }
-            else q.title.right=q.saved.left-8*s;
-            qy = q.saved.bottom + 6*s;
-            const float row_h = (stacked_quick ? 92 : 54)*s*font;
-            for (int i = 0; i < 3; ++i) { q.rows[i] = D2D1::RectF(ql, qy, qr, qy + row_h); qy += row_h; }
-            const float ch = 32*s*font;
-            auto control = [&](int row, float w, float right_edge) {
-                const float cy = stacked_quick ? q.rows[row].bottom-ch-6*s : (q.rows[row].top + q.rows[row].bottom - ch)/2;
-                return D2D1::RectF(right_edge - w, cy, right_edge, cy + ch);
-            };
-            q.mode = control(0, 196*s, qr);
-            q.level = control(1, 104*s, qr);
-            q.format = control(1, 104*s, q.level.left - 8*s);
-            q.remember = control(2, 40*s, qr);
-            q.remember.top += (ch - 20*s)/2; q.remember.bottom = q.remember.top + 20*s;
-            float qbottom = qy + 12*s;
-            // The menu preview: right column, or below the rows when narrow.
-            const float menu_h = store_view::MenuPreviewHeight(z.archive_rows, z.submenu, s);
-            if (split) {
-                q.preview = D2D1::RectF(right - preview_w, body, right, body);
-                q.preview_caption = D2D1::RectF(q.preview.left + 16*s, body + 16*s, right - 16*s, body + 16*s + 20*s);
-                q.preview_menu = D2D1::RectF(q.preview.left + 14*s, q.preview_caption.bottom + 8*s, right - 14*s, q.preview_caption.bottom + 8*s + menu_h);
-                qbottom = (std::max)(qbottom, q.preview_menu.bottom + 16*s);
-                q.preview.bottom = qbottom;
-            } else {
-                q.preview = D2D1::RectF(left, qbottom, right, qbottom);
-                q.preview_caption = D2D1::RectF(left + pad, qbottom + 12*s, right - pad, qbottom + 32*s);
-                q.preview_menu = D2D1::RectF(left + pad, q.preview_caption.bottom + 8*s, right - pad, q.preview_caption.bottom + 8*s + menu_h);
-                qbottom = q.preview_menu.bottom + 16*s;
-                q.preview.bottom = qbottom;
-            }
-            q.section.bottom = qbottom;
-            body = qbottom;
-        }
+        out_body = body;
         c.bounds = D2D1::RectF(left, top, right, body);
-        l.store_feature = c;
-        l.store_feature_item=hero;
-        y = c.bounds.bottom + 18*s;
+    };
+    l.store_generic_quick.clear();
+    for (size_t qidx = 0; qidx < view.quick_cards.size(); ++qidx) {
+        const auto& qc = view.quick_cards[qidx];
+        if (qc.item_index < 0 || static_cast<size_t>(qc.item_index) >= view.items.size()) continue;
+        const auto& item = view.items[static_cast<size_t>(qc.item_index)];
+        if (!store_view::Shown(view, store_view::CategoryChip(item.category), item.name, item.summary)) continue;
+
+        SettingsLayout::GenericQuickCard gq;
+        gq.item_index = qc.item_index;
+        gq.quick_index = static_cast<int>(qidx);
+        const float pad = 22*s;
+        const float top = y;
+        float body = y;
+        layout_hero_header(gq.card, item, store_view::HasSettings(view, item), body);
+
+        gq.section = D2D1::RectF(left, body, right, body);
+        const bool split = qc.has_menu_preview && (right - left >= 680*s);
+        // The preview stage sits in the card (16 DIP from its edges), 20 DIP after the settings column.
+        const float preview_w = split ? (std::clamp)((right - left) * 0.36f, 300*s, 360*s) : 0.0f;
+        const float ql = left + pad, qr = split ? right - 16*s - preview_w - 20*s : right - pad;
+        float qy = body + 16*s;
+        gq.title = D2D1::RectF(ql, qy, qr, qy + 22*s*font);
+        const auto& status_text = qc.status.empty() ? l10n::Get(view.saved ? I::StoreSaved : I::StoreAutoSaved) : qc.status;
+        const float saved_w = (std::min)(qr - ql, (painter ? painter->MeasureBadgeWidth(status_text) : 138*s*font) + 22*s);
+        gq.saved = D2D1::RectF((std::max)(ql, qr - saved_w), qy, qr, qy + 22*s*font);
+        const bool stacked_quick = qr - ql < 340*s*font;
+        if (stacked_quick) {
+            gq.saved = D2D1::RectF(ql, gq.title.bottom + 4*s, (std::min)(qr, ql + saved_w), gq.title.bottom + 4*s + 22*s*font);
+        } else {
+            gq.title.right = gq.saved.left - 8*s;
+        }
+        qy = gq.saved.bottom + 6*s;
+
+        // Settings rows: label and description on the left, the controls right-aligned and vertically
+        // centred on the same line. Only a row whose label would get under 150 DIP puts its controls
+        // underneath (one row at a time, not the whole card).
+        const size_t row_count = qc.available ? qc.rows.size() : (std::max)(size_t{1}, qc.rows.size());
+        const float ch = 32*s*font;
+        const auto control_width = [&](const ExtensionQuickControlView& ctrl) {
+            if (ctrl.kind == 1) return (std::min)(qr - ql, (ctrl.width_dip ? static_cast<float>(ctrl.width_dip) : 140.0f) * s);
+            if (ctrl.kind == 2) return (std::min)(qr - ql, ctrl.width_dip ? static_cast<float>(ctrl.width_dip) * s : width(ctrl.label));
+            return 40*s;
+        };
+        gq.rows.reserve(row_count);
+        for (size_t ri = 0; ri < row_count; ++ri) {
+            const ExtensionQuickRowView* row_view_ptr = qc.available && ri < qc.rows.size() ? &qc.rows[ri] : nullptr;
+            float controls_w = 0.0f;
+            if (row_view_ptr) {
+                for (const auto& ctrl : row_view_ptr->controls) controls_w += control_width(ctrl) + 8*s;
+            }
+            const bool stacked_row = controls_w > 0.0f && (qr - ql) - controls_w - 8*s < 150*s*font;
+            const float row_h = stacked_row ? 56*s*font + ch + 8*s : 56*s*font;
+            const D2D1_RECT_F row_rect = D2D1::RectF(ql, qy, qr, qy + row_h);
+            gq.rows.push_back(row_rect);
+            qy += row_h;
+            if (!row_view_ptr) continue;
+            const auto& row_view = *row_view_ptr;
+            float right_edge = qr;
+            const float cy = stacked_row ? row_rect.bottom - ch - 8*s : (row_rect.top + row_rect.bottom - ch) / 2;
+            for (size_t ci_rev = row_view.controls.size(); ci_rev > 0; --ci_rev) {
+                const auto& ctrl = row_view.controls[ci_rev - 1];
+                const float cw = control_width(ctrl);
+                const float cl = (std::max)(ql, right_edge - cw);
+                D2D1_RECT_F cr = D2D1::RectF(cl, cy, right_edge, cy + ch);
+                if (ctrl.kind == 0) {
+                    cr.top += (ch - 20*s) / 2;
+                    cr.bottom = cr.top + 20*s;
+                }
+                gq.controls.push_back({cr, ctrl.action, static_cast<int>(ri), ctrl.kind, ctrl.disabled});
+                right_edge = cl - 8*s;
+            }
+        }
+
+        float qbottom = qy + 12*s;
+        if (qc.available && qc.has_menu_preview) {
+            const float menu_h = (std::max)(84*s, store_view::MenuPreviewHeight(qc.preview_rows, qc.preview_submenu, s));
+            if (split) {
+                gq.preview = D2D1::RectF(right - 16*s - preview_w, body + 14*s, right - 16*s, body + 14*s);
+            } else {
+                gq.preview = D2D1::RectF(left + pad, qbottom, right - pad, qbottom);
+            }
+            gq.preview_caption = D2D1::RectF(gq.preview.left + 14*s, gq.preview.top + 12*s,
+                                             gq.preview.right - 14*s, gq.preview.top + 12*s + 20*s*font);
+            const float menu_w = (std::min)(gq.preview.right - gq.preview.left - 28*s, 340*s);
+            gq.preview_menu = D2D1::RectF(gq.preview.left + 14*s, gq.preview_caption.bottom + 10*s,
+                                          gq.preview.left + 14*s + menu_w, gq.preview_caption.bottom + 10*s + menu_h);
+            gq.preview.bottom = gq.preview_menu.bottom + 18*s;
+            qbottom = split ? (std::max)(qbottom, gq.preview.bottom + 16*s) : gq.preview.bottom + 16*s;
+        }
+        gq.section.bottom = qbottom;
+        body = qbottom;
+        gq.card.bounds = D2D1::RectF(left, top, right, body);
+        y = gq.card.bounds.bottom + 18*s;
+        l.store_generic_quick.push_back(std::move(gq));
     }
     // Chips, then the catalog state and 刷新 at the end of the same row.
     {
@@ -613,391 +653,391 @@ float LayoutSettingsStore(SettingsLayout& l, const WindowViewModel& vm, float s,
     return y + 12*s;
 }
 
-// The 7-Zip detail page: header, four tabs, and the menu preview beside them.
-float LayoutSevenZipDetail(SettingsLayout& l, const WindowViewModel& vm, float s,
-                           float y, const fluent::Painter* painter) {
+std::wstring ExtensionDetailSubtitle(bool official, const std::wstring& summary) {
+    std::wstring text = official ? l10n::Get(l10n::StringId::StoreOfficial) : std::wstring{};
+    if (!summary.empty()) text += (text.empty() ? L"" : L" · ") + summary;
+    return text;
+}
+// One template owns the geometry of every package detail header.
+float LayoutExtensionDetailHeader(SettingsLayout::DetailHeader& d, bool enabled, bool official,
+                                 const std::wstring& version, const std::wstring& summary,
+                                 float left, float right, float y, float s, float font,
+                                 const fluent::Painter* painter,
+                                 bool installed = true, std::wstring_view action_label = {},
+                                 std::wstring_view status_text = {}) {
     using I = l10n::StringId;
-    const auto& view = vm.settings_store_view;
-    const auto& z = view.seven_zip;
-    auto& d = l.sz;
     d.on = true;
-    const float left = l.content.left + 20*s, right = l.content.right - 20*s;
-    const float font = static_cast<float>(vm.settings_ui_font_scale)/100;
+    d.install_button = {};
+    d.enable = {};
+    d.enable_label = {};
+    d.more = {};
     const float bh = 32*s*font;
     auto height = [&](std::wstring_view value, float w) {
-        return value.empty() ? 0.0f : painter ? painter->MeasureWrappedCaptionHeight(value, (std::max)(1.0f, w)) : 40*s*font;
+        return painter ? painter->MeasureWrappedCaptionHeight(value, (std::max)(1.0f, w)) : 40*s*font;
     };
     auto width = [&](std::wstring_view value) {
         return (std::min)(right-left, painter ? painter->MeasureButtonWidth(value) : 144*s*font);
     };
-    const auto& item = view.items[static_cast<size_t>(z.item)];
     // Crumb: ‹ 扩展商店 › name.
     const float crumb_w = width(l10n::Get(I::StoreTitle)) + 8*s;
     d.crumb = D2D1::RectF(left - 6*s, y, left + crumb_w, y + 28*s*font);
     d.crumb_name = D2D1::RectF(d.crumb.right + 4*s, y, right, y + 28*s*font);
     y = d.crumb.bottom + 16*s;
-    // Header: the tile, name, the publisher line and badges; the switch and ⋯ at the right.
+    // Header: the tile, name, the publisher line and badges; optional action button, switch and ⋯ at the right.
     d.icon = D2D1::RectF(left, y, left + 72*s, y + 72*s);
     const float more_w = 36*s;
-    d.more = D2D1::RectF(right - more_w, y + 18*s, right, y + 18*s + bh);
-    d.enable = D2D1::RectF(d.more.left - 12*s - 40*s, y + 18*s + (bh - 20*s)/2, d.more.left - 12*s, y + 18*s + (bh + 20*s)/2);
     const float label_w = 64*s*font;
-    d.enable_label = D2D1::RectF(d.enable.left - 10*s - label_w, y + 18*s, d.enable.left - 10*s, y + 18*s + bh);
+    const float action_w = action_label.empty() ? 0.0f : width(action_label);
+    float controls_left = right;
+    if (installed) {
+        d.more = D2D1::RectF(right - more_w, y + 18*s, right, y + 18*s + bh);
+        d.enable = D2D1::RectF(d.more.left - 12*s - 40*s, y + 18*s + (bh - 20*s)/2, d.more.left - 12*s, y + 18*s + (bh + 20*s)/2);
+        d.enable_label = D2D1::RectF(d.enable.left - 10*s - label_w, y + 18*s, d.enable.left - 10*s, y + 18*s + bh);
+        controls_left = d.enable_label.left;
+        if (!action_label.empty()) {
+            d.install_button = D2D1::RectF(controls_left - 12*s - action_w, y + 18*s, controls_left - 12*s, y + 18*s + bh);
+            controls_left = d.install_button.left;
+        }
+    } else if (!action_label.empty()) {
+        d.install_button = D2D1::RectF(right - action_w, y + 18*s, right, y + 18*s + bh);
+        controls_left = d.install_button.left;
+    }
     const float tx = d.icon.right + 18*s;
-    const bool narrow_head = d.enable_label.left - tx < 260*s;
-    const float tr = narrow_head ? right : d.enable_label.left - 16*s;
+    const bool narrow_head = (controls_left < right) && (controls_left - tx < 260*s);
+    const float tr = narrow_head || controls_left >= right ? right : controls_left - 16*s;
     d.name = D2D1::RectF(tx, y - 2*s, tr, y + 34*s*font);
-    d.sub = D2D1::RectF(tx, d.name.bottom + 2*s, tr, d.name.bottom + 2*s + height(L"x", tr - tx));
+    d.sub = D2D1::RectF(tx, d.name.bottom + 2*s, tr, d.name.bottom + 2*s + height(ExtensionDetailSubtitle(official, summary), tr - tx - (official ? 20*s : 0)));
     float bx = tx;
     float by = d.sub.bottom + 8*s;
     const std::wstring badges[3] = {
-        l10n::Get(item.enabled ? I::StoreExtensionEnabled : I::StoreExtensionDisabled),
-        l10n::Get(I::StoreNativeCode),
-        item.version.empty() ? std::wstring{} : item.version + (item.size.empty() ? std::wstring{} : L" · " + item.size)};
+        l10n::Get(!installed ? I::StoreDetailNotInstalled : enabled ? I::StoreExtensionEnabled : I::StoreExtensionDisabled),
+        std::wstring{},
+        version};
     for (int i = 0; i < 3; ++i) {
         if (badges[i].empty()) continue;
-        const float bw = (std::min)(right-tx, (painter ? painter->MeasureBadgeWidth(badges[i]) : 120*s) + (i == 0 ? 14*s : 0.0f));
+        const float bw = (std::min)(right-tx, (painter ? painter->MeasureBadgeWidth(badges[i]) : 120*s) + (i == 0 && installed ? 14*s : 0.0f));
         if (bx>tx && bx+bw>right) { bx=tx; by+=24*s*font+6*s; }
         d.badges[i] = D2D1::RectF(bx, by, bx + bw, by + 24*s*font);
         bx = d.badges[i].right + 6*s;
     }
+    d.status_pill = {};
+    if (!status_text.empty()) {
+        const float sbw = (std::min)(right-tx, painter ? painter->MeasureBadgeWidth(status_text) + 12*s : 112*s);
+        if (bx>tx && bx+sbw>right) { bx=tx; by+=24*s*font+6*s; }
+        d.status_pill = D2D1::RectF(bx, by, bx + sbw, by + 24*s*font);
+        bx = d.status_pill.right + 6*s;
+    }
     y = (std::max)(d.icon.bottom, by+24*s*font) + 18*s;
     if (narrow_head) {
-        // Narrow: the switch row goes under the badges.
-        d.enable_label = D2D1::RectF(left, y, left + label_w, y + bh);
-        d.enable = D2D1::RectF(d.enable_label.right + 10*s, y + (bh - 20*s)/2, d.enable_label.right + 50*s, y + (bh + 20*s)/2);
-        d.more = D2D1::RectF(d.enable.right + 12*s, y, d.enable.right + 12*s + more_w, y + bh);
+        float ax = left;
+        if (!action_label.empty()) {
+            d.install_button = D2D1::RectF(ax, y, ax + action_w, y + bh);
+            ax = d.install_button.right + 12*s;
+        }
+        if (installed) {
+            const float switch_group_w = label_w + 10*s + 40*s + 12*s + more_w;
+            if (ax > left && ax + switch_group_w > right) {
+                ax = left;
+                y += bh + 8*s;
+            }
+            d.enable_label = D2D1::RectF(ax, y, ax + label_w, y + bh);
+            d.enable = D2D1::RectF(d.enable_label.right + 10*s, y + (bh - 20*s)/2, d.enable_label.right + 50*s, y + (bh + 20*s)/2);
+            d.more = D2D1::RectF(d.enable.right + 12*s, y, d.enable.right + 12*s + more_w, y + bh);
+        }
         y += bh + 14*s;
     }
-    if (!item.enabled || z.needs_restart || view.pending_restart) {
-        const bool show_restart_btn = item.enabled && (z.needs_restart || view.pending_restart);
-        const auto banner_text = l10n::Get(!item.enabled ? I::SzDisabledNote : I::StoreRestart);
-        if (show_restart_btn) {
-            const float rbw = (std::min)(right - left - 28*s, width(l10n::Get(I::StoreRestartNow)));
-            const bool inline_btn = right - left - 28*s - rbw - 12*s >= 180*s;
-            if (inline_btn) {
-                const float text_w = right - left - 28*s - rbw - 12*s;
-                const float th = height(banner_text, text_w);
-                const float row_h = (std::max)(th, bh);
-                d.disabled_banner = D2D1::RectF(left + 14*s, y + (row_h - th)/2, right - 14*s - rbw - 12*s, y + (row_h + th)/2);
-                l.store_restart_button = D2D1::RectF(right - 14*s - rbw, y + (row_h - bh)/2, right - 14*s, y + (row_h + bh)/2);
-                y += row_h + 20*s;
-            } else {
-                d.disabled_banner = D2D1::RectF(left + 14*s, y, right - 14*s, y + height(banner_text, right - left - 28*s));
-                l.store_restart_button = D2D1::RectF(left + 14*s, d.disabled_banner.bottom + 8*s, left + 14*s + rbw, d.disabled_banner.bottom + 8*s + bh);
-                y = l.store_restart_button.bottom + 20*s;
-            }
-        } else {
-            d.disabled_banner = D2D1::RectF(left + 14*s, y, right - 14*s, y + height(banner_text, right - left - 28*s));
-            y = d.disabled_banner.bottom + 20*s;
+    return y;
+}
+inline float LayoutExtensionDetailTabsCustom(SettingsLayout::DetailHeader& d,
+                                             const std::wstring* titles, const int* actions, int count,
+                                             float left, float right, float y, float s, float font,
+                                             const fluent::Painter* painter) {
+    count = (std::clamp)(count, 0, SettingsLayout::DetailHeader::kMaxTabs);
+    d.tab_count = count;
+    float x = left;
+    const float height = 38*s*font;
+    for (int i = 0; i < count; ++i) {
+        d.tab_titles[i] = titles[i];
+        d.tab_actions[i] = actions[i];
+        const float width = (std::min)(right-left, painter ? painter->MeasureButtonWidth(titles[i]) : 96*s);
+        if (x > left && x + width > right) { x = left; y += height + 6*s; }
+        d.tabs[i] = D2D1::RectF(x, y, x + width, y + height);
+        x += width + 4*s;
+    }
+    for (int i = count; i < SettingsLayout::DetailHeader::kMaxTabs; ++i) {
+        d.tabs[i] = {};
+        d.tab_titles[i].clear();
+        d.tab_actions[i] = -1;
+    }
+    return y + height + 20*s;
+}
+inline float LayoutExtensionDetailTabsSpec(SettingsLayout::DetailHeader& d,
+                                           const l10n::StringId* labels, const int* actions, int count,
+                                           float left, float right, float y, float s, float font,
+                                           const fluent::Painter* painter) {
+    count = (std::clamp)(count, 0, SettingsLayout::DetailHeader::kMaxTabs);
+    std::wstring titles[SettingsLayout::DetailHeader::kMaxTabs];
+    for (int i = 0; i < count; ++i) {
+        d.tab_labels[i] = labels[i];
+        titles[i] = l10n::Get(labels[i]);
+    }
+    return LayoutExtensionDetailTabsCustom(d, titles, actions, count, left, right, y, s, font, painter);
+}
+float LayoutExtensionDetailTabs(SettingsLayout::DetailHeader& d, int count, float left, float right,
+                               float y, float s, float font, const fluent::Painter* painter) {
+    using I = l10n::StringId;
+    static constexpr I ids[] = {I::SzTabSettings, I::SzTabMenu, I::SzTabFormats, I::SzTabAbout};
+    int actions[4]{};
+    const int base = static_cast<int>(PackAction::StoreDetailTabBase);
+    for (int i = 0; i < 4; ++i) actions[i] = base + i;
+    return LayoutExtensionDetailTabsSpec(d, ids, actions, count, left, right, y, s, font, painter);
+}
+
+// Generic store detail / showcase page for any catalog or local extension.
+float LayoutExtensionDetail(SettingsLayout& l, const WindowViewModel& vm, float s,
+                            float y, const fluent::Painter* painter) {
+    using I = l10n::StringId;
+    const auto& view = vm.settings_store_view;
+    const int item_index = store_view::ActiveDetailItem(view);
+    if (item_index < 0 || item_index >= static_cast<int>(view.items.size())) return y;
+    const auto& item = view.items[static_cast<size_t>(item_index)];
+    auto& d = l.ext_detail;
+    const float left = l.content.left + 20*s, right = l.content.right - 20*s;
+    const float font = static_cast<float>(vm.settings_ui_font_scale)/100;
+    auto height = [&](std::wstring_view value, float w) {
+        return value.empty() ? 0.0f : painter ? painter->MeasureWrappedCaptionHeight(value, (std::max)(1.0f, w)) : 40*s*font;
+    };
+    const std::wstring_view action_label = (!item.button_label.empty() && (!item.installed || item.action_enabled))
+        ? std::wstring_view{item.button_label} : std::wstring_view{};
+    const std::wstring ver = item.version + (item.size.empty() ? std::wstring{} : L" · " + item.size);
+    y = LayoutExtensionDetailHeader(d, item.enabled, item.official, ver, item.summary,
+        left, right, y, s, font, painter, item.installed, action_label);
+    store_view::LayoutStatusBanners(l, view, false, false, false, left, right, s, font, y, painter);
+
+    l10n::StringId tab_labels[4]{};
+    int tab_actions[4]{};
+    int tab_count = 0;
+    if (item.installed && item.settings_package >= 0) {
+        tab_labels[tab_count] = I::SzTabSettings;
+        tab_actions[tab_count++] = static_cast<int>(PackAction::StoreDetailOpenSettings);
+        if (item.has_menu_tab) {
+            tab_labels[tab_count] = I::SzTabMenu;
+            tab_actions[tab_count++] = static_cast<int>(PackAction::StoreDetailOpenMenu);
         }
     }
-    // Tabs (pivot).
-    float tx2 = left;
-    const float tab_h = 38*s*font;
-    for (int i = 0; i < 4; ++i) {
-        static constexpr I ids[] = {I::SzTabSettings, I::SzTabMenu, I::SzTabFormats, I::SzTabAbout};
-        const float tw = (painter ? painter->MeasureButtonWidth(l10n::Get(ids[i])) : 96*s);
-        if (tx2 > left && tx2 + tw > right) { tx2 = left; y += tab_h + 6*s; }
-        d.tabs[i] = D2D1::RectF(tx2, y, tx2 + tw, y + tab_h);
-        tx2 += tw + 4*s;
+    tab_labels[tab_count] = I::StoreDetailTabOverview;
+    tab_actions[tab_count++] = static_cast<int>(PackAction::StoreDetailTabBase);
+    tab_labels[tab_count] = I::SzTabAbout;
+    tab_actions[tab_count++] = static_cast<int>(PackAction::StoreDetailTabBase) + 1;
+    y = LayoutExtensionDetailTabsSpec(d, tab_labels, tab_actions, tab_count, left, right, y, s, font, painter);
+
+    if (view.detail_tab == 1) {
+        const float ml = left, mr = right;
+        d.body = D2D1::RectF(ml, y, mr, y);
+        // Details as a grid of key-over-value cells (3, 2 or 1 per row by width), then the release
+        // history as a timeline: a rail with one dot per release, the version, the current badge, its note.
+        const float g0 = y;
+        const int cols = mr - ml >= 760*s*font ? 3 : mr - ml >= 460*s*font ? 2 : 1;
+        const float il = ml + 20*s, ir = mr - 20*s, col_gap = 24*s;
+        const float cw = (std::max)(1.0f, (ir - il - col_gap * static_cast<float>(cols - 1)) / static_cast<float>(cols));
+        float cy = y + 18*s;
+        for (int i = 0; i < 6; i += cols) {
+            float row_h = 0.0f;
+            for (int c = 0; c < cols && i + c < 6; ++c) {
+                const int k = i + c;
+                auto value = store_view::AboutValue(view, item, k);
+                if (k == 5 && value.empty() && !item.homepage.empty()) value = item.homepage;
+                const float x = il + static_cast<float>(c) * (cw + col_gap);
+                const float vw = (std::max)(1.0f, cw - (k == 0 && item.official ? 19*s : 0.0f));
+                const float vh = (std::max)(22*s*font, height(value, vw));
+                d.about_keys[k] = {x, cy, x + cw, cy + 18*s*font};
+                d.about_values[k] = {x, d.about_keys[k].bottom + 4*s, x + cw, d.about_keys[k].bottom + 4*s + vh};
+                d.about_rows[k] = {x, cy, x + cw, d.about_values[k].bottom};
+                row_h = (std::max)(row_h, d.about_rows[k].bottom - cy);
+            }
+            cy += row_h + 18*s;
+        }
+        if (item.source.starts_with(L"https://") || item.source.starts_with(L"http://"))
+            d.about_source = d.about_values[5];
+        else if (item.source.empty() && (item.homepage.starts_with(L"https://") || item.homepage.starts_with(L"http://")))
+            d.about_homepage = d.about_values[5];
+        y = cy;
+        d.groups[0] = D2D1::RectF(ml, g0, mr, y);
+        if (store_view::HistoryCount(item) > 0) {
+            y += 24*s;
+            d.history_label = D2D1::RectF(ml + 2*s, y, mr, y + 22*s*font);
+            y = d.history_label.bottom + 8*s;
+            const float g1 = y;
+            y += 8*s;
+            const auto installed_version = store_view::InstalledVersion(view, item);
+            const float vx = ml + 48*s;
+            for (size_t i = 0; i < store_view::HistoryCount(item) && i < 8; ++i) {
+                const bool current = !installed_version.empty() && store_view::HistoryVersion(item, i) == installed_version;
+                const auto note = store_view::HistoryNote(item, i);
+                const float version_w = (std::min)(mr - vx - 20*s, 120*s*font);
+                const D2D1_RECT_F version{vx, y + 10*s, vx + version_w, y + 10*s + 22*s*font};
+                const float badge_w = current ? (painter ? painter->MeasureBadgeWidth(l10n::Get(I::SzAboutCurrent)) : 64*s) : 0.0f;
+                const float nh = note.empty() ? 0.0f : (std::max)(20*s*font, height(note, (std::max)(1.0f, mr - 20*s - vx)));
+                const D2D1_RECT_F note_rect{vx, version.bottom + 2*s, mr - 20*s, version.bottom + 2*s + nh};
+                const float rh = note_rect.bottom - y + 10*s;
+                d.history_rows.push_back({ml, y, mr, y + rh});
+                d.history_versions.push_back(version);
+                d.history_notes.push_back(note_rect);
+                d.history_current.push_back(current && version.right + 8*s + badge_w <= mr - 20*s
+                    ? D2D1::RectF(version.right + 8*s, version.top, version.right + 8*s + badge_w, version.bottom)
+                    : D2D1::RectF());
+                y += rh;
+            }
+            y += 8*s;
+            d.history_card = {ml, g1, mr, y};
+        }
+        y += 24*s;
+        d.body.bottom = y;
+        return y;
     }
-    y = d.tabs[3].bottom + 20*s;
-    // Body and the preview column.
+
     const bool split = right - left >= 680*s;
     const float side_w = split ? (right - left >= 780*s ? 286*s : 264*s) : 0.0f;
     const float ml = left, mr = split ? right - side_w - 20*s : right;
     d.body = D2D1::RectF(ml, y, mr, y);
-    const float opt_gap = 8*s;
-    const float option_left = ml + (mr-ml < 440*s ? 16 : 62)*s;
-    auto group_begin = [&](int index, std::wstring_view label) {
-        if (index >= 0 && index < 3) { d.section_label[index] = D2D1::RectF(ml + 2*s, y, mr, y + 22*s*font); }
-        (void)label;
-        y += 22*s*font + 8*s;
-        return y;
-    };
-    // A row: 32 dip icon tile + title over description; returns the row and moves y.
-    auto head_row = [&](std::wstring_view desc, float control_w) {
-        const float textw = mr - ml - 32*s - 46*s - control_w;
-        const float h = 16*s + 22*s*font + height(desc, textw) + 14*s;
-        const auto r = D2D1::RectF(ml, y, mr, y + (std::max)(64*s, h));
-        y = r.bottom;
-        return r;
-    };
-    if (z.TabAvailable(view.detail_tab) || view.detail_tab == 3) {
-        if (view.detail_tab == 0) {
-            // 接管压缩包 (archive_icons_mockup.html): the switch, one row per format, what a double-click does.
-            if (z.take_available) {
-                d.take_label = D2D1::RectF(ml + 2*s, y, mr, y + 22*s*font);
-                y += 22*s*font + 8*s;
-                const float gt = y;
-                d.take_row = head_row(l10n::Get(I::SzTakeDesc), 60*s);
-                const float mid = (d.take_row.top + d.take_row.bottom) / 2;
-                d.take_switch = D2D1::RectF(mr - 16*s - 40*s, mid - 10*s, mr - 16*s, mid + 10*s);
-                const float ll = ml + 16*s, lr = mr - 16*s;
-                y += 6*s;
-                // The summary line, with 逐个确认 and (for several) 在 Windows 设置里一起改 at its right.
-                float buttons_left = lr;
-                if (!z.take_busy && z.ask_any) {
-                    const float nw = width(l10n::Get(I::SzTakeConfirmEach));
-                    d.take_next = D2D1::RectF(lr - nw, y, lr, y + bh);
-                    buttons_left = d.take_next.left - 8*s;
-                    if (z.ask_many) {
-                        const float ww = width(l10n::Get(I::SzTakeWinSettings));
-                        if (buttons_left - ww - ll >= 160*s) {
-                            d.take_winsettings = D2D1::RectF(buttons_left - ww, y, buttons_left, y + bh);
-                            buttons_left = d.take_winsettings.left - 8*s;
-                        }
-                    }
-                }
-                const auto& head = z.take_busy ? l10n::Get(I::SzTakeBusy) : z.take_head;
-                const float head_h = (std::max)(bh, height(head, buttons_left - ll - 8*s));
-                d.take_head = D2D1::RectF(ll + 8*s, y, buttons_left - 8*s, y + head_h);
-                y += head_h + 6*s;
-                if (!z.take_busy) {
-                    for (const auto& row : z.take_rows) {
-                        SettingsLayout::SevenZipDetail::TakeRow r;
-                        const float ask_w = row.ask ? width(l10n::Get(row.ask_windows ? I::SzTakeAskSet : I::SzTakeAskChange)) : 0.0f;
-                        const float name_w = (std::clamp)((lr - ll) * 0.3f, 128*s, 220*s);
-                        const float status_x = ll + 8*s + 18*s + 12*s + 24*s + 10*s + name_w + 8*s;
-                        const float status_r = row.ask ? lr - 8*s - ask_w - 8*s : lr - 8*s;
-                        // Narrow: the status goes under the name.
-                        const bool stacked = status_r - status_x < 120*s;
-                        const float row_h = (stacked ? 62 : 46)*s*font;
-                        r.bounds = D2D1::RectF(ll, y, lr, y + row_h);
-                        const float cy = stacked ? y + 23*s*font : y + row_h / 2;
-                        r.check = D2D1::RectF(ll + 8*s, cy - 9*s, ll + 26*s, cy + 9*s);
-                        r.icon = D2D1::RectF(r.check.right + 12*s, cy - 12*s, r.check.right + 36*s, cy + 12*s);
-                        r.name = D2D1::RectF(r.icon.right + 10*s, y + 4*s, stacked ? lr - 8*s - ask_w - 8*s : r.icon.right + 10*s + name_w, y + 42*s*font);
-                        r.status = stacked ? D2D1::RectF(r.name.left, r.name.bottom, lr - 8*s, r.bounds.bottom - 4*s)
-                                           : D2D1::RectF(r.name.right + 8*s, y, status_r, r.bounds.bottom);
-                        if (row.ask) r.ask = D2D1::RectF(lr - 8*s - ask_w, cy - bh / 2, lr - 8*s, cy + bh / 2);
-                        d.take_rows.push_back(r);
-                        y = r.bounds.bottom;
-                    }
-                }
-                y += 10*s;
-                d.double_click_row = head_row(l10n::Get(I::SzDblDesc), 0);
-                const bool two = mr - ml - 78*s >= 440*s;
-                for (int i = 0; i < 2; ++i) {
-                    const float ow = two ? (mr - 16*s - option_left - opt_gap) / 2 : mr - 16*s - option_left;
-                    const auto& desc = l10n::Get(i ? I::SzDblOpenDesc : I::SzModeSmartDesc);
-                    const float oh = 14*s + 20*s*font + height(desc, ow - 46*s) + 12*s;
-                    const float ox = option_left + (two ? i * (ow + opt_gap) : 0.0f);
-                    const float oy = two || i == 0 ? y : d.double_click_opts[0].bottom + opt_gap;
-                    d.double_click_opts[i] = D2D1::RectF(ox, oy, ox + ow, oy + (std::max)(62*s*font, oh));
-                }
-                if (two) {
-                    const float tallest = (std::max)(d.double_click_opts[0].bottom, d.double_click_opts[1].bottom);
-                    d.double_click_opts[0].bottom = d.double_click_opts[1].bottom = tallest;
-                }
-                y = d.double_click_opts[1].bottom + opt_gap + 10*s;
-                d.take_group = D2D1::RectF(ml, gt, mr, y);
-                y += 22*s;
-            }
-            const float g0 = group_begin(0, l10n::Get(I::SzSectionExtract));
-            d.mode_row = head_row(l10n::Get(I::SzModeDesc), 0);
-            for (int i = 0; i < 3; ++i) {
-                const float h = 14*s + 20*s*font + height(store_view::ModeDesc(i), mr - ml - 46*s - 56*s) + 12*s;
-                d.mode_opts[i] = D2D1::RectF(option_left, y, mr - 16*s, y + h);
-                y = d.mode_opts[i].bottom + opt_gap;
-            }
-            y += 8*s;
-            d.location_row = head_row(l10n::Get(I::SzLocationDesc), 0);
-            const bool two = mr - ml - 78*s >= 440*s;
-            for (int i = 0; i < 2; ++i) {
-                const float ow = two ? (mr - 16*s - (option_left) - opt_gap) / 2 : mr - 16*s - (option_left);
-                const float ox = option_left + (two ? i * (ow + opt_gap) : 0.0f);
-                const float oy = two ? y : y + i * (62*s*font + opt_gap);
-                d.location_opts[i] = D2D1::RectF(ox, oy, ox + ow, oy + 62*s*font);
-            }
-            y = d.location_opts[1].bottom + opt_gap;
-            if (z.location == 1) {
-                const float bw = width(l10n::Get(I::Browse));
-                d.browse = D2D1::RectF(mr - 16*s - bw, y + 2*s, mr - 16*s, y + 2*s + bh);
-                d.folder = D2D1::RectF(option_left, y + 2*s, d.browse.left - 8*s, y + 2*s + bh);
-                if (d.folder.right-d.folder.left < 140*s) {
-                    d.folder.right=mr-16*s;
-                    d.browse.top=d.folder.bottom+8*s; d.browse.bottom=d.browse.top+bh;
-                }
-                y = d.browse.bottom + opt_gap;
-            }
-            y += 10*s;
-            d.groups[0] = D2D1::RectF(ml, g0, mr, y);
-            y += 22*s;
-            const float g1 = group_begin(1, l10n::Get(I::SzSectionCompress));
-            d.format_row = head_row(store_view::Fill(l10n::Get(I::SzFormatDesc), L"{name}", store_view::FormatName(z.format)), 0);
-            const int cols = mr-option_left-16*s >= 520*s ? 3 : 2;
-            const float tw = (mr - 16*s - (option_left) - opt_gap * (cols - 1)) / cols;
-            float tile_bottom = y;
-            for (int i = 0; i < 6; ++i) {
-                const float h = 14*s + 20*s*font + height(store_view::FormatDesc(i), tw - 46*s) + 12*s;
-                const int col = i % cols, row = i / cols;
-                (void)row;
-                if (col == 0 && i) y = tile_bottom + opt_gap;
-                d.format_opts[i] = D2D1::RectF(option_left + col * (tw + opt_gap), y, option_left + col * (tw + opt_gap) + tw, y + h);
-                tile_bottom = (std::max)(tile_bottom, d.format_opts[i].bottom);
-            }
-            // Tiles of one row share the tallest height.
-            for (int i = 0; i < 6; i += cols) {
-                float tallest = 0;
-                for (int k = i; k < i + cols && k < 6; ++k) tallest = (std::max)(tallest, d.format_opts[k].bottom - d.format_opts[k].top);
-                for (int k = i; k < i + cols && k < 6; ++k) d.format_opts[k].bottom = d.format_opts[k].top + tallest;
-            }
-            y = tile_bottom + 14*s;
-            d.level_row = head_row(l10n::Get(I::SzLevelDesc), 0);
-            d.level_value = D2D1::RectF(option_left,y,mr-16*s,y+22*s*font);
-            y=d.level_value.bottom+8*s;
-            d.level_track = D2D1::RectF(option_left, y, mr - 16*s, y + fluent::StepSliderHeight(s));
-            for (int i = 0; i < 6; ++i) {
-                const float cx=fluent::StepSliderStopX(d.level_track,6,static_cast<float>(i),s);
-                const float hit_left=i==0 ? d.level_track.left : (cx+fluent::StepSliderStopX(d.level_track,6,static_cast<float>(i-1),s))/2;
-                const float hit_right=i==5 ? d.level_track.right : (cx+fluent::StepSliderStopX(d.level_track,6,static_cast<float>(i+1),s))/2;
-                d.level_stops[i] = D2D1::RectF(hit_left,y,hit_right,d.level_track.bottom+26*s*font);
-            }
-            y = d.level_track.bottom + 26*s*font;
-            d.groups[1] = D2D1::RectF(ml, g1, mr, y);
-            y += 12*s;
-            d.compress_note = D2D1::RectF(ml + 24*s, y, mr, y + height(l10n::Get(I::SzCompressNote), mr - ml - 24*s));
-            y = d.compress_note.bottom + 22*s;
-            const float g2 = group_begin(2, l10n::Get(I::SzSectionPassword));
-            d.remember_row = head_row(l10n::Get(I::SzRememberDesc), 60*s);
-            d.remember = D2D1::RectF(mr - 16*s - 40*s, (d.remember_row.top + d.remember_row.bottom)/2 - 10*s, mr - 16*s, (d.remember_row.top + d.remember_row.bottom)/2 + 10*s);
-            d.groups[2] = D2D1::RectF(ml, g2, mr, y);
-            y += 12*s;
-            d.rar_note = D2D1::RectF(ml + 24*s, y, mr, y + height(l10n::Get(I::SzRarNote), mr - ml - 24*s));
-            y = d.rar_note.bottom + 24*s;
-        } else if (view.detail_tab == 1) {
-            const float g0 = group_begin(0, l10n::Get(I::SzPlacementTitle));
-            y += 14*s;
-            const bool two = mr - ml - 32*s >= 440*s;
-            for (int i = 0; i < 2; ++i) {
-                const float ow = two ? (mr - ml - 32*s - opt_gap) / 2 : mr - ml - 32*s;
-                const float ox = ml + 16*s + (two ? i * (ow + opt_gap) : 0.0f);
-                const float oy = two ? y : y + i * (62*s*font + opt_gap);
-                d.placement_opts[i] = D2D1::RectF(ox, oy, ox + ow, oy + 62*s*font);
-            }
-            y = d.placement_opts[1].bottom + 16*s;
-            d.groups[0] = D2D1::RectF(ml, g0, mr, y);
-            y += 22*s;
-            d.commands_label = D2D1::RectF(ml + 2*s, y, mr, y + 22*s*font);
-            y += 22*s*font + 8*s;
-            const float g1 = y;
-            for (int i = 0; i < 6; ++i) {
-                // StorePainter::Row: the title from top+10 (24 DIP at 100% text), the
-                // caption under it and 10 DIP below; the tag may wrap on a narrow page.
-                const float caption_h = height(store_view::CommandTag(i), mr - ml - 62*s - 76*s);
-                const float row_h = (std::max)(56*s, (12 + 24*font)*s + caption_h + 10*s);
-                d.command_rows[i] = D2D1::RectF(ml, y, mr, y + row_h);
-                d.command_switch[i] = D2D1::RectF(mr - 16*s - 40*s, (d.command_rows[i].top + d.command_rows[i].bottom)/2 - 10*s,
-                                                  mr - 16*s, (d.command_rows[i].top + d.command_rows[i].bottom)/2 + 10*s);
-                y = d.command_rows[i].bottom;
-            }
-            d.groups[1] = D2D1::RectF(ml, g1, mr, y);
-            y += 24*s;
-        } else if (view.detail_tab == 2) {
-            const float g0 = y;
-            y += 16*s;
-            auto chips = [&](D2D1_RECT_F& label, std::vector<D2D1_RECT_F>& out, const std::vector<std::wstring>& names) {
-                label = D2D1::RectF(ml + 16*s, y, mr - 16*s, y + 22*s*font);
-                y = label.bottom + 8*s;
-                float cx = ml + 16*s;
-                const float ch = 24*s*font;
-                out.clear();
-                for (const auto& name : names) {
-                    const float cw = painter ? painter->MeasureMonospaceBadgeWidth(name) : (28.0f+12.0f*static_cast<float>(name.size()))*s*font;
-                    if (cx > ml + 16*s && cx + cw > mr - 16*s) { cx = ml + 16*s; y += ch + 6*s; }
-                    out.push_back(D2D1::RectF(cx, y, cx + cw, y + ch));
-                    cx += cw + 6*s;
-                }
-                y += ch + 16*s;
-            };
-            chips(d.formats_rw_label, d.chips_rw, z.formats_rw);
-            chips(d.formats_ro_label, d.chips_ro, z.formats_ro);
-            d.groups[0] = D2D1::RectF(ml, g0, mr, y);
-            y += 12*s;
-            d.formats_note = D2D1::RectF(ml + 24*s, y, mr, y + height(l10n::Get(I::SzFormatsNote), mr - ml - 24*s));
-            y = d.formats_note.bottom + 24*s;
-        } else {
-            const float g0 = y;
-            y += 10*s;
-            const bool stacked=mr-ml<400*s*font;
-            for(int i=0;i<6;++i) {
-                const auto value=store_view::AboutValue(view,item,i);
-                const float key_width=120*s*font;
-                const float vl=stacked?ml+16*s:ml+16*s+key_width+16*s;
-                const float vy=stacked?y+22*s*font:y;
-                const float value_height=(std::max)(22*s*font,height(value,mr-16*s-vl-(i==0&&item.official?18*s:0)));
-                d.about_keys[i]={ml+16*s,y,stacked?mr-16*s:vl-16*s,y+22*s*font};
-                d.about_values[i]={vl,vy,mr-16*s,vy+value_height};
-                d.about_rows[i]={ml+16*s,y,mr-16*s,d.about_values[i].bottom};
-                y=d.about_rows[i].bottom+8*s;
-            }
-            if(item.source.starts_with(L"https://")||item.source.starts_with(L"http://"))d.about_source=d.about_values[5];
-            y += 8*s;
-            d.groups[0] = D2D1::RectF(ml, g0, mr, y);
-            if(store_view::HistoryCount(item)>0) {
-                y += 22*s;
-                d.history_label = D2D1::RectF(ml+2*s,y,mr,y+22*s*font);
-                y=d.history_label.bottom+8*s;
-                const float g1=y;
-                const auto installed_version=store_view::InstalledVersion(view,item);
-                for(size_t i=0;i<store_view::HistoryCount(item)&&i<8;++i) {
-                    const bool current=!installed_version.empty()&&store_view::HistoryVersion(item,i)==installed_version;
-                    const auto note=store_view::HistoryNote(item,i);
-                    const float badge_width=current?(painter?painter->MeasureBadgeWidth(l10n::Get(I::SzAboutCurrent)):64*s):0;
-                    const float version_width=(std::min)(100*s*font,(mr-ml-32*s)*.35f);
-                    const bool wrap=mr-ml<440*s*font;
-                    const float nl=wrap?ml+16*s:ml+16*s+version_width+12*s;
-                    const float nr=mr-16*s-(current&&!wrap?badge_width+12*s:0);
-                    const float ny=y+(wrap?36*s*font:10*s);
-                    const float nh=note.empty()?0:(std::max)(22*s*font,height(note,nr-nl));
-                    const float rh=(std::max)(48*s*font,ny-y+nh+10*s);
-                    d.history_rows.push_back({ml,y,mr,y+rh});
-                    d.history_versions.push_back({ml+16*s,y+10*s,ml+16*s+version_width,y+34*s*font});
-                    d.history_notes.push_back({nl,ny,nr,ny+nh});
-                    d.history_current.push_back(current?D2D1::RectF(mr-16*s-badge_width,y+12*s,mr-16*s,y+36*s):D2D1::RectF());
-                    // Registry management knows the rollback target; catalog order alone does not.
-                    d.history_rollback.push_back({});
-                    y+=rh;
-                }
-                d.history_card={ml,g1,mr,y};
-            }
-            y += 24*s;
+
+    // The introduction and what the plugin adds to the right-click menu share one card: the text on
+    // the left, the menu (from its manifest quickSettings preview) on a tinted stage at the right; the
+    // stage moves under the text when the column is narrow.
+    d.showcase_quick = -1;
+    for (size_t qi = 0; qi < view.quick_cards.size(); ++qi) {
+        const auto& qc = view.quick_cards[qi];
+        if (qc.item_index == item_index && qc.available && qc.has_menu_preview && !qc.preview_rows.empty()) {
+            d.showcase_quick = static_cast<int>(qi);
+            break;
         }
-    } else {
-        // Not running yet (or off): one line, and the generic plugin page stays reachable.
-        const auto& note=l10n::Get(z.available?I::SzExtensionUpdateRequired:item.enabled?I::SzLoading:I::SzUnavailable);
-        d.groups[0] = D2D1::RectF(ml, y, mr, y + (std::max)(72*s,40*s+height(note,mr-ml-40*s)));
-        y = d.groups[0].bottom + 24*s;
+    }
+    const bool has_menu = d.showcase_quick >= 0;
+    const bool beside = has_menu && mr - ml >= 640*s;
+    const float stage_w = beside ? (std::clamp)((mr - ml) * 0.44f, 300*s, 360*s) : mr - ml - 32*s;
+    const float card_top = y;
+    const float text_l = ml + 20*s, text_r = beside ? mr - 16*s - stage_w - 24*s : mr - 20*s;
+    d.desc_label = D2D1::RectF(text_l, card_top + 18*s, text_r, card_top + 18*s + 22*s*font);
+    const std::wstring_view desc_str = !item.description.empty() ? std::wstring_view{item.description}
+        : !item.summary.empty() ? std::wstring_view{item.summary}
+        : std::wstring_view{l10n::Get(I::StoreDetailNoDescription)};
+    const float desc_w = (std::max)(1.0f, text_r - text_l);
+    const float desc_h = painter ? painter->MeasureWrappedBodyHeight(desc_str, desc_w) : 60*s*font;
+    d.desc_text = D2D1::RectF(text_l, d.desc_label.bottom + 8*s, text_r, d.desc_label.bottom + 8*s + (std::max)(22*s*font, desc_h));
+    float card_bottom = d.desc_text.bottom + 20*s;
+    d.showcase_label = {};
+    if (has_menu) {
+        const auto& qc = view.quick_cards[static_cast<size_t>(d.showcase_quick)];
+        const float menu_h = (std::max)(84*s, store_view::MenuPreviewHeight(qc.preview_rows, qc.preview_submenu, s));
+        const float stage_l = beside ? mr - 16*s - stage_w : ml + 16*s;
+        const float stage_t = beside ? card_top + 16*s : d.desc_text.bottom + 16*s;
+        const float menu_w = (std::min)(stage_w - 28*s, 340*s);
+        d.showcase_caption = D2D1::RectF(stage_l + 14*s, stage_t + 12*s, stage_l + stage_w - 14*s, stage_t + 12*s + 20*s*font);
+        const float mx = stage_l + (stage_w - menu_w) / 2;
+        d.showcase_menu = D2D1::RectF(mx, d.showcase_caption.bottom + 10*s, mx + menu_w, d.showcase_caption.bottom + 10*s + menu_h);
+        d.showcase_card = D2D1::RectF(stage_l, stage_t, stage_l + stage_w, d.showcase_menu.bottom + 16*s);
+        card_bottom = (std::max)(card_bottom, d.showcase_card.bottom + 16*s);
+    }
+    d.desc_card = D2D1::RectF(ml, card_top, mr, card_bottom);
+    y = d.desc_card.bottom + 20*s;
+
+    // Highlights as tiles: a tinted check badge and the text, two per row when there is room.
+    if (!item.highlights.empty()) {
+        d.highlights_label = D2D1::RectF(ml + 2*s, y, mr, y + 22*s*font);
+        y = d.highlights_label.bottom + 8*s;
+        const float hcard_top = y;
+        const int hcols = mr - ml >= 560*s ? 2 : 1;
+        const float hgap = 12*s;
+        const float tile_w = (mr - ml - hgap * static_cast<float>(hcols - 1)) / static_cast<float>(hcols);
+        for (size_t i = 0; i < item.highlights.size(); i += static_cast<size_t>(hcols)) {
+            float row_h = 0.0f;
+            for (int c = 0; c < hcols && i + static_cast<size_t>(c) < item.highlights.size(); ++c) {
+                const float th = (std::max)(20*s*font, height(item.highlights[i + static_cast<size_t>(c)], (std::max)(1.0f, tile_w - 72*s)));
+                row_h = (std::max)(row_h, (std::max)(64*s, th + 36*s));
+            }
+            for (int c = 0; c < hcols && i + static_cast<size_t>(c) < item.highlights.size(); ++c) {
+                const float x = ml + static_cast<float>(c) * (tile_w + hgap);
+                d.highlight_rows.push_back(D2D1::RectF(x, y, x + tile_w, y + row_h));
+            }
+            y += row_h + hgap;
+        }
+        d.highlights_card = D2D1::RectF(ml, hcard_top, mr, y - hgap);
+        y += 20*s - hgap;
+    }
+
+    if (!item.tags.empty()) {
+        d.tags_label = D2D1::RectF(ml + 2*s, y, mr, y + 22*s*font);
+        y = d.tags_label.bottom + 8*s;
+        const float tcard_top = y;
+        float tx = ml + 16*s, ty = y + 14*s;
+        const float ch = 26*s*font;
+        for (const auto& tag : item.tags) {
+            const float cw = (std::min)(mr - ml - 32*s,
+                painter ? painter->MeasureBadgeWidth(tag) + 8*s : (24.0f + 10.0f * static_cast<float>(tag.size())) * s * font);
+            if (tx > ml + 16*s && tx + cw > mr - 16*s) { tx = ml + 16*s; ty += ch + 8*s; }
+            d.tag_chips.push_back(D2D1::RectF(tx, ty, tx + cw, ty + ch));
+            tx += cw + 8*s;
+        }
+        d.tags_card = D2D1::RectF(ml, tcard_top, mr, ty + ch + 14*s);
+        y = d.tags_card.bottom + 20*s;
     }
     d.body.bottom = y;
-    // The preview card and the result note.
+
     float sy = split ? d.body.top : y;
     const float sl = split ? right - side_w : left, sr = right;
-    if (z.available) {
-        const auto& rows = view.preview_kind == 0 ? z.archive_rows : z.file_rows;
-        d.side = D2D1::RectF(sl, sy, sr, sy);
-        d.preview_card = D2D1::RectF(sl, sy, sr, sy);
-        const float kinds_w = 2 * 56*s*font;
-        const bool inline_kinds = (sr - sl - 28*s - kinds_w - 10*s) >= 112*s*font;
-        if (inline_kinds) {
-            d.preview_kinds[0] = D2D1::RectF(sr - 14*s - kinds_w, sy + 12*s, sr - 14*s - kinds_w/2, sy + 12*s + 26*s*font);
-            d.preview_kinds[1] = D2D1::RectF(d.preview_kinds[0].right, sy + 12*s, sr - 14*s, sy + 12*s + 26*s*font);
-            d.preview_title = D2D1::RectF(sl + 14*s, sy + 12*s, d.preview_kinds[0].left - 8*s, sy + 12*s + 26*s*font);
-        } else {
-            d.preview_title = D2D1::RectF(sl + 14*s, sy + 14*s, sr - 14*s, sy + 14*s + 22*s*font);
-            d.preview_kinds[0] = D2D1::RectF(sr - 14*s - kinds_w, d.preview_title.bottom + 6*s, sr - 14*s - kinds_w/2, d.preview_title.bottom + 6*s + 26*s*font);
-            d.preview_kinds[1] = D2D1::RectF(d.preview_kinds[0].right, d.preview_kinds[0].top, sr - 14*s, d.preview_kinds[0].bottom);
+    d.side = D2D1::RectF(sl, sy, sr, sy);
+    {
+        struct Fact { l10n::StringId key; std::wstring value; int link_kind; };
+        std::vector<Fact> facts;
+        const auto pub = store_view::AboutValue(view, item, 0);
+        if (!pub.empty()) facts.push_back({I::Publisher, pub, 0});
+        const auto ver_fact = store_view::AboutValue(view, item, 1);
+        if (!ver_fact.empty()) facts.push_back({I::SzAboutVersion, ver_fact, 0});
+        if (!item.engine.empty()) facts.push_back({I::SzAboutEngine, item.engine, 0});
+        if (!item.license.empty()) facts.push_back({I::SzAboutLicense, item.license, 0});
+        if (!item.homepage.empty()) facts.push_back({I::StoreDetailHomepage, item.homepage, 1});
+        if (!item.source.empty() && item.source != item.homepage) facts.push_back({I::SzAboutSource, item.source, 2});
+
+        const float fcard_top = sy;
+        d.facts_title = D2D1::RectF(sl + 14*s, sy + 12*s, sr - 14*s, sy + 12*s + 22*s*font);
+        float fy = d.facts_title.bottom + 10*s;
+        const bool side_stacked = (sr - sl - 28*s) < 220*s*font;
+        const float key_w = 72*s*font;
+        for (const auto& f : facts) {
+            const float vl = side_stacked ? sl + 14*s : sl + 14*s + key_w + 10*s;
+            const float vy = side_stacked ? fy + 20*s*font : fy;
+            const float vh = (std::max)(20*s*font, height(f.value, (std::max)(1.0f, sr - 14*s - vl)));
+            d.fact_keys.push_back({sl + 14*s, fy, side_stacked ? sr - 14*s : vl - 10*s, fy + 20*s*font});
+            const D2D1_RECT_F vr{vl, vy, sr - 14*s, vy + vh};
+            d.fact_values.push_back(vr);
+            d.fact_rows.push_back({sl + 14*s, fy, sr - 14*s, vr.bottom});
+            if (f.link_kind == 1 && (f.value.starts_with(L"https://") || f.value.starts_with(L"http://")))
+                d.fact_homepage = vr;
+            if (f.link_kind == 2 && (f.value.starts_with(L"https://") || f.value.starts_with(L"http://")))
+                d.fact_source = vr;
+            fy = vr.bottom + 8*s;
         }
-        const float menu_top = d.preview_kinds[0].bottom + 12*s;
-        const float menu_h = store_view::MenuPreviewHeight(rows, z.submenu, s) + (view.preview_kind==0 ? 227 : 171)*s;
-        d.preview_menu = D2D1::RectF(sl + 14*s, menu_top, sr - 14*s, menu_top + menu_h);
-        d.preview_card.bottom = d.preview_menu.bottom + 14*s;
-        const auto& result = l10n::Get(z.mode == 1 ? I::SzResultFolder : z.mode == 2 ? I::SzResultHere : I::SzResultSmart);
-        d.result_card = D2D1::RectF(sl, d.preview_card.bottom + 12*s, sr, d.preview_card.bottom + 12*s + 28*s + height(result, sr - sl - 56*s));
-        d.side.bottom = d.result_card.bottom;
-        y = split ? (std::max)(y, d.side.bottom + 24*s) : d.side.bottom + 24*s;
+        d.facts_card = D2D1::RectF(sl, fcard_top, sr, fy + 6*s);
+        sy = d.facts_card.bottom + 12*s;
     }
-    return y;
+    {
+        const float pcard_top = sy;
+        d.perms_title = D2D1::RectF(sl + 14*s, sy + 12*s, sr - 14*s, sy + 12*s + 22*s*font);
+        sy = d.perms_title.bottom + 10*s;
+        const float perm_w = (std::max)(1.0f, sr - sl - 28*s - 18*s);
+        if (item.permissions.empty()) {
+            const float ph = (std::max)(20*s*font, height(l10n::Get(I::StorePermissionsNone), (std::max)(1.0f, sr - sl - 28*s)));
+            d.perm_rows.push_back(D2D1::RectF(sl + 14*s, sy, sr - 14*s, sy + ph));
+            sy += ph + 8*s;
+        } else {
+            for (const auto& perm : item.permissions) {
+                const float ph = (std::max)(20*s*font, height(perm, perm_w));
+                d.perm_rows.push_back(D2D1::RectF(sl + 14*s, sy, sr - 14*s, sy + ph));
+                sy += ph + 8*s;
+            }
+        }
+        d.perms_card = D2D1::RectF(sl, pcard_top, sr, sy + 6*s);
+    }
+    d.side.bottom = d.perms_card.bottom;
+    return split ? (std::max)(y, d.side.bottom + 24*s) : d.side.bottom + 24*s;
 }

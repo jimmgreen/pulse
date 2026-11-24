@@ -86,6 +86,10 @@ void PureHelpers() {
     Check(s.cx == 640 && s.cy == 360, "frame size never enlarges");
     s = FfmpegFrameSize(1001, 563, {1001, 563});
     Check(s.cx % 2 == 0 && s.cy % 2 == 0, "frame size is even");
+    s = FfmpegFrameSize(101, 57, {320, 240});
+    Check(s.cx == 100 && s.cy == 56, "even rounding never enlarges an odd source");
+    s = FfmpegFrameSize(101, 57, {99, 55});
+    Check(s.cx == 98 && s.cy == 54, "even rounding stays inside an odd playback box");
     s = FfmpegFrameSize(4000, 10, {100, 100});
     Check(s.cx >= 16 && s.cy >= 16, "frame size has a floor");
 
@@ -107,6 +111,9 @@ void PureHelpers() {
     FfmpegMediaInfo info;
     Check(ParseFfmpegMediaInfo(dvd, info), "DVD log parses");
     Check(info.duration == 905'000'000, "duration in 100 ns");
+    FfmpegMediaInfo long_clip;
+    Check(ParseFfmpegMediaInfo("  Duration: 1200:00:00.00, start: 0.0\n  Stream #0:0: Video: h264, 64x48, 30 fps\n", long_clip) &&
+          long_clip.duration == 43200000000000ll, "playback duration exceeds the thumbnail IPC range");
     Check(info.video && info.audio, "video and audio streams found");
     Check(info.width == 1024 && info.height == 576, "anamorphic picture gets its display width");
     Check(info.fps == 25.0, "frame rate read");
@@ -162,6 +169,31 @@ void PureHelpers() {
         "  Stream #0:2: Video: hevc, yuv420p, 1920x1080 [SAR 4:1 DAR 64:9], 60 fps\n";
     Check(ParseFfmpegMediaInfo(multiple, info) && info.duration == 0 && info.width == 640 &&
           info.height == 240 && info.fps == 0, "video properties all belong to first real stream, not cover or later stream");
+
+    const char* rotated_dm =
+        "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'file:douyin.mp4':\n"
+        "  Duration: 00:00:15.00, start: 0\n"
+        "  Stream #0:0[0x1](und): Video: hevc (Main), yuv420p, 1920x1080 [SAR 1:1 DAR 16:9], 30 fps\n"
+        "    Side data:\n"
+        "      displaymatrix: rotation of -90.00 degrees\n";
+    Check(ParseFfmpegMediaInfo(rotated_dm, info) && info.video && info.width == 1080 && info.height == 1920,
+          "displaymatrix -90 rotation swaps coded landscape frame to portrait dimensions");
+
+    const char* rotated_meta =
+        "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'file:phone.mp4':\n"
+        "  Duration: 00:00:10.00, start: 0\n"
+        "  Stream #0:0[0x1]: Video: h264, yuv420p, 1920x1080, 30 fps\n"
+        "    Metadata:\n"
+        "      rotate          : 270\n";
+    Check(ParseFfmpegMediaInfo(rotated_meta, info) && info.video && info.width == 1080 && info.height == 1920,
+          "rotate metadata 270 swaps coded landscape frame to portrait dimensions");
+
+    const char* rotated_180 =
+        "  Stream #0:0[0x1]: Video: h264, yuv420p, 1920x1080, 30 fps\n"
+        "    Side data:\n"
+        "      displaymatrix: rotation of -180.00 degrees\n";
+    Check(ParseFfmpegMediaInfo(rotated_180, info) && info.video && info.width == 1920 && info.height == 1080,
+          "displaymatrix 180 rotation keeps landscape dimensions");
 }
 
 void Integration(const std::wstring& fixture_exe, const std::wstring& ffmpeg_exe) {
@@ -380,6 +412,64 @@ void TrackIntegration(const std::wstring& media, bool limited = false) {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 3 && wcscmp(argv[1], L"--slow-cadence") == 0) {
+        const std::wstring exe = Env(L"PULSE_TEST_FFMPEG");
+        FfmpegMediaInfo info;
+        Check(ProbeFfmpegMedia(exe, argv[2], info) && Near(info.fps, 0.5, 0.0001),
+              "half-fps recording retains its source rate");
+        FfmpegPlayback player(exe, argv[2], info);
+        Check(player.Start(0, 1.0f, {64, 48}, false), "open slow clip paused");
+        auto red = FirstFrame(player);
+        Check(red && red->pixels[2] > 240 && red->pixels[0] < 10, "paused first frame is red");
+        player.SetPlaying(true);
+        int next_frames = 0;
+        const ULONGLONG until = GetTickCount64() + 7000;
+        while (GetTickCount64() < until && !player.Ended()) {
+            if (auto next = player.Pump()) {
+                ++next_frames;
+                Check(next->time == 20000000 && next->pixels[0] > 240 && next->pixels[2] < 10,
+                      "blue frame arrives at its source timestamp");
+            }
+            Sleep(3);
+        }
+        Check(next_frames == 1 && player.Ended() && player.Position() == 40000000,
+              "last frame held until four seconds, without fabricated frames");
+        Check(player.Start(20000000, 1.0f, {64, 48}, false), "seek paused to second frame");
+        auto blue = FirstFrame(player);
+        Check(blue && blue->time == 20000000 && blue->pixels[0] > 240, "paused seek gives blue frame");
+        std::printf("slow cadence: %d passed, %d failed\n", g_passed, g_failed);
+        return g_failed ? 1 : 0;
+    }
+    if (argc == 3 && wcscmp(argv[1], L"--single-frame") == 0) {
+        const std::wstring exe = Env(L"PULSE_TEST_FFMPEG");
+        FfmpegMediaInfo info;
+        Check(ProbeFfmpegMedia(exe, argv[2], info), "probe one-frame MP4");
+        FfmpegPlayback player(exe, argv[2], info);
+        Check(player.Start(0, 1.0f, {64, 48}, false), "open one-frame MP4 paused");
+        const auto frame = FirstFrame(player);
+        Check(frame && frame->time == 0 && frame->pixels.size() == 64u * 48 * 4 &&
+              frame->pixels[0] < 10 && frame->pixels[1] > 240 && frame->pixels[2] > 240,
+              "single yellow frame survives frame-rate conversion");
+        std::printf("single frame: %d passed, %d failed\n", g_passed, g_failed);
+        return g_failed ? 1 : 0;
+    }
+    if (argc == 3 && wcscmp(argv[1], L"--sparse-two-frame") == 0) {
+        const std::wstring exe = Env(L"PULSE_TEST_FFMPEG");
+        FfmpegMediaInfo info;
+        Check(!exe.empty() && ProbeFfmpegMedia(exe, argv[2], info) &&
+              info.duration == 43200000000000ll, "probe 50-day sparse recording");
+        FfmpegPlayback player(exe, argv[2], info);
+        for (int pass = 0; pass < 2 && !g_failed; ++pass) {
+            const int64_t target = pass ? info.duration : 0;
+            Check(player.Start(target, 1.0f, {64, 48}, false), "start paused at sparse boundary");
+            const auto frame = FirstFrame(player);
+            Check(frame && frame->time == target && frame->pixels.size() == 64u * 48 * 4 &&
+                  frame->pixels[pass ? 0 : 2] > 240 && frame->pixels[pass ? 2 : 0] < 10,
+                  "sparse boundary has the expected time and red/blue frame");
+        }
+        std::printf("sparse playback: %d passed, %d failed\n", g_passed, g_failed);
+        return g_failed ? 1 : 0;
+    }
     if (argc == 3 && (wcscmp(argv[1], L"--tracks-only") == 0 || wcscmp(argv[1], L"--limited-pack-only") == 0)) {
         PureHelpers();
         TrackIntegration(argv[2], wcscmp(argv[1], L"--limited-pack-only") == 0);

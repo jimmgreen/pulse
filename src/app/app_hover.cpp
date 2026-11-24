@@ -94,7 +94,13 @@ bool UpdatePointerHover(AppState& s, const ui::HitTestResult& pointer_hit, POINT
     const int pane_hot_index = pane_hot ? hit.pane_index : -1;
     const bool bars_changed = settings_hot != s.settingsScrollbarHot || pane_hot != s.paneScrollbarHot ||
                               pane_hot_index != s.paneScrollbarHotPane;
+    const D2D1_RECT_F cmd_bar = s.renderer.CommandToolbarRect(static_cast<float>(s.compositor.Width()));
+    const bool toolbar_hot = !on_card && cmd_bar.right > cmd_bar.left &&
+                             static_cast<float>(point.x) >= cmd_bar.left && static_cast<float>(point.x) < cmd_bar.right &&
+                             static_cast<float>(point.y) >= cmd_bar.top && static_cast<float>(point.y) < cmd_bar.bottom;
+    const bool toolbar_changed = toolbar_hot != s.toolbarHovered;
     s.hoverPoint = point;
+    s.toolbarHovered = toolbar_hot;
     if (target_changed) ApplyHoverTarget(s, hit);
     if (row_changed) {
         s.hoverRow = row;
@@ -109,7 +115,7 @@ bool UpdatePointerHover(AppState& s, const ui::HitTestResult& pointer_hit, POINT
     s.paneScrollbarHotPane = pane_hot_index;
     s.breadcrumbHover = crumb;
     UpdateChangeHover(s, hit, point);
-    return target_changed || row_changed || crumb_changed || sidebar_changed || bars_changed;
+    return target_changed || row_changed || crumb_changed || sidebar_changed || bars_changed || toolbar_changed;
 }
 
 bool RefreshScrolledHover(AppState& s, const HoverPointerApi& api) {

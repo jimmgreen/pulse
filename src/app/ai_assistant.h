@@ -18,6 +18,17 @@ struct AiVoiceUi; // 语音输入: listening, menu, connection card (ai_assistan
 struct AsstPageUi; // Settings > AI 助手: stage, fields, 连接 (ai_assistant_settings.h)
 struct AiHistoryUi; // 历史对话: the saved list, its filter and row actions (ai_chat_history.cpp)
 
+struct AiPendingAttach {
+    std::wstring path;            // empty for pasted clipboard screenshots
+    std::wstring name;
+    uint64_t size = 0;
+    bool is_image = false;
+    bool is_dir = false;
+    std::string image_data_url;   // populated for pasted screenshots or encoded images
+    int img_w = 0;
+    int img_h = 0;
+};
+
 struct AiAssistantState {
     bool open = false;
     bool floating = false;
@@ -25,6 +36,9 @@ struct AiAssistantState {
     bool enabled = true;
     int model = 0;                 // index into the model list
     int think = 4;                 // the preferred level, 0 off .. 6 max (ai_providers.h ThinkLevel)
+    bool web_search = true;        // 联网搜索 composer toggle (persisted in ai.json assistant.web_search)
+    std::vector<AiPendingAttach> attachments;   // files / pasted screenshots pending for next send
+    bool drop_hot = false;         // files dragged over the open AI panel
     bool menu_open = false;
     uint64_t menu_closed_at = 0;   // the menu's fade-out still covers the input
     // The context chip was removed for this folder.
@@ -99,6 +113,8 @@ void AiAssistantToggle(AppState& s);
 void AiAssistantHotkey(AppState& s);
 void AiAssistantOpen(AppState& s, bool animate = true);
 void AiAssistantClose(AppState& s, bool animate = true);
+// The built-in assistant's preference, independent of the panel and model connection.
+bool AiAssistantEnabled(AppState& s);
 bool AiAssistantIsOpen(const AppState& s);
 // Right-click on the status bar's ✦ AI: open / collapse, AI 助手设置….
 void AiChipContextMenu(AppState& s, POINT screen_pt);
@@ -146,5 +162,15 @@ bool AiAssistantOwnsTask(uint64_t task_id);
 // folder watch: reload every visible one after files moved or came back,
 // whichever pane it is in and however the operation was started (Ctrl+Z).
 void AiAssistantRefreshLists(AppState& s);
+
+// Isolated --test-instance --shot verification helper (PULSE_SHOT_AI_PANEL).
+void StageAiPanelShot(AppState& s);
+
+// Attaches local files/folders to the AI composer (deduplicated, up to 8).
+bool AiAssistantAttachFiles(AppState& s, const std::vector<std::wstring>& paths);
+// Drag-and-drop onto the open AI panel (never moves files on disk; attaches references).
+bool AiAssistantDragOver(AppState& s, const std::vector<std::wstring>& sources, POINT pt);
+void AiAssistantDragLeave(AppState& s);
+bool AiAssistantDrop(AppState& s, const std::vector<std::wstring>& sources, POINT pt);
 
 } // namespace pulse

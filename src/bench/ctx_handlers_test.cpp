@@ -812,6 +812,212 @@ void TestNestedMenuTree() {
     DestroyMenu(slot.hmenu);
 }
 
+void TestSubmenuHighAndResourceIds() {
+    ScriptedMenu menu;
+    pulse::shell::CtxHandlerSlot slot;
+    slot.menu = &menu;
+    slot.menu2 = &menu;
+    slot.menu3 = &menu;
+    slot.hmenu = CreatePopupMenu();
+    slot.id_first = 1;
+    slot.id_last = 0x7FFF;
+    HMENU flyout = CreatePopupMenu();
+    MENUITEMINFOW parent{sizeof(parent)};
+    parent.fMask = MIIM_ID | MIIM_STRING | MIIM_SUBMENU;
+    parent.wID = 1;
+    parent.dwTypeData = const_cast<wchar_t*>(L"PDF Tools");
+    parent.hSubMenu = flyout;
+    InsertMenuItemW(slot.hmenu, 0, TRUE, &parent);
+    AppendMenuW(flyout, MF_STRING, 301, L"High Offset Leaf");
+    AppendMenuW(flyout, MF_STRING, 40001, L"Fixed Resource Leaf");
+    AppendMenuW(flyout, MF_STRING, 0, L"Invalid Zero");
+    AppendMenuW(flyout, MF_STRING, 0xFFFF, L"Invalid Sentinel FFFF");
+    AppendMenuW(flyout, MF_STRING, static_cast<UINT>(-1), L"Invalid Sentinel MinusOne");
+    std::vector<pulse::shell::CtxItemOut> items;
+    pulse::shell::CollectHandlerItems(slot, false, items);
+    Check(items.size() == 3 && items[0].has_children &&
+              items[1].id == 301 && items[1].text == L"High Offset Leaf" &&
+              items[2].id == 40001 && items[2].text == L"Fixed Resource Leaf",
+          "submenu leaves keep >256 offsets and fixed resource IDs while filtering sentinels");
+    DestroyMenu(slot.hmenu);
+}
+
+void TestPerFlyoutBudget() {
+    class TwoFlyoutMenu final : public IContextMenu3 {
+    public:
+        HMENU first = nullptr;
+        HMENU second = nullptr;
+        bool first_init = false;
+        bool second_init = false;
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+            if (!out) return E_POINTER;
+            *out = nullptr;
+            if (iid != IID_IUnknown && iid != IID_IContextMenu &&
+                iid != IID_IContextMenu2 && iid != IID_IContextMenu3) return E_NOINTERFACE;
+            *out = static_cast<IContextMenu3*>(this);
+            return S_OK;
+        }
+        ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+        ULONG STDMETHODCALLTYPE Release() override { return 1; }
+        HRESULT STDMETHODCALLTYPE QueryContextMenu(HMENU hmenu, UINT, UINT id_first, UINT, UINT) override {
+            base_ = id_first;
+            first = CreatePopupMenu();
+            second = CreatePopupMenu();
+            AppendMenuW(hmenu, MF_POPUP, reinterpret_cast<UINT_PTR>(first), L"First Flyout");
+            AppendMenuW(hmenu, MF_POPUP, reinterpret_cast<UINT_PTR>(second), L"Second Flyout");
+            return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 30);
+        }
+        HRESULT STDMETHODCALLTYPE InvokeCommand(CMINVOKECOMMANDINFO*) override { return S_OK; }
+        HRESULT STDMETHODCALLTYPE GetCommandString(UINT_PTR, UINT, UINT*, CHAR*, UINT) override {
+            return E_NOTIMPL;
+        }
+        HRESULT STDMETHODCALLTYPE HandleMenuMsg(UINT msg, WPARAM wParam, LPARAM) override {
+            if (msg != WM_INITMENUPOPUP) return S_OK;
+            HMENU hm = reinterpret_cast<HMENU>(wParam);
+            if (hm == first && !first_init) {
+                first_init = true;
+                Sleep(95);
+                AppendMenuW(first, MF_STRING, base_ + 10, L"First Child");
+            } else if (hm == second && !second_init) {
+                second_init = true;
+                AppendMenuW(second, MF_STRING, base_ + 20, L"Second Child");
+            }
+            return S_OK;
+        }
+        HRESULT STDMETHODCALLTYPE HandleMenuMsg2(UINT msg, WPARAM wp, LPARAM lp, LRESULT* res) override {
+            if (res) *res = 0;
+            return HandleMenuMsg(msg, wp, lp);
+        }
+    private:
+        UINT base_ = 0;
+    } menu;
+    pulse::shell::CtxHandlerSlot slot;
+    slot.menu = &menu;
+    slot.menu2 = &menu;
+    slot.menu3 = &menu;
+    slot.hmenu = CreatePopupMenu();
+    slot.id_first = 1;
+    slot.id_last = 0x7FFF;
+    menu.QueryContextMenu(slot.hmenu, 0, slot.id_first, slot.id_last, CMF_NORMAL);
+    std::vector<pulse::shell::CtxItemOut> items;
+    pulse::shell::CollectHandlerItems(slot, false, items);
+    bool has_second_child = false;
+    for (const auto& item : items)
+        if (item.id == 21 && item.text == L"Second Child") has_second_child = true;
+    Check(menu.first_init && menu.second_init && has_second_child,
+          "second top-level flyout still receives WM_INITMENUPOPUP after slow first flyout");
+    DestroyMenu(slot.hmenu);
+}
+
+void TestAnsiVerbFallback() {
+    class AnsiVerbMenu final : public IContextMenu {
+    public:
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+            if (!out) return E_POINTER;
+            *out = nullptr;
+            if (iid != IID_IUnknown && iid != IID_IContextMenu) return E_NOINTERFACE;
+            *out = static_cast<IContextMenu*>(this);
+            return S_OK;
+        }
+        ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+        ULONG STDMETHODCALLTYPE Release() override { return 1; }
+        HRESULT STDMETHODCALLTYPE QueryContextMenu(HMENU hmenu, UINT, UINT id_first, UINT, UINT) override {
+            AppendMenuW(hmenu, MF_STRING, id_first + 5, L"ANSI Merge");
+            return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 6);
+        }
+        HRESULT STDMETHODCALLTYPE InvokeCommand(CMINVOKECOMMANDINFO*) override { return S_OK; }
+        HRESULT STDMETHODCALLTYPE GetCommandString(UINT_PTR offset, UINT flags, UINT*, CHAR* out,
+                                                   UINT count) override {
+            if (offset != 5 || !out || count == 0) return E_NOTIMPL;
+            if (flags == GCS_VERBA) {
+                return strcpy_s(out, count, "ansi.merge") == 0 ? S_OK : E_FAIL;
+            }
+            return E_NOTIMPL;
+        }
+    } menu;
+    pulse::shell::CtxHandlerSlot slot;
+    slot.menu = &menu;
+    slot.hmenu = CreatePopupMenu();
+    slot.id_first = 100;
+    slot.id_last = 0x7FFF;
+    menu.QueryContextMenu(slot.hmenu, 0, slot.id_first, slot.id_last, CMF_NORMAL);
+    std::vector<pulse::shell::CtxItemOut> items;
+    pulse::shell::CollectHandlerItems(slot, false, items);
+    Check(items.size() == 1 && items[0].verb == L"ansi.merge" && items[0].text == L"ANSI Merge",
+          "GCS_VERBA fallback captures verb when GCS_VERBW returns E_NOTIMPL");
+    DestroyMenu(slot.hmenu);
+}
+
+void TestFindItemIdSharedVerb() {
+    std::vector<pulse::shell::CtxItemOut> items;
+    pulse::shell::CtxItemOut a;
+    a.id = 10;
+    a.verb = L"wps.pdf";
+    a.text = L"PDF\x5408\x5e76";
+    pulse::shell::CtxItemOut b;
+    b.id = 11;
+    b.verb = L"wps.pdf";
+    b.text = L"PDF\x62c6\x5206";
+    items.push_back(a);
+    items.push_back(b);
+    Check(pulse::shell::FindItemId(items, 0, L"wps.pdf", L"PDF\x62c6\x5206") == 11 &&
+              pulse::shell::FindItemId(items, 0, L"wps.pdf", L"PDF\x5408\x5e76") == 10,
+          "FindItemId disambiguates items sharing one verb by (verb, text)");
+}
+
+void TestMultiVerbExplorerCommandSharingClsid() {
+    const std::wstring pid = std::to_wstring(GetCurrentProcessId());
+    const std::wstring ext = L".pulse_test_multiverb_" + pid;
+    const std::wstring progid = L"Pulse.TestMultiVerb." + pid;
+    const wchar_t* clsid = L"{50554C53-4500-4D55-4C54-000000000001}";
+    const std::wstring ext_key = L"Software\\Classes\\" + ext;
+    const std::wstring progid_key = L"Software\\Classes\\" + progid;
+    auto write_sz = [](const std::wstring& subkey, const wchar_t* name, const wchar_t* val) {
+        HKEY k = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, nullptr, 0, KEY_WRITE,
+                            nullptr, &k, nullptr) != ERROR_SUCCESS)
+            return false;
+        const auto bytes = static_cast<DWORD>((wcslen(val) + 1) * sizeof(wchar_t));
+        const bool ok = RegSetValueExW(k, name, 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(val), bytes) == ERROR_SUCCESS;
+        RegCloseKey(k);
+        return ok;
+    };
+    const bool reg_ok = write_sz(ext_key, nullptr, progid.c_str()) &&
+                        write_sz(progid_key + L"\\shell\\VerbOne", L"ExplorerCommandHandler", clsid) &&
+                        write_sz(progid_key + L"\\shell\\VerbTwo", L"ExplorerCommandHandler", clsid);
+    wchar_t temp[MAX_PATH]{};
+    GetTempPathW(ARRAYSIZE(temp), temp);
+    const std::wstring temp_file = std::wstring(temp) + L"pulse_multiverb_" + pid + ext;
+    HANDLE hf = CreateFileW(temp_file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
+    const bool file_ok = hf != INVALID_HANDLE_VALUE;
+    if (file_ok) CloseHandle(hf);
+
+    bool found_both = false;
+    if (reg_ok && file_ok) {
+        const auto descs = pulse::shell::EnumerateCtxHandlers(false, temp_file, {});
+        for (const auto& d : descs) {
+            if (_wcsicmp(d.clsid_text.c_str(), clsid) != 0) continue;
+            bool v1 = false, v2 = false;
+            for (const auto& v : d.explorer_verbs) {
+                if (_wcsicmp(v.verb.c_str(), L"VerbOne") == 0 &&
+                    v.reg_key.ends_with(L"\\shell\\VerbOne"))
+                    v1 = true;
+                if (_wcsicmp(v.verb.c_str(), L"VerbTwo") == 0 &&
+                    v.reg_key.ends_with(L"\\shell\\VerbTwo"))
+                    v2 = true;
+            }
+            found_both = d.explorer_command && d.explorer_verbs.size() == 2 && v1 && v2;
+        }
+    }
+    DeleteFileW(temp_file.c_str());
+    RegDeleteTreeW(HKEY_CURRENT_USER, ext_key.c_str());
+    RegDeleteTreeW(HKEY_CURRENT_USER, progid_key.c_str());
+    Check(reg_ok && file_ok && found_both,
+          "multiple ExplorerCommandHandler verbs sharing one CLSID merge into explorer_verbs");
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -842,6 +1048,11 @@ int wmain(int argc, wchar_t** argv) {
     TestOpenWithForPrograms();
     TestDefaultMenuConditionalVerbs();
     TestConditionalShellVerbsRegistry();
+    TestSubmenuHighAndResourceIds();
+    TestPerFlyoutBudget();
+    TestAnsiVerbFallback();
+    TestFindItemIdSharedVerb();
+    TestMultiVerbExplorerCommandSharingClsid();
     TestNativeSendToItems();
     TestNativeSendToMerge();
     TestSendToDropKeys();

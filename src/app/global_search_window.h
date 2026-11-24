@@ -65,7 +65,9 @@ public:
     ~GlobalSearchWindow();
     GlobalSearchWindow(const GlobalSearchWindow&) = delete;
     GlobalSearchWindow& operator=(const GlobalSearchWindow&) = delete;
-    bool Show(HWND owner, bool dark, float scale, const std::wstring& current_folder, bool search_pinyin = true);
+    // initial_query: text typed elsewhere (the desktop) that the box starts with, caret at the end.
+    bool Show(HWND owner, bool dark, float scale, const std::wstring& current_folder, bool search_pinyin = true,
+              const std::wstring& initial_query = {});
     void SetAppearance(bool dark, ui::WindowEffect effect, const std::wstring& background_image, D2D1_COLOR_F accent);
     // Called on the UI thread after the popup has hidden itself.
     void SetHandoffHandler(GlobalSearchHandoffHandler handler);

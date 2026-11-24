@@ -290,12 +290,35 @@ bool QuickPreviewWindow::PlaybackHover(POINT point) {
     playback_hover_button_ = button;
     return AudioHover(point) || changed;
 }
+void QuickPreviewWindow::SetOptions(const QuickPreviewOptions& options) {
+    const auto old = options_;
+    options_ = options;
+    if (playback_volume_drag_) {
+        options_.volume_percent = old.volume_percent;
+        options_.muted = old.muted;
+    }
+    if (options_.volume_percent != old.volume_percent || options_.muted != old.muted) {
+        video_.SetVolume(PlaybackVolume());
+        video_.SetMuted(options_.muted);
+        if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+    if (options_.prefer_system != old.prefer_system && hwnd_)
+        InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 void QuickPreviewWindow::SetPlaybackVolume(float value) {
-    playback_volume_ = std::clamp(value, 0.0f, 1.0f);
-    playback_muted_ = false;
+    const int percent = static_cast<int>(std::lround(std::clamp(value, 0.0f, 1.0f) * 100.0f));
+    if (options_.volume_percent == percent && !options_.muted) return;
+    options_.volume_percent = percent;
+    options_.muted = false;
     video_.SetMuted(false);
-    video_.SetVolume(playback_volume_);
+    video_.SetVolume(PlaybackVolume());
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+void QuickPreviewWindow::FinishPlaybackVolumeDrag() {
+    if (!playback_volume_drag_) return;
+    playback_volume_drag_ = false;
+    PostAction(QuickPreviewAction::SavePlaybackAudio, &item_);
 }
 void QuickPreviewWindow::DragPlaybackVolume(float x) {
     const auto track = PlaybackLayout().volume_track;
@@ -306,7 +329,8 @@ bool QuickPreviewWindow::PlaybackWheel(POINT point, float steps) {
     const auto g = PlaybackLayout();
     if (!Contains(g.volume, point) && !Contains(g.volume_track, point) &&
         !Contains(g.volume_value, point)) return false;
-    SetPlaybackVolume(playback_volume_ + steps * 0.05f);
+    SetPlaybackVolume(PlaybackVolume() + steps * 0.05f);
+    PostAction(QuickPreviewAction::SavePlaybackAudio, &item_);
     return true;
 }
 std::vector<FluentMenuItem> QuickPreviewWindow::PlaybackTrackItems(
@@ -405,20 +429,18 @@ void QuickPreviewWindow::BeginVideo() {
     if (safe_mode_ || OfflinePlaceholder() || (item_.attrs & FILE_ATTRIBUTE_DIRECTORY) ||
         !VideoPreview::Supports(item_.path) || native_preview_.Available(owner_, item_.path)) return;
     handler_.Reset();
-    video_.Open(hwnd_, item_.path);
+    video_.Open(hwnd_, item_.path, false, !embedded_, PlaybackVolume(), options_.muted);
     ffmpeg_noted_ = false;
     playback_rate_ = 1.0f;
     playback_note_until_ = 0;
     playback_hover_x_ = -1.0f;
     playback_hover_button_ = -1;
-    video_.SetVolume(playback_volume_);
-    video_.SetMuted(playback_muted_);
     if (VideoPreview::IsAudio(item_.path)) waveform_.Start(item_.path);
     SetTimer(hwnd_, kVideoTimer, 50, nullptr);
 }
 void QuickPreviewWindow::CancelPlaybackScrub() {
     const bool was_dragging = playback_drag_ || playback_volume_drag_;
-    playback_volume_drag_ = false;
+    FinishPlaybackVolumeDrag();
     playback_drag_ = false;
     playback_resume_ = false;
     playback_scrub_pending_ = false;
@@ -554,11 +576,12 @@ bool QuickPreviewWindow::PlaybackMouseDown(POINT point) {
             return true;
         }
         if (Contains(g.volume, point)) {
-            playback_muted_ = !playback_muted_;
-            video_.SetMuted(playback_muted_);
-            playback_note_ = playback_muted_ ? std::wstring(Label(L"\x5DF2\x9759\x97F3", L"Muted"))
+            options_.muted = !options_.muted;
+            video_.SetMuted(options_.muted);
+            PostAction(QuickPreviewAction::SavePlaybackAudio, &item_);
+            playback_note_ = options_.muted ? std::wstring(Label(L"\x5DF2\x9759\x97F3", L"Muted"))
                 : Label(L"\x97F3\x91CF ", L"Volume ") +
-                  std::to_wstring(std::lround(playback_volume_ * 100.0f)) + L"%";
+                  std::to_wstring(options_.volume_percent) + L"%";
             playback_note_until_ = GetTickCount64() + 1200;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return true;
@@ -852,19 +875,19 @@ void QuickPreviewWindow::DrawPlaybackChrome(ID2D1DeviceContext* dc, ID2D1SolidCo
         ID2D1Brush* b = tint(0.95f);
         pen.Poly({pen.P(1.5f, 6.0f), pen.P(4.2f, 6.0f), pen.P(7.8f, 2.8f), pen.P(7.8f, 13.2f),
                   pen.P(4.2f, 10.0f), pen.P(1.5f, 10.0f)}, b);
-        if (playback_muted_ || playback_volume_ <= 0.0f) {
+        if (options_.muted || options_.volume_percent == 0) {
             pen.Line(10.2f, 5.8f, 14.4f, 10.2f, b);
             pen.Line(14.4f, 5.8f, 10.2f, 10.2f, b);
         } else {
             pen.Arc(10.3f, 5.3f, 10.3f, 10.7f, 3.9f, b);
-            if (playback_volume_ > 0.5f) pen.Arc(12.1f, 3.4f, 12.1f, 12.6f, 6.4f, b);
+            if (options_.volume_percent > 50) pen.Arc(12.1f, 3.4f, 12.1f, 12.6f, 6.4f, b);
         }
         const float volume_y = (g.volume_track.top + g.volume_track.bottom) * 0.5f;
-        const float volume_x = g.volume_track.left + playback_volume_ * (g.volume_track.right - g.volume_track.left);
+        const float volume_x = g.volume_track.left + PlaybackVolume() * (g.volume_track.right - g.volume_track.left);
         dc->DrawLine(D2D1::Point2F(g.volume_track.left, volume_y), D2D1::Point2F(g.volume_track.right, volume_y), tint(0.2f), 4 * s);
-        dc->DrawLine(D2D1::Point2F(g.volume_track.left, volume_y), D2D1::Point2F(volume_x, volume_y), tint(playback_muted_ ? 0.35f : 1.0f), 4 * s);
+        dc->DrawLine(D2D1::Point2F(g.volume_track.left, volume_y), D2D1::Point2F(volume_x, volume_y), tint(options_.muted ? 0.35f : 1.0f), 4 * s);
         dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(volume_x, volume_y), 5 * s, 5 * s), tint(1.0f));
-        text(std::to_wstring(std::lround(playback_volume_ * 100)) + L"%", g.volume_value, tint(0.85f));
+        text(std::to_wstring(options_.volume_percent) + L"%", g.volume_value, tint(0.85f));
         const auto track_button = [&](bool subtitle, const D2D1_RECT_F& rect, int id) {
             const bool selectable = enabled && (subtitle
                 ? (state.can_select_subtitle || (!state.ffmpeg && state.ffmpeg_subtitles_available))

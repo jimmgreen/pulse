@@ -388,8 +388,29 @@ void AiPanelView::DrawContent(Compositor* compositor, const AiPanelViewModel& vm
                               const D2D1_RECT_F& panel, float s, uint64_t now_ms) {
     Ctx c{compositor, compositor->Dc(), brush_, s};
     DrawHeader(compositor, vm, pal, panel, s);
-    // Composer: margin 6 12 12 (its quote chip measured first).
-    MeasureQuote(compositor, vm, panel.right - panel.left - 24.0f * s - 2.0f * s - 22.0f * s, s);
+    // Composer: margin 6 12 12 (its quote chip and attachment chips measured first).
+    const float inner_w = panel.right - panel.left - 24.0f * s - 2.0f * s - 22.0f * s;
+    MeasureQuote(compositor, vm, inner_w, s);
+    attach_h_ = 0.0f;
+    if (!vm.attachments.empty() && inner_w > 20.0f * s) {
+        const float chip_h = 24.0f * s;
+        const float gap = 6.0f * s;
+        float rx = 0.0f;
+        int rows = 1;
+        for (const AiAttachChipView& att : vm.attachments) {
+            std::wstring label = att.name;
+            if (!att.meta.empty()) label += L" \u00B7 " + att.meta;
+            const float cw = (std::min)(inner_w, (7.0f + 13.0f + 6.0f + 6.0f + 11.0f + 9.0f) * s +
+                                                     c.Measure(label, formats_.caption));
+            if (rx > 0.0f && rx + cw > inner_w) {
+                ++rows;
+                rx = 0.0f;
+            }
+            rx += cw + gap;
+        }
+        attach_h_ = rows * chip_h + (rows - 1) * 5.0f * s + 6.0f * s;
+        if (!vm.attach_notice.empty()) attach_h_ += 18.0f * s;
+    }
     const float ch = ComposerHeight(vm, s);
     const D2D1_RECT_F box = D2D1::RectF(panel.left + 12.0f * s, panel.bottom - 12.0f * s - ch,
                                         panel.right - 12.0f * s, panel.bottom - 12.0f * s);
@@ -619,9 +640,9 @@ float InputHeight(const AiPanelViewModel& vm, int input_lines, float s) {
 } // namespace
 
 float AiPanelView::ComposerHeight(const AiPanelViewModel& vm, float s) const {
-    // padding 10 / 8, context row 24 + 6, input, controls row 32, 1 px borders.
+    // padding 10 / 8, context row 24 + 6, attachments, input, controls row 32, 1 px borders.
     const float quote = !vm.quote.empty() && rich_ ? rich_->quote_h : 0.0f;
-    return std::round((2.0f + 10.0f + (vm.context_visible ? 30.0f : 0.0f) + 32.0f + 8.0f) * s) + quote +
+    return std::round((2.0f + 10.0f + (vm.context_visible ? 30.0f : 0.0f) + 32.0f + 8.0f) * s) + quote + attach_h_ +
            InputHeight(vm, InputLines(vm), s);
 }
 
@@ -635,16 +656,16 @@ void AiPanelView::DrawComposer(Compositor* compositor, const AiPanelViewModel& v
     if (clear) pal.hover = base.glass_hover;
     composer_rect_ = box;
     const float radius = 16.0f * s;
-    const bool ring = vm.composer_focused || vm.voice.listening;   // .composer.listen: the same ring
+    const bool ring = vm.composer_focused || vm.voice.listening || vm.drop_hot;
     if (ring) {
-        // Focus: accent border and a 3 px ring at 16%; only outside the box
-        // when the box lets the panel through.
+        // Focus / drop target: accent border and a 3 px ring at 16%.
         if (clear) c.Stroke(Inflate(box, 3.0f * s), radius + 3.0f * s, Alpha(pal.accent, 0.16f), 3.0f * s);
         else c.Fill(Inflate(box, 3.0f * s), radius + 3.0f * s, Alpha(pal.accent, 0.16f));
     } else if (!clear) {
         c.Shadow(box, radius, 8.0f * s, 2.0f * s, Hex(0x000000, vm.dark ? 0.20f : 0.05f));
     }
     c.Fill(box, radius, clear ? pal.glass_input : pal.card);
+    if (vm.drop_hot) c.Fill(box, radius, Alpha(pal.accent, vm.dark ? 0.12f : 0.07f));
     c.Stroke(box, radius, ring ? pal.accent : clear ? pal.glass_input_line : pal.line);
     const float left = box.left + 1.0f * s + 12.0f * s;
     const float right = box.right - 1.0f * s - 10.0f * s;
@@ -668,6 +689,46 @@ void AiPanelView::DrawComposer(Compositor* compositor, const AiPanelViewModel& v
         c.Icon(AiIcon::Close, xx, y + 6.5f * s, 11.0f * s, hot ? pal.text : pal.text3);
         y += 30.0f * s;
     }
+    attach_removes_.clear();
+    if (!vm.attachments.empty()) {
+        const float chip_h = 24.0f * s;
+        const float gap = 6.0f * s;
+        const float max_w = right - left;
+        float cx = left;
+        for (size_t i = 0; i < vm.attachments.size(); ++i) {
+            const AiAttachChipView& att = vm.attachments[i];
+            std::wstring label = att.name;
+            if (!att.meta.empty()) label += L" \u00B7 " + att.meta;
+            const float cw = (std::min)(max_w, (7.0f + 13.0f + 6.0f + 6.0f + 11.0f + 9.0f) * s +
+                                                   c.Measure(label, formats_.caption));
+            if (cx > left && cx + cw > right) {
+                cx = left;
+                y += chip_h + 5.0f * s;
+            }
+            const D2D1_COLOR_F img_ink = vm.dark ? Mix(pal.accent, pal.text, 0.48f) : pal.accent;
+            const D2D1_RECT_F chip = D2D1::RectF(cx, y, cx + cw, y + chip_h);
+            c.Fill(chip, 12.0f * s, att.is_image ? pal.accent_soft : (clear ? pal.glass_card : pal.card));
+            c.Stroke(chip, 12.0f * s,
+                     att.is_image ? Alpha(img_ink, vm.dark ? 0.42f : 0.30f) : (clear ? pal.glass_card_line : pal.line));
+            const AiIcon ic = att.is_image ? AiIcon::Image : att.is_dir ? AiIcon::Folder : AiIcon::Document;
+            c.Icon(ic, chip.left + 7.0f * s, y + 5.5f * s, 13.0f * s, att.is_image ? img_ink : pal.text2);
+            const float xx = chip.right - 9.0f * s - 11.0f * s;
+            c.Text(label, formats_.caption, D2D1::RectF(chip.left + 26.0f * s, y, xx - 4.0f * s, y + chip_h),
+                   att.is_image ? img_ink : pal.text);
+            const D2D1_RECT_F xhit = D2D1::RectF(xx - 4.0f * s, y + 2.0f * s, xx + 15.0f * s, y + 22.0f * s);
+            attach_removes_.push_back(xhit);
+            const bool xhot = vm.hover.part == AiPanelPart::AttachRemove && vm.hover.index == static_cast<int>(i);
+            if (xhot) c.Fill(D2D1::RectF(xx - 3.0f * s, y + 4.0f * s, xx + 14.0f * s, y + 20.0f * s), 8.0f * s, pal.hover);
+            c.Icon(AiIcon::Close, xx, y + 6.5f * s, 11.0f * s, xhot ? pal.text : pal.text3);
+            cx += cw + gap;
+        }
+        y += chip_h + 6.0f * s;
+        if (!vm.attach_notice.empty()) {
+            c.Icon(AiIcon::Shield, left + 1.0f * s, y + 1.0f * s, 12.0f * s, pal.text3);
+            c.Text(vm.attach_notice, formats_.meta, D2D1::RectF(left + 17.0f * s, y, right, y + 14.0f * s), pal.text3);
+            y += 18.0f * s;
+        }
+    }
     DrawQuoteChip(compositor, vm, pal, left, right, y, s);
     const float input_h = InputHeight(vm, InputLines(vm), s);
     // .cp-in padding 2: the EDIT sits inside; the placeholder is drawn here
@@ -688,8 +749,9 @@ void AiPanelView::DrawComposer(Compositor* compositor, const AiPanelViewModel& v
         c.dc->PopAxisAlignedClip();
     }
     y += input_h;
-    // Controls row (height 32): 添加文件 · model button · (mic) · send. In a
-    // narrow panel 添加文件 drops its label first, then the model name shortens.
+    // Controls row (height 32): 添加文件 · 联网 · model button · (mic) · send.
+    // In a narrow panel 添加文件 drops its label first, then 联网, then the model
+    // name shortens.
     const float row_mid = y + 16.0f * s;
     const float model_r = vm.voice.available ? right - 32.0f * s - 10.0f * s - 46.0f * s - 10.0f * s
                                              : right - 32.0f * s - 6.0f * s;
@@ -698,18 +760,45 @@ void AiPanelView::DrawComposer(Compositor* compositor, const AiPanelViewModel& v
     const float model_pad = (8.0f + 4.0f + 12.0f + 8.0f) * s;
     float model_fit = model_lw;
     {
-        const float tw = c.Measure(vm.add_files, formats_.caption);
-        const float full = (8.0f + 14.0f + 5.0f + 8.0f) * s + tw;
-        const bool compact = left - 4.0f * s + full + 6.0f * s + model_pad + model_lw + model_ew > model_r;
-        const float w = compact ? 30.0f * s : full;
-        add_files_ = D2D1::RectF(left - 4.0f * s, row_mid - 14.0f * s, left - 4.0f * s + w, row_mid + 14.0f * s);
-        model_fit = std::clamp(model_r - (add_files_.right + 6.0f * s) - model_pad - model_ew, 30.0f * s, model_lw);
-        const bool hot = vm.hover.part == AiPanelPart::AddFiles;
-        if (hot) c.Fill(add_files_, 8.0f * s, pal.hover);
+        const float gap_btn = 4.0f * s;
+        const float add_tw = c.Measure(vm.add_files, formats_.caption);
+        const float add_full = (8.0f + 14.0f + 5.0f + 8.0f) * s + add_tw;
+        const float web_tw = vm.web_search_label.empty() ? 0.0f : c.Measure(vm.web_search_label, formats_.caption);
+        const float web_full = web_tw > 0.0f ? (8.0f + 14.0f + 5.0f + 8.0f) * s + web_tw : 30.0f * s;
+        const float need_model = model_pad + model_lw + model_ew + 6.0f * s;
+        const float start_x = left - 4.0f * s;
+        bool add_compact = start_x + add_full + gap_btn + web_full + need_model > model_r;
+        const float add_w = add_compact ? 30.0f * s : add_full;
+        bool web_compact = web_tw <= 0.0f || (start_x + add_w + gap_btn + web_full + need_model > model_r);
+        const float web_w = web_compact ? 30.0f * s : web_full;
+
+        add_files_ = D2D1::RectF(start_x, row_mid - 14.0f * s, start_x + add_w, row_mid + 14.0f * s);
+        web_search_ = D2D1::RectF(add_files_.right + gap_btn, row_mid - 14.0f * s,
+                                  add_files_.right + gap_btn + web_w, row_mid + 14.0f * s);
+        model_fit = std::clamp(model_r - (web_search_.right + 6.0f * s) - model_pad - model_ew, 30.0f * s, model_lw);
+
+        const bool add_hot = vm.hover.part == AiPanelPart::AddFiles;
+        if (add_hot) c.Fill(add_files_, 8.0f * s, pal.hover);
         c.Icon(AiIcon::At, add_files_.left + 8.0f * s, row_mid - 7.0f * s, 14.0f * s, pal.text2);
-        if (!compact)
+        if (!add_compact)
             c.Text(vm.add_files, formats_.caption, D2D1::RectF(add_files_.left + 27.0f * s, add_files_.top,
                                                              add_files_.right, add_files_.bottom), pal.text2);
+
+        const bool web_hot = vm.hover.part == AiPanelPart::WebSearch;
+        const bool web_on = vm.web_search;
+        const D2D1_COLOR_F web_accent = vm.dark ? Mix(pal.accent, pal.text, 0.48f) : pal.accent;
+        if (web_on) {
+            c.Fill(web_search_, 8.0f * s, web_hot ? Mix(pal.accent_soft, pal.accent, 0.14f) : pal.accent_soft);
+            c.Stroke(web_search_, 8.0f * s, Alpha(web_accent, vm.dark ? 0.42f : 0.28f));
+        } else if (web_hot) {
+            c.Fill(web_search_, 8.0f * s, pal.hover);
+        }
+        const D2D1_COLOR_F web_ink = web_on ? web_accent : (web_hot ? pal.text : pal.text2);
+        c.Icon(AiIcon::Globe, web_search_.left + 8.0f * s, row_mid - 7.0f * s, 14.0f * s, web_ink);
+        if (!web_compact)
+            c.Text(vm.web_search_label, formats_.caption,
+                   D2D1::RectF(web_search_.left + 27.0f * s, web_search_.top, web_search_.right, web_search_.bottom),
+                   web_ink);
     }
     // Send: 32 round.
     send_button_ = D2D1::RectF(right - 32.0f * s, row_mid - 16.0f * s, right, row_mid + 16.0f * s);
@@ -1160,9 +1249,12 @@ AiPanelHit AiPanelView::HitTest(float x, float y) const {
         return {AiPanelPart::Conversation, -1};
     }
     if (In(quote_remove_, x, y)) return {AiPanelPart::QuoteRemove, -1};
+    for (size_t i = 0; i < attach_removes_.size(); ++i)
+        if (In(attach_removes_[i], x, y)) return {AiPanelPart::AttachRemove, static_cast<int>(i)};
     if (In(context_remove_, x, y)) return {AiPanelPart::ContextRemove, -1};
     if (In(context_chip_, x, y)) return {AiPanelPart::ContextChip, -1};
     if (In(add_files_, x, y)) return {AiPanelPart::AddFiles, -1};
+    if (In(web_search_, x, y)) return {AiPanelPart::WebSearch, -1};
     if (In(model_button_, x, y)) return {AiPanelPart::ModelButton, -1};
     if (In(mic_button_, x, y)) return {AiPanelPart::Mic, -1};
     if (In(mic_menu_, x, y)) return {AiPanelPart::MicMenu, -1};

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <string_view>
 
 namespace pulse::setup {
 
@@ -181,6 +182,204 @@ std::string WideToUtf8(const std::wstring& w) {
     std::string s(static_cast<size_t>(n), '\0');
     WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
     return s;
+}
+
+namespace {
+
+std::wstring AsciiLower(std::wstring s) {
+    for (wchar_t& c : s) {
+        if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c - L'A' + L'a');
+    }
+    return s;
+}
+
+bool IsHex16(const std::wstring& s) {
+    if (s.size() != 16) return false;
+    for (wchar_t c : s) {
+        if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F'))) return false;
+    }
+    return true;
+}
+
+bool IsTopLevelIndexArtifactFile(const std::wstring& name, bool include_config) {
+    const std::wstring n = AsciiLower(name);
+    if (include_config && n == L"config.json") return true;
+    return n == L"pulse-index.bin" || n == L"pulse-index.bin.tmp" || n == L"pulse-index.dlt" ||
+           (n.starts_with(L"pulse-index-") && n.ends_with(L".dlt")) ||
+           n.starts_with(L"changes-s-1-") ||
+           n.starts_with(L".pulse-write-check-");
+}
+
+bool IsShardArtifactFile(const std::wstring& name) {
+    const std::wstring n = AsciiLower(name);
+    static constexpr std::wstring_view kBases[] = {L"base-a.bin", L"base-b.bin", L"manifest.json", L"wal-a.log", L"wal-b.log"};
+    for (std::wstring_view base : kBases) {
+        if (n.starts_with(base) && (n.size() == base.size() || n[base.size()] == L'.')) return true;
+    }
+    return false;
+}
+
+void DeleteShardHexDir(const std::wstring& hex_dir) {
+    const DWORD a = GetFileAttributesW(hex_dir.c_str());
+    if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY) || (a & FILE_ATTRIBUTE_REPARSE_POINT)) return;
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((hex_dir + L"\\*").c_str(), &fd);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            const std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..") continue;
+            if ((fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0 &&
+                IsShardArtifactFile(name)) {
+                const std::wstring file = hex_dir + L"\\" + name;
+                SetFileAttributesW(file.c_str(), FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(file.c_str());
+            }
+        } while (FindNextFileW(find, &fd));
+        FindClose(find);
+    }
+    RemoveDirectoryW(hex_dir.c_str());
+}
+
+void DeleteShardFamilyDir(const std::wstring& family_dir, bool allow_nested_volumes) {
+    const DWORD a = GetFileAttributesW(family_dir.c_str());
+    if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY) || (a & FILE_ATTRIBUTE_REPARSE_POINT)) return;
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((family_dir + L"\\*").c_str(), &fd);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            const std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..") continue;
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                continue;
+            const std::wstring sub = family_dir + L"\\" + name;
+            if (IsHex16(name)) {
+                DeleteShardHexDir(sub);
+            } else if (allow_nested_volumes && EqualsNoCase(name, L"volumes")) {
+                DeleteShardFamilyDir(sub, false);
+            }
+        } while (FindNextFileW(find, &fd));
+        FindClose(find);
+    }
+    RemoveDirectoryW(family_dir.c_str());
+}
+
+}  // namespace
+
+bool DirectoryHasPulseIndexArtifacts(const std::wstring& raw_dir) {
+    const std::wstring dir = NormalizeDir(raw_dir);
+    if (dir.empty()) return false;
+    const DWORD a = GetFileAttributesW(dir.c_str());
+    if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY) || (a & FILE_ATTRIBUTE_REPARSE_POINT))
+        return false;
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return false;
+    bool found = false;
+    do {
+        const std::wstring name = fd.cFileName;
+        if (name == L"." || name == L"..") continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (EqualsNoCase(name, L"v9") || EqualsNoCase(name, L"volumes")) {
+                found = true;
+                break;
+            }
+        } else if (IsTopLevelIndexArtifactFile(name, false)) {
+            found = true;
+            break;
+        }
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+    return found;
+}
+
+bool IsNonEmptyNonIndexDirectory(const std::wstring& raw_dir) {
+    const std::wstring dir = NormalizeDir(raw_dir);
+    if (dir.empty()) return false;
+    const DWORD a = GetFileAttributesW(dir.c_str());
+    if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) return false;
+    if (a & FILE_ATTRIBUTE_REPARSE_POINT) return true;
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return false;
+    bool any_entry = false;
+    do {
+        const std::wstring name = fd.cFileName;
+        if (name == L"." || name == L"..") continue;
+        any_entry = true;
+        break;
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+    if (!any_entry) return false;
+    return !DirectoryHasPulseIndexArtifacts(dir);
+}
+
+std::wstring DefaultIndexPathForApp(const std::wstring& app_dir, bool test_mode) {
+    const std::wstring default_app =
+        NormalizeDir(KnownFolder(FOLDERID_ProgramFiles) + (test_mode ? L"\\Pulse Test" : L"\\Pulse"));
+    const std::wstring progdata_index =
+        NormalizeDir(KnownFolder(FOLDERID_ProgramData) + (test_mode ? L"\\Pulse Test\\Index" : L"\\Pulse\\Index"));
+    const std::wstring norm_app = NormalizeDir(app_dir);
+    if (norm_app.empty() || (!default_app.empty() && SameDirectory(norm_app, default_app))) return progdata_index;
+    return norm_app + L"\\Index";
+}
+
+std::wstring NormalizeIndexSelection(const std::wstring& chosen_dir, const std::wstring& app_dir,
+                                     const std::wstring& current_configured_index, bool from_browse) {
+    std::wstring p = chosen_dir;
+    auto blank = [](wchar_t c) { return c == L' ' || c == L'\t'; };
+    while (!p.empty() && blank(p.front())) p.erase(p.begin());
+    while (!p.empty() && blank(p.back())) p.pop_back();
+    for (auto& c : p) if (c == L'/') c = L'\\';
+    auto is_ascii_letter = [](wchar_t c) { return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z'); };
+    if (p.size() == 2 && p[1] == L':' && is_ascii_letter(p[0]))
+        return std::wstring{p[0], L':', L'\\'} + L"Index";
+    p = NormalizeDir(p);
+    if (p.size() == 3 && p[1] == L':' && p[2] == L'\\' && is_ascii_letter(p[0]))
+        return p + L"Index";
+    if (p.empty()) return p;
+    const std::wstring norm_app = NormalizeDir(app_dir);
+    if (!norm_app.empty()) {
+        if (SameDirectory(p, norm_app)) return norm_app + L"\\Index";
+        if (PathInDirectories(norm_app, {p})) return p + L"\\Index";
+    }
+    if (from_browse) {
+        const auto slash = p.find_last_of(L'\\');
+        const std::wstring last = slash == std::wstring::npos ? p : p.substr(slash + 1);
+        if (!EqualsNoCase(last, L"Index") &&
+            (current_configured_index.empty() || !SameDirectory(p, current_configured_index)) &&
+            IsNonEmptyNonIndexDirectory(p)) {
+            return p + L"\\Index";
+        }
+    }
+    return p;
+}
+
+void DeletePulseIndexDirectoryArtifacts(const std::wstring& raw_dir) {
+    const std::wstring dir = NormalizeDir(raw_dir);
+    if (dir.empty()) return;
+    const DWORD a = GetFileAttributesW(dir.c_str());
+    if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY) || (a & FILE_ATTRIBUTE_REPARSE_POINT))
+        return;
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            const std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..") continue;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+            const std::wstring child = dir + L"\\" + name;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (EqualsNoCase(name, L"v9")) DeleteShardFamilyDir(child, true);
+                else if (EqualsNoCase(name, L"volumes")) DeleteShardFamilyDir(child, false);
+            } else if (IsTopLevelIndexArtifactFile(name, true)) {
+                SetFileAttributesW(child.c_str(), FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(child.c_str());
+            }
+        } while (FindNextFileW(find, &fd));
+        FindClose(find);
+    }
+    RemoveDirectoryW(dir.c_str());  // only succeeds when directory is empty, keeping unrelated user files
 }
 
 }  // namespace pulse::setup

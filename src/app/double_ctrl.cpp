@@ -2,6 +2,11 @@
 #include <shellapi.h>
 
 namespace pulse {
+namespace {
+constexpr UINT kRefreshInputDevices = WM_APP + 1;
+constexpr UINT_PTR kInputPollTimer = 1;
+constexpr UINT kInputPollIntervalMs = 32;
+}
 bool DoubleCtrlDetector::Key(bool ctrl, bool down, uint64_t now) {
     if (!ctrl) {
         // Ctrl+anything is a shortcut, not a tap; a key typed between the taps
@@ -47,8 +52,17 @@ void DoubleCtrlWatcher::Update(HWND target, UINT message, bool enabled, uint32_t
     target_ = target;
     message_ = message;
     gap_ = gap_ms;
-    if (!enabled || !target) { Stop(); return; }
+    enabled_ = enabled && target;
+    if (!enabled_.load() && !observer_.load()) { Stop(); return; }
     if (!thread_.joinable()) thread_ = std::thread([this] { Run(); });
+}
+
+void DoubleCtrlWatcher::SetInputObserver(InputObserver observe, InputPoll poll) {
+    observer_.store(observe ? std::make_shared<const Observer>(Observer{std::move(observe), std::move(poll)})
+                            : nullptr);
+    if (!enabled_.load() && !observer_.load()) { Stop(); return; }
+    if (!thread_.joinable()) thread_ = std::thread([this] { Run(); });
+    else if (const auto id = thread_id_.load()) PostThreadMessageW(id, kRefreshInputDevices, 0, 0);
 }
 
 void DoubleCtrlWatcher::Stop() {
@@ -72,6 +86,12 @@ LRESULT CALLBACK DoubleCtrlWatcher::WindowProc(HWND hwnd, UINT msg, WPARAM wpara
     } else if (msg == WM_INPUT) {
         if (auto* self = reinterpret_cast<DoubleCtrlWatcher*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA)))
             self->OnInput(reinterpret_cast<HRAWINPUT>(lparam));
+    } else if (msg == WM_TIMER && wparam == kInputPollTimer) {
+        if (auto* self = reinterpret_cast<DoubleCtrlWatcher*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA))) {
+            const auto observer = self->observer_.load();
+            if (observer && observer->poll) observer->poll();
+        }
+        return 0;
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
@@ -86,10 +106,30 @@ void DoubleCtrlWatcher::WatchMouse(bool on) {
     if (RegisterRawInputDevices(&device, 1, sizeof(device)) || !on) mouse_ = on;
 }
 
+void DoubleCtrlWatcher::RefreshInputDevices() {
+    const auto observer = observer_.load();
+    WatchMouse(observer || (enabled_.load() && detector_.Pending(GetTickCount64())));
+    const bool want_poll = observer && observer->poll;
+    if (want_poll == polling_) return;
+    if (want_poll) polling_ = SetTimer(window_, kInputPollTimer, kInputPollIntervalMs, nullptr) != 0;
+    else {
+        KillTimer(window_, kInputPollTimer);
+        polling_ = false;
+    }
+}
+
 void DoubleCtrlWatcher::OnInput(HRAWINPUT input) {
     RAWINPUT raw{};
     UINT size = sizeof(raw);
     if (GetRawInputData(input, RID_INPUT, &raw, &size, sizeof(RAWINPUTHEADER)) == static_cast<UINT>(-1)) return;
+    const auto observer = observer_.load();
+    if (observer) observer->on_input(raw);
+    const bool ctrl_enabled = enabled_.load();
+    if (!ctrl_enabled) {
+        detector_ = {};
+        WatchMouse(observer != nullptr);
+        return;
+    }
     detector_.SetGap(gap_.load());
     const uint64_t now = GetTickCount64();
     if (raw.header.dwType == RIM_TYPEMOUSE) {
@@ -104,7 +144,7 @@ void DoubleCtrlWatcher::OnInput(HRAWINPUT input) {
             if (target && !QuietMoment()) PostMessageW(target, message_.load(), 0, 0);
         }
     }
-    WatchMouse(detector_.Pending(now));
+    WatchMouse(observer || detector_.Pending(now));
 }
 
 void DoubleCtrlWatcher::Run() {
@@ -124,12 +164,19 @@ void DoubleCtrlWatcher::Run() {
         device.dwFlags = RIDEV_INPUTSINK;
         device.hwndTarget = window_;
         RegisterRawInputDevices(&device, 1, sizeof(device));
+        RefreshInputDevices();
     }
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (msg.message == kRefreshInputDevices && !msg.hwnd) {
+            if (window_) RefreshInputDevices();
+            continue;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
     if (window_) {
+        if (polling_) KillTimer(window_, kInputPollTimer);
+        polling_ = false;
         WatchMouse(false);
         RAWINPUTDEVICE device{};
         device.usUsagePage = 0x01;

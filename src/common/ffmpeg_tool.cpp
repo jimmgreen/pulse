@@ -2,6 +2,8 @@
 #include "path_utils.h"
 #include "preview_packs.h"
 #include <algorithm>
+#include <cmath>
+#include <charconv>
 #include <iterator>
 #include <cctype>
 #include <cstdio>
@@ -199,7 +201,7 @@ DWORD Process::ExitCode() const {
     return code;
 }
 
-uint32_t ParseDurationMs(std::string_view log) {
+int64_t ParseDuration100ns(std::string_view log) {
     size_t at = 0;
     while (at < log.size() && !log.substr(at).starts_with("  Duration: ")) {
         at = log.find('\n', at);
@@ -208,21 +210,31 @@ uint32_t ParseDurationMs(std::string_view log) {
     }
     if (at == log.size()) return 0;
     at += 2;
-    unsigned h = 0, m = 0, s = 0, frac = 0;
-    char buffer[24]{};
-    const std::string_view value = log.substr(at + 10, 16);
-    std::copy(value.begin(), value.end(), buffer);
-    int digits = 0;
-    if (sscanf_s(buffer, "%u:%u:%u.%n", &h, &m, &s, &digits) < 3) return 0;
-    // Fraction is hundredths in ffmpeg's log ("12.34").
-    const char* f = buffer + digits;
-    if (digits > 0 && f[0] >= '0' && f[0] <= '9') {
-        frac = (f[0] - '0') * 100u;
-        if (f[1] >= '0' && f[1] <= '9') frac += (f[1] - '0') * 10u;
+    const char* p = log.data() + at + 10;
+    const char* end = log.data() + log.size();
+    uint64_t hours = 0;
+    unsigned minutes = 0, seconds = 0;
+    auto number = [&](auto& value) {
+        const auto result = std::from_chars(p, end, value);
+        p = result.ptr;
+        return result.ec == std::errc{};
+    };
+    if (!number(hours) || p == end || *p++ != ':' || !number(minutes) ||
+        p == end || *p++ != ':' || !number(seconds) || minutes >= 60 || seconds >= 60) return 0;
+    int64_t fraction = 0;
+    if (p != end && *p == '.') {
+        ++p;
+        for (int scale = 1000000; p != end && *p >= '0' && *p <= '9'; ++p, scale /= 10)
+            fraction += (*p - '0') * scale;
     }
-    if (m >= 60 || s >= 60) return 0;
-    const unsigned long long ms = ((h * 60ull + m) * 60ull + s) * 1000ull + frac;
-    return static_cast<uint32_t>((std::min)(ms, 0xFFFFFFFFull));
+    constexpr int64_t hour_ticks = 3600ll * 10000000;
+    const int64_t tail = (minutes * 60ll + seconds) * 10000000 + fraction;
+    if (hours > static_cast<uint64_t>((INT64_MAX - tail) / hour_ticks)) return 0;
+    return static_cast<int64_t>(hours) * hour_ticks + tail;
+}
+
+uint32_t ParseDurationMs(std::string_view log) {
+    return static_cast<uint32_t>((std::min<int64_t>)(ParseDuration100ns(log) / 10000, UINT32_MAX));
 }
 
 namespace {
@@ -269,6 +281,53 @@ bool ParseVideoSize(std::string_view log, UINT& width, UINT& height) {
     });
 }
 
+bool ParseVideoQuarterTurn(std::string_view log) {
+    const std::string_view video_line = StreamLine(log, "Video");
+    if (video_line.empty()) return false;
+    const size_t stream_pos = static_cast<size_t>(video_line.data() - log.data());
+    size_t pos = log.find('\n', stream_pos);
+    if (pos == std::string_view::npos) return false;
+    ++pos;
+
+    auto is_quarter_turn = [](std::string_view num_text) -> bool {
+        while (!num_text.empty() && (num_text.front() == ' ' || num_text.front() == '\t'))
+            num_text.remove_prefix(1);
+        if (num_text.empty()) return false;
+        char buf[32]{};
+        const size_t n = (std::min)(num_text.size(), sizeof(buf) - 1);
+        std::copy_n(num_text.data(), n, buf);
+        char* end = nullptr;
+        const double val = strtod(buf, &end);
+        if (end == buf) return false;
+        const long deg = std::lround(std::fabs(val)) % 360;
+        return deg == 90 || deg == 270;
+    };
+
+    while (pos < log.size()) {
+        const size_t end = log.find('\n', pos);
+        std::string_view line = log.substr(pos, end == std::string_view::npos ? log.size() - pos : end - pos);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        pos = end == std::string_view::npos ? log.size() : end + 1;
+        if (line.empty()) continue;
+        // Stream sub-blocks (Metadata / Side data) are indented by at least 4 spaces.
+        size_t indent = 0;
+        while (indent < line.size() && (line[indent] == ' ' || line[indent] == '\t')) ++indent;
+        if (indent < 4) break;
+        const std::string_view trimmed = line.substr(indent);
+        constexpr std::string_view kDisplayMatrix = "displaymatrix: rotation of ";
+        if (const size_t dm = trimmed.find(kDisplayMatrix); dm != std::string_view::npos) {
+            if (is_quarter_turn(trimmed.substr(dm + kDisplayMatrix.size()))) return true;
+        }
+        if (trimmed.starts_with("rotate")) {
+            size_t rest = 6;
+            while (rest < trimmed.size() && (trimmed[rest] == ' ' || trimmed[rest] == '\t')) ++rest;
+            if (rest < trimmed.size() && trimmed[rest] == ':' && is_quarter_turn(trimmed.substr(rest + 1)))
+                return true;
+        }
+    }
+    return false;
+}
+
 double ParseFrameRate(std::string_view log) {
     double rate = 0;
     ForEachVideoLine(log, [&](std::string_view line) {
@@ -281,7 +340,7 @@ double ParseFrameRate(std::string_view log) {
             std::string number(line.substr(a, at - a));
             double value = strtod(number.c_str(), nullptr);
             if (!number.empty() && number.back() == 'k') value *= 1000.0;
-            if (value > 0.5 && value < 1000.0) { rate = value; return true; }
+            if (value >= 0.0001 && value < 1000.0) { rate = value; return true; }
         }
         return false;
     });

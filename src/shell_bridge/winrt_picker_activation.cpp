@@ -4,7 +4,10 @@
 #include <shlobj.h>
 #include <winrt/Windows.Storage.Pickers.h>
 #include <winrt/Windows.System.h>
+#include <cstdio>
+#include <filesystem>
 #include <optional>
+#include <string>
 
 namespace pulse::shell_bridge::winrt_picker {
 namespace {
@@ -13,25 +16,112 @@ namespace foundation = winrt::Windows::Foundation;
 namespace wire = ipc::picker;
 using winrt::hstring;
 std::u16string Text(const hstring& value) { return {reinterpret_cast<const char16_t*>(value.c_str()), value.size()}; }
-std::optional<std::u16string> Start(pick::PickerLocationId location) {
+uint64_t HashText(std::wstring_view text) noexcept {
+    uint64_t hash = 14695981039346656037ull;
+    for (wchar_t ch : text) {
+        const uint16_t unit = static_cast<uint16_t>(ch);
+        hash = (hash ^ (unit & 0xffu)) * 1099511628211ull;
+        hash = (hash ^ (unit >> 8)) * 1099511628211ull;
+    }
+    return hash;
+}
+std::wstring WinRtSettingsValueName(std::wstring_view settings_id) {
+    wchar_t module_path[32768]{};
+    const DWORD len = GetModuleFileNameW(nullptr, module_path, ARRAYSIZE(module_path));
+    std::wstring_view exe(module_path, len && len < ARRAYSIZE(module_path) ? len : 0);
+    const auto slash = exe.find_last_of(L"\\/");
+    if (slash != exe.npos) exe.remove_prefix(slash + 1);
+    std::wstring lowered(exe);
+    for (auto& ch : lowered) if (ch >= L'A' && ch <= L'Z') ch = static_cast<wchar_t>(ch - L'A' + L'a');
+    wchar_t name[64]{};
+    std::swprintf(name, ARRAYSIZE(name), L"%016llx-%016llx",
+        static_cast<unsigned long long>(HashText(lowered)),
+        static_cast<unsigned long long>(HashText(settings_id)));
+    return name;
+}
+std::optional<std::u16string> ReadRememberedDirectory(std::wstring_view settings_id) noexcept {
+    if (settings_id.empty()) return std::nullopt;
+    try {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Pulse\\WinRtPickerState", 0, KEY_READ, &key) != ERROR_SUCCESS)
+            return std::nullopt;
+        struct Close { HKEY h; ~Close() { RegCloseKey(h); } } close{key};
+        const auto value_name = WinRtSettingsValueName(settings_id);
+        DWORD type = 0, bytes = 0;
+        if (RegQueryValueExW(key, value_name.c_str(), nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS ||
+            type != REG_SZ || bytes < sizeof(wchar_t) || bytes > 65536)
+            return std::nullopt;
+        std::wstring folder(bytes / sizeof(wchar_t), L'\0');
+        if (RegQueryValueExW(key, value_name.c_str(), nullptr, &type, reinterpret_cast<BYTE*>(folder.data()), &bytes) != ERROR_SUCCESS)
+            return std::nullopt;
+        while (!folder.empty() && folder.back() == L'\0') folder.pop_back();
+        if (folder.empty()) return std::nullopt;
+        const DWORD attrs = GetFileAttributesW(folder.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY)) return std::nullopt;
+        return std::u16string(folder.begin(), folder.end());
+    } catch (...) { return std::nullopt; }
+}
+void WriteRememberedDirectory(std::wstring_view settings_id, const std::wstring& directory) noexcept {
+    if (settings_id.empty() || directory.empty()) return;
+    try {
+        HKEY key = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Pulse\\WinRtPickerState", 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+            return;
+        struct Close { HKEY h; ~Close() { RegCloseKey(h); } } close{key};
+        const auto value_name = WinRtSettingsValueName(settings_id);
+        const DWORD bytes = static_cast<DWORD>((directory.size() + 1) * sizeof(wchar_t));
+        RegSetValueExW(key, value_name.c_str(), 0, REG_SZ, reinterpret_cast<const BYTE*>(directory.c_str()), bytes);
+    } catch (...) {}
+}
+Services WrapWithSettingsState(const Services& services, const hstring& settings_id, bool folder_result) {
+    if (settings_id.empty() || !services.run) return services;
+    std::wstring key(settings_id.c_str(), settings_id.size());
+    Services wrapped;
+    wrapped.run = [run = services.run, key = std::move(key), folder_result](const wire::Message& req, HWND hwnd, HANDLE cancel) {
+        auto reply = run(req, hwnd, cancel);
+        if (const auto* body = std::get_if<wire::Response>(&reply.body);
+            body && body->status == wire::Status::Accepted && !body->paths.empty()) {
+            const auto& first = body->paths.front();
+            std::wstring path(first.begin(), first.end());
+            const std::wstring dir = folder_result ? path : std::filesystem::path(path).parent_path().wstring();
+            WriteRememberedDirectory(key, dir);
+        }
+        return reply;
+    };
+    return wrapped;
+}
+std::optional<std::u16string> Start(pick::PickerLocationId location, wire::Operation operation) {
+    if (location == pick::PickerLocationId::ComputerFolder) {
+        if (operation != wire::Operation::SaveFile) return std::u16string(u"pulse:computer");
+    }
     const KNOWNFOLDERID* folder = nullptr;
     switch (location) {
-    case pick::PickerLocationId::DocumentsLibrary: folder = &FOLDERID_Documents; break;
+    case pick::PickerLocationId::DocumentsLibrary:
+    case pick::PickerLocationId::Unspecified:
+    case pick::PickerLocationId::HomeGroup:
+        folder = &FOLDERID_Documents; break;
     case pick::PickerLocationId::Desktop: folder = &FOLDERID_Desktop; break;
     case pick::PickerLocationId::Downloads: folder = &FOLDERID_Downloads; break;
     case pick::PickerLocationId::MusicLibrary: folder = &FOLDERID_Music; break;
     case pick::PickerLocationId::PicturesLibrary: folder = &FOLDERID_Pictures; break;
     case pick::PickerLocationId::VideosLibrary: folder = &FOLDERID_Videos; break;
+    case pick::PickerLocationId::ComputerFolder: folder = &FOLDERID_Profile; break;
+    case pick::PickerLocationId::Objects3D: folder = &FOLDERID_Objects3D; break;
     default: return std::nullopt;
     }
     PWSTR path = nullptr;
-    if (FAILED(SHGetKnownFolderPath(*folder, KF_FLAG_DONT_VERIFY, nullptr, &path))) return std::nullopt;
+    HRESULT hr = SHGetKnownFolderPath(*folder, KF_FLAG_DONT_VERIFY, nullptr, &path);
+    if (FAILED(hr) && folder == &FOLDERID_Objects3D)
+        hr = SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DONT_VERIFY, nullptr, &path);
+    if (FAILED(hr) || !path) return std::nullopt;
     std::u16string result(reinterpret_cast<const char16_t*>(path));
     CoTaskMemFree(path); return result;
 }
 template<class Native> std::optional<wire::Request> Base(const Native& native, HWND owner, bool native_only, wire::Operation operation) {
-    if (native_only || FAILED(DesktopEligibility(owner)) || !native.SettingsIdentifier().empty()) return std::nullopt;
-    auto start = Start(native.SuggestedStartLocation());
+    if (native_only || FAILED(DesktopEligibility(owner))) return std::nullopt;
+    const auto settings_id = native.SettingsIdentifier();
+    auto start = ReadRememberedDirectory(std::wstring_view(settings_id.c_str(), settings_id.size()));
+    if (!start) start = Start(native.SuggestedStartLocation(), operation);
     if (!start) return std::nullopt;
     wire::Request request; request.operation = operation;
     request.required_capabilities = operation == wire::Operation::PickFolder ? wire::Folder : operation == wire::Operation::SaveFile ? wire::Save : wire::Open;
@@ -100,11 +190,11 @@ struct Open : winrt::implements<Open, pick::IFileOpenPicker, pick::IFileOpenPick
     }
     IAsyncOperation<File> PickSingleFileAsync() {
         auto request = Request(false);
-        return request ? PickFileAsync(std::move(*request), owner, services) : native.PickSingleFileAsync();
+        return request ? PickFileAsync(std::move(*request), owner, WrapWithSettingsState(services, native.SettingsIdentifier(), false)) : native.PickSingleFileAsync();
     }
     IAsyncOperation<Files> PickMultipleFilesAsync() {
         auto request = Request(true);
-        return request ? PickFilesAsync(std::move(*request), owner, services) : native.PickMultipleFilesAsync();
+        return request ? PickFilesAsync(std::move(*request), owner, WrapWithSettingsState(services, native.SettingsIdentifier(), false)) : native.PickMultipleFilesAsync();
     }
 };
 using Extensions = foundation::Collections::IVector<hstring>;
@@ -187,7 +277,7 @@ struct Save : winrt::implements<Save, pick::IFileSavePicker, pick::IFileSavePick
         auto extension = Text(native.DefaultFileExtension());
         if (!extension.empty() && extension.front() == u'.') extension.erase(0, 1);
         request->default_extension = std::move(extension);
-        return PickSaveAsync(std::move(*request), owner, services);
+        return PickSaveAsync(std::move(*request), owner, WrapWithSettingsState(services, native.SettingsIdentifier(), false));
     }
 };
 struct FolderProxy : winrt::implements<FolderProxy, pick::IFolderPicker, pick::IFolderPicker2, pick::IFolderPicker3, ::IInitializeWithWindow, winrt::non_agile> {
@@ -225,7 +315,7 @@ struct FolderProxy : winrt::implements<FolderProxy, pick::IFolderPicker, pick::I
     IAsyncOperation<Folder> PickSingleFolderAsync() {
         auto request = Base(native, owner, native_only, wire::Operation::PickFolder);
         if (!request || !services.run || !native.FileTypeFilter().Size()) return native.PickSingleFolderAsync();
-        return PickFolderAsync(std::move(*request), owner, services);
+        return PickFolderAsync(std::move(*request), owner, WrapWithSettingsState(services, native.SettingsIdentifier(), true));
     }
 };
 struct Factory : winrt::implements<Factory, foundation::IActivationFactory> {
@@ -263,5 +353,35 @@ HRESULT GetActivationFactory(HSTRING name, REFIID iid, void** output, const Serv
         *output = winrt::detach_abi(factory);
         return S_OK;
     } catch (...) { return hr; } // Original activation factory remains the fallback.
+}
+HRESULT ActivateInstance(HSTRING name, IInspectable** output, const Services& services, ActivateInstanceFunction original) noexcept {
+    if (!output) return E_POINTER;
+    *output = nullptr;
+    if (!original) return E_INVALIDARG;
+    const HRESULT hr = original(name, output);
+    if (FAILED(hr) || !*output || !services.run) return hr;
+    try {
+        UINT32 length = 0;
+        const wchar_t* text = WindowsGetStringRawBuffer(name, &length);
+        const std::wstring_view type(text, length);
+        if (type != L"Windows.Storage.Pickers.FileOpenPicker" &&
+            type != L"Windows.Storage.Pickers.FileSavePicker" &&
+            type != L"Windows.Storage.Pickers.FolderPicker") {
+            return hr;
+        }
+        foundation::IInspectable native{nullptr};
+        winrt::copy_from_abi(native, *output);
+        foundation::IInspectable wrapped{nullptr};
+        if (type == L"Windows.Storage.Pickers.FileOpenPicker") {
+            wrapped = winrt::make<Open>(native.as<pick::FileOpenPicker>(), services);
+        } else if (type == L"Windows.Storage.Pickers.FileSavePicker") {
+            wrapped = winrt::make<Save>(native.as<pick::FileSavePicker>(), services);
+        } else {
+            wrapped = winrt::make<FolderProxy>(native.as<pick::FolderPicker>(), services);
+        }
+        (*output)->Release();
+        *output = static_cast<IInspectable*>(winrt::detach_abi(wrapped));
+        return S_OK;
+    } catch (...) { return hr; } // Original instance remains the fallback.
 }
 }

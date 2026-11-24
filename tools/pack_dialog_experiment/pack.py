@@ -44,6 +44,17 @@ DYNAMIC = {
     'pdfium.dll': 'src/preview_host/pdf_raster.cpp: dynamic PDF renderer',
     'pulse_elevated.exe': 'src/ops/elevated_transfer_client.cpp: explicit elevated operation helper',
 }
+APP_CONTRACT = {'manifest': 1, 'kind': 'AppRuntime'}
+APP_REQUIRED = ['pulse.exe', 'lumatext.dll', 'pulse_shell.exe']
+APP_OPTIONAL = {'pulse.ai.exe', 'pulse.content.exe', 'pulse.document.exe', 'pulse.index.exe',
+                'pulse_hotkey_broker.exe', 'pulse_start_pin.dll', 'pulse_integration.exe'}
+
+
+def dialog_binary(name):
+    name = name.lower()
+    return name.startswith(('pulsedialog', 'pulsefiledialog')) or name == 'pulsepickeruiproof.dll'
+
+
 REPO_LICENSES = {
     'LICENSE': 'licenses/Pulse/LICENSE',
     'third_party/detours/LICENSE.md': 'licenses/Detours/LICENSE.md',
@@ -113,21 +124,27 @@ def record(path, relative, role, arch=None):
         item.update(machine=pe.machine, imports=pe.normal, delay_imports=pe.delay)
     return item
 
-def plan(build, version, arch, repository, automatic=False, runtime_items=(), *, thin=False, host_digest=None):
+def plan(build, version, arch, repository, automatic=False, runtime_items=(), *,
+         thin=False, host_digest=None, app_runtime=False):
     if arch not in MACHINES or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', version):
         raise PackageError('invalid architecture or version label')
     if not Path(build).is_absolute() or not Path(repository).is_absolute(): raise PackageError('absolute build/repository paths required')
+    if app_runtime and (thin or automatic):
+        raise PackageError('app runtime cannot include a dialog bridge')
     if thin:
         if arch != 'x86' or runtime_items: raise PackageError('thin companion requires x86 and no full runtime items')
         host_hash(host_digest)
     elif host_digest is not None: raise PackageError('host binding requires thin companion')
     build, repository = no_links(build), no_links(repository)
     local = entries(build)
-    pending = [(name, 'entry') for name in (thin_roots() if thin else roots(arch, automatic))]
+    base = APP_REQUIRED if app_runtime else thin_roots() if thin else roots(arch, automatic)
+    pending = [(name, 'entry') for name in base]
     if not thin: pending += [(name, 'dynamic-helper') for name in DYNAMIC]
     for source, relative in runtime_items:
         safe_relative(relative)
         if not relative.startswith('licenses/'):
+            if app_runtime and dialog_binary(relative):
+                continue
             if '/' in relative or Path(source).resolve() != (build / relative).resolve():
                 raise PackageError('runtime binary must be a build direct child')
             pending.append((relative, 'entry'))
@@ -136,6 +153,8 @@ def plan(build, version, arch, repository, automatic=False, runtime_items=(), *,
         name, role = pending.pop(0)
         key = name.lower()
         if key in seen: continue
+        if app_runtime and dialog_binary(key):
+            errors.append(f'app runtime depends on dialog component: {name}'); continue
         seen.add(key)
         path = local.get(key)
         if path is None:
@@ -173,7 +192,8 @@ def plan(build, version, arch, repository, automatic=False, runtime_items=(), *,
             files.append(record(source, relative, 'license')); sources[relative] = source
     if errors: raise PackageError('\n'.join(errors))
     if len(files) > 512 or len({f['path'].lower() for f in files}) != len(files): raise PackageError('manifest size/case collision')
-    manifest = {'schema': 3 if thin else 1, 'version': version, 'architecture': arch, 'contract': CONTRACT,
+    manifest = {'schema': 4 if app_runtime else 3 if thin else 1, 'version': version, 'architecture': arch,
+                'contract': APP_CONTRACT if app_runtime else CONTRACT,
                 'dynamic_helpers': {} if thin else DYNAMIC, 'system_dependencies': sorted(os_dependencies),
                 'files': sorted(files, key=lambda f: f['path'].lower())}
     if thin: manifest['host_bundle'] = {'manifest_sha256': host_digest}
@@ -275,13 +295,59 @@ def package_installed(build, output, version, arch, repository, items):
     return verify_installed(output)
 
 
+def package_app_runtime(build, output, version, arch, repository, items):
+    """Add an independent app package to a private staged layout, never replacing an app pointer."""
+    output = no_links(output)
+    bridge = output / 'AppRuntime'
+    pointer_path = output / 'app-current.json'
+    layout_path = output / '.pulse-app-layout'
+    if any(path.exists() or path.is_symlink() for path in (pointer_path, layout_path)):
+        raise PackageError('app pointer already exists')
+    bridge.mkdir()
+    with tempfile.TemporaryDirectory(prefix='.app-staging-', dir=bridge) as staging:
+        candidate = Path(staging)
+        candidate.rmdir()
+        package(build, candidate, version, arch, repository, runtime_items=items, app_runtime=True)
+        manifest_hash = digest(candidate / 'manifest.json')
+        destination = bridge / manifest_hash
+        publish_directory(candidate, destination)
+    if verify(destination, app_runtime=True)['architecture'] != arch:
+        raise PackageError('invalid published app architecture')
+    pointer = {'schema': 1, 'directory': f'AppRuntime/{manifest_hash}', 'manifest_sha256': manifest_hash}
+    with pointer_path.open('x', encoding='utf-8', newline='\n') as stream:
+        json.dump(pointer, stream, separators=(',', ':')); stream.write('\n')
+    with layout_path.open('xb') as stream:
+        stream.write(b'1\n')
+    return pointer
+
+
+def verify_app_pointer(directory):
+    directory = no_links(directory)
+    marker = no_links(directory / '.pulse-app-layout')
+    if marker.stat().st_size != 2 or marker.read_bytes() != b'1\n':
+        raise PackageError('application layout marker')
+    path = no_links(directory / 'app-current.json')
+    if path.stat().st_size > 1024:
+        raise PackageError('application pointer bound')
+    pointer = json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=unique_object)
+    if not isinstance(pointer, dict) or set(pointer) != {'schema', 'directory', 'manifest_sha256'} or type(pointer['schema']) is not int or pointer['schema'] != 1:
+        raise PackageError('application pointer schema')
+    manifest_hash = host_hash(pointer['manifest_sha256'])
+    if pointer['directory'] != f'AppRuntime/{manifest_hash}':
+        raise PackageError('application pointer directory/hash mismatch')
+    bundle = no_links(directory / pointer['directory'])
+    if digest(no_links(bundle / 'manifest.json')) != manifest_hash:
+        raise PackageError('application pointer manifest hash mismatch')
+    return verify(bundle, app_runtime=True)
+
+
 def unique_object(pairs):
     result = {}
     for key, value in pairs:
         if key in result: raise PackageError(f'duplicate JSON key: {key}')
         result[key] = value
     return result
-def verify(directory, require_marker=True, *, allow_thin=True):
+def verify(directory, require_marker=True, *, allow_thin=True, app_runtime=False):
     directory = no_links(directory)
     manifest_path = directory / 'manifest.json'
     no_links(manifest_path)
@@ -291,13 +357,14 @@ def verify(directory, require_marker=True, *, allow_thin=True):
     thin = schema == 3
     keys = {'schema', 'version', 'architecture', 'contract', 'dynamic_helpers', 'system_dependencies', 'files'}
     if thin: keys.add('host_bundle')
-    if set(manifest) != keys or type(schema) is not int or schema not in (1, 2, 3):
+    if set(manifest) != keys or type(schema) is not int or schema not in ((4,) if app_runtime else (1, 2, 3)):
         raise PackageError('manifest schema')
     # A thin reference can only target a full schema-1 host. Reject a chained
     # reference before recursion, including a malicious cycle.
     if thin and not allow_thin: raise PackageError('thin host must be full schema 1')
     arch = manifest['architecture']
-    if arch not in MACHINES or (thin and arch != 'x86') or manifest['contract'] != CONTRACT or manifest['dynamic_helpers'] != ({} if thin else DYNAMIC):
+    contract = APP_CONTRACT if app_runtime else CONTRACT
+    if arch not in MACHINES or (thin and arch != 'x86') or manifest['contract'] != contract or manifest['dynamic_helpers'] != ({} if thin else DYNAMIC):
         raise PackageError('unknown component contract')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', manifest['version']): raise PackageError('version label')
     if thin:
@@ -327,10 +394,12 @@ def verify(directory, require_marker=True, *, allow_thin=True):
         if role == 'license':
             if not relative.startswith('licenses/'): raise PackageError('license path')
         elif '/' in relative: raise PackageError('binary must be a direct bundle child')
+        elif app_runtime and dialog_binary(relative): raise PackageError('dialog component in app runtime')
         actual = record(directory / relative, relative, role, None if role == 'license' else arch)
         if actual != item: raise PackageError(f'file metadata/hash/import mismatch: {relative}')
         if role != 'license': by_name[relative.lower()] = item
-    for name in (thin_roots() if thin else roots(arch) + list(DYNAMIC)):
+    required = APP_REQUIRED + list(DYNAMIC) if app_runtime else thin_roots() if thin else roots(arch) + list(DYNAMIC)
+    for name in required:
         if name.lower() not in by_name: raise PackageError(f'missing mandatory component: {name}')
     wrong_auto = 'pulsedialogauto32.dll' if arch == 'x64' else 'pulsedialogauto64.dll'
     if wrong_auto in by_name: raise PackageError('wrong automatic component architecture name')
@@ -349,15 +418,19 @@ def verify(directory, require_marker=True, *, allow_thin=True):
                 if dependency in by_name: raise PackageError('packaged system dependency')
                 os_dependencies.add(dependency)
             elif dependency not in by_name: raise PackageError(f'unresolved packaged dependency: {dependency}')
-    if thin:
-        pending, reachable = [name.lower() for name in thin_roots()], set()
+    if thin or app_runtime:
+        pending, reachable = [name.lower() for name in required], set()
+        if app_runtime:
+            pending.extend(APP_OPTIONAL.intersection(by_name))
         while pending:
             name = pending.pop()
             if name in reachable: continue
             reachable.add(name)
             item = by_name[name]
             pending.extend(dep for dep in item['imports'] + item['delay_imports'] if not system(dep))
-        if reachable != set(by_name): raise PackageError('unrelated binary in thin companion')
+        if reachable != set(by_name):
+            raise PackageError('unrelated binary in app runtime' if app_runtime else
+                               'unrelated binary in thin companion')
     if sorted(os_dependencies) != manifest['system_dependencies']: raise PackageError('system dependency list mismatch')
     for relative in (THIN_LICENSES if thin else REPO_LICENSES).values():
         if relative.lower() not in expected: raise PackageError(f'missing mandatory license: {relative}')
@@ -372,20 +445,23 @@ def verify(directory, require_marker=True, *, allow_thin=True):
     actual_files = set()
     for path in directory.rglob('*'):
         no_links(path)
+        relative = path.relative_to(directory).as_posix().lower()
+        if app_runtime and path.is_dir() and relative != 'licenses' and not relative.startswith('licenses/'):
+            raise PackageError('unlisted app runtime directory')
         if path.is_file():
-            relative = path.relative_to(directory).as_posix().lower()
             if relative in actual_files: raise PackageError('case-colliding destination')
             actual_files.add(relative)
     if actual_files != expected: raise PackageError('unlisted/missing bundle files')
     return manifest
 
-def package(build, output, version, arch, repository, automatic=False, runtime_items=(), *, thin=False, host_digest=None):
+def package(build, output, version, arch, repository, automatic=False, runtime_items=(), *,
+            thin=False, host_digest=None, app_runtime=False):
     output = Path(output)
     if not output.is_absolute(): raise PackageError('absolute NEW output required')
     no_links(output.parent)
     if output.exists() or output.is_symlink(): raise PackageError('output already exists; never overwrite or clean')
     manifest, sources = plan(build, version, arch, repository, automatic, runtime_items,
-                             thin=thin, host_digest=host_digest)
+                             thin=thin, host_digest=host_digest, app_runtime=app_runtime)
     if output.is_relative_to(Path(build).absolute()): raise PackageError('output must be outside build directory')
     output.mkdir()  # Exclusive creation; failure leaves existing data unchanged.
     # Any failure leaves an incomplete unverified directory for diagnosis.
@@ -398,10 +474,10 @@ def package(build, output, version, arch, repository, automatic=False, runtime_i
         if digest(target) != item['sha256']: raise PackageError(f'source changed during copy: {source.name}')
     with (output / 'manifest.json').open('x', encoding='utf-8', newline='\n') as stream:
         json.dump(manifest, stream, ensure_ascii=False, indent=2); stream.write('\n')
-    verify(output, False)
+    verify(output, False, app_runtime=app_runtime)
     with (output / 'VERIFIED.json').open('x', encoding='utf-8', newline='\n') as stream:
         json.dump({'manifest_sha256': digest(output / 'manifest.json'), 'integrity_only': True}, stream)
-    return verify(output)
+    return verify(output, app_runtime=app_runtime)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

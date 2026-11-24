@@ -6,16 +6,20 @@ enum class Architecture { X64, X86 };
 #ifdef _WIN64
 inline constexpr Architecture CurrentArchitecture = Architecture::X64;
 inline constexpr auto DllName = L"PulseDialogAuto64.dll";
+inline constexpr auto StubDllName = L"PulseDialogStub64.dll";
 inline constexpr auto ConfigKey = L"Software\\Pulse\\DialogAuto";
 inline constexpr REGSAM RegistryView = KEY_WOW64_64KEY;
 #else
 inline constexpr Architecture CurrentArchitecture = Architecture::X86;
 inline constexpr auto DllName = L"PulseDialogAuto32.dll";
+inline constexpr auto StubDllName = L"PulseDialogStub32.dll";
 inline constexpr auto ConfigKey = L"Software\\Pulse\\DialogAuto32";
 inline constexpr REGSAM RegistryView = KEY_WOW64_32KEY;
 #endif
 struct Status { bool enabled = false; bool conflict = false; DWORD error = ERROR_SUCCESS; std::wstring dll_path; };
 const wchar_t* DllNameFor(Architecture architecture) noexcept;
+const wchar_t* StubDllNameFor(Architecture architecture) noexcept;
+bool IsAllowedDialogDllName(Architecture architecture, const wchar_t* file_name) noexcept;
 Status Inspect(Architecture architecture);
 DWORD Enable(Architecture architecture, const std::wstring& absolute_dll);
 DWORD EnableIfUnclaimed(Architecture architecture, const std::wstring& absolute_dll);

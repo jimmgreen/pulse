@@ -45,6 +45,20 @@ int main() {
     const auto third = commands.Push(first);
     check(!commands.Take(second, received) && third != second && commands.Take(third, received),
           "closing or switching preview invalidates stale commands without reusing tokens");
+    QuickPreviewCommands other_window;
+    QuickPreviewCommand pin_cmd;
+    pin_cmd.action = QuickPreviewAction::PinDetach;
+    pin_cmd.target = root;
+    QuickPreviewCommand close_cmd;
+    close_cmd.action = QuickPreviewAction::DetachedClosed;
+    const auto t_a = commands.Push(pin_cmd);
+    const auto t_b = other_window.Push(close_cmd);
+    QuickPreviewCommand out_a, out_b;
+    check(t_a != 0 && t_b != 0 && t_a != t_b &&
+          !commands.Take(t_b, out_b) && !other_window.Take(t_a, out_a) &&
+          commands.Take(t_a, out_a) && out_a.action == QuickPreviewAction::PinDetach &&
+          other_window.Take(t_b, out_b) && out_b.action == QuickPreviewAction::DetachedClosed,
+          "multi-window preview commands allocate globally unique tokens across instances");
     check(!PreviewNotice(L"svg-unsupported:text").empty(), "SVG source fallback has a visible explanation");
     check(PreviewNotice(L"image-preview-incomplete:frame-limit") !=
           PreviewNotice(L"image-preview-incomplete:canvas-limit"), "truncated animation and static fallback have distinct notices");

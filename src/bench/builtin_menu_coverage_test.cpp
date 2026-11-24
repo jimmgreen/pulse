@@ -57,7 +57,13 @@ ui::FluentMenuItem NewFlyout() {
 }
 ui::FluentMenuItem GitFlyout() {
     auto row = Row(CmdNone); row.glyph = L"\xE8B7";
-    row.children = {Row(kCmdGitPull), Row(kCmdGitPush), Row(kCmdGitRefresh)}; return row;
+    row.children = {Row(kCmdGitSourceControl), Row(kCmdGitPull), Row(kCmdGitPush), Row(kCmdGitRefresh)}; return row;
+}
+ui::FluentMenuItem GitFlyoutBranchGlyph() {
+    auto row = Row(CmdNone); row.glyph = L"\xF003";
+    row.children = {Row(kCmdGitSourceControl), Row(kCmdGitHistory), Row(kCmdGitBranches),
+                    Row(kCmdGitSync), Row(kCmdGitPull), Row(kCmdGitPush), Row(kCmdGitRefresh)};
+    return row;
 }
 }
 int main() {
@@ -110,6 +116,18 @@ int main() {
         prefs.builtin_hidden = 0; rows = flyouts; ApplyBuiltinMenuPrefs(rows, prefs, BuiltinMenuSurface::Background);
         check(Has(rows, hidden_command), "reenabling submenu restores its original commands");
     }
+    {
+        const Menu modern_flyouts{NewFlyout(), GitFlyoutBranchGlyph()};
+        ContextMenuPrefs p2; p2.persist = false;
+        p2.builtin_hidden = BuiltinMenuBit(BuiltinMenuItem::Git);
+        auto r2 = modern_flyouts; ApplyBuiltinMenuPrefs(r2, p2, BuiltinMenuSurface::Background);
+        check(r2.size() == 1 && !Has(r2, kCmdGitSync) && !Has(r2, kCmdGitBranches) &&
+              Has(r2, CmdShellNewBase) && WellFormed(r2),
+              "modern F003 Git flyout maps to BuiltinMenuItem::Git and hides independently");
+        p2.builtin_hidden = 0; r2 = modern_flyouts; ApplyBuiltinMenuPrefs(r2, p2, BuiltinMenuSurface::Background);
+        check(Has(r2, kCmdGitSync) && Has(r2, kCmdGitHistory),
+              "reenabling modern F003 Git flyout restores Sync and History items");
+    }
     auto rows = BuildBackgroundMenu(true, false, L""); rows.push_back(NewFlyout());
     prefs.builtin_hidden = BuiltinMenuBit(BuiltinMenuItem::NewFolder) | BuiltinMenuBit(BuiltinMenuItem::NewTextFile);
     ApplyBuiltinMenuPrefs(rows, prefs, BuiltinMenuSurface::Background);
@@ -150,6 +168,37 @@ int main() {
     prefs.SetBuiltinVisible(BuiltinMenuItem::StageToTray, false); prefs.SetBuiltinVisible(BuiltinMenuItem::CopyPath, false);
     ApplyBuiltinMenuPrefs(rows, prefs, BuiltinMenuSurface::Item);
     check(rows.size() == 1 && rows[0].command == CmdOpen && WellFormed(rows), "hiding a complete sorted group leaves no orphan separator");
+    {
+        SidebarDriveMenuOptions fixed;
+        auto menu = BuildSidebarDriveMenu(fixed);
+        check(Has(menu, CmdOpen) && Has(menu, CmdOpenInNewTab) && Has(menu, CmdCopyPath) &&
+              Has(menu, CmdOpenTerminal) && Has(menu, CmdProperties) && Has(menu, CmdPinWorkspace) &&
+              !Has(menu, CmdCopy) && !Has(menu, CmdEjectDrive) && !Has(menu, CmdDisconnectDrive) &&
+              !Has(menu, CmdUnlockDrive) && WellFormed(menu),
+              "sidebar drive menu for a fixed drive omits Copy and drive-specific verbs");
+        SidebarDriveMenuOptions ejectable; ejectable.ejectable = true; ejectable.workspace_pinned = true;
+        menu = BuildSidebarDriveMenu(ejectable);
+        check(Has(menu, CmdEjectDrive) && !Has(menu, CmdDisconnectDrive) && !Has(menu, CmdUnlockDrive) &&
+              menu.size() >= 2 && menu[0].command == CmdOpen && menu[1].command == CmdEjectDrive &&
+              WellFormed(menu),
+              "sidebar drive menu for an ejectable drive places Eject right after Open");
+        SidebarDriveMenuOptions remote; remote.remote = true;
+        menu = BuildSidebarDriveMenu(remote);
+        check(Has(menu, CmdDisconnectDrive) && !Has(menu, CmdEjectDrive) && WellFormed(menu),
+              "sidebar drive menu for a mapped network drive offers Disconnect");
+        SidebarDriveMenuOptions locked; locked.locked = true; locked.ejectable = true;
+        menu = BuildSidebarDriveMenu(locked);
+        check(Has(menu, CmdOpen) && Has(menu, CmdUnlockDrive) && Has(menu, CmdEjectDrive) &&
+              Has(menu, CmdCopyPath) && Has(menu, CmdProperties) && !Has(menu, CmdOpenInNewTab) &&
+              !Has(menu, CmdOpenTerminal) && !Has(menu, CmdPinWorkspace) && WellFormed(menu),
+              "sidebar drive menu for a locked drive offers Unlock/Eject and omits open-in-tab/terminal/workspace");
+        ContextMenuPrefs drive_prefs; drive_prefs.persist = false;
+        drive_prefs.SetBuiltinVisible(BuiltinMenuItem::EjectDrive, false);
+        menu = BuildSidebarDriveMenu(ejectable);
+        ApplyBuiltinMenuPrefs(menu, drive_prefs, BuiltinMenuSurface::Item);
+        check(!Has(menu, CmdEjectDrive) && Has(menu, CmdOpen) && WellFormed(menu),
+              "sidebar drive menu respects builtin context-menu visibility prefs");
+    }
     std::printf("Checks: %d Failures: %d\n", checks, failures);
     return failures ? 1 : 0;
 }

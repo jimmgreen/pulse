@@ -361,7 +361,7 @@ int RunDetailsPreviewProbe(pulse::AppState& s, const wchar_t* report) {
             const auto bounds = s.renderer.DetailsPreviewBounds();
             fprintf(log, "[STATE] details=%d enabled=%d loading=%d selected=%zu iconic=%d quick_preview=%d bounds=%.1f,%.1f,%.1f,%.1f scale=%.2f\n",
                     s.showDetailsPanel, s.detailsPreviewEnabled, tab->loading,
-                    static_cast<size_t>(tab->SelectedCount()), IsIconic(s.hwnd), s.quickPreview.visible(),
+                    static_cast<size_t>(tab->SelectedCount()), IsIconic(s.hwnd), s.quickPreview->visible(),
                     bounds.left, bounds.top, bounds.right, bounds.bottom, s.scale);
             ui::DetailsPreviewProbe::LogState(preview, log);
             const bool ready = ui::DetailsPreviewProbe::Markdown(preview);
@@ -462,8 +462,13 @@ int RunDetailsPreviewProbe(pulse::AppState& s, const wchar_t* report) {
             const auto before = ui::DetailsPreviewProbe::Media(preview);
             pump(800);
             const auto after = ui::DetailsPreviewProbe::Media(preview);
-            check(after.ready && SUCCEEDED(after.error) && after.position > before.position,
-                  "embedded video really plays and advances");
+            check(after.ready && SUCCEEDED(after.error) && !after.playing &&
+                  after.position == before.position,
+                  "embedded media loads paused and does not advance");
+            SendMessageW(preview.hwnd(), WM_KEYDOWN, VK_SPACE, 0); pump(800);
+            const auto started = ui::DetailsPreviewProbe::Media(preview);
+            check(started.playing && started.position > after.position,
+                  "embedded media plays and advances after manual start");
             ui::DetailsPreviewProbe::SetVolume(preview, 0.35f); pump(300);
             check(std::abs(ui::DetailsPreviewProbe::Media(preview).volume - 0.35f) < 0.01f,
                   "sidebar volume reaches shared player");
@@ -490,8 +495,8 @@ int RunDetailsPreviewProbe(pulse::AppState& s, const wchar_t* report) {
     check(!preview.visible(), "disabled sidebar preview closes");
     s.detailsPreviewEnabled = true; select(0);
     ToggleQuickPreview(s); pump(600); SyncDetailsPreview(s);
-    check(s.quickPreview.visible() && !preview.visible(), "Space preview excludes sidebar playback");
-    s.quickPreview.Close(); pump(600); SyncDetailsPreview(s);
+    check(s.quickPreview->visible() && !preview.visible(), "Space preview excludes sidebar playback");
+    s.quickPreview->Close(); pump(600); SyncDetailsPreview(s);
     check(preview.visible(), "sidebar resumes after Space preview closes");
     ShowWindow(s.hwnd, SW_MINIMIZE); pump(300); SyncDetailsPreview(s);
     check(!preview.visible() && !ui::DetailsPreviewProbe::Playing(preview), "minimize stops sidebar preview");

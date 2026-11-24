@@ -1,4 +1,5 @@
 #include <future>
+#include <map>
 // ui_renderer.h — Full-window Fluent renderer (title bar, toolbar, sidebar, pane, tray).
 #pragma once
 #include "ui_view_model.h"
@@ -23,6 +24,7 @@
 #include "ai_panel_view.h"
 #include "window_overview_view.h"
 #include "window_switcher_view.h"
+#include "tab_mru_view.h"
 
 namespace pulse::ui {
 
@@ -37,8 +39,11 @@ class MainRenderer {
     friend struct ItemGripTest;
 public:
     D2D1_RECT_F SettingsStoreField(int field) const;
+    D2D1_RECT_F SettingsStoreQuickControlRect(int action) const;
     D2D1_RECT_F SettingsStoreClip() const;
     std::vector<int> HiddenTitleTabs(const WindowViewModel& vm, float width) const;
+    // The title bar's tab-list button (⧉ N, or the strip's overflow button); empty when not shown.
+    D2D1_RECT_F TitleTabListRect(const WindowViewModel& vm, float width) const;
     void SetResourceModule(HINSTANCE module) { resource_module_ = module; }
     HINSTANCE ResourceModule() const { return resource_module_ ? resource_module_ : GetModuleHandleW(nullptr); }
     std::vector<std::shared_future<void>> SuspendVolume(const std::wstring& root);
@@ -62,6 +67,12 @@ public:
     // Also stops the card's video when the view is no longer visible.
     void DrawHoverPreview(const HoverPreviewView& view, const D2D1_RECT_F& client,
                           const Theme& theme, bool high_contrast);
+    // The hover tooltip box. Render draws it as its last overlay; a host that
+    // paints its own chrome over Render calls this after that chrome.
+    void DrawTooltip(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    // A file's shell icon through the list's asynchronous icon cache: the generic
+    // file mark until the real icon arrives (the notify window repaints then).
+    void DrawPathIcon(const std::wstring& path, DWORD attributes, float x, float y, float size, const Theme& theme);
     // Motion v2 "star": a star arcs from (x, y) client px into the sidebar's
     // 已加星标 row; DrawStarFlight paints it over everything (ui_sidebar.cpp).
     void LaunchStarFlight(float x, float y);
@@ -106,7 +117,7 @@ public:
     // Layout metrics (DIPs).
     void UpdateTabLayout(const WindowViewModel& vm, float width);
     float TitleBarHeight() const { return title_bar_height_; }
-    float TitleControlsHeight() const { return (!vertical_tabs_ && !embedded_ ? kTabRowHeight : kTitleBarHeight) * scale_; }
+    float TitleControlsHeight() const { return (!TitleAddress() && !embedded_ ? kTabRowHeight : kTitleBarHeight) * scale_; }
     float ToolbarHeight() const { return toolbar_height_; }
     // Where the panes start: the sidebar plus the docked Pulse 助手 column.
     float EffectiveSidebarWidth(float window_width) const;
@@ -132,6 +143,56 @@ public:
         vertical_tabs_ = on && !embedded_;
         toolbar_height_ = ToolbarHeightDip() * scale_;
     }
+    // 界面布局 (app_prefs ui_*): which chrome rows the window keeps. Settings
+    // and embedded hosts pass the defaults (everything shown).
+    struct UiChromeFlags {
+        bool show_tabs = true;          // title-bar tab strip
+        bool address_in_title = false;  // nav / address / search in the title bar
+        bool command_row = true;        // the toolbar's command row
+        bool inline_commands = false;   // no command row: New / Sort / More end the address row
+        bool toolbar_labels = true;     // New / Sort / Filter / Group keep their text
+        bool status_bar = true;
+        int sidebar_mode = 0;
+        bool selection_float = false;   // no command row: the selection chip floats over the list
+        // The title button group, left to right (app::kTitleButtonIds order:
+        // 0 win, 1 layout, 2 settings, 3 theme, 4 ai; -1 a divider).
+        // 5 the tray button (ui_modes_mockup pillHTML): first, only without a docked sidebar.
+        std::vector<int> title_buttons{0, 2, -1, 3};
+        int tray_badge = 0;             // staged items on the tray button
+        bool tray_open = false;         // the shelf is showing           // 0 docked, 1 浮起 (edge hover / toggle), 2 隐藏 (toggle only)
+        bool operator==(const UiChromeFlags&) const = default;
+    };
+    void SetUiChrome(const UiChromeFlags& flags) {
+        const UiChromeFlags f = embedded_ ? UiChromeFlags{} : flags;
+        if (f == ui_chrome_) return;
+        ui_chrome_ = f;
+        toolbar_height_ = ToolbarHeightDip() * scale_;
+        status_height_ = StatusHeightDip() * scale_;
+    }
+    const UiChromeFlags& UiChrome() const { return ui_chrome_; }
+    // The address row sits in the title bar: vertical tabs, or 地址栏并入标题栏
+    // while the tab strip is off (with tabs on it keeps its own row for now).
+    bool TitleAddress() const {
+        return vertical_tabs_ || (!embedded_ && ui_chrome_.address_in_title && !ui_chrome_.show_tabs);
+    }
+    // The horizontal tab strip is drawn / hit-tested in the title bar.
+    bool TabStripShown() const { return !TitleAddress() && (ui_chrome_.show_tabs || embedded_); }
+    bool CommandRowShown() const { return !embedded_ && ui_chrome_.command_row; }
+    bool SelectionChipFloats() const { return !embedded_ && !CommandRowShown() && ui_chrome_.selection_float; }
+    // The floating selection chip (empty unless SelectionChipFloats and something is selected).
+    ToolbarSelectionChip FloatingSelectionChip(float w, float h, int selected, int action_count) const;
+    // Its plate: 40 DIP tall around the chip's 32 DIP buttons.
+    D2D1_RECT_F FloatingSelectionCard(const D2D1_RECT_F& chip) const {
+        return D2D1::RectF(chip.left - 6.0f * scale_, chip.top - 4.0f * scale_, chip.right + 2.0f * scale_, chip.bottom + 4.0f * scale_);
+    }
+    // 并入地址栏: only while the address row has its own row.
+    bool InlineCommands() const { return !embedded_ && !ui_chrome_.command_row && ui_chrome_.inline_commands && !TitleAddress(); }
+    // 侧边栏 浮起 / 隐藏: no docked column; the full sidebar only as the peek overlay.
+    bool SidebarUndocked() const { return !embedded_ && ui_chrome_.sidebar_mode != 0; }
+    // The title brand lines up with a docked sidebar (vertical tabs).
+    bool BrandAligned() const { return vertical_tabs_ && !SidebarUndocked(); }
+    bool StatusBarShown() const { return embedded_ || ui_chrome_.status_bar; }
+    float StatusHeightDip() const { return embedded_ ? embedded_bottom_dip_ : ui_chrome_.status_bar ? 28.0f : 0.0f; }
     // 收藏栏: one more row under the command row (never in embedded hosts).
     void SetFavoritesBar(bool on) {
         favorites_bar_ = on && !embedded_;
@@ -147,9 +208,18 @@ public:
     FavoritesBarLayout FavoritesBarLayoutAt(const WindowViewModel& vm, float window_width) const;
     float NavigationHeightDip() const { return EmbeddedPickerLayout() ? 46.0f : 44.0f; }
     bool EmbeddedPickerLayout() const { return embedded_ && embedded_picker_layout_; }
-    float ToolbarLeft(float width) const { return EmbeddedPickerLayout() ? 0.0f : EffectiveSidebarWidth(width); }
+    // The main window's chrome rows run the full width, the sidebar below
+    // them (ui_modes_mockup); the picker does the same; other embedded hosts
+    // keep the rows right of their sidebar.
+    bool FullWidthRows() const { return !embedded_ || EmbeddedPickerLayout(); }
+    float ToolbarLeft(float width) const { return FullWidthRows() ? 0.0f : EffectiveSidebarWidth(width); }
+    // New / Sort / Filter fold to icons (narrow toolbar, or 按钮文字 off).
+    bool ToolbarCompact(float width) const { return !ui_chrome_.toolbar_labels || width - ToolbarLeft(width) < 600.0f * scale_; }
     float ToolbarHeightDip() const {
-        return (vertical_tabs_ || embedded_ ? NavigationHeightDip() : 88.0f) + (favorites_bar_ ? kFavoritesBarHeightDip : 0.0f) +
+        // Address row (44, unless it moved into the title bar) + command row (44).
+        return (embedded_ ? NavigationHeightDip()
+                          : (TitleAddress() ? 0.0f : 44.0f) + (ui_chrome_.command_row ? 44.0f : 0.0f)) +
+               (favorites_bar_ ? kFavoritesBarHeightDip : 0.0f) +
                (embedded_ ? embedded_band_dip_ : 0.0f);
     }
     // Embedded only: an empty band under the address row that the host draws
@@ -184,7 +254,7 @@ public:
         return window_width / scale_ < kSidebarRailWindowDip;
     }
     bool SidebarRailVisible(float window_width) const {
-        return SidebarAutoCollapsed(window_width) || sidebar_collapsed_;
+        return SidebarAutoCollapsed(window_width) || sidebar_collapsed_ || SidebarUndocked();
     }
     bool SidebarAnimating() const { return collapse_anim_; }
     // Hover peek: the collapsed rail shows the full sidebar as an overlay
@@ -192,6 +262,13 @@ public:
     void SetSidebarPeek(bool on, bool pinned = false) {
         sidebar_peek_ = on;
         sidebar_peek_pinned_ = on && pinned;
+    }
+    // 浮起: the pointer rests in the left-edge strip that opens the overlay.
+    // Returns whether the edge hint changed (the caller repaints).
+    bool SetSidebarEdgeHot(bool hot) {
+        if (sidebar_edge_hot_ == hot) return false;
+        sidebar_edge_hot_ = hot;
+        return true;
     }
     bool SidebarPeek() const { return sidebar_peek_; }
     bool SidebarPeekPinned() const { return sidebar_peek_pinned_; }
@@ -240,6 +317,7 @@ public:
     void SetToolbarViewSlots(std::array<int,3> slots) { pin_view_slots_ = slots; }
     void SetToolbarRightFrom(int slot) { pin_right_from_ = slot; }
     void SetToolbarSeparators(uint64_t mask) { pin_separators_ = mask; }
+    void SetToolbarHiddenPins(uint64_t mask) { pin_hidden_ = mask; }
     float ToolbarPinLabelWidth() const;
     // Selection chip input for the toolbar layout (the row reserves its room).
     void SetToolbarSelection(int selected, int action_count) {
@@ -254,6 +332,11 @@ public:
     GroupWheel& GroupWheelPicker() { return group_wheel_; }
     // Ctrl+` window switcher drawn over everything (app/window_switcher_ui.cpp, M7d).
     WindowSwitcherView& WindowSwitcher() { return window_switcher_; }
+    // Ctrl+Tab recent tabs panel (app/window_switcher_ui.cpp, ui modes step 7).
+    TabMruView& TabMru() { return tab_mru_; }
+    // 界面 > 圆角 (ui_rounded, on in 专注): controls, rows, flyouts and the
+    // window corners 4 DIP rounder, after the mockup's --r 8 -> 12.
+    void SetRoundedCorners(bool on) noexcept { rounded_corners_ = on; }
     // Ctrl+Shift+O window overview, under the switcher (app/window_overview_ui.cpp, M7e).
     WindowOverviewView& WindowOverview() { return window_overview_; }
     float ToolbarGroupWidth(float w) const;
@@ -305,6 +388,7 @@ public:
         details_visible_ = visible;
         if (!visible) details_preview_bounds_ = {};
     }
+    bool DetailsPanelActive() const noexcept { return details_visible_ || details_anim_; }
     // Preferred width, capped by the window so the file list keeps a usable width.
     float DetailsPanelWidth(float window_w) const;
     void SetDetailsPanelWidth(float width_dip) {
@@ -495,15 +579,32 @@ public:
     // Total: This PC's 总大小 (MainRenderer::ThisPcColumns), never a global column.
     // Media*: 媒体文件夹专用列 (MainRenderer::MediaColumns), never global
     // columns either; each sorts by the SortColumn of the same name.
+    // Extension0..3: columns of extensions (pulse.columns, PaneViewModel::
+    // extension_columns), appended after the others, display-only and never
+    // in details_column_order.
     enum class ColumnKind : uint8_t { Name, Path, Date, Type, Size, Created, Accessed, Status, Total,
                                       MediaTaken, MediaDims, MediaCamera, MediaTitle, MediaArtist,
-                                      MediaAlbum, MediaDuration, MediaFps };
-    static constexpr bool IsMediaColumn(ColumnKind kind) noexcept { return kind >= ColumnKind::MediaTaken; }
+                                      MediaAlbum, MediaDuration, MediaFps,
+                                      Extension0, Extension1, Extension2, Extension3 };
+    static constexpr bool IsMediaColumn(ColumnKind kind) noexcept {
+        return kind >= ColumnKind::MediaTaken && kind <= ColumnKind::MediaFps;
+    }
+    static constexpr size_t kMaxExtensionColumns = 4;
+    float Scale() const noexcept { return scale_; }
+    static constexpr bool IsExtensionColumn(ColumnKind kind) noexcept {
+        return kind >= ColumnKind::Extension0 && kind <= ColumnKind::Extension3;
+    }
+    static constexpr bool IsExtensionColumnValue(int kind) noexcept {
+        return kind >= static_cast<int>(ColumnKind::Extension0) && kind <= static_cast<int>(ColumnKind::Extension3);
+    }
+    static constexpr size_t ExtensionColumnIndex(ColumnKind kind) noexcept {
+        return static_cast<size_t>(kind) - static_cast<size_t>(ColumnKind::Extension0);
+    }
     static SortColumn MediaSortColumn(ColumnKind kind) noexcept;
     static std::wstring MediaColumnLabel(ColumnKind kind, uint8_t media_columns);
     DetailsColumnWidths ResizeMediaDetailsColumnDivider(const D2D1_RECT_F& bounds,
         const PaneViewModel& view, int divider, float cursor_x) const;
-    static constexpr size_t kMaxDetailsColumns = 11;
+    static constexpr size_t kMaxDetailsColumns = 16;
     static_assert(kDetailsColumnModified == 1u << static_cast<uint32_t>(ColumnKind::Date) &&
                   kDetailsColumnType == 1u << static_cast<uint32_t>(ColumnKind::Type) &&
                   kDetailsColumnSize == 1u << static_cast<uint32_t>(ColumnKind::Size) &&
@@ -528,6 +629,9 @@ public:
         // follow details_column_order and can be dragged in the header.
         bool reorderable = false;
         int FirstOrderable() const { return Has(ColumnKind::Path) ? 2 : 1; }
+        // Extension columns at the end: neither dragged nor drop targets.
+        int extension_count = 0;
+        int OrderableEnd() const { return count - extension_count; }
 
         float DividerX(int index) const {
             float x = left;
@@ -606,7 +710,10 @@ public:
     // Grid thumbnails: default-program badge and video playing time.
     void SetThumbnailBadges(bool on) { thumbnail_badges_ = on; }
     // Default programs changed (SHCNE_ASSOCCHANGED).
-    void InvalidateOpenWithIcons() { open_with_icons_.InvalidateAssociations(); }
+    void InvalidateOpenWithIcons() {
+        open_with_icons_.InvalidateAssociations();
+        icon_cache_.InvalidateAssociations();
+    }
     // List-row hover buttons the user keeps: bit 0 star, bit 1 new tab, bit 2 more.
     // Bits 0-2 visible buttons, bits 3-8 their order (app::RowActionMask).
     void SetRowActions(unsigned mask) { row_actions_ = mask & 0x1FFu; }
@@ -659,6 +766,18 @@ public:
         bool status_column = false) const;
     DetailsColumnLayout DetailsColumns(const D2D1_RECT_F& pane_bounds,
                                        const PaneViewModel& vm) const;
+    DetailsColumnLayout BaseDetailsColumns(const D2D1_RECT_F& pane_bounds,
+                                           const PaneViewModel& vm) const;
+    // Extension columns (vm.extension_columns) take their room from the
+    // name column, the last ones dropped first when the pane is narrow.
+    void AppendExtensionColumns(DetailsColumnLayout& layout, const PaneViewModel& vm) const;
+    // Total width (px) of the extension columns in a layout: the columns to
+    // their left sit that much further left than without them.
+    static float ExtensionColumnsWidth(const DetailsColumnLayout& layout) noexcept {
+        float w = 0.0f;
+        for (int i = layout.OrderableEnd(); i < layout.count; ++i) w += layout.widths[static_cast<size_t>(i)];
+        return w;
+    }
     // This PC in details view: 名称 · 使用情况 (Date) · 可用 (Size) · 总大小
     // (Total) · 类型, fitted to the drives; not resizable.
     DetailsColumnLayout ThisPcColumns(const D2D1_RECT_F& pane_bounds,
@@ -724,6 +843,7 @@ public:
     D2D1_RECT_F StagingTrayRect(const WindowViewModel& vm, float w, float h) const;
     D2D1_RECT_F TitleBarRect(float w) const;
     D2D1_RECT_F ToolbarRect(float w) const;
+    D2D1_RECT_F CommandToolbarRect(float w) const;
     D2D1_RECT_F AddressBarRect(float w) const;
     D2D1_RECT_F AddressTextRect(float w) const { return ToolbarLayoutAt(w, 0).address_text; }
     // The 别名 suggestion list under the path editor, and the row at (x, y) or -1.
@@ -788,6 +908,10 @@ public:
     float SysCtxPreviewItemTop(const WindowViewModel& vm, const D2D1_RECT_F& rect, int item);
     int SysCtxDropZone(const WindowViewModel& vm, const D2D1_RECT_F& rect, float x, float y);
     app::BuiltinMenuOrder SettingsMenuDropOrder(const WindowViewModel& vm, const D2D1_RECT_F& rect, float x, float y);
+    // 界面布局 › 标题栏按钮 drag (the same settings menu drag): a row's resting
+    // top (NaN when absent), and the row index the held row lands on (-1: none).
+    float SettingsTitleRowTop(const WindowViewModel& vm, const D2D1_RECT_F& rect, int row);
+    int SettingsTitleDropSlot(const WindowViewModel& vm, const D2D1_RECT_F& rect);
     int SettingsSliderValueAt(const WindowViewModel& vm, const D2D1_RECT_F& rect,
                               int which, float x) const;
     // Settings > AI 助手 › 思考强度: the slider position (in stops) at x, -1 when not shown.
@@ -831,6 +955,7 @@ public:
     // Overflowing tab strip: wheel over the strip (`steps` = wheel notches,
     // positive = toward the first tab) and arrow pages. False when the strip
     // fits or the point is outside it.
+    bool PointInTabStrip(const WindowViewModel& vm, float window_w, float x, float y) const;
     bool ScrollTabStrip(const WindowViewModel& vm, float window_w, float x, float y, float steps);
     void ScrollTabStripPage(const WindowViewModel& vm, float window_w, int direction);
     // Closing tabs keeps the current widths until the pointer leaves the strip,
@@ -840,6 +965,10 @@ public:
     // Settings > 快捷键: how far to scroll so the open popover is in view (0: it is).
     float SettingsShortcutsRevealDelta(const WindowViewModel& vm, float window_w, float window_h) const;
     D2D1_RECT_F NativeSettingsRect(float window_w, float window_h, const WindowViewModel& vm) const;
+    // The layers this window paints over its backdrop below the title bar, as one straight-alpha colour.
+    // DWM leaves a docked child window's area out of this window's composition, so an embedded child
+    // paints the same wash itself to sit on the page instead of on bare Mica.
+    D2D1_COLOR_F EmbeddedBackdropWash() const { return embedded_wash_; }
     float SettingsMaxScroll(const WindowViewModel& vm, float window_w, float window_h) const;
     // The settings page's scrollbar as drawn (false: the page fits, no bar).
     bool SettingsScrollbarGeometry(const WindowViewModel& vm, float window_w, float window_h,
@@ -854,6 +983,9 @@ public:
     float SidebarMaxScroll(const WindowViewModel& vm, float window_w, float window_h) const;
     bool SidebarScrollbarGeometry(const WindowViewModel& vm, float window_w, float window_h,
                                   D2D1_RECT_F& track, D2D1_RECT_F& thumb, float& max_scroll) const;
+    bool SidebarFavoritesScrollbarGeometry(const WindowViewModel& vm, float window_w, float window_h,
+                                            D2D1_RECT_F& track, D2D1_RECT_F& thumb,
+                                            float& max_scroll, D2D1_RECT_F* visible = nullptr) const;
     // How many deck cards the tray panel fits at the current sidebar width
     // without breaking the max-50%-overlap rule (>= 1).
     int TrayDeckCapacity(float window_w) const;
@@ -919,6 +1051,11 @@ private:
     void DrawFavoritesBar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawToolbarApps(const WindowViewModel& vm, const ToolbarLayout& layout, const Theme& theme);
     void DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    // One sidebar paint. While the sidebar folds, `glide` (0..1) moves each wide
+    // row onto its rail cell and `rail_pass` paints the rail itself; `opacity`
+    // crossfades the two so the icons land instead of jumping when it settles.
+    void DrawSidebarPass(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme,
+                         bool rail_pass, float glide, float opacity);
     void DrawPane(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSpringRing(ID2D1DeviceContext* dc, const D2D1_RECT_F& icon, float progress, const Theme& theme);
     void DrawSplitterKnob(int index, const SplitterView& sp, bool hovered, bool pressed, bool dark,
@@ -962,15 +1099,20 @@ private:
     // File-operation capsule in the status bar: ring progress while running,
     // accent check on success, then settles back to plain summary text.
     void DrawTaskPill(const WindowViewModel& vm, const D2D1_RECT_F& area, const Theme& theme);
+    // Status bar off: the task pill floats over the content's bottom-left corner.
+    void DrawFloatingTaskPill(const WindowViewModel& vm, const D2D1_RECT_F& full, const Theme& theme);
+    void DrawSelectionChip(const WindowViewModel& vm, const ToolbarSelectionChip& sel, const Theme& theme, bool floating);
     void DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsContext(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsPulseMenu(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsSegmentPlate(int key, int selected, D2D1_RECT_F bounds, bool enabled = true);
     void DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     D2D1_RECT_F settings_store_fields_[7]{};
+    mutable std::map<int, D2D1_RECT_F> settings_store_quick_controls_;
     D2D1_RECT_F settings_store_clip_{};
     void DrawSettingsStore(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
-    void DrawSevenZipDetail(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    void DrawNativeSettingsHeader(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    void DrawExtensionDetail(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsSysCtx(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsShortcuts(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
@@ -985,7 +1127,7 @@ private:
 
     void DrawList(const PaneViewModel& vm, float x, float y, float w, float h, const Theme& theme,
                   int hover_region = 0, int hover_control_index = -1, bool pane_focused = true,
-                  int pane_index = 0);
+                  int pane_index = 0, bool split_mode = false);
     // Grid views: queue the thumbnails of the screen below the visible one.
     void PrefetchNextScreen(const PaneViewModel& vm, int first, int last, uint32_t pixels, int pane_index);
     // Placeholder rows with a soft shimmer for slow (network) folders.
@@ -994,7 +1136,8 @@ private:
     // "Group by" headers over a grouped details/content list (sticky top one).
     void DrawGroupHeaders(const PaneViewModel& vm, const ViewLayout& layout,
                           const D2D1_RECT_F& viewport, const Theme& theme,
-                          int hover_region, int hover_control_index, int pane_index);
+                          int hover_region, int hover_control_index, int pane_index,
+                          bool pane_focused = true, bool split_mode = false);
     static std::wstring GroupLabel(const PaneViewModel& vm, const ListGroup& g);
     int group_hover_pane_ = -1;   // pane under the mouse for header hover
     // Scatter deck of staged files inside the tray panel (draw + hit-test
@@ -1018,6 +1161,8 @@ private:
                     const std::wstring& glyph, const std::wstring& fallback,
                     const D2D1_COLOR_F& fg, bool round_right = false, bool round_left = false,
                     float size_factor = 1.0f);
+    // 设置 › 界面布局: a ui_layout_icons.h code ("\x1" glyph strings) in `color`, its tone part in `accent`.
+    void DrawUilIcon(wchar_t code, D2D1_RECT_F box, D2D1_COLOR_F color, D2D1_COLOR_F accent);
     void DrawIconText(float x, float y, float w, float h, const std::wstring& glyph,
                       const std::wstring& fallback, const D2D1_COLOR_F& color, float size_factor = 1.0f);
     void DrawTextRect(ID2D1DeviceContext* dc, IDWriteTextFormat* format,
@@ -1038,7 +1183,10 @@ private:
     void DrawTypeChipLabel(ID2D1DeviceContext* dc, const std::wstring& chip, const D2D1_RECT_F& box,
                            const D2D1_COLOR_F& ink, const D2D1_COLOR_F& background);
     void DrawFolderIcon(float x, float y, float size, const Theme& theme,
-                        float opacity = 1.0f);
+                        float opacity = 1.0f, float saturation = 1.0f);
+    // Two-tone header folder icon (#e9a823/#ffc54d active, desaturated grayscale inactive).
+    void DrawSplitHeaderFolderIcon(const D2D1_RECT_F& rc, float focus_t, const Theme& theme);
+    ID2D1Effect* IconDesaturateEffect(float saturation, float opacity);
     // Slate-gray folder for a folder with nothing to show (same silhouette as
     // the shell folder, no paper). Fills [x, x+size] like DrawFolderIcon.
     void DrawEmptyFolderIcon(float x, float y, float size, const Theme& theme,
@@ -1047,10 +1195,12 @@ private:
         const ListEntryView& entry, ViewMode mode, uint64_t generation, uint32_t pixels,
         float opacity, bool align_bottom, D2D1_RECT_F* artwork, uint32_t* duration = nullptr);
     void DrawSidebarPeek(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    // 浮起 with the overlay closed: the accent bar on the left edge that says a sidebar waits there.
+    void DrawSidebarEdgeHint(const D2D1_RECT_F& rect, const Theme& theme);
     void DrawFileIcon(float x, float y, float size, const Theme& theme,
-                      float opacity = 1.0f);
+                      float opacity = 1.0f, float saturation = 1.0f);
     void DrawEntryIcon(const ListEntryView& entry, float x, float y, float size,
-                       const Theme& theme, float opacity = 1.0f);
+                       const Theme& theme, float opacity = 1.0f, float saturation = 1.0f);
     void DrawLinkOverlay(float x, float y, float size, const Theme& theme, float opacity = 1.0f,
                          const std::wstring& label = {}, float expansion = 0.0f,
                          float right_limit = 0.0f, const D2D1_RECT_F* artwork = nullptr);
@@ -1063,6 +1213,12 @@ private:
     // artwork's bottom-left (shell icons) or inside its top-left (pictures).
     void DrawCloudBadge(const ListEntryView& entry, const D2D1_RECT_F& artwork, bool picture,
                         const Theme& theme, float opacity);
+    // Extension badge (pulse.columns): a round plate with the extension's
+    // icon on the artwork's top-right corner.
+    void DrawExtensionBadge(const D2D1_RECT_F& artwork, uint32_t icon, uint32_t tone, const Theme& theme,
+                            float opacity);
+    // Ink of an extension cell / badge tone (PULSE_COLUMN_TONE_*).
+    D2D1_COLOR_F ExtensionToneInk(uint32_t tone, const Theme& theme, D2D1_COLOR_F normal) const;
     // Photo wall picture tile over its thumbnail: a hairline edge, the dark
     // fade its name sits on while hovered or selected, the selection ring.
     void DrawWallTileChrome(const D2D1_RECT_F& tile, bool hover, bool selected, const Theme& theme);
@@ -1127,6 +1283,7 @@ private:
     RenderCaches& caches_;
     ShellIconCache& icon_cache_ = caches_.icons;
     ItemArtworkHitCache item_artwork_hits_;
+    ItemArtworkHitCache row_star_hits_;
     OpenWithIconCache& open_with_icons_ = caches_.open_with_icons;
     std::unordered_map<ID2D1Bitmap*, ComPtr<ID2D1Effect>> tray_shadows_;
     ThumbnailCache& thumbnail_cache_ = caches_.thumbnails;
@@ -1150,6 +1307,7 @@ private:
     float sidebar_width_ = 224.0f;
     float sidebar_width_dip_ = 224.0f;
     bool vertical_tabs_ = false;
+    UiChromeFlags ui_chrome_{};
     float search_min_dip_ = 0.0f;
     bool navigation_can_forward_ = false;
     mutable float title_brand_width_ = 0.0f;
@@ -1167,6 +1325,7 @@ private:
     std::array<int,3> pin_view_slots_{-1,-1,-1};
     int pin_right_from_ = -1;
     uint64_t pin_separators_ = 0;
+    uint64_t pin_hidden_ = 0;
     bool pin_drop_mode_ = false;
     std::wstring pin_drop_label_;
     // Device bitmaps of the pinned apps' icons, keyed by their pixel buffers.
@@ -1186,10 +1345,13 @@ private:
     void ApplySidebarCollapse(bool animate);
     bool sidebar_peek_ = false;
     bool sidebar_peek_pinned_ = false;
+    bool sidebar_edge_hot_ = false;
     bool collapse_anim_ = false;
     GroupWheel group_wheel_;
     WindowOverviewView window_overview_;
     WindowSwitcherView window_switcher_;
+    TabMruView tab_mru_;
+    bool rounded_corners_ = false;
     float collapse_value_ = 0.0f;  // 0 expanded .. 1 rail (frame-stable)
     float collapse_from_ = 0.0f;
     uint64_t collapse_start_ = 0;  // motion::NowMs()
@@ -1267,6 +1429,13 @@ private:
     void DrawColumnBadge(int pane_index, const Theme& theme);
     std::array<uint64_t, 8> list_loading_since_{};
     std::array<uint64_t, 8> prefetch_signature_{};  // per pane: what was last prefetched
+    struct PaneScrollVelocity {
+        uint64_t list_context = 0;
+        int last_start_idx = 0;
+        uint64_t last_sample_ms = 0;
+        uint64_t glide_until_ms = 0;
+    };
+    std::array<PaneScrollVelocity, 8> pane_scroll_velocity_{};
     bool list_loading_animate_ = true;
     bool list_loading_active_ = false;
     // Tab strip overflow state: ComputeTabStrip clamps the scroll and reveals
@@ -1359,6 +1528,18 @@ private:
         std::wstring path;
     };
     std::array<HeaderSizeMotion, 8> header_size_motion_{};
+    struct SplitPaneChromeMotion {
+        bool primed = false;
+        float focus_t = 0.0f;
+        float hover_t = 0.0f;
+        uint64_t last_ms = 0;
+    };
+    std::array<SplitPaneChromeMotion, 8> split_pane_motion_{};
+    bool split_target_primed_ = false;
+    float split_target_t_ = 0.0f;
+    uint64_t split_target_last_ms_ = 0;
+    ComPtr<ID2D1Effect> icon_color_matrix_;
+    ID2D1DeviceContext* icon_color_matrix_dc_ = nullptr;
     uint64_t splitter_motion_until_ = 0;
     uint64_t spring_ring_until_ = 0;        // NowMs: a spring-load ring is filling
     // Settings > AI 助手 › 思考强度: the step slider's knob (ui_settings_assistant.cpp).
@@ -1449,6 +1630,7 @@ private:
     D2D1_COLOR_F text_background_{};
     // Per-frame layer opacity (see ComputeLayerAlphas); 1 when opaque.
     float sheet_alpha_ = 1.0f;
+    D2D1_COLOR_F embedded_wash_{0, 0, 0, 0};
     float card_alpha_ = 1.0f;
     // Pane cards over DWM material: copy-blended with pane_color_ (alpha
     // pane_alpha_); pane_alpha_ < 0 when they blend with card_alpha_.

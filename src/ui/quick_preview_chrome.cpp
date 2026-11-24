@@ -43,6 +43,7 @@ constexpr wchar_t kPrevGlyph[] = L"\xE72B";
 constexpr wchar_t kNextGlyph[] = L"\xE72A";
 constexpr wchar_t kMoreGlyph[] = L"\xE712";
 constexpr wchar_t kSizeGlyph[] = L"\xE740";   // 窗口大小 (FullScreen arrows)
+constexpr wchar_t kPinGlyph[] = L"\xE718";    // 置顶窗口 (Pin)
 constexpr wchar_t kOpenGlyph[] = L"\xE8A7";   // OpenInNewWindow
 constexpr wchar_t kCloseGlyph[] = L"\xE711";
 constexpr wchar_t kFolderGlyph[] = L"\xE8B7";
@@ -233,7 +234,8 @@ std::wstring QuickPreviewWindow::OpenLabel() const {
     using pulse::l10n::StringId;
     if (item_.attrs & FILE_ATTRIBUTE_DIRECTORY)
         return command_message_ ? pulse::l10n::Get(StringId::OpenNewTab) : pulse::l10n::Get(StringId::Open);
-    if (open_app_.empty()) return pulse::l10n::Get(StringId::ShellOpenWith);
+    // A missing friendly name does not mean Windows has no default app.
+    if (open_app_.empty()) return pulse::l10n::Get(StringId::Open);
     return Fill(pulse::l10n::Get(StringId::ShellOpenApp), L"{app}", open_app_);
 }
 
@@ -412,8 +414,10 @@ void QuickPreviewWindow::LayoutHeader() {
     const float cy = header * 0.5f;
     HeaderLayout h;
     h.close = D2D1::RectF(width - kCloseWidth * s, 0, width, header);
+    const bool has_nav = HasNavigation();
+    h.nav_visible = has_nav;
     h.counter_text.clear();
-    if (item_.count > 0 && item_.position > 0)
+    if (has_nav && item_.count > 0 && item_.position > 0)
         h.counter_text = std::to_wstring(item_.position) + L" / " + std::to_wstring(item_.count);
     const float button = kIconButton * s;
     const float counter_w = h.counter_text.empty() ? 0.0f
@@ -425,10 +429,10 @@ void QuickPreviewWindow::LayoutHeader() {
     const float tools_w = has_tools ? ToggleSegmentWidth(0) + ToggleSegmentWidth(1) + 4.0f * s : 0.0f;
     const float left_fixed = (kHeaderPadLeft + kBadgeSize + 10.0f) * s;
     const auto title_room = [&](bool tools, bool open_text, bool counter) {
-        float right = kCloseWidth * s + 2.0f * s + (button + 4.0f * s) * 2.0f;  // close, more, size
-        right += open_text ? open_full : button;                           // open
-        right += 8.0f * s + button * 2.0f + (counter ? counter_w : 0.0f);  // nav
-        if (tools) right += tools_w + 8.0f * s + 13.0f * s;                // pill + separator
+        float right = kCloseWidth * s + 2.0f * s + (button + 4.0f * s) * 3.0f;  // close, more, size, pin
+        right += open_text ? open_full : button;                                 // open
+        if (has_nav) right += 8.0f * s + button * 2.0f + (counter ? counter_w : 0.0f);  // nav
+        if (tools) right += tools_w + 8.0f * s + 13.0f * s;                     // pill + separator
         return width - left_fixed - right - 12.0f * s;
     };
     h.tools_visible = has_tools;
@@ -460,17 +464,22 @@ void QuickPreviewWindow::LayoutHeader() {
     x = h.more.left - 4.0f * s;
     h.size = D2D1::RectF(x - button, cy - button * 0.5f, x, cy + button * 0.5f);
     x = h.size.left - 4.0f * s;
+    h.pin = D2D1::RectF(x - button, cy - button * 0.5f, x, cy + button * 0.5f);
+    x = h.pin.left - 4.0f * s;
     const float open_w = h.open_text ? open_full : button;
     h.open = D2D1::RectF(x - open_w, cy - button * 0.5f, x, cy + button * 0.5f);
-    x = h.open.left - 8.0f * s;
-    h.next = D2D1::RectF(x - button, cy - button * 0.5f, x, cy + button * 0.5f);
-    x = h.next.left;
-    if (h.counter_visible) {
-        h.counter = D2D1::RectF(x - counter_w, 0, x, header);
-        x = h.counter.left;
+    x = h.open.left;
+    if (has_nav) {
+        x -= 8.0f * s;
+        h.next = D2D1::RectF(x - button, cy - button * 0.5f, x, cy + button * 0.5f);
+        x = h.next.left;
+        if (h.counter_visible) {
+            h.counter = D2D1::RectF(x - counter_w, 0, x, header);
+            x = h.counter.left;
+        }
+        h.prev = D2D1::RectF(x - button, cy - button * 0.5f, x, cy + button * 0.5f);
+        x = h.prev.left;
     }
-    h.prev = D2D1::RectF(x - button, cy - button * 0.5f, x, cy + button * 0.5f);
-    x = h.prev.left;
     if (h.tools_visible) {
         const float sx = std::round(x - 6.0f * s);
         h.separator = D2D1::RectF(sx, cy - 9.0f * s, sx + (std::max)(1.0f, std::round(s)), cy + 9.0f * s);
@@ -572,13 +581,15 @@ void QuickPreviewWindow::DrawHeader(ID2D1DeviceContext* dc, const ChromePalette&
         if (!command_icons::DrawGlyph(dc, brush.get(), glyph, rect, glyph_size))
             DrawLegacyIcon(dc, compositor_.DwriteFactory(), glyph, rect, brush.get());
     };
-    const bool first = item_.count > 0 && item_.position <= 1;
-    const bool last = item_.count > 0 && item_.position >= item_.count;
-    icon_button(ChromeButton::Prev, header_.prev, kPrevGlyph, !first);
-    if (header_.counter_visible)
-        DrawUiText(dc, header_.counter_text, compositor_.SmallFormat(), header_.counter, p.ink2,
-                   DWRITE_TEXT_ALIGNMENT_CENTER);
-    icon_button(ChromeButton::Next, header_.next, kNextGlyph, !last);
+    if (header_.nav_visible) {
+        const bool first = item_.count > 0 && item_.position <= 1;
+        const bool last = item_.count > 0 && item_.position >= item_.count;
+        icon_button(ChromeButton::Prev, header_.prev, kPrevGlyph, !first);
+        if (header_.counter_visible)
+            DrawUiText(dc, header_.counter_text, compositor_.SmallFormat(), header_.counter, p.ink2,
+                       DWRITE_TEXT_ALIGNMENT_CENTER);
+        icon_button(ChromeButton::Next, header_.next, kNextGlyph, !last);
+    }
 
     // Primary button: open with the default program.
     {
@@ -618,6 +629,29 @@ void QuickPreviewWindow::DrawHeader(ID2D1DeviceContext* dc, const ChromePalette&
                        D2D1::RectF(icon_rect.right + 6.0f * s, header_.open.top,
                                    header_.open.right - 12.0f * s, header_.open.bottom),
                        p.on_accent);
+    }
+    if (always_on_top_) {
+        const bool hot = chrome_hover_ == ChromeButton::Pin;
+        const D2D1_ROUNDED_RECT shape{header_.pin, 7.0f * s, 7.0f * s};
+        const AccentShades shades = DeriveAccentShades(p.accent);
+        const D2D1_COLOR_F active_ink = p.high_contrast ? p.on_accent : (dark_ ? shades.light2 : shades.dark1);
+        const D2D1_COLOR_F active_bg = p.high_contrast
+            ? p.accent
+            : WithAlpha(p.accent, dark_ ? (hot ? 0.30f : 0.22f) : (hot ? 0.20f : 0.14f));
+        ComPtr<ID2D1SolidColorBrush> fill;
+        CreateUiBrush(dc, active_bg, &fill);
+        if (fill.get()) dc->FillRoundedRectangle(shape, fill.get());
+        if (!p.high_contrast) {
+            ComPtr<ID2D1SolidColorBrush> border;
+            CreateUiBrush(dc, WithAlpha(active_ink, dark_ ? 0.38f : 0.30f), &border);
+            if (border.get()) dc->DrawRoundedRectangle(shape, border.get(), (std::max)(1.0f, s));
+        }
+        ComPtr<ID2D1SolidColorBrush> brush;
+        CreateUiBrush(dc, active_ink, &brush);
+        if (brush.get() && !command_icons::DrawGlyph(dc, brush.get(), kPinGlyph, header_.pin, glyph_size))
+            DrawLegacyIcon(dc, compositor_.DwriteFactory(), kPinGlyph, header_.pin, brush.get());
+    } else {
+        icon_button(ChromeButton::Pin, header_.pin, kPinGlyph, true);
     }
     icon_button(ChromeButton::Size, header_.size, kSizeGlyph, true);
     icon_button(ChromeButton::More, header_.more, kMoreGlyph, true);

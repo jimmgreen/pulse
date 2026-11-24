@@ -3,6 +3,7 @@
 #include "ui_renderer.h"
 #include "ui_renderer_internal.h"
 #include "store_icons.h"
+#include "ui_layout_icons.h"
 #include "../common/localization.h"
 #include "tab_shape.h"
 #include "bloom_accent_picker.h"
@@ -103,21 +104,24 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         pulse::l10n::StringId::SettingsGeneral,  // 13: AI 与 MCP, no row (title: ai_text)
         pulse::l10n::StringId::AsstPageTitle,
         pulse::l10n::StringId::NativeExtensionSettingsTitle,
+        pulse::l10n::StringId::SettingsPageUiLayout,
     };
     static_assert(std::size(kNav) == kSettingsNavCount);
     static constexpr const wchar_t* kNavIcon[] = {
         // 右键菜单 (2): the list glyph of its Pulse 右键菜单 card, not the gear.
-        L"\xE771", kIconSearch, L"\xE8FD", kIconInfo, kIconCopy, L"\xE890",  // Quick Look
-        L"\xE71D",  // 系统右键菜单
+        // 重复文件 (4) compares copies; Copy stays with 文件操作 (12).
+        L"\xE771", kIconSearch, L"\xE8FD", kIconInfo, L"\xF5B5", L"\xE890",  // Quick Look
+        L"\xF5DA",  // 系统右键菜单 (SysMenu; E71D drew 右键菜单's list)
         L"\xE765",  // 快捷键 (keyboard)
         L"\xE7B8",  // 增强包 (package)
-        L"\xED25",  // 文件列表
-        L"\xE737",  // 标签页与窗口
+        L"\xF5D0",  // 文件列表 (FileList: a folder and its rows)
+        L"\xF5C7",  // 标签页与窗口 (TabStrip; E737 is the tray)
         L"\xE7E8",  // 启动与集成
         L"\xE8DE",  // 文件操作
-        L"\xE99A",  // AI 与 MCP (no row)
+        L"\xF5DB",  // AI 与 MCP (Plug; the sparkle is AI 助手's)
         L"\xF5C2",  // AI 助手 (sparkle, as the status bar chip)
         L"\xE713",  // Plugin settings (sub-page)
+        L"\xF5C5",  // 界面布局 (UiLayout, as the 界面 title button)
     };
     static_assert(std::size(kNavIcon) == kSettingsNavCount);
     // Page 5 (快速预览) has no string-table entry; see pack_text. Page 2 is
@@ -153,8 +157,11 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
     {
         const uint64_t now = motion_now_;
         int hovered_row = -1;
-        for (int i = 0; i < kSettingsNavCount; ++i)
-            if (i != nav_page && IsHovered(vm, HitTestResult::SettingsNav, i)) hovered_row = i;
+        for (int i = 0; i < kSettingsNavCount; ++i) {
+            const auto& r = lay.nav_row[i];
+            if (i != nav_page && r.bottom > r.top && r.right > r.left && IsHovered(vm, HitTestResult::SettingsNav, i))
+                hovered_row = i;
+        }
         if (hovered_row >= 0) {
             const D2D1_RECT_F rc = settings_nav_hover_.Update(
                 1, hovered_row, lay.nav_row[hovered_row], motion_frame_, now, 120);
@@ -162,7 +169,8 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
             FillRoundedRect(dc, brFillSelected_.get(), rc.left, rc.top,
                             rc.right - rc.left, rc.bottom - rc.top, 6.0f * scale_);
         }
-        if (nav_page >= 0 && nav_page < kSettingsNavCount) {
+        if (nav_page >= 0 && nav_page < kSettingsNavCount &&
+            lay.nav_row[nav_page].bottom > lay.nav_row[nav_page].top) {
             const D2D1_RECT_F rc = settings_nav_pill_.Update(
                 1, nav_page, lay.nav_row[nav_page], motion_frame_, now, 200);
             MakeBrush(dc, theme.fill_selected, brFillSelected_);
@@ -176,20 +184,49 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
     for (int i = 0; i < kSettingsNavCount; ++i) {
         if (i == 6) continue;  // no row: reached through the 右键菜单 layer cards
         if (i == kSettingsPageAi) continue;  // no row: under 增强包
+        if (i == kSettingsPageNativeExtensions) continue;  // no row: sub-page under 增强包
         const bool active = nav_page == i;
         const auto& rc = lay.nav_row[i];
+        if (rc.bottom <= rc.top || rc.right <= rc.left) continue;
         const bool matched = vm.settings_search_query.empty() || std::any_of(vm.settings_search_results.begin(), vm.settings_search_results.end(), [i](const auto& result) {
-            return (result.page == 6 ? 2 : result.page == kSettingsPageAi ? 8 : result.page) == i;
+            const int mapped = result.page == 6 ? 2 : (result.page == kSettingsPageAi || result.page == kSettingsPageNativeExtensions) ? 8 : result.page;
+            return mapped == i;
         });
-        DrawIconText(rc.left + (compact_nav ? 13.0f : 12.0f) * scale_, rc.top, 22.0f * scale_, rc.bottom - rc.top,
-                     kNavIcon[i], L"*", !matched ? theme.text_disabled : active ? theme.accent : theme.text_secondary, 0.85f);
+        {
+            // The mockup's nav icons (ui_modes_mockup.html settingsWindow navg).
+            using CI = command_icons::Icon;
+            UilGlyph g{};
+            switch (i) {
+            case 0: g = UilG(UilIcon::Palette); break;
+            case kSettingsPageUiLayout: g = UilG(UilIcon::Layout); break;
+            case 9: g = UilG(UilIcon::List2); break;
+            case 10: g = UilG(UilIcon::Tabs); break;
+            case 11: g = UilG(UilIcon::Power); break;
+            case 12: g = UilG(CI::Copy); break;
+            case 1: g = UilG(CI::Search); break;
+            case 5: g = UilG(CI::Eye); break;
+            case 8: g = UilG(CI::Zip); break;
+            case kSettingsPageAssistant: g = UilG(CI::Sparkle); break;
+            case 2: g = UilG(CI::List); break;
+            case 7: g = UilG(UilIcon::Keyboard); break;
+            case 3: g = UilG(CI::Info); break;
+            default: break;
+            }
+            const auto color = !matched ? theme.text_disabled : active ? theme.accent : theme.text_secondary;
+            if (g.s[0]) {
+                const float cx = rc.left + (compact_nav ? 13.0f : 12.0f) * scale_ + 11.0f * scale_, cy = (rc.top + rc.bottom) * 0.5f;
+                DrawUilIcon(g.s[1], D2D1::RectF(cx - 9.0f * scale_, cy - 9.0f * scale_, cx + 9.0f * scale_, cy + 9.0f * scale_), color, color);
+            } else DrawIconText(rc.left + (compact_nav ? 13.0f : 12.0f) * scale_, rc.top, 22.0f * scale_, rc.bottom - rc.top,
+                     kNavIcon[i], L"*", color, 0.85f);
+        }
         MakeBrush(dc, matched ? theme.text : theme.text_disabled, brText_);
         if (!compact_nav) DrawTextRect(dc, compositor_->TextFormat(), brText_.get(), nav_label(i),
                      rc.left + 42.0f * scale_, rc.top, rc.right - rc.left - (vm.settings_search_query.empty() ? 48.0f : 72.0f) * scale_,
                      rc.bottom - rc.top);
         if (!vm.settings_search_query.empty()) {
             const auto count = std::count_if(vm.settings_search_results.begin(), vm.settings_search_results.end(), [i](const auto& result) {
-                return (result.page == 6 ? 2 : result.page == kSettingsPageAi ? 8 : result.page) == i;
+                const int mapped = result.page == 6 ? 2 : (result.page == kSettingsPageAi || result.page == kSettingsPageNativeExtensions) ? 8 : result.page;
+                return mapped == i;
             });
             if (count > 0) painter_.DrawText(std::to_wstring(count),
                 D2D1::RectF(rc.right-26*scale_, rc.top, rc.right-4*scale_, rc.bottom), compositor_->SmallFormat(), theme.accent);
@@ -210,7 +247,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                               fluent::HorizontalAlignment::Center);
         }
         // AI 助手: 新 until it was opened in this run.
-        if (i == kSettingsPageAssistant && vm.settings_assistant_new && !compact_nav) {
+        if (((i == kSettingsPageAssistant && vm.settings_assistant_new) || i == kSettingsPageUiLayout) && !compact_nav) {
             const std::wstring& label = pulse::l10n::Get(pulse::l10n::StringId::SettingsNavNew);
             const float bw = painter_.MeasureBadgeWidth(label);
             const float mid = (rc.top + rc.bottom) * 0.5f;
@@ -300,24 +337,28 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         : vm.settings_page == 7 ? std::wstring(shortcuts_text::Title())
         : vm.settings_page == 8 ? l10n::Get(l10n::StringId::StoreTitle)
         : vm.settings_page == kSettingsPageAi ? std::wstring(ai_text::Title())
-        : vm.settings_page == kSettingsPageAssistant ? asst_text::Title() : l10n::Get(page_title_id);
+        : vm.settings_page == kSettingsPageAssistant ? asst_text::Title()
+        : vm.settings_page == kSettingsPageNativeExtensions && !vm.native_settings_title.empty() ? vm.native_settings_title
+        : l10n::Get(page_title_id);
     ComPtr<IDWriteTextLayout> title_layout;
     compositor_->DwriteFactory()->CreateTextLayout(title.c_str(), static_cast<UINT32>(title.size()),
         compositor_->HeaderFormat(), lay.page_heading.right-lay.page_heading.left, 40*scale_, &title_layout);
-    if (title_layout.get() && !lay.sz.on) {
+    if (title_layout.get() && !lay.ext_detail.on && !lay.native_head.on) {
         title_layout->SetFontSize(26*scale_, {0,static_cast<UINT32>(title.size())});
         title_layout->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, {0,static_cast<UINT32>(title.size())});
         compositor_->DrawTextLayout(D2D1::Point2F(lay.page_heading.left,lay.page_heading.top),title_layout.get(),brText_.get());
     }
-    if (!lay.sz.on && (vm.settings_page == 5 || vm.settings_page == 8 || vm.settings_page == kSettingsPageAi ||
-        vm.settings_page == kSettingsPageAssistant || vm.settings_page == kSettingsPageNativeExtensions))
+    if (!lay.ext_detail.on && (vm.settings_page == 5 || vm.settings_page == 8 || vm.settings_page == kSettingsPageAi ||
+        vm.settings_page == kSettingsPageAssistant ||
+        (vm.settings_page == kSettingsPageNativeExtensions && vm.native_settings_title.empty())))
         painter_.DrawWrappedCaption(vm.settings_page == kSettingsPageNativeExtensions ? l10n::Get(l10n::StringId::NativeExtensionSettingsIntro).c_str()
                                     : vm.settings_page == kSettingsPageAssistant ? asst_text::Intro().c_str()
                                     : vm.settings_page == kSettingsPageAi ? ai_text::Intro()
                                     : vm.settings_page == 8 ? (vm.settings_store_browse ? l10n::Get(l10n::StringId::StoreIntro).c_str() : vm.settings_store_installed ? l10n::Get(l10n::StringId::StoreInstalledIntro).c_str() : pack_text::PacksIntro()) : pack_text::Intro(),
             D2D1::Point2F(lay.content.left+pad, origin+(vm.settings_page == kSettingsPageNativeExtensions ? 88 : 60)*scale_),
             lay.content.right-lay.content.left-2*pad, theme.text_secondary);
-    if (vm.settings_page == kSettingsPageNativeExtensions && lay.native_store_crumb.right > lay.native_store_crumb.left) {
+    if (vm.settings_page == kSettingsPageNativeExtensions && lay.native_head.on) DrawNativeSettingsHeader(vm, rect, theme);
+    else if (vm.settings_page == kSettingsPageNativeExtensions && lay.native_store_crumb.right > lay.native_store_crumb.left) {
         // Back to the store: a chevron and the store's name, in the accent, with a hover plate.
         const auto crumb = lay.native_store_crumb;
         if (IsHovered(vm, HitTestResult::SettingsPackAction, static_cast<int>(PackAction::StoreBrowse))) {
@@ -334,7 +375,8 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
             : vm.settings_page == 9 ? l10n::StringId::SettingsFileListIntro
             : vm.settings_page == 10 ? l10n::StringId::SettingsTabsIntro
             : vm.settings_page == 11 ? l10n::StringId::SettingsSystemIntro
-            : vm.settings_page == 12 ? l10n::StringId::SettingsFileOpsIntro : l10n::StringId::SettingsSearchIntro),
+            : vm.settings_page == 12 ? l10n::StringId::SettingsFileOpsIntro
+            : vm.settings_page == kSettingsPageUiLayout ? l10n::StringId::SettingsUiLayoutIntro : l10n::StringId::SettingsSearchIntro),
             D2D1::RectF(lay.content.left+pad,origin+60*scale_,lay.content.right-pad,origin+84*scale_),
             compositor_->SmallFormat(),theme.text_secondary);
 
@@ -1420,6 +1462,7 @@ D2D1_RECT_F MainRenderer::NativeSettingsRect(float window_w, float window_h, con
 
 D2D1_RECT_F MainRenderer::SettingsDropdownBounds(const WindowViewModel& vm, int index, float window_w, float window_h) const {
     const auto l=MakeSettingsLayout(vm,D2D1::RectF(0,0,window_w,window_h),scale_,title_bar_height_,status_height_,&painter_);
+    if(index==13) return l.double_click_interval_choice;
     if(index>=10 && index<=12) return l.integration_choice[index-10];
     if(index==3) return l.assistant.model_choice;
     if(index==4) return l.assistant.voice_service;
@@ -1463,6 +1506,7 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::SettingsNotifyIcon: target=l.notify_icon_card;break;
     case I::SettingsHomeFolder: target=l.home_folder_card;break;
     case I::SettingsStartupOpen: target=l.startup_open_card;break;
+    case I::SettingsTabActiveStyle: target=l.tab_active_style_card;break;
     case I::SettingsTabLayout: target=l.tab_layout_card;break;
     case I::SettingsTabRows: target=l.tab_rows_card;break;
     case I::SettingsNewTabOpen: target=l.new_tab_open_card;break;
@@ -1500,6 +1544,10 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::SettingsWallpaperBlur: target=l.wallpaper_blur_card;break;
     case I::SettingsFrameLook: target=l.frame_look_card;break;
     case I::SettingsTrayIcon: target=l.tray_icon_card;break;
+    case I::SettingsShelfShake: target=l.shelf_shake_row;break;
+    case I::SettingsShelfSensitivity: target=l.shelf_sensitivity_card;break;
+    case I::SettingsShelfPosition: target=l.shelf_position_card;break;
+    case I::SettingsShelfAutoHide: target=l.shelf_auto_hide_row;break;
     case I::SettingsShowHidden: target=l.hidden_files_row;break;
     case I::SettingsShowProtected: target=l.protected_files_row;break;
     case I::PinnedNames: target=l.pinned_names_row;break;
@@ -1516,6 +1564,7 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::SettingsHints: target=l.hints_row;break;
     case I::SettingsHintsReset: target=l.hints_reset_row;break;
     case I::SettingsTransfer: target=l.transfer_card;break;
+    case I::SettingsDoubleClickInterval: target=l.double_click_interval_card;break;
     case I::SettingsBlankClickBack: target=l.blank_click_row;break;
     case I::SettingsWinE: target=l.integration_cover[2];break;
     case I::SettingsThisPc: target=l.integration_cover[1];break;
@@ -1531,6 +1580,7 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::GlobalSearchApps: target=l.global_search_apps_row;break;
     case I::DialogJumpBar: target=l.dialog_jump_row;break;
     case I::DialogJumpAuto: target=l.dialog_jump_auto_row;break;
+    case I::DialogAdaptiveLegacy: target=l.dialog_adaptive_row;break;
     case I::SearchPinyin: target=l.search_pinyin_row;break;
     case I::JumpHistory: target=l.jump_history_row;break;
     case I::ContentIndexManage: target=l.content_header;break;
@@ -1541,6 +1591,16 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::ReleaseNotes: target=l.release_card;break;
     case I::SettingsAutoUpdate: target=l.update_auto_row;break;
     case I::DownloadSourceTitle: target=l.pack_dl_row;break;
+    case I::SettingsPageUiLayout:
+    case I::UilSecStart: target=l.section[0];break;
+    case I::LayoutRowSidebar: target=l.uil_seg_card[0];break;
+    case I::LayoutTglTabs: target=l.uil_toggle_row[0];break;
+    case I::LayoutRowAddress: target=l.uil_seg_card[2];break;
+    case I::LayoutRowCommands: target=l.uil_seg_card[1];break;
+    case I::UilToolbarLabels: target=l.uil_toggle_row[8];break;
+    case I::LayoutTglStatus: target=l.uil_toggle_row[3];break;
+    case I::UilView: target=l.uil_seg_card[4];break;
+    case I::UilSecTitle: target=l.uil_tb_count>0 ? l.uil_tb_row[0] : l.uil_tb_actions;break;
     default: return 0;
     }
     return (std::max)(0.0f,target.top-l.content_origin-20*scale_);

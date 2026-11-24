@@ -90,6 +90,49 @@ bool MissingOnAccessibleVolume(const std::wstring& path, DWORD error) {
     }
     return false;
 }
+bool VolumeLacksNamedStreams(const std::wstring& path) {
+    wchar_t root[32768]{};
+    DWORD flags = 0;
+    return GetVolumePathNameW(path.c_str(), root, ARRAYSIZE(root)) &&
+           GetVolumeInformationW(root, nullptr, 0, nullptr, nullptr, &flags, nullptr, 0) &&
+           (flags & FILE_NAMED_STREAMS) == 0;
+}
+void ApplyTagAdsNoticeImpl(TagAdsNoticeState& owned, const std::vector<TagAdsFailure>& failures,
+                           std::wstring& title, std::wstring& message, bool show_new,
+                           bool scoped, const std::wstring& current_path) {
+    const bool owns_banner = !owned.message.empty() && title == owned.title && message == owned.message;
+    owned = {};
+    const bool folder_scope = scoped && !current_path.empty() && !fs::IsVirtualPath(current_path);
+    const auto current = folder_scope ? Key(current_path) : std::wstring{};
+    auto directory = current;
+    if (!directory.empty() && directory.back() != L'\\') directory += L'\\';
+    const TagAdsFailure* shown = nullptr;
+    for (const auto& failure : failures) {
+        // Journal errors affect all tag edits; stream/pending items belong only to the
+        // real filesystem folder containing the file, never to This PC or virtual views.
+        if (scoped && failure.stage != TagAdsFailureStage::JournalRead &&
+            failure.stage != TagAdsFailureStage::JournalWrite) {
+            if (!folder_scope) continue;
+            const auto path = Key(failure.path);
+            if (directory.empty() || (path != current && !path.starts_with(directory))) continue;
+        }
+        if (!shown || (shown->stage == TagAdsFailureStage::Pending &&
+                       failure.stage != TagAdsFailureStage::Pending))
+            shown = &failure;
+    }
+    if (!shown) {
+        if (owns_banner) { title.clear(); message.clear(); }
+        return;
+    }
+    // Pure in-progress batching keeps an already-owned banner until drained,
+    // but must not pop up a brand-new warning banner when nothing has failed.
+    if (!owns_banner && shown->stage == TagAdsFailureStage::Pending) return;
+    // A later unrelated notification owns its banner; a sync retry cannot erase it.
+    if (!owns_banner && (!show_new || !title.empty() || !message.empty())) return;
+    owned.title = l10n::Get(l10n::StringId::FileTagSync).c_str();
+    owned.message = TagAdsFailureMessage(*shown);
+    title = owned.title; message = owned.message;
+}
 }
 bool HasPendingTagAds(const std::wstring& path) {
     std::lock_guard lock(mutex); Load();
@@ -109,33 +152,13 @@ std::wstring TagAdsFailureMessage(const TagAdsFailure& failure) {
         L" " + failure.path + L" (" + stage + L", " + std::to_wstring(failure.error) + L")";
 }
 void ApplyTagAdsNotice(TagAdsNoticeState& owned, const std::vector<TagAdsFailure>& failures,
+                       std::wstring& title, std::wstring& message, bool show_new) {
+    ApplyTagAdsNoticeImpl(owned, failures, title, message, show_new, false, {});
+}
+void ApplyTagAdsNotice(TagAdsNoticeState& owned, const std::vector<TagAdsFailure>& failures,
                        std::wstring& title, std::wstring& message, bool show_new,
                        const std::wstring& current_path) {
-    const bool owns_banner = !owned.message.empty() && title == owned.title && message == owned.message;
-    owned = {};
-    const auto current = Key(current_path);
-    auto directory = current;
-    if (!directory.empty() && directory.back() != L'\\') directory += L'\\';
-    const TagAdsFailure* shown = nullptr;
-    for (const auto& failure : failures) {
-        // Journal errors affect all tag edits; stream errors belong to the folder
-        // containing the file, not whichever folder happens to be active now.
-        if (!current_path.empty() && failure.stage != TagAdsFailureStage::JournalRead &&
-            failure.stage != TagAdsFailureStage::JournalWrite) {
-            const auto path = Key(failure.path);
-            if (directory.empty() || (path != current && !path.starts_with(directory))) continue;
-        }
-        if (!shown || failure.stage != TagAdsFailureStage::Pending) shown = &failure;
-    }
-    if (!shown) {
-        if (owns_banner) { title.clear(); message.clear(); }
-        return;
-    }
-    // A later unrelated notification owns its banner; a sync retry cannot erase it.
-    if (!owns_banner && (!show_new || !title.empty() || !message.empty())) return;
-    owned.title = l10n::Get(l10n::StringId::FileTagSync).c_str();
-    owned.message = TagAdsFailureMessage(*shown);
-    title = owned.title; message = owned.message;
+    ApplyTagAdsNoticeImpl(owned, failures, title, message, show_new, true, current_path);
 }
 static std::vector<std::wstring> SyncBatch(const std::vector<TagAdsUpdate>& updates,
     std::vector<TagAdsFailure>* diagnostics, std::map<std::wstring, TagAdsFailure>* attempted) {
@@ -146,13 +169,8 @@ static std::vector<std::wstring> SyncBatch(const std::vector<TagAdsUpdate>& upda
         failed.push_back(path);
         if (!diagnostics) return;
         TagAdsFailure failure{path, stage, error ? error : ERROR_GEN_FAILURE};
-        if (stage == TagAdsFailureStage::StreamWrite) {
-            wchar_t root[32768]{};
-            DWORD flags = 0;
-            if (GetVolumePathNameW(path.c_str(), root, ARRAYSIZE(root)) &&
-                GetVolumeInformationW(root, nullptr, 0, nullptr, nullptr, &flags, nullptr, 0))
-                failure.unsupported = (flags & FILE_NAMED_STREAMS) == 0;
-        }
+        if (stage == TagAdsFailureStage::StreamWrite)
+            failure.unsupported = VolumeLacksNamedStreams(path);
         diagnostics->push_back(std::move(failure));
     };
     if (!readable) {
@@ -201,7 +219,10 @@ static std::vector<std::wstring> SyncBatch(const std::vector<TagAdsUpdate>& upda
             const DWORD error = GetLastError();
             report(it->second.path, TagAdsFailureStage::StreamWrite, error);
             if (attempted && diagnostics) (*attempted)[it->first] = diagnostics->back();
-            ++it;
+            // A mounted non-NTFS volume (FAT32/exFAT) can never store ADS; retire it
+            // from durable retries after reporting once instead of retrying forever.
+            if (VolumeLacksNamedStreams(it->second.path)) it = staged.erase(it);
+            else ++it;
         }
     }
     const bool saved = Save(staged);

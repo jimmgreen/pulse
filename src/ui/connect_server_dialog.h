@@ -18,6 +18,7 @@ struct ConnectServerSuggestion {
 
 struct ConnectServerPreview {
     bool ok = false;       // 连接 is allowed
+    bool can_pin = true;   // a local-style network place: 固定到网络位置 is offered
     bool can_map = false;  // a share root: 映射为驱动器 is offered
     std::wstring text;     // the line under the field (empty: nothing to say)
 };

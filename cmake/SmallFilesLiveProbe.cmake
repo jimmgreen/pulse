@@ -1,0 +1,5 @@
+option(PULSE_SMALL_FILES_LIVE_PROBE "Build isolated small-files responsiveness probe" OFF)
+if(PULSE_SMALL_FILES_LIVE_PROBE)
+    target_sources(pulse PRIVATE src/bench/small_files_live_probe.cpp)
+    set_property(SOURCE src/app/app_main.cpp APPEND PROPERTY COMPILE_DEFINITIONS PULSE_SMALL_FILES_LIVE_PROBE=1)
+endif()

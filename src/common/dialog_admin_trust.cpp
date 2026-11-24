@@ -199,6 +199,30 @@ DWORD AdminControlRoot(const std::wstring& install_root, bool create, std::wstri
         return ERROR_SUCCESS;
     } catch (...) { return ERROR_NOT_ENOUGH_MEMORY; }
 }
+DWORD VerifyProtectedBridgeLocation(const std::wstring& bridge_root,
+                                    const std::wstring& core_root, WORD machine) noexcept {
+    try {
+        if (machine != IMAGE_FILE_MACHINE_I386 && machine != IMAGE_FILE_MACHINE_AMD64) {
+            return ERROR_EXE_MACHINE_TYPE_MISMATCH;
+        }
+        if (const DWORD error = VerifyProtectedPath(bridge_root, true)) return error;
+        const auto prefix = bridge_root + L"\\";
+        if (core_root.size() <= prefix.size() ||
+            CompareStringOrdinal(core_root.data(), static_cast<int>(prefix.size()),
+                                 prefix.data(), static_cast<int>(prefix.size()), TRUE) != CSTR_EQUAL) {
+            return ERROR_ACCESS_DENIED;
+        }
+        const auto active_ptr = bridge_root + L"\\active-bridge.json";
+        if (GetFileAttributesW(active_ptr.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            if (const DWORD error = VerifyProtectedPath(active_ptr, false)) return error;
+        } else {
+            const auto legacy_ptr = bridge_root + (machine == IMAGE_FILE_MACHINE_I386
+                ? L"\\dialog-x86-current.json" : L"\\dialog-current.json");
+            if (const DWORD error = VerifyProtectedPath(legacy_ptr, false)) return error;
+        }
+        return VerifyProtectedTree(core_root);
+    } catch (...) { return ERROR_NOT_ENOUGH_MEMORY; }
+}
 DWORD VerifyAdminLaunchLocation(const std::wstring& install_root, const std::wstring& bundle_root,
                                const std::wstring& host_path, WORD machine) noexcept {
     try {

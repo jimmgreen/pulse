@@ -1,0 +1,9 @@
+LIBRARY PulseDialogStub64
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE
+    PulseStubActivate
+    PulseStubHotReload
+    PulseStubGetStatus
+    PulseInitializeDirectReveal
+    PulseStubSetBridgeRootForTest

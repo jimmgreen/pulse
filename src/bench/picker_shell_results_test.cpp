@@ -143,6 +143,11 @@ int main(int argc, char** argv) {
         Check(IsSelectable(SFGAO_STREAM, false, stream_options) && !IsSelectable(0, false, stream_options), "streamable policy requires source SFGAO_STREAM");
         Check(IsSelectable(SFGAO_STREAM | SFGAO_FOLDER, false, stream_options), "streamable folder can be returned as a file");
         Check(IsSelectable(0, false, FOS_ALLNONSTORAGEITEMS) && !IsSelectable(SFGAO_STREAM, false, stream_options | FOS_FORCEFILESYSTEM), "all-items and forced-filesystem retain distinct semantics");
+        using pulse::picker_shell::ShellFilterNeedsNative;
+        Check(!ShellFilterNeedsNative(stream_options | FOS_FORCEFILESYSTEM) && !ShellFilterNeedsNative(FOS_FORCEFILESYSTEM),
+            "forced file-system keeps a streamable caller's shell filter in Pulse");
+        Check(ShellFilterNeedsNative(stream_options) && ShellFilterNeedsNative(FOS_ALLNONSTORAGEITEMS) && ShellFilterNeedsNative(FOS_ALLNONSTORAGEITEMS | FOS_FORCEFILESYSTEM),
+            "stream or non-storage enumeration keeps the shell filter native");
         const auto zip = std::filesystem::current_path() / L"bench_data" /
             (L"picker-stream-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + L".zip");
         const unsigned char empty_zip[22] = {'P','K',5,6};

@@ -308,11 +308,13 @@ void ClearTextWidthCache() {
         auto& cache = *vm.row_cache;
         const uint64_t alias_revision = app::AliasStore::Instance().Revision();
         const uint64_t extension_revision = KnownExtensionsRevision();
+        const uint64_t places_revision = vm.tag_catalog ? vm.tag_catalog->TagRevision() : 0;
         if (cache.snapshot != vm.snapshot || cache.alias_revision != alias_revision ||
-            cache.extension_revision != extension_revision) {
+            cache.extension_revision != extension_revision || cache.places_revision != places_revision) {
             cache.snapshot = vm.snapshot;
             cache.alias_revision = alias_revision;
             cache.extension_revision = extension_revision;
+            cache.places_revision = places_revision;
             cache.rows.clear();
             cache.order.clear();
         }
@@ -360,7 +362,8 @@ void ClearTextWidthCache() {
         entry.modified_value = (static_cast<uint64_t>(source.mtime.dwHighDateTime) << 32) |
                                source.mtime.dwLowDateTime;
         entry.is_dir = penetrated ? source.link_target_is_dir : source.is_dir;
-        entry.hidden_ext = HiddenExtensionLength(entry.name, entry.is_dir);
+        // The suffix belongs to the shortcut file, not to its target folder.
+        entry.hidden_ext = HiddenExtensionLength(entry.name, source.is_dir);
         entry.is_reparse = source.is_reparse;
         entry.link_kind = fs::ClassifyLink(source.attrs, source.reparse_tag);
         entry.is_link = entry.link_kind != fs::LinkKind::None ||
@@ -496,6 +499,7 @@ void ClearTextWidthCache() {
             TrayClear
         } kind = Header;
         D2D1_RECT_F rc{};
+        D2D1_RECT_F clip{};  // nested favorites viewport, or empty for ordinary rows
         int group = -1;
         int item = -1;
         int run = -1;
@@ -696,7 +700,19 @@ void ClearTextWidthCache() {
         return std::max(40.0f * scale, open_like ? h - 20.0f * scale : h * 0.52f);
     }
 
-    float SidebarContentHeight(const WindowViewModel& vm, const SidebarMetrics& m) {
+    struct SidebarFavoritesLayout {
+        D2D1_RECT_F viewport{}, clip{};
+        fluent::ScrollbarSpec bar{};
+    };
+
+    float SidebarFavoritesHeight(const SidebarMetrics& m, float available, float content) {
+        const float pitch = m.itemH + m.itemGap;
+        const float cap = std::clamp(available * 0.40f, pitch, 6.0f * pitch);
+        return std::min(content, cap);
+    }
+
+    float SidebarContentHeight(const WindowViewModel& vm, const SidebarMetrics& m,
+                               float viewport_height) {
         float height = m.pad;
         for (const auto& group : vm.sidebar) {
             if (group.hidden) continue;
@@ -706,8 +722,13 @@ void ClearTextWidthCache() {
             const bool has_header = !group.header.empty();
             if (has_header) height += m.headerH + 4.0f * m.scale;
             if (!has_header || !group.collapsed) {
-                for (const auto& item : group.items)
-                    height += SidebarItemHeight(item, m) + m.itemGap;
+                float favorites = 0.0f;
+                for (const auto& item : group.items) {
+                    const float pitch = SidebarItemHeight(item, m) + m.itemGap;
+                    if (item.starred_child) favorites += pitch;
+                    else height += pitch;
+                }
+                height += SidebarFavoritesHeight(m, viewport_height, favorites);
                 height += m.groupGap - m.itemGap;
             }
             // Same extra gap LayoutSidebar leaves under the vertical-tabs well.
@@ -726,7 +747,7 @@ void ClearTextWidthCache() {
         bar.viewport = D2D1::RectF(sb.right - 12.0f * scale, sb.top,
                                    sb.right - 2.0f * scale, bottom);
         bar.viewport_extent = bottom - sb.top;
-        bar.content_extent = SidebarContentHeight(vm, m);
+        bar.content_extent = SidebarContentHeight(vm, m, bar.viewport_extent);
         bar.offset = std::clamp(vm.sidebar_scroll, 0.0f,
             std::max(0.0f, bar.content_extent - bar.viewport_extent));
         bar.expand_progress = vm.sidebar_scrollbar_expand;
@@ -737,8 +758,10 @@ void ClearTextWidthCache() {
 
     void LayoutSidebar(const WindowViewModel& vm, const D2D1_RECT_F& sb, float scale,
                        std::vector<SidebarSlot>& out,
-                       std::vector<SidebarGroupBand>* bands = nullptr) {
+                       std::vector<SidebarGroupBand>* bands = nullptr,
+                       SidebarFavoritesLayout* favorites = nullptr) {
         out.clear();
+        if (favorites) *favorites = {};
         const float width = sb.right - sb.left;
         const bool compact = SidebarRailLayout(width, scale);
         SidebarMetrics m = MakeSidebarMetrics(scale);
@@ -871,6 +894,52 @@ void ClearTextWidthCache() {
                 const auto& item = group.items[i];
                 const float h = SidebarItemHeight(item, m);
                 if (y >= contentBottom) break;
+                if (item.starred_child) {
+                    int end = i;
+                    float total = 0.0f;
+                    while (end < static_cast<int>(group.items.size()) && group.items[end].starred_child)
+                        total += SidebarItemHeight(group.items[end++], m) + m.itemGap;
+                    const float visible = SidebarFavoritesHeight(m, contentBottom - sb.top, total);
+                    const float max_scroll = total - visible;
+                    const float offset = std::clamp(vm.sidebar_favorites_scroll, 0.0f, max_scroll);
+                    const float bottom = y + visible;
+                    const auto viewport = D2D1::RectF(innerL, y, innerR, bottom);
+                    const auto clip = D2D1::RectF(innerL, std::max(y, sb.top), innerR,
+                                                  std::min(bottom, contentBottom));
+                    if (favorites) {
+                        favorites->viewport = viewport;
+                        favorites->clip = clip;
+                        auto& bar = favorites->bar;
+                        bar.viewport = D2D1::RectF(innerR - 12.0f * scale, y, innerR - 1.0f * scale, bottom);
+                        bar.viewport_extent = visible;
+                        bar.content_extent = total;
+                        bar.offset = offset;
+                        bar.enabled = max_scroll > 0.0f;
+                        bar.expand_progress = vm.sidebar_favorites_scrollbar_dragging ||
+                            (vm.hover_region == static_cast<int>(HitTestResult::Scrollbar) &&
+                             vm.hover_sub_index == kSidebarFavoritesScrollbar) ? 1.0f : 0.0f;
+                    }
+                    float row_y = y - offset;
+                    for (; i < end; ++i) {
+                        const auto& row = group.items[i];
+                        const float height = SidebarItemHeight(row, m);
+                        SidebarSlot slot;
+                        slot.kind = SidebarSlot::Item;
+                        slot.group = g;
+                        slot.item = i;
+                        slot.run = run++;
+                        slot.rc = D2D1::RectF(innerL + (row.indent + (has_header ? 1 : 0)) * 16.0f * scale,
+                                              row_y, innerR - (max_scroll > 0.0f ? 13.0f * scale : 0.0f),
+                                              row_y + height);
+                        slot.clip = clip;
+                        if (clip.bottom > clip.top && slot.rc.bottom > clip.top && slot.rc.top < clip.bottom)
+                            out.push_back(slot);
+                        row_y += height + m.itemGap;
+                    }
+                    --i;
+                    y = bottom;
+                    continue;
+                }
                 SidebarSlot slot;
                 slot.kind = item.is_drive ? SidebarSlot::Drive
                           : item.is_tag ? SidebarSlot::Tag : SidebarSlot::Item;
@@ -904,6 +973,7 @@ void ClearTextWidthCache() {
         D2D1_RECT_F panel{};
         // Strip (empty).
         D2D1_RECT_F strip_icon{}, strip_title{}, strip_hint{}, strip_kbd{};
+        D2D1_RECT_F shelf_header{}, shelf_switch{}, shelf_popout{};
         bool strip_hint_short = false;   // no room for the chip: 拖入文件 without 或
         // Drop halves: 0 copy, 1 move.
         D2D1_RECT_F half[2]{};
@@ -932,6 +1002,12 @@ void ClearTextWidthCache() {
         const float top = panel.top;
         const float inner = (R - L) / s;
         const bool narrow = inner < 230.0f;
+        if (!deck.active_shelf_name.empty()) {
+            g.shelf_header = D2D1::RectF(L, top + 5.0f * s, R, top + 32.0f * s);
+            g.shelf_popout = D2D1::RectF(R - 25.0f * s, g.shelf_header.top, R, g.shelf_header.bottom);
+            g.shelf_switch = D2D1::RectF(L, g.shelf_header.top, g.shelf_popout.left - 3.0f * s,
+                                        g.shelf_header.bottom);
+        }
 
         // Strip: icon, 暂存区, hint (+ kbd chip when it fits).
         {
@@ -973,6 +1049,7 @@ void ClearTextWidthCache() {
         {
             const float ib = (narrow ? 28.0f : 30.0f) * s;
             float y1 = top + 10.0f * s;
+            if (!deck.active_shelf_name.empty()) y1 += 30.0f * s;
             if (deck.clip_count > 0) {
                 // .cliprow: 26 tall, margin-top -2, then the usual 9 gap.
                 g.clip_row = D2D1::RectF(L, y1 - 2.0f * s, R, y1 + 24.0f * s);
@@ -1194,6 +1271,7 @@ void ClearTextWidthCache() {
         case PaneBannerAction::Refresh: return pulse::l10n::Get(I::Refresh);
         case PaneBannerAction::ManageIndex: return pulse::l10n::Get(I::ContentManageShort);
         case PaneBannerAction::AddNetworkIndex: return pulse::l10n::Get(I::NetworkLiveAdd);
+        case PaneBannerAction::OpenNativeFolder: return pulse::l10n::Get(I::OpenDeniedFolderNative);
         case PaneBannerAction::NetworkSettings: return pulse::l10n::Get(I::Settings);
         case PaneBannerAction::LanRescan: return pulse::l10n::Get(I::HintActLanRescan);
         case PaneBannerAction::DupCancel: return pulse::l10n::Get(I::Cancel);
@@ -1682,6 +1760,7 @@ void ClearTextWidthCache() {
     struct DetailsSectionDef { int id; pulse::l10n::StringId label; };
     constexpr DetailsSectionDef kDetailsSections[] = {
         { 0, pulse::l10n::StringId::DetailsBasic },
+        { 5, pulse::l10n::StringId::Git },   // only inside a repository
         { 2, pulse::l10n::StringId::DetailsTags },
         { 1, pulse::l10n::StringId::DetailsAttributes },
         { 3, pulse::l10n::StringId::DetailsSecurity },
@@ -1974,6 +2053,7 @@ void ClearTextWidthCache() {
             y += rowH + 4.0f * s;
 
             for (const auto& def : kDetailsSections) {
+                if (def.id == 5 && d.git_branch_text.empty()) continue;
                 y += 8.0f * s; // separator gap (line drawn inside DrawDetailsPanel)
                 out.section_headers.push_back(D2D1::RectF(x, y, x + w, y + 28.0f * s));
                 out.section_ids.push_back(def.id);
@@ -2028,6 +2108,39 @@ void ClearTextWidthCache() {
                 case 4: // 其他: 驱动器/文件系统/可用空间
                     y += 3.0f * 18.0f * s + 8.0f * s;
                     break;
+                case 5: { // Git: branch/status, actions, mini-diff preview, recent history
+                    y += 2.0f * 18.0f * s + 4.0f * s;
+                    out.git_open = D2D1::RectF(x, y, x + w, y + 26.0f * s);
+                    y = out.git_open.bottom + 6.0f * s;
+                    if (!d.is_dir && d.git_mark != GitMark::None && d.git_summary_ready) {
+                        const bool has_discard = d.git_unstaged || d.git_untracked;
+                        if (has_discard) {
+                            const float btn_gap = 6.0f * s;
+                            const float sw = (w - btn_gap) * 0.54f;
+                            out.git_stage = D2D1::RectF(x, y, x + sw, y + 26.0f * s);
+                            out.git_discard = D2D1::RectF(out.git_stage.right + btn_gap, y, x + w, y + 26.0f * s);
+                        } else {
+                            out.git_stage = D2D1::RectF(x, y, x + w, y + 26.0f * s);
+                            out.git_discard = {};
+                        }
+                        y += 26.0f * s + 8.0f * s;
+                    }
+                    if (!d.git_preview_lines.empty()) {
+                        const size_t nlines = (std::min<size_t>)(6, d.git_preview_lines.size());
+                        y += 10.0f * s + static_cast<float>(nlines) * 16.0f * s + 8.0f * s;
+                    }
+                    if (!d.git_history.empty()) {
+                        out.git_history = D2D1::RectF(x + w - 76.0f * s, y, x + w, y + 20.0f * s);
+                        y += 22.0f * s;
+                        const size_t hn = (std::min<size_t>)(3, d.git_history.size());
+                        for (size_t i = 0; i < hn; ++i) {
+                            out.git_hist_restore[i] = D2D1::RectF(x + w - 76.0f * s, y + 16.0f * s, x + w, y + 34.0f * s);
+                            y += 38.0f * s;
+                        }
+                    }
+                    y += 2.0f * s;
+                    break;
+                }
                 default: break;
                 }
             }
@@ -2097,8 +2210,10 @@ struct StatusBarMetrics {
     D2D1_RECT_F task{};
     D2D1_RECT_F cancel_search{};
     D2D1_RECT_F hint_action{};   // empty unless the hint carries a clickable action
-    D2D1_RECT_F undo_chip{}, undo_button{}, redo_button{}, status_label{}, selection_label{};
+    D2D1_RECT_F undo_chip{}, undo_button{}, redo_button{}, pane_who_label{}, pane_who_sep{}, status_label{}, selection_label{};
     D2D1_RECT_F ai_chip{};       // the AI chip at the far left; empty when hidden
+    D2D1_RECT_F git_chip{};      // the Git chip after the status text; empty outside a repo
+    std::vector<D2D1_RECT_F> extension_chips; // per status.extension_items; empty rect = dropped
     bool ai_chip_text = false;   // the chip has room for its words (else "✦ AI" only)
     float content_left = 0.0f;   // where everything else starts (right of the AI chip)
     float content_right = 0.0f;  // where everything else ends
@@ -2216,20 +2331,60 @@ StatusBarMetrics MakeStatusBarMetrics(const WindowViewModel& vm, const D2D1_RECT
             m.cancel_search = D2D1::RectF(m.task.right + cancel_gap, m.bar.top + 2.0f * scale,
                 left + width, m.bar.bottom - 2.0f * scale);
     }
-    // HTML order: AI, item count, optional selection count, history, flexible trailing area.
+    // Keep the selected size visible before giving width to optional labels.
     const float gap = 14 * scale;
     const float left_limit = centered_progress ? m.task.left - gap :
         rect.right - m.pad - (has_task ? std::min(190.0f * scale, (rect.right - m.content_left) * 0.32f) : 0.0f);
+    const float history_reserve = centered_progress ? 0.0f : 120 * scale;
+    const float selection_width = MeasureTextWidth(factory, small_format, vm.status.selection_text);
+    const float before_selection = left_limit - history_reserve -
+        (selection_width > 0.0f ? selection_width + gap : 0.0f);
     float cursor = m.content_left;
-    const auto column = [&](const std::wstring& text, D2D1_RECT_F& out) {
-        if (text.empty()) return;
-        const float width = std::min(std::max(0.0f, left_limit - cursor - (centered_progress ? 0.0f : 120 * scale)),
-            MeasureTextWidth(factory, small_format, path::FriendlyPathText(text)));
+    if (!vm.status.active_pane_label.empty() && !vm.status.status_text.empty() && factory && small_format) {
+        const std::wstring sep = L" \u00B7 ";
+        const float who_w = MeasureTextWidth(factory, small_format, vm.status.active_pane_label);
+        const float sep_w = MeasureTextWidth(factory, small_format, sep);
+        if (cursor + who_w + sep_w + 48.0f * scale <= before_selection) {
+            m.pane_who_label = D2D1::RectF(cursor, m.bar.top, cursor + who_w + 2.0f * scale, m.bar.bottom);
+            m.pane_who_sep = D2D1::RectF(cursor + who_w, m.bar.top, cursor + who_w + sep_w + 2.0f * scale, m.bar.bottom);
+            cursor += who_w + sep_w;
+        }
+    }
+    const auto column = [&](D2D1_RECT_F& out, float measured, float limit) {
+        const float width = std::min(std::max(0.0f, limit - cursor), measured);
+        if (width <= 0.0f) return;
         out = D2D1::RectF(cursor, m.bar.top, cursor + width, m.bar.bottom);
         cursor += width + gap;
     };
-    column(vm.status.status_text, m.status_label);
-    column(vm.status.selection_text, m.selection_label);
+    column(m.status_label, MeasureTextWidth(factory, small_format, path::FriendlyPathText(vm.status.status_text)),
+           before_selection);
+    if (!vm.status.git_text.empty()) {
+        // A padded, clickable chip (git_ui.cpp: the branch / Source Control menu).
+        const float chip_pad = 8 * scale;
+        const float room = std::max(0.0f, before_selection - cursor);
+        const float width = std::min(room, MeasureTextWidth(factory, small_format, vm.status.git_text) + 2 * chip_pad);
+        if (width >= 48 * scale) {
+            const float mid = (m.bar.top + m.bar.bottom) * 0.5f;
+            m.git_chip = D2D1::RectF(cursor - chip_pad * 0.5f, mid - 10 * scale, cursor - chip_pad * 0.5f + width, mid + 10 * scale);
+            cursor += width + gap - chip_pad * 0.5f;
+        }
+    }
+    // Plugin items (pulse.statusbar): icon and text chips in registration order; one that no
+    // longer fits is dropped whole, and so are the ones after it.
+    m.extension_chips.assign(vm.status.extension_items.size(), D2D1_RECT_F{});
+    for (size_t i = 0; i < vm.status.extension_items.size(); ++i) {
+        const auto& item = vm.status.extension_items[i];
+        const float chip_pad = 7 * scale;
+        const float icon_w = item.icon ? 14 * scale + (item.text.empty() ? 0.0f : 5 * scale) : 0.0f;
+        const float text_w = item.text.empty() ? 0.0f : MeasureTextWidth(factory, small_format, item.text);
+        const float width = icon_w + text_w + 2 * chip_pad;
+        if (cursor - chip_pad * 0.5f + width > before_selection) break;
+        const float mid = (m.bar.top + m.bar.bottom) * 0.5f;
+        m.extension_chips[i] = D2D1::RectF(cursor - chip_pad * 0.5f, mid - 10 * scale, cursor - chip_pad * 0.5f + width, mid + 10 * scale);
+        cursor += width + gap - chip_pad * 0.5f;
+    }
+    column(m.selection_label, selection_width,
+           std::min(left_limit, std::max(left_limit - history_reserve, cursor + selection_width)));
     const float controls = (vm.status.can_redo ? 98.0f : 70.0f) * scale;
     const float preferred = std::min(240.0f * scale,
         MeasureTextWidth(factory, small_format, vm.status.undo_label) + controls);
@@ -2451,44 +2606,66 @@ void MakeBrush(ID2D1DeviceContext* dc, const D2D1_COLOR_F& c, ComPtr<ID2D1SolidC
     if (!br.get()) dc->CreateSolidColorBrush(c, &br);
     else br->SetColor(c);
 }
+// Title button kinds (app::kTitleButtonIds order).
+constexpr int kTitleButtonWin = 0, kTitleButtonLayout = 1, kTitleButtonSettings = 2, kTitleButtonTheme = 3,
+              kTitleButtonAi = 4, kTitleButtonTray = 5, kTitleButtonKinds = 6;
 struct TitleChrome {
     float chrome_left = 0.0f;
-    float windows_left = 0.0f;
-    float settings_left = 0.0f;
-    float settings_w = 0.0f;
-    float theme_left = 0.0f;
-    float theme_w = 0.0f;
-    // Settings + theme share one pill, kept apart from the window controls.
+    float windows_left = 0.0f;   // the group's leftmost button (chrome_left - 14 DIP when it is empty)
+    // The buttons share one pill, kept apart from the window controls.
     float group_left = 0.0f;
     float group_right = 0.0f;
     float cmd_left = 0.0f;
     float cmd_w = 0.0f;
     float cmd_top = 0.0f;
     float cmd_h = 0.0f;
+    struct Slot { int kind = 0; float left = 0.0f; };
+    std::array<Slot, kTitleButtonKinds> slots{};
+    int count = 0;
+    float button_w = 0.0f;
+    std::array<float, kTitleButtonKinds> dividers{};   // x of each 1 DIP hairline
+    int divider_count = 0;
 };
 
-TitleChrome MakeTitleChrome(float window_w, float scale, float title_h) {
+// `buttons`: kinds left to right, -1 a divider (kept only between two buttons).
+TitleChrome MakeTitleChrome(float window_w, float scale, float title_h, const std::vector<int>& buttons) {
     TitleChrome c;
     const float ctrl_w = 46.0f * scale;
     c.chrome_left = window_w - ctrl_w * 3.0f;
-    if (window_w < 600.0f * scale) {
-        c.windows_left = c.settings_left = c.theme_left = c.chrome_left;
-        c.group_left = c.group_right = c.chrome_left;
-        return c;
-    }
-    c.theme_w = 36.0f * scale;
-    c.settings_w = 36.0f * scale;
-    const float group_pad = 2.0f * scale;
-    c.group_right = c.chrome_left - 14.0f * scale;
-    c.theme_left = c.group_right - group_pad - c.theme_w;
-    c.settings_left = c.theme_left - 1.0f * scale - c.settings_w;   // 1 DIP divider
-    c.windows_left = c.settings_left - 37.0f * scale;
-    c.group_left = c.windows_left - group_pad;
-    c.cmd_w = 0.0f;
-    c.cmd_left = c.windows_left;
+    c.windows_left = c.group_left = c.group_right = c.cmd_left = c.chrome_left;
     const float cmd_pad = 8.0f * scale;
     c.cmd_top = cmd_pad;
     c.cmd_h = std::max(0.0f, title_h - cmd_pad * 2.0f);
+    if (window_w < 600.0f * scale) return c;
+    std::array<int, kTitleButtonKinds> kinds{};
+    std::array<bool, kTitleButtonKinds> divider_before{};
+    int n = 0;
+    bool pending = false;
+    for (const int kind : buttons) {
+        if (kind < 0) { pending = n > 0; continue; }
+        if (kind >= kTitleButtonKinds || n >= kTitleButtonKinds) continue;
+        kinds[static_cast<size_t>(n)] = kind;
+        divider_before[static_cast<size_t>(n)] = pending;
+        pending = false;
+        ++n;
+    }
+    const float group_pad = 2.0f * scale;
+    c.group_right = c.chrome_left - 14.0f * scale;
+    c.windows_left = c.group_left = c.cmd_left = c.group_right;
+    if (n == 0) return c;
+    c.button_w = 36.0f * scale;
+    float x = c.group_right - group_pad;
+    for (int i = n - 1; i >= 0; --i) {
+        x -= c.button_w;
+        c.slots[static_cast<size_t>(i)] = {kinds[static_cast<size_t>(i)], x};
+        if (i > 0) {
+            x -= 1.0f * scale;   // a hairline where the spec has '|', else a 1 DIP gap
+            if (divider_before[static_cast<size_t>(i)]) c.dividers[static_cast<size_t>(c.divider_count++)] = x;
+        }
+    }
+    c.count = n;
+    c.windows_left = c.cmd_left = x;
+    c.group_left = x - group_pad;
     return c;
 }
 
@@ -2496,11 +2673,12 @@ constexpr float kSettingsNavW = 200.0f;
 // 5: 快速预览, 6: 系统右键菜单, 7: 快捷键, 8: 增强包; 0 and 9-12 split the former 通用 page:
 // 0 外观, 9 文件列表, 10 标签页与窗口, 11 启动与集成, 12 文件操作.
 // 13 AI 与 MCP has no row (under 增强包); 14 AI 助手 follows 增强包.
-constexpr int kSettingsNavCount = 16;
-inline bool IsGeneralSettingsPage(int page) noexcept { return page == 0 || (page >= 9 && page <= 12); }
+// 16 界面布局 follows 外观 in the sidebar.
+constexpr int kSettingsNavCount = 17;
+inline bool IsGeneralSettingsPage(int page) noexcept { return page == 0 || (page >= 9 && page <= 12) || page == kSettingsPageUiLayout; }
 // Sidebar order, top to bottom, in five groups (关于 3 sits at the bottom, 6 has no row).
-constexpr int kSettingsNavOrder[] = {0, 9, 10, 11, 12, 1, 5, 8, 14, 2, 7, 4};
-constexpr int kSettingsNavGroupStart[] = {0, 1, 3, 5, 11};  // indexes into kSettingsNavOrder
+constexpr int kSettingsNavOrder[] = {0, kSettingsPageUiLayout, 9, 10, 11, 12, 1, 5, 8, 14, 2, 7, 4};
+constexpr int kSettingsNavGroupStart[] = {0, 2, 4, 6, 12};  // indexes into kSettingsNavOrder
 constexpr int kSettingsNavGroups = 5;
 
 // System folder groups shown under Settings > Exclusions: 0-4 follow
@@ -2694,6 +2872,7 @@ struct SettingsLayout {
     // its tile, title and description; section_rule[i] is the line above it (0: none).
     bool section_side = false;
     D2D1_RECT_F section_tile[8]{}, section_name[8]{}, section_desc[8]{};
+    D2D1_RECT_F section_hint[8]{};   // 界面布局: kbd keys / per-mode defaults under the description
     float section_rule[8]{};
     int section_rows[8]{};
     std::vector<D2D1_RECT_F> child_bands;
@@ -2708,6 +2887,23 @@ struct SettingsLayout {
     // 关于与诊断 › 新手提示.
     D2D1_RECT_F tips_card{};
     D2D1_RECT_F theme_row{}, theme_tile[3]{}, effect_choice{}, language_choice{};
+    // 界面布局 (kSettingsPageUiLayout): starting-point cards and their previews,
+    // the diff bar (chips, 恢复), segment rows (sidebar, commands, address,
+    // density, view), toggle rows (LayoutPanelToggle order, then 按钮文字) and
+    // the title-button list (row, up, down, switch or remove).
+    D2D1_RECT_F uil_start_row{}, uil_card[3]{}, uil_preview[3]{}, uil_diff_row{}, uil_restore{};
+    std::vector<D2D1_RECT_F> uil_chip;
+    D2D1_RECT_F uil_seg_card[5]{}, uil_seg[5][3]{};
+    D2D1_RECT_F uil_toggle_row[9]{};
+    D2D1_RECT_F uil_tb_row[12]{}, uil_tb_up[12]{}, uil_tb_down[12]{}, uil_tb_switch[12]{};
+    D2D1_RECT_F uil_tb_warn{}, uil_tb_actions{}, uil_tb_add{}, uil_tb_reset{};
+    int uil_tb_count = 0;
+    D2D1_RECT_F uil_back{};                                   // 回到文件夹看效果
+    D2D1_RECT_F uil_lite_card{}, uil_lite[2]{}, uil_tray_card{}, uil_tray[2]{}, uil_labels_card{}, uil_labels[2]{};
+    D2D1_RECT_F uil_tablayout_card{}, uil_tablayout[4]{}, uil_tabrows_card{}, uil_tabrows[3]{};
+    D2D1_RECT_F uil_cmp_card{}; float uil_cmp_y[13]{}; float uil_cmp_x[5]{};   // 三套对比: row tops, column edges
+    D2D1_RECT_F uil_tbc_row{}, uil_tbc_button{}, uil_tbc_toggle[3]{};
+    D2D1_RECT_F uil_pf_row[3]{}, uil_pf_button[4]{}, uil_pf_text{};
     D2D1_RECT_F performance_row{}, disclosure[4]{}, filename_status{};
     D2D1_RECT_F startup_lead{}, startup_overview[3]{}, startup_restore_row{}, startup_restore_button{};
     StartupDialogInfoLayout startup_dialog_info;
@@ -2720,6 +2916,10 @@ struct SettingsLayout {
     D2D1_RECT_F dialog_bundle_button{}, dialog_application_button{}, dialog_launch_button{}, dialog_admin_button{}, dialog_refresh_button{};
     std::vector<D2D1_RECT_F> dialog_session_rows, dialog_disable_buttons, dialog_history_rows;
     std::vector<std::pair<D2D1_RECT_F, int>> dialog_history_groups;  // caption row, DialogTakeoverRow::group
+    std::vector<D2D1_RECT_F> dialog_history_delete_buttons;  // one per row; empty for rows that cannot be deleted
+    D2D1_RECT_F dialog_clear_button{};
+    D2D1_RECT_F dialog_api_test_row{}, dialog_api_test_button{};
+    D2D1_RECT_F dialog_feedback_row{}, dialog_feedback_button{};
     D2D1_RECT_F dialog_history_heading{}, dialog_history_note{};
     D2D1_RECT_F integration_card{}, integration_status{}, integration_summary{}, integration_hint{};
     D2D1_RECT_F integration_retry{}, integration_restore{};
@@ -2745,20 +2945,30 @@ struct SettingsLayout {
     // 预览增强包 page (5), see LayoutSettingsPacks.
     D2D1_RECT_F pack_update_all{}, pack_manage{}, pack_native_settings{}, native_settings_content{};
     D2D1_RECT_F native_store_crumb{}; // page 15: "‹ 扩展商店" back to the store
+    struct DetailHeader { // Shared by store details and focused plugin pages.
+        static constexpr int kMaxTabs = 10;
+        bool on = false;
+        D2D1_RECT_F crumb{}, crumb_name{}, icon{}, name{}, sub{}, badges[3]{}, status_pill{},
+            tabs[kMaxTabs]{}, install_button{}, enable{}, enable_label{}, more{};
+        int tab_count = 0;
+        l10n::StringId tab_labels[kMaxTabs]{};
+        std::wstring tab_titles[kMaxTabs]{};
+        int tab_actions[kMaxTabs]{};
+    };
+    DetailHeader native_head;
     D2D1_RECT_F page_heading{};
-    D2D1_RECT_F store_tabs[3]{}, store_refresh{}, store_install_file{}, store_cancel{}, store_state{},
-        store_trust{}, store_notice{}, store_restart{}, store_restart_button{}, store_manage{}, store_section{}, store_empty{},
+    D2D1_RECT_F store_tabs[3]{}, store_refresh{}, store_install_file{}, store_developer{}, store_cancel{}, store_state{},
+        store_trust{}, store_notice{}, store_restart{}, store_restart_button{}, store_notice_surface{}, store_restart_surface{},
+        store_manage{}, store_section{}, store_empty{},
         store_community_section{};
     struct StoreCard {
         D2D1_RECT_F bounds{}, icon{}, name{}, publisher{}, summary{}, version{}, status{}, button{};
         D2D1_RECT_F enabled_badge{}, settings{}; // "设置": installed extensions that provide a settings page
         bool feature = false;   // laid out full width at the top of its section
     };
-    StoreCard store_feature;
-    int store_feature_item=-1;
     std::vector<StoreCard> store_items;
     // Browse extras (settings_layout_store.h): search, chips, loading blocks, the
-    // failed card, official pack cards and the 7-Zip quick settings in its card.
+    // failed card and official pack cards.
     D2D1_RECT_F store_search{}, store_chips[5]{}, store_skeleton[4]{}, store_failed{}, store_failed_retry{},
         store_failed_sources{}, store_official_hint{}, store_community_card{}, store_no_match{};
     struct StorePack {
@@ -2766,36 +2976,43 @@ struct SettingsLayout {
         D2D1_RECT_F bounds{}, icon{}, name{}, publisher{}, summary{}, meta{}, state{}, button{}, secondary{}, progress{};
     };
     std::vector<StorePack> store_packs;
-    struct StoreQuick {
-        bool on = false;
-        D2D1_RECT_F section{}, title{}, saved{}, rows[3]{}, mode{}, format{}, level{}, remember{};
-        D2D1_RECT_F preview{}, preview_caption{}, preview_menu{};
-    } store_quick;
-    // The 7-Zip detail page (vm.settings_store_view.detail).
-    struct SevenZipDetail {
-        bool on = false;
-        D2D1_RECT_F crumb{}, crumb_name{}, icon{}, name{}, sub{}, badges[3]{}, enable{}, enable_label{}, more{};
-        D2D1_RECT_F tabs[4]{}, disabled_banner{}, body{}, side{}, preview_card{}, preview_title{}, preview_kinds[2]{}, preview_menu{}, result_card{};
-        D2D1_RECT_F section_label[3]{}, saved{}, groups[4]{};
-        // 常用设置
-        D2D1_RECT_F mode_row{}, mode_opts[3]{}, location_row{}, location_opts[2]{}, folder{}, browse{},
-            format_row{}, format_opts[6]{}, level_row{}, level_track{}, level_stops[6]{}, level_value{},
-            compress_note{}, remember_row{}, remember{}, rar_note{};
-        // 接管压缩包 (on 常用设置, above 解压)
-        D2D1_RECT_F take_label{}, take_group{}, take_row{}, take_switch{}, take_head{}, take_next{}, take_winsettings{},
-            double_click_row{}, double_click_opts[2]{};
-        struct TakeRow { D2D1_RECT_F bounds{}, check{}, icon{}, name{}, status{}, ask{}; };
-        std::vector<TakeRow> take_rows;
-        // 右键菜单
-        D2D1_RECT_F placement_label{}, placement_opts[2]{}, commands_label{}, command_rows[6]{}, command_switch[6]{};
-        // 支持格式 / 关于
-        D2D1_RECT_F formats_rw_label{}, formats_ro_label{}, formats_note{};
-        std::vector<D2D1_RECT_F> chips_rw, chips_ro;
-        D2D1_RECT_F about_rows[6]{}, history_label{}, history_card{};
-        D2D1_RECT_F about_keys[6]{}, about_values[6]{}, about_source{};
-        std::vector<D2D1_RECT_F> history_versions, history_notes, history_current;
-        std::vector<D2D1_RECT_F> history_rows, history_rollback;
-    } sz;
+    struct GenericQuickControlRect {
+        D2D1_RECT_F bounds{};
+        int action = -1;
+        int row = 0;
+        int kind = 0;
+        bool disabled = false;
+    };
+    struct GenericQuickCard {
+        StoreCard card;
+        int item_index = -1;
+        int quick_index = -1;
+        D2D1_RECT_F section{}, title{}, saved{}, preview{}, preview_caption{}, preview_menu{};
+        std::vector<D2D1_RECT_F> rows;
+        std::vector<GenericQuickControlRect> controls;
+    };
+    std::vector<GenericQuickCard> store_generic_quick;
+    // Generic extension showcase / detail page (non-7zip items in vm.settings_store_view).
+    struct ExtensionDetail : DetailHeader {
+        D2D1_RECT_F body{}, side{};
+        D2D1_RECT_F desc_label{}, desc_card{}, desc_text{};
+        // Context-menu showcase from the plugin's own quickSettings menu preview (any plugin).
+        int showcase_quick = -1;
+        D2D1_RECT_F showcase_label{}, showcase_card{}, showcase_caption{}, showcase_menu{};
+        D2D1_RECT_F highlights_label{}, highlights_card{};
+        std::vector<D2D1_RECT_F> highlight_rows;
+        D2D1_RECT_F tags_label{}, tags_card{};
+        std::vector<D2D1_RECT_F> tag_chips;
+        D2D1_RECT_F facts_card{}, facts_title{}, fact_homepage{}, fact_source{};
+        std::vector<D2D1_RECT_F> fact_keys, fact_values, fact_rows;
+        D2D1_RECT_F perms_card{}, perms_title{};
+        std::vector<D2D1_RECT_F> perm_rows;
+        // About tab
+        D2D1_RECT_F groups[1]{}, about_rows[6]{}, about_keys[6]{}, about_values[6]{};
+        D2D1_RECT_F about_source{}, about_homepage{};
+        D2D1_RECT_F history_label{}, history_card{};
+        std::vector<D2D1_RECT_F> history_versions, history_notes, history_current, history_rows;
+    } ext_detail;
     struct InstalledCard {
         D2D1_RECT_F bounds{}, icon{}, name{}, id{}, version{}, publisher{}, badge{}, native_code{}, status{}, notice{};
         D2D1_RECT_F enable{}, disable{}, more{}, settings{};
@@ -2852,6 +3069,7 @@ struct SettingsLayout {
     D2D1_RECT_F sync_row[2]{};           // OneDrive, SVN
     // 鼠标与选择: open mode; name band and hover selection while single-click; check boxes.
     D2D1_RECT_F click_open_card{}, click_open_row[2]{};
+    D2D1_RECT_F double_click_interval_card{}, double_click_interval_choice{};
     D2D1_RECT_F name_highlight_card{}, name_highlight_row[2]{};
     D2D1_RECT_F hover_select_row{}, item_checkbox_row{};
     D2D1_RECT_F density_row[3]{};
@@ -2864,6 +3082,7 @@ struct SettingsLayout {
     D2D1_RECT_F startup_open_row[2]{};
     D2D1_RECT_F notify_icon_card{};
     D2D1_RECT_F notify_icon_row[3]{};
+    D2D1_RECT_F tab_active_style_card{}, tab_active_style_choices[2]{};
     D2D1_RECT_F tab_layout_card{}, tab_layout_choices[3]{}, tab_rows_card{}, tab_rows_choices[3]{};
     D2D1_RECT_F new_tab_open_card{};
     D2D1_RECT_F new_tab_open_row[2]{};
@@ -2886,6 +3105,12 @@ struct SettingsLayout {
     D2D1_RECT_F ui_font_size_row[4]{};
     D2D1_RECT_F tray_icon_card{};
     D2D1_RECT_F tray_icon_row[3]{};
+    D2D1_RECT_F shelf_shake_row{};
+    D2D1_RECT_F shelf_sensitivity_card{};
+    D2D1_RECT_F shelf_sensitivity_row[3]{};
+    D2D1_RECT_F shelf_position_card{};
+    D2D1_RECT_F shelf_position_row[3]{};
+    D2D1_RECT_F shelf_auto_hide_row{};
     D2D1_RECT_F language_card{};
     D2D1_RECT_F language_segment[3]{};
     D2D1_RECT_F wallpaper_card{};
@@ -2928,7 +3153,7 @@ struct SettingsLayout {
     D2D1_RECT_F search_master_section{}, search_master_row{};
     D2D1_RECT_F global_search_row{}, global_search_hotkey_row{}, global_search_hotkey_button{};
     D2D1_RECT_F global_search_double_ctrl_row{}, global_search_gap_card{}, global_search_gap[3]{};
-    D2D1_RECT_F global_search_apps_row{}, dialog_jump_row{}, dialog_jump_auto_row{};
+    D2D1_RECT_F global_search_apps_row{}, dialog_jump_row{}, dialog_jump_auto_row{}, dialog_adaptive_row{};
     D2D1_RECT_F jump_history_row{}, jump_history_clear{};
     D2D1_RECT_F content_index_row{};
     D2D1_RECT_F index_info{};
@@ -3125,7 +3350,7 @@ bool ContainsPt(const D2D1_RECT_F& rc, float x, float y) {
 
 HitTestResult::Region StatusBarHitRegion(const WindowViewModel& vm, const D2D1_RECT_F& rect,
                                          float x, float y, float scale, float status_height,
-                                         Compositor* compositor) {
+                                         Compositor* compositor, int* index = nullptr) {
     IDWriteFactory2* factory = compositor ? compositor->DwriteFactory() : nullptr;
     IDWriteTextFormat* fmt = compositor ? compositor->SmallFormat() : nullptr;
     const StatusBarMetrics sb = MakeStatusBarMetrics(
@@ -3134,6 +3359,14 @@ HitTestResult::Region StatusBarHitRegion(const WindowViewModel& vm, const D2D1_R
     if (vm.status.can_redo && ContainsPt(sb.redo_button, x, y)) return HitTestResult::StatusRedo;
     if (ContainsPt(sb.undo_chip, x, y)) return HitTestResult::StatusUndoHistory;
     if (sb.ai_chip.right > sb.ai_chip.left && ContainsPt(sb.ai_chip, x, y)) return HitTestResult::StatusBarAi;
+    if (sb.git_chip.right > sb.git_chip.left && ContainsPt(sb.git_chip, x, y)) return HitTestResult::StatusBarGit;
+    for (size_t i = 0; i < sb.extension_chips.size(); ++i) {
+        const auto& chip = sb.extension_chips[i];
+        if (chip.right > chip.left && ContainsPt(chip, x, y)) {
+            if (index) *index = static_cast<int>(i);
+            return HitTestResult::StatusBarExtension;
+        }
+    }
     if (vm.status.query_cancellable && ContainsPt(sb.cancel_search, x, y)) return HitTestResult::StatusBarCancelSearch;
     if (sb.hint_action.right > sb.hint_action.left && ContainsPt(sb.hint_action, x, y))
         return HitTestResult::StatusHintAction;
@@ -3561,6 +3794,159 @@ D2D1_RECT_F ChangePopoverRect(const ChangePopover& popup, const D2D1_RECT_F& bou
     const float y = std::clamp(popup.y + 10 * scale, bounds.top + 8 * scale, std::max(bounds.top + 8 * scale, bounds.bottom - h - 8 * scale));
     return D2D1::RectF(x, y, x + w, y + h);
 }
+inline bool IsToolbarCommandRegion(int region) noexcept {
+    using R = HitTestResult;
+    switch (static_cast<R::Region>(region)) {
+    case R::NewButton: case R::NewButtonArrow:
+    case R::Cut: case R::Copy: case R::Paste: case R::Rename: case R::Delete:
+    case R::SplitButton: case R::DetailsToggle: case R::PaneColumnLayout:
+    case R::ToolbarSort: case R::ToolbarMore: case R::ToolbarSelAction:
+    case R::ToolbarPin: case R::ToolbarPinLabel:
+    case R::FilterBox: case R::FilterClear:
+    case R::ToolbarGroup: case R::ToolbarGroupClear:
+        return true;
+    default:
+        return false;
+    }
+}
+
+inline std::wstring SplitPaneParentPrefix(const PaneViewModel& pane) {
+    if (!pane.is_file_system || pane.path.empty()) return {};
+    std::wstring p = pane.path;
+    if (p.starts_with(L"\\\\?\\UNC\\")) p = L"\\\\" + p.substr(8);
+    else if (p.starts_with(L"\\\\?\\")) p = p.substr(4);
+    while (p.size() > 3 && (p.back() == L'\\' || p.back() == L'/')) p.pop_back();
+    if (p.size() <= 3) return {};
+    if (p.starts_with(L"\\\\")) {
+        const size_t first_sep = p.find_first_of(L"\\/", 2);
+        if (first_sep == std::wstring::npos || first_sep + 1 >= p.size()) return {};
+    }
+    const size_t slash = p.find_last_of(L"\\/");
+    if (slash == std::wstring::npos || slash == 0) return {};
+    std::wstring parent = p.substr(0, slash);
+    while (!parent.empty() && (parent.back() == L'\\' || parent.back() == L'/')) parent.pop_back();
+    if (parent.empty()) return {};
+    const size_t prev_slash = parent.find_last_of(L"\\/");
+    std::wstring leaf = prev_slash == std::wstring::npos ? parent : parent.substr(prev_slash + 1);
+    if (leaf.empty()) return {};
+    return leaf + L" /";
+}
+
+struct SplitPaneHeaderLayout {
+    D2D1_RECT_F icon{};
+    std::wstring prefix;
+    D2D1_RECT_F prefix_rect{};
+    D2D1_RECT_F title_rect{};
+    D2D1_RECT_F stamp_rect{};
+    float title_end = 0.0f;
+};
+
+inline SplitPaneHeaderLayout LayoutSplitPaneHeader(const PaneViewModel& pane, const D2D1_RECT_F& bounds,
+                                                   float text_right, float height, bool focused,
+                                                   float scale, Compositor* compositor) {
+    SplitPaneHeaderLayout out;
+    const float icon_side = 16.0f * scale;
+    const float icon_left = bounds.left + 12.0f * scale;
+    const float icon_top = bounds.top + (height - icon_side) * 0.5f;
+    out.icon = D2D1::RectF(icon_left, icon_top, icon_left + icon_side, icon_top + icon_side);
+    float cursor = out.icon.right + 6.0f * scale;
+    out.title_end = cursor;
+    if (!compositor || !compositor->DwriteFactory()) {
+        out.title_rect = D2D1::RectF(cursor, bounds.top, std::max(cursor, text_right), bounds.top + height);
+        return out;
+    }
+    IDWriteFactory2* dwrite = compositor->DwriteFactory();
+    IDWriteTextFormat* title_fmt = focused
+        ? (compositor->TabActiveFormat() ? compositor->TabActiveFormat() : compositor->HeaderFormat())
+        : (compositor->TabFormat() ? compositor->TabFormat() : compositor->TextFormat());
+    IDWriteTextFormat* pre_fmt = compositor->FileNameFormat() ? compositor->FileNameFormat() : compositor->SmallFormat();
+    IDWriteTextFormat* small_fmt = compositor->SmallFormat();
+
+    float stamp_w = 0.0f;
+    if (HasChangeBadge(pane.title_change_badge) && small_fmt) {
+        const float label_w = MeasureLayoutText(compositor, dwrite, small_fmt, pane.title_change_badge.label);
+        const float raw_w = (6.0f + 6.0f + 4.0f + 7.0f + (pane.title_change_badge.has_deleted ? 10.0f : 0.0f)) * scale + label_w;
+        if (text_right - cursor >= raw_w + 56.0f * scale) stamp_w = raw_w;
+    }
+    const float stamp_reserve = stamp_w > 0.0f ? stamp_w + 6.0f * scale : 0.0f;
+
+    std::wstring pre = SplitPaneParentPrefix(pane);
+    if (!pre.empty() && pre_fmt) {
+        const float pre_w = MeasureLayoutText(compositor, dwrite, pre_fmt, pre);
+        if (text_right - cursor - stamp_reserve >= pre_w + 6.0f * scale + 56.0f * scale) {
+            out.prefix = std::move(pre);
+            out.prefix_rect = D2D1::RectF(cursor, bounds.top, cursor + pre_w + 2.0f * scale, bounds.top + height);
+            cursor += pre_w + 6.0f * scale;
+        }
+    }
+
+    const float max_title_w = std::max(0.0f, text_right - stamp_reserve - cursor);
+    const float natural_title_w = title_fmt ? MeasureLayoutText(compositor, dwrite, title_fmt, pane.header_text) : 0.0f;
+    const float shown_title_w = std::min(max_title_w, natural_title_w);
+    out.title_rect = D2D1::RectF(cursor, bounds.top, cursor + max_title_w, bounds.top + height);
+    out.title_end = cursor + shown_title_w;
+
+    if (stamp_w > 0.0f) {
+        const float stamp_h = 20.0f * scale;
+        const float stamp_left = out.title_end + 6.0f * scale;
+        const float stamp_top = bounds.top + (height - stamp_h) * 0.5f;
+        out.stamp_rect = D2D1::RectF(stamp_left, stamp_top, std::min(text_right, stamp_left + stamp_w), stamp_top + stamp_h);
+        out.title_end = out.stamp_rect.right;
+    }
+    return out;
+}
+
+inline void DrawSplitChangeStamp(Compositor* compositor, const ChangeBadge& badge, const D2D1_RECT_F& rc,
+                                 float focus_t, const Theme& theme, const D2D1_COLOR_F& accent_ink, float scale) {
+    if (!HasChangeBadge(badge) || rc.right <= rc.left || !compositor || !compositor->Dc()) return;
+    auto* dc = compositor->Dc();
+    ComPtr<ID2D1SolidColorBrush> brush;
+    const float radius = (rc.bottom - rc.top) * 0.5f;
+    const D2D1_COLOR_F inactive_bg = theme.fill_hover;
+    const D2D1_COLOR_F active_bg = WithAlpha(accent_ink, 0.09f);
+    const D2D1_COLOR_F bg{
+        inactive_bg.r + (active_bg.r - inactive_bg.r) * focus_t,
+        inactive_bg.g + (active_bg.g - inactive_bg.g) * focus_t,
+        inactive_bg.b + (active_bg.b - inactive_bg.b) * focus_t,
+        inactive_bg.a + (active_bg.a - inactive_bg.a) * focus_t,
+    };
+    if (FAILED(dc->CreateSolidColorBrush(bg, &brush))) return;
+    dc->FillRoundedRectangle(D2D1::RoundedRect(rc, radius, radius), brush.get());
+
+    const D2D1_COLOR_F active_dot = badge.status == 0 ? HexColor(0x2FA36B)
+                                  : badge.status == 1 ? HexColor(0x4A9080) : theme.text_disabled;
+    const D2D1_COLOR_F inactive_dot = theme.text_disabled;
+    const D2D1_COLOR_F dot_color = IsHighContrast() ? theme.text : D2D1_COLOR_F{
+        inactive_dot.r + (active_dot.r - inactive_dot.r) * focus_t,
+        inactive_dot.g + (active_dot.g - inactive_dot.g) * focus_t,
+        inactive_dot.b + (active_dot.b - inactive_dot.b) * focus_t,
+        inactive_dot.a + (active_dot.a - inactive_dot.a) * focus_t,
+    };
+    const float cy = (rc.top + rc.bottom) * 0.5f;
+    const float dot_r = 3.0f * scale;
+    const float dot_cx = rc.left + 6.0f * scale + dot_r;
+    brush->SetColor(dot_color);
+    dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(dot_cx, cy), dot_r, dot_r), brush.get());
+
+    const D2D1_COLOR_F text_color{
+        theme.text_disabled.r + (theme.text_secondary.r - theme.text_disabled.r) * focus_t,
+        theme.text_disabled.g + (theme.text_secondary.g - theme.text_disabled.g) * focus_t,
+        theme.text_disabled.b + (theme.text_secondary.b - theme.text_disabled.b) * focus_t,
+        theme.text_disabled.a + (theme.text_secondary.a - theme.text_disabled.a) * focus_t,
+    };
+    float text_left = dot_cx + dot_r + 4.0f * scale;
+    float text_right = rc.right - 7.0f * scale - (badge.has_deleted ? 10.0f * scale : 0.0f);
+    brush->SetColor(text_color);
+    DrawTextEndEllipsis(compositor, compositor->SmallFormat(), brush.get(),
+                        badge.label, text_left, rc.top, std::max(0.0f, text_right - text_left), rc.bottom - rc.top);
+    if (badge.has_deleted) {
+        const D2D1_COLOR_F del_color = focus_t > 0.5f ? HexColor(0xC58A38) : theme.text_disabled;
+        brush->SetColor(del_color);
+        dc->DrawLine(D2D1::Point2F(rc.right - 12.0f * scale, cy),
+                     D2D1::Point2F(rc.right - 6.0f * scale, cy), brush.get(), 1.8f * scale);
+    }
+}
+
 struct ScrollbarMetrics {
     float thumbY, thumbH;
     bool valid;

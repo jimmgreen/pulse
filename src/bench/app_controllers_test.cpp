@@ -597,6 +597,25 @@ bool TestShortcutKeymap() {
     auto chord = [](const wchar_t* text) { KeyChord c{}; k::ParseChord(text, c); return c; };
     bool passed = true;
     k::Keymap fresh;
+    passed &= Report("keymap: close others default and stable prefs ID",
+        fresh.Find(chord(L"Ctrl+Alt+W")).action == KeyAction::CloseOtherTabs &&
+        k::ActionFromId("CloseOtherTabs") == KeyAction::CloseOtherTabs);
+    auto close_custom = k::Keymap::FromPrefs({L"CloseOtherTabs=Ctrl+Alt+F8"});
+    const auto close_route = close_custom.Translate(chord(L"Ctrl+Alt+F8"));
+    passed &= Report("keymap: close others rebinding disables old chord and survives prefs",
+        close_route.kind == k::Keymap::Translation::Rewrite && close_route.target == chord(L"Ctrl+Alt+W") &&
+        close_custom.Translate(chord(L"Ctrl+Alt+W")).kind == k::Keymap::Translation::Swallow &&
+        k::Keymap::FromPrefs(close_custom.ToPrefs()).Bindings(KeyAction::CloseOtherTabs) == close_custom.Bindings(KeyAction::CloseOtherTabs));
+    const auto saved_map = k::ActiveKeymap();
+    k::SetActiveKeymap(close_custom);
+    passed &= Report("keymap: close others menu caption follows custom binding",
+        k::ShownShortcut(L"Ctrl+Alt+W") == k::ChordDisplay(chord(L"Ctrl+Alt+F8")));
+    close_custom.SetBindings(KeyAction::CloseOtherTabs, {});
+    k::SetActiveKeymap(close_custom);
+    passed &= Report("keymap: disabled close others loses its caption and handler",
+        k::ShownShortcut(L"Ctrl+Alt+W").empty() &&
+        close_custom.Translate(chord(L"Ctrl+Alt+W")).kind == k::Keymap::Translation::Swallow);
+    k::SetActiveKeymap(saved_map);
     bool layouts_keep_keys = true;
     for (uint16_t digit = '1'; digit <= '4'; ++digit) {
         const KeyChord key{k::kKeyCtrl | k::kKeyAlt, digit};
@@ -652,10 +671,15 @@ bool TestShortcutKeymap() {
     k::ShortcutSettings settings;
     settings.SetEnvForTesting(env);
     const auto view = settings.View();
+    bool close_others_visible = false;
     bool copy_clear = false;
     for (const auto& group : view->groups)
         for (const auto& row : group.rows)
             if (row.action == static_cast<int>(KeyAction::Copy)) copy_clear = row.level == 0;
+    for (const auto& group : view->groups)
+        for (const auto& row : group.rows)
+            if (row.action == static_cast<int>(KeyAction::CloseOtherTabs)) close_others_visible = true;
+    passed &= Report("shortcuts view: close others is configurable", close_others_visible);
     passed &= Report("shortcuts view: Copy has no false red mark or conflict badge",
         copy_clear && view->red == 0 && settings.IssueCount() == 0);
     settings.Click(pulse::ui::kScTester);
@@ -664,6 +688,60 @@ bool TestShortcutKeymap() {
     passed &= Report("shortcuts tester: received Ctrl+C reports Copy without an occupied warning",
         tested->pop.kind == pulse::ui::ShortcutPopView::Tester && tested->pop.level == 0 &&
         tested->pop.detail.empty() && tested->pop.verdict.find(k::ActionName(KeyAction::Copy)) != std::wstring::npos);
+    return passed;
+}
+
+bool TestDoubleClickPrefs() {
+    namespace a = pulse::app;
+    a::AppPrefs prefs;
+    prefs.persist = false;
+    bool passed = Report("double-click prefs: new preferences follow system", prefs.double_click_interval_ms == 0);
+    prefs.double_click_interval_ms = 500;
+    passed &= Report("double-click prefs: legacy preferences follow system",
+        prefs.FromJson(L"{}") && prefs.double_click_interval_ms == 0);
+    bool roundtrip = true;
+    for (int value : {0, 200, 500, 1000}) {
+        prefs.double_click_interval_ms = value;
+        a::AppPrefs loaded;
+        loaded.persist = false;
+        roundtrip &= loaded.FromJson(prefs.ToJson()) && loaded.double_click_interval_ms == value;
+    }
+    passed &= Report("double-click prefs: system and supported values survive serialization", roundtrip);
+    bool clamped = true;
+    for (int value : {-100, 1, 199, 1001, 100000}) {
+        const int expected = value < 200 ? 200 : 1000;
+        const auto json = L"{\"double_click_interval_ms\":" + std::to_wstring(value) + L"}";
+        clamped &= prefs.FromJson(json) && prefs.double_click_interval_ms == expected;
+        prefs.double_click_interval_ms = value;
+        a::AppPrefs loaded;
+        loaded.persist = false;
+        clamped &= loaded.FromJson(prefs.ToJson()) && loaded.double_click_interval_ms == expected;
+    }
+    passed &= Report("double-click prefs: loading and saving clamp invalid nonzero values", clamped);
+    prefs.double_click_interval_ms = 0;
+    a::ContextMenuPrefs context;
+    context.persist = false;
+    pulse::index::IndexClient index;
+    pulse::index::NetworkAgentClient network;
+    a::SettingsController settings;
+    a::SettingsEffect effect = a::SettingsEffect::None;
+    int notifications = 0;
+    a::SettingsController::UiCallbacks callbacks;
+    callbacks.apply_effects = [&](a::SettingsEffect value) { effect = value; ++notifications; };
+    settings.BindUi(prefs, context, index, network, std::move(callbacks));
+    settings.DoubleClickInterval(500);
+    passed &= Report("double-click settings: update notifies list style",
+        prefs.double_click_interval_ms == 500 && notifications == 1 && a::HasEffect(effect, a::SettingsEffect::ListStyle));
+    settings.DoubleClickInterval(500);
+    passed &= Report("double-click settings: unchanged value does not notify", notifications == 1);
+    settings.DoubleClickInterval(-1);
+    const bool low_clamped = prefs.double_click_interval_ms == 200 && notifications == 2;
+    settings.DoubleClickInterval(1001);
+    passed &= Report("double-click settings: updates clamp to supported bounds",
+        low_clamped && prefs.double_click_interval_ms == 1000 && notifications == 3);
+    settings.DoubleClickInterval(0);
+    passed &= Report("double-click settings: zero restores system setting",
+        prefs.double_click_interval_ms == 0 && notifications == 4);
     return passed;
 }
 
@@ -1826,6 +1904,7 @@ int wmain(int argc, wchar_t** argv) {
         return ok ? 0 : 1;
     }
 
+    if (argc == 2 && std::wstring(argv[1]) == L"--doubleclick-prefs") return TestDoubleClickPrefs() ? 0 : 1;
     if (argc == 2 && std::wstring(argv[1]) == L"--shortcut-keymap") return TestShortcutKeymap() ? 0 : 1;
     if (argc == 2 && std::wstring(argv[1]) == L"--view-hit-bounds") return TestViewHitBounds() ? 0 : 1;
     if (argc == 2 && std::wstring(argv[1]) == L"--com-menu-identity") return TestComMenuIdentity() ? 0 : 1;

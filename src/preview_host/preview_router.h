@@ -28,9 +28,10 @@ inline constexpr UINT kGridThumbnailEdge = 256;
 struct DecodeRequest {
     DecodeRequest(const ipc::PreviewRequest& request_in, const std::wstring& path_in,
                   const std::wstring& extension_in, bool is_directory_in, bool offline_in,
-                  UINT cap_in, bool grid_in)
+                  UINT cap_in, bool grid_in, HANDLE client_pipe_in = nullptr)
         : request(request_in), path(path_in), extension(extension_in),
-          is_directory(is_directory_in), offline(offline_in), cap(cap_in), grid(grid_in) {}
+          is_directory(is_directory_in), offline(offline_in), cap(cap_in), grid(grid_in),
+          client_pipe(client_pipe_in) {}
 
     const ipc::PreviewRequest& request;
     const std::wstring& path;
@@ -39,6 +40,7 @@ struct DecodeRequest {
     bool offline;                   // cloud placeholder: never read its data
     UINT cap;                       // ClampPreviewPixelSize(pixel_size, false)
     bool grid;                      // list/grid thumbnail: kPreviewRequestFlagGrid or cap <= kGridThumbnailEdge
+    HANDLE client_pipe;             // Borrowed by cancellable decoders until this request returns.
 };
 
 // Everything a decoder writes. Defaults match a zeroed PreviewResponse.
@@ -75,9 +77,10 @@ bool RunDecoders(const DecoderEntry (&table)[N], const DecodeRequest& request,
                  DecodeResult& result) {
     for (const DecoderEntry& entry : table) {
         if (!entry.accepts(request)) continue;
+        result.decoder = nullptr;
         const DecodeStep step = entry.run(request, result);
         if (step == DecodeStep::Next) continue;
-        result.decoder = entry.name;
+        if (!result.decoder) result.decoder = entry.name;
         return step == DecodeStep::Made;
     }
     return false;

@@ -70,6 +70,7 @@ struct UiProbe {
     IFileDialog* dialog = nullptr;
     DWORD thread = GetCurrentThreadId();
     bool observed = false;
+    bool native = false;
     bool expired = false;
     ULONGLONG deadline = GetTickCount64() + 15000;
 };
@@ -80,6 +81,10 @@ BOOL CALLBACK ObserveUi(HWND window, LPARAM parameter) {
     if (GetWindowThreadProcessId(window, &pid) != probe.thread || pid != GetCurrentProcessId()) return TRUE;
     wchar_t name[128]{}; GetClassNameW(window, name, 128);
     if (IsWindowVisible(window) && wcscmp(name, L"PulseFolderPickerWindow") == 0) probe.observed = true;
+    if (!probe.native && IsWindowVisible(window) && wcscmp(name, L"#32770") == 0) {
+        probe.native = true;
+        PostMessageW(window, WM_COMMAND, IDCANCEL, 0);
+    }
     if (probe.expired) PostMessageW(window, WM_CLOSE, 0, 0);
     return TRUE;
 }
@@ -97,6 +102,73 @@ template<class T> struct ComPtr {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 5 && wcscmp(argv[2], L"--upgrade-ui") == 0) {
+        WatchdogScope watchdog;
+        Isolation isolation;
+        DWORD error = isolation.Setup(false);
+        std::printf("[INFO] upgrade isolation error=%lu\n", error);
+        if (!error) error = pulse::dialog_auto::Enable(argv[1]);
+        std::printf("[INFO] upgrade registration error=%lu\n", error);
+        const DWORD zero = 0;
+        if (!error) error = RegSetKeyValueW(HKEY_CURRENT_USER, pulse::dialog_auto::ConfigKey,
+            L"Host", REG_DWORD, &zero, sizeof(zero));
+        if (error || !watchdog.thread) { std::printf("[FAIL] isolated upgrade setup error=%lu\n", error); return 2; }
+        const HRESULT apartment = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (FAILED(apartment)) return 2;
+        HMODULE dll = LoadLibraryExW(argv[1], nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+        using Entry = HRESULT (WINAPI*)(REFCLSID, REFIID, void**);
+        auto entry = dll ? reinterpret_cast<Entry>(GetProcAddress(dll, "DllGetClassObject")) : nullptr;
+        int failures = 0;
+        const auto check = [&](bool pass, const char* name) {
+            std::printf("[%s] %s\n", pass ? "PASS" : "FAIL", name); std::fflush(stdout); failures += !pass;
+        };
+        {
+            ComPtr<IClassFactory> factory;
+            HRESULT hr = entry ? entry(CLSID_FileSaveDialog, IID_IClassFactory, factory.Out()) : E_FAIL;
+            check(SUCCEEDED(hr) && factory.p, "load real Save factory from old generation");
+            const auto create = [&](ComPtr<IFileDialog>& dialog) {
+                HRESULT result = factory.p ? factory.p->CreateInstance(nullptr, IID_IFileDialog, dialog.Out()) : E_FAIL;
+                if (SUCCEEDED(result)) result = dialog.p->SetOptions(FOS_OVERWRITEPROMPT | FOS_NOREADONLYRETURN | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
+                COMDLG_FILTERSPEC filter{L"Text", L"*.txt"};
+                if (SUCCEEDED(result)) result = dialog.p->SetFileTypes(1, &filter);
+                ComPtr<IShellItem> folder;
+                if (SUCCEEDED(result)) result = SHCreateItemFromParsingName(argv[4], nullptr, IID_IShellItem, folder.Out());
+                if (SUCCEEDED(result)) result = dialog.p->SetFolder(folder.p);
+                if (SUCCEEDED(result)) result = dialog.p->SetFileName(L"generation-test.txt");
+                return SUCCEEDED(result);
+            };
+            const auto show = [&](IFileDialog* dialog, bool pulse, const char* name) {
+                UiProbe probe; probe.dialog = dialog; active_ui = &probe;
+                const auto timer = dialog ? SetTimer(nullptr, 0, 100, UiTick) : 0;
+                const HRESULT shown = timer ? dialog->Show(nullptr) : E_FAIL;
+                if (timer) KillTimer(nullptr, timer);
+                active_ui = nullptr;
+                const bool visible = pulse ? probe.observed && !probe.native : probe.native && !probe.observed;
+                check(visible && !probe.expired && shown == HRESULT_FROM_WIN32(ERROR_CANCELLED), name);
+                std::printf("  pulse=%u native=%u timeout=%u hr=%08lx\n", probe.observed, probe.native, probe.expired, static_cast<unsigned long>(shown));
+            };
+            ComPtr<IFileDialog> before, retained;
+            check(create(before) && create(retained), "create dialogs before upgrade");
+            show(before.p, true, "before upgrade uses Pulse UI");
+            error = pulse::dialog_auto::Enable(argv[3]);
+            check(!error, "switch isolated registration to next generation");
+            ComPtr<IFileDialog> after;
+            check(create(after), "cached old factory creates first dialog after upgrade");
+            show(after.p, true, "FIRST request after upgrade stays Pulse without retry");
+            show(retained.p, true, "dialog created before upgrade stays Pulse at Show");
+            show(after.p, true, "repeated Show after upgrade stays Pulse");
+            ComPtr<IFileDialog> disabled_dialog;
+            check(create(disabled_dialog), "create wrapper before disabling takeover");
+            error = pulse::dialog_auto::Disable();
+            check(!error, "disable isolated takeover");
+            show(disabled_dialog.p, false, "disable overrides cached generation admission");
+        }
+        // The shim deliberately keeps its worker and provider module resident.
+        CoUninitialize();
+        check(isolation.Cleanup() == ERROR_SUCCESS, "restore user registry view and remove fixture");
+        std::printf("UPGRADE_UI failures=%d user_registration_mutations=0\n", failures);
+        return failures ? 1 : 0;
+    }
     const bool complex_extension = argc == 4 && wcscmp(argv[2], L"--complex-extension-ui") == 0;
     if (argc == 4 && (wcscmp(argv[2], L"--xmind-ui") == 0 || complex_extension)) {
         const FILEOPENDIALOGOPTIONS expected_options = complex_extension ? 0x1040u : 0x1240u;

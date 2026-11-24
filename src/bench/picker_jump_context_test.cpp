@@ -24,6 +24,34 @@ bool Ready(picker_inprocess::JumpContext& context, ui::FolderPickerSpec& spec) {
 }
 }
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--slow-history") {
+        l10n::Initialize(GetModuleHandleW(nullptr), L"en-US");
+        auto entered = std::make_shared<std::atomic<bool>>(false);
+        auto release = std::make_shared<std::atomic<bool>>(false);
+        picker_inprocess::JumpContextOptions options;
+        options.enumerate_explorer = false;
+        options.read_places = [entered, release] {
+            entered->store(true);
+            while (!release->load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            picker_places::Snapshot snapshot;
+            snapshot.jump_policy_available = true; snapshot.auto_jump = true;
+            snapshot.current = L"C:\\fixture";
+            return snapshot;
+        };
+        picker_inprocess::JumpContext context(GetCurrentProcessId(), static_cast<int>(ui::PickerMode::File), options);
+        for (int i = 0; i < 400 && !entered->load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        Check(entered->load(), "history worker reached blocked fixture");
+        ui::FolderPickerSpec spec; spec.allow_auto_jump = true; spec.initial_path = L"C:\\original";
+        Check(context.Poll(spec) && !spec.host_app_name.empty(), "branding publishes while history is blocked");
+        Check(!context.Poll(spec), "unchanged branding does not repeatedly relayout");
+        Check(spec.initial_path == L"C:\\original", "branding does not navigate");
+        release->store(true);
+        for (int i = 0; i < 400 && spec.initial_path != L"C:\\fixture"; ++i) {
+            context.Poll(spec); std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        Check(spec.initial_path == L"C:\\fixture", "first history arrival retains auto jump");
+        return failures ? 1 : 0;
+    }
     if (argc != 2) return 2;
     l10n::Initialize(GetModuleHandleW(nullptr), L"en-US");
     const auto local_seconds = [](WORD day) {

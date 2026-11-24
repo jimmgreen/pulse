@@ -4,6 +4,7 @@
 #include "dialog_lifecycle.h"
 #include "fluent_components.h"
 #include "ui_compositor.h"
+#include "window_effect_support.h"
 
 #include <d2d1.h>
 #include <windows.h>
@@ -23,6 +24,9 @@ LRESULT BorderlessHitTest(HWND hwnd, LPARAM lparam, float title_height,
 // System acrylic for dialogs (Mica Alt / Mica before 22H2); false = paint solid
 // (unsupported, transparency effects off, high contrast, Windows 10).
 bool ApplyBackdrop(HWND hwnd, bool dark);
+// The same frame with `effect` as the preferred material (None: solid). Mica Alt
+// falls back to Mica, Acrylic to Mica Alt then Mica, as the main window does.
+bool ApplyBackdrop(HWND hwnd, bool dark, WindowEffect effect);
 bool IsAcrylicBackdrop(HWND hwnd);
 // See-through cards and footer bands for dialogs over acrylic.
 D2D1_COLOR_F GlassCard(bool dark);
@@ -47,6 +51,18 @@ std::wstring FitPathMiddle(const std::wstring& text, float width,
 void RedirectStrayModalKey(MSG& message, HWND dialog);
 void CenterOwnedWindow(HWND hwnd, HWND owner, int width, int height,
                        bool clamp_to_work_area = true);
+// Top-left at which CenterOwnedWindow would put a width x height window. Pass
+// it to CreateWindowExW instead of CW_USEDEFAULT: a popup created at
+// CW_USEDEFAULT is born at (0,0) on the primary monitor, and when the owner
+// sits on a monitor with another scale (100% next to 150%) the later move
+// fires WM_DPICHANGED, whose suggested rect rescales a pixel size that was
+// already right for the owner - the dialog ends up clipped or oversized.
+POINT OwnedWindowOrigin(HWND owner, int width, int height,
+                        bool clamp_to_work_area = true);
+// CenterOwnedWindow for a DIP size: re-sizes for the DPI of the monitor the
+// window actually lands on. Returns that DPI so the caller can sync its scale.
+UINT CenterOwnedWindowDip(HWND hwnd, HWND owner, float width_dip, float height_dip,
+                          bool clamp_to_work_area = true);
 
 void BeginSurface(Compositor& compositor, fluent::Painter& painter,
                   const Theme& theme, bool dark, bool high_contrast,

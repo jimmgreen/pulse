@@ -1209,10 +1209,20 @@ void ToolTask(AppState& s, const app::ai::ModelToolCall& call, const json::Value
                 return;
             }
             std::vector<std::wstring> paths;
-            if (tab->search_entries)
+            size_t loaded_count = 0;
+            if (tab->search_entries) {
+                loaded_count = tab->search_entries->size();
                 for (const fs::DirEntry& e : *tab->search_entries)
                     if (!e.is_dir) paths.push_back(e.full_path);
-            if (static_cast<size_t>(tab->search_total) > (tab->search_entries ? tab->search_entries->size() : 0)) {
+            } else if (tab->content_results) {
+                loaded_count = tab->EntryCount();
+                const size_t n = (std::min)(loaded_count, kMaxTask);
+                for (size_t i = 0; i < n; ++i) {
+                    const fs::DirEntry e = tab->EntryAt(i);
+                    if (!e.is_dir) paths.push_back(e.full_path);
+                }
+            }
+            if (static_cast<size_t>(tab->search_total) > loaded_count) {
                 EndStep(st, ag, false, Fill(Text(I::AiAsstStepFailed), L"{reason}", Text(I::AiTkTooMany)));
                 AddToolResult(ag, call_id, ToolOutcome::Fail("too_many", "The search found more files than Pulse "
                                                                          "loaded; narrow the conditions."));

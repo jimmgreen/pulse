@@ -1,0 +1,36 @@
+--- a/internal/windows/system.go
++++ b/internal/windows/system.go
+@@ -9,6 +9,9 @@
+ 	"image"
+ 	"image/color"
+ 	"image/png"
++	"os"
++	"os/exec"
++	"path/filepath"
+ 	"strconv"
+ 	"strings"
+ 	"syscall"
+@@ -312,6 +315,23 @@
+ func (shell) OpenPath(path string) error    { return shellExecute("open", path, "") }
+ 
+ func (shell) ShowItemInFolder(path string) {
++	// Only ordinary drive paths are part of the Pulse reveal contract.
++	// Keep virtual items, UNC paths and drive roots on the native route.
++	local := len(path) > 3 && len(filepath.VolumeName(path)) == 2 && path[2] == '\\'
++	// An explicit, absolute executable path also supports portable installations.
++	if pulse := os.Getenv("MYGO_PULSE_EXECUTABLE"); local && filepath.IsAbs(pulse) && strings.EqualFold(filepath.Base(pulse), "pulse.exe") {
++		cmd := exec.Command(pulse, "--reveal-item", path)
++		if cmd.Start() == nil {
++			go func() {
++				// Pulse rejected the path syntax before dispatch. A missing
++				// item (exit 2) is not a reason to open another window.
++				if err, ok := cmd.Wait().(*exec.ExitError); ok && err.ExitCode() == 87 {
++					_ = shellExecute("open", "explorer.exe", `/select,"`+path+`"`)
++				}
++			}()
++			return
++		}
++	}
+ 	_ = shellExecute("open", "explorer.exe", `/select,"`+path+`"`)
+ }
+ 

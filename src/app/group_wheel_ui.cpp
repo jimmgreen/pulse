@@ -1,4 +1,5 @@
 #include "group_wheel_ui.h"
+#include "app_hover_preview.h"
 #include "app_internal.h"
 #include "context_menu.h"
 #include "entry_group.h"
@@ -284,7 +285,7 @@ void ApplySort(AppState& s, int value, bool desc, int folder) {
 void Kick(AppState& s, HWND hwnd) {
     // The picker is parent-rendered; remove its footprint from the embedded
     // child before the first frame, including while the picker fades closed.
-    s.detailsPreview.SetEmbeddedOcclusion(s.renderer.GroupWheelPicker().OcclusionBounds());
+    SyncDetailsPreviewOcclusion(s);
     if (s.framePump.Running()) s.framePump.Arm();
     InvalidateRect(hwnd, nullptr, FALSE);
 }
@@ -387,8 +388,7 @@ void OpenGroupWheel(AppState& s) {
 
     const float width = static_cast<float>(s.compositor.Width());
     const float height = static_cast<float>(s.compositor.Height());
-    const float left = s.renderer.EffectiveSidebarWidth(width);
-    const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(width - left < 600 * s.scale),
+    const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(s.renderer.ToolbarCompact(width)),
                                                    s.pane ? s.pane->filter_expand : 0.0f);
     g_wheel_accum = 0;
     g_kind = WheelKind::Group;
@@ -466,8 +466,7 @@ void OpenSortWheel(AppState& s) {
 
     const float width = static_cast<float>(s.compositor.Width());
     const float height = static_cast<float>(s.compositor.Height());
-    const float left = s.renderer.EffectiveSidebarWidth(width);
-    const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(width - left < 600 * s.scale),
+    const auto layout = s.renderer.ToolbarLayoutAt(width, s.renderer.NewButtonWidthPx(s.renderer.ToolbarCompact(width)),
                                                    s.pane ? s.pane->filter_expand : 0.0f);
     g_wheel_accum = 0;
     g_kind = WheelKind::Sort;

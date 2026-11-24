@@ -3,8 +3,10 @@
 #include <filesystem>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <thread>
 #include <vector>
+#include <winioctl.h>
 
 using namespace pulse;
 namespace {
@@ -32,9 +34,86 @@ app::FolderStatistics Verified(app::FolderStatisticsService& service, const std:
     while (!value.verified) value = service.Read(path, cancelled, value.version);
     return value;
 }
+
+bool MakeJunction(const std::wstring& link, const std::wstring& target) {
+    const auto substitute = L"\\??\\" + target;
+    struct MountPoint {
+        DWORD tag;
+        WORD length, reserved, substitute_offset, substitute_length, print_offset, print_length;
+        wchar_t path[2 * MAX_PATH + 4];
+    } data{};
+    if (substitute.size() + target.size() + 2 > std::size(data.path) ||
+        !CreateDirectoryW(link.c_str(), nullptr)) return false;
+    HANDLE handle = CreateFileW(link.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    data.tag = IO_REPARSE_TAG_MOUNT_POINT;
+    data.substitute_length = static_cast<WORD>(substitute.size() * sizeof(wchar_t));
+    data.print_offset = static_cast<WORD>(data.substitute_length + sizeof(wchar_t));
+    data.print_length = static_cast<WORD>(target.size() * sizeof(wchar_t));
+    data.length = static_cast<WORD>(8 + data.print_offset + data.print_length + sizeof(wchar_t));
+    std::memcpy(data.path, substitute.c_str(), data.print_offset);
+    std::memcpy(reinterpret_cast<BYTE*>(data.path) + data.print_offset, target.c_str(),
+        data.print_length + sizeof(wchar_t));
+    DWORD written = 0;
+    const bool ok = DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, &data, data.length + 8,
+        nullptr, 0, &written, nullptr) != FALSE;
+    CloseHandle(handle);
+    return ok;
+}
+
+void LinkedDirectories(const std::wstring& parent, const std::wstring& target) {
+    const auto junction = parent + L"\\junction";
+    const bool junction_created = MakeJunction(junction, target);
+    Check(junction_created, "create an NTFS junction within the fixture");
+    if (!junction_created) return;
+    struct RemoveJunction {
+        const std::wstring& path;
+        ~RemoveJunction() { RemoveDirectoryW(path.c_str()); }
+    } remove_junction{junction};
+
+    app::FolderStatisticsService service;
+    const auto parent_value = service.Read(parent, Deadline());
+    const auto target_value = service.Read(target, Deadline());
+    const auto junction_value = service.Read(junction, Deadline());
+    const auto trailing_junction_value = service.Read(junction + L"\\", Deadline());
+    std::printf("  bytes: parent=%llu target=%llu junction=%llu trailing_junction=%llu junction_files=%llu\n",
+        parent_value.bytes, target_value.bytes, junction_value.bytes, trailing_junction_value.bytes, junction_value.files);
+    Check(parent_value.bytes == 18 && parent_value.files == 2, "nested junction does not add target bytes or files again");
+    Check(target_value.bytes == 11 && target_value.files == 1 && !target_value.partial,
+        "directly selected ordinary directory still counts its content");
+    Check(junction_value.bytes == 0 && junction_value.files == 0 && junction_value.directories == 0 &&
+        junction_value.partial && !junction_value.verified, "directly selected junction does not traverse its target");
+    Check(trailing_junction_value.bytes == 0 && trailing_junction_value.partial,
+        "trailing separator does not make the junction traversable");
+
+    const auto directory_link = parent + L"\\directory-symlink";
+    if (CreateSymbolicLinkW(directory_link.c_str(), target.c_str(),
+            SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+        RemoveJunction remove_directory_link{directory_link};
+        const auto value = service.Read(directory_link, Deadline());
+        std::printf("  bytes: directory_symlink=%llu\n", value.bytes);
+        Check(value.bytes == 0 && value.files == 0 && value.partial,
+            "directly selected directory symlink does not traverse its target");
+    } else std::printf("[SKIP] directory symlink creation failed: Win32=%lu\n", GetLastError());
+
+    const auto file_link = parent + L"\\file-symlink";
+    const auto source_file = target + L"\\two";
+    if (CreateSymbolicLinkW(file_link.c_str(), source_file.c_str(), SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+        struct RemoveFileLink {
+            const std::wstring& path;
+            ~RemoveFileLink() { DeleteFileW(path.c_str()); }
+        } remove_file_link{file_link};
+        app::FolderStatisticsService fresh;
+        const auto value = fresh.Read(parent, Deadline());
+        std::printf("  bytes: parent_with_file_symlink=%llu\n", value.bytes);
+        Check(value.bytes == 18, "file symlink does not add the target's bytes");
+    } else std::printf("[SKIP] file symlink creation failed: Win32=%lu\n", GetLastError());
+}
 }
 int main(int argc, char** argv) {
     const bool cold_only = argc == 2 && std::strcmp(argv[1], "--cold-start-only") == 0;
+    const bool links_only = argc == 2 && std::strcmp(argv[1], "--links-only") == 0;
     const auto root = std::filesystem::absolute(L"bench_data").wstring() + L"\\statistics_" +
         std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64());
     std::filesystem::create_directories(root + L"\\A\\child");
@@ -43,6 +122,11 @@ int main(int argc, char** argv) {
     File(a + L"\\one", 7);
     File(a + L"\\child\\two", 11);
     try {
+        if (!cold_only) LinkedDirectories(a, a + L"\\child");
+        if (links_only) {
+            std::filesystem::remove_all(root);
+            return failures ? 1 : 0;
+        }
         {
             constexpr unsigned attempts = 8;
             uint64_t scans = 0;

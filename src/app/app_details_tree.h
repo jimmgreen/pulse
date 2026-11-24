@@ -31,5 +31,6 @@ bool IsDetailsTreePlaceholder(const app::Tab& tab, int index);
 bool PointOnDetailsTreeChevron(AppState& s, int pane_index, POINT point);
 // Snack action: undoes the last recursive expansion.
 void UndoDetailsTreeExpand(AppState& s);
+bool ExpandDetailsTreeDropFolder(AppState& s, app::Tab& tab, const std::wstring& path);
 
 } // namespace pulse

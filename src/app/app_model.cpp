@@ -1,6 +1,8 @@
 #include "name_pattern.h"
 // app_model.cpp
 #include "app_model.h"
+#include "extensions/vfs_path.h"
+#include "../common/navigation_known_folders.h"
 #include "git_status.h"
 #include "cloud_roots.h"
 #include "../fs/device_source.h"
@@ -21,6 +23,7 @@
 #include "../common/text_format.h"
 #include "../fs/drive_label.h"
 #include "../fs/drive_kind.h"
+#include "../fs/bitlocker_volume.h"
 #include "../ui/drive_capacity.h"
 #include "../ops/clipboard.h"
 #include "../ops/source_listing.h"
@@ -369,7 +372,8 @@ void Tab::SelectRange(int from, int to, const ui::PaneViewModel* view) {
             if (group_index < groups->size() && (*groups)[group_index].collapsed) continue;
         }
         const int source = view ? view->SourceIndex(row) : row;
-        if (EntryVisible(source)) selected.insert(source);
+        if (EntryVisible(source) && !(TreeEntries() && tree->IsPlaceholder(static_cast<size_t>(source))))
+            selected.insert(source);
     }
     selected_index = selected.contains(to) ? to : -1;
     if (selection_anchor < 0) selection_anchor = from;
@@ -987,8 +991,524 @@ static std::wstring DisplayPath(const std::wstring& path) {
 // ---------------------------------------------------------------------------
 // StagingTray
 // ---------------------------------------------------------------------------
+namespace {
+std::wstring ShelvesConfigPath() {
+    wchar_t env[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", env, ARRAYSIZE(env)) > 0 && env[0]) {
+        std::wstring dir = env;
+        while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/')) dir.pop_back();
+        CreateDirectoryW(dir.c_str(), nullptr);
+        return dir + L"\\shelves.json";
+    }
+    PWSTR local = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_CREATE, nullptr, &local)) && local) {
+        std::wstring dir = std::wstring(local) + L"\\Pulse";
+        CoTaskMemFree(local);
+        CreateDirectoryW(dir.c_str(), nullptr);
+        return dir + L"\\shelves.json";
+    }
+    return {};
+}
+
+bool WriteUtf8ConfigAtomic(const std::wstring& path, const std::wstring& wide) {
+    if (path.empty()) return false;
+    const int n = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()),
+                                      nullptr, 0, nullptr, nullptr);
+    if (!n && !wide.empty()) return false;
+    std::string utf8(static_cast<size_t>(n), '\0');
+    if (n > 0 && WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()),
+                                     utf8.data(), n, nullptr, nullptr) != n) return false;
+    const std::wstring tmp = path + L".tmp";
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    const bool ok = utf8.empty() ||
+        (WriteFile(h, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr) &&
+         written == static_cast<DWORD>(utf8.size()));
+    CloseHandle(h);
+    if (!ok) { DeleteFileW(tmp.c_str()); return false; }
+    if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool ReadUtf8Config(const std::wstring& path, std::wstring& out) {
+    out.clear();
+    if (path.empty()) return false;
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER sz{};
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart < 0 || sz.QuadPart > (16ll << 20)) {
+        CloseHandle(h);
+        return false;
+    }
+    std::string utf8(static_cast<size_t>(sz.QuadPart), '\0');
+    DWORD got = 0;
+    const bool ok = utf8.empty() ||
+        (ReadFile(h, utf8.data(), static_cast<DWORD>(utf8.size()), &got, nullptr) &&
+         got == static_cast<DWORD>(utf8.size()));
+    CloseHandle(h);
+    if (!ok) return false;
+    if (utf8.empty()) return true;
+    const int wn = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
+                                       static_cast<int>(utf8.size()), nullptr, 0);
+    if (wn <= 0) return false;
+    out.resize(static_cast<size_t>(wn));
+    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), out.data(), wn);
+    return true;
+}
+
+void AppendEscapedField(std::wstring& out, const wchar_t* key, const std::wstring& val) {
+    out += L",\"";
+    out += key;
+    out += L"\":\"";
+    pulse::json::Escape(val, out);
+    out += L"\"";
+}
+
+void SerializeShelfList(const std::vector<TrayShelfRecord>& shelves, uint64_t active_id,
+                        bool include_temp, std::wstring& out) {
+    out = L"{\n  \"version\":1,\n  \"active\":";
+    out += std::to_wstring(active_id);
+    out += L",\n  \"shelves\":[\n";
+    bool first_shelf = true;
+    for (const auto& s : shelves) {
+        if (!include_temp && s.temp) continue;
+        if (!first_shelf) out += L",\n";
+        first_shelf = false;
+        out += L"    {\"id\":";
+        out += std::to_wstring(s.id);
+        out += L",\"temp\":";
+        out += s.temp ? L"true" : L"false";
+        out += L",\"customName\":";
+        out += s.custom_name ? L"true" : L"false";
+        out += L",\"color\":";
+        out += std::to_wstring(s.color_rgb);
+        AppendEscapedField(out, L"name", s.name);
+        out += L",\"batches\":[";
+        for (size_t b = 0; b < s.batches.size(); ++b) {
+            const auto& batch = s.batches[b];
+            if (b > 0) out += L",";
+            out += L"{\"move\":";
+            out += batch.move_intent ? L"true" : L"false";
+            out += L",\"entries\":[";
+            for (size_t j = 0; j < batch.items.size(); ++j) {
+                const auto& it = batch.items[j];
+                if (j > 0) out += L",";
+                out += L"{\"path\":\"";
+                pulse::json::Escape(it.path, out);
+                out += L"\"";
+                if (it.content_kind != 0) {
+                    out += L",\"kind\":";
+                    out += std::to_wstring(it.content_kind);
+                }
+                if (it.owned_snippet) out += L",\"owned\":true";
+                if (!it.display_name.empty()) AppendEscapedField(out, L"title", it.display_name);
+                if (!it.domain.empty()) AppendEscapedField(out, L"domain", it.domain);
+                if (!it.source_label.empty()) AppendEscapedField(out, L"source", it.source_label);
+                out += L"}";
+            }
+            out += L"]}";
+        }
+        out += L"]}";
+    }
+    out += L"\n  ]\n}";
+}
+
+bool ParseShelfList(const std::wstring& in, uint64_t& next_id,
+                    std::vector<TrayShelfRecord>& out_shelves, uint64_t& out_active) {
+    if (!pulse::json::ValidConfigObject(in)) return false;
+    out_active = static_cast<uint64_t>(std::max(0, pulse::json::ExtractInt(in, L"active", 1)));
+    const std::wstring arr = pulse::json::ExtractArray(in, L"shelves");
+    if (arr.empty()) return false;
+    std::vector<TrayShelfRecord> parsed;
+    std::unordered_set<uint64_t> shelf_ids;
+    bool unique_ids = true;
+    const bool ok = pulse::json::ForEachElement(arr, [&](const std::wstring& sblock) {
+        if (sblock.empty() || sblock.front() != L'{') return;
+        TrayShelfRecord rec;
+        const int raw_id = pulse::json::ExtractInt(sblock, L"id", 0);
+        rec.id = raw_id > 0 ? static_cast<uint64_t>(raw_id) : next_id++;
+        if (rec.id >= next_id) next_id = rec.id + 1;
+        if (!shelf_ids.insert(rec.id).second) { unique_ids = false; return; }
+        rec.temp = pulse::json::ExtractBool(sblock, L"temp", false);
+        rec.custom_name = pulse::json::ExtractBool(sblock, L"customName", !rec.temp);
+        rec.color_rgb = static_cast<uint32_t>(pulse::json::ExtractInt(sblock, L"color", 0x0067C0));
+        rec.name = pulse::json::ExtractString(sblock, L"name");
+        const std::wstring batches_arr = pulse::json::ExtractArray(sblock, L"batches");
+        if (!batches_arr.empty()) {
+            pulse::json::ForEachElement(batches_arr, [&](const std::wstring& bblock) {
+                if (bblock.empty() || bblock.front() != L'{') return;
+                TrayBatch batch;
+                batch.id = next_id++;
+                batch.move_intent = pulse::json::ExtractBool(bblock, L"move", false);
+                const std::wstring entries_arr = pulse::json::ExtractArray(bblock, L"entries");
+                if (!entries_arr.empty()) {
+                    pulse::json::ForEachElement(entries_arr, [&](const std::wstring& eblock) {
+                        if (eblock.empty() || eblock.front() != L'{') return;
+                        const std::wstring p = pulse::json::ExtractString(eblock, L"path");
+                        if (p.empty()) return;
+                        TrayItem it;
+                        it.id = next_id++;
+                        it.path = fs::NormalizePath(p);
+                        it.content_kind = static_cast<uint8_t>(std::clamp(pulse::json::ExtractInt(eblock, L"kind", 0), 0, 3));
+                        it.owned_snippet = pulse::json::ExtractBool(eblock, L"owned", false);
+                        it.display_name = pulse::json::ExtractString(eblock, L"title");
+                        it.domain = pulse::json::ExtractString(eblock, L"domain");
+                        it.source_label = pulse::json::ExtractString(eblock, L"source");
+                        WIN32_FILE_ATTRIBUTE_DATA data{};
+                        it.exists = GetFileAttributesExW(it.path.c_str(), GetFileExInfoStandard, &data) != FALSE;
+                        it.attrs = it.exists ? data.dwFileAttributes : 0;
+                        it.is_dir = it.exists && (it.attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                        if (it.exists && !it.is_dir) {
+                            it.size = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+                            batch.total_size += it.size;
+                        }
+                        batch.items.push_back(std::move(it));
+                    });
+                }
+                if (!batch.items.empty()) rec.batches.push_back(std::move(batch));
+            });
+        }
+        parsed.push_back(std::move(rec));
+    });
+    if (!ok || !unique_ids) return false;
+    out_shelves = std::move(parsed);
+    return true;
+}
+} // namespace
+
+StagingTray::StagingTray() {
+    EnsureTempShelf();
+}
+
+void StagingTray::EnsureTempShelf() {
+    for (const auto& s : shelves_) {
+        if (s.temp) {
+            if (active_index_ >= shelves_.size()) active_index_ = 0;
+            return;
+        }
+    }
+    TrayShelfRecord temp;
+    temp.id = 1;
+    for (const auto& s : shelves_) {
+        if (s.id == temp.id) { temp.id = next_id_++; break; }
+    }
+    temp.temp = true;
+    temp.custom_name = false;
+    temp.color_rgb = shelves_.empty() ? kShelfPaletteRgb[0] : NextShelfColor();
+    shelves_.insert(shelves_.begin(), std::move(temp));
+    if (active_index_ >= shelves_.size()) active_index_ = 0;
+}
+
+TrayShelfRecord& StagingTray::ActiveShelf() {
+    if (shelves_.empty()) EnsureTempShelf();
+    if (active_index_ >= shelves_.size()) active_index_ = 0;
+    return shelves_[active_index_];
+}
+
+const TrayShelfRecord& StagingTray::ActiveShelf() const {
+    return shelves_[active_index_ < shelves_.size() ? active_index_ : 0];
+}
+
+TrayShelfRecord* StagingTray::FindShelfMut(uint64_t shelf_id) {
+    for (auto& s : shelves_) {
+        if (s.id == shelf_id) return &s;
+    }
+    return nullptr;
+}
+
+const TrayShelfRecord* StagingTray::FindShelf(uint64_t shelf_id) const {
+    for (const auto& s : shelves_) {
+        if (s.id == shelf_id) return &s;
+    }
+    return nullptr;
+}
+
+std::wstring StagingTray::ShelfDisplayName(const TrayShelfRecord& shelf) const {
+    if (!shelf.name.empty()) return shelf.name;
+    if (shelf.temp) {
+        const std::wstring& loc = l10n::Get(l10n::StringId::ShelfTempName);
+        return loc.empty() ? std::wstring(L"\u4E34\u65F6") : loc;
+    }
+    return L"Shelf";
+}
+
+uint32_t StagingTray::NextShelfColor() const {
+    for (uint32_t c : kShelfPaletteRgb) {
+        const bool used = std::any_of(shelves_.begin(), shelves_.end(),
+                                      [c](const TrayShelfRecord& s) { return s.color_rgb == c; });
+        if (!used) return c;
+    }
+    return kShelfPaletteRgb[shelves_.size() % std::size(kShelfPaletteRgb)];
+}
+
+bool StagingTray::SwitchShelf(uint64_t shelf_id) {
+    for (size_t i = 0; i < shelves_.size(); ++i) {
+        if (shelves_[i].id == shelf_id) {
+            active_index_ = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+uint64_t StagingTray::CreateShelf(const std::wstring& custom_name) {
+    std::wstring name = custom_name;
+    if (name.empty()) {
+        std::wstring fmt = l10n::Get(l10n::StringId::ShelfDefaultNameFormat);
+        if (fmt.empty()) fmt = L"\u6682\u5B58\u67B6 {n}";
+        for (int k = 2; k < 1000; ++k) {
+            std::wstring candidate = fmt;
+            if (const size_t at = candidate.find(L"{n}"); at != std::wstring::npos)
+                candidate.replace(at, 3, std::to_wstring(k));
+            const bool taken = std::any_of(shelves_.begin(), shelves_.end(), [&](const TrayShelfRecord& s) {
+                return _wcsicmp(ShelfDisplayName(s).c_str(), candidate.c_str()) == 0;
+            });
+            if (!taken) { name = std::move(candidate); break; }
+        }
+    }
+    if (name.size() > 16) name.resize(16);
+    TrayShelfRecord rec;
+    rec.id = next_id_++;
+    rec.name = std::move(name);
+    rec.custom_name = true;
+    rec.color_rgb = NextShelfColor();
+    rec.temp = false;
+    const uint64_t id = rec.id;
+    shelves_.push_back(std::move(rec));
+    return id;
+}
+
+bool StagingTray::RenameShelf(uint64_t shelf_id, const std::wstring& new_name) {
+    auto* s = FindShelfMut(shelf_id ? shelf_id : active_shelf_id());
+    if (!s) return false;
+    size_t a = 0, b = new_name.size();
+    while (a < b && iswspace(new_name[a])) ++a;
+    while (b > a && iswspace(new_name[b - 1])) --b;
+    if (a >= b) return false;
+    std::wstring trimmed = new_name.substr(a, b - a);
+    if (trimmed.size() > 16) trimmed.resize(16);
+    s->name = std::move(trimmed);
+    s->custom_name = true;
+    return true;
+}
+
+bool StagingTray::SetShelfColor(uint64_t shelf_id, uint32_t rgb) {
+    auto* s = FindShelfMut(shelf_id ? shelf_id : active_shelf_id());
+    if (!s) return false;
+    s->color_rgb = rgb;
+    return true;
+}
+
+bool StagingTray::SaveTempAsNamed(uint64_t shelf_id) {
+    const uint64_t id = shelf_id ? shelf_id : active_shelf_id();
+    size_t idx = shelves_.size();
+    for (size_t i = 0; i < shelves_.size(); ++i) {
+        if (shelves_[i].id == id) { idx = i; break; }
+    }
+    if (idx >= shelves_.size() || !shelves_[idx].temp) return false;
+    auto& promoted = shelves_[idx];
+    promoted.temp = false;
+    if (!promoted.custom_name || promoted.name.empty()) {
+        std::wstring def = l10n::Get(l10n::StringId::ShelfSavedDefaultName);
+        if (def.empty()) def = L"\u65B0\u6682\u5B58\u67B6";
+        promoted.name = std::move(def);
+    }
+    promoted.custom_name = true;
+
+    TrayShelfRecord fresh_temp;
+    fresh_temp.id = next_id_++;
+    fresh_temp.temp = true;
+    fresh_temp.custom_name = false;
+    fresh_temp.color_rgb = NextShelfColor();
+    shelves_.insert(shelves_.begin(), std::move(fresh_temp));
+    active_index_ = idx + 1;
+    return true;
+}
+
+bool StagingTray::DeleteShelf(uint64_t shelf_id, std::vector<std::wstring>* out_owned_snippets) {
+    const uint64_t id = shelf_id ? shelf_id : active_shelf_id();
+    for (size_t i = 0; i < shelves_.size(); ++i) {
+        if (shelves_[i].id != id) continue;
+        if (shelves_[i].temp) return false;
+        if (out_owned_snippets) {
+            for (const auto& b : shelves_[i].batches)
+                for (const auto& it : b.items)
+                    if (it.owned_snippet && !it.path.empty()) out_owned_snippets->push_back(it.path);
+        }
+        shelves_.erase(shelves_.begin() + static_cast<std::ptrdiff_t>(i));
+        EnsureTempShelf();
+        // Switch back to the temp shelf (matches staging_shelf_mockup.html).
+        for (size_t k = 0; k < shelves_.size(); ++k) {
+            if (shelves_[k].temp) { active_index_ = k; break; }
+        }
+        return true;
+    }
+    return false;
+}
+
+void StagingTray::ClearTempShelf(std::vector<std::wstring>* out_owned_snippets) {
+    for (auto& s : shelves_) {
+        if (!s.temp) continue;
+        if (out_owned_snippets) {
+            for (const auto& b : s.batches)
+                for (const auto& it : b.items)
+                    if (it.owned_snippet && !it.path.empty()) out_owned_snippets->push_back(it.path);
+        }
+        s.batches.clear();
+    }
+}
+
+void StagingTray::AllReferencedSnippetPaths(std::vector<std::wstring>& out) const {
+    out.clear();
+    for (const auto& s : shelves_)
+        for (const auto& b : s.batches)
+            for (const auto& it : b.items)
+                if (it.owned_snippet && !it.path.empty()) out.push_back(it.path);
+}
+
+size_t StagingTray::CollectRichToShelf(uint64_t shelf_id, const std::vector<TrayItem>& proto_items,
+                                       bool move_intent, size_t* out_skipped) {
+    if (out_skipped) *out_skipped = 0;
+    if (proto_items.empty()) return 0;
+    TrayShelfRecord* target = shelf_id ? FindShelfMut(shelf_id) : &ActiveShelf();
+    if (!target) return 0;
+
+    std::vector<std::wstring> file_paths;
+    file_paths.reserve(proto_items.size());
+    for (const auto& p : proto_items) {
+        if (!p.path.empty()) file_paths.push_back(fs::NormalizePath(p.path));
+    }
+    const ops::SourceListing listing(file_paths);
+
+    TrayBatch batch;
+    batch.id = next_id_++;
+    batch.move_intent = move_intent;
+    size_t skipped = 0;
+    for (const auto& proto : proto_items) {
+        const std::wstring norm = fs::NormalizePath(proto.path);
+        if (norm.empty()) continue;
+        // Skip duplicate regular files already in this shelf.
+        if (proto.content_kind == 0) {
+            bool dup = std::any_of(batch.items.begin(), batch.items.end(), [&](const TrayItem& x) {
+                return _wcsicmp(x.path.c_str(), norm.c_str()) == 0;
+            });
+            for (const auto& b : target->batches) {
+                if (dup) break;
+                dup = std::any_of(b.items.begin(), b.items.end(), [&](const TrayItem& x) {
+                    return _wcsicmp(x.path.c_str(), norm.c_str()) == 0;
+                });
+            }
+            if (dup) { ++skipped; continue; }
+        }
+        TrayItem it = proto;
+        it.id = next_id_++;
+        it.path = norm;
+        it.inflight_task = 0;
+        it.inflight_move = false;
+        it.inflight_source.clear();
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        const ops::ListedSource* listed = listing.Find(it.path);
+        if (listed) {
+            fad.dwFileAttributes = listed->attributes;
+            fad.nFileSizeLow = static_cast<DWORD>(listed->bytes);
+            fad.nFileSizeHigh = static_cast<DWORD>(listed->bytes >> 32);
+        }
+        if (listed || GetFileAttributesExW(it.path.c_str(), GetFileExInfoStandard, &fad)) {
+            it.exists = true;
+            it.attrs = fad.dwFileAttributes;
+            it.is_dir = (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            if (!it.is_dir) {
+                ULARGE_INTEGER sz;
+                sz.LowPart = fad.nFileSizeLow;
+                sz.HighPart = fad.nFileSizeHigh;
+                it.size = sz.QuadPart;
+                batch.total_size += it.size;
+            }
+        } else {
+            it.exists = false;
+        }
+        batch.items.push_back(std::move(it));
+    }
+    if (out_skipped) *out_skipped = skipped;
+    const size_t added = batch.items.size();
+    if (added > 0) {
+        // A mixed intake keeps its file intent; snippets are always copied on release.
+        batch.move_intent = move_intent && std::any_of(batch.items.begin(), batch.items.end(),
+            [](const TrayItem& item) { return !IsTraySnippet(item); });
+        target->batches.push_back(std::move(batch));
+    }
+    return added;
+}
+
+size_t StagingTray::MoveItemsBetweenShelves(uint64_t from_shelf_id, uint64_t to_shelf_id,
+                                            const std::vector<uint64_t>& item_ids) {
+    if (from_shelf_id == to_shelf_id) return 0;
+    TrayShelfRecord* src = FindShelfMut(from_shelf_id);
+    TrayShelfRecord* dst = FindShelfMut(to_shelf_id);
+    if (!src || !dst) return 0;
+    const std::unordered_set<uint64_t> filter(item_ids.begin(), item_ids.end());
+    const bool filter_all = filter.empty();
+    size_t moved_count = 0;
+
+    for (size_t b = 0; b < src->batches.size();) {
+        auto& sb = src->batches[b];
+        TrayBatch copy_out;
+        copy_out.id = next_id_++;
+        copy_out.move_intent = sb.move_intent;
+        size_t kept = 0;
+        for (size_t i = 0; i < sb.items.size(); ++i) {
+            auto& it = sb.items[i];
+            if ((filter_all || filter.contains(it.id)) && it.inflight_task == 0) {
+                const bool dup = std::any_of(dst->batches.begin(), dst->batches.end(), [&](const TrayBatch& db) {
+                    return std::any_of(db.items.begin(), db.items.end(), [&](const TrayItem& x) {
+                        return _wcsicmp(x.path.c_str(), it.path.c_str()) == 0;
+                    });
+                });
+                if (!dup) {
+                    sb.total_size -= std::min(sb.total_size, it.size);
+                    copy_out.total_size += it.size;
+                    copy_out.items.push_back(std::move(it));
+                    ++moved_count;
+                    continue;
+                }
+            }
+            if (kept != i) sb.items[kept] = std::move(it);
+            ++kept;
+        }
+        sb.items.erase(sb.items.begin() + static_cast<std::ptrdiff_t>(kept), sb.items.end());
+        if (!copy_out.items.empty()) dst->batches.push_back(std::move(copy_out));
+        if (sb.items.empty()) src->batches.erase(src->batches.begin() + static_cast<std::ptrdiff_t>(b));
+        else ++b;
+    }
+    return moved_count;
+}
+
+bool StagingTray::RemoveItemById(uint64_t item_id, std::wstring* out_owned_snippet) {
+    auto& batches = ActiveShelf().batches;
+    for (size_t b = 0; b < batches.size(); ++b) {
+        auto& batch = batches[b];
+        for (size_t i = 0; i < batch.items.size(); ++i) {
+            if (batch.items[i].id != item_id || batch.items[i].inflight_task) continue;
+            if (out_owned_snippet && batch.items[i].owned_snippet)
+                *out_owned_snippet = batch.items[i].path;
+            batch.total_size -= std::min(batch.total_size, batch.items[i].size);
+            batch.items.erase(batch.items.begin() + static_cast<std::ptrdiff_t>(i));
+            if (batch.items.empty()) batches.erase(batches.begin() + static_cast<std::ptrdiff_t>(b));
+            return true;
+        }
+    }
+    return false;
+}
+
 void StagingTray::Collect(const std::vector<std::wstring>& paths, bool move_intent) {
     if (paths.empty()) return;
+    auto& batches = ActiveShelf().batches;
     TrayBatch batch;
     batch.id = next_id_++;
     batch.move_intent = move_intent;
@@ -1026,30 +1546,32 @@ void StagingTray::Collect(const std::vector<std::wstring>& paths, bool move_inte
         }
         batch.items.push_back(std::move(it));
     }
-    batches_.push_back(std::move(batch));
+    batches.push_back(std::move(batch));
 }
 
 void StagingTray::ReplacePath(const std::wstring& from, const std::wstring& to) {
     const std::wstring key = fs::NormalizePath(from);
     std::wstring target = fs::NormalizePath(to);
     if (key.empty() || target.empty()) return;
-    for (auto& batch : batches_) {
-        for (auto& item : batch.items) {
-            if (item.inflight_task != 0) continue;
-            if (_wcsicmp(item.path.c_str(), key.c_str()) == 0) {
-                item.path = target;
-                continue;
+    for (auto& shelf : shelves_) {
+        for (auto& batch : shelf.batches) {
+            for (auto& item : batch.items) {
+                if (item.inflight_task != 0) continue;
+                if (_wcsicmp(item.path.c_str(), key.c_str()) == 0) {
+                    item.path = target;
+                    continue;
+                }
+                // Items staged from inside a renamed or moved folder follow it.
+                const bool child = item.path.size() > key.size() &&
+                    _wcsnicmp(item.path.c_str(), key.c_str(), key.size()) == 0 &&
+                    (key.back() == L'\\' || item.path[key.size()] == L'\\');
+                if (!child) continue;
+                std::wstring rest = item.path.substr(key.size());
+                if (rest.empty() || rest.front() != L'\\') rest.insert(rest.begin(), L'\\');
+                std::wstring base = target;
+                while (!base.empty() && base.back() == L'\\') base.pop_back();
+                item.path = base + rest;
             }
-            // Items staged from inside a renamed or moved folder follow it.
-            const bool child = item.path.size() > key.size() &&
-                _wcsnicmp(item.path.c_str(), key.c_str(), key.size()) == 0 &&
-                (key.back() == L'\\' || item.path[key.size()] == L'\\');
-            if (!child) continue;
-            std::wstring rest = item.path.substr(key.size());
-            if (rest.empty() || rest.front() != L'\\') rest.insert(rest.begin(), L'\\');
-            std::wstring base = target;
-            while (!base.empty() && base.back() == L'\\') base.pop_back();
-            item.path = base + rest;
         }
     }
 }
@@ -1060,9 +1582,10 @@ void StagingTray::MarkPendingMove(uint64_t task_id, const std::vector<std::wstri
     std::unordered_set<std::wstring> wanted;
     wanted.reserve(paths.size());
     for (const auto& path : paths) wanted.insert(pulse::path::FoldedKey(fs::NormalizePath(path)));
-    for (size_t b = 0; b < batches_.size(); ++b) {
+    const auto& batches = ActiveShelf().batches;
+    for (size_t b = 0; b < batches.size(); ++b) {
         if (batch && b != *batch) continue;
-        for (const auto& item : batches_[b].items)
+        for (const auto& item : batches[b].items)
             if (wanted.contains(pulse::path::FoldedKey(item.path))) ids.push_back(item.id);
     }
     MarkInFlight(task_id, ids, true);
@@ -1072,85 +1595,245 @@ void StagingTray::CompleteMove(uint64_t task_id, const std::vector<std::wstring>
 }
 
 void StagingTray::ApplyMetadata(const std::wstring& path, const WIN32_FILE_ATTRIBUTE_DATA& data) {
-    for (auto& batch : batches_) {
-        for (auto& item : batch.items) {
-            if (item.path != path) continue;
-            batch.total_size -= std::min(batch.total_size, item.size);
-            item.exists = true;
-            item.attrs = data.dwFileAttributes;
-            item.is_dir = (item.attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
-            item.size = item.is_dir ? 0 :
-                (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
-            batch.total_size += item.size;
-        }
-    }
-}
-
-bool StagingTray::RefreshExists() {
-    bool changed = false;
-    for (auto& batch : batches_) {
-        for (auto& it : batch.items) {
-            // Mapped shares and user-mode cloud mounts can stall just like UNC paths.
-            const bool unc = it.path.starts_with(L"\\\\?\\UNC\\") ||
-                (it.path.starts_with(L"\\\\") && !it.path.starts_with(L"\\\\?\\"));
-            if (unc || fs::IsRemoteLikeDrive(it.path)) continue;
-            const bool now = GetFileAttributesW(it.path.c_str()) != INVALID_FILE_ATTRIBUTES;
-            if (now != it.exists) {
-                it.exists = now;
-                changed = true;
+    for (auto& shelf : shelves_) {
+        for (auto& batch : shelf.batches) {
+            for (auto& item : batch.items) {
+                if (item.path != path) continue;
+                batch.total_size -= std::min(batch.total_size, item.size);
+                item.exists = true;
+                item.attrs = data.dwFileAttributes;
+                item.is_dir = (item.attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                item.size = item.is_dir ? 0 :
+                    (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+                batch.total_size += item.size;
             }
         }
     }
+}
+
+StagingTray::ExistenceProbe StagingTray::SnapshotExistence() const {
+    ExistenceProbe probe;
+    for (const auto& shelf : shelves_)
+        for (const auto& batch : shelf.batches)
+            for (const auto& item : batch.items)
+                probe.items.emplace(item.id, ExistenceProbe::Item{item.path, item.exists, item.exists});
+    return probe;
+}
+
+void StagingTray::ExistenceProbe::ReadLocalAttributes() {
+    std::array<std::optional<bool>, 26> remote_drives{};
+    for (auto& entry : items) {
+        auto& item = entry.second;
+        const bool unc = item.path.starts_with(L"\\\\?\\UNC\\") ||
+            (item.path.starts_with(L"\\\\") && !item.path.starts_with(L"\\\\?\\"));
+        if (unc) continue;
+        if (const auto letter = fs::DriveLetterOf(item.path)) {
+            auto& remote = remote_drives[letter - L'A'];
+            if (!remote.has_value()) remote = fs::IsRemoteLikeDrive(item.path);
+            if (*remote) continue;
+        }
+        if (GetFileAttributesW(item.path.c_str()) != INVALID_FILE_ATTRIBUTES) item.observed = true;
+        else {
+            const DWORD error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) item.observed = false;
+        }
+    }
+    std::erase_if(items, [](const auto& entry) { return entry.second.observed == entry.second.previous; });
+}
+
+bool StagingTray::ApplyExistence(const ExistenceProbe& probe) {
+    if (probe.items.empty()) return false;
+    bool changed = false;
+    for (auto& shelf : shelves_)
+        for (auto& batch : shelf.batches)
+            for (auto& item : batch.items) {
+                const auto it = probe.items.find(item.id);
+                if (it == probe.items.end()) continue;
+                const auto& result = it->second;
+                if (result.path == item.path && result.previous == item.exists && result.observed != item.exists) {
+                    item.exists = result.observed;
+                    changed = true;
+                }
+            }
     return changed;
 }
 
-size_t StagingTray::RemoveMissing() {
+bool StagingTray::RefreshExists() {
+    auto probe = SnapshotExistence();
+    probe.ReadLocalAttributes();
+    return ApplyExistence(probe);
+}
+
+size_t StagingTray::RemoveMissing(std::vector<std::wstring>* out_owned_snippets) {
     size_t removed = 0;
-    for (size_t b = batches_.size(); b-- > 0;) {
-        auto& batch = batches_[b];
+    auto& batches = ActiveShelf().batches;
+    for (size_t b = batches.size(); b-- > 0;) {
+        auto& batch = batches[b];
         for (size_t i = batch.items.size(); i-- > 0;) {
-            if (batch.items[i].exists) continue;
+            const auto& item = batch.items[i];
+            if (item.exists || item.inflight_task) continue;
+            if (out_owned_snippets && item.owned_snippet) out_owned_snippets->push_back(item.path);
             batch.total_size -= std::min(batch.total_size, batch.items[i].size);
             batch.items.erase(batch.items.begin() + static_cast<std::ptrdiff_t>(i));
             ++removed;
         }
-        if (batch.items.empty()) batches_.erase(batches_.begin() + static_cast<std::ptrdiff_t>(b));
+        if (batch.items.empty()) batches.erase(batches.begin() + static_cast<std::ptrdiff_t>(b));
     }
     return removed;
 }
 
 void StagingTray::RemoveBatch(size_t idx) {
-    if (idx < batches_.size()) batches_.erase(batches_.begin() + idx);
+    auto& batches = ActiveShelf().batches;
+    if (idx >= batches.size()) return;
+    const auto& items = batches[idx].items;
+    if (std::none_of(items.begin(), items.end(), [](const TrayItem& item) { return item.inflight_task != 0; }))
+        batches.erase(batches.begin() + static_cast<std::ptrdiff_t>(idx));
 }
 
 void StagingTray::SetMoveIntent(size_t idx, bool move_intent) {
-    if (idx < batches_.size()) batches_[idx].move_intent = move_intent;
+    auto& batches = ActiveShelf().batches;
+    if (idx < batches.size()) batches[idx].move_intent = move_intent;
 }
 
 void StagingTray::RemoveItem(size_t batch_idx, size_t item_idx) {
-    if (batch_idx >= batches_.size()) return;
-    auto& b = batches_[batch_idx];
-    if (item_idx < b.items.size()) {
+    auto& batches = ActiveShelf().batches;
+    if (batch_idx >= batches.size()) return;
+    auto& b = batches[batch_idx];
+    if (item_idx < b.items.size() && !b.items[item_idx].inflight_task) {
         b.total_size -= std::min(b.total_size, b.items[item_idx].size);
-        b.items.erase(b.items.begin() + item_idx);
+        b.items.erase(b.items.begin() + static_cast<std::ptrdiff_t>(item_idx));
     }
-    if (b.items.empty()) batches_.erase(batches_.begin() + batch_idx);
+    if (b.items.empty()) batches.erase(batches.begin() + static_cast<std::ptrdiff_t>(batch_idx));
 }
 
-void StagingTray::Clear() { batches_.clear(); }
+void StagingTray::Clear(std::vector<std::wstring>* out_owned_snippets) {
+    auto& batches = ActiveShelf().batches;
+    if (out_owned_snippets) {
+        for (const auto& b : batches)
+            for (const auto& it : b.items)
+                if (it.owned_snippet && !it.path.empty()) out_owned_snippets->push_back(it.path);
+    }
+    batches.clear();
+}
+
+TrayReleasePlan StagingTray::PlanRelease(const std::wstring& dest, TrayReleaseMode mode,
+                                           const std::vector<uint64_t>& item_ids,
+                                           std::optional<size_t> batch_idx, bool skip_same_folder) const {
+    TrayReleasePlan plan;
+    std::wstring dest_key = pulse::path::FoldedKey(fs::NormalizePath(dest));
+    if (dest_key.empty()) return plan;
+    while (dest_key.size() > 1 && dest_key.back() == L'\\' && dest_key[dest_key.size() - 2] != L':')
+        dest_key.pop_back();
+    const std::unordered_set<uint64_t> selected(item_ids.begin(), item_ids.end());
+    // Another shelf or an unchecked duplicate may own the same backing path.
+    std::unordered_set<std::wstring> snippets;
+    for (const auto& shelf : shelves_)
+        for (const auto& batch : shelf.batches)
+            for (const auto& item : batch.items)
+                if (IsTraySnippet(item)) snippets.insert(pulse::path::FoldedKey(item.path));
+
+    struct UniqueSource {
+        const std::wstring* path = nullptr;
+        std::vector<uint64_t> ids;
+        bool move = false;
+    };
+    std::unordered_map<std::wstring, size_t> by_key;
+    std::vector<UniqueSource> sources;
+    const auto& batches = ActiveShelf().batches;
+    for (size_t i = 0; i < batches.size(); ++i) {
+        if (batch_idx && i != *batch_idx) continue;
+        const auto& batch = batches[i];
+        const bool move_batch = mode == TrayReleaseMode::Move ||
+            (mode == TrayReleaseMode::Staged && batch.move_intent);
+        for (const auto& item : batch.items) {
+            if (!selected.empty() && !selected.contains(item.id)) continue;
+            const std::wstring key = pulse::path::FoldedKey(item.path);
+            if (key.empty() || fs::IsVirtualPath(item.path) || inflight_keys_.contains(key)) continue;
+            if (!item.exists) { ++plan.missing; continue; }
+            if (skip_same_folder && pulse::path::FoldedKey(fs::ParentPath(item.path)) == dest_key) {
+                ++plan.already_there;
+                continue;
+            }
+            const bool move = move_batch && !snippets.contains(key);
+            const auto [where, added] = by_key.try_emplace(key, sources.size());
+            if (added) sources.push_back({&item.path, {}, move});
+            auto& source = sources[where->second];
+            // If conflicting records reference one original, do not destroy the copy record's source.
+            source.move = source.move && move;
+            source.ids.push_back(item.id);
+        }
+    }
+    for (auto& source : sources) {
+        auto& part = source.move ? plan.moves : plan.copies;
+        part.sources.push_back(*source.path);
+        part.item_ids.insert(part.item_ids.end(), source.ids.begin(), source.ids.end());
+    }
+    return plan;
+}
+
+std::vector<TrayBatch> StagingTray::TakeIdleBatches() {
+    auto& batches = ActiveShelf().batches;
+    std::vector<TrayBatch> removed;
+    for (auto& batch : batches) {
+        TrayBatch idle;
+        idle.id = batch.id;
+        idle.move_intent = batch.move_intent;
+        size_t kept = 0;
+        for (size_t i = 0; i < batch.items.size(); ++i) {
+            auto& item = batch.items[i];
+            if (!item.inflight_task) {
+                idle.total_size += item.size;
+                batch.total_size -= std::min(batch.total_size, item.size);
+                idle.items.push_back(std::move(item));
+            } else {
+                if (kept != i) batch.items[kept] = std::move(item);
+                ++kept;
+            }
+        }
+        batch.items.erase(batch.items.begin() + static_cast<std::ptrdiff_t>(kept), batch.items.end());
+        if (!idle.items.empty()) removed.push_back(std::move(idle));
+    }
+    std::erase_if(batches, [](const TrayBatch& batch) { return batch.items.empty(); });
+    return removed;
+}
+
+bool StagingTray::RestoreClearedBatches(uint64_t shelf_id, std::vector<TrayBatch> batches) {
+    auto* shelf = FindShelfMut(shelf_id);
+    if (!shelf) return false;
+    std::unordered_set<std::wstring> existing;
+    for (const auto& batch : shelf->batches)
+        for (const auto& item : batch.items) existing.insert(pulse::path::FoldedKey(item.path));
+    for (auto& batch : batches) {
+        std::erase_if(batch.items, [&](const TrayItem& item) {
+            if (existing.insert(pulse::path::FoldedKey(item.path)).second) return false;
+            batch.total_size -= std::min(batch.total_size, item.size);
+            return true;
+        });
+        if (batch.items.empty()) continue;
+        const auto same = std::find_if(shelf->batches.begin(), shelf->batches.end(),
+            [&](const TrayBatch& saved) { return saved.id == batch.id; });
+        if (same == shelf->batches.end()) shelf->batches.push_back(std::move(batch));
+        else {
+            for (auto& item : batch.items) same->items.push_back(std::move(item));
+            same->total_size += batch.total_size;
+        }
+    }
+    return true;
+}
 
 void StagingTray::MarkInFlight(uint64_t task_id, const std::vector<uint64_t>& item_ids, bool move) {
     if (!task_id) return;
     const std::unordered_set<uint64_t> wanted(item_ids.begin(), item_ids.end());
-    for (auto& batch : batches_)
-        for (auto& item : batch.items)
-            if (!item.inflight_task && wanted.contains(item.id)) {
-                item.inflight_task = task_id;
-                item.inflight_move = move;
-                item.inflight_source = item.path;
-                inflight_sources_[task_id].push_back(item.path);
-                ++inflight_keys_[pulse::path::FoldedKey(item.path)];
-            }
+    for (auto& shelf : shelves_)
+        for (auto& batch : shelf.batches)
+            for (auto& item : batch.items)
+                if (!item.inflight_task && wanted.contains(item.id) && !(move && IsTraySnippet(item))) {
+                    item.inflight_task = task_id;
+                    item.inflight_move = move;
+                    item.inflight_source = item.path;
+                    inflight_sources_[task_id].push_back(item.path);
+                    ++inflight_keys_[pulse::path::FoldedKey(item.path)];
+                }
 }
 
 void StagingTray::CompleteTask(uint64_t task_id, const std::vector<std::wstring>& moved_sources) {
@@ -1165,27 +1848,27 @@ void StagingTray::CompleteTask(uint64_t task_id, const std::vector<std::wstring>
     std::unordered_set<std::wstring> moved;
     moved.reserve(moved_sources.size());
     for (const auto& source : moved_sources) moved.insert(pulse::path::FoldedKey(fs::NormalizePath(source)));
-    for (size_t b = batches_.size(); b-- > 0;) {
-        auto& batch = batches_[b];
-        // Kept items close up in one pass; erasing each consumed one would
-        // shift the rest every time.
-        size_t kept = 0;
-        for (size_t i = 0; i < batch.items.size(); ++i) {
-            auto& item = batch.items[i];
-            bool consume = false;
-            if (item.inflight_task == task_id) {
-                consume = item.inflight_move && moved.contains(pulse::path::FoldedKey(item.inflight_source));
-                item.inflight_task = 0;
-                item.inflight_move = false;
-                item.inflight_source.clear();
-                if (consume) batch.total_size -= std::min(batch.total_size, item.size);
+    for (auto& shelf : shelves_) {
+        for (size_t b = shelf.batches.size(); b-- > 0;) {
+            auto& batch = shelf.batches[b];
+            size_t kept = 0;
+            for (size_t i = 0; i < batch.items.size(); ++i) {
+                auto& item = batch.items[i];
+                bool consume = false;
+                if (item.inflight_task == task_id) {
+                    consume = item.inflight_move && moved.contains(pulse::path::FoldedKey(item.inflight_source));
+                    item.inflight_task = 0;
+                    item.inflight_move = false;
+                    item.inflight_source.clear();
+                    if (consume) batch.total_size -= std::min(batch.total_size, item.size);
+                }
+                if (consume) continue;
+                if (kept != i) batch.items[kept] = std::move(item);
+                ++kept;
             }
-            if (consume) continue;
-            if (kept != i) batch.items[kept] = std::move(item);
-            ++kept;
+            batch.items.erase(batch.items.begin() + static_cast<std::ptrdiff_t>(kept), batch.items.end());
+            if (batch.items.empty()) shelf.batches.erase(shelf.batches.begin() + static_cast<std::ptrdiff_t>(b));
         }
-        batch.items.erase(batch.items.begin() + static_cast<std::ptrdiff_t>(kept), batch.items.end());
-        if (batch.items.empty()) batches_.erase(batches_.begin() + static_cast<std::ptrdiff_t>(b));
     }
 }
 
@@ -1194,15 +1877,11 @@ bool StagingTray::IsInFlight(const std::wstring& path) const {
 }
 
 void StagingTray::RemoveDeleted(const std::vector<std::wstring>& paths) {
-    if (batches_.empty()) return;
     std::unordered_set<std::wstring> deleted;
     deleted.reserve(paths.size());
     for (const auto& path : paths)
         if (!path.empty()) deleted.insert(pulse::path::FoldedKey(fs::NormalizePath(path)));
     if (deleted.empty()) return;
-    // An item goes when it or a folder above it was deleted: look its own path
-    // and each parent up (with and without the separator) instead of
-    // comparing every item with every deleted path.
     const auto gone = [&](const std::wstring& path) {
         const std::wstring key = pulse::path::FoldedKey(path);
         if (deleted.contains(key)) return true;
@@ -1212,27 +1891,30 @@ void StagingTray::RemoveDeleted(const std::vector<std::wstring>& paths) {
         }
         return false;
     };
-    for (size_t b = batches_.size(); b-- > 0;) {
-        auto& batch = batches_[b];
-        size_t kept = 0;
-        for (size_t i = 0; i < batch.items.size(); ++i) {
-            if (gone(batch.items[i].path)) {
-                batch.total_size -= std::min(batch.total_size, batch.items[i].size);
-                continue;
+    for (auto& shelf : shelves_) {
+        for (size_t b = shelf.batches.size(); b-- > 0;) {
+            auto& batch = shelf.batches[b];
+            size_t kept = 0;
+            for (size_t i = 0; i < batch.items.size(); ++i) {
+                if (gone(batch.items[i].path)) {
+                    batch.total_size -= std::min(batch.total_size, batch.items[i].size);
+                    continue;
+                }
+                if (kept != i) batch.items[kept] = std::move(batch.items[i]);
+                ++kept;
             }
-            if (kept != i) batch.items[kept] = std::move(batch.items[i]);
-            ++kept;
+            if (kept == batch.items.size()) continue;
+            batch.items.erase(batch.items.begin() + static_cast<std::ptrdiff_t>(kept), batch.items.end());
+            if (batch.items.empty()) shelf.batches.erase(shelf.batches.begin() + static_cast<std::ptrdiff_t>(b));
         }
-        if (kept == batch.items.size()) continue;
-        batch.items.erase(batch.items.begin() + static_cast<std::ptrdiff_t>(kept), batch.items.end());
-        if (batch.items.empty()) batches_.erase(batches_.begin() + static_cast<std::ptrdiff_t>(b));
     }
 }
 
 void StagingTray::ToJson(std::wstring& out) const {
+    const auto& batches = ActiveShelf().batches;
     out = L"[\n";
-    for (size_t i = 0; i < batches_.size(); ++i) {
-        const auto& b = batches_[i];
+    for (size_t i = 0; i < batches.size(); ++i) {
+        const auto& b = batches[i];
         out += L"  {\"move\":";
         out += b.move_intent ? L"true" : L"false";
         out += L",\"items\":[";
@@ -1243,7 +1925,7 @@ void StagingTray::ToJson(std::wstring& out) const {
             if (j + 1 < b.items.size()) out += L",";
         }
         out += L"]}";
-        if (i + 1 < batches_.size()) out += L",";
+        if (i + 1 < batches.size()) out += L",";
         out += L"\n";
     }
     out += L"]";
@@ -1278,24 +1960,119 @@ bool StagingTray::FromJson(const std::wstring& in) {
         if (!batch.items.empty()) parsed.push_back(std::move(batch));
     });
     if (!ok) return false;
-    batches_ = std::move(parsed);
+    ActiveShelf().batches = std::move(parsed);
+    return true;
+}
+
+std::wstring StagingTray::NamedShelvesToJson() const {
+    std::wstring out;
+    SerializeShelfList(shelves_, active_shelf_id(), false, out);
+    return out;
+}
+
+bool StagingTray::LoadNamedShelvesFromJson(const std::wstring& in) {
+    std::vector<TrayShelfRecord> parsed;
+    uint64_t active_id = 1;
+    uint64_t next_id = next_id_;
+    if (!ParseShelfList(in, next_id, parsed, active_id)) return false;
+    // Keep only non-temp shelves from persisted file; always keep one clean temp shelf at index 0.
+    std::vector<TrayShelfRecord> merged;
+    TrayShelfRecord temp;
+    temp.id = 1;
+    for (const auto& s : parsed) {
+        if (s.id == temp.id) { temp.id = next_id++; break; }
+    }
+    temp.temp = true;
+    temp.custom_name = false;
+    temp.color_rgb = kShelfPaletteRgb[0];
+    for (const auto& s : parsed) {
+        if (!s.temp && s.color_rgb == temp.color_rgb) {
+            // Avoid colliding color with a named shelf when possible.
+            for (uint32_t c : kShelfPaletteRgb) {
+                const bool used = std::any_of(parsed.begin(), parsed.end(),
+                                              [c](const TrayShelfRecord& x) { return !x.temp && x.color_rgb == c; });
+                if (!used) { temp.color_rgb = c; break; }
+            }
+            break;
+        }
+    }
+    merged.push_back(std::move(temp));
+    for (auto& s : parsed) {
+        if (!s.temp) merged.push_back(std::move(s));
+    }
+    shelves_ = std::move(merged);
+    next_id_ = next_id;
+    active_index_ = 0;
+    for (size_t i = 0; i < shelves_.size(); ++i) {
+        if (shelves_[i].id == active_id) { active_index_ = i; break; }
+    }
+    return true;
+}
+
+bool StagingTray::SaveNamedShelvesFile() const {
+    return WriteUtf8ConfigAtomic(ShelvesConfigPath(), NamedShelvesToJson());
+}
+
+bool StagingTray::LoadNamedShelvesFile() {
+    std::wstring text;
+    if (!ReadUtf8Config(ShelvesConfigPath(), text) || text.empty()) return false;
+    return LoadNamedShelvesFromJson(text);
+}
+
+std::wstring StagingTray::FullSnapshotJson() const {
+    std::wstring out;
+    SerializeShelfList(shelves_, active_shelf_id(), true, out);
+    return out;
+}
+
+bool StagingTray::RestoreFullSnapshotJson(const std::wstring& in) {
+    std::vector<TrayShelfRecord> parsed;
+    uint64_t active_id = 1;
+    uint64_t next_id = next_id_;
+    if (!ParseShelfList(in, next_id, parsed, active_id) || parsed.empty()) return false;
+    next_id_ = next_id;
+    shelves_ = std::move(parsed);
+    EnsureTempShelf();
+    active_index_ = 0;
+    for (size_t i = 0; i < shelves_.size(); ++i) {
+        if (shelves_[i].id == active_id) { active_index_ = i; break; }
+    }
     return true;
 }
 
 // ---------------------------------------------------------------------------
 // Sidebar model
 // ---------------------------------------------------------------------------
-static SidebarEntry MakeKnownEntry(REFKNOWNFOLDERID fid, const wchar_t* glyph, const wchar_t* fallback,
+static const KNOWNFOLDERID* BuiltinQuickAccessFolderId(int builtin) {
+    switch (static_cast<BuiltinQuickAccess>(builtin)) {
+    case BuiltinQuickAccess::Desktop: return &FOLDERID_Desktop;
+    case BuiltinQuickAccess::Downloads: return &FOLDERID_Downloads;
+    case BuiltinQuickAccess::Documents: return &FOLDERID_Documents;
+    case BuiltinQuickAccess::Pictures: return &FOLDERID_Pictures;
+    case BuiltinQuickAccess::Music: return &FOLDERID_Music;
+    case BuiltinQuickAccess::Videos: return &FOLDERID_Videos;
+    default: return nullptr;
+    }
+}
+
+bool IsBuiltinQuickAccessFolder(int builtin) {
+    return BuiltinQuickAccessFolderId(builtin) != nullptr;
+}
+
+std::wstring ResolveBuiltinQuickAccessFolder(int builtin) {
+    const auto* id = BuiltinQuickAccessFolderId(builtin);
+    return id ? fs::NormalizePath(known_folders::CurrentPath(*id)) : std::wstring{};
+}
+
+static SidebarEntry MakeKnownEntry(std::wstring path, const wchar_t* glyph, const wchar_t* fallback,
                                    D2D1_COLOR_F color, const wchar_t* override_name = nullptr) {
     SidebarEntry e;
     e.glyph = glyph;
     e.fallback = fallback;
     e.color = color;
-    PWSTR path = nullptr;
-    if (SUCCEEDED(SHGetKnownFolderPath(fid, 0, nullptr, &path)) && path) {
-        e.path = fs::NormalizePath(path);
+    if (!path.empty()) {
+        e.path = std::move(path);
         e.label = override_name ? override_name : TabTitle(e.path);
-        CoTaskMemFree(path);
     } else {
         e.label = fallback;
     }
@@ -1462,8 +2239,11 @@ void RefreshSidebarDriveCapacity(std::vector<SidebarEntry>& drives) {
         entry.free_bytes = ~uint64_t{0};
         entry.total_bytes = 0;
         entry.danger = false;
-        if (!GetDiskFreeSpaceExW(entry.path.c_str(), &free_bytes, &total_bytes, nullptr))
+        entry.drive_locked = false;
+        if (!GetDiskFreeSpaceExW(entry.path.c_str(), &free_bytes, &total_bytes, nullptr)) {
+            entry.drive_locked = fs::IsBitLockerLockedError(GetLastError());
             continue;
+        }
         const uint64_t total = total_bytes.QuadPart;
         const uint64_t free = std::min(free_bytes.QuadPart, total_bytes.QuadPart);
         entry.detail = ui::DriveSidebarDetail(free, total);
@@ -1477,6 +2257,76 @@ void RefreshSidebarDriveCapacity(std::vector<SidebarEntry>& drives) {
     if (changed) SetThreadErrorMode(old_mode, nullptr);
 }
 
+std::vector<SidebarEntry> BuildBuiltinQuickAccess(const fs::RecycleBinInfo* recycle) {
+    std::vector<SidebarEntry> entries;
+    SidebarEntry recent;
+    recent.glyph = L"\xE823";
+    recent.fallback = L"Recent";
+    recent.color = ui::HexColor(0x60A5FA);
+    recent.label = l10n::Get(l10n::StringId::Recent);
+    recent.path = MakeRecentPath();
+    recent.builtin = static_cast<int>(BuiltinQuickAccess::Recent);
+    entries.push_back(std::move(recent));
+    SidebarEntry desktop = MakeKnownEntry(ResolveBuiltinQuickAccessFolder(static_cast<int>(BuiltinQuickAccess::Desktop)),
+        L"\xE7F4", L"Desktop",
+        ui::HexColor(0x38BDF8), l10n::Get(l10n::StringId::Desktop).c_str());
+    desktop.badge = l10n::Get(l10n::StringId::Desktop);
+    desktop.badge_rgb = 0x0078D4;
+    desktop.builtin = static_cast<int>(BuiltinQuickAccess::Desktop);
+    entries.push_back(std::move(desktop));
+    // Explorer shows the localized name ("下载"), not the folder name on disk.
+    SidebarEntry downloads = MakeKnownEntry(ResolveBuiltinQuickAccessFolder(static_cast<int>(BuiltinQuickAccess::Downloads)),
+        L"\xE896", L"Downloads",
+        ui::HexColor(0xC084FC), l10n::Get(l10n::StringId::Downloads).c_str());
+    downloads.builtin = static_cast<int>(BuiltinQuickAccess::Downloads);
+    entries.push_back(std::move(downloads));
+    // The library folders Explorer lists next to them, in Explorer's order.
+    // Documents and Music start hidden (kDefaultQuickAccessHiddenMask); a
+    // folder the profile does not have is left out, section menu included.
+    const struct {
+        const wchar_t* glyph;
+        const wchar_t* fallback;
+        uint32_t rgb;
+        l10n::StringId label;
+        BuiltinQuickAccess builtin;
+    } libraries[] = {
+        // Documents: \xE7C3 (Page), not the file glyph, so the sidebar gives it
+        // its color document icon (FluentSvgIdForGlyph).
+        {L"\xE7C3", L"Docs", 0x60A5FA, l10n::StringId::PickerDocuments,
+         BuiltinQuickAccess::Documents},
+        {L"\xE91B", L"Pics", 0x34D399, l10n::StringId::PickerPictures,
+         BuiltinQuickAccess::Pictures},
+        {L"\xE8D6", L"Music", 0xF472B6, l10n::StringId::Music,
+         BuiltinQuickAccess::Music},
+        {L"\xE714", L"Video", 0xF59E0B, l10n::StringId::Videos,
+         BuiltinQuickAccess::Videos},
+    };
+    for (const auto& library : libraries) {
+        SidebarEntry entry = MakeKnownEntry(ResolveBuiltinQuickAccessFolder(static_cast<int>(library.builtin)),
+            library.glyph, library.fallback,
+            ui::HexColor(library.rgb), l10n::Get(library.label).c_str());
+        if (entry.path.empty()) continue;
+        entry.builtin = static_cast<int>(library.builtin);
+        entries.push_back(std::move(entry));
+    }
+    SidebarEntry recycle_bin;
+    recycle_bin.glyph = L"\xE75C";
+    recycle_bin.fallback = L"Bin";
+    recycle_bin.color = ui::HexColor(0x94A3B8);
+    recycle_bin.label = l10n::Get(l10n::StringId::RecycleBin);
+    recycle_bin.path = MakeRecyclePath();
+    recycle_bin.builtin = static_cast<int>(BuiltinQuickAccess::RecycleBin);
+    if (recycle && recycle->valid) {
+        wchar_t occupancy[96]{};
+        swprintf_s(occupancy, l10n::Get(l10n::StringId::RecycleOccupancyFormat).c_str(),
+                   std::to_wstring(recycle->items).c_str(),
+                   pulse::format::ByteSize(recycle->bytes).c_str());
+        recycle_bin.detail = occupancy;
+    }
+    entries.push_back(std::move(recycle_bin));
+    return entries;
+}
+
 SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle) {
     SidebarModel m;
     // Starred items lead their own section, next to (not inside) quick access.
@@ -1488,60 +2338,15 @@ SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle) {
     starred.path = MakeStarredPath();
     starred.expandable = true;
     m.starred.push_back(std::move(starred));
-    SidebarEntry recent;
-    recent.glyph = L"\xE823";
-    recent.fallback = L"Recent";
-    recent.color = ui::HexColor(0x60A5FA);
-    recent.label = l10n::Get(l10n::StringId::Recent);
-    recent.path = MakeRecentPath();
-    recent.builtin = static_cast<int>(BuiltinQuickAccess::Recent);
-    m.quick_access.push_back(std::move(recent));
-    SidebarEntry desktop = MakeKnownEntry(FOLDERID_Desktop, L"\xE7F4", L"Desktop",
-        ui::HexColor(0x38BDF8), l10n::Get(l10n::StringId::Desktop).c_str());
-    desktop.badge = l10n::Get(l10n::StringId::Desktop);
-    desktop.badge_rgb = 0x0078D4;
-    desktop.builtin = static_cast<int>(BuiltinQuickAccess::Desktop);
-    m.quick_access.push_back(std::move(desktop));
-    // Explorer shows the localized name ("下载"), not the folder name on disk.
-    SidebarEntry downloads = MakeKnownEntry(FOLDERID_Downloads, L"\xE896", L"Downloads",
-        ui::HexColor(0xC084FC), l10n::Get(l10n::StringId::Downloads).c_str());
-    downloads.builtin = static_cast<int>(BuiltinQuickAccess::Downloads);
-    m.quick_access.push_back(std::move(downloads));
-    // The library folders Explorer lists next to them, in Explorer's order.
-    // Documents and Music start hidden (kDefaultQuickAccessHiddenMask); a
-    // folder the profile does not have is left out, section menu included.
-    const struct {
-        REFKNOWNFOLDERID id;
-        const wchar_t* glyph;
-        const wchar_t* fallback;
-        uint32_t rgb;
-        l10n::StringId label;
-        BuiltinQuickAccess builtin;
-    } libraries[] = {
-        // Documents: \xE7C3 (Page), not the file glyph, so the sidebar gives it
-        // its color document icon (FluentSvgIdForGlyph).
-        {FOLDERID_Documents, L"\xE7C3", L"Docs", 0x60A5FA, l10n::StringId::PickerDocuments,
-         BuiltinQuickAccess::Documents},
-        {FOLDERID_Pictures, L"\xE91B", L"Pics", 0x34D399, l10n::StringId::PickerPictures,
-         BuiltinQuickAccess::Pictures},
-        {FOLDERID_Music, L"\xE8D6", L"Music", 0xF472B6, l10n::StringId::Music,
-         BuiltinQuickAccess::Music},
-        {FOLDERID_Videos, L"\xE714", L"Video", 0xF59E0B, l10n::StringId::Videos,
-         BuiltinQuickAccess::Videos},
-    };
-    for (const auto& library : libraries) {
-        SidebarEntry entry = MakeKnownEntry(library.id, library.glyph, library.fallback,
-            ui::HexColor(library.rgb), l10n::Get(library.label).c_str());
-        if (entry.path.empty()) continue;
-        entry.builtin = static_cast<int>(library.builtin);
-        m.quick_access.push_back(std::move(entry));
-    }
+    m.quick_access = BuildBuiltinQuickAccess(recycle);
     // OneDrive leads its own section: one row per signed-in account, the way
     // Explorer lists them. The known folder only resolves for the primary
     // account, so it stays as the fallback when the registry has nothing.
     m.cloud = BuildOneDriveEntries();
     if (m.cloud.empty()) {
-        SidebarEntry onedrive = MakeKnownEntry(FOLDERID_OneDrive, L"\xE753", L"OneDrive",
+        SidebarEntry onedrive = MakeKnownEntry(
+            fs::NormalizePath(known_folders::CurrentPath(FOLDERID_OneDrive, KF_FLAG_DEFAULT)),
+            L"\xE753", L"OneDrive",
             ui::HexColor(0x2B88D8), L"OneDrive");
         if (!onedrive.path.empty()) m.cloud.push_back(std::move(onedrive));
     }
@@ -1561,21 +2366,6 @@ SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle) {
         }
     }
     AppendOtherCloudEntries(m.cloud);
-    SidebarEntry recycle_bin;
-    recycle_bin.glyph = L"\xE75C";
-    recycle_bin.fallback = L"Bin";
-    recycle_bin.color = ui::HexColor(0x94A3B8);
-    recycle_bin.label = l10n::Get(l10n::StringId::RecycleBin);
-    recycle_bin.path = MakeRecyclePath();
-    recycle_bin.builtin = static_cast<int>(BuiltinQuickAccess::RecycleBin);
-    if (recycle && recycle->valid) {
-        wchar_t occupancy[96]{};
-        swprintf_s(occupancy, l10n::Get(l10n::StringId::RecycleOccupancyFormat).c_str(),
-                   std::to_wstring(recycle->items).c_str(),
-                   pulse::format::ByteSize(recycle->bytes).c_str());
-        recycle_bin.detail = occupancy;
-    }
-    m.quick_access.push_back(std::move(recycle_bin));
 
     static const uint32_t kDrivePalette[] = { 0x60A5FA, 0x34D399, 0xFBBF24, 0xC084FC };
     DWORD drives = GetLogicalDrives();
@@ -1592,6 +2382,7 @@ SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle) {
         e.fallback = L"Drive";
         e.path = fs::NormalizePath(std::wstring(root));
         e.is_drive = true;
+        e.drive_type = static_cast<uint8_t>(GetDriveTypeW(root));
         e.color = ui::HexColor(kDrivePalette[m.drives.size() % 4]);
         m.drives.push_back(std::move(e));
     }
@@ -1654,7 +2445,14 @@ static std::wstring SelectionText(const Tab& tab) {
         return {};
     wchar_t buf[64]{};
     swprintf_s(buf, l10n::Get(l10n::StringId::SelectedCountFormat).c_str(), count);
-    return buf;
+    std::wstring text(buf);
+    if (!tab.current_path.empty() && !fs::IsVirtualPath(tab.current_path) && !tab.content_results) {
+        uint64_t bytes = 0;
+        int files = 0;
+        tab.SelectionSizeSummary(&bytes, &files, nullptr);
+        if (files > 0) text += L"  \u00B7  " + format::ByteSize(bytes);
+    }
+    return text;
 }
 
 static ui::SidebarGroup ConvertGroup(const std::wstring& header, const std::vector<SidebarEntry>& src,
@@ -2029,11 +2827,13 @@ void CollectFilterMatches(const Tab& tab, const PlacesCatalog* places, std::vect
 namespace {
 PaneDecorator g_dup_decorator = nullptr;
 MediaPaneDecorator g_media_decorator = nullptr;
+MediaPaneDecorator g_extension_decorator = nullptr;
 void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const PlacesCatalog* places);
 } // namespace
 
 void SetDupPaneDecorator(PaneDecorator decorator) { g_dup_decorator = decorator; }
 void SetMediaPaneDecorator(MediaPaneDecorator decorator) { g_media_decorator = decorator; }
+void SetExtensionPaneDecorator(MediaPaneDecorator decorator) { g_extension_decorator = decorator; }
 
 void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCatalog* places) {
     out.banner_action_labels[0].clear();
@@ -2043,9 +2843,13 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
     out.dup_empty_title.clear();
     out.media_columns = 0;
     out.media_cell = nullptr;
+    out.extension_columns.clear();
+    out.extension_cell = nullptr;
+    out.extension_badge = nullptr;
     FillPaneViewModelBody(out, pane, places);
     const Tab* tab = pane.ActiveTab();
     if (g_media_decorator && tab) g_media_decorator(*tab, out);
+    if (g_extension_decorator && tab) g_extension_decorator(*tab, out);
     // A media column order without those columns on screen (switched off,
     // another folder) sorts by name (SortEntries); show it as such.
     if (!out.media_columns && out.sort_column >= ui::SortColumn::MediaTaken) out.sort_column = ui::SortColumn::Name;
@@ -2077,7 +2881,9 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
     ParsePulsePath(tab->current_path, &virtual_kind, nullptr);
     out.can_go_up = virtual_kind == L"recycle" || virtual_kind == L"device"
         ? true
-        : (fs::IsVirtualPath(tab->current_path) ? tab->CanGoBack() : !tab->current_path.empty());
+        : (virtual_kind == L"vfs"
+            ? (extensions::vfs::ParentVfsPath(tab->current_path).has_value() || tab->CanGoBack())
+            : (fs::IsVirtualPath(tab->current_path) ? tab->CanGoBack() : !tab->current_path.empty()));
     out.is_file_system = !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path);
     out.cloud_status_column = out.is_file_system && IsUnderCloudFilesRoot(tab->current_path);
     out.can_create = out.is_file_system && !tab->net_readonly && !IsUncServerRoot(tab->current_path);
@@ -2134,8 +2940,8 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
     out.search_snippets = tab->search_snippets;
     out.recent_filter = tab->recent_filter;
     out.recent_total = out.is_recent && places ? places->recent_items.size() : 0;
-    // Phones: the breadcrumb splits the pulse:device: path (此电脑 › 手机 › …).
-    if (virtual_kind == L"device") out.path = tab->current_path;
+    // Phones & VFS: the breadcrumb splits the pulse:device: / pulse:vfs: path.
+    if (virtual_kind == L"device" || virtual_kind == L"vfs") out.path = tab->current_path;
     if (virtual_kind == L"recycle") {
         out.path = MakeRecyclePath();
         out.date_column_label = l10n::Get(l10n::StringId::ColumnDeleted);
@@ -2757,6 +3563,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
                 header.label = group->name;
                 header.path = MakeStarredGroupPath(group->id);
                 header.indent = 1;
+                header.starred_child = true;
                 header.icon_glyph = L"\xE8F1";
                 header.fallback_text = L"Grp";
                 header.icon_color = ui::HexColor(0xFBBF24);

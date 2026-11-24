@@ -16,6 +16,13 @@ int main() {
         {L"first", L"First"}, {L"empty-last", L"Empty last"}};
     data.starred_items = {{L"C:\\top.txt", 1, {}}, {L"C:\\one", 2, L"first"},
         {L"C:\\two", 2, L"second"}, {L"C:\\three", 2, L"first"}};
+    data.networks = {{LR"(\\server\share)", L"NAS"}, {LR"(\\SERVER\share)", L"duplicate"}, {L"relative", L"bad"}};
+    WindowViewModel networks;
+    AppendPickerNetworkPlaces(networks, data, true, [](const auto& path) { return path; });
+    check(networks.sidebar.size() == 1 && networks.sidebar[0].id == kPickerNetworksSection &&
+        networks.sidebar[0].collapsed && networks.sidebar[0].items.size() == 1 &&
+        networks.sidebar[0].items[0].path == LR"(\\server\share)" && networks.sidebar[0].items[0].label == L"NAS",
+        "network sidebar preserves navigable UNC label, collapse, and deduplicates paths");
     WindowViewModel vm;
     AppendPickerSharedPlaces(vm, data, false, false, {}, [](const std::wstring& path) { return path; });
     const std::vector<std::wstring> expected{L"C:\\top.txt", std::wstring(kPickerGroupPrefix) + L"first",

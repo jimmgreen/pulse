@@ -1,10 +1,15 @@
 #include "vertical_tabs.h"
 #include "app_commands.h"
 #include "app_navigation.h"
+#include "app_sidebar_refresh.h"
+#include "quick_access.h"
 #include "last_tab_close.h"
 #include "favorites_bar.h"
 #include "../common/localization.h"
 #include "../ui/ui_renderer.h"
+#include "title_buttons.h"
+#include "app_runtime.h"
+#include "staging_shelf_controller.h"
 #include <algorithm>
 #include <utility>
 #include <cwchar>
@@ -35,6 +40,45 @@ void ApplyVerticalTabs(AppState& s, ui::WindowViewModel& vm) {
         (active && active->current_path.starts_with(L"pulse:settings"));
     const bool vertical = s.appPrefs.vertical_tabs && !in_settings;
     s.renderer.SetVerticalTabs(vertical);
+    // 界面布局: Settings keeps the full chrome (its own navigation and status).
+    ui::MainRenderer::UiChromeFlags chrome;
+    if (!in_settings) {
+        chrome.show_tabs = s.appPrefs.ui_show_tabs;
+        chrome.address_in_title = s.appPrefs.ui_address_in_title;
+        chrome.command_row = s.appPrefs.ui_command_mode == 0;
+        chrome.inline_commands = s.appPrefs.ui_command_mode == 1;
+        chrome.toolbar_labels = s.appPrefs.ui_toolbar_labels;
+        chrome.status_bar = s.appPrefs.ui_status_bar;
+        chrome.sidebar_mode = std::clamp(s.appPrefs.ui_sidebar_mode, 0, 2);
+        chrome.selection_float = s.appPrefs.ui_selection_float;
+    }
+    // 标题栏按钮 (everywhere, settings included).
+    chrome.title_buttons.clear();
+    for (const auto& button : app::VisibleTitleButtons(s.appPrefs.ui_title_buttons)) {
+        if (button.Divider()) { chrome.title_buttons.push_back(-1); continue; }
+        for (size_t k = 0; k < app::kTitleButtonIds.size(); ++k)
+            if (app::kTitleButtonIds[k] == button.id) chrome.title_buttons.push_back(static_cast<int>(k));
+    }
+    // 暂存区 leads the group when there is no docked sidebar to hold the tray
+    // card and something is staged (ui_modes_mockup pillHTML).
+    const int staged = TrayItemTotalCount(s.tray);
+    if (!in_settings && chrome.sidebar_mode != 0 && staged > 0) {
+        if (!chrome.title_buttons.empty()) chrome.title_buttons.insert(chrome.title_buttons.begin(), -1);
+        chrome.title_buttons.insert(chrome.title_buttons.begin(), 5);
+        chrome.tray_badge = staged;
+        chrome.tray_open = StagingShelfVisible(s) || s.trayView.open;
+    }
+    s.renderer.SetUiChrome(chrome);
+    // 精简侧边栏: places, favorites, this PC, network (and the tabs group);
+    // workspaces, saved searches and tags stay in the full sidebar.
+    if (!in_settings && s.appPrefs.ui_sidebar_lite) {
+        for (auto& group : vm.sidebar) {
+            const auto id = static_cast<app::SidebarSectionId>(group.id);
+            if (!group.tabs_section && (id == app::SidebarSectionId::Workspaces ||
+                id == app::SidebarSectionId::SavedSearches || id == app::SidebarSectionId::Tags))
+                group.hidden = true;
+        }
+    }
     s.renderer.SetSidebarCollapsed(s.appPrefs.sidebar_collapsed);
     if (s.renderer.SidebarPeek() && !s.renderer.SidebarRailVisible(static_cast<float>(s.compositor.Width())))
         CloseSidebarPeek(s);
@@ -95,7 +139,8 @@ void ApplyVerticalTabs(AppState& s, ui::WindowViewModel& vm) {
 
 void ToggleSidebarCollapsed(AppState& s) {
     const float width = static_cast<float>(s.compositor.Width());
-    if (s.renderer.SidebarAutoCollapsed(width)) {
+    // 浮起 / 隐藏 and the automatic rail: the toggle pins the overlay open or closes it.
+    if (s.renderer.SidebarAutoCollapsed(width) || s.renderer.SidebarUndocked()) {
         const bool open = !s.renderer.SidebarPeekVisible(width);
         s.sidebarPeekArmAt = 0;
         if (open) s.renderer.SetSidebarPeek(true, true);
@@ -116,9 +161,17 @@ void ToggleSidebarCollapsed(AppState& s) {
 namespace {
 constexpr ULONGLONG kPeekDwellMs = 450;
 
+// 浮起: resting on the window's left edge opens the overlay after a short dwell.
+// The outer ~8 DIP are the resize border (WM_NCHITTEST HTLEFT, no client
+// mouse moves), so the strip reaches 16 DIP into the client area.
+constexpr ULONGLONG kFloatPeekDwellMs = 120;
+constexpr float kFloatPeekEdgeDip = 16.0f;
+
+bool SidebarFloats(const AppState& s) { return s.renderer.UiChrome().sidebar_mode == 1 && s.renderer.SidebarUndocked(); }
+
 bool PeekEligible(AppState& s) {
     const float width = static_cast<float>(s.compositor.Width());
-    if (!s.appPrefs.sidebar_collapsed && !s.renderer.SidebarAutoCollapsed(width)) return false;
+    if (!s.appPrefs.sidebar_collapsed && !s.renderer.SidebarAutoCollapsed(width) && !SidebarFloats(s)) return false;
     if (!s.renderer.SidebarAutoCollapsed(width) && s.renderer.SidebarAnimating()) return false;
     if ((GetKeyState(VK_LBUTTON) & 0x8000) != 0) return false;  // drags keep the rail
     if (const app::Tab* tab = ActiveTab(s); tab && tab->current_path.starts_with(L"pulse:settings"))
@@ -129,7 +182,11 @@ bool PeekEligible(AppState& s) {
 
 void CloseSidebarPeek(AppState& s) {
     s.sidebarPeekArmAt = 0;
-    if (!s.renderer.SidebarPeek()) return;
+    const bool cooled = s.renderer.SetSidebarEdgeHot(false);
+    if (!s.renderer.SidebarPeek()) {
+        if (cooled) InvalidateRect(s.hwnd, nullptr, FALSE);
+        return;
+    }
     s.renderer.SetSidebarPeek(false);
     // The rail itself never scrolls; drop any offset the overlay picked up.
     s.sidebarScroll = 0.0f;
@@ -138,7 +195,7 @@ void CloseSidebarPeek(AppState& s) {
 
 void UpdateSidebarPeek(AppState& s, int x, [[maybe_unused]] int y) {
     const float w = static_cast<float>(s.compositor.Width());
-    if (!s.appPrefs.sidebar_collapsed && !s.renderer.SidebarAutoCollapsed(w)) {
+    if (!s.appPrefs.sidebar_collapsed && !s.renderer.SidebarAutoCollapsed(w) && !s.renderer.SidebarUndocked()) {
         if (s.sidebarPeekArmAt || s.renderer.SidebarPeek()) CloseSidebarPeek(s);
         return;
     }
@@ -148,6 +205,13 @@ void UpdateSidebarPeek(AppState& s, int x, [[maybe_unused]] int y) {
         // reachable because it sits inside the overlay's width).
         if (static_cast<float>(x) > s.renderer.SidebarFullWidth(w) + 12.0f * s.scale)
             CloseSidebarPeek(s);
+        return;
+    }
+    const bool edge = SidebarFloats(s) && static_cast<float>(x) < kFloatPeekEdgeDip * s.scale &&
+        static_cast<float>(y) >= s.renderer.SidebarRect(w, static_cast<float>(s.compositor.Height())).top;
+    if (s.renderer.SetSidebarEdgeHot(edge)) InvalidateRect(s.hwnd, nullptr, FALSE);
+    if (edge) {
+        if (!s.sidebarPeekArmAt) s.sidebarPeekArmAt = GetTickCount64();
         return;
     }
     // The rail reads on its own (section titles, drive letters, tooltips), so
@@ -165,16 +229,33 @@ void DismissSidebarPeekOutside(AppState& s, int x, int y) {
         CloseSidebarPeek(s);
 }
 
+void DragSidebarPeek(AppState& s, POINT client) {
+    if (!SidebarFloats(s) || s.renderer.SidebarPeekPinned()) return;
+    const float w = static_cast<float>(s.compositor.Width());
+    const D2D1_RECT_F sb = s.renderer.SidebarRect(w, static_cast<float>(s.compositor.Height()));
+    const float x = static_cast<float>(client.x), y = static_cast<float>(client.y);
+    if (s.renderer.SidebarPeek()) {
+        if (x > s.renderer.SidebarFullWidth(w) + 12.0f * s.scale || y < sb.top - 12.0f * s.scale) CloseSidebarPeek(s);
+        return;
+    }
+    if (x >= 0.0f && x < (kFloatPeekEdgeDip + 4.0f) * s.scale && y >= sb.top) {
+        s.sidebarPeekArmAt = 0;
+        s.renderer.SetSidebarPeek(true);
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+    }
+}
+
 bool TickSidebarPeek(AppState& s, ULONGLONG now) {
     if (!s.sidebarPeekArmAt || s.renderer.SidebarPeek()) return false;
-    if (now - s.sidebarPeekArmAt < kPeekDwellMs) return false;
+    if (now - s.sidebarPeekArmAt < (SidebarFloats(s) ? kFloatPeekDwellMs : kPeekDwellMs)) return false;
     s.sidebarPeekArmAt = 0;
     if (!PeekEligible(s)) return false;
     POINT pt{};
     GetCursorPos(&pt);
     ScreenToClient(s.hwnd, &pt);
+    const float h = static_cast<float>(s.compositor.Height());
     if (pt.x < 0 || static_cast<float>(pt.x) >= ui::kSidebarRailWidthDip * s.scale ||
-        static_cast<float>(pt.y) < s.renderer.TitleBarHeight()) return false;
+        static_cast<float>(pt.y) < s.renderer.SidebarRect(static_cast<float>(s.compositor.Width()), h).top) return false;
     s.renderer.SetSidebarPeek(true);
     return true;
 }
@@ -373,6 +454,10 @@ bool HandleFolderMiddleClick(AppState& s, int x, int y) {
         if (path.empty()) return true;   // a starred file, or the bar's empty part
     } else if (hit.region == R::SidebarItem) {
         if (IsVerticalTabPath(hit.path) || hit.path.starts_with(kTabPrefix)) return false;
+        const int builtin = app::BuiltinQuickAccessFromKey(
+            QuickAccessRowKey(s, vm, hit.sidebar_section, hit.sidebar_item));
+        if (OpenSidebarKnownFolder(s, builtin, (GetKeyState(VK_CONTROL) & 0x8000)
+                ? SidebarFolderOpenMode::NewTab : SidebarFolderOpenMode::BackgroundTab)) return true;
         // Tag group headers and 所有标签 › are sidebar controls, not places.
         if (app::IsTagGroupPath(hit.path) || hit.path == app::MakeTagManagerPath()) return true;
         path = hit.path;

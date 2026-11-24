@@ -7,7 +7,7 @@
 #include "extensions/native/settings_pages_adapter.h"
 #include "extensions/runtime.h"
 #include "extension_store_ui.h"
-#include "extension_store_seven_zip.h"
+#include "seven_zip_store_probe.h"
 #include "extension_store_edits.h"
 #include "extension_store_actions.h"
 #include "../common/json_value.h"
@@ -20,7 +20,6 @@
 #include <algorithm>
 
 int RunExtensionStoreOperationsTest(pulse::AppState&, const wchar_t*);
-int RunExtensionStoreSwitchesTest(pulse::AppState&, const wchar_t*);
 
 namespace {
 void PumpStoreFlow() {
@@ -85,11 +84,15 @@ int RunExtensionStoreFlowTest(pulse::AppState& s, const wchar_t* output_dir) {
     auto action = [&](A base, int offset = 0) {
         return ExtensionStoreAction(s, static_cast<int>(base) + offset);
     };
+    // 7-Zip settings are the plugin's own SDK page; read and edit them there.
+    using store_probe::SetSevenZipState;
+    auto plugin_state = [&](const ui::ExtensionStoreView& view) { return store_probe::ReadSevenZip(s, view); };
     OpenSettingsTab(s, 8);
     action(A::StoreBrowse);
     const auto ready_started = GetTickCount64();
-    const bool ready = wait([](const auto& view) {
-        return view.seven_zip.available && view.seven_zip.item >= 0 && view.seven_zip.installed_index >= 0;
+    const bool ready = wait([&](const auto& view) {
+        const auto z = plugin_state(view);
+        return z.available && z.item >= 0 && z.installed_index >= 0;
     }, 30000);
     check(ready, "installed registry and real 7-Zip store settings become ready within 30 seconds");
     log << "store_and_plugin_ready_ms=" << GetTickCount64() - ready_started << std::endl;
@@ -106,92 +109,79 @@ int RunExtensionStoreFlowTest(pulse::AppState& s, const wchar_t* output_dir) {
         log << "failures=" << failures << std::endl; return 1;
     }
     if (GetEnvironmentVariableW(L"PULSE_TEST_STORE_LEGACY", nullptr, 0)) {
-        const auto legacy = read().seven_zip;
+        const auto legacy = plugin_state(read());
         check(legacy.available && !legacy.menu_available && !legacy.formats_available,
             "real old plugin is detected by missing menu and format state capabilities");
         check(!SetSevenZipState(s, "cmd0", "false"), "old plugin rejects missing command state rather than saving a false success");
-        for (int tab : {1, 2}) {
-            s.store_detail = true; s.store_detail_tab = tab;
-            auto vm = BuildVm(s, false); vm.settings_open = true; vm.settings_page = 8;
-            const auto theme = ui::MakeTheme(s.darkMode, s.accentColor);
-            auto* dc = s.compositor.Dc(); dc->BeginDraw(); dc->Clear(theme.bg);
-            s.renderer.Render(vm, D2D1::RectF(0, 0, static_cast<float>(s.compositor.Width()), static_cast<float>(s.compositor.Height())), theme);
-            check(SUCCEEDED(dc->EndDraw()) && s.compositor.SaveSnapshot(
-                (output / (tab == 1 ? L"legacy-menu.png" : L"legacy-formats.png")).c_str()),
-                "render explicit extension-update message instead of fake switches or empty formats");
-        }
         log << "failures=" << failures << std::endl;
         return failures ? 1 : 0;
     }
-    check(read().seven_zip.menu_available && read().seven_zip.formats_available &&
-        !read().seven_zip.formats_rw.empty() && !read().seven_zip.formats_ro.empty(),
+    {
+        const auto z = plugin_state(read());
+        check(z.menu_available && z.formats_available && !z.formats_rw.empty() && !z.formats_ro.empty(),
         "updated real plugin supplies six switches and both nonempty format groups");
+        log << "  menu_available=" << z.menu_available << " formats_rw=" << z.formats_rw.size()
+            << " formats_ro=" << z.formats_ro.size() << " status=" << json::Utf8(z.status) << '\n';
+    }
     {
         const auto view = read();
-        const auto& installed = view.installed[view.seven_zip.installed_index];
-        if (installed.version.empty()) check(!view.items[view.seven_zip.item].action_enabled,
+        const auto z = plugin_state(view);
+        const auto& installed = view.installed[static_cast<size_t>(z.installed_index)];
+        if (installed.version.empty()) check(!view.items[static_cast<size_t>(z.item)].action_enabled,
             "unlisted upgraded plugin is not offered an older catalog package as an update");
     }
-    const auto original = read().seven_zip;
+    const auto original = plugin_state(read());
     const auto original_search = s.store_search;
     const int original_category = s.store_category;
     const bool original_detail = s.store_detail;
     const int original_tab = s.store_detail_tab;
-    const int original_preview = s.store_preview_kind;
-    auto expect = [&](A base, int offset, const std::function<bool(const ui::SevenZipView&)>& predicate, const char* label) {
-        const bool handled = action(base, offset);
-        // A real mouse press can be down while this isolated probe runs. Finish
-        // the same release path rather than leaving a slider preview uncommitted.
-        if (base == A::SzLevelBase && ExtensionStoreLevelDragging(s)) {
-            log << "level_preview=" << s.store_level_drag << std::endl;
-            ExtensionStoreLevelDragEnd(s);
-            if (GetCapture() == s.hwnd) ReleaseCapture();
-        }
-        check(handled && wait([&](const auto& view) { return predicate(view.seven_zip); }), label);
+    auto expect = [&](const std::string& key, const std::string& value,
+                      const std::function<bool(const store_probe::SevenZipState&)>& predicate, const char* label) {
+        const bool handled = SetSevenZipState(s, key, value);
+        check(handled && wait([&](const auto& view) { return predicate(plugin_state(view)); }), label);
     };
-    // All mutations go through production action dispatch and the plugin-owned state bridge.
+    auto str = [](int value) { return std::to_string(value); };
+    // All mutations are edits on the plugin's own settings page; the store only reflects them.
     for (int mode = 0; mode < 3; ++mode)
-        expect(A::SzModeBase, mode, [=](const auto& z) { return z.mode == mode; }, "mode action reaches plugin state");
-    const auto here = MenuSignature(read().seven_zip.archive_rows);
-    expect(A::SzModeBase, 1, [](const auto& z) { return z.mode == 1; }, "folder extraction mode selected");
-    check(wait([&](const auto& view) { return MenuSignature(view.seven_zip.archive_rows) != here; }), "extract menu title or detail changes with mode");
+        expect("mode", str(mode), [=](const auto& z) { return z.mode == mode; }, "mode action reaches plugin state");
+    const auto here = MenuSignature(plugin_state(read()).archive_rows);
+    expect("mode", "1", [](const auto& z) { return z.mode == 1; }, "folder extraction mode selected");
+    check(wait([&](const auto& view) { return MenuSignature(plugin_state(view).archive_rows) != here; }), "extract menu title or detail changes with mode");
     for (int location = 0; location < 2; ++location)
-        expect(A::SzLocationBase, location, [=](const auto& z) { return z.location == location; }, "location action reaches plugin state");
+        expect("location", str(location), [=](const auto& z) { return z.location == location; }, "location action reaches plugin state");
     for (int format = 0; format < 6; ++format)
-        expect(A::SzFormatBase, format, [=](const auto& z) { return z.format == format; }, "format action reaches plugin state");
-    expect(A::SzFormatBase, 0, [](const auto& z) { return z.format == 0; }, "compressed format enables level selection");
+        expect("format", str(format), [=](const auto& z) { return z.format == format; }, "format action reaches plugin state");
+    expect("format", "0", [](const auto& z) { return z.format == 0; }, "compressed format enables level selection");
     for (int level = 0; level < 6; ++level)
-        expect(A::SzLevelBase, level, [=](const auto& z) { return z.level == level; }, "level action reaches plugin state");
-    expect(A::SzFormatBase, 2, [](const auto& z) { return z.format == 2; }, "tar format selected");
-    expect(A::SzLevelBase, 0, [](const auto& z) { return z.level == 5; }, "tar ignores disabled level action");
-    expect(A::SzFormatBase, 1, [](const auto& z) { return z.format == 1; }, "zip format selected");
-    check(wait([](const auto& view) { return MenuSignature(view.seven_zip.file_rows).find(L"zip") != std::wstring::npos; }), "file menu reflects zip format");
-    const bool remember = read().seven_zip.remember;
-    expect(A::SzRemember, 0, [=](const auto& z) { return z.remember != remember; }, "detail remember switch toggles plugin state");
-    expect(A::StoreQuickRemember, 0, [=](const auto& z) { return z.remember == remember; }, "quick remember switch uses same plugin state");
+        expect("level", str(level), [=](const auto& z) { return z.level == level; }, "level action reaches plugin state");
+    expect("format", "2", [](const auto& z) { return z.format == 2; }, "tar format selected");
+    expect("format", "1", [](const auto& z) { return z.format == 1; }, "zip format selected");
+    check(wait([&](const auto& view) { return MenuSignature(plugin_state(view).file_rows).find(L"zip") != std::wstring::npos; }), "file menu reflects zip format");
+    const bool remember = plugin_state(read()).remember;
+    expect("remember", remember ? "false" : "true", [=](const auto& z) { return z.remember != remember; }, "remember switch toggles plugin state");
+    expect("remember", remember ? "true" : "false", [=](const auto& z) { return z.remember == remember; }, "remember switch restores plugin state");
     for (int placement = 0; placement < 2; ++placement)
-        expect(A::SzPlacementBase, placement, [=](const auto& z) { return z.submenu == (placement != 0); }, "menu placement action reaches plugin state");
+        expect("placement" + str(placement), "true", [=](const auto& z) { return z.submenu == (placement != 0); }, "menu placement action reaches plugin state");
     for (int command = 0; command < 6; ++command) {
-        const auto before = read().seven_zip;
+        const auto before = plugin_state(read());
         const auto wanted = before.commands ^ (1u << command);
-        expect(A::SzCommandBase, command, [=](const auto& z) { return z.commands == wanted; }, "command toggle updates actual mask");
+        const auto key = "cmd" + str(command);
+        const bool was_on = (before.commands >> command) & 1u;
+        expect(key, was_on ? "false" : "true", [=](const auto& z) { return z.commands == wanted; }, "command toggle updates actual mask");
         check(wait([&](const auto& view) {
-            return MenuSignature(view.seven_zip.archive_rows) != MenuSignature(before.archive_rows) ||
-                MenuSignature(view.seven_zip.file_rows) != MenuSignature(before.file_rows);
+            const auto now = plugin_state(view);
+            return MenuSignature(now.archive_rows) != MenuSignature(before.archive_rows) ||
+                MenuSignature(now.file_rows) != MenuSignature(before.file_rows);
         }), "command toggle changes live context-menu preview");
-        expect(A::SzCommandBase, command, [=](const auto& z) { return z.commands == before.commands; }, "command toggle restores original command mask");
+        expect(key, was_on ? "true" : "false", [=](const auto& z) { return z.commands == before.commands; }, "command toggle restores original command mask");
     }
-    for (int tab = 0; tab < 4; ++tab) {
+    for (int tab = 0; tab < 2; ++tab) {
         action(A::StoreDetailTabBase, tab);
         check(read().detail_tab == tab, "detail tab action updates view");
     }
     for (int category = 0; category < 5; ++category) {
         action(A::StoreChipBase, category);
         check(read().category == category, "category action updates view");
-    }
-    for (int preview = 0; preview < 2; ++preview) {
-        action(A::SzPreviewBase, preview);
-        check(read().preview_kind == preview, "preview kind action updates view");
     }
     s.store_detail = true;
     action(A::StoreDetailBack);
@@ -222,6 +212,7 @@ int RunExtensionStoreFlowTest(pulse::AppState& s, const wchar_t* output_dir) {
         EnumChildWindows(s.hwnd, MatchStoreEdit, reinterpret_cast<LPARAM>(&find));
         return find.result;
     };
+    action(A::StoreChipBase, 0);  // show every category (the chip loop above ends on the last one)
     check(render(0), "store frame rendered for native search edit");
     check(s.compositor.SaveSnapshot((output / L"store-live.png").c_str()), "save actual plugin store frame");
     const HWND search = edit(I::StoreSearchHint);
@@ -231,38 +222,19 @@ int RunExtensionStoreFlowTest(pulse::AppState& s, const wchar_t* output_dir) {
         check(s.store_search == L"7-Zip" && read().search == L"7-Zip", "search EDIT routes text to store view");
         SendMessageW(search, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(original_search.c_str()));
     }
-    const bool has_catalog = read().seven_zip.item >= 0;
+    const bool has_catalog = plugin_state(read()).item >= 0;
     check(has_catalog, "real catalog contains installed 7-Zip detail item");
     if (has_catalog) {
-        s.store_detail = true; s.store_detail_tab = 0;
-        check(render(1), "detail frame rendered for native folder edit");
-        check(s.compositor.SaveSnapshot((output / L"detail-live.png").c_str()), "save actual plugin detail frame");
-        expect(A::SzLevelBase, 0, [](const auto& z) { return z.level == 0; }, "slider drag starts from committed level");
-        const auto track = s.renderer.SettingsStoreField(6);
-        s.store_level_drag = 0.0f;
-        ExtensionStoreLevelDrag(s, static_cast<int>(std::lround(ui::fluent::StepSliderStopX(track, 6, 5, s.scale))));
-        check(ExtensionStoreLevelDragging(s) && std::lround(s.store_level_drag) == 5 && read().seven_zip.level == 0,
-            "shared slider drag previews the endpoint without saving intermediate values");
-        check(ExtensionStoreLevelDragEnd(s) && wait([](const auto& v) { return v.seven_zip.level == 5; }),
-            "slider release commits the chosen level through plugin state");
-        const HWND folder = edit(I::SzFolderHint);
-        check(folder != nullptr, "native fixed-folder EDIT located by real cue banner");
-        if (folder) {
-            const auto path = std::filesystem::absolute(output).wstring();
-            SendMessageW(folder, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(path.c_str()));
-            SendMessageW(folder, WM_KEYDOWN, VK_RETURN, 0);
-            check(wait([&](const auto& view) { return view.seven_zip.folder == path; }), "folder EDIT Enter commits through plugin validation");
-            DestroyStoreEdits(s);
-            check(render(1), "hosted controls rebuilt without resetting plugin values");
-            check(read().seven_zip.folder == path, "folder survives native EDIT recreation");
-        }
-    }
-    if (has_catalog) {
-        for (int tab : {2, 3}) {
+        // The generic detail page: overview (with the plugin's menu showcase) and about,
+        // opened exactly as a click on 7-Zip's store card does.
+        const int item = plugin_state(read()).item;
+        action(A::StoreItemDetailBase, item);
+        check(read().detail && read().detail_item == item, "7-Zip store card opens its generic detail page");
+        for (int tab : {0, 1}) {
             action(A::StoreDetailTabBase, tab);
-            check(read().detail_tab == tab && render(-1), "render actual plugin formats/about tab");
-            check(s.compositor.SaveSnapshot((output / (tab == 2 ? L"formats-live.png" : L"about-live.png")).c_str()),
-                "save actual plugin formats/about frame");
+            check(read().detail_tab == tab && render(-1), "render actual plugin generic detail tab");
+            check(s.compositor.SaveSnapshot((output / (tab == 0 ? L"detail-live.png" : L"about-live.png")).c_str()),
+                "save actual plugin generic detail frame");
         }
     }
     // Exercise the actual contribution adapter against a real selected archive,
@@ -294,7 +266,7 @@ int RunExtensionStoreFlowTest(pulse::AppState& s, const wchar_t* output_dir) {
     check(selected_archive, "real directory enumeration selects menu-fixture.zip");
     for (int command = 0; command < 6; ++command)
         SetSevenZipState(s, "cmd" + std::to_string(command), "true");
-    expect(A::SzPlacementBase, 0, [](const auto& z) { return !z.submenu && z.commands == 0x3f; },
+    expect("placement0", "true", [](const auto& z) { return !z.submenu && z.commands == 0x3f; },
         "real plugin registers top-level context commands");
     std::vector<ui::FluentMenuItem> contributed;
     const bool contributed_ready = selected_archive && wait([&](const auto&) {
@@ -310,13 +282,19 @@ int RunExtensionStoreFlowTest(pulse::AppState& s, const wchar_t* output_dir) {
         for (const auto& row : contributed) {
             if (row.heading && row.group_tint) gear_command = row.trailing_command;
             if (row.group_tint && !row.heading) {
-                icons = icons && row.vector_icon != ui::StoreIcon::None && row.glyph.empty();
+                // A registered extension icon (custom_icon) is also drawn as a vector.
+                icons = icons && (row.vector_icon != ui::StoreIcon::None || row.custom_icon != 0) && row.glyph.empty();
                 primary_detail = primary_detail || (row.primary && !row.detail.empty());
                 tinted_end = tinted_end || row.group_end;
             }
         }
         check(primary_detail, "actual primary extraction command retains its result detail");
         check(icons && tinted_end, "actual contributed commands use vectors and close their tinted group");
+        if (!(icons && tinted_end))
+            for (const auto& row : contributed)
+                log << "  row heading=" << row.heading << " tint=" << row.group_tint << " end=" << row.group_end
+                    << " vector=" << static_cast<int>(row.vector_icon) << " custom=" << row.custom_icon << " glyph=" << !row.glyph.empty()
+                    << " sep=" << row.separator_after << " text=" << json::Utf8(row.text) << '\n';
         const bool menu_ready = EnsureMenu(s);
         check(menu_ready, "reuse production FluentMenu for real contribution snapshots");
         auto full_menu = BuildFinderItemMenu(s, false, L"");
@@ -340,7 +318,7 @@ int RunExtensionStoreFlowTest(pulse::AppState& s, const wchar_t* output_dir) {
     }
     const bool reselected_archive = select_fixture();
     check(reselected_archive, "restore real archive selection after settings gear navigation");
-    expect(A::SzPlacementBase, 1, [](const auto& z) { return z.submenu; },
+    expect("placement1", "true", [](const auto& z) { return z.submenu; },
         "real plugin re-registers commands as submenu");
     std::vector<ui::FluentMenuItem> submenu_rows;
     const bool submenu_ready = reselected_archive && wait([&](const auto&) {
@@ -366,8 +344,6 @@ int RunExtensionStoreFlowTest(pulse::AppState& s, const wchar_t* output_dir) {
     if (s.menu) s.menu->SetTheme(s.darkMode, s.accentColor);
     check(RunExtensionStoreOperationsTest(s, output_dir) == 0,
         "real menu clicks complete archive creation, testing, extraction and checksum verification");
-    check(RunExtensionStoreSwitchesTest(s, output_dir) == 0,
-        "actual mouse clicks change both placement cards and all six command switches");
     // Restore all plugin-owned values, including the mask, even if any assertion failed.
     SetSevenZipState(s, "mode", std::to_string(original.mode));
     SetSevenZipState(s, "location", std::to_string(original.location));
@@ -379,7 +355,7 @@ int RunExtensionStoreFlowTest(pulse::AppState& s, const wchar_t* output_dir) {
     for (int command = 0; command < 6; ++command)
         SetSevenZipState(s, "cmd" + std::to_string(command), original.commands & (1u << command) ? "true" : "false");
     check(wait([&](const auto& view) {
-        const auto& z = view.seven_zip;
+        const auto z = plugin_state(view);
         return z.mode == original.mode && z.location == original.location && z.format == original.format &&
             z.level == original.level && z.remember == original.remember && z.submenu == original.submenu &&
             z.commands == original.commands && z.folder == original.folder;
@@ -387,10 +363,10 @@ int RunExtensionStoreFlowTest(pulse::AppState& s, const wchar_t* output_dir) {
     // Let the existing asynchronous settings resource writer drain; no private storage format is assumed.
     const auto settle = GetTickCount64();
     while (GetTickCount64() - settle < 500) { PumpStoreFlow(); MsgWaitForMultipleObjectsEx(0, nullptr, 10, QS_ALLINPUT, MWMO_INPUTAVAILABLE); }
-    log << "plugin_status=" << json::Utf8(read().seven_zip.status) << '\n';
+    log << "plugin_status=" << json::Utf8(plugin_state(read()).status) << '\n';
     log << "NOTE: native control recreation is covered; process-restart persistence is not asserted by this in-process test.\n";
     s.store_search = original_search; s.store_category = original_category; s.store_detail = original_detail;
-    s.store_detail_tab = original_tab; s.store_preview_kind = original_preview;
+    s.store_detail_tab = original_tab;
     DestroyStoreEdits(s);
     log << "failures=" << failures << std::endl;
     return failures ? 1 : 0;

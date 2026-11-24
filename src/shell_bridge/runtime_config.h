@@ -18,11 +18,22 @@ inline constexpr uint32_t kGetOpenFileNameW = 0x40, kGetSaveFileNameW = 0x80;
 inline constexpr uint32_t kGetOpenFileNameA = 0x100, kGetSaveFileNameA = 0x200;
 inline constexpr uint32_t kCommDlgExtendedError = 0x400;
 inline constexpr uint32_t kRoGetActivationFactory = 0x1000;
+inline constexpr uint32_t kSHOpenFolderAndSelectItems = 0x2000;
+inline constexpr uint32_t kShellExecuteW = 0x4000;
+inline constexpr uint32_t kShellExecuteExW = 0x8000;
+inline constexpr uint32_t kShellExecuteA = 0x10000;
+inline constexpr uint32_t kShellExecuteExA = 0x20000;
+// GetProcAddress slots of third-party modules (import-table route only): a
+// returned address equal to a hooked original is replaced by its wrapper.
+inline constexpr uint32_t kGetProcAddress = 0x40000;
+inline constexpr uint32_t kRoActivateInstance = 0x80000;
+inline constexpr uint32_t kComDlgDllGetClassObject = 0x100000;
 // Other standard entries are currently unconnected. Flags are coverage,
 // never proof that any individual dialog passed the capability policy.
 #pragma pack(push, 8)
 // Session::reserved is a flags word; unknown bits always fail closed.
 inline constexpr uint32_t kAdminSession = 1;
+inline constexpr uint32_t kUserAutoSession = 2;
 struct Session {
     uint32_t magic = kConfigMagic, version = kVersion, size = sizeof(Session), reserved = 0;
     uint32_t target_pid = 0, machine = 0;

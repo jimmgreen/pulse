@@ -139,6 +139,11 @@ struct FormDialog::Impl : std::enable_shared_from_this<Impl> {
             DrawProductTile(dc, box, ProductArt::SevenZip, HexColor(0x527D70), StoreIcon::Box);
             return;
         }
+        if (spec.subject_kind == FormDialogSubject::Extension) {
+            const auto icon = static_cast<StoreIcon>(spec.subject_tile_icon);
+            DrawProductTile(dc, box, ProductArtFor(icon), HexColor(spec.subject_tile_color), icon);
+            return;
+        }
         // 16-grid artwork scaled into the box: a two-tone folder or a page with a fold.
         const float u = (box.right - box.left) / 16.0f;
         auto at = [&](float x, float y, float w, float h) { return D2D1::RectF(box.left + x * u, box.top + y * u, box.left + (x + w) * u, box.top + (y + h) * u); };
@@ -172,9 +177,24 @@ struct FormDialog::Impl : std::enable_shared_from_this<Impl> {
             const auto card = DipRect(scale, kPad, SubjectTop(), content_w, kSubjectH);
             painter.FillRoundedRect(card, 6.0f * scale, WithAlpha(theme.text, dark ? 0.06f : 0.035f));
             painter.StrokeRoundedRect(card, 6.0f * scale, theme.stroke_card);
-            const float art = spec.subject_kind == FormDialogSubject::Archive ? 36.0f : 30.0f;
+            const bool tile = spec.subject_kind == FormDialogSubject::Archive || spec.subject_kind == FormDialogSubject::Extension;
+            const float art = tile ? 36.0f : 30.0f;
             DrawSubjectArt(DipRect(scale, kPad + 10.0f + (36.0f - art) * 0.5f, SubjectTop() + (kSubjectH - art) * 0.5f, art, art));
-            const float tx = kPad + 56.0f, tw = content_w - 66.0f;
+            const float tx = kPad + 56.0f;
+            float tw = content_w - 66.0f;
+            if (!spec.subject_badge.empty()) {
+                const float bw = painter.MeasureBadgeWidth(spec.subject_badge) / scale;
+                if (bw > 0.0f && bw + 24.0f < tw) {
+                    static constexpr fluent::BadgeKind kinds[] = {fluent::BadgeKind::Neutral, fluent::BadgeKind::Accent,
+                        fluent::BadgeKind::Success, fluent::BadgeKind::Warning, fluent::BadgeKind::Danger};
+                    fluent::BadgeSpec badge;
+                    badge.bounds = DipRect(scale, kPad + content_w - 14.0f - bw, SubjectTop() + (kSubjectH - 22.0f) * 0.5f, bw, 22.0f);
+                    badge.text = spec.subject_badge;
+                    badge.kind = kinds[std::clamp(spec.subject_badge_kind, 0, 4)];
+                    painter.DrawBadge(badge);
+                    tw -= bw + 16.0f;
+                }
+            }
             const bool two = !spec.subject_detail.empty();
             painter.DrawText(spec.subject, DipRect(scale, tx, SubjectTop() + (two ? 9.0f : 18.0f), tw, 20.0f),
                              subject_format.get() ? subject_format.get() : compositor.TextFormat(), theme.text);
@@ -422,8 +442,11 @@ bool FormDialog::Show(HWND owner, FormDialogSpec spec, bool dark, D2D1_COLOR_F a
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     if (!GetClassInfoExW(wc.hInstance, kClass, &wc)) RegisterClassExW(&wc);
     const int width = static_cast<int>(std::lround(self.Width() * self.scale));
+    // Born on the owner's monitor: CW_USEDEFAULT lands on the primary one and
+    // the move to a screen of another scale rescaled the size (WM_DPICHANGED).
+    const POINT origin = OwnedWindowOrigin(owner, width, static_cast<int>(200 * self.scale));
     if (!CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_CONTROLPARENT, kClass, self.spec.title.c_str(),
-                         WS_POPUP | WS_THICKFRAME | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, width,
+                         WS_POPUP | WS_THICKFRAME | WS_SYSMENU, origin.x, origin.y, width,
                          static_cast<int>(200 * self.scale), owner, nullptr, wc.hInstance, &self) || !self.hwnd) {
         self.owner_guard.reset();
         return false;

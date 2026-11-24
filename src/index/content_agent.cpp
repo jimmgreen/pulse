@@ -59,6 +59,7 @@ bool ParseRequest(const std::vector<uint8_t>& payload, ContentSearchRequest& req
     request.skip_system_locations = (flags & 4) != 0;
     request.whole_word = (flags & 8) != 0;
     const bool roots_only = (flags & 16) != 0 && request.mode == ContentSearchMode::Content;
+    request.allow_uncovered_root = (flags & 32) != 0;
     request.maximum_hits = maximum_hits;
     if (reader.remaining() >= 12) {
         uint32_t extra_roots = 0;

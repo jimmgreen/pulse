@@ -77,7 +77,11 @@ void Gallery(IWICImagingFactory* wic, ID2D1Factory* factory, const wchar_t* file
         L"Skip",L"Disconnect",L"Music",L"Wrench",L"Timer",L"Help",L"Puzzle",L"Sparkle",
         L"Wi-Fi",L"Mic",L"Checkbox",L"Highlight",L"Key",L"Bold",L"Layers",L"Globe",L"Flag",L"Phone",
         L"Check circle",L"Check filled",L"Blocked",L"Down",
-        L"Dialog",L"User",L"Exit",L"Pane expand",L"Pane restore",L"New file",L"Redo"
+        L"Dialog",L"User",L"Exit",L"Pane expand",L"Pane restore",L"New file",L"Redo",L"Git branch",L"Git changes",
+        L"UI layout",L"Windows",L"Tabs",L"Status bar",L"Zen",L"Standard",L"Workbench",L"Selection bar",
+        L"Extension",L"Title buttons",L"File list",L"Window parts",L"Tab to window",L"New window",L"Window overview",
+        L"Extra large icons",L"Large icons",L"Small icons",L"Tiles view",L"Content view",L"Shell menu",L"Plug",L"Arrange windows",
+        L"Extract selected"
     };
     static_assert(std::size(names) == static_cast<size_t>(Icon::Count)-1);
     constexpr int kRows = static_cast<int>((std::size(names) + 10) / 11);
@@ -200,8 +204,28 @@ int wmain(int argc, wchar_t** argv) {
         for (size_t i = 0; i < std::size(glyphs); ++i)
             for (size_t j = i + 1; j < std::size(glyphs); ++j)
                 Check(FromGlyph(glyphs[i])!=FromGlyph(glyphs[j]),"private glyph ids map to distinct shapes");
+        // 界面定制: the title buttons, the 界面 panel, the window menu and 设置 › 界面布局
+        // each get their own shape, not one another command already shows.
+        const std::pair<const wchar_t*,const wchar_t*> ui_pairs[] = {
+            {kGlyphUiLayout,L"\xE80A"}, {kGlyphWinSwitch,L"\xE923"}, {kGlyphTabStrip,L"\xE7C4"},
+            {kGlyphTabStrip,L"\xE737"}, {kGlyphNewWindow,L"\xE78B"}, {kGlyphTabToWindow,L"\xE8A7"},
+            {kGlyphSelectionBar,L"\xE8B3"}, {kGlyphFileExt,L"\xE7C3"}, {kGlyphTitleButtons,L"\xE70F"},
+            {kGlyphFileList,L"\xED25"}, {kGlyphWinOverview,L"\xE80A"}, {kGlyphModeStandard,L"\xE90C"}, {kGlyphModePro,L"\xF5B1"},
+        };
+        for (const auto& [mine, other] : ui_pairs)
+            Check(FromGlyph(mine)!=Icon::None && FromGlyph(mine)!=FromGlyph(other),"a 界面定制 icon has its own shape");
+        const wchar_t* ui_glyphs[] = {kGlyphUiLayout,kGlyphWinSwitch,kGlyphTabStrip,kGlyphStatusBar,kGlyphModeZen,
+            kGlyphModeStandard,kGlyphModePro,kGlyphSelectionBar,kGlyphFileExt,kGlyphTitleButtons,kGlyphFileList,
+            kGlyphWindowParts,kGlyphTabToWindow,kGlyphNewWindow,kGlyphWinOverview,
+            kGlyphViewXL,kGlyphViewLarge,kGlyphViewSmall,kGlyphViewTiles,kGlyphViewContent,L"\xE80A",kGlyphSysMenu,L"\xE8FD",
+            kGlyphPlug,L"\xE99A",kGlyphWinArrange,kGlyphExtractSel};
+        for (size_t i = 0; i < std::size(ui_glyphs); ++i)
+            for (size_t j = i + 1; j < std::size(ui_glyphs); ++j)
+                Check(FromGlyph(ui_glyphs[i])!=FromGlyph(ui_glyphs[j]),"界面定制 glyph ids map to distinct shapes");
         Check(FromGlyph(L"\xE7A7")==Icon::Undo && FromGlyph(L"\xE756")==Icon::Terminal &&
               FromGlyph(L"\xF012")==Icon::Zip,"toolbar tools draw on the vector grid, not the font");
+        Check(FromGlyph(L"\xF003")==Icon::GitBranch && FromGlyph(L"\xE7A2")==Icon::GitChanges &&
+              FromGlyph(L"\xEA3C")==Icon::Merge,"Git toolbar and version-window glyphs draw on the vector grid");
         // Settings rows and navigation, the assistant setup, cloud states, network
         // devices and command-palette actions: none of them may fall back to the font.
         for (const wchar_t* glyph : {L"\xE701",L"\xE703",L"\xE720",L"\xE73A",L"\xE771",L"\xE775",L"\xE7BC",

@@ -41,6 +41,18 @@ struct MediaFrame {
 bool MediaPackFrame(const std::wstring& path, UINT cap, bool grid, uint32_t known_duration_ms,
                     MediaFrame& frame);
 
+struct AvifSequenceFrame {
+    MediaFrame bitmap;                  // Premultiplied BGRA (not the opaque video thumbnail contract).
+    uint32_t count = 1;
+    uint32_t delay_ms = 0;
+};
+
+// An interactive AVIF sequence with the optional Media Pack. The bounded cache
+// is request-thread-local. False leaves the ordinary still decode available.
+bool MediaPackAvifFrame(const std::wstring& path, UINT cap, uint32_t index, HANDLE client_pipe,
+                        AvifSequenceFrame& frame);
+void RetireAvifSequence(const std::wstring& path);
+
 // Details-pane rows from ffprobe (duration, resolution, frame rate, codecs).
 // Appends at most `max_rows` rows not already present in `rows`.
 bool MediaPackProperties(const std::wstring& path, std::vector<PreviewPropertyValue>& rows,

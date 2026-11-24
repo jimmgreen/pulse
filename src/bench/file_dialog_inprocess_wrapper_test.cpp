@@ -6,10 +6,12 @@
 #include "../shell_bridge/file_dialog_client_state.h"
 #include "../shell_bridge/file_dialog_runtime.h"
 #include <shlobj.h>
+#include <shellapi.h>
 #include <propsys.h>
 #include <propkey.h>
 #include <propvarutil.h>
 #include <wrl/client.h>
+#include <wrl/implements.h>
 #include <atomic>
 #include <algorithm>
 #include <memory>
@@ -30,7 +32,7 @@ using Microsoft::WRL::ComPtr;
 unsigned checks = 0, failures = 0;
 bool isolated_native = false;
 int dynamic_text_mode = -1;
-HRESULT CreateIsolatedDialogWithNative(DialogFactory kind, const FileDialogBridgeServices& services, REFIID iid, void** output, IFileDialog** native_output) {
+HRESULT CreateSystemDialog(DialogFactory kind, IFileDialog** native_output) {
     using Entry = HRESULT (WINAPI*)(REFCLSID, REFIID, void**);
     static const auto entry = []() -> Entry {
         const auto module = LoadLibraryExW(L"comdlg32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -39,8 +41,11 @@ HRESULT CreateIsolatedDialogWithNative(DialogFactory kind, const FileDialogBridg
     if (!entry) return HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
     ComPtr<IClassFactory> factory;
     HRESULT hr = entry(kind == DialogFactory::Save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog, IID_PPV_ARGS(&factory));
+    return FAILED(hr) ? hr : factory->CreateInstance(nullptr, IID_PPV_ARGS(native_output));
+}
+HRESULT CreateIsolatedDialogWithNative(DialogFactory kind, const FileDialogBridgeServices& services, REFIID iid, void** output, IFileDialog** native_output) {
     ComPtr<IFileDialog> native;
-    if (SUCCEEDED(hr)) hr = factory->CreateInstance(nullptr, IID_PPV_ARGS(&native));
+    HRESULT hr = CreateSystemDialog(kind, &native);
     if (SUCCEEDED(hr) && native_output) native.CopyTo(native_output);
     return FAILED(hr) ? hr : WrapNativeFileDialog(kind, native.Get(), services, iid, output);
 }
@@ -67,7 +72,9 @@ struct Script {
     uint32_t prominent_kind = 0;
     bool prominent_nested = false;
     bool no_test_save = false;
+    bool real_world_save = false;
     bool separators = false;
+    bool export_as_customize = false;
     bool client_places = false, cancel_before_accept = false, default_folder = false;
     bool metadata=false,metadata_cancel=false,metadata_caller=false,metadata_full=false,save_as_metadata=false;
     uint32_t title_index=0,keywords_index=0;
@@ -91,6 +98,7 @@ struct Script {
     uint32_t button_state = 3;
     bool remove_button_sink = false;
     bool candidate = false, closed = false, corrupt_result = false, fail_after_callback = false, filtered = false;
+    bool clear_view_selection = false;
     HRESULT close_hr = S_OK;
 };
 Script* script = nullptr;
@@ -98,6 +106,7 @@ int expected_folder_policy = -1;
 bool expect_folder_policy_tail = false;
 PulsePickerUiV2Api real_config_api{};
 std::function<void()> show_action;
+std::function<void()> after_veto_action;
 const PulsePickerUiV2Callbacks* navigation_callbacks = nullptr;
 HRESULT navigation_result = S_OK;
 bool navigation_case = false;
@@ -133,6 +142,11 @@ HRESULT WINAPI Validate(PulsePickerUiV2Session, const PulsePickerUiV2Config* con
             config->controls[1].kind == PULSE_PICKER_UI_V2_CONTROL_SEPARATOR && config->controls[1].id == 2029 && config->controls[1].state == 2 &&
             config->controls[2].id == 2024 && (config->controls[2].state & PULSE_PICKER_UI_V2_CONTROL_PROMINENT),
             "save separators retain order, IDs, state and prominent button");
+    }
+    if (script->export_as_customize) {
+        Check(config->control_count == 1 && config->controls[0].kind == PULSE_PICKER_UI_V2_CONTROL_TEXT &&
+            config->controls[0].id == 2010 && config->controls[0].label.units == 0,
+            "Export As AddText control is represented in V2 config");
     }
     if(script->no_test_save) Check((config->save_options&PULSE_PICKER_UI_V2_SAVE_NO_TEST_CREATE) &&
         !(config->save_options&PULSE_PICKER_UI_V2_SAVE_SKIP_ACCESS_VALIDATION) && config->default_extension.units==3 &&
@@ -195,7 +209,7 @@ HRESULT WINAPI Validate(PulsePickerUiV2Session, const PulsePickerUiV2Config* con
         }
         if (hr != S_OK) return hr;
     }
-    return config->required_capabilities == 0 && config->access_policy == (script->folder_mode ? PULSE_PICKER_UI_V2_ACCESS_FOLDER_V1 : (script->save || script->no_test_save || script->separators || script->cancel_label_save) ? PULSE_PICKER_UI_V2_ACCESS_LOCAL_SAVE_V1 : PULSE_PICKER_UI_V2_ACCESS_LOCAL_OPEN_V1) ? S_OK : E_UNEXPECTED;
+    return config->required_capabilities == 0 && config->access_policy == (script->folder_mode ? PULSE_PICKER_UI_V2_ACCESS_FOLDER_V1 : (script->save || script->no_test_save || script->real_world_save || script->separators || script->cancel_label_save || script->export_as_customize) ? PULSE_PICKER_UI_V2_ACCESS_LOCAL_SAVE_V1 : PULSE_PICKER_UI_V2_ACCESS_LOCAL_OPEN_V1) ? S_OK : E_UNEXPECTED;
 }
 HRESULT WINAPI Window(PulsePickerUiV2Session, uint64_t show, HWND* out) { *out = show == 1 ? script->window : nullptr; return *out ? S_OK : E_UNEXPECTED; }
 HRESULT WINAPI Close(PulsePickerUiV2Session, uint64_t show, HRESULT hr) {
@@ -213,7 +227,9 @@ HRESULT WINAPI Shutdown(PulsePickerUiV2Session) { ++script->stopped; return S_OK
 HRESULT WINAPI Query(PulsePickerUiV2Session, uint64_t show, uint64_t generation, PulsePickerUiV2Snapshot* output) {
     if (show != 1 || (generation && generation != script->generation)) return HRESULT_FROM_WIN32(ERROR_RETRY);
     const std::wstring name = std::filesystem::path(script->file).filename().wstring(), candidate = script->candidate ? script->file : L"";
-    const std::wstring* values[]{&script->folder, &name, &script->file, &candidate};
+    const std::wstring empty_selection;
+    const std::wstring* values[]{&script->folder, &name,
+        script->clear_view_selection ? &empty_selection : &script->file, &candidate};
     PulsePickerUiV2Buffer* buffers[]{&output->folder, &output->filename, &output->selection, &output->candidate};
     output->show_id = 1; output->generation = script->generation; output->window = script->window;
     output->filter_index = 0; output->flags = script->candidate ? PULSE_PICKER_UI_V2_STATE_CANDIDATE_READY : 0;
@@ -341,6 +357,7 @@ HRESULT WINAPI Show(PulsePickerUiV2Session, const PulsePickerUiV2Config* config,
         if (hr == S_FALSE && !script->closed) {
             Check(IsWindow(script->window) != FALSE, "veto script retains same real HWND");
             script->candidate = false; ++script->generation;
+            if (after_veto_action) after_veto_action();
             script->candidate = true; hr = emit(PULSE_PICKER_UI_V2_EVENT_FILE_OK);
         }
     }
@@ -374,6 +391,8 @@ void CheckMetadata(IPropertyStore* store) {
 struct SinkState {
     unsigned calls = 0;
     bool self_unadvise = false, destroyed = false;
+    bool probe_folder_service = false, probed_folder_service = false;
+    ComPtr<IShellView> browser_view;
     DWORD cookie = 0;
     ComPtr<IFileDialogEvents>* external = nullptr;
     std::wstring expected;
@@ -468,6 +487,34 @@ public:
             for(DWORD i=0;i<count;++i){ComPtr<IShellItem> item;PWSTR path=nullptr;
                 const auto expected=i?script->second:script->file;
                 Check(items->GetItemAt(i,&item)==S_OK&&item->GetDisplayName(SIGDN_FILESYSPATH,&path)==S_OK&&path&&expected==path,"missing FileOk paths preserve order");CoTaskMemFree(path);}
+            if (state_.probe_folder_service) {
+                script->clear_view_selection = true;
+                ComPtr<IFolderView2> view;
+                ComPtr<IShellItemArray> from_view;
+                ComPtr<IShellItem> viewed_folder;
+                DWORD view_count = 0;
+                PWSTR view_path = nullptr;
+                Check(state_.browser_view && state_.browser_view.As(&view) == S_OK &&
+                    view->GetSelection(FALSE, &from_view) == S_OK && from_view &&
+                    from_view->GetCount(&view_count) == S_OK && view_count == 1 &&
+                    from_view->GetItemAt(0, &viewed_folder) == S_OK &&
+                    viewed_folder->GetDisplayName(SIGDN_FILESYSPATH, &view_path) == S_OK &&
+                    view_path && state_.expected == view_path,
+                    "QQ FileOk: primary GetSelection returns confirmed current folder even with no row");
+                CoTaskMemFree(view_path);
+                ComPtr<IShellItemArray> confirmed;
+                ComPtr<IShellItem> folder;
+                DWORD selected_count = 0;
+                PWSTR selected_path = nullptr;
+                Check(open && open->GetSelectedItems(&confirmed) == S_OK && confirmed &&
+                    confirmed->GetCount(&selected_count) == S_OK && selected_count == 1 &&
+                    confirmed->GetItemAt(0, &folder) == S_OK &&
+                    folder->GetDisplayName(SIGDN_FILESYSPATH, &selected_path) == S_OK &&
+                    selected_path && state_.expected == selected_path,
+                    "QQ FileOk: GetSelectedItems returns the confirmed directory with no highlighted row");
+                CoTaskMemFree(selected_path);
+                script->clear_view_selection = false;
+            }
             if(script->missing_veto){if(state_.calls>1)Check(dialog->Close(HRESULT_FROM_WIN32(ERROR_CANCELLED))==S_OK,"cancel after missing candidate veto");return S_FALSE;}
             return S_OK;
         }
@@ -568,7 +615,78 @@ public:
         }
         return Notification(2);
     }
-    HRESULT STDMETHODCALLTYPE OnSelectionChange(IFileDialog*) override { return Notification(3); }
+    HRESULT STDMETHODCALLTYPE OnSelectionChange(IFileDialog* dialog) override {
+        if (state_.probe_folder_service) {
+            state_.probed_folder_service = true;
+            ComPtr<IServiceProvider> services;
+            ComPtr<IFolderView> view;
+            ComPtr<IShellItem> folder;
+            PWSTR path = nullptr;
+            Check(dialog && SUCCEEDED(dialog->QueryInterface(IID_PPV_ARGS(&services))) &&
+                SUCCEEDED(services->QueryService(SID_SFolderView, IID_PPV_ARGS(&view))) &&
+                SUCCEEDED(view->GetFolder(IID_PPV_ARGS(&folder))) &&
+                SUCCEEDED(folder->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path && state_.expected == path,
+                "selection-change callback reads actual browsed folder from service");
+            CoTaskMemFree(path);
+            ComPtr<IShellBrowser> browser;
+            Check(services && services->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(&browser)) == S_OK &&
+                browser && browser->QueryActiveShellView(&state_.browser_view) == S_OK && state_.browser_view,
+                "selection-change: top-level browser returns active view");
+            if (state_.browser_view) {
+                ComPtr<IFolderView2> view2;
+                Check(state_.browser_view.As(&view2) == S_OK && view2,
+                    "QQ query chain exposes IFolderView2");
+                DWORD flags = 0;
+                Check(view2 && view2->GetCurrentFolderFlags(&flags) == S_OK && (flags & FWF_SINGLESEL),
+                    "QQ view reports actual single-selection mode");
+                const auto matches = [&](BOOL none_implies_folder, const std::wstring& expected) {
+                    ComPtr<IShellItemArray> items;
+                    DWORD count = 0;
+                    ComPtr<IShellItem> one;
+                    PWSTR full_path = nullptr;
+                    const bool match = view2 && view2->GetSelection(none_implies_folder, &items) == S_OK &&
+                        items && items->GetCount(&count) == S_OK && count == 1 &&
+                        items->GetItemAt(0, &one) == S_OK &&
+                        one->GetDisplayName(SIGDN_FILESYSPATH, &full_path) == S_OK &&
+                        full_path && expected == full_path;
+                    CoTaskMemFree(full_path);
+                    return match;
+                };
+                Check(matches(FALSE, state_.expected), "IFolderView2 returns the exact highlighted folder");
+                script->clear_view_selection = true;
+                ComPtr<IShellItemArray> empty;
+                Check(view2 && view2->GetSelection(FALSE, &empty) == HRESULT_FROM_WIN32(ERROR_NOT_FOUND) && !empty,
+                    "IFolderView2 no selection matches native when fallback is off");
+                Check(matches(TRUE, script->folder), "IFolderView2 no selection returns the browsed folder when requested");
+                script->clear_view_selection = false;
+                ComPtr<IDispatch> background;
+                Check(state_.browser_view->GetItemObject(SVGIO_BACKGROUND, IID_PPV_ARGS(&background)) == E_NOTIMPL &&
+                    !background, "diagnostic probe preserves unsupported background result");
+            }
+            ComPtr<IFolderView> active_folder;
+            ComPtr<IShellItem> browsed;
+            path = nullptr;
+            Check(state_.browser_view && state_.browser_view.As(&active_folder) == S_OK &&
+                active_folder->GetFolder(IID_PPV_ARGS(&browsed)) == S_OK &&
+                browsed->GetDisplayName(SIGDN_FILESYSPATH, &path) == S_OK && path && state_.expected == path,
+                "top-level browser view reads browsed directory");
+            CoTaskMemFree(path);
+            ComPtr<IDataObject> data;
+            FORMATETC format{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+            STGMEDIUM medium{};
+            HRESULT hr = state_.browser_view
+                ? state_.browser_view->GetItemObject(SVGIO_SELECTION, IID_PPV_ARGS(&data)) : E_NOINTERFACE;
+            if (SUCCEEDED(hr)) hr = data->GetData(&format, &medium);
+            wchar_t selected[MAX_PATH]{};
+            const auto drop = static_cast<HDROP>(medium.hGlobal);
+            Check(hr == S_OK && medium.tymed == TYMED_HGLOBAL &&
+                DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0) == 1 &&
+                DragQueryFileW(drop, 0, selected, ARRAYSIZE(selected)) && state_.expected == selected,
+                "top-level browser selection data contains exact directory");
+            ReleaseStgMedium(&medium);
+        }
+        return Notification(3);
+    }
     HRESULT STDMETHODCALLTYPE OnTypeChange(IFileDialog* dialog) override { if(script->value_controls) {
             ComPtr<IFileDialogCustomize> custom;dialog->QueryInterface(IID_PPV_ARGS(&custom));
             for(DWORD id:{206u,210u,213u})Check(custom->SetControlState(id,static_cast<CDCONTROLSTATEF>(3))==S_OK,"type change reveals initially hidden control");
@@ -618,7 +736,7 @@ public:
 private:
     std::atomic<ULONG> refs_{1}; SinkState& state_;
 };
-void FolderCase(const std::wstring& folder, bool multi) {
+void FolderCase(const std::wstring& folder, bool multi, bool clear_client = false) {
     Script state; script = &state; state.folder = folder; state.file = folder + L"\\named-folder"; state.folder_mode = true; state.folder_multi = multi; state.second = folder;
     Check(CreateDirectoryW(state.file.c_str(), nullptr) != FALSE, "create named folder fixture");
     auto provider = std::make_shared<FileDialogInprocessProvider>();
@@ -629,11 +747,28 @@ void FolderCase(const std::wstring& folder, bool multi) {
     api.GetWindow = Window; api.Close = Close; api.Shutdown = Shutdown;
     FileDialogBridgeServices services; services.access_policy = AccessPolicy::LocalOpenV1;
     services.inprocess_provider = provider; services.validation_verified = RuntimeContractCertified;
-    services.on_native_reason = [](const char* reason, const IID*) { std::printf("folder diagnostic: %s\n", reason); };
+    bool traced_optional_view = false, traced_background = false, traced_selection = false;
+    services.on_native_reason = [&](const char* reason, const IID* iid) {
+        std::printf("folder diagnostic: %s\n", reason);
+        const std::string_view trace(reason);
+        if (!trace.starts_with("picker-browser-call ")) return;
+        traced_optional_view |= iid && *iid == IID_IFolderView2 &&
+            trace.find("method=QueryInterface hr=0x00000000") != trace.npos;
+        traced_background |= iid && *iid == IID_IDispatch &&
+            trace.find("method=GetItemObject hr=0x80004001 arg=0") != trace.npos;
+        traced_selection |= iid && *iid == IID_IDataObject &&
+            trace.find("method=GetItemObject hr=0x00000000 arg=1") != trace.npos;
+    };
+    GUID client{};
+    if (clear_client) {
+        Check(CoCreateGuid(&client) == S_OK, "generate fresh client GUID");
+        services.client_state = std::make_shared<FileDialogClientState>(L"folder-clear-test", L"memory");
+    }
     unsigned native = 0; services.show_native = [&](IFileDialog*, HWND) { ++native; return E_FAIL; };
     ComPtr<IFileOpenDialog> dialog;
     Check(CreateIsolatedDialog(DialogFactory::Open, services, IID_PPV_ARGS(&dialog)) == S_OK, "isolated folder factory");
     if (!dialog) return;
+    if (clear_client) Check(dialog->SetClientGuid(client) == S_OK, "bind isolated client history");
     ComPtr<IShellItem> item; Check(SHCreateItemFromParsingName(folder.c_str(), nullptr, IID_PPV_ARGS(&item)) == S_OK, "folder fixture item");
     Check(dialog->SetOptions(static_cast<FILEOPENDIALOGOPTIONS>(multi ? 0x1260 : 0x101828)) == S_OK, "folder options");
     Check(dialog->SetFileName(L"named-folder") == S_OK && dialog->SetTitle(L"Select") == S_OK, "folder text setters");
@@ -675,24 +810,70 @@ void FolderCase(const std::wstring& folder, bool multi) {
             Check(dialog->SetFolder(nullptr) == E_INVALIDARG, "live null folder rejected");
         };
     }
+    if (clear_client) observer.probe_folder_service = true;
+    if (clear_client) state.folder = state.file; // Enter the folder instead of highlighting it in its parent.
     Check(dialog->Show(nullptr) == S_OK && !native, "folder accepted without native fallback");
     show_action = {};
+    if (clear_client) {
+        Check(observer.probed_folder_service, "selection-change callback exercised");
+        Check(traced_optional_view && traced_background && traced_selection,
+            "trace records exact IID and HRESULT for accepted and rejected view calls");
+        observer.probe_folder_service = false;
+        Check(services.client_state->Read(client) == folder, "accepted bridge owns the remembered folder");
+        const auto cleared = dialog->ClearClientData();
+        std::printf("FOLDER_CLEAR hr=0x%08lX\n", static_cast<unsigned long>(cleared));
+        Check(cleared == S_OK && !services.client_state->Read(client), "ClearClientData succeeds and clears bridge history after accepted Show");
+        ComPtr<IShellItem> selected;
+        PWSTR path = nullptr;
+        Check(dialog->GetResult(&selected) == S_OK && selected && selected->GetDisplayName(SIGDN_FILESYSPATH, &path) == S_OK &&
+            path && state.file == path, "ClearClientData leaves the exact accepted directory readable");
+        CoTaskMemFree(path);
+        ComPtr<IShellItem> browsed;
+        PWSTR browsed_path = nullptr;
+        Check(dialog->GetFolder(&browsed) == S_OK && browsed &&
+            browsed->GetDisplayName(SIGDN_FILESYSPATH, &browsed_path) == S_OK && browsed_path &&
+            state.folder == browsed_path, "after acceptance GetFolder preserves the browsed directory");
+        CoTaskMemFree(browsed_path);
+        ComPtr<IServiceProvider> folder_service; ComPtr<IFolderView> view;
+        Check(dialog.As(&folder_service) == S_OK && folder_service &&
+            folder_service->QueryService(SID_SFolderView, IID_PPV_ARGS(&view)) == S_OK && view,
+            "folder service available");
+        ComPtr<IShellItemArray> view_selection;
+        DWORD n = 0; ComPtr<IShellItem> service_item; PWSTR service_path = nullptr;
+        Check(view && view->Items(SVGIO_SELECTION, IID_PPV_ARGS(&view_selection)) == S_OK &&
+            view_selection && view_selection->GetCount(&n) == S_OK && n == 1 &&
+            view_selection->GetItemAt(0, &service_item) == S_OK &&
+            service_item->GetDisplayName(SIGDN_FILESYSPATH, &service_path) == S_OK &&
+            service_path && state.file == service_path, "folder service returns exact selected directory");
+        CoTaskMemFree(service_path);
+    }
     ComPtr<IShellItemArray> results; DWORD count = 0;
     Check(dialog->GetResults(&results) == S_OK && results && results->GetCount(&count) == S_OK && count == (multi ? 2u : 1u), "folder result array");
     state.candidate = false; state.cancel_before_accept = true;
     Check(dialog->Show(nullptr) == HRESULT_FROM_WIN32(ERROR_CANCELLED) && !native, "folder cancellation terminal");
     item.Reset(); Check(FAILED(dialog->GetResult(&item)) && !item, "folder cancellation clears result");
+    if (clear_client) {
+        ComPtr<IShellItemArray> stale;
+        Check(observer.browser_view && observer.browser_view->GetItemObject(SVGIO_SELECTION, IID_PPV_ARGS(&stale)) ==
+            CO_E_OBJNOTCONNECTED && !stale, "view retained from previous Show cannot expose stale selection");
+        ComPtr<IFolderView2> retained;
+        Check(observer.browser_view && observer.browser_view.As(&retained) == S_OK &&
+            retained->GetSelection(TRUE, &stale) == CO_E_OBJNOTCONNECTED && !stale,
+            "IFolderView2 cannot return a previous Show's folder after cancellation");
+    }
     Check(RemoveDirectoryW(state.file.c_str()) != FALSE, "remove named folder fixture");
 }
 void Case(const std::wstring& folder, int mode) {
     Script state; state.folder = folder; state.file = folder + L"\\owned.txt";
-    const bool save_case = mode >= 33;
-    state.overwrite_mode = mode == 38 ? 1u : mode >= 41 ? static_cast<unsigned>(mode - 39) : 0u;
+    // PickerHost private-interface probe on an eligible Open: 49 keeps native, 50 is the broker pass-through.
+    const bool private_case = mode == 49 || mode == 50, private_passthrough = mode == 50;
+    const bool save_case = mode >= 33 && !private_case;
+    state.overwrite_mode = mode == 38 ? 1u : mode >= 41 && !private_case ? static_cast<unsigned>(mode - 39) : 0u;
     state.save = save_case; state.overwrite = mode == 34 || mode == 35 || state.overwrite_mode;
     if (save_case && !state.overwrite) state.file = folder + L"\\new-save.txt";
     state.overwrite_response = mode == 35 || state.overwrite_mode == 2 || state.overwrite_mode == 9 ? PULSE_PICKER_UI_V2_OVERWRITE_REFUSE :
         state.overwrite_mode >= 6 && state.overwrite_mode <= 8 ? PULSE_PICKER_UI_V2_OVERWRITE_DEFAULT : PULSE_PICKER_UI_V2_OVERWRITE_ACCEPT;
-    state.custom = mode == 18 || mode == 19 || mode == 26 || mode == 27 || mode == 28 || mode == 31; state.button_close = mode == 19 || mode == 26; state.remove_button_sink = mode == 26;
+    state.custom = mode == 18 || mode == 19 || mode == 20 || mode == 26 || mode == 27 || mode == 28 || mode == 31; state.button_close = mode == 19 || mode == 26; state.remove_button_sink = mode == 26;
     state.corrupt_result = mode == 3; state.fail_after_callback = mode == 4; state.filtered = mode == 13; script = &state;
     auto provider = std::make_shared<FileDialogInprocessProvider>(); provider->module_lifetime = std::make_shared<int>(1);
     provider->allow_unverified_proof = mode != 2;
@@ -713,6 +894,7 @@ void Case(const std::wstring& folder, int mode) {
     bool unknown_probe = false, customize_probe = false, customize_gate = false;
     std::vector<std::string> customize_diagnostics, stage_diagnostics;
     FileDialogBridgeServices services; services.access_policy = AccessPolicy::LocalOpenV1;
+    services.private_interface_passthrough = private_passthrough;
     if (save_case && mode != 40) services.save_access_policy = AccessPolicy::LocalSaveV1;
     services.validation_verified = [](const ContractDecision& decision) { return decision.supported_access_policy == AccessPolicy::LocalOpenV1 || decision.supported_access_policy == AccessPolicy::LocalSaveV1; };
     services.show_native = [&](IFileDialog* native, HWND) {
@@ -803,13 +985,14 @@ void Case(const std::wstring& folder, int mode) {
     if (mode == 8) {
         ComPtr<IFileDialogCustomize> customize;
         const HRESULT custom_query = dialog.As(&customize);
-        const HRESULT added = customize ? customize->AddText(9001, L"Unsupported static text") : E_NOINTERFACE;
+        const HRESULT added = customize ? customize->AddText(9001, L"Unsupported\nstatic text") : E_NOINTERFACE;
         Check(SUCCEEDED(custom_query) && customize && SUCCEEDED(added), "actual customization remains native");
         if (customize) {
             CDCONTROLSTATEF control_state{};
             const HRESULT read = customize->GetControlState(9001, &control_state);
+            const HRESULT mutated = customize->SetControlState(9001, CDCS_ENABLED);
             const HRESULT failed = customize->SetSelectedControlItem(0xFFFFu, 0xEEEEu);
-            Check(SUCCEEDED(read) && FAILED(failed), "native successful Customize read and invalid-control mutation observed");
+            Check(SUCCEEDED(read) && SUCCEEDED(mutated) && FAILED(failed), "native Customize read, existing-control mutation and invalid-control mutation observed");
             const auto has = [&](const char* method, const char* kind, HRESULT hr, const char* outcome) {
                 char result[32]{}; std::snprintf(result, sizeof(result), "hr=0x%08lX", static_cast<unsigned long>(hr));
                 for (const auto& line : customize_diagnostics)
@@ -817,7 +1000,7 @@ void Case(const std::wstring& folder, int mode) {
                         line.find(result) != std::string::npos && line.find(outcome) != std::string::npos) return true;
                 return false;
             };
-            Check(has("method=AddText ", "kind=mutation", added, added == S_OK ? "outcome=mutation-ok" : "outcome=other-success") &&
+            Check(has("method=SetControlState ", "kind=mutation", mutated, mutated == S_OK ? "outcome=mutation-ok" : "outcome=other-success") &&
                 has("method=GetControlState ", "kind=read", read, read == S_OK ? "outcome=read-ok" : "outcome=other-success") &&
                 has("method=SetSelectedControlItem ", "kind=mutation", failed, "outcome=failed"),
                 "Customize diagnostics preserve exact static method, read/mutation and actual HRESULT outcome");
@@ -836,13 +1019,17 @@ void Case(const std::wstring& folder, int mode) {
         if (mode == 22) Check(FAILED(custom->AddPushButton(72, L"Duplicate")), "duplicate native ID failure is not hidden");
         if (mode == 23) Check(custom->StartVisualGroup(73, L"Outer") == S_OK && FAILED(custom->StartVisualGroup(74, L"Nested")), "nested native group failure is not hidden");
         if (mode == 24) Check(FAILED(custom->EndVisualGroup()), "unbalanced native End failure is not hidden");
-        if (mode == 25) for (DWORD id = 100; id < 115; ++id) Check(custom->AddPushButton(id, L"Extra") == S_OK, "native extra controls keep original successful HRESULT despite model limit");
-        if (mode == 20) Check(FAILED(custom->SetControlState(999, CDCS_VISIBLE)), "unknown pre-Show control preserves native failure and fallback");
+        if (mode == 25) for (DWORD id = 100; id < 100 + PULSE_PICKER_UI_V2_MAX_CONTROLS; ++id) Check(custom->AddPushButton(id, L"Extra") == S_OK, "native extra controls keep original successful HRESULT despite model limit");
+        if (mode == 20) Check(custom->SetControlState(999, CDCS_VISIBLE) == E_INVALIDARG, "unknown pre-Show control E_INVALIDARG preserves native HRESULT without fallback");
     }
     if (mode == 39) Check(dialog->SetOptions(options | FOS_NOVALIDATE) == S_OK, "Save unsupported option retains native setter success");
     if (mode == 9) Check(dialog->SetOptions(FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT | FOS_ALLOWMULTISELECT) == S_OK, "multiselect without provider feature remains native");
     if (mode == 28 || mode == 32) published = true; // Deterministic publication, no sleeps.
     if (deferred_case) Check(resolutions == 0, "early setters/custom/Advise do not resolve or wait for startup");
+    if (private_case) {
+        ComPtr<IUnknown> privately;
+        Check(SUCCEEDED(dialog->QueryInterface(kFileDialogPrivateIid, &privately)) && privately, "private broker interface is answered by the native dialog");
+    }
     const HRESULT shown = dialog->Show(nullptr);
     if (deferred_case) Check(resolutions == 1, "Show resolves services exactly once");
     if (mode == 0) {
@@ -864,7 +1051,7 @@ void Case(const std::wstring& folder, int mode) {
     if (mode == 8) Check(customize_probe && customize_gate, "diagnostics distinguish Customize probe from actual method gate");
     if (mode == 16 || mode == 17) Check(unknown_probe && customize_probe && !customize_gate && native_calls == 0,
         "pure QI probes record exact IID without poisoning inprocess routing, even if observer throws");
-    if (mode == 2 || mode == 6 || (mode >= 20 && mode <= 25) || mode == 29 || mode == 30 || mode == 32 || (mode == 37 || mode == 39 || mode == 40) || (mode >= 7 && mode <= 9)) Check(native_calls == 1 && state.initialized == 0 && !observer.calls, "uncertified/default/unsupported contracts stay native exactly once");
+    if (mode == 2 || mode == 6 || (mode >= 21 && mode <= 25) || mode == 29 || mode == 30 || mode == 32 || (mode == 37 || mode == 39 || mode == 40 || (private_case && !private_passthrough)) || (mode >= 7 && mode <= 9)) Check(native_calls == 1 && state.initialized == 0 && !observer.calls, "uncertified/default/unsupported contracts stay native exactly once");
     else {
         Check(native_calls == 0 && state.shown == 1 && state.stopped == 1, "explicit v2 executes once and shuts down; no native replay");
         if (mode == 19 || mode == 26) Check(shown == kClose && observer.calls == 0, "button Close returns exact HRESULT without FileOk/native replay");
@@ -891,7 +1078,7 @@ void Case(const std::wstring& folder, int mode) {
             Check(shown == S_OK && callback_order == expected, "native-oracle FileOk order, first-veto short circuit and unsubscription");
         } else Check(shown == S_OK && observer.calls == 2, "FileOk veto then accepts same candidate");
         ComPtr<IShellItem> result;
-        const bool accepted = mode == 0 || mode == 13 || mode == 16 || mode == 17 || mode == 18 || mode == 28 || mode == 31 || mode == 33 || mode == 34 || (multiple && state.overwrite_mode != 2 && state.overwrite_mode != 9);
+        const bool accepted = mode == 0 || mode == 13 || private_passthrough || mode == 16 || mode == 17 || mode == 18 || mode == 20 || mode == 28 || mode == 31 || mode == 33 || mode == 34 || (multiple && state.overwrite_mode != 2 && state.overwrite_mode != 9);
         Check((accepted ? dialog->GetResult(&result) == S_OK : FAILED(dialog->GetResult(&result))) && (accepted || !result), "only final accepted Show publishes result");
     }
     if (mode == 0) {
@@ -1234,7 +1421,11 @@ void ReadonlyProperties(const std::wstring& folder, unsigned variant) {
 }
 void PreUiFallback(const std::wstring& folder) {
     static unsigned variant = 0;
-    for (variant=0;variant<6;++variant) {
+    static std::wstring missing_folder;
+    static HRESULT folder_changing_hr = E_FAIL;
+    missing_folder = folder + L"\\missing-yjk-dir";
+    for (variant=0;variant<8;++variant) {
+        folder_changing_hr = E_FAIL;
         Script state;script=&state;state.folder=folder;state.file=folder+L"\\owned.txt";
         auto provider=std::make_shared<FileDialogInprocessProvider>();provider->module_lifetime=std::make_shared<int>(1);provider->allow_unverified_proof=true;
         auto& api=provider->api;api.size=sizeof(api);api.version=2;api.Initialize=Initialize;api.ValidateConfig=Validate;api.Query=Query;api.GetWindow=Window;api.Close=Close;api.Shutdown=Shutdown;
@@ -1245,6 +1436,20 @@ void PreUiFallback(const std::wstring& folder) {
             if(variant==2)result->show_id=1;
             if(variant==4){PulsePickerUiV2Event event{};event.size=sizeof(event);callbacks->callback(callbacks->context,&event);}
             if(variant==5)result->terminal_hr=E_FAIL;
+            if(variant==6 || variant==7){
+                script->window = CreateWindowExW(0, L"STATIC", L"owned pre-ui fallback fixture", WS_OVERLAPPED,
+                    0, 0, 100, 100, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+                result->show_id=1;
+                PulsePickerUiV2Event ev{};ev.size=sizeof(ev);ev.kind=PULSE_PICKER_UI_V2_EVENT_TYPE_CHANGED;
+                ev.show_id=1;ev.generation=script->generation;ev.window=script->window;
+                callbacks->callback(callbacks->context,&ev);
+                if(variant==6){
+                    ev.kind=PULSE_PICKER_UI_V2_EVENT_FOLDER_CHANGING;
+                    ev.proposed_folder={missing_folder.c_str(),static_cast<uint32_t>(missing_folder.size())};
+                    folder_changing_hr=callbacks->callback(callbacks->context,&ev);
+                }
+                DestroyWindow(script->window); script->window = nullptr;
+            }
             return variant==5?E_UNEXPECTED:result->terminal_hr;
         };
         unsigned native_calls=0;FileDialogBridgeServices services;services.access_policy=AccessPolicy::LocalOpenV1;services.inprocess_provider=provider;
@@ -1254,10 +1459,66 @@ void PreUiFallback(const std::wstring& folder) {
         Check(CreateIsolatedDialog(DialogFactory::Open,services,IID_PPV_ARGS(&open))==S_OK,"isolated system factory for startup fallback");if(!open)continue;
         ComPtr<IShellItem> initial;SHCreateItemFromParsingName(folder.c_str(),nullptr,IID_PPV_ARGS(&initial));
         Check(open->SetFolder(initial.Get())==S_OK && open->SetOptions(FOS_FORCEFILESYSTEM|FOS_PATHMUSTEXIST|FOS_FILEMUSTEXIST|FOS_NOCHANGEDIR)==S_OK,"configure startup fallback contract");
+        std::vector<unsigned> sink_notifications;
+        SinkState sink_state; sink_state.notifications = &sink_notifications;
+        ComPtr<Sink> sink; DWORD cookie = 0;
+        if (variant == 7) { sink.Attach(new Sink(sink_state)); Check(open->Advise(sink.Get(), &cookie) == S_OK, "advise sink for caller-observed pre-UI variant"); }
         const auto hr=open->Show(nullptr);
-        Check(native_calls==(variant==0?1u:0u),"only validated callback-free pre-UI failure falls back once");
-        Check(variant==0||variant==3?hr==HRESULT_FROM_WIN32(ERROR_CANCELLED):FAILED(hr),"failure and cancellation preserve terminal outcome");
+        if (variant == 7) {
+            open->Unadvise(cookie);
+            Check(!sink_notifications.empty(), "caller sink actually observed pre-UI TypeChanged notification");
+        }
+        if (variant == 6) Check(folder_changing_hr == S_OK, "FolderChanging without event sinks tolerates missing folder path");
+        const unsigned expected_native = (variant == 0 || variant == 6) ? 1u : 0u;
+        Check(native_calls==expected_native,"only validated unobserved pre-UI failure falls back once");
+        Check(variant==0||variant==3||variant==6?hr==HRESULT_FROM_WIN32(ERROR_CANCELLED):FAILED(hr),"failure and cancellation preserve terminal outcome");
         ComPtr<IShellItem> result;Check(FAILED(open->GetResult(&result))&&!result,"failed or cancelled show exposes no result");
+    }
+    // Stale MRU / deleted default directory must heal to an existing fallback directory so Pulse opens directly.
+    {
+        static std::wstring received_initial;
+        received_initial.clear();
+        const std::wstring stale_dir = folder + L"\\stale-mru-dir";
+        Check(CreateDirectoryW(stale_dir.c_str(), nullptr) != FALSE, "create temporary stale MRU directory");
+        ComPtr<IShellItem> stale_item;
+        Check(SHCreateItemFromParsingName(stale_dir.c_str(), nullptr, IID_PPV_ARGS(&stale_item)) == S_OK && stale_item, "bind stale MRU ShellItem before deletion");
+        Script state; script = &state; state.folder = folder; state.file = folder + L"\\owned.txt";
+        auto provider = std::make_shared<FileDialogInprocessProvider>();
+        provider->module_lifetime = std::make_shared<int>(1); provider->allow_unverified_proof = true;
+        auto& api = provider->api; api.size = sizeof(api); api.version = 2;
+        api.Initialize = Initialize; api.ValidateConfig = Validate; api.Query = Query; api.GetWindow = Window; api.Close = Close; api.Shutdown = Shutdown;
+        api.Show = [](PulsePickerUiV2Session, const PulsePickerUiV2Config* config, const PulsePickerUiV2Callbacks*, PulsePickerUiV2Result* result) -> HRESULT {
+            if (config && config->initial_folder.data && config->initial_folder.units)
+                received_initial.assign(config->initial_folder.data, config->initial_folder.units);
+            result->status = PULSE_PICKER_UI_V2_CANCELLED;
+            result->flags = PULSE_PICKER_UI_V2_UI_SHOWN;
+            result->terminal_hr = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+            return result->terminal_hr;
+        };
+        unsigned native_calls = 0; bool stale_reason_seen = false;
+        FileDialogBridgeServices services; services.access_policy = AccessPolicy::LocalOpenV1; services.inprocess_provider = provider;
+        services.validation_verified = [](const ContractDecision& d) { return d.validation_category == ValidationCategory::LocalOpenAccessV1; };
+        services.show_native = [&](IFileDialog*, HWND) { ++native_calls; return HRESULT_FROM_WIN32(ERROR_CANCELLED); };
+        services.on_native_reason = [&](const char* reason, const IID*) {
+            if (reason && std::string_view(reason) == "initial-folder-stale-mru-fallback") stale_reason_seen = true;
+        };
+        ComPtr<IFileOpenDialog> open;
+        Check(CreateIsolatedDialog(DialogFactory::Open, services, IID_PPV_ARGS(&open)) == S_OK && open, "isolated dialog for stale MRU repair");
+        if (open) {
+            Check(open->SetDefaultFolder(stale_item.Get()) == S_OK, "seed default folder before deleting it");
+            Check(open->SetOptions(FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST | FOS_NOCHANGEDIR) == S_OK, "configure stale MRU open options");
+            stale_item.Reset();
+            Check(RemoveDirectoryW(stale_dir.c_str()) != FALSE, "delete stale MRU directory before Show");
+            const HRESULT hr = open->Show(nullptr);
+            Check(hr == HRESULT_FROM_WIN32(ERROR_CANCELLED), "stale MRU repair reaches Pulse UI cleanly");
+            Check(native_calls == 0, "stale MRU repair opens Pulse directly without native fallback");
+            Check(stale_reason_seen, "stale MRU repair emits initial-folder-stale-mru-fallback diagnostic");
+            const DWORD attrs = received_initial.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(received_initial.c_str());
+            Check(attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 && received_initial != stale_dir,
+                "stale MRU repair hands existing fallback directory to Pulse UI");
+        } else {
+            RemoveDirectoryW(stale_dir.c_str());
+        }
     }
 }
 void NullExtension(const std::wstring& folder) {
@@ -1356,6 +1617,56 @@ void SeparatorControls(const std::wstring& folder) {
         Check(!std::filesystem::exists(state.file), "separator Save contract creates no user file");
     }
 }
+void ExportAsCustomizeTrace(const std::wstring& folder) {
+    Script state; script = &state; state.folder = folder; state.file = folder + L"\\export.png";
+    state.export_as_customize = true; state.cancel_before_accept = true;
+    auto provider = std::make_shared<FileDialogInprocessProvider>();
+    provider->module_lifetime = std::make_shared<int>(1); provider->allow_unverified_proof = true;
+    auto& api = provider->api; api.size = sizeof(api); api.version = 2;
+    api.Initialize = Initialize; api.ValidateConfig = Validate; api.Show = Show; api.Query = Query;
+    api.GetWindow = Window; api.Close = Close; api.Shutdown = Shutdown; api.UpdateControl = UpdateControl;
+    api.implemented_features = PULSE_PICKER_UI_V2_FEATURE_SAVE_NATIVE_DEFAULTS |
+        PULSE_PICKER_UI_V2_FEATURE_CUSTOM_LABELS | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_SEPARATOR |
+        PULSE_PICKER_UI_V2_FEATURE_DYNAMIC_TEXT;
+    static std::wstring* dynamic_ok_label_out = nullptr;
+    std::wstring dynamic_ok_label;
+    dynamic_ok_label_out = &dynamic_ok_label;
+    provider->update_text = [](PulsePickerUiV2Session, uint64_t, uint32_t kind, PulsePickerUiV2Text input) -> HRESULT {
+        if (kind == PULSE_PICKER_UI_V2_TEXT_OK_LABEL && dynamic_ok_label_out)
+            dynamic_ok_label_out->assign(input.data, input.units);
+        return S_OK;
+    };
+    unsigned native_calls = 0;
+    FileDialogBridgeServices services; services.save_access_policy = AccessPolicy::LocalSaveV1;
+    services.inprocess_provider = provider;
+    services.validation_verified = [](const ContractDecision& d) { return d.validation_category == ValidationCategory::LocalSaveAccessV1; };
+    services.show_native = [&](IFileDialog*, HWND) { ++native_calls; return E_FAIL; };
+    ComPtr<IFileSaveDialog> save;
+    Check(CreateIsolatedDialog(DialogFactory::Save, services, IID_PPV_ARGS(&save)) == S_OK, "isolated Photoshop Export As Save");
+    if (!save) return;
+    ComPtr<IShellItem> initial; SHCreateItemFromParsingName(folder.c_str(), nullptr, IID_PPV_ARGS(&initial));
+    const COMDLG_FILTERSPEC filter{L"PNG", L"*.png"};
+    Check(save->SetOptions(34826) == S_OK && save->SetFileTypes(1, &filter) == S_OK &&
+        save->SetFileTypeIndex(1) == S_OK && save->SetDefaultExtension(L"png") == S_OK &&
+        save->SetFileName(L"export.png") == S_OK && save->SetTitle(L"Export As") == S_OK &&
+        save->SetOkButtonLabel(L"Export") == S_OK && save->SetFolder(initial.Get()) == S_OK,
+        "Export As options and metadata match Photoshop 2026 call sequence");
+    ComPtr<IFileDialogCustomize> custom; save.As(&custom);
+    Check(custom && custom->AddText(2010, L"") == S_OK, "Export As AddText(2010, empty) succeeds without native fallback");
+    Check(custom && custom->SetControlState(2031, CDCS_VISIBLE) == E_INVALIDARG,
+        "Export As SetControlState(2031, CDCS_VISIBLE) before Show preserves native E_INVALIDARG");
+    show_action = [&] {
+        Check(custom->SetControlState(2031, CDCS_VISIBLE) == E_INVALIDARG,
+            "Export As SetControlState(2031, CDCS_VISIBLE) inside Show returns E_INVALIDARG without aborting");
+        Check(save->SetOkButtonLabel(L"\u5BFC\u51FA") == S_OK && dynamic_ok_label == L"\u5BFC\u51FA",
+            "Export As dynamic OK button update continues working after unknown-control probe");
+    };
+    const HRESULT shown = save->Show(nullptr);
+    dynamic_ok_label_out = nullptr;
+    show_action = {};
+    Check(shown == HRESULT_FROM_WIN32(ERROR_CANCELLED) && !native_calls && state.shown == 1,
+        "Export As enters Pulse V2 dialog without native fallback");
+}
 void SaveNoTestCreate(const std::wstring& folder) {
     for(bool checkbox : {false,true})for(bool cancel : {false,true}){
         Script state;script=&state;state.folder=folder;state.file=folder+L"\\absent\\export.pdf";
@@ -1433,6 +1744,156 @@ void ProminentGroup(const std::wstring& folder) {
         Check(custom->SetControlState(1047,CDCS_VISIBLE)==S_OK&&custom->SetControlState(1047,static_cast<CDCONTROLSTATEF>(3))==S_OK,"state changes preserve independent prominence");
         CDCONTROLSTATEF native_state{};Check(custom->GetControlState(1047,&native_state)==S_OK&&native_state==static_cast<CDCONTROLSTATEF>(3),"prominence bit never leaks into COM state");
         Check(open->Show(nullptr)==HRESULT_FROM_WIN32(ERROR_CANCELLED)&&native_calls==(variant?1u:0u)&&state.shown==(variant?0u:1u),"prominence needs provider capability and preserves prior unsupported gate");
+    }
+}
+void RealWorldCompatRegression(const std::wstring& folder) {
+    // 1. Illustrator Save pattern: optional absent-control SetCheckButtonState + SetControlState
+    //    returning E_INVALIDARG, plus Save without FOS_OVERWRITEPROMPT (0x8848).
+    {
+        Script state; script = &state; state.folder = folder; state.file = folder + L"\\illustrator.ai"; state.cancel_before_accept = true; state.real_world_save = true;
+        auto provider = std::make_shared<FileDialogInprocessProvider>();
+        provider->module_lifetime = std::make_shared<int>(1); provider->allow_unverified_proof = true;
+        auto& api = provider->api; api.size = sizeof(api); api.version = 2;
+        api.Initialize = Initialize; api.ValidateConfig = Validate; api.Show = Show; api.Query = Query; api.GetWindow = Window; api.Close = Close; api.Shutdown = Shutdown; api.UpdateControl = UpdateControl;
+        api.implemented_features = PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_OVERWRITE | PULSE_PICKER_UI_V2_FEATURE_SAVE_NATIVE_DEFAULTS |
+            PULSE_PICKER_UI_V2_FEATURE_CUSTOM_CHECK | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_EDIT | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_LABELS;
+        unsigned native_calls = 0;
+        FileDialogBridgeServices services;
+        services.save_access_policy = AccessPolicy::LocalSaveV1;
+        services.inprocess_provider = provider;
+        services.validation_verified = [](const ContractDecision& d) { return RuntimeLocalSaveContractCertified(d); };
+        services.show_native = [&](IFileDialog*, HWND) { ++native_calls; return HRESULT_FROM_WIN32(ERROR_CANCELLED); };
+        ComPtr<IFileSaveDialog> save;
+        Check(CreateIsolatedDialog(DialogFactory::Save, services, IID_PPV_ARGS(&save)) == S_OK, "create Illustrator Save wrapper");
+        if (save) {
+            ComPtr<IShellItem> initial; SHCreateItemFromParsingName(folder.c_str(), nullptr, IID_PPV_ARGS(&initial));
+            ComPtr<IFileDialogCustomize> custom; save.As(&custom);
+            Check(custom && custom->SetCheckButtonState(1043, TRUE) == E_INVALIDARG &&
+                custom->SetControlState(1024, CDCS_VISIBLE) == E_INVALIDARG,
+                "Illustrator absent-control SetCheckButtonState/SetControlState preserve E_INVALIDARG");
+            Check(save->SetFolder(initial.Get()) == S_OK && save->SetFileName(L"illustrator.ai") == S_OK &&
+                save->SetOptions(static_cast<FILEOPENDIALOGOPTIONS>(0x8848u)) == S_OK,
+                "Illustrator Save options without FOS_OVERWRITEPROMPT configured");
+            Check(save->Show(nullptr) == HRESULT_FROM_WIN32(ERROR_CANCELLED) && native_calls == 0 && state.shown == 1,
+                "Illustrator Save reaches Pulse UI without native_only poisoning");
+        }
+    }
+    // 2. CorelDRAW Save pattern: multi-filter with {L"", L""} blank separator, RemoveAllControlItems (E_NOTIMPL),
+    //    100x RemoveControlItem (E_INVALIDARG) with log throttling, absent-control GetEditBoxText/GetCheckButtonState,
+    //    and live OnTypeChange SetCollectedProperties(nullptr, TRUE) + FileOk/post-Show GetProperties + ApplyProperties.
+    {
+        struct CorelSink final : IFileDialogEvents {
+            std::atomic<ULONG> refs{1};
+            bool type_called = false;
+            bool file_ok_props_ok = false;
+            HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+                if (!out) return E_POINTER; *out = nullptr;
+                if (iid == IID_IUnknown || iid == IID_IFileDialogEvents) { *out = static_cast<IFileDialogEvents*>(this); AddRef(); return S_OK; }
+                return E_NOINTERFACE;
+            }
+            ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+            ULONG STDMETHODCALLTYPE Release() override { ULONG r = --refs; if (!r) delete this; return r; }
+            HRESULT STDMETHODCALLTYPE OnFileOk(IFileDialog* dialog) override {
+                ComPtr<IFileSaveDialog> save;
+                ComPtr<IPropertyStore> store;
+                if (SUCCEEDED(dialog->QueryInterface(IID_PPV_ARGS(&save))) && save->GetProperties(&store) == S_OK && store)
+                    file_ok_props_ok = true;
+                return S_OK;
+            }
+            HRESULT STDMETHODCALLTYPE OnFolderChanging(IFileDialog*, IShellItem*) override { return S_OK; }
+            HRESULT STDMETHODCALLTYPE OnFolderChange(IFileDialog*) override { return S_OK; }
+            HRESULT STDMETHODCALLTYPE OnSelectionChange(IFileDialog*) override { return S_OK; }
+            HRESULT STDMETHODCALLTYPE OnShareViolation(IFileDialog*, IShellItem*, FDE_SHAREVIOLATION_RESPONSE*) override { return E_NOTIMPL; }
+            HRESULT STDMETHODCALLTYPE OnTypeChange(IFileDialog* dialog) override {
+                type_called = true;
+                ComPtr<IFileSaveDialog> save;
+                if (SUCCEEDED(dialog->QueryInterface(IID_PPV_ARGS(&save)))) {
+                    const HRESULT hr = save->SetCollectedProperties(nullptr, TRUE);
+                    Check(hr == S_OK, "CorelDRAW live OnTypeChange SetCollectedProperties(nullptr, TRUE) returns S_OK");
+                }
+                ComPtr<IFileDialogCustomize> custom;
+                if (SUCCEEDED(dialog->QueryInterface(IID_PPV_ARGS(&custom)))) {
+                    Check(custom->RemoveAllControlItems(26409) == E_NOTIMPL, "live RemoveAllControlItems returns E_NOTIMPL without closing");
+                    BOOL checked = FALSE;
+                    Check(custom->GetCheckButtonState(26430, &checked) == E_INVALIDARG, "live absent GetCheckButtonState returns E_INVALIDARG");
+                }
+                return S_OK;
+            }
+            HRESULT STDMETHODCALLTYPE OnOverwrite(IFileDialog*, IShellItem*, FDE_OVERWRITE_RESPONSE*) override { return E_NOTIMPL; }
+        };
+        Script state; script = &state; state.folder = folder; state.file = folder + L"\\corel.cdr"; state.real_world_save = true;
+        auto provider = std::make_shared<FileDialogInprocessProvider>();
+        provider->module_lifetime = std::make_shared<int>(1); provider->allow_unverified_proof = true;
+        auto& api = provider->api; api.size = sizeof(api); api.version = 2;
+        api.Initialize = Initialize; api.ValidateConfig = Validate; api.Show = Show; api.Query = Query; api.GetWindow = Window; api.Close = Close; api.Shutdown = Shutdown; api.UpdateControl = UpdateControl;
+        api.implemented_features = PULSE_PICKER_UI_V2_FEATURE_SAVE_NATIVE_DEFAULTS | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_COMBOBOX |
+            PULSE_PICKER_UI_V2_FEATURE_CUSTOM_CHECK | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_EDIT | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_LABELS |
+            PULSE_PICKER_UI_V2_FEATURE_PROPERTIES | PULSE_PICKER_UI_V2_FEATURE_DYNAMIC_ITEMS;
+        unsigned native_calls = 0;
+        unsigned probe_diag_count = 0;
+        bool suppressed_marker = false;
+        FileDialogBridgeServices services;
+        services.save_access_policy = AccessPolicy::LocalSaveV1;
+        services.inprocess_provider = provider;
+        services.validation_verified = [](const ContractDecision& d) { return RuntimeLocalSaveContractCertified(d); };
+        services.show_native = [&](IFileDialog*, HWND) { ++native_calls; return HRESULT_FROM_WIN32(ERROR_CANCELLED); };
+        services.on_native_reason = [&](const char* detail, const IID*) {
+            if (!detail) return;
+            const std::string_view text(detail);
+            if (text.find("control-item-rejected") != std::string_view::npos || text.find("customize-") == 0) ++probe_diag_count;
+            if (text == "customize-probe-suppressed") suppressed_marker = true;
+        };
+        ComPtr<IFileSaveDialog> save;
+        Check(CreateIsolatedDialog(DialogFactory::Save, services, IID_PPV_ARGS(&save)) == S_OK, "create CorelDRAW Save wrapper");
+        if (save) {
+            ComPtr<IShellItem> initial; SHCreateItemFromParsingName(folder.c_str(), nullptr, IID_PPV_ARGS(&initial));
+            ComPtr<IFileDialogCustomize> custom; save.As(&custom);
+            const COMDLG_FILTERSPEC filters[] = {{L"CDR", L"*.cdr"}, {L"", L""}, {L"AI", L"*.ai"}};
+            Check(save->SetFolder(initial.Get()) == S_OK && save->SetFileTypes(3, filters) == S_OK &&
+                save->SetFileTypeIndex(1) == S_OK && save->SetOptions(static_cast<FILEOPENDIALOGOPTIONS>(34882u)) == S_OK,
+                "CorelDRAW Save filters with blank separator configured");
+            Check(custom->AddComboBox(26409) == S_OK && custom->RemoveAllControlItems(26409) == E_NOTIMPL,
+                "CorelDRAW RemoveAllControlItems returns native E_NOTIMPL");
+            for (DWORD i = 0; i < 100; ++i) custom->RemoveControlItem(26409, i);
+            PWSTR edit = nullptr; BOOL checked = FALSE;
+            Check(custom->GetEditBoxText(26413, &edit) == E_INVALIDARG && !edit &&
+                custom->GetCheckButtonState(26430, &checked) == E_INVALIDARG,
+                "CorelDRAW absent GetEditBoxText/GetCheckButtonState return E_INVALIDARG without poisoning");
+            ComPtr<CorelSink> sink; sink.Attach(new CorelSink()); DWORD cookie = 0;
+            Check(save->Advise(sink.Get(), &cookie) == S_OK, "advise CorelDRAW sink");
+            Check(save->Show(nullptr) == S_OK && native_calls == 0 && state.shown == 1 && sink->type_called && sink->file_ok_props_ok,
+                "CorelDRAW Save reaches Pulse UI, runs live SetCollectedProperties and FileOk GetProperties");
+            Check(suppressed_marker && probe_diag_count <= 40,
+                "100x RemoveControlItem probe diagnostics are throttled cleanly");
+            ComPtr<IPropertyStore> post_store;
+            Check(save->GetProperties(&post_store) == S_OK && post_store,
+                "CorelDRAW post-Show GetProperties returns valid store");
+            save->Unadvise(cookie);
+        }
+    }
+    // 3. PST.Main PickFolders pattern: FOS_PICKFOLDERS | FOS_NOTESTFILECREATE | FOS_NOVALIDATE (0x02011968).
+    {
+        Script state; script = &state; state.folder = folder; state.file = folder; state.cancel_before_accept = true; state.folder_mode = true;
+        auto provider = std::make_shared<FileDialogInprocessProvider>();
+        provider->module_lifetime = std::make_shared<int>(1); provider->allow_unverified_proof = true;
+        auto& api = provider->api; api.size = sizeof(api); api.version = 2;
+        api.Initialize = Initialize; api.ValidateConfig = Validate; api.Show = Show; api.Query = Query; api.GetWindow = Window; api.Close = Close; api.Shutdown = Shutdown;
+        api.implemented_features = PULSE_PICKER_UI_V2_FEATURE_OPEN_SKIP_ACCESS;
+        unsigned native_calls = 0;
+        FileDialogBridgeServices services;
+        services.access_policy = AccessPolicy::LocalOpenV1;
+        services.inprocess_provider = provider;
+        services.validation_verified = [](const ContractDecision& d) { return RuntimeContractCertified(d); };
+        services.show_native = [&](IFileDialog*, HWND) { ++native_calls; return HRESULT_FROM_WIN32(ERROR_CANCELLED); };
+        ComPtr<IFileOpenDialog> open;
+        Check(CreateIsolatedDialog(DialogFactory::Open, services, IID_PPV_ARGS(&open)) == S_OK, "create PST.Main PickFolders wrapper");
+        if (open) {
+            ComPtr<IShellItem> initial; SHCreateItemFromParsingName(folder.c_str(), nullptr, IID_PPV_ARGS(&initial));
+            Check(open->SetFolder(initial.Get()) == S_OK && open->SetOptions(static_cast<FILEOPENDIALOGOPTIONS>(0x02011968u)) == S_OK,
+                "PST.Main PickFolders options configured");
+            Check(open->Show(nullptr) == HRESULT_FROM_WIN32(ERROR_CANCELLED) && native_calls == 0 && state.shown == 1,
+                "PST.Main PickFolders with FOS_NOTESTFILECREATE reaches Pulse UI");
+        }
     }
 }
 void OpenMissing(const std::wstring& folder) {
@@ -1608,7 +2069,19 @@ void CancelLabelTrace(const std::wstring& folder) {
 }
 #include "file_dialog_metadata_live_test.inc"
 #include "file_dialog_navigation_root_contract_test.inc"
+#include "file_dialog_large_combo_contract_test.inc"
+#include "file_dialog_ae_filter_contract_test.inc"
+#include "file_dialog_save_name_masks_live.inc"
 int wmain(int argc, wchar_t** argv) {
+    const bool native_masks = argc == 2 && std::wstring_view(argv[1]) == L"--native-save-name-masks";
+    const bool pulse_masks = argc == 3 && std::wstring_view(argv[1]) == L"--live-save-name-masks";
+    // DirectComposition needs a presented first frame. The system oracle is
+    // independent of DWM; the real Pulse test requires a composited desktop.
+    if (native_masks) {
+        const auto desktop_name = L"PulseSaveMasks-" + std::to_wstring(GetCurrentProcessId());
+        const auto desktop = CreateDesktopW(desktop_name.c_str(), nullptr, nullptr, 0, GENERIC_ALL, nullptr);
+        if (!desktop || !SetThreadDesktop(desktop)) return 2;
+    }
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); if (FAILED(com)) return 2;
@@ -1622,7 +2095,9 @@ int wmain(int argc, wchar_t** argv) {
     const bool real_default = argc == 3 && std::wstring_view(argv[1]) == L"--default-folder-real-config";
     const bool real_separators = argc == 3 && std::wstring_view(argv[1]) == L"--separators-real-config";
     const bool real_values = argc == 3 && std::wstring_view(argv[1]) == L"--value-controls-real-config";
-    if (real_metadata || real_values || real_default || real_separators || real_cancel) {
+    const bool large_combo = (argc == 2 || argc == 3) && std::wstring_view(argv[1]) == L"--large-combo-contract";
+    const bool ae_filters = argc == 3 && std::wstring_view(argv[1]) == L"--ae-filter-contract";
+    if (real_metadata || real_values || real_default || real_separators || real_cancel || (large_combo && argc == 3) || ae_filters) {
         HMODULE module = std::filesystem::path(argv[2]).is_absolute() ? LoadLibraryExW(argv[2], nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32) : nullptr;
         using GetApi = HRESULT (WINAPI*)(uint32_t, uint32_t, PulsePickerUiV2Api*);
         const auto get = module ? reinterpret_cast<GetApi>(GetProcAddress(module, "PulsePickerUiGetApiV2")) : nullptr;
@@ -1630,7 +2105,10 @@ int wmain(int argc, wchar_t** argv) {
             Check(false, "load real UI validator"); DeleteFileW(file.c_str()); RemoveDirectoryW(root.c_str()); CoUninitialize(); return 1;
         }
     }
-    if (argc == 2 && std::wstring_view(argv[1]) == L"--navigation-root-contract") { navigation_root_contract::Run(root.wstring()); }
+    if (native_masks || pulse_masks) { save_name_mask_live::Run(pulse_masks ? argv[2] : nullptr, root.wstring()); }
+    else if (large_combo) { large_combo_contract::Run(root.wstring()); }
+    else if (ae_filters) { ae_filter_contract::Run(root.wstring()); }
+    else if (argc == 2 && std::wstring_view(argv[1]) == L"--navigation-root-contract") { navigation_root_contract::Run(root.wstring()); }
     else if (argc == 3 && std::wstring_view(argv[1]) == L"--live-save-as-metadata") { metadata_live::Run(argv[2], root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--folder-provenance") { FolderProvenanceTrace(root.wstring()); }
     else if (real_cancel || (argc == 2 && std::wstring_view(argv[1]) == L"--cancel-label")) { CancelLabelTrace(root.wstring()); }
@@ -1640,12 +2118,14 @@ int wmain(int argc, wchar_t** argv) {
         DeferredHistoryTrace(root.wstring(), true);
     }
     else if (real_separators || (argc == 2 && std::wstring_view(argv[1]) == L"--separators")) { SeparatorControls(root.wstring()); }
+    else if (argc == 2 && std::wstring_view(argv[1]) == L"--export-as-customize") { ExportAsCustomizeTrace(root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--customize-gates") { isolated_native = true; Case(root.wstring(), 8); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--native-options") { isolated_native = true; NativeOptions(root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--null-extension") { NullExtension(root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--prominent-controls") { ProminentControls(root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--save-no-test-create") { SaveNoTestCreate(root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--prominent-group") { ProminentGroup(root.wstring()); }
+    else if (argc == 2 && std::wstring_view(argv[1]) == L"--real-world-compat") { RealWorldCompatRegression(root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--open-missing") { OpenMissing(root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--pre-ui-fallback") { PreUiFallback(root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--dynamic-text-contract") {
@@ -1655,6 +2135,9 @@ int wmain(int argc, wchar_t** argv) {
     }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--navigate-contract") { navigation_case = true; FolderCase(root.wstring(), false); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--folders") { FolderCase(root.wstring(), false); FolderCase(root.wstring(), true); }
+#ifdef PULSE_DEFERRED_HISTORY_MEMORY
+    else if (argc == 2 && std::wstring_view(argv[1]) == L"--folder-clear-client") { FolderCase(root.wstring(), false, true); }
+#endif
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--repeat-show-contract") { isolated_native = true; Case(root.wstring(), 0); Case(root.wstring(), 19); Case(root.wstring(), 26); }
     else if (real_default) { for(unsigned variant=0;variant<3;++variant)DefaultFolderTrace(root.wstring(),variant); }
     else if (real_metadata) { for(unsigned variant=0;variant<7;++variant)MetadataTrace(root.wstring(),variant); }
@@ -1670,7 +2153,7 @@ int wmain(int argc, wchar_t** argv) {
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--caller-validation-open-contract") { OpenTrace(root.wstring(), 9); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--all-files-open-contract") { OpenTrace(root.wstring(), 8); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--notepad-open-contract") { for (unsigned variant = 0; variant < 8; ++variant) OpenTrace(root.wstring(), variant); }
-    else { for (int mode = 0; mode < 49; ++mode) Case(root.wstring(), mode); OpenTrace(root.wstring()); }
+    else { for (int mode = 0; mode < 51; ++mode) Case(root.wstring(), mode); OpenTrace(root.wstring()); ExportAsCustomizeTrace(root.wstring()); }
     Check(DeleteFileW(file.c_str()) != FALSE && RemoveDirectoryW(root.c_str()) != FALSE, "delete only owned fixture");
     CoUninitialize(); std::printf("Checks=%u failures=%u\n", checks, failures); return failures ? 1 : 0;
 }

@@ -2,10 +2,14 @@
 #include "command_icons.h"
 #include "store_icons.h"
 #include "../app/extensions/icon_registry.h"
+#include "../common/localization.h"
+#include <wincodec.h>
+#include <commctrl.h>
 #include <wrl/client.h>
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <cwctype>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -385,7 +389,9 @@ void DrawExtensionCanvas(const extensions::UiNode& node, const ExtensionControlV
             float ix = 0, iy = 0, isize = 0;
             if (!ParseCanvasFloat(pos[0]->value, ix) || !ParseCanvasFloat(pos[1]->value, iy) ||
                 !ParseCanvasFloat(pos[2]->value, isize) || isize <= 0.0f) return;
-            const auto resolved = extensions::icons::GlobalRegistry().ResolveName({}, pos[3]->value);
+            std::string_view icon_tok = pos[3]->value;
+            if (icon_tok.starts_with("icon:")) icon_tok.remove_prefix(5);
+            const auto resolved = extensions::icons::GlobalRegistry().ResolveName({}, icon_tok);
             if (!resolved) return;
             const auto col_tok = !get_kw("color").empty() ? get_kw("color") : std::string_view("text");
             D2D1_COLOR_F icon_c = theme.text;
@@ -450,12 +456,744 @@ void DrawExtensionCanvas(const extensions::UiNode& node, const ExtensionControlV
         painter.StrokeRoundedRect(bounds, radius, theme.accent, 2.0f * scale);
     }
 }
+
+bool HasSafeAbsoluteLocalPath(std::wstring_view path) {
+    if (path.size() < 4 || path.find(L'\0') != std::wstring_view::npos || path.find(L"..") != std::wstring_view::npos)
+        return false;
+    const wchar_t drive = path[0];
+    return ((drive >= L'A' && drive <= L'Z') || (drive >= L'a' && drive <= L'z')) &&
+           path[1] == L':' && (path[2] == L'\\' || path[2] == L'/');
+}
+
+bool EndsWithInsensitive(std::wstring_view text, std::wstring_view suffix) {
+    if (text.size() < suffix.size()) return false;
+    const auto tail = text.substr(text.size() - suffix.size());
+    for (size_t i = 0; i < suffix.size(); ++i) {
+        if (std::towlower(tail[i]) != std::towlower(suffix[i])) return false;
+    }
+    return true;
+}
+
+ID2D1Bitmap* LoadExtensionImageBitmap(ID2D1DeviceContext* dc, std::wstring_view source, int target_px,
+                                      D2D1_SIZE_F* out_size) {
+    struct CacheEntry {
+        ID2D1DeviceContext* dc = nullptr;
+        std::wstring source;
+        int px = 0;
+        D2D1_SIZE_F size{};
+        Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
+    };
+    static std::vector<CacheEntry> cache;
+    if (!dc || source.empty()) return nullptr;
+    const bool is_resource = source.starts_with(L"resource:");
+    const bool is_file = source.starts_with(L"file:");
+    if (!is_resource && !is_file) return nullptr;
+    const int cache_px = is_resource ? (std::clamp)(target_px, 16, 512) : 0;
+    for (const auto& e : cache) {
+        if (e.dc == dc && e.px == cache_px && e.source == source) {
+            if (out_size) *out_size = e.size;
+            return e.bitmap.Get();
+        }
+    }
+    if (cache.size() >= 64) cache.clear();
+
+    CacheEntry entry;
+    entry.dc = dc;
+    entry.source.assign(source);
+    entry.px = cache_px;
+
+    Microsoft::WRL::ComPtr<IWICImagingFactory> wic;
+    if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) &&
+        wic) {
+        Microsoft::WRL::ComPtr<IWICBitmapSource> wic_source;
+        if (is_resource) {
+            const auto spec = source.substr(9);
+            const auto hash_pos = spec.rfind(L'#');
+            if (hash_pos != std::wstring_view::npos && hash_pos > 3 && hash_pos + 1 < spec.size()) {
+                const std::wstring mod_path(spec.substr(0, hash_pos));
+                int res_id = 0;
+                const auto id_sv = spec.substr(hash_pos + 1);
+                bool all_digits = !id_sv.empty();
+                for (const wchar_t ch : id_sv) {
+                    if (ch < L'0' || ch > L'9') { all_digits = false; break; }
+                    res_id = res_id * 10 + (ch - L'0');
+                    if (res_id > 65535) { all_digits = false; break; }
+                }
+                if (all_digits && res_id > 0 && HasSafeAbsoluteLocalPath(mod_path) &&
+                    (EndsWithInsensitive(mod_path, L".dll") || EndsWithInsensitive(mod_path, L".exe") ||
+                     EndsWithInsensitive(mod_path, L".cpl") || EndsWithInsensitive(mod_path, L".ico"))) {
+                    if (HMODULE mod = LoadLibraryExW(mod_path.c_str(), nullptr,
+                                                     LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE)) {
+                        HICON icon = nullptr;
+                        if (SUCCEEDED(LoadIconWithScaleDown(mod, MAKEINTRESOURCEW(res_id), cache_px, cache_px, &icon)) &&
+                            icon) {
+                            Microsoft::WRL::ComPtr<IWICBitmap> bmp;
+                            if (SUCCEEDED(wic->CreateBitmapFromHICON(icon, &bmp))) wic_source = bmp;
+                            DestroyIcon(icon);
+                        }
+                        FreeLibrary(mod);
+                    }
+                }
+            }
+        } else {
+            const std::wstring file_path(source.substr(5));
+            if (HasSafeAbsoluteLocalPath(file_path) &&
+                (EndsWithInsensitive(file_path, L".png") || EndsWithInsensitive(file_path, L".ico") ||
+                 EndsWithInsensitive(file_path, L".bmp") || EndsWithInsensitive(file_path, L".jpg") ||
+                 EndsWithInsensitive(file_path, L".jpeg") || EndsWithInsensitive(file_path, L".webp"))) {
+                Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
+                Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+                if (SUCCEEDED(wic->CreateDecoderFromFilename(file_path.c_str(), nullptr, GENERIC_READ,
+                                                             WICDecodeMetadataCacheOnDemand, &decoder)) &&
+                    decoder && SUCCEEDED(decoder->GetFrame(0, &frame))) {
+                    wic_source = frame;
+                }
+            }
+        }
+        if (wic_source) {
+            UINT w = 0, h = 0;
+            wic_source->GetSize(&w, &h);
+            Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
+            if (w > 0 && h > 0 && SUCCEEDED(wic->CreateFormatConverter(&converter)) && converter &&
+                SUCCEEDED(converter->Initialize(wic_source.Get(), GUID_WICPixelFormat32bppPBGRA,
+                                                 WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeMedianCut))) {
+                if (SUCCEEDED(dc->CreateBitmapFromWicBitmap(converter.Get(), nullptr, &entry.bitmap)) && entry.bitmap) {
+                    entry.size = {static_cast<float>(w), static_cast<float>(h)};
+                }
+            }
+        }
+    }
+    if (out_size) *out_size = entry.size;
+    ID2D1Bitmap* result = entry.bitmap.Get();
+    cache.push_back(std::move(entry));
+    return result;
+}
+
+// Glyph for a preview menu row: "icon:<name>" resolves through the icon registry, anything else is a
+// font glyph; a checked row without a glyph shows the check mark.
+void ResolveMenuPreviewGlyph(const extensions::UiMenuItem& item, std::wstring_view glyph_w, fluent::MenuItemSpec& spec) {
+    if (!item.glyph.empty()) {
+        std::string_view g = item.glyph;
+        if (g.starts_with("icon:")) {
+            g.remove_prefix(5);
+            if (const auto id = extensions::icons::GlobalRegistry().ResolveName({}, g)) {
+                if (IsCustomExtensionIcon(*id)) spec.custom_icon = *id;
+                else spec.vector_icon = StoreIconFromId(*id);
+            }
+        } else {
+            spec.glyph = glyph_w;
+        }
+    } else if (item.checked) {
+        spec.vector_icon = StoreIcon::Check;
+    }
+}
+
+// Previews that declare a tinted group, a detail line, a primary row or the context frame use the host
+// right-click menu metrics (fluent_menu and the store's menu preview): 28 DIP rows, 40 DIP with a detail
+// line, a group opens with a 26 DIP caption and spaces its rows by 2 DIP. Plain previews keep the original
+// 30/26 DIP preview metrics.
+bool MenuPreviewHostMetrics(const extensions::UiNode& node) {
+    if (node.menu_kind == "context") return true;
+    const auto extended = [](const extensions::UiMenuItem& item) {
+        return !item.group.empty() || !item.detail.empty() || item.primary;
+    };
+    return std::any_of(node.menu.begin(), node.menu.end(), [&](const extensions::UiMenuItem& item) {
+        return extended(item) || std::any_of(item.children.begin(), item.children.end(), extended);
+    });
+}
+
+float HostMenuRowDip(const extensions::UiMenuItem& item) {
+    return item.separator ? 9.0f : item.detail.empty() ? 28.0f : 40.0f;
+}
+
+struct MenuPreviewDraw {
+    Compositor& compositor;
+    fluent::Painter& painter;
+    const Theme& theme;
+    bool enabled = true;
+};
+
+// Lays out (and, with `draw`, paints) a host-metric preview inside `card`; returns the card height.
+float WalkHostMenuPreview(const extensions::UiNode& node, D2D1_RECT_F card, float scale, const MenuPreviewDraw* draw) {
+    const float s = scale;
+    float y = card.top + 8.0f * s;
+    const auto separator = [&](float left) {
+        if (draw) {
+            draw->painter.FillRoundedRect({left + 8.0f * s, y + 4.0f * s, card.right - 8.0f * s, y + 4.0f * s + 1.0f},
+                                          0.0f, draw->theme.stroke_divider);
+        }
+        y += 9.0f * s;
+    };
+    const auto host_row = [&](StoreIcon icon, std::wstring_view text, std::wstring_view shortcut, bool submenu) {
+        if (draw) {
+            fluent::MenuItemSpec spec;
+            spec.bounds = {card.left, y, card.right, y + 28.0f * s};
+            spec.text = text;
+            spec.shortcut = shortcut;
+            spec.vector_icon = icon;
+            spec.has_submenu = submenu;
+            spec.state.enabled = draw->enabled;
+            draw->painter.DrawMenuItem(spec);
+        }
+        y += 28.0f * s;
+    };
+    const auto item_row = [&](const extensions::UiMenuItem& item, float left, bool grouped) {
+        if (item.separator) {
+            separator(left);
+            return;
+        }
+        const float h = HostMenuRowDip(item) * s;
+        if (draw) {
+            const auto text = WideExtra(item.text), detail = WideExtra(item.detail);
+            const auto shortcut = WideExtra(item.shortcut), glyph = WideExtra(item.glyph);
+            fluent::MenuItemSpec spec;
+            spec.bounds = {left, y, card.right, y + h};
+            spec.text = text;
+            spec.detail = detail;
+            spec.shortcut = shortcut;
+            spec.checked = item.checked;
+            spec.has_submenu = !item.children.empty();
+            spec.primary = item.primary;
+            spec.group_tint = grouped;
+            spec.state.enabled = draw->enabled && item.enabled;
+            ResolveMenuPreviewGlyph(item, glyph, spec);
+            draw->painter.DrawMenuItem(spec);
+        }
+        y += h + (grouped ? 2.0f * s : 0.0f);
+    };
+    const bool context = node.menu_kind == "context";
+    if (context) {
+        // The host right-click menu around the plugin's rows: quick actions, Open, Quick preview, Open with.
+        if (draw) {
+            const StoreIcon actions[] = {StoreIcon::Cut, StoreIcon::Copy, StoreIcon::Rename, StoreIcon::Trash};
+            const float width = (card.right - card.left - 16.0f * s) / 4.0f;
+            if (auto* dc = draw->compositor.Dc()) {
+                for (int i = 0; i < 4; ++i) {
+                    const float x = card.left + 8.0f * s + (static_cast<float>(i) + 0.5f) * width;
+                    DrawStoreIcon(dc, actions[i], {x - 8.0f * s, y + 5.0f * s, x + 8.0f * s, y + 21.0f * s},
+                                  draw->theme.text_secondary);
+                }
+            }
+        }
+        y += 32.0f * s;
+        if (draw) {
+            draw->painter.FillRoundedRect({card.left + 8.0f * s, y, card.right - 8.0f * s, y + 1.0f}, 0.0f,
+                                          draw->theme.stroke_divider);
+        }
+        host_row(StoreIcon::Open, l10n::Get(l10n::StringId::Open), L"Enter", false);
+        host_row(StoreIcon::Eye, l10n::Get(l10n::StringId::QuickPreview), L"Space", false);
+        host_row(StoreIcon::OpenWith, l10n::Get(l10n::StringId::ContextOpenWith), {}, true);
+        if (!node.menu.empty()) separator(card.left);
+    }
+    for (size_t i = 0; i < node.menu.size();) {
+        const auto& item = node.menu[i];
+        if (item.group.empty()) {
+            item_row(item, card.left, false);
+            for (const auto& sub : item.children) item_row(sub, card.left + 18.0f * s, false);
+            ++i;
+            continue;
+        }
+        size_t end = i + 1;
+        while (end < node.menu.size() && node.menu[end].group == item.group) ++end;
+        // A group of one item with a submenu reads as the collapsed-submenu placement: the item, then its
+        // rows on a 2 DIP accent rail.
+        const bool submenu = end == i + 1 && !item.children.empty();
+        float band = (submenu ? 30.0f : 26.0f) * s;
+        const auto add = [&](const extensions::UiMenuItem& row) {
+            band += row.separator ? 9.0f * s : (HostMenuRowDip(row) + 2.0f) * s;
+        };
+        for (size_t k = i; k < end; ++k) {
+            if (!submenu) add(node.menu[k]);
+            for (const auto& sub : node.menu[k].children) add(sub);
+        }
+        const float band_top = y;
+        if (draw) {
+            draw->painter.FillHorizontalGradientRect({card.left + 4.0f * s, y, card.right - 4.0f * s, y + band}, 7.0f * s,
+                                                     draw->theme.list_selected_start, draw->theme.list_selected_end);
+        }
+        if (submenu) {
+            item_row(item, card.left, true);
+            if (draw) {
+                draw->painter.FillRoundedRect({card.left + 12.0f * s, y, card.left + 14.0f * s, band_top + band - 4.0f * s},
+                                              1.0f * s, WithAlpha(draw->theme.accent, 0.5f));
+            }
+            for (const auto& sub : item.children) item_row(sub, card.left + 14.0f * s, true);
+        } else {
+            if (draw) {
+                const auto caption = WideExtra(item.group);
+                const auto color = MixColor(draw->theme.accent, draw->theme.text_secondary, 0.35f);
+                draw->painter.DrawText(caption, {card.left + 16.0f * s, y + 2.0f * s, card.right - 34.0f * s, y + 24.0f * s},
+                                       draw->painter.RampFormat(fluent::Painter::TextRamp::Section), color);
+                if (auto* dc = draw->compositor.Dc()) {
+                    DrawStoreIcon(dc, StoreIcon::Gear, {card.right - 28.0f * s, y + 7.0f * s, card.right - 16.0f * s, y + 19.0f * s},
+                                  draw->theme.text_secondary);
+                }
+            }
+            y += 26.0f * s;
+            for (size_t k = i; k < end; ++k) {
+                item_row(node.menu[k], card.left, true);
+                for (const auto& sub : node.menu[k].children) item_row(sub, card.left + 18.0f * s, true);
+            }
+        }
+        y = band_top + band;
+        i = end;
+    }
+    if (context) {
+        if (!node.menu.empty()) separator(card.left);
+        host_row(StoreIcon::Path, l10n::Get(l10n::StringId::CopyPath), L"Ctrl+Shift+C", false);
+        host_row(StoreIcon::Star, l10n::Get(l10n::StringId::PinQuickAccess), {}, false);
+        separator(card.left);
+        host_row(StoreIcon::Properties, l10n::Get(l10n::StringId::Properties), L"Alt+Enter", false);
+    }
+    y += 6.0f * s;
+    return y - card.top;
+}
+
+float MenuPreviewContentHeight(const extensions::UiNode& node, float width, float scale, fluent::Painter& painter) {
+    float h = 0.0f;
+    const auto title_w = WideExtra(node.text);
+    const auto detail_w = WideExtra(node.detail);
+    if (!title_w.empty()) h += 22.0f * scale;
+    if (!detail_w.empty()) h += painter.MeasureWrappedCaptionHeight(detail_w, (std::max)(40.0f * scale, width)) + 4.0f * scale;
+    if (h > 0.0f) h += 6.0f * scale;
+    if (MenuPreviewHostMetrics(node)) {
+        return h + WalkHostMenuPreview(node, D2D1::RectF(0.0f, 0.0f, (std::max)(1.0f, width), 0.0f), scale, nullptr);
+    }
+    h += 12.0f * scale;  // flyout card padding
+    if (node.menu.empty()) {
+        h += 36.0f * scale;
+        return h;
+    }
+    for (const auto& item : node.menu) {
+        h += (item.separator ? 9.0f : 30.0f) * scale;
+        for (const auto& sub : item.children) {
+            h += (sub.separator ? 9.0f : 26.0f) * scale;
+        }
+    }
+    return h;
+}
+
+// An option card with a canvas child is a tile: the illustration on top, then title and detail.
+const extensions::UiNode* OptionCardArt(const extensions::UiNode& node) {
+    return node.children.size() == 1 && node.children[0].type == UiNodeType::Canvas && node.children[0].visible
+               ? &node.children[0]
+               : nullptr;
+}
+
+float OptionTileArtHeight(const extensions::UiNode& art, float scale) {
+    return static_cast<float>((std::max)(64, art.min_height)) * scale;
+}
+
+// Tile body (the card surface is already painted): illustration well, selection mark in the top-right
+// corner, semibold title with the badge on its right, wrapped detail.
+void DrawExtensionOptionTile(const extensions::UiNode& node, const extensions::UiNode& art,
+                             const ExtensionControlVisual& visual, bool picked, Compositor& compositor,
+                             fluent::Painter& painter, const Theme& theme) {
+    const auto bounds = visual.bounds;
+    const float scale = (std::max)(0.25f, visual.scale);
+    const float pad = 10.0f * scale;
+    const D2D1_RECT_F well{bounds.left + pad, bounds.top + pad, bounds.right - pad,
+                           bounds.top + pad + OptionTileArtHeight(art, scale)};
+    painter.FillRoundedRect(well, 6.0f * scale, picked ? theme.fill_selected : theme.bg);
+    ExtensionControlVisual art_visual;
+    art_visual.host = visual.host;
+    art_visual.bounds = {well.left + 4.0f * scale, well.top + 4.0f * scale, well.right - 4.0f * scale,
+                         well.bottom - 4.0f * scale};
+    art_visual.state.enabled = visual.state.enabled;
+    art_visual.scale = visual.scale;
+    art_visual.dark = visual.dark;
+    DrawExtensionCanvas(art, art_visual, compositor, painter, theme);
+    if (!node.state.empty() || node.selected) {
+        fluent::ControlState ind_state = visual.state;
+        ind_state.checked = picked;
+        const D2D1_RECT_F ind_rc{bounds.right - 27.0f * scale, bounds.top + 9.0f * scale, bounds.right - 9.0f * scale,
+                                 bounds.top + 27.0f * scale};
+        if (node.option_kind == "toggle") painter.DrawCheckBox(ind_rc, L"", ind_state);
+        else painter.DrawRadioButton(ind_rc, L"", ind_state, 18.0f);
+    }
+    float left = bounds.left + pad;
+    const float right = bounds.right - pad;
+    const float top = well.bottom + 9.0f * scale;
+    const D2D1_COLOR_F ink = visual.state.enabled ? theme.text : theme.text_disabled;
+    const D2D1_COLOR_F sub_ink = visual.state.enabled ? theme.text_secondary : theme.text_disabled;
+    const auto glyph_w = WideExtra(node.glyph);
+    if (!glyph_w.empty()) {
+        const D2D1_RECT_F icon_rc{left, top + 1.0f * scale, left + 16.0f * scale, top + 17.0f * scale};
+        const D2D1_COLOR_F icon_color = !visual.state.enabled ? theme.text_disabled : picked ? theme.accent : theme.text_secondary;
+        if (auto* dc = compositor.Dc(); !dc || !DrawExtensionIconGlyph(dc, glyph_w, icon_rc, icon_color, &theme, 1.35f * scale)) {
+            painter.DrawGlyph(glyph_w, icon_rc, icon_color);
+        }
+        left += 22.0f * scale;
+    }
+    float title_right = right;
+    const auto badge_w = WideExtra(node.badge_text);
+    if (!badge_w.empty()) {
+        const float bw = painter.MeasureBadgeWidth(badge_w);
+        if (bw > 0.0f && right - left > bw + 24.0f * scale) {
+            painter.DrawBadge({D2D1::RectF(right - bw, top, right, top + 20.0f * scale), badge_w,
+                               picked ? fluent::BadgeKind::Accent : fluent::BadgeKind::Neutral});
+            title_right = right - bw - 8.0f * scale;
+        }
+    }
+    const auto title_w = WideExtra(node.text);
+    if (!title_w.empty() && title_right > left) {
+        painter.DrawText(title_w, D2D1::RectF(left, top - 1.0f * scale, title_right, top + 21.0f * scale),
+                         painter.RampFormat(fluent::Painter::TextRamp::Section), ink);
+    }
+    const auto detail_w = WideExtra(node.detail);
+    if (!detail_w.empty() && right > bounds.left + pad) {
+        painter.DrawWrappedCaption(detail_w, D2D1::Point2F(bounds.left + pad, top + 23.0f * scale),
+                                   (std::max)(1.0f, right - bounds.left - pad), sub_ink);
+    }
+    if (visual.state.keyboard_focus) {
+        painter.DrawFocusRing(bounds, 8.0f * scale);
+    }
+}
+
+void DrawExtensionOptionCard(const extensions::UiNode& node, const ExtensionControlVisual& visual,
+                             Compositor& compositor, fluent::Painter& painter, const Theme& theme) {
+    const auto bounds = visual.bounds;
+    const float scale = (std::max)(0.25f, visual.scale);
+    const float radius = 8.0f * scale;
+    const bool picked = visual.state.checked || node.selected;
+    if (picked) {
+        painter.FillRoundedRect(bounds, radius, WithAlpha(theme.accent, visual.dark ? 0.14f : 0.08f));
+        if (visual.state.enabled) {
+            if (visual.state.pressed) painter.FillRoundedRect(bounds, radius, theme.fill_pressed);
+            else if (visual.state.hovered) painter.FillRoundedRect(bounds, radius, theme.fill_hover);
+        }
+        painter.StrokeRoundedRect(bounds, radius, theme.accent, 1.5f * scale);
+    } else {
+        if (node.bordered) painter.FillRoundedRect(bounds, radius, theme.surface_card);
+        if (visual.state.enabled) {
+            if (visual.state.pressed) painter.FillRoundedRect(bounds, radius, theme.fill_pressed);
+            else if (visual.state.hovered) painter.FillRoundedRect(bounds, radius, theme.fill_hover);
+        }
+        if (node.bordered) painter.StrokeRoundedRect(bounds, radius, theme.stroke_card);
+    }
+    if (const auto* art = OptionCardArt(node)) {
+        DrawExtensionOptionTile(node, *art, visual, picked, compositor, painter, theme);
+        return;
+    }
+
+    float left = bounds.left + 14.0f * scale;
+    const float right = bounds.right - 14.0f * scale;
+    const float top = bounds.top + 12.0f * scale;
+    if (!node.state.empty() || node.selected) {
+        fluent::ControlState ind_state = visual.state;
+        ind_state.checked = picked;
+        const D2D1_RECT_F ind_rc{left, top, left + 20.0f * scale, top + 20.0f * scale};
+        if (node.option_kind == "toggle") {
+            painter.DrawCheckBox(ind_rc, L"", ind_state);
+        } else {
+            painter.DrawRadioButton(ind_rc, L"", ind_state, 18.0f);
+        }
+        left += 28.0f * scale;
+    }
+    const auto glyph_w = WideExtra(node.glyph);
+    if (!glyph_w.empty()) {
+        const D2D1_RECT_F icon_rc{left, top, left + 20.0f * scale, top + 20.0f * scale};
+        const D2D1_COLOR_F icon_color = !visual.state.enabled ? theme.text_disabled
+                                      : picked                ? theme.accent
+                                                              : theme.text_secondary;
+        if (auto* dc = compositor.Dc(); !dc || !DrawExtensionIconGlyph(dc, glyph_w, icon_rc, icon_color, &theme, 1.35f * scale)) {
+            painter.DrawGlyph(glyph_w, icon_rc, icon_color);
+        }
+        left += 28.0f * scale;
+    }
+    float title_right = right;
+    const auto badge_w = WideExtra(node.badge_text);
+    if (!badge_w.empty()) {
+        const float bw = painter.MeasureBadgeWidth(badge_w);
+        if (bw > 0.0f && right - left > bw + 24.0f * scale) {
+            const float bh = 20.0f * scale;
+            painter.DrawBadge({D2D1::RectF(right - bw, top, right, top + bh), badge_w,
+                               picked ? fluent::BadgeKind::Accent : fluent::BadgeKind::Neutral});
+            title_right = right - bw - 8.0f * scale;
+        }
+    }
+    const auto title_w = WideExtra(node.text);
+    const D2D1_COLOR_F ink = visual.state.enabled ? theme.text : theme.text_disabled;
+    const D2D1_COLOR_F sub_ink = visual.state.enabled ? theme.text_secondary : theme.text_disabled;
+    if (!title_w.empty() && title_right > left) {
+        painter.DrawText(title_w, D2D1::RectF(left, top - 1.0f * scale, title_right, top + 21.0f * scale),
+                         compositor.TextFormat(), ink);
+    }
+    const auto detail_w = WideExtra(node.detail);
+    if (!detail_w.empty() && right > left) {
+        painter.DrawWrappedCaption(detail_w, D2D1::Point2F(left, top + 24.0f * scale),
+                                   (std::max)(1.0f, right - left), sub_ink);
+    }
+    if (visual.state.keyboard_focus) {
+        painter.DrawFocusRing(bounds, radius);
+    }
+}
+
+void DrawExtensionSettingsRow(const extensions::UiNode& node, const ExtensionControlVisual& visual,
+                              Compositor& compositor, fluent::Painter& painter, const Theme& theme) {
+    const auto bounds = visual.bounds;
+    const float scale = (std::max)(0.25f, visual.scale);
+    const float radius = 8.0f * scale;
+    if (node.bordered) {
+        painter.FillRoundedRect(bounds, radius, theme.surface_card);
+        if (!node.command.empty() && node.children.empty() && visual.state.enabled) {
+            if (visual.state.pressed) painter.FillRoundedRect(bounds, radius, theme.fill_pressed);
+            else if (visual.state.hovered) painter.FillRoundedRect(bounds, radius, theme.fill_hover);
+        }
+        painter.StrokeRoundedRect(bounds, radius, theme.stroke_card);
+    } else if (!node.command.empty() && node.children.empty() && visual.state.enabled) {
+        if (visual.state.pressed) painter.FillRoundedRect(bounds, radius, theme.fill_pressed);
+        else if (visual.state.hovered) painter.FillRoundedRect(bounds, radius, theme.fill_hover);
+    }
+
+    const float pad_x = node.bordered ? 16.0f * scale : 0.0f;
+    const float pad_y = node.bordered ? 12.0f * scale : 4.0f * scale;
+    float left = bounds.left + pad_x;
+    float right = bounds.right - pad_x;
+    const float inner_w = (std::max)(1.0f, right - left);
+
+    std::vector<float> control_widths;
+    const float controls_total_w = ExtensionSettingsRowInlineWidths(node, inner_w, static_cast<float>(node.gap) * scale, scale,
+        [&](size_t i) { return node.children[i].visible; }, control_widths);
+    if (controls_total_w > 0.0f) {
+        right = (std::max)(left + 1.0f, right - controls_total_w - 16.0f * scale);
+    }
+
+    auto* dc = compositor.Dc();
+    const float top = bounds.top + pad_y;
+    const auto glyph_w = WideExtra(node.glyph);
+    if (!glyph_w.empty()) {
+        const D2D1_RECT_F icon_rc{left, top + 1.0f * scale, left + 18.0f * scale, top + 19.0f * scale};
+        const D2D1_COLOR_F icon_c = visual.state.enabled ? theme.text_secondary : theme.text_disabled;
+        if (!dc || !DrawExtensionIconGlyph(dc, glyph_w, icon_rc, icon_c, &theme, 1.35f * scale)) {
+            painter.DrawGlyph(glyph_w, icon_rc, icon_c);
+        }
+        left += 26.0f * scale;
+    }
+
+    const float avail_w = (std::max)(1.0f, right - left);
+    const auto title_w = WideExtra(node.text);
+    const auto detail_w = WideExtra(node.detail);
+    const auto badge_w = WideExtra(node.badge_text);
+    const D2D1_COLOR_F ink = visual.state.enabled ? theme.text : theme.text_disabled;
+    const D2D1_COLOR_F sub_ink = visual.state.enabled ? theme.text_secondary : theme.text_disabled;
+    float title_h = 0.0f;
+    float badge_reserve = 0.0f;
+    if (!badge_w.empty()) {
+        const float bw = painter.MeasureBadgeWidth(badge_w);
+        if (bw > 0.0f && avail_w > bw + 48.0f * scale) {
+            badge_reserve = bw + 8.0f * scale;
+            const float bh = 20.0f * scale;
+            painter.DrawBadge({D2D1::RectF(right - bw, top, right, top + bh), badge_w, fluent::BadgeKind::Neutral});
+        }
+    }
+    if (!title_w.empty()) {
+        const float tw = (std::max)(1.0f, avail_w - badge_reserve);
+        painter.DrawWrappedBody(title_w, D2D1::Point2F(left, top), tw, ink);
+        title_h = painter.MeasureWrappedBodyHeight(title_w, tw);
+    }
+    if (!detail_w.empty()) {
+        painter.DrawWrappedCaption(detail_w, D2D1::Point2F(left, top + (title_h > 0.0f ? title_h + 3.0f * scale : 0.0f)),
+                                   avail_w, sub_ink);
+    }
+    if (!node.command.empty() && node.children.empty() && visual.state.keyboard_focus) {
+        painter.DrawFocusRing(bounds, radius);
+    }
+}
+
+void DrawExtensionImage(const extensions::UiNode& node, const ExtensionControlVisual& visual,
+                        Compositor& compositor, fluent::Painter& painter, const Theme& theme) {
+    auto* dc = compositor.Dc();
+    const auto bounds = visual.bounds;
+    const float scale = (std::max)(0.25f, visual.scale);
+    const float radius = 8.0f * scale;
+    if (node.bordered) {
+        painter.FillRoundedRect(bounds, radius, theme.surface_card);
+        if (!node.command.empty() && visual.state.enabled) {
+            if (visual.state.pressed) painter.FillRoundedRect(bounds, radius, theme.fill_pressed);
+            else if (visual.state.hovered) painter.FillRoundedRect(bounds, radius, theme.fill_hover);
+        }
+        painter.StrokeRoundedRect(bounds, radius, theme.stroke_card);
+    }
+    const std::string& src = !node.glyph.empty() ? node.glyph : node.detail;
+    const auto inner = node.bordered
+        ? D2D1::RectF(bounds.left + 6.0f * scale, bounds.top + 6.0f * scale,
+                      bounds.right - 6.0f * scale, bounds.bottom - 6.0f * scale)
+        : bounds;
+    const float iw = inner.right - inner.left;
+    const float ih = inner.bottom - inner.top;
+    bool drawn = false;
+    if (dc && iw > 2.0f && ih > 2.0f && src.starts_with("icon:")) {
+        if (const auto id = extensions::icons::GlobalRegistry().ResolveName({}, std::string_view(src).substr(5))) {
+            D2D1_COLOR_F tile_color = theme.accent;
+            if (node.color.size() == 7 && node.color[0] == '#') {
+                unsigned rgb = 0;
+                if (std::from_chars(node.color.data() + 1, node.color.data() + 7, rgb, 16).ec == std::errc{})
+                    tile_color = HexColor(rgb);
+            }
+            float side = (std::min)(iw, ih);
+            if (node.image_fit == "center") side = (std::min)(side, 32.0f * scale);
+            const D2D1_RECT_F sq{inner.left + (iw - side) * 0.5f, inner.top + (ih - side) * 0.5f,
+                                 inner.left + (iw + side) * 0.5f, inner.top + (ih + side) * 0.5f};
+            if (node.image_fit == "tile") {
+                DrawProductTile(dc, sq, ProductArt::Generic, tile_color, StoreIcon::Puzzle, *id, &theme);
+                drawn = true;
+            } else {
+                D2D1_COLOR_F fg = !visual.state.enabled ? theme.text_disabled
+                                : !node.color.empty()   ? tile_color
+                                                        : theme.text;
+                drawn = DrawExtensionIcon(dc, *id, sq, fg, &theme, 1.35f * scale);
+            }
+        }
+    } else if (dc && iw > 2.0f && ih > 2.0f && (src.starts_with("resource:") || src.starts_with("file:"))) {
+        D2D1_SIZE_F nat{};
+        const int req_px = (std::max)(16, static_cast<int>(std::lround((std::min)(iw, ih))));
+        if (ID2D1Bitmap* bmp = LoadExtensionImageBitmap(dc, WideExtra(src), req_px, &nat);
+            bmp && nat.width > 0.0f && nat.height > 0.0f) {
+            D2D1_RECT_F dest = inner;
+            if (node.image_fit == "center") {
+                const float dw = nat.width * scale, dh = nat.height * scale;
+                dest = D2D1::RectF(inner.left + (iw - dw) * 0.5f, inner.top + (ih - dh) * 0.5f,
+                                   inner.left + (iw + dw) * 0.5f, inner.top + (ih + dh) * 0.5f);
+            } else {
+                const float rx = iw / nat.width, ry = ih / nat.height;
+                const float factor = node.image_fit == "cover" ? (std::max)(rx, ry) : (std::min)(rx, ry);
+                const float dw = nat.width * factor, dh = nat.height * factor;
+                dest = D2D1::RectF(inner.left + (iw - dw) * 0.5f, inner.top + (ih - dh) * 0.5f,
+                                   inner.left + (iw + dw) * 0.5f, inner.top + (ih + dh) * 0.5f);
+            }
+            dc->PushAxisAlignedClip(inner, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            dc->DrawBitmap(bmp, &dest, visual.state.enabled ? 1.0f : 0.45f,
+                           D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, nullptr, nullptr);
+            dc->PopAxisAlignedClip();
+            drawn = true;
+        }
+    }
+    if (!drawn && !node.text.empty()) {
+        painter.DrawText(WideExtra(node.text), inner, compositor.SmallFormat(),
+                         theme.text_secondary, fluent::HorizontalAlignment::Center);
+    }
+    if (!node.command.empty() && visual.state.keyboard_focus) {
+        painter.DrawFocusRing(bounds, radius);
+    }
+}
+
+void DrawExtensionMenuPreview(const extensions::UiNode& node, const ExtensionControlVisual& visual,
+                              Compositor& compositor, fluent::Painter& painter, const Theme& theme) {
+    const auto bounds = visual.bounds;
+    const float scale = (std::max)(0.25f, visual.scale);
+    float y = bounds.top;
+    const auto title_w = WideExtra(node.text);
+    const auto detail_w = WideExtra(node.detail);
+    if (!title_w.empty()) {
+        painter.DrawText(title_w, D2D1::RectF(bounds.left, y, bounds.right, y + 22.0f * scale),
+                         compositor.HeaderFormat(), theme.text);
+        y += 22.0f * scale;
+    }
+    if (!detail_w.empty()) {
+        const float w = (std::max)(1.0f, bounds.right - bounds.left);
+        painter.DrawWrappedCaption(detail_w, D2D1::Point2F(bounds.left, y), w, theme.text_secondary);
+        y += painter.MeasureWrappedCaptionHeight(detail_w, w) + 4.0f * scale;
+    }
+    if (y > bounds.top) y += 6.0f * scale;
+    const D2D1_RECT_F card{bounds.left, y, bounds.right, (std::max)(y + 32.0f * scale, bounds.bottom)};
+    painter.DrawMenuSurface(card, false);
+    if (MenuPreviewHostMetrics(node)) {
+        const MenuPreviewDraw draw{compositor, painter, theme, visual.state.enabled};
+        auto* dc = compositor.Dc();
+        if (dc) dc->PushAxisAlignedClip(card, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        WalkHostMenuPreview(node, card, scale, &draw);
+        if (dc) dc->PopAxisAlignedClip();
+        return;
+    }
+    if (node.menu.empty()) {
+        painter.DrawText(L"-", card, compositor.SmallFormat(), theme.text_secondary, fluent::HorizontalAlignment::Center);
+        return;
+    }
+
+    auto draw_row = [&](const extensions::UiMenuItem& item, float row_h, float indent_dip) {
+        const D2D1_RECT_F row{card.left + indent_dip * scale, y, card.right, y + row_h};
+        y += row_h;
+        if (item.separator) {
+            const float sy = (row.top + row.bottom) * 0.5f;
+            painter.FillRoundedRect({row.left + 12.0f * scale, sy, card.right - 12.0f * scale, sy + 1.0f}, 0.0f,
+                                    theme.stroke_divider);
+            return;
+        }
+        const auto item_text = WideExtra(item.text);
+        const auto item_shortcut = WideExtra(item.shortcut);
+        const auto item_glyph = WideExtra(item.glyph);
+        fluent::MenuItemSpec spec;
+        spec.bounds = row;
+        spec.text = item_text;
+        spec.shortcut = item_shortcut;
+        spec.checked = item.checked;
+        spec.has_submenu = !item.children.empty();
+        spec.state.enabled = visual.state.enabled && item.enabled;
+        ResolveMenuPreviewGlyph(item, item_glyph, spec);
+        painter.DrawMenuItem(spec);
+    };
+
+    y = card.top + 6.0f * scale;
+    for (const auto& item : node.menu) {
+        draw_row(item, (item.separator ? 9.0f : 30.0f) * scale, 0.0f);
+        for (const auto& sub : item.children) {
+            draw_row(sub, (sub.separator ? 9.0f : 26.0f) * scale, 18.0f);
+        }
+    }
+}
+}
+
+bool ResolveExtensionColorToken(std::string_view token, const Theme& theme, bool dark, D2D1_COLOR_F& out) noexcept {
+    return ResolveCanvasColor(token, theme, dark, 1.0f, out);
+}
+
+bool ExtensionCanvasPoint(const extensions::UiNode& node, D2D1_RECT_F bounds, float scale, float x, float y,
+                          float& view_x, float& view_y) noexcept {
+    const float w_px = bounds.right - bounds.left, h_px = bounds.bottom - bounds.top;
+    scale = (std::max)(0.25f, scale);
+    if (w_px <= 1.0f || h_px <= 1.0f) return false;
+    // Same mapping as DrawExtensionCanvas, using the script's first viewbox statement.
+    float vb_w = w_px / scale, vb_h = h_px / scale;
+    bool stretch = false, found = false;
+    const auto visit = [&](std::string_view raw) {
+        if (found) return;
+        const auto tokens = TokenizeCanvasCommand(raw);
+        if (tokens.empty() || !tokens[0].key.empty() || tokens[0].value != "viewbox") return;
+        std::vector<const CanvasToken*> pos;
+        bool stretch_mode = false;
+        for (size_t i = 1; i < tokens.size(); ++i) {
+            if (tokens[i].key.empty()) pos.push_back(&tokens[i]);
+            else if (tokens[i].key == "mode" && tokens[i].value == "stretch") stretch_mode = true;
+        }
+        float nw = 0, nh = 0;
+        if (pos.size() >= 2 && ParseCanvasFloat(pos[0]->value, nw) && ParseCanvasFloat(pos[1]->value, nh) &&
+            nw >= 1.0f && nh >= 1.0f) {
+            vb_w = nw;
+            vb_h = nh;
+            stretch = stretch_mode || (pos.size() >= 3 && pos[2]->value == "stretch");
+            found = true;
+        }
+    };
+    for (const auto& entry : node.options) ForEachCanvasStatement(entry, visit);
+    if (!node.detail.empty()) ForEachCanvasStatement(node.detail, visit);
+    float sx = scale, sy = scale, ox = bounds.left, oy = bounds.top;
+    if (stretch) {
+        sx = w_px / vb_w;
+        sy = h_px / vb_h;
+    } else {
+        const float s = (std::min)(w_px / vb_w, h_px / vb_h);
+        sx = sy = s;
+        ox = bounds.left + (w_px - vb_w * s) * 0.5f;
+        oy = bounds.top + (h_px - vb_h * s) * 0.5f;
+    }
+    view_x = std::clamp((x - ox) / sx, 0.0f, vb_w);
+    view_y = std::clamp((y - oy) / sy, 0.0f, vb_h);
+    return true;
 }
 
 float MeasureExtensionExtraControl(const extensions::UiNode& node, float width, float scale,
     fluent::Painter& painter) {
-    (void)width;
-    (void)painter;
     float height = 0;
     switch (node.type) {
     case UiNodeType::TrayCard: height = 76 * scale; break;
@@ -470,6 +1208,36 @@ float MeasureExtensionExtraControl(const extensions::UiNode& node, float width, 
     case UiNodeType::Tooltip: height = 32 * scale; break;
     case UiNodeType::TitleBarButton: height = 32 * scale; break;
     case UiNodeType::Canvas: height = 160 * scale; break;
+    case UiNodeType::OptionCard: {
+        if (const auto* art = OptionCardArt(node)) {
+            const float text_w = (std::max)(80.0f * scale, (width > 0.0f ? width : 220.0f * scale) - 20.0f * scale);
+            const auto detail_w = WideExtra(node.detail);
+            height = (10.0f + 9.0f + 22.0f + 11.0f) * scale + OptionTileArtHeight(*art, scale) +
+                     (detail_w.empty() ? 0.0f : painter.MeasureWrappedCaptionHeight(detail_w, text_w) + 2.0f * scale);
+            break;
+        }
+        const float lead = (!node.state.empty() || node.selected ? 28.0f : 0.0f) + (!node.glyph.empty() ? 28.0f : 0.0f);
+        const float text_w = (std::max)(80.0f * scale, (width > 0.0f ? width : 320.0f * scale) - (28.0f + lead) * scale);
+        const auto detail_w = WideExtra(node.detail);
+        height = 44.0f * scale + (detail_w.empty() ? 0.0f : painter.MeasureWrappedCaptionHeight(detail_w, text_w) + 4.0f * scale);
+        height = (std::max)(height, 52.0f * scale);
+        break;
+    }
+    case UiNodeType::SettingsRow: {
+        const auto title_w = WideExtra(node.text);
+        const auto detail_w = WideExtra(node.detail);
+        const float text_w = (std::max)(40.0f * scale, (width > 0.0f ? width : 300.0f * scale) - (!node.glyph.empty() ? 26.0f * scale : 0.0f));
+        float text_h = !title_w.empty() ? painter.MeasureWrappedBodyHeight(title_w, text_w) : 20.0f * scale;
+        if (!detail_w.empty()) text_h += 3.0f * scale + painter.MeasureWrappedCaptionHeight(detail_w, text_w);
+        height = (std::max)(24.0f * scale, text_h);
+        break;
+    }
+    case UiNodeType::Image:
+        height = 64.0f * scale;
+        break;
+    case UiNodeType::MenuPreview:
+        height = MenuPreviewContentHeight(node, width, scale, painter);
+        break;
     default: return 0;
     }
     return (std::max)(height, node.min_height * scale);
@@ -500,6 +1268,18 @@ bool DrawExtensionExtraControl(const extensions::UiNode& node, const ExtensionCo
     switch (node.type) {
     case UiNodeType::Canvas:
         DrawExtensionCanvas(node, visual, compositor, painter, theme);
+        return true;
+    case UiNodeType::OptionCard:
+        DrawExtensionOptionCard(node, visual, compositor, painter, theme);
+        return true;
+    case UiNodeType::SettingsRow:
+        DrawExtensionSettingsRow(node, visual, compositor, painter, theme);
+        return true;
+    case UiNodeType::Image:
+        DrawExtensionImage(node, visual, compositor, painter, theme);
+        return true;
+    case UiNodeType::MenuPreview:
+        DrawExtensionMenuPreview(node, visual, compositor, painter, theme);
         return true;
     case UiNodeType::TrayCard: {
         fluent::TrayCardSpec spec;
@@ -555,6 +1335,7 @@ bool DrawExtensionExtraControl(const extensions::UiNode& node, const ExtensionCo
         spec.bounds = bounds; spec.name = text; spec.modified = modified; spec.type = type;
         spec.size = size; spec.glyph = glyph; spec.status = status; spec.state = state;
         spec.state.selected = state.selected || node.selected; spec.cut = node.cut; spec.status_kind = BadgeKind(node.badge_kind);
+        spec.adaptive = true;
         for (const auto& hex : node.tag_colors) {
             if (spec.tag_count == spec.tag_colors.size()) break;
             unsigned value = 0;

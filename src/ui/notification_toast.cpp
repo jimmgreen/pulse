@@ -1,4 +1,5 @@
 #include "notification_toast.h"
+#include "../common/display_path.h"
 
 #include "snack_style.h"
 #include "ui_motion.h"
@@ -109,7 +110,7 @@ void NotificationToast::Show(HWND owner, std::wstring title, std::wstring messag
     animate_ = motion::SystemAnimationsEnabled();
     enter_at_ = motion::NowMs();
     title_ = std::move(title);
-    message_ = std::move(message);
+    message_ = path::FriendlyPathText(message);
     persistent_ = persistent;
     snack_ = false;
     actions_.clear();

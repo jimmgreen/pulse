@@ -21,6 +21,10 @@ void Observe(const FileDialogActivationEx& activation, const char* reason, const
         // A diagnostic must never change activation or trigger a second call.
     }
 }
+void Outcome(const FileDialogActivationEx& activation, const char* stage, const IID* iid = nullptr) noexcept {
+    if (activation.outcome) *activation.outcome = stage;
+    Observe(activation, stage, iid);
+}
 const char* Eligibility(REFCLSID clsid, IUnknown* outer, DWORD context, COSERVERINFO* server,
               DWORD count, MULTI_QI* results, DialogFactory& factory, const IID*& rejected) {
     if (outer) return "ex-native-aggregation";
@@ -50,7 +54,7 @@ const char* Eligibility(REFCLSID clsid, IUnknown* outer, DWORD context, COSERVER
 
 HRESULT ActivateFileDialogEx(const FileDialogActivationEx& activation, REFCLSID clsid,
     IUnknown* outer, DWORD context, COSERVERINFO* server, DWORD count, MULTI_QI* results) noexcept {
-    if (!activation.original) { Observe(activation, "ex-missing-original"); return E_INVALIDARG; }
+    if (!activation.original) { Outcome(activation, "ex-missing-original"); return E_INVALIDARG; }
     detail::ActivationScope recursion;
     DialogFactory factory{};
     const IID* rejected = nullptr;
@@ -62,7 +66,7 @@ HRESULT ActivateFileDialogEx(const FileDialogActivationEx& activation, REFCLSID 
         static_cast<unsigned long>(context), static_cast<unsigned long>(count),
         clsid == CLSID_FileOpenDialog ? 1u : clsid == CLSID_FileSaveDialog ? 2u : 0u);
     Observe(activation, inputs);
-    if (reason) Observe(activation, reason, rejected);
+    if (reason) Outcome(activation, reason, rejected);
     std::array<IID, kMaxInterfaces> requested{};
     if (eligible) for (DWORD i = 0; i < count; ++i) {
         requested[i] = *results[i].pIID;
@@ -75,26 +79,27 @@ HRESULT ActivateFileDialogEx(const FileDialogActivationEx& activation, REFCLSID 
     }
     const HRESULT created = activation.original(clsid, outer, context, server, count, results);
     if (!eligible || created != S_OK) {
-        if (eligible) Observe(activation, "ex-native-aggregate-result");
+        if (FAILED(created)) Outcome(activation, "ex-original-failed");
+        else if (eligible) Outcome(activation, "ex-native-aggregate-result");
         return created;
     }
     try {
         ComPtr<IUnknown> identity;
         for (DWORD i = 0; i < count; ++i) {
-            if (results[i].hr != S_OK || !results[i].pItf || !results[i].pIID || *results[i].pIID != requested[i]) { Observe(activation, "ex-native-output-state"); return created; }
+            if (results[i].hr != S_OK || !results[i].pItf || !results[i].pIID || *results[i].pIID != requested[i]) { Outcome(activation, "ex-native-output-state"); return created; }
             ComPtr<IUnknown> candidate;
-            if (results[i].pItf->QueryInterface(IID_PPV_ARGS(&candidate)) != S_OK || !candidate) { Observe(activation, "ex-native-identity-query"); return created; }
+            if (results[i].pItf->QueryInterface(IID_PPV_ARGS(&candidate)) != S_OK || !candidate) { Outcome(activation, "ex-native-identity-query"); return created; }
             if (!identity) identity = candidate;
-            else if (identity.Get() != candidate.Get()) { Observe(activation, "ex-native-mixed-identities"); return created; }
+            else if (identity.Get() != candidate.Get()) { Outcome(activation, "ex-native-mixed-identities"); return created; }
         }
         ComPtr<IUnknown> wrapper;
-        if (WrapNativeFileDialog(factory, identity.Get(), activation.services, IID_PPV_ARGS(&wrapper)) != S_OK || !wrapper) { Observe(activation, "ex-native-wrapper-creation"); return created; }
+        if (WrapNativeFileDialog(factory, identity.Get(), activation.services, IID_PPV_ARGS(&wrapper)) != S_OK || !wrapper) { Outcome(activation, "ex-native-wrapper-creation"); return created; }
         std::array<ComPtr<IUnknown>, kMaxInterfaces> staged;
         for (DWORD i = 0; i < count; ++i) {
             void* queried = nullptr;
             const HRESULT hr = wrapper->QueryInterface(requested[i], &queried);
             staged[i].Attach(static_cast<IUnknown*>(queried));
-            if (hr != S_OK || !staged[i]) { Observe(activation, "ex-native-wrapper-interface", &requested[i]); return created; }
+            if (hr != S_OK || !staged[i]) { Outcome(activation, "ex-native-wrapper-interface", &requested[i]); return created; }
         }
         // Publish every result before releasing any original caller reference:
         // a native final Release can run arbitrary code and reenter the caller.
@@ -103,10 +108,10 @@ HRESULT ActivateFileDialogEx(const FileDialogActivationEx& activation, REFCLSID 
             originals[i].Attach(results[i].pItf);
             results[i].pItf = staged[i].Detach();
         }
-        Observe(activation, "ex-wrapper-published");
+        Outcome(activation, "ex-wrapper-published");
         return created;
     } catch (...) {
-        Observe(activation, "ex-native-wrapper-exception");
+        Outcome(activation, "ex-native-wrapper-exception");
         // No original field is changed until the allocation-free commit above.
         return created;
     }

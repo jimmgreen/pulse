@@ -48,12 +48,21 @@ bool PackagedRowsDuplicate(const std::vector<std::wstring>& packaged_rows,
 // when the menu is released.
 HRESULT CreateExplorerCommandMenu(IExplorerCommand* command, IShellItemArray* items,
                                   IContextMenu** out, IUnknown* site = nullptr);
+HRESULT CreateExplorerCommandMenuMulti(const std::vector<IExplorerCommand*>& commands,
+                                       IShellItemArray* items, IContextMenu** out,
+                                       IUnknown* site = nullptr);
+
+// Creates a read-only IPropertyBag backed by `root\subkey` for initializing
+// registered IExplorerCommand / IExecuteCommand handlers.
+HRESULT CreateRegistryPropertyBag(HKEY root, const std::wstring& subkey,
+                                  IPropertyBag** out);
 
 // The part of Explorer's view site that verbs read their folder from:
 // IServiceProvider::QueryService(SID_SFolderView) gives an IFolderView whose
 // GetFolder returns `folder` (the folder shown, for a background click the
-// folder itself). PowerToys New+ finds its target this way and did nothing
-// in Pulse without one (#58-6). Everything else reports E_NOTIMPL.
-HRESULT CreateFolderViewSite(PCIDLIST_ABSOLUTE folder, IUnknown** out);
+// folder itself), IOleWindow::GetWindow gives `owner`, and when `selection` is
+// given IFolderView::ItemCount / Items answer SVGIO_SELECTION.
+HRESULT CreateFolderViewSite(PCIDLIST_ABSOLUTE folder, IUnknown** out,
+                             HWND owner = nullptr, IShellItemArray* selection = nullptr);
 
 } // namespace pulse::shell

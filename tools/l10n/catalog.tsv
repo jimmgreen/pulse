@@ -383,7 +383,7 @@ PreviewUnsupported	IDS_PREVIEW_UNSUPPORTED	1147	此格式暂不支持预览	This
 SettingsFullIndex	IDS_SETTINGS_FULL_INDEX	1148	全机索引	Full-device index	全機索引
 SettingsServiceWaiting	IDS_SETTINGS_SERVICE_WAITING	1754	全机索引服务已安装，正在等待连接。	The full-device index service is installed. Waiting for a connection.	全機索引服務已安裝，正在等待連線。
 SettingsUserIndex	IDS_SETTINGS_USER_INDEX	1149	当前用户模式	Current-user mode	目前使用者模式
-SettingsFullIndexDesc	IDS_SETTINGS_FULL_INDEX_DESC	1150	本地 NTFS 由系统服务索引；服务器文件夹使用当前 Windows 登录凭据。	The system service indexes local NTFS volumes. Server folders use your Windows credentials.	本機 NTFS 由系統服務索引；伺服器資料夾使用目前 Windows 登入憑證。
+SettingsFullIndexDesc	IDS_SETTINGS_FULL_INDEX_DESC	1150	本地磁盘（NTFS、FAT32、exFAT）由系统服务索引；服务器文件夹使用当前 Windows 登录凭据。	The system service indexes local drives (NTFS, FAT32, exFAT). Server folders use your Windows credentials.	
 SettingsUserIndexDesc	IDS_SETTINGS_USER_INDEX_DESC	1151	本地仅索引用户目录；服务器文件夹使用当前 Windows 登录凭据。安装服务可启用全盘索引。	Only user folders are indexed locally. Server folders use your Windows credentials. Install the service for full-device indexing.	本機僅索引使用者目錄；伺服器資料夾使用目前 Windows 登入憑證。安裝服務可啟用全磁碟索引。
 IndexStatus	IDS_INDEX_STATUS	1152	索引状态	Index status	索引狀態
 IndexLocation	IDS_INDEX_LOCATION	1153	索引位置	Index location	索引位置
@@ -4331,8 +4331,8 @@ DoubleCtrlFast	IDS_DOUBLE_CTRL_FAST	5581	200 毫秒	200 ms	200 毫秒
 DoubleCtrlNormal	IDS_DOUBLE_CTRL_NORMAL	5582	300 毫秒	300 ms	300 毫秒
 DoubleCtrlSlow	IDS_DOUBLE_CTRL_SLOW	5583	400 毫秒	400 ms	400 毫秒
 GlobalSearchJump	IDS_GLOBAL_SEARCH_JUMP	5584	跳转	Go to	跳轉
-DialogJumpBar	IDS_DIALOG_JUMP_BAR	5585	对话框跳转条	Dialog jump bar	對話方塊跳轉列
-DialogJumpBarDesc	IDS_DIALOG_JUMP_BAR_DESC	5586	未能替换的打开、保存对话框保留原生界面，并显示 Pulse 文件夹跳转条；Ctrl+G 跳到当前文件夹	Open and Save dialogs that cannot be replaced keep their native interface with a Pulse folder jump bar; Ctrl+G goes to the current folder	無法取代的開啟、儲存對話方塊保留原生介面，並顯示 Pulse 資料夾跳轉列；Ctrl+G 跳到目前資料夾
+DialogJumpBar	IDS_DIALOG_JUMP_BAR	5585	Pulse 快捷栏	Pulse shortcut bar	Pulse 快捷列
+DialogJumpBarDesc	IDS_DIALOG_JUMP_BAR_DESC	5586	软件仍显示 Windows 自带的打开、保存窗口时，附带一条 Pulse 快捷栏，一键跳到常用文件夹；按 Ctrl+G 跳到 Pulse 当前文件夹	When an app still shows the standard Windows open or save window, a Pulse bar is added for one-click jumps to your folders; press Ctrl+G to go to the current Pulse folder	軟體仍顯示 Windows 內建的開啟、儲存視窗時，附帶一條 Pulse 快捷列，一鍵跳到常用資料夾；按 Ctrl+G 跳到 Pulse 目前資料夾
 DialogJumpSearchCue	IDS_DIALOG_JUMP_SEARCH_CUE	5587	跳转到…  拼音也行	Go to…	跳轉到…  拼音也行
 DialogJumpCurrent	IDS_DIALOG_JUMP_CURRENT	5588	跳到 Pulse 当前的文件夹	Go to the current Pulse folder	跳到 Pulse 目前的資料夾
 DialogJumpNone	IDS_DIALOG_JUMP_NONE	5589	Pulse 里还没有打开的文件夹	No folders open in Pulse	Pulse 裡還沒有開啟的資料夾
@@ -4347,8 +4347,8 @@ DialogJumpFillOpen	IDS_DIALOG_JUMP_FILL_OPEN	5597	填入并打开 ↵	Fill in an
 DialogJumpChipCurrent	IDS_DIALOG_JUMP_CHIP_CURRENT	5598	当前	current	目前
 DialogJumpPinned	IDS_DIALOG_JUMP_PINNED	5599	快速访问	Quick access	快速存取
 DialogJumpRecent	IDS_DIALOG_JUMP_RECENT	5600	最近使用	Recent	最近使用
-DialogJumpAuto	IDS_DIALOG_JUMP_AUTO	5601	打开对话框时自动跳到 Pulse 当前文件夹	Go to the current Pulse folder when a dialog opens	開啟對話方塊時自動跳到 Pulse 目前資料夾
-DialogJumpAutoDesc	IDS_DIALOG_JUMP_AUTO_DESC	5602	只跳一次；手动换了位置后不再干预	Only once per dialog; after you move elsewhere it stays put	只跳一次；手動換了位置後不再干預
+DialogJumpAuto	IDS_DIALOG_JUMP_AUTO	5601	自动跳到 Pulse 当前打开的文件夹	Jump to the folder open in Pulse	自動跳到 Pulse 目前開啟的資料夾
+DialogJumpAutoDesc	IDS_DIALOG_JUMP_AUTO_DESC	5602	每个窗口只跳一次，你自己换了位置后就不再改动	Only once per window; if you go elsewhere, it won't move you back	每個視窗只跳一次，你自己換了位置後就不再變動
 JumpHistory	IDS_JUMP_HISTORY	5603	记住常去的位置	Remember frequent places	記住常去的位置
 JumpHistoryDesc	IDS_JUMP_HISTORY_DESC	5604	把常去的文件夹排在前面；只保存在本机	Folders you go to often come first; kept on this PC only	把常去的資料夾排在前面；只儲存在本機
 JumpHistoryClear	IDS_JUMP_HISTORY_CLEAR	5605	清除记录	Clear history	清除記錄
@@ -4805,22 +4805,22 @@ PickerApplicationPlaces	IDS_PICKER_APPLICATION_PLACES	6199	程序提供的位置
 StartupIntegrationLead	IDS_STARTUPINTEGRATIONLEAD	6200	决定 Pulse 何时启动，以及代替 Windows 的哪些部分。这些设置只对本机生效。	Choose when Pulse starts and which Windows features it replaces. These settings apply only to this PC.	
 StartupDialogsTitle	IDS_STARTUPDIALOGSTITLE	6201	打开和保存对话框	Open and save dialogs	
 StartupDialogsToggle	IDS_STARTUPDIALOGSTOGGLE	6202	用 Pulse 代替打开和保存对话框	Use Pulse for open and save dialogs	
-StartupDialogsDesc	IDS_STARTUPDIALOGSDESC	6203	其他软件调用受支持的标准文件对话框时，使用 Pulse 的快速访问、搜索和预览。	Use Pulse quick access, search and preview in supported standard file dialogs.	
+StartupDialogsDesc	IDS_STARTUPDIALOGSDESC	6203	其他软件打开或保存文件时，改用 Pulse 的窗口，可以直接用快速访问、搜索和预览。	When other apps open or save files, use Pulse instead, with quick access, search and preview.	
 StartupDialogsScope	IDS_STARTUPDIALOGSSCOPE	6204	适用范围和使用须知	Scope and usage notes	
-StartupDialogsScopeBody	IDS_STARTUPDIALOGSSCOPEBODY	6205	支持当前组件架构的 Windows 标准 COM 打开、保存对话框。32 位、旧式接口及管理员程序需要对应入口；此开关不代表它们已全部接入。自绘对话框、受限应用和不支持的请求保留原界面。\n开启前已运行的软件，请保存工作后重新打开。仅影响当前用户；不会覆盖其他软件的入口。关闭后，后续请求恢复原生对话框。	Supports standard Windows COM file dialogs matching the installed components. 32-bit, legacy and elevated programs need their corresponding entry points; this switch does not connect them all. Custom, restricted and unsupported dialogs retain their original UI.\nSave your work and restart applications that were already running. Applies to the current user only and preserves other providers. Turning this off restores subsequent requests.	
+StartupDialogsScopeBody	IDS_STARTUPDIALOGSSCOPEBODY	6205	开启后，软件里的「打开」「另存为」「选择文件夹」窗口会尽量换成 Pulse。少数软件使用自己设计的窗口或有安全限制，这些仍显示 Windows 自带的窗口。\n已经开着的软件需要重新打开一次才会生效（请先保存工作）。只影响当前 Windows 账户；关掉开关即可恢复 Windows 自带的窗口。	Open, Save As and Choose Folder windows in your apps will switch to Pulse where possible. A few apps use their own custom windows or have security restrictions; those keep the standard Windows version.\nApps that are already running need to be reopened once (save your work first). Only your Windows account is affected; turn the switch off to return to the standard Windows dialogs.	開啟後，軟體裡的「開啟」「另存新檔」「選擇資料夾」視窗會盡量換成 Pulse。少數軟體使用自己設計的視窗或有安全限制，這些仍顯示 Windows 內建的視窗。\n已經開著的軟體需要重新開啟一次才會生效（請先儲存工作）。只影響目前的 Windows 帳戶；關掉開關即可恢復 Windows 內建的視窗。
 StartupDialogsOff	IDS_STARTUPDIALOGSOFF	6206	使用 Windows 对话框	Using Windows dialogs	
 StartupDialogsOn	IDS_STARTUPDIALOGSON	6207	使用 Pulse 对话框	Using Pulse dialogs	
-StartupDialogsChecking	IDS_STARTUPDIALOGSCHECKING	6208	正在检查组件和入口…	Checking components and registration…	
-StartupDialogsMissing	IDS_STARTUPDIALOGSMISSING	6209	组件缺失或校验失败。请修复安装后重试；尚未启用此功能。	Components are missing or invalid. Repair the installation and retry; this feature has not been enabled.	
-StartupDialogsFailed	IDS_STARTUPDIALOGSFAILED	6210	操作未完成。请重试或导出诊断；当前状态以实际入口为准。	The operation did not complete. Retry or export diagnostics; the actual registration determines the current state.	
-StartupDialogsConflict	IDS_STARTUPDIALOGSCONFLICT	6211	打开和保存对话框的入口已被其他组件占用。Pulse 不会覆盖它，请先关闭对应功能再重试。	Another component owns the open/save dialog entry. Pulse will not overwrite it. Turn off that feature before retrying.	
+StartupDialogsChecking	IDS_STARTUPDIALOGSCHECKING	6208	正在检查…	Checking…	
+StartupDialogsMissing	IDS_STARTUPDIALOGSMISSING	6209	Pulse 的安装文件不完整，暂时无法开启。请重新安装 Pulse 后再试。	Some Pulse files are missing or damaged, so this can't be turned on. Reinstall Pulse and try again.	
+StartupDialogsFailed	IDS_STARTUPDIALOGSFAILED	6210	没能完成设置。请点「重试」；如果还是不行，可以导出问题报告发给开发者。	This setting couldn't be applied. Select Try again; if it still fails, export a problem report and send it to the developer.	沒能完成設定。請點「重試」；如果還是不行，可以匯出問題報告傳給開發者。
+StartupDialogsConflict	IDS_STARTUPDIALOGSCONFLICT	6211	另一个软件已经替换了打开和保存窗口。为避免冲突，Pulse 不会抢占；请先关掉那个软件里的类似功能，再点「重试」。	Another app has already replaced the open and save dialogs. To avoid conflicts, Pulse won't override it. Turn off that app's similar feature, then select Try again.	
 StartupDialogsEnableTitle	IDS_STARTUPDIALOGSENABLETITLE	6212	开启 Pulse 打开和保存对话框？	Enable Pulse open and save dialogs?	
 StartupDialogsEnableConfirm	IDS_STARTUPDIALOGSENABLECONFIRM	6213	开启	Enable	
-StartupDialogsEnabledHint	IDS_STARTUPDIALOGSENABLEDHINT	6214	已开启。请保存工作后重新打开需要使用此功能的软件。	Enabled. Save your work and restart the applications you want to use with this feature.	
-StartupDiagnostics	IDS_STARTUPDIAGNOSTICS	6215	诊断报告	Diagnostic report	
-StartupDiagnosticsDesc	IDS_STARTUPDIAGNOSTICSDESC	6216	导出组件状态和错误码，不包含所选文件名、文件内容或原始日志。	Export component status and error codes, without selected filenames, file contents or raw logs.	
-StartupDiagnosticsExport	IDS_STARTUPDIAGNOSTICSEXPORT	6217	导出诊断	Export diagnostics	
-StartupDiagnosticsSaved	IDS_STARTUPDIAGNOSTICSSAVED	6218	诊断报告已保存：	Diagnostic report saved: 	
+StartupDialogsEnabledHint	IDS_STARTUPDIALOGSENABLEDHINT	6214	已开启。已经开着的软件，保存工作后重新打开一次即可使用。	On. Apps that are already open will use it after you save your work and reopen them.	
+StartupDiagnostics	IDS_STARTUPDIAGNOSTICS	6215	问题报告	Problem report	
+StartupDiagnosticsDesc	IDS_STARTUPDIAGNOSTICSDESC	6216	把最近的使用记录打包成 ZIP，方便发给开发者排查。里面可能含有文件夹路径和文件名。	Packs recent activity into a ZIP you can send to the developer. It may contain folder paths and file names.	把最近的使用記錄打包成 ZIP，方便傳給開發者排查。裡面可能含有資料夾路徑和檔名。
+StartupDiagnosticsExport	IDS_STARTUPDIAGNOSTICSEXPORT	6217	导出报告	Export report	
+StartupDiagnosticsSaved	IDS_STARTUPDIAGNOSTICSSAVED	6218	问题报告已保存：	Problem report saved: 	
 StartupJumpSettings	IDS_STARTUPJUMPSETTINGS	6219	设置对话框跳转条	Configure the dialog jump bar	
 StartupJumpDesc	IDS_STARTUPJUMPDESC	6220	保留原生对话框时，也可快速跳到 Pulse 中打开的文件夹。	Jump to folders open in Pulse when the original Windows dialog is retained.	
 StartupRestoreSection	IDS_STARTUPRESTORESECTION	6221	恢复 Windows 默认	Restore Windows defaults	
@@ -4840,19 +4840,19 @@ StartupFolderDesc	IDS_STARTUPFOLDERDESC	6234	在桌面等位置双击文件夹�
 StartupThisPcDesc	IDS_STARTUPTHISPCDESC	6235	双击桌面上的“此电脑”图标时	When you open This PC from the desktop	
 StartupWinEDesc	IDS_STARTUPWINEDESC	6236	按 Win + E 或点任务栏的资源管理器图标时。管理员应用内的 Win + E 接管需在每次启动 Pulse 时授权；取消后仍保留普通接管。	For Win + E and the taskbar Explorer icon. Handling Win + E in administrator apps requires approval each time Pulse starts; cancelling keeps standard interception enabled.	按 Win + E 或點工作列的檔案總管圖示時。管理員應用程式內的 Win + E 接管需在每次啟動 Pulse 時授權；取消後仍保留一般接管。
 StartupScopeYes	IDS_STARTUPSCOPEYES	6237	会改用 Pulse 对话框	Uses Pulse dialogs	
-StartupScopeYesDesc	IDS_STARTUPSCOPEYESDESC	6238	使用 Windows 标准文件对话框，并已启用对应 Pulse 接入组件的软件。	Applications using standard Windows file dialogs with the corresponding Pulse integration enabled.	
+StartupScopeYesDesc	IDS_STARTUPSCOPEYESDESC	6238	软件弹出的是 Windows 标准的打开、保存窗口时，就会换成 Pulse。	Apps that show the standard Windows open or save window will switch to Pulse.	
 StartupScopeNo	IDS_STARTUPSCOPENO	6239	仍使用原来的对话框	Keeps the original dialogs	
-StartupScopeNoDesc	IDS_STARTUPSCOPENODESC	6240	自绘对话框、受限或尚未接入的软件保留原界面。暂不支持的标准请求会回退到 Windows 对话框。	Custom dialogs, restricted apps and apps without integration keep their original UI. Unsupported standard requests fall back to Windows dialogs.	
+StartupScopeNoDesc	IDS_STARTUPSCOPENODESC	6240	少数软件用的是自己设计的窗口，或有安全限制，这些仍显示原来的窗口。遇到暂不支持的情况，也会自动改用 Windows 自带的窗口。	A few apps use their own custom windows or have security restrictions; those keep their original window. Anything Pulse doesn't support yet automatically uses the standard Windows window.	
 StartupKnowBefore	IDS_STARTUPKNOWBEFORE	6241	开启前请了解	Before enabling	
 StartupKnowTitle	IDS_STARTUPKNOWTITLE	6242	使用须知	Things to know	
-StartupKnowRestart	IDS_STARTUPKNOWRESTART	6243	重新打开已在运行的软件	Restart applications already running	
-StartupKnowRestartDesc	IDS_STARTUPKNOWRESTARTDESC	6008	开启前已在运行的软件，需要重新打开才会使用 Pulse 对话框。请先保存工作。	Applications already running must be restarted to use Pulse dialogs. Save your work first.	
+StartupKnowRestart	IDS_STARTUPKNOWRESTART	6243	重新打开已在运行的软件	Reopen apps that are already running	
+StartupKnowRestartDesc	IDS_STARTUPKNOWRESTARTDESC	6008	开启前已经开着的软件，需要重新打开一次才会用上 Pulse。请先保存工作。	Apps that were already open need to be reopened once to use Pulse. Save your work first.	
 StartupKnowUser	IDS_STARTUPKNOWUSER	6009	只影响当前用户	Only affects the current user	
 StartupKnowUserDesc	IDS_STARTUPKNOWUSERDESC	6010	不改动这台电脑上其他用户的设置。	Other users on this computer are not affected.	
-StartupKnowProvider	IDS_STARTUPKNOWPROVIDER	6011	不覆盖其他软件	Preserves other providers	
-StartupKnowProviderDesc	IDS_STARTUPKNOWPROVIDERDESC	6012	如果另一款软件已经接管这些对话框，Pulse 会提示冲突，不会覆盖它。	If another application owns these dialogs, Pulse reports the conflict and leaves it unchanged.	
+StartupKnowProvider	IDS_STARTUPKNOWPROVIDER	6011	不和其他软件抢	Won't override other apps	
+StartupKnowProviderDesc	IDS_STARTUPKNOWPROVIDERDESC	6012	如果另一个软件已经替换了这些窗口，Pulse 会提示你，不会强行覆盖。	If another app has already replaced these windows, Pulse lets you know and leaves it alone.	
 StartupKnowRestore	IDS_STARTUPKNOWRESTORE	6013	随时可以恢复	Restore at any time	
-StartupKnowRestoreDesc	IDS_STARTUPKNOWRESTOREDESC	6014	关掉开关后，后续请求恢复 Windows 对话框，不会关闭任何软件；卸载 Pulse 时也会自动恢复。	Turning this off restores native dialogs for subsequent requests. Uninstalling also restores them. Dialogs already open are unaffected.	
+StartupKnowRestoreDesc	IDS_STARTUPKNOWRESTOREDESC	6014	关掉开关后，之后弹出的窗口就会恢复成 Windows 自带的，不会关闭任何软件；卸载 Pulse 时也会自动恢复。	Turn the switch off and new windows go back to the standard Windows version. No apps are closed, and uninstalling Pulse restores them too.	
 StartupJumpTitle	IDS_STARTUPJUMPTITLE	6015	Windows 对话框里也能快速跳转	Jump quickly in Windows dialogs	
 StartupPreview	IDS_STARTUPPREVIEW	6016	预览	Preview	
 IntegrationEnableKeep	IDS_INTEGRATIONENABLEKEEP	6017	打开「关闭后继续运行」	Enable keep running after close	開啟「關閉後繼續執行」
@@ -4983,7 +4983,7 @@ PackagedMenuReadOnly	IDS_PACKAGED_MENU_READ_ONLY	6253	由应用包声明，系�
 ArrangeMainRight	IDS_ARRANGE_MAIN_RIGHT	6254	主窗在右	Main on right	主視窗在右
 ArrangeMainTop	IDS_ARRANGE_MAIN_TOP	6255	主窗在上	Main on top	主視窗在上
 ArrangeMerge	IDS_ARRANGE_MERGE	6256	合并窗口	Merge	合併視窗
-StartupDialogsPathMismatch	IDS_STARTUP_DIALOGS_PATH_MISMATCH	6257	已启用的文件对话框来自其他安装目录。重试可绑定当前已验证组件。	File dialogs use another installation. Retry to bind the current verified components.	已啟用的檔案對話方塊來自其他安裝目錄。重試可綁定目前已驗證元件。
+StartupDialogsPathMismatch	IDS_STARTUP_DIALOGS_PATH_MISMATCH	6257	当前使用的是另一个位置安装的 Pulse。点「重试」即可换成现在这份 Pulse。	Dialogs are using a copy of Pulse installed somewhere else. Select Try again to switch to this copy.	目前使用的是另一個位置安裝的 Pulse。點「重試」即可換成現在這份 Pulse。
 SetupLockedTitle	IDS_SETUP_LOCKED_TITLE	6258	安装文件被占用	Installation files are in use	安裝檔案被佔用
 SetupLockedText	IDS_SETUP_LOCKED_TEXT	6259	其他程序可能正在使用 Pulse 组件。请关闭下列程序后重试；取消将保留原版本。	Other programs may be using Pulse components. Close the programs listed below, then retry. Cancel keeps the existing version.	其他程式可能正在使用 Pulse 元件。請關閉下列程式後重試；取消將保留原版本。
 SetupLockedUnknown	IDS_SETUP_LOCKED_UNKNOWN	6260	无法识别占用程序。请关闭正在使用下列文件的程序后重试。	The program using these files could not be identified. Close programs using the files below, then retry.	無法識別佔用程式。請關閉正在使用下列檔案的程式後重試。
@@ -5177,7 +5177,7 @@ DialogAutoArchScope	IDS_DIALOG_AUTO_ARCH_SCOPE	6447	自动模式仅覆盖受支�
 DialogAutoArchX64	IDS_DIALOG_AUTO_ARCH_X64	6448	x64	x64	x64
 DialogAutoArchX86	IDS_DIALOG_AUTO_ARCH_X86	6449	x86	x86	x86
 DialogAutoArchDisabledMatching	IDS_DIALOG_AUTO_ARCH_DISABLED_MATCHING	6450	已停用（仍有匹配登记）	Disabled (matching registration remains)	已停用（仍保留相符登錄）
-PreviewNativeDocumentEmpty	IDS_PREVIEW_NATIVE_DOCUMENT_EMPTY	6451	当前页没有可预览的文字内容。请用关联应用查看完整内容。	This page has no previewable text. Open it in its associated app to view the full content.	目前頁面沒有可預覽的文字內容。請用關聯應用程式檢視完整內容。
+PreviewNativeDocumentEmpty	IDS_PREVIEW_NATIVE_DOCUMENT_EMPTY	6451	当前页没有可预览的文字内容。打开文件可查看完整内容。	This page has no previewable text. Open the file to view the full content.	目前頁面沒有可預覽的文字內容。開啟檔案可檢視完整內容。
 PreviewNativeContentMode	IDS_PREVIEW_NATIVE_CONTENT_MODE	6452	内容预览（非原始版式）	Content preview (not original layout)	內容預覽（非原始版面配置）
 PreviewNextSlide	IDS_PREVIEW_NEXT_SLIDE	6453	下一张幻灯片	Next slide	下一張投影片
 StoreTabDiscover	IDS_STORE_TAB_DISCOVER	6454	发现	Discover	
@@ -5330,46 +5330,46 @@ ManagedAdminConfirmTitle	IDS_MANAGEDADMINCONFIRMTITLE	6654	确认管理员托管
 ManagedAdminConfirmBody	IDS_MANAGEDADMINCONFIRMBODY	6655	请先保存工作并完全退出所选应用。确认后 Windows 将请求管理员权限；取消提权不会启动应用。已有实例可能接收请求而仍未接管。本操作仅启动本次所选应用，不提升 Pulse 主窗口权限，也不保证所有对话框已接管。	Save your work and fully exit the selected application first. Windows will then request administrator privileges; cancelling elevation will not launch the application. An existing instance may receive the request without being managed. This launches only the selected application, does not elevate the main Pulse window, and does not certify replacement of all dialogs.	
 ManagedAdminUnavailable	IDS_MANAGEDADMINUNAVAILABLE	6656	管理员托管组件尚未就绪。请使用安装版，并确认匹配组件位于受保护的安装目录。	Administrator managed-launch components are not ready. Use an installed copy with matching components in a protected installation directory.	
 ManagedAdminCancelled	IDS_MANAGEDADMINCANCELLED	6657	已取消管理员权限请求，未提交应用启动。	Administrator permission request cancelled; application launch was not submitted.	
-DialogHistoryTitle	IDS_DIALOGHISTORYTITLE	6658	软件接管记录	Application dialog history	
-DialogHistoryDesc	IDS_DIALOGHISTORYDESC	6659	自动记录已观察到的对话框结果。出现问题时，说明原因和处理方法；未观察到记录不代表失败。	Automatically records observed dialog outcomes, with explanations and next steps for issues. No record does not mean failure.	
-DialogHistoryRefresh	IDS_DIALOGHISTORYREFRESH	6660	检查最新记录	Check latest records	
-DialogHistoryEmpty	IDS_DIALOGHISTORYEMPTY	6661	暂无可确认的软件记录。照常使用软件即可，Pulse 会在后台记录可观察到的接管结果。	No attributable application records yet. Use your applications normally; Pulse records observable dialog outcomes in the background.	
-DialogHistoryNote	IDS_DIALOGHISTORYNOTE	6662	显示最近 12 组软件接管记录，不记录所选文件名或内容。重复事件合并；后续成功仅说明那一次操作成功。	Shows the latest 12 grouped application records, not selected filenames or contents. Repeated events are grouped; a later success only confirms that operation.	
-DialogHistoryUnattributed	IDS_DIALOGHISTORYUNATTRIBUTED	6663	部分旧记录缺少可靠的软件身份，暂不归到任何软件，也不据此判断失败。	Some older records lack reliable application identity. They are not attributed to an application or counted as failures.	
-DialogHistoryStorageError	IDS_DIALOGHISTORYSTORAGEERROR	6664	部分历史记录未能读取或保存。当前列表可能不完整，可导出诊断继续排查。	Some history could not be read or saved. The list may be incomplete; export diagnostics for investigation.	
+DialogHistoryTitle	IDS_DIALOGHISTORYTITLE	6658	各软件使用情况	Dialog activity by app	
+DialogHistoryDesc	IDS_DIALOGHISTORYDESC	6659	Pulse 会自动记下各软件打开、保存文件时的情况；出了问题，这里会说明原因和解决办法。	Pulse notes what happens when apps open or save files. If something goes wrong, you'll see why and what to do here.	
+DialogHistoryRefresh	IDS_DIALOGHISTORYREFRESH	6660	刷新	Refresh	
+DialogHistoryEmpty	IDS_DIALOGHISTORYEMPTY	6661	还没有记录。照常使用软件即可，Pulse 会在后台自动记下。	Nothing here yet. Just use your apps as usual; Pulse keeps track in the background.	
+DialogHistoryNote	IDS_DIALOGHISTORYNOTE	6662	只显示最近 12 条，重复的情况合并为一条；不会记录你选了哪些文件。	Shows the latest 12 entries, with repeats combined. The files you choose are never recorded.	
+DialogHistoryUnattributed	IDS_DIALOGHISTORYUNATTRIBUTED	6663	有些较早的记录无法确定来自哪个软件，已略过。	Some older entries couldn't be matched to an app and were skipped.	
+DialogHistoryStorageError	IDS_DIALOGHISTORYSTORAGEERROR	6664	部分记录读取或保存失败，列表可能不全。	Some entries couldn't be read or saved, so this list may be incomplete.	
 DialogHistoryUnknown	IDS_DIALOGHISTORYUNKNOWN	6665	状态待确认	Status unconfirmed	
 DialogHistoryFallback	IDS_DIALOGHISTORYFALLBACK	6666	本次使用了原生对话框	This operation used the native dialog	
 DialogHistoryFailure	IDS_DIALOGHISTORYFAILURE	6667	本次接管未完成	This operation did not complete in Pulse	
 DialogHistorySuccess	IDS_DIALOGHISTORYSUCCESS	6668	已确认 Pulse 对话框接管	Pulse dialog replacement was confirmed	
-DialogHistoryReasonUnknown	IDS_DIALOGHISTORYREASONUNKNOWN	6669	原因尚未确认，不作推断。	The cause is not confirmed; no cause is inferred.	
-DialogHistoryUnsupported	IDS_DIALOGHISTORYUNSUPPORTED	6670	该对话框请求包含暂未支持的功能。	This dialog request contains an unsupported feature.	
-DialogHistoryProviderUnavailable	IDS_DIALOGHISTORYPROVIDERUNAVAILABLE	6671	本次未能连接或加载对话框组件。	The dialog component could not be connected to or loaded.	
-DialogHistoryTimeout	IDS_DIALOGHISTORYTIMEOUT	6672	本次等待对话框组件超时。	The dialog component timed out.	
-DialogHistoryPermissionDenied	IDS_DIALOGHISTORYPERMISSIONDENIED	6673	本次接管被权限检查拒绝。	A permission check rejected this dialog request.	
-DialogHistoryPermissionUnknown	IDS_DIALOGHISTORYPERMISSIONUNKNOWN	6674	诊断所需权限不足，尚未确认接管状态。	Diagnostic access was insufficient; the dialog status is unconfirmed.	
-DialogHistoryMismatch	IDS_DIALOGHISTORYMISMATCH	6675	软件使用的接管组件与当前登记不一致。	The application is using a dialog component that differs from the current registration.	
-DialogHistoryDisabled	IDS_DIALOGHISTORYDISABLED	6676	发生此事件时，自动接管处于关闭状态。	Automatic dialog replacement was disabled when this event occurred.	
-DialogHistoryConflict	IDS_DIALOGHISTORYCONFLICT	6677	发现接管登记冲突。	Conflicting dialog registration was observed.	
-DialogHistoryInitialFolder	IDS_DIALOGHISTORYINITIALFOLDER	6678	本次初始位置暂不受支持，已保留原生对话框。	The initial location is not supported; the native dialog was retained.	
-DialogHistoryProviderFailure	IDS_DIALOGHISTORYPROVIDERFAILURE	6679	对话框组件报告本次处理失败。	The dialog component reported a failure for this operation.	
-DialogHistoryNative	IDS_DIALOGHISTORYNATIVE	6680	本次已回到原生对话框，具体原因尚未确认。	This operation fell back to the native dialog; the specific cause is unconfirmed.	
-DialogHistorySucceeded	IDS_DIALOGHISTORYSUCCEEDED	6681	本次操作已有成功结果，不代表该软件的所有对话框均受支持。	This operation returned successfully; this does not certify all dialogs in the application.	
-DialogHistoryRestart	IDS_DIALOGHISTORYRESTART	6682	处理方法：先保存工作，完全退出该软件（包括托盘），再按平时的方式重新打开。	Next step: save your work, fully exit the application (including its tray icon), then reopen it normally.	
-DialogHistorySettings	IDS_DIALOGHISTORYSETTINGS	6683	处理方法：检查本页的自动接管设置；若显示冲突，请导出诊断，不必自行修改系统登记。	Next step: check automatic dialog replacement on this page. For a conflict, export diagnostics rather than editing system registration.	
-DialogHistoryRetry	IDS_DIALOGHISTORYRETRY	6684	处理方法：重新尝试打开或保存；若再次出现，请导出诊断。	Next step: retry opening or saving. If it recurs, export diagnostics.	
-DialogHistoryUseNative	IDS_DIALOGHISTORYUSENATIVE	6685	处理方法：继续使用原生对话框即可；可导出诊断反馈兼容性问题。	Next step: continue using the native dialog. Export diagnostics to report the compatibility issue.	
-DialogHistoryExport	IDS_DIALOGHISTORYEXPORT	6686	处理方法：导出诊断供排查，无需手动查找日志或运行命令。	Next step: export diagnostics for investigation. No manual log collection or commands are needed.	
-DialogHistoryNoAction	IDS_DIALOGHISTORYNOACTION	6687	无需处理，照常使用即可。	No action is needed; continue using the application normally.	
+DialogHistoryReasonUnknown	IDS_DIALOGHISTORYREASONUNKNOWN	6669	原因暂时不清楚。	The cause isn't known yet.	
+DialogHistoryUnsupported	IDS_DIALOGHISTORYUNSUPPORTED	6670	这个窗口用到了 Pulse 暂不支持的功能。	This window uses a feature Pulse doesn't support yet.	
+DialogHistoryProviderUnavailable	IDS_DIALOGHISTORYPROVIDERUNAVAILABLE	6671	这次没能启动 Pulse 对话框。	The Pulse dialog couldn't start this time.	
+DialogHistoryTimeout	IDS_DIALOGHISTORYTIMEOUT	6672	这次 Pulse 对话框等了太久没有响应。	The Pulse dialog took too long to respond this time.	這次 Pulse 對話方塊等了太久沒有回應。
+DialogHistoryPermissionDenied	IDS_DIALOGHISTORYPERMISSIONDENIED	6673	这次因为权限不足，没能使用 Pulse。	Pulse couldn't be used this time because of missing permissions.	
+DialogHistoryPermissionUnknown	IDS_DIALOGHISTORYPERMISSIONUNKNOWN	6674	权限不够，无法确认这次的情况。	Not enough permission to check what happened this time.	
+DialogHistoryMismatch	IDS_DIALOGHISTORYMISMATCH	6675	这个软件还在用旧版本的 Pulse 对话框。	This app is still using an older version of the Pulse dialog.	
+DialogHistoryDisabled	IDS_DIALOGHISTORYDISABLED	6676	当时「用 Pulse 代替打开和保存对话框」是关闭的。	“Use Pulse for open and save dialogs” was off at the time.	
+DialogHistoryConflict	IDS_DIALOGHISTORYCONFLICT	6677	另一个软件也在替换打开和保存窗口，两者冲突了。	Another app is also replacing the open and save dialogs, causing a conflict.	
+DialogHistoryInitialFolder	IDS_DIALOGHISTORYINITIALFOLDER	6678	Pulse 暂不支持这个软件要求的起始位置，所以用了系统对话框。	Pulse doesn't support the starting folder this app asked for yet, so the Windows dialog was used.	
+DialogHistoryProviderFailure	IDS_DIALOGHISTORYPROVIDERFAILURE	6679	Pulse 对话框这次出错了。	The Pulse dialog ran into an error this time.	
+DialogHistoryNative	IDS_DIALOGHISTORYNATIVE	6680	这次用了系统对话框，原因暂时不清楚。	The Windows dialog was used this time; the cause isn't known yet.	
+DialogHistorySucceeded	IDS_DIALOGHISTORYSUCCEEDED	6681	这次已成功使用 Pulse。	Pulse was used successfully this time.	
+DialogHistoryRestart	IDS_DIALOGHISTORYRESTART	6682	怎么办：保存工作，完全退出这个软件（包括托盘图标），再重新打开。	What to do: save your work, quit the app completely (including its tray icon), then reopen it.	怎麼辦：儲存工作，完全結束這個軟體（包括系統匣圖示），再重新開啟。
+DialogHistorySettings	IDS_DIALOGHISTORYSETTINGS	6683	怎么办：检查本页的「用 Pulse 代替打开和保存对话框」开关；如果提示冲突，导出问题报告即可，不需要自己改系统设置。	What to do: check the “Use Pulse for open and save dialogs” switch on this page. If it reports a conflict, just export a problem report—no need to change system settings yourself.	
+DialogHistoryRetry	IDS_DIALOGHISTORYRETRY	6684	怎么办：再试一次打开或保存；如果又出现，请导出问题报告。	What to do: try opening or saving again. If it happens again, export a problem report.	
+DialogHistoryUseNative	IDS_DIALOGHISTORYUSENATIVE	6685	怎么办：继续用系统对话框即可；也可以导出问题报告告诉开发者。	What to do: keep using the Windows dialog. You can also export a problem report to let the developer know.	
+DialogHistoryExport	IDS_DIALOGHISTORYEXPORT	6686	怎么办：点下方「导出报告」，把文件发给开发者即可。	What to do: select Export report below and send the file to the developer.	怎麼辦：點下方「匯出報告」，把檔案傳給開發者即可。
+DialogHistoryNoAction	IDS_DIALOGHISTORYNOACTION	6687	不用处理，照常使用即可。	Nothing to do; keep using it as usual.	
 DialogHistoryMeta	IDS_DIALOGHISTORYMETA	6688	最近事件：{time} UTC · 合并 {count} 次	Latest event: {time} UTC · {count} grouped events	
-DialogHistoryLaterSuccess	IDS_DIALOGHISTORYLATERSUCCESS	6689	此后已观察到同一软件的一次成功接管；此前问题记录仍保留。	A later successful dialog replacement was observed for this application; the earlier issue remains in history.	
+DialogHistoryLaterSuccess	IDS_DIALOGHISTORYLATERSUCCESS	6689	之后这个软件已成功用上 Pulse，这条记录仅供参考。	This app has since used Pulse successfully; this entry is kept for reference.	
 DialogHistoryOpen	IDS_DIALOGHISTORYOPEN	6690	操作：打开	Operation: Open	
 DialogHistorySave	IDS_DIALOGHISTORYSAVE	6691	操作：保存	Operation: Save	
-DialogHistoryOperationUnknown	IDS_DIALOGHISTORYOPERATIONUNKNOWN	6692	操作类型未确认	Operation type unconfirmed	
-DialogHistoryPartial	IDS_DIALOGHISTORYPARTIAL	6693	日志采集有范围或读取限制，当前列表可能不完整。	Log collection was limited or incomplete; this list may not include every event.	
-DialogRestartNote	IDS_DIALOGRESTARTNOTE	6694	运行中的软件仍有旧接管组件，建议如下。约每分钟自动更新，不会关闭软件。	Older dialog components were found in running applications. Updated about once a minute; applications are never closed automatically.	
-DialogRestartNone	IDS_DIALOGRESTARTNONE	6695	本次检查未发现需要重新打开的软件；这不代表所有软件的对话框均受支持。	This scan found no applications requiring a restart. This does not mean every application dialog is supported.	
-DialogRestartPartial	IDS_DIALOGRESTARTPARTIAL	6696	部分运行进程未能完整检查，未将这些进程判定为接管失败。	Some running processes could not be fully checked. They are not classified as takeover failures.	
-DialogRestartRequired	IDS_DIALOGRESTARTREQUIRED	6697	当前状态：仍加载旧接管组件。请先保存工作，再完整退出此软件（包括托盘中的后台进程），然后正常重新打开。无需重启电脑。	Current status: an older dialog component is still loaded. Save your work, fully exit this application (including background tray processes), then reopen it normally. No computer restart is needed.	
+DialogHistoryOperationUnknown	IDS_DIALOGHISTORYOPERATIONUNKNOWN	6692	未知操作	Unknown action	
+DialogHistoryPartial	IDS_DIALOGHISTORYPARTIAL	6693	部分记录没能读取，列表可能不全。	Some entries couldn't be read, so this list may be incomplete.	
+DialogRestartNote	IDS_DIALOGRESTARTNOTE	6694	下面的软件还在用旧版本的 Pulse 对话框，重新打开一次就能更新。列表约每分钟自动刷新，Pulse 不会自动关闭任何软件。	The apps below are still using an older version of the Pulse dialog. Reopen them once to update. This list refreshes about every minute; Pulse never closes apps for you.	
+DialogRestartNone	IDS_DIALOGRESTARTNONE	6695	目前没有需要重新打开的软件。	No apps need to be reopened right now.	
+DialogRestartPartial	IDS_DIALOGRESTARTPARTIAL	6696	有几个正在运行的软件没能检查，这不代表它们有问题。	A few running apps couldn't be checked; that doesn't mean anything is wrong with them.	
+DialogRestartRequired	IDS_DIALOGRESTARTREQUIRED	6697	这个软件还在用旧版本。请保存工作，完全退出它（包括右下角托盘里的图标），再重新打开。不用重启电脑。	This app is still using the older version. Save your work, quit it completely (including its icon in the notification area), then open it again. No need to restart your PC.	這個軟體還在用舊版本。請儲存工作，完全結束它（包括右下角系統匣裡的圖示），再重新開啟。不用重新啟動電腦。
 StoreUninstallPurgeData	IDS_STOREUNINSTALLPURGEDATA	6698	同时清除此扩展保存的设置与授权记录	Also delete saved settings and permissions for this extension	
 OpTaskWritingPrefix	IDS_OP_TASK_WRITING_PREFIX	6699	正在写入 	Writing 	
 OpTaskThroughPulse	IDS_OP_TASK_THROUGH_PULSE	6700	经过 Pulse 文件操作	Through Pulse file operations	
@@ -5381,16 +5381,16 @@ PickerUndoJump	IDS_PICKER_UNDO_JUMP	6705	回到 {name}	Back to {name}
 PickerExplorerSource	IDS_PICKER_EXPLORER_SOURCE	6706	资源管理器	Explorer	
 PickerPulseSource	IDS_PICKER_PULSE_SOURCE	6817	Pulse	Pulse	Pulse
 PickerPropertyAdd	IDS_PICKER_PROPERTY_ADD	6818	添加{name}	Add {name}	
-DialogRecordStatusSuccess	IDS_DIALOG_RECORD_STATUS_SUCCESS	6819	已接管	Replaced	
-DialogRecordStatusNative	IDS_DIALOG_RECORD_STATUS_NATIVE	6820	原生对话框	Native dialog	
-DialogRecordStatusFailed	IDS_DIALOG_RECORD_STATUS_FAILED	6821	未完成	Not completed	
+DialogRecordStatusSuccess	IDS_DIALOG_RECORD_STATUS_SUCCESS	6819	已用 Pulse	Using Pulse	
+DialogRecordStatusNative	IDS_DIALOG_RECORD_STATUS_NATIVE	6820	系统对话框	Windows dialog	
+DialogRecordStatusFailed	IDS_DIALOG_RECORD_STATUS_FAILED	6821	出了问题	Problem	
 DialogRecordStatusRestart	IDS_DIALOG_RECORD_STATUS_RESTART	6822	需重新打开	Reopen needed	
 DialogRecordStatusUnknown	IDS_DIALOG_RECORD_STATUS_UNKNOWN	6823	待确认	Unconfirmed	
 DialogRecordGroupRestart	IDS_DIALOG_RECORD_GROUP_RESTART	6824	需要重新打开	Needs reopening	
 DialogRecordGroupRecent	IDS_DIALOG_RECORD_GROUP_RECENT	6825	最近记录	Recent records	
 DialogRecordCountOne	IDS_DIALOG_RECORD_COUNT_ONE	6826	1 次	once	
-DialogRecordCountMany	IDS_DIALOG_RECORD_COUNT_MANY	6827	合并 {count} 次	{count} events	
-DialogRecordRunningOld	IDS_DIALOG_RECORD_RUNNING_OLD	6828	运行中 · 仍加载旧接管组件	Running · older dialog component loaded	
+DialogRecordCountMany	IDS_DIALOG_RECORD_COUNT_MANY	6827	共 {count} 次	{count} times	
+DialogRecordRunningOld	IDS_DIALOG_RECORD_RUNNING_OLD	6828	正在运行 · 使用旧版本	Running · older version	
 PickerJumpRecent	IDS_PICKER_JUMP_RECENT	6707	{name} 最近使用	{name} recent	
 PickerJumpEverywhere	IDS_PICKER_JUMP_EVERYWHERE	6708	全盘	Everywhere	
 PickerJumpCreate	IDS_PICKER_JUMP_CREATE	6709	在 {folder} 中新建文件夹“{name}”	New folder “{name}” in {folder}	
@@ -5486,7 +5486,7 @@ PickerSelectedSizeFormat	IDS_PICKER_SELECTED_SIZE_FORMAT	6798	{count} 个文件 
 PickerUserIndexExplanation	IDS_PICKER_USER_INDEX_EXPLANATION	6799	正在使用用户索引，只搜索已纳入用户索引的文件夹。全盘索引服务可扩大搜索范围；此处不会自动安装服务。	Using the per-user index; only indexed user folders are searched. The full-disk indexing service can expand coverage. No service is installed automatically here.	
 PickerSearchResultSummary	IDS_PICKER_SEARCH_RESULT_SUMMARY	6800	{count} 个结果 · {ms} 毫秒	{count} results · {ms} ms	
 PickerSaveAsName	IDS_PICKER_SAVE_AS_NAME	6801	另存为 {name}	Save as {name}	
-DialogHistoryShownClosed	IDS_DIALOGHISTORYSHOWNCLOSED	6802	Pulse 对话框已显示并正常取消或关闭，没有返回选中文件。	The Pulse dialog was displayed and cancelled or closed normally; no selected file was returned.	
+DialogHistoryShownClosed	IDS_DIALOGHISTORYSHOWNCLOSED	6802	Pulse 对话框已打开，随后被取消或关闭，没有选择文件。	The Pulse dialog opened and was then cancelled or closed without choosing a file.	
 NativeExtTabSettings	IDS_NATIVE_EXT_TAB_SETTINGS	6803	扩展设置	Extension settings	
 NativeExtTabContextMenu	IDS_NATIVE_EXT_TAB_CONTEXT_MENU	6804	右键菜单	Context menu	
 NativeExtMenuPlacementTitle	IDS_NATIVE_EXT_MENU_PLACEMENT_TITLE	6805	菜单显示方式	Menu placement	
@@ -5500,7 +5500,13 @@ NativeExtMenuCommandsDesc	IDS_NATIVE_EXT_MENU_COMMANDS_DESC	6812	单独开启或
 NativeExtMenuCommandsEmpty	IDS_NATIVE_EXT_MENU_COMMANDS_EMPTY	6813	该扩展当前未声明右键菜单命令	This extension has not declared any context menu commands	
 NativeExtMenuHiddenByPlugin	IDS_NATIVE_EXT_MENU_HIDDEN_BY_PLUGIN	6814	已由扩展自身隐藏	Currently hidden by the extension	
 NativeExtMenuResetOverrides	IDS_NATIVE_EXT_MENU_RESET_OVERRIDES	6815	恢复默认菜单显示	Reset menu overrides	
-DialogHistoryAdminAutoFailed	IDS_DIALOGHISTORYADMINAUTOFAILED	6816	这款管理员软件尚未自动接入。请在接管设置中检查自动服务状态。	Automatic attachment to this elevated application failed. Check the automatic service status in dialog integration settings.	
+DialogHistoryAdminAutoFailed	IDS_DIALOGHISTORYADMINAUTOFAILED	6816	这个软件以管理员身份运行，这次 Pulse 没能接入。可以重新打开它再试；如果还不行，请导出问题报告。	This app runs as administrator and Pulse couldn't connect to it this time. Reopen the app to try again; if it still fails, export a problem report.	
+DialogHistoryShownThenFailed	IDS_DIALOGHISTORYSHOWNTHENFAILED	7194	Pulse 对话框打开后出错了，没有返回结果。	The Pulse dialog opened but then ran into an error and returned nothing.	Pulse 對話方塊開啟後出錯了，沒有傳回結果。
+DialogHistoryClear	IDS_DIALOGHISTORYCLEAR	6829	清除记录	Clear records	
+DialogHistoryDeleteRecord	IDS_DIALOGHISTORYDELETERECORD	6830	删除这条记录	Delete this record	
+SettingsDoubleClickInterval	IDS_SETTINGS_DOUBLE_CLICK_INTERVAL	6831	文件双击间隔	File double-click interval	檔案雙擊間隔
+SettingsDoubleClickIntervalDesc	IDS_SETTINGS_DOUBLE_CLICK_INTERVAL_DESC	6832	控制文件双击识别时间，不更改 Windows 设置。	File double-click timing. Windows settings stay unchanged.	控制檔案按兩下識別時間，不變更 Windows 設定。
+DoubleClickSystem	IDS_DOUBLE_CLICK_SYSTEM	6833	跟随系统	Follow system	跟隨系統
 SzTakeSection	IDS_SZ_TAKE_SECTION	6834	接管压缩包	Archive files	
 SzTakeTitle	IDS_SZ_TAKE_TITLE	6835	接管压缩包	Open archives with Pulse	
 SzTakeDesc	IDS_SZ_TAKE_DESC	6836	双击压缩包直接用 Pulse 解压，压缩包换上按格式区分的图标。别的压缩软件正在打开的格式不动，可以在下面单独改。关掉时恢复原来的关联。	Double-click an archive to extract it with Pulse, and give archives an icon for each format. Formats another archiver opens are left alone; change them one by one below. Turning this off restores the previous associations.	
@@ -5556,3 +5562,861 @@ CtxFactApply	IDS_CTX_FACT_APPLY	6885	点「应用」才生效	Takes effect when 
 CtxFactBackup	IDS_CTX_FACT_BACKUP	6886	先自动备份，可撤销	Backed up first, can be undone	
 CtxFactAdmin	IDS_CTX_FACT_ADMIN	6887	改所有用户时需管理员	Admin needed for all users	
 CtxLayerPending	IDS_CTX_LAYER_PENDING	6888	{n} 处待应用	{n} to apply	
+SzTakeStatusUnknown	IDS_SZ_TAKE_STATUS_UNKNOWN	6889	关联状态未确认	Association not confirmed	
+StoreLocalBuild	IDS_STORE_LOCAL_BUILD	6890	本地构建	Local build	
+LocalLiveTitle	IDS_LOCAL_LIVE_TITLE	6891	此位置未加入索引	This location isn't indexed	此位置未加入索引
+LocalLiveRunning	IDS_LOCAL_LIVE_RUNNING	6892	正在实时搜索此位置，结果会陆续出现…	Searching this location live; results keep coming in…	正在即時搜尋此位置，結果會陸續出現…
+LocalLiveDone	IDS_LOCAL_LIVE_DONE	6893	结果来自实时目录扫描。	Results come from a live folder scan.	結果來自即時目錄掃描。
+StoreErrorInstallBusy	IDS_STORE_ERROR_INSTALL_BUSY	6894	安装文件仍被占用。请结束正在使用扩展的任务后重试；若仍失败，请完全退出并重启 Pulse。已有扩展会保留。	Installation files are still in use. Finish tasks using the extension and retry. If it persists, fully exit and restart Pulse. Existing extensions are preserved.	安裝檔案仍被佔用。請結束正在使用擴充的任務後重試；若仍失敗，請完全退出並重啟 Pulse。已有擴充會保留。
+StoreErrorInstallDenied	IDS_STORE_ERROR_INSTALL_DENIED	6895	安装位置拒绝更新，文件也可能正被占用。请结束相关任务并检查该位置的写入权限后重试。已有扩展会保留。	The installation location denied the update; its files may be in use. Finish related tasks, check write access to that location, and retry. Existing extensions are preserved.	安裝位置拒絕更新，檔案也可能正被佔用。請結束相關任務並檢查該位置的寫入權限後重試。已有擴充會保留。
+SettingsTabActiveStyle	IDS_SETTINGS_TAB_ACTIVE_STYLE	6896	活动标签样式	Active tab style	
+SettingsTabActiveStyleDesc	IDS_SETTINGS_TAB_ACTIVE_STYLE_DESC	6897	当前标签页与标题栏、地址栏衔接时的突出方式	How the current tab stands out and meets the toolbar	
+TabActiveStyleLift	IDS_TAB_ACTIVE_STYLE_LIFT	6898	柔和托起	Soft lift	
+TabActiveStyleGradient	IDS_TAB_ACTIVE_STYLE_GRADIENT	6899	渐变填充	Gradient fill	
+ConnectServerFtpFormat	IDS_CONNECT_SERVER_FTP_FORMAT	6900	将在系统资源管理器中打开 %s	Opens %s in File Explorer	
+DesktopOrganizeMenuGroup	IDS_DESKTOP_ORGANIZE_MENU_GROUP	6901	桌面整理	Desktop organization	桌面整理
+DesktopGroupViewMode	IDS_DESKTOP_GROUP_VIEW_MODE	6902	显示方式	View mode	顯示方式
+DesktopGroupViewIcons	IDS_DESKTOP_GROUP_VIEW_ICONS	6903	图标	Icons	圖示
+DesktopGroupViewLargeIcons	IDS_DESKTOP_GROUP_VIEW_LARGE_ICONS	6904	大图标	Large icons	大圖示
+DesktopGroupViewTiles	IDS_DESKTOP_GROUP_VIEW_TILES	6905	平铺	Tiles	並排
+DesktopGroupViewDetails	IDS_DESKTOP_GROUP_VIEW_DETAILS	6906	详细信息	Details	詳細資料
+DesktopGroupDetachTab	IDS_DESKTOP_GROUP_DETACH_TAB	6907	从标签组拆出	Detach from tab group	從分頁群組拆出
+DesktopGroupMergeTabs	IDS_DESKTOP_GROUP_MERGE_TABS	6908	合并标签组	Merge tab groups	合併分頁群組
+DesktopGroupSelectTab	IDS_DESKTOP_GROUP_SELECT_TAB	6909	切换分组标签	Switch group tab	切換群組分頁
+DesktopGroupChangeView	IDS_DESKTOP_GROUP_CHANGE_VIEW	6910	更改分组显示方式	Change group view mode	變更群組顯示方式
+DesktopGroupDetachNoSpace	IDS_DESKTOP_GROUP_DETACH_NO_SPACE	6911	没有足够空间拆出这个规则组	Not enough room to detach this group	沒有足夠空間拆出此規則群組
+DesktopGroupTabsFull	IDS_DESKTOP_GROUP_TABS_FULL	6912	标签组最多支持 8 个规则组	A tab group supports up to 8 groups	分頁群組最多支援 8 個規則群組
+DesktopGroupMove	IDS_DESKTOP_GROUP_MOVE	6913	移动分组	Move group	移動群組
+DesktopGroupResize	IDS_DESKTOP_GROUP_RESIZE	6914	调整分组大小	Resize group	調整群組大小
+DesktopIconLabelNormal	IDS_DESKTOP_ICON_LABEL_NORMAL	6915	正常	Normal	正常
+TreeTransferCopyAllTitle	IDS_TREE_TRANSFER_COPY_ALL_TITLE	6916	确认复制到所有选中的文件夹	Confirm copying to all selected folders	確認複製到所有選取的資料夾
+TreeTransferCopyAllMessage	IDS_TREE_TRANSFER_COPY_ALL_MESSAGE	6917	将所选内容分别复制到以下 {n} 个文件夹。	Copy the selected contents into each of these {n} folders.	將所選內容分別複製到以下 {n} 個資料夾。
+TreeTransferCopyAllAction	IDS_TREE_TRANSFER_COPY_ALL_ACTION	6918	复制到所有文件夹	Copy to all folders	複製到所有資料夾
+TreeTransferCopyAllRetain	IDS_TREE_TRANSFER_COPY_ALL_RETAIN	6919	源文件会保留。剪切或移动操作此次也将改为复制；剪贴板保持不变，之后粘贴到单个文件夹仍会移动源文件。	Source files will be kept. Cut or move becomes copy for this operation. The clipboard stays unchanged; a later paste into a single folder still moves cut files.	來源檔案會保留。剪下或移動操作這次也將改為複製；剪貼簿保持不變，之後貼上至單一資料夾仍會移動來源檔案。
+TreeTransferShellSingleTarget	IDS_TREE_TRANSFER_SHELL_SINGLE_TARGET	6920	此类剪贴板内容请只选择一个目标文件夹。	Select a single destination folder for this type of clipboard content.	這類剪貼簿內容請只選取一個目標資料夾。
+TreeTransferInvalidTargets	IDS_TREE_TRANSFER_INVALID_TARGETS	6921	选中的目标包含无效文件夹。未提交任何操作。	The selected destinations include an invalid folder. No operations were submitted.	選取的目標包含無效資料夾。未提交任何操作。
+DesktopGlassPreset	IDS_DESKTOP_GLASS_PRESET	6922	液态玻璃预设	Liquid glass preset	
+DesktopGlassPresetHelp	IDS_DESKTOP_GLASS_PRESET_HELP	6923	选择参考默认可应用参考工程参数；自定义参数不会自动重置。	Choose Reference defaults to apply the reference parameters. Custom settings are not reset automatically.	
+DesktopGlassClear	IDS_DESKTOP_GLASS_CLEAR	6924	清透水滴	Clear glass	
+DesktopGlassStandard	IDS_DESKTOP_GLASS_STANDARD	6925	标准玻璃	Standard glass	
+DesktopGlassPrism	IDS_DESKTOP_GLASS_PRISM	6926	超厚棱镜	Thick prism	
+DesktopGlassSoft	IDS_DESKTOP_GLASS_SOFT	6927	柔雾凝脂	Soft frost	
+DesktopGlassCustom	IDS_DESKTOP_GLASS_CUSTOM	6928	自定义	Custom	
+DesktopGlassReference	IDS_DESKTOP_GLASS_REFERENCE	6929	参考默认	Reference defaults	
+DesktopGlassRate	IDS_DESKTOP_GLASS_RATE	6930	动态折射帧率	Dynamic refraction rate	
+DesktopGlassRateHelp	IDS_DESKTOP_GLASS_RATE_HELP	6931	仅采样桌面壁纸，不读取其他应用窗口。	Samples only desktop wallpaper, not other application windows.	
+DesktopGlassStatic	IDS_DESKTOP_GLASS_STATIC	6932	静态	Static	
+DesktopGlassThickness	IDS_DESKTOP_GLASS_THICKNESS	6933	折射厚度	Refraction thickness	
+DesktopGlassThicknessHelp	IDS_DESKTOP_GLASS_THICKNESS_HELP	6934	单位为像素；下方显示当前精确值。	Pixels; the exact current value is shown below.	
+DesktopGlassBlur	IDS_DESKTOP_GLASS_BLUR	6935	背景模糊半径	Background blur radius	
+DesktopGlassBlurHelp	IDS_DESKTOP_GLASS_BLUR_HELP	6936	参考模式的模糊半径，单位为像素。	Reference-mode blur radius in pixels.	
+DesktopGlassFrost	IDS_DESKTOP_GLASS_FROST	6937	旧版磨砂混合	Legacy frost mix	
+DesktopGlassFrostHelp	IDS_DESKTOP_GLASS_FROST_HELP	6938	仅适用于旧版预设，不等同于参考模式的模糊半径。	Legacy presets only; not the reference blur radius.	
+DesktopGlassBlurEdge	IDS_DESKTOP_GLASS_BLUR_EDGE	6939	模糊边缘	Blur edge	
+DesktopGlassBlurEdgeHelp	IDS_DESKTOP_GLASS_BLUR_EDGE_HELP	6940	使用参考工程的边缘模糊设置。	Use the reference edge-blur setting.	
+DesktopGlassCurrent	IDS_DESKTOP_GLASS_CURRENT	6941	当前值：{value}	Current value: {value}	
+DesktopGlassReset	IDS_DESKTOP_GLASS_RESET	6942	恢复参考默认	Restore reference defaults	
+DesktopGlassOptics	IDS_DESKTOP_GLASS_OPTICS	6943	液态玻璃参数	Liquid glass parameters	
+DesktopGlassOpticsHelp	IDS_DESKTOP_GLASS_OPTICS_HELP	6944	拖动时实时预览，松开后保存；恢复参考默认只在点击后应用。极端参数会限制折射距离。	Preview while dragging; save on release. Reference defaults are applied only when requested. Extreme settings limit refraction distance.	
+DesktopGlassIor	IDS_DESKTOP_GLASS_IOR	6945	折射率	Index of refraction	
+DesktopGlassDispersion	IDS_DESKTOP_GLASS_DISPERSION	6946	色散强度	Dispersion	
+DesktopGlassFresnelRange	IDS_DESKTOP_GLASS_FRESNEL_RANGE	6947	菲涅耳范围	Fresnel range	
+DesktopGlassFresnelHardness	IDS_DESKTOP_GLASS_FRESNEL_HARDNESS	6948	菲涅耳硬度	Fresnel hardness	
+DesktopGlassFresnelFactor	IDS_DESKTOP_GLASS_FRESNEL_FACTOR	6949	菲涅耳强度	Fresnel intensity	
+DesktopGlassGlareRange	IDS_DESKTOP_GLASS_GLARE_RANGE	6950	高光范围	Glare range	
+DesktopGlassGlareHardness	IDS_DESKTOP_GLASS_GLARE_HARDNESS	6951	高光硬度	Glare hardness	
+DesktopGlassGlareFactor	IDS_DESKTOP_GLASS_GLARE_FACTOR	6952	高光强度	Glare intensity	
+DesktopGlassGlareConvergence	IDS_DESKTOP_GLASS_GLARE_CONVERGENCE	6953	高光汇聚	Glare convergence	
+DesktopGlassGlareOpposite	IDS_DESKTOP_GLASS_GLARE_OPPOSITE	6954	背向高光	Opposite glare	
+DesktopGlassGlareAngle	IDS_DESKTOP_GLASS_GLARE_ANGLE	6955	高光角度	Glare angle	
+DesktopGlassTintR	IDS_DESKTOP_GLASS_TINT_R	6956	染色红色	Tint red	
+DesktopGlassTintG	IDS_DESKTOP_GLASS_TINT_G	6957	染色绿色	Tint green	
+DesktopGlassTintB	IDS_DESKTOP_GLASS_TINT_B	6958	染色蓝色	Tint blue	
+DesktopGlassTintA	IDS_DESKTOP_GLASS_TINT_A	6959	染色不透明度	Tint opacity	
+ShelfTempName	IDS_SHELF_TEMP_NAME	6960	临时	Temporary	
+ShelfClearedOnExit	IDS_SHELF_CLEARED_ON_EXIT	6961	退出时清空	Cleared on exit	
+ShelfDefaultNameFormat	IDS_SHELF_DEFAULT_NAME_FORMAT	6962	暂存架 {n}	Shelf {n}	
+ShelfSavedDefaultName	IDS_SHELF_SAVED_DEFAULT_NAME	6963	新暂存架	New shelf	
+ShelfMenuHeader	IDS_SHELF_MENU_HEADER	6964	暂存架	Shelves	
+ShelfSwitchTip	IDS_SHELF_SWITCH_TIP	6965	切换暂存架 · 双击改名	Switch shelf · double-click to rename	
+ShelfMenuRenameFormat	IDS_SHELF_MENU_RENAME_FORMAT	6966	重命名「{name}」…	Rename “{name}”…	
+ShelfMenuSaveTemp	IDS_SHELF_MENU_SAVE_TEMP	6967	把「临时」存为命名架	Save “Temporary” as named shelf	
+ShelfMenuDelete	IDS_SHELF_MENU_DELETE	6968	删除此架	Delete shelf	
+ShelfMenuNew	IDS_SHELF_MENU_NEW	6969	＋ 新建暂存架	+ New shelf	
+ShelfMenuClearFormat	IDS_SHELF_MENU_CLEAR_FORMAT	6970	清空「{name}」	Clear “{name}”	
+ShelfColorTip	IDS_SHELF_COLOR_TIP	6971	改色	Change color	
+ShelfPinTip	IDS_SHELF_PIN_TIP	6972	钉住：送空后不自动收起	Pin: stay open when emptied	
+ShelfMoreTip	IDS_SHELF_MORE_TIP	6973	更多	More	
+ShelfDockTip	IDS_SHELF_DOCK_TIP	6974	收回到侧栏	Dock to sidebar	
+ShelfPopoutTip	IDS_SHELF_POPOUT_TIP	6975	弹出为浮动架	Pop out as floating shelf	
+ShelfTearTip	IDS_SHELF_TEAR_TIP	6976	拖到窗口外 = 撕下成浮动架	Drag outside window to tear off	
+ShelfFloatHeadTip	IDS_SHELF_FLOAT_HEAD_TIP	6977	拖动移动 · 拖回 Pulse 侧栏可停靠	Drag to move · drag to Pulse sidebar to dock	
+ShelfStripHintOr	IDS_SHELF_STRIP_HINT_OR	6978	拖入或	Drop or	
+ShelfStripKbdShort	IDS_SHELF_STRIP_KBD_SHORT	6979	Ctrl⇧S	Ctrl⇧S	
+ShelfFloatedStatusFormat	IDS_SHELF_FLOATED_STATUS_FORMAT	6980	{n} 项 · 正在桌面上浮动	{n} items · floating on desktop	
+ShelfDockDropMsg	IDS_SHELF_DOCK_DROP_MSG	6981	松开 · 停靠到侧栏	Release · dock to sidebar	
+ShelfEmptyTitle	IDS_SHELF_EMPTY_TITLE	6982	把文件、图片、文字拖到这里	Drop files, images, or text here	
+ShelfEmptySub	IDS_SHELF_EMPTY_SUB	6983	Ctrl V 粘贴 · 拖动时晃一晃随时呼出	Ctrl V to paste · shake while dragging to summon	
+ShelfDropIntoFormat	IDS_SHELF_DROP_INTO_FORMAT	6984	放进「{name}」	Put in “{name}”	
+ShelfDropContentTitleFormat	IDS_SHELF_DROP_CONTENT_TITLE_FORMAT	6985	收入「{name}」	Add to “{name}”	
+ShelfDropContentSub	IDS_SHELF_DROP_CONTENT_SUB	6986	网页图片 / 文字 / 链接	Web images / text / links	
+ShelfDropOtherLabel	IDS_SHELF_DROP_OTHER_LABEL	6987	或放进	Or into	
+ShelfDropNewChip	IDS_SHELF_DROP_NEW_CHIP	6988	＋ 新架	+ New	
+ShelfFilterSnippets	IDS_SHELF_FILTER_SNIPPETS	6989	片段	Snippets	
+ShelfViewToListTip	IDS_SHELF_VIEW_TO_LIST_TIP	6990	切到列表（按来源分组）	Switch to list (grouped by source)	
+ShelfViewToGridTip	IDS_SHELF_VIEW_TO_GRID_TIP	6991	切到网格	Switch to grid	
+ShelfMoveBadge	IDS_SHELF_MOVE_BADGE	6992	移	M	
+ShelfMissingTag	IDS_SHELF_MISSING_TAG	6993	已失效	Missing	
+ShelfKindText	IDS_SHELF_KIND_TEXT	6994	文字	Text	
+ShelfKindLink	IDS_SHELF_KIND_LINK	6995	链接	Link	
+ShelfKindImage	IDS_SHELF_KIND_IMAGE	6996	图片	Image	
+ShelfSourceBrowser	IDS_SHELF_SOURCE_BROWSER	6997	浏览器	Browser	
+ShelfSourceClipboard	IDS_SHELF_SOURCE_CLIPBOARD	6998	剪贴板	Clipboard	
+ShelfSnippetExcerptFormat	IDS_SHELF_SNIPPET_EXCERPT_FORMAT	6999	摘录 · {text}	Excerpt · {text}	
+ShelfSnippetClipFormat	IDS_SHELF_SNIPPET_CLIP_FORMAT	7000	剪贴板 · {text}	Clipboard · {text}	
+ShelfSnippetImageDefault	IDS_SHELF_SNIPPET_IMAGE_DEFAULT	7001	网页图片	Web image	
+ShelfSnippetClipImage	IDS_SHELF_SNIPPET_CLIP_IMAGE	7002	剪贴板图片	Clipboard image	
+ShelfReleaseNone	IDS_SHELF_RELEASE_NONE	7003	没有可送出的项	Nothing to send	
+ShelfReleaseMixedFullFormat	IDS_SHELF_RELEASE_MIXED_FULL_FORMAT	7004	放入「{name}」· {c} 复制 {m} 移动	Put in “{name}” · {c} copy, {m} move	
+ShelfReleaseMixedShortFormat	IDS_SHELF_RELEASE_MIXED_SHORT_FORMAT	7005	放入「{name}」	Put in “{name}”	
+ShelfReleaseSnippetNoteFormat	IDS_SHELF_RELEASE_SNIPPET_NOTE_FORMAT	7006	其中 {n} 个网页内容会存成 {exts}	{n} web item(s) will be saved as {exts}	
+ShelfReleaseMenuHeaderFormat	IDS_SHELF_RELEASE_MENU_HEADER_FORMAT	7007	送到「{name}」时	When sending to “{name}”	
+ShelfReleaseModeAuto	IDS_SHELF_RELEASE_MODE_AUTO	7008	按各项暂存方式（默认）	Per item's staged mode (default)	
+ShelfReleaseModeCopy	IDS_SHELF_RELEASE_MODE_COPY	7009	全部复制	Copy all	
+ShelfReleaseModeMove	IDS_SHELF_RELEASE_MODE_MOVE	7010	全部移动	Move all	
+ShelfReleaseMenuOther	IDS_SHELF_RELEASE_MENU_OTHER	7011	送到其他文件夹…	Send to another folder…	
+ShelfPileTip	IDS_SHELF_PILE_TIP	7012	拖走整架 · 点击展开	Drag all · click to expand	
+ShelfRemoveItemTip	IDS_SHELF_REMOVE_ITEM_TIP	7013	移出暂存	Remove from shelf	
+ShelfToastAddedFormat	IDS_SHELF_TOAST_ADDED_FORMAT	7014	已放进「{name}」{n} 项	Added {n} to “{name}”	
+ShelfToastMovedShelfFormat	IDS_SHELF_TOAST_MOVED_SHELF_FORMAT	7015	已移到「{name}」{n} 项	Moved {n} to “{name}”	
+ShelfToastSavedNamed	IDS_SHELF_TOAST_SAVED_NAMED	7016	已存为命名架，退出 Pulse 也会保留	Saved as named shelf; kept after exiting Pulse	
+ShelfToastDeletedFormat	IDS_SHELF_TOAST_DELETED_FORMAT	7017	已删除「{name}」	Deleted “{name}”	
+ShelfToastClearedFormat	IDS_SHELF_TOAST_CLEARED_FORMAT	7018	已清空「{name}」	Cleared “{name}”	
+ShelfToastPinned	IDS_SHELF_TOAST_PINNED	7019	已钉住 · 送空后也不自动收起	Pinned · stays open when emptied	
+ShelfToastUnpinned	IDS_SHELF_TOAST_UNPINNED	7020	已取消钉住	Unpinned	
+ShelfToastTornOff	IDS_SHELF_TOAST_TORN_OFF	7021	已撕下成浮动架 · 拖回侧栏可停靠	Torn off as floating shelf · drag back to dock	
+ShelfToastDocked	IDS_SHELF_TOAST_DOCKED	7022	已停靠回侧栏	Docked to sidebar	
+ShelfToastAutoHidden	IDS_SHELF_TOAST_AUTO_HIDDEN	7023	暂存架已送空，自动收起	Shelf emptied and tucked away	
+ShelfToastPastedFormat	IDS_SHELF_TOAST_PASTED_FORMAT	7024	已把剪贴板内容收入「{name}」	Added clipboard content to “{name}”	
+ShelfToastStaleRemoved	IDS_SHELF_TOAST_STALE_REMOVED	7025	已移出失效项	Removed missing items	
+ShelfGhostContentFormat	IDS_SHELF_GHOST_CONTENT_FORMAT	7026	松开 · 收入「{name}」	Release · add to “{name}”	
+ShelfGhostIntoShelfFormat	IDS_SHELF_GHOST_INTO_SHELF_FORMAT	7027	放进「{name}」	Put in “{name}”	
+ShelfGhostNewShelf	IDS_SHELF_GHOST_NEW_SHELF	7028	放进一个新暂存架	Put in a new shelf	
+SettingsShelfShake	IDS_SETTINGS_SHELF_SHAKE	7029	拖动时晃动鼠标呼出暂存架	Shake mouse while dragging to summon shelf	
+SettingsShelfShakeDesc	IDS_SETTINGS_SHELF_SHAKE_DESC	7030	由常驻后台的 Pulse 进程识别，主窗口关闭后在其他应用里也能用	Detected by Pulse in the background; works in other apps too	
+SettingsShelfSensitivity	IDS_SETTINGS_SHELF_SENSITIVITY	7031	晃动灵敏度	Shake sensitivity	
+SettingsShelfSensitivityDesc	IDS_SETTINGS_SHELF_SENSITIVITY_DESC	7032	越高越容易触发，也越容易误触	Higher triggers more easily, with more chance of false triggers	
+SettingsShelfSensLow	IDS_SETTINGS_SHELF_SENS_LOW	7033	低	Low	
+SettingsShelfSensMed	IDS_SETTINGS_SHELF_SENS_MED	7034	中	Medium	
+SettingsShelfSensHigh	IDS_SETTINGS_SHELF_SENS_HIGH	7035	高	High	
+SettingsShelfPosition	IDS_SETTINGS_SHELF_POSITION	7036	浮动架出现在	Summon shelf at	
+SettingsShelfPositionDesc	IDS_SETTINGS_SHELF_POSITION_DESC	7037	呼出时的位置	Where the floating shelf appears when summoned	
+SettingsShelfPosCursor	IDS_SETTINGS_SHELF_POS_CURSOR	7038	指针旁	Near pointer	
+SettingsShelfPosLast	IDS_SETTINGS_SHELF_POS_LAST	7039	上次位置	Last position	
+SettingsShelfPosRightEdge	IDS_SETTINGS_SHELF_POS_RIGHT_EDGE	7040	屏幕右缘	Right edge	
+SettingsShelfAutoHide	IDS_SETTINGS_SHELF_AUTO_HIDE	7041	送空后自动收起	Auto-hide when emptied	
+SettingsShelfAutoHideDesc	IDS_SETTINGS_SHELF_AUTO_HIDE_DESC	7042	钉住的架不受影响	Pinned shelves stay open	
+PreviewSystemContentFallback	IDS_PREVIEW_SYSTEM_CONTENT_FALLBACK	7043	系统预览未能显示，已切换到 Pulse 内容预览（非原始版式）。	System preview could not be displayed. Showing Pulse content preview (not the original layout).	系統預覽未能顯示，已切換到 Pulse 內容預覽（非原始版面配置）。
+StartupDiagnosticsSaveLocation	IDS_STARTUP_DIAGNOSTICS_SAVE_LOCATION	7044	把问题报告保存到…	Save problem report to…	將問題報告儲存至…
+StartupDiagnosticsNoRawLogs	IDS_STARTUP_DIAGNOSTICS_NO_RAW_LOGS	7045	没有找到详细日志，ZIP 里只有报告本身。	No detailed logs were found; the ZIP contains only the report.	沒有找到詳細記錄，ZIP 裡只有報告本身。
+StartupDiagnosticsPartialRawLogs	IDS_STARTUP_DIAGNOSTICS_PARTIAL_RAW_LOGS	7046	部分日志没能收集，详情见报告。	Some logs couldn't be collected; see the report for details.	部分記錄沒能收集，詳情請見報告。
+DialogApiTestTitle	IDS_DIALOG_API_TEST_TITLE	7047	测试对话框	Test dialogs	測試對話方塊
+DialogApiTestDesc	IDS_DIALOG_API_TEST_DESC	7048	试一试打开、另存为和选择文件夹窗口，看看 Pulse 是否正常出现。不会创建或修改文件。	Try the Open, Save As and Choose Folder windows to check that Pulse appears. No files are created or changed.	試一試開啟、另存新檔和選擇資料夾視窗，看看 Pulse 是否正常出現。不會建立或修改檔案。
+DialogApiTestLaunch	IDS_DIALOG_API_TEST_LAUNCH	7049	打开测试台	Open test panel	開啟測試面板
+DialogApiTestLaunchFailed	IDS_DIALOG_API_TEST_LAUNCH_FAILED	7050	未能打开对话框测试台	Could not open the dialog test panel	無法開啟對話方塊測試面板
+DialogApiTestInstructions	IDS_DIALOG_API_TEST_INSTRUCTIONS	7051	选择要测试的 Windows 接口。测试只检查返回结果，不读写文件内容，也不会更改接管开关。另存为测试中，切换到 JSON 可启用输出模式；勾选附加标记后留空，可测试确认拦截。	Choose a Windows interface to test. The probe checks the result without reading or writing file contents or changing takeover settings. In the Save test, switch to JSON to enable the output mode. Turn on the tag and leave it empty to test validation.	選擇要測試的 Windows 介面。測試只檢查傳回結果，不讀寫檔案內容，也不會變更接管開關。另存新檔測試中，切換到 JSON 可啟用輸出模式；勾選附加標記後留空，可測試確認攔截。
+DialogApiTestOpen	IDS_DIALOG_API_TEST_OPEN	7052	打开文件	Open a file	開啟檔案
+DialogApiTestSave	IDS_DIALOG_API_TEST_SAVE	7053	另存为（带文件类型等选项）	Save as (with file type options)	另存新檔（含檔案類型等選項）
+DialogApiTestFolder	IDS_DIALOG_API_TEST_FOLDER	7054	选择文件夹	Choose a folder	選擇資料夾
+DialogApiTestLegacy	IDS_DIALOG_API_TEST_LEGACY	7055	旧式另存为窗口	Older-style Save As window	舊式另存新檔視窗
+DialogApiTestOptions	IDS_DIALOG_API_TEST_OPTIONS	7056	测试参数	Test options	測試參數
+DialogApiTestMode	IDS_DIALOG_API_TEST_MODE	7057	输出模式（仅 JSON）	Output mode (JSON only)	輸出模式（僅 JSON）
+DialogApiTestNormal	IDS_DIALOG_API_TEST_NORMAL	7058	标准	Standard	標準
+DialogApiTestCompact	IDS_DIALOG_API_TEST_COMPACT	7059	紧凑	Compact	精簡
+DialogApiTestTag	IDS_DIALOG_API_TEST_TAG	7060	附加标记	Add a tag	附加標記
+DialogApiTestTagRequired	IDS_DIALOG_API_TEST_TAG_REQUIRED	7061	请填写标记，或取消勾选「附加标记」。测试对话框会保持打开。	Enter a tag or clear “Add a tag”. The test dialog will stay open.	請填寫標記，或取消勾選「附加標記」。測試對話方塊會保持開啟。
+DialogApiTestSucceeded	IDS_DIALOG_API_TEST_SUCCEEDED	7062	接口已返回选择结果。未写入文件。	The API returned a selection. No file was written.	介面已傳回選擇結果。未寫入檔案。
+DialogApiTestCancelled	IDS_DIALOG_API_TEST_CANCELLED	7063	已取消，接口未返回选择结果。	Cancelled. The API returned no selection.	已取消，介面未傳回選擇結果。
+DialogApiTestFailed	IDS_DIALOG_API_TEST_FAILED	7064	接口调用失败	The API call failed	介面呼叫失敗
+DialogApiTestPulseUi	IDS_DIALOG_API_TEST_PULSE_UI	7065	观察到的界面：Pulse 对话框	Observed window: Pulse dialog	觀察到的介面：Pulse 對話方塊
+DialogApiTestWindowsUi	IDS_DIALOG_API_TEST_WINDOWS_UI	7066	观察到的界面：Windows 对话框	Observed window: Windows dialog	觀察到的介面：Windows 對話方塊
+DialogApiTestUnknownUi	IDS_DIALOG_API_TEST_UNKNOWN_UI	7067	未确认界面由谁显示；这不是接管成功的证明。	The window provider was not identified. This does not confirm takeover.	未確認介面由誰顯示；這不是接管成功的證明。
+DialogApiTestReadback	IDS_DIALOG_API_TEST_READBACK	7068	读回参数	Read-back values	讀回參數
+DialogApiTestTagOn	IDS_DIALOG_API_TEST_TAG_ON	7069	标记启用	Tag on	標記已啟用
+DialogApiTestTagOff	IDS_DIALOG_API_TEST_TAG_OFF	7070	标记关闭	Tag off	標記已關閉
+DialogApiTestTypeEvents	IDS_DIALOG_API_TEST_TYPE_EVENTS	7071	格式切换事件	Format change events	格式切換事件
+DialogApiTestControlEvents	IDS_DIALOG_API_TEST_CONTROL_EVENTS	7072	控件变更事件	Control change events	控制項變更事件
+DialogApiTestVetoes	IDS_DIALOG_API_TEST_VETOES	7073	校验拦截次数	Validation blocks	驗證攔截次數
+DialogFeedbackTitle	IDS_DIALOG_FEEDBACK_TITLE	7074	某个软件没用上 Pulse？	An app didn't use Pulse?	某個軟體沒用上 Pulse？
+DialogFeedbackDesc	IDS_DIALOG_FEEDBACK_DESC	7086	点「开始记录」并选择要做的操作，再到那个软件里操作一次。Pulse 会整理成一个文件，方便发给开发者。	Select Start recording, choose what you were doing, then do it once more in that app. Pulse packs the details into one file you can send to the developer.	點「開始記錄」並選擇要做的操作，再到那個軟體裡操作一次。Pulse 會整理成一個檔案，方便傳給開發者。
+DialogFeedbackStart	IDS_DIALOG_FEEDBACK_START	7075	开始记录	Start recording	開始記錄
+DialogFeedbackRecording	IDS_DIALOG_FEEDBACK_RECORDING	7076	正在记录…请到那个软件里再操作一次，然后回到这里点「完成并导出」。	Recording… Do it once more in that app, then come back here and select Finish and export.	正在記錄…請到那個軟體裡再操作一次，然後回到這裡點「完成並匯出」。
+DialogFeedbackFinish	IDS_DIALOG_FEEDBACK_FINISH	7077	完成并导出	Finish and export	完成並匯出
+DialogFeedbackReview	IDS_DIALOG_FEEDBACK_REVIEW	7078	反馈文件（ZIP）会保存到桌面，不会自动发送。里面可能含有文件夹路径和文件名，分享前请先看一下。	The feedback file (ZIP) is saved to your desktop and is never sent automatically. It may contain folder paths and file names, so check it before sharing.	回報檔案（ZIP）會儲存到桌面，不會自動傳送。裡面可能含有資料夾路徑和檔名，分享前請先看一下。
+DialogFeedbackExport	IDS_DIALOG_FEEDBACK_EXPORT	7079	导出到桌面	Export to desktop	匯出至桌面
+DialogFeedbackDiscard	IDS_DIALOG_FEEDBACK_DISCARD	7080	放弃这次记录	Discard recording	放棄這次記錄
+DialogFeedbackSaved	IDS_DIALOG_FEEDBACK_SAVED	7081	请把桌面的反馈 ZIP 作为附件发给 Pulse 开发者。	Attach the feedback ZIP from your desktop when contacting the Pulse developer.	聯絡 Pulse 開發者時，請附上桌面的回報 ZIP。
+DialogFeedbackOpen	IDS_DIALOG_FEEDBACK_OPEN	7082	打开文件	Open a file	開啟檔案
+DialogFeedbackSave	IDS_DIALOG_FEEDBACK_SAVE	7083	另存为	Save as	另存新檔
+DialogFeedbackFolder	IDS_DIALOG_FEEDBACK_FOLDER	7084	选择文件夹	Choose a folder	選擇資料夾
+DialogFeedbackOther	IDS_DIALOG_FEEDBACK_OTHER	7085	其他或不确定	Other or not sure	其他或不確定
+# AI assistant web search (Batch 1)
+AiAsstWebSearch	IDS_AI_ASST_WEB_SEARCH	7087	联网	Web	
+AiAsstWebSearchOnTip	IDS_AI_ASST_WEB_SEARCH_ON_TIP	7088	联网搜索已开启（点击关闭）	Web search is on (click to turn off)	
+AiAsstWebSearchOffTip	IDS_AI_ASST_WEB_SEARCH_OFF_TIP	7089	联网搜索已关闭（点击开启）	Web search is off (click to turn on)	
+AiAsstStepWebSearch	IDS_AI_ASST_STEP_WEB_SEARCH	7090	搜索网页	Search web	
+AiAsstStepWebSearchRun	IDS_AI_ASST_STEP_WEB_SEARCH_RUN	7091	正在联网搜索…	Searching the web…	
+AiAsstStepWebSearchDone	IDS_AI_ASST_STEP_WEB_SEARCH_DONE	7092	找到 {n} 条网页结果	Found {n} web results	
+AiAsstStepWebFetch	IDS_AI_ASST_STEP_WEB_FETCH	7093	读取网页	Read webpage	
+AiAsstStepWebFetchRun	IDS_AI_ASST_STEP_WEB_FETCH_RUN	7094	正在获取网页正文…	Fetching webpage…	
+AiAsstStepWebFetchDone	IDS_AI_ASST_STEP_WEB_FETCH_DONE	7095	已读取 {n} 字	Read {n} characters	
+AiAsstStepsWeb	IDS_AI_ASST_STEPS_WEB	7096	联网查阅了 {n} 个来源	Checked {n} web sources	
+AiAsstWebSources	IDS_AI_ASST_WEB_SOURCES	7097	参考来源	Sources	
+AiAsstChipWebSearch	IDS_AI_ASST_CHIP_WEB_SEARCH	7098	联网搜索中	Searching web	
+AiAsstChipWebFetch	IDS_AI_ASST_CHIP_WEB_FETCH	7099	读取网页中	Reading page	
+# AI assistant attachments, vision, compaction, memory, archive, compare, save, workflows, MCP (Batches 3-7)
+AiAsstAttachNotice	IDS_AI_ASST_ATTACH_NOTICE	7100	附件内容摘录将发送至当前模型服务	Attachment excerpts will be sent to the model service	
+AiAsstAttachDropBadge	IDS_AI_ASST_ATTACH_DROP_BADGE	7101	添加到 Pulse 助手	Attach to Pulse Assistant	
+AiAsstAttachDefaultPrompt	IDS_AI_ASST_ATTACH_DEFAULT_PROMPT	7102	请分析我附加的文件内容。	Please analyze the attached files.	
+AiAsstAttachTooMany	IDS_AI_ASST_ATTACH_TOO_MANY	7103	单次最多添加 8 个附件	You can attach up to 8 files per message	
+AiAsstStepReadFile	IDS_AI_ASST_STEP_READ_FILE	7104	读取文件内容	Read file content	
+AiAsstStepReadFileRun	IDS_AI_ASST_STEP_READ_FILE_RUN	7105	正在读取文档摘录…	Reading document excerpt…	
+AiAsstStepReadFileDone	IDS_AI_ASST_STEP_READ_FILE_DONE	7106	已读取 {n} 字	Read {n} characters	
+AiAsstConfirmReadTitle	IDS_AI_ASST_CONFIRM_READ_TITLE	7107	允许读取文件内容？	Allow reading this file?	
+AiAsstConfirmReadSub	IDS_AI_ASST_CONFIRM_READ_SUB	7108	将把「{name}」的前 {n} 字摘录发送至 {host}	Will send up to {n} characters from “{name}” to {host}	
+AiAsstConfirmReadAccept	IDS_AI_ASST_CONFIRM_READ_ACCEPT	7109	允许读取	Allow read	
+AiAsstConfirmReadDone	IDS_AI_ASST_CONFIRM_READ_DONE	7110	已允许读取「{name}」	Allowed reading “{name}”	
+AiAsstConfirmReadDeny	IDS_AI_ASST_CONFIRM_READ_DENY	7111	未读取「{name}」	Skipped reading “{name}”	
+AiAsstScreenshotName	IDS_AI_ASST_SCREENSHOT_NAME	7112	截图	Screenshot	
+AiAsstImageDefaultPrompt	IDS_AI_ASST_IMAGE_DEFAULT_PROMPT	7113	请帮我看看这张图片的内容。	Please describe and analyze this image.	
+AiAsstImagePasted	IDS_AI_ASST_IMAGE_PASTED	7114	已粘贴截图	Screenshot pasted	
+AiAsstCompactedNote	IDS_AI_ASST_COMPACTED_NOTE	7115	已自动精简较早的对话上下文以保持响应速度	Earlier conversation context was compacted to stay within limits	
+AiAsstStepMemory	IDS_AI_ASST_STEP_MEMORY	7116	更新习惯记忆	Update memory	
+AiAsstStepMemoryDone	IDS_AI_ASST_STEP_MEMORY_DONE	7117	当前共 {n} 条本地习惯记忆	{n} local memories saved	
+AiAsstStepArchiveList	IDS_AI_ASST_STEP_ARCHIVE_LIST	7118	查看压缩包	Inspect archive	
+AiAsstStepArchiveListRun	IDS_AI_ASST_STEP_ARCHIVE_LIST_RUN	7119	正在读取压缩包目录…	Reading archive entries…	
+AiAsstStepArchiveListDone	IDS_AI_ASST_STEP_ARCHIVE_LIST_DONE	7120	共 {n} 项 · {size}	{n} items · {size}	
+AiAsstStepArchiveExtract	IDS_AI_ASST_STEP_ARCHIVE_EXTRACT	7121	解压压缩包	Extract archive	
+AiAsstStepArchiveExtractRun	IDS_AI_ASST_STEP_ARCHIVE_EXTRACT_RUN	7122	正在解压文件…	Extracting files…	
+AiAsstStepArchiveExtractDone	IDS_AI_ASST_STEP_ARCHIVE_EXTRACT_DONE	7123	已解压 {n} 个文件到「{folder}」	Extracted {n} files to “{folder}”	
+AiAsstConfirmExtractTitle	IDS_AI_ASST_CONFIRM_EXTRACT_TITLE	7124	确认解压到文件夹？	Extract archive to folder?	
+AiAsstConfirmExtractSub	IDS_AI_ASST_CONFIRM_EXTRACT_SUB	7125	将把「{name}」解压到「{folder}」（不覆盖已有文件）	Extract “{name}” into “{folder}” (existing files will not be overwritten)	
+AiAsstConfirmExtractAccept	IDS_AI_ASST_CONFIRM_EXTRACT_ACCEPT	7126	开始解压	Extract	
+AiAsstStepCompare	IDS_AI_ASST_STEP_COMPARE	7127	对比文件夹	Compare folders	
+AiAsstStepCompareDone	IDS_AI_ASST_STEP_COMPARE_DONE	7128	{n} 项不同 · {same} 项相同	{n} differences · {same} identical	
+AiAsstActSave	IDS_AI_ASST_ACT_SAVE	7129	保存为文档	Save as document	
+AiAsstSavedDoc	IDS_AI_ASST_SAVED_DOC	7130	已保存为 {name}	Saved as {name}	
+AiAsstSaveDocFail	IDS_AI_ASST_SAVE_DOC_FAIL	7131	保存文档失败	Could not save document	
+AiAsstStepWorkflow	IDS_AI_ASST_STEP_WORKFLOW	7132	管理常用规则	Manage workflows	
+AiAsstStepWorkflowDone	IDS_AI_ASST_STEP_WORKFLOW_DONE	7133	当前共 {n} 个规则	{n} workflows saved	
+AiAsstStepMcpTool	IDS_AI_ASST_STEP_MCP_TOOL	7134	外部 MCP 工具	External MCP tool	
+AiAsstConfirmMcpTitle	IDS_AI_ASST_CONFIRM_MCP_TITLE	7135	允许调用外部 MCP 工具？	Allow external MCP tool?	
+AiAsstConfirmMcpSub	IDS_AI_ASST_CONFIRM_MCP_SUB	7136	将调用 {server} 的 {tool}	Will call {tool} on {server}	
+AiAsstConfirmMcpAccept	IDS_AI_ASST_CONFIRM_MCP_ACCEPT	7137	允许调用	Allow call	
+LocalFolderPermissionTitle	IDS_LOCAL_FOLDER_PERMISSION_TITLE	7188	没有权限浏览此文件夹	Permission needed to browse this folder	沒有權限瀏覽此資料夾
+OpenDeniedFolderNative	IDS_OPEN_DENIED_FOLDER_NATIVE	7189	用资源管理器打开	Open in File Explorer	使用檔案總管開啟
+DialogAdaptiveLegacy	IDS_DIALOG_ADAPTIVE_LEGACY	7190	让更多软件也用上 Pulse 对话框	Use Pulse dialogs in more apps	讓更多軟體也用上 Pulse 對話方塊
+DialogAdaptiveLegacyDesc	IDS_DIALOG_ADAPTIVE_LEGACY_DESC	7191	包括较老的软件和部分新式应用。如果某个软件多次出问题，Pulse 会自动对它改回系统对话框。	Includes older apps and some newer ones. If an app keeps having problems, Pulse automatically switches it back to the Windows dialog.	包括較舊的軟體和部分新式應用程式。如果某個軟體多次出問題，Pulse 會自動對它改回系統對話方塊。
+TransferQueued	IDS_TRANSFER_QUEUED	7192	已加入队列	Added to the queue	已加入佇列
+TransferQueuedDetail	IDS_TRANSFER_QUEUED_DETAIL	7193	它和正在进行的操作涉及相同的位置，那项操作完成后会自动开始，无需再次粘贴	It touches the same place as an operation already running, and starts by itself when that one finishes; no need to paste again	它和正在進行的操作涉及相同的位置，那項操作完成後會自動開始，無需再次貼上
+OpRunningNow	IDS_OP_RUNNING_NOW	7787	正在进行	Running now	正在進行
+DialogRecordGroupPaused	IDS_DIALOG_RECORD_GROUP_PAUSED	7195	暂时改用系统对话框	Temporarily using the Windows dialog	暫時改用系統對話方塊
+DialogRecordStatusPaused	IDS_DIALOG_RECORD_STATUS_PAUSED	7196	已暂停	Paused	已暫停
+DialogPausedReason	IDS_DIALOG_PAUSED_REASON	7197	这个软件连续 {count} 次没能用上 Pulse，已暂时改用系统对话框，{days} 天后自动再试。	Pulse didn't work in this app {count} times in a row, so it's using the Windows dialog for now and will try again in {days} days.	這個軟體連續 {count} 次沒能用上 Pulse，已暫時改用系統對話方塊，{days} 天後自動再試。
+DialogPausedNext	IDS_DIALOG_PAUSED_NEXT	7198	如果软件已经更新或问题已解决，点右边的重试按钮，下次打开它时会重新使用 Pulse。	If the app has been updated or the problem is fixed, select the retry button on the right; Pulse will be used the next time you open it.	如果軟體已經更新或問題已解決，點右邊的重試按鈕，下次開啟它時會重新使用 Pulse。
+GitScTitle	IDS_GIT_SC_TITLE	7200	源代码管理	Source Control	原始檔控制
+GitScMenu	IDS_GIT_SC_MENU	7201	源代码管理…	Source Control…	原始檔控制…
+GitScMessageCue	IDS_GIT_SC_MESSAGE_CUE	7202	提交消息（Ctrl+Enter 提交到 {branch}）	Message (Ctrl+Enter to commit on {branch})	提交訊息（Ctrl+Enter 提交到 {branch}）
+GitScAmendCue	IDS_GIT_SC_AMEND_CUE	7203	留空则沿用上次的提交消息（Ctrl+Enter 修改提交）	Leave empty to keep the last message (Ctrl+Enter to amend)	留空則沿用上次的提交訊息（Ctrl+Enter 修改提交）
+GitScCommit	IDS_GIT_SC_COMMIT	7204	提交	Commit	提交
+GitScCommitN	IDS_GIT_SC_COMMIT_N	7205	提交 {n} 个文件	Commit {n} files	提交 {n} 個檔案
+GitScAmendCommit	IDS_GIT_SC_AMEND_COMMIT	7206	修改上次提交	Amend Commit	修改上次提交
+GitScAmend	IDS_GIT_SC_AMEND	7207	修改上次提交 (amend)	Amend last commit	修改上次提交 (amend)
+GitScStaged	IDS_GIT_SC_STAGED	7208	暂存的更改	Staged Changes	暫存的變更
+GitScChanges	IDS_GIT_SC_CHANGES	7209	更改	Changes	變更
+GitScConflicts	IDS_GIT_SC_CONFLICTS	7210	合并冲突	Merge Conflicts	合併衝突
+GitScStageAll	IDS_GIT_SC_STAGE_ALL	7211	全部暂存	Stage All	全部暫存
+GitScUnstageAll	IDS_GIT_SC_UNSTAGE_ALL	7212	全部取消暂存	Unstage All	全部取消暫存
+GitScStage	IDS_GIT_SC_STAGE	7213	暂存	Stage	暫存
+GitScUnstage	IDS_GIT_SC_UNSTAGE	7214	取消暂存	Unstage	取消暫存
+GitScDiscard	IDS_GIT_SC_DISCARD	7215	放弃更改	Discard Changes	捨棄變更
+GitScClean	IDS_GIT_SC_CLEAN	7216	工作区是干净的	Working tree clean	工作區是乾淨的
+GitScCleanHint	IDS_GIT_SC_CLEAN_HINT	7217	没有需要提交的更改。	There is nothing to commit.	沒有需要提交的變更。
+GitScSelectFile	IDS_GIT_SC_SELECT_FILE	7218	选择一个文件查看差异	Select a file to see its diff	選取一個檔案檢視差異
+GitScNoTextChange	IDS_GIT_SC_NO_TEXT_CHANGE	7219	文本内容没有变化（可能只改了文件模式或换行符）	No text changes (file mode or line endings only)	文字內容沒有變化（可能只改了檔案模式或換行字元）
+GitScEmptyFile	IDS_GIT_SC_EMPTY_FILE	7220	空文件	Empty file	空檔案
+GitScHeadIndex	IDS_GIT_SC_HEAD_INDEX	7221	HEAD ↔ 暂存区	HEAD ↔ Index	HEAD ↔ 暫存區
+GitScIndexWorktree	IDS_GIT_SC_INDEX_WORKTREE	7222	暂存区 ↔ 工作区	Index ↔ Working Tree	暫存區 ↔ 工作區
+GitScHeadWorktree	IDS_GIT_SC_HEAD_WORKTREE	7223	HEAD ↔ 工作区（含冲突标记）	HEAD ↔ Working Tree (with conflict markers)	HEAD ↔ 工作區（含衝突標記）
+GitScUntracked	IDS_GIT_SC_UNTRACKED	7224	未跟踪的新文件	Untracked file	未追蹤的新檔案
+GitScDetached	IDS_GIT_SC_DETACHED	7225	分离 HEAD	detached HEAD	分離 HEAD
+GitScLoading	IDS_GIT_SC_LOADING	7226	正在读取 git status…	Reading git status…	正在讀取 git status…
+GitScRunning	IDS_GIT_SC_RUNNING	7227	正在运行 git…	Running git…	正在執行 git…
+GitScFailed	IDS_GIT_SC_FAILED	7228	git 出错：{msg}	git failed: {msg}	git 出錯：{msg}
+GitScSummary	IDS_GIT_SC_SUMMARY	7229	{n} 个更改 · {s} 个已暂存	{n} changes · {s} staged	{n} 個變更 · {s} 個已暫存
+GitScNothingStaged	IDS_GIT_SC_NOTHING_STAGED	7230	没有暂存的更改：先勾选要提交的文件。	No staged changes: check the files to commit first.	沒有暫存的變更：先勾選要提交的檔案。
+GitScCommitted	IDS_GIT_SC_COMMITTED	7231	已提交 {hash}：{subject}	Committed {hash}: {subject}	已提交 {hash}：{subject}
+GitScUndoCommit	IDS_GIT_SC_UNDO_COMMIT	7232	撤销提交	Undo Commit	復原提交
+GitScCommitUndone	IDS_GIT_SC_COMMIT_UNDONE	7233	已撤销提交（reset --soft），更改仍在暂存区。	Commit undone (reset --soft); its changes are still staged.	已復原提交（reset --soft），變更仍在暫存區。
+GitScDiscardTitleOne	IDS_GIT_SC_DISCARD_TITLE_ONE	7234	放弃对“{name}”的更改？	Discard changes to “{name}”?	捨棄對「{name}」的變更？
+GitScDiscardTitleMany	IDS_GIT_SC_DISCARD_TITLE_MANY	7235	放弃 {n} 个文件的更改？	Discard changes in {n} files?	捨棄 {n} 個檔案的變更？
+GitScDiscardMsg	IDS_GIT_SC_DISCARD_MSG	7236	工作区中的文件会恢复为暂存区里的版本，未暂存的修改将丢失，无法撤销。	The files go back to their version in the index. Unstaged edits are lost and can't be undone.	工作區中的檔案會恢復為暫存區裡的版本，未暫存的修改將遺失，無法復原。
+GitScDiscardUntracked	IDS_GIT_SC_DISCARD_UNTRACKED	7237	未跟踪的文件会移到回收站，可以从那里还原。	Untracked files are moved to the Recycle Bin, where they can be restored.	未追蹤的檔案會移到資源回收筒，可以從那裡還原。
+GitScDiscardCmd	IDS_GIT_SC_DISCARD_CMD	7238	将执行：{cmd}	Runs: {cmd}	將執行：{cmd}
+GitScRecycleCmd	IDS_GIT_SC_RECYCLE_CMD	7239	未跟踪文件移到回收站（不用 git clean）	untracked files to the Recycle Bin (no git clean)	未追蹤檔案移到資源回收筒（不用 git clean）
+GitScResolveTitle	IDS_GIT_SC_RESOLVE_TITLE	7240	将“{name}”标记为已解决？	Mark “{name}” as resolved?	將「{name}」標記為已解決？
+GitScResolveMsg	IDS_GIT_SC_RESOLVE_MSG	7241	会暂存这个文件的当前内容。请确认冲突标记（<<<<<<< ======= >>>>>>>）都已处理。	Its current contents are staged. Make sure no conflict markers (<<<<<<< ======= >>>>>>>) are left.	會暫存這個檔案的目前內容。請確認衝突標記（<<<<<<< ======= >>>>>>>）都已處理。
+GitScResolve	IDS_GIT_SC_RESOLVE	7242	标记为已解决	Mark Resolved	標記為已解決
+GitScBranch	IDS_GIT_SC_BRANCH	7243	分支	Branch	分支
+GitScUnchanged	IDS_GIT_SC_UNCHANGED	7244	未更改	Unmodified	未變更
+GitTermsPlain	IDS_GIT_TERMS_PLAIN	7245	通俗说法	Plain terms	
+GitTermsTechnical	IDS_GIT_TERMS_TECHNICAL	7246	Git 术语	Git terms	
+GitCenterPlain	IDS_GIT_CENTER_PLAIN	7247	版本	Versions	
+GitCenterGit	IDS_GIT_CENTER_GIT	7248	源代码管理	Source Control	
+GitChangesPlain	IDS_GIT_CHANGES_PLAIN	7249	改动	Changes	
+GitChangesGit	IDS_GIT_CHANGES_GIT	7250	更改	Changes	
+GitHistoryPlain	IDS_GIT_HISTORY_PLAIN	7251	历史	History	
+GitHistoryGit	IDS_GIT_HISTORY_GIT	7252	提交历史	Commit History	
+GitConflictsPlain	IDS_GIT_CONFLICTS_PLAIN	7253	处理冲突	Resolve Conflicts	
+GitConflictsGit	IDS_GIT_CONFLICTS_GIT	7254	解决冲突	Merge Conflicts	
+GitSyncLabel	IDS_GIT_SYNC_LABEL	7255	同步	Sync	
+GitFetchUpdatesPlain	IDS_GIT_FETCH_UPDATES_PLAIN	7256	获取更新	Pull	
+GitUploadPlain	IDS_GIT_UPLOAD_PLAIN	7257	上传	Push	
+GitFetchOnly	IDS_GIT_FETCH_ONLY	7258	检查更新	Fetch	
+GitSaveVersionPlain	IDS_GIT_SAVE_VERSION_PLAIN	7259	保存版本	Save version	
+GitSaveVersionNPlain	IDS_GIT_SAVE_VERSION_N_PLAIN	7260	保存版本（{n} 个文件）	Save version ({n} files)	
+GitSaveAndUploadPlain	IDS_GIT_SAVE_AND_UPLOAD_PLAIN	7261	保存并上传	Save & upload	
+GitCommitAndPushGit	IDS_GIT_COMMIT_AND_PUSH_GIT	7262	提交并推送	Commit & Push	
+GitSyncTipPlain	IDS_GIT_SYNC_TIP_PLAIN	7263	同步：从云端获取新版本，再上传本地版本	Sync: pull new versions, then push yours	
+GitSyncTipGit	IDS_GIT_SYNC_TIP_GIT	7264	同步（pull + push）	Sync (pull + push)	
+GitChangesShortPlain	IDS_GIT_CHANGES_SHORT_PLAIN	7265	%d 处修改	%d edits	
+GitSaveVersionDotCount	IDS_GIT_SAVE_VERSION_DOT_COUNT	7266	保存版本 · %d 处修改	Save version · %d edits	
+GitScMenuDotCount	IDS_GIT_SC_MENU_DOT_COUNT	7267	源代码管理 · %d 处更改	Source Control · %d changes	
+GitDirSummaryPlain	IDS_GIT_DIR_SUMMARY_PLAIN	7268	含 {n} 处改动	{n} edits inside	
+GitDirSummaryGit	IDS_GIT_DIR_SUMMARY_GIT	7269	{n} {code}	{n} {code}	
+GitBranchMenuTipPlain	IDS_GIT_BRANCH_MENU_TIP_PLAIN	7270	切换或新建分支	Switch or create branch	
+GitBranchMenuTipGit	IDS_GIT_BRANCH_MENU_TIP_GIT	7271	分支与同步	Branches & Sync	
+GitMarkModifiedPlain	IDS_GIT_MARK_MODIFIED_PLAIN	7272	已修改	Modified	
+GitMarkAddedPlain	IDS_GIT_MARK_ADDED_PLAIN	7273	新文件	New	
+GitMarkDeletedPlain	IDS_GIT_MARK_DELETED_PLAIN	7274	已删除	Deleted	
+GitMarkRenamedPlain	IDS_GIT_MARK_RENAMED_PLAIN	7275	重命名	Renamed	
+GitMarkConflictPlain	IDS_GIT_MARK_CONFLICT_PLAIN	7276	两边都改了	Both changed	
+GitMarkModifiedCode	IDS_GIT_MARK_MODIFIED_CODE	7277	M	M	
+GitMarkAddedCode	IDS_GIT_MARK_ADDED_CODE	7278	A	A	
+GitMarkUntrackedCode	IDS_GIT_MARK_UNTRACKED_CODE	7279	U	U	
+GitMarkDeletedCode	IDS_GIT_MARK_DELETED_CODE	7280	D	D	
+GitMarkRenamedCode	IDS_GIT_MARK_RENAMED_CODE	7281	R	R	
+GitMarkConflictCode	IDS_GIT_MARK_CONFLICT_CODE	7282	冲突	Conflict	
+GitMsgCuePlain	IDS_GIT_MSG_CUE_PLAIN	7283	这次改了什么？（写给以后的自己和同事看，Ctrl+Enter 保存）	What changed? (Ctrl+Enter to save)	
+GitAmendCuePlain	IDS_GIT_AMEND_CUE_PLAIN	7284	留空则沿用上次的说明（Ctrl+Enter 更新上次保存）	Leave blank to reuse the last message (Ctrl+Enter to amend)	
+GitSuggestLabel	IDS_GIT_SUGGEST_LABEL	7285	建议：	Suggested:	
+GitSuggestOne	IDS_GIT_SUGGEST_ONE	7286	更新 {name}	Update {name}	
+GitSuggestTwo	IDS_GIT_SUGGEST_TWO	7287	更新 {a}、{b}	Update {a} and {b}	
+GitSuggestMany	IDS_GIT_SUGGEST_MANY	7288	更新 {a}、{b} 等 {n} 个文件	Update {a}, {b}, and {n} more	
+GitWhoSavePlain	IDS_GIT_WHO_SAVE_PLAIN	7289	署名：{name} · 保存在本地，点 ↑ 同时上传	Author: {name} · Saved locally, ↑ also pushes	
+GitWhoNoIdentity	IDS_GIT_WHO_NO_IDENTITY	7290	未设置 Git 署名（user.name）	Git author (user.name) not set	
+GitStagedPlain	IDS_GIT_STAGED_PLAIN	7291	这次要保存	Include in save	
+GitUnstagedPlain	IDS_GIT_UNSTAGED_PLAIN	7292	先不保存	Not included	
+GitStageAllPlain	IDS_GIT_STAGE_ALL_PLAIN	7293	全部加入	Include all	
+GitUnstageAllPlain	IDS_GIT_UNSTAGE_ALL_PLAIN	7294	全部移出	Exclude all	
+GitStageOnePlain	IDS_GIT_STAGE_ONE_PLAIN	7295	下次保存时带上	Include next save	
+GitStagedOnePlain	IDS_GIT_STAGED_ONE_PLAIN	7296	下次保存会带上	Included in next save	
+GitDiscardPlain	IDS_GIT_DISCARD_PLAIN	7297	撤销修改	Revert changes	
+GitDeleteUntrackedPlain	IDS_GIT_DELETE_UNTRACKED_PLAIN	7298	删除这个新文件…	Delete new file…	
+GitDeleteUntrackedGit	IDS_GIT_DELETE_UNTRACKED_GIT	7299	删除未跟踪文件…	Delete untracked file…	
+GitRestoreDeletedPlain	IDS_GIT_RESTORE_DELETED_PLAIN	7300	找回这个文件	Restore file	
+GitRestoreDeletedGit	IDS_GIT_RESTORE_DELETED_GIT	7301	恢复	Restore	
+GitViewChangesPlain	IDS_GIT_VIEW_CHANGES_PLAIN	7302	看看改了哪些	See changes	
+GitViewChangesGit	IDS_GIT_VIEW_CHANGES_GIT	7303	查看更改	View diff	
+GitExpandAllPlain	IDS_GIT_EXPAND_ALL_PLAIN	7304	全部 {n} 处 →	All {n} →	
+GitExpandAllGit	IDS_GIT_EXPAND_ALL_GIT	7305	展开 →	Expand →	
+GitDiffWhatChangedPlain	IDS_GIT_DIFF_WHAT_CHANGED_PLAIN	7306	改了什么	What changed	
+GitDiffWhatChangedGit	IDS_GIT_DIFF_WHAT_CHANGED_GIT	7307	差异	Diff	
+GitDiffVsPrevPlain	IDS_GIT_DIFF_VS_PREV_PLAIN	7308	对比上一个版本	vs previous version	
+GitDiffVsHeadGit	IDS_GIT_DIFF_VS_HEAD_GIT	7309	vs HEAD	vs HEAD	
+GitDiffPrevSidePlain	IDS_GIT_DIFF_PREV_SIDE_PLAIN	7310	上一个版本	Previous	
+GitDiffNowSidePlain	IDS_GIT_DIFF_NOW_SIDE_PLAIN	7311	现在	Now	
+GitDiffHeadSideGit	IDS_GIT_DIFF_HEAD_SIDE_GIT	7312	HEAD	HEAD	
+GitDiffWorkSideGit	IDS_GIT_DIFF_WORK_SIDE_GIT	7313	工作区	Working tree	
+GitInlinePlain	IDS_GIT_INLINE_PLAIN	7314	合在一起	Inline	
+GitInlineGit	IDS_GIT_INLINE_GIT	7315	行内	Unified	
+GitSbsPlain	IDS_GIT_SBS_PLAIN	7316	左右对比	Side by side	
+GitSbsGit	IDS_GIT_SBS_GIT	7317	并排	Split	
+GitBlamePlain	IDS_GIT_BLAME_PLAIN	7318	显示谁改的	Show authors	
+GitBlameGit	IDS_GIT_BLAME_GIT	7319	逐行追溯 (blame)	Blame	
+GitBlameUncommitted	IDS_GIT_BLAME_UNCOMMITTED	7320	未保存	Unsaved	
+GitHunkNearLine	IDS_GIT_HUNK_NEAR_LINE	7321	第 {line} 行附近	Around line {line}	
+GitHunkStagePlain	IDS_GIT_HUNK_STAGE_PLAIN	7322	只保存这一段	Include hunk	
+GitHunkStageGit	IDS_GIT_HUNK_STAGE_GIT	7323	暂存此块	Stage hunk	
+GitHunkUnstagePlain	IDS_GIT_HUNK_UNSTAGE_PLAIN	7324	这一段先不保存	Exclude hunk	
+GitHunkUnstageGit	IDS_GIT_HUNK_UNSTAGE_GIT	7325	取消暂存此块	Unstage hunk	
+GitHunkDiscardPlain	IDS_GIT_HUNK_DISCARD_PLAIN	7326	撤销这一段	Revert hunk	
+GitHunkDiscardGit	IDS_GIT_HUNK_DISCARD_GIT	7327	放弃此块	Discard hunk	
+GitHunkDiscardTitle	IDS_GIT_HUNK_DISCARD_TITLE	7328	撤销这一段修改？	Discard this hunk?	
+GitHunkDiscardMsg	IDS_GIT_HUNK_DISCARD_MSG	7329	只影响这一小段，同一文件的其他修改不受影响，无法用 Ctrl+Z 撤回。	Only this hunk is reverted; other edits in this file stay. Cannot be undone.	
+GitRevealFilePlain	IDS_GIT_REVEAL_FILE_PLAIN	7330	在文件夹中显示	Show in folder	
+GitImgDragHintPlain	IDS_GIT_IMG_DRAG_HINT_PLAIN	7331	拖动中间的把手对比	Drag handle to compare	
+GitImgDragHintGit	IDS_GIT_IMG_DRAG_HINT_GIT	7332	拖动滑块比较	Drag slider to compare	
+GitImgDimSame	IDS_GIT_IMG_DIM_SAME	7333	尺寸 {w} × {h}（未变）	{w} × {h} (unchanged)	
+GitImgDimChanged	IDS_GIT_IMG_DIM_CHANGED	7334	尺寸 {w1} × {h1} → {w2} × {h2}	{w1} × {h1} → {w2} × {h2}	
+GitImgNewPlain	IDS_GIT_IMG_NEW_PLAIN	7335	新加入的图片，没有旧版本可对比	New image with no previous version	
+GitImgDeletedPlain	IDS_GIT_IMG_DELETED_PLAIN	7336	这个文件已从文件夹中删除。保存版本后，以后仍能从历史里找回。	Deleted from disk; once saved, it can still be recovered from history.	
+GitFileHistoryPlain	IDS_GIT_FILE_HISTORY_PLAIN	7337	这个文件的历史	File history	
+GitFileHistoryGit	IDS_GIT_FILE_HISTORY_GIT	7338	文件历史	File history	
+GitWipRowPlain	IDS_GIT_WIP_ROW_PLAIN	7339	还没保存的修改	Unsaved changes	
+GitWipRowSubPlain	IDS_GIT_WIP_ROW_SUB_PLAIN	7340	{n} 个文件 · 点击去保存	{n} files · Click to save	
+GitUndoSavePlain	IDS_GIT_UNDO_SAVE_PLAIN	7341	撤销刚才的保存	Undo save	
+GitSavedToastPlain	IDS_GIT_SAVED_TOAST_PLAIN	7342	已保存版本	Version saved	
+GitSavedAndPushedPlain	IDS_GIT_SAVED_AND_PUSHED_PLAIN	7343	 · 已上传	 · Uploaded	
+GitSavedAndPushedGit	IDS_GIT_SAVED_AND_PUSHED_GIT	7344	 · 已推送	 · Pushed	
+GitSavePushRejected	IDS_GIT_SAVE_PUSH_REJECTED	7345	本地版本已保存，但云端已有新提交被拒绝上传；请先获取更新后再上传。	Saved locally, but push was rejected because remote has new commits. Pull first.	
+GitFootTipPlain	IDS_GIT_FOOT_TIP_PLAIN	7346	“撤销修改”会先弹窗说明后果，确认后才执行；已保存的版本永远可以从「历史」找回。	Reverting always asks first; saved versions stay in History.	
+GitFootTipGit	IDS_GIT_FOOT_TIP_GIT	7347	放弃更改前均需确认；已提交内容可从历史检出。	Discard asks before running; commits stay in History.	
+GitSwitchShortcutHint	IDS_GIT_SWITCH_SHORTCUT_HINT	7348	Alt ↑↓ 上/下一个文件	Alt ↑↓ Switch file	
+GitBranchSearchPhPlain	IDS_GIT_BRANCH_SEARCH_PH_PLAIN	7349	找分支，或输入新名字直接创建	Find branch or type a new name	
+GitBranchSearchPhGit	IDS_GIT_BRANCH_SEARCH_PH_GIT	7350	搜索或创建分支	Search or create branch	
+GitBranchCurrentHintPlain	IDS_GIT_BRANCH_CURRENT_HINT_PLAIN	7351	你正在这个分支上	You are here	
+GitBranchCurrentHintGit	IDS_GIT_BRANCH_CURRENT_HINT_GIT	7352	当前分支	Current branch	
+GitBehindBoxPlain	IDS_GIT_BEHIND_BOX_PLAIN	7353	{n} 个新版本	{n} new	
+GitBehindBoxGit	IDS_GIT_BEHIND_BOX_GIT	7354	{n} 待拉取	{n} behind	
+GitBehindDescPlain	IDS_GIT_BEHIND_DESC_PLAIN	7355	云端可获取的更新	Available on remote	
+GitAheadBoxPlain	IDS_GIT_AHEAD_BOX_PLAIN	7356	{n} 个版本	{n} local	
+GitAheadBoxGit	IDS_GIT_AHEAD_BOX_GIT	7357	{n} 待推送	{n} ahead	
+GitAheadDescPlain	IDS_GIT_AHEAD_DESC_PLAIN	7358	你保存了、还没上传	Saved locally, not uploaded	
+GitAheadDescGit	IDS_GIT_AHEAD_DESC_GIT	7359	本地领先	Local ahead	
+GitSyncOneClickPlain	IDS_GIT_SYNC_ONE_CLICK_PLAIN	7360	一键同步（先获取再上传）	Sync (pull + push)	
+GitSyncOneClickGit	IDS_GIT_SYNC_ONE_CLICK_GIT	7361	同步（pull + push）	Sync (pull + push)	
+GitLocalBranchesPlain	IDS_GIT_LOCAL_BRANCHES_PLAIN	7362	最近的分支	Local branches	
+GitLocalBranchesGit	IDS_GIT_LOCAL_BRANCHES_GIT	7363	本地分支	Local branches	
+GitRemoteBranchesPlain	IDS_GIT_REMOTE_BRANCHES_PLAIN	7364	只在云端的分支	Remote branches	
+GitRemoteBranchesGit	IDS_GIT_REMOTE_BRANCHES_GIT	7365	远程分支	Remote branches	
+GitRemoteBranchHintPlain	IDS_GIT_REMOTE_BRANCH_HINT_PLAIN	7366	点击下载并切换	Click to check out	
+GitStashListPlain	IDS_GIT_STASH_LIST_PLAIN	7367	收起的修改	Shelved changes	
+GitStashListGit	IDS_GIT_STASH_LIST_GIT	7368	储藏列表	Stashes	
+GitStashPlain	IDS_GIT_STASH_PLAIN	7369	先收起修改	Shelve edits	
+GitStashGit	IDS_GIT_STASH_GIT	7370	储藏 (stash)	Stash	
+GitUnstashPlain	IDS_GIT_UNSTASH_PLAIN	7371	放回	Restore	
+GitUnstashGit	IDS_GIT_UNSTASH_GIT	7372	应用储藏	Apply stash	
+GitNewBranch	IDS_GIT_NEW_BRANCH	7373	新建分支	New branch	
+GitCreateAndSwitch	IDS_GIT_CREATE_AND_SWITCH	7374	创建并切换到分支“{name}”	Create and switch to “{name}”	
+GitMergeIntoCurrent	IDS_GIT_MERGE_INTO_CURRENT	7375	合并到当前分支…	Merge into current…	
+GitBranchChangesPillPlain	IDS_GIT_BRANCH_CHANGES_PILL_PLAIN	7376	{n} 处未保存	{n} unsaved	
+GitBranchChangesPillGit	IDS_GIT_BRANCH_CHANGES_PILL_GIT	7377	{n} 更改	{n} changes	
+GitSwitchDirtyTitle	IDS_GIT_SWITCH_DIRTY_TITLE	7378	切换到“{branch}”之前…	Before switching to “{branch}”…	
+GitSwitchDirtyMsg	IDS_GIT_SWITCH_DIRTY_MSG	7379	你有 {n} 处修改还没保存成版本。想怎么带着它们？	You have {n} unsaved changes. What should happen to them?	
+GitSwitchStashOpt	IDS_GIT_SWITCH_STASH_OPT	7380	先收起修改，再切换（推荐）	Stash changes & switch (recommended)	
+GitSwitchCarryOpt	IDS_GIT_SWITCH_CARRY_OPT	7381	带着修改切换	Carry changes & switch	
+GitStashTitle	IDS_GIT_STASH_TITLE	7382	先收起这 {n} 处修改？	Stash {n} changes?	
+GitStashMsg	IDS_GIT_STASH_MSG	7383	文件会回到最近一次保存时的样子；收起的修改放在「收起的修改」里，随时可以放回。	Files return to the last saved state; your edits stay in Stashes until restored.	
+GitStashConfirm	IDS_GIT_STASH_CONFIRM	7384	收起	Stash	
+GitStashDropTitle	IDS_GIT_STASH_DROP_TITLE	7385	删除收起的修改“{name}”？	Drop stash “{name}”?	
+GitStashDropMsg	IDS_GIT_STASH_DROP_MSG	7386	删除后这批改动就找不回来了，无法撤回。	These shelved changes will be permanently deleted.	
+GitStashDropBtn	IDS_GIT_STASH_DROP_BTN	7387	删除	Drop	
+GitMergeConfirmTitle	IDS_GIT_MERGE_CONFIRM_TITLE	7388	把“{branch}”合并到当前分支？	Merge “{branch}” into current branch?	
+GitMergeConfirmMsg	IDS_GIT_MERGE_CONFIRM_MSG	7389	将把“{branch}”上的新改动合并到当前分支；若出现两边都改了同一处，会自动打开冲突处理页。	Brings changes from “{branch}” here; conflicts open the resolver.	
+GitMergeBtn	IDS_GIT_MERGE_BTN	7390	合并	Merge	
+GitNewBranchTitle	IDS_GIT_NEW_BRANCH_TITLE	7391	新建分支	New Branch	
+GitNewBranchMsg	IDS_GIT_NEW_BRANCH_MSG	7392	输入新分支名称（基于 {base} 创建并切换）：	Enter a new branch name (branched from {base}):	
+GitSyncRunning	IDS_GIT_SYNC_RUNNING	7393	正在同步…	Syncing…	
+GitSyncDone	IDS_GIT_SYNC_DONE	7394	已完成同步	Synced	
+GitSyncFailed	IDS_GIT_SYNC_FAILED	7395	同步未完成	Sync failed	
+GitMergeDone	IDS_GIT_MERGE_DONE	7396	合并完成	Merge complete	
+GitMergeConflictToast	IDS_GIT_MERGE_CONFLICT_TOAST	7397	有文件需要处理冲突，已为你打开处理页。	Conflicts found; opened conflict resolver.	
+GitStashEmpty	IDS_GIT_STASH_EMPTY	7398	当前没有收起的修改	No stashes yet	
+GitStashFilesCount	IDS_GIT_STASH_FILES_COUNT	7399	{n} 个文件	{n} files	
+GitConflictBannerPlain	IDS_GIT_CONFLICT_BANNER_PLAIN	7400	正在合并他人的改动	Merging incoming changes	
+GitConflictBannerGit	IDS_GIT_CONFLICT_BANNER_GIT	7401	正在合并 {head}	Merging {head}	
+GitConflictProgressPlain	IDS_GIT_CONFLICT_PROGRESS_PLAIN	7402	{done}/{total} 个文件已处理	{done}/{total} resolved	
+GitConflictProgressGit	IDS_GIT_CONFLICT_PROGRESS_GIT	7403	{done}/{total} 已解决	{done}/{total} resolved	
+GitConflictFinishPlain	IDS_GIT_CONFLICT_FINISH_PLAIN	7404	完成合并	Complete merge	
+GitConflictFinishGit	IDS_GIT_CONFLICT_FINISH_GIT	7405	提交合并	Commit merge	
+GitConflictAbortPlain	IDS_GIT_CONFLICT_ABORT_PLAIN	7406	放弃这次合并…	Abort merge…	
+GitConflictAbortGit	IDS_GIT_CONFLICT_ABORT_GIT	7407	中止合并…	Abort merge…	
+GitConflictNeedPick	IDS_GIT_CONFLICT_NEED_PICK	7408	需要你决定的文件	Needs decision	
+GitConflictFilesGit	IDS_GIT_CONFLICT_FILES_GIT	7409	冲突文件	Conflicts	
+GitConflictAutoMerged	IDS_GIT_CONFLICT_AUTO_MERGED	7410	已自动合好	Auto-merged	
+GitConflictNotePlain	IDS_GIT_CONFLICT_NOTE_PLAIN	7411	处理时文件夹照常可用。中途关掉 Pulse 也没关系，下次打开会接着这里继续。	You can keep working normally; closing Pulse preserves merge progress.	
+GitConflictNoteGit	IDS_GIT_CONFLICT_NOTE_GIT	7412	合并状态保存在 .git/MERGE_HEAD	Merge state stored in .git/MERGE_HEAD	
+GitConflictTextHint	IDS_GIT_CONFLICT_TEXT_HINT	7413	选一个保留，或者两段都要，之后还能手动微调	Pick one, keep both, or edit manually	
+GitConflictBinHint	IDS_GIT_CONFLICT_BIN_HINT	7414	图片或二进制文件没法自动合在一起，选一张保留；另一张可以另存一份	Binary files cannot be merged automatically; pick one and optionally save the other.	
+GitConflictMinePlain	IDS_GIT_CONFLICT_MINE_PLAIN	7415	用我的	Use mine	
+GitConflictMineGit	IDS_GIT_CONFLICT_MINE_GIT	7416	采用当前 (ours)	Accept current (ours)	
+GitConflictTheirsPlain	IDS_GIT_CONFLICT_THEIRS_PLAIN	7417	用对方的	Use theirs	
+GitConflictTheirsGit	IDS_GIT_CONFLICT_THEIRS_GIT	7418	采用传入 (theirs)	Accept incoming (theirs)	
+GitConflictBothPlain	IDS_GIT_CONFLICT_BOTH_PLAIN	7419	两段都保留	Keep both	
+GitConflictBothGit	IDS_GIT_CONFLICT_BOTH_GIT	7420	全部接受	Accept both	
+GitConflictManualPlain	IDS_GIT_CONFLICT_MANUAL_PLAIN	7421	自己改写	Edit manually	
+GitConflictManualGit	IDS_GIT_CONFLICT_MANUAL_GIT	7422	手动编辑	Manual edit	
+GitConflictBasePlain	IDS_GIT_CONFLICT_BASE_PLAIN	7423	看看原来是什么样	Show common base	
+GitConflictBaseGit	IDS_GIT_CONFLICT_BASE_GIT	7424	显示共同祖先	Show common ancestor	
+GitConflictPreviewPlain	IDS_GIT_CONFLICT_PREVIEW_PLAIN	7425	合并后会变成	Result preview	
+GitConflictPreviewGit	IDS_GIT_CONFLICT_PREVIEW_GIT	7426	结果预览	Result preview	
+GitConflictPickPrompt	IDS_GIT_CONFLICT_PICK_PROMPT	7427	先在上面为每个冲突段做出选择	Choose an option above for each conflict	
+GitConflictApplyFile	IDS_GIT_CONFLICT_APPLY_FILE	7428	应用选择并标记已处理	Apply & mark resolved	
+GitConflictSaveOther	IDS_GIT_CONFLICT_SAVE_OTHER	7429	没选中的那份另存为副本，不会丢	Save the unchosen version as a copy so nothing is lost	
+GitConflictUseThis	IDS_GIT_CONFLICT_USE_THIS	7430	用这个版本	Use this version	
+GitConflictAbortTitle	IDS_GIT_CONFLICT_ABORT_TITLE	7431	放弃这次合并？	Abort this merge?	
+GitConflictAbortMsg	IDS_GIT_CONFLICT_ABORT_MSG	7432	所有文件会回到合并之前的样子，你刚才做的选择都会作废。你自己的修改和版本都不会丢，之后还可以重新获取。	Files return to pre-merge state and your conflict choices are discarded. Your commits are safe.	
+GitConflictAbortBtn	IDS_GIT_CONFLICT_ABORT_BTN	7433	放弃合并	Abort merge	
+GitConflictResolvedBadge	IDS_GIT_CONFLICT_RESOLVED_BADGE	7434	已处理	Resolved	
+GitConflictHunksCount	IDS_GIT_CONFLICT_HUNKS_COUNT	7435	{n} 段需要选择	{n} conflicts	
+GitConflictBinaryCount	IDS_GIT_CONFLICT_BINARY_COUNT	7436	二选一	Binary	
+GitConflictOtherSuffix	IDS_GIT_CONFLICT_OTHER_SUFFIX	7437	对方版本	theirs	
+GitConflictNoMerge	IDS_GIT_CONFLICT_NO_MERGE	7438	当前没有进行中的合并冲突。	No merge conflict in progress.	
+GitHistAllPlain	IDS_GIT_HIST_ALL_PLAIN	7439	全部	All	
+GitHistAllGit	IDS_GIT_HIST_ALL_GIT	7440	全部分支	All branches	
+GitHistPathPlain	IDS_GIT_HIST_PATH_PLAIN	7441	只看这个文件夹	This folder	
+GitHistPathGit	IDS_GIT_HIST_PATH_GIT	7442	当前路径	Current path	
+GitHistMinePlain	IDS_GIT_HIST_MINE_PLAIN	7443	只看我的	Mine	
+GitHistMineGit	IDS_GIT_HIST_MINE_GIT	7444	我的提交	My commits	
+GitHistSearchPlain	IDS_GIT_HIST_SEARCH_PLAIN	7445	搜索说明、作者、文件名	Search message, author, file	
+GitHistSearchGit	IDS_GIT_HIST_SEARCH_GIT	7446	搜索 message / author / path	Search message / author / path	
+GitHistRemoteBannerPlain	IDS_GIT_HIST_REMOTE_BANNER_PLAIN	7447	云端有 {n} 个新版本 · 获取后会与本地合并	{n} new versions on remote · Pull to merge	
+GitHistRemoteBannerGit	IDS_GIT_HIST_REMOTE_BANNER_GIT	7448	远端领先 {n} 个提交 · 将执行 pull	{n} commits ahead on remote · Will run pull	
+GitHistRefUnpushedPlain	IDS_GIT_HIST_REF_UNPUSHED_PLAIN	7449	还没上传	Not uploaded	
+GitHistRefUnpushedGit	IDS_GIT_HIST_REF_UNPUSHED_GIT	7450	未推送	Unpushed	
+GitHistRefRemoteNewPlain	IDS_GIT_HIST_REF_REMOTE_NEW_PLAIN	7451	云端新版本	New on remote	
+GitHistRefRemoteNewGit	IDS_GIT_HIST_REF_REMOTE_NEW_GIT	7452	远程新提交	Remote commit	
+GitHistAuthor	IDS_GIT_HIST_AUTHOR	7453	作者	Author	
+GitHistDate	IDS_GIT_HIST_DATE	7454	时间	Date	
+GitHistIdPlain	IDS_GIT_HIST_ID_PLAIN	7455	编号	ID	
+GitHistIdGit	IDS_GIT_HIST_ID_GIT	7456	Commit	Commit	
+GitHistIdNotePlain	IDS_GIT_HIST_ID_NOTE_PLAIN	7457	 · 一般用不到	 · Rarely needed	
+GitHistLocation	IDS_GIT_HIST_LOCATION	7458	位置	Location	
+GitHistRemoteOnlyPlain	IDS_GIT_HIST_REMOTE_ONLY_PLAIN	7459	只在云端，还没获取到你的电脑	Only on remote, not pulled yet	
+GitHistRemoteOnlyGit	IDS_GIT_HIST_REMOTE_ONLY_GIT	7460	仅远程	Remote only	
+GitHistChangedFilesPlain	IDS_GIT_HIST_CHANGED_FILES_PLAIN	7461	这个版本改了 {n} 个文件	{n} files changed in this version	
+GitHistChangedFilesGit	IDS_GIT_HIST_CHANGED_FILES_GIT	7462	变更文件 {n}	Changed files ({n})	
+GitHistViewFilesPlain	IDS_GIT_HIST_VIEW_FILES_PLAIN	7463	浏览这个版本的文件	Browse files at this version	
+GitHistViewFilesGit	IDS_GIT_HIST_VIEW_FILES_GIT	7464	浏览此提交的文件	Browse files at commit	
+GitHistCompareNowPlain	IDS_GIT_HIST_COMPARE_NOW_PLAIN	7465	和现在对比	Compare with working tree	
+GitHistCompareNowGit	IDS_GIT_HIST_COMPARE_NOW_GIT	7466	与工作区比较	Compare with working tree	
+GitHistBranchHerePlain	IDS_GIT_HIST_BRANCH_HERE_PLAIN	7467	从这里开新分支	New branch here	
+GitHistBranchHereGit	IDS_GIT_HIST_BRANCH_HERE_GIT	7468	从此提交创建分支	Branch from commit	
+GitHistResetPlain	IDS_GIT_HIST_RESET_PLAIN	7469	回到这个版本…	Go back to this version…	
+GitHistResetGit	IDS_GIT_HIST_RESET_GIT	7470	重置到此提交…	Reset to commit…	
+GitHistRestoreFilePlain	IDS_GIT_HIST_RESTORE_FILE_PLAIN	7471	恢复成这个版本	Restore to this version	
+GitHistRestoreFileGit	IDS_GIT_HIST_RESTORE_FILE_GIT	7472	检出此版本	Checkout file	
+GitHistRestoreConfirmTitle	IDS_GIT_HIST_RESTORE_CONFIRM_TITLE	7473	把“{name}”恢复成 {hash} 的版本？	Restore “{name}” to {hash}?	
+GitHistRestoreConfirmMsg	IDS_GIT_HIST_RESTORE_CONFIRM_MSG	7474	只替换这一个文件的内容。你当前的未保存修改会先自动收起，之后可在「收起的修改」里找回。	Only this file is replaced. Your current edits are stashed first so nothing is lost.	
+GitHistResetTitle	IDS_GIT_HIST_RESET_TITLE	7475	回到“{subject}”这个版本？	Go back to “{subject}”?	
+GitHistResetMsg	IDS_GIT_HIST_RESET_MSG	7476	之后保存的版本记录会从当前分支移除。请选择怎么处理你现在的文件：	Later commits will be removed from this branch. Choose what happens to your files:	
+GitHistResetKeepBtn	IDS_GIT_HIST_RESET_KEEP_BTN	7477	保留现在的文件（推荐）	Keep current files (soft)	
+GitHistResetDropBtn	IDS_GIT_HIST_RESET_DROP_BTN	7478	文件也一起回到那时	Reset files too (hard)	
+GitHistResetHardConfirmTitle	IDS_GIT_HIST_RESET_HARD_CONFIRM_TITLE	7479	确定丢弃之后的文件修改并回到 {hash}？	Discard files and hard-reset to {hash}?	
+GitHistResetHardConfirmMsg	IDS_GIT_HIST_RESET_HARD_CONFIRM_MSG	7480	选择“文件也一起回到那时”将丢弃该版本之后的改动和所有未保存修改，无法撤回！	All later edits and unsaved changes will be permanently lost!	
+GitHistBackToDetail	IDS_GIT_HIST_BACK_TO_DETAIL	7481	← 返回提交详情	← Back to commit details	
+GitHistTreeTitle	IDS_GIT_HIST_TREE_TITLE	7482	提交 {hash} 的文件树	Files at {hash}	
+GitHistTreeHint	IDS_GIT_HIST_TREE_HINT	7483	选择文件可预览内容，或直接恢复到工作区	Select a file to preview or restore to working tree	
+GitHistTotalCommits	IDS_GIT_HIST_TOTAL_COMMITS	7484	共 {n} 个版本	{n} commits	
+GitHistOtherBranches	IDS_GIT_HIST_OTHER_BRANCHES	7485	其他分支	Other branches	
+GitHistRemoteLegend	IDS_GIT_HIST_REMOTE_LEGEND	7486	云端	Remote	
+GitHistNoCommits	IDS_GIT_HIST_NO_COMMITS	7487	还没有任何保存的版本。	No commits yet.	
+GitCmdDetailsSummary	IDS_GIT_CMD_DETAILS_SUMMARY	7488	将执行的命令：{cmd}	Command: {cmd}	
+StoreDetailTabOverview	IDS_STORE_DETAIL_TAB_OVERVIEW	7489	概览	Overview	
+StoreDetailDescription	IDS_STORE_DETAIL_DESCRIPTION	7490	插件介绍	Description	
+StoreDetailHighlights	IDS_STORE_DETAIL_HIGHLIGHTS	7491	主要特性	Highlights	
+StoreDetailMenuShowcase	IDS_STORE_DETAIL_MENU_SHOWCASE	7709	右键菜单里是这样的	In the right-click menu	右鍵選單裡是這樣的
+StoreDetailTags	IDS_STORE_DETAIL_TAGS	7492	标签	Tags	
+StoreDetailQuickFacts	IDS_STORE_DETAIL_QUICK_FACTS	7493	基本信息	Details	
+StoreDetailHomepage	IDS_STORE_DETAIL_HOMEPAGE	7494	主页	Homepage	
+StoreDetailNoDescription	IDS_STORE_DETAIL_NO_DESCRIPTION	7495	此扩展尚未提供详细介绍。	This extension has not provided a detailed description yet.	
+StoreDetailNotInstalled	IDS_STORE_DETAIL_NOT_INSTALLED	7496	未安装	Not installed	
+StoreDetailPermissionsTitle	IDS_STORE_DETAIL_PERMISSIONS_TITLE	7497	声明的权限	Declared permissions	
+SetupUiChip	IDS_SETUP_UI_CHIP	7498	界面：%1 · 安装过程中可以换	Layout: %1 · you can change it while installing	介面：%1 · 安裝過程中可以換
+SetupUiChipPick	IDS_SETUP_UI_CHIP_PICK	7499	现在选	Choose now	現在選
+SetupSecUi	IDS_SETUP_SEC_UI	7500	界面	Layout	介面
+SetupUiStart	IDS_SETUP_UI_START	7501	界面起点	Starting layout	介面起點
+SetupUiStartSub	IDS_SETUP_UI_START_SUB	7502	装好打开就是这个样子；之后在 设置 › 界面布局 随时改	How Pulse looks when it first opens. Change it anytime in Settings › Layout.	裝好開啟就是這個樣子；之後在 設定 › 介面版面 隨時改
+SetupUiPickTitle	IDS_SETUP_UI_PICK_TITLE	7503	趁这会儿，挑个界面起点	While you wait, pick a starting layout	趁這會兒，挑個介面起點
+SetupUiPickHint	IDS_SETUP_UI_PICK_HINT	7504	不选也行，默认「标准」，装好后随时能换。	No need to choose: Standard is the default, and you can switch anytime.	不選也行，預設「標準」，裝好後隨時能換。
+SetupModeZen	IDS_SETUP_MODE_ZEN	7505	专注	Focus	專注
+SetupModeStandard	IDS_SETUP_MODE_STANDARD	7506	标准	Standard	標準
+SetupModePro	IDS_SETUP_MODE_PRO	7507	工作台	Workbench	工作台
+SetupModeZenWho	IDS_SETUP_MODE_ZEN_WHO	7508	喜欢简洁	Keep it minimal	喜歡簡潔
+SetupModeStandardWho	IDS_SETUP_MODE_STANDARD_WHO	7509	大多数人	Most people	大多數人
+SetupModeProWho	IDS_SETUP_MODE_PRO_WHO	7510	现在的 Pulse	Today's Pulse	現在的 Pulse
+SetupModeZenLine	IDS_SETUP_MODE_ZEN_LINE	7511	一行标题栏，侧栏浮起，选中才出操作。	One title bar, a floating sidebar, and actions only when you select something.	一行標題列，側欄浮起，選取才出操作。
+SetupModeStandardLine	IDS_SETUP_MODE_STANDARD_LINE	7512	标签页 + 一行地址栏，常用命令并进地址栏。	Tabs plus one address bar that also holds the common commands.	分頁 + 一行網址列，常用命令併入網址列。
+SetupModeProLine	IDS_SETUP_MODE_PRO_LINE	7513	现在的 Pulse：完整命令栏、侧边栏、状态栏。	Today's Pulse: full command bar, sidebar and status bar.	現在的 Pulse：完整命令列、側邊欄、狀態列。
+SetupThemeSystem	IDS_SETUP_THEME_SYSTEM	7514	跟随系统	System	跟隨系統
+SetupThemeLight	IDS_SETUP_THEME_LIGHT	7515	浅色	Light	淺色
+SetupThemeDark	IDS_SETUP_THEME_DARK	7516	深色	Dark	深色
+SetupAccentColor	IDS_SETUP_ACCENT_COLOR	7517	主题色	Accent color	主題色
+SetupSumUi	IDS_SETUP_SUM_UI	7518	界面 · %1 · %2	Layout · %1 · %2	介面 · %1 · %2
+TitleBtnLayout	IDS_TITLE_BTN_LAYOUT	7519	界面	Layout	介面
+TitleBtnLayoutTip	IDS_TITLE_BTN_LAYOUT_TIP	7520	界面布局	Interface layout	介面配置
+TitleBtnMoveLeft	IDS_TITLE_BTN_MOVE_LEFT	7521	左移	Move left	左移
+TitleBtnMoveRight	IDS_TITLE_BTN_MOVE_RIGHT	7522	右移	Move right	右移
+TitleBtnRemove	IDS_TITLE_BTN_REMOVE	7523	从标题栏移除	Remove from title bar	從標題列移除
+TitleBtnShow	IDS_TITLE_BTN_SHOW	7524	在标题栏显示「%s」	Show "%s" in the title bar	在標題列顯示「%s」
+TitleBtnReset	IDS_TITLE_BTN_RESET	7525	恢复本模式的默认按钮	Reset to this mode's buttons	恢復此模式的預設按鈕
+TitleBtnCustomize	IDS_TITLE_BTN_CUSTOMIZE	7526	自定义标题栏按钮…	Customize title bar buttons…	自訂標題列按鈕…
+LayoutPanelCurrent	IDS_LAYOUT_PANEL_CURRENT	7527	当前：	Current:	目前：
+LayoutPanelCustom	IDS_LAYOUT_PANEL_CUSTOM	7528	自定义	Custom	自訂
+LayoutPanelBasedOn	IDS_LAYOUT_PANEL_BASED_ON	7529	· 基于「{mode}」改了 {n} 项	· {n} changes from {mode}	· 以「{mode}」為基礎改了 {n} 項
+LayoutPanelRestore	IDS_LAYOUT_PANEL_RESTORE	7530	恢复	Restore	還原
+LayoutPanelShow	IDS_LAYOUT_PANEL_SHOW	7531	显示	Show	顯示
+LayoutPanelShowHint	IDS_LAYOUT_PANEL_SHOW_HINT	7532	点一下立即生效	Takes effect right away	點一下立即生效
+LayoutTglTabs	IDS_LAYOUT_TGL_TABS	7533	标签页	Tabs	索引標籤
+LayoutTglLite	IDS_LAYOUT_TGL_LITE	7534	精简侧边栏	Lite sidebar	精簡側邊欄
+LayoutTglDetails	IDS_LAYOUT_TGL_DETAILS	7535	详情窗格	Details pane	詳細資料窗格
+LayoutTglStatus	IDS_LAYOUT_TGL_STATUS	7536	状态栏	Status bar	狀態列
+LayoutTglTray	IDS_LAYOUT_TGL_TRAY	7537	常驻暂存	Staging tray	常駐暫存
+LayoutTglZebra	IDS_LAYOUT_TGL_ZEBRA	7538	斑马纹	Zebra rows	斑馬紋
+LayoutTglSelection	IDS_LAYOUT_TGL_SELECTION	7539	选中操作	Selection bar	選取操作
+LayoutTglExtensions	IDS_LAYOUT_TGL_EXTENSIONS	7540	扩展名	Extensions	副檔名
+LayoutRowSidebar	IDS_LAYOUT_ROW_SIDEBAR	7541	侧边栏	Sidebar	側邊欄
+LayoutRowCommands	IDS_LAYOUT_ROW_COMMANDS	7542	命令	Commands	命令
+LayoutRowAddress	IDS_LAYOUT_ROW_ADDRESS	7543	地址栏	Address bar	網址列
+LayoutRowDensity	IDS_LAYOUT_ROW_DENSITY	7544	行距	Row spacing	行距
+LayoutSegDocked	IDS_LAYOUT_SEG_DOCKED	7545	固定	Docked	固定
+LayoutSegFloating	IDS_LAYOUT_SEG_FLOATING	7546	浮起	Floating	浮起
+LayoutSegHidden	IDS_LAYOUT_SEG_HIDDEN	7547	隐藏	Hidden	隱藏
+LayoutSegFullCommands	IDS_LAYOUT_SEG_FULL_COMMANDS	7548	完整命令栏	Full bar	完整命令列
+LayoutSegInlineCommands	IDS_LAYOUT_SEG_INLINE_COMMANDS	7549	并入地址栏	In address	併入網址列
+LayoutSegCollapsed	IDS_LAYOUT_SEG_COLLAPSED	7550	收起	Collapsed	收起
+LayoutSegOwnRow	IDS_LAYOUT_SEG_OWN_ROW	7551	独立一行	Own row	獨立一行
+LayoutSegInTitle	IDS_LAYOUT_SEG_IN_TITLE	7552	并入标题栏	In title bar	併入標題列
+LayoutSegCompact	IDS_LAYOUT_SEG_COMPACT	7553	紧凑	Compact	緊湊
+LayoutSegStandard	IDS_LAYOUT_SEG_STANDARD	7554	标准	Standard	標準
+LayoutSegRoomy	IDS_LAYOUT_SEG_ROOMY	7555	宽松	Roomy	寬鬆
+LayoutPanelFootHint	IDS_LAYOUT_PANEL_FOOT_HINT	7556	右键命令栏也能改	Or right-click the command bar	右鍵命令列也能改
+LayoutPanelMoreSettings	IDS_LAYOUT_PANEL_MORE_SETTINGS	7557	更多界面设置	More layout settings	更多介面設定
+SettingsPageUiLayout	IDS_SETTINGS_PAGE_UI_LAYOUT	7558	界面布局	Layout	介面配置
+SettingsUiLayoutIntro	IDS_SETTINGS_UI_LAYOUT_INTRO	7559	窗口里显示哪些部分、标题栏放哪些按钮。安装时挑的起点也在这里改，改动立即生效。	Which parts the window shows and which buttons sit in the title bar. The starting point picked at setup is changed here too; changes apply right away.	視窗裡顯示哪些部分、標題列放哪些按鈕。安裝時挑的起點也在這裡改，變更立即生效。
+UilSecStart	IDS_UIL_SEC_START	7560	起点	Starting point	起點
+SecDescUilStart	IDS_SEC_DESC_UIL_START	7561	三套现成的组合。挑一个起点，下面每一项还能单独调；随时可以恢复。	Three ready-made sets. Pick a starting point, then fine-tune any option below; you can always go back.	三套現成的組合。挑一個起點，下面每一項還能單獨調；隨時可以恢復。
+UilSecWindow	IDS_UIL_SEC_WINDOW	7562	窗口结构	Window layout	視窗結構
+SecDescUilWindow	IDS_SEC_DESC_UIL_WINDOW	7563	标题栏、地址栏、命令栏和两侧的窗格。关掉的部分，仍能用快捷键或标题栏按钮临时打开。	Title bar, address bar, commands and side panes. Hidden parts can still be opened with shortcuts or title-bar buttons.	標題欄、位址列、命令欄和兩側的窗格。關掉的部分，仍能用快捷鍵或標題欄按鈕臨時開啟。
+UilSecList	IDS_UIL_SEC_LIST	7564	文件列表	File list	檔案清單
+SecDescUilList	IDS_SEC_DESC_UIL_LIST	7565	新打开的文件夹用什么样子显示。单个文件夹的视图仍会记住。	How newly opened folders look. Each folder still remembers its own view.	新開啟的資料夾用什麼樣子顯示。單個資料夾的檢視仍會記住。
+UilSecTitle	IDS_UIL_SEC_TITLE	7566	标题栏按钮	Title bar buttons	標題列按鈕
+SecDescUilTitle	IDS_SEC_DESC_UIL_TITLE	7567	窗口右上角的按钮组。开关决定是否显示，箭头调整顺序；也可以直接在标题栏右键某个按钮 › 左移、右移或移除。每个起点有自己的默认组合。	The button group at the top right. Switches show or hide, arrows reorder; you can also right-click a title-bar button to move or remove it. Each starting point has its own default set.	視窗右上角的按鈕組。開關決定是否顯示，箭頭調整順序；也可以直接在標題欄右鍵某個按鈕 › 左移、右移或移除。每個起點有自己的預設組合。
+UilCurrentIs	IDS_UIL_CURRENT_IS	7568	当前就是「{mode}」，没有改动。	This is {mode}, unchanged.	目前就是「{mode}」，沒有變更。
+UilCustomBased	IDS_UIL_CUSTOM_BASED	7569	当前是 自定义，基于「{mode}」改了：	Custom, based on {mode}. Changed:	目前是 自訂，以「{mode}」為基礎改了：
+UilRestoreTo	IDS_UIL_RESTORE_TO	7570	恢复为「{mode}」	Restore {mode}	還原為「{mode}」
+UilSidebarDesc	IDS_UIL_SIDEBAR_DESC	7571	固定：常驻左侧；浮起：贴左缘悬停唤出，盖在文件上、不占宽度	Docked stays on the left; floating appears at the left edge over the files	固定：常駐左側；浮起：貼左緣懸停喚出，蓋在檔案上、不佔寬度
+UilSidebarLiteDesc	IDS_UIL_SIDEBAR_LITE_DESC	7572	只保留常用的几组，其余不显示	Keep only the most used groups	只保留常用的幾組，其餘不顯示
+UilTabsDesc	IDS_UIL_TABS_DESC	7573	关掉后不显示标签栏；Ctrl+T、中键仍能开新标签	Hides the tab strip; Ctrl+T and middle-click still open tabs	關掉後不顯示標籤欄；Ctrl+T、中鍵仍能開新標籤
+UilAddressDesc	IDS_UIL_ADDRESS_DESC	7574	并入标题栏后，导航、地址和搜索放在同一行，省出一行高度	In the title bar, navigation, address and search share one row	併入標題欄後，導航、地址和搜尋放在同一行，省出一行高度
+UilCommandsDesc	IDS_UIL_COMMANDS_DESC	7575	完整命令栏单独一行；并入地址栏只留新建、排序和「更多」	Full command bar on its own row; inline keeps New, Sort and More	完整命令欄單獨一行；併入位址列只留新建、排序和「更多」
+UilToolbarLabels	IDS_UIL_TOOLBAR_LABELS	7576	按钮文字	Button labels	按鈕文字
+UilToolbarLabelsDesc	IDS_UIL_TOOLBAR_LABELS_DESC	7577	「新建文件夹」「排序」「筛选」「分组」旁的文字	Text beside New folder, Sort, Filter and Group	「新建資料夾」「排序」「篩選」「分組」旁的文字
+UilSelectionDesc	IDS_UIL_SELECTION_DESC	7578	命令栏里出现「已选中 N 项」；命令栏关闭时浮在窗口底部	Shows "N selected" in the command bar, or floats at the bottom	命令欄裡出現「已選中 N 項」；命令欄關閉時浮在視窗底部
+UilDetailsDesc	IDS_UIL_DETAILS_DESC	7579	预览、基本信息、Git 与标签	Preview, properties, Git and tags	預覽、基本資訊、Git 與標籤
+UilStatusDesc	IDS_UIL_STATUS_DESC	7580	项目数、选中信息、操作记录和分栏切换	Item count, selection, history and pane switch	專案數、選中資訊、操作記錄和分欄切換
+UilTrayDesc	IDS_UIL_TRAY_DESC	7581	暂存托盘一直显示；关掉后放了东西才出现	The staging tray stays visible; when off it appears once it holds items	暫存匣一直顯示；關閉後放了東西才出現
+UilView	IDS_UIL_VIEW	7582	默认视图	Default view	預設檢視
+UilViewDesc	IDS_UIL_VIEW_DESC	7583	没有单独设置过的文件夹	Folders without their own view	沒有單獨設定過的資料夾
+UilViewDetails	IDS_UIL_VIEW_DETAILS	7584	详细信息	Details	詳細資料
+UilViewIcons	IDS_UIL_VIEW_ICONS	7585	图标	Icons	圖示
+UilDensityDesc	IDS_UIL_DENSITY_DESC	7586	紧凑每屏显示更多行，宽松更适合触屏	Compact fits more rows; roomy suits touch	緊湊每屏顯示更多行，寬鬆更適合觸屏
+UilZebraDesc	IDS_UIL_ZEBRA_DESC	7587	隔行浅色底，长列表更容易对齐	Alternate rows tinted for long lists	隔行淺色底，長列表更容易對齊
+UilExtDesc	IDS_UIL_EXT_DESC	7588	.md、.png 这样的后缀	Suffixes such as .md and .png	.md、.png 這樣的字尾
+UilMinimalColumns	IDS_UIL_MINIMAL_COLUMNS	7589	最简列	Minimal columns	最簡欄
+UilRounded	IDS_UIL_ROUNDED	7590	大圆角	Large corners	大圓角
+UilTbDivider	IDS_UIL_TB_DIVIDER	7591	分隔线	Divider	分隔線
+UilTbAddDivider	IDS_UIL_TB_ADD_DIVIDER	7592	添加分隔线	Add divider	新增分隔線
+UilTbReset	IDS_UIL_TB_RESET	7593	恢复默认	Restore defaults	還原預設
+UilTbIsDefault	IDS_UIL_TB_IS_DEFAULT	7594	就是「{mode}」的默认组合	{mode}'s default set	就是「{mode}」的預設組合
+UilTbNotDefault	IDS_UIL_TB_NOT_DEFAULT	7595	和「{mode}」的默认不同	Differs from {mode}'s default	和「{mode}」的預設不同
+UilTbWarn	IDS_UIL_TB_WARN	7596	「设置」和「界面」按钮都隐藏了。仍可按 Ctrl+, 打开设置，或右键标题栏空白处选「打开设置」；Alt+L 打开界面面板。	Settings and Layout are both hidden. Press Ctrl+, or right-click an empty spot on the title bar and choose Open settings; Alt+L opens the layout panel.	「設定」和「介面」按鈕都隱藏了。仍可按 Ctrl+, 開啟設定，或在標題列空白處按右鍵選「開啟設定」；Alt+L 開啟介面面板。
+UilSidebarContent	IDS_UIL_SIDEBAR_CONTENT	7597	侧边栏内容	Sidebar content	側邊欄內容
+UilSidebarContentDesc	IDS_UIL_SIDEBAR_CONTENT_DESC	7598	精简：常用位置、收藏夹和磁盘；完整：再加工作区、项目、标签和暂存区	Lite: places, favorites and drives; full adds workspaces, projects, tags and staging	精簡：常用位置、收藏夾和磁碟；完整：再加工作區、專案、標籤和暫存區
+UilSegLite	IDS_UIL_SEG_LITE	7599	精简	Lite	精簡
+UilSegFull	IDS_UIL_SEG_FULL	7600	完整	Full	完整
+UilTrayEntry	IDS_UIL_TRAY_ENTRY	7601	暂存入口	Staging tray	暫存入口
+UilTrayEntryDesc	IDS_UIL_TRAY_ENTRY_DESC	7602	用时出现：空着不占位置，拖动文件或晃一晃鼠标时出现	When used: hidden while empty, appears when you drag or shake	用時出現：空著不佔位置，拖動檔案或晃一晃滑鼠時出現
+UilSegTrayAlways	IDS_UIL_SEG_TRAY_ALWAYS	7603	常驻托盘	Always shown	常駐托盤
+UilSegTrayOnUse	IDS_UIL_SEG_TRAY_ON_USE	7604	用时出现	When used	用時出現
+UilTabLayout	IDS_UIL_TAB_LAYOUT	7605	标签多时	Many tabs	標籤多時
+UilTabLayoutDesc	IDS_UIL_TAB_LAYOUT_DESC	7606	放不下时：收进「⧉ 数量」列表、单排滚动，或分成多排	When they do not fit: into the tab list, one scrolling row, or several rows	放不下時：收進「⧉ 數量」列表、單排滾動，或分成多排
+UilSegShowText	IDS_UIL_SEG_SHOW_TEXT	7607	显示	Show	顯示
+UilSegIconOnly	IDS_UIL_SEG_ICON_ONLY	7608	只显示图标	Icons only	只顯示圖示
+UilSelectionTitle	IDS_UIL_SELECTION_TITLE	7609	选中时的快捷操作	Selection actions	選中時的快捷操作
+UilExtTitle	IDS_UIL_EXT_TITLE	7610	显示扩展名	File name extensions	顯示副檔名
+UilBackToFolder	IDS_UIL_BACK_TO_FOLDER	7611	回到文件夹看效果	Back to the folder	回到資料夾看效果
+UilHintStartKeys	IDS_UIL_HINT_START_KEYS	7612	在任何窗口切换起点	switch the starting point in any window	在任何視窗切換起點
+UilHintTbZen	IDS_UIL_HINT_TB_ZEN	7613	专注：界面、设置	Zen: Layout, Settings	專注：介面、設定
+UilHintTbStandard	IDS_UIL_HINT_TB_STANDARD	7614	标准：界面、设置、切换主题	Standard: Layout, Settings, Theme	標準：介面、設定、切換主題
+UilHintTbPro	IDS_UIL_HINT_TB_PRO	7615	工作台：窗口、界面、设置、切换主题	Workbench: Windows, Layout, Settings, Theme	工作臺：視窗、介面、設定、切換主題
+UilSecCompare	IDS_UIL_SEC_COMPARE	7616	三套有什么不同	How the three differ	三套有什麼不同
+SecDescUilCompare	IDS_SEC_DESC_UIL_COMPARE	7617	从上到下一行行少：工作台是现在的 Pulse，标准省掉命令栏和状态栏，专注只剩一行标题栏。高亮的一列是当前起点。	Each drops a row: Workbench is the classic Pulse, Standard drops the command and status bars, Zen keeps just the title bar. The highlighted column is the current one.	從上到下一行行少：工作臺是現在的 Pulse，標準省掉命令欄和狀態列，專注只剩一行標題欄。高亮的一列是當前起點。
+UilSecToolbar	IDS_UIL_SEC_TOOLBAR	7618	命令栏按钮	Command bar buttons	命令欄按鈕
+SecDescUilToolbar	IDS_SEC_DESC_UIL_TOOLBAR	7619	开关决定是否显示。完整的按钮和顺序在「自定义命令栏」里调，也可以在命令栏上右键。	Switches show or hide. Add and reorder all buttons in Customize, or right-click the command bar.	開關決定是否顯示。完整的按鈕和順序在「自定義命令欄」裡調，也可以在命令欄上右鍵。
+UilTbcCustomize	IDS_UIL_TBC_CUSTOMIZE	7620	自定义命令栏	Customize command bar	自定義命令欄
+UilTbcCustomizeDesc	IDS_UIL_TBC_CUSTOMIZE_DESC	7621	添加、移除和排列命令栏上的按钮	Add, remove and arrange the buttons	新增、移除和排列命令欄上的按鈕
+UilTbcOpen	IDS_UIL_TBC_OPEN	7622	自定义…	Customize…	自定義…
+UilTbcSort	IDS_UIL_TBC_SORT	7623	排序	Sort	排序
+UilTbcSortDesc	IDS_UIL_TBC_SORT_DESC	7624	命令栏上的「排序」按钮	The Sort button	命令欄上的「排序」按鈕
+UilTbcFilter	IDS_UIL_TBC_FILTER	7625	筛选	Filter	篩選
+UilTbcFilterDesc	IDS_UIL_TBC_FILTER_DESC	7626	命令栏上的筛选框	The filter box	命令欄上的篩選框
+UilTbcGroup	IDS_UIL_TBC_GROUP	7627	分组	Group	分組
+UilTbcGroupDesc	IDS_UIL_TBC_GROUP_DESC	7628	命令栏上的「分组」按钮	The Group button	命令欄上的「分組」按鈕
+UilSecProfile	IDS_UIL_SEC_PROFILE	7629	界面方案	Layout profile	介面方案
+SecDescUilProfile	IDS_SEC_DESC_UIL_PROFILE	7630	一份方案 = 起点 + 上面的所有开关 + 命令栏和标题栏按钮。可以导出给同事，或在另一台电脑导入。	A profile is the starting point, every option above and the bar buttons. Export it for a colleague or import it on another PC.	一份方案 = 起點 + 上面的所有開關 + 命令欄和標題欄按鈕。可以匯出給同事，或在另一臺電腦匯入。
+UilPfExport	IDS_UIL_PF_EXPORT	7631	导出方案	Export profile	匯出方案
+UilPfExportDesc	IDS_UIL_PF_EXPORT_DESC	7632	保存为 .json 文件，含布局、命令栏和标题栏按钮	Saves a .json file with the layout and bar buttons	儲存為 .json 檔案，含佈局、命令欄和標題欄按鈕
+UilPfExportBtn	IDS_UIL_PF_EXPORT_BTN	7633	导出…	Export…	匯出…
+UilPfImport	IDS_UIL_PF_IMPORT	7634	导入方案	Import profile	匯入方案
+UilPfImportDesc	IDS_UIL_PF_IMPORT_DESC	7635	导入前会先确认，确认后才替换当前界面	Asks before replacing the current layout	匯入前會先確認，確認後才替換當前介面
+UilPfImportBtn	IDS_UIL_PF_IMPORT_BTN	7636	导入…	Import…	匯入…
+UilPfContent	IDS_UIL_PF_CONTENT	7637	方案内容	Profile contents	方案內容
+UilPfContentDesc	IDS_UIL_PF_CONTENT_DESC	7638	给支持人员或备份用	For support or backup	給支援人員或備份用
+UilPfView	IDS_UIL_PF_VIEW	7639	查看	View	檢視
+UilPfHide	IDS_UIL_PF_HIDE	7640	收起	Hide	收起
+UilPfCopy	IDS_UIL_PF_COPY	7641	复制	Copy	複製
+UilPfImportConfirm	IDS_UIL_PF_IMPORT_CONFIRM	7642	用这个以「{mode}」为起点的界面方案替换当前界面？	Replace the current layout with this profile based on {mode}?	用這個以「{mode}」為起點的介面方案替換當前介面？
+UilPfImportBad	IDS_UIL_PF_IMPORT_BAD	7643	这个文件不是 Pulse 界面方案。	This file is not a Pulse layout profile.	這個檔案不是 Pulse 介面方案。
+UilCmp0L	IDS_UIL_CMP0_L	7644	适合	Suits	適合
+UilCmp0Z	IDS_UIL_CMP0_Z	7645	只看、偶尔整理	Browsing, light tidying	只看、偶爾整理
+UilCmp0S	IDS_UIL_CMP0_S	7646	日常管理文件	Everyday file work	日常管理檔案
+UilCmp0P	IDS_UIL_CMP0_P	7647	重度整理，老用户默认	Heavy organizing; default for existing users	重度整理，老使用者預設
+UilCmp1L	IDS_UIL_CMP1_L	7648	顶部占用	Top rows	頂部佔用
+UilCmp1Z	IDS_UIL_CMP1_Z	7649	1 行：标题栏	1: title bar	1 行：標題欄
+UilCmp1S	IDS_UIL_CMP1_S	7650	2 行：标签页 + 地址栏	2: tabs + address	2 行：標籤頁 + 位址列
+UilCmp1P	IDS_UIL_CMP1_P	7651	3 行：标签页 + 地址栏 + 命令栏	3: tabs + address + commands	3 行：標籤頁 + 位址列 + 命令欄
+UilCmp2L	IDS_UIL_CMP2_L	7652	标签页	Tabs	標籤頁
+UilCmp2Z	IDS_UIL_CMP2_Z	7653	不显示；开了多个时标题栏出现「⧉ 数量」	Hidden; a "⧉ count" button when several are open	不顯示；開了多個時標題欄出現「⧉ 數量」
+UilCmp2S	IDS_UIL_CMP2_S	7654	窗口顶部	Top of the window	視窗頂部
+UilCmp2P	IDS_UIL_CMP2_P	7655	窗口顶部	Top of the window	視窗頂部
+UilCmp3L	IDS_UIL_CMP3_L	7656	标签多时	Many tabs	標籤多時
+UilCmp3Z	IDS_UIL_CMP3_Z	7657	收进列表：放不下时显示「⧉ 数量」	Listed under "⧉ count"	收進列表：放不下時顯示「⧉ 數量」
+UilCmp3S	IDS_UIL_CMP3_S	7658	单排滚动，溢出时出现「⧉ 数量」	One scrolling row	單排滾動，溢位時出現「⧉ 數量」
+UilCmp3P	IDS_UIL_CMP3_P	7659	单排滚动（可改多排 2–4 行）	One row (or 2–4 rows)	單排滾動（可改多排 2–4 行）
+UilCmp4L	IDS_UIL_CMP4_L	7660	地址栏	Address	位址列
+UilCmp4Z	IDS_UIL_CMP4_Z	7661	并入标题栏	In the title bar	併入標題欄
+UilCmp4S	IDS_UIL_CMP4_S	7662	独立一行	Own row	獨立一行
+UilCmp4P	IDS_UIL_CMP4_P	7663	独立一行	Own row	獨立一行
+UilCmp5L	IDS_UIL_CMP5_L	7664	命令	Commands	命令
+UilCmp5Z	IDS_UIL_CMP5_Z	7665	收起，选中才浮出	Collapsed; float on selection	收起，選中才浮出
+UilCmp5S	IDS_UIL_CMP5_S	7666	新建、排序并入地址栏，选中浮出	New and Sort beside the address	新建、排序併入位址列，選中浮出
+UilCmp5P	IDS_UIL_CMP5_P	7667	完整命令栏：剪贴板、分栏、排序筛选分组、固定的工具	Full command bar	完整命令欄：剪貼簿、分欄、排序篩選分組、固定的工具
+UilCmp6L	IDS_UIL_CMP6_L	7668	侧边栏	Sidebar	側邊欄
+UilCmp6Z	IDS_UIL_CMP6_Z	7669	浮起：贴左缘悬停唤出，移开自动收起	Floating at the left edge	浮起：貼左緣懸停喚出，移開自動收起
+UilCmp6S	IDS_UIL_CMP6_S	7670	精简：常用位置、收藏夹、磁盘	Lite: places, favorites, drives	精簡：常用位置、收藏夾、磁碟
+UilCmp6P	IDS_UIL_CMP6_P	7671	完整：再加工作区、项目、标签、暂存托盘	Full: adds workspaces, projects, tags, tray	完整：再加工作區、專案、標籤、暫存托盤
+UilCmp7L	IDS_UIL_CMP7_L	7672	暂存	Staging	暫存
+UilCmp7Z	IDS_UIL_CMP7_Z	7673	用时出现：拖动或晃一晃时出现	Appears when dragging or shaking	用時出現：拖動或晃一晃時出現
+UilCmp7S	IDS_UIL_CMP7_S	7674	用时出现：拖动时侧栏底部出现放置区	Drop zone appears while dragging	用時出現：拖動時側欄底部出現放置區
+UilCmp7P	IDS_UIL_CMP7_P	7675	侧栏底部托盘常驻	Tray always in the sidebar	側欄底部托盤常駐
+UilCmp8L	IDS_UIL_CMP8_L	7676	标题栏按钮	Title buttons	標題欄按鈕
+UilCmp8Z	IDS_UIL_CMP8_Z	7677	界面、设置	Layout, Settings	介面、設定
+UilCmp8S	IDS_UIL_CMP8_S	7678	界面、设置、切换主题	Layout, Settings, Theme	介面、設定、切換主題
+UilCmp8P	IDS_UIL_CMP8_P	7679	窗口、界面、设置、切换主题（可加 AI 助手）	Windows, Layout, Settings, Theme	視窗、介面、設定、切換主題（可加 AI 助手）
+UilCmp9L	IDS_UIL_CMP9_L	7680	状态栏	Status bar	狀態列
+UilCmp9Z	IDS_UIL_CMP9_Z	7681	—	—	—
+UilCmp9S	IDS_UIL_CMP9_S	7682	—	—	—
+UilCmp9P	IDS_UIL_CMP9_P	7683	项目数、Git、操作记录、分栏切换	Items, Git, history, panes	專案數、Git、操作記錄、分欄切換
+UilCmp10L	IDS_UIL_CMP10_L	7684	文件区	Files	檔案區
+UilCmp10Z	IDS_UIL_CMP10_Z	7685	图标 · 宽松	Icons, roomy	圖示 · 寬鬆
+UilCmp10S	IDS_UIL_CMP10_S	7686	详细信息	Details	詳細資訊
+UilCmp10P	IDS_UIL_CMP10_P	7687	详细信息；可开详情窗格、双栏	Details; details pane, dual panes	詳細資訊；可開詳情窗格、雙欄
+TabMruTitle	IDS_TAB_MRU_TITLE	7688	最近使用的标签	Recent tabs	最近使用的標籤
+TabMruCount	IDS_TAB_MRU_COUNT	7689	%d 个	%d	%d 個
+TabMruCurrent	IDS_TAB_MRU_CURRENT	7690	当前	Current	目前
+TabMruHold	IDS_TAB_MRU_HOLD	7691	按住，	hold,	按住，
+TabMruDown	IDS_TAB_MRU_DOWN	7692	往下	next	往下
+TabMruBack	IDS_TAB_MRU_BACK	7693	往回	back	往回
+TabMruRelease	IDS_TAB_MRU_RELEASE	7694	松开 Ctrl 打开	Release Ctrl to open	放開 Ctrl 開啟
+TabMruCancel	IDS_TAB_MRU_CANCEL	7695	取消	cancel	取消
+UilTabList	IDS_UIL_TAB_LIST	7696	收进列表	Into a list	收進列表
+UilTabGrid	IDS_UIL_TAB_GRID	7697	多排 · 对齐	Rows · aligned	多排 · 對齊
+UilTabFit	IDS_UIL_TAB_FIT	7698	多排 · 按标题	Rows · by title	多排 · 按標題
+TabListCount	IDS_TAB_LIST_COUNT	7699	%d 个标签	%d tabs	%d 個標籤
+TabListNew	IDS_TAB_LIST_NEW	7700	新建标签	New tab	新增標籤
+UilTbDescWin	IDS_UIL_TB_DESC_WIN	7701	切换、并排打开的 Pulse 窗口	Switch and arrange open Pulse windows	切換、並排開啟的 Pulse 視窗
+UilTbDescLayout	IDS_UIL_TB_DESC_LAYOUT	7702	起点和显示开关的快捷面板	Quick panel for the starting point and what shows	起點和顯示開關的快捷面板
+UilTbDescSettings	IDS_UIL_TB_DESC_SETTINGS	7703	打开全部设置	Open all settings	開啟全部設定
+UilTbDescTheme	IDS_UIL_TB_DESC_THEME	7704	浅色 / 深色一键切换	Switch light / dark in one click	淺色 / 深色一鍵切換
+UilTbDescAi	IDS_UIL_TB_DESC_AI	7705	就当前文件夹提问、整理	Ask about and tidy the current folder	就目前資料夾提問、整理
+TabListRestore	IDS_TAB_LIST_RESTORE	7706	恢复关闭的标签	Reopen closed tab	恢復關閉的標籤
+TabListCloseOthers	IDS_TAB_LIST_CLOSE_OTHERS	7707	关闭其他标签	Close other tabs	關閉其他標籤
+TabListTip	IDS_TAB_LIST_TIP	7708	标签多？到设置里改「标签多时」	Many tabs? Change “Many tabs” in Settings	標籤多？到設定裡改「標籤多時」
+VfsExtractSelectedTo	IDS_VFS_EXTRACT_SELECTED_TO	7710	解压所选到…	Extract selected to…	解壓縮所選到…
+VfsExtractTaskTitle	IDS_VFS_EXTRACT_TASK_TITLE	7711	从「{name}」解压	Extract from “{name}”	從「{name}」解壓縮
+VfsTaskKind	IDS_VFS_TASK_KIND	7712	压缩包	Archive	壓縮檔
+VfsExportTaskTitle	IDS_VFS_EXPORT_TASK_TITLE	7713	从「{name}」取出 {n} 项	Take {n} items out of “{name}”	從「{name}」取出 {n} 項
+VfsCopiedSnack	IDS_VFS_COPIED_SNACK	7714	已复制 {n} 项，可粘贴到任意位置	Copied {n} items. Paste them anywhere	已複製 {n} 項，可貼上到任意位置
+VfsDragTooLarge	IDS_VFS_DRAG_TOO_LARGE	7715	所选内容太大，不能直接拖出。请用「解压所选到…」	Too large to drag out. Use “Extract selected to…”	所選內容太大，不能直接拖出。請用「解壓縮所選到…」
+VfsUpdateTaskTitle	IDS_VFS_UPDATE_TASK_TITLE	7716	更新「{name}」	Update “{name}”	更新「{name}」
+VfsUpdatedSnack	IDS_VFS_UPDATED_SNACK	7717	已更新「{name}」	Updated “{name}”	已更新「{name}」
+VfsWriteBackSnack	IDS_VFS_WRITE_BACK_SNACK	7718	已把「{file}」的修改存回「{name}」	Saved “{file}” back into “{name}”	已把「{file}」的修改存回「{name}」
+VfsUndoneSnack	IDS_VFS_UNDONE_SNACK	7719	已撤销对「{name}」的修改	Undid the change to “{name}”	已復原對「{name}」的修改
+VfsReadOnlyFormat	IDS_VFS_READ_ONLY_FORMAT	7720	这种压缩包只能查看（只有 7z、zip、tar 可以修改）	This archive is view-only (only 7z, zip and tar can be changed)	這種壓縮檔只能檢視（只有 7z、zip、tar 可以修改）
+VfsEncryptedReadOnly	IDS_VFS_ENCRYPTED_READ_ONLY	7721	压缩包已加密，暂不支持在这里修改	The archive is encrypted and can’t be changed here yet	壓縮檔已加密，暫不支援在這裡修改
+VfsUpdateFailed	IDS_VFS_UPDATE_FAILED	7722	未能更新「{name}」	Couldn’t update “{name}”	未能更新「{name}」
+VfsDeleteConfirm	IDS_VFS_DELETE_CONFIRM	7723	从压缩包中删除 {n} 项？删除后可以撤销一次。	Delete {n} items from the archive? You can undo this once.	從壓縮檔中刪除 {n} 項？刪除後可以復原一次。
+VfsExtractFailed	IDS_VFS_EXTRACT_FAILED	7724	未能从「{name}」取出文件	Couldn’t take files out of “{name}”	未能從「{name}」取出檔案
+ExtensionColumnFrom	IDS_EXTENSION_COLUMN_FROM	7725	扩展列 · {name}	Extension column · {name}	擴充功能欄 · {name}
+ExtensionBadgeFrom	IDS_EXTENSION_BADGE_FROM	7726	图标角标 · {name}	Icon badge · {name}	圖示角標 · {name}
+StoreDeveloper	IDS_STORE_DEVELOPER	7727	开发者	Developer	
+StoreDeveloperOn	IDS_STORE_DEVELOPER_ON	7728	开发者模式 · 已开启	Developer mode · On	
+StoreDeveloperMode	IDS_STORE_DEVELOPER_MODE	7729	开发者模式	Developer mode	
+StoreDeveloperLoadFolder	IDS_STORE_DEVELOPER_LOAD_FOLDER	7730	从文件夹加载…	Load from folder…	
+StoreDeveloperOpenRoot	IDS_STORE_DEVELOPER_OPEN_ROOT	7731	打开开发者数据文件夹	Open developer data folder	
+StoreDeveloperEnableTitle	IDS_STORE_DEVELOPER_ENABLE_TITLE	7732	开启开发者模式？	Turn on developer mode?	
+StoreDeveloperEnablePrompt	IDS_STORE_DEVELOPER_ENABLE_PROMPT	7733	开发者模式用于测试你自己编写的扩展：可以安装未签名的扩展包，也可以直接从文件夹加载扩展。未签名的代码没有经过发布者验证，只加载你信任的代码。签名安全策略本身不会改变，未签名的包也不能覆盖已安装的签名扩展。重启 Pulse 后生效。	Developer mode is for testing extensions you write: it allows unsigned packages and loading an extension straight from a folder. Unsigned code is not verified by any publisher, so only load code you trust. The signature policy itself is unchanged, and an unsigned package can never replace an installed signed extension. Takes effect after Pulse restarts.	
+StoreDeveloperEnableConfirm	IDS_STORE_DEVELOPER_ENABLE_CONFIRM	7734	开启	Turn on	
+StoreDevBadge	IDS_STORE_DEV_BADGE	7735	开发中	In development	
+StoreDevReload	IDS_STORE_DEV_RELOAD	7736	重新加载	Reload	
+StoreDevRemove	IDS_STORE_DEV_REMOVE	7737	移除	Remove	
+StoreDevOpenFolder	IDS_STORE_DEV_OPEN_FOLDER	7738	打开文件夹	Open folder	
+StoreDevCopyError	IDS_STORE_DEV_COPY_ERROR	7739	复制最近错误	Copy last error	
+StoreDevLoaded	IDS_STORE_DEV_LOADED	7740	已从文件夹加载	Loaded from folder	
+StoreDevPendingRestart	IDS_STORE_DEV_PENDING_RESTART	7741	重启 Pulse 后生效	Takes effect after Pulse restarts	
+StoreDevModeOff	IDS_STORE_DEV_MODE_OFF	7742	开发者模式已关闭，此文件夹不会加载。	Developer mode is off; this folder is not loaded.	
+StoreDevErrConflict	IDS_STORE_DEV_ERR_CONFLICT	7743	已安装同 ID 的扩展。请先卸载它，或修改 manifest.json 中的 id。	An installed extension already uses this id. Uninstall it or change the id in manifest.json.	
+StoreDevErrNoNative	IDS_STORE_DEV_ERR_NO_NATIVE	7744	此文件夹的 manifest.json 没有 native 段。请选择 pulse_ext native-manifest 生成的输出文件夹（含 DLL）。	This folder's manifest.json has no native section. Pick the output folder made by pulse_ext native-manifest (with the DLL).	
+StoreDevErrNoManifest	IDS_STORE_DEV_ERR_NO_MANIFEST	7745	文件夹中没有 manifest.json。	The folder has no manifest.json.	
+StoreDevErrFile	IDS_STORE_DEV_ERR_FILE	7746	找不到 manifest 声明的文件：{name}	A file the manifest declares is missing: {name}	
+StoreDevErrShadow	IDS_STORE_DEV_ERR_SHADOW	7747	开发副本缺失或已被修改，请重新加载。	The development copy is missing or changed; reload it.	
+StoreDevErrLocal	IDS_STORE_DEV_ERR_LOCAL	7748	只能从本地磁盘上的文件夹加载。	Only folders on a local drive can be loaded.	
+StoreUnsignedNeedsDevMode	IDS_STORE_UNSIGNED_NEEDS_DEV_MODE	7749	未签名：开启开发者模式后可用（已安装 → 开发者）。	Unsigned: available when developer mode is on (Installed → Developer).	
+StoreDevLoadTitle	IDS_STORE_DEV_LOAD_TITLE	7750	从文件夹加载扩展？	Load an extension from a folder?	
+StoreDevLoadPrompt	IDS_STORE_DEV_LOAD_PROMPT	7751	Pulse 会复制这个文件夹，并在重启后运行其中的本机代码（DLL）。只加载你信任的代码。	Pulse copies this folder and runs its native code (DLL) after restarting. Only load code you trust.	
+StoreDevLoadConfirm	IDS_STORE_DEV_LOAD_CONFIRM	7752	加载并重启	Load and restart	
+StoreDevErrInvalid	IDS_STORE_DEV_ERR_INVALID	7753	manifest.json 无效：{error}	Invalid manifest.json: {error}	
+StoreDevErrFull	IDS_STORE_DEV_ERR_FULL	7754	最多可同时加载 8 个开发文件夹。	Up to 8 development folders can be loaded.	
+StoreDevErrCopy	IDS_STORE_DEV_ERR_COPY	7755	复制开发文件夹失败：{error}	Couldn’t copy the development folder: {error}	
+StoreUnsignedDevHint	IDS_STORE_UNSIGNED_DEV_HINT	7756	如果这是你自己开发的扩展，请在“已安装 → 开发者”中开启开发者模式后再安装。	If you wrote this extension, turn on developer mode in Installed → Developer, then install it again.	
+StoreDevRemoveDone	IDS_STORE_DEV_REMOVE_DONE	7757	已移除，重启 Pulse 后卸载。	Removed. It unloads after Pulse restarts.	
+StoreUnsignedNeedsDevModeRollback	IDS_STORE_UNSIGNED_NEEDS_DEV_MODE_ROLLBACK	7758	未签名的开发版本未加载（开发者模式已关闭）。点击“回滚”恢复之前的版本，或重新开启开发者模式。	This unsigned development build isn’t loaded (developer mode is off). Roll back to restore the previous version, or turn developer mode back on.	
+StoreUnsignedReplacesSigned	IDS_STORE_UNSIGNED_REPLACES_SIGNED	7759	开发者模式：将用这个未签名的版本替换已安装的签名版本。签名版本会保留，可随时在“已安装”中回滚；关闭开发者模式后，未签名版本不再加载。	Developer mode: this unsigned build replaces the installed signed version. The signed version is kept and you can roll back to it from Installed at any time; with developer mode off, the unsigned build no longer loads.	
+StoreReviewInstallHeading	IDS_STORE_REVIEW_INSTALL_HEADING	7760	安装前请审阅此扩展	Review this extension before installing	安裝前請審閱此擴充功能
+StoreReviewUpdateHeading	IDS_STORE_REVIEW_UPDATE_HEADING	7761	审阅此扩展的更新	Review this extension update	審閱此擴充功能的更新
+StoreReviewTrustHeading	IDS_STORE_REVIEW_TRUST_HEADING	7762	信任新的发布者	Trust a new publisher	信任新的發行者
+StoreReviewManageNote	IDS_STORE_REVIEW_MANAGE_NOTE	7763	安装后可随时在“扩展”中停用、回滚或卸载。	You can disable, roll back or uninstall it from Extensions at any time.	安裝後可隨時在「擴充功能」中停用、復原或解除安裝。
+StoreReviewVersion	IDS_STORE_REVIEW_VERSION	7764	版本 {v}	Version {v}	版本 {v}
+StoreReviewBadgeUnsigned	IDS_STORE_REVIEW_BADGE_UNSIGNED	7765	未签名	Unsigned	未簽署
+StoreReviewBadgeVerified	IDS_STORE_REVIEW_BADGE_VERIFIED	7766	签名已验证	Verified	簽章已驗證
+StoreReviewBadgeNewKey	IDS_STORE_REVIEW_BADGE_NEW_KEY	7767	新发布者	New publisher	新發行者
+StoreReviewUnsignedTitle	IDS_STORE_REVIEW_UNSIGNED_TITLE	7768	无法验证发布者	Publisher can't be verified	無法驗證發行者
+StoreReviewUnsignedBody	IDS_STORE_REVIEW_UNSIGNED_BODY	7769	此扩展包没有数字签名。仅在完全信任文件来源时继续。	This package has no digital signature. Only continue if you fully trust where it came from.	此擴充套件沒有數位簽章。僅在完全信任檔案來源時繼續。
+StoreReviewReplacesTitle	IDS_STORE_REVIEW_REPLACES_TITLE	7770	将替换官方签名版本	Replaces the signed official version	將取代官方簽署版本
+StoreReviewRotatedTitle	IDS_STORE_REVIEW_ROTATED_TITLE	7771	发布者密钥已变更	Publisher key changed	發行者金鑰已變更
+StoreReviewCanDo	IDS_STORE_REVIEW_CAN_DO	7772	此扩展将能够	This extension will be able to	此擴充功能將能夠
+StoreReviewNewPermissions	IDS_STORE_REVIEW_NEW_PERMISSIONS	7773	此更新新增的能力	New in this update	此更新新增的能力
+StoreReviewNativeRow	IDS_STORE_REVIEW_NATIVE_ROW	7774	运行原生代码	Run native code	執行原生程式碼
+StoreReviewNativeDetail	IDS_STORE_REVIEW_NATIVE_DETAIL	7775	在沙箱外运行，可访问你的文件与系统	Runs outside the sandbox with access to your files and system	在沙箱外執行，可存取你的檔案與系統
+StoreReviewConfirm	IDS_STORE_REVIEW_CONFIRM	7776	需要你的确认	Needs your confirmation	需要你的確認
+StoreReviewNativeConsentDetail	IDS_STORE_REVIEW_NATIVE_CONSENT_DETAIL	7777	原生代码将以你的 Windows 用户权限运行	Native code runs with your Windows user permissions	原生程式碼將以你的 Windows 使用者權限執行
+StoreReviewResourcesConsentDetail	IDS_STORE_REVIEW_RESOURCES_CONSENT_DETAIL	7778	授予上方“此扩展将能够”中列出的权限	Grants the permissions listed above	授予上方「此擴充功能將能夠」中列出的權限
+StoreReviewEnableConsentDetail	IDS_STORE_REVIEW_ENABLE_CONSENT_DETAIL	7779	不勾选则仅安装，稍后可在“扩展”中启用	Leave off to only install; enable it later from Extensions	不勾選則僅安裝，稍後可在「擴充功能」中啟用
+NativeExtMenuPlacementDefaultDesc	IDS_NATIVE_EXT_MENU_PLACEMENT_DEFAULT_DESC	7780	按扩展自带的分组显示	Follow the extension's own grouping	依擴充功能內建的分組顯示
+NativeExtMenuPlacementFlatDesc	IDS_NATIVE_EXT_MENU_PLACEMENT_FLAT_DESC	7781	每条命令直接出现在主菜单	Every command sits in the main menu	每個命令直接出現在主選單
+NativeExtMenuPlacementSubmenuDesc	IDS_NATIVE_EXT_MENU_PLACEMENT_SUBMENU_DESC	7782	收进一个以扩展命名的子菜单	Grouped under one submenu named after it	收進一個以擴充功能命名的子選單
+NativeExtMenuPlacementHiddenDesc	IDS_NATIVE_EXT_MENU_PLACEMENT_HIDDEN_DESC	7783	右键菜单中不显示它的命令	None of its commands appear in the menu	右鍵選單中不顯示它的命令
+NativeExtMenuPreviewTitle	IDS_NATIVE_EXT_MENU_PREVIEW_TITLE	7784	实时预览	Live preview	即時預覽
+NativeExtMenuPreviewDesc	IDS_NATIVE_EXT_MENU_PREVIEW_DESC	7785	右键单击文件时菜单的样子，随设置即时更新	How the menu looks when you right-click a file, updated as you change it	右鍵按一下檔案時選單的樣子，隨設定即時更新
+NativeExtMenuPreviewHidden	IDS_NATIVE_EXT_MENU_PREVIEW_HIDDEN	7786	当前设置下该扩展不会出现在右键菜单中	With these settings it does not appear in the menu	目前設定下此擴充功能不會出現在右鍵選單中
+PreviewAlwaysOnTop	IDS_PREVIEW_ALWAYS_ON_TOP	7788	置顶窗口	Always on top	置頂視窗
+PreviewCancelAlwaysOnTop	IDS_PREVIEW_CANCEL_ALWAYS_ON_TOP	7789	取消置顶	Unpin from top	取消置頂
+OpNeedsChoice	IDS_OP_NEEDS_CHOICE	7790	需要你选择	Needs your choice	
+OpQueuedWaiting	IDS_OP_QUEUED_WAITING	7791	排队中	Queued	
+OpWaitSamePlace	IDS_OP_WAIT_SAME_PLACE	7792	和其他操作涉及相同位置，它完成后自动开始	Same place as another operation; starts after it	
+OpWaitLanesFull	IDS_OP_WAIT_LANES_FULL	7793	同时进行的操作已满，有一项完成后自动开始	Too many running at once; starts when one finishes	
+OpWaitTurn	IDS_OP_WAIT_TURN	7794	前面的操作完成后自动开始	Starts by itself after the operations ahead of it	
+OpMoreTasksPrefix	IDS_OP_MORE_TASKS_PREFIX	7795	另有 	+	
+OpMoreTasksSuffix	IDS_OP_MORE_TASKS_SUFFIX	7796	 项操作	 more	

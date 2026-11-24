@@ -73,13 +73,13 @@ inline int FolderKind(const std::wstring& name) {
         const auto add = [&map](int kind, std::initializer_list<const wchar_t*> list) {
             for (const wchar_t* ext : list) map.emplace(ext, kind);
         };
-        add(kHoverKindImage, {L".jpg", L".jpeg", L".jfif", L".png", L".gif", L".bmp", L".webp", L".heic",
+        add(kHoverKindImage, {L".jpg", L".jpeg", L".jpe", L".jfif", L".png", L".apng", L".gif", L".bmp", L".webp", L".heic",
                                   L".heif", L".hif", L".avif", L".tif", L".tiff", L".svg", L".ico", L".psd",
                                   L".raw", L".dng", L".cr2", L".cr3", L".nef", L".arw", L".orf", L".rw2"});
         add(kHoverKindVideo, {L".mp4", L".mkv", L".mov", L".avi", L".wmv", L".flv", L".webm", L".m4v",
                                   L".ts", L".mts", L".m2ts", L".mpg", L".mpeg", L".3gp"});
-        add(kHoverKindAudio, {L".mp3", L".flac", L".wav", L".aac", L".m4a", L".ogg", L".opus", L".wma",
-                                  L".ape", L".aiff"});
+        add(kHoverKindAudio, {L".mp3", L".flac", L".wav", L".aac", L".m4a", L".m4b", L".ogg", L".opus", L".wma",
+                                  L".ape", L".aiff", L".aifc"});
         add(kHoverKindDocument, {L".doc", L".docx", L".xls", L".xlsx", L".xlsm", L".ppt", L".pptx", L".pdf",
                                      L".txt", L".md", L".rtf", L".odt", L".ods", L".odp", L".csv", L".wps",
                                      L".et", L".dps", L".epub", L".xps"});

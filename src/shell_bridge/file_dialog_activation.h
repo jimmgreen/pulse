@@ -9,6 +9,8 @@ struct FileDialogActivation {
     bool enabled = false;
     CoCreateInstanceFunction original = &::CoCreateInstance;
     FileDialogBridgeServices services;
+    // Optional call-local output; stage names have static storage and contain no caller data.
+    const char** outcome = nullptr;
 };
 
 // Explicit adapter only: no hooks, registration or interception installation.

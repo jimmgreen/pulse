@@ -53,6 +53,14 @@ enum class Icon {
     Dialog, User, Exit, PaneExpand, PaneRestore,
     // Added with the two-tone set: New file (document + plus badge) and Redo.
     FileAdd, Redo,
+    // In-app Git: a branch (Segoe F003) and the version center's changes,
+    // a page with + and - lines (E7A2, which the font does not carry).
+    GitBranch, GitChanges,
+    // 界面定制 (ui_modes_mockup.html): one shape per meaning for the title-bar
+    // buttons, the 界面 panel, the window menu and 设置 › 界面布局.
+    UiLayout, WinSwitch, TabStrip, StatusBar, ModeZen, ModeStandard, ModePro, SelectionBar, FileExt, TitleButtons, FileList, WindowParts, TabToWindow, NewWindow, WinOverview,
+    // 查看 › view modes (sizes/tiles/content each their own), the shell menu, MCP, arranging.
+    ViewXL, ViewLarge, ViewSmall, ViewTiles, ViewContent, SysMenu, Plug, WinArrange, ExtractSel,
     Count
 };
 
@@ -77,6 +85,30 @@ inline constexpr const wchar_t* kGlyphFolderList = L"\xF5C1";   // a 收藏栏 g
 inline constexpr const wchar_t* kGlyphSparkle = L"\xF5C2";
 inline constexpr const wchar_t* kGlyphTopBar = L"\xF5C3";   // a window with a top bar (收藏栏)
 inline constexpr const wchar_t* kGlyphFileAdd = L"\xF5C4";  // 新建文件
+inline constexpr const wchar_t* kGlyphUiLayout = L"\xF5C5";  // 界面 (title button, 界面布局): window, top bar and sidebar edge
+inline constexpr const wchar_t* kGlyphWinSwitch = L"\xF5C6";  // 窗口 (title button): two Pulse windows
+inline constexpr const wchar_t* kGlyphTabStrip = L"\xF5C7";  // 标签页 / the ⧉ N tab list
+inline constexpr const wchar_t* kGlyphStatusBar = L"\xF5C8";  // 状态栏
+inline constexpr const wchar_t* kGlyphModeZen = L"\xF5C9";  // 起点 专注
+inline constexpr const wchar_t* kGlyphModeStandard = L"\xF5CA";  // 起点 标准: address row and the list
+inline constexpr const wchar_t* kGlyphModePro = L"\xF5CB";  // 起点 工作台: command row and two panes
+inline constexpr const wchar_t* kGlyphSelectionBar = L"\xF5CC";  // 选中时的快捷操作: a check over the floating bar
+inline constexpr const wchar_t* kGlyphFileExt = L"\xF5CE";  // 显示扩展名: a page with its type label
+inline constexpr const wchar_t* kGlyphTitleButtons = L"\xF5CF";  // 标题栏按钮 / 自定义标题栏按钮…: the buttons in the title bar
+inline constexpr const wchar_t* kGlyphFileList = L"\xF5D0";  // 设置 › 文件列表: a folder and its rows
+inline constexpr const wchar_t* kGlyphWindowParts = L"\xF5D1";  // 界面布局 › 窗口结构: the bars and panes
+inline constexpr const wchar_t* kGlyphTabToWindow = L"\xF5D2";  // 把标签移到新窗口: a tab leaving
+inline constexpr const wchar_t* kGlyphNewWindow = L"\xF5D3";  // 新建窗口: a window and a plus
+inline constexpr const wchar_t* kGlyphWinOverview = L"\xF5D4";  // 窗口总览: the screen with window thumbnails
+inline constexpr const wchar_t* kGlyphViewXL = L"\xF5D5";  // 超大图标: one big picture
+inline constexpr const wchar_t* kGlyphViewLarge = L"\xF5D6";  // 大图标: two big tiles with names
+inline constexpr const wchar_t* kGlyphViewSmall = L"\xF5D7";  // 小图标: nine small tiles
+inline constexpr const wchar_t* kGlyphViewTiles = L"\xF5D8";  // 平铺: icon + name side by side
+inline constexpr const wchar_t* kGlyphViewContent = L"\xF5D9";  // 内容: full-width rows with a thumbnail and text
+inline constexpr const wchar_t* kGlyphSysMenu = L"\xF5DA";  // 系统右键菜单: the shell menu under a pointer
+inline constexpr const wchar_t* kGlyphPlug = L"\xF5DB";  // AI 与 MCP / 外部工具: a connector plug
+inline constexpr const wchar_t* kGlyphWinArrange = L"\xF5DC";  // 排列窗口: two windows side by side
+inline constexpr const wchar_t* kGlyphExtractSel = L"\xF5DD";  // 解压所选到…: picked items leave an archive
 
 inline constexpr bool IsPinned(Icon icon) noexcept {
     return icon >= Icon::PinFavorites && icon <= Icon::PinToolbar;
@@ -185,6 +217,30 @@ inline Icon FromGlyph(std::wstring_view glyph) noexcept {
     case L'\xF5C2': return Icon::Sparkle;
     case L'\xF5C3': return Icon::Toolbar;
     case L'\xF5C4': return Icon::FileAdd;
+    case L'\xF5C5': return Icon::UiLayout;
+    case L'\xF5C6': return Icon::WinSwitch;
+    case L'\xF5C7': return Icon::TabStrip;
+    case L'\xF5C8': return Icon::StatusBar;
+    case L'\xF5C9': return Icon::ModeZen;
+    case L'\xF5CA': return Icon::ModeStandard;
+    case L'\xF5CB': return Icon::ModePro;
+    case L'\xF5CC': return Icon::SelectionBar;
+    case L'\xF5CE': return Icon::FileExt;
+    case L'\xF5CF': return Icon::TitleButtons;
+    case L'\xF5D0': return Icon::FileList;
+    case L'\xF5D1': return Icon::WindowParts;
+    case L'\xF5D2': return Icon::TabToWindow;
+    case L'\xF5D3': return Icon::NewWindow;
+    case L'\xF5D4': return Icon::WinOverview;
+    case L'\xF5D5': return Icon::ViewXL;
+    case L'\xF5D6': return Icon::ViewLarge;
+    case L'\xF5D7': return Icon::ViewSmall;
+    case L'\xF5D8': return Icon::ViewTiles;
+    case L'\xF5D9': return Icon::ViewContent;
+    case L'\xF5DA': return Icon::SysMenu;
+    case L'\xF5DB': return Icon::Plug;
+    case L'\xF5DC': return Icon::WinArrange;
+    case L'\xF5DD': return Icon::ExtractSel;
     case L'\xF168': return Icon::GroupBy;
     case L'\xE8F1': return Icon::FolderList;
     case L'\xE777': return Icon::Reset;
@@ -195,7 +251,9 @@ inline Icon FromGlyph(std::wstring_view glyph) noexcept {
     case L'\xE714': return Icon::Video;
     case L'\xE753': return Icon::Cloud;
     case L'\xE783': case L'\xEA39': return Icon::Error;
-    case L'\xE8B8': return Icon::Merge;
+    case L'\xE8B8': case L'\xEA3C': return Icon::Merge;
+    case L'\xF003': return Icon::GitBranch;
+    case L'\xE7A2': return Icon::GitChanges;
     case L'\xF8AE': return Icon::Pause;
     case L'\xEDDA': return Icon::Play;
     case L'\xE724': return Icon::Send;
@@ -1087,6 +1145,119 @@ inline constexpr DesignPart kDesignParts[] = {
     {"m17.75 6.25-11.5 11.5", 0},
     {"M11 3.5c.5 3.9 2.1 5.5 6 6-3.9.5-5.5 2.1-6 6-.5-3.9-2.1-5.5-6-6 3.9-.5 5.5-2.1 6-6Z", kAccent|kFill},
     {"M18 14.5c.25 1.9 1 2.65 2.9 2.9-1.9.25-2.65 1-2.9 2.9-.25-1.9-1-2.65-2.9-2.9 1.9-.25 2.65-1 2.9-2.9Z", kAccent|kFill},
+    // 246: Git branch - trunk and its two commits in the ink, the branch in the accent.
+    {"M6 8.25v7.5", 0},
+    {"M8.25 6A2.25 2.25 0 1 1 3.75 6A2.25 2.25 0 1 1 8.25 6Z", 0},
+    {"M8.25 18A2.25 2.25 0 1 1 3.75 18A2.25 2.25 0 1 1 8.25 18Z", 0},
+    {"M20.25 6A2.25 2.25 0 1 1 15.75 6A2.25 2.25 0 1 1 20.25 6Z", kAccent},
+    {"M18 8.25v1.25a3.25 3.25 0 0 1-3.25 3.25H9.25A3.25 3.25 0 0 0 6 16", kAccent},
+    // 251: Git changes - a page with an added and a removed line.
+    {"M7 2.75h5.88c.6 0 1.17.24 1.59.66l4.12 4.12c.42.42.66.99.66 1.59V19a2.25 2.25 0 0 1-2.25 2.25H7A2.25 2.25 0 0 1 4.75 19V5A2.25 2.25 0 0 1 7 2.75Z", 0},
+    {"M12 8.75v5", kAccent},
+    {"M9.5 11.25h5", kAccent},
+    {"M9.5 16.75h5", kAccent},
+    // 255: UiLayout - 界面 (title button, 界面布局): window, top bar and sidebar edge
+    {"M5.5 4.75H18.5A2.25 2.25 0 0 1 20.75 7V17A2.25 2.25 0 0 1 18.5 19.25H5.5A2.25 2.25 0 0 1 3.25 17V7A2.25 2.25 0 0 1 5.5 4.75Z", 0},
+    {"M3.25 9h17.5", kAccent},
+    {"M9 9v10.25", kAccent},
+    // 258: WinSwitch - 窗口 (title button): two Pulse windows
+    {"M8.5 7.5V6.25a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-1.75", kAccent},
+    {"M5.5 8.25h9a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-7.5a2 2 0 0 1 2-2Z", 0},
+    {"M3.5 11.75h13", 0},
+    // 261: TabStrip - 标签页 / the ⧉ N tab list
+    {"M5.5 4.75H18.5A2.25 2.25 0 0 1 20.75 7V17A2.25 2.25 0 0 1 18.5 19.25H5.5A2.25 2.25 0 0 1 3.25 17V7A2.25 2.25 0 0 1 5.5 4.75Z", 0},
+    {"M3.25 9h17.5", 0},
+    {"M9.25 9V4.75M15.25 9V4.75", kAccent},
+    // 264: StatusBar - 状态栏
+    {"M5.5 4.75H18.5A2.25 2.25 0 0 1 20.75 7V17A2.25 2.25 0 0 1 18.5 19.25H5.5A2.25 2.25 0 0 1 3.25 17V7A2.25 2.25 0 0 1 5.5 4.75Z", 0},
+    {"M3.25 15.25h17.5", kAccent},
+    {"M6.5 17.3h3", kAccent},
+    // 267: ModeZen - 起点 专注
+    {"M20.5 12a8.5 8.5 0 1 1-17 0 8.5 8.5 0 0 1 17 0Z", 0},
+    {"M15.25 12a3.25 3.25 0 1 1-6.5 0 3.25 3.25 0 0 1 6.5 0Z", kAccent},
+    // 269: ModeStandard - 起点 标准: address row and the list
+    {"M5.5 4.75H18.5A2.25 2.25 0 0 1 20.75 7V17A2.25 2.25 0 0 1 18.5 19.25H5.5A2.25 2.25 0 0 1 3.25 17V7A2.25 2.25 0 0 1 5.5 4.75Z", 0},
+    {"M3.25 9h17.5", 0},
+    {"M7 12.75h10", kAccent},
+    {"M7 15.75h6.5", kAccent},
+    // 273: ModePro - 起点 工作台: command row and two panes
+    {"M5.5 4.75H18.5A2.25 2.25 0 0 1 20.75 7V17A2.25 2.25 0 0 1 18.5 19.25H5.5A2.25 2.25 0 0 1 3.25 17V7A2.25 2.25 0 0 1 5.5 4.75Z", 0},
+    {"M3.25 8.5h17.5", 0},
+    {"M3.25 11.75h17.5", kAccent},
+    {"M12 11.75v7.5", kAccent},
+    // 277: SelectionBar - 选中时的快捷操作: a check over the floating bar
+    {"M7.25 14.5h9.5a2.75 2.75 0 0 1 0 5.5h-9.5a2.75 2.75 0 0 1 0-5.5Z", 0},
+    {"M10.00 17.25A1.00 1.00 0 1 1 8.00 17.25A1.00 1.00 0 1 1 10.00 17.25Z", kFill},
+    {"M13.00 17.25A1.00 1.00 0 1 1 11.00 17.25A1.00 1.00 0 1 1 13.00 17.25Z", kFill},
+    {"M16.00 17.25A1.00 1.00 0 1 1 14.00 17.25A1.00 1.00 0 1 1 16.00 17.25Z", kFill},
+    {"m8.75 7.75 2.25 2.25 4.25-4.5", kAccent},
+    // 282: FileExt - 显示扩展名: a page with its type label
+    {"M7 2.75h5.88c.6 0 1.17.24 1.59.66l4.12 4.12c.42.42.66.99.66 1.59V19a2.25 2.25 0 0 1-2.25 2.25H7A2.25 2.25 0 0 1 4.75 19V5A2.25 2.25 0 0 1 7 2.75Z", 0},
+    {"M8.5 13.25h7a1.5 1.5 0 0 1 1.5 1.5v1.5a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 7 16.25v-1.5a1.5 1.5 0 0 1 1.5-1.5Z", kAccent},
+    // 284: TitleButtons - 标题栏按钮 / 自定义标题栏按钮…: the buttons in the title bar
+    {"M5.5 4.75H18.5A2.25 2.25 0 0 1 20.75 7V17A2.25 2.25 0 0 1 18.5 19.25H5.5A2.25 2.25 0 0 1 3.25 17V7A2.25 2.25 0 0 1 5.5 4.75Z", 0},
+    {"M3.25 9h17.5", 0},
+    {"M13.00 6.90A1.00 1.00 0 1 1 11.00 6.90A1.00 1.00 0 1 1 13.00 6.90Z", kAccent|kFill},
+    {"M16.00 6.90A1.00 1.00 0 1 1 14.00 6.90A1.00 1.00 0 1 1 16.00 6.90Z", kAccent|kFill},
+    {"M19.00 6.90A1.00 1.00 0 1 1 17.00 6.90A1.00 1.00 0 1 1 19.00 6.90Z", kAccent|kFill},
+    // 289: FileList - 设置 › 文件列表: a folder and its rows
+    {"M3.25 17V7.25A2.25 2.25 0 0 1 5.5 5h3.4c.53 0 1.04.21 1.41.59l1.16 1.16h7.03a2.25 2.25 0 0 1 2.25 2.25V17a2.25 2.25 0 0 1-2.25 2.25h-13A2.25 2.25 0 0 1 3.25 17Z", 0},
+    {"M7.5 12.25h9", kAccent},
+    {"M7.5 15.5h6", kAccent},
+    // 292: WindowParts - 界面布局 › 窗口结构: the bars and panes
+    {"M5.5 4.75H18.5A2.25 2.25 0 0 1 20.75 7V17A2.25 2.25 0 0 1 18.5 19.25H5.5A2.25 2.25 0 0 1 3.25 17V7A2.25 2.25 0 0 1 5.5 4.75Z", 0},
+    {"M3.25 8.5h17.5", kAccent},
+    {"M3.25 15.75h17.5", kAccent},
+    {"M9 8.5v7.25", 0},
+    // 296: TabToWindow - 把标签移到新窗口: a tab leaving
+    {"M3.25 9.5V7A2.25 2.25 0 0 1 5.5 4.75h4.25A2.25 2.25 0 0 1 12 7v2.5", 0},
+    {"M20.75 13v4a2.25 2.25 0 0 1-2.25 2.25h-13A2.25 2.25 0 0 1 3.25 17V9.5h9", 0},
+    {"M14.5 14.5 20.25 8.75", kAccent},
+    {"M16.25 8.75h4v4", kAccent},
+    // 300: NewWindow - 新建窗口: a window and a plus
+    {"M5.5 4.75H18.5A2.25 2.25 0 0 1 20.75 7V17A2.25 2.25 0 0 1 18.5 19.25H5.5A2.25 2.25 0 0 1 3.25 17V7A2.25 2.25 0 0 1 5.5 4.75Z", 0},
+    {"M3.25 9h17.5", 0},
+    {"M12 11.75v5", kAccent},
+    {"M9.5 14.25h5", kAccent},
+    // 304: WinOverview - 窗口总览: the screen with its windows as thumbnails
+    {"M5.5 4.75H18.5A2.25 2.25 0 0 1 20.75 7V17A2.25 2.25 0 0 1 18.5 19.25H5.5A2.25 2.25 0 0 1 3.25 17V7A2.25 2.25 0 0 1 5.5 4.75Z", 0},
+    {"M7.5 8.25h3.5a.75.75 0 0 1 .75.75v3a.75.75 0 0 1-.75.75H7.5a.75.75 0 0 1-.75-.75V9a.75.75 0 0 1 .75-.75Z", kAccent},
+    {"M13 8.25h3.5a.75.75 0 0 1 .75.75v3a.75.75 0 0 1-.75.75H13a.75.75 0 0 1-.75-.75V9a.75.75 0 0 1 .75-.75Z", kAccent},
+    {"M9.5 16h5", 0},
+    // 308: ViewXL - 超大图标: one big picture
+    {"M6 3.75h12A2.25 2.25 0 0 1 20.25 6v12A2.25 2.25 0 0 1 18 20.25h-12A2.25 2.25 0 0 1 3.75 18v-12A2.25 2.25 0 0 1 6 3.75Z", 0},
+    {"M6.75 17l4-4.5 3 3 2-2 2.5 3.5", kAccent},
+    // 310: ViewLarge - 大图标: two big tiles with names
+    {"M5 4h4.5A1.5 1.5 0 0 1 11 5.5v6A1.5 1.5 0 0 1 9.5 13h-4.5A1.5 1.5 0 0 1 3.5 11.5v-6A1.5 1.5 0 0 1 5 4Z", 0},
+    {"M14.5 4h4.5A1.5 1.5 0 0 1 20.5 5.5v6A1.5 1.5 0 0 1 19 13h-4.5A1.5 1.5 0 0 1 13 11.5v-6A1.5 1.5 0 0 1 14.5 4Z", 0},
+    {"M4.5 17.5h5.5M14 17.5h5.5", kAccent},
+    // 313: ViewSmall - 小图标: nine small tiles
+    {"M4.5 3.5h2.5A1 1 0 0 1 8 4.5v2.5A1 1 0 0 1 7 8h-2.5A1 1 0 0 1 3.5 7v-2.5A1 1 0 0 1 4.5 3.5Z M10.75 3.5h2.5A1 1 0 0 1 14.25 4.5v2.5A1 1 0 0 1 13.25 8h-2.5A1 1 0 0 1 9.75 7v-2.5A1 1 0 0 1 10.75 3.5Z M17 3.5h2.5A1 1 0 0 1 20.5 4.5v2.5A1 1 0 0 1 19.5 8h-2.5A1 1 0 0 1 16 7v-2.5A1 1 0 0 1 17 3.5Z M4.5 9.75h2.5A1 1 0 0 1 8 10.75v2.5A1 1 0 0 1 7 14.25h-2.5A1 1 0 0 1 3.5 13.25v-2.5A1 1 0 0 1 4.5 9.75Z M17 9.75h2.5A1 1 0 0 1 20.5 10.75v2.5A1 1 0 0 1 19.5 14.25h-2.5A1 1 0 0 1 16 13.25v-2.5A1 1 0 0 1 17 9.75Z M4.5 16h2.5A1 1 0 0 1 8 17v2.5A1 1 0 0 1 7 20.5h-2.5A1 1 0 0 1 3.5 19.5v-2.5A1 1 0 0 1 4.5 16Z M10.75 16h2.5A1 1 0 0 1 14.25 17v2.5A1 1 0 0 1 13.25 20.5h-2.5A1 1 0 0 1 9.75 19.5v-2.5A1 1 0 0 1 10.75 16Z M17 16h2.5A1 1 0 0 1 20.5 17v2.5A1 1 0 0 1 19.5 20.5h-2.5A1 1 0 0 1 16 19.5v-2.5A1 1 0 0 1 17 16Z", 0},
+    {"M10.75 9.75h2.5A1 1 0 0 1 14.25 10.75v2.5A1 1 0 0 1 13.25 14.25h-2.5A1 1 0 0 1 9.75 13.25v-2.5A1 1 0 0 1 10.75 9.75Z", kAccent},
+    // 315: ViewTiles - 平铺: icon + name side by side
+    {"M4.5 5h2.5A1 1 0 0 1 8 6v2.5A1 1 0 0 1 7 9.5h-2.5A1 1 0 0 1 3.5 8.5v-2.5A1 1 0 0 1 4.5 5Z M14 5h2.5A1 1 0 0 1 17.5 6v2.5A1 1 0 0 1 16.5 9.5h-2.5A1 1 0 0 1 13 8.5v-2.5A1 1 0 0 1 14 5Z", 0},
+    {"M4.5 14.5h2.5A1 1 0 0 1 8 15.5v2.5A1 1 0 0 1 7 19h-2.5A1 1 0 0 1 3.5 18v-2.5A1 1 0 0 1 4.5 14.5Z M14 14.5h2.5A1 1 0 0 1 17.5 15.5v2.5A1 1 0 0 1 16.5 19h-2.5A1 1 0 0 1 13 18v-2.5A1 1 0 0 1 14 14.5Z", 0},
+    {"M9.5 7.25h1.75M19 7.25h1.75M9.5 16.75h1.75M19 16.75h1.75", kAccent},
+    // 318: ViewContent - 内容: full-width rows with a thumbnail and text
+    {"M4.75 4.25h3A1.25 1.25 0 0 1 9 5.5v3A1.25 1.25 0 0 1 7.75 9.75h-3A1.25 1.25 0 0 1 3.5 8.5v-3A1.25 1.25 0 0 1 4.75 4.25Z M4.75 14.25h3A1.25 1.25 0 0 1 9 15.5v3A1.25 1.25 0 0 1 7.75 19.75h-3A1.25 1.25 0 0 1 3.5 18.5v-3A1.25 1.25 0 0 1 4.75 14.25Z", 0},
+    {"M11.5 5.75h9M11.5 8.5h6M11.5 15.75h9M11.5 18.5h6", 0},
+    {"M3.5 12h17", kAccent},
+    // 321: SysMenu - 系统右键菜单: the shell menu under a pointer
+    {"M8 3.75h9.75A2.25 2.25 0 0 1 20 6v9.5A2.25 2.25 0 0 1 17.75 17.75h-9.75A2.25 2.25 0 0 1 5.75 15.5v-9.5A2.25 2.25 0 0 1 8 3.75Z", 0},
+    {"M9 7.75h7.75M9 11h7.75M9 14.25h4.5", 0},
+    {"M3.25 13.75 5 20.25l1.6-2.35 2.65-.6Z", kAccent},
+    // 324: Plug - AI 与 MCP / 外部工具: a connector plug
+    {"M9.25 3.25v4M14.75 3.25v4", 0},
+    {"M6.75 7.25h10.5v3.25a5.25 5.25 0 0 1-10.5 0Z", 0},
+    {"M12 15.75v5", kAccent},
+    // 327: WinArrange - 排列窗口: two windows side by side
+    {"M5.25 4.75h3.5A2 2 0 0 1 10.75 6.75v10.5A2 2 0 0 1 8.75 19.25h-3.5A2 2 0 0 1 3.25 17.25v-10.5A2 2 0 0 1 5.25 4.75Z", 0},
+    {"M15.25 4.75h3.5A2 2 0 0 1 20.75 6.75v10.5A2 2 0 0 1 18.75 19.25h-3.5A2 2 0 0 1 13.25 17.25v-10.5A2 2 0 0 1 15.25 4.75Z", kAccent},
+    {"M3.25 8.5h7.5", 0},
+    // 330: ExtractSel - 解压所选到…: an archive (zipper) with one picked item leaving it
+    {"M5.5 3.75h5.5A1.75 1.75 0 0 1 12.75 5.5v13A1.75 1.75 0 0 1 11 20.25h-5.5A1.75 1.75 0 0 1 3.75 18.5v-13A1.75 1.75 0 0 1 5.5 3.75Z", 0},
+    {"M8.25 3.75v1.5M8.25 7.5v1.5M8.25 11.25v1.5", 0},
+    {"M15.75 9.25h3.5a1 1 0 0 1 1 1v3.5a1 1 0 0 1-1 1h-3.5a1 1 0 0 1-1-1v-3.5a1 1 0 0 1 1-1ZM12.75 17.75h4.75M15.75 16l1.75 1.75-1.75 1.75", kAccent}
 };
 inline constexpr Design kDesigns[] = {
     {Icon::Back, Tone::None, 0, 2, 2, 0},  // 后退
@@ -1164,6 +1335,32 @@ inline constexpr Design kDesigns[] = {
     {Icon::Check, Tone::None, 241, 1, 242, 0},  // 完成
     {Icon::Close, Tone::None, 242, 2, 244, 0},  // 关闭
     {Icon::Sparkle, Tone::Nav, 244, 2, 246, 0},  // Pulse 助手
+    {Icon::GitBranch, Tone::Nav, 246, 5, 251, 0},  // Git 分支
+    {Icon::GitChanges, Tone::Edit, 251, 4, 255, 0},  // 版本: 改动
+    {Icon::UiLayout, Tone::View, 255, 3, 258, 0},  // 界面 (title button, 界面布局)
+    {Icon::WinSwitch, Tone::Nav, 258, 3, 261, 0},  // 窗口 (title button)
+    {Icon::TabStrip, Tone::Nav, 261, 3, 264, 0},  // 标签页 / the ⧉ N tab list
+    {Icon::StatusBar, Tone::View, 264, 3, 267, 0},  // 状态栏
+    {Icon::ModeZen, Tone::Nav, 267, 2, 269, 0},  // 起点 专注
+    {Icon::ModeStandard, Tone::Nav, 269, 4, 273, 0},  // 起点 标准
+    {Icon::ModePro, Tone::Nav, 273, 4, 277, 0},  // 起点 工作台
+    {Icon::SelectionBar, Tone::Clip, 277, 5, 282, 0},  // 选中时的快捷操作
+    {Icon::FileExt, Tone::View, 282, 2, 284, 0},  // 显示扩展名
+    {Icon::TitleButtons, Tone::View, 284, 5, 289, 0},  // 标题栏按钮 / 自定义标题栏按钮…
+    {Icon::FileList, Tone::Place, 289, 3, 292, 0},  // 设置 › 文件列表
+    {Icon::WindowParts, Tone::View, 292, 4, 296, 0},  // 界面布局 › 窗口结构
+    {Icon::TabToWindow, Tone::Nav, 296, 4, 300, 0},  // 把标签移到新窗口
+    {Icon::NewWindow, Tone::New, 300, 4, 304, 0},  // 新建窗口
+    {Icon::WinOverview, Tone::Nav, 304, 4, 308, 0},  // 窗口总览
+    {Icon::ViewXL, Tone::View, 308, 2, 310, 0},  // 超大图标
+    {Icon::ViewLarge, Tone::View, 310, 3, 313, 0},  // 大图标
+    {Icon::ViewSmall, Tone::View, 313, 2, 315, 0},  // 小图标
+    {Icon::ViewTiles, Tone::View, 315, 3, 318, 0},  // 平铺
+    {Icon::ViewContent, Tone::View, 318, 3, 321, 0},  // 内容
+    {Icon::SysMenu, Tone::Clip, 321, 3, 324, 0},  // 系统右键菜单
+    {Icon::Plug, Tone::Nav, 324, 3, 327, 0},  // AI 与 MCP / 外部工具
+    {Icon::WinArrange, Tone::Nav, 327, 3, 330, 0},  // 排列窗口
+    {Icon::ExtractSel, Tone::Place, 330, 3, 333, 0},  // 解压所选到…
 };
 
 inline const Design* DesignFor(Icon icon) noexcept {

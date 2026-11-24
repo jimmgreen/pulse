@@ -69,6 +69,7 @@ int main() {
         const auto task = manager.Submit(request);
         check(wait([&] { return manager.Status().authorization == AuthorizationState::ActionRequired; }),
               "authorization failure remains in the active operation");
+        check(manager.Status().native_handoff_directory == target.wstring(), "Explorer handoff uses destination without replaying copy");
         const auto before = prompts.load();
         manager.ResolveAuthorization(task + 1, true);
         Sleep(30);
@@ -84,6 +85,7 @@ int main() {
         check(std::filesystem::exists(first) && std::filesystem::exists(second) &&
             !std::filesystem::exists(target / first.filename()) && !std::filesystem::exists(target / second.filename()) &&
             manager.DrainCompletions().empty(), "denied retry skip and cancel change no files or completion records");
+        check(manager.Status().native_handoff_directory.empty(), "cancel clears native handoff");
         check(finished_without_move(task), "authorization cancel emits terminal identity without successful moved roots");
         const auto next = manager.Submit(request);
         check(wait([&] { return manager.Status().task_id == next && manager.Status().authorization == AuthorizationState::ActionRequired; }),
@@ -100,6 +102,7 @@ int main() {
             const auto denied_task = manager.Submit(denied_remove);
             check(wait([&] { return manager.Status().task_id == denied_task && manager.Status().authorization == AuthorizationState::ActionRequired; }),
                   "protected deletion uses the existing permission state");
+            check(manager.Status().native_handoff_directory == delete_first.parent_path().wstring(), "delete handoff locates containing folder without changing recycle semantics");
             manager.ResolveAuthorization(denied_task, false);
             check(wait([&] { return manager.Status().current_item == delete_second.wstring() &&
                 manager.Status().authorization == AuthorizationState::ActionRequired; }), "deletion skip advances without deleting either item");

@@ -38,6 +38,7 @@ public:
         return normalized;
     }
     bool OwnsEndpoint(HWND window) const;
+    void SetRevealEnabled(bool enabled) noexcept { reveal_enabled_.store(enabled, std::memory_order_relaxed); }
     struct Endpoint {
         HWND window = nullptr;
         DWORD pid = 0;
@@ -65,8 +66,11 @@ public:
         uint64_t ui_wait_deadline = 0;
         // Internal delivery only; never encoded as part of the v2 request.
         std::shared_ptr<std::atomic<OpenDeliveryState>> delivery;
-        // Internal quick-search intent; v2 wire requests cannot encode it.
+        // v2 ordinary open remains unchanged; v3 carries explicit single-item reveal;
+        // v4 carries in-process direct folder open (gated by reveal_enabled_).
         bool reveal = false;
+        bool wire_reveal = false;
+        bool wire_direct_open = false;
     };
     static std::vector<unsigned char> EncodeOpenRequest(const OpenRequest& request);
     static bool DecodeOpenRequest(const COPYDATASTRUCT* data, OpenRequest& request);
@@ -101,6 +105,7 @@ private:
     std::shared_ptr<ExplorerSubmissionPort> explorer_port_;
     mutable std::mutex requests_mutex_;
     bool accepting_requests_ = true;
+    std::atomic<bool> reveal_enabled_{false};
     std::deque<OpenRequest> open_queue_;
     std::optional<OpenRequest> keyboard_open_;
     std::shared_ptr<std::atomic<OpenDeliveryState>> open_claim_;

@@ -114,7 +114,7 @@ int RunTitleLayoutProbe(pulse::AppState& s) {
         bool ok=true;for(int n=0;n<8;++n){s.compositor.Dc()->BeginDraw();s.renderer.Render(vm,bounds,ui::MakeTheme(true,ui::HexColor(0x6474C7)));ok=SUCCEEDED(s.compositor.Dc()->EndDraw())&&ok;Sleep(16);}
         if(file)check(ok&&s.compositor.SaveSnapshot((output/file).c_str()),"application title screenshot saved");
         auto g=ui::TitleLayoutTestAccess::Geometry(s.renderer,vm,bounds.right);
-        const auto chrome=ui::MakeTitleChrome(bounds.right,scale,s.renderer.TitleBarHeight());
+        const auto chrome=ui::MakeTitleChrome(bounds.right,scale,s.renderer.TitleBarHeight(),s.renderer.UiChrome().title_buttons);
         check(g.new_x+32*scale<=chrome.windows_left-56*scale+.5f,"new-tab button preserves 56 DIP window drag reserve");
         const auto toggle=s.renderer.SidebarToggleRect(bounds.right);
         check(toggle.right<=g.x0+.5f,"sidebar toggle stays clear of tabs after brand borrowing");

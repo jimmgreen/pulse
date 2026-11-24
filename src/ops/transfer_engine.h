@@ -10,6 +10,9 @@
 #include <windows.h>
 #include "verification_worker.h"
 #include "transfer_device_budget.h"
+#include "large_file_copy.h"
+#include "spindle_gate.h"
+#include <optional>
 #include <memory>
 #include <atomic>
 #include <condition_variable>
@@ -29,6 +32,14 @@ namespace pulse::ops {
 unsigned TransferThreadCount(const std::wstring& source, const std::wstring& dest_dir);
 
 bool IsSolidToSpinningTransfer(const std::wstring& source, const std::wstring& dest_dir);
+
+// The spinning disks (physical disk numbers, ascending) that a transfer from
+// `source` into `dest_dir` reads or writes; operations sharing one take turns
+// on it (spindle_gate.h). Empty for solid-state, remote or unknown storage.
+std::vector<long> SpinningDisksFor(const std::wstring& source, const std::wstring& dest_dir);
+
+// The volume holding `path` is solid-state (no seek penalty). False when spinning or unknown.
+bool IsSolidStateStorage(const std::wstring& path);
 
 unsigned MediumTransferThreadCount(const std::wstring& source, const std::wstring& dest_dir);
 
@@ -68,6 +79,11 @@ struct SmallCopyJob {
     // Zero keeps the original whole-file admission policy.
     uint64_t admission_bytes = 0;
     uint64_t AdmissionBytes() const noexcept { return admission_bytes ? admission_bytes : bytes; }
+    // Set: an unbuffered big-chunk copy (large_file_copy.h) instead of CopyFile2,
+    // which still takes any file the plan declines.
+    std::optional<LargeCopyPlan> chunked;
+    // Spinning disks it uses, shared by every job of the task; empty: no turns.
+    std::shared_ptr<const std::vector<long>> spindles;
 };
 
 struct SmallCopyProgress {
@@ -149,7 +165,12 @@ public:
 private:
     void Worker();
     SmallCopyResult Run(const SmallCopyJob& job, std::unique_ptr<SHA256VerificationWorker>& verifier,
-                        SmallCopyWorkerProfile* profile);
+                        SmallCopyWorkerProfile* profile, TransferDeviceBudget::Lease& lease, SpindleTurn& turn);
+    // A paused job gives its device permit and disk turn back, so other
+    // operations on the same disk carry on, and takes them again when it
+    // resumes (turn first, then permit). False: cancelled.
+    bool WaitWhilePaused(const SmallCopyJob& job, TransferDeviceBudget::Lease& lease, SpindleTurn& turn);
+    bool AcquireDevice(const SmallCopyJob& job, TransferDeviceBudget::Lease& lease);
 
     std::atomic<bool>& cancel_;
     std::atomic<bool>& pause_;
@@ -169,7 +190,10 @@ private:
     uint64_t reserved_bytes_ = 0;
     std::unordered_map<size_t, uint64_t> reservations_;
     std::unordered_map<size_t, SmallCopyProgress> progress_;
-    struct ProgressContext { SmallCopyPool* pool; size_t index; std::shared_ptr<VerificationStamp>* owned_output; };
+    struct ProgressContext {
+        SmallCopyPool* pool; size_t index; std::shared_ptr<VerificationStamp>* owned_output;
+        const SmallCopyJob* job = nullptr; TransferDeviceBudget::Lease* lease = nullptr; SpindleTurn* turn = nullptr;
+    };
     static COPYFILE2_MESSAGE_ACTION CALLBACK Progress(const COPYFILE2_MESSAGE*, PVOID);
     bool closing_ = false;
     std::vector<std::thread> threads_;

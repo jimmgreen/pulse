@@ -22,6 +22,16 @@ std::wstring QuickAccessRowKey(const AppState& s, const ui::WindowViewModel& vm,
                                int section, int item);
 // Drops the dragged quick-access row `key` into gap `gap` of the visible rows.
 void CommitQuickAccessDrag(AppState& s, const std::wstring& key, size_t gap);
+enum class ShortcutDragSource { QuickAccess, FavoriteFolder, FavoriteFile };
+bool IsQuickAccessDropArea(const ui::HitTestResult& hit);
+// These consume collection targets even when the shortcut is ineligible or
+// already present. A rejected cross-drop must never fall through to reorder/remove.
+bool PreviewShortcutCrossDrop(AppState& s, ShortcutDragSource source, const std::wstring& path,
+                              const ui::HitTestResult& hit, POINT client);
+bool CommitShortcutCrossDrop(AppState& s, ShortcutDragSource source, const std::wstring& path,
+                             const ui::HitTestResult& hit);
+ui::HitTestResult HitShortcutCrossDrop(AppState& s, POINT client);
+void ClearShortcutCrossDropHint(AppState& s);
 // Right-click on a workspace row: open, refresh its saved layout, unpin.
 void MoveWorkspace(AppState& s, int index, int to_index);
 void UpdateWorkspaceFromCurrent(AppState& s, int index);

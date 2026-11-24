@@ -3,6 +3,7 @@
 #include "../fs/fs_snapshot.h"
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -30,10 +31,16 @@ struct ColumnStripColumn {
 };
 
 struct ColumnStripState {
+    struct ClickAnchor {
+        std::wstring path;
+        float viewport_dip = 0.0f; // clicked column's visible left edge, relative to the pane
+    };
+
     std::wstring for_path;                     // current_path the ancestors belong to
     std::vector<ColumnStripColumn> ancestors;  // farthest -> parent
     ColumnStripColumn child;                   // selected folder (path empty = none)
     float scroll_from_right_dip = 0.0f;        // ancestor strip scroll; 0 = parent visible
+    std::optional<ClickAnchor> click_anchor;
 
     bool Empty() const { return for_path.empty() && ancestors.empty() && child.path.empty(); }
 };

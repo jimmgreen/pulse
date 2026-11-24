@@ -45,6 +45,8 @@ inline constexpr uint32_t kExtendedFileDialogOptions = static_cast<uint32_t>(FOS
 // Separately observed native getter evidence, never an invented setter call.
 struct PreparationContext {
     std::optional<std::u16string> resolved_initial_directory;
+    // Final S_OK native GetFileName snapshot; nullopt means unavailable, not empty.
+    std::optional<std::u16string> resolved_filename;
     // Native-mirrored filesystem SaveAsItem. Retained Shell identity and any
     // detached metadata snapshot are verified by the wrapper, not wire paths.
     std::optional<std::u16string> resolved_save_as_filename;
@@ -55,6 +57,8 @@ struct PreparationContext {
     bool open_missing_supported = false;
     bool open_missing_validated_supported = false;
     bool save_caller_validation_supported = false;
+    bool save_caller_readonly_supported = false;
+    bool computer_initial_folder_supported = false;
     bool native_save_defaults_supported = false;
     bool save_no_test_create_supported = false;
     bool save_no_overwrite_supported = false;
@@ -73,6 +77,7 @@ struct ContractDecision {
     bool allow_missing_open = false;
     bool require_existing_open_parent = false;
     bool skip_save_access_validation = false;
+    bool reject_readonly_save = false;
     bool native_save_defaults = false;
     bool no_test_file_create = false;
     bool no_overwrite_prompt = false;

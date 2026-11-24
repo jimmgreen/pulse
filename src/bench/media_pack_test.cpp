@@ -116,6 +116,17 @@ static void UnitTests() {
     Check(HasLabel(rows, L"编码格式", L"H.265 (HEVC) Main 10"), "probe codec row");
     Check(HasLabel(rows, L"音频", L"AAC · 48 kHz · 立体声"), "probe audio row");
     Check(HasLabel(rows, L"比特率", L"10.1 Mb/s"), "probe bitrate row");
+    const auto long_rows = ParseProbeRows("[FORMAT]\nduration=4320000.000000\n[/FORMAT]\n");
+    Check(HasLabel(long_rows, L"时长", L"1200:00:00"), "long recording duration stays in hours");
+    Check(ParseFfmpegDurationMs("  Duration: 1200:00:00.00,") == UINT32_MAX,
+          "thumbnail duration saturates instead of wrapping");
+    const auto covered = ParseProbeRows(
+        "[STREAM]\ncodec_type=video\ncodec_name=mjpeg\nwidth=96\nheight=64\nDISPOSITION:attached_pic=1\n[/STREAM]\n"
+        "[STREAM]\ncodec_type=audio\ncodec_name=aac\n[/STREAM]\n");
+    Check(covered.size() == 1 && HasLabel(covered, L"音频", L"AAC"), "cover art is not a video stream");
+    const auto motion = ParseProbeRows(
+        "[STREAM]\ncodec_type=video\ncodec_name=mjpeg\nwidth=960\nheight=540\nDISPOSITION:attached_pic=0\n[/STREAM]\n");
+    Check(HasLabel(motion, L"分辨率", L"960 x 540"), "real MJPEG video still has video properties");
 }
 
 static void ResolutionTests(const fs::path& profile) {

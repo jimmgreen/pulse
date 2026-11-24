@@ -249,6 +249,8 @@ void TreeView::Clear() {
     hover_row_ = -1;
     sy_ = 0.0f;
     dragging_ = false;
+    scrollbar_hover_ = false;
+    thumb_ = {};
 }
 
 std::wstring TreeView::ErrorText() const {
@@ -702,16 +704,42 @@ void TreeView::Reveal(uint32_t offset) {
     }
 }
 
+TreeView::ScrollbarGeometry TreeView::Scrollbar() const noexcept {
+    ScrollbarGeometry bar;
+    const float view = view_.bottom - view_.top;
+    const float content = ContentHeight();
+    if (nodes_.empty() || view <= 0.0f || content <= view + 1.0f) return bar;
+    const float start = view_.top + 4.0f * scale_;
+    const float track = (std::max)(0.0f, view - 8.0f * scale_);
+    const float thumb = (std::min)(track, (std::max)(24.0f * scale_, track * view / content));
+    bar.maximum = content - view;
+    bar.travel = track - thumb;
+    const float ty = start + bar.travel * std::clamp(sy_ / bar.maximum, 0.0f, 1.0f);
+    // Keep the painted thumb clear of Quick Look's outer 3 DIP resize edge.
+    bar.thumb = D2D1::RectF(view_.right - 9.0f * scale_, ty, view_.right - 5.0f * scale_, ty + thumb);
+    bar.hit = D2D1::RectF((std::max)(view_.left, view_.right - 14.0f * scale_), start, view_.right, start + track);
+    return bar;
+}
+
+bool TreeView::OverScrollbar(float x, float y) const noexcept {
+    const auto bar = Scrollbar();
+    return bar.maximum > 0.0f && x >= bar.hit.left && x < bar.hit.right &&
+        y >= bar.hit.top && y < bar.hit.bottom;
+}
+
 bool TreeView::MouseDown(float x, float y) {
     if (x < view_.left || x >= view_.right || y < view_.top || y >= view_.bottom) return false;
-    if (thumb_.right > thumb_.left && x >= view_.right - 12.0f * scale_) {
-        if (y >= thumb_.top && y < thumb_.bottom) {
+    const auto bar = Scrollbar();
+    if (bar.maximum > 0.0f && x >= bar.hit.left && x < bar.hit.right &&
+        y >= bar.hit.top && y < bar.hit.bottom) {
+        if (y >= bar.thumb.top && y < bar.thumb.bottom && bar.travel > 0.0f) {
             dragging_ = true;
             drag_origin_ = y;
             drag_scroll_ = sy_;
         } else {
+            dragging_ = false;
             const float view = view_.bottom - view_.top;
-            sy_ += (y < thumb_.top ? -1.0f : 1.0f) * view * 0.9f;
+            sy_ += (y < bar.thumb.top ? -1.0f : 1.0f) * view * 0.9f;
             Clamp();
         }
         return true;
@@ -728,31 +756,32 @@ bool TreeView::MouseDown(float x, float y) {
 
 bool TreeView::MouseMove(float, float y) {
     if (!dragging_) return false;
-    const float view = view_.bottom - view_.top;
-    const float track = view - 8.0f * scale_;
-    const float thumb = thumb_.bottom - thumb_.top;
-    const float room = (std::max)(1.0f, track - thumb);
-    const float max_sy = (std::max)(0.0f, ContentHeight() - view);
-    sy_ = drag_scroll_ + (y - drag_origin_) / room * max_sy;
+    const auto bar = Scrollbar();
+    if (bar.travel <= 0.0f) { dragging_ = false; return false; }
+    const float before = sy_;
+    sy_ = drag_scroll_ + (y - drag_origin_) * bar.maximum / bar.travel;
     Clamp();
-    return true;
+    return sy_ != before;
 }
 
 bool TreeView::Hover(float x, float y) {
+    const bool over_bar = OverScrollbar(x, y);
     int row = -1;
-    if (x >= view_.left && x < view_.right - 12.0f * scale_ && y >= view_.top && y < view_.bottom) {
+    if (!over_bar && x >= view_.left && x < view_.right && y >= view_.top && y < view_.bottom) {
         const float local = y - view_.top + sy_ - 12.0f * scale_;
         if (local >= 0) row = static_cast<int>(local / RowHeight());
         if (row >= static_cast<int>(rows_.size())) row = -1;
     }
-    if (row == hover_row_) return false;
+    const bool changed = row != hover_row_ || over_bar != scrollbar_hover_;
     hover_row_ = row;
-    return true;
+    scrollbar_hover_ = over_bar;
+    return changed;
 }
 
 bool TreeView::Leave() {
-    if (hover_row_ < 0) return false;
+    if (hover_row_ < 0 && !scrollbar_hover_) return false;
     hover_row_ = -1;
+    scrollbar_hover_ = false;
     return true;
 }
 
@@ -779,6 +808,8 @@ bool TreeView::EnsureFormats(IDWriteFactory2* factory, float scale) {
 void TreeView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D1_RECT_F& rect,
                     const Theme& theme, bool dark, float scale, SearchHighlights matches) {
     if (!dc || nodes_.empty() || !EnsureFormats(factory, scale)) return;
+    if (rect.left != view_.left || rect.top != view_.top || rect.right != view_.right ||
+        rect.bottom != view_.bottom || scale != scale_) dragging_ = false;
     view_ = rect;
     scale_ = scale;
     if (brush_owner_ != dc || !brush_) {
@@ -883,18 +914,12 @@ void TreeView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D1
         dc->DrawTextLayout(D2D1::Point2F(tx, y), layout.Get(), brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
     // Scroll position.
-    const float view = rect.bottom - rect.top;
-    const float content = ContentHeight();
-    thumb_ = {};
-    if (content > view + 1.0f) {
-        const float track = view - 8.0f * s;
-        const float thumb = (std::max)(24.0f * s, track * view / content);
-        const float t = sy_ / (content - view);
-        const float ty = rect.top + 4.0f * s + (track - thumb) * t;
-        thumb_ = D2D1::RectF(rect.right - 7.0f * s, ty, rect.right - 2.0f * s, ty + thumb);
-        brush_->SetColor(WithAlpha(theme.text, dragging_ ? 0.40f : 0.25f));
-        dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(rect.right - 6.0f * s, ty, rect.right - 3.0f * s, ty + thumb),
-                                                   1.5f * s, 1.5f * s), brush_.Get());
+    const auto bar = Scrollbar();
+    thumb_ = bar.thumb;
+    if (bar.maximum > 0.0f) {
+        const float alpha = dragging_ ? 0.45f : scrollbar_hover_ ? 0.36f : 0.25f;
+        brush_->SetColor(WithAlpha(theme.text, alpha));
+        dc->FillRoundedRectangle(D2D1::RoundedRect(bar.thumb, 2.0f * s, 2.0f * s), brush_.Get());
     }
     dc->PopAxisAlignedClip();
 }

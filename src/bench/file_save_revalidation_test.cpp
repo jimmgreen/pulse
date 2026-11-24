@@ -152,7 +152,22 @@ int main(int argc, char** argv) {
         Check(caller_confirmed.state == State::Ready && caller_confirmed.snapshot,
             "caller validation readonly snapshot survives read-only revalidation", caller_confirmed.error);
     }
+    auto caller_readonly_strict = caller_request;
+    caller_readonly_strict.reject_readonly_save = true;
+    const auto strict_capture = CaptureSaveConfirmation(caller_readonly_strict);
+    Check(strict_capture.state == State::Failed && strict_capture.error == ERROR_ACCESS_DENIED && !strict_capture.snapshot,
+        "caller validation with FOS_NOREADONLYRETURN rejects readonly target", strict_capture.error);
     Check(SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_NORMAL) != FALSE, "readonly transition restored");
+    const auto strict_writable = CaptureSaveConfirmation(caller_readonly_strict);
+    Check(strict_writable.state == State::ConfirmOverwrite && strict_writable.snapshot,
+        "caller validation with FOS_NOREADONLYRETURN captures writable target", strict_writable.error);
+    Check(SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_READONLY) != FALSE, "readonly re-transition installed");
+    if (strict_writable.snapshot) {
+        const auto strict_reval = RevalidateSaveConfirmation(*strict_writable.snapshot);
+        Check(strict_reval.state == State::Failed && strict_reval.error == ERROR_ACCESS_DENIED && !strict_reval.snapshot,
+            "caller validation with FOS_NOREADONLYRETURN rejects readonly transition on revalidation", strict_reval.error);
+    }
+    Check(SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_NORMAL) != FALSE, "readonly re-transition restored");
     Check(DeleteFileW(target.c_str()) != FALSE && fixtures.Directory(target), "target replaced by directory");
     if (current.snapshot) {
         result = RevalidateSaveConfirmation(*current.snapshot);

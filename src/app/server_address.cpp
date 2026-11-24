@@ -164,7 +164,29 @@ std::wstring Slashes(std::wstring text) {
     return text;
 }
 
-constexpr std::wstring_view kUnsupported[] = {L"ftp", L"ftps", L"sftp", L"afp", L"nfs", L"ssh", L"webdav", L"dav"};
+constexpr std::wstring_view kUnsupported[] = {L"ftps", L"sftp", L"afp", L"nfs", L"ssh", L"webdav", L"dav"};
+
+bool ValidPort(std::wstring_view port) {
+    if (port.empty() || port.size() > 5) return false;
+    uint32_t value = 0;
+    for (wchar_t c : port) {
+        if (c < L'0' || c > L'9') return false;
+        value = value * 10u + static_cast<uint32_t>(c - L'0');
+    }
+    return value >= 1u && value <= 65535u;
+}
+
+std::wstring EncodeExplorerUrlPart(std::wstring_view s) {
+    std::wstring encoded;
+    encoded.reserve(s.size());
+    for (wchar_t c : s) {
+        if (c == L' ') encoded += L"%20";
+        else if (c == L',') encoded += L"%2C";
+        else if (c == L'"') encoded += L"%22";
+        else encoded += c;
+    }
+    return encoded;
+}
 
 }  // namespace
 
@@ -172,12 +194,62 @@ ServerAddress ParseServerAddress(std::wstring_view input, bool allow_bare_host) 
     std::wstring text = Trim(input);
     ServerAddress out;
     if (text.empty()) return out;
+    for (wchar_t c : text) if (c < 0x20 || c == L'"') return out;
 
     if (const size_t sep = text.find(L"://"); sep != std::wstring::npos && sep > 0) {
         const std::wstring scheme = Lower(text.substr(0, sep));
         for (wchar_t c : scheme) if (!iswalnum(c) && c != L'+' && c != L'-' && c != L'.') return out;
         std::wstring rest = text.substr(sep + 3);
         if (const size_t cut = rest.find_first_of(L"?#"); cut != std::wstring::npos) rest.resize(cut);
+        if (scheme == L"ftp") {
+            const size_t slash = rest.find_first_of(L"/\\");
+            const std::wstring raw_authority = slash == std::wstring::npos ? rest : rest.substr(0, slash);
+            std::wstring raw_path = slash == std::wstring::npos ? std::wstring() : rest.substr(slash);
+            std::wstring raw_userinfo, host_port = raw_authority, user;
+            bool has_userinfo = false;
+            if (const size_t at = raw_authority.rfind(L'@'); at != std::wstring::npos) {
+                has_userinfo = true;
+                raw_userinfo = raw_authority.substr(0, at);
+                if (raw_userinfo.empty() || raw_userinfo.find_first_of(L"<>|") != std::wstring::npos) return out;
+                user = PercentDecode(raw_userinfo);
+                if (const size_t colon = user.find(L':'); colon != std::wstring::npos) user.resize(colon);
+                host_port = raw_authority.substr(at + 1);
+            }
+            if (host_port.empty()) return out;
+            std::wstring host_only, port;
+            if (host_port.front() == L'[') {
+                const size_t close = host_port.find(L']');
+                if (close == std::wstring::npos) return out;
+                const std::wstring bracketed = host_port.substr(0, close + 1);
+                std::wstring v6 = bracketed;
+                if (!Ipv6Literal(v6)) return out;
+                host_only = bracketed;
+                if (close + 1 < host_port.size()) {
+                    if (host_port[close + 1] != L':') return out;
+                    port = host_port.substr(close + 2);
+                    if (!ValidPort(port)) return out;
+                }
+            } else {
+                const size_t colon = host_port.find(L':');
+                const std::wstring raw_host = colon == std::wstring::npos ? host_port : host_port.substr(0, colon);
+                if (colon != std::wstring::npos) {
+                    port = host_port.substr(colon + 1);
+                    if (!ValidPort(port)) return out;
+                }
+                host_only = PercentDecode(raw_host);
+                if (!ValidHost(host_only) || host_only.find(L'@') != std::wstring::npos) return out;
+            }
+            if (raw_path.find_first_of(L"<>|\"") != std::wstring::npos) return out;
+            for (auto& c : raw_path) if (c == L'\\') c = L'/';
+            if (raw_path.empty()) raw_path = L"/";
+            out.kind = ServerAddressKind::Ftp;
+            out.host = host_only;
+            out.scheme = L"ftp";
+            out.user = std::move(user);
+            out.url = L"ftp://" + (has_userinfo ? EncodeExplorerUrlPart(raw_userinfo) + L"@" : std::wstring()) +
+                host_only + (port.empty() ? std::wstring() : L":" + port) + EncodeExplorerUrlPart(raw_path);
+            return out;
+        }
         const size_t slash = rest.find(L'/');
         std::wstring authority = rest.substr(0, slash);
         std::wstring path = slash == std::wstring::npos ? std::wstring() : rest.substr(slash);
@@ -243,7 +315,7 @@ bool IsServerUrlText(std::wstring_view input) {
     const std::wstring text = Trim(input);
     if (const size_t sep = text.find(L"://"); sep != std::wstring::npos && sep > 0) {
         const std::wstring scheme = Lower(text.substr(0, sep));
-        if (scheme == L"smb" || scheme == L"cifs") return true;
+        if (scheme == L"smb" || scheme == L"cifs" || scheme == L"ftp") return true;
         for (auto s : kUnsupported) if (scheme == s) return true;
         return false;
     }

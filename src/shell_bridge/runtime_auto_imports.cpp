@@ -1,7 +1,9 @@
 #include "runtime_auto_imports.h"
 #include "runtime_config.h"
 #include <tlhelp32.h>
+#include <intrin.h>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -10,10 +12,65 @@ namespace pulse::shell_bridge::runtime {
 namespace {
 using auto_import_detail::ImportSlot;
 constexpr size_t kMaxImage = 512 * 1024 * 1024, kMaxSlots = 16384;
+// The first kHookCount names correspond index-for-index to caller hooks. The
+// GetProcAddress name after them is never a caller hook; it is handled below.
 constexpr const char* kNames[]{"CoCreateInstance", "CoCreateInstanceEx", "CoGetClassObject", "RoGetActivationFactory",
-    "GetOpenFileNameW", "GetSaveFileNameW", "GetOpenFileNameA", "GetSaveFileNameA", "CommDlgExtendedError", "SHBrowseForFolderW", "SHBrowseForFolderA"};
+    "GetOpenFileNameW", "GetSaveFileNameW", "GetOpenFileNameA", "GetSaveFileNameA", "CommDlgExtendedError", "SHBrowseForFolderW", "SHBrowseForFolderA",
+    "SHOpenFolderAndSelectItems", "ShellExecuteW", "ShellExecuteExW", "ShellExecuteA", "ShellExecuteExA", "GetProcAddress"};
 constexpr uint32_t kMasks[]{kCoCreateInstance, kCoCreateInstanceEx, kCoGetClassObject, kRoGetActivationFactory,
-    kGetOpenFileNameW, kGetSaveFileNameW, kGetOpenFileNameA, kGetSaveFileNameA, kCommDlgExtendedError, kSHBrowseForFolderW, kSHBrowseForFolderA};
+    kGetOpenFileNameW, kGetSaveFileNameW, kGetOpenFileNameA, kGetSaveFileNameA, kCommDlgExtendedError, kSHBrowseForFolderW, kSHBrowseForFolderA,
+    kSHOpenFolderAndSelectItems, kShellExecuteW, kShellExecuteExW, kShellExecuteA, kShellExecuteExA, kGetProcAddress};
+constexpr uint32_t kHookCount = 16, kGetProcAddressIndex = 16;
+static_assert(std::size(kNames) == kHookCount + 1 && std::size(kMasks) == std::size(kNames));
+// GetProcAddress route. The table is published once per owner module and never
+// changes afterwards (the owner is pinned), so the wrapper reads it lock-free.
+// Every returned address that is not exactly a hooked original passes through.
+namespace lookup {
+using ForCaller = FARPROC (WINAPI*)(HMODULE, LPCSTR, PVOID);
+using Plain = FARPROC (WINAPI*)(HMODULE, LPCSTR);
+struct Pair { void* original; void* replacement; };
+Pair pairs[kHookCount]{};
+uint32_t pair_count = 0;
+ForCaller for_caller = nullptr;
+Plain plain = nullptr;
+void* accepted[3]{};
+std::atomic<uint32_t> state{0}; // 0 unset, 1 publishing, 2 ready, 3 unavailable
+}
+FARPROC WINAPI HookGetProcAddress(HMODULE module, LPCSTR name) {
+    // kernel32!GetProcAddress forwards its caller to GetProcAddressForCaller;
+    // keep that caller the application module rather than this wrapper.
+    const FARPROC result = lookup::for_caller ? lookup::for_caller(module, name, _ReturnAddress()) : lookup::plain(module, name);
+    if (!result) return result;
+    for (uint32_t i = 0; i < lookup::pair_count; ++i)
+        if (reinterpret_cast<void*>(result) == lookup::pairs[i].original) return reinterpret_cast<FARPROC>(lookup::pairs[i].replacement);
+    return result;
+}
+// Publishes the table from the first install; later installs must pass the same
+// hooks or their GetProcAddress slots are left native.
+bool LookupReady(std::span<const AutoImportHook> hooks) noexcept {
+    lookup::Pair wanted[kHookCount]{}; uint32_t count = 0;
+    for (const auto& hook : hooks) if (hook.original && count < kHookCount) wanted[count++] = {hook.original, hook.replacement};
+    uint32_t expected = 0;
+    if (lookup::state.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
+        const HMODULE base = GetModuleHandleW(L"kernelbase.dll"), k32 = GetModuleHandleW(L"kernel32.dll");
+        lookup::for_caller = base ? reinterpret_cast<lookup::ForCaller>(::GetProcAddress(base, "GetProcAddressForCaller")) : nullptr;
+        lookup::plain = &::GetProcAddress;
+        lookup::accepted[0] = reinterpret_cast<void*>(&::GetProcAddress);
+        lookup::accepted[1] = k32 ? reinterpret_cast<void*>(::GetProcAddress(k32, "GetProcAddress")) : nullptr;
+        lookup::accepted[2] = base ? reinterpret_cast<void*>(::GetProcAddress(base, "GetProcAddress")) : nullptr;
+        for (uint32_t i = 0; i < count; ++i) lookup::pairs[i] = wanted[i];
+        lookup::pair_count = count;
+        lookup::state.store(count ? 2u : 3u, std::memory_order_release);
+    }
+    while ((expected = lookup::state.load(std::memory_order_acquire)) == 1) YieldProcessor();
+    if (expected != 2 || lookup::pair_count != count) return false;
+    for (uint32_t i = 0; i < count; ++i)
+        if (lookup::pairs[i].original != wanted[i].original || lookup::pairs[i].replacement != wanted[i].replacement) return false;
+    return true;
+}
+bool LookupOriginal(void* value) noexcept {
+    return value && (value == lookup::accepted[0] || value == lookup::accepted[1] || value == lookup::accepted[2]);
+}
 #if defined(_M_X64)
 constexpr WORD kMachine = IMAGE_FILE_MACHINE_AMD64;
 #elif defined(_M_IX86)
@@ -58,50 +115,99 @@ template<class Read> HRESULT Inspect(Read read, std::vector<ImportSlot>& output)
         }
         return false;
     };
-    if (nt.OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IMPORT) { output.clear(); return S_OK; }
-    const auto imports = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (!imports.VirtualAddress && !imports.Size) { output.clear(); return S_OK; }
-    if (!imports.VirtualAddress || imports.Size < sizeof(IMAGE_IMPORT_DESCRIPTOR) || imports.VirtualAddress > size ||
-        imports.Size > size - imports.VirtualAddress || imports.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR) > 4096 ||
-        nt.OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IAT) return BadImage();
-    const auto iat = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT];
-    bool ended = false;
     size_t total_thunks = 0;
-    for (size_t offset = 0; offset + sizeof(IMAGE_IMPORT_DESCRIPTOR) <= imports.Size; offset += sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
-        IMAGE_IMPORT_DESCRIPTOR descriptor{};
-        if (!bounded(imports.VirtualAddress + offset, &descriptor, sizeof(descriptor))) return BadImage();
-        if (!descriptor.Name && !descriptor.FirstThunk && !descriptor.OriginalFirstThunk && !descriptor.TimeDateStamp && !descriptor.ForwarderChain) { ended = true; break; }
-        if (!descriptor.Name || !descriptor.FirstThunk) return BadImage();
-        // An import without a name lookup table is not guessed from live addresses.
-        if (!descriptor.OriginalFirstThunk) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-        if (descriptor.FirstThunk > size || descriptor.OriginalFirstThunk > size) return BadImage();
-        std::array<char, 256> name{};
-        if (!read_name(descriptor.Name, name)) return BadImage();
-        bool thunk_end = false;
-        for (size_t index = 0; index < 65536; ++index) {
-            if (++total_thunks > 131072) return BadImage();
-            IMAGE_THUNK_DATA lookup{}, address{};
-            const size_t delta = index * sizeof(lookup);
-            if (delta > size - descriptor.OriginalFirstThunk || delta > size - descriptor.FirstThunk ||
-                !bounded(static_cast<size_t>(descriptor.OriginalFirstThunk) + delta, &lookup, sizeof(lookup)) ||
-                !bounded(static_cast<size_t>(descriptor.FirstThunk) + delta, &address, sizeof(address))) return BadImage();
-            if (!lookup.u1.AddressOfData) { if (address.u1.Function) return BadImage(); thunk_end = true; break; }
-            if (!address.u1.Function) return BadImage();
-            if (IMAGE_SNAP_BY_ORDINAL(lookup.u1.Ordinal)) continue;
-            if (lookup.u1.AddressOfData > size || size - static_cast<size_t>(lookup.u1.AddressOfData) < sizeof(WORD) ||
-                !read_name(static_cast<size_t>(lookup.u1.AddressOfData) + sizeof(WORD), name)) return BadImage();
-            for (uint32_t api = 0; api < std::size(kNames); ++api) if (std::strcmp(name.data(), kNames[api]) == 0) {
-                const size_t rva = static_cast<size_t>(descriptor.FirstThunk) + delta;
-                if (rva % alignof(void*) || !data_slot(rva) || !iat.VirtualAddress || iat.Size < sizeof(void*) ||
-                    iat.VirtualAddress > size || iat.Size > size - iat.VirtualAddress ||
-                    rva < iat.VirtualAddress || rva - iat.VirtualAddress > iat.Size - sizeof(void*) || slots.size() >= kMaxSlots) return BadImage();
-                for (const auto& existing : slots) if (existing.rva == rva) return BadImage();
-                slots.push_back({rva, api});
+    if (nt.OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_IMPORT) {
+        const auto imports = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        if (imports.VirtualAddress || imports.Size) {
+            if (!imports.VirtualAddress || imports.Size < sizeof(IMAGE_IMPORT_DESCRIPTOR) || imports.VirtualAddress > size ||
+                imports.Size > size - imports.VirtualAddress || imports.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR) > 4096 ||
+                nt.OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IAT) return BadImage();
+            const auto iat = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT];
+            bool ended = false;
+            for (size_t offset = 0; offset + sizeof(IMAGE_IMPORT_DESCRIPTOR) <= imports.Size; offset += sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
+                IMAGE_IMPORT_DESCRIPTOR descriptor{};
+                if (!bounded(imports.VirtualAddress + offset, &descriptor, sizeof(descriptor))) return BadImage();
+                if (!descriptor.Name && !descriptor.FirstThunk && !descriptor.OriginalFirstThunk && !descriptor.TimeDateStamp && !descriptor.ForwarderChain) { ended = true; break; }
+                if (!descriptor.Name || !descriptor.FirstThunk) return BadImage();
+                // An import without a name lookup table is not guessed from live addresses.
+                if (!descriptor.OriginalFirstThunk) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+                if (descriptor.FirstThunk > size || descriptor.OriginalFirstThunk > size) return BadImage();
+                std::array<char, 256> name{};
+                if (!read_name(descriptor.Name, name)) return BadImage();
+                bool thunk_end = false;
+                for (size_t index = 0; index < 65536; ++index) {
+                    if (++total_thunks > 131072) return BadImage();
+                    IMAGE_THUNK_DATA lookup{}, address{};
+                    const size_t delta = index * sizeof(lookup);
+                    if (delta > size - descriptor.OriginalFirstThunk || delta > size - descriptor.FirstThunk ||
+                        !bounded(static_cast<size_t>(descriptor.OriginalFirstThunk) + delta, &lookup, sizeof(lookup)) ||
+                        !bounded(static_cast<size_t>(descriptor.FirstThunk) + delta, &address, sizeof(address))) return BadImage();
+                    if (!lookup.u1.AddressOfData) { if (address.u1.Function) return BadImage(); thunk_end = true; break; }
+                    if (!address.u1.Function) return BadImage();
+                    if (IMAGE_SNAP_BY_ORDINAL(lookup.u1.Ordinal)) continue;
+                    if (lookup.u1.AddressOfData > size || size - static_cast<size_t>(lookup.u1.AddressOfData) < sizeof(WORD) ||
+                        !read_name(static_cast<size_t>(lookup.u1.AddressOfData) + sizeof(WORD), name)) return BadImage();
+                    for (uint32_t api = 0; api < std::size(kNames); ++api) if (std::strcmp(name.data(), kNames[api]) == 0) {
+                        const size_t rva = static_cast<size_t>(descriptor.FirstThunk) + delta;
+                        if (rva % alignof(void*) || !data_slot(rva) || !iat.VirtualAddress || iat.Size < sizeof(void*) ||
+                            iat.VirtualAddress > size || iat.Size > size - iat.VirtualAddress ||
+                            rva < iat.VirtualAddress || rva - iat.VirtualAddress > iat.Size - sizeof(void*) || slots.size() >= kMaxSlots) return BadImage();
+                        for (const auto& existing : slots) if (existing.rva == rva) return BadImage();
+                        slots.push_back({rva, api, false});
+                    }
+                }
+                if (!thunk_end) return BadImage();
             }
+            if (!ended) return BadImage();
         }
-        if (!thunk_end) return BadImage();
     }
-    if (!ended) return BadImage();
+    if (nt.OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT) {
+        const auto delay = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
+        if (delay.VirtualAddress || delay.Size) {
+            if (!delay.VirtualAddress || delay.Size < sizeof(IMAGE_DELAYLOAD_DESCRIPTOR) || delay.VirtualAddress > size ||
+                delay.Size > size - delay.VirtualAddress || delay.Size / sizeof(IMAGE_DELAYLOAD_DESCRIPTOR) > 4096) return BadImage();
+            bool ended = false;
+            size_t offset = 0;
+            for (; offset + sizeof(IMAGE_DELAYLOAD_DESCRIPTOR) <= delay.Size; offset += sizeof(IMAGE_DELAYLOAD_DESCRIPTOR)) {
+                IMAGE_DELAYLOAD_DESCRIPTOR desc{};
+                if (!bounded(delay.VirtualAddress + offset, &desc, sizeof(desc))) return BadImage();
+                if (!desc.Attributes.AllAttributes && !desc.DllNameRVA && !desc.ModuleHandleRVA &&
+                    !desc.ImportAddressTableRVA && !desc.ImportNameTableRVA &&
+                    !desc.BoundImportAddressTableRVA && !desc.UnloadInformationTableRVA && !desc.TimeDateStamp) {
+                    ended = true;
+                    break;
+                }
+                // Only RVA-based v2 delay-load descriptors are parsed; skip legacy VA-based entries.
+                if (!desc.Attributes.RvaBased) continue;
+                if (!desc.DllNameRVA || !desc.ImportAddressTableRVA || !desc.ImportNameTableRVA ||
+                    desc.DllNameRVA > size || desc.ImportAddressTableRVA > size || desc.ImportNameTableRVA > size) return BadImage();
+                std::array<char, 256> name{};
+                if (!read_name(desc.DllNameRVA, name)) return BadImage();
+                bool thunk_end = false;
+                for (size_t index = 0; index < 65536; ++index) {
+                    if (++total_thunks > 131072) return BadImage();
+                    IMAGE_THUNK_DATA lookup{}, address{};
+                    const size_t delta = index * sizeof(lookup);
+                    if (delta > size - desc.ImportNameTableRVA || delta > size - desc.ImportAddressTableRVA ||
+                        !bounded(static_cast<size_t>(desc.ImportNameTableRVA) + delta, &lookup, sizeof(lookup)) ||
+                        !bounded(static_cast<size_t>(desc.ImportAddressTableRVA) + delta, &address, sizeof(address))) return BadImage();
+                    if (!lookup.u1.AddressOfData) { if (address.u1.Function) return BadImage(); thunk_end = true; break; }
+                    if (!address.u1.Function) return BadImage();
+                    if (IMAGE_SNAP_BY_ORDINAL(lookup.u1.Ordinal)) continue;
+                    if (lookup.u1.AddressOfData > size || size - static_cast<size_t>(lookup.u1.AddressOfData) < sizeof(WORD) ||
+                        !read_name(static_cast<size_t>(lookup.u1.AddressOfData) + sizeof(WORD), name)) return BadImage();
+                    for (uint32_t api = 0; api < std::size(kNames); ++api) if (std::strcmp(name.data(), kNames[api]) == 0) {
+                        const size_t rva = static_cast<size_t>(desc.ImportAddressTableRVA) + delta;
+                        if (rva % alignof(void*) || !data_slot(rva) || slots.size() >= kMaxSlots) return BadImage();
+                        for (const auto& existing : slots) if (existing.rva == rva) return BadImage();
+                        slots.push_back({rva, api, true});
+                    }
+                }
+                if (!thunk_end) return BadImage();
+            }
+            if (!ended && offset != delay.Size) return BadImage();
+        }
+    }
     output = std::move(slots);
     return S_OK;
 }
@@ -120,6 +226,14 @@ bool ReadImage(HMODULE module, size_t rva, void* output, size_t count) noexcept 
     }
     SIZE_T copied = 0;
     return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(base + rva), output, count, &copied) && copied == count;
+}
+bool IsModuleExecutableAddress(HMODULE module, const void* address) noexcept {
+    if (!module || !address) return false;
+    MEMORY_BASIC_INFORMATION memory{};
+    if (!VirtualQuery(address, &memory, sizeof(memory))) return false;
+    constexpr DWORD exec = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    return memory.AllocationBase == module && memory.Type == MEM_IMAGE && memory.State == MEM_COMMIT &&
+        !(memory.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && (memory.Protect & exec) != 0;
 }
 std::wstring CanonicalPath(const std::wstring& path) {
     HANDLE file = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -146,6 +260,32 @@ bool Under(const std::wstring& path, const std::wstring& directory) noexcept {
 }
 }
 namespace auto_import_detail {
+bool RedistributableFramework(const std::wstring& path, const std::wstring& windows) noexcept {
+    static constexpr const wchar_t* kFrameworks[] = {L"mfc140u.dll", L"mfc140.dll", L"mfcm140u.dll", L"mfcm140.dll",
+        L"mfc120u.dll", L"mfc120.dll", L"mfc110u.dll", L"mfc110.dll", L"mfc100u.dll", L"mfc100.dll",
+        L"mfc90u.dll", L"mfc90.dll", L"mfc80u.dll", L"mfc80.dll", L"mfc71u.dll", L"mfc71.dll",
+        L"mfc42u.dll", L"mfc42.dll"};
+    const auto slash = path.find_last_of(L'\\');
+    if (slash == std::wstring::npos) return false;
+    const std::wstring_view directory(path.data(), slash + 1), name(path.data() + slash + 1, path.size() - slash - 1);
+    const auto same = [](std::wstring_view a, std::wstring_view b) {
+        return a.size() == b.size() && a.size() <= INT_MAX &&
+            CompareStringOrdinal(a.data(), static_cast<int>(a.size()), b.data(), static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
+    };
+    bool allowed_dir = same(directory, windows + L"System32\\") || same(directory, windows + L"SysWOW64\\");
+    if (!allowed_dir) {
+        const auto winsxs = windows + L"WinSxS\\";
+        if (directory.size() > winsxs.size() && same(directory.substr(0, winsxs.size()), winsxs)) {
+            const auto tail = directory.substr(winsxs.size());
+            // Directly inside one WinSxS assembly subdirectory (VC80/VC90 SxS MFC).
+            const auto inner_slash = tail.find(L'\\');
+            allowed_dir = inner_slash != std::wstring_view::npos && inner_slash > 0 && inner_slash + 1 == tail.size();
+        }
+    }
+    if (!allowed_dir) return false;
+    for (const auto* candidate : kFrameworks) if (same(name, candidate)) return true;
+    return false;
+}
 // A foreign IAT writer may revoke write access after VirtualProtect succeeds.
 // Module references prevent unload, but cannot serialize another tool's page
 // protections. Treat this particular access race as a failed transaction.
@@ -204,7 +344,7 @@ HRESULT ChangeSlot(SlotChange& change, bool install, Protect protect) noexcept {
 }
 }
 struct AutoImportPatch::Impl {
-    struct Slot { auto_import_detail::SlotChange change; uint32_t mask; HMODULE module; std::wstring path; };
+    struct Slot { auto_import_detail::SlotChange change; void* api_original; uint32_t mask; HMODULE module; std::wstring path; };
     std::vector<HMODULE> modules;
     std::vector<Slot> slots;
     AutoImportResult result;
@@ -219,10 +359,10 @@ AutoImportResult AutoImportPatch::Install(HMODULE owner, std::span<const AutoImp
         impl_ = std::make_unique<Impl>();
         auto& state = *impl_;
         const auto fail = [&](HRESULT error) { state.result.status = error; return Rollback(); };
-        if (!owner || (hooks.size() != 3 && hooks.size() != 4 && hooks.size() != std::size(kNames))) return fail(E_INVALIDARG);
+        if (!owner || (hooks.size() != 3 && hooks.size() != 4 && hooks.size() != 11 && hooks.size() != kHookCount)) return fail(E_INVALIDARG);
         for (size_t index = 0; index < hooks.size(); ++index) {
             const auto& hook = hooks[index];
-            if (index == 3 && hooks.size() == std::size(kNames) && !hook.original && !hook.replacement) continue;
+            if (index == 3 && hooks.size() >= 11 && !hook.original && !hook.replacement) continue;
             if (!hook.original || !hook.replacement || hook.original == hook.replacement) return fail(E_INVALIDARG);
         }
         HMODULE pinned = nullptr;
@@ -243,6 +383,10 @@ AutoImportResult AutoImportPatch::Install(HMODULE owner, std::span<const AutoImp
         windows.resize(length); windows = CanonicalPath(windows);
         if (windows.empty()) return fail(HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND));
         windows += L"\\";
+        // The wrapper must live in the pinned owner, like every replacement.
+        HMODULE wrapper_owner = nullptr;
+        const bool route_lookup = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&HookGetProcAddress), &wrapper_owner) && wrapper_owner == owner && LookupReady(hooks);
         HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
         if (snapshot == INVALID_HANDLE_VALUE) return fail(HRESULT_FROM_WIN32(GetLastError()));
         struct Snapshot { HANDLE value; ~Snapshot() { CloseHandle(value); } } close{snapshot};
@@ -255,21 +399,40 @@ AutoImportResult AutoImportPatch::Install(HMODULE owner, std::span<const AutoImp
             if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(entry.modBaseAddr), &retained)) { ++state.result.skipped_modules; continue; }
             try { state.modules.push_back(retained); } catch (...) { FreeLibrary(retained); throw; }
             const auto path = ModulePath(retained);
-            if (retained == owner || path.empty() || Under(path, own_directory) || Under(path, windows)) { ++state.result.skipped_modules; continue; }
+            if (retained == owner || path.empty() || Under(path, own_directory) ||
+                (Under(path, windows) && !auto_import_detail::RedistributableFramework(path, windows))) { ++state.result.skipped_modules; continue; }
             std::vector<ImportSlot> candidates;
             const HRESULT parsed = Inspect([&](size_t rva, void* buffer, size_t count) { return ReadImage(retained, rva, buffer, count); }, candidates);
-            if (parsed == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)) { ++state.result.skipped_modules; continue; }
+            // A packed or protected third-party module (license protection, as in YJK)
+            // may carry an import table the strict parser rejects: skip that module, never
+            // patch it, and keep the others instead of giving up on the whole process.
+            if (parsed == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) || parsed == BadImage()) { ++state.result.skipped_modules; continue; }
             if (FAILED(parsed)) return fail(parsed);
             for (const auto& candidate : candidates) {
+                if (candidate.api_index == kGetProcAddressIndex) {
+                    if (!route_lookup) continue;
+                    void* current = nullptr;
+                    if (!ReadImage(retained, candidate.rva, &current, sizeof(current))) return fail(HRESULT_FROM_WIN32(ERROR_READ_FAULT));
+                    void* const replacement = reinterpret_cast<void*>(&HookGetProcAddress);
+                    if (current == replacement) continue;
+                    const bool delay_stub = candidate.delay_load && !LookupOriginal(current) && IsModuleExecutableAddress(retained, current);
+                    if (!LookupOriginal(current) && !delay_stub) { ++state.result.foreign_slots; continue; }
+                    if (state.slots.size() >= kMaxSlots) return fail(E_OUTOFMEMORY);
+                    auto* slot = reinterpret_cast<void* volatile*>(reinterpret_cast<uintptr_t>(retained) + candidate.rva);
+                    state.slots.push_back({{slot, current, replacement}, lookup::accepted[1] ? lookup::accepted[1] : lookup::accepted[0],
+                        kMasks[kGetProcAddressIndex], retained, path});
+                    continue;
+                }
                 if (candidate.api_index >= hooks.size() || !hooks[candidate.api_index].original) continue;
                 void* current = nullptr;
                 if (!ReadImage(retained, candidate.rva, &current, sizeof(current))) return fail(HRESULT_FROM_WIN32(ERROR_READ_FAULT));
                 const auto& hook = hooks[candidate.api_index];
                 if (current == hook.replacement) continue;
-                if (current != hook.original) { ++state.result.foreign_slots; continue; }
+                const bool delay_stub = candidate.delay_load && current != hook.original && IsModuleExecutableAddress(retained, current);
+                if (current != hook.original && !delay_stub) { ++state.result.foreign_slots; continue; }
                 if (state.slots.size() >= kMaxSlots) return fail(E_OUTOFMEMORY);
                 auto* slot = reinterpret_cast<void* volatile*>(reinterpret_cast<uintptr_t>(retained) + candidate.rva);
-                state.slots.push_back({{slot, hook.original, hook.replacement}, kMasks[candidate.api_index], retained, path});
+                state.slots.push_back({{slot, current, hook.replacement}, hook.original, kMasks[candidate.api_index], retained, path});
             }
         } while (Module32NextW(snapshot, &entry));
         if (GetLastError() != ERROR_NO_MORE_FILES) return fail(HRESULT_FROM_WIN32(GetLastError()));
@@ -277,11 +440,24 @@ AutoImportResult AutoImportPatch::Install(HMODULE owner, std::span<const AutoImp
         // All candidates/module references are collected before the first write.
         for (auto& slot : state.slots) {
             if (permit && !permit(context)) return fail(HRESULT_FROM_WIN32(ERROR_PROCESS_ABORTED));
-            const HRESULT changed = auto_import_detail::ChangeSlot(slot.change, true);
+            HRESULT changed = auto_import_detail::ChangeSlot(slot.change, true);
+            // A delay-load thunk can resolve concurrently between scan and write
+            // (observed in wps.exe): retry once against the canonical Win32 export.
+            if (changed == HRESULT_FROM_WIN32(ERROR_INVALID_STATE) && slot.change.original != slot.api_original) {
+                slot.change.original = slot.api_original;
+                changed = auto_import_detail::ChangeSlot(slot.change, true);
+            }
+            // A single concurrently modified/hooked slot must not roll back the
+            // entire process; treat it as a foreign slot just like during scan.
+            if (changed == HRESULT_FROM_WIN32(ERROR_INVALID_STATE)) {
+                ++state.result.foreign_slots;
+                continue;
+            }
             if (FAILED(changed)) return fail(changed);
             state.result.api_mask |= slot.mask;
             ++state.result.patched_slots;
         }
+        if (!state.result.patched_slots) return fail(HRESULT_FROM_WIN32(ERROR_INVALID_STATE));
         state.result.status = S_OK;
         return state.result;
     } catch (...) { if (impl_) { impl_->result.status = E_OUTOFMEMORY; return Rollback(); } return {E_OUTOFMEMORY}; }

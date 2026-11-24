@@ -6,6 +6,7 @@
 #include <cwctype>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace pulse::ops::archive_open {
 inline bool Supported(std::wstring_view path) {
@@ -65,5 +66,41 @@ inline bool NeedsFallback(const std::wstring& path) {
     std::wstring progid;
     const auto result = CurrentDefault(extension.c_str(), progid);
     return ShouldExtract(result, progid) || (SUCCEEDED(result) && PulseExtractType(progid));
+}
+
+inline bool PulseExtensionType(std::wstring_view progid) {
+    constexpr std::wstring_view prefix = L"Pulse.Ext.";
+    if (progid.size() <= prefix.size() || CompareStringOrdinal(progid.data(), static_cast<int>(prefix.size()),
+                                                                prefix.data(), static_cast<int>(prefix.size()), TRUE) != CSTR_EQUAL)
+        return false;
+    const std::wstring key = L"Software\\Classes\\" + std::wstring(progid) + L"\\shell\\open\\command";
+    wchar_t command[2048]{};
+    DWORD bytes = sizeof(command) - sizeof(wchar_t);
+    if (RegGetValueW(HKEY_CURRENT_USER, key.c_str(), nullptr, RRF_RT_REG_SZ, nullptr, command, &bytes) != ERROR_SUCCESS)
+        return false;
+    const std::wstring_view cmd(command);
+    return cmd.find(L"--ext-open") != std::wstring_view::npos || cmd.find(L"--ext-preview") != std::wstring_view::npos;
+}
+
+inline bool NeedsCustomFallback(const std::wstring& path, const std::vector<std::wstring>& extra_extensions) {
+    if (extra_extensions.empty() || path.empty()) return false;
+    const size_t slash = path.find_last_of(L"\\/");
+    std::wstring lower_name(slash == std::wstring::npos ? std::wstring_view(path) : std::wstring_view(path).substr(slash + 1));
+    std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), towlower);
+    std::wstring matched_ext;
+    for (const auto& ext : extra_extensions) {
+        if (ext.size() > matched_ext.size() && !ext.empty() && ext.front() == L'.' &&
+            lower_name.size() >= ext.size() && lower_name.ends_with(ext)) {
+            matched_ext = ext;
+        }
+    }
+    if (matched_ext.empty()) return false;
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) return false;
+    const size_t dot = lower_name.find_last_of(L'.');
+    const std::wstring single_ext = dot == std::wstring::npos ? matched_ext : lower_name.substr(dot);
+    std::wstring progid;
+    const auto result = CurrentDefault(single_ext.c_str(), progid);
+    return MissingAssociation(result) || (SUCCEEDED(result) && PulseExtensionType(progid));
 }
 }

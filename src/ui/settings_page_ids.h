@@ -12,5 +12,8 @@ inline constexpr int kSettingsPageAi = 13;
 // Settings > AI 助手: Pulse's own assistant (a sidebar row under 增强包).
 inline constexpr int kSettingsPageAssistant = 14;
 inline constexpr int kSettingsPageNativeExtensions = 15;
+// Settings > 个性化 > 界面布局 (ui_modes_mockup settingsWindow): a grouped
+// general page listed right after 外观 (0).
+inline constexpr int kSettingsPageUiLayout = 16;
 
 } // namespace pulse::ui

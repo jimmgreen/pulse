@@ -29,10 +29,10 @@ struct RenderCaches {
     // 32 MiB full-size + 8 MiB compact folder artwork, without growing the total.
     ThumbnailCache thumbnails{72ull * 1024ull * 1024ull, 1024};
     FolderThumbnailCache folder_thumbnails;
-    ThumbnailCache details{48ull * 1024ull * 1024ull, 24};
+    ThumbnailCache details{4ull * 1024ull * 1024ull, 24};
     // The hover preview card: its own host, so resting on a file never
     // displaces the details-pane preview of the selection.
-    ThumbnailCache hover{32ull * 1024ull * 1024ull, 24};
+    ThumbnailCache hover{12ull * 1024ull * 1024ull, 6};
 };
 
 // Stops the decode threads and drops every bitmap. Shared caches outlive any
@@ -45,6 +45,22 @@ inline void ResetRenderCaches(RenderCaches& caches) {
     caches.folder_thumbnails.Reset();
     caches.details.Reset();
     caches.hover.Reset();
+}
+
+inline void TrimRenderCachesForTray(RenderCaches& caches) {
+    caches.thumbnails.TrimToBytes(4u * 1024u * 1024u);
+    caches.folder_thumbnails.TrimForBackground(2u * 1024u * 1024u);
+    caches.details.TrimToBytes(0);
+    caches.hover.TrimToBytes(0);
+}
+
+inline size_t TrimRenderCachesActiveWorkingSet(RenderCaches& caches, bool details_active, bool hover_active) {
+    size_t freed = 0;
+    freed += caches.thumbnails.TrimInactiveToSlack(8u * 1024u * 1024u, 0);
+    freed += caches.folder_thumbnails.TrimInactiveWorkingSet();
+    if (!details_active) freed += caches.details.TrimInactiveToSlack(0, 0);
+    if (!hover_active) freed += caches.hover.TrimInactiveToSlack(0, 0);
+    return freed;
 }
 
 }  // namespace pulse::ui

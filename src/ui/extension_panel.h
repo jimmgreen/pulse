@@ -63,6 +63,8 @@ public:
     // Moves the same HWND/tree between owned-window and child hosting.
     bool Remount(HWND owner, const RECT* dock_bounds, bool dark, D2D1_COLOR_F accent, float scale);
     void UpdateAppearance(bool dark, D2D1_COLOR_F accent, float scale);
+    // Docked content-only panel: the page's wash under it (MainRenderer::EmbeddedBackdropWash).
+    void SetEmbeddedWash(D2D1_COLOR_F wash);
     bool Undock(bool dark, D2D1_COLOR_F accent, float scale);
     bool SaveCurrentFrame(const wchar_t* path);
     void Close();

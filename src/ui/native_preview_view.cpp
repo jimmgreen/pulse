@@ -23,19 +23,8 @@ void EnsurePreviewPackagesStarted(AppState& state, const std::wstring& path) {
         if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
         ext.push_back(c);
     }
-    for (size_t i = 0; i < extensions::PackageCount(); ++i) {
-        const auto* manifest = extensions::PackageManifest(i);
-        if (!manifest || !manifest->native || !manifest->command_contributions_declared ||
-            !extensions::PackageEnabled(i) || extensions::native::PackageSessionLoaded(state.hwnd, i)) continue;
-        bool candidate = manifest->command_contributions.empty();
-        for (const auto& cmd : manifest->command_contributions) {
-            if (std::find(cmd.extensions.begin(), cmd.extensions.end(), ext) != cmd.extensions.end()) {
-                candidate = true;
-                break;
-            }
-        }
-        if (candidate) extensions::native::EnsureCommandPackageStarted(state, i);
-    }
+    // Providers register in OnStart: activate, loading alone registers nothing.
+    extensions::native::ActivatePreviewPackages(state, ext);
 }
 }
 NativePreviewView::NativePreviewView() : surface_(next_surface.fetch_add(1)) {}

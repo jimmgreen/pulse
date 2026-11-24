@@ -2,6 +2,8 @@
 // shell_host / index host are separate exes and must not gain link dependencies.
 #pragma once
 
+#include "windows_path_prefix.h"
+
 #include <cwctype>
 #include <string>
 #include <string_view>
@@ -32,9 +34,12 @@ inline std::wstring FoldedKey(std::wstring_view p) {
 // them out for long-path support. \\?\UNC\server\share -> \\server\share,
 // \\?\C:\dir -> C:\dir.
 inline std::wstring StripExtendedPathPrefix(std::wstring_view p) {
-    if (p.starts_with(L"\\\\?\\UNC\\"))
+    switch (detail::ClassifyExtendedDosPrefix(p)) {
+    case detail::ExtendedDosPrefix::Unc:
         return std::wstring(L"\\\\") + std::wstring(p.substr(8));
-    if (p.starts_with(L"\\\\?\\")) return std::wstring(p.substr(4));
+    case detail::ExtendedDosPrefix::Drive: p.remove_prefix(4); break;
+    case detail::ExtendedDosPrefix::None: break;
+    }
     return std::wstring(p);
 }
 

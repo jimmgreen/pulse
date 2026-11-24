@@ -1,4 +1,5 @@
 #include "../ui/edit_host.h"
+#include "../ui/FluentTokens.h"
 #include "../ui/ui_compositor.h"
 #include "../ui/typography.h"
 #include "../ui/lumatext_renderer.h"
@@ -6,11 +7,15 @@
 #include <string>
 #include <commctrl.h>
 #include <cstdint>
+#include <iterator>
 #include <utility>
 
 namespace {
 int failures = 0;
 bool force_present_failure = false;
+bool probe_frame_publication = false;
+bool probe_filter_resize = false;
+bool probe_filter_dark = false;
 void Check(bool ok, const char* message) {
     std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", message);
     if (!ok) ++failures;
@@ -18,17 +23,66 @@ void Check(bool ok, const char* message) {
 LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) {
     auto& compositor = *reinterpret_cast<pulse::ui::Compositor*>(data);
     auto* format = force_present_failure ? nullptr : compositor.TextFormat();
-    const auto foreground = D2D1::ColorF(1, 1, 1);
+    const auto foreground = probe_filter_resize ? pulse::ui::ColorFromRef(pulse::ui::EditTextColor(probe_filter_dark)) : D2D1::ColorF(1, 1, 1);
     DWORD flags = 0;
     const bool redirected = GetLayeredWindowAttributes(hwnd, nullptr, nullptr, &flags) && (flags & LWA_ALPHA);
-    const auto background = D2D1::ColorF(0, redirected ? 1.0f : 0.0f);
+    const auto background = probe_frame_publication ? D2D1::ColorF(0.0f, 1.0f, 0.0f)
+        : probe_filter_resize ? pulse::ui::ColorFromRef(pulse::ui::EditBackColor(probe_filter_dark)) : D2D1::ColorF(0, redirected ? 1.0f : 0.0f);
     LRESULT result = 0;
     if (pulse::ui::HandleChildEditMessage(compositor, format, foreground,
         background, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)), hwnd, msg, wp, lp, result)) return result;
     return pulse::ui::DefPresentedChildEditProc(compositor, format, foreground,
         background, hwnd, msg, wp, lp);
 }
-bool HasRenderedText(pulse::ui::Compositor& compositor, HWND edit) {
+LRESULT CALLBACK FilterResizeOwnerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_COMMAND && HIWORD(wp) == EN_CHANGE) {
+        const HWND edit = reinterpret_cast<HWND>(lp);
+        RECT rc{}; GetWindowRect(edit, &rc);
+        // Same reentrant shrink/grow as SyncFilterEditor -> LayoutFilterEditor.
+        SetWindowPos(edit, nullptr, 0, 0, GetWindowTextLengthW(edit) ? 260 : 300,
+            rc.bottom - rc.top, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+bool CaptureFilterInk(HWND edit, bool dark, int scale_index) {
+    RECT rc{}; GetClientRect(edit, &rc);
+    HDC source=GetDC(edit), dc=CreateCompatibleDC(source);
+    BITMAPINFO info{}; info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth=rc.right; info.bmiHeader.biHeight=-rc.bottom;
+    info.bmiHeader.biPlanes=1; info.bmiHeader.biBitCount=32; info.bmiHeader.biCompression=BI_RGB;
+    void* pixels=nullptr; HBITMAP bmp=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&pixels,nullptr,0);
+    const auto old=SelectObject(dc,bmp);
+    const bool copied=BitBlt(dc,0,0,rc.right,rc.bottom,source,0,0,SRCCOPY)!=FALSE; GdiFlush();
+    unsigned ink=0; const auto* data=static_cast<const uint32_t*>(pixels);
+    if(copied) for(int i=0;i<rc.right*rc.bottom;++i) if(dark ? (data[i]&255)>160 : (data[i]&255)<100) ++ink;
+    wchar_t path[180]{}; swprintf_s(path,L"bench_data/filter_text_feedback/filter-%s-%d.bmp",dark?L"dark":L"light",scale_index);
+    FILE* out=nullptr; _wfopen_s(&out,path,L"wb");
+    if(out){BITMAPFILEHEADER header{};header.bfType=0x4d42;header.bfOffBits=sizeof(header)+sizeof(info.bmiHeader);header.bfSize=header.bfOffBits+rc.right*rc.bottom*4;
+        fwrite(&header,sizeof(header),1,out);fwrite(&info.bmiHeader,sizeof(info.bmiHeader),1,out);fwrite(pixels,4,rc.right*rc.bottom,out);fclose(out);}
+    SelectObject(dc,old);DeleteObject(bmp);DeleteDC(dc);ReleaseDC(edit,source);
+    std::printf("[PIXEL] dark=%d scale=%d ink=%u copied=%d\n",dark,scale_index,ink,copied);
+    return copied&&ink>20;
+}
+int guarded_paints = 0;
+LRESULT CALLBACK FrameProbeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    if (msg != WM_PAINT) return DefSubclassProc(hwnd, msg, wp, lp);
+    BYTE alpha = 255; DWORD flags = 0;
+    Check(GetLayeredWindowAttributes(hwnd, nullptr, &alpha, &flags) && alpha == 0,
+        "show/resize paint starts before redirected surface publication");
+    const LRESULT result = DefSubclassProc(hwnd, msg, wp, lp);
+    RECT client{}; GetClientRect(hwnd, &client);
+    HDC dc = GetDC(hwnd);
+    GdiFlush();
+    const COLORREF pixel = GetPixel(dc, client.right - 2, client.bottom - 2);
+    ReleaseDC(hwnd, dc);
+    if (pixel != RGB(0, 255, 0))
+        std::printf("[DIAG] redirected DC pixel=%08lx expected=0000ff00 size=%ldx%ld\n",
+            static_cast<unsigned long>(pixel), client.right, client.bottom);
+    Check(pixel == RGB(0, 255, 0), "actual redirected DC has initialized background before reveal");
+    ++guarded_paints;
+    return result;
+}
+bool HasRenderedText(pulse::ui::Compositor& compositor, HWND edit, bool dark = true) {
     RECT rect{};
     GetClientRect(edit, &rect);
     BITMAPINFO info{};
@@ -48,13 +102,19 @@ bool HasRenderedText(pulse::ui::Compositor& compositor, HWND edit) {
     }
     const auto old = SelectObject(dc, bitmap);
     const bool painted = compositor.PaintLumaEdit(edit, dc, compositor.TextFormat(),
-        D2D1::ColorF(1, 1, 1), D2D1::ColorF(0, 0, 0));
+        pulse::ui::ColorFromRef(pulse::ui::EditTextColor(dark)),
+        pulse::ui::ColorFromRef(pulse::ui::EditBackColor(dark)));
     GdiFlush();
     int ink = 0;
+    bool background_matches = false;
     const auto* data = static_cast<const std::uint32_t*>(pixels);
     if (painted) {
+        const COLORREF background = pulse::ui::EditBackColor(dark);
+        const std::uint32_t expected = (GetRValue(background) << 16) |
+            (GetGValue(background) << 8) | GetBValue(background);
+        background_matches = (data[rect.right * rect.bottom - 1] & 0xffffffu) == expected;
         for (int i = 0; i < rect.right * rect.bottom; ++i)
-            if ((data[i] & 0xff) > 64) ++ink;
+            if (dark ? (data[i] & 0xff) > 160 : (data[i] & 0xff) < 100) ++ink;
     }
     SelectObject(dc, old);
     DeleteObject(bitmap);
@@ -66,7 +126,7 @@ bool HasRenderedText(pulse::ui::Compositor& compositor, HWND edit) {
             static_cast<unsigned long long>(stats ? stats->edit_layout_builds : 0),
             static_cast<unsigned long long>(stats ? stats->edit_layout_cache_hits : 0));
     }
-    return painted && ink > 20;
+    return painted && ink > 20 && background_matches;
 }
 
 void CheckEditLayoutCache(HWND parent, pulse::ui::Compositor& compositor) {
@@ -175,6 +235,22 @@ void CheckSelectionSync(pulse::ui::Compositor& compositor, HWND edit) {
     SendMessageW(edit, EM_SETSEL, 8, 3);
     click(5, true);
     Check(selection() == std::pair<DWORD, DWORD>{5, 8}, "programmatic reverse selection keeps its original active end and anchor");
+    {
+        BYTE keys[256]{};
+        GetKeyboardState(keys);
+        const BYTE prev_shift = keys[VK_SHIFT];
+        keys[VK_SHIFT] = 0x80;
+        SetKeyboardState(keys);
+        SendMessageW(edit, EM_SETSEL, 8, 3);
+        SendMessageW(edit, WM_KEYDOWN, VK_LEFT, 0);
+        const auto after_left = selection();
+        SendMessageW(edit, WM_KEYDOWN, VK_RIGHT, 0);
+        const auto after_right = selection();
+        keys[VK_SHIFT] = prev_shift;
+        SetKeyboardState(keys);
+        Check(after_left == std::pair<DWORD, DWORD>{2, 8} && after_right == std::pair<DWORD, DWORD>{3, 8},
+              "Shift+Left/Right after reverse selection moves the active end instead of the anchor (#617)");
+    }
     SendMessageW(edit, EM_SETSEL, 0, -1);
     click(5, true);
     Check(selection() == std::pair<DWORD, DWORD>{0, 5}, "select-all followed by Shift-click starts at the new native anchor");
@@ -213,6 +289,109 @@ void CheckSelectionSync(pulse::ui::Compositor& compositor, HWND edit) {
 }
 int wmain(int argc, wchar_t** argv) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--wrapped-selection") {
+        HWND host = CreateWindowW(L"STATIC", L"", WS_POPUP, -30000, -30000,
+            420, 220, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        pulse::ui::Compositor compositor;
+        Check(host && compositor.Init(host), "initialize the real editor compositor");
+        if (host && !failures) for (const float scale : {1.0f, 1.5f}) {
+            compositor.RecreateTextFormats(scale);
+            constexpr wchar_t name[] = L"0123456789-ABCDEFGHIJ-0123456789-example.txt";
+            HWND edit = pulse::ui::CreateRedirectedChildEdit(host, name);
+            Check(edit != nullptr, "create native wrapped rename editor");
+            if (!edit) continue;
+            SetWindowSubclass(edit, EditProc, 1, reinterpret_cast<DWORD_PTR>(&compositor));
+            SetPropW(edit, L"Pulse.EditWrap", reinterpret_cast<HANDLE>(1));
+            SetWindowPos(edit, nullptr, 4, 4, static_cast<int>(110 * scale), static_cast<int>(130 * scale),
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            ShowWindow(host, SW_SHOWNOACTIVATE);
+            Check(compositor.PresentLumaEdit(edit, compositor.TextFormat(), D2D1::ColorF(1, 1, 1),
+                D2D1::ColorF(0, 0, 0, 1)), "paint and track the real wrapped text layout");
+            const auto range = [&] {
+                DWORD lo = 0, hi = 0;
+                SendMessageW(edit, EM_GETSEL, reinterpret_cast<WPARAM>(&lo), reinterpret_cast<LPARAM>(&hi));
+                return std::pair{lo, hi};
+            };
+            constexpr DWORD end = static_cast<DWORD>(std::size(name) - 1);
+            SendMessageW(edit, EM_SETSEL, end, end);
+            BYTE keys[256]{};
+            const bool keyboard_read = GetKeyboardState(keys) != FALSE;
+            const BYTE old_shift = keys[VK_SHIFT];
+            keys[VK_SHIFT] = 0x80;
+            Check(keyboard_read && SetKeyboardState(keys), "set Shift state only on the test GUI thread");
+            SendMessageW(edit, WM_KEYDOWN, VK_UP, 1);
+            const auto up = range();
+            SendMessageW(edit, WM_KEYDOWN, VK_LEFT, 1);
+            const auto left = range();
+            SendMessageW(edit, WM_KEYDOWN, VK_RIGHT, 1);
+            const auto right = range();
+            keys[VK_SHIFT] = old_shift;
+            if (keyboard_read) SetKeyboardState(keys);
+            std::printf("scale=%.1f shift_up=%lu,%lu shift_left=%lu,%lu shift_right=%lu,%lu\n",
+                scale, up.first, up.second, left.first, left.second, right.first, right.second);
+            Check(up.first > 0 && up.first < end && up.second == end,
+                "Shift+Up creates a reverse selection from the preceding wrapped line");
+            Check(left.first + 1 == up.first && left.second == end && right == up,
+                "Shift+Left expands the leading edge, and Shift+Right reverses it (#617)");
+            DestroyWindow(edit);
+        }
+        if (host) DestroyWindow(host);
+        CoUninitialize();
+        return failures ? 1 : 0;
+    }
+    if (argc == 2 && std::wstring(argv[1]) == L"--filter-reentrant-resize") {
+        probe_filter_resize=true;
+        WNDCLASSW wc{};wc.lpfnWndProc=FilterResizeOwnerProc;wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=L"PulseFilterResizeFixture";RegisterClassW(&wc);
+        for(bool dark:{false,true}) for(int dpi:{96,144,192}) {
+            probe_filter_dark=dark;
+            HWND host=CreateWindowW(wc.lpszClassName,L"",WS_POPUP,-30000,-30000,600,120,nullptr,nullptr,wc.hInstance,nullptr);
+            pulse::ui::Compositor compositor;Check(host&&compositor.Init(host),"real compositor initializes");
+            compositor.RecreateTextFormats(dpi/96.0f);ShowWindow(host,SW_SHOWNOACTIVATE);
+            HWND edit=pulse::ui::CreateRedirectedChildEdit(host);
+            SetWindowSubclass(edit,EditProc,1,reinterpret_cast<DWORD_PTR>(&compositor));pulse::ui::GuardRedirectedChildEditFrames(edit);
+            SetWindowPos(edit,nullptr,0,0,300,dpi/3,SWP_NOZORDER|SWP_NOACTIVATE);ShowWindow(edit,SW_SHOWNOACTIVATE);
+            SendMessageW(edit,WM_CHAR,L'A',1);SendMessageW(edit,WM_CHAR,L'中',1);
+            BYTE alpha=0;DWORD flags=0;GetLayeredWindowAttributes(edit,nullptr,&alpha,&flags);
+            wchar_t text[32]{};GetWindowTextW(edit,text,32);Check(std::wstring(text)==L"A中","typed text exists in native input model");
+            Check(alpha==255&&!GetPropW(edit,L"Pulse.EditFramePending"),"reentrant input resize completes opaque frame publication");
+            Check(CaptureFilterInk(edit,dark,dpi)&&alpha==255,"actual redirected surface has visible contrasting text pixels");
+            SendMessageW(edit,EM_SETSEL,0,-1);SendMessageW(edit,WM_CLEAR,0,0);
+            SendMessageW(edit,WM_CHAR,L'B',1);GetLayeredWindowAttributes(edit,nullptr,&alpha,&flags);
+            Check(alpha==255,"clear then retype remains visible");
+            DestroyWindow(edit);DestroyWindow(host);
+        }
+        UnregisterClassW(wc.lpszClassName,wc.hInstance);CoUninitialize();std::printf("FAILURES=%d\n",failures);return failures?1:0;
+    }
+    if (argc == 2 && (std::wstring(argv[1]) == L"--filter-frame-publication" ||
+        std::wstring(argv[1]) == L"--filter-frame-publication-unguarded")) {
+        probe_frame_publication = true;
+        HWND host = CreateWindowW(L"STATIC", L"", WS_POPUP, -30000, -30000,
+            600, 100, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        pulse::ui::Compositor compositor;
+        Check(host && compositor.Init(host), "publication host initializes");
+        compositor.RecreateTextFormats(1.0f);
+        ShowWindow(host, SW_SHOWNOACTIVATE);
+        HWND edit = pulse::ui::CreateRedirectedChildEdit(host, L"filter 中文");
+        SetWindowSubclass(edit, EditProc, 1, reinterpret_cast<DWORD_PTR>(&compositor));
+        SetWindowSubclass(edit, FrameProbeProc, 2, 0);
+        if (std::wstring(argv[1]) != L"--filter-frame-publication-unguarded")
+            pulse::ui::GuardRedirectedChildEditFrames(edit);
+        for (int cycle = 0; cycle < 3; ++cycle) {
+            ShowWindow(edit, SW_HIDE);
+            SetWindowPos(edit, nullptr, 0, 0, 300 + cycle * 40, 30, SWP_NOZORDER | SWP_NOACTIVATE);
+            const int before = guarded_paints;
+            ShowWindow(edit, SW_SHOWNOACTIVATE);
+            BYTE alpha = 0; DWORD flags = 0;
+            Check(guarded_paints > before && GetLayeredWindowAttributes(edit, nullptr, &alpha, &flags) && alpha == 255,
+                "first/repeated show publishes only after synchronous paint");
+            const int before_resize = guarded_paints;
+            SetWindowPos(edit, nullptr, 0, 0, 320 + cycle * 40, 35, SWP_NOZORDER | SWP_NOACTIVATE);
+            Check(guarded_paints > before_resize && GetLayeredWindowAttributes(edit, nullptr, &alpha, &flags) && alpha == 255,
+                "visible resize repaints before publication");
+        }
+        DestroyWindow(edit); DestroyWindow(host);
+        CoUninitialize(); return failures ? 1 : 0;
+    }
     if (argc == 2 && std::wstring(argv[1]) == L"--first-frame-alpha") {
         HWND host = CreateWindowW(L"STATIC", L"", WS_POPUP, -30000, -30000,
             400, 100, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -282,6 +461,15 @@ int wmain(int argc, wchar_t** argv) {
             Check(compositor.PresentLumaEdit(edit, compositor.TextFormat(), D2D1::ColorF(1, 1, 1),
                 D2D1::ColorF(0, redirected ? 1.0f : 0.0f)), "editor presents after native redraw suppression");
             Check(HasRenderedText(compositor, edit), "rendered editor contains visible Unicode glyph pixels");
+            if (redirected) {
+                for (const bool dark : {false, true, false}) {
+                    Check(compositor.PresentLumaEdit(edit, compositor.TextFormat(),
+                        pulse::ui::ColorFromRef(pulse::ui::EditTextColor(dark)),
+                        pulse::ui::ColorFromRef(pulse::ui::EditBackColor(dark))) &&
+                        HasRenderedText(compositor, edit, dark),
+                        "redirected filter surface presents contrasting glyphs after theme changes");
+                }
+            }
             RECT before{}, after{};
             GetWindowRect(edit, &before);
             Check(compositor.PresentLumaEdit(edit, compositor.TextFormat(), D2D1::ColorF(1, 1, 1),
@@ -308,9 +496,15 @@ int wmain(int argc, wchar_t** argv) {
                 const bool opaque = GetLayeredWindowAttributes(edit, nullptr, nullptr, &flags) && (flags & LWA_ALPHA);
                 Check(opaque == redirected, "existing editor preserves its original presentation surface");
                 const auto before_draws = compositor.GetLumaTextStats()->edit_directwrite_draws;
+                const auto before_lt_glyphs = compositor.GetLumaTextStats()->freetype_glyphs +
+                                              compositor.GetLumaTextStats()->cache_hits;
                 Check(HasRenderedText(compositor, edit) &&
                     compositor.GetLumaTextStats()->edit_directwrite_draws > before_draws,
                     "every text mode draws actual DirectWrite input glyph pixels");
+                const auto after_lt_glyphs = compositor.GetLumaTextStats()->freetype_glyphs +
+                                             compositor.GetLumaTextStats()->cache_hits;
+                Check(luma_ui ? (after_lt_glyphs > before_lt_glyphs) : (after_lt_glyphs == before_lt_glyphs),
+                    "Auto text mode rasterizes input glyphs with LumaText; Sharp/Smooth use DirectWrite");
                 Check(compositor.GetLumaTextStats()->edit_rendering_mode ==
                     (mode == pulse::ui::typography::TextRenderMode::Sharp ? DWRITE_RENDERING_MODE_GDI_CLASSIC
                                                                        : DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC),
@@ -388,6 +582,27 @@ int wmain(int argc, wchar_t** argv) {
             ShowWindow(parent, SW_HIDE);
             Check(!IsWindowVisible(edit), "parent hide automatically hides the editor");
             DestroyWindow(edit);
+            {
+                pulse::ui::typography::SetTextRenderMode(pulse::ui::typography::TextRenderMode::Auto);
+                compositor.HibernateHiddenSurface();
+                ShowWindow(parent, SW_SHOWNOACTIVATE);
+                compositor.EnsureAwake();
+                HWND wake_edit = pulse::ui::CreateChildEdit(parent, L"测试用是");
+                SetWindowSubclass(wake_edit, EditProc, 1, reinterpret_cast<DWORD_PTR>(&compositor));
+                SetWindowPos(wake_edit, nullptr, 20, 80, 320, 30, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                const auto before_wake_lt = compositor.GetLumaTextStats()->freetype_glyphs +
+                                            compositor.GetLumaTextStats()->cache_hits;
+                const bool presented = pulse::ui::PresentChildEdit(compositor, compositor.TextFormat(),
+                    pulse::ui::ColorFromRef(pulse::ui::EditTextColor(false)),
+                    pulse::ui::ColorFromRef(pulse::ui::EditBackColor(false)), wake_edit);
+                const auto after_wake_lt = compositor.GetLumaTextStats()->freetype_glyphs +
+                                           compositor.GetLumaTextStats()->cache_hits;
+                Check(presented && !GetPropW(wake_edit, L"Pulse.NativeEditFallback") &&
+                    after_wake_lt > before_wake_lt,
+                    "waking from tray hibernation recreates LumaText edit renderer without native fallback");
+                DestroyWindow(wake_edit);
+                ShowWindow(parent, SW_HIDE);
+            }
         }
         {
             HWND plain = pulse::ui::CreatePulsePaintedChildEdit(parent, L"filter 中文", 0, true);

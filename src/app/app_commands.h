@@ -2,6 +2,7 @@
 #pragma once
 #include "app_runtime.h"
 #include "../ui/quick_preview_command.h"
+#include <optional>
 
 namespace pulse::ui { struct ToolbarCustomizeSpec; struct ToolbarPickerTile; struct FluentMenuItem; }
 namespace pulse::app { struct SelectionCaps; struct DriveVerbResult; }
@@ -74,7 +75,7 @@ void ApplyDriveVerbResult(AppState& s, const app::DriveVerbResult& result);
 void ApplyWorkspacePinLabel(std::vector<ui::FluentMenuItem>& items, AppState& s);
 std::vector<ui::FluentMenuItem> BuildFinderItemMenu(
         AppState& s, bool can_undo, const std::wstring& undo_label);
-void AppendNativeCommandRows(AppState& state, std::vector<ui::FluentMenuItem>& items);
+bool AppendNativeCommandRows(AppState& state, std::vector<ui::FluentMenuItem>& items);
 std::wstring CommonExtension(const app::Tab& tab,
                                     const std::vector<int>& indices);
 // Registry/COM cache key for the selection: ".ext", ":folder", ":drive", or "".
@@ -104,8 +105,9 @@ std::vector<ui::FluentMenuItem> ExplorerMenu(
 void RefreshOpenCtxMenu(AppState& s);
 bool HandleShellMenuCommand(AppState& s, int cmd);
 // from_chip: the selection chip's ⋯ (adds the pinned-app rows on top).
+bool IsDriveRootPath(std::wstring path);
 void ShowSidebarDriveMenu(AppState& s, std::wstring path, POINT screen_pt);
-void ShowItemContextMenu(AppState& s, POINT screen_pt, bool from_chip = false);
+void ShowItemContextMenu(AppState& s, POINT screen_pt, std::optional<RECT> chip_anchor = {});
 // Shift+F10 / Apps key: the item menu under the focused item, else the background menu.
 void ShowKeyboardContextMenu(AppState& s);
 // 解散文件夹 of these folders (each into its own parent) under one undo
@@ -122,7 +124,7 @@ app::SidebarEntry* QuickAccessEntryForPath(AppState& s,
 void ShowStarredBadgeEditor(AppState& s, const std::wstring& path,
                                     POINT screen_pt);
 void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
-                                bool recent, POINT screen_pt);
+                                bool recent, POINT screen_pt, int builtin = -1);
 // anchor: client point of a zoom gesture (Ctrl+wheel); the item under it keeps
 // its place. Without one the focused item (if on screen) or the middle of the
 // visible range is kept in place.
@@ -258,6 +260,17 @@ void NavigateQuickPreview(AppState& s, int direction);
 void HandleQuickPreviewCommand(AppState& s, const ui::QuickPreviewCommand& command);
 void HandleQuickPreviewCommand(AppState& s, ui::QuickPreviewWindow& preview,
                                const ui::QuickPreviewCommand& command);
+// Pinned / detached Quick Look multi-window pool (stored in AppCore::pinned_previews).
+void DetachQuickPreviewToPinned(AppState& s, std::shared_ptr<ui::QuickPreviewWindow> window);
+void PruneClosedPinnedPreviews(AppCore& core);
+void CloseAllPinnedPreviews(AppCore& core);
+void RetargetPinnedPreviews(AppCore& core, HWND from_hwnd, HWND to_hwnd);
+bool HasVisiblePinnedPreview(const AppCore& core);
+std::vector<RECT> VisiblePinnedPreviewRects(const AppCore& core);
+std::shared_ptr<ui::QuickPreviewWindow> FindPinnedPreviewByHwnd(AppCore& core, HWND hwnd);
+bool DispatchPinnedPreviewCommand(AppState& s, UINT_PTR token);
+void SyncPinnedPreviewsAccent(AppCore& core, const D2D1_COLOR_F& accent);
+void SyncPinnedPreviewsStarred(AppCore& core, const app::PlacesCatalog& places);
 // Quick Look on `item` (the focused tab's selected row); activate false: the
 // press-and-hold peek, which leaves the focus and the mouse with Pulse.
 void OpenQuickPreview(AppState& s, const ui::QuickPreviewItem& item, bool activate);
@@ -289,6 +302,22 @@ bool SysCtxPreviewDragMove(AppState& s, int x, int y, WPARAM buttons);
 bool SysCtxPreviewDragEnd(AppState& s, int x, int y);
 bool SysCtxPreviewDragCancel(AppState& s);
 void ToggleTheme(AppState& s);
+// 界面 quick panel (Alt+L, the title bar's 界面 button). `anchor`: the
+// panel's top-right corner in screen px; null = under the title bar's right end.
+void ToggleLayoutPanel(AppState& s, const POINT* anchor = nullptr);
+// Starting point 0 专注 / 1 标准 / 2 工作台 (Alt+Shift+1..3, the panel's cards):
+// every layout option takes the preset, the view in all folders.
+void SwitchUiMode(AppState& s, int mode);
+// 设置 › 界面布局: a click (index as HitTestResult::SettingsUiLayout, segment
+// rows 10 + row*3 + value, toggles 300+), and the page's view-model fields.
+void HandleUiLayoutSetting(AppState& s, int index);
+void FillUiLayoutSettingsVm(const AppState& s, ui::WindowViewModel& vm);
+// 标题栏按钮 rows drag with the settings menu drag; its item ids start here.
+inline constexpr int kSettingsTitleDragBase = 10000;
+// Moves title-button row `from` (dividers included) to row `to`.
+void MoveTitleButton(AppState& s, int from, int to);
+// 设置 › 界面布局, scrolled to 标题栏按钮.
+void OpenTitleButtonSettings(AppState& s);
 } // namespace pulse
 
 namespace pulse { void SyncDetailsPreview(AppState& s); }

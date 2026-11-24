@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace pulse::preview {
@@ -49,12 +50,20 @@ inline void NormalizeShellAlpha(std::vector<uint8_t>& px) {
 inline bool ShellBitmapToPbgra(HBITMAP bitmap, WTS_ALPHATYPE /*label*/, std::vector<uint8_t>& out,
                                UINT& width, UINT& height, UINT& stride) {
     out.clear();
-    BITMAP info{};
-    if (!bitmap || !GetObjectW(bitmap, sizeof(info), &info) || info.bmWidth <= 0 || info.bmHeight == 0)
+    if (!bitmap) return false;
+    DIBSECTION dib{};
+    const int obj_size = GetObjectW(bitmap, sizeof(dib), &dib);
+    const BITMAP& info = dib.dsBm;
+    if (obj_size < static_cast<int>(sizeof(BITMAP)) || info.bmWidth <= 0 || info.bmHeight == 0)
         return false;
     const LONG w = info.bmWidth;
     const LONG h = info.bmHeight < 0 ? -info.bmHeight : info.bmHeight;
     if (w > 16384 || h > 16384) return false;
+    const size_t row_bytes = static_cast<size_t>(w) * 4;
+    const size_t total_bytes = row_bytes * static_cast<size_t>(h);
+    // GetObject normalizes DIBSECTION.biHeight to positive even for top-down
+    // DIBs. Let GDI perform the conversion; copying bmBits based on that sign
+    // flips cached Shell thumbnails when the provider returns a top-down DIB.
     BITMAPINFO header{};
     header.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     header.bmiHeader.biWidth = w;
@@ -62,7 +71,7 @@ inline bool ShellBitmapToPbgra(HBITMAP bitmap, WTS_ALPHATYPE /*label*/, std::vec
     header.bmiHeader.biPlanes = 1;
     header.bmiHeader.biBitCount = 32;
     header.bmiHeader.biCompression = BI_RGB;
-    out.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
+    out.resize(total_bytes);
     HDC dc = CreateCompatibleDC(nullptr);
     const int rows = dc ? GetDIBits(dc, bitmap, 0, static_cast<UINT>(h), out.data(), &header,
                                     DIB_RGB_COLORS) : 0;
@@ -74,7 +83,7 @@ inline bool ShellBitmapToPbgra(HBITMAP bitmap, WTS_ALPHATYPE /*label*/, std::vec
     NormalizeShellAlpha(out);
     width = static_cast<UINT>(w);
     height = static_cast<UINT>(h);
-    stride = width * 4;
+    stride = static_cast<UINT>(row_bytes);
     return true;
 }
 

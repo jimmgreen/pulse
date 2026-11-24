@@ -16,7 +16,7 @@ namespace hp = app::hot_entry_probe;
 struct Probe {
     HANDLE mapping = nullptr;
     hp::Shared* shared = nullptr;
-    std::wstring mutex, target, other;
+    std::wstring mutex, live_mutex, target, other;
     int slot = -1;
     uint64_t started = 0;
     ~Probe() { if (shared) UnmapViewOfFile(shared); if (mapping) CloseHandle(mapping); }
@@ -63,6 +63,15 @@ bool PrepareHotEntryProbe(AppState& state) {
         if (fixture.empty() || bench.empty() ||
             !Same(Canonical(std::filesystem::path(fixture).parent_path()), bench) ||
             !std::filesystem::path(fixture).filename().wstring().starts_with(L"shell-entry-live-")) return false;
+        const auto fixture_name = std::filesystem::path(fixture).filename().wstring();
+        constexpr std::wstring_view reveal_fixture = L"shell-entry-live-reveal-";
+        if (fixture_name.starts_with(reveal_fixture)) {
+            const auto nonce = fixture_name.substr(reveal_fixture.size());
+            GUID guid{};
+            if (nonce.size() != 38 || FAILED(CLSIDFromString(nonce.c_str(), &guid))) return false;
+            // Exercise cold and forwarded requests without touching a running Pulse.
+            Current().live_mutex = L"Local\\Pulse.RevealFixture." + nonce;
+        }
         // Keep the real singleton/forwarding route, but resolve every data read
         // and write to the validated test profile even in non-selftest builds.
         detail::HotEntryDataDirectory::directory_ = fixture;
@@ -123,7 +132,10 @@ bool PrepareHotEntryProbe(AppState& state) {
     SetEnvironmentVariableW(L"PULSE_TEST_SHELL_WINDOWS", nullptr);
     return true;
 }
-std::wstring_view HotEntryProbeMutexName() { return Current().mutex; }
+std::wstring_view HotEntryProbeMutexName() {
+    const auto& probe = Current();
+    return probe.live_mutex.empty() ? probe.mutex : probe.live_mutex;
+}
 bool HotEntryProbeAcquired(app::SingleInstanceCoordinator::AcquireResult result) {
     auto& probe = Current();
     if (probe.mutex.empty()) return true;

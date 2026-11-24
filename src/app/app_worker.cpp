@@ -99,11 +99,12 @@ void WorkerPool::CancelGeneration(uint64_t generation) {
 uint64_t WorkerPool::Refresh(const std::wstring& path, ui::SortColumn col,
                              ui::SortDirection dir, int group_by,
                              std::shared_ptr<const FolderSizeLookup> folder_sizes,
-                             FolderSortMode folders) {
+                             FolderSortMode folders, WorkItem::AuthorizedListing authorized_listing) {
     const bool network_job = fs::NeedsBoundedEnumeration(path);
     std::lock_guard<std::mutex> lock(mutex_);
     uint64_t gen = ++global_gen_;
-    const std::wstring key = WorkKey(path, col, dir, group_by, folders);
+    const std::wstring key = WorkKey(path, col, dir, group_by, folders) +
+        (authorized_listing ? L"|authorized:" + std::to_wstring(gen) : L"");
     const bool superseding = current_gen_.contains(key);
     current_gen_[key] = gen;
     // Only supersede the same path+sort request. Separate panes may show the
@@ -117,12 +118,13 @@ uint64_t WorkerPool::Refresh(const std::wstring& path, ui::SortColumn col,
     queue_ = std::move(filtered);
     WorkItem work{ path, key, gen, col, dir };
     work.network_job = network_job;
+    work.authorized_listing = std::move(authorized_listing);
     // Only requests already queued together share physical work. A refresh
     // superseding the same presentation always starts a fresh batch.
-    if (!fs::IsVirtualPath(path) && !path.empty()) {
+    if (!work.authorized_listing && !fs::IsVirtualPath(path) && !path.empty()) {
         for (auto& pending : queue_) {
             if (superseding) break;
-            if (pending.path == path && pending.request_key != key && !pending.load_paths &&
+            if (pending.path == path && pending.request_key != key && !pending.load_paths && !pending.authorized_listing &&
                 (!pending.raw_listing || !pending.raw_listing->started.load())) {
                 if (!pending.raw_listing) {
                     pending.raw_listing = std::make_shared<RawListingBatch>();
@@ -175,12 +177,13 @@ uint64_t WorkerPool::LoadPaths(const std::wstring& view_path,
     return gen;
 }
 
-void WorkerPool::EnqueueIo(std::function<void()> task) {
-    if (!task) return;
+bool WorkerPool::EnqueueIo(std::function<void()> task) {
+    if (!task) return false;
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!running_ || stopped_) return;
+    if (!running_ || stopped_) return false;
     io_queue_.Push(std::move(task), false);
     cv_.notify_one();
+    return true;
 }
 
 void WorkerPool::EnqueueSerialIo(std::function<void()> task) {
@@ -197,7 +200,7 @@ namespace {
 // tell a refusing server from Pulse's own listing quota). fs_enum reports
 // "...error=<win32>" or "...status=0x<ntstatus>"; bounded_enumeration.h
 // reports a timeout or a full quota.
-void LogListingFailure(uint64_t generation, const std::exception_ptr& failure) {
+DWORD LogListingFailure(uint64_t generation, const std::exception_ptr& failure) {
     std::string what;
     try {
         if (failure) std::rethrow_exception(failure);
@@ -219,6 +222,7 @@ void LogListingFailure(uint64_t generation, const std::exception_ptr& failure) {
         reason = 4;
     }
     diagnostics::runtime::Event("navigation_error", {{"generation", generation}, {"reason", reason}, {"code", code}});
+    return reason == 1 ? static_cast<DWORD>(code) : ERROR_GEN_FAILURE;
 }
 
 } // namespace
@@ -303,6 +307,19 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
         } catch (...) {
             res.error = true;
             res.snapshot = nullptr;
+            return res;
+        }
+    } else if (item.authorized_listing) {
+        res.authorized_listing = true;
+        res.listed_at = fs::WatchClock();
+        const auto hr = item.authorized_listing(*entries, cancelled);
+        if (FAILED(hr)) {
+            if (cancelled() || hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+                res.cancelled = true;
+                return res;
+            }
+            res.error = true;
+            res.listing_error = HRESULT_FACILITY(hr) == FACILITY_WIN32 ? HRESULT_CODE(hr) : ERROR_GEN_FAILURE;
             return res;
         }
     } else {
@@ -398,7 +415,7 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
                 const auto current = current_gen_.find(item.request_key);
                 res.cancelled = !running_ || current == current_gen_.end() || current->second != item.generation;
             }
-            if (!res.cancelled) LogListingFailure(item.generation, std::current_exception());
+            if (!res.cancelled) res.listing_error = LogListingFailure(item.generation, std::current_exception());
             res.error = !res.cancelled;
             res.bitlocker_locked = res.error && fs::IsBitLockerLocked(item.path);
             res.snapshot = nullptr;
@@ -410,7 +427,7 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
     diagnostics::runtime::Event("navigation_enumerated", {{"generation", item.generation},
         {"entries", entries->size()}, {"elapsed_us", static_cast<uint64_t>(res.enum_ms * 1000.0)},
         {"directory_id", diagnostics::deletion::Id(diagnostics::deletion::Key(item.path))}});
-    if (!item.load_paths)
+    if (!item.load_paths && !item.authorized_listing)
         diagnostics::deletion::Snapshot(item.path, *entries, item.generation, 0);
 
     // Check cancellation before sort.
@@ -424,8 +441,8 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
     }
 
     // Read link destinations on this worker before display (including .lnk targets).
-    // Not on a phone: reading a .lnk there means copying it off the device.
-    if (!fs::IsRecycleViewPath(item.path) && !fs::IsDevicePath(item.path)) {
+    // Not on virtual locations: reading a .lnk there means copying/not an OS path.
+    if (!fs::IsVirtualPath(item.path) && !fs::IsRecycleViewPath(item.path) && !fs::IsDevicePath(item.path)) {
         ResolveLinksInPlace(item.path, *entries, [&] {
             std::lock_guard<std::mutex> lock(mutex_);
             const auto it = current_gen_.find(item.request_key);
@@ -539,7 +556,7 @@ void WorkerPool::WorkerThread() {
             {"entries", res.snapshot ? res.snapshot->size() : 0},
             {"has_snapshot", res.snapshot != nullptr}, {"elapsed_ms", GetTickCount64() - started}});
         if (!res.cancelled && callback_) {
-            fs::SnapshotPtr cache_snapshot = res.snapshot;
+            fs::SnapshotPtr cache_snapshot = res.authorized_listing ? nullptr : res.snapshot;
             try {
                 callback_(std::move(res));
             } catch (...) {

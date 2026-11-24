@@ -56,9 +56,11 @@ public:
     void Reveal(uint32_t offset);
 
     bool MouseDown(float x, float y, bool shift);  // true when handled
+    bool OverScrollbar(float x, float y) const noexcept;
     bool MouseMove(float x, float y);              // while dragging; true to repaint
     void MouseUp();
     bool Dragging() const noexcept { return drag_ != Drag::None; }
+    bool DraggingScrollbar() const noexcept { return drag_ == Drag::VThumb || drag_ == Drag::HThumb; }
     bool Hover(float x, float y);                  // true to repaint
     bool Leave();
     // Hovering a clipped cell whose full text is not shown yet.
@@ -80,6 +82,7 @@ public:
 
 private:
     friend struct TableViewTestAccess;
+    friend struct QuickPreviewAuditTest;
     struct Sheet {
         std::wstring name, detail;
         bool truncated = false, header = false;
@@ -99,7 +102,13 @@ private:
         float row_h = 0, head_h = 0, pad = 0, content_w = 0, content_h = 0;
         float max_sx = 0, max_sy = 0;
     };
+    struct ScrollbarGeometry {
+        D2D1_RECT_F hit{}, thumb{};
+        float travel = 0.0f, maximum = 0.0f;
+    };
     enum class Drag { None, Cells, VThumb, HThumb };
+    ScrollbarGeometry Scrollbar(bool horizontal) const;
+    Drag ScrollbarAt(float x, float y) const noexcept;
 
     Sheet* Current() noexcept { return sheets_.empty() ? nullptr : &sheets_[sheet_]; }
     const Sheet* Current() const noexcept { return sheets_.empty() ? nullptr : &sheets_[sheet_]; }
@@ -151,6 +160,7 @@ private:
     int sel_r0_ = 0, sel_c0_ = 0, sel_r1_ = 0, sel_c1_ = 0;
 
     Drag drag_ = Drag::None;
+    Drag scrollbar_hover_ = Drag::None;
     float drag_origin_ = 0.0f, drag_scroll_ = 0.0f;
     float drag_x_ = 0.0f, drag_y_ = 0.0f;
 

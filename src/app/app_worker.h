@@ -53,6 +53,8 @@ struct WorkItem {
     std::shared_ptr<RawListingBatch> raw_listing;
     // Classified before taking the queue lock; mapped/cloud drives share UNC quotas.
     bool network_job = false;
+    using AuthorizedListing = std::function<HRESULT(std::vector<fs::DirEntry>&, const std::function<bool()>&)>;
+    AuthorizedListing authorized_listing;
 };
 
 struct WorkResult {
@@ -63,6 +65,8 @@ struct WorkResult {
     std::wstring git_root;
     bool cancelled = false;
     bool error = false;
+    DWORD listing_error = ERROR_SUCCESS;
+    bool authorized_listing = false;
     bool bitlocker_locked = false; // error: the drive is a locked BitLocker volume
     uint8_t device_error = 0;      // error: fs::DeviceError of a pulse:device: listing
     double enum_ms = 0.0;
@@ -87,7 +91,8 @@ public:
     uint64_t Refresh(const std::wstring& path, ui::SortColumn col, ui::SortDirection dir,
                      int group_by = 0,
                      std::shared_ptr<const FolderSizeLookup> folder_sizes = nullptr,
-                     FolderSortMode folders = DefaultFolderSortMode());
+                     FolderSortMode folders = DefaultFolderSortMode(),
+                     WorkItem::AuthorizedListing authorized_listing = {});
 
     // Independent consumer request; cancel an obsolete request by generation.
     uint64_t LoadPaths(const std::wstring& view_path, std::vector<std::wstring> paths,
@@ -97,7 +102,7 @@ public:
                        int group_by = 0,
                        FolderSortMode folders = DefaultFolderSortMode());
 
-    void EnqueueIo(std::function<void()> task);
+    bool EnqueueIo(std::function<void()> task);
     void EnqueueSerialIo(std::function<void()> task);
 
 private:

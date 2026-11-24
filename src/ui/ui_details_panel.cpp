@@ -454,6 +454,7 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
 
     if (d.multi_count <= 1) {
         for (const auto& def : kDetailsSections) {
+            if (def.id == 5 && d.git_branch_text.empty()) continue;   // not in a repository
             // Section separator (matches the 8 DIP gap in LayoutDetailsPanel).
             y += 8.0f * s;
             MakeBrush(dc, theme.stroke_card, brStrokeCard_);
@@ -583,6 +584,111 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
                         d.free_space_text.empty() ? pulse::l10n::Get(pulse::l10n::StringId::LoadingEllipsis)
                                                   : d.free_space_text, iy);
                 y = iy + 8.0f * s;
+                break;
+            }
+            case 5: { // Git
+                using Sid = pulse::l10n::StringId;
+                const bool plain = d.git_plain_terms;
+                float iy = y;
+                infoRow(pulse::l10n::Get(Sid::GitScBranch).c_str(), d.git_branch_text, iy);
+                const float state_y = iy;
+                infoRow(pulse::l10n::Get(Sid::ColumnStatus).c_str(), std::wstring(), iy);
+                std::wstring state_str = d.git_state_text;
+                if (!d.is_dir && d.git_summary_ready && (d.git_added > 0 || d.git_deleted > 0)) {
+                    state_str += L"  (+" + std::to_wstring(d.git_added) + L" \u2212" + std::to_wstring(d.git_deleted) + L")";
+                }
+                text(state_str, D2D1::RectF(panel.left + pad + 100.0f * s, state_y,
+                                            panel.right - pad, state_y + 18.0f * s),
+                     compositor_->SmallFormat(),
+                     d.git_mark != GitMark::None ? GitMarkColor(d.git_mark, vm.dark) : theme.text);
+
+                const std::wstring open_lbl = (!d.is_dir && d.git_mark != GitMark::None)
+                    ? pulse::l10n::Get(plain ? Sid::GitViewChangesPlain : Sid::GitViewChangesGit)
+                    : pulse::l10n::Get(Sid::GitScMenu);
+                ghostButton(hit.git_open, L"\xF003", open_lbl, IsHovered(vm, HitTestResult::DetailsGitOpen));
+                y = hit.git_open.bottom + 6.0f * s;
+
+                if (hit.git_stage.right > hit.git_stage.left) {
+                    const bool currently_staged = d.git_staged && !d.git_unstaged;
+                    const Sid stg_id = currently_staged
+                        ? (plain ? Sid::GitStagedOnePlain : Sid::GitScUnstage)
+                        : (plain ? Sid::GitStageOnePlain : Sid::GitScStage);
+                    ghostButton(hit.git_stage, currently_staged ? L"\xE73E" : L"\xE710",
+                                pulse::l10n::Get(stg_id), IsHovered(vm, HitTestResult::DetailsGitStage));
+                    if (hit.git_discard.right > hit.git_discard.left) {
+                        const Sid dsc_id = d.git_untracked
+                            ? (plain ? Sid::GitDeleteUntrackedPlain : Sid::GitDeleteUntrackedGit)
+                            : (plain ? Sid::GitDiscardPlain : Sid::GitScDiscard);
+                        ghostButton(hit.git_discard, L"\xE7A7", pulse::l10n::Get(dsc_id),
+                                    IsHovered(vm, HitTestResult::DetailsGitDiscard));
+                    }
+                    y += 26.0f * s + 8.0f * s;
+                }
+
+                if (!d.git_preview_lines.empty()) {
+                    const size_t nlines = (std::min<size_t>)(6, d.git_preview_lines.size());
+                    const float box_h = 10.0f * s + static_cast<float>(nlines) * 16.0f * s;
+                    const D2D1_RECT_F box = D2D1::RectF(panel.left + pad, y, panel.right - pad, y + box_h);
+                    painter_.FillRoundedRect(box, 6.0f * s, theme.surface_card);
+                    painter_.StrokeRoundedRect(box, 6.0f * s, theme.stroke_card, 1.0f);
+                    const D2D1_COLOR_F add_bg = vm.dark ? D2D1::ColorF(0x3DD68C, 0.14f) : D2D1::ColorF(0x1F9D55, 0.10f);
+                    const D2D1_COLOR_F del_bg = vm.dark ? D2D1::ColorF(0xFF6369, 0.14f) : D2D1::ColorF(0xE5484D, 0.09f);
+                    const D2D1_COLOR_F add_fg = vm.dark ? D2D1::ColorF(0x3DD68C) : D2D1::ColorF(0x1A7F37);
+                    const D2D1_COLOR_F del_fg = vm.dark ? D2D1::ColorF(0xFF6369) : D2D1::ColorF(0xB42318);
+                    for (size_t i = 0; i < nlines; ++i) {
+                        const auto& ln = d.git_preview_lines[i];
+                        const float ly = box.top + 5.0f * s + static_cast<float>(i) * 16.0f * s;
+                        const D2D1_RECT_F lrc = D2D1::RectF(box.left + 4.0f * s, ly, box.right - 4.0f * s, ly + 16.0f * s);
+                        if (ln.sign == L'+') {
+                            MakeBrush(dc, add_bg, brFillHover_);
+                            dc->FillRectangle(lrc, brFillHover_.get());
+                        } else if (ln.sign == L'-') {
+                            MakeBrush(dc, del_bg, brFillHover_);
+                            dc->FillRectangle(lrc, brFillHover_.get());
+                        }
+                        const std::wstring row_txt = std::wstring(1, ln.sign) + L" " + ln.text;
+                        text(row_txt, D2D1::RectF(lrc.left + 4.0f * s, lrc.top, lrc.right - 4.0f * s, lrc.bottom),
+                             compositor_->SmallFormat(),
+                             ln.sign == L'+' ? add_fg : ln.sign == L'-' ? del_fg : theme.text_secondary);
+                    }
+                    y += box_h + 8.0f * s;
+                }
+
+                if (!d.git_history.empty()) {
+                    text(pulse::l10n::Get(plain ? Sid::GitFileHistoryPlain : Sid::GitFileHistoryGit),
+                         D2D1::RectF(panel.left + pad, y, hit.git_history.left - 4.0f * s, y + 20.0f * s),
+                         compositor_->SmallFormat(), theme.text_secondary);
+                    {
+                        const bool hot = IsHovered(vm, HitTestResult::DetailsGitHistory);
+                        const std::wstring exp_lbl = pulse::l10n::Get(plain ? Sid::GitExpandAllPlain : Sid::GitExpandAllGit);
+                        std::wstring rendered_exp = exp_lbl;
+                        if (const size_t at = rendered_exp.find(L"{n}"); at != std::wstring::npos) {
+                            rendered_exp.replace(at, 3, std::to_wstring(d.git_history.size()));
+                        }
+                        text(rendered_exp, hit.git_history, compositor_->SmallFormat(),
+                             hot ? theme.accent_hover : theme.accent, true);
+                    }
+                    y += 22.0f * s;
+                    const size_t hn = (std::min<size_t>)(3, d.git_history.size());
+                    const std::wstring rst_lbl = pulse::l10n::Get(
+                        plain ? Sid::GitHistRestoreFilePlain : Sid::GitHistRestoreFileGit);
+                    for (size_t i = 0; i < hn; ++i) {
+                        const auto& h = d.git_history[i];
+                        text(h.subject,
+                             D2D1::RectF(panel.left + pad, y, panel.right - pad, y + 18.0f * s),
+                             compositor_->SmallFormat(), theme.text);
+                        const std::wstring sub = (h.author.empty() ? h.hash.substr(0, 7) : h.author) +
+                                                 (h.time_text.empty() ? L"" : L" · " + h.time_text);
+                        text(sub,
+                             D2D1::RectF(panel.left + pad, y + 16.0f * s, hit.git_hist_restore[i].left - 6.0f * s, y + 34.0f * s),
+                             compositor_->SmallFormat(), theme.text_secondary);
+                        const bool hot_r = IsHovered(vm, HitTestResult::DetailsGitRestore, static_cast<int>(i));
+                        text(rst_lbl, hit.git_hist_restore[i], compositor_->SmallFormat(),
+                             hot_r ? theme.accent_hover : theme.accent, true);
+                        y += 38.0f * s;
+                    }
+                }
+                y += 2.0f * s;
                 break;
             }
             default: break;

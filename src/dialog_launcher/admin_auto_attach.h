@@ -21,6 +21,8 @@ struct Event {
     FILETIME created{};
     uint64_t app_instance_id = 0;
     std::wstring app_basename;
+    // runtime_status only: the runtime's static import coverage when ready never came.
+    DWORD patched_slots = 0, skipped_modules = 0, foreign_slots = 0;
 };
 struct Options {
     std::wstring installed_root;
@@ -38,7 +40,7 @@ struct Eligibility {
 DWORD CheckEligibility(const Eligibility&) noexcept;
 std::wstring StatusBasename(DWORD session_id, WORD machine);
 // Long-lived same-user/session elevated helper. No registration, token changes,
-// process suspension or forced target termination. Injection is never retried for
-// the same retained PID+creation identity. Completion requires bound ready data.
+// process suspension or forced target termination. Rebinding requires an exact
+// trusted runtime and explicit fully restored diagnostic, with bounded retries. Completion requires bound ready data.
 DWORD Run(const Options&) noexcept;
 }

@@ -8,6 +8,11 @@ DWORD VerifyProtectedPath(const std::wstring &path, bool directory) noexcept;
 // Read-only installed-location checks; callers separately verify bundle hashes.
 DWORD VerifyAdminLaunchLocation(const std::wstring& install_root, const std::wstring& bundle_root,
                                const std::wstring& host_path, WORD machine) noexcept;
+// Validates an independent protected shared bridge location (e.g.
+// C:\Program Files\Common Files\Pulse\DialogBridge) without requiring the user's
+// main Pulse install directory to live on C:\Program Files.
+DWORD VerifyProtectedBridgeLocation(const std::wstring& bridge_root,
+                                    const std::wstring& core_root, WORD machine) noexcept;
 // Only the elevated launcher may create this fixed child of a protected root.
 // Existing directories are validated, never repaired or assigned weaker ACLs.
 DWORD AdminControlRoot(const std::wstring& install_root, bool create, std::wstring& result) noexcept;

@@ -41,6 +41,7 @@ enum class SettingsEffect : uint32_t {
     UiFontSize = 1u << 13,
     MenuMaterial = 1u << 14,
     SearchSwitch = 1u << 15,
+    ShelfWatcher = 1u << 16,
 };
 
 constexpr SettingsEffect operator|(SettingsEffect left, SettingsEffect right) noexcept {
@@ -256,10 +257,13 @@ public:
     void MtimeStyle(int index);     // 修改时间提示: off, dot, bar, text
     void MtimeRange(int index);     // today, 3, 7, 30 days
     void MtimePalette(int index);
+    void DoubleClickInterval(int milliseconds);
     void ClickMode(int index);      // 鼠标与选择: 0/1 double/single click, 2/3 name band on hover/always
     // Optional Details columns (ui/details_column_set.h bits), every folder.
     void DetailsColumns(uint32_t mask);
     void DetailsColumnOrder(const ui::DetailsColumnOrder& order);
+    // Extension columns and badges (pulse.columns): hidden keys and widths.
+    void ExtensionColumns(const std::vector<std::wstring>& hidden, const std::vector<std::wstring>& widths);
     void StartupOpen(int index);
     void NotifyIcon(int index);
     void NewTabOpen(int index);
@@ -285,6 +289,8 @@ public:
     void TextRendering(int index);
     void UiFontSize(int index);   // 0 small 90%, 1 default 100%, 2 large 112%, 3 larger 125%
     void TrayIconSize(int index);
+    void ShelfShakeSensitivity(int index);
+    void ShelfSummonPosition(int index);
     void DoubleCtrlGap(int index);   // 连按间隔: 200 / 300 / 400 ms
     // Settings sliders: 0 interface transparency (0..90), 1 wallpaper blur (0..40),
     // 2..4 custom accent hue (0..360), saturation and lightness (0..100).

@@ -11,6 +11,7 @@
 #include "../ui/typography.h"
 #include "../ui/ui_compositor.h"
 #include <commctrl.h>
+#include <commdlg.h>
 #include <d2d1_1.h>
 #include <dwmapi.h>
 #include <dwrite_2.h>
@@ -28,6 +29,7 @@
 #include <cwctype>
 #include <map>
 #include <numeric>
+#include <optional>
 
 namespace pulse::app {
 namespace {
@@ -39,7 +41,8 @@ constexpr UINT kMsgFocus = WM_APP + 2;        // FocusSearch
 constexpr UINT kMsgIndexStatus = WM_APP + 3;
 constexpr UINT kMsgIndexResult = WM_APP + 4;
 constexpr UINT kMsgStop = WM_APP + 5;
-constexpr UINT_PTR kTimerAddress = 2, kTimerSearch = 3, kTimerProbe = 4, kTimerAnim = 5, kTimerGiveUp = 6, kTimerAuto = 7;
+constexpr UINT_PTR kTimerAddress = 2, kTimerSearch = 3, kTimerProbe = 4, kTimerAnim = 5, kTimerGiveUp = 6, kTimerAuto = 7,
+                   kTimerClassicFolder = 8;
 constexpr int kHotkeyId = 0x5054;
 // Window properties follow the HWND's lifetime, unlike a process-local HWND set.
 // A destroyed/reused handle must get a fresh automatic-navigation opportunity.
@@ -65,7 +68,7 @@ std::wstring ClassOf(HWND hwnd) {
     GetClassNameW(hwnd, buffer, 64);
     return buffer;
 }
-std::wstring TextOf(HWND hwnd) {
+std::optional<std::wstring> TryTextOf(HWND hwnd) {
     DWORD_PTR length = 0;
     if (!SendMessageTimeoutW(hwnd, WM_GETTEXTLENGTH, 0, 0, SMTO_ABORTIFHUNG, 300, &length)) return {};
     std::wstring text(static_cast<size_t>(length) + 1, L'\0');
@@ -77,10 +80,27 @@ std::wstring TextOf(HWND hwnd) {
     while (!text.empty() && text.back() == L'\0') text.pop_back();
     return text;
 }
+std::wstring TextOf(HWND hwnd) {
+    return TryTextOf(hwnd).value_or(std::wstring{});
+}
 bool SetText(HWND hwnd, const std::wstring& text) {
     DWORD_PTR result = 0;
     return SendMessageTimeoutW(hwnd, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(text.c_str()), SMTO_ABORTIFHUNG, 500,
-                               &result) != 0;
+                               &result) != 0 && result == TRUE;
+}
+bool SetEditTextAndNotify(HWND edit_hwnd, const std::wstring& text) {
+    if (!edit_hwnd || !IsWindow(edit_hwnd) || !SetText(edit_hwnd, text) || TextOf(edit_hwnd) != text) return false;
+    if (const HWND parent = GetParent(edit_hwnd)) {
+        const int id = GetDlgCtrlID(edit_hwnd);
+        PostMessageW(parent, WM_COMMAND, MAKEWPARAM(id, EN_CHANGE), reinterpret_cast<LPARAM>(edit_hwnd));
+        if (ClassOf(parent) == L"ComboBox") {
+            if (const HWND grand = GetParent(parent)) {
+                const int gid = GetDlgCtrlID(parent);
+                PostMessageW(grand, WM_COMMAND, MAKEWPARAM(gid, CBN_EDITCHANGE), reinterpret_cast<LPARAM>(parent));
+            }
+        }
+    }
+    return true;
 }
 std::wstring Leaf(const std::wstring& path) {
     std::wstring trimmed = path;
@@ -152,52 +172,175 @@ bool IsAddressEdit(HWND dialog, HWND edit) {
     return false;
 }
 
+HWND BreadcrumbToolbar(HWND dialog) {
+    HWND found = nullptr;
+    if (!dialog) return nullptr;
+    EnumChildWindows(dialog, [](HWND child, LPARAM param) -> BOOL {
+        if (!IsWindowVisible(child) || ClassOf(child) != L"ToolbarWindow32" || GetDlgCtrlID(child) != 1001) return TRUE;
+        const HWND parent = GetParent(child);
+        if (!parent || ClassOf(parent) != L"Breadcrumb Parent") return TRUE;
+        *reinterpret_cast<HWND*>(param) = child;
+        return FALSE;
+    }, reinterpret_cast<LPARAM>(&found));
+    return found;
+}
+
+HWND FindActiveAddressEdit(HWND dialog, DWORD tid, HWND name_edit) {
+    if (!dialog) return nullptr;
+    GUITHREADINFO gti{sizeof(gti)};
+    if (tid && GetGUIThreadInfo(tid, &gti) && gti.hwndFocus != name_edit &&
+        IsAddressEdit(dialog, gti.hwndFocus) && IsWindowVisible(gti.hwndFocus) && IsWindowEnabled(gti.hwndFocus))
+        return gti.hwndFocus;
+    return nullptr;
+}
+
+struct ClassicFolderControls {
+    HWND name_box = nullptr, edit = nullptr, location = nullptr, ok = nullptr;
+};
+
+ClassicFolderControls ProbeClassicFolderControls(HWND dialog) {
+    constexpr int kNameCombo = 0x47C, kNameEdit = 0x480, kLookInCombo = 0x471;
+    const auto usable = [](HWND hwnd) { return hwnd && IsWindowVisible(hwnd) && IsWindowEnabled(hwnd); };
+    const HWND location = GetDlgItem(dialog, kLookInCombo);
+    const HWND ok = GetDlgItem(dialog, IDOK);
+    if (!usable(dialog) || !usable(location) || ClassOf(location) != L"ComboBox" ||
+        !usable(ok) || ClassOf(ok) != L"Button" || GetParent(ok) != dialog) return {};
+    HWND box = GetDlgItem(dialog, kNameCombo);
+    HWND edit = nullptr;
+    if (usable(box) && ClassOf(box) == L"ComboBoxEx32") {
+        EnumChildWindows(box, [](HWND child, LPARAM data) -> BOOL {
+            if (ClassOf(child) != L"Edit" || !IsWindowVisible(child) || !IsWindowEnabled(child)) return TRUE;
+            *reinterpret_cast<HWND*>(data) = child;
+            return FALSE;
+        }, reinterpret_cast<LPARAM>(&edit));
+    } else {
+        edit = GetDlgItem(dialog, kNameEdit);
+        box = edit;
+    }
+    if (!usable(edit) || ClassOf(edit) != L"Edit" ||
+        (GetWindowLongPtrW(edit, GWL_STYLE) & ES_READONLY)) return {};
+    return {box, edit, location, ok};
+}
+
+bool IsFullFolderPath(const std::wstring& path) {
+    return (path.size() >= 3 && std::iswalpha(path[0]) && path[1] == L':' && path[2] == L'\\') ||
+           (path.size() > 2 && path.starts_with(L"\\\\"));
+}
+
+bool WriteClassicName(const ClassicFolderControls& controls, const std::wstring& text) {
+    // With ComboBoxEx, change the outer control, which owns the name used
+    // by the dialog. Never infer the submitted name from the inner edit alone.
+    return SetText(controls.name_box, text) && TryTextOf(controls.edit) == text &&
+           (controls.name_box == controls.edit || TryTextOf(controls.name_box) == text);
+}
+
+bool ResolveTypedJumpPath(std::wstring direct, bool allow_file, std::wstring& out_path, bool& out_dir) {
+    while (!direct.empty() && (direct.front() == L' ' || direct.front() == L'"')) direct.erase(direct.begin());
+    while (!direct.empty() && (direct.back() == L' ' || direct.back() == L'"')) direct.pop_back();
+    if (direct.empty()) return false;
+    if (direct.find(L'%') != std::wstring::npos) {
+        wchar_t expanded[1024]{};
+        const DWORD n = ExpandEnvironmentStringsW(direct.c_str(), expanded, ARRAYSIZE(expanded));
+        if (n > 0 && n <= ARRAYSIZE(expanded)) direct = expanded;
+    }
+    for (wchar_t& ch : direct) if (ch == L'/') ch = L'\\';
+    const bool looks_path = (direct.size() >= 2 && std::iswalpha(direct[0]) && direct[1] == L':') ||
+                            (direct.size() >= 3 && direct[0] == L'\\' && direct[1] == L'\\');
+    if (!looks_path) return false;
+    if (direct.size() == 2 && direct[1] == L':') direct.push_back(L'\\');
+    const std::wstring plain = PlainPath(direct);
+    const DWORD attrs = GetFileAttributesW(plain.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) return false;
+    if ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        out_path = plain;
+        out_dir = true;
+        return true;
+    }
+    if (allow_file) {
+        out_path = plain;
+        out_dir = false;
+        return true;
+    }
+    const std::wstring parent = Parent(plain);
+    const DWORD parent_attrs = parent.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(parent.c_str());
+    if (parent_attrs != INVALID_FILE_ATTRIBUTES && (parent_attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        out_path = parent;
+        out_dir = true;
+        return true;
+    }
+    return false;
+}
+
 // A common file dialog: #32770 with a shell view inside. The file name box is
 // control 0x47C (cmb13, an Edit inside) or 0x480 (edt1); the type filter is
 // 0x470 (cmb1), which folder pickers do not have. Windows 11 hosts both in a
 // FloatNotifySink with id 0: the name box is the combo with an Edit inside.
-bool ProbeDialog(HWND hwnd, DialogInfo& out) {
+bool ProbeDialogControls(HWND hwnd, bool allow_same_process, DialogInfo& out) {
     if (!hwnd || !IsWindowVisible(hwnd) || IsIconic(hwnd) || ClassOf(hwnd) != L"#32770") return false;
     DWORD pid = 0;
     const DWORD tid = GetWindowThreadProcessId(hwnd, &pid);
-    if (!tid || pid == GetCurrentProcessId()) return false;
+    if (!tid || (!allow_same_process && pid == GetCurrentProcessId())) return false;
     struct Scan {
         bool view = false, modern = false, types = false;
-        HWND name_box = nullptr, edt1 = nullptr;
+        HWND name_box = nullptr, name_box_hidden = nullptr, edt1 = nullptr, edt1_hidden = nullptr;
     } scan;
     EnumChildWindows(hwnd, [](HWND child, LPARAM param) -> BOOL {
         auto& s = *reinterpret_cast<Scan*>(param);
         const auto cls = ClassOf(child);
         const int id = GetDlgCtrlID(child);
+        const bool visible = IsWindowVisible(child) != FALSE;
         if (cls == L"DUIViewWndClassName") s.view = s.modern = true;
         else if (cls == L"SHELLDLL_DefView") s.view = true;
         if (id == 0x470) s.types = true;
-        if (id == 0x47C && !s.name_box && (cls == L"ComboBoxEx32" || cls == L"ComboBox")) s.name_box = child;
+        if (id == 0x47C) {
+            if (cls == L"ComboBoxEx32" || cls == L"ComboBox") {
+                if (visible) { if (!s.name_box) s.name_box = child; }
+                else if (!s.name_box_hidden) s.name_box_hidden = child;
+            } else if (cls == L"Edit") {
+                if (visible) { if (!s.edt1) s.edt1 = child; }
+                else if (!s.edt1_hidden) s.edt1_hidden = child;
+            }
+        }
         if (id == 0 && cls == L"ComboBox" && ClassOf(GetParent(child)) == L"FloatNotifySink") {
             if (FindWindowExW(child, nullptr, L"Edit", nullptr)) {
-                if (!s.name_box) s.name_box = child;
+                if (visible) { if (!s.name_box) s.name_box = child; }
+                else if (!s.name_box_hidden) s.name_box_hidden = child;
             } else {
                 s.types = true;
             }
         }
-        if (id == 0x480 && cls == L"Edit") s.edt1 = child;
+        if (id == 0x480 && cls == L"Edit") {
+            if (visible) { if (!s.edt1) s.edt1 = child; }
+            else if (!s.edt1_hidden) s.edt1_hidden = child;
+        }
         return TRUE;
     }, reinterpret_cast<LPARAM>(&scan));
-    if (!scan.view || !ReachableProcess(pid)) return false;
+    if (!scan.view || (!allow_same_process && !ReachableProcess(pid))) return false;
     DialogInfo info;
     info.dialog = hwnd;
     info.pid = pid;
     info.tid = tid;
     info.modern = scan.modern;
-    info.name_edit = scan.name_box ? FirstEdit(scan.name_box) : scan.edt1;
+    const HWND chosen_box = scan.name_box ? scan.name_box : scan.name_box_hidden;
+    const HWND chosen_edt = scan.edt1 ? scan.edt1 : scan.edt1_hidden;
+    info.name_edit = scan.name_box ? FirstEdit(scan.name_box)
+                     : scan.edt1    ? scan.edt1
+                     : chosen_box   ? FirstEdit(chosen_box)
+                                    : chosen_edt;
     info.ok = GetDlgItem(hwnd, IDOK);
     const auto ok_text = info.ok ? TextOf(info.ok) : std::wstring();
-    for (const wchar_t* word : {L"\u4FDD\u5B58", L"\u5132\u5B58", L"\u5B58\u50A8", L"Save", L"save"})
+    for (const wchar_t* word :
+         {L"\u4FDD\u5B58", L"\u5132\u5B58", L"\u5B58\u50A8", L"\u5BFC\u51FA", L"\u532F\u51FA",
+          L"Save", L"save", L"Export", L"export"})
         if (ok_text.find(word) != std::wstring::npos) info.save = true;
     info.folder_picker = scan.modern && !scan.types && !info.save;
     if (!info.name_edit && !info.modern) return false;
     out = info;
     return true;
+}
+
+bool ProbeDialog(HWND hwnd, DialogInfo& out) {
+    return ProbeDialogControls(hwnd, false, out);
 }
 
 
@@ -584,12 +727,24 @@ struct DialogJump::Impl {
 
     std::wstring address_path;
     int address_ticks = 0;
-    bool address_keys_sent = false;
+    bool address_keys_sent = false, address_record = false;
+    ULONGLONG last_interaction_tick = 0;
+    Hot pressed_hit = Hot::None;
+    size_t pressed_chip = 0;
+    struct ClassicFolderJump {
+        ClassicFolderControls controls;
+        std::wstring target, temporary_name, original_name, previous_location, display_name;
+        ULONGLONG deadline = 0;
+        bool dispatch_completed = false, record = false;
+    };
+    std::optional<ClassicFolderJump> classic_folder_jump;
 
     void Run();
     void Evaluate(HWND foreground);
     void Attach(const DialogInfo& info);
     void Detach();
+    bool OwnWindow(HWND hwnd) const;
+    void SetBarNoActivate(bool no_activate);
     void TakeContext();
     void UpdatePalette();
     void Place();
@@ -617,7 +772,11 @@ struct DialogJump::Impl {
     void HideList();
     void Pick(size_t row);
     void Navigate(const std::wstring& path, bool dir, bool record = true);
-    void NavigateAddressBar(const std::wstring& path);
+    void NavigateAddressBar(const std::wstring& path, bool record);
+    bool NavigateViaFileNameBox(const std::wstring& path, bool record);
+    bool ClassicFolderArrived() const;
+    void FinishClassicFolderJump(bool arrived, bool show_failure);
+    void ShowFolderJumpFailure();
     void SendAddressKeys();
     void ReturnToDialog();
     void FocusEdit();
@@ -652,8 +811,8 @@ void DialogJump::Impl::Run() {
     wc.lpszClassName = kShadowClass;
     RegisterClassExW(&wc);
     const DWORD popup_ex = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOREDIRECTIONBITMAP;
-    bar.hwnd = CreateWindowExW(popup_ex, kBarClass, L"Pulse", WS_POPUP | WS_CLIPCHILDREN, 0, 0, 10, 10, nullptr,
-                               nullptr, instance, nullptr);
+    bar.hwnd = CreateWindowExW(popup_ex | WS_EX_NOACTIVATE, kBarClass, L"Pulse", WS_POPUP | WS_CLIPCHILDREN, 0, 0, 10, 10,
+                               nullptr, nullptr, instance, nullptr);
     list.hwnd = CreateWindowExW(popup_ex | WS_EX_NOACTIVATE, kListClass, L"", WS_POPUP, 0, 0, 10, 10, bar.hwnd,
                                 nullptr, instance, nullptr);
     bar_shadow.Create(instance);
@@ -678,8 +837,8 @@ void DialogJump::Impl::Run() {
         SetWindowSubclass(edit, &Impl::EditProc, 1, reinterpret_cast<DWORD_PTR>(this));
         SendMessageW(edit, EM_SETLIMITTEXT, 260, 0);
     }
-    tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, 0, 0, 0,
-                              0, bar.hwnd, nullptr, instance, nullptr);
+    tooltip = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT, TOOLTIPS_CLASSW, nullptr,
+                              WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, 0, 0, 0, 0, bar.hwnd, nullptr, instance, nullptr);
     if (tooltip) SendMessageW(tooltip, TTM_SETMAXTIPWIDTH, 0, 640);
 
     foreground_hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, &Impl::OnForeground, 0,
@@ -736,9 +895,26 @@ void CALLBACK DialogJump::Impl::OnDialogEvent(HWINEVENTHOOK, DWORD event, HWND h
     }
 }
 
+bool DialogJump::Impl::OwnWindow(HWND hwnd) const {
+    if (!hwnd) return false;
+    if (hwnd == bar.hwnd || hwnd == list.hwnd || hwnd == tooltip || hwnd == bar_shadow.hwnd ||
+        hwnd == list_shadow.hwnd)
+        return true;
+    const HWND root = GetAncestor(hwnd, GA_ROOT);
+    return root && (root == bar.hwnd || root == list.hwnd);
+}
+
+void DialogJump::Impl::SetBarNoActivate(bool no_activate) {
+    if (!bar.hwnd) return;
+    const LONG_PTR ex = GetWindowLongPtrW(bar.hwnd, GWL_EXSTYLE);
+    const LONG_PTR next = no_activate ? (ex | static_cast<LONG_PTR>(WS_EX_NOACTIVATE))
+                                      : (ex & ~static_cast<LONG_PTR>(WS_EX_NOACTIVATE));
+    if (next != ex) SetWindowLongPtrW(bar.hwnd, GWL_EXSTYLE, next);
+}
+
 void DialogJump::Impl::Evaluate(HWND foreground) {
     if (!foreground) return;
-    if (foreground == bar.hwnd || foreground == list.hwnd || foreground == tooltip) return;
+    if (OwnWindow(foreground)) return;
     if (dlg.dialog && foreground == dlg.dialog) {
         if (!IsWindowVisible(bar.hwnd)) Attach(dlg);
         return;
@@ -747,6 +923,29 @@ void DialogJump::Impl::Evaluate(HWND foreground) {
     if (ProbeDialog(foreground, info)) {
         Attach(info);
         return;
+    }
+    // Host applications with custom modal loops (such as Photoshop and 3ds Max)
+    // can briefly bounce foreground activation back to their disabled owner/main
+    // frame when the jump strip or edit box is interacted with. Keep the bar
+    // attached while the dialog itself stays visible, enabled, and owned (or
+    // right after a strip interaction / ongoing folder navigation).
+    if (dlg.dialog && IsWindow(dlg.dialog) && IsWindowVisible(dlg.dialog) && !IsIconic(dlg.dialog)) {
+        DWORD fg_pid = 0;
+        GetWindowThreadProcessId(foreground, &fg_pid);
+        if (fg_pid == dlg.pid && ClassOf(foreground) != L"#32770" && IsWindowEnabled(dlg.dialog)) {
+            const HWND owner = GetWindow(dlg.dialog, GW_OWNER);
+            const HWND owner_root = owner ? GetAncestor(owner, GA_ROOT) : nullptr;
+            const bool modal_owner_disabled =
+                (owner && !IsWindowEnabled(owner)) || (owner_root && !IsWindowEnabled(owner_root));
+            const ULONGLONG now = GetTickCount64();
+            const bool recent_activity =
+                (last_interaction_tick && now >= last_interaction_tick && now - last_interaction_tick < 600) ||
+                address_ticks > 0 || classic_folder_jump.has_value();
+            if (modal_owner_disabled || recent_activity) {
+                if (bar.hwnd && !IsWindowVisible(bar.hwnd)) Place();
+                return;
+            }
+        }
     }
     Detach();
     KillTimer(bar.hwnd, kTimerProbe);
@@ -791,6 +990,11 @@ void DialogJump::Impl::Attach(const DialogInfo& info) {
 
 void DialogJump::Impl::Detach() {
     search_requested = false;
+    pressed_hit = Hot::None;
+    last_interaction_tick = 0;
+    FinishClassicFolderJump(ClassicFolderArrived(), false);
+    if (bar.hwnd && GetCapture() == bar.hwnd) ReleaseCapture();
+    SetBarNoActivate(true);
     KillTimer(bar.hwnd, kTimerAddress);
     KillTimer(bar.hwnd, kTimerAuto);
     auto_pending = false;
@@ -934,21 +1138,33 @@ void DialogJump::Impl::Place() {
     right = std::min<LONG>(right, mi.rcWork.right);
     if (right <= left) return;
     // Reserve visible space below the dialog rather than covering its controls.
+    // If a fixed-size dialog cannot shift or shrink above the taskbar, flip above it.
     if (frame.bottom + height > mi.rcWork.bottom) {
         RECT outer{};
-        if (!GetWindowRect(dlg.dialog, &outer)) return;
-        const LONG overflow = frame.bottom + height - mi.rcWork.bottom;
-        const LONG shift = std::min(overflow, std::max(0L, frame.top - mi.rcWork.top));
-        const LONG shrink = overflow - shift;
-        if (outer.bottom - outer.top - shrink < static_cast<LONG>(200 * scale)) return;
-        if (!SetWindowPos(dlg.dialog, nullptr, outer.left, outer.top - shift,
-            outer.right - outer.left, outer.bottom - outer.top - shrink,
-            SWP_NOZORDER | SWP_NOACTIVATE)) return;
-        if (FAILED(DwmGetWindowAttribute(dlg.dialog, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame))))
-            GetWindowRect(dlg.dialog, &frame);
+        if (GetWindowRect(dlg.dialog, &outer)) {
+            const LONG overflow = frame.bottom + height - mi.rcWork.bottom;
+            const LONG shift = std::min(overflow, std::max(0L, frame.top - mi.rcWork.top));
+            const LONG shrink = overflow - shift;
+            if (outer.bottom - outer.top - shrink >= static_cast<LONG>(200 * scale)) {
+                if (SetWindowPos(dlg.dialog, nullptr, outer.left, outer.top - shift,
+                    outer.right - outer.left, outer.bottom - outer.top - shrink,
+                    SWP_NOZORDER | SWP_NOACTIVATE)) {
+                    if (FAILED(DwmGetWindowAttribute(dlg.dialog, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame))))
+                        GetWindowRect(dlg.dialog, &frame);
+                }
+            }
+        }
     }
-    const int top = frame.bottom;
+    int top = frame.bottom;
     placement = Placement::Below;
+    if (top + height > mi.rcWork.bottom) {
+        if (frame.top - height >= mi.rcWork.top) {
+            top = frame.top - height;
+            placement = Placement::Above;
+        } else {
+            top = std::max<LONG>(mi.rcWork.top, mi.rcWork.bottom - height);
+        }
+    }
     strip_px = {left, top, right, top + height};
     if (rescaled && edit) {
         if (HFONT font = ui::typography::CreateEditFont(scale, 13.0f)) {
@@ -1260,10 +1476,14 @@ void DialogJump::Impl::MoveSelection(int delta) {
 void DialogJump::Impl::BuildSearchRows() {
     rows.clear();
     std::vector<const Found*> folders, files;
-    for (const auto& f : known) folders.push_back(&f);
+    for (const auto& f : known) {
+        if (f.dir) folders.push_back(&f);
+        else if (!dlg.save && !dlg.folder_picker) files.push_back(&f);
+    }
     for (const auto& f : indexed) {
         bool dup = false;
         for (const auto* k : folders) dup = dup || SamePath(k->path, f.path);
+        for (const auto* k : files) dup = dup || SamePath(k->path, f.path);
         if (dup) continue;
         if (f.dir) folders.push_back(&f);
         else if (!dlg.save && !dlg.folder_picker) files.push_back(&f);
@@ -1403,6 +1623,15 @@ void DialogJump::Impl::OnSearchChanged() {
         if (!ShowFrequent() && list_mode == ListMode::Search) HideList();
         return;
     }
+    // A typed or pasted drive / UNC / %ENV% path resolves directly even when unindexed (#648).
+    {
+        std::wstring direct_path;
+        bool direct_dir = true;
+        if (ResolveTypedJumpPath(query, !dlg.save && !dlg.folder_picker, direct_path, direct_dir)) {
+            const std::wstring name = Leaf(direct_path);
+            known.push_back({direct_path, name.empty() ? direct_path : name, direct_dir});
+        }
+    }
     // Equal matches rank in list order, so the most visited go in first.
     std::vector<size_t> order(ctx.folders.size());
     std::iota(order.begin(), order.end(), size_t{0});
@@ -1415,6 +1644,9 @@ void DialogJump::Impl::OnSearchChanged() {
         const size_t index = order[ranked];
         if (!Exists(index)) continue;
         const auto& folder = ctx.folders[index];
+        bool dup = false;
+        for (const auto& k : known) dup = dup || SamePath(k.path, folder.path);
+        if (dup) continue;
         known.push_back({folder.path, folder.label.empty() ? Leaf(folder.path) : folder.label, true});
     }
     if (ctx.index) {
@@ -1468,23 +1700,39 @@ void DialogJump::Impl::Pick(size_t row) {
 
 // --- driving the dialog -----------------------------------------------------------
 
+static void ActivateDialogWindow(HWND dialog) {
+    if (!dialog || !IsWindow(dialog) || GetForegroundWindow() == dialog) return;
+    const HWND fg = GetForegroundWindow();
+    const DWORD fg_thread = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
+    const DWORD dlg_thread = GetWindowThreadProcessId(dialog, nullptr);
+    const DWORD self = GetCurrentThreadId();
+    const bool attach_fg = fg_thread && fg_thread != self && AttachThreadInput(self, fg_thread, TRUE) != FALSE;
+    const bool attach_dlg = dlg_thread && dlg_thread != self && dlg_thread != fg_thread &&
+                            AttachThreadInput(self, dlg_thread, TRUE) != FALSE;
+    SetForegroundWindow(dialog);
+    if (attach_dlg) AttachThreadInput(self, dlg_thread, FALSE);
+    if (attach_fg) AttachThreadInput(self, fg_thread, FALSE);
+}
+
 void DialogJump::Impl::ReturnToDialog() {
-    if (dlg.dialog && GetForegroundWindow() == bar.hwnd) SetForegroundWindow(dlg.dialog);
+    SetBarNoActivate(true);
+    if (dlg.dialog && GetForegroundWindow() == bar.hwnd) ActivateDialogWindow(dlg.dialog);
 }
 
 void DialogJump::Impl::Navigate(const std::wstring& path, bool dir, bool record) {
     HideList();
     if (path.empty() || !dlg.dialog || !IsWindow(dlg.dialog)) return;
     auto_pending = false;  // the user went somewhere first
-    if (record && ctx.remember && history) history->Record(dir ? path : Parent(path), dlg_app);
     KillTimer(bar.hwnd, kTimerAddress);
+    FinishClassicFolderJump(ClassicFolderArrived(), false);
     if (dir) {
-        NavigateAddressBar(path);
+        NavigateAddressBar(path, record);
         return;
     }
+    if (record && ctx.remember && history) history->Record(Parent(path), dlg_app);
     // Only an explicitly chosen file may submit the host dialog. Folder jumps
     // must never invoke IDOK: some hosts accept it instead of navigating.
-    if (!SetText(dlg.name_edit, path)) return;
+    if (!SetEditTextAndNotify(dlg.name_edit, path)) return;
     PostMessageW(dlg.dialog, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), reinterpret_cast<LPARAM>(dlg.ok));
     ReturnToDialog();
 }
@@ -1495,32 +1743,147 @@ static bool ModifiersDown() {
     return false;
 }
 
-void DialogJump::Impl::NavigateAddressBar(const std::wstring& path) {
-    // Alt+D puts the dialog's address bar into edit mode (once Ctrl+G's Ctrl
-    // is up); the path goes in once the bar has the focus.
-    if (GetForegroundWindow() != dlg.dialog) SetForegroundWindow(dlg.dialog);
+bool DialogJump::Impl::NavigateViaFileNameBox(const std::wstring& path, bool record) {
+    if (dlg.folder_picker || !IsWindow(dlg.dialog)) return false;
+    std::wstring target = PlainPath(path);
+    if (!IsFullFolderPath(target)) return false;
+    while (target.size() > 3 && target.back() == L'\\') target.pop_back();
+    const DWORD attrs = GetFileAttributesW(target.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0)
+        return false;
+
+    SetBarNoActivate(true);
+    ActivateDialogWindow(dlg.dialog);
+    const auto controls = ProbeClassicFolderControls(dlg.dialog);
+    if (!controls.edit) return false;
+    const auto location = TextOf(controls.location);
+    if (location.empty()) return false;
+    if (SamePath(location, target)) return true;
+    SHFILEINFOW info{};
+    SHGetFileInfoW(target.c_str(), 0, &info, sizeof(info), SHGFI_DISPLAYNAME);
+    std::wstring display_name = info.szDisplayName;
+    // A label alone can't distinguish two directories with the same name.
+    if (SamePath(location, Leaf(target)) || SamePath(location, display_name)) return false;
+    auto original = TryTextOf(controls.edit);
+    if (!original || (controls.name_box != controls.edit && TryTextOf(controls.name_box) != original)) return false;
+    const std::wstring temporary = target.back() == L'\\' ? target : target + L'\\';
+    dlg.name_edit = controls.edit;
+    if (!WriteClassicName(controls, temporary)) {
+        if (TryTextOf(controls.edit) == temporary) WriteClassicName(controls, *original);
+        return false;
+    }
+    if (!IsWindowEnabled(dlg.dialog) || !IsWindowEnabled(controls.ok) ||
+        GetDlgItem(dlg.dialog, IDOK) != controls.ok) {
+        if (TryTextOf(controls.edit) == temporary) WriteClassicName(controls, *original);
+        return false;
+    }
+    classic_folder_jump = ClassicFolderJump{controls, std::move(target), temporary, std::move(*original), location,
+        std::move(display_name), GetTickCount64() + 2500, false, record};
+    if (!SetTimer(bar.hwnd, kTimerClassicFolder, 60, nullptr)) {
+        classic_folder_jump->dispatch_completed = true;
+        FinishClassicFolderJump(false, false);
+        return false;
+    }
+    // Use the real, verified button, not a fabricated IDOK to the dialog.
+    // This message contains no cross-process pointer.
+    DWORD_PTR unused = 0;
+    const bool delivered =
+        SendMessageTimeoutW(controls.ok, BM_CLICK, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 500, &unused) != 0;
+    if (classic_folder_jump && classic_folder_jump->controls.edit == controls.edit &&
+        classic_folder_jump->temporary_name == temporary) classic_folder_jump->dispatch_completed = delivered;
+    return true;
+}
+
+bool DialogJump::Impl::ClassicFolderArrived() const {
+    if (!classic_folder_jump || !IsWindowVisible(dlg.dialog)) return false;
+    DWORD pid = 0;
+    if (GetWindowThreadProcessId(dlg.dialog, &pid) != dlg.tid || pid != dlg.pid) return false;
+    const auto& jump = *classic_folder_jump;
+    if (!IsChild(dlg.dialog, jump.controls.location)) return false;
+    const auto location = TextOf(jump.controls.location);
+    return !location.empty() && !SamePath(location, jump.previous_location) &&
+        (SamePath(location, jump.target) ||
+         (!IsFullFolderPath(location) && (SamePath(location, Leaf(jump.target)) ||
+                                         SamePath(location, jump.display_name))));
+}
+
+void DialogJump::Impl::FinishClassicFolderJump(bool arrived, bool show_failure) {
+    if (!classic_folder_jump) return;
+    KillTimer(bar.hwnd, kTimerClassicFolder);
+    auto jump = std::move(*classic_folder_jump);
+    classic_folder_jump.reset();
+    DWORD pid = 0;
+    if (GetWindowThreadProcessId(dlg.dialog, &pid) != dlg.tid || pid != dlg.pid) return;
+    if ((arrived || jump.dispatch_completed) && IsChild(dlg.dialog, jump.controls.edit) &&
+        IsChild(dlg.dialog, jump.controls.name_box) && IsWindowEnabled(jump.controls.edit)) {
+        const auto current = TryTextOf(jump.controls.edit);
+        // Preserve any new name the user typed. An unacknowledged click
+        // may still run; don't replace its temporary directory with a file.
+        if (current && (*current == jump.temporary_name || (arrived && current->empty())))
+            WriteClassicName(jump.controls, jump.original_name);
+    }
+    if (arrived && jump.record && ctx.remember && history) history->Record(jump.target, dlg_app);
+    if (!arrived && show_failure && jump.record) ShowFolderJumpFailure();
+}
+
+void DialogJump::Impl::ShowFolderJumpFailure() {
+    if (!showing || !list.hwnd || !bar.hwnd) return;
+    rows = {{Row::Kind::Note, l10n::Get(StringId::PickerOpenFailed), {}, true}};
+    list_mode = ListMode::Places;
+    selected = -1;
+    ShowList();
+    SetTimer(list.hwnd, 1, 50, nullptr);
+}
+
+void DialogJump::Impl::NavigateAddressBar(const std::wstring& path, bool record) {
+    if (!dlg.modern && !BreadcrumbToolbar(dlg.dialog) && ClassOf(dlg.dialog) == L"#32770") {
+        if (!NavigateViaFileNameBox(path, record) && record) ShowFolderJumpFailure();
+        return;
+    }
+    if (record && ctx.remember && history) history->Record(path, dlg_app);
+    // The address must actually enter edit mode after the activation request.
+    ActivateDialogWindow(dlg.dialog);
     address_path = path;
+    address_record = record;
     address_ticks = 0;
     address_keys_sent = false;
     SetTimer(bar.hwnd, kTimerAddress, 30, nullptr);
 }
 
-void DialogJump::Impl::SendAddressKeys() {
-    address_keys_sent = true;
+static void SendCtrlL(HWND dialog) {
+    if (!dialog || GetForegroundWindow() != dialog || ModifiersDown()) return;
     INPUT keys[4]{};
     for (auto& key : keys) key.type = INPUT_KEYBOARD;
-    keys[0].ki.wVk = VK_MENU;
-    keys[1].ki.wVk = 'D';
-    keys[2].ki.wVk = 'D';
+    keys[0].ki.wVk = VK_CONTROL;
+    keys[1].ki.wVk = 'L';
+    keys[2].ki.wVk = 'L';
     keys[2].ki.dwFlags = KEYEVENTF_KEYUP;
-    keys[3].ki.wVk = VK_MENU;
+    keys[3].ki.wVk = VK_CONTROL;
     keys[3].ki.dwFlags = KEYEVENTF_KEYUP;
-    if (GetForegroundWindow() == dlg.dialog) SendInput(4, keys, sizeof(INPUT));
+    SendInput(4, keys, sizeof(INPUT));
+}
+
+void DialogJump::Impl::SendAddressKeys() {
+    address_keys_sent = true;
+    // Prefer clicking the breadcrumb bar's blank trailing area via window messages so
+    // global Alt+D clipboard/snippet hotkeys are never triggered (#648).
+    if (const HWND crumb = BreadcrumbToolbar(dlg.dialog)) {
+        RECT rc{};
+        if (GetClientRect(crumb, &rc) && (rc.right - rc.left) > 48 && rc.bottom > rc.top) {
+            const LPARAM pt = MAKELPARAM(std::max<LONG>(1, rc.right - 4), (rc.bottom - rc.top) / 2);
+            PostMessageW(crumb, WM_LBUTTONDOWN, MK_LBUTTON, pt);
+            PostMessageW(crumb, WM_LBUTTONUP, 0, pt);
+            return;
+        }
+    }
+    SendCtrlL(dlg.dialog);
 }
 
 void DialogJump::Impl::FocusEdit() {
     if (!showing || !dlg.dialog || !edit) return;
+    last_interaction_tick = GetTickCount64();
     search_requested = true;
+    SetBarNoActivate(false);
     const HWND foreground = GetForegroundWindow();
     const DWORD foreground_thread = foreground ? GetWindowThreadProcessId(foreground, nullptr) : 0;
     const DWORD self = GetCurrentThreadId();
@@ -1534,7 +1897,10 @@ void DialogJump::Impl::FocusEdit() {
 }
 
 void DialogJump::Impl::OnEditFocus(bool focused) {
-    if (!focused) search_requested = false;
+    if (!focused) {
+        search_requested = false;
+        SetBarNoActivate(true);
+    }
     if (focused == edit_focused) return;
     edit_focused = focused;
     UpdateFieldBrush();
@@ -1564,9 +1930,19 @@ bool DialogJump::Impl::EditKey(WPARAM key) {
             MoveSelection(key == VK_DOWN ? 1 : -1);
         }
         return true;
-    case VK_RETURN:
-        if (list_mode == ListMode::Search && selected >= 0) Pick(static_cast<size_t>(selected));
+    case VK_RETURN: {
+        if (list_mode == ListMode::Search && selected >= 0) {
+            Pick(static_cast<size_t>(selected));
+            return true;
+        }
+        std::wstring direct_path;
+        bool direct_dir = true;
+        if (edit && ResolveTypedJumpPath(TextOf(edit), !dlg.save && !dlg.folder_picker, direct_path, direct_dir)) {
+            SetWindowTextW(edit, L"");
+            Navigate(direct_path, direct_dir);
+        }
         return true;
+    }
     case VK_ESCAPE:
         if (list_mode != ListMode::Hidden) HideList();
         else if (GetWindowTextLengthW(edit) > 0) SetWindowTextW(edit, L"");
@@ -1619,11 +1995,16 @@ LRESULT DialogJump::Impl::HandleBar(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 1;
     case WM_MOUSEACTIVATE: {
         // Only the search box takes the focus; the rest works without it.
+        last_interaction_tick = GetTickCount64();
         POINT pt{};
         GetCursorPos(&pt);
         ScreenToClient(hwnd, &pt);
         const float x = static_cast<float>(pt.x) / scale, y = static_cast<float>(pt.y) / scale;
-        return Contains(Inflate(query_rect, 3), x, y) ? MA_ACTIVATE : MA_NOACTIVATE;
+        if (Contains(Inflate(query_rect, 3), x, y)) {
+            SetBarNoActivate(false);
+            return MA_ACTIVATE;
+        }
+        return MA_NOACTIVATE;
     }
     case WM_MOUSEMOVE: {
         float x, y;
@@ -1661,22 +2042,44 @@ LRESULT DialogJump::Impl::HandleBar(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_LBUTTONDOWN: {
+        last_interaction_tick = GetTickCount64();
         float x, y;
         point(x, y);
-        if (Contains(Inflate(query_rect, 3), x, y)) FocusEdit();
-        return 0;
-    }
-    case WM_LBUTTONUP: {
-        float x, y;
-        point(x, y);
-        for (const auto& chip : chips)
-            if (Contains(chip.rect, x, y)) {
-                Navigate(ctx.folders[chip.folder].path, true);
+        if (Contains(Inflate(query_rect, 3), x, y)) {
+            pressed_hit = Hot::None;
+            FocusEdit();
+            return 0;
+        }
+        pressed_hit = Hot::None;
+        for (size_t i = 0; i < chips.size(); ++i) {
+            if (Contains(Inflate(chips[i].rect, 2), x, y)) {
+                pressed_hit = Hot::Chip;
+                pressed_chip = i;
+                SetCapture(hwnd);
                 return 0;
             }
-        if (Contains(keys_rect, x, y)) {
-            Navigate(ctx.current, true);
-        } else if (Contains(more_rect, x, y)) {
+        }
+        if (Contains(Inflate(keys_rect, 2), x, y)) {
+            pressed_hit = Hot::Keys;
+            SetCapture(hwnd);
+        } else if (Contains(Inflate(more_rect, 2), x, y)) {
+            pressed_hit = Hot::More;
+            SetCapture(hwnd);
+        }
+        return 0;
+    }
+    case WM_CAPTURECHANGED:
+        pressed_hit = Hot::None;
+        return 0;
+    case WM_LBUTTONUP: {
+        last_interaction_tick = GetTickCount64();
+        const Hot down_hit = pressed_hit;
+        const size_t down_chip = pressed_chip;
+        pressed_hit = Hot::None;
+        if (GetCapture() == hwnd) ReleaseCapture();
+        float x, y;
+        point(x, y);
+        const auto toggle_places = [&] {
             if (list_mode == ListMode::Places) {
                 HideList();
             } else {
@@ -1685,6 +2088,30 @@ LRESULT DialogJump::Impl::HandleBar(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 selected = -1;
                 ShowList();
                 SetTimer(list.hwnd, 1, 50, nullptr);  // closes on a click elsewhere
+            }
+        };
+        if (down_hit == Hot::Chip && down_chip < chips.size() && Contains(Inflate(chips[down_chip].rect, 4), x, y)) {
+            Navigate(ctx.folders[chips[down_chip].folder].path, true);
+            return 0;
+        }
+        if (down_hit == Hot::Keys && Contains(Inflate(keys_rect, 4), x, y)) {
+            Navigate(ctx.current, true);
+            return 0;
+        }
+        if (down_hit == Hot::More && Contains(Inflate(more_rect, 4), x, y)) {
+            toggle_places();
+            return 0;
+        }
+        if (down_hit == Hot::None) {
+            for (const auto& chip : chips)
+                if (Contains(chip.rect, x, y)) {
+                    Navigate(ctx.folders[chip.folder].path, true);
+                    return 0;
+                }
+            if (Contains(keys_rect, x, y)) {
+                Navigate(ctx.current, true);
+            } else if (Contains(more_rect, x, y)) {
+                toggle_places();
             }
         }
         return 0;
@@ -1735,34 +2162,47 @@ LRESULT DialogJump::Impl::HandleBar(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (GetForegroundWindow() == probe_target && ProbeDialog(probe_target, info)) Attach(info);
             else if (++probe_tries >= 30 || !IsWindow(probe_target)) KillTimer(hwnd, kTimerProbe);
         } else if (wp == kTimerAddress) {
-            if (!IsWindow(dlg.dialog) || GetForegroundWindow() != dlg.dialog) {
+            if (!IsWindowVisible(dlg.dialog) || !IsWindowEnabled(dlg.dialog)) {
                 KillTimer(hwnd, kTimerAddress);
                 return 0;
             }
             if (!address_keys_sent) {
                 if (ModifiersDown()) {
-                    if (++address_ticks >= 40) KillTimer(hwnd, kTimerAddress);
+                    if (++address_ticks >= 40) {
+                        KillTimer(hwnd, kTimerAddress);
+                        if (address_record) ShowFolderJumpFailure();
+                    }
                     return 0;
                 }
                 address_ticks = 0;
                 SendAddressKeys();
                 return 0;
             }
-            GUITHREADINFO gti{sizeof(gti)};
-            const HWND focus = dlg.dialog && GetGUIThreadInfo(dlg.tid, &gti) ? gti.hwndFocus : nullptr;
-            if (focus != dlg.name_edit && IsAddressEdit(dlg.dialog, focus)) {
+            if (const HWND addr_edit = FindActiveAddressEdit(dlg.dialog, dlg.tid, dlg.name_edit)) {
                 KillTimer(hwnd, kTimerAddress);
-                if (!SetText(focus, PlainPath(address_path))) return 0;
-                GUITHREADINFO confirmed{sizeof(confirmed)};
-                if (!GetGUIThreadInfo(dlg.tid, &confirmed) || confirmed.hwndFocus != focus || ModifiersDown()) return 0;
-                INPUT keys[2]{};
-                keys[0].type = keys[1].type = INPUT_KEYBOARD;
-                keys[0].ki.wVk = keys[1].ki.wVk = VK_RETURN;
-                keys[1].ki.dwFlags = KEYEVENTF_KEYUP;
-                if (GetForegroundWindow() == dlg.dialog) SendInput(2, keys, sizeof(INPUT));
-            } else if (++address_ticks > 12) {
-                KillTimer(hwnd, kTimerAddress);
+                if (GetForegroundWindow() != dlg.dialog || !SetEditTextAndNotify(addr_edit, PlainPath(address_path)) ||
+                    FindActiveAddressEdit(dlg.dialog, dlg.tid, dlg.name_edit) != addr_edit ||
+                    GetForegroundWindow() != dlg.dialog ||
+                    !PostMessageW(addr_edit, WM_KEYDOWN, VK_RETURN, 0x001C0001)) {
+                    if (address_record) ShowFolderJumpFailure();
+                } else {
+                    PostMessageW(addr_edit, WM_KEYUP, VK_RETURN, 0xC01C0001);
+                }
+            } else {
+                ++address_ticks;
+                if (address_ticks == 3) {
+                    ActivateDialogWindow(dlg.dialog);
+                    SendCtrlL(dlg.dialog);
+                } else if (address_ticks >= 24) {
+                    KillTimer(hwnd, kTimerAddress);
+                    if (address_record) ShowFolderJumpFailure();
+                }
             }
+        } else if (wp == kTimerClassicFolder) {
+            if (!classic_folder_jump) KillTimer(hwnd, kTimerClassicFolder);
+            else if (ClassicFolderArrived()) FinishClassicFolderJump(true, false);
+            else if (!IsWindow(dlg.dialog) || GetTickCount64() >= classic_folder_jump->deadline)
+                FinishClassicFolderJump(false, true);
         }
         return 0;
     case kMsgContext: {
@@ -2002,7 +2442,8 @@ int RunDialogJumpNavigationTest(const wchar_t* output) {
                 } else if (!self->submitted) {
                     GUITHREADINFO focus{sizeof(focus)};
                     GetGUIThreadInfo(self->jump->dlg.tid, &focus);
-                    const bool ready = self->jump->address_keys_sent && IsAddressEdit(self->jump->dlg.dialog, focus.hwndFocus);
+                    const bool ready = self->jump->address_keys_sent &&
+                        FindActiveAddressEdit(self->jump->dlg.dialog, self->jump->dlg.tid, self->jump->dlg.name_edit) != nullptr;
                     self->jump->HandleBar(window, WM_TIMER, kTimerAddress, 0);
                     if (self->ticks == 15) {
                         *self->log << "address_keys=" << self->jump->address_keys_sent
@@ -2075,6 +2516,149 @@ int RunDialogJumpNavigationTest(const wchar_t* output) {
         if (!okay) ++failures;
         RemovePropW(jump.bar.hwnd, L"Pulse.JumpDriver");
         DestroyWindow(jump.bar.hwnd); jump.bar.hwnd = nullptr;
+    }
+    using SaveFileNameFn = BOOL(WINAPI*)(LPOPENFILENAMEW);
+    if (const auto save_fn = native ? reinterpret_cast<SaveFileNameFn>(GetProcAddress(native, "GetSaveFileNameW")) : nullptr) {
+        DialogJump::Impl jump;
+        jump.instance = GetModuleHandleW(nullptr);
+        jump.ctx.remember = false;
+        jump.bar.hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"Jump classic navigation fixture",
+            WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, jump.instance, nullptr);
+        if (!jump.bar.hwnd) {
+            log << "[FAIL] classic timer window error=" << GetLastError() << std::endl;
+            ++failures;
+        } else {
+            ShowWindow(jump.bar.hwnd, SW_HIDE);
+            struct ClassicDriver {
+                DialogJump::Impl* jump;
+                std::ofstream* log;
+                std::wstring target;
+                bool reject_write;
+                int ticks = 0, submitted_tick = 0;
+                int file_ok = 0;
+                bool started = false, probed_classic_save = false, navigated = false, kept_name = false,
+                     write_guard_installed = false;
+                static LRESULT CALLBACK RejectWrite(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+                    if (msg == WM_SETTEXT) return TRUE; // Message claims success without changing the input.
+                    return DefSubclassProc(hwnd, msg, wp, lp);
+                }
+                static UINT_PTR CALLBACK Hook(HWND hdlg, UINT msg, WPARAM, LPARAM lp) {
+                    const HWND parent = GetParent(hdlg);
+                    if (msg == WM_INITDIALOG) {
+                        const auto* ofn = reinterpret_cast<const OPENFILENAMEW*>(lp);
+                        if (parent && ofn) SetPropW(parent, L"Pulse.ClassicDriver", reinterpret_cast<HANDLE>(ofn->lCustData));
+                        return 0;
+                    }
+                    if (msg == WM_NOTIFY && lp) {
+                        const auto* nm = reinterpret_cast<const NMHDR*>(lp);
+                        auto* drv = parent ? reinterpret_cast<ClassicDriver*>(GetPropW(parent, L"Pulse.ClassicDriver")) : nullptr;
+                        if (nm->code == CDN_INITDONE && parent) {
+                            SendMessageW(parent, CDM_SETCONTROLTEXT, IDOK, reinterpret_cast<LPARAM>(L"\u5BFC\u51FA"));
+                        } else if (nm->code == CDN_FOLDERCHANGE && parent && drv) {
+                            wchar_t folder[MAX_PATH]{};
+                            if (SendMessageW(parent, CDM_GETFOLDERPATH, ARRAYSIZE(folder), reinterpret_cast<LPARAM>(folder)) > 0)
+                                drv->navigated = SamePath(folder, drv->target);
+                        } else if (nm->code == CDN_FILEOK && drv) {
+                            ++drv->file_ok;
+                            SetWindowLongPtrW(hdlg, DWLP_MSGRESULT, 1);
+                            return 1; // This fixture must never accept an export.
+                        }
+                    }
+                    return 0;
+                }
+                static void CALLBACK Tick(HWND window, UINT, UINT_PTR, DWORD) {
+                    auto* self = reinterpret_cast<ClassicDriver*>(GetPropW(window, L"Pulse.ClassicDriver"));
+                    if (!self) return;
+                    ++self->ticks;
+                    if (self->ticks < 8) return;
+                    if (!self->started) {
+                        HWND host = nullptr;
+                        EnumThreadWindows(GetCurrentThreadId(), [](HWND candidate, LPARAM parameter) -> BOOL {
+                            if (ClassOf(candidate) == L"#32770" && TextOf(candidate) == L"Pulse isolated classic export jump test") {
+                                *reinterpret_cast<HWND*>(parameter) = candidate;
+                                return FALSE;
+                            }
+                            return TRUE;
+                        }, reinterpret_cast<LPARAM>(&host));
+                        if (!host || !IsWindowVisible(host)) return;
+                        self->probed_classic_save = ProbeDialogControls(host, true, self->jump->dlg) &&
+                            !self->jump->dlg.modern && self->jump->dlg.save && self->jump->dlg.name_edit != nullptr;
+                        if (!self->probed_classic_save) {
+                            KillTimer(window, 92);
+                            PostMessageW(host, WM_CLOSE, 0, 0);
+                            return;
+                        }
+                        self->started = true;
+                        self->submitted_tick = self->ticks;
+                        const auto controls = ProbeClassicFolderControls(host);
+                        if (!controls.edit) return;
+                        if (self->reject_write) {
+                            self->write_guard_installed =
+                                SetWindowSubclass(controls.name_box, RejectWrite, 1, 0) != FALSE;
+                            if (!self->write_guard_installed) return;
+                        }
+                        self->jump->ctx.folders = {{self->target, L"Destination", true, false}};
+                        self->jump->chips = {{{12, 4, 92, 28}, 0, false, L"Destination", {}}};
+                        const LPARAM chip_point = MAKELPARAM(30, 14);
+                        self->jump->HandleBar(window, WM_LBUTTONDOWN, MK_LBUTTON, chip_point);
+                        self->jump->HandleBar(window, WM_LBUTTONUP, 0, chip_point);
+                    } else {
+                        self->jump->HandleBar(window, WM_TIMER, kTimerClassicFolder, 0);
+                        if ((self->navigated || self->reject_write || self->file_ok) &&
+                            !self->jump->classic_folder_jump && self->ticks - self->submitted_tick >= 2) {
+                            const auto controls = ProbeClassicFolderControls(self->jump->dlg.dialog);
+                            self->kept_name = TextOf(controls.edit) == L"keep-this-name.fbx";
+                            KillTimer(window, 92);
+                            PostMessageW(self->jump->dlg.dialog, WM_CLOSE, 0, 0);
+                            return;
+                        }
+                    }
+                    if (self->ticks > 120) {
+                        KillTimer(window, 92);
+                        if (self->jump->dlg.dialog) PostMessageW(self->jump->dlg.dialog, WM_CLOSE, 0, 0);
+                    }
+                }
+            };
+            for (bool reject_write : {false, true}) {
+                ClassicDriver classic_driver{&jump, &log, destination.wstring(), reject_write};
+                jump.dlg = {};
+                wchar_t file_buf[MAX_PATH] = L"keep-this-name.fbx";
+                OPENFILENAMEW ofn{};
+                ofn.lStructSize = sizeof(ofn);
+                ofn.lpstrFilter = L"Autodesk (*.fbx)\0*.fbx\0";
+                ofn.lpstrDefExt = L"fbx";
+                ofn.lpstrFile = file_buf;
+                ofn.nMaxFile = ARRAYSIZE(file_buf);
+                const std::wstring initial = root.wstring();
+                ofn.lpstrInitialDir = initial.c_str();
+                ofn.lpstrTitle = L"Pulse isolated classic export jump test";
+                ofn.Flags = OFN_EXPLORER | OFN_ENABLEHOOK | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR | OFN_DONTADDTORECENT;
+                ofn.lpfnHook = ClassicDriver::Hook;
+                ofn.lCustData = reinterpret_cast<LPARAM>(&classic_driver);
+                const bool property = SetPropW(jump.bar.hwnd, L"Pulse.ClassicDriver", &classic_driver) != FALSE;
+                const UINT_PTR timer = SetTimer(jump.bar.hwnd, 92, 30, ClassicDriver::Tick);
+                log << "mode=3 reject_write=" << reject_write << " property=" << property << " timer=" << timer << std::endl;
+                const BOOL accepted = save_fn(&ofn);
+                KillTimer(jump.bar.hwnd, 92);
+                jump.FinishClassicFolderJump(false, false);
+                const bool okay = !accepted && !classic_driver.file_ok && classic_driver.probed_classic_save &&
+                    classic_driver.navigated == !reject_write && classic_driver.kept_name &&
+                    (!reject_write || classic_driver.write_guard_installed);
+                log << (okay ? "[PASS] " : "[FAIL] ")
+                    << (reject_write ? "mode=3 rejected write does not navigate or save; export name retained"
+                                     : "mode=3 classic FBX folder chip reaches the exact target without saving; export name retained")
+                    << " accepted=" << accepted << " probed=" << classic_driver.probed_classic_save
+                    << " navigated=" << classic_driver.navigated << " kept=" << classic_driver.kept_name
+                    << " file_ok=" << classic_driver.file_ok << std::endl;
+                if (!okay) ++failures;
+                RemovePropW(jump.bar.hwnd, L"Pulse.ClassicDriver");
+            }
+            DestroyWindow(jump.bar.hwnd);
+            jump.bar.hwnd = nullptr;
+        }
+    } else {
+        log << "[FAIL] mode=3 GetSaveFileNameW export missing from comdlg32.dll" << std::endl;
+        ++failures;
     }
     if (root.parent_path() == fs::absolute(L"bench_data") && root.filename().wstring().starts_with(L"jump-navigation-")) {
         std::error_code error; fs::remove_all(root, error);
@@ -2153,6 +2737,26 @@ static int RunDialogJumpAutoLifecycleTest(const wchar_t* output) {
     check(f.auto_pending, "a new dialog after destruction can automatically navigate again");
     f.Detach();
     DestroyWindow(replacement_dialog);
+    const HWND modal_owner = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"Jump owner fixture",
+        WS_POPUP | WS_VISIBLE, 0, 0, 0, 0, nullptr, nullptr, f.instance, nullptr);
+    const HWND modal_dialog = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"Jump modal fixture",
+        WS_POPUP | WS_VISIBLE, 0, 0, 0, 0, modal_owner, nullptr, f.instance, nullptr);
+    if (modal_owner && modal_dialog) {
+        EnableWindow(modal_owner, FALSE);
+        DialogInfo modal_info{};
+        modal_info.dialog = modal_dialog;
+        modal_info.tid = GetWindowThreadProcessId(modal_dialog, &modal_info.pid);
+        f.Attach(modal_info);
+        f.Evaluate(modal_owner);
+        check(f.dlg.dialog == modal_dialog, "disabled modal owner foreground bounce keeps bar attached");
+        DialogJump::Impl::OnDialogEvent(nullptr, EVENT_OBJECT_HIDE, modal_dialog, OBJID_WINDOW, CHILDID_SELF,
+                                        modal_info.tid, 0);
+        check(!f.dlg.dialog, "dialog hide event detaches bar immediately");
+    } else {
+        check(false, "create modal owner fixture windows");
+    }
+    if (modal_dialog) DestroyWindow(modal_dialog);
+    if (modal_owner) DestroyWindow(modal_owner);
     t_impl = previous_impl;
     DestroyWindow(other);
     DestroyWindow(f.list.hwnd);

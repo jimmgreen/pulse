@@ -20,6 +20,11 @@ struct PainterTestPeer {
 
 namespace pulse::ui {
 struct FluentMenuTestPeer {
+    static HWND EnsureHiddenFilter(FluentMenu& menu) {
+        if (!menu.EnsureWindow()) return nullptr;
+        menu.filter_fn_ = [](const std::wstring&) { return std::vector<FluentMenuItem>{}; };
+        return menu.EnsureFilterEdit() ? menu.edit_ : nullptr;
+    }
     static bool CheckSnapshotReplacement() {
         Compositor compositor;
         FluentMenu menu;
@@ -302,6 +307,26 @@ int AdvanceCacheRegression() {
 
 int wmain(int argc, wchar_t** argv) {
     using namespace pulse::ui;
+    if (argc == 2 && std::wstring(argv[1]) == L"--menu-filter-cue") {
+        const std::wstring group = L"标签页组名称…";
+        const std::wstring search = L"搜索命令、文件夹…";
+        FluentMenu menu;
+        const auto cue = [](HWND edit) {
+            wchar_t text[256]{};
+            SendMessageW(edit, EM_GETCUEBANNER, reinterpret_cast<WPARAM>(text), std::size(text));
+            return std::wstring(text);
+        };
+        menu.SetFilterPlaceholder(group);
+        const HWND edit = FluentMenuTestPeer::EnsureHiddenFilter(menu);
+        Check(edit && cue(edit) == group, "new edit displays tab group name cue");
+        menu.SetFilterPlaceholder(search);
+        Check(edit && FluentMenuTestPeer::EnsureHiddenFilter(menu) == edit && cue(edit) == search,
+              "reused edit restores the search cue");
+        menu.SetFilterPlaceholder(group);
+        Check(edit && FluentMenuTestPeer::EnsureHiddenFilter(menu) == edit && cue(edit) == group,
+              "reused edit displays tab group name cue again");
+        return failures ? 1 : 0;
+    }
     if (argc == 2 && std::wstring(argv[1]) == L"--advance-cache") return AdvanceCacheRegression();
     if (argc == 2 && std::wstring(argv[1]) == L"--menu-identity") {
         Check(FluentMenuTestPeer::CheckSnapshotReplacement(),

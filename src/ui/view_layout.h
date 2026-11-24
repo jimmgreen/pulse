@@ -108,8 +108,8 @@ inline constexpr float IconGridNameBlockDip(int lines) noexcept {
 float IconGridNameWidth(ViewMode mode, float scale, float icon_dip = 0.0f) noexcept;
 // Name lines for a whole folder from the lines each sampled name needs: one
 // only when 95% fit on one line, otherwise what 75% need, kept to 2..4.
-// Folders show their size on the last line, so a folder holding subfolders
-// keeps at least two. Sorts `needed`.
+// Folders show their size on an additional last line, so a folder holding
+// subfolders keeps at least two name lines plus one size line. Sorts `needed`.
 int AutoIconNameLines(std::vector<int>& needed, bool has_folders) noexcept;
 
 // Photo wall (P2): justified rows of one height, each item as wide as its
@@ -134,11 +134,13 @@ WallRows BuildWallRows(const std::vector<float>& aspects, float width, float row
 
 // Size inputs of a pane's layout; a plain row height converts implicitly.
 struct ViewLayoutParams {
-    ViewLayoutParams(float row_height = 0.0f, float icon = 0.0f) noexcept
-        : row_height_dip(row_height), icon_dip(icon) {}
+    ViewLayoutParams(float row_height = 0.0f, float icon = 0.0f,
+                     float name_line = kIconGridNameLineDip) noexcept
+        : row_height_dip(row_height), icon_dip(icon), icon_name_line_dip(name_line) {}
     // >0: Details row height override; icon grids: name block (IconGridNameBlockDip)
     float row_height_dip;
     float icon_dip;  // icon grids: thumbnail width in DIP (0 = the mode's preset)
+    float icon_name_line_dip; // icon grids: enough height for the current UI font
     // Icon grids shown as a photo wall: its rows (for this item count), else null.
     const WallRows* wall = nullptr;
 };
@@ -162,6 +164,7 @@ struct ViewLayoutMetrics {
     float pitch_x = 0.0f;
     float pitch_y = 0.0f;
     int name_lines = kIconGridNameLines;  // icon grids
+    float name_line_px = 0.0f;
 };
 
 // Pure, O(1) virtual geometry. Coordinates returned by ItemRect are in the

@@ -76,20 +76,18 @@ std::wstring Collapse(const std::wstring& s) {
 }
 
 struct TocEntry { int level = 0; std::wstring file, fragment, title; };
-struct Anchor { size_t section = 0, block = 0; };
+using ChapterAnchors = std::map<std::wstring, size_t>;
 
 class HtmlConverter {
 public:
-    HtmlConverter(const std::wstring& zip, DocPayload& out, PreviewImageCache& images,
-                  std::map<std::wstring, Anchor>& anchors)
-        : zip_(zip), out_(out), images_(images), anchors_(anchors) {}
+    HtmlConverter(const std::wstring& zip, DocPayload& out, PreviewImageCache& images)
+        : zip_(zip), out_(out), images_(images) {}
 
     // Converts one spine document; title: its <title>.
-    void Convert(const std::wstring& part, std::wstring_view html, size_t section, size_t base,
+    void Convert(const std::wstring& part, std::wstring_view html, ChapterAnchors* anchors, size_t base,
                  std::wstring& title) {
-        part_ = part;
+        anchors_ = anchors;
         dir_ = DirOf(part);
-        section_ = section;
         base_ = base;
         quote_ = pre_ = svg_ = heading_ = 0;
         lists_.clear();
@@ -101,8 +99,7 @@ public:
             const std::wstring& n = x.name();
             if (k == XmlPull::Open) {
                 if (n == L"head") { ReadHead(x, title); continue; }
-                const std::wstring id = x.Attr(L"id");
-                if (!id.empty()) anchors_[part_ + L"#" + id] = {section_, out_.blocks() - base_};
+                RecordAnchor(x);
                 if (n == L"table" && !x.self_closing()) { ParseTable(x); continue; }
                 OnOpen(x);
                 if (x.self_closing()) OnClose(n);
@@ -114,6 +111,12 @@ public:
     }
 
 private:
+    void RecordAnchor(const XmlPull& x) {
+        if (!anchors_) return;
+        const auto it = anchors_->find(x.Attr(L"id"));
+        if (it != anchors_->end()) it->second = out_.blocks() - base_;
+    }
+
     struct Inline { std::wstring name; unsigned flags; std::wstring target; };
     struct List { bool ordered; int next; };
 
@@ -280,8 +283,7 @@ private:
                 continue;
             }
             if (k == XmlPull::Open) {
-                const std::wstring id = x.Attr(L"id");
-                if (!id.empty()) anchors_[part_ + L"#" + id] = {section_, out_.blocks() - base_};
+                RecordAnchor(x);
                 if (n == L"table") { if (!x.self_closing()) ++nested; continue; }
                 if (nested == 0 && n == L"tr") { rows.emplace_back(); row = &rows.back(); cell = nullptr; continue; }
                 if (nested == 0 && (n == L"td" || n == L"th") && row) {
@@ -339,34 +341,50 @@ private:
     const std::wstring& zip_;
     DocPayload& out_;
     PreviewImageCache& images_;
-    std::map<std::wstring, Anchor>& anchors_;
-    std::wstring part_, dir_;
-    size_t section_ = 0, base_ = 0;
+    ChapterAnchors* anchors_ = nullptr;
+    std::wstring dir_;
+    size_t base_ = 0;
     int quote_ = 0, pre_ = 0, svg_ = 0, heading_ = 0;
     std::vector<List> lists_;
     std::vector<Inline> inline_;
     std::wstring marker_;
 };
 
+bool HasToken(std::wstring_view value, std::wstring_view token) {
+    constexpr std::wstring_view spaces = L" \t\n\r\f";
+    for (size_t start = value.find_first_not_of(spaces); start != value.npos;) {
+        const auto end = value.find_first_of(spaces, start);
+        if (value.substr(start, end - start) == token) return true;
+        if (end == value.npos) break;
+        start = value.find_first_not_of(spaces, end);
+    }
+    return false;
+}
+
 void ReadNav(const std::wstring& zip, const std::wstring& part, std::vector<TocEntry>& toc) {
     std::wstring text;
     if (!ReadPart(zip, part, text)) return;
     const std::wstring dir = DirOf(part);
     XmlPull x(text, true);
-    bool in_toc = false, in_link = false, fallback = true;
+    bool in_toc = false, in_link = false, preferred = false, have_fallback = false;
     int depth = 0;
     TocEntry entry;
     // Prefer <nav epub:type="toc">; else the first <nav>.
-    if (text.find(L"toc") != std::wstring::npos) fallback = false;
-    for (XmlPull::Kind k; (k = x.Next()) != XmlPull::Eof && toc.size() < kMaxToc;) {
+    for (XmlPull::Kind k; (k = x.Next()) != XmlPull::Eof;) {
         const std::wstring& n = x.name();
         if (k == XmlPull::Open) {
             if (n == L"nav" && !in_toc) {
-                const std::wstring type = x.QAttr(L"epub:type") + L" " + x.Attr(L"role") + L" " + x.Attr(L"id");
-                in_toc = fallback || type.find(L"toc") != std::wstring::npos;
+                if (x.self_closing()) continue;
+                preferred = HasToken(x.QAttr(L"epub:type"), L"toc") ||
+                            HasToken(x.Attr(L"role"), L"doc-toc") || x.Attr(L"id") == L"toc";
+                if (!preferred && have_fallback) { x.SkipElement(); continue; }
+                if (preferred) toc.clear();
+                in_toc = true;
+                depth = 0;
+                in_link = false;
             } else if (in_toc && n == L"ol") {
                 ++depth;
-            } else if (in_toc && n == L"a" && !x.self_closing()) {
+            } else if (in_toc && toc.size() < kMaxToc && n == L"a" && !x.self_closing()) {
                 in_link = true;
                 entry = TocEntry{};
                 entry.level = (std::max)(0, depth - 1);
@@ -382,8 +400,11 @@ void ReadNav(const std::wstring& zip, const std::wstring& part, std::vector<TocE
                 while (!entry.title.empty() && entry.title.front() == L' ') entry.title.erase(0, 1);
                 while (!entry.title.empty() && entry.title.back() == L' ') entry.title.pop_back();
                 if (!entry.title.empty() && !entry.file.empty()) toc.push_back(entry);
+                if (preferred && toc.size() == kMaxToc) return;
             } else if (in_toc && n == L"nav") {
-                return;
+                if (preferred) return;
+                have_fallback = true;
+                in_toc = false;
             }
         } else if (k == XmlPull::Text && in_link) {
             entry.title += x.text();
@@ -502,10 +523,15 @@ bool MakeEpubDocument(const std::wstring& path, std::wstring& payload, uint32_t&
     // Keep enough room for every spine position even after content fills up.
     DocPayload out(ipc::kPreviewMaxTableChars - kTocReserve - spine.size() * 512);
     PreviewImageCache images;
-    std::map<std::wstring, Anchor> anchors;
+    std::map<std::wstring, ChapterAnchors> anchors;
+    std::map<std::wstring, std::wstring> first_title;
+    for (const auto& entry : toc) {
+        first_title.try_emplace(entry.file, entry.title.substr(0, 120));
+        if (!entry.fragment.empty()) anchors[entry.file].try_emplace(entry.fragment, 0);
+    }
     std::map<std::wstring, size_t> section_of;  // part -> section
     std::vector<std::wstring> section_titles;
-    HtmlConverter converter(path, out, images, anchors);
+    HtmlConverter converter(path, out, images);
     bool incomplete = total_spine > spine.size();
     size_t loaded_chapters = 0;
     for (const std::wstring& idref : spine) {
@@ -525,8 +551,7 @@ bool MakeEpubDocument(const std::wstring& path, std::wstring& payload, uint32_t&
             : L"Chapter content could not be read (missing or damaged package entry).";
         // The chapter's name: its first TOC entry, else its <title>.
         std::wstring name;
-        for (const TocEntry& e : toc) if (e.file == item.href) { name = e.title; break; }
-        name = name.substr(0, 120);
+        if (const auto it = first_title.find(item.href); it != first_title.end()) name = it->second;
         const size_t section = section_titles.size();
         if (!reason.empty()) {
             incomplete = true;
@@ -551,7 +576,8 @@ bool MakeEpubDocument(const std::wstring& path, std::wstring& payload, uint32_t&
         // The reserved placeholder budget also covers a P record at the limit.
         if (out.full()) out.str() += record + L'\n';
         std::wstring html_title;
-        converter.Convert(item.href, body, section, base, html_title);
+        const auto targets = anchors.find(item.href);
+        converter.Convert(item.href, body, targets == anchors.end() ? nullptr : &targets->second, base, html_title);
         if (!out.full()) ++loaded_chapters;
         if (out.full()) {
             DocPayload notice(256);
@@ -596,8 +622,7 @@ bool MakeEpubDocument(const std::wstring& path, std::wstring& payload, uint32_t&
         if (sec == section_of.end()) continue;
         size_t block = 0;
         if (!e.fragment.empty()) {
-            const auto a = anchors.find(e.file + L"#" + e.fragment);
-            if (a != anchors.end()) block = a->second.block;
+            block = anchors.at(e.file).at(e.fragment);
         }
         std::wstring record = L"C\t" + std::to_wstring((std::min)(e.level, 6)) + L'\t' +
             std::to_wstring(sec->second) + L'\t' + std::to_wstring(block) + L'\t';

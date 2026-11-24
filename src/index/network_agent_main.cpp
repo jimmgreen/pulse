@@ -261,8 +261,9 @@ int RunAgent(const std::wstring& test_token = {}) {
     std::thread idle_watch([pipe_name] {
         while (g.running) {
             Sleep(1000);
+            const ULONGLONG limit_ms = g.index.Roots().empty() ? 15000ull : kIdleExitMs;
             if (!g.running || g.clients.load() != 0 ||
-                GetTickCount64() - g.last_activity.load() < kIdleExitMs) continue;
+                GetTickCount64() - g.last_activity.load() < limit_ms) continue;
             g.running = false;
             // Wake the pending accept so shutdown also works without an active client.
             HANDLE wake = CreateFileW(pipe_name.c_str(), GENERIC_READ | GENERIC_WRITE, 0,

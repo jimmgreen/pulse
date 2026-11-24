@@ -13,6 +13,7 @@
 #include "../common/utf8_file.h"
 #include "../ui/confirm_dialog.h"
 
+#include <cstdlib>
 #include <cwchar>
 #include <mutex>
 #include <utility>
@@ -284,6 +285,15 @@ bool RestartPulse(AppState& s) {
         std::wstring command = L"\"" + exe + L"\" " +
                                kRestartAfterArgument + L" " + std::to_wstring(GetCurrentProcessId()) +
                                L" --restore-update-session";
+        // An isolated test instance restarts as itself: same data folder (inherited
+        // PULSE_TEST_DATA_DIR) and the same explicit extension store.
+        for (int i = 1; i < __argc; ++i) {
+            if (wcscmp(__wargv[i], L"--test-instance") == 0) {
+                command += L" --test-instance";
+            } else if (wcscmp(__wargv[i], L"--extension-store") == 0 && i + 1 < __argc) {
+                command += L" --extension-store \"" + std::wstring(__wargv[++i]) + L"\"";
+            }
+        }
         STARTUPINFOW startup{};
         startup.cb = sizeof(startup);
         PROCESS_INFORMATION process{};

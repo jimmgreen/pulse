@@ -405,6 +405,6 @@ bool ParsePulsePath(const std::wstring& path, std::wstring* kind, std::wstring* 
 
 bool WriteTagAdsV2(const std::wstring& path, const std::vector<TagAdsRecord>& tags);
 std::vector<std::wstring> ReadTagAds(const std::wstring& path);
-std::vector<TagAdsRecord> ReadTagAdsV2(const std::wstring& path);
+std::vector<TagAdsRecord> ReadTagAdsV2(const std::wstring& path, std::vector<std::wstring>* legacy = nullptr);
 
 } // namespace pulse::app

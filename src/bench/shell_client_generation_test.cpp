@@ -169,6 +169,18 @@ int wmain(int argc, wchar_t** argv) {
         Check(Await([&] { return ShellClientTestAccess::Generation(*client) != 0; }), "same client automatically recovers after early exit without Stop/Start");
         const auto id = client->QueryContextMenu({}, 0, false, false, {}, results.Reserve());
         Check(Await([&] { return results.Completed(id); }) && results.Once(id), "fast menu response observes pre-registered request id");
+        const auto gen_before_suspend = ShellClientTestAccess::Generation(*client);
+        Check(gen_before_suspend != 0 && !client->SuspendIfIdle(60000),
+            "SuspendIfIdle honors min_idle_ms before inactivity threshold elapses");
+        Check(client->SuspendIfIdle(0), "SuspendIfIdle(0) disconnects idle shell host");
+        Check(Await([&] { return ShellClientTestAccess::ChildCleared(*client) && ShellClientTestAccess::Generation(*client) == 0; }),
+            "idle suspend retires pipe and terminates shell child cleanly");
+        Sleep(150);
+        Check(ShellClientTestAccess::ChildCleared(*client), "suspended client does not auto-respawn while idle");
+        const auto woke_id = client->CreateFolder(L"after-suspend", results.Reserve());
+        Check(Await([&] { return results.Completed(woke_id); }) && results.Once(woke_id) &&
+            ShellClientTestAccess::Generation(*client) > gen_before_suspend,
+            "new request after SuspendIfIdle immediately wakes host with fresh generation");
         client->Stop();
     }
     Reconnect(module, root, false);

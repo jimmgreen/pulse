@@ -108,6 +108,31 @@ int Hold(const fs::path& app, const wchar_t* ready_name, const wchar_t* stop_nam
     SetEvent(ready); WaitForSingleObject(stop, 120000);
     CloseHandle(a); CloseHandle(b); CloseHandle(ready); CloseHandle(stop); return 0;
 }
+int VersionLocks() {
+    const auto root = fs::absolute(L"bench_data") / (L"version-lock-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    fs::create_directories(root / L"DialogBridge" / std::wstring(64, L'a'));
+    const auto lock_file = root / L".pulse-versions.lock";
+    {
+        VersionLock first, second;
+        Check(first.Acquire(root.wstring(), 0) == ERROR_SUCCESS && fs::exists(lock_file), "first holder creates the version lock");
+        const ULONGLONG began = GetTickCount64();
+        Check(second.Acquire(root.wstring(), 300) == ERROR_SUCCESS ? false : GetTickCount64() - began >= 250,
+            "second holder waits its bound and then reports the lock busy");
+        Check(RunDeferredVersionCleanup(root.wstring()) == kExitCleanupBusy, "deferred cleanup reports busy while the lock is held");
+    }
+    Check(!fs::exists(lock_file), "lock file disappears with its last handle");
+    {
+        VersionLock again;
+        Check(again.Acquire(root.wstring(), 1000) == ERROR_SUCCESS, "lock is acquirable again after release");
+    }
+    // No pointer: setup cannot verify the current version and must not touch anything.
+    Check(RunDeferredVersionCleanup(root.wstring()) == kExitCleanupRetained &&
+        fs::exists(root / L"DialogBridge" / std::wstring(64, L'a')), "unverifiable current version retains every directory");
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    std::printf("failures=%d\n", failures);
+    return failures ? 1 : 0;
+}
 int CleanupReports(const fs::path& a, const fs::path& b, const fs::path& c) {
     const auto root = fs::absolute(L"bench_data") / (L"dialog-cleanup-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
     fs::create_directories(root / L"DialogBridge");
@@ -168,6 +193,35 @@ int CleanupReports(const fs::path& a, const fs::path& b, const fs::path& c) {
     Check(!invalid_marker.scan_complete && invalid_marker.deleted_directories.empty() && fs::exists(retired_dll),
         "invalid previous marker prevents every deletion");
     Write(root / L".pulse-dialog-previous", digests[1]);
+    {
+        VersionLock install;
+        Check(install.Acquire(root.wstring(), 0) == ERROR_SUCCESS, "install side acquires the version lock");
+        Check(RunDeferredVersionCleanup(root.wstring()) == kExitCleanupBusy && fs::exists(retired_dll),
+            "deferred cleanup never waits for or races an install holding the version lock");
+    }
+    fs::create_directory(root / L".pulse-setup");
+    Check(RunDeferredVersionCleanup(root.wstring()) == kExitCleanupBusy && fs::exists(retired_dll),
+        "deferred cleanup skips while setup work awaits recovery");
+    RemoveDirectoryW((root / L".pulse-setup").c_str());
+    {
+        // An owner with the DLL open and no delete sharing, like a program that loaded it.
+        HANDLE owner = CreateFileW(retired_dll.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        Check(owner != INVALID_HANDLE_VALUE, "owner holds retired bundle DLL for deferred retry");
+        Check(RunDeferredVersionCleanup(root.wstring()) == kExitCleanupRetained &&
+            Read(retired / L"manifest.json") == manifest && fs::exists(retired_dll),
+            "deferred retry with a running owner keeps the complete bundle and reports retained");
+        if (owner != INVALID_HANDLE_VALUE) CloseHandle(owner);
+    }
+    Check(RunDeferredVersionCleanup(root.wstring()) == kExitCleanupRetained && !fs::exists(retired) &&
+        fs::exists(root / L"DialogBridge" / Utf8ToWide(digests[1])) && fs::exists(root / L"DialogBridge" / Utf8ToWide(digests[2])),
+        "deferred retry after the owner exits removes the retired version and protects current plus previous");
+    {
+        pulse::dialog_bundle::BundleLease source;
+        Check(pulse::dialog_bundle::ResolveInstalledBundle(a.wstring(), source) == ERROR_SUCCESS, "re-resolve retired source");
+        const auto source_directory = source.Directory();
+        source = {};
+        fs::copy(source_directory, retired, fs::copy_options::recursive);
+    }
     const auto cleaned = CleanupDialogVersionsReport(root.wstring());
     Check(cleaned.deleted_directories.size() == 1 && cleaned.deleted_directories[0] == retired.wstring() &&
         cleaned.protected_directories.size() == 2 && cleaned.retained_directories.size() == 20 && !cleaned.Retryable() &&
@@ -273,9 +327,9 @@ bool ApplyVersionFiles(const fs::path& app, const fs::path& package, bool fail_c
     if (!PrepareDialogVersion(app.wstring(), transaction.StagingDir(), files, plan, error)) { std::fwprintf(stderr, L"prepare: %s\n", error.c_str()); return false; }
     Check(plan.machine == IMAGE_FILE_MACHINE_AMD64 && plan.companions.size() == 1 &&
         plan.companions[0].machine == IMAGE_FILE_MACHINE_I386 && plan.companions[0].companions.empty() &&
-        plan.replacements.back() == L"dialog-current.json" &&
+        plan.replacements.back() == (plan.app_runtime.versioned ? L"app-current.json" : L"dialog-current.json") &&
         std::find(plan.replacements.begin(), plan.replacements.end(), L"dialog-x86-current.json") != plan.replacements.end(),
-        "dual plan has typed one-level companion and primary pointer is final root commit");
+        "dual plan has typed one-level companion and the startup pointer is the final root commit");
     if (!PublishDialogVersion(app.wstring(), transaction.StagingDir(), plan, error)) { std::fwprintf(stderr, L"publish: %s\n", error.c_str()); return false; }
     std::erase(files, L".pulse-files");
     std::string installed;
@@ -463,20 +517,12 @@ int OrphanRepair(const fs::path& old_package, const fs::path& new_package) {
         "cleanup retains both current architectures thin host and unowned files");
     const auto damaged = root / L"damaged";
     Check(ApplyVersionFiles(damaged, old_package), "install separate existing-directory corruption fixture");
-    const auto damaged_dir = damaged / L"DialogBridge" / Utf8ToWide(old32);
-    const auto saved = Read(damaged_dir / L"manifest.json");
-    Write(damaged_dir / L"manifest.json", saved + " ");
-    Check(!ApplyVersionFiles(damaged, new_package), "existing version with damaged manifest hash never qualifies as orphan");
-    Write(damaged_dir / L"manifest.json", saved);
-    Check(DeleteFileW((damaged_dir / L"manifest.json").c_str()) != FALSE, "prepare missing manifest inside existing version directory");
-    Check(!ApplyVersionFiles(damaged, new_package), "missing manifest inside existing directory is not an orphan pointer");
-    Write(damaged_dir / L"manifest.json", saved);
     const auto raw_pointer = Read(damaged / L"dialog-x86-current.json");
     Write(damaged / L"dialog-x86-current.json", "{\"schema\":1,\"directory\":\"../outside\",\"manifest_sha256\":\"" + old32 + "\"}");
     Check(!ApplyVersionFiles(damaged, new_package), "malicious old pointer path remains rejected");
     Write(damaged / L"dialog-x86-current.json", raw_pointer);
     HANDLE locked = CreateFileW((damaged / L"dialog-x86-current.json").c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-    Check(locked != INVALID_HANDLE_VALUE && !ApplyVersionFiles(damaged, new_package), "inaccessible old pointer does not qualify as orphan");
+    Check(locked != INVALID_HANDLE_VALUE && !ApplyVersionFiles(damaged, new_package), "inaccessible old pointer does not qualify for repair");
     if (locked != INVALID_HANDLE_VALUE) CloseHandle(locked);
     {
         FileTransaction transaction(damaged.wstring());
@@ -487,20 +533,269 @@ int OrphanRepair(const fs::path& old_package, const fs::path& new_package) {
         Write(manifest, Read(manifest) + " ");
         DialogVersionPlan plan;
         Check(!PrepareDialogVersion(damaged.wstring(), transaction.StagingDir(), files, plan, error),
-            "orphan repair never weakens complete new staging hash verification");
+            "repair never weakens complete new staging hash verification");
     }
+    // Primary bundle polluted by an unlisted user file (exact ERROR_INVALID_DATA upgrade bug).
+    const auto polluted_primary = root / L"polluted-primary";
+    Check(ApplyVersionFiles(polluted_primary, old_package), "install old dual package before polluting primary bundle");
+    const auto user_extra = polluted_primary / L"DialogBridge" / Utf8ToWide(old64) / L"ffmpeg.exe";
+    Check(Write(user_extra, "user-dropped-binary"), "add unlisted file inside old primary DialogBridge bundle");
+    {
+        pulse::dialog_bundle::BundleLease probe;
+        Check(pulse::dialog_bundle::ResolveInstalledBundle(polluted_primary.wstring(), probe) == ERROR_INVALID_DATA,
+            "reproduce ERROR_INVALID_DATA (13) on polluted primary bundle");
+        Check(InstalledRuntimeFile(polluted_primary.wstring(), L"pulse.exe").empty() &&
+            UninstallRuntimeFile(polluted_primary.wstring(), L"pulse.exe") ==
+                (polluted_primary / L"DialogBridge" / Utf8ToWide(old64) / L"pulse.exe").wstring(),
+            "UninstallRuntimeFile still locates plain runtime helper when bundle has unlisted files");
+        FileTransaction same_tx(polluted_primary.wstring());
+        std::wstring same_error;
+        Check(same_tx.Begin(same_error), "begin same-digest diagnostic check");
+        auto same_files = CopyPackage(old_package, same_tx.StagingDir());
+        DialogVersionPlan same_plan;
+        Check(!PrepareDialogVersion(polluted_primary.wstring(), same_tx.StagingDir(), same_files, same_plan, same_error) &&
+            same_error.find(L"ffmpeg.exe") != std::wstring::npos,
+            "same-digest existing destination failure reports exact unlisted file name");
+        same_tx.Abort();
+    }
+    Check(ApplyVersionFiles(polluted_primary, new_package) &&
+        VersionDigest(polluted_primary, IMAGE_FILE_MACHINE_AMD64) == new64 &&
+        VersionDigest(polluted_primary, IMAGE_FILE_MACHINE_I386) == new32 &&
+        !fs::exists(polluted_primary / L".pulse-dialog-previous") &&
+        !fs::exists(polluted_primary / L".pulse-dialog-x86-previous"),
+        "upgrade repairs polluted primary bundle without trusting unverified previous version");
+    CleanupDialogVersionsReport(polluted_primary.wstring());
+    Check(Read(user_extra) == "user-dropped-binary" &&
+        VersionDigest(polluted_primary, IMAGE_FILE_MACHINE_AMD64) == new64,
+        "cleanup after polluted-bundle repair retains user file and old bundle");
+
+    // Existing bundle with damaged or missing manifest, or truncated pointer, also repairs cleanly.
+    const auto damaged_dir = damaged / L"DialogBridge" / Utf8ToWide(old32);
+    const auto saved = Read(damaged_dir / L"manifest.json");
+    Write(damaged_dir / L"manifest.json", saved + " ");
+    bool repair_commit_reached = false;
+    Check(!ApplyVersionFiles(damaged, new_package, true, nullptr, &repair_commit_reached) && repair_commit_reached &&
+        Read(damaged / L"dialog-x86-current.json") == raw_pointer,
+        "damaged-manifest repair rolls back cleanly on commit failure");
+    Check(ApplyVersionFiles(damaged, new_package) &&
+        VersionDigest(damaged, IMAGE_FILE_MACHINE_AMD64) == new64 &&
+        VersionDigest(damaged, IMAGE_FILE_MACHINE_I386) == new32 &&
+        Read(damaged / L".pulse-dialog-previous") == old64 &&
+        !fs::exists(damaged / L".pulse-dialog-x86-previous"),
+        "damaged companion manifest repairs while preserving verified primary previous marker");
+    CleanupDialogVersionsReport(damaged.wstring());
+    Check(fs::exists(damaged_dir / L"manifest.json"), "cleanup retains unverified damaged companion directory");
+
+    const auto empty_ptr = root / L"empty-pointer";
+    Check(ApplyVersionFiles(empty_ptr, old_package), "install fixture for truncated pointer repair");
+    Write(empty_ptr / L"dialog-current.json", "");
+    Check(ApplyVersionFiles(empty_ptr, new_package) &&
+        VersionDigest(empty_ptr, IMAGE_FILE_MACHINE_AMD64) == new64 &&
+        VersionDigest(empty_ptr, IMAGE_FILE_MACHINE_I386) == new32,
+        "truncated empty dialog-current.json repairs cleanly during upgrade");
     std::wprintf(L"orphan-fixture=%s\n", root.c_str());
     std::printf("orphan-repair failures=%d\n", failures);
     return failures ? 1 : 0;
 }
 
+namespace {
+int SplitRuntimeTransactions(const fs::path& legacy, const fs::path& split_a, const fs::path& split_b) {
+    const auto root = fs::absolute(L"bench_data") /
+        (L"split-runtime-transaction-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    const auto startup = [&] {
+        pulse::dialog_bundle::BundleLease lease;
+        return pulse::dialog_bundle::ResolveStartupBundle(root.wstring(), lease) ? std::string() : lease.ManifestDigest();
+    };
+    const auto app_digest = [](const fs::path& package) {
+        pulse::dialog_bundle::BundleLease lease;
+        return pulse::dialog_bundle::ResolveInstalledAppRuntime(package.wstring(), lease) ?
+            std::string() : lease.ManifestDigest();
+    };
+    Check(ApplyVersionFiles(root, legacy), "install legacy fixture");
+    const auto old_dialog = Read(root / L"dialog-current.json");
+    const auto old_startup = startup();
+    bool reached = false;
+    Check(!ApplyVersionFiles(root, split_a, true, nullptr, &reached) && reached &&
+        Read(root / L"dialog-current.json") == old_dialog && !old_startup.empty() && startup() == old_startup &&
+        !fs::exists(root / L".pulse-app-layout") && !fs::exists(root / L"app-current.json") &&
+        fs::is_directory(root / L"AppRuntime"), "failed migration restores boot even with an immutable app version left staged");
+    const auto a = app_digest(split_a);
+    Check(ApplyVersionFiles(root, split_a) && !a.empty() && startup() == a, "split migration activates its verified app runtime");
+    const auto a_pointer = Read(root / L"app-current.json");
+    const auto a_dialog = Read(root / L"dialog-current.json");
+    reached = false;
+    Check(!ApplyVersionFiles(root, split_b, true, nullptr, &reached) && reached &&
+        Read(root / L"app-current.json") == a_pointer && Read(root / L"dialog-current.json") == a_dialog &&
+        startup() == a, "failed split upgrade restores both pointers and the previous app remains bootable");
+    const auto b = app_digest(split_b);
+    Check(ApplyVersionFiles(root, split_b) && !b.empty() && startup() == b &&
+        Read(root / L".pulse-app-previous") == a, "successful split upgrade records the previous verified app version");
+    const auto cleanup = CleanupAppRuntimeVersionsReport(root.wstring());
+    Check(cleanup.Complete() && cleanup.protected_directories.size() == 2,
+        "normal cleanup keeps current and previous app versions");
+    const auto removed = CleanupAppRuntimeVersionsReport(root.wstring(), true);
+    Check(removed.Complete() && removed.deleted_directories.size() == 2 &&
+        fs::is_empty(root / L"AppRuntime"), "uninstall cleanup removes the verified app versions");
+    std::printf("split-runtime failures=%d\n", failures);
+    return failures ? 1 : 0;
+}
+}
+
+int RetireLegacyBridgeSuite(const fs::path& dual_a, const fs::path& dual_b, const fs::path& app_only_c) {
+    const auto root = fs::absolute(L"bench_data") /
+        (L"retire-legacy-bridge-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    const auto startup = [&] {
+        pulse::dialog_bundle::BundleLease lease;
+        return pulse::dialog_bundle::ResolveStartupBundle(root.wstring(), lease) ? std::string() : lease.ManifestDigest();
+    };
+    const auto app_digest = [](const fs::path& package) {
+        pulse::dialog_bundle::BundleLease lease;
+        return pulse::dialog_bundle::ResolveInstalledAppRuntime(package.wstring(), lease) ?
+            std::string() : lease.ManifestDigest();
+    };
+    // 1. Seed a legacy dual-architecture install upgraded A -> B (leaving 4 DialogBridge/<hash> dirs
+    //    plus legacy root pointers/markers + leftover DialogBridgeStage).
+    Check(ApplyVersionFiles(root, dual_a), "seed legacy dual install A");
+    Check(ApplyVersionFiles(root, dual_b), "upgrade legacy dual install A -> B");
+    fs::create_directories(root / L"DialogBridgeStage");
+    Write(root / L"DialogBridgeStage" / L"PulseDialogStub64.dll", "old-stage");
+    Write(root / L"PulseDialogAdminAuto.exe", "old-admin-auto");
+    {
+        auto manifest = Read(root / L".pulse-files");
+        manifest += "DialogBridgeStage\\PulseDialogStub64.dll\r\nPulseDialogAdminAuto.exe\r\n";
+        Write(root / L".pulse-files", manifest);
+    }
+    const auto old_dialog_ptr = Read(root / L"dialog-current.json");
+    const auto old_x86_ptr = Read(root / L"dialog-x86-current.json");
+    const auto locked_digest = VersionDigest(root, IMAGE_FILE_MACHINE_AMD64);
+    const auto locked_dir = root / L"DialogBridge" / Utf8ToWide(locked_digest);
+
+    // Prepare a staged AppRuntime-only copy that also includes DialogBridgeStage\ files.
+    const auto staged_pkg = root / L"_pkg_app_only";
+    fs::create_directories(staged_pkg);
+    CopyPackage(app_only_c, staged_pkg);
+    fs::create_directories(staged_pkg / L"DialogBridgeStage");
+    Write(staged_pkg / L"DialogBridgeStage" / L"PulseDialogStub64.dll", "new-stage");
+
+    auto apply_app_only = [&](bool fail_commit, bool* commit_reached = nullptr) {
+        FileTransaction tx(root.wstring());
+        std::wstring error;
+        if (!tx.Begin(error)) return false;
+        auto files = CopyPackage(staged_pkg, tx.StagingDir());
+        DialogVersionPlan plan;
+        if (!PrepareDialogVersion(root.wstring(), tx.StagingDir(), files, plan, error)) {
+            std::fwprintf(stderr, L"retire prepare: %s\n", error.c_str());
+            tx.Abort();
+            return false;
+        }
+        Check(!plan.versioned && plan.companions.empty() && plan.app_runtime.versioned &&
+              plan.replacements.front() == L".pulse-app-layout" &&
+              plan.replacements.back() == L"app-current.json" &&
+              std::none_of(plan.replacements.begin(), plan.replacements.end(), IsDialogBridgeStageFile),
+              "app-only plan excludes DialogBridgeStage and keeps app-current.json as final commit");
+        if (!PublishDialogVersion(root.wstring(), tx.StagingDir(), plan, error)) {
+            std::fwprintf(stderr, L"retire publish: %s\n", error.c_str());
+            tx.Abort();
+            return false;
+        }
+        std::vector<std::wstring> manifest_files;
+        for (const auto& f : files) if (!IsDialogBridgeStageFile(f)) manifest_files.push_back(f);
+        std::string installed;
+        for (const auto& f : manifest_files) installed += WideToUtf8(f) + "\r\n";
+        if (!Write(fs::path(tx.StagingDir()) / L".pulse-files", installed)) { tx.Abort(); return false; }
+        plan.replacements.insert(plan.replacements.end() - 1, L".pulse-files");
+        auto obsolete = LegacyDialogFiles(root.wstring(), manifest_files);
+        std::erase_if(obsolete, IsDialogVersionFile);
+        const bool committed = tx.Commit(plan.replacements, error, obsolete, [&](std::wstring& reason) {
+            if (commit_reached) *commit_reached = true;
+            if (!fail_commit) return true;
+            reason = L"injected app-only commit failure";
+            return false;
+        });
+        if (committed) {
+            tx.Finish();
+            RemoveDirectoryW((root / L"DialogBridgeStage").c_str());
+        }
+        return committed;
+    };
+
+    // 2. Rollback test: commit failure must restore dialog-current.json and dialog-x86-current.json!
+    bool reached = false;
+    Check(!apply_app_only(true, &reached) && reached &&
+          Read(root / L"dialog-current.json") == old_dialog_ptr &&
+          Read(root / L"dialog-x86-current.json") == old_x86_ptr &&
+          fs::exists(root / L"PulseDialogAdminAuto.exe"),
+          "failed app-only migration atomically restores legacy dialog pointers and root files");
+
+    // 3. Hold a lock on one legacy DialogBridge\<hash>\ bundle (simulating a running third-party app).
+    Holder holder;
+    Check(holder.Start(root), "start external process holding current legacy DialogBridge bundle");
+
+    // 4. Successful AppRuntime-only migration.
+    const auto expected_app = app_digest(app_only_c);
+    Check(apply_app_only(false) && !expected_app.empty() && startup() == expected_app,
+          "app-only migration activates AppRuntime startup pointer");
+    Check(!fs::exists(root / L"dialog-current.json") && !fs::exists(root / L"dialog-x86-current.json") &&
+          !fs::exists(root / L".pulse-dialog-previous") && !fs::exists(root / L".pulse-dialog-x86-previous") &&
+          !fs::exists(root / L"PulseDialogAdminAuto.exe") && !fs::exists(root / L"DialogBridgeStage"),
+          "app-only migration atomically retires legacy dialog pointers, admin helper and DialogBridgeStage");
+
+    // 5. Immediate cleanup removes all unlocked legacy bundles and safely retains the locked one.
+    const auto first_cleanup = CleanupDialogVersionsReport(root.wstring(), false, true);
+    Check(!first_cleanup.Complete() &&
+          first_cleanup.deleted_directories.size() == 3 &&
+          first_cleanup.blocked_directories.size() == 1 &&
+          first_cleanup.protected_directories.empty() &&
+          fs::exists(locked_dir) && holder.Alive(),
+          "immediate cleanup deletes 3 unlocked legacy bundles and retains 1 locked bundle without killing holder");
+
+    // 6. Once the third-party process exits, deferred cleanup removes the final legacy bundle AND DialogBridge\.
+    holder.Stop();
+    const int deferred_rc = RunDeferredVersionCleanup(root.wstring());
+    Check(deferred_rc == kExitOk && !fs::exists(locked_dir) && !fs::exists(root / L"DialogBridge"),
+          "deferred cleanup removes last legacy bundle and deletes empty DialogBridge root");
+
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    std::printf("retire-legacy-bridge failures=%d\n", failures);
+    return failures ? 1 : 0;
+}
+
+int CleanupSixBench(const fs::path& root, DWORD expected_pid) {
+    const ULONGLONG t_no_id0 = GetTickCount64();
+    const auto fast = CleanupDialogVersionsReport(root.wstring(), false, false);
+    const ULONGLONG t_no_id_ms = GetTickCount64() - t_no_id0;
+    Check(fast.blocked_directories.size() == 6 && fast.locks.programs.empty(),
+        "identify_owners=false detects all 6 blocked bundles without Restart Manager");
+
+    const ULONGLONG t_id0 = GetTickCount64();
+    const auto full = CleanupDialogVersionsReport(root.wstring(), false, true);
+    const ULONGLONG t_id_ms = GetTickCount64() - t_id0;
+    bool pid_found = false;
+    for (const auto& prog : full.locks.programs) if (prog.pid == expected_pid) pid_found = true;
+    Check(full.blocked_directories.size() == 6 && full.Retryable(),
+        "identify_owners=true detects all 6 blocked 47-file bundles");
+    Check(full.locks.files.size() >= 6 && full.locks.files.size() <= 12,
+        "representative lock probing keeps RM files bounded to 1-2 per bundle (not 282)");
+    Check(pid_found, "Restart Manager identifies external holder PID across representative files");
+    std::printf("CLEANUP_6X47 no_id_ms=%llu with_id_ms=%llu rm_files=%zu programs=%zu\n",
+        t_no_id_ms, t_id_ms, full.locks.files.size(), full.locks.programs.size());
+    return failures ? 1 : 0;
+}
 int wmain(int argc, wchar_t** argv) {
     try {
+        if (argc == 4 && std::wstring(argv[1]) == L"--cleanup-6-bench")
+            return CleanupSixBench(fs::absolute(argv[2]), static_cast<DWORD>(_wtoi(argv[3])));
         if (argc == 4 && std::wstring(argv[1]) == L"--orphan-repair") return OrphanRepair(fs::absolute(argv[2]), fs::absolute(argv[3]));
         if (argc == 5 && std::wstring(argv[1]) == L"--thin-suite") return ThinVersions(fs::absolute(argv[2]), fs::absolute(argv[3]), fs::absolute(argv[4]));
         if (argc == 5 && std::wstring(argv[1]) == L"--dual-suite") return DualVersions(fs::absolute(argv[2]), fs::absolute(argv[3]), fs::absolute(argv[4]));
+        if (argc == 5 && std::wstring(argv[1]) == L"--split-suite")
+            return SplitRuntimeTransactions(fs::absolute(argv[2]), fs::absolute(argv[3]), fs::absolute(argv[4]));
+        if (argc == 5 && std::wstring(argv[1]) == L"--retire-legacy-bridge")
+            return RetireLegacyBridgeSuite(fs::absolute(argv[2]), fs::absolute(argv[3]), fs::absolute(argv[4]));
         if (argc == 5 && std::wstring(argv[1]) == L"--cleanup-report") return CleanupReports(fs::absolute(argv[2]), fs::absolute(argv[3]), fs::absolute(argv[4]));
         if (argc == 2 && std::wstring(argv[1]) == L"--publication-locks") return PublicationLocks();
+        if (argc == 2 && std::wstring(argv[1]) == L"--version-lock") return VersionLocks();
         if (argc == 5 && std::wstring(argv[1]) == L"--hold") return Hold(argv[2], argv[3], argv[4]);
         if (argc == 4 && std::wstring(argv[1]) == L"--apply-staged") return Apply(fs::absolute(argv[2]), fs::absolute(argv[3])) ? 0 : 1;
         if (argc == 4 && std::wstring(argv[1]) == L"--interrupt") return Apply(fs::absolute(argv[2]), fs::absolute(argv[3]), false, false, true) ? 0 : 1;

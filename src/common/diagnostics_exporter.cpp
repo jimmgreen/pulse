@@ -83,15 +83,16 @@ bool IsRuntimeArtifact(std::wstring_view name) {
     if (!name.ends_with(L".jsonl")) return false;
     name.remove_suffix(6);
     if (name.ends_with(L".critical")) name.remove_suffix(9);
-    static constexpr std::array<std::wstring_view, 13> prefixes = {
+    static constexpr std::wstring_view prefixes[] = {
         L"app-", L"index-", L"index-service-", L"index-helper-", L"network-agent-",
-        L"dialog_auto-", L"content-agent-", L"preview-", L"shell-", L"test-", L"unknown-", L"launcher-", L"hotkey_broker-"
+        L"dialog_auto-", L"dialog_runtime-", L"dialog_admin_auto-", L"dialog_user_auto-", L"content-agent-",
+        L"preview-", L"shell-", L"test-", L"unknown-", L"launcher-", L"hotkey_broker-"
     };
-    const auto prefix = std::find_if(prefixes.begin(), prefixes.end(), [name](auto value) {
+    const auto prefix = std::find_if(std::begin(prefixes), std::end(prefixes), [name](auto value) {
         return name.starts_with(value) && name.size() > value.size() &&
             name[value.size()] >= L'0' && name[value.size()] <= L'9';
     });
-    if (prefix == prefixes.end()) return false;
+    if (prefix == std::end(prefixes)) return false;
     name.remove_prefix(prefix->size());
     return !name.empty() && std::all_of(name.begin(), name.end(),
         [](wchar_t ch) { return ch >= L'0' && ch <= L'9'; });

@@ -1,6 +1,7 @@
 #include "ui_renderer.h"
 #include "ui_renderer_internal.h"
 #include "address_search_control.h"
+#include "../app/keymap.h"
 
 namespace pulse::ui {
 
@@ -64,7 +65,10 @@ void MainRenderer::DrawAddressSearchChrome(const WindowViewModel& vm, float w, c
         search.placeholder = toolbar.navigation_tier == NavigationTier::Narrow || vm.address_search_placeholder.empty()
             ? l10n::Get(l10n::StringId::Search) : vm.address_search_placeholder;
         search.leading_glyph = L"\xE721";
-        search.trailing_keycap = field.right - field.left >= 220 * scale_ ? L"Ctrl+K" : L"";
+        const auto& shortcuts = app::ActiveKeymap().Bindings(app::KeyAction::Search);
+        const std::wstring keycap = field.right - field.left >= 220 * scale_ && !shortcuts.empty()
+            ? app::ChordDisplay(shortcuts.front()) : std::wstring{};
+        search.trailing_keycap = keycap;
         search.suppress_text = true;
         painter_.DrawTextField(search);
         MakeBrush(compositor_->Dc(),theme.text_secondary,brTextSecondary_);

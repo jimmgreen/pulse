@@ -241,7 +241,62 @@ int EdgeScrollTest() {
     return failures ? 1 : 0;
 }
 
+int WheelRoutingTest() {
+    using namespace pulse::ui;
+    OleInitialize(nullptr);
+    struct Probe { int vertical=0, horizontal=0; WPARAM keys=0; LPARAM position=0; } probe;
+    WNDCLASSW cls{}; cls.hInstance=GetModuleHandleW(nullptr); cls.lpszClassName=L"PulseDragWheelFixture";
+    cls.lpfnWndProc=[](HWND hwnd,UINT msg,WPARAM wp,LPARAM lp)->LRESULT {
+        auto* p=reinterpret_cast<Probe*>(GetWindowLongPtrW(hwnd,GWLP_USERDATA));
+        if(p&&(msg==WM_MOUSEWHEEL||msg==WM_MOUSEHWHEEL)){if(msg==WM_MOUSEWHEEL)++p->vertical;else ++p->horizontal;p->keys=wp;p->position=lp;return 0;}
+        return DefWindowProcW(hwnd,msg,wp,lp);
+    };
+    RegisterClassW(&cls);
+    HWND window=CreateWindowExW(WS_EX_TOPMOST,cls.lpszClassName,L"",WS_POPUP|WS_VISIBLE,60,60,240,180,nullptr,nullptr,cls.hInstance,nullptr);
+    HWND foreign=CreateWindowExW(WS_EX_TOPMOST,cls.lpszClassName,L"",WS_POPUP|WS_VISIBLE,340,60,100,100,nullptr,nullptr,cls.hInstance,nullptr);
+    SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(&probe));
+    auto* data=FileDataObject::Create({L"C:\\fixture\\source.txt"});
+    int refresh=0;
+    DropTargetCallbacks cb;
+    cb.drag_over=[&](const auto&,POINT,DWORD,DWORD,DWORD){++refresh;return DROPEFFECT_COPY;};
+    cb.drag_scroll=[](POINT){return false;};
+    auto* target=new WindowDropTarget(window,cb);
+    DWORD effect=DROPEFFECT_COPY;target->DragEnter(data,MK_LBUTTON,POINTL{100,100},&effect);
+    MSG msg{}; while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessageW(&msg);}
+    const WPARAM keys=MAKEWPARAM(MK_LBUTTON|MK_CONTROL,static_cast<WORD>(-WHEEL_DELTA));
+    const LPARAM anchor=MAKELPARAM(100,100);
+    PostMessageW(window,WM_MOUSEWHEEL,keys,anchor);
+    PeekMessageW(&msg,window,WM_MOUSEWHEEL,WM_MOUSEWHEEL,PM_NOREMOVE);
+    Check(probe.vertical==0,"PM_NOREMOVE never forwards wheel");
+    PeekMessageW(&msg,window,WM_MOUSEWHEEL,WM_MOUSEWHEEL,PM_REMOVE);
+    Check(probe.vertical==1&&msg.message==WM_NULL&&probe.keys==keys&&probe.position==anchor,"active OLE target receives exactly one wheel with unchanged modifiers and screen point");
+    DispatchMessageW(&msg);Check(probe.vertical==1,"consumed OLE wheel does not double-dispatch");
+    PostMessageW(window,WM_MOUSEHWHEEL,keys,anchor);
+    PeekMessageW(&msg,window,WM_MOUSEHWHEEL,WM_MOUSEHWHEEL,PM_REMOVE);
+    Check(probe.horizontal==1&&msg.message==WM_NULL,"horizontal wheel uses same active-target bridge");
+    const int before_refresh=refresh;
+    edge_fixture=true;edge_hwnd=window;target->TickScroll();edge_fixture=false;
+    Check(refresh==before_refresh+1,"wheel refreshes drop hit on existing timer even away from edge");
+    PostMessageW(window,WM_MOUSEWHEEL,keys,MAKELPARAM(360,100));
+    PeekMessageW(&msg,window,WM_MOUSEWHEEL,WM_MOUSEWHEEL,PM_REMOVE);
+    Check(probe.vertical==1&&msg.message==WM_MOUSEWHEEL,"pointer over foreign window is untouched");
+    target->DragLeave();
+    PostMessageW(window,WM_MOUSEWHEEL,keys,anchor);PeekMessageW(&msg,window,WM_MOUSEWHEEL,WM_MOUSEWHEEL,PM_REMOVE);
+    Check(probe.vertical==1&&msg.message==WM_MOUSEWHEEL,"DragLeave unhooks wheel routing");
+    effect=DROPEFFECT_COPY;target->DragEnter(data,MK_LBUTTON,POINTL{100,100},&effect);
+    effect=DROPEFFECT_COPY;target->Drop(data,MK_LBUTTON,POINTL{100,100},&effect);
+    PostMessageW(window,WM_MOUSEWHEEL,keys,anchor);PeekMessageW(&msg,window,WM_MOUSEWHEEL,WM_MOUSEWHEEL,PM_REMOVE);
+    Check(probe.vertical==1&&msg.message==WM_MOUSEWHEEL,"Drop removes hook before final operation callback");
+    effect=DROPEFFECT_COPY;target->DragEnter(data,MK_LBUTTON,POINTL{100,100},&effect);
+    target->Release();
+    PostMessageW(window,WM_MOUSEWHEEL,keys,anchor);PeekMessageW(&msg,window,WM_MOUSEWHEEL,WM_MOUSEWHEEL,PM_REMOVE);
+    Check(probe.vertical==1&&msg.message==WM_MOUSEWHEEL,"destruction removes hook while drag active");
+    data->Release();DestroyWindow(foreign);DestroyWindow(window);OleUninitialize();
+    printf("Drag wheel routing: %d passed, %d failed\n",passed,failures);return failures?1:0;
+}
+
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && wcscmp(argv[1], L"--wheel") == 0) return WheelRoutingTest();
     if (argc == 2 && wcscmp(argv[1], L"--edge-scroll") == 0) return EdgeScrollTest();
     using namespace pulse::ui;
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -445,6 +500,25 @@ int wmain(int argc, wchar_t** argv) {
               !SourceWouldDelete(effect, data->PerformedEffect()),
               "Explorer dragging into Pulse is told about an optimized move, so it keeps the originals");
         explorer_target->Release();
+        // Filesystem drags use FileDataObject directly without calling SHParseDisplayName
+        // on the UI thread, and publish allowed_effects as Preferred DropEffect.
+        {
+            const std::wstring unprobed = (root / L"does-not-exist-on-disk.bin").wstring();
+            DWORD seen_preferred = 0;
+            DropTargetCallbacks pref_cb;
+            pref_cb.drop = [&](const auto& paths, POINT, DWORD, DWORD, DWORD preferred) {
+                seen_preferred = preferred;
+                return paths.size() == 1 && paths.front() == unprobed ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+            };
+            auto* pref_target = new WindowDropTarget(nullptr, std::move(pref_cb));
+            g_route_target = pref_target;
+            g_route_keys = 0;
+            const DWORD copy_only = DoFileDragDrop({unprobed}, DROPEFFECT_COPY, {}, root.wstring(), false);
+            g_route_target = nullptr;
+            pref_target->Release();
+            Check(copy_only == DROPEFFECT_COPY && seen_preferred == DROPEFFECT_COPY,
+                  "filesystem drag uses FileDataObject directly without probing disk and preserves preferred effect");
+        }
         data->Release();
     }
     Check(DropIntoOwnFolder({L"E:\\work\\.minecraft"}, L"E:\\work\\.minecraft") &&

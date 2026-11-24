@@ -28,6 +28,9 @@ struct PickerAppearanceSnapshot {
     int hover_preview_delay_ms = 500;
     int hover_card_size = 1;
     uint32_t details_columns = ui::kDetailsColumnsDefault;
+    std::wstring window_effect = L"mica-alt"; // AppPrefs::window_effect id
+    int panel_transparency = 50; // AppPrefs::wallpaper_look, 0..90
+    int frame_transparency = 10; // AppPrefs::frame_transparency, 0..100
 };
 struct PickerAppearanceColors { bool dark = false; uint32_t accent_rgb = 0x527D70; };
 enum class PickerAppearanceReadStatus { Loaded, Missing, Failed };

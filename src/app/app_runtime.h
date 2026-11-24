@@ -101,6 +101,7 @@ int TrayDeckCap(const AppState& s);
 std::vector<TrayDeckEntry> TrayDeckEntries(const app::StagingTray& tray, size_t offset,
                                                   size_t cap);
 int TrayItemTotalCount(const app::StagingTray& tray);
+ui::TrayDeckView BuildFloatingShelfView(AppState& s, bool expanded);
 std::wstring TrayDisplayPath(const std::wstring& path);
 std::wstring TrayItemName(const std::wstring& path);
 int TrayDeckHoverIndex(const AppState& s);

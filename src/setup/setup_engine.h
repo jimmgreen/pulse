@@ -30,8 +30,10 @@ struct EngineCallbacks {
 struct InstallRequest {
     Options options;
     Tasks tasks;              // final selection
+    UiChoice ui;              // starting layout (fresh installs; upgrades keep the old defaults)
     std::wstring app_dir;     // resolved target
     std::wstring index_path;  // used when tasks.index_service
+    bool index_explicit = false;
     bool upgrade = false;     // a registered install with pulse.exe exists
     std::wstring previous_version;
 };

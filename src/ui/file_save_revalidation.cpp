@@ -47,7 +47,7 @@ struct Observation {
     std::optional<SaveObjectIdentity> target;
 };
 DWORD Observe(const std::wstring& path, const std::wstring& parent,
-              const SaveObjectIdentity* expected_parent, const std::function<bool()>& cancelled, Observation& out, bool caller_validates_access, bool no_test = false, bool require_parent = false) {
+              const SaveObjectIdentity* expected_parent, const std::function<bool()>& cancelled, Observation& out, bool caller_validates_access, bool no_test = false, bool require_parent = false, bool reject_readonly = false) {
     if (Cancelled(cancelled)) return ERROR_CANCELLED;
     Metadata first;
     DWORD error = Parent(parent, first);
@@ -75,7 +75,7 @@ DWORD Observe(const std::wstring& path, const std::wstring& parent,
     if (error && !absent) return error;
     if (!error) {
         if (target.attributes & FILE_ATTRIBUTE_DIRECTORY) return ERROR_DIRECTORY;
-        if (!caller_validates_access && (target.attributes & FILE_ATTRIBUTE_READONLY)) return ERROR_ACCESS_DENIED;
+        if ((!caller_validates_access || reject_readonly) && (target.attributes & FILE_ATTRIBUTE_READONLY)) return ERROR_ACCESS_DENIED;
         out.target = target.identity;
     }
     if (Cancelled(cancelled)) return ERROR_CANCELLED;
@@ -105,10 +105,11 @@ SaveRevalidationResult CaptureSaveConfirmation(const SaveTargetRequest& request,
     snapshot.parent_ = std::filesystem::path(resolved.path).parent_path().wstring();
     snapshot.filter_index_ = resolved.filter_index;
     snapshot.caller_validates_access_ = request.caller_validates_access;
+    snapshot.reject_readonly_save_ = request.reject_readonly_save;
     snapshot.no_test_file_create_ = request.no_test_file_create;
     snapshot.require_existing_parent_ = request.require_existing_save_parent;
     Observation observed;
-    const DWORD error = Observe(snapshot.path_, snapshot.parent_, nullptr, cancelled, observed, snapshot.caller_validates_access_, snapshot.no_test_file_create_, snapshot.require_existing_parent_);
+    const DWORD error = Observe(snapshot.path_, snapshot.parent_, nullptr, cancelled, observed, snapshot.caller_validates_access_, snapshot.no_test_file_create_, snapshot.require_existing_parent_, snapshot.reject_readonly_save_);
     if (error) return Failed(error);
     snapshot.parent_identity_ = observed.parent;
     snapshot.parent_exists_ = observed.parent_exists;
@@ -123,7 +124,7 @@ SaveRevalidationResult CaptureSaveConfirmation(const SaveTargetRequest& request,
 SaveRevalidationResult RevalidateSaveConfirmation(const SaveConfirmationSnapshot& snapshot, const std::function<bool()>& cancelled) {
     if (snapshot.path_.empty() || snapshot.parent_.empty()) return Failed(ERROR_INVALID_PARAMETER);
     Observation observed;
-    const DWORD error = Observe(snapshot.path_, snapshot.parent_, snapshot.parent_exists_ ? &snapshot.parent_identity_ : nullptr, cancelled, observed, snapshot.caller_validates_access_, snapshot.no_test_file_create_, snapshot.require_existing_parent_);
+    const DWORD error = Observe(snapshot.path_, snapshot.parent_, snapshot.parent_exists_ ? &snapshot.parent_identity_ : nullptr, cancelled, observed, snapshot.caller_validates_access_, snapshot.no_test_file_create_, snapshot.require_existing_parent_, snapshot.reject_readonly_save_);
     if (error) return Failed(error);
     SaveRevalidationResult result;
     result.error = ERROR_SUCCESS;

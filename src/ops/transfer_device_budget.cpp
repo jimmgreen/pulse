@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cwchar>
+#include <cwctype>
 #include <mutex>
 #include <condition_variable>
 #include <list>
@@ -48,13 +49,67 @@ TransferDeviceIdentity DirectUncTransferIdentity(const std::wstring& path) {
 TransferDeviceIdentityCache::TransferDeviceIdentityCache()
     : remote_budget_enabled_(TransferFeatureEnabled(L"PULSE_REMOTE_COPY_BUDGET")) {}
 
+namespace {
+std::wstring FoldedPath(const std::wstring& path) {
+    std::wstring folded = path;
+    for (auto& ch : folded) ch = static_cast<wchar_t>(towlower(ch));
+    return folded;
+}
+}  // namespace
+
+// GetVolumePathNameW costs 0.5-1 ms per deep C: path, and a tree copy asks for
+// every new folder. A folder is on its parent's volume unless it is a reparse
+// point (mount point, junction, link), so a path a few plain folders below one
+// already resolved reuses that root: one attribute query per folder between
+// them. Anything else - a reparse point, a missing or unreadable folder, a
+// long path, an unrelated path - asks the system as before.
+std::wstring TransferDeviceIdentityCache::VolumeRootOf(const std::wstring& path) {
+    constexpr size_t kMaxReusedLevels = 4;
+    constexpr size_t kMaxCachedPaths = 4096;
+    const std::wstring folded = FoldedPath(path);
+    size_t end = folded.size();
+    for (size_t level = 0; level <= kMaxReusedLevels && end > 0; ++level) {
+        const auto ancestor = roots_.find(folded.substr(0, end));
+        if (ancestor != roots_.end()) {
+            // The ancestor and every folder below it, down to the path itself:
+            // contents share a folder's volume only if it is not a reparse point.
+            bool plain = true;
+            for (size_t cut = folded.size();;) {
+                const DWORD attributes = GetFileAttributesW(path.substr(0, cut).c_str());
+                plain = attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT);
+                if (!plain || cut == end) break;
+                cut = folded.find_last_of(L"\\/", cut - 1);
+                if (cut == std::wstring::npos || cut < end) { plain = false; break; }
+            }
+            if (plain) {
+                std::wstring root = ancestor->second;
+                if (end != folded.size()) {
+                    if (roots_.size() >= kMaxCachedPaths) roots_.clear();
+                    roots_.emplace(folded, root);
+                }
+                return root;
+            }
+            break;
+        }
+        const size_t separator = folded.find_last_of(L"\\/", end - 1);
+        if (separator == std::wstring::npos || separator + 1 >= end) break;
+        end = separator;
+    }
+    ++volume_path_queries_;
+    std::wstring root(32768, L'\0');
+    if (!GetVolumePathNameW(path.c_str(), root.data(), static_cast<DWORD>(root.size()))) return {};
+    root.resize(wcslen(root.c_str()));
+    if (roots_.size() >= kMaxCachedPaths) roots_.clear();
+    roots_.insert_or_assign(folded, root);
+    return root;
+}
+
 TransferDeviceIdentity TransferDeviceIdentityCache::Resolve(const std::wstring& path) {
     const bool direct_unc = (path.size() >= 8 && _wcsnicmp(path.c_str(), LR"(\\?\UNC\)", 8) == 0) ||
         (path.starts_with(LR"(\\)") && !path.starts_with(LR"(\\?\)") && !path.starts_with(LR"(\\.\)"));
     if (direct_unc) return remote_budget_enabled_ ? DirectUncTransferIdentity(path) : TransferDeviceIdentity{};
-    std::wstring root(32768, L'\0');
-    if (!GetVolumePathNameW(path.c_str(), root.data(), static_cast<DWORD>(root.size()))) return {};
-    root.resize(wcslen(root.c_str()));
+    const std::wstring root = VolumeRootOf(path);
+    if (root.empty()) return {};
     if (const auto found = volumes_.find(root); found != volumes_.end()) return found->second;
     TransferDeviceIdentity identity;
     if (!pulse::fs::IsRemoteLikeDrive(root) && GetDriveTypeW(root.c_str()) != DRIVE_REMOTE) {

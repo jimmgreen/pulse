@@ -1233,7 +1233,204 @@ int RunToolbarLayoutTest(AppState& s, const wchar_t* output) {
     return failures ? 1 : 0;
 }
 
+namespace {
+struct AddressMenuProbe {
+    AppState* state = nullptr;
+    WPARAM key_to_send = 0;
+    bool fluent_open = false;
+    bool native_menu_found = false;
+    bool editor_kept_alive = false;
+};
+AddressMenuProbe* g_address_menu_probe = nullptr;
+
+BOOL CALLBACK CheckNoNativePopupMenu(HWND hwnd, LPARAM lparam) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != GetCurrentProcessId() || !IsWindowVisible(hwnd)) return TRUE;
+    wchar_t cls[64]{};
+    if (GetClassNameW(hwnd, cls, ARRAYSIZE(cls)) > 0 && wcscmp(cls, L"#32768") == 0) {
+        *reinterpret_cast<bool*>(lparam) = true;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+void CALLBACK DriveAddressContextMenu(HWND, UINT, UINT_PTR timer, DWORD) {
+    auto* probe = g_address_menu_probe;
+    if (!probe || !probe->state || !probe->state->menu || !probe->state->menu->IsOpen()) return;
+    auto& s = *probe->state;
+    probe->fluent_open = true;
+    EnumWindows(CheckNoNativePopupMenu, reinterpret_cast<LPARAM>(&probe->native_menu_found));
+    probe->editor_kept_alive = s.addressEditing && s.hwndAddressEdit && IsWindowVisible(s.hwndAddressEdit);
+    KillTimer(nullptr, timer);
+    if (probe->key_to_send) {
+        PostMessageW(s.hwnd, WM_KEYDOWN, probe->key_to_send, 0);
+    } else {
+        s.menu->Dismiss();
+    }
+}
+} // namespace
+
+static int RunAddressContextMenuTest(AppState& s, const wchar_t* output) {
+    std::ofstream log{std::filesystem::path(output)};
+    int failures = 0;
+    auto check = [&](bool ok, const char* label) {
+        log << (ok ? "[PASS] " : "[FAIL] ") << label << '\n';
+        if (!ok) ++failures;
+    };
+    const auto out_dir = std::filesystem::path(output).parent_path();
+    s.appPrefs.persist = false;
+    auto* tab = ActiveTab(s);
+    const std::wstring orig_path = tab ? tab->current_path : std::wstring{};
+    const bool orig_dark = s.darkMode;
+
+    if (tab) tab->current_path = L"C:\\Users\\Public";
+    Render(s);
+
+    // 1. Non-editing address bar context menu model & live right-click -> EditAddress.
+    {
+        HideAddressEditor(s, false);
+        const auto bar_items = BuildAddressBarContextMenu(s);
+        check(bar_items.size() == 3 &&
+              bar_items[0].enabled &&
+              bar_items[1].command == app::CmdCopyPath && bar_items[1].enabled &&
+              bar_items[2].command == app::CmdPaste,
+              "non-editing address bar menu has Edit address, Copy path, and Paste");
+        if (tab) tab->current_path.clear();
+        const auto root_items = BuildAddressBarContextMenu(s);
+        check(root_items.size() == 3 && !root_items[1].enabled,
+              "Copy path is disabled on This PC where clipboard path is empty");
+        if (tab) tab->current_path = L"C:\\Users\\Public";
+        Render(s);
+
+        const auto address = s.renderer.AddressBarRect(static_cast<float>(s.compositor.Width()));
+        AddressMenuProbe probe{&s, VK_RETURN};
+        g_address_menu_probe = &probe;
+        const UINT_PTR timer = SetTimer(nullptr, 0, 40, DriveAddressContextMenu);
+        SendMessageW(s.hwnd, WM_RBUTTONUP, 0,
+            MAKELPARAM(static_cast<int>(address.right - 8.0f * s.scale),
+                       static_cast<int>((address.top + address.bottom) * 0.5f)));
+        KillTimer(nullptr, timer);
+        g_address_menu_probe = nullptr;
+        check(probe.fluent_open && !probe.native_menu_found &&
+              s.addressEditing && s.hwndAddressEdit && IsWindowVisible(s.hwndAddressEdit),
+              "right-clicking blank address bar opens FluentMenu and Edit address activates editor");
+    }
+
+    // 2. Edit-mode context menu state transitions & visual debug snapshots.
+    ShowAddressEditor(s);
+    check(s.addressEditing && s.hwndAddressEdit && IsWindowVisible(s.hwndAddressEdit),
+          "address editor is open for context menu checks");
+    {
+        const auto initial = BuildAddressEditContextMenu(s.hwndAddressEdit);
+        check(initial.size() == 6 &&
+              initial[0].command == app::CmdUndo && !initial[0].enabled &&
+              initial[1].command == app::CmdCut && initial[1].enabled &&
+              initial[2].command == app::CmdCopy && initial[2].enabled &&
+              initial[3].command == app::CmdPaste &&
+              initial[4].command == app::CmdDelete && initial[4].enabled &&
+              initial[5].command == app::CmdSelectAll && !initial[5].enabled,
+              "full selection enables Cut/Copy/Delete and disables Select all & Undo");
+
+        if (EnsureMenu(s)) {
+            s.menu->SetTheme(false, s.accentColor);
+            check(s.menu->SaveDebugSnapshot((out_dir / L"address-edit-menu-light.png").c_str(), initial, 2),
+                  "captured light-theme Fluent address edit context menu");
+            s.menu->SetTheme(true, s.accentColor);
+            check(s.menu->SaveDebugSnapshot((out_dir / L"address-edit-menu-dark.png").c_str(), initial, 2),
+                  "captured dark-theme Fluent address edit context menu");
+            s.menu->SetTheme(orig_dark, s.accentColor);
+        }
+
+        SendMessageW(s.hwndAddressEdit, EM_SETSEL, 0, 0);
+        const auto collapsed = BuildAddressEditContextMenu(s.hwndAddressEdit);
+        check(!collapsed[1].enabled && !collapsed[2].enabled && !collapsed[4].enabled && collapsed[5].enabled,
+              "collapsed caret disables Cut/Copy/Delete and enables Select all");
+    }
+
+    // 3. End-to-end live WM_CONTEXTMENU -> Select All ('A'), Delete ('D'), Undo ('U').
+    {
+        SendMessageW(s.hwndAddressEdit, EM_SETSEL, 0, -1);
+        SendMessageW(s.hwndAddressEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L"C:\\DemoFolder"));
+        SendMessageW(s.hwndAddressEdit, EM_SETSEL, 0, 0);
+
+        auto invoke_key = [&](WPARAM key, AddressMenuProbe& probe) {
+            probe.state = &s;
+            probe.key_to_send = key;
+            g_address_menu_probe = &probe;
+            const UINT_PTR timer = SetTimer(nullptr, 0, 40, DriveAddressContextMenu);
+            SendMessageW(s.hwndAddressEdit, WM_CONTEXTMENU,
+                reinterpret_cast<WPARAM>(s.hwndAddressEdit), MAKELPARAM(-1, -1));
+            KillTimer(nullptr, timer);
+            g_address_menu_probe = nullptr;
+        };
+
+        AddressMenuProbe p_all;
+        invoke_key(L'A', p_all);
+        DWORD s0 = 0, s1 = 0;
+        SendMessageW(s.hwndAddressEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&s0), reinterpret_cast<LPARAM>(&s1));
+        check(p_all.fluent_open && !p_all.native_menu_found && p_all.editor_kept_alive &&
+              s.addressEditing && s0 == 0 && s1 == 13,
+              "WM_CONTEXTMENU opens FluentMenu (never #32768), keeps editor alive, and Select all selects text");
+
+        AddressMenuProbe p_del;
+        invoke_key(L'D', p_del);
+        check(p_del.fluent_open && !p_del.native_menu_found &&
+              GetWindowTextLengthW(s.hwndAddressEdit) == 0 && s.addressEditing,
+              "Delete item in Fluent address edit menu clears selected text");
+
+        AddressMenuProbe p_undo;
+        invoke_key(L'U', p_undo);
+        wchar_t restored[64]{};
+        GetWindowTextW(s.hwndAddressEdit, restored, ARRAYSIZE(restored));
+        check(p_undo.fluent_open && wcscmp(restored, L"C:\\DemoFolder") == 0 && s.addressEditing,
+              "Undo item in Fluent address edit menu restores previous text");
+    }
+
+    // 4. LumaText mouse-dragged deferred selection commits on right-click.
+    {
+        SetWindowTextW(s.hwndAddressEdit, L"C:\\Users\\Public\\Documents");
+        SendMessageW(s.hwndAddressEdit, EM_SETSEL, 0, 0);
+        SendMessageW(s.hwndAddressEdit, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(4, 8));
+        SendMessageW(s.hwndAddressEdit, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(90, 8));
+        SendMessageW(s.hwndAddressEdit, WM_LBUTTONUP, 0, MAKELPARAM(90, 8));
+        SendMessageW(s.hwndAddressEdit, WM_RBUTTONDOWN, MK_RBUTTON, MAKELPARAM(40, 8));
+        DWORD d0 = 0, d1 = 0;
+        SendMessageW(s.hwndAddressEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&d0), reinterpret_cast<LPARAM>(&d1));
+        const auto dragged_menu = BuildAddressEditContextMenu(s.hwndAddressEdit);
+        check(d1 > d0 && dragged_menu[2].enabled && dragged_menu[5].enabled,
+              "mouse-dragged partial selection commits on right-click and enables both Copy and Select all");
+    }
+
+    // 5. Search mode inside address/search bar uses the same Fluent edit menu.
+    {
+        HideAddressEditor(s, false);
+        ShowAddressSearch(s);
+        SetWindowTextW(s.hwndAddressEdit, L"invoice");
+        SendMessageW(s.hwndAddressEdit, EM_SETSEL, 0, -1);
+        AddressMenuProbe p_search;
+        p_search.state = &s;
+        p_search.key_to_send = VK_ESCAPE;
+        g_address_menu_probe = &p_search;
+        const UINT_PTR timer = SetTimer(nullptr, 0, 40, DriveAddressContextMenu);
+        SendMessageW(s.hwndAddressEdit, WM_CONTEXTMENU,
+            reinterpret_cast<WPARAM>(s.hwndAddressEdit), MAKELPARAM(-1, -1));
+        KillTimer(nullptr, timer);
+        g_address_menu_probe = nullptr;
+        check(p_search.fluent_open && !p_search.native_menu_found && s.addressSearching,
+              "address search editor also uses FluentMenu and stays active after Esc dismiss");
+        HideAddressEditor(s, false);
+    }
+
+    if (tab) tab->current_path = orig_path;
+    s.darkMode = orig_dark;
+    Render(s);
+    log << "failures=" << failures << '\n';
+    return failures ? 1 : 0;
+}
+
 int RunSearchFlowTest(AppState& s, const wchar_t* output) {
+    if (GetEnvironmentVariableW(L"PULSE_TEST_ADDRESS_CONTEXT_MENU", nullptr, 0)) return RunAddressContextMenuTest(s, output);
     if (GetEnvironmentVariableW(L"PULSE_TEST_TOOLBAR_INTERACTION_ONLY", nullptr, 0)) return RunToolbarInteractionTest(s, output);
     if (GetEnvironmentVariableW(L"PULSE_TEST_TOOLBAR_LAYOUT", nullptr, 0)) return RunToolbarLayoutTest(s, output);
     if(GetEnvironmentVariableW(L"PULSE_TEST_CONTENT_LIVE_SELECTION",nullptr,0)) return RunContentLiveSelectionTest(s,output);

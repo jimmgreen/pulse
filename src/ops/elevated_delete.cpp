@@ -7,6 +7,8 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <new>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #pragma comment(lib, "advapi32.lib")
@@ -15,6 +17,25 @@ namespace pulse::ops {
 namespace {
 using Microsoft::WRL::ComPtr;
 constexpr HRESULT kCancelled = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+class DeleteStageScope {
+public:
+    DeleteStageScope(const DeleteStageObserver& observer, DeleteStage stage) : observer_(observer), stage_(stage) { Emit(true, S_OK); }
+    ~DeleteStageScope() { if (!ended_) Emit(false, E_UNEXPECTED); }
+    void End(HRESULT hr) { if (!ended_) { ended_ = true; Emit(false, hr); } }
+private:
+    void Emit(bool begin, HRESULT hr) noexcept {
+        try { if (observer_) observer_(stage_, begin, hr); } catch (...) {}
+    }
+    const DeleteStageObserver& observer_;
+    DeleteStage stage_;
+    bool ended_ = false;
+};
+template<class Work> HRESULT TraceDeleteStage(const DeleteStageObserver& observer, DeleteStage stage, Work&& work) {
+    DeleteStageScope trace(observer, stage);
+    const HRESULT result = work();
+    trace.End(result);
+    return result;
+}
 std::wstring ItemPath(IShellItem* item) {
     PWSTR raw = nullptr;
     if (!item || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &raw))) return {};
@@ -79,6 +100,30 @@ std::wstring ParentKey(const std::wstring& path) {
     if (!key.empty()) CharLowerBuffW(key.data(), static_cast<DWORD>(key.size()));
     return key;
 }
+
+// A native recycle is one rename, so the Shell is not told about each item:
+// one SHCNE_UPDATEDIR per affected folder plus one Recycle Bin update replace
+// the per-item DELETE/CREATE pair, which cost ~4.8 ms per item on a SATA SSD
+// (1000 files: 6246 ms per-item vs 1459 ms batched). Pending folders are
+// published at most once a second during a batch and always when it ends.
+constexpr ULONGLONG kRecycleNotifyIntervalMs = 1000;
+void AddRecycledParent(RecycledParents& parents, const std::wstring& source) {
+    std::wstring parent = native_recycle::detail::NormalizePlainPath(source);
+    const size_t slash = parent.find_last_of(L'\\');
+    if (slash == std::wstring::npos) return;
+    parent.resize(slash == 2 && parent[1] == L':' ? 3 : slash);  // a root keeps its slash: "C:\x" -> "C:\"
+    if (parent.empty()) return;
+    std::wstring key = parent;
+    CharLowerBuffW(key.data(), static_cast<DWORD>(key.size()));
+    parents.try_emplace(std::move(key), std::move(parent));
+}
+uint32_t NotifyRecycledParents(RecycledParents& parents) {
+    const auto count = static_cast<uint32_t>(parents.size());
+    for (const auto& entry : parents)
+        native_recycle::detail::NotifyShellPath(SHCNE_UPDATEDIR, entry.second.c_str());
+    parents.clear();
+    return count;
+}
 }  // namespace
 
 struct RecycleCache::State {
@@ -91,9 +136,44 @@ struct RecycleCache::State {
     bool available = false;
     DWORD volume_error = 0;
     RecycleBinLimits limits;
+    std::wstring native_bin_dir;
+    std::unordered_map<std::wstring, uint64_t> native_bins_max_bytes;
+    std::unordered_set<std::wstring> protected_payloads_upper;
+    uint64_t native_recycled_count = 0;
+    // Folders that lost a natively recycled item and have not been told yet.
+    RecycledParents notify_parents;
+    ULONGLONG notify_last = 0;
 };
 RecycleCache::RecycleCache() : state_(std::make_unique<State>()) {}
 RecycleCache::~RecycleCache() = default;
+
+RecycleBatchQuotaSummary FlushRecycleCache(RecycleCache& cache) {
+    RecycleBatchQuotaSummary summary;
+    auto& state = cache.state();
+    if (state.native_recycled_count == 0) return summary;
+    const ULONGLONG notify_started = GetTickCount64();
+    summary.notified_parents = NotifyRecycledParents(state.notify_parents);
+    pulse::recycle_empty::NotifyShell();
+    summary.notify_ms = GetTickCount64() - notify_started;
+    state.notify_last = 0;
+    const ULONGLONG started = GetTickCount64();
+    for (const auto& [bin_dir, max_bytes] : state.native_bins_max_bytes) {
+        if (max_bytes == 0) continue;
+        uint64_t used = 0;
+        uint64_t victim_bytes = 0;
+        const uint32_t queued = native_recycle::QueueQuotaCompaction(
+            bin_dir, max_bytes, state.protected_payloads_upper, used, victim_bytes);
+        summary.bin_used_bytes += used;
+        summary.bin_max_bytes = (std::max)(summary.bin_max_bytes, max_bytes);
+        summary.victims_queued += queued;
+        summary.victim_bytes += victim_bytes;
+    }
+    summary.quota_check_ms = GetTickCount64() - started;
+    state.native_recycled_count = 0;
+    state.native_bins_max_bytes.clear();
+    state.protected_payloads_upper.clear();
+    return summary;
+}
 
 // Parsing a full path walks it from the namespace root: known folders,
 // libraries and property handlers, 3-17 ms per item under a user profile.
@@ -118,20 +198,20 @@ HRESULT CreateItemForPath(const std::wstring& path, IShellItem* folder, IShellIt
 namespace {
 HRESULT RecycleOnly(const std::wstring& source, std::atomic<bool>& cancel,
                     ShellTransferResult& result, const ShellTransferProgress& progress,
-                    RecycleCache* cache) {
+                    RecycleCache* cache, const DeleteStageObserver& observer) {
     ComPtr<IShellItem> item, parent, bin;
     ComPtr<ITransferSource> transfer;
     const std::wstring parent_key = cache ? ParentKey(source) : std::wstring{};
     const bool same_folder = cache && cache->state().transfer && cache->state().parent &&
         !parent_key.empty() && cache->state().transfer_parent == parent_key;
-    HRESULT hr = CreateItemForPath(source, same_folder ? cache->state().parent.Get() : nullptr, &item);
+    HRESULT hr = TraceDeleteStage(observer, DeleteStage::CreateItem, [&] { return CreateItemForPath(source, same_folder ? cache->state().parent.Get() : nullptr, &item); });
     if (FAILED(hr)) return hr;
     if (same_folder) {
         transfer = cache->state().transfer;
     } else {
-        hr = item->GetParent(&parent);
+        hr = TraceDeleteStage(observer, DeleteStage::GetParent, [&] { return item->GetParent(&parent); });
         if (FAILED(hr)) return hr;
-        hr = parent->BindToHandler(nullptr, BHID_Transfer, IID_PPV_ARGS(&transfer));
+        hr = TraceDeleteStage(observer, DeleteStage::BindTransfer, [&] { return parent->BindToHandler(nullptr, BHID_Transfer, IID_PPV_ARGS(&transfer)); });
         if (FAILED(hr)) return hr;
         if (cache) {
             cache->state().transfer = transfer;
@@ -142,7 +222,7 @@ HRESULT RecycleOnly(const std::wstring& source, std::atomic<bool>& cancel,
     if (cache && cache->state().bin) {
         bin = cache->state().bin;
     } else {
-        hr = SHGetKnownFolderItem(FOLDERID_RecycleBinFolder, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&bin));
+        hr = TraceDeleteStage(observer, DeleteStage::GetBin, [&] { return SHGetKnownFolderItem(FOLDERID_RecycleBinFolder, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&bin)); });
         if (FAILED(hr)) return hr;
         if (cache) cache->state().bin = bin;
     }
@@ -150,7 +230,7 @@ HRESULT RecycleOnly(const std::wstring& source, std::atomic<bool>& cancel,
     sink.Attach(new (std::nothrow) RecycleSink(source, cancel, progress));
     if (!sink) return E_OUTOFMEMORY;
     DWORD cookie = 0;
-    hr = transfer->Advise(sink.Get(), &cookie);
+    hr = TraceDeleteStage(observer, DeleteStage::Advise, [&] { return transfer->Advise(sink.Get(), &cookie); });
     if (FAILED(hr)) return hr;
     ComPtr<IShellItem> recycled;
     bool attempted = false;
@@ -160,20 +240,22 @@ HRESULT RecycleOnly(const std::wstring& source, std::atomic<bool>& cancel,
         if (cancel.load()) hr = kCancelled;
         else {
             attempted = true;
-            hr = transfer->RecycleItem(item.Get(), bin.Get(), TSF_NORMAL, &recycled);
+            hr = TraceDeleteStage(observer, DeleteStage::RecycleItem, [&] { return transfer->RecycleItem(item.Get(), bin.Get(), TSF_NORMAL, &recycled); });
         }
     }
-    transfer->Unadvise(cookie);
+    (void)TraceDeleteStage(observer, DeleteStage::Unadvise, [&] { return transfer->Unadvise(cookie); });
     // A failed transfer source is not trusted with the next item.
     if (cache && FAILED(hr)) {
         cache->state().transfer.Reset();
         cache->state().parent.Reset();
         cache->state().transfer_parent.clear();
     }
+    DeleteStageScope confirm_stage(observer, DeleteStage::ConfirmMissing);
     const DWORD attributes = GetFileAttributesW(source.c_str());
     const DWORD source_error = attributes == INVALID_FILE_ATTRIBUTES ? GetLastError() : ERROR_SUCCESS;
     const bool missing = attributes == INVALID_FILE_ATTRIBUTES &&
         (source_error == ERROR_FILE_NOT_FOUND || source_error == ERROR_PATH_NOT_FOUND);
+    confirm_stage.End(missing ? S_OK : source_error ? HRESULT_FROM_WIN32(source_error) : S_FALSE);
     // A returned recycled object proves a change even if the original path was
     // recreated concurrently. Unknown source state after the call cannot be
     // treated as proof of no mutation and must not enable replay.
@@ -291,10 +373,13 @@ std::wstring LongPath(const std::wstring& path) {
 }
 
 // Bytes under `folder`, stopping once past `limit`. Links are not entered,
-// the same as the recycle itself. An unreadable subfolder counts as empty;
-// the recycle then fails on it anyway.
-uint64_t MeasureFolder(const std::wstring& folder, uint64_t limit, std::atomic<bool>& cancel) {
-    uint64_t total = 0;
+// the same as the recycle itself. A folder that cannot be listed fails the
+// measurement with its Win32 error: its size is unknown, so the limit cannot
+// be shown to hold (the Shell would delete an oversized item for good). This
+// matches native_recycle::MeasureFolderFast. A folder that vanished during
+// the walk holds nothing and is skipped.
+HRESULT MeasureFolder(const std::wstring& folder, uint64_t limit, std::atomic<bool>& cancel, uint64_t& total) {
+    total = 0;
     std::vector<std::wstring> pending{folder};
     while (!pending.empty() && total <= limit && !cancel.load()) {
         const std::wstring current = std::move(pending.back());
@@ -303,7 +388,11 @@ uint64_t MeasureFolder(const std::wstring& folder, uint64_t limit, std::atomic<b
         const std::wstring pattern = LongPath(current + (current.ends_with(L'\\') ? L"*" : L"\\*"));
         HANDLE find = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &data, FindExSearchNameMatch, nullptr,
                                        FIND_FIRST_EX_LARGE_FETCH);
-        if (find == INVALID_HANDLE_VALUE) continue;
+        if (find == INVALID_HANDLE_VALUE) {
+            const DWORD error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) continue;
+            return HRESULT_FROM_WIN32(error != ERROR_SUCCESS ? error : ERROR_ACCESS_DENIED);
+        }
         do {
             if (cancel.load(std::memory_order_relaxed)) break;
             const wchar_t* name = data.cFileName;
@@ -315,9 +404,11 @@ uint64_t MeasureFolder(const std::wstring& folder, uint64_t limit, std::atomic<b
                 total += (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
             }
         } while (total <= limit && FindNextFileW(find, &data));
+        const DWORD next_error = total <= limit && !cancel.load(std::memory_order_relaxed) ? GetLastError() : ERROR_NO_MORE_FILES;
         FindClose(find);
+        if (next_error != ERROR_NO_MORE_FILES) return HRESULT_FROM_WIN32(next_error);
     }
-    return total;
+    return S_OK;
 }
 }  // namespace
 
@@ -409,8 +500,9 @@ HRESULT CheckRecycleFits(const std::wstring& path, const RecycleBinLimits& limit
     if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
         bytes = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
     } else if (measure_folders && !(data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
-        bytes = MeasureFolder(path, limits.max_bytes, cancel);
+        const HRESULT measured = MeasureFolder(path, limits.max_bytes, cancel, bytes);
         if (cancel.load()) return kCancelled;
+        if (FAILED(measured)) return measured;  // size unknown: nothing touched
     }
     return bytes > limits.max_bytes ? kRecycleBinTooSmall : S_OK;
 }
@@ -423,14 +515,19 @@ bool RecycleBinAvailable(const std::wstring& path, DWORD* volume_error) {
 
 ShellTransferResult DeleteWithCurrentToken(const std::vector<std::wstring>& sources,
     bool permanent, HWND owner, std::atomic<bool>& cancel, ShellTransferProgress progress,
-    RecycleCache* cache) {
+    RecycleCache* cache, DeleteStageObserver observer, const DeleteHooks* hooks) {
     ShellTransferResult result;
+    std::unordered_map<std::wstring, uint64_t> local_native_bins;
+    std::unordered_set<std::wstring> local_protected_upper;
+    uint64_t local_native_count = 0;
+    RecycledParents local_parents;
     for (const auto& source : sources) {
         if (cancel.load()) { result.hr = kCancelled; result.cancelled = true; break; }
         if (!permanent) {
             // The UI sends such items as permanent deletes after asking
             // (DeletePaths); a recycle request for them is refused, never
             // turned into a silent permanent delete.
+            DeleteStageScope policy_stage(observer, DeleteStage::Policy);
             DWORD volume_error = 0;
             bool available = false;
             RecycleBinLimits limits;
@@ -458,6 +555,7 @@ ShellTransferResult DeleteWithCurrentToken(const std::vector<std::wstring>& sour
                     state.volume_error = volume_error;
                 }
             }
+            policy_stage.End(available ? S_OK : volume_error ? HRESULT_FROM_WIN32(volume_error) : COPYENGINE_E_RECYCLE_BIN_NOT_FOUND);
             if (!available) {
                 if (volume_error) {
                     result.hr = HRESULT_FROM_WIN32(volume_error);
@@ -467,9 +565,80 @@ ShellTransferResult DeleteWithCurrentToken(const std::vector<std::wstring>& sour
                 }
                 break;
             }
+            // Fast path: direct same-volume $I v2 + MoveFileExW($R). Single
+            // FindFirstFileExW measurement (no double walk) and <1 ms atomic
+            // move, with background quota compaction instead of synchronous
+            // Shell purging after the source already vanished.
+            native_recycle::NativeRecycleResult native;
+            {
+                DeleteStageScope native_stage(observer, DeleteStage::NativeRecycle);
+                const std::wstring cached_bin = cache ? cache->state().native_bin_dir : std::wstring{};
+                // A bin as large as the volume's used space takes anything
+                // (CheckRecycleFits): no limit to prove, so a folder that
+                // cannot be listed is not refused for an unknowable size.
+                const uint64_t native_limit =
+                    limits.used_bytes && limits.max_bytes >= limits.used_bytes ? 0 : limits.max_bytes;
+                native = native_recycle::RecycleItemNative(
+                    source, native_limit, cancel,
+                    hooks ? hooks->on_scan : native_recycle::ScanProgressFn{},
+                    false, {}, cached_bin);
+                native.metrics.bin_max_bytes = limits.max_bytes;
+                native_stage.End(native.handled ? native.hr : S_FALSE);
+            }
+            if (hooks && hooks->on_native_metrics) {
+                try { hooks->on_native_metrics(native.metrics); } catch (...) {}
+            }
+            if (native.handled) {
+                result.hr = native.hr;
+                result.cancelled = native.cancelled || cancel.load() || result.hr == kCancelled;
+                if (result.cancelled && SUCCEEDED(result.hr)) result.hr = kCancelled;
+                if (native.mutated) result.mutated = true;
+                if (SUCCEEDED(result.hr)) {
+                    result.sources.push_back(source);
+                    if (!native.recycled_payload.empty())
+                        result.destinations.push_back(native.recycled_payload);
+                    if (cache) {
+                        auto& state = cache->state();
+                        if (!native.bin_dir.empty()) {
+                            state.native_bin_dir = native.bin_dir;
+                            state.native_bins_max_bytes[native.bin_dir] = limits.max_bytes;
+                        }
+                        if (!native.recycled_payload.empty())
+                            state.protected_payloads_upper.insert(
+                                native_recycle::detail::UpperFold(native.recycled_payload));
+                        ++state.native_recycled_count;
+                        AddRecycledParent(state.notify_parents, source);
+                        const ULONGLONG now = GetTickCount64();
+                        if (state.notify_last == 0) {
+                            state.notify_last = now;
+                        } else if (now - state.notify_last >= kRecycleNotifyIntervalMs) {
+                            NotifyRecycledParents(state.notify_parents);
+                            pulse::recycle_empty::NotifyShell();
+                            state.notify_last = now;
+                        }
+                    } else {
+                        if (!native.bin_dir.empty())
+                            local_native_bins[native.bin_dir] = limits.max_bytes;
+                        if (!native.recycled_payload.empty())
+                            local_protected_upper.insert(
+                                native_recycle::detail::UpperFold(native.recycled_payload));
+                        ++local_native_count;
+                        AddRecycledParent(local_parents, source);
+                    }
+                    continue;
+                }
+                if (result.hr == kRecycleBinTooSmall)
+                    result.error = L"This item is larger than the Recycle Bin can hold. It was not deleted.";
+                else if (result.hr == COPYENGINE_E_RECYCLE_BIN_NOT_FOUND)
+                    result.error = L"This location cannot be safely sent to the Recycle Bin. The item was not deleted.";
+                break;
+            }
+
+            // Fallback path (uninitialized $Recycle.Bin, OneDrive/reparse root,
+            // cross-volume mount point): preserve full Shell compatibility.
             // The bin's size limit: an item larger than the bin would be
             // deleted for good by the Shell, so it is refused here, untouched.
-            result.hr = CheckRecycleFits(source, limits, cancel);
+            result.hr = TraceDeleteStage(observer, DeleteStage::SizePreflight, [&] { return CheckRecycleFits(source, limits, cancel); });
             if (FAILED(result.hr)) {
                 result.cancelled = result.hr == kCancelled;
                 if (result.hr == kRecycleBinTooSmall)
@@ -478,14 +647,14 @@ ShellTransferResult DeleteWithCurrentToken(const std::vector<std::wstring>& sour
                     result.error = L"This location cannot be safely sent to the Recycle Bin. The item was not deleted.";
                 break;
             }
-            result.hr = RecycleOnly(source, cancel, result, progress, cache);
+            result.hr = RecycleOnly(source, cancel, result, progress, cache, observer);
             result.cancelled = cancel.load() || result.hr == kCancelled || result.hr == E_ABORT || result.hr == COPYENGINE_E_USER_CANCELLED;
             if (result.cancelled && SUCCEEDED(result.hr)) result.hr = kCancelled;
             if (FAILED(result.hr) || result.cancelled) break;
             continue;
         }
         ComPtr<IFileOperation> operation;
-        result.hr = CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&operation));
+        result.hr = TraceDeleteStage(observer, DeleteStage::CreateOperation, [&] { return CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&operation)); });
         if (FAILED(result.hr)) break;
         result.hr = operation->SetOwnerWindow(owner);
         if (FAILED(result.hr)) break;
@@ -500,12 +669,12 @@ ShellTransferResult DeleteWithCurrentToken(const std::vector<std::wstring>& sour
         DWORD cookie = 0;
         result.hr = operation->Advise(sink.Get(), &cookie);
         if (FAILED(result.hr)) break;
-        result.hr = operation->DeleteItem(item.Get(), nullptr);
+        result.hr = TraceDeleteStage(observer, DeleteStage::QueueDelete, [&] { return operation->DeleteItem(item.Get(), nullptr); });
         if (SUCCEEDED(result.hr)) {
-            const HRESULT performed = operation->PerformOperations();
+            const HRESULT performed = TraceDeleteStage(observer, DeleteStage::PerformOperations, [&] { return operation->PerformOperations(); });
             if (FAILED(performed) && SUCCEEDED(result.hr)) result.hr = performed;
             BOOL aborted = FALSE;
-            const HRESULT queried = operation->GetAnyOperationsAborted(&aborted);
+            const HRESULT queried = TraceDeleteStage(observer, DeleteStage::QueryAborted, [&] { return operation->GetAnyOperationsAborted(&aborted); });
             if (FAILED(queried) && SUCCEEDED(result.hr)) result.hr = queried;
             if (aborted && SUCCEEDED(result.hr)) result.hr = HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED);
             const bool source_missing = Missing(source);
@@ -514,13 +683,22 @@ ShellTransferResult DeleteWithCurrentToken(const std::vector<std::wstring>& sour
                 (result.sources.empty() || result.sources.back() != source))
                 result.sources.push_back(source);
         }
-        operation->Unadvise(cookie);
+        (void)TraceDeleteStage(observer, DeleteStage::Unadvise, [&] { return operation->Unadvise(cookie); });
         result.cancelled = cancel.load() || result.hr == kCancelled || result.hr == E_ABORT || result.hr == COPYENGINE_E_USER_CANCELLED;
         if (result.cancelled && SUCCEEDED(result.hr)) result.hr = kCancelled;
         if (FAILED(result.hr) || result.cancelled) break;
         if (result.sources.empty() || result.sources.back() != source) {
             // No completion callback must never become a fabricated success.
             result.hr = E_FAIL; break;
+        }
+    }
+    if (!cache && local_native_count > 0) {
+        NotifyRecycledParents(local_parents);
+        pulse::recycle_empty::NotifyShell();
+        for (const auto& [bin_dir, max_bytes] : local_native_bins) {
+            if (max_bytes == 0) continue;
+            uint64_t used = 0, victim_bytes = 0;
+            (void)native_recycle::QueueQuotaCompaction(bin_dir, max_bytes, local_protected_upper, used, victim_bytes);
         }
     }
     if (FAILED(result.hr) && !result.cancelled && result.error.empty()) result.error = ErrorText(result.hr);

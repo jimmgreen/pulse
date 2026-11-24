@@ -159,6 +159,7 @@ int RunFileClickProbe(pulse::AppState& s, FILE* log) {
         if (!home() || !locate(point, row)) return false;
         ActiveTab(s)->SelectOnly(row);
         s.appPrefs.single_click_open = false;
+        s.appPrefs.double_click_interval_ms = 0;
         s.activateClickTick = 0;
         return true;
     };
@@ -215,9 +216,9 @@ int RunFileClickProbe(pulse::AppState& s, FILE* log) {
         point.x += GetSystemMetrics(SM_CXDOUBLECLK) + 8;
         if (!physical_click()) return 4;
         pump(interval + 100);
-        check(s.renameIndex < 0 && !s.fileClick.RenamePending(), preselected
-            ? "fast displaced clicks on selected name never become rename"
-            : "fast displaced selection clicks never become rename");
+        check(s.renameIndex == row && !s.fileClick.RenamePending(), preselected
+            ? "v58 displaced second selected name click enters rename"
+            : "v58 displaced second click after selection enters rename");
         check(ActiveTab(s)->current_path == root, "unrecognized displaced double click never guesses an open");
         point = first;
         if (s.renameIndex >= 0) HideRenameOverlay(s, false);
@@ -239,8 +240,35 @@ int RunFileClickProbe(pulse::AppState& s, FILE* log) {
     event(WM_LBUTTONDOWN, MK_LBUTTON); pump(interval + 100);
     check(s.renameIndex < 0, "held first press cannot start rename");
     event(WM_LBUTTONUP);
-    check(s.renameIndex < 0 && s.fileClick.RenamePending(), "long press release starts a fresh rename wait");
+    pump(100);
+    check(s.renameIndex == row && IsWindowVisible(s.hwndRenameEdit),
+        "v58 long press release enters rename without a fresh interval wait");
     CancelFileClick(s);
+    // Exercise both Windows message forms independently of the OS interval.
+    // First selecting clicks cannot arm rename while the second press is pending.
+    if (!reset()) return 3;
+    s.appPrefs.double_click_interval_ms = 1000;
+    ActiveTab(s)->ClearSelection();
+    click(); pump(550);
+    event(WM_LBUTTONDOWN, MK_LBUTTON); event(WM_LBUTTONUP); pump(100);
+    check(ActiveTab(s)->current_path == folder && s.renameIndex < 0,
+        "custom 1000ms interval recognizes second DOWN beyond the common 500ms system interval");
+    if (!reset()) return 3;
+    s.appPrefs.double_click_interval_ms = 200;
+    ActiveTab(s)->ClearSelection();
+    click(); pump(250);
+    event(WM_LBUTTONDBLCLK, MK_LBUTTON); event(WM_LBUTTONUP);
+    check(ActiveTab(s)->current_path == root && s.renameIndex < 0 && s.fileClick.RenamePending(),
+        "custom 200ms interval treats late native DBLCLK as ordinary selected-name press");
+    pump(250);
+    check(s.renameIndex == row && IsWindowVisible(s.hwndRenameEdit),
+        "late native DBLCLK retains ordinary slow-click rename behavior");
+    if (!reset()) return 3;
+    s.appPrefs.double_click_interval_ms = 1000;
+    ActiveTab(s)->ClearSelection();
+    click(); event(WM_LBUTTONDBLCLK, MK_LBUTTON); event(WM_LBUTTONUP); pump(100);
+    check(ActiveTab(s)->current_path == folder && s.renameIndex < 0,
+        "custom interval accepts native DBLCLK within its deadline");
     if (!reset()) return 3;
     click();
     HWND other = CreateWindowW(L"STATIC", L"Pulse isolated focus fixture", WS_OVERLAPPEDWINDOW,

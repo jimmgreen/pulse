@@ -21,6 +21,7 @@ inline constexpr wchar_t kTestUninstallKey[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\PulseSetupTest";
 inline constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 inline constexpr wchar_t kServiceName[] = L"PulseIndex";
+inline constexpr wchar_t kDialogBrokerServiceName[] = L"PulseDialogBroker";
 
 // Exit codes follow Inno Setup so UpdateInstallErrorFromExitCode keeps working.
 enum ExitCode : int {
@@ -30,6 +31,10 @@ enum ExitCode : int {
     kExitFatalInstall = 4,      // error while replacing files (rolled back)
     kExitCancelledDuring = 5,
     kExitPrepareFailed = 7,     // PrepareToInstall equivalent failed
+    // /CLEANUPVERSIONS only: versions remain (owners still running, or unverifiable),
+    // or an install holds the version lock / awaits recovery.
+    kExitCleanupRetained = 8,
+    kExitCleanupBusy = 9,
 };
 
 std::wstring Win32Error(DWORD code);
@@ -59,5 +64,13 @@ bool WriteWholeFile(const std::wstring& path, const void* data, size_t size);
 void RemoveTree(const std::wstring& dir);  // locked leftovers are removed at reboot
 std::wstring Utf8ToWide(const std::string& s);
 std::string WideToUtf8(const std::wstring& s);
+
+bool DirectoryHasPulseIndexArtifacts(const std::wstring& dir);
+bool IsNonEmptyNonIndexDirectory(const std::wstring& dir);
+std::wstring DefaultIndexPathForApp(const std::wstring& app_dir, bool test_mode = false);
+std::wstring NormalizeIndexSelection(const std::wstring& chosen_dir, const std::wstring& app_dir,
+                                     const std::wstring& current_configured_index = {},
+                                     bool from_browse = false);
+void DeletePulseIndexDirectoryArtifacts(const std::wstring& dir);
 
 }  // namespace pulse::setup

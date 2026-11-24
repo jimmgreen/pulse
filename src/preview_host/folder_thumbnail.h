@@ -10,6 +10,7 @@ namespace pulse::preview {
 bool DecodeFolderThumbnail(const std::wstring& path, UINT pixels,
     std::vector<uint8_t>& bgra, UINT& width, UINT& height, UINT& stride,
     bool single = false, bool force_refresh = false);
+void ShutdownFolderThumbnailResources() noexcept;
 #ifdef PULSE_FOLDER_THUMBNAIL_TESTING
 void SetFolderThumbnailBudgetForTest(DWORD budget_ms, unsigned completed_pictures = ~0u);
 #endif

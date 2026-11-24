@@ -5,7 +5,11 @@ namespace pulse::index {
 std::shared_ptr<VolumePause> Engine::PauseVolumes(std::vector<std::wstring> ids, std::vector<std::wstring> roots) {
     auto lease = std::make_shared<VolumePause>();
     lease->ids = std::move(ids); lease->roots = std::move(roots);
-    { std::lock_guard lock(volume_pause_mutex_); volume_pause_requests_.push_back(lease); }
+    {
+        std::lock_guard lock(volume_pause_mutex_);
+        volume_pause_requests_.push_back(lease);
+        pending_pause_requests_.fetch_add(1);
+    }
     if (change_signal_) SetEvent(change_signal_);
     return lease;
 }
@@ -17,6 +21,24 @@ bool Engine::VolumePaused(const std::wstring& id) const {
     for (const auto& lease : volume_pauses_)
         for (const auto& value : lease->ids)
             if (NormalizeVolumeId(value) == NormalizeVolumeId(id)) return true;
+    return false;
+}
+bool Engine::VolumePauseRequestedOrActive(std::wstring_view id, std::wstring_view path) {
+    const std::wstring norm_id = NormalizeVolumeId(std::wstring(id));
+    for (const auto& lease : volume_pauses_) {
+        if (!lease->active.load()) continue;
+        for (const auto& value : lease->ids)
+            if (!norm_id.empty() && NormalizeVolumeId(value) == norm_id) return true;
+        if (!path.empty() && pulse::path::OnAnyVolume(path, lease->roots)) return true;
+    }
+    if (pending_pause_requests_.load() == 0) return false;
+    std::lock_guard lock(volume_pause_mutex_);
+    for (const auto& lease : volume_pause_requests_) {
+        if (!lease->active.load()) continue;
+        for (const auto& value : lease->ids)
+            if (!norm_id.empty() && NormalizeVolumeId(value) == norm_id) return true;
+        if (!path.empty() && pulse::path::OnAnyVolume(path, lease->roots)) return true;
+    }
     return false;
 }
 bool Engine::PathPaused(const std::wstring& path) const {
@@ -32,16 +54,16 @@ void Engine::ApplyVolumePauses() {
         std::lock_guard lock(volume_pause_mutex_);
         for (auto& lease : volume_pause_requests_) if (lease->active) volume_pauses_.push_back(std::move(lease));
         volume_pause_requests_.clear();
+        pending_pause_requests_.store(0);
     }
     for (auto it = journal_streams_.begin(); it != journal_streams_.end();) {
         if (VolumePaused(it->first)) it = journal_streams_.erase(it); // joins after cancelling/draining USN I/O
         else ++it;
     }
-    for (auto& watch : watches_) if (watch.dir != INVALID_HANDLE_VALUE && PathPaused(watch.path)) {
-        CancelIoEx(watch.dir, &watch.ov);
-        DWORD bytes = 0;
-        GetOverlappedResult(watch.dir, &watch.ov, &bytes, TRUE);
-        CloseHandle(watch.dir); watch.dir = INVALID_HANDLE_VALUE;
+    for (auto& watch : watches_) {
+        const bool handle_open = watch.dir != INVALID_HANDLE_VALUE ||
+            (watch.io && watch.io->dir != INVALID_HANDLE_VALUE);
+        if (handle_open && PathPaused(watch.path)) CloseWalkWatchHandle(watch);
     }
     for (const auto& lease : volume_pauses_) if (!lease->acknowledged) {
         lease->acknowledged = true;
@@ -53,16 +75,15 @@ void Engine::ApplyVolumePauses() {
         !journal_streams_.contains(volume.volume_id) && !volume_retry_after_.contains(volume.volume_id))
         journal_streams_[volume.volume_id] = std::make_unique<UsnStream>(volume.letter, volume.journal_id, volume.next_usn, change_signal_);
     for (auto& watch : watches_) if (watch.dir == INVALID_HANDLE_VALUE && !PathPaused(watch.path)) {
-        watch.dir = CreateFileW(watch.path.c_str(), FILE_LIST_DIRECTORY,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr);
-        if (watch.dir == INVALID_HANDLE_VALUE) continue;
-        watch.ov = {}; watch.ov.hEvent = watch.event; ResetEvent(watch.event);
-        ReadDirectoryChangesW(watch.dir, watch.buf.data(), static_cast<DWORD>(watch.buf.size()), TRUE,
-            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE,
-            nullptr, &watch.ov, nullptr);
-        // Directory watches have no journal: reconcile on the existing rebuild path.
-        rebuild_requested_ = true;
+        if (OpenWalkWatchHandle(watch)) {
+            if (!watch.volume_id.empty()) {
+                QueueVolumeReconcile(watch.volume_id);
+                GapFeed();
+            } else {
+                // Directory watches have no journal: reconcile on the existing rebuild path.
+                rebuild_requested_ = true;
+            }
+        }
     }
 }
 }

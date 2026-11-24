@@ -58,6 +58,30 @@ struct ServicePrefs {
     std::string base_url;   // empty: the service's own address
 };
 
+// 联网搜索 (web_search): composer toggle and optional dedicated search backend
+// ("auto" uses zero-key DuckDuckGo -> Bing fallback; "tavily" / "bocha" /
+// "serper" use search_key.bin; "searxng" uses endpoint). Written only when it
+// differs from defaults so existing ai.json files stay unchanged.
+struct WebSearchPrefs {
+    bool enabled = true;
+    std::string provider = "auto";   // "auto" | "ddg" | "bing" | "tavily" | "bocha" | "serper" | "searxng"
+    std::string endpoint;            // optional custom endpoint URL
+    bool native = false;             // also enable provider-native search alongside function tools
+
+    bool IsDefault() const { return enabled && provider == "auto" && endpoint.empty() && !native; }
+};
+
+// External MCP server configured by the user in ai.json assistant.mcp_servers.
+// Every tool call to an external MCP server always shows a confirmation card in Pulse.
+struct ExternalMcpServer {
+    std::string name;                // short identifier (alphanumeric / '_' / '-')
+    std::string transport = "stdio"; // "stdio" | "http"
+    std::string command;             // executable for stdio
+    std::vector<std::string> args;   // arguments for stdio
+    std::string url;                 // endpoint URL for http
+    bool enabled = true;
+};
+
 // Pulse 助手 (ai_assistant.h): where its panel sits, the model service in use
 // (ai_providers.h) and the model last used.
 struct AssistantPrefs {
@@ -72,6 +96,8 @@ struct AssistantPrefs {
     std::string base_url;                     // empty: the service's own address
     std::vector<std::pair<std::string, ServicePrefs>> services;   // "services": {id: {...}}, the others
     VoicePrefs voice;                         // "voice": {...}
+    WebSearchPrefs web_search;                // "web_search": {...}
+    std::vector<ExternalMcpServer> mcp_servers;   // "mcp_servers": [...]
     // 55 P3 历史对话: "history": false stops saving conversations;
     // "history_days" removes those not updated for that many days (pinned
     // ones stay). Written only when not the default, so older files stay.

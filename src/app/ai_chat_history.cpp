@@ -299,7 +299,35 @@ void AiHistorySave(AppState& s) {
     if (c.pinned) doc.set("pinned", true);
     doc.set("model", U(AiChatModelId(s)));
     doc.set("blocks", std::move(blocks));
-    doc.set("history", AiAgentHistoryJson(s));
+    // Strip embedded base64 data:image/... blobs from persisted history so saved
+    // chat files stay small and fast to scan.
+    json::Value raw_hist = AiAgentHistoryJson(s);
+    json::Value clean_hist = json::Value::Array();
+    if (raw_hist.is_array()) {
+        for (const json::Value& m : raw_hist.items()) {
+            const json::Value* content = m.is_object() ? m.find("content") : nullptr;
+            if (!content || !content->is_array()) {
+                clean_hist.push(m);
+                continue;
+            }
+            std::string merged;
+            for (const json::Value& part : content->items()) {
+                if (!part.is_object()) continue;
+                const std::string t = part.get_string("type");
+                if (t == "text") {
+                    if (!merged.empty()) merged += "\n";
+                    merged += part.get_string("text");
+                } else if (t == "image_url") {
+                    if (!merged.empty()) merged += "\n";
+                    merged += "[image attachment]";
+                }
+            }
+            json::Value copy = m;
+            copy.set("content", std::move(merged));
+            clean_hist.push(std::move(copy));
+        }
+    }
+    doc.set("history", std::move(clean_hist));
     // Unchanged since the last save (opened and closed again): keep its time
     // and place in the list.
     const size_t sig = std::hash<std::string>{}(json::Serialize(doc));

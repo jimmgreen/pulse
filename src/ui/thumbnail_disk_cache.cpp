@@ -1,5 +1,6 @@
 // thumbnail_disk_cache.cpp - see thumbnail_disk_cache.h.
 #include "thumbnail_disk_cache.h"
+#include "thumbnail_decode_policy.h"
 #include <algorithm>
 #include <cstring>
 #include <cwchar>
@@ -12,7 +13,8 @@ namespace pulse::ui {
 namespace {
 
 constexpr uint32_t kMagic = 0x31435450;  // "PTC1"
-constexpr uint16_t kVersion = 1;
+// Version 1 may contain vertically inverted top-down Shell DIBs.
+constexpr uint16_t kVersion = 2;
 constexpr uint16_t kCodecJpeg = 1;
 constexpr uint16_t kCodecPng = 2;
 constexpr uint32_t kMaxEdge = 4096;
@@ -100,6 +102,7 @@ uint64_t KeyHash(const ThumbnailStoreKey& key) {
     mix(&key.size, sizeof(key.size));
     mix(&key.modified, sizeof(key.modified));
     mix(&key.pixels, sizeof(key.pixels));
+    if (const uint32_t policy = ThumbnailDecodePolicy(key.path)) mix(&policy, sizeof(policy));
     // Version only formats whose rendering changed, leaving photo/video caches warm.
     const auto dot = key.path.find_last_of(L'.');
     if (dot != std::wstring::npos) {
@@ -246,6 +249,18 @@ bool IsTemporary(const std::wstring& path) {
     return path.size() > 4 && _wcsicmp(path.c_str() + path.size() - 4, L".tmp") == 0;
 }
 
+bool ParsePtHash(const std::wstring& path, uint64_t& hash_out) noexcept {
+    const size_t slash = path.find_last_of(L'\\');
+    const size_t start = slash == std::wstring::npos ? 0 : slash + 1;
+    if (path.size() < start + 19 || _wcsicmp(path.c_str() + path.size() - 3, L".pt") != 0) return false;
+    const wchar_t* ptr = path.c_str() + start;
+    wchar_t* end = nullptr;
+    const uint64_t val = wcstoull(ptr, &end, 16);
+    if (end != path.c_str() + path.size() - 3) return false;
+    hash_out = val;
+    return true;
+}
+
 // The grid cache of every window reads this store.
 const bool g_registered = (ThumbnailCache::SetGridStore(&ThumbnailDiskCache::Shared()), true);
 
@@ -281,16 +296,56 @@ std::wstring ThumbnailDiskCache::EntryPath(const ThumbnailStoreKey& key) const {
     return root_ + name;
 }
 
+void ThumbnailDiskCache::EnsurePtShardLocked(uint8_t shard) {
+    if (pt_shard_ready_[shard]) return;
+    pt_shard_ready_[shard] = true;
+    if (root_.empty()) return;
+    wchar_t pattern[16]{};
+    swprintf_s(pattern, L"\\%02x\\*.pt", static_cast<unsigned>(shard));
+    WIN32_FIND_DATAW data{};
+    HANDLE find = FindFirstFileExW((root_ + pattern).c_str(), FindExInfoBasic, &data,
+                                   FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+    if (find == INVALID_HANDLE_VALUE) return;
+    do {
+        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        uint64_t h = 0;
+        if (ParsePtHash(data.cFileName, h)) known_pt_hashes_.insert(h);
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+}
+
+bool ThumbnailDiskCache::EnsurePackOpen() {
+    std::lock_guard lock(pack_open_mutex_);
+    if (pack_opened_) return true;
+    const auto& root = Root();
+    if (root.empty()) return false;
+    pack_opened_ = pack_.Open(root, false);
+    return pack_opened_;
+}
+
 bool ThumbnailDiskCache::Load(const ThumbnailStoreKey& key, StoredThumbnail& out) {
     bool remote = false;
     if (Root().empty() || !Eligible(key.path, key.attrs, remote)) return false;
+    const uint64_t hash = KeyHash(key);
+    const uint8_t shard = static_cast<uint8_t>(hash >> 56);
+    {
+        std::lock_guard lock(pt_index_mutex_);
+        EnsurePtShardLocked(shard);
+        if (!known_pt_hashes_.contains(hash)) return false;
+    }
     const std::wstring file = EntryPath(key);
-    HANDLE handle = CreateFileW(file.c_str(), GENERIC_READ | FILE_WRITE_ATTRIBUTES,
+    HANDLE handle = CreateFileW(file.c_str(), GENERIC_READ,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                 OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) return false;
-    std::vector<uint8_t> entry;
+    if (handle == INVALID_HANDLE_VALUE) {
+        std::lock_guard lock(pt_index_mutex_);
+        if (pt_shard_ready_[shard]) known_pt_hashes_.erase(hash);
+        return false;
+    }
+    thread_local std::vector<uint8_t> entry;
     LARGE_INTEGER length{};
+    FILETIME written{};
+    bool got_written = false;
     bool read = GetFileSizeEx(handle, &length) && length.QuadPart > static_cast<LONGLONG>(sizeof(EntryHeader)) &&
                 static_cast<uint64_t>(length.QuadPart) <= kMaxEntryBytes;
     if (read) {
@@ -298,31 +353,83 @@ bool ThumbnailDiskCache::Load(const ThumbnailStoreKey& key, StoredThumbnail& out
         DWORD got = 0;
         read = ReadFile(handle, entry.data(), static_cast<DWORD>(entry.size()), &got, nullptr) &&
                got == entry.size();
-    }
-    if (read) {
-        // Last write time is the LRU clock (NTFS last-access updates are
-        // usually off); refreshed at most daily so hits stay read-only.
-        FILETIME written{}, now{};
-        GetSystemTimeAsFileTime(&now);
-        if (GetFileTime(handle, nullptr, nullptr, &written) &&
-            FileTimeValue(now) > FileTimeValue(written) + kTouchAfter)
-            SetFileTime(handle, nullptr, nullptr, &now);
+        if (read) got_written = GetFileTime(handle, nullptr, nullptr, &written) != FALSE;
     }
     CloseHandle(handle);
+    const bool decoded = read && Decode(entry, key, out);
+    if (entry.capacity() > (256u << 10)) std::vector<uint8_t>{}.swap(entry);
     if (!read) return false;
-    if (Decode(entry, key, out)) return true;
+    if (decoded) {
+        if (got_written) {
+            // Last write time is the LRU clock (NTFS last-access updates are
+            // usually off); refreshed at most daily so hits stay read-only.
+            FILETIME now{};
+            GetSystemTimeAsFileTime(&now);
+            if (FileTimeValue(now) > FileTimeValue(written) + kTouchAfter) {
+                HANDLE touch = CreateFileW(file.c_str(), FILE_WRITE_ATTRIBUTES,
+                                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                           nullptr, OPEN_EXISTING, 0, nullptr);
+                if (touch != INVALID_HANDLE_VALUE) {
+                    SetFileTime(touch, nullptr, nullptr, &now);
+                    CloseHandle(touch);
+                }
+            }
+        }
+        return true;
+    }
     // Damaged, or another file's entry under the same hash.
-    DeleteFileW(file.c_str());
+    if (DeleteFileW(file.c_str())) {
+        std::lock_guard lock(pt_index_mutex_);
+        if (pt_shard_ready_[shard]) known_pt_hashes_.erase(hash);
+    }
     return false;
 }
 
+bool ThumbnailDiskCache::LoadMicro(const ThumbnailStoreKey& key, MicroThumbData& out) {
+    bool remote = false;
+    if (Root().empty() || !Eligible(key.path, key.attrs, remote) || !EnsurePackOpen()) return false;
+    const uint64_t id_hash = MicroThumbPack::IdentityHash(key.path);
+    return pack_.Read(id_hash, static_cast<int64_t>(key.modified), key.size, out);
+}
+
+bool ThumbnailDiskCache::ShouldSave(const ThumbnailStoreKey& key, uint32_t decode_ms) const {
+    bool remote = false;
+    if (!Eligible(key.path, key.attrs, remote)) return false;
+    return decode_ms >= kMinDecodeMs || remote || key.keep_always || AlwaysKept(key.path) ||
+        key.size >= kMinSourceBytesForKeep;
+}
+
 ThumbnailDiskCache::~ThumbnailDiskCache() {
-    { std::lock_guard lock(writer_mutex_); stopping_ = true; writes_.clear(); }
+    {
+        std::lock_guard lock(writer_mutex_);
+        stopping_ = true;
+        writes_.clear();
+        writer_bytes_ = 0;
+        micro_writes_.clear();
+        micro_bytes_ = 0;
+    }
     writer_cv_.notify_one();
     if (writer_.joinable()) writer_.join();
 }
 
-void ThumbnailDiskCache::Save(const ThumbnailStoreKey& key, uint32_t decode_ms, const StoredThumbnail& thumb) {
+void ThumbnailDiskCache::SaveMicro(const ThumbnailStoreKey& key, MicroThumbData&& micro) {
+    bool remote = false;
+    if (Root().empty() || !Eligible(key.path, key.attrs, remote)) return;
+    const uint64_t id_hash = MicroThumbPack::IdentityHash(key.path);
+    const size_t bytes = micro.blocks.size();
+    constexpr size_t kMicroWriterBudget = 8u << 20;
+    if (!id_hash || !bytes || bytes > kMicroWriterBudget) return;
+    std::lock_guard lock(writer_mutex_);
+    if (stopping_ || micro_writes_.size() >= 4096 || bytes > kMicroWriterBudget - micro_bytes_) return;
+    try {
+        if (!writer_.joinable()) writer_ = std::thread([this] { WriterLoop(); });
+        micro_writes_.push_back({id_hash, static_cast<int64_t>(key.modified), key.size, std::move(micro)});
+        micro_bytes_ += bytes;
+    } catch (...) { return; }
+    writer_cv_.notify_one();
+}
+
+void ThumbnailDiskCache::EnqueueSave(const ThumbnailStoreKey& key, uint32_t decode_ms, StoredThumbnail thumb) {
     constexpr size_t kWriterBudget = 16u << 20;
     const size_t bytes = thumb.pixels.size();
     if (!bytes || bytes > kWriterBudget || key.path.size() > 32767 ||
@@ -332,40 +439,79 @@ void ThumbnailDiskCache::Save(const ThumbnailStoreKey& key, uint32_t decode_ms, 
     if (stopping_ || writes_.size() >= 64 || bytes > kWriterBudget - writer_bytes_) return;
     try {
         if (!writer_.joinable()) writer_ = std::thread([this] { WriterLoop(); });
-        writes_.push_back({key.path, key.attrs, key.pixels, key.modified, key.size, key.keep_always, decode_ms, thumb});
+        writes_.push_back({key.path, key.attrs, key.pixels, key.modified, key.size, key.keep_always,
+            decode_ms, std::move(thumb)});
         writer_bytes_ += bytes;
     } catch (...) { return; }
     writer_cv_.notify_one();
 }
 
+void ThumbnailDiskCache::Save(const ThumbnailStoreKey& key, uint32_t decode_ms, const StoredThumbnail& thumb) {
+    EnqueueSave(key, decode_ms, thumb);
+}
+
+void ThumbnailDiskCache::SaveMoved(const ThumbnailStoreKey& key, uint32_t decode_ms, StoredThumbnail&& thumb) {
+    EnqueueSave(key, decode_ms, std::move(thumb));
+}
+
 bool ThumbnailDiskCache::FlushForTesting(uint32_t timeout_ms) {
     std::unique_lock lock(writer_mutex_);
     return writer_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-        [this] { return writer_bytes_ == 0; });
+        [this] { return writer_bytes_ == 0 && micro_bytes_ == 0 && !writer_busy_; });
 }
 
 void ThumbnailDiskCache::WriterLoop() {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     for (;;) {
+        std::vector<MicroThumbPack::PendingRecord> micro_batch;
+        size_t micro_batch_bytes = 0;
         WriteRequest request;
+        bool has_write = false;
         {
             std::unique_lock lock(writer_mutex_);
-            writer_cv_.wait(lock, [this] { return stopping_ || !writes_.empty(); });
+            writer_cv_.wait(lock, [this] { return stopping_ || !writes_.empty() || !micro_writes_.empty(); });
             if (stopping_) break;
-            request = std::move(writes_.front());
-            writes_.pop_front();
+            if (!micro_writes_.empty()) {
+                micro_batch.reserve(micro_writes_.size());
+                while (!micro_writes_.empty()) {
+                    micro_batch_bytes += micro_writes_.front().thumb.blocks.size();
+                    micro_batch.push_back(std::move(micro_writes_.front()));
+                    micro_writes_.pop_front();
+                }
+                writer_busy_ = true;
+            } else {
+                request = std::move(writes_.front());
+                writes_.pop_front();
+                has_write = true;
+                writer_busy_ = true;
+            }
         }
-        try { SaveNow({request.path, request.attrs, request.pixels, request.modified, request.size, request.keep_always}, request.decode_ms, request.thumb); } catch (...) {}
-        { std::lock_guard lock(writer_mutex_); writer_bytes_ -= request.thumb.pixels.size(); }
-        writer_cv_.notify_all();
+        if (!micro_batch.empty()) {
+            try {
+                if (EnsurePackOpen()) pack_.AppendBatch(micro_batch);
+            } catch (...) {}
+            {
+                std::lock_guard lock(writer_mutex_);
+                micro_bytes_ -= (std::min)(micro_bytes_, micro_batch_bytes);
+                writer_busy_ = false;
+            }
+            writer_cv_.notify_all();
+        }
+        if (has_write) {
+            try { SaveNow({request.path, request.attrs, request.pixels, request.modified, request.size, request.keep_always}, request.decode_ms, request.thumb); } catch (...) {}
+            {
+                std::lock_guard lock(writer_mutex_);
+                writer_bytes_ -= (std::min)(writer_bytes_, request.thumb.pixels.size());
+                writer_busy_ = false;
+            }
+            writer_cv_.notify_all();
+        }
     }
     if (SUCCEEDED(com)) CoUninitialize();
 }
 
 void ThumbnailDiskCache::SaveNow(const ThumbnailStoreKey& key, uint32_t decode_ms, const StoredThumbnail& thumb) {
-    bool remote = false;
-    if (Root().empty() || !Eligible(key.path, key.attrs, remote)) return;
-    if (decode_ms < kMinDecodeMs && !remote && !key.keep_always && !AlwaysKept(key.path)) return;
+    if (Root().empty() || !ShouldSave(key, decode_ms)) return;
     if (!thumb.width || !thumb.height || thumb.width > kMaxEdge || thumb.height > kMaxEdge ||
         thumb.pixels.size() != static_cast<size_t>(thumb.width) * thumb.height * 4 ||
         key.path.size() > 32767) return;
@@ -411,6 +557,12 @@ void ThumbnailDiskCache::SaveNow(const ThumbnailStoreKey& key, uint32_t decode_m
         DeleteFileW(temporary.c_str());
         return;
     }
+    {
+        const uint64_t h = KeyHash(key);
+        const uint8_t shard = static_cast<uint8_t>(h >> 56);
+        std::lock_guard pt_lock(pt_index_mutex_);
+        if (pt_shard_ready_[shard]) known_pt_hashes_.insert(h);
+    }
     std::lock_guard lock(mutex_);
     if (!scanned_) ScanLocked();  // counts the entry just written
     else bytes_ = bytes_ + entry.size() - (std::min)(replaced, bytes_ + entry.size());
@@ -448,14 +600,41 @@ void ThumbnailDiskCache::TrimLocked() {
     std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.written < b.written; });
     // Down to 80 % so the next trim is a while away.
     const uint64_t target = kBudgetBytes / 5 * 4;
+    std::vector<uint64_t> removed_hashes;
     for (const Entry& entry : entries) {
         if (total <= target) break;
-        if (DeleteFileW(entry.path.c_str())) total -= entry.bytes;
+        if (DeleteFileW(entry.path.c_str())) {
+            total -= entry.bytes;
+            uint64_t h = 0;
+            if (ParsePtHash(entry.path, h)) removed_hashes.push_back(h);
+        }
+    }
+    if (!removed_hashes.empty()) {
+        std::lock_guard pt_lock(pt_index_mutex_);
+        for (uint64_t h : removed_hashes) known_pt_hashes_.erase(h);
     }
     bytes_ = total;
 }
 
 void ThumbnailDiskCache::Clear() {
+    {
+        std::unique_lock wlock(writer_mutex_);
+        writes_.clear();
+        writer_bytes_ = 0;
+        micro_writes_.clear();
+        micro_bytes_ = 0;
+        writer_cv_.wait(wlock, [this] { return !writer_busy_; });
+    }
+    {
+        std::lock_guard pack_lock(pack_open_mutex_);
+        pack_.Clear();
+        pack_opened_ = false;
+    }
+    {
+        std::lock_guard pt_lock(pt_index_mutex_);
+        known_pt_hashes_.clear();
+        pt_shard_ready_.fill(false);
+    }
     if (Root().empty()) return;
     std::lock_guard lock(mutex_);
     uint64_t left = 0;

@@ -6,6 +6,7 @@
 #include <cwctype>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <system_error>
 #include <vector>
 
@@ -177,11 +178,7 @@ struct Cell { std::vector<Piece> pieces; };
 class Converter {
 public:
     Converter(const std::wstring& path, std::wstring_view document, DocPayload& out)
-        : path_(path), x_(document, false), out_(out) {
-        rels_ = ReadRelationships(path);
-        styles_ = ReadStyles(path);
-        numbering_ = ReadNumbering(path);
-    }
+        : path_(path), x_(document, false), out_(out) {}
 
     void Run() {
         for (XmlPull::Kind k; !out_.full() && (k = x_.Next()) != XmlPull::Eof;) {
@@ -204,13 +201,15 @@ public:
 
 private:
     // One Style lookup through basedOn.
-    Style Resolve(const std::wstring& id) const {
+    Style Resolve(const std::wstring& id) {
+        if (id.empty()) return {};
+        if (!styles_) styles_.emplace(ReadStyles(path_));
         Style result;
         bool heading = false, quote = false, num = false;
         std::wstring cur = id;
         for (int hop = 0; hop < 10 && !cur.empty(); ++hop) {
-            const auto it = styles_.find(cur);
-            if (it == styles_.end()) break;
+            const auto it = styles_->find(cur);
+            if (it == styles_->end()) break;
             const Style& s = it->second;
             if (!heading && s.heading) { result.heading = s.heading; heading = true; }
             if (!quote && s.quote) { result.quote = true; quote = true; }
@@ -231,9 +230,15 @@ private:
         p.pieces.push_back({text, f, target});
     }
 
+    const std::map<std::wstring, Relationship>& Relationships() {
+        if (!rels_) rels_.emplace(ReadRelationships(path_));
+        return *rels_;
+    }
+
     void AddPicture(Para& p, const std::wstring& id, const std::wstring& alt) {
-        const auto it = rels_.find(id);
-        if (it == rels_.end() || it->second.external) return;
+        const auto& rels = Relationships();
+        const auto it = rels.find(id);
+        if (it == rels.end() || it->second.external) return;
         std::vector<unsigned char> bytes;
         if (!ReadZipEntry(path_, ToUtf8(it->second.target), 24u * 1024u * 1024u, bytes, nullptr)) return;
         const size_t dot = it->second.target.find_last_of(L'.');
@@ -273,7 +278,9 @@ private:
             } else if (n == L"cr") {
                 AddText(p, L"\n", flags);
             } else if (n == L"noBreakHyphen") {
-                AddText(p, L"-", flags);
+                AddText(p, L"\u2011", flags);
+            } else if (n == L"softHyphen") {
+                AddText(p, L"\u00AD", flags);
             } else if (n == L"drawing") {
                 ParseDrawing(p, L"drawing");
             } else if (n == L"pict" || n == L"object") {
@@ -329,9 +336,10 @@ private:
                 if (!x_.self_closing()) ParseRun(p);
             } else if (n == L"hyperlink") {
                 const std::wstring id = x_.QAttr(L"r:id").empty() ? x_.Attr(L"id") : x_.QAttr(L"r:id");
-                const auto it = rels_.find(id);
+                const auto& rels = Relationships();
+                const auto it = rels.find(id);
                 link_.clear();
-                if (it != rels_.end() && it->second.external) {
+                if (it != rels.end() && it->second.external) {
                     const std::wstring lower = Lower(it->second.target);
                     if (lower.rfind(L"http://", 0) == 0 || lower.rfind(L"https://", 0) == 0 ||
                         lower.rfind(L"mailto:", 0) == 0)
@@ -372,7 +380,8 @@ private:
         int indent = 0;
         if (num_id > 0 && !heading) {
             ilvl = (std::clamp)(ilvl, 0, 8);
-            const Level* level = numbering_.Find(num_id, ilvl);
+            if (!numbering_) numbering_.emplace(ReadNumbering(path_));
+            const Level* level = numbering_->Find(num_id, ilvl);
             if (level && !level->none) {
                 indent = ilvl + 1;
                 if (level->bullet) {
@@ -486,9 +495,9 @@ private:
     const std::wstring& path_;
     XmlPull x_;
     DocPayload& out_;
-    std::map<std::wstring, Relationship> rels_;
-    std::map<std::wstring, Style> styles_;
-    Numbering numbering_;
+    std::optional<std::map<std::wstring, Relationship>> rels_;
+    std::optional<std::map<std::wstring, Style>> styles_;
+    std::optional<Numbering> numbering_;
     std::map<int, std::vector<int>> counters_;
     PreviewImageCache images_;
     std::wstring link_;

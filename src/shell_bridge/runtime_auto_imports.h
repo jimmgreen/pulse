@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace pulse::shell_bridge::runtime {
@@ -13,11 +14,14 @@ struct AutoImportResult {
     uint32_t api_mask = 0, patched_slots = 0, skipped_modules = 0, foreign_slots = 0;
     bool protection_restored = true;
 };
-// One-shot, current-process static-IAT transaction. No thread suspension or code
-// patching. The owner is pinned; scanned modules are held through commit/rollback.
-// Own bundle and Windows directories are excluded. Late DLLs, delay imports and
-// GetProcAddress calls are intentionally not intercepted. Concurrent foreign
-// changes to page protections are not serialized by this component.
+// One-shot, current-process static- and delay-IAT transaction. No thread
+// suspension or code patching. The owner is pinned; scanned modules are held
+// through commit/rollback. Own bundle and Windows directories are excluded.
+// Late DLLs are covered by repeated passes (runtime_auto_monitor.h). The
+// GetProcAddress slots of scanned modules are routed through a wrapper that
+// returns the replacement only when the real lookup returned a hooked original
+// (by address, so ordinals and forwarders are covered; nothing else changes).
+// Concurrent foreign changes to page protections are not serialized here.
 class AutoImportPatch {
 public:
     AutoImportPatch() noexcept;
@@ -39,7 +43,7 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 namespace auto_import_detail {
-struct ImportSlot { size_t rva = 0; uint32_t api_index = 0; };
+struct ImportSlot { size_t rva = 0; uint32_t api_index = 0; bool delay_load = false; };
 HRESULT InspectImage(std::span<const std::byte> image, std::vector<ImportSlot>& slots) noexcept;
 struct SlotChange {
     void* volatile* slot = nullptr;
@@ -51,5 +55,11 @@ struct SlotChange {
 // Fault-injection seam used only by direct tests. Production uses VirtualProtect.
 using Protect = BOOL (WINAPI*)(LPVOID, SIZE_T, DWORD, PDWORD);
 HRESULT ChangeSlot(SlotChange& change, bool install, Protect protect = &VirtualProtect) noexcept;
+// Microsoft's MFC redistributable (mfc140u.dll ...) installed directly in System32
+// or SysWOW64: an application framework, not a Windows component. Elevated MFC
+// programs open their file dialogs from it, and only the import patch reaches
+// them (Windows ignores per-user COM registration for elevated processes).
+// `windows` is the canonical Windows directory with a trailing backslash.
+bool RedistributableFramework(const std::wstring& path, const std::wstring& windows) noexcept;
 }
 }

@@ -1,6 +1,7 @@
 #include "../common/windows_compat.h"
 #include "ui_renderer.h"
 #include "ui_renderer_internal.h"
+#include "ui_settings_store_status.h"
 #include "store_icons.h"
 #include <algorithm>
 #include <cmath>
@@ -67,24 +68,27 @@ struct StorePainter {
     }
     void Line(float left,float right,float y,D2D1_COLOR_F color) { if(right>left) p.FillRoundedRect({left,y,right,y+s},0,color); }
     void Icon(StoreIcon icon,D2D1_RECT_F r,D2D1_COLOR_F color) { if(Present(r)) DrawStoreIcon(dc,icon,r,color); }
-    void Tile(StoreIcon icon,D2D1_RECT_F r,D2D1_COLOR_F color,bool solid=false) {
+    void Tile(StoreIcon icon,D2D1_RECT_F r,D2D1_COLOR_F color,bool solid=false,uint32_t custom_icon=0) {
         if(!Present(r))return;
         // Product tiles (archive_ux_mockup.html): known products carry their own artwork,
-        // others a white line icon on their catalog colour. High contrast keeps flat glyphs.
-        if(solid&&!IsHighContrast()) { DrawProductTile(dc,r,ProductArtFor(icon),color,icon); return; }
+        // custom vector packages render inside the gradient tile, others render a white line icon.
+        if(solid&&!IsHighContrast()) { DrawProductTile(dc,r,ProductArtFor(icon),color,icon,custom_icon,&t); return; }
         const float rad=((r.right-r.left)>64*s?16:(r.right-r.left)>50*s?14:8)*s;
         p.FillRoundedRect(r,rad,solid?color:WithAlpha(color,.09f));
         const float pad=(r.right-r.left)*.25f;
-        Icon(icon,Inset(r,pad,pad),solid?t.text:color);
+        const auto inner=Inset(r,pad,pad);
+        const D2D1_COLOR_F fg=solid?t.text:color;
+        if(!IsCustomExtensionIcon(custom_icon)||!DrawExtensionIcon(dc,custom_icon,inner,fg,&t))
+            Icon(icon,inner,fg);
     }
     void Button(D2D1_RECT_F r,std::wstring_view v,A a,bool primary=false,bool enabled=true) {
         if(!Present(r)||v.empty())return;
         fluent::ControlState state{};state.enabled=enabled;state.hovered=enabled&&Hot(a);
         p.DrawButton({r,v,{},primary?fluent::ButtonKind::Primary:fluent::ButtonKind::Standard,state});
     }
-    void Switch(D2D1_RECT_F r,bool checked,A a) {
+    void Switch(D2D1_RECT_F r,bool checked,A a,bool enabled=true) {
         if(!Present(r))return;
-        fluent::ControlState state{};state.checked=checked;state.hovered=Hot(a);p.DrawSwitch(r,L"",state);
+        fluent::ControlState state{};state.checked=checked;state.enabled=enabled;state.hovered=enabled&&Hot(a);p.DrawSwitch(r,L"",state);
     }
     void Pill(D2D1_RECT_F r,std::wstring_view value,D2D1_COLOR_F color,bool selected=false,bool dot=false) {
         if(!Present(r))return;
@@ -114,63 +118,68 @@ struct StorePainter {
         if(!Present(r))return;
         auto color=p.StatusToneColor(kind);p.FillRoundedRect(Inset(r,-12*s,-6*s),6*s,WithAlpha(color,.08f));Caption(value,r,t.text_secondary);
     }
-    void Menu(D2D1_RECT_F r,const std::vector<SevenZipMenuRow>& rows,bool submenu,bool expanded,std::wstring_view name,
-              bool full=false,bool archive=true) {
+    // The host right-click menu around the plugin's rows, drawn with the real menu's
+    // pieces (surface, rows, group tint, accent rail) at store_view::MenuPreviewHeight.
+    void Menu(D2D1_RECT_F r,const std::vector<SevenZipMenuRow>& rows,bool submenu,bool expanded,std::wstring_view name) {
         if(!Present(r))return;
+        // A soft drop shadow, so the menu reads as floating over the stage.
+        const float radius=static_cast<float>(t.radius_flyout)*s;
+        for(int i=4;i>=1;--i) {
+            const float k=static_cast<float>(i);
+            p.FillRoundedRect({r.left-k*s,r.top-k*.5f*s+2*s,r.right+k*s,r.bottom+k*s+2*s},radius+k*s,
+                              D2D1::ColorF(0.0f,0.0f,0.0f,vm.dark?.10f:.022f));
+        }
         p.DrawMenuSurface(r);
         dc->PushAxisAlignedClip(r,D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        float y=r.top+8*s,left=r.left;
+        float y=r.top+8*s;
         auto separator=[&] { Line(r.left+8*s,r.right-8*s,y+4*s,t.stroke_divider);y+=9*s; };
-        auto item=[&](StoreIcon icon,std::wstring_view title,std::wstring_view detail={},std::wstring_view shortcut={},bool child=false,bool primary=false) {
+        auto item=[&](StoreIcon icon,std::wstring_view title,std::wstring_view detail,std::wstring_view shortcut,
+                      float left,bool child,bool grouped,bool primary,uint32_t custom_icon) {
             const float height=(detail.empty()?28:40)*s;
-            fluent::MenuItemSpec spec{};spec.bounds={left+4*s,y,r.right-4*s,y+height};
-            spec.text=title;spec.detail=detail;spec.shortcut=shortcut;spec.vector_icon=icon;spec.has_submenu=child;spec.primary=primary;
-            p.DrawMenuItem(spec);y+=height;
+            fluent::MenuItemSpec spec{};spec.bounds={left,y,r.right,y+height};
+            spec.text=title;spec.detail=detail;spec.shortcut=shortcut;
+            if(IsCustomExtensionIcon(custom_icon)) spec.custom_icon=custom_icon;
+            else spec.vector_icon=icon;
+            spec.has_submenu=child;spec.primary=primary;spec.group_tint=grouped;spec.state.enabled=true;
+            p.DrawMenuItem(spec);y+=height+(grouped?2*s:0);
         };
-        if(full) {
-            const StoreIcon actions[]={StoreIcon::Cut,StoreIcon::Copy,StoreIcon::Rename,StoreIcon::Trash};
-            const float width=(r.right-r.left-16*s)/4;
-            for(int i=0;i<4;++i) {
-                const float x=r.left+8*s+(i+.5f)*width;
-                Icon(actions[i],{x-8*s,y+5*s,x+8*s,y+21*s},t.text_secondary);
-            }
-            y+=32*s;Line(r.left+8*s,r.right-8*s,y,t.stroke_divider);
-            item(StoreIcon::Open,l10n::Get(I::Open),{},L"Enter");
-            if(archive) {
-                item(StoreIcon::Eye,l10n::Get(I::QuickPreview),{},L"Space");
-                item(StoreIcon::OpenWith,l10n::Get(I::ContextOpenWith),{},{},true);
-            }
-            separator();
+        auto host=[&](StoreIcon icon,std::wstring_view title,std::wstring_view shortcut) {
+            item(icon,title,{},shortcut,r.left,false,false,false,0);
+        };
+        const StoreIcon actions[]={StoreIcon::Cut,StoreIcon::Copy,StoreIcon::Rename,StoreIcon::Trash};
+        const float width=(r.right-r.left-16*s)/4;
+        for(int i=0;i<4;++i) {
+            const float x=r.left+8*s+(i+.5f)*width;
+            Icon(actions[i],{x-8*s,y+5*s,x+8*s,y+21*s},t.text_secondary);
         }
-        const float group_top=y;
-        float group_height=(submenu?30:26)*s;
-        for(const auto& row:rows)group_height+=(row.detail.empty()?30:42)*s;
-        if(submenu&&expanded)group_height+=37*s;
-        p.FillRoundedRect({r.left+4*s,y,r.right-4*s,y+group_height},6*s,WithAlpha(t.accent,.04f));
+        y+=32*s;Line(r.left+8*s,r.right-8*s,y,t.stroke_divider);
+        host(StoreIcon::Open,l10n::Get(I::Open),L"Enter");
+        separator();
+        // The group: one tint (the list selection pair at half strength, like the live menu).
+        const float group_top=y,group_h=store_view::MenuPreviewGroupHeight(rows,submenu&&expanded)*s;
+        auto from=t.list_selected_start,to=t.list_selected_end;from.a*=.5f;to.a*=.5f;
+        p.FillHorizontalGradientRect({r.left+4*s,y,r.right-4*s,y+group_h-4*s},7*s,from,to);
         if(submenu) {
-            item(StoreIcon::Box,name,{},{},true);y+=2*s;
+            item(StoreIcon::Box,name,{},{},r.left,true,true,false,0);
             if(expanded) {
-                left+=10*s;
-                p.FillRoundedRect({left,y,left+2*s,group_top+group_height-4*s},1*s,WithAlpha(t.accent,.5f));
+                p.FillRoundedRect({r.left+12*s,y,r.left+14*s,group_top+group_h-10*s},1*s,WithAlpha(t.accent,.5f));
+                for(const auto& row:rows) item(row.vector_icon,row.title,row.detail,{},r.left+14*s,false,true,false,row.icon);
+                separator();
+                item(StoreIcon::Gear,l10n::Get(I::Settings),{},{},r.left+14*s,false,true,false,0);
             }
         } else {
-            auto group_color=MixColor(t.accent,t.text_secondary,.35f);
-            Text(name,{r.left+12*s,y+2*s,r.right-28*s,y+24*s},true,&group_color);
-            Icon(StoreIcon::Gear,{r.right-24*s,y+6*s,r.right-12*s,y+18*s},t.text_secondary);
+            const auto color=MixColor(t.accent,t.text_secondary,.35f);
+            p.DrawText(name,{r.left+16*s,y+2*s,r.right-34*s,y+24*s},p.RampFormat(fluent::Painter::TextRamp::Section),color);
+            Icon(StoreIcon::Gear,{r.right-28*s,y+7*s,r.right-16*s,y+19*s},t.text_secondary);
             y+=26*s;
+            for(size_t ri=0;ri<rows.size();++ri) {
+                const auto& row=rows[ri];
+                item(row.vector_icon,row.title,row.detail,{},r.left,false,true,ri==0&&!row.detail.empty(),row.icon);
+            }
         }
-        if(!submenu||expanded) {
-            for(size_t ri=0;ri<rows.size();++ri) { const auto& row=rows[ri]; item(row.vector_icon,row.title,row.detail,{},false,ri==0&&!row.detail.empty());y+=2*s; }
-            if(submenu) {separator();item(StoreIcon::Gear,l10n::Get(I::Settings));}
-        }
-        left=r.left;
-        if(full) {
-            separator();
-            item(StoreIcon::Path,l10n::Get(I::CopyPath),{},L"Ctrl+Shift+C");
-            item(StoreIcon::Star,l10n::Get(I::PinQuickAccess));
-            separator();
-            item(StoreIcon::Properties,l10n::Get(I::Properties),{},L"Alt+Enter");
-        }
+        y=group_top+group_h;
+        separator();
+        host(StoreIcon::Properties,l10n::Get(I::Properties),L"Alt+Enter");
         dc->PopAxisAlignedClip();
     }
     void Option(D2D1_RECT_F r,std::wstring_view title,std::wstring_view desc,bool selected,A a) {
@@ -193,38 +202,96 @@ struct StorePainter {
     }
 };
 A Offset(A a,size_t i){return static_cast<A>(static_cast<int>(a)+static_cast<int>(i));}
-// 接管压缩包: a format's icon from the 7-Zip extension's DLL (the one File Explorer shows), per device and size.
-ID2D1Bitmap* FormatIcon(ID2D1DeviceContext* dc,const std::wstring& library,int id,int px) {
-    struct Entry { ID2D1DeviceContext* dc=nullptr; std::wstring library; int id=0,px=0; ComPtr<ID2D1Bitmap> bitmap; };
-    static std::vector<Entry> cache;
-    if(!dc||library.empty()||id<=0)return nullptr;
-    for(auto& e:cache) if(e.dc==dc&&e.id==id&&e.px==px&&e.library==library) return e.bitmap.get();
-    if(cache.size()>64)cache.clear();
-    Entry entry;entry.dc=dc;entry.library=library;entry.id=id;entry.px=px;
-    HICON icon=nullptr;
-    if(HMODULE module=LoadLibraryExW(library.c_str(),nullptr,LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE)) {
-        if(FAILED(LoadIconWithScaleDown(module,MAKEINTRESOURCEW(id),px,px,&icon)))icon=nullptr;
-        FreeLibrary(module);
+void DrawExtensionDetailHeader(StorePainter& p, const SettingsLayout::DetailHeader& d,
+                               const WindowViewModel::NativeSettingsHeader& h, A back) {
+    const float s = p.s;
+    auto green=p.p.StatusToneColor(fluent::InfoBarKind::Success);
+    if(p.Hot(back))p.p.FillRoundedRect(d.crumb,5*s,p.t.fill_hover);
+    p.Icon(StoreIcon::ChevronLeft,{d.crumb.left+4*s,d.crumb.top+7*s,d.crumb.left+18*s,d.crumb.bottom-7*s},p.t.text_secondary);
+    auto crumb=d.crumb;crumb.left+=24*s;p.Text(l10n::Get(I::StoreTitle),crumb,true);
+    p.Icon(StoreIcon::ChevronRight,{d.crumb_name.left,d.crumb_name.top+7*s,d.crumb_name.left+12*s,d.crumb_name.bottom-7*s},p.t.text_disabled);
+    auto crumb_name=d.crumb_name;crumb_name.left+=22*s;p.Text(h.name,crumb_name,true);
+    p.Tile(h.icon,d.icon,HexColor(h.icon_color),true,h.custom_icon);
+    if(Present(d.name)) {
+        ComPtr<IDWriteTextLayout> title;
+        if(SUCCEEDED(p.comp->DwriteFactory()->CreateTextLayout(h.name.c_str(),static_cast<UINT32>(h.name.size()),p.comp->HeaderFormat(),d.name.right-d.name.left,d.name.bottom-d.name.top,&title))) {
+            title->SetFontSize(26*s,{0,static_cast<UINT32>(h.name.size())});title->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            ComPtr<ID2D1SolidColorBrush> brush; p.dc->CreateSolidColorBrush(p.t.text, &brush);
+            if (brush.get()) { p.dc->PushAxisAlignedClip(d.name, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE); p.comp->DrawTextLayout({d.name.left,d.name.top},title.get(),brush.get()); p.dc->PopAxisAlignedClip(); }
+        }
     }
-    if(icon) {
-        ComPtr<IWICImagingFactory> wic;ComPtr<IWICBitmap> source;ComPtr<IWICFormatConverter> converter;
-        if(SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&wic)))&&
-           SUCCEEDED(wic->CreateBitmapFromHICON(icon,&source))&&SUCCEEDED(wic->CreateFormatConverter(&converter))&&
-           SUCCEEDED(converter->Initialize(source.get(),GUID_WICPixelFormat32bppPBGRA,WICBitmapDitherTypeNone,nullptr,0.0,WICBitmapPaletteTypeMedianCut)))
-            dc->CreateBitmapFromWicBitmap(converter.get(),nullptr,&entry.bitmap);
-        DestroyIcon(icon);
+    auto sub=d.sub;
+    if(h.official){p.Icon(StoreIcon::Badge,{sub.left,sub.top+2*s,sub.left+14*s,sub.top+16*s},p.t.accent);sub.left+=20*s;}
+    const auto subtitle=ExtensionDetailSubtitle(h.official,h.summary);
+    p.Summary(subtitle,sub);
+    if(!h.installed) {
+        p.Pill(d.badges[0],l10n::Get(I::StoreDetailNotInstalled),p.t.text_secondary,false,false);
+    } else {
+        p.Pill(d.badges[0],l10n::Get(h.enabled?I::StoreExtensionEnabled:I::StoreExtensionDisabled),h.enabled?green:p.t.text_secondary,false,h.enabled);
     }
-    cache.push_back(std::move(entry));
-    return cache.back().bitmap.get();
+    if(!h.version.empty())p.Pill(d.badges[2],h.version,p.t.text_secondary);
+    if(!h.status_text.empty()&&Present(d.status_pill)) {
+        const auto tone=h.status_kind==2?green
+                       :h.status_kind==3?p.p.StatusToneColor(fluent::InfoBarKind::Warning)
+                       :h.status_kind==4?p.p.StatusToneColor(fluent::InfoBarKind::Error)
+                                        :p.t.text_secondary;
+        p.Pill(d.status_pill,h.status_text,tone,false,h.status_kind>=2);
+    }
+    if(!h.action_label.empty()) p.Button(d.install_button,h.action_label,A::StoreDetailInstall,true,h.action_enabled);
+    if(h.installed) {
+        p.Text(l10n::Get(h.enabled ? I::StoreExtensionEnabled : I::StoreExtensionDisabled),d.enable_label,true);
+        p.Switch(d.enable,h.enabled,A::StoreDetailEnable);
+        p.Button(d.more,L" ",A::StoreDetailMore);p.Icon(StoreIcon::More,Inset(d.more,8*s,8*s),p.t.text_secondary);
+    }
+}
+void DrawExtensionDetailTabs(StorePainter& p, const SettingsLayout::DetailHeader& d, int count, int selected, A action) {
+    if (count <= 0) return;
+    selected = (std::clamp)(selected, 0, count - 1);
+    const float s = p.s;
+    constexpr I tabs[]={I::SzTabSettings,I::SzTabMenu,I::SzTabFormats,I::SzTabAbout};
+    for(int i=0;i<count&&i<SettingsLayout::DetailHeader::kMaxTabs;++i) {
+        auto r=d.tabs[i];p.Line(r.left,r.right,r.bottom-s,p.t.stroke_divider);
+        const A tab_action = d.tab_count > i ? static_cast<A>(d.tab_actions[i]) : Offset(action,i);
+        const std::wstring& title = (d.tab_count > i && !d.tab_titles[i].empty())
+            ? d.tab_titles[i]
+            : l10n::Get(d.tab_count > i ? d.tab_labels[i] : tabs[i]);
+        if(p.Hot(tab_action))p.p.FillRoundedRect(Inset(r,0,4*s),6*s,p.t.fill_hover);
+        p.p.DrawText(title,r,i==selected?p.comp->HeaderFormat():p.comp->TextFormat(),i==selected?p.t.text:p.t.text_secondary,fluent::HorizontalAlignment::Center);
+        if(i==selected)p.p.FillRoundedRect({r.left+12*s,r.bottom-3*s,r.right-12*s,r.bottom},1.5f*s,p.t.accent);
+    }
 }
 }
 D2D1_RECT_F MainRenderer::SettingsStoreField(int field) const { return field>=0&&field<7?settings_store_fields_[field]:D2D1_RECT_F{}; }
+D2D1_RECT_F MainRenderer::SettingsStoreQuickControlRect(int action) const {
+    const auto it = settings_store_quick_controls_.find(action);
+    return it == settings_store_quick_controls_.end() ? D2D1_RECT_F{} : it->second;
+}
 D2D1_RECT_F MainRenderer::SettingsStoreClip() const {return settings_store_clip_;}
+
+// A plugin page opened for one package: the 7-Zip detail header, drawn with the same pieces.
+void MainRenderer::DrawNativeSettingsHeader(const WindowViewModel& vm,const D2D1_RECT_F& rect,const Theme& theme) {
+    const auto l=MakeSettingsLayout(vm,rect,scale_,title_bar_height_,status_height_,&painter_);
+    const auto& d=l.native_head;
+    if(!d.on)return;
+    StorePainter p{painter_,compositor_->Dc(),compositor_,theme,vm,scale_};
+    const auto& h=vm.native_settings_header;
+    settings_store_fields_[5] = d.more;
+    DrawExtensionDetailHeader(p, d, h, A::StoreBrowse);
+    int selected_slot = h.tab == 0 ? (std::max)(0, h.active_plugin_tab) : h.tab;
+    if (d.tab_count > 0 && h.tab != 0) {
+        const int target_action = static_cast<int>(A::NativeTabBase) + h.tab;
+        selected_slot = 0;
+        for (int i = 0; i < d.tab_count; ++i) {
+            if (d.tab_actions[i] == target_action) { selected_slot = i; break; }
+        }
+    }
+    DrawExtensionDetailTabs(p, d, d.tab_count > 0 ? d.tab_count : (h.has_menu_tab ? 2 : 1), selected_slot, A::NativeTabBase);
+}
 
 void MainRenderer::DrawSettingsStore(const WindowViewModel& vm,const D2D1_RECT_F& rect,const Theme& theme) {
     const auto l=MakeSettingsLayout(vm,rect,scale_,title_bar_height_,status_height_,&painter_);
     StorePainter p{painter_,compositor_->Dc(),compositor_,theme,vm,scale_};
-    const float s=scale_;const auto& v=vm.settings_store_view;const auto& z=v.seven_zip;
+    const float s=scale_;const auto& v=vm.settings_store_view;
     auto green=painter_.StatusToneColor(fluent::InfoBarKind::Success);
     p.Input(l.store_search);p.Icon(StoreIcon::Search,{l.store_search.left+10*s,l.store_search.top+9*s,l.store_search.left+26*s,l.store_search.top+25*s},theme.text_secondary);
     constexpr StoreIcon chip_icons[]={StoreIcon::None,StoreIcon::Box,StoreIcon::Image,StoreIcon::TextSearch,StoreIcon::Sparkle};
@@ -255,8 +322,7 @@ void MainRenderer::DrawSettingsStore(const WindowViewModel& vm,const D2D1_RECT_F
         auto tile=D2D1::RectF(l.store_failed.left+16*s,l.store_failed.top+18*s,l.store_failed.left+60*s,l.store_failed.top+62*s);
         p.Tile(StoreIcon::CloudOff,tile,theme.danger);
         p.Text(l10n::Get(I::StoreFailed),l.store_state);
-        p.Caption(l10n::Get(I::StoreFailedDesc),{l.store_state.left,l.store_state.bottom+4*s,l.store_state.right,Present(l.store_notice)?l.store_notice.top-6*s:l.store_failed.bottom-14*s},theme.text_secondary);
-        p.Mono(v.notice,l.store_notice);
+        p.Caption(l10n::Get(I::StoreFailedDesc),{l.store_state.left,l.store_state.bottom+4*s,l.store_state.right,l.store_failed.bottom-14*s},theme.text_secondary);
         p.Button(l.store_refresh,l10n::Get(I::RecoveryRetry),A::StoreRetry,true,store_text::CanRefresh(v));
         p.Button(l.store_failed_sources,l10n::Get(I::StoreDownloadSources),A::StoreSources);
         p.Button(l.store_install_file,l10n::Get(I::StoreInstallFromFile),A::StoreInstallFromFile,false,store_text::CanInstallFromFile(v));
@@ -264,21 +330,8 @@ void MainRenderer::DrawSettingsStore(const WindowViewModel& vm,const D2D1_RECT_F
         auto state_rect=l.store_state;
         if(v.state==ExtensionStoreView::State::Loading&&Present(state_rect)) {p.Icon(StoreIcon::Refresh,{state_rect.left,state_rect.top+7*s,state_rect.left+16*s,state_rect.top+23*s},theme.accent);state_rect.left+=22*s;}
         p.Text(store_text::State(v),state_rect,true);
-        p.Note(v.state==ExtensionStoreView::State::Offline?l10n::Get(I::StoreOfflineDesc):v.notice,l.store_notice,v.state==ExtensionStoreView::State::Offline?fluent::InfoBarKind::Warning:fluent::InfoBarKind::Informational);
     }
-    if(Present(l.store_restart)) {
-        auto banner=l.store_restart;
-        if(Present(l.store_restart_button)) {
-            banner.left=(std::min)(banner.left,l.store_restart_button.left);
-            banner.top=(std::min)(banner.top,l.store_restart_button.top);
-            banner.right=(std::max)(banner.right,l.store_restart_button.right);
-            banner.bottom=(std::max)(banner.bottom,l.store_restart_button.bottom);
-        }
-        auto color=painter_.StatusToneColor(fluent::InfoBarKind::Warning);
-        painter_.FillRoundedRect(Inset(banner,-12*s,-6*s),6*s,WithAlpha(color,.08f));
-        p.Caption(l10n::Get(I::StoreRestart),l.store_restart,theme.text_secondary);
-        p.Button(l.store_restart_button,l10n::Get(I::StoreRestartNow),A::StoreRestartNow);
-    }
+    store_notify::DrawStatusBanners(painter_, l, v, theme, true, false, p.Hot(A::StoreRestartNow));
     for(auto r:l.store_skeleton)if(Present(r)) {
         p.Card(r);painter_.FillRoundedRect({r.left+18*s,r.top+18*s,r.left+64*s,r.top+64*s},9*s,theme.fill_hover);
         p.Line(r.left+80*s,r.right-24*s,r.top+27*s,theme.fill_hover);
@@ -291,12 +344,14 @@ void MainRenderer::DrawSettingsStore(const WindowViewModel& vm,const D2D1_RECT_F
         if(i>=v.items.size()||!Present(c.bounds))return;
         const auto& item=v.items[i];
         p.Card(c.bounds,12);
+        if(!c.feature&&p.Hot(Offset(A::StoreItemDetailBase,i)))
+            painter_.StrokeRoundedRect(c.bounds,12*s,WithAlpha(theme.accent,.48f));
         if(c.feature) {
             const D2D1_GRADIENT_STOP stops[]={{0,WithAlpha(theme.accent,.10f)},{1,WithAlpha(theme.accent,0)}};
             ComPtr<ID2D1GradientStopCollection> collection;ComPtr<ID2D1LinearGradientBrush> brush;
             if(SUCCEEDED(p.dc->CreateGradientStopCollection(stops,2,&collection))&&SUCCEEDED(p.dc->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties({c.bounds.left,c.bounds.top},{c.bounds.right,c.publisher.bottom}),collection.get(),&brush)))p.dc->FillRoundedRectangle(D2D1::RoundedRect(c.bounds,12*s,12*s),brush.get());
         }
-        p.Tile(item.icon,c.icon,HexColor(item.icon_color),true);
+        p.Tile(item.icon,c.icon,HexColor(item.icon_color),true,item.custom_icon);
         if(c.feature&&Present(c.name)) {
             ComPtr<IDWriteTextLayout> hero_title;
             if(SUCCEEDED(compositor_->DwriteFactory()->CreateTextLayout(item.name.c_str(),static_cast<UINT32>(item.name.size()),compositor_->HeaderFormat(),c.name.right-c.name.left,c.name.bottom-c.name.top,&hero_title))) {
@@ -310,8 +365,7 @@ void MainRenderer::DrawSettingsStore(const WindowViewModel& vm,const D2D1_RECT_F
         auto publisher=c.publisher;
         if(item.official){p.Icon(StoreIcon::Badge,{publisher.left,publisher.top+2*s,publisher.left+14*s,publisher.top+16*s},theme.accent);publisher.left+=19*s;}
         std::wstring sub=item.official?l10n::Get(I::StoreOfficial):item.publisher;
-        if(c.feature&&z.formats_available)sub+=L" · "+store_view::Fill(l10n::Get(I::SzEngineFormats),L"{n}",std::to_wstring(z.formats_rw.size()+z.formats_ro.size()));
-        else if(c.feature&&!Present(c.settings)&&!item.version.empty())sub+=L" · "+item.version+(item.size.empty()?L"":L" · "+item.size);
+        if(c.feature&&!item.version.empty())sub+=L" · "+item.version+(item.size.empty()?L"":L" · "+item.size);
         p.Text(sub,publisher,true);p.Summary(item.summary,c.summary);
         p.Text(item.status,c.status,true);p.Text(item.version+(item.size.empty()?L"":L" · "+item.size),c.version,true);
         p.Button(c.button,item.button_label,Offset(A::StoreItemBase,i),!c.feature||!Present(c.settings),item.action_enabled);
@@ -321,54 +375,77 @@ void MainRenderer::DrawSettingsStore(const WindowViewModel& vm,const D2D1_RECT_F
             p.Icon(StoreIcon::ChevronRight,{c.settings.right-20*s,cy-6*s,c.settings.right-8*s,cy+6*s},theme.text_secondary);
         } else p.Button(c.settings,l10n::Get(I::Settings),Offset(A::StoreItemSettingsBase,i));
     };
-    if(l.store_feature_item>=0)draw_catalog_card(l.store_feature,static_cast<size_t>(l.store_feature_item));
     for(size_t i=0;i<l.store_items.size()&&i<v.items.size();++i)draw_catalog_card(l.store_items[i],i);
-    const auto& q=l.store_quick;
-    if(q.on) {
-        p.Line(q.section.left,q.section.right,q.section.top,theme.stroke_divider);
-        p.Heading(l10n::Get(I::StoreQuickTitle),q.title);
-        auto saved_color=z.status.empty()?(v.saved?green:theme.text_secondary):(z.status==L"已保存。"||z.status==L"Saved."?green:painter_.StatusToneColor(fluent::InfoBarKind::Error));
-        auto saved_rect=q.saved;
-        if(z.status.empty()&&Present(saved_rect)&&(saved_rect.right-saved_rect.left)>32*s) {
+    settings_store_quick_controls_.clear();
+    for(const auto& gq:l.store_generic_quick) {
+        if(gq.item_index<0||static_cast<size_t>(gq.item_index)>=v.items.size())continue;
+        if(gq.quick_index<0||static_cast<size_t>(gq.quick_index)>=v.quick_cards.size())continue;
+        const auto& qc=v.quick_cards[static_cast<size_t>(gq.quick_index)];
+        const auto& item=v.items[static_cast<size_t>(gq.item_index)];
+        draw_catalog_card(gq.card,static_cast<size_t>(gq.item_index));
+        p.Line(gq.section.left,gq.section.right,gq.section.top,theme.stroke_divider);
+        p.Heading(qc.title.empty()?l10n::Get(I::StoreQuickTitle):qc.title,gq.title);
+        auto saved_color=qc.status.empty()?(v.saved?green:theme.text_secondary):green;
+        auto saved_rect=gq.saved;
+        if(qc.status.empty()&&Present(saved_rect)&&(saved_rect.right-saved_rect.left)>32*s) {
             const float cy=(saved_rect.top+saved_rect.bottom)/2;
             p.Icon(StoreIcon::Check,{saved_rect.left,cy-6.5f*s,saved_rect.left+13*s,cy+6.5f*s},saved_color);
             saved_rect.left+=17*s;
         }
-        p.Text(z.status.empty()?l10n::Get(v.saved?I::StoreSaved:I::StoreAutoSaved):z.status,saved_rect,true,&saved_color);
-        if(!z.available) p.Caption(l10n::Get(z.item>=0&&z.item<static_cast<int>(v.items.size())&&v.items[z.item].enabled?I::SzLoading:I::SzUnavailable),q.rows[0],theme.text_secondary);
-        else {
-            const I labels[]={I::SzModeTitle,I::StoreQuickCompress,I::SzRememberTitle};
-            const D2D1_RECT_F controls[]={q.mode,q.format,q.remember};
-            for(int i=0;i<3;++i) {
-                auto r=q.rows[i];const bool stacked=controls[i].top>=r.top+32*s;
-                const float right=stacked?r.right:controls[i].left-12*s;
-                p.Text(l10n::Get(labels[i]),{r.left,r.top+5*s,right,r.top+28*s});
-                auto desc=i==0?store_view::Fill(l10n::Get(I::StoreMenuShows),L"{name}",z.archive_rows.empty()?store_view::ModeTitle(z.mode):z.archive_rows.front().title)
-                    :i==1?store_view::Fill(l10n::Get(I::SzFormatDesc),L"{name}",store_view::FormatName(z.format))
-                    :l10n::Get(I::SzRememberDesc);
-                p.Text(desc,{r.left,r.top+28*s,right,r.top+49*s},true);
-                if(i<2)p.Line(r.left,r.right,r.bottom,theme.stroke_divider);
+        p.Text(qc.status.empty()?l10n::Get(v.saved?I::StoreSaved:I::StoreAutoSaved):qc.status,saved_rect,true,&saved_color);
+        if(!qc.available) {
+            if(!gq.rows.empty())p.Caption(l10n::Get(item.enabled?I::SzLoading:I::SzUnavailable),gq.rows[0],theme.text_secondary);
+        } else {
+            for(size_t ri=0;ri<gq.rows.size()&&ri<qc.rows.size();++ri) {
+                const auto& r=gq.rows[ri];const auto& rv=qc.rows[ri];
+                float text_right=r.right;bool stacked_row=false;
+                for(const auto& ctrl:gq.controls) {
+                    if(ctrl.row!=static_cast<int>(ri))continue;
+                    if(ctrl.bounds.top>=r.top+32*s)stacked_row=true;
+                    else text_right=(std::min)(text_right,ctrl.bounds.left-12*s);
+                }
+                if(stacked_row)text_right=r.right;
+                // The label block is centred in the row's 56 DIP text band (controls drop below it when stacked).
+                const float band=(std::min)(r.bottom-r.top,56*s*static_cast<float>(vm.settings_ui_font_scale)/100);
+                const bool has_desc=!rv.description.empty();
+                const float ty=r.top+(band-(has_desc?44*s:23*s))/2;
+                p.Text(rv.title,{r.left,ty,text_right,ty+23*s});
+                if(has_desc)p.Text(rv.description,{r.left,ty+23*s,text_right,ty+44*s},true);
+                if(ri+1<gq.rows.size())p.Line(r.left,r.right,r.bottom,theme.stroke_divider);
             }
-            p.Combo(q.mode,store_view::ModeTitle(z.mode),A::StoreQuickMode);
-            p.Combo(q.format,store_view::FormatName(z.format),A::StoreQuickFormat);
-            p.Combo(q.level,z.format==2?l10n::Get(I::SzLevelTar):store_view::LevelName(z.level),A::StoreQuickLevel,z.format!=2);
-            p.Switch(q.remember,z.remember,A::StoreQuickRemember);
-            painter_.FillRoundedRect(q.preview,0,WithAlpha(theme.surface_sheet,.75f));
-            auto cap=q.preview_caption;
-            if(Present(cap)&&(cap.right-cap.left)>36*s) {
-                const float cy=(cap.top+cap.bottom)/2;
-                p.Icon(StoreIcon::Lines,{cap.left,cy-6.5f*s,cap.left+13*s,cy+6.5f*s},theme.text_secondary);
-                cap.left+=18*s;
+            for(const auto& cr:gq.controls) {
+                settings_store_quick_controls_[cr.action]=cr.bounds;
+                for(const auto& rv:qc.rows) {
+                    for(const auto& cv:rv.controls) {
+                        if(cv.action!=cr.action)continue;
+                        if(cv.kind==0)p.Switch(cr.bounds,cv.checked,static_cast<A>(cr.action),!cv.disabled);
+                        else if(cv.kind==1)p.Combo(cr.bounds,cv.label,static_cast<A>(cr.action),!cv.disabled);
+                        else if(cv.kind==2)p.Button(cr.bounds,cv.label,static_cast<A>(cr.action),false,!cv.disabled);
+                    }
+                }
             }
-            p.Text(l10n::Get(I::StorePreviewArchiveCaption),cap,true);
-            const std::wstring_view menu_group=z.item>=0&&z.item<static_cast<int>(v.items.size())&&v.items[z.item].id=="pulse.7zip"?std::wstring_view{L"7-Zip"}:
-                (z.item>=0&&z.item<static_cast<int>(v.items.size())?std::wstring_view{v.items[z.item].name}:std::wstring_view{});
-            p.Menu(q.preview_menu,z.archive_rows,z.submenu,true,menu_group);
+            if(qc.has_menu_preview&&Present(gq.preview_menu)) {
+                // A quiet rounded stage for the menu; no full-height strip pinned to the card edge.
+                painter_.FillRoundedRect(gq.preview,8*s,WithAlpha(theme.text,vm.dark?.045f:.03f));
+                painter_.StrokeRoundedRect(gq.preview,8*s,theme.stroke_divider);
+                auto cap=gq.preview_caption;
+                if(Present(cap)&&(cap.right-cap.left)>36*s) {
+                    const float cy=(cap.top+cap.bottom)/2;
+                    p.Icon(StoreIcon::Lines,{cap.left,cy-6.5f*s,cap.left+13*s,cy+6.5f*s},theme.text_secondary);
+                    cap.left+=18*s;
+                }
+                p.Text(qc.preview_caption.empty()?l10n::Get(I::StorePreviewArchiveCaption):qc.preview_caption,cap,true);
+                p.Menu(gq.preview_menu,qc.preview_rows,qc.preview_submenu,true,item.name);
+            }
         }
     }
     for(const auto& c:l.store_packs) {
         const auto data=store_view::Pack(vm,c.pack);p.Card(c.bounds);p.Tile(data.icon,c.icon,HexColor(data.color),true);
-        p.Heading(data.name,c.name);p.Text(l10n::Get(I::StoreOfficial),c.publisher,true);p.Summary(data.summary,c.summary);
+        p.Heading(data.name,c.name);
+        // Pulse's own packs carry the same verified badge as the catalog's official extensions.
+        auto pack_publisher=c.publisher;
+        if(Present(pack_publisher)){p.Icon(StoreIcon::Badge,{pack_publisher.left,pack_publisher.top+2*s,pack_publisher.left+14*s,pack_publisher.top+16*s},theme.accent);pack_publisher.left+=19*s;}
+        p.Text(l10n::Get(I::StoreOfficial),pack_publisher,true);p.Summary(data.summary,c.summary);
         if(!data.state.empty()) {
             auto color=data.installed?green:theme.text_secondary;auto state=c.state;
             if(data.installed&&Present(state)){p.Icon(StoreIcon::Check,{state.left,state.top+8*s,state.left+14*s,state.top+22*s},color);state.left+=19*s;}
@@ -389,199 +466,160 @@ void MainRenderer::DrawSettingsStore(const WindowViewModel& vm,const D2D1_RECT_F
     if(Present(l.store_trust)){p.Line(l.store_trust.left-30*s,l.store_trust.right+20*s,l.store_trust.top-12*s,theme.stroke_divider);p.Icon(StoreIcon::Shield,{l.store_trust.left-26*s,l.store_trust.top,l.store_trust.left-10*s,l.store_trust.top+18*s},theme.text_secondary);p.Caption(l10n::Get(I::StoreTrust),l.store_trust,theme.text_secondary);}
     p.Caption(l10n::Get(I::StoreOfficialManage),l.store_manage,theme.accent);
 }
-void MainRenderer::DrawSevenZipDetail(const WindowViewModel& vm,const D2D1_RECT_F& rect,const Theme& theme) {
-    const auto l=MakeSettingsLayout(vm,rect,scale_,title_bar_height_,status_height_,&painter_);
-    StorePainter p{painter_,compositor_->Dc(),compositor_,theme,vm,scale_};
-    const auto& d=l.sz;const auto& v=vm.settings_store_view;const auto& z=v.seven_zip;const float s=scale_;
-    if(z.item<0||z.item>=static_cast<int>(v.items.size()))return;
-    const auto& item=v.items[z.item];auto green=painter_.StatusToneColor(fluent::InfoBarKind::Success);
-    p.Icon(StoreIcon::ChevronLeft,{d.crumb.left+4*s,d.crumb.top+7*s,d.crumb.left+18*s,d.crumb.bottom-7*s},theme.text_secondary);
-    auto crumb=d.crumb;crumb.left+=24*s;p.Text(l10n::Get(I::StoreTitle),crumb,true);
-    p.Icon(StoreIcon::ChevronRight,{d.crumb_name.left,d.crumb_name.top+7*s,d.crumb_name.left+12*s,d.crumb_name.bottom-7*s},theme.text_disabled);
-    auto crumb_name=d.crumb_name;crumb_name.left+=22*s;p.Text(item.name,crumb_name,true);
-    p.Tile(item.icon,d.icon,HexColor(item.icon_color),true);
-    if(Present(d.name)) {
-        ComPtr<IDWriteTextLayout> title;
-        if(SUCCEEDED(compositor_->DwriteFactory()->CreateTextLayout(item.name.c_str(),static_cast<UINT32>(item.name.size()),compositor_->HeaderFormat(),d.name.right-d.name.left,d.name.bottom-d.name.top,&title))) {
-            title->SetFontSize(26*s,{0,static_cast<UINT32>(item.name.size())});title->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-            MakeBrush(p.dc,theme.text,brText_);compositor_->DrawTextLayout({d.name.left,d.name.top},title.get(),brText_.get());
+void MainRenderer::DrawExtensionDetail(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme) {
+    const auto l = MakeSettingsLayout(vm, rect, scale_, title_bar_height_, status_height_, &painter_);
+    StorePainter p{painter_, compositor_->Dc(), compositor_, theme, vm, scale_};
+    const auto& d = l.ext_detail;
+    const auto& v = vm.settings_store_view;
+    const float s = scale_;
+    const int item_index = store_view::ActiveDetailItem(v);
+    if (item_index < 0 || item_index >= static_cast<int>(v.items.size())) return;
+    const auto& item = v.items[static_cast<size_t>(item_index)];
+    const auto green = painter_.StatusToneColor(fluent::InfoBarKind::Success);
+
+    WindowViewModel::NativeSettingsHeader header;
+    header.name = item.name;
+    header.summary = item.summary;
+    header.version = item.version + (item.size.empty() ? L"" : L" · " + item.size);
+    header.icon = item.icon;
+    header.icon_color = item.icon_color;
+    header.custom_icon = item.custom_icon;
+    header.official = item.official;
+    header.enabled = item.enabled;
+    header.installed = item.installed;
+    if (!item.button_label.empty() && (!item.installed || item.action_enabled)) {
+        header.action_label = item.button_label;
+        header.action_enabled = item.action_enabled;
+    }
+    DrawExtensionDetailHeader(p, d, header, A::StoreDetailBack);
+    store_notify::DrawStatusBanners(painter_, l, v, theme, false, false, p.Hot(A::StoreRestartNow));
+    const int selected_tab = (std::max)(0, d.tab_count - 2) + (v.detail_tab == 1 ? 1 : 0);
+    DrawExtensionDetailTabs(p, d, d.tab_count, selected_tab, A::StoreDetailTabBase);
+
+    if (v.detail_tab == 1) {
+        p.Card(d.groups[0]);
+        const I keys[] = {I::Publisher, I::SzAboutVersion, I::SzAboutEngine, I::SzAboutLicense, I::SzAboutPermissions, I::SzAboutSource};
+        for (int i = 0; i < 6; ++i) {
+            // Grid cells: a quiet key over its value; a hairline between the cell rows.
+            if (i && d.about_rows[i].left <= d.about_rows[0].left + 1 && d.about_rows[i].top > d.about_rows[0].top)
+                p.Line(d.groups[0].left + 20*s, d.groups[0].right - 20*s, d.about_rows[i].top - 9*s, theme.stroke_divider);
+            p.Text(l10n::Get(keys[i]), d.about_keys[i], true);
+            auto value = d.about_values[i];
+            if (i == 0 && item.official) {
+                p.Icon(StoreIcon::Badge, {value.left, value.top + 3*s, value.left + 14*s, value.top + 17*s}, theme.accent);
+                value.left += 19*s;
+            }
+            auto text_val = store_view::AboutValue(v, item, i);
+            if (i == 5 && text_val.empty() && !item.homepage.empty()) text_val = item.homepage;
+            const bool is_link = i == 5 && (Present(d.about_source) || Present(d.about_homepage));
+            p.Text(text_val, value, false, (i == 0 && item.official) || is_link ? const_cast<D2D1_COLOR_F*>(&theme.accent) : nullptr);
         }
-    }
-    p.Icon(StoreIcon::Badge,{d.sub.left,d.sub.top+2*s,d.sub.left+14*s,d.sub.top+16*s},theme.accent);
-    auto sub=d.sub;sub.left+=20*s;
-    auto subtitle=item.official?l10n::Get(I::StoreOfficial):item.publisher;
-    if(z.formats_available) subtitle+=L" · "+store_view::Fill(l10n::Get(I::SzEngineFormats),L"{n}",std::to_wstring(z.formats_rw.size()+z.formats_ro.size()));
-    p.Text(subtitle,sub,true);
-    const auto enabled=l10n::Get(item.enabled?I::StoreExtensionEnabled:I::StoreExtensionDisabled);
-    p.Pill(d.badges[0],enabled,item.enabled?green:theme.text_secondary,false,item.enabled);
-    p.Pill(d.badges[1],l10n::Get(I::StoreNativeCode),theme.text_secondary);
-    p.Pill(d.badges[2],item.version+(item.size.empty()?L"":L" · "+item.size),theme.text_secondary);
-    p.Text(enabled,d.enable_label,true);p.Switch(d.enable,item.enabled,A::StoreDetailEnable);
-    p.Button(d.more,L" ",A::StoreDetailMore);p.Icon(StoreIcon::More,Inset(d.more,8*s,8*s),theme.text_secondary);
-    if(Present(d.disabled_banner)) {
-        auto banner=d.disabled_banner;
-        if(Present(l.store_restart_button)) {
-            banner.left=(std::min)(banner.left,l.store_restart_button.left);
-            banner.top=(std::min)(banner.top,l.store_restart_button.top);
-            banner.right=(std::max)(banner.right,l.store_restart_button.right);
-            banner.bottom=(std::max)(banner.bottom,l.store_restart_button.bottom);
+        p.Heading(l10n::Get(I::SzAboutHistory), d.history_label);
+        p.Card(d.history_card);
+        const size_t history = d.history_rows.size();
+        if (history) {
+            // Timeline: a rail through one dot per release, the current release filled with the accent.
+            const float rail_x = d.history_card.left + 26*s;
+            const float first = (d.history_versions.front().top + d.history_versions.front().bottom) / 2;
+            const float last = (d.history_versions.back().top + d.history_versions.back().bottom) / 2;
+            if (last > first) painter_.FillRoundedRect({rail_x - s, first, rail_x + s, last}, s, WithAlpha(theme.text_secondary, .35f));
+            for (size_t i = 0; i < history; ++i) {
+                const float cy = (d.history_versions[i].top + d.history_versions[i].bottom) / 2;
+                const bool current = Present(d.history_current[i]);
+                const float r = (current || i == 0 ? 6.0f : 4.5f) * s;
+                const D2D1_RECT_F dot{rail_x - r, cy - r, rail_x + r, cy + r};
+                painter_.FillRoundedRect(dot, r, current ? theme.accent : theme.surface_card);
+                painter_.StrokeRoundedRect(dot, r, current ? theme.accent : theme.text_secondary);
+                p.Mono(store_view::HistoryVersion(item, i), d.history_versions[i], &theme.text);
+                p.Caption(store_view::HistoryNote(item, i), d.history_notes[i], theme.text_secondary);
+                p.Pill(d.history_current[i], l10n::Get(I::SzAboutCurrent), green);
+            }
         }
-        auto color=painter_.StatusToneColor(!item.enabled?fluent::InfoBarKind::Warning:fluent::InfoBarKind::Informational);
-        painter_.FillRoundedRect(Inset(banner,-12*s,-6*s),6*s,WithAlpha(color,.08f));
-        p.Caption(l10n::Get(!item.enabled?I::SzDisabledNote:I::StoreRestart),d.disabled_banner,theme.text_secondary);
-        p.Button(l.store_restart_button,l10n::Get(I::StoreRestartNow),A::StoreRestartNow);
-    }
-    constexpr I tabs[]={I::SzTabSettings,I::SzTabMenu,I::SzTabFormats,I::SzTabAbout};
-    for(int i=0;i<4;++i) {
-        auto r=d.tabs[i];p.Line(r.left,r.right,r.bottom-s,theme.stroke_divider);
-        if(p.Hot(Offset(A::StoreDetailTabBase,i)))painter_.FillRoundedRect(Inset(r,0,4*s),6*s,theme.fill_hover);
-        painter_.DrawText(l10n::Get(tabs[i]),r,i==v.detail_tab?compositor_->HeaderFormat():compositor_->TextFormat(),i==v.detail_tab?theme.text:theme.text_secondary,fluent::HorizontalAlignment::Center);
-        if(i==v.detail_tab)painter_.FillRoundedRect({r.left+12*s,r.bottom-3*s,r.right-12*s,r.bottom},1.5f*s,theme.accent);
-    }
-    for(auto r:d.groups)p.Card(r);
-    if(!z.TabAvailable(v.detail_tab)&&v.detail_tab!=3) {
-        const auto fallback=(z.available||z.needs_update)?I::SzExtensionUpdateRequired:z.needs_restart?I::ExtensionStoreInstalledRestart:item.enabled?I::SzLoading:I::SzUnavailable;
-        p.Caption(l10n::Get(fallback),Inset(d.groups[0],20*s,20*s),theme.text_secondary);
         return;
     }
-    if(v.detail_tab==0&&z.take_available) {
-        p.Heading(l10n::Get(I::SzTakeSection),d.take_label);
-        p.Card(d.take_group);
-        p.Row(d.take_row,StoreIcon::Box,l10n::Get(I::SzTakeTitle),l10n::Get(I::SzTakeDesc),76);
-        p.Switch(d.take_switch,z.take,A::SzTake);
-        p.Line(d.take_group.left+16*s,d.take_group.right-16*s,d.take_head.top-4*s,theme.stroke_divider);
-        if(z.take_busy) {
-            p.Caption(l10n::Get(I::SzTakeBusy),{d.take_head.left,d.take_head.top+6*s,d.take_head.right,d.take_head.bottom},theme.accent);
-        } else {
-            p.Caption(z.take_head,{d.take_head.left,d.take_head.top+6*s,d.take_head.right,d.take_head.bottom},theme.text_secondary);
-            p.Button(d.take_winsettings,l10n::Get(I::SzTakeWinSettings),A::SzTakeWinSettings);
-            p.Button(d.take_next,l10n::Get(I::SzTakeConfirmEach),A::SzTakeNext,true);
-        }
-        const auto warning=painter_.StatusToneColor(fluent::InfoBarKind::Warning);
-        for(size_t i=0;i<d.take_rows.size()&&i<z.take_rows.size();++i) {
-            const auto& r=d.take_rows[i];const auto& row=z.take_rows[i];
-            using Owner=SevenZipTakeRow::Owner;
-            const bool dim=row.owner==Owner::Off;
-            if(p.Hot(Offset(A::SzTakeIncBase,i))&&z.take)painter_.FillRoundedRect(Inset(r.bounds,0,2*s),6*s,theme.fill_hover);
-            if(i)p.Line(r.bounds.left+8*s,r.bounds.right-8*s,r.bounds.top,theme.stroke_divider);
-            fluent::ControlState check{};check.checked=row.included;check.enabled=z.take;check.hovered=z.take&&p.Hot(Offset(A::SzTakeIncBase,i));
-            painter_.DrawCheckBox(r.check,L"",check);
-            const int px=std::max(16,static_cast<int>(std::lround((r.icon.right-r.icon.left))));
-            if(auto* bitmap=FormatIcon(compositor_->Dc(),z.icon_library,row.icon,px))
-                compositor_->Dc()->DrawBitmap(bitmap,r.icon,dim?.7f:1.0f,D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-            auto name_color=dim?theme.text_secondary:theme.text;
-            p.Text(row.label,{r.name.left,r.name.top,r.name.right,r.name.top+20*s},false,&name_color);
-            p.Text(row.extensions,{r.name.left,r.name.top+20*s,r.name.right,r.name.bottom},true);
-            const auto tone=row.owner==Owner::Pulse?green:row.owner==Owner::Other?warning:theme.text_secondary;
-            const float cy=(r.status.top+r.status.bottom)/2;
-            painter_.FillRoundedRect({r.status.left,cy-3.5f*s,r.status.left+7*s,cy+3.5f*s},3.5f*s,row.owner==Owner::Off?WithAlpha(tone,.5f):tone);
-            auto status_color=row.owner==Owner::Pulse||row.owner==Owner::Other?theme.text:theme.text_secondary;
-            p.Text(row.status,{r.status.left+14*s,r.status.top,r.status.right,r.status.bottom},true,&status_color);
-            p.Button(r.ask,l10n::Get(row.ask_windows?I::SzTakeAskSet:I::SzTakeAskChange),Offset(A::SzTakeAskBase,i));
-        }
-        p.Line(d.take_group.left+16*s,d.take_group.right-16*s,d.double_click_row.top-2*s,theme.stroke_divider);
-        p.Row(d.double_click_row,StoreIcon::Open,l10n::Get(I::SzDblTitle),l10n::Get(I::SzDblDesc));
-        for(int i=0;i<2;++i)p.Option(d.double_click_opts[i],l10n::Get(i?I::SzDblOpen:I::SzModeSmart),l10n::Get(i?I::SzDblOpenDesc:I::SzModeSmartDesc),z.double_click==i,Offset(A::SzDoubleClickBase,i));
+
+    // Introduction card; the right-click menu sits on a tinted stage inside it.
+    p.Card(d.desc_card);
+    p.Heading(l10n::Get(I::StoreDetailDescription), d.desc_label);
+    if (Present(d.desc_text)) {
+        const std::wstring_view desc_str = !item.description.empty() ? std::wstring_view{item.description}
+            : !item.summary.empty() ? std::wstring_view{item.summary}
+            : std::wstring_view{l10n::Get(I::StoreDetailNoDescription)};
+        painter_.DrawWrappedBody(desc_str, {d.desc_text.left, d.desc_text.top}, d.desc_text.right - d.desc_text.left, theme.text);
     }
-    if(v.detail_tab==0) {
-        constexpr I sections[]={I::SzSectionExtract,I::SzSectionCompress,I::SzSectionPassword};
-        for(int i=0;i<3;++i)p.Heading(l10n::Get(sections[i]),d.section_label[i]);
-        if(!z.status.empty()&&Present(d.section_label[0])&&(d.section_label[0].right-d.section_label[0].left)>180*s) {
-            const bool ok_status=z.status==L"已保存。"||z.status==L"Saved.";
-            const auto st_color=ok_status?green:painter_.StatusToneColor(fluent::InfoBarKind::Error);
-            painter_.DrawText(z.status,{d.section_label[0].left+100*s,d.section_label[0].top,d.section_label[0].right-2*s,d.section_label[0].bottom},compositor_->SmallFormat(),st_color,fluent::HorizontalAlignment::Right);
+
+    if (d.showcase_quick >= 0 && d.showcase_quick < static_cast<int>(v.quick_cards.size())) {
+        const auto& qc = v.quick_cards[static_cast<size_t>(d.showcase_quick)];
+        painter_.FillRoundedRect(d.showcase_card, 8*s, WithAlpha(theme.accent, vm.dark ? .10f : .07f));
+        painter_.StrokeRoundedRect(d.showcase_card, 8*s, WithAlpha(theme.accent, .16f));
+        auto cap = d.showcase_caption;
+        if (Present(cap) && (cap.right - cap.left) > 36*s) {
+            const float cy = (cap.top + cap.bottom) / 2;
+            p.Icon(StoreIcon::Lines, {cap.left, cy - 6.5f*s, cap.left + 13*s, cy + 6.5f*s}, theme.accent);
+            cap.left += 18*s;
         }
-        p.Row(d.mode_row,StoreIcon::Extract,l10n::Get(I::SzModeTitle),l10n::Get(I::SzModeDesc));
-        for(int i=0;i<3;++i)p.Option(d.mode_opts[i],store_view::ModeTitle(i),store_view::ModeDesc(i),z.mode==i,Offset(A::SzModeBase,i));
-        p.Line(d.groups[0].left+16*s,d.groups[0].right-16*s,d.location_row.top-2*s,theme.stroke_divider);
-        p.Row(d.location_row,StoreIcon::Folder,l10n::Get(I::SzLocationTitle),l10n::Get(I::SzLocationDesc));
-        for(int i=0;i<2;++i)p.Option(d.location_opts[i],l10n::Get(i?I::SzLocationFixed:I::SzLocationBeside),l10n::Get(i?I::SzLocationFixedDesc:I::SzLocationBesideDesc),z.location==i,Offset(A::SzLocationBase,i));
-        p.Input(d.folder);p.Button(d.browse,l10n::Get(I::Browse),A::SzBrowse);
-        p.Row(d.format_row,StoreIcon::Compress,l10n::Get(I::SzFormatTitle),store_view::Fill(l10n::Get(I::SzFormatDesc),L"{name}",store_view::FormatName(z.format)));
-        for(int i=0;i<6;++i)p.Option(d.format_opts[i],store_view::FormatName(i),store_view::FormatDesc(i),z.format==i,Offset(A::SzFormatBase,i));
-        p.Line(d.groups[1].left+16*s,d.groups[1].right-16*s,d.level_row.top-2*s,theme.stroke_divider);
-        p.Row(d.level_row,StoreIcon::Gear,l10n::Get(I::SzLevelTitle),l10n::Get(I::SzLevelDesc));
-        const bool dragging=v.level_drag>=0.0f;
-        const float level_position=dragging?v.level_drag:static_cast<float>(z.level);
-        const int shown_level=std::clamp(static_cast<int>(std::lround(level_position)),0,5);
-        auto level_color=z.format==2?theme.text_disabled:theme.accent;
-        p.Text(z.format==2?l10n::Get(I::SzLevelTar):store_view::LevelName(shown_level),d.level_value,true,&level_color);
-        fluent::StepSliderSpec slider;
-        slider.bounds=d.level_track;
-        slider.stops=6;
-        slider.position=level_position;
-        slider.state.pressed=dragging;
-        slider.state.enabled=z.format!=2;
-        for(int i=0;i<6;++i)slider.state.hovered=slider.state.hovered||p.Hot(Offset(A::SzLevelBase,i));
-        painter_.DrawStepSlider(slider);
-        for(int i=0;i<6;++i) {
-            const auto r=d.level_stops[i];
-            const float cx=fluent::StepSliderStopX(d.level_track,6,static_cast<float>(i),s);
-            const float half=(r.right-r.left)/2;
-            const bool selected=shown_level==i&&slider.state.enabled;
-            painter_.DrawText(store_view::LevelName(i),{cx-half,d.level_track.bottom+2*s,cx+half,r.bottom},
-                compositor_->SmallFormat(),!slider.state.enabled?theme.text_disabled:selected?theme.accent:theme.text_secondary,
-                fluent::HorizontalAlignment::Center);
+        p.Text(qc.preview_caption.empty() ? l10n::Get(I::StoreDetailMenuShowcase) : qc.preview_caption, cap, true);
+        p.Menu(d.showcase_menu, qc.preview_rows, qc.preview_submenu, true, item.name);
+    }
+
+    if (!item.highlights.empty()) {
+        // Feature tiles: a tinted round check badge beside the text, vertically centred.
+        p.Heading(l10n::Get(I::StoreDetailHighlights), d.highlights_label);
+        for (size_t i = 0; i < d.highlight_rows.size() && i < item.highlights.size(); ++i) {
+            const auto& r = d.highlight_rows[i];
+            p.Card(r);
+            const float cy = (r.top + r.bottom) / 2;
+            const D2D1_RECT_F badge{r.left + 16*s, cy - 16*s, r.left + 48*s, cy + 16*s};
+            painter_.FillRoundedRect(badge, 16*s, WithAlpha(green, .14f));
+            p.Icon(StoreIcon::Check, {badge.left + 9*s, badge.top + 9*s, badge.right - 9*s, badge.bottom - 9*s}, green);
+            const float tw = (std::max)(1.0f, r.right - 16*s - (r.left + 64*s));
+            const float th = painter_.MeasureWrappedCaptionHeight(item.highlights[i], tw);
+            p.Caption(item.highlights[i], {r.left + 64*s, cy - th / 2, r.right - 16*s, cy + th / 2 + 2*s}, theme.text);
         }
-        p.Icon(StoreIcon::Info,{d.compress_note.left-22*s,d.compress_note.top+2*s,d.compress_note.left-6*s,d.compress_note.top+18*s},theme.text_secondary);
-        p.Caption(l10n::Get(I::SzCompressNote),d.compress_note,theme.text_secondary);
-        p.Row(d.remember_row,StoreIcon::Lock,l10n::Get(I::SzRememberTitle),l10n::Get(I::SzRememberDesc),76);
-        p.Switch(d.remember,z.remember,A::SzRemember);
-        p.Icon(StoreIcon::Info,{d.rar_note.left-22*s,d.rar_note.top+2*s,d.rar_note.left-6*s,d.rar_note.top+18*s},theme.text_secondary);
-        p.Caption(l10n::Get(I::SzRarNote),d.rar_note,theme.text_secondary);
-    } else if(v.detail_tab==1) {
-        p.Heading(l10n::Get(I::SzPlacementTitle),d.section_label[0]);
-        for(int i=0;i<2;++i)p.Option(d.placement_opts[i],l10n::Get(i?I::SzPlacementSub:I::SzPlacementTop),l10n::Get(i?I::SzPlacementSubDesc:I::SzPlacementTopDesc),z.submenu==(i==1),Offset(A::SzPlacementBase,i));
-        p.Text(l10n::Get(I::SzCommandsTitle)+L"  ·  "+l10n::Get(I::SzCommandsDesc),d.commands_label,true);
-        const StoreIcon icons[]={StoreIcon::Extract,StoreIcon::ExtractTo,StoreIcon::Test,StoreIcon::Compress,StoreIcon::AddArchive,StoreIcon::Hash};
-        for(int i=0;i<6;++i){p.Row(d.command_rows[i],icons[i],store_view::CommandName(i),store_view::CommandTag(i),76);p.Switch(d.command_switch[i],(z.commands&(1u<<i))!=0,Offset(A::SzCommandBase,i));if(i<5)p.Line(d.command_rows[i].left+16*s,d.command_rows[i].right-16*s,d.command_rows[i].bottom,theme.stroke_divider);}
-    } else if(v.detail_tab==2) {
-        p.Heading(l10n::Get(I::SzFormatsWritable),d.formats_rw_label);p.Heading(l10n::Get(I::SzFormatsReadOnly),d.formats_ro_label);
-        auto format_chip=[&](D2D1_RECT_F bounds,std::wstring_view name,bool writable) {
-            if(!Present(bounds))return;
-            auto color=writable?(vm.dark?MixColor(theme.accent,theme.text,.45f):theme.accent):theme.text;
-            painter_.FillRoundedRect(bounds,6*s,writable?WithAlpha(theme.accent,.095f):theme.fill_hover);
-            p.Mono(name,Inset(bounds,7*s,0),&color,true);
-        };
-        for(size_t i=0;i<d.chips_rw.size()&&i<z.formats_rw.size();++i)format_chip(d.chips_rw[i],z.formats_rw[i],true);
-        for(size_t i=0;i<d.chips_ro.size()&&i<z.formats_ro.size();++i)format_chip(d.chips_ro[i],z.formats_ro[i],false);
-        p.Icon(StoreIcon::Eye,{d.formats_note.left-22*s,d.formats_note.top+2*s,d.formats_note.left-6*s,d.formats_note.top+18*s},theme.text_secondary);
-        p.Caption(l10n::Get(I::SzFormatsNote),d.formats_note,theme.text_secondary);
+    }
+
+    if (!item.tags.empty()) {
+        p.Heading(l10n::Get(I::StoreDetailTags), d.tags_label);
+        p.Card(d.tags_card);
+        for (size_t i = 0; i < d.tag_chips.size() && i < item.tags.size(); ++i) {
+            p.Pill(d.tag_chips[i], item.tags[i], theme.text_secondary);
+        }
+    }
+
+    p.Card(d.facts_card);
+    p.Heading(l10n::Get(I::StoreDetailQuickFacts), d.facts_title);
+    {
+        struct Fact { l10n::StringId key; std::wstring value; int link_kind; };
+        std::vector<Fact> facts;
+        const auto pub = store_view::AboutValue(v, item, 0);
+        if (!pub.empty()) facts.push_back({I::Publisher, pub, 0});
+        const auto ver_fact = store_view::AboutValue(v, item, 1);
+        if (!ver_fact.empty()) facts.push_back({I::SzAboutVersion, ver_fact, 0});
+        if (!item.engine.empty()) facts.push_back({I::SzAboutEngine, item.engine, 0});
+        if (!item.license.empty()) facts.push_back({I::SzAboutLicense, item.license, 0});
+        if (!item.homepage.empty()) facts.push_back({I::StoreDetailHomepage, item.homepage, 1});
+        if (!item.source.empty() && item.source != item.homepage) facts.push_back({I::SzAboutSource, item.source, 2});
+        for (size_t i = 0; i < facts.size() && i < d.fact_keys.size(); ++i) {
+            if (i) p.Line(d.fact_rows[i].left, d.fact_rows[i].right, d.fact_rows[i].top - 4*s, theme.stroke_divider);
+            p.Text(l10n::Get(facts[i].key), d.fact_keys[i], true);
+            const bool is_link = (facts[i].link_kind == 1 && Present(d.fact_homepage)) ||
+                                 (facts[i].link_kind == 2 && Present(d.fact_source));
+            p.Caption(facts[i].value, d.fact_values[i], is_link ? theme.accent : theme.text);
+        }
+    }
+
+    p.Card(d.perms_card);
+    p.Heading(l10n::Get(I::StoreDetailPermissionsTitle), d.perms_title);
+    if (item.permissions.empty()) {
+        if (!d.perm_rows.empty()) {
+            p.Caption(l10n::Get(I::StorePermissionsNone), d.perm_rows[0], theme.text_secondary);
+        }
     } else {
-        const I keys[]={I::Publisher,I::SzAboutVersion,I::SzAboutEngine,I::SzAboutLicense,I::SzAboutPermissions,I::SzAboutSource};
-        for(int i=0;i<6;++i) {
-            if(i)p.Line(d.about_rows[i].left,d.about_rows[i].right,d.about_rows[i].top-4*s,theme.stroke_divider);
-            p.Text(l10n::Get(keys[i]),d.about_keys[i],true);
-            auto value=d.about_values[i];
-            if(i==0&&item.official) {p.Icon(StoreIcon::Badge,{value.left,value.top+3*s,value.left+14*s,value.top+17*s},theme.accent);value.left+=19*s;}
-            p.Caption(store_view::AboutValue(v,item,i),value,(i==0&&item.official)||(i==5&&Present(d.about_source))?theme.accent:theme.text);
-        }
-        p.Heading(l10n::Get(I::SzAboutHistory),d.history_label);p.Card(d.history_card);
-        for(size_t i=0;i<d.history_rows.size();++i) {
-            p.Mono(store_view::HistoryVersion(item,i),d.history_versions[i],&theme.text);
-            p.Caption(store_view::HistoryNote(item,i),d.history_notes[i],theme.text_secondary);
-            p.Pill(d.history_current[i],l10n::Get(I::SzAboutCurrent),green);
-            if(i)p.Line(d.history_rows[i].left,d.history_rows[i].right,d.history_rows[i].top,theme.stroke_divider);
+        for (size_t i = 0; i < d.perm_rows.size() && i < item.permissions.size(); ++i) {
+            const auto& r = d.perm_rows[i];
+            p.Icon(StoreIcon::Shield, {r.left, r.top + 3*s, r.left + 12*s, r.top + 15*s}, theme.text_secondary);
+            p.Caption(item.permissions[i], {r.left + 18*s, r.top, r.right, r.bottom}, theme.text_secondary);
         }
     }
-    p.Card(d.preview_card);
-    auto preview_title=d.preview_title;
-    if(Present(preview_title)&&(preview_title.right-preview_title.left)>36*s) {
-        const float cy=(preview_title.top+preview_title.bottom)/2;
-        p.Icon(StoreIcon::Eye,{preview_title.left,cy-7*s,preview_title.left+14*s,cy+7*s},theme.text_secondary);
-        preview_title.left+=19*s;
-    }
-    p.Text(l10n::Get(I::SzPreviewTitle),preview_title,true);
-    if(Present(d.preview_kinds[0])) {
-        painter_.DrawSegmentedTrack({d.preview_kinds[0].left,d.preview_kinds[0].top,d.preview_kinds[1].right,d.preview_kinds[1].bottom});
-        for(int i=0;i<2;++i){fluent::SegmentedItemSpec spec{};spec.bounds=d.preview_kinds[i];spec.text=l10n::Get(i?I::SzPreviewFiles:I::SzPreviewArchive);spec.state.checked=v.preview_kind==i;spec.state.hovered=p.Hot(Offset(A::SzPreviewBase,i));spec.shared_track=true;spec.position=i?fluent::SegmentPosition::Last:fluent::SegmentPosition::First;painter_.DrawSegmentedItem(spec);}
-    }
-    const std::wstring_view detail_group=item.id=="pulse.7zip"?std::wstring_view{L"7-Zip"}:std::wstring_view{item.name};
-    p.Menu(d.preview_menu,v.preview_kind==0?z.archive_rows:z.file_rows,z.submenu,true,detail_group,true,v.preview_kind==0);
-    p.Card(d.result_card);
-    const auto result_icon=z.mode==2?StoreIcon::Warn:StoreIcon::Check;
-    const auto result_tone=z.mode==2?painter_.StatusToneColor(fluent::InfoBarKind::Warning):green;
-    p.Icon(result_icon,{d.result_card.left+14*s,d.result_card.top+15*s,d.result_card.left+30*s,d.result_card.top+31*s},result_tone);
-    auto result=Inset(d.result_card,14*s,14*s);result.left+=28*s;p.Caption(l10n::Get(z.mode==1?I::SzResultFolder:z.mode==2?I::SzResultHere:I::SzResultSmart),result,theme.text_secondary);
 }
 } // namespace pulse::ui

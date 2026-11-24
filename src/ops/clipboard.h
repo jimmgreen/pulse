@@ -29,6 +29,10 @@ bool WriteClipboardText(const std::wstring& text);
 // Reads an Explorer copy/cut (CF_HDROP). Returns false if no files present.
 bool ReadClipboard(ClipboardData& out);
 
+// A single attempt for background readers; never substitutes newer clipboard data.
+enum class ClipboardFileRead { Ready, Busy, Changed, Missing };
+ClipboardFileRead TryReadClipboardFiles(ClipboardData& out, uint32_t expected_sequence);
+
 // Files with no path to read: copied out of a zip, a Remote Desktop session,
 // Outlook... They come as Shell IDList Array / FileGroupDescriptorW (virtual
 // files) without CF_HDROP, so ReadClipboard sees nothing (#109). Inline:

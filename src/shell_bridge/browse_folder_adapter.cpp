@@ -35,7 +35,7 @@ std::wstring Wide(const char* value) {
     if (Ansi(result) != value) throw E_INVALIDARG;
     return result;
 }
-template<class Input> bool Run(Input* input, const LegacyDialogFactory& create,
+template<class Input> bool Run(Input* input, const BrowseFolderFactory& create,
     PIDLIST_ABSOLUTE& result, const BrowseFolderObserver& observer) {
     BrowseFolderDiagnostic detail;
     const auto report = [&](const char* reason, HRESULT error = S_OK) noexcept {
@@ -47,20 +47,31 @@ template<class Input> bool Run(Input* input, const LegacyDialogFactory& create,
     detail.presence = (input->hwndOwner ? 1u : 0u) | (input->pidlRoot ? 2u : 0u) |
         (input->pszDisplayName ? 4u : 0u) | (input->lpszTitle ? 8u : 0u) |
         (input->lpfn ? 16u : 0u) | (input->lParam ? 32u : 0u);
-    // Roots constrain the entire namespace, not just the starting directory.
-    // The picker provides both resizing and address/name editing for the two
-    // ordinary modern styles. Their native W/A accept/cancel output contract is
-    // covered by browse_folder_runtime_test --native-baseline. Callback/BFFM
-    // messages and every other BIF behavior remain native.
-    if (input->pidlRoot) { report("browse-decline-root"); return false; }
-    if (input->lpfn) { report("browse-decline-callback"); return false; }
-    if (input->ulFlags != BIF_RETURNONLYFSDIRS && input->ulFlags != (BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE) &&
-        input->ulFlags != (BIF_RETURNONLYFSDIRS | BIF_USENEWUI)) { report("browse-decline-flags"); return false; }
+    constexpr UINT supported = BIF_RETURNONLYFSDIRS | BIF_USENEWUI | BIF_NONEWFOLDERBUTTON |
+        BIF_STATUSTEXT | BIF_DONTGOBELOWDOMAIN | BIF_RETURNFSANCESTORS | BIF_NOTRANSLATETARGETS | BIF_UAHINT;
+    const bool fs_or_modern = input->ulFlags == 0 || (input->ulFlags & (BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE)) != 0;
+    if (!fs_or_modern || (input->ulFlags & ~supported) ||
+        ((input->ulFlags & BIF_NONEWFOLDERBUTTON) && !(input->ulFlags & BIF_NEWDIALOGSTYLE)) ||
+        ((input->ulFlags & BIF_STATUSTEXT) && !(input->ulFlags & BIF_NEWDIALOGSTYLE)) ||
+        ((input->ulFlags & BIF_UAHINT) && !(input->ulFlags & BIF_NEWDIALOGSTYLE))) {
+        report("browse-decline-flags"); return false;
+    }
     APTTYPE apartment{}; APTTYPEQUALIFIER qualifier{};
-    if (FAILED(CoGetApartmentType(&apartment, &qualifier)) ||
-        (apartment != APTTYPE_STA && apartment != APTTYPE_MAINSTA)) {
+    const HRESULT apartment_hr = CoGetApartmentType(&apartment, &qualifier);
+    bool own_apartment = false;
+    if (apartment_hr == CO_E_NOTINITIALIZED ||
+        (SUCCEEDED(apartment_hr) && apartment == APTTYPE_MTA && qualifier == APTTYPEQUALIFIER_IMPLICIT_MTA)) {
+        if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
+            report("browse-decline-apartment"); return false;
+        }
+        own_apartment = true;
+    } else if (FAILED(apartment_hr) || (apartment != APTTYPE_STA && apartment != APTTYPE_MAINSTA)) {
         report("browse-decline-apartment"); return false;
     }
+    struct ApartmentGuard {
+        bool owned = false;
+        ~ApartmentGuard() { if (owned) CoUninitialize(); }
+    } apartment_guard{own_apartment};
     if (input->hwndOwner) {
         DWORD process = 0;
         const DWORD thread = GetWindowThreadProcessId(input->hwndOwner, &process);
@@ -72,16 +83,37 @@ template<class Input> bool Run(Input* input, const LegacyDialogFactory& create,
     result = nullptr;
     try {
         const auto title = Wide(input->lpszTitle);
+        ComPtr<IShellItem> root;
+        if (input->pidlRoot && !ILIsEmpty(input->pidlRoot)) {
+            SFGAOF attrs = 0;
+            if (SHCreateItemFromIDList(input->pidlRoot, IID_PPV_ARGS(&root)) != S_OK ||
+                root->GetAttributes(SFGAO_FOLDER | SFGAO_FILESYSTEM, &attrs) != S_OK ||
+                attrs != (SFGAO_FOLDER | SFGAO_FILESYSTEM)) {
+                report("browse-decline-root"); return false;
+            }
+        }
+        bool use_original = false;
+        const BrowseFolderPolicy policy{input->lpfn, input->lParam, !!root,
+            !!(input->ulFlags & BIF_NONEWFOLDERBUTTON), &use_original};
         ComPtr<IFileDialog> dialog;
-        HRESULT hr = create(false, &dialog);
+        HRESULT hr = create(policy, &dialog);
         if (FAILED(hr) || !dialog) { report("browse-decline-create", FAILED(hr) ? hr : E_UNEXPECTED); return false; }
-        constexpr DWORD options = FOS_FORCEFILESYSTEM | FOS_PICKFOLDERS | FOS_NOCHANGEDIR | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT;
+        DWORD options = FOS_FORCEFILESYSTEM | FOS_PICKFOLDERS | FOS_NOCHANGEDIR | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT;
+        if (input->ulFlags & BIF_NOTRANSLATETARGETS) options |= FOS_NODEREFERENCELINKS;
         hr = dialog->SetOptions(options);
         if (SUCCEEDED(hr) && input->lpszTitle) hr = dialog->SetTitle(title.c_str());
+        if (SUCCEEDED(hr) && root) {
+            ComPtr<IFileDialog2> rooted;
+            hr = dialog.As(&rooted);
+            if (SUCCEEDED(hr)) hr = rooted->SetNavigationRoot(root.Get());
+            if (hr == S_OK) hr = dialog->SetFolder(root.Get());
+            if (hr != S_OK) { report("browse-decline-root", hr); return false; }
+        }
         if (FAILED(hr)) { report("browse-decline-configuration", hr); return false; }
         report("browse-show-started");
         shown = true;
         hr = dialog->Show(input->hwndOwner);
+        if (use_original) { report("browse-decline-exact-contract"); return false; }
         if (FAILED(hr)) { report(hr == HRESULT_FROM_WIN32(ERROR_CANCELLED) ? "browse-cancelled" : "browse-show-failed", hr); return true; }
         ComPtr<IShellItem> item;
         hr = dialog->GetResult(&item);
@@ -93,6 +125,12 @@ template<class Input> bool Run(Input* input, const LegacyDialogFactory& create,
         ShellMemory pidl;
         hr = SHGetIDListFromObject(item.Get(), reinterpret_cast<PIDLIST_ABSOLUTE*>(&pidl.value));
         if (FAILED(hr) || !pidl.value) { report("browse-result-pidl-failed", FAILED(hr) ? hr : E_UNEXPECTED); return true; }
+        if (root) {
+            const auto selected = static_cast<PCIDLIST_ABSOLUTE>(pidl.value);
+            if (!ILIsEqual(input->pidlRoot, selected) && !ILIsParent(input->pidlRoot, selected, FALSE)) {
+                report("browse-result-outside-root", E_INVALIDARG); return true;
+            }
+        }
         ShellMemory name;
         hr = item->GetDisplayName(SIGDN_NORMALDISPLAY, reinterpret_cast<PWSTR*>(&name.value));
         if (FAILED(hr) || !name.value) { report("browse-result-name-failed", FAILED(hr) ? hr : E_UNEXPECTED); return true; }
@@ -117,10 +155,10 @@ template<class Input> bool Run(Input* input, const LegacyDialogFactory& create,
     return shown;
 }
 }
-bool RunBrowseFolderDialog(BROWSEINFOW* input, const LegacyDialogFactory& create, PIDLIST_ABSOLUTE& result, const BrowseFolderObserver& observer) {
+bool RunBrowseFolderDialog(BROWSEINFOW* input, const BrowseFolderFactory& create, PIDLIST_ABSOLUTE& result, const BrowseFolderObserver& observer) {
     return Run(input, create, result, observer);
 }
-bool RunBrowseFolderDialog(BROWSEINFOA* input, const LegacyDialogFactory& create, PIDLIST_ABSOLUTE& result, const BrowseFolderObserver& observer) {
+bool RunBrowseFolderDialog(BROWSEINFOA* input, const BrowseFolderFactory& create, PIDLIST_ABSOLUTE& result, const BrowseFolderObserver& observer) {
     return Run(input, create, result, observer);
 }
 }

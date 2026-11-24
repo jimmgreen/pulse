@@ -20,7 +20,7 @@ add_executable(pulse_file_save_revalidation_test src/bench/file_save_revalidatio
     src/ui/file_save_revalidation.cpp src/ui/file_save_model.cpp)
 
 add_executable(pulse_picker_bridge_model_test src/bench/picker_bridge_model_test.cpp
-    src/app/picker_bridge_model.cpp src/ipc/picker_protocol.cpp)
+    src/app/picker_bridge_model.cpp src/ipc/picker_protocol.cpp src/ui/file_save_model.cpp)
 
 add_executable(pulse_picker_host_test src/bench/picker_host_test.cpp
     src/ipc/picker_transport.cpp src/ipc/picker_protocol.cpp)
@@ -240,6 +240,8 @@ add_executable(pulse_picker_remote_v2_test EXCLUDE_FROM_ALL src/bench/picker_inp
     src/ipc/picker_transport.cpp src/ipc/picker_protocol.cpp src/common/picker_owner_guard.cpp)
 target_compile_definitions(pulse_picker_remote_v2_test PRIVATE PULSE_REMOTE_PROVIDER_TEST=1)
 target_link_libraries(pulse_picker_remote_v2_test PRIVATE ole32 user32 windowscodecs advapi32 bcrypt)
+add_executable(pulse_picker_remote_wake_test EXCLUDE_FROM_ALL src/bench/picker_remote_wake_test.cpp)
+target_link_libraries(pulse_picker_remote_wake_test PRIVATE user32)
 add_executable(pulse_picker_remote_owner_test EXCLUDE_FROM_ALL
     src/bench/picker_remote_owner_test.cpp src/common/picker_owner_guard.cpp
     src/shell_bridge/file_dialog_remote_provider.cpp src/ipc/picker_remote_protocol.cpp
@@ -284,6 +286,7 @@ add_executable(pulse_picker_open_missing_validated_test EXCLUDE_FROM_ALL
     src/ui/file_save_model.cpp
     src/ui/file_save_revalidation.cpp
     src/ui/file_save_access_policy.cpp
-    src/ipc/picker_protocol.cpp)
+    src/ipc/picker_protocol.cpp
+    src/ipc/picker_remote_protocol.cpp)
 target_link_libraries(pulse_picker_open_missing_validated_test PRIVATE
-    pulse_fs_watch pulse_localization ole32 shell32 user32 uuid advapi32)
+    pulse_fs_watch pulse_localization pulse_runtime_log ole32 shell32 user32 uuid advapi32)

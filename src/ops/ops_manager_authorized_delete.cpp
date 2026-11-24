@@ -1,5 +1,6 @@
 #include "ops_manager.h"
 #include "native_delete_stream.h"
+#include "transfer_engine.h"
 #include "elevated_delete.h"
 #include "elevated_transfer_client.h"
 #include "transfer_rate_estimator.h"
@@ -13,6 +14,7 @@
 #include <chrono>
 #include <climits>
 #include <iterator>
+#include <filesystem>
 #include <mutex>
 #include <vector>
 #include <unordered_set>
@@ -114,6 +116,20 @@ bool NativeInUse(DWORD error) {
     return error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION || error == ERROR_USER_MAPPED_FILE;
 }
 
+// Progress for an in-flight delete root that has not yet returned from the
+// backend. Never report 100% while the root is still pending; for a single
+// root whose backend hits 100% before returning, show indeterminate activity
+// instead of a frozen "100% / 0 of 1" state.
+float InFlightDeletePercent(uint64_t settled_roots, uint64_t total_roots, float item_percent) {
+    if (total_roots == 0) return 0.0f;
+    if (item_percent >= 100.0f) {
+        if (settled_roots == 0 && total_roots == 1) return -1.0f;
+        item_percent = 99.0f;
+    }
+    const double clamped = item_percent < 0.0f ? 0.0 : static_cast<double>(item_percent) / 100.0;
+    const double fraction = (static_cast<double>(settled_roots) + clamped) / static_cast<double>(total_roots);
+    return static_cast<float>((std::min)(99.0, fraction * 100.0));
+}
 
 }
 
@@ -138,6 +154,7 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
     size_t failures_in_a_row = 0;
     std::vector<std::wstring> refused;
     RecycleRefusal refusal = RecycleRefusal::None;
+    std::wstring native_handoff_directory;
     bool defer_authorization = false;
     std::wstring authorization_error;
     const auto started = GetTickCount64();
@@ -183,6 +200,8 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
         SetStatus([&](OpStatus& status) {
             status.current_item_token = current_item->token;
             status.current_item = source;
+            status.scanned_items = 0;
+            status.scanned_bytes = 0;
             status.last_error.clear();
             status.phase = OpPhase::Running;
         });
@@ -211,16 +230,57 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
             const auto update = [&](OpStatus& status) {
                 status.authorization = AuthorizationState::None;
                 status.authorization_retrying = false;
+                status.phase = OpPhase::Running;
                 status.current_item = source; // The skip target is this selected root, not a changing child.
                 (void)item;
                 status.completed_items = completed.size();
-                status.percent = req.sources.empty() ? 0.0f :
-                    static_cast<float>((completed.size() + skipped + failed_items + refused.size() +
-                                        (percent < 0 ? 0 : percent / 100.0)) * 100.0 / req.sources.size());
+                status.percent = InFlightDeletePercent(completed.size() + skipped + failed_items + refused.size(),
+                    req.sources.size(), percent);
                 update_rate(status);
+                if (status.percent < 0) status.eta_seconds = 0;
             };
             if (authorization_shown) { authorization_shown = false; SetStatus(update); }
             else SetProgressStatus(update);
+        };
+        DeleteHooks delete_hooks;
+        delete_hooks.on_scan = [&](const native_recycle::ScanProgress& scan) {
+            const auto update = [&](OpStatus& status) {
+                status.authorization = AuthorizationState::None;
+                status.authorization_retrying = false;
+                status.current_item = source;
+                status.completed_items = completed.size();
+                status.scanned_items = scan.scanned_items;
+                status.scanned_bytes = scan.scanned_bytes;
+                status.phase = scan.moving ? OpPhase::Running : OpPhase::Scanning;
+                if (req.sources.size() <= 1) {
+                    status.percent = -1.0f;
+                    status.eta_seconds = 0;
+                } else {
+                    const uint64_t settled = static_cast<uint64_t>(completed.size()) + skipped + failed_items +
+                        static_cast<uint64_t>(refused.size());
+                    status.percent = static_cast<float>((std::min)(99.0,
+                        static_cast<double>(settled) * 100.0 / static_cast<double>(req.sources.size())));
+                    update_rate(status);
+                }
+            };
+            if (authorization_shown) { authorization_shown = false; SetStatus(update); }
+            else SetProgressStatus(update);
+        };
+        delete_hooks.on_native_metrics = [&](const native_recycle::RecycleMetrics& m) {
+            diagnostics::runtime::Event("delete_native_recycle", {
+                {"task", task_id},
+                {"token", current_item->token},
+                {"used_native", m.used_native ? 1u : 0u},
+                {"fallback", static_cast<uint64_t>(m.fallback)},
+                {"fallback_error", m.fallback_win32_error},
+                {"scanned_items", m.scanned_items},
+                {"scanned_bytes", m.scanned_bytes},
+                {"scan_ms", m.scan_ms},
+                {"index_write_ms", m.index_write_ms},
+                {"move_ms", m.move_ms},
+                {"notify_ms", m.notify_ms},
+                {"bin_max_bytes", m.bin_max_bytes}
+            });
         };
         callbacks.progress = [&](const OpStatus& status) { progress(status.current_item, status.percent); };
         ShellTransferResult result;
@@ -232,8 +292,28 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
                 (source.starts_with(L"\\\\") && !source.starts_with(L"\\\\?\\")) ||
                 source.starts_with(L"\\\\?\\UNC\\") || ::pulse::fs::IsRemoteLikeDrive(source);
             const unsigned workers = remote ? 8u : 1u;
-            diagnostics::runtime::Event("operation_delete_backend_begin", {{"task", task_id}, {"token", current_item->token}, {"backend", 0}});
-            NativeDeleteOutcome native = DeleteNative(source, current_item->cancel, progress, workers);
+            // Folders on a fixed disk: several at once (native_delete_stream.h).
+            // Shares keep their batches; removable media the serial walk.
+            // Local disks, removable ones included, take the parallel walk; shares keep their batches.
+            const bool fixed = !remote && [&] {
+                std::vector<wchar_t> volume(32768);
+                if (!GetVolumePathNameW(native_delete::NativePath(source).c_str(), volume.data(),
+                                        static_cast<DWORD>(volume.size()))) return false;
+                const UINT type = GetDriveTypeW(volume.data());
+                return type == DRIVE_FIXED || type == DRIVE_REMOVABLE;
+            }();
+            // Measured on 30k files: a spinning disk is fastest at 2-4 requests and
+            // slower at 8 (one head, more seeking); an SSD keeps gaining up to 8 and
+            // loses again at 16. A FAT32 USB stick (3.4k files): 4 beat 1 and 2.
+            // Unknown and removable storage get 4.
+            const unsigned parallel = fixed && IsSolidStateStorage(native_delete::NativePath(source)) ? 8u : 4u;
+            const auto delete_native = [&] {
+                return fixed ? native_delete::DeleteNativeParallel(source, current_item->cancel, progress, parallel)
+                             : DeleteNative(source, current_item->cancel, progress, workers);
+            };
+            diagnostics::runtime::Event("operation_delete_backend_begin", {{"task", task_id}, {"token", current_item->token}, {"backend", 0},
+                {"workers", fixed ? parallel : workers}});
+            NativeDeleteOutcome native = delete_native();
             diagnostics::runtime::Event("operation_delete_backend_end", {{"task", task_id}, {"token", current_item->token},
                 {"backend", 0}, {"error", native.error}, {"cancelled", native.cancelled}, {"mutated", native.mutated}});
             // In use for a moment: tried again here, at once, rather than by
@@ -245,7 +325,7 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
                     native.cancelled = true;
                     break;
                 }
-                native = DeleteNative(source, current_item->cancel, progress, workers);
+                native = delete_native();
             }
             native_mutated = native_mutated || native.mutated;
             native_terminal = native.mutated || native.enumeration_failed || native.cancelled;
@@ -275,10 +355,20 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
                 defer_authorization = false;
             }
             diagnostics::runtime::Event("operation_delete_backend_begin", {{"task", task_id}, {"token", current_item->token}, {"backend", authorized ? 2u : 1u}});
+            ULONGLONG stage_started = 0;
+            const DeleteStageObserver stage_observer = [&](DeleteStage stage, bool begin, HRESULT hr) {
+                const auto now = GetTickCount64();
+                if (begin) stage_started = now;
+                diagnostics::runtime::Event("delete_backend_stage", {{"task", task_id}, {"token", current_item->token},
+                    {"stage", static_cast<uint64_t>(stage)}, {"begin", begin},
+                    {"elapsed_ms", begin ? 0 : now - stage_started}, {"hresult", static_cast<uint32_t>(hr)},
+                    {"permanent", permanent}});
+            };
             result = authorized
                 ? DeleteWithElevatedHelper({source}, permanent, UiWindow(), current_item->cancel, callbacks)
                 : DeleteWithCurrentToken({source}, permanent, UiWindow(), current_item->cancel, progress,
-                                         permanent ? nullptr : &recycle_cache);
+                                         permanent ? nullptr : &recycle_cache, stage_observer,
+                                         permanent ? nullptr : &delete_hooks);
             diagnostics::runtime::Event("operation_delete_backend_end", {{"task", task_id}, {"token", current_item->token},
                 {"backend", authorized ? 2u : 1u}, {"hr", static_cast<uint32_t>(result.hr)},
                 {"cancelled", result.cancelled}, {"mutated", result.mutated}});
@@ -291,6 +381,12 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
                 if (!WaitUnlessCancelled(current_item->cancel, kInUseRetryMs[in_use_retries++])) break;
                 continue;
             }
+            if (authorized && FAILED(result.hr) && !current_item->cancel.load() && !result.cancelled) {
+                native_handoff_directory = std::filesystem::path(source).parent_path().wstring();
+                request_replay_unsafe = request_replay_unsafe || result.mutated;
+                SetStatus([&](OpStatus& st) { st.native_handoff_directory = native_handoff_directory; });
+            }
+            if (result.cancelled) break;
             if (SUCCEEDED(result.hr) || result.mutated || current_item->cancel.load() || !authorized) break;
             authorization_error = DeleteError(result);
             const auto choice = WaitForAuthorization(task_id, authorization_error, source);
@@ -319,7 +415,16 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
             // authorization callback, so leave the Requesting view explicitly.
             status.authorization = AuthorizationState::None;
             status.authorization_retrying = false;
+            status.phase = OpPhase::Running;
+            status.scanned_items = 0;
+            status.scanned_bytes = 0;
             status.completed_items = completed.size();
+            if (req.sources.size() > 1) {
+                const uint64_t settled = static_cast<uint64_t>(completed.size()) + skipped + failed_items +
+                    static_cast<uint64_t>(refused.size());
+                status.percent = static_cast<float>((std::min)(100.0,
+                    static_cast<double>(settled) * 100.0 / static_cast<double>(req.sources.size())));
+            }
             update_rate(status);
         };
         if (!authorization_shown && !authorized) SetProgressStatus(finish_item);
@@ -362,6 +467,22 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
         if (item_failures.size() < kMaxReportedFailures)
             item_failures.push_back({source, {}, DeleteError(result), result.hr});
         ++failed_items;
+    }
+    if (!permanent) {
+        const auto quota = FlushRecycleCache(recycle_cache);
+        if (quota.quota_check_ms > 0 || quota.victims_queued > 0 || quota.bin_used_bytes > 0 ||
+            quota.notified_parents > 0) {
+            diagnostics::runtime::Event("delete_recycle_quota_check", {
+                {"task", task_id},
+                {"notify_ms", quota.notify_ms},
+                {"notified_parents", quota.notified_parents},
+                {"quota_check_ms", quota.quota_check_ms},
+                {"bin_used_bytes", quota.bin_used_bytes},
+                {"bin_max_bytes", quota.bin_max_bytes},
+                {"victims_queued", quota.victims_queued},
+                {"victim_bytes", quota.victim_bytes}
+            });
+        }
     }
     if (!completed.empty()) {
         OpRequest finished = req;
@@ -424,11 +545,14 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
         status.can_pause = false;
         ++status.completed_ops;
         status.completed_items = completed.size();
+        status.scanned_items = 0;
+        status.scanned_bytes = 0;
         status.bytes_per_second = 0;
         status.items_per_second = 0;
         status.eta_seconds = 0;
         status.locked_path = lock_report.path;
         status.lock_owners = lock_report.owners;
+        status.native_handoff_directory = !cancelled && (failed_items || FAILED(failure)) ? native_handoff_directory : L"";
         status.failures = item_failures;
         status.failed_items = failed_items;
         if (cancelled || FAILED(failure)) {

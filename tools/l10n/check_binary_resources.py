@@ -93,29 +93,50 @@ def check_installer(path: Path, entries: list[tuple[str, int]]) -> bool:
     if start + size > position or hashlib.sha256(payload).digest() != digest:
         raise ValueError("invalid installer payload hash or bounds")
     raw = lzma.decompress(payload)
-    if raw[:4] != b"PPKM":
+    if raw[:4] not in (b"PPKM", b"PPK2"):
         raise ValueError("invalid installer payload header")
     manifest_size = struct.unpack_from("<I", raw, 4)[0]
     manifest = json.loads(raw[8:8 + manifest_size])
+    compact = raw[:4] == b"PPK2"
+    if manifest.get("format") != (2 if compact else 1):
+        raise ValueError("invalid installer payload format")
     offset = 8 + manifest_size
     found, okay = 0, True
+    spans = []
     with tempfile.TemporaryDirectory(prefix="pulse-resource-check-") as directory:
         for entry in manifest["files"]:
             length = entry["size"]
-            if length < 0 or offset + length > len(raw):
+            source = entry.get("link_to")
+            if source is not None:
+                if not compact or type(source) is not int or not 0 <= source < len(spans):
+                    raise ValueError("invalid packaged file link")
+                at, original_size, original_hash, original_link = spans[source]
+                if original_link or length != original_size or entry["sha256"] != original_hash:
+                    raise ValueError("invalid packaged file link identity")
+            else:
+                at = offset
+                offset += length
+            if length < 0 or at + length > len(raw):
                 raise ValueError("invalid packaged file bounds")
-            if entry["path"].replace("\\", "/").rsplit("/", 1)[-1].lower() == "pulsepickeruiproof.dll":
-                content = raw[offset:offset + length]
+            spans.append((at, length, entry["sha256"], source is not None))
+            parts = entry["path"].replace("\\", "/").split("/")
+            leaf = parts[-1].lower()
+            is_picker_dll = leaf == "pulsepickeruiproof.dll"
+            is_app_runtime_exe = len(parts) == 3 and parts[0].lower() == "appruntime" and leaf == "pulse.exe"
+            if is_picker_dll or is_app_runtime_exe:
+                content = raw[at:at + length]
                 if hashlib.sha256(content).hexdigest() != entry["sha256"]:
                     raise ValueError("invalid packaged picker hash")
                 # Never use an untrusted manifest path as a filesystem path.
-                extracted = Path(directory) / f"picker-{found}.dll"
+                ext = ".dll" if is_picker_dll else ".exe"
+                extracted = Path(directory) / f"picker-{found}{ext}"
                 extracted.write_bytes(content)
                 found += 1
                 okay = check_binary(extracted, entries, f"{path}!{entry['path']}") and okay
-            offset += length
+    if offset != len(raw):
+        raise ValueError("unexpected data after packaged files")
     if not found:
-        raise ValueError("installer contains no PulsePickerUiProof.dll")
+        raise ValueError("installer contains no PulsePickerUiProof.dll or AppRuntime pulse.exe")
     return okay
 
 

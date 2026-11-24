@@ -10,6 +10,8 @@
 #include "../common/localization.h"
 #include "../common/json_utils.h"
 #include "../common/utf8_file.h"
+#include "../common/path_utils.h"
+#include "../common/display_path.h"
 #include <filesystem>
 #include <condition_variable>
 #include <exdisp.h>
@@ -61,6 +63,93 @@ std::wstring Description(const std::wstring& path) {
     }
     const auto slash = path.find_last_of(L"\\/");
     return path.substr(slash == path.npos ? 0 : slash + 1);
+}
+bool SameName(const std::wstring& path, const wchar_t* name) {
+    const auto slash = path.find_last_of(L"\\/");
+    return CompareStringOrdinal(path.c_str() + (slash == path.npos ? 0 : slash + 1), -1, name, -1, TRUE) == CSTR_EQUAL;
+}
+// PickerHost.exe opens the brokered pickers of packaged apps (Settings' 浏览照片),
+// so the program is the window the user was in when the dialog started: the
+// foreground window, or for a UWP frame (ApplicationFrameHost) its CoreWindow.
+DWORD BrokeredApp(DWORD process_id) {
+    if (!SameName(Executable(process_id), L"PickerHost.exe")) return process_id;
+    HWND root = GetAncestor(GetForegroundWindow(), GA_ROOTOWNER);
+    DWORD owner = 0;
+    if (!root || !GetWindowThreadProcessId(root, &owner) || !owner) return process_id;
+    if (SameName(Executable(owner), L"ApplicationFrameHost.exe")) {
+        struct Find { DWORD frame; DWORD found = 0; } find{owner};
+        EnumChildWindows(root, [](HWND child, LPARAM value) -> BOOL {
+            auto& f = *reinterpret_cast<Find*>(value);
+            DWORD pid = 0;
+            if (GetWindowThreadProcessId(child, &pid) && pid && pid != f.frame) { f.found = pid; return FALSE; }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&find));
+        owner = find.found;
+    }
+    return owner && owner != process_id && owner != GetCurrentProcessId() ? owner : process_id;
+}
+// A packaged program's AppUserModelID, empty for ordinary programs.
+std::wstring AppUserModelId(DWORD process_id) {
+    using Query = LONG(WINAPI*)(HANDLE, UINT32*, PWSTR);
+    static const auto query = reinterpret_cast<Query>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetApplicationUserModelId"));
+    if (!query) return {};
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+    if (!process) return {};
+    wchar_t id[256]{}; UINT32 length = static_cast<UINT32>(std::size(id));
+    const LONG status = query(process, &length, id);
+    CloseHandle(process);
+    return status == ERROR_SUCCESS ? std::wstring(id) : std::wstring{};
+}
+// The program's Start menu entry (shell:AppsFolder\<id>): the name and icon
+// Explorer shows, e.g. 设置 / 记事本 rather than SystemSettings.exe / Notepad.exe.
+ComPtr<IShellItem> AppsFolderItem(const std::wstring& id) {
+    ComPtr<IShellItem> item;
+    if (!id.empty()) SHCreateItemFromParsingName((L"shell:AppsFolder\\" + id).c_str(), nullptr, IID_PPV_ARGS(&item));
+    return item;
+}
+std::wstring PackagedName(const std::wstring& id) {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    std::wstring name;
+    if (auto item = AppsFolderItem(id)) {
+        PWSTR text = nullptr;
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_NORMALDISPLAY, &text)) && text) name = text;
+        CoTaskMemFree(text);
+    }
+    if (SUCCEEDED(com)) CoUninitialize();
+    return name;
+}
+// Caller's STA. The shell hands back a 32bpp DIB; rows are read top-down and
+// the colour premultiplied when the source is straight alpha.
+common::MenuIconRef PackagedIcon(const std::wstring& id, int edge) {
+    auto item = AppsFolderItem(id);
+    ComPtr<IShellItemImageFactory> factory;
+    HBITMAP bitmap = nullptr;
+    if (!item || FAILED(item.As(&factory)) || FAILED(factory->GetImage({edge, edge}, SIIGBF_ICONONLY, &bitmap)) || !bitmap) return {};
+    BITMAP info{};
+    common::MenuIconRef result;
+    if (GetObjectW(bitmap, sizeof(info), &info) && info.bmWidth == edge && std::abs(info.bmHeight) == edge && info.bmBitsPixel == 32) {
+        auto pixels = std::make_shared<common::MenuIconPixels>();
+        pixels->width = pixels->height = static_cast<uint32_t>(edge);
+        pixels->bgra.resize(static_cast<size_t>(edge) * edge * 4u);
+        BITMAPINFO header{};
+        header.bmiHeader.biSize = sizeof(header.bmiHeader);
+        header.bmiHeader.biWidth = edge; header.bmiHeader.biHeight = -edge;
+        header.bmiHeader.biPlanes = 1; header.bmiHeader.biBitCount = 32; header.bmiHeader.biCompression = BI_RGB;
+        if (HDC screen = GetDC(nullptr)) {
+            const int rows = GetDIBits(screen, bitmap, 0, static_cast<UINT>(edge), pixels->bgra.data(), &header, DIB_RGB_COLORS);
+            ReleaseDC(nullptr, screen);
+            if (rows == edge) {
+                auto& px = pixels->bgra;
+                bool straight = false;
+                for (size_t i = 0; i < px.size() && !straight; i += 4) straight = px[i] > px[i + 3] || px[i + 1] > px[i + 3] || px[i + 2] > px[i + 3];
+                if (straight) for (size_t i = 0; i < px.size(); i += 4)
+                    for (int c = 0; c < 3; ++c) px[i + c] = static_cast<uint8_t>((px[i + c] * px[i + 3] + 127) / 255);
+                if (pixels->Valid()) result = std::move(pixels);
+            }
+        }
+    }
+    DeleteObject(bitmap);
+    return result;
 }
 void Add(std::vector<ui::PickerOpenFolder>& folders, ui::PickerOpenFolder folder) {
     if (!picker_places::detail::DiskPath(folder.path)) return;
@@ -233,7 +322,11 @@ std::vector<RecentSource> PulseRecentFiles(const JumpContextOptions& options) {
     std::vector<RecentSource> files;
     json::ForEachElement(json::ExtractArray(text, L"recent_items"), [&](const std::wstring& raw) {
         if (files.size() >= 100 || json::ExtractString(raw, L"kind") != L"file") return;
-        const auto file = json::ExtractString(raw, L"path");
+        // Pulse stores extended paths (\\?\C:\...). Shell items and thumbnails reject
+        // them, and they would never match the same file from the dialog's own history:
+        // drop the prefix whenever the plain path still fits.
+        auto file = json::ExtractString(raw, L"path");
+        if (auto plain = path::StripExtendedPathPrefix(file); plain.size() < MAX_PATH) file = std::move(plain);
         if (!picker_places::detail::DiskPath(file)) return;
         const auto value = json::ExtractString(raw, L"opened_at");
         const auto ticks = std::wcstoull(value.c_str(), nullptr, 10);
@@ -255,13 +348,19 @@ std::wstring FormatJumpVisitDate(int64_t seconds, int64_t now) {
 }
 JumpContext::JumpContext(DWORD process_id, int mode, JumpContextOptions options) : state_(std::make_shared<State>()) {
     state_->mode = static_cast<ui::PickerMode>(mode);
+    // Before the dialog takes the foreground: a broker's caller is still in front.
+    process_id = BrokeredApp(process_id);
     if (active_workers.fetch_add(1) >= 2) { active_workers.fetch_sub(1); return; }
     try {
         std::thread([state = state_, process_id, mode, options = std::move(options)] {
             struct WorkerSlot { ~WorkerSlot() { active_workers.fetch_sub(1); } } slot;
             try {
                 const auto executable = Executable(process_id);
-                const auto name = Description(executable);
+                const auto aumid = AppUserModelId(process_id);
+                auto name = PackagedName(aumid);
+                if (name.empty()) name = Description(executable);
+                // Branding does not depend on history or potentially offline recent paths.
+                { std::lock_guard lock(state->mutex); state->name = name; }
                 const auto shared = options.read_places ? options.read_places() : picker_places::Read();
                 std::vector<ui::PickerOpenFolder> folders;
                 for (const auto& entry : shared.folders) if (entry.open) Add(folders, {entry.path, entry.label, false});
@@ -286,7 +385,7 @@ JumpContext::JumpContext(DWORD process_id, int mode, JumpContextOptions options)
                         if (!GetFileAttributesExW(file.c_str(), GetFileExInfoStandard, &info) ||
                             (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
                         const auto date = VisitDate(entry.used);
-                        ui::PickerRecentFile card{file, Parent(file) + (date.empty() ? L"" : L" · " + date), nullptr};
+                        ui::PickerRecentFile card{file, Parent(path::FriendlyPathText(file)) + (date.empty() ? L"" : L" · " + date), nullptr};
                         card.attributes = info.dwFileAttributes;
                         card.modified = (static_cast<uint64_t>(info.ftLastWriteTime.dwHighDateTime) << 32) | info.ftLastWriteTime.dwLowDateTime;
                         card.size = (static_cast<uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
@@ -314,7 +413,7 @@ JumpContext::JumpContext(DWORD process_id, int mode, JumpContextOptions options)
                 // A separate STA isolates hung Explorer providers from search/history.
                 if (options.enumerate_explorer || !files.empty()) {
                 if (active_shell_workers.fetch_add(1) < 2) {
-                try { std::thread([state, executable, files, enumerate_explorer = options.enumerate_explorer] {
+                try { std::thread([state, executable, aumid, files, enumerate_explorer = options.enumerate_explorer] {
                     struct ShellSlot { ~ShellSlot() { active_shell_workers.fetch_sub(1); } } shell_slot;
                     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
                     struct ComScope { HRESULT hr; ~ComScope() { if (SUCCEEDED(hr)) CoUninitialize(); } } com_scope{com};
@@ -331,11 +430,12 @@ JumpContext::JumpContext(DWORD process_id, int mode, JumpContextOptions options)
                             // process and size. Never destroyed (detached workers at exit).
                             static std::mutex& icon_mutex = *new std::mutex;
                             static auto& icon_cache = *new std::unordered_map<std::wstring, common::MenuIconRef>;
-                            const std::wstring key = executable + L"|" + std::to_wstring(edge);
+                            const std::wstring key = (aumid.empty() ? executable : aumid) + L"|" + std::to_wstring(edge);
                             bool cached = false;
                             { std::lock_guard lock(icon_mutex); if (const auto it = icon_cache.find(key); it != icon_cache.end()) { icon = it->second; cached = true; } }
                             if (!cached) {
-                                icon = common::LoadIconPixels(executable + L",0", static_cast<uint32_t>(edge));
+                                if (!aumid.empty() && SUCCEEDED(com)) icon = PackagedIcon(aumid, edge);
+                                if (!icon) icon = common::LoadIconPixels(executable + L",0", static_cast<uint32_t>(edge));
                                 std::lock_guard lock(icon_mutex);
                                 if (icon_cache.size() >= 16) icon_cache.clear();
                                 icon_cache.emplace(key, icon);
@@ -451,6 +551,12 @@ bool JumpContext::Poll(ui::FolderPickerSpec& spec) {
     std::unique_lock lock(state_->mutex, std::try_to_lock);
     if (!lock) return false;
     state_->filter.filters = spec.filters; state_->filter.filter_index = spec.filter_index;
+    if (!state_->history_loaded) {
+        if (state_->name.empty() || spec.host_app_name == state_->name) return false;
+        spec.host_app_name = state_->name;
+        // Do not consume the first history revision: it owns the auto-jump decision.
+        return true;
+    }
     if (!state_->history_loaded || !state_->revision || (revision_ == state_->revision && filter_index_ == spec.filter_index)) return false;
     const bool first = revision_ == 0;
     revision_ = state_->revision; filter_index_ = spec.filter_index;

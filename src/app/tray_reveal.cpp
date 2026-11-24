@@ -1,6 +1,7 @@
 // tray_reveal.cpp — Closing to the tray and coming back (see tray_reveal.h).
 #include "tray_reveal.h"
 #include "app_internal.h"
+#include "extensions/native/session.h"
 #include "startup_location.h"
 #include "window_identity_ui.h"
 
@@ -8,11 +9,15 @@ namespace pulse {
 
 void HideMainWindowToTray(AppState& s) {
     s.hidden_to_tray = true;
+    s.detailsPreview.Close();
     s.tray_controller.HideWindow(WantsTrayIcon(s, true));
     SyncWindowIdentities(s);  // it no longer counts as an open window
 }
 
 void RevealWindow(AppState& s) {
+    s.core.tray_hibernated = false;
+    s.core.all_windows_hidden_since_tick = 0;
+    s.compositor.EnsureAwake();
     const HWND tray_window = s.tray_controller.Window();
     if (!tray_window || tray_window == s.hwnd || !s.hwnd) {
         s.tray_controller.RestoreWindow();
@@ -26,8 +31,9 @@ void RevealWindow(AppState& s) {
 }
 
 bool WantsTrayIcon(const AppState& s, bool window_hidden) {
-    return app::TrayIconWanted(s.appPrefs.KeepsRunningInBackground(),
-                               s.appPrefs.notify_icon_mode, window_hidden);
+    return app::TrayIconWanted(
+        s.appPrefs.KeepsRunningInBackground() || extensions::native::BackgroundPackageEnabled(),
+        s.appPrefs.notify_icon_mode, window_hidden);
 }
 
 bool TakeFreshStart(AppState& s) {
@@ -49,6 +55,9 @@ void StartFreshAt(AppState& s, const std::wstring& path) {
 
 void InstallTrayRevealHook(AppState& s) {
     s.tray_controller.SetBeforeRestore([&s] {
+        s.core.tray_hibernated = false;
+        s.core.all_windows_hidden_since_tick = 0;
+        s.compositor.EnsureAwake();
         if (TakeFreshStart(s)) StartFreshAt(s, app::DefaultLocation(s.appPrefs));
         SyncWindowIdentities(s);  // counts as an open window again
         // A sign-in launch into the tray (startup_launch.h) shows the icon even

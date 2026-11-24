@@ -141,7 +141,7 @@ void FillGroups(const ai::Settings& settings, ui::AiPageView& view) {
         {G::Organize, I::AiMcpGroupOrganize, I::AiMcpDescOrganize, Tag::None, L"\xE8EC"},
         {G::Create, I::AiMcpGroupCreate, I::AiMcpDescCreate, Tag::Asks, L"\xE8F4"},
         {G::Files, I::AiMcpGroupFiles, I::AiMcpDescFiles, Tag::Asks, L"\xE8DE"},
-        {G::External, I::AiMcpGroupExternal, I::AiMcpDescExternal, Tag::AsksOutside, L"\xE945"},
+        {G::External, I::AiMcpGroupExternal, I::AiMcpDescExternal, Tag::AsksOutside, L"\xF5DB"},  // Plug
         {G::Locked, I::AiMcpGroupLocked, I::AiMcpDescLocked, Tag::None, L"\xE72E"},
     };
     for (const auto& r : rows) {

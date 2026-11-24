@@ -6,6 +6,7 @@
 #include <wincodec.h>
 #include <filesystem>
 #include <cstdio>
+#include <chrono>
 #include <string>
 template<class T> using WrlPtr = Microsoft::WRL::ComPtr<T>;
 bool SavePng(ID2D1DeviceContext* dc, ID2D1Bitmap1* bitmap, const std::filesystem::path& path) {
@@ -51,8 +52,37 @@ bool EmptyMessageHasInk(ID2D1DeviceContext* dc, ID2D1Bitmap1* bitmap) {
     return ink > 50;
 }
 
+static bool FirstDraw(pulse_test::Host& host, pulse::ui::Compositor& comp, ID2D1Bitmap1* bitmap,
+                      pulse::ui::MarkdownView& view, const std::filesystem::path& root,
+                      const std::wstring& path, const wchar_t* marker) {
+    using namespace pulse;
+    auto dc = comp.Dc();
+    // Include IPC, conversion, layout and D2D EndDraw, not PNG encoding.
+    // The HWND stays hidden. The real host is reused just as in a warm session.
+    const auto theme = ui::MakeTheme(false, ui::HexColor(0x0078d4));
+    for (unsigned i = 0; i < 30; ++i) {
+        view.Clear();
+        pulse_test::Result result;
+        const auto start = std::chrono::steady_clock::now();
+        if (!host.Request(path, result, MAXDWORD, 1024, ipc::PreviewRequestKind::Content,
+                          ipc::kPreviewRequestFlagRichText) || result.response.status != 0 ||
+            !view.SetPayload(result.text, path)) return false;
+        dc->BeginDraw();
+        dc->Clear(ui::HexColor(0xffffff));
+        view.Draw(dc, comp.DwriteFactory(), D2D1::RectF(0, 0, 1100, 800), theme, false,
+                  1.0f, nullptr, 1, 0, 0, {});
+        if (FAILED(dc->EndDraw())) return false;
+        const double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+        if (view.PlainText().find(marker) == std::wstring::npos) return false;
+        printf("first-draw-ms=%.3f\n", ms);
+    }
+    return SavePng(dc, bitmap, root / L"first-draw.png");
+}
+
 int wmain(int argc, wchar_t** argv) {
-    if (argc != 2) return 2;
+    const bool timed = argc == 5 && std::wstring_view(argv[2]) == L"--first-draw";
+    if (argc != 2 && !timed) return 2;
     OleInitialize(nullptr);
     pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
     const std::filesystem::path root(argv[1]);
@@ -81,92 +111,97 @@ int wmain(int argc, wchar_t** argv) {
         if (FAILED(dc->CreateBitmap(D2D1::SizeU(1100, 800), nullptr, 0, props, &bitmap))) return 2;
         dc->SetTarget(bitmap.Get()); dc->SetDpi(96, 96);
         ui::MarkdownView view;
-        struct Case { const wchar_t* file; const wchar_t* tail; int sections; };
-        const Case cases[] = {
-            {L"fixture/sample.doc", L"After", 0},
-            {L"fixture/sample.rtf", L"EndOfDocument", 0},
-            {L"fixture/disguised.doc", L"Paragraph-99", 0},
-            {L"fixture/zip-disguised.doc", L"EndOfDocx", 0},
-            {L"fixture/sample.docx", L"EndOfDocx", 0},
-            {L"fixtures/ordered.ppt", L"Last physical first", 3},
-            {L"fixtures/ordered.pptx", L"Slide 3", 3},
-            {L"fixtures/shared-text.ppt", L"Last physical first", 3},
-            {L"fixture/sample.doc", L"After", 0}
-        };
-        int index = 0;
-        for (const auto& test : cases) {
-            const auto file = (root / test.file).wstring();
-            pulse_test::Result result;
-            const bool received = host.Request(file, result, MAXDWORD, 1024,
-                ipc::PreviewRequestKind::Content, ipc::kPreviewRequestFlagRichText);
-            check(received && result.response.kind == ipc::PreviewContentKind::Markdown && result.response.status == 0,
-                  "actual preview worker returns native document");
-            check(view.SetPayload(result.text, file) && !view.DocFormat().empty(), "shared document view accepts payload");
-            check(view.PlainText().find(test.tail) != std::wstring::npos, "tail content present, not first-page thumbnail");
-            check(view.SectionCount() == test.sections, "section count and presentation order preserved");
-            if (std::wstring(test.file).find(L"shared-text") != std::wstring::npos) {
-                const auto& text = view.PlainText();
-                const auto first = text.find(L"Shared placeholder"), second = text.find(L"Independent body");
-                const auto last = text.find(L"Last physical first");
-                check(first < second && second < last && text.find(L"Last physical first", last + 1) == text.npos,
-                      "PPT shared text is resolved in shape order without duplicate body text");
-            }
-            for (const bool dark : {false, true}) {
-                const auto bg = ui::HexColor(dark ? 0x202020 : 0xffffff);
-                const float scale = dark ? 1.5f : 1.0f;
-                const auto rect = D2D1::RectF(0, 0, dark ? 650.0f : 1100.0f, 800.0f);
-                bool drawn = true;
-                for (int frame = 0; frame < 30; ++frame) {
-                    dc->BeginDraw(); dc->Clear(bg);
-                    view.Draw(dc, comp.DwriteFactory(), rect, ui::MakeTheme(dark, ui::HexColor(0x0078d4)),
-                        dark, scale, nullptr, 1, 0, 0, {});
-                    drawn = drawn && SUCCEEDED(dc->EndDraw());
+        if (timed) {
+            check(FirstDraw(host, comp, bitmap.Get(), view, root, std::filesystem::absolute(argv[3]).wstring(),
+                            argv[4]), "render timed document and save pixels");
+        } else {
+            struct Case { const wchar_t* file; const wchar_t* tail; int sections; };
+            const Case cases[] = {
+                {L"fixture/sample.doc", L"After", 0},
+                {L"fixture/sample.rtf", L"EndOfDocument", 0},
+                {L"fixture/disguised.doc", L"Paragraph-99", 0},
+                {L"fixture/zip-disguised.doc", L"EndOfDocx", 0},
+                {L"fixture/sample.docx", L"EndOfDocx", 0},
+                {L"fixtures/ordered.ppt", L"Last physical first", 3},
+                {L"fixtures/ordered.pptx", L"Slide 3", 3},
+                {L"fixtures/shared-text.ppt", L"Last physical first", 3},
+                {L"fixture/sample.doc", L"After", 0}
+            };
+            int index = 0;
+            for (const auto& test : cases) {
+                const auto file = (root / test.file).wstring();
+                pulse_test::Result result;
+                const bool received = host.Request(file, result, MAXDWORD, 1024,
+                    ipc::PreviewRequestKind::Content, ipc::kPreviewRequestFlagRichText);
+                check(received && result.response.kind == ipc::PreviewContentKind::Markdown && result.response.status == 0,
+                      "actual preview worker returns native document");
+                check(view.SetPayload(result.text, file) && !view.DocFormat().empty(), "shared document view accepts payload");
+                check(view.PlainText().find(test.tail) != std::wstring::npos, "tail content present, not first-page thumbnail");
+                check(view.SectionCount() == test.sections, "section count and presentation order preserved");
+                if (std::wstring(test.file).find(L"shared-text") != std::wstring::npos) {
+                    const auto& text = view.PlainText();
+                    const auto first = text.find(L"Shared placeholder"), second = text.find(L"Independent body");
+                    const auto last = text.find(L"Last physical first");
+                    check(first < second && second < last && text.find(L"Last physical first", last + 1) == text.npos,
+                          "PPT shared text is resolved in shape order without duplicate body text");
                 }
-                check(drawn && view.PlainText().find(test.tail) != std::wstring::npos,
-                      "30 redraws retain content in light/wide and dark/narrow high-scale layouts");
-                check(SavePng(dc, bitmap.Get(), root / (L"view-" + std::to_wstring(index) + (dark ? L"-dark.png" : L"-light.png"))),
-                      "save actual document renderer");
+                for (const bool dark : {false, true}) {
+                    const auto bg = ui::HexColor(dark ? 0x202020 : 0xffffff);
+                    const float scale = dark ? 1.5f : 1.0f;
+                    const auto rect = D2D1::RectF(0, 0, dark ? 650.0f : 1100.0f, 800.0f);
+                    bool drawn = true;
+                    for (int frame = 0; frame < 30; ++frame) {
+                        dc->BeginDraw(); dc->Clear(bg);
+                        view.Draw(dc, comp.DwriteFactory(), rect, ui::MakeTheme(dark, ui::HexColor(0x0078d4)),
+                            dark, scale, nullptr, 1, 0, 0, {});
+                        drawn = drawn && SUCCEEDED(dc->EndDraw());
+                    }
+                    check(drawn && view.PlainText().find(test.tail) != std::wstring::npos,
+                          "30 redraws retain content in light/wide and dark/narrow high-scale layouts");
+                    check(SavePng(dc, bitmap.Get(), root / (L"view-" + std::to_wstring(index) + (dark ? L"-dark.png" : L"-light.png"))),
+                          "save actual document renderer");
+                }
+                if (test.sections) {
+                    check(view.ShowSection(1) && !view.CurrentSectionHasContent(), "empty middle slide has explicit empty-content state");
+                    dc->BeginDraw(); dc->Clear(ui::HexColor(0xffffff));
+                    view.Draw(dc, comp.DwriteFactory(), D2D1::RectF(0,0,1100,800), ui::MakeTheme(false,ui::HexColor(0x0078d4)),false,1,nullptr,1,0,0,{});
+                    check(SUCCEEDED(dc->EndDraw()) && SavePng(dc,bitmap.Get(),root/(L"empty-"+std::to_wstring(index)+L".png")),
+                          "empty slide renders explanatory message, not silent white");
+                    check(EmptyMessageHasInk(dc, bitmap.Get()), "empty-page explanatory message has visible pixels");
+                    check(view.ShowSection(2) && view.CurrentSectionHasContent(), "last slide reachable");
+                    check(view.ShowSection(0) && view.ShowSection(2) && view.ShowSection(0) && view.SectionIndex() == 0,
+                          "rapid slide switches keep latest selection");
+                    check(!view.ShowSection(3), "out-of-range slide rejected");
+                }
+                ++index;
             }
-            if (test.sections) {
-                check(view.ShowSection(1) && !view.CurrentSectionHasContent(), "empty middle slide has explicit empty-content state");
-                dc->BeginDraw(); dc->Clear(ui::HexColor(0xffffff));
-                view.Draw(dc, comp.DwriteFactory(), D2D1::RectF(0,0,1100,800), ui::MakeTheme(false,ui::HexColor(0x0078d4)),false,1,nullptr,1,0,0,{});
-                check(SUCCEEDED(dc->EndDraw()) && SavePng(dc,bitmap.Get(),root/(L"empty-"+std::to_wstring(index)+L".png")),
-                      "empty slide renders explanatory message, not silent white");
-                check(EmptyMessageHasInk(dc, bitmap.Get()), "empty-page explanatory message has visible pixels");
-                check(view.ShowSection(2) && view.CurrentSectionHasContent(), "last slide reachable");
-                check(view.ShowSection(0) && view.ShowSection(2) && view.ShowSection(0) && view.SectionIndex() == 0,
-                      "rapid slide switches keep latest selection");
-                check(!view.ShowSection(3), "out-of-range slide rejected");
+            for (const auto name : {L"fixture/encrypted.doc", L"fixture/damaged.doc", L"fixture/damaged.ppt",
+                                   L"fixtures/malformed.pptx", L"fixtures/encrypted.ppt", L"fixtures/broken.ppt", L"fixtures/garbage.ppt"}) {
+                pulse_test::Result result;
+                check(host.Request((root/name).wstring(), result, MAXDWORD, 1024, ipc::PreviewRequestKind::Content,
+                      ipc::kPreviewRequestFlagRichText) && result.response.status != 0 && result.text.empty(),
+                      "damaged/encrypted file returns explicit failure without shell fallback or stale text");
             }
-            ++index;
+            pulse_test::Result artwork;
+            const auto artwork_path = (root/L"fixture/artwork.pptx").wstring();
+            check(host.Request(artwork_path, artwork, MAXDWORD, 1024, ipc::PreviewRequestKind::Content,
+                  ipc::kPreviewRequestFlagRichText) && (artwork.response.flags & ipc::kPreviewFlagTruncated) &&
+                  view.SetPayload(artwork.text, artwork_path) && !view.CurrentSectionHasContent(),
+                  "image-only slide explicitly reports partial content and empty-text state");
+            check(view.ShowSection(1) && view.CurrentSectionHasContent() && view.PlainText().find(L"TableCell") != std::wstring::npos,
+                  "PPTX table-cell text survives native content conversion");
+            pulse_test::Result offline;
+            check(host.Request((root/L"fixture/sample.doc").wstring(), offline, FILE_ATTRIBUTE_OFFLINE, 1024,
+                  ipc::PreviewRequestKind::Content, ipc::kPreviewRequestFlagRichText) && offline.response.bytes_read == 0 &&
+                  offline.error == L"offline-placeholder", "native Office respects cloud placeholder no-read guard");
+            pulse_test::Result limit;
+            check(host.Request((root/L"fixtures/limit.ppsx").wstring(), limit, MAXDWORD, 1024,
+                  ipc::PreviewRequestKind::Content, ipc::kPreviewRequestFlagRichText) &&
+                  limit.text.find(L"V\tchapters\t512\t514") != std::wstring::npos,
+                  "presentation limit retains explicit loaded/total counts");
+            view.Clear();
+            check(!view.HasData() && view.PlainText().empty(), "close/cancel clears document view state");
         }
-        for (const auto name : {L"fixture/encrypted.doc", L"fixture/damaged.doc", L"fixture/damaged.ppt",
-                               L"fixtures/malformed.pptx", L"fixtures/encrypted.ppt", L"fixtures/broken.ppt", L"fixtures/garbage.ppt"}) {
-            pulse_test::Result result;
-            check(host.Request((root/name).wstring(), result, MAXDWORD, 1024, ipc::PreviewRequestKind::Content,
-                  ipc::kPreviewRequestFlagRichText) && result.response.status != 0 && result.text.empty(),
-                  "damaged/encrypted file returns explicit failure without shell fallback or stale text");
-        }
-        pulse_test::Result artwork;
-        const auto artwork_path = (root/L"fixture/artwork.pptx").wstring();
-        check(host.Request(artwork_path, artwork, MAXDWORD, 1024, ipc::PreviewRequestKind::Content,
-              ipc::kPreviewRequestFlagRichText) && (artwork.response.flags & ipc::kPreviewFlagTruncated) &&
-              view.SetPayload(artwork.text, artwork_path) && !view.CurrentSectionHasContent(),
-              "image-only slide explicitly reports partial content and empty-text state");
-        check(view.ShowSection(1) && view.CurrentSectionHasContent() && view.PlainText().find(L"TableCell") != std::wstring::npos,
-              "PPTX table-cell text survives native content conversion");
-        pulse_test::Result offline;
-        check(host.Request((root/L"fixture/sample.doc").wstring(), offline, FILE_ATTRIBUTE_OFFLINE, 1024,
-              ipc::PreviewRequestKind::Content, ipc::kPreviewRequestFlagRichText) && offline.response.bytes_read == 0 &&
-              offline.error == L"offline-placeholder", "native Office respects cloud placeholder no-read guard");
-        pulse_test::Result limit;
-        check(host.Request((root/L"fixtures/limit.ppsx").wstring(), limit, MAXDWORD, 1024,
-              ipc::PreviewRequestKind::Content, ipc::kPreviewRequestFlagRichText) &&
-              limit.text.find(L"V\tchapters\t512\t514") != std::wstring::npos,
-              "presentation limit retains explicit loaded/total counts");
-        view.Clear();
-        check(!view.HasData() && view.PlainText().empty(), "close/cancel clears document view state");
     }
     DestroyWindow(window); OleUninitialize();
     printf("office-view failed=%d\n", failed);

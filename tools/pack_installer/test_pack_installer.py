@@ -15,6 +15,55 @@ import test_pack as dialog_fixtures
 
 
 class PayloadDictionaryTest(unittest.TestCase):
+    def test_split_runtime_stores_only_matching_app_files_once(self):
+        with tempfile.TemporaryDirectory(prefix='pulse_pack_alias_') as directory:
+            root = Path(directory)
+            app = 'AppRuntime/' + 'a' * 64 + '/'
+            bridge = 'DialogBridge/' + 'b' * 64 + '/'
+            items = []
+            for name, data in ((app + 'pulse.exe', b'MZ exe'), (bridge + 'pulse.exe', b'MZ exe'),
+                               (app + 'other.dll', b'different'), (bridge + 'other.dll', b'different DLL'),
+                               (app + 'manifest.json', b'{}'), (bridge + 'manifest.json', b'{}'),
+                               ('pulse.exe', b'MZ exe')):
+                source = root / str(len(items))
+                source.write_bytes(data)
+                items.append((source, name))
+            xz, _ = pack.build_payload(items, 'alias-test', deduplicate=True)
+            raw = lzma.decompress(xz)
+            self.assertEqual(raw[:4], b'PPK2')
+            length, = struct.unpack_from('<I', raw, 4)
+            manifest = json.loads(raw[8:8 + length])
+            self.assertEqual(manifest['format'], 2)
+            self.assertEqual([(i, f['link_to']) for i, f in enumerate(manifest['files']) if 'link_to' in f], [(1, 0)])
+            self.assertEqual(raw[8 + length:], b''.join(p.read_bytes() for i, (p, _) in enumerate(items) if i != 1))
+
+    def test_role_order_ignores_bundle_hash_and_round_trips(self):
+        with tempfile.TemporaryDirectory(prefix='pulse_pack_order_') as directory:
+            root = Path(directory)
+            destinations = ['DialogBridge/aaaa/pdfium.dll', 'DialogBridge/zzzz/pulse.exe',
+                            'DialogBridge/aaaa/pulse.exe', 'dialog-current.json',
+                            'DialogBridge/zzzz/pdfium.dll']
+            items = []
+            for index, destination in enumerate(destinations):
+                source = root / str(index)
+                source.write_bytes(destination.encode())
+                items.append((source, destination))
+            ordered = sorted(items, key=pack.payload_order_key)
+            self.assertEqual([dest for _, dest in ordered], [destinations[i] for i in (2, 1, 0, 4, 3)])
+            self.assertEqual(ordered, sorted(reversed(items), key=pack.payload_order_key))
+            xz, _ = pack.build_payload(ordered, 'order-test')
+            raw = lzma.decompress(xz)
+            length, = struct.unpack_from('<I', raw, 4)
+            manifest = json.loads(raw[8:8 + length])
+            cursor = 8 + length
+            for entry, (source, destination) in zip(manifest['files'], ordered):
+                content = raw[cursor:cursor + entry['size']]
+                self.assertEqual(entry['path'], destination)
+                self.assertEqual(content, source.read_bytes())
+                self.assertEqual(hashlib.sha256(content).hexdigest(), entry['sha256'])
+                cursor += entry['size']
+            self.assertEqual(cursor, len(raw))
+
     def test_installer_contains_separate_verified_dialog_bundle(self):
         fixture = dialog_fixtures.PackageTests()
         fixture.setUp()

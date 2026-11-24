@@ -68,6 +68,23 @@ int RunWorkspaceUiTest(pulse::AppState& s, const wchar_t* output) {
         check(dirty(), "changing pane count still marks layout changed");
         OpenWorkspace(s, 0);
         check(!dirty(), "restoring saved split clears layout change");
+        {
+            const auto any_active = [&] {
+                const auto cur = BuildVm(s, false);
+                for (const auto& group : cur.sidebar) for (const auto& row : group.items)
+                    if (row.workspace_active) return true;
+                return false;
+            };
+            NewTab(s, (base / L"design").wstring());
+            check(!any_active(), "opening another tab clears workspace Current badge (#638)");
+            CloseLayoutTab(s, s.window_tabs.active);
+            check(any_active(), "returning to workspace tab restores Current badge (#638)");
+            OpenWorkspace(s, 1);
+            check(any_active(), "single-folder workspace shows Current badge at its root (#638)");
+            LiveLayout(s).VisiblePanes().front()->ActiveTab()->current_path = base.wstring();
+            check(!any_active(), "navigating up to parent folder clears workspace Current badge (#638)");
+            OpenWorkspace(s, 0);
+        }
         s.appPrefs.change_tracking_enabled = true;
         s.appPrefs.change_tracking_days = 7;
         s.changes.enabled = true; s.changes.days = 7;

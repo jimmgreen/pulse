@@ -2,9 +2,11 @@
 #include "../common/picker_shell_namespace.h"
 #include "picker_shell_results.h"
 #include "file_dialog_events.h"
+#include "file_dialog_shell_browser.h"
 #include "file_dialog_inprocess_session.h"
 #include "file_dialog_dynamic_helpers.h"
 #include "file_dialog_navigation_root.h"
+#include "file_dialog_parameter_shape.h"
 #include "file_dialog_client_state.h"
 #include "file_dialog_properties.h"
 #include "save_as_item_model.h"
@@ -28,20 +30,128 @@ namespace wire = ipc::picker;
 using Microsoft::WRL::ComPtr;
 // The pulse.exe host's pre-UI local-save check (picker_host_mode.cpp), run by
 // the caller so a target the host would decline never crosses the pipe.
-bool BridgeSaveTargetResolves(const wire::Request& body) {
+bool BridgeAcceptsLocalSaveDraft(const wire::Request& body) {
     const auto wide = [](const std::u16string& text) { return std::wstring(text.begin(), text.end()); };
     ui::SaveTargetRequest target;
     target.directory = wide(body.initial_directory);
-    target.filename = body.filename.empty() ? L"pulse-validation" : wide(body.filename);
+    target.filename = wide(body.filename);
     for (const auto& filter : body.filters) target.filters.push_back({wide(filter.label), wide(filter.pattern)});
     target.filter_index = body.filter_index;
     target.default_extension = wide(body.default_extension);
     target.native_save_defaults = (body.options & wire::SaveNativeDefaults) != 0;
     target.no_test_file_create = (body.options & wire::SaveNoTestFileCreate) != 0;
     target.require_existing_save_parent = (body.options & wire::SaveRequireExistingParent) != 0;
-    return ui::ResolveSaveTarget(target).state == ui::SaveTargetState::Resolved;
+    return static_cast<bool>(ui::PrepareLocalSaveDraft(target));
 }
-class FileDialog final : public IFileOpenDialog, public IFileSaveDialog, public IFileDialogCustomize, public IFileDialog2, public IOleWindow, public IObjectWithSite {
+bool IsComputerFolderItem(IShellItem* item) {
+    if (!item) return false;
+    ComPtr<IShellItem> known;
+    int order = 1;
+    return SHGetKnownFolderItem(FOLDERID_ComputerFolder, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&known)) == S_OK &&
+        item->Compare(known.Get(), SICHINT_CANONICAL, &order) == S_OK && order == 0;
+}
+bool IsImplicitHomeOrQuickAccessFolder(IShellItem* item) {
+    if (!item) return false;
+    PWSTR parsing = nullptr;
+    if (FAILED(item->GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING, &parsing)) || !parsing) return false;
+    const bool match =
+        _wcsicmp(parsing, L"::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}") == 0 || // Windows 11 Home
+        _wcsicmp(parsing, L"::{679F85CB-0220-4080-B29B-5540CC05AAB6}") == 0;   // Quick Access
+    CoTaskMemFree(parsing);
+    return match;
+}
+bool ResolveSingleFolderLibrary(IShellItem* item, ComPtr<IShellItem>& resolved) {
+    if (!item) return false;
+    ComPtr<IShellLibrary> library;
+    if (FAILED(SHLoadLibraryFromItem(item, STGM_READ, IID_PPV_ARGS(&library))) || !library) return false;
+    ComPtr<IShellItemArray> folders;
+    if (FAILED(library->GetFolders(LFF_ALLITEMS, IID_PPV_ARGS(&folders))) || !folders) return false;
+    DWORD count = 0;
+    if (FAILED(folders->GetCount(&count)) || count != 1) return false;
+    ComPtr<IShellItem> candidate;
+    if (FAILED(folders->GetItemAt(0, &candidate)) || !candidate) return false;
+    SFGAOF attrs = SFGAO_FILESYSTEM | SFGAO_FOLDER;
+    if (FAILED(candidate->GetAttributes(attrs, &attrs)) ||
+        (attrs & (SFGAO_FILESYSTEM | SFGAO_FOLDER)) != (SFGAO_FILESYSTEM | SFGAO_FOLDER))
+        return false;
+    resolved = std::move(candidate);
+    return true;
+}
+bool ResolveLibraryPlaceFolder(IShellItem* item, ComPtr<IShellItem>& resolved) {
+    if (!item) return false;
+    ComPtr<IShellLibrary> library;
+    if (SUCCEEDED(SHLoadLibraryFromItem(item, STGM_READ, IID_PPV_ARGS(&library))) && library) {
+        ComPtr<IShellItem> candidate;
+        if (SUCCEEDED(library->GetDefaultSaveFolder(DSFT_DETECT, IID_PPV_ARGS(&candidate))) && candidate) {
+            SFGAOF attrs = SFGAO_FILESYSTEM | SFGAO_FOLDER;
+            if (SUCCEEDED(candidate->GetAttributes(attrs, &attrs)) &&
+                (attrs & (SFGAO_FILESYSTEM | SFGAO_FOLDER)) == (SFGAO_FILESYSTEM | SFGAO_FOLDER)) {
+                resolved = std::move(candidate);
+                return true;
+            }
+        }
+    }
+    static constexpr std::pair<const KNOWNFOLDERID*, const KNOWNFOLDERID*> kLibraryMap[] = {
+        {&FOLDERID_DocumentsLibrary, &FOLDERID_Documents},
+        {&FOLDERID_PicturesLibrary, &FOLDERID_Pictures},
+        {&FOLDERID_MusicLibrary, &FOLDERID_Music},
+        {&FOLDERID_VideosLibrary, &FOLDERID_Videos},
+        {&FOLDERID_Libraries, &FOLDERID_Profile},
+    };
+    for (const auto& [virtual_id, physical_id] : kLibraryMap) {
+        ComPtr<IShellItem> known;
+        int order = 1;
+        if (SHGetKnownFolderItem(*virtual_id, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&known)) == S_OK &&
+            item->Compare(known.Get(), SICHINT_CANONICAL, &order) == S_OK && order == 0) {
+            ComPtr<IShellItem> target;
+            SFGAOF attrs = SFGAO_FILESYSTEM | SFGAO_FOLDER;
+            if (SHGetKnownFolderItem(*physical_id, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&target)) == S_OK &&
+                target && SUCCEEDED(target->GetAttributes(attrs, &attrs)) &&
+                (attrs & (SFGAO_FILESYSTEM | SFGAO_FOLDER)) == (SFGAO_FILESYSTEM | SFGAO_FOLDER)) {
+                resolved = std::move(target);
+                return true;
+            }
+            return false;
+        }
+    }
+    return false;
+}
+bool IsStaleLocalDirectory(const wchar_t* path) noexcept {
+    if (!path || !path[0] || path[1] != L':' || (path[2] != L'\\' && path[2] != L'/')) return false;
+    wchar_t root[4]{path[0], L':', L'\\', L'\0'};
+    const UINT drive_type = GetDriveTypeW(root);
+    if (drive_type == DRIVE_REMOTE) return false;
+    if (drive_type == DRIVE_NO_ROOT_DIR || drive_type == DRIVE_UNKNOWN) return true;
+    const DWORD attrs = GetFileAttributesW(path);
+    return attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+}
+bool ResolveExistingFallbackDirectory(std::u16string& output) {
+    static constexpr const KNOWNFOLDERID* kFallbacks[] = {
+        &FOLDERID_Desktop, &FOLDERID_Documents, &FOLDERID_Profile
+    };
+    for (const KNOWNFOLDERID* id : kFallbacks) {
+        PWSTR known = nullptr;
+        if (SHGetKnownFolderPath(*id, KF_FLAG_DEFAULT, nullptr, &known) != S_OK || !known) {
+            CoTaskMemFree(known);
+            continue;
+        }
+        const DWORD attrs = GetFileAttributesW(known);
+        const bool ok = attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (ok) {
+            std::u16string copied;
+            const size_t len = wcslen(known);
+            if (len > 0 && len <= wire::kMaxStringUnits) {
+                copied.assign(known, known + len);
+                CoTaskMemFree(known);
+                output = std::move(copied);
+                return true;
+            }
+        }
+        CoTaskMemFree(known);
+    }
+    return false;
+}
+class FileDialog final : public IFileOpenDialog, public IFileSaveDialog, public IFileDialogCustomize, public IFileDialog2, public IOleWindow, public IObjectWithSite, public IServiceProvider, public IFolderView {
 public:
     FileDialog(DialogFactory factory, ComPtr<IFileDialog> native, ComPtr<IFileDialog2> native2, FileDialogBridgeServices services)
         : factory_(factory), native_(std::move(native)), native2_(std::move(native2)), services_(std::move(services)), thread_(GetCurrentThreadId()),
@@ -60,6 +170,8 @@ public:
             if (FAILED(hr)) return hr;
             *output = static_cast<IObjectWithSite*>(this);
         }
+        else if (iid == IID_IServiceProvider) *output = static_cast<IServiceProvider*>(this);
+        else if (iid == IID_IFolderView && (inprocess_ || bridge_result_)) *output = static_cast<IFolderView*>(this);
         else if (iid == IID_IOleWindow) {
             *output = static_cast<IOleWindow*>(this);
         }
@@ -67,9 +179,95 @@ public:
             ObserveNativeReason("query-interface-customize-only", &iid);
             *output = static_cast<IFileDialogCustomize*>(this);
         }
+        else if (iid == kFileDialogPrivateIid) {
+            // Refusing this private contract leaves the caller with no dialog at all.
+            // Only the known broker keeps Pulse; elsewhere keep the native dialog.
+            if (services_.private_interface_passthrough) ObserveNativeReason("query-interface-private-passthrough", &iid);
+            else MarkNativeOnly("query-interface-private-native", &iid);
+            return native_->QueryInterface(iid, output);
+        }
         else { ObserveNativeReason("query-interface-not-supported", &iid); return E_NOINTERFACE; }
         AddRef(); return S_OK;
     }
+    HRESULT STDMETHODCALLTYPE QueryService(REFGUID service, REFIID iid, void** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
+        ObserveNativeReason("picker-query-service-id", &service);
+        ObserveNativeReason("picker-query-service-interface", &iid);
+        if (!inprocess_ && !bridge_result_) {
+            ComPtr<IServiceProvider> provider;
+            HRESULT hr = native_.As(&provider);
+            return FAILED(hr) ? hr : provider->QueryService(service, iid, output);
+        }
+        // The hidden native dialog has no live selection while Pulse owns the UI.
+        if (service == SID_STopLevelBrowser && (iid == IID_IShellBrowser || iid == IID_IUnknown) &&
+            ResultOperation() == wire::Operation::PickFolder) {
+            auto* browser = new (std::nothrow) detail::FileDialogShellBrowser(
+                event_owner_, show_sequence_,
+                [](IFileDialog* owner, uint64_t sequence) noexcept {
+                    auto* self = static_cast<FileDialog*>(static_cast<IFileOpenDialog*>(owner));
+                    const bool live = self->inprocess_ && !self->inprocess_->Closed();
+                    const bool valid = sequence == self->show_sequence_ && (live || self->bridge_result_);
+                    return valid ? S_OK : CO_E_OBJNOTCONNECTED;
+                },
+                [](IFileDialog* owner, BOOL fallback, IShellItemArray** items) noexcept {
+                    auto* self = static_cast<FileDialog*>(static_cast<IFileOpenDialog*>(owner));
+                    return self->ReadBrowserSelection(fallback, items);
+                },
+                [](IFileDialog* owner, const char* line, const IID* iid) noexcept {
+                    auto* self = static_cast<FileDialog*>(static_cast<IFileOpenDialog*>(owner));
+                    self->ObserveNativeReason(line, iid);
+                });
+            if (!browser) return E_OUTOFMEMORY;
+            const HRESULT hr = browser->QueryInterface(iid, output);
+            browser->Release();
+            return DiagnosticResult("picker-shell-browser-service", hr);
+        }
+        if (service != SID_SFolderView || (iid != IID_IFolderView && iid != IID_IUnknown))
+            return E_NOINTERFACE;
+        return QueryInterface(iid, output);
+    }
+    HRESULT STDMETHODCALLTYPE GetFolder(REFIID iid, void** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        ComPtr<IShellItem> folder;
+        HRESULT hr = GetFolder(&folder);
+        if (FAILED(hr)) return hr;
+        hr = folder->QueryInterface(iid, output);
+        return hr == E_NOINTERFACE ? folder->BindToHandler(nullptr, BHID_SFObject, iid, output) : hr;
+    }
+    HRESULT STDMETHODCALLTYPE Items(UINT flags, REFIID iid, void** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (flags != SVGIO_SELECTION) return E_NOTIMPL;
+        ComPtr<IShellItemArray> items;
+        HRESULT hr = GetSelectedItems(&items);
+        if (FAILED(hr)) return hr;
+        return iid == IID_IDataObject ? items->BindToHandler(nullptr, BHID_DataObject, iid, output)
+                                     : items->QueryInterface(iid, output);
+    }
+    HRESULT STDMETHODCALLTYPE ItemCount(UINT flags, int* count) override {
+        if (!count) return E_POINTER;
+        *count = 0;
+        ComPtr<IShellItemArray> items;
+        HRESULT hr = Items(flags, IID_PPV_ARGS(&items));
+        DWORD n = 0;
+        if (SUCCEEDED(hr)) hr = items->GetCount(&n);
+        if (SUCCEEDED(hr)) *count = static_cast<int>(n);
+        return hr;
+    }
+    HRESULT STDMETHODCALLTYPE GetCurrentViewMode(UINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SetCurrentViewMode(UINT) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Item(int, PITEMID_CHILD*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetSelectionMarkedItem(int*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetFocusedItem(int*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetItemPosition(PCUITEMID_CHILD, POINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetSpacing(POINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetDefaultSpacing(POINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetAutoArrange() override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SelectItem(int, DWORD) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE SelectAndPositionItems(UINT, PCUITEMID_CHILD_ARRAY, POINT*, DWORD) override { return E_NOTIMPL; }
     ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
     ULONG STDMETHODCALLTYPE Release() override {
         ULONG count;
@@ -100,7 +298,7 @@ public:
         if (showing_ || inspecting_metadata_) return HRESULT_FROM_WIN32(ERROR_BUSY);
         if (custom_desynchronized_) return E_UNEXPECTED;
         AddRef();
-        struct Hold { FileDialog* self; ~Hold() { self->inprocess_.reset(); self->pending_folders_.clear(); self->showing_ = false; self->Release(); } } hold{this};
+        struct Hold { FileDialog* self; ~Hold() { self->DestroyBrowseProxy(); self->inprocess_.reset(); self->pending_folders_.clear(); self->showing_ = false; self->Release(); } } hold{this};
         showing_ = true;
         show_observation_ = {};
         show_observation_.sequence = ++show_sequence_;
@@ -109,6 +307,13 @@ public:
         const HRESULT result = ShowCore(owner);
         show_observation_.result = result;
         show_observation_.accepted_result = result == S_OK && bridge_result_ && item_ && result_count_ != 0;
+        if (factory_ == DialogFactory::Open && ResultOperation() == wire::Operation::PickFolder) {
+            char detail[144]{};
+            std::snprintf(detail, sizeof(detail), "picker-folder-return hr=0x%08lX show=%llu bridge=%d count=%zu",
+                          static_cast<unsigned long>(result), static_cast<unsigned long long>(show_sequence_),
+                          bridge_result_, result_count_);
+            ObserveNativeReason(detail);
+        }
         ObserveShow(false);
         return result;
     }
@@ -124,7 +329,7 @@ public:
     }
     HRESULT ShowCore(HWND owner) {
         // Clear the previous result before any fallible preparation of this Show.
-        item_.Reset(); items_.Reset(); returned_name_.clear(); result_count_ = 0; result_index_ = 0; bridge_result_ = false;
+        item_.Reset(); items_.Reset(); returned_name_.clear(); browsed_folder_.clear(); result_count_ = 0; result_index_ = 0; bridge_result_ = false;
         cancel_.Reset();
         readonly_properties_result_ = false;
         properties_accepted_ = false;
@@ -138,12 +343,16 @@ public:
                 bool ready = false;
                 try { ready = resolve(resolved); } catch (...) {}
                 if (!ready) {
+                    // A temporary registration/provider failure must not consume
+                    // this dialog's deferred binding. The next Show rechecks it.
+                    services_.resolve_on_show = std::move(resolve);
                     ObserveNativeReason("resolve-not-ready-native");
                     shown_ = true;
                     return ShowNative(owner, FileDialogShowFallback::ResolveNotReady);
                 }
                 resolved.resolve_on_show = {};
                 resolved.observe_show = std::move(services_.observe_show);
+                resolved.private_interface_passthrough = services_.private_interface_passthrough;
                 services_ = std::move(resolved);
                 // Deferred capture is not authorization. IPC cannot represent
                 // the retained event/custom-control contract.
@@ -163,8 +372,14 @@ public:
                 return services_.inprocess_provider && (services_.inprocess_provider->api.implemented_features & feature);
             };
             // pulse.exe route: basic dialogs only; everything retained for
-            // events, custom controls, properties or places stays in-process.
-            const bool bridge_route = services_.prefer_bridge && (services_.run_bridge || !services_.executable.empty()) &&
+            // events, custom controls, properties, places or foreign enabled
+            // owners (which require RemoteProvider ForeignLease) stays on provider.
+            DWORD bridge_owner_pid = 0;
+            const bool foreign_enabled_owner = owner && IsWindow(owner) &&
+                GetWindowThreadProcessId(owner, &bridge_owner_pid) &&
+                bridge_owner_pid != GetCurrentProcessId() && IsWindowEnabled(owner);
+            const bool bridge_route = !services_.legacy_browse_policy && services_.prefer_bridge &&
+                !foreign_enabled_owner && (services_.run_bridge || !services_.executable.empty()) &&
                 subscriptions_.empty() && custom_controls_.empty() && !custom_group_ && !properties_owned_ && places_.empty() && !shell_filter_;
             // The pulse.exe host carries local-save access and caller-validated
             // Open/Save over the pipe; native extended options, places,
@@ -180,6 +395,8 @@ public:
                 c.save_no_test_create_supported = bridge || provided(PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_TEST_CREATE);
                 c.save_no_overwrite_supported = !bridge && provided(PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_OVERWRITE);
                 c.save_caller_validation_supported = bridge || provided(PULSE_PICKER_UI_V2_FEATURE_SAVE_SKIP_ACCESS);
+                c.save_caller_readonly_supported = !bridge && provided(PULSE_PICKER_UI_V2_FEATURE_SAVE_SKIP_ACCESS);
+                c.computer_initial_folder_supported = !bridge && provided(PULSE_PICKER_UI_V2_FEATURE_COMPUTER_PLACE);
                 c.open_missing_supported = !bridge && provided(PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING);
                 c.open_missing_validated_supported = !bridge && provided(PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING_VALIDATED);
                 c.caller_validation_supported = bridge || provided(PULSE_PICKER_UI_V2_FEATURE_OPEN_SKIP_ACCESS);
@@ -200,6 +417,19 @@ public:
             const auto resolve_initial = [&](PreparationContext& c) {
                 if (!(((policy == AccessPolicy::LocalOpenV1 && factory_ == DialogFactory::Open) ||
                     (policy == AccessPolicy::LocalSaveV1 && factory_ == DialogFactory::Save)) && !native_only_)) return true;
+                if (std::any_of(calls_.begin(), calls_.end(), [](const SetterCall& call) {
+                        return call.setting == Setting::FileName;
+                    })) {
+                    PWSTR name = nullptr;
+                    const HRESULT name_hr = native_->GetFileName(&name);
+                    if (name_hr == S_OK && name) {
+                        try {
+                            std::u16string copied;
+                            if (CopyText(name, copied)) c.resolved_filename = std::move(copied);
+                        } catch (...) { CoTaskMemFree(name); throw; }
+                    }
+                    CoTaskMemFree(name);
+                }
                 if (factory_ == DialogFactory::Save && save_as_item_.HasCall()) {
                     const HRESULT refreshed = save_as_item_.RefreshAfterSetter(native_.Get(), S_OK);
                     SaveAsItemSeed seed;
@@ -217,17 +447,44 @@ public:
                 SFGAOF attributes = SFGAO_FILESYSTEM | SFGAO_FOLDER;
                 const HRESULT folder_hr = native_->GetFolder(&folder);
                 if (SUCCEEDED(folder_hr) && folder && SUCCEEDED(folder->GetAttributes(attributes, &attributes)) &&
-                    (attributes & SFGAO_FOLDER) &&
-                    ((attributes & SFGAO_FILESYSTEM) || c.native_options_supported) &&
-                    SUCCEEDED(folder->GetDisplayName((attributes & SFGAO_FILESYSTEM) ? SIGDN_FILESYSPATH : SIGDN_DESKTOPABSOLUTEPARSING, &path))) {
-                    std::u16string resolved;
-                    bool copied = false;
-                    try { copied = CopyText(path, resolved); }
-                    catch (...) { CoTaskMemFree(path); throw; }
-                    CoTaskMemFree(path);
-                    if (!copied) return false;
-                    c.resolved_initial_directory = std::move(resolved);
-                    return true;
+                    (attributes & SFGAO_FOLDER)) {
+                    if (!(attributes & SFGAO_FILESYSTEM)) {
+                        ComPtr<IShellItem> library_folder;
+                        if (ResolveSingleFolderLibrary(folder.Get(), library_folder) ||
+                            ResolveLibraryPlaceFolder(folder.Get(), library_folder)) {
+                            folder = std::move(library_folder);
+                            attributes |= SFGAO_FILESYSTEM;
+                        }
+                    }
+                    const bool computer_ok = factory_ == DialogFactory::Open && c.computer_initial_folder_supported &&
+                        !(attributes & SFGAO_FILESYSTEM) && IsComputerFolderItem(folder.Get());
+                    if (!(attributes & SFGAO_FILESYSTEM) && !explicit_folder_ &&
+                        !computer_ok && !c.native_options_supported) {
+                        const bool is_home = IsImplicitHomeOrQuickAccessFolder(folder.Get());
+                        std::u16string resolved;
+                        if (ResolveExistingFallbackDirectory(resolved)) {
+                            ObserveNativeReason(is_home ? "initial-folder-implicit-home-fallback"
+                                                        : "initial-folder-implicit-virtual-fallback");
+                            c.resolved_initial_directory = std::move(resolved);
+                            return true;
+                        }
+                    }
+                    if (((attributes & SFGAO_FILESYSTEM) || c.native_options_supported || computer_ok) &&
+                        SUCCEEDED(folder->GetDisplayName((attributes & SFGAO_FILESYSTEM) ? SIGDN_FILESYSPATH : SIGDN_DESKTOPABSOLUTEPARSING, &path))) {
+                        std::u16string resolved;
+                        bool copied = false;
+                        const bool stale_mru = !explicit_folder_ && (attributes & SFGAO_FILESYSTEM) && IsStaleLocalDirectory(path);
+                        try { copied = CopyText(path, resolved); }
+                        catch (...) { CoTaskMemFree(path); throw; }
+                        CoTaskMemFree(path);
+                        if (!copied) return false;
+                        if (stale_mru) {
+                            if (!ResolveExistingFallbackDirectory(resolved)) return false;
+                            ObserveNativeReason("initial-folder-stale-mru-fallback");
+                        }
+                        c.resolved_initial_directory = std::move(resolved);
+                        return true;
+                    }
                 }
                 CoTaskMemFree(path);
                 return false;
@@ -245,7 +502,7 @@ public:
                         // run the host's local-save target check here first: a
                         // target it would decline keeps the in-process route.
                         if (bridge_request && candidate.supported_access_policy == AccessPolicy::LocalSaveV1 &&
-                            !BridgeSaveTargetResolves(std::get<wire::Request>(bridge_request->body))) bridge_request.reset();
+                            !BridgeAcceptsLocalSaveDraft(std::get<wire::Request>(bridge_request->body))) bridge_request.reset();
                         if (bridge_request) decision = std::move(candidate);
                     }
                 }
@@ -275,6 +532,16 @@ public:
                 decision = PrepareFileDialogContract(factory_, calls_, id, policy, context);
             }
             show_observation_.contract_reason = decision.reason;
+            if ((decision.reason == NativeReason::UnsupportedFilename ||
+                 decision.reason == NativeReason::UnsupportedExtension) && decision.call_index < calls_.size()) {
+                const auto& call = calls_[decision.call_index];
+                char detail[192]{};
+                std::snprintf(detail, sizeof(detail),
+                    "contract-input-shape setting=%u call=%zu length=%zu shape=0x%08X",
+                    static_cast<unsigned>(call.setting), decision.call_index, call.text.size(),
+                    FileDialogParameterShape(call.text));
+                ObserveNativeReason(detail);
+            }
             if (services_.observe_contract) {
                 try { services_.observe_contract(decision, native_only_, shown_, subscriptions_.size()); }
                 catch (...) {} // A diagnostic failure must not change dialog behavior.
@@ -320,7 +587,7 @@ public:
                         }
                     }
                     prepared = session->Prepare(decision, owner, custom_controls_, places_, property_views,
-                        !explicit_set_folder_ && !explicit_folder_, navigation_root_);
+                        !explicit_set_folder_ && !explicit_folder_, navigation_root_, services_.legacy_browse_policy);
                 }
                 catch (...) { ObserveNativeReason("inprocess-prepare-exception"); throw; }
                 std::snprintf(diagnostic, sizeof(diagnostic), "inprocess-prepare-return hr=0x%08lX", static_cast<unsigned long>(prepared));
@@ -338,28 +605,59 @@ public:
                 if (result_native_options_ & FOS_SHAREAWARE) callbacks.share_violation = InprocessShareViolation;
                 PulsePickerUiV2Result result{}; std::wstring path;
                 inprocess_callback_seen_ = false;
+                inprocess_caller_callback_seen_ = false;
+                inprocess_malformed_callback_ = false;
                 show_observation_.provider_started = true;
                 const HRESULT shown = inprocess_->Show(callbacks, result, path);
                 show_observation_.ui_shown = (result.flags & PULSE_PICKER_UI_V2_UI_SHOWN) != 0;
-                if (inprocess_->Closed()) return inprocess_->CloseResult();
+                if (inprocess_->Closed()) {
+                    const HRESULT close_hr = inprocess_->CloseResult();
+                    if (FAILED(close_hr)) show_observation_.failure_phase = FileDialogShowFailurePhase::CloseRequested;
+                    return close_hr;
+                }
                 // Show clears output buffer pointers only after validating the provider's
-                // terminal result. Any callback, even malformed, excludes startup retry.
+                // terminal result. Any malformed callback or caller-observed callback
+                // excludes startup retry; valid pre-UI internal setup events with no
+                // caller sinks may safely fall back to native when UI never appeared.
+                const bool pre_ui_unobserved =
+                    (!result.show_id && !inprocess_callback_seen_) ||
+                    (inprocess_callback_seen_ && !inprocess_malformed_callback_ && !inprocess_caller_callback_seen_);
                 if (FAILED(shown) && shown != HRESULT_FROM_WIN32(ERROR_CANCELLED) &&
                     result.status == PULSE_PICKER_UI_V2_FAILED && result.terminal_hr == shown &&
-                    !result.show_id && !result.flags && !inprocess_callback_seen_ &&
+                    pre_ui_unobserved && !result.flags &&
                     !result.path.data && !result.paths.data && !result.path.units && !result.paths.units && !result.path_count) {
                     inprocess_.reset(); inprocess_used_ = false; bridge_result_ = false;
                     ObserveNativeReason("inprocess-startup-native-fallback");
                     return ShowNative(owner, FileDialogShowFallback::ProviderFailedBeforeUi);
                 }
-                if (FAILED(shown) || result.status != PULSE_PICKER_UI_V2_ACCEPTED) return shown;
+                // Cancelling Save discards the target, not the selected file type.
+                // Only trust an index from a shown, validated cancellation.
+                if (local_save && shown == HRESULT_FROM_WIN32(ERROR_CANCELLED) &&
+                    result.status == PULSE_PICKER_UI_V2_CANCELLED && (result.flags & PULSE_PICKER_UI_V2_UI_SHOWN)) {
+                    const auto& request = std::get<wire::Request>(decision.request->body);
+                    if (result.filter_index < request.filters.size()) result_index_ = result.filter_index + 1;
+                }
+                if (FAILED(shown) || result.status != PULSE_PICKER_UI_V2_ACCEPTED) {
+                    if (FAILED(shown) && shown != HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+                        show_observation_.failure_phase = FileDialogShowFailurePhase::ProviderShowFailed;
+                    }
+                    return shown;
+                }
                 const HRESULT materialized = CreatePickerShellItemArray(ResultOperation(), inprocess_->AcceptedPaths(), &items_, allow_missing_result_, result_native_options_);
-                if (FAILED(materialized)) return materialized;
+                if (FAILED(materialized)) {
+                    show_observation_.failure_phase = FileDialogShowFailurePhase::ShellItemMaterializeFailed;
+                    return materialized;
+                }
                 const HRESULT first = items_->GetItemAt(0, &item_);
-                if (FAILED(first)) { items_.Reset(); return first; }
+                if (FAILED(first)) {
+                    items_.Reset();
+                    show_observation_.failure_phase = FileDialogShowFailurePhase::ShellItemMaterializeFailed;
+                    return first;
+                }
                 readonly_properties_result_ = decision.require_unencrypted_save;
                 properties_accepted_ = properties_owned_;
                 result_count_ = inprocess_->AcceptedPaths().size(); result_index_ = result.filter_index + 1;
+                if (result_native_options_ & FOS_PICKFOLDERS) browsed_folder_ = inprocess_->AcceptedFolder();
                 const auto slash = path.find_last_of(L"\\/");
                 if (result_count_ == 1) returned_name_ = path.substr(slash == std::wstring::npos ? 0 : slash + 1);
                 if (decision.effective_options && !(*decision.effective_options & FOS_DONTADDTORECENT)) {
@@ -376,22 +674,52 @@ public:
                 }
                 return S_OK;
             }
-            // Once this boundary is crossed, every failure is terminal. Never
-            // reopen a native dialog after acceptance, cancellation or IPC error.
+            // Once the request is delivered over the pipe, every failure is
+            // terminal. Startup failures before delivery may fall back cleanly.
             bridge_result_ = true;
             cancel_.Reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-            if (!cancel_) return HRESULT_FROM_WIN32(GetLastError());
+            if (!cancel_) {
+                show_observation_.failure_phase = FileDialogShowFailurePhase::ProviderShowFailed;
+                return HRESULT_FROM_WIN32(GetLastError());
+            }
             const auto& request = bridge_request ? *bridge_request : *decision.request;
             show_observation_.provider_started = true;
-            const auto response = services_.run_bridge ? services_.run_bridge(request, owner, cancel_.Get()) :
-                wire::RunPickerClient(services_.executable, request, owner, cancel_.Get());
+            wire::PickerClientOutcome outcome;
+            if (services_.run_bridge) {
+                outcome.response = services_.run_bridge(request, owner, cancel_.Get());
+                outcome.request_delivered = true;
+            } else {
+                outcome = wire::RunPickerClientDetailed(services_.executable, request, owner, cancel_.Get());
+            }
             cancel_.Reset();
-            if (close_requested_) return close_result_;
-            if (!wire::ValidateResponse(request, response)) return E_UNEXPECTED;
-            const auto& result = std::get<wire::Response>(response.body);
+            if (close_requested_) {
+                if (FAILED(close_result_)) show_observation_.failure_phase = FileDialogShowFailurePhase::CloseRequested;
+                return close_result_;
+            }
+            const bool valid_response = wire::ValidateResponse(request, outcome.response);
+            if (!valid_response) {
+                if (!outcome.ui_shown) {
+                    bridge_result_ = false;
+                    ObserveNativeReason("bridge-invalid-pre-ui-native-fallback");
+                    return ShowNative(owner, FileDialogShowFallback::ProviderFailedBeforeUi);
+                }
+                show_observation_.ui_shown = true;
+                show_observation_.failure_phase = FileDialogShowFailurePhase::BridgeResponseInvalid;
+                return E_UNEXPECTED;
+            }
+            const auto& result = std::get<wire::Response>(outcome.response.body);
+            if (outcome.ui_shown) show_observation_.ui_shown = true;
             if (result.status == wire::Status::Cancelled) return HRESULT_FROM_WIN32(ERROR_CANCELLED);
-            if (result.status == wire::Status::Unsupported) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+            if (result.status == wire::Status::Unsupported ||
+                (!outcome.ui_shown && result.status == wire::Status::Failed)) {
+                bridge_result_ = false;
+                ObserveNativeReason(result.status == wire::Status::Unsupported
+                    ? "bridge-unsupported-native-fallback"
+                    : "bridge-startup-native-fallback");
+                return ShowNative(owner, FileDialogShowFallback::ProviderFailedBeforeUi);
+            }
             if (result.status == wire::Status::Failed) {
+                show_observation_.failure_phase = FileDialogShowFailurePhase::BridgeResultFailed;
                 if (result.error_source == wire::ErrorSource::HResult)
                     return FAILED(static_cast<HRESULT>(result.error_code)) ? static_cast<HRESULT>(result.error_code) : E_FAIL;
                 return HRESULT_FROM_WIN32(result.error_source == wire::ErrorSource::Protocol ? ERROR_INVALID_DATA : result.error_code);
@@ -400,10 +728,18 @@ public:
             for (const auto& path : result.paths) paths.emplace_back(path.begin(), path.end());
             ComPtr<IShellItemArray> items;
             ComPtr<IShellItem> item;
-            hr = CreatePickerShellItemArray(result.operation, paths, &items);
-            if (FAILED(hr)) return hr;
+            allow_missing_result_ = decision.allow_missing_open || decision.no_test_file_create;
+            const uint32_t bridge_native_options = decision.effective_options.value_or(0);
+            hr = CreatePickerShellItemArray(result.operation, paths, &items, allow_missing_result_, bridge_native_options);
+            if (FAILED(hr)) {
+                show_observation_.failure_phase = FileDialogShowFailurePhase::ShellItemMaterializeFailed;
+                return hr;
+            }
             hr = items->GetItemAt(0, &item);
-            if (FAILED(hr)) return hr;
+            if (FAILED(hr)) {
+                show_observation_.failure_phase = FileDialogShowFailurePhase::ShellItemMaterializeFailed;
+                return hr;
+            }
             if (paths.size() == 1) {
                 const auto slash = paths.front().find_last_of(L"\\/");
                 returned_name_ = paths.front().substr(slash == std::wstring::npos ? 0 : slash + 1);
@@ -414,7 +750,7 @@ public:
             if (bridge_request) {
                 // As the in-process route after acceptance: every result goes
                 // to Recent unless excluded, and the client folder is remembered.
-                result_native_options_ = decision.effective_options.value_or(0);
+                result_native_options_ = bridge_native_options;
                 readonly_properties_result_ = decision.require_unencrypted_save;
                 if (decision.effective_options && !(*decision.effective_options & FOS_DONTADDTORECENT)) {
                     for (DWORD i = 0; i < result_count_; ++i) { ComPtr<IShellItem> recent; if (SUCCEEDED(items_->GetItemAt(i, &recent))) SHAddToRecentDocs(SHARD_SHELLITEM, recent.Get()); }
@@ -435,8 +771,15 @@ public:
                 SHAddToRecentDocs(SHARD_SHELLITEM, item_.Get());
             }
             return S_OK;
-        } catch (const std::bad_alloc&) { cancel_.Reset(); return E_OUTOFMEMORY; }
-        catch (...) { cancel_.Reset(); return E_FAIL; }
+        } catch (const std::bad_alloc&) {
+            cancel_.Reset();
+            show_observation_.failure_phase = FileDialogShowFailurePhase::UnhandledException;
+            return E_OUTOFMEMORY;
+        } catch (...) {
+            cancel_.Reset();
+            show_observation_.failure_phase = FileDialogShowFailurePhase::UnhandledException;
+            return E_FAIL;
+        }
     }
     HRESULT STDMETHODCALLTYPE SetFileTypes(UINT count, const COMDLG_FILTERSPEC* filters) override {
         if (const auto hr = Mutable(); FAILED(hr)) return hr;
@@ -475,7 +818,7 @@ public:
             *index = snapshot.filter_index + 1; return DiagnosticResult("getter-GetFileTypeIndex", S_OK);
         }
         if (!bridge_result_) return native_->GetFileTypeIndex(index);
-        if (!item_) { *index = 0; return E_UNEXPECTED; }
+        if (!result_index_) { *index = 0; return E_UNEXPECTED; }
         *index = result_index_; return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Advise(IFileDialogEvents* sink, DWORD* cookie) override {
@@ -534,12 +877,16 @@ public:
         if (const auto hr = Thread(); FAILED(hr)) return hr;
         if (inprocess_) {
             if (!folder) return E_INVALIDARG;
-            PWSTR text = nullptr;
-            const HRESULT extracted = folder->GetDisplayName(picker_shell::Enabled(result_native_options_) ? SIGDN_DESKTOPABSOLUTEPARSING : SIGDN_FILESYSPATH, &text);
-            if (FAILED(extracted)) return extracted;
             std::wstring path;
-            try { path = text ? text : L""; } catch (...) { CoTaskMemFree(text); return E_OUTOFMEMORY; }
-            CoTaskMemFree(text);
+            if (!picker_shell::Enabled(result_native_options_) && factory_ == DialogFactory::Open && IsComputerFolderItem(folder)) {
+                path = picker_navigation::kComputerPath;
+            } else {
+                PWSTR text = nullptr;
+                const HRESULT extracted = folder->GetDisplayName(picker_shell::Enabled(result_native_options_) ? SIGDN_DESKTOPABSOLUTEPARSING : SIGDN_FILESYSPATH, &text);
+                if (FAILED(extracted)) return extracted;
+                try { path = text ? text : L""; } catch (...) { CoTaskMemFree(text); return E_OUTOFMEMORY; }
+                CoTaskMemFree(text);
+            }
             if (pending_folders_.size() >= 64) return HRESULT_FROM_WIN32(ERROR_BUSY);
             const auto request = ++navigation_request_;
             try { pending_folders_.push_back({request, path, folder}); } catch (...) { return E_OUTOFMEMORY; }
@@ -554,10 +901,20 @@ public:
         PWSTR path = nullptr;
         SFGAOF attributes = SFGAO_FILESYSTEM | SFGAO_FOLDER;
         if (SUCCEEDED(call.native_result) && folder && SUCCEEDED(folder->GetAttributes(attributes, &attributes)) &&
-            (attributes & SFGAO_FOLDER) &&
-            SUCCEEDED(folder->GetDisplayName((attributes & SFGAO_FILESYSTEM) ? SIGDN_FILESYSPATH : SIGDN_DESKTOPABSOLUTEPARSING, &path))) {
-            try { const bool copied = CopyText(path, call.text); call.filesystem_folder = copied && (attributes & SFGAO_FILESYSTEM); }
-            catch (...) { CoTaskMemFree(path); MarkNativeOnly("folder-snapshot-allocation"); return E_OUTOFMEMORY; }
+            (attributes & SFGAO_FOLDER)) {
+            ComPtr<IShellItem> snapshot_folder = folder;
+            if (!(attributes & SFGAO_FILESYSTEM)) {
+                ComPtr<IShellItem> library_folder;
+                if (ResolveSingleFolderLibrary(folder, library_folder) ||
+                    ResolveLibraryPlaceFolder(folder, library_folder)) {
+                    snapshot_folder = std::move(library_folder);
+                    attributes |= SFGAO_FILESYSTEM;
+                }
+            }
+            if (SUCCEEDED(snapshot_folder->GetDisplayName((attributes & SFGAO_FILESYSTEM) ? SIGDN_FILESYSPATH : SIGDN_DESKTOPABSOLUTEPARSING, &path))) {
+                try { const bool copied = CopyText(path, call.text); call.filesystem_folder = copied && (attributes & SFGAO_FILESYSTEM); }
+                catch (...) { CoTaskMemFree(path); MarkNativeOnly("folder-snapshot-allocation"); return E_OUTOFMEMORY; }
+            }
         }
         CoTaskMemFree(path);
         return Track(std::move(call));
@@ -568,7 +925,14 @@ public:
         if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
         if (inprocess_) return DiagnosticResult("getter-GetFolder", SnapshotItem(SnapshotPart::Folder, folder));
         if (!bridge_result_) return native_->GetFolder(folder);
-        return item_ ? item_->GetParent(folder) : E_UNEXPECTED;
+        // When accepting the current directory, its parent is not the folder displayed by the picker.
+        if (!browsed_folder_.empty()) {
+            const HRESULT hr = picker_navigation::IsComputerPath(browsed_folder_)
+                ? SHGetKnownFolderItem(FOLDERID_ComputerFolder, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(folder))
+                : CreatePickerShellItem(wire::Operation::PickFolder, browsed_folder_, folder, false, result_native_options_);
+            return DiagnosticResult("getter-GetFolder-final", hr);
+        }
+        return DiagnosticResult("getter-GetFolder-final", item_ ? item_->GetParent(folder) : E_UNEXPECTED);
     }
     HRESULT STDMETHODCALLTYPE GetCurrentSelection(IShellItem** item) override {
         if (!item) return E_POINTER;
@@ -576,7 +940,7 @@ public:
         if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
         if (inprocess_) return DiagnosticResult("getter-GetCurrentSelection", SnapshotItem(SnapshotPart::Selection, item));
         if (!bridge_result_) { if (!CanCaptureInprocess()) MarkNativeOnly("current-selection-without-inprocess"); return native_->GetCurrentSelection(item); }
-        return item_ ? item_.CopyTo(item) : E_UNEXPECTED;
+        return DiagnosticResult("getter-GetCurrentSelection-final", item_ ? item_.CopyTo(item) : E_UNEXPECTED);
     }
     HRESULT STDMETHODCALLTYPE SetFileName(LPCWSTR text) override { return Text(Setting::FileName, text, &IFileDialog::SetFileName); }
     HRESULT STDMETHODCALLTYPE GetFileName(LPWSTR* text) override {
@@ -588,12 +952,12 @@ public:
             return DiagnosticResult("getter-GetFileName", FAILED(hr) ? hr : CopyResultText(snapshot.filename, text));
         }
         if (!bridge_result_) return native_->GetFileName(text);
-        if (!item_ || returned_name_.empty()) return E_UNEXPECTED;
+        if (!item_ || returned_name_.empty()) return DiagnosticResult("getter-GetFileName-final", E_UNEXPECTED);
         const auto bytes = (returned_name_.size() + 1) * sizeof(wchar_t);
         auto copy = static_cast<wchar_t*>(CoTaskMemAlloc(bytes));
-        if (!copy) return E_OUTOFMEMORY;
+        if (!copy) return DiagnosticResult("getter-GetFileName-final", E_OUTOFMEMORY);
         std::copy(returned_name_.begin(), returned_name_.end(), copy); copy[returned_name_.size()] = 0;
-        *text = copy; return S_OK;
+        *text = copy; return DiagnosticResult("getter-GetFileName-final", S_OK);
     }
     HRESULT STDMETHODCALLTYPE SetTitle(LPCWSTR text) override { return Text(Setting::Title, text, &IFileDialog::SetTitle); }
     HRESULT STDMETHODCALLTYPE SetOkButtonLabel(LPCWSTR text) override { return Text(Setting::OkButtonLabel, text, &IFileDialog::SetOkButtonLabel); }
@@ -603,7 +967,9 @@ public:
         *item = nullptr;
         if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
         if (inprocess_) return DiagnosticResult("getter-GetResult", inprocess_->InFileOk() && !inprocess_->Closed() ? SnapshotItem(SnapshotPart::Candidate, item) : E_UNEXPECTED);
-        return bridge_result_ ? (item_ && result_count_ == 1 ? item_.CopyTo(item) : E_UNEXPECTED) : native_->GetResult(item);
+        if (bridge_result_) return DiagnosticResult("getter-GetResult-final",
+            item_ && result_count_ == 1 ? item_.CopyTo(item) : E_UNEXPECTED);
+        return native_->GetResult(item);
     }
     HRESULT STDMETHODCALLTYPE AddPlace(IShellItem* item, FDAP location) override {
         if (const auto hr = Mutable(); FAILED(hr)) return hr;
@@ -640,6 +1006,23 @@ public:
                 ObserveNativeReason("place-computer-captured");
                 SetterCall call; call.setting = Setting::Place; call.native_result = hr;
                 return Track(std::move(call));
+            }
+            if (item && (attributes & SFGAO_FOLDER) && !(attributes & SFGAO_FILESYSTEM) &&
+                places_.size() < 32 && (location == FDAP_TOP || location == FDAP_BOTTOM) && label_ok) {
+                ComPtr<IShellItem> library_target;
+                Text library_path;
+                if (ResolveLibraryPlaceFolder(item, library_target) &&
+                    library_target->GetDisplayName(SIGDN_FILESYSPATH, &library_path.value) == S_OK && library_path.value) {
+                    std::u16string copied;
+                    if (CopyText(library_path.value, copied)) {
+                        place.path.assign(copied.begin(), copied.end());
+                        place.location = static_cast<uint32_t>(location);
+                        places_.push_back(std::move(place));
+                        ObserveNativeReason("place-library-captured");
+                        SetterCall call; call.setting = Setting::Place; call.native_result = hr;
+                        return Track(std::move(call));
+                    }
+                }
             }
             if (!item || places_.size() >= 32 || (location != FDAP_TOP && location != FDAP_BOTTOM) ||
                 attributes_hr != S_OK ||
@@ -687,6 +1070,14 @@ public:
     }
     HRESULT STDMETHODCALLTYPE ClearClientData() override {
         if (const auto hr = Mutable(); FAILED(hr)) return hr;
+        if (!showing_ && inprocess_used_ && bridge_result_ && item_ && result_count_ &&
+            (result_native_options_ & FOS_PICKFOLDERS) && client_state_ && client_guid_) {
+            // Pulse displayed this folder dialog and owns its history. The native
+            // mirror never ran Show; clearing it can fail and abort the caller
+            // before it reads the already accepted result.
+            const HRESULT cleared = client_state_->Clear(*client_guid_) ? S_OK : E_FAIL;
+            return DiagnosticResult("clear-client-data-bridge", cleared);
+        }
         const HRESULT hr = native_->ClearClientData();
         if (!CanCaptureInprocess() || hr != S_OK || !client_state_ || !client_guid_)
             return Unsupported(Setting::ClearClientData, hr);
@@ -713,8 +1104,8 @@ public:
         *items = nullptr;
         if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
         if (factory_ != DialogFactory::Open) return E_NOINTERFACE;
-        if (inprocess_) return SnapshotArray(true, items);
-        if (bridge_result_) return items_ ? items_.CopyTo(items) : E_UNEXPECTED;
+        if (inprocess_) return DiagnosticResult("getter-GetResults", SnapshotArray(true, items));
+        if (bridge_result_) return DiagnosticResult("getter-GetResults-final", items_ ? items_.CopyTo(items) : E_UNEXPECTED);
         ComPtr<IFileOpenDialog> open; const auto hr = native_.As(&open);
         return FAILED(hr) ? hr : open->GetResults(items);
     }
@@ -723,8 +1114,14 @@ public:
         *items = nullptr;
         if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
         if (factory_ != DialogFactory::Open) return E_NOINTERFACE;
-        if (inprocess_) return SnapshotArray(false, items);
-        if (bridge_result_) return items_ ? items_.CopyTo(items) : E_UNEXPECTED;
+        if (inprocess_) {
+            // The native folder picker reports the pending result via this API
+            // during FileOk, even when the view has no highlighted rows.
+            if (inprocess_->InFileOk() && ResultOperation() == wire::Operation::PickFolder)
+                return DiagnosticResult("getter-GetSelectedItems-fileok", SnapshotArray(true, items));
+            return DiagnosticResult("getter-GetSelectedItems", SnapshotArray(false, items));
+        }
+        if (bridge_result_) return DiagnosticResult("getter-GetSelectedItems-final", items_ ? items_.CopyTo(items) : E_UNEXPECTED);
         if (!CanCaptureInprocess()) MarkNativeOnly("selected-items-without-inprocess");
         ComPtr<IFileOpenDialog> open; const auto hr = native_.As(&open);
         return FAILED(hr) ? hr : open->GetSelectedItems(items);
@@ -775,9 +1172,33 @@ public:
         return Track(std::move(call));
     }
     HRESULT STDMETHODCALLTYPE SetCollectedProperties(IPropertyDescriptionList* properties, BOOL append) override {
-        if (const auto hr = Mutable(); FAILED(hr)) return hr;
+        if (const auto hr = Thread(); FAILED(hr)) return hr;
         if (factory_ != DialogFactory::Save) return E_NOINTERFACE;
         if (inspecting_metadata_) return HRESULT_FROM_WIN32(ERROR_BUSY);
+        if (inprocess_) {
+            // Applications like CorelDRAW invoke SetCollectedProperties(nullptr, TRUE)
+            // inside OnTypeChange during Show and then read GetProperties/ApplyProperties.
+            save_metadata_requested_ = true;
+            AddRef();
+            struct Hold { FileDialog* self; ~Hold() { self->inspecting_metadata_ = false; self->Release(); } } hold{this};
+            inspecting_metadata_ = true;
+            ComPtr<IFileSaveDialog> save;
+            const HRESULT queried = native_.As(&save); if (FAILED(queried)) return queried;
+            const HRESULT result = save->SetCollectedProperties(properties, append);
+            if (result != S_OK) return result;
+            if (!properties && properties_owned_) {
+                properties_collected_ = true;
+                return result;
+            }
+            const HRESULT captured = properties_.SetCollected(properties);
+            DiagnosticResult("live-properties-collection-capture", captured);
+            if (captured == S_OK) {
+                properties_owned_ = true;
+                properties_collected_ = true;
+            }
+            return result;
+        }
+        if (const auto hr = Mutable(); FAILED(hr)) return hr;
         save_metadata_requested_ = true;
         AddRef();
         struct Hold { FileDialog* self; ~Hold() { self->inspecting_metadata_ = false; self->Release(); } } hold{this};
@@ -815,7 +1236,7 @@ public:
                 return Track(std::move(call));
             }
             metadata_seen_ = true;
-            const HRESULT captured = result == S_OK && append == FALSE && epoch == metadata_epoch_ ? properties_.SetCollected(list.Get()) : E_NOTIMPL;
+            const HRESULT captured = result == S_OK && epoch == metadata_epoch_ ? properties_.SetCollected(list.Get()) : E_NOTIMPL;
             DiagnosticResult("properties-collection-capture", captured);
             if (FAILED(captured) && list) {
                 ComPtr<IPropertyStore> snapshot;
@@ -958,7 +1379,7 @@ public:
             control.kind = PULSE_PICKER_UI_V2_CONTROL_SEPARATOR;
             control.id = id; control.has_parent = custom_group_;
             control.parent = control.has_parent ? custom_group_id_ : 0;
-            if (FindCustom(id) || custom_controls_.size() >= 16) {
+            if (FindCustom(id) || custom_controls_.size() >= PULSE_PICKER_UI_V2_MAX_CONTROLS) {
                 MarkNativeOnly("separator-unrepresentable"); return hr;
             }
             custom_controls_.push_back(std::move(control));
@@ -966,31 +1387,94 @@ public:
         return hr;
     }
     HRESULT STDMETHODCALLTYPE AddText(DWORD id, LPCWSTR text) override {
-        return CustomizeCall("AddText", false, id, 0, 0, [&](IFileDialogCustomize* customize) { return customize->AddText(id, text); });
+        if (!CanCaptureInprocess())
+            return CustomizeCall("AddText", false, id, 0, 0, [&](IFileDialogCustomize* c) { return c->AddText(id, text); });
+        if (const auto hr = Mutable(); FAILED(hr)) return hr;
+        ComPtr<IFileDialogCustomize> native;
+        HRESULT hr = native_.As(&native); if (FAILED(hr)) return hr;
+        hr = native->AddText(id, text);
+        if (hr != S_OK) { MarkNativeOnly("text-control-native-failure", &IID_IFileDialogCustomize); return hr; }
+        try {
+            FileDialogCustomControl control;
+            control.kind = PULSE_PICKER_UI_V2_CONTROL_TEXT;
+            control.id = id;
+            control.has_parent = custom_group_;
+            control.parent = control.has_parent ? custom_group_id_ : 0;
+            if (FindCustom(id) || custom_controls_.size() >= PULSE_PICKER_UI_V2_MAX_CONTROLS || !CustomLabel(text, control.label)) {
+                MarkNativeOnly("text-control-unrepresentable", &IID_IFileDialogCustomize);
+                return hr;
+            }
+            custom_controls_.push_back(std::move(control));
+        } catch (...) { MarkNativeOnly("text-control-allocation", &IID_IFileDialogCustomize); }
+        return hr;
     }
     HRESULT STDMETHODCALLTYPE SetControlLabel(DWORD id, LPCWSTR text) override {
         return ChangeCustom(id, text, 0, true);
     }
     HRESULT STDMETHODCALLTYPE GetControlState(DWORD id, CDCONTROLSTATEF* state) override {
         if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
-        if (inprocess_) { if (!state) return E_POINTER; const auto* control = FindCustom(id); if (!control) return E_INVALIDARG; *state = static_cast<CDCONTROLSTATEF>(control->state & 3u); return S_OK; }
-        if (FindCustom(id) && CanCaptureInprocess()) { ComPtr<IFileDialogCustomize> native; const auto hr = native_.As(&native); return FAILED(hr) ? hr : native->GetControlState(id, state); }
+        if (inprocess_ || inprocess_used_) {
+            if (!state) return E_POINTER;
+            const auto* control = FindCustom(id);
+            if (!control) return E_INVALIDARG;
+            *state = static_cast<CDCONTROLSTATEF>(control->state & 3u);
+            return S_OK;
+        }
+        if (CanCaptureInprocess()) {
+            if (FindCustom(id)) {
+                ComPtr<IFileDialogCustomize> native;
+                const auto hr = native_.As(&native);
+                return FAILED(hr) ? hr : native->GetControlState(id, state);
+            }
+            return ProbeUncapturedCustomize("GetControlState", true, id, 0, 0,
+                [&](IFileDialogCustomize* customize) { return customize->GetControlState(id, state); });
+        }
         return CustomizeCall("GetControlState", true, id, 0, 0, [&](IFileDialogCustomize* customize) { return customize->GetControlState(id, state); });
     }
     HRESULT STDMETHODCALLTYPE SetControlState(DWORD id, CDCONTROLSTATEF state) override {
         return ChangeCustom(id, nullptr, static_cast<DWORD>(state), false);
     }
     HRESULT STDMETHODCALLTYPE GetEditBoxText(DWORD id, WCHAR** text) override {
-        if(FAILED(Thread()))return RPC_E_WRONG_THREAD;
-        if(CanCaptureInprocess() && FindCustom(id) && FindCustom(id)->kind==8) { ComPtr<IFileDialogCustomize> native;const auto hr=native_.As(&native);return FAILED(hr)?hr:native->GetEditBoxText(id,text); }
+        if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
+        if (inprocess_ || inprocess_used_) {
+            if (!text) return E_POINTER;
+            *text = nullptr;
+            const auto* control = FindCustom(id);
+            if (!control || control->kind != 8) return E_INVALIDARG;
+            return CopyResultText(control->text, text);
+        }
+        if (CanCaptureInprocess()) {
+            if (const auto* control = FindCustom(id); control && control->kind == 8) {
+                ComPtr<IFileDialogCustomize> native;
+                const auto hr = native_.As(&native);
+                return FAILED(hr) ? hr : native->GetEditBoxText(id, text);
+            }
+            return ProbeUncapturedCustomize("GetEditBoxText", true, id, 0, 0,
+                [&](IFileDialogCustomize* customize) { return customize->GetEditBoxText(id, text); });
+        }
         return CustomizeCall("GetEditBoxText", true, id, 0, 0, [&](IFileDialogCustomize* customize) { return customize->GetEditBoxText(id, text); });
     }
     HRESULT STDMETHODCALLTYPE SetEditBoxText(DWORD id, LPCWSTR text) override {
         return ChangeValueControl(id,text,FALSE,true);
     }
     HRESULT STDMETHODCALLTYPE GetCheckButtonState(DWORD id, BOOL* checked) override {
-        if(FAILED(Thread()))return RPC_E_WRONG_THREAD;
-        if(CanCaptureInprocess() && FindCustom(id) && FindCustom(id)->kind==7) { ComPtr<IFileDialogCustomize> native;const auto hr=native_.As(&native);return FAILED(hr)?hr:native->GetCheckButtonState(id,checked); }
+        if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
+        if (inprocess_ || inprocess_used_) {
+            if (!checked) return E_POINTER;
+            const auto* control = FindCustom(id);
+            if (!control || control->kind != 7) return E_INVALIDARG;
+            *checked = control->checked ? TRUE : FALSE;
+            return S_OK;
+        }
+        if (CanCaptureInprocess()) {
+            if (const auto* control = FindCustom(id); control && control->kind == 7) {
+                ComPtr<IFileDialogCustomize> native;
+                const auto hr = native_.As(&native);
+                return FAILED(hr) ? hr : native->GetCheckButtonState(id, checked);
+            }
+            return ProbeUncapturedCustomize("GetCheckButtonState", true, id, 0, 0,
+                [&](IFileDialogCustomize* customize) { return customize->GetCheckButtonState(id, checked); });
+        }
         return CustomizeCall("GetCheckButtonState", true, id, 0, 0, [&](IFileDialogCustomize* customize) { return customize->GetCheckButtonState(id, checked); });
     }
     HRESULT STDMETHODCALLTYPE SetCheckButtonState(DWORD id, BOOL checked) override {
@@ -1007,9 +1491,23 @@ public:
     }
     HRESULT STDMETHODCALLTYPE GetControlItemState(DWORD id, DWORD item, CDCONTROLSTATEF* state) override {
         if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
-        if (auto* control = FindCustom(id); CanCaptureInprocess() && control && control->kind >= PULSE_PICKER_UI_V2_CONTROL_COMBO && control->kind<=6) {
-            ComPtr<IFileDialogCustomize> native; const HRESULT hr = native_.As(&native);
-            return FAILED(hr) ? hr : native->GetControlItemState(id, item, state);
+        if (inprocess_ || inprocess_used_) {
+            if (!state) return E_POINTER;
+            auto* control = FindCustom(id);
+            if (!control || control->kind < PULSE_PICKER_UI_V2_CONTROL_COMBO || control->kind > 6) return E_INVALIDARG;
+            const auto* found = FindItem(*control, item);
+            if (!found) return E_INVALIDARG;
+            *state = static_cast<CDCONTROLSTATEF>(found->state & 3u);
+            return S_OK;
+        }
+        if (CanCaptureInprocess()) {
+            if (auto* control = FindCustom(id); control && control->kind >= PULSE_PICKER_UI_V2_CONTROL_COMBO && control->kind <= 6) {
+                ComPtr<IFileDialogCustomize> native;
+                const HRESULT hr = native_.As(&native);
+                return FAILED(hr) ? hr : native->GetControlItemState(id, item, state);
+            }
+            return ProbeUncapturedCustomize("GetControlItemState", true, id, item, 0,
+                [&](IFileDialogCustomize* customize) { return customize->GetControlItemState(id, item, state); });
         }
         return CustomizeCall("GetControlItemState", true, id, item, 0, [&](IFileDialogCustomize* customize) { return customize->GetControlItemState(id, item, state); });
     }
@@ -1019,9 +1517,14 @@ public:
     HRESULT STDMETHODCALLTYPE GetSelectedControlItem(DWORD id, DWORD* item) override {
         if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
         if (inprocess_ || inprocess_used_) { if(!item) return E_POINTER; const auto* control=FindCustom(id); if(!control || !control->has_selected || control->kind==4) return E_INVALIDARG; *item=control->selected_item_id; return S_OK; }
-        if (auto* control = FindCustom(id); CanCaptureInprocess() && control && control->kind >= PULSE_PICKER_UI_V2_CONTROL_COMBO && control->kind<=6) {
-            ComPtr<IFileDialogCustomize> native; const HRESULT hr = native_.As(&native);
-            return FAILED(hr) ? hr : native->GetSelectedControlItem(id, item);
+        if (CanCaptureInprocess()) {
+            if (auto* control = FindCustom(id); control && control->kind >= PULSE_PICKER_UI_V2_CONTROL_COMBO && control->kind <= 6) {
+                ComPtr<IFileDialogCustomize> native;
+                const HRESULT hr = native_.As(&native);
+                return FAILED(hr) ? hr : native->GetSelectedControlItem(id, item);
+            }
+            return ProbeUncapturedCustomize("GetSelectedControlItem", true, id, 0, 0,
+                [&](IFileDialogCustomize* customize) { return customize->GetSelectedControlItem(id, item); });
         }
         return CustomizeCall("GetSelectedControlItem", true, id, 0, 0, [&](IFileDialogCustomize* customize) { return customize->GetSelectedControlItem(id, item); });
     }
@@ -1049,7 +1552,7 @@ public:
         const auto* control=FindCustom(id);
         const bool supported=control && (control->kind==PULSE_PICKER_UI_V2_CONTROL_GROUP || control->kind==PULSE_PICKER_UI_V2_CONTROL_BUTTON ||
             control->kind==PULSE_PICKER_UI_V2_CONTROL_COMBO || control->kind==PULSE_PICKER_UI_V2_CONTROL_MENU || control->kind==PULSE_PICKER_UI_V2_CONTROL_CHECK);
-        const bool unchanged=control && (control->kind==PULSE_PICKER_UI_V2_CONTROL_RADIO || control->kind==PULSE_PICKER_UI_V2_CONTROL_EDIT);
+        const bool unchanged=control && (control->kind==PULSE_PICKER_UI_V2_CONTROL_RADIO || control->kind==PULSE_PICKER_UI_V2_CONTROL_EDIT || control->kind==PULSE_PICKER_UI_V2_CONTROL_TEXT);
         if (CanCaptureInprocess() && (supported || unchanged)) {
             if (const auto hr=Mutable(); FAILED(hr)) return hr;
             ComPtr<IFileDialogCustomize> native; HRESULT hr=native_.As(&native); if(FAILED(hr)) return hr;
@@ -1119,6 +1622,31 @@ private:
             return CreatePickerShellItem(part == SnapshotPart::Folder ? wire::Operation::PickFolder : ResultOperation(), path, item, part != SnapshotPart::Folder && allow_missing_result_, result_native_options_);
         } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; } catch (...) { return E_FAIL; }
     }
+    HRESULT ReadBrowserSelection(BOOL none_implies_folder, IShellItemArray** items) noexcept {
+        if (!inprocess_) return items_ ? items_.CopyTo(items) : CO_E_OBJNOTCONNECTED;
+        FileDialogInprocessSnapshot snapshot;
+        HRESULT hr = inprocess_->Read(snapshot);
+        if (FAILED(hr)) return hr;
+        if (!snapshot.selections.empty())
+            return CreatePickerShellItemArray(wire::Operation::PickFolder, snapshot.selections,
+                                              items, allow_missing_result_, result_native_options_);
+        // At confirmation, Pulse has a concrete folder even without a selected row.
+        // Give the caller's retained shell view the same candidate as GetSelectedItems.
+        if (inprocess_->InFileOk() && !inprocess_->Closed() &&
+            (snapshot.flags & PULSE_PICKER_UI_V2_STATE_CANDIDATE_READY) && !snapshot.candidates.empty()) {
+            return DiagnosticResult("picker-browser-selection-confirmed-current",
+                CreatePickerShellItemArray(wire::Operation::PickFolder, snapshot.candidates,
+                                           items, allow_missing_result_, result_native_options_));
+        }
+        // Outside confirmation, a missing row is still an empty selection.
+        if (!none_implies_folder || snapshot.folder.empty()) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+        ComPtr<IShellItem> folder;
+        hr = picker_navigation::IsComputerPath(snapshot.folder)
+            ? SHGetKnownFolderItem(FOLDERID_ComputerFolder, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&folder))
+            : CreatePickerShellItem(wire::Operation::PickFolder, snapshot.folder,
+                                    &folder, false, result_native_options_);
+        return FAILED(hr) ? hr : SHCreateShellItemArrayFromShellItem(folder.Get(), IID_PPV_ARGS(items));
+    }
     HRESULT SnapshotArray(bool result, IShellItemArray** items) {
         if (result && (!inprocess_->InFileOk() || inprocess_->Closed())) return E_UNEXPECTED;
         try {
@@ -1126,6 +1654,13 @@ private:
             if (FAILED(hr)) return hr;
             if (result && !(snapshot.flags & PULSE_PICKER_UI_V2_STATE_CANDIDATE_READY)) return E_UNEXPECTED;
             const auto& paths = result ? snapshot.candidates : snapshot.selections;
+            if (ResultOperation() == wire::Operation::PickFolder) {
+                char detail[144]{};
+                std::snprintf(detail, sizeof(detail), "picker-folder-snapshot source=%s flags=0x%08X selections=%zu candidates=%zu",
+                              result ? "candidate" : "selection", snapshot.flags,
+                              snapshot.selections.size(), snapshot.candidates.size());
+                ObserveNativeReason(detail);
+            }
             if (paths.empty()) return E_FAIL;
             return CreatePickerShellItemArray(ResultOperation(), paths, items, allow_missing_result_, result_native_options_);
         } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; } catch (...) { return E_FAIL; }
@@ -1133,9 +1668,11 @@ private:
     static HRESULT WINAPI InprocessOverwrite(void* context, const PulsePickerUiV2OverwriteEvent* event, uint32_t* response) noexcept {
         auto* self = static_cast<FileDialog*>(context);
         self->inprocess_callback_seen_ = true;
-        if (!response) return E_POINTER;
+        self->inprocess_caller_callback_seen_ = true;
+        if (!response) { self->inprocess_malformed_callback_ = true; return E_POINTER; }
         *response = PULSE_PICKER_UI_V2_OVERWRITE_DEFAULT;
-        try { return event ? self->DispatchOverwrite(*event, response) : E_INVALIDARG; }
+        if (!event) { self->inprocess_malformed_callback_ = true; return E_INVALIDARG; }
+        try { return self->DispatchOverwrite(*event, response); }
         catch (const std::bad_alloc&) { return E_OUTOFMEMORY; } catch (...) { return E_FAIL; }
     }
     HRESULT DispatchOverwrite(const PulsePickerUiV2OverwriteEvent& event, uint32_t* response) {
@@ -1182,9 +1719,11 @@ private:
     static HRESULT WINAPI InprocessShareViolation(void* context, const PulsePickerUiV2OverwriteEvent* event, uint32_t* response) noexcept {
         auto* self = static_cast<FileDialog*>(context);
         self->inprocess_callback_seen_ = true;
-        if (!response) return E_POINTER;
+        self->inprocess_caller_callback_seen_ = true;
+        if (!response) { self->inprocess_malformed_callback_ = true; return E_POINTER; }
         *response = PULSE_PICKER_UI_V2_OVERWRITE_DEFAULT;
-        try { return event ? self->DispatchShareViolation(*event, response) : E_INVALIDARG; }
+        if (!event) { self->inprocess_malformed_callback_ = true; return E_INVALIDARG; }
+        try { return self->DispatchShareViolation(*event, response); }
         catch (const std::bad_alloc&) { return E_OUTOFMEMORY; } catch (...) { return E_FAIL; }
     }
     HRESULT DispatchShareViolation(const PulsePickerUiV2OverwriteEvent& event, uint32_t* response) {
@@ -1238,6 +1777,7 @@ private:
         std::snprintf(diagnostic, sizeof(diagnostic), "inprocess-event-enter kind=%u", kind);
         self->ObserveNativeReason(diagnostic);
         HRESULT hr = E_FAIL;
+        if (!event) self->inprocess_malformed_callback_ = true;
         try { hr = event ? self->DispatchInprocess(*event) : E_INVALIDARG; }
         catch (const std::bad_alloc&) { hr = E_OUTOFMEMORY; } catch (...) { hr = E_FAIL; }
         std::snprintf(diagnostic, sizeof(diagnostic), "inprocess-event-return kind=%u hr=0x%08lX", kind, static_cast<unsigned long>(hr));
@@ -1248,7 +1788,7 @@ private:
         if (FAILED(Thread()) || !inprocess_) return RPC_E_WRONG_THREAD;
         HRESULT hr = inprocess_->Observe(event);
         DiagnosticResult("inprocess-observe-return", hr);
-        if (FAILED(hr)) { if (event.kind == PULSE_PICKER_UI_V2_EVENT_INCLUDE_ITEM) inprocess_->Close(hr); return hr; }
+        if (FAILED(hr)) { inprocess_malformed_callback_ = true; if (event.kind == PULSE_PICKER_UI_V2_EVENT_INCLUDE_ITEM) inprocess_->Close(hr); return hr; }
         struct Exit { FileDialogInprocessSession* session; ~Exit() { session->LeaveEvent(); } } exit{inprocess_.get()};
         if (event.kind == PULSE_PICKER_UI_V2_EVENT_NAVIGATION_COMPLETE) {
             if (!event.proposed_folder.data || !event.proposed_folder.units || event.proposed_folder.units > PULSE_PICKER_UI_V2_MAX_UNITS) return E_INVALIDARG;
@@ -1278,6 +1818,7 @@ private:
                 inprocess_->Close(failure); return failure;
             }
             ComPtr<IShellItemFilter> filter = shell_filter_;
+            inprocess_caller_callback_seen_ = true;
             // Native IFileDialog does not call GetEnumFlagsForItem. IncludeItem
             // filters views, not typed navigation or the final typed result.
             return filter->IncludeItem(item.Get());
@@ -1288,6 +1829,23 @@ private:
         std::vector<Entry> snapshot;
         for (const auto& [cookie, subscription] : subscriptions_) snapshot.push_back({cookie, subscription.proxy, subscription.order});
         std::sort(snapshot.begin(), snapshot.end(), [](const Entry& a, const Entry& b) { return a.order < b.order; });
+        if (services_.legacy_browse_callback) {
+            HWND browse_window = ResolveBrowseCallbackWindow(event.window);
+            if (event.kind == PULSE_PICKER_UI_V2_EVENT_READY) {
+                inprocess_caller_callback_seen_ = true;
+                services_.legacy_browse_callback(browse_window, BFFM_INITIALIZED, 0);
+            } else if (event.kind == PULSE_PICKER_UI_V2_EVENT_SELECTION_CHANGED || event.kind == PULSE_PICKER_UI_V2_EVENT_FOLDER_CHANGED) {
+                ComPtr<IShellItem> selected;
+                HRESULT got = event.kind == PULSE_PICKER_UI_V2_EVENT_SELECTION_CHANGED ? GetCurrentSelection(&selected) : GetFolder(&selected);
+                PIDLIST_ABSOLUTE id = nullptr;
+                if (got == S_OK && selected && SHGetIDListFromObject(selected.Get(), &id) == S_OK && id) {
+                    inprocess_caller_callback_seen_ = true;
+                    try { services_.legacy_browse_callback(browse_window, BFFM_SELCHANGED, reinterpret_cast<LPARAM>(id)); }
+                    catch (...) { CoTaskMemFree(id); throw; }
+                    CoTaskMemFree(id);
+                }
+            }
+        }
         if (event.kind == PULSE_PICKER_UI_V2_EVENT_READY) return S_OK;
         if (event.kind == PULSE_PICKER_UI_V2_EVENT_PROPERTY_CHANGED) {
             if (!properties_owned_ || event.control_id >= properties_.Fields().size() ||
@@ -1345,15 +1903,18 @@ private:
         ComPtr<IShellItem> proposed;
         if (event.kind == PULSE_PICKER_UI_V2_EVENT_FOLDER_CHANGING) {
             if (!event.proposed_folder.data || !event.proposed_folder.units || event.proposed_folder.units > PULSE_PICKER_UI_V2_MAX_UNITS) return E_INVALIDARG;
-            const std::wstring path(event.proposed_folder.data, event.proposed_folder.units);
-            hr = picker_navigation::IsComputerPath(path) ?
-                SHGetKnownFolderItem(FOLDERID_ComputerFolder, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&proposed)) :
-                CreatePickerShellItem(wire::Operation::PickFolder, path, &proposed, false, result_native_options_);
-            if (FAILED(hr)) return hr;
+            if (!snapshot.empty()) {
+                const std::wstring path(event.proposed_folder.data, event.proposed_folder.units);
+                hr = picker_navigation::IsComputerPath(path) ?
+                    SHGetKnownFolderItem(FOLDERID_ComputerFolder, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&proposed)) :
+                    CreatePickerShellItem(wire::Operation::PickFolder, path, &proposed, false, result_native_options_);
+                if (FAILED(hr)) return hr;
+            }
         }
         for (const auto& entry : snapshot) {
             const auto current = subscriptions_.find(entry.cookie);
             if (current == subscriptions_.end() || current->second.order != entry.order) continue;
+            inprocess_caller_callback_seen_ = true;
             char sink_diagnostic[160]{};
             std::snprintf(sink_diagnostic, sizeof(sink_diagnostic), "inprocess-sink-enter kind=%lu order=%llu", static_cast<unsigned long>(event.kind), entry.order);
             ObserveNativeReason(sink_diagnostic);
@@ -1412,6 +1973,7 @@ private:
         return event.kind == PULSE_PICKER_UI_V2_EVENT_FILE_OK ? inprocess_->CompleteFileOk(S_OK) : S_OK;
     }
     ~FileDialog() {
+        DestroyBrowseProxy();
         // Final Release already disconnected weak owner access. Releasing a
         // native subscription can destroy an arbitrary caller-provided sink.
         for (const auto& entry : subscriptions_) native_->Unadvise(entry.first);
@@ -1612,7 +2174,7 @@ private:
         hr=call(native.Get());if(hr!=S_OK)return hr;
         try {
             FileDialogCustomControl control;control.kind=kind;control.id=id;control.checked=checked!=FALSE;
-            if(FindCustom(id) || custom_controls_.size()>=16 || (kind==7 && !CustomLabel(text,control.label)) || (kind==8 && !EditText(text,control.text))) {MarkNativeOnly("value-control-unrepresentable");return hr;}
+            if(FindCustom(id) || custom_controls_.size()>=PULSE_PICKER_UI_V2_MAX_CONTROLS || (kind==7 && !CustomLabel(text,control.label)) || (kind==8 && !EditText(text,control.text))) {MarkNativeOnly("value-control-unrepresentable");return hr;}
             control.has_parent=custom_group_;control.parent=custom_group_?custom_group_id_:0;
             custom_controls_.push_back(std::move(control));
         }catch(...){MarkNativeOnly("value-control-allocation");}
@@ -1620,15 +2182,24 @@ private:
     }
     HRESULT ChangeValueControl(DWORD id,LPCWSTR text,BOOL checked,bool text_value) {
         if(FAILED(Thread()))return RPC_E_WRONG_THREAD;
+        const char* method = text_value ? "SetEditBoxText" : "SetCheckButtonState";
         const auto call=[&](IFileDialogCustomize* c){return text_value?c->SetEditBoxText(id,text):c->SetCheckButtonState(id,checked);};
+        if(!CanCaptureInprocess())return CustomizeCall(method,false,id,0,checked,call);
         auto* control=FindCustom(id);
-        if(!CanCaptureInprocess() || !control || control->kind!=(text_value?8u:7u))return CustomizeCall(text_value?"SetEditBoxText":"SetCheckButtonState",false,id,0,checked,call);
+        if(!control || control->kind!=(text_value?8u:7u))
+            return ProbeUncapturedCustomize(method,false,id,0,checked,call);
         if(!inprocess_){if(const auto hr=Mutable();FAILED(hr))return hr;}
         try {
             auto next=*control;const bool valid=!text_value || EditText(text,next.text);if(!text_value)next.checked=checked!=FALSE;
             if(inprocess_ && !valid)return E_INVALIDARG;
             ComPtr<IFileDialogCustomize> native;HRESULT hr=native_.As(&native);if(FAILED(hr))return hr;
-            hr=call(native.Get());if(hr!=S_OK || !valid){if(!inprocess_)MarkNativeOnly("value-control-unrepresentable");return hr;}
+            hr=call(native.Get());
+            if(hr!=S_OK || !valid){
+                // If native itself rejected the value with E_INVALIDARG without changing
+                // state, preserve the mirror and avoid poisoning in-process routing.
+                if(!inprocess_ && !(hr==E_INVALIDARG))MarkNativeOnly("value-control-unrepresentable");
+                return hr;
+            }
             if(!inprocess_){*control=std::move(next);return hr;}
             hr=inprocess_->UpdateControl(next);
             if(hr==S_OK){*control=std::move(next);return S_OK;}
@@ -1646,7 +2217,7 @@ private:
         hr=call(native.Get()); if(hr!=S_OK) return hr;
         try {
             FileDialogCustomControl control; control.kind=kind;control.id=id;
-            if(FindCustom(id) || custom_controls_.size()>=16 || (kind==4 && !CustomLabel(text,control.label))) { MarkNativeOnly("container-unrepresentable"); return hr; }
+            if(FindCustom(id) || custom_controls_.size()>=PULSE_PICKER_UI_V2_MAX_CONTROLS || (kind==4 && !CustomLabel(text,control.label))) { MarkNativeOnly("container-unrepresentable"); return hr; }
             control.has_parent=kind==4 && custom_group_;control.parent=control.has_parent ? custom_group_id_ : 0;
             custom_controls_.push_back(std::move(control));
         } catch(...) { MarkNativeOnly("container-allocation"); }
@@ -1659,7 +2230,7 @@ private:
         hr = c->AddComboBox(id);
         if (hr != S_OK) { MarkNativeOnly("combo-native-failure"); return hr; }
         try {
-            if (FindCustom(id) || custom_controls_.size() >= 16) { MarkNativeOnly("combo-unrepresentable"); return hr; }
+            if (FindCustom(id) || custom_controls_.size() >= PULSE_PICKER_UI_V2_MAX_CONTROLS) { MarkNativeOnly("combo-unrepresentable"); return hr; }
             FileDialogCustomControl control; control.kind = PULSE_PICKER_UI_V2_CONTROL_COMBO; control.id = id;
             control.has_parent = custom_group_; control.parent = control.has_parent ? custom_group_id_ : 0;
             custom_controls_.push_back(std::move(control));
@@ -1683,9 +2254,28 @@ private:
             operation == ItemMutation::Clear ? "RemoveAllControlItems" : operation == ItemMutation::State ? "SetControlItemState" :
             operation == ItemMutation::Select ? "SetSelectedControlItem" : "SetControlItemText";
         auto* control = FindCustom(id);
-        if (!CanCaptureInprocess() || !control || control->kind < PULSE_PICKER_UI_V2_CONTROL_COMBO || control->kind>6)
-            return CustomizeCall(method, false, id, item, state, call);
+        if (!CanCaptureInprocess())
+            return CustomizeCall(method, false, id, item, state, call, operation == ItemMutation::Clear);
+        if (!control || control->kind < PULSE_PICKER_UI_V2_CONTROL_COMBO || control->kind > 6)
+            return ProbeUncapturedCustomize(method, false, id, item, state, call, operation == ItemMutation::Clear);
         const bool structural = operation == ItemMutation::Add || operation == ItemMutation::Remove || operation == ItemMutation::Clear;
+        if (inprocess_ && operation == ItemMutation::Clear) {
+            ComPtr<IFileDialogCustomize> native; HRESULT hr = native_.As(&native); if (FAILED(hr)) return hr;
+            // Windows RemoveAllControlItems returns E_NOTIMPL; preserve that no-op even if dynamic items are off.
+            hr = native->RemoveAllControlItems(id);
+            if (hr == E_NOTIMPL) return hr;
+            if (FAILED(hr)) return hr;
+            if (!inprocess_->SupportsDynamicItems()) {
+                custom_desynchronized_ = true; inprocess_->Close(E_NOTIMPL); return E_NOTIMPL;
+            }
+            auto next = *control; next.items.clear(); next.has_selected = false; next.selected_item_id = 0;
+            try { hr = inprocess_->UpdateControl(next); } catch (...) { hr = E_FAIL; }
+            if (hr == S_OK) { *control = std::move(next); return S_OK; }
+            const HRESULT restored = RestoreControlItems(native.Get(), *control, next);
+            HRESULT ui_restored = E_FAIL; try { ui_restored = inprocess_->UpdateControl(*control); } catch (...) {}
+            if (restored != S_OK || ui_restored != S_OK) { custom_desynchronized_ = true; MarkNativeOnly("combo-rollback-failed"); inprocess_->Close(E_UNEXPECTED); return E_UNEXPECTED; }
+            return hr;
+        }
         if (inprocess_ && structural && !inprocess_->SupportsDynamicItems()) return E_NOTIMPL;
         if (!inprocess_) { if (const auto hr = Mutable(); FAILED(hr)) return hr; }
         try {
@@ -1695,6 +2285,7 @@ private:
             if (operation == ItemMutation::Add) {
                 FileDialogCustomItem addition; addition.id = item;
                 valid = !changed && next.items.size() < PULSE_PICKER_UI_V2_MAX_CONTROL_ITEMS && CustomLabel(text, addition.label);
+                if (valid && inprocess_ && !inprocess_->SupportsControlItemCount(next.items.size() + 1)) return E_NOTIMPL;
                 if (valid) next.items.push_back(std::move(addition));
             } else if (operation == ItemMutation::Clear) { next.items.clear(); next.has_selected = false; next.selected_item_id = 0; }
             else if (!changed) valid = false;
@@ -1708,12 +2299,19 @@ private:
             ComPtr<IFileDialogCustomize> native; HRESULT hr = native_.As(&native); if (FAILED(hr)) return hr;
             hr = call(native.Get());
             if (hr != S_OK || !valid) {
-                char diagnostic[160]{};
-                std::snprintf(diagnostic, sizeof(diagnostic), "control-item-rejected method=%s id=%lu item=%lu valid=%u hr=0x%08lX live=%u",
-                    method, static_cast<unsigned long>(id), static_cast<unsigned long>(item), valid ? 1u : 0u,
-                    static_cast<unsigned long>(hr), inprocess_ ? 1u : 0u);
-                ObserveNativeReason(diagnostic);
-                if (!inprocess_) MarkNativeOnly("combo-item-unrepresentable");
+                // Applications (e.g. CorelDRAW) call RemoveAllControlItems (native E_NOTIMPL)
+                // and then loop RemoveControlItem over hundreds of IDs (native E_INVALIDARG).
+                // Native did not mutate any state, so preserve the mirror and throttle logs.
+                const bool benign_native_reject =
+                    hr == E_INVALIDARG || (operation == ItemMutation::Clear && hr == E_NOTIMPL);
+                if (!benign_native_reject || ShouldLogCustomizeProbe()) {
+                    char diagnostic[160]{};
+                    std::snprintf(diagnostic, sizeof(diagnostic), "control-item-rejected method=%s id=%lu item=%lu valid=%u hr=0x%08lX live=%u",
+                        method, static_cast<unsigned long>(id), static_cast<unsigned long>(item), valid ? 1u : 0u,
+                        static_cast<unsigned long>(hr), inprocess_ ? 1u : 0u);
+                    ObserveNativeReason(diagnostic);
+                }
+                if (!inprocess_ && !benign_native_reject) MarkNativeOnly("combo-item-unrepresentable");
                 return hr;
             }
             // Native may choose a selection when adding/removing an item; mirror
@@ -1745,7 +2343,7 @@ private:
         try {
             FileDialogCustomControl control; control.kind = group ? PULSE_PICKER_UI_V2_CONTROL_GROUP : PULSE_PICKER_UI_V2_CONTROL_BUTTON;
             control.id = id; control.has_parent = !group && custom_group_; control.parent = control.has_parent ? custom_group_id_ : 0;
-            if (FindCustom(id) || (group && custom_group_) || custom_controls_.size() >= 16 || !CustomLabel(text, control.label)) { MarkNativeOnly("custom-model-unrepresentable"); return hr; }
+            if (FindCustom(id) || (group && custom_group_) || custom_controls_.size() >= PULSE_PICKER_UI_V2_MAX_CONTROLS || !CustomLabel(text, control.label)) { MarkNativeOnly("custom-model-unrepresentable"); return hr; }
             custom_controls_.push_back(std::move(control));
             if (group) { custom_group_ = true; custom_group_id_ = id; }
         } catch (...) { MarkNativeOnly("custom-model-allocation"); }
@@ -1763,8 +2361,12 @@ private:
     HRESULT ChangeCustom(DWORD id, LPCWSTR text, DWORD state, bool label) {
         if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
         auto* control = FindCustom(id);
-        if (!CanCaptureInprocess() || !control) return CustomizeCall(label ? "SetControlLabel" : "SetControlState", false, id, 0, state,
+        if (!CanCaptureInprocess()) return CustomizeCall(label ? "SetControlLabel" : "SetControlState", false, id, 0, state,
             [&](IFileDialogCustomize* c) { return label ? c->SetControlLabel(id, text) : c->SetControlState(id, static_cast<CDCONTROLSTATEF>(state)); });
+        if (!control) {
+            return ProbeUncapturedCustomize(label ? "SetControlLabel" : "SetControlState", false, id, 0, state,
+                [&](IFileDialogCustomize* c) { return label ? c->SetControlLabel(id, text) : c->SetControlState(id, static_cast<CDCONTROLSTATEF>(state)); });
+        }
         try {
             auto next = *control;
             const bool valid = label ? CustomLabel(text, next.label) : !(state & ~3u);
@@ -1799,33 +2401,96 @@ private:
             if (const auto hr = Mutable(); FAILED(hr)) return hr;
             ComPtr<IFileDialogCustomize> c; HRESULT hr = native_.As(&c); if (FAILED(hr)) return hr;
             hr = label ? c->SetControlLabel(id, text) : c->SetControlState(id, static_cast<CDCONTROLSTATEF>(state));
-            if (hr == S_OK && valid) *control = std::move(next); else MarkNativeOnly("custom-model-update-failure");
+            if (hr == S_OK && valid) *control = std::move(next);
+            else if (hr != E_INVALIDARG) MarkNativeOnly("custom-model-update-failure");
             return hr;
         } catch (...) { MarkNativeOnly("custom-model-allocation"); return E_OUTOFMEMORY; }
     }
-    template<class F> HRESULT CustomizeCall(const char* method, bool read_only, DWORD control, DWORD item, DWORD value, F&& call) {
-        const auto report = [&](const char* stage, HRESULT result, bool invoked) {
+    bool ShouldLogCustomizeProbe() noexcept {
+        constexpr uint32_t kMaxProbeLogs = 16;
+        if (customize_probe_logs_ < kMaxProbeLogs) {
+            ++customize_probe_logs_;
+            return true;
+        }
+        if (customize_probe_logs_ == kMaxProbeLogs) {
+            ++customize_probe_logs_;
+            ObserveNativeReason("customize-probe-suppressed", &IID_IFileDialogCustomize);
+        }
+        return false;
+    }
+    template<class F> HRESULT ProbeUncapturedCustomize(const char* method, bool read_only, DWORD id, DWORD item, DWORD state_arg, F&& call, bool allow_notimpl = false) {
+        const bool log_probe = ShouldLogCustomizeProbe();
+        const auto report_probe = [&](const char* stage, HRESULT result, bool invoked, bool mark_native) {
+            if (!mark_native && !log_probe) return;
+            char reason[256]{};
+            std::snprintf(reason, sizeof(reason),
+                "customize-%s method=%s hr=0x%08lX kind=%s id=%lu item=%lu state_arg=%lu called=%u outcome=%s",
+                stage, method, static_cast<unsigned long>(result), read_only ? "read" : "mutation",
+                id, item, state_arg, invoked ? 1u : 0u,
+                !invoked ? "not-invoked" :
+                    FAILED(result) ? "failed" : result == S_OK ? (read_only ? "read-ok" : "mutation-ok") : "other-success");
+            if (mark_native) MarkNativeOnly(reason, &IID_IFileDialogCustomize);
+            else ObserveNativeReason(reason, &IID_IFileDialogCustomize);
+        };
+        report_probe("call", E_PENDING, false, false);
+        if (inprocess_) {
+            // Unknown optional control IDs or unimplemented RemoveAllControlItems
+            // are no-ops and must not tear down or poison an active Show.
+            const HRESULT hr = allow_notimpl ? E_NOTIMPL : E_INVALIDARG;
+            report_probe("result", hr, false, false);
+            return hr;
+        }
+        if (inprocess_used_) {
+            const HRESULT hr = read_only ? E_INVALIDARG : (allow_notimpl ? E_NOTIMPL : E_UNEXPECTED);
+            report_probe("result", hr, false, false);
+            return hr;
+        }
+        if (showing_ && bridge_result_) {
+            report_probe("result", E_UNEXPECTED, false, true);
+            return E_UNEXPECTED;
+        }
+        AddRef();
+        struct Hold { FileDialog* self; ~Hold() { self->Release(); } } hold{this};
+        ComPtr<IFileDialogCustomize> native;
+        const HRESULT queried = native_.As(&native);
+        if (FAILED(queried)) { report_probe("result", queried, false, true); return queried; }
+        const HRESULT result = call(native.Get());
+        // Native rejecting an absent control (E_INVALIDARG) or unimplemented clear
+        // (E_NOTIMPL) leaves dialog state untouched; only unexpected successes or
+        // other failures require falling back to the native dialog.
+        const bool benign = result == E_INVALIDARG || (allow_notimpl && result == E_NOTIMPL);
+        report_probe("result", result, true, !benign);
+        return result;
+    }
+    template<class F> HRESULT CustomizeCall(const char* method, bool read_only, DWORD control, DWORD item, DWORD value, F&& call, bool allow_notimpl = false) {
+        const bool already_native = native_only_.load(std::memory_order_acquire);
+        const bool log_call = !already_native || ShouldLogCustomizeProbe();
+        const auto report = [&](const char* stage, HRESULT result, bool invoked, bool mark_native) {
+            if (!mark_native && !log_call && already_native) return;
             char reason[256]{};
             std::snprintf(reason, sizeof(reason),
                 "customize-%s method=%s hr=0x%08lX kind=%s id=%lu item=%lu state_arg=%lu called=%u outcome=%s",
                 stage, method, static_cast<unsigned long>(result), read_only ? "read" : "mutation",
                 control, item, value, invoked ? 1u : 0u, !invoked ? "not-invoked" :
                     FAILED(result) ? "failed" : result == S_OK ? (read_only ? "read-ok" : "mutation-ok") : "other-success");
-            if (stage[0] == 'c') MarkNativeOnly(reason, &IID_IFileDialogCustomize);
+            if (mark_native) MarkNativeOnly(reason, &IID_IFileDialogCustomize);
             else ObserveNativeReason(reason, &IID_IFileDialogCustomize);
         };
-        if (const auto hr = Thread(); FAILED(hr)) { report("result", hr, false); return hr; }
-        report("call", E_PENDING, false);
-        // Keep every existing native gate, including reads and failed calls.
+        if (const auto hr = Thread(); FAILED(hr)) { report("result", hr, false, false); return hr; }
+        if (!already_native || log_call) report("call", E_PENDING, false, false);
         // Diagnostics carry only static method names, numeric IDs and HRESULT.
-        if (bridge_result_) { report("result", E_UNEXPECTED, false); return E_UNEXPECTED; }
+        if (bridge_result_) { report("result", E_UNEXPECTED, false, true); return E_UNEXPECTED; }
         AddRef();
         struct Hold { FileDialog* self; ~Hold() { self->Release(); } } hold{this};
         ComPtr<IFileDialogCustomize> customize;
         const HRESULT queried = native_.As(&customize);
-        if (FAILED(queried)) { report("result", queried, false); return queried; }
+        if (FAILED(queried)) { report("result", queried, false, true); return queried; }
         const HRESULT result = call(customize.Get());
-        report("result", result, true);
+        // Native rejecting an absent control (E_INVALIDARG) or unimplemented clear
+        // (E_NOTIMPL) leaves dialog state untouched; only real mutations or unexpected
+        // failures require forcing the native dialog.
+        const bool benign = result == E_INVALIDARG || (allow_notimpl && result == E_NOTIMPL);
+        report("result", result, true, !benign);
         return result;
     }
     void ReportCollectedSchema(IPropertyDescriptionList* properties, UINT count) noexcept {
@@ -1898,6 +2563,8 @@ private:
     std::unique_ptr<FileDialogInprocessSession> inprocess_;
     bool inprocess_used_ = false;
     bool inprocess_callback_seen_ = false;
+    bool inprocess_caller_callback_seen_ = false;
+    bool inprocess_malformed_callback_ = false;
     uint32_t result_native_options_ = 0;
     bool allow_missing_result_ = false;
     std::shared_ptr<FileDialogClientState> client_state_;
@@ -1920,6 +2587,7 @@ private:
     bool custom_group_ = false;
     bool custom_desynchronized_ = false;
     DWORD custom_group_id_ = 0;
+    uint32_t customize_probe_logs_ = 0;
     DWORD thread_;
     std::shared_ptr<detail::FileDialogEventOwner> event_owner_;
     struct Subscription { ComPtr<IFileDialogEvents> proxy; uint64_t order; };
@@ -1938,10 +2606,114 @@ private:
     ComPtr<IShellItem> item_;
     ComPtr<IShellItemArray> items_;
     std::wstring returned_name_;
+    std::wstring browsed_folder_;
     std::wstring navigation_root_;
     ComPtr<IShellItem> navigation_root_item_;
+    HWND ResolveBrowseCallbackWindow(HWND remote_window) noexcept {
+        DWORD window_pid = 0;
+        if (!remote_window || !GetWindowThreadProcessId(remote_window, &window_pid) || window_pid == GetCurrentProcessId()) {
+            return remote_window;
+        }
+        browse_remote_window_ = remote_window;
+        if (!browse_proxy_window_) {
+            browse_proxy_window_ = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
+            if (browse_proxy_window_) {
+                SetWindowLongPtrW(browse_proxy_window_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+                browse_proxy_prev_proc_ = reinterpret_cast<WNDPROC>(
+                    SetWindowLongPtrW(browse_proxy_window_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&BrowseProxyWndProc)));
+            }
+        }
+        return browse_proxy_window_ ? browse_proxy_window_ : remote_window;
+    }
+    void DestroyBrowseProxy() noexcept {
+        if (browse_proxy_window_) {
+            if (browse_proxy_prev_proc_) {
+                SetWindowLongPtrW(browse_proxy_window_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(browse_proxy_prev_proc_));
+                browse_proxy_prev_proc_ = nullptr;
+            }
+            SetWindowLongPtrW(browse_proxy_window_, GWLP_USERDATA, 0);
+            DestroyWindow(browse_proxy_window_);
+            browse_proxy_window_ = nullptr;
+        }
+        browse_remote_window_ = nullptr;
+    }
+    static LRESULT CALLBACK BrowseProxyWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) noexcept {
+        auto* self = reinterpret_cast<FileDialog*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        const WNDPROC previous = self ? self->browse_proxy_prev_proc_ : nullptr;
+        if (!self || !self->inprocess_) {
+            return previous ? CallWindowProcW(previous, hwnd, message, wparam, lparam) : DefWindowProcW(hwnd, message, wparam, lparam);
+        }
+        try {
+            if (message == BFFM_ENABLEOK) {
+                if (self->browse_remote_window_ && IsWindow(self->browse_remote_window_)) {
+                    PostMessageW(self->browse_remote_window_, BFFM_ENABLEOK, wparam, lparam ? 1 : 0);
+                }
+                return 0;
+            }
+            if (message == BFFM_SETOKTEXT) {
+                const auto* text = reinterpret_cast<const wchar_t*>(lparam);
+                if (text && wcsnlen_s(text, 1024) < 1024) {
+                    (void)self->SetOkButtonLabel(text);
+                }
+                return 0;
+            }
+            if (message == BFFM_SETSELECTIONW || message == BFFM_SETSELECTIONA) {
+                if (!lparam) return 0;
+                std::wstring path;
+                if (!wparam) {
+                    wchar_t buffer[32768]{};
+                    if (SHGetPathFromIDListEx(reinterpret_cast<PCIDLIST_ABSOLUTE>(lparam), buffer, ARRAYSIZE(buffer), GPFIDL_DEFAULT)) {
+                        path = buffer;
+                    }
+                } else if (message == BFFM_SETSELECTIONW) {
+                    const auto* text = reinterpret_cast<const wchar_t*>(lparam);
+                    const size_t size = wcsnlen_s(text, 32768);
+                    if (size < 32768) path.assign(text, size);
+                } else {
+                    const auto* text = reinterpret_cast<const char*>(lparam);
+                    const size_t bytes = strnlen_s(text, 32768);
+                    if (bytes && bytes < 32768) {
+                        const int units = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, text, static_cast<int>(bytes), nullptr, 0);
+                        if (units > 0) {
+                            path.resize(static_cast<size_t>(units));
+                            if (!MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, text, static_cast<int>(bytes), path.data(), units)) {
+                                path.clear();
+                            }
+                        }
+                    }
+                }
+                if (!path.empty()) {
+                    ComPtr<IShellItem> item;
+                    if (SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item)) == S_OK && item) {
+                        (void)self->SetFolder(item.Get());
+                    }
+                }
+                return 0;
+            }
+            if (message == BFFM_SETSTATUSTEXTA || message == BFFM_SETSTATUSTEXTW || message == BFFM_SETEXPANDED) {
+                return 0;
+            }
+            if (message == WM_SETTEXT) {
+                const auto* text = reinterpret_cast<const wchar_t*>(lparam);
+                if (text && wcsnlen_s(text, 1024) < 1024) {
+                    (void)self->SetTitle(text);
+                }
+                return TRUE;
+            }
+            if (message == WM_CLOSE) {
+                (void)self->Close(HRESULT_FROM_WIN32(ERROR_CANCELLED));
+                return 0;
+            }
+        } catch (...) {
+            return 0;
+        }
+        return previous ? CallWindowProcW(previous, hwnd, message, wparam, lparam) : DefWindowProcW(hwnd, message, wparam, lparam);
+    }
     UINT result_index_ = 0;
     size_t result_count_ = 0;
+    HWND browse_proxy_window_ = nullptr;
+    WNDPROC browse_proxy_prev_proc_ = nullptr;
+    HWND browse_remote_window_ = nullptr;
 };
 }
 

@@ -19,6 +19,87 @@ bool actual_null_verb = false, require_default_action = false, force_shell_failu
 HANDLE shell_process = nullptr;
 std::vector<std::wstring> missing_programs;  // ShellStub reports these as not installed
 std::vector<std::wstring> launched_programs;
+std::wstring new_image, new_line, new_directory;
+DWORD new_pid = 0;
+BOOL WINAPI CaptureShellNew(LPCWSTR image, LPWSTR command, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES,
+    BOOL, DWORD, LPVOID, LPCWSTR directory, LPSTARTUPINFOW, LPPROCESS_INFORMATION) {
+    new_image = image ? image : L"";
+    new_line = command;
+    new_directory = directory;
+    SetLastError(create_error);
+    return create_error == ERROR_SUCCESS;
+}
+BOOL WINAPI StartShellNewWizard(LPCWSTR image, LPWSTR command, LPSECURITY_ATTRIBUTES a, LPSECURITY_ATTRIBUTES b,
+    BOOL inherit, DWORD flags, LPVOID env, LPCWSTR directory, LPSTARTUPINFOW startup, LPPROCESS_INFORMATION process) {
+    if (!CreateProcessW(image, command, a, b, inherit, flags, env, directory, startup, process)) return FALSE;
+    new_pid = process->dwProcessId;
+    return TRUE;
+}
+bool TestShellNew() {
+    bool ok = true;
+    auto check = [&](bool condition, const char* label) {
+        ok &= condition;
+        std::cout << (condition ? "[PASS] " : "[FAIL] ") << label << '\n';
+    };
+    const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
+        (L"shell-new-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
+    const auto folder = root / L"新建 %WINDIR% folder";
+    std::filesystem::create_directories(folder);
+    const auto extended = L"\\\\?\\" + folder.wstring();
+    const ShellCommandApi api{CaptureShellNew};
+
+    create_error = ERROR_SUCCESS;
+    auto err = LaunchShellNew(extended, L"新建 快捷方式", L".lnk", {}, api);
+    const auto first = folder / L"新建 快捷方式.lnk";
+    const auto expected = L",NewLinkHere " + first.wstring();
+    check(!err && new_line.ends_with(expected) && new_directory == folder.wstring() &&
+        new_image.ends_with(L"\\rundll32.exe") && std::filesystem::is_regular_file(first),
+        "wizard receives an ordinary unquoted path without expanding percent text");
+    std::ofstream(first) << "existing";
+    create_error = ERROR_FILE_NOT_FOUND;
+    err = LaunchShellNew(extended, L"新建 快捷方式", L".LNK", {}, api);
+    check(err == ERROR_FILE_NOT_FOUND && new_line.ends_with(L" (2).LNK") &&
+        !std::filesystem::exists(folder / L"新建 快捷方式 (2).LNK") && std::filesystem::file_size(first) == 8,
+        "failed process startup removes only the newly reserved placeholder");
+    err = LaunchShellNew(extended, std::wstring(MAX_PATH, L'l'), L".lnk", {}, api);
+    check(err == ERROR_FILENAME_EXCED_RANGE &&
+        std::distance(std::filesystem::directory_iterator(folder), std::filesystem::directory_iterator{}) == 1,
+        "wizard-incompatible names fail before making an empty shortcut");
+
+    const auto missing = extended + L"\\missing";
+    check(LaunchShellNew(missing, L"new", L".lnk", {}, api) == ERROR_PATH_NOT_FOUND,
+        "missing destination returns the Win32 error instead of silently doing nothing");
+    create_error = ERROR_SUCCESS;
+    const auto contact = folder / L"New Contact.contact";
+    const auto argument = L"\"" + contact.wstring() + L"\"";
+    wchar_t system[MAX_PATH]{};
+    GetWindowsDirectoryW(system, ARRAYSIZE(system));
+    err = LaunchShellNew(extended, L"New Contact", L".contact",
+        L"\"%SystemRoot%\\fixture.exe\" /CreateContact \"%1\" %L", api);
+    check(!err && new_directory == folder.wstring() && new_line ==
+        L"\"" + std::wstring(system) + L"\\fixture.exe\" /CreateContact " + argument + L" " + argument &&
+        !std::filesystem::exists(contact), "registry entries expand template variables before inserting quoted literal paths");
+    err = LaunchShellNew(extended, L"New Contact", L".contact", L"fixture.exe /new", api);
+    check(!err && new_line == L"fixture.exe /new " + argument,
+        "command-only entries without a placeholder receive one quoted output argument");
+    bool replaced = false;
+    check(ExpandShellCommand(L"%L", L"\\\\?\\UNC\\server\\share\\with spaces.lnk", &replaced) ==
+        L"\"\\\\server\\share\\with spaces.lnk\"" && replaced,
+        "UNC argument keeps the server/share path when removing the extended prefix");
+    bool w_replaced = false;
+    check(ExpandShellCommand(L"tool.exe /dir %W %1", L"C:\\docs folder\\a b.pdf", &w_replaced) ==
+              L"tool.exe /dir \"C:\\docs folder\" \"C:\\docs folder\\a b.pdf\"" && w_replaced,
+          "%W expands to quoted parent directory alongside %1");
+    check(ExpandShellCommand(L"tool.exe %w", L"C:\\a.pdf") == L"tool.exe \"C:\\\"",
+          "%w on drive root preserves trailing backslash");
+    check(ExpandShellCommand(L"tool.exe \"%W\"", L"C:\\docs\\a.pdf") ==
+              L"tool.exe \"C:\\docs\"",
+          "quoted %W is not double-quoted");
+    std::filesystem::remove(first);
+    std::filesystem::remove(folder);
+    std::filesystem::remove(root);
+    return ok;
+}
 BOOL WINAPI CreateStub(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES,
     BOOL, DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION) {
     SetLastError(create_error); return create_error == ERROR_SUCCESS;
@@ -119,6 +200,14 @@ bool TestShellItemLaunch() {
 }
 }
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--shell-new-only")
+        return TestShellNew() ? 0 : 1;
+    if (argc == 3 && std::wstring_view(argv[1]) == L"--shell-new-wizard") {
+        const DWORD error = LaunchShellNew(argv[2], L"新建 快捷方式", L".lnk", {},
+            {StartShellNewWizard});
+        std::cout << "error=" << error << " pid=" << new_pid << '\n';
+        return error ? 1 : 0;
+    }
     if (argc == 2 && std::wstring_view(argv[1]) == L"--association-only")
         return TestShellItemLaunch() ? 0 : 1;
     if (argc == 4 && std::wstring_view(argv[1]) == L"--child") {
@@ -164,6 +253,14 @@ int wmain(int argc, wchar_t** argv) {
         const bool split = SplitShellCommand(inf_command, parts);
         check(split && _wcsicmp(parts.executable.c_str(), inf_image.c_str()) == 0, "INF install verb splits for elevation");
     }
+    check(ExpandShellCommand(L"tool.exe /dir %W %1", L"C:\\docs folder\\a b.pdf") ==
+              L"tool.exe /dir \"C:\\docs folder\" \"C:\\docs folder\\a b.pdf\"",
+          "ExpandShellCommand expands %W to quoted parent directory alongside %1");
+    check(ExpandShellCommand(L"tool.exe %w", L"C:\\a.pdf") == L"tool.exe \"C:\\\"",
+          "ExpandShellCommand preserves trailing backslash for drive root %w");
+    check(ExpandShellCommand(L"tool.exe \"%W\"", L"C:\\docs\\a.pdf") ==
+              L"tool.exe \"C:\\docs\"",
+          "ExpandShellCommand does not double-quote already quoted %W");
     const HWND owner = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x1234));
     const ShellCommandApi stub{CreateStub, ShellStub};
     auto result = LaunchShellCommand(command, root.wstring(), owner, stub);

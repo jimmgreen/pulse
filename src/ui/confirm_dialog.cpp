@@ -77,9 +77,13 @@ public:
         wc.hbrBackground = nullptr;
         if (!GetClassInfoExW(wc.hInstance, kConfirmClass, &wc)) RegisterClassExW(&wc);
 
+        // Born on the owner's monitor: CW_USEDEFAULT lands on the primary one and
+        // the move to a screen of another scale rescaled the size (WM_DPICHANGED).
+        const POINT origin = OwnedWindowOrigin(owner, static_cast<int>(420.0f * scale_),
+                                               static_cast<int>(200.0f * scale_));
         hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kConfirmClass,
             spec_.title.c_str(), WS_POPUP | WS_THICKFRAME | WS_SYSMENU,
-            CW_USEDEFAULT, CW_USEDEFAULT, static_cast<int>(420.0f * scale_),
+            origin.x, origin.y, static_cast<int>(420.0f * scale_),
             static_cast<int>(200.0f * scale_), owner, nullptr, wc.hInstance, this);
         if (!hwnd_) return ConfirmChoice::Cancel;
         RECT placed{};

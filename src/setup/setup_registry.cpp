@@ -52,6 +52,7 @@ std::optional<PreviousInstall> FindPreviousInstall(const wchar_t* key) {
         p.where = where;
         p.dir = NormalizeDir(*dir);
         p.uninstall_string = ReadString(where.root, where.view, key, L"UninstallString").value_or(L"");
+        p.index_path = ReadString(where.root, where.view, key, L"Pulse Setup: Index Path");
         p.inno = !ReadString(where.root, where.view, key, L"Pulse Setup: Version").has_value();
         if (auto t = ReadString(where.root, where.view, key, L"Inno Setup: Selected Tasks")) {
             Tasks tasks;
@@ -94,6 +95,8 @@ bool WriteUninstallEntry(const RegLocation& where, const wchar_t* key, const Uni
     sz(L"Inno Setup: App Path", e.dir);
     sz(L"Inno Setup: Selected Tasks", e.tasks);
     sz(L"Pulse Setup: Version", e.version);
+    if (!e.index_path.empty()) sz(L"Pulse Setup: Index Path", e.index_path);
+    else RegDeleteValueW(h, L"Pulse Setup: Index Path");
     sz(L"UninstallString", Quote(e.uninstaller) + e.uninstall_args);
     sz(L"QuietUninstallString", Quote(e.uninstaller) + e.uninstall_args + L" /VERYSILENT");
     sz(L"InstallDate", date);

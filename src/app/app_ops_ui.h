@@ -12,6 +12,15 @@ namespace pulse {
 bool SubmitWithConflictResolution(AppState& s, ops::OpRequest request, uint64_t* task_id = nullptr);
 void ReleaseTrayBatch(AppState& s, size_t idx);
 void PasteIntoCurrent(AppState& s);
+inline constexpr UINT_PTR kFileClipboardPasteTimer = 0xD312;
+void PollFileClipboardPaste(AppState& s);
+void CancelFileClipboardPaste(AppState& s);
+// A transfer the user just started (paste, drop) that is still waiting after
+// kQueuedTransferNoticeMs behind another running task gets one "queued" snack,
+// so a silent queue does not invite a second paste. Called on WM_OPS_NOTIFY.
+inline constexpr ULONGLONG kQueuedTransferNoticeMs = 400;
+void WatchQueuedTransfer(AppState& s, uint64_t task);
+void NoteQueuedTransfers(AppState& s);
 void DeleteSelected(AppState& s, bool permanent);
 void PollDeletePreflight(AppState& s);
 void CancelDeletePreflight(AppState& s);
@@ -58,12 +67,14 @@ void SendTrayToDest(AppState& s, const std::wstring& dir, bool move);
 // that exists and is not already in dir. Selects the arrivals when dir is the
 // current folder; a snack with 撤销 / 打开 follows when the task finishes.
 void ReleaseTrayTo(AppState& s, const std::wstring& dir, bool move);
+bool ReleaseTrayTo(AppState& s, const std::wstring& dir, app::TrayReleaseMode mode,
+                   const std::vector<uint64_t>& item_ids = {});
 void NoteTrayReleaseFinished(AppState& s, const ops::FinishedTask& done);
 // Every staged path whose file still exists (shelf ZIP, rename, drag-out).
 std::vector<std::wstring> TrayLivePaths(const AppState& s);
 // Clears the tray; the snack offers to put the items back (WM_TRAY_RESTORE).
 void ClearTrayWithUndo(AppState& s);
-void HandleTrayMessage(AppState& s, UINT message);
+void HandleTrayMessage(AppState& s, UINT message, WPARAM token = 0);
 // Removes staged items by id (open view Del).
 void RemoveTrayItems(AppState& s, const std::vector<uint64_t>& ids);
 // Removes one staged path (the "已暂存" row pill).
@@ -83,6 +94,8 @@ void HandleOperationStatusAction(AppState& s, int action);
 void HandleOperationHistoryAction(AppState& s, uint64_t task_id, int action);
 std::vector<ui::FluentMenuItem> BuildOperationHistoryMenu(AppState& s, const std::vector<ops::OpStatus>& history);
 void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog);
+void NoteOperationFinishedFailure(AppState& s, const ops::FinishedTask& finished);
+void DeferOperationAutoShow(AppState& s);
 // Makes `to` the window that shows file operations (multi-window M4c, plan
 // §8.1): ops notifications and shell dialogs go to it, and the progress
 // window's state moves along, shown there without focus if it was showing.

@@ -8,6 +8,7 @@
 #include "../ui/fluent_menu.h"
 #include <windows.h>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace pulse {
@@ -30,6 +31,8 @@ uint32_t ApplyDetailsColumnCommand(uint32_t mask, int command);
 
 } // namespace app
 
-void ShowDetailsColumnMenu(AppState& s, POINT screen_pt, uint32_t visible, bool search);
+// shown_extension_keys: extension columns the pane draws ("<package>/<id>").
+void ShowDetailsColumnMenu(AppState& s, POINT screen_pt, uint32_t visible, bool search,
+                           const std::vector<std::wstring>& shown_extension_keys = {});
 
 } // namespace pulse

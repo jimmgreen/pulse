@@ -7,6 +7,7 @@
 #include "app_network_page.h"
 #include "../common/localization.h"
 #include "../ui/quick_access_editor.h"
+#include "../ui/ui_renderer.h"
 #include <algorithm>
 #include <unordered_map>
 #include "app_hosted_edit.h"
@@ -150,6 +151,113 @@ void CommitQuickAccessDrag(AppState& s, const std::wstring& key, size_t gap) {
                                                      s.sidebarQuickAccessHiddenMask, false);
     s.places.SetQuickAccessLayout(app::MoveQuickAccessKey(all, visible, key, gap),
                                   app::BuiltinQuickAccessDefaultKeys(s.sidebar.quick_access));
+}
+
+namespace {
+bool ShortcutDropRow(const ui::HitTestResult& hit) {
+    return hit.region == ui::HitTestResult::SidebarItem ||
+           hit.region == ui::HitTestResult::SidebarItemExpand;
+}
+
+bool FavoritesBarDropArea(const ui::HitTestResult& hit) {
+    return hit.region == ui::HitTestResult::FavoritesBarItem ||
+           hit.region == ui::HitTestResult::FavoritesBarChevron ||
+           hit.region == ui::HitTestResult::FavoritesBarMore;
+}
+
+bool CanPinDraggedFavorite(const AppState& s, const std::wstring& path) {
+    if (s.places.IsQuickAccessPinned(path)) return false;
+    const auto normalized = fs::NormalizePath(path);
+    // An already-visible built-in folder is also a quick-access shortcut.
+    return std::none_of(s.sidebar.quick_access.begin(), s.sidebar.quick_access.end(),
+        [&](const app::SidebarEntry& entry) {
+            return app::IsBuiltinQuickAccessFolder(entry.builtin) &&
+                   !(s.sidebarQuickAccessHiddenMask & (1u << entry.builtin)) &&
+                   _wcsicmp(fs::NormalizePath(entry.path).c_str(), normalized.c_str()) == 0;
+        });
+}
+
+struct ShortcutCrossDrop {
+    bool matched = false;
+    bool allowed = false;
+    std::wstring group;
+};
+
+ShortcutCrossDrop ResolveShortcutCrossDrop(const AppState& s, ShortcutDragSource source,
+                                           const std::wstring& path, const ui::HitTestResult& hit) {
+    using R = ui::HitTestResult;
+    const bool real_path = !path.empty() && !fs::IsVirtualPath(path);
+    if (source != ShortcutDragSource::QuickAccess) {
+        const bool matched = IsQuickAccessDropArea(hit);
+        return {matched, matched && real_path && source == ShortcutDragSource::FavoriteFolder &&
+                         CanPinDraggedFavorite(s, path), {}};
+    }
+    const bool sidebar = hit.sidebar_section == static_cast<int>(app::SidebarSectionId::Starred) &&
+                         (ShortcutDropRow(hit) || hit.region == R::SidebarHeader);
+    const bool matched = sidebar || FavoritesBarDropArea(hit);
+    if (!matched || !real_path || s.places.IsStarred(path)) return {matched, false, {}};
+    std::wstring group = app::StarredGroupIdFromPath(hit.path);
+    if (group.empty() && !hit.path.empty()) {
+        if (const auto* member = s.places.FindStarred(hit.path)) group = member->group;
+    }
+    if (!group.empty() && !s.places.FindStarredGroup(group)) return {true, false, {}};
+    return {true, true, std::move(group)};
+}
+} // namespace
+
+bool IsQuickAccessDropArea(const ui::HitTestResult& hit) {
+    using R = ui::HitTestResult;
+    return hit.sidebar_section == static_cast<int>(app::SidebarSectionId::QuickAccess) &&
+           (ShortcutDropRow(hit) || hit.region == R::SidebarHeader || hit.region == R::SidebarHeaderAction);
+}
+
+void ClearShortcutCrossDropHint(AppState& s) {
+    s.dropSidebar = s.dropFavorite = -1;
+    s.dropBadge.clear();
+    s.dropBadgeMove = false;
+}
+
+bool PreviewShortcutCrossDrop(AppState& s, ShortcutDragSource source, const std::wstring& path,
+                              const ui::HitTestResult& hit, POINT client) {
+    ClearShortcutCrossDropHint(s);
+    const auto target = ResolveShortcutCrossDrop(s, source, path, hit);
+    if (!target.allowed) return target.matched;
+    if (ShortcutDropRow(hit)) s.dropSidebar = hit.index;
+    if (FavoritesBarDropArea(hit) && hit.region != ui::HitTestResult::FavoritesBarMore)
+        s.dropFavorite = hit.index;
+    s.dropBadgeX = static_cast<float>(client.x);
+    s.dropBadgeY = static_cast<float>(client.y);
+    if (source != ShortcutDragSource::QuickAccess) {
+        s.dropBadge = l10n::Get(l10n::StringId::PinQuickAccess);
+    } else if (const auto* group = s.places.FindStarredGroup(target.group)) {
+        wchar_t label[256]{};
+        swprintf_s(label, l10n::Get(l10n::StringId::FavoritesBarDropGroupFormat).c_str(), group->name.c_str());
+        s.dropBadge = label;
+    } else {
+        s.dropBadge = l10n::Get(l10n::StringId::FavoritesBarDropAdd);
+    }
+    return true;
+}
+
+bool CommitShortcutCrossDrop(AppState& s, ShortcutDragSource source, const std::wstring& path,
+                             const ui::HitTestResult& hit) {
+    const auto target = ResolveShortcutCrossDrop(s, source, path, hit);
+    if (!target.allowed) return target.matched;
+    // Collection actions only change path records; never launch a file drop.
+    if (source != ShortcutDragSource::QuickAccess) {
+        s.places.SetQuickAccessPinned({path}, true);
+    } else if (s.places.ToggleStarred(path, app::PlaceItemKind::Folder)) {
+        if (!target.group.empty()) s.places.SetStarredItemGroup(path, target.group);
+        RefreshStarredViews(s);
+    }
+    return true;
+}
+
+ui::HitTestResult HitShortcutCrossDrop(AppState& s, POINT client) {
+    const auto vm = BuildVm(s, false);
+    const auto rect = D2D1::RectF(0, 0, static_cast<float>(s.compositor.Width()),
+                                 static_cast<float>(s.compositor.Height()));
+    return s.renderer.HitTest(vm, rect, static_cast<float>(client.x), static_cast<float>(client.y));
 }
 
 std::vector<std::wstring> QuickAccessTargets(const app::Tab* tab, bool background) {
@@ -301,6 +409,8 @@ void UpdateWorkspaceFromCurrent(AppState& s, int index) {
     s.places.UpdateWorkspaceSnapshot(index, static_cast<int>(WorkspaceLayoutOf(s)),
                                     CollectPanePaths(s), CollectPaneViews(s));
     s.places.active_workspace = index;
+    if (auto* lt = s.window_tabs.Active())
+        lt->workspace_root = s.places.workspaces[static_cast<size_t>(index)].root;
     s.places.Save();
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }

@@ -444,8 +444,140 @@ void ForeignDisabled(bool low = false, HWND reverse_owner = nullptr) {
     UnmapViewOfFile(const_cast<UINT_PTR*>(shared)); CloseHandle(mapping);
 }
 
+int PreHideSlowChild(const wchar_t* argument) {
+    const auto mapping = reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(_wcstoui64(argument, nullptr, 10)));
+    auto* shared = static_cast<volatile UINT_PTR*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(UINT_PTR) * 8));
+    if (!shared) return 2;
+    const DWORD delay_ms = static_cast<DWORD>(shared[1]);
+    WNDCLASSW wc{}; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"Pulse.PreHideSlow.Regression";
+    wc.lpfnWndProc = [](HWND window, UINT message, WPARAM wparam, LPARAM lparam) -> LRESULT {
+        if (message == WM_NCCREATE) {
+            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams));
+        }
+        if (message == WM_ENABLE && wparam) {
+            const DWORD delay = static_cast<DWORD>(GetWindowLongPtrW(window, GWLP_USERDATA));
+            if (delay) Sleep(delay);
+        }
+        if (message == WM_DESTROY) PostQuitMessage(0);
+        return DefWindowProcW(window, message, wparam, lparam);
+    };
+    RegisterClassW(&wc);
+    HWND window = CreateWindowW(wc.lpszClassName, L"Slow caller owner", WS_OVERLAPPEDWINDOW,
+        80, 80, 220, 140, nullptr, nullptr, wc.hInstance, reinterpret_cast<LPVOID>(static_cast<UINT_PTR>(delay_ms)));
+    ShowWindow(window, SW_SHOWNOACTIVATE);
+    pulse::PickerOwnerGuard caller_guard(window);
+    shared[2] = caller_guard.Error();
+    shared[3] = caller_guard.PreHideEvent() ? 1 : 0;
+    *shared = reinterpret_cast<UINT_PTR>(window);
+    HANDLE pre_hide = caller_guard.PreHideEvent();
+    const ULONGLONG deadline = GetTickCount64() + 10000;
+    while (GetTickCount64() < deadline) {
+        if (shared[4] == 1) break;
+        const DWORD count = pre_hide ? 1u : 0u;
+        const DWORD wait = MsgWaitForMultipleObjects(count, count ? &pre_hide : nullptr, FALSE, 20, QS_ALLINPUT);
+        if (pre_hide && wait == WAIT_OBJECT_0) {
+            caller_guard.CompletePreHideRestore();
+            pre_hide = nullptr;
+            shared[5] = 1;
+        }
+        MSG msg{};
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) break;
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    DestroyWindow(window);
+    UnmapViewOfFile(const_cast<UINT_PTR*>(shared)); CloseHandle(mapping);
+    return 0;
+}
+
+void PreHideSlowRestore(DWORD delay_ms, const char* label) {
+    SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
+    HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE, 0, sizeof(UINT_PTR) * 8, nullptr);
+    auto* shared = mapping ? static_cast<volatile UINT_PTR*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(UINT_PTR) * 8)) : nullptr;
+    if (!shared) { Check(false, "pre-hide slow fixture mapping"); if (mapping) CloseHandle(mapping); return; }
+    for (size_t i = 0; i < 8; ++i) shared[i] = 0;
+    shared[1] = delay_ms;
+    wchar_t self[32768]{}; GetModuleFileNameW(nullptr, self, 32768);
+    std::wstring command = L"\"" + std::wstring(self) + L"\" --pre-hide-slow-child " + std::to_wstring(reinterpret_cast<UINT_PTR>(mapping));
+    STARTUPINFOW startup{sizeof(startup)}; PROCESS_INFORMATION child{};
+    const BOOL started = CreateProcessW(self, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &child);
+    Check(started != FALSE, label);
+    if (started) {
+        const auto deadline = GetTickCount64() + 5000;
+        while (!*shared && GetTickCount64() < deadline && WaitForSingleObject(child.hProcess, 0) == WAIT_TIMEOUT) Sleep(10);
+        const HWND owner_hwnd = reinterpret_cast<HWND>(*shared);
+        Check(IsWindow(owner_hwnd) && shared[2] == 0 && shared[3] == 1 && !IsWindowEnabled(owner_hwnd),
+            "slow caller owner disabled with active PreHideEvent");
+        if (IsWindow(owner_hwnd)) {
+            pulse::PickerOwnerGuard remote_guard(owner_hwnd, pulse::PickerOwnerGuard::CallerManagedRemoteOwner{child.dwProcessId});
+            Check(!remote_guard.Error() && remote_guard.Alive(), "remote guard attaches to caller-guarded owner");
+            if (!remote_guard.Error()) {
+                WNDCLASSW popup_wc{}; popup_wc.lpfnWndProc = DefWindowProcW; popup_wc.hInstance = GetModuleHandleW(nullptr);
+                popup_wc.lpszClassName = L"Pulse.PreHideSlow.Popup";
+                RegisterClassW(&popup_wc);
+                HWND dialog = CreateWindowW(popup_wc.lpszClassName, L"Slow restore popup", WS_POPUP | WS_CAPTION,
+                    120, 120, 240, 120, owner_hwnd, nullptr, popup_wc.hInstance, nullptr);
+                ShowWindow(dialog, SW_SHOW);
+                SetForegroundWindow(dialog);
+                const bool interactive_fg = GetForegroundWindow() == dialog;
+                std::atomic<bool> stop_monitor{false};
+                std::atomic<bool> saw_dead{false};
+                std::thread monitor([&] {
+                    while (!stop_monitor.load(std::memory_order_acquire)) {
+                        if (!remote_guard.Alive()) { saw_dead.store(true, std::memory_order_release); return; }
+                        Sleep(5);
+                    }
+                });
+                if (interactive_fg) remote_guard.RestoreBeforeDialogHide(dialog);
+                else pulse::picker_owner_detail::RestoreBeforeDialogHideForTest(remote_guard, dialog);
+                const bool alive_after_restore = remote_guard.Alive();
+                const auto wait_done = GetTickCount64() + 3000;
+                while (!shared[5] && GetTickCount64() < wait_done) {
+                    MSG msg{};
+                    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                    Sleep(10);
+                }
+                const bool alive_after_complete = remote_guard.Alive();
+                stop_monitor.store(true, std::memory_order_release);
+                monitor.join();
+                Check(!saw_dead.load(std::memory_order_acquire), "concurrent Alive() monitor never cancels accepted result during slow pre-hide restore");
+                Check(alive_after_restore && alive_after_complete, "remote guard remains Alive() during and after slow caller pre-hide restore");
+                const bool completed = shared[5] == 1 && IsWindowEnabled(owner_hwnd);
+                if (!completed) {
+                    std::printf("  diag delay=%lu shared5=%llu enabled=%d iswin=%d exit=%lu diag_restored=%d\n",
+                        delay_ms, static_cast<unsigned long long>(shared[5]),
+                        IsWindowEnabled(owner_hwnd) ? 1 : 0, IsWindow(owner_hwnd) ? 1 : 0,
+                        WaitForSingleObject(child.hProcess, 0),
+                        remote_guard.Diagnostics().restore_owned_disable ? 1 : 0);
+                }
+                Check(completed, "caller completed pre-hide EnableWindow(TRUE)");
+                if (delay_ms < 900) {
+                    Check(remote_guard.Diagnostics().restore_owned_disable, "diagnostics records caller-owned pre-hide restore completion");
+                }
+                DestroyWindow(dialog);
+            }
+        }
+        shared[4] = 1;
+        if (WaitForSingleObject(child.hProcess, 3000) == WAIT_TIMEOUT) { TerminateProcess(child.hProcess, 99); WaitForSingleObject(child.hProcess, 1000); }
+        CloseHandle(child.hThread); CloseHandle(child.hProcess);
+    }
+    UnmapViewOfFile(const_cast<UINT_PTR*>(shared)); CloseHandle(mapping);
+}
+
 int wmain(int argc, wchar_t** argv) {
     if(argc==2 && wcscmp(argv[1],L"--focus-cross-thread")==0){CrossThreadFocus();printf("Checks: %d, failures: %d\n",checks,failures);return failures?1:0;}
+    if (argc == 2 && wcscmp(argv[1], L"--pre-hide-slow") == 0) {
+        PreHideSlowRestore(350, "start 350ms slow WM_ENABLE caller (Photoshop shape)");
+        PreHideSlowRestore(1200, "start 1200ms over-timeout WM_ENABLE caller");
+        std::printf("Checks: %d, failures: %d\n", checks, failures);
+        return failures ? 1 : 0;
+    }
+    if (argc == 3 && wcscmp(argv[1], L"--pre-hide-slow-child") == 0) return PreHideSlowChild(argv[2]);
     if (argc == 2 && wcscmp(argv[1], L"--foreign-only") == 0) {
         ForeignDisabled(); ForeignDisabled(true);
         { Owner reverse(false); ForeignDisabled(true, reverse.window); }
@@ -469,6 +601,8 @@ int wmain(int argc, wchar_t** argv) {
     });
     ForeignDisabled(); ForeignDisabled(true);
     { Owner reverse(false); ForeignDisabled(true, reverse.window); }
+    PreHideSlowRestore(350, "start 350ms slow WM_ENABLE caller (Photoshop shape)");
+    PreHideSlowRestore(1200, "start 1200ms over-timeout WM_ENABLE caller");
     Responsive(); AlreadyDisabled(); Timeout(false); Timeout(true); RestoreTimeout(); Destroyed(); AttachedQueues();
     std::printf("Checks: %d, failures: %d\n", checks, failures);
     SetEvent(completed);

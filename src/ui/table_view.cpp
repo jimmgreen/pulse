@@ -249,6 +249,7 @@ bool TableView::SetPayloadImpl(const std::wstring& payload,
     awaiting_sheet_ = pending_sheet_request_ = false;
     sel_valid_ = false;
     drag_ = Drag::None;
+    scrollbar_hover_ = Drag::None;
     hover_tab_ = tip_row_ = tip_col_ = -1;
     tip_shown_ = false;
     BuildPlain();
@@ -272,6 +273,7 @@ void TableView::Clear() {
     response_sheet_ = 0;
     sel_valid_ = false;
     drag_ = Drag::None;
+    scrollbar_hover_ = Drag::None;
     hover_tab_ = tip_row_ = tip_col_ = -1;
     tip_shown_ = false;
 }
@@ -334,6 +336,8 @@ std::vector<std::wstring> TableView::StatusParts(uint32_t encoding) const {
     case ipc::PreviewTextEncoding::Utf8Bom: name = L"UTF-8 BOM"; break;
     case ipc::PreviewTextEncoding::Utf16Le: name = L"UTF-16 LE"; break;
     case ipc::PreviewTextEncoding::Utf16Be: name = L"UTF-16 BE"; break;
+    case ipc::PreviewTextEncoding::Utf32Le: name = L"UTF-32 LE"; break;
+    case ipc::PreviewTextEncoding::Utf32Be: name = L"UTF-32 BE"; break;
     case ipc::PreviewTextEncoding::Ansi:
         switch (GetACP()) {
         case 936: name = L"GBK"; break;
@@ -508,6 +512,10 @@ void TableView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D
                      SearchHighlights matches) {
     Sheet* sheet = Current();
     if (!dc || !sheet || !EnsureFormats(factory, scale)) return;
+    if (rect.left != view_.left || rect.top != view_.top || rect.right != view_.right ||
+        rect.bottom != view_.bottom || scale != scale_) {
+        if (DraggingScrollbar()) drag_ = Drag::None;
+    }
     view_ = rect;
     scale_ = scale;
     if (brush_owner_ != dc || !brush_) {
@@ -751,24 +759,17 @@ void TableView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D
         dc->DrawLine(D2D1::Point2F(head.left, head.bottom - 0.5f), D2D1::Point2F(head.right, head.bottom - 0.5f), b, 1.0f);
     }
 
-    // Scroll indicators (draggable thumbs).
+    // Scroll indicators (draggable thumbs, inset clear of Quick Look's outer 3 DIP resize edge).
     vthumb_ = hthumb_ = D2D1_RECT_F{};
-    const D2D1_COLOR_F thumb = WithAlpha(theme.text, drag_ == Drag::VThumb || drag_ == Drag::HThumb ? 0.45f : 0.28f);
-    if (g.max_sy > 0.0f) {
-        const float track = g.body.bottom - g.body.top - 8.0f * k;
-        const float h = (std::max)(28.0f * k, track * (g.body.bottom - g.body.top) / g.content_h);
-        const float y = g.body.top + 4.0f * k + (track - h) * (s.sy / g.max_sy);
-        vthumb_ = R(g.grid.right - 7.0f * k, y, g.grid.right - 3.0f * k, y + h);
-        b->SetColor(thumb);
-        dc->FillRoundedRectangle(D2D1::RoundedRect(vthumb_, 2.0f * k, 2.0f * k), b);
-    }
-    if (g.max_sx > 0.0f) {
-        const float track = view_w - 8.0f * k;
-        const float w = (std::max)(28.0f * k, track * view_w / g.content_w);
-        const float x = g.body.left + 4.0f * k + (track - w) * (s.sx / g.max_sx);
-        hthumb_ = R(x, g.grid.bottom - 7.0f * k, x + w, g.grid.bottom - 3.0f * k);
-        b->SetColor(thumb);
-        dc->FillRoundedRectangle(D2D1::RoundedRect(hthumb_, 2.0f * k, 2.0f * k), b);
+    for (bool horizontal : {false, true}) {
+        const auto bar = Scrollbar(horizontal);
+        if (bar.maximum <= 0.0f) continue;
+        const Drag axis = horizontal ? Drag::HThumb : Drag::VThumb;
+        if (horizontal) hthumb_ = bar.thumb;
+        else vthumb_ = bar.thumb;
+        const float alpha = drag_ == axis ? 0.45f : scrollbar_hover_ == axis ? 0.36f : 0.28f;
+        b->SetColor(WithAlpha(theme.text, alpha));
+        dc->FillRoundedRectangle(D2D1::RoundedRect(bar.thumb, 2.0f * k, 2.0f * k), b);
     }
 
     // Workbook sheet tabs (the window may draw them in its footer instead).
@@ -1048,6 +1049,8 @@ void TableView::SwitchSheet(size_t index) {
         detail == L"time-limit" || detail == L"payload-limit");
     pending_sheet_request_ = awaiting_sheet_;
     sel_valid_ = false;
+    drag_ = Drag::None;
+    scrollbar_hover_ = Drag::None;
     tip_row_ = tip_col_ = -1;
     tip_shown_ = false;
     BuildPlain();
@@ -1077,6 +1080,57 @@ bool TableView::TabClick(float x, float y) {
     return false;
 }
 
+TableView::ScrollbarGeometry TableView::Scrollbar(bool horizontal) const {
+    ScrollbarGeometry bar;
+    const Sheet* s = Current();
+    if (!s) return bar;
+    const Geometry g = Measure();
+    const float k = scale_;
+    if (horizontal) {
+        if (g.max_sx <= 0.0f) return bar;
+        const float view = g.body.right - g.body.left;
+        if (view <= 0.0f || g.content_w <= view) return bar;
+        const bool other = g.max_sy > 0.0f;
+        const float start = g.body.left + 4.0f * k;
+        const float track = (std::max)(0.0f, view - (other ? 18.0f : 8.0f) * k);
+        const float thumb = (std::min)(track, (std::max)(28.0f * k, track * view / g.content_w));
+        bar.maximum = g.max_sx;
+        bar.travel = track - thumb;
+        const float offset = start + bar.travel * std::clamp(s->sx / bar.maximum, 0.0f, 1.0f);
+        bar.thumb = R(offset, g.grid.bottom - 9.0f * k, offset + thumb, g.grid.bottom - 5.0f * k);
+        bar.hit = R(start, (std::max)(g.body.top, g.grid.bottom - 14.0f * k), start + track, g.grid.bottom);
+        return bar;
+    }
+    if (g.max_sy <= 0.0f) return bar;
+    const float view = g.body.bottom - g.body.top;
+    if (view <= 0.0f || g.content_h <= view) return bar;
+    const bool other = g.max_sx > 0.0f;
+    const float start = g.body.top + 4.0f * k;
+    const float track = (std::max)(0.0f, view - (other ? 18.0f : 8.0f) * k);
+    const float thumb = (std::min)(track, (std::max)(28.0f * k, track * view / g.content_h));
+    bar.maximum = g.max_sy;
+    bar.travel = track - thumb;
+    const float offset = start + bar.travel * std::clamp(s->sy / bar.maximum, 0.0f, 1.0f);
+    bar.thumb = R(g.grid.right - 9.0f * k, offset, g.grid.right - 5.0f * k, offset + thumb);
+    bar.hit = R((std::max)(g.body.left, g.grid.right - 14.0f * k), start, g.grid.right, start + track);
+    return bar;
+}
+
+TableView::Drag TableView::ScrollbarAt(float x, float y) const noexcept {
+    if (!Current()) return Drag::None;
+    for (bool horizontal : {false, true}) {
+        const auto bar = Scrollbar(horizontal);
+        if (bar.maximum > 0.0f && x >= bar.hit.left && x < bar.hit.right &&
+            y >= bar.hit.top && y < bar.hit.bottom)
+            return horizontal ? Drag::HThumb : Drag::VThumb;
+    }
+    return Drag::None;
+}
+
+bool TableView::OverScrollbar(float x, float y) const noexcept {
+    return ScrollbarAt(x, y) != Drag::None;
+}
+
 bool TableView::MouseDown(float x, float y, bool shift) {
     Sheet* s = Current();
     if (!s) return false;
@@ -1097,11 +1151,24 @@ bool TableView::MouseDown(float x, float y, bool shift) {
         if (inside(tab_rects_[i], 0.0f)) { SwitchSheet(first_visible_sheet_ + i); return true; }
     const Geometry g = Measure();
     if (spreadsheet_ && !footer_tabs_ && y >= g.tabs.top) return true;
-    if (vthumb_.bottom > vthumb_.top && inside(vthumb_, 4.0f * scale_)) {
-        drag_ = Drag::VThumb; drag_origin_ = y; drag_scroll_ = s->sy; return true;
-    }
-    if (hthumb_.right > hthumb_.left && inside(hthumb_, 4.0f * scale_)) {
-        drag_ = Drag::HThumb; drag_origin_ = x; drag_scroll_ = s->sx; return true;
+    if (const Drag scrollbar = ScrollbarAt(x, y); scrollbar != Drag::None) {
+        const bool horizontal = scrollbar == Drag::HThumb;
+        const auto bar = Scrollbar(horizontal);
+        const float point = horizontal ? x : y;
+        const float start = horizontal ? bar.thumb.left : bar.thumb.top;
+        const float end = horizontal ? bar.thumb.right : bar.thumb.bottom;
+        if (point >= start && point < end && bar.travel > 0.0f) {
+            drag_ = scrollbar;
+            drag_origin_ = point;
+            drag_scroll_ = horizontal ? s->sx : s->sy;
+        } else {
+            drag_ = Drag::None;
+            const float view = horizontal ? (g.body.right - g.body.left) : (g.body.bottom - g.body.top);
+            float& scroll = horizontal ? s->sx : s->sy;
+            scroll += (point < start ? -1.0f : 1.0f) * view * 0.9f;
+            Clamp();
+        }
+        return true;
     }
     const int rows = static_cast<int>(BodyRows()), cols = static_cast<int>(s->cols);
     if (rows <= 0 || cols <= 0) return true;
@@ -1139,19 +1206,17 @@ bool TableView::MouseDown(float x, float y, bool shift) {
 bool TableView::MouseMove(float x, float y) {
     Sheet* s = Current();
     if (!s || drag_ == Drag::None) return false;
+    if (drag_ == Drag::VThumb || drag_ == Drag::HThumb) {
+        const bool horizontal = drag_ == Drag::HThumb;
+        const auto bar = Scrollbar(horizontal);
+        if (bar.travel <= 0.0f) { drag_ = Drag::None; return false; }
+        float& scroll = horizontal ? s->sx : s->sy;
+        const float before = scroll;
+        scroll = drag_scroll_ + ((horizontal ? x : y) - drag_origin_) * bar.maximum / bar.travel;
+        Clamp();
+        return scroll != before;
+    }
     const Geometry g = Measure();
-    if (drag_ == Drag::VThumb) {
-        const float track = g.body.bottom - g.body.top - 8.0f * scale_ - (vthumb_.bottom - vthumb_.top);
-        if (track > 0.0f) s->sy = drag_scroll_ + (y - drag_origin_) / track * g.max_sy;
-        Clamp();
-        return true;
-    }
-    if (drag_ == Drag::HThumb) {
-        const float track = g.body.right - g.body.left - 8.0f * scale_ - (hthumb_.right - hthumb_.left);
-        if (track > 0.0f) s->sx = drag_scroll_ + (x - drag_origin_) / track * g.max_sx;
-        Clamp();
-        return true;
-    }
     // Range drag; past the edges the grid scrolls.
     if (y > g.body.bottom) s->sy += (std::min)(y - g.body.bottom, 60.0f * scale_);
     else if (y < g.body.top) s->sy -= (std::min)(g.body.top - y, 60.0f * scale_);
@@ -1193,13 +1258,15 @@ bool TableView::Hover(float x, float y) {
         if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) tab = static_cast<int>(i);
     }
     if (tab != hover_tab_) { hover_tab_ = tab; repaint = true; }
+    const Drag bar_hover = drag_ == Drag::None ? ScrollbarAt(x, y) : Drag::None;
+    if (bar_hover != scrollbar_hover_) { scrollbar_hover_ = bar_hover; repaint = true; }
     {
         int hr = -1, hc = -1;
-        if (drag_ != Drag::None || !CellAt(x, y, hr, hc, false)) hr = hc = -1;
+        if (drag_ != Drag::None || bar_hover != Drag::None || !CellAt(x, y, hr, hc, false)) hr = hc = -1;
         if (hr != hover_row_ || hc != hover_col_) { hover_row_ = hr; hover_col_ = hc; repaint = true; }
     }
     int r = -1, c = -1;
-    if (drag_ != Drag::None || !CellAt(x, y, r, c, false) || !Clipped(r, c)) r = c = -1;
+    if (drag_ != Drag::None || bar_hover != Drag::None || !CellAt(x, y, r, c, false) || !Clipped(r, c)) r = c = -1;
     if (r != tip_row_ || c != tip_col_) {
         if (tip_shown_) repaint = true;
         tip_row_ = r;
@@ -1212,8 +1279,9 @@ bool TableView::Hover(float x, float y) {
 }
 
 bool TableView::Leave() {
-    const bool repaint = hover_tab_ >= 0 || tip_shown_ || hover_row_ >= 0;
+    const bool repaint = hover_tab_ >= 0 || tip_shown_ || hover_row_ >= 0 || scrollbar_hover_ != Drag::None;
     hover_tab_ = tip_row_ = tip_col_ = hover_row_ = hover_col_ = -1;
+    scrollbar_hover_ = Drag::None;
     tip_shown_ = false;
     return repaint;
 }

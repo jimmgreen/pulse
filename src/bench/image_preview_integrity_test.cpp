@@ -375,6 +375,14 @@ void SvgIpcCases(pulse_test::Host& host, const std::filesystem::path& directory)
     Check(host.Request((directory / "utf16.svg").wstring(), result) &&
         result.response.kind == pulse::ipc::PreviewContentKind::Text && result.text.find(L"中文预览") != std::wstring::npos &&
         result.error == L"svg-unsupported:element:text", "UTF-16 SVG source and warning survive host IPC");
+    Check(host.Request((directory / "text.svg").wstring(), result, MAXDWORD, 256,
+              pulse::ipc::PreviewRequestKind::Content, pulse::ipc::kPreviewRequestFlagGrid) &&
+        ((result.response.kind == pulse::ipc::PreviewContentKind::Unsupported &&
+          result.text.empty() && result.error == L"svg-unsupported:element:text") ||
+         (result.response.kind == pulse::ipc::PreviewContentKind::Bitmap &&
+          !result.pixels.empty() && result.error.empty() &&
+          result.response.integrity.state == pulse::preview::IntegrityState::Unknown)),
+        "grid SVG fallback avoids text payload and accepts shell provider bitmap when registered");
 }
 }
 
@@ -435,6 +443,11 @@ int main(int argc, char** argv) {
                 frame == 0 ? "APNG IPC frame 0 retains nonzero opaque background" :
                              "APNG IPC frame 1 over-blends alpha 0/128/255 across vector blocks and row tail");
         }
+        Check(Write(directory / "blend.apng", BlendedAnimation()) &&
+              host.Request((directory / "blend.apng").wstring(), result, MAXDWORD, 1024,
+                  pulse::ipc::PreviewRequestKind::Content, 0, 1) &&
+              result.response.frame_count == 2 && BlendedPixels(result, true),
+              "explicit .apng extension keeps the animated second frame and blended pixels");
         if (!apng_only) SvgIpcCases(host, directory);
         if (!apng_only) for (uint32_t page : {0u, 1u, 99u}) {
             result = {};

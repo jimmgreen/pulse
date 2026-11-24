@@ -10,6 +10,9 @@ public:
     // False never mutates the context: the producer must cancel its NEW source.
     // Retrying an already dispatched source must not revoke its UI-owned lease.
     bool Submit(std::shared_ptr<const ExplorerOpenContext> context) noexcept;
+    // Signal a committed/failed handoff without submitting it a second time.
+    // The hidden window's one-second idle timer is only a recovery fallback.
+    bool WakePresentation() noexcept;
     void Revoke() noexcept;
 private:
     friend class SingleInstanceCoordinator;

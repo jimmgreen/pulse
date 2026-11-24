@@ -30,6 +30,15 @@ inline HRESULT ValidateOptions(uint32_t options) noexcept {
     return (options & FOS_ALLNONSTORAGEITEMS) && (options & FOS_FORCEFILESYSTEM) ? E_INVALIDARG : S_OK;
 }
 
+// A caller's IShellItemFilter stays native when Pulse could offer it items the
+// filter contract does not cover. Streamable items only widen what the caller
+// accepts; FOS_FORCEFILESYSTEM still limits results to file-system items, which
+// native also allows (the brokered FileOpenPicker of packaged apps sets both).
+inline bool ShellFilterNeedsNative(uint32_t options) noexcept {
+    if (options & FOS_ALLNONSTORAGEITEMS) return true;
+    return (options & FOS_SUPPORTSTREAMABLEITEMS) && !(options & FOS_FORCEFILESYSTEM);
+}
+
 inline bool IsStream(SFGAOF attributes, uint32_t options) noexcept {
     return (options & FOS_SUPPORTSTREAMABLEITEMS) && (attributes & SFGAO_STREAM);
 }

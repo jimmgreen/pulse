@@ -3,9 +3,11 @@
 #include "setup_common.h"
 #include "setup_log.h"
 #include "setup_service.h"
+#include "../common/mcp_update_gate.h"
 
 #include <windows.h>
 #include <tlhelp32.h>
+#include <algorithm>
 
 namespace pulse::setup {
 namespace {
@@ -18,8 +20,8 @@ struct ProcessEntry {
 std::wstring ProcessPath(DWORD pid) {
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!process) return {};
-    wchar_t buffer[1024];
-    DWORD size = 1024;
+    wchar_t buffer[32768];
+    DWORD size = static_cast<DWORD>(std::size(buffer));
     std::wstring path;
     if (QueryFullProcessImageNameW(process, 0, buffer, &size)) path.assign(buffer, size);
     CloseHandle(process);
@@ -68,6 +70,59 @@ bool EndProcess(DWORD pid) {
     return gone;
 }
 
+struct ScopedProcess {
+    HANDLE handle;
+    explicit ScopedProcess(DWORD pid, DWORD additional_access = 0)
+        : handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | additional_access, FALSE, pid)) {}
+    ~ScopedProcess() { if (handle) CloseHandle(handle); }
+    ScopedProcess(const ScopedProcess&) = delete;
+    ScopedProcess& operator=(const ScopedProcess&) = delete;
+
+    std::wstring Image() const {
+        if (!handle || WaitForSingleObject(handle, 0) != WAIT_TIMEOUT) return {};
+        std::wstring path(32768, L'\0');
+        DWORD size = static_cast<DWORD>(path.size());
+        if (!QueryFullProcessImageNameW(handle, 0, path.data(), &size)) return {};
+        path.resize(size);
+        return path;
+    }
+    bool CreatedBefore(const ScopedProcess& child) const {
+        FILETIME parent_started{}, child_started{}, exit{}, kernel{}, user{};
+        return handle && child.handle && GetProcessTimes(handle, &parent_started, &exit, &kernel, &user) &&
+            GetProcessTimes(child.handle, &child_started, &exit, &kernel, &user) &&
+            CompareFileTime(&parent_started, &child_started) <= 0;
+    }
+};
+
+// Older MCP hosts do not observe the update gate. After all UI processes have
+// accepted the shutdown handshake, close only their known stdio transport:
+// a job-owned Pulse.AI.exe sibling, parented by the matching Pulse binary.
+// The inner and outer launchers return naturally on that child's exit.
+void DisconnectLegacyMcp(const std::vector<std::wstring>& dirs) {
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return;
+    struct Link { DWORD pid, parent; };
+    std::vector<Link> hosts;
+    PROCESSENTRY32W entry{sizeof(entry)};
+    for (BOOL ok = Process32FirstW(snapshot, &entry); ok; ok = Process32NextW(snapshot, &entry))
+        if (mcp_update::Same(entry.szExeFile, L"Pulse.AI.exe")) hosts.push_back({entry.th32ProcessID, entry.th32ParentProcessID});
+    CloseHandle(snapshot);
+    for (const auto& [pid, parent_pid] : hosts) {
+        const ScopedProcess child(pid, PROCESS_TERMINATE);
+        const auto image = child.Image();
+        if (image.empty()) continue;
+        const auto parent_dir = mcp_update::Parent(image);
+        const auto root = mcp_update::InstallRootForHost(image);
+        if (std::none_of(dirs.begin(), dirs.end(), [&](const auto& dir) { return mcp_update::Same(root, NormalizeDir(dir)); })) continue;
+        const ScopedProcess parent(parent_pid);
+        if (!mcp_update::Same(parent.Image(), std::wstring(parent_dir) + L"\\pulse.exe") || !parent.CreatedBefore(child)) continue;
+        BOOL in_job = FALSE;
+        if (!IsProcessInJob(child.handle, nullptr, &in_job) || !in_job) continue;
+        if (TerminateProcess(child.handle, mcp_update::kRetryAfterUpdate))
+            Log(L"Disconnected legacy Pulse MCP stdio host (pid " + std::to_wstring(pid) + L")");
+    }
+}
+
 // Pulse <= 1.0.48 predates the handshake: send what sign-out sends, where
 // those versions save their session, then end the process.
 bool EndLegacyPulse(HWND window, DWORD pid) {
@@ -89,6 +144,7 @@ CloseState ClosePulseWindows(const std::vector<std::wstring>& dirs, bool unatten
         DWORD pid = 0;
         GetWindowThreadProcessId(window, &pid);
         const auto process_path = ProcessPath(pid);
+        if (process_path.empty()) return CloseState::Failed;
         if (!PathInDirectories(process_path, dirs)) continue;
         DWORD_PTR reply = 0;
         if (!SendMessageTimeoutW(window, msg, 0, 0, SMTO_ABORTIFHUNG, 30000, &reply)) return CloseState::Failed;
@@ -105,7 +161,7 @@ CloseState ClosePulseWindows(const std::vector<std::wstring>& dirs, bool unatten
 
 // Waits for windowless pulse.exe instances; interactive setups end leftovers
 // after ~10 s. A failed process query keeps setup blocked.
-bool WaitForPulseProcesses(const std::vector<std::wstring>& dirs, bool unattended) {
+bool WaitForPulseProcesses(const std::vector<std::wstring>& dirs, bool unattended, bool drain_mcp) {
     std::vector<ProcessEntry> list;
     for (int i = 1; i <= 42; ++i) {
         if (!FindProcesses(L"pulse.exe", dirs, list, true)) {
@@ -113,6 +169,7 @@ bool WaitForPulseProcesses(const std::vector<std::wstring>& dirs, bool unattende
             return false;
         }
         if (list.empty()) return true;
+        if (drain_mcp && i >= 9) DisconnectLegacyMcp(dirs);
         if (i == 41 && !unattended)
             for (const auto& p : list) {
                 if (p.path.empty()) continue;
@@ -121,28 +178,56 @@ bool WaitForPulseProcesses(const std::vector<std::wstring>& dirs, bool unattende
             }
         if (i < 41) Sleep(250);
     }
+    for (const auto& p : list) Log(L"Pulse still running (pid " + std::to_wstring(p.pid) + L"): " + p.path);
     return false;
 }
 
-CloseState ClosePulseInstances(const std::vector<std::wstring>& dirs, int busy_seconds, bool unattended) {
+CloseState ClosePulseInstances(const std::vector<std::wstring>& dirs, int busy_seconds, bool unattended,
+                               McpUpdateGuard* mcp_update) {
     CloseState state = CloseState::Failed;
     for (int i = 0; i <= busy_seconds; ++i) {
         state = ClosePulseWindows(dirs, unattended);
         if (state != CloseState::Busy) break;
         if (i < busy_seconds) Sleep(1000);
     }
-    if (state == CloseState::Done && !WaitForPulseProcesses(dirs, unattended)) state = CloseState::Failed;
+    if (state != CloseState::Done) return state;
+    if (mcp_update && !mcp_update->Activate(dirs)) return CloseState::McpGateFailed;
+    if (!WaitForPulseProcesses(dirs, unattended, mcp_update != nullptr)) return CloseState::ProcessesRemain;
     return state;
 }
 
 }  // namespace
 
-CloseState ClosePulseForUpdate(const std::vector<std::wstring>& dirs, bool unattended_update) {
+McpUpdateGuard::~McpUpdateGuard() {
+    for (const auto file : files_) CloseHandle(file);
+}
+
+bool McpUpdateGuard::Activate(const std::vector<std::wstring>& dirs) {
+    if (active_) return true;
+    for (const auto& dir : dirs) {
+        const auto path = mcp_update::GatePath(NormalizeDir(dir));
+        const HANDLE file = CreateFileW(path.c_str(), DELETE | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_NEW,
+            FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            const DWORD error = GetLastError();
+            // A migration may already have removed the old directory.
+            if (error == ERROR_PATH_NOT_FOUND) continue;
+            Log(L"Could not pause MCP connections at " + path + L": " + Win32Error(error));
+            return false;
+        }
+        files_.push_back(file);
+    }
+    active_ = true;
+    return true;
+}
+
+CloseState ClosePulseForUpdate(const std::vector<std::wstring>& dirs, bool unattended_update, McpUpdateGuard* mcp_update) {
     std::wstring joined;
     for (const auto& d : dirs) joined += (joined.empty() ? L"" : L"|") + d;
     Log(L"Closing Pulse running from: " + joined);
     for (;;) {
-        const CloseState state = ClosePulseInstances(dirs, 10, unattended_update);
+        const CloseState state = ClosePulseInstances(dirs, 10, unattended_update, mcp_update);
         // Operations may take hours: an unattended update keeps asking for an
         // orderly exit instead of killing active work (same as the Inno script).
         if (unattended_update && state == CloseState::Busy) { Sleep(1000); continue; }

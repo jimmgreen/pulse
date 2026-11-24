@@ -14,12 +14,40 @@ enum class VolumeKind : uint32_t {
     Other = 2,
 };
 
+enum class VolumeBackend : uint8_t {
+    Unsupported = 0,
+    NtfsMftUsn = 1,
+    DirectoryWalk = 2,
+};
+
+inline VolumeBackend SelectVolumeBackend(std::wstring_view file_system) {
+    auto ascii_eq = [](std::wstring_view a, std::wstring_view upper) {
+        if (a.size() != upper.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            const wchar_t c = (a[i] >= L'a' && a[i] <= L'z')
+                ? static_cast<wchar_t>(a[i] - L'a' + L'A')
+                : a[i];
+            if (c != upper[i]) return false;
+        }
+        return true;
+    };
+    if (ascii_eq(file_system, L"NTFS")) return VolumeBackend::NtfsMftUsn;
+    if (ascii_eq(file_system, L"FAT32") || ascii_eq(file_system, L"EXFAT") ||
+        ascii_eq(file_system, L"FAT") || ascii_eq(file_system, L"FAT16") ||
+        ascii_eq(file_system, L"FAT12")) {
+        return VolumeBackend::DirectoryWalk;
+    }
+    return VolumeBackend::Unsupported;
+}
+
 struct VolumeInfo {
     std::wstring id;
     std::wstring label;
     std::wstring mount_point;
     std::wstring file_system;
     VolumeKind kind = VolumeKind::Other;
+    VolumeBackend backend = VolumeBackend::Unsupported;
+    uint32_t serial = 0;
     bool online = false;
     bool supported = false;
     bool enabled = false;

@@ -43,5 +43,21 @@ int wmain(){
  Microsoft::WRL::ComPtr<ITaskDefinition> definition;if(SUCCEEDED(hr))hr=service->NewTask(0,&definition);
  BSTR xml=SysAllocString(plan.xml.c_str());if(SUCCEEDED(hr))hr=definition->put_XmlText(xml);SysFreeString(xml);Check(SUCCEEDED(hr),"native Task Scheduler accepts in-memory XML without registration");
  definition.Reset();service.Reset();if(SUCCEEDED(initialized))CoUninitialize();
+ {
+  // A registered task's principal reads back as the account name, not the SID it was
+  // registered with; an upgrade inspecting its own task must still accept it.
+  HANDLE token=nullptr;std::wstring own_sid,own_name;
+  if(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token)){
+   BYTE buffer[SECURITY_MAX_SID_SIZE+sizeof(TOKEN_USER)]{};DWORD size=0;
+   if(GetTokenInformation(token,TokenUser,buffer,sizeof(buffer),&size)){LPWSTR text=nullptr;if(ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buffer)->User.Sid,&text)){own_sid=text;LocalFree(text);}}
+   CloseHandle(token);
+  }
+  wchar_t name[257]{};DWORD length=ARRAYSIZE(name);if(GetUserNameW(name,&length))own_name=name;
+  Check(!own_sid.empty()&&!own_name.empty(),"current account sid and name available");
+  Check(SameTaskUser(own_sid,own_sid),"task user given as the sid matches");
+  Check(SameTaskUser(own_name,own_sid),"task user read back as the account name matches its sid");
+  Check(!SameTaskUser(own_name,L"S-1-5-21-1-2-3-1001"),"account name of another sid is rejected");
+  Check(!SameTaskUser(L"",own_sid)&&!SameTaskUser(own_name,L""),"empty task user or sid is rejected");
+ }
  printf("checks=%d failures=%d\n",checks,failures);return failures?1:0;
 }

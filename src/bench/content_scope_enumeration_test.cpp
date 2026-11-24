@@ -164,6 +164,41 @@ int wmain() {
         if (!valid) std::cout << "[INFO] scenario=" << scenario << " ok=" << ok << " error=" << final.error << " hits=" << hits << " opened=" << opened.size() << '\n';
     }
     }
+    for (int shared = 0; shared < 2; ++shared) {
+        std::atomic<bool> cancelled{false};
+        ContentIndexConfig config;
+        config.shared_scope = shared != 0;
+        if (!config.shared_scope) config.roots = {{outside.wstring(), pulse::text::Encoding::Auto}};
+        ContentSearchRequest request;
+        request.needle = L"scope_marker";
+        request.root = wanted.wstring();
+        request.recursive = true;
+        request.allow_uncovered_root = true;
+        denied = {Key(outside.wstring())};
+        opened.clear();
+        cancel_on_open = nullptr;
+        ContentTaskCache cache;
+        cache.version = [](const auto&) { return L"scope-version"; };
+        cache.excluded = [&](const auto& p) { return shared && ContentPathUnder(ContentScopeKey(p), Key(deep.wstring())); };
+        cache.fresh = [](const auto&, uint64_t, uint64_t, const auto&) { return false; };
+        Check(ContentTaskRoots(config, request) == std::vector<std::wstring>{Key(wanted.wstring())},
+              shared ? "ContentTaskRoots allows explicit uncovered scope under shared_scope"
+                     : "ContentTaskRoots allows explicit uncovered scope outside config.roots");
+        ContentSearchProgress final;
+        size_t hits = 0;
+        const bool ok = RunContentTaskSupplement(config, request, cancelled, cache, {}, 0,
+            [&](const auto& progress, auto batch) { final = progress; hits += batch.size(); return true; },
+            [](const auto&, uint64_t, std::wstring& body, uint64_t& bytes, DWORD*, pulse::text::Encoding, const auto&) {
+                body = L"scope_marker"; bytes = 12; return true;
+            });
+        const std::set<std::wstring> expected = shared
+            ? std::set<std::wstring>{Key(wanted.wstring())}
+            : std::set<std::wstring>{Key(wanted.wstring()), Key(deep.wstring())};
+        Check(ok && final.done && final.error == ERROR_SUCCESS && hits == expected.size() &&
+                  std::set<std::wstring>(opened.begin(), opened.end()) == expected,
+              shared ? "uncovered shared_scope content search walks wanted while respecting cache.excluded"
+                     : "uncovered content search walks wanted and deep outside config.roots");
+    }
     if (base.parent_path() != parent || !base.filename().wstring().starts_with(L"content-scope-")) return 1;
     SetFileAttributesW(offline.c_str(), FILE_ATTRIBUTE_NORMAL);
     RemoveDirectoryW(junction.c_str());

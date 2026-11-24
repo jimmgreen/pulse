@@ -15,11 +15,21 @@ struct JpegHeaderInfo {
     uint32_t width = 0, height = 0;   // the main picture (SOF)
     uint32_t orientation = 1;         // Exif orientation of the main picture
     bool colour_profile = false;      // ICC profile, or Exif colour space "uncalibrated"
+    bool is_progressive = false;      // SOF2 progressive JPEG
+    bool non_baseline_sof = false;    // anything other than SOF0 / SOF1
     // Exif thumbnail, as offsets into the header bytes; 0 = none.
     size_t exif_thumbnail_offset = 0, exif_thumbnail_size = 0;
     // MPF large thumbnails, as absolute file offsets.
     struct Entry { uint64_t offset = 0; uint32_t size = 0; };
     std::vector<Entry> mpf_previews;
+};
+
+struct JpegProbeSummary {
+    bool has_size = false;
+    bool valid = false;
+    uint64_t file_size = 0;
+    bool is_progressive = false;
+    bool needs_coefficients = false;
 };
 
 // Parses the markers up to the first scan. False when the bytes do not hold
@@ -39,6 +49,7 @@ struct JpegEmbeddedPreview {
 // The smallest embedded picture whose longest side reaches min_edge, with
 // the main picture's proportions (a letterboxed 160 x 120 thumbnail of a 3:2
 // photo is refused). False when there is none: decode the main picture.
-bool ReadJpegEmbeddedPreview(const std::wstring& path, uint32_t min_edge, JpegEmbeddedPreview& out);
+bool ReadJpegEmbeddedPreview(const std::wstring& path, uint32_t min_edge, JpegEmbeddedPreview& out,
+                             JpegProbeSummary* summary = nullptr);
 
 } // namespace pulse::preview

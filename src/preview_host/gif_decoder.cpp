@@ -15,9 +15,12 @@ struct Meta { uint32_t x, y, w, h, disposal, delay; bool transparent; };
 using Color = std::array<uint8_t, 4>;
 void FillBackground(std::vector<uint8_t>& canvas, uint32_t width, uint32_t x, uint32_t y,
                     uint32_t w, uint32_t h, const Color& color) {
-    for (uint32_t row = y; row < y + h; ++row)
-        for (uint32_t col = x; col < x + w; ++col)
-            std::copy(color.begin(), color.end(), canvas.begin() + (size_t(row) * width + col) * 4);
+    const size_t stride = size_t(width) * 4, bytes = size_t(w) * 4;
+    auto* first = canvas.data() + size_t(y) * stride + size_t(x) * 4;
+    for (size_t col = 0; col < bytes; col += 4)
+        std::memcpy(first + col, color.data(), 4);
+    for (uint32_t row = 1; row < h; ++row)
+        std::memcpy(first + size_t(row) * stride, first, bytes);
 }
 struct Handle {
     HANDLE value = INVALID_HANDLE_VALUE;
@@ -216,6 +219,15 @@ bool GifDecoder::Decode(const std::wstring& path, UINT edge, uint32_t index, Gif
                     WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom))) return fail(L"gif-frame-decode");
             UINT w = 0, h = 0;
             if (FAILED(converter->GetSize(&w, &h)) || w != frame.w || h != frame.h) return fail(L"gif-frame-size");
+            // An opaque full-width frame overwrites every pixel in its rows. WIC can
+            // write them in place, with no intermediate raster or source-over pass.
+            if (!frame.transparent && w == s.w) {
+                auto* dst = s.canvas.data() + size_t(frame.y) * w * 4;
+                if (FAILED(converter->CopyPixels(nullptr, w * 4, static_cast<UINT>(size_t(w) * h * 4), dst)))
+                    return fail(L"gif-frame-decode");
+                ++s.stats.decoded_frames;
+                continue;
+            }
             std::vector<uint8_t> raster(static_cast<size_t>(w) * h * 4);
             if (FAILED(converter->CopyPixels(nullptr, w * 4, static_cast<UINT>(raster.size()), raster.data()))) return fail(L"gif-frame-decode");
             ++s.stats.decoded_frames;

@@ -310,6 +310,9 @@ int main(int argc, char** argv) {
     passed &= Report("en-US operation error localizes the message only",
         ServiceErrorText(L"没有权限在此位置新建") != L"没有权限在此位置新建" &&
         ServiceErrorText(L"软件说明.txt 无法处理 | D:\\软件说明.txt") == L"软件说明.txt 无法处理 | D:\\软件说明.txt");
+    passed &= Report("operation error presents embedded drive and UNC paths without rewriting filenames",
+        ServiceErrorText(L"无法访问 \\\\?\\D:\\软件说明.txt | \\??\\UNC\\server\\share\\目的地") ==
+            L"无法访问 D:\\软件说明.txt | \\\\server\\share\\目的地");
     SetLanguage(L"zh-CN");
     passed &= Report("zh-CN service text is unchanged",
         ServiceText(L"已索引 1,234 项 · 实时更新") == L"已索引 1,234 项 · 实时更新");

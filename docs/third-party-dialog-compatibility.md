@@ -1,5 +1,19 @@
 # 第三方打开 / 保存兼容性验收
 
+## 2026-11-19 非 Adobe 入口复核
+
+**补充：打开窗口的问号筛选。** 在 28 个本地文件样本上，实际读取 Windows 打开窗口的列表；16 个模式（含混合列表）与 Shell 匹配函数返回的文件集合逐项相同。比如 `Makefile?` 列出 `Makefile`、`Makefile1`，排除 `Makefile12`；`frame-??.png` 中的两个问号还可以匹配一个占两个 UTF-16 码元的字符。Pulse 对声明了建议性筛选的 Open 调用使用这项语义；扩展名含 `?` 时保留调用方默认后缀，不遍历后续类型猜测。未将规则推广到 Save。[实机对照与回归记录](../bench_data/non-adobe-next-20261119/VERIFICATION.txt)
+
+| 实际调用者和版本 | 已核验的结果 | 尚未证明 |
+|---|---|---|
+| Excel LTSC 2024 x64，安装版 Pulse 1.0.61 | Excel 的“另存为”经 Pulse 返回，实际写出工作簿；关闭并重新只读打开后，标记、公式和结果 42 均正确。同一 Excel PID 有保存成功记录。 | 不是未安装的工作树二进制；不涉及覆盖已有工作簿。 |
+| Edge 157，本地 HTML 文件输入 | Windows 原生窗口保留浏览器的移动设备入口，下方显示 Pulse 跳转栏。页面第一次选取后读回专用样本的完整 51 字节。 | 不是 Pulse 完整接管；第二次未完成，下载另存未测。 |
+| 工程文件宿主，x86 / x64 工作树 | 通过真实 Pulse 窗口打开 `Makefile;report-*.csv;CMakeLists.txt`：列表选取只返回三个匹配条目；手输两个名字得到 `probe.csv` 和显式的 `explicit.dat`。两种位数均核对有序 Shell 结果。 | 调用契约验收，不代表特定 CAD、IDE 或浏览器版本通过。 |
+
+在提供器能力相同的 14 项 Windows 调用对照中，能交给 Pulse 的从 5 项增至 14 项。保存另以 16 个真实窗口场景比较最终路径、切换类型、覆盖否决和取消后的类型索引；一次早期的访问被拒绝保留在报告中。这里的分母是指定样本，不是软件覆盖率。
+
+证据：[实际应用与版本](../bench_data/non-adobe-app-roundtrip-20261119/VERIFICATION.md)、[筛选与窗口返回](../bench_data/non-adobe-compat-20261119/VERIFICATION.txt)、[保存文件名与取消](../bench_data/save-filter-parity-20261119/VERIFICATION.txt)、[旧式 A/W 打开和保存](../bench_data/legacy-flags-20261119/VERIFICATION.txt)。下文按日期保留历史状态。
+
 ## 2026-11-12 通用接口增量验收
 
 以下是隔离宿主的接口与真实 Pulse 窗口验收，不自动升级下方第三方应用历史表。

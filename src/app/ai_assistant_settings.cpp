@@ -1470,13 +1470,15 @@ void AssistantSettingsClick(AppState& s, int target) {
             settings.enabled = !settings.enabled;
             enabled = settings.enabled;
         })) return;
-        s.aiAssistant.enabled = enabled;
-        if (!enabled) {
-            if (s.aiAssistant.chat) AiChatStop(s);
-            AiAssistantClose(s, false);
-        }
         Changed();
-        Redraw(s);
+        app::ForEachWindowSharingCore(s, [enabled](AppState& window) {
+            window.aiAssistant.enabled = enabled;
+            if (!enabled) {
+                if (window.aiAssistant.chat) AiChatStop(window);
+                AiAssistantClose(window, false);
+            }
+            Redraw(window);
+        });
         return;
     }
     const std::vector<const ai::Provider*> tiles = TileOrder();

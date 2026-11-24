@@ -17,9 +17,11 @@ struct Paths {
         runtime = root = directory.wstring(); entry = executable;
         if (_wcsicmp(image.filename().c_str(), L"pulse.exe") != 0) return;
         const auto hash = directory.filename().wstring();
+        const auto family = directory.parent_path().filename();
+        const bool independent_app = family == dialog_bundle::kAppRuntimeDirectory;
         if (hash.size() != 64 || !std::all_of(hash.begin(), hash.end(), [](wchar_t c) {
             return (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f');
-        }) || directory.parent_path().filename() != L"DialogBridge") return;
+        }) || (!independent_app && family != L"DialogBridge")) return;
         const auto installed = directory.parent_path().parent_path();
         const auto stable = installed / L"pulse.exe";
         // Identity belongs to this verified version, independently of an
@@ -29,7 +31,9 @@ struct Paths {
         std::string digest;
         digest.reserve(hash.size());
         for (wchar_t c : hash) digest.push_back(static_cast<char>(c));
-        if (dialog_bundle::VerifyBundle(directory.wstring(), digest, lease) != ERROR_SUCCESS) return;
+        const DWORD error = independent_app ? dialog_bundle::VerifyAppRuntimeForStartup(directory.wstring(), digest, lease) :
+            dialog_bundle::VerifyBundle(directory.wstring(), digest, lease);
+        if (error != ERROR_SUCCESS) return;
         root = installed.wstring(); entry = stable.wstring();
     }
 };

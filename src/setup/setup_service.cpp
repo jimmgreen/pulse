@@ -101,4 +101,37 @@ std::wstring ServiceBinaryPath(const wchar_t* name) {
     return config->lpBinaryPathName;
 }
 
+DWORD DeleteOwnedService(const wchar_t* name, const std::wstring& app_dir) {
+    if (app_dir.empty()) return ERROR_SUCCESS;
+    std::wstring bin = ServiceBinaryPath(name);
+    if (bin.empty()) return ERROR_SUCCESS;
+    if (!bin.empty() && bin.front() == L'"') {
+        const size_t end = bin.find(L'"', 1);
+        bin = end == std::wstring::npos ? bin.substr(1) : bin.substr(1, end - 1);
+    } else {
+        const size_t exe_pos = bin.find(L".exe");
+        if (exe_pos != std::wstring::npos) bin.resize(exe_pos + 4);
+    }
+    std::wstring prefix = app_dir;
+    while (!prefix.empty() && (prefix.back() == L'\\' || prefix.back() == L'/')) prefix.pop_back();
+    prefix += L'\\';
+    if (bin.size() <= prefix.size() ||
+        CompareStringOrdinal(bin.c_str(), static_cast<int>(prefix.size()), prefix.c_str(), static_cast<int>(prefix.size()), TRUE) != CSTR_EQUAL) {
+        return ERROR_SUCCESS;
+    }
+    StopService(name, 10000);
+    ScHandle scm{OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)};
+    if (!scm.h) return GetLastError();
+    ScHandle svc{OpenServiceW(scm.h, name, DELETE)};
+    if (!svc.h) {
+        const DWORD e = GetLastError();
+        return e == ERROR_SERVICE_DOES_NOT_EXIST ? ERROR_SUCCESS : e;
+    }
+    if (!DeleteService(svc.h)) {
+        const DWORD e = GetLastError();
+        if (e != ERROR_SERVICE_MARKED_FOR_DELETE) return e;
+    }
+    return ERROR_SUCCESS;
+}
+
 }  // namespace pulse::setup

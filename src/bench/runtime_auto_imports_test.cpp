@@ -1,4 +1,5 @@
 #include "../shell_bridge/runtime_auto_imports.h"
+#include "../shell_bridge/runtime_config.h"
 #include <objbase.h>
 #include <array>
 #include <atomic>
@@ -12,6 +13,19 @@ namespace detail = pulse::shell_bridge::runtime::auto_import_detail;
 namespace {
 unsigned checks = 0, failures = 0;
 void Check(bool value, const char* label) { ++checks; if (!value) ++failures; std::printf("[%s] %s\n", value ? "PASS" : "FAIL", label); }
+void Frameworks() {
+    const std::wstring windows = L"C:\\Windows\\";
+    Check(detail::RedistributableFramework(L"C:\\Windows\\System32\\mfc140u.dll", windows), "System32 MFC redistributable is patchable");
+    Check(detail::RedistributableFramework(L"c:\\windows\\syswow64\\MFC120.DLL", windows), "SysWOW64 MFC matches without case");
+    Check(detail::RedistributableFramework(L"C:\\Windows\\SysWOW64\\mfc42.dll", windows), "SysWOW64 legacy MFC42 is patchable");
+    Check(detail::RedistributableFramework(L"C:\\Windows\\WinSxS\\x86_microsoft.vc90.mfc_1fc8b3b9a1e18e3b_9.0.30729.6161_none_4bf7e3e2bf9ada4c\\mfc90u.dll", windows), "WinSxS single-level VC90 MFC is patchable");
+    Check(!detail::RedistributableFramework(L"C:\\Windows\\WinSxS\\a\\b\\mfc90u.dll", windows), "nested WinSxS subdirectory stays excluded");
+    Check(!detail::RedistributableFramework(L"C:\\Windows\\System32\\comdlg32.dll", windows), "Windows components stay excluded");
+    Check(!detail::RedistributableFramework(L"C:\\Windows\\System32\\downlevel\\mfc140u.dll", windows), "only directly in System32");
+    Check(!detail::RedistributableFramework(L"C:\\Windows\\mfc140u.dll", windows), "not from the Windows root");
+    Check(!detail::RedistributableFramework(L"C:\\Windows\\System32\\mfc140u.dll.mui", windows), "exact file names only");
+    Check(!detail::RedistributableFramework(L"mfc140u.dll", windows), "a bare name is rejected");
+}
 template<class T> void Put(std::vector<std::byte>& image, size_t offset, const T& value) { std::memcpy(image.data() + offset, &value, sizeof(value)); }
 std::vector<std::byte> Fixture() {
     std::vector<std::byte> image(4096);
@@ -40,7 +54,8 @@ std::vector<std::byte> Fixture() {
 void Parser() {
     auto image = Fixture(); std::vector<detail::ImportSlot> slots;
     Check(detail::InspectImage(image, slots) == S_OK && slots.size() == 1 && slots[0].rva == 1056 && slots[0].api_index == 0, "bounded native PE import located");
-    for (const auto& pair : std::array<std::pair<const char*, unsigned>, 3>{{{"CoCreateInstanceEx", 1}, {"CoGetClassObject", 2}, {"RoGetActivationFactory", 3}}}) {
+    for (const auto& pair : std::array<std::pair<const char*, unsigned>, 9>{{{"CoCreateInstanceEx", 1}, {"CoGetClassObject", 2}, {"RoGetActivationFactory", 3},
+        {"SHOpenFolderAndSelectItems", 11}, {"ShellExecuteW", 12}, {"ShellExecuteExW", 13}, {"ShellExecuteA", 14}, {"ShellExecuteExA", 15}, {"GetProcAddress", 16}}}) {
         auto other = image; std::memset(other.data() + 1102, 0, 40); std::memcpy(other.data() + 1102, pair.first, std::strlen(pair.first) + 1);
         Check(detail::InspectImage(other, slots) == S_OK && slots.size() == 1 && slots[0].api_index == pair.second, "all requested named APIs mapped");
     }
@@ -56,6 +71,40 @@ void Parser() {
     Check(truncations, "all required prefix truncations rejected");
     bad = image; IMAGE_DATA_DIRECTORY empty{}; Put(bad, 128 + offsetof(IMAGE_NT_HEADERS, OptionalHeader) + offsetof(IMAGE_OPTIONAL_HEADER, DataDirectory) + IMAGE_DIRECTORY_ENTRY_IMPORT * sizeof(empty), empty);
     Check(detail::InspectImage(bad, slots) == S_OK && slots.empty(), "no static imports produces zero candidates");
+    // Delay-load import parsing (v2 RVA-based IMAGE_DELAYLOAD_DESCRIPTOR).
+    {
+        auto delayed = bad; // Zero static imports, delay-load only.
+        IMAGE_DATA_DIRECTORY dir{1536, 2 * sizeof(IMAGE_DELAYLOAD_DESCRIPTOR)};
+        Put(delayed, 128 + offsetof(IMAGE_NT_HEADERS, OptionalHeader) + offsetof(IMAGE_OPTIONAL_HEADER, DataDirectory) + IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT * sizeof(dir), dir);
+        IMAGE_DELAYLOAD_DESCRIPTOR desc{};
+        desc.Attributes.RvaBased = 1;
+        desc.DllNameRVA = 1664;
+        desc.ImportNameTableRVA = 1792;
+        desc.ImportAddressTableRVA = 1856;
+        Put(delayed, 1536, desc);
+        std::memcpy(delayed.data() + 1664, "comdlg32.dll", 13);
+        IMAGE_THUNK_DATA dlookup{}, daddr{};
+        dlookup.u1.AddressOfData = 1920; daddr.u1.Function = 0x140001000;
+        Put(delayed, 1792, dlookup); Put(delayed, 1856, daddr);
+        std::memcpy(delayed.data() + 1922, "GetOpenFileNameW", 17);
+        IMAGE_THUNK_DATA dlookup2{}, daddr2{};
+        dlookup2.u1.AddressOfData = 1960; daddr2.u1.Function = 0x140001040;
+        Put(delayed, 1792 + sizeof(IMAGE_THUNK_DATA), dlookup2); Put(delayed, 1856 + sizeof(IMAGE_THUNK_DATA), daddr2);
+        std::memcpy(delayed.data() + 1962, "SHBrowseForFolderW", 19);
+        Check(detail::InspectImage(delayed, slots) == S_OK && slots.size() == 2 &&
+            slots[0].rva == 1856 && slots[0].api_index == 4 && slots[0].delay_load &&
+            slots[1].rva == 1856 + sizeof(IMAGE_THUNK_DATA) && slots[1].api_index == 9 && slots[1].delay_load,
+            "bounded delay-load PE imports located with delay_load flag");
+        auto legacy_va = delayed;
+        IMAGE_DELAYLOAD_DESCRIPTOR va_desc = desc; va_desc.Attributes.RvaBased = 0;
+        Put(legacy_va, 1536, va_desc);
+        Check(detail::InspectImage(legacy_va, slots) == S_OK && slots.empty(),
+            "legacy VA-based delay-load descriptor safely skipped");
+        auto bad_delay = delayed;
+        DWORD bad_rva = 1857;
+        Put(bad_delay, 1536 + offsetof(IMAGE_DELAYLOAD_DESCRIPTOR, ImportAddressTableRVA), bad_rva);
+        reject(bad_delay, "unaligned delay-load IAT slot rejected");
+    }
 }
 unsigned protection_calls = 0, fail_call = 0;
 BOOL WINAPI InjectProtect(LPVOID address, SIZE_T size, DWORD flags, PDWORD old) {
@@ -112,16 +161,35 @@ void Slots() {
     Check(FAILED(detail::ChangeSlot(change, true)), "executable page never patched");
     VirtualFree(page, 0, MEM_RELEASE);
 }
+// x86 __stdcall exports without a .def file carry decorated names.
+FARPROC ProbeExport(HMODULE dll, const char* name, const char* decorated) {
+    const FARPROC plain = GetProcAddress(dll, name);
+    return plain ? plain : GetProcAddress(dll, decorated);
+}
+// Every lookup reloads the import slot: an x86 caller may otherwise keep the
+// GetProcAddress pointer in a register across the install and the rollback.
+__declspec(noinline) void* Lookup(HMODULE module, const char* name) { return reinterpret_cast<void*>(GetProcAddress(module, name)); }
+__declspec(noinline) double LookupNs(HMODULE module) {
+    LARGE_INTEGER f{}, a{}, b{}; QueryPerformanceFrequency(&f);
+    volatile uintptr_t sink = 0; constexpr int kCalls = 200000;
+    QueryPerformanceCounter(&a);
+    for (int i = 0; i < kCalls; ++i) sink = sink + reinterpret_cast<uintptr_t>(GetProcAddress(module, "GetTickCount"));
+    QueryPerformanceCounter(&b);
+    return static_cast<double>(b.QuadPart - a.QuadPart) * 1e9 / static_cast<double>(f.QuadPart) / kCalls;
+}
 __declspec(noinline) HRESULT DirectCreate() { IUnknown* output = nullptr; const auto hr = CoCreateInstance(CLSID_NULL, nullptr, CLSCTX_INPROC_SERVER, IID_IUnknown, reinterpret_cast<void**>(&output)); if (output) output->Release(); return hr; }
 __declspec(noinline) HRESULT DirectEx() { MULTI_QI output{&IID_IUnknown, nullptr, E_FAIL}; const auto hr = CoCreateInstanceEx(CLSID_NULL, nullptr, CLSCTX_INPROC_SERVER, nullptr, 1, &output); if (output.pItf) output.pItf->Release(); return hr; }
 __declspec(noinline) HRESULT DirectClass() { IUnknown* output = nullptr; const auto hr = CoGetClassObject(CLSID_NULL, CLSCTX_INPROC_SERVER, nullptr, IID_IUnknown, reinterpret_cast<void**>(&output)); if (output) output->Release(); return hr; }
 void Live(const wchar_t* path) {
     HMODULE dll = LoadLibraryW(path); Check(dll != nullptr, "isolated helper DLL loaded"); if (!dll) return;
-    const auto install = reinterpret_cast<HRESULT (WINAPI*)()>(GetProcAddress(dll, "ProbeInstall"));
-    const auto rollback = reinterpret_cast<HRESULT (WINAPI*)()>(GetProcAddress(dll, "ProbeRollback"));
-    const auto value = reinterpret_cast<unsigned (WINAPI*)(unsigned)>(GetProcAddress(dll, "ProbeValue"));
+    const auto install = reinterpret_cast<HRESULT (WINAPI*)()>(ProbeExport(dll, "ProbeInstall", "_ProbeInstall@0"));
+    const auto rollback = reinterpret_cast<HRESULT (WINAPI*)()>(ProbeExport(dll, "ProbeRollback", "_ProbeRollback@0"));
+    const auto value = reinterpret_cast<unsigned (WINAPI*)(unsigned)>(ProbeExport(dll, "ProbeValue", "_ProbeValue@4"));
     Check(install && rollback && value, "probe ABI found"); if (!install || !rollback || !value) { FreeLibrary(dll); return; }
     const HRESULT baseline = DirectCreate(); Check(baseline != E_ABORT && FAILED(baseline), "baseline real COM import remains native");
+    const HMODULE ole = GetModuleHandleW(L"ole32.dll"), k32 = GetModuleHandleW(L"kernel32.dll");
+    const auto native_create = Lookup(ole, "CoCreateInstance");
+    const auto native_tick = Lookup(k32, "GetTickCount");
     std::atomic<bool> stop{false}; std::atomic<unsigned> heartbeats{0}, unexpected{0};
     std::array<std::thread, 4> workers;
     for (auto& thread : workers) thread = std::thread([&] {
@@ -130,19 +198,30 @@ void Live(const wchar_t* path) {
         CoUninitialize();
     });
     const unsigned before = heartbeats.load();
+    // Same condition for both samples: the four COM workers are running.
+    const double lookup_before = LookupNs(k32);
     const HRESULT installed = install();
     Check(SUCCEEDED(installed), "real static IAT installation succeeds while workers call COM");
     std::printf("install_hr=%08lx mask=%u slots=%u\n", static_cast<unsigned long>(installed), value(3), value(4));
-    Check(value(3) == 7 && value(4) >= 3, "actual API mask and patched slot count reported");
+    Check((value(3) & ~pulse::shell_bridge::runtime::kGetProcAddress) == 7 && (value(3) & pulse::shell_bridge::runtime::kGetProcAddress) && value(4) >= 4,
+        "actual API mask (COM3 plus GetProcAddress route) and patched slot count reported");
     Check(DirectCreate() == E_ABORT && DirectEx() == E_ABORT && DirectClass() == E_ABORT, "real compiler-generated COM3 imports route to helper");
-    const auto dynamic_create = reinterpret_cast<decltype(&CoCreateInstance)>(GetProcAddress(GetModuleHandleW(L"ole32.dll"), "CoCreateInstance"));
+    const auto dynamic_create = reinterpret_cast<decltype(&CoCreateInstance)>(Lookup(ole, "CoCreateInstance"));
     IUnknown* dynamic_output = nullptr;
-    Check(dynamic_create && dynamic_create(CLSID_NULL, nullptr, CLSCTX_INPROC_SERVER, IID_IUnknown,
-        reinterpret_cast<void**>(&dynamic_output)) == baseline, "GetProcAddress path remains native as declared coverage gap");
+    Check(dynamic_create && reinterpret_cast<void*>(dynamic_create) != native_create && dynamic_create(CLSID_NULL, nullptr, CLSCTX_INPROC_SERVER, IID_IUnknown,
+        reinterpret_cast<void**>(&dynamic_output)) == E_ABORT, "GetProcAddress lookup of a hooked API routes to helper");
     if (dynamic_output) dynamic_output->Release();
+    const auto via_combase = GetModuleHandleW(L"combase.dll") ? Lookup(GetModuleHandleW(L"combase.dll"), "CoCreateInstance") : nullptr;
+    Check(via_combase == reinterpret_cast<void*>(dynamic_create), "forwarded export resolved from the implementing module routes to the same helper");
+    Check(Lookup(k32, "GetTickCount") == native_tick, "unrelated GetProcAddress lookups return the native address");
+    const double lookup_hooked = LookupNs(k32);
+    std::printf("GetProcAddress ns/call: before=%.1f routed=%.1f\n", lookup_before, lookup_hooked);
+    SetLastError(0);
+    Check(!Lookup(k32, "PulseNoSuchExport_7f3a") && GetLastError() == ERROR_PROC_NOT_FOUND, "missing export keeps null and ERROR_PROC_NOT_FOUND");
     Check(value(0) && value(1) && value(2), "all three helper callbacks observed");
     Check(SUCCEEDED(rollback()), "real IAT rollback succeeds during concurrent COM calls");
     Check(DirectCreate() == baseline && DirectEx() != E_ABORT && DirectClass() != E_ABORT, "all static entries return native after rollback");
+    Check(Lookup(ole, "CoCreateInstance") == native_create, "GetProcAddress returns native addresses after rollback");
     stop = true; for (auto& thread : workers) thread.join();
     Check(heartbeats.load() > before && !unexpected.load(), "workers progress with only native or hooked call results");
     Check(value(3) == 0 && value(4) == 0 && value(5) == 1, "rollback reports no owned slots and restored protection");
@@ -150,8 +229,8 @@ void Live(const wchar_t* path) {
 }
 void ZeroSlots(const wchar_t* path) {
     HMODULE dll = LoadLibraryW(path); Check(dll != nullptr, "same-directory helper loaded"); if (!dll) return;
-    const auto install = reinterpret_cast<HRESULT (WINAPI*)()>(GetProcAddress(dll, "ProbeInstall"));
-    const auto value = reinterpret_cast<unsigned (WINAPI*)(unsigned)>(GetProcAddress(dll, "ProbeValue"));
+    const auto install = reinterpret_cast<HRESULT (WINAPI*)()>(ProbeExport(dll, "ProbeInstall", "_ProbeInstall@0"));
+    const auto value = reinterpret_cast<unsigned (WINAPI*)(unsigned)>(ProbeExport(dll, "ProbeValue", "_ProbeValue@4"));
     const HRESULT before = DirectCreate();
     Check(install && value && install() == HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND), "excluded-bundle main EXE yields explicit zero-slot failure");
     Check(value && !value(3) && !value(4) && DirectCreate() == before, "zero-slot failure retains native calls and reports no coverage");
@@ -162,7 +241,7 @@ int wmain(int argc, wchar_t** argv) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (argc == 2 && std::wstring_view(argv[1]) == L"--parser-only") Parser();
     else if (argc == 3 && std::wstring_view(argv[2]) == L"--zero-slots") ZeroSlots(argv[1]);
-    else { Parser(); Slots(); if (argc == 2) Live(argv[1]); else Check(false, "absolute helper path required"); }
+    else { Parser(); Slots(); Frameworks(); if (argc == 2) Live(argv[1]); else Check(false, "absolute helper path required"); }
     CoUninitialize();
     std::printf("Checks: %u, failures: %u\n", checks, failures);
     return failures ? 1 : 0;

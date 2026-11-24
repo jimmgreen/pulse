@@ -301,9 +301,16 @@ void QueueAddressSearch(AppState& s) {
         s.appPrefs.address_search_content = s.addressSearchContent;
         if (!s.isolatedTest) s.appPrefs.Save();
     }
-    s.addressLiveDue = GetTickCount64() + (s.addressSearchContent ? 150 : 100);
     tab->search_allow_scan = false;
     s.addressHistoryDue = 0;
+    // Clearing has no query work to debounce. Record it before a close or
+    // launch command can capture the previous search URI as the current view.
+    if (s.addressSearchContent && !s.addressSearchComposing && s.hwndAddressEdit &&
+        IsAddressSearchResults(tab) && GetWindowTextLengthW(s.hwndAddressEdit) == 0) {
+        SubmitAddressSearch(s, true);
+        return;
+    }
+    s.addressLiveDue = GetTickCount64() + (s.addressSearchContent ? 150 : 100);
 }
 
 void FlushAddressSearch(AppState& s) {
@@ -338,6 +345,7 @@ void SubmitAddressSearch(AppState& s, bool live) {
         if (continuing) {
             tab->pending_generation = 0;
             tab->loading = tab->search_content_active = tab->search_awaiting_content = false;
+            tab->search_input_path = tab->current_path;
             tab->search_input_content = true;
             tab->search_content_empty = true;
             tab->search_input_text.clear();

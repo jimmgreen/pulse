@@ -28,12 +28,15 @@ inline void DrawWindowActionIcon(ID2D1DeviceContext* dc, D2D1_RECT_F bounds,
         line(2.5f,7,17.5f,7); line(10,9,10,14); line(7.5f,11.5f,12.5f,11.5f);
         break;
     case WindowActionIcon::Overview:
-        box(2.5f,3.5f,8.5f,8.5f); box(11.5f,3.5f,17.5f,8.5f);
-        box(2.5f,11.5f,8.5f,16.5f); box(11.5f,11.5f,17.5f,16.5f);
+        // The screen with its windows as thumbnails (command_icons WinOverview):
+        // the 2x2 tiles were 中图标's grid.
+        box(2.5f,3.5f,17.5f,16.5f);
+        box(5,6.5f,9.25f,10.5f); box(10.75f,6.5f,15,10.5f); line(7.5f,13.5f,12.5f,13.5f);
         break;
     case WindowActionIcon::Detach:
-        line(10,6,2.5f,6); line(2.5f,6,2.5f,17); line(2.5f,17,14,17); line(14,17,14,10);
-        line(11,3,17,3); line(17,3,17,9); line(17,3,9,11);
+        // A tab leaving its window (TabToWindow), not 用其他程序打开's open box.
+        box(2.5f,8,13,17); line(2.5f,8,2.5f,5); line(2.5f,5,7.5f,5); line(7.5f,5,7.5f,8);
+        line(11.5f,9.5f,17.5f,3.5f); line(13.5f,3.5f,17.5f,3.5f); line(17.5f,3.5f,17.5f,7.5f);
         break;
     case WindowActionIcon::Merge:
         box(2,4,8,16); box(12,4,18,16); line(8,10,12,10);

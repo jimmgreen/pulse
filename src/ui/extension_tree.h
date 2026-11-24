@@ -30,6 +30,10 @@ class ExtensionTreeView {
                 D2D1_COLOR_F accent, float scale);
     void SetBounds(RECT bounds);
     void SetTheme(bool dark, D2D1_COLOR_F accent, float scale);
+    // Leave the background unpainted so the host page (Settings' Mica) shows between cards.
+    void SetTransparentBackground(bool transparent);
+    // With a transparent background: the host page's wash to clear with (straight alpha).
+    void SetBackgroundWash(D2D1_COLOR_F wash);
     void Refresh();
     void Close();
     HWND Hwnd() const;

@@ -18,8 +18,8 @@ inline constexpr std::wstring_view kVideoExtensions[] = {
     L".3gp", L".3g2", L".asf", L".ogv", L".rm", L".rmvb", L".mxf", L".divx", L".dv",
     L".y4m", L".mjpeg", L".hevc", L".h264", L".264", L".265"};
 inline constexpr std::wstring_view kAudioExtensions[] = {
-    L".mp3", L".wav", L".flac", L".m4a", L".aac", L".wma", L".ogg", L".oga",
-    L".opus", L".aif", L".aiff", L".ape", L".wv", L".tta", L".dsf", L".dff", L".mka",
+    L".mp3", L".wav", L".flac", L".m4a", L".m4b", L".aac", L".wma", L".ogg", L".oga",
+    L".opus", L".aif", L".aiff", L".aifc", L".ape", L".wv", L".tta", L".dsf", L".dff", L".mka",
     L".ac3", L".dts", L".amr", L".caf", L".mpc"};
 
 // Containers and audio formats the media pack handles (lower case, with dot).
@@ -75,9 +75,12 @@ private:
 // ---- ffmpeg's log ("ffmpeg -i file" prints the input description) ---------
 
 // "Duration: 00:42:18.12," ; 0 when absent or N/A.
+int64_t ParseDuration100ns(std::string_view log);
 uint32_t ParseDurationMs(std::string_view log);
 // First "Video: ... 3840x2160" stream size.
 bool ParseVideoSize(std::string_view log, UINT& width, UINT& height);
+// True when the first video stream carries a 90/270-degree display rotation.
+bool ParseVideoQuarterTurn(std::string_view log);
 // First video stream's "29.97 fps" (else "25 tbr"); 0 when absent.
 double ParseFrameRate(std::string_view log);
 // First video stream's sample aspect ratio ("SAR 64:45"); 1:1 when absent.

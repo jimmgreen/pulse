@@ -6,6 +6,7 @@
 #include "../common/picker_shell_namespace.h"
 
 #include "../common/display_path.h"
+#include "../common/runtime_log.h"
 #include "../common/localization.h"
 #include "../fs/fs_enum.h"
 
@@ -329,9 +330,8 @@ DWORD OpenExtension(const PickerOptions& options, std::wstring& extension) {
     const auto& pattern = options.filters[options.filter_index].pattern;
     if (!picker_filter::OpenPattern(std::wstring_view(pattern))) return ERROR_NOT_SUPPORTED;
     const auto selected = picker_filter::FirstLiteralExtension(std::wstring_view(pattern));
-    // Native Open uses the selected first literal mask from initial display,
-    // not just after a type change. A wildcard first mask restores the caller's
-    // original default; later alternatives never supply a guessed extension.
+    // Native Open applies the selected filter even before the first type change.
+    // If it supplies no suffix, retain the caller's original default.
     if (!selected.empty()) extension.assign(selected);
     return ERROR_SUCCESS;
 }
@@ -579,7 +579,9 @@ PickerLoader::~PickerLoader() {
 void PickerLoader::Load(uint64_t generation, std::wstring path, PickerMode mode, PickerOptions options) {
     std::lock_guard guard(target_->lock);
     ++target_->serial;
-    target_->pending = [target = target_.get(), generation, path = std::move(path), mode, options = std::move(options)](uint64_t serial) {
+    const auto queued_at = GetTickCount64();
+    target_->pending = [target = target_.get(), window = target_->hwnd, generation, queued_at, path = std::move(path), mode, options = std::move(options)](uint64_t serial) {
+        const auto started_at = GetTickCount64();
         auto cancelled = [&] { return target->serial.load() != serial; };
         DWORD admission_error = ERROR_SUCCESS;
         if (target->folder_commit_message) {
@@ -596,9 +598,15 @@ void PickerLoader::Load(uint64_t generation, std::wstring path, PickerMode mode,
             }
         }
         auto result = std::make_unique<PickerListing>();
+        const auto admitted_at = GetTickCount64();
         if (admission_error == ERROR_SUCCESS) *result = ReadListing(path, mode, options, cancelled);
         else { result->path = path; result->error = admission_error; }
         result->generation = generation;
+        diagnostics::runtime::Event("picker_listing_ready", {
+            {"window", reinterpret_cast<uintptr_t>(window)}, {"generation", generation},
+            {"queue_ms", started_at - queued_at}, {"admission_ms", admitted_at - started_at},
+            {"listing_ms", GetTickCount64() - admitted_at}, {"rows", result->entries.size()},
+            {"options", options.native_options}, {"error", result->error}, {"cancelled", cancelled() ? 1u : 0u}});
         std::lock_guard guard(target->lock);
         if (!target->closed && !cancelled() && PostMessageW(target->hwnd, target->message, 0, reinterpret_cast<LPARAM>(result.get()))) result.release();
     };

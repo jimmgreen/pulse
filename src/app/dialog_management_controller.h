@@ -7,13 +7,15 @@
 #include <array>
 #include "../common/dialog_auto_arch_status.h"
 #include "../common/dialog_takeover_history.h"
+#include "../common/dialog_adaptive_attach.h"
 #include "../common/dialog_restart_inventory.h"
+#include "../common/dialog_log_excerpt.h"
 #include "dialog_record_apps.h"
 #include <functional>
 #include <unordered_map>
 namespace pulse::app {
 bool DialogAutoPathMismatch(bool enabled, const std::wstring& registered, const std::wstring& bundle_root);
-enum class DialogManagementOperation { PollHistory, Refresh, SelectBundle, SelectApplication, PrepareLaunch, Launch, PrepareAdminLaunch, LaunchAdmin, Disable, EnableAuto, DisableAuto, ExportDiagnostics };
+enum class DialogManagementOperation { PollHistory, ClearHistory, Refresh, SelectBundle, SelectApplication, PrepareLaunch, Launch, PrepareAdminLaunch, LaunchAdmin, Disable, EnableAuto, DisableAuto, ExportDiagnostics, ResumePaused };
 struct DialogManagementConfiguration {
     std::wstring bundle_root, application;
     std::string manifest_digest;
@@ -33,6 +35,8 @@ struct DialogManagementResult {
     bool auto_enabled = false, auto_conflict = false, auto_path_mismatch = false;
     DWORD auto_error = 0, auto_rollback_error = 0, bundle_error = 0;
     std::wstring auto_dll, diagnostics_path;
+    unsigned diagnostics_raw_files = 0;
+    bool diagnostics_raw_incomplete = false;
     std::array<dialog_auto::ArchStatus, 2> auto_arch;
     bool launcher_started = false;
     bool launch_preflight_checked = false, launch_scan_complete = false;
@@ -53,6 +57,8 @@ struct DialogManagementResult {
     // Program name and icon per record fingerprint (history and restart rows).
     std::unordered_map<uint64_t, DialogRecordApp> record_apps;
     bool restart_checked = false;
+    // Programs whose automatic takeover is paused by the circuit breaker.
+    std::vector<dialog_adaptive::PausedTarget> paused;
 };
 // UI owner thread API. All filesystem/process work runs on an owned worker.
 // The wake carries no pointer. Drain only returns the current generation.
@@ -77,15 +83,21 @@ public:
     uint64_t LaunchAdmin();
     uint64_t Refresh();
     uint64_t PollHistory(bool refresh_running_applications = false);
+    // Deletes every takeover record (all) or the record of (app_image_id, reason),
+    // saves, and answers like PollHistory.
+    uint64_t ClearHistory(bool all, uint64_t app_image_id = 0, uint32_t reason = 0);
+    // Ends the automatic pause of one program (by executable name) and answers like PollHistory.
+    uint64_t ResumePaused(std::wstring basename);
     uint64_t EnableAuto();
     uint64_t DisableAuto();
-    uint64_t ExportDiagnostics();
+    uint64_t ExportDiagnostics(std::wstring destination_directory = {});
+    uint64_t ExportFeedback(dialog_diagnostics::ReproductionWindow reproduction, std::wstring destination_directory = {});
     uint64_t Disable(std::wstring exact_session_directory);
     void Cancel() noexcept;
     std::vector<DialogManagementResult> Drain();
 private:
     struct State;
     std::shared_ptr<State> state_;
-    uint64_t Submit(DialogManagementOperation, std::wstring = {}, std::string = {});
+    uint64_t Submit(DialogManagementOperation, std::wstring = {}, std::string = {}, dialog_diagnostics::ReproductionWindow = {});
 };
 }

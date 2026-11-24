@@ -1,14 +1,20 @@
 #include "app_internal.h"
 #include "dialog_management_ui.h"
+#include "dialog_api_probe.h"
 #include "dialog_management_controller.h"
+#include "../common/json_value.h"
 #include "app_messages.h"
+#include "app_commands.h"
 #include "session.h"
 #include "../ui/ui_renderer.h"
 #include "shell_tag_registry.h"
 #include "../ui/confirm_dialog.h"
+#include "../ui/fluent_menu.h"
+#include <initializer_list>
 #include <future>
 #include <thread>
 #include <algorithm>
+#include <shlobj.h>
 
 namespace pulse {
 struct DialogManagementUiState {
@@ -20,10 +26,28 @@ struct DialogManagementUiState {
     bool restore_other_ok = true, retry_disable = false;
     std::future<DWORD> restore_tags;
     std::wstring notice;
+    HANDLE api_probe = nullptr;
+    dialog_diagnostics::ReproductionWindow feedback;
+    bool exporting_feedback=false;
     ULONGLONG refreshed = 0, history_refreshed = 0;
+    ~DialogManagementUiState() { if(api_probe) CloseHandle(api_probe); }
 };
 namespace {
 using I=l10n::StringId;
+uint64_t NowFileTime() {
+    FILETIME now{};GetSystemTimeAsFileTime(&now);
+    return (static_cast<uint64_t>(now.dwHighDateTime)<<32)|now.dwLowDateTime;
+}
+int DialogMenu(AppState& s,std::initializer_list<std::pair<int,I>> choices) {
+    if(!EnsureMenu(s)) return 0;
+    std::vector<ui::FluentMenuItem> items;
+    for(const auto& [command,title]:choices) {
+        ui::FluentMenuItem item;item.command=command;item.text=l10n::Get(title);items.push_back(std::move(item));
+    }
+    s.menu->SetTheme(s.darkMode,s.accentColor);
+    POINT point{};GetCursorPos(&point);
+    return s.menu->TrackPopup(point,std::move(items));
+}
 // "2026-11-11T12:00:00.000Z" -> UTC FILETIME; 0 when malformed.
 uint64_t UtcFileTime(const std::wstring& iso) {
     SYSTEMTIME time{};
@@ -64,10 +88,35 @@ void FillHistoryVm(const app::DialogManagementResult& result,ui::WindowViewModel
             vm.settings_dialog_records.push_back(std::move(row));restart_group=true;
         }
     }
+    // Programs the circuit breaker paused: system dialogs until they are retried.
+    bool paused_group=false;
+    FILETIME now_ft{};GetSystemTimeAsFileTime(&now_ft);
+    const uint64_t now=(static_cast<uint64_t>(now_ft.dwHighDateTime)<<32)|now_ft.dwLowDateTime;
+    for(const auto& target:result.paused) {
+        if(vm.settings_dialog_records.size()>=12) break;
+        const std::wstring basename=json::Wide(target.basename);
+        if(basename.empty()) continue;
+        // A history record of the same program supplies its name and icon.
+        uint64_t image_id=0;
+        for(const auto& record:result.history.records)
+            if(CompareStringOrdinal(record.app_basename.c_str(),-1,basename.c_str(),-1,TRUE)==CSTR_EQUAL) {image_id=record.app_image_id;break;}
+        ui::WindowViewModel::DialogTakeoverRow row;
+        FillApplication(result,basename,image_id,row);
+        constexpr uint64_t day=24ull*60*60*10000000;
+        const uint64_t days=target.retry_ft>now ? (std::max<uint64_t>)(1,(target.retry_ft-now+day-1)/day) : 1;
+        auto reason=l10n::Get(I::DialogPausedReason);
+        if(const auto slot=reason.find(L"{count}");slot!=std::wstring::npos) reason.replace(slot,7,std::to_wstring(target.failures));
+        if(const auto slot=reason.find(L"{days}");slot!=std::wstring::npos) reason.replace(slot,6,std::to_wstring(days));
+        row.detail=reason+L"\n"+l10n::Get(I::DialogPausedNext);row.attention=true;
+        row.last_event=target.paused_ft;
+        row.status=l10n::Get(I::DialogRecordStatusPaused);row.tone=2;row.group=3;row.retry=true;
+        vm.settings_dialog_records.push_back(std::move(row));paused_group=true;
+    }
     const I reasons[]={I::DialogHistoryReasonUnknown,I::DialogHistoryUnsupported,I::DialogHistoryProviderUnavailable,
         I::DialogHistoryTimeout,I::DialogHistoryPermissionDenied,I::DialogHistoryPermissionUnknown,I::DialogHistoryMismatch,
         I::DialogHistoryDisabled,I::DialogHistoryConflict,I::DialogHistoryInitialFolder,I::DialogHistoryProviderFailure,
-        I::DialogHistoryNative,I::DialogHistorySucceeded,I::DialogHistoryShownClosed,I::DialogHistoryAdminAutoFailed};
+        I::DialogHistoryNative,I::DialogHistorySucceeded,I::DialogHistoryShownClosed,I::DialogHistoryAdminAutoFailed,
+        I::DialogHistoryShownThenFailed};
     const I actions[]={I::DialogHistoryNoAction,I::DialogHistoryRestart,I::DialogHistorySettings,
         I::DialogHistoryRetry,I::DialogHistoryUseNative,I::DialogHistoryExport};
     std::vector<const dialog_history::Record*> recent;
@@ -96,7 +145,8 @@ void FillHistoryVm(const app::DialogManagementResult& result,ui::WindowViewModel
         row.meta+=L" · "+count;
         row.last_event=UtcFileTime(record->last_utc);
         if(record->resolved_by_success || record->later_success) row.later=l10n::Get(I::DialogHistoryLaterSuccess);
-        row.group=restart_group ? 2 : 0;
+        row.group=restart_group || paused_group ? 2 : 0;
+        row.removable=true;
         vm.settings_dialog_records.push_back(std::move(row));
     }
 }
@@ -148,9 +198,11 @@ void DialogManagementReady(AppState& s) {
     for(auto& result:current->controller->Drain()) {
         if(result.generation!=current->generation) continue;
         const auto operation=result.operation;
-        if(operation==app::DialogManagementOperation::PollHistory) {
+        if(operation==app::DialogManagementOperation::PollHistory || operation==app::DialogManagementOperation::ClearHistory ||
+           operation==app::DialogManagementOperation::ResumePaused) {
             if(!result.error) {
                 current->snapshot.history=std::move(result.history);
+                current->snapshot.paused=std::move(result.paused);
                 current->snapshot.record_apps=std::move(result.record_apps);
                 current->snapshot.restart_inventory=std::move(result.restart_inventory);
                 current->snapshot.restart_checked=result.restart_checked;
@@ -181,8 +233,23 @@ void DialogManagementReady(AppState& s) {
         current->snapshot=std::move(result);
         current->busy=false;current->refreshing=false;current->refreshed=GetTickCount64();
         if(operation==app::DialogManagementOperation::Refresh || operation==app::DialogManagementOperation::ExportDiagnostics) current->history_refreshed=current->refreshed;
-        if(operation==app::DialogManagementOperation::ExportDiagnostics && !current->error)
+        const bool feedback_result=operation==app::DialogManagementOperation::ExportDiagnostics && current->exporting_feedback;
+        if(feedback_result) {
+            current->exporting_feedback=false;
+            if(!current->error) current->feedback={};
+            else {
+                current->notice=l10n::Get(I::DiagnosticsExportFailed)+L" ("+std::to_wstring(current->error)+L")";
+                current->error=previous_error;
+            }
+        }
+        if(operation==app::DialogManagementOperation::ExportDiagnostics && !current->snapshot.error) {
             current->notice=l10n::Get(I::StartupDiagnosticsSaved)+current->snapshot.diagnostics_path;
+            if(feedback_result) current->notice+=L"\n"+l10n::Get(I::DialogFeedbackSaved);
+            if(!current->snapshot.diagnostics_raw_files)
+                current->notice+=L"\n"+l10n::Get(I::StartupDiagnosticsNoRawLogs);
+            else if(current->snapshot.diagnostics_raw_incomplete)
+                current->notice+=L"\n"+l10n::Get(I::StartupDiagnosticsPartialRawLogs);
+        }
         if(operation==app::DialogManagementOperation::EnableAuto && !current->error)
             current->notice=l10n::Get(I::StartupDialogsEnabledHint);
         if(operation==app::DialogManagementOperation::DisableAuto && current->restoring) {
@@ -201,6 +268,16 @@ void TickDialogManagement(AppState& s) {
         s.core.dialogManagement=std::move(fresh);
     }
     const auto current=s.core.dialogManagement;
+    if(current->feedback.start_filetime && !current->exporting_feedback && !current->modal && !current->api_probe) {
+        const HWND foreground=GetForegroundWindow();
+        DWORD pid=0;
+        if(foreground && foreground!=GetShellWindow()) GetWindowThreadProcessId(foreground,&pid);
+        if(pid && pid!=GetCurrentProcessId()) current->feedback.foreground_pid=pid;
+    }
+    if(current->api_probe && WaitForSingleObject(current->api_probe,0)!=WAIT_TIMEOUT) {
+        CloseHandle(current->api_probe);current->api_probe=nullptr;
+        Redraw(s);
+    }
     if(current->busy || current->refreshing) DialogManagementReady(s);
     if(current->restoring && current->restore_tags.valid() && current->restore_tags.wait_for(std::chrono::seconds(0))==std::future_status::ready)
         FinishRestore(s,*current,current->restore_tags.get());
@@ -225,12 +302,15 @@ void FillDialogManagementVm(AppState& s,ui::WindowViewModel& vm) {
         current->generation=current->controller->Refresh();current->refreshing=true;
     }
     const auto& snapshot=current->snapshot;
+    vm.settings_dialog_api_test_running=current->api_probe!=nullptr;
+    vm.settings_dialog_feedback_recording=current->feedback.start_filetime!=0;
     vm.settings_dialog_busy=current->busy || current->modal;
     FillHistoryVm(snapshot,vm);
     vm.settings_dialog_can_launch=snapshot.launch_bundle_verified && snapshot.application_valid;
     vm.settings_dialog_can_launch_admin=snapshot.admin_launch_ready && snapshot.application_valid;
     vm.settings_integration_restore_busy=current->restoring;
     vm.settings_dialog_enabled=snapshot.auto_enabled && !snapshot.auto_path_mismatch;
+    s.core.userDialogAuto.Update(!s.isolatedTest && !s.shot.active && s.appPrefs.dialog_adaptive_legacy && vm.settings_dialog_enabled, app::GetPulseDataDir());
     vm.settings_dialog_conflict=snapshot.auto_conflict;
     vm.settings_dialog_failed=snapshot.auto_path_mismatch || current->error || snapshot.auto_error || (!snapshot.bundle_verified && !snapshot.auto_enabled && !current->busy);
     vm.settings_dialog_scope_expanded=current->scope_expanded;
@@ -257,9 +337,75 @@ void DialogManagementAction(AppState& s,int action) {
     if(s.isolatedTest || !IsWindow(s.core.host.Hwnd())) return;
     auto current=s.core.dialogManagement;
     if(!current || !current->controller || current->busy || current->restoring || current->modal) return;
+    if(action==17) {
+        if(current->api_probe || current->feedback.start_filetime) return;
+        const auto choice=DialogMenu(s,{{100,I::DialogApiTestOpen},{101,I::DialogApiTestSave},{102,I::DialogApiTestFolder},{103,I::DialogApiTestLegacy}});
+        if(choice<100 || choice>103) return;
+        DWORD error=ERROR_SUCCESS;
+        try {error=app::LaunchDialogApiProbe(current->api_probe,static_cast<app::DialogApiScenario>(choice),s.darkMode);}
+        catch(...) {error=ERROR_NOT_ENOUGH_MEMORY;}
+        if(error) current->notice=l10n::Get(I::DialogApiTestLaunchFailed)+L" ("+std::to_wstring(error)+L")";
+        Redraw(s);return;
+    }
+    if(action==18) {
+        if(current->api_probe) return;
+        if(!current->feedback.start_filetime) {
+            const int choice=DialogMenu(s,{{1,I::DialogFeedbackOpen},{2,I::DialogFeedbackSave},{3,I::DialogFeedbackFolder},{4,I::DialogFeedbackOther}});
+            if(choice<1 || choice>4) return;
+            current->feedback={NowFileTime(),0,0,static_cast<uint32_t>(choice==4 ? 0 : choice)};
+            current->notice.clear();Redraw(s);return;
+        }
+        auto window=current->feedback;window.end_filetime=(std::max)(NowFileTime(),window.start_filetime);
+        ui::ConfirmDialogSpec spec;
+        spec.title=l10n::Get(I::DialogFeedbackFinish);
+        spec.message=l10n::Get(I::DialogFeedbackReview);
+        spec.confirm_text=l10n::Get(I::DialogFeedbackExport);
+        spec.secondary_text=l10n::Get(I::DialogFeedbackDiscard);
+        spec.cancel_text=l10n::Get(I::Cancel);
+        spec.default_choice=ui::ConfirmChoice::Cancel;
+        current->modal=true;
+        struct EndModal {bool& flag;~EndModal(){flag=false;}};
+        ui::ConfirmChoice answer;
+        {EndModal end{current->modal};answer=ui::ShowConfirmDialogEx(s.hwnd,spec,s.darkMode,s.accentColor);}
+        if(answer==ui::ConfirmChoice::Cancel) return;
+        if(answer==ui::ConfirmChoice::Secondary) {current->feedback={};Redraw(s);return;}
+        current->refreshing=false;current->notice.clear();current->error=0;
+        try {
+            current->generation=current->controller->ExportFeedback(window);
+            current->busy=current->exporting_feedback=current->generation!=0;
+            if(!current->busy) current->error=ERROR_NOT_READY;
+        } catch(...) {current->error=ERROR_NOT_ENOUGH_MEMORY;}
+        Redraw(s);return;
+    }
     if(action==4) {
         current->refreshing=false;current->notice.clear();
         try {current->generation=current->controller->PollHistory(true);current->busy=current->generation!=0;}
+        catch(...) {current->snapshot.history_error=ERROR_NOT_ENOUGH_MEMORY;}
+        Redraw(s);return;
+    }
+    if(action==16 || (action>=100 && action<100+12)) {
+        // 16 clears every record; 100+i deletes the i-th listed row, or resumes a paused program.
+        bool all=action==16;uint64_t id=0;uint32_t reason=0;
+        if(!all) {
+            // The rows as drawn: restart rows, paused programs, then records newest first.
+            ui::WindowViewModel listed;FillHistoryVm(current->snapshot,listed);
+            const auto index=static_cast<size_t>(action-100);
+            if(index<listed.settings_dialog_records.size() && listed.settings_dialog_records[index].retry) {
+                current->refreshing=false;current->notice.clear();
+                try {current->generation=current->controller->ResumePaused(listed.settings_dialog_records[index].file);current->busy=current->generation!=0;}
+                catch(...) {current->snapshot.history_error=ERROR_NOT_ENOUGH_MEMORY;}
+                Redraw(s);return;
+            }
+            if(index>=listed.settings_dialog_records.size() || !listed.settings_dialog_records[index].removable) return;
+            size_t restart=0;for(const auto& row:listed.settings_dialog_records) restart+=row.removable ? 0 : 1;
+            std::vector<const dialog_history::Record*> recent;
+            for(const auto& record:current->snapshot.history.records) recent.push_back(&record);
+            std::stable_sort(recent.begin(),recent.end(),[](const auto* a,const auto* b){return a->last_utc>b->last_utc;});
+            if(index<restart || index-restart>=recent.size()) return;
+            id=recent[index-restart]->app_image_id;reason=static_cast<uint32_t>(recent[index-restart]->reason);
+        }
+        current->refreshing=false;current->notice.clear();
+        try {current->generation=current->controller->ClearHistory(all,id,reason);current->busy=current->generation!=0;}
         catch(...) {current->snapshot.history_error=ERROR_NOT_ENOUGH_MEMORY;}
         Redraw(s);return;
     }
@@ -268,10 +414,26 @@ void DialogManagementAction(AppState& s,int action) {
     if((action==15 || ((action==10 || action==11) && !disabling)) && !Confirm(s,action==15)) return;
     // Confirmation pumps messages: recheck shared state before submitting.
     if(current->busy || current->restoring || current->modal) return;
+    std::wstring destination;
+    if(action==12) {
+        std::wstring desktop;
+        PWSTR known=nullptr;
+        if(SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop,KF_FLAG_DEFAULT,nullptr,&known))) {
+            desktop=known;CoTaskMemFree(known);
+        }
+        const HWND owner=s.hwnd;
+        bool chosen=false;
+        {
+            current->modal=true;
+            struct EndModal {bool& flag;~EndModal(){flag=false;}} end{current->modal};
+            chosen=PickFolder(s,destination,l10n::Get(I::StartupDiagnosticsSaveLocation).c_str(),{},desktop);
+        }
+        if(!chosen || destination.empty() || !IsWindow(owner))return;
+    }
     current->refreshing=false;
     current->notice.clear();current->error=0;
     try {
-        if(action==12) current->generation=current->controller->ExportDiagnostics();
+        if(action==12) current->generation=current->controller->ExportDiagnostics(std::move(destination));
         else if(action==15) {current->restoring=true;current->retry_disable=true;current->generation=current->controller->DisableAuto();}
         else {current->retry_disable=disabling;current->generation=disabling ? current->controller->DisableAuto() : current->controller->EnableAuto();}
         current->busy=current->generation!=0;
@@ -316,6 +478,20 @@ bool TestDialogManagementBackgroundVm(AppState& s) {
     ui::WindowViewModel rescanned{};FillDialogManagementVm(s,rescanned);
     passed=passed && rescanned.settings_dialog_records.size()==1 &&
         rescanned.settings_dialog_history_note.find(l10n::Get(I::DialogRestartPartial))!=std::wstring::npos;
+    // A paused program: listed before the records with a retry button, not deletable,
+    // and the history caption follows it.
+    FILETIME now_ft{};GetSystemTimeAsFileTime(&now_ft);
+    const uint64_t now=(static_cast<uint64_t>(now_ft.dwHighDateTime)<<32)|now_ft.dwLowDateTime;
+    dialog_adaptive::PausedTarget paused;paused.fingerprint="v2-fixture";paused.basename="Example.exe";paused.failures=2;
+    paused.paused_ft=now;paused.retry_ft=now+dialog_adaptive::AdaptiveTargetStore::kBlockedRetryAfter;
+    fixture->snapshot.paused.push_back(paused);
+    ui::WindowViewModel withpaused{};FillDialogManagementVm(s,withpaused);
+    const auto& rows=withpaused.settings_dialog_records;
+    passed=passed && rows.size()==2 && rows[0].retry && !rows[0].removable && rows[0].group==3 && rows[0].file==L"Example.exe" &&
+        rows[0].status==l10n::Get(I::DialogRecordStatusPaused) && rows[0].detail.find(L'{')==std::wstring::npos &&
+        rows[0].detail.find(L"7")!=std::wstring::npos && rows[0].last_event==now &&
+        !rows[1].retry && rows[1].removable && rows[1].group==2;
+    fixture->snapshot.paused.clear();
     s.core.dialogManagement=saved;return passed;
 }
 }

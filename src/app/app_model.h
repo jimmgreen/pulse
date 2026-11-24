@@ -12,6 +12,7 @@
 #include "entry_order_hold.h"
 #include "entry_sort.h"
 #include "create_rename_intent.h"
+#include "inline_rename_selection.h"
 #include "pane_header_animation.h"
 #include "details_tree.h"
 #include "../index/content_result_store.h"
@@ -74,6 +75,7 @@ struct Tab {
     bool wall = false;
     uint64_t view_generation = 1;
     std::vector<CreateRenameIntent> create_rename_intents;
+    InlineRenameSelection inline_rename_selection;
     ui::SortColumn sort_column = ui::SortColumn::Name;
     ui::SortDirection sort_direction = ui::SortDirection::Asc;
     // "Group by" (app::GroupBy value) for current_path. Views that draw group
@@ -138,6 +140,7 @@ struct Tab {
     // Transient UI state.
     bool loading = false;
     uint64_t pending_generation = 0;
+    uint64_t interactive_permission_generation = 0;
     uint64_t applied_generation = 0;
     fs::SnapshotPtr snapshot;
     std::wstring snapshot_path;
@@ -154,10 +157,10 @@ struct Tab {
     std::wstring pending_selection_key_focus_name;
     uint64_t pending_selection_revision = UINT64_MAX;
     bool pending_ensure_selection_visible = false;
-    // File Explorer order hold (#13): change patches and non-explicit
-    // refreshes keep rows in place until F5, a new sort or reopening.
-    bool refresh_keeps_order = false;      // the pending refresh merges into the shown order
-    bool order_held = false;               // rows may be out of sort order
+    // Background refresh bookkeeping for rename/selection reconciliation.
+    // Both notifications and full refreshes now obey the active sort order.
+    bool refresh_keeps_order = false;      // retain pending rename reconciliation
+    bool order_held = false;               // legacy explicit-refresh reveal marker
     std::vector<EntryRename> held_renames; // Pulse renames not yet seen by a refresh
     // Size order (#58): fingerprint of the folder totals the rows were sorted
     // with, and when they last moved for new totals (GetTickCount64).
@@ -459,11 +462,14 @@ void SetDupPaneDecorator(PaneDecorator decorator);
 // by InstallMediaColumns (media_columns_ui.cpp), so tests link without it.
 using MediaPaneDecorator = void (*)(const Tab& tab, ui::PaneViewModel& out);
 void SetMediaPaneDecorator(MediaPaneDecorator decorator);
+// Extension columns and badges (extension_columns_ui.cpp), after the media decorator.
+void SetExtensionPaneDecorator(MediaPaneDecorator decorator);
 
 // One window tab = one working layout (pane count, split ratios, each column).
 struct LayoutTab {
     std::unique_ptr<ExplorerOpenTransaction> explorer_transaction;
     std::wstring title; // empty = derive from the focused folder
+    std::wstring workspace_root; // non-empty while bound to a sidebar workspace (#638)
     uint32_t marker_rgb = 0;
     bool pinned = false;
     int tab_group = 0;
@@ -557,6 +563,31 @@ struct TrayItem {
     bool is_dir = false;
     DWORD attrs = 0;
     uint64_t size = 0;
+    // Content snippet metadata (0 = regular file/folder).
+    uint8_t content_kind = 0;        // 0=File, 1=Pic, 2=Text, 3=Link
+    bool owned_snippet = false;      // materialized under %LOCALAPPDATA%\Pulse\shelf
+    std::wstring display_name;
+    std::wstring domain;
+    std::wstring source_label;
+};
+
+// Owned materializations are copied even under a forced move.
+inline bool IsTraySnippet(const TrayItem& item) noexcept {
+    return item.owned_snippet || item.content_kind != 0;
+}
+
+enum class TrayReleaseMode { Staged, Copy, Move };
+
+struct TrayReleasePart {
+    std::vector<std::wstring> sources;
+    std::vector<uint64_t> item_ids;
+};
+
+struct TrayReleasePlan {
+    TrayReleasePart copies;
+    TrayReleasePart moves;
+    size_t missing = 0;
+    size_t already_there = 0;
 };
 
 struct TrayBatch {
@@ -566,21 +597,68 @@ struct TrayBatch {
     uint64_t total_size = 0;
 };
 
+inline constexpr uint32_t kShelfPaletteRgb[6] = {
+    0x0067C0, 0x2AA05A, 0x8A63D2, 0xD2489A, 0x0E9AA7, 0xB8901A
+};
+
+struct TrayShelfRecord {
+    uint64_t id = 1;
+    std::wstring name;           // empty on default temp shelf -> resolves to localized "临时"
+    bool custom_name = false;
+    uint32_t color_rgb = 0x0067C0;
+    bool temp = true;
+    std::vector<TrayBatch> batches;
+};
+
 class StagingTray {
 public:
-    const std::vector<TrayBatch>& batches() const { return batches_; }
+    StagingTray();
 
-    // Collect selected full paths. move_intent = true for Ctrl+X.
+    const std::vector<TrayBatch>& batches() const { return ActiveShelf().batches; }
+
+    // Multi-shelf accessors and operations.
+    const std::vector<TrayShelfRecord>& shelves() const { return shelves_; }
+    const TrayShelfRecord& active_shelf() const { return ActiveShelf(); }
+    uint64_t active_shelf_id() const { return ActiveShelf().id; }
+    std::wstring ShelfDisplayName(const TrayShelfRecord& shelf) const;
+    std::wstring ActiveShelfName() const { return ShelfDisplayName(ActiveShelf()); }
+    const TrayShelfRecord* FindShelf(uint64_t shelf_id) const;
+    bool SwitchShelf(uint64_t shelf_id);
+    uint64_t CreateShelf(const std::wstring& custom_name = {});
+    bool RenameShelf(uint64_t shelf_id, const std::wstring& new_name);
+    bool SetShelfColor(uint64_t shelf_id, uint32_t rgb);
+    bool SaveTempAsNamed(uint64_t shelf_id);
+    bool DeleteShelf(uint64_t shelf_id, std::vector<std::wstring>* out_owned_snippets = nullptr);
+    void ClearTempShelf(std::vector<std::wstring>* out_owned_snippets = nullptr);
+    uint32_t NextShelfColor() const;
+
+    // Collect rich items (files or snippets) into a specific shelf (0 = active).
+    size_t CollectRichToShelf(uint64_t shelf_id, const std::vector<TrayItem>& proto_items,
+                              bool move_intent, size_t* out_skipped = nullptr);
+    // Move existing items from `from_shelf_id` into `to_shelf_id` ("换架").
+    size_t MoveItemsBetweenShelves(uint64_t from_shelf_id, uint64_t to_shelf_id,
+                                   const std::vector<uint64_t>& item_ids);
+    bool RemoveItemById(uint64_t item_id, std::wstring* out_owned_snippet = nullptr);
+    void AllReferencedSnippetPaths(std::vector<std::wstring>& out) const;
+
+    // Collect selected full paths into the active shelf. move_intent = true for Ctrl+X.
     void Collect(const std::vector<std::wstring>& paths, bool move_intent);
     void RemoveBatch(size_t idx);
     // Follow a rename done from the tray (batch rename) so the card stays live.
     void ReplacePath(const std::wstring& from, const std::wstring& to);
     // Re-probe local items (moved/deleted outside Pulse); true when any flag flipped.
+    struct ExistenceProbe {
+        struct Item { std::wstring path; bool previous; bool observed; };
+        std::unordered_map<uint64_t, Item> items;
+        void ReadLocalAttributes();
+    };
+    ExistenceProbe SnapshotExistence() const;
+    bool ApplyExistence(const ExistenceProbe& probe);
     bool RefreshExists();
     // Apply a completed background probe without performing I/O on the caller.
     void ApplyMetadata(const std::wstring& path, const WIN32_FILE_ATTRIBUTE_DATA& data);
     // Drop every item whose file is gone; returns how many were removed.
-    size_t RemoveMissing();
+    size_t RemoveMissing(std::vector<std::wstring>* out_owned_snippets = nullptr);
     // Flip a batch between copy and move on release (tray intent chip).
     void SetMoveIntent(size_t idx, bool move_intent);
     void RemoveItem(size_t batch_idx, size_t item_idx);
@@ -588,18 +666,37 @@ public:
     void MarkPendingMove(uint64_t task_id, const std::vector<std::wstring>& paths,
                          std::optional<size_t> batch = {});
     void CompleteMove(uint64_t task_id, const std::vector<std::wstring>& moved);
-    void Clear();
+    void Clear(std::vector<std::wstring>* out_owned_snippets = nullptr);
+    // Select checked cards, one batch, or all of the active shelf. No filesystem I/O.
+    TrayReleasePlan PlanRelease(const std::wstring& dest, TrayReleaseMode mode,
+                               const std::vector<uint64_t>& item_ids = {},
+                               std::optional<size_t> batch_idx = {}, bool skip_same_folder = true) const;
+    std::vector<TrayBatch> TakeIdleBatches();
+    bool RestoreClearedBatches(uint64_t shelf_id, std::vector<TrayBatch> batches);
     void MarkInFlight(uint64_t task_id, const std::vector<uint64_t>& item_ids, bool move);
     void CompleteTask(uint64_t task_id, const std::vector<std::wstring>& moved_sources);
     bool IsInFlight(const std::wstring& path) const;
 
-    // For serialization.
+    // Active-shelf batch serialization (session tests) and full multi-shelf persistence.
     void ToJson(std::wstring& out) const;
     bool FromJson(const std::wstring& in);
+    std::wstring NamedShelvesToJson() const;
+    bool LoadNamedShelvesFromJson(const std::wstring& in);
+    bool SaveNamedShelvesFile() const;
+    bool LoadNamedShelvesFile();
+    // Full state snapshot for Undo (delete shelf, clear shelf, etc.).
+    std::wstring FullSnapshotJson() const;
+    bool RestoreFullSnapshotJson(const std::wstring& in);
 
 private:
-    std::vector<TrayBatch> batches_;
-    uint64_t next_id_ = 1;
+    TrayShelfRecord& ActiveShelf();
+    const TrayShelfRecord& ActiveShelf() const;
+    TrayShelfRecord* FindShelfMut(uint64_t shelf_id);
+    void EnsureTempShelf();
+
+    std::vector<TrayShelfRecord> shelves_;
+    size_t active_index_ = 0;
+    uint64_t next_id_ = 2;
     std::map<uint64_t, std::vector<std::wstring>> inflight_sources_;
     // The same paths keyed for lookup, counted across tasks.
     std::unordered_map<std::wstring, size_t> inflight_keys_;
@@ -624,6 +721,8 @@ struct SidebarEntry {
     int count = 0;
     std::wstring path;
     bool is_drive = false;
+    uint8_t drive_type = 0;
+    bool drive_locked = false;
     float used_ratio = 0.0f;
     uint64_t free_bytes = ~uint64_t{0};  // drives: bytes left (all ones = unknown)
     uint64_t total_bytes = 0;            // drives: capacity (0 = unknown)
@@ -661,6 +760,8 @@ inline constexpr uint32_t kDefaultQuickAccessHiddenMask =
 std::wstring BuiltinQuickAccessKey(int builtin);
 // The BuiltinQuickAccess value of a key, or -1 for pins and unknown names.
 int BuiltinQuickAccessFromKey(const std::wstring& key);
+bool IsBuiltinQuickAccessFolder(int builtin);
+std::wstring ResolveBuiltinQuickAccessFolder(int builtin);
 
 // Sidebar sections. The ids are stable: the collapse/hide bitmasks stored in the
 // session are indexed by them, and the user may reorder the groups by dragging.
@@ -704,6 +805,7 @@ struct SidebarModel {
 };
 
 SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle = nullptr);
+std::vector<SidebarEntry> BuildBuiltinQuickAccess(const fs::RecycleBinInfo* recycle);
 // Blocking volume queries: call only on a background worker.
 void RefreshSidebarDriveCapacity(std::vector<SidebarEntry>& drives);
 

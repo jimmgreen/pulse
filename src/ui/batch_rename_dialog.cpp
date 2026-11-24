@@ -39,20 +39,17 @@
 #include <unordered_set>
 
 namespace pulse::ui {
-#if defined(PULSE_TEST_BATCH_RENAME_PRESENT)
-void BatchRenameShownForTest(HWND hwnd);
-float BatchRenameScaleForTest();
-#endif
 namespace {
 
 namespace rn = app::rename;
 using l10n::StringId;
+using PresetKind = rn::PresetSelection::Kind;
 
 constexpr wchar_t kClass[] = L"PulseBatchRenameWindow";
 constexpr float kDlgW = 1064.0f;
 constexpr float kDlgH = 672.0f;
 constexpr float kTitleH = 52.0f;
-constexpr float kBodyTop = 146.0f;    // title 52 + AI bar 48 + 12 + examples 26 + 8
+constexpr float kAiBodyTop = 146.0f;    // title 52 + AI bar 48 + 12 + examples 26 + 8
 constexpr float kFootH = 60.0f;
 constexpr float kStepsW = 372.0f;
 constexpr float kPaneHeadH = 44.0f;
@@ -307,6 +304,7 @@ uint64_t LocalTicks(const FILETIME& utc) {
 // with its worker, which stops early once the dialog cancels it.
 constexpr UINT kMetaMsg = WM_APP + 0x31;   // wparam 1 = done, 0 = progress
 constexpr UINT kReviewReadyMsg = WM_APP + 0x34;
+constexpr UINT kExecutionDoneMsg = WM_APP + 0x35;
 constexpr UINT kAiMsg = WM_APP + 0x32;     // the AI request finished
 struct MetaJob {
     bool taken = false, dims = false;
@@ -421,11 +419,10 @@ public:
             folder_label_ = sources_.empty() ? std::wstring() : sources_.front().folder;
             opts_.policy = rn::Policy::Block;
         } else LoadSources();
-#ifndef PULSE_TEST_BATCH_RENAME_PRESENT
-        if (!options_.proposed_names) store_ = rn::LoadPresets();
+#if defined(PULSE_TEST_BATCH_RENAME_PRESENT)
+        if (BatchRenameUsePresetStoreForTest())
 #endif
-        // A fresh dialog opens with the cleanup most people start from (the
-        // design's first scene), or with the steps it was handed.
+            if (!options_.proposed_names) store_ = rn::LoadPresets();
         if (options_.proposed_names) {
             steps_.clear();
         } else if (options_.preset) {
@@ -436,7 +433,7 @@ public:
             }
             ApplyPreset(p, false);
         } else {
-            ApplyPreset(Builtins().front(), false);
+            ApplyInitialPreset();
         }
         Recompute(false);
 
@@ -461,8 +458,11 @@ public:
         }
         const int width = static_cast<int>(w * scale_);
         const int height = static_cast<int>(h * scale_);
+        // Born on the owner's monitor: CW_USEDEFAULT lands on the primary one and
+        // the move to a screen of another scale rescaled the size (WM_DPICHANGED).
+        const POINT origin = pulse::ui::OwnedWindowOrigin(owner, width, height);
         hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kClass, S(StringId::BatchRename).c_str(),
-                                WS_POPUP | WS_THICKFRAME | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, width, height,
+                                WS_POPUP | WS_THICKFRAME | WS_SYSMENU, origin.x, origin.y, width, height,
                                 owner, nullptr, wc.hInstance, this);
         if (!hwnd_) return result_;
         pulse::ui::CenterOwnedWindow(hwnd_, owner_, width, height);
@@ -470,7 +470,32 @@ public:
         ShowWindow(hwnd_, SW_SHOW);
         UpdateWindow(hwnd_);   // first frame places the step fields
 #if defined(PULSE_TEST_BATCH_RENAME_PRESENT)
-        BatchRenameShownForTest(hwnd_);
+        BatchRenameShownForTest(hwnd_, [this](BatchRenameControlForTest control, int index) {
+            using Control = BatchRenameControlForTest;
+            Hit hit;
+            switch (control) {
+            case Control::Picker: hit = {H::PresetDD}; break;
+            case Control::Builtin: hit = {H::PresetItem, index, 1}; break;
+            case Control::User: hit = {H::PresetItem, index, 2}; break;
+            case Control::Last: hit = {H::PresetItem, 0, 0}; break;
+            case Control::DeleteUser: hit = {H::PresetDel, index}; break;
+            case Control::Save: hit = {H::PresetSave}; break;
+            case Control::ConfirmSave: hit = {H::PresetOk}; break;
+            case Control::AiExample: hit = {H::Example, index}; break;
+            case Control::ContentMode: hit = {H::ModeContent}; break;
+            case Control::AddStep: hit = {H::AddStep}; break;
+            case Control::PreviewFilter: hit = {H::Tab, index}; break;
+            }
+            for (const auto& entry : hits_) {
+                if (entry.h == hit) {
+                    const POINT pt{static_cast<LONG>((entry.r.left + entry.r.right) * 0.5f),
+                                   static_cast<LONG>((entry.r.top + entry.r.bottom) * 0.5f)};
+                    if (HitAt(static_cast<float>(pt.x), static_cast<float>(pt.y)) == hit)
+                        return std::optional<POINT>(pt);
+                }
+            }
+            return std::optional<POINT>();
+        });
 #endif
         SetForegroundWindow(hwnd_);
         if (!steps_ui_.empty()) {
@@ -744,8 +769,12 @@ private:
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
+    bool ShowAiTools() const { return options_.ai_enabled && !options_.proposed_names; }
+    float BodyTop() const { return ShowAiTools() ? kAiBodyTop : kTitleH; }
+
     // Send, or stop while a request runs.
     void SendAi() {
+        if (!ShowAiTools()) return;
         if (ai_task_) {
             ai_task_->Cancel();
             ai_task_.reset();
@@ -834,7 +863,7 @@ private:
     }
 
     void EnterContentMode() {
-        if (content_mode_) return;
+        if (!ShowAiTools() || content_mode_) return;
         CommitRowEdit(true);
         if (naming_) EndNaming();
         content_mode_ = true;
@@ -866,6 +895,7 @@ private:
 
     // 开始生成建议 / 重新生成: nothing is read or sent before this.
     void StartContent() {
+        if (!ShowAiTools() || !content_mode_) return;
         CommitRowEdit(false);
         StopContent();
         c_error_.clear();
@@ -1065,8 +1095,13 @@ private:
 
     // Built-in presets: the same jobs as the AI examples, without AI. Tokens
     // follow the UI language.
-    static std::vector<rn::Preset> Builtins() {
-        std::vector<rn::Preset> out;
+    struct BuiltinPreset {
+        const wchar_t* key;
+        rn::Preset preset;
+    };
+
+    static std::vector<BuiltinPreset> Builtins() {
+        std::vector<BuiltinPreset> out;
         auto step = [](rn::StepType t) { rn::Step st; st.type = t; return st; };
         {
             rn::Preset p;
@@ -1075,7 +1110,7 @@ private:
             rn::Step b = step(rn::StepType::Remove); b.brackets = true; b.spaces = true;
             rn::Step c = step(rn::StepType::Case); c.mode = rn::CaseMode::Title;
             p.steps = {a, b, c};
-            out.push_back(std::move(p));
+            out.push_back({L"clean", std::move(p)});
         }
         {
             rn::Preset p;
@@ -1083,7 +1118,7 @@ private:
             rn::Step t = step(rn::StepType::Template); t.pattern = TokenText(2) + L" " + TokenText(1);
             p.steps = {t};
             p.opts.order = rn::Order::Taken;
-            out.push_back(std::move(p));
+            out.push_back({L"photo", std::move(p)});
         }
         {
             rn::Preset p;
@@ -1092,23 +1127,65 @@ private:
             rn::Step b = step(rn::StepType::Replace); b.find = L" "; b.with = L"-";
             rn::Step c = step(rn::StepType::Case); c.mode = rn::CaseMode::Lower;
             p.steps = {a, b, c};
-            out.push_back(std::move(p));
+            out.push_back({L"kebab", std::move(p)});
         }
         {
             rn::Preset p;
             p.name = S(StringId::BrPresetFolder);
             rn::Step t = step(rn::StepType::Template); t.pattern = TokenText(4) + L" " + TokenText(1);
             p.steps = {t};
-            out.push_back(std::move(p));
+            out.push_back({L"folder", std::move(p)});
         }
         {
             rn::Preset p;
             p.name = S(StringId::BrPresetDate);
             rn::Step t = step(rn::StepType::Insert); t.text = TokenText(3) + L" "; t.where = rn::Where::Start;
             p.steps = {t};
-            out.push_back(std::move(p));
+            out.push_back({L"date", std::move(p)});
         }
         return out;
+    }
+
+    rn::Preset LastPreset() const {
+        rn::Preset p = store_.last;
+        p.name = S(StringId::BrPresetLast);
+        return p;
+    }
+
+    void ApplyInitialPreset() {
+        const auto& selection = store_.selection;
+        if (selection.kind == PresetKind::Last && store_.has_last) {
+            ApplyPreset(LastPreset(), false);
+            return;
+        }
+        if (selection.kind == PresetKind::User) {
+            const auto saved = std::find_if(store_.presets.begin(), store_.presets.end(), [&](const rn::Preset& p) {
+                return p.name == selection.key && !p.steps.empty();
+            });
+            if (saved != store_.presets.end()) {
+                ApplyPreset(*saved, false);
+                return;
+            }
+        }
+        const auto builtins = Builtins();
+        if (selection.kind == PresetKind::Builtin) {
+            const auto builtin = std::find_if(builtins.begin(), builtins.end(), [&](const BuiltinPreset& p) {
+                return selection.key == p.key;
+            });
+            if (builtin != builtins.end()) {
+                ApplyPreset(builtin->preset, false);
+                return;
+            }
+        }
+        ApplyPreset(builtins.front().preset, false);
+    }
+
+    void SelectPreset(const rn::Preset& preset, rn::PresetSelection selection) {
+        ApplyPreset(preset, true);
+        if (store_.selection != selection) {
+            store_.selection = std::move(selection);
+            SaveStore();
+        }
     }
 
     void ApplyPreset(const rn::Preset& p, bool animate, ULONGLONG stagger = 40) {
@@ -1162,9 +1239,10 @@ private:
     }
 
     void SaveStore() {
-#ifndef PULSE_TEST_BATCH_RENAME_PRESENT
-        rn::SavePresets(store_);
+#if defined(PULSE_TEST_BATCH_RENAME_PRESENT)
+        if (!BatchRenameUsePresetStoreForTest()) return;
 #endif
+        rn::SavePresets(store_);
     }
 
     void CommitPresetName() {
@@ -1179,32 +1257,25 @@ private:
                                [&](const rn::Preset& x) { return x.name == name; });
         if (it != store_.presets.end()) *it = std::move(p);
         else store_.presets.push_back(std::move(p));
+        store_.selection = {PresetKind::User, name};
         SaveStore();
         preset_name_ = name;
         preset_key_ = rn::StepsKey(steps_, opts_);
         EndNaming();
     }
 
-    // Per frame while running: how many rows show their check. The checks
-    // follow the task but are spread over at most ~0.6 s, so a fast batch
-    // still reads as going through in order; a slow one is never held back.
     void TickExecution() {
         if (!executing_) return;
         anim_active_ = true;
-        const size_t total = plan_.exec_order.size();
         const BatchRenameProgress p = options_.poll(exec_task_);
-        const size_t real = p.finished ? total : (std::min)(p.done, total);
-        const ULONGLONG per_row = std::clamp<ULONGLONG>(600 / (std::max<size_t>)(total, 1), 25, 110);
-        const size_t by_time = static_cast<size_t>((now_ - exec_start_) / per_row) + 1;
-        exec_shown_ = (std::min)(real, by_time);
-        if (p.finished && exec_shown_ >= total && !exec_end_) exec_end_ = now_;
-        // Done: hold the last check for a moment (HTML: 380 ms), then close.
-        // Queued behind another job: leave it to the operations UI.
-        const bool stuck = !p.finished && real == 0 && now_ - exec_start_ > 1500;
-        if ((exec_end_ && now_ - exec_end_ >= 380) || stuck) {
-            executing_ = false;
-            PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+        // Keep the existing handoff to the operations UI when no rows advance.
+        const bool handoff = p.done == 0 && now_ - exec_start_ > 1500;
+        if (p.finished || handoff) {
+            // Close after painting, without re-enabling Apply or replaying rows.
+            PostMessageW(hwnd_, kExecutionDoneMsg, 0, 0);
+            return;
         }
+        exec_shown_ = (std::min)(p.done, plan_.exec_order.size());
     }
 
     // ---------------------------------------------------------------- steps
@@ -1282,7 +1353,7 @@ private:
 
     void EnsureFields() {
         if (options_.proposed_names) return;
-        if (!FindField(-1, 0)) CreateField(-1, 0, std::wstring(), false);
+        if (ShowAiTools() && !FindField(kAiField, 0)) CreateField(kAiField, 0, std::wstring(), false);
         for (size_t i = 0; i < steps_.size(); ++i) {
             const int id = steps_ui_[i].id;
             int count = 0;
@@ -1675,8 +1746,10 @@ private:
         DrawTitle();
         Stroke(D2D1::RectF(0, 0, W_, H_), X(12), Alpha(pal_.text, 0.09f));
         if (!options_.proposed_names) {
-            DrawAiBar();
-            DrawExamples();
+            if (ShowAiTools()) {
+                DrawAiBar();
+                DrawExamples();
+            }
             if (content_mode_) DrawContentPane();
             else DrawSteps();
         }
@@ -1734,7 +1807,7 @@ private:
         painter_.DrawTitleBarButton(close, fluent::TitleBarButtonRole::Close, {}, close_state);
         Reg(close, {H::Close});
 
-        if (options_.proposed_names) return;
+        if (!ShowAiTools()) return;
         // Mode switch: 规则 | 按内容命名.
         const std::wstring l0 = S(StringId::BrModeRules), l1 = S(StringId::BrModeContent);
         const float w0 = X(12 + 14 + 6 + 12) + Measure(l0, Fmt::T13);
@@ -1873,7 +1946,7 @@ private:
     }
 
     void DrawSteps() {
-        const float top = X(kBodyTop), bottom = H_ - X(kFootH);
+        const float top = X(BodyTop()), bottom = H_ - X(kFootH);
         const D2D1_RECT_F pane = D2D1::RectF(0, top, X(kStepsW), bottom);
         Fill(pane, 0, pal_.glass_pane);
         Fill(D2D1::RectF(0, top, W_, top + X(1)), 0, pal_.line2);
@@ -2154,7 +2227,7 @@ private:
     }
 
     void DrawContentPane() {
-        const float top = X(kBodyTop), bottom = H_ - X(kFootH);
+        const float top = X(BodyTop()), bottom = H_ - X(kFootH);
         const D2D1_RECT_F pane = D2D1::RectF(0, top, X(kStepsW), bottom);
         Fill(pane, 0, pal_.glass_pane);
         Fill(D2D1::RectF(0, top, W_, top + X(1)), 0, pal_.line2);
@@ -2583,7 +2656,7 @@ private:
     // ---------------------------------------------------------------- preview
 
     void DrawPreview() {
-        const float top = X(options_.proposed_names ? kTitleH : kBodyTop) + X(1), bottom = H_ - X(kFootH);
+        const float top = X(BodyTop()) + X(1), bottom = H_ - X(kFootH);
         const float left = options_.proposed_names ? 0.0f : X(kStepsW);
         const D2D1_RECT_F pane = D2D1::RectF(left, top, W_, bottom);
         Reg(pane, {H::Preview});
@@ -3144,7 +3217,7 @@ private:
             D2D1_RECT_F r = R(add_link_.right - X(190), add_link_.bottom + X(4), X(190), mh);
             bool up = false;
             if (menu_from_box_) {
-                up = qa_box_.top - X(4) - mh >= X(kBodyTop);
+                up = qa_box_.top - X(4) - mh >= X(BodyTop());
                 r = up ? R(qa_box_.left, qa_box_.top - X(4) - mh, X(190), mh) : R(qa_box_.left, qa_box_.bottom + X(4), X(190), mh);
             }
             const float dir = up ? 1.0f : -1.0f;
@@ -3188,7 +3261,8 @@ private:
             if (store_.has_last) list.push_back({0, 0, S(StringId::BrPresetLast), false});
             list.push_back({-1, 0, S(StringId::BrPresetCommon), true});
             const auto builtins = Builtins();
-            for (size_t i = 0; i < builtins.size(); ++i) list.push_back({1, static_cast<int>(i), builtins[i].name, false});
+            for (size_t i = 0; i < builtins.size(); ++i)
+                list.push_back({1, static_cast<int>(i), builtins[i].preset.name, false});
             if (!store_.presets.empty()) {
                 list.push_back({-1, 0, S(StringId::BrPresetMine), true});
                 for (size_t i = 0; i < store_.presets.size(); ++i)
@@ -3196,7 +3270,7 @@ private:
             }
             float mh = X(10);
             for (const Entry& e : list) mh += e.header ? X(26) : X(34);
-            const float room = preset_dd_.top - X(4) - X(kBodyTop) - X(8);
+            const float room = preset_dd_.top - X(4) - X(BodyTop()) - X(8);
             mh = (std::min)(mh, room);
             const D2D1_RECT_F r = R(preset_dd_.left, preset_dd_.top - X(4) - mh, X(280), mh);
             dc_->SetTransform(D2D1::Matrix3x2F::Translation(0, X(6) * (1 - t)) * m);
@@ -3277,18 +3351,25 @@ private:
         case H::Close: case H::Cancel: Complete(false); return;
         case H::PresetDD: menu_ = was == Menu::Preset ? Menu::None : Menu::Preset; break;
         case H::PresetItem: {
-            if (h.b == 0 && store_.has_last) ApplyPreset(store_.last, true);
+            if (h.b == 0 && store_.has_last) SelectPreset(LastPreset(), {PresetKind::Last, {}});
             else if (h.b == 1) {
                 const auto builtins = Builtins();
-                if (h.a >= 0 && h.a < static_cast<int>(builtins.size())) ApplyPreset(builtins[static_cast<size_t>(h.a)], true);
-            } else if (h.b == 2 && h.a >= 0 && h.a < static_cast<int>(store_.presets.size()))
-                ApplyPreset(store_.presets[static_cast<size_t>(h.a)], true);
+                if (h.a >= 0 && h.a < static_cast<int>(builtins.size())) {
+                    const auto& builtin = builtins[static_cast<size_t>(h.a)];
+                    SelectPreset(builtin.preset, {PresetKind::Builtin, builtin.key});
+                }
+            } else if (h.b == 2 && h.a >= 0 && h.a < static_cast<int>(store_.presets.size())) {
+                const auto& preset = store_.presets[static_cast<size_t>(h.a)];
+                SelectPreset(preset, {PresetKind::User, preset.name});
+            }
             Recompute(true);
             break;
         }
         case H::PresetDel:
             if (h.a >= 0 && h.a < static_cast<int>(store_.presets.size())) {
-                if (store_.presets[static_cast<size_t>(h.a)].name == preset_name_) preset_name_.clear();
+                const auto& name = store_.presets[static_cast<size_t>(h.a)].name;
+                if (name == preset_name_) preset_name_.clear();
+                if (store_.selection.kind == PresetKind::User && store_.selection.key == name) store_.selection = {};
                 store_.presets.erase(store_.presets.begin() + h.a);
                 SaveStore();
             }
@@ -3520,6 +3601,9 @@ private:
             return 0;
         case kContentMsg:
             OnContentMsg(wparam, lparam);
+            return 0;
+        case kExecutionDoneMsg:
+            Close();
             return 0;
         case WM_DPICHANGED: {
             // Moved to a monitor with another scale: rebuild text and edit
@@ -3795,7 +3879,7 @@ private:
     // Running (scene 5): the renames go through while the dialog shows them.
     bool executing_ = false;
     uint64_t exec_task_ = 0;
-    ULONGLONG exec_start_ = 0, exec_end_ = 0;
+    ULONGLONG exec_start_ = 0;
     size_t exec_shown_ = 0;
     std::vector<int> exec_rank_;   // row -> position in exec_order (-1: not renamed)
     float scale_ = 1.0f;

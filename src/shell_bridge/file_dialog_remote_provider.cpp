@@ -29,8 +29,10 @@ struct Context {
     bool initialized=false,showing=false,callback=false,io=false,dead=false,quit=false;
     int quit_code=0;
     PickerOwnerGuard* owner=nullptr;
+    std::wstring lease_executable;
     uint64_t show_id=0,window=0;
     uint32_t peer_features=0;
+    uint32_t max_control_items=PULSE_PICKER_UI_V2_LEGACY_CONTROL_ITEMS;
     bool close_requested=false;
     bool deferred_close=false;
     HRESULT close_result=S_OK;
@@ -48,8 +50,13 @@ struct Context {
         std::thread worker([&]{try {result=operation(stop.Get());}catch(...){result={ERROR_NOT_ENOUGH_MEMORY};} SetEvent(done.Get());});
         DWORD error=0;
         for(;;) {
-            HANDLE handle=done.Get();
-            DWORD wait=MsgWaitForMultipleObjectsEx(1,&handle,25,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
+            HANDLE handles[2]{done.Get(), nullptr};
+            DWORD count = 1;
+            if (owner) {
+                if (HANDLE pre_hide = owner->PreHideEvent()) handles[count++] = pre_hide;
+            }
+            DWORD wait=MsgWaitForMultipleObjectsEx(count,handles,25,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
+            if(count==2 && wait==WAIT_OBJECT_0+1){owner->CompletePreHideRestore();continue;}
             if(owner && !owner->Alive()){error=ERROR_CANCELLED;break;}
             if(wait==WAIT_OBJECT_0) break;
             if(wait==WAIT_FAILED){error=GetLastError();break;}
@@ -57,6 +64,7 @@ struct Context {
             while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)){
                 if(message.message==WM_QUIT){quit=true;quit_code=static_cast<int>(message.wParam);error=ERROR_CANCELLED;break;}
                 TranslateMessage(&message);DispatchMessageW(&message);
+                if(owner){if(HANDLE pre_hide=owner->PreHideEvent(); pre_hide && WaitForSingleObject(pre_hide,0)==WAIT_OBJECT_0)owner->CompletePreHideRestore();}
                 if(owner && !owner->Alive()){error=ERROR_CANCELLED;break;}
                 if(WaitForSingleObject(done.Get(),0)==WAIT_OBJECT_0)break;
             }
@@ -94,9 +102,10 @@ struct Binding {
     std::wstring executable;
     DWORD thread=GetCurrentThreadId();
     uint64_t capabilities=0,features=0;
+    uint32_t max_control_items=PULSE_PICKER_UI_V2_LEGACY_CONTROL_ITEMS;
     std::shared_ptr<Context> current;
 };
-HRESULT Start(const std::wstring&,const std::shared_ptr<Context>&,wire::Message&);
+HRESULT Start(const std::wstring&,const std::shared_ptr<Context>&,wire::Message&,RemoteProviderTimings*);
 HRESULT Get(PulsePickerUiV2Session token,std::shared_ptr<Context>& c){
     c=active;if(!c)return RPC_E_WRONG_THREAD;if(c->token!=token)return E_INVALIDARG;
     if(c->thread!=GetCurrentThreadId() || !Sta())return RPC_E_WRONG_THREAD;
@@ -114,14 +123,15 @@ HRESULT WINAPI Initialize(const PulsePickerUiV2Initialize* init,PulsePickerUiV2S
         c=std::make_shared<Context>();
         active=c; // Startup pumps messages; reject nested Initialize.
         struct Reset { bool committed=false; ~Reset(){if(!committed)active.reset();} } reset;
-        wire::Message reply;HRESULT hr=Start(binding->executable,c,reply);
+        wire::Message reply;HRESULT hr=Start(binding->executable,c,reply,nullptr);
         if(FAILED(hr))return hr;
-        if(reply.capabilities!=binding->capabilities || reply.features!=binding->features)return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+        if(reply.capabilities!=binding->capabilities || reply.features!=binding->features ||
+            c->max_control_items!=binding->max_control_items)return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
         binding->current=c;reset.committed=true;
     }
     c->initialized=true;active=c;*out=c->token;return S_OK;});}
-HRESULT WINAPI Shutdown(PulsePickerUiV2Session token){return Boundary([&]()->HRESULT{std::shared_ptr<Context> c;HRESULT hr=Get(token,c);if(FAILED(hr))return hr;if(c->showing)return HRESULT_FROM_WIN32(ERROR_BUSY);c->dead=true;c->job.Reset();active.reset();return S_OK;});}
-HRESULT WINAPI Validate(PulsePickerUiV2Session token,const PulsePickerUiV2Config* config){return Boundary([&]()->HRESULT{std::shared_ptr<Context> c;HRESULT hr=Get(token,c);if(FAILED(hr))return hr;if(!config||c->showing)return E_INVALIDARG;wire::Message m,r;m.kind=wire::Kind::ValidateConfig;if(!wire::FromAbi(*config,m.config))return E_INVALIDARG;if(!wire::ConfigSupportedByPeer(m.config,c->peer_features))return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);return c->Call(m,r);});}
+HRESULT WINAPI Shutdown(PulsePickerUiV2Session token){return Boundary([&]()->HRESULT{std::shared_ptr<Context> c;HRESULT hr=Get(token,c);if(FAILED(hr))return hr;if(c->showing)return HRESULT_FROM_WIN32(ERROR_BUSY);c->dead=true;c->channel={};c->job.Reset();active.reset();return S_OK;});}
+HRESULT WINAPI Validate(PulsePickerUiV2Session token,const PulsePickerUiV2Config* config){return Boundary([&]()->HRESULT{std::shared_ptr<Context> c;HRESULT hr=Get(token,c);if(FAILED(hr))return hr;if(!config||c->showing)return E_INVALIDARG;wire::Message m,r;m.kind=wire::Kind::ValidateConfig;if(!wire::FromAbi(*config,m.config))return E_INVALIDARG;if(!wire::ConfigSupportedByPeer(m.config,c->peer_features,c->max_control_items))return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);return c->Call(m,r);});}
 HRESULT Command(PulsePickerUiV2Session token,wire::Message& m,wire::Message& r){std::shared_ptr<Context> c;HRESULT hr=Get(token,c);if(FAILED(hr))return hr;if(!c->showing||!c->callback)return HRESULT_FROM_WIN32(ERROR_INVALID_STATE);return c->Call(m,r);}
 HRESULT WINAPI Query(PulsePickerUiV2Session token,uint64_t show,uint64_t generation,PulsePickerUiV2Snapshot* out){return Boundary([&]()->HRESULT{if(!out)return E_POINTER;wire::Message m,r;m.kind=wire::Kind::Query;m.show_id=show;m.expected_generation=generation;HRESULT hr=Command(token,m,r);if(FAILED(hr))return hr;if(r.snapshot.show_id!=show || (generation && r.snapshot.generation!=generation) || !active->Window(r.snapshot.window) || (active->window && active->window!=r.snapshot.window))return E_ACCESSDENIED;return wire::CopyToAbi(r.snapshot,*out);});}
 HRESULT WINAPI GetWindow(PulsePickerUiV2Session token,uint64_t show,HWND* out){return Boundary([&]()->HRESULT{if(!out)return E_POINTER;wire::Message m,r;m.kind=wire::Kind::GetWindow;m.show_id=show;HRESULT hr=Command(token,m,r);if(FAILED(hr))return hr;if(show!=active->show_id || !active->Window(r.window) || (active->window && active->window!=r.window))return E_ACCESSDENIED;*out=reinterpret_cast<HWND>(static_cast<uintptr_t>(r.window));return S_OK;});}
@@ -154,7 +164,13 @@ HRESULT WINAPI Close(PulsePickerUiV2Session token,uint64_t show,HRESULT reason){
         return S_OK;
     }
     wire::Message m,r;m.kind=wire::Kind::Close;m.show_id=show;m.hresult=static_cast<uint32_t>(reason);HRESULT hr=Command(token,m,r);if(SUCCEEDED(hr)&&!active->close_requested){active->close_requested=true;active->close_result=reason;active->accepted={};}return hr;});}
-HRESULT WINAPI Update(PulsePickerUiV2Session token,uint64_t show,const PulsePickerUiV2Control* control){return Boundary([&]()->HRESULT{wire::Message m,r;m.kind=wire::Kind::UpdateControl;m.show_id=show;if(!control||!wire::FromAbi(*control,m.control))return E_INVALIDARG;return Command(token,m,r);});}
+HRESULT WINAPI Update(PulsePickerUiV2Session token,uint64_t show,const PulsePickerUiV2Control* control){return Boundary([&]()->HRESULT{
+    std::shared_ptr<Context> c; HRESULT hr=Get(token,c); if(FAILED(hr))return hr;
+    if(!c->showing||!c->callback)return HRESULT_FROM_WIN32(ERROR_INVALID_STATE);
+    wire::Message m,r; m.kind=wire::Kind::UpdateControl; m.show_id=show;
+    if(!control||!wire::FromAbi(*control,m.control))return E_INVALIDARG;
+    if(m.control.items.size()>c->max_control_items)return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    return c->Call(m,r);});}
 HRESULT WINAPI SetNavigationRoot(PulsePickerUiV2Session token, PulsePickerUiV2Text root) {
     return Boundary([&]() -> HRESULT {
         std::shared_ptr<Context> context; HRESULT hr = Get(token, context); if (FAILED(hr)) return hr;
@@ -186,10 +202,10 @@ HRESULT WINAPI Show(PulsePickerUiV2Session token,const PulsePickerUiV2Config* co
     c->show_id=0;c->window=0;c->close_requested=false;c->deferred_close=false;c->close_result=S_OK;c->accepted={};c->pending_close=0;
     wire::Message request;request.kind=wire::Kind::Show;if(!wire::FromAbi(*config,request.config))return E_INVALIDARG;
     if((request.config.open_options&PULSE_PICKER_UI_V2_OPEN_SHELL_ITEM_FILTER)&&!callbacks->callback)return E_INVALIDARG;
-    if(!wire::ConfigSupportedByPeer(request.config,c->peer_features))return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    if(!wire::ConfigSupportedByPeer(request.config,c->peer_features,c->max_control_items))return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
     c->showing=true;
     struct Reset{Context& c;~Reset(){c.owner=nullptr;c.showing=false;c.callback=false;if(c.quit){PostQuitMessage(c.quit_code);c.quit=false;}}}reset{*c};
-    PickerOwnerGuard owner(reinterpret_cast<HWND>(static_cast<uintptr_t>(request.config.owner)));
+    PickerOwnerGuard owner(reinterpret_cast<HWND>(static_cast<uintptr_t>(request.config.owner)), c->lease_executable.c_str());
     if(owner.Error())return HRESULT_FROM_WIN32(owner.Error());
     c->owner=&owner;
     bool completed=false;struct Abort {Context& c;bool& completed;~Abort(){if(!completed){c.dead=true;c.job.Reset();}}}abort{*c,completed};
@@ -223,7 +239,8 @@ HRESULT WINAPI Show(PulsePickerUiV2Session token,const PulsePickerUiV2Config* co
         if(!incoming.event.show_id || (c->show_id && incoming.event.show_id!=c->show_id) ||
             (c->window && incoming.event.window!=c->window))return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
         c->show_id=incoming.event.show_id;c->window=incoming.event.window;
-        output->flags|=PULSE_PICKER_UI_V2_UI_SHOWN;
+        if(incoming.kind==wire::Kind::Event && incoming.event.kind==PULSE_PICKER_UI_V2_EVENT_READY)
+            output->flags|=PULSE_PICKER_UI_V2_UI_SHOWN;
         output->show_id=c->show_id;output->generation=incoming.event.generation;
         c->event_sequence=incoming.sequence;c->callback=true;HRESULT answer=S_OK;uint32_t response=0;
         try{
@@ -257,32 +274,86 @@ HRESULT WINAPI Show(PulsePickerUiV2Session token,const PulsePickerUiV2Config* co
     }
     return returned;
 }
-HRESULT Start(const std::wstring& executable,const std::shared_ptr<Context>& c,wire::Message& reply) {
-        GUID guid{};HRESULT hr=CoCreateGuid(&guid);if(FAILED(hr))return hr;memcpy(c->id.data(),&guid,sizeof(guid));
+HRESULT Start(const std::wstring& executable,const std::shared_ptr<Context>& c,wire::Message& reply,RemoteProviderTimings* timings) {
+    const ULONGLONG t0 = GetTickCount64();
+    c->lease_executable = executable;
+    GUID guid{};HRESULT hr=CoCreateGuid(&guid);if(FAILED(hr))return hr;memcpy(c->id.data(),&guid,sizeof(guid));
+    wchar_t desktop[512]{};DWORD desktop_bytes=0;
+    if(!GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()),UOI_NAME,desktop,sizeof(desktop),&desktop_bytes))
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    // Phase 2 fast-path: connect to a pre-warmed persistent V2 picker host when one is
+    // listening for this user, session, desktop, and integrity level. Any miss or error
+    // transparently falls back to cold CreateProcessW without impacting callers.
+    wchar_t disable_warm_buf[8]{};
+    const bool warm_disabled = GetEnvironmentVariableW(L"PULSE_DISABLE_WARM_REMOTE", disable_warm_buf, ARRAYSIZE(disable_warm_buf)) > 0 &&
+                               disable_warm_buf[0] == L'1';
+    std::wstring warm_override;
+    wchar_t override_buf[512]{};
+    const DWORD override_len = GetEnvironmentVariableW(L"PULSE_WARM_REMOTE_PIPE_OVERRIDE", override_buf, ARRAYSIZE(override_buf));
+    if (override_len > 0 && override_len < ARRAYSIZE(override_buf)) {
+        warm_override.assign(override_buf, override_len);
+    }
+    DWORD warm_pid = 0;
+    if (!warm_disabled &&
+        ipc::picker::ConnectWarmRemote(executable, desktop, c->channel, warm_pid, {nullptr, 250}, warm_override)) {
+        c->pid = warm_pid;
+        AllowSetForegroundWindow(c->pid);
+        const ULONGLONG t_warm = GetTickCount64();
+        if(timings){timings->spawn_ms=0;timings->accept_ms=t_warm-t0;timings->host_pid=c->pid;timings->total_ms=t_warm-t0;timings->warm_connected=true;}
+        wire::Message hello;hello.kind=wire::Kind::Hello;hello.version=2;hr=c->Call(hello,reply);
+        const ULONGLONG t_hello = GetTickCount64();
+        if(timings){timings->hello_ms=t_hello-t_warm;timings->total_ms=t_hello-t0;}
+        if(SUCCEEDED(hr) && reply.version==2) {
+            c->max_control_items=wire::PeerControlItemLimit(reply.response);
+            if(c->max_control_items) {
+                c->peer_features=reply.features;
+                return S_OK;
+            }
+        }
+        // Reset failed warm connection before cold fallback.
+        if(timings) timings->warm_connected = false;
+        c->channel = {};
+        c->pid = 0;
+        c->dead = false;
+        c->sequence = 0;
+    }
+
         ipc::picker::Server server;auto created=ipc::picker::Server::Create(server);if(!created)return HRESULT_FROM_WIN32(created.error);
         c->job.Reset(CreateJobObjectW(nullptr,nullptr));if(!c->job)return HRESULT_FROM_WIN32(GetLastError());
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         if(!SetInformationJobObject(c->job.Get(),JobObjectExtendedLimitInformation,&limits,sizeof(limits)))return HRESULT_FROM_WIN32(GetLastError());
         std::wstring command=L"\""+executable+L"\" --picker-remote-host "+server.Name()+L" "+std::to_wstring(GetCurrentProcessId());
-        wchar_t desktop[512]{};DWORD desktop_bytes=0; if(!GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()),UOI_NAME,desktop,sizeof(desktop),&desktop_bytes))return HRESULT_FROM_WIN32(GetLastError()); STARTUPINFOW startup{};startup.cb=sizeof(startup);startup.lpDesktop=desktop;PROCESS_INFORMATION process{};
+        STARTUPINFOW startup{};startup.cb=sizeof(startup);startup.lpDesktop=desktop;PROCESS_INFORMATION process{};
         if(!CreateProcessW(executable.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_SUSPENDED|CREATE_NO_WINDOW,nullptr,nullptr,&startup,&process))return HRESULT_FROM_WIN32(GetLastError());
         c->process.Reset(process.hProcess);PipeHandle thread(process.hThread);c->pid=process.dwProcessId;
         if(!AssignProcessToJobObject(c->job.Get(),c->process.Get())){DWORD error=GetLastError();TerminateProcess(c->process.Get(),error);return HRESULT_FROM_WIN32(error);}
         AllowSetForegroundWindow(c->pid);if(ResumeThread(thread.Get())==static_cast<DWORD>(-1))return HRESULT_FROM_WIN32(GetLastError());
-        hr=c->Io([&](HANDLE stop){return server.Accept(c->process.Get(),c->channel,{stop,10000});});if(FAILED(hr))return hr;
-        wire::Message hello;hello.kind=wire::Kind::Hello;hello.version=2;hr=c->Call(hello,reply);if(FAILED(hr))return hr;
+        const ULONGLONG t_spawn = GetTickCount64();
+        if(timings){timings->spawn_ms=t_spawn-t0;timings->host_pid=c->pid;timings->total_ms=t_spawn-t0;}
+        hr=c->Io([&](HANDLE stop){return server.Accept(c->process.Get(),c->channel,{stop,10000});});
+        const ULONGLONG t_accept = GetTickCount64();
+        if(timings){timings->accept_ms=t_accept-t_spawn;timings->total_ms=t_accept-t0;}
+        if(FAILED(hr))return hr;
+        wire::Message hello;hello.kind=wire::Kind::Hello;hello.version=2;hr=c->Call(hello,reply);
+        const ULONGLONG t_hello = GetTickCount64();
+        if(timings){timings->hello_ms=t_hello-t_accept;timings->total_ms=t_hello-t0;}
+        if(FAILED(hr))return hr;
         if(reply.version!=2)return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+        c->max_control_items=wire::PeerControlItemLimit(reply.response);
+        if(!c->max_control_items)return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
         c->peer_features=reply.features;
         return S_OK;
 }
-}HRESULT LoadFileDialogRemoteProvider(const std::wstring& executable,std::shared_ptr<const FileDialogInprocessProvider>& output,bool allow_unverified) noexcept {
-    output.reset();return Boundary([&]()->HRESULT{
+}HRESULT LoadFileDialogRemoteProvider(const std::wstring& executable,std::shared_ptr<const FileDialogInprocessProvider>& output,bool allow_unverified,RemoteProviderTimings* timings) noexcept {
+    output.reset();if(timings)*timings={};return Boundary([&]()->HRESULT{
         if(!Sta())return RPC_E_WRONG_THREAD;
         if(active || !pending.expired())return HRESULT_FROM_WIN32(ERROR_BUSY);
         if(executable.size()<3||executable[1]!=L':'||executable[2]!=L'\\'||executable.find(L'"')!=std::wstring::npos)return E_INVALIDARG;
-        auto c=std::make_shared<Context>();wire::Message reply;HRESULT hr=Start(executable,c,reply);if(FAILED(hr))return hr;
+        auto c=std::make_shared<Context>();wire::Message reply;HRESULT hr=Start(executable,c,reply,timings);if(FAILED(hr))return hr;
         auto binding=std::make_shared<Binding>();binding->executable=executable;binding->current=c;binding->capabilities=reply.capabilities;binding->features=reply.features;
         auto provider=std::make_shared<FileDialogInprocessProvider>();provider->module_lifetime=binding;provider->allow_unverified_proof=allow_unverified;
+        provider->max_control_items=binding->max_control_items=c->max_control_items;
         auto& api=provider->api;api.size=sizeof(api);api.version=2;api.capabilities=reply.capabilities;api.implemented_features=picker_inprocess::RemotePickerFeatures(reply.features);
         api.Initialize=Initialize;api.ValidateConfig=Validate;api.Show=Show;api.GetWindow=GetWindow;api.Query=Query;api.Close=Close;api.Shutdown=Shutdown;api.UpdateControl=Update;api.Navigate=Navigate;provider->update_text=UpdateText;provider->set_navigation_root=SetNavigationRoot;
         provider->validate_remote_window=[weak=std::weak_ptr<Binding>(binding)](PulsePickerUiV2Session session,HWND window){auto bound=weak.lock();auto current=bound?bound->current:nullptr;return current&&current==active&&!current->dead&&current->thread==GetCurrentThreadId()&&current->token==session&&current->Window(reinterpret_cast<uintptr_t>(window));};

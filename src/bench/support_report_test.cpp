@@ -28,6 +28,17 @@ int wmain(int argc, wchar_t** argv) {
     uint64_t rejected = 0;
     const auto safe = SanitizeRuntime("{\"event\":\"failure\",\"severity\":2,\"session\":18446744073709551615,\"pid\":42,\"path\":\"PRIVATE\",\"data\":{\"error\":5,\"path\":\"PRIVATE\",\"nested\":{\"name\":\"PRIVATE\"},\"operation\":91}}\ninvalid\n", rejected);
     check(rejected == 1 && safe.find("PRIVATE") == safe.npos && safe.find("\"operation\":91") != safe.npos && safe.find("18446744073709551615") != safe.npos, "sanitize strings and malformed records while preserving exact numeric correlation");
+    uint64_t dialog_rejected = 0;
+    const auto safe_dialog = SanitizeRuntime(
+        "{\"event\":\"user_dialog_auto\",\"component\":\"app\",\"pid\":10,\"data\":{\"stage\":\"user_ready\",\"app_basename\":\"WXWork.exe\",\"secret\":\"PRIVATE\",\"pid\":48400,\"match_mask\":32}}\n"
+        "{\"event\":\"dialog_legacy_decline\",\"component\":\"dialog_runtime\",\"pid\":48400,\"data\":{\"entry_family\":\"OFN_W\",\"reason\":\"legacy-decline-hook\",\"path\":\"C:\\\\Users\\\\PRIVATE\",\"flags\":524320}}\n",
+        dialog_rejected);
+    check(dialog_rejected == 0 && safe_dialog.find("PRIVATE") == safe_dialog.npos &&
+          safe_dialog.find("\"stage\":\"user_ready\"") != safe_dialog.npos &&
+          safe_dialog.find("\"app_basename\":\"WXWork.exe\"") != safe_dialog.npos &&
+          safe_dialog.find("\"entry_family\":\"OFN_W\"") != safe_dialog.npos &&
+          safe_dialog.find("\"reason\":\"legacy-decline-hook\"") != safe_dialog.npos,
+          "dialog auto and legacy decline diagnostics retain safe tokens while stripping paths");
     check(runtime::Initialize((root / "source").wstring(), "test"), "initialize isolated logger");
     runtime::Event("index_write_failed", {{"operation", 7}, {"error", 5}}, runtime::Level::Error);
     Write(root / "source" / "pulse_crash.log", "PRIVATE-LEGACY");

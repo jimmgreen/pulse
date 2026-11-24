@@ -9,6 +9,8 @@
 #include <new>
 #include <ocidl.h>
 #include <thread>
+#include <string_view>
+#include "file_dialog_activation_route_cases.inc"
 #include <wrl/client.h>
 
 using namespace pulse::shell_bridge;
@@ -130,7 +132,8 @@ HRESULT WINAPI ViaFactoryEx(REFCLSID, IUnknown* outer, DWORD, COSERVERINFO*, DWO
     return S_OK;
 }
 }
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--activation-routes") return activation_routes::Run();
     std::cout << std::unitbuf;
     const auto initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(initialized)) return 2;

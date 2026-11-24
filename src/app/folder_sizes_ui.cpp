@@ -1,5 +1,6 @@
 #include "folder_sizes_ui.h"
 #include "folder_size_store.h"
+#include "../fs/drive_kind.h"
 #include "app_state.h"
 #include "session.h"
 #include "../common/text_format.h"
@@ -26,9 +27,10 @@ std::wstring ChildPath(const std::wstring& parent, const std::wstring& name) {
     return !parent.empty() && parent.back() == L'\\' ? parent + name : parent + L"\\" + name;
 }
 
-// Drive rows keep their drive icon; virtual and network places are never probed.
+// Drive rows keep their drive icon; virtual, network, and spinning HDD places are never probed.
 bool ProbesEmptiness(const std::wstring& path) {
     return !path.empty() && !fs::IsVirtualPath(path) && !fs::IsUncPath(path) &&
+        !fs::IsKnownSpinningDrive(path) &&
         !(path.size() <= 3 && path.size() >= 2 && path[1] == L':');
 }
 

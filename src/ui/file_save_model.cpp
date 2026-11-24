@@ -1,4 +1,5 @@
 #include "file_save_model.h"
+#include "../common/picker_save_filter.h"
 #include "../common/path_utils.h"
 #include "../common/picker_user_storage.h"
 
@@ -59,6 +60,56 @@ bool Missing(DWORD error) { return error == ERROR_FILE_NOT_FOUND || error == ERR
 
 } // namespace
 
+bool UsesSaveNameMask(const std::vector<PickerFilter>& filters) {
+    return std::any_of(filters.begin(), filters.end(), [](const PickerFilter& filter) {
+        const auto mask = picker_filter::ParseSaveMask(std::wstring_view(filter.pattern));
+        return mask.valid && mask.name_mask;
+    });
+}
+
+std::wstring NativeSaveMaskFilename(std::wstring_view filename, const std::vector<PickerFilter>& filters,
+    size_t index, std::wstring_view default_extension, bool type_change) {
+    std::wstring result(filename);
+    if (index >= filters.size() || filename.empty() || default_extension.empty()) return result;
+    const std::wstring_view pattern(filters[index].pattern);
+    const auto mask = picker_filter::ParseSaveMask(pattern);
+    if (!mask.valid || (type_change && (pattern == L"*" || pattern == L"*.*"))) return result;
+    const auto extension = mask.extension.empty() ? default_extension : mask.extension;
+    const auto slash = filename.find_last_of(L"\\/");
+    const auto leaf = filename.substr(slash == filename.npos ? 0 : slash + 1);
+    if (leaf.empty() || leaf.back() == L'.' || leaf.back() == L' ' || leaf.find_first_of(L"<>:\"|?*") != leaf.npos)
+        return result;
+    const auto suffix_matches = [&](std::wstring_view ext) {
+        return !ext.empty() && leaf.size() > ext.size() && leaf[leaf.size() - ext.size() - 1] == L'.' &&
+            CompareStringOrdinal(leaf.data() + leaf.size() - ext.size(), static_cast<int>(ext.size()),
+                ext.data(), static_cast<int>(ext.size()), TRUE) == CSTR_EQUAL;
+    };
+    if (suffix_matches(extension)) return result;
+    const auto dot = leaf.rfind(L'.');
+    if (dot != leaf.npos) {
+        if (type_change) result.resize(filename.size() - (leaf.size() - dot));
+        else {
+            // A registered extension is an explicit file type, even if this
+            // filter does not list it. Never instantiate the associated handler.
+            const std::wstring suffix(leaf.substr(dot));
+            HKEY key = nullptr;
+            if (RegOpenKeyExW(HKEY_CLASSES_ROOT, suffix.c_str(), 0, KEY_QUERY_VALUE, &key) == ERROR_SUCCESS) {
+                RegCloseKey(key); return result;
+            }
+            for (const auto& filter : filters) {
+                std::wstring_view rest(filter.pattern);
+                while (!rest.empty()) {
+                    const auto end = rest.find(L';');
+                    if (suffix_matches(picker_filter::ParseSaveMask(rest.substr(0, end)).extension)) return result;
+                    if (end == rest.npos) break;
+                    rest.remove_prefix(end + 1);
+                }
+            }
+        }
+    }
+    return result.append(L".").append(extension);
+}
+
 std::optional<size_t> InferSaveFilterFromFilename(std::wstring_view filename,
     const std::vector<PickerFilter>& filters, size_t current_filter) {
     if (current_filter >= filters.size() || !ValidText(filename)) return std::nullopt;
@@ -86,12 +137,55 @@ std::optional<size_t> InferSaveFilterFromFilename(std::wstring_view filename,
     };
     if (matches(filters[current_filter].pattern)) return std::nullopt;
     std::optional<size_t> inferred;
+    bool ambiguous = false;
+    size_t best_count = static_cast<size_t>(-1);
     for (size_t i = 0; i < filters.size(); ++i) {
         if (!matches(filters[i].pattern)) continue;
-        if (inferred) return std::nullopt;
-        inferred = i;
+        const size_t count = filters[i].pattern.find(L';') == std::wstring::npos ? 1 : 2;
+        if (count < best_count) { inferred = i; best_count = count; ambiguous = false; }
+        else if (count == best_count) ambiguous = true;
     }
+    if (ambiguous) return std::nullopt;
     return inferred;
+}
+
+std::wstring RewriteSaveFilenameForFilter(std::wstring_view filename,
+    const std::vector<PickerFilter>& filters, size_t selected_filter) {
+    const std::wstring unchanged(filename);
+    if (selected_filter >= filters.size() || !ValidText(filename)) return unchanged;
+    std::wstring extension;
+    if (!FilterExtension(filters[selected_filter].pattern, extension) || extension.empty()) return unchanged;
+    const auto slash = filename.find_last_of(L"\\/");
+    const size_t begin = slash == filename.npos ? 0 : slash + 1;
+    const auto leaf = filename.substr(begin);
+    if (leaf.empty() || leaf.front() == L'.' || leaf.back() == L'.' || std::iswspace(leaf.back()) ||
+        leaf.find_first_of(L"<>:\"|?*") != leaf.npos) return unchanged;
+    const auto suffix_length = [&](std::wstring_view pattern) {
+        size_t longest = 0;
+        std::wstring ignored;
+        if (!FilterExtension(pattern, ignored)) return longest;
+        for (size_t start = 0; start < pattern.size();) {
+            const auto end = pattern.find(L';', start);
+            const auto part = pattern.substr(start, end == pattern.npos ? pattern.size() - start : end - start);
+            if (part.starts_with(L"*.") && Extension(part.substr(2))) {
+                const auto suffix = part.substr(1);
+                if (leaf.size() > suffix.size() && std::equal(suffix.begin(), suffix.end(), leaf.end() - suffix.size(),
+                    [](wchar_t a, wchar_t b) { return std::towlower(a) == std::towlower(b); }))
+                    longest = (std::max)(longest, suffix.size());
+            }
+            if (end == pattern.npos) break;
+            start = end + 1;
+        }
+        return longest;
+    };
+    if (suffix_length(filters[selected_filter].pattern)) return unchanged;
+    size_t remove = 0;
+    for (const auto& filter : filters) remove = (std::max)(remove, suffix_length(filter.pattern));
+    if (!remove) {
+        const auto dot = leaf.find_last_of(L'.');
+        if (dot != leaf.npos && dot != 0) remove = leaf.size() - dot;
+    }
+    return std::wstring(filename.substr(0, filename.size() - remove)) + L"." + extension;
 }
 
 SaveTargetResult ResolveSaveTarget(const SaveTargetRequest& request) {
@@ -126,9 +220,16 @@ SaveTargetResult ResolveSaveTarget(const SaveTargetRequest& request) {
     }
     std::wstring extension = request.default_extension;
     std::wstring selected_extension;
+    const bool named = request.native_save_defaults && UsesSaveNameMask(request.filters);
+    // Native SetDefaultExtension(".ext") appends another dot when no concrete
+    // filter overrides it. Preserve the literal value rather than stripping it.
+    const auto literal_default = [&](std::wstring_view value) {
+        return Extension(value) || (request.native_save_defaults && value.starts_with(L".") && Extension(value.substr(1)));
+    };
     const bool pattern_default = request.native_save_defaults && extension.starts_with(L"*.") && Extension(std::wstring_view(extension).substr(2));
-    if ((!extension.empty() && !Extension(extension) && !pattern_default) || (!request.filters.empty() &&
-        !FilterExtension(request.filters[request.filter_index].pattern, selected_extension))) {
+    if ((named && pattern_default) || (!extension.empty() && !literal_default(extension) && !pattern_default) || (!request.filters.empty() &&
+        (named ? !picker_filter::ParseSaveMask(std::wstring_view(request.filters[request.filter_index].pattern)).valid :
+            !FilterExtension(request.filters[request.filter_index].pattern, selected_extension)))) {
         result.state = SaveTargetState::Unsupported;
         return result;
     }
@@ -136,12 +237,13 @@ SaveTargetResult ResolveSaveTarget(const SaveTargetRequest& request) {
     // The older wire policy retains its original initialization behavior.
     // All-files has no literal extension and restores the caller's default.
     if ((request.filter_changed || request.native_save_defaults) && !selected_extension.empty()) extension = selected_extension;
-    if (request.native_save_defaults && name.find(L'.') == name.npos && !extension.empty() && !Extension(extension)) {
+    if (request.native_save_defaults && name.find(L'.') == name.npos && !extension.empty() && !literal_default(extension)) {
         result.state = SaveTargetState::Unsupported;
         return result;
     }
     std::wstring filename = name;
-    if (filename.find(L'.') == filename.npos && !extension.empty()) filename += L'.' + extension;
+    if (named) filename = NativeSaveMaskFilename(name, request.filters, request.filter_index, extension, false);
+    else if (filename.find(L'.') == filename.npos && !extension.empty()) filename += L'.' + extension;
     if (filename.size() > 255) return result;
     auto directory = pulse::path::StripExtendedPathPrefix(request.directory);
     std::replace(directory.begin(), directory.end(), L'/', L'\\');
@@ -164,6 +266,57 @@ SaveTargetResult ResolveSaveTarget(const SaveTargetRequest& request) {
     }
     result.state = SaveTargetState::Resolved;
     return result;
+}
+
+bool NormalizeLocalSaveDirectory(std::wstring_view path, std::wstring& normalized) {
+    picker_user_storage::Path parsed;
+    if (path.size() >= 32760 || !ValidText(path) || !picker_user_storage::Parse(path, parsed) || parsed.unc)
+        return false;
+    // Do not change extended-path semantics when the picker removes the prefix.
+    const std::wstring_view value(parsed.value);
+    for (size_t start = parsed.root_length; start < value.size();) {
+        const auto end = value.find(L'\\', start);
+        const auto part = value.substr(start, end - start);
+        if (part.empty() || part.back() == L'.' || part.back() == L' ' || Reserved(part))
+            return false;
+        if (end == value.npos) break;
+        start = end + 1;
+    }
+    normalized = std::move(parsed.value);
+    return true;
+}
+
+LocalSaveDraft PrepareLocalSaveDraft(const SaveTargetRequest& request) {
+    LocalSaveDraft plan;
+    if (!NormalizeLocalSaveDirectory(request.directory, plan.directory)) return plan;
+    plan.state = LocalSaveDraftState::UnsupportedTarget;
+    SaveTargetRequest draft = request;
+    draft.directory = plan.directory;
+    if (draft.filename.empty()) draft.filename = L"pulse-validation";
+    const auto target = ResolveSaveTarget(draft);
+    if (target.state == SaveTargetState::Resolved) {
+        // An absolute filename can redirect the target away from the initial
+        // folder. Its parent still has to be handled by LocalSaveV1.
+        const auto target_parent = std::filesystem::path(target.path).parent_path().wstring();
+        std::wstring parent;
+        picker_user_storage::Path parsed;
+        // The existing no-test route does metadata/identity checks only and
+        // already supports UNC targets supplied from a local starting folder.
+        if (NormalizeLocalSaveDirectory(target_parent, parent) ||
+            (request.no_test_file_create && picker_user_storage::Parse(target_parent, parsed) && parsed.unc))
+            plan.state = LocalSaveDraftState::Ready;
+        return plan;
+    }
+
+    // A bad draft leaf can be corrected in the existing filename edit. Keep
+    // it verbatim and never give path-like drafts or unsupported filters a pass.
+    if ((target.state == SaveTargetState::InvalidName || target.state == SaveTargetState::Unsupported) &&
+        !request.filename.empty() && request.filename.find_first_of(L"\\/:") == request.filename.npos) {
+        draft.filename = L"pulse-validation";
+        if (ResolveSaveTarget(draft).state == SaveTargetState::Resolved)
+            plan.state = LocalSaveDraftState::EditableName;
+    }
+    return plan;
 }
 
 SaveTargetResult ValidateSaveTarget(const SaveTargetRequest& request) {

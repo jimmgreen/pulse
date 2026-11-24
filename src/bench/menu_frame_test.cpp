@@ -9,6 +9,99 @@
 #include <string>
 namespace pulse::ui {
 struct FluentMenuTestPeer {
+    struct OutsideFocusFixture {
+        FluentMenu* menu = nullptr;
+        HWND other = nullptr;
+        bool switched = false;
+        bool watchdog = false;
+    };
+    static void CALLBACK TransferFocus(HWND owner, UINT, UINT_PTR id, DWORD) {
+        KillTimer(owner, id);
+        auto* fixture = reinterpret_cast<OutsideFocusFixture*>(GetWindowLongPtrW(owner, GWLP_USERDATA));
+        if (!fixture) return;
+        if (id == 1) {
+            SetForegroundWindow(fixture->other);
+            fixture->switched = GetForegroundWindow() == fixture->other;
+        } else {
+            fixture->watchdog = true;
+            fixture->menu->Dismiss();
+        }
+    }
+    static int OutsideFocus() {
+        const HWND previous = GetForegroundWindow();
+        WNDCLASSW wc{}; wc.lpfnWndProc = DefWindowProcW; wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"PulseMenuOutsideFocusFixture"; RegisterClassW(&wc);
+        const auto window = [&] {
+            return CreateWindowExW(0, wc.lpszClassName, L"Fixture", WS_POPUP | WS_VISIBLE,
+                -30000, -30000, 360, 220, nullptr, nullptr, wc.hInstance, nullptr);
+        };
+        const HWND other = window(), owner = window();
+        if (!other || !owner) return 2;
+        const HRESULT apartment = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        int result = 2;
+        {
+            Compositor compositor;
+            FluentMenu menu;
+            SetForegroundWindow(owner);
+            if (GetForegroundWindow() == owner && compositor.Init(owner) && menu.Create(owner, &compositor, 1.0f)) {
+                OutsideFocusFixture fixture{&menu, other};
+                SetWindowLongPtrW(owner, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&fixture));
+                FluentMenuItem item;
+                item.text = L"Fixture action";
+                item.command = 101;
+                SetTimer(owner, 1, 125, &TransferFocus);
+                SetTimer(owner, 2, 650, &TransferFocus);
+                const int command = menu.TrackPopup(POINT{220, 180}, {std::move(item)});
+                KillTimer(owner, 1);
+                KillTimer(owner, 2);
+                const bool retained = GetForegroundWindow() == other;
+                const bool hidden = !IsWindowVisible(menu.hwnd_);
+                std::printf("foreground switched=%d watchdog needed=%d foreground retained=%d popup hidden=%d command=%d\n",
+                    fixture.switched, fixture.watchdog, retained, hidden, command);
+                result = fixture.switched && !fixture.watchdog && retained && hidden && command == 0 ? 0 : 1;
+                SetWindowLongPtrW(owner, GWLP_USERDATA, 0);
+            }
+        }
+        if (SUCCEEDED(apartment)) CoUninitialize();
+        const HWND foreground = GetForegroundWindow();
+        if ((foreground == owner || foreground == other) && IsWindow(previous)) SetForegroundWindow(previous);
+        DestroyWindow(owner);
+        DestroyWindow(other);
+        return result;
+    }
+    static int FocusReturn(bool isolated) {
+        const HWND previous = GetForegroundWindow();
+        const auto name = L"PulseMenuFocus_" + std::to_wstring(GetCurrentProcessId());
+        if (isolated) {
+            HDESK desktop = CreateDesktopW(name.c_str(), nullptr, nullptr, 0, GENERIC_ALL, nullptr);
+            if (!desktop || !SetThreadDesktop(desktop)) return 3;
+        }
+        WNDCLASSW wc{}; wc.lpfnWndProc = DefWindowProcW; wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"PulseMenuFocusFixture"; RegisterClassW(&wc);
+        const auto window = [&](HWND parent) {
+            return CreateWindowExW(0, wc.lpszClassName, L"Fixture", WS_POPUP | WS_VISIBLE,
+                -30000, -30000, 200, 100, parent, nullptr, wc.hInstance, nullptr);
+        };
+        const HWND other = window(nullptr), owner = window(nullptr);
+        FluentMenu menu; menu.owner_ = owner; menu.hwnd_ = window(owner);
+        int failures = 0;
+        const auto check = [&](bool ok, const char* label) {
+            std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", label); if (!ok) ++failures;
+        };
+        SetForegroundWindow(menu.hwnd_);
+        check(GetForegroundWindow() == menu.hwnd_, "fixture popup owns foreground");
+        menu.HideRootWindow();
+        check(GetForegroundWindow() == owner && !IsWindowVisible(menu.hwnd_), "closing active popup returns foreground to owner");
+        ShowWindow(menu.hwnd_, SW_SHOWNOACTIVATE); SetForegroundWindow(other);
+        check(GetForegroundWindow() == other, "fixture user switched to another window");
+        menu.HideRootWindow();
+        check(GetForegroundWindow() == other, "closing inactive popup does not steal foreground");
+        const HWND foreground = GetForegroundWindow();
+        if (!isolated && (foreground == owner || foreground == other || foreground == menu.hwnd_) && IsWindow(previous))
+            SetForegroundWindow(previous);
+        DestroyWindow(owner); DestroyWindow(other);
+        return failures ? 1 : 0;
+    }
     static void Prepare(FluentMenu& menu, const std::vector<FluentMenuItem>& items) {
         menu.model_.SetItems(items);
         menu.model_.Layout(menu.compositor_->DwriteFactory(), menu.scale_, 280.0f * menu.scale_);
@@ -28,6 +121,9 @@ struct FluentMenuTestPeer {
 }
 int wmain(int argc, wchar_t** argv) {
     using namespace pulse::ui;
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--focus-return") return FluentMenuTestPeer::FocusReturn(true);
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--focus-return-live") return FluentMenuTestPeer::FocusReturn(false);
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--outside-focus-live") return FluentMenuTestPeer::OutsideFocus();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     WNDCLASSW wc{};
     wc.lpfnWndProc = DefWindowProcW;

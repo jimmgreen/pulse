@@ -1,9 +1,11 @@
 #include "app_internal.h"
 #include "app_column_view.h"
+#include "../common/path_utils.h"
 #include "../ui/column_strip_layout.h"
 #include "../ui/ui_renderer.h"
 #include <algorithm>
 #include <cwchar>
+#include <optional>
 
 namespace pulse {
 
@@ -154,6 +156,8 @@ void RebuildAncestors(AppState& s, app::Tab& tab) {
     // Listings may be stale after navigation; revalidate against the store.
     for (auto& col : tab.column_strip.ancestors) col.requested = false;
     tab.column_strip.for_path = tab.current_path;
+    if (tab.column_strip.click_anchor && !path::EqualInsensitive(tab.column_strip.click_anchor->path, tab.current_path))
+        tab.column_strip.click_anchor.reset();
     tab.column_strip.scroll_from_right_dip = 0.0f;
 }
 
@@ -241,7 +245,8 @@ void SelectByName(AppState& s, app::Tab& tab, const std::wstring& name) {
     }
 }
 
-bool ClickRow(AppState& s, app::Tab& tab, int column_id, int row) {
+bool ClickRow(AppState& s, app::Tab& tab, int column_id, int row,
+              std::optional<float> viewport_anchor_dip = std::nullopt) {
     app::ColumnStripColumn* col = StripColumn(tab, column_id);
     if (!col || !col->rows || !col->rows_snapshot || row < 0 ||
         static_cast<size_t>(row) >= col->rows->size()) {
@@ -251,7 +256,11 @@ bool ClickRow(AppState& s, app::Tab& tab, int column_id, int row) {
     if (source < 0 || static_cast<size_t>(source) >= col->rows_snapshot->size()) return false;
     const std::wstring name = (*col->rows_snapshot)[static_cast<size_t>(source)].name;
     const std::wstring folder = col->path; // col is invalidated by navigation
-    if (!SamePath(folder, tab.current_path)) NavigateTo(s, folder);
+    if (!SamePath(folder, tab.current_path)) {
+        if (viewport_anchor_dip)
+            tab.column_strip.click_anchor = app::ColumnStripState::ClickAnchor{folder, *viewport_anchor_dip};
+        NavigateTo(s, folder);
+    }
     if (app::Tab* active = ActiveTab(s)) SelectByName(s, *active, name);
     s.stripClickTick = GetTickCount64();
     return true;
@@ -318,7 +327,18 @@ bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
     }
     case R::ColumnStripRow: {
         app::Tab* tab = TabAtSlot(s, hit.pane_index);
-        if (tab) ClickRow(s, *tab, hit.sub_index, hit.index);
+        std::optional<float> anchor;
+        ui::ColumnStripLayout layout;
+        if (tab && hit.sub_index >= 0 && hit.sub_index != ui::kColumnStripChildId &&
+            SlotLayout(s, vm, hit.pane_index, layout)) {
+            for (const auto& slot : layout.columns) {
+                if (slot.id != hit.sub_index) continue;
+                const float scale = s.scale > 0.0f ? s.scale : 1.0f;
+                anchor = std::max(0.0f, slot.rect.left - layout.viewport.left) / scale;
+                break;
+            }
+        }
+        if (tab) ClickRow(s, *tab, hit.sub_index, hit.index, anchor);
         return true;
     }
     case R::ColumnStripBlank:

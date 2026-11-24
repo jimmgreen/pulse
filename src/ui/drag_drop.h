@@ -13,6 +13,7 @@
 #pragma once
 #include <windows.h>
 #include <objidl.h>
+#include <shlobj.h>
 #include <functional>
 #include <string>
 #include <vector>
@@ -71,7 +72,8 @@ DWORD PreferredDropEffect(IDataObject* obj); // 0 when absent
 class FileDataObject final : public IDataObject {
 public:
     // ref-counted; initial ref = 1. paths must be plain (no \\?\ prefix).
-    static FileDataObject* Create(const std::vector<std::wstring>& paths);
+    static FileDataObject* Create(const std::vector<std::wstring>& paths,
+                                  DWORD preferred_effect = DROPEFFECT_COPY | DROPEFFECT_MOVE);
 
     DWORD PerformedEffect() const { return performed_effect_; }
     // CFSTR_LOGICALPERFORMEDDROPEFFECT: what happened from the user's view,
@@ -97,7 +99,7 @@ public:
     IFACEMETHODIMP EnumDAdvise(IEnumSTATDATA**) override { return OLE_E_ADVISENOTSUPPORTED; }
 
 private:
-    explicit FileDataObject(const std::vector<std::wstring>& paths);
+    explicit FileDataObject(const std::vector<std::wstring>& paths, DWORD preferred_effect);
 
     HGLOBAL RenderHDrop() const;
     HGLOBAL RenderDword(DWORD v) const;
@@ -108,6 +110,7 @@ private:
 
     LONG ref_ = 1;
     std::vector<std::wstring> paths_;
+    DWORD preferred_effect_ = DROPEFFECT_COPY | DROPEFFECT_MOVE;
     DWORD performed_effect_ = 0;
     DWORD logical_effect_ = 0;
 };
@@ -194,6 +197,12 @@ struct DropTargetCallbacks {
     // Same arguments as drag_over. Returns one allowed performed effect, or NONE.
     std::function<DWORD(const std::vector<std::wstring>& sources, POINT pt,
                         DWORD key_state, DWORD allowed, DWORD preferred)> drop;
+    // Flat virtual files carry names for hit testing and a validated descriptor
+    // snapshot for the copy. The source stays an OLE data object, not paths.
+    std::function<DWORD(const std::vector<std::wstring>& names, POINT pt,
+                        DWORD key_state, DWORD allowed)> virtual_drag_over;
+    std::function<DWORD(const std::vector<std::wstring>& names, std::vector<FILEDESCRIPTORW> files,
+                        IDataObject* data, POINT pt, DWORD key_state, DWORD allowed)> virtual_drop;
 };
 
 class WindowDropTarget final : public IDropTarget {
@@ -213,10 +222,18 @@ public:
 
 private:
     POINT ClientPoint(POINTL pt) const;
+    DWORD RouteDragOver(POINT pt, DWORD key_state, DWORD allowed) const;
     void StopScroll();
+    void StartWheelHook();
+    void StopWheelHook();
+    static LRESULT CALLBACK WheelHook(int code, WPARAM remove, LPARAM message);
+    HHOOK wheel_hook_ = nullptr;
+    bool wheel_forwarding_ = false;
+    ULONGLONG wheel_refresh_until_ = 0;
     DWORD allowed_ = 0;
     DWORD keys_ = 0;
     bool scrolling_ = false;
+    bool virtual_files_ = false;
 
     LONG ref_ = 1;
     HWND hwnd_ = nullptr;

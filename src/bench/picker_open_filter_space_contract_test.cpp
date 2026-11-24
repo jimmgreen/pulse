@@ -26,10 +26,22 @@ int main(){
     SetterCall index;index.setting=Setting::FileTypeIndex;index.native_result=S_OK;index.value=4;calls.push_back(index);
     const auto decision=Prepare(DialogFactory::Open,calls);const auto* request=decision.request?std::get_if<wire::Request>(&decision.request->body):nullptr;
     Check(request&&request->filters.size()==5&&request->filter_index==3&&request->filters[3].pattern==u"*.dwg;*.dxf"&&request->filters[4].pattern==u"*.dwy;*.dwg;*.dxf","exact observed five-filter YJK list preserves order and selection");
-    for(auto pattern:{u"*.dwg ;*.dxf",u"*.dwg ; *.dxf",u" *.dwg;*.dxf",u"*.dwg;*.dxf ",u"*.d wg; *.dxf",u"*.dwg; \t*.dxf",u"*.dwg; ",u"*.dwg; ;*.dxf",u" ; ",u"*.dwg; C:\\*.dxf",u"*.dwg; ../*.dxf",u"*.dwg; report*.dxf",u"*.dwg; *.d?f"}){
+    for(auto pattern:{u"*.dwg ;*.dxf",u"*.dwg ; *.dxf",u" *.dwg;*.dxf",u"*.dwg;*.dxf ",u"*.d wg; *.dxf",u"*.dwg; \t*.dxf",u"*.dwg; ",u"*.dwg; ;*.dxf",u" ; ",u"*.dwg; C:\\*.dxf",u"*.dwg; ../*.dxf",u"*.dwg; report*.d:?f",u"*.dwg; ../*.d?f"}){
         const auto invalid=Prepare(DialogFactory::Open,Calls(DialogFactory::Open,pattern));Check(invalid.disposition==Disposition::NativeOnly&&invalid.reason==NativeReason::UnsupportedFilter,"unproven spaces, empty-space segments, paths and unsupported globs remain native");
     }
-    auto save=Prepare(DialogFactory::Save,Calls(DialogFactory::Save,u"*.dwg; *.dxf"));Check(save.disposition==Disposition::NativeOnly&&save.reason==NativeReason::UnsupportedFilter,"Save filter contract remains unchanged");
+    const auto question = Prepare(DialogFactory::Open,Calls(DialogFactory::Open,u"*.dwg; report*.d?f; *.d?f"));
+    Check(question.request && std::get<wire::Request>(question.request->body).filters[0].pattern==u"*.dwg;report*.d?f;*.d?f",
+        "Shell question-mark patterns keep their spelling after separator normalization");
+    const auto prefix = Prepare(DialogFactory::Open, Calls(DialogFactory::Open,u"*.dwg; report*.dxf"));
+    Check(prefix.request && std::get<wire::Request>(prefix.request->body).filters[0].pattern == u"*.dwg;report*.dxf",
+        "supported filename-prefix mixed list retains the native post-semicolon whitespace rule");
+    auto save=Prepare(DialogFactory::Save,Calls(DialogFactory::Save,u"*.dwg; *.dxf"));
+    const auto* save_req=save.request?std::get_if<wire::Request>(&save.request->body):nullptr;
+    Check(save.disposition==Disposition::Prepared&&save_req&&save_req->filters[0].pattern==u"*.dwg;*.dxf","Save canonicalizes post-semicolon ASCII spaces like native Windows");
+    for(auto bad_save:{u"*.dwg ;*.dxf",u" *.dwg;*.dxf",u"*.dwg; ",u"*.dwg; \t*.dxf"}){
+        const auto rejected=Prepare(DialogFactory::Save,Calls(DialogFactory::Save,bad_save));
+        Check(rejected.disposition==Disposition::NativeOnly&&rejected.reason==NativeReason::UnsupportedFilter,"Save rejects unproven spaces outside post-semicolon normalization");
+    }
     auto failed=Calls(DialogFactory::Open,u"*.dwg; *.dxf");failed.back().native_result=E_INVALIDARG;Check(Prepare(DialogFactory::Open,failed).reason==NativeReason::SetterFailed,"failed native setter is never normalized into acceptance");
     Check(!pulse::picker_filter::OpenPattern(std::u16string_view(u"*.dwg; *.dxf")),"shared parser has not been globally loosened");
     std::printf("open-filter-space failures=%d\n",failures);return failures?1:0;

@@ -1,3 +1,4 @@
+#include "../common/runtime_log.h"
 #include "extensions/native/settings_pages_host.h"
 #include "extension_store_ui.h"
 #include "extensions/native/previews_adapter.h"
@@ -15,6 +16,7 @@
 #include "folder_alias.h"
 #include "app_wall_hint.h"
 #include "app_internal.h"
+#include "staging_shelf_controller.h"
 #include "workspace_sidebar.h"
 #include "app_network_page.h"
 #include "shortcut_page.h"
@@ -63,6 +65,7 @@
 #include "../common/diagnostics_exporter.h"
 #include "snapshot_patch.h"
 #include "dir_notify_queue.h"
+#include "tray_snapshot_queries.h"
 #include "text_diff.h"
 #include "content_pack.h"
 #include "content_pack_ui.h"
@@ -102,6 +105,7 @@
 #include <mutex>
 #include <optional>
 #include <unordered_set>
+#include "extensions/statusbar_registry.h"
 
 using namespace pulse;
 
@@ -284,9 +288,9 @@ void SyncVisibleWatches(AppState& s) {
     s.watches.Sync(paths, [&core, service](const std::wstring& path, bool overflow, std::vector<fs::DirNotifyEvent> events) {
         std::lock_guard<std::mutex> lock(core.notify_mu);
         const bool first = core.notify_queue.empty();
-        app::QueueDirNotify(core.notify_queue, path, overflow, std::move(events));
+        app::QueueDirNotify(core.notify_queue, path, overflow, std::move(events), GetCurrentProcessId());
         // The tick drains the whole queue, so one wake per batch is enough.
-        if (first) PostMessageW(service, WM_UI_KICK, 0, 0);
+        if (first && !core.notify_queue.empty()) PostMessageW(service, WM_UI_KICK, 0, 0);
     });
 }
 
@@ -414,6 +418,7 @@ std::wstring ResolveOpenFolderPath(std::wstring path, bool reveal) {
                path[path.size() - 2] != L':') path.pop_back();
     }
     const DWORD attrs = LaunchArgumentAttributes(path);
+    if (reveal && attrs == INVALID_FILE_ATTRIBUTES) return {};
     if (attrs != INVALID_FILE_ATTRIBUTES &&
         (reveal || (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0)) {
         path = fs::ParentPath(path);
@@ -454,12 +459,18 @@ void OpenFolderInNewTab(AppState& s, const std::wstring& raw, bool reveal) {
     // Back from the tray with "open the default location" at startup: an
     // explicit folder starts over on its own, as launching with it would.
     if (!path.empty() && !IsWindowVisible(s.hwnd) && TakeFreshStart(s)) StartFreshAt(s, path);
-    RevealWindow(s);
+    // A restore can paint synchronously. Prepare the reveal selection first.
+    if (!reveal) RevealWindow(s);
     if (!path.empty() && !ActivateExistingFolderTab(s, path)) NewTab(s, path);
     else InvalidateRect(s.hwnd, nullptr, FALSE);
     // A file (Pulse as a file's default app, a launcher's "open containing
     // folder") shows up selected instead of silently opening its folder (#40).
     if (!path.empty()) SelectLaunchedFile(s, raw, reveal);
+    if (reveal) {
+        s.compositor.ForceFullFrame();
+        RevealWindow(s);
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+    }
 }
 
 void PostWorkerResult(AppState& s, app::WorkResult res) {
@@ -653,6 +664,14 @@ static void AnimatePaneLayout(AppState& s, const D2D1_RECT_F& content,
 }
 
 void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
+    auto slot_phase_started = GetTickCount64();
+    const auto slot_phase = [&](uint64_t phase) {
+        const auto now = GetTickCount64();
+        const auto elapsed = now - slot_phase_started;
+        slot_phase_started = now;
+        if (elapsed >= 10)
+            diagnostics::runtime::Event("build_vm_slot_slow", {{"phase", phase}, {"elapsed_ms", elapsed}});
+    };
     FillPaneLayoutControls(s, vm);
     D2D1_RECT_F content = s.renderer.ContentRect(
         static_cast<float>(s.compositor.Width()), static_cast<float>(s.compositor.Height()));
@@ -688,6 +707,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_global_search_double_ctrl_ms = s.appPrefs.global_search_double_ctrl_ms;
             vm.settings_dialog_jump_bar = s.appPrefs.dialog_jump_bar;
             vm.settings_dialog_jump_auto = s.appPrefs.dialog_jump_auto;
+            vm.settings_dialog_adaptive_legacy = s.appPrefs.dialog_adaptive_legacy;
             vm.settings_jump_history = s.appPrefs.jump_history;
             vm.settings_jump_history_empty = s.core.jumpHistory->Size() == 0;
             vm.settings_global_search_apps = s.appPrefs.global_search_apps;
@@ -733,6 +753,39 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                 const auto& packs = s.settings.Packs();
                 vm.settings_pack_updates = int(!packs.update_version.empty()) + int(!packs.images_update_version.empty()) +
                                            int(!packs.raw_update_version.empty());
+            }
+            if (vm.settings_page == ui::kSettingsPageNativeExtensions) {
+                extensions::native::BindSettingsPagesPath(s.hwnd, rest);
+                vm.native_settings_title = extensions::native::FocusedSettingsTitle(s.hwnd);
+                if (!vm.native_settings_title.empty()) {
+                    // The page heads itself like the package's store detail page: its tile, publisher and chips.
+                    const auto focused = extensions::native::FocusedSettings(s.hwnd);
+                    auto& h = vm.native_settings_header;
+                    h.present = true;
+                    h.name = vm.native_settings_title;
+                    h.tab = focused.mode;
+                    h.has_menu_tab = focused.has_menu;
+                    h.active_plugin_tab = focused.active_plugin_tab;
+                    h.status_kind = focused.status_kind;
+                    h.status_text = focused.status_text;
+                    for (size_t k = 1; k < focused.plugin_tabs.size(); ++k) {
+                        h.extra_tabs.push_back(focused.plugin_tabs[k].title);
+                    }
+                    ui::WindowViewModel store_vm;
+                    FillExtensionStoreView(s, store_vm);
+                    for (const auto& item : store_vm.settings_store_view.items) {
+                        if (item.id != focused.package_id) continue;
+                        h.summary = item.summary;
+                        h.version = item.version + (item.size.empty() ? std::wstring{} : L" · " + item.size);
+                        h.icon = item.icon;
+                        h.icon_color = item.icon_color;
+                        h.custom_icon = item.custom_icon;
+                        h.has_about_tab = true;
+                        h.official = item.official;
+                        h.enabled = item.enabled;
+                        break;
+                    }
+                }
             }
             if (vm.settings_page == 8) {
                 FillExtensionStoreView(s, vm);
@@ -1240,13 +1293,14 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             const float r = 16.0f * s.scale;
             const float cx = view.vertical ? (sp.hit_rect.left + sp.hit_rect.right) * 0.5f
                                            : (sp.parent_bounds.left + sp.parent_bounds.right) * 0.5f;
-            const float cy = view.vertical ? sp.parent_bounds.top + 29.0f * s.scale
+            const float cy = view.vertical ? sp.parent_bounds.top + 20.0f * s.scale
                                            : (sp.hit_rect.top + sp.hit_rect.bottom) * 0.5f;
             view.swap_rect = D2D1::RectF(cx - r, cy - r, cx + r, cy + r);
         }
         vm.splitters.push_back(view);
         s.splitterNodes.push_back(sp.node);
     }
+    slot_phase(70);
     for (size_t i = 0; i < laid.size(); ++i) {
         ui::PaneSlotView slot;
         slot.rect = laid[i].second;
@@ -1261,18 +1315,25 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             slot.pane.staged = StagedHashes(s);
             if (app::Tab* tab = p->ActiveTab()) {
                 FillChangePane(s, *tab, slot.pane, slot.rect);
+                slot_phase(71);
                 FillGitPane(s, *tab, slot.pane);
-                FillSyncPane(s, *tab, slot.pane);   // SVN marks (outside Git) and OneDrive states
+                slot_phase(72);
+                FillSyncPane(s, *tab, slot.pane);
+                slot_phase(73);   // SVN marks (outside Git) and OneDrive states
                 const float wall_scroll_before = slot.pane.scroll_y;
                 s.renderer.ReconcileWallAnchor(slot.pane, slot.rect);
+                slot_phase(74);
                 if (slot.focused && s.scrollAnimating)
                     s.scrollTargetY += slot.pane.scroll_y - wall_scroll_before;
                 tab->scroll_y = slot.pane.scroll_y;
                 if (slot.focused) vm.pane.scroll_y = slot.pane.scroll_y;
                 if (slot.focused) {
                     vm.pane.git_marks = slot.pane.git_marks;
+                    vm.pane.git_mark_lookup = slot.pane.git_mark_lookup;
+                    vm.pane.git_plain_terms = slot.pane.git_plain_terms;
+                    vm.pane.git_dir_count_lookup = slot.pane.git_dir_count_lookup;
                     vm.pane.onedrive_status = slot.pane.onedrive_status;
-                    AppendGitStatusText(*tab, vm.status.status_text);
+                    AppendGitStatusText(s, *tab, vm.status.git_text);
                     AppendSvnStatusText(s, *tab, vm.status.status_text);
                 }
                 for (const auto& cutPath : s.cutPaths) {
@@ -1288,6 +1349,15 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             if (static_cast<int>(i) == s.hoverPaneIndex) slot.pane.hover_index = s.hoverRow;
             // Hover shots stage the row on "the focused pane" (-1).
             else if (s.shot.active && s.hoverPaneIndex < 0 && slot.focused) slot.pane.hover_index = s.hoverRow;
+            // Capture may send WM_MOUSELEAVE before the release. Keep the
+            // pressed outline star drawn until the button's gesture ends.
+            const auto& press = s.buttonPress;
+            if (press.active && press.hit.region == ui::HitTestResult::RowStar &&
+                press.hit.pane_index == static_cast<int>(i) && press.context.pane == p) {
+                if (const auto* active = p->ActiveTab(); active && press.context.tab == active &&
+                    press.context.generation == active->view_generation)
+                    slot.pane.hover_index = press.hit.index;
+            }
             if (s.stripResizing && static_cast<int>(i) == s.stripResizePane)
                 slot.pane.column_strip.resize_column = s.stripResizeColumn;
             if (s.stripHScrolling && static_cast<int>(i) == s.stripResizePane)
@@ -1316,7 +1386,26 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
         }
         vm.pane_slots.push_back(std::move(slot));
     }
+    if (!vm.settings_open && vm.pane_slots.size() >= 2) {
+        size_t focused_slot = 0;
+        for (size_t i = 0; i < vm.pane_slots.size(); ++i)
+            if (vm.pane_slots[i].focused) { focused_slot = i; break; }
+        using I = l10n::StringId;
+        if (vm.pane_slots.size() == 2) {
+            const bool horizontal_split = (vm.splitters.size() == 1 && !vm.splitters[0].vertical) ||
+                (s.window_tabs.Active() && s.window_tabs.Active()->layout == app::LayoutPreset::TwoHorizontal);
+            vm.status.active_pane_label = l10n::Get(horizontal_split
+                ? (focused_slot == 0 ? I::AiCtlPaneTop : I::AiCtlPaneBottom)
+                : (focused_slot == 0 ? I::AiCtlPaneLeft : I::AiCtlPaneRight));
+        } else {
+            std::wstring label = l10n::Get(I::AiCtlPaneN);
+            const size_t pos = label.find(L"{n}");
+            if (pos != std::wstring::npos) label.replace(pos, 3, std::to_wstring(focused_slot + 1));
+            vm.status.active_pane_label = std::move(label);
+        }
+    }
     s.renderer.PruneWallViews(vm.pane_slots);
+    slot_phase(75);
 }
 // ---------------------------------------------------------------------------
 // Staging tray card deck: display entries (newest batch first) + eased poses.
@@ -1934,6 +2023,8 @@ static bool TickTrayShelf(AppState& s, float elapsed) {
     int stage = static_cast<int>(ui::TrayStage::Strip);
     if (total == 0 && s.trayView.open) s.trayView = {};
     if (s.dragFilesOver && !s.trayDragOut) stage = static_cast<int>(ui::TrayStage::Drop);
+    else if (StagingShelfDockHot(s)) stage = static_cast<int>(ui::TrayStage::Dock);
+    else if (StagingShelfVisible(s)) stage = static_cast<int>(ui::TrayStage::Floated);
     else if (total > 0) stage = static_cast<int>(s.trayView.open ? ui::TrayStage::Open : ui::TrayStage::Shelf);
     if (stage != static_cast<int>(ui::TrayStage::Open)) s.trayView.compare = false;
     TickTrayOpenRemoval(s, now);
@@ -1949,6 +2040,7 @@ static bool TickTrayShelf(AppState& s, float elapsed) {
     const bool clip = TrayClipLive(s);
     if (clip && now - s.trayClip.at < 460) dirty = true;
     float target = ui::TrayShelfStageHeightDip(stage, clip);
+    if (s.core.staging_shelf && stage == static_cast<int>(ui::TrayStage::Shelf)) target += 30.0f;
     // Setting: an empty tray folds away; a Ctrl+C offer or a drag brings it back.
     if (stage == static_cast<int>(ui::TrayStage::Strip) && !clip && s.appPrefs.tray_hide_when_empty) target = 0.0f;
     if (stage == static_cast<int>(ui::TrayStage::Drop)) target = std::max(target, a.drop_from);
@@ -2521,7 +2613,7 @@ static int TrayItemKind(const std::wstring& name, bool is_dir) {
 }
 
 // Open view rows: the filtered items grouped by source folder (staging order).
-static void FillTrayOpen(AppState& s, ui::TrayDeckView& deck, ULONGLONG now) {
+static void FillTrayOpen(AppState& s, ui::TrayDeckView& deck, ULONGLONG now, bool floating = false) {
     auto& v = s.trayView;
     auto progress = [now](ULONGLONG at, float ms) {
         return now >= at ? std::clamp(static_cast<float>(now - at) / ms, 0.0f, 1.0f) : 0.0f;
@@ -2533,35 +2625,42 @@ static void FillTrayOpen(AppState& s, ui::TrayDeckView& deck, ULONGLONG now) {
                 if (item.id == id) return !item.exists;
         return true;
     }), v.checked.end());
-    struct Group { std::wstring path; std::vector<const app::TrayItem*> items; };
+    struct RowItem { const app::TrayItem* item; bool move; };
+    struct Group { std::wstring path; std::wstring source; std::vector<RowItem> items; };
     std::vector<Group> groups;
     for (const auto& b : s.tray.batches()) {
         for (const auto& item : b.items) {
             const std::wstring name = TrayItemName(item.path);
-            const int kind = TrayItemKind(name, item.is_dir);
+            int kind = TrayItemKind(name, item.is_dir);
+            if (floating) kind = item.content_kind ? 3 : kind == 3 ? 4 : kind;
             ++deck.filter_counts[0];
             ++deck.filter_counts[kind];
             if (item.exists) ++deck.live_total;
             if (v.filter != 0 && kind != v.filter) continue;
             const std::wstring parent = fs::ParentPath(item.path);
             auto g = std::find_if(groups.begin(), groups.end(), [&](const Group& x) {
-                return _wcsicmp(x.path.c_str(), parent.c_str()) == 0; });
-            if (g == groups.end()) { groups.push_back({parent, {}}); g = std::prev(groups.end()); }
-            g->items.push_back(&item);
+                return x.source == item.source_label && _wcsicmp(x.path.c_str(), parent.c_str()) == 0; });
+            if (g == groups.end()) {
+                groups.push_back({parent, item.source_label, {}});
+                g = std::prev(groups.end());
+            }
+            g->items.push_back({&item, b.move_intent && !item.content_kind && !item.owned_snippet});
         }
     }
-    if (v.filter != 0 && deck.filter_counts[v.filter] == 0) v.filter = 0;
     deck.filter = v.filter;
     deck.checked = static_cast<int>(v.checked.size());
     deck.target_count = deck.checked > 0 ? deck.checked : deck.live_total;
     int i = 0;
     for (const Group& g : groups) {
         bool first = true;
-        for (const app::TrayItem* item : g.items) {
+        for (const auto& [item, move] : g.items) {
             ui::TrayOpenRow row;
             row.id = item->id;
             row.path = ClipboardPath(item->path);
-            row.name = TrayItemName(item->path);
+            row.name = item->display_name.empty() ? TrayItemName(item->path) : item->display_name;
+            row.content_kind = item->content_kind;
+            row.domain = item->domain;
+            row.move_intent = move;
             row.is_dir = item->is_dir;
             row.attrs = item->attrs;
             row.exists = item->exists;
@@ -2569,7 +2668,7 @@ static void FillTrayOpen(AppState& s, ui::TrayDeckView& deck, ULONGLONG now) {
             row.checked = std::find(v.checked.begin(), v.checked.end(), item->id) != v.checked.end();
             row.group_start = first;
             row.group_path = ClipboardPath(g.path);
-            row.group = TrayItemName(g.path);
+            row.group = g.source.empty() ? TrayItemName(g.path) : g.source;
             if (row.group.empty()) row.group = row.group_path;
             first = false;
             // .oi.in: 60 + 40·i ms delay, 400 ms (the first dozen rows).
@@ -2609,7 +2708,15 @@ static void FillTrayOpen(AppState& s, ui::TrayDeckView& deck, ULONGLONG now) {
 }
 
 // Shelf part of the tray view.
-static void FillTrayShelf(AppState& s, ui::TrayDeckView& deck, ULONGLONG now) {
+static bool TrayDestinationMissing(AppState& s, const std::wstring& dir) {
+    const auto normalized = fs::NormalizePath(dir);
+    const auto parent = fs::ParentPath(normalized);
+    if (parent.empty() || path::EqualInsensitive(parent, normalized) || s.store.IsDirty(parent))
+        return false;
+    return app::TrayFolderKnownMissing(s.store.Peek(parent), TrayItemName(normalized));
+}
+
+static void FillTrayShelf(AppState& s, ui::TrayDeckView& deck, ULONGLONG now, bool floating = false) {
     const auto& a = s.trayShelf;
     auto progress = [now](ULONGLONG at, float ms) {
         return at ? std::clamp(static_cast<float>(now - at) / ms, 0.0f, 1.0f) : 1.0f;
@@ -2618,6 +2725,11 @@ static void FillTrayShelf(AppState& s, ui::TrayDeckView& deck, ULONGLONG now) {
     deck.prev_stage = a.prev_stage;
     deck.swap = a.prev_stage >= 0 ? progress(a.swap_at, 410.0f) : 1.0f;
     deck.height_dip = a.height;
+    if (s.core.staging_shelf) {
+        deck.active_shelf_name = s.tray.ActiveShelfName();
+        deck.active_shelf_color = s.tray.active_shelf().color_rgb;
+        deck.active_shelf_temp = s.tray.active_shelf().temp;
+    }
     deck.hide_empty = s.appPrefs.tray_hide_when_empty;
     deck.drop_move = s.dropTrayMove;
     deck.move_mode = TrayEffectiveMove(s);
@@ -2634,7 +2746,8 @@ static void FillTrayShelf(AppState& s, ui::TrayDeckView& deck, ULONGLONG now) {
 
     // Target: the current folder, when files can land there.
     std::wstring current;
-    if (app::Tab* tab = ActiveTab(s); tab && !tab->current_path.empty() &&
+    const app::Tab* tab = ActiveTab(s);
+    if (tab && !tab->current_path.empty() &&
         !fs::IsVirtualPath(tab->current_path) && !tab->net_readonly) {
         current = tab->current_path;
         deck.target = TrayItemName(current);
@@ -2689,75 +2802,156 @@ static void FillTrayShelf(AppState& s, ui::TrayDeckView& deck, ULONGLONG now) {
     for (auto it = newest.rbegin(); it != newest.rend(); ++it) {
         ui::TrayCardView card;
         card.path = (*it)->path;
-        card.name = TrayItemName((*it)->path);
+        card.name = (*it)->display_name.empty() ? TrayItemName((*it)->path) : (*it)->display_name;
+        card.content_kind = (*it)->content_kind;
+        card.domain = (*it)->domain;
         card.is_dir = (*it)->is_dir;
         card.attrs = (*it)->attrs;
         card.size = (*it)->size;
         deck.fan.push_back(std::move(card));
     }
 
-    // Same names already in the current folder (cached probe).
+    // Same-name badges are advice, not conflict resolution. Use the existing
+    // listing exclusively: an attribute query for Y:\ can block the UI just
+    // like a query for \\server\share.
     auto& c = s.trayShelf;
-    uint64_t sig = 1469598103934665603ull;
+    uint64_t sig = (tab ? tab->view_generation : 0) ^ 1469598103934665603ull;
     for (const auto& b : batches)
-        for (const auto& item : b.items) sig = (sig ^ item.id) * 1099511628211ull;
+        for (const auto& item : b.items)
+            sig = (sig ^ item.id ^ item.exists ^ std::hash<std::wstring>{}(item.path)) * 1099511628211ull;
     if (current.empty()) {
         c.conflicts = 0;
         c.conflict_ids.clear();
     } else if (sig != c.conflict_sig || _wcsicmp(c.conflict_dir.c_str(), current.c_str()) != 0 ||
                now - c.conflict_at > 1500) {
-        int n = 0, probed = 0;
-        c.conflict_ids.clear();
-        const bool remote = fs::IsUncPath(current);
+        auto snapshot = s.store.Peek(current);
+        if (!snapshot && tab && !tab->content_results && path::EqualInsensitive(tab->snapshot_path, current))
+            snapshot = tab->snapshot;
+        std::unordered_multimap<std::wstring, uint64_t> candidates;
+        constexpr size_t kCandidateLimit = 200;
         for (const auto& b : batches) {
             for (const auto& item : b.items) {
-                if (remote || ++probed > 200) break;
+                if (!snapshot || candidates.size() == kCandidateLimit) break;
                 if (!item.exists) continue;
-                const std::wstring parent = fs::ParentPath(item.path);
-                if (_wcsicmp(parent.c_str(), current.c_str()) == 0) continue;
-                std::wstring dest = current;
-                if (!dest.empty() && dest.back() != L'\\') dest += L'\\';
-                dest += TrayItemName(item.path);
-                if (GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                    ++n;
-                    c.conflict_ids.push_back(item.id);
-                }
+                if (path::EqualInsensitive(fs::ParentPath(item.path), current)) continue;
+                candidates.emplace(path::FoldedKey(TrayItemName(item.path)), item.id);
             }
+            if (!snapshot || candidates.size() == kCandidateLimit) break;
         }
-        c.conflicts = n;
+        c.conflict_ids = app::TraySnapshotConflicts(snapshot, std::move(candidates));
+        c.conflicts = static_cast<int>(c.conflict_ids.size());
         c.conflict_sig = sig;
         c.conflict_dir = current;
         c.conflict_at = now;
     }
     deck.conflicts = c.conflicts;
-    if (deck.stage == static_cast<int>(ui::TrayStage::Open) || deck.prev_stage == static_cast<int>(ui::TrayStage::Open))
+    if (!floating && (deck.stage == static_cast<int>(ui::TrayStage::Open) || deck.prev_stage == static_cast<int>(ui::TrayStage::Open)))
         FillTrayOpen(s, deck, now);
 }
 
+ui::TrayDeckView BuildFloatingShelfView(AppState& s, bool expanded) {
+    ui::TrayDeckView deck;
+    const auto& active = s.tray.active_shelf();
+    deck.active_shelf_id = active.id;
+    deck.active_shelf_name = s.tray.ShelfDisplayName(active);
+    deck.active_shelf_temp = active.temp;
+    deck.active_shelf_color = active.color_rgb;
+    deck.pinned = s.appPrefs.shelf_pinned;
+    deck.view_grid = s.appPrefs.shelf_view_grid;
+    for (const auto& shelf : s.tray.shelves()) {
+        int count = 0;
+        for (const auto& batch : shelf.batches)
+            for (const auto& item : batch.items) {
+                if (item.exists) ++count;
+                if (shelf.id != active.id) continue;
+                ++deck.total_count;
+                if (!item.exists) ++deck.stale_count;
+                else if (!item.is_dir) deck.total_size += item.size;
+            }
+        deck.shelves.push_back({shelf.id, s.tray.ShelfDisplayName(shelf), shelf.color_rgb, shelf.temp, count});
+    }
+    for (const auto& dir : TrayDestList(s)) {
+        std::wstring label = BaseName(dir);
+        if (label.empty()) label = dir;
+        deck.dests.push_back({dir, std::move(label), TrayDestinationMissing(s, dir)});
+    }
+    const auto now = ui::motion::NowMs();
+    FillTrayShelf(s, deck, now, true);
+    if (expanded) FillTrayOpen(s, deck, now, true);
+    int snippets = 0;
+    unsigned kinds = 0;
+    for (const auto& batch : active.batches)
+        for (const auto& item : batch.items) {
+            if (!item.exists || item.inflight_task) continue;
+            if (deck.checked && std::find(s.trayView.checked.begin(), s.trayView.checked.end(), item.id) ==
+                                     s.trayView.checked.end()) continue;
+            if (batch.move_intent && !item.content_kind && !item.owned_snippet) ++deck.release_move_count;
+            else ++deck.release_copy_count;
+            if (item.content_kind > 0 && item.content_kind <= 3) {
+                ++snippets;
+                kinds |= 1u << item.content_kind;
+            }
+        }
+    if (snippets) {
+        std::wstring exts;
+        constexpr const wchar_t* suffixes[] = {L".png", L".txt", L".url"};
+        for (unsigned i = 0; i < 3; ++i)
+            if (kinds & (2u << i)) {
+                if (!exts.empty()) exts += L" / ";
+                exts += suffixes[i];
+            }
+        auto note = l10n::Get(l10n::StringId::ShelfReleaseSnippetNoteFormat);
+        if (const auto i = note.find(L"{n}"); i != std::wstring::npos)
+            note.replace(i, 3, std::to_wstring(snippets));
+        if (const auto i = note.find(L"{exts}"); i != std::wstring::npos)
+            note.replace(i, 6, exts);
+        deck.snippet_note = std::move(note);
+    }
+    return deck;
+}
+
 ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
+    app::ObserveTabMru(s.tabMru, s.window_tabs);  // Ctrl+Tab order follows every activation
+    s.renderer.SetRoundedCorners(s.appPrefs.ui_rounded);
+    auto vm_phase_started = GetTickCount64();
+    const auto vm_phase = [&](uint64_t phase) {
+        const auto now = GetTickCount64();
+        const auto elapsed = now - vm_phase_started;
+        vm_phase_started = now;
+        if (elapsed >= 20)
+            diagnostics::runtime::Event("build_vm_phase_slow", {{"phase", phase}, {"elapsed_ms", elapsed}});
+    };
     SyncTaskbarWindowTitle(s);
     if (!s.pane) return {};
+    // The open rename field follows its item when rows re-sort under it.
+    if (s.renameIndex >= 0) SyncRenameIndex(s, false);
     TickContentPackInstall(s);
     TickAiPackInstall(s);
     // A finished pack download repaints the window once; drop the cached
     // failed thumbnails so the newly supported files are decoded again.
     if (s.settings.TakeMediaPackResult()) {
         s.renderer.EvictThumbnails();
-        s.quickPreview.OnMediaPackInstalled();
+        s.quickPreview->OnMediaPackInstalled();
         s.detailsPreview.OnMediaPackInstalled();
+        for (auto& pinned : s.core.pinned_previews)
+            if (pinned) pinned->OnMediaPackInstalled();
     }
     if (s.settings.TakeImagePackResult()) {
         s.renderer.EvictThumbnails();
-        s.quickPreview.OnImagePackInstalled();
+        s.quickPreview->OnImagePackInstalled();
         s.detailsPreview.OnImagePackInstalled();
+        for (auto& pinned : s.core.pinned_previews)
+            if (pinned) pinned->OnImagePackInstalled();
     }
     const bool raw_installed = s.settings.TakeRawPackResult();
     if (raw_installed) {
         s.renderer.EvictThumbnails();
-        s.quickPreview.OnExtraPackInstalled();
+        s.quickPreview->OnExtraPackInstalled();
         s.detailsPreview.OnExtraPackInstalled();
+        for (auto& pinned : s.core.pinned_previews)
+            if (pinned) pinned->OnExtraPackInstalled();
     }
-    if (s.quickPreview.visible() || s.detailsPreview.visible()) {
+    if (s.quickPreview->visible() || s.detailsPreview.visible() || HasVisiblePinnedPreview(s.core)) {
         ui::MediaPackOffer offer, image_offer;
         s.settings.FillMediaPackOffer(offer);
         s.settings.FillImagePackOffer(image_offer);
@@ -2772,25 +2966,23 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
                 offer.progress = image_offer.progress = static_cast<float>(_wtoi(fake)) / 100.0f;
             }
         }
-        s.quickPreview.SetMediaPackOffer(offer);
-        s.detailsPreview.SetMediaPackOffer(offer);
-        s.quickPreview.SetImagePackOffer(image_offer);
-        s.detailsPreview.SetImagePackOffer(image_offer);
-        ui::CloudDownloadOffer cloud;
-        if (fs::IsCloudPlaceholder(s.quickPreview.item().attrs)) {
-            cloud.path = s.quickPreview.item().path;
-            cloud.percent = app::CloudDownloadPercent(cloud.path);
-            cloud.provider = app::CloudRootLabelFor(cloud.path);
-        }
-        s.quickPreview.SetCloudDownloadOffer(cloud);
-        cloud = {};
-        if (fs::IsCloudPlaceholder(s.detailsPreview.item().attrs)) {
-            cloud.path = s.detailsPreview.item().path;
-            cloud.percent = app::CloudDownloadPercent(cloud.path);
-            cloud.provider = app::CloudRootLabelFor(cloud.path);
-        }
-        s.detailsPreview.SetCloudDownloadOffer(cloud);
+        auto sync_offers = [&](ui::QuickPreviewWindow& target) {
+            target.SetMediaPackOffer(offer);
+            target.SetImagePackOffer(image_offer);
+            ui::CloudDownloadOffer cloud;
+            if (fs::IsCloudPlaceholder(target.item().attrs)) {
+                cloud.path = target.item().path;
+                cloud.percent = app::CloudDownloadPercent(cloud.path);
+                cloud.provider = app::CloudRootLabelFor(cloud.path);
+            }
+            target.SetCloudDownloadOffer(cloud);
+        };
+        sync_offers(*s.quickPreview);
+        sync_offers(s.detailsPreview);
+        for (auto& pinned : s.core.pinned_previews)
+            if (pinned && pinned->visible()) sync_offers(*pinned);
     }
+    vm_phase(1);
     UpdateFolderCompare(s);
     s.changes.visible_paths.clear();
     ForEachPane(s, [&](app::Pane& pane) {
@@ -2802,10 +2994,21 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     SyncColumnStrips(s);
     SyncDetailsTrees(s);
     UpdateWallHint(s);
+    vm_phase(2);
     ui::WindowViewModel vm = app::BuildWindowViewModel(*s.pane, s.sidebar,
         s.pane->focused, s.maximized, s.darkMode, &s.places, s.sidebarCollapsedMask,
         SidebarHiddenMaskWithBar(s), s.starredExpanded, &s.sidebarOrder,
         s.sidebarQuickAccessHiddenMask);
+    vm_phase(3);
+    if (s.renameIndex >= 0 && s.hwndRenameEdit && IsWindowVisible(s.hwndRenameEdit)) {
+        DWORD rename_from = 0, rename_to = 0;
+        SendMessageW(s.hwndRenameEdit, EM_GETSEL,
+                     reinterpret_cast<WPARAM>(&rename_from), reinterpret_cast<LPARAM>(&rename_to));
+        vm.selection_cut = rename_from != rename_to;
+        vm.selection_copy = rename_from != rename_to;
+        vm.paste_target = true;
+        vm.clipboard_files = IsClipboardFormatAvailable(CF_UNICODETEXT) != FALSE;
+    }
     FillWorkspaceSidebarState(s, vm);
     if (const app::Tab* tab = ActiveTab(s)) {
         FillWallHint(*tab, vm.pane);  // photo wall suggestion
@@ -2835,6 +3038,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.show_pinned_tab_names = s.appPrefs.show_pinned_tab_names;
     vm.settings_list_smart_date = s.appPrefs.list_smart_date;
     vm.settings_list_zebra_rows = s.appPrefs.list_zebra_rows;
+    FillUiLayoutSettingsVm(s, vm);
     vm.settings_list_tree_sticky = s.appPrefs.list_tree_sticky;
     vm.settings_menu_acrylic = s.appPrefs.menu_acrylic;
     vm.settings_list_size_bar = s.appPrefs.list_size_bar;
@@ -2846,14 +3050,22 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_mtime.tree = s.appPrefs.list_mtime_tree;   // the switch shows the pref itself
     vm.settings_sync_onedrive = s.appPrefs.sync_onedrive;
     vm.settings_sync_svn = s.appPrefs.sync_svn;
+    vm.settings_double_click_interval_ms = s.appPrefs.double_click_interval_ms;
     vm.settings_single_click = s.appPrefs.single_click_open;
     vm.settings_name_highlight = s.appPrefs.name_highlight;
     vm.settings_hover_select = s.appPrefs.hover_select;
     vm.settings_item_checkboxes = s.appPrefs.item_checkboxes;
     vm.settings_vertical_tabs = s.appPrefs.vertical_tabs;
+    vm.tab_active_style = s.appPrefs.tab_active_style;
+    vm.window_active = !s.hwnd || s.shot.active || GetForegroundWindow() == s.hwnd;
     vm.tab_layout = s.appPrefs.tab_layout;
+    vm.tab_overflow_list = s.appPrefs.tab_overflow_list && s.appPrefs.tab_layout == 0;
     vm.tab_max_rows = s.appPrefs.tab_max_rows;
     vm.settings_tray_hide_empty = s.appPrefs.tray_hide_when_empty;
+    vm.settings_shelf_shake = s.appPrefs.shelf_shake_enabled;
+    vm.settings_shelf_sensitivity = s.appPrefs.shelf_shake_sensitivity;
+    vm.settings_shelf_position = s.appPrefs.shelf_summon_pos;
+    vm.settings_shelf_auto_hide = s.appPrefs.shelf_auto_hide;
     vm.settings_lan_discovery = s.appPrefs.lan_discovery;
     vm.settings_network_recent = s.appPrefs.network_recent_enabled;
     vm.settings_hidden_shares = s.appPrefs.show_hidden_shares;
@@ -2879,6 +3091,8 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_ui_font_scale = s.appPrefs.ui_font_scale;
     std::copy_n(s.settings.custom_accent(), 3, vm.settings_accent_hsl);
     vm.sidebar_scroll = s.sidebarScroll;
+    vm.sidebar_favorites_scroll = s.sidebarFavoritesScroll;
+    vm.sidebar_favorites_scrollbar_dragging = s.scrollbarDragging && s.scrollbarFavorites;
     vm.sidebar_scrollbar_opacity = s.sidebarScrollbarFade.Opacity();
     vm.sidebar_scrollbar_expand = s.sidebarScrollbarFade.Expand();
     vm.settings_scrollbar_opacity = s.settingsScrollbarFade.Opacity();
@@ -2901,13 +3115,28 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         vm.status.selection_text = std::wstring(count) + L"  \u00B7  " +
             (bytes ? pulse::format::ByteSize(*bytes, true) : l10n::Get(l10n::StringId::LoadingEllipsis));
     }
-    vm.status.can_undo = s.ops.CanUndo();
-    vm.status.can_redo = s.ops.CanRedo();
+    vm_phase(4);
+    const uint64_t ops_rev = s.ops.UiRevision();
+    if (!s.opsUiCache.valid || s.opsUiCache.revision != ops_rev ||
+        (s.undoHistoryOpen && !s.opsUiCache.include_rows)) {
+        s.opsUiCache.snapshot = s.ops.CaptureUiSnapshot(s.undoHistoryOpen);
+        s.opsUiCache.revision = s.opsUiCache.snapshot.revision;
+        s.opsUiCache.include_rows = s.undoHistoryOpen;
+        s.opsUiCache.valid = true;
+    }
+    const auto& ops_snap = s.opsUiCache.snapshot;
+    vm.status.can_undo = ops_snap.can_undo;
+    vm.status.extension_items.clear();
+    for (const auto& item : ::pulse::extensions::statusbar::Registry::Instance().Visible()) {
+        vm.status.extension_items.push_back(ui::StatusExtensionItemView{
+            item.text, item.tooltip, item.icon, item.tone, item.clickable, item.handle});
+    }
+    vm.status.can_redo = ops_snap.can_redo;
     vm.status.history_open = s.undoHistoryOpen;
     vm.status.history_offset = s.undoHistoryOffset;
     vm.status.undo_label = l10n::Get(l10n::StringId::OpHistory);
-    const auto undo_history = s.ops.UndoHistorySummary(s.undoHistoryOpen);
-    const bool history_has_entries = s.ops.HistoryProgress().has_entries;
+    const auto& undo_history = ops_snap.undo_summary;
+    const bool history_has_entries = ops_snap.history_progress.has_entries;
     for (const auto& item : undo_history) {
         const auto& e = item;
         ui::UndoHistoryRowView row;
@@ -2969,7 +3198,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     }
     std::stable_partition(vm.status.history.begin(), vm.status.history.end(), [](const auto& row) { return row.undone; });
     vm.status.history_offset = std::clamp(vm.status.history_offset, 0, std::max(0, static_cast<int>(vm.status.history.size()) - 1));
-    ops::OpStatus st = s.ops.Status();
+    const ops::OpStatus& st = ops_snap.status;
     vm.status.task_id = st.task_id;
     if (st.active || !st.last_error.empty() || !st.summary.empty()) {
         vm.status.task_text = st.last_error.empty() ? st.summary
@@ -2978,7 +3207,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         vm.status.task_active = st.active;
         vm.status.task_failed = !st.last_error.empty();
         vm.status.task_paused = st.active && (st.phase == ops::OpPhase::Paused || st.pause_requested);
-        if (st.active) vm.status.task_queued = static_cast<uint32_t>(s.ops.QueuedTransferCount());
+        if (st.active) vm.status.task_queued = static_cast<uint32_t>(ops_snap.queued_transfers);
         if (vm.status.task_paused) {
             vm.status.task_text = l10n::Get(st.type == ops::OpType::Copy ? l10n::StringId::OpCopyPaused
                 : st.type == ops::OpType::Move ? l10n::StringId::OpMovePaused
@@ -2988,7 +3217,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         }
         if (!st.active && st.phase == ops::OpPhase::Completed && st.last_error.empty()) {
             // The finished pill offers 撤销 / 打开.
-            vm.status.task_can_undo = s.ops.CanUndoTask(st.task_id);
+            vm.status.task_can_undo = ops_snap.can_undo_status_task;
             vm.status.task_can_open = (st.type == ops::OpType::Copy || st.type == ops::OpType::Move) &&
                                       !st.destination_dir.empty();
         }
@@ -3050,7 +3279,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         const auto region = static_cast<ui::HitTestResult::Region>(s.hoverRegion);
         if (HoverHintIsCommand(region) && !s.addressSearching && !s.filterEditing) {
             // Tooltips may carry extra lines; the status bar only has room for the first.
-            vm.status.hint_text = TooltipForHover(s);
+            vm.status.hint_text = path::FriendlyPathText(TooltipForHover(s));
             const size_t nl = vm.status.hint_text.find(L'\n');
             if (nl != std::wstring::npos) vm.status.hint_text.resize(nl);
         }
@@ -3072,6 +3301,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     }
     pulse::FillAiStatusVm(vm);   // the AI chip at the left end of the status bar
     // "已暂存" row pills (tray redesign).
+    vm_phase(5);
     vm.pane.staged = StagedHashes(s);
     // 1B-2 overlays: cut rows, drag feedback, breadcrumb hover.
     if (!s.cutPaths.empty()) {
@@ -3237,8 +3467,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
             d.path = dir;
             d.label = BaseName(dir);
             if (d.label.empty()) d.label = dir;
-            // Network folders are not probed per frame (a dead share would stall).
-            d.missing = !fs::IsUncPath(dir) && GetFileAttributesW(dir.c_str()) == INVALID_FILE_ATTRIBUTES;
+            d.missing = TrayDestinationMissing(s, dir);
             deck.dests.push_back(std::move(d));
         }
         const int hover_index = TrayDeckHoverIndex(s);
@@ -3357,6 +3586,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
             dv.view_generation = tab->view_generation;
             dv.path = penetrated ? e.link_target
                                  : EntryFullPath(*tab, tab->selected_index);
+            FillGitDetails(s, *tab, dv);   // the Git section, inside a repository
             // 下载并预览 (C4b): only the entry itself; a shortcut's target is
             // not what the well would download.
             dv.cloud_online = !penetrated && !dv.is_dir && fs::IsCloudPlaceholder(e.attrs);
@@ -3508,6 +3738,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         }
     }
     vm.hover_pane_index = s.hoverPaneIndex;
+    vm.toolbar_hovered = s.toolbarHovered;
     vm.column_resize_pressed = s.columnResizing;
     if (s.columnHeaderDrag.active) {
         vm.column_drag_pane = s.columnHeaderDrag.pane;
@@ -3518,7 +3749,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         vm.column_drag_grab_dx = s.columnHeaderDrag.grab_dx;
     }
     // No hover tips while a marquee owns the pointer.
-    vm.tooltip_text = s.listSelection.BandActive() ? std::wstring{} : s.tooltipText;
+    vm.tooltip_text = s.listSelection.BandActive() ? std::wstring{} : path::FriendlyPathText(s.tooltipText);
     if (s.teachTip >= 0) {
         using I = l10n::StringId;
         static constexpr I kTitles[] = {I::TeachMiddleTitle, I::TeachTrayTitle, I::TeachCompareTitle,
@@ -3537,7 +3768,9 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     // Tab wrapping changes the toolbar origin; settle it before pane hit geometry.
     RECT tab_client{};
     if (GetClientRect(s.hwnd, &tab_client)) s.renderer.UpdateTabLayout(vm, static_cast<float>(tab_client.right));
+    vm_phase(6);
     FillPaneSlots(s, vm);
+    vm_phase(7);
     {
         // File-list scrollbars: the hovered pane's (or the dragged, focused one's) expands.
         const bool dragging = s.scrollbarDragging && !s.scrollbarSidebar && !s.scrollbarSettings;
@@ -3614,6 +3847,10 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     s.renderer.SetToolbarPrefs(s.appPrefs.toolbar_new_primary, s.appPrefs.toolbar_last_new == 1,
                                static_cast<int>(vm.toolbar_pins.size() + vm.toolbar_apps.size()));
     s.renderer.SetToolbarApps(static_cast<int>(vm.toolbar_pins.size()), drop_mode, vm.toolbar_drop_label);
+    uint64_t hidden_pins = 0;
+    for (size_t k = 0; k < vm.toolbar_pins.size() && k < 64; ++k)
+        if (!vm.toolbar_pins[k].visible) hidden_pins |= uint64_t{1} << k;
+    s.renderer.SetToolbarHiddenPins(hidden_pins);
     uint64_t separators = app::ToolbarSeparatorMask(s.appPrefs.toolbar_tools);
     // The apps' own separators (bit: before the app after the marked one).
     const size_t app_from = vm.toolbar_pins.size();
@@ -3633,6 +3870,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         for (auto& slot : vm.pane_slots) slot.pane.history_preview_paths = paths;
     }
     extensions::native::SyncSettingsPagesHost(s, vm);
+    vm_phase(8);
     return vm;
 }
 
@@ -3714,6 +3952,9 @@ std::wstring TooltipForHover(AppState& s) {
     case R::StatusUndoHistory: return text(I::OpHistory);
     case R::StatusBarAi: return text(I::AiChipTip);   // Pulse 助手  Ctrl+J
     case R::WindowManageButton: return text(I::WindowManage);
+    case R::TitleLayoutButton: return text(I::TitleBtnLayoutTip);
+    case R::TitleAiButton: return text(I::AiChipTip);
+    case R::TitleTrayButton: return text(I::TrayShelfTitle) + L"  Ctrl+Shift+S";
     case R::SettingsButton: return text(I::Settings);
     case R::SettingsFind: return text(I::SettingsFind);
     case R::SettingsNav: {
@@ -3910,6 +4151,13 @@ std::wstring TooltipForHover(AppState& s) {
         default: return L"";
         }
     case R::DetailsSecurityChange: return text(I::SystemAttributes);
+    case R::StatusBarGit: return text(s.appPrefs.git_plain_terms ? I::GitBranchMenuTipPlain : I::GitBranchMenuTipGit);
+    case R::StatusBarExtension: {
+        const auto items = ::pulse::extensions::statusbar::Registry::Instance().Visible();
+        if (s.hoverControlIndex < 0 || static_cast<size_t>(s.hoverControlIndex) >= items.size()) return L"";
+        const auto& item = items[static_cast<size_t>(s.hoverControlIndex)];
+        return item.tooltip.empty() ? item.text : item.tooltip;
+    }
     case R::RowStar: return text(s.appPrefs.show_hints ? I::TipxStar : I::Star);
     case R::RowNewTab: return text(s.appPrefs.show_hints ? I::TipxRowNewTab : I::OpenNewTab);
     case R::RowMore: return text(I::MoreActions);
@@ -3941,9 +4189,10 @@ std::wstring TooltipForHover(AppState& s) {
     case R::SidebarHeader: return SidebarRailActive(s) ? s.hoverLabel : L"";
     case R::SidebarItem: {
         if (SidebarRailActive(s) && !s.hoverLabel.empty()) return s.hoverLabel;
-        if (const app::StarredItem* starred = s.places.FindStarred(s.hoverPath);
-            starred && !starred->badge.empty()) {
-            return starred->badge;
+        if (const app::StarredItem* starred = s.places.FindStarred(s.hoverPath)) {
+            std::wstring full = path::FriendlyPathText(starred->path);
+            if (!starred->badge.empty()) full += L"\n" + starred->badge;
+            return full;
         }
         if (const app::QuickAccessBadge* badge = s.places.FindQuickAccessBadge(s.hoverPath);
             badge && !badge->badge.empty()) {
@@ -3960,9 +4209,10 @@ std::wstring TooltipForHover(AppState& s) {
             const auto& entry = tab->EntryAt(s.hoverControlIndex);
             std::wstring tooltip = entry.name;
             if (!entry.change_type_text.empty()) {
-                tooltip += L" · " + entry.change_type_text + L" · " + entry.full_path;
+                tooltip += L" · " + entry.change_type_text + L" · " + path::FriendlyPathText(entry.full_path);
                 if (!entry.change_old_path.empty() && entry.change_old_path != entry.full_path)
-                    tooltip += L" (" + entry.change_old_path + L" → " + entry.full_path + L")";
+                    tooltip += L" (" + path::FriendlyPathText(entry.change_old_path) +
+                        L" → " + path::FriendlyPathText(entry.full_path) + L")";
                 return tooltip;
             }
             std::wstring full = entry.full_path;
@@ -4032,7 +4282,7 @@ std::wstring TooltipForHover(AppState& s) {
     case R::TrayShelf: return s.hoverLabel;  // the shelf hit test carries each control's tip
     case R::StagedBadge: return text(I::TrayStagedTip);
     case R::TrayDest: {
-        const bool gone = GetFileAttributesW(s.hoverPath.c_str()) == INVALID_FILE_ATTRIBUTES;
+        const bool gone = TrayDestinationMissing(s, s.hoverPath);
         return s.hoverPath + L"\n" + text(gone ? I::TrayDestMissing : I::HintTrayDest);
     }
     case R::TrayCard: {
@@ -4207,8 +4457,7 @@ void QueueVisibleTagDiscovery(AppState& s) {
         for (const auto& path : paths) {
             TagAdsDiscovery discovery;
             discovery.path = path;
-            discovery.records = app::ReadTagAdsV2(path);
-            if (discovery.records.empty()) discovery.legacy_names = app::ReadTagAds(path);
+            discovery.records = app::ReadTagAdsV2(path, &discovery.legacy_names);
             discoveries->push_back(std::move(discovery));
         }
         if (notify && PostMessageW(notify, WM_TAG_ADS_DISCOVERED, 0,

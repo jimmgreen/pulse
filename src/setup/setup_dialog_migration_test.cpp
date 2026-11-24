@@ -2,6 +2,7 @@
 #include "setup_transaction.h"
 #include "setup_file_locks.h"
 #include "setup_common.h"
+#include "../common/dialog_auto_ownership.h"
 #include <filesystem>
 #include <algorithm>
 #include <iostream>
@@ -185,6 +186,62 @@ int main(int argc, char** argv) {
         status.error=ERROR_ACCESS_DENIED;
         Check(DisableOwnedDialogRegistration(app,status,disable)==ERROR_ACCESS_DENIED && calls==1,
             "uninstall inspection error blocks deletion instead of assuming registration is absent");
+
+        // Exercise RestoreDialogRegistrationsForUninstall with injected state (zero native registry mutations).
+        std::array<UninstallDialogConfigState, 2> cfgs{};
+        std::array<std::array<UninstallDialogClsidState, 2>, 2> clsids{};
+        bool deny_clear = false;
+        UninstallDialogRestoreApi restore_api{
+            [&](Architecture arch, size_t idx, UninstallDialogClsidState& out) -> DWORD {
+                out = clsids[Index(arch)][idx];
+                return ERROR_SUCCESS;
+            },
+            [&](Architecture arch, size_t idx, bool /*force_tree*/) -> DWORD {
+                if (deny_clear) return ERROR_ACCESS_DENIED;
+                clsids[Index(arch)][idx] = {};
+                return ERROR_SUCCESS;
+            },
+            [&](Architecture arch, UninstallDialogConfigState& out) -> DWORD {
+                out = cfgs[Index(arch)];
+                return ERROR_SUCCESS;
+            },
+            [&](Architecture arch, bool clear_dll) -> DWORD {
+                if (clear_dll) { cfgs[Index(arch)].dll_path.clear(); cfgs[Index(arch)].dll_corrupt = false; }
+                return ERROR_SUCCESS;
+            },
+        };
+        const auto other_hash = app + L"\\DialogBridge\\" + std::wstring(64, L'b') + L"\\PulseDialogAuto64.dll";
+
+        // 1) Corrupted DllPath (error 13) + mismatched owned hash in InprocServer32:
+        cfgs[0] = {true, {}, true};
+        clsids[0][0] = {true, L"Pulse.DialogAuto.v1", false, true, other_hash, false};
+        Check(RestoreDialogRegistrationsForUninstall(app, restore_api) == ERROR_SUCCESS &&
+            !clsids[0][0].present && !cfgs[0].dll_corrupt,
+            "uninstall restores dialogs despite corrupted DllPath (error 13) and hash mismatch");
+
+        // 2) Stale owned DllPath in DialogAuto while a third-party app owns the CLSID:
+        cfgs[0] = {true, old_version, false};
+        clsids[0][1] = {true, {}, false, true, L"C:\\ThirdParty\\DialogHook.dll", false};
+        Check(RestoreDialogRegistrationsForUninstall(app, restore_api) == ERROR_SUCCESS &&
+            clsids[0][1].present && clsids[0][1].inproc_dll == L"C:\\ThirdParty\\DialogHook.dll" &&
+            cfgs[0].dll_path.empty(),
+            "uninstall succeeds when Pulse is disabled and preserves third-party CLSID byte-for-byte");
+
+        // 3) Foreign Pulse installation owns both DialogAuto and CLSID:
+        const auto foreign_dll = L"D:\\OtherPulse\\DialogBridge\\" + std::wstring(64, L'c') + L"\\PulseDialogAuto64.dll";
+        cfgs[0] = {true, foreign_dll, false};
+        clsids[0][0] = {true, L"Pulse.DialogAuto.v1", false, true, foreign_dll, false};
+        Check(RestoreDialogRegistrationsForUninstall(app, restore_api) == ERROR_SUCCESS &&
+            clsids[0][0].present && clsids[0][0].inproc_dll == foreign_dll && cfgs[0].dll_path == foreign_dll,
+            "uninstall preserves another Pulse copy's dialog registration");
+
+        // 4) Access denied removing an owned CLSID fails closed so installation files are kept:
+        cfgs[0] = {true, old_version, false};
+        clsids[0][0] = {true, L"Pulse.DialogAuto.v1", false, true, old_version, false};
+        deny_clear = true;
+        Check(RestoreDialogRegistrationsForUninstall(app, restore_api) == ERROR_ACCESS_DENIED &&
+            clsids[0][0].inproc_dll == old_version,
+            "uninstall fails closed when owned CLSID removal is denied");
     }
     {
         Fixture f(99);
@@ -282,6 +339,54 @@ int main(int argc, char** argv) {
         }
         Check(Read(f.root + L"\\DialogBridge\\personal.txt") == "user", "unregistered user file preserved");
         Check(GetFileAttributesW((f.root + L"\\.pulse-setup").c_str()) == INVALID_FILE_ATTRIBUTES, "transaction evidence cleaned only after completion");
+    }
+    {
+        const std::wstring app = L"C:\\IsolatedPulse";
+        Check(IsOwnedDialogDll(app, app + L"\\DialogBridge\\x86\\PulseDialogAuto32.dll", Architecture::X86),
+            "owned helper recognizes DialogBridge x86 layout");
+        Check(IsOwnedDialogDll(app, app + L"\\DialogBridge\\" + std::wstring(64, L'A') + L"\\PulseDialogAuto32.dll", Architecture::X86),
+            "owned helper accepts uppercase 64-hex digest directories");
+        Check(!IsOwnedDialogDll(app, L"C:\\OtherPulse\\DialogBridge\\x86\\PulseDialogAuto32.dll", Architecture::X86),
+            "owned helper rejects paths outside the installation root");
+        Check(!IsOwnedDialogDll(app, app + L"\\DialogBridge\\..\\PulseDialogAuto32.dll", Architecture::X86),
+            "owned helper rejects traversal segments");
+
+        const auto orphan_root = std::filesystem::absolute(L"bench_data").wstring() + L"\\orphan-ownership-" +
+            std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+        CreateDirectoryW(orphan_root.c_str(), nullptr);
+        const std::wstring existing_dir = orphan_root + L"\\existing";
+        CreateDirectoryW(existing_dir.c_str(), nullptr);
+        const std::wstring live_dll = existing_dir + L"\\PulseDialogAuto32.dll";
+        Write(live_dll, "live");
+
+        const std::wstring missing_dir_dll = orphan_root + L"\\missing-dir\\PulseDialogAuto32.dll";
+        const std::wstring missing_leaf_dll = existing_dir + L"\\missing-subdir\\PulseDialogAuto32.dll";
+        const std::wstring missing_in_existing_dir = orphan_root + L"\\PulseDialogAuto32.dll";
+
+        Check(pulse::dialog_auto::IsOrphanedMissingPulseDialogDll(Architecture::X86, {true, false, 0, missing_dir_dll}),
+            "active consistent registration with missing directory on fixed drive is reclaimed");
+        Check(pulse::dialog_auto::IsOrphanedMissingPulseDialogDll(Architecture::X86, {true, false, 0, missing_leaf_dll}),
+            "active consistent registration with missing nested directory is reclaimed");
+        Check(pulse::dialog_auto::IsOrphanedMissingPulseDialogDll(Architecture::X86, {true, false, 0, missing_in_existing_dir}),
+            "active consistent registration with missing leaf DLL in existing directory is reclaimed");
+        Check(!pulse::dialog_auto::IsOrphanedMissingPulseDialogDll(Architecture::X86, {true, false, 0, live_dll}),
+            "active registration with live DLL on disk is never treated as orphaned");
+        Check(!pulse::dialog_auto::IsOrphanedMissingPulseDialogDll(Architecture::X86, {false, false, 0, missing_dir_dll}),
+            "disabled registration with missing directory is not reclaimed");
+        Check(!pulse::dialog_auto::IsOrphanedMissingPulseDialogDll(Architecture::X86, {true, true, 0, missing_dir_dll}),
+            "conflicting registration with missing directory fails closed");
+        Check(!pulse::dialog_auto::IsOrphanedMissingPulseDialogDll(Architecture::X86, {true, false, ERROR_ACCESS_DENIED, missing_dir_dll}),
+            "registration inspect error fails closed");
+        Check(!pulse::dialog_auto::IsOrphanedMissingPulseDialogDll(Architecture::X86, {true, false, 0, orphan_root + L"\\missing-dir\\PulseDialogAuto64.dll"}),
+            "mismatched architecture DLL filename fails closed");
+        Check(!pulse::dialog_auto::IsOrphanedMissingPulseDialogDll(Architecture::X86, {true, false, 0, orphan_root + L"\\..\\missing\\PulseDialogAuto32.dll"}),
+            "noncanonical traversal path fails closed");
+        Check(!pulse::dialog_auto::IsOrphanedMissingPulseDialogDll(Architecture::X86, {true, false, 0, L"\\\\server\\share\\PulseDialogAuto32.dll"}),
+            "UNC path is never treated as local reclaimed orphan");
+
+        DeleteFileW(live_dll.c_str());
+        RemoveDirectoryW(existing_dir.c_str());
+        RemoveDirectoryW(orphan_root.c_str());
     }
     std::cout << checks << " checks, " << failures << " failures\n";
     return failures ? 1 : 0;

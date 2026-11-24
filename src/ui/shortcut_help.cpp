@@ -76,6 +76,7 @@ std::vector<HelpGroup> HelpGroups() {
         {Id::HelpGroupTabs, {
             {Id::TooltipNewTab, L"Ctrl T", {K::NewTab}},
             {Id::TabClose, L"Ctrl W", {K::CloseTab}},
+            {Id::TabCloseOthers, L"Ctrl Alt W", {K::CloseOtherTabs}},
             {Id::HelpSwitchTab, L"Ctrl Tab / Ctrl 1–9", {K::NextTab, K::TabNumber}},
             {Id::SplitLayout, L"Ctrl Alt 1 / 2 / 3 / 4", {K::Layout}},
             {Id::HelpViewMode, L"Ctrl Shift 1–8", {K::ViewMode}},

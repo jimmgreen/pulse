@@ -1,6 +1,7 @@
 #include "drive_verbs.h"
 #include "app_sidebar_refresh.h"
 #include "app_internal.h"
+#include "app_navigation.h"
 #include "sidebar_refresh_schedule.h"
 #include "device_registry.h"
 #include "../common/localization.h"
@@ -19,6 +20,15 @@ struct SidebarRefreshLoad {
     bool rebuilt = false;
     bool succeeded = false;
     bool retry_rebuild = false; // UI thread only
+};
+
+struct SidebarKnownFolderOpen {
+    app::Tab* origin = nullptr;
+    uint64_t origin_generation = 0;
+    int builtin = -1;
+    SidebarFolderOpenMode mode = SidebarFolderOpenMode::Current;
+    std::wstring path;
+    std::atomic<bool> ready{false};
 };
 
 namespace {
@@ -47,6 +57,7 @@ bool SameEntries(const std::vector<app::SidebarEntry>& a, const std::vector<app:
             !SameColor(x.color, y.color) || !SameColor(x.tag_dot, y.tag_dot) ||
             x.danger != y.danger || x.is_tag != y.is_tag || x.show_count != y.show_count ||
             x.count != y.count || x.path != y.path || x.is_drive != y.is_drive ||
+            x.drive_type != y.drive_type || x.drive_locked != y.drive_locked ||
             std::abs(x.used_ratio - y.used_ratio) > kUsedRatioStep || x.total_bytes != y.total_bytes ||
             x.expandable != y.expandable ||
             x.builtin != y.builtin) {
@@ -84,6 +95,11 @@ void StartPending(AppState& state) {
                 }
             } else {
                 result.drives = std::move(drives);
+                // No cloud, network-location or device enumeration on routine
+                // refreshes, but don't leave the built-in destinations frozen.
+                SidebarComScope com;
+                if (SUCCEEDED(com.result) || com.result == RPC_E_CHANGED_MODE)
+                    result.quick_access = app::BuildBuiltinQuickAccess(&recycle);
                 app::RefreshSidebarDriveCapacity(result.drives);
                 succeeded = true;
             }
@@ -91,9 +107,14 @@ void StartPending(AppState& state) {
             // Publish completion even on failure: WorkerPool's outer catch
             // otherwise leaves the sidebar scheduler permanently busy.
         }
-        if (succeeded)
+        if (succeeded && rebuild)
             for (const auto& drive : result.drives)
-                if (drive.is_drive) app::RefreshDriveEjectable(drive.path, static_cast<uint8_t>(GetDriveTypeW(drive.path.c_str())));
+                if (drive.is_drive) {
+                    const uint8_t type = drive.drive_type
+                        ? drive.drive_type
+                        : static_cast<uint8_t>(GetDriveTypeW(drive.path.c_str()));
+                    app::RefreshDriveEjectable(drive.path, type);
+                }
         if (load->cancelled) return;
         std::lock_guard lock(load->mutex);
         load->result = std::move(result);
@@ -111,7 +132,47 @@ void RequestSidebarRefresh(AppState& state, bool rebuild) {
     StartPending(state);
 }
 
+bool OpenSidebarKnownFolder(AppState& state, int builtin, SidebarFolderOpenMode mode) {
+    if (!app::IsBuiltinQuickAccessFolder(builtin)) return false;
+    auto request = std::make_shared<SidebarKnownFolderOpen>();
+    request->origin = ActiveTab(state);
+    if (!request->origin) return true;
+    request->origin_generation = request->origin->view_generation;
+    request->builtin = builtin;
+    request->mode = mode;
+    state.sidebarKnownFolderOpen = request;
+    if (!state.worker.EnqueueIo([request, hwnd = state.hwnd] {
+        try {
+            SidebarComScope com;
+            if (SUCCEEDED(com.result) || com.result == RPC_E_CHANGED_MODE)
+                request->path = app::ResolveBuiltinQuickAccessFolder(request->builtin);
+        } catch (...) {
+        }
+        request->ready = true;
+        PostMessageW(hwnd, WM_UI_KICK, 0, 0);
+    })) state.sidebarKnownFolderOpen.reset();
+    return true;
+}
+
+static void TickSidebarKnownFolderOpen(AppState& state) {
+    if (!state.sidebarKnownFolderOpen || !state.sidebarKnownFolderOpen->ready) return;
+    const auto request = std::exchange(state.sidebarKnownFolderOpen, {});
+    const auto* tab = ActiveTab(state);
+    if (!tab || tab != request->origin || tab->view_generation != request->origin_generation) return;
+    if (request->path.empty()) return; // No automatic navigation to the cached old location.
+    const auto entry = std::find_if(state.sidebar.quick_access.begin(), state.sidebar.quick_access.end(),
+        [&](const app::SidebarEntry& row) { return row.builtin == request->builtin; });
+    if (entry == state.sidebar.quick_access.end() || entry->path != request->path)
+        RequestSidebarRefresh(state, true);
+    switch (request->mode) {
+    case SidebarFolderOpenMode::Current: NavigateTo(state, request->path); break;
+    case SidebarFolderOpenMode::NewTab: OpenFolderTab(state, request->path); break;
+    case SidebarFolderOpenMode::BackgroundTab: NewBackgroundTab(state, request->path); break;
+    }
+}
+
 bool TickSidebarRefresh(AppState& state, ULONGLONG now) {
+    TickSidebarKnownFolderOpen(state);
     const auto load = state.sidebarRefresh;
     if (!load || load->cancelled) return false;
     app::SidebarModel result;
@@ -143,9 +204,16 @@ bool TickSidebarRefresh(AppState& state, ULONGLONG now) {
                 SyncSavedSearchSidebar(state);
                 ApplyRecycleOccupancy(state);
                 applied = true;
-            } else if (!SameEntries(state.sidebar.drives, result.drives)) {
-                state.sidebar.drives = std::move(result.drives);
-                applied = true;
+            } else {
+                if (!result.quick_access.empty() && !SameEntries(state.sidebar.quick_access, result.quick_access)) {
+                    state.sidebar.quick_access = std::move(result.quick_access);
+                    ApplyRecycleOccupancy(state);
+                    applied = true;
+                }
+                if (!SameEntries(state.sidebar.drives, result.drives)) {
+                    state.sidebar.drives = std::move(result.drives);
+                    applied = true;
+                }
             }
         }
     }

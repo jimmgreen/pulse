@@ -22,7 +22,13 @@ int wmain() {
         reveal.deadline = now + 10000;
         reveal.path = L"C:\\fixture\\folder";
         reveal.reveal = true;
-        check(Coordinator::EncodeOpenRequest(reveal).empty(), "internal reveal cannot silently lose intent on v2 wire");
+        const auto reveal_bytes = Coordinator::EncodeOpenRequest(reveal);
+        COPYDATASTRUCT reveal_data{Coordinator::OpenRequestMessageId(),
+            static_cast<DWORD>(reveal_bytes.size()), const_cast<unsigned char*>(reveal_bytes.data())};
+        Coordinator::OpenRequest decoded_reveal;
+        check(Coordinator::DecodeOpenRequest(&reveal_data, decoded_reveal) &&
+            decoded_reveal.reveal && decoded_reveal.wire_reveal && decoded_reveal.path == reveal.path,
+            "explicit v3 wire preserves reveal intent rather than silently encoding a v2 open");
         check(reveal_queue.SubmitOpenRequest(reveal, now, host, WM_APP + 125) == Coordinator::OpenSubmission::Accepted,
             "folder reveal enters owned queue");
         auto open_same_id = reveal;

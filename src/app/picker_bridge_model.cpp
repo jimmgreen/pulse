@@ -1,4 +1,7 @@
 #include "picker_bridge_model.h"
+#include "../common/picker_save_filter.h"
+#include "../common/picker_open_filter.h"
+#include "../ui/file_save_model.h"
 
 namespace pulse::app {
 namespace {
@@ -58,22 +61,26 @@ PickerBridgePreparation PreparePickerBridge(const wire::Message& request) {
         wire::LocalSaveAccessV1 | wire::DialogLabels | wire::CallerWindow;
     if ((body->required_capabilities & ~supported) ||
         (body->operation == wire::Operation::PickFolder &&
-            (!body->filename.empty() || (body->required_capabilities & (wire::MultiSelect | wire::Filters)))))
+            ((body->required_capabilities & wire::Filters) ||
+             body->filename.find_first_of(u"\\/:*?\"<>|") != body->filename.npos)))
         return Terminal(request, wire::Status::Unsupported, wire::ErrorSource::Win32, ERROR_NOT_SUPPORTED);
+    const bool local_save = (body->options & wire::ValidateLocalSaveAccessV1) != 0;
     if (body->operation == wire::Operation::SaveFile) {
         const auto& extension = body->default_extension;
         const auto& filename = body->filename;
         // Save UI currently always asks before overwrite, rejects read-only files,
         // and accepts a single leaf name. Do not claim unsupported native options.
         if (!(body->options & wire::OverwritePrompt) || (body->required_capabilities & wire::MultiSelect) ||
-            (!extension.empty() && (extension.front() == u'.' || extension.back() == u'.' ||
+            (!local_save && ((!extension.empty() && (extension.front() == u'.' || extension.back() == u'.' ||
                 extension.find_first_of(u"<>:\"/\\|?*; \t\r\n") != extension.npos)) ||
             (!filename.empty() && (filename.back() == u'.' || filename.back() == u' ' ||
-                filename.find_first_of(u"<>:\"/\\|?*") != filename.npos)))
+                filename.find_first_of(u"<>:\"/\\|?*") != filename.npos)))))
             return Terminal(request, wire::Status::Unsupported, wire::ErrorSource::Win32, ERROR_NOT_SUPPORTED);
     }
     for (const auto& filter : body->filters) {
-        if (!SupportedPattern(filter.pattern))
+        if (!(body->operation == wire::Operation::OpenFiles && (body->options & wire::AdvisoryFileFilters)
+                ? picker_filter::OpenPattern(std::u16string_view(filter.pattern)) : local_save && (body->options & wire::SaveNativeDefaults)
+                ? picker_filter::ParseSaveMask(std::u16string_view(filter.pattern)).valid : SupportedPattern(filter.pattern)))
             return Terminal(request, wire::Status::Unsupported, wire::ErrorSource::Win32, ERROR_NOT_SUPPORTED);
     }
     ui::FolderPickerSpec spec;
@@ -91,7 +98,7 @@ PickerBridgePreparation PreparePickerBridge(const wire::Message& request) {
     spec.allow_multiselect = (body->options & wire::AllowMultiSelect) != 0;
     // Local save: the same spec the in-process provider builds from its V2
     // save options (picker_ui_bootstrap_v2.cpp), so both paths validate alike.
-    if (body->options & wire::ValidateLocalSaveAccessV1) {
+    if (local_save) {
         spec.validate_local_save_access_v1 = true;
         spec.skip_access_validation = (body->options & wire::SaveSkipAccessValidation) != 0;
         spec.native_save_defaults = (body->options & wire::SaveNativeDefaults) != 0;
@@ -106,6 +113,20 @@ PickerBridgePreparation PreparePickerBridge(const wire::Message& request) {
     spec.ok_button_label = Wide(body->ok_button_label);
     spec.file_name_label = Wide(body->file_name_label);
     for (const auto& filter : body->filters) spec.filters.push_back({Wide(filter.label), Wide(filter.pattern)});
+    if (local_save) {
+        ui::SaveTargetRequest draft;
+        draft.directory = spec.initial_path;
+        draft.filename = spec.filename;
+        draft.filters = spec.filters;
+        draft.filter_index = spec.filter_index;
+        draft.default_extension = spec.default_extension;
+        draft.native_save_defaults = spec.native_save_defaults;
+        draft.no_test_file_create = spec.no_test_file_create;
+        draft.require_existing_save_parent = spec.require_existing_save_parent;
+        auto plan = ui::PrepareLocalSaveDraft(draft);
+        if (!plan) return Terminal(request, wire::Status::Unsupported, wire::ErrorSource::Win32, ERROR_NOT_SUPPORTED);
+        spec.initial_path = std::move(plan.directory);
+    }
     return spec;
 }
 

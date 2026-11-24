@@ -1,4 +1,8 @@
 #include "admin_auto_attach.h"
+#include "admin_auto_rebind.h"
+#include "admin_session_prune.h"
+#include "admin_version_retry.h"
+#include "window_show_watch.h"
 #include "../common/dialog_admin_trust.h"
 #include "../common/dialog_auto_binding.h"
 #include "../common/dialog_auto_registration.h"
@@ -83,7 +87,9 @@ DWORD StatusWrite(const fs::path& root,const HelperStatusV1& status){
 struct TargetModule {uintptr_t base=0;DWORD size=0;std::wstring path;};
 DWORD Modules(DWORD pid,std::vector<TargetModule>& result){
     result.clear();Handle snapshot;
-    for(unsigned retry=0;retry!=3;++retry){snapshot=Handle(CreateToolhelp32Snapshot(TH32CS_SNAPMODULE|TH32CS_SNAPMODULE32,pid));if(snapshot)break;if(GetLastError()!=ERROR_BAD_LENGTH)return Last();}
+    // ERROR_BAD_LENGTH means the target was loading or unloading modules while the
+    // snapshot ran (YJK at startup); back off briefly instead of failing the target.
+    for(unsigned retry=0;retry!=20;++retry){snapshot=Handle(CreateToolhelp32Snapshot(TH32CS_SNAPMODULE|TH32CS_SNAPMODULE32,pid));if(snapshot)break;if(GetLastError()!=ERROR_BAD_LENGTH)return Last();Sleep(retry<5?5:25);}
     if(!snapshot)return Last();MODULEENTRY32W entry{};entry.dwSize=sizeof(entry);
     if(!Module32FirstW(snapshot.value,&entry))return Last();
     do{if(result.size()>=2048)return ERROR_TOO_MANY_NAMES;result.push_back({reinterpret_cast<uintptr_t>(entry.modBaseAddr),entry.modBaseSize,entry.szExePath});}while(Module32NextW(snapshot.value,&entry));
@@ -102,7 +108,7 @@ struct Work {
     DWORD pid=0;FILETIME created{};GUID nonce{};
     fs::path control;
     void* remote=nullptr;ULONGLONG deadline=0;
-    enum class Phase {Load,Attach,Ready,Done} phase=Phase::Done;
+    enum class Phase {Probe,Load,Attach,Ready,Done} phase=Phase::Done;
     bool timeout_logged=false;
     // A live remote thread may still own this buffer. Never free underneath it.
     ~Work(){if(remote&&(!thread||WaitForSingleObject(thread.value,0)==WAIT_OBJECT_0))VirtualFreeEx(process.value,remote,0,MEM_RELEASE);}
@@ -115,7 +121,7 @@ DWORD StartRemote(Work& work,uintptr_t address,const void* data,size_t size){
     if(!work.thread){const DWORD error=Last();VirtualFreeEx(work.process.value,work.remote,0,MEM_RELEASE);work.remote=nullptr;return error;}
     work.deadline=GetTickCount64()+10000;work.timeout_logged=false;return 0;
 }
-void Disable(const fs::path& directory){const BYTE value=1;(void)WriteNew(directory/cfg::kDisableFile,&value,1);}
+void Disable(const fs::path& directory){if(directory.empty())return;const BYTE value=1;(void)WriteNew(directory/cfg::kDisableFile,&value,1);}
 using Key=std::pair<DWORD,uint64_t>;
 Key Identity(DWORD pid,FILETIME time){return {pid,(static_cast<uint64_t>(time.dwHighDateTime)<<32)|time.dwLowDateTime};}
 struct Engine {
@@ -124,11 +130,13 @@ struct Engine {
     Module module;
     fs::path control_root;
     std::wstring runtime,system_root;
-    uintptr_t attach_offset=0;
+    uintptr_t attach_offset=0,diagnose_offset=0; // diagnose: 0 when the runtime predates the export
     uint64_t generation=0;
     std::vector<std::unique_ptr<Work>> active;
     std::vector<fs::path> sessions;
     std::set<Key> attempted;
+    struct Retry { ULONGLONG next=0; unsigned count=0, unavailable=0; bool authorized=false; };
+    std::map<Key,Retry> retries;
     std::map<DWORD,std::pair<FILETIME,std::wstring>> identities;
     explicit Engine(const Options& input):options(input){}
     void Log(const char* stage,DWORD pid=0,DWORD error=0,DWORD entries=0,FILETIME created={})const noexcept {try{if(options.log){Event event{stage,pid,error,entries,created,0,{}};const auto found=identities.find(pid);if(found!=identities.end()){event.created=found->second.first;event.app_basename=pulse::shell_bridge::application_identity::ExecutableBasename(found->second.second);event.app_instance_id=pulse::shell_bridge::application_identity::ImageHash(found->second.second);}options.log(event);}}catch(...) {}}
@@ -137,9 +145,14 @@ struct Engine {
     DWORD Begin(DWORD pid){
         Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,pid));if(!process)return Last();
         FILETIME created{},exit{},kernel{},user{};if(!GetProcessTimes(process.value,&created,&exit,&kernel,&user))return Last();
-        const auto key=Identity(pid,created);if(attempted.contains(key))return ERROR_ALREADY_EXISTS;
+        const auto key=Identity(pid,created);
+        if(std::any_of(active.begin(),active.end(),[&](const auto& w){return w->pid==pid&&CompareFileTime(&w->created,&created)==0;}))return ERROR_ALREADY_EXISTS;
+        auto retry=retries.find(key);
+        if(attempted.contains(key)&&(retry==retries.end()||GetTickCount64()<retry->second.next))return ERROR_ALREADY_EXISTS;
+        if(retry!=retries.end()&&retry->second.count>=kMaxAutoRebinds){if(retry->second.next!=MAXULONGLONG)Log("rebind_limit_native_restart_target",pid,ERROR_RETRY);retry->second.next=MAXULONGLONG;return ERROR_ALREADY_EXISTS;}
+        if(retry!=retries.end())retry->second.next=GetTickCount64()+kAutoRebindCooldownMs;
         // Fixed upper bound prevents unbounded memory growth on a hostile GUI churn.
-        if(attempted.size()>=8192)return ERROR_TOO_MANY_NAMES;attempted.insert(key);
+        if(!attempted.contains(key)&&attempted.size()>=8192)return ERROR_TOO_MANY_NAMES;attempted.insert(key);
         Log("discovered",pid,0,0,created);
         GUID nonce{};if(FAILED(CoCreateGuid(&nonce)))return ERROR_GEN_FAILURE;
         binding::BindingV1 bound{};DWORD error=binding::CaptureProcessWithHelper(process.value,GetCurrentProcess(),generation,nonce,bound);
@@ -156,10 +169,23 @@ struct Engine {
         FILETIME reopened{};if(!GetProcessTimes(privileged.value,&reopened,&exit,&kernel,&user)||CompareFileTime(&reopened,&created)!=0){Log("target_reused",pid,ERROR_INVALID_DATA);return ERROR_INVALID_DATA;}
         process=std::move(privileged);
         std::vector<TargetModule> modules;if((error=Modules(pid,modules)))return error;
-        for(const auto& item:modules){const auto name=fs::path(item.path).filename().wstring();if(name.starts_with(L"PulseFileDialogRuntime")||name.starts_with(L"PulseFileDialogAutoRuntime")){Log("existing_runtime_native",pid);return ERROR_ALREADY_INITIALIZED;}}
+        uintptr_t existing=0;
+        for(const auto& item:modules){const auto name=fs::path(item.path).filename().wstring();if(name.starts_with(L"PulseFileDialogRuntime")||name.starts_with(L"PulseFileDialogAutoRuntime")){
+            if(!CanReuseAutoRuntime(Equal(item.path,runtime),existing!=0,attach_offset,diagnose_offset,item.size)){Log("existing_runtime_native",pid);retries.erase(key);return ERROR_ALREADY_INITIALIZED;}
+            existing=item.base;
+        }}
+        if(retry!=retries.end()&&!existing){Log("rebind_runtime_missing_native",pid);retries.erase(key);return ERROR_MOD_NOT_FOUND;}
         if((error=dialog_bundle::RecheckDirectory(bundle)))return error;
         if(!Enabled()||Stopped())return ERROR_CANCELLED;
         auto work=std::make_unique<Work>();work->process=std::move(process);work->pid=pid;work->created=created;work->nonce=nonce;
+        if(existing&&(retry==retries.end()||!retry->second.authorized)){
+            cfg::PulseRuntimeAutoDiagnosticV1 diagnostic{};
+            auto& state=retries[key];state.next=GetTickCount64()+kAutoRebindCooldownMs;
+            if((error=StartRemote(*work,existing+diagnose_offset,&diagnostic,sizeof(diagnostic)))){retries.erase(key);Log("rebind_probe_failed_native",pid,error);return error;}
+            work->phase=Work::Phase::Probe;active.push_back(std::move(work));return 0;
+        }
+        if(existing){retry->second.authorized=false;++retry->second.count;}
+        if(sessions.size()>=8192){retries.erase(key);Log("session_limit_native_restart_target",pid,ERROR_TOO_MANY_NAMES);return ERROR_TOO_MANY_NAMES;}
         wchar_t nonce_text[40]{};StringFromGUID2(nonce,nonce_text,40);work->control=control_root/nonce_text;
         if(!CreateDirectoryW(work->control.c_str(),nullptr))return Last();
         if((error=dialog_admin::VerifyProtectedPath(work->control.wstring(),true)))return error;
@@ -167,9 +193,45 @@ struct Engine {
         wcscpy_s(session->nonce,nonce_text);wcscpy_s(session->host_path,bundle.Host().c_str());wcscpy_s(session->target_path,image.c_str());wcscpy_s(session->control_path,work->control.c_str());wcscpy_s(session->launcher_path,bundle.Launcher().c_str());
         if((error=WriteNew(work->control/cfg::kSessionFile,session.get(),sizeof(*session)))||(error=WriteNew(work->control/L"auto-binding.bin",&bound,sizeof(bound)))){Disable(work->control);return error;}
         sessions.push_back(work->control);Log("binding_published",pid,0,0,created);
+        if(!Enabled()||Stopped()){Disable(work->control);return ERROR_CANCELLED;}
+        if(existing){
+            auto request=std::make_unique<cfg::PulseRuntimeAutoStartV1>();StringFromGUID2(work->nonce,request->nonce,40);wcscpy_s(request->host,bundle.Host().c_str());wcscpy_s(request->control,work->control.c_str());
+            if((error=StartRemote(*work,existing+attach_offset,request.get(),sizeof(*request)))){Disable(work->control);return error;}
+            work->phase=Work::Phase::Attach;active.push_back(std::move(work));Log("rebind_queued",pid);return 0;
+        }
         uintptr_t load=0;if((error=RemoteAddress(pid,reinterpret_cast<const void*>(&LoadLibraryW),load))){Disable(work->control);return error;}
         if((error=StartRemote(*work,load,runtime.c_str(),(runtime.size()+1)*sizeof(wchar_t)))){Disable(work->control);return error;}
-        work->phase=Work::Phase::Load;active.push_back(std::move(work));Log("load_queued",pid);return 0;
+        retries[key].next=GetTickCount64()+kAutoRebindCooldownMs;work->phase=Work::Phase::Load;active.push_back(std::move(work));Log("load_queued",pid);return 0;
+    }
+    // Ready never came: ask the runtime in the target why (initialization result and
+    // import coverage). Bounded wait; a stuck thread keeps its buffer, as StartRemote.
+    void Diagnose(Work& work){
+        if(!diagnose_offset)return;
+        std::vector<TargetModule> modules;uintptr_t address=0;
+        if(!Modules(work.pid,modules))for(const auto& loaded:modules)if(Equal(loaded.path,runtime)&&diagnose_offset<loaded.size){address=loaded.base+diagnose_offset;break;}
+        if(!address){Log("runtime_status_unavailable",work.pid,ERROR_MOD_NOT_FOUND);return;}
+        cfg::PulseRuntimeAutoDiagnosticV1 value{};
+        void* remote=VirtualAllocEx(work.process.value,nullptr,sizeof(value),MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+        if(!remote){Log("runtime_status_unavailable",work.pid,Last());return;}
+        SIZE_T moved=0;
+        if(!WriteProcessMemory(work.process.value,remote,&value,sizeof(value),&moved)||moved!=sizeof(value)){
+            const DWORD error=Last();VirtualFreeEx(work.process.value,remote,0,MEM_RELEASE);Log("runtime_status_unavailable",work.pid,error);return;}
+        Handle thread(CreateRemoteThread(work.process.value,nullptr,0,reinterpret_cast<LPTHREAD_START_ROUTINE>(address),remote,0,nullptr));
+        if(!thread){const DWORD error=Last();VirtualFreeEx(work.process.value,remote,0,MEM_RELEASE);Log("runtime_status_unavailable",work.pid,error);return;}
+        if(WaitForSingleObject(thread.value,2000)!=WAIT_OBJECT_0){Log("runtime_status_unavailable",work.pid,ERROR_TIMEOUT);return;}
+        DWORD code=0;GetExitCodeThread(thread.value,&code);
+        const bool read=ReadProcessMemory(work.process.value,remote,&value,sizeof(value),&moved)&&moved==sizeof(value);
+        VirtualFreeEx(work.process.value,remote,0,MEM_RELEASE);
+        if(code||!read){Log("runtime_status_unavailable",work.pid,code?code:ERROR_PARTIAL_COPY);return;}
+        if(!options.log)return;
+        try{
+            Event event{"runtime_status",work.pid,static_cast<DWORD>(value.initialization),value.api_mask,work.created,0,{}};
+            if(const auto found=identities.find(work.pid);found!=identities.end()){
+                event.app_basename=pulse::shell_bridge::application_identity::ExecutableBasename(found->second.second);
+                event.app_instance_id=pulse::shell_bridge::application_identity::ImageHash(found->second.second);}
+            event.patched_slots=value.patched_slots;event.skipped_modules=value.skipped_modules;event.foreign_slots=value.foreign_slots;
+            options.log(event);
+        }catch(...){}
     }
     void Tick(){
         for(auto& pointer:active){auto& work=*pointer;if(work.phase==Work::Phase::Done)continue;
@@ -178,13 +240,29 @@ struct Engine {
                 if(!error){wchar_t nonce[40]{};StringFromGUID2(work.nonce,nonce,40);
                     const bool identity=ready.magic==cfg::kReadyMagic&&ready.version==cfg::kVersion&&ready.size==sizeof(ready)&&!ready.reserved&&ready.target_pid==work.pid&&ready.machine==kMachine&&CompareFileTime(&ready.target_created,&work.created)==0&&wcsncmp(ready.nonce,nonce,40)==0;
                     const bool accepted=identity&&ready.status==S_OK&&ready.installed_entries;
+                    if(accepted)retries.erase(Identity(work.pid,work.created));
                     Log(accepted?"ready":"ready_rejected",work.pid,accepted?0:ERROR_INVALID_DATA,ready.installed_entries,work.created);if(!accepted)Disable(work.control);work.phase=Work::Phase::Done;
-                }else if(error!=ERROR_FILE_NOT_FOUND||GetTickCount64()>work.deadline){Log("ready_failed",work.pid,error==ERROR_FILE_NOT_FOUND?ERROR_TIMEOUT:error);Disable(work.control);work.phase=Work::Phase::Done;}continue;}
+                }else if(error!=ERROR_FILE_NOT_FOUND||GetTickCount64()>work.deadline){if(error==ERROR_FILE_NOT_FOUND)Diagnose(work);Log("ready_failed",work.pid,error==ERROR_FILE_NOT_FOUND?ERROR_TIMEOUT:error);Disable(work.control);work.phase=Work::Phase::Done;}continue;}
             const DWORD waited=WaitForSingleObject(work.thread.value,0);
             if(waited==WAIT_TIMEOUT){if(GetTickCount64()>work.deadline&&!work.timeout_logged){work.timeout_logged=true;Disable(work.control);Log("remote_thread_timeout_retained",work.pid,ERROR_TIMEOUT);}continue;}
             if(waited!=WAIT_OBJECT_0){Disable(work.control);Log("remote_thread_wait_failed",work.pid,Last());work.phase=Work::Phase::Done;continue;}
-            DWORD result=0;GetExitCodeThread(work.thread.value,&result);work.thread=Handle();if(work.remote){VirtualFreeEx(work.process.value,work.remote,0,MEM_RELEASE);work.remote=nullptr;}
-            if(work.timeout_logged){work.phase=Work::Phase::Done;continue;}
+            DWORD result=0;GetExitCodeThread(work.thread.value,&result);
+            if(work.phase==Work::Phase::Probe){
+                cfg::PulseRuntimeAutoDiagnosticV1 diagnostic{};SIZE_T read=0;
+                const bool valid=!result&&!work.timeout_logged&&ReadProcessMemory(work.process.value,work.remote,&diagnostic,sizeof(diagnostic),&read)&&read==sizeof(diagnostic);
+                const auto key=Identity(work.pid,work.created);
+                if(valid&&CanAutoRebind(diagnostic)){auto& state=retries[key];state.authorized=true;state.unavailable=0;state.next=0;Log("rebind_probe_ready",work.pid);}
+                else if(!valid){retries.erase(key);Log("rebind_probe_failed_native",work.pid,result?result:ERROR_INVALID_DATA);}
+                else if(!ShouldContinueProbing(diagnostic)){retries.erase(key);}
+                else if(diagnostic.initialization!=S_OK&&diagnostic.initialization!=E_PENDING){
+                    // The explicit ready flag is published after restoration diagnostics.
+                    // Allow that publication race, but stop repeatedly probing a failed runtime.
+                    if(++retries[key].unavailable>=3){retries.erase(key);Log("rebind_unavailable_native_restart_target",work.pid,static_cast<DWORD>(diagnostic.initialization));}
+                }else retries[key].unavailable=0;
+                work.phase=Work::Phase::Done;
+            }
+            work.thread=Handle();if(work.remote){VirtualFreeEx(work.process.value,work.remote,0,MEM_RELEASE);work.remote=nullptr;}
+            if(work.timeout_logged||work.phase==Work::Phase::Done){work.phase=Work::Phase::Done;continue;}
             if(work.phase==Work::Phase::Attach){if(static_cast<HRESULT>(result)!=S_OK){Log("attach_rejected",work.pid,result);Disable(work.control);work.phase=Work::Phase::Done;}else{Log("attach_submitted",work.pid);work.phase=Work::Phase::Ready;work.deadline=GetTickCount64()+15000;}continue;}
             std::vector<TargetModule> modules;DWORD error=Modules(work.pid,modules);uintptr_t address=0;
             if(!error)for(const auto& loaded:modules)if(Equal(loaded.path,runtime)&&attach_offset<loaded.size){address=loaded.base+attach_offset;break;}
@@ -229,7 +307,11 @@ DWORD Run(const Options& options) noexcept {
         if(!options.probe_only){engine.module.value=LoadLibraryExW(engine.runtime.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);if(!engine.module.value)return Last();
         auto attach=GetProcAddress(engine.module.value,"PulseFileDialogRuntimeAutoAttach");if(!attach)return ERROR_PROC_NOT_FOUND;
         HMODULE owner=nullptr;if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,reinterpret_cast<LPCWSTR>(attach),&owner))return Last();Module export_owner{owner};if(owner!=engine.module.value)return ERROR_INVALID_DLL;
-        engine.attach_offset=reinterpret_cast<uintptr_t>(attach)-reinterpret_cast<uintptr_t>(engine.module.value);}
+        engine.attach_offset=reinterpret_cast<uintptr_t>(attach)-reinterpret_cast<uintptr_t>(engine.module.value);
+        if(auto diagnose=GetProcAddress(engine.module.value,"PulseFileDialogRuntimeAutoDiagnose")){
+            HMODULE diagnostic_owner=nullptr;if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,reinterpret_cast<LPCWSTR>(diagnose),&diagnostic_owner))return Last();Module diagnostic_keep{diagnostic_owner};if(diagnostic_owner!=engine.module.value)return ERROR_INVALID_DLL;
+            engine.diagnose_offset=reinterpret_cast<uintptr_t>(diagnose)-reinterpret_cast<uintptr_t>(engine.module.value);
+        }}
         Handle companion_process,companion_job;
 #if defined(_WIN64)
         if(!options.companion&&!options.probe_only){
@@ -248,19 +330,36 @@ DWORD Run(const Options& options) noexcept {
         HelperStatusV1 status{};status.pid=GetCurrentProcessId();status.created=self.target.created;status.session_id=self.target.session_id;status.machine=kMachine;status.generation=engine.generation;status.ready=options.probe_only?0u:1u;status.error=options.probe_only?ERROR_NOT_SUPPORTED:0u;
         if(!options.probe_only&&(error=StatusWrite(engine.control_root,status)))return error;
         engine.Log("helper_ready",status.pid,0,kMachine,status.created);
-        ULONGLONG next_scan=0,next_pointer_check=0;const ULONGLONG began=GetTickCount64();
+        ULONGLONG next_scan=0,next_pointer_check=0,next_prune=0;const ULONGLONG began=GetTickCount64();
+        // Each attached administrator program leaves a session directory (~260 KB);
+        // only the primary helper removes those whose target has exited.
+        const auto prune=[&]{
+            if(options.companion||options.probe_only||GetTickCount64()<next_prune)return;
+            next_prune=GetTickCount64()+kSessionPruneIntervalMs;
+            const auto pruned=PruneExitedSessions(engine.control_root.wstring(),kSessionPruneIdleMs);
+            if(pruned.removed||pruned.retained||pruned.limited)engine.Log("sessions_pruned",0,pruned.limited?ERROR_MORE_DATA:0,pruned.removed);
+        };
+        // Retired versions an install left to running programs are retried here, off the loop.
+        std::unique_ptr<VersionRetry> versions;
+        if(!options.companion&&!options.probe_only)versions=std::make_unique<VersionRetry>(options.installed_root,GetTickCount64(),[&](const char* stage,DWORD error,DWORD value){engine.Log(stage,0,error,value);});
         const auto pointer=fs::path(options.installed_root)/(kMachine==IMAGE_FILE_MACHINE_I386?L"dialog-x86-current.json":L"dialog-current.json");
         std::array<BYTE,32> pointer_hash{},observed_pointer{};if((error=FileHash(pointer.wstring(),pointer_hash)))return error;
+        // Administrator programs are checked as their windows appear; the sweep stays as the fallback.
+        WindowShowWatch watch;
+        if(watch.Start())engine.Log("window_watch_ready");else engine.Log("window_watch_unavailable",0,GetLastError());
         while(engine.Enabled()&&!engine.Stopped()){
             if(options.duration_ms&&GetTickCount64()-began>=options.duration_ms)break;
             if(GetTickCount64()>=next_pointer_check){next_pointer_check=GetTickCount64()+1000;if(FileHash(pointer.wstring(),observed_pointer)||observed_pointer!=pointer_hash){engine.Log("bundle_changed_exit");break;}}
             if(companion_process&&WaitForSingleObject(companion_process.value,0)==WAIT_OBJECT_0){DWORD code=0;GetExitCodeProcess(companion_process.value,&code);if(code!=ERROR_ALREADY_INITIALIZED){engine.Log("companion_exited",0,code);break;}companion_process=Handle();}
             engine.Tick();
+            prune();
+            if(versions)versions->Tick(GetTickCount64());
+            for(const auto& shown:watch.Take()){if(engine.active.size()>=4||engine.Stopped()||!engine.Enabled())break;const DWORD attached=engine.Begin(shown.pid);if(attached&&attached!=ERROR_ALREADY_EXISTS&&attached!=ERROR_ACCESS_DENIED)engine.Log("candidate_skipped",shown.pid,attached);}
             if(GetTickCount64()>=next_scan&&engine.active.size()<4){next_scan=GetTickCount64()+1000;std::set<DWORD> pids;
                 EnumWindows([](HWND hwnd,LPARAM raw)->BOOL {if(IsWindowVisible(hwnd)){DWORD pid=0;GetWindowThreadProcessId(hwnd,&pid);if(pid)reinterpret_cast<std::set<DWORD>*>(raw)->insert(pid);}return TRUE;},reinterpret_cast<LPARAM>(&pids));
                 for(DWORD pid:pids){if(pid==GetCurrentProcessId())continue;if(engine.active.size()>=4||engine.Stopped()||!engine.Enabled())break;const DWORD attached=engine.Begin(pid);if(attached&&attached!=ERROR_ALREADY_EXISTS&&attached!=ERROR_ACCESS_DENIED)engine.Log("candidate_skipped",pid,attached);}
             }
-            if(options.stop)WaitForSingleObject(options.stop,100);else Sleep(100);
+            watch.Wait(options.stop?&options.stop:nullptr,options.stop?1u:0u,100);
         }
         status.ready=0;status.error=ERROR_CANCELLED;if(!options.probe_only)(void)StatusWrite(engine.control_root,status);engine.Log("helper_stopping",status.pid);return 0;
     }catch(const std::bad_alloc&){return ERROR_NOT_ENOUGH_MEMORY;}catch(...){return ERROR_GEN_FAILURE;}

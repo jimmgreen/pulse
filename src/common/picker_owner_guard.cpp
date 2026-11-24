@@ -237,13 +237,206 @@ PickerRemoteOwnerValidation ValidateRemotePickerOwner(HWND window, HANDLE authen
     const auto policy = picker_owner_detail::ForeignIdentityPolicy(diagnostic.same_user, diagnostic.same_session,
         diagnostic.caller_integrity, diagnostic.owner_integrity);
     if (policy != PickerOwnerFailureStage::None) return fail(policy, ERROR_ACCESS_DENIED);
-    if ((showing || result.owner_pid != result.caller_pid) && IsWindowEnabled(window))
+    if (showing && IsWindowEnabled(window))
         return fail(PickerOwnerFailureStage::ForeignEnabled, ERROR_NOT_SUPPORTED);
     DWORD final_pid = 0;
     if (!IsWindow(window) || GetWindowThreadProcessId(window, &final_pid) != result.owner_thread || final_pid != result.owner_pid ||
         WaitForSingleObject(owner.Get(), 0) != WAIT_TIMEOUT || WaitForSingleObject(authenticated_parent, 0) != WAIT_TIMEOUT)
         return fail(PickerOwnerFailureStage::WindowIdentity, ERROR_INVALID_WINDOW_HANDLE);
     return result;
+}
+namespace {
+DWORD WaitOwnerHandles(DWORD count, const HANDLE* handles, DWORD timeout) {
+    const ULONGLONG start = GetTickCount64();
+    bool quit = false; int quit_code = 0;
+    for (;;) {
+        const ULONGLONG elapsed = GetTickCount64() - start;
+        const DWORD remaining = timeout == INFINITE ? INFINITE : elapsed >= timeout ? 0 : timeout - static_cast<DWORD>(elapsed);
+        const DWORD result = MsgWaitForMultipleObjectsEx(count, handles, remaining, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (result != WAIT_OBJECT_0 + count) {
+            if (quit) PostQuitMessage(quit_code);
+            return result;
+        }
+        MSG message{};
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (message.message == WM_QUIT) { quit = true; quit_code = static_cast<int>(message.wParam); }
+            else { TranslateMessage(&message); DispatchMessageW(&message); }
+        }
+    }
+}
+constexpr const wchar_t* LeaseProperty = L"Pulse.PickerClient.ForeignLease.v1";
+std::wstring LeaseEvent(DWORD pid) { return L"Local\\Pulse.PickerClient.ForeignLease.Release." + std::to_wstring(pid); }
+struct ForeignLease {
+    Handle process, release;
+    ~ForeignLease() { if (release) SetEvent(release.Get()); }
+    DWORD Start(HWND window, const wchar_t* executable) {
+        if (!executable || !*executable) return ERROR_NOT_SUPPORTED;
+        SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+        Handle ready(CreateEventW(&sa, TRUE, FALSE, nullptr));
+        release.Reset(CreateEventW(&sa, TRUE, FALSE, nullptr));
+        Handle parent;
+        HANDLE inherited_parent = nullptr;
+        if (!ready || !release || !DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(),
+            &inherited_parent, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, TRUE, 0)) return GetLastError();
+        parent.Reset(inherited_parent);
+        SIZE_T bytes = 0;
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
+        std::unique_ptr<BYTE[]> storage(new BYTE[bytes]);
+        auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.get());
+        if (!InitializeProcThreadAttributeList(attributes, 1, 0, &bytes)) return GetLastError();
+        struct Cleanup { LPPROC_THREAD_ATTRIBUTE_LIST p; ~Cleanup() { DeleteProcThreadAttributeList(p); } } cleanup{attributes};
+        HANDLE handles[]{ready.Get(), parent.Get(), release.Get()};
+        if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, sizeof(handles), nullptr, nullptr)) return GetLastError();
+        std::wstring command = L"\"" + std::wstring(executable) + L"\" --picker-owner-lease " +
+            std::to_wstring(reinterpret_cast<UINT_PTR>(window)) + L" " + std::to_wstring(reinterpret_cast<UINT_PTR>(parent.Get())) +
+            L" " + std::to_wstring(reinterpret_cast<UINT_PTR>(ready.Get())) + L" " + std::to_wstring(reinterpret_cast<UINT_PTR>(release.Get()));
+        STARTUPINFOEXW startup{}; startup.StartupInfo.cb = sizeof(startup); startup.lpAttributeList = attributes;
+        PROCESS_INFORMATION child{};
+        if (!CreateProcessW(executable, command.data(), nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
+            nullptr, nullptr, &startup.StartupInfo, &child)) return GetLastError();
+        process.Reset(child.hProcess); CloseHandle(child.hThread);
+        HANDLE wait[]{ready.Get(), process.Get()};
+        const DWORD status = WaitOwnerHandles(2, wait, 3000);
+        if (status != WAIT_OBJECT_0 || !release || IsWindowEnabled(window)) {
+            if (release) SetEvent(release.Get());
+            // The helper also observes the retained parent handle. A startup that
+            // misses this deadline must not later acquire a lease (ready timeout).
+            return ERROR_TIMEOUT;
+        }
+        return ERROR_SUCCESS;
+    }
+    bool Restore() {
+        if (!release) return false;
+        SetEvent(release.Get());
+        return WaitOwnerHandles(1, &process.value, 2000) == WAIT_OBJECT_0;
+    }
+};
+bool ReleaseForeignLease(HWND window, std::atomic<bool>& foreign_restored) {
+    const DWORD pid = static_cast<DWORD>(reinterpret_cast<UINT_PTR>(GetPropW(window, LeaseProperty)));
+    if (!pid) return false;
+    Handle process(OpenProcess(SYNCHRONIZE, FALSE, pid));
+    Handle release(OpenEventW(EVENT_MODIFY_STATE, FALSE, LeaseEvent(pid).c_str()));
+    if (!process || !release) return false;
+    // Mark before signaling the lease helper so a concurrent Alive() poll on
+    // another thread never misclassifies our own pre-hide EnableWindow(TRUE).
+    foreign_restored.store(true, std::memory_order_release);
+    SetEvent(release.Get());
+    return WaitOwnerHandles(1, &process.value, 2000) == WAIT_OBJECT_0 && IsWindowEnabled(window);
+}
+std::wstring PreHideEventName(const std::wstring& owner_key, bool done) {
+    return owner_key + (done ? L".PreHideDone" : L".PreHide");
+}
+std::wstring BuildOwnerKey(DWORD pid, FILETIME creation, HWND window) {
+    return L"Local\\Pulse.PickerClient.Owner." + std::to_wstring(pid) + L"." +
+        std::to_wstring(creation.dwHighDateTime) + L"." + std::to_wstring(creation.dwLowDateTime) + L"." +
+        std::to_wstring(reinterpret_cast<UINT_PTR>(window));
+}
+DWORD WaitHandlePumpingSentMessages(HANDLE handle, DWORD timeout_ms) noexcept {
+    const ULONGLONG start = GetTickCount64();
+    for (;;) {
+        const ULONGLONG elapsed = GetTickCount64() - start;
+        const DWORD remaining = elapsed >= timeout_ms ? 0u : timeout_ms - static_cast<DWORD>(elapsed);
+        // Pump only inter-thread sent messages (e.g. WM_ACTIVATE/WM_NCACTIVATE
+        // sent synchronously when the caller calls SetActiveWindow on an owner
+        // that owns our cross-process popup). Otherwise a plain WaitForSingleObject
+        // deadlocks the caller's CompletePreHideRestore until timeout!
+        const DWORD wait = MsgWaitForMultipleObjectsEx(1, &handle, remaining, QS_SENDMESSAGE, MWMO_INPUTAVAILABLE);
+        if (wait == WAIT_OBJECT_0) return WAIT_OBJECT_0;
+        if (wait == WAIT_OBJECT_0 + 1) {
+            MSG msg{};
+            PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+            if (WaitForSingleObject(handle, 0) == WAIT_OBJECT_0) return WAIT_OBJECT_0;
+            if (remaining == 0) return WAIT_TIMEOUT;
+            continue;
+        }
+        return wait;
+    }
+}
+bool RequestCallerPreHideRestore(HWND window, DWORD pid, FILETIME creation, std::atomic<bool>* foreign_restored = nullptr) noexcept {
+    if (!window || !pid) return false;
+    try {
+        const auto key = BuildOwnerKey(pid, creation, window);
+        Handle trigger(OpenEventW(EVENT_MODIFY_STATE, FALSE, PreHideEventName(key, false).c_str()));
+        Handle done(OpenEventW(SYNCHRONIZE, FALSE, PreHideEventName(key, true).c_str()));
+        if (!trigger || !done) return false;
+        // Mark before signaling the caller so neither a background Alive() poll
+        // nor a slow caller WM_ENABLE repaint (>250ms, e.g. Photoshop) can flip
+        // Alive() to false and discard an accepted Save/Open result.
+        if (foreign_restored) foreign_restored->store(true, std::memory_order_release);
+        SetEvent(trigger.Get());
+        const DWORD wait = WaitHandlePumpingSentMessages(done.Get(), 1000);
+        return wait == WAIT_OBJECT_0 || IsWindowEnabled(window) != FALSE;
+    } catch (...) {
+        return false;
+    }
+}
+bool DialogIsForeground(HWND dialog, HWND& foreground) noexcept {
+    foreground = GetForegroundWindow();
+    bool was_foreground = foreground == dialog || IsChild(dialog, foreground);
+    for (HWND current = foreground; !was_foreground && current; current = GetWindow(current, GW_OWNER)) {
+        was_foreground = current == dialog;
+    }
+    return was_foreground;
+}
+}
+// A separate process survives a crashing broker/remote host. Its main thread
+// watches cancellation while a worker may be blocked in foreign WM_ENABLE.
+int RunPickerOwnerLease(int argc, wchar_t** argv) noexcept {
+    if (argc != 6) return 2;
+    const auto window = reinterpret_cast<HWND>(static_cast<UINT_PTR>(_wcstoui64(argv[2], nullptr, 10)));
+    Handle parent(reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(_wcstoui64(argv[3], nullptr, 10))));
+    Handle ready(reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(_wcstoui64(argv[4], nullptr, 10))));
+    Handle cancel(reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(_wcstoui64(argv[5], nullptr, 10))));
+    const auto checked = ValidateRemotePickerOwner(window, parent.Get(), false);
+    if (checked.error || !IsWindowEnabled(window)) return 3;
+    CurrentUserSecurityAttributes security;
+    if (!security) return 4;
+    Handle release(CreateEventW(security.get(), TRUE, FALSE, LeaseEvent(GetCurrentProcessId()).c_str()));
+    if (!release) return 5;
+    Handle owner(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, checked.owner_pid));
+    FILETIME created{}, exit{}, kernel{}, user{};
+    if (!owner || !GetProcessTimes(owner.Get(), &created, &exit, &kernel, &user) ||
+        CompareFileTime(&created, &checked.owner_created) != 0) return 6;
+    auto lifetime = std::make_shared<ForeignLifetime>();
+    lifetime->window = window; lifetime->pid = checked.owner_pid; lifetime->thread = checked.owner_thread;
+    const auto hook = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY, nullptr, ForeignEvent,
+        checked.owner_pid, checked.owner_thread, WINEVENT_OUTOFCONTEXT);
+    if (!hook) return 6;
+    { std::lock_guard lock(foreign_events_mutex); foreign_events.emplace(hook, lifetime); }
+    struct HookCleanup { HWINEVENTHOOK hook; ~HookCleanup() {
+        UnhookWinEvent(hook); std::lock_guard lock(foreign_events_mutex); foreign_events.erase(hook);
+    } } hook_cleanup{hook};
+    struct Work {
+        HWND window; DWORD pid, thread; HANDLE ready, release, parent, cancel;
+        ForeignLifetime* lifetime;
+        bool Same() const {
+            DWORD current = 0;
+            return !lifetime->destroyed.load() && GetWindowThreadProcessId(window, &current) == thread && current == pid &&
+                GetPropW(window, LeaseProperty) == reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(GetCurrentProcessId()));
+        }
+        static DWORD WINAPI Run(void* context) {
+            auto& w = *static_cast<Work*>(context);
+            if (GetPropW(w.window, LeaseProperty) || !SetPropW(w.window, LeaseProperty,
+                reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(GetCurrentProcessId())))) return 6;
+            if (!w.Same()) return 7;
+            if (!IsWindowEnabled(w.window)) { RemovePropW(w.window, LeaseProperty); return 7; }
+            if (WaitForSingleObject(w.cancel, 0) != WAIT_TIMEOUT || WaitForSingleObject(w.release, 0) != WAIT_TIMEOUT || WaitForSingleObject(w.parent, 0) != WAIT_TIMEOUT) {
+                RemovePropW(w.window, LeaseProperty); return 8;
+            }
+            EnableWindow(w.window, FALSE);
+            if (w.Same() && !IsWindowEnabled(w.window)) SetEvent(w.ready);
+            HANDLE waits[]{w.release, w.parent, w.cancel};
+            WaitForMultipleObjects(3, waits, FALSE, INFINITE);
+            if (w.Same()) { EnableWindow(w.window, TRUE); if (w.Same()) RemovePropW(w.window, LeaseProperty); }
+            return 0;
+        }
+    } work{window, checked.owner_pid, checked.owner_thread, ready.Get(), release.Get(), parent.Get(), cancel.Get(), lifetime.get()};
+    Handle worker(CreateThread(nullptr, 0, Work::Run, &work, 0, nullptr));
+    if (!worker) return 9;
+    HANDLE startup[]{ready.Get(), worker.Get(), parent.Get()};
+    if (WaitOwnerHandles(3, startup, 2500) != WAIT_OBJECT_0) SetEvent(release.Get());
+    WaitOwnerHandles(1, &worker.value, INFINITE);
+    return 0;
 }
 struct PickerOwnerGuard::Impl {
     static constexpr const wchar_t* Property = L"Pulse.PickerClient.OwnerGuard";
@@ -252,9 +445,13 @@ struct PickerOwnerGuard::Impl {
     DWORD pid = 0, thread = 0;
     FILETIME creation{};
     Handle process, mutex, remote_process;
+    Handle pre_hide_event, pre_hide_done;
+    bool pre_hide_completed = false;
     DWORD remote_pid = 0;
     FILETIME remote_creation{};
     std::shared_ptr<ThreadOwner> cross_thread;
+    std::unique_ptr<ForeignLease> foreign_lease;
+    std::atomic<bool> foreign_restored{false};
     DWORD error = ERROR_SUCCESS;
     PickerOwnerFailureStage stage = PickerOwnerFailureStage::None;
     PickerOwnerIdentityDiagnostics diagnostics;
@@ -262,7 +459,7 @@ struct PickerOwnerGuard::Impl {
     bool foreign_registered = false;
     HWINEVENTHOOK foreign_hook = nullptr;
     std::shared_ptr<ForeignLifetime> foreign_lifetime;
-    explicit Impl(HWND value, DWORD remote_parent = 0) : window(value) {
+    explicit Impl(HWND value, DWORD remote_parent = 0, const wchar_t* lease_executable = nullptr) : window(value) {
         if (!window) return;
         FILETIME validated_owner_creation{};
         stage = PickerOwnerFailureStage::Window;
@@ -313,8 +510,8 @@ struct PickerOwnerGuard::Impl {
             stage = PickerOwnerFailureStage::UserMismatch;
             if (!diagnostics.same_user) { error = ERROR_ACCESS_DENIED; return; }
             stage = PickerOwnerFailureStage::IntegrityMismatch;
-            // Foreign owners are only observed. A medium-or-higher caller may
-            // observe its own user's lower-integrity disabled window, never the
+            // A medium-or-higher caller may manage its own user's lower-
+            // integrity window using the isolated lease helper, never the
             // reverse. Same-process transitions retain their equal-IL contract.
             const bool foreign = pid != GetCurrentProcessId();
             if (foreign ? (picker_owner_detail::ForeignIdentityPolicy(true, true, own.integrity, other.integrity) != PickerOwnerFailureStage::None)
@@ -323,15 +520,9 @@ struct PickerOwnerGuard::Impl {
             }
             // Cross-thread EnableWindow sends synchronous messages. Caller-managed
             // already-disabled owners are supported without sending any message.
-            if (pid != GetCurrentProcessId() && IsWindowEnabled(window)) {
-                OutputDebugStringW(L"Pulse PickerClient: external owner is enabled; caller-managed disabled owner required (ERROR_NOT_SUPPORTED).\n");
-                stage = PickerOwnerFailureStage::ForeignEnabled;
-                error = ERROR_NOT_SUPPORTED; return;
-            }
+
         }
-        const auto name = L"Local\\Pulse.PickerClient.Owner." + std::to_wstring(pid) + L"." +
-            std::to_wstring(creation.dwHighDateTime) + L"." + std::to_wstring(creation.dwLowDateTime) + L"." +
-            std::to_wstring(reinterpret_cast<UINT_PTR>(window));
+        const auto name = BuildOwnerKey(pid, creation, window);
         if (!remote_parent) {
         stage = PickerOwnerFailureStage::SecurityAttributes;
         CurrentUserSecurityAttributes security;
@@ -346,11 +537,21 @@ struct PickerOwnerGuard::Impl {
             if (!error) error = ERROR_GEN_FAILURE; return;
         }
         locked = true;
+        pre_hide_event.Reset(CreateEventW(security.get(), TRUE, FALSE, PreHideEventName(name, false).c_str()));
+        pre_hide_done.Reset(CreateEventW(security.get(), TRUE, FALSE, PreHideEventName(name, true).c_str()));
+        if (pre_hide_event) ResetEvent(pre_hide_event.Get());
+        if (pre_hide_done) ResetEvent(pre_hide_done.Get());
         }
         stage = PickerOwnerFailureStage::WindowIdentity;
         if (!SameWindow()) { error = ERROR_INVALID_WINDOW_HANDLE; return; }
         if (pid != GetCurrentProcessId()) {
-            if (IsWindowEnabled(window)) { stage = PickerOwnerFailureStage::ForeignEnabled; error = ERROR_NOT_SUPPORTED; return; }
+            if (IsWindowEnabled(window)) {
+                stage = PickerOwnerFailureStage::ForeignEnabled;
+                if (remote_parent || !lease_executable) { error = ERROR_NOT_SUPPORTED; return; }
+                foreign_lease = std::make_unique<ForeignLease>();
+                error = foreign_lease->Start(window, lease_executable);
+                if (error) return;
+            }
             foreign_key = name;
             std::lock_guard guard(foreign_mutex);
             if (!foreign_owners.insert(foreign_key).second) { stage = PickerOwnerFailureStage::MutexAcquire; error = ERROR_BUSY; return; }
@@ -412,26 +613,75 @@ struct PickerOwnerGuard::Impl {
         if (foreign_registered) {
             // Out-of-context events are delivered on the creating STA as it pumps.
             // PID/TID/creation checks remain necessary before queued events arrive.
-            return foreign_lifetime && !foreign_lifetime->destroyed.load() && SameWindow() && !IsWindowEnabled(window);
+            return foreign_lifetime && !foreign_lifetime->destroyed.load() && SameWindow() && (foreign_restored.load(std::memory_order_acquire) || (foreign_lease && WaitForSingleObject(foreign_lease->process.Get(), 0) == WAIT_OBJECT_0) || !IsWindowEnabled(window));
         }
         return !window || (marked && SameWindow() &&
             GetPropW(window, Property) == (cross_thread ? static_cast<void*>(cross_thread.get()) : static_cast<void*>(const_cast<Impl*>(this))) &&
             (!external || (cross_thread && cross_thread->restored.load()) || !IsWindowEnabled(window)));
     }
-    void RestoreBeforeDialogHide(HWND dialog) noexcept {
+    HANDLE PreHideEvent() const noexcept {
+        if (error || pre_hide_completed || !pre_hide_event) return nullptr;
+        if (!changed && !cross_thread && !foreign_lease) return nullptr;
+        return pre_hide_event.Get();
+    }
+    void CompletePreHideRestore() noexcept {
+        if (pre_hide_completed) return;
+        pre_hide_completed = true;
+        if (pre_hide_event) ResetEvent(pre_hide_event.Get());
+        if (!error && Alive()) {
+            bool restored_now = false;
+            if (foreign_lease) {
+                foreign_restored.store(true, std::memory_order_release);
+                if (foreign_lease->Restore()) restored_now = true;
+                else if (!IsWindowEnabled(window)) foreign_restored.store(false, std::memory_order_release);
+            } else if (cross_thread) {
+                if (cross_thread->Restore(false)) restored_now = true;
+            } else if (changed) {
+                changed = false;
+                EnableWindow(window, TRUE);
+                restored_now = true;
+            }
+            if (restored_now && Alive() && IsWindow(window) && IsWindowEnabled(window)) {
+                // Host verified dialog-was-foreground and granted AllowSetForegroundWindow
+                // before signaling PreHideEvent; activating here on the owner's thread
+                // makes the owner foreground BEFORE the host hides its popup.
+                SetForegroundWindow(window);
+                if (!external) SetActiveWindow(window);
+            }
+        }
+        if (pre_hide_done) SetEvent(pre_hide_done.Get());
+    }
+    void RestoreBeforeDialogHide(HWND dialog, bool assume_foreground = false) noexcept {
         if(error || !Alive() || !IsWindow(dialog)) return;
         DWORD dialog_pid=0;
         if(GetWindowThreadProcessId(dialog,&dialog_pid)!=GetCurrentThreadId() ||
             dialog_pid!=GetCurrentProcessId() || GetWindow(dialog,GW_OWNER)!=window) return;
-        const HWND foreground=GetForegroundWindow();
-        bool was_foreground=foreground==dialog || IsChild(dialog,foreground);
-        for(HWND current=foreground; !was_foreground && current; current=GetWindow(current,GW_OWNER))
-            was_foreground=current==dialog;
+        HWND foreground = nullptr;
+        const bool was_foreground = assume_foreground || DialogIsForeground(dialog, foreground);
         // Restore an enabled activation target before hiding the active popup.
         // EnableWindow sends messages, so recheck identity before touching focus.
         diagnostics.restore_attempted = true;
-        diagnostics.restore_owned_disable = changed || static_cast<bool>(cross_thread);
+        diagnostics.restore_owned_disable = changed || static_cast<bool>(cross_thread) || static_cast<bool>(foreign_lease);
         diagnostics.dialog_was_foreground = was_foreground;
+        if (was_foreground && external) {
+            AllowSetForegroundWindow(pid);
+        }
+        if (foreign_lease) {
+            foreign_restored.store(true, std::memory_order_release);
+            if (!foreign_lease->Restore()) {
+                if (!IsWindowEnabled(window)) foreign_restored.store(false, std::memory_order_release);
+                return;
+            }
+        } else if (remote_process && GetPropW(window, LeaseProperty)) {
+            if (!ReleaseForeignLease(window, foreign_restored)) return;
+        } else if (remote_process && was_foreground) {
+            // Ask the caller's STA PickerOwnerGuard to re-enable & activate the
+            // owner BEFORE we hide the foreground popup, so Windows never raises
+            // the window behind the disabled owner.
+            if (RequestCallerPreHideRestore(window, pid, creation, &foreign_restored)) {
+                diagnostics.restore_owned_disable = true;
+            }
+        }
         if (cross_thread && !cross_thread->Restore(false)) return;
         if (changed) {
             changed=false;
@@ -446,7 +696,7 @@ struct PickerOwnerGuard::Impl {
                 if (external) {
                     // The foreground picker may hand activation back without
                     // changing caller-owned disabled state or attaching queues.
-                    SetForegroundWindow(window);
+                    if (now != window) SetForegroundWindow(window);
                 } else SetActiveWindow(window);
                 // Cross-thread foreground activation may complete asynchronously;
                 // this diagnostic is an immediate observation, not a failure verdict.
@@ -476,11 +726,40 @@ struct PickerOwnerGuard::Impl {
 PickerOwnerGuard::PickerOwnerGuard(HWND window) : impl_(std::make_unique<Impl>(window)) {}
 PickerOwnerGuard::PickerOwnerGuard(HWND window, CallerManagedRemoteOwner parent)
     : impl_(std::make_unique<Impl>(window, parent.authenticated_parent_pid)) {}
+PickerOwnerGuard::PickerOwnerGuard(HWND window, const wchar_t* executable)
+    : impl_(std::make_unique<Impl>(window, 0, executable)) {}
 PickerOwnerGuard::~PickerOwnerGuard() = default;
 DWORD PickerOwnerGuard::Error() const noexcept { return impl_->error; }
 PickerOwnerFailureStage PickerOwnerGuard::FailureStage() const noexcept { return impl_->error ? impl_->stage : PickerOwnerFailureStage::None; }
 PickerOwnerIdentityDiagnostics PickerOwnerGuard::Diagnostics() const noexcept { return impl_->diagnostics; }
 bool PickerOwnerGuard::Alive() const { return !impl_->error && impl_->Alive(); }
 HWND PickerOwnerGuard::Window() const noexcept { return impl_->window; }
-void PickerOwnerGuard::RestoreBeforeDialogHide(HWND dialog) noexcept { impl_->RestoreBeforeDialogHide(dialog); }
+void PickerOwnerGuard::RestoreBeforeDialogHide(HWND dialog) noexcept { impl_->RestoreBeforeDialogHide(dialog, false); }
+namespace picker_owner_detail {
+void RestoreBeforeDialogHideForTest(PickerOwnerGuard& guard, HWND dialog) noexcept {
+    if (guard.impl_) guard.impl_->RestoreBeforeDialogHide(dialog, true);
+}
+}
+HANDLE PickerOwnerGuard::PreHideEvent() const noexcept { return impl_->PreHideEvent(); }
+void PickerOwnerGuard::CompletePreHideRestore() noexcept { impl_->CompletePreHideRestore(); }
+void RestoreExternalPickerOwnerBeforeHide(HWND dialog, HWND owner) noexcept {
+    if (!dialog || !owner || !IsWindow(dialog) || !IsWindow(owner)) return;
+    DWORD dialog_pid = 0;
+    if (GetWindowThreadProcessId(dialog, &dialog_pid) != GetCurrentThreadId() ||
+        dialog_pid != GetCurrentProcessId() || GetWindow(dialog, GW_OWNER) != owner) return;
+    DWORD owner_pid = 0;
+    if (!GetWindowThreadProcessId(owner, &owner_pid) || !owner_pid || owner_pid == GetCurrentProcessId()) return;
+    HWND foreground = nullptr;
+    if (!DialogIsForeground(dialog, foreground)) return;
+    AllowSetForegroundWindow(owner_pid);
+    Handle proc(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, owner_pid));
+    FILETIME creation{}, exit{}, kernel{}, user{};
+    if (proc && GetProcessTimes(proc.Get(), &creation, &exit, &kernel, &user)) {
+        (void)RequestCallerPreHideRestore(owner, owner_pid, creation);
+    }
+    const HWND now = GetForegroundWindow();
+    if (IsWindow(owner) && (now == foreground || now == dialog || now == owner || IsChild(dialog, now))) {
+        if (now != owner) SetForegroundWindow(owner);
+    }
+}
 }

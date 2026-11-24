@@ -73,6 +73,9 @@ struct ExtensionPanel::Impl {
     float FieldPitch() const { return (Compact() ? 68.0f : 76.0f) * scale; }
     float BodyGap() const { return (Compact() ? 12.0f : 16.0f) * scale; }
     float DescriptionHeight() const { return description_height; }
+    // A content-only page docked in Settings: no panel plate or border, the page shows through.
+    bool Embedded() const { return docked && spec.content_only; }
+    D2D1_COLOR_F embedded_wash{0, 0, 0, 0};
     float BodyTop() const { return (spec.content_only ? 12.0f : Compact() ? 76.0f : 88.0f) * scale; }
     float FieldsTop() const { return BodyTop() + DescriptionHeight() + (spec.description.empty() ? 0.0f : BodyGap()); }
     float FieldsHeight() const { return static_cast<float>(spec.fields.size()) * FieldPitch(); }
@@ -273,7 +276,13 @@ struct ExtensionPanel::Impl {
         if (!compositor.Dc()) return false;
         const bool high_contrast = IsHighContrast();
         const Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark, accent);
-        BeginSurface(compositor, painter, theme, dark, high_contrast, false, scale);
+        if (Embedded() && !high_contrast) {
+            compositor.Dc()->BeginDraw();
+            compositor.Dc()->Clear(embedded_wash);
+            painter.BeginFrame(theme, high_contrast);
+        } else {
+            BeginSurface(compositor, painter, theme, dark, high_contrast, false, scale);
+        }
         if (!spec.content_only) DrawWrapped(spec.title, title_format.get(), {24.0f * scale, 24.0f * scale,
             Width() - 52.0f * scale, 76.0f * scale},
             ExtensionPanelTitleColor(spec.title_tone, high_contrast, theme.accent, theme.bg, theme.text));
@@ -602,14 +611,19 @@ struct ExtensionPanel::Impl {
         window_class.lpszClassName = kWindowClass;
         window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         if (!RegisterClassExW(&window_class) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
+        // A floating panel is born on the owner's monitor: CW_USEDEFAULT lands on
+        // the primary one, and moving to a screen of another scale rescaled it.
+        const POINT origin = docked ? POINT{ CW_USEDEFAULT, CW_USEDEFAULT }
+            : OwnedWindowOrigin(owner, static_cast<int>(480 * scale), static_cast<int>(420 * scale));
         if (!CreateWindowExW(docked ? 0 : WS_EX_TOOLWINDOW, kWindowClass, spec.title.c_str(),
             (docked ? WS_CHILD | WS_CLIPSIBLINGS : WS_POPUP | WS_CAPTION | WS_SYSMENU) | WS_CLIPCHILDREN,
-            CW_USEDEFAULT, CW_USEDEFAULT, static_cast<int>(480 * scale), static_cast<int>(420 * scale),
+            origin.x, origin.y, static_cast<int>(480 * scale), static_cast<int>(420 * scale),
             owner, nullptr, window_class.hInstance, this)) return false;
         if (spec.tree && !tree.Create(hwnd, *spec.tree, spec.tree_callbacks, dark, accent, scale)) {
             Close();
             return false;
         }
+        if (spec.tree) { tree.SetBackgroundWash(embedded_wash); tree.SetTransparentBackground(Embedded()); }
         if (docked) SetWindowPos(hwnd, nullptr, dock_bounds->left, dock_bounds->top,
             dock_bounds->right - dock_bounds->left, dock_bounds->bottom - dock_bounds->top, SWP_NOZORDER | SWP_NOACTIVATE);
         else SizeToContent(true);
@@ -647,6 +661,13 @@ void ExtensionPanel::UpdateDocked(const RECT& bounds, bool dark, D2D1_COLOR_F ac
     MapWindowPoints(nullptr, impl_->owner, reinterpret_cast<POINT*>(&current), 2);
     if (!EqualRect(&current, &bounds)) SetWindowPos(impl_->hwnd, nullptr, bounds.left, bounds.top,
         bounds.right - bounds.left, bounds.bottom - bounds.top, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+void ExtensionPanel::SetEmbeddedWash(D2D1_COLOR_F wash) {
+    auto& w = impl_->embedded_wash;
+    if (w.r == wash.r && w.g == wash.g && w.b == wash.b && w.a == wash.a) return;
+    w = wash;
+    if (impl_->spec.tree) impl_->tree.SetBackgroundWash(wash);
+    if (impl_->hwnd) InvalidateRect(impl_->hwnd, nullptr, FALSE);
 }
 void ExtensionPanel::UpdateAppearance(bool dark, D2D1_COLOR_F accent, float scale) {
     if (!IsOpen() || !std::isfinite(scale) || scale <= 0) return;
@@ -688,6 +709,7 @@ bool ExtensionPanel::Remount(HWND owner, const RECT* dock_bounds, bool dark, D2D
     if (GetLastError()) return false;
     SetWindowLongPtrW(window, GWL_EXSTYLE, docked ? 0 : WS_EX_TOOLWINDOW);
     impl_->docked = docked;
+    if (impl_->spec.tree) impl_->tree.SetTransparentBackground(impl_->Embedded());
     impl_->owner = owner;
     SetLastError(0);
     const HWND previous_parent = SetParent(window, docked ? owner : nullptr);

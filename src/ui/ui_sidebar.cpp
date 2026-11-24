@@ -7,6 +7,8 @@
 #define PULSE_SIDEBAR_MARK(label) ((void)0)
 #endif
 #include "ui_renderer_internal.h"
+#include "high_contrast_state.h"
+#include "snack_style.h"
 #include "../common/localization.h"
 #include "tab_shape.h"
 #include "command_icons.h"
@@ -153,7 +155,8 @@ D2D1_RECT_F SidebarHoverPositionForTest(const MainRenderer* renderer) {
 
 D2D1_RECT_F MainRenderer::SidebarRect(float w, float h) const {
     float top = title_bar_height_ + (EmbeddedPickerLayout()
-        ? (NavigationHeightDip() + embedded_picker_strip_dip_) * scale_ : margin_);
+        ? (NavigationHeightDip() + embedded_picker_strip_dip_) * scale_
+        : (FullWidthRows() ? toolbar_height_ : 0.0f) + margin_);
     float bottom = h - status_height_ - margin_;
     const float right = SidebarPeekVisible(w) ? SidebarFullWidth(w) : SidebarOwnWidth(w);
     return D2D1::RectF(0.0f, top, right, bottom);
@@ -185,15 +188,27 @@ void MainRenderer::DrawSidebarPeek(const WindowViewModel& vm, const D2D1_RECT_F&
                                    const Theme& theme) {
     ID2D1DeviceContext* dc = compositor_->Dc();
     const D2D1_RECT_F sb = SidebarRect(rect.right, rect.bottom);
-    const float r = theme.radius_flyout * scale_;
-    const D2D1_RECT_F card = D2D1::RectF(sb.left + 4.0f * scale_, sb.top - 2.0f * scale_,
-                                         sb.right + 6.0f * scale_, sb.bottom + 2.0f * scale_);
-    // Cheap layered shadow; no effect graph for a transient overlay.
-    for (int i = 3; i >= 1; --i) {
-        const float g = static_cast<float>(i) * 3.0f * scale_;
-        MakeBrush(dc, D2D1_COLOR_F{0.0f, 0.0f, 0.0f, vm.dark ? 0.12f : 0.045f}, brFillHover_);
-        FillRoundedRect(dc, brFillHover_.get(), card.left - g * 0.5f, card.top + g * 0.4f,
-                        card.right - card.left + g, card.bottom - card.top + g * 0.6f, r + g);
+    // The card sits in the window's lower-left corner: it takes the window's
+    // corner radius (Windows 11 rounds the frame at 8 DIP) instead of the
+    // larger flyout radius, with an even gap to the left edge and the bottom.
+    // Fixed rather than theme.radius_*: 更圆的角 enlarges those, the frame stays 8.
+    constexpr float kWindowCornerDip = 8.0f;
+    const float r = kWindowCornerDip * scale_;
+    // The same 4 DIP gap the window keeps around its panes; the card bottom
+    // then meets the sidebar's own bottom, so no row paints past the card.
+    const float gap = margin_;
+    // The right edge is the sidebar's own: the overlay scrollbar (2 DIP in from
+    // sb.right) then hugs the card edge, and clicks close the peek exactly
+    // outside what is painted.
+    const D2D1_RECT_F card = D2D1::RectF(gap, sb.top - 2.0f * scale_, sb.right,
+                                         (std::max)(sb.bottom, sb.top));
+    // Soft Gaussian elevation, lighter than a menu: the card is wide and tall,
+    // so the mockup's 40 px key shadow read as a heavy smudge along the list.
+    if (!IsHighContrast()) {
+        DrawElevationShadow(dc, card, r, 9.0f * scale_, 4.0f * scale_,
+                            vm.dark ? D2D1::ColorF(0x000000, 0.34f) : D2D1::ColorF(0x303B50, 0.10f));
+        DrawElevationShadow(dc, card, r, 1.0f * scale_, 0.5f * scale_,
+                            vm.dark ? D2D1::ColorF(0x000000, 0.28f) : D2D1::ColorF(0x303B50, 0.07f));
     }
     MakeBrush(dc, BlendOver(theme.surface_flyout, theme.bg), brFillSelected_);
     FillRoundedRect(dc, brFillSelected_.get(), card.left, card.top,
@@ -204,13 +219,58 @@ void MainRenderer::DrawSidebarPeek(const WindowViewModel& vm, const D2D1_RECT_F&
     DrawSidebar(vm, rect, theme);
 }
 
+// Mockup .peek-zone::after: a 56 DIP accent bar on the left edge at 28%,
+// 80 DIP at 60% while the pointer rests in the strip that opens the overlay.
+void MainRenderer::DrawSidebarEdgeHint(const D2D1_RECT_F& rect, const Theme& theme) {
+    ID2D1DeviceContext* dc = compositor_->Dc();
+    const D2D1_RECT_F sb = SidebarRect(rect.right, rect.bottom);
+    const float height = (sidebar_edge_hot_ ? 80.0f : 56.0f) * scale_;
+    if (sb.bottom - sb.top < height) return;
+    const float mid = (sb.top + sb.bottom) * 0.5f;
+    D2D1_COLOR_F color = IsHighContrast() ? theme.text : theme.accent;
+    color.a *= sidebar_edge_hot_ ? 0.6f : 0.28f;
+    MakeBrush(dc, color, brFillHover_);
+    // Inside the window's 4 DIP margin, so it never lands on the pane's border.
+    FillRoundedRect(dc, brFillHover_.get(), 1.0f * scale_, mid - height * 0.5f, 3.0f * scale_, height, 1.5f * scale_);
+}
+
+namespace {
+// Motion v2 "rail": up to this collapse value the wide rows glide onto their
+// rail cells; past it the wide paint crossfades into the rail paint in place.
+constexpr float kRailGlideEnd = 0.7f;
+}  // namespace
+
 void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme) {
+    const bool folding = collapse_anim_ && rect.right / scale_ >= kSidebarRailWindowDip;
+    if (!folding) {
+        DrawSidebarPass(vm, rect, theme, false, 0.0f, 1.0f);
+        return;
+    }
+    // The wide layout and the rail layout place icons differently (row
+    // heights, section titles, drive tiles), so switching between them when
+    // the animation settled made every icon jump. Instead the wide rows land
+    // on the rail cells first and the rail fades in over them: the frame the
+    // animation ends on is already the static rail (and expanding starts from it).
+    const float v = std::clamp(collapse_value_, 0.0f, 1.0f);
+    const float glide = (std::min)(1.0f, v / kRailGlideEnd);
+    float mix = std::clamp((v - kRailGlideEnd) / (1.0f - kRailGlideEnd), 0.0f, 1.0f);
+    mix = mix * mix * (3.0f - 2.0f * mix);
+    if (mix < 1.0f) DrawSidebarPass(vm, rect, theme, false, glide, 1.0f - mix);
+    if (mix > 0.0f) DrawSidebarPass(vm, rect, theme, true, 1.0f, mix);
+}
+
+void MainRenderer::DrawSidebarPass(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme,
+                                   bool rail_pass, float glide, float opacity) {
     ID2D1DeviceContext* dc = compositor_->Dc();
     D2D1_RECT_F sb = SidebarRect(rect.right, rect.bottom);
     const D2D1_RECT_F sb_clip = sb;
     // Collapse/expand: lay out at the expanded width and reveal it through
-    // the easing width, so labels slide rather than re-wrap every frame.
-    if (collapse_anim_ && rect.right / scale_ >= kSidebarRailWindowDip)
+    // the easing width, so labels slide rather than re-wrap every frame. The
+    // rail pass lays out at the rail width, exactly as the settled rail does.
+    const bool folding = collapse_anim_ && rect.right / scale_ >= kSidebarRailWindowDip;
+    if (folding && rail_pass)
+        sb.right = sb.left + kSidebarRailWidthDip * scale_;
+    else if (folding)
         sb.right = (std::max)(sb.right, SidebarFullWidth(rect.right));
     const float w = sb.right - sb.left;
 
@@ -220,7 +280,8 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
     // and everything right of it (labels, counts) fades - late on the way
     // out to full width, early on the way into the rail.
     bool label_layer = false;
-    if (collapse_anim_ && rect.right / scale_ >= kSidebarRailWindowDip) {
+    ComPtr<ID2D1LinearGradientBrush> fade;
+    if (folding && !rail_pass) {
         const float open = std::clamp((1.0f - collapse_value_ - 0.35f) / 0.65f, 0.0f, 1.0f);
         const D2D1_GRADIENT_STOP stops[] = {
             {0.0f, D2D1::ColorF(0, 0, 0, 1.0f)},
@@ -228,18 +289,21 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             {1.0f, D2D1::ColorF(0, 0, 0, open * open)},
         };
         ComPtr<ID2D1GradientStopCollection> stop_set;
-        ComPtr<ID2D1LinearGradientBrush> fade;
         const float x0 = sb.left + 38.0f * scale_;
-        if (SUCCEEDED(dc->CreateGradientStopCollection(stops, 3, &stop_set)) && stop_set.get() &&
-            SUCCEEDED(dc->CreateLinearGradientBrush(
+        if (FAILED(dc->CreateGradientStopCollection(stops, 3, &stop_set)) || !stop_set.get() ||
+            FAILED(dc->CreateLinearGradientBrush(
                 D2D1::LinearGradientBrushProperties(D2D1::Point2F(x0 - 8.0f * scale_, 0.0f),
                                                     D2D1::Point2F(x0 + 8.0f * scale_, 0.0f)),
-                stop_set.get(), &fade)) && fade.get()) {
-            D2D1_LAYER_PARAMETERS1 lp = D2D1::LayerParameters1(sb_clip, nullptr,
-                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), 1.0f, fade.get());
-            dc->PushLayer(lp, nullptr);
-            label_layer = true;
-        }
+                stop_set.get(), &fade)))
+            fade.reset();
+    }
+    // The same layer carries the crossfade between the wide and rail passes.
+    if (fade.get() || opacity < 0.999f) {
+        D2D1_LAYER_PARAMETERS1 lp = D2D1::LayerParameters1(sb_clip, nullptr,
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(),
+            std::clamp(opacity, 0.0f, 1.0f), fade.get());
+        dc->PushLayer(lp, nullptr);
+        label_layer = true;
     }
 
     // The sidebar sits on the shared sheet painted by Render(); the pane cards
@@ -247,10 +311,47 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
 
     std::vector<SidebarSlot> slots;
     PULSE_SIDEBAR_MARK("sidebar_layout_begin");
-    LayoutSidebar(vm, sb, scale_, slots);
+    SidebarFavoritesLayout favorites;
+    LayoutSidebar(vm, sb, scale_, slots, nullptr, &favorites);
     PULSE_SIDEBAR_MARK("sidebar_layout_end");
     const bool compact = SidebarRailLayout(w, scale_);
     painter_.BeginFrame(theme, IsHighContrast());
+    if (folding && !rail_pass && !compact && glide > 0.0f) {
+        // Each row (and section title) glides toward the rail cell it becomes:
+        // its icon centre meets the rail icon centre by the end of the glide.
+        D2D1_RECT_F rail_sb = sb_clip;
+        rail_sb.right = rail_sb.left + kSidebarRailWidthDip * scale_;
+        std::vector<SidebarSlot> rail;
+        LayoutSidebar(vm, rail_sb, scale_, rail);
+        const auto is_row = [](const SidebarSlot& slot) {
+            return slot.kind == SidebarSlot::Item || slot.kind == SidebarSlot::Drive ||
+                   slot.kind == SidebarSlot::Tag;
+        };
+        for (auto& slot : slots) {
+            const bool header = slot.kind == SidebarSlot::Header;
+            if (slot.group < 0 || !(header || (is_row(slot) && slot.item >= 0))) continue;
+            const SidebarSlot* cell = nullptr;
+            for (const auto& r : rail) {
+                if (r.group != slot.group) continue;
+                const bool match = header ? (r.kind == SidebarSlot::Rail && r.item < 0 && r.sub == 0)
+                                          : (is_row(r) && r.item == slot.item);
+                if (match) { cell = &r; break; }
+            }
+            if (!cell) continue;  // not on the rail: the crossfade takes it out
+            D2D1_POINT_2F from = D2D1::Point2F(slot.rc.left + 18.0f * scale_,
+                                               (slot.rc.top + slot.rc.bottom) * 0.5f);
+            if (slot.kind == SidebarSlot::Drive) {
+                const D2D1_RECT_F icon = painter_.DriveSidebarItemIconRect(slot.rc);
+                from = D2D1::Point2F((icon.left + icon.right) * 0.5f, (icon.top + icon.bottom) * 0.5f);
+            }
+            const float dx = header ? 0.0f : ((cell->rc.left + cell->rc.right) * 0.5f - from.x) * glide;
+            const float dy = ((cell->rc.top + cell->rc.bottom) * 0.5f - from.y) * glide;
+            slot.rc = D2D1::RectF(slot.rc.left + dx, slot.rc.top + dy, slot.rc.right + dx, slot.rc.bottom + dy);
+            if (slot.clip.bottom > slot.clip.top)
+                slot.clip = D2D1::RectF(slot.clip.left + dx, slot.clip.top + dy,
+                                        slot.clip.right + dx, slot.clip.bottom + dy);
+        }
+    }
 
     // Only the most specific matching row is selected (Desktop, not also the
     // C: drive that contains it). That row owns one pill that glides to the
@@ -274,7 +375,9 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
         }
     }
     const bool reordering = vm.sidebar_pin_drag_index >= 0 || vm.sidebar_group_drag_id >= 0;
-    const int pill_slot = !reordering && !IsHighContrast() ? selected_slot : -1;
+    const int pill_slot = !reordering && !IsHighContrast() && selected_slot >= 0 &&
+        slots[static_cast<size_t>(selected_slot)].clip.bottom <= slots[static_cast<size_t>(selected_slot)].clip.top
+        ? selected_slot : -1;
     SidebarMotion& sm = SidebarMotionFor(this);
     if (motion_now_ - sm.animations_checked > 2000 || !sm.animations_checked) {
         // The Windows animation switch, re-read every couple of seconds.
@@ -294,6 +397,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             if (slot.kind != SidebarSlot::Item && slot.kind != SidebarSlot::Drive &&
                 slot.kind != SidebarSlot::Tag) continue;
             if (slot.group < 0 || slot.item < 0) continue;
+            if (slot.clip.bottom > slot.clip.top) continue;
             if (static_cast<int>(k) == pill_slot) continue;
             const auto& item = vm.sidebar[slot.group].items[slot.item];
             if (item.tab_row && item.tab_active) continue;  // the raised card is its own hover
@@ -305,7 +409,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             }
         }
     }
-    {
+    if (!rail_pass) {  // the fold's rail pass leaves the hover plate to the wide pass
         const uint64_t context = compact ? 1u : 2u;
         const float dt = static_cast<float>((std::min<uint64_t>)(motion_now_ - sm.hover_last, 64));
         sm.hover_last = motion_now_;
@@ -367,7 +471,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             well.right - 0.5f, well.bottom - 0.5f), r, r), brStrokeDivider_.get(), 1.0f);
         break;
     }
-    if (sm.hover_alpha > 0.0f) {
+    if (!rail_pass && sm.hover_alpha > 0.0f) {
         D2D1_COLOR_F fill = theme.fill_hover;
         fill.a *= sm.hover_alpha;
         painter_.FillRoundedRect(sm.hover_rect, sm.hover_radius, fill);
@@ -905,6 +1009,12 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
     ++sm.count_epoch;
     for (const size_t paint_k : paint_order) {
         const auto& slot = slots[paint_k];
+        struct RowClip {
+            ID2D1DeviceContext* dc;
+            bool active;
+            ~RowClip() { if (active) dc->PopAxisAlignedClip(); }
+        } clip{dc, slot.clip.bottom > slot.clip.top};
+        if (clip.active) dc->PushAxisAlignedClip(slot.clip, D2D1_ANTIALIAS_MODE_ALIASED);
         RowXform row_xform;
         if (pin_slot >= 0 && slot.group == slots[static_cast<size_t>(pin_slot)].group &&
             slot.item >= 0 && slot.kind != SidebarSlot::Header) {
@@ -1006,8 +1116,11 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             switch (item.workspace_child_view) {
             case ViewMode::Details: glyph = L"\xE14C"; break;
             case ViewMode::List: glyph = L"\xE8FD"; break;
-            case ViewMode::Tiles: glyph = L"\xECA5"; break;
-            case ViewMode::Content: glyph = L"\xE8A9"; break;
+            case ViewMode::Tiles: glyph = command_icons::kGlyphViewTiles; break;      // ECA5/E8A9 were 中图标's grid
+            case ViewMode::Content: glyph = command_icons::kGlyphViewContent; break;
+            case ViewMode::ExtraLargeIcons: glyph = command_icons::kGlyphViewXL; break;
+            case ViewMode::LargeIcons: glyph = command_icons::kGlyphViewLarge; break;
+            case ViewMode::SmallIcons: glyph = command_icons::kGlyphViewSmall; break;
             default: break;
             }
             if (hot) glyph = L"\xE784";
@@ -1083,7 +1196,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             state.hovered = true;
         const bool row_hot = state.hovered;
         // The gliding plate paints the hover under ordinary rows.
-        if (plate_live && !(item.tab_row && item.tab_active)) state.hovered = false;
+        if (plate_live && !clip.active && !(item.tab_row && item.tab_active)) state.hovered = false;
         if (item.tab_row && item.tab_active) {
             // Active tab: raised card with an accent bar, like the top strip's
             // active tab plate.
@@ -1183,6 +1296,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             fluent::SidebarItemSpec row;
             row.bounds = slot.rc;
             row.text = item.label;
+            row.ellipsize = item.starred_child;
             if (item.path == L"pulse:recycle" || item.workspace_index >= 0 || item.workspace_empty) row.detail = item.detail;
             row.glyph = item.icon_glyph;
             row.badge_text = item.badge;
@@ -1426,6 +1540,11 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
     }
 
 
+    if (favorites.bar.enabled && favorites.clip.bottom > favorites.clip.top) {
+        dc->PushAxisAlignedClip(favorites.clip, D2D1_ANTIALIAS_MODE_ALIASED);
+        painter_.DrawScrollbar(favorites.bar);
+        dc->PopAxisAlignedClip();
+    }
     painter_.DrawScrollbar(SidebarScrollbarSpec(vm, sb, scale_));
     if (label_layer) dc->PopLayer();
     dc->PopAxisAlignedClip();
@@ -2015,6 +2134,19 @@ bool MainRenderer::SidebarScrollbarGeometry(const WindowViewModel& vm, float win
     thumb = fluent::ScrollbarThumbRect(bar, scale_);
     max_scroll = bar.enabled ? std::max(0.0f, bar.content_extent - bar.viewport_extent) : 0.0f;
     return max_scroll > 0.0f && thumb.bottom > thumb.top;
+}
+
+bool MainRenderer::SidebarFavoritesScrollbarGeometry(const WindowViewModel& vm, float window_w, float window_h,
+                                                     D2D1_RECT_F& track, D2D1_RECT_F& thumb,
+                                                     float& max_scroll, D2D1_RECT_F* visible) const {
+    std::vector<SidebarSlot> slots;
+    SidebarFavoritesLayout favorites;
+    LayoutSidebar(vm, SidebarRect(window_w, window_h), scale_, slots, nullptr, &favorites);
+    if (visible) *visible = favorites.clip;
+    track = favorites.bar.viewport;
+    thumb = fluent::ScrollbarThumbRect(favorites.bar, scale_);
+    max_scroll = std::max(0.0f, favorites.bar.content_extent - favorites.bar.viewport_extent);
+    return favorites.bar.enabled && favorites.clip.bottom > favorites.clip.top && thumb.bottom > thumb.top;
 }
 
 } // namespace pulse::ui

@@ -7,6 +7,7 @@
 #include "../common/runtime_log.h"
 #include "typography.h"
 #include "window_helpers.h"
+#include "dialog_dpi_placement.h"
 #include "ui_motion.h"
 #include "store_icons.h"
 
@@ -30,6 +31,21 @@
 
 #pragma comment(lib, "imm32.lib")
 #pragma comment(lib, "windowscodecs.lib")
+
+
+namespace {
+// After a dialog is centred on its owner: when that move crossed onto a screen
+// of another scale and no WM_DPICHANGED reached the (still hidden) window, feed
+// it one so its scale matches the monitor, then centre it at the new size.
+void SettleWindowDpi(HWND hwnd, HWND owner, float scale, UINT dpi) {
+    if (!hwnd || !pulse::ui::placement::NeedsDpiSync(scale, dpi)) return;
+    RECT placed{};
+    GetWindowRect(hwnd, &placed);
+    SendMessageW(hwnd, WM_DPICHANGED, MAKEWPARAM(dpi, dpi), reinterpret_cast<LPARAM>(&placed));
+    GetWindowRect(hwnd, &placed);
+    pulse::ui::CenterOwnedWindow(hwnd, owner, placed.right - placed.left, placed.bottom - placed.top);
+}
+} // namespace
 
 namespace pulse::ui {
 // Shared with the native-task render probe: external terminal states must not
@@ -91,6 +107,13 @@ constexpr int kHitFailRow = 20;   // + visible row
 constexpr int kHitTaskAction = 40; // + action index
 constexpr int kHitBackground = 12;
 constexpr int kHitCopyDetails = 13;
+// Other-operations strip, above the footer: + row * 4 + part (0 the row,
+// 1 pause/resume, 2 cancel).
+constexpr int kHitTaskRow = 60;
+constexpr float kTaskRowH = 44.0f;
+constexpr float kTaskStripPadY = 6.0f;
+constexpr size_t kTaskMaxRows = 4;  // the 3 others that can run beside the shown one, + 1 queued
+constexpr float kTaskMoreH = 20.0f;
 constexpr size_t kTimeGraphPoints = ops::OpSpeedGraph::kMaxTimePoints;
 constexpr float kPi = 3.14159265f;
 
@@ -224,6 +247,13 @@ bool PauseInFlight(const ops::OpStatus& status) {
     return status.phase != ops::OpPhase::Paused && ShowsPaused(status);
 }
 
+// The strip's waiting tasks need the person when a conflict waits for an answer.
+int TaskStripRank(const ops::OpStatus& status) {
+    if (status.phase == ops::OpPhase::WaitingForConflict ||
+        status.authorization == ops::AuthorizationState::ActionRequired) return 0;
+    return status.phase == ops::OpPhase::Queued ? 2 : 1;
+}
+
 bool SupportsItemSkip(const ops::OpStatus& status) {
     return status.active && status.authorization == ops::AuthorizationState::None &&
         (status.type == ops::OpType::Copy || status.type == ops::OpType::Move ||
@@ -265,6 +295,11 @@ TransferLabels MakeTransferLabels(const ops::OpStatus& status, bool detailed,
                (status.phase == ops::OpPhase::Completed || status.phase == ops::OpPhase::Failed)) {
         labels.show_open = true;
         labels.open = l10n::Get(l10n::StringId::OpOpenDestination);
+    }
+    if (partial.native_handoff) {
+        labels.show_open = true;
+        labels.open = l10n::Get(status.active ? l10n::StringId::SettingsSecExplorer
+                                               : l10n::StringId::OpenDeniedFolderNative);
     }
     if (status.external) {
         labels.show_details = false; // always shown while it runs
@@ -573,6 +608,43 @@ void DrawStatusIcon(ID2D1DeviceContext* dc, StatusIcon kind, float x, float y, f
     }
 }
 
+// Pause (two bars) or play (a rounded triangle) centred in `bounds` (pixels),
+// `size` pixels tall: the strip's small buttons, drawn rather than glyphs.
+void DrawPausePlayMark(ID2D1DeviceContext* dc, bool play, D2D1_RECT_F bounds, float size, D2D1_COLOR_F color) {
+    if (!dc) return;
+    ComPtr<ID2D1SolidColorBrush> brush;
+    if (FAILED(dc->CreateSolidColorBrush(color, &brush))) return;
+    const float cx = (bounds.left + bounds.right) * 0.5f;
+    const float cy = (bounds.top + bounds.bottom) * 0.5f;
+    const float h = size;
+    if (!play) {
+        const float bar = (std::max)(h * 0.26f, 1.0f);
+        const float gap = h * 0.22f;
+        const float r = bar * 0.35f;
+        dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(cx - gap * 0.5f - bar, cy - h * 0.5f,
+            cx - gap * 0.5f, cy + h * 0.5f), r, r), brush.get());
+        dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(cx + gap * 0.5f, cy - h * 0.5f,
+            cx + gap * 0.5f + bar, cy + h * 0.5f), r, r), brush.get());
+        return;
+    }
+    auto factory = FactoryOf(dc);
+    if (!factory.get()) return;
+    ComPtr<ID2D1PathGeometry> geometry;
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(factory->CreatePathGeometry(&geometry)) || FAILED(geometry->Open(&sink))) return;
+    const float w = h * 0.86f;
+    const float left = cx - w * 0.42f;  // optical centre of a triangle sits left of its box's
+    sink->BeginFigure(D2D1::Point2F(left, cy - h * 0.5f), D2D1_FIGURE_BEGIN_FILLED);
+    sink->AddLine(D2D1::Point2F(left + w, cy));
+    sink->AddLine(D2D1::Point2F(left, cy + h * 0.5f));
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    if (FAILED(sink->Close())) return;
+    dc->FillGeometry(geometry.get(), brush.get());
+    // Soften the corners like the Fluent mark.
+    auto style = RoundStroke(factory.get());
+    dc->DrawGeometry(geometry.get(), brush.get(), (std::max)(h * 0.12f, 1.0f), style.get());
+}
+
 D2D1_RECT_F Rect(float scale, float x, float y, float width, float height) {
     return pulse::ui::DipRect(scale, x, y, width, height);
 }
@@ -756,8 +828,25 @@ void DrawChoiceGlyph(ID2D1DeviceContext* dc, int index, float x, float y, float 
                                  brush.get(), 1.3f * s, style.get());
 }
 
-class ConflictWindow {
+class ConflictWindow final : public PendingFileConflict, public std::enable_shared_from_this<ConflictWindow> {
 public:
+    ~ConflictWindow() override {
+        if (hwnd_) DestroyWindow(hwnd_);
+    }
+    bool Reparent(HWND owner) override {
+        if (!hwnd_ || !IsWindow(owner)) return false;
+        SetLastError(ERROR_SUCCESS);
+        if (!SetWindowLongPtrW(hwnd_, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(owner)) && GetLastError()) return false;
+        owner_ = owner;
+        return true;
+    }
+    bool Present(HWND owner, const ops::ConflictItemInfo& conflict, bool dark, D2D1_COLOR_F accent,
+                 std::function<void(ConflictDialogResult)> answer) {
+        answer_ = std::move(answer);
+        if (!Create(owner, conflict, dark, accent)) return false;
+        ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+        return true;
+    }
     bool Snapshot(const wchar_t* path) {
         const bool previous = compositor_.FrameCopyEnabled();
         compositor_.SetFrameCopyEnabled(true);
@@ -766,8 +855,7 @@ public:
         compositor_.SetFrameCopyEnabled(previous);
         return saved;
     }
-    ConflictDialogResult Show(HWND owner, const ops::ConflictItemInfo& conflict,
-                              bool dark, D2D1_COLOR_F accent) {
+    bool Create(HWND owner, const ops::ConflictItemInfo& conflict, bool dark, D2D1_COLOR_F accent) {
         owner_ = owner;
         conflict_ = conflict;
         conflict_.source = path::FriendlyPathText(conflict_.source);
@@ -792,17 +880,26 @@ public:
 
         const int width = static_cast<int>(kConflictW * scale_);
         const int height = static_cast<int>(HeightDip() * scale_);
+        // Born on the owner's monitor, not at CW_USEDEFAULT (the primary one):
+        // with 100% and 150% screens mixed, the move there rescaled the size.
+        const POINT origin = pulse::ui::OwnedWindowOrigin(owner, width, height);
         hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kConflictClass, l10n::Get(l10n::StringId::OpConflictTitle).c_str(),
             WS_POPUP | WS_THICKFRAME | WS_SYSMENU,
-            CW_USEDEFAULT, CW_USEDEFAULT, width, height, owner, nullptr,
+            origin.x, origin.y, width, height, owner, nullptr,
             wc.hInstance, this);
         if (!hwnd_) {
             diagnostics::runtime::Event("operation_conflict_ui_create_failed", {{"task", conflict.task_id},
                 {"token", conflict.token}, {"error", GetLastError()}}, diagnostics::runtime::Level::Error);
-            return result_;
+            return false;
         }
         diagnostics::runtime::Event("operation_conflict_ui_created", {{"task", conflict.task_id}, {"token", conflict.token}});
-        pulse::ui::CenterOwnedWindow(hwnd_, owner_, width, height);
+        const UINT placed_dpi = pulse::ui::CenterOwnedWindowDip(hwnd_, owner_, kConflictW, HeightDip());
+        SettleWindowDpi(hwnd_, owner_, scale_, placed_dpi);
+        return true;
+    }
+    ConflictDialogResult Show(HWND owner, const ops::ConflictItemInfo& conflict,
+                              bool dark, D2D1_COLOR_F accent) {
+        if (!Create(owner, conflict, dark, accent)) return result_;
         EnableWindow(owner_, FALSE);
         ShowWindow(hwnd_, SW_SHOW);
         SetForegroundWindow(hwnd_);
@@ -844,8 +941,16 @@ private:
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
             self->hwnd_ = hwnd;
         }
-        return self ? self->Handle(message, wparam, lparam)
-                    : DefWindowProcW(hwnd, message, wparam, lparam);
+        if (!self) return DefWindowProcW(hwnd, message, wparam, lparam);
+        // Closing or handing off the main window can release its last reference
+        // while a nested window message is being dispatched.
+        const auto keep_alive = self->weak_from_this().lock();
+        if (message == WM_NCDESTROY) {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            self->hwnd_ = nullptr;
+            return DefWindowProcW(hwnd, message, wparam, lparam);
+        }
+        return self->Handle(message, wparam, lparam);
     }
 
     static std::wstring ParentPath(const std::wstring& path) {
@@ -976,10 +1081,14 @@ private:
     }
 
     void Complete(ops::ConflictChoice choice) {
+        if (done_) return;
         result_.choice = choice;
         result_.apply_to_all = apply_all_;
         done_ = true;
-        if (hwnd_) { HideComposedDialog(hwnd_, owner_); DestroyWindow(hwnd_); }
+        auto answer = std::move(answer_);
+        const auto response = result_;
+        if (hwnd_) { HideComposedDialog(hwnd_, answer ? nullptr : owner_); DestroyWindow(hwnd_); }
+        if (answer) answer(response);
     }
 
     // Preview of the hovered (or focused) choice: 1 replace, 2 skip, 3 keep.
@@ -1540,9 +1649,11 @@ private:
             compositor_.RecreateTextFormats(scale_);
             painter_.SetScale(scale_);
             CreateFormats();
-            const auto* suggested = reinterpret_cast<RECT*>(lparam);
-            SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top,
-                         suggested->right - suggested->left, suggested->bottom - suggested->top,
+            // Size from the DIP layout, not the suggested rect: that one only
+            // rescales the current pixels, which may not match the old DPI.
+            const RECT next = pulse::ui::placement::DpiChangedRect(
+                *reinterpret_cast<RECT*>(lparam), kConflictW, HeightDip(), HIWORD(wparam));
+            SetWindowPos(hwnd_, nullptr, next.left, next.top, next.right - next.left, next.bottom - next.top,
                          SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
             return 0;
         }
@@ -1679,6 +1790,7 @@ private:
     std::wstring source_dir_;
     std::wstring destination_dir_;
     ConflictDialogResult result_;
+    std::function<void(ConflictDialogResult)> answer_;
     D2D1_COLOR_F accent_ = HexColor(0x0078D4);
     float scale_ = 1.0f;
     bool dark_ = false;
@@ -1729,11 +1841,13 @@ public:
 
         const int width = static_cast<int>(kW * scale_);
         const int height = static_cast<int>(HeightDip() * scale_);
+        const POINT origin = pulse::ui::OwnedWindowOrigin(owner, width, height);
         hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kDeleteClass,
             l10n::Get(l10n::StringId::PermanentDelete).c_str(), WS_POPUP | WS_THICKFRAME | WS_SYSMENU,
-            CW_USEDEFAULT, CW_USEDEFAULT, width, height, owner, nullptr, wc.hInstance, this);
+            origin.x, origin.y, width, height, owner, nullptr, wc.hInstance, this);
         if (!hwnd_) { ReleaseIcons(); return choice_; }
-        pulse::ui::CenterOwnedWindow(hwnd_, owner_, width, height);
+        const UINT placed_dpi = pulse::ui::CenterOwnedWindowDip(hwnd_, owner_, kW, HeightDip());
+        SettleWindowDpi(hwnd_, owner_, scale_, placed_dpi);
         if (owner_) EnableWindow(owner_, FALSE);
         ShowWindow(hwnd_, SW_SHOW);
         SetForegroundWindow(hwnd_);
@@ -2047,9 +2161,10 @@ private:
             compositor_.RecreateTextFormats(scale_);
             painter_.SetScale(scale_);
             CreateFormats();
-            const auto* suggested = reinterpret_cast<RECT*>(lparam);
-            SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top, suggested->right - suggested->left,
-                         suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOOWNERZORDER);
+            const RECT next = pulse::ui::placement::DpiChangedRect(
+                *reinterpret_cast<RECT*>(lparam), kW, HeightDip(), HIWORD(wparam));
+            SetWindowPos(hwnd_, nullptr, next.left, next.top, next.right - next.left, next.bottom - next.top,
+                         SWP_NOZORDER | SWP_NOOWNERZORDER);
             return 0;
         }
         case WM_MOUSEMOVE: {
@@ -2183,11 +2298,13 @@ public:
 
         const int width = static_cast<int>(kW * scale_);
         const int height = static_cast<int>(HeightDip() * scale_);
+        const POINT origin = pulse::ui::OwnedWindowOrigin(owner, width, height);
         hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kLockedClass,
             l10n::Get(l10n::StringId::LockedItemTitle).c_str(), WS_POPUP | WS_THICKFRAME | WS_SYSMENU,
-            CW_USEDEFAULT, CW_USEDEFAULT, width, height, owner, nullptr, wc.hInstance, this);
+            origin.x, origin.y, width, height, owner, nullptr, wc.hInstance, this);
         if (hwnd_) {
-            pulse::ui::CenterOwnedWindow(hwnd_, owner_, width, height);
+            const UINT placed_dpi = pulse::ui::CenterOwnedWindowDip(hwnd_, owner_, kW, HeightDip());
+            SettleWindowDpi(hwnd_, owner_, scale_, placed_dpi);
             if (owner_) EnableWindow(owner_, FALSE);
             ShowWindow(hwnd_, SW_SHOW);
             SetForegroundWindow(hwnd_);
@@ -2691,9 +2808,10 @@ private:
             painter_.SetScale(scale_);
             CreateFormats();
             LoadIcons();
-            const auto* suggested = reinterpret_cast<RECT*>(lparam);
-            SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top, suggested->right - suggested->left,
-                         suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOOWNERZORDER);
+            const RECT next = pulse::ui::placement::DpiChangedRect(
+                *reinterpret_cast<RECT*>(lparam), kW, HeightDip(), HIWORD(wparam));
+            SetWindowPos(hwnd_, nullptr, next.left, next.top, next.right - next.left, next.bottom - next.top,
+                         SWP_NOZORDER | SWP_NOOWNERZORDER);
             return 0;
         }
         case kWatchMessage:
@@ -2845,9 +2963,12 @@ bool FileOperationWindow::Create(HWND owner, FileOperationCallbacks callbacks) {
     const UINT owner_dpi = pulse::compat::WindowDpi(owner_);
     const int width = MulDiv(static_cast<int>(kDlgW), owner_dpi, 96);
     const int height = MulDiv(static_cast<int>(kCollapsedH), owner_dpi, 96);
+    // Born on the owner's monitor so WM_CREATE reads the DPI the size was
+    // computed for (CW_USEDEFAULT puts it on the primary monitor).
+    const POINT origin = pulse::ui::OwnedWindowOrigin(owner_, width, height);
     hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kTransferClass, l10n::Get(l10n::StringId::OpWindow).c_str(),
         WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, width, height, owner_, nullptr,
+        origin.x, origin.y, width, height, owner_, nullptr,
         wc.hInstance, this);
     return hwnd_ != nullptr;
 }
@@ -2933,6 +3054,10 @@ std::wstring FormatCounts(l10n::StringId id, uint64_t first, uint64_t second = 0
 
 TransferFailureView FileOperationWindow::FailureView() const {
     TransferFailureView view;
+    view.native_handoff = !status_.native_handoff_directory.empty() && callbacks_.open_native_folder &&
+        ((!status_.active && status_.phase == ops::OpPhase::Failed) ||
+         (status_.active && status_.authorization == ops::AuthorizationState::ActionRequired &&
+          !status_.authorization_retrying && status_.phase != ops::OpPhase::Cancelling));
     view.can_open = !status_.destination_dir.empty() && callbacks_.open_folder != nullptr;
     if (!board_) return view;
     view.on = true;
@@ -3035,6 +3160,11 @@ void FileOperationWindow::FinishRetry(const ops::OpStatus& done) {
 }
 
 void FileOperationWindow::Update(const ops::OpStatus& incoming) {
+    if (incoming.task_id != status_.task_id || incoming.active != status_.active) {
+        if (incoming.task_id != status_.task_id) FlushPaintStats();
+        std::fill(std::begin(presentation_tick_), std::end(presentation_tick_), 0);
+    }
+    status_update_tick_ = GetTickCount64();
     ops::OpStatus status = incoming;
     const bool had_board = board_.has_value();
     if (board_) {
@@ -3094,6 +3224,7 @@ void FileOperationWindow::Update(const ops::OpStatus& incoming) {
         if ((leaving_authorization || retry_ended) && now < hold_until_) {
             held_status_ = status;  // released by the render timer if it sticks
             has_held_status_ = true;
+            SyncRenderTimer();
             return;
         }
     }
@@ -3102,26 +3233,59 @@ void FileOperationWindow::Update(const ops::OpStatus& incoming) {
     if (status.authorization_retrying && !status_.authorization_retrying) retry_shown_tick_ = now;
     const bool was_active = status_.active;
     const bool was_succeeded = !new_task && TransferCanAutoClose(status_);
+    const ULONGLONG previous_dismiss_at = success_dismiss_at_;
     if (new_task || status.authorization != status_.authorization) pressed_ = 0;
     const bool layout_changed = TaskLayoutReduction(status) != TaskLayoutReduction(status_);
     const bool authorization_changed = (status.authorization != ops::AuthorizationState::None) !=
                                        (status_.authorization != ops::AuthorizationState::None);
-    status_ = ops::PresentOperationStatus(status);
+    const ops::OpStatus presented = ops::PresentOperationStatus(status);
+    const bool visual_changed = new_task || layout_changed || authorization_changed || had_board != board_.has_value() ||
+        presented.active != status_.active || presented.phase != status_.phase ||
+        presented.pause_requested != status_.pause_requested ||
+        presented.authorization != status_.authorization ||
+        presented.authorization_retrying != status_.authorization_retrying ||
+        presented.enumeration_complete != status_.enumeration_complete ||
+        presented.percent != status_.percent ||
+        presented.completed_items != status_.completed_items ||
+        presented.total_items != status_.total_items ||
+        presented.scanned_items != status_.scanned_items ||
+        presented.scanned_bytes != status_.scanned_bytes ||
+        presented.transferred_bytes != status_.transferred_bytes ||
+        presented.total_bytes != status_.total_bytes ||
+        presented.failed_items != status_.failed_items ||
+        presented.eta_seconds != status_.eta_seconds ||
+        presented.current_item_token != status_.current_item_token ||
+        static_cast<int64_t>(presented.bytes_per_second) != static_cast<int64_t>(status_.bytes_per_second) ||
+        static_cast<int64_t>(presented.items_per_second) != static_cast<int64_t>(status_.items_per_second) ||
+        presented.current_item != status_.current_item ||
+        presented.summary != status_.summary ||
+        presented.last_error != status_.last_error ||
+        presented.external_step != status_.external_step ||
+        presented.external_outcome != status_.external_outcome ||
+        presented.external_note != status_.external_note;
+    status_ = presented;
     if (new_task) {
         graph_.Reset();
         SyncGraph();   // a card built late starts with the run so far
-        task_start_tick_ = now;
+        task_start_tick_ = (status_.started_tick != 0 && status_.started_tick <= now) ? status_.started_tick : now;
         task_end_tick_ = 0;
         success_dismiss_at_ = 0;
-        if (keep_open_requested_) auto_close_ = true;
+        auto_close_ = true;
         keep_open_requested_ = false;
         locate_after_ = false;
         pending_locate_task_ = 0;
+    } else if (status_.started_tick != 0 && status_.started_tick < task_start_tick_) {
+        task_start_tick_ = status_.started_tick;
     }
     const bool finished = !status_.active &&
         (status_.phase == ops::OpPhase::Completed || status_.phase == ops::OpPhase::Failed);
-    if (!finished) task_end_tick_ = 0;
-    else if (task_end_tick_ == 0) task_end_tick_ = now;
+    if (!finished) {
+        task_end_tick_ = 0;
+    } else if (status_.ended_tick != 0 && status_.ended_tick >= task_start_tick_) {
+        task_end_tick_ = status_.ended_tick;
+    } else if (task_end_tick_ == 0) {
+        task_end_tick_ = now;
+    }
     const bool succeeded = TransferCanAutoClose(status_);
     if (succeeded && status_.failed_items == 0) {
         SyncGraph();
@@ -3134,6 +3298,7 @@ void FileOperationWindow::Update(const ops::OpStatus& incoming) {
     } else if (!succeeded || !auto_close_) {
         success_dismiss_at_ = 0;
     }
+    if (hwnd_ && TickSuccessDismiss(now)) return;
     if (succeeded && !was_succeeded && auto_close_ && locate_after_ &&
         hwnd_ && !Shown() && callbacks_.locate_results) {
         if (closing_) pending_locate_task_ = status_.task_id;
@@ -3142,10 +3307,10 @@ void FileOperationWindow::Update(const ops::OpStatus& incoming) {
     if (!hwnd_) return;
     if (authorization_changed || new_task || was_active != status_.active || layout_changed)
         ResizeForDetails(authorization_changed);
-    InvalidateRect(hwnd_, nullptr, FALSE);
-    // The timer also drains the short completion indicator in the footer.
-    if (((status_.active && !was_active) || success_dismiss_at_ != 0) && Shown())
-        SetTimer(hwnd_, kRenderTimer, 33, nullptr);
+    const bool armed_dismiss = previous_dismiss_at == 0 && success_dismiss_at_ != 0;
+    if (visual_changed || armed_dismiss)
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    SyncRenderTimer();
 }
 
 bool FileOperationWindow::FlightAnimationsEnabled() const {
@@ -3163,9 +3328,13 @@ void FileOperationWindow::Show(bool activate, bool from_status) {
     const bool was_visible = IsWindowVisible(hwnd_) != FALSE;
     const bool zoom = (from_status || interrupted) && !was_visible && FlightAnimationsEnabled();
     if (!positioned_) {
+        // The window is reused: the owner may have moved to a screen with
+        // another scale since it was created. Size for the DPI it lands on.
         RECT rect{};
         GetWindowRect(hwnd_, &rect);
-        pulse::ui::CenterOwnedWindow(hwnd_, owner_, rect.right - rect.left, rect.bottom - rect.top);
+        const UINT dpi = pulse::ui::CenterOwnedWindowDip(
+            hwnd_, owner_, kDlgW, static_cast<float>(rect.bottom - rect.top) / scale_);
+        SettleWindowDpi(hwnd_, owner_, scale_, dpi);
         positioned_ = true;
     }
     if (!was_visible) SyncGraph();
@@ -3296,8 +3465,10 @@ void FileOperationWindow::FinishHideToStatus() {
     if (!hwnd_) return;
     const bool was_shown = closing_ || opening_ || IsWindowVisible(hwnd_) != FALSE;
     KillTimer(hwnd_, kRenderTimer);
+    render_timer_ms_ = 0;
     ShowWindow(hwnd_, SW_HIDE);
     EndZoom();
+    FlushPaintStats();
     const uint64_t locate = pending_locate_task_;
     pending_locate_task_ = 0;
     if (was_shown && callbacks_.reached_status) callbacks_.reached_status();
@@ -3312,8 +3483,23 @@ void FileOperationWindow::FinishShowFromStatus() {
     SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER |
                  (flight_activate_ ? 0 : SWP_NOACTIVATE) | SWP_SHOWWINDOW);
-    SetTimer(hwnd_, kRenderTimer, 33, nullptr);
+    if (auto_close_ && success_dismiss_at_ == 0 && TransferCanAutoClose(status_))
+        success_dismiss_at_ = GetTickCount64() + kSuccessDismissMs;
+    SyncRenderTimer();
     if (flight_activate_) SetForegroundWindow(hwnd_);
+}
+
+bool FileOperationWindow::TickSuccessDismiss(ULONGLONG now) {
+    if (closing_ || !Shown() || success_dismiss_at_ == 0 || !auto_close_ || now < success_dismiss_at_)
+        return false;
+    success_dismiss_at_ = 0;
+    diagnostics::runtime::Event("operation_ui_success_close", {{"task", status_.task_id},
+        {"type", static_cast<uint64_t>(status_.type)}});
+    if (callbacks_.dismiss_task) callbacks_.dismiss_task(status_.task_id);
+    else if (callbacks_.dismiss) callbacks_.dismiss();
+    pending_locate_task_ = locate_after_ ? status_.task_id : 0;
+    HideToStatus();
+    return true;
 }
 
 bool FileOperationWindow::Shown() const {
@@ -3380,7 +3566,12 @@ void FileOperationWindow::ShowMoreMenu() {
 
 void FileOperationWindow::SetAutoClose(bool on) {
     auto_close_ = on && !keep_open_requested_;
-    if (!auto_close_) success_dismiss_at_ = 0;
+    if (!auto_close_) {
+        success_dismiss_at_ = 0;
+    } else if (success_dismiss_at_ == 0 && TransferCanAutoClose(status_) && Shown()) {
+        success_dismiss_at_ = GetTickCount64() + kSuccessDismissMs;
+    }
+    SyncRenderTimer();
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -3388,8 +3579,10 @@ void FileOperationWindow::Hide() {
     pending_locate_task_ = 0;
     if (!hwnd_) return;
     KillTimer(hwnd_, kRenderTimer);
+    render_timer_ms_ = 0;
     ShowWindow(hwnd_, SW_HIDE);
     if (closing_ || opening_) EndZoom();
+    FlushPaintStats();
 }
 
 // A card shrinking into the status pill already counts as gone.
@@ -3401,6 +3594,48 @@ void FileOperationWindow::ApplyWindowTheme() {
     backdrop_enabled_ = pulse::ui::ApplyBackdrop(hwnd_, dark_);
 }
 
+void FileOperationWindow::SetOtherTasks(std::vector<ops::OpStatus> tasks) {
+    std::erase_if(tasks, [&](const ops::OpStatus& task) { return !task.active || task.task_id == status_.task_id; });
+    std::stable_sort(tasks.begin(), tasks.end(), [](const ops::OpStatus& a, const ops::OpStatus& b) {
+        return TaskStripRank(a) < TaskStripRank(b);
+    });
+    const float before = TaskStripDip();
+    other_tasks_ = std::move(tasks);
+    // The strip grows the card downwards: the body is laid out from the top
+    // and the footer from the bottom, so neither moves.
+    if (TaskStripDip() != before) ResizeForDetails(false);
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+size_t FileOperationWindow::TaskStripRows() const {
+    return (std::min)(other_tasks_.size(), kTaskMaxRows);
+}
+
+float FileOperationWindow::TaskStripDip() const {
+    const size_t rows = TaskStripRows();
+    if (rows == 0) return 0.0f;
+    return kTaskStripPadY * 2.0f + kTaskRowH * static_cast<float>(rows) +
+           (other_tasks_.size() > rows ? kTaskMoreH : 0.0f);
+}
+
+FileOperationWindow::TaskRowGeometry FileOperationWindow::TaskRow(size_t index) const {
+    const float s = (std::max)(scale_, 0.001f);
+    const float dip_w = static_cast<float>(compositor_.Width()) / s;
+    const float dip_h = static_cast<float>(compositor_.Height()) / s;
+    const float y = dip_h - kFooterH - TaskStripDip() + kTaskStripPadY + kTaskRowH * static_cast<float>(index);
+    TaskRowGeometry g{};
+    g.row = D2D1::RectF(kPadX - 8.0f, y + 2.0f, dip_w - kPadX + 8.0f, y + kTaskRowH - 2.0f);
+    g.cancel = D2D1::RectF(dip_w - kPadX - 28.0f, y + 8.0f, dip_w - kPadX, y + 36.0f);
+    g.pause = D2D1::RectF(g.cancel.left - 32.0f, g.cancel.top, g.cancel.left - 4.0f, g.cancel.bottom);
+    if (index < other_tasks_.size()) {
+        const auto& task = other_tasks_[index];
+        g.has_pause = task.phase != ops::OpPhase::Queued && task.can_pause &&
+            task.phase != ops::OpPhase::WaitingForConflict && task.phase != ops::OpPhase::Cancelling &&
+            task.authorization == ops::AuthorizationState::None;
+    }
+    return g;
+}
+
 void FileOperationWindow::ResizeForDetails(bool preserve_center) {
     if (!hwnd_) return;
     RECT rect{};
@@ -3410,7 +3645,7 @@ void FileOperationWindow::ResizeForDetails(bool preserve_center) {
     const float height_dip = status_.authorization != ops::AuthorizationState::None
         ? kAuthorizationH : (ShowsTransferDetails(status_, detailed_) ? kDetailedH : kCollapsedH) +
             FailureBlockDip() - TaskLayoutReduction(status_);
-    const int height = static_cast<int>(height_dip * scale_);
+    const int height = static_cast<int>((height_dip + TaskStripDip()) * scale_);
     const int y = preserve_center ? rect.top - (height - old_height) / 2 : rect.top;
     SetWindowPos(hwnd_, nullptr, rect.left, y, width, height,
                  SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
@@ -3432,6 +3667,16 @@ int FileOperationWindow::HitTestControl(float x, float y) const {
     if (labels.show_keep_open && pulse::ui::ContainsRect(chrome.keep_open, x, y)) return kHitKeepOpen;
     if (pulse::ui::ContainsRect(chrome.close, x, y)) return 1;
     if (pulse::ui::ContainsRect(chrome.minimize, x, y)) return 2;
+    for (size_t i = 0, rows = TaskStripRows(); i < rows; ++i) {
+        const auto g = TaskRow(i);
+        const auto px = [&](D2D1_RECT_F r) { return D2D1::RectF(r.left * scale_, r.top * scale_, r.right * scale_, r.bottom * scale_); };
+        const int base = kHitTaskRow + static_cast<int>(i) * 4;
+        if (pulse::ui::ContainsRect(px(g.cancel), x, y)) return base + 2;
+        if (g.has_pause && pulse::ui::ContainsRect(px(g.pause), x, y)) return base + 1;
+        // A queued task has nothing to show in the card yet.
+        if (pulse::ui::ContainsRect(px(g.row), x, y))
+            return other_tasks_[i].phase == ops::OpPhase::Queued || !callbacks_.select_task ? 0 : base;
+    }
     if (board_ && !status_.active) {
         for (const auto& [row, bounds] : failure_buttons_)
             if (pulse::ui::ContainsRect(bounds, x, y)) return kHitFailRow + static_cast<int>(row);
@@ -3452,7 +3697,8 @@ int FileOperationWindow::HitTestControl(float x, float y) const {
 
 void FileOperationWindow::RequestDismiss(bool to_status) {
     success_dismiss_at_ = 0;
-    if (callbacks_.dismiss) callbacks_.dismiss();
+    if (callbacks_.dismiss_task) callbacks_.dismiss_task(status_.task_id);
+    else if (callbacks_.dismiss) callbacks_.dismiss();
     if (to_status) HideToStatus();
     else Hide();
 }
@@ -3468,17 +3714,68 @@ void FileOperationWindow::RequestCancel() {
     RequestDismiss(!cancelling);
 }
 
-void FileOperationWindow::SampleGraph(ULONGLONG now) {
-    if (!graph_.Due(now)) return;
+bool FileOperationWindow::SampleGraph(ULONGLONG now) {
+    if (!graph_.Due(now)) return false;
     if (status_.phase != ops::OpPhase::Running || ShowsPaused(status_)) {
         graph_.last_tick = now;
-        return;
+        return false;
     }
-    if (status_.speed_basis == ops::OpSpeedBasis::None) return;
+    if (status_.speed_basis == ops::OpSpeedBasis::None) return false;
+    const size_t before = graph_.points.size();
+    const double last_v = before ? graph_.points.back().v : -1.0;
+    const float last_x = before ? graph_.points.back().x : -1.0f;
     // Sample whichever unit this task tracks: byte transfers and
     // empty-recycle feed the byte rate, delete and restore the item rate.
     graph_.Sample(now, status_.percent, status_.speed_basis == ops::OpSpeedBasis::Items
         ? status_.items_per_second : status_.bytes_per_second);
+    return graph_.points.size() != before ||
+        (before > 0 && (graph_.points.back().v != last_v || graph_.points.back().x != last_x));
+}
+
+bool FileOperationWindow::NeedsContinuousAnimation() const {
+    if (success_dismiss_at_ != 0 && auto_close_) return true;
+    if (!status_.active || ShowsPaused(status_)) return false;
+    if (status_.phase == ops::OpPhase::WaitingForConflict ||
+        status_.phase == ops::OpPhase::Cancelling ||
+        status_.authorization != ops::AuthorizationState::None)
+        return false;
+    return status_.phase == ops::OpPhase::Scanning ||
+        status_.percent < 0.0f ||
+        !status_.enumeration_complete;
+}
+
+void FileOperationWindow::SyncRenderTimer() {
+    if (!hwnd_) return;
+    const bool visible = !closing_ && IsWindowVisible(hwnd_) && !IsIconic(hwnd_);
+    const bool need_timer = visible && (status_.active || (success_dismiss_at_ != 0 && auto_close_) || has_held_status_);
+    if (!need_timer) {
+        if (render_timer_ms_ != 0) {
+            KillTimer(hwnd_, kRenderTimer);
+            render_timer_ms_ = 0;
+        }
+        return;
+    }
+    const UINT desired = (NeedsContinuousAnimation() || has_held_status_) ? 33u : 125u;
+    if (render_timer_ms_ != desired) {
+        SetTimer(hwnd_, kRenderTimer, desired, nullptr);
+        render_timer_ms_ = desired;
+    }
+}
+
+void FileOperationWindow::FlushPaintStats() {
+    if (paint_count_ == 0) return;
+    diagnostics::runtime::Event("operation_window_paint_stats", {
+        {"task", paint_task_id_},
+        {"paints", paint_count_},
+        {"slow_paints", slow_paint_count_},
+        {"total_ms", paint_total_ms_},
+        {"max_ms", paint_max_ms_}
+    });
+    paint_count_ = 0;
+    slow_paint_count_ = 0;
+    paint_total_ms_ = 0;
+    paint_max_ms_ = 0;
+    paint_task_id_ = 0;
 }
 
 // The engine samples every run in the background; while the card was not
@@ -3496,7 +3793,27 @@ void FileOperationWindow::SyncGraph() {
     if (tick > graph_.last_tick) graph_.last_tick = tick;
 }
 
+// Paint/timer gaps do not imply stalled input. Runtime Event writes off-thread.
+void FileOperationWindow::ObservePresentation(unsigned kind, ULONGLONG now, ULONGLONG elapsed) {
+    if (kind == 0 || kind >= 5) return;
+    const auto previous = presentation_tick_[kind];
+    presentation_tick_[kind] = now;
+    const bool visible = hwnd_ && IsWindowVisible(hwnd_) && !IsIconic(hwnd_);
+    if (!visible || (kind != 3 && !status_.active)) return;
+    if (kind != 3) elapsed = previous ? now - previous : 0;
+    if (elapsed < (kind == 3 ? 50u : 250u) ||
+        (presentation_report_[kind] && now - presentation_report_[kind] < 1000)) return;
+    presentation_report_[kind] = now;
+    diagnostics::runtime::Event("operation_window_slow", {{"kind", kind}, {"elapsed_ms", elapsed},
+        {"task", status_.task_id}, {"type", static_cast<uint64_t>(status_.type)},
+        {"phase", static_cast<uint64_t>(status_.phase)}, {"active", status_.active},
+        {"opening", opening_}, {"closing", closing_},
+        {"foreground", GetForegroundWindow() == hwnd_},
+        {"status_age_ms", status_update_tick_ ? now - status_update_tick_ : 0}});
+}
+
 void FileOperationWindow::Render() {
+    const auto render_started = GetTickCount64();
     if (compositor_.NeedsRecovery()) {
         if (!compositor_.Recover()) return;
         compositor_.RecreateTextFormats(scale_);
@@ -3928,9 +4245,16 @@ void FileOperationWindow::Render() {
                                l10n::Get(status_.external ? l10n::StringId::OpPreparing : !status_.enumeration_complete ? l10n::StringId::OpScanningAndCopying :
                                    (scanning ? l10n::StringId::OpScanning : l10n::StringId::OpPreparing)),
                                theme.text_secondary);
-            if (status_.total_items > 0) {
+            if (status_.scanned_items > 0) {
+                std::wstring found = pulse::format::GroupedInt(status_.scanned_items);
+                found += status_.scanned_bytes > 0
+                    ? l10n::Get(l10n::StringId::OpCountBytes) + pulse::format::ByteSize(status_.scanned_bytes) + L")"
+                    : l10n::Get(l10n::StringId::OpCountSuffix);
+                painter_.DrawText(found, right_box, value_format_.get(), theme.text_secondary,
+                                  fluent::HorizontalAlignment::Right);
+            } else if (status_.total_items > 0) {
                 std::wstring found = pulse::format::GroupedInt(status_.total_items);
-                found += byte_basis && status_.total_bytes > 0
+                found += (byte_basis || scanning) && status_.total_bytes > 0
                     ? l10n::Get(l10n::StringId::OpCountBytes) + pulse::format::ByteSize(status_.total_bytes) + L")"
                     : l10n::Get(l10n::StringId::OpCountSuffix);
                 painter_.DrawText(found, right_box, value_format_.get(), theme.text_secondary,
@@ -3976,8 +4300,10 @@ void FileOperationWindow::Render() {
             if (!completed && !failed && !cancelling && status_.speed_basis != ops::OpSpeedBasis::None) {
                 const std::wstring sub = status_.external && status_.external_linked != 0
                     ? l10n::Get(l10n::StringId::OpTaskThroughPulse) : paused || waiting ? remain_line : time_text;
-                painter_.DrawText(sub, Rect(s, dip_w - kPadX - 220.0f, hero_y + 26.0f, 220.0f, 18.0f),
-                                  label_format_.get(), theme.text_secondary, fluent::HorizontalAlignment::Right);
+                if (!sub.empty() && sub != state) {
+                    painter_.DrawText(sub, Rect(s, dip_w - kPadX - 220.0f, hero_y + 26.0f, 220.0f, 18.0f),
+                                      label_format_.get(), theme.text_secondary, fluent::HorizontalAlignment::Right);
+                }
             }
         }
 
@@ -4024,6 +4350,10 @@ void FileOperationWindow::Render() {
                 if (SUCCEEDED(dc->CreateSolidColorBrush(completed ? ok_color : failed ? bad_color : line, &dot_brush)))
                     dc->FillEllipse(D2D1::Ellipse(points.back(), ScaleDip(s, 3.0f), ScaleDip(s, 3.0f)),
                                     dot_brush.get());
+            } else if (fraction > 0.0f && !unknown_terminal_progress) {
+                const bool grey = paused || waiting || failed || cancelling;
+                painter_.FillRoundedRect(Rect(s, kPadX, graph_top + graph_h - 3.0f, content_w * fraction, 3.0f),
+                                         ScaleDip(s, 1.5f), grey ? text3 : accent);
             }
         }
         if (clipped) dc->PopLayer();
@@ -4203,6 +4533,91 @@ void FileOperationWindow::Render() {
         }
     }
 
+    // --- Other operations -------------------------------------------------
+    // Each other task running or queued: what it works on, how far, and its
+    // own pause and cancel. A row needing a choice comes first.
+    if (const size_t rows = TaskStripRows(); rows > 0) {
+        const float strip_top = height / s - kFooterH - TaskStripDip();
+        const float line = ScaleDip(s, strip_top);
+        painter_.FillRoundedRect(D2D1::RectF(0, line, width, line + 1.0f), 0, theme.stroke_divider);
+        const auto px = [&](D2D1_RECT_F r) { return D2D1::RectF(r.left * s, r.top * s, r.right * s, r.bottom * s); };
+        for (size_t i = 0; i < rows; ++i) {
+            const ops::OpStatus& task = other_tasks_[i];
+            const auto g = TaskRow(i);
+            const int base = kHitTaskRow + static_cast<int>(i) * 4;
+            const bool task_queued = task.phase == ops::OpPhase::Queued;
+            const bool task_choice = TaskStripRank(task) == 0;
+            const bool task_paused = ShowsPaused(task);
+            const bool task_deleting = task.type == ops::OpType::RecycleDelete || task.type == ops::OpType::RealDelete;
+            const auto hover_fill = [&](int id) {
+                return WithAlpha(theme.text, pressed_ == id ? 0.06f : (dark_ ? 0.06f : 0.037f));
+            };
+            if (!task_queued && (hover_ == base || pressed_ == base))
+                painter_.FillRoundedRect(px(g.row), ScaleDip(s, 4.0f), hover_fill(base));
+            const float y = g.row.top - 2.0f;
+            const StoreIcon kind = task_choice ? StoreIcon::Warn : task.type == ops::OpType::Move ? StoreIcon::Cut
+                : task_deleting ? StoreIcon::Trash : StoreIcon::Copy;
+            DrawStoreIcon(dc, kind, Rect(s, kPadX, y + 6.0f, 16.0f, 16.0f),
+                          task_choice ? warn_color : theme.text_secondary, 1.3f);
+
+            // Buttons: pause / resume, cancel.
+            for (int part = 1; part <= 2; ++part) {
+                if (part == 1 && !g.has_pause) continue;
+                const auto bounds = px(part == 1 ? g.pause : g.cancel);
+                const int id = base + part;
+                if (hover_ == id || pressed_ == id)
+                    painter_.FillRoundedRect(bounds, ScaleDip(s, 4.0f), hover_fill(id));
+                const D2D1_COLOR_F mark = part == 2 && hover_ == id ? bad_color : theme.text_secondary;
+                if (part == 1) {
+                    DrawPausePlayMark(dc, task_paused, bounds, ScaleDip(s, 10.0f), mark);
+                } else {
+                    const float cx = (g.cancel.left + g.cancel.right) * 0.5f, cy = (g.cancel.top + g.cancel.bottom) * 0.5f;
+                    DrawStoreIcon(dc, StoreIcon::Close, Rect(s, cx - 6.0f, cy - 6.0f, 12.0f, 12.0f), mark, 1.4f);
+                }
+            }
+
+            // State on the right of the first line, name on the left.
+            const float right = (g.has_pause ? g.pause.left : g.cancel.left) - 6.0f;
+            const float pct = OperationDisplayPercent(task);
+            const std::wstring state = task_choice ? l10n::Get(l10n::StringId::OpNeedsChoice)
+                : task_queued ? l10n::Get(l10n::StringId::OpQueuedWaiting)
+                : task_paused ? l10n::Get(l10n::StringId::OpPaused)
+                : pct >= 0.0f ? std::to_wstring(static_cast<int>(std::floor(pct))) + L"%" : std::wstring();
+            const float state_w = state.empty() ? 0.0f : TextWidth(factory, label_format_.get(), state) / s + 2.0f;
+            if (!state.empty())
+                painter_.DrawText(state, Rect(s, right - state_w, y + 4.0f, state_w, 18.0f), label_format_.get(),
+                                  task_choice ? warn_color : theme.text_secondary, fluent::HorizontalAlignment::Right);
+            const float name_x = kPadX + 26.0f;
+            const std::wstring name = task.source_label.empty()
+                ? l10n::Get(l10n::StringId::OpSourceShort) : task.source_label;
+            DrawEllipsizedText(compositor_, chip_format_.get(),
+                               Rect(s, name_x, y + 4.0f, (std::max)(right - state_w - 8.0f - name_x, 0.0f), 18.0f),
+                               name, theme.text);
+            // Second line: its progress, or why it waits.
+            if (task_queued) {
+                const auto reason = task.wait_reason == ops::OpWaitReason::SamePlace ? l10n::StringId::OpWaitSamePlace
+                    : task.wait_reason == ops::OpWaitReason::LanesFull ? l10n::StringId::OpWaitLanesFull
+                    : l10n::StringId::OpWaitTurn;
+                DrawEllipsizedText(compositor_, label_format_.get(),
+                                   Rect(s, name_x, y + 23.0f, (std::max)(right - name_x, 0.0f), 16.0f),
+                                   l10n::Get(reason), text3);
+            } else {
+                fluent::ProgressSpec bar{};
+                bar.bounds = Rect(s, name_x, y + 28.0f, (std::max)(right - name_x, 0.0f), 4.0f);
+                bar.value = pct < 0.0f ? 0.0f : std::clamp(pct / 100.0f, 0.0f, 1.0f);
+                bar.paused = task_paused || task_choice;
+                painter_.DrawProgressBar(bar);
+            }
+        }
+        if (other_tasks_.size() > rows) {
+            const std::wstring more = l10n::Get(l10n::StringId::OpMoreTasksPrefix) +
+                pulse::format::GroupedInt(other_tasks_.size() - rows) + l10n::Get(l10n::StringId::OpMoreTasksSuffix);
+            const float more_y = strip_top + kTaskStripPadY + kTaskRowH * static_cast<float>(rows);
+            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, kPadX + 26.0f, more_y, content_w - 26.0f, 16.0f),
+                               more, text3);
+        }
+    }
+
     // --- Footer -----------------------------------------------------------
     const float footer_top = height - ScaleDip(s, kFooterH);
     painter_.FillRoundedRect(D2D1::RectF(0, footer_top, width, height), 0,
@@ -4308,6 +4723,15 @@ void FileOperationWindow::Render() {
                           labels.cancel_primary ? fluent::ButtonKind::Primary : fluent::ButtonKind::Standard,
                           cancel_state });
     pulse::ui::EndSurface(compositor_);
+    const ULONGLONG render_end = GetTickCount64();
+    const ULONGLONG render_ms = render_end - render_started;
+    last_rendered_elapsed_sec_ = elapsed_ms / 1000;
+    paint_task_id_ = status_.task_id;
+    ++paint_count_;
+    paint_total_ms_ += render_ms;
+    if (render_ms >= 16) ++slow_paint_count_;
+    if (render_ms > paint_max_ms_) paint_max_ms_ = render_ms;
+    ObservePresentation(3, render_end, render_ms);
 }
 
 LRESULT CALLBACK FileOperationWindow::WndProc(HWND hwnd, UINT message,
@@ -4328,17 +4752,27 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
     case WM_CREATE:
         scale_ = static_cast<float>(pulse::compat::WindowDpi(hwnd_)) / 96.0f;
         ApplyWindowTheme();
+        // Secondary progress surface: never VSync-stall the shared UI thread's DXGI queue.
+        compositor_.SetSyncInterval(0);
         if (!compositor_.Init(hwnd_)) return -1;
         compositor_.RecreateTextFormats(scale_);
         painter_.SetCompositor(&compositor_);
         painter_.SetScale(scale_);
         CreateCardFormats();
-        // The window is created hidden and kept for reuse; its 33 ms
-        // animation timer only runs while it is shown.
+        // The window is created hidden and kept for reuse; its timer only runs
+        // while shown and paces itself to the active animation state.
         return 0;
     case WM_SHOWWINDOW:
-        if (wparam) SetTimer(hwnd_, kRenderTimer, 33, nullptr);
-        else KillTimer(hwnd_, kRenderTimer);
+        std::fill(std::begin(presentation_tick_), std::end(presentation_tick_), 0);
+        if (!wparam) {
+            if (render_timer_ms_ != 0) {
+                KillTimer(hwnd_, kRenderTimer);
+                render_timer_ms_ = 0;
+            }
+            FlushPaintStats();
+        } else {
+            SyncRenderTimer();
+        }
         break;
     case WM_NCCALCSIZE:
         return 0;
@@ -4364,6 +4798,10 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
         return 0;
     }
     case WM_SIZE:
+        if (wparam == SIZE_MINIMIZED || presentation_minimized_)
+            std::fill(std::begin(presentation_tick_), std::end(presentation_tick_), 0);
+        presentation_minimized_ = wparam == SIZE_MINIMIZED;
+        SyncRenderTimer();
         if (compositor_.Dc() && wparam != SIZE_MINIMIZED)
             compositor_.Resize(LOWORD(lparam), HIWORD(lparam));
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -4379,19 +4817,25 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
         compositor_.RecreateTextFormats(scale_);
         painter_.SetScale(scale_);
         CreateCardFormats();
+        // Width from the DIP layout, height re-derived by ResizeForDetails:
+        // the suggested rect only rescales pixels that may not match the old DPI.
         const auto* suggested = reinterpret_cast<RECT*>(lparam);
         SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top,
-                     suggested->right - suggested->left, suggested->bottom - suggested->top,
+                     pulse::ui::placement::DipToPx(kDlgW, HIWORD(wparam)),
+                     suggested->bottom - suggested->top,
                      SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+        ResizeForDetails(false);
         return 0;
     }
     case WM_TIMER:
         if (wparam == kZoomTimer) {
+            ObservePresentation(4, GetTickCount64());
             TickZoom();
             return 0;
         }
         if (wparam == kRenderTimer && (closing_ || !IsWindowVisible(hwnd_))) {
             KillTimer(hwnd_, kRenderTimer);
+            render_timer_ms_ = 0;
             return 0;
         }
         if (wparam == kRenderTimer && has_held_status_ && GetTickCount64() >= hold_until_) {
@@ -4400,26 +4844,22 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
         }
         if (wparam == kRenderTimer) {
             const ULONGLONG now = GetTickCount64();
+            ObservePresentation(1, now);
             if (success_dismiss_at_ != 0 && auto_close_) {
-                if (now >= success_dismiss_at_) {
-                    success_dismiss_at_ = 0;
-                    diagnostics::runtime::Event("operation_ui_success_close", {{"task", status_.task_id},
-                        {"type", static_cast<uint64_t>(status_.type)}});
-                    if (callbacks_.dismiss) callbacks_.dismiss();
-                    pending_locate_task_ = locate_after_ ? status_.task_id : 0;
-                    HideToStatus();
-                    return 0;
-                }
-                InvalidateRect(hwnd_, nullptr, FALSE);
+                if (!TickSuccessDismiss(now)) InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
-            // A running operation animates the speed graph and live dot.
             if (!status_.active) {
-                KillTimer(hwnd_, kRenderTimer);
+                SyncRenderTimer();
                 return 0;
             }
-            SampleGraph(now);
-            InvalidateRect(hwnd_, nullptr, FALSE);
+            const bool sampled = SampleGraph(now);
+            const uint64_t elapsed_sec = task_start_tick_ != 0 && now > task_start_tick_
+                ? (now - task_start_tick_) / 1000 : 0;
+            const bool sec_changed = detailed_ && elapsed_sec != last_rendered_elapsed_sec_;
+            if (NeedsContinuousAnimation() || sampled || sec_changed)
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            SyncRenderTimer();
             return 0;
         }
         break;
@@ -4472,7 +4912,21 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
             diagnostics::runtime::Event("operation_ui_action", {{"task", status_.task_id},
                 {"type", static_cast<uint64_t>(status_.type)}, {"phase", static_cast<uint64_t>(status_.phase)},
                 {"control", static_cast<uint64_t>(hit)}, {"active", status_.active}});
-            if (hit == kHitItemSkip && callbacks_.skip_current && status_.current_item_token) {
+            if (hit >= kHitTaskRow) {
+                const size_t index = static_cast<size_t>(hit - kHitTaskRow) / 4;
+                const int part = (hit - kHitTaskRow) % 4;
+                if (index < other_tasks_.size()) {
+                    const ops::OpStatus task = other_tasks_[index];
+                    if (part == 0 && callbacks_.select_task) {
+                        callbacks_.select_task(task.task_id);
+                    } else if (part == 1) {
+                        if (ShowsPaused(task)) { if (callbacks_.resume_task) callbacks_.resume_task(task.task_id); }
+                        else if (callbacks_.pause_task) callbacks_.pause_task(task.task_id);
+                    } else if (part == 2 && callbacks_.cancel_task) {
+                        callbacks_.cancel_task(task.task_id);
+                    }
+                }
+            } else if (hit == kHitItemSkip && callbacks_.skip_current && status_.current_item_token) {
                 callbacks_.skip_current(status_.task_id, status_.current_item_token);
             } else if (hit == 11) {
                 ShowMoreMenu();
@@ -4487,6 +4941,10 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
                 RequestDismiss();
             } else if (hit == 4) {
                 RequestCancel();
+            } else if (hit == kHitOpen && FailureView().native_handoff) {
+                const auto folder = status_.native_handoff_directory;
+                if (status_.active && callbacks_.cancel_task) callbacks_.cancel_task(status_.task_id);
+                callbacks_.open_native_folder(folder);
             } else if (hit == kHitOpen && (callbacks_.open_folder || callbacks_.locate_results) && !status_.destination_dir.empty()) {
                 if (callbacks_.locate_results && status_.phase == ops::OpPhase::Completed) {
                     const auto task = status_.task_id;
@@ -4514,8 +4972,12 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
                      status_.phase != ops::OpPhase::WaitingForConflict &&
                      status_.phase != ops::OpPhase::Cancelling) {
                 if (ShowsPaused(status_)) {
-                    if (callbacks_.resume) callbacks_.resume();
-                } else if (callbacks_.pause) callbacks_.pause();
+                    if (callbacks_.resume_task) callbacks_.resume_task(status_.task_id);
+                    else if (callbacks_.resume) callbacks_.resume();
+                } else {
+                    if (callbacks_.pause_task) callbacks_.pause_task(status_.task_id);
+                    else if (callbacks_.pause) callbacks_.pause();
+                }
             } else if ((hit == 6 || hit == 7) && status_.active &&
                        status_.authorization == ops::AuthorizationState::ActionRequired &&
                        status_.phase != ops::OpPhase::Cancelling) {
@@ -4547,6 +5009,7 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
         }
         break;
     case WM_PAINT: {
+        ObservePresentation(2, GetTickCount64());
         PAINTSTRUCT paint{};
         BeginPaint(hwnd_, &paint);
         Render();
@@ -4556,14 +5019,23 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
     case WM_ERASEBKGND:
         return 1;
     case WM_DESTROY:
+        FlushPaintStats();
         flight_.Stop();
         KillTimer(hwnd_, kZoomTimer);
         KillTimer(hwnd_, kRenderTimer);
+        render_timer_ms_ = 0;
         compositor_.Shutdown();
         hwnd_ = nullptr;
         return 0;
     }
     return DefWindowProcW(hwnd_, message, wparam, lparam);
+}
+
+std::shared_ptr<PendingFileConflict> PresentFileConflict(HWND owner, const ops::ConflictItemInfo& conflict,
+    bool dark, D2D1_COLOR_F accent, std::function<void(ConflictDialogResult)> answer) {
+    auto window = std::make_shared<ConflictWindow>();
+    if (!window->Present(owner, conflict, dark, accent, std::move(answer))) return {};
+    return window;
 }
 
 ConflictDialogResult ShowFileConflictDialog(HWND owner,

@@ -1,4 +1,5 @@
 #include "controlled_transfer.h"
+#include "directory_metadata.h"
 #include "../app/extensions/transfer_snapshot.h"
 #include <winternl.h>
 #include <algorithm>
@@ -49,9 +50,9 @@ DWORD CreateRelativeDirectory(HANDLE parent, const std::wstring& name, Handle& o
         FILE_SHARE_READ | FILE_SHARE_WRITE, 2 /* FILE_CREATE */, 0x1 /* FILE_DIRECTORY_FILE */ | 0x20 /* synchronous */ |
         0x00200000 /* FILE_OPEN_REPARSE_POINT */, nullptr, 0);
     if (status < 0) return convert(status);
-    FILE_ATTRIBUTE_TAG_INFO tag{};
-    if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &tag, sizeof(tag)) ||
-        !(tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    DWORD created_attributes = 0;
+    if (!QueryHandleAttributes(handle, created_attributes) ||
+        !(created_attributes & FILE_ATTRIBUTE_DIRECTORY) || (created_attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
         const auto error = GetLastError(); CloseHandle(handle); return error ? error : ERROR_REPARSE_TAG_INVALID;
     }
     output.value = handle;

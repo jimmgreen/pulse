@@ -214,6 +214,11 @@ int wmain(int argc, wchar_t** argv) {
           "theme and explicit high contrast broadcasts refresh the snapshot");
     Check(settings(L"Environment") == SystemBroadcast::None && settings(L"intl") == SystemBroadcast::None,
           "other setting changes are ignored");
+    Check(settings(L"User Shell Folders") != SystemBroadcast::None &&
+          settings(L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders") !=
+              SystemBroadcast::None &&
+          settings(L"UnrelatedShell Folders") == SystemBroadcast::None,
+          "known-folder settings notifications reach the shared host only for the right keys");
     DEV_BROADCAST_HDR volume{};
     volume.dbch_size = sizeof(volume);
     volume.dbch_devicetype = DBT_DEVTYP_VOLUME;

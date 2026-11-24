@@ -75,4 +75,35 @@ private:
 // receives the verified host's pid.
 TransportResult ConnectStandby(const std::wstring& expected_executable, const std::wstring& desktop, Channel& channel,
                                DWORD& server_pid, WaitOptions wait = {nullptr, 200});
+
+// Phase 2: Warm persistent V2 remote picker host channel (\\.\pipe\PulsePickerHost-<SID>-v2[-hi]).
+// Keeps a pre-warmed host ready across multiple sequential V2 sessions (Medium & High IL isolated)
+// so callers avoid cold CreateProcessW latency on every dialog while retaining cold fallback.
+std::wstring WarmRemotePipeName(const std::wstring& desktop = {}, const std::wstring& override_name = {});
+
+class WarmRemoteServer {
+public:
+    WarmRemoteServer() = default;
+    ~WarmRemoteServer();
+    WarmRemoteServer(const WarmRemoteServer&) = delete;
+    WarmRemoteServer& operator=(const WarmRemoteServer&) = delete;
+
+    TransportResult Start(const std::wstring& override_name = {});
+    // Accepts one verified same-user/session/IL client and hands off a private Channel.
+    // The rendezvous listener stays armed so subsequent dialogs connect immediately.
+    TransportResult AcceptNext(Channel& channel, DWORD& client_pid, WaitOptions wait = {});
+    void Stop();
+    const std::wstring& PipeName() const noexcept { return pipe_name_; }
+
+private:
+    std::wstring pipe_name_;
+    PipeHandle pipe_;
+};
+
+// Fast-fail connect (<= 80ms default) to a warm V2 remote picker host of the same
+// user, session, integrity level, and expected executable image.
+TransportResult ConnectWarmRemote(const std::wstring& expected_executable, const std::wstring& desktop,
+                                  Channel& channel, DWORD& server_pid,
+                                  WaitOptions wait = {nullptr, 80},
+                                  const std::wstring& override_name = {});
 } // namespace pulse::ipc::picker

@@ -1,5 +1,8 @@
 #include "../ops/transfer_device_budget.h"
 #include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
 #include <windows.h>
 #include <utility>
 #include <thread>
@@ -340,6 +343,66 @@ int main() {
         ticket.WaitForChange(std::chrono::seconds(2));
         check(Clock::now() - started < std::chrono::seconds(1) && notified.TryAcquire(ticket),
               "cancelled older ticket wakes eligible successor");
+    }
+    {
+        // Folders below a resolved one reuse its volume root; reparse points
+        // and missing folders still ask the system. Identities must match a
+        // fresh cache (the previous behaviour: one system query per path).
+        wchar_t temp[MAX_PATH + 1]{};
+        GetTempPathW(MAX_PATH + 1, temp);
+        const std::wstring tree = std::wstring(temp) + L"pulse-volume-root-" + std::to_wstring(GetCurrentProcessId());
+        const auto same = [](const TransferDeviceIdentity& lhs, const TransferDeviceIdentity& rhs) {
+            return lhs.resources == rhs.resources && lhs.capacity == rhs.capacity && lhs.tiny_capacity == rhs.tiny_capacity;
+        };
+        std::vector<std::wstring> folders{tree};
+        CreateDirectoryW(tree.c_str(), nullptr);
+        for (int outer = 0; outer < 8; ++outer) {
+            const std::wstring level1 = tree + L"\\d" + std::to_wstring(outer);
+            CreateDirectoryW(level1.c_str(), nullptr);
+            folders.push_back(level1);
+            for (int inner = 0; inner < 8; ++inner) {
+                const std::wstring level2 = level1 + L"\\S" + std::to_wstring(inner);
+                CreateDirectoryW(level2.c_str(), nullptr);
+                folders.push_back(level2);
+            }
+        }
+        TransferDeviceIdentityCache root_cache(false);
+        bool all_same = true;
+        for (const auto& folder : folders) {
+            TransferDeviceIdentityCache fresh(false);
+            all_same = all_same && same(root_cache.Resolve(folder), fresh.Resolve(folder));
+        }
+        check(all_same, "volume root reuse matches a fresh resolve for plain folders");
+        check(root_cache.VolumePathQueries() == 1, "plain folders below a resolved folder skip the volume query");
+        const size_t before_missing = root_cache.VolumePathQueries();
+        TransferDeviceIdentityCache fresh_missing(false);
+        const std::wstring missing = tree + L"\\d0\\missing\\deeper";
+        check(same(root_cache.Resolve(missing), fresh_missing.Resolve(missing)) &&
+              root_cache.VolumePathQueries() == before_missing + 1, "missing folder falls back to the volume query");
+        const auto junction_case = [&](const std::wstring& target, const char* label) {
+            const std::wstring link = tree + L"\\d1\\j" + std::to_wstring(GetTickCount64());
+            const std::wstring command = L"cmd /c mklink /J \"" + link + L"\" \"" + target + L"\" >nul 2>nul";
+            if (_wsystem(command.c_str()) != 0) { std::printf("SKIP junction %s (mklink failed)\n", label); return; }
+            const size_t before = root_cache.VolumePathQueries();
+            TransferDeviceIdentityCache fresh(false);
+            bool matches = same(root_cache.Resolve(link), fresh.Resolve(link));
+            size_t expected = before + 1;
+            // A folder inside the junction must not reuse the junction's root.
+            const std::wstring inside = link + L"\\S0";
+            if (GetFileAttributesW(inside.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                TransferDeviceIdentityCache fresh_inside(false);
+                matches = matches && same(root_cache.Resolve(inside), fresh_inside.Resolve(inside));
+                ++expected;
+            }
+            check(matches && root_cache.VolumePathQueries() == expected, label);
+            RemoveDirectoryW(link.c_str());
+        };
+        junction_case(tree + L"\\d2", "junction on the same volume is resolved by the system");
+        wchar_t other_root[MAX_PATH + 1]{};
+        if (GetFileAttributesW(L"D:\\") != INVALID_FILE_ATTRIBUTES &&
+            GetVolumePathNameW(L"D:\\", other_root, MAX_PATH + 1) && _wcsicmp(other_root, L"D:\\") == 0)
+            junction_case(L"D:\\", "junction to another volume is resolved by the system");
+        for (auto folder = folders.rbegin(); folder != folders.rend(); ++folder) RemoveDirectoryW(folder->c_str());
     }
     return failures ? 1 : 0;
 }

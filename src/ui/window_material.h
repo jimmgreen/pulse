@@ -59,6 +59,12 @@ public:
     WindowMaterial(const WindowMaterial&) = delete;
     WindowMaterial& operator=(const WindowMaterial&) = delete;
 
+    // Main-window wallpaper-sampling graph, not native DWM. Blur uses source pixels.
+    static HRESULT BuildMicaImage(ID2D1DeviceContext* dc, ID2D1Image* input,
+        bool alternate, bool dark, float blur_std, ID2D1Image** output) noexcept;
+    static HRESULT BuildMicaImageWithProfile(ID2D1DeviceContext* dc, ID2D1Image* input,
+        bool alternate, bool dark, float blur_std, float luminosity_opacity,
+        float tint_opacity, ID2D1Image** output) noexcept;
     void SetCompositor(Compositor* compositor);
     void Invalidate();
 

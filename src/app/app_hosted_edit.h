@@ -16,6 +16,10 @@ void LayoutAddressEditor(AppState& s);
 void EnsureEditVisuals(AppState& s);
 void ShowAddressEditor(AppState& s);
 void HideAddressEditor(AppState& s, bool navigate);
+std::vector<ui::FluentMenuItem> BuildAddressEditContextMenu(HWND hwnd);
+void ShowAddressEditContextMenu(AppState& s, HWND hwnd, POINT screen_pt);
+std::vector<ui::FluentMenuItem> BuildAddressBarContextMenu(const AppState& s);
+void ShowAddressBarContextMenu(AppState& s, POINT screen_pt);
 // True when the click chose a 别名 suggestion (and so is consumed).
 bool DismissPathEditorOutside(AppState& s, int x, int y);
 // Refills the 别名 suggestions from the path editor's text.
@@ -52,6 +56,10 @@ void ShowRenameOverlay(AppState& s);
 // it (or typing the real name) removes the alias.
 void ShowAliasOverlay(AppState& s);
 void HideRenameOverlay(AppState& s, bool commit);
+// Re-finds the edited item by path after its row moved (re-sort, insert,
+// removal). False when it is no longer listed (nothing is then committed).
+// relayout=false inside BuildVm: the post-present layout moves the field.
+bool SyncRenameIndex(AppState& s, bool relayout = true);
 bool TagRenameCell(AppState& s, const app::TagId& tag_id, D2D1_RECT_F& cell);
 void LayoutWorkspaceRenameOverlay(AppState& s);
 void ShowWorkspaceRenameOverlay(AppState& s, int index);

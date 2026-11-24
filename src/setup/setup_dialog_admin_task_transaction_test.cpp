@@ -32,6 +32,17 @@ int wmain(){
   DialogAdminTaskTransaction corrupted(root.wstring(),true,api);
   Check(!corrupted.Recover(error)&&called==0,"corrupt journal rejected before task operation");std::filesystem::remove(journal);
  }
+ {
+  std::wstring error;
+  DialogAdminTaskTransaction prod(root.wstring(),true);
+  Check(prod.Prepare(error)&&std::filesystem::exists(journal),"custom install root prepares admin-auto snapshot without Program Files gate");
+  DialogAdminTaskTransaction prod_recover(root.wstring(),true);
+  Check(prod_recover.Recover(error)&&!std::filesystem::exists(journal),"custom install root recovers interrupted admin-auto journal without VerifyProtectedPath access denied");
+  std::ofstream out(journal,std::ios::binary);out<<"corrupt custom journal";out.close();
+  DialogAdminTaskTransaction prod_corrupt(root.wstring(),true);
+  Check(!prod_corrupt.Recover(error),"corrupt journal rejected on custom install root too");
+  std::filesystem::remove(journal);
+ }
  std::filesystem::remove(root/L".pulse-setup");std::filesystem::remove(root);
  printf("checks=%d failures=%d\n",checks,failures);return failures?1:0;
 }

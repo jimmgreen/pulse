@@ -28,6 +28,31 @@ int ModuleFallback(bool end_owner = false) {
     for (const auto& program : report.programs) if (program.pid == child.dwProcessId) identified = true;
     check(!report.Ready() && !report.files.empty(), "mapped DLL is reported even when DELETE access alone is allowed");
     check(identified, "read-only module fallback identifies real DLL owner PID");
+    // Mixed lock batch: one handle-locked text file (Win32 32) + one mapped DLL (Win32 5).
+    const auto doc = root / L"doc.txt";
+    { std::ofstream out(doc, std::ios::binary); out << "handle-locked"; }
+    const auto doc_ready_name = L"Local\\PulseDocReady" + suffix, doc_release_name = L"Local\\PulseDocRelease" + suffix;
+    HANDLE doc_ready = CreateEventW(nullptr, TRUE, FALSE, doc_ready_name.c_str());
+    HANDLE doc_release = CreateEventW(nullptr, TRUE, FALSE, doc_release_name.c_str());
+    std::wstring doc_cmd = L"\"" + std::wstring(exe) + L"\" --hold \"" + doc.wstring() + L"\" " + doc_ready_name + L" " + doc_release_name;
+    STARTUPINFOW doc_si{sizeof(doc_si)}; PROCESS_INFORMATION doc_child{};
+    const bool doc_started = CreateProcessW(exe, doc_cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &doc_si, &doc_child) != FALSE;
+    check(doc_started && WaitForSingleObject(doc_ready, 10000) == WAIT_OBJECT_0, "second child holds handle lock on doc.txt");
+    const auto mixed = InspectReplacementLocks(root.wstring(), {L"doc.txt", L"version.dll"}, true);
+    bool found_doc_pid = false, found_dll_pid = false;
+    for (const auto& program : mixed.programs) {
+        if (program.pid == doc_child.dwProcessId) found_doc_pid = true;
+        if (program.pid == child.dwProcessId) found_dll_pid = true;
+    }
+    check(found_doc_pid && found_dll_pid && mixed.files.size() >= 2,
+        "mixed handle-lock + mapped-DLL batch identifies both files and both owner PIDs");
+    SetEvent(doc_release);
+    if (doc_started) {
+        WaitForSingleObject(doc_child.hProcess, 10000);
+        CloseHandle(doc_child.hThread); CloseHandle(doc_child.hProcess);
+    }
+    CloseHandle(doc_ready); CloseHandle(doc_release);
+    DeleteFileW(doc.c_str());
     std::cout << "Restart Manager status=" << report.identification_error << ", module_scan_complete=" << report.module_scan_complete << '\n';
     check(std::filesystem::file_size(file) == original_size && started && WaitForSingleObject(child.hProcess, 0) == WAIT_TIMEOUT,
         "owner remains running and DLL bytes remain present");

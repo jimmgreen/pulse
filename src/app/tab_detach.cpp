@@ -89,6 +89,20 @@ struct PaneBack {
 };
 PaneBack g_pane_back;
 WINDOWPLACEMENT g_before{sizeof(WINDOWPLACEMENT)};
+// Cached strip geometry of the target window under a move loop (#645): avoids
+// rebuilding the full WindowViewModel and probing the clipboard on every mouse tick.
+struct StripCache {
+    HWND hwnd = nullptr;
+    float width = 0.0f;
+    float scale = 0.0f;
+    size_t count = 0;
+    size_t active = 0;
+    bool vertical = false;
+    int layout = 0;
+    int max_rows = 0;
+    std::vector<TabSpan> spans;
+};
+StripCache g_strip_cache;
 
 AppState* WindowOf(AppState& any, HWND hwnd) {
     if (!hwnd) return nullptr;
@@ -349,21 +363,36 @@ Drop FindDrop(AppState& moving, POINT cursor, bool content) {
             ForgetDwell();
             return {};
         }
-        const ui::WindowViewModel vm = BuildVm(*target, false);
         const float width = static_cast<float>(target->compositor.Width());
-        std::vector<TabSpan> spans;
-        for (int i = 0; i < static_cast<int>(vm.tabs.size()); ++i) {
-            D2D1_RECT_F rc{};
-            if (!target->renderer.TabItemRect(vm, width, i, &rc)) continue;
-            spans.push_back(TabSpan{static_cast<size_t>(i),
-                                    RECT{std::lround(rc.left), std::lround(rc.top), std::lround(rc.right),
-                                         std::lround(rc.bottom)}});
+        const float scale = target->scale > 0.0f ? target->scale : 1.0f;
+        const size_t tab_count = target->window_tabs.items.size();
+        if (g_strip_cache.hwnd != below || g_strip_cache.width != width || g_strip_cache.scale != scale ||
+            g_strip_cache.count != tab_count || g_strip_cache.active != target->window_tabs.active ||
+            g_strip_cache.vertical != target->appPrefs.vertical_tabs ||
+            g_strip_cache.layout != target->appPrefs.tab_layout ||
+            g_strip_cache.max_rows != target->appPrefs.tab_max_rows) {
+            const ui::WindowViewModel vm = BuildVm(*target, false);
+            g_strip_cache.hwnd = below;
+            g_strip_cache.width = width;
+            g_strip_cache.scale = scale;
+            g_strip_cache.count = tab_count;
+            g_strip_cache.active = target->window_tabs.active;
+            g_strip_cache.vertical = target->appPrefs.vertical_tabs;
+            g_strip_cache.layout = target->appPrefs.tab_layout;
+            g_strip_cache.max_rows = target->appPrefs.tab_max_rows;
+            g_strip_cache.spans.clear();
+            for (int i = 0; i < static_cast<int>(vm.tabs.size()); ++i) {
+                D2D1_RECT_F rc{};
+                if (!target->renderer.TabItemRect(vm, width, i, &rc)) continue;
+                g_strip_cache.spans.push_back(TabSpan{static_cast<size_t>(i),
+                                                      RECT{std::lround(rc.left), std::lround(rc.top),
+                                                           std::lround(rc.right), std::lround(rc.bottom)}});
+            }
         }
         POINT client = cursor;
         ScreenToClient(below, &client);
-        const float scale = target->scale > 0.0f ? target->scale : 1.0f;
         const LONG caption_buttons = std::lround(3.0f * 46.0f * scale);  // minimize, maximize, close
-        const int index = TabDropIndex(spans.data(), spans.size(), target->window_tabs.items.size(), client,
+        const int index = TabDropIndex(g_strip_cache.spans.data(), g_strip_cache.spans.size(), tab_count, client,
                                        std::lround(12.0f * scale), std::lround(width) - caption_buttons);
         Drop over;
         over.over = below;
@@ -518,6 +547,7 @@ void BeginWindowMove(AppState& s) {
     g_moving_state = &s;
     g_caption_move = true;
     g_drop = Drop{};
+    g_strip_cache = StripCache{};
     g_before = WINDOWPLACEMENT{sizeof(WINDOWPLACEMENT)};
     GetWindowPlacement(s.hwnd, &g_before);
     g_escape_pressed = false;
@@ -528,6 +558,7 @@ void EndWindowMove(AppState& s) {
     if (!g_caption_move || g_moving != s.hwnd) return;
     g_caption_move = false;
     ForgetDwell();
+    g_strip_cache = StripCache{};
     g_moving = nullptr;
     g_moving_state = nullptr;
     if (g_escape_hook) UnhookWindowsHookEx(g_escape_hook);
@@ -653,6 +684,7 @@ void RunDetachedTabMove(AppState& s, HWND from, size_t index) {
     g_source = from;
     g_drop = Drop{};
     g_dwell = Dwell{};
+    g_strip_cache = StripCache{};
     // The window takes a moment to open while the hand keeps going, so the
     // cursor may already rest on a drop spot: look once now. Drops are only
     // tracked on WM_MOVING, and until the first mouse move the loop below

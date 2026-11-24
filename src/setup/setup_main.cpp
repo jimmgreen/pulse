@@ -16,10 +16,12 @@
 #include "setup_log.h"
 #include "setup_options.h"
 #include "setup_payload.h"
+#include "setup_registry.h"
 #include "setup_strings.h"
 #include "setup_ui.h"
 #include "setup_uninstall.h"
 #include "setup_desktop_launch.h"
+#include "setup_dialog_versions.h"
 #include "../common/os_version.h"
 
 using namespace pulse::setup;
@@ -51,6 +53,26 @@ std::wstring DefaultLogPath() {
     swprintf_s(name, L"\\Pulse-Setup-%04u%02u%02u-%02u%02u%02u.log", t.wYear, t.wMonth, t.wDay, t.wHour,
                t.wMinute, t.wSecond);
     return TempPath() + name;
+}
+
+// One appended log for the periodic retry instead of a new file per run.
+std::wstring CleanupLogPath() {
+    const std::wstring path = TempPath() + L"\\Pulse-Setup-VersionCleanup.log";
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) &&
+        (data.nFileSizeHigh || data.nFileSizeLow > 1024 * 1024)) DeleteFileW(path.c_str());
+    return path;
+}
+
+// {app}\uninstall.exe /CLEANUPVERSIONS, started by the elevated dialog helper.
+// Only its own installation, never an elevation prompt or any UI.
+int RunVersionCleanup(const Options& o, const std::wstring& self) {
+    const std::wstring app = ParentDir(self);
+    if (!IsPulseInstallDir(app)) { Log(L"Not a Pulse installation: " + app); return kExitPrepareFailed; }
+    if (!o.test && !IsProcessElevated()) { Log(L"Deferred version cleanup requires elevation"); return kExitCancelledBefore; }
+    const int code = pulse::setup::RunDeferredVersionCleanup(app);
+    Log(L"Exit code " + std::to_wstring(code));
+    return code;
 }
 
 void ShowError(const Options& o, const std::wstring& text) {
@@ -103,7 +125,17 @@ int RunUninstaller(const Options& o, const std::wstring& self) {
     const Lang lang = DetectLanguage(o.lang.c_str());
     UninstallRequest request;
     request.options = o;
-    request.app_dir = ParentDir(self);
+    const size_t slash = self.find_last_of(L'\\');
+    const std::wstring self_name = slash == std::wstring::npos ? self : self.substr(slash + 1);
+    if (!o.dir.empty()) {
+        request.app_dir = NormalizeDir(o.dir);
+    } else if (EqualsNoCase(self_name, L"uninstall.exe") || IsPulseInstallDir(ParentDir(self))) {
+        request.app_dir = ParentDir(self);
+    } else if (const auto previous = FindPreviousInstall(o.test ? kTestUninstallKey : kUninstallKey)) {
+        request.app_dir = NormalizeDir(previous->dir);
+    } else {
+        request.app_dir = ParentDir(self);
+    }
     // InitializeUninstall: silent removal (the upgrade path) keeps user data.
     request.cleanup_data = !o.silent;
     if (!IsPulseInstallDir(request.app_dir)) {
@@ -112,9 +144,14 @@ int RunUninstaller(const Options& o, const std::wstring& self) {
         return kExitPrepareFailed;
     }
     if (!o.test && !IsProcessElevated() && !o.elevated_child) {
+        Options elevated_opts = o;
+        if (o.dir.empty() && !SameDirectory(ParentDir(self), request.app_dir)) {
+            if (!elevated_opts.raw.empty()) elevated_opts.raw += L' ';
+            elevated_opts.raw += L"/DIR=" + Quote(request.app_dir);
+        }
         std::wstring unused;
         bool launch = false;
-        const int code = RunElevated(o, self, unused, launch);
+        const int code = RunElevated(elevated_opts, self, unused, launch);
         Log(L"Elevated uninstaller exited with " + std::to_wstring(code));
         return code;
     }
@@ -137,7 +174,20 @@ int RunUninstaller(const Options& o, const std::wstring& self) {
                         L"Pulse", MB_OK | MB_ICONWARNING);
     }
     CoUninitialize();
-    if (self_delete) ScheduleSelfDelete(self, request.app_dir);
+    if (self_delete) {
+        if (SameDirectory(ParentDir(self), request.app_dir)) {
+            ScheduleSelfDelete(self, request.app_dir);
+        } else {
+            const std::wstring installed_uninstaller = request.app_dir + L"\\uninstall.exe";
+            SetFileAttributesW(installed_uninstaller.c_str(), FILE_ATTRIBUTE_NORMAL);
+            if (!DeleteFileW(installed_uninstaller.c_str())) {
+                const DWORD err = GetLastError();
+                if (err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND)
+                    MoveFileExW(installed_uninstaller.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+            }
+            RemoveDirectoryW(request.app_dir.c_str());
+        }
+    }
     Log(L"Exit code " + std::to_wstring(code));
     return code;
 }
@@ -161,7 +211,7 @@ DWORD WindowsBuild() {
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     const Options o = ParseOptions(GetCommandLineW());
-    LogOpen(o.log.empty() ? DefaultLogPath() : o.log);
+    LogOpen(o.log.empty() ? (o.cleanup_versions ? CleanupLogPath() : DefaultLogPath()) : o.log);
     Log(L"Pulse setup: " + o.raw);
     const std::wstring self = SelfPath();
 
@@ -182,6 +232,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     // {app}\uninstall.exe is this bootstrapper without a payload.
     const size_t slash = self.find_last_of(L'\\');
     const std::wstring self_name = slash == std::wstring::npos ? self : self.substr(slash + 1);
+    if (o.cleanup_versions) {
+        if (!EqualsNoCase(self_name, L"uninstall.exe")) return kExitPrepareFailed;
+        return RunVersionCleanup(o, self);
+    }
     if (o.uninstall || EqualsNoCase(self_name, L"uninstall.exe")) return RunUninstaller(o, self);
 
     Payload payload;

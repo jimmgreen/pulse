@@ -1,18 +1,23 @@
+#include <set>
+#include "../app/extensions/ui_continuous_slider.h"
 #include <initguid.h>
 
 #include "../common/localization.h"
+#include "../app/frame_pump.h"
 #include "FluentTokens.h"
 #include "edit_host.h"
 #include "extension_data_view.h"
 #include "extension_tree.h"
 #include "extension_tree_controls.h"
 #include "extension_tree_layout.h"
+#include "extension_tree_extra_controls.h"
 #include "fluent_components.h"
 #include "fluent_menu.h"
 #include "typography.h"
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <cstdio>
 #include <commctrl.h>
 #include <map>
 #include <oleacc.h>
@@ -50,6 +55,11 @@ struct ExtensionTreeView::Impl {
         bool clip_applied = false;
         bool command_allowed = true;
         int keyboard_part = 0;
+        bool continuous_dragging = false;
+        bool continuous_keyboard_focus = false;
+        std::string continuous_start;
+        bool pointer_pressed = false;  // canvas: the next activation came from this press point
+        float pointer_x = 0, pointer_y = 0;
         std::shared_ptr<ExtensionDataView> data;
         std::shared_ptr<IAccessible> accessible;
     };
@@ -59,9 +69,13 @@ struct ExtensionTreeView::Impl {
     std::shared_ptr<FluentMenu> menu;
     HWND hovered{}, pressed{};
     int hover_part = -1, pressed_part = -1;
+    static constexpr UINT_PTR TooltipTimer = 0x7154;
+    bool tooltip_shown = false;
     bool bar_drag = false, bar_hot = false;
     float bar_grab = 0;
     bool rendering = false;
+    bool transparent_background = false;
+    D2D1_COLOR_F background_wash{0, 0, 0, 0};
     bool ready = false;
     bool render_failed = false;
     bool refreshing_sources = false;
@@ -81,6 +95,11 @@ struct ExtensionTreeView::Impl {
                    static_cast<BYTE>(std::clamp(color.b, 0.0f, 1.0f) * 255));
     }
     int scroll = 0, total = 0;
+    app::FramePump scroll_pump;
+    float scroll_remaining = 0, outer_scroll_position = 0;
+    POINT scroll_point{};
+    ULONGLONG scroll_tick = 0;
+    static constexpr UINT ScrollFrameMessage = WM_APP + 0x353;
     unsigned generation = 0;
     std::map<std::string, std::shared_ptr<ExtensionDataController>> sources;
     std::map<std::string, std::string> source_queries, validation_errors;
@@ -96,6 +115,7 @@ struct ExtensionTreeView::Impl {
     uint64_t state_revision = 0;
     static constexpr UINT StateMessage = WM_APP + 0x352;
     std::map<std::string, ExtensionStateChange> pending_state_events;
+    std::set<std::string> pending_continuous_commands;
     bool state_message_pending = false, dispatching_state = false;
     unsigned state_notification_depth = 0;
     struct StateNotificationScope {
@@ -107,13 +127,14 @@ struct ExtensionTreeView::Impl {
         }
     };
     void QueueStateEvents() {
-        if (!host || pending_state_events.empty() || state_message_pending || dispatching_state ||
+        if (!host || (pending_state_events.empty() && pending_continuous_commands.empty()) || state_message_pending || dispatching_state ||
             state_notification_depth)
             return;
         state_message_pending = PostMessageW(host, StateMessage, static_cast<WPARAM>(generation), 0) != FALSE;
     }
     void ResetStateEvents() {
         pending_state_events.clear();
+        pending_continuous_commands.clear();
         state_message_pending = false;
     }
     bool AssignState(const std::string &key, const std::string &value,
@@ -135,21 +156,28 @@ struct ExtensionTreeView::Impl {
     }
     void DispatchStateEvents() {
         state_message_pending = false;
-        if (dispatching_state || state_notification_depth || pending_state_events.empty() ||
-            !callbacks.on_state_changed)
-            return;
+        if (dispatching_state || state_notification_depth) return;
+        const auto revision=generation;
         auto pending = std::move(pending_state_events);
         pending_state_events.clear();
         std::vector<ExtensionStateChange> changes;
-        for (auto &[key, change] : pending)
-            changes.push_back(std::move(change));
+        for (auto &[key, change] : pending) changes.push_back(std::move(change));
         auto callback = callbacks.on_state_changed;
         dispatching_state = true;
-        try {
-            callback(state_revision, changes);
-        } catch (...) {
-        }
+        try { if(callback && !changes.empty())callback(state_revision, changes); } catch (...) {}
         dispatching_state = false;
+        // A callback may close/replace the tree or enqueue further state edits.
+        // Commit only after all preceding value changes reached the subscriber.
+        if(generation==revision && pending_state_events.empty()) {
+            auto commands=std::move(pending_continuous_commands);
+            pending_continuous_commands.clear();
+            dispatching_state=true;
+            for(const auto& command:commands) {
+                if(generation!=revision||!host)break;
+                Invoke(command);
+            }
+            dispatching_state=false;
+        }
         QueueStateEvents();
     }
 
@@ -507,7 +535,9 @@ struct ExtensionTreeView::Impl {
         scroll = static_cast<int>(std::lround(
             fluent::ScrollbarDragOffset(bar.viewport.top, bar.viewport_extent, thumb.bottom - thumb.top,
                                         std::max(0.0f, bar.content_extent - bar.viewport_extent), y, bar_grab)));
-        Layout();
+        scroll_remaining = 0;
+        scroll_pump.Disarm();
+        Layout(true);
     }
     void OpenSelect(HWND window) {
         auto lifetime = owner->impl_;
@@ -642,7 +672,71 @@ struct ExtensionTreeView::Impl {
             OpenCommandMenu(window);
             return;
         }
+        if (node.type == UiNodeType::Canvas && !node.pointer_state.empty()) {
+            float x = 0, y = 0;
+            if (item->pointer_pressed) {
+                x = item->pointer_x;
+                y = item->pointer_y;
+            } else {
+                // Keyboard activation reports the centre of the drawing.
+                const auto &b = item->bounds;
+                ExtensionCanvasPoint(node, b, scale, (b.left + b.right) / 2, (b.top + b.bottom) / 2, x, y);
+            }
+            item->pointer_pressed = false;
+            const auto revision = generation;
+            AssignState(node.pointer_state, PointerValue("click", x, y), ExtensionStateSource::User);
+            if (generation != revision)
+                return;
+        }
         Invoke(node.command);
+    }
+    static std::string PointerValue(const char *verb, float x, float y) {
+        char buffer[64]{};
+        std::snprintf(buffer, sizeof(buffer), "%s %.2f %.2f", verb, x, y);
+        return buffer;
+    }
+    void PointerInput(Item &item, UINT message, LPARAM lparam) {
+        const auto &node = *item.node;
+        if (node.type != UiNodeType::Canvas || node.pointer_state.empty() || !item.visible || !item.enabled)
+            return;
+        if (message == WM_MOUSELEAVE) {
+            AssignState(node.pointer_state, "leave", ExtensionStateSource::User);
+            return;
+        }
+        POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        MapWindowPoints(item.window, host, &point, 1);
+        float x = 0, y = 0;
+        if (!ExtensionCanvasPoint(node, item.bounds, scale, static_cast<float>(point.x), static_cast<float>(point.y),
+                                  x, y))
+            return;
+        if (message == WM_LBUTTONDOWN) {
+            item.pointer_pressed = true;
+            item.pointer_x = x;
+            item.pointer_y = y;
+        } else if (message == WM_MOUSEMOVE) {
+            AssignState(node.pointer_state, PointerValue("move", x, y), ExtensionStateSource::User);
+        }
+    }
+    void DrawTooltip() {
+        if (!tooltip_shown || !hovered)
+            return;
+        const auto *item = Find(hovered);
+        if (!item || !item->visible || item->node->tooltip.empty())
+            return;
+        const auto text = Wide(item->node->tooltip);
+        auto *format = painter.RampFormat(fluent::Painter::TextRamp::Caption);
+        const float advance = typography::MeasureAdvance(compositor.DwriteFactory(), format, text);
+        const float width = std::min(320.0f * scale, advance + 18.0f * scale);
+        const float height = 30.0f * scale;
+        RECT client{};
+        GetClientRect(host, &client);
+        const auto &b = item->bounds;
+        const float right_limit = std::max(4.0f * scale, static_cast<float>(client.right) - width - 4.0f * scale);
+        const float left = std::clamp(b.left, 4.0f * scale, right_limit);
+        float top = b.bottom + 6.0f * scale;
+        if (top + height > static_cast<float>(client.bottom) - 4.0f * scale)
+            top = std::max(4.0f * scale, b.top - height - 6.0f * scale);
+        painter.DrawTooltip({left, top, left + width, top + height}, text);
     }
     bool Render() {
         if (!ready || !host || rendering)
@@ -664,11 +758,12 @@ struct ExtensionTreeView::Impl {
             return false;
         }
         dc->BeginDraw();
-        dc->Clear(theme.bg);
+        dc->Clear(transparent_background && !high_contrast ? background_wash : theme.bg);
         painter.BeginFrame(theme, high_contrast);
         bool successful = true;
         for (const auto &item : items) {
-            if (!item.visible)
+            if (!item.visible || item.bounds.right <= item.clip.left || item.bounds.left >= item.clip.right ||
+                item.bounds.bottom <= item.clip.top || item.bounds.top >= item.clip.bottom)
                 continue;
             const auto &node = *item.node;
             const auto bounds = item.bounds;
@@ -680,6 +775,8 @@ struct ExtensionTreeView::Impl {
             // Text fields show focus with their accent underline; a ring on top doubles it.
             visual.keyboard_focus = visual.focused && node.type != UiNodeType::TextInput &&
                                     node.type != UiNodeType::CommandSearch;
+            if (extensions::ContinuousSlider(node))
+                visual.keyboard_focus = visual.keyboard_focus && item.continuous_keyboard_focus;
             dc->PushAxisAlignedClip(item.clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             if (item.data)
                 item.data->Draw(painter, compositor, theme, visual);
@@ -694,10 +791,16 @@ struct ExtensionTreeView::Impl {
                 control.scale = scale;
                 control.dark = dark;
                 if (node.badge_text.starts_with("state.") ||
-                    (node.type == UiNodeType::Canvas && !node.state.empty())) {
+                    (node.type == UiNodeType::Canvas && !node.state.empty()) ||
+                    (node.type == UiNodeType::SettingsRow && node.binding.starts_with("state."))) {
                     auto resolved = node;
                     if (node.badge_text.starts_with("state."))
                         resolved.badge_text = BadgeText(node);
+                    if (node.type == UiNodeType::SettingsRow && node.binding.starts_with("state.")) {
+                        if (const auto st = state.find(node.binding.substr(6)); st != state.end()) {
+                            resolved.detail = st->second;
+                        }
+                    }
                     if (node.type == UiNodeType::Canvas && !node.state.empty()) {
                         if (const auto st = state.find(node.state); st != state.end() && !st->second.empty()) {
                             if (!resolved.detail.empty()) resolved.detail.push_back('\n');
@@ -725,6 +828,7 @@ struct ExtensionTreeView::Impl {
             painter.DrawScrollbar(bar);
             dc->PopAxisAlignedClip();
         }
+        DrawTooltip();
         HRESULT result = dc->EndDraw();
         if (SUCCEEDED(result))
             result = compositor.Present();
@@ -741,6 +845,18 @@ struct ExtensionTreeView::Impl {
         auto item = self->Find(window);
         auto lifetime = self->owner->impl_;
         StateNotificationScope notification(*self);
+        if (item && extensions::ContinuousSlider(*item->node)) {
+            if (message == WM_LBUTTONDOWN || message == WM_KILLFOCUS)
+                item->continuous_keyboard_focus = false;
+            else if (message == WM_KEYDOWN)
+                item->continuous_keyboard_focus = true;
+            if (message == WM_LBUTTONDOWN || message == WM_KILLFOCUS || message == WM_KEYDOWN)
+                InvalidateRect(self->host, nullptr, FALSE);
+        }
+        // Native tabs hit-test their own label widths, not our equal-width painted segments.
+        if (message == WM_NCHITTEST && item &&
+            (item->node->type == UiNodeType::Tabs || item->node->type == UiNodeType::Segmented))
+            return HTCLIENT;
         if (message == WM_IME_STARTCOMPOSITION)
             self->composing.insert(window);
         if (message == WM_IME_ENDCOMPOSITION) {
@@ -825,9 +941,55 @@ struct ExtensionTreeView::Impl {
                 return 0;
             }
         }
+        if (item && extensions::ContinuousSlider(*item->node) && item->visible && item->enabled) {
+            const auto node = *item->node;
+            double minimum=0,maximum=1,current=0;
+            extensions::SliderRange(node,minimum,maximum);
+            const auto found=self->state.find(node.state);
+            if(found!=self->state.end()) extensions::SliderNumber(found->second,current);
+            auto update=[&](double next) {
+                const auto text=extensions::SliderText(std::clamp(next,minimum,maximum));
+                if(self->Valid(node.state,text))self->AssignState(node.state,text,ExtensionStateSource::User);
+                const auto wide=Wide(text); SetWindowTextW(window,wide.c_str());
+                InvalidateRect(self->host,nullptr,FALSE);
+            };
+            auto finish=[&]() {
+                item->continuous_dragging=false;
+                if(!node.command.empty())self->pending_continuous_commands.insert(node.command);
+                self->QueueStateEvents();
+            };
+            if(message==WM_LBUTTONDOWN || (message==WM_MOUSEMOVE && item->continuous_dragging)) {
+                if(message==WM_LBUTTONDOWN){item->continuous_start=extensions::SliderText(current);item->continuous_dragging=true;SetFocus(window);SetCapture(window);}
+                POINT point{GET_X_LPARAM(lparam),GET_Y_LPARAM(lparam)};MapWindowPoints(window,self->host,&point,1);
+                const double fraction=fluent::StepSliderPositionAt(item->bounds,2,static_cast<float>(point.x),self->scale);
+                update(minimum+(maximum-minimum)*fraction);return 0;
+            }
+            if((message==WM_LBUTTONUP || message==WM_CAPTURECHANGED || message==WM_CANCELMODE || message==WM_KILLFOCUS) && item->continuous_dragging) {
+                if(message==WM_LBUTTONUP) {
+                    POINT point{GET_X_LPARAM(lparam),GET_Y_LPARAM(lparam)};MapWindowPoints(window,self->host,&point,1);
+                    const double fraction=fluent::StepSliderPositionAt(item->bounds,2,static_cast<float>(point.x),self->scale);
+                    update(minimum+(maximum-minimum)*fraction);
+                }
+                item->continuous_dragging=false;
+                if(GetCapture()==window)ReleaseCapture();
+                finish();return 0;
+            }
+            if(message==WM_KEYDOWN && wparam!=VK_TAB) {
+                if(wparam==VK_ESCAPE && item->continuous_dragging){double original=current;extensions::SliderNumber(item->continuous_start,original);update(original);item->continuous_dragging=false;if(GetCapture()==window)ReleaseCapture();finish();return 0;}
+                double next=current;const double step=(maximum-minimum)/100.0;
+                if(wparam==VK_LEFT||wparam==VK_DOWN)next-=step;
+                else if(wparam==VK_RIGHT||wparam==VK_UP)next+=step;
+                else if(wparam==VK_HOME)next=minimum;
+                else if(wparam==VK_END)next=maximum;
+                else return DefSubclassProc(window,message,wparam,lparam);
+                update(next);item->continuous_dragging=false;
+                if(GetCapture()==window)ReleaseCapture();
+                finish();return 0;
+            }
+        }
         if ((message == WM_LBUTTONDOWN || message == WM_MOUSEMOVE || message == WM_LBUTTONUP ||
              message == WM_KEYDOWN) &&
-            item && (item->node->type == UiNodeType::Slider || item->node->type == UiNodeType::SplitPane) &&
+            item && !extensions::ContinuousSlider(*item->node) && (item->node->type == UiNodeType::Slider || item->node->type == UiNodeType::SplitPane) &&
             item->visible && item->enabled) {
             bool split = item->node->type == UiNodeType::SplitPane;
             int maximum = split ? 100 : item->node->stops - 1;
@@ -979,27 +1141,46 @@ struct ExtensionTreeView::Impl {
                 part = GET_Y_LPARAM(lparam) / std::max(1, static_cast<int>(32 * self->scale)) +
                        static_cast<int>(SendMessageW(window, LB_GETTOPINDEX, 0, 0));
         }
+        if (item && (message == WM_MOUSEMOVE || message == WM_MOUSELEAVE || message == WM_LBUTTONDOWN))
+            self->PointerInput(*item, message, lparam);
         if (message == WM_MOUSEMOVE) {
+            if (self->hovered != window) {
+                self->tooltip_shown = false;
+                KillTimer(self->host, TooltipTimer);
+                if (item && !item->node->tooltip.empty())
+                    SetTimer(self->host, TooltipTimer, 500, nullptr);
+            }
             self->hovered = window;
             self->hover_part = part;
             TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, window, 0};
             TrackMouseEvent(&track);
             InvalidateRect(self->host, nullptr, FALSE);
         }
-        if (message == WM_MOUSELEAVE) {
+        // A late leave for a control the pointer already left must not clear the newer hover.
+        if (message == WM_MOUSELEAVE && self->hovered == window) {
             self->hovered = nullptr;
+            self->tooltip_shown = false;
+            KillTimer(self->host, TooltipTimer);
             InvalidateRect(self->host, nullptr, FALSE);
         }
         if (message == WM_LBUTTONDOWN) {
             self->pressed = window;
             self->pressed_part = part;
+            if (self->tooltip_shown) {
+                self->tooltip_shown = false;
+                InvalidateRect(self->host, nullptr, FALSE);
+            }
+            KillTimer(self->host, TooltipTimer);
         }
         if (message == WM_LBUTTONUP)
             self->pressed = nullptr;
         if (message == WM_KEYDOWN && wparam == VK_TAB) {
             HWND next = GetNextDlgTabItem(self->host, window, GetKeyState(VK_SHIFT) < 0);
-            if (next)
+            if (next) {
+                if (auto next_item = self->Find(next); next_item && extensions::ContinuousSlider(*next_item->node))
+                    next_item->continuous_keyboard_focus = true;
                 SetFocus(next);
+            }
             return 0;
         }
         if (message == WM_KEYDOWN && wparam == VK_ESCAPE) {
@@ -1077,6 +1258,27 @@ struct ExtensionTreeView::Impl {
             BeginPaint(window, &paint);
             self->Render();
             EndPaint(window, &paint);
+            return 0;
+        }
+        if (message == ScrollFrameMessage) {
+            self->scroll_pump.FrameConsumed();
+            const auto now = GetTickCount64();
+            const auto elapsed = std::min<ULONGLONG>(50, now - self->scroll_tick);
+            self->scroll_tick = now;
+            const float delta = std::abs(self->scroll_remaining) <= 0.35f ? self->scroll_remaining :
+                self->scroll_remaining * (1.0f - std::exp(-static_cast<float>(elapsed) / 28.0f));
+            self->scroll_remaining -= delta;
+            self->ApplyScrollDelta(delta);
+            if (std::abs(self->scroll_remaining) <= 0.01f) self->scroll_pump.Disarm();
+            return 0;
+        }
+        if (message == WM_TIMER && wparam == TooltipTimer) {
+            KillTimer(window, TooltipTimer);
+            const auto *hovered_item = self->hovered ? self->Find(self->hovered) : nullptr;
+            if (hovered_item && hovered_item->visible && !hovered_item->node->tooltip.empty()) {
+                self->tooltip_shown = true;
+                InvalidateRect(window, nullptr, FALSE);
+            }
             return 0;
         }
         if (message == WM_TIMER && wparam == 1) {
@@ -1164,16 +1366,17 @@ struct ExtensionTreeView::Impl {
         if (message == WM_MOUSEWHEEL) {
             POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             ScreenToClient(window, &point);
-            if (self->layout.ScrollAt(static_cast<float>(point.x), static_cast<float>(point.y),
-                                      static_cast<float>(-GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA * 48)) {
-                self->Layout();
-                return 0;
+            if (!self->scroll_pump.Armed()) {
+                self->outer_scroll_position = static_cast<float>(self->scroll);
+                self->scroll_tick = GetTickCount64();
             }
-            RECT rect{};
-            GetClientRect(window, &rect);
-            self->scroll = std::clamp(self->scroll - GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA * 48, 0,
-                                      std::max(0, self->total - static_cast<int>(rect.bottom)));
-            self->Layout();
+            self->scroll_point = point;
+            const float delta = static_cast<float>(-GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA * 48;
+            if (!self->scroll_pump.Running()) self->scroll_pump.Start(window, ScrollFrameMessage);
+            if (self->scroll_pump.Running()) {
+                self->scroll_remaining += delta;
+                self->scroll_pump.Arm();
+            } else self->ApplyScrollDelta(delta);
             return 0;
         }
         if (message == WM_ERASEBKGND)
@@ -1209,7 +1412,8 @@ struct ExtensionTreeView::Impl {
             auto code = HIWORD(wparam);
             if (code == BN_CLICKED) {
                 if (IsExtensionBooleanControl(node)) {
-                    if (node.type == UiNodeType::Radio)
+                    if (node.type == UiNodeType::Radio ||
+                        (node.type == UiNodeType::OptionCard && node.option_kind == "radio"))
                         SendMessageW(child, BM_SETCHECK, BST_CHECKED, 0);
                     auto value = SendMessageW(child, BM_GETCHECK, 0, 0) == BST_CHECKED ? "true" : "false";
                     auto revision = self->generation;
@@ -1252,9 +1456,12 @@ struct ExtensionTreeView::Impl {
     }
     void Build(const UiNode &node) {
         nodes.push_back(&node);
+        // An option card's canvas child is its illustration, painted by the card: no window of its own.
+        const bool owns_children = node.type != UiNodeType::OptionCard;
         if (Find(&node)) {
-            for (const auto &child : node.children)
-                Build(child);
+            if (owns_children)
+                for (const auto &child : node.children)
+                    Build(child);
             return;
         }
         const wchar_t *type = nullptr;
@@ -1329,15 +1536,46 @@ struct ExtensionTreeView::Impl {
             style |= SS_NOTIFY;
             break;
         case UiNodeType::Badge:
-        case UiNodeType::Tag:
         case UiNodeType::EmptyState:
         case UiNodeType::StatusBar:
         case UiNodeType::Tooltip:
+        case UiNodeType::MenuPreview:
             type = L"STATIC";
             style = WS_CHILD | WS_VISIBLE | SS_NOPREFIX;
             break;
-        case UiNodeType::Canvas:
+        case UiNodeType::Tag:
+            if (!node.state.empty() || !node.command.empty()) {
+                type = L"BUTTON";
+                if (!node.state.empty()) style |= BS_AUTOCHECKBOX;
+            } else {
+                type = L"STATIC";
+                style = WS_CHILD | WS_VISIBLE | SS_NOPREFIX;
+            }
+            break;
+        case UiNodeType::OptionCard:
+            type = L"BUTTON";
+            if (!node.state.empty()) {
+                style |= node.option_kind == "toggle" ? BS_AUTOCHECKBOX : BS_RADIOBUTTON;
+            }
+            break;
+        case UiNodeType::SettingsRow:
+            if (!node.command.empty() && node.children.empty()) {
+                type = L"BUTTON";
+            } else {
+                type = L"STATIC";
+                style = WS_CHILD | WS_VISIBLE | SS_NOPREFIX;
+            }
+            break;
+        case UiNodeType::Image:
             if (!node.command.empty()) {
+                type = L"BUTTON";
+            } else {
+                type = L"STATIC";
+                style = WS_CHILD | WS_VISIBLE | SS_NOPREFIX;
+            }
+            break;
+        case UiNodeType::Canvas:
+            if (!node.command.empty() || !node.pointer_state.empty()) {
                 type = L"BUTTON";
             } else {
                 type = L"STATIC";
@@ -1395,7 +1633,7 @@ struct ExtensionTreeView::Impl {
             if (node.type == UiNodeType::Progress)
                 SendMessageW(child, PBM_SETPOS, node.value, 0);
             if (node.type == UiNodeType::TextInput || node.type == UiNodeType::CommandSearch)
-                SendMessageW(child, EM_SETLIMITTEXT, 1024, 0);
+                SendMessageW(child, EM_SETLIMITTEXT, 4096, 0);
             if (node.type == UiNodeType::Select || node.type == UiNodeType::List)
                 for (const auto &option : node.options)
                     SendMessageW(child, node.type == UiNodeType::List ? LB_ADDSTRING : CB_ADDSTRING, 0,
@@ -1428,14 +1666,29 @@ struct ExtensionTreeView::Impl {
                 }
             }
         }
-        for (const auto &child : node.children)
-            Build(child);
+        if (owns_children)
+            for (const auto &child : node.children)
+                Build(child);
     }
-    void Layout() {
+    void ApplyScrollDelta(float delta) {
+        if (!layout.ScrollAt(static_cast<float>(scroll_point.x), static_cast<float>(scroll_point.y), delta)) {
+            RECT client{};
+            GetClientRect(host, &client);
+            outer_scroll_position = std::clamp(outer_scroll_position + delta, 0.0f,
+                static_cast<float>(std::max(0, total - static_cast<int>(client.bottom))));
+            scroll = static_cast<int>(std::lround(outer_scroll_position));
+        }
+        Layout(true);
+    }
+    void Layout(bool scroll_only = false) {
         if (!host)
             return;
+        if (!scroll_only) { scroll_remaining = 0; scroll_pump.Disarm(); }
         RECT client{};
         GetClientRect(host, &client);
+        struct WindowPlacement { HWND window; RECT bounds; };
+        std::vector<WindowPlacement> window_placements;
+        window_placements.reserve(items.size());
         ExtensionLayoutCallbacks options;
         options.visible = [&](const UiNode &node) { return node.visible && BooleanBinding(node.visible_binding); };
         options.enabled = [&](const UiNode &node) { return node.enabled && BooleanBinding(node.enabled_binding); };
@@ -1460,6 +1713,10 @@ struct ExtensionTreeView::Impl {
             auto effective = node;
             if (item && (node.type == UiNodeType::StagingTray || node.type == UiNodeType::SidebarSection))
                 effective.expanded = SendMessageW(item->window, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            if (node.type == UiNodeType::SettingsRow && node.binding.starts_with("state.")) {
+                if (const auto st = state.find(node.binding.substr(6)); st != state.end())
+                    effective.detail = st->second;
+            }
             float height =
                 ready ? MeasureExtensionControl(effective, item ? Wide(ReadText(item->window)) : Wide(node.text), width,
                                                 scale, painter)
@@ -1468,6 +1725,16 @@ struct ExtensionTreeView::Impl {
             if (error != validation_errors.end())
                 height += 4 * scale + painter.MeasureWrappedCaptionHeight(Wide(error->second), width);
             return height;
+        };
+        options.intrinsic_width = [&](const UiNode &node) {
+            if (!ready || node.type != UiNodeType::Breadcrumb || !node.menu.empty())
+                return 0.0f;
+            // Mirrors DrawBreadcrumbSegment: 8 DIP insets, optional 18+4 DIP icon, 18 DIP chevron.
+            const auto text = Wide(node.text);
+            const float advance = text.empty() ? 0.0f
+                : typography::MeasureAdvance(compositor.DwriteFactory(),
+                                             painter.RampFormat(fluent::Painter::TextRamp::Body), text);
+            return advance + (16.0f + (node.glyph.empty() ? 0.0f : 22.0f) + (node.separator ? 18.0f : 0.0f) + 4.0f) * scale;
         };
         options.place = [&](const UiNode &node, D2D1_RECT_F bounds, D2D1_RECT_F clip, bool visible, bool enabled) {
             auto item = Find(&node);
@@ -1503,14 +1770,30 @@ struct ExtensionTreeView::Impl {
                 desired.right = desired.left + std::max(1, width - inset - static_cast<int>(trailing));
                 desired.bottom = desired.top + line;
             }
+            // Offscreen controls keep semantic visibility (keyboard navigation), but
+            // an empty owned region prevents their old HWND position intercepting input.
+            // Do not move them every animation frame; restore geometry on re-entry.
+            const bool on_screen = visible && bounds.right > clip.left && bounds.left < clip.right &&
+                                   bounds.bottom > clip.top && bounds.top < clip.bottom;
+            if (scroll_only && !on_screen) {
+                const RECT empty{};
+                if (!item->clip_applied || !EqualRect(&item->applied_clip, &empty)) {
+                    HRGN region = CreateRectRgn(0, 0, 0, 0);
+                    if (region) {
+                        if (SetWindowRgn(item->window, region, FALSE)) {
+                            item->applied_clip = empty;
+                            item->clip_applied = true;
+                        } else DeleteObject(region);
+                    }
+                }
+                return;
+            }
             RECT actual{};
             GetWindowRect(item->window, &actual);
             MapWindowPoints(nullptr, host, reinterpret_cast<POINT *>(&actual), 2);
             if (!EqualRect(&actual, &desired)) {
-                MoveWindow(item->window, desired.left, desired.top, desired.right - desired.left,
-                           desired.bottom - desired.top, TRUE);
-                GetWindowRect(item->window, &actual);
-                MapWindowPoints(nullptr, host, reinterpret_cast<POINT *>(&actual), 2);
+                window_placements.push_back({item->window, desired});
+                actual = desired;
             }
             int left = std::max(0, static_cast<int>(clip.left - actual.left)),
                 top = std::max(0, static_cast<int>(clip.top - actual.top)),
@@ -1524,7 +1807,7 @@ struct ExtensionTreeView::Impl {
             if (!item->clip_applied || !EqualRect(&item->applied_clip, &desired_clip)) {
                 HRGN region = CreateRectRgn(left, top, right, bottom);
                 if (region) {
-                    if (SetWindowRgn(item->window, region, TRUE)) {
+                    if (SetWindowRgn(item->window, region, FALSE)) {
                         item->applied_clip = desired_clip;
                         item->clip_applied = true;
                     } else
@@ -1549,24 +1832,53 @@ struct ExtensionTreeView::Impl {
         };
         auto viewport = viewport_for(reserved);
         total = static_cast<int>(
-                    std::ceil(layout.Arrange(tree.root, viewport, static_cast<float>(scroll), scale, options))) +
+                    std::ceil(layout.Arrange(tree.root, viewport, static_cast<float>(scroll), scale, options, scroll_only,
+                                         static_cast<float>(kExtensionTreeContentInset)))) +
                 2 * kExtensionTreeContentInset;
         if ((total > client.bottom) != reserved) {
             viewport = viewport_for(total > client.bottom);
             total = static_cast<int>(
-                        std::ceil(layout.Arrange(tree.root, viewport, static_cast<float>(scroll), scale, options))) +
+                        std::ceil(layout.Arrange(tree.root, viewport, static_cast<float>(scroll), scale, options, false,
+                                         static_cast<float>(kExtensionTreeContentInset)))) +
                     2 * kExtensionTreeContentInset;
         }
         int clamped = std::clamp(scroll, 0, std::max(0, total - static_cast<int>(client.bottom)));
         if (clamped != scroll) {
             scroll = clamped;
-            layout.Arrange(tree.root, viewport, static_cast<float>(scroll), scale, options);
+            layout.Arrange(tree.root, viewport, static_cast<float>(scroll), scale, options, false,
+                                         static_cast<float>(kExtensionTreeContentInset));
+        }
+        if (!window_placements.empty()) {
+            constexpr UINT flags = SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOREDRAW | SWP_NOCOPYBITS;
+            HDWP batch = BeginDeferWindowPos(static_cast<int>(window_placements.size()));
+            for (const auto& placement : window_placements) {
+                if (!batch) break;
+                const auto& bounds = placement.bounds;
+                batch = DeferWindowPos(batch, placement.window, nullptr, bounds.left, bounds.top,
+                                       bounds.right - bounds.left, bounds.bottom - bounds.top, flags);
+            }
+            // A failed batch has no reliable geometry; finish every requested placement.
+            if (!batch || !EndDeferWindowPos(batch)) {
+                for (const auto& placement : window_placements) {
+                    const auto& bounds = placement.bounds;
+                    SetWindowPos(placement.window, nullptr, bounds.left, bounds.top,
+                                 bounds.right - bounds.left, bounds.bottom - bounds.top, flags);
+                }
+            }
         }
         HWND focus = GetFocus();
         auto focused = Find(focus);
         if (focused && (!focused->visible || !focused->enabled))
             SetFocus(host);
+        // Most child HWNDs are input/accessibility proxies painted by Render().
+        // Invalidating all of them schedules redundant WM_PAINT work per scroll frame.
         InvalidateRect(host, nullptr, FALSE);
+        for (const auto& item : items) {
+            if ((item.node->type == UiNodeType::TextInput || item.node->type == UiNodeType::CommandSearch) &&
+                item.visible && item.bounds.bottom > item.clip.top && item.bounds.top < item.clip.bottom &&
+                item.bounds.right > item.clip.left && item.bounds.left < item.clip.right)
+                InvalidateRect(item.window, nullptr, FALSE);
+        }
     }
 };
 ExtensionTreeView::ExtensionTreeView() : impl_(std::make_shared<Impl>()) {}
@@ -1637,6 +1949,8 @@ void ExtensionTreeView::Close() {
         self.menu.reset();
     }
     self.ready = false;
+    self.scroll_pump.Stop();
+    self.scroll_remaining = 0;
     if (GetCapture() == self.host)
         ReleaseCapture();
     self.bar_drag = false;
@@ -1742,6 +2056,8 @@ void ExtensionTreeView::Refresh() {
                 numeric = 0;
             if (item.data)
                 item.data->SetSelection(*value);
+            else if (extensions::ContinuousSlider(node))
+                SetWindowTextW(item.window, Wide(*value).c_str());
             else if (node.type == UiNodeType::Slider || node.type == UiNodeType::SplitPane)
                 SendMessageW(item.window, TBM_SETPOS, TRUE, numeric);
             else if (node.type == UiNodeType::Select)
@@ -1766,6 +2082,17 @@ void ExtensionTreeView::Refresh() {
     self.RefreshSources();
 }
 HWND ExtensionTreeView::Hwnd() const { return impl_->host; }
+void ExtensionTreeView::SetBackgroundWash(D2D1_COLOR_F wash) {
+    auto &w = impl_->background_wash;
+    if (w.r == wash.r && w.g == wash.g && w.b == wash.b && w.a == wash.a) return;
+    w = wash;
+    if (impl_->transparent_background && impl_->host) InvalidateRect(impl_->host, nullptr, FALSE);
+}
+void ExtensionTreeView::SetTransparentBackground(bool transparent) {
+    if (impl_->transparent_background == transparent) return;
+    impl_->transparent_background = transparent;
+    if (impl_->host) InvalidateRect(impl_->host, nullptr, FALSE);
+}
 HWND ExtensionTreeView::NodeWindow(const std::string &id) const {
     for (const auto &item : impl_->items)
         if (item.node->id == id)
@@ -1881,7 +2208,19 @@ bool ExtensionTreeView::UpdateTree(const extensions::UiTree &replacement) {
     for (auto &item : self.items) {
         auto at = actual.find(item.node->id);
         if (at == actual.end() || at->second->type != item.node->type || at->second->options != item.node->options ||
-            (item.node->type == UiNodeType::Canvas && at->second->command.empty() != item.node->command.empty())) {
+            (item.node->type == UiNodeType::Canvas &&
+             (at->second->command.empty() && at->second->pointer_state.empty()) !=
+                 (item.node->command.empty() && item.node->pointer_state.empty())) ||
+            (item.node->type == UiNodeType::Tag &&
+             (at->second->state.empty() != item.node->state.empty() ||
+              at->second->command.empty() != item.node->command.empty())) ||
+            (item.node->type == UiNodeType::OptionCard &&
+             (at->second->state.empty() != item.node->state.empty() ||
+              at->second->option_kind != item.node->option_kind)) ||
+            (item.node->type == UiNodeType::SettingsRow &&
+             ((!at->second->command.empty() && at->second->children.empty()) !=
+              (!item.node->command.empty() && item.node->children.empty()))) ||
+            (item.node->type == UiNodeType::Image && at->second->command.empty() != item.node->command.empty())) {
             DestroyWindow(item.window);
             continue;
         }

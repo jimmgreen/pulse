@@ -28,6 +28,13 @@ int main() {
                   "initial ancestor viewport stays beside immediate parent");
             const auto scrolled = LayoutColumnStrip(bounds, 80 * scale, 12, true, {}, scale, 100000);
             check(scrolled.scroll_px == 0, "horizontal overscroll clamps at oldest ancestor");
+            const auto anchored = LayoutColumnStrip(bounds, 80 * scale, 12, true, {}, scale, 0.0f, 80.0f);
+            check(!layout.active || std::abs(anchored.body.left - std::fmin(layout.body.left, bounds.left + 80.0f * scale)) < .01f,
+                  "clicked ancestor anchor keeps the body at the old coordinate when there is room");
+            const auto clipped = LayoutColumnStrip(bounds, 80 * scale, 12, true, {}, scale, 0.0f, 0.0f);
+            check(!layout.active || std::abs(clipped.body.left - std::fmin(layout.body.left,
+                      bounds.left + kColumnStripMinAnchorViewportDip * scale)) < .01f,
+                  "clipped anchor keeps a usable ancestor viewport without taking room from the body or child");
             const auto root = LayoutColumnStrip(bounds, 80 * scale, 0, false, {}, scale);
             check(root.active && root.body.left == bounds.left && root.columns.empty(),
                   "a root folder alone is one column at the left");

@@ -1,5 +1,6 @@
 #include "index_engine.h"
 #include <algorithm>
+#include <malloc.h>
 
 namespace pulse::index {
 FolderSizeIndex::Item Engine::FolderSizeItem(int32_t id) const {
@@ -55,11 +56,18 @@ bool Engine::BuildFolderTotals() {
         return false;
     }
     // An edit published between the two locks was not applied to this copy.
-    if (mutations != folder_size_mutations_ || folder_sizes_.Valid()) return folder_sizes_.Valid();
+    if (mutations != folder_size_mutations_ || folder_sizes_.Valid()) {
+        const bool already_valid = folder_sizes_.Valid();
+        lock.unlock();
+        _heapmin();
+        return already_valid;
+    }
     folder_sizes_.Adopt(std::move(built));
     diagnostics::runtime::Event("index_folder_totals_ready", {{"nodes", static_cast<uint64_t>(nodes)},
         {"elapsed_ms", GetTickCount64() - started}});
     folder_size_retry_after_ = 0;
+    lock.unlock();
+    _heapmin();
     return true;
 }
 std::vector<IndexedFolderSize> Engine::FolderSizes(const std::vector<std::wstring>& paths) {

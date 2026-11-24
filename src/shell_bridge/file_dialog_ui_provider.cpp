@@ -150,7 +150,16 @@ HRESULT Load(std::wstring_view input, std::shared_ptr<const FileDialogInprocessP
     if (!get_api) return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
     if (!InModule(lifetime->module, reinterpret_cast<const void*>(get_api))) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     auto provider = std::make_shared<FileDialogInprocessProvider>();
-    hr = get_api(PULSE_PICKER_UI_V2_VERSION, sizeof(provider->api), &provider->api);
+    PulsePickerUiV2ApiControlLimits extended{};
+    hr = get_api(PULSE_PICKER_UI_V2_VERSION, sizeof(extended), &extended.base);
+    if (hr == E_INVALIDARG) {
+        hr = get_api(PULSE_PICKER_UI_V2_VERSION, sizeof(provider->api), &provider->api);
+    } else if (hr == S_OK) {
+        if (extended.reserved || extended.max_control_items < PULSE_PICKER_UI_V2_LEGACY_CONTROL_ITEMS)
+            return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        provider->api = extended.base;
+        provider->max_control_items = (std::min)(extended.max_control_items, PULSE_PICKER_UI_V2_MAX_CONTROL_ITEMS);
+    }
     if (hr != S_OK) return FAILED(hr) ? hr : E_UNEXPECTED;
     const auto& api = provider->api;
     if (api.size != sizeof(api) || api.version != PULSE_PICKER_UI_V2_VERSION || api.reserved ||

@@ -25,6 +25,7 @@ struct GitRepoStatus {
     // the folders git reports as wholly untracked ("dir/").
     std::unordered_map<std::wstring, ui::GitMark> files;
     std::unordered_map<std::wstring, ui::GitMark> dirs;
+    std::unordered_map<std::wstring, int> dir_counts;
     std::unordered_set<std::wstring> untracked_dirs;
 };
 
@@ -34,6 +35,8 @@ bool ParseGitStatusV2(std::string_view out, GitRepoStatus& status);
 ui::GitMark StrongerGitMark(ui::GitMark a, ui::GitMark b);
 // The mark of a row whose root-relative lowercase path is `rel`.
 ui::GitMark GitMarkFor(const GitRepoStatus& status, const std::wstring& rel, bool is_dir);
+// Number of changed entries under a folder (or 1 when an untracked folder itself).
+int GitDirChangeCount(const GitRepoStatus& status, const std::wstring& rel);
 // "main ↑1 ↓2"; a detached HEAD shows its short commit id.
 std::wstring GitBranchLabel(const GitRepoStatus& status);
 // The sidebar badge: the label with a long branch name shortened.
