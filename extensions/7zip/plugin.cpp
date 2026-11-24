@@ -1,3 +1,4 @@
+#include "archive_paths.h"
 // plugin.cpp - the official Pulse 7-Zip extension: context-menu commands for
 // extracting, testing, compressing and checksums, plus archive previews.
 #include <windows.h>
@@ -13,11 +14,14 @@
 #include "jobs.h"
 #include "settings.h"
 #include "text.h"
+#include "vfs_mount.h"
 #include <array>
 #include <filesystem>
 #include <memory>
 #include <new>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -33,6 +37,7 @@ constexpr unsigned kLevels[] = {0, 1, 3, 5, 7, 9};
 constexpr const char* kPreviewExtensions[] = {".7z", ".rar", ".tar", ".gz", ".tgz", ".xz", ".bz2", ".iso", ".cab", ".wim", ".001"};
 
 struct Plugin {
+    struct PendingCommand { Command command; std::vector<std::wstring> paths; };
     pulse::sdk::Host host;
     PulseCommandsV1 commands{};
     PulseStagingV1 staging{};
@@ -40,7 +45,10 @@ struct Plugin {
     PulseDispatchV1 dispatch_api{};
     PulsePreviewV1 preview{};
     std::array<pulse::sdk::CommandRegistration, static_cast<size_t>(Command::Count)> registrations;
+    pulse::sdk::CommandRegistration browse_registration;
     pulse::sdk::CommandRegistration auto_extract_registration;
+    PulseIconId browse_icon = PULSE_ICON_FOLDER;
+    ArchiveVfsManager vfs;
     bool auto_extract = false;  // extract-auto is registered
     std::array<PulseCommandId, static_cast<size_t>(Command::Count)> ids{};
     std::array<std::string, static_cast<size_t>(Command::Count)> titles;
@@ -52,6 +60,9 @@ struct Plugin {
     std::unique_ptr<Dialogs> dialogs;
     std::unique_ptr<Jobs> jobs;
     std::unique_ptr<Settings> settings;
+    std::optional<pulse::sdk::WorkbenchClient> workbench;
+    pulse::sdk::WorkbenchClient::LocaleSubscription locale_sub;
+    std::optional<PendingCommand> pending_command;
     explicit Plugin(const PulseHostV1& value) : host(value) {}
 };
 
@@ -71,10 +82,10 @@ std::string Utf8(const std::wstring& value) {
 }
 std::wstring BaseName(const std::vector<std::wstring>& paths) {
     if (paths.size() != 1) {
-        const auto parent = fs::path(paths.front()).parent_path().filename().wstring();
-        return parent.empty() ? L"Archive" : parent;
+        return archive_paths::ParentArchiveName(fs::path(paths.front()));
     }
     const fs::path path(paths.front());
+    if (archive_paths::RootLength(path.wstring()) == path.wstring().size()) return L"Archive";
     const DWORD attributes = GetFileAttributesW(path.c_str());
     if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) return path.filename().wstring();
     const auto stem = path.stem().wstring();
@@ -108,22 +119,16 @@ Jobs::ExtractMode ModeOf(const Settings& settings) {
 
 // Everything comes from the extension settings: one click, no dialog, except
 // "Extract to…" (a folder picker by design) and "Add to archive…" (options).
-void Run(Plugin& plugin, Command command, const PulseContextSelectionSnapshot& selection) {
-    if (!selection.entry_count || !selection.entries) return;
-    std::vector<std::wstring> paths;
-    for (uint32_t i = 0; i < selection.entry_count; ++i) {
-        auto path = Wide(selection.entries[i].path);
-        if (!path.empty()) paths.push_back(std::move(path));
-    }
-    if (paths.empty()) return;
-    const auto parent = Utf8(fs::path(paths.front()).parent_path().wstring());
+void Run(Plugin& plugin, Command command, const std::vector<std::wstring>& paths) {
+    if (paths.empty() || !plugin.settings->CommandShown(static_cast<int>(command))) return;
+    const auto parent = Utf8(archive_paths::Parent(fs::path(paths.front())).wstring());
     auto& settings = *plugin.settings;
     auto& jobs = *plugin.jobs;
     switch (command) {
     case Command::Extract: {
         const auto fixed = settings.FixedFolder();
         for (const auto& path : paths)
-            jobs.Extract(path, fixed.empty() ? Utf8(fs::path(path).parent_path().wstring()) : fixed, ModeOf(settings));
+            jobs.Extract(path, fixed.empty() ? Utf8(archive_paths::Parent(fs::path(path)).wstring()) : fixed, ModeOf(settings));
         break;
     }
     case Command::To: {
@@ -137,7 +142,7 @@ void Run(Plugin& plugin, Command command, const PulseContextSelectionSnapshot& s
     case Command::Test:
         for (const auto& path : paths) {
             const auto fixed = settings.FixedFolder();
-            const auto destination = fixed.empty() ? Utf8(fs::path(path).parent_path().wstring()) : fixed;
+            const auto destination = fixed.empty() ? Utf8(archive_paths::Parent(fs::path(path)).wstring()) : fixed;
             const auto mode = ModeOf(settings);
             jobs.Test(path, [&jobs, path, destination, mode] { jobs.Extract(path, destination, mode); });
         }
@@ -156,7 +161,7 @@ void Run(Plugin& plugin, Command command, const PulseContextSelectionSnapshot& s
         source.base = BaseName(paths);
         const auto first = Utf8(fs::path(paths.front()).filename().wstring());
         source.title = paths.size() == 1 ? first : text::Format(T::SourceMore, first, std::to_string(paths.size() - 1));
-        const auto folder = fs::path(paths.front()).parent_path();
+        const auto folder = archive_paths::Parent(fs::path(paths.front()));
         source.detail = text::Format(T::SourceSaveTo, Utf8(folder.filename().empty() ? folder.wstring() : folder.filename().wstring()));
         std::error_code folder_error;
         source.folder = fs::is_directory(paths.front(), folder_error);
@@ -170,6 +175,23 @@ void Run(Plugin& plugin, Command command, const PulseContextSelectionSnapshot& s
     default:
         break;
     }
+}
+
+void Invoke(Plugin& plugin, Command command, const PulseContextSelectionSnapshot& selection) {
+    if (!selection.entry_count || !selection.entries) return;
+    std::vector<std::wstring> paths;
+    for (uint32_t i = 0; i < selection.entry_count; ++i) {
+        auto path = Wide(selection.entries[i].path);
+        if (!path.empty()) paths.push_back(std::move(path));
+    }
+    if (!plugin.settings->Ready()) {
+        // The SDK selection is borrowed for the callback only. Keep the first click and
+        // its paths while settings load; never run it with the startup defaults.
+        if (!paths.empty() && !plugin.pending_command) plugin.pending_command = Plugin::PendingCommand{command, std::move(paths)};
+        plugin.settings->EnsureLoaded();
+        return;
+    }
+    Run(plugin, command, paths);
 }
 
 std::string Title(const Plugin& plugin, Command command) {
@@ -208,13 +230,18 @@ std::string Detail(const Plugin& plugin, Command command) {
     return detail.size() <= 160 ? detail : std::string{};
 }
 
-PulseStatus Register(Plugin& plugin, Command command) {
+const std::vector<PulseStringView>& ArchiveExtensionViews() {
     static const auto archive_list = engine::ArchiveExtensions();
     static const auto archive_views = [] {
         std::vector<PulseStringView> views;
         for (const auto& ext : archive_list) views.push_back(View(ext));
         return views;
     }();
+    return archive_views;
+}
+
+PulseStatus Register(Plugin& plugin, Command command) {
+    const auto& archive_views = ArchiveExtensionViews();
     struct Spec { const char* id; uint32_t icon, kinds, max; bool archives; };
     static constexpr Spec kSpecs[] = {
         {"extract", PULSE_COMMAND_ICON_EXTRACT, PULSE_COMMAND_FILES, 64, true},
@@ -238,14 +265,16 @@ PulseStatus Register(Plugin& plugin, Command command) {
         plugin.titles[index] = title;
         return PULSE_OK;
     }
-    static const std::string group = text::Get(T::SettingsTitle);
+    const std::string group = text::Get(T::SettingsTitle);
     PulseCommandDescriptor descriptor{};
     descriptor.size = sizeof(descriptor);
     descriptor.id = View(spec.id);
     descriptor.title = View(title);
     descriptor.detail = View(detail);
     descriptor.group = View(group);
-    descriptor.flags = submenu ? PULSE_COMMAND_GROUP_SUBMENU : 0u;
+    uint32_t flags = submenu ? PULSE_COMMAND_GROUP_SUBMENU : 0u;
+    if (command == Command::Extract || command == Command::Quick) flags |= PULSE_COMMAND_PRIMARY;
+    descriptor.flags = flags;
     descriptor.icon = spec.icon;
     descriptor.kinds = spec.kinds;
     descriptor.min_selection = 1;
@@ -257,13 +286,48 @@ PulseStatus Register(Plugin& plugin, Command command) {
     Plugin* self = &plugin;
     const auto status = plugin.registrations[index].Register(plugin.commands, descriptor,
         [self, command](PulseCommandId, const PulseContextSelectionSnapshot& selection) {
-            try { Run(*self, command, selection); } catch (...) {}
+            try { Invoke(*self, command, selection); } catch (...) {}
         });
     if (status == PULSE_OK) {
         plugin.ids[index] = plugin.registrations[index].Id();
         plugin.titles[index] = title;
     }
     return status;
+}
+
+PulseStatus RegisterBrowseCommand(Plugin& plugin) {
+    if (!plugin.vfs.Available()) {
+        plugin.browse_registration.Reset();
+        return PULSE_OK;
+    }
+    const auto& archive_views = ArchiveExtensionViews();
+    const std::string group = text::Get(T::SettingsTitle);
+    const std::string title = text::Get(T::CmdBrowseArchive);
+    const std::string detail = text::Get(T::CmdBrowseDetail);
+    PulseCommandDescriptor descriptor{};
+    descriptor.size = sizeof(descriptor);
+    descriptor.id = View("browse-archive");
+    descriptor.title = View(title);
+    descriptor.detail = View(detail);
+    descriptor.group = View(group);
+    descriptor.flags = plugin.settings->MenuSubmenu() ? PULSE_COMMAND_GROUP_SUBMENU : 0u;
+    descriptor.icon = plugin.browse_icon;
+    descriptor.kinds = PULSE_COMMAND_FILES;
+    descriptor.min_selection = 1;
+    descriptor.max_selection = 1;
+    descriptor.extensions = archive_views.data();
+    descriptor.extension_count = static_cast<uint32_t>(archive_views.size());
+    Plugin* self = &plugin;
+    return plugin.browse_registration.Register(plugin.commands, descriptor,
+        [self](PulseCommandId, const PulseContextSelectionSnapshot& selection) {
+            try {
+                if (selection.entry_count == 1 && selection.entries &&
+                    (selection.entries[0].flags & PULSE_CONTEXT_ENTRY_DIRECTORY) == 0u) {
+                    const auto path = Wide(selection.entries[0].path);
+                    if (!path.empty()) (void)self->vfs.OpenArchive(path, false);
+                }
+            } catch (...) {}
+        });
 }
 
 // What opening an archive runs: Pulse's own double-click on an archive nothing opens, and File
@@ -309,7 +373,7 @@ PulseStatus RegisterAutoExtract(Plugin& plugin) {
                 for (const auto* candidate : extensions) if (extension == candidate) supported = true;
                 if (!supported) return;
                 // Opening an unassociated archive is independent of the menu's destination/mode preferences.
-                self->jobs->Extract(path, Utf8(fs::path(path).parent_path().wstring()), Jobs::ExtractMode::Smart);
+                self->jobs->Extract(path, Utf8(archive_paths::Parent(fs::path(path)).wstring()), Jobs::ExtractMode::Smart);
             } catch (...) {}
         });
 }
@@ -319,11 +383,15 @@ PulseStatus RegisterCommands(Plugin& plugin) {
         const auto status = Register(plugin, static_cast<Command>(i));
         if (status != PULSE_OK) return status;
     }
+    const auto browse_st = RegisterBrowseCommand(plugin);
+    if (browse_st != PULSE_OK) return browse_st;
     return RegisterAutoExtract(plugin);
 }
 
 // Settings changed: menu titles that name the behavior follow it.
 void Refresh(Plugin& plugin) {
+    auto pending = std::exchange(plugin.pending_command, std::nullopt);
+    if (!plugin.settings->Ready()) return;
     plugin.jobs->RememberPasswords(plugin.settings->RememberPasswords());
     bool changed = false;
     for (size_t index = 0; index < static_cast<size_t>(Command::Count); ++index) {
@@ -335,6 +403,18 @@ void Refresh(Plugin& plugin) {
     // The host lists commands in registration order, so re-register all of them to keep the menu order.
     if (changed) RegisterCommands(plugin);
     else if (plugin.auto_extract != WantsAutoExtract(plugin)) RegisterAutoExtract(plugin);
+    if (pending) Run(plugin, pending->command, pending->paths);
+}
+
+void OnLocaleChanged(Plugin& plugin, const PulseHostLocale& locale) {
+    try {
+        const auto previous = text::CurrentLanguage();
+        text::SetHostLanguage(locale.language_tag);
+        if (text::CurrentLanguage() == previous) return;
+        if (plugin.settings) plugin.settings->RefreshLanguage();
+        if (plugin.settings && plugin.settings->Ready()) Refresh(plugin);
+        else RegisterCommands(plugin);
+    } catch (...) {}
 }
 
 PulseStatus PULSE_CALL Preview(void*, const PulsePreviewRequest* request) {
@@ -389,13 +469,17 @@ PulseStatus RegisterPreviews(Plugin& plugin) {
 
 void PULSE_CALL Destroy(void* value) {
     auto* plugin = static_cast<Plugin*>(value);
+    plugin->locale_sub.Reset();
+    plugin->workbench.reset();
     if (plugin->jobs) plugin->jobs->CancelAll();
     for (auto& registration : plugin->registrations) registration.Reset();
+    plugin->browse_registration.Reset();
     plugin->auto_extract_registration.Reset();
     if (plugin->preview.context) for (const auto id : plugin->previews) plugin->preview.unregister_provider(plugin->preview.context, id);
     if (plugin->dispatch) plugin->dispatch->Close();
     plugin->jobs.reset();
     plugin->settings.reset();
+    plugin->vfs.Clear();
     engine::ShutdownWorkers();
     delete plugin;
 }
@@ -420,6 +504,20 @@ extern "C" __declspec(dllexport) PulseStatus PULSE_CALL PulsePluginEntryV1(const
         plugin->dialogs = std::make_unique<Dialogs>(plugin->dialogs_api);
         plugin->jobs = std::make_unique<Jobs>(tasks, plugin->staging, *plugin->dispatch, *plugin->dialogs);
         plugin->settings = std::make_unique<Settings>();
+        plugin->workbench = pulse::sdk::WorkbenchClient::TryQuery(plugin->host);
+        if (plugin->workbench && plugin->workbench->SupportsV3()) {
+            PulseHostLocale locale{};
+            if (plugin->workbench->QueryLocale(locale) == PULSE_OK) {
+                text::SetHostLanguage(locale.language_tag);
+            }
+        }
+        (void)plugin->vfs.Initialize(plugin->host);
+        if (auto icons = pulse::sdk::IconsClient::TryQuery(plugin->host)) {
+            PulseIconId id = 0;
+            if (icons->Resolve("sevenzip-browse", id) == PULSE_OK && id != 0) {
+                plugin->browse_icon = id;
+            }
+        }
     } catch (...) { return PULSE_ERROR_INITIALIZATION; }
     // Commands first (default titles), then settings; their load renames them.
     auto status = RegisterCommands(*plugin);
@@ -427,6 +525,13 @@ extern "C" __declspec(dllexport) PulseStatus PULSE_CALL PulsePluginEntryV1(const
     try {
         status = plugin->settings->Initialize(plugin->host, plugin->staging, *plugin->dispatch, [plugin] { try { Refresh(*plugin); } catch (...) {} });
         if (status != PULSE_OK) return status;
+        if (plugin->workbench && plugin->workbench->SupportsV3()) {
+            if (auto sub = plugin->workbench->SubscribeLocale([plugin](const PulseHostLocale& next) {
+                    OnLocaleChanged(*plugin, next);
+                })) {
+                plugin->locale_sub = std::move(*sub);
+            }
+        }
     } catch (...) { return PULSE_ERROR_INITIALIZATION; }
     return status == PULSE_OK ? RegisterPreviews(*plugin) : status;
 }

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <string_view>
 
 using pulse::sdk::View;
 using T = text::Id;
@@ -97,7 +98,12 @@ std::string ErrorText(engine::Status status, const std::string& detail) {
     case engine::Status::WorkerTimedOut: return text::Get(T::ErrWorkerTimedOut);
     case engine::Status::WorkerMemoryLimit: return text::Get(T::ErrWorkerMemory);
     case engine::Status::IoError: return text::Get(T::ErrIo) + detail;
-    default: return text::Get(T::ErrDamaged) + detail;
+    default: {
+        // An unsafe entry name is a refusal, not damage: say so.
+        static constexpr std::string_view kUnsafe = "The archive contains an unsafe path: ";
+        if (detail.rfind(kUnsafe, 0) == 0) return text::Get(T::ErrUnsafePath) + detail.substr(kUnsafe.size());
+        return text::Get(T::ErrDamaged) + detail;
+    }
     }
 }
 
@@ -241,6 +247,7 @@ class Stage {
     PulseStageId id_ = 0;
     bool requested_ = false, committed_ = false, terminal_ = false;
     std::wstring path_;
+    std::string create_error_;
     static void PULSE_CALL Created(void* user, PulseStatus status, PulseStageId id, PulseStringView path) {
         auto& self = *static_cast<Stage*>(user);
         self.id_ = id;
@@ -267,21 +274,49 @@ public:
     ~Stage() { Release(); }
     const std::wstring& Path() const { return path_; }
     bool Create(const std::string& destination) {
-        if (api_.create(api_.context, View(destination), Created, this) != PULSE_OK) return false;
+        const PulseStatus accepted = api_.create(api_.context, View(destination), Created, this);
+        if (accepted != PULSE_OK) {
+            create_error_ = "stage.create rejected status=" + std::to_string(accepted);
+            return false;
+        }
         requested_ = true;
         while (!created_.load(std::memory_order_acquire)) Sleep(10);  // an accepted create always calls back
-        return create_status_ == PULSE_OK && id_ && !path_.empty();
+        if (create_status_ == PULSE_OK && id_ && !path_.empty()) return true;
+        create_error_ = "stage.create callback status=" + std::to_string(create_status_) +
+            " id=" + std::to_string(id_) + " path_empty=" + std::to_string(path_.empty());
+        if (id_) {
+            Snapshot snapshot;
+            const auto status = api_.get(api_.context, id_, Snapshot::Read, &snapshot);
+            create_error_ += " get_status=" + std::to_string(status);
+            if (status == PULSE_OK) {
+                create_error_ += " state=" + std::to_string(snapshot.state);
+                if (!snapshot.error.empty()) create_error_ += "\n" + snapshot.error;
+            }
+        }
+        return false;
+    }
+    void ReportCreateFailure(Reporter& report) const {
+        report.Log(Diagnostics(create_error_));
+        report.Fail(text::Get(T::ErrStage));
     }
     // write_step: the task's step for the host's write (0 when it has no steps).
     PulseTaskState Commit(const std::function<bool()>& cancelled, Reporter& report, uint32_t write_step, const std::string& note) {
-        if (api_.commit(api_.context, id_) != PULSE_OK) { report.Fail(text::Get(T::ErrCommit)); return PULSE_TASK_FAILED; }
+        const auto accepted = api_.commit(api_.context, id_);
+        if (accepted != PULSE_OK) {
+            report.Log(Diagnostics("stage.commit rejected status=" + std::to_string(accepted) + " id=" + std::to_string(id_)));
+            report.Fail(text::Get(T::ErrCommit)); return PULSE_TASK_FAILED;
+        }
         committed_ = true;
         report.Step(write_step, note);
         report.Note(text::Get(T::WaitingHost), 90);
         for (;;) {
             if (cancelled()) api_.cancel(api_.context, id_);
             Snapshot snapshot;
-            if (api_.get(api_.context, id_, Snapshot::Read, &snapshot) != PULSE_OK) { report.Fail(text::Get(T::ErrCommit)); return PULSE_TASK_FAILED; }
+            const auto status = api_.get(api_.context, id_, Snapshot::Read, &snapshot);
+            if (status != PULSE_OK) {
+                report.Log(Diagnostics("stage.get rejected status=" + std::to_string(status) + " id=" + std::to_string(id_)));
+                report.Fail(text::Get(T::ErrCommit)); return PULSE_TASK_FAILED;
+            }
             if (snapshot.state < PULSE_STAGE_COMPLETED && snapshot.task) {
                 // The host's file operation now writes our output: it shows as this task's second step.
                 report.Link(snapshot.task);
@@ -290,7 +325,11 @@ public:
             if (snapshot.state >= PULSE_STAGE_COMPLETED) {
                 report.Link(0);
                 terminal_ = true;
-                if (!snapshot.error.empty()) report.Fail(snapshot.error);
+                if (!snapshot.error.empty()) {
+                    report.Log(Diagnostics("stage.commit terminal id=" + std::to_string(id_) +
+                        " state=" + std::to_string(snapshot.state) + "\n" + snapshot.error));
+                    report.Fail(snapshot.error);
+                }
                 return snapshot.state == PULSE_STAGE_COMPLETED ? PULSE_TASK_COMPLETED : snapshot.state == PULSE_STAGE_PARTIAL ? PULSE_TASK_PARTIAL
                      : snapshot.state == PULSE_STAGE_CANCELLED ? PULSE_TASK_CANCELLED : PULSE_TASK_FAILED;
             }
@@ -392,8 +431,8 @@ PulseStatus Jobs::Extract(const std::wstring& archive, const std::string& destin
             const std::vector<std::pair<std::string, std::string>> retry{{"retry", text::Get(T::ActionRetry)}};
             Stage stage(shared->staging);
             if (!stage.Create(destination)) {
-                report.Explain({}, text::Get(T::SafeUnchanged), retry);
-                report.Fail(text::Get(T::ErrStage));
+                report.Explain({}, {}, retry);
+                stage.ReportCreateFailure(report);
                 return PULSE_TASK_FAILED;
             }
             const fs::path root(stage.Path());
@@ -421,7 +460,7 @@ PulseStatus Jobs::Extract(const std::wstring& archive, const std::string& destin
                 report.Explain(password ? text::Get(T::DetailWrongPassword)
                                : damaged ? text::Get(T::DetailDamaged)
                                : IsWorkerFault(result.status) ? text::Get(T::DetailWorkerIsolated) : std::string{},
-                               text::Get(T::SafeUnchanged),
+                               {},
                                password ? std::vector<std::pair<std::string, std::string>>{{"password", text::Get(T::ActionPassword)}}
                                : damaged ? std::vector<std::pair<std::string, std::string>>{{"test", text::Get(T::CmdTest)}, {"retry", text::Get(T::ActionRetry)}}
                                : retry);
@@ -556,8 +595,8 @@ PulseStatus Jobs::Compress(const std::vector<std::wstring>& sources, const std::
             const std::vector<std::pair<std::string, std::string>> retry{{"retry", text::Get(T::ActionRetry)}};
             Stage stage(shared->staging);
             if (!stage.Create(destination)) {
-                report.Explain({}, text::Get(T::SafeNoArchive), retry);
-                report.Fail(text::Get(T::ErrStage));
+                report.Explain({}, {}, retry);
+                stage.ReportCreateFailure(report);
                 return PULSE_TASK_FAILED;
             }
             const auto result = engine::Create(sources, stage.Path(), choice.name, choice.options, cancelled,
@@ -565,7 +604,7 @@ PulseStatus Jobs::Compress(const std::vector<std::wstring>& sources, const std::
             if (result.status == engine::Status::Cancelled || cancelled()) return PULSE_TASK_CANCELLED;
             if (result.status != engine::Status::Ok) {
                 report.Explain(IsWorkerFault(result.status) ? text::Get(T::DetailWorkerIsolated) : std::string{},
-                               text::Get(T::SafeNoArchive), retry);
+                               {}, retry);
                 report.Log(Diagnostics(result.error));
                 report.Fail(Headline(result.status, result.error));
                 return PULSE_TASK_FAILED;

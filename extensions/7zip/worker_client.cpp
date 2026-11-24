@@ -457,7 +457,9 @@ public:
 std::mutex g_warm_lock;
 std::unique_ptr<WorkerSession> g_warm_preview_worker;
 
-std::unique_ptr<WorkerSession> AcquirePreviewSession(const worker_client::WorkerLimits& limits, std::string& error) {
+std::unique_ptr<WorkerSession> AcquirePreviewSession(const worker_client::WorkerLimits& limits, std::string& error,
+                                                     bool* out_reused = nullptr) {
+    if (out_reused) *out_reused = false;
     {
         std::lock_guard guard(g_warm_lock);
         if (g_warm_preview_worker) {
@@ -465,6 +467,7 @@ std::unique_ptr<WorkerSession> AcquirePreviewSession(const worker_client::Worker
             if (candidate->Healthy() &&
                 candidate->MemoryLimitBytes() == limits.preview_memory_bytes &&
                 candidate->AllowFaults() == limits.allow_fault_injection) {
+                if (out_reused) *out_reused = true;
                 return candidate;
             }
             candidate->ShutdownCleanly();
@@ -991,5 +994,200 @@ std::vector<HashResult> Hash(const std::vector<std::wstring>& files,
     session.ShutdownCleanly();
     return results;
 }
+
+ExtractResult ExtractEntry(const std::wstring& archive_path, const std::wstring& entry_path,
+                           const std::wstring& destination_file, const Cancelled& cancelled,
+                           const Report& report, const AskPassword& password,
+                           const Budget& budget) {
+    ExtractResult result;
+    if (SafeCallCancelled(cancelled)) {
+        result.status = Status::Cancelled;
+        result.error = "Cancelled";
+        return result;
+    }
+
+    ByteWriter req;
+    if (!req.WStr(archive_path) ||
+        !req.WStr(entry_path) ||
+        !req.WStr(destination_file) ||
+        !req.Budget(budget) ||
+        !req.Bool(static_cast<bool>(report)) ||
+        !req.Bool(static_cast<bool>(password))) {
+        result.status = Status::InvalidInput;
+        result.error = "Invalid extract-entry arguments";
+        return result;
+    }
+
+    const auto limits = CurrentLimits();
+    const uint32_t hard_timeout_ms = EffectiveHardTimeoutMs(
+        budget.max_duration_ms, limits.preview_hard_timeout_slack_ms, limits.task_hard_timeout_ms);
+
+    std::unique_ptr<WorkerSession> session;
+    std::vector<uint8_t> resp;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::string spawn_error;
+        bool reused = false;
+        if (attempt == 0) {
+            session = AcquirePreviewSession(limits, spawn_error, &reused);
+        } else {
+            session = std::make_unique<WorkerSession>();
+            if (!session->Spawn(limits.preview_memory_bytes, limits.allow_fault_injection, spawn_error)) {
+                session.reset();
+            }
+        }
+        if (!session) {
+            result.status = Status::WorkerCrashed;
+            result.error = spawn_error;
+            return result;
+        }
+
+        const uint64_t req_id = ++g_next_request_id;
+        const uint64_t gen = ++g_next_task_generation;
+        result = ExtractResult{};
+        if (session->Execute(FrameType::ReqExtractEntry, FrameType::RespExtractEntry, req_id, gen, req.Bytes(),
+                             cancelled, report, password, hard_timeout_ms, limits.cancel_grace_ms,
+                             resp, result.status, result.error)) {
+            break;
+        }
+        session->KillAndReap();
+        session.reset();
+        if (!(attempt == 0 && reused && result.status == Status::WorkerCrashed && !SafeCallCancelled(cancelled))) {
+            return result;
+        }
+    }
+
+    ByteReader reader(resp);
+    if (!reader.Status(result.status) ||
+        !reader.Str(result.error) ||
+        !reader.U64(result.files) ||
+        !reader.U64(result.bytes) ||
+        !reader.U64(result.skipped_links) ||
+        !reader.Empty()) {
+        if (session) session->KillAndReap();
+        result = ExtractResult{};
+        result.status = Status::WorkerCrashed;
+        result.error = "malformed extract-entry response from worker";
+        return result;
+    }
+    if (session) ReleasePreviewSession(std::move(session));
+    return result;
+}
+
+ExtractResult ExtractSelected(const std::wstring& archive_path, const std::vector<std::wstring>& entries,
+                              const std::wstring& base, const std::wstring& destination,
+                              const Cancelled& cancelled, const Report& report, const AskPassword& password,
+                              const Budget& budget) {
+    ExtractResult result;
+    if (SafeCallCancelled(cancelled)) {
+        result.status = Status::Cancelled;
+        result.error = "Cancelled";
+        return result;
+    }
+    ByteWriter req;
+    if (!req.WStr(archive_path) ||
+        !req.WStrVec(entries) ||
+        !req.WStr(base) ||
+        !req.WStr(destination) ||
+        !req.Budget(budget) ||
+        !req.Bool(static_cast<bool>(report)) ||
+        !req.Bool(static_cast<bool>(password))) {
+        result.status = Status::InvalidInput;
+        result.error = "Invalid extract-selected arguments";
+        return result;
+    }
+    const auto limits = CurrentLimits();
+    std::string spawn_error;
+    WorkerSession session;
+    if (!session.Spawn(limits.task_memory_bytes, limits.allow_fault_injection, spawn_error)) {
+        result.status = Status::WorkerCrashed;
+        result.error = spawn_error;
+        return result;
+    }
+    const uint64_t req_id = ++g_next_request_id;
+    const uint64_t gen = ++g_next_task_generation;
+    const uint32_t hard_timeout_ms = EffectiveHardTimeoutMs(
+        budget.max_duration_ms, limits.preview_hard_timeout_slack_ms, limits.task_hard_timeout_ms);
+    std::vector<uint8_t> resp;
+    if (!session.Execute(FrameType::ReqExtractSelected, FrameType::RespExtractSelected, req_id, gen, req.Bytes(),
+                         cancelled, report, password, hard_timeout_ms, limits.cancel_grace_ms,
+                         resp, result.status, result.error)) {
+        session.KillAndReap();
+        return result;
+    }
+    ByteReader reader(resp);
+    if (!reader.Status(result.status) ||
+        !reader.Str(result.error) ||
+        !reader.U64(result.files) ||
+        !reader.U64(result.bytes) ||
+        !reader.U64(result.skipped_links) ||
+        !reader.Empty()) {
+        session.KillAndReap();
+        result = ExtractResult{};
+        result.status = Status::WorkerCrashed;
+        result.error = "malformed extract-selected response from worker";
+        return result;
+    }
+    session.ShutdownCleanly();
+    return result;
+}
+
+ModifyResult Modify(const std::wstring& archive_path, const std::vector<Change>& changes,
+                    const std::wstring& backup_dir, const Cancelled& cancelled, const Report& report,
+                    const AskPassword& password) {
+    ModifyResult result;
+    if (SafeCallCancelled(cancelled)) {
+        result.status = Status::Cancelled;
+        result.error = "Cancelled";
+        return result;
+    }
+    ByteWriter req;
+    bool ok = !changes.empty() && changes.size() <= 100000u &&
+              req.WStr(archive_path) && req.U32(static_cast<uint32_t>(changes.size()));
+    for (const auto& change : changes) {
+        if (!ok) break;
+        ok = req.U32(static_cast<uint32_t>(change.kind)) && req.WStr(change.path) &&
+             req.WStr(change.source) && req.WStr(change.target);
+    }
+    ok = ok && req.WStr(backup_dir) && req.Bool(static_cast<bool>(report)) && req.Bool(static_cast<bool>(password));
+    if (!ok) {
+        result.status = Status::InvalidInput;
+        result.error = "Invalid modify arguments";
+        return result;
+    }
+    const auto limits = CurrentLimits();
+    std::string spawn_error;
+    WorkerSession session;
+    if (!session.Spawn(limits.task_memory_bytes, limits.allow_fault_injection, spawn_error)) {
+        result.status = Status::WorkerCrashed;
+        result.error = spawn_error;
+        return result;
+    }
+    const uint64_t req_id = ++g_next_request_id;
+    const uint64_t gen = ++g_next_task_generation;
+    std::vector<uint8_t> resp;
+    if (!session.Execute(FrameType::ReqModify, FrameType::RespModify, req_id, gen, req.Bytes(),
+                         cancelled, report, password, limits.task_hard_timeout_ms, limits.cancel_grace_ms,
+                         resp, result.status, result.error)) {
+        session.KillAndReap();
+        return result;
+    }
+    ByteReader reader(resp);
+    if (!reader.Status(result.status) ||
+        !reader.Str(result.error) ||
+        !reader.WStr(result.backup) ||
+        !reader.U64(result.added) ||
+        !reader.U64(result.removed) ||
+        !reader.U64(result.renamed) ||
+        !reader.Empty()) {
+        session.KillAndReap();
+        result = ModifyResult{};
+        result.status = Status::WorkerCrashed;
+        result.error = "malformed modify response from worker";
+        return result;
+    }
+    session.ShutdownCleanly();
+    return result;
+}
+
 
 } // namespace engine

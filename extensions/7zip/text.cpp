@@ -1,6 +1,8 @@
 #include "text.h"
 #include <windows.h>
 #include <array>
+#include <atomic>
+#include <string>
 
 namespace text {
 namespace {
@@ -60,6 +62,7 @@ constexpr Row kRows[] = {
     {Id::ErrCommit, "无法把结果交给 Pulse 发布。", "無法把結果交給 Pulse 發佈。", "Cannot hand the result to Pulse."},
     {Id::ErrLinks, "已跳过 {name} 个链接（不会解压符号链接或硬链接）。", "已略過 {name} 個連結（不會解壓縮符號連結或硬連結）。", "Skipped {name} link(s): symbolic and hard links are not extracted."},
     {Id::ErrSkipped, "已跳过 {name} 个链接或连接点（不会跟随）。", "已略過 {name} 個連結或連接點（不會跟隨）。", "Skipped {name} link(s) or junction(s); they are not followed."},
+    {Id::ErrUnsafePath, "压缩包里有不安全的路径，已停止以免写到目标文件夹之外：", "壓縮檔中有不安全的路徑，已停止以免寫到目標資料夾之外：", "The archive contains a path that could write outside the destination, so it was stopped: "},
     {Id::WaitingHost, "等待确认并写入文件…", "等待確認並寫入檔案…", "Waiting for confirmation and writing files…"},
     {Id::TestOk, "测试通过，没有发现错误。", "測試通過，沒有發現錯誤。", "Test passed; no errors found."},
     {Id::SettingsTitle, "7-Zip", "7-Zip", "7-Zip"},
@@ -193,8 +196,52 @@ constexpr Row kRows[] = {
     {Id::TypeCab, "CAB 安装包", "CAB 安裝套件", "CAB package"},
     {Id::VerbPreview, "在 Pulse 中打开", "在 Pulse 中開啟", "Open in Pulse"},
     {Id::AppDescription, "用 Pulse 和 7-Zip 解压与预览压缩包", "用 Pulse 和 7-Zip 解壓縮與預覽壓縮檔", "Extract and preview archives with Pulse and 7-Zip"},
+    {Id::CmdBrowseArchive, "打开浏览", "開啟瀏覽", "Open archive"},
+    {Id::CmdBrowseDetail, "在当前标签页浏览压缩包内文件", "在目前分頁瀏覽壓縮檔內檔案", "Browse archive contents in Pulse"},
+    {Id::TabGeneral, "常规设置", "一般設定", "General"},
+    {Id::TabFormats, "支持格式", "支援格式", "Formats"},
+    {Id::FormatsRwTitle, "读取与写入", "讀取與寫入", "Read & write"},
+    {Id::FormatsRoTitle, "只读浏览与解压", "唯讀瀏覽與解壓", "Read-only"},
+    {Id::SidePreviewTitle, "右键菜单效果", "右鍵選單效果", "Menu preview"},
+    {Id::SidePreviewDetail, "示例：backup.zip", "範例：backup.zip", "Sample: backup.zip"},
+    {Id::VfsUnavailable, "当前无法打开虚拟目录，请改用提取功能。", "目前無法開啟虛擬目錄，請改用解壓縮功能。", "Archive browsing is unavailable right now."},
+    {Id::TakeSection, "接管压缩包", "接管壓縮檔", "Archive files"},
+    {Id::TakeTitle, "接管压缩包", "接管壓縮檔", "Open archives with Pulse"},
+    {Id::TakeDesc, "双击压缩包直接用 Pulse 解压，压缩包换上按格式区分的图标。别的压缩软件正在打开的格式不动，可以在下面单独改。关掉时恢复原来的关联。", "按兩下壓縮檔直接用 Pulse 解壓，壓縮檔換上依格式區分的圖示。其他壓縮軟體正在開啟的格式不動，可以在下面單獨修改。關閉時還原原來的關聯。", "Double-click an archive to extract it with Pulse, and give archives an icon for each format. Formats another archiver opens are left alone; change them one by one below. Turning this off restores the previous associations."},
+    {Id::TakeBusy, "正在注册图标和关联，并通知资源管理器刷新图标…", "正在註冊圖示和關聯，並通知檔案總管重新整理圖示…", "Registering icons and associations, and asking File Explorer to refresh…"},
+    {Id::TakeWinSettings, "在 Windows 设置里一起改", "在 Windows 設定裡一起修改", "Change them in Windows Settings"},
+    {Id::TakeConfirmEach, "逐个确认", "逐一確認", "Confirm one by one"},
+    {Id::TakeAskSet, "设为 Pulse…", "設為 Pulse…", "Use Pulse…"},
+    {Id::TakeAskChange, "改为 Pulse…", "改為 Pulse…", "Switch to Pulse…"},
+    {Id::DblTitle, "双击压缩包时", "按兩下壓縮檔時", "When you double-click an archive"},
+    {Id::DblDesc, "右键菜单里的命令不变", "右鍵選單裡的命令不變", "Context menu commands stay the same"},
+    {Id::DblOpen, "在 Pulse 里打开", "在 Pulse 裡開啟", "Open in Pulse"},
+    {Id::DblOpenDesc, "先看里面有什么，不解压", "先看裡面有什麼，不解壓", "See what is inside without extracting"},
+    {Id::TakeStatusExtract, "Pulse 智能解压", "Pulse 智慧解壓", "Pulse smart extract"},
+    {Id::TakeStatusOpen, "在 Pulse 中打开", "在 Pulse 中開啟", "Opens in Pulse"},
+    {Id::TakeStatusOther, "现在由「{name}」打开", "現在由「{name}」開啟", "Opens with {name} now"},
+    {Id::TakeStatusExcluded, "不接管", "不接管", "Not taken over"},
+    {Id::TakeStatusExcludedWho, "不接管 · 由「{name}」打开", "不接管 · 由「{name}」開啟", "Not taken over · opens with {name}"},
+    {Id::TakeStatusOff, "未接管", "未接管", "Not taken over"},
+    {Id::TakeStatusOffWho, "未接管 · 由「{name}」打开", "未接管 · 由「{name}」開啟", "Not taken over · opens with {name}"},
+    {Id::TakeStatusFree, "没有程序打开", "沒有程式開啟", "No program opens it"},
+    {Id::TakeStatusUnknown, "关联状态未确认", "關聯狀態未確認", "Association not confirmed"},
+    {Id::TakeOffHint, "打开后，下面这些格式双击就用 Pulse 解压，并换上压缩包图标。", "開啟後，下面這些格式按兩下就用 Pulse 解壓，並換上壓縮檔圖示。", "When on, these formats extract with Pulse on double-click and get archive icons."},
+    {Id::TakeSummaryAsk, "已接管 {count} 种 · {name} 种需要在 Windows 里确认一次", "已接管 {count} 種 · {name} 種需要在 Windows 裡確認一次", "{count} taken over · {name} need confirming once in Windows"},
+    {Id::TakeSummaryDone, "已接管 {count} 种 · 全部完成", "已接管 {count} 種 · 全部完成", "{count} taken over · all done"},
+    {Id::Recommended, "推荐", "推薦", "Recommended"},
+    {Id::MenuDetailSmart, "单项直接放出 · 多项建同名文件夹", "單項直接放出 · 多項建同名資料夾", "One item lands as is · several get a folder"},
+    {Id::MenuDetailFolder, "放进同名文件夹", "放進同名資料夾", "Into a folder named after the archive"},
+    {Id::MenuDetailHere, "内容放在压缩包旁边", "內容放在壓縮檔旁邊", "Contents land next to the archive"},
+    {Id::MenuDetailFixed, "放进 {name}", "放進 {name}", "Into {name}"},
+    {Id::MenuDetailQuick, "{name} · {count}", "{name} · {count}", "{name} · {count}"},
+    {Id::MenuSettings, "设置", "設定", "Settings"},
+    {Id::PreviewArchive, "右键压缩包时", "右鍵壓縮檔時", "Right-click an archive"},
+    {Id::PreviewFile, "右键普通文件时", "右鍵一般檔案時", "Right-click any other file"},
 };
-int Language() {
+std::atomic<int> g_host_language{-1};
+
+int OsLanguage() {
     static const int language = [] {
         const LANGID id = GetUserDefaultUILanguage();
         if (PRIMARYLANGID(id) != LANG_CHINESE) return 2;
@@ -205,9 +252,38 @@ int Language() {
 }
 } // namespace
 
+void SetHostLanguage(std::string_view language_tag) noexcept {
+    if (language_tag.empty()) {
+        g_host_language.store(-1, std::memory_order_release);
+        return;
+    }
+    char lowered[32]{};
+    const size_t limit = language_tag.size() < sizeof(lowered) ? language_tag.size() : sizeof(lowered) - 1;
+    for (size_t i = 0; i < limit; ++i) {
+        const unsigned char c = static_cast<unsigned char>(language_tag[i]);
+        lowered[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : static_cast<char>(c);
+    }
+    const std::string_view tag(lowered, limit);
+    int resolved = 2; // MenuLanguage::EnUS
+    if (tag.starts_with("zh-tw") || tag.starts_with("zh-hk") || tag.starts_with("zh-mo") || tag.starts_with("zh-hant")) {
+        resolved = 1; // MenuLanguage::ZhTW
+    } else if (tag == "zh" || tag.starts_with("zh-")) {
+        resolved = 0; // MenuLanguage::ZhCN
+    }
+    g_host_language.store(resolved, std::memory_order_release);
+}
+
+MenuLanguage CurrentLanguage() noexcept {
+    const int override_lang = g_host_language.load(std::memory_order_acquire);
+    return static_cast<MenuLanguage>(override_lang >= 0 ? override_lang : OsLanguage());
+}
+
 const char* Get(Id id) {
+    return Get(id, CurrentLanguage());
+}
+const char* Get(Id id, MenuLanguage language) {
     for (const auto& row : kRows)
-        if (row.id == id) return Language() == 0 ? row.zh : Language() == 1 ? row.tw : row.en;
+        if (row.id == id) return language == MenuLanguage::ZhCN ? row.zh : language == MenuLanguage::ZhTW ? row.tw : row.en;
     return "";
 }
 std::string Format(Id id, const std::string& name, const std::string& count) {

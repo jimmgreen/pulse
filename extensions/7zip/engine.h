@@ -98,6 +98,49 @@ ExtractResult Extract(const std::wstring& path, const std::wstring& destination,
                       const Cancelled& cancelled, const Report& report, const AskPassword& password,
                       const Budget& budget = Budget::DefaultExtractBudget());
 
+// Extracts one regular archive file (`entry_path`) into a non-existent `destination_file`
+// whose parent directory exists. Never overwrites, never follows or creates links.
+ExtractResult ExtractEntry(const std::wstring& archive_path, const std::wstring& entry_path,
+                           const std::wstring& destination_file, const Cancelled& cancelled,
+                           const Report& report, const AskPassword& password,
+                           const Budget& budget = Budget::DefaultExtractBudget());
+
+// Only the selected items, in one pass over the archive: `entries` are archive-relative ('\\' or '/'),
+// a folder takes everything below it. Output paths are relative to `base` (the archive folder the
+// selection was made in, "" = root), so "docs\\a.txt" picked inside "docs" lands as "a.txt".
+// `destination` must be an existing empty folder; callers move the result where it belongs.
+ExtractResult ExtractSelected(const std::wstring& archive_path, const std::vector<std::wstring>& entries,
+                              const std::wstring& base, const std::wstring& destination,
+                              const Cancelled& cancelled, const Report& report, const AskPassword& password,
+                              const Budget& budget = Budget::DefaultExtractBudget());
+
+// Editing an archive in place. 7-Zip rewrites it to a temporary file beside it (unchanged items
+// are copied without recompressing where the format allows) and swaps it in with ReplaceFileW.
+struct Change {
+    enum class Kind : uint32_t { Put = 0, Delete = 1, Rename = 2 };
+    Kind kind = Kind::Put;
+    std::wstring path;    // archive-relative; Put: where `source` lands (replacing what is there),
+                          // Delete/Rename: the item, a folder with everything below it
+    std::wstring source;  // Put: a file or folder on disk
+    std::wstring target;  // Rename: the new archive-relative path
+};
+struct ModifyResult {
+    Status status = Status::IoError;
+    std::string error;
+    std::wstring backup;  // the archive as it was before, when a backup folder was given
+    uint64_t added = 0, removed = 0, renamed = 0;
+};
+ModifyResult Modify(const std::wstring& archive_path, const std::vector<Change>& changes,
+                    const std::wstring& backup_dir, const Cancelled& cancelled, const Report& report,
+                    const AskPassword& password);
+// Formats Modify writes (Listing::format, case-insensitive). Wrapped (Listing::nested) and split
+// archives stay read-only.
+inline bool WritableFormat(const std::wstring& format) noexcept {
+    std::wstring lower;
+    for (wchar_t ch : format) lower += (ch >= L'A' && ch <= L'Z') ? static_cast<wchar_t>(ch - L'A' + L'a') : ch;
+    return lower == L"7z" || lower == L"zip" || lower == L"tar";
+}
+
 enum class Format { SevenZip, Zip, Tar, TarGz, TarXz, TarBz2 };
 struct CreateOptions {
     Format format = Format::SevenZip;

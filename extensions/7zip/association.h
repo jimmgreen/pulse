@@ -18,10 +18,19 @@ const char* GroupExtensions(int group);  // ".gz .tgz"
 int GroupIcon(int group);                // its first extension's icon resource (101-115)
 std::wstring IconLibrary();              // this extension's DLL, which holds the icons
 
-enum class Owner { Off, Pulse, Free, Other };
+struct ExtensionSpec {
+    std::string extension;               // lowercase dotted extension, e.g. ".zip"
+    int group = 0;                       // 0..kGroupCount-1
+    int icon = 0;                        // resource id in pulse_7zip.dll (101..115)
+    std::string display_name;            // localized file type display name (UTF-8)
+};
+std::vector<ExtensionSpec> AllExtensions();
+
+enum class Owner { Off, Pulse, Free, Other, Unknown };
 struct Status {
     Owner owner = Owner::Off;
     std::wstring who;      // the program that opens it now, when not Pulse
+    unsigned pulse_count = 0; // effective extensions in this group, for chooser progress
     bool windows = false;  // that program is Windows' own archive folder
 };
 // How Windows opens each group now. `groups`: bit i = the group is taken over. Blocking (COM, registry).
@@ -31,8 +40,8 @@ std::vector<Status> Query(unsigned groups);
 // shows the archive in Pulse with its contents previewed. Blocking; false if the registry refused.
 bool Apply(unsigned groups, bool extract);
 // Removes everything Apply wrote and gives the extensions back to what opened them before.
-void Remove();
-// Windows' own "open with" chooser for the group's first extension (UI thread, modal).
+bool Remove();
+// Windows' own "open with" chooser for the first extension not yet owned by Pulse (UI thread, modal).
 void Choose(HWND owner, int group);
 // Windows Settings › Apps › Default apps › Pulse, where all of them can be switched at once.
 void OpenDefaultApps();

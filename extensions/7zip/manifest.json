@@ -3,7 +3,240 @@
   "id": "pulse.7zip",
   "name": "7-Zip",
   "resources": ["settings.own"],
+  "showcase": {
+    "version": "1.1.0",
+    "summary": {
+      "zh": "支持 7z、zip、rar 等数十种压缩格式：智能解压、虚拟浏览、分卷创建与校验。",
+      "en": "Smart extract, virtual browsing, archive creation, and checksums across 7z, zip, rar, and more.",
+      "tw": "支援 7z、zip、rar 等數十種壓縮格式：智慧解壓、虛擬瀏覽、分卷建立與校驗。"
+    },
+    "description": {
+      "zh": "基于 7-Zip 独立隔离工作进程构建。可在 Pulse 内直接以虚拟目录打开压缩包并按需提取文件，也支持智能单层展开、AES-256 加密压缩、分卷打包及系统文件关联接管。",
+      "en": "Powered by an isolated 7-Zip worker process. Browse archives as virtual folders in Pulse with on-demand extraction, smart single-root unpacking, AES-256 creation, split volumes, and Windows archive associations.",
+      "tw": "基於 7-Zip 獨立隔離工作行程建置。可在 Pulse 內直接以虛擬目錄開啟壓縮檔並依需求提取檔案，也支援智慧單層展開、AES-256 加密壓縮、分卷打包及系統檔案關聯接管。"
+    },
+    "category": "archive",
+    "publisher": "Pulse",
+    "engine": {
+      "zh": "7-Zip 隔离引擎",
+      "en": "7-Zip isolated engine",
+      "tw": "7-Zip 隔離引擎"
+    },
+    "license": "LGPL-2.1-or-later",
+    "homepage": "https://www.7-zip.org/",
+    "source": "https://github.com/ip7z/7zip",
+    "icon": "box",
+    "iconColor": "#527D70",
+    "tags": ["7z", "zip", "rar", "tar", "vfs"],
+    "highlights": [
+      {
+        "zh": "独立进程沙箱隔离解码，避免主界面卡顿或崩溃",
+        "en": "Process-isolated decoding keeps Pulse fast and resilient",
+        "tw": "獨立行程沙箱隔離解碼，避免主介面卡頓或當機"
+      },
+      {
+        "zh": "支持虚拟文件系统浏览压缩包内容与按需提取",
+        "en": "Browse archive contents directly via virtual folders",
+        "tw": "支援虛擬檔案系統瀏覽壓縮檔內容與依需求提取"
+      },
+      {
+        "zh": "右键菜单智能解压、快速压缩与 Windows 文件关联管理",
+        "en": "Smart extract, quick compress, and reversible file associations",
+        "tw": "右鍵選單智慧解壓、快速壓縮與 Windows 檔案關聯管理"
+      }
+    ],
+    "quickSettings": {
+      "title": {
+        "zh": "常用压缩与菜单设置",
+        "en": "Archive & menu quick settings",
+        "tw": "常用壓縮與選單設定"
+      },
+      "readyState": "ready",
+      "statusState": "status",
+      "rows": [
+        {
+          "title": {
+            "zh": "解压策略",
+            "en": "Extract mode",
+            "tw": "解壓策略"
+          },
+          "description": {
+            "zh": "单层内容直接放出，多项时新建同名目录",
+            "en": "Flatten single items or unpack into a new folder",
+            "tw": "單層內容直接放出，多項時新建同名資料夾"
+          },
+          "controls": [
+            {
+              "kind": "select",
+              "state": "mode",
+              "width": 168,
+              "options": [
+                {
+                  "value": "0",
+                  "label": {
+                    "zh": "智能解压",
+                    "en": "Smart extract",
+                    "tw": "智慧解壓縮"
+                  }
+                },
+                {
+                  "value": "1",
+                  "label": {
+                    "zh": "解压到文件夹",
+                    "en": "Into folder",
+                    "tw": "解壓到資料夾"
+                  }
+                },
+                {
+                  "value": "2",
+                  "label": {
+                    "zh": "解压到当前位置",
+                    "en": "Extract here",
+                    "tw": "解壓到目前位置"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": {
+            "zh": "快速压缩预设",
+            "en": "Quick compress",
+            "tw": "快速壓縮預設"
+          },
+          "description": {
+            "zh": "一键压缩时使用的默认封装格式与压缩级别",
+            "en": "Default container format and compression level",
+            "tw": "一鍵壓縮時使用的預設封裝格式與壓縮等級"
+          },
+          "controls": [
+            {
+              "kind": "select",
+              "state": "format",
+              "width": 108,
+              "options": [
+                { "value": "0", "label": "7z" },
+                { "value": "1", "label": "zip" },
+                { "value": "2", "label": "tar" },
+                { "value": "3", "label": "tar.gz" },
+                { "value": "4", "label": "tar.xz" },
+                { "value": "5", "label": "tar.bz2" }
+              ]
+            },
+            {
+              "kind": "select",
+              "state": "level",
+              "width": 108,
+              "options": [
+                { "value": "0", "label": { "zh": "仅存储", "en": "Store", "tw": "僅儲存" } },
+                { "value": "1", "label": { "zh": "极速", "en": "Fastest", "tw": "極速" } },
+                { "value": "2", "label": { "zh": "快速", "en": "Fast", "tw": "快速" } },
+                { "value": "3", "label": { "zh": "标准", "en": "Normal", "tw": "標準" } },
+                { "value": "4", "label": { "zh": "最大", "en": "Maximum", "tw": "最大" } },
+                { "value": "5", "label": { "zh": "极限", "en": "Ultra", "tw": "極限" } }
+              ]
+            }
+          ]
+        },
+        {
+          "title": {
+            "zh": "记住密码",
+            "en": "Remember passwords",
+            "tw": "記住密碼"
+          },
+          "description": {
+            "zh": "本次会话内自动复用已验证过的压缩包密码",
+            "en": "Reuse verified passwords during this session",
+            "tw": "本次工作階段自動複用已驗證過的壓縮檔密碼"
+          },
+          "controls": [
+            {
+              "kind": "switch",
+              "state": "remember"
+            }
+          ]
+        },
+        {
+          "title": {
+            "zh": "折叠到 7-Zip 子菜单",
+            "en": "Group in 7-Zip submenu",
+            "tw": "摺疊到 7-Zip 子選單"
+          },
+          "description": {
+            "zh": "开启后将全部动作收纳进一级 7-Zip 子菜单中",
+            "en": "Place all actions under a single 7-Zip submenu",
+            "tw": "開啟後將全部動作收納進一級 7-Zip 子選單中"
+          },
+          "controls": [
+            {
+              "kind": "switch",
+              "state": "placement1"
+            }
+          ]
+        }
+      ],
+      "menuPreview": {
+        "caption": {
+          "zh": "右键菜单实时预览",
+          "en": "Context menu preview",
+          "tw": "右鍵選單即時預覽"
+        },
+        "submenuState": "placement1",
+        "sampleEntries": [
+          { "name": "archive.zip", "directory": false },
+          { "name": "Documents", "directory": true }
+        ]
+      }
+    }
+  },
   "contributes": {
+    "icons": [
+      {
+        "id": "sevenzip-browse",
+        "viewBox": 16,
+        "layers": [
+          {
+            "path": "M1.75 12.5V4.25a1 1 0 0 1 1-1h3.1l1.4 1.5h4.75a1 1 0 0 1 1 1V7",
+            "stroke": true,
+            "fill": false,
+            "closed": false,
+            "color": "inherit"
+          },
+          {
+            "path": "M1.75 12.5L3.35 7.75a1 1 0 0 1 0.95-0.75h9.05a0.9 0.9 0 0 1 0.86 1.16l-1.45 4.5a1 1 0 0 1-0.96 0.69H2.55a0.8 0.8 0 0 1-0.8-0.85Z",
+            "stroke": true,
+            "fill": false,
+            "closed": true,
+            "color": "inherit"
+          }
+        ]
+      }
+    ],
+    "fileHandlers": [
+      {
+        "id": "archive-open",
+        "displayName": {
+          "zh": "7-Zip 压缩包",
+          "en": "7-Zip archive",
+          "tw": "7-Zip 壓縮檔"
+        },
+        "verbLabel": {
+          "zh": "在 Pulse 中打开",
+          "en": "Open in Pulse",
+          "tw": "在 Pulse 中開啟"
+        },
+        "command": "extract-auto",
+        "action": "command",
+        "iconResource": "pulse_7zip.dll,-101",
+        "fallbackOnUnassociated": true,
+        "extensions": [
+          ".zip", ".zipx", ".7z", ".rar", ".tar", ".gz", ".tgz", ".xz",
+          ".txz", ".bz2", ".tbz2", ".tbz", ".lzma", ".z", ".cab", ".lzh",
+          ".lha", ".arj", ".cpio"
+        ]
+      }
+    ],
     "commands": [
       {
         "id": "extract",
@@ -19,6 +252,7 @@
         },
         "group": "7-Zip",
         "submenu": false,
+        "primary": true,
         "icon": "extract",
         "kinds": ["files"],
         "minSelection": 1,
@@ -84,6 +318,7 @@
         },
         "group": "7-Zip",
         "submenu": false,
+        "primary": true,
         "icon": "archive",
         "kinds": ["files", "directories"],
         "minSelection": 1,
@@ -116,6 +351,31 @@
         "kinds": ["files"],
         "minSelection": 1,
         "maxSelection": 64
+      },
+      {
+        "id": "browse-archive",
+        "title": {
+          "zh": "打开浏览",
+          "en": "Open archive",
+          "tw": "開啟瀏覽"
+        },
+        "detail": {
+          "zh": "在当前标签页浏览压缩包内文件",
+          "en": "Browse archive contents in Pulse",
+          "tw": "在目前分頁瀏覽壓縮檔內檔案"
+        },
+        "group": "7-Zip",
+        "submenu": false,
+        "icon": "sevenzip-browse",
+        "kinds": ["files"],
+        "minSelection": 1,
+        "maxSelection": 1,
+        "extensions": [
+          ".7z", ".zip", ".rar", ".tar", ".gz", ".tgz", ".xz", ".txz",
+          ".bz2", ".tbz2", ".tbz", ".lzma", ".z", ".iso", ".cab", ".wim",
+          ".arj", ".lzh", ".lha", ".cpio", ".rpm", ".deb", ".001", ".zipx",
+          ".jar", ".apk", ".msi", ".vhd", ".vhdx", ".dmg", ".udf", ".squashfs"
+        ]
       }
     ]
   }

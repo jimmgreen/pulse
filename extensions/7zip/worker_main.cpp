@@ -64,6 +64,9 @@ bool IsRequestFrame(FrameType type, bool allow_faults) noexcept {
     case FrameType::ReqExtract:
     case FrameType::ReqCreate:
     case FrameType::ReqHash:
+    case FrameType::ReqExtractEntry:
+    case FrameType::ReqExtractSelected:
+    case FrameType::ReqModify:
         return true;
     case FrameType::ReqFaultCrashAv:
     case FrameType::ReqFaultHang:
@@ -493,6 +496,104 @@ bool HandleRequest(PipeChannel& channel, WorkerState& state, QueuedRequest& req,
         }
         if (!ok) return false;
         return channel.WriteFrame(FrameType::RespHash, req_id, gen, writer.Bytes(), nullptr, kWriteTimeoutMs) == IoStatus::Ok;
+    }
+
+    if (type == FrameType::ReqExtractEntry) {
+        std::wstring archive_path, entry_path, destination_file;
+        bool has_report = false, has_password_cb = false;
+        engine::Budget budget{};
+        if (!reader.WStr(archive_path) || !reader.WStr(entry_path) || !reader.WStr(destination_file) ||
+            !reader.Budget(budget) || !reader.Bool(has_report) || !reader.Bool(has_password_cb) || !reader.Empty()) {
+            return false;
+        }
+        engine::ExtractResult result;
+        try {
+            const auto report = has_report ? MakeProgressSender(channel, state, req_id, gen) : engine::Report{};
+            const auto ask = has_password_cb ? MakePasswordRequester(channel, state, req_id, gen) : engine::AskPassword{};
+            result = engine::ExtractEntry(archive_path, entry_path, destination_file, cancelled, report, ask, budget);
+        } catch (const std::bad_alloc&) {
+            result.status = engine::Status::WorkerMemoryLimit;
+            result.error = "Worker hit process memory limit";
+        }
+        ByteWriter writer;
+        if (!writer.U32(static_cast<uint32_t>(result.status)) ||
+            !writer.Str(result.error) ||
+            !writer.U64(result.files) ||
+            !writer.U64(result.bytes) ||
+            !writer.U64(result.skipped_links)) {
+            return false;
+        }
+        return channel.WriteFrame(FrameType::RespExtractEntry, req_id, gen, writer.Bytes(), nullptr, kWriteTimeoutMs) == IoStatus::Ok;
+    }
+
+    if (type == FrameType::ReqExtractSelected) {
+        std::wstring archive_path, base, destination;
+        std::vector<std::wstring> entries;
+        bool has_report = false, has_password_cb = false;
+        engine::Budget budget{};
+        if (!reader.WStr(archive_path) || !reader.WStrVec(entries) || !reader.WStr(base) || !reader.WStr(destination) ||
+            !reader.Budget(budget) || !reader.Bool(has_report) || !reader.Bool(has_password_cb) || !reader.Empty()) {
+            return false;
+        }
+        engine::ExtractResult result;
+        try {
+            const auto report = has_report ? MakeProgressSender(channel, state, req_id, gen) : engine::Report{};
+            const auto ask = has_password_cb ? MakePasswordRequester(channel, state, req_id, gen) : engine::AskPassword{};
+            result = engine::ExtractSelected(archive_path, entries, base, destination, cancelled, report, ask, budget);
+        } catch (const std::bad_alloc&) {
+            result.status = engine::Status::WorkerMemoryLimit;
+            result.error = "Worker hit process memory limit";
+        }
+        ByteWriter writer;
+        if (!writer.U32(static_cast<uint32_t>(result.status)) ||
+            !writer.Str(result.error) ||
+            !writer.U64(result.files) ||
+            !writer.U64(result.bytes) ||
+            !writer.U64(result.skipped_links)) {
+            return false;
+        }
+        return channel.WriteFrame(FrameType::RespExtractSelected, req_id, gen, writer.Bytes(), nullptr, kWriteTimeoutMs) == IoStatus::Ok;
+    }
+
+    if (type == FrameType::ReqModify) {
+        std::wstring archive_path, backup_dir;
+        uint32_t count = 0;
+        bool has_report = false, has_password_cb = false;
+        if (!reader.WStr(archive_path) || !reader.U32(count) || count == 0 || count > 100000u ||
+            static_cast<size_t>(count) * 16u > reader.Remaining()) {
+            return false;
+        }
+        std::vector<engine::Change> changes(count);
+        for (auto& change : changes) {
+            uint32_t kind = 0;
+            if (!reader.U32(kind) || kind > static_cast<uint32_t>(engine::Change::Kind::Rename) ||
+                !reader.WStr(change.path) || !reader.WStr(change.source) || !reader.WStr(change.target)) {
+                return false;
+            }
+            change.kind = static_cast<engine::Change::Kind>(kind);
+        }
+        if (!reader.WStr(backup_dir) || !reader.Bool(has_report) || !reader.Bool(has_password_cb) || !reader.Empty()) {
+            return false;
+        }
+        engine::ModifyResult result;
+        try {
+            const auto report = has_report ? MakeProgressSender(channel, state, req_id, gen) : engine::Report{};
+            const auto ask = has_password_cb ? MakePasswordRequester(channel, state, req_id, gen) : engine::AskPassword{};
+            result = engine::Modify(archive_path, changes, backup_dir, cancelled, report, ask);
+        } catch (const std::bad_alloc&) {
+            result.status = engine::Status::WorkerMemoryLimit;
+            result.error = "Worker hit process memory limit";
+        }
+        ByteWriter writer;
+        if (!writer.U32(static_cast<uint32_t>(result.status)) ||
+            !writer.Str(result.error) ||
+            !writer.WStr(result.backup) ||
+            !writer.U64(result.added) ||
+            !writer.U64(result.removed) ||
+            !writer.U64(result.renamed)) {
+            return false;
+        }
+        return channel.WriteFrame(FrameType::RespModify, req_id, gen, writer.Bytes(), nullptr, kWriteTimeoutMs) == IoStatus::Ok;
     }
 
     return false;

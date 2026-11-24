@@ -31,6 +31,9 @@ enum class FrameType : uint16_t {
     ReqExtract = 12,
     ReqCreate = 13,
     ReqHash = 14,
+    ReqExtractEntry = 15,
+    ReqExtractSelected = 16,
+    ReqModify = 17,
 
     MsgCancel = 20,
     MsgPasswordReply = 21,
@@ -44,6 +47,9 @@ enum class FrameType : uint16_t {
     RespExtract = 42,
     RespCreate = 43,
     RespHash = 44,
+    RespExtractEntry = 45,
+    RespExtractSelected = 46,
+    RespModify = 47,
 
     // Fault-injection opcodes accepted ONLY when worker runs with --allow-fault-injection.
     ReqFaultCrashAv = 200,

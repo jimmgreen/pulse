@@ -19,7 +19,9 @@ public:
     // `changed` runs on the UI thread after values load or change. `dispatch` brings the
     // association work (接管压缩包, a worker thread) back to the UI thread.
     PulseStatus Initialize(const pulse::sdk::Host&, PulseStagingV1, pulse::sdk::DispatchQueue& dispatch, std::function<void()> changed);
+    void RefreshLanguage();
     bool Ready() const;
+    void EnsureLoaded();
     ExtractMode Mode() const;
     // UTF-8 fixed extraction folder; empty = next to the archive.
     std::string FixedFolder() const;

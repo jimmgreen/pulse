@@ -1,3 +1,4 @@
+#include "archive_paths.h"
 #include "engine.h"
 #include "sevenzip_com.h"
 #include <bcrypt.h>
@@ -486,7 +487,7 @@ class OpenCallback final : public IArchiveOpenCallback, public IArchiveOpenVolum
     BudgetTracker& tracker_;
 public:
     OpenCallback(const fs::path& path, const Cancelled& cancelled, PasswordState& password, BudgetTracker& tracker)
-        : folder_(path.parent_path()), name_(path.filename().wstring()), cancelled_(cancelled), password_(password), tracker_(tracker) {}
+        : folder_(archive_paths::Parent(path)), name_(path.filename().wstring()), cancelled_(cancelled), password_(password), tracker_(tracker) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** out) noexcept override {
         if (!out) return E_POINTER;
         *out = nullptr;
@@ -701,7 +702,7 @@ Status OpenFile(const fs::path& path, const Cancelled& cancelled, PasswordState&
                 });
             if (archive_inside && SafeRelativePath(name) && name.find(L'\\') == std::wstring::npos && name.find(L'/') == std::wstring::npos) {
                 auto temp = std::make_unique<TempFolder>();
-                const auto temp_dir = temp->Create({}, path.parent_path());
+                const auto temp_dir = temp->Create({}, archive_paths::Parent(path));
                 if (!tracker.CheckDisk(temp_dir.wstring(), 0, true)) return Status::LimitReached;
                 const auto target = temp_dir / name;
                 std::unique_ptr<SingleOut, ComRelease<SingleOut>> single(
@@ -747,6 +748,31 @@ std::string StatusText(Status status) {
     }
 }
 
+// Drops "." components ("./a/./b" -> "a\\b"). Archives written by Unix tools
+// (tar, zip -r .) prefix every name with "./"; that is an ordinary relative
+// path, not an unsafe one. "..", empty parts, drive and device names are left
+// in place for SafeRelativePath to reject, as is a leading separator.
+std::wstring DropDotComponents(const std::wstring& path) {
+    std::vector<std::wstring_view> parts;
+    const std::wstring_view all(path);
+    size_t start = 0;
+    while (true) {
+        const size_t end = all.find(L'\\', start);
+        const auto part = all.substr(start, end == std::wstring_view::npos ? std::wstring_view::npos : end - start);
+        if (part != L".") parts.push_back(part);
+        if (end == std::wstring_view::npos) break;
+        start = end + 1;
+    }
+    if (parts.size() > 1 && parts.back().empty()) parts.pop_back();  // "dir\\"
+    std::wstring out;
+    out.reserve(path.size());
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i) out += L'\\';
+        out += parts[i];
+    }
+    return out;
+}
+
 bool ReadEntry(IInArchive* archive, UInt32 index, Entry& entry) {
     Variant path, dir, size, packed, mtime, attrib, encrypted, posix, symlink, hardlink, copylink, anti;
     archive->GetProperty(index, kpidPath, &path.value);
@@ -763,6 +789,11 @@ bool ReadEntry(IInArchive* archive, UInt32 index, Entry& entry) {
     archive->GetProperty(index, kpidIsAnti, &anti.value);
     entry.path = String(path.value);
     std::replace(entry.path.begin(), entry.path.end(), L'/', L'\\');
+    // A bare "./" entry names the archive root itself: nothing to list or write.
+    // (Nameless single streams such as .gz keep their empty path.)
+    const bool named = !entry.path.empty();
+    entry.path = DropDotComponents(entry.path);
+    const bool root_only = named && entry.path.empty();
     entry.dir = Bool(dir.value);
     entry.size = Number(size.value);
     entry.packed = Number(packed.value);
@@ -775,7 +806,7 @@ bool ReadEntry(IInArchive* archive, UInt32 index, Entry& entry) {
                            (posix.value.vt != VT_EMPTY && (Number(posix.value) & 0170000) == 0120000);
     entry.link = unix_link || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) || symlink.value.vt == VT_BSTR ||
                  hardlink.value.vt == VT_BSTR || copylink.value.vt == VT_BSTR;
-    return !Bool(anti.value);
+    return !Bool(anti.value) && !root_only;
 }
 
 // ---- extraction ---------------------------------------------------------------
@@ -917,7 +948,7 @@ public:
                 }
                 return S_OK;
             }
-            if (!MakeDirs(path.parent_path())) { failed = true; return E_FAIL; }
+            if (!MakeDirs(archive_paths::Parent(path))) { failed = true; return E_FAIL; }
             HANDLE file = CreateFileW(LongPath(path.wstring()).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                                       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
             if (file == INVALID_HANDLE_VALUE) { failed = true; return HRESULT_FROM_WIN32(GetLastError()); }
@@ -1312,9 +1343,32 @@ Listing List(const std::wstring& path, const Cancelled& cancelled, const AskPass
     return result;
 }
 
-ExtractResult Extract(const std::wstring& path, const std::wstring& destination, bool test_only,
-                      const Cancelled& cancelled, const Report& report, const AskPassword& ask,
-                      const Budget& budget) {
+namespace {
+// Archive-relative keys: '\\' separators, no leading "./" or separators, no trailing separator.
+std::wstring SelectionKey(std::wstring_view raw) {
+    std::wstring out(raw);
+    std::replace(out.begin(), out.end(), L'/', L'\\');
+    while (out.size() >= 2 && out[0] == L'.' && out[1] == L'\\') out.erase(0, 2);
+    while (!out.empty() && out.front() == L'\\') out.erase(out.begin());
+    while (!out.empty() && out.back() == L'\\') out.pop_back();
+    return out;
+}
+// `key` is `prefix` itself or inside it (case-insensitive, as Windows names are).
+bool UnderOrSame(const std::wstring& key, const std::wstring& prefix) noexcept {
+    if (prefix.empty()) return true;
+    if (key.size() < prefix.size()) return false;
+    if (CompareStringOrdinal(key.c_str(), static_cast<int>(prefix.size()), prefix.c_str(),
+                             static_cast<int>(prefix.size()), TRUE) != CSTR_EQUAL) return false;
+    return key.size() == prefix.size() || key[prefix.size()] == L'\\';
+}
+struct Selection {
+    std::vector<std::wstring> entries;
+    std::wstring base;
+};
+
+ExtractResult ExtractFiltered(const std::wstring& path, const std::wstring& destination, bool test_only,
+                              const Selection* selection, const Cancelled& cancelled, const Report& report,
+                              const AskPassword& ask, const Budget& budget) {
     ExtractResult result;
     if (!dyn::IsLoaded()) {
         result.status = Status::IoError;
@@ -1361,6 +1415,18 @@ ExtractResult Extract(const std::wstring& path, const std::wstring& destination,
                 continue;
             }
             if (entry.path.empty()) entry.path = fs::path(path).stem().wstring();  // nameless single streams
+            if (selection) {
+                // Not picked, or the base folder itself: skipped. Picked: written relative to the base.
+                const bool picked = std::any_of(selection->entries.begin(), selection->entries.end(),
+                    [&](const std::wstring& item) { return UnderOrSame(entry.path, item); });
+                const auto& base = selection->base;
+                if (!picked || !UnderOrSame(entry.path, base) || (!base.empty() && entry.path.size() <= base.size())) {
+                    entries.push_back(std::move(entry));
+                    wanted.push_back(false);
+                    continue;
+                }
+                if (!base.empty()) entry.path.erase(0, base.size() + 1);
+            }
             path_bytes = SaturatingAdd(path_bytes, static_cast<uint64_t>(entry.path.size()) * sizeof(wchar_t));
             if (path_bytes > budget.max_path_bytes) {
                 tracker.Trip(LimitReason::Paths);
@@ -1447,6 +1513,356 @@ ExtractResult Extract(const std::wstring& path, const std::wstring& destination,
         }
         result.status = Status::Ok;
     } catch (const std::exception& error) { result.status = Status::IoError; result.error = error.what(); }
+    return result;
+}
+
+} // namespace
+
+ExtractResult Extract(const std::wstring& path, const std::wstring& destination, bool test_only,
+                      const Cancelled& cancelled, const Report& report, const AskPassword& ask,
+                      const Budget& budget) {
+    return ExtractFiltered(path, destination, test_only, nullptr, cancelled, report, ask, budget);
+}
+
+ExtractResult ExtractSelected(const std::wstring& archive_path, const std::vector<std::wstring>& entries,
+                              const std::wstring& base, const std::wstring& destination,
+                              const Cancelled& cancelled, const Report& report, const AskPassword& ask,
+                              const Budget& budget) {
+    Selection selection;
+    selection.base = SelectionKey(base);
+    for (const auto& entry : entries) {
+        auto key = SelectionKey(entry);
+        // Every pick lies inside the base folder; an empty pick would mean "everything".
+        if (key.empty() || !SafeRelativePath(key) || !UnderOrSame(key, selection.base) ||
+            (!selection.base.empty() && key.size() <= selection.base.size())) {
+            ExtractResult result;
+            result.status = Status::InvalidInput;
+            result.error = "A selected item is not inside the archive folder: " + Narrow(entry);
+            return result;
+        }
+        selection.entries.push_back(std::move(key));
+    }
+    if (selection.entries.empty() || (!selection.base.empty() && !SafeRelativePath(selection.base))) {
+        ExtractResult result;
+        result.status = Status::InvalidInput;
+        result.error = "Nothing selected";
+        return result;
+    }
+    return ExtractFiltered(archive_path, destination, false, &selection, cancelled, report, ask, budget);
+}
+
+namespace {
+std::wstring NormalizeEntryKey(std::wstring_view raw) {
+    std::wstring out(raw);
+    std::replace(out.begin(), out.end(), L'/', L'\\');
+    while (out.size() >= 2 && out[0] == L'.' && out[1] == L'\\') out.erase(0, 2);
+    while (!out.empty() && out.front() == L'\\') out.erase(out.begin());
+    while (!out.empty() && out.back() == L'\\') out.pop_back();
+    return out;
+}
+
+bool SameEntryKey(const std::wstring& a, const std::wstring& b) noexcept {
+    return a.size() == b.size() &&
+           CompareStringOrdinal(a.c_str(), static_cast<int>(a.size()),
+                                b.c_str(), static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
+}
+
+class SingleEntryExtraction final : public IArchiveExtractCallback, public ICryptoGetTextPassword, public RefCounted<SingleEntryExtraction> {
+    UInt32 target_index_;
+    fs::path dest_;
+    std::wstring volume_dir_;
+    const Entry& entry_;
+    const Cancelled& cancelled_;
+    const Report& report_;
+    PasswordState& password_;
+    BudgetTracker& tracker_;
+    std::unique_ptr<ItemOut, ComRelease<ItemOut>> out_;
+    Progress progress_{};
+public:
+    uint64_t written = 0;
+    bool failed = false;
+    bool wrong_password = false;
+    bool opened_stream = false;
+    Int32 worst = kOpOk;
+
+    SingleEntryExtraction(UInt32 target_index, fs::path dest, std::wstring volume_dir, const Entry& entry,
+                          const Cancelled& cancelled, const Report& report, PasswordState& password, BudgetTracker& tracker)
+        : target_index_(target_index), dest_(std::move(dest)), volume_dir_(std::move(volume_dir)), entry_(entry),
+          cancelled_(cancelled), report_(report), password_(password), tracker_(tracker) {
+        progress_.current = dest_.filename().wstring();
+        progress_.total_items = 1;
+        progress_.total_bytes = entry.size;
+    }
+
+    void CleanupIncomplete() noexcept {
+        if (out_) {
+            out_->Close();
+            out_.reset();
+            DeleteFileW(LongPath(dest_.wstring()).c_str());
+        }
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** out) noexcept override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (id == IID_IUnknown || id == kIID_ExtractCallback || id == kIID_Progress) *out = static_cast<IArchiveExtractCallback*>(this);
+        else if (id == kIID_GetTextPassword) *out = static_cast<ICryptoGetTextPassword*>(this);
+        else return E_NOINTERFACE;
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() noexcept override { return DoAddRef(); }
+    ULONG STDMETHODCALLTYPE Release() noexcept override { return DoRelease(); }
+
+    HRESULT STDMETHODCALLTYPE SetTotal(UInt64 total) noexcept override {
+        if (total > entry_.size) progress_.total_bytes = total;
+        return IsCancelled(cancelled_) || !tracker_.CheckTime() ? E_ABORT : S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE SetCompleted(const UInt64*) noexcept override {
+        if (IsCancelled(cancelled_) || !tracker_.CheckTime()) return E_ABORT;
+        if (report_) {
+            progress_.completed_bytes = written;
+            try { report_(progress_); } catch (...) { return E_ABORT; }
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetStream(UInt32 index, ISequentialOutStream** out, Int32 mode) noexcept override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (IsCancelled(cancelled_) || !tracker_.CheckTime()) return E_ABORT;
+        if (index != target_index_ || mode != kAskExtract) return S_OK;
+        try {
+            if (!tracker_.CheckDisk(volume_dir_, 0, true)) return E_ABORT;
+            HANDLE file = CreateFileW(LongPath(dest_.wstring()).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+            if (file == INVALID_HANDLE_VALUE) { failed = true; return HRESULT_FROM_WIN32(GetLastError()); }
+            out_.reset(new ItemOut(file, cancelled_, tracker_, volume_dir_, written));
+            out_->AddRef();
+            *out = out_.get();
+            opened_stream = true;
+            return S_OK;
+        } catch (...) {
+            failed = true;
+            return E_FAIL;
+        }
+    }
+    HRESULT STDMETHODCALLTYPE PrepareOperation(Int32) noexcept override {
+        return IsCancelled(cancelled_) || !tracker_.CheckTime() ? E_ABORT : S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE SetOperationResult(Int32 result) noexcept override {
+        if (result == kOpWrongPassword || (entry_.encrypted && (result == kOpDataError || result == kOpCrcError)))
+            wrong_password = true;
+        if (result != kOpOk && worst == kOpOk) worst = result;
+        if (out_) {
+            const bool ok = result == kOpOk && !tracker_.Exceeded() && !IsCancelled(cancelled_);
+            if (ok && entry_.modified && out_->Handle() != INVALID_HANDLE_VALUE) {
+                FILETIME time{static_cast<DWORD>(entry_.modified), static_cast<DWORD>(entry_.modified >> 32)};
+                SetFileTime(out_->Handle(), nullptr, nullptr, &time);
+            }
+            out_->Close();
+            out_.reset();
+            if (!ok) {
+                DeleteFileW(LongPath(dest_.wstring()).c_str());
+            } else {
+                const DWORD keep = entry_.attributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE);
+                if (keep) SetFileAttributesW(LongPath(dest_.wstring()).c_str(), keep);
+            }
+        }
+        if (result == kOpOk) progress_.completed_items = 1;
+        if (report_) {
+            progress_.completed_bytes = written;
+            try { report_(progress_); } catch (...) { return E_ABORT; }
+        }
+        return IsCancelled(cancelled_) || !tracker_.CheckTime() ? E_ABORT : S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE CryptoGetTextPassword(BSTR* out) noexcept override {
+        try { return password_.Get(out); } catch (...) { return E_FAIL; }
+    }
+};
+} // namespace
+
+ExtractResult ExtractEntry(const std::wstring& archive_path, const std::wstring& entry_path,
+                           const std::wstring& destination_file, const Cancelled& cancelled,
+                           const Report& report, const AskPassword& ask, const Budget& budget) {
+    ExtractResult result;
+    if (!dyn::IsLoaded()) {
+        result.status = Status::IoError;
+        result.error = LoadErrorMessage();
+        return result;
+    }
+    if (IsCancelled(cancelled)) {
+        result.status = Status::Cancelled;
+        result.error = StatusText(result.status);
+        return result;
+    }
+    const std::wstring target_key = NormalizeEntryKey(entry_path);
+    if (target_key.empty() || !SafeRelativePath(target_key) || destination_file.empty()) {
+        result.status = Status::InvalidInput;
+        result.error = "Invalid archive entry or destination path";
+        return result;
+    }
+    try {
+        std::error_code ec;
+        if (fs::exists(destination_file, ec)) {
+            result.status = Status::InvalidInput;
+            result.error = "Destination file already exists";
+            return result;
+        }
+        const fs::path dest_path(destination_file);
+        const fs::path parent_dir = archive_paths::Parent(dest_path);
+        if (!parent_dir.empty()) {
+            std::error_code dir_ec;
+            fs::create_directories(LongPath(parent_dir.wstring()), dir_ec);
+            if (dir_ec && !fs::is_directory(LongPath(parent_dir.wstring()), dir_ec)) {
+                result.status = Status::IoError;
+                result.error = "Cannot create destination directory";
+                return result;
+            }
+        }
+        const std::wstring volume_dir = parent_dir.empty() ? fs::current_path(ec).wstring() : parent_dir.wstring();
+
+        BudgetTracker tracker(budget);
+        if (!tracker.CheckTime()) {
+            result.status = Status::LimitReached;
+            result.error = tracker.ErrorMessage();
+            return result;
+        }
+        PasswordState password;
+        password.ask = &ask;
+        Opened opened;
+        const auto status = OpenFile(archive_path, cancelled, password, tracker, opened, 0);
+        if (status != Status::Ok) {
+            result.status = status;
+            result.error = status == Status::LimitReached ? tracker.ErrorMessage() : StatusText(status);
+            return result;
+        }
+
+        UInt32 count = 0;
+        opened.archive->GetNumberOfItems(&count);
+        if (count > budget.max_entries) {
+            tracker.Trip(LimitReason::Entries);
+            result.status = Status::LimitReached;
+            result.error = tracker.ErrorMessage();
+            return result;
+        }
+
+        bool found = false;
+        UInt32 target_index = 0;
+        Entry matched;
+        uint64_t path_bytes = 0;
+        for (UInt32 i = 0; i < count; ++i) {
+            if (IsCancelled(cancelled)) {
+                result.status = Status::Cancelled;
+                result.error = StatusText(result.status);
+                return result;
+            }
+            if (!tracker.CheckTime()) {
+                result.status = Status::LimitReached;
+                result.error = tracker.ErrorMessage();
+                return result;
+            }
+            Entry entry;
+            if (!ReadEntry(opened.archive.get(), i, entry)) continue;
+            path_bytes = SaturatingAdd(path_bytes, static_cast<uint64_t>(entry.path.size()) * sizeof(wchar_t));
+            if (path_bytes > budget.max_path_bytes) {
+                tracker.Trip(LimitReason::Paths);
+                result.status = Status::LimitReached;
+                result.error = tracker.ErrorMessage();
+                return result;
+            }
+            const std::wstring key = NormalizeEntryKey(entry.path);
+            if (!SameEntryKey(key, target_key)) continue;
+            if (entry.link) {
+                result.skipped_links = 1;
+                result.status = Status::InvalidInput;
+                result.error = "Archive entry is a link and was skipped for safety";
+                return result;
+            }
+            if (entry.dir) {
+                result.status = Status::InvalidInput;
+                result.error = "Archive entry is a directory";
+                return result;
+            }
+            if (!SafeRelativePath(entry.path)) {
+                result.status = Status::InvalidArchive;
+                result.error = "The archive contains an unsafe path: " + Narrow(entry.path);
+                return result;
+            }
+            target_index = i;
+            matched = std::move(entry);
+            found = true;
+            break;
+        }
+        if (!found) {
+            result.status = Status::InvalidInput;
+            result.error = "Archive entry not found";
+            return result;
+        }
+        if (matched.size > budget.max_single_bytes || matched.size > budget.max_total_bytes) {
+            tracker.Trip(LimitReason::Size);
+            result.status = Status::LimitReached;
+            result.error = tracker.ErrorMessage();
+            return result;
+        }
+        if (!tracker.CheckDisk(volume_dir, 0, true)) {
+            result.status = Status::LimitReached;
+            result.error = tracker.ErrorMessage();
+            return result;
+        }
+
+        std::unique_ptr<SingleEntryExtraction, ComRelease<SingleEntryExtraction>> callback(
+            new SingleEntryExtraction(target_index, dest_path, volume_dir, matched, cancelled, report, password, tracker));
+        const HRESULT extracted = opened.archive->Extract(&target_index, 1, 0, callback.get());
+        callback->CleanupIncomplete();
+        auto cleanup_partial = [&]() noexcept {
+            DeleteFileW(LongPath(destination_file).c_str());
+        };
+        if (password.refused) {
+            cleanup_partial();
+            result.status = Status::NeedPassword;
+            result.error = StatusText(result.status);
+            return result;
+        }
+        if (IsCancelled(cancelled)) {
+            cleanup_partial();
+            result.status = Status::Cancelled;
+            result.error = "Cancelled";
+            return result;
+        }
+        if (tracker.Exceeded()) {
+            cleanup_partial();
+            result.status = Status::LimitReached;
+            result.error = tracker.ErrorMessage();
+            return result;
+        }
+        if (extracted == E_ABORT) {
+            cleanup_partial();
+            result.status = Status::Cancelled;
+            result.error = "Cancelled";
+            return result;
+        }
+        if (callback->wrong_password) {
+            cleanup_partial();
+            result.status = Status::WrongPassword;
+            result.error = StatusText(result.status);
+            return result;
+        }
+        if (extracted != S_OK || callback->failed || callback->worst != kOpOk || !callback->opened_stream) {
+            cleanup_partial();
+            result.status = Status::InvalidArchive;
+            result.error = callback->worst == kOpUnsupportedMethod ? "The archive uses a compression method 7-Zip does not support"
+                : callback->worst == kOpUnexpectedEnd ? "The archive ends unexpectedly (incomplete download or missing volume)"
+                : callback->failed ? "The file could not be written" : "The archive is damaged (CRC or data error)";
+            return result;
+        }
+        result.files = 1;
+        result.bytes = callback->written;
+        result.status = Status::Ok;
+    } catch (const std::exception& error) {
+        DeleteFileW(LongPath(destination_file).c_str());
+        result.status = Status::IoError;
+        result.error = error.what();
+    }
     return result;
 }
 
@@ -1604,6 +2020,305 @@ std::vector<HashResult> Hash(const std::vector<std::wstring>& files, const Cance
         results.push_back(std::move(item));
     }
     return results;
+}
+
+// ---- modification -----------------------------------------------------------
+namespace {
+// One item of the rewritten archive: an existing one (copied, or renamed) or a new one from disk.
+struct Slot {
+    UInt32 archive_index = UINT32_MAX;
+    int item = -1;          // index into the new items; -1 = existing
+    bool renamed = false;
+    std::wstring name;      // renamed: the new path
+};
+
+class Modification final : public IArchiveUpdateCallback, public ICryptoGetTextPassword2, public ICryptoGetTextPassword,
+                           public RefCounted<Modification> {
+    IInArchive* in_;
+    const std::vector<Slot>& slots_;
+    const std::vector<Item>& items_;
+    PasswordState& password_;
+    const Cancelled& cancelled_;
+    const Report& report_;
+    Progress progress_;
+public:
+    bool failed = false;
+    Modification(IInArchive* in, const std::vector<Slot>& slots, const std::vector<Item>& items, PasswordState& password,
+                 uint64_t total, const Cancelled& cancelled, const Report& report)
+        : in_(in), slots_(slots), items_(items), password_(password), cancelled_(cancelled), report_(report) {
+        progress_.total_bytes = total;
+        progress_.total_items = items.size();
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** out) noexcept override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (id == IID_IUnknown || id == kIID_UpdateCallback || id == kIID_Progress) *out = static_cast<IArchiveUpdateCallback*>(this);
+        else if (id == kIID_GetTextPassword2) *out = static_cast<ICryptoGetTextPassword2*>(this);
+        else if (id == kIID_GetTextPassword) *out = static_cast<ICryptoGetTextPassword*>(this);
+        else return E_NOINTERFACE;
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() noexcept override { return DoAddRef(); }
+    ULONG STDMETHODCALLTYPE Release() noexcept override { return DoRelease(); }
+    HRESULT STDMETHODCALLTYPE SetTotal(UInt64 total) noexcept override {
+        if (total) progress_.total_bytes = total;
+        return IsCancelled(cancelled_) ? E_ABORT : S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE SetCompleted(const UInt64* value) noexcept override {
+        if (value) progress_.completed_bytes = std::min<uint64_t>(*value, progress_.total_bytes ? progress_.total_bytes : *value);
+        try { if (report_) report_(progress_); } catch (...) {}
+        return IsCancelled(cancelled_) ? E_ABORT : S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetUpdateItemInfo(UInt32 index, Int32* data, Int32* props, UInt32* archive_index) noexcept override {
+        if (index >= slots_.size()) return E_INVALIDARG;
+        const auto& slot = slots_[index];
+        const bool fresh = slot.item >= 0;
+        if (data) *data = fresh ? 1 : 0;
+        if (props) *props = fresh || slot.renamed ? 1 : 0;
+        if (archive_index) *archive_index = fresh ? UINT32_MAX : slot.archive_index;
+        return IsCancelled(cancelled_) ? E_ABORT : S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetProperty(UInt32 index, PROPID id, PROPVARIANT* value) noexcept override {
+        if (!value || index >= slots_.size()) return E_INVALIDARG;
+        PropVariantInit(value);
+        const auto& slot = slots_[index];
+        if (slot.item < 0) {
+            // Renamed: the new path, everything else as the archive has it.
+            if (id == kpidPath) {
+                value->vt = VT_BSTR;
+                value->bstrVal = dyn::AllocBstr(slot.name.c_str());
+                return value->bstrVal ? S_OK : E_OUTOFMEMORY;
+            }
+            return in_->GetProperty(slot.archive_index, id, value);
+        }
+        const auto& item = items_[static_cast<size_t>(slot.item)];
+        switch (id) {
+        case kpidPath: value->vt = VT_BSTR; value->bstrVal = dyn::AllocBstr(item.name.c_str()); return value->bstrVal ? S_OK : E_OUTOFMEMORY;
+        case kpidIsDir: value->vt = VT_BOOL; value->boolVal = item.dir ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case kpidSize: value->vt = VT_UI8; value->uhVal.QuadPart = item.size; break;
+        case kpidMTime: value->vt = VT_FILETIME; value->filetime = item.modified; break;
+        case kpidAttrib: value->vt = VT_UI4; value->ulVal = item.attributes & ~static_cast<DWORD>(FILE_ATTRIBUTE_REPARSE_POINT); break;
+        case kpidIsAnti: value->vt = VT_BOOL; value->boolVal = VARIANT_FALSE; break;
+        default: break;
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetStream(UInt32 index, ISequentialInStream** stream) noexcept override {
+        if (!stream || index >= slots_.size()) return E_INVALIDARG;
+        *stream = nullptr;
+        const auto& slot = slots_[index];
+        if (slot.item < 0) return S_OK;
+        const auto& item = items_[static_cast<size_t>(slot.item)];
+        progress_.current = item.name;
+        if (item.dir) return S_OK;
+        HANDLE file = CreateFileW(LongPath(item.path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                                  FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        if (file == INVALID_HANDLE_VALUE) { failed = true; return HRESULT_FROM_WIN32(GetLastError()); }
+        try { *stream = new ItemIn(file, cancelled_); } catch (...) { CloseHandle(file); return E_OUTOFMEMORY; }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE SetOperationResult(Int32 result) noexcept override {
+        ++progress_.completed_items;
+        return result == kOpOk && !IsCancelled(cancelled_) ? S_OK : E_ABORT;
+    }
+    // New data is encrypted with the archive's own password when it has one (asked while opening).
+    HRESULT STDMETHODCALLTYPE CryptoGetTextPassword2(Int32* defined, BSTR* password) noexcept override {
+        if (!defined || !password) return E_POINTER;
+        *defined = password_.known && !password_.value.empty() ? 1 : 0;
+        *password = dyn::AllocBstr(password_.known ? password_.value.c_str() : L"");
+        return *password ? S_OK : E_OUTOFMEMORY;
+    }
+    // Repacking a solid block that holds a changed item decrypts it first.
+    HRESULT STDMETHODCALLTYPE CryptoGetTextPassword(BSTR* out) noexcept override {
+        try { return password_.Get(out); } catch (...) { return E_FAIL; }
+    }
+};
+
+std::wstring UniqueTick() {
+    return std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+}
+} // namespace
+
+ModifyResult Modify(const std::wstring& path, const std::vector<Change>& requested, const std::wstring& backup_dir,
+                    const Cancelled& cancelled, const Report& report, const AskPassword& ask) {
+    ModifyResult result;
+    if (!dyn::IsLoaded()) {
+        result.status = Status::IoError;
+        result.error = LoadErrorMessage();
+        return result;
+    }
+    fs::path temp_file;
+    const auto fail = [&](Status status, std::string error) {
+        if (!temp_file.empty()) DeleteFileW(LongPath(temp_file.wstring()).c_str());
+        result.status = status;
+        result.error = std::move(error);
+        return result;
+    };
+    try {
+        if (requested.empty()) return fail(Status::InvalidInput, "Nothing to change");
+        std::vector<Change> changes = requested;
+        for (auto& change : changes) {
+            change.path = SelectionKey(change.path);
+            change.target = SelectionKey(change.target);
+            if (change.path.empty() || !SafeRelativePath(change.path))
+                return fail(Status::InvalidInput, "Invalid path in the archive: " + Narrow(change.path));
+            if (change.kind == Change::Kind::Put && change.source.empty())
+                return fail(Status::InvalidInput, "Nothing to add");
+            if (change.kind == Change::Kind::Rename) {
+                if (change.target.empty() || !SafeRelativePath(change.target))
+                    return fail(Status::InvalidInput, "Invalid new name: " + Narrow(change.target));
+                // Into itself is impossible; only a case change may keep the same key.
+                if (UnderOrSame(change.target, change.path) && change.target.size() != change.path.size())
+                    return fail(Status::InvalidInput, "A folder cannot be moved into itself");
+            }
+        }
+        Budget budget = Budget::DefaultExtractBudget();
+        budget.expand_wrappers = false;  // a .tar.gz is never rewritten through its wrapper
+        BudgetTracker tracker(budget);
+        PasswordState password;
+        password.ask = &ask;
+        Opened opened;
+        const auto status = OpenFile(path, cancelled, password, tracker, opened, 0);
+        if (status != Status::Ok) return fail(status, StatusText(status));
+        if (opened.nested || !WritableFormat(opened.format))
+            return fail(Status::Unsupported, "This archive format is read-only: " + Narrow(opened.format));
+        IOutArchive* writer_raw = nullptr;
+        if (opened.archive->QueryInterface(kIID_OutArchive, reinterpret_cast<void**>(&writer_raw)) != S_OK || !writer_raw)
+            return fail(Status::Unsupported, "7-Zip cannot update this archive");
+        std::unique_ptr<IOutArchive, ComRelease<IOutArchive>> writer(writer_raw);
+
+        UInt32 count = 0;
+        opened.archive->GetNumberOfItems(&count);
+        std::vector<bool> matched(changes.size(), false);
+        std::vector<Slot> slots;
+        slots.reserve(count);
+        std::set<std::wstring> final_names;
+        const auto claim = [&](const std::wstring& name) {
+            if (!final_names.insert(Lower(name)).second)
+                throw std::invalid_argument("An item named " + Narrow(name) + " already exists in the archive");
+        };
+        std::vector<std::wstring> kept_names;
+        std::vector<Entry> all_entries(count);
+        UInt32 probe = UINT32_MAX;  // smallest encrypted file: proves the password before anything is written
+        for (UInt32 i = 0; i < count; ++i) {
+            if (IsCancelled(cancelled)) return fail(Status::Cancelled, "Cancelled");
+            Entry& entry = all_entries[i];
+            const bool listed = ReadEntry(opened.archive.get(), i, entry);
+            if (listed && entry.encrypted && !entry.dir && (probe == UINT32_MAX || entry.size < all_entries[probe].size)) probe = i;
+            Slot slot;
+            slot.archive_index = i;
+            bool drop = false;
+            if (listed && !entry.path.empty()) {
+                for (size_t c = 0; c < changes.size(); ++c) {
+                    const auto& change = changes[c];
+                    if (!UnderOrSame(entry.path, change.path)) continue;
+                    matched[c] = true;
+                    if (change.kind == Change::Kind::Rename) {
+                        slot.renamed = true;
+                        slot.name = change.target + entry.path.substr(change.path.size());
+                    } else {
+                        drop = true;  // deleted, or replaced by what Put brings
+                        if (change.kind == Change::Kind::Delete && !entry.dir) ++result.removed;
+                    }
+                }
+            }
+            if (drop) continue;
+            if (slot.renamed && !entry.dir) ++result.renamed;
+            if (listed && !entry.path.empty()) kept_names.push_back(slot.renamed ? slot.name : entry.path);
+            slots.push_back(std::move(slot));
+        }
+        for (size_t c = 0; c < changes.size(); ++c)
+            if (changes[c].kind == Change::Kind::Rename && !matched[c])
+                return fail(Status::InvalidInput, "Not in the archive: " + Narrow(changes[c].path));
+        for (const auto& name : kept_names) claim(name);
+
+        if (probe != UINT32_MAX) {
+            std::vector<bool> wanted(count, false);
+            wanted[probe] = true;
+            const Report silent;
+            std::unique_ptr<Extraction, ComRelease<Extraction>> check(new Extraction(
+                fs::path(), all_entries, wanted, true, cancelled, silent, password, tracker, 0, all_entries[probe].size, 1));
+            const HRESULT tested = opened.archive->Extract(&probe, 1, 1, check.get());
+            if (password.refused) return fail(Status::NeedPassword, StatusText(Status::NeedPassword));
+            if (IsCancelled(cancelled)) return fail(Status::Cancelled, "Cancelled");
+            if (check->wrong_password) return fail(Status::WrongPassword, StatusText(Status::WrongPassword));
+            if (tested != S_OK || check->worst != kOpOk) return fail(Status::InvalidArchive, "The archive is damaged (CRC or data error)");
+        }
+        std::vector<Item> items;
+        std::set<std::wstring> new_names;
+        uint64_t total = 0, skipped = 0;
+        for (const auto& change : changes)
+            if (change.kind == Change::Kind::Put)
+                Collect(change.source, change.path, 0, items, new_names, total, skipped, cancelled);
+        for (size_t i = 0; i < items.size(); ++i) {
+            claim(items[i].name);
+            Slot slot;
+            slot.item = static_cast<int>(i);
+            slots.push_back(std::move(slot));
+            if (!items[i].dir) ++result.added;
+        }
+
+        const fs::path target(path);
+        const fs::path folder = archive_paths::Parent(target);
+        const std::wstring leaf = target.filename().wstring();
+        const std::wstring tick = UniqueTick();
+        temp_file = folder / (L"." + leaf + L".pulse-" + tick + L".tmp");
+        HANDLE file = CreateFileW(LongPath(temp_file.wstring()).c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            const DWORD error = GetLastError();
+            temp_file.clear();
+            return fail(Status::IoError, "Cannot write beside the archive (Win32 error " + std::to_string(error) + ")");
+        }
+        std::unique_ptr<FileOut, ComRelease<FileOut>> out(new FileOut(file, cancelled));
+        std::unique_ptr<Modification, ComRelease<Modification>> callback(
+            new Modification(opened.archive.get(), slots, items, password, total, cancelled, report));
+        const HRESULT updated = writer->UpdateItems(out.get(), static_cast<UInt32>(slots.size()), callback.get());
+        const bool closed = out->Close();
+        const bool source_failed = callback->failed;
+        // Let go of the archive before it is replaced.
+        callback.reset();
+        writer.reset();
+        opened.archive.reset();
+        opened.outers.clear();
+        opened.temps.clear();
+        if (password.refused) return fail(Status::NeedPassword, StatusText(Status::NeedPassword));
+        if (IsCancelled(cancelled) || updated == E_ABORT) return fail(Status::Cancelled, "Cancelled");
+        if (updated != S_OK || !closed)
+            return fail(source_failed ? Status::IoError : Status::InvalidArchive,
+                        source_failed ? "A file to add could not be read" : "Writing the updated archive failed");
+
+        const fs::path local_backup = folder / (L"." + leaf + L".pulse-bak-" + tick);
+        const bool keep = !backup_dir.empty();
+        if (!ReplaceFileW(LongPath(path).c_str(), LongPath(temp_file.wstring()).c_str(),
+                          keep ? LongPath(local_backup.wstring()).c_str() : nullptr,
+                          REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS, nullptr, nullptr)) {
+            const DWORD error = GetLastError();
+            return fail(Status::IoError, error == ERROR_SHARING_VIOLATION || error == ERROR_UNABLE_TO_REMOVE_REPLACED
+                ? "The archive is in use by another program"
+                : "Cannot replace the archive (Win32 error " + std::to_string(error) + ")");
+        }
+        temp_file.clear();
+        if (keep) {
+            std::error_code ec;
+            fs::create_directories(backup_dir, ec);
+            const fs::path stored = fs::path(backup_dir) / (target.stem().wstring() + L"." + tick + target.extension().wstring());
+            if (MoveFileExW(LongPath(local_backup.wstring()).c_str(), LongPath(stored.wstring()).c_str(),
+                            MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                result.backup = stored.wstring();
+            } else {
+                SetFileAttributesW(LongPath(local_backup.wstring()).c_str(), FILE_ATTRIBUTE_HIDDEN);
+                result.backup = local_backup.wstring();
+            }
+        }
+        result.status = Status::Ok;
+    } catch (const std::invalid_argument& error) {
+        return fail(Status::InvalidInput, error.what());
+    } catch (const std::exception& error) {
+        return fail(Status::IoError, error.what());
+    }
+    return result;
 }
 
 void ShutdownWorkers() noexcept {}
