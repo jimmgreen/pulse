@@ -232,6 +232,9 @@ private:
     // then running, then queued), and its rows' geometry in DIPs.
     std::vector<ops::OpStatus> other_tasks_;
     size_t TaskStripRows() const;
+    bool TaskStripHasMoreLine() const;
+    D2D1_RECT_F TaskMoreLine() const;  // DIPs
+    bool strip_expanded_ = false;      // "+N more" clicked: every task listed (up to kTaskExpandedRows)
     float TaskStripDip() const;
     struct TaskRowGeometry { D2D1_RECT_F row, pause, cancel; bool has_pause; };
     TaskRowGeometry TaskRow(size_t index) const;

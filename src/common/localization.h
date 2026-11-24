@@ -6403,6 +6403,9 @@ enum class StringId : UINT {
     OpWaitTurn = IDS_OP_WAIT_TURN,
     OpMoreTasksPrefix = IDS_OP_MORE_TASKS_PREFIX,
     OpMoreTasksSuffix = IDS_OP_MORE_TASKS_SUFFIX,
+    OpWaitNetworkTurn = IDS_OP_WAIT_NETWORK_TURN,
+    OpStripShowLess = IDS_OP_STRIP_SHOW_LESS,
+    OpQueuedHeld = IDS_OP_QUEUED_HELD,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

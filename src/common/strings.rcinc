@@ -6393,6 +6393,9 @@ BEGIN
     IDS_OP_WAIT_TURN "前面的操作完成后自动开始"
     IDS_OP_MORE_TASKS_PREFIX "另有 "
     IDS_OP_MORE_TASKS_SUFFIX " 项操作"
+    IDS_OP_WAIT_NETWORK_TURN "网络位置上的操作逐个进行，前一项完成后自动开始"
+    IDS_OP_STRIP_SHOW_LESS "收起"
+    IDS_OP_QUEUED_HELD "点继续后才会开始"
 END
 
 LANGUAGE 0x09, 0x01
@@ -12785,6 +12788,9 @@ BEGIN
     IDS_OP_WAIT_TURN "Starts by itself after the operations ahead of it"
     IDS_OP_MORE_TASKS_PREFIX "+"
     IDS_OP_MORE_TASKS_SUFFIX " more"
+    IDS_OP_WAIT_NETWORK_TURN "Network operations take turns; starts after the one before"
+    IDS_OP_STRIP_SHOW_LESS "Show less"
+    IDS_OP_QUEUED_HELD "Starts once you resume it"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

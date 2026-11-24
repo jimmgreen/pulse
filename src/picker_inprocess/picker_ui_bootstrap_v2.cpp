@@ -802,17 +802,44 @@ HRESULT ShowCore(PulsePickerUiV2Session id, const PulsePickerUiV2Config* input,
         const std::wstring& target, uint32_t& response) { return NotifyOverwrite(frame, window, snapshot, target, response); };
     if (spec.native_options & FOS_SHAREAWARE) spec.on_share_violation = [&](HWND window, const PickerDialogSnapshot& snapshot,
         const std::wstring& target, uint32_t& response) { return NotifyOverwrite(frame, window, snapshot, target, response, true); };
-    std::jthread monitor([&](std::stop_token stop) {
-        while (!stop.stop_requested()) {
-            if (!owner_guard.Alive()) { SetEvent(frame.cancel); return; }
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    struct OwnerMonitorScope {
+        HANDLE stop_event = nullptr;
+        std::thread worker;
+        OwnerMonitorScope(pulse::PickerOwnerGuard& guard, HANDLE cancel_event) {
+            if (!guard.Window()) return;
+            stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            if (!stop_event) return;
+            try {
+                worker = std::thread([&guard, cancel_event, stop = stop_event] {
+                    for (;;) {
+                        if (!guard.Alive()) { SetEvent(cancel_event); return; }
+                        if (WaitForSingleObject(stop, 25) != WAIT_TIMEOUT) return;
+                    }
+                });
+            } catch (...) {
+                CloseHandle(stop_event);
+                stop_event = nullptr;
+                throw;
+            }
         }
-    });
+        void Stop() noexcept {
+            if (stop_event) SetEvent(stop_event);
+            if (worker.joinable()) worker.join();
+            if (stop_event) { CloseHandle(stop_event); stop_event = nullptr; }
+        }
+        ~OwnerMonitorScope() noexcept { Stop(); }
+        OwnerMonitorScope(const OwnerMonitorScope&) = delete;
+        OwnerMonitorScope& operator=(const OwnerMonitorScope&) = delete;
+    } monitor(owner_guard, frame.cancel);
     session->active = &frame;
     struct ActiveScope { ~ActiveScope() { session->active = nullptr; } } active_scope;
     const auto jump_context = pulse::picker_inprocess::AttachJumpContext(spec, remote_parent_pid ? remote_parent_pid : GetCurrentProcessId());
     const auto outcome = pulse::ui::ShowFilePickerDetailed(owner, spec, colors.dark, pulse::ui::HexColor(colors.accent_rgb));
+    ProofContextFailure("after-show-detailed", static_cast<DWORD>(GetTickCount64()));
+    monitor.Stop();
+    ProofContextFailure("after-monitor-stop", static_cast<DWORD>(GetTickCount64()));
     LogOwnerContext(owner_guard, owner, true);
+    ProofContextFailure("after-log-owner", static_cast<DWORD>(GetTickCount64()));
     frame.window = nullptr;
     if (frame.shown || frame.callback_dispatched || frame.closed ||
         outcome.status == pulse::ui::FilePickerStatus::Accepted ||

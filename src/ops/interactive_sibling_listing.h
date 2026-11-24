@@ -1,5 +1,6 @@
 #pragma once
 #include "source_listing.h"
+#include "interactive_links.h"
 #include "interactive_tree_watch.h"
 #include "../common/rename_filename.h"
 #include <map>
@@ -40,7 +41,10 @@ public:
             if (slot != slots_.end()) {
                 // Case-sensitive directories can contain distinct long names
                 // equal under Windows ordinal comparison. Don't pick either.
-                if (slot->second != Kind::Absent || (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                // A link stays unsafe here; a reparse point that keeps the item in
+                // place (cloud placeholder, dedup, WOF) lists as what it is.
+                if (slot->second != Kind::Absent || ((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+                    ClassifyInteractiveReparseTag(data.dwReserved0) != InteractiveReparse::Plain))
                     slot->second = Kind::Unsafe;
                 else slot->second = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? Kind::Directory : Kind::PlainFile;
             }

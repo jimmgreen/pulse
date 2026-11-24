@@ -6391,4 +6391,7 @@ BEGIN
     IDS_OP_WAIT_TURN "前面的操作完成後自動開始"
     IDS_OP_MORE_TASKS_PREFIX "另有 "
     IDS_OP_MORE_TASKS_SUFFIX " 項操作"
+    IDS_OP_WAIT_NETWORK_TURN "網路位置上的操作逐個進行，前一項完成後自動開始"
+    IDS_OP_STRIP_SHOW_LESS "收起"
+    IDS_OP_QUEUED_HELD "點繼續後才會開始"
 END

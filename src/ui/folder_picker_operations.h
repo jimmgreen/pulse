@@ -24,9 +24,11 @@ public:
     void Cancel();
 
 private:
+    void EnsureStarted();
     PickerOperationResult Execute(HWND owner, const std::function<bool()>& submit,
                                   bool dark, D2D1_COLOR_F accent, const std::function<bool()>& ready = {});
     ops::OpsManager manager_;
+    bool started_ = false;
     bool executing_ = false;
     std::atomic_bool cancelling_{false};
 };

@@ -259,6 +259,7 @@ enum class OpWaitReason : uint8_t {
     None,       // not queued, or not looked at yet: starts after those ahead of it
     SamePlace,  // touches a place an operation running or queued ahead of it uses
     LanesFull,  // as many operations as run at once already run
+    NetworkTurn,  // network operations take turns with each other
 };
 
 struct OpStatus {
@@ -610,6 +611,8 @@ public:
     // include_queued adds the copies, moves and deletes waiting for their turn
     // (phase Queued, with wait_reason); those can be cancelled.
     std::vector<OpStatus> ActiveStatuses(bool include_queued = false) const;
+    // PauseTask/ResumeTask on a queued copy, move or delete; false when not queued.
+    bool SetQueuedPaused(uint64_t task_id, bool paused);
     // Called by the UI thread once when servicing WM_OPS_NOTIFY so worker-side
     // notification coalescing resets only after delivery, not on every BuildVm read.
     void AcknowledgeNotify() const;
@@ -732,6 +735,12 @@ private:
     std::array<Lane, kLaneCount> lanes_;
     bool interactive_child_ = false;
     std::set<uint64_t> interactive_serial_only_;
+    // The queue head the scheduler cleared to start on the main worker beside
+    // these running lanes (InteractiveBlocksLocked), and the head it last
+    // looked at for the running set it saw (reset when that set changes).
+    uint64_t primary_cleared_seq_ = 0;
+    std::vector<uint64_t> primary_cleared_lanes_;
+    uint64_t primary_checked_seq_ = 0;
     struct PrimaryTargetTreeState {
         uint64_t task_id = 0;
         bool ready = false;

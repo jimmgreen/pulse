@@ -1,6 +1,7 @@
 #include "hdd_copy_buffer_policy.h"
 #include "interactive_name_reservation.h"
 #include "interactive_target_walk.h"
+#include "interactive_scope.h"
 #include "interactive_sibling_listing.h"
 #include "interactive_tree_watch.h"
 #include "../common/rename_identity.h"
@@ -1950,6 +1951,12 @@ bool OpsManager::CancelTask(uint64_t task_id) {
             controlled = true;
         } else {
             target->cancel_requested = true;
+            // Still queued: a transfer reads only this flag when it starts, so
+            // without it the cancelled copy or move would run once its turn came.
+            if (!active) {
+                target->transfer_cancelled = true;
+                target->transfer_paused = false;
+            }
             if (active) {
                 shell_cancel_requested_ = true;
                 shell_request = current_req_id_.load();
@@ -1990,9 +1997,16 @@ void OpsManager::PauseCurrent() { PauseTask(Status().task_id); }
 bool OpsManager::PauseTask(uint64_t task_id) {
     if (!task_id) return false;
     if (auto executor = InteractiveExecutor(task_id)) return executor->PauseTask(task_id);
+    if (SetQueuedPaused(task_id, true)) return true;
     bool requested = false;
     {
         std::scoped_lock lock(mutex_, transfer_control_mutex_);
+        // Taken by the worker, transfer not started yet: it reads this flag when it starts.
+        if (active_item_ && active_item_->seq == task_id && !transfer_active_.load() &&
+            status_.task_id != task_id && !active_item_->transfer_cancelled && !active_item_->cancel_requested) {
+            active_item_->transfer_paused = true;
+            return true;
+        }
         auto* current = CurrentTransferLocked();
         if (!active_item_ || !current || current->seq != task_id || current->transfer_cancelled ||
             !status_.active || status_.task_id != task_id || transfer_cancel_.load()) return false;
@@ -2016,9 +2030,14 @@ void OpsManager::ResumeCurrent() { ResumeTask(Status().task_id); }
 bool OpsManager::ResumeTask(uint64_t task_id) {
     if (!task_id) return false;
     if (auto executor = InteractiveExecutor(task_id)) return executor->ResumeTask(task_id);
+    if (SetQueuedPaused(task_id, false)) return true;
     bool changed = false;
     {
         std::scoped_lock lock(mutex_, transfer_control_mutex_);
+        if (active_item_ && active_item_->seq == task_id && !transfer_active_.load() && status_.task_id != task_id) {
+            active_item_->transfer_paused = false;
+            return true;
+        }
         auto* current = CurrentTransferLocked();
         if (!active_item_ || !current || current->seq != task_id || current->transfer_cancelled ||
             !status_.active || status_.task_id != task_id || transfer_cancel_.load()) return false;
@@ -2029,6 +2048,25 @@ bool OpsManager::ResumeTask(uint64_t task_id) {
     }
     transfer_control_cv_.notify_all();
     if (changed) NotifyStatusChanged();
+    return true;
+}
+
+// A copy, move or delete still waiting in the queue (not the one the main
+// worker is taking): paused, it does not take a lane, and starts paused if
+// the main worker reaches it first.
+bool OpsManager::SetQueuedPaused(uint64_t task_id, bool paused) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (active_item_ && active_item_->seq == task_id) return false;
+        const auto it = std::find_if(queue_.begin(), queue_.end(), [&](const QueueItem& item) { return item.seq == task_id; });
+        if (it == queue_.end() || it->cancel_requested || !it->open_path.empty() || !it->open_paths.empty()) return false;
+        if (it->transfer_paused == paused) return true;
+        it->transfer_paused = paused;
+        interactive_serial_only_.erase(task_id);
+        BumpUiRevision();
+    }
+    cv_.notify_all();
+    NotifyStatusChanged();
     return true;
 }
 
@@ -3481,6 +3519,8 @@ void OpsManager::WorkerThread() {
                 item = std::move(queue_.front());
                 queue_.pop_front();
                 interactive_serial_only_.clear(); // A new primary has a different dependency footprint.
+                primary_cleared_seq_ = 0;
+                primary_checked_seq_ = 0;
                 primary_target_tree_ = {};
                 if (item.open_path.empty()) active_item_ = item;
                 BumpUiRevision();

@@ -199,7 +199,12 @@ void CALLBACK Tick(HWND hwnd, UINT, UINT_PTR, DWORD) {
             p.worker_ok = false;
             const auto end = GetTickCount64() + 10000;
             while (GetTickCount64() < end) {
-                if (p.state->ops.PauseTask(p.task)) { p.worker_ok = true; break; }
+                // Running first: PauseTask on a queued task holds it in the queue.
+                const auto st = p.state->ops.QueryTask(p.task);
+                if (st && st->active && st->phase != ops::OpPhase::Queued && p.state->ops.PauseTask(p.task)) {
+                    p.worker_ok = true;
+                    break;
+                }
                 Sleep(1);
             }
             p.done = true;

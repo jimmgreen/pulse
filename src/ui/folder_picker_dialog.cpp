@@ -67,15 +67,18 @@
 #include <dwmapi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #if defined(PULSE_PICKER_INPROCESS_PROOF)
 #include <cstdio>
 #endif
 #include <cwctype>
 #include <memory>
+#include <mutex>
 #include <deque>
 #include <source_location>
 #include <filesystem>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 
@@ -392,8 +395,21 @@ public:
 
         pulse_places_ = spec.read_shared_places ? spec.read_shared_places() : picker_places::Read();
         if (!pulse_places_.shared_available && !spec.read_shared_places) {
-            try { saved_places_ = std::async(std::launch::async, [] { return picker_places::ReadSaved(); }); }
-            catch (...) { }
+            try {
+                auto slot = std::make_shared<SavedPlacesSlot>();
+                saved_places_ = slot;
+                std::thread([slot = std::move(slot)]() noexcept {
+                    try {
+                        auto saved = picker_places::ReadSaved();
+                        if (slot->cancelled.load(std::memory_order_acquire)) return;
+                        std::lock_guard lock(slot->mutex);
+                        if (!slot->cancelled.load(std::memory_order_acquire)) {
+                            slot->snapshot = std::move(saved);
+                            slot->ready.store(true, std::memory_order_release);
+                        }
+                    } catch (...) { }
+                }).detach();
+            } catch (...) { saved_places_.reset(); }
         }
         PickerProofPhase("known-places-before");
         RefreshKnownPlaces();
@@ -1594,9 +1610,8 @@ private:
         PostMessageW(hwnd_, WM_NULL, 0, 0);
     }
 
-    void SaveLayout() noexcept {
-        if (!persist_layout_ || !layout_shown_ || layout_saved_ || !hwnd_ || !IsWindow(hwnd_)) return;
-        layout_saved_ = true;
+    void CaptureLayoutForSave() noexcept {
+        if (!persist_layout_ || !layout_shown_ || layout_saved_ || layout_captured_ || !hwnd_ || !IsWindow(hwnd_)) return;
         try {
             layout_settings_.view_mode=static_cast<int>(view_mode_);
             layout_settings_.icon_dip=icon_dip_;
@@ -1606,12 +1621,42 @@ private:
             layout_settings_.collapsed_mask=0;
             for(unsigned i=0;i<std::size(collapsed_);++i) if(collapsed_[i]) layout_settings_.collapsed_mask|=1u<<i;
             picker_layout::CapturePlacement(hwnd_,layout_settings_);
+            layout_captured_ = true;
+        } catch (...) { }
+    }
+
+    void PersistCapturedLayout() noexcept {
+        if (!persist_layout_ || !layout_shown_ || layout_saved_ || !layout_captured_) return;
+        layout_saved_ = true;
+        try {
             const bool saved=picker_layout::Save(static_cast<int>(mode_),layout_settings_);
             diagnostics::runtime::Event("picker_layout_save",{{"success",saved?1u:0u},{"mode",static_cast<uint32_t>(mode_)}});
         } catch (...) { }
     }
 
+    void SaveLayout() noexcept {
+        CaptureLayoutForSave();
+        PersistCapturedLayout();
+    }
+
     void Close() noexcept {
+        done_ = true;
+        if (saved_places_) {
+            saved_places_->cancelled.store(true, std::memory_order_release);
+            saved_places_.reset();
+        }
+        const HWND hwnd = hwnd_;
+        if (hwnd && IsWindow(hwnd)) {
+            CaptureLayoutForSave();
+            if (GetCapture() == hwnd) ReleaseCapture();
+            if (spec_.owner_guard && spec_.owner_guard->Window()) spec_.owner_guard->RestoreBeforeDialogHide(hwnd);
+            else if (owner_) pulse::RestoreExternalPickerOwnerBeforeHide(hwnd, owner_);
+            if (IsWindow(hwnd)) {
+                PickerProofPhase("close-hide-before");
+                HideComposedDialog(hwnd); // Identity-bound guard restores modality before the popup disappears.
+                PickerProofPhase("close-hide-after");
+            }
+        }
         navigation_root_.Close();
         details_preview_.Close();
         EndRename(false);
@@ -1622,9 +1667,8 @@ private:
         operation_session_.Cancel();
         CancelPlacesDrag();
         EndMarquee(false);
-        done_ = true;
         if (!hwnd_) return;
-        SaveLayout();
+        PersistCapturedLayout();
         RemoveClipboardFormatListener(hwnd_);
         KillTimer(hwnd_, kLoadTimer);
         KillTimer(hwnd_, kSearchTimer);
@@ -1646,10 +1690,6 @@ private:
         while (PeekMessageW(&pending, hwnd_, kValidationMessage, kValidationMessage, PM_REMOVE))
             PickerLoader::TakeValidation(pending.lParam);
         if (IsWindow(hwnd_)) {
-            if (spec_.owner_guard && spec_.owner_guard->Window()) spec_.owner_guard->RestoreBeforeDialogHide(hwnd_);
-            else if (owner_) pulse::RestoreExternalPickerOwnerBeforeHide(hwnd_, owner_);
-            PickerProofPhase("close-hide-before");
-            HideComposedDialog(hwnd_); // Identity-bound guard restores modality before the popup disappears.
             PickerProofPhase("close-destroy-before");
             DestroyWindow(hwnd_);
             PickerProofPhase("close-destroy-after");
@@ -1712,13 +1752,14 @@ private:
         else {
             pulse_places_.shared_available = false;
             pulse_places_.endpoint = nullptr;
-            if (saved_places_.valid() && saved_places_.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            if (saved_places_ && saved_places_->ready.load(std::memory_order_acquire)) {
                 try {
-                    auto saved = saved_places_.get();
-                    pulse_places_.workspaces = std::move(saved.workspaces);
-                    pulse_places_.networks = std::move(saved.networks);
-                    pulse_places_.starred_items = std::move(saved.starred_items);
-                    pulse_places_.starred_groups = std::move(saved.starred_groups);
+                    std::lock_guard lock(saved_places_->mutex);
+                    pulse_places_.workspaces = std::move(saved_places_->snapshot.workspaces);
+                    pulse_places_.networks = std::move(saved_places_->snapshot.networks);
+                    pulse_places_.starred_items = std::move(saved_places_->snapshot.starred_items);
+                    pulse_places_.starred_groups = std::move(saved_places_->snapshot.starred_groups);
+                    saved_places_.reset();
                 } catch (...) { }
             }
         }
@@ -3914,7 +3955,7 @@ private:
         vm_.tooltip_text.clear();
         if (hwnd_ && compositor_.Dc()) {
             renderer_.DrawHoverPreview({}, RendererRect(), MakeTheme(dark_, accent_), IsHighContrast());
-            Invalidate();
+            if (!done_ && IsWindowVisible(hwnd_)) Invalidate();
         }
     }
 
@@ -6151,7 +6192,13 @@ private:
     std::vector<SidebarItem> drives_;
     bool collapsed_[9] = {};
     std::unordered_set<std::wstring> folded_favorite_groups_;
-    std::future<picker_places::Snapshot> saved_places_;
+    struct SavedPlacesSlot {
+        std::mutex mutex;
+        std::atomic<bool> ready{false};
+        std::atomic<bool> cancelled{false};
+        picker_places::Snapshot snapshot;
+    };
+    std::shared_ptr<SavedPlacesSlot> saved_places_;
     PickerPlacesDrag places_drag_;
     PickerOleDrop ole_drop_;
     std::unique_ptr<ops::OpRequest> queued_drop_;
@@ -6183,7 +6230,7 @@ private:
     ULONGLONG hover_started_ = 0;
     POINT hover_point_{};
     picker_layout::State layout_settings_;
-    bool persist_layout_=false, layout_shown_=false, layout_saved_=false;
+    bool persist_layout_=false, layout_shown_=false, layout_captured_=false, layout_saved_=false;
     bool sidebar_resizing_=false;
     int column_resizing_=-1;
     std::wstring error_;
@@ -6325,13 +6372,17 @@ FilePickerOutcome ShowFilePickerDetailed(HWND owner, const FolderPickerSpec& spe
     if (!guard->Alive()) { outcome.status = FilePickerStatus::Cancelled; return outcome; }
     auto guarded_spec = spec;
     guarded_spec.owner_guard = guard;
-    FolderPickerWindow window;
-    const bool picked = window.Show(owner, guarded_spec, dark, accent, outcome.result);
-    if (!guard->Alive()) { outcome.result = {}; outcome.status = FilePickerStatus::Cancelled; return outcome; }
-    outcome.error = window.Error();
-    outcome.failure = window.Failure();
-    outcome.status = picked ? FilePickerStatus::Accepted :
-        outcome.error ? FilePickerStatus::Failed : FilePickerStatus::Cancelled;
+    {
+        FolderPickerWindow window;
+        const bool picked = window.Show(owner, guarded_spec, dark, accent, outcome.result);
+        outcome.error = window.Error();
+        outcome.failure = window.Failure();
+        if (!guard->Alive()) { outcome.result = {}; outcome.status = FilePickerStatus::Cancelled; return outcome; }
+        outcome.status = picked ? FilePickerStatus::Accepted :
+            outcome.error ? FilePickerStatus::Failed : FilePickerStatus::Cancelled;
+        PickerProofPhase("window-dtor-before");
+    }
+    PickerProofPhase("window-dtor-after");
     return outcome;
 }
 

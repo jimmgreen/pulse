@@ -523,25 +523,41 @@ struct PickerOwnerGuard::Impl {
 
         }
         const auto name = BuildOwnerKey(pid, creation, window);
+        std::unique_ptr<CurrentUserSecurityAttributes> security;
         if (!remote_parent) {
-        stage = PickerOwnerFailureStage::SecurityAttributes;
-        CurrentUserSecurityAttributes security;
-        if (!security) { error = ERROR_ACCESS_DENIED; return; }
-        stage = PickerOwnerFailureStage::MutexCreate;
-        mutex.Reset(CreateMutexW(security.get(), FALSE, name.c_str()));
-        if (!mutex) { error = GetLastError(); if (!error) error = ERROR_GEN_FAILURE; return; }
-        stage = PickerOwnerFailureStage::MutexAcquire;
-        const DWORD acquired = WaitForSingleObject(mutex.Get(), 0);
-        if (acquired != WAIT_OBJECT_0 && acquired != WAIT_ABANDONED) {
-            error = acquired == WAIT_TIMEOUT ? ERROR_BUSY : GetLastError();
-            if (!error) error = ERROR_GEN_FAILURE; return;
+            stage = PickerOwnerFailureStage::SecurityAttributes;
+            security = std::make_unique<CurrentUserSecurityAttributes>();
+            if (!*security) { error = ERROR_ACCESS_DENIED; return; }
+            stage = PickerOwnerFailureStage::MutexCreate;
+            mutex.Reset(CreateMutexW(security->get(), FALSE, name.c_str()));
+            if (!mutex) { error = GetLastError(); if (!error) error = ERROR_GEN_FAILURE; return; }
+            stage = PickerOwnerFailureStage::MutexAcquire;
+            const DWORD acquired = WaitForSingleObject(mutex.Get(), 0);
+            if (acquired != WAIT_OBJECT_0 && acquired != WAIT_ABANDONED) {
+                error = acquired == WAIT_TIMEOUT ? ERROR_BUSY : GetLastError();
+                if (!error) error = ERROR_GEN_FAILURE; return;
+            }
+            locked = true;
         }
-        locked = true;
-        pre_hide_event.Reset(CreateEventW(security.get(), TRUE, FALSE, PreHideEventName(name, false).c_str()));
-        pre_hide_done.Reset(CreateEventW(security.get(), TRUE, FALSE, PreHideEventName(name, true).c_str()));
-        if (pre_hide_event) ResetEvent(pre_hide_event.Get());
-        if (pre_hide_done) ResetEvent(pre_hide_done.Get());
-        }
+        // Only publish the cross-process PreHide handshake events when this guard
+        // actually owns the owner's disabled transition (matching PreHideEvent()).
+        // Otherwise callers that pre-disable their own owner (e.g. MFC CFileDialog)
+        // never wait on PreHideEvent, and publishing the named events stalls the
+        // remote host's RequestCallerPreHideRestore() for a full 1000 ms timeout.
+        auto arm_pre_hide = [&] {
+            if (remote_parent || !security || !*security) return;
+            HANDLE trigger = CreateEventW(security->get(), TRUE, FALSE, PreHideEventName(name, false).c_str());
+            HANDLE done = CreateEventW(security->get(), TRUE, FALSE, PreHideEventName(name, true).c_str());
+            if (!trigger || !done) {
+                if (trigger) CloseHandle(trigger);
+                if (done) CloseHandle(done);
+                return;
+            }
+            ResetEvent(trigger);
+            ResetEvent(done);
+            pre_hide_event.Reset(trigger);
+            pre_hide_done.Reset(done);
+        };
         stage = PickerOwnerFailureStage::WindowIdentity;
         if (!SameWindow()) { error = ERROR_INVALID_WINDOW_HANDLE; return; }
         if (pid != GetCurrentProcessId()) {
@@ -575,6 +591,7 @@ struct PickerOwnerGuard::Impl {
             }
             stage = PickerOwnerFailureStage::WindowIdentity;
             if (!SameWindow() || IsWindowEnabled(window)) { error = ERROR_INVALID_WINDOW_HANDLE; return; }
+            if (foreign_lease) arm_pre_hide();
             return;
         }
         stage = PickerOwnerFailureStage::WindowProperty;
@@ -591,10 +608,14 @@ struct PickerOwnerGuard::Impl {
             stage = PickerOwnerFailureStage::ThreadTransition;
             error = cross_thread->Start();
             if (error) cross_thread->Restore(true, false);
+            else arm_pre_hide();
             return;
         }
         changed = !external && IsWindowEnabled(window);
-        if (changed) EnableWindow(window, FALSE);
+        if (changed) {
+            EnableWindow(window, FALSE);
+            arm_pre_hide();
+        }
     }
     bool SameWindow() const {
         if (!window) return true;

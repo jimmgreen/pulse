@@ -891,7 +891,9 @@ int RunLaneTests() {
     const auto pause_when_running = [&](uint64_t task) {
         const auto deadline = GetTickCount64() + 10000;
         while (GetTickCount64() < deadline) {
-            if (g_ops.PauseTask(task)) return true;
+            // Running first: PauseTask on a queued task holds it in the queue.
+            const auto st = g_ops.QueryTask(task);
+            if (st && st->active && st->phase != ops::OpPhase::Queued && g_ops.PauseTask(task)) return true;
             Sleep(1);
         }
         return false;
@@ -1012,6 +1014,324 @@ int RunLaneTests() {
     std::filesystem::remove_all(root, error);
     Check(!error, L"lanes fixture cleanup");
     wprintf(L"lanes: %d passed, %d failed\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
+
+// Links and lanes: a path through a junction runs beside other work when where
+// it leads is free, and waits when it leads to a place another operation uses.
+int RunLaneLinkTests() {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const auto base = SandboxRoot();
+    if (base.empty()) return 2;
+    const std::wstring root = (std::filesystem::path(base).parent_path() /
+        (L"lanelinks_" + std::to_wstring(GetCurrentProcessId()))).wstring();
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    for (const wchar_t* dir : {L"\\src\\big", L"\\src\\big2", L"\\T\\big", L"\\R", L"\\R2", L"\\d1", L"\\d2", L"\\src3"})
+        std::filesystem::create_directories(root + dir, error);
+    const char payload[] = "link payload";
+    MakeFile(root + L"\\R\\a.txt", payload, sizeof(payload) - 1);
+    MakeFile(root + L"\\R2\\c.txt", payload, sizeof(payload) - 1);
+    MakeFile(root + L"\\src3\\x.txt", payload, sizeof(payload) - 1);
+    const bool fixtures = MakePatternFile(root + L"\\src\\big\\movie.bin", 512ull << 20) &&
+        MakePatternFile(root + L"\\src\\big2\\movie.bin", 512ull << 20) &&
+        MakeJunction(root + L"\\J", root + L"\\R") &&            // J -> R
+        MakeJunction(root + L"\\T\\big\\link", root + L"\\R2");  // a link inside a copy's target
+    Check(fixtures, L"links: fixtures created");
+    if (!fixtures) return 1;
+    g_ops.SetJournalPath(root + L"\\operations.json");
+    g_ops.SetVerifyCopies(false);
+    g_ops.Start([] {});
+    Sleep(500);
+    const auto wait_final = [&](uint64_t task, ULONGLONG ms) -> std::optional<ops::OpStatus> {
+        const auto deadline = GetTickCount64() + ms;
+        while (GetTickCount64() < deadline) {
+            if (auto st = g_ops.QueryTask(task); st && !st->active && st->phase != ops::OpPhase::Queued) return st;
+            g_ops.DrainFinishedTasks();
+            g_ops.DrainCompletions();
+            Sleep(5);
+        }
+        return std::nullopt;
+    };
+    const auto pause_when_running = [&](uint64_t task) {
+        const auto deadline = GetTickCount64() + 10000;
+        while (GetTickCount64() < deadline) {
+            // Running first: PauseTask on a queued task holds it in the queue.
+            const auto st = g_ops.QueryTask(task);
+            if (st && st->active && st->phase != ops::OpPhase::Queued && g_ops.PauseTask(task)) return true;
+            Sleep(1);
+        }
+        return false;
+    };
+    const auto waits_for_same_place = [&](uint64_t task) {
+        Sleep(1500);
+        const auto listed = g_ops.ActiveStatuses(true);
+        const auto found = std::find_if(listed.begin(), listed.end(), [&](const auto& st) { return st.task_id == task; });
+        return found != listed.end() && found->phase == ops::OpPhase::Queued && found->wait_reason == ops::OpWaitReason::SamePlace;
+    };
+
+    // Held: a copy merging into T\big (which holds a link to R2), and a copy into R.
+    const uint64_t held = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\src\\big").c_str()}, (root + L"\\T").c_str()));
+    Check(pause_when_running(held), L"links: the merge into a tree with a link is paused while running");
+    const uint64_t held2 = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\src\\big2").c_str()}, (root + L"\\R").c_str()));
+    Check(pause_when_running(held2), L"links: the copy into R is paused while running");
+
+    // Through a junction to a free place: runs at once (it used to wait).
+    const uint64_t via_source = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\J\\a.txt").c_str()}, (root + L"\\d1").c_str()));
+    const auto via_source_final = wait_final(via_source, 10000);
+    Check(via_source_final && via_source_final->phase == ops::OpPhase::Completed && FileHash(root + L"\\d1\\a.txt") != 0,
+          L"links: a copy whose source goes through a junction runs beside paused work");
+    const uint64_t via_target = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\src3\\x.txt").c_str()}, (root + L"\\J").c_str()));
+    const auto via_target_final = wait_final(via_target, 10000);
+    Check(via_target_final && via_target_final->phase == ops::OpPhase::Completed && FileHash(root + L"\\R\\x.txt") != 0,
+          L"links: a copy whose destination goes through a junction runs beside paused work");
+
+    // Through a junction to a place a paused copy writes: waits, untouched.
+    const uint64_t alias_delete = g_ops.Submit(SimpleOp(ops::OpType::RealDelete, {(root + L"\\J\\big2").c_str()}));
+    // (The paused copy may not have made R\big2 yet: the queued state is the proof.)
+    Check(waits_for_same_place(alias_delete),
+          L"links: deleting the paused copy's target through a junction waits for the same place");
+    // Inside where a link in a running copy's target leads: waits, untouched.
+    const uint64_t linked_delete = g_ops.Submit(SimpleOp(ops::OpType::RealDelete, {(root + L"\\R2\\c.txt").c_str()}));
+    Check(waits_for_same_place(linked_delete) && Exists(root + L"\\R2\\c.txt"),
+          L"links: deleting where a link in a running target leads waits for the same place");
+
+    for (const uint64_t task : {held, held2}) g_ops.CancelTask(task);
+    for (const uint64_t task : {held, held2, alias_delete, linked_delete}) {
+        const auto final_status = wait_final(task, 60000);
+        Check(final_status.has_value(), L"links: every operation ends after the held ones are cancelled");
+    }
+    Check(!Exists(root + L"\\R2\\c.txt"), L"links: the waiting delete ran after the copy it waited for");
+    Check(g_ops.ActiveStatuses(true).empty(), L"links: nothing is listed afterwards");
+    g_ops.Stop();
+    g_ops.SetJournalPath(L"");
+    RemoveDirectoryW((root + L"\\J").c_str());
+    RemoveDirectoryW((root + L"\\T\\big\\link").c_str());
+    std::filesystem::remove_all(root, error);
+    Check(!error, L"links: fixture cleanup");
+    wprintf(L"lane links: %d passed, %d failed\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
+
+// Network paths and lanes: a network operation runs beside local work, two
+// network operations take turns, and this computer under a network name
+// (\\localhost) is never taken for elsewhere. No remote server is needed: an
+// unreachable name is held paused before it touches the network.
+int RunLaneNetworkTests() {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const auto base = SandboxRoot();
+    if (base.empty()) return 2;
+    const std::wstring root = (std::filesystem::path(base).parent_path() /
+        (L"lanenet_" + std::to_wstring(GetCurrentProcessId()))).wstring();
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    for (const wchar_t* dir : {L"\\big", L"\\big2", L"\\d1", L"\\d2", L"\\small"})
+        std::filesystem::create_directories(root + dir, error);
+    const char payload[] = "net payload";
+    MakeFile(root + L"\\small\\a.txt", payload, sizeof(payload) - 1);
+    const bool fixtures = MakePatternFile(root + L"\\big\\movie.bin", 512ull << 20) &&
+        MakePatternFile(root + L"\\big2\\movie.bin", 512ull << 20);
+    Check(fixtures, L"network: fixtures created");
+    if (!fixtures) return 1;
+    g_ops.SetJournalPath(root + L"\\operations.json");
+    g_ops.SetVerifyCopies(false);
+    g_ops.Start([] {});
+    Sleep(500);
+    const auto wait_final = [&](uint64_t task, ULONGLONG ms) -> std::optional<ops::OpStatus> {
+        const auto deadline = GetTickCount64() + ms;
+        while (GetTickCount64() < deadline) {
+            if (auto st = g_ops.QueryTask(task); st && !st->active && st->phase != ops::OpPhase::Queued) return st;
+            g_ops.DrainFinishedTasks();
+            g_ops.DrainCompletions();
+            Sleep(5);
+        }
+        return std::nullopt;
+    };
+    const auto pause_when_running = [&](uint64_t task) {
+        const auto deadline = GetTickCount64() + 10000;
+        while (GetTickCount64() < deadline) {
+            // Running first: PauseTask on a queued task holds it in the queue.
+            const auto st = g_ops.QueryTask(task);
+            if (st && st->active && st->phase != ops::OpPhase::Queued && g_ops.PauseTask(task)) return true;
+            Sleep(1);
+        }
+        return false;
+    };
+    const auto queued_reason = [&](uint64_t task) -> std::optional<ops::OpWaitReason> {
+        Sleep(1500);
+        const auto listed = g_ops.ActiveStatuses(true);
+        const auto found = std::find_if(listed.begin(), listed.end(), [&](const auto& st) { return st.task_id == task; });
+        if (found == listed.end() || found->phase != ops::OpPhase::Queued) return std::nullopt;
+        return found->wait_reason;
+    };
+    const std::wstring unreachable = L"\\\\pulse-lane-test.invalid\\share";
+
+    // A local copy held paused on the main worker.
+    const uint64_t local = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\big").c_str()}, (root + L"\\d1").c_str()));
+    Check(pause_when_running(local), L"network: the local copy is paused while running");
+    // A network copy: admitted beside it, then held.
+    const uint64_t net1 = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\big2").c_str()}, unreachable.c_str()));
+    Check(pause_when_running(net1), L"network: a network copy runs beside a paused local copy");
+    // Local work still runs beside both.
+    const uint64_t nearby = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\small\\a.txt").c_str()}, (root + L"\\d2").c_str()));
+    const auto nearby_final = wait_final(nearby, 10000);
+    Check(nearby_final && nearby_final->phase == ops::OpPhase::Completed && FileHash(root + L"\\d2\\a.txt") != 0,
+          L"network: local work runs beside a network copy");
+    // A second network operation takes its turn after the first.
+    const uint64_t net2 = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\small\\a.txt").c_str()},
+                                                (unreachable + L"\\other").c_str()));
+    const auto net2_reason = queued_reason(net2);
+    Check(net2_reason && *net2_reason == ops::OpWaitReason::NetworkTurn,
+          L"network: a second network operation waits for the network turn");
+    // This computer under a network name may be any local place: it waits.
+    const uint64_t loopback = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\small\\a.txt").c_str()},
+        (L"\\\\localhost\\" + std::wstring(1, root[0]) + L"$" + root.substr(2) + L"\\d1").c_str()));
+    Check(queued_reason(loopback).has_value(), L"network: a path through \\\\localhost waits for the running copies");
+
+    for (const uint64_t task : {loopback, net2, net1, local}) g_ops.CancelTask(task);
+    for (const uint64_t task : {local, net1, net2, loopback}) {
+        const auto final_status = wait_final(task, 60000);
+        Check(final_status.has_value(), L"network: every operation ends once cancelled");
+    }
+    Check(g_ops.ActiveStatuses(true).empty(), L"network: nothing is listed afterwards");
+    g_ops.Stop();
+    g_ops.SetJournalPath(L"");
+    std::filesystem::remove_all(root, error);
+    Check(!error, L"network: fixture cleanup");
+    wprintf(L"lane network: %d passed, %d failed\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
+
+// The main worker beside lanes: a queued request no lane takes (here a Replace
+// copy) starts on the idle main worker while a lane runs, when it cannot touch
+// what that lane touches; one that can still waits. A queued copy can be held.
+int RunLanePrimaryTests() {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const auto base = SandboxRoot();
+    if (base.empty()) return 2;
+    const std::wstring root = (std::filesystem::path(base).parent_path() /
+        (L"laneprimary_" + std::to_wstring(GetCurrentProcessId()))).wstring();
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    for (const wchar_t* dir : {L"\\big", L"\\big2", L"\\d1", L"\\d2", L"\\d3", L"\\d4", L"\\few"})
+        std::filesystem::create_directories(root + dir, error);
+    const char payload[] = "primary payload";
+    MakeFile(root + L"\\few\\a.txt", payload, sizeof(payload) - 1);
+    MakeFile(root + L"\\d3\\a.txt", "old", 3);
+    const bool fixtures = MakePatternFile(root + L"\\big\\movie.bin", 512ull << 20) &&
+        MakePatternFile(root + L"\\big2\\movie.bin", 512ull << 20);
+    Check(fixtures, L"primary: fixtures created");
+    if (!fixtures) return 1;
+    diagnostics::runtime::Initialize(std::filesystem::path(base).parent_path().wstring() + L"\\primary_diag", "primary");
+    g_ops.SetJournalPath(root + L"\\operations.json");
+    g_ops.SetVerifyCopies(false);
+    g_ops.Start([] {});
+    Sleep(500);
+    const auto wait_final = [&](uint64_t task, ULONGLONG ms) -> std::optional<ops::OpStatus> {
+        const auto deadline = GetTickCount64() + ms;
+        while (GetTickCount64() < deadline) {
+            if (auto st = g_ops.QueryTask(task); st && !st->active && st->phase != ops::OpPhase::Queued) return st;
+            g_ops.DrainFinishedTasks();
+            g_ops.DrainCompletions();
+            Sleep(5);
+        }
+        return std::nullopt;
+    };
+    const auto pause_when_running = [&](uint64_t task) {
+        const auto deadline = GetTickCount64() + 10000;
+        while (GetTickCount64() < deadline) {
+            // Running first: PauseTask on a queued task holds it in the queue.
+            const auto st = g_ops.QueryTask(task);
+            if (st && st->active && st->phase != ops::OpPhase::Queued && g_ops.PauseTask(task)) return true;
+            Sleep(1);
+        }
+        return false;
+    };
+    // Main worker: A (then cancelled); lane: B, held paused.
+    const uint64_t first = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\big").c_str()}, (root + L"\\d1").c_str()));
+    Check(pause_when_running(first), L"primary: the first copy is paused on the main worker");
+    const uint64_t lane = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\big2").c_str()}, (root + L"\\d2").c_str()));
+    Check(pause_when_running(lane), L"primary: the second copy is paused in a lane");
+    g_ops.CancelTask(first);
+    Check(wait_final(first, 30000).has_value(), L"primary: the main worker's copy ends, leaving it idle");
+
+    // A Replace copy takes no lane: it starts on the idle main worker beside the paused lane.
+    auto replace = SimpleOp(ops::OpType::Copy, {(root + L"\\few\\a.txt").c_str()}, (root + L"\\d3").c_str());
+    replace.collision_policy = ops::CollisionPolicy::Replace;
+    const uint64_t beside = g_ops.Submit(replace);
+    const auto beside_final = wait_final(beside, 10000);
+    Check(beside_final && beside_final->phase == ops::OpPhase::Completed && FileHash(root + L"\\d3\\a.txt") == FileHash(root + L"\\few\\a.txt"),
+          L"primary: a request no lane takes runs on the idle main worker beside a paused lane");
+    const auto lane_status = g_ops.QueryTask(lane);
+    Check(lane_status && lane_status->active, L"primary: the paused lane is untouched");
+
+    // One that touches the lane's target still waits for it.
+    auto into_lane = SimpleOp(ops::OpType::Copy, {(root + L"\\few\\a.txt").c_str()}, (root + L"\\d2\\big2").c_str());
+    into_lane.collision_policy = ops::CollisionPolicy::Replace;
+    const uint64_t blocked = g_ops.Submit(into_lane);
+    Sleep(1500);
+    const auto blocked_status = g_ops.QueryTask(blocked);
+    Check(blocked_status && blocked_status->phase == ops::OpPhase::Queued,
+          L"primary: a request into the paused lane's target keeps waiting");
+    {
+        const bool paused_queued = g_ops.PauseTask(blocked);
+        const auto listed = g_ops.ActiveStatuses(true);
+        const auto found = std::find_if(listed.begin(), listed.end(), [&](const auto& st) { return st.task_id == blocked; });
+        Check(paused_queued && found != listed.end() && found->phase == ops::OpPhase::Queued && found->pause_requested,
+              L"primary: a queued request can be held, and is listed as held");
+        Check(g_ops.ResumeTask(blocked), L"primary: a held queued request can be resumed");
+    }
+
+    // A queued copy held paused does not start; resumed, it does.
+    // Cancelled while queued: gone from the list at once; it ends for good when
+    // the main worker reaches it (after the lane it waited for).
+    g_ops.CancelTask(blocked);
+    {
+        const auto listed = g_ops.ActiveStatuses(true);
+        Check(std::none_of(listed.begin(), listed.end(), [&](const auto& st) { return st.task_id == blocked; }),
+              L"primary: a cancelled queued request leaves the list at once");
+    }
+    const uint64_t held = g_ops.Submit(SimpleOp(ops::OpType::Copy, {(root + L"\\big2\\movie.bin").c_str()}, (root + L"\\d4").c_str()));
+    // Paused before the scheduler can take it (it may already run: then the running pause applies).
+    const bool held_paused = g_ops.PauseTask(held);
+    Sleep(1500);
+    const auto held_status = g_ops.QueryTask(held);
+    Check(held_paused && held_status && held_status->active && !Exists(root + L"\\d4\\movie.bin"),
+          L"primary: a held queued copy has not written anything");
+    const bool resumed_held = g_ops.ResumeTask(held);
+    const auto held_final = wait_final(held, 60000);
+    if (!held_final) {
+        const auto st = g_ops.QueryTask(held);
+        wprintf(L"primary: held resume=%d phase=%d pause_requested=%d active=%d percent=%.1f\n", resumed_held,
+                st ? static_cast<int>(st->phase) : -1, st ? st->pause_requested : -1, st ? st->active : -1,
+                st ? st->percent : -1.0f);
+    }
+    Check(held_final && held_final->phase == ops::OpPhase::Completed && FileHash(root + L"\\d4\\movie.bin") != 0,
+          L"primary: resumed, the held copy completes");
+
+    // A delete of what the lane reads waits; cancelled while waiting, it never runs.
+    const uint64_t queued_delete = g_ops.Submit(SimpleOp(ops::OpType::RealDelete, {(root + L"\\big2\\movie.bin").c_str()}));
+    Sleep(1500);
+    const auto queued_delete_status = g_ops.QueryTask(queued_delete);
+    Check(queued_delete_status && queued_delete_status->phase == ops::OpPhase::Queued,
+          L"primary: deleting what the paused lane reads waits");
+    g_ops.CancelTask(queued_delete);
+    g_ops.CancelTask(lane);
+    Check(wait_final(lane, 30000).has_value(), L"primary: the lane copy ends once cancelled");
+    const auto queued_delete_final = wait_final(queued_delete, 30000);
+    Check(queued_delete_final && queued_delete_final->phase != ops::OpPhase::Completed &&
+          Exists(root + L"\\big2\\movie.bin"), L"primary: the cancelled delete ends without deleting");
+    const auto blocked_final = wait_final(blocked, 30000);
+    wprintf(L"primary: cancelled request final=%d phase=%d written=%d\n", blocked_final.has_value(),
+            blocked_final ? static_cast<int>(blocked_final->phase) : -1, Exists(root + L"\\d2\\big2\\a.txt"));
+    Check(blocked_final && blocked_final->phase != ops::OpPhase::Completed && !Exists(root + L"\\d2\\big2\\a.txt"),
+          L"primary: the cancelled request ends without writing anything");
+    Check(g_ops.ActiveStatuses(true).empty(), L"primary: nothing is listed afterwards");
+    g_ops.Stop();
+    g_ops.SetJournalPath(L"");
+    std::filesystem::remove_all(root, error);
+    Check(!error, L"primary: fixture cleanup");
+    wprintf(L"lane primary: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
 
@@ -1342,6 +1662,9 @@ int wmain(int argc, wchar_t** argv) {
     if (argc == 2 && std::wstring_view(argv[1]) == L"--big-chunk-copy-only") return RunBigChunkCopyTests();
     if (argc == 2 && std::wstring_view(argv[1]) == L"--merge-move-only") return RunMergeMoveTests();
     if (argc == 2 && std::wstring_view(argv[1]) == L"--lanes-only") return RunLaneTests();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--lane-links-only") return RunLaneLinkTests();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--lane-network-only") return RunLaneNetworkTests();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--lane-primary-only") return RunLanePrimaryTests();
     if (argc >= 5 && std::wstring_view(argv[1]) == L"--multi") return RunMulti(argc, argv);
     if (argc == 7 && std::wstring_view(argv[1]) == L"--soak-lanes") return RunLaneSoak(argc, argv);
     if (argc == 5 && std::wstring_view(argv[1]) == L"--soak") return RunSoak(argc, argv);

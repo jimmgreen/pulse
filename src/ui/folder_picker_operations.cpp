@@ -6,14 +6,25 @@
 
 namespace pulse::ui {
 
-PickerOperationSession::PickerOperationSession() { manager_.Start({}, false); }
-PickerOperationSession::~PickerOperationSession() { manager_.Stop(); }
+PickerOperationSession::PickerOperationSession() = default;
+PickerOperationSession::~PickerOperationSession() { if (started_) manager_.Stop(); }
 
-bool PickerOperationSession::CanUndo() const { return !executing_ && manager_.CanUndo(); }
-void PickerOperationSession::Cancel() { cancelling_ = true; manager_.CancelCurrent(); }
+void PickerOperationSession::EnsureStarted() {
+    if (!started_) {
+        manager_.Start({}, false);
+        started_ = true;
+    }
+}
+
+bool PickerOperationSession::CanUndo() const { return started_ && !executing_ && manager_.CanUndo(); }
+void PickerOperationSession::Cancel() {
+    cancelling_ = true;
+    if (started_) manager_.CancelCurrent();
+}
 
 PickerOperationResult PickerOperationSession::Run(HWND owner, ops::OpRequest request,
                                                  bool dark, D2D1_COLOR_F accent, bool unique_create) {
+    EnsureStarted();
     if (unique_create && request.sources.size() == 1 &&
         (request.type == ops::OpType::CreateFolder || request.type == ops::OpType::CreateTextFile)) {
         std::future<ops::OpRequest> prepared;

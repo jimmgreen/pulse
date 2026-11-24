@@ -114,6 +114,8 @@ constexpr float kTaskRowH = 44.0f;
 constexpr float kTaskStripPadY = 6.0f;
 constexpr size_t kTaskMaxRows = 4;  // the 3 others that can run beside the shown one, + 1 queued
 constexpr float kTaskMoreH = 20.0f;
+constexpr size_t kTaskExpandedRows = 8;  // "show all": the rest past this stay counted
+constexpr int kHitTaskMore = 58;         // the "+N" / "show less" line
 constexpr size_t kTimeGraphPoints = ops::OpSpeedGraph::kMaxTimePoints;
 constexpr float kPi = 3.14159265f;
 
@@ -252,6 +254,11 @@ int TaskStripRank(const ops::OpStatus& status) {
     if (status.phase == ops::OpPhase::WaitingForConflict ||
         status.authorization == ops::AuthorizationState::ActionRequired) return 0;
     return status.phase == ops::OpPhase::Queued ? 2 : 1;
+}
+
+// The strip's pause/resume state: running and paused, or held in the queue.
+bool StripShowsPaused(const ops::OpStatus& status) {
+    return ShowsPaused(status) || (status.phase == ops::OpPhase::Queued && status.pause_requested);
 }
 
 bool SupportsItemSkip(const ops::OpStatus& status) {
@@ -3601,6 +3608,7 @@ void FileOperationWindow::SetOtherTasks(std::vector<ops::OpStatus> tasks) {
     });
     const float before = TaskStripDip();
     other_tasks_ = std::move(tasks);
+    if (other_tasks_.size() <= kTaskMaxRows) strip_expanded_ = false;  // nothing left to show all of
     // The strip grows the card downwards: the body is laid out from the top
     // and the footer from the bottom, so neither moves.
     if (TaskStripDip() != before) ResizeForDetails(false);
@@ -3608,14 +3616,26 @@ void FileOperationWindow::SetOtherTasks(std::vector<ops::OpStatus> tasks) {
 }
 
 size_t FileOperationWindow::TaskStripRows() const {
-    return (std::min)(other_tasks_.size(), kTaskMaxRows);
+    return (std::min)(other_tasks_.size(), strip_expanded_ ? kTaskExpandedRows : kTaskMaxRows);
+}
+
+bool FileOperationWindow::TaskStripHasMoreLine() const {
+    return other_tasks_.size() > kTaskMaxRows;
+}
+
+D2D1_RECT_F FileOperationWindow::TaskMoreLine() const {
+    const float s = (std::max)(scale_, 0.001f);
+    const float dip_w = static_cast<float>(compositor_.Width()) / s;
+    const float dip_h = static_cast<float>(compositor_.Height()) / s;
+    const float y = dip_h - kFooterH - TaskStripDip() + kTaskStripPadY + kTaskRowH * static_cast<float>(TaskStripRows());
+    return D2D1::RectF(kPadX + 18.0f, y - 1.0f, dip_w - kPadX, y + kTaskMoreH - 1.0f);
 }
 
 float FileOperationWindow::TaskStripDip() const {
     const size_t rows = TaskStripRows();
     if (rows == 0) return 0.0f;
     return kTaskStripPadY * 2.0f + kTaskRowH * static_cast<float>(rows) +
-           (other_tasks_.size() > rows ? kTaskMoreH : 0.0f);
+           (TaskStripHasMoreLine() ? kTaskMoreH : 0.0f);
 }
 
 FileOperationWindow::TaskRowGeometry FileOperationWindow::TaskRow(size_t index) const {
@@ -3629,7 +3649,7 @@ FileOperationWindow::TaskRowGeometry FileOperationWindow::TaskRow(size_t index) 
     g.pause = D2D1::RectF(g.cancel.left - 32.0f, g.cancel.top, g.cancel.left - 4.0f, g.cancel.bottom);
     if (index < other_tasks_.size()) {
         const auto& task = other_tasks_[index];
-        g.has_pause = task.phase != ops::OpPhase::Queued && task.can_pause &&
+        g.has_pause = task.can_pause &&
             task.phase != ops::OpPhase::WaitingForConflict && task.phase != ops::OpPhase::Cancelling &&
             task.authorization == ops::AuthorizationState::None;
     }
@@ -3676,6 +3696,11 @@ int FileOperationWindow::HitTestControl(float x, float y) const {
         // A queued task has nothing to show in the card yet.
         if (pulse::ui::ContainsRect(px(g.row), x, y))
             return other_tasks_[i].phase == ops::OpPhase::Queued || !callbacks_.select_task ? 0 : base;
+    }
+    if (TaskStripHasMoreLine()) {
+        const auto line = TaskMoreLine();
+        if (pulse::ui::ContainsRect(D2D1::RectF(line.left * scale_, line.top * scale_, line.right * scale_,
+                                                line.bottom * scale_), x, y)) return kHitTaskMore;
     }
     if (board_ && !status_.active) {
         for (const auto& [row, bounds] : failure_buttons_)
@@ -4547,7 +4572,7 @@ void FileOperationWindow::Render() {
             const int base = kHitTaskRow + static_cast<int>(i) * 4;
             const bool task_queued = task.phase == ops::OpPhase::Queued;
             const bool task_choice = TaskStripRank(task) == 0;
-            const bool task_paused = ShowsPaused(task);
+            const bool task_paused = StripShowsPaused(task);
             const bool task_deleting = task.type == ops::OpType::RecycleDelete || task.type == ops::OpType::RealDelete;
             const auto hover_fill = [&](int id) {
                 return WithAlpha(theme.text, pressed_ == id ? 0.06f : (dark_ ? 0.06f : 0.037f));
@@ -4580,8 +4605,8 @@ void FileOperationWindow::Render() {
             const float right = (g.has_pause ? g.pause.left : g.cancel.left) - 6.0f;
             const float pct = OperationDisplayPercent(task);
             const std::wstring state = task_choice ? l10n::Get(l10n::StringId::OpNeedsChoice)
-                : task_queued ? l10n::Get(l10n::StringId::OpQueuedWaiting)
                 : task_paused ? l10n::Get(l10n::StringId::OpPaused)
+                : task_queued ? l10n::Get(l10n::StringId::OpQueuedWaiting)
                 : pct >= 0.0f ? std::to_wstring(static_cast<int>(std::floor(pct))) + L"%" : std::wstring();
             const float state_w = state.empty() ? 0.0f : TextWidth(factory, label_format_.get(), state) / s + 2.0f;
             if (!state.empty())
@@ -4595,8 +4620,10 @@ void FileOperationWindow::Render() {
                                name, theme.text);
             // Second line: its progress, or why it waits.
             if (task_queued) {
-                const auto reason = task.wait_reason == ops::OpWaitReason::SamePlace ? l10n::StringId::OpWaitSamePlace
+                const auto reason = task_paused ? l10n::StringId::OpQueuedHeld
+                    : task.wait_reason == ops::OpWaitReason::SamePlace ? l10n::StringId::OpWaitSamePlace
                     : task.wait_reason == ops::OpWaitReason::LanesFull ? l10n::StringId::OpWaitLanesFull
+                    : task.wait_reason == ops::OpWaitReason::NetworkTurn ? l10n::StringId::OpWaitNetworkTurn
                     : l10n::StringId::OpWaitTurn;
                 DrawEllipsizedText(compositor_, label_format_.get(),
                                    Rect(s, name_x, y + 23.0f, (std::max)(right - name_x, 0.0f), 16.0f),
@@ -4609,12 +4636,20 @@ void FileOperationWindow::Render() {
                 painter_.DrawProgressBar(bar);
             }
         }
-        if (other_tasks_.size() > rows) {
-            const std::wstring more = l10n::Get(l10n::StringId::OpMoreTasksPrefix) +
-                pulse::format::GroupedInt(other_tasks_.size() - rows) + l10n::Get(l10n::StringId::OpMoreTasksSuffix);
-            const float more_y = strip_top + kTaskStripPadY + kTaskRowH * static_cast<float>(rows);
-            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, kPadX + 26.0f, more_y, content_w - 26.0f, 16.0f),
-                               more, text3);
+        if (TaskStripHasMoreLine()) {
+            // Collapsed: "+N more", which shows them all. Expanded: "show less"
+            // (with what still does not fit counted in front of it).
+            std::wstring more;
+            if (other_tasks_.size() > rows)
+                more = l10n::Get(l10n::StringId::OpMoreTasksPrefix) +
+                    pulse::format::GroupedInt(other_tasks_.size() - rows) + l10n::Get(l10n::StringId::OpMoreTasksSuffix);
+            if (strip_expanded_) more += (more.empty() ? L"" : L" · ") + l10n::Get(l10n::StringId::OpStripShowLess);
+            const auto line = TaskMoreLine();
+            const bool hot = hover_ == kHitTaskMore || pressed_ == kHitTaskMore;
+            if (hot) painter_.FillRoundedRect(Rect(s, line.left, line.top, line.right - line.left, line.bottom - line.top),
+                                              ScaleDip(s, 4.0f), WithAlpha(theme.text, dark_ ? 0.06f : 0.037f));
+            DrawEllipsizedText(compositor_, label_format_.get(),
+                               Rect(s, kPadX + 26.0f, line.top + 1.0f, content_w - 26.0f, 16.0f), more, link);
         }
     }
 
@@ -4912,7 +4947,10 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
             diagnostics::runtime::Event("operation_ui_action", {{"task", status_.task_id},
                 {"type", static_cast<uint64_t>(status_.type)}, {"phase", static_cast<uint64_t>(status_.phase)},
                 {"control", static_cast<uint64_t>(hit)}, {"active", status_.active}});
-            if (hit >= kHitTaskRow) {
+            if (hit == kHitTaskMore) {
+                strip_expanded_ = !strip_expanded_;
+                ResizeForDetails(false);
+            } else if (hit >= kHitTaskRow) {
                 const size_t index = static_cast<size_t>(hit - kHitTaskRow) / 4;
                 const int part = (hit - kHitTaskRow) % 4;
                 if (index < other_tasks_.size()) {
@@ -4920,7 +4958,7 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
                     if (part == 0 && callbacks_.select_task) {
                         callbacks_.select_task(task.task_id);
                     } else if (part == 1) {
-                        if (ShowsPaused(task)) { if (callbacks_.resume_task) callbacks_.resume_task(task.task_id); }
+                        if (StripShowsPaused(task)) { if (callbacks_.resume_task) callbacks_.resume_task(task.task_id); }
                         else if (callbacks_.pause_task) callbacks_.pause_task(task.task_id);
                     } else if (part == 2 && callbacks_.cancel_task) {
                         callbacks_.cancel_task(task.task_id);

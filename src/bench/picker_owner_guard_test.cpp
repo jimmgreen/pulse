@@ -569,8 +569,121 @@ void PreHideSlowRestore(DWORD delay_ms, const char* label) {
     UnmapViewOfFile(const_cast<UINT_PTR*>(shared)); CloseHandle(mapping);
 }
 
+int PreHideAlreadyDisabledChild(const wchar_t* argument) {
+    const auto mapping = reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(_wcstoui64(argument, nullptr, 10)));
+    auto* shared = static_cast<volatile UINT_PTR*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(UINT_PTR) * 8));
+    if (!shared) return 2;
+    WNDCLASSW wc{}; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"Pulse.PreHideDisabled.Regression";
+    wc.lpfnWndProc = [](HWND window, UINT message, WPARAM wparam, LPARAM lparam) -> LRESULT {
+        if (message == WM_DESTROY) PostQuitMessage(0);
+        return DefWindowProcW(window, message, wparam, lparam);
+    };
+    RegisterClassW(&wc);
+    HWND window = CreateWindowW(wc.lpszClassName, L"Already-disabled caller owner", WS_OVERLAPPEDWINDOW,
+        80, 80, 220, 140, nullptr, nullptr, wc.hInstance, nullptr);
+    ShowWindow(window, SW_SHOWNOACTIVATE);
+    // Simulate MFC CFileDialog::DoModal disabling its owner before calling Show(owner).
+    EnableWindow(window, FALSE);
+    pulse::PickerOwnerGuard caller_guard(window);
+    shared[2] = caller_guard.Error();
+    shared[3] = caller_guard.PreHideEvent() ? 1 : 0;
+    *shared = reinterpret_cast<UINT_PTR>(window);
+    const ULONGLONG deadline = GetTickCount64() + 10000;
+    while (GetTickCount64() < deadline) {
+        if (shared[4] == 1) break;
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT);
+        MSG msg{};
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) break;
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    DestroyWindow(window);
+    UnmapViewOfFile(const_cast<UINT_PTR*>(shared)); CloseHandle(mapping);
+    return 0;
+}
+
+void PreHideAlreadyDisabled() {
+    const auto desktop_name = L"PulseOwnerGuardDisabled_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64());
+    HDESK previous_desktop = GetThreadDesktop(GetCurrentThreadId());
+    HDESK desktop = CreateDesktopW(desktop_name.c_str(), nullptr, nullptr, 0, GENERIC_ALL, nullptr);
+    const bool on_private = desktop && SetThreadDesktop(desktop);
+    Check(on_private, "already-disabled pre-hide runs on isolated private desktop");
+    if (!on_private) { if (desktop) CloseDesktop(desktop); return; }
+
+    SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
+    HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE, 0, sizeof(UINT_PTR) * 8, nullptr);
+    auto* shared = mapping ? static_cast<volatile UINT_PTR*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(UINT_PTR) * 8)) : nullptr;
+    if (!shared) {
+        Check(false, "already-disabled pre-hide fixture mapping");
+        if (mapping) CloseHandle(mapping);
+        SetThreadDesktop(previous_desktop); CloseDesktop(desktop);
+        return;
+    }
+    for (size_t i = 0; i < 8; ++i) shared[i] = 0;
+    wchar_t self[32768]{}; GetModuleFileNameW(nullptr, self, 32768);
+    std::wstring command = L"\"" + std::wstring(self) + L"\" --pre-hide-disabled-child " + std::to_wstring(reinterpret_cast<UINT_PTR>(mapping));
+    std::wstring desktop_arg = desktop_name;
+    STARTUPINFOW startup{sizeof(startup)};
+    startup.lpDesktop = desktop_arg.data();
+    PROCESS_INFORMATION child{};
+    const BOOL started = CreateProcessW(self, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &child);
+    Check(started != FALSE, "start already-disabled caller owner (MFC CFileDialog shape)");
+    if (started) {
+        const auto deadline = GetTickCount64() + 5000;
+        while (!*shared && GetTickCount64() < deadline && WaitForSingleObject(child.hProcess, 0) == WAIT_TIMEOUT) Sleep(10);
+        const HWND owner_hwnd = reinterpret_cast<HWND>(*shared);
+        Check(IsWindow(owner_hwnd) && shared[2] == 0 && shared[3] == 0 && !IsWindowEnabled(owner_hwnd),
+            "already-disabled caller owner has error=0 and null PreHideEvent");
+        if (IsWindow(owner_hwnd)) {
+            LARGE_INTEGER freq{}; QueryPerformanceFrequency(&freq);
+            WNDCLASSW popup_wc{}; popup_wc.lpfnWndProc = DefWindowProcW; popup_wc.hInstance = GetModuleHandleW(nullptr);
+            popup_wc.lpszClassName = L"Pulse.PreHideDisabled.Popup";
+            RegisterClassW(&popup_wc);
+            double max_ms = 0.0;
+            bool all_ok = true;
+            for (int run = 1; run <= 3; ++run) {
+                pulse::PickerOwnerGuard remote_guard(owner_hwnd, pulse::PickerOwnerGuard::CallerManagedRemoteOwner{child.dwProcessId});
+                if (remote_guard.Error() || !remote_guard.Alive()) { all_ok = false; break; }
+                HWND dialog = CreateWindowW(popup_wc.lpszClassName, L"Disabled owner popup", WS_POPUP | WS_CAPTION,
+                    120, 120, 240, 120, owner_hwnd, nullptr, popup_wc.hInstance, nullptr);
+                ShowWindow(dialog, SW_SHOWNOACTIVATE);
+                LARGE_INTEGER t0{}, t1{};
+                QueryPerformanceCounter(&t0);
+                pulse::picker_owner_detail::RestoreBeforeDialogHideForTest(remote_guard, dialog);
+                QueryPerformanceCounter(&t1);
+                const double elapsed_ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / freq.QuadPart;
+                if (elapsed_ms > max_ms) max_ms = elapsed_ms;
+                const bool alive = remote_guard.Alive();
+                const bool still_disabled = !IsWindowEnabled(owner_hwnd);
+                const bool restored = remote_guard.Diagnostics().restore_owned_disable;
+                std::printf("PRE_HIDE_ALREADY_DISABLED run=%d elapsed_ms=%.2f restored=%d alive=%d enabled=%d\n",
+                    run, elapsed_ms, restored ? 1 : 0, alive ? 1 : 0, still_disabled ? 0 : 1);
+                std::fflush(stdout);
+                all_ok &= alive && still_disabled && !restored;
+                DestroyWindow(dialog);
+            }
+            Check(all_ok, "remote guard preserves already-disabled caller owner state and stays Alive()");
+            Check(max_ms < 100.0, "remote RestoreBeforeDialogHide does not stall 1000ms on already-disabled caller owner");
+        }
+        shared[4] = 1;
+        if (WaitForSingleObject(child.hProcess, 3000) == WAIT_TIMEOUT) { TerminateProcess(child.hProcess, 99); WaitForSingleObject(child.hProcess, 1000); }
+        CloseHandle(child.hThread); CloseHandle(child.hProcess);
+    }
+    UnmapViewOfFile(const_cast<UINT_PTR*>(shared)); CloseHandle(mapping);
+    SetThreadDesktop(previous_desktop);
+    CloseDesktop(desktop);
+}
+
 int wmain(int argc, wchar_t** argv) {
     if(argc==2 && wcscmp(argv[1],L"--focus-cross-thread")==0){CrossThreadFocus();printf("Checks: %d, failures: %d\n",checks,failures);return failures?1:0;}
+    if (argc == 2 && wcscmp(argv[1], L"--pre-hide-already-disabled") == 0) {
+        PreHideAlreadyDisabled();
+        std::printf("Checks: %d, failures: %d\n", checks, failures);
+        return failures ? 1 : 0;
+    }
+    if (argc == 3 && wcscmp(argv[1], L"--pre-hide-disabled-child") == 0) return PreHideAlreadyDisabledChild(argv[2]);
     if (argc == 2 && wcscmp(argv[1], L"--pre-hide-slow") == 0) {
         PreHideSlowRestore(350, "start 350ms slow WM_ENABLE caller (Photoshop shape)");
         PreHideSlowRestore(1200, "start 1200ms over-timeout WM_ENABLE caller");
@@ -601,6 +714,7 @@ int wmain(int argc, wchar_t** argv) {
     });
     ForeignDisabled(); ForeignDisabled(true);
     { Owner reverse(false); ForeignDisabled(true, reverse.window); }
+    PreHideAlreadyDisabled();
     PreHideSlowRestore(350, "start 350ms slow WM_ENABLE caller (Photoshop shape)");
     PreHideSlowRestore(1200, "start 1200ms over-timeout WM_ENABLE caller");
     Responsive(); AlreadyDisabled(); Timeout(false); Timeout(true); RestoreTimeout(); Destroyed(); AttachedQueues();

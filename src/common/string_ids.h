@@ -6413,5 +6413,8 @@
 #define IDS_OP_WAIT_TURN                                                                 7794
 #define IDS_OP_MORE_TASKS_PREFIX                                                         7795
 #define IDS_OP_MORE_TASKS_SUFFIX                                                         7796
+#define IDS_OP_WAIT_NETWORK_TURN                                                         7797
+#define IDS_OP_STRIP_SHOW_LESS                                                           7798
+#define IDS_OP_QUEUED_HELD                                                               7799
 
 #endif  // PULSE_STRING_IDS_H

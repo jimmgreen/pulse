@@ -42,6 +42,8 @@ bool NormalizeVolumes(std::vector<Root>& left, std::vector<Root>& right, Resolve
     if (std::all_of(left.begin(), left.end(), same) && std::all_of(right.begin(), right.end(), same)) return true;
     std::map<wchar_t, std::wstring> volumes;
     const auto canonical = [&](Root& root) {
+        // A resolved link (interactive_links.h) is in volume form already.
+        if (root.parent.size() > 11 && _wcsnicmp(root.parent.c_str(), L"\\\\?\\Volume{", 11) == 0) return true;
         const wchar_t key = drive(root);
         if (!key) return false;
         auto [it, added] = volumes.try_emplace(key);

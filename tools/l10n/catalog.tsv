@@ -6420,3 +6420,6 @@ OpWaitLanesFull	IDS_OP_WAIT_LANES_FULL	7793	同时进行的操作已满，有一
 OpWaitTurn	IDS_OP_WAIT_TURN	7794	前面的操作完成后自动开始	Starts by itself after the operations ahead of it	
 OpMoreTasksPrefix	IDS_OP_MORE_TASKS_PREFIX	7795	另有 	+	
 OpMoreTasksSuffix	IDS_OP_MORE_TASKS_SUFFIX	7796	 项操作	 more	
+OpWaitNetworkTurn	IDS_OP_WAIT_NETWORK_TURN	7797	网络位置上的操作逐个进行，前一项完成后自动开始	Network operations take turns; starts after the one before	
+OpStripShowLess	IDS_OP_STRIP_SHOW_LESS	7798	收起	Show less	
+OpQueuedHeld	IDS_OP_QUEUED_HELD	7799	点继续后才会开始	Starts once you resume it	

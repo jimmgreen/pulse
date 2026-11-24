@@ -13,6 +13,8 @@
 #include <atomic>
 #include <wincodec.h>
 #include <wrl/client.h>
+#include <algorithm>
+#include <fstream>
 #include <set>
 #include <mutex>
 #include "picker_window_capture_test.h"
@@ -1736,8 +1738,175 @@ void CheckControlItemLimits(const PulsePickerUiV2Api& api, PulsePickerUiV2Sessio
     control.selected_item_id = 9999;
     Check(api.ValidateConfig(session, &config) == E_INVALIDARG, "missing selected ID on full list rejected");
 }
+
+int RunCloseBench(const wchar_t* dll) {
+    if (!std::filesystem::path(dll).is_absolute()) return 2;
+    LARGE_INTEGER freq{};
+    QueryPerformanceFrequency(&freq);
+    auto now_qpc = []() -> int64_t { LARGE_INTEGER v{}; QueryPerformanceCounter(&v); return v.QuadPart; };
+    auto to_ms = [&](int64_t a, int64_t b) -> double { return b >= a ? (b - a) * 1000.0 / freq.QuadPart : -1.0; };
+    auto median = [](std::vector<double> values) -> double {
+        if (values.empty()) return -1.0;
+        std::sort(values.begin(), values.end());
+        return values[values.size() / 2];
+    };
+
+    const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
+        (L"picker-close-bench-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
+    const auto data_dir = root / L"data";
+    const auto folder = root / L"files";
+    std::filesystem::create_directories(data_dir);
+    std::filesystem::create_directories(folder);
+    struct DirCleanup {
+        std::filesystem::path path;
+        ~DirCleanup() { std::error_code ec; std::filesystem::remove_all(path, ec); }
+    } cleanup{root};
+    for (int i = 0; i < 30; ++i) {
+        std::ofstream(folder / (L"sample-" + std::to_wstring(i) + L".txt")) << "close bench fixture " << i;
+    }
+    SetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", data_dir.c_str());
+
+    const auto desktop_name = L"PulseCloseBench-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+    HDESK previous_desktop = GetThreadDesktop(GetCurrentThreadId());
+    HDESK desktop = CreateDesktopW(desktop_name.c_str(), nullptr, nullptr, 0, GENERIC_ALL, nullptr);
+    const bool switched = desktop && SetThreadDesktop(desktop);
+    Check(switched, "close-bench isolated private desktop without SwitchDesktop");
+    if (!switched) {
+        if (desktop) CloseDesktop(desktop);
+        return 2;
+    }
+
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    Check(SUCCEEDED(com), "close-bench caller STA");
+    HMODULE module = nullptr;
+    bool unload_safe = true;
+    if (SUCCEEDED(com)) {
+        module = LoadLibraryExW(dll, nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+        Check(module != nullptr, "close-bench load explicit UI DLL");
+        using GetApi = HRESULT (WINAPI*)(uint32_t, uint32_t, PulsePickerUiV2Api*);
+        const auto get = module ? reinterpret_cast<GetApi>(GetProcAddress(module, "PulsePickerUiGetApiV2")) : nullptr;
+        PulsePickerUiV2Api api{};
+        const HRESULT api_hr = get ? get(PULSE_PICKER_UI_V2_VERSION, sizeof(api), &api) : E_NOINTERFACE;
+        Check(api_hr == S_OK && api.Initialize && api.ValidateConfig && api.Show && api.Shutdown, "close-bench v2 API ready");
+        if (api_hr == S_OK && api.Initialize && api.ValidateConfig && api.Show && api.Shutdown) {
+            PulsePickerUiV2Initialize init{}; init.size = sizeof(init); init.version = 2;
+            PulsePickerUiV2Session session = 0;
+            const HRESULT init_hr = api.Initialize(&init, &session);
+            Check(init_hr == S_OK && session, "close-bench initialize session");
+            if (init_hr == S_OK && session) {
+                unload_safe = false;
+                HWND owner = CreateWindowW(L"STATIC", L"Close bench owner", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    80, 80, 320, 200, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+                Check(owner != nullptr, "close-bench owner window");
+                const std::wstring folder_str = folder.wstring();
+                for (const bool with_owner : {true, false}) {
+                    std::vector<double> hide_runs, destroy_runs, teardown_runs, total_runs;
+                    constexpr int kTotalRuns = 6; // 1 warmup + 5 measured
+                    for (int run = 0; run < kTotalRuns; ++run) {
+                        std::atomic<bool> stop{false};
+                        std::atomic<int64_t> t_post{0}, t_hidden{0}, t_destroyed{0};
+                        std::atomic<bool> found_visible{false};
+                        std::thread watcher([&] {
+                            if (!SetThreadDesktop(desktop)) return;
+                            HWND picker = nullptr;
+                            const ULONGLONG find_deadline = GetTickCount64() + 5000;
+                            while (!stop.load(std::memory_order_acquire) && GetTickCount64() < find_deadline) {
+                                struct Search { DWORD pid; HWND found; } search{GetCurrentProcessId(), nullptr};
+                                EnumDesktopWindows(desktop, [](HWND hwnd, LPARAM lp) -> BOOL {
+                                    auto& s = *reinterpret_cast<Search*>(lp);
+                                    DWORD pid = 0;
+                                    GetWindowThreadProcessId(hwnd, &pid);
+                                    if (pid != s.pid) return TRUE;
+                                    wchar_t cls[64]{};
+                                    if (GetClassNameW(hwnd, cls, 64) && wcscmp(cls, L"PulseFolderPickerWindow") == 0 && IsWindowVisible(hwnd)) {
+                                        s.found = hwnd;
+                                        return FALSE;
+                                    }
+                                    return TRUE;
+                                }, reinterpret_cast<LPARAM>(&search));
+                                if (search.found) { picker = search.found; break; }
+                                Sleep(1);
+                            }
+                            if (!picker) return;
+                            found_visible.store(true, std::memory_order_release);
+                            // Let initial listing and first-frame setup settle before triggering Close.
+                            Sleep(60);
+                            if (stop.load(std::memory_order_acquire) || !IsWindow(picker)) return;
+                            t_post.store(now_qpc(), std::memory_order_release);
+                            PostMessageW(picker, WM_CLOSE, 0, 0);
+                            const ULONGLONG close_deadline = GetTickCount64() + 5000;
+                            while (!t_hidden.load(std::memory_order_relaxed) && GetTickCount64() < close_deadline) {
+                                if (!IsWindow(picker) || !IsWindowVisible(picker)) {
+                                    t_hidden.store(now_qpc(), std::memory_order_release);
+                                    break;
+                                }
+                                SwitchToThread();
+                            }
+                            while (!t_destroyed.load(std::memory_order_relaxed) && GetTickCount64() < close_deadline) {
+                                if (!IsWindow(picker)) {
+                                    t_destroyed.store(now_qpc(), std::memory_order_release);
+                                    break;
+                                }
+                                SwitchToThread();
+                            }
+                        });
+                        PulsePickerUiV2Config config{}; config.size = sizeof(config); config.version = 2;
+                        config.owner = with_owner ? owner : nullptr;
+                        config.access_policy = PULSE_PICKER_UI_V2_ACCESS_LOCAL_OPEN_V1;
+                        config.initial_folder = Text(folder_str);
+                        PulsePickerUiV2Callbacks callbacks{}; callbacks.size = sizeof(callbacks);
+                        callbacks.callback = [](void*, const PulsePickerUiV2Event*) -> HRESULT { return S_OK; };
+                        std::vector<wchar_t> path(PULSE_PICKER_UI_V2_MAX_UNITS + 1);
+                        PulsePickerUiV2Result result{}; result.size = sizeof(result);
+                        result.path = {path.data(), static_cast<uint32_t>(path.size()), 0};
+                        const HRESULT valid_hr = api.ValidateConfig(session, &config);
+                        const HRESULT show_hr = SUCCEEDED(valid_hr) ? api.Show(session, &config, &callbacks, &result) : valid_hr;
+                        const int64_t t_return = now_qpc();
+                        stop.store(true, std::memory_order_release);
+                        watcher.join();
+                        const int64_t p = t_post.load(std::memory_order_acquire);
+                        const int64_t h = t_hidden.load(std::memory_order_acquire);
+                        const int64_t d = t_destroyed.load(std::memory_order_acquire);
+                        const double hide_ms = to_ms(p, h);
+                        const double destroy_ms = to_ms(p, d);
+                        const double teardown_ms = to_ms(d, t_return);
+                        const double total_ms = to_ms(p, t_return);
+                        std::printf("CLOSE_BENCH owner=%d run=%d%s hide_ms=%.2f destroy_ms=%.2f teardown_ms=%.2f total_ms=%.2f hr=%08lX status=%u\n",
+                            with_owner ? 1 : 0, run, run == 0 ? "(warmup)" : "",
+                            hide_ms, destroy_ms, teardown_ms, total_ms,
+                            static_cast<unsigned long>(show_hr), result.status);
+                        std::fflush(stdout);
+                        Check(found_visible.load() && show_hr == HRESULT_FROM_WIN32(ERROR_CANCELLED) &&
+                            result.status == PULSE_PICKER_UI_V2_CANCELLED && (!with_owner || IsWindowEnabled(owner)),
+                            "close-bench run closed cleanly and restored owner");
+                        if (run > 0 && hide_ms >= 0.0 && destroy_ms >= 0.0 && teardown_ms >= 0.0 && total_ms >= 0.0) {
+                            hide_runs.push_back(hide_ms);
+                            destroy_runs.push_back(destroy_ms);
+                            teardown_runs.push_back(teardown_ms);
+                            total_runs.push_back(total_ms);
+                        }
+                    }
+                    std::printf("CLOSE_BENCH_SUMMARY owner=%d n=%zu hide_median_ms=%.2f destroy_median_ms=%.2f teardown_median_ms=%.2f total_median_ms=%.2f\n",
+                        with_owner ? 1 : 0, total_runs.size(),
+                        median(hide_runs), median(destroy_runs), median(teardown_runs), median(total_runs));
+                    std::fflush(stdout);
+                }
+                if (owner) DestroyWindow(owner);
+                unload_safe = api.Shutdown(session) == S_OK;
+                Check(unload_safe, "close-bench shutdown session");
+            }
+        }
+        if (module && unload_safe) FreeLibrary(module);
+        CoUninitialize();
+    }
+    SetThreadDesktop(previous_desktop);
+    CloseDesktop(desktop);
+    std::printf("Checks=%u failures=%u\n", checks, failures);
+    return failures ? 1 : 0;
+}
 }
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 3 && std::wstring_view(argv[2]) == L"close-bench") return RunCloseBench(argv[1]);
     if (argc == 3 && std::wstring_view(argv[2]) == L"pre-ready-submit") return pending_submit_test::Run(argv[1]);
     if (argc == 3 && std::wstring_view(argv[2]) == L"navigation-root") return navigation_root_test::Run(argv[1]);
     if (argc == 3 && std::wstring_view(argv[2]) == L"navigation-root-old-peer") return navigation_root_test::Run(argv[1], true);

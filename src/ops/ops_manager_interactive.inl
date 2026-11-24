@@ -102,6 +102,8 @@ bool InteractiveRequestsConflict(const InteractiveFootprint& left, wchar_t left_
 // Reject namespace aliases and reparse ancestors rather than guessing identities.
 struct InteractivePathProof {
     std::set<std::wstring> volumes, plain_directories;
+    // Links met on the way (as written -> where they lead, \\?\Volume{...}\...).
+    std::vector<std::pair<std::wstring, std::wstring>> aliases;
 };
 bool InteractivePlainPath(const std::wstring& input, bool may_be_missing, InteractivePathProof& proof) {
     const auto value = pulse::path::StripExtendedPathPrefix(input);
@@ -131,7 +133,26 @@ bool InteractivePlainPath(const std::wstring& input, bool may_be_missing, Intera
         if (attrs == INVALID_FILE_ATTRIBUTES) {
             const auto error = GetLastError();
             if (!first || !may_be_missing || (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)) return false;
-        } else if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) return false;
+        } else if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) {
+            const auto api = LongPathForApi(name);
+            const auto kind = ClassifyInteractiveReparse(api);
+            if (kind == InteractiveReparse::Unsafe) return false;
+            if (kind == InteractiveReparse::Link) {
+                // Where it leads is fully resolved, links above it included:
+                // the footprint gets that place as well as these names.
+                const bool known = std::any_of(proof.aliases.begin(), proof.aliases.end(),
+                    [&](const auto& alias) { return interactive_names::Equal(alias.first, name); });
+                if (!known) {
+                    auto target = ResolveInteractiveLink(api);
+                    if (target.empty() || proof.aliases.size() >= 64) return false;
+                    proof.aliases.emplace_back(name, std::move(target));
+                }
+                break;
+            }
+            // In place (cloud placeholder, dedup, WOF): plain.
+            if (attrs & FILE_ATTRIBUTE_DIRECTORY) proof.plain_directories.insert(name);
+            else if (!first) return false;
+        }
         else if (attrs & FILE_ATTRIBUTE_DIRECTORY) proof.plain_directories.insert(name);
         else if (!first) return false;
         if (current == current.root_path()) break;
@@ -175,7 +196,128 @@ bool InteractivePlainRequest(const OpRequest& req) {
     return InteractivePlainRequest(req, proof);
 }
 
-bool InteractiveTargetTreeKnown(const OpRequest& req, InteractiveTreeWalkBudget& budget) {
+// Each footprint entry reached through a link also stands where the link leads.
+void AddInteractiveAliasRoots(InteractiveFootprint& roots,
+                              const std::vector<std::pair<std::wstring, std::wstring>>& aliases) {
+    if (aliases.empty()) return;
+    const size_t count = roots.size();
+    for (size_t i = 0; i < count; ++i) {
+        const std::wstring full = roots[i].parent + roots[i].leaf;
+        for (const auto& [link, target] : aliases) {
+            if (!interactive_names::Starts(full, link) ||
+                (full.size() > link.size() && full[link.size()] != L'\\')) continue;
+            auto mirrored = interactive_names::Make(target + full.substr(link.size()), roots[i].family);
+            mirrored.read = roots[i].read;
+            roots.push_back(std::move(mirrored));
+        }
+    }
+}
+
+// Places a target-tree walk found links leading to: written into, whole.
+void AddInteractiveLinkRoots(InteractiveFootprint& roots, const std::vector<std::wstring>& links) {
+    for (const auto& link : links) roots.push_back(interactive_names::Make(link));
+}
+
+// Everything a request may touch: exact places by name, plus whole volumes and
+// the network where names prove nothing (interactive_scope.h).
+struct InteractiveScope {
+    InteractiveFootprint roots;
+    std::set<std::wstring> volumes;   // \\?\volume{...}\, lowercase
+    bool network = false;
+    bool everything = false;
+    bool walk_target = true;          // the target tree is local: walk it for links
+};
+enum class InteractiveClash { None, Names, Volume, Network, Unknown };
+
+// A request whose paths are all plain and local (InteractivePlainRequest).
+InteractiveScope PlainInteractiveScope(const OpRequest& req, const InteractivePathProof& proof) {
+    InteractiveScope scope;
+    scope.roots = InteractiveRoots(req);
+    AddInteractiveAliasRoots(scope.roots, proof.aliases);
+    if (scope.roots.empty()) scope.everything = true;
+    return scope;
+}
+
+// Any other request: names where they can be proven, widened elsewhere.
+InteractiveScope WideInteractiveScope(const OpRequest& req, InteractiveDriveCache& drives) {
+    InteractiveScope scope;
+    auto roots = InteractiveRoots(req);
+    if (roots.empty()) { scope.everything = true; return scope; }
+    InteractivePathProof proof;
+    for (auto& root : roots) {
+        const std::wstring full = root.parent + root.leaf;
+        if (full.size() >= 2 && full[0] == L'\\' && full[1] == L'\\') {
+            const auto server = InteractiveUncServer(full);
+            if (InteractiveIsLocalServer(server)) { scope.everything = true; return scope; }
+            scope.network = true;
+            continue;
+        }
+        if (full.size() < 3 || full[1] != L':' || full[2] != L'\\') { scope.everything = true; return scope; }
+        const UINT type = drives.Type(full[0]);
+        if (type == DRIVE_REMOTE) {
+            const auto& server = drives.MappedServer(full[0]);
+            if (server.empty() || InteractiveIsLocalServer(server)) { scope.everything = true; return scope; }
+            scope.network = true;
+            continue;
+        }
+        if ((type == DRIVE_FIXED || type == DRIVE_REMOVABLE) && InteractivePlainPath(full, true, proof)) {
+            scope.roots.push_back(root);
+            continue;
+        }
+        const auto& volume = drives.Volume(full[0]);
+        if (volume.empty()) { scope.everything = true; return scope; }
+        scope.volumes.insert(volume);
+    }
+    AddInteractiveAliasRoots(scope.roots, proof.aliases);
+    if (!req.dest_dir.empty()) {
+        const auto& dest = req.dest_dir;
+        scope.walk_target = dest.size() >= 3 && dest[1] == L':' && dest[2] == L'\\' &&
+            drives.Type(dest[0]) != DRIVE_REMOTE;
+    }
+    return scope;
+}
+
+InteractiveClash InteractiveScopesClash(const InteractiveScope& a, const InteractiveScope& b, InteractiveDriveCache& drives) {
+    if (a.everything || b.everything) return InteractiveClash::Unknown;
+    if (a.network && b.network) return InteractiveClash::Network;
+    const auto touches = [&](const InteractiveScope& wide, const InteractiveScope& other) {
+        if (wide.volumes.empty()) return false;
+        for (const auto& volume : other.volumes) if (wide.volumes.contains(volume)) return true;
+        for (const auto& root : other.roots) {
+            const auto volume = drives.VolumeOfParent(root.parent);
+            if (volume.empty() || wide.volumes.contains(volume)) return true;
+        }
+        return false;
+    };
+    if (touches(a, b) || touches(b, a)) return InteractiveClash::Volume;
+    if (!a.roots.empty() && !b.roots.empty() &&
+        InteractiveRequestsConflict(a.roots, InteractiveDrive(a.roots), b.roots, InteractiveDrive(b.roots)))
+        return InteractiveClash::Names;
+    return InteractiveClash::None;
+}
+
+// A queued undo never runs in a lane, but what comes after it may: it touches
+// the places its reversed request names, every one of them changed (undoing a
+// copy deletes the copies). Shapes not known by name stand for everything.
+InteractiveScope UndoInteractiveScope(const OpRequest& undo, InteractiveDriveCache& drives) {
+    OpRequest named = undo;
+    named.is_undo = false;
+    named.undo_group = 0;
+    if (!InteractiveKnownShape(named)) return InteractiveScope{.everything = true};
+    auto scope = WideInteractiveScope(named, drives);
+    for (auto& root : scope.roots) root.read = false;
+    return scope;
+}
+
+// A copy, move or permanent delete with network paths: may run in a lane
+// beside local work (never beside another network operation).
+bool InteractiveWideEligible(const OpRequest& req) {
+    return InteractiveRequestShape(req) && InteractiveKnownShape(req) && req.sources.size() <= 20000 &&
+        (req.type == OpType::Copy || req.type == OpType::Move || req.type == OpType::RealDelete);
+}
+
+bool InteractiveTargetTreeKnown(const OpRequest& req, InteractiveTreeWalkBudget& budget,
+                                std::vector<std::wstring>* links = nullptr) {
     if (req.type != OpType::Copy && req.type != OpType::Move) return true;
     std::vector<std::wstring> pending;
     bool batched = false;
@@ -197,7 +339,7 @@ bool InteractiveTargetTreeKnown(const OpRequest& req, InteractiveTreeWalkBudget&
     if (!batched) for (const auto& source : req.sources)
         pending.push_back(JoinPath(req.dest_dir, req.type == OpType::Move && req.sources.size() == 1 && !req.new_name.empty()
             ? req.new_name : FileName(source)));
-    return WalkPlainInteractiveTargets(pending, budget, LongPathForApi, JoinPath);
+    return WalkPlainInteractiveTargets(pending, budget, LongPathForApi, JoinPath, links);
 }
 
 // Whether a request may run in a lane beside other operations. Any size,
@@ -205,9 +347,8 @@ bool InteractiveTargetTreeKnown(const OpRequest& req, InteractiveTreeWalkBudget&
 // plain local path (InteractivePlainRequest) and the items are not links. A
 // taken target is fine too: the lane asks about the conflict itself, and the
 // scheduler walks the target tree for links before admitting the request.
-bool InteractiveEligibleFile(const OpRequest& req) {
+bool InteractiveEligibleFile(const OpRequest& req, InteractivePathProof& proof) {
     constexpr size_t kMaxLaneSources = 20000;  // beyond this, the checks below cost more than queueing
-    InteractivePathProof proof;
     if (!InteractiveRequestShape(req) || req.sources.size() > kMaxLaneSources || !InteractivePlainRequest(req, proof))
         return false;
     const bool create = req.type == OpType::CreateFolder || req.type == OpType::CreateTextFile;
@@ -220,8 +361,11 @@ bool InteractiveEligibleFile(const OpRequest& req) {
             GetFileAttributesW(LongPathForApi(req.sources.front()).c_str()) == INVALID_FILE_ATTRIBUTES;
     }
     for (const auto& source : req.sources) {
+        // The item itself may be a cloud placeholder; a link stays out (copying a
+        // link is not copying what it leads to).
         if (!GetFileAttributesExW(LongPathForApi(source).c_str(), GetFileExInfoStandard, &data) ||
-            (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+            ((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+             ClassifyInteractiveReparse(LongPathForApi(source)) != InteractiveReparse::Plain)) return false;
         if (req.type == OpType::Copy || req.type == OpType::Move) {
             const auto target = JoinPath(req.dest_dir, req.new_name.empty() ? FileName(source) : req.new_name);
             if (!InteractivePlainPath(target, true, proof)) return false;
@@ -294,6 +438,7 @@ std::vector<OpStatus> OpsManager::ActiveStatuses(bool include_queued) const {
             queued.destination_label = FileName(item.req.dest_dir);
             queued.wait_reason = item.wait_reason != OpWaitReason::None ? item.wait_reason
                 : lanes_full ? OpWaitReason::LanesFull : OpWaitReason::None;
+            queued.pause_requested = item.transfer_paused;
             result.push_back(std::move(queued));
         }
     }
@@ -301,12 +446,17 @@ std::vector<OpStatus> OpsManager::ActiveStatuses(bool include_queued) const {
     return result;
 }
 
-bool OpsManager::InteractiveBlocksLocked(const QueueItem&) const {
-    // The main worker starts the next queued item only when no lane runs: a
-    // lane's paths were checked against what ran at its admission, not against
-    // whatever the main worker would pick up next. The scheduler places queued
-    // work beside running lanes instead.
-    return AnyLaneBusyLocked();
+bool OpsManager::InteractiveBlocksLocked(const QueueItem& item) const {
+    // The main worker starts the next queued item when no lane runs, or when
+    // the scheduler cleared that item against the lanes running now (or fewer
+    // of them): it then cannot touch what they touch. Otherwise a queued item
+    // waiting for one lane would also wait for every lane started after it.
+    if (!AnyLaneBusyLocked()) return false;
+    if (item.seq == 0 || item.seq != primary_cleared_seq_ || item.cancel_requested) return true;
+    for (const auto& lane : lanes_)
+        if (lane.item && std::find(primary_cleared_lanes_.begin(), primary_cleared_lanes_.end(), lane.item->seq) ==
+            primary_cleared_lanes_.end()) return true;
+    return false;
 }
 
 // The scheduler: merges lanes that finished, and starts queued work in a free
@@ -365,6 +515,7 @@ void OpsManager::InteractiveThread() {
         std::vector<QueueItem> running, predecessors;
         size_t free_lane = lanes_.size();
         bool merge = false;
+        bool for_primary = false;  // clearing the queue head for the idle main worker
         bool has_primary = false;  // running.front() is the main worker's operation
         {
             std::unique_lock lock(mutex_);
@@ -378,27 +529,42 @@ void OpsManager::InteractiveThread() {
                 if (now != last_running) {
                     last_running = now;
                     interactive_serial_only_.clear();
+                    // A clearance holds for the lanes it saw: with others, look again.
+                    primary_checked_seq_ = 0;
+                    primary_cleared_seq_ = 0;
                 }
                 if (now.empty() || history_replay_ || recovery_cleanup_active_ || !recovery_cleanup_roots_.empty())
                     return false;
                 if (active_item_ && (active_item_->controlled || active_item_->cancel_requested ||
                     active_item_->transfer_cancelled)) return false;
+                // The main worker is idle only because lanes run: see whether the
+                // head of the queue may start on it beside them.
+                if (!active_item_ && !queue_.empty()) {
+                    const auto& head = queue_.front();
+                    if (head.seq != primary_checked_seq_ && head.seq != primary_cleared_seq_ && !head.cancel_requested &&
+                        head.open_path.empty() && head.open_paths.empty()) { for_primary = true; return true; }
+                }
                 free_lane = lanes_.size();
                 for (size_t i = 0; i < lanes_.size(); ++i) if (!lanes_[i].item) { free_lane = i; break; }
                 if (free_lane == lanes_.size()) return false;
+                // An undo or a controlled job keeps its place in the queue; what
+                // comes after it may still start when it cannot touch what the
+                // undo will (its scope is checked as a predecessor).
                 for (const auto& item : queue_) {
-                    if (item.controlled || item.req.is_undo) return false;  // these keep their place
-                    if (!item.cancel_requested && !interactive_serial_only_.contains(item.seq) &&
-                        InteractiveRequestShape(item.req)) return true;
+                    if (!item.controlled && !item.cancel_requested && !item.transfer_paused &&
+                        !interactive_serial_only_.contains(item.seq) && InteractiveRequestShape(item.req)) return true;
                 }
                 return false;
             });
             if (!running_ || stopping_) break;
-            if (!merge) {
+            if (for_primary) {
+                candidate = queue_.front();
+                for (const auto& lane : lanes_) if (lane.item) running.push_back(*lane.item);
+            } else if (!merge) {
                 auto it = queue_.begin();
                 for (; it != queue_.end(); ++it)
-                    if (!it->cancel_requested && !interactive_serial_only_.contains(it->seq) &&
-                        InteractiveRequestShape(it->req)) break;
+                    if (!it->controlled && !it->cancel_requested && !it->transfer_paused &&
+                        !interactive_serial_only_.contains(it->seq) && InteractiveRequestShape(it->req)) break;
                 if (it == queue_.end()) continue;
                 candidate = *it;
                 predecessors.assign(queue_.begin(), it);
@@ -420,20 +586,54 @@ void OpsManager::InteractiveThread() {
 
         const auto started = GetTickCount64();
         uint32_t reject = 0;
-        const auto roots = InteractiveRoots(candidate.req);
-        const auto drive = InteractiveDrive(roots);
-        for (const auto& other : running) {
-            if (reject) break;
-            const auto other_roots = InteractiveRoots(other.req);
-            if (InteractiveRequestsConflict(roots, drive, other_roots, InteractiveDrive(other_roots))) reject = 1u;
-            else if (!InteractivePlainRequest(other.req)) reject = 4u;
+        // Footprints: the names each request touches, plus where any link on
+        // the way leads (interactive_links.h); target-tree walks add the places
+        // links inside a target lead to.
+        // Scopes: plain local requests by name; network paths, unprovable
+        // names and unknown requests widened (interactive_scope.h).
+        InteractiveDriveCache drives;
+        const auto scope_of = [&](const OpRequest& req) {
+            InteractivePathProof proof;
+            return InteractivePlainRequest(req, proof) ? PlainInteractiveScope(req, proof) : WideInteractiveScope(req, drives);
+        };
+        // Which scope met which: names or a volume -> "same place", the
+        // network -> "network turn", unknown -> just waits its turn.
+        const auto clash_reject = [](InteractiveClash clash, uint32_t place) {
+            return clash == InteractiveClash::Network ? 128u : clash == InteractiveClash::Unknown ? 4u : place;
+        };
+        InteractivePathProof candidate_proof;
+        bool eligible = false;
+        InteractiveScope scope;
+        if (for_primary) {
+            // The main worker runs any request: it needs a scope, not a lane shape.
+            scope = candidate.controlled ? InteractiveScope{.everything = true}
+                : candidate.req.is_undo ? UndoInteractiveScope(candidate.req, drives)
+                : scope_of(candidate.req);
+            eligible = !scope.everything;
+            if (!eligible) reject = 2u;
+        } else {
+            const bool plain_candidate = InteractiveEligibleFile(candidate.req, candidate_proof);
+            eligible = plain_candidate || InteractiveWideEligible(candidate.req);
+            scope = plain_candidate ? PlainInteractiveScope(candidate.req, candidate_proof)
+                : WideInteractiveScope(candidate.req, drives);
+            if (!plain_candidate && scope.everything) reject = 2u;
         }
-        if (!reject && !InteractiveEligibleFile(candidate.req)) reject = 2u;
-        for (const auto& prior : predecessors) {
-            if (reject) break;
-            const auto prior_roots = InteractiveRoots(prior.req);
-            if (InteractiveRequestsConflict(roots, drive, prior_roots, InteractiveDrive(prior_roots)) ||
-                !InteractivePlainRequest(prior.req)) reject = 8u;
+        std::vector<InteractiveScope> running_scopes(running.size()), prior_scopes(predecessors.size());
+        for (size_t i = 0; i < running.size() && !reject; ++i) {
+            running_scopes[i] = running[i].req.is_undo ? UndoInteractiveScope(running[i].req, drives)
+                : scope_of(running[i].req);
+            if (const auto clash = InteractiveScopesClash(scope, running_scopes[i], drives); clash != InteractiveClash::None)
+                reject = clash_reject(clash, 1u);
+        }
+        if (!reject && !eligible) reject = 2u;
+        for (size_t i = 0; i < predecessors.size() && !reject; ++i) {
+            // Cancelled while queued: it ends without touching anything (CancelTask).
+            if (predecessors[i].cancel_requested && !predecessors[i].controlled) continue;
+            prior_scopes[i] = predecessors[i].controlled ? InteractiveScope{.everything = true}
+                : predecessors[i].req.is_undo ? UndoInteractiveScope(predecessors[i].req, drives)
+                : scope_of(predecessors[i].req);
+            if (const auto clash = InteractiveScopesClash(scope, prior_scopes[i], drives); clash != InteractiveClash::None)
+                reject = clash_reject(clash, 8u);
         }
         // Walks are bounded by a deadline the scheduler extends only while the
         // candidate keeps its place in the queue.
@@ -447,58 +647,80 @@ void OpsManager::InteractiveThread() {
             return item.seq == candidate.seq && !item.cancel_requested;
         }, GetTickCount64() + 250};
         bool reused_tree = false;
+        bool found_links = false;
         uint32_t target_proof = 0;
-        // No running operation may write through a link inside its target tree:
-        // the names compared above would then not be all the places it writes.
-        for (const auto& other : running) {
-            if (reject) break;
-            const bool primary = has_primary && &other == &running.front();
+        // Every place a running operation writes must be in its footprint: a
+        // link inside its target tree adds where it leads.
+        for (size_t i = 0; i < running.size() && !reject; ++i) {
+            const auto& other = running[i];
+            const bool primary = has_primary && i == 0;
+            std::vector<std::wstring> links;
             PrimaryTargetTreeState tree_state;
             if (primary) {
                 std::lock_guard lock(mutex_);
                 if (primary_target_tree_.task_id == other.seq && primary_target_tree_.ready) tree_state = primary_target_tree_;
             }
             if (tree_state.ready) {
-                if (tree_state.unsafe) { target_proof = 3u; reject = 16u; }
+                if (!running_scopes[i].walk_target) { target_proof = 4u; }
+                else if (tree_state.unsafe) { target_proof = 3u; reject = 16u; }
                 else if (tree_state.safe_without_walk) { target_proof = 2u; reused_tree = true; }
                 else {
                     target_proof = 1u;
                     auto pending = tree_state.preexisting_dirs;
-                    if (!WalkPlainInteractiveTargets(pending, budget, LongPathForApi, JoinPath)) reject = 16u;
+                    if (!WalkPlainInteractiveTargets(pending, budget, LongPathForApi, JoinPath, &links)) reject = 16u;
                 }
-                continue;
+            } else {
+                // A single concrete destination of the main worker is watched after an
+                // expensive walk, so the many small requests beside one big merge do
+                // not walk it again; never reused across changes or task ids, nor
+                // when the walk found links (their places must be listed each time).
+                const bool single_transfer = primary && other.req.sources.size() == 1 &&
+                    (other.req.type == OpType::Copy || other.req.type == OpType::Move);
+                if (watched_primary != other.seq) {
+                    watched_primary = primary ? other.seq : watched_primary;
+                    cached_tree = watch_next_walk = false;
+                    target_watch.Reset();
+                }
+                std::wstring path;
+                if (single_transfer && (cached_tree || watch_next_walk))
+                    path = LongPathForApi(JoinPath(other.req.dest_dir, other.req.new_name.empty()
+                        ? FileName(other.req.sources.front()) : other.req.new_name));
+                reused_tree = single_transfer && cached_tree && !path.empty() && target_watch.Unchanged(other.seq, path);
+                if (reused_tree) continue;
+                if (single_transfer) {
+                    cached_tree = false;
+                    if (!path.empty()) target_watch.Arm(other.seq, path);
+                }
+                if (running_scopes[i].walk_target && !InteractiveTargetTreeKnown(other.req, budget, &links)) reject = 16u;
+                if (single_transfer) {
+                    cached_tree = !reject && links.empty() && !path.empty() && target_watch.Unchanged(other.seq, path);
+                    watch_next_walk = budget.visited >= 64;
+                    if (!cached_tree) target_watch.Reset();
+                }
             }
-            // A single concrete destination of the main worker is watched after an
-            // expensive walk, so the many small requests beside one big merge do
-            // not walk it again; never reused across changes or task ids.
-            const bool single_transfer = primary && other.req.sources.size() == 1 &&
-                (other.req.type == OpType::Copy || other.req.type == OpType::Move);
-            if (watched_primary != other.seq) {
-                watched_primary = primary ? other.seq : watched_primary;
-                cached_tree = watch_next_walk = false;
-                target_watch.Reset();
-            }
-            std::wstring path;
-            if (single_transfer && (cached_tree || watch_next_walk))
-                path = LongPathForApi(JoinPath(other.req.dest_dir, other.req.new_name.empty()
-                    ? FileName(other.req.sources.front()) : other.req.new_name));
-            reused_tree = single_transfer && cached_tree && !path.empty() && target_watch.Unchanged(other.seq, path);
-            if (reused_tree) continue;
-            if (single_transfer) {
-                cached_tree = false;
-                if (!path.empty()) target_watch.Arm(other.seq, path);
-            }
-            if (!InteractiveTargetTreeKnown(other.req, budget)) reject = 16u;
-            if (single_transfer) {
-                cached_tree = !reject && !path.empty() && target_watch.Unchanged(other.seq, path);
-                watch_next_walk = budget.visited >= 64;
-                if (!cached_tree) target_watch.Reset();
-            }
+            if (!links.empty()) { found_links = true; AddInteractiveLinkRoots(running_scopes[i].roots, links); }
         }
         // The candidate's own target, now that a taken one is allowed (a merge).
-        if (!reject && !InteractiveTargetTreeKnown(candidate.req, budget)) reject = 64u;
-        for (const auto& prior : predecessors)
-            if (!reject && !InteractiveTargetTreeKnown(prior.req, budget)) reject = 32u;
+        if (!reject) {
+            std::vector<std::wstring> links;
+            if (scope.walk_target && !InteractiveTargetTreeKnown(candidate.req, budget, &links)) reject = 64u;
+            if (!links.empty()) { found_links = true; AddInteractiveLinkRoots(scope.roots, links); }
+        }
+        for (size_t i = 0; i < predecessors.size() && !reject; ++i) {
+            if (predecessors[i].cancel_requested && !predecessors[i].controlled) continue;
+            std::vector<std::wstring> links;
+            if (prior_scopes[i].walk_target && !InteractiveTargetTreeKnown(predecessors[i].req, budget, &links)) reject = 32u;
+            if (!links.empty()) { found_links = true; AddInteractiveLinkRoots(prior_scopes[i].roots, links); }
+        }
+        // Places found through links in the trees: compare again with them.
+        if (!reject && found_links) {
+            for (size_t i = 0; i < running.size() && !reject; ++i)
+                if (const auto clash = InteractiveScopesClash(scope, running_scopes[i], drives); clash != InteractiveClash::None)
+                    reject = clash_reject(clash, 1u);
+            for (size_t i = 0; i < predecessors.size() && !reject; ++i)
+                if (const auto clash = InteractiveScopesClash(scope, prior_scopes[i], drives); clash != InteractiveClash::None)
+                    reject = clash_reject(clash, 8u);
+        }
         if (budget.interrupted) continue;  // a superseded walk is not a negative proof
         diagnostics::runtime::Event("ops_interactive_admission", {
             {"candidate_type", static_cast<uint32_t>(candidate.req.type)},
@@ -511,6 +733,30 @@ void OpsManager::InteractiveThread() {
             {"walk_continuations", static_cast<uint32_t>(budget.continuations)},
             {"walk_ms", static_cast<uint32_t>(GetTickCount64() - started)}
         });
+        if (for_primary) {
+            std::unique_lock lock(mutex_);
+            if (!running_ || stopping_) break;
+            if (queue_.empty() || queue_.front().seq != candidate.seq || active_item_) continue;
+            // Lanes started since the check were not compared: look again.
+            bool unchanged = true;
+            for (const auto& lane : lanes_)
+                if (lane.item && std::none_of(running.begin(), running.end(),
+                        [&](const QueueItem& item) { return item.seq == lane.item->seq; })) unchanged = false;
+            if (!unchanged) continue;
+            primary_checked_seq_ = candidate.seq;
+            if (!reject) {
+                primary_cleared_seq_ = candidate.seq;
+                primary_cleared_lanes_.clear();
+                for (const auto& item : running) primary_cleared_lanes_.push_back(item.seq);
+            } else {
+                queue_.front().wait_reason = (reject & 1u) ? OpWaitReason::SamePlace
+                    : (reject & 128u) ? OpWaitReason::NetworkTurn : OpWaitReason::None;
+                BumpUiRevision();
+            }
+            lock.unlock();
+            cv_.notify_all();
+            continue;
+        }
         {
             std::unique_lock lock(mutex_);
             if (!running_ || stopping_) break;
@@ -534,7 +780,8 @@ void OpsManager::InteractiveThread() {
                 interactive_serial_only_.insert(candidate.seq);
                 // A path shared with what runs or waits ahead; anything else
                 // (links, network, an unreadable target) only waits its turn.
-                it->wait_reason = (reject & (1u | 8u)) ? OpWaitReason::SamePlace : OpWaitReason::None;
+                it->wait_reason = (reject & (1u | 8u)) ? OpWaitReason::SamePlace
+                    : (reject & 128u) ? OpWaitReason::NetworkTurn : OpWaitReason::None;
                 BumpUiRevision();
                 continue;
             }

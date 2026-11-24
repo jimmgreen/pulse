@@ -182,12 +182,35 @@ HRESULT WINAPI Show(const PulsePickerUiConfig* config, const PulsePickerUiCallba
         frame.cancel = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!frame.cancel) return HRESULT_FROM_WIN32(GetLastError());
         spec.owner_guard = &owner_guard;
-        std::jthread owner_monitor([&](std::stop_token stop) {
-            while (!stop.stop_requested()) {
-                if (!owner_guard.Alive()) { SetEvent(frame.cancel); return; }
-                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        struct OwnerMonitorScope {
+            HANDLE stop_event = nullptr;
+            std::thread worker;
+            OwnerMonitorScope(pulse::PickerOwnerGuard& guard, HANDLE cancel_event) {
+                if (!guard.Window()) return;
+                stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+                if (!stop_event) return;
+                try {
+                    worker = std::thread([&guard, cancel_event, stop = stop_event] {
+                        for (;;) {
+                            if (!guard.Alive()) { SetEvent(cancel_event); return; }
+                            if (WaitForSingleObject(stop, 25) != WAIT_TIMEOUT) return;
+                        }
+                    });
+                } catch (...) {
+                    CloseHandle(stop_event);
+                    stop_event = nullptr;
+                    throw;
+                }
             }
-        });
+            void Stop() noexcept {
+                if (stop_event) SetEvent(stop_event);
+                if (worker.joinable()) worker.join();
+                if (stop_event) { CloseHandle(stop_event); stop_event = nullptr; }
+            }
+            ~OwnerMonitorScope() noexcept { Stop(); }
+            OwnerMonitorScope(const OwnerMonitorScope&) = delete;
+            OwnerMonitorScope& operator=(const OwnerMonitorScope&) = delete;
+        } owner_monitor(owner_guard, frame.cancel);
         spec.cancel_event = frame.cancel; spec.module_instance = module;
         spec.pulse_painted_plain_child = true;
         spec.on_ready = [&](HWND window) { return Notify(frame, PULSE_PICKER_UI_READY, window); };
@@ -196,6 +219,7 @@ HRESULT WINAPI Show(const PulsePickerUiConfig* config, const PulsePickerUiCallba
         struct ActiveScope { ~ActiveScope() { active = nullptr; } } live;
         const auto jump_context = pulse::picker_inprocess::AttachJumpContext(spec, GetCurrentProcessId());
         const auto outcome = pulse::ui::ShowFilePickerDetailed(config->owner, spec, colors.dark, pulse::ui::HexColor(colors.accent_rgb));
+        owner_monitor.Stop();
         frame.window = nullptr;
         if (FAILED(frame.callback_error)) { result->win32_error = ERROR_FUNCTION_FAILED; return frame.callback_error; }
         if (!owner_guard.Alive() || outcome.status == pulse::ui::FilePickerStatus::Cancelled) {

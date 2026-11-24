@@ -462,12 +462,34 @@ int wmain(int argc, wchar_t** argv) {
         Check(cancelled_task == 23, "strip cancel cancels that task");
         click(Access::FindControl(window, kRow + 1 * 4 + 0));
         Check(selected_task == 21, "clicking a strip row shows that task");
-        Check(Access::FindControl(window, kRow + 3 * 4 + 1).x < 0 && Access::FindControl(window, kRow + 3 * 4 + 2).x >= 0,
-              "the fourth row is the first queued task, with cancel only");
+        Check(Access::FindControl(window, kRow + 3 * 4 + 0).x < 0 && Access::FindControl(window, kRow + 3 * 4 + 2).x >= 0,
+              "the fourth row is the first queued task: cancel, nothing to open");
+        // "+1 more" shows every task; "show less" folds them again.
+        const int folded = Access::Height(window);
+        const POINT more = Access::FindControl(window, 58);
+        Check(more.x >= 0, "the strip offers to show the tasks past its rows");
+        click(more);
+        Check(Access::Height(window) - folded == 44 && Access::FindControl(window, kRow + 4 * 4 + 2).x >= 0,
+              "showing all adds the fifth task's row");
+        shot(L"strip-expanded");
+        click(Access::FindControl(window, 58));
+        Check(Access::Height(window) == folded && Access::FindControl(window, kRow + 4 * 4 + 2).x < 0,
+              "show less folds the list back to four rows");
         // Queued rows: cancel only, nothing to show in the card yet.
         window.SetOtherTasks({queued_same});
         Check(Access::FindControl(window, kRow + 0).x < 0, "a queued row cannot be opened in the card");
-        Check(Access::FindControl(window, kRow + 1).x < 0, "a queued row has no pause");
+        // A queued task can be held: it does not start until resumed.
+        paused_task = 0;
+        click(Access::FindControl(window, kRow + 1));
+        Check(paused_task == 24, "a queued task can be paused from the strip");
+        auto held = queued_same;
+        held.pause_requested = true;
+        window.SetOtherTasks({held});
+        resumed_task = 0;
+        click(Access::FindControl(window, kRow + 1));
+        Check(resumed_task == 24, "a held queued task is resumed from the same button");
+        shot(L"strip-queued-paused");
+        window.SetOtherTasks({queued_same});
         cancelled_task = 0;
         click(Access::FindControl(window, kRow + 2));
         Check(cancelled_task == 24, "a queued task can be cancelled from the strip");
