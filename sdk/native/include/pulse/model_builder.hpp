@@ -457,6 +457,16 @@ public:
                         " align=" + std::string(align) + " role=" + std::string(role));
         return *this;
     }
+    // Text at an exact size in viewBox units, so it scales with the canvas (a label on an icon);
+    // weight is "normal", "semibold" or "bold". The host draws it with the UI text renderer
+    // (LumaText); hosts that predate size= draw it at the body size.
+    CanvasBuilder& ScaledText(double x, double y, double w, double h, std::string_view color, double size,
+                              std::string_view weight, std::string_view align, std::string_view content) {
+        cmds_.push_back("text " + Fmt(x) + " " + Fmt(y) + " " + Quote(content) +
+                        " w=" + Fmt(w) + " h=" + Fmt(h) + " color=" + std::string(color) +
+                        " align=" + std::string(align) + " role=body size=" + Fmt(size) + " weight=" + std::string(weight));
+        return *this;
+    }
     CanvasBuilder& Text(double x, double y, std::string_view content, std::string_view color = "text",
                         std::string_view role = "body", std::string_view align = "left") {
         cmds_.push_back("text " + Fmt(x) + " " + Fmt(y) + " " + Quote(content) +

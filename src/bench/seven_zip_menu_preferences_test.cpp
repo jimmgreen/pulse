@@ -84,6 +84,11 @@ int wmain(int argc, wchar_t** argv) {
     const auto v4 = prefs::ParseCommandPreferences("4\n1\n0\n4\n2\n1\n1\n0f\n");
     Check(v3 && v3->format == 4, "v3 legacy settings retained");
     Check(v4 && v4->commands == 15, "v4 legacy command mask retained");
+    const auto v5 = prefs::ParseCommandPreferences("5\n1\n0\n0\n3\n1\n0\n3f\n1\n0\nfff\nD:\\Out");
+    const auto v6 = prefs::ParseCommandPreferences("6\n1\n0\n0\n3\n1\n0\n3f\n1\n0\nfff\n2\nD:\\Out");
+    Check(v5 && v5->takeover && v5->icon_style == 0 && v5->folder == "D:\\Out", "v5 settings keep the document icons");
+    Check(v6 && v6->takeover && v6->icon_style == 2 && v6->folder == "D:\\Out", "v6 carries the icon style before the folder");
+    Check(!prefs::ParseCommandPreferences("6\n1\n0\n0\n3\n1\n0\n3f\n1\n0\nfff\n9\n"), "unknown icon style rejected");
     Check(!prefs::ParseCommandPreferences("5\n0\n1\n99\n"), "malformed data rejected");
 
     const auto stale = ReadOwnSettings(profile.wstring(), "pulse.7zip");

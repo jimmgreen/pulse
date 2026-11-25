@@ -1,5 +1,7 @@
-// plugin.rc - the "document" style archive icons registered as DefaultIcon by association.cpp.
-// Rendered from archive_icons_mockup.html: 16/20/24 px use the simplified page, 32-256 px the full one.
+// plugin.rc - archive icons registered as DefaultIcon by association.cpp, one block per icon style
+// (association::kIconStyleStride apart, in this order): 101-115 "document", 121-135 "zipper folder" and
+// 141-155 "colour page", all rendered from archive_icon_styles_mockup.html by
+// tools/generate_7zip_archive_icons.py. 16/20/24 px use the simplified art, 32-256 px the full one.
 101 ICON "icons/zip.ico"
 102 ICON "icons/zipx.ico"
 103 ICON "icons/7z.ico"
@@ -15,3 +17,35 @@
 113 ICON "icons/lha.ico"
 114 ICON "icons/arj.ico"
 115 ICON "icons/cpio.ico"
+
+121 ICON "icons/folder/zip.ico"
+122 ICON "icons/folder/zipx.ico"
+123 ICON "icons/folder/7z.ico"
+124 ICON "icons/folder/rar.ico"
+125 ICON "icons/folder/tar.ico"
+126 ICON "icons/folder/gz.ico"
+127 ICON "icons/folder/xz.ico"
+128 ICON "icons/folder/bz2.ico"
+129 ICON "icons/folder/lzma.ico"
+130 ICON "icons/folder/z.ico"
+131 ICON "icons/folder/cab.ico"
+132 ICON "icons/folder/lzh.ico"
+133 ICON "icons/folder/lha.ico"
+134 ICON "icons/folder/arj.ico"
+135 ICON "icons/folder/cpio.ico"
+
+141 ICON "icons/color/zip.ico"
+142 ICON "icons/color/zipx.ico"
+143 ICON "icons/color/7z.ico"
+144 ICON "icons/color/rar.ico"
+145 ICON "icons/color/tar.ico"
+146 ICON "icons/color/gz.ico"
+147 ICON "icons/color/xz.ico"
+148 ICON "icons/color/bz2.ico"
+149 ICON "icons/color/lzma.ico"
+150 ICON "icons/color/z.ico"
+151 ICON "icons/color/cab.ico"
+152 ICON "icons/color/lzh.ico"
+153 ICON "icons/color/lha.ico"
+154 ICON "icons/color/arj.ico"
+155 ICON "icons/color/cpio.ico"

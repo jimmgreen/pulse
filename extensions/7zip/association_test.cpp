@@ -77,6 +77,19 @@ int main() {
     Check(!KeyExists(zip) && !ValueExists(L"Software\\Classes\\.zip\\OpenWithProgids", L"Pulse.Archive.zip"), "ZIP is given back");
     Check(Read(L"Software\\Classes\\Pulse.Archive.7z\\shell\\open\\command").find(L"\"pulse:archive-preview:%1\"") != std::wstring::npos,
           "the preview command replaces the extract one");
+    // Icon styles: each style points DefaultIcon at its own resource block; an unknown style stays 「文档」.
+    Check(association::Apply(association::kAllGroups & ~1u, false, association::kIconFolder) &&
+          Read(L"Software\\Classes\\Pulse.Archive.7z\\DefaultIcon").find(L",-123") != std::wstring::npos &&
+          Read(L"Software\\Classes\\Pulse.Archive.cpio\\DefaultIcon").find(L",-135") != std::wstring::npos,
+          "zipper folder style registers resources 121-135");
+    Check(association::Apply(association::kAllGroups & ~1u, false, association::kIconColor) &&
+          Read(L"Software\\Classes\\Pulse.Archive.7z\\DefaultIcon").find(L",-143") != std::wstring::npos &&
+          Read(L"Software\\Classes\\Pulse.Archive.tgz\\DefaultIcon").find(L",-146") != std::wstring::npos,
+          "colour page style registers resources 141-155");
+    Check(association::Apply(association::kAllGroups & ~1u, false, 7) &&
+          Read(L"Software\\Classes\\Pulse.Archive.7z\\DefaultIcon").find(L",-103") != std::wstring::npos,
+          "an unknown style falls back to the document icons");
+    Check(Read(L"Software\\Classes\\.zip") == L"CompressedFolder" && !KeyExists(zip), "switching icons leaves excluded ZIP alone");
 
     association::Remove();
     Check(!KeyExists(L"Software\\Classes\\Pulse.Archive.7z") && !KeyExists(L"Software\\Classes\\Pulse.Archive.cpio"), "Remove deletes the types");

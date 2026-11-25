@@ -15,6 +15,7 @@ struct CommandPreferences {
     int mode = 0, location = 0, format = 0, level = 3;
     unsigned commands = kAllMenuCommands;
     bool remember = true, submenu = false, takeover = false, preview_on_open = false;
+    int icon_style = 0;  // 接管压缩包 icons: 0 「文档」, 1 「拉链文件夹」, 2 「彩色文件」 (v6)
     std::string_view groups = "fff", folder;
 };
 
@@ -40,7 +41,7 @@ inline std::optional<CommandPreferences> ParseCommandPreferences(std::string_vie
         }
         return result;
     };
-    const int version = digit('5');
+    const int version = digit('6');
     if (version < 3) return {};
     CommandPreferences prefs;
     prefs.mode = digit('2'); prefs.location = digit('1'); prefs.format = digit('5'); prefs.level = digit('5');
@@ -54,12 +55,16 @@ inline std::optional<CommandPreferences> ParseCommandPreferences(std::string_vie
         prefs.submenu = placement != 0;
         prefs.commands = static_cast<unsigned>(commands);
     }
-    if (version == 5) {
+    if (version >= 5) {
         const int takeover = digit('1'), behavior = digit('1');
         prefs.groups = field();
         if (takeover < 0 || behavior < 0 || hex(prefs.groups, 3) < 0) return {};
         prefs.takeover = takeover != 0;
         prefs.preview_on_open = behavior != 0;
+    }
+    if (version >= 6) {
+        prefs.icon_style = digit('2');
+        if (prefs.icon_style < 0) return {};
     }
     prefs.folder = input;
     return prefs;

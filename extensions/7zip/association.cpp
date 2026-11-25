@@ -14,7 +14,7 @@ namespace association {
 namespace {
 using T = text::Id;
 struct Extension { const wchar_t* name; int group; int icon; const char* label; };
-// Resource ids follow plugin.rc (icons/*.ico in the 「文档」 style).
+// Resource ids follow plugin.rc: the 「文档」 block; StyledIcon moves them to another style's block.
 constexpr Extension kExtensions[] = {
     {L".zip", 0, 101, "ZIP"}, {L".zipx", 1, 102, "ZIPX"}, {L".7z", 2, 103, "7Z"}, {L".rar", 3, 104, "RAR"},
     {L".tar", 4, 105, "TAR"}, {L".gz", 5, 106, "GZ"}, {L".tgz", 5, 106, "TGZ"}, {L".xz", 6, 107, "XZ"},
@@ -186,7 +186,7 @@ std::vector<Status> Query(unsigned groups) {
     return result;
 }
 
-bool Apply(unsigned groups, bool extract) {
+bool Apply(unsigned groups, bool extract, int icon_style) {
     groups &= kAllGroups;
     if (!groups) return Remove();
     Com com;
@@ -208,7 +208,7 @@ bool Apply(unsigned groups, bool extract) {
         const auto ext_key = takeover::ClassesKey(extension.name);
         const auto type = TypeName(extension);
         ok = SetString(key, nullptr, type) && SetString(key, L"FriendlyTypeName", type) &&
-             SetString(key + L"\\DefaultIcon", nullptr, dll + L",-" + std::to_wstring(extension.icon)) &&
+             SetString(key + L"\\DefaultIcon", nullptr, dll + L",-" + std::to_wstring(StyledIcon(extension.icon, icon_style))) &&
              SetString(key + L"\\shell", nullptr, L"open") && SetString(key + L"\\shell\\open", nullptr, verb) &&
              SetString(key + L"\\shell\\open\\command", nullptr, command) &&
              RegSetKeyValueW(HKEY_CURRENT_USER, (ext_key + L"\\OpenWithProgids").c_str(), progid.c_str(), REG_NONE, nullptr, 0) == ERROR_SUCCESS &&

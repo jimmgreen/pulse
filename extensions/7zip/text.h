@@ -40,6 +40,7 @@ enum class Id {
     SidePreviewTitle, SidePreviewDetail, VfsUnavailable,
     TakeSection, TakeTitle, TakeDesc, TakeBusy, TakeWinSettings, TakeConfirmEach, TakeAskSet, TakeAskChange, DblTitle, DblDesc, DblOpen, DblOpenDesc, TakeStatusExtract, TakeStatusOpen, TakeStatusOther, TakeStatusExcluded, TakeStatusExcludedWho, TakeStatusOff, TakeStatusOffWho, TakeStatusFree, TakeStatusUnknown, TakeOffHint, TakeSummaryAsk, TakeSummaryDone,
     Recommended, MenuDetailSmart, MenuDetailFolder, MenuDetailHere, MenuDetailFixed, MenuDetailQuick, MenuSettings, PreviewArchive, PreviewFile,
+    IconSection, IconTitle, IconDesc, IconOffHint, IconDocument, IconDocumentDesc, IconFolder, IconFolderDesc, IconColor, IconColorDesc, ListSeparator,
 };
 const char* Get(Id id);                       // UTF-8
 enum class MenuLanguage { ZhCN, ZhTW, EnUS };

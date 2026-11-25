@@ -2,6 +2,7 @@
 #include "settings.h"
 #include "command_preferences.h"
 #include "association.h"
+#include "icon_style_art.h"
 #include "takeover_record.h"
 #include "engine.h"
 #include "text.h"
@@ -95,11 +96,7 @@ struct Settings::State {
     PulseUiModelV1 model{};
     PulseUiEventsV1 events{};
     PulseUiModelV1 formats_model{};
-    // 接管压缩包: its own settings tab (own state budget), drawn by the host from SDK components only.
-    PulseUiModelV1 take_model{};
-    PulseUiEventsV1 take_events{};
-    uint64_t take_page = 0;
-    pulse::sdk::Subscription take_edits;
+    // 接管压缩包 lives on the 常用设置 page itself (no tab of its own); drawn from SDK components only.
     PulseResourcesV1 resources{};
     PulseStagingV1 staging{};
     std::function<void()> changed;
@@ -109,12 +106,13 @@ struct Settings::State {
     std::map<std::string, std::string> values{{"mode", "0"}, {"location", "0"}, {"folder", ""}, {"format", "0"},
                                               {"level", "3"}, {"remember", "true"}, {"placement", "0"},
                                               {"commands", Hex2(kAllCommands)},
-                                              {"take", "false"}, {"dbl", "0"}, {"inc", Hex3(association::kAllGroups)}};
+                                              {"take", "false"}, {"dbl", "0"}, {"inc", Hex3(association::kAllGroups)},
+                                              {"icon", "0"}};
     bool loading = false, saving = false, loaded = false, dirty = false;
     pulse::sdk::Subscription browse, edits;
     // Legacy direct-registry worker OR SDK Default Apps watch poller.
     pulse::sdk::DispatchQueue* dispatch = nullptr;
-    std::array<pulse::sdk::Subscription, association::kGroupCount + 2> take_commands;
+    pulse::sdk::Subscription take_winsettings;
     std::vector<association::Status> statuses = std::vector<association::Status>(association::kGroupCount);
     std::thread worker;
     std::atomic<bool> stop{false};
@@ -129,9 +127,7 @@ struct Settings::State {
         if (request) resources.cancel_request(resources.context, request);
         browse.Reset();
         edits.Reset();
-        for (auto& command : take_commands) command.Reset();
-        take_edits.Reset();
-        if (take_page) pages.Remove(take_page);
+        take_winsettings.Reset();
         if (formats_page) pages.Remove(formats_page);
         if (page) pages.Remove(page);
     }
@@ -154,6 +150,10 @@ struct Settings::State {
     }
 
     bool Taking() const { return values.at("take") == "true"; }
+    int IconStyle() const {
+        const auto& v = values.at("icon");
+        return v.size() == 1 && v[0] >= '0' && v[0] < '0' + association::kIconStyleCount ? v[0] - '0' : association::kIconDocument;
+    }
     int Commands() const {
         const auto& hex = values.at("commands");
         return hex.size() == 2 && HexDigit(hex[0]) >= 0 && HexDigit(hex[1]) >= 0
@@ -168,6 +168,7 @@ struct Settings::State {
         StopWorker();
         const unsigned groups = Groups(), serial = ++job;
         const bool extract = values.at("dbl") != "1", taking = Taking();
+        const int icon_style = IconStyle();
         if (kind == Job::Apply || kind == Job::Remove) {
             busy = true;
             DeriveTake();
@@ -175,13 +176,13 @@ struct Settings::State {
         }
 
         if (assoc_client && assoc_client->Available()) {
-            RunSdk(kind, watch, groups, extract, taking, serial);
+            RunSdk(kind, watch, groups, extract, taking, icon_style, serial);
             return;
         }
 
-        worker = std::thread([this, kind, watch, groups, extract, taking, serial] {
+        worker = std::thread([this, kind, watch, groups, extract, taking, icon_style, serial] {
             bool ok = true;
-            if (kind == Job::Apply || kind == Job::Refresh) ok = association::Apply(groups, extract);
+            if (kind == Job::Apply || kind == Job::Refresh) ok = association::Apply(groups, extract, icon_style);
             else if (kind == Job::Remove) ok = association::Remove();
             auto result = association::Query(taking ? groups : 0);
             auto posted = result;
@@ -304,7 +305,7 @@ struct Settings::State {
         });
     }
 
-    void RunSdk(Job kind, bool watch, unsigned groups, bool extract, bool taking, unsigned serial) {
+    void RunSdk(Job kind, bool watch, unsigned groups, bool extract, bool taking, int icon_style, unsigned serial) {
         const unsigned active_groups = taking ? groups : 0u;
         if (kind == Job::Query) {
             QuerySdk(serial, Job::Query, true, active_groups, watch);
@@ -337,7 +338,7 @@ struct Settings::State {
             entry.extension = spec.extension;
             entry.display_name = spec.display_name;
             entry.verb_label = verb;
-            entry.icon_resource = "pulse_7zip.dll,-" + std::to_string(spec.icon);
+            entry.icon_resource = "pulse_7zip.dll,-" + std::to_string(association::StyledIcon(spec.icon, icon_style));
             entries.push_back(std::move(entry));
         }
         const PulseStatus st = assoc_client->Apply(entries, assoc_request,
@@ -413,18 +414,17 @@ struct Settings::State {
     }
 
     void SetTake(const std::string& key, const std::string& value) {
-        if (!take_page || !take_model.set_states) return;
-        const PulseUiState update{View(key), View(value)};
-        take_model.set_states(take_model.context, take_page, &update, 1);
+        Set(key, value);
     }
 
     // 接管压缩包: who opens each format now, as rows of the plugin's own tab. The plugin owns every
     // string and state here; the host only renders the SDK components (no 7-Zip-specific host code).
     void DeriveTake() {
-        if (!take_page) return;
+        if (!page) return;
         const bool taking = Taking(), extract = values.at("dbl") != "1";
         const unsigned groups = Groups();
         int ours = 0, asks = 0;
+        std::string pending;  // the formats Windows still has to confirm, by name: "7Z、RAR、TAR"
         for (int i = 0; i < association::kGroupCount; ++i) {
             const auto& status = statuses[static_cast<size_t>(i)];
             const auto owner = taking ? status.owner : association::Owner::Off;
@@ -440,38 +440,39 @@ struct Settings::State {
                                : (who.empty() ? text::Get(T::TakeStatusExcluded) : text::Format(T::TakeStatusExcludedWho, who));
                 break;
             }
-            const bool ask = taking && !busy && (owner == association::Owner::Other || owner == association::Owner::Free ||
-                                                 owner == association::Owner::Unknown);
-            const bool set_label = status.windows || owner == association::Owner::Free || owner == association::Owner::Unknown;
-            const auto n = std::to_string(i);
-            SetTake("st" + n, std::string(association::GroupExtensions(i)) + " · " + line);
-            SetTake("inc" + n, (groups >> i) & 1u ? "true" : "false");
-            SetTake("askw" + n, ask && set_label ? "true" : "false");
-            SetTake("askc" + n, ask && !set_label ? "true" : "false");
+            (void)line;
+            if (taking && (owner == association::Owner::Other || owner == association::Owner::Free ||
+                           owner == association::Owner::Unknown)) {
+                pending += (pending.empty() ? "" : text::Get(T::ListSeparator)) + std::string(association::GroupLabel(i));
+            }
+            SetTake("inc" + std::to_string(i), (groups >> i) & 1u ? "true" : "false");
         }
         const bool ask_any = taking && !busy && asks > 0;
         SetTake("take", taking ? "true" : "false");
         SetTake("editable", taking && !busy ? "true" : "false");
         SetTake("idle", busy ? "false" : "true");
         SetTake("askany", ask_any ? "true" : "false");
-        SetTake("askmany", ask_any && asks > 2 ? "true" : "false");
         SetTake("dbl0", extract ? "true" : "false");
         SetTake("dbl1", extract ? "false" : "true");
+        const int icon_style = IconStyle();
+        for (int i = 0; i < association::kIconStyleCount; ++i) SetTake("icon" + std::to_string(i), i == icon_style ? "true" : "false");
+        SetTake("icondesc", text::Get(taking ? T::IconDesc : T::IconOffHint));
         SetTake("takehead", busy ? text::Get(T::TakeBusy)
             : !taking ? text::Get(T::TakeOffHint)
-            : asks ? text::Format(T::TakeSummaryAsk, std::to_string(asks), std::to_string(ours))
+            : asks ? text::Format(T::TakeSummaryAsk, pending, std::to_string(ours))
                    : text::Format(T::TakeSummaryDone, {}, std::to_string(ours)));
     }
 
     // One edit of the 接管压缩包 tab: the switch, a format's checkbox or the double-click choice.
-    void ApplyTake(bool take, const std::string& dbl, const std::string& inc) {
+    void ApplyTake(bool take, const std::string& dbl, const std::string& inc, const std::string& icon) {
         std::optional<Job> takeover;
         if (take != Taking()) takeover = take ? Job::Apply : Job::Remove;
-        else if (take && (dbl != values["dbl"] || inc != values["inc"])) takeover = Job::Apply;
-        const bool changed_value = take != Taking() || dbl != values["dbl"] || inc != values["inc"];
+        else if (take && (dbl != values["dbl"] || inc != values["inc"] || icon != values["icon"])) takeover = Job::Apply;
+        const bool changed_value = take != Taking() || dbl != values["dbl"] || inc != values["inc"] || icon != values["icon"];
         values["take"] = take ? "true" : "false";
         values["dbl"] = dbl;
         values["inc"] = inc;
+        values["icon"] = icon;
         if (takeover) Run(*takeover);
         else DeriveTake();
         if (changed_value) {
@@ -483,7 +484,7 @@ struct Settings::State {
     void TakeEdited(const PulseUiStateBatch& batch) {
         if (busy || !loaded) { DeriveTake(); return; }
         bool take = Taking();
-        std::string dbl = values["dbl"];
+        std::string dbl = values["dbl"], icon = values["icon"];
         unsigned groups = Groups();
         for (uint32_t i = 0; i < batch.count; ++i) {
             const auto key = Copy(batch.changes[i].key), value = Copy(batch.changes[i].value);
@@ -491,13 +492,16 @@ struct Settings::State {
             if (value != "true" && value != "false") continue;
             if (key == "take") take = flag;
             else if ((key == "dbl0" || key == "dbl1") && flag) dbl.assign(1, key.back());
+            // The icon style only changes with the takeover on (the cards are disabled otherwise).
+            else if (key.size() == 5 && key.compare(0, 4, "icon") == 0 && flag && Taking() && key[4] >= '0' &&
+                     key[4] < '0' + association::kIconStyleCount) icon.assign(1, key.back());
             else if (key.size() >= 4 && key.size() <= 5 && key.compare(0, 3, "inc") == 0) {
                 const int group = std::atoi(key.c_str() + 3);
                 if (group >= 0 && group < association::kGroupCount && std::to_string(group) == key.substr(3))
                     groups = flag ? groups | (1u << group) : groups & ~(1u << group);
             }
         }
-        ApplyTake(take, dbl, Hex3(groups & association::kAllGroups));
+        ApplyTake(take, dbl, Hex3(groups & association::kAllGroups), icon);
     }
 
     void PublishHeaderStatus(uint32_t kind, const std::string& text) {
@@ -526,7 +530,7 @@ struct Settings::State {
 
     void Show() {
         for (const auto& [key, value] : values)
-            if (key != "take" && key != "dbl" && key != "inc") Set(key, value);
+            if (key != "take" && key != "dbl" && key != "inc" && key != "icon") Set(key, value);
         Derive();
         Set("ready", loaded ? "true" : "false");
         DeriveTake();
@@ -534,9 +538,10 @@ struct Settings::State {
 
     std::string Encoded() const {
         const auto& v = values;
-        return "5\n" + v.at("mode") + "\n" + v.at("location") + "\n" + v.at("format") + "\n" + v.at("level") + "\n" +
+        return "6\n" + v.at("mode") + "\n" + v.at("location") + "\n" + v.at("format") + "\n" + v.at("level") + "\n" +
                (v.at("remember") == "false" ? "0" : "1") + "\n" + v.at("placement") + "\n" + v.at("commands") + "\n" +
-               (v.at("take") == "true" ? "1" : "0") + "\n" + v.at("dbl") + "\n" + v.at("inc") + "\n" + v.at("folder");
+               (v.at("take") == "true" ? "1" : "0") + "\n" + v.at("dbl") + "\n" + v.at("inc") + "\n" +
+               v.at("icon") + "\n" + v.at("folder");
     }
 
     void Decode(const PulseSettings& settings) {
@@ -555,6 +560,7 @@ struct Settings::State {
             values["take"] = prefs->takeover ? "true" : "false";
             values["dbl"] = prefs->preview_on_open ? "1" : "0";
             values["inc"] = prefs->groups;
+            values["icon"] = std::to_string(prefs->icon_style);
             values["folder"] = prefs->folder;
         }
         version = settings.version;
@@ -693,77 +699,6 @@ struct Settings::State {
                 Set(group + std::to_string(i), values[group][0] - '0' == i ? "true" : "false");
         const int shown = Commands();
         for (int i = 0; i < kCommandCount; ++i) Set("cmd" + std::to_string(i), (shown >> i) & 1 ? "true" : "false");
-        UpdateSidePreview();
-    }
-
-    pulse::sdk::ModelTree BuildSidePreviewTree() const {
-        using pulse::sdk::ModelMenuItem;
-        using pulse::sdk::ModelNode;
-        using pulse::sdk::ModelTree;
-        using N = PulseUiModelNode;
-
-        const int mode = values.at("mode")[0] - '0';
-        const int format = values.at("format")[0] - '0';
-        const bool fixed = values.at("location") == "1";
-        const auto smart_label = fixed && !values.at("folder").empty() ? T::CmdFixed
-            : mode == 1 ? T::CmdFolder : mode == 2 ? T::CmdHere : T::CmdSmart;
-        constexpr const char* kFormatNames[] = {"7z", "zip", "tar", "tar.gz", "tar.xz", "tar.bz2"};
-        const std::string quick_label = text::Format(T::CmdQuick, kFormatNames[format]);
-
-        const int shown = kAllCommands;  // which commands show is set in the host's 右键菜单 tab
-        const int level = values.at("level")[0] - '0';
-        constexpr T kLevels[] = {T::Level0, T::Level1, T::Level3, T::Level5, T::Level7, T::Level9};
-        const std::string extract_detail = fixed && !values.at("folder").empty()
-            ? text::Format(T::MenuDetailFixed, values.at("folder"))
-            : text::Get(mode == 1 ? T::MenuDetailFolder : mode == 2 ? T::MenuDetailHere : T::MenuDetailSmart);
-        const bool submenu = values.at("placement") == "1";
-        // archive=true: what right-clicking an archive shows; false: an ordinary file, where only the
-        // compress and checksum commands apply. Item ids carry the prefix so both menus coexist.
-        auto build_menu = [&](const std::string& p, bool archive) {
-            std::vector<ModelMenuItem> entries;
-            if (archive && ((shown >> 0) & 1)) entries.push_back(ModelMenuItem(p + "extract", text::Get(smart_label)).Glyph("icon:extract"));
-            if (archive && ((shown >> 1) & 1)) entries.push_back(ModelMenuItem(p + "to", text::Get(T::CmdTo)).Glyph("icon:extract-to"));
-            if (archive && ((shown >> 2) & 1)) entries.push_back(ModelMenuItem(p + "test", text::Get(T::CmdTest)).Glyph("icon:test"));
-            if ((shown >> 3) & 1) entries.push_back(ModelMenuItem(p + "quick", quick_label).Glyph("icon:archive"));
-            if ((shown >> 4) & 1) entries.push_back(ModelMenuItem(p + "add", text::Get(T::CmdAdd)).Glyph("icon:add-archive"));
-            if ((shown >> 5) & 1) entries.push_back(ModelMenuItem(p + "hash", text::Get(T::CmdHash)).Glyph("icon:hash"));
-            // The first command is the group's main action: semibold, with what it will do underneath.
-            if (!entries.empty()) {
-                entries.front().Primary();
-                if (archive && (shown & 1)) entries.front().Detail(extract_detail);
-                else if (((shown >> 3) & 1) && (!archive || (shown & 0x7) == 0))
-                    entries.front().Detail(text::Format(T::MenuDetailQuick, kFormatNames[format],
-                                                        text::Get(kLevels[std::clamp(level, 0, 5)])));
-            }
-            std::vector<ModelMenuItem> root_menu;
-            if (entries.empty()) {
-                root_menu.push_back(ModelMenuItem(p + "none", text::Get(T::MenuSection)).Enabled(false));
-            } else if (submenu) {
-                entries.push_back(ModelMenuItem::Separator(p + "sub-sep"));
-                entries.push_back(ModelMenuItem(p + "sub-settings", text::Get(T::MenuSettings)).Glyph("icon:gear"));
-                root_menu.push_back(ModelMenuItem(p + "group", "7-Zip").Glyph("icon:box").Group("7-Zip").Children(std::move(entries)));
-            } else {
-                for (auto& entry : entries) entry.Group("7-Zip");
-                root_menu = std::move(entries);
-            }
-            return root_menu;
-        };
-
-        auto stack = ModelNode(PULSE_UI_MODEL_STACK, "side-preview-stack").Int(&N::gap, 10).Children({
-            ModelNode(PULSE_UI_MODEL_TEXT, "side-preview-title").String(&N::text, text::Get(T::SidePreviewTitle)).String(&N::role, "section"),
-            ModelNode(PULSE_UI_MODEL_TEXT, "side-preview-detail").String(&N::text, text::Get(T::SidePreviewDetail)).String(&N::role, "caption"),
-            ModelNode(PULSE_UI_MODEL_TEXT, "side-preview-archive").String(&N::text, text::Get(T::PreviewArchive)).String(&N::role, "bodyStrong"),
-            ModelNode::MenuPreview("side-preview-menu", {}, build_menu("prev-", true)).Kind("context"),
-            ModelNode(PULSE_UI_MODEL_TEXT, "side-preview-file").String(&N::text, text::Get(T::PreviewFile)).String(&N::role, "bodyStrong"),
-            ModelNode::MenuPreview("side-preview-file-menu", {}, build_menu("prevf-", false)).Kind("context"),
-        });
-        return ModelTree(ModelNode(PULSE_UI_MODEL_SCROLL_VIEW, "side-preview-root").Children({std::move(stack)}));
-    }
-
-    void UpdateSidePreview() {
-        if (!pages.HasV2() || !page) return;
-        auto preview = BuildSidePreviewTree();
-        (void)pages.SetSidePreview(page, &preview.Build(), 300);
     }
 
     pulse::sdk::ModelTree BuildFormatsTree(const FormatLists& fmts) const {
@@ -771,24 +706,21 @@ struct Settings::State {
         using pulse::sdk::ModelTree;
         using N = PulseUiModelNode;
 
+        // Each format as a badge in one horizontal stack: the host wraps it like a line of text.
         const auto make_chips_card = [&](const std::string& prefix, const std::string& title,
-                                         const std::vector<std::string>& items, std::string color) {
+                                         const std::vector<std::string>& items, const char* kind) {
             std::vector<ModelNode> rows;
-            constexpr size_t kPerRow = 6;
-            const size_t limit = std::min<size_t>(items.size(), 64);
-            for (size_t start = 0; start < limit; start += kPerRow) {
-                std::vector<ModelNode> line;
-                const size_t end = std::min<size_t>(limit, start + kPerRow);
-                for (size_t i = start; i < end; ++i) {
-                    ModelNode chip(PULSE_UI_MODEL_TAG, prefix + "-chip-" + std::to_string(i));
-                    chip.String(&N::text, items[i]).Bool(&N::bordered, true);
-                    if (!color.empty()) chip.String(&N::color, color);
-                    line.push_back(std::move(chip));
-                }
-                rows.push_back(ModelNode(PULSE_UI_MODEL_STACK, prefix + "-row-" + std::to_string(start))
+            std::vector<ModelNode> badges;
+            const size_t limit = std::min<size_t>(items.size(), 96);
+            for (size_t i = 0; i < limit; ++i) {
+                badges.push_back(ModelNode(PULSE_UI_MODEL_BADGE, prefix + "-badge-" + std::to_string(i))
+                                     .String(&N::text, items[i]).Kind(kind));
+            }
+            if (!badges.empty()) {
+                rows.push_back(ModelNode(PULSE_UI_MODEL_STACK, prefix + "-badges")
                                    .String(&N::orientation, "horizontal")
                                    .Int(&N::gap, 6)
-                                   .Children(std::move(line)));
+                                   .Children(std::move(badges)));
             }
             if (rows.empty()) {
                 rows.push_back(ModelNode(PULSE_UI_MODEL_TEXT, prefix + "-empty").String(&N::text, "-").String(&N::role, "caption"));
@@ -802,7 +734,7 @@ struct Settings::State {
 
         auto content = ModelNode(PULSE_UI_MODEL_STACK, "formats-content").Int(&N::gap, 12).Children({
             make_chips_card("rw", text::Get(T::FormatsRwTitle), fmts.rw, "accent"),
-            make_chips_card("ro", text::Get(T::FormatsRoTitle), fmts.ro, {}),
+            make_chips_card("ro", text::Get(T::FormatsRoTitle), fmts.ro, "neutral"),
         });
         return ModelTree(ModelNode(PULSE_UI_MODEL_SCROLL_VIEW, "formats-root").Children({std::move(content)}));
     }
@@ -825,11 +757,7 @@ struct Settings::State {
         std::vector<std::string> levels;
         for (const auto id : {T::Level0, T::Level1, T::Level3, T::Level5, T::Level7, T::Level9}) levels.push_back(text::Get(id));
 
-        auto hero = card("hero", {
-            section("hero-title", text::Get(T::HeroTitle)),
-            caption("hero-detail", text::Format(T::HeroDetail, std::to_string(fmts.rw.size() + fmts.ro.size()))),
-            ModelNode(PULSE_UI_MODEL_TEXT, "settings-status").String(&N::binding, "state.status").String(&N::role, "caption"),
-        }).Int(&N::gap, 2);
+        // No intro card: the page header already names the plugin, its engine and the save status.
 
         // Extract mode as three illustrated tiles: the archive, an arrow, and what lands on disk.
         const auto art = [](const char* id, int kind) {
@@ -902,11 +830,13 @@ struct Settings::State {
 
 
 
-        auto content = ModelNode(PULSE_UI_MODEL_STACK, "settings-content").Int(&N::gap, 12).Children({
-            hero, section("extract-title", text::Get(T::SettingsExtractSection)), extract,
-            section("compress-title", text::Get(T::SettingsCompressSection)), compress,
-            caption("rar-note", text::Get(T::RarNote)),
-        });
+        std::vector<ModelNode> sections = BuildTakeNodes();
+        sections.push_back(section("extract-title", text::Get(T::SettingsExtractSection)));
+        sections.push_back(std::move(extract));
+        sections.push_back(section("compress-title", text::Get(T::SettingsCompressSection)));
+        sections.push_back(std::move(compress));
+        sections.push_back(caption("rar-note", text::Get(T::RarNote)));
+        auto content = ModelNode(PULSE_UI_MODEL_STACK, "settings-content").Int(&N::gap, 12).Children(std::move(sections));
 
         const int mode = values.at("mode")[0] - '0';
         const int format = values.at("format")[0] - '0';
@@ -935,14 +865,34 @@ struct Settings::State {
             .State("cmd2", (shown >> 2) & 1 ? "true" : "false").State("cmd3", (shown >> 3) & 1 ? "true" : "false")
             .State("cmd4", (shown >> 4) & 1 ? "true" : "false").State("cmd5", (shown >> 5) & 1 ? "true" : "false")
             .Command("browse");
+        AddTakeStates(tree);
         return tree;
     }
 
-    // 接管压缩包 tab: a switch, one SettingsRow per format (status in its detail line, Windows'
-    // chooser button, include switch) and the double-click choice as option cards.
-    pulse::sdk::ModelTree BuildTakeTree() const {
+    // 接管压缩包, at the top of 常用设置: the switch, a one-line status with a single button that
+    // sends every remaining format to Windows' Default apps page (one "Set default" there covers
+    // them all), the formats as toggle chips, then the icon style and the double-click choice.
+    // A format's mark on its tile: a rounded square in the format's colour with its short name
+    // (the archive icons' palette: ZIP teal, 7Z violet, RAR plum ...). 32 DIP: the host draws it as an icon.
+    static pulse::sdk::ModelNode FormatMark(const std::string& id, int group) {
+        // Same colours as icons/*.ico (archive_icon_styles_mockup.html): clear of folder yellow and the
+        // Word / Excel / PowerPoint / PDF hues. Order: association groups.
+        static constexpr uint32_t kColors[association::kGroupCount] = {
+            0x1F7A87, 0x195A64, 0x6A4FB3, 0x8B4A9E, 0x7A6352, 0xA84479,
+            0x5A5E9E, 0x6B7638, 0x566C7E, 0x5F6878, 0x6A6295, 0x776F66};
+        const uint32_t base = kColors[(std::clamp)(group, 0, association::kGroupCount - 1)];
+        std::string label = association::GroupLabel(group);
+        if (const auto cut = label.find(' '); cut != std::string::npos) label.resize(cut);
+        const double size = label.size() <= 2 ? 11.5 : label.size() == 3 ? 9.5 : 7.8;
+        pulse::sdk::CanvasBuilder canvas(id);
+        canvas.ViewBox(32, 32).MinHeight(32)
+            .Rect(1, 1, 30, 30, 8, icon_art::Hex(base))
+            .ScaledText(1, 8, 30, 16, icon_art::Hex(icon_art::Ink(base)), size, "bold", "center", label);
+        return canvas.BuildNode();
+    }
+
+    std::vector<pulse::sdk::ModelNode> BuildTakeNodes() const {
         using pulse::sdk::ModelNode;
-        using pulse::sdk::ModelTree;
         using N = PulseUiModelNode;
         const auto caption = [](const char* id, const std::string& value) {
             return ModelNode(PULSE_UI_MODEL_TEXT, id).String(&N::text, value).String(&N::role, "caption");
@@ -953,85 +903,92 @@ struct Settings::State {
         const auto card = [](const char* id, std::vector<ModelNode> children) {
             return ModelNode(PULSE_UI_MODEL_GROUP, id).Bool(&N::bordered, true).Int(&N::gap, 12).Children(std::move(children));
         };
-        const auto toggle = [](const std::string& id, const std::string& state) {
-            return ModelNode(PULSE_UI_MODEL_SWITCH, id).String(&N::state, state).Int(&N::min_width, 48).Int(&N::max_width, 48);
-        };
 
-        std::vector<ModelNode> rows{
+        // Each format as a compact tile: its colour mark, the name, its extensions and a check box
+        // (checked = Pulse takes it over). The grid drops to fewer columns as the page narrows.
+        std::vector<ModelNode> tiles;
+        for (int i = 0; i < association::kGroupCount; ++i) {
+            const auto n = std::to_string(i);
+            tiles.push_back(ModelNode::OptionCard("inc" + n + "-tile", association::GroupLabel(i),
+                                                  association::GroupExtensions(i), "inc" + n, "toggle")
+                .Int(&N::min_width, 150).String(&N::enabled_binding, "state.editable")
+                .Children({FormatMark("inc" + n + "-mark", i)}));
+        }
+
+        auto take = card("take-card", {
             ModelNode::SettingsRow("take-row", text::Get(T::TakeTitle), text::Get(T::TakeDesc),
-                toggle("take-input", "take").String(&N::enabled_binding, "state.idle"),
+                ModelNode(PULSE_UI_MODEL_SWITCH, "take-input").String(&N::state, "take").Int(&N::min_width, 48).Int(&N::max_width, 48)
+                    .String(&N::enabled_binding, "state.idle"),
                 "icon:box", false),
             ModelNode(PULSE_UI_MODEL_DIVIDER, "take-divider"),
-            ModelNode(PULSE_UI_MODEL_STACK, "take-head-row").String(&N::orientation, "horizontal").Int(&N::gap, 8).Children({
+            ModelNode(PULSE_UI_MODEL_STACK, "take-head-row").String(&N::orientation, "horizontal").Int(&N::gap, 12).Children({
                 ModelNode(PULSE_UI_MODEL_TEXT, "take-head").String(&N::binding, "state.takehead").String(&N::role, "caption").Int(&N::flex, 1),
                 ModelNode(PULSE_UI_MODEL_BUTTON, "take-winsettings").String(&N::text, text::Get(T::TakeWinSettings))
-                    .String(&N::command, "winsettings").String(&N::visible_binding, "state.askmany"),
-                ModelNode(PULSE_UI_MODEL_BUTTON, "take-next").String(&N::text, text::Get(T::TakeConfirmEach))
-                    .String(&N::command, "asknext").String(&N::visible_binding, "state.askany"),
+                    .Kind("primary").String(&N::command, "winsettings").String(&N::visible_binding, "state.askany"),
             }),
-        };
-        for (int i = 0; i < association::kGroupCount; ++i) {
-            const auto n = std::to_string(i);
-            ModelNode row(PULSE_UI_MODEL_SETTINGS_ROW, "grp" + n);
-            row.String(&N::text, association::GroupLabel(i)).String(&N::detail, association::GroupExtensions(i))
-                .String(&N::glyph, "icon:archive").Bool(&N::bordered, false).String(&N::binding, "state.st" + n);
-            row.Children({
-                ModelNode(PULSE_UI_MODEL_BUTTON, "askw" + n).String(&N::text, text::Get(T::TakeAskSet))
-                    .String(&N::command, "ask" + n).String(&N::visible_binding, "state.askw" + n),
-                ModelNode(PULSE_UI_MODEL_BUTTON, "askc" + n).String(&N::text, text::Get(T::TakeAskChange))
-                    .String(&N::command, "ask" + n).String(&N::visible_binding, "state.askc" + n),
-                toggle("inc" + n + "-input", "inc" + n).String(&N::enabled_binding, "state.editable"),
-            });
-            rows.push_back(std::move(row));
-        }
+            ModelNode(PULSE_UI_MODEL_GRID, "take-formats").Int(&N::columns, 4).Int(&N::gap, 8)
+                .String(&N::visible_binding, "state.take").Children(std::move(tiles)),
+        });
 
-        auto dbl = card("dbl-card", {
+        // 压缩包图标: three radio cards, each illustrated with its style's 7Z, ZIP and RAR icons
+        // (an option card takes one canvas, so the icons are drawn as vectors; icon_style_art.h).
+        const auto style_card = [&](int style, T title, T detail, const char* badge) {
+            const auto n = std::to_string(style);
+            auto node = ModelNode::OptionCard("icon" + n, text::Get(title), text::Get(detail), "icon" + n, "radio", {}, badge ? badge : "");
+            node.Int(&N::min_width, 160).String(&N::enabled_binding, "state.editable")
+                .Children({icon_art::Preview("icon" + n + "-art", style)});
+            return node;
+        };
+        auto icon_card = card("icon-card", {
+            ModelNode(PULSE_UI_MODEL_TEXT, "icon-title").String(&N::text, text::Get(T::IconTitle)),
+            ModelNode(PULSE_UI_MODEL_TEXT, "icon-desc").String(&N::binding, "state.icondesc").String(&N::role, "caption"),
+            ModelNode(PULSE_UI_MODEL_GRID, "icon-tiles").Int(&N::columns, 3).Int(&N::gap, 10).Children({
+                style_card(association::kIconDocument, T::IconDocument, T::IconDocumentDesc, nullptr),
+                style_card(association::kIconFolder, T::IconFolder, T::IconFolderDesc, text::Get(T::Recommended)),
+                style_card(association::kIconColor, T::IconColor, T::IconColorDesc, nullptr),
+            }),
+            ModelNode(PULSE_UI_MODEL_DIVIDER, "dbl-divider"),
             ModelNode(PULSE_UI_MODEL_TEXT, "dbl-title").String(&N::text, text::Get(T::DblTitle)),
             caption("dbl-desc", text::Get(T::DblDesc)),
-            ModelNode::OptionCard("dbl0", text::Get(T::TakeStatusExtract), text::Get(T::ModeSmartDesc), "dbl0", "radio", "icon:sparkle")
-                .String(&N::enabled_binding, "state.editable"),
-            ModelNode::OptionCard("dbl1", text::Get(T::DblOpen), text::Get(T::DblOpenDesc), "dbl1", "radio", "icon:folder")
-                .String(&N::enabled_binding, "state.editable"),
+            ModelNode(PULSE_UI_MODEL_GRID, "dbl-tiles").Int(&N::columns, 2).Int(&N::gap, 10).Children({
+                ModelNode::OptionCard("dbl0", text::Get(T::TakeStatusExtract), text::Get(T::ModeSmartDesc), "dbl0", "radio", "icon:extract")
+                    .String(&N::enabled_binding, "state.editable"),
+                ModelNode::OptionCard("dbl1", text::Get(T::DblOpen), text::Get(T::DblOpenDesc), "dbl1", "radio", "icon:folder")
+                    .String(&N::enabled_binding, "state.editable"),
+            }),
         });
 
-        auto content = ModelNode(PULSE_UI_MODEL_STACK, "take-content").Int(&N::gap, 12).Children({
-            section("take-title", text::Get(T::TakeSection)), card("take-card", std::move(rows)),
-            section("dbl-section", text::Get(T::DblTitle)), std::move(dbl),
-        });
-        auto tree = ModelTree(ModelNode(PULSE_UI_MODEL_SCROLL_VIEW, "take-root").Children({std::move(content)}))
-            .State("take", Taking() ? "true" : "false").State("editable", "false").State("idle", "true")
-            .State("askany", "false").State("askmany", "false")
-            .State("dbl0", values.at("dbl") != "1" ? "true" : "false").State("dbl1", values.at("dbl") == "1" ? "true" : "false")
-            .State("takehead", text::Get(T::TakeOffHint))
-            .Command("asknext").Command("winsettings");
-        const unsigned groups = Groups();
-        for (int i = 0; i < association::kGroupCount; ++i) {
-            const auto n = std::to_string(i);
-            tree.State("st" + n, association::GroupExtensions(i)).State("inc" + n, (groups >> i) & 1u ? "true" : "false")
-                .State("askw" + n, "false").State("askc" + n, "false").Command("ask" + n);
-        }
-        return tree;
+        std::vector<ModelNode> nodes;
+        nodes.push_back(section("take-title", text::Get(T::TakeSection)));
+        nodes.push_back(std::move(take));
+        nodes.push_back(section("icon-section", text::Get(T::IconSection)));
+        nodes.push_back(std::move(icon_card));
+        return nodes;
     }
 
-    void EnsureTakeTab() {
-        if (!pages.HasV2()) return;
-        for (auto& command : take_commands) command.Reset();
-        take_edits.Reset();
-        if (take_page) {
-            (void)pages.Remove(take_page);
-            take_page = 0;
-            take_model = {};
-            take_events = {};
-        }
-        auto tree = BuildTakeTree();
-        uint64_t created = 0;
-        if (pages.CreateTab("takeover", text::Get(T::TakeSection), tree.Build(), created, "icon:archive", 5) != PULSE_OK) return;
-        PulseUiModelV1 created_model{};
-        PulseUiEventsV1 created_events{};
-        bool ok = pages.QueryModel(created, created_model) == PULSE_OK && pages.QueryEvents(created, created_events) == PULSE_OK;
-        ok = ok && take_commands[0].Command(created_model, created, "asknext",
-            [this](uint64_t, PulseStringView) { try { Choose(NextAsk(), true); } catch (...) {} }) == PULSE_OK;
-        ok = ok && take_commands[1].Command(created_model, created, "winsettings", [this](uint64_t, PulseStringView) {
+    void AddTakeStates(pulse::sdk::ModelTree& tree) const {
+        tree.State("take", Taking() ? "true" : "false").State("editable", "false").State("idle", "true")
+            .State("askany", "false")
+            .State("dbl0", values.at("dbl") != "1" ? "true" : "false").State("dbl1", values.at("dbl") == "1" ? "true" : "false")
+            .State("icon0", IconStyle() == 0 ? "true" : "false").State("icon1", IconStyle() == 1 ? "true" : "false")
+            .State("icon2", IconStyle() == 2 ? "true" : "false").State("icondesc", text::Get(T::IconOffHint))
+            .State("takehead", text::Get(T::TakeOffHint))
+            .Command("winsettings");
+        const unsigned groups = Groups();
+        for (int i = 0; i < association::kGroupCount; ++i)
+            tree.State("inc" + std::to_string(i), (groups >> i) & 1u ? "true" : "false");
+    }
+
+    static bool IsTakeKey(const std::string& key) {
+        return key == "take" || key == "dbl0" || key == "dbl1" ||
+               (key.size() == 5 && key.compare(0, 4, "icon") == 0) ||
+               (key.size() >= 4 && key.size() <= 5 && key.compare(0, 3, "inc") == 0);
+    }
+
+    // The take section's one command; its edits arrive through the page's state subscription.
+    PulseStatus BindTake() {
+        take_winsettings.Reset();
+        return take_winsettings.Command(model, page, "winsettings", [this](uint64_t, PulseStringView) {
             try {
                 if (Taking() && !busy) {
                     if (assoc_client && assoc_client->Available()) (void)assoc_client->OpenDefaultApps();
@@ -1039,23 +996,7 @@ struct Settings::State {
                     Run(Job::Query, true);
                 }
             } catch (...) {}
-        }) == PULSE_OK;
-        for (int i = 0; ok && i < association::kGroupCount; ++i) {
-            ok = take_commands[static_cast<size_t>(i) + 2].Command(created_model, created, "ask" + std::to_string(i),
-                [this, i](uint64_t, PulseStringView) { try { Choose(i, false); } catch (...) {} }) == PULSE_OK;
-        }
-        ok = ok && take_edits.State(created_model, created_events, created, {}, PULSE_UI_STATE_USER,
-            [this](uint64_t, const PulseUiStateBatch& batch) { try { TakeEdited(batch); } catch (...) {} }) == PULSE_OK;
-        if (!ok) {
-            for (auto& command : take_commands) command.Reset();
-            take_edits.Reset();
-            (void)pages.Remove(created);
-            return;
-        }
-        take_page = created;
-        take_model = created_model;
-        take_events = created_events;
-        DeriveTake();
+        });
     }
 
     void EnsureFormatsTab(const FormatLists& fmts) {
@@ -1084,13 +1025,20 @@ struct Settings::State {
         if (result != PULSE_OK) return result;
         result = browse.Command(model, page, "browse", [this](uint64_t, PulseStringView) { try { Browse(); } catch (...) {} });
         if (result != PULSE_OK) return result;
-        result = edits.State(model, events, page, {}, PULSE_UI_STATE_USER,
-                             [this](uint64_t, const PulseUiStateBatch& batch) { try { Edited(batch); } catch (...) {} });
+        result = edits.State(model, events, page, {}, PULSE_UI_STATE_USER, [this](uint64_t, const PulseUiStateBatch& batch) {
+            try {
+                Edited(batch);
+                bool take_keys = false;
+                for (uint32_t i = 0; i < batch.count && !take_keys; ++i) take_keys = IsTakeKey(Copy(batch.changes[i].key));
+                if (take_keys) TakeEdited(batch);
+            } catch (...) {}
+        });
+        if (result != PULSE_OK) return result;
+        result = BindTake();
         if (result != PULSE_OK) return result;
 
-        UpdateSidePreview();
-        EnsureTakeTab();
         EnsureFormatsTab(fmts);
+        DeriveTake();
         Load();
         return PULSE_OK;
     }
@@ -1102,7 +1050,7 @@ struct Settings::State {
         if (model.update(model.context, page, &tree.Build()) == PULSE_OK) {
             Show();
             Status(text::Get(T::AutoSaved));
-            EnsureTakeTab();
+            DeriveTake();
             EnsureFormatsTab(fmts);
         }
     }

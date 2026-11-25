@@ -39,7 +39,7 @@ target_link_libraries(pulse_7zip_worker PRIVATE pulse_7zip_engine pulse_7zip_ipc
 set(PLUGIN_SOURCES plugin.cpp text.cpp settings.cpp association.cpp jobs.cpp dialogs.cpp vfs_mount.cpp worker_client.cpp)
 add_library(pulse_7zip SHARED ${PLUGIN_SOURCES} plugin.rc)
 set_source_files_properties(${PLUGIN_SOURCES} PROPERTIES OBJECT_DEPENDS "${PULSE_PUBLIC_HEADERS}")
-file(GLOB PULSE_7ZIP_ICONS CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/icons/*.ico")
+file(GLOB_RECURSE PULSE_7ZIP_ICONS CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/icons/*.ico")
 set_source_files_properties(plugin.rc PROPERTIES OBJECT_DEPENDS "${PULSE_7ZIP_ICONS}")
 target_include_directories(pulse_7zip PRIVATE "${PULSE_SDK_INCLUDE}")
 target_compile_features(pulse_7zip PRIVATE cxx_std_20)
