@@ -168,5 +168,40 @@ int main() {
         wp.wall = &wall;
         check(!ViewLayout(ViewMode::LargeIcons, {0, 0, 700, 400}, 7, 0, 0, 1, wp, &gs).Grouped(), "photo wall is not grouped");
     }
+    {
+        // List view like File Explorer: each column as wide as its longest name.
+        const float scale = 1.5f;
+        const D2D1_RECT_F viewport{0, 0, 1200, 24 * scale * 3 + 10};   // three rows per column
+        check(ListRowsPerColumn(viewport.bottom, scale) == 3, "list: rows per column follow the viewport height");
+        // Column 0: short names; column 1: one long name; column 2: a name past the cap; column 3: one short row.
+        const std::vector<float> text = {30, 40, 35, 50, 400, 60, 90, 2000, 20, 25};
+        const ListColumns columns = BuildListColumns(text, 3, scale);
+        const auto width = [&](size_t c) { return columns.left[c + 1] - columns.left[c]; };
+        check(columns.left.size() == 5 && columns.left[0] == 0, "list: one offset per column plus the content width");
+        check(std::abs(width(0) - std::round(std::max(40 + kListItemChromeDip * scale, kListColumnMinDip * scale))) < 0.01f,
+              "list: a short column fits its longest name, not a fixed width");
+        check(std::abs(width(1) - std::round(400 + kListItemChromeDip * scale)) < 0.01f, "list: a long name widens only its own column");
+        check(std::abs(width(2) - kListColumnMaxDip * scale) < 0.01f, "list: a very long name stops at the column cap");
+        check(std::abs(width(3) - kListColumnMinDip * scale) < 0.01f, "list: a column never goes below the minimum");
+        ViewLayoutParams params;
+        params.list_columns = &columns;
+        const ViewLayout list(ViewMode::List, viewport, text.size(), 0, 0, scale, params);
+        const auto r4 = list.ItemRect(4), r7 = list.ItemRect(7), r9 = list.ItemRect(9);
+        check(r4.left == columns.left[1] && r4.right == columns.left[2] && r7.left == columns.left[2] &&
+              r9.left == columns.left[3] && list.ContentWidth() == columns.left.back(),
+              "list: item rects follow the measured columns");
+        check(list.HitTest(columns.left[1] + 5, r4.top + 2) == 4 && list.HitTest(columns.left[2] - 1, r4.top + 2) == 4 &&
+              list.HitTest(columns.left[2] + 1, r7.top + 2) == 7 && list.HitTest(columns.left.back() + 3, 2) == -1,
+              "list: hit testing finds the column by its measured span");
+        check(list.MoveIndex(1, 1, 0) == 4 && list.MoveIndex(4, -1, 0) == 1, "list: left / right still step one column");
+        const ViewLayout scrolled(ViewMode::List, viewport, text.size(), columns.left[2], 0, scale, params);
+        const auto [first, last] = scrolled.VisibleRange();
+        check(first <= 6 && last >= 9 && scrolled.ItemRect(7).left == 0, "list: scrolling by measured offsets");
+        // Columns built for another split (the pane was resized) are not used.
+        const D2D1_RECT_F taller{0, 0, 1200, 24 * scale * 5 + 4};
+        const ViewLayout stale(ViewMode::List, taller, text.size(), 0, 0, scale, params);
+        check(std::abs((stale.ItemRect(5).right - stale.ItemRect(5).left) - kListColumnDefaultDip * scale) < 0.01f,
+              "list: columns of another row split fall back to the default width");
+    }
     return failures ? 1 : 0;
 }

@@ -52,6 +52,60 @@ int wmain(int argc, wchar_t** argv) {
     fs::create_directories(parent);
     if (!fs::create_directory(base)) return 1;
     const auto old = (base / L"old.txt").wstring(), added = (base / L"added.txt").wstring();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--copy") {
+        fixture = base.wstring();
+        const auto final = (base / L"final.txt").wstring(), retry = (base / L"retry.txt").wstring();
+        {
+            PlacesCatalog catalog;
+            catalog.persist = false;
+            const auto tag = catalog.CreateTag(L"copy fixture", 0x123456);
+            std::vector<TagAdsUpdate> deferred;
+            Check(catalog.SetTagsBatch(tag, {old}, true, &deferred), "copy fixture seeds a tagged source without touching file streams");
+            catalog.ToggleStarred(old, PlaceItemKind::File);
+            catalog.RecordRecent(old, PlaceItemKind::File);
+            catalog.persist = true;
+            Check(catalog.Save(), "copy baseline catalog is persisted");
+            auto io = PlacesSaveTestAccess::HoldIo(catalog);
+            HANDLE completed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            ULONGLONG elapsed = 0;
+            std::jthread copy([&] {
+                const auto start = GetTickCount64();
+                catalog.CloneAssignments({{old, added}, {added, final}});
+                elapsed = GetTickCount64() - start;
+                SetEvent(completed);
+            });
+            Check(WaitForSingleObject(completed, 300) == WAIT_OBJECT_0,
+                "copy completion returns while catalog disk writer is blocked");
+            io.unlock(); copy.join(); CloseHandle(completed);
+            std::cout << "copy_completion_ms=" << elapsed << '\n';
+            Check(catalog.IsStarred(old) && catalog.IsStarred(added) && catalog.IsStarred(final) &&
+                !catalog.TagsForPath(final).empty() && catalog.FindRecent(old) && !catalog.FindRecent(final),
+                "copy immediately inherits tags and favorites in pair order without moving source or copying recent history");
+            PlacesSaveTestAccess::Stop(catalog);
+            Check(catalog.FlushTagSave(), "copied tag catalog reaches durable storage");
+            PlacesCatalog loaded; loaded.persist = false;
+            Check(loaded.Load() && loaded.IsStarred(old) && loaded.IsStarred(final) &&
+                !loaded.TagsForPath(final).empty(), "queued copy metadata survives disk reload");
+            HANDLE locked = CreateFileW((fixture + L"\\places.json").c_str(), GENERIC_READ, 0,
+                nullptr, OPEN_EXISTING, 0, nullptr);
+            Check(locked != INVALID_HANDLE_VALUE, "copy persistence failure is injected on the owned fixture only");
+            catalog.CloneAssignments(std::vector<std::pair<std::wstring, std::wstring>>{{final, retry}});
+            PlacesSaveTestAccess::Stop(catalog);
+            Check(catalog.IsStarred(retry) && !catalog.TagsForPath(retry).empty() && PlacesSaveTestAccess::Dirty(catalog),
+                "failed copy save preserves in-memory metadata and pending retry");
+            if (locked != INVALID_HANDLE_VALUE) CloseHandle(locked);
+            Check(catalog.FlushTagSave() && catalog.FlushPendingSave(true) && !PlacesSaveTestAccess::Dirty(catalog),
+                "copy metadata retries durably after storage becomes available");
+            PlacesCatalog reloaded; reloaded.persist = false;
+            Check(reloaded.Load() && reloaded.IsStarred(retry) && !reloaded.TagsForPath(retry).empty(),
+                "copy retry metadata survives a fresh catalog load");
+        }
+        CloseHandle(entered); CloseHandle(released); CloseHandle(dirty_entered);
+        if (base.parent_path() != parent || !base.filename().wstring().starts_with(L"places-save-order-")) return 1;
+        fs::remove_all(base);
+        std::cout << "COPY_COMPLETION_RESULT failures=" << failures << '\n';
+        return failures ? 1 : 0;
+    }
     if (argc == 2 && std::wstring_view(argv[1]) == L"--rename") {
         fixture = base.wstring();
         const auto final = (base / L"final.txt").wstring();

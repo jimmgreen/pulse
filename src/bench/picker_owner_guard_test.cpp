@@ -492,16 +492,33 @@ int PreHideSlowChild(const wchar_t* argument) {
     return 0;
 }
 
-void PreHideSlowRestore(DWORD delay_ms, const char* label) {
+void PreHideSlowRestore(DWORD delay_ms, const char* label, bool private_desktop = false) {
+    HDESK previous_desktop = nullptr;
+    HDESK desktop = nullptr;
+    std::wstring desktop_arg;
+    if (private_desktop) {
+        desktop_arg = L"PulseOwnerGuardSlow_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64());
+        previous_desktop = GetThreadDesktop(GetCurrentThreadId());
+        desktop = CreateDesktopW(desktop_arg.c_str(), nullptr, nullptr, 0, GENERIC_ALL, nullptr);
+        const bool on_private = desktop && SetThreadDesktop(desktop);
+        Check(on_private, "slow pre-hide runs on isolated private desktop");
+        if (!on_private) { if (desktop) CloseDesktop(desktop); return; }
+    }
     SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
     HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE, 0, sizeof(UINT_PTR) * 8, nullptr);
     auto* shared = mapping ? static_cast<volatile UINT_PTR*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(UINT_PTR) * 8)) : nullptr;
-    if (!shared) { Check(false, "pre-hide slow fixture mapping"); if (mapping) CloseHandle(mapping); return; }
+    if (!shared) {
+        Check(false, "pre-hide slow fixture mapping");
+        if (mapping) CloseHandle(mapping);
+        if (private_desktop) { SetThreadDesktop(previous_desktop); CloseDesktop(desktop); }
+        return;
+    }
     for (size_t i = 0; i < 8; ++i) shared[i] = 0;
     shared[1] = delay_ms;
     wchar_t self[32768]{}; GetModuleFileNameW(nullptr, self, 32768);
     std::wstring command = L"\"" + std::wstring(self) + L"\" --pre-hide-slow-child " + std::to_wstring(reinterpret_cast<UINT_PTR>(mapping));
     STARTUPINFOW startup{sizeof(startup)}; PROCESS_INFORMATION child{};
+    if (private_desktop) startup.lpDesktop = desktop_arg.data();
     const BOOL started = CreateProcessW(self, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &child);
     Check(started != FALSE, label);
     if (started) {
@@ -567,6 +584,10 @@ void PreHideSlowRestore(DWORD delay_ms, const char* label) {
         CloseHandle(child.hThread); CloseHandle(child.hProcess);
     }
     UnmapViewOfFile(const_cast<UINT_PTR*>(shared)); CloseHandle(mapping);
+    if (private_desktop) {
+        SetThreadDesktop(previous_desktop);
+        CloseDesktop(desktop);
+    }
 }
 
 int PreHideAlreadyDisabledChild(const wchar_t* argument) {
@@ -684,9 +705,10 @@ int wmain(int argc, wchar_t** argv) {
         return failures ? 1 : 0;
     }
     if (argc == 3 && wcscmp(argv[1], L"--pre-hide-disabled-child") == 0) return PreHideAlreadyDisabledChild(argv[2]);
-    if (argc == 2 && wcscmp(argv[1], L"--pre-hide-slow") == 0) {
-        PreHideSlowRestore(350, "start 350ms slow WM_ENABLE caller (Photoshop shape)");
-        PreHideSlowRestore(1200, "start 1200ms over-timeout WM_ENABLE caller");
+    if (argc == 2 && (wcscmp(argv[1], L"--pre-hide-slow") == 0 || wcscmp(argv[1], L"--pre-hide-slow-private") == 0)) {
+        const bool priv = wcscmp(argv[1], L"--pre-hide-slow-private") == 0;
+        PreHideSlowRestore(350, "start 350ms slow WM_ENABLE caller (Photoshop shape)", priv);
+        PreHideSlowRestore(1200, "start 1200ms over-timeout WM_ENABLE caller", priv);
         std::printf("Checks: %d, failures: %d\n", checks, failures);
         return failures ? 1 : 0;
     }

@@ -351,6 +351,72 @@ int wmain(int argc, wchar_t** argv) {
         thread.join();
         check(SUCCEEDED(other), "cached factory creates on another apartment");
     }
+    // Verify P0-2b: StubHostExe() refreshes live from active-bridge.json when cached host_exe
+    // is pruned/upgraded (e.g. old AppRuntime\<hash>\pulse.exe removed after upgrades).
+    {
+        wchar_t temp[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, temp);
+        const auto root = std::filesystem::path(temp) /
+            (L"pulse-auto-host-refresh-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+        const auto v1_dir = root / L"v1";
+        const auto v2_dir = root / L"v2";
+        std::error_code ec;
+        std::filesystem::create_directories(v1_dir, ec);
+        std::filesystem::create_directories(v2_dir, ec);
+        const auto host_v1 = v1_dir / L"pulse.exe";
+        const auto host_v2 = v2_dir / L"pulse.exe";
+        { std::ofstream f(host_v1, std::ios::binary); f << "v1"; }
+        { std::ofstream f(host_v2, std::ios::binary); f << "v2"; }
+
+        auto write_ptr = [&](int gen, const std::filesystem::path& host_path) -> bool {
+            auto esc = [](const std::wstring& w) {
+                const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+                std::string u(static_cast<size_t>(n > 0 ? n : 0), '\0');
+                if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), u.data(), n, nullptr, nullptr);
+                std::string out;
+                for (char c : u) { if (c == '\\' || c == '"') out.push_back('\\'); out.push_back(c); }
+                return out;
+            };
+            std::ofstream f(root / L"active-bridge.json", std::ios::binary | std::ios::trunc);
+            if (!f) return false;
+            f << "{\"schema\":1,\"generation\":" << gen << ",\"core_dir_x64\":\"" << esc(v1_dir.wstring())
+              << "\",\"host_exe\":\"" << esc(host_path.wstring()) << "\",\"disabled\":false}";
+            return static_cast<bool>(f);
+        };
+        check(write_ptr(10, host_v1), "write initial active-bridge.json for host_exe refresh test");
+
+        PulseStubConfigV1 cfg{};
+        cfg.size = sizeof(cfg);
+        cfg.version = PULSE_DIALOG_CORE_ABI_VERSION;
+        cfg.flags = PULSE_STUB_FLAG_COM_ONLY;
+        cfg.generation = 10;
+        const auto root_w = root.wstring();
+        const auto v1_dir_w = v1_dir.wstring();
+        const auto host_v1_w = host_v1.wstring();
+        cfg.bridge_root = root_w.c_str();
+        cfg.core_dir = v1_dir_w.c_str();
+        cfg.host_exe = host_v1_w.c_str();
+        check(SUCCEEDED(CoreInitialize(&cfg)), "CoreInitialize seeds stub bridge_root and v1 host_exe");
+        check(StubHostExe() == host_v1.wstring(), "StubHostExe initially returns v1 host_exe");
+
+        // Simulate upgrade pruning old AppRuntime\v1\pulse.exe and advancing active-bridge.json to v2.
+        std::filesystem::remove(host_v1, ec);
+        check(write_ptr(11, host_v2), "atomically update active-bridge.json host_exe to v2");
+        const auto refreshed = StubHostExe();
+        check(refreshed == host_v2.wstring(),
+              "StubHostExe immediately refreshes to v2 host_exe when cached v1 path is missing");
+
+        // Also verify periodic refresh after 250ms cache TTL even when v2 still exists on disk.
+        const auto host_v3 = v2_dir / L"pulse_v3.exe";
+        { std::ofstream f(host_v3, std::ios::binary); f << "v3"; }
+        write_ptr(12, host_v3);
+        Sleep(280);
+        check(StubBridgeEnabled() && StubHostExe() == host_v3.wstring(),
+              "StubBridgeEnabled refreshes host_exe to v3 after 250ms TTL");
+
+        stub_managed.store(false, std::memory_order_release);
+        std::filesystem::remove_all(root, ec);
+    }
     if (argc == 2 && wcscmp(argv[1], L"--ui") == 0) failures += UiFixture();
     CoUninitialize();
     log::Shutdown();

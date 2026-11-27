@@ -1,7 +1,10 @@
 #include "../common/picker_open_filter.h"
 #include "../common/picker_shell_namespace.h"
 #include "../common/windows_compat.h"
+#include "../common/localization.h"
 #include "../ui/folder_picker_loader.h"
+#include "../ui/picker_format_segments.h"
+#include "../ui/picker_sidebar_model.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -45,6 +48,266 @@ std::unique_ptr<PickerValidation> WaitValidation(HWND window) {
 }
 }
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--format-labels") {
+        pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
+        Check(PickerFormatLabels({{L"Text", L"*.txt"}})[0] == L"TXT", "generic Text is shown as concrete TXT format");
+        Check(PickerFormatLabels({{L"text", L"*.TXT"}})[0] == L"TXT", "extension-derived format is consistently uppercase");
+        Check(PickerFormatLabels({{L"All", L"*.*"}})[0] == L"任意格式", "wildcard uses localized format meaning rather than caller All");
+        Check(PickerFormatLabels({{L"Images", L"*.png;*.jpg"}})[0] == L"PNG", "generic Images is replaced by primary concrete format");
+        Check(PickerFormatLabels({{L"JPEG", L"*.jpg;*.jpeg"}})[0] == L"JPEG", "recognized alternate extension keeps JPEG label");
+        Check(PickerFormatLabels({{L"WebP", L"*.webp"}})[0] == L"WebP", "recognized WebP casing is retained");
+        Check(PickerFormatLabels({{L"Photoshop", L"*.psd;*.pdd"}})[0] == L"Photoshop", "Photoshop family name remains meaningful");
+        Check(PickerFilterName({L"Text (*.txt)", L"*.txt"}) == L"Text", "original caller label remains available for menus and tooltips");
+        std::cout << "failures=" << failures << '\n'; return failures ? 1 : 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--save-format-visibility") {
+        std::cout << std::unitbuf;
+        try {
+            const auto base = std::filesystem::absolute(L"bench_data") / (L"pulse_save_visibility_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64()));
+            Check(std::filesystem::create_directory(base), "create isolated save visibility fixture");
+            for (const auto* name : {L"a.txt", L"a.png", L"b.bin", L"hidden.png", L"protected.bin"}) std::ofstream(base / name) << "sample";
+            std::filesystem::create_directory(base / L"folder");
+            Check(SetFileAttributesW((base / L"hidden.png").c_str(), FILE_ATTRIBUTE_HIDDEN) != FALSE, "set hidden sample");
+            Check(SetFileAttributesW((base / L"protected.bin").c_str(), FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != FALSE, "set protected sample");
+            for (const DWORD native : {DWORD(0), DWORD(FOS_ALLNONSTORAGEITEMS), DWORD(FOS_STRICTFILETYPES)}) {
+                PickerOptions options; options.native_options = native; options.filters = {{L"Text", L"*.txt"}, {L"Images", L"*.png"}, {L"All", L"*.*"}};
+                const auto save = ReadPickerListing(base.wstring(), PickerMode::Save, options);
+                Check(!save.error && save.entries.size() == 4, "save keeps mismatched files but excludes hidden and protected");
+                const auto open = ReadPickerListing(base.wstring(), PickerMode::File, options);
+                Check(!open.error && open.entries.size() == 2, "Open listing remains strict to current filter");
+                Check(!PickerMatchesFilter(L"a.png", PickerMode::Save, options), "visibility never broadens format acceptance");
+                options.filter_index = 1;
+                const auto switched = ReadPickerListing(base.wstring(), PickerMode::Save, options);
+                Check(!switched.error && switched.entries.size() == 4, "save format switch retains complete visible listing");
+                options.save_same_format_only = true;
+                const auto same_only = ReadPickerListing(base.wstring(), PickerMode::Save, options);
+                Check(!same_only.error && same_only.entries.size() == 2 &&
+                      std::any_of(same_only.entries.begin(), same_only.entries.end(), [](const auto& e){ return e.name == L"a.png"; }) &&
+                      std::none_of(same_only.entries.begin(), same_only.entries.end(), [](const auto& e){ return e.name == L"a.txt" || e.name == L"b.bin"; }),
+                      "save_same_format_only keeps folders and matching format files only");
+                options.save_same_format_only = false;
+                options.search = L"b.bin";
+                const auto searched = ReadPickerListing(base.wstring(), PickerMode::Save, options);
+                Check(!searched.error && searched.entries.size() == 1 && searched.entries[0].name == L"b.bin", "search still restricts mismatched Save rows");
+                options.search.clear(); options.show_hidden = true;
+                Check(ReadPickerListing(base.wstring(), PickerMode::Save, options).entries.size() == 5, "hidden toggle applies before Save format display");
+                options.show_protected_os_files = true;
+                Check(ReadPickerListing(base.wstring(), PickerMode::Save, options).entries.size() == 6, "protected toggle remains independent");
+                options.filter_index = 2;
+                Check(ReadPickerListing(base.wstring(), PickerMode::Save, options).entries.size() == 6, "all-files Save shows the same complete list");
+            }
+            for (const auto* name : {L"hidden.png", L"protected.bin"}) SetFileAttributesW((base / name).c_str(), FILE_ATTRIBUTE_NORMAL);
+            std::error_code ec; Check(std::filesystem::remove_all(base, ec) == 7 && !ec, "remove only owned save visibility fixture");
+            std::cout << "failures=" << failures << '\n'; return failures ? 1 : 0;
+        } catch (const std::exception& error) { std::cout << "[FAIL] save visibility fixture: " << error.what() << std::endl; return 1; }
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--sidebar-common") {
+        const auto leaf = [](const std::wstring& path) {
+            const size_t slash = path.find_last_of(L"\\/");
+            return slash == std::wstring::npos ? path : path.substr(slash + 1);
+        };
+        Check(PickerParentPath(L"C:\\a\\b") == L"C:\\a", "parent of a nested folder");
+        Check(PickerParentPath(L"C:\\a\\") == L"C:\\", "parent of a top folder is the drive root");
+        Check(PickerParentPath(L"C:\\").empty(), "a drive root has no parent");
+        Check(PickerParentPath(L"\\\\nas\\share\\print") == L"\\\\nas\\share", "parent inside a share is the share");
+        Check(PickerParentPath(L"\\\\nas\\share").empty(), "a share root has no parent");
+
+        PickerCommonInput in;
+        in.pinned = {L"D:\\fin\\contracts"};
+        in.history = {{L"C:\\Users\\u\\Desktop", L""}, {L"C:\\Users\\u\\Desktop\\Print", L""},
+                      {L"\\\\nas\\share\\print", L""}, {L"D:\\fin\\bills", L""}, {L"D:\\a", L""},
+                      {L"D:\\b", L""}, {L"D:\\c", L""}};
+        in.last_location = L"C:\\Users\\u\\Desktop";
+        in.favorites = {L"d:\\FIN\\bills\\"};
+        auto rows = BuildPickerCommonRows(in, leaf);
+        Check(rows.size() == 6, "capped at six rows");
+        Check(rows[0].pinned && rows[0].path == L"D:\\fin\\contracts", "pinned folder comes first");
+        Check(rows[1].last && !rows[1].pinned, "the last place is marked");
+        Check(std::count_if(rows.begin(), rows.end(), [](const auto& r) { return r.last; }) == 1, "only one row is the last place");
+        Check(rows[2].hint == L"Desktop" && rows[3].hint == L"share", "same names get their parent folder");
+        Check(rows[1].hint.empty() && rows[4].hint.empty(), "unique names get no hint");
+        Check(rows[4].favorite, "a favorite is marked whatever its spelling");
+        Check(std::none_of(rows.begin(), rows.end(), [](const auto& r) { return r.from_pulse; }), "own history never borrows Pulse rows");
+
+        in.forgotten = {L"c:\\users\\u\\desktop\\print\\"};
+        rows = BuildPickerCommonRows(in, leaf);
+        Check(std::none_of(rows.begin(), rows.end(), [](const auto& r) { return r.path == L"C:\\Users\\u\\Desktop\\Print"; }),
+              "a forgotten folder is left out");
+        Check(std::all_of(rows.begin(), rows.end(), [](const auto& r) { return r.hint.empty(); }),
+              "the hint goes away once the name is unique again");
+
+        PickerCommonInput deep;
+        deep.history = {{L"D:\\x\\docs\\print", L""}, {L"E:\\x\\docs\\print", L""}};
+        rows = BuildPickerCommonRows(deep, leaf);
+        Check(rows.size() == 2 && rows[0].hint == L"D:\\x\\docs" && rows[1].hint == L"E:\\x\\docs",
+              "parents with the same name fall back to their full path");
+
+        PickerCommonInput distant;
+        for (int i = 0; i < 10; ++i) distant.history.push_back({L"D:\\f" + std::to_wstring(i), L""});
+        distant.last_location = L"D:\\f9";
+        rows = BuildPickerCommonRows(distant, leaf);
+        Check(rows.size() == 6 && rows.back().path == L"D:\\f9" && rows.back().last, "a far last place takes the last slot");
+
+        PickerCommonInput fresh;
+        fresh.pulse_recent = {{L"C:\\Users\\u\\Downloads", L""}, {L"D:\\proj", L"Project"}};
+        rows = BuildPickerCommonRows(fresh, leaf);
+        Check(rows.size() == 2 && rows[0].from_pulse && rows[1].label == L"Project", "a program without history borrows Pulse's recent folders");
+        fresh.history = {{L"D:\\own", L""}};
+        rows = BuildPickerCommonRows(fresh, leaf);
+        Check(rows.size() == 1 && !rows[0].from_pulse, "Pulse rows stop once the program has its own");
+
+        PickerCommonInput many;
+        for (int i = 0; i < 8; ++i) many.pinned.push_back(L"D:\\p" + std::to_wstring(i));
+        many.history = {{L"D:\\h", L""}};
+        rows = BuildPickerCommonRows(many, leaf);
+        Check(rows.size() == 8 && std::all_of(rows.begin(), rows.end(), [](const auto& r) { return r.pinned; }),
+              "every pinned folder stays even past the cap");
+        std::cout << "failures=" << failures << '\n'; return failures ? 1 : 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--format-segments") {
+        pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
+        const std::vector<PickerFilter> photoshop = {
+            {L"Photoshop (*.PSD;*.PDD;*.PSDT)", L"*.PSD;*.PDD;*.PSDT"}, {L"大型文档格式 (*.PSB)", L"*.PSB"},
+            {L"BMP (*.BMP;*.RLE;*.DIB)", L"*.BMP;*.RLE;*.DIB"}, {L"Photoshop EPS (*.EPS)", L"*.EPS"},
+            {L"Photoshop DCS 1.0 (*.EPS)", L"*.EPS"}, {L"Photoshop DCS 2.0 (*.EPS)", L"*.EPS"},
+            {L"JPEG (*.JPG;*.JPEG;*.JPE)", L"*.JPG;*.JPEG;*.JPE"}, {L"JPEG 2000 (*.JPF;*.JPX;*.JP2)", L"*.JPF;*.JPX;*.JP2"},
+            {L"Photoshop PDF (*.PDF;*.PDP)", L"*.PDF;*.PDP"}, {L"PNG (*.PNG;*.PNS)", L"*.PNG;*.PNS"},
+            {L"TIFF (*.TIF;*.TIFF)", L"*.TIF;*.TIFF"}, {L"WebP (*.WEBP)", L"*.WEBP"}};
+        const auto labels = PickerFormatLabels(photoshop);
+        Check(labels[0] == L"Photoshop" && labels[1] == L"PSB" && labels[2] == L"BMP" && labels[6] == L"JPEG" &&
+              labels[7] == L"JPEG 2000" && labels[8] == L"PDF" && labels[9] == L"PNG" && labels[11] == L"WebP",
+              "format labels: short program names, else the first extension");
+        Check(labels[3] == L"Photoshop EPS" && labels[4] == L"Photoshop DCS 1.0" && labels[5] == L"Photoshop DCS 2.0",
+              "format labels that would repeat keep the program's names");
+        Check(PickerFilterExtensions(photoshop[6]) == std::vector<std::wstring>{L"jpg", L"jpeg", L"jpe"},
+              "format extensions keep pattern order in lower case");
+        const auto many = PickerFormatSegmentOrder(photoshop, 9, {6, 0});
+        Check(many == std::vector<int>{0, 1, 6, 9, kPickerFormatMore},
+              "many formats: selected and recent inline in program order, then 更多");
+        const std::vector<PickerFilter> notepad = {{L"文本文档 (*.txt)", L"*.txt"}, {L"所有文件 (*.*)", L"*.*"}};
+        Check(PickerFormatSegmentOrder(notepad, 0) == std::vector<int>{0, 1} && PickerFilterIsAny(notepad[1]) &&
+              !PickerFilterIsAny(notepad[0]), "few formats inline, *.* last");
+        const auto notepad_labels = PickerFormatLabels(notepad);
+        Check(notepad_labels[0] == L"TXT" && notepad_labels[1] == L"任意格式", "*.* uses a consistent localized format label");
+        const std::vector<PickerFilter> any_mixed = {{L"All (*.*)", L"*.*"}, {L"A (*.a)", L"*.a"}, {L"B (*.b)", L"*.b"},
+            {L"C (*.c)", L"*.c"}, {L"D (*.d)", L"*.d"}, {L"E (*.e)", L"*.e"}, {L"F (*.f)", L"*.f"}};
+        const auto mixed = PickerFormatSegmentOrder(any_mixed, 0);
+        Check(mixed.size() == 6 && mixed[4] == kPickerFormatMore && mixed[5] == 0,
+              "*.* first in the program's list still shows last, after 更多");
+        Check(PickerFilterName({L"文本文档（*.txt）", L"*.txt"}) == L"文本文档" && PickerFilterName({L"Readme (latest)", L"*.md"}) == L"Readme (latest)",
+              "only a trailing pattern list is dropped from names");
+        std::cout << "failures=" << failures << '\n'; return failures ? 1 : 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--display-settings") {
+        const auto base = std::filesystem::current_path() / L"bench_data" /
+            (L"picker-display-files-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+        Check(std::filesystem::create_directories(base), "create isolated attribute fixture");
+        const DWORD attrs[] = {FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM,
+                               FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM};
+        for (int i = 0; i < 4; ++i) {
+            const auto file = base / (std::to_wstring(i) + L".txt");
+            const auto folder = base / (std::to_wstring(i) + L".folder");
+            std::ofstream(file) << "visibility sample";
+            std::filesystem::create_directory(folder);
+            Check(SetFileAttributesW(file.c_str(), attrs[i]) != FALSE, "set actual file attributes");
+            Check(SetFileAttributesW(folder.c_str(), attrs[i] | FILE_ATTRIBUTE_DIRECTORY) != FALSE, "set actual directory attributes");
+        }
+        for (int mask = 0; mask < 4; ++mask) {
+            PickerOptions options; options.show_hidden = (mask & 1) != 0;
+            options.show_protected_os_files = (mask & 2) != 0;
+            options.filters = {{L"Text", L"*.txt"}};
+            const auto listing = ReadPickerListing(base.wstring(), PickerMode::File, options);
+            const size_t visible = 2 + (options.show_hidden ? 1 : 0) +
+                (options.show_hidden && options.show_protected_os_files ? 1 : 0);
+            Check(!listing.error && listing.entries.size() == visible * 2, "disk listing matches main two-gate visibility");
+            Check(listing.filter_counts == std::vector<uint32_t>{static_cast<uint32_t>(visible)} &&
+                  listing.category_counts[0] == visible, "filter counts use identical visibility policy");
+            for (int i = 0; i < 4; ++i) {
+                const bool expected = !(attrs[i] & FILE_ATTRIBUTE_HIDDEN) ||
+                    (options.show_hidden && (!(attrs[i] & FILE_ATTRIBUTE_SYSTEM) || options.show_protected_os_files));
+                Check(PickerAllowsAttributes(attrs[i], options) == expected &&
+                    PickerShowsEntry(attrs[i], std::to_wstring(i) + L".txt", PickerMode::File, options) == expected,
+                    "normal hidden system-only protected exact policy");
+            }
+            options.native_options = FOS_ALLNONSTORAGEITEMS;
+            const auto shell = ReadPickerListing(base.wstring(), PickerMode::File, options);
+            Check(!shell.error && shell.entries.size() == visible * 2, "Shell enumeration matches main two-gate visibility");
+        }
+        for (int i = 0; i < 4; ++i) {
+            SetFileAttributesW((base / (std::to_wstring(i) + L".txt")).c_str(), FILE_ATTRIBUTE_NORMAL);
+            SetFileAttributesW((base / (std::to_wstring(i) + L".folder")).c_str(), FILE_ATTRIBUTE_DIRECTORY);
+        }
+        std::error_code ec; Check(std::filesystem::remove_all(base, ec) == 9 && !ec, "remove owned fixture only");
+        std::cout << "failures=" << failures << '\n'; return failures ? 1 : 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--filter-bar") {
+        // The open filter bar: whole-folder counts per type and category, and the
+        // category / time view filters, from one real listing.
+        const auto base = std::filesystem::current_path() / L"bench_data" /
+            (L"picker-filter-bar-" + std::to_wstring(GetCurrentProcessId()));
+        std::filesystem::create_directories(base / L"sub");
+        const auto touch = [&](const wchar_t* name, int days_old) {
+            const auto path = base / name;
+            { std::ofstream(path) << "x"; }
+            FILETIME now{}; GetSystemTimeAsFileTime(&now);
+            ULARGE_INTEGER t{}; t.LowPart = now.dwLowDateTime; t.HighPart = now.dwHighDateTime;
+            t.QuadPart -= static_cast<uint64_t>(days_old) * 864000000000ull;
+            FILETIME stamp{t.LowPart, t.HighPart};
+            HANDLE file = CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (file != INVALID_HANDLE_VALUE) { SetFileTime(file, nullptr, nullptr, &stamp); CloseHandle(file); }
+        };
+        touch(L"new.png", 0); touch(L"old.png", 30); touch(L"notes.txt", 30); touch(L"pack.zip", 2);
+        PickerOptions options;
+        options.filters = {{L"PNG (*.png)", L"*.png"}, {L"Text (*.txt)", L"*.txt"}, {L"All (*.*)", L"*.*"}};
+        options.filter_index = 2;
+        options.category_of = [](std::wstring_view name) {
+            return name.ends_with(L".png") ? 1 : name.ends_with(L".zip") ? 5 : 6;
+        };
+        FILETIME now{}; GetSystemTimeAsFileTime(&now);
+        const uint64_t ticks = (static_cast<uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+        options.new_since = ticks - 864000000000ull * 7;
+        auto listing = ReadPickerListing(base.wstring(), PickerMode::File, options);
+        Check(listing.counted && listing.filter_counts == std::vector<uint32_t>{2, 1, 4}, "filter bar counts files per type over the whole folder");
+        Check(listing.category_counts[0] == 4 && listing.category_counts[1] == 2 && listing.category_counts[5] == 1 &&
+              listing.category_counts[6] == 1, "filter bar counts Pulse categories");
+        Check(listing.new_count == 2, "新文件 counts files of the current type modified since last time");
+        options.category = 1;
+        listing = ReadPickerListing(base.wstring(), PickerMode::File, options);
+        size_t files = 0, folders = 0;
+        for (const auto& entry : listing.entries) (entry.kind == PickerEntryKind::Folder ? folders : files) += 1;
+        Check(files == 2 && folders == 1 && listing.filter_counts == std::vector<uint32_t>{2, 1, 4},
+              "a category shows only its files, keeps folders, and leaves the counts whole");
+        options.category = 0;
+        options.modified_after = options.new_since;
+        listing = ReadPickerListing(base.wstring(), PickerMode::File, options);
+        files = folders = 0;
+        for (const auto& entry : listing.entries) (entry.kind == PickerEntryKind::Folder ? folders : files) += 1;
+        Check(files == 2 && folders == 1, "a time filter hides older files only");
+        options.modified_after = 0; options.only_new = true;
+        listing = ReadPickerListing(base.wstring(), PickerMode::File, options);
+        files = folders = 0;
+        bool marked = true;
+        for (const auto& entry : listing.entries) {
+            if (entry.kind == PickerEntryKind::Folder) ++folders;
+            else { ++files; marked &= entry.is_new; }
+        }
+        Check(files == 2 && folders == 1 && marked, "only-new independently filters old files and marks new rows");
+        options.modified_after = ticks + 864000000000ull;
+        listing = ReadPickerListing(base.wstring(), PickerMode::File, options);
+        Check(listing.entries.size() == 1 && listing.entries[0].kind == PickerEntryKind::Folder,
+              "date and only-new filters intersect while folders remain navigable");
+        options.only_new = false; options.modified_after = 0;
+        listing = ReadPickerListing(base.wstring(), PickerMode::File, options);
+        Check(std::count_if(listing.entries.begin(), listing.entries.end(), [](const auto& e){return e.is_new;}) == 2,
+              "new badges remain visible when only-new filtering is off");
+        options.new_since = 0; options.only_new = true;
+        listing = ReadPickerListing(base.wstring(), PickerMode::File, options);
+        Check(listing.entries.size() == 5 && std::none_of(listing.entries.begin(), listing.entries.end(), [](const auto& e){return e.is_new;}),
+              "missing per-program history never hides files or invents new badges");
+        std::error_code ignored;
+        Check(std::filesystem::remove_all(base, ignored) > 0, "filter bar fixture removed");
+        std::cout << "failures=" << failures << '\n'; return failures ? 1 : 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--createprompt-open") {
         const auto base = std::filesystem::current_path() / L"bench_data" /
             (L"picker-createprompt-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));

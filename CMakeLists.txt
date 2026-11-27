@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.25)
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/version.txt" PULSE_VERSION LIMIT_COUNT 1)
 project(Pulse VERSION ${PULSE_VERSION} LANGUAGES C CXX)
 
@@ -342,6 +342,16 @@ add_executable(pulse_d2d_list WIN32 src/bench/d2d_list.cpp)
 target_link_libraries(pulse_d2d_list PRIVATE d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore)
 
 # Fluent component visual contract: dark/light/high-contrast regression PNGs.
+add_executable(pulse_tag_manager_reentry_test EXCLUDE_FROM_ALL
+    src/bench/tag_manager_reentry_test.cpp src/ui/tag_manager_panel.cpp
+    src/ui/fluent_components.cpp src/ui/tab_shape.cpp src/ui/typography.cpp
+    src/ui/ui_compositor.cpp src/ui/window_helpers.cpp)
+target_link_libraries(pulse_tag_manager_reentry_test PRIVATE
+    d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 windowscodecs comctl32
+    pulse_localization)
+pulse_enable_lumatext(pulse_tag_manager_reentry_test)
+target_compile_options(pulse_tag_manager_reentry_test PRIVATE /WX)
+
 add_executable(pulse_fluent_gallery WIN32
     src/bench/fluent_components_gallery.cpp
     src/ui/fluent_components.cpp
@@ -385,6 +395,25 @@ pulse_enable_lumatext(pulse_dialog_gallery)
 
 target_link_libraries(pulse_dialog_gallery PRIVATE shlwapi uuid)
 
+# Native confirmation first-frame and idle-paint regression, isolated desktop.
+add_executable(pulse_confirm_first_frame_test
+    src/bench/confirm_first_frame_test.cpp
+    src/bench/dialog_gallery.rc
+    src/ui/dialog_lifecycle.cpp
+    src/ui/confirm_dialog.cpp
+    src/ui/confirm_dialog_view.cpp
+    src/ui/fluent_components.cpp
+    src/ui/tab_shape.cpp
+    src/ui/typography.cpp
+    src/ui/ui_compositor.cpp
+    src/bench/confirm_caption_backdrop.cpp)
+target_compile_options(pulse_confirm_first_frame_test PRIVATE /W4 /permissive- /utf-8)
+target_link_options(pulse_confirm_first_frame_test PRIVATE /MANIFEST:NO)
+target_link_libraries(pulse_confirm_first_frame_test PRIVATE
+    d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 windowscodecs comctl32
+    uxtheme shell32 shlwapi uuid pulse_localization)
+pulse_enable_lumatext(pulse_confirm_first_frame_test)
+
 add_executable(pulse_extension_transfer_confirmation_test
     src/bench/extension_transfer_confirmation_test.cpp
     src/bench/localization_test.rc
@@ -406,8 +435,16 @@ target_link_libraries(pulse_file_picker_view_test PRIVATE d3d11 d2d1 dwrite dxgi
     dwmapi shcore ole32 windowscodecs comctl32 uxtheme shell32 shlwapi uuid pulse_localization)
 target_link_options(pulse_file_picker_view_test PRIVATE /MANIFEST:NO)
 pulse_enable_lumatext(pulse_file_picker_view_test)
+# Picker archive selection reuses the isolated 7-Zip worker protocol, never the decoder in process.
+add_library(pulse_picker_archive_client STATIC EXCLUDE_FROM_ALL
+    extensions/7zip/worker_client.cpp extensions/7zip/worker_ipc.cpp)
+target_link_libraries(pulse_picker_archive_client PUBLIC shell32 ole32 advapi32 bcrypt)
+add_library(pulse_picker_archive_session STATIC EXCLUDE_FROM_ALL src/ui/picker_archive_session.cpp)
+target_link_libraries(pulse_picker_archive_session PUBLIC pulse_picker_archive_client)
+
 add_executable(pulse_file_picker_model_test src/bench/file_picker_model_test.cpp
-    src/bench/localization_test.rc src/ui/folder_picker_model.cpp src/ui/folder_picker_loader.cpp)
+    src/bench/localization_test.rc src/ui/folder_picker_model.cpp src/ui/folder_picker_loader.cpp src/ui/picker_format_segments.cpp
+    src/ui/picker_sidebar_model.cpp)
 target_link_libraries(pulse_file_picker_model_test PRIVATE shell32 ole32 uuid pulse_localization pulse_runtime_log)
 # The loader enumerates with the main window's fs::EnumerateDirectory.
 target_link_libraries(pulse_file_picker_model_test PRIVATE pulse_fs_watch)
@@ -595,6 +632,7 @@ list(APPEND PULSE_APP_SOURCES src/index/network_agent_client.cpp)
 if(PULSE_APP_SOURCES)
     add_executable(pulse WIN32 ${PULSE_APP_SOURCES})
     target_sources(pulse PRIVATE extensions/7zip/text.cpp)
+    target_link_libraries(pulse PRIVATE pulse_picker_archive_client)
     # The assistant's answers are Markdown, parsed by the same md4c as Quick Look.
     target_sources(pulse PRIVATE src/preview_host/markdown_document.cpp third_party/md4c/md4c.c)
     target_compile_definitions(pulse PRIVATE MD4C_USE_UTF16)
@@ -615,12 +653,12 @@ if(PULSE_APP_SOURCES)
     target_sources(pulse PRIVATE src/app/pulse.rc src/common/ffmpeg_tool.cpp src/common/picker_owner_guard.cpp src/common/picker_layout_settings.cpp src/common/menu_icon.cpp)
     if(PULSE_TEST_HOOKS_EFFECTIVE)
         target_sources(pulse PRIVATE src/bench/operation_pill_probe.cpp)
-        target_sources(pulse PRIVATE src/bench/quick_preview_audit_test.cpp src/bench/playback_ui_test.cpp)
+        target_sources(pulse PRIVATE src/bench/quick_preview_audit_test.cpp src/bench/quick_preview_gallery_probe.cpp src/bench/playback_ui_test.cpp)
         set_source_files_properties(src/bench/playback_ui_test.cpp PROPERTIES COMPILE_DEFINITIONS PULSE_WITH_TEST_HOOKS=1)
         # Scope the probe define to dispatch and its settings fixture helpers.
         set_source_files_properties(src/app/app_main.cpp src/app/settings_flow_test.cpp src/app/shortcut_flow_test.cpp src/app/settings_ui.cpp src/app/operation_intent_ui_test.cpp
             src/app/search_flow_test.cpp src/app/dialog_jump.cpp src/app/global_search_controller.cpp src/ui/toolbar_picker.cpp src/ui/folder_picker_dialog.cpp src/ui/drag_stack.cpp
-            src/app/picker_host_mode.cpp
+            src/app/picker_host_mode.cpp src/app/picker_saved_followup.cpp
             PROPERTIES COMPILE_DEFINITIONS PULSE_WITH_TEST_HOOKS=1)
         target_sources(pulse PRIVATE src/bench/file_picker_dialog_test.cpp src/bench/file_picker_operations_test.cpp src/bench/picker_shared_places_ui_test.cpp)
     endif()
@@ -799,6 +837,11 @@ add_executable(pulse_ffmpeg_playback_test src/bench/ffmpeg_playback_test.cpp
 target_link_libraries(pulse_ffmpeg_playback_test PRIVATE user32 winmm ole32 mfuuid)
 add_executable(pulse_cover_palette_test src/bench/cover_palette_test.cpp)
 
+# Deterministic ETA replay and uniquely owned native-delete counter fixtures.
+add_executable(pulse_transfer_eta_test src/bench/transfer_eta_estimator_test.cpp)
+add_executable(pulse_recursive_eta_test src/bench/recursive_eta_test.cpp)
+add_executable(pulse_eta_reference_compare src/bench/eta_reference_compare.cpp)
+
 add_executable(pulse_ops_test
     src/bench/ops_test_main.cpp
     src/bench/retry_template_test.cpp
@@ -886,6 +929,7 @@ target_link_libraries(pulse_elevated_session_test PRIVATE ole32 shell32 advapi32
 add_dependencies(pulse_elevated_session_test pulse_elevated_test_host)
 
 file(GLOB_RECURSE PULSE_SHELL_SOURCES CONFIGURE_DEPENDS src/shell_host/*.cpp)
+list(APPEND PULSE_SHELL_SOURCES src/common/menu_icon.cpp)
 if(PULSE_SHELL_SOURCES)
     add_executable(pulse_shell WIN32 ${PULSE_SHELL_SOURCES})
 target_link_libraries(pulse_shell PRIVATE ole32 oleaut32 shell32 uuid advapi32 shlwapi version pulse_crash_reporter)
@@ -1035,6 +1079,7 @@ target_link_libraries(pulse_shell_recycle_test PRIVATE ole32 shell32 uuid shlwap
 
 add_executable(pulse_ctx_handlers_test src/bench/ctx_handlers_test.cpp
     src/shell_host/ctx_handlers.cpp src/shell_host/packaged_ctx_handlers.cpp)
+target_sources(pulse_ctx_handlers_test PRIVATE src/common/menu_icon.cpp)
 target_link_libraries(pulse_ctx_handlers_test PRIVATE ole32 oleaut32 shell32 uuid shlwapi)
 
 add_executable(pulse_start_pin_menu_test src/bench/start_pin_menu_test.cpp src/ipc/shell_client.cpp)
@@ -1043,6 +1088,7 @@ target_link_libraries(pulse_start_pin_menu_test PRIVATE ole32 shell32 uuid shlwa
 add_executable(pulse_isolated_start_pin_test src/bench/isolated_start_pin_test.cpp
     src/shell_host/isolated_start_pin.cpp src/shell_host/ctx_handlers.cpp
     src/shell_host/packaged_ctx_handlers.cpp)
+target_sources(pulse_isolated_start_pin_test PRIVATE src/common/menu_icon.cpp)
 target_link_libraries(pulse_isolated_start_pin_test PRIVATE ole32 shell32 uuid shlwapi advapi32)
 add_dependencies(pulse_isolated_start_pin_test pulse_shell)
 add_dependencies(pulse_start_pin_menu_test pulse_shell)
@@ -1698,6 +1744,11 @@ add_executable(pulse_link_destination_test src/bench/link_destination_test.cpp s
 target_link_libraries(pulse_link_destination_test PRIVATE pulse_localization shell32 shlwapi netapi32 ole32 uuid)
 add_executable(pulse_entry_sort_key_test src/bench/entry_sort_key_test.cpp src/app/entry_group.cpp src/app/entry_sort.cpp)
 target_link_libraries(pulse_entry_sort_key_test PRIVATE pulse_localization shlwapi)
+# Quick search sort / group order (pure model behind the popup's 排序 and 分组).
+add_executable(pulse_global_search_arrange_test src/bench/global_search_arrange_test.cpp src/app/global_search_arrange.cpp
+    src/app/entry_group.cpp src/app/entry_sort.cpp src/index/search_kinds.cpp src/index/index_query.cpp
+    src/index/filename_pinyin.cpp)
+target_link_libraries(pulse_global_search_arrange_test PRIVATE pulse_localization shlwapi)
 add_executable(pulse_link_pill_test src/bench/link_pill_test.cpp)
 target_link_libraries(pulse_link_pill_test PRIVATE user32)
 # Smart list dates: which days read as 周三 and which as 上周五 (pure).
@@ -2348,7 +2399,7 @@ add_executable(pulse_content_search_snapshot_test src/bench/content_search_snaps
 add_executable(pulse_advanced_search_query_test src/bench/advanced_search_query_test.cpp
     src/bench/dialog_gallery.rc
     src/ui/dialog_lifecycle.cpp
-    src/ui/advanced_search_dialog.cpp src/ui/edit_host.cpp src/ui/fluent_components.cpp
+    src/ui/advanced_search_dialog.cpp src/ui/edit_host.cpp src/ui/fluent_components.cpp src/ui/ai_panel_icons.cpp
     src/ui/tab_shape.cpp src/ui/typography.cpp src/ui/ui_compositor.cpp src/ui/window_helpers.cpp
     src/app/search_query.cpp src/app/search_query_rewrite.cpp
     src/index/index_query.cpp src/index/search_kinds.cpp src/index/filename_pinyin.cpp)
@@ -3366,6 +3417,14 @@ if(PULSE_BUILD_PROGRESS_UI_TESTS)
     endforeach()
     # Address search editor stability reuses the compiled Pulse objects.
     add_executable(pulse_address_edit_stability_test src/bench/address_edit_stability_test.cpp $<TARGET_OBJECTS:pulse>)
+    add_executable(pulse_breadcrumb_address_test EXCLUDE_FROM_ALL src/bench/breadcrumb_address_test.cpp $<TARGET_OBJECTS:pulse>)
+    target_link_libraries(pulse_breadcrumb_address_test PRIVATE "$<TARGET_PROPERTY:pulse,LINK_LIBRARIES>")
+    foreach(breadcrumb_property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_OPTIONS)
+        get_target_property(breadcrumb_value pulse ${breadcrumb_property})
+        if(breadcrumb_value)
+            set_property(TARGET pulse_breadcrumb_address_test PROPERTY ${breadcrumb_property} "${breadcrumb_value}")
+        endif()
+    endforeach()
     target_link_libraries(pulse_address_edit_stability_test PRIVATE "$<TARGET_PROPERTY:pulse,LINK_LIBRARIES>")
     foreach(progress_property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_OPTIONS)
         get_target_property(progress_value pulse ${progress_property})
@@ -3573,3 +3632,111 @@ pulse_enable_lumatext(pulse_tree_transfer_destination_test)
 include(cmake/ops_interactive_test.cmake)
 include(cmake/SmallFilesLiveProbe.cmake)
 include(cmake/CopyDiagnosticsProbe.cmake)
+
+include(cmake/AnimationDialogTests.cmake OPTIONAL)
+include(cmake/AnimationListTests.cmake OPTIONAL)
+include(cmake/AnimationAuxTests.cmake OPTIONAL)
+include(cmake/AnimationCoreTests.cmake OPTIONAL)
+
+if(TARGET pulse)
+    add_executable(pulse_row_action_input_test EXCLUDE_FROM_ALL
+        src/bench/row_action_input_test.cpp $<TARGET_OBJECTS:pulse>)
+    target_link_libraries(pulse_row_action_input_test PRIVATE "$<TARGET_PROPERTY:pulse,LINK_LIBRARIES>")
+    foreach(prop INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_OPTIONS)
+        get_target_property(value pulse ${prop})
+        if(value)
+            set_property(TARGET pulse_row_action_input_test PROPERTY ${prop} "${value}")
+        endif()
+    endforeach()
+endif()
+
+include(cmake/CtrlSearchTests.cmake)
+
+include(cmake/AnimationIntegrationTests.cmake OPTIONAL)
+include(cmake/ExtensionPartialRedrawTests.cmake OPTIONAL)
+include(cmake/AnimationThemeTests.cmake OPTIONAL)
+include(cmake/ContextMenuReviewTests.cmake)
+
+include(cmake/SystemCtxSettingsTests.cmake)
+
+include(cmake/PulseExplorerProcess.cmake)
+
+include(cmake/FolderIconVisibilityTests.cmake OPTIONAL)
+
+# Picker confirmation consumes tray references, never the backing file.
+get_target_property(PULSE_TRAY_CONSUME_MODEL_SOURCES pulse_selection_caps_test SOURCES)
+list(REMOVE_ITEM PULSE_TRAY_CONSUME_MODEL_SOURCES src/bench/selection_caps_test.cpp)
+add_executable(pulse_picker_tray_consume_test EXCLUDE_FROM_ALL src/bench/picker_tray_consume_test.cpp ${PULSE_TRAY_CONSUME_MODEL_SOURCES})
+target_link_libraries(pulse_picker_tray_consume_test PRIVATE user32 shell32 ole32 uuid advapi32 shlwapi netapi32 secur32 pulse_localization pulse_runtime_log pulse_sqlite)
+
+add_executable(pulse_picker_tray_ui_test EXCLUDE_FROM_ALL src/bench/picker_jump_ui_test.cpp src/bench/dialog_gallery.rc ${PULSE_TRAY_CONSUME_MODEL_SOURCES})
+target_compile_definitions(pulse_picker_tray_ui_test PRIVATE PULSE_PICKER_TRAY_CONSUME_TEST=1)
+target_link_libraries(pulse_picker_tray_ui_test PRIVATE user32 shell32 ole32 uuid advapi32 shlwapi netapi32 secur32 pulse_localization pulse_runtime_log pulse_sqlite)
+target_link_options(pulse_picker_tray_ui_test PRIVATE /MANIFEST:NO)
+
+add_executable(pulse_picker_archive_runtime_test EXCLUDE_FROM_ALL src/bench/picker_archive_runtime_test.cpp)
+target_link_libraries(pulse_picker_archive_runtime_test PRIVATE user32 advapi32)
+add_executable(pulse_picker_archive_session_test EXCLUDE_FROM_ALL src/bench/picker_archive_session_test.cpp)
+target_link_libraries(pulse_picker_archive_session_test PRIVATE pulse_picker_archive_session)
+
+
+get_property(_picker_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_picker_target IN LISTS _picker_targets)
+    get_target_property(_picker_sources ${_picker_target} SOURCES)
+    if(NOT _picker_target STREQUAL "pulse" AND "${_picker_sources}" MATCHES "folder_picker_loader\\.cpp")
+        target_link_libraries(${_picker_target} PRIVATE pulse_picker_archive_session)
+    endif()
+endforeach()
+get_target_property(_picker_archive_loader_sources pulse_file_picker_model_test SOURCES)
+list(REMOVE_ITEM _picker_archive_loader_sources src/bench/file_picker_model_test.cpp)
+get_target_property(_picker_archive_loader_libraries pulse_file_picker_model_test LINK_LIBRARIES)
+add_executable(pulse_picker_archive_loader_test EXCLUDE_FROM_ALL src/bench/picker_archive_loader_test.cpp ${_picker_archive_loader_sources})
+target_link_libraries(pulse_picker_archive_loader_test PRIVATE ${_picker_archive_loader_libraries})
+
+include(cmake/RenameOverlayTests.cmake OPTIONAL)
+
+# Save follow-up observes real writes after picker result delivery.
+add_library(pulse_picker_save_watch STATIC EXCLUDE_FROM_ALL src/common/picker_save_watch.cpp)
+target_include_directories(pulse_picker_save_watch PUBLIC src)
+target_link_libraries(pulse_picker_save_watch PUBLIC user32)
+target_link_libraries(pulse PRIVATE pulse_picker_save_watch)
+get_property(_save_watch_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_save_watch_target IN LISTS _save_watch_targets)
+    get_target_property(_save_watch_sources ${_save_watch_target} SOURCES)
+    if("${_save_watch_sources}" MATCHES "folder_picker_loader\\.cpp")
+        target_link_libraries(${_save_watch_target} PRIVATE pulse_picker_save_watch)
+    endif()
+endforeach()
+add_executable(pulse_picker_save_watch_test EXCLUDE_FROM_ALL src/bench/picker_save_watch_test.cpp)
+target_link_libraries(pulse_picker_save_watch_test PRIVATE pulse_picker_save_watch)
+get_target_property(_picker_saved_toast_sources pulse_file_picker_view_test SOURCES)
+list(REMOVE_ITEM _picker_saved_toast_sources src/bench/file_picker_view_test.cpp src/ui/folder_picker_view.cpp)
+add_executable(pulse_picker_saved_toast_test EXCLUDE_FROM_ALL src/bench/picker_saved_toast_test.cpp
+    src/ui/picker_saved_toast.cpp src/ui/notification_toast.cpp src/ui/snack_style.cpp src/ui/window_material.cpp ${_picker_saved_toast_sources})
+target_compile_definitions(pulse_picker_saved_toast_test PRIVATE PULSE_PICKER_SAVED_TOAST_TEST=1)
+get_target_property(_picker_saved_toast_libs pulse_file_picker_view_test LINK_LIBRARIES)
+target_link_libraries(pulse_picker_saved_toast_test PRIVATE ${_picker_saved_toast_libs})
+target_link_options(pulse_picker_saved_toast_test PRIVATE /MANIFEST:NO)
+pulse_enable_lumatext(pulse_picker_saved_toast_test)
+
+target_link_libraries(pulse_picker_tray_ui_test PRIVATE pulse_picker_save_watch)
+if(TARGET pulse_picker_jump_ui_test)
+    target_link_libraries(pulse_picker_jump_ui_test PRIVATE pulse_picker_save_watch)
+endif()
+get_target_property(_saved_followup_sources pulse_selection_caps_test SOURCES)
+list(REMOVE_ITEM _saved_followup_sources src/bench/selection_caps_test.cpp)
+get_target_property(_saved_followup_libraries pulse_selection_caps_test LINK_LIBRARIES)
+add_executable(pulse_picker_saved_followup_test EXCLUDE_FROM_ALL src/bench/picker_saved_followup_test.cpp ${_saved_followup_sources})
+target_link_libraries(pulse_picker_saved_followup_test PRIVATE ${_saved_followup_libraries})
+add_executable(pulse_picker_save_capability_test EXCLUDE_FROM_ALL src/bench/picker_save_capability_test.cpp)
+target_link_libraries(pulse_picker_save_capability_test PRIVATE user32 advapi32)
+add_executable(pulse_picker_save_request_test EXCLUDE_FROM_ALL src/bench/picker_save_request_test.cpp)
+target_link_libraries(pulse_picker_save_request_test PRIVATE user32 advapi32)
+add_executable(pulse_picker_tag_catalog_shared_test EXCLUDE_FROM_ALL src/bench/picker_tag_catalog_shared_test.cpp)
+target_link_libraries(pulse_picker_tag_catalog_shared_test PRIVATE user32 advapi32)
+
+# Inline details expansion uses the same row facts as the main pane renderer.
+add_executable(pulse_picker_details_tree_test EXCLUDE_FROM_ALL
+    src/bench/picker_details_tree_test.cpp src/ui/folder_picker_model.cpp)
+
+include(cmake/CalcSearchTests.cmake)

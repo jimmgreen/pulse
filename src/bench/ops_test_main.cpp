@@ -1463,6 +1463,13 @@ int RunBigChunkCopyTests() {
     };
     ops::LargeCopyControl control;
     std::vector<std::pair<uint64_t, uint64_t>> reports;
+    unsigned prepared_calls = 0;
+    bool prepared_before_progress = false, prepared_simple = true;
+    control.prepared = [&](bool simple_stream) {
+        ++prepared_calls;
+        prepared_before_progress = reports.empty();
+        prepared_simple = simple_stream;
+    };
     control.report = [&](uint64_t done, uint64_t total) { reports.emplace_back(done, total); };
     for (const bool overlap : {false, true}) {
         ops::LargeCopyPlan plan;
@@ -1470,6 +1477,7 @@ int RunBigChunkCopyTests() {
         plan.overlap = overlap;
         const std::wstring copy = root + (overlap ? L"\\overlap.bin" : L"\\same_disk.bin");
         reports.clear();
+        prepared_calls = 0;
         std::shared_ptr<ops::VerificationStamp> owned;
         const HRESULT hr = ops::CopyLargeFile(source, copy, true, plan, control, &owned);
         Check(hr == S_OK && same_as_source(copy) && owned,
@@ -1477,6 +1485,8 @@ int RunBigChunkCopyTests() {
                       : L"big chunk (one disk): bytes, stream, attributes and modified time match");
         Check(!reports.empty() && reports.back().first == reports.back().second && reports.size() == 5,
               L"big chunk: progress per chunk, ending at the file size");
+        Check(prepared_calls == 1 && prepared_before_progress && !prepared_simple,
+              L"big chunk: preparation precedes bytes and excludes named-stream ETA");
         SetFileAttributesW(copy.c_str(), FILE_ATTRIBUTE_NORMAL);
     }
     {
@@ -1484,9 +1494,11 @@ int RunBigChunkCopyTests() {
         plan.chunk = 16u << 20;
         const std::wstring existing = root + L"\\overlap.bin";
         const uint64_t before = FileHash(existing);
+        prepared_calls = 0;
         Check(ops::CopyLargeFile(source, existing, true, plan, control) == HRESULT_FROM_WIN32(ERROR_FILE_EXISTS) &&
                   FileHash(existing) == before,
               L"big chunk: an existing target is reported and left untouched");
+        Check(prepared_calls == 0, L"big chunk: pre-setup failure cannot train preparation ETA");
         std::atomic<bool> cancel{false}, skip{false}, pause{false};
         ops::LargeCopyControl stop_control;
         stop_control.cancel = &cancel;
@@ -1588,6 +1600,139 @@ int RunSoak(int, wchar_t** argv) {
     return failures ? 1 : 0;
 }
 
+int RunRecursiveEtaValidation() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const auto sandbox = SandboxRoot();
+    if (sandbox.empty()) { CoUninitialize(); return 2; }
+    std::filesystem::create_directories(std::filesystem::path(sandbox).parent_path());
+    const auto root = std::filesystem::path(sandbox).parent_path() /
+        (L"recursive_eta_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64()));
+    if (!CreateDirectoryW(root.c_str(), nullptr)) { CoUninitialize(); return 2; }
+    const std::string owner = "recursive-eta-owned-" + std::to_string(GetCurrentProcessId());
+    { std::ofstream marker(root / L".owned"); marker << owner; }
+    constexpr unsigned groups = 48, per_group = 256, file_count = groups * per_group;
+    const auto make_tree = [&](const std::filesystem::path& tree, unsigned group_count, bool flat) {
+        std::filesystem::create_directory(tree);
+        for (unsigned group = 0; group < group_count; ++group) {
+            const auto folder = flat ? tree : tree / (L"group-" + std::to_wstring(group));
+            if (!flat) std::filesystem::create_directory(folder);
+            for (unsigned file = 0; file < per_group; ++file) {
+                const std::wstring name = flat ? L"file-" + std::to_wstring(group) + L"-" + std::to_wstring(file)
+                    : L"file-" + std::to_wstring(file);
+                std::ofstream output(folder / name, std::ios::binary);
+                if (file % 2) output << "owned recursive eta " << group << ':' << file;
+                if (!output) return false;
+            }
+        }
+        return true;
+    };
+    const auto source = root / L"source", destination = root / L"destination", stream = root / L"stream";
+    Check(make_tree(source, groups, true), L"create unique flat source tree for same-process copy/delete ETA");
+    std::filesystem::create_directory(destination);
+    g_ops.SetJournalPath((root / L"operations.json").wstring());
+    g_ops.Start([] {});
+    struct Result {
+        bool finished = false, monotonic = true;
+        uint64_t elapsed = 0, ranges = 0, copy_hints = 0, samples = 0;
+        ops::OpStatus status;
+    };
+    const auto run = [&](ops::OpRequest request) {
+        Result result;
+        const uint64_t started = GetTickCount64(), task = g_ops.Submit(std::move(request));
+        uint64_t previous = 0, last_print = started;
+        while (task && GetTickCount64() - started < 60000) {
+            for (const auto& done : g_ops.DrainFinishedTasks()) {
+                if (done.task_id == task) {
+                    result.finished = true;
+                    result.status = done.final_status.value_or(g_ops.Status());
+                    result.elapsed = GetTickCount64() - started;
+                }
+            }
+            if (result.finished) break;
+            if (const auto status = g_ops.QueryTask(task); status && status->eta_detail.task_id == task) {
+                const auto& detail = status->eta_detail;
+                ++result.samples;
+                result.monotonic = result.monotonic && detail.processed_items >= previous;
+                previous = detail.processed_items;
+                if (detail.stage == ops::EtaStage::Range && detail.lower_seconds > 0 && detail.upper_seconds >= detail.lower_seconds) {
+                    ++result.ranges;
+                    if (detail.source == ops::EtaSource::RecentCopy) ++result.copy_hints;
+                }
+                if (GetTickCount64() - last_print >= 1000) {
+                    last_print = GetTickCount64();
+                    std::printf("RECURSIVE_LIVE task=%llu stage=%u source=%u done=%llu low=%llu high=%llu active=%d\n",
+                        static_cast<unsigned long long>(task), static_cast<unsigned>(detail.stage), static_cast<unsigned>(detail.source),
+                        static_cast<unsigned long long>(detail.processed_items), static_cast<unsigned long long>(detail.lower_seconds),
+                        static_cast<unsigned long long>(detail.upper_seconds), status->active);
+                }
+            }
+            Sleep(20);
+        }
+        if (!result.finished) { g_ops.CancelCurrent(); Check(false, L"owned ETA operation finishes within its timeout"); }
+        return result;
+    };
+    const auto finish = [&] {
+        g_ops.Stop();
+        if (g_fail == 0) {
+            std::ifstream marker(root / L".owned");
+            const std::string actual((std::istreambuf_iterator<char>(marker)), {});
+            marker.close();
+            if (actual == owner && root.filename().wstring().starts_with(L"recursive_eta_")) {
+                std::error_code error; std::filesystem::remove_all(root, error);
+                Check(!error, L"clean only the exclusively created successful ETA fixture");
+            } else Check(false, L"owned ETA cleanup marker remains valid");
+        }
+        CoUninitialize();
+        std::printf("RECURSIVE_ETA_LIVE_RESULT failures=%d\n", g_fail);
+        return g_fail ? 1 : 0;
+    };
+    auto copied = run(SimpleOp(ops::OpType::Copy, {source.c_str()}, destination.c_str()));
+    Check(copied.finished && copied.status.phase == ops::OpPhase::Completed && copied.status.failed_items == 0,
+        L"same-process copy completes before any delete request");
+    if (g_fail) return finish();
+    const auto copied_root = destination / L"source";
+    size_t verified = 0;
+    for (const auto& file : std::filesystem::recursive_directory_iterator(source)) {
+        if (!file.is_regular_file()) continue;
+        const auto relative = file.path().lexically_relative(source);
+        std::ifstream input(file.path(), std::ios::binary), output(copied_root / relative, std::ios::binary);
+        if (!input || !output) { Check(false, L"open both owned files for bytewise verification"); break; }
+        const std::string original_bytes((std::istreambuf_iterator<char>(input)), {});
+        const std::string copied_bytes((std::istreambuf_iterator<char>(output)), {});
+        if (input.bad() || output.bad() || original_bytes != copied_bytes) {
+            Check(false, L"owned copy content matches before recursive deletion"); break;
+        }
+        ++verified;
+    }
+    Check(verified == file_count && copied_root.parent_path() == destination,
+        L"verify all copied small/empty files and the exclusively owned delete target");
+    if (g_fail) return finish();
+    auto removed = run(SimpleOp(ops::OpType::RealDelete, {copied_root.c_str()}));
+    Check(removed.finished && removed.status.phase == ops::OpPhase::Completed && !std::filesystem::exists(copied_root),
+        L"hint-backed deletion retains real completion and removes only its owned copied root");
+    Check(removed.monotonic && std::filesystem::exists(source), L"hint prediction preserves monotonic child counts and original source");
+    // Numeric ranges intentionally need both warmup and useful remaining duration.
+    if (removed.elapsed >= 3000) Check(removed.ranges > 0 && removed.copy_hints > 0,
+        L"copy-to-delete reuses actual completed-copy counts as an advisory range");
+    else std::printf("[SKIP] hint-backed deletion completed before a useful post-warmup observation window\n");
+    if (g_fail) return finish();
+    constexpr unsigned stream_groups = 48;
+    Check(make_tree(stream, stream_groups, false), L"create a larger owned tree without a copy receipt");
+    auto streamed = run(SimpleOp(ops::OpType::RealDelete, {stream.c_str()}));
+    Check(streamed.finished && streamed.status.phase == ops::OpPhase::Completed && !std::filesystem::exists(stream),
+        L"stream-predicted deletion retains real completion");
+    if (streamed.elapsed >= 3000) Check(streamed.ranges > 0 && streamed.copy_hints == 0,
+        L"ordinary sibling-directory traversal supplies ranges without any extra prescan or receipt");
+    else std::printf("[SKIP] streamed deletion completed before a useful post-warmup observation window\n");
+    Check(streamed.monotonic && streamed.status.completed_items == 1 && streamed.status.total_items == 1,
+        L"stream forecasts never rewrite authoritative selected-root totals");
+    std::printf("RECURSIVE_LIVE_SUMMARY files=%u streamed_files=%u hint_ranges=%llu stream_ranges=%llu hint_ms=%llu stream_ms=%llu\n",
+        file_count, stream_groups * per_group, static_cast<unsigned long long>(removed.ranges), static_cast<unsigned long long>(streamed.ranges),
+        static_cast<unsigned long long>(removed.elapsed), static_cast<unsigned long long>(streamed.elapsed));
+    return finish();
+}
+
 // Manual stress run against a real tree:
 //   --bulk-transfer copy|move <source> <dest_dir> [log_dir]
 //   --bulk-transfer delete <path> - [log_dir]        (permanent delete)
@@ -1634,6 +1779,10 @@ int RunBulkTransfer(int argc, wchar_t** argv) {
                     (now - started) / 1000.0, static_cast<int>(st.phase), st.completed_items, st.total_items,
                     st.transferred_bytes, st.total_bytes, (now - last_change) / 1000,
                     st.current_item.c_str(), st.last_error.c_str());
+            wprintf(L"ETA_SAMPLE tick=%llu task=%llu eta_s=%llu items_s=%.3f active=%d running=%d enumerated=%d eta_stage=%u eta_low=%llu eta_high=%llu eta_done=%llu eta_source=%u\n",
+                now, task, st.eta_seconds, st.items_per_second, st.active, st.phase == ops::OpPhase::Running,
+                st.enumeration_complete, static_cast<unsigned>(st.eta_detail.stage), st.eta_detail.lower_seconds,
+                st.eta_detail.upper_seconds, st.eta_detail.processed_items, static_cast<unsigned>(st.eta_detail.source));
             if (const auto conflict = g_ops.PendingConflict())
                 wprintf(L"  pending conflict token=%llu\n", conflict->token);
         }
@@ -1657,6 +1806,7 @@ int RunBulkTransfer(int argc, wchar_t** argv) {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--recursive-eta-only") return RunRecursiveEtaValidation();
     if (argc >= 5 && std::wstring_view(argv[1]) == L"--bulk-transfer") return RunBulkTransfer(argc, argv);
     if (argc == 2 && std::wstring_view(argv[1]) == L"--item-failure-run-only") return RunItemFailureRunTests();
     if (argc == 2 && std::wstring_view(argv[1]) == L"--big-chunk-copy-only") return RunBigChunkCopyTests();

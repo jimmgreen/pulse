@@ -2166,6 +2166,14 @@ int wmain(int argc, wchar_t** argv) {
         ok &= Report("arrange minimized has independent toggle", prefs.arrange_include_minimized && !prefs.media_columns);
         settings.ToggleUi(80);
         ok &= Report("media columns can be enabled again", prefs.media_columns && prefs.arrange_include_minimized);
+        ok &= Report("scroll past end defaults to on", prefs.list_scroll_past_end);
+        effect = pulse::app::SettingsEffect::None;
+        settings.ToggleUi(84);
+        ok &= Report("scroll past end has its own toggle", !prefs.list_scroll_past_end && prefs.media_columns &&
+            prefs.arrange_include_minimized && prefs.list_tree_sticky &&
+            pulse::app::HasEffect(effect, pulse::app::SettingsEffect::ListStyle));
+        settings.ToggleUi(84);
+        ok &= Report("scroll past end can be enabled again", prefs.list_scroll_past_end);
         return ok ? 0 : 1;
     }
     if (argc == 2 && std::wstring(argv[1]) == L"--global-search") {

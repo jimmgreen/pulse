@@ -24,6 +24,8 @@
 // HIDDEN-PREF (a settings switch: info only) or DISPLAY-DROPPED (lost while
 // composing: [FAIL]). The menu has no row cap.
 #include "../shell_host/ctx_handlers.h"
+#include "../shell_host/ctx_menu_icon.h"
+#include <fstream>
 #include "../shell_host/isolated_start_pin.h"
 #include "../app/shell_verbs.h"
 #include "../ipc/ctx_menu_util.h"
@@ -55,6 +57,8 @@ namespace {
 int failures = 0;
 FILE* g_report = nullptr;
 bool g_display = false;
+bool g_icons_only = false;
+bool g_capture_native_icons = false;
 pulse::app::ContextMenuPrefs g_prefs;
 
 void Check(bool ok, const std::wstring& label) {
@@ -152,6 +156,10 @@ struct Row {
     bool disabled = false;
     bool submenu = false;
     std::wstring source;
+    bool native_bitmap = false;
+    bool owner_draw = false;
+    pulse::common::MenuIconRef icon;
+    pulse::common::MenuIconRef native_icon;
 };
 
 // Extensions are foreign code; a fault in one must not end the probe.
@@ -222,7 +230,7 @@ void Walk(IContextMenu* menu, HMENU hmenu, UINT first, int depth, const std::wst
     for (int i = 0; i < count; ++i) {
         wchar_t text[512]{};
         MENUITEMINFOW info{ sizeof(info) };
-        info.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_SUBMENU | MIIM_STRING;
+        info.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_SUBMENU | MIIM_STRING | MIIM_BITMAP | MIIM_CHECKMARKS;
         info.dwTypeData = text;
         info.cch = ARRAYSIZE(text) - 1;
         if (!GetMenuItemInfoW(hmenu, static_cast<UINT>(i), TRUE, &info)) continue;
@@ -234,6 +242,16 @@ void Walk(IContextMenu* menu, HMENU hmenu, UINT first, int depth, const std::wst
         row.disabled = (info.fState & (MFS_DISABLED | MFS_GRAYED)) != 0;
         row.submenu = info.hSubMenu != nullptr;
         row.source = source;
+        const auto bitmap = info.hbmpItem ? info.hbmpItem :
+            ((info.fState & MFS_CHECKED) ? info.hbmpChecked : info.hbmpUnchecked);
+        if (g_capture_native_icons && source == L"native") {
+            IContextMenu2* m2 = nullptr; IContextMenu3* m3 = nullptr;
+            menu->QueryInterface(IID_PPV_ARGS(&m2)); menu->QueryInterface(IID_PPV_ARGS(&m3));
+            row.native_icon = pulse::shell::MenuItemIcon(hmenu, static_cast<UINT>(i), m2, m3);
+            if (m3) m3->Release(); if (m2) m2->Release();
+        }
+        row.owner_draw = (info.fType & MFT_OWNERDRAW) != 0;
+        row.native_bitmap = bitmap == HBMMENU_CALLBACK || reinterpret_cast<ULONG_PTR>(bitmap) > 12;
         rows.push_back(row);
         if (info.hSubMenu && depth < 3) {
             InitPopup(menu, info.hSubMenu, static_cast<UINT>(i));
@@ -248,6 +266,7 @@ void PrintRows(const std::vector<Row>& rows) {
         Out(L"  %ls%ls%ls  [verb=%ls]%ls\n", std::wstring(static_cast<size_t>(row.depth) * 4, L' ').c_str(),
             row.submenu ? L"> " : L"", row.text.empty() ? L"(no text)" : row.text.c_str(), row.verb.c_str(),
             row.disabled ? L" DISABLED" : L"");
+        Out(L"      native-bitmap=%d owner-draw=%d pulse-pixels=%d\n", row.native_bitmap, row.owner_draw, row.icon && row.icon->Valid());
     }
 }
 
@@ -541,9 +560,12 @@ void ProbePath(const std::wstring& path, bool extended) {
             shell_item.clsid = item.clsid;
             shell_item.handler = item.handler;
             shell_item.mnemonic = item.mnemonic;
+            shell_item.icon = item.icon;
+            shell_item.depth = item.depth;
             kept_items.push_back(std::move(shell_item));
             Row row;
-            row.depth = item.child ? 1 : 0;
+            row.depth = item.depth ? item.depth : (item.child ? 1 : 0);
+            row.icon = item.icon;
             row.text = item.text;
             row.verb = item.verb;
             row.disabled = !item.enabled;
@@ -563,12 +585,14 @@ void ProbePath(const std::wstring& path, bool extended) {
     }
 
     std::vector<Row> statics;
-    const auto static_verbs = pulse::app::EnumerateStaticVerbs(verb_key);
+    auto static_verbs = pulse::app::EnumerateStaticVerbs(verb_key);
+    pulse::app::ResolveStaticVerbIcons(static_verbs);
     for (const auto& verb : static_verbs) {
         Row row;
         row.text = verb.display;
         row.verb = verb.verb;
         row.source = L"static";
+        row.icon = verb.icon_pixels;
         statics.push_back(row);
         for (const auto& child : verb.children) {
             Row sub;
@@ -576,6 +600,7 @@ void ProbePath(const std::wstring& path, bool extended) {
             sub.text = child.display;
             sub.verb = child.verb;
             sub.source = L"static";
+            sub.icon = child.icon_pixels;
             statics.push_back(sub);
         }
     }
@@ -602,6 +627,40 @@ void ProbePath(const std::wstring& path, bool extended) {
                 for (const auto& text : native_order) Info(L"  native send-to:   %ls\n", text.c_str());
             }
         }
+    }
+
+    if (g_icons_only) {
+        size_t native_icons = 0, matched = 0, lost = 0, missing_source = 0, owner_draw_only = 0;
+        Out(L"\n## Native application bitmap -> production Pulse pixels\n");
+        for (const auto& row : native) {
+            if (row.owner_draw && !row.native_bitmap) ++owner_draw_only;
+            if (!row.native_bitmap || pulse::ipc::IsBuiltinContextVerb(row.verb, false)) continue;
+            ++native_icons;
+            const Row* hit = FindRow(kept, row);
+            if (!hit) hit = FindRow(statics, row);
+            if (!hit) { ++missing_source; Out(L"  NO-SOURCE depth=%d %ls\n", row.depth, row.text.c_str()); continue; }
+            ++matched;
+            const bool pixels = hit->icon && hit->icon->Valid();
+            lost += !pixels;
+            if (!pixels && row.native_icon && row.native_icon->Valid()) {
+                static int dump = 0;
+                const auto name = "bench_data/context-menu-20261125/native-lost-" + std::to_string(dump++) + ".bgra";
+                std::ofstream file(name, std::ios::binary);
+                const uint32_t size[]{row.native_icon->width, row.native_icon->height};
+                file.write(reinterpret_cast<const char*>(size), sizeof(size));
+                file.write(reinterpret_cast<const char*>(row.native_icon->bgra.data()), row.native_icon->bgra.size());
+                Out(L"  NATIVE_CAPTURE index=%d size=%ux%u %ls\n", dump - 1,
+                    row.native_icon->width, row.native_icon->height, row.text.c_str());
+            }
+            Out(L"  %ls depth=%d %ls source=%ls\n", pixels ? L"PRESERVED" : L"ICON-LOST", row.depth,
+                row.text.c_str(), hit->source.c_str());
+        }
+        Info(L"native_icons=%zu matched=%zu lost=%zu missing_source=%zu\n", native_icons, matched, lost, missing_source);
+        Out(L"SUMMARY native_icons=%zu matched=%zu lost=%zu missing_source=%zu\n", native_icons, matched, lost, missing_source);
+        Info(L"owner_draw_without_bitmap=%zu (not asserted as icon parity)\n", owner_draw_only);
+        Out(L"owner_draw_without_bitmap=%zu (not asserted as icon parity)\n", owner_draw_only);
+        Check(lost == 0 && missing_source == 0, path + L": native application bitmaps retain production pixels");
+        return;
     }
 
     // Native -> Pulse.
@@ -767,6 +826,8 @@ int wmain(int argc, wchar_t** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
         if (arg == L"--extended") extended = true;
+        else if (arg == L"--capture-native-icons") { g_icons_only = true; g_capture_native_icons = true; }
+        else if (arg == L"--icons-only") g_icons_only = true;
         else if (arg == L"--report" && i + 1 < argc) report = argv[++i];
         else if (arg == L"--display") g_display = true;
         else if (arg == L"--prefs" && i + 1 < argc) prefs_path = argv[++i];

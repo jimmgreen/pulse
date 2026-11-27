@@ -113,25 +113,54 @@ int wmain(int argc, wchar_t** argv) {
     check(fs::exists(bridge_root / L"init_101.txt"), "Core v1 initialize marker written");
 
     // 4. Hot-upgrade active-bridge.json to Core v2 (generation 2) WITHOUT restarting host or unloading Stub!
+    //    First trigger hot-swap PASSIVELY via Stub DllGetClassObject (simulating acad.exe/COM call after
+    //    upgrade without Broker reload) to verify sink hooks are NEVER dropped to COM_ONLY!
     paths::ActiveBridgePointer ptr2 = ptr1;
     ptr2.core_dir_x64 = v2_dir.wstring();
+    ptr2.host_exe = L"D:\\Pulse\\AppRuntime\\v2\\pulse.exe";
     ptr2.generation = 2;
     check(paths::WriteActiveBridgePointer(bridge_root.wstring(), ptr2) == ERROR_SUCCESS,
           "atomically update active-bridge.json to generation 2");
 
-    const DWORD reload_err = p_reload();
+    Sleep(300); // Exceed Stub's 250ms reload check interval.
+    const HRESULT gco2_passive = p_gco(CLSID_FileOpenDialog, IID_IClassFactory, &dummy);
     PulseStubStatusV1 st2{};
     st2.size = sizeof(st2);
     const HRESULT q2 = p_status(&st2);
-    check(reload_err == ERROR_SUCCESS && SUCCEEDED(q2) && st2.core_loaded == 1 &&
+    check(gco2_passive == MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x4000u + 202u) &&
+          SUCCEEDED(q2) && st2.core_loaded == 1 &&
           st2.generation == 2 && st2.core_build_id == 202 && st2.active_hook_mask != 0,
-          "Stub hot-switched in-process to Core v2 (build 202, gen 2) with hooks re-installed");
+          "Passive DllGetClassObject hot-swap switched to Core v2 AND preserved active sink hooks");
     check(fs::exists(bridge_root / L"shutdown_101.txt") && fs::exists(bridge_root / L"init_202.txt"),
           "Core v1 shutdown ran cleanly before Core v2 initialize");
 
     // Prove OS truly unloaded Core v1 DLL by deleting its on-disk PE file!
     const bool deleted_v1 = DeleteFileW(core_v1_dst.c_str()) != FALSE;
     check(deleted_v1, "OS unlocked and deleted Core v1 DLL while host process keeps running");
+
+    // 4b. Verify host_exe-only update (same Core dir, generation 3) via PulseStubHotReload + idempotent PulseStubActivate.
+    paths::ActiveBridgePointer ptr3 = ptr2;
+    ptr3.host_exe = L"D:\\Pulse\\AppRuntime\\v3\\pulse.exe";
+    ptr3.generation = 3;
+    check(paths::WriteActiveBridgePointer(bridge_root.wstring(), ptr3) == ERROR_SUCCESS,
+          "atomically update active-bridge.json host_exe to generation 3");
+    const DWORD reload_err = p_reload();
+    PulseStubStatusV1 st2b{};
+    st2b.size = sizeof(st2b);
+    const HRESULT q2b = p_status(&st2b);
+    if (!(reload_err == ERROR_SUCCESS && SUCCEEDED(q2b) && st2b.core_loaded == 1 &&
+          st2b.generation == 3 && st2b.core_build_id == 202 && st2b.active_hook_mask != 0)) {
+        std::printf("  [DIAG] reload_err=%lu q2b=0x%08lX loaded=%u gen=%llu build=%llu mask=0x%X last_err=%lu\n",
+            reload_err, static_cast<unsigned long>(q2b), st2b.core_loaded,
+            static_cast<unsigned long long>(st2b.generation),
+            static_cast<unsigned long long>(st2b.core_build_id),
+            st2b.active_hook_mask, st2b.last_error);
+    }
+    check(reload_err == ERROR_SUCCESS && SUCCEEDED(q2b) && st2b.core_loaded == 1 &&
+          st2b.generation == 3 && st2b.core_build_id == 202 && st2b.active_hook_mask != 0,
+          "PulseStubHotReload refreshes generation 3 host_exe while keeping sink hooks active");
+    check(p_activate(PULSE_STUB_FLAG_INSTALL_SINK_HOOKS) == ERROR_SUCCESS,
+          "Idempotent PulseStubActivate at current generation succeeds cleanly");
 
     const HRESULT gco2 = p_gco(CLSID_FileOpenDialog, IID_IClassFactory, &dummy);
     check(gco2 == MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x4000u + 202u),

@@ -1,23 +1,99 @@
 #include <windows.h>
 #include <memory>
 #include <string>
-#include "../app/global_search_window.h"
+#include <cstdio>
+#ifndef PULSE_SEARCH_WINDOW_HEADER
+#define PULSE_SEARCH_WINDOW_HEADER "../app/global_search_window.h"
+#endif
+#include PULSE_SEARCH_WINDOW_HEADER
+#include "../app/global_search_activation.h"
 #include "../app/app_prefs.h"
+#include "../common/string_ids.h"
 namespace {
 bool reject_search_activation = false;
+bool log_search_activation_api = false;
 HWND search_activation_other = nullptr;
+bool emulate_search_activation = false, accept_search_activation_direct = false, accept_search_activation_retry = false;
+bool search_mouse_pulse_succeeds = true, search_mouse_payload_zero = true;
+HWND emulated_search_foreground = nullptr;
+unsigned emulated_search_requests = 0, emulated_search_pulses = 0;
+int search_held_input = 0;
+bool search_fixture_cursor_enabled = false;
+POINT search_fixture_cursor{};
+BOOL WINAPI SearchTestGetCursorPos(LPPOINT point) {
+    if (!search_fixture_cursor_enabled) return ::GetCursorPos(point);
+    *point = search_fixture_cursor;
+    return TRUE;
+}
+std::function<void()> search_after_direct, search_after_pulse;
 BOOL WINAPI SearchTestSetForegroundWindow(HWND window) {
-    return reject_search_activation ? FALSE : ::SetForegroundWindow(window);
+    if (emulate_search_activation) {
+        ++emulated_search_requests;
+        if (emulated_search_requests == 1 && search_after_direct) search_after_direct();
+        if ((emulated_search_requests == 1 && accept_search_activation_direct) ||
+            (emulated_search_requests > 1 && accept_search_activation_retry)) {
+            emulated_search_foreground = window;
+            return TRUE;
+        }
+        return FALSE;
+    }
+    const BOOL accepted = reject_search_activation ? FALSE : ::SetForegroundWindow(window);
+    if (log_search_activation_api) std::printf("[API] SetForegroundWindow target=%p forced_denial=%u accepted=%u foreground=%p active=%p focus=%p\n",
+        static_cast<void*>(window), reject_search_activation ? 1u : 0u, accepted ? 1u : 0u,
+        static_cast<void*>(::GetForegroundWindow()), static_cast<void*>(::GetActiveWindow()), static_cast<void*>(::GetFocus()));
+    return accepted;
 }
 HWND WINAPI SearchTestGetForegroundWindow() {
+    if (emulate_search_activation) return emulated_search_foreground;
     return reject_search_activation ? search_activation_other : ::GetForegroundWindow();
 }
+UINT WINAPI SearchTestSendInput(UINT count, LPINPUT inputs, int size) {
+    if (!emulate_search_activation) {
+        const UINT sent = ::SendInput(count, inputs, size);
+        if (log_search_activation_api) std::printf("[API] SendInput count=%u sent=%u error=%lu type=%lu flags=%lu\n",
+            count, sent, sent == count ? ERROR_SUCCESS : GetLastError(),
+            inputs && count ? inputs[0].type : 0, inputs && count ? inputs[0].mi.dwFlags : 0);
+        return sent;
+    }
+    ++emulated_search_pulses;
+    search_mouse_payload_zero = search_mouse_payload_zero && count == 1 && size == static_cast<int>(sizeof(INPUT)) && inputs &&
+        inputs[0].type == INPUT_MOUSE && inputs[0].mi.dx == 0 && inputs[0].mi.dy == 0 &&
+        inputs[0].mi.mouseData == 0 && inputs[0].mi.dwFlags == 0 && inputs[0].mi.time == 0 &&
+        inputs[0].mi.dwExtraInfo == 0;
+    if (search_after_pulse) search_after_pulse();
+    if (!search_mouse_pulse_succeeds) SetLastError(ERROR_ACCESS_DENIED);
+    return search_mouse_pulse_succeeds ? 1 : 0;
 }
+SHORT WINAPI SearchTestGetAsyncKeyState(int key) {
+    if (!emulate_search_activation) return ::GetAsyncKeyState(key);
+    return key == search_held_input ? static_cast<SHORT>(0x8000) : 0;
+}
+}
+#define SendInput SearchTestSendInput
+#define GetAsyncKeyState SearchTestGetAsyncKeyState
 #define SetForegroundWindow SearchTestSetForegroundWindow
 #define GetForegroundWindow SearchTestGetForegroundWindow
-#include "../app/global_search_window.cpp"
+#define GetCursorPos SearchTestGetCursorPos
+#include "global_search_calculation_test_hooks.h"
+#define OpenClipboard CalculationTestOpenClipboard
+#define EmptyClipboard CalculationTestEmptyClipboard
+#define SetClipboardData CalculationTestSetClipboardData
+#define CloseClipboard CalculationTestCloseClipboard
+#define GetKeyState CalculationTestGetKeyState
+#ifndef PULSE_SEARCH_WINDOW_SOURCE
+#define PULSE_SEARCH_WINDOW_SOURCE "../app/global_search_window.cpp"
+#endif
+#include PULSE_SEARCH_WINDOW_SOURCE
 #undef SetForegroundWindow
 #undef GetForegroundWindow
+#undef SendInput
+#undef GetAsyncKeyState
+#undef GetCursorPos
+#undef OpenClipboard
+#undef EmptyClipboard
+#undef SetClipboardData
+#undef CloseClipboard
+#undef GetKeyState
 #include <wincodec.h>
 #include <iostream>
 #include <filesystem>
@@ -30,6 +106,8 @@ struct GlobalSearchWindowTestPeer {
     static State& Get(GlobalSearchWindow& window) { return *window.impl_; }
 };
 }
+
+#include "global_search_activation_test.inc"
 
 namespace pulse::index {
 struct ContentRefreshTestPeer {
@@ -44,41 +122,7 @@ namespace {
 std::vector<std::pair<std::wstring, bool>> recorded_opens;
 void RecordOpen(std::wstring path, bool location) { recorded_opens.emplace_back(std::move(path), location); }
 
-int RunActivationDeniedTests() {
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"en-US");
-    const auto root = std::filesystem::absolute(L"bench_data/search-activation-denied");
-    std::filesystem::create_directories(root / L"profile");
-    SetEnvironmentVariableW(L"LOCALAPPDATA", (root / L"profile").c_str());
-    pulse::diagnostics::runtime::Initialize((root / L"profile").wstring(), "search-activation-test");
-    int failures = 0;
-    const auto check = [&](bool ok, const char* label) {
-        std::cout << (ok ? "[PASS] " : "[FAIL] ") << label << '\n';
-        if (!ok) ++failures;
-    };
-    search_activation_other = CreateWindowExW(0, L"STATIC", L"Activation fixture", WS_POPUP,
-        0, 0, 100, 100, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
-    check(search_activation_other != nullptr, "create independent foreground fixture");
-    {
-        pulse::GlobalSearchWindow window;
-        reject_search_activation = true;
-        const bool shown = window.Show(nullptr, true, 1, root.wstring());
-        check(shown, "activation refusal is not a search-window open failure");
-        check(window.Visible(), "activation refusal keeps the search window available to click");
-        reject_search_activation = false;
-        auto& state = pulse::GlobalSearchWindowTestPeer::Get(window);
-        check(window.Show(nullptr, true, 1, root.wstring()) && window.Visible() &&
-            GetForegroundWindow() == state.hwnd && GetFocus() == state.edit,
-            "subsequent permitted activation focuses the existing search edit");
-        window.Hide();
-        check(!window.Visible(), "explicit dismissal still hides search");
-    }
-    DestroyWindow(search_activation_other); search_activation_other = nullptr;
-    pulse::diagnostics::runtime::Shutdown();
-    CoUninitialize();
-    std::cout << "RESULT " << (failures ? "FAIL" : "PASS") << " activation-denied\n";
-    return failures ? 1 : 0;
-}
+#include "global_search_focus_test.inc"
 
 int RunOpenRoutingTests() {
     using State = pulse::GlobalSearchWindowTestPeer::State;
@@ -368,8 +412,8 @@ void Pump(DWORD milliseconds) {
         Sleep(10);
     } while (GetTickCount64() < end);
 }
-bool CapturePresentedFrame(pulse::ui::Compositor& compositor, const std::wstring& path) {
-    auto* source = compositor.HeldFrame();
+bool CapturePresentedFrame(pulse::ui::Compositor& compositor, const std::wstring& path, bool submitted_frame = false) {
+    auto* source = submitted_frame ? compositor.FrameCopy() : compositor.HeldFrame();
     if (!source) return false;
     const auto size = source->GetPixelSize();
     Microsoft::WRL::ComPtr<ID2D1Bitmap1> readback;
@@ -402,8 +446,11 @@ bool CapturePresentedFrame(pulse::ui::Compositor& compositor, const std::wstring
 bool CapturePresentedFrame(pulse::GlobalSearchWindowTestPeer::State& state, const std::wstring& path) {
     return CapturePresentedFrame(state.compositor, path);
 }
-bool Capture(pulse::GlobalSearchWindowTestPeer::State& state, const std::wstring& path) {
+bool Capture(pulse::GlobalSearchWindowTestPeer::State& state, const std::wstring& path,
+    const std::wstring& submitted_frame = {}) {
+    bool edit_text_matches = CalculationTestLogEdit(state.edit, state.raw_query, "before-pump");
     Pump(30);
+    edit_text_matches = CalculationTestLogEdit(state.edit, state.raw_query, "after-pump") && edit_text_matches;
     const UINT width = static_cast<UINT>(state.Px(state.width)), height = static_cast<UINT>(state.Px(state.height));
     Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
     Microsoft::WRL::ComPtr<IWICBitmap> image;
@@ -411,7 +458,20 @@ bool Capture(pulse::GlobalSearchWindowTestPeer::State& state, const std::wstring
     Microsoft::WRL::ComPtr<IWICBitmapEncoder> encoder;
     Microsoft::WRL::ComPtr<IWICBitmapFrameEncode> frame;
     HRESULT result = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
-    if (SUCCEEDED(result)) result = factory->CreateBitmap(width, height, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &image);
+    if (SUCCEEDED(result) && !submitted_frame.empty()) {
+        Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
+        Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> source;
+        Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
+        result = factory->CreateDecoderFromFilename(submitted_frame.c_str(), nullptr, GENERIC_READ,
+            WICDecodeMetadataCacheOnLoad, &decoder);
+        if (SUCCEEDED(result)) result = decoder->GetFrame(0, &source);
+        if (SUCCEEDED(result)) result = factory->CreateFormatConverter(&converter);
+        if (SUCCEEDED(result)) result = converter->Initialize(source.Get(), GUID_WICPixelFormat32bppPBGRA,
+            WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom);
+        if (SUCCEEDED(result)) result = factory->CreateBitmapFromSource(converter.Get(), WICBitmapCacheOnLoad, &image);
+    } else if (SUCCEEDED(result)) {
+        result = factory->CreateBitmap(width, height, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &image);
+    }
     state.EnsureTarget();
     const auto live_target = state.target;
     const auto live_brush = state.brush;
@@ -421,7 +481,10 @@ bool Capture(pulse::GlobalSearchWindowTestPeer::State& state, const std::wstring
     if (SUCCEEDED(result)) result = state.factory->CreateWicBitmapRenderTarget(image.Get(), properties, &state.target);
     if (SUCCEEDED(result)) result = state.target->CreateSolidColorBrush(D2D1::ColorF(0xffffff), &state.brush);
     if (SUCCEEDED(result)) {
-        state.Paint();
+        // A submitted frame already contains the real parent surface. Only add
+        // the separate native edit surface; do not paint into a swapped target.
+        if (submitted_frame.empty()) state.Paint();
+        edit_text_matches = CalculationTestLogEdit(state.edit, state.raw_query, "after-paint") && edit_text_matches;
         RECT edit_rect{}; GetClientRect(state.edit, &edit_rect);
         BITMAPINFO info{}; info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         info.bmiHeader.biWidth = edit_rect.right; info.bmiHeader.biHeight = -edit_rect.bottom;
@@ -433,6 +496,9 @@ bool Capture(pulse::GlobalSearchWindowTestPeer::State& state, const std::wstring
         FillRect(memory, &edit_rect, state.background);
         if (!state.compositor.PaintLumaEdit(state.edit, memory, state.edit_format.Get(), state.Theme().text, state.EditBackground()))
             SendMessageW(state.edit, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(memory), PRF_CLIENT | PRF_ERASEBKGND);
+        // CreateDIBSection requires GDI completion before direct pixel access.
+        if (!GdiFlush()) result = E_FAIL;
+        edit_text_matches = CalculationTestLogEdit(state.edit, state.raw_query, "after-edit-paint") && edit_text_matches;
         if (state.EditBackground().a == 0 && static_cast<const BYTE*>(pixels)[
             (static_cast<size_t>(edit_rect.bottom / 2) * edit_rect.right + edit_rect.right - 2) * 4 + 3] != 0) {
             std::cout << "[FAIL] Search edit background is not transparent\n";
@@ -443,14 +509,34 @@ bool Capture(pulse::GlobalSearchWindowTestPeer::State& state, const std::wstring
         Microsoft::WRL::ComPtr<ID2D1Bitmap> edit_bitmap;
         if (SUCCEEDED(factory->CreateBitmapFromHBITMAP(bitmap, nullptr, WICBitmapUsePremultipliedAlpha, &edit_image)) &&
             SUCCEEDED(state.target->CreateBitmapFromWicBitmap(edit_image.Get(), nullptr, &edit_bitmap))) {
+            if (calculation_test_input && calculation_test_edit_diagnostics && state.raw_query.find(L"to") != std::wstring::npos) {
+                Microsoft::WRL::ComPtr<IWICStream> edit_stream;
+                Microsoft::WRL::ComPtr<IWICBitmapEncoder> edit_encoder;
+                Microsoft::WRL::ComPtr<IWICBitmapFrameEncode> edit_frame;
+                HRESULT saved = factory->CreateStream(&edit_stream);
+                if (SUCCEEDED(saved)) saved = edit_stream->InitializeFromFilename((path + L".edit.png").c_str(), GENERIC_WRITE);
+                if (SUCCEEDED(saved)) saved = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &edit_encoder);
+                if (SUCCEEDED(saved)) saved = edit_encoder->Initialize(edit_stream.Get(), WICBitmapEncoderNoCache);
+                if (SUCCEEDED(saved)) saved = edit_encoder->CreateNewFrame(&edit_frame, nullptr);
+                if (SUCCEEDED(saved)) saved = edit_frame->Initialize(nullptr);
+                if (SUCCEEDED(saved)) saved = edit_frame->WriteSource(edit_image.Get(), nullptr);
+                if (SUCCEEDED(saved)) saved = edit_frame->Commit();
+                if (SUCCEEDED(saved)) saved = edit_encoder->Commit();
+                if (FAILED(saved)) result = saved;
+            }
             state.target->BeginDraw();
-            state.target->DrawBitmap(edit_bitmap.Get(), {116, 23, state.width - 72, 58});
+            RECT destination = edit_rect;
+            MapWindowPoints(state.edit, state.hwnd, reinterpret_cast<POINT*>(&destination), 2);
+            state.target->DrawBitmap(edit_bitmap.Get(), {
+                destination.left / state.scale, destination.top / state.scale,
+                destination.right / state.scale, destination.bottom / state.scale});
             const HRESULT painted_edit = state.target->EndDraw();
             if (SUCCEEDED(result)) result = painted_edit;
         }
         DeleteObject(bitmap); DeleteDC(memory);
     }
     state.target = live_target; state.brush = live_brush;
+    if (!edit_text_matches) result = E_FAIL;
     if (SUCCEEDED(result)) result = factory->CreateStream(&stream);
     if (SUCCEEDED(result)) result = stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE);
     if (SUCCEEDED(result)) result = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
@@ -649,6 +735,7 @@ int RunLiveRecycleSearch(const std::wstring& name) {
 
 #include "global_search_embedded_preview_test.inc"
 #include "global_search_mockup_flow_test.inc"
+#include "global_search_order_flow_test.inc"
 #include "global_search_header_test.inc"
 
 int RunPlacementTests() {
@@ -800,7 +887,28 @@ int RunPlacementLiveTests() {
     return failures ? 1 : 0;
 }
 
+#include "global_search_pointer_monitor_test.inc"
+#include "global_search_calculation_test.inc"
+
+bool PrepareCtrlSearchProfile();
 int wmain(int argc, wchar_t** argv) {
+#ifdef PULSE_SEARCH_ISOLATED_PROFILE
+    struct TestDesktop {
+        HDESK previous = GetThreadDesktop(GetCurrentThreadId());
+        HDESK isolated = nullptr;
+        ~TestDesktop() { if (isolated) { SetThreadDesktop(previous); CloseDesktop(isolated); } }
+    } desktop;
+    if (GetEnvironmentVariableW(L"PULSE_SEARCH_TEST_PRIVATE_DESKTOP", nullptr, 0)) {
+        const auto name = L"PulseCtrlSearchTest-" + std::to_wstring(GetCurrentProcessId());
+        desktop.isolated = CreateDesktopW(name.c_str(), nullptr, nullptr, 0, GENERIC_ALL, nullptr);
+        if (!desktop.isolated || !SetThreadDesktop(desktop.isolated)) return 3;
+    }
+    if (!PrepareCtrlSearchProfile()) return 2;
+#endif
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--calculator-coexist")
+        return RunCalculationCoexistTests(argc > 2 ? argv[2] : L"bench_data/search-calc-coexist-20261126/modified");
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--activation-reentry") return RunActivationReentryTests();
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--pointer-monitor") return RunPointerMonitorTests();
     if (argc > 1 && std::wstring_view(argv[1]) == L"--placement-live") return RunPlacementLiveTests();
     if (argc > 1 && std::wstring_view(argv[1]) == L"--placement") return RunPlacementTests();
     if (argc > 3 && std::wstring_view(argv[1]) == L"--image-preview")
@@ -809,12 +917,15 @@ int wmain(int argc, wchar_t** argv) {
         return RunEmbeddedPreviewTests(argc > 2 ? argv[2] : L"bench_data/search-embedded-preview");
     if (argc > 1 && std::wstring_view(argv[1]) == L"--shared-header-offscreen")
         return RunSharedSearchHeaderTests(argc > 2 ? argv[2] : L"bench_data/search-shared-header");
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--order-flow")
+        return RunOrderFlow(argc > 2 ? argv[2] : L"bench_data/search-order-flow");
     if (argc > 1 && std::wstring_view(argv[1]) == L"--mockup-flow")
         return RunMockupFlow(argc > 2 ? argv[2] : L"bench_data/search-mockup-flow", argc > 3);
     wchar_t live_name[1024]{};
     if (GetEnvironmentVariableW(L"PULSE_TEST_LIVE_RECYCLE_NAME", live_name, 1024))
         return RunLiveRecycleSearch(live_name);
-    if (argc > 1 && std::wstring_view(argv[1]) == L"--activation-denied") return RunActivationDeniedTests();
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--activation-denied") return RunActivationDeniedTests(false);
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--activation-denied-diagnose") return RunActivationDeniedTests(true);
     if (argc > 1 && std::wstring_view(argv[1]) == L"--open-routing") return RunOpenRoutingTests();
     if (argc > 1 && std::wstring_view(argv[1]) == L"--selection-identity") return RunSelectionIdentityTests();
     if (argc > 1 && std::wstring_view(argv[1]) == L"--reopen-state") return RunReopenStateTests();

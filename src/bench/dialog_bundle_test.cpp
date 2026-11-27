@@ -76,6 +76,46 @@ struct Fixture {
     ~Fixture(){std::error_code error;fs::remove_all(dir,error);if(error){++failures;std::cerr<<"[FAIL] synthetic fixture cleanup "<<error.value()<<'\n';}}
 };
 
+void TestAppExplorerBridge(const fs::path& root) {
+    Fixture app(root / L"source");
+    auto files = Value::Array();
+    for (const auto& entry : app.manifest.find("files")->items()) {
+        const auto name = entry.get_string("path");
+        if (name.starts_with("PulseDialog") || name.starts_with("PulseFileDialog") || name == "PulsePickerUiProof.dll") {
+            Need(fs::remove(app.dir / pulse::json::Wide(name)));
+        } else {
+            files.push(entry);
+        }
+    }
+    auto contract = Value::Object();
+    contract.set("manifest", 1);
+    contract.set("kind", "AppRuntime");
+    app.manifest.set("schema", 4);
+    app.manifest.set("contract", std::move(contract));
+    app.manifest.set("files", std::move(files));
+    app.Commit();
+    const auto verify = [&](const char* label, DWORD expected) {
+        bundle::BundleLease lease;
+        bundle::ResolveStage stage{};
+        const DWORD result = bundle::VerifyAppRuntime(app.dir.wstring(), {}, lease, &stage);
+        Check(result == expected && static_cast<bool>(lease) == (expected == ERROR_SUCCESS), label, result);
+        Check(stage == (expected == ERROR_SUCCESS ? bundle::ResolveStage::None : bundle::ResolveStage::DependencyClosure),
+            "AppRuntime optional helper dependency closure status", result);
+    };
+    verify("old AppRuntime without Explorer bridge remains accepted", ERROR_SUCCESS);
+    app.Add("pulse_explorer_bridge.exe", Image(), false);
+    app.Commit();
+    verify("AppRuntime accepts the production Explorer bridge", ERROR_SUCCESS);
+    {
+        bundle::BundleLease lease;
+        const DWORD result = bundle::VerifyAppRuntimeForStartup(app.dir.wstring(), {}, lease);
+        Check(result == ERROR_SUCCESS && !!lease, "startup verifier accepts the production Explorer bridge", result);
+    }
+    app.Add("unrelated_explorer_helper.exe", Image(), false);
+    app.Commit();
+    verify("AppRuntime still rejects an unrelated executable", ERROR_INVALID_DATA);
+}
+
 void TestAppStartupLog(const fs::path& root) {
     using bundle::ResolveStage;
     Fixture app(root / L"source");
@@ -180,10 +220,17 @@ int wmain(int argc,wchar_t** argv){
     if(argc==3&&std::wstring_view(argv[1])==L"--verify") {bundle::BundleLease lease;DWORD e=bundle::VerifyBundle(argv[2],{},lease);Check(e==0,"read-only supplied bundle verification",e);if(!e)Check(bundle::RecheckDirectory(lease)==0,"retained supplied bundle directory recheck");return failures?1:0;}
     const bool installed_only=argc==2 && std::wstring_view(argv[1])==L"--installed-pointer";
     const bool app_log_only = argc == 2 && std::wstring_view(argv[1]) == L"--app-runtime-empty-log";
-    if (argc != 1 && !installed_only && !app_log_only) return 2;
+    const bool app_explorer_only = argc == 2 && std::wstring_view(argv[1]) == L"--app-runtime-explorer-bridge";
+    if (argc != 1 && !installed_only && !app_log_only && !app_explorer_only) return 2;
     try {
         const auto bench=fs::path(Self()).parent_path().parent_path()/L"bench_data";fs::create_directories(bench);
         const auto root=bench/(L"dialog-bundle-test-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64()));Need(CreateDirectoryW(root.c_str(),nullptr)!=FALSE);
+        if (app_explorer_only) {
+            TestAppExplorerBridge(root);
+            Check(fs::remove(root), "remove only the owned Explorer bridge fixture");
+            std::cout << "checks=" << checks << " failures=" << failures << '\n';
+            return failures ? 1 : 0;
+        }
         if (app_log_only) {
             TestAppStartupLog(root);
             Check(fs::remove(root / bundle::kAppRuntimeDirectory) && fs::remove(root), "remove only the owned launch fixture");

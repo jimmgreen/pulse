@@ -94,7 +94,7 @@ void TestUiTimerPacer() {
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc == 2 && wcscmp(argv[1], L"--morph-text-warmup") == 0) {
+    if (argc == 2 && (wcscmp(argv[1], L"--morph-text-warmup") == 0 || wcscmp(argv[1], L"--morph-readable-text") == 0)) {
         using VM = pulse::ui::motion::ViewMorphMotion;
         if (!pulse::ui::motion::SystemAnimationsEnabled()) {
             std::wprintf(L"[SKIP] system animations disabled; warmup transition not exercised\n");
@@ -108,7 +108,7 @@ int wmain(int argc, wchar_t** argv) {
         morph.AdvanceTextWarmup(37);
         morph.BeginFrame(1, 1, 2, 1016, true);
         Check(morph.Running() && morph.TextWarmupNext() == 0, L"new mode resets prior text warmup cursor");
-        Check(morph.TextOpacity() == 0.0f, L"new morph starts with hidden target text");
+        Check(morph.TextOpacity() == 1.0f, L"new mode starts with fully readable target text");
         morph.AdvanceTextWarmup(12);
         morph.Record(7, cell, icon);
         morph.BeginFrame(1, 1, 3, 1032, true);
@@ -118,7 +118,7 @@ int wmain(int argc, wchar_t** argv) {
         morph.BeginFrame(1, 2, 4, 1048, true);
         Check(morph.Running() && morph.TextWarmupNext() == 0 && morph.FramesSinceStart() == 1,
               L"rapid second mode switch starts its own warmup at zero");
-        Check(morph.TextOpacity() == 0.0f, L"rapid switch restarts target text opacity");
+        Check(morph.TextOpacity() == 1.0f, L"rapid switch never hides target text");
         morph.AdvanceTextWarmup(9);
         float previous = 0;
         bool monotonic = true, saw_fade = false, preserved = true;
@@ -132,7 +132,7 @@ int wmain(int argc, wchar_t** argv) {
             previous = alpha;
         }
         Check(preserved, L"ordinary fade and settled frames preserve warmup progress");
-        Check(monotonic && saw_fade, L"target text fades continuously through intermediate opacity");
+        Check(monotonic && !saw_fade && previous == 1.0f, L"target text remains fully readable on every frame");
         Check(!morph.Running() && morph.TextOpacity() == 1.0f, L"settled text is fully visible");
         std::wprintf(L"== morph text warmup: %d passed, %d failed ==\n", passed, failed);
         return failed ? 1 : 0;
@@ -232,38 +232,41 @@ int wmain(int argc, wchar_t** argv) {
         Check(!animations || (m.FromLayout().valid && m.FromLayout().scroll_y == 240.0f &&
                               m.FromLayout().viewport.top == 0.0f),
               L"morph keeps the previous view's exact layout inputs (scroll, viewport)");
-        Check(!animations || m.FromOpacity() == 1.0f, L"previous labels are fully visible on the first frame");
+        Check(m.FromOpacity() == 0.0f, L"old labels do not overlay the readable new labels");
         Check(!animations || m.Running(), L"view switch in the same folder starts a morph");
         if (animations) {
             const VM::Sample first = m.Get(42, list_cell, list_icon, 0, 12.0f);
-            Check(first.animating && same(first.cell, grid_cell) && same(first.icon, grid_icon),
-                  L"morph first frame draws the item where it was in the grid");
+            Check(first.animating && same(first.cell, list_cell) && first.icon.left >= list_icon.left &&
+                  first.icon.right <= list_icon.right,
+                  L"first transition frame keeps target hit cells and contained artwork");
             Check(same(first.from_icon, grid_icon), L"morph reports the start icon (image-list size lock)");
             const VM::Sample fresh = m.Get(77, list_cell, list_icon, 0, 12.0f);
-            Check(fresh.entering && fresh.opacity == 0.0f && fresh.cell.top > list_cell.top,
-                  L"items new to the screen fade in from slightly below");
-            Check(m.TextOpacity() == 0.0f, L"labels are hidden while shapes start moving");
+            Check(fresh.entering && fresh.opacity == 1.0f && same(fresh.cell, list_cell),
+                  L"newly visible items are readable at their target immediately");
+            Check(m.TextOpacity() == 1.0f, L"labels stay fully readable while shapes move");
             uint64_t frame = 2, now = 1016;
-            run(m, 9, kList, frame, now, 150);
+            run(m, 9, kList, frame, now, VM::kMorphMs / 3);
             Check(m.FromOpacity() == 0.0f, L"previous labels are gone before the shapes land");
             const VM::Sample mid = m.Get(42, list_cell, list_icon, 0, 12.0f);
-            Check(mid.icon.left < grid_icon.left && mid.icon.left > list_icon.left &&
-                  mid.icon.right - mid.icon.left < 80.0f && mid.icon.right - mid.icon.left > 16.0f,
-                  L"mid-morph the icon is between grid and row, position and size");
+            Check(same(mid.cell, list_cell) && mid.icon.left >= list_icon.left &&
+                  mid.icon.right <= list_icon.right && mid.icon.right - mid.icon.left > first.icon.right - first.icon.left,
+                  L"short artwork settle stays inside the authoritative target cell");
             const VM::Sample late = m.Get(42, list_cell, list_icon, 20, 12.0f);
-            Check(late.progress < mid.progress, L"later items start slightly later (stagger)");
+            Check(late.progress == mid.progress, L"all visible items progress together without stagger");
             // Switch back mid-flight: continue from where the item is drawn now.
             m.Record(42, mid.cell, mid.icon);
             now += 16;
             m.BeginFrame(9, kMedium, ++frame, now, true);
             const VM::Sample back = m.Get(42, grid_cell, grid_icon, 0, 12.0f);
-            Check(same(back.icon, mid.icon), L"re-switch mid-morph continues from the drawn position");
+            Check(same(back.cell, grid_cell) && same(back.from_icon, mid.icon) &&
+                  back.icon.left >= grid_icon.left && back.icon.right <= grid_icon.right,
+                  L"rapid reversal preserves source artwork but immediately updates hit geometry");
             run(m, 9, kMedium, frame, now, VM::kTotalMs);
             const VM::Sample done = m.Get(42, grid_cell, grid_icon, 0, 12.0f);
             Check(!m.Running() && !done.animating && same(done.icon, grid_icon) && m.TextOpacity() == 1.0f,
                   L"morph settles exactly on the target layout");
         }
-        // A 124 ms first frame (cold caches) must not skip a third of the glide.
+        // Slow frames advance wall-clock time, rather than prolonging the transition.
         if (animations) {
             VM slow;
             slow.BeginFrame(4, kMedium, 1, 100, true);
@@ -271,11 +274,11 @@ int wmain(int argc, wchar_t** argv) {
             slow.BeginFrame(4, kList, 2, 116, true);
             slow.BeginFrame(4, kList, 3, 116 + 124, true);   // the slow frame
             const VM::Sample after = slow.Get(42, list_cell, list_icon, 0, 12.0f);
-            Check(after.progress <= motion::MorphSpring(static_cast<float>(VM::kMaxStepMs) / VM::kMorphMs) + 1e-4f,
-                  L"a slow frame slows the morph instead of skipping ahead");
-            uint64_t frame = 3, now = 240;
-            run(slow, 4, kList, frame, now, VM::kTotalMs);
-            Check(!slow.Running(), L"a slowed morph still finishes");
+            Check(std::abs(after.progress - motion::MorphSpring(124.0f / VM::kMorphMs)) < 1e-4f,
+                  L"a slow frame consumes its actual wall-clock interval");
+            slow.BeginFrame(4, kList, 4, 116 + VM::kTotalMs, true);
+            Check(!slow.Running() && !slow.Active(116 + VM::kTotalMs),
+                  L"a slow morph finishes at the wall-clock deadline");
         }
         // Abandoned morph (pane hidden mid-flight) must stop asking for frames.
         VM a;

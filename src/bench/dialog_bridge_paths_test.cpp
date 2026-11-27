@@ -3,6 +3,7 @@
 #include <sddl.h>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 namespace {
@@ -89,6 +90,22 @@ int wmain() {
               loaded.install_root == written.install_root &&
               loaded.generation == 42,
           "ReadActiveBridgePointer round-trips all fields faithfully");
+    check(loaded.explorer_bridge_sha256_x64.empty() && loaded.explorer_bridge_sha256_x86.empty(),
+          "legacy pointer without optional Explorer helper digests remains accepted");
+    written.explorer_bridge_sha256_x64 = std::string(64, 'c');
+    written.explorer_bridge_sha256_x86 = std::string(64, 'd');
+    written.disabled = true;
+    check(paths::WriteActiveBridgePointer(common_override.wstring(), written) == ERROR_SUCCESS &&
+          paths::ReadActiveBridgePointer(common_override.wstring(), loaded) == ERROR_SUCCESS &&
+          loaded.explorer_bridge_sha256_x64 == written.explorer_bridge_sha256_x64 &&
+          loaded.explorer_bridge_sha256_x86 == written.explorer_bridge_sha256_x86 && loaded.disabled,
+          "optional architecture-specific Explorer helper hashes and disabled state round-trip");
+    written.explorer_bridge_sha256_x64 = "invalid";
+    check(paths::WriteActiveBridgePointer(common_override.wstring(), written) == ERROR_INVALID_DATA &&
+          paths::ReadActiveBridgePointer(common_override.wstring(), loaded) == ERROR_SUCCESS &&
+          loaded.explorer_bridge_sha256_x64 == std::string(64, 'c'),
+          "invalid helper digest never replaces the valid pointer");
+    written.explorer_bridge_sha256_x64 = std::string(64, 'c');
 
     // 4. ResolveActiveBridgeRoot chooses provisioned override even for non-C: install_root.
     const auto resolved = paths::ResolveActiveBridgeRoot(legacy_install.wstring(), common_override.wstring());
@@ -115,6 +132,12 @@ int wmain() {
           "ReadActiveBridgePointer rejects relative directory");
     check(paths::WriteActiveBridgePointer(L"relative\\bridge", written) == ERROR_INVALID_NAME,
           "WriteActiveBridgePointer rejects relative directory");
+    {
+        std::ofstream file(common_override / paths::kActivePointerFile, std::ios::trunc);
+        file << "{\"schema\":1,\"explorer_bridge_sha256_x64\":42}";
+    }
+    check(paths::ReadActiveBridgePointer(common_override.wstring(), loaded) == ERROR_INVALID_DATA,
+          "present non-string helper digest is rejected instead of treated as legacy absent");
 
     return failures ? 1 : 0;
 }

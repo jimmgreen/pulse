@@ -641,6 +641,28 @@ void SettingsPagesV2AndBuildersCases() {
         converted.root.children[4].color == "#0078D4",
         "ModelNode P0-2 builders and ModelMenuItem convert cleanly through native::ConvertUiModel");
 
+    {
+        // Chip colours accept theme tokens (the 7-Zip formats tab passes "accent"), not just #RRGGBB.
+        auto make = [](const char* color) {
+            ModelTree t(ModelNode(PULSE_UI_MODEL_STACK, "root").Children({ModelNode::Chip("c", ".7z", "c", color, "icon:archive")}));
+            t.State("c", "true");
+            return t;
+        };
+        auto accent = make("accent");
+        auto bogus = make("purple");
+        auto short_hex = make("#12345");
+        UiTree a, b, c;
+        std::set<std::string> cmds_a, cmds_b, cmds_c;
+        std::string err_a, err_b, err_c;
+        const PulseStatus sa = native::ConvertUiModel(&accent.Build(), a, cmds_a, err_a);
+        const PulseStatus sb = native::ConvertUiModel(&bogus.Build(), b, cmds_b, err_b);
+        const PulseStatus sc = native::ConvertUiModel(&short_hex.Build(), c, cmds_c, err_c);
+        if (sa != PULSE_OK) std::printf("  accent chip error: %s\n", err_a.c_str());
+        Check(sa == PULSE_OK && a.root.children.size() == 1 && a.root.children[0].color == "accent" &&
+            sb != PULSE_OK && err_b.find(".color") != std::string::npos && sc != PULSE_OK,
+            "chip colour accepts theme tokens and still rejects unknown names and malformed hex");
+    }
+
     MockSettingsHost v2_mock;
     const Host v2_host(v2_mock.HostTable());
     const auto v2_client = SettingsPagesClient::TryQuery(v2_host);

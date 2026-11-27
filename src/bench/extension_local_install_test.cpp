@@ -554,6 +554,42 @@ int wmain(int argc, wchar_t** argv) {
                   dev_state.entries[0].previous_revision == signed_revision &&
                   dev_state.entries[0].publisher_id.empty(),
                 "the signed revision stays the rollback target across unsigned developer builds", read_error);
+            // Disabling and re-enabling an unsigned developer build must work while developer mode is on
+            // (with explicit native + resource consent), and fail closed once developer mode is off under requireSigned:true.
+            {
+                StoreChangeReview dis_rev, en_rev;
+                StoreChangeResult ch_res;
+                std::string ch_err;
+                const std::atomic<bool> no_cancel_local{false};
+                Check(ReviewStoreChange(mixed_store, "org.test.signed", StoreChangeAction::Disable, dis_rev, ch_err) &&
+                      CommitStoreChange(mixed_store, dis_rev, StoreChangeConsent{true, false, false, false}, no_cancel_local, ch_res, ch_err),
+                    "unsigned developer build can be disabled", ch_err);
+                Check(ReviewStoreChange(mixed_store, "org.test.signed", StoreChangeAction::Enable, en_rev, ch_err) &&
+                      en_rev.native_code && en_rev.publisher_id.empty() &&
+                      CommitStoreChange(mixed_store, en_rev, StoreChangeConsent{true, true, true, false}, no_cancel_local, ch_res, ch_err),
+                    "disabled unsigned developer build can be re-enabled while developer mode is on", ch_err);
+                // Re-disable and verify requireSigned:true + developer mode off blocks Enable.
+                Check(ReviewStoreChange(mixed_store, "org.test.signed", StoreChangeAction::Disable, dis_rev, ch_err) &&
+                      CommitStoreChange(mixed_store, dis_rev, StoreChangeConsent{true, false, false, false}, no_cancel_local, ch_res, ch_err),
+                    "re-disable unsigned developer build before testing developer-mode-off guard", ch_err);
+                const std::string saved_policy = [&] {
+                    std::ifstream in(mixed_store / L"signature-policy.json", std::ios::binary);
+                    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                }();
+                auto strict_policy = saved_policy;
+                if (const auto pos = strict_policy.find("\"requireSigned\":false"); pos != std::string::npos) {
+                    strict_policy.replace(pos, 21, "\"requireSigned\":true");
+                }
+                WriteBytes(mixed_store / L"signature-policy.json", strict_policy);
+                fs::remove(dev_flag);
+                Check(!ReviewStoreChange(mixed_store, "org.test.signed", StoreChangeAction::Enable, en_rev, ch_err),
+                    "unsigned build cannot be re-enabled when requireSigned:true and developer mode is off", ch_err);
+                WriteBytes(dev_flag, R"({"formatVersion":1,"enabled":true})");
+                Check(ReviewStoreChange(mixed_store, "org.test.signed", StoreChangeAction::Enable, en_rev, ch_err) &&
+                      CommitStoreChange(mixed_store, en_rev, StoreChangeConsent{true, true, true, false}, no_cancel_local, ch_res, ch_err),
+                    "unsigned build can be re-enabled under requireSigned:true once developer mode is on", ch_err);
+                WriteBytes(mixed_store / L"signature-policy.json", saved_policy);
+            }
             fs::remove(dev_flag);
             StoreChangeReview rollback;
             std::string change_error;

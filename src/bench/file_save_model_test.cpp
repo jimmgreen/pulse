@@ -223,14 +223,15 @@ int main(int argc, char** argv) {
         Check(infer(L"child\\report.JpG") == 1, "relative filename uses leaf extension");
         Check(infer(L"child.v1/report.png") == 1, "relative slash path ignores parent dots");
         Check(infer(L"C:\\folder.v1\\report.png") == 1, "absolute path uses leaf without filesystem access");
-        Check(infer(L"report.png", 2) == 1, "all-files does not mask unique concrete type");
+        for (const auto* name : {L"report.png", L"report.JPG", L"report.txt", L"child\\report.png", L"report.unknown"})
+            Check(!infer(name, 2), "explicit all-files selection survives typed extension");
         Check(!infer(L"report.jpg", 1), "current matching multi-extension type remains selected");
         for (const auto* name : {L"report", L"report.", L".png", L".hidden.png", L"report.png ", L"child.png\\report", L"child\\", L"report.unknown", L"report?.png"})
             Check(!infer(name), "ambiguous incomplete or unknown filename does not infer type");
         Check(!infer(L"report.png", 9), "invalid current index cannot infer");
-        const std::vector<PickerFilter> duplicate = {{L"All", L"*.*"}, {L"PNG one", L"*.png"}, {L"PNG two", L"*.PNG;*.jpg"}};
+        const std::vector<PickerFilter> duplicate = {{L"Text", L"*.txt"}, {L"PNG one", L"*.png"}, {L"PNG two", L"*.PNG;*.jpg"}};
         Check(InferSaveFilterFromFilename(L"report.png", duplicate, 0) == 1, "dedicated type preferred over broad multi-pattern type");
-        const std::vector<PickerFilter> equal = {{L"All", L"*.*"}, {L"PNG one", L"*.png"}, {L"PNG two", L"*.PNG"}};
+        const std::vector<PickerFilter> equal = {{L"Text", L"*.txt"}, {L"PNG one", L"*.png"}, {L"PNG two", L"*.PNG"}};
         Check(!InferSaveFilterFromFilename(L"report.png", equal, 0), "equally dedicated caller formats remain ambiguous");
         Check(!InferSaveFilterFromFilename(L"report.png", duplicate, 2), "already matching caller format stays unchanged despite ambiguity");
         const std::vector<PickerFilter> wildcard = {{L"Text", L"*.txt"}, {L"Mixed", L"*.png;*.*"}, {L"Excel", L"*.xl*"}, {L"Loose", L"report*.png"}};
@@ -242,6 +243,10 @@ int main(int argc, char** argv) {
         Check(!InferSaveFilterFromFilename(L"archive.tar.gz", overlap, 0), "overlapping compound extension formats are ambiguous");
         const std::vector<PickerFilter> repeated = {{L"Text", L"*.txt"}, {L"PNG", L"*.png;*.PNG"}};
         Check(InferSaveFilterFromFilename(L"report.png", repeated, 0) == 1, "duplicate masks inside one caller type remain unambiguous");
+        const std::vector<PickerFilter> any = {{L"All", L"*.*"}, {L"Tar", L"*.tar.gz"}, {L"PNG", L"*.png"}};
+        Check(!InferSaveFilterFromFilename(L"archive.TAR.GZ", any, 0), "all-files selection survives known compound extension");
+        auto star = any; star[0].pattern = L"*";
+        Check(!InferSaveFilterFromFilename(L"report.png", star, 0), "native star all-files selection survives typed extension");
         std::printf("FAILURES=%d\n", failures);
         return failures ? 1 : 0;
     }

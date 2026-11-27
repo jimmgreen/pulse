@@ -255,6 +255,135 @@ int GroupedSettingsRegression() {
     std::printf("GROUPED_SETTINGS_RESULT failed=%d\n", failed);
     return failed ? 1 : 0;
 }
+int RefreshScrollRegression() {
+    using namespace pulse;
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    l10n::Initialize(GetModuleHandleW(nullptr), L"en");
+    INITCOMMONCONTROLSEX common{sizeof(common), ICC_WIN95_CLASSES};
+    InitCommonControlsEx(&common);
+    int failed = 0, checks = 0;
+    const auto check = [&](bool ok, const char* name) {
+        std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", name);
+        ++checks; failed += !ok;
+    };
+    HWND parent = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"STATIC", L"Refresh scroll fixture",
+        WS_POPUP | WS_VISIBLE, -20000, -20000, 1000, 800, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(parent != nullptr, "create nonactivating offscreen refresh fixture");
+    if (parent) for (bool viewport : {false, true}) for (float scale : {1.0f, 1.5f}) {
+        std::printf("REFRESH_SCROLL_CASE viewport=%d scale=%.1f\n", viewport, scale);
+        extensions::UiTree tree;
+        tree.root.id = "refresh-root";
+        tree.root.type = viewport ? extensions::UiNodeType::ScrollView : extensions::UiNodeType::Stack;
+        tree.root.gap = 6;
+        tree.state = {{"caption", "before"}, {"extra", "true"}, {"checked", "false"}, {"choice", "1"}, {"progress", "20"}};
+        for (int i = 0; i < 24; ++i) {
+            extensions::UiNode row;
+            row.id = "row-" + std::to_string(i); row.type = extensions::UiNodeType::Text;
+            row.text = "Settings row"; row.min_height = 40;
+            if (i == 0) row.binding = "state.caption";
+            if (i == 1) row.binding = "context.caption";
+            if (i == 23) row.visible_binding = "state.extra";
+            tree.root.children.push_back(std::move(row));
+        }
+        const auto control = [&](const char* id, extensions::UiNodeType type, const char* state,
+                                 std::vector<std::string> options = {}) {
+            extensions::UiNode node;
+            node.id = id; node.type = type; node.state = state; node.options = std::move(options);
+            if (type == extensions::UiNodeType::Slider) node.stops = 3;
+            tree.root.children.push_back(std::move(node));
+        };
+        control("switch", extensions::UiNodeType::Switch, "checked");
+        control("select", extensions::UiNodeType::Select, "choice", {"Zero", "One", "Two"});
+        control("list", extensions::UiNodeType::List, "choice", {"Zero", "One", "Two"});
+        control("segment", extensions::UiNodeType::Segmented, "choice", {"Zero", "One", "Two"});
+        control("slider", extensions::UiNodeType::Slider, "choice", {"Zero", "One", "Two"});
+        control("progress", extensions::UiNodeType::Progress, "progress");
+        extensions::UiNode command;
+        command.id = "command"; command.type = extensions::UiNodeType::Button; command.text = "Command"; command.command = "run";
+        tree.root.children.push_back(command);
+        bool readable = true, allowed = true;
+        std::string external = "external";
+        int user_changes = 0;
+        ui::ExtensionTreeCallbacks callbacks;
+        callbacks.on_command = [](const std::string&) {};
+        callbacks.command_enabled = [&](const std::string&) { return allowed; };
+        callbacks.read_binding = [&](const std::string&) -> std::optional<std::string> {
+            return readable ? std::optional<std::string>(external) : std::nullopt;
+        };
+        callbacks.on_state_changed = [&](uint64_t, const std::vector<ui::ExtensionStateChange>& changes) {
+            for (const auto& change : changes)
+                if (change.source_mask & static_cast<uint32_t>(ui::ExtensionStateSource::User)) ++user_changes;
+        };
+        ui::ExtensionTreeView view;
+        const bool created = view.Create(parent, tree, callbacks, false, {}, scale);
+        check(created, "create real compositor-backed settings tree");
+        if (!created) continue;
+        view.SetBounds({0, 0, static_cast<LONG>(560 * scale), static_cast<LONG>(400 * scale)});
+        const HWND sample = view.NodeWindow("row-6");
+        const auto top = [&]() { RECT bounds{}; GetWindowRect(sample, &bounds); return bounds.top; };
+        const auto text = [&](const char* id) {
+            wchar_t value[64]{}; GetWindowTextW(view.NodeWindow(id), value, 64); return std::wstring(value);
+        };
+        const auto wheel = [&]() {
+            POINT point{static_cast<LONG>(100 * scale), static_cast<LONG>(100 * scale)};
+            ClientToScreen(view.Hwnd(), &point);
+            SendMessageW(view.Hwnd(), WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)), MAKELPARAM(point.x, point.y));
+        };
+        const auto pump = [&]() {
+            const auto until = GetTickCount64() + 450;
+            while (GetTickCount64() < until) {
+                MSG message{};
+                while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+                Sleep(2);
+            }
+        };
+        const auto validate = [&]() {
+            ValidateRect(view.Hwnd(), nullptr);
+            EnumChildWindows(view.Hwnd(), [](HWND child, LPARAM) -> BOOL { ValidateRect(child, nullptr); return TRUE; }, 0);
+        };
+        LONG before = top(); wheel();
+        check(top() == before, "wheel begins asynchronously before refresh");
+        pump();
+        const LONG distance = before - top();
+        check(distance == 48, "baseline consumes the full wheel displacement");
+        validate(); before = top(); wheel(); view.Refresh();
+        check(!GetUpdateRect(view.Hwnd(), nullptr, FALSE), "unchanged refresh does not invalidate the tree surface");
+        check(!GetUpdateRect(view.NodeWindow("row-0"), nullptr, FALSE), "unchanged refresh does not invalidate child proxies");
+        pump();
+        check(before - top() == distance, "unchanged refresh preserves pending wheel displacement");
+        before = top(); wheel();
+        check(view.SetStates({{"caption", "after"}, {"extra", "false"}, {"checked", "true"}, {"choice", "2"}, {"progress", "72"}}),
+              "model state batch remains valid during scrolling");
+        check(text("row-0") == L"after" && !(GetWindowLongPtrW(view.NodeWindow("row-23"), GWL_STYLE) & WS_VISIBLE),
+              "changed state still updates bound text and visibility");
+        check(SendMessageW(view.NodeWindow("switch"), BM_GETCHECK, 0, 0) == BST_CHECKED &&
+              SendMessageW(view.NodeWindow("select"), CB_GETCURSEL, 0, 0) == 2 &&
+              SendMessageW(view.NodeWindow("list"), LB_GETCURSEL, 0, 0) == 2 &&
+              TabCtrl_GetCurSel(view.NodeWindow("segment")) == 2 &&
+              SendMessageW(view.NodeWindow("slider"), TBM_GETPOS, 0, 0) == 2 &&
+              SendMessageW(view.NodeWindow("progress"), PBM_GETPOS, 0, 0) == 72,
+              "changed numeric and boolean controls remain synchronized");
+        pump();
+        check(before - top() == distance, "state-driven relayout preserves pending wheel displacement");
+        before = top(); wheel(); external = "updated"; allowed = false; view.Refresh();
+        check(text("row-1") == L"updated" && !IsWindowEnabled(view.NodeWindow("command")),
+              "external bindings and command availability still refresh");
+        pump();
+        check(before - top() == distance, "external-binding relayout preserves pending wheel displacement");
+        readable = false; allowed = true; view.Refresh();
+        check(text("row-1").empty() && IsWindowEnabled(view.NodeWindow("command")),
+              "revoked bindings clear stale text and commands can recover");
+        validate(); view.Refresh();
+        check(!GetUpdateRect(view.Hwnd(), nullptr, FALSE), "settled refresh remains repaint-free after real changes");
+        check(view.NodeWindow("row-6") == sample && user_changes == 0,
+              "refresh retains native identity without synthesizing user edits");
+        view.Close();
+    }
+    if (parent) DestroyWindow(parent);
+    if (SUCCEEDED(com)) CoUninitialize();
+    std::printf("REFRESH_SCROLL_RESULT checks=%d failed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}
 int ScrollRegression() {
     using namespace pulse;
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -328,6 +457,7 @@ int ScrollRegression() {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--refresh-scroll") return RefreshScrollRegression();
     if (argc == 2 && std::string_view(argv[1]) == "--scroll") return ScrollRegression();
     if (argc == 2 && std::string_view(argv[1]) == "--grouped-settings") return GroupedSettingsRegression();
     if (argc == 3 && std::string_view(argv[1]) == "--segmented") return SegmentedRegression(argv[2]);

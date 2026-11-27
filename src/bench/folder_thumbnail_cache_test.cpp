@@ -1,10 +1,15 @@
+#ifdef PULSE_FOLDER_HEADER
+#include PULSE_FOLDER_HEADER
+#else
 #include "../ui/folder_thumbnail_cache.h"
+#endif
 #include <cstdio>
 #include <string_view>
 
 namespace pulse::ui {
 struct FolderThumbnailCacheTestAccess {
 #include "folder_thumbnail_revisit_live.inc"
+#include "folder_thumbnail_visibility_live.inc"
     static int Live(const wchar_t* folder) {
         wchar_t full[32768]{};
         const DWORD length = GetFullPathNameW(folder, ARRAYSIZE(full), full, nullptr);
@@ -232,7 +237,94 @@ struct FolderThumbnailCacheTestAccess {
             "reset releases full-resolution and compact artwork");
         return ok;
     }
-    static int Run(bool revisit_only = false) {
+    static bool WindowVisibility(ID2D1DeviceContext* dc) {
+        bool ok = true;
+        ComPtr<ID2D1Bitmap1> target;
+        const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+        if (FAILED(dc->CreateBitmap(D2D1::SizeU(576, 64), nullptr, 0, properties, &target))) return false;
+        dc->SetTarget(target.get());
+        const HWND a = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
+        const HWND b = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
+        if (!a || !b) { std::printf("[FAIL] message-only owners\n"); return false; }
+        for (int scenario = 0; scenario < 3; ++scenario) {
+            FolderThumbnailCache folders;
+            folders.SetDeviceContext(dc);
+            auto& cache = folders.cache_;
+            cache.running_ = true; // Real cache/GPU; deterministic worker results, no decoder host.
+            const auto begin = [&](HWND owner, bool full = true) {
+                dc->BeginDraw();
+#ifdef PULSE_FOLDER_VISIBILITY_BASELINE
+                (void)owner; (void)full; folders.BeginFrame();
+#else
+                folders.BeginFrame(owner, full);
+#endif
+            };
+            const auto end = [&] { ok &= SUCCEEDED(dc->EndDraw()); folders.EndFrame(); };
+            const auto draw = [&](int n) {
+                return folders.Draw(dc, D2D1::RectF(static_cast<float>(n * 64), 0, static_cast<float>((n + 1) * 64), 64), L"visible-folder-" + std::to_wstring(n),
+                    FILE_ATTRIBUTE_DIRECTORY, 64, 1, 1, 0, 1, false, nullptr);
+            };
+            begin(a); for (int n = 0; n < 9; ++n) draw(n); end();
+            for (auto& [key, visible] : folders.visible_) visible.since = GetTickCount64() - 160;
+            begin(a); for (int n = 0; n < 9; ++n) draw(n); end();
+            bool loaded = cache.queue_.size() == 9;
+            while (!cache.queue_.empty()) {
+                auto request = cache.queue_.front(); cache.queue_.pop_front();
+                ThumbnailCache::Item item; item.kind = ipc::PreviewContentKind::Bitmap;
+                item.w = item.h = 64; item.stride = 256; item.pixels.assign(64 * 64 * 4, 255); item.cost = item.pixels.size();
+                loaded &= cache.StoreResult(request, std::move(item));
+            }
+            // Pre-upload every original bitmap before the lifecycle action.
+            begin(a); for (int n = 0; n < 9; ++n) { cache.BeginFrame(); loaded &= draw(n) == PreviewDrawResult::Bitmap; } end();
+            if (scenario == 1) { begin(b); end(); } // A second settings/empty window.
+            if (scenario == 2) { begin(a, false); end(); } // Damage outside folder cells.
+            const size_t before = folders.visible_.size();
+            const size_t freed = folders.TrimInactiveWorkingSet();
+            begin(a); int warm = 0; for (int n = 0; n < 9; ++n) warm += draw(n) == PreviewDrawResult::Bitmap; end();
+            const bool stable = loaded && warm == 9 && cache.queue_.empty() && cache.pending_.empty() && freed == 0;
+            std::printf("[%s] scenario=%d visible_before_trim=%zu warm=%d freed=%zu queued=%zu (0=idle,1=other-window,2=partial)\n",
+                stable ? "PASS" : "FAIL", scenario, before, warm, freed, cache.queue_.size());
+            ok &= stable;
+#ifndef PULSE_FOLDER_VISIBILITY_BASELINE
+            folders.RemoveNotifyWindow(a); folders.RemoveNotifyWindow(b);
+            folders.TrimInactiveWorkingSet();
+            const bool released = folders.visible_.empty() && cache.items_.empty();
+            std::printf("[%s] closed owners release visibility and inactive artwork\n", released ? "PASS" : "FAIL");
+            ok &= released;
+#endif
+        }
+        {
+            FolderThumbnailCache folders; folders.SetDeviceContext(dc);
+            auto& cache = folders.cache_; cache.running_ = true;
+            const auto begin = [&](HWND owner) {
+                dc->BeginDraw();
+#ifdef PULSE_FOLDER_VISIBILITY_BASELINE
+                (void)owner; folders.BeginFrame();
+#else
+                folders.BeginFrame(owner);
+#endif
+            };
+            const auto end = [&] { ok &= SUCCEEDED(dc->EndDraw()); folders.EndFrame(); };
+            const auto draw = [&](uint64_t generation) {
+                folders.Draw(dc, D2D1::RectF(0, 0, 64, 64), L"shared-folder", FILE_ATTRIBUTE_DIRECTORY,
+                    64, generation, 1, 0, 1, false, nullptr);
+            };
+            begin(a); draw(1); end();
+            for (auto& [key, visible] : folders.visible_) visible.since = GetTickCount64() - 160;
+            begin(a); draw(1); end();
+            const uint64_t id = cache.queue_.empty() ? 0 : cache.queue_.front().id;
+            begin(b); draw(2); end();
+            begin(a); end(); // A leaves while B still needs exactly the same content.
+            begin(b); draw(2); end();
+            const bool stable = id && cache.queue_.size() == 1 && cache.queue_.front().id == id;
+            std::printf("[%s] shared key survives differing window generations and original owner leaving\n", stable ? "PASS" : "FAIL");
+            ok &= stable;
+        }
+        DestroyWindow(a); DestroyWindow(b);
+        return ok;
+    }
+    static int Run(bool revisit_only = false, bool visibility_only = false) {
         ComPtr<ID3D11Device> d3d;
         HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
             D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &d3d, nullptr, nullptr);
@@ -243,6 +335,7 @@ struct FolderThumbnailCacheTestAccess {
         ComPtr<ID2D1DeviceContext> dc;
         if (SUCCEEDED(hr)) hr = device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc);
         if (FAILED(hr)) { std::printf("[FAIL] WARP initialization: %08lx\n", hr); return 1; }
+        if (visibility_only) return WindowVisibility(dc.get()) ? 0 : 1;
         const bool revisit_draw_ok = Revisit(dc.get());
         const bool revisit_boundaries_ok = RevisitBoundaries(dc.get());
         const bool revisit_ok = revisit_draw_ok && revisit_boundaries_ok;
@@ -535,10 +628,13 @@ struct FolderThumbnailCacheTestAccess {
 }
 int wmain(int argc, wchar_t** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    if (argc == 4 && std::wstring_view(argv[1]) == L"--live-visibility")
+        return pulse::ui::FolderThumbnailCacheTestAccess::LiveVisibility(argv[2], argv[3]);
     if (argc == 4 && std::wstring_view(argv[1]) == L"--live-scroll")
         return pulse::ui::FolderThumbnailCacheTestAccess::LiveScroll(argv[2], argv[3]);
     if (argc == 3 && std::wstring_view(argv[1]) == L"--live")
         return pulse::ui::FolderThumbnailCacheTestAccess::Live(argv[2]);
     return pulse::ui::FolderThumbnailCacheTestAccess::Run(
-        argc == 2 && std::wstring_view(argv[1]) == L"--revisit");
+        argc == 2 && std::wstring_view(argv[1]) == L"--revisit",
+        argc == 2 && std::wstring_view(argv[1]) == L"--visibility");
 }

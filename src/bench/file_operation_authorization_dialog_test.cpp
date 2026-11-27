@@ -10,6 +10,7 @@
 #include <cmath>
 #include <thread>
 #include <commctrl.h>
+#include <vector>
 
 namespace pulse::ui {
 struct FileOperationWindowTestAccess {
@@ -18,6 +19,23 @@ struct FileOperationWindowTestAccess {
     static void Press(FileOperationWindow& window, bool pressed) { window.pressed_ = pressed ? 1 : 0; }
     static HWND Handle(FileOperationWindow& window) { return window.hwnd_; }
     static void RenderFrame(FileOperationWindow& window) { window.Render(); }
+    static void NoFlight(FileOperationWindow& window) { window.flight_animations_override_ = false; }
+    static uint64_t Task(FileOperationWindow& window) { return window.status_.task_id; }
+    static bool Active(FileOperationWindow& window) { return window.status_.active; }
+    static ULONGLONG Deadline(FileOperationWindow& window) { return window.success_dismiss_at_; }
+    static void ArmOldDeadline(FileOperationWindow& window, uint64_t task) {
+        window.success_dismiss_at_ = 1; window.success_dismiss_task_id_ = task;
+    }
+    static bool SuccessPulse(FileOperationWindow& window, ULONGLONG now = GetTickCount64()) { return window.TickSuccessDismiss(now); }
+    static void ClosingForFixture(FileOperationWindow& window, bool automatic) {
+        window.flight_.Stop(); window.opening_ = false; window.closing_ = true;
+        window.success_dismiss_at_ = 0;
+        window.success_hiding_task_ = automatic ? std::optional<uint64_t>(window.status_.task_id) : std::nullopt;
+        window.zoom_until_ = GetTickCount64() - 1;
+        ShowWindow(window.hwnd_, SW_HIDE);
+    }
+    static void ZoomPulse(FileOperationWindow& window) { window.TickZoom(); }
+    static void PendingLocate(FileOperationWindow& window, uint64_t task) { window.pending_locate_task_ = task; }
     static void Size(FileOperationWindow& window, UINT dpi, int width = 468) {
         RECT rect{0, 0, MulDiv(width, dpi, 96), MulDiv(348, dpi, 96)};
         SendMessageW(window.hwnd_, WM_DPICHANGED, MAKELONG(dpi, dpi), reinterpret_cast<LPARAM>(&rect));
@@ -42,6 +60,14 @@ struct FileOperationWindowTestAccess {
     }
     static float Width(FileOperationWindow& window, l10n::StringId id, bool shield = false) {
         return window.painter_.MeasureButtonWidth(l10n::Get(id), shield ? L"\xEA18" : L"");
+    }
+    static float EtaWidth(FileOperationWindow& window, const std::wstring& text) {
+        ComPtr<IDWriteTextLayout> layout;
+        if (FAILED(window.compositor_.DwriteFactory()->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
+            window.label_format_.get(), 10000, 10000, &layout))) return 10000;
+        DWRITE_TEXT_METRICS metrics{};
+        if (FAILED(layout->GetMetrics(&metrics))) return 10000;
+        return metrics.width / window.scale_;
     }
     static bool Snapshot(FileOperationWindow& window, const std::filesystem::path& path) {
         window.backdrop_enabled_ = false;
@@ -73,6 +99,60 @@ void BindTaskCallbacks(Callbacks& callbacks, uint64_t& paused, uint64_t& resumed
         callbacks.dismiss_task = [&](uint64_t task) { dismissed = task; };
     }
 }
+int RecursiveEtaDisplayCases() {
+    using namespace pulse;
+    using Access = ui::FileOperationWindowTestAccess;
+    ui::FileOperationWindow window;
+    Check(window.Create(nullptr, {}), "create isolated ETA layout probe");
+    Access::NoFlight(window);
+    ops::OpStatus status;
+    status.task_id = 501; status.type = ops::OpType::RealDelete;
+    status.active = true; status.phase = ops::OpPhase::Running; status.speed_basis = ops::OpSpeedBasis::Items;
+    status.total_items = 1;
+    status.eta_detail = {501, 1000, 12000, 10, 25, ops::EtaStage::Range, ops::EtaSource::RecentCopy, true};
+    const auto duration = [](uint64_t seconds) { return std::to_wstring(seconds); };
+    for (const wchar_t* language : {L"zh-CN", L"en-US", L"zh-TW"}) {
+        l10n::SetLanguage(language);
+        status.task_id = 501; status.active = true; status.external = false;
+        status.eta_detail = {501, 1000, 12000, 10, 25, ops::EtaStage::Range, ops::EtaSource::RecentCopy, true};
+        auto value = ui::TransferAdvisoryEtaText(status, 1100, duration);
+        Check(value && value->find(L"\x2013") != std::wstring::npos && *value != l10n::Get(l10n::StringId::OpEstimating),
+            "predicted ranges are distinct from learning in all supported locales");
+        Check(value && Access::EtaWidth(window, *value) <= 110,
+            "seconds range fits the unchanged details value column");
+        for (const auto bounds : {std::pair<uint64_t,uint64_t>{80,150}, {3660,7200}}) {
+            status.eta_detail.lower_seconds = bounds.first; status.eta_detail.upper_seconds = bounds.second;
+            value = ui::TransferAdvisoryEtaText(status, 1100, duration);
+            Check(value && Access::EtaWidth(window, *value) <= 110,
+                "compact minute and hour ranges fit without repeating long units");
+        }
+        value = ui::TransferAdvisoryEtaText(status, 5000, duration);
+        Check(value && *value == l10n::Get(l10n::StringId::OpEtaUnknownTotal),
+            "stale ranges become unknown total rather than an indefinitely frozen countdown");
+        status.eta_detail.stage = ops::EtaStage::Learning;
+        value = ui::TransferAdvisoryEtaText(status, 5000, duration);
+        Check(value && *value == l10n::Get(l10n::StringId::OpEtaUnknownTotal),
+            "learning text cannot remain forever after callbacks stop");
+        status.eta_detail.stage = ops::EtaStage::Finishing;
+        value = ui::TransferAdvisoryEtaText(status, 1100, duration);
+        Check(value && *value == l10n::Get(l10n::StringId::OpEtaFinishing) && !ui::TransferCanAutoClose(status),
+            "finishing is a presentation phase, never an operation completion signal");
+        Check(ui::TransferHasChildWork(status) && status.completed_items == 0 && status.total_items == 1,
+            "actual child progress never rewrites selected-root completion counters");
+        status.task_id = 502;
+        Check(!ui::TransferAdvisoryEtaText(status, 1100, duration) && !ui::TransferHasChildWork(status),
+            "ETA presentation cannot leak into a replacement task");
+        status.task_id = 501; status.external = true;
+        Check(!ui::TransferAdvisoryEtaText(status, 1100, duration), "external plugin ETA remains on its original presentation path");
+        status.external = false; status.active = false;
+        Check(!ui::TransferAdvisoryEtaText(status, 1100, duration), "terminal summaries retain their authoritative original presentation");
+        status.active = true; status.eta_detail.stage = ops::EtaStage::Range; status.eta_detail.lower_seconds = 0;
+        value = ui::TransferAdvisoryEtaText(status, 1100, duration);
+        Check(value && *value == l10n::Get(l10n::StringId::OpEtaUnknownTotal), "malformed ranges do not display zero seconds remaining");
+    }
+    std::printf("RECURSIVE_ETA_UI_RESULT failures=%d\n", failures);
+    return failures ? 1 : 0;
+}
 int TaskBindingCases() {
     using namespace pulse;
     using Access = ui::FileOperationWindowTestAccess;
@@ -99,6 +179,168 @@ int TaskBindingCases() {
     Check(resumed == displayed, "resume binds displayed task despite changed backend current task");
     SendMessageW(Access::Handle(window), WM_SYSCOMMAND, SC_MINIMIZE, 0);
     Check(dismissed == displayed, "minimize dismisses displayed task not backend current task");
+    return failures ? 1 : 0;
+}
+int TaskHandoffCases() {
+    using namespace pulse;
+    using Access = ui::FileOperationWindowTestAccess;
+    constexpr uint64_t copied = 12001, deleting = 12002;
+    ops::OpStatus copy;
+    copy.task_id = copied; copy.type = ops::OpType::Copy; copy.active = true;
+    copy.phase = ops::OpPhase::Running; copy.percent = 40; copy.enumeration_complete = true;
+    copy.total_items = 20; copy.completed_items = 8;
+    auto complete = copy; complete.active = false; complete.phase = ops::OpPhase::Completed;
+    complete.percent = 100; complete.completed_items = complete.total_items;
+    auto deletion = copy; deletion.task_id = deleting; deletion.type = ops::OpType::RealDelete;
+    deletion.percent = 100; deletion.total_items = 1; deletion.completed_items = 1;
+    deletion.enumeration_complete = false; // One selected folder is not proof its children are gone.
+    const auto create = [&](ui::FileOperationWindow& window, ui::FileOperationCallbacks callbacks = {}) {
+        const bool made = window.Create(nullptr, std::move(callbacks));
+        Check(made, "create real progress window for copy-to-delete handoff on private desktop");
+        if (made) { Access::NoFlight(window); window.Update(copy); window.Show(false, false); }
+        return made;
+    };
+    Check(!ui::TransferCanAutoClose(deletion), "an active delete at 100 percent cannot be auto-completed");
+    Check(!ui::TransferNearDoneSuppressesAutoShow(deletion), "an active folder delete cannot lose progress UI because top-level progress is 100 percent");
+    auto recycle = deletion; recycle.type = ops::OpType::RecycleDelete;
+    Check(!ui::TransferNearDoneSuppressesAutoShow(recycle), "active recycle deletion also bypasses the nearly-done popup suppression");
+    auto active_terminal = deletion; active_terminal.phase = ops::OpPhase::Completed;
+    Check(!ui::TransferTerminal(active_terminal), "a terminal-looking phase is not terminal while the task remains active");
+    auto almost_copied = copy; almost_copied.percent = 95;
+    Check(ui::TransferNearDoneSuppressesAutoShow(almost_copied), "the existing nearly-finished copy popup policy remains unchanged");
+    {
+        std::vector<uint64_t> dismissed;
+        ui::FileOperationCallbacks callbacks;
+        callbacks.dismiss_task = [&](uint64_t task) { dismissed.push_back(task); };
+        ui::FileOperationWindow window;
+        if (!create(window, std::move(callbacks))) return 1;
+        window.Update(deletion);
+        Access::ArmOldDeadline(window, copied);
+        Check(!Access::SuccessPulse(window) && window.IsVisible() && dismissed.empty(),
+            "a stale copy close deadline cannot dismiss the running delete task");
+        window.Show(false, false); window.Update(deletion); dismissed.clear();
+        Access::ArmOldDeadline(window, deleting);
+        Check(!Access::SuccessPulse(window) && window.IsVisible() && dismissed.empty(),
+            "even a matching deadline cannot auto-close an active delete");
+    }
+    {
+        int reached = 0, located = 0;
+        ui::FileOperationCallbacks callbacks; callbacks.reached_status = [&] { ++reached; };
+        callbacks.locate_results = [&](uint64_t) { ++located; };
+        ui::FileOperationWindow window;
+        if (!create(window, std::move(callbacks))) return 1;
+        window.Update(complete);
+        Access::ClosingForFixture(window, true);
+        Access::PendingLocate(window, copied);
+        Check(window.CanFollowNextTask(), "a successful card still closing can hand off to the next active operation");
+        window.Update(deletion);
+        Check(window.IsVisible() && Access::Task(window) == deleting && Access::Active(window),
+            "new delete status cancels the previous copy auto-close before advancing its old animation");
+        Access::ZoomPulse(window);
+        Check(window.IsVisible() && reached == 0 && located == 0,
+            "late old zoom ticks cannot hide deletion, pop the old pill, or locate the previous copy");
+    }
+    {
+        ui::FileOperationWindow window;
+        if (!create(window)) return 1;
+        window.Update(complete);
+        Access::ClosingForFixture(window, false);
+        Check(!window.CanFollowNextTask(), "a manual hide is not treated as an automatic success handoff");
+        window.Update(deletion);
+        Check(!window.IsVisible(), "new status does not reverse the user's manual hide intent");
+    }
+    {
+        ui::FileOperationWindow window;
+        if (!create(window)) return 1;
+        window.Update(complete); Access::ClosingForFixture(window, true);
+        auto resumed = copy;
+        window.Update(resumed);
+        Check(window.IsVisible() && Access::Active(window) && Access::Task(window) == copied,
+            "a task that becomes active again cannot be hidden by its previous success animation");
+    }
+    {
+        std::vector<uint64_t> dismissed;
+        ui::FileOperationWindow window;
+        ui::FileOperationCallbacks callbacks;
+        callbacks.dismiss_task = [&](uint64_t task) {
+            dismissed.push_back(task);
+            if (task == copied) window.Update(deletion);
+        };
+        if (!create(window, std::move(callbacks))) return 1;
+        window.Update(complete); Access::ArmOldDeadline(window, copied);
+        Access::SuccessPulse(window);
+        Check(window.IsVisible() && Access::Task(window) == deleting && Access::Active(window) &&
+            dismissed == std::vector<uint64_t>{copied}, "reentrant completion callbacks cannot close the replacement delete task");
+    }
+    {
+        std::vector<uint64_t> dismissed;
+        ui::FileOperationWindow window;
+        ui::FileOperationCallbacks callbacks; callbacks.dismiss_task = [&](uint64_t task) { dismissed.push_back(task); };
+        if (!create(window, std::move(callbacks))) return 1;
+        window.Update(complete); window.SetOtherTasks({deletion});
+        Access::ArmOldDeadline(window, copied);
+        Check(!Access::SuccessPulse(window) && window.IsVisible() && dismissed.empty(),
+            "a completed copy cannot auto-close while its strip still contains active deletion");
+        window.Show(false, false); window.SetOtherTasks({});
+        const auto deadline = Access::Deadline(window);
+        Check(deadline != 0 && !Access::SuccessPulse(window, deadline - 1) && window.IsVisible(),
+            "success retains its existing completion hold instead of closing early");
+        Check(deadline != 0 && Access::SuccessPulse(window, deadline) && !window.IsVisible() &&
+            dismissed == std::vector<uint64_t>{copied}, "automatic close applies only to the completed task after all other work ends");
+        Check(!Access::SuccessPulse(window, deadline + 1) && dismissed.size() == 1, "repeated timer ticks never dismiss completion twice");
+    }
+    {
+        int reached = 0;
+        ui::FileOperationCallbacks callbacks; callbacks.reached_status = [&] { ++reached; };
+        ui::FileOperationWindow window;
+        if (!create(window, std::move(callbacks))) return 1;
+        auto queued = deletion; queued.phase = ops::OpPhase::Queued; queued.percent = -1;
+        window.Update(complete); Access::ClosingForFixture(window, true);
+        window.SetOtherTasks({queued});
+        Check(window.IsVisible() && Access::Deadline(window) == 0,
+            "a queued deletion arriving in the task strip cancels an automatic success flight");
+        Access::ZoomPulse(window);
+        Check(window.IsVisible() && reached == 0, "a cancelled success flight cannot later hide queued work");
+        Access::ClosingForFixture(window, false); window.SetOtherTasks({queued});
+        Check(!window.IsVisible(), "task-strip updates do not reverse a manual hide");
+    }
+    {
+        ui::FileOperationWindow window;
+        if (!create(window)) return 1;
+        auto another_complete = complete; another_complete.task_id = deleting;
+        window.Update(another_complete); Access::ArmOldDeadline(window, copied);
+        Check(!Access::SuccessPulse(window) && window.IsVisible(),
+            "a stale success deadline cannot close a different task even when both tasks completed");
+    }
+    {
+        uint64_t dismissed = 0;
+        ui::FileOperationWindow window;
+        ui::FileOperationCallbacks callbacks;
+        callbacks.dismiss_task = [&](uint64_t task) { dismissed = task; window.Destroy(); };
+        if (!create(window, std::move(callbacks))) return 1;
+        window.Update(complete); Access::ArmOldDeadline(window, copied);
+        Check(Access::SuccessPulse(window) && Access::Handle(window) == nullptr && dismissed == copied,
+            "success dismissal safely stops if its callback destroys the progress window");
+    }
+    {
+        ui::FileOperationWindow window;
+        ui::FileOperationCallbacks callbacks;
+        callbacks.dismiss_task = [&](uint64_t) { window.SetOtherTasks({deletion}); };
+        if (!create(window, std::move(callbacks))) return 1;
+        window.Update(complete); Access::ArmOldDeadline(window, copied);
+        Check(Access::SuccessPulse(window) && window.IsVisible() && Access::Deadline(window) == 0,
+            "success dismissal rechecks other active work added by its callback");
+    }
+    {
+        ui::FileOperationWindow window;
+        if (!create(window)) return 1;
+        auto failed = deletion; failed.active = false; failed.phase = ops::OpPhase::Failed;
+        failed.last_error = L"fixture failure"; failed.failed_items = 1;
+        window.Update(failed); window.Show(false, false);
+        Access::ArmOldDeadline(window, deleting);
+        Check(!Access::SuccessPulse(window) && window.IsVisible(), "failed deletion is not hidden by a stale success timer");
+    }
+    std::printf("TASK_HANDOFF_RESULT failures=%d\n", failures);
     return failures ? 1 : 0;
 }
 int TerminalCases(const std::filesystem::path& output) {
@@ -343,7 +585,7 @@ int wmain(int argc, wchar_t** argv) {
     using namespace pulse;
     using Access = ui::FileOperationWindowTestAccess;
     compat::EnableDpiAwareness();
-    if (argc > 1 && (std::wstring_view(argv[1]) == L"--terminal" || std::wstring_view(argv[1]) == L"--task-binding" || std::wstring_view(argv[1]) == L"--diagnostics" || std::wstring_view(argv[1]) == L"--starvation")) {
+    if (argc > 1 && (std::wstring_view(argv[1]) == L"--recursive-eta" || std::wstring_view(argv[1]) == L"--terminal" || std::wstring_view(argv[1]) == L"--task-binding" || std::wstring_view(argv[1]) == L"--task-handoff" || std::wstring_view(argv[1]) == L"--diagnostics" || std::wstring_view(argv[1]) == L"--starvation")) {
         const std::filesystem::path output = argc > 2 ? argv[2] : L"";
         const auto name = L"PulseTransferTerminal-" + std::to_wstring(GetCurrentProcessId());
         HDESK desktop = CreateDesktopW(name.c_str(), nullptr, nullptr, 0, GENERIC_ALL, nullptr);
@@ -353,7 +595,9 @@ int wmain(int argc, wchar_t** argv) {
             if (!SetThreadDesktop(desktop)) return;
             CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
             l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
-            result = std::wstring_view(argv[1]) == L"--starvation" ? PresentationStarvation() :
+            result = std::wstring_view(argv[1]) == L"--recursive-eta" ? RecursiveEtaDisplayCases() :
+                std::wstring_view(argv[1]) == L"--task-handoff" ? TaskHandoffCases() :
+                std::wstring_view(argv[1]) == L"--starvation" ? PresentationStarvation() :
                 std::wstring_view(argv[1]) == L"--diagnostics" ? PresentationDiagnostics(output) :
                 std::wstring_view(argv[1]) == L"--task-binding" ? TaskBindingCases() : TerminalCases(output);
             CoUninitialize();

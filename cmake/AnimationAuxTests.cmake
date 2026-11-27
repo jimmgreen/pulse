@@ -1,0 +1,11 @@
+if(TARGET pulse)
+    add_executable(pulse_animation_aux_test EXCLUDE_FROM_ALL
+        src/bench/animation_aux_test.cpp $<TARGET_OBJECTS:pulse>)
+    target_link_libraries(pulse_animation_aux_test PRIVATE "$<TARGET_PROPERTY:pulse,LINK_LIBRARIES>")
+    foreach(aux_property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_OPTIONS)
+        get_target_property(aux_value pulse ${aux_property})
+        if(aux_value)
+            set_property(TARGET pulse_animation_aux_test PROPERTY ${aux_property} "${aux_value}")
+        endif()
+    endforeach()
+endif()

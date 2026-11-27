@@ -112,6 +112,7 @@ int wmain(int argc, wchar_t** argv) {
     std::atomic<int> browse_w_hits{0};
     std::atomic<int> ro_factory_hits{0};
     std::atomic<int> ro_activate_hits{0};
+    std::atomic<int> create_process_hits{0};
 
     sink::SinkCallbacks cb;
     cb.on_comdlg_class_object = [&](REFCLSID clsid, REFIID iid, void** out, sink::ComDlgGetClassObjectFn orig) -> HRESULT {
@@ -142,6 +143,12 @@ int wmain(int argc, wchar_t** argv) {
         return orig(cls, out);
     };
 
+    cb.on_create_process_w = [&](LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES,
+        BOOL, DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION, sink::CreateProcessWFn) -> BOOL {
+        ++create_process_hits;
+        SetLastError(ERROR_CANCELLED);
+        return FALSE;
+    };
     sink::InstallOptions opts;
     opts.requested_mask = sink::kSinkGroupAll;
     opts.watch_late_dll_loads = true;
@@ -268,6 +275,15 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
+    STARTUPINFOW process_startup{sizeof(process_startup)};
+    PROCESS_INFORMATION process_info{};
+    SetLastError(ERROR_SUCCESS);
+    const BOOL intercepted = CreateProcessW(L"", nullptr, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &process_startup, &process_info);
+    const DWORD intercepted_error = GetLastError();
+    check(!intercepted && intercepted_error == ERROR_CANCELLED && create_process_hits.load() == 1 &&
+          (sink::QueryStatus().active_mask & sink::kSinkKernel32CreateProcessW),
+          "CreateProcessW sink invokes callback with exact FALSE and LastError, without a child");
+
     // 9. Clean Uninstall() detaches all hooks and stops watcher.
     const DWORD uninst_err = sink::Uninstall();
     const auto st_after = sink::QueryStatus();
@@ -281,6 +297,12 @@ int wmain(int argc, wchar_t** argv) {
         check(SUCCEEDED(hr) && factory && comdlg_open_hits.load() == before,
               "after Uninstall, comdlg32!DllGetClassObject runs completely unhooked");
     }
+
+    SetLastError(ERROR_SUCCESS);
+    const BOOL restored_process = CreateProcessW(L"", nullptr, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &process_startup, &process_info);
+    const DWORD restored_error = GetLastError();
+    check(!restored_process && restored_error != ERROR_CANCELLED && create_process_hits.load() == 1,
+          "CreateProcessW sink removal restores native failure and stops callback delivery");
 
     if (h_combase) FreeLibrary(h_combase);
     if (h_shell) FreeLibrary(h_shell);

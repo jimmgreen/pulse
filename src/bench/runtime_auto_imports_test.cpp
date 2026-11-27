@@ -54,8 +54,8 @@ std::vector<std::byte> Fixture() {
 void Parser() {
     auto image = Fixture(); std::vector<detail::ImportSlot> slots;
     Check(detail::InspectImage(image, slots) == S_OK && slots.size() == 1 && slots[0].rva == 1056 && slots[0].api_index == 0, "bounded native PE import located");
-    for (const auto& pair : std::array<std::pair<const char*, unsigned>, 9>{{{"CoCreateInstanceEx", 1}, {"CoGetClassObject", 2}, {"RoGetActivationFactory", 3},
-        {"SHOpenFolderAndSelectItems", 11}, {"ShellExecuteW", 12}, {"ShellExecuteExW", 13}, {"ShellExecuteA", 14}, {"ShellExecuteExA", 15}, {"GetProcAddress", 16}}}) {
+    for (const auto& pair : std::array<std::pair<const char*, unsigned>, 10>{{{"CoCreateInstanceEx", 1}, {"CoGetClassObject", 2}, {"RoGetActivationFactory", 3},
+        {"SHOpenFolderAndSelectItems", 11}, {"ShellExecuteW", 12}, {"ShellExecuteExW", 13}, {"ShellExecuteA", 14}, {"ShellExecuteExA", 15}, {"CreateProcessW", 16}, {"GetProcAddress", 17}}}) {
         auto other = image; std::memset(other.data() + 1102, 0, 40); std::memcpy(other.data() + 1102, pair.first, std::strlen(pair.first) + 1);
         Check(detail::InspectImage(other, slots) == S_OK && slots.size() == 1 && slots[0].api_index == pair.second, "all requested named APIs mapped");
     }
@@ -180,6 +180,14 @@ __declspec(noinline) double LookupNs(HMODULE module) {
 __declspec(noinline) HRESULT DirectCreate() { IUnknown* output = nullptr; const auto hr = CoCreateInstance(CLSID_NULL, nullptr, CLSCTX_INPROC_SERVER, IID_IUnknown, reinterpret_cast<void**>(&output)); if (output) output->Release(); return hr; }
 __declspec(noinline) HRESULT DirectEx() { MULTI_QI output{&IID_IUnknown, nullptr, E_FAIL}; const auto hr = CoCreateInstanceEx(CLSID_NULL, nullptr, CLSCTX_INPROC_SERVER, nullptr, 1, &output); if (output.pItf) output.pItf->Release(); return hr; }
 __declspec(noinline) HRESULT DirectClass() { IUnknown* output = nullptr; const auto hr = CoGetClassObject(CLSID_NULL, CLSCTX_INPROC_SERVER, nullptr, IID_IUnknown, reinterpret_cast<void**>(&output)); if (output) output->Release(); return hr; }
+__declspec(noinline) DWORD DirectProcess() {
+    STARTUPINFOW startup{sizeof(startup)};
+    PROCESS_INFORMATION process{};
+    const BOOL created = CreateProcessW(L"", nullptr, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process);
+    const DWORD error = GetLastError();
+    if (created) { CloseHandle(process.hThread); CloseHandle(process.hProcess); }
+    return created ? ERROR_SUCCESS : error;
+}
 void Live(const wchar_t* path) {
     HMODULE dll = LoadLibraryW(path); Check(dll != nullptr, "isolated helper DLL loaded"); if (!dll) return;
     const auto install = reinterpret_cast<HRESULT (WINAPI*)()>(ProbeExport(dll, "ProbeInstall", "_ProbeInstall@0"));
@@ -203,8 +211,8 @@ void Live(const wchar_t* path) {
     const HRESULT installed = install();
     Check(SUCCEEDED(installed), "real static IAT installation succeeds while workers call COM");
     std::printf("install_hr=%08lx mask=%u slots=%u\n", static_cast<unsigned long>(installed), value(3), value(4));
-    Check((value(3) & ~pulse::shell_bridge::runtime::kGetProcAddress) == 7 && (value(3) & pulse::shell_bridge::runtime::kGetProcAddress) && value(4) >= 4,
-        "actual API mask (COM3 plus GetProcAddress route) and patched slot count reported");
+    Check((value(3) & ~pulse::shell_bridge::runtime::kGetProcAddress) == (7 | kCreateProcessW) && (value(3) & pulse::shell_bridge::runtime::kGetProcAddress) && value(4) >= 4,
+        "actual API mask (COM3, CreateProcessW and GetProcAddress) and patched slot count reported");
     Check(DirectCreate() == E_ABORT && DirectEx() == E_ABORT && DirectClass() == E_ABORT, "real compiler-generated COM3 imports route to helper");
     const auto dynamic_create = reinterpret_cast<decltype(&CoCreateInstance)>(Lookup(ole, "CoCreateInstance"));
     IUnknown* dynamic_output = nullptr;
@@ -219,9 +227,15 @@ void Live(const wchar_t* path) {
     SetLastError(0);
     Check(!Lookup(k32, "PulseNoSuchExport_7f3a") && GetLastError() == ERROR_PROC_NOT_FOUND, "missing export keeps null and ERROR_PROC_NOT_FOUND");
     Check(value(0) && value(1) && value(2), "all three helper callbacks observed");
+    Check(DirectProcess() == ERROR_CANCELLED && value(6) == 1, "main executable CreateProcessW IAT routes without starting a child");
+    const auto dynamic_process = reinterpret_cast<decltype(&::CreateProcessW)>(Lookup(k32, "CreateProcessW"));
+    SetLastError(ERROR_SUCCESS);
+    Check(dynamic_process && !dynamic_process(L"", nullptr, nullptr, nullptr, FALSE, 0, nullptr, nullptr, nullptr, nullptr) &&
+        GetLastError() == ERROR_CANCELLED && value(6) == 2, "dynamic CreateProcessW lookup shares the routed callback");
     Check(SUCCEEDED(rollback()), "real IAT rollback succeeds during concurrent COM calls");
     Check(DirectCreate() == baseline && DirectEx() != E_ABORT && DirectClass() != E_ABORT, "all static entries return native after rollback");
     Check(Lookup(ole, "CoCreateInstance") == native_create, "GetProcAddress returns native addresses after rollback");
+    Check(DirectProcess() != ERROR_CANCELLED && value(6) == 2, "CreateProcessW main executable IAT is restored after rollback");
     stop = true; for (auto& thread : workers) thread.join();
     Check(heartbeats.load() > before && !unexpected.load(), "workers progress with only native or hooked call results");
     Check(value(3) == 0 && value(4) == 0 && value(5) == 1, "rollback reports no owned slots and restored protection");

@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <fstream>
 #include <atomic>
+#include <mutex>
 namespace pulse::picker_inprocess {
 std::wstring FormatJumpVisitDate(int64_t seconds, int64_t now);
 std::wstring ResolveJumpIndexHelper(const std::wstring&, dialog_bundle::BundleLease&);
@@ -24,6 +25,178 @@ bool Ready(picker_inprocess::JumpContext& context, ui::FolderPickerSpec& spec) {
 }
 }
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 3 && std::wstring_view(argv[1]) == L"--last-location") {
+        const auto root = std::filesystem::absolute(argv[2]);
+        if (std::filesystem::exists(root)) return 3;
+        std::filesystem::create_directories(root);
+        picker_inprocess::JumpContextOptions options;
+        options.enumerate_explorer = false;
+        options.history_root = root.wstring();
+        options.read_places = [] { picker_places::Snapshot s; s.jump_policy_available = true; s.remember = true; return s; };
+        for (const auto mode : {ui::PickerMode::File, ui::PickerMode::Save, ui::PickerMode::Folder}) {
+            const auto directory = root / std::to_wstring(static_cast<int>(mode));
+            std::filesystem::create_directory(directory);
+            const auto accepted = mode == ui::PickerMode::Folder ? directory : directory / L"result.txt";
+            if (mode != ui::PickerMode::Folder) std::ofstream(accepted) << "fixture";
+            {
+                picker_inprocess::JumpContext context(GetCurrentProcessId(), static_cast<int>(mode), options);
+                ui::FolderPickerSpec spec;
+                Check(Ready(context, spec), "history producer becomes ready without Explorer enumeration");
+                context.Accepted(accepted.wstring());
+            }
+            bool committed = false;
+            for (int i=0;i<150&&!committed;++i) {
+                for (const auto& file : std::filesystem::directory_iterator(root)) {
+                    if (file.path().extension() != L".tsv") continue;
+                    app::JumpHistory history; history.Open(file.path().wstring());
+                    committed |= history.LastUsed(directory.wstring()) > 0;
+                }
+                if (!committed) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            Check(committed, "actual accepted location reaches isolated history file");
+            for (const auto* language : {L"zh-CN", L"en-US", L"zh-TW"}) {
+                l10n::Initialize(GetModuleHandleW(nullptr), language);
+                picker_inprocess::JumpContext context(GetCurrentProcessId(), static_cast<int>(mode), options);
+                ui::FolderPickerSpec spec;
+                for(int i=0;i<150&&spec.last_location.path.empty();++i) {
+                    context.Poll(spec);
+                    if(spec.last_location.path.empty())std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                }
+                Check(spec.last_location.path == directory.wstring(), "history reload preserves each mode's exact directory");
+                auto expected = std::wstring(l10n::Get(mode == ui::PickerMode::Save ?
+                    l10n::StringId::PickerAppLastSaveLocation : l10n::StringId::PickerAppLastLocation));
+                const auto name = expected.find(L"{name}");
+                if(name != expected.npos)expected.replace(name,6,spec.host_app_name);
+                Check(name != expected.npos && !spec.host_app_name.empty() && spec.last_location_source == expected,
+                    "production history caption identifies program and open/save action in all languages");
+            }
+        }
+        std::printf("FAILURES=%d\n",failures);
+        return failures?1:0;
+    }
+    if (argc == 3 && std::wstring_view(argv[1]) == L"--forget") {
+        // 常用 × removes a folder from this program's history; one folder reached
+        // through a junction is recorded once, at its real location.
+        const auto root = std::filesystem::absolute(argv[2]);
+        if (std::filesystem::exists(root)) return 3;
+        std::filesystem::create_directories(root);
+        {
+            app::JumpHistory memory;
+            memory.Record(L"D:\\Fixture\\Print", {});
+            Check(memory.Remove(L"d:\\fixture\\print\\"), "remove matches however the path is typed");
+            Check(!memory.Remove(L"D:\\Fixture\\Print") && memory.Size() == 0, "a second remove finds nothing");
+        }
+        picker_inprocess::JumpContextOptions options;
+        options.enumerate_explorer = false;
+        options.history_root = root.wstring();
+        options.read_places = [] { picker_places::Snapshot s; s.jump_policy_available = true; s.remember = true; return s; };
+        const auto mode = static_cast<int>(ui::PickerMode::Folder);
+        const auto keep = root / L"keep", drop = root / L"drop", target = root / L"target";
+        for (const auto& d : {keep, drop, target}) std::filesystem::create_directory(d);
+        const auto link = root / L"link";
+        const std::wstring mklink = L"cmd /c mklink /J \"" + link.wstring() + L"\" \"" + target.wstring() + L"\" >nul";
+        const bool junction = _wsystem(mklink.c_str()) == 0 && std::filesystem::exists(link);
+        const auto history_file = [&] {
+            for (const auto& file : std::filesystem::directory_iterator(root))
+                if (file.path().extension() == L".tsv") return file.path().wstring();
+            return std::wstring();
+        };
+        const auto used = [&](const std::filesystem::path& folder) {
+            const auto file = history_file();
+            if (file.empty()) return int64_t{0};
+            app::JumpHistory history; history.Open(file);
+            return history.LastUsed(folder.wstring());
+        };
+        std::vector<std::filesystem::path> accepted = {keep, drop};
+        if (junction) accepted.push_back(link);
+        for (const auto& folder : accepted) {
+            {
+                picker_inprocess::JumpContext context(GetCurrentProcessId(), mode, options);
+                ui::FolderPickerSpec spec;
+                Check(Ready(context, spec), "history producer ready");
+                context.Accepted(folder.wstring());
+            }
+            const auto expect = folder == link ? target : folder;
+            for (int i = 0; i < 150 && !used(expect); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            Check(used(expect) > 0, "accepted folder reaches the history file");
+        }
+        if (junction) {
+            Check(used(target) > 0 && !used(link), "a junction is recorded at its real location");
+        } else {
+            std::printf("[SKIP] junction canonicalization: mklink /J unavailable here\n");
+        }
+        {
+            picker_inprocess::JumpContext context(GetCurrentProcessId(), mode, options);
+            ui::FolderPickerSpec spec;
+            const auto has = [&](const std::filesystem::path& folder) {
+                return std::any_of(spec.app_recent_places.begin(), spec.app_recent_places.end(),
+                    [&](const auto& place) { return ui::SamePickerPath(place.path, folder.wstring()); });
+            };
+            for (int i = 0; i < 150 && !(has(keep) && has(drop)); ++i) {
+                context.Poll(spec);
+                if (!(has(keep) && has(drop))) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            Check(has(keep) && has(drop), "both folders listed before the removal");
+            context.Forget(drop.wstring());
+            for (int i = 0; i < 150 && has(drop); ++i) {
+                context.Poll(spec);
+                if (has(drop)) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            Check(!has(drop) && has(keep), "the removed folder leaves the live list, the other stays");
+        }
+        for (int i = 0; i < 150 && used(drop); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        Check(!used(drop) && used(keep) > 0, "the removal is written to the history file");
+        {
+            picker_inprocess::JumpContext context(GetCurrentProcessId(), mode, options);
+            ui::FolderPickerSpec spec;
+            Check(Ready(context, spec), "history reload after removal");
+            for (int i = 0; i < 50; ++i) { context.Poll(spec); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+            Check(std::none_of(spec.app_recent_places.begin(), spec.app_recent_places.end(),
+                [&](const auto& place) { return ui::SamePickerPath(place.path, drop.wstring()); }), "a removed folder stays gone after reopening");
+        }
+        if (junction) RemoveDirectoryW(link.c_str());
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+        Check(!ec, "isolated fixture removed");
+        std::printf("FAILURES=%d\n", failures);
+        return failures ? 1 : 0;
+    }
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--selection") {
+        l10n::Initialize(GetModuleHandleW(nullptr), L"en-US");
+        struct Fixture { std::mutex mutex; picker_places::Snapshot snapshot; };
+        auto fixture = std::make_shared<Fixture>();
+        fixture->snapshot.selection_available = true;
+        fixture->snapshot.selected_items = {{L"C:\\file.png", false, 32}, {L"C:\\folder", true, 0}};
+        picker_inprocess::JumpContextOptions options;
+        options.enumerate_explorer = false;
+        options.read_places = [fixture] { std::lock_guard lock(fixture->mutex); return fixture->snapshot; };
+        picker_inprocess::JumpContext context(GetCurrentProcessId(), static_cast<int>(ui::PickerMode::File), options);
+        ui::FolderPickerSpec spec;
+        auto wait_for = [&](auto expected) {
+            for (int i = 0; i < 150; ++i) {
+                context.Poll(spec);
+                if (expected()) return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            return false;
+        };
+        Check(wait_for([&] { return spec.pulse_selection_available && spec.pulse_selected_items.size() == 2; }),
+            "selection worker delivers file and directory snapshot to FolderPickerSpec");
+        Check(spec.pulse_selected_items.size() == 2 && !spec.pulse_selected_items[0].is_directory &&
+            spec.pulse_selected_items[0].size == 32 && spec.pulse_selected_items[1].is_directory,
+            "selection transport retains type and byte size without filesystem validation claims");
+        { std::lock_guard lock(fixture->mutex); fixture->snapshot.selected_items.clear(); }
+        Check(wait_for([&] { return spec.pulse_selection_available && spec.pulse_selected_items.empty(); }),
+            "cleared source selection advances revision and clears picker data");
+        { std::lock_guard lock(fixture->mutex); fixture->snapshot.selected_items = {{L"\\\\server\\share\\new.txt", false, 99}}; }
+        Check(wait_for([&] { return spec.pulse_selected_items.size() == 1 && spec.pulse_selected_items[0].size == 99; }),
+            "source change refreshes picker without requiring filter or search changes");
+        { std::lock_guard lock(fixture->mutex); fixture->snapshot.selection_available = false; }
+        Check(wait_for([&] { return !spec.pulse_selection_available && spec.pulse_selected_items.empty(); }),
+            "unavailable source clears picker even if callback retains its old vector");
+        return failures ? 1 : 0;
+    }
+
     if (argc == 2 && std::wstring_view(argv[1]) == L"--slow-history") {
         l10n::Initialize(GetModuleHandleW(nullptr), L"en-US");
         auto entered = std::make_shared<std::atomic<bool>>(false);
@@ -206,57 +379,13 @@ int wmain(int argc, wchar_t** argv) {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     {
+        // Accepted files remember their folder; the dialog no longer shows recent file cards.
         picker_inprocess::JumpContext context(GetCurrentProcessId(), static_cast<int>(ui::PickerMode::File), options);
-        ui::FolderPickerSpec spec; spec.mode = ui::PickerMode::File; Check(Ready(context, spec) && spec.recent_files.size() == 1 && spec.recent_files.front().path == accepted_file.wstring(), "recent files contain actual accepted same-app file");
-        Check(!spec.recent_files.empty() && spec.recent_files.front().detail.starts_with(root.wstring()) &&
-            spec.recent_files.front().detail.size() > root.wstring().size(), "recent card contains actual parent directory and visit date");
+        ui::FolderPickerSpec spec; spec.mode = ui::PickerMode::File; Check(Ready(context, spec), "file-mode history arrives");
         Check(!spec.app_recent_places.empty() && !spec.app_recent_places.front().detail.empty(), "recent directory shows actual visit date");
-        Check(!spec.last_location_source.empty() && !spec.recent_files_caption.empty(), "history chips and cards identify their actual app source");
+        Check(!spec.last_location_source.empty(), "history chips identify their actual app source");
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    {
-        picker_inprocess::JumpContext context(GetCurrentProcessId(), static_cast<int>(ui::PickerMode::File), options);
-        ui::FolderPickerSpec spec; spec.mode = ui::PickerMode::File; spec.filters = {{L"Images", L"*.png"}, {L"Text", L"*.txt"}};
-        Check(Ready(context, spec) && spec.recent_files.empty(), "recent files honor active file filter");
-        spec.filter_index = 1;
-        Check(context.Poll(spec) && spec.recent_files.size() == 1, "filter switching updates recent cards from memory");
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
     std::filesystem::remove(accepted_file);
-    {
-        picker_inprocess::JumpContext context(GetCurrentProcessId(), static_cast<int>(ui::PickerMode::File), options);
-        ui::FolderPickerSpec spec; spec.mode = ui::PickerMode::File; Check(Ready(context, spec) && spec.recent_files.empty(), "deleted recent file is omitted");
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    const auto pulse_file = root / L"pulse-recent.txt";
-    { std::ofstream stream(pulse_file); stream << "pulse recent fixture"; }
-    auto merged_options = options;
-    merged_options.pulse_places_file = (root / L"places.json").wstring();
-    std::wstring escaped; json::Escape(pulse_file.wstring(), escaped);
-    const auto ticks = (static_cast<uint64_t>(app::JumpHistory::Now() - 600) + 11644473600ULL) * 10000000ULL;
-    WriteUtf8FileAtomic(merged_options.pulse_places_file, L"{\"recent_items\":[{\"path\":\"" + escaped + L"\",\"kind\":\"file\",\"opened_at\":\"" + std::to_wstring(ticks) + L"\"}]}");
-    {
-        picker_inprocess::JumpContext context(GetCurrentProcessId(), static_cast<int>(ui::PickerMode::File), merged_options);
-        ui::FolderPickerSpec spec; spec.mode = ui::PickerMode::File;
-        Check(Ready(context, spec) && spec.recent_files.size() == 1 && spec.recent_files[0].path == pulse_file.wstring(),
-            "recent cards merge real Pulse places JSON file records");
-        Check(!spec.recent_files.empty() && spec.recent_files[0].detail.find(L"10 minutes ago") != std::wstring::npos,
-            "recent card uses actual relative minutes");
-        context.Accepted(pulse_file.wstring());
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    {
-        picker_inprocess::JumpContext context(GetCurrentProcessId(), static_cast<int>(ui::PickerMode::File), merged_options);
-        ui::FolderPickerSpec spec; spec.mode = ui::PickerMode::File;
-        Check(Ready(context, spec) && spec.recent_files.size() == 1, "Pulse and same-app duplicate paths merge once");
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    merged_options.read_places = [shared] { auto disabled = shared; disabled.remember = false; return disabled; };
-    {
-        picker_inprocess::JumpContext context(GetCurrentProcessId(), static_cast<int>(ui::PickerMode::File), merged_options);
-        ui::FolderPickerSpec spec; spec.mode = ui::PickerMode::File;
-        Check(Ready(context, spec) && spec.recent_files.empty(), "privacy off suppresses Pulse and app recent files together");
-    }
     const auto helper_root = root / L"resolver";
     std::filesystem::create_directories(helper_root);
     dialog_bundle::BundleLease lease;

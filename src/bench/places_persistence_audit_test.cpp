@@ -6,6 +6,10 @@
 #include <cstdio>
 #include <functional>
 #include <string_view>
+#include <chrono>
+#include <tuple>
+#include <algorithm>
+#include <iterator>
 
 namespace pulse::app {
 static std::wstring fixture;
@@ -23,6 +27,7 @@ struct PlacesPersistenceAudit {
     static void Mark(PlacesCatalog& c) { c.MarkPlacesDirty(); }
     static void Queue(PlacesCatalog& c) { c.QueuePlacesSave(); }
     static void Stop(PlacesCatalog& c) { c.StopPlacesWriter(); }
+    static void Index(PlacesCatalog& c) { c.RebuildTagIndex(); c.RebuildStarIndex(); }
 };
 }
 using namespace pulse;
@@ -206,7 +211,142 @@ static void BatchedAssignments() {
               "batched removal leaves what one removal per item left");
     }
 }
+static void SeedCopyCatalog(PlacesCatalog& c) {
+    c.persist = false;
+    c.tags.clear(); c.starred_items.clear(); c.starred_groups.clear(); c.recent_items.clear();
+    ColorTag tag; tag.id = L"copy-tag"; tag.name = L"copy"; tag.rgb = 0x123456; tag.favorite = 1; tag.group = L"tags";
+    const wchar_t* paths[] = {L"C:\\src\\a.jpg", L"C:\\src\\b.jpg", L"C:\\src\\dir\\c.jpg", L"C:\\src\\dir",
+        L"C:\\keep\\d.jpg", L"C:\\src\\directory\\e.jpg", L"\\\\server\\share\\src\\item.jpg", L"C:\\src\\a.jpg"};
+    for (size_t i = 0; i < std::size(paths); ++i) {
+        const auto path = pulse::fs::NormalizePath(paths[i]);
+        tag.paths.push_back(path);
+        if (i + 1 == std::size(paths)) continue;
+        StarredItem star; star.path = path; star.kind = i == 3 ? PlaceItemKind::Folder : PlaceItemKind::File;
+        star.badge = std::to_wstring(i); star.badge_rgb = 0x135790 + static_cast<uint32_t>(i);
+        star.group = i == 3 ? L"favorites" : L""; star.separator_after = true;
+        c.starred_items.push_back(star);
+        RecentItem recent; recent.path = path; recent.kind = star.kind; recent.opened_at = 42 + i;
+        c.recent_items.push_back(recent);
+    }
+    c.tags.push_back(tag);
+    ColorTag second; second.id = L"second"; second.name = L"second"; second.paths = {tag.paths[2], tag.paths[4]};
+    c.tags.push_back(second);
+    StarredGroup group; group.id = L"favorites"; group.name = L"favorites"; group.collapsed = true;
+    c.starred_groups.push_back(group);
+    c.quick_access_paths = {pulse::fs::NormalizePath(L"C:\\src\\dir")};
+    c.quick_access_order = {L"builtin:recent", c.quick_access_paths.front()};
+    PlacesPersistenceAudit::Index(c);
+}
+static bool SameCopyCatalog(const PlacesCatalog& a, const PlacesCatalog& b) {
+    if (a.tags.size() != b.tags.size() || a.starred_items.size() != b.starred_items.size() ||
+        a.recent_items.size() != b.recent_items.size() || a.quick_access_paths != b.quick_access_paths ||
+        a.quick_access_order != b.quick_access_order || a.starred_groups.size() != b.starred_groups.size()) return false;
+    for (size_t i = 0; i < a.tags.size(); ++i) {
+        const auto& x = a.tags[i]; const auto& y = b.tags[i];
+        if (std::tie(x.id,x.name,x.rgb,x.favorite,x.group,x.paths) != std::tie(y.id,y.name,y.rgb,y.favorite,y.group,y.paths)) return false;
+        for (const auto& path : x.paths) if (a.TagsForPath(path) != b.TagsForPath(path)) return false;
+    }
+    for (size_t i = 0; i < a.starred_items.size(); ++i) {
+        const auto& x = a.starred_items[i]; const auto& y = b.starred_items[i];
+        if (std::tie(x.path,x.kind,x.badge,x.badge_rgb,x.group,x.separator_after) !=
+            std::tie(y.path,y.kind,y.badge,y.badge_rgb,y.group,y.separator_after) || a.IsStarred(x.path) != b.IsStarred(x.path)) return false;
+    }
+    for (size_t i = 0; i < a.recent_items.size(); ++i) {
+        const auto& x = a.recent_items[i]; const auto& y = b.recent_items[i];
+        if (std::tie(x.path,x.kind,x.opened_at) != std::tie(y.path,y.kind,y.opened_at)) return false;
+    }
+    for (size_t i = 0; i < a.starred_groups.size(); ++i) {
+        const auto& x = a.starred_groups[i]; const auto& y = b.starred_groups[i];
+        if (std::tie(x.id,x.name,x.collapsed,x.separator_after) != std::tie(y.id,y.name,y.collapsed,y.separator_after)) return false;
+    }
+    return true;
+}
+static std::vector<std::wstring> ReferenceTaggedPaths(const PlacesCatalog& c, const std::vector<std::wstring>& roots) {
+    std::vector<std::wstring> result;
+    for (const auto& tag : c.tags) for (const auto& path : tag.paths) {
+        const bool included = std::any_of(roots.begin(), roots.end(), [&](const auto& root) {
+            if (_wcsicmp(path.c_str(), root.c_str()) == 0) return true;
+            return path.size() > root.size() && _wcsnicmp(path.c_str(), root.c_str(), root.size()) == 0 &&
+                (root.ends_with(L"\\") || path[root.size()] == L'\\' || path[root.size()] == L'/');
+        });
+        if (included) result.push_back(path);
+    }
+    return result;
+}
+static void CopyCompletionCases() {
+    using Copies = std::vector<std::pair<std::wstring, std::wstring>>;
+    const std::vector<Copies> cases = {
+        {{L"C:\\src\\b.jpg",L"C:\\dst\\b.jpg"},{L"c:\\SRC\\a.jpg",L"C:\\dst\\a.jpg"},{L"C:\\src\\dir",L"C:\\dst\\dir"}},
+        {{L"C:\\src\\a.jpg",L"C:\\src\\b.jpg"},{L"C:\\src\\b.jpg",L"C:\\other\\b.jpg"}},
+        {{L"C:\\src",L"C:\\copied"},{L"C:\\src\\dir",L"C:\\other\\dir"}},
+        {{L"C:\\src\\a.jpg",L"C:\\same.jpg"},{L"C:\\src\\a.jpg",L"C:\\same.jpg"}},
+        {{L"C:\\src\\a.jpg",L"C:\\same.jpg"},{L"C:\\src\\b.jpg",L"C:\\same.jpg"}},
+        {{L"C:\\src\\a.jpg",L"C:\\src\\a.jpg"},{L"C:\\src\\a.jpg",L"c:\\SRC\\A.JPG"}},
+        {{L"",L"C:\\missing"},{L"C:\\not-present",L"C:\\missing"}},
+        {{L"\\\\server\\share\\src",L"\\\\server\\share\\dst"}},
+        {{L"C:\\",L"D:\\copy"}},
+        {{L"C:\\src\\dir",L"C:\\other\\dir"},{L"C:\\other",L"C:\\second"}}
+    };
+    for (const auto& copies : cases) {
+        PlacesCatalog batch, single; SeedCopyCatalog(batch); SeedCopyCatalog(single);
+        batch.CloneAssignments(copies);
+        for (const auto& [from,to] : copies) single.CloneAssignments(from,to);
+        Check(SameCopyCatalog(batch,single), "copy batch preserves sequential metadata, order, duplicate handling and lookup indexes");
+    }
+    PlacesCatalog c; SeedCopyCatalog(c);
+    c.CloneAssignments(Copies{{L"C:\\src\\dir",L"C:\\dst\\dir"}});
+    const auto copied_star = c.FindStarred(L"C:\\dst\\dir");
+    Check(copied_star && c.IsStarred(L"C:\\src\\dir") && c.IsStarred(L"C:\\dst\\dir") &&
+        copied_star->group == L"favorites" && !copied_star->separator_after,
+        "copy keeps source and favorite group while clearing only the new separator flag");
+    Check(!c.TagsForPath(L"C:\\dst\\dir\\c.jpg").empty() && c.TagsForPath(L"C:\\dst\\directory\\e.jpg").empty(),
+        "copy includes descendants but not a similar directory-name prefix");
+    const auto N = [](const wchar_t* path) { return pulse::fs::NormalizePath(path); };
+    for (const auto& roots : std::vector<std::vector<std::wstring>>{
+            {}, {N(L"C:\\src\\dir")}, {N(L"C:\\src"),N(L"C:\\src\\dir")},
+            {N(L"c:\\SRC\\A.JPG"),N(L"C:\\src\\a.jpg")}, {N(L"\\\\server\\share\\src")},
+            {N(L"C:\\")}, {N(L"C:\\missing")}, {L""}, {L"C:/src/"}, {L"pulse:tags"}}) {
+        Check(c.TaggedPathsUnder(roots) == ReferenceTaggedPaths(c,roots),
+            "tag descendant expansion preserves catalog order, duplicates, case and path-boundary semantics");
+    }
+}
+static void CompletionBenchmark() {
+    using Clock = std::chrono::steady_clock;
+    for (size_t count : {64u,256u,512u}) for (int sample = 0; sample < 3; ++sample) {
+        PlacesCatalog c; c.persist = false;
+        c.tags.clear(); c.starred_items.clear();
+        ColorTag tag; tag.id = L"bench"; tag.name = L"bench";
+        for (size_t i = 0; i < count * 12; ++i) {
+            const auto raw = i % 12 == 0 ? L"C:\\completion-bench\\src\\f" + std::to_wstring(i/12) :
+                L"C:\\completion-bench\\unrelated\\f" + std::to_wstring(i);
+            tag.paths.push_back(pulse::fs::NormalizePath(raw + L".bin"));
+            if (i % 48 == 0) { StarredItem star; star.path = tag.paths.back(); star.kind = PlaceItemKind::File; c.starred_items.push_back(star); }
+        }
+        c.tags.push_back(std::move(tag)); PlacesPersistenceAudit::Index(c);
+        std::vector<std::pair<std::wstring,std::wstring>> copies;
+        std::vector<std::wstring> roots;
+        for (size_t i = count; i-- > 0;) {
+            const auto from = pulse::fs::NormalizePath(L"C:\\completion-bench\\src\\f"+std::to_wstring(i)+L".bin");
+            const auto to = pulse::fs::NormalizePath(L"C:\\completion-bench\\dst\\f"+std::to_wstring(i)+L".bin");
+            copies.emplace_back(from,to); roots.push_back(to);
+        }
+        const auto start = Clock::now(); c.CloneAssignments(copies); const auto copied = Clock::now();
+        const auto matches = c.TaggedPathsUnder(roots); const auto matched = Clock::now();
+        const auto first = pulse::fs::NormalizePath(L"C:\\completion-bench\\dst\\f0.bin");
+        Check(c.tags[0].paths.size() == count*13 && c.starred_items.size() == count/2 &&
+            matches.size() == count && !c.TagsForPath(first).empty() && c.IsStarred(first), "benchmark verifies production metadata output without disk writes");
+        printf("COMPLETION_BENCH roots=%zu assigned=%zu sample=%d copy_ms=%.3f match_ms=%.3f\n", count,
+            count*13,sample,std::chrono::duration<double,std::milli>(copied-start).count(),
+            std::chrono::duration<double,std::milli>(matched-copied).count()); fflush(stdout);
+    }
+}
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--completion-only") {
+        CopyCompletionCases(); printf("COPY_METADATA_RESULT failures=%d\n",failures); return failures ? 1 : 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--completion-bench") {
+        CompletionBenchmark(); return failures ? 1 : 0;
+    }
     const auto root = std::filesystem::absolute(L"bench_data/places-audit-" + std::to_wstring(GetCurrentProcessId()));
     if (std::filesystem::exists(root)) return 2;
     std::filesystem::create_directories(root);

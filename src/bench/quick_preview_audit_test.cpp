@@ -1088,7 +1088,9 @@ struct QuickPreviewAuditTest {
     }
 };
 }
+int RunQuickPreviewGalleryProbe();
 int RunQuickPreviewAuditTest(){
+    if (GetEnvironmentVariableW(L"PULSE_TEST_GALLERY_DIR", nullptr, 0)) return RunQuickPreviewGalleryProbe();
     if (GetEnvironmentVariableW(L"PULSE_TEST_VIDEO_FEEDBACK", nullptr, 0)) {
         pulse::compat::EnableDpiAwareness();
         pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");

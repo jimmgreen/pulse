@@ -3,6 +3,7 @@
 #include "../common/localization.h"
 #include <cstdio>
 #include <set>
+#include <filesystem>
 
 namespace pulse::ui {
 AdvancedSearchDialogResult TestAdvancedSearchQuery(app::AdvancedSearchSpec spec, int field,
@@ -40,8 +41,13 @@ std::set<std::wstring> Results(const std::wstring& raw) {
 }
 }
 int main() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    puts("[STAGE] COM initialization");
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    puts("[STAGE] localization initialization");
     pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
+    puts("[STAGE] dialog tests");
     int failures = 0;
     const auto check = [&](bool pass, const char* name) {
         printf("[%s] %s\n", pass ? "PASS" : "FAIL", name); failures += !pass;
@@ -71,6 +77,34 @@ int main() {
                               L"content:hello !content:noise ext:txt alpha !draft"}) {
         const auto result = pulse::ui::TestAdvancedSearchQuery(pulse::app::ParseSearchQuery(query, L"C:\\private-memory-fixture"), 0, L"");
         check(result.accepted && result.query == query, "untouched custom extensions and hidden exclusions survive actual editor initialization");
+    }
+    {
+        const auto result = pulse::ui::TestAdvancedSearchQuery({}, 4, LR"(^(alpha|beta)-keep\.txt$)");
+        check(result.accepted && Results(result.query) == expected,
+              "selecting Regex in real form matches both alternation branches");
+        const auto reopened = pulse::ui::TestAdvancedSearchQuery(pulse::app::ParseSearchQuery(result.query), 0, L"");
+        check(reopened.accepted && reopened.query == result.query,
+              "reopening real form retains regex mode and pattern");
+        const auto invalid = pulse::ui::TestAdvancedSearchQuery({}, 4, L"[");
+        check(!invalid.accepted, "invalid regex blocks real form submission");
+        const auto recovered = pulse::ui::TestAdvancedSearchQuery({}, 5, L"[");
+        check(recovered.accepted && Results(recovered.query).size() == 2,
+              "correcting invalid regex re-enables real form submission");
+        auto spec = pulse::app::ParseSearchQuery(result.query);
+        const auto edited = pulse::ui::TestAdvancedSearchQuery(spec, 2, L"pdf");
+        check(edited.accepted && Results(edited.query).empty(),
+              "real regex form honors extension edits");
+    }
+    for (int field = 10; field < 16; ++field) {
+        pulse::app::AdvancedSearchSpec spec;
+        spec.name_how = pulse::app::NameMatchHow::Regex;
+        spec.name = field == 15 ? L"[" : LR"(^aa[([]2022[)\]]xx.*$)";
+        pulse::l10n::SetLanguage(field == 13 ? L"en-US" : field == 14 ? L"zh-TW" : L"zh-CN");
+        const auto folder = std::filesystem::current_path() / L"bench_data" / L"advanced-search-regex-20261124";
+        std::filesystem::create_directories(folder);
+        const auto path = folder / (L"regex-ui-" + std::to_wstring(field) + L".png");
+        const auto result = pulse::ui::TestAdvancedSearchQuery(spec, field, path.wstring());
+        check(result.accepted, "regex selected pill fits without overlap; real D2D frame captured (theme/DPI/language)");
     }
     CoUninitialize();
     return failures ? 1 : 0;

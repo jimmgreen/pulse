@@ -1,0 +1,11 @@
+if(TARGET pulse)
+    add_executable(pulse_extension_partial_redraw_test EXCLUDE_FROM_ALL
+        src/bench/extension_partial_redraw_test.cpp $<TARGET_OBJECTS:pulse>)
+    target_link_libraries(pulse_extension_partial_redraw_test PRIVATE "$<TARGET_PROPERTY:pulse,LINK_LIBRARIES>")
+    foreach(property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_OPTIONS)
+        get_target_property(value pulse ${property})
+        if(value)
+            set_property(TARGET pulse_extension_partial_redraw_test PROPERTY ${property} "${value}")
+        endif()
+    endforeach()
+endif()

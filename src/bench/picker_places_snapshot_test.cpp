@@ -1,9 +1,18 @@
 #include "../common/picker_places_snapshot.h"
 #include "../common/picker_places_saved.h"
+#include "../app/window_registry.h"
+#include "../app/picker_selection_source.h"
 #include <iostream>
 #include <memory>
 
-int main() {
+int wmain(int argc, wchar_t** argv) {
+    if (argc == 3 && std::wstring_view(argv[1]) == L"--selection-child") {
+        pulse::picker_places::Snapshot loaded;
+        pulse::picker_places::selection_detail::Read(loaded, argv[2]);
+        return loaded.selection_available && loaded.selected_items.size() == 2 &&
+            loaded.selected_items[0].path == L"C:\\资料\\文件.png" && !loaded.selected_items[0].is_directory &&
+            loaded.selected_items[0].size == 123 && loaded.selected_items[1].is_directory ? 0 : 1;
+    }
     using namespace pulse::picker_places;
     int failed = 0;
     auto check = [&](bool ok, const char* name) {
@@ -178,7 +187,104 @@ int main() {
     ReadSharedVersion(legacy, false, network_name);
     check(legacy.shared_available && legacy.networks.empty() && legacy.workspaces.size() == 1 &&
         network_writer.blob->payload.version == 2, "legacy v2 remains readable without network rows");
+
+
+    struct SourceFixture {
+        bool snapshot = true, content_results = false;
+        std::wstring snapshot_path = L"C:\\one", current_path = snapshot_path;
+        struct Item { std::wstring path; bool is_dir; uint64_t size; };
+        std::vector<Item> rows{{L"C:\\one\\file.png", false, 44}, {L"C:\\one\\folder", true, 0}};
+        std::vector<int> selected{0, 1};
+        mutable int enumerations = 0;
+        int count = 2;
+        int SelectedCount() const { return count; }
+        const std::vector<int>& SelectedIndices() const { ++enumerations; return selected; }
+        const Item& EntryAt(size_t index) const { return rows[index]; }
+    } source;
+    auto resolve = [](const SourceFixture& tab, int index) {
+        return index >= 0 && static_cast<size_t>(index) < tab.rows.size() ? tab.rows[index].path : std::wstring{};
+    };
+    Snapshot captured;
+    pulse::app::CapturePickerSelection(&source, captured, resolve);
+    check(captured.selection_available && captured.selected_items.size() == 2 && captured.selected_items[0].size == 44 &&
+        captured.selected_items[1].is_directory, "production capture uses selected row paths, file types and sizes");
+    source.current_path = L"C:\\new";
+    pulse::app::CapturePickerSelection(&source, captured, resolve);
+    check(!captured.selection_available && captured.selected_items.empty(), "navigation with retained previous snapshot clears selection source");
+    source.current_path = source.snapshot_path; source.content_results = true;
+    pulse::app::CapturePickerSelection(&source, captured, resolve);
+    check(!captured.selection_available && captured.selected_items.empty(), "content storage-backed selection is never fetched on UI thread");
+    source.content_results = false; source.count = 65; source.enumerations = 0;
+    pulse::app::CapturePickerSelection(&source, captured, resolve);
+    check(!captured.selection_available && source.enumerations == 0, "oversized source rejected before allocating all selected indices");
+    source.count = 2; source.selected = {0, 99};
+    pulse::app::CapturePickerSelection(&source, captured, resolve);
+    check(!captured.selection_available && captured.selected_items.empty(), "stale selected index clears whole source rather than retaining valid prefix");
+    source.count = 0; source.selected.clear();
+    pulse::app::CapturePickerSelection(&source, captured, resolve);
+    check(captured.selection_available && captured.selected_items.empty(), "empty current selection is published as empty");
+    const auto selection_name = isolated_name + L".selection";
+    selection_detail::Writer selection_writer(selection_name);
+    Snapshot first;
+    first.selection_source = network_endpoint; first.selection_available = true;
+    first.selected_items = {{L"C:\\资料\\文件.png", false, 123}, {L"\\\\server\\share\\folder", true, 0}};
+    selection_detail::Publish(first, selection_writer);
+    Snapshot selected;
+    selection_detail::Read(selected, selection_name);
+    check(selected.selection_available && selected.selected_items == first.selected_items,
+        "selection mapping preserves Unicode file, UNC folder, type and byte size");
+    wchar_t exe[32768]{}; GetModuleFileNameW(nullptr, exe, 32768);
+    std::wstring command = L"\"" + std::wstring(exe) + L"\" --selection-child \"" + selection_name + L"\"";
+    STARTUPINFOW startup{sizeof(startup)}; PROCESS_INFORMATION process{};
+    DWORD child_exit = 99;
+    if (CreateProcessW(exe, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
+        if (WaitForSingleObject(process.hProcess, 10000) == WAIT_OBJECT_0) GetExitCodeProcess(process.hProcess, &child_exit);
+        CloseHandle(process.hThread); CloseHandle(process.hProcess);
+    }
+    check(child_exit == 0, "selection mapping is readable across actual process boundary");
+    HWND second_window = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
+    Snapshot second; second.selection_source = second_window; second.selection_available = true;
+    pulse::app::BasicWindowRegistry<Snapshot> windows;
+    windows.Add(network_endpoint, &first); windows.Add(second_window, &second);
+    selection_detail::Publish(*windows.MostRecent(), selection_writer);
+    selection_detail::Read(selected, selection_name);
+    check(selected.selection_available && selected.selected_items.empty() && selected.selection_source == second_window,
+        "empty MRU window replaces other window selection rather than falling back");
+    windows.Touch(network_endpoint);
+    selection_detail::Publish(*windows.MostRecent(), selection_writer);
+    selection_detail::Read(selected, selection_name);
+    check(selected.selected_items == first.selected_items, "MRU activation switches selection source");
+    first.selected_items.assign(kMaxSelectedItems + 1, {L"C:\\one.png", false, 1});
+    selection_detail::Publish(first, selection_writer); selection_detail::Read(selected, selection_name);
+    check(!selected.selection_available && selected.selected_items.empty(), "oversized selection clears old values without partial publication");
+    first.selected_items = {{L"C:\\one.png", false, 1}, {L"pulse:starred", true, 0}};
+    selection_detail::Publish(first, selection_writer); selection_detail::Read(selected, selection_name);
+    check(!selected.selection_available && selected.selected_items.empty(), "invalid selection clears entire batch without partial publication");
+    first.selected_items = {{L"C:\\" + std::wstring(800, L'x'), false, 9}};
+    selection_detail::Publish(first, selection_writer); selection_detail::Read(selected, selection_name);
+    check(selected.selection_available && selected.selected_items == first.selected_items, "bounded long path survives selection mapping");
+    first.selected_items.front().path.assign(1024, L'x');
+    selection_detail::Publish(first, selection_writer); selection_detail::Read(selected, selection_name);
+    check(!selected.selection_available && selected.selected_items.empty(), "overlong path never gets truncated into another path");
+    first.selected_items = {{L"C:\\one.png", false, 1}};
+    selection_detail::Publish(first, selection_writer);
+    selection_writer.blob->payload.timestamp = GetTickCount64() + 10000;
+    check(!selection_detail::Valid(selection_writer.blob->payload), "future selection timestamp rejected");
+    selection_writer.blob->payload.timestamp = GetTickCount64() - 10001;
+    selection_detail::Read(selected, selection_name);
+    check(!selected.selection_available && selected.selected_items.empty(), "expired selection clears previously read values");
+    selection_detail::Publish(first, selection_writer);
+    InterlockedIncrement(&selection_writer.blob->sequence);
+    selection_detail::Read(selected, selection_name);
+    check(!selected.selection_available && selected.selected_items.empty(), "in-progress selection writer never leaks stale values");
+    InterlockedIncrement(&selection_writer.blob->sequence);
+    selection_writer.blob->payload.rows[0].directory = 2;
+    check(!selection_detail::Valid(selection_writer.blob->payload), "invalid selection type rejected");
+    selection_detail::Publish(first, selection_writer);
+    if (second_window) DestroyWindow(second_window);
     if (network_endpoint) DestroyWindow(network_endpoint);
+    selection_detail::Read(selected, selection_name);
+    check(!selected.selection_available && selected.selected_items.empty(), "closed main window invalidates selection immediately");
     return failed ? 1 : 0;
 }
 

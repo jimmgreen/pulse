@@ -1,4 +1,5 @@
 #include "../app/picker_appearance.h"
+#include "../app/picker_list_order.h"
 #include "../app/app_prefs.h"
 #include "../ui/folder_picker_dialog.h"
 #include "../common/utf8_file.h"
@@ -25,9 +26,58 @@ bool WriteFixture(const std::filesystem::path& path, const std::wstring& json) {
 }
 int main() {
     using namespace pulse::app;
+    {
+        PickerAppearanceSnapshot session; session.theme_mode = 2; session.language = L"en";
+        PickerAppearanceReadResult latest; latest.status = PickerAppearanceReadStatus::Loaded;
+        ParsePickerAppearanceJson(LR"({"show_hidden_files":true,"show_protected_os_files":true,"show_file_extensions":false,"sort_default_column":5})", latest.snapshot);
+        RefreshPickerListPreferences(session, latest);
+        Check(session.show_hidden_files && session.show_protected_os_files && !session.show_file_extensions &&
+            session.list_order && session.list_order->Resolve(L"C:\\fixture").column == 5, "reused session refreshes current visibility and sort preferences");
+        Check(session.theme_mode == 2 && session.language == L"en", "list refresh preserves initialized theme and language");
+        latest = {}; RefreshPickerListPreferences(session, latest);
+        Check(session.show_hidden_files && !session.show_file_extensions && session.list_order,
+            "temporary unreadable preferences retain the last valid listing settings");
+        latest.status = PickerAppearanceReadStatus::Missing; RefreshPickerListPreferences(session, latest);
+        Check(!session.show_hidden_files && !session.show_protected_os_files && session.show_file_extensions && !session.list_order,
+            "removed preferences restore list defaults without changing session theme");
+    }
     PickerAppearanceSnapshot value;
     Check(ParsePickerAppearanceJson(L"{}", value) && value.ui_font_scale == 100 && value.text_render == 0 &&
         value.row_height == 34 && value.smart_date && value.zebra_rows && value.thumbnail_badges, "empty object has Pulse defaults");
+    Check(!value.show_hidden_files && !value.show_protected_os_files && value.show_file_extensions,
+        "missing visibility preferences match main window defaults");
+    for (int mask = 0; mask < 8; ++mask) {
+        AppPrefs visibility_prefs;
+        visibility_prefs.show_hidden_files = (mask & 1) != 0;
+        visibility_prefs.show_protected_os_files = (mask & 2) != 0;
+        visibility_prefs.show_file_extensions = (mask & 4) != 0;
+        const std::wstring visibility_json = std::wstring(L"{\"show_hidden_files\":") +
+            (visibility_prefs.show_hidden_files ? L"true" : L"false") + L",\"show_protected_os_files\":" +
+            (visibility_prefs.show_protected_os_files ? L"true" : L"false") + L",\"show_file_extensions\":" +
+            (visibility_prefs.show_file_extensions ? L"true" : L"false") + L"}";
+        PickerAppearanceSnapshot parsed_visibility;
+        Check(ParsePickerAppearanceJson(visibility_json, parsed_visibility), "visibility preference combination parses");
+        for (const auto& visibility : {parsed_visibility, PickerAppearanceFromPrefs(visibility_prefs)}) {
+            Check(visibility.show_hidden_files == visibility_prefs.show_hidden_files &&
+                visibility.show_protected_os_files == visibility_prefs.show_protected_os_files &&
+                visibility.show_file_extensions == visibility_prefs.show_file_extensions,
+                "persisted and in-memory visibility snapshots match main window preferences");
+            for (bool forced_hidden : {false, true}) {
+                pulse::ui::FolderPickerSpec visibility_spec;
+                visibility_spec.show_hidden = forced_hidden;
+                ApplyPickerAppearanceToSpec(visibility, visibility_spec);
+                Check(visibility_spec.show_hidden == forced_hidden &&
+                    visibility_spec.show_hidden_files == visibility_prefs.show_hidden_files &&
+                    visibility_spec.show_protected_os_files == visibility_prefs.show_protected_os_files &&
+                    visibility_spec.show_file_extensions == visibility_prefs.show_file_extensions,
+                    "spec receives all visibility preferences without overwriting caller force flag");
+            }
+        }
+    }
+    PickerAppearanceSnapshot invalid_visibility;
+    Check(ParsePickerAppearanceJson(LR"({"nested":{"show_hidden_files":true,"show_protected_os_files":true,"show_file_extensions":false},"show_hidden_files":"true","show_protected_os_files":null,"show_file_extensions":"false"})", invalid_visibility) &&
+        !invalid_visibility.show_hidden_files && !invalid_visibility.show_protected_os_files && invalid_visibility.show_file_extensions,
+        "invalid and nested visibility preferences use main window defaults");
     for (int action : {0, 1, 2, 99}) {
         const int expected = action == 1 || action == 2 ? action : 0;
         Check(ParsePickerAppearanceJson(L"{\"blank_click_action\":" + std::to_wstring(action) + L"}", value) &&
@@ -51,6 +101,7 @@ int main() {
         "language":"zh-TW","ui_font_scale":125,"text_render":2,"row_height":24,
         "list_selection_outline":true,"list_smart_date":false,"list_zebra_rows":false,
         "list_size_bar":true,"list_thumbnail_badges":false,"details_columns":0,"details_columns_v":2,
+        "show_hidden_files":true,"show_protected_os_files":true,"show_file_extensions":false,
         "nested":{"theme_mode":1},"unrelated":"synthetic-only"})";
     Check(ParsePickerAppearanceJson(json, value) && value.theme_mode == 2 && value.language == L"zh-TW" &&
         value.accent_rgb == 0xABCD12u && value.ui_font_scale == 125 && value.text_render == 2 && value.details_columns == 0,
@@ -144,6 +195,8 @@ int main() {
     const auto loaded = ReadPickerAppearanceFileReadOnly(file.wstring());
     Check(wrote && loaded.status == PickerAppearanceReadStatus::Loaded && loaded.error == ERROR_SUCCESS &&
         loaded.snapshot.language == L"zh-TW" && loaded.snapshot.accent_rgb == 0xABCD12u, "read-only snapshot loads whitelist");
+    Check(loaded.snapshot.show_hidden_files && loaded.snapshot.show_protected_os_files && !loaded.snapshot.show_file_extensions,
+        "standalone read-only file path carries file visibility preferences");
     std::wstring after;
     Check(pulse::ReadUtf8File(file.wstring(), after) && after == json, "read does not rewrite fixture content");
     const auto missing_dir = base / L"absent";
@@ -162,6 +215,65 @@ int main() {
     Check(bad_written && bad.status == PickerAppearanceReadStatus::Failed && bad.error == ERROR_INVALID_DATA,
         "invalid persisted JSON is failure rather than successful defaults");
     Check(DeleteFileW(file.c_str()) && DeleteFileW(invalid.c_str()) && RemoveDirectoryW(base.c_str()), "exact owned fixtures cleaned");
+    {
+        // The dialog lists a folder in the main window's remembered order.
+        AppPrefs order_prefs;
+        order_prefs.folder_sorts.Set(L"D:\\Work", {pulse::ui::SortColumn::Mtime, pulse::ui::SortDirection::Desc});
+        order_prefs.folder_sorts.SetFolderMode(L"D:\\Work", 2);
+        order_prefs.folder_groups.Set(L"D:\\Work", GroupBy::Date);
+        order_prefs.folder_groups.Set(L"D:\\Tagged", GroupBy::Tag);
+        order_prefs.folder_sort_mode = 1;
+        std::wstring order_json = L"{\"theme_mode\":0";
+        order_prefs.folder_sorts.AppendJson(order_json);
+        order_prefs.folder_groups.AppendJson(order_json);
+        order_json += L",\n  \"folder_sort_mode\":1}";
+        PickerAppearanceSnapshot parsed;
+        Check(ParsePickerAppearanceJson(order_json, parsed) && parsed.list_order, "app.json carries the per-folder list order");
+        for (const auto& source : {parsed.list_order, PickerListOrderPrefsFromPrefs(order_prefs)}) {
+            if (!source) continue;
+            const auto work = source->Resolve(L"d:\\work\\");
+            Check(work.column == static_cast<int>(pulse::ui::SortColumn::Mtime) && work.descending &&
+                  work.folder_mode == 2 && work.group_by == static_cast<int>(GroupBy::Date),
+                  "a remembered folder resolves its sort, folder mode and group-by");
+            const auto other = source->Resolve(L"D:\\Other");
+            Check(other.column == 0 && !other.descending && other.folder_mode == 1 && other.group_by == 0,
+                  "other folders use the default sort and the global folder mode");
+            Check(source->Resolve(L"D:\\Tagged").group_by == 0, "groups the dialog cannot compute list flat");
+        }
+        pulse::ui::FolderPickerSpec order_spec;
+        ApplyPickerAppearanceToSpec(parsed, order_spec);
+        Check(order_spec.folder_order && order_spec.folder_order(L"D:\\Work").descending, "the spec resolves folders through the snapshot");
+
+        // Rows: a folder, a file from today, an old file, a second file from today.
+        SYSTEMTIME now_st{}; GetSystemTime(&now_st);
+        FILETIME now{}; SystemTimeToFileTime(&now_st, &now);
+        FILETIME old{}; SYSTEMTIME old_st{2019, 3, 0, 5, 12, 0, 0, 0}; SystemTimeToFileTime(&old_st, &old);
+        std::vector<pulse::fs::DirEntry> rows(4);
+        rows[0].name = L"sub"; rows[0].is_dir = true; rows[0].attrs = FILE_ATTRIBUTE_DIRECTORY; rows[0].mtime = old;
+        rows[1].name = L"new-a.txt"; rows[1].mtime = now; rows[1].size = 10;
+        rows[2].name = L"old.txt"; rows[2].mtime = old; rows[2].size = 20;
+        rows[3].name = L"new-b.txt"; rows[3].mtime = now; rows[3].size = 30;
+        std::vector<pulse::ui::PickerEntry> entries(4);
+        for (size_t i = 0; i < entries.size(); ++i) { entries[i].name = rows[i].name; entries[i].source = i; }
+        pulse::ui::PickerListOrder by_date;
+        by_date.column = static_cast<int>(pulse::ui::SortColumn::Name);
+        by_date.group_by = static_cast<int>(GroupBy::Date);
+        OrderPickerEntries(entries, rows, L"D:\\Work", by_date);
+        Check(entries[0].name == L"sub" && entries[1].name == L"new-a.txt" && entries[2].name == L"new-b.txt" &&
+              entries[3].name == L"old.txt", "rows are ordered by group, then by the sort column");
+        std::vector<pulse::fs::DirEntry> ordered;
+        for (const auto& entry : entries) ordered.push_back(rows[entry.source]);
+        const auto groups = BuildPickerListGroups(ordered, by_date, {});
+        Check(groups && groups->size() == 3 && (*groups)[0].count == 1 && (*groups)[1].count == 2 &&
+              (*groups)[2].count == 1 && (*groups)[1].bytes == 40, "group spans cover every row in order");
+        const auto folded = BuildPickerListGroups(ordered, by_date, {groups ? (*groups)[2].key : std::wstring()});
+        Check(folded && folded->size() == 3 && (*folded)[2].collapsed && !(*folded)[1].collapsed, "collapsed keys fold their group");
+        std::swap(ordered[2], ordered[3]);  // today, old, today: not one run per group
+        Check(!BuildPickerListGroups(ordered, by_date, {}), "rows out of grouped order are drawn flat");
+        pulse::ui::PickerListOrder flat = by_date;
+        flat.group_by = 0;
+        Check(!BuildPickerListGroups(ordered, flat, {}), "no group-by, no spans");
+    }
     std::cout << "Checks: " << checks << ", failures: " << failures << '\n';
     return failures ? 1 : 0;
 }

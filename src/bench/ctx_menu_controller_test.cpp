@@ -1,4 +1,4 @@
-﻿// ctx_menu_controller_test.cpp - ContextMenuController bookkeeping: the
+// ctx_menu_controller_test.cpp - ContextMenuController bookkeeping: the
 // per-menu timing record (ctx_menu_timing.h), static-verb re-reads, rows
 // painted from the cache while the live answer arrives in parts, and the
 // persistent layout with templated names (ctx_layout_cache.h), and the
@@ -110,8 +110,18 @@ int RowIndex(const std::vector<pulse::ui::FluentMenuItem>& rows, const wchar_t* 
 
 #include "shell_action_routing_test.inc"
 #include "nested_menu_controller_test.inc"
+#include "shell_menu_icons_test.inc"
+#include "menu_cache_reuse_test.inc"
+#include "menu_tree_preferences_test.inc"
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--tree-cpu-bench") return MenuTreeCpuBench();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--tree-prefs-only") return MenuTreePreferencesTests();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--cache-reuse-only") return MenuCacheReuseTests();
+#ifndef PULSE_BASELINE_MENU_CONTROLLER
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--base-flyout-only") return BaseFlyoutReplacementTests();
+#endif
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--icons-only") return ShellMenuIconsTests();
     if (argc == 2 && std::wstring_view(argv[1]) == L"--cold-native-menu") {
         using namespace pulse;
         app::ContextMenuPrefs prefs;
@@ -431,6 +441,61 @@ int wmain(int argc, wchar_t** argv) {
               "a registry flush empties the layout until it is read again");
     }
     {
+        // A file type never answered paints the rows every file shows.
+        app::ContextMenuController controller;
+        uint32_t token = 60;
+        app::ContextMenuController::ShellOperations operations;
+        operations.query = [&](std::vector<std::wstring>, HWND, bool, bool,
+                               std::vector<std::wstring>) { return ++token; };
+        controller.SetShellOperations(std::move(operations));
+        controller.StartQuery(prefs, nullptr, { L"C:\\f\\README" }, false, L"", false, {}, {});
+        controller.CompleteComQuery(token, { Row(3, L"{S}", L"sendto", L"Send to"),
+                                             Row(4, L"{L}", L"link", L"Create shortcut") },
+                                    100, false);
+        controller.StartQuery(prefs, nullptr, { L"C:\\f\\run.bat" }, false, L".bat", false, {}, {});
+        Check(controller.com_predicted() &&
+                  Texts(controller.com_items()) == L"Send to|Create shortcut|" &&
+                  Predicted(controller.com_items()[0].id),
+              "a new file type paints an extensionless file's rows with predicted ids");
+        controller.CompleteComQuery(token, { Row(7, L"{S}", L"sendto", L"Send to"),
+                                             Row(8, L"{L}", L"link", L"Create shortcut"),
+                                             Row(9, L"{N}", L"", L"Edit in Notepad") },
+                                    120, false);
+        Check(!controller.com_predicted() &&
+                  Texts(controller.com_items()) == L"Send to|Create shortcut|Edit in Notepad|",
+              "the live answer of the new type replaces the borrowed rows");
+        controller.StartQuery(prefs, nullptr, { L"C:\\f\\next.bat" }, false, L".bat", false, {}, {});
+        Check(Texts(controller.com_items()) == L"Send to|Create shortcut|Edit in Notepad|",
+              "from then on the type paints its own layout");
+        controller.StartQuery(prefs, nullptr, { L"C:\\f\\sub" }, false,
+                              std::wstring(ipc::kFolderVerbKey), false, {}, {});
+        Check(!controller.com_predicted(), "a folder never borrows a file layout");
+        controller.StartQuery(prefs, nullptr, { L"C:\\f" }, true, L"", false, {}, {});
+        Check(!controller.com_predicted(), "nor does the background");
+
+        app::ContextMenuController shared;
+        uint32_t shared_token = 70;
+        app::ContextMenuController::ShellOperations shared_ops;
+        shared_ops.query = [&](std::vector<std::wstring>, HWND, bool, bool,
+                               std::vector<std::wstring>) { return ++shared_token; };
+        shared.SetShellOperations(std::move(shared_ops));
+        shared.StartQuery(prefs, nullptr, { L"C:\\f\\a.exe" }, false, L".exe", false, {}, {});
+        shared.CompleteComQuery(shared_token, { Row(1, L"{P}", L"taskbarpin", L"Pin"),
+                                                Row(2, L"{S}", L"sendto", L"Send to") },
+                                100, false);
+        shared.StartQuery(prefs, nullptr, { L"C:\\f\\b.txt" }, false, L".txt", false, {}, {});
+        Check(!shared.com_predicted(), "one cached type is no evidence of the shared rows");
+        shared.CompleteComQuery(shared_token, { Row(5, L"{S}", L"sendto", L"Send to"),
+                                                Row(6, L"{N}", L"", L"Notepad") },
+                                100, false);
+        shared.StartQuery(prefs, nullptr, { L"C:\\f\\c.dwg" }, false, L".dwg", false, {}, {});
+        Check(shared.com_predicted() && Texts(shared.com_items()) == L"Send to|",
+              "without an extensionless layout the rows all types share are painted");
+        shared.StartQuery(prefs, nullptr, { L"C:\\f\\c.dwg", L"C:\\f\\d.dwg" }, false, L".dwg",
+                          false, {}, {});
+        Check(!shared.com_predicted(), "a multi-selection borrows only from multi-selections");
+    }
+    {
         // A menu closed before the complete answer still learns the layout.
         app::ContextMenuController controller;
         uint32_t token = 90;
@@ -570,9 +635,9 @@ int wmain(int argc, wchar_t** argv) {
                   parsed[L".dwg"].handlers[1].clsid == L"{S}" && !parsed[L".dwg"].handlers[1].done &&
                   parsed[L".dwg"].handlers[1].elapsed_ms == 5000,
               "the layout survives a round trip with its handler times");
-        Check(!app::ParseCtxLayout(bytes.data(), bytes.size(), L"1.1+other", parsed) &&
-                  parsed.empty(),
-              "a file written by another build is ignored");
+        Check(app::ParseCtxLayout(bytes.data(), bytes.size(), L"1.1+other", parsed) &&
+                  parsed.size() == 2 && parsed[L".dwg"].fingerprint == 11,
+              "a file written by another build is still read");
         Check(!app::ParseCtxLayout(bytes.data(), bytes.size() - 3, L"1.0+test", parsed),
               "a truncated file is rejected");
 

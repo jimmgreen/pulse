@@ -2,6 +2,7 @@
 #include "../common/dialog_auto_registration.h"
 #include "../common/json_value.h"
 #include <filesystem>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -67,6 +68,7 @@ int RunUpgradeRebindTest(const std::wstring& dual_install, const std::wstring& b
         HKEY key = nullptr;
         bool overridden = false;
         ~HiveGuard() {
+            pulse::bench::registry_views::enabled = false;
             if (overridden) RegOverridePredefKey(HKEY_CURRENT_USER, nullptr);
             if (key) RegCloseKey(key);
             RegDeleteTreeW(HKEY_CURRENT_USER, subkey.c_str());
@@ -78,6 +80,7 @@ int RunUpgradeRebindTest(const std::wstring& dual_install, const std::wstring& b
         return 1;
     }
     guard.overridden = true;
+    pulse::bench::registry_views::enabled = true;
 
     // 1. Verify full unpacked 1.0.61 dual-arch bundle is recognized (x64 + x86 components present).
     {
@@ -89,8 +92,8 @@ int RunUpgradeRebindTest(const std::wstring& dual_install, const std::wstring& b
         check(ok, "unpacked 1.0.61 bundle resolves verified x64 and x86 dialog bridges", res ? res->bundle_error : ERROR_TIMEOUT);
     }
 
-    // Prepare single-arch x64 view in %TEMP% (without dialog-x86-current.json) because RegOverridePredefKey
-    // does not split HKCU\Software\Classes WOW64 redirection views on a synthetic root.
+    // These legacy upgrade scenarios intentionally exercise an x64-only bundle.
+    // Native x86 inspection still runs against its independent real-key subtree.
     fs::copy(fs::path(dual_install), x64_install, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
     fs::remove(x64_install / L"dialog-x86-current.json", ec);
     if (ec && ec != std::errc::no_such_file_or_directory) {
@@ -99,10 +102,7 @@ int RunUpgradeRebindTest(const std::wstring& dual_install, const std::wstring& b
     }
 
     auto reset_hive = [] {
-        RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Pulse\\DialogAuto");
-        RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Pulse\\DialogAuto32");
-        RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\CLSID\\{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}");
-        RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\CLSID\\{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}");
+        RegDeleteTreeW(HKEY_CURRENT_USER, L"PulseTestViews");
     };
     auto set_sz = [](const wchar_t* subkey, REGSAM view, const wchar_t* name, const std::wstring& value) {
         HKEY k = nullptr;
@@ -121,6 +121,29 @@ int RunUpgradeRebindTest(const std::wstring& dual_install, const std::wstring& b
         RegCloseKey(k);
         return st == ERROR_SUCCESS;
     };
+    auto clsids_absent = [](REGSAM view) {
+        bool absent = true;
+        for (const auto* path : {
+            L"Software\\Classes\\CLSID\\{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}",
+            L"Software\\Classes\\CLSID\\{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}"}) {
+            HKEY key = nullptr;
+            const auto result = RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_READ | view, &key);
+            if (key) RegCloseKey(key);
+            absent = absent && result == ERROR_FILE_NOT_FOUND;
+        }
+        return absent;
+    };
+    {
+        const auto* clsid = L"Software\\Classes\\CLSID\\{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}";
+        check(set_sz(clsid, KEY_WOW64_64KEY, L"ViewProbe", L"x64") &&
+            !clsids_absent(KEY_WOW64_64KEY) && clsids_absent(KEY_WOW64_32KEY),
+            "real isolated x64 CLSID key is invisible to x86 view");
+        reset_hive();
+        check(set_sz(clsid, KEY_WOW64_32KEY, L"ViewProbe", L"x86") &&
+            !clsids_absent(KEY_WOW64_32KEY) && clsids_absent(KEY_WOW64_64KEY),
+            "real isolated x86 CLSID key is invisible to x64 view");
+        reset_hive();
+    }
 
     const std::wstring retired_old_dll = x64_install.wstring() +
         L"\\DialogBridge\\e8465a107b894ad50b082afa255fc19573c89a1a2b5b223c2d09a42d2dd379e6\\PulseDialogAuto64.dll";
@@ -222,7 +245,8 @@ int RunUpgradeRebindTest(const std::wstring& dual_install, const std::wstring& b
         const auto disabled = RunController(L"disable", x64_install.wstring(), (state_dir / L"case_e_disable").wstring());
         const bool disable_ok = disabled.has_value() && !disabled->error && !disabled->auto_rollback_error &&
             !disabled->auto_enabled && !disabled->auto_conflict &&
-            disabled->auto_arch[0].registration == ArchRegistrationState::DisabledMatching;
+            disabled->auto_arch[0].registration == ArchRegistrationState::Unregistered &&
+            clsids_absent(KEY_WOW64_64KEY) && clsids_absent(KEY_WOW64_32KEY);
         check(disable_ok, "DisableAuto cleanly disables active orphaned missing-DLL registration without error 183",
             disabled ? disabled->error : ERROR_TIMEOUT);
     }
@@ -246,6 +270,142 @@ int RunUpgradeRebindTest(const std::wstring& dual_install, const std::wstring& b
         fs::remove_all(live_dir, ec);
     }
 
+    // Cross-install retired journals are not the owned-digest upgrade above.
+    const auto moved_old = state_dir / L"旧 安装 moved" / L"DialogBridge" /
+        std::wstring(64, L'b') / L"PulseDialogAuto64.dll";
+    const auto seed_retired = [&] {
+        reset_hive();
+        return set_sz(L"Software\\Pulse\\DialogAuto", KEY_WOW64_64KEY, L"DllPath", moved_old.wstring()) &&
+            set_dw(L"Software\\Pulse\\DialogAuto", KEY_WOW64_64KEY, L"Enabled", 0) &&
+            set_dw(L"Software\\Pulse\\DialogAuto", KEY_WOW64_64KEY, L"Stage", 0) &&
+            set_dw(L"Software\\Pulse\\DialogAuto", KEY_WOW64_64KEY, L"Host", 7);
+    };
+    {
+        check(seed_retired(), "seed disabled deleted cross-install digest with Unicode and spaces");
+        const auto res = RunController(L"enable", x64_install.wstring(), (state_dir / L"retired_success").wstring());
+        check(res && !res->error && !res->auto_rollback_error && res->auto_enabled &&
+            _wcsicmp(res->auto_dll.c_str(), moved_old.c_str()) != 0,
+            "EnableAuto migrates disabled deleted cross-install journal", res ? res->error : ERROR_TIMEOUT);
+        const auto again = RunController(L"enable", x64_install.wstring(), (state_dir / L"retired_repeat").wstring());
+        check(again && !again->error && again->auto_enabled,
+            "repeated EnableAuto after migration is idempotent", again ? again->error : ERROR_TIMEOUT);
+    }
+    for (unsigned variant = 0; variant < 4; ++variant) {
+        check(seed_retired(), "seed cross-install receipt for rejected normalization case");
+        HKEY key = nullptr;
+        const DWORD opened = RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Pulse\\DialogAuto", 0,
+            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY, &key);
+        check(opened == ERROR_SUCCESS, "open isolated receipt for flag boundary", opened);
+        if (opened) continue;
+        const wchar_t* flag = variant == 3 ? L"Enabled" : L"Stage";
+        if (variant == 0) RegDeleteValueW(key, flag);
+        else if (variant == 1) set_sz(L"Software\\Pulse\\DialogAuto", KEY_WOW64_64KEY, flag, L"0");
+        else set_dw(L"Software\\Pulse\\DialogAuto", KEY_WOW64_64KEY, flag, 1);
+        DWORD before_type = 0, before_bytes = 16; BYTE before[16]{};
+        const DWORD before_result = RegQueryValueExW(key, flag, nullptr, &before_type, before, &before_bytes);
+        const auto res = RunController(L"enable", x64_install.wstring(),
+            (state_dir / (L"retired_reject_" + std::to_wstring(variant))).wstring());
+        const DWORD expected = variant == 0 ? ERROR_FILE_NOT_FOUND : variant == 1 ? ERROR_INVALID_DATA : ERROR_ALREADY_EXISTS;
+        check(res && res->error == expected && !res->auto_enabled && !res->auto_rollback_error &&
+            res->auto_dll == moved_old.wstring(), "retired malformed/nonzero flags are not normalized", res ? res->error : ERROR_TIMEOUT);
+        DWORD after_type = 0, after_bytes = 16; BYTE after[16]{};
+        const DWORD after_result = RegQueryValueExW(key, flag, nullptr, &after_type, after, &after_bytes);
+        check(before_result == after_result && (before_result != ERROR_SUCCESS ||
+            (before_type == after_type && before_bytes == after_bytes &&
+                std::equal(before, before + before_bytes, after))), "rejected retired receipt remains byte-identical");
+        RegCloseKey(key);
+    }
+    {
+        check(seed_retired(), "seed existing cross-install receipt");
+        fs::create_directories(moved_old.parent_path());
+        { std::ofstream file(moved_old, std::ios::binary); file << "still installed"; }
+        const auto res = RunController(L"enable", x64_install.wstring(), (state_dir / L"retired_live").wstring());
+        check(res && res->error == ERROR_ALREADY_EXISTS && !res->auto_enabled && res->auto_dll == moved_old.wstring(),
+            "disabled other installation with existing component remains untouched", res ? res->error : ERROR_TIMEOUT);
+    }
+    // Second support report: x86 journal lost DllPath, while both owned CLSIDs
+    // still point to a deleted installation. Exercise the full dual bundle.
+    const auto missing_journal_old = state_dir / L"旧 安装 journal" / L"DialogBridge" /
+        std::wstring(64, L'c') / L"PulseDialogAuto32.dll";
+    const auto seed_missing_journal = [&] {
+        reset_hive();
+        bool ok = set_dw(L"Software\\Pulse\\DialogAuto32", KEY_WOW64_32KEY, L"Enabled", 1) &&
+            set_dw(L"Software\\Pulse\\DialogAuto32", KEY_WOW64_32KEY, L"Stage", 1) &&
+            set_dw(L"Software\\Pulse\\DialogAuto32", KEY_WOW64_32KEY, L"Host", 7);
+        for (const auto* clsid : {
+            L"Software\\Classes\\CLSID\\{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}",
+            L"Software\\Classes\\CLSID\\{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}"}) {
+            const auto server = std::wstring(clsid) + L"\\InprocServer32";
+            ok = ok && set_sz(clsid, KEY_WOW64_32KEY, L"PulseDialogAutoOwner", L"Pulse.DialogAuto.v1") &&
+                set_sz(server.c_str(), KEY_WOW64_32KEY, nullptr, missing_journal_old.wstring()) &&
+                set_sz(server.c_str(), KEY_WOW64_32KEY, L"ThreadingModel", L"Apartment");
+        }
+        return ok;
+    };
+    for (unsigned variant = 0; variant < 3; ++variant) {
+        check(seed_missing_journal(), "seed second user missing x86 journal with retained COM registration");
+        HKEY key = nullptr;
+        const DWORD opened = RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Pulse\\DialogAuto32", 0,
+            KEY_READ | KEY_WRITE | KEY_WOW64_32KEY, &key);
+        check(opened == ERROR_SUCCESS, "open second user isolated journal", opened);
+        if (opened) continue;
+        if (variant == 1) set_dw(L"Software\\Pulse\\DialogAuto32", KEY_WOW64_32KEY, L"Stage", 0);
+        if (variant == 2) RegDeleteValueW(key, L"Stage");
+        const auto old64 = state_dir / L"retired64" / L"DialogBridge" / std::wstring(64, L'd') / L"PulseDialogAuto64.dll";
+        check(set_sz(L"Software\\Pulse\\DialogAuto", KEY_WOW64_64KEY, L"DllPath", old64.wstring()) &&
+            set_dw(L"Software\\Pulse\\DialogAuto", KEY_WOW64_64KEY, L"Enabled", 0) &&
+            set_dw(L"Software\\Pulse\\DialogAuto", KEY_WOW64_64KEY, L"Stage", 0),
+            "combine first user x64 retired state with second user x86 missing journal");
+        const auto result = RunController(L"enable", dual_install,
+            (state_dir / (L"missing_journal_" + std::to_wstring(variant))).wstring());
+        check(result && !result->error && !result->auto_rollback_error &&
+            result->auto_arch[0].registration == ArchRegistrationState::Registered &&
+            result->auto_arch[1].registration == ArchRegistrationState::Registered,
+            "EnableAuto repairs both user states and enables both architectures", result ? result->error : ERROR_TIMEOUT);
+        DWORD host = 0, bytes = sizeof(host), type = 0;
+        check(RegQueryValueExW(key, L"Host", nullptr, &type, reinterpret_cast<BYTE*>(&host), &bytes) == ERROR_SUCCESS &&
+            type == REG_DWORD && host == 7, "journal repair and migration preserve user preferences");
+        RegCloseKey(key);
+        const auto repeated = RunController(L"enable", dual_install, (state_dir / L"missing_repeat").wstring());
+        check(repeated && !repeated->error && repeated->auto_enabled, "repeated dual enable after journal repair is idempotent");
+        const auto disabled = RunController(L"disable", dual_install, (state_dir / L"missing_disable").wstring());
+        check(disabled && !disabled->error && !disabled->auto_enabled &&
+            clsids_absent(KEY_WOW64_64KEY) && clsids_absent(KEY_WOW64_32KEY),
+            "both repaired architectures disable and remove owned COM roots");
+    }
+    check(seed_missing_journal(), "seed missing journal alongside another live installation");
+    const auto other_live = state_dir / L"other_live" / L"PulseDialogAuto64.dll";
+    fs::create_directories(other_live.parent_path());
+    { std::ofstream file(other_live, std::ios::binary); file << "still installed"; }
+    bool other_seeded = set_sz(L"Software\\Pulse\\DialogAuto", KEY_WOW64_64KEY, L"DllPath", other_live.wstring()) &&
+        set_dw(L"Software\\Pulse\\DialogAuto", KEY_WOW64_64KEY, L"Enabled", 1) &&
+        set_dw(L"Software\\Pulse\\DialogAuto", KEY_WOW64_64KEY, L"Stage", 1);
+    for (const auto* clsid : {
+        L"Software\\Classes\\CLSID\\{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}",
+        L"Software\\Classes\\CLSID\\{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}"}) {
+        const auto server = std::wstring(clsid) + L"\\InprocServer32";
+        other_seeded = other_seeded && set_sz(clsid, KEY_WOW64_64KEY, L"PulseDialogAutoOwner", L"Pulse.DialogAuto.v1") &&
+            set_sz(server.c_str(), KEY_WOW64_64KEY, nullptr, other_live.wstring()) &&
+            set_sz(server.c_str(), KEY_WOW64_64KEY, L"ThreadingModel", L"Apartment");
+    }
+    check(other_seeded, "seed consistent x64 registration belonging to live other installation");
+    const auto foreign_result = RunController(L"enable", dual_install, (state_dir / L"missing_foreign").wstring());
+    HKEY untouched_key = nullptr;
+    const DWORD untouched_open = RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Pulse\\DialogAuto32", 0,
+        KEY_READ | KEY_WOW64_32KEY, &untouched_key);
+    DWORD value_bytes = 0;
+    const DWORD untouched_value = untouched_open ? untouched_open :
+        RegQueryValueExW(untouched_key, L"DllPath", nullptr, nullptr, nullptr, &value_bytes);
+    if (untouched_key) RegCloseKey(untouched_key);
+    check(foreign_result && foreign_result->error == ERROR_ALREADY_EXISTS && untouched_value == ERROR_FILE_NOT_FOUND &&
+        pulse::dialog_auto::Inspect(pulse::dialog_auto::Architecture::X64).dll_path == other_live.wstring(),
+        "live other architecture is rejected before writing the missing journal");
+    check(seed_missing_journal(), "seed missing journal for live old component rejection");
+    fs::create_directories(missing_journal_old.parent_path());
+    { std::ofstream file(missing_journal_old, std::ios::binary); file << "still installed"; }
+    const auto live_result = RunController(L"enable", dual_install, (state_dir / L"missing_live").wstring());
+    check(live_result && live_result->error == ERROR_ALREADY_EXISTS && !live_result->auto_enabled,
+        "missing journal does not authorize taking over a live old installation", live_result ? live_result->error : ERROR_TIMEOUT);
     reset_hive();
     fs::remove_all(state_dir, ec);
     std::cout << "Summary: " << passed << " passed, " << failed << " failed\n";
@@ -258,7 +418,8 @@ int wmain(int argc,wchar_t** argv) {
     const std::wstring operation(argv[1]);
     if (operation == L"--test-upgrade-rebind") {
         if (!std::filesystem::path(argv[2]).is_absolute() || !std::filesystem::path(argv[3]).is_absolute()) return 2;
-        return RunUpgradeRebindTest(argv[2], argv[3]);
+        return RunUpgradeRebindTest(std::filesystem::path(argv[2]).make_preferred().wstring(),
+            std::filesystem::path(argv[3]).make_preferred().wstring());
     }
     if(operation!=L"--refresh" && operation!=L"--enable" && operation!=L"--disable")return 2;
     install_root=argv[2];state_root=argv[3];

@@ -81,7 +81,9 @@ void Gallery(IWICImagingFactory* wic, ID2D1Factory* factory, const wchar_t* file
         L"UI layout",L"Windows",L"Tabs",L"Status bar",L"Zen",L"Standard",L"Workbench",L"Selection bar",
         L"Extension",L"Title buttons",L"File list",L"Window parts",L"Tab to window",L"New window",L"Window overview",
         L"Extra large icons",L"Large icons",L"Small icons",L"Tiles view",L"Content view",L"Shell menu",L"Plug",L"Arrange windows",
-        L"Extract selected"
+        L"Extract selected",
+        L"Title settings",L"Theme (light)",L"Theme (dark)",L"Minimize (caption)",L"Maximize (caption)",
+        L"Restore (caption)",L"Close (caption)"
     };
     static_assert(std::size(names) == static_cast<size_t>(Icon::Count)-1);
     constexpr int kRows = static_cast<int>((std::size(names) + 10) / 11);

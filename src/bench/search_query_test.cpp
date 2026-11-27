@@ -185,6 +185,97 @@ int wmain() {
     Check(!index::QueryHasExtFilter(index::ParseQuery(app::CompileSearchQuery(literal))),
           L"advanced literal name does not gain native operators when another word is added");
 
+    {
+        app::AdvancedSearchSpec regex_spec;
+        regex_spec.name = LR"(^aa[([]2022[)\]]xx$)";
+        regex_spec.name_how = static_cast<app::NameMatchHow>(3);
+        const auto raw_regex = app::CompileSearchQuery(regex_spec);
+        const auto parsed_regex = index::ParseQuery(raw_regex);
+        auto matches = [&](std::wstring_view name) {
+            for (const auto& group : parsed_regex.groups) {
+                bool ok = true;
+                for (const auto& term : group)
+                    ok = ok && index::MatchTerm(name, name, false, 0, 0, term);
+                if (ok) return true;
+            }
+            return false;
+        };
+        Check(matches(L"aa(2022)xx") && matches(L"aa[2022]xx") && !matches(L"aa(2023)xx"),
+              L"regex regression: parentheses and brackets match, other year rejected");
+        Check(app::ParseSearchQuery(raw_regex).name_how == static_cast<app::NameMatchHow>(3),
+              L"regex regression: advanced match mode survives query roundtrip");
+    }
+
+    {
+        auto query_matches = [](std::wstring_view raw, std::wstring_view name, uint64_t size = 0) {
+            const auto query = index::ParseQuery(raw);
+            if (index::QueryHasInvalidRegex(query)) return false;
+            for (const auto& group : query.groups) {
+                bool ok = true;
+                for (const auto& term : group)
+                    ok = ok && index::MatchTerm(L"C:\\fixture\\" + std::wstring(name), name, false, size, 0, term);
+                if (ok) return true;
+            }
+            return false;
+        };
+        app::AdvancedSearchSpec regex_spec;
+        regex_spec.name_how = app::NameMatchHow::Regex;
+        for (const auto* pattern : {LR"(^aa[([]2022[)\]]xx$)", LR"((Alpha|Beta)\D+\d{4}\.TXT$)",
+                                   LR"(^(报告|照片) \d{4}\.txt$)", LR"re(^[^"]+"x$)re", L" foo "}) {
+            regex_spec.name = pattern;
+            const auto raw = app::CompileSearchQuery(regex_spec);
+            auto parsed = app::ParseSearchQuery(raw);
+            Check(parsed.name == pattern && parsed.name_how == app::NameMatchHow::Regex,
+                  L"regex pattern roundtrip preserves escapes, OR, quotes, spaces and case");
+            parsed.kind = index::SearchKind::Custom; parsed.custom_exts = L"txt";
+            const auto edited = app::CompileSearchQuery(parsed);
+            const auto again = app::ParseSearchQuery(edited);
+            Check(again.name == pattern && again.name_how == app::NameMatchHow::Regex,
+                  L"editing extensions preserves regex predicate");
+            Check(index::FilenameQueryText(raw) == raw, L"filename query extraction preserves regex token");
+        }
+        Check(query_matches(LR"(regex:"^(Alpha|Beta)\D+\d{4}\.TXT$")", L"alpha-(2022.TXT"),
+              L"regex alternation and uppercase escape D retain semantics under case-insensitive matching");
+        Check(!query_matches(LR"(regex:"^\D+$")", L"2022") &&
+              query_matches(LR"(regex:"^\D+$")", L"中文"),
+              L"regex escape D is not folded to digit class");
+        Check(query_matches(LR"(regex:"^(报告|照片) \d{4}\.txt$")", L"报告 2022.txt"),
+              L"Unicode regex with spaces matches a filename");
+        Check(query_matches(LR"(regex:"2022")", L"aa(2022)xx.txt") &&
+              !query_matches(LR"(regex:"^2022$")", L"aa(2022)xx.txt"),
+              L"regex searches substrings; anchors request whole-name matching");
+        Check(query_matches(LR"(regex:"^aa" ext:txt size:>10)", L"aa(2022)xx.txt", 20) &&
+              !query_matches(LR"(regex:"^aa" ext:txt size:>10)", L"aa(2022)xx.jpg", 20) &&
+              !query_matches(LR"(regex:"^aa" ext:txt size:>10)", L"aa(2022)xx.txt", 5),
+              L"regex composes with extension and size filters");
+        Check(query_matches(LR"(!regex:"2022")", L"report2023.txt") &&
+              !query_matches(LR"(!regex:"2022")", L"report2022.txt"),
+              L"native regex negation excludes matching names");
+        for (const auto* raw : {LR"(regex:"[")", LR"(!regex:"[")", LR"(regex:"")",
+                                LR"(regex:"(" | alpha)"}) {
+            Check(index::QueryHasInvalidRegex(index::ParseQuery(raw)) &&
+                  !query_matches(raw, L"alpha.txt"), L"invalid regex fails closed, including negation and OR");
+        }
+        Check(index::QueryHasInvalidRegex(index::ParseQuery(index::RegexQueryToken(std::wstring(1025, L'a')))),
+              L"regex length limit rejects oversized patterns");
+        Check(!index::QueryIsSimpleName(index::ParseQuery(LR"(regex:"^aa")")) &&
+              !index::QueryCanNarrow(LR"(regex:"aa")", LR"(regex:"aa|bb")"),
+              L"regex bypasses literal candidate and incremental-narrowing optimizations");
+        const auto q = index::ParseQuery(LR"(regex:"^aa")");
+        Check(!q.groups.front().front().pinyin &&
+              index::RankName(L"aa.txt", 6, false, q) > 0,
+              L"regex ranking works without pinyin expansion");
+        Check(!query_matches(L"aa[2022]xx", L"aa(2022)xx") &&
+              query_matches(L"aa?2022?xx*", L"aa(2022)xx.txt"),
+              L"literal brackets and wildcard behavior remain unchanged");
+        auto parsed = app::ParseSearchQuery(LR"(regex:"^aa" ext:txt | regex:"^bb" ext:txt)");
+        parsed.size = app::SizePreset::Gt10MB;
+        auto rewritten = app::CompileSearchQuery(parsed);
+        Check(query_matches(rewritten, L"aa.txt", 20 * 1024 * 1024) &&
+              query_matches(rewritten, L"bb.txt", 20 * 1024 * 1024) &&
+              !query_matches(rewritten, L"bb.txt", 1), L"OR regex branches retain added structured filters");
+    }
+
     if (failures) {
         std::wcout << L"FAILED " << failures << L"\n";
         return 1;

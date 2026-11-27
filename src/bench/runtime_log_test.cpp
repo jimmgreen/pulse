@@ -132,12 +132,22 @@ int main(int argc, char** argv) {
         surrogate += L"\xd83d\xde00";
         TextEvent("surrogate_boundary", {{"path", surrogate}});
         TextEvent("duplicate_field", {{"pid", L"invalid"}}, {{"pid", 3}});
+        TextEvent("dialog_show_terminal",
+            {{"request", L"2:1"}, {"terminal_status", L"native"},
+             {"reason_name", L"None"}, {"fallback_reason", L"INITIAL_FOLDER_UNREPRESENTABLE"},
+             {"failure_phase", L""}},
+            {{"dialog", 2}, {"show_sequence", 1}, {"native_fallback", 1}});
         Event("legacy_numeric", {{"number", 123}});
         check(Flush(), "flush text and legacy events");
+        check(GetHealth().dropped_events == 1, "only duplicate_field is dropped; 5-field dialog_show_terminal is accepted");
         Shutdown();
         const auto file = root / L"Diagnostics" / L"Runtime" /
             (L"text_test-" + std::to_wstring(GetCurrentProcessId()) + L".jsonl");
         const auto text = Read(file);
+        check(text.find("\"event\":\"dialog_show_terminal\"") != std::string::npos &&
+            text.find("\"fallback_reason\":\"INITIAL_FOLDER_UNREPRESENTABLE\"") != std::string::npos &&
+            text.find("\"failure_phase\":\"\"") != std::string::npos,
+            "5-text-field dialog_show_terminal event persists without silent drop");
         check(text.find(R"("path":"C:\\\u4e2d\u6587\\\"component\".exe\u000a\u0009")") != std::string::npos,
             "Chinese path, backslashes, quotes and control characters are JSON escaped");
         check(text.find("mutated_after_enqueue") == std::string::npos,

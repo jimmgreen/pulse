@@ -146,6 +146,56 @@ struct ChangeTrackerTestAccess {
 };
 
 struct EngineTestAccess {
+    static bool RegexFixture() {
+        const auto base = std::filesystem::current_path() / L"bench_data" / L"advanced-search-regex-20261124" /
+                          (L"engine-" + std::to_wstring(GetCurrentProcessId()));
+        const auto files = base / L"files";
+        std::filesystem::create_directories(files / L"nested");
+        std::filesystem::create_directories(base / L"index");
+        for (const auto* name : {L"aa(2022)xx.txt", L"aa[2022]xx.txt", L"aa(2023)xx.txt", L"AA(2022)xx.jpg",
+                                 L"报告 2022.txt"}) std::ofstream(files / name) << "regex fixture";
+        std::ofstream(files / L"nested" / L"aa(2022)xx.txt") << "nested";
+        SetActiveIndexDirectory((base / L"index").wstring());
+        bool ok = true;
+        auto check = [&](bool passed, const char* label) {
+            std::cout << (passed ? "[PASS] " : "[FAIL] ") << label << '\n';
+            ok &= passed;
+        };
+        {
+            Engine engine;
+            engine.fixture_root_ = files.wstring();
+            engine.running_ = true;
+            engine.FullRebuild("regex_fixture");
+            Query query;
+            query.limit = 100;
+            query.needle = LR"(regex:"^aa[([]2022[)\]]xx\.txt$")";
+            auto result = engine.Search(query);
+            check(result.total == 3 && result.hits.size() == 3,
+                  "production filesystem scan and Engine::Search find both bracket styles and nested file");
+            query.needle = LR"(regex:"^aa[([]2022[)\]]xx\.(txt|jpg)$")";
+            check(engine.Search(query).total == 4, "regex widening bypasses literal narrowing cache and ignores case");
+            query.needle = LR"(regex:"^aa[([]2022[)\]]xx\.(txt|jpg)$" ext:txt)";
+            check(engine.Search(query).total == 3, "production engine composes regex and extension filter");
+            query.path_prefix = (files / L"nested").wstring();
+            check(engine.Search(query).total == 1, "production engine restricts regex to selected folder");
+            query.path_prefix.clear();
+            query.needle = LR"(regex:"^报告 \d{4}\.txt$")";
+            check(engine.Search(query).total == 1, "production engine matches Unicode and digit class");
+            for (const auto* raw : {LR"(regex:"[")", LR"(!regex:"[")", LR"(regex:"[" | aa)"}) {
+                query.needle = raw;
+                check(engine.Search(query).total == 0, "invalid native regex returns no results, including NOT and OR");
+            }
+            query.needle = LR"(regex:"^aa")";
+            std::atomic<uint32_t> generation{2};
+            check(engine.Search(query, &generation, 1).hits.empty(), "stale regex search observes generation cancellation");
+            query.needle = LR"(regex:"no-such-file")";
+            check(engine.Search(query).total == 0, "valid regex with no matching files returns empty results");
+            engine.Stop();
+        }
+        SetActiveIndexDirectory(L"");
+        return ok;
+    }
+
     static bool ExclusionConcurrencyFixture() {
         SetMachineIndexScope(false);
         Engine engine;
@@ -2739,6 +2789,7 @@ void CheckSearch(Engine& e) {
 #include "index_quiet_diagnostics_fixture.h"
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--regex-only") return EngineTestAccess::RegexFixture() ? 0 : 1;
     if (argc == 2 && std::wstring_view(argv[1]) == L"--exclusion-concurrency-only") return EngineTestAccess::ExclusionConcurrencyFixture() ? 0 : 1;
     if (argc == 2 && std::wstring_view(argv[1]) == L"--audit-query-only") return EngineTestAccess::AuditQueryFixture() ? 0 : 1;
     if (argc == 3 && std::wstring_view(argv[1]) == L"--validate-cache") return EngineTestAccess::ValidateCache(argv[2]) ? 0 : 1;

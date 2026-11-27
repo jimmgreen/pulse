@@ -45,6 +45,73 @@ int main() {
         check(pulse::TryDirectReveal(invalid) == pulse::DirectRevealResult::Rejected, "sender rejects unsupported path before transport");
     }
     {
+        using Pipe = pulse::app::OpenRequestPipe;
+        using Result = pulse::DirectRevealResult;
+        C::OpenRequest fixed;
+        fixed.id[0] = 42; fixed.id[15] = 91; fixed.deadline = 160;
+        fixed.path = L"C:\\fixture\\cold-folder"; fixed.wire_direct_open = true;
+        const auto bytes = C::EncodeOpenRequest(fixed);
+        // Same immutable real wire payload, virtual clock, real admission model.
+        // No sleep-based readiness assumption or alternate request ID is used.
+        for (const bool cold : {false, true}) {
+            C receiver;
+            uint64_t tick = 100;
+            unsigned calls = 0, accepted = 0;
+            bool identical = true, bounded = true;
+            pulse::DirectRevealDiagnostics diagnostics;
+            const auto result = pulse::direct_reveal_detail::ExchangeSameRequest(bytes, fixed.deadline, cold, &diagnostics,
+                [&] { return tick; }, [&](std::span<const unsigned char> payload, uint64_t deadline) {
+                    ++calls; bounded &= deadline <= fixed.deadline && deadline > tick;
+                    identical &= payload.size() == bytes.size() && !memcmp(payload.data(), bytes.data(), bytes.size());
+                    if (calls == 3) receiver.SetRevealEnabled(true);
+                    C::OpenRequest parsed;
+                    COPYDATASTRUCT data{C::OpenRequestMessageId(), static_cast<DWORD>(payload.size()), const_cast<unsigned char*>(payload.data())};
+                    const auto admission = C::DecodeOpenRequest(&data, parsed)
+                        ? receiver.SubmitOpenRequest(parsed, tick, host, WM_APP + 948) : C::OpenSubmission::Invalid;
+                    const auto reply = admission == C::OpenSubmission::Accepted ? Pipe::Reply::Accepted : Pipe::Reply::Invalid;
+                    accepted += reply == Pipe::Reply::Accepted;
+                    return Pipe::Result{reply, ERROR_SUCCESS, Pipe::Stage::Reply, true};
+                }, [&](DWORD delay) { tick += delay; });
+            if (cold) {
+                const auto admitted = receiver.TakeQueuedOpenRequest(tick);
+                check(result == Result::Accepted && calls == 3 && accepted == 1 && identical && bounded && tick == 120 &&
+                    admitted && admitted->id == fixed.id && admitted->deadline == fixed.deadline && admitted->path == fixed.path &&
+                    !receiver.TakeQueuedOpenRequest(tick), "cold Invalid replies retry identical GUID/payload until exactly one admission");
+            } else {
+                check(result == Result::Rejected && calls == 1 && !accepted && tick == 100 && identical && bounded &&
+                    !receiver.TakeQueuedOpenRequest(tick), "warm explicit Invalid rejects immediately without readiness retry");
+            }
+        }
+        {
+            uint64_t tick = 100;
+            unsigned calls = 0;
+            bool bounded = true, identical = true;
+            pulse::DirectRevealDiagnostics diagnostics;
+            const auto result = pulse::direct_reveal_detail::ExchangeSameRequest(bytes, 123, true, &diagnostics,
+                [&] { return tick; }, [&](std::span<const unsigned char> payload, uint64_t deadline) {
+                    ++calls; bounded &= deadline <= 123 && deadline > tick;
+                    identical &= payload.size() == bytes.size() && !memcmp(payload.data(), bytes.data(), bytes.size());
+                    return Pipe::Result{Pipe::Reply::Invalid, ERROR_SUCCESS, Pipe::Stage::Reply, true};
+                }, [&](DWORD delay) { tick += delay; });
+            check(result == Result::Rejected && calls == 3 && tick == 123 && bounded && identical && diagnostics.deadline_expired,
+                "permanent cold Invalid is bounded by the original remaining deadline");
+        }
+        for (const auto terminal : {Pipe::Reply::Invalid, Pipe::Reply::Duplicate}) {
+            uint64_t tick = 100;
+            unsigned calls = 0;
+            bool identical = true;
+            pulse::DirectRevealDiagnostics diagnostics;
+            const auto result = pulse::direct_reveal_detail::ExchangeSameRequest(bytes, 160, true, &diagnostics,
+                [&] { return tick; }, [&](std::span<const unsigned char> payload, uint64_t) {
+                    identical &= payload.size() == bytes.size() && !memcmp(payload.data(), bytes.data(), bytes.size());
+                    if (++calls == 1) return Pipe::Result{std::nullopt, ERROR_TIMEOUT, Pipe::Stage::Reply, true};
+                    return Pipe::Result{terminal, ERROR_SUCCESS, Pipe::Stage::Reply, true};
+                }, [&](DWORD delay) { tick += delay; });
+            check(calls == 2 && identical && result == (terminal == Pipe::Reply::Duplicate ? Result::Accepted : Result::Indeterminate),
+                "ambiguous transport keeps one GUID; Duplicate confirms it and Invalid does not erase ambiguity");
+        }
+    }
+    {
         C pipe_receiver;
         const auto endpoint_name = L"Local\\Pulse.DirectRevealTest." + std::to_wstring(GetCurrentProcessId());
         check(pipe_receiver.Acquire(endpoint_name) == C::AcquireResult::Primary &&

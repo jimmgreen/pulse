@@ -2,11 +2,67 @@
 #include <cstdio>
 #include <limits>
 #include <cstring>
+#include <filesystem>
 using namespace pulse::picker_layout;
-int main() {
+int wmain(int argc, wchar_t** argv) {
+    // A process-local HKCU override exercises the real registry implementation
+    // without writing installed preferences or relying on the user's hive ACL.
+    HKEY hive = nullptr;
+    if (argc > 1) {
+        const auto file = std::filesystem::absolute(argv[1]);
+        const auto loaded = RegLoadAppKeyW(file.c_str(), &hive, KEY_ALL_ACCESS, REG_PROCESS_APPKEY, 0);
+        const auto overridden = loaded == ERROR_SUCCESS ? RegOverridePredefKey(HKEY_CURRENT_USER, hive) : loaded;
+        std::printf("ISOLATED_HIVE_LOAD=%ld OVERRIDE=%ld\n", loaded, overridden);
+        if (overridden != ERROR_SUCCESS) { if (hive) RegCloseKey(hive); return 2; }
+    }
     const auto root=L"Software\\Pulse\\Tests\\PickerLayout-"+std::to_wstring(GetCurrentProcessId());
+    HKEY probe=nullptr;
+    const auto registry_probe=RegCreateKeyExW(HKEY_CURRENT_USER,root.c_str(),0,nullptr,0,KEY_SET_VALUE,nullptr,&probe,nullptr);
+    std::printf("ISOLATED_REGISTRY_CREATE=%ld\n",registry_probe);
+    if(probe)RegCloseKey(probe);
     int failures=0;
     auto check=[&](bool ok,const char* name) { std::printf("[%s] %s\n",ok?"PASS":"FAIL",name); if(!ok) ++failures; };
+    check(LoadFlagsForIdentity(root,L"host-a",2)==0,"remove-after-open defaults off in isolated host");
+    check(SaveFlagsForIdentity(root,L"host-a",2,kFlagPreviewPane|kFlagRemoveTrayAfterOpen),"remember remove-after-open without replacing preview flag");
+    check(LoadFlagsForIdentity(root,L"host-a",2)==(kFlagPreviewPane|kFlagRemoveTrayAfterOpen),"host flags roundtrip");
+    check(LoadFlagsForIdentity(root,L"host-b",2)==0 && LoadFlagsForIdentity(root,L"host-a",3)==0,"other programs and Save mode remain independent");
+    check(SaveFlagsForIdentity(root,L"host-a",2,kFlagPreviewPane)&&LoadFlagsForIdentity(root,L"host-a",2)==kFlagPreviewPane,"turning remove-after-open off preserves preview setting");
+    check(SaveFlagsForIdentity(root,L"host-a",2,kFlagPreviewPaneHidden)&&LoadFlagsForIdentity(root,L"host-a",2)==kFlagPreviewPaneHidden,"preview-hidden flag roundtrips cleanly");
+    check(LoadAppPinnedForIdentity(root,L"host-a").empty(),"app pinned places default empty");
+    check(SaveAppPinnedForIdentity(root,L"host-a",{L"C:\\PinA",L"D:\\PinB"}) &&
+          LoadAppPinnedForIdentity(root,L"host-a")==std::vector<std::wstring>{L"C:\\PinA",L"D:\\PinB"} &&
+          LoadAppPinnedForIdentity(root,L"host-b").empty(),"app pinned places roundtrip with per-app isolation");
+    check(!SaveAppPinnedForIdentity(root,L"host-a",{L"C:\\PinA",L"c:\\pina"}),"duplicate app pinned paths rejected");
+    check(SaveAppPinnedForIdentity(root,L"host-a",{}) && LoadAppPinnedForIdentity(root,L"host-a").empty(),"clearing app pinned places persists");
+    check(!SaveFlagsForIdentity(root,L"",2,2)&&!SaveFlagsForIdentity(root,L"host-a",4,2),"invalid host and mode reject persistence");
+    constexpr int save_mode = 3;
+    constexpr uint32_t existing_flags = kFlagPreviewPane | kFlagRemoveTrayAfterOpen;
+    constexpr uint32_t followup_flags = kFlagShowAfterSave | kFlagCopyAfterSave;
+    check(LoadFlagsForIdentity(root,L"save-host-a",save_mode)==0 &&
+        LoadFlagsForIdentity(root,L"save-host-b",save_mode)==0,
+        "save follow-up flags default off for independent callers");
+    check(SaveFlagsForIdentity(root,L"save-host-a",save_mode,existing_flags),
+        "seed existing preview and tray flags before save follow-up toggles");
+    auto save_flags = LoadFlagsForIdentity(root,L"save-host-a",save_mode);
+    check(SaveFlagsForIdentity(root,L"save-host-a",save_mode,save_flags|followup_flags) &&
+        LoadFlagsForIdentity(root,L"save-host-a",save_mode)==(existing_flags|followup_flags),
+        "show-after-save and copy-after-save roundtrip while retaining existing flags");
+    check(LoadFlagsForIdentity(root,L"save-host-b",save_mode)==0 &&
+        LoadFlagsForIdentity(root,L"save-host-a",0)==0 && LoadFlagsForIdentity(root,L"save-host-a",2)==0,
+        "save follow-up settings stay isolated from other callers and picker modes");
+    check(SaveFlagsForIdentity(root,L"save-host-b",save_mode,kFlagCopyAfterSave) &&
+        LoadFlagsForIdentity(root,L"save-host-b",save_mode)==kFlagCopyAfterSave &&
+        LoadFlagsForIdentity(root,L"save-host-a",save_mode)==(existing_flags|followup_flags),
+        "second caller independently remembers copy-only without changing first caller");
+    save_flags = LoadFlagsForIdentity(root,L"save-host-a",save_mode);
+    check(SaveFlagsForIdentity(root,L"save-host-a",save_mode,save_flags&~kFlagShowAfterSave) &&
+        LoadFlagsForIdentity(root,L"save-host-a",save_mode)==(existing_flags|kFlagCopyAfterSave),
+        "disabling show-after-save preserves copy-after-save preview and tray flags");
+    save_flags = LoadFlagsForIdentity(root,L"save-host-a",save_mode);
+    check(SaveFlagsForIdentity(root,L"save-host-a",save_mode,save_flags&~kFlagCopyAfterSave) &&
+        LoadFlagsForIdentity(root,L"save-host-a",save_mode)==existing_flags &&
+        LoadFlagsForIdentity(root,L"save-host-b",save_mode)==kFlagCopyAfterSave,
+        "disabling both follow-ups preserves existing flags and other caller choice");
     State original; original.icon_dip=112; original.has_placement=true; original.x=120; original.width=940; original.view_mode=4; original.sort=2; original.descending=true; original.column_widths[0]=240; original.hidden_places={L"C:\\hidden", L"D:\\other"};
     check(SaveForIdentity(root,L"C:\\host-a.exe",0,original),"save including canceled dialog state");
     State read;
@@ -66,6 +122,8 @@ int main() {
         DestroyWindow(window);
     }
     RegDeleteTreeW(HKEY_CURRENT_USER,root.c_str());
+    if (hive) { RegOverridePredefKey(HKEY_CURRENT_USER, nullptr); RegCloseKey(hive); }
+    std::printf("FAILURES=%d\n", failures);
     return failures ? 1 : 0;
 }
 

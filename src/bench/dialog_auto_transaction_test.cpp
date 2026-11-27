@@ -1,10 +1,13 @@
 #include "../common/dialog_auto_transaction.h"
+#include "../common/dialog_auto_ownership.h"
 #include <array>
 #include <cstdio>
 #include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <filesystem>
+#include <fstream>
 
 #ifdef PULSE_DIALOG_TRANSACTION_STANDALONE
 #include "../common/runtime_log.h"
@@ -336,9 +339,107 @@ int Baseline() {
     return fake.states[0].enabled && second == ERROR_ACCESS_DENIED ? 1 : 2;
 }
 }
+namespace {
+void RetiredCases() {
+    namespace fs = std::filesystem;
+    const auto root = fs::absolute(L"bench_data") /
+        (L"retired-transaction-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    const auto old_directory = root / L"Old Install" / L"DialogBridge" / std::wstring(64, L'a');
+    const auto old64 = (old_directory / DllNameFor(x64)).wstring();
+    const auto old32 = (old_directory / DllNameFor(x86)).wstring();
+    const std::vector<RegistrationTarget> targets{{x64, Path(x64), old64, true}, {x86, Path(x86), old32, true}};
+    const auto seed = [&](Fake& fake) {
+        fake.states[0] = {false, false, 0, old64}; fake.states[1] = {false, false, 0, old32};
+    };
+    const auto api_for = [&](Fake& fake) {
+        auto api = fake.ApiWithRebind();
+        api.enable_if_retired_disabled_for = [&fake](Architecture arch, const std::wstring& old_path,
+            const std::wstring& new_path, bool& attempted) {
+            attempted = false;
+            if (!IsRetiredDisabledPulseDialogDll(arch, fake.states[Index(arch)])) return DWORD{ERROR_ALREADY_EXISTS};
+            attempted = true;
+            return fake.Change(Operation::EnableIfDisabledFor, arch, new_path, old_path);
+        };
+        return api;
+    };
+    {
+        Fake fake; seed(fake); fake.states[1] = {};
+        const auto result = ExecuteRegistrationChange({targets[0], {x86, Path(x86)}}, true, api_for(fake));
+        Check(!result.error && result.attempted_count == 2 && fake.states[0].enabled && fake.states[1].enabled,
+            "retired x64 and unclaimed x86 use their separate endpoints in one transaction");
+    }
+    {
+        Fake fake; seed(fake); auto api = api_for(fake); const auto change = api.enable_if_retired_disabled_for;
+        api.enable_if_retired_disabled_for = [&](Architecture arch, const std::wstring& old_path,
+            const std::wstring& new_path, bool& attempted) {
+            if (arch == x86) { attempted = false; return DWORD{ERROR_INVALID_DATA}; }
+            return change(arch, old_path, new_path, attempted);
+        };
+        const auto result = ExecuteRegistrationChange(targets, true, api);
+        Check(result.error == ERROR_INVALID_DATA && !result.rollback_error && result.attempted_count == 1 &&
+            result.rollback_attempted_count == 1 && !result.targets[1].attempted && !result.targets[1].rollback_attempted &&
+            !fake.states[0].enabled && !fake.states[1].enabled && fake.states[1].dll_path == old32 &&
+            fake.calls.size() == 2 && fake.calls.back().architecture == x64,
+            "x86 precondition refusal leaves x86 untouched and rolls back only modified x64");
+    }
+    {
+        Fake fake; seed(fake); auto api = api_for(fake);
+        api.enable_if_retired_disabled_for = [](Architecture, const std::wstring&, const std::wstring&, bool& attempted) {
+            attempted = false; return DWORD{ERROR_FILE_NOT_FOUND};
+        };
+        const auto result = ExecuteRegistrationChange(targets, true, api);
+        Check(result.error == ERROR_FILE_NOT_FOUND && !result.attempted_count && !result.rollback_attempted_count &&
+            fake.calls.empty() && fake.states[0].dll_path == old64,
+            "retired precondition refusal does not manufacture zero flags through rollback");
+    }
+    {
+        Fake fake; seed(fake); auto api = api_for(fake); const auto change = api.enable_if_retired_disabled_for;
+        api.enable_if_retired_disabled_for = [&](Architecture arch, const std::wstring& old_path,
+            const std::wstring& new_path, bool& attempted) -> DWORD {
+            change(arch, old_path, new_path, attempted);
+            throw std::runtime_error("after retired mutation");
+        };
+        const auto result = ExecuteRegistrationChange(targets, true, api);
+        Check(result.error == ERROR_UNHANDLED_EXCEPTION && !result.rollback_error && result.attempted_count == 1 &&
+            result.rollback_attempted_count == 1 && !fake.states[0].enabled && fake.states[1].dll_path == old32,
+            "retired callback exception preserves mutation marker and triggers recovery");
+    }
+    {
+        Fake fake; seed(fake); auto api = api_for(fake);
+        api.enable_if_retired_disabled_for = {};
+        const auto result = ExecuteRegistrationChange(targets, true, api);
+        Check(result.error == ERROR_INVALID_PARAMETER && fake.calls.empty(), "retired target cannot downgrade to ordinary rebind callback");
+        for (const auto& target : std::vector<RegistrationTarget>{{x64, Path(x64), {}, true}, {x64, Path(x64), Path(x64), true}}) {
+            const auto invalid = ExecuteRegistrationChange({target}, true, api_for(fake));
+            Check(invalid.error == ERROR_INVALID_PARAMETER && fake.calls.empty(), "retired target requires a distinct expected old identity");
+        }
+        const auto invalid = ExecuteRegistrationChange(targets, false, api_for(fake));
+        Check(invalid.error == ERROR_INVALID_PARAMETER && fake.calls.empty(), "retired constraint is enable-only");
+    }
+    {
+        Fake fake; seed(fake); fake.states[1].conflict = true;
+        const auto result = ExecuteRegistrationChange(targets, true, api_for(fake));
+        Check(result.error == ERROR_ALREADY_EXISTS && fake.calls.empty(), "other architecture conflict blocks retired batch before all mutation");
+    }
+    {
+        Check(fs::create_directories(old_directory), "create exclusively owned retired transaction fixture");
+        Fake fake; seed(fake);
+        fake.on_inspect = [&](Architecture arch, unsigned reads) {
+            if (arch == x64 && reads == 2) { std::ofstream file(old64, std::ios::binary); file << "restored"; }
+        };
+        const auto result = ExecuteRegistrationChange(targets, true, api_for(fake));
+        Check(result.error == ERROR_ALREADY_EXISTS && !result.attempted_count && !result.rollback_attempted_count && fake.calls.empty(),
+            "old file reappearing after transaction preflight is refused without rollback writes");
+        const auto base = fs::weakly_canonical(fs::absolute(L"bench_data"));
+        Check(fs::weakly_canonical(root).parent_path() == base && fs::is_regular_file(old64), "verify owned transaction cleanup boundary");
+        if (fs::weakly_canonical(root).parent_path() == base) fs::remove_all(root);
+    }
+}
+}
 int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--single-arch-baseline") return Baseline();
     Cases();
+    RetiredCases();
     std::printf("TRANSACTION_TEST checks=%u failures=%u api=injected_state native_registry_mutations=0\n", checks, failures);
     return failures ? 1 : 0;
 }

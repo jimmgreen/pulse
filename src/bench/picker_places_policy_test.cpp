@@ -132,6 +132,47 @@ int main() {
     const auto bounded = BuildPickerPlacesMenu(data, L"C:\\one", many_hidden, true);
     check(find(bounded, 163) && !find(bounded, 164) && find(bounded, 263) && !find(bounded, 264) &&
         !find(bounded, 1)->enabled, "group and restore protocol ranges cap at 64 and hide respects its limit");
+    // 常用: folders dropped on it pin to the program; its rows are removed, not hidden.
+    {
+        places::Snapshot online; online.shared_available = true;
+        WindowViewModel common;
+        SidebarGroup group; group.id = kPickerAppCommonSection; group.header = L"Weixin 常用";
+        group.add_action = SidebarAddAction::PinToApp;
+        SidebarItem row; row.path = L"C:\\print"; group.items.push_back(row);
+        common.sidebar.push_back(group);
+        HitTestResult header; header.region = HitTestResult::SidebarHeader; header.index = 0;
+        auto pin = ResolvePickerPlacesDrop(common, online, header, folder, 0);
+        check(pin.pin && pin.effect == DROPEFFECT_LINK, "folders dropped on the 常用 title pin to the program");
+        check(ResolvePickerPlacesDrop(common, online, header, file, 0).effect == DROPEFFECT_NONE,
+            "a file cannot be pinned as a program place");
+        HitTestResult on_row; on_row.region = HitTestResult::SidebarItem; on_row.index = 0;
+        on_row.sidebar_section = kPickerAppCommonSection; on_row.path = L"C:\\print";
+        check(ResolvePickerPlacesDrop(common, online, on_row, folder, 0).pin, "a 常用 row is a pin target too");
+        common.sidebar[0].add_action = SidebarAddAction::None;   // no program name: nothing to pin to
+        check(!ResolvePickerPlacesDrop(common, online, header, folder, 0).pin, "without a program there is no pin target");
+        const auto removable = BuildPickerPlacesMenu(online, L"C:\\print", {}, true, true, L"Weixin", false, true);
+        check(find(removable, 18) && !find(removable, 1), "a 常用 row offers remove and no hide");
+        const auto fixed = BuildPickerPlacesMenu(online, L"C:\\Users", {}, true, true, L"Weixin", false, false);
+        check(!find(fixed, 18) && find(fixed, 1), "a fixed place keeps hide and has no remove");
+    }
+    // Favorites in the redesigned sidebar: workspaces first, what 常用 shows is skipped,
+    // members of a favorite group stay; Pulse's quick-access pins stay out (此电脑 has them).
+    {
+        places::Snapshot fav;
+        fav.workspaces = {{L"D:\\brand", L"Brand"}};
+        fav.starred_groups = {{L"g", L"Finance"}};
+        fav.starred_items = {{L"D:\\bills", 2, {}}, {L"D:\\design", 2, {}}, {L"D:\\bills\\2026", 2, L"g"}};
+        fav.folders = {{L"D:\\pinned", L"", false, true}, {L"D:\\design", L"", false, true}, {L"D:\\recent", L"", false, false}};
+        WindowViewModel merged;
+        AppendPickerFavoritesMerged(merged, fav, false, {}, [](const std::wstring& path) { return path; },
+            [](const std::wstring& path) { return SamePickerPath(path, L"D:\\bills"); });
+        std::vector<std::wstring> paths;
+        for (const auto& item : merged.sidebar[0].items) paths.push_back(item.path);
+        const std::vector<std::wstring> want{L"D:\\brand", L"D:\\design", std::wstring(kPickerGroupPrefix) + L"g",
+            L"D:\\bills\\2026"};
+        check(paths == want, "favorites: workspace, starred (minus 常用), group with members, no quick-access pins");
+        check(merged.sidebar[0].id == kPickerFavoritesSection, "the merged group keeps the favorites id (drop target, collapse bit)");
+    }
     check(IsPickerFolderName(L"New folder") && !IsPickerFolderName(L"CON.txt") &&
         !IsPickerFolderName(L"../outside") && !IsPickerFolderName(L"trailing."),
         "new folder validation rejects reserved names and escaping paths");

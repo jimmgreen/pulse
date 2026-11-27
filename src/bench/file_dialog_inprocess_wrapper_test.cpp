@@ -1520,6 +1520,77 @@ void PreUiFallback(const std::wstring& folder) {
             RemoveDirectoryW(stale_dir.c_str());
         }
     }
+    // Stale explicit SetFolder (e.g. YJK Save remembering a deleted export directory) must heal
+    // to its nearest existing parent directory instead of falling back to native Windows dialog.
+    {
+        static std::wstring received_save_initial;
+        received_save_initial.clear();
+        const std::wstring parent_dir = folder + L"\\yjk-export-parent";
+        const std::wstring stale_leaf = parent_dir + L"\\deleted-export-leaf";
+        Check(CreateDirectoryW(parent_dir.c_str(), nullptr) != FALSE &&
+              CreateDirectoryW(stale_leaf.c_str(), nullptr) != FALSE,
+              "create temporary explicit Save folder hierarchy");
+        ComPtr<IShellItem> stale_item;
+        Check(SHCreateItemFromParsingName(stale_leaf.c_str(), nullptr, IID_PPV_ARGS(&stale_item)) == S_OK && stale_item,
+              "bind explicit Save ShellItem before deletion");
+        Script state; script = &state; state.folder = parent_dir; state.file = parent_dir + L"\\export.dwg"; state.real_world_save = true;
+        auto provider = std::make_shared<FileDialogInprocessProvider>();
+        provider->module_lifetime = std::make_shared<int>(1); provider->allow_unverified_proof = true;
+        auto& api = provider->api; api.size = sizeof(api); api.version = 2;
+        api.implemented_features = 0xFFFFFFFFu;
+        api.Initialize = Initialize; api.ValidateConfig = Validate; api.Query = Query; api.GetWindow = Window; api.Close = Close; api.Shutdown = Shutdown;
+        api.Show = [](PulsePickerUiV2Session, const PulsePickerUiV2Config* config, const PulsePickerUiV2Callbacks*, PulsePickerUiV2Result* result) -> HRESULT {
+            if (config && config->initial_folder.data && config->initial_folder.units)
+                received_save_initial.assign(config->initial_folder.data, config->initial_folder.units);
+            result->status = PULSE_PICKER_UI_V2_CANCELLED;
+            result->flags = PULSE_PICKER_UI_V2_UI_SHOWN;
+            result->terminal_hr = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+            return result->terminal_hr;
+        };
+        unsigned native_calls = 0; bool explicit_heal_seen = false;
+        FileDialogBridgeServices services;
+        services.access_policy = AccessPolicy::LocalOpenV1;
+        services.save_access_policy = AccessPolicy::LocalSaveV1;
+        services.inprocess_provider = provider;
+        services.validation_verified = [](const ContractDecision& d) {
+            return d.validation_category == ValidationCategory::LocalSaveAccessV1;
+        };
+        services.show_native = [&](IFileDialog*, HWND) { ++native_calls; return HRESULT_FROM_WIN32(ERROR_CANCELLED); };
+        services.on_native_reason = [&](const char* reason, const IID*) {
+            if (!reason) return;
+            std::string_view sv(reason);
+            if (sv == "initial-folder-stale-explicit-fallback" ||
+                sv.starts_with("initial-folder-recovered-fallback")) {
+                explicit_heal_seen = true;
+            }
+        };
+        ComPtr<IFileSaveDialog> save;
+        Check(CreateIsolatedDialog(DialogFactory::Save, services, IID_PPV_ARGS(&save)) == S_OK && save,
+              "isolated Save dialog for stale explicit SetFolder repair");
+        if (save) {
+            const COMDLG_FILTERSPEC filters[] = {
+                {L"DWG (*.dwg)", L"*.dwg"},
+                {L"DXF (*.dxf)", L"*.dxf"},
+            };
+            Check(save->SetDefaultExtension(L"dwg") == S_OK &&
+                  save->SetFileTypes(2, filters) == S_OK &&
+                  save->SetFileTypeIndex(1) == S_OK &&
+                  save->SetFileName(L"export.dwg") == S_OK &&
+                  save->SetFolder(stale_item.Get()) == S_OK &&
+                  save->SetOptions(FOS_OVERWRITEPROMPT | FOS_FORCEFILESYSTEM) == S_OK,
+                  "configure YJK-style Save dialog with explicit SetFolder");
+            stale_item.Reset();
+            Check(RemoveDirectoryW(stale_leaf.c_str()) != FALSE, "delete explicit Save leaf directory before Show");
+            const HRESULT hr = save->Show(nullptr);
+            Check(hr == HRESULT_FROM_WIN32(ERROR_CANCELLED), "stale explicit Save SetFolder reaches Pulse UI cleanly");
+            Check(native_calls == 0, "stale explicit Save SetFolder opens Pulse directly without native fallback");
+            Check(explicit_heal_seen, "stale explicit Save SetFolder emits explicit heal/recovery diagnostic");
+            Check(received_save_initial == parent_dir,
+                  "stale explicit Save SetFolder resolves to nearest existing ancestor directory");
+        }
+        RemoveDirectoryW(stale_leaf.c_str());
+        RemoveDirectoryW(parent_dir.c_str());
+    }
 }
 void NullExtension(const std::wstring& folder) {
     static bool captured = false;

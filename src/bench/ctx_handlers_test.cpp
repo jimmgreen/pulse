@@ -1,5 +1,6 @@
 #include "../shell_host/ctx_handlers.h"
 #include "../ipc/ctx_menu_util.h"
+#include <shellapi.h>
 
 #include <cstdio>
 #include <string>
@@ -738,6 +739,43 @@ void TestNativeSendToLive() {
     Check(targets.empty(), "native send-to: targets are freed");
 }
 
+void TestNativeSendToIcons() {
+    auto targets = pulse::shell::EnumerateSendToTargets();
+    std::vector<pulse::shell::CtxItemOut> rows;
+    pulse::shell::NativeSendToItems(targets, L"Send to", 0, 100, 1000, rows);
+    size_t available = 0, matched = 0;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        SHFILEINFOW info{};
+        pulse::common::MenuIconRef expected;
+        if (SHGetFileInfoW(reinterpret_cast<LPCWSTR>(targets[i].pidl), 0, &info, sizeof(info),
+                           SHGFI_PIDL | SHGFI_ICON | SHGFI_SMALLICON) && info.hIcon) {
+            expected = pulse::common::IconPixels(info.hIcon);
+        }
+        if (info.hIcon) DestroyIcon(info.hIcon);
+        if (!expected) continue;
+        ++available;
+        const auto actual = rows.size() > i + 1 ? rows[i + 1].icon : nullptr;
+        const bool equal = actual && actual->width == expected->width &&
+                           actual->height == expected->height && actual->bgra == expected->bgra;
+        if (equal) ++matched;
+        std::printf("  destination[%zu]: native=%ux%u pulse=%ux%u identical=%d\n", i,
+                    expected->width, expected->height, actual ? actual->width : 0,
+                    actual ? actual->height : 0, equal ? 1 : 0);
+    }
+    std::printf("  send-to real icons: targets=%zu available=%zu matched=%zu\n",
+                targets.size(), available, matched);
+    Check(available != 0 && matched == available,
+          "native send-to keeps every original PIDL-provided icon pixel");
+    pulse::shell::FreeSendToTargets(targets);
+    Check(targets.empty(), "send-to icon enumeration frees PIDLs");
+    std::vector<pulse::shell::SendToTarget> empty_target(1);
+    empty_target[0].text = L"Unavailable item";
+    rows.clear();
+    pulse::shell::NativeSendToItems(empty_target, L"Send to", 0, 100, 1000, rows);
+    Check(rows.size() == 2 && !rows[1].icon,
+          "missing send-to PIDL never gets an invented icon");
+}
+
 // The drop itself, on a plain folder: SendTo copies.
 void TestNativeSendToDrop() {
     wchar_t temp[MAX_PATH] = {};
@@ -1022,6 +1060,10 @@ void TestMultiVerbExplorerCommandSharingClsid() {
 
 int wmain(int argc, wchar_t** argv) {
     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return 2;
+    if (argc > 1 && wcscmp(argv[1], L"--sendto-icons") == 0) {
+        TestNativeSendToItems(); TestNativeSendToMerge(); TestNativeSendToIcons();
+        CoUninitialize(); return passed ? 0 : 1;
+    }
     if (argc > 1 && wcscmp(argv[1], L"--nested-only") == 0) {
         TestNestedMenuTree(); CoUninitialize(); return passed ? 0 : 1;
     }
