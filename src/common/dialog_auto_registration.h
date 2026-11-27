@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include <string>
+#include <vector>
 namespace pulse::dialog_auto {
 enum class Architecture { X64, X86 };
 #ifdef _WIN64
@@ -21,11 +22,19 @@ const wchar_t* DllNameFor(Architecture architecture) noexcept;
 const wchar_t* StubDllNameFor(Architecture architecture) noexcept;
 bool IsAllowedDialogDllName(Architecture architecture, const wchar_t* file_name) noexcept;
 Status Inspect(Architecture architecture);
+struct JournalRepairResult { DWORD error = ERROR_SUCCESS, rollback_error = ERROR_SUCCESS; unsigned repaired = 0; };
+// Restore only a missing DllPath witnessed by two matching, strictly owned,
+// retired COM registrations. All architectures are checked before any write.
+JournalRepairResult RepairMissingRegistrationJournals(const std::vector<Architecture>& architectures);
 DWORD Enable(Architecture architecture, const std::wstring& absolute_dll);
 DWORD EnableIfUnclaimed(Architecture architecture, const std::wstring& absolute_dll);
 // Rebind only an exact old journal that is fully disabled and has no CLSID roots.
 // This does not relax the unclaimed-only endpoint or discard extra preferences.
 DWORD EnableIfDisabledFor(Architecture architecture, const std::wstring& expected_old_dll, const std::wstring& new_dll);
+// Cross-install retired journals additionally require the old component to remain missing.
+// False mutation_attempted means every failed precondition left the journal untouched.
+DWORD EnableIfRetiredDisabledFor(Architecture architecture, const std::wstring& expected_old_dll,
+    const std::wstring& new_dll, bool* mutation_attempted = nullptr);
 DWORD Disable(Architecture architecture);
 DWORD DisableFor(Architecture architecture, const std::wstring& absolute_dll);
 DWORD Enable(const std::wstring& absolute_dll);

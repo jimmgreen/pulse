@@ -13,7 +13,36 @@ struct Entry { std::wstring path, label; bool open = false, pinned = false; };
 struct Workspace { std::wstring root, name; uint32_t color_rgb = 0; };
 struct StarredItem { std::wstring path; uint32_t kind = 0; std::wstring group; };
 struct StarredGroup { std::wstring id, name; };
+struct SelectedItem {
+    std::wstring path;
+    bool is_directory = false;
+    uint64_t size = 0;
+    bool operator==(const SelectedItem&) const = default;
+};
+inline constexpr size_t kMaxSelectedItems = 64;
+struct TrayItem {
+    uint64_t id = 0, batch_id = 0, shelf_id = 0;
+    std::wstring path, label;
+    bool is_directory = false;
+    uint64_t size = 0;
+    bool exists = false, inflight = false, owned_snippet = false;
+    DWORD attrs = 0;
+    uint32_t content_kind = 0;
+    std::wstring domain, source_label;
+    bool operator==(const TrayItem&) const = default;
+};
+inline constexpr size_t kMaxTrayItems = 64; // rows per legacy mapping / paged chunk
+inline constexpr size_t kMaxTraySnapshotItems = 4096;
 struct Snapshot {
+    std::vector<TrayItem> tray_items;
+    bool tray_available = false;
+    uint64_t tray_shelf_id = 0, tray_revision = 0, tray_total_count = 0;
+    std::wstring tray_shelf_name;
+    HWND tray_source = nullptr;
+    DWORD tray_publisher_pid = 0;
+    std::vector<SelectedItem> selected_items;
+    HWND selection_source = nullptr;
+    bool selection_available = false;
     std::wstring current;
     std::vector<Entry> folders;
     std::vector<Workspace> workspaces;
@@ -24,8 +53,18 @@ struct Snapshot {
     DWORD endpoint_pid = 0;
     bool shared_available = false;
     bool jump_policy_available = false;
+    bool save_followup_available = false;
     bool auto_jump = false, remember = false, pinyin = false, index = false;
+    std::wstring archive_worker;
 };
+void PublishArchiveRuntime(const Snapshot& snapshot);
+void ReadArchiveRuntime(Snapshot& snapshot);
+void PublishSaveCapability(const Snapshot& snapshot);
+void ReadSaveCapability(Snapshot& snapshot);
+void PublishTray(const Snapshot& snapshot);
+void ReadTray(Snapshot& snapshot);
+void PublishSelection(const Snapshot& snapshot);
+void ReadSelection(Snapshot& snapshot);
 void PublishJumpPolicy(const Snapshot& snapshot);
 void ReadJumpPolicy(Snapshot& snapshot);
 void PublishShared(const Snapshot& snapshot);
@@ -82,8 +121,12 @@ inline bool Valid(const Payload& p) {
 }
 }
 inline void Publish(const Snapshot& snapshot) {
+    PublishTray(snapshot);
+    PublishSelection(snapshot);
     PublishShared(snapshot);
     PublishJumpPolicy(snapshot);
+    PublishArchiveRuntime(snapshot);
+    PublishSaveCapability(snapshot);
     static detail::Writer writer;
     if (!writer.blob || !writer.mutex) return;
     // Allocate the bounded copy off the stack before taking the writer lock.
@@ -141,8 +184,12 @@ inline Snapshot ReadMapping(const std::wstring& name) {
     return result;
 }
 }
-inline Snapshot Read() { auto result = detail::ReadMapping(detail::Name()); ReadShared(result); ReadJumpPolicy(result); return result; }
+inline Snapshot Read() { auto result = detail::ReadMapping(detail::Name()); ReadShared(result); ReadJumpPolicy(result); ReadSelection(result); ReadTray(result); ReadArchiveRuntime(result); ReadSaveCapability(result); return result; }
 }
 #include "picker_places_shared.h"
 #include "picker_jump_policy.h"
+#include "picker_selection_shared.h"
+#include "picker_tray_shared.h"
+#include "picker_archive_runtime_shared.h"
+#include "picker_save_capability_shared.h"
 

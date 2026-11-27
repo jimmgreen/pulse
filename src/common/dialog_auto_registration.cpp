@@ -1,7 +1,9 @@
 #include "dialog_auto_registration.h"
+#include "dialog_auto_ownership.h"
 #include "dialog_registration_mutex.h"
 #include "runtime_log.h"
 #include <vector>
+#include <new>
 namespace pulse::dialog_auto {
 namespace {
 bool ValidArchitecture(Architecture architecture) { return architecture == Architecture::X64 || architecture == Architecture::X86; }
@@ -199,6 +201,118 @@ Status Inspect(Architecture architecture) {
     }
     s.enabled = complete && c.h && Number(c.h, L"Enabled") == 1; return s;
 }
+namespace {
+struct MissingJournal {
+    Architecture architecture;
+    std::wstring path;
+    DWORD stage = 0;
+    bool stage_present = false;
+};
+DWORD ReadFlag(HKEY key, const wchar_t* name, DWORD& value) {
+    DWORD type = 0, bytes = sizeof(value);
+    const DWORD error = RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(&value), &bytes);
+    if (error) return error;
+    return type == REG_DWORD && bytes == sizeof(value) ? ERROR_SUCCESS : ERROR_INVALID_DATA;
+}
+DWORD MissingJournalWitness(Architecture architecture, MissingJournal& witness,
+    const MissingJournal* expected = nullptr, bool restoring = false) {
+    Key config;
+    DWORD error = Open(architecture, ConfigFor(architecture), config);
+    if (error) return error;
+    const auto recorded = Read(config.h, L"DllPath", &error);
+    if (error != ERROR_FILE_NOT_FOUND && !(restoring && expected && !error && recorded == expected->path))
+        return error ? error : ERROR_ALREADY_EXISTS;
+    DWORD enabled = 0;
+    if ((error = ReadFlag(config.h, L"Enabled", enabled))) return error;
+    if (enabled != 1) return ERROR_ALREADY_EXISTS;
+    witness.architecture = architecture;
+    error = ReadFlag(config.h, L"Stage", witness.stage);
+    witness.stage_present = error != ERROR_FILE_NOT_FOUND;
+    if (error && error != ERROR_FILE_NOT_FOUND) return error;
+    if (witness.stage_present && witness.stage > 1) return ERROR_ALREADY_EXISTS;
+    for (const auto root : roots) {
+        Key key, server;
+        if ((error = Open(architecture, root, key))) return error;
+        if (Read(key.h, owner) != token || !Shape(key.h, 1, 1)) return ERROR_ALREADY_EXISTS;
+        const auto subkey = std::wstring(root) + L"\\InprocServer32";
+        if ((error = Open(architecture, subkey.c_str(), server))) return error;
+        if (!Shape(server.h, 0, 2) || Read(server.h, L"ThreadingModel") != L"Apartment") return ERROR_ALREADY_EXISTS;
+        const auto path = Read(server.h, nullptr, &error);
+        if (error) return error;
+        if (path.empty() || (!witness.path.empty() && witness.path != path)) return ERROR_ALREADY_EXISTS;
+        witness.path = path;
+    }
+    if (expected && (witness.path != expected->path || witness.stage_present != expected->stage_present ||
+        (witness.stage_present && witness.stage != expected->stage))) return ERROR_REVISION_MISMATCH;
+    // Recovery of our own metadata write must remain possible if the old file
+    // reappears. Forward repair still requires a genuinely retired local DLL.
+    if (!restoring && !IsRetiredDisabledPulseDialogDll(architecture, Status{false, false, 0, witness.path}))
+        return ERROR_ALREADY_EXISTS;
+    return ERROR_SUCCESS;
+}
+}
+JournalRepairResult RepairMissingRegistrationJournals(const std::vector<Architecture>& architectures) {
+    JournalRepairResult result;
+    MutationLock lock;
+    if (lock.error) { result.error = lock.error; return result; }
+    std::vector<MissingJournal> pending;
+    size_t attempted = 0;
+    try {
+        auto repair = [&]() -> DWORD {
+            if (architectures.empty() || architectures.size() > 2) return ERROR_INVALID_PARAMETER;
+            pending.reserve(architectures.size());
+            for (size_t i = 0; i < architectures.size(); ++i) {
+                const auto architecture = architectures[i];
+                if (const DWORD error = ArchitectureError(architecture)) return error;
+                if (i && architecture == architectures[0]) return ERROR_INVALID_PARAMETER;
+                const auto status = Inspect(architecture);
+                if (status.error) return status.error;
+                if (!status.conflict) continue;
+                MissingJournal witness{architecture};
+                if (const DWORD error = MissingJournalWitness(architecture, witness)) return error;
+                pending.push_back(std::move(witness));
+            }
+            for (const auto& item : pending) {
+                MissingJournal current{item.architecture};
+                if (const DWORD error = MissingJournalWitness(item.architecture, current, &item)) return error;
+                Key key;
+                DWORD error = Open(item.architecture, ConfigFor(item.architecture), key, false, nullptr, true);
+                if (error) return error;
+                ++attempted;
+                if ((error = Write(key.h, L"DllPath", item.path)) || (error = RegFlushKey(key.h))) return error;
+                const auto observed = Inspect(item.architecture);
+                if (observed.error) return observed.error;
+                if (!observed.enabled || observed.conflict || observed.dll_path != item.path) return ERROR_REVISION_MISMATCH;
+                ++result.repaired;
+            }
+            return ERROR_SUCCESS;
+        };
+        result.error = repair();
+    } catch (const std::bad_alloc&) { result.error = ERROR_NOT_ENOUGH_MEMORY; }
+    catch (...) { result.error = ERROR_UNHANDLED_EXCEPTION; }
+    if (result.error) {
+        for (size_t i = attempted; i > 0; --i) {
+            const auto& item = pending[i - 1];
+            DWORD error = ERROR_SUCCESS;
+            try {
+                MissingJournal current{item.architecture};
+                error = MissingJournalWitness(item.architecture, current, &item, true);
+                Key key;
+                if (!error) error = Open(item.architecture, ConfigFor(item.architecture), key, false, nullptr, true);
+                if (!error) {
+                    error = RegDeleteValueW(key.h, L"DllPath");
+                    if (error == ERROR_FILE_NOT_FOUND) error = ERROR_SUCCESS;
+                    if (!error) error = RegFlushKey(key.h);
+                }
+            } catch (...) { error = ERROR_UNHANDLED_EXCEPTION; }
+            if (error && !result.rollback_error) result.rollback_error = error;
+        }
+        if (!result.rollback_error) result.repaired = 0;
+    }
+    diagnostics::runtime::Event("dialog_auto_journal_repair", {{"error", result.error},
+        {"rollback_error", result.rollback_error}, {"repaired", result.repaired}});
+    return result;
+}
 DWORD Disable(Architecture architecture) {
     if (const DWORD error = ArchitectureError(architecture)) return error;
     MutationLock lock; if (lock.error) return lock.error;
@@ -237,10 +351,13 @@ DWORD DisableFor(Architecture architecture, const std::wstring& absolute_dll) {
     }
     return ERROR_SUCCESS;
 }
-DWORD Enable(Architecture architecture, const std::wstring& p) {
+namespace {
+DWORD EnableImpl(Architecture architecture, const std::wstring& p, bool* mutation_attempted) {
+    if (mutation_attempted) *mutation_attempted = false;
     MutationLock lock; if (lock.error) return lock.error;
     DWORD e = Validate(architecture, p); if (e) return e;
     Status s = Inspect(architecture); if (s.enabled && s.dll_path == p) return ERROR_SUCCESS;
+    if (mutation_attempted) *mutation_attempted = true;
     Key c; if ((e = Open(architecture, ConfigFor(architecture), c, true))) return e;
     if (Number(c.h, L"Stage")) { if ((e = Disable(architecture))) return e; }
     for (auto root : roots) { Key k; e = Open(architecture, root, k); if (!e) return ERROR_ALREADY_EXISTS; if (e != ERROR_FILE_NOT_FOUND) return e; }
@@ -258,6 +375,10 @@ DWORD Enable(Architecture architecture, const std::wstring& p) {
     e = Flag(c.h, L"Enabled", 1); if (e) Cleanup(architecture, p);
     diagnostics::runtime::Event("dialog_auto_enable", {{"error", e}}); return e;
 }
+}
+DWORD Enable(Architecture architecture, const std::wstring& p) {
+    return EnableImpl(architecture, p, nullptr);
+}
 DWORD EnableIfUnclaimed(Architecture architecture, const std::wstring& p) {
     MutationLock lock; if (lock.error) return lock.error;
     DWORD error = Validate(architecture, p); if (error) return error;
@@ -270,7 +391,10 @@ DWORD EnableIfUnclaimed(Architecture architecture, const std::wstring& p) {
     }
     return Enable(architecture, p);
 }
-DWORD EnableIfDisabledFor(Architecture architecture, const std::wstring& expected_old_dll, const std::wstring& new_dll) {
+namespace {
+DWORD RebindDisabled(Architecture architecture, const std::wstring& expected_old_dll,
+    const std::wstring& new_dll, bool retired, bool* mutation_attempted) {
+    if (mutation_attempted) *mutation_attempted = false;
     MutationLock lock;
     if (lock.error) return lock.error;
     DWORD error = ValidatePathSyntax(architecture, expected_old_dll);
@@ -294,7 +418,17 @@ DWORD EnableIfDisabledFor(Architecture architecture, const std::wstring& expecte
     }
     // Enable uses this same recursive mutation mutex. The old journal receipt,
     // both empty CLSID slots and the new registration remain one locked action.
-    return Enable(architecture, new_dll);
+    if (retired && !IsRetiredDisabledPulseDialogDll(architecture, Status{false, false, 0, recorded}))
+        return ERROR_ALREADY_EXISTS;
+    return EnableImpl(architecture, new_dll, mutation_attempted);
+}
+}
+DWORD EnableIfDisabledFor(Architecture architecture, const std::wstring& expected_old_dll, const std::wstring& new_dll) {
+    return RebindDisabled(architecture, expected_old_dll, new_dll, false, nullptr);
+}
+DWORD EnableIfRetiredDisabledFor(Architecture architecture, const std::wstring& expected_old_dll,
+    const std::wstring& new_dll, bool* mutation_attempted) {
+    return RebindDisabled(architecture, expected_old_dll, new_dll, true, mutation_attempted);
 }
 Status Inspect() { return Inspect(CurrentArchitecture); }
 DWORD Enable(const std::wstring& path) { return Enable(CurrentArchitecture, path); }

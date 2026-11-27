@@ -14,6 +14,7 @@ inline constexpr wchar_t kCoreDllName32[] = L"PulseDialogCore32.dll";
 inline constexpr wchar_t kBrokerExeName[] = L"PulseDialogBroker.exe";
 inline constexpr wchar_t kInject32ExeName[] = L"PulseDialogInject32.exe";
 inline constexpr wchar_t kOverlayExeName[] = L"PulseDialogOverlay.exe";
+inline constexpr wchar_t kExplorerBridgeExeName[] = L"pulse_explorer_bridge.exe";
 
 struct ActiveBridgePointer {
     uint32_t schema = 1;
@@ -21,9 +22,12 @@ struct ActiveBridgePointer {
     std::wstring core_dir_x86;
     std::string core_digest_x64;
     std::string core_digest_x86;
+    std::string explorer_bridge_sha256_x64;
+    std::string explorer_bridge_sha256_x86;
     std::wstring host_exe;
     std::wstring install_root;
     uint64_t generation = 0;
+    bool disabled = false;
 };
 
 // Returns C:\Program Files\Common Files\Pulse\DialogBridge (or override_root for tests).

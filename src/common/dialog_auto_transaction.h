@@ -9,6 +9,7 @@ struct RegistrationTarget {
     Architecture architecture = Architecture::X64;
     std::wstring dll_path;
     std::wstring expected_old_dll_path{};
+    bool require_retired_disabled = false;
 };
 struct RegistrationApi {
     std::function<Status(Architecture)> inspect;
@@ -16,6 +17,7 @@ struct RegistrationApi {
     std::function<DWORD(Architecture, const std::wstring&)> enable_if_unclaimed;
     std::function<DWORD(Architecture, const std::wstring&)> disable_for;
     std::function<DWORD(Architecture, const std::wstring&, const std::wstring&)> enable_if_disabled_for{};
+    std::function<DWORD(Architecture, const std::wstring&, const std::wstring&, bool&)> enable_if_retired_disabled_for{};
 };
 struct RegistrationTargetResult {
     RegistrationTarget target;

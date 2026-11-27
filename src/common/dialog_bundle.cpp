@@ -310,7 +310,8 @@ DWORD BundleVerifier::Verify(const std::wstring& directory, std::string_view exp
             for(const auto& name:required) reachable.insert(Lower(name));
             if (app_runtime) {
                 for (const auto* name : {"pulse.ai.exe", "pulse.content.exe", "pulse.document.exe",
-                        "pulse.index.exe", "pulse_hotkey_broker.exe", "pulse_start_pin.dll", "pulse_integration.exe"}) {
+                        "pulse.index.exe", "pulse_hotkey_broker.exe", "pulse_start_pin.dll", "pulse_integration.exe",
+                        "pulse_explorer_bridge.exe"}) {
                     if (binaries.contains(name)) reachable.insert(name);
                 }
             }

@@ -1,4 +1,5 @@
 #include "dialog_auto_transaction.h"
+#include "dialog_auto_ownership.h"
 #include "dialog_registration_mutex.h"
 #include "runtime_log.h"
 #include <new>
@@ -62,6 +63,8 @@ DWORD ValidatePath(Architecture architecture, const std::wstring& path) {
 }
 DWORD ValidateTarget(const RegistrationTarget& target, bool enable) {
     if (target.architecture != Architecture::X64 && target.architecture != Architecture::X86) return ERROR_INVALID_PARAMETER;
+    if (target.require_retired_disabled && (!enable || target.expected_old_dll_path.empty() ||
+        SamePath(target.expected_old_dll_path, target.dll_path))) return ERROR_INVALID_PARAMETER;
     if (!enable && !target.expected_old_dll_path.empty()) return ERROR_INVALID_PARAMETER;
     if (const DWORD error = ValidatePath(target.architecture, target.dll_path)) return error;
     if (!target.expected_old_dll_path.empty()) return ValidatePath(target.architecture, target.expected_old_dll_path);
@@ -82,6 +85,11 @@ DWORD Change(const std::function<DWORD(Architecture, const std::wstring&)>& call
 DWORD ChangeRebind(const std::function<DWORD(Architecture, const std::wstring&, const std::wstring&)>& call,
     Architecture architecture, const std::wstring& old_path, const std::wstring& new_path) noexcept {
     try { return call(architecture, old_path, new_path); }
+    catch (const std::bad_alloc&) { return ERROR_NOT_ENOUGH_MEMORY; }
+    catch (...) { return ERROR_UNHANDLED_EXCEPTION; }
+}
+DWORD ChangeRetiredRebind(const RegistrationApi& api, const RegistrationTarget& target, bool& attempted) noexcept {
+    try { return api.enable_if_retired_disabled_for(target.architecture, target.expected_old_dll_path, target.dll_path, attempted); }
     catch (const std::bad_alloc&) { return ERROR_NOT_ENOUGH_MEMORY; }
     catch (...) { return ERROR_UNHANDLED_EXCEPTION; }
 }
@@ -147,7 +155,8 @@ RegistrationChangeResult ExecuteRegistrationChange(const std::vector<Registratio
     if (lock.error) { result.error = lock.error; return result; }
     RegistrationApi resolved;
     try {
-        const bool any = api.inspect || api.enable || api.enable_if_unclaimed || api.disable_for || api.enable_if_disabled_for;
+        const bool any = api.inspect || api.enable || api.enable_if_unclaimed || api.disable_for ||
+            api.enable_if_disabled_for || api.enable_if_retired_disabled_for;
         if (any && !(api.inspect && api.enable && api.enable_if_unclaimed && api.disable_for)) {
             result.error = ERROR_INVALID_PARAMETER; return result;
         }
@@ -159,6 +168,10 @@ RegistrationChangeResult ExecuteRegistrationChange(const std::vector<Registratio
             resolved.disable_for = [](Architecture architecture, const std::wstring& path) { return dialog_auto::DisableFor(architecture, path); };
             resolved.enable_if_disabled_for = [](Architecture architecture, const std::wstring& old_path, const std::wstring& new_path) {
                 return dialog_auto::EnableIfDisabledFor(architecture, old_path, new_path);
+            };
+            resolved.enable_if_retired_disabled_for = [](Architecture architecture, const std::wstring& old_path,
+                const std::wstring& new_path, bool& attempted) {
+                return dialog_auto::EnableIfRetiredDisabledFor(architecture, old_path, new_path, &attempted);
             };
         }
         if (targets.empty() || targets.size() > 2) { result.error = ERROR_INVALID_PARAMETER; return result; }
@@ -181,7 +194,13 @@ RegistrationChangeResult ExecuteRegistrationChange(const std::vector<Registratio
             const bool matching_expected_old = enable && !item.before.enabled && !item.target.expected_old_dll_path.empty() &&
                 SamePath(item.before.dll_path, item.target.expected_old_dll_path);
             if (!error && !item.before.dll_path.empty() && !matching_current && !matching_expected_old) error = ERROR_ALREADY_EXISTS;
-            if (!error && matching_expected_old && !matching_current && !resolved.enable_if_disabled_for) error = ERROR_INVALID_PARAMETER;
+            if (!error && matching_expected_old && !matching_current && !item.target.require_retired_disabled &&
+                !resolved.enable_if_disabled_for) error = ERROR_INVALID_PARAMETER;
+            if (!error && item.target.require_retired_disabled) {
+                if (!resolved.enable_if_retired_disabled_for) error = ERROR_INVALID_PARAMETER;
+                else if (!matching_expected_old || !IsRetiredDisabledPulseDialogDll(item.target.architecture, item.before))
+                    error = ERROR_ALREADY_EXISTS;
+            }
             if (!error && !enable && item.before.dll_path.empty()) error = ERROR_NOT_FOUND;
             item.error = error;
             if (error) { result.error = error; return result; }
@@ -194,10 +213,14 @@ RegistrationChangeResult ExecuteRegistrationChange(const std::vector<Registratio
             if (error) item.after = std::move(current);
             if (!error && enable && item.before.enabled) continue;
             if (!error) {
-                item.attempted = true; ++result.attempted_count;
-                if (enable && !item.before.dll_path.empty() && !SamePath(item.before.dll_path, item.target.dll_path)) {
+                if (item.target.require_retired_disabled) {
+                    error = ChangeRetiredRebind(resolved, item.target, item.attempted);
+                    if (item.attempted) ++result.attempted_count;
+                } else if (enable && !item.before.dll_path.empty() && !SamePath(item.before.dll_path, item.target.dll_path)) {
+                    item.attempted = true; ++result.attempted_count;
                     error = ChangeRebind(resolved.enable_if_disabled_for, item.target.architecture, item.before.dll_path, item.target.dll_path);
                 } else {
+                    item.attempted = true; ++result.attempted_count;
                     const auto& path = item.before.dll_path.empty() ? item.target.dll_path : item.before.dll_path;
                     error = Change(enable ? resolved.enable_if_unclaimed : resolved.disable_for, item.target.architecture, path);
                 }

@@ -38,6 +38,39 @@ std::wstring KnownFolder(const KNOWNFOLDERID& id) noexcept {
     return result;
 }
 
+std::wstring NativeCommonFiles() {
+    auto common = KnownFolder(FOLDERID_ProgramFilesCommonX64);
+    if (!common.empty()) return common;
+#ifndef _WIN64
+    BOOL wow64 = FALSE;
+    if (!IsWow64Process(GetCurrentProcess(), &wow64)) return {};
+    if (wow64) {
+        // Some WOW64 callers receive no path for CommonX64.
+        // Read the machine's native-view setting, never the caller's environment.
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion", 0,
+                KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS) return {};
+        struct CloseKey { HKEY key; ~CloseKey() { RegCloseKey(key); } } close{key};
+        DWORD type = 0, bytes = 0;
+        if (RegQueryValueExW(key, L"CommonFilesDir", nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS ||
+            type != REG_SZ || bytes < 4 * sizeof(wchar_t) || bytes > 32768 * sizeof(wchar_t) ||
+            bytes % sizeof(wchar_t)) return {};
+        std::wstring value(bytes / sizeof(wchar_t), L'\0');
+        if (RegQueryValueExW(key, L"CommonFilesDir", nullptr, &type,
+                reinterpret_cast<BYTE*>(value.data()), &bytes) != ERROR_SUCCESS || type != REG_SZ ||
+            value.back() != L'\0') return {};
+        value.pop_back();
+        if (value.size() < 3 || value[1] != L':' || value[2] != L'\\' ||
+            !((value[0] >= L'A' && value[0] <= L'Z') || (value[0] >= L'a' && value[0] <= L'z')) ||
+            value.find(L'\0') != value.npos) return {};
+        return value;
+    }
+#endif
+    // CommonX64 is undefined on native 32-bit Windows. A native 64-bit
+    // process's ordinary ID also names the shared native Common Files tree.
+    return KnownFolder(FOLDERID_ProgramFilesCommon);
+}
+
 std::wstring StripTrailingSlash(std::wstring value) {
     while (value.size() > 3 && (value.back() == L'\\' || value.back() == L'/')) value.pop_back();
     return value;
@@ -105,7 +138,8 @@ DWORD ApplyProtectedDacl(const std::wstring& directory, bool include_app_contain
 std::wstring CommonDialogBridgeRoot(const std::wstring& override_root) noexcept {
     try {
         if (!override_root.empty()) return StripTrailingSlash(StripExtendedPrefix(override_root));
-        const auto common = StripTrailingSlash(KnownFolder(FOLDERID_ProgramFilesCommon));
+        // Both Core architectures share the native installer's protected tree.
+        const auto common = StripTrailingSlash(NativeCommonFiles());
         if (common.empty()) return {};
         return common + L"\\" + kCommonRelativeSubdir;
     } catch (...) {
@@ -159,6 +193,11 @@ DWORD WriteActiveBridgePointer(const std::wstring& bridge_root, const ActiveBrid
     try {
         const auto root = StripTrailingSlash(StripExtendedPrefix(bridge_root));
         if (root.size() < 4 || root[1] != L':' || root[2] != L'\\') return ERROR_INVALID_NAME;
+        const auto valid_digest = [](const std::string& value) {
+            return value.empty() || (value.size() == 64 && value.find_first_not_of("0123456789abcdef") == std::string::npos);
+        };
+        if (!valid_digest(pointer.explorer_bridge_sha256_x64) || !valid_digest(pointer.explorer_bridge_sha256_x86))
+            return ERROR_INVALID_DATA;
 
         json::Value doc = json::Value::Object();
         doc.set("schema", static_cast<int64_t>(pointer.schema));
@@ -166,9 +205,12 @@ DWORD WriteActiveBridgePointer(const std::wstring& bridge_root, const ActiveBrid
         doc.set("core_dir_x86", WideToUtf8(pointer.core_dir_x86));
         doc.set("core_digest_x64", pointer.core_digest_x64);
         doc.set("core_digest_x86", pointer.core_digest_x86);
+        if (!pointer.explorer_bridge_sha256_x64.empty()) doc.set("explorer_bridge_sha256_x64", pointer.explorer_bridge_sha256_x64);
+        if (!pointer.explorer_bridge_sha256_x86.empty()) doc.set("explorer_bridge_sha256_x86", pointer.explorer_bridge_sha256_x86);
         doc.set("host_exe", WideToUtf8(pointer.host_exe));
         doc.set("install_root", WideToUtf8(pointer.install_root));
         doc.set("generation", static_cast<int64_t>(pointer.generation));
+        if (pointer.disabled) doc.set("disabled", true);
 
         const std::string encoded = json::Serialize(doc);
         const auto temp_path = root + L"\\" + kActivePointerFile + L"." +
@@ -242,11 +284,24 @@ DWORD ReadActiveBridgePointer(const std::wstring& bridge_root, ActiveBridgePoint
         output.core_dir_x86 = read_wstr("core_dir_x86");
         output.core_digest_x64 = read_str("core_digest_x64");
         output.core_digest_x86 = read_str("core_digest_x86");
+        const auto read_digest = [&](const char* key, std::string& value) {
+            const auto* field = parsed.find(key);
+            if (!field) return true;
+            if (!field->is_string()) return false;
+            value = field->as_string();
+            return value.size() == 64 && value.find_first_not_of("0123456789abcdef") == std::string::npos;
+        };
+        if (!read_digest("explorer_bridge_sha256_x64", output.explorer_bridge_sha256_x64) ||
+            !read_digest("explorer_bridge_sha256_x86", output.explorer_bridge_sha256_x86)) return ERROR_INVALID_DATA;
         output.host_exe = read_wstr("host_exe");
         output.install_root = read_wstr("install_root");
         int64_t gen_val = 0;
         if (const auto* gen = parsed.find("generation"); gen && gen->get_int(gen_val, 0)) {
             output.generation = static_cast<uint64_t>(gen_val);
+        }
+        if (const auto* disabled = parsed.find("disabled")) {
+            if (!disabled->is_bool()) return ERROR_INVALID_DATA;
+            output.disabled = disabled->as_bool();
         }
         return ERROR_SUCCESS;
     } catch (const std::bad_alloc&) {
@@ -275,6 +330,10 @@ bool IsUnderProgramFiles(const std::wstring& path) noexcept {
     try {
         const auto clean = StripTrailingSlash(StripExtendedPrefix(path));
         if (clean.empty()) return false;
+        const auto native_common = StripTrailingSlash(NativeCommonFiles());
+        if (!native_common.empty() && clean.size() > native_common.size() + 1 &&
+            _wcsnicmp(clean.c_str(), native_common.c_str(), native_common.size()) == 0 &&
+            clean[native_common.size()] == L'\\') return true;
         for (const auto& folder_id : {FOLDERID_ProgramFiles, FOLDERID_ProgramFilesCommon, FOLDERID_ProgramFilesX86}) {
             const auto base = StripTrailingSlash(KnownFolder(folder_id));
             if (base.empty() || clean.size() <= base.size() + 1) continue;

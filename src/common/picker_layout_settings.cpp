@@ -116,6 +116,117 @@ bool LoadForIdentity(const std::wstring& root,const std::wstring& id,int mode,St
     if (offset!=size || !Valid(candidate)) return false;
     s=std::move(candidate); return true;
 }
+std::vector<std::wstring> LoadRecentFormatsForIdentity(const std::wstring& root, const std::wstring& id, int mode) {
+    std::vector<std::wstring> patterns;
+    if (id.empty() || mode < 0 || mode > 3) return patterns;
+    const auto name = L"formats:" + Value(id, mode);
+    DWORD size = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, root.c_str(), name.c_str(), RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &size) != ERROR_SUCCESS ||
+        size < sizeof(wchar_t) || size > 16 * 1024) return patterns;
+    std::vector<wchar_t> text(size / sizeof(wchar_t) + 1, L'\0');
+    if (RegGetValueW(HKEY_CURRENT_USER, root.c_str(), name.c_str(), RRF_RT_REG_MULTI_SZ, nullptr, text.data(), &size) != ERROR_SUCCESS) return patterns;
+    for (const wchar_t* at = text.data(); *at && patterns.size() < kMaxRecentFormats; at += wcslen(at) + 1) {
+        std::wstring pattern(at);
+        if (pattern.size() <= 512) patterns.push_back(std::move(pattern));
+    }
+    return patterns;
+}
+bool SaveRecentFormatsForIdentity(const std::wstring& root, const std::wstring& id, int mode, const std::vector<std::wstring>& patterns) {
+    if (id.empty() || mode < 0 || mode > 3) return false;
+    std::wstring block;
+    size_t count = 0;
+    for (const auto& pattern : patterns) {
+        if (count >= kMaxRecentFormats) break;
+        if (pattern.empty() || pattern.size() > 512 || pattern.find(L'\0') != std::wstring::npos) continue;
+        block += pattern; block.push_back(L'\0'); ++count;
+    }
+    block.push_back(L'\0');
+    HKEY key{};
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, root.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) return false;
+    const auto name = L"formats:" + Value(id, mode);
+    const auto result = RegSetValueExW(key, name.c_str(), 0, REG_MULTI_SZ, reinterpret_cast<const BYTE*>(block.data()),
+                                       static_cast<DWORD>(block.size() * sizeof(wchar_t)));
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS;
+}
+uint32_t LoadFlagsForIdentity(const std::wstring& root, const std::wstring& id, int mode) {
+    if (id.empty() || mode < 0 || mode > 3) return 0;
+    const auto name = L"flags:" + Value(id, mode);
+    DWORD flags = 0, size = sizeof(flags);
+    if (RegGetValueW(HKEY_CURRENT_USER, root.c_str(), name.c_str(), RRF_RT_REG_DWORD, nullptr, &flags, &size) != ERROR_SUCCESS) return 0;
+    return flags;
+}
+bool SaveFlagsForIdentity(const std::wstring& root, const std::wstring& id, int mode, uint32_t flags) {
+    if (id.empty() || mode < 0 || mode > 3) return false;
+    HKEY key{};
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, root.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) return false;
+    const auto name = L"flags:" + Value(id, mode);
+    const DWORD value = flags;
+    const auto result = RegSetValueExW(key, name.c_str(), 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value));
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS;
+}
+uint32_t LoadFlags(int mode) { return LoadFlagsForIdentity(kRoot, Identity(), mode); }
+bool SaveFlags(int mode, uint32_t flags) { return SaveFlagsForIdentity(kRoot, Identity(), mode, flags); }
+uint64_t LoadLastOpened(int mode) {
+    const auto id = Identity();
+    if (id.empty() || mode < 0 || mode > 3) return 0;
+    const auto name = L"opened:" + Value(id, mode);
+    uint64_t ticks = 0; DWORD size = sizeof(ticks);
+    if (RegGetValueW(HKEY_CURRENT_USER, kRoot, name.c_str(), RRF_RT_REG_QWORD, nullptr, &ticks, &size) != ERROR_SUCCESS) return 0;
+    return ticks;
+}
+bool SaveLastOpened(int mode, uint64_t ticks) {
+    const auto id = Identity();
+    if (id.empty() || mode < 0 || mode > 3 || !ticks) return false;
+    HKEY key{};
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kRoot, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) return false;
+    const auto name = L"opened:" + Value(id, mode);
+    const auto result = RegSetValueExW(key, name.c_str(), 0, REG_QWORD, reinterpret_cast<const BYTE*>(&ticks), sizeof(ticks));
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS;
+}
+std::vector<std::wstring> LoadRecentFormats(int mode) { return LoadRecentFormatsForIdentity(kRoot, Identity(), mode); }
+bool SaveRecentFormats(int mode, const std::vector<std::wstring>& patterns) { return SaveRecentFormatsForIdentity(kRoot, Identity(), mode, patterns); }
+std::vector<std::wstring> LoadAppPinnedForIdentity(const std::wstring& root, const std::wstring& id) {
+    std::vector<std::wstring> paths;
+    if (id.empty()) return paths;
+    const auto name = L"pinned:" + id;
+    DWORD size = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, root.c_str(), name.c_str(), RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &size) != ERROR_SUCCESS ||
+        size < sizeof(wchar_t) || size > 64 * 1024) return paths;
+    std::vector<wchar_t> text(size / sizeof(wchar_t) + 1, L'\0');
+    if (RegGetValueW(HKEY_CURRENT_USER, root.c_str(), name.c_str(), RRF_RT_REG_MULTI_SZ, nullptr, text.data(), &size) != ERROR_SUCCESS) return paths;
+    for (const wchar_t* at = text.data(); *at && paths.size() < kMaxAppPinnedPlaces; at += wcslen(at) + 1) {
+        std::wstring path(at);
+        if (path.size() <= 1024) paths.push_back(std::move(path));
+    }
+    return paths;
+}
+bool SaveAppPinnedForIdentity(const std::wstring& root, const std::wstring& id, const std::vector<std::wstring>& paths) {
+    if (id.empty() || paths.size() > kMaxAppPinnedPlaces) return false;
+    std::vector<std::wstring> seen;
+    seen.reserve(paths.size());
+    std::wstring block;
+    for (const auto& path : paths) {
+        if (path.empty() || path.size() > 1024 || path.find(L'\0') != std::wstring::npos) return false;
+        for (const auto& existing : seen) {
+            if (CompareStringOrdinal(existing.c_str(), -1, path.c_str(), -1, TRUE) == CSTR_EQUAL) return false;
+        }
+        seen.push_back(path);
+        block += path; block.push_back(L'\0');
+    }
+    block.push_back(L'\0');
+    HKEY key{};
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, root.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) return false;
+    const auto name = L"pinned:" + id;
+    const auto result = RegSetValueExW(key, name.c_str(), 0, REG_MULTI_SZ,
+        reinterpret_cast<const BYTE*>(block.data()), static_cast<DWORD>(block.size() * sizeof(wchar_t)));
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS;
+}
+std::vector<std::wstring> LoadAppPinned() { return LoadAppPinnedForIdentity(kRoot, Identity()); }
+bool SaveAppPinned(const std::vector<std::wstring>& paths) { return SaveAppPinnedForIdentity(kRoot, Identity(), paths); }
 bool Load(int mode,State& s) { return LoadForIdentity(kRoot,Identity(),mode,s); }
 bool Save(int mode,const State& s) { return SaveForIdentity(kRoot,Identity(),mode,s); }
 bool RestorePlacement(HWND window,HWND owner,const State& s) {

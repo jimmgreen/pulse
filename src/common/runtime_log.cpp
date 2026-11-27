@@ -17,7 +17,7 @@
 
 namespace pulse::diagnostics::runtime {
 namespace {
-constexpr size_t kQueueLimit = 1024, kFieldLimit = 12;
+constexpr size_t kQueueLimit = 1024, kFieldLimit = 12, kTextFieldLimit = 8;
 constexpr size_t kCriticalLimit = 32;
 struct Value { char name[48]{}; uint64_t value = 0; };
 struct TextValue { std::string name; std::wstring value; };
@@ -445,7 +445,7 @@ void TextEvent(const char* name, std::initializer_list<TextField> text_fields,
     try {
         auto& state = State();
         if (!state.enabled) return;
-        if (!Identifier(name, 80) || fields.size() > kFieldLimit || text_fields.size() > 4 ||
+        if (!Identifier(name, 80) || fields.size() > kFieldLimit || text_fields.size() > kTextFieldLimit ||
             (level != Level::Info && level != Level::Warning && level != Level::Error)) { ++state.dropped; return; }
         for (const auto& field : fields) if (!Identifier(field.name, 48)) { ++state.dropped; return; }
         for (auto it = text_fields.begin(); it != text_fields.end(); ++it) {
