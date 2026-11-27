@@ -554,7 +554,7 @@ class PublishExtensionReleaseTests(unittest.TestCase):
             })
 
         summary = verify_sdk_bundle._verify_compiled_lifecycle(extracted_sdk, generated_projects, self.root)
-        self.assertEqual(summary["packedArchiveCount"], 8)
+        self.assertEqual(summary["packedArchiveCount"], len(generated_projects))
         self.assertEqual(summary["lifecyclePackageId"], "org.pulse.sdkverify.inspector")
         self.assertNotEqual(summary["initialRevision"], summary["upgradedRevision"])
         self.assertGreater(summary["reclaimedBytes"], 0)
