@@ -400,14 +400,14 @@ Remove	IDS_REMOVE	1163	移除	Remove	移除
 ServerFolders	IDS_SERVER_FOLDERS	1164	服务器文件夹	Server folders	伺服器資料夾
 Rescan	IDS_RESCAN	1165	重新扫描	Rescan	重新掃描
 NoServerFoldersDesc	IDS_NO_SERVER_FOLDERS_DESC	1166	尚未添加。可索引服务器共享中所选文件夹下的全部文件。	None added. Pulse can index all files below selected server folders.	尚未新增。可索引伺服器共用中所選資料夾下的全部檔案。
-ContextMenuDesc	IDS_CONTEXT_MENU_DESC	1167	选择融合区显示哪些 Explorer 动词。改动在下次右键生效。	Choose which Explorer verbs appear in the merged menu. Changes apply next time.	選擇融合區顯示哪些 Explorer 動詞。改動在下次右鍵生效。
+ContextMenuDesc	IDS_CONTEXT_MENU_DESC	1167	选择哪些 Windows 和软件菜单项显示在 Pulse 中；下次右键时生效，不改动资源管理器。	Choose which Windows and app menu items appear in Pulse. Changes apply on the next right-click; File Explorer is unchanged.	
 ContextSoftware	IDS_CONTEXT_SOFTWARE	1168	软件功能	Software features	軟體功能
 ContextOpenWith	IDS_CONTEXT_OPEN_WITH	1169	打开方式	Open with	開啟方式
 ContextShare	IDS_CONTEXT_SHARE	1170	分享	Sharing	分享
 ContextSystem	IDS_CONTEXT_SYSTEM	1171	系统项	System items	系統項
 ContextPrint	IDS_CONTEXT_PRINT	1172	打印	Print	列印
-ContextSoftwareDesc	IDS_CONTEXT_SOFTWARE_DESC	1173	第三方软件的子菜单和类型动词。默认保留。	Third-party software submenus and file-type verbs. Kept by default.	第三方軟體的子選單和類型動詞。預設保留。
-ContextOpenWithDesc	IDS_CONTEXT_OPEN_WITH_DESC	1174	注册表“用某应用打开”和“打开方式...”。COM 重复项默认关闭。	Registry Open with entries. Duplicate COM entries are hidden by default.	登錄檔中的「用某應用程式開啟」和「開啟方式...」。COM 重複項目預設關閉。
+ContextSoftwareDesc	IDS_CONTEXT_SOFTWARE_DESC	1173	其他软件添加的菜单，例如压缩和解压。默认显示。	Menu items added by other apps, such as compress and extract. Shown by default.	
+ContextOpenWithDesc	IDS_CONTEXT_OPEN_WITH_DESC	1174	选择用哪个软件打开文件。重复的菜单项默认隐藏。	Choose an app to open a file. Duplicate menu items are hidden by default.	
 ContextShareDesc	IDS_CONTEXT_SHARE_DESC	1175	发送到、即时通讯分享。默认显示。	Send to and messaging shares. Shown by default.	傳送到、即時通訊分享。預設顯示。
 ContextSystemDesc	IDS_CONTEXT_SYSTEM_DESC	1176	壁纸、旋转、快捷方式、以前的版本等。默认显示。	Wallpaper, rotation, shortcuts, previous versions, and similar items. Shown by default.	桌布、旋轉、捷徑、以前的版本等。預設顯示。
 ContextPrintDesc	IDS_CONTEXT_PRINT_DESC	1177	打印。默认保留。	Printing commands. Kept by default.	列印。預設保留。
@@ -1045,7 +1045,7 @@ SettingsSystemFoldersTip	IDS_SETTINGS_SYSTEM_FOLDERS_TIP	2546	只影响搜索，
 ContextActionStrip	IDS_CONTEXT_ACTION_STRIP	2547	剪切 · 复制 · 删除 · 重命名	Cut · Copy · Delete · Rename	剪下 · 複製 · 刪除 · 重新命名
 ContextFolderProperties	IDS_CONTEXT_FOLDER_PROPERTIES	2548	属性（当前文件夹）	Properties (current folder)	內容（目前資料夾）
 ContextPulseMenu	IDS_CONTEXT_PULSE_MENU	2549	Pulse 菜单	Pulse menu	Pulse 選單
-ContextPulseMenuDesc	IDS_CONTEXT_PULSE_MENU_DESC	2550	选择 Pulse 自己的右键菜单显示哪些项	Choose which of Pulse's own menu items to show	選擇 Pulse 自己的右鍵選單顯示哪些項目
+ContextPulseMenuDesc	IDS_CONTEXT_PULSE_MENU_DESC	2550	开关可隐藏或恢复菜单项，拖动可调整顺序；下次右键时生效。	Hide or restore items with the switches, and drag to reorder. Changes apply on the next right-click.	
 ContextTabItem	IDS_CONTEXT_TAB_ITEM	2551	选中文件时	On a file	選取檔案時
 ContextTabBackground	IDS_CONTEXT_TAB_BACKGROUND	2552	空白处	Blank area	空白處
 ContextTabRow	IDS_CONTEXT_TAB_ROW	2553	文件行按钮	Row buttons	檔案列按鈕
@@ -1668,7 +1668,7 @@ OpenItsFolderInANewTab	IDS_OPEN_ITS_FOLDER_IN_ANEW_TAB	2867	在新标签页打�
 HideInPulseSMenuOnly	IDS_HIDE_IN_PULSE_SMENU_ONLY	2868	只在 Pulse 右键菜单中隐藏	Hide in Pulse's menu only	
 KeepIt	IDS_KEEP_IT	2869	取消删除	Keep it	
 DeleteLeftoverOnApplyChanges	IDS_DELETE_LEFTOVER_ON_APPLY_CHANGES	2870	删除残留项（点“应用更改”后生效）	Delete leftover (on Apply changes)	
-UndoEveryChangeMadeSincePulseStarted	IDS_UNDO_EVERY_CHANGE_MADE_SINCE_PULSE_STARTED	2871	撤销这次打开 Pulse 以来的全部改动	Undo every change made since Pulse started	
+UndoEveryChangeMadeSincePulseStarted	IDS_UNDO_EVERY_CHANGE_MADE_SINCE_PULSE_STARTED	2871	撤销本次打开 Pulse 后应用的全部 Windows 菜单改动（不含仅在 Pulse 隐藏的项目）	Undo all Windows menu changes applied during this Pulse session (not Pulse-only visibility changes)	
 ChooseFfmpegExe	IDS_CHOOSE_FFMPEG_EXE	2872	选择 ffmpeg.exe	Choose ffmpeg.exe	
 TheCompleteSelectionCouldNotBeProcessedCheckTheTagsBeforeTry	IDS_THE_COMPLETE_SELECTION_COULD_NOT_BE_PROCESSED_CHECK_THE_TAGS_BEFORE_TRY	2873	未能处理完整选择，标签未完成更新。请检查后重试。	The complete selection could not be processed. Check the tags before trying again.	
 Text2874	IDS_TEXT2874	2874	「	“	
@@ -1759,7 +1759,7 @@ MenuCommand	IDS_MENU_COMMAND	2958	菜单命令	Menu command
 En	IDS_EN	2959	zh	en	
 WindowsManagesThisEntryItselfTrustedInstallerPulseLeavesItAl	IDS_WINDOWS_MANAGES_THIS_ENTRY_ITSELF_TRUSTED_INSTALLER_PULSE_LEAVES_IT_AL	2960	这一项由 Windows 自己管理（TrustedInstaller），Pulse 不会去改它。	Windows manages this entry itself (TrustedInstaller); Pulse leaves it alone.	
 ABasicWindowsCommandSwitchingItOffBreaksFileExplorerSoThereI	IDS_ABASIC_WINDOWS_COMMAND_SWITCHING_IT_OFF_BREAKS_FILE_EXPLORER_SO_THERE_I	2961	这是 Windows 的基础命令，关掉会让资源管理器不好用，所以不提供开关。	A basic Windows command; switching it off breaks File Explorer, so there is no switch.	
-SwitchesForNewSendToAndOpenWithComeInALaterVersionForNowYouC	IDS_SWITCHES_FOR_NEW_SEND_TO_AND_OPEN_WITH_COME_IN_ALATER_VERSION_FOR_NOW_YOU_C	2962	新建、发送到、打开方式的开关会在后续版本提供，现在可以查看和定位。	Switches for New, Send to and Open with come in a later version; for now you can inspect them.	
+SwitchesForNewSendToAndOpenWithComeInALaterVersionForNowYouC	IDS_SWITCHES_FOR_NEW_SEND_TO_AND_OPEN_WITH_COME_IN_ALATER_VERSION_FOR_NOW_YOU_C	2962	这类菜单项目前仅支持查看来源，还没有 Windows 全局开关。	This entry can be inspected here, but does not yet have a Windows-wide switch.	
 SwitchedOffTheCommandLeavesTheContextMenuPulseOnlyAddsHideMa	IDS_SWITCHED_OFF_THE_COMMAND_LEAVES_THE_CONTEXT_MENU_PULSE_ONLY_ADDS_HIDE_MA	2963	关闭后，这个命令不再出现在右键菜单里。Pulse 只给它加上隐藏标记（和 ContextMenuManager 的做法相同），重新打开就去掉标记，原有设置不会丢。	Switched off, the command leaves the context menu. Pulse only adds hide markers (as ContextMenuManager does); switching it on removes them and nothing else changes.	
 SwitchedOffWindowsStopsLoadingTheExtensionAndItsRowsLeaveThe	IDS_SWITCHED_OFF_WINDOWS_STOPS_LOADING_THE_EXTENSION_AND_ITS_ROWS_LEAVE_THE	2964	关闭后，Windows 不再加载这个扩展，它添加的菜单项也随之消失。Pulse 只是把它的注册表项挪到旁边的“-”分组（和 ContextMenuManager 的做法相同），重新打开就挪回来。	Switched off, Windows stops loading the extension and its rows leave the menu. Pulse moves its key to the sibling ""-"" group (as ContextMenuManager does); switching it on moves it back.	
 ItsProgramIsGoneUsuallyLeftBehindByAnUninstallerSoTheEntryCa	IDS_ITS_PROGRAM_IS_GONE_USUALLY_LEFT_BEHIND_BY_AN_UNINSTALLER_SO_THE_ENTRY_CA	2965	\n它指向的程序已经不存在（多半是卸载时没清理干净），可以直接删除这个残留项。删除前会导出 .reg 备份，之后也能撤销。	\nIts program is gone (usually left behind by an uninstaller), so the entry can be deleted. A .reg backup is exported first and the delete can be undone.	
@@ -1780,7 +1780,7 @@ YourSendToFolder	IDS_YOUR_SEND_TO_FOLDER	2979	当前用户的文件夹	your Send
 AllUsers	IDS_ALL_USERS	2980	所有用户	all users	
 CurrentUser	IDS_CURRENT_USER	2981	当前用户	current user	
 ItAdds	IDS_IT_ADDS	2982	它在菜单里添加：	It adds: 	
-NotInAScannedScene	IDS_NOT_IN_ASCANNED_SCENE	2983	不在已扫描的场景里	Not in a scanned scene	
+NotInAScannedScene	IDS_NOT_IN_ASCANNED_SCENE	2983	未在当前菜单列表中找到	Not found in the current menu lists	
 TurnedOff	IDS_TURNED_OFF	2984	禁用	Turned off 	
 TurnedOn	IDS_TURNED_ON	2985	启用	Turned on 	
 DeletedLeftover	IDS_DELETED_LEFTOVER	2986	删除残留	Deleted leftover 	
@@ -2076,23 +2076,23 @@ RecordMyOwn	IDS_RECORD_MY_OWN	3275	自己录一个	Record my own
 TryInstead	IDS_TRY_INSTEAD	3276	建议换成	Try instead	
 PressKeys	IDS_PRESS_KEYS	3277	请按键…	Press keys…	
 SystemContextMenu	IDS_SYSTEM_CONTEXT_MENU	3278	系统右键菜单	System context menu	
-ChangesApplyToTheContextMenuInFileExplorerAndEveryAppSwitche	IDS_CHANGES_APPLY_TO_THE_CONTEXT_MENU_IN_FILE_EXPLORER_AND_EVERY_APP_SWITCHE	3279	改动作用于资源管理器和所有应用的右键菜单。开关先记下，点“应用更改”才写入注册表；写入前自动导出 .reg 备份，随时可以撤销或全部还原。	Changes apply to the context menu in File Explorer and every app. Switches are only noted until you choose Apply changes; a .reg backup is exported first, and you can undo or restore everything at any time.	
+ChangesApplyToTheContextMenuInFileExplorerAndEveryAppSwitche	IDS_CHANGES_APPLY_TO_THE_CONTEXT_MENU_IN_FILE_EXPLORER_AND_EVERY_APP_SWITCHE	3279	在左侧选择文件、文件夹等右键位置。Windows 开关会影响资源管理器；“在 Pulse 隐藏/恢复”只改 Pulse。点“应用更改”后生效，系统改动会先备份。	Choose files, folders or another right-click location on the left. Windows switches affect File Explorer; Hide/Restore in Pulse changes only Pulse. Choose Apply changes to save. System changes are backed up first.	
 ActivityLog	IDS_ACTIVITY_LOG	3280	操作日志	Activity log	
 RestoreAll_2	IDS_RESTORE_ALL_2	3281	全部还原…	Restore all…	
 OnlyInsidePulseNoPermissionNeededAlwaysReversible	IDS_ONLY_INSIDE_PULSE_NO_PERMISSION_NEEDED_ALWAYS_REVERSIBLE	3282	只影响 Pulse · 不需要权限 · 随时恢复	Only inside Pulse · no permission needed · always reversible	
 Switch	IDS_SWITCH	3283	切换 →	Switch →	
-FileExplorerAndEveryAppWrittenWhenYouApplyAllUserChangesNeed	IDS_FILE_EXPLORER_AND_EVERY_APP_WRITTEN_WHEN_YOU_APPLY_ALL_USER_CHANGES_NEED	3284	影响资源管理器和所有应用 · 点“应用更改”后写入，涉及所有用户时只需确认一次管理员权限	File Explorer and every app · written when you apply; all-user changes need one admin confirmation	
-BasicObjects	IDS_BASIC_OBJECTS	3285	基本对象	Basic objects	
-SpecificTypes	IDS_SPECIFIC_TYPES	3286	特定类型	Specific types	
-SpecialMenus	IDS_SPECIAL_MENUS	3287	专门菜单	Special menus	
+FileExplorerAndEveryAppWrittenWhenYouApplyAllUserChangesNeed	IDS_FILE_EXPLORER_AND_EVERY_APP_WRITTEN_WHEN_YOU_APPLY_ALL_USER_CHANGES_NEED	3284	影响资源管理器等 Windows 菜单；点“应用更改”后生效，部分操作需要管理员确认。	Affects Windows menus such as File Explorer. Choose Apply changes to save; some changes need administrator confirmation.	
+BasicObjects	IDS_BASIC_OBJECTS	3285	右键位置	Right-click locations	
+SpecificTypes	IDS_SPECIFIC_TYPES	3286	文件类型	File types	
+SpecialMenus	IDS_SPECIAL_MENUS	3287	其他菜单	Other menus	
 Off_2	IDS_OFF_2	3288	已禁用	Off	
 NeedsAdmin	IDS_NEEDS_ADMIN	3289	需要管理员	Needs admin	
 ThirdParty	IDS_THIRD_PARTY	3290	第三方	Third-party	
 Leftovers	IDS_LEFTOVERS	3291	残留项	Leftovers	
 HiddenByWindows	IDS_HIDDEN_BY_WINDOWS	3292	系统默认隐藏	Hidden by Windows	
-Type	IDS_TYPE	3293	感知类型	Type	
+Type	IDS_TYPE	3293	文件类别	File category	
 Extension	IDS_EXTENSION	3294	扩展名	Extension	
-ReadingTheRegistry	IDS_READING_THE_REGISTRY	3295	正在读取注册表…	Reading the registry…	
+ReadingTheRegistry	IDS_READING_THE_REGISTRY	3295	正在读取右键菜单…	Reading context menus…	
 Text3296	IDS_TEXT3296	3296			
 ChangeSWaiting	IDS_CHANGE_SWAITING	3297	 项更改待应用	 change(s) waiting	
 PulseSOwnMenuOnlyWindowsIsUnchanged	IDS_PULSE_SOWN_MENU_ONLY_WINDOWS_IS_UNCHANGED	3298	只改 Pulse 自己的右键菜单，Windows 不变	Pulse's own menu only; Windows is unchanged	
@@ -2113,7 +2113,7 @@ LeftoverUninstalled	IDS_LEFTOVER_UNINSTALLED	3312	残留 · 程序已卸载	Left
 Pending	IDS_PENDING	3313	待应用	Pending	
 Protected	IDS_PROTECTED	3314	受保护	Protected	
 OwnedByWindows	IDS_OWNED_BY_WINDOWS	3315	系统所有	Owned by Windows	
-NotYet	IDS_NOT_YET	3316	暂不可改	Not yet	
+NotYet	IDS_NOT_YET	3316	Windows 菜单不变	Windows menu unchanged	
 LivePreview	IDS_LIVE_PREVIEW	3317	实时预览	Live preview	
 Details	IDS_DETAILS	3318	详情	Details	
 Registry	IDS_REGISTRY	3319	注册表	Registry	
@@ -2122,7 +2122,7 @@ Permission	IDS_PERMISSION	3321	权限	Permission
 AllUsersOneAdminConfirmationWhenApplied	IDS_ALL_USERS_ONE_ADMIN_CONFIRMATION_WHEN_APPLIED	3322	所有用户 · 应用时确认一次管理员权限	All users · one admin confirmation when applied	
 YourUserOnlyNoAdminNeeded	IDS_YOUR_USER_ONLY_NO_ADMIN_NEEDED	3323	只影响当前用户 · 无需管理员权限	Your user only · no admin needed	
 EnabledInWindows	IDS_ENABLED_IN_WINDOWS	3324	在系统里启用	Enabled in Windows	
-FileExplorerAndEveryApp	IDS_FILE_EXPLORER_AND_EVERY_APP	3325	资源管理器和所有应用	File Explorer and every app	
+FileExplorerAndEveryApp	IDS_FILE_EXPLORER_AND_EVERY_APP	3325	资源管理器等 Windows 菜单	Windows menus such as File Explorer	
 ShownInPulseSMenu	IDS_SHOWN_IN_PULSE_SMENU	3326	在 Pulse 右键菜单中显示	Shown in Pulse's menu	
 PulseOnlyWindowsIsUnchanged	IDS_PULSE_ONLY_WINDOWS_IS_UNCHANGED	3327	只影响 Pulse，不改动 Windows	Pulse only; Windows is unchanged	
 HiddenInPulse	IDS_HIDDEN_IN_PULSE	3328	Pulse 中隐藏	Hidden in Pulse	
@@ -2131,7 +2131,7 @@ PickAnEntryInTheListToSeeItsDetails	IDS_PICK_AN_ENTRY_IN_THE_LIST_TO_SEE_ITS_DET
 Files_2	IDS_FILES_2	3331	 文件	 files	
 RightClickOn	IDS_RIGHT_CLICK_ON	3332	右键单击「	Right-click on 	
 Text3333	IDS_TEXT3333	3333	」时		
-SketchOfThisSceneSEntriesDragToPinOrHide	IDS_SKETCH_OF_THIS_SCENE_SENTRIES_DRAG_TO_PIN_OR_HIDE	3334	示意图 · 拖动条目可置顶、置底或隐藏	Sketch of this scene's entries. Drag to pin or hide.	
+SketchOfThisSceneSEntriesDragToPinOrHide	IDS_SKETCH_OF_THIS_SCENE_SENTRIES_DRAG_TO_PIN_OR_HIDE	3334	拖动可调整的项目来隐藏或排序。	Drag supported items to hide or move.	
 Bottom	IDS_BOTTOM	3335	置底	Bottom	
 Default	IDS_DEFAULT	3336	默认位置	Default	
 ToTop	IDS_TO_TOP	3337	将置顶	To top	
@@ -2149,25 +2149,25 @@ More_2	IDS_MORE_2	3348	 项	 more
 Overview	IDS_OVERVIEW	3349	概览	Overview	
 Text3350	IDS_TEXT3350	3350	共 		
 Entries_2	IDS_ENTRIES_2	3351	 个条目 · 	 entries · 	
-Scenes	IDS_SCENES	3352	 个场景	 scenes	
+Scenes	IDS_SCENES	3352	 类右键位置	 right-click categories	
 SwitchedOff	IDS_SWITCHED_OFF	3353	已禁用	Switched off	
 OffByContextMenuManager	IDS_OFF_BY_CONTEXT_MENU_MANAGER	3354	由 ContextMenuManager 禁用	Off by ContextMenuManager	
-ExtensionsSlowingTheMenu150Ms	IDS_EXTENSIONS_SLOWING_THE_MENU150_MS	3355	拖慢右键 ≥150 ms 的扩展	Extensions slowing the menu ≥150 ms	
+ExtensionsSlowingTheMenu150Ms	IDS_EXTENSIONS_SLOWING_THE_MENU150_MS	3355	响应较慢的菜单（≥150 ms）	Slow menu add-ons (≥150 ms)	
 ChangesMadeByPulse	IDS_CHANGES_MADE_BY_PULSE	3356	Pulse 做过的改动	Changes made by Pulse	
-SlowestExtensions	IDS_SLOWEST_EXTENSIONS	3357	慢扩展排行	Slowest extensions	
-MeasuredWhilePulseBuiltItsOwnMenuTheLastQueryPerSceneSwitchi	IDS_MEASURED_WHILE_PULSE_BUILT_ITS_OWN_MENU_THE_LAST_QUERY_PER_SCENE_SWITCHI	3358	来自 Pulse 右键菜单的实测数据（每个场景最近一次）。禁用后，资源管理器和 Pulse 的右键都会变快。	Measured while Pulse built its own menu (the last query per scene). Switching one off speeds up File Explorer and Pulse alike.	
-NoDataYetRightClickAFewFilesOrFoldersInPulseAndTheTimesShowU	IDS_NO_DATA_YET_RIGHT_CLICK_AFEW_FILES_OR_FOLDERS_IN_PULSE_AND_THE_TIMES_SHOW_U	3359	还没有数据。在 Pulse 里右键几次文件或文件夹，这里就会显示各扩展的耗时。	No data yet. Right-click a few files or folders in Pulse and the times show up here.	
-SkipInPulse	IDS_SKIP_IN_PULSE	3360	Pulse 跳过	Skip in Pulse	
-SkippedInPulse	IDS_SKIPPED_IN_PULSE	3361	Pulse 已跳过	Skipped in Pulse	
+SlowestExtensions	IDS_SLOWEST_EXTENSIONS	3357	哪些菜单响应慢	Slow menu add-ons	
+MeasuredWhilePulseBuiltItsOwnMenuTheLastQueryPerSceneSwitchi	IDS_MEASURED_WHILE_PULSE_BUILT_ITS_OWN_MENU_THE_LAST_QUERY_PER_SCENE_SWITCHI	3358	记录在 Pulse 中打开右键菜单时，各软件菜单的响应耗时。“在 Pulse 停用”只影响 Pulse；“禁用”会影响 Windows 菜单。	Response times recorded when opening menus in Pulse. Disable in Pulse affects only Pulse; Turn off affects Windows menus.	
+NoDataYetRightClickAFewFilesOrFoldersInPulseAndTheTimesShowU	IDS_NO_DATA_YET_RIGHT_CLICK_AFEW_FILES_OR_FOLDERS_IN_PULSE_AND_THE_TIMES_SHOW_U	3359	还没有数据。在 Pulse 中右键打开文件或文件夹菜单后，这里会显示各软件菜单的响应耗时。	No data yet. Open a file or folder context menu in Pulse to see how long each app’s menu takes to respond.	
+SkipInPulse	IDS_SKIP_IN_PULSE	3360	在 Pulse 停用	Disable in Pulse	
+SkippedInPulse	IDS_SKIPPED_IN_PULSE	3361	Pulse 中已停用	Disabled in Pulse	
 TurnOff	IDS_TURN_OFF	3362	禁用	Turn off	
-MarksLeftByOtherTools	IDS_MARKS_LEFT_BY_OTHER_TOOLS	3363	来自其他工具的禁用标记	Marks left by other tools	
-MarksWrittenByContextMenuManagerShowInTheirScenesAndCanBeRes	IDS_MARKS_WRITTEN_BY_CONTEXT_MENU_MANAGER_SHOW_IN_THEIR_SCENES_AND_CAN_BE_RES	3364	识别 ContextMenuManager 写下的标记，显示在对应场景里，也可以在这里一键还原。	Marks written by ContextMenuManager show in their scenes and can be restored here.	
+MarksLeftByOtherTools	IDS_MARKS_LEFT_BY_OTHER_TOOLS	3363	被其他工具关闭的菜单	Menus disabled by other tools	
+MarksWrittenByContextMenuManagerShowInTheirScenesAndCanBeRes	IDS_MARKS_WRITTEN_BY_CONTEXT_MENU_MANAGER_SHOW_IN_THEIR_SCENES_AND_CAN_BE_RES	3364	这些菜单之前被 ContextMenuManager 关闭。你可以在这里恢复，点“应用更改”后生效。	These menus were disabled by ContextMenuManager. Restore them here, then choose Apply changes to save.	
 None_2	IDS_NONE_2	3365	没有了 ✓	None ✓	
 RecentChanges	IDS_RECENT_CHANGES	3366	最近的改动	Recent changes	
-EveryBatchHasItsRegBackupAndCanBeUndoneStepByStep	IDS_EVERY_BATCH_HAS_ITS_REG_BACKUP_AND_CAN_BE_UNDONE_STEP_BY_STEP	3367	每次应用都有对应的 .reg 备份，可以逐步撤销。	Every batch has its .reg backup and can be undone step by step.	
-NoChangesYetPickASceneOnTheLeftToStart	IDS_NO_CHANGES_YET_PICK_ASCENE_ON_THE_LEFT_TO_START	3368	还没有改动。在左侧选择一个场景开始。	No changes yet. Pick a scene on the left to start.	
+EveryBatchHasItsRegBackupAndCanBeUndoneStepByStep	IDS_EVERY_BATCH_HAS_ITS_REG_BACKUP_AND_CAN_BE_UNDONE_STEP_BY_STEP	3367	这里记录本次打开 Pulse 后的 Windows 菜单改动，每次应用前会备份，可逐次撤销。	Windows menu changes made during this Pulse session. Each batch is backed up before applying and can be undone.	
+NoChangesYetPickASceneOnTheLeftToStart	IDS_NO_CHANGES_YET_PICK_ASCENE_ON_THE_LEFT_TO_START	3368	还没有 Windows 菜单改动。在左侧选择文件、文件夹等位置开始整理。	No Windows menu changes yet. Choose files, folders or another location on the left to start.	
 Undone_2	IDS_UNDONE_2	3369	已撤销 · 	Undone · 	
-PickASceneOnTheLeftToSeeItsMenuHereLiveWithYourChanges	IDS_PICK_ASCENE_ON_THE_LEFT_TO_SEE_ITS_MENU_HERE_LIVE_WITH_YOUR_CHANGES	3370	在左侧选择一个场景，这里会显示它的右键菜单，并实时反映你的改动。	Pick a scene on the left to see its menu here, live with your changes.	
+PickASceneOnTheLeftToSeeItsMenuHereLiveWithYourChanges	IDS_PICK_ASCENE_ON_THE_LEFT_TO_SEE_ITS_MENU_HERE_LIVE_WITH_YOUR_CHANGES	3370	在左侧选择文件、文件夹等位置，这里会显示对应的 Windows 菜单示意及待应用的改动。	Choose files, folders or another location on the left to preview its Windows menu and pending changes.	
 TheOverviewUsesWhatPulseMeasuredOnRealRightClicksNothingElse	IDS_THE_OVERVIEW_USES_WHAT_PULSE_MEASURED_ON_REAL_RIGHT_CLICKS_NOTHING_ELSE	3371	概览页的数据来自 Pulse 实际右键时的测量，不需要额外运行任何东西。	The overview uses what Pulse measured on real right-clicks; nothing else needs to run.	
 EnterDoubleClick	IDS_ENTER_DOUBLE_CLICK	3372	Enter / 双击	Enter / Double-click	
 Tab	IDS_TAB	3373	Tab 分隔	Tab	
@@ -4978,8 +4978,8 @@ OpDiscoveredPending	IDS_OP_DISCOVERED_PENDING	6248	已发现待处理	Discovered
 CopyVerificationSourceChanged	IDS_COPY_VERIFICATION_SOURCE_CHANGED	6249	源文件在复制或校验期间发生变化	The source changed during copying or verification	來源檔案在複製或驗證期間發生變更
 CopyVerificationTargetChanged	IDS_COPY_VERIFICATION_TARGET_CHANGED	6250	目标文件在校验期间被替换或修改	The destination was replaced or modified during verification	目標檔案在驗證期間被取代或修改
 Git	IDS_GIT	6251	Git	Git	Git
-PackagedMenuSource	IDS_PACKAGED_MENU_SOURCE	6252	打包应用菜单声明（MSIX）	Packaged app menu declaration (MSIX)	封裝應用程式選單宣告（MSIX）
-PackagedMenuReadOnly	IDS_PACKAGED_MENU_READ_ONLY	6253	由应用包声明，系统级设置只读。可用“在 Pulse 中显示”控制本应用内的菜单。	Declared by an app package; system settings are read-only. Use “Show in Pulse” to control this app’s menu.	由應用程式套件宣告，系統層級設定唯讀。可用「在 Pulse 中顯示」控制本應用程式內的選單。
+PackagedMenuSource	IDS_PACKAGED_MENU_SOURCE	6252	由应用添加的菜单	App menu	
+PackagedMenuReadOnly	IDS_PACKAGED_MENU_READ_ONLY	6253	这项菜单由应用管理。你可以在 Pulse 中隐藏或恢复它，不影响资源管理器。点“应用更改”后生效。	This menu is managed by an app. You can hide or restore it in Pulse without changing File Explorer. Choose Apply changes to save.	
 ArrangeMainRight	IDS_ARRANGE_MAIN_RIGHT	6254	主窗在右	Main on right	主視窗在右
 ArrangeMainTop	IDS_ARRANGE_MAIN_TOP	6255	主窗在上	Main on top	主視窗在上
 ArrangeMerge	IDS_ARRANGE_MERGE	6256	合并窗口	Merge	合併視窗
@@ -5378,8 +5378,8 @@ OpCopyDetails	IDS_OP_COPY_DETAILS	6702	复制详情	Copy details
 PickerWillSave	IDS_PICKER_WILL_SAVE	6703	将保存到：	Will save to: 	
 PickerOpenFolders	IDS_PICKER_OPEN_FOLDERS	6704	已打开	Open	
 PickerUndoJump	IDS_PICKER_UNDO_JUMP	6705	回到 {name}	Back to {name}	
-PickerExplorerSource	IDS_PICKER_EXPLORER_SOURCE	6706	资源管理器	Explorer	
-PickerPulseSource	IDS_PICKER_PULSE_SOURCE	6817	Pulse	Pulse	Pulse
+PickerExplorerSource	IDS_PICKER_EXPLORER_SOURCE	6706	资源管理器窗口	Explorer window	檔案總管視窗
+PickerPulseSource	IDS_PICKER_PULSE_SOURCE	6817	Pulse 标签页	Pulse tab	Pulse 分頁
 PickerPropertyAdd	IDS_PICKER_PROPERTY_ADD	6818	添加{name}	Add {name}	
 DialogRecordStatusSuccess	IDS_DIALOG_RECORD_STATUS_SUCCESS	6819	已用 Pulse	Using Pulse	
 DialogRecordStatusNative	IDS_DIALOG_RECORD_STATUS_NATIVE	6820	系统对话框	Windows dialog	
@@ -5401,7 +5401,7 @@ PickerJumpHintTab	IDS_PICKER_JUMP_HINT_TAB	6713	补全路径	Complete path
 PickerJumpHintSaveHere	IDS_PICKER_JUMP_HINT_SAVE_HERE	6714	直接保存到这里	Save here	
 PickerJumpHintBack	IDS_PICKER_JUMP_HINT_BACK	6715	返回	Back	
 PickerJumpNote	IDS_PICKER_JUMP_NOTE	6716	支持拼音首字母 · 路径片段	Pinyin initials · path fragments	
-PickerJumpPulseTab	IDS_PICKER_JUMP_PULSE_TAB	6717	Pulse 标签	Pulse tab	
+PickerJumpPulseTab	IDS_PICKER_JUMP_PULSE_TAB	6717	Pulse 标签页	Pulse tab	Pulse 分頁
 StoreInstallFromFile	IDS_STORE_INSTALL_FROM_FILE	6718	从文件安装…	Install from file…	
 StoreInstallFileDialogTitle	IDS_STORE_INSTALL_FILE_DIALOG_TITLE	6719	选择扩展包	Select extension package	
 StoreInstallFileFilter	IDS_STORE_INSTALL_FILE_FILTER	6720	Pulse 扩展包 (*.pulse-ext)	Pulse extension package (*.pulse-ext)	
@@ -5443,7 +5443,7 @@ PickerJumpUserIndex	IDS_PICKER_JUMP_USER_INDEX	6755	正在使用用户索引	Usi
 PickerWillCreateFolders	IDS_PICKER_WILL_CREATE_FOLDERS	6756	将新建文件夹：{paths}	Will create folders: {paths}	
 PickerCreateFolders	IDS_PICKER_CREATE_FOLDERS	6757	创建这些文件夹	Create these folders	
 PickerCreatedFoldersRemain	IDS_PICKER_CREATED_FOLDERS_REMAIN	6758	创建的文件夹会保留，即使之后取消保存。	Created folders will remain even if you cancel saving afterwards.	
-PickerAppLastLocation	IDS_PICKER_APP_LAST_LOCATION	6759	{name} 上次	{name} last location	
+PickerAppLastLocation	IDS_PICKER_APP_LAST_LOCATION	6759	{name} 上次打开的位置	{name}: last opened location	
 PickerRecentFilesFromApp	IDS_PICKER_RECENT_FILES_FROM_APP	6760	最近的文件 · 来自 {name}，不限文件夹	Recent files · from {name}, any folder	
 PickerSearchFolder	IDS_PICKER_SEARCH_FOLDER	6761	在 {name} 中搜索	Search in {name}	
 OpConflictExistingLabel	IDS_OP_CONFLICT_EXISTING_LABEL	6762	现有	Existing	
@@ -5553,9 +5553,9 @@ SecDescChanges	IDS_SEC_DESC_CHANGES	6876	记录文件夹里最近的变化，保
 SecDescNetwork	IDS_SEC_DESC_NETWORK	6877	局域网发现、缓存和最近的网络位置。	LAN discovery, caching and recent network places.	
 CtxLayerPulseTitle	IDS_CTX_LAYER_PULSE_TITLE	6878	Pulse 的右键菜单	Pulse's context menu	
 CtxLayerSystemTitle	IDS_CTX_LAYER_SYSTEM_TITLE	6879	Windows 的右键菜单	Windows context menu	
-CtxLayerPulseWhat	IDS_CTX_LAYER_PULSE_WHAT	6880	只在 Pulse 里右键时出现的菜单。	The menu you get when you right-click inside Pulse.	
-CtxLayerSystemWhat	IDS_CTX_LAYER_SYSTEM_WHAT	6881	资源管理器、桌面和所有软件共用的菜单。	The menu File Explorer, the desktop and every app share.	
-CtxFactInstant	IDS_CTX_FACT_INSTANT	6882	改了马上生效	Takes effect at once	
+CtxLayerPulseWhat	IDS_CTX_LAYER_PULSE_WHAT	6880	只在 Pulse 里右键时出现的菜单。	Menus inside Pulse.	
+CtxLayerSystemWhat	IDS_CTX_LAYER_SYSTEM_WHAT	6881	资源管理器、桌面等位置的 Windows 菜单。	File Explorer and desktop menus.	
+CtxFactInstant	IDS_CTX_FACT_INSTANT	6882	下次右键就生效	Next right-click	
 CtxFactNoAdmin	IDS_CTX_FACT_NO_ADMIN	6883	不需要权限	No permission needed	
 CtxFactRestore	IDS_CTX_FACT_RESTORE	6884	随时恢复	Restore any time	
 CtxFactApply	IDS_CTX_FACT_APPLY	6885	点「应用」才生效	Takes effect when you apply	
@@ -6423,3 +6423,201 @@ OpMoreTasksSuffix	IDS_OP_MORE_TASKS_SUFFIX	7796	 项操作	 more
 OpWaitNetworkTurn	IDS_OP_WAIT_NETWORK_TURN	7797	网络位置上的操作逐个进行，前一项完成后自动开始	Network operations take turns; starts after the one before	
 OpStripShowLess	IDS_OP_STRIP_SHOW_LESS	7798	收起	Show less	
 OpQueuedHeld	IDS_OP_QUEUED_HELD	7799	点继续后才会开始	Starts once you resume it	
+PickerGoTo	IDS_PICKER_GO_TO	7800	已打开的文件夹	Open folders	已開啟的資料夾
+PickerFormatSearch	IDS_PICKER_FORMAT_SEARCH	7801	输入格式名或扩展名，如 tif	Type a format or extension, e.g. tif	
+PickerNameExistsLive	IDS_PICKER_NAME_EXISTS_LIVE	7802	已有同名文件 {name} · 保存时会先问你是否替换	{name} already exists · you'll be asked before it is replaced	
+PickerNoExtension	IDS_PICKER_NO_EXTENSION	7803	没有扩展名 · 会按「{name}」原样保存	No extension · saved as "{name}"	
+PickerNewFiles	IDS_PICKER_NEW_FILES	7804	新文件	New files	
+PickerBasketSummary	IDS_PICKER_BASKET_SUMMARY	7805	{count} 个文件 · {size} · 来自 {folders} 个文件夹	{count} files · {size} · from {folders} folders	
+PickerBasketHint	IDS_PICKER_BASKET_HINT	7806	换个文件夹继续选，已选的会保留	Switch folders to keep adding; picks stay	
+AdvSearchRegex	IDS_ADV_SEARCH_REGEX	7807	正则表达式	Regex	規則運算式
+AdvSearchRegexInvalid	IDS_ADV_SEARCH_REGEX_INVALID	7808	正则有误或超过 1024 字符	Invalid regex or over 1024 characters	規則運算式有誤或超過 1024 字元
+AdvSearchRegexHint	IDS_ADV_SEARCH_REGEX_HINT	7809	ECMAScript 正则，不区分大小写，如 ^报告.*\.pdf$	Case-insensitive ECMAScript regex, e.g. ^report.*\.pdf$	ECMAScript 規則運算式，不區分大小寫，如 ^報告.*\.pdf$
+OpEtaUnknownTotal	IDS_OP_ETA_UNKNOWN_TOTAL	7810	总量未知	Total unknown	總量未知
+OpEtaFinishing	IDS_OP_ETA_FINISHING	7811	正在完成	Finishing	正在完成
+GlobalSearchSortRelevance	IDS_GLOBAL_SEARCH_SORT_RELEVANCE	7812	相关性	Relevance	
+GlobalSearchSortRelevanceDesc	IDS_GLOBAL_SEARCH_SORT_RELEVANCE_DESC	7813	跳转和最佳匹配在前，其余按匹配度	Go to and best matches first, then by match	
+GlobalSearchSortPathDesc	IDS_GLOBAL_SEARCH_SORT_PATH_DESC	7814	同一位置的文件排在一起	Files in the same place stay together	
+GlobalSearchSortedBy	IDS_GLOBAL_SEARCH_SORTED_BY	7815	按%s	by %s	
+GlobalSearchGroupMatch	IDS_GLOBAL_SEARCH_GROUP_MATCH	7816	匹配程度	Match	
+GlobalSearchGroupMatchDesc	IDS_GLOBAL_SEARCH_GROUP_MATCH_DESC	7817	跳转、最佳匹配、应用、文件夹、文件	Go to, best match, apps, folders, files	
+GlobalSearchGroupTypeDesc	IDS_GLOBAL_SEARCH_GROUP_TYPE_DESC	7818	文件夹、文档、图片…分开列出	Folders, documents, images… listed apart	
+GlobalSearchGroupDateDesc	IDS_GLOBAL_SEARCH_GROUP_DATE_DESC	7819	今天、昨天、上周…	Today, yesterday, last week…	
+GlobalSearchGroupFolder	IDS_GLOBAL_SEARCH_GROUP_FOLDER	7820	所在文件夹	Folder	
+GlobalSearchGroupFolderDesc	IDS_GLOBAL_SEARCH_GROUP_FOLDER_DESC	7821	同一文件夹里的结果放在一起	Results in the same folder stay together	
+GlobalSearchGroupSizeDesc	IDS_GLOBAL_SEARCH_GROUP_SIZE_DESC	7822	从巨大到极小	From gigantic to tiny	
+GlobalSearchGroupNoneDesc	IDS_GLOBAL_SEARCH_GROUP_NONE_DESC	7823	一个列表，只按排序	One list, sort order only	
+GlobalSearchCollapseAll	IDS_GLOBAL_SEARCH_COLLAPSE_ALL	7824	折叠全部组	Collapse all groups	
+GlobalSearchExpandAll	IDS_GLOBAL_SEARCH_EXPAND_ALL	7825	展开全部组	Expand all groups	
+GlobalSearchExtension	IDS_GLOBAL_SEARCH_EXTENSION	7826	扩展名	Extension	
+GlobalSearchSizeSmall	IDS_GLOBAL_SEARCH_SIZE_SMALL	7827	< 1 MB	< 1 MB	
+GlobalSearchSizeMedium	IDS_GLOBAL_SEARCH_SIZE_MEDIUM	7828	1 – 128 MB	1 – 128 MB	
+GlobalSearchSizeLarge	IDS_GLOBAL_SEARCH_SIZE_LARGE	7829	128 MB – 1 GB	128 MB – 1 GB	
+GlobalSearchSizeHuge	IDS_GLOBAL_SEARCH_SIZE_HUGE	7830	> 1 GB	> 1 GB	
+GlobalSearchAppsFirst	IDS_GLOBAL_SEARCH_APPS_FIRST	7831	应用排在最前	Apps first	
+GlobalSearchAppsFirstDesc	IDS_GLOBAL_SEARCH_APPS_FIRST_DESC	7832	应用放在跳转和最佳匹配之前	Show apps above Go to and best matches	
+PickerUseIncomingFiles	IDS_PICKER_USE_INCOMING_FILES	7833	使用拖入的文件	Use dropped files	使用拖入的檔案
+PickerPulseSelection	IDS_PICKER_PULSE_SELECTION	7834	Pulse 主窗口里选中的	Selected in the Pulse main window	Pulse 主視窗中選取的
+PickerUseSelection	IDS_PICKER_USE_SELECTION	7835	使用	Use	使用
+PickerAddAllSelection	IDS_PICKER_ADD_ALL_SELECTION	7836	全部加入	Add all	全部加入
+PickerSuggestVersion	IDS_PICKER_SUGGEST_VERSION	7837	版本 +1	Version +1	版本 +1
+PickerSuggestDate	IDS_PICKER_SUGGEST_DATE	7838	加日期	Add date	加日期
+PickerSuggestOriginal	IDS_PICKER_SUGGEST_ORIGINAL	7839	原文件名	Original name	原檔名
+PickerSuggestRemoveCopy	IDS_PICKER_SUGGEST_REMOVE_COPY	7840	去掉副本	Remove copy suffix	移除副本字樣
+PickerSaveCheckContinue	IDS_PICKER_SAVE_CHECK_CONTINUE	7841	检查并保存	Check and save	檢查並儲存
+PickerLiveConflict	IDS_PICKER_LIVE_CONFLICT	7842	已有同名文件 {name}，请选择改名或继续检查保存。	{name} already exists. Rename or continue to check and save.	已有同名檔案 {name}，請選擇改名或繼續檢查儲存。
+PickerLiveDirectoryConflict	IDS_PICKER_LIVE_DIRECTORY_CONFLICT	7843	同名文件夹已存在，请更换文件名。	A folder with this name exists. Choose another filename.	同名資料夾已存在，請更換檔名。
+PickerSaveNameInvalid	IDS_PICKER_SAVE_NAME_INVALID	7844	文件名无效：请检查非法字符、系统保留名称及末尾空格或句点。	Invalid filename: check reserved names, invalid characters, and trailing spaces or periods.	檔名無效：請檢查無效字元、系統保留名稱及結尾空格或句點。
+PickerSavePathInvalid	IDS_PICKER_SAVE_PATH_INVALID	7845	保存路径无效，请检查文件夹路径。	Invalid save path. Check the folder path.	儲存路徑無效，請檢查資料夾路徑。
+PickerSaveNameLong	IDS_PICKER_SAVE_NAME_LONG	7846	文件名或完整路径过长，请缩短后再保存。	The filename or full path is too long. Shorten it before saving.	檔名或完整路徑過長，請縮短後再儲存。
+PickerTrayTitle	IDS_PICKER_TRAY_TITLE	7847	暂存托盘	Staging tray	暫存匣
+PickerTrayOthers	IDS_PICKER_TRAY_OTHERS	7848	另外 {name} 项	{name} other items	另外 {name} 項
+PickerTrayIncompatible	IDS_PICKER_TRAY_INCOMPATIBLE	7849	不匹配	Not compatible	不相容
+PickerTrayOverflow	IDS_PICKER_TRAY_OVERFLOW	7850	托盘内容暂不可用，请在 Pulse 中检查	Tray content is unavailable; check it in Pulse	暫存匣內容暫時無法使用，請在 Pulse 中檢查
+PickerTrayBusy	IDS_PICKER_TRAY_BUSY	7851	处理中	In progress	處理中
+PickerTrayPreviousPage	IDS_PICKER_TRAY_PREVIOUS_PAGE	7852	上一页 · {name}	Previous · {name}	上一頁 · {name}
+PickerTrayNextPage	IDS_PICKER_TRAY_NEXT_PAGE	7853	下一页 · {name}	Next · {name}	下一頁 · {name}
+PickerNewBadge	IDS_PICKER_NEW_BADGE	7854	新	New	新
+NewMenuLoading	IDS_NEW_MENU_LOADING	7855	正在读取系统新建项…	Loading system file types…	
+NewMenuLoadFailed	IDS_NEW_MENU_LOAD_FAILED	7856	系统新建项读取失败，重新打开以重试	Could not load system file types; reopen to retry	
+SysCtxHideInPulse	IDS_SYS_CTX_HIDE_IN_PULSE	7857	在 Pulse 隐藏	Hide in Pulse	
+SysCtxRestoreInPulse	IDS_SYS_CTX_RESTORE_IN_PULSE	7858	在 Pulse 恢复	Restore in Pulse	
+PickerSelectionLimit	IDS_PICKER_SELECTION_LIMIT	7859	一次最多选择 1024 个文件，请减少已选文件后重试。	Select at most 1024 files at a time. Reduce the selection and try again.	一次最多選取 1024 個檔案，請減少已選檔案後重試。
+PickerFormatInferred	IDS_PICKER_FORMAT_INFERRED	7860	按输入的 {ext} 改用 {format}	Switched to {format} for the typed {ext}	依輸入的 {ext} 改用 {format}
+PickerSameNameSeries	IDS_PICKER_SAME_NAME_SERIES	7861	同名系列	Same-name series	同名系列
+PickerAnyFormat	IDS_PICKER_ANY_FORMAT	7862	任意格式	Any format	任意格式
+PickerFormatNotePng	IDS_PICKER_FORMAT_NOTE_PNG	7863	无损位图 · 支持透明	Lossless raster image · supports transparency	
+PickerFormatNoteJpeg	IDS_PICKER_FORMAT_NOTE_JPEG	7864	通常使用有损压缩 · 适合照片	Usually lossy compression · suited to photos	
+PickerFormatNoteWebp	IDS_PICKER_FORMAT_NOTE_WEBP	7865	支持有损和无损压缩 · 支持透明	Supports lossy and lossless compression · supports transparency	
+PickerFormatNotePsd	IDS_PICKER_FORMAT_NOTE_PSD	7866	Photoshop 文档格式 · 支持图层	Photoshop document format · supports layers	
+PickerFormatNotePsb	IDS_PICKER_FORMAT_NOTE_PSB	7867	Photoshop 大型文档格式 · 支持图层	Photoshop large document format · supports layers	
+PickerFormatNoteText	IDS_PICKER_FORMAT_NOTE_TEXT	7868	纯文本 · 不包含字体和排版	Plain text · no font or layout formatting	
+PickerFormatNoteAny	IDS_PICKER_FORMAT_NOTE_ANY	7869	按文件名中的扩展名	Uses the extension in the file name	
+PickerTrayRemoveAfterOpen	IDS_PICKER_TRAY_REMOVE_AFTER_OPEN	7870	打开后从暂存托盘移出	Remove from staging tray after opening	
+PickerTrayKeepContent	IDS_PICKER_TRAY_KEEP_CONTENT	7871	临时内容保留	Keep temporary content	
+PickerTrayRemoveAfterOpenHint	IDS_PICKER_TRAY_REMOVE_AFTER_OPEN_HINT	7872	按程序记住。确认打开后仅移出普通文件的托盘引用，不删除原文件；截图、文字等临时内容保留，避免调用程序读取失效。	Remembered for this app. After confirming Open, remove ordinary file references from the tray without deleting the files. Keep temporary content such as screenshots and text so the receiving app can still read it.	
+ContextTreeTitle	IDS_CONTEXT_TREE_TITLE	7873	整理右键项目…	Organize menu items…	
+ContextTreeRowEntry	IDS_CONTEXT_TREE_ROW_ENTRY	7874	整理此菜单的子项…	Organize items in this menu…	
+ContextTreeScope	IDS_CONTEXT_TREE_SCOPE	7875	仅改 Pulse，下次右键生效	Pulse only; next right-click	
+ContextTreeObservedOnly	IDS_CONTEXT_TREE_OBSERVED_ONLY	7876	只列出已在 Pulse 出现的项目	Only items seen in Pulse are listed	
+ContextTreeEmpty	IDS_CONTEXT_TREE_EMPTY	7877	先在 Pulse 中右键单击对应文件；要整理子项，再打开相应子菜单	First right-click the file in Pulse; open its submenu to organize child items	
+ContextTreeBack	IDS_CONTEXT_TREE_BACK	7878	返回上一级	Back to parent	
+ContextTreeOpen	IDS_CONTEXT_TREE_OPEN	7879	进入子菜单	Open submenu	
+ContextTreeShown	IDS_CONTEXT_TREE_SHOWN	7880	显示 · 点击整理	Shown · choose to organize	
+ContextTreeHidden	IDS_CONTEXT_TREE_HIDDEN	7881	已隐藏 · 点击恢复或排序	Hidden · restore or reorder	
+ContextTreeAmbiguous	IDS_CONTEXT_TREE_AMBIGUOUS	7882	这个项目的来源或名称不明确，保留应用默认显示	Unclear source or name; keep the app’s default display	
+ContextTreeMoveUp	IDS_CONTEXT_TREE_MOVE_UP	7883	在本组上移	Move up in this group	
+ContextTreeMoveDown	IDS_CONTEXT_TREE_MOVE_DOWN	7884	在本组下移	Move down in this group	
+ContextTreeResetGroup	IDS_CONTEXT_TREE_RESET_GROUP	7885	恢复本组的显示与顺序	Reset visibility and order in this group	
+ContextTreeSaveFailed	IDS_CONTEXT_TREE_SAVE_FAILED	7886	更改尚未保存，关闭后请重试	Changes not saved; close and try again	
+ContextTreeChanged	IDS_CONTEXT_TREE_CHANGED	7887	菜单项目已变化，请重新选择	Menu items changed; choose again	
+PickerAppLastSaveLocation	IDS_PICKER_APP_LAST_SAVE_LOCATION	7888	{name} 上次保存的位置	{name}: last saved location	
+ContextTreeRegistryChild	IDS_CONTEXT_TREE_REGISTRY_CHILD	7889	这一组的 Windows 菜单由所属应用管理。要单独隐藏或排序，请用“整理右键项目”调整 Pulse 中已出现的项目。	This Windows menu group is managed by its app. Use Organize menu items to hide or reorder items already seen in Pulse.	
+ContextTreePartial	IDS_CONTEXT_TREE_PARTIAL	7890	这里只显示已读取的部分子项；打开对应右键子菜单后，可在 Pulse 中整理实际出现的项目。	Only some child items could be read. Open the context submenu in Pulse to organize the items that actually appear.	
+ContextTreeOtherType	IDS_CONTEXT_TREE_OTHER_TYPE	7891	其他文件类型…	Other file types…	
+ContextTreeTypePrompt	IDS_CONTEXT_TREE_TYPE_PROMPT	7892	输入文件扩展名，例如 .dwg、.psd。仅查看此类型的右键菜单，不修改文件关联。	Enter a file extension, such as .dwg or .psd. This inspects its context menu without changing file associations.	
+ContextTreeTypeInvalid	IDS_CONTEXT_TREE_TYPE_INVALID	7893	请输入有效扩展名，例如 .dwg；不要输入路径、空格或通配符。	Enter a valid extension such as .dwg, without a path, spaces or wildcards.	
+PickerSaveSpaceAvailable	IDS_PICKER_SAVE_SPACE_AVAILABLE	7894	可用 {free}	{free} available	
+PickerSaveDiskFull	IDS_PICKER_SAVE_DISK_FULL	7895	目标位置当前无可用空间，保存可能失败。	No space is currently available at the destination. Saving may fail.	
+PickerSaveReadOnlyTarget	IDS_PICKER_SAVE_READ_ONLY_TARGET	7896	目标文件为只读，请改名或选择其他位置。	The destination file is read-only. Use another name or location.	
+PickerSaveOnlineTarget	IDS_PICKER_SAVE_ONLINE_TARGET	7897	目标文件未完全在本地，保存可能需要联网；尚未确认云端同步状态。	The destination file is not fully local. Saving may require a connection; cloud sync status is not confirmed.	
+OpenNativeExplorer	IDS_OPEN_NATIVE_EXPLORER	7898	在原生资源管理器中打开	Open in native File Explorer	
+OpenNativeExplorerFailed	IDS_OPEN_NATIVE_EXPLORER_FAILED	7899	未能打开原生资源管理器，请重试。	Could not open native File Explorer. Try again.	
+PickerArchiveExtractSelection	IDS_PICKER_ARCHIVE_EXTRACT_SELECTION	7900	压缩包内 · 打开时仅解压所选文件，原包不变	Inside archive · Open extracts only selected files; the archive stays unchanged	
+PickerArchivePassword	IDS_PICKER_ARCHIVE_PASSWORD	7901	此压缩包需要密码，请先解压后再选择文件。	This archive requires a password. Extract it first, then select the file.	
+PickerSaveAfterShow	IDS_PICKER_SAVE_AFTER_SHOW	7902	保存后在 Pulse 显示	Show in Pulse after saving	
+PickerSaveAfterCopy	IDS_PICKER_SAVE_AFTER_COPY	7903	保存后复制路径	Copy path after saving	
+PickerSaveAfterHint	IDS_PICKER_SAVE_AFTER_HINT	7904	检测到文件写入并稳定后执行；返回保存路径不代表程序已保存。	Runs after an observed write becomes stable; returning a save path does not confirm that the application saved it.	
+PickerSaveAfterUnavailable	IDS_PICKER_SAVE_AFTER_UNAVAILABLE	7905	启动更新后的 Pulse，可使用保存后联动。	Start an updated Pulse to enable after-save actions.	
+PickerSavedObserved	IDS_PICKER_SAVED_OBSERVED	7906	已写入 {name}	File written: {name}	
+PickerSavedDetail	IDS_PICKER_SAVED_DETAIL	7907	{folder} · {size} · 来自 {app}	{folder} · {size} · from {app}	
+PickerSaveToTray	IDS_PICKER_SAVE_TO_TRAY	7908	存到暂存托盘	Save to staging tray	
+PickerSaveToTrayTip	IDS_PICKER_SAVE_TO_TRAY_TIP	7909	先存进暂存托盘，之后拖进聊天窗口，或在托盘里释放到文件夹	Save into the staging tray first, then drag into chat windows or release to a folder later	
+PickerSaveToTrayHeading	IDS_PICKER_SAVE_TO_TRAY_HEADING	7910	先放进暂存托盘	Put in staging tray first	
+PickerSaveToTrayStatus	IDS_PICKER_SAVE_TO_TRAY_STATUS	7911	可以保存 · 存进暂存托盘：{name}（临时存放）	Ready to save · Into staging tray: {name} (temporary)	
+PickerSaveToTrayTempHint	IDS_PICKER_SAVE_TO_TRAY_TEMP_HINT	7912	临时存放：从托盘移除时，这个文件会一起删除。要长期保留，之后在托盘里「释放」到文件夹	Temporary storage: removing this item from the tray deletes the file. Release it to a folder later to keep it permanently.	
+PickerSaveToTrayInTrayLabel	IDS_PICKER_SAVE_TO_TRAY_IN_TRAY_LABEL	7913	托盘里	In tray	
+PickerSaveToTrayInTrayValue	IDS_PICKER_SAVE_TO_TRAY_IN_TRAY_VALUE	7914	已有 {count} 项，保存后排在最前	{count} items; saved file appears first	
+PickerSaveToTrayLaterTitle	IDS_PICKER_SAVE_TO_TRAY_LATER_TITLE	7915	之后可以	Next, you can	
+PickerSaveToTrayLater1	IDS_PICKER_SAVE_TO_TRAY_LATER_1	7916	· 从托盘直接拖进微信、网页、邮件	· Drag directly from the tray into chat, web, or email	
+PickerSaveToTrayLater2	IDS_PICKER_SAVE_TO_TRAY_LATER_2	7917	· 在别的程序的打开对话框里，左侧暂存托盘点一下就选中	· Pick it directly from the sidebar tray in other apps' Open dialogs	
+PickerSaveToTrayLater3	IDS_PICKER_SAVE_TO_TRAY_LATER_3	7918	· 在 Pulse 里释放到任意文件夹（复制或移动）	· Release it into any folder in Pulse (copy or move)	
+PickerSaveToTrayAddrHint	IDS_PICKER_SAVE_TO_TRAY_ADDR_HINT	7919	临时存放 · 之后再决定放哪	Temporary · decide where to put it later	
+PickerTrayDropPrompt	IDS_PICKER_TRAY_DROP_PROMPT	7920	松开放进暂存托盘	Drop to add to staging tray	
+PickerTrayDropBadge	IDS_PICKER_TRAY_DROP_BADGE	7921	暂存到托盘	Stage to tray	
+PickerTrayStageUnavailable	IDS_PICKER_TRAY_STAGE_UNAVAILABLE	7922	暂存托盘当前不可用，请先启动 Pulse	Staging tray is unavailable; start Pulse first	
+PickerSaveHereHeading	IDS_PICKER_SAVE_HERE_HEADING	7923	保存到这里	Save here	
+PickerSaveDestFolder	IDS_PICKER_SAVE_DEST_FOLDER	7924	文件夹	Folder	
+PickerSaveDestDisk	IDS_PICKER_SAVE_DEST_DISK	7925	磁盘	Disk	
+PickerSaveDestPerm	IDS_PICKER_SAVE_DEST_PERM	7926	权限	Access	
+PickerSaveDestSync	IDS_PICKER_SAVE_DEST_SYNC	7927	同步	Sync	
+PickerSaveDestWritable	IDS_PICKER_SAVE_DEST_WRITABLE	7928	可写入	Writable	
+PickerSaveDestReadOnly	IDS_PICKER_SAVE_DEST_READ_ONLY	7929	只读	Read-only	
+PickerSaveDestLocal	IDS_PICKER_SAVE_DEST_LOCAL	7930	本地磁盘	Local disk	
+PickerSaveDestCloud	IDS_PICKER_SAVE_DEST_CLOUD	7931	仅在线（云端占位）	Online-only (cloud placeholder)	
+PickerSaveDestNoClash	IDS_PICKER_SAVE_DEST_NO_CLASH	7932	没有同名文件，可以直接保存	No file with this name; ready to save	
+PickerSaveDestClash	IDS_PICKER_SAVE_DEST_CLASH	7933	{name} 已存在（{detail}）	{name} already exists ({detail})	
+PickerSaveAfterHeading	IDS_PICKER_SAVE_AFTER_HEADING	7934	保存后	After saving	
+PickerSaveAfterShowShort	IDS_PICKER_SAVE_AFTER_SHOW_SHORT	7935	在 Pulse 中显示	Show in Pulse	
+PickerSaveAfterCopyShort	IDS_PICKER_SAVE_AFTER_COPY_SHORT	7936	复制完整路径	Copy full path	
+PickerSaveSeriesNone	IDS_PICKER_SAVE_SERIES_NONE	7937	无同名文件	No matching files	
+PickerSaveFilterAll	IDS_PICKER_SAVE_FILTER_ALL	7938	全部文件	All files	
+PickerSaveFilterSame	IDS_PICKER_SAVE_FILTER_SAME	7939	同格式 {format}	Same format {format}	
+PickerFilterTime	IDS_PICKER_FILTER_TIME	7940	时间	Time	
+PickerFilterOnlyNew	IDS_PICKER_FILTER_ONLY_NEW	7941	只看新文件	Only new files	
+PickerFilterOnlyNewSub	IDS_PICKER_FILTER_ONLY_NEW_SUB	7942	上次打开以后新出现的	Added since last opened	
+PickerSortSyncTip	IDS_PICKER_SORT_SYNC_TIP	7943	排序：{sort} · 分组：{group}	Sort: {sort} · Group: {group}	
+PickerSortSyncSame	IDS_PICKER_SORT_SYNC_SAME	7944	与 Pulse 主界面里这个文件夹相同	Matches this folder in Pulse	
+PickerPreviewPaneTip	IDS_PICKER_PREVIEW_PANE_TIP	7945	预览栏 (空格)	Preview pane (Space)	
+PickerOriginalLocation	IDS_PICKER_ORIGINAL_LOCATION	7946	原文件位置	Original location	
+PickerOriginalLocationSrc	IDS_PICKER_ORIGINAL_LOCATION_SRC	7947	{name} 所在	Where {name} lives	
+PickerRepoRoot	IDS_PICKER_REPO_ROOT	7948	仓库根目录	Repository root	
+PickerAppCommonHeader	IDS_PICKER_APP_COMMON_HEADER	7949	{name} 常用	{name} frequent	
+PickerPinToApp	IDS_PICKER_PIN_TO_APP	7950	固定到本程序	Pin to this app	
+PickerUnpinFromApp	IDS_PICKER_UNPIN_FROM_APP	7951	从本程序取消固定	Unpin from this app	
+PickerAppPinnedTag	IDS_PICKER_APP_PINNED_TAG	7952	已固定	Pinned	
+PickerTrayOthersUnsupported	IDS_PICKER_TRAY_OTHERS_UNSUPPORTED	7953	另外 {count} 项 · {app} 打不开	{count} more · unsupported by {app}	
+PickerTrayCollapse	IDS_PICKER_TRAY_COLLAPSE	7954	收起	Show less	
+PickerDropZoneSingle	IDS_PICKER_DROP_ZONE_SINGLE	7955	松开即使用 {name}	Drop to use {name}	
+PickerDropZoneMulti	IDS_PICKER_DROP_ZONE_MULTI	7956	松开即使用 {count} 个文件	Drop to use {count} files	
+PickerDropZoneSub	IDS_PICKER_DROP_ZONE_SUB	7957	直接交给 {app}，不会复制到这里	Passes directly to {app} without copying here	
+PickerDropZoneSubGeneric	IDS_PICKER_DROP_ZONE_SUB_GENERIC	7958	直接使用，不会复制到当前文件夹	Uses directly without copying to this folder	
+PickerEnterArchive	IDS_PICKER_ENTER_ARCHIVE	7959	进入压缩包	Enter archive	
+PickerPreviewSpaceKey	IDS_PICKER_PREVIEW_SPACE_KEY	7960	空格	Space	
+PickerPreviewSpaceHint	IDS_PICKER_PREVIEW_SPACE_HINT	7961	开关预览	Toggle preview	
+PickerWillReplaceBadge	IDS_PICKER_WILL_REPLACE_BADGE	7962	将被替换	Will replace	
+PickerSaveSeriesLatest	IDS_PICKER_SAVE_SERIES_LATEST	7963	{items}（最新：{latest}，{time}）	{items} (latest: {latest}, {time})	
+PickerSaveDiskFree	IDS_PICKER_SAVE_DISK_FREE	7964	{drive} 剩余 {free}	{drive} · {free} free	
+PickerSaveToTrayLocationVal	IDS_PICKER_SAVE_TO_TRAY_LOCATION_VAL	7965	暂存托盘（{path}）	Staging tray ({path})	
+PickerShakeHint	IDS_PICKER_SHAKE_HINT	7966	拖着左右摇一摇，左侧暂存托盘就准备好接收	Shake left and right while dragging to open the sidebar staging tray	
+PickerCommonLast	IDS_PICKER_COMMON_LAST	7967	上次	Last	
+PickerCommonLastSaved	IDS_PICKER_COMMON_LAST_SAVED	7968	上次保存	Last saved	
+PickerCommonFromPulse	IDS_PICKER_COMMON_FROM_PULSE	7969	Pulse	Pulse	
+PickerCommonRemove	IDS_PICKER_COMMON_REMOVE	7970	从常用中移除	Remove from Frequent	
+PickerCommonRemoved	IDS_PICKER_COMMON_REMOVED	7971	已移除「{name}」	Removed “{name}”	
+PickerGroupHide	IDS_PICKER_GROUP_HIDE	7972	隐藏这一组	Hide this group	
+PickerGroupsShown	IDS_PICKER_GROUPS_SHOWN	7973	显示的分组	Groups shown	
+PickerGroupsHiddenCount	IDS_PICKER_GROUPS_HIDDEN_COUNT	7974	已隐藏 {count} 组	{count} groups hidden	
+PickerGroupsShow	IDS_PICKER_GROUPS_SHOW	7975	显示	Show	
+PickerGroupCollapse	IDS_PICKER_GROUP_COLLAPSE	7976	折叠	Collapse	
+PickerGroupExpand	IDS_PICKER_GROUP_EXPAND	7977	展开	Expand	
+PickerRailCommon	IDS_PICKER_RAIL_COMMON	7978	常用	Freq	
+PickerRailTray	IDS_PICKER_RAIL_TRAY	7979	托盘	Tray	
+PickerRailFavorites	IDS_PICKER_RAIL_FAVORITES	7980	收藏	Favs	
+PickerRailThisPc	IDS_PICKER_RAIL_THIS_PC	7981	电脑	PC	
+PickerRailProgram	IDS_PICKER_RAIL_PROGRAM	7982	程序	App	
+SettingsScrollPastEnd	IDS_SETTINGS_SCROLL_PAST_END	7983	滚动到最后一项之后	Scroll past the last item	捲動到最後一項之後
+SettingsScrollPastEndDesc	IDS_SETTINGS_SCROLL_PAST_END_DESC	7984	列表到底后还能再往下滚一段，留出空白处，方便多栏之间拖放或右键	Keep scrolling a little past the end, leaving empty space to drop files between panes or right-click	清單到底後還能再往下捲一段，留出空白處，方便多欄之間拖放或按右鍵
+OpenInOtherPane	IDS_OPEN_IN_OTHER_PANE	7985	在另一栏打开	Open in the other pane	在另一欄開啟
+TransferCopyTo	IDS_TRANSFER_COPY_TO	7986	复制到	Copy to	複製到
+TransferMoveTo	IDS_TRANSFER_MOVE_TO	7987	移动到	Move to	移動到
+DockStackApps	IDS_DOCK_STACK_APPS	7988	应用程序	Applications	應用程式
+DockStackViewAs	IDS_DOCK_STACK_VIEW_AS	7989	显示为	View as	顯示為
+DockStackViewFan	IDS_DOCK_STACK_VIEW_FAN	7990	扇形	Fan	扇形
+DockStackViewGrid	IDS_DOCK_STACK_VIEW_GRID	7991	网格	Grid	網格
+DockStackShowApps	IDS_DOCK_STACK_SHOW_APPS	7992	在程序坞显示「应用程序」	Show Applications in the Dock	在程式塢顯示「應用程式」
+QuickLookFilterAll	IDS_QUICK_LOOK_FILTER_ALL	7994	全部	All	全部
+QuickLookFilterPhotos	IDS_QUICK_LOOK_FILTER_PHOTOS	7995	图片	Photos	圖片
+QuickLookFilterVideos	IDS_QUICK_LOOK_FILTER_VIDEOS	7996	视频	Videos	影片
+QuickLookImmersive	IDS_QUICK_LOOK_IMMERSIVE	7997	沉浸式看图	Photo viewer layout	沉浸式看圖
+DockStackRemove	IDS_DOCK_STACK_REMOVE	7993	从程序坞移除	Remove from Dock	從程式塢移除
