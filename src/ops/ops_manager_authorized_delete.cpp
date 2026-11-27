@@ -4,6 +4,8 @@
 #include "elevated_delete.h"
 #include "elevated_transfer_client.h"
 #include "transfer_rate_estimator.h"
+#include "transfer_eta_estimator.h"
+#include "recursive_eta_estimator.h"
 #include "../common/localization.h"
 #include "../common/runtime_log.h"
 #include "../common/delete_diagnostics.h"
@@ -161,14 +163,51 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
     TransferRateEstimator rate;
     rate.SetEtaFloor(0.0);
     rate.Reset(started, 0);
+    TransferEtaEstimator eta;
+    eta.Reset(started);
+    uint64_t eta_held_ms = 0, eta_hold_from = 0;
+    const auto eta_hold = [&](bool on) {
+        const uint64_t now = GetTickCount64();
+        if (on && eta_hold_from == 0) eta_hold_from = now;
+        else if (!on && eta_hold_from != 0) { eta_held_ms += now - eta_hold_from; eta_hold_from = 0; }
+    };
+    const auto eta_now = [&] {
+        const uint64_t now = GetTickCount64();
+        return now - eta_held_ms - (eta_hold_from ? now - eta_hold_from : 0);
+    };
+    const auto eta_wait_for_authorization = [&](const std::wstring& reason, const std::wstring& path) {
+        eta_hold(true);
+        const auto choice = WaitForAuthorization(task_id, reason, path);
+        eta_hold(false);
+        return choice;
+    };
+    bool tree_work = false;
+    uint64_t child_base = 0;
+    TransferRateEstimator child_rate;
+    child_rate.SetEtaFloor(0.0);
+    bool child_rate_started = false;
+    RecursiveEtaEstimator recursive_eta;
+    OperationEta advisory;
     const auto update_rate = [&](OpStatus& status) {
         // Only confirmed source deletions count, including on the elevated path.
         // Skipped sources reduce remaining work without inflating the delete rate.
         rate.Observe(GetTickCount64(), completed.size(), req.sources.size() - skipped);
-        status.items_per_second = rate.speed();
+        status.items_per_second = child_rate_started ? child_rate.speed() : rate.speed();
         status.peak_items_per_second = (std::max)(status.peak_items_per_second,
                                                 status.items_per_second);
-        status.eta_seconds = rate.eta_seconds();
+        const uint64_t omitted = skipped + failed_items + static_cast<uint64_t>(refused.size());
+        const uint64_t total = req.sources.size() - (std::min)(static_cast<uint64_t>(req.sources.size()), omitted);
+        eta.Observe(eta_now(), {{0, static_cast<uint64_t>(completed.size()), 0}, {0, total, 0}, !tree_work});
+        status.eta_seconds = eta.seconds();
+        if (tree_work) {
+            if (advisory.task_id != task_id) {
+                advisory.task_id = task_id;
+                advisory.sample_tick = GetTickCount64();
+                advisory.stage = eta_now() - started < 3000 ? EtaStage::Learning : EtaStage::Unknown;
+            }
+            status.eta_detail = advisory;
+            status.eta_seconds = 0; // inferred ranges never masquerade as authoritative legacy totals
+        }
     };
     // Set while the authorization view is up; leaving it is shown at once,
     // ordinary per-item progress is throttled.
@@ -177,6 +216,9 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
     for (size_t index = 0; index < req.sources.size(); ++index) {
         const std::wstring& source = req.sources[index];
         if (transfer_cancel_.load()) break;
+        auto copy_hint = RecentCopyHints().Take(source, GetTickCount64());
+        bool recursive_started = false;
+        advisory = {};
         if (permanent) {
             bool covered = completed_roots.contains(source);
             for (size_t boundary = source.find_last_of(L'\\'); !covered && boundary != std::wstring::npos;) {
@@ -210,9 +252,13 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
         // its initial 0% progress otherwise flash the progress/estimate view
         // just before the same error brings the authorization view back.
         bool retrying = false;
+        const uint64_t root_started = GetTickCount64();
+        const uint64_t recursive_started_at = eta_now();
+        uint64_t root_children = 0;
         ElevatedTransferCallbacks callbacks;
         callbacks.authorization = [&](bool awaiting) {
             if (retrying && !awaiting) return;
+            eta_hold(awaiting);
             authorization_shown = awaiting;
             SetStatus([&](OpStatus& status) {
                 status.authorization = awaiting ? AuthorizationState::Requesting : AuthorizationState::None;
@@ -222,10 +268,49 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
                     : l10n::Get(l10n::StringId::Deleting).c_str();
             });
         };
-        auto progress = [&](const std::wstring& item, float percent) {
+        auto progress = [&](const std::wstring& item, float percent, const TransferWorkProgress* work = nullptr) {
             if (retrying) {
                 if (percent <= 0) return;
                 retrying = false;
+            }
+            eta_hold(false);
+            if (!work && (permanent || (!item.empty() && item != source))) tree_work = true;
+            if (!work && tree_work) {
+                // A fallback provider without child telemetry must not inherit a native range or a false zero-child counter.
+                advisory = {};
+                advisory.task_id = task_id;
+                advisory.sample_tick = GetTickCount64();
+                advisory.stage = eta_now() - started < 3000 ? EtaStage::Learning : EtaStage::Unknown;
+            }
+            if (work) {
+                root_children = work->completed.files + work->completed.directories;
+                if (!work->total_known || work->completed.directories > 0) {
+                    tree_work = true;
+                    if (!child_rate_started) {
+                        child_rate.Reset(root_started, child_base);
+                        child_rate_started = true;
+                    }
+                }
+                if (child_rate_started) {
+                    const uint64_t done = child_base + root_children;
+                    child_rate.Observe(GetTickCount64(), done, done == UINT64_MAX ? done : done + 1);
+                }
+                if (tree_work) {
+                    if (!recursive_started) {
+                        recursive_eta.Reset(recursive_started_at, copy_hint);
+                        recursive_started = true;
+                    }
+                    advisory = recursive_eta.Observe(eta_now(), *work, work->discovery, task_id, child_base);
+                    advisory.sample_tick = GetTickCount64(); // presentation uses the wall clock, cost learning does not
+                    if (advisory.stage == EtaStage::Learning && eta_now() - started >= 3000)
+                        advisory.stage = EtaStage::Unknown;
+                    // A current-root interval is not a whole-selection countdown.
+                    if (req.sources.size() != 1 && (advisory.stage == EtaStage::Range || advisory.stage == EtaStage::Finishing)) {
+                        advisory.stage = EtaStage::Unknown;
+                        advisory.lower_seconds = advisory.upper_seconds = 0;
+                        advisory.source = EtaSource::None;
+                    }
+                }
             }
             const auto update = [&](OpStatus& status) {
                 status.authorization = AuthorizationState::None;
@@ -244,6 +329,13 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
         };
         DeleteHooks delete_hooks;
         delete_hooks.on_scan = [&](const native_recycle::ScanProgress& scan) {
+            eta_hold(false);
+            if (scan.scanned_items > 1) {
+                tree_work = true;
+                advisory.task_id = task_id;
+                advisory.sample_tick = GetTickCount64();
+                advisory.stage = eta_now() - started < 3000 ? EtaStage::Learning : EtaStage::Unknown;
+            }
             const auto update = [&](OpStatus& status) {
                 status.authorization = AuthorizationState::None;
                 status.authorization_retrying = false;
@@ -251,6 +343,7 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
                 status.completed_items = completed.size();
                 status.scanned_items = scan.scanned_items;
                 status.scanned_bytes = scan.scanned_bytes;
+                if (tree_work) status.eta_detail = advisory;
                 status.phase = scan.moving ? OpPhase::Running : OpPhase::Scanning;
                 if (req.sources.size() <= 1) {
                     status.percent = -1.0f;
@@ -349,7 +442,7 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
         bool authorized = false;
         for (; !handled;) {
             if (authorized && defer_authorization) {
-                const auto choice = WaitForAuthorization(task_id, authorization_error, source);
+                const auto choice = eta_wait_for_authorization(authorization_error, source);
                 if (choice == AuthorizationChoice::Cancel) break;
                 if (choice == AuthorizationChoice::Skip) { ++skipped; result = ShellTransferResult{}; break; }
                 defer_authorization = false;
@@ -389,7 +482,7 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
             if (result.cancelled) break;
             if (SUCCEEDED(result.hr) || result.mutated || current_item->cancel.load() || !authorized) break;
             authorization_error = DeleteError(result);
-            const auto choice = WaitForAuthorization(task_id, authorization_error, source);
+            const auto choice = eta_wait_for_authorization(authorization_error, source);
             if (choice == AuthorizationChoice::Retry) { retrying = true; continue; }
             if (choice == AuthorizationChoice::Skip) {
                 ++skipped;
@@ -409,6 +502,7 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
                 return diagnostics::deletion::Key(actual) == diagnostics::deletion::Key(source);
             }), result.cancelled, result.mutated);
         completed.insert(completed.end(), result.sources.begin(), result.sources.end());
+        child_base += root_children;
         if (permanent) completed_roots.insert(result.sources.begin(), result.sources.end());
         const auto finish_item = [&](OpStatus& status) {
             // A retried attempt on a reused elevated session never invokes the

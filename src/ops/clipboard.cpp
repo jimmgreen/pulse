@@ -169,43 +169,61 @@ ClipboardFileRead TryReadClipboardFiles(ClipboardData& out, uint32_t expected_se
     return ClipboardFileRead::Ready;
 }
 
-bool PasteShellClipboard(const std::wstring& dir) {
+HRESULT PasteShellClipboardAtSequence(const std::wstring& dir, uint32_t expected_sequence,
+                                     const std::atomic_bool* cancelled) {
+    const auto cancelled_now = [&] { return cancelled && cancelled->load(); };
+    if (dir.empty()) return E_INVALIDARG;
+    if (cancelled_now()) return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    if (GetClipboardSequenceNumber() != expected_sequence) return HRESULT_FROM_WIN32(ERROR_RETRY);
+    const HRESULT init = OleInitialize(nullptr);
+    if (FAILED(init)) return init;
+    struct Apartment { ~Apartment() { OleUninitialize(); } } apartment;
     IDataObject* data = nullptr;
-    if (FAILED(OleGetClipboard(&data)) || !data) return false;
-    IDropTarget* drop = nullptr;
+    HRESULT hr = OleGetClipboard(&data);
+    if (FAILED(hr) || !data) return FAILED(hr) ? hr : E_FAIL;
+    struct Source { IDataObject* value; ~Source() { value->Release(); } } source{data};
+    if (GetClipboardSequenceNumber() != expected_sequence) return HRESULT_FROM_WIN32(ERROR_RETRY);
+    if (cancelled_now()) return HRESULT_FROM_WIN32(ERROR_CANCELLED);
     IShellItem* folder = nullptr;
-    // The shell does not parse Pulse's \\?\ form.
-    if (SUCCEEDED(SHCreateItemFromParsingName(path::StripExtendedPathPrefix(dir).c_str(), nullptr,
-                                              IID_PPV_ARGS(&folder)))) {
-        folder->BindToHandler(nullptr, BHID_SFUIObject, IID_PPV_ARGS(&drop));
-        folder->Release();
-    }
-    bool ok = false;
-    if (drop) {
-        // A cut moves, as in Explorer; anything else copies.
-        DWORD effect = DROPEFFECT_COPY;
-        FORMATETC fmt{ static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT)),
-                       nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
-        STGMEDIUM medium{};
-        if (SUCCEEDED(data->GetData(&fmt, &medium))) {
-            if (const DWORD* preferred = static_cast<const DWORD*>(GlobalLock(medium.hGlobal))) {
-                if (PreferredEffectIsCut(*preferred)) effect = DROPEFFECT_MOVE;
+    hr = SHCreateItemFromParsingName(path::StripExtendedPathPrefix(dir).c_str(), nullptr,
+                                    IID_PPV_ARGS(&folder));
+    if (FAILED(hr)) return hr;
+    IDropTarget* drop = nullptr;
+    hr = folder->BindToHandler(nullptr, BHID_SFUIObject, IID_PPV_ARGS(&drop));
+    folder->Release();
+    if (FAILED(hr) || !drop) return FAILED(hr) ? hr : E_NOINTERFACE;
+    struct Target { IDropTarget* value; ~Target() { value->Release(); } } target{drop};
+    DWORD wanted = DROPEFFECT_COPY;
+    FORMATETC fmt{static_cast<CLIPFORMAT>(RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT)),
+                  nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    STGMEDIUM medium{};
+    if (SUCCEEDED(data->GetData(&fmt, &medium))) {
+        if (medium.tymed == TYMED_HGLOBAL && GlobalSize(medium.hGlobal) >= sizeof(DWORD)) {
+            if (const auto* value = static_cast<const DWORD*>(GlobalLock(medium.hGlobal))) {
+                if (PreferredEffectIsCut(*value)) wanted = DROPEFFECT_MOVE;
                 GlobalUnlock(medium.hGlobal);
             }
-            ReleaseStgMedium(&medium);
         }
-        const DWORD wanted = effect;
-        POINTL pt{ 0, 0 };
-        if (SUCCEEDED(drop->DragEnter(data, MK_LBUTTON, pt, &effect)) && (effect & wanted)) {
-            effect = wanted;
-            ok = SUCCEEDED(drop->Drop(data, MK_LBUTTON, pt, &effect));
-        } else {
-            drop->DragLeave();
-        }
-        drop->Release();
+        ReleaseStgMedium(&medium);
     }
-    data->Release();
-    return ok;
+    if (cancelled_now()) return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    const DWORD keys = MK_LBUTTON | (wanted == DROPEFFECT_MOVE ? MK_SHIFT : MK_CONTROL);
+    POINTL point{};
+    DWORD effect = wanted;
+    hr = drop->DragEnter(data, keys, point, &effect);
+    if (FAILED(hr)) return hr;
+    if (!(effect & wanted) || cancelled_now()) {
+        drop->DragLeave();
+        return HRESULT_FROM_WIN32(cancelled_now() ? ERROR_CANCELLED : ERROR_NOT_SUPPORTED);
+    }
+    effect = wanted;
+    hr = drop->Drop(data, keys, point, &effect);
+    if (SUCCEEDED(hr) && !(effect & wanted)) return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    return hr;
+}
+
+bool PasteShellClipboard(const std::wstring& dir) {
+    return PasteShellClipboardAtSequence(dir, GetClipboardSequenceNumber()) == S_OK;
 }
 
 namespace {

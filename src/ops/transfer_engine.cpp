@@ -475,6 +475,7 @@ bool SmallCopyPool::AcquireDevice(const SmallCopyJob& job, TransferDeviceBudget:
 
 bool SmallCopyPool::WaitWhilePaused(const SmallCopyJob& job, TransferDeviceBudget::Lease& lease, SpindleTurn& turn) {
     if (!pause_.load() || cancel_.load() || stopping_.load()) return !cancel_.load() && !stopping_.load();
+    if (job.phase_eta) job.phase_eta->Invalidate();
     lease.Reset();
     turn.Release();
     while (pause_.load() && !cancel_.load() && !stopping_.load()) {
@@ -544,11 +545,22 @@ SmallCopyResult SmallCopyPool::Run(const SmallCopyJob& job, std::unique_ptr<SHA2
         control.pause = &pause_;
         control.wait_while_paused = [this, &job, &lease, &turn] { return WaitWhilePaused(job, lease, turn); };
         control.report = [this, &job](uint64_t done, uint64_t total) {
+            if (job.phase_eta) {
+                if (pause_.load()) job.phase_eta->Invalidate();
+                job.phase_eta->Progress(job.index, GetTickCount64(), done);
+            }
             std::lock_guard lock(mutex_);
             progress_[job.index] = {job.index, done, total};
         };
+        control.prepared = [this, &job](bool simple_stream) {
+            if (!job.phase_eta) return;
+            if (!simple_stream || pause_.load()) job.phase_eta->Invalidate();
+            else job.phase_eta->Prepared(job.index, GetTickCount64());
+        };
         const auto started = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        if (job.phase_eta) job.phase_eta->Begin(job.index, GetTickCount64(), job.bytes);
         const HRESULT hr = CopyLargeFile(job.source, job.destination, true, *job.chunked, control, &result.owned_output);
+        if (job.phase_eta) job.phase_eta->Finish(job.index, GetTickCount64(), hr == S_OK && !pause_.load());
         if (profile) {
             profile->copy_work_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - started).count());
@@ -559,7 +571,10 @@ SmallCopyResult SmallCopyPool::Run(const SmallCopyJob& job, std::unique_ptr<SHA2
             chunked = true;
         }
     }
-    if (!chunked) result.hr = copy();
+    if (!chunked) {
+        if (job.phase_eta) job.phase_eta->Invalidate();
+        result.hr = copy();
+    }
     if (!chunked && result.hr == HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER) && job.unbuffered) {
         result.buffering_fallback_error = result.hr;
         if (result.owned_output) {

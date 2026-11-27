@@ -11,6 +11,7 @@
 #include "verification_worker.h"
 #include "transfer_device_budget.h"
 #include "large_file_copy.h"
+#include "large_copy_eta_estimator.h"
 #include "spindle_gate.h"
 #include <optional>
 #include <memory>
@@ -84,6 +85,8 @@ struct SmallCopyJob {
     std::optional<LargeCopyPlan> chunked;
     // Spinning disks it uses, shared by every job of the task; empty: no turns.
     std::shared_ptr<const std::vector<long>> spindles;
+    // Optional task-owned two-phase model; actual overlapping attempts disable it.
+    std::shared_ptr<LargeCopyEtaEstimator> phase_eta;
 };
 
 struct SmallCopyProgress {

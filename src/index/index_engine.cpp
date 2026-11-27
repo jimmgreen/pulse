@@ -1815,6 +1815,7 @@ SearchResult Engine::Search(const Query& q, const std::atomic<uint32_t>* latest,
     std::lock_guard<std::mutex> query_guard(query_mu_);
     if (latest && latest->load() != expected) return out;
     CompiledQuery cq = ParseQuery(q.needle);
+    if (QueryHasInvalidRegex(cq)) return out;
     std::shared_lock<std::shared_mutex> lock(mutex_);
     out.layout = layout_epoch_.load();
     int32_t prefix_node = -1;

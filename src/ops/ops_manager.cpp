@@ -20,6 +20,8 @@
 #include "../common/preview_diagnostics.h"
 #include "operation_presentation.h"
 #include "transfer_rate_estimator.h"
+#include "transfer_eta_estimator.h"
+#include "recursive_eta_estimator.h"
 #include "transfer_stage_timing.h"
 #include "transfer_diagnostics.h"
 #include "transfer_enumeration_cursor.h"
@@ -4513,6 +4515,7 @@ void OpsManager::RunShellItemOp(const OpRequest& req, uint64_t task_id) {
 }
 
 void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
+    const uint64_t receipt_epoch = RecentCopyHints().BeginMutation();
     // A phone's items have no path for Pulse's engine: Explorer's does it.
     if (IsShellTransferRequest(req)) {
         RunShellTransfer(req, task_id);
@@ -4575,6 +4578,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         st.can_skip_authorization = false;
         st.type = req.type;
         st.task_id = task_id;
+        st.eta_detail = {};
         st.phase = OpPhase::Scanning;
         st.percent = -1.0f;
         st.failures.clear();
@@ -4615,6 +4619,10 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     // Time spent paused or waiting on a conflict. The rate clock skips it, so
     // after a resume the speed and estimate carry on where they were instead
     // of dropping to 0 and warming up again.
+    std::shared_ptr<LargeCopyEtaEstimator> phase_eta;
+    std::optional<LargeCopyPlan> phase_eta_plan;
+    ULONGLONG phase_eta_held_ms = 0;
+    bool eta_publish_pending = false;
     std::atomic<ULONGLONG> held_ms{ 0 };
     const auto rate_now = [&] { return GetTickCount64() - held_ms.load(); };
     std::wstring failure;
@@ -4624,6 +4632,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     const auto stop_requested = [&] {
         cancelled = cancelled || transfer_cancel_.load() || stopping_.load();
         if (!cancelled && transfer_pause_.load()) {
+            if (phase_eta) phase_eta->Invalidate();
             const auto previous = ExecutionStatus();
             SetStatus([&](OpStatus& st) {
                 st.phase = OpPhase::Paused;
@@ -4643,7 +4652,9 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                 st.phase = previous.phase;
                 st.summary = previous.summary;
                 st.bytes_per_second = previous.bytes_per_second;
-                st.eta_seconds = previous.eta_seconds;
+                // A retired phase estimate must not reappear after resume.
+                st.eta_seconds = phase_eta ? 0 : previous.eta_seconds;
+                eta_publish_pending = phase_eta != nullptr;
             });
         }
         return cancelled;
@@ -5061,7 +5072,13 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     }
 
     uint64_t total_bytes = 0;
-    for (const auto& entry : entries) total_bytes += entry.bytes;
+    TransferWork eta_total;
+    for (const auto& entry : entries) {
+        total_bytes += entry.bytes;
+        // Ordinary directories are prepared now and finalized after their children.
+        if (entry.directory && !entry.reparse) eta_total.directories += 2;
+        else ++eta_total.files;
+    }
     SetStatus([&](OpStatus& st) {
         st.total_bytes = total_bytes;
         st.total_items = entries.size();
@@ -5089,7 +5106,55 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     uint64_t processed_items = 0;
     TransferRateEstimator rate;
     rate.Reset(rate_now(), 0);
+    TransferEtaEstimator eta;
+    TransferWork eta_completed;
+    bool eta_reset_pending = false;
+    bool eta_parallel = false;
+    uint64_t transfer_eta_seconds = 0;
+    eta.Reset(rate_now());
+    const auto complete_eta_item = [&](const TransferEntry& entry) {
+        if (entry.directory && !entry.reparse) {
+            ++eta_completed.directories;
+            if (entry.renamed) --eta_total.directories; // no later directory finalization
+        } else ++eta_completed.files;
+        if (entry.renamed || (req.generated_output && req.type == OpType::Move)) eta_reset_pending = true;
+    };
+    const auto observe_eta = [&](uint64_t bytes) {
+        eta_completed.bytes = bytes;
+        const uint64_t tick = rate_now(); // the existing clock excludes pause and conflict waits
+        if (eta_reset_pending) {
+            if (phase_eta) phase_eta->Invalidate();
+            eta.Reset(tick, eta_completed);
+            eta_reset_pending = false;
+        }
+        eta.Observe(tick, {eta_completed, {total_bytes, eta_total.files, eta_total.directories}, enumeration_complete}, eta_parallel);
+        transfer_eta_seconds = eta.seconds();
+        if (phase_eta) {
+            if (held_ms.load() != phase_eta_held_ms || transfer_pause_.load() || transfer_cancel_.load())
+                phase_eta->Invalidate();
+            // The phase model replaces, never adds to, the aggregate estimate.
+            // Keep the existing unknown-total and stall gates authoritative.
+            if (transfer_eta_seconds && enumeration_complete) {
+                if (const uint64_t phased = phase_eta->Seconds(GetTickCount64())) transfer_eta_seconds = phased;
+            }
+        }
+    };
     ULONGLONG last_progress_publish_ms = 0;
+    uint64_t eta_poll_tick = 0;
+    const auto poll_eta = [&] {
+        const uint64_t now = rate_now();
+        if (now - eta_poll_tick < TransferEtaEstimator::kSampleMs) return;
+        eta_poll_tick = now;
+        uint64_t bytes = committed_bytes;
+        for (uint64_t pending : {pool_progress.Total(), active_serial_bytes})
+            bytes = pending > UINT64_MAX - bytes ? UINT64_MAX : bytes + pending;
+        const uint64_t previous = transfer_eta_seconds;
+        observe_eta((std::min)(bytes, total_bytes));
+        if (transfer_eta_seconds != previous || eta_publish_pending) {
+            eta_publish_pending = false;
+            SetProgressStatus([&](OpStatus& st) { st.eta_seconds = transfer_eta_seconds; });
+        }
+    };
     uint64_t progress_publishes_sent = 0;
     uint64_t progress_publishes_suppressed = 0;
 
@@ -5103,6 +5168,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         overall = concurrent > UINT64_MAX - overall ? UINT64_MAX : overall + concurrent;
         if (active_serial_entry && active_serial_entry != &entry)
             overall = active_serial_bytes > UINT64_MAX - overall ? UINT64_MAX : overall + active_serial_bytes;
+        const uint64_t eta_bytes = (std::min)(overall, total_bytes);
         overall = (std::max)(published_bytes, overall);
         if (total_bytes > 0) overall = (std::min)(overall, total_bytes);
         published_bytes = overall;
@@ -5115,6 +5181,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         last_progress_publish_ms = now_tick;
         ++progress_publishes_sent;
         rate.Observe(rate_now(), overall, total_bytes);
+        observe_eta(eta_bytes);
         SetProgressStatus([&](OpStatus& st) {
             st.current_item = FileName(st.current_item_token && active_serial_entry ? active_serial_entry->source : entry.source);
             st.total_bytes = total_bytes;
@@ -5122,10 +5189,10 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             st.completed_items = completed_items;
             st.bytes_per_second = rate.speed();
             st.peak_bytes_per_second = (std::max)(st.peak_bytes_per_second, rate.speed());
+            st.eta_seconds = transfer_eta_seconds;
             if (st.total_bytes > 0) {
                 st.percent = static_cast<float>((std::min)(verify_copies_.load() ? 99.0 : 100.0,
                     static_cast<double>(overall) * 100.0 / st.total_bytes));
-                st.eta_seconds = rate.eta_seconds();
             } else if (st.total_items > 0) {
                 st.percent = static_cast<float>(completed_items * 100.0 / st.total_items);
             }
@@ -5135,14 +5202,19 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     auto mark_skipped = [&](const TransferEntry& entry) {
         skipped_sources.push_back(entry.source);
         total_bytes -= (std::min)(total_bytes, entry.bytes);
+        if (entry.directory && !entry.reparse) eta_total.directories -= (std::min)(eta_total.directories, uint64_t{2});
+        else eta_total.files -= (std::min)(eta_total.files, uint64_t{1});
         ++processed_items;
         rate.Observe(rate_now(), published_bytes, total_bytes);
+        eta_reset_pending = true; // discarded partial work and skips are not successful throughput
+        const uint64_t pooled = pool_progress.Total();
+        observe_eta((std::min)(total_bytes, pooled > UINT64_MAX - committed_bytes ? UINT64_MAX : committed_bytes + pooled));
         SetProgressStatus([&](OpStatus& st) {
             st.total_bytes = total_bytes;
             st.transferred_bytes = published_bytes;
             st.completed_items = processed_items;
             st.current_item = FileName(entry.source);
-            st.eta_seconds = rate.eta_seconds();
+            st.eta_seconds = transfer_eta_seconds;
             if (st.total_bytes > 0) {
                 st.percent = static_cast<float>((std::min)(100.0,
                     static_cast<double>(published_bytes) * 100.0 / st.total_bytes));
@@ -5204,6 +5276,29 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     // Storage budgets are conservative across every selected root; an unrelated
     // SSD source must not grant concurrency to an HDD, unknown disk or share.
     const bool verify_requested = verify_copies_.load();
+    // Conservative first application: an entirely known queue of sibling large
+    // files. Real overlap, waits, fallback or changed work invalidate the model.
+    if (enumeration_complete && req.type == OpType::Copy && !verify_requested &&
+        !req.generated_output && entries.size() >= 3 && eta_total.files == entries.size() &&
+        eta_total.directories == 0) {
+        const auto source_parent = ParentOf(entries.front().source);
+        const auto target_parent = ParentOf(entries.front().destination);
+        const bool homogeneous = !source_parent.empty() && !target_parent.empty() &&
+            std::all_of(entries.begin(), entries.end(), [&](const TransferEntry& item) {
+                return !item.directory && !item.reparse && !item.renamed && item.bytes >= kDirectCopyMaxBytes &&
+                    ParentOf(item.source) == source_parent && ParentOf(item.destination) == target_parent;
+            });
+        if (homogeneous) {
+            phase_eta = std::make_shared<LargeCopyEtaEstimator>(total_bytes, eta_total.files);
+            phase_eta_held_ms = held_ms.load();
+        }
+    }
+    const auto match_phase_plan = [&](const LargeCopyPlan* plan) {
+        if (!phase_eta) return;
+        if (!plan || (phase_eta_plan && (phase_eta_plan->chunk != plan->chunk || phase_eta_plan->overlap != plan->overlap)))
+            phase_eta->Invalidate();
+        else if (!phase_eta_plan) phase_eta_plan = *plan;
+    };
     const bool bounded_verification = verify_requested && TransferFeatureEnabled(L"PULSE_BOUNDED_VERIFICATION") && req.type == OpType::Copy;
     const auto scheduler_config = ReadTransferSchedulerConfig();
     const bool overlap_large_verification = bounded_verification && scheduler_config.enabled &&
@@ -5314,6 +5409,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         pool = std::make_unique<SmallCopyPool>(threads, transfer_cancel_, transfer_pause_,
             transfer_control_mutex_, transfer_control_cv_, medium_pool_enabled, phase_profile, turn_task);
         pool_threads = threads;
+        eta_parallel = threads > 1;
         if (stage_report.enabled) {
             stage_report.pool_threads = threads;
             stage_report.medium_pool_enabled = medium_pool_enabled;
@@ -5562,6 +5658,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                 done.source_removed = result.source_removed;
             }
             ++processed_items;
+            complete_eta_item(done);
             committed_bytes += done.bytes;
             last_completed = &done;
         }
@@ -5582,6 +5679,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         if (!pool) return;
         if (!medium_pool_enabled) {
             apply_pooled(pool->Take(wait));
+            poll_eta();
             return;
         }
         for (const auto& progress : pool->TakeProgress()) {
@@ -5600,6 +5698,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             });
         }
         apply_pooled(pool->Take(wait));
+        poll_eta();
     };
     const auto drain_pool = [&] {
         while (pool && pool->Outstanding() > 0) {
@@ -5704,6 +5803,8 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             append_enumerated(TransferEnumerationCursor::RefillBatchLimit);
             for (size_t j = enumeration_batch_start; j < entries.size(); ++j) {
                 total_bytes += entries[j].bytes;
+                if (entries[j].directory && !entries[j].reparse) eta_total.directories += 2;
+                else ++eta_total.files;
                 if (!entries[j].directory && !entries[j].reparse && entries[j].bytes >= kDirectCopyMaxBytes)
                     large_remaining += entries[j].bytes;
             }
@@ -5737,6 +5838,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         retire_known_conflict(index);
         if (entry.renamed) {
             ++processed_items;
+            complete_eta_item(entry);
             publish_progress(entry, entry.bytes, entry.bytes, processed_items);
             committed_bytes += entry.bytes;
             continue;
@@ -5875,7 +5977,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                 st.phase = OpPhase::Running;
                 st.summary = ProgressSummary(req.type, entries.size());
                 st.bytes_per_second = rate.speed();
-                st.eta_seconds = rate.eta_seconds();
+                st.eta_seconds = eta.seconds();
             });
         }
 
@@ -5989,6 +6091,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             failures_in_a_row = 0;
             entry.completed = true;
             ++processed_items;
+            complete_eta_item(entry);
             publish_progress(entry, entry.bytes, entry.bytes, processed_items);
             committed_bytes += entry.bytes;
             continue;
@@ -6019,6 +6122,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             failures_in_a_row = 0;
             if (entry.bytes >= kDirectCopyMaxBytes) large_remaining -= (std::min)(large_remaining, entry.bytes);
             ++processed_items;
+            complete_eta_item(entry);
             ++renamed_in_merge;
             publish_progress(entry, entry.bytes, entry.bytes, processed_items);
             committed_bytes += entry.bytes;
@@ -6069,14 +6173,18 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             ready_dirs.insert(key);
             entry.directory_prepared = true;
             ++processed_items;
+            complete_eta_item(entry);
             const ULONGLONG now_dir = GetTickCount64();
             if (entries.size() <= kEveryItemMaxTotal ||
                 last_progress_publish_ms == 0 || now_dir - last_progress_publish_ms >= kProgressNotifyMs) {
                 last_progress_publish_ms = now_dir;
                 ++progress_publishes_sent;
+                const uint64_t pooled = pool_progress.Total();
+                observe_eta((std::min)(total_bytes, pooled > UINT64_MAX - committed_bytes ? UINT64_MAX : committed_bytes + pooled));
                 SetProgressStatus([&](OpStatus& st) {
                     st.current_item = FileName(entry.source);
                     st.completed_items = processed_items;
+                    st.eta_seconds = transfer_eta_seconds;
                     if (st.total_bytes == 0 && st.total_items > 0)
                         st.percent = static_cast<float>(st.completed_items * 100.0 / st.total_items);
                 });
@@ -6100,6 +6208,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             entry.destination_written = true;
             failures_in_a_row = 0;
             ++processed_items;
+            complete_eta_item(entry);
             publish_progress(entry, entry.bytes, entry.bytes, processed_items);
             committed_bytes += entry.bytes;
             if (entry.bytes >= kDirectCopyMaxBytes) large_remaining -= (std::min)(large_remaining, entry.bytes);
@@ -6150,6 +6259,8 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                     job.admission_bytes = (std::min<uint64_t>)(job.admission_bytes ? job.admission_bytes : entry.bytes, 64ull << 20);
                 }
             }
+            match_phase_plan(job.chunked ? &*job.chunked : nullptr);
+            job.phase_eta = phase_eta;
             pool->Submit(std::move(job));
             continue;
         }
@@ -6348,19 +6459,33 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         const bool large_to_solid = !unbuffered && !target.spinning && !target.block_clone &&
             entry.bytes >= kDirectCopyMaxBytes;
         const LargeCopyPlan* chunk_plan = (unbuffered || large_to_solid) ? chunk_plan_for(api_source, parent_dir) : nullptr;
+        match_phase_plan(chunk_plan);
         if (chunk_plan) {
             LargeCopyControl control;
             control.cancel = &transfer_cancel_;
             control.skip = &current_item->cancel;
             control.pause = &transfer_pause_;
-            control.report = context.report;
+            control.report = [&](uint64_t done, uint64_t total) {
+                if (phase_eta) {
+                    if (transfer_pause_.load()) phase_eta->Invalidate();
+                    phase_eta->Progress(index, GetTickCount64(), done);
+                }
+                context.report(done, total);
+            };
+            control.prepared = [&](bool simple_stream) {
+                if (!phase_eta) return;
+                if (!simple_stream || transfer_pause_.load()) phase_eta->Invalidate();
+                else phase_eta->Prepared(index, GetTickCount64());
+            };
             control.checkpoint = [&] {
                 if (!serial_turn.Contended()) return true;
+                if (phase_eta) phase_eta->Invalidate();
                 serial_lease.Reset();
                 serial_turn.Release();
                 return reacquire_serial() && !current_item->cancel.load();
             };
             control.wait_while_paused = [&] {
+                if (phase_eta) phase_eta->Invalidate();
                 SetStatus([&](OpStatus& st) {
                     st.phase = OpPhase::Paused;
                     st.summary = std::wstring(OpVerb(req.type)) + l10n::Get(l10n::StringId::Paused).c_str();
@@ -6382,13 +6507,20 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                     st.phase = OpPhase::Running;
                     st.summary = ProgressSummary(req.type, entries.size());
                     st.bytes_per_second = rate.speed();
-                    st.eta_seconds = rate.eta_seconds();
+                    st.eta_seconds = eta.seconds();
                 });
                 return true;
             };
+            const bool log_chunk = stage_report.enabled && entry.bytes >= 64ull * 1024 * 1024;
+            if (log_chunk) diagnostics::runtime::Event("copy_api_begin", {{"task", task_id},
+                {"bytes", entry.bytes}, {"backend", 1}});
+            if (phase_eta) phase_eta->Begin(index, GetTickCount64(), entry.bytes);
             const HRESULT chunked = measure_work(stage_report.serial_copy_work_ms, [&] {
                 return CopyLargeFile(api_source, copy_destination, true, *chunk_plan, control, &context.owned_output);
             });
+            if (phase_eta) phase_eta->Finish(index, GetTickCount64(), chunked == S_OK && !transfer_pause_.load());
+            if (log_chunk) diagnostics::runtime::Event("copy_api_end", {{"task", task_id},
+                {"hr", static_cast<uint64_t>(static_cast<uint32_t>(chunked))}, {"backend", 1}});
             if (chunked != S_FALSE) {
                 copy_result = chunked;
                 copied_in_chunks = true;
@@ -6463,7 +6595,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                 st.phase = OpPhase::Running;
                 st.summary = ProgressSummary(req.type, entries.size());
                 st.bytes_per_second = rate.speed();
-                st.eta_seconds = rate.eta_seconds();
+                st.eta_seconds = eta.seconds();
             });
         }
         const bool item_skipped = item_control_.Finish(current_item);
@@ -6589,6 +6721,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         if (entry.bytes >= kDirectCopyMaxBytes)
             large_remaining -= (std::min)(large_remaining, entry.bytes);
         ++processed_items;
+        complete_eta_item(entry);
         publish_progress(entry, entry.bytes, entry.bytes, processed_items);
         committed_bytes += entry.bytes;
     }
@@ -6612,6 +6745,8 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             {"apply_empty_calls", phase_profile->apply_empty_calls}, {"apply_results", phase_profile->apply_results},
             {"includes_pause", true}});
     }
+    // Flush/commit latency is not byte throughput; do not retain a stale countdown here.
+    SetStatus([](OpStatus& st) { st.eta_seconds = 0; });
     // Copies already written out finish their move, on failure and cancel
     // too (as each finished move used to).
     commit_moves();
@@ -6619,7 +6754,44 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         diagnostics::runtime::Event("move_renamed_in_merge", {{"task", task_id}, {"items", renamed_in_merge}});
     std::vector<std::wstring> generated_directories;
     std::vector<GeneratedDirectoryReceipt> generated_directory_receipts;
+    struct CopyCountReceipt {
+        size_t first, end;
+        std::wstring root;
+        TransferWork total;
+    };
+    std::vector<CopyCountReceipt> copy_receipts;
+    // Reuse the existing in-order result pass; never enumerate the copied tree again.
+    if (req.type == OpType::Copy && !req.is_undo && !req.generated_output &&
+        req.sources.size() <= RecentCopyWorkCache::kCapacity) {
+        for (size_t root = 0; root < root_entries.size(); ++root) {
+            const size_t first = root_entries[root];
+            if (first == std::wstring::npos) continue;
+            if (first >= entries.size() || (!copy_receipts.empty() && first <= copy_receipts.back().first)) {
+                copy_receipts.clear();
+                break;
+            }
+            if (!copy_receipts.empty()) copy_receipts.back().end = first;
+            const auto& entry = entries[first];
+            const std::wstring intended = JoinPath(req.dest_dir, root_name(req.sources[root]));
+            const bool independent = !entry.destination_preexisting || _wcsicmp(entry.destination.c_str(), intended.c_str()) != 0;
+            copy_receipts.push_back({first, entries.size(), entry.directory && !entry.reparse && independent
+                ? entry.destination : std::wstring{}, {}});
+        }
+    }
+    size_t receipt_index = 0;
     for (const auto& done : entries) {
+        const size_t item_index = static_cast<size_t>(&done - entries.data());
+        while (receipt_index + 1 < copy_receipts.size() && item_index >= copy_receipts[receipt_index].end) ++receipt_index;
+        if (receipt_index < copy_receipts.size()) {
+            auto& receipt = copy_receipts[receipt_index];
+            if (!receipt.root.empty() && item_index >= receipt.first && item_index < receipt.end) {
+                if (done.directory && !done.reparse) ++receipt.total.directories;
+                else {
+                    ++receipt.total.files;
+                    if (!RecursiveWorkStats::Add(receipt.total.bytes, done.bytes)) receipt.root.clear();
+                }
+            }
+        }
         const bool new_container = req.generated_output && done.directory && !done.renamed &&
             done.directory_prepared && !done.destination_preexisting;
         if (new_container) {
@@ -6633,6 +6805,9 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     }
 
     if (failure.empty() && !stop_requested()) {
+        // Directory finalization has its own measured cost, not the earlier data rate.
+        eta.Reset(rate_now(), eta_completed);
+        eta_reset_pending = false;
         for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
             if (stop_requested()) break;
             if (!it->directory_prepared) continue;
@@ -6664,6 +6839,13 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
                         item_failures.push_back({it->source, it->destination, Win32Message(metadata_error), hr});
                     ++failed_items;
                 }
+            }
+            ++eta_completed.directories;
+            const uint64_t now = GetTickCount64();
+            if (last_progress_publish_ms == 0 || now - last_progress_publish_ms >= kProgressNotifyMs) {
+                last_progress_publish_ms = now;
+                observe_eta(committed_bytes);
+                SetProgressStatus([&](OpStatus& st) { st.eta_seconds = transfer_eta_seconds; });
             }
         }
     }
@@ -6908,6 +7090,11 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
         while (failed_retries_.size() > 8) failed_retries_.pop_front();
     }
     rollback_note = kept_backup_note + rollback_note;
+    if (!transfer_cancelled && failure.empty() && failed_items == 0 && skipped_sources.empty()) {
+        const uint64_t copied_tick = GetTickCount64();
+        for (const auto& receipt : copy_receipts)
+            if (!receipt.root.empty()) RecentCopyHints().Remember(receipt.root, receipt.total, copied_tick, receipt_epoch);
+    }
     SetStatus([&](OpStatus& st) {
         st.active = false;
         st.pause_requested = false;
@@ -6950,6 +7137,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
 }
 
 void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
+    RecentCopyHints().BeginMutation(req.type == OpType::RealDelete || req.type == OpType::RecycleDelete);
     ControlledTransferResult rename_result;
     struct RenameCompletion {
         const OpRequest& request;
@@ -6985,6 +7173,7 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
         st.can_skip_authorization = false;
         st.type = req.type;
         st.task_id = task_id;
+        st.eta_detail = {};
         st.phase = OpPhase::Running;
         st.percent = 0.0f;
         st.summary = Describe(req);

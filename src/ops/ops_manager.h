@@ -21,6 +21,7 @@
 #include "op_speed_graph.h"
 #include "controlled_transfer.h"
 #include "transfer_rate_estimator.h"
+#include "operation_eta.h"
 #include "../common/menu_icon.h"
 #include <condition_variable>
 #include <cstdint>
@@ -316,6 +317,7 @@ struct OpStatus {
     double peak_items_per_second = 0.0;
     OpSpeedBasis speed_basis = OpSpeedBasis::None;
     uint64_t eta_seconds = 0;
+    OperationEta eta_detail; // advisory, task-bound presentation; never authoritative totals
     uint64_t completed_ops = 0; // bumped on every finished op (UI edge detect)
     // Failed because other processes hold the item (Restart Manager result).
     std::wstring locked_path;

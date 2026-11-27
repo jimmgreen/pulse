@@ -32,6 +32,9 @@ struct LargeCopyControl {
     // Blocks while paused; false: cancelled or skipped while waiting.
     std::function<bool()> wait_while_paused;
     std::function<void(uint64_t done, uint64_t total)> report;
+    // Once, after setup and before the first read. Named streams require an
+    // unmodelled extra phase, so their preparation is not a simple-stream sample.
+    std::function<void(bool simple_stream)> prepared;
     // Between chunks, with nothing in flight: lets the caller hand a shared
     // disk to another operation and wait for it back. False: abort.
     std::function<bool()> checkpoint;
@@ -282,6 +285,7 @@ inline HRESULT CopyLargeFile(const std::wstring& source, const std::wstring& des
         return true;
     };
     const auto read_next = [&](int index, DWORD& got) { return start_read(index) && finish_read(got); };
+    if (control.prepared) control.prepared(streams.empty());
     if (!read_next(current, pending_bytes)) return HRESULT_FROM_WIN32(error);
     while (pending_bytes > 0) {
         if (aborted()) return HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED);

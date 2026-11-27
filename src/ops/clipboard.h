@@ -1,6 +1,7 @@
 // clipboard.h — System clipboard interop with Explorer (CF_HDROP + drop effect).
 #pragma once
 #include <windows.h>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -51,6 +52,12 @@ inline bool ClipboardHasPasteableFiles() {
 // the folder's shell drop target, which writes virtual files out and shows
 // its own progress. For what ReadClipboard cannot read. UI thread (OLE).
 bool PasteShellClipboard(const std::wstring& dir);
+
+// Worker-only OLE paste. Captures the requested clipboard generation, reports
+// the actual Drop result, and never retries a potentially partial transfer.
+// Cancellation is checked before Drop; an ongoing Shell copy owns its cancel UI.
+HRESULT PasteShellClipboardAtSequence(const std::wstring& dir, uint32_t expected_sequence,
+                                     const std::atomic_bool* cancelled = nullptr);
 
 // A phone's items (shell parsing names, "::{...}") on the clipboard the
 // way Explorer puts them there: the shell's own data object for the items

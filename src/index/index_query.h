@@ -1,6 +1,7 @@
 // index_query.h — Everything-style query compile (plan.md 阶段 2.5 B).
 #pragma once
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,13 +18,16 @@ bool StartsWithFolded(const wchar_t* s, uint32_t n, const std::wstring& needle);
 bool WildcardFolded(const wchar_t* s, uint32_t n, const std::wstring& pat);
 bool WordStartFolded(const wchar_t* s, uint32_t n, const std::wstring& needle);
 
-enum class NameHow : uint8_t { Any, Substring, Exact, Wildcard };
+enum class NameHow : uint8_t { Any, Substring, Exact, Wildcard, Regex };
 enum class SizeHow : uint8_t { Any, Eq, Gt, Ge, Lt, Le, Range };
 enum class DateHow : uint8_t { Any, Range };
 enum class ContentMatchMode : uint8_t { AllWords, Phrase, AnyWord };
 
+struct NameRegex;
+
 struct Term {
-    std::wstring name; // already case-folded
+    std::shared_ptr<const NameRegex> name_regex;
+    std::wstring name; // case-folded except regex, whose escapes are case-sensitive
     NameHow name_how = NameHow::Any;
     bool name_in_path = false;
     bool name_not = false;
@@ -64,6 +68,8 @@ struct CompiledQuery {
 };
 
 CompiledQuery ParseQuery(std::wstring_view raw);
+bool QueryHasInvalidRegex(const CompiledQuery& q);
+std::wstring RegexQueryToken(std::wstring_view pattern);
 std::wstring FilenameQueryText(std::wstring_view raw);
 std::wstring QueryWithoutPathPrefix(std::wstring_view raw);
 bool QueryCanNarrow(std::wstring_view prev, std::wstring_view next);
