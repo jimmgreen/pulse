@@ -11,7 +11,9 @@ class DialogAdminTaskTransaction {
 public:
     DialogAdminTaskTransaction(std::wstring root,bool real,DialogAdminTaskApi api={})
         :root_(std::move(root)),real_(real),api_(std::move(api)){}
-    bool Prepare(std::wstring& error);
+    // Snapshot only a task this transaction will update. Recovery of an older
+    // journal remains independent of the incoming package's layout.
+    bool Prepare(std::wstring& error, bool updates_task = true);
     bool Recover(std::wstring& error);
 private:
     std::wstring root_;

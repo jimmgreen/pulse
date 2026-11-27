@@ -244,7 +244,9 @@ private:
     std::vector<int> StepsList() const;
     bool Animating() const;
     bool GlowAnimating() const;
-    void Invalidate() { InvalidateRect(hwnd_, nullptr, FALSE); }
+    bool MotionEnabled() const;
+    void SyncAnimationTimer();
+    void Invalidate() { SyncAnimationTimer(); InvalidateRect(hwnd_, nullptr, FALSE); }
     void CloseWith(int code) { outcome_.exit_code = code; DestroyWindow(hwnd_); }
     const wchar_t* T(Str s) const { return pulse::setup::Text(lang_, s); }
 
@@ -288,6 +290,7 @@ private:
     bool app_edit_visible_ = false, index_edit_visible_ = false;
 
     Page page_ = Page::Welcome, prev_page_ = Page::Welcome;
+    UINT animation_timer_ms_ = 0;
     ULONGLONG page_time_ = 0;
     Dialog dialog_ = Dialog::None;
     ULONGLONG dialog_time_ = 0;
@@ -895,19 +898,17 @@ void Wizard::Paint() {
     }
     PaintTitleBar();
 
-    // Page transition: the old page slides left and fades, the new one slides in.
-    const float t = std::min(1.f, (GetTickCount64() - page_time_) / 420.f);
-    const float ease = EaseOut(t);
+    // Keep the page and its hit targets in place; only its backdrop settles briefly.
+    const float t = MotionEnabled() ? std::min(1.f, (GetTickCount64() - page_time_) / 120.f) : 1.f;
     rt_->PushAxisAlignedClip({0, kTitle, kW, kH}, D2D1_ANTIALIAS_MODE_ALIASED);
-    if (t < 1 && prev_page_ != page_) PaintPage(prev_page_, -24 * ease, 1 - std::min(1.f, t * 1.6f));
-    const size_t first_hit = hits_.size();
-    PaintPage(page_, 24 * (1 - ease), std::min(1.f, t * 1.3f));
-    if (t < 1) hits_.resize(first_hit);  // no clicks while sliding
+    PaintPage(page_, 0, 1);
+    if (t < 1) Fill({0, kTitle, kW, kH}, WithAlpha(theme_.win, .06f * (1 - EaseOut(t))));
     rt_->PopAxisAlignedClip();
     if (dialog_ != Dialog::None) PaintDialog();
 
     if (rt_->EndDraw() == D2DERR_RECREATE_TARGET) ReleaseDevice();
     LayoutEdits();
+    SyncAnimationTimer();
 }
 
 void Wizard::PaintTitleBar() {
@@ -1149,7 +1150,7 @@ void Wizard::PaintOptions() {
         edit_rect = {in.left + 9, in.top + 8, in.right - 8, in.bottom - 7};
         visible = enabled && in.top >= view_top && in.bottom <= view_bottom;
         // While the native edit is hidden (disabled, scrolled, sliding) draw its text.
-        const bool edit_shown = visible && dialog_ == Dialog::None && GetTickCount64() - page_time_ >= 420;
+        const bool edit_shown = visible && dialog_ == Dialog::None;
         if (!edit_shown)
             Text(edit_id == kAppEdit ? req_.app_dir : req_.index_path, edit_rect, 12.5f,
                  WithAlpha(theme_.text, enabled ? 1.f : .45f));
@@ -1595,7 +1596,7 @@ void Wizard::PaintUiPanel(const D2D1_RECT_F& panel) {
 }
 
 void Wizard::PaintDone() {
-    const float t = std::min(1.f, (GetTickCount64() - page_time_) / 900.f);
+    const float t = MotionEnabled() ? std::min(1.f, (GetTickCount64() - page_time_) / 300.f) : 1.f;
     const bool index_ok = result_.index_configured && result_.index_running;
     std::vector<std::pair<std::wstring, D2D1_COLOR_F>> pills;
     if (req_.tasks.index_service && !req_.options.test && (result_.index_running || !result_.index_configured))
@@ -1790,7 +1791,7 @@ void Wizard::PaintDialog() {
     if (dialog_ == Dialog::Locked || dialog_ == Dialog::Cleanup) { PaintLockDialog(); return; }
     hits_.clear();  // modal
     Hit(kMin, {kW - 92, 0, kW - 46, kTitle}, false);
-    const float t = std::min(1.f, (GetTickCount64() - dialog_time_) / 220.f);
+    const float t = MotionEnabled() ? std::min(1.f, (GetTickCount64() - dialog_time_) / 120.f) : 1.f;
     Fill({0, kTitle, kW, kH}, WithAlpha(theme_.scrim, t));
     const bool busy = dialog_ == Dialog::Busy;
     const std::wstring title = T(busy ? Str::BusyTitle : Str::CancelTitle);
@@ -1903,14 +1904,29 @@ void Wizard::PaintLockDialog() {
 bool Wizard::GlowAnimating() const {
     if (page_ != Page::Welcome || dialog_ != Dialog::None || !hwnd_ || IsIconic(hwnd_) || !IsWindowVisible(hwnd_))
         return false;
+    return MotionEnabled();
+}
+
+bool Wizard::MotionEnabled() const {
     BOOL animate = TRUE;
     SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animate, 0);
     return animate != FALSE;
 }
 
+void Wizard::SyncAnimationTimer() {
+    if (!hwnd_) return;
+    const bool visible = IsWindowVisible(hwnd_) && !IsIconic(hwnd_);
+    const UINT desired = visible ? (Animating() ? 16u : GlowAnimating() ? 33u : 0u) : 0u;
+    if (desired == animation_timer_ms_) return;
+    if (desired) SetTimer(hwnd_, 1, desired, nullptr);
+    else KillTimer(hwnd_, 1);
+    animation_timer_ms_ = desired;
+}
+
 bool Wizard::Animating() const {
     const ULONGLONG now = GetTickCount64();
-    return now - page_time_ < 1000 || now - dialog_time_ < 300 || page_ == Page::Install ||
+    return (MotionEnabled() && (now - page_time_ < (page_ == Page::Done ? 300u : 120u) ||
+                               (dialog_ != Dialog::None && now - dialog_time_ < 120))) || page_ == Page::Install ||
            un_state_ == UnState::Running || (un_state_ != UnState::Idle && shown_progress_ < .999f) ||
            (agree_flash_ && now - agree_flash_ < 1000);
 }
@@ -2206,7 +2222,7 @@ void Wizard::CreateEdits() {
 
 void Wizard::LayoutEdits() {
     if (!app_edit_) return;
-    const bool interactive = page_ == Page::Options && prev_page_ != page_ ? GetTickCount64() - page_time_ >= 420 : page_ == Page::Options;
+    const bool interactive = page_ == Page::Options;
     const float s = Scale();
     auto place = [&](HWND e, const D2D1_RECT_F& r, bool visible) {
         const bool show = visible && interactive && dialog_ == Dialog::None;
@@ -2296,6 +2312,10 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
             Invalidate();
             return 0;
         }
+        case WM_SHOWWINDOW:
+            if (!wp) { KillTimer(hwnd_, 1); animation_timer_ms_ = 0; }
+            else Invalidate();
+            return 0;
         case WM_SIZE:
             if (window_rt_) window_rt_->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));
             Invalidate();
@@ -2326,6 +2346,7 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 Show(result_.exit_code == kExitOk ? Page::Done : Page::Error);
             }
+            SyncAnimationTimer();
             return 0;
         case WM_MOUSEMOVE: {
             TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd_, 0};
@@ -2603,7 +2624,7 @@ WizardOutcome Wizard::Run() {
 #endif
     ShowWindow(hwnd_, SW_SHOWNORMAL);
     SetForegroundWindow(hwnd_);
-    SetTimer(hwnd_, 1, 16, nullptr);
+    SyncAnimationTimer();
 
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {

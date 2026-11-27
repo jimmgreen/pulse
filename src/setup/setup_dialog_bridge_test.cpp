@@ -149,5 +149,53 @@ int wmain(int argc, wchar_t** argv) {
               ptr3.core_dir_x86 == r2.core_dir_x86,
           "partial x64-only update preserves previous x86 Core pointer cleanly");
 
+    const auto helper = fixture.dir / L"helper.exe";
+    WriteBytes(helper, "EXPLORER_HELPER_V1");
+    setup::BridgeStageRequest helper_request = req1;
+    helper_request.core_only = true;
+    helper_request.core_source_x64 = (stage_v3 / paths::kCoreDllName64).wstring();
+    helper_request.explorer_bridge_source_x64 = helper.wstring();
+    const auto helper_v1 = setup::ProvisionDialogBridge(helper_request);
+    paths::ActiveBridgePointer helper_pointer{};
+    check(helper_v1.error == ERROR_SUCCESS && helper_v1.explorer_bridge64_staged &&
+          paths::ReadActiveBridgePointer(bridge_root.wstring(), helper_pointer) == ERROR_SUCCESS &&
+          helper_pointer.core_digest_x64 == ptr3.core_digest_x64 &&
+          helper_pointer.explorer_bridge_sha256_x64.size() == 64 &&
+          helper_pointer.core_dir_x64 != ptr3.core_dir_x64 &&
+          fs::path(helper_pointer.core_dir_x64).filename().wstring().size() == 64 &&
+          helper_pointer.core_dir_x86 == ptr3.core_dir_x86 &&
+          helper_pointer.host_exe == ptr3.host_exe && helper_pointer.install_root == ptr3.install_root,
+          "Core plus helper uses combined immutable address and preserves installed host and x86 Core");
+    check(!helper_v1.stub64_staged && !helper_v1.stub32_staged && !helper_v1.broker_staged &&
+          !helper_v1.overlay_staged && !helper_v1.inject32_staged && !helper_v1.service_configured &&
+          fs::exists(ptr3.core_dir_x64),
+          "core-only update neither stages fixed components nor prunes old versions");
+    WriteBytes(helper, "EXPLORER_HELPER_V2");
+    helper_request.core_source_x64.clear();
+    const auto helper_v2 = setup::ProvisionDialogBridge(helper_request);
+    paths::ActiveBridgePointer helper_pointer_v2{};
+    check(helper_v2.error == ERROR_SUCCESS &&
+          paths::ReadActiveBridgePointer(bridge_root.wstring(), helper_pointer_v2) == ERROR_SUCCESS &&
+          helper_pointer_v2.core_digest_x64 == helper_pointer.core_digest_x64 &&
+          helper_pointer_v2.explorer_bridge_sha256_x64 != helper_pointer.explorer_bridge_sha256_x64 &&
+          helper_pointer_v2.core_dir_x64 != helper_pointer.core_dir_x64 &&
+          fs::exists(fs::path(helper_pointer.core_dir_x64) / paths::kExplorerBridgeExeName),
+          "helper-only update retains Core bytes and publishes a distinct version without overwriting old helper");
+    helper_request.explorer_bridge_source_x64 = (fixture.dir / L"missing.exe").wstring();
+    const auto missing_helper = setup::ProvisionDialogBridge(helper_request);
+    paths::ActiveBridgePointer after_failure{};
+    check(missing_helper.error != ERROR_SUCCESS &&
+          paths::ReadActiveBridgePointer(bridge_root.wstring(), after_failure) == ERROR_SUCCESS &&
+          after_failure.generation == helper_pointer_v2.generation &&
+          after_failure.core_dir_x64 == helper_pointer_v2.core_dir_x64,
+          "helper staging failure preserves the published pointer");
+    helper_request.explorer_bridge_source_x64 = helper.wstring();
+    WriteBytes(fs::path(helper_pointer_v2.core_dir_x64) / paths::kExplorerBridgeExeName, "TAMPERED");
+    const auto damaged_destination = setup::ProvisionDialogBridge(helper_request);
+    check(damaged_destination.error == ERROR_CRC &&
+          paths::ReadActiveBridgePointer(bridge_root.wstring(), after_failure) == ERROR_SUCCESS &&
+          after_failure.generation == helper_pointer_v2.generation,
+          "existing immutable helper mismatch is rejected rather than replaced or activated");
+
     return failures ? 1 : 0;
 }

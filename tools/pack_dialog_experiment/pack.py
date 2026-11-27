@@ -47,7 +47,8 @@ DYNAMIC = {
 APP_CONTRACT = {'manifest': 1, 'kind': 'AppRuntime'}
 APP_REQUIRED = ['pulse.exe', 'lumatext.dll', 'pulse_shell.exe']
 APP_OPTIONAL = {'pulse.ai.exe', 'pulse.content.exe', 'pulse.document.exe', 'pulse.index.exe',
-                'pulse_hotkey_broker.exe', 'pulse_start_pin.dll', 'pulse_integration.exe'}
+                'pulse_hotkey_broker.exe', 'pulse_start_pin.dll', 'pulse_integration.exe',
+                'pulse_explorer_bridge.exe'}
 
 
 def dialog_binary(name):

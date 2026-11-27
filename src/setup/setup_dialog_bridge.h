@@ -10,6 +10,11 @@ struct BridgeStageRequest {
     std::wstring app_dir;              // User's chosen Pulse install dir (may be on D:\ / E:\ / F:\).
     std::wstring stage_source_dir;     // Directory containing built Stub/Core/Broker/Inject32/Overlay files.
     std::wstring host_exe;             // Pulse host executable path (e.g. D:\Pulse\pulse.exe).
+    std::wstring explorer_bridge_source_x64; // Explicit optional helper source; never inferred across architectures.
+    std::wstring explorer_bridge_source_x86;
+    std::wstring core_source_x64;
+    std::wstring core_source_x86;
+    bool core_only = false;            // Explicit sources only; no fixed components, service, COM or cleanup.
     std::wstring bridge_root_override; // Empty => C:\Program Files\Common Files\Pulse\DialogBridge.
     bool harden_dacl = true;
     bool configure_service = true;
@@ -27,6 +32,8 @@ struct BridgeStageResult {
     bool stub32_staged = false;
     bool core64_staged = false;
     bool core32_staged = false;
+    bool explorer_bridge64_staged = false;
+    bool explorer_bridge32_staged = false;
     bool broker_staged = false;
     bool inject32_staged = false;
     bool overlay_staged = false;

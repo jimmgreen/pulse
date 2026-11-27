@@ -27,9 +27,15 @@ bool ExistsFile(const std::wstring& path) noexcept {
 }
 
 std::string Sha256FileHex(const std::wstring& path) noexcept {
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
-                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                              nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (file == INVALID_HANDLE_VALUE) return {};
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(file, &info) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) {
+        CloseHandle(file);
+        return {};
+    }
 
     BCRYPT_ALG_HANDLE alg = nullptr;
     BCRYPT_HASH_HANDLE hash = nullptr;
@@ -43,7 +49,8 @@ std::string Sha256FileHex(const std::wstring& path) noexcept {
                 std::vector<UCHAR> buf(64 * 1024);
                 DWORD read = 0;
                 bool ok = true;
-                while (ReadFile(file, buf.data(), static_cast<DWORD>(buf.size()), &read, nullptr)) {
+                for (;;) {
+                    if (!ReadFile(file, buf.data(), static_cast<DWORD>(buf.size()), &read, nullptr)) { ok = false; break; }
                     if (read == 0) break;
                     if (BCryptHashData(hash, buf.data(), read, 0) != 0) { ok = false; break; }
                 }
@@ -63,6 +70,39 @@ std::string Sha256FileHex(const std::wstring& path) noexcept {
     }
     CloseHandle(file);
     return hex;
+}
+
+std::string PairDigest(const std::string& core, const std::string& helper) {
+    const std::string input = "PulseExplorerBridgeV1\n" + core + "\n" + helper;
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    UCHAR digest[32]{};
+    std::string output;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) == 0) {
+        if (BCryptCreateHash(alg, &hash, nullptr, 0, nullptr, 0, 0) == 0) {
+            if (BCryptHashData(hash, reinterpret_cast<PUCHAR>(const_cast<char*>(input.data())),
+                              static_cast<ULONG>(input.size()), 0) == 0 &&
+                BCryptFinishHash(hash, digest, sizeof(digest), 0) == 0) {
+                for (const auto byte : digest) {
+                    output += "0123456789abcdef"[byte >> 4];
+                    output += "0123456789abcdef"[byte & 15];
+                }
+            }
+            BCryptDestroyHash(hash);
+        }
+        BCryptCloseAlgorithmProvider(alg, 0);
+    }
+    return output;
+}
+
+DWORD StageImmutableVerified(const std::wstring& source, const std::wstring& target,
+                             const std::string& digest) {
+    if (digest.size() != 64) return ERROR_INVALID_DATA;
+    if (!CopyFileW(source.c_str(), target.c_str(), TRUE)) {
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) return error;
+    }
+    return Sha256FileHex(target) == digest ? ERROR_SUCCESS : ERROR_CRC;
 }
 
 std::wstring AsciiToWide(const std::string& s) {
@@ -282,16 +322,24 @@ BridgeStageResult ProvisionDialogBridge(const BridgeStageRequest& request) noexc
 
         // Preserve previous active pointer to advance generation monotonically and retain previous Core dir.
         paths::ActiveBridgePointer prev{};
-        paths::ReadActiveBridgePointer(out.bridge_root, prev);
+        const DWORD previous_error = paths::ReadActiveBridgePointer(out.bridge_root, prev);
+        if (request.core_only && (previous_error || prev.install_root != request.app_dir ||
+            prev.host_exe != request.host_exe || prev.generation == UINT64_MAX)) {
+            out.error = previous_error ? previous_error : ERROR_INVALID_DATA;
+            return out;
+        }
 
         // 2. Stage fixed-path Stub DLLs, Broker, Inject32, Overlay (stopping Broker first if updating it).
-        const auto src_stub64 = FindSourceFile(request.stage_source_dir, request.app_dir, paths::kStubDllName64);
-        const auto src_stub32 = FindSourceFile(request.stage_source_dir, request.app_dir, paths::kStubDllName32);
-        const auto src_core64 = FindSourceFile(request.stage_source_dir, request.app_dir, paths::kCoreDllName64);
-        const auto src_core32 = FindSourceFile(request.stage_source_dir, request.app_dir, paths::kCoreDllName32);
-        const auto src_broker = FindSourceFile(request.stage_source_dir, request.app_dir, paths::kBrokerExeName);
-        const auto src_inj32  = FindSourceFile(request.stage_source_dir, request.app_dir, paths::kInject32ExeName);
-        const auto src_overlay = FindSourceFile(request.stage_source_dir, request.app_dir, paths::kOverlayExeName);
+        const auto find = [&](const wchar_t* name) {
+            return request.core_only ? std::wstring{} : FindSourceFile(request.stage_source_dir, request.app_dir, name);
+        };
+        const auto src_stub64 = find(paths::kStubDllName64);
+        const auto src_stub32 = find(paths::kStubDllName32);
+        const auto src_core64 = request.core_source_x64.empty() ? find(paths::kCoreDllName64) : request.core_source_x64;
+        const auto src_core32 = request.core_source_x86.empty() ? find(paths::kCoreDllName32) : request.core_source_x86;
+        const auto src_broker = find(paths::kBrokerExeName);
+        const auto src_inj32 = find(paths::kInject32ExeName);
+        const auto src_overlay = find(paths::kOverlayExeName);
 
         if (request.configure_service && !src_broker.empty()) {
             StopService(kDialogBrokerServiceName, 10000);
@@ -314,32 +362,56 @@ BridgeStageResult ProvisionDialogBridge(const BridgeStageRequest& request) noexc
         paths::ActiveBridgePointer next{};
         next.schema = 1;
         next.generation = prev.generation + 1;
+        next.disabled = prev.disabled;
         next.install_root = request.app_dir;
         next.host_exe = !request.host_exe.empty() ? request.host_exe
                         : (!request.app_dir.empty() ? request.app_dir + L"\\pulse.exe" : L"");
 
-        auto stage_core = [&](const std::wstring& src, const wchar_t* name,
-                              std::wstring& out_dir, std::string& out_digest, bool& flag) -> DWORD {
-            if (src.empty()) return ERROR_SUCCESS;
-            const std::string sha = Sha256FileHex(src);
+        auto stage_core = [&](const std::wstring& source, const wchar_t* name,
+                              const std::wstring& helper, const std::wstring& previous_dir,
+                              const std::string& previous_digest, std::wstring& out_dir,
+                              std::string& out_digest, std::string& helper_digest, bool& flag, bool& helper_flag) -> DWORD {
+            if (source.empty() && helper.empty()) return ERROR_SUCCESS;
+            const auto src = source.empty() ? previous_dir + L"\\" + name : source;
+            if (source.empty() && (previous_dir.empty() || previous_digest.size() != 64)) return ERROR_FILE_NOT_FOUND;
+            const auto sha = Sha256FileHex(src);
             if (sha.size() != 64) return ERROR_READ_FAULT;
-            const std::wstring ver_dir = versions_root + L"\\" + AsciiToWide(sha.substr(0, 16));
+            if (source.empty() && sha != previous_digest) return ERROR_CRC;
+            const auto helper_sha = helper.empty() ? std::string{} : Sha256FileHex(helper);
+            if (!helper.empty() && helper_sha.size() != 64) return ERROR_READ_FAULT;
+            const auto identity = helper.empty() ? sha.substr(0, 16) : PairDigest(sha, helper_sha);
+            if (identity.empty()) return ERROR_READ_FAULT;
+            const std::wstring ver_dir = versions_root + L"\\" + AsciiToWide(identity);
             std::error_code ec;
             fs::create_directories(ver_dir, ec);
             if (ec) return ERROR_CANNOT_MAKE;
-            const DWORD err = StageFileSafe(src, ver_dir + L"\\" + name);
+            if (request.harden_dacl) {
+                const DWORD error = paths::EnsureProtectedBridgeDirectory(ver_dir, true);
+                if (error) return error;
+            }
+            const DWORD err = StageImmutableVerified(src, ver_dir + L"\\" + name, sha);
             if (err != ERROR_SUCCESS) return err;
+            if (!helper.empty()) {
+                const DWORD error = StageImmutableVerified(helper, ver_dir + L"\\" + paths::kExplorerBridgeExeName, helper_sha);
+                if (error) return error;
+                helper_flag = true;
+            }
             out_dir = ver_dir;
             out_digest = sha;
+            helper_digest = helper_sha;
             flag = true;
             return ERROR_SUCCESS;
         };
 
-        if (DWORD err = stage_core(src_core64, paths::kCoreDllName64, next.core_dir_x64, next.core_digest_x64, out.core64_staged)) {
+        if (DWORD err = stage_core(src_core64, paths::kCoreDllName64, request.explorer_bridge_source_x64,
+                prev.core_dir_x64, prev.core_digest_x64, next.core_dir_x64, next.core_digest_x64,
+                next.explorer_bridge_sha256_x64, out.core64_staged, out.explorer_bridge64_staged)) {
             out.error = err;
             return out;
         }
-        if (DWORD err = stage_core(src_core32, paths::kCoreDllName32, next.core_dir_x86, next.core_digest_x86, out.core32_staged)) {
+        if (DWORD err = stage_core(src_core32, paths::kCoreDllName32, request.explorer_bridge_source_x86,
+                prev.core_dir_x86, prev.core_digest_x86, next.core_dir_x86, next.core_digest_x86,
+                next.explorer_bridge_sha256_x86, out.core32_staged, out.explorer_bridge32_staged)) {
             out.error = err;
             return out;
         }
@@ -348,10 +420,12 @@ BridgeStageResult ProvisionDialogBridge(const BridgeStageRequest& request) noexc
         if (next.core_dir_x64.empty()) {
             next.core_dir_x64 = prev.core_dir_x64;
             next.core_digest_x64 = prev.core_digest_x64;
+            next.explorer_bridge_sha256_x64 = prev.explorer_bridge_sha256_x64;
         }
         if (next.core_dir_x86.empty()) {
             next.core_dir_x86 = prev.core_dir_x86;
             next.core_digest_x86 = prev.core_digest_x86;
+            next.explorer_bridge_sha256_x86 = prev.explorer_bridge_sha256_x86;
         }
 
         out.core_dir_x64 = next.core_dir_x64;
@@ -368,12 +442,14 @@ BridgeStageResult ProvisionDialogBridge(const BridgeStageRequest& request) noexc
         }
 
         // Clean up retired Core versions older than current + previous and unlocked .old./.new. files.
-        PruneObsoleteCoreVersions(versions_root, next.core_dir_x64, next.core_dir_x86,
-                                  prev.core_dir_x64, prev.core_dir_x86);
-        PruneStaleBridgeArtifacts(out.bridge_root);
+        if (!request.core_only) {
+            PruneObsoleteCoreVersions(versions_root, next.core_dir_x64, next.core_dir_x86,
+                                      prev.core_dir_x64, prev.core_dir_x86);
+            PruneStaleBridgeArtifacts(out.bridge_root);
+        }
 
         // 5. Optional HKLM COM Stub registration (explicit opt-in with full backup).
-        if (request.register_hklm_com) {
+        if (request.register_hklm_com && !request.core_only) {
             if (out.stub64_staged) {
                 dialog_com_hklm::RegisterStub(out.bridge_root + L"\\" + paths::kStubDllName64, false);
             }

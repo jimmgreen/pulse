@@ -52,7 +52,7 @@ add_executable(pulse_setup WIN32
 target_link_libraries(pulse_setup PRIVATE oleaut32 taskschd)
 
 add_executable(pulse_setup_dialog_admin_task_transaction_test EXCLUDE_FROM_ALL setup_dialog_admin_task_transaction_test.cpp
-    setup_dialog_admin_task_transaction.cpp ../common/dialog_admin_auto_task.cpp ../common/dialog_admin_trust.cpp
+    setup_dialog_admin_task_transaction.cpp setup_service.cpp ../common/dialog_admin_auto_task.cpp ../common/dialog_admin_trust.cpp
     ../common/dialog_bridge_paths.cpp ../common/dialog_com_hklm.cpp setup_dialog_bridge.cpp)
 target_link_libraries(pulse_setup_dialog_admin_task_transaction_test PRIVATE pulse_setup_dialog_bundle taskschd oleaut32 ole32 advapi32 shell32)
 target_compile_definitions(pulse_setup_dialog_admin_task_transaction_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

@@ -51,6 +51,7 @@ DEFAULT_LAYOUT = [
     ("{build}/Pulse.Preview.exe", "Pulse.Preview.exe"),
     ("{build}/pulse_elevated.exe", "pulse_elevated.exe"),
     ("{build}/pulse_hotkey_broker.exe", "pulse_hotkey_broker.exe"),
+    ("{build}/pulse_explorer_bridge.exe", "pulse_explorer_bridge.exe"),
     ("{build}/pulse_shell.exe", "pulse_shell.exe"),
     ("{build}/pulse_start_pin.dll", "pulse_start_pin.dll"),
     ("{build}/pulse_integration.exe", "pulse_integration.exe"),
@@ -106,6 +107,32 @@ def collect_dialog_bridge_stage(build: Path, dialog_build_x86: Path | None = Non
             candidate = dialog_build_x86 / name
             if candidate.is_file():
                 staged.append((candidate, dest))
+    if (build / "pulse_explorer_bridge.exe").is_file():
+        # New packages bind helpers from these builds, never from an installed
+        # active pointer. Old helper-free payload layouts remain compatible.
+        dialog_pack = _dialog_tools()
+        if not has_decoupled_dialog_bridge_stage(staged):
+            raise dialog_pack.PackageError("Explorer bridge requires complete x64 Stub/Core/Broker stage")
+        def require_image(path: Path, machine: int, *, executable=False):
+            if not path.is_file():
+                raise dialog_pack.PackageError(f"missing Explorer bridge component: {path}")
+            image = dialog_pack.PE(path)
+            if image.machine != machine:
+                raise dialog_pack.PackageError(f"wrong Explorer bridge architecture: {path}")
+            if executable:
+                header = image.u32(0x3c)
+                characteristics = image.u16(header + 22)
+                if not characteristics & 0x0002 or characteristics & 0x2000:
+                    raise dialog_pack.PackageError(f"Explorer bridge must be an executable: {path}")
+        require_image(build / "pulse_explorer_bridge.exe", dialog_pack.MACHINES['x64'], executable=True)
+        for name in ("PulseDialogStub64.dll", "PulseDialogCore64.dll", "PulseDialogBroker.exe"):
+            require_image(build / name, dialog_pack.MACHINES['x64'])
+        if dialog_build_x86 is not None:
+            for name, _ in OPTIONAL_DIALOG_BRIDGE_STAGE_X86:
+                require_image(dialog_build_x86 / name, dialog_pack.MACHINES['x86'])
+            helper = dialog_build_x86 / "pulse_explorer_bridge.exe"
+            require_image(helper, dialog_pack.MACHINES['x86'], executable=True)
+            staged.append((helper, "DialogBridgeStage/pulse_explorer_bridge32.exe"))
     return staged
 
 

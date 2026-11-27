@@ -30,9 +30,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%CD%\scripts\check_release_
 call "%CD%\scripts\vcvars.bat" >nul || exit /b 1
 chcp 65001 >nul
 set "VSLANG=1033"
-cmake --build "%PULSE_BUILD_DIR%" --target pulse_launcher pulse_setup pulse_dialog_stub pulse_dialog_core pulse_dialog_broker pulse_dialog_overlay pulse_dialog_auto pulse_dialog_auto_control pulse_dialog_launcher pulse_file_dialog_ui_proof_runtime pulse_picker_ui_proof pulse_dialog_admin_auto pulse_file_dialog_auto_entry_runtime || exit /b 1
+cmake --build "%PULSE_BUILD_DIR%" --target pulse_launcher pulse_setup pulse_explorer_bridge pulse_dialog_stub pulse_dialog_core pulse_dialog_broker pulse_dialog_overlay pulse_dialog_auto pulse_dialog_auto_control pulse_dialog_launcher pulse_file_dialog_ui_proof_runtime pulse_picker_ui_proof pulse_dialog_admin_auto pulse_file_dialog_auto_entry_runtime || exit /b 1
 
-for %%F in (pulse.exe Pulse.AI.exe Pulse.Content.exe Pulse.Document.exe Pulse.Index.exe Pulse.Preview.exe pulse_shell.exe pulse_start_pin.dll pulse_elevated.exe pulse_hotkey_broker.exe pulse_integration.exe lumatext.dll pdfium.dll) do (
+for %%F in (pulse.exe Pulse.AI.exe Pulse.Content.exe Pulse.Document.exe Pulse.Index.exe Pulse.Preview.exe pulse_shell.exe pulse_start_pin.dll pulse_elevated.exe pulse_hotkey_broker.exe pulse_explorer_bridge.exe pulse_integration.exe lumatext.dll pdfium.dll) do (
     if not exist "%PULSE_BUILD_DIR%\%%F" (
         echo Missing build output: %PULSE_BUILD_DIR%\%%F
         exit /b 1
@@ -48,6 +48,11 @@ where python >nul 2>&1 || set "PULSE_PYTHON=py -3"
 rem The x86 companion is thin (dialog files only, no pulse.exe): pack_installer.py checks its
 rem architecture and that every import is a system DLL or a bundled file, so a CRT DLL dependency fails there.
 if defined PULSE_DIALOG_BUILD_X86 (
+    cmake --build "%PULSE_DIALOG_BUILD_X86%" --target pulse_explorer_bridge || exit /b 1
+    if not exist "%PULSE_DIALOG_BUILD_X86%\pulse_explorer_bridge.exe" (
+        echo Missing x86 Explorer bridge: %PULSE_DIALOG_BUILD_X86%\pulse_explorer_bridge.exe
+        exit /b 1
+    )
     %PULSE_PYTHON% tools\l10n\check_binary_resources.py "%PULSE_DIALOG_BUILD_X86%\PulsePickerUiProof.dll" || exit /b 1
     set PULSE_DIALOG_X86_ARG=--dialog-build-x86 "%PULSE_DIALOG_BUILD_X86%"
 )

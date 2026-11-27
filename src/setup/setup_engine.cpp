@@ -49,6 +49,25 @@ namespace {
 
 const wchar_t* UninstallKey(const Options& o) { return o.test ? kTestUninstallKey : kUninstallKey; }
 
+bool ExplorerHelperMachine(const std::wstring& file, WORD machine) {
+    const HANDLE input = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (input == INVALID_HANDLE_VALUE) return false;
+    IMAGE_DOS_HEADER dos{};
+    DWORD read = 0, signature = 0;
+    IMAGE_FILE_HEADER header{};
+    bool valid = ReadFile(input, &dos, sizeof(dos), &read, nullptr) && read == sizeof(dos) &&
+        dos.e_magic == IMAGE_DOS_SIGNATURE && dos.e_lfanew >= static_cast<LONG>(sizeof(dos)) && dos.e_lfanew <= 64 * 1024 * 1024;
+    LARGE_INTEGER offset{}; offset.QuadPart = dos.e_lfanew;
+    valid = valid && SetFilePointerEx(input, offset, nullptr, FILE_BEGIN) &&
+        ReadFile(input, &signature, sizeof(signature), &read, nullptr) && read == sizeof(signature) &&
+        signature == IMAGE_NT_SIGNATURE && ReadFile(input, &header, sizeof(header), &read, nullptr) &&
+        read == sizeof(header) && header.Machine == machine &&
+        (header.Characteristics & IMAGE_FILE_EXECUTABLE_IMAGE) && !(header.Characteristics & IMAGE_FILE_DLL);
+    CloseHandle(input);
+    return valid;
+}
+
 // ---- ConfiguredIndexPath ---------------------------------------------------
 
 std::optional<std::wstring> ReadExplicitIndexPath(const Options& options = {}) {
@@ -368,6 +387,35 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
     files.push_back(L"setup-defaults.ini");
     DialogVersionPlan dialog_version;
     if (!PrepareDialogVersion(app, tx.StagingDir(), files, dialog_version, error)) { tx.Abort(); return Fail(kExitPrepareFailed, error); }
+    const auto supplied = [&](const std::wstring& relative) {
+        return std::any_of(files.begin(), files.end(), [&](auto file) {
+            std::replace(file.begin(), file.end(), L'/', L'\\');
+            return EqualsNoCase(file, relative.c_str());
+        });
+    };
+    const std::wstring helper_relative = dialog_version.app_runtime.relative_directory + L"\\pulse_explorer_bridge.exe";
+    const bool strict_bridge_payload = dialog_version.app_runtime.versioned && supplied(helper_relative);
+    const bool helper32_payload = supplied(L"DialogBridgeStage\\pulse_explorer_bridge32.exe");
+    const bool core32_payload = supplied(L"DialogBridgeStage\\PulseDialogCore32.dll");
+    const bool main_helper64 = dialog_version.app_runtime.machine == IMAGE_FILE_MACHINE_AMD64;
+    if (helper32_payload && (!strict_bridge_payload || !main_helper64)) {
+        tx.Abort(); return Fail(kExitPrepareFailed, L"Explorer bridge sidecar has no matching x64 application payload.");
+    }
+    if (strict_bridge_payload) {
+        const auto core = main_helper64 ? L"DialogBridgeStage\\PulseDialogCore64.dll" : L"DialogBridgeStage\\PulseDialogCore32.dll";
+        const auto stub = main_helper64 ? L"DialogBridgeStage\\PulseDialogStub64.dll" : L"DialogBridgeStage\\PulseDialogStub32.dll";
+        const bool supported_machine = main_helper64 || dialog_version.app_runtime.machine == IMAGE_FILE_MACHINE_I386;
+        if (!supported_machine || !supplied(core) || !supplied(stub) || !supplied(L"DialogBridgeStage\\PulseDialogBroker.exe") ||
+            (core32_payload && (!supplied(L"DialogBridgeStage\\PulseDialogStub32.dll") ||
+                !supplied(L"DialogBridgeStage\\PulseDialogInject32.exe"))) ||
+            !ExplorerHelperMachine(tx.StagingDir() + L"\\" + helper_relative,
+                static_cast<WORD>(dialog_version.app_runtime.machine)) ||
+            (main_helper64 && core32_payload && !helper32_payload) ||
+            (helper32_payload && (!core32_payload || !ExplorerHelperMachine(
+                tx.StagingDir() + L"\\DialogBridgeStage\\pulse_explorer_bridge32.exe", IMAGE_FILE_MACHINE_I386)))) {
+            tx.Abort(); return Fail(kExitPrepareFailed, L"Explorer bridge payload is incomplete or has mismatched architectures.");
+        }
+    }
     if (dialog_version.versioned) migration.SetVersionDirectory(dialog_version.relative_directory);
     for(const auto& companion : dialog_version.companions)
         migration.SetCompanionVersionDirectory(dialog_auto::Architecture::X86,companion.relative_directory);
@@ -515,12 +563,13 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
         }
         return true;
     };
-    if (!admin_task.Prepare(error)) { tx.Abort(); return Fail(kExitPrepareFailed, error); }
+    const bool updates_admin_task = dialog_version.versioned || shared_dialog_layout;
+    if (!admin_task.Prepare(error, updates_admin_task)) { tx.Abort(); return Fail(kExitPrepareFailed, error); }
     bool admin_auto_start = false;
     if (!tx.Commit(dialog_version.replacements, error, obsolete_files, [&](std::wstring& failure) {
         if (!migration.Apply(failure)) return false;
         if (previous_directory.empty() && !register_runtime(failure)) return false;
-        if (real && (dialog_version.versioned || shared_dialog_layout)) {
+        if (real && updates_admin_task) {
             bool enabled = false;
             for (const auto architecture : {dialog_auto::Architecture::X64, dialog_auto::Architecture::X86}) {
                 const auto status = dialog_auto::Inspect(architecture);
@@ -555,6 +604,7 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
     // Provision the decoupled protected bridge tree under C:\Program Files\Common Files\Pulse\DialogBridge
     // directly from staging BEFORE tx.Finish() deletes .pulse-staging, so C:\Program Files\Pulse stays clean.
     BridgeStageResult bridge_res{};
+    bool strict_bridge_failed = false;
     if (real) {
         const std::wstring staged_bridge = tx.StagingDir() + L"\\DialogBridgeStage";
         if (GetFileAttributesW(staged_bridge.c_str()) != INVALID_FILE_ATTRIBUTES) {
@@ -562,6 +612,15 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
             bridge_req.app_dir = app;
             bridge_req.stage_source_dir = staged_bridge;
             bridge_req.host_exe = InstalledRuntimeFile(app, L"pulse.exe");
+            if (strict_bridge_payload) {
+                // Bind only this payload's immutable runtime, never a previous
+                // install or the helper digest from the active pointer.
+                if (main_helper64) bridge_req.explorer_bridge_source_x64 = app + L"\\" + helper_relative;
+                else bridge_req.explorer_bridge_source_x86 = app + L"\\" + helper_relative;
+                if (helper32_payload) bridge_req.explorer_bridge_source_x86 = staged_bridge + L"\\pulse_explorer_bridge32.exe";
+                if (main_helper64) bridge_req.core_source_x64 = staged_bridge + L"\\PulseDialogCore64.dll";
+                if (core32_payload) bridge_req.core_source_x86 = staged_bridge + L"\\PulseDialogCore32.dll";
+            }
             bridge_req.harden_dacl = true;
             bridge_req.configure_service = true;
             bridge_req.start_service = true;
@@ -571,8 +630,15 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
                 L" gen=" + std::to_wstring(bridge_res.generation) +
                 L" stub64=" + std::to_wstring(bridge_res.stub64_staged ? 1 : 0) +
                 L" core64=" + std::to_wstring(bridge_res.core64_staged ? 1 : 0) +
+                L" helper64=" + std::to_wstring(bridge_res.explorer_bridge64_staged ? 1 : 0) +
+                L" helper32=" + std::to_wstring(bridge_res.explorer_bridge32_staged ? 1 : 0) +
+                L" strict_payload=" + std::to_wstring(strict_bridge_payload ? 1 : 0) +
                 L" broker_running=" + std::to_wstring(bridge_res.service_running ? 1 : 0));
         }
+        strict_bridge_failed = strict_bridge_payload && (bridge_res.error != ERROR_SUCCESS ||
+            (main_helper64 ? !bridge_res.explorer_bridge64_staged : !bridge_res.explorer_bridge32_staged) ||
+            (helper32_payload && !bridge_res.explorer_bridge32_staged));
+        if (!strict_bridge_payload) Log(L"Legacy helper-free payload: strict Explorer routing was not provisioned.");
     }
     tx.Finish();
     // Rebind active HKCU dialog registrations from any legacy DialogBridge\<hash>\ version
@@ -781,7 +847,10 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
     }
 
     // GetCustomSetupExitCode: only unattended updates report post-install failures.
-    result.exit_code = (o.pulse_update && post_failed) ? kExitFailed : kExitOk;
+    if (strict_bridge_failed)
+        result.error = L"Application files were installed, but Explorer bridge provisioning failed (Win32 " +
+            std::to_wstring(bridge_res.error ? bridge_res.error : ERROR_INVALID_DATA) + L").";
+    result.exit_code = (strict_bridge_failed || (o.pulse_update && post_failed)) ? kExitFailed : kExitOk;
     ctx.Phase(Phase::Done, L"Done, exit code " + std::to_wstring(result.exit_code));
     return result;
 }

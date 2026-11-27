@@ -5,11 +5,15 @@
 #include <cstring>
 namespace pulse::setup {
 namespace {
-bool Failure(std::wstring& error,HRESULT hr){error=Win32Error(HRESULT_FACILITY(hr)==FACILITY_WIN32?HRESULT_CODE(hr):static_cast<DWORD>(hr));Log(L"Admin auto task transaction failed: "+std::to_wstring(static_cast<unsigned long>(hr)));return false;}
+bool Failure(std::wstring& error,HRESULT hr,const wchar_t* stage=L"recover"){error=Win32Error(HRESULT_FACILITY(hr)==FACILITY_WIN32?HRESULT_CODE(hr):static_cast<DWORD>(hr));Log(L"Admin auto task transaction failed: "+std::to_wstring(static_cast<unsigned long>(hr))+L" stage="+stage);return false;}
 struct Header { DWORD magic=0x31544150,exists=0,running=0,units=0; };
 }
-bool DialogAdminTaskTransaction::Prepare(std::wstring& error){
+bool DialogAdminTaskTransaction::Prepare(std::wstring& error,bool updates_task){
  if(!real_)return true;
+ if(!updates_task){
+  Log(L"Admin auto task snapshot skipped: package does not update the legacy task");
+  return true;
+ }
  dialog_admin_auto::Snapshot before;
  HRESULT hr=S_OK;
  if(api_.capture){
@@ -22,14 +26,14 @@ bool DialogAdminTaskTransaction::Prepare(std::wstring& error){
    hr=S_OK;
   }
  }
- if(FAILED(hr))return Failure(error,hr);
- if(before.root.size()>32768)return Failure(error,E_INVALIDARG);
+ if(FAILED(hr))return Failure(error,hr,L"capture");
+ if(before.root.size()>32768)return Failure(error,E_INVALIDARG,L"snapshot-validation");
  Header header;header.exists=before.exists?1:0;header.running=before.running?1:0;header.units=static_cast<DWORD>(before.root.size());
  const auto path=root_+L"\\.pulse-setup\\admin-auto-task";
- HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)return Failure(error,HRESULT_FROM_WIN32(GetLastError()));
+ HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(file==INVALID_HANDLE_VALUE)return Failure(error,HRESULT_FROM_WIN32(GetLastError()),L"journal-open");
  DWORD written=0;bool ok=WriteFile(file,&header,sizeof(header),&written,nullptr)&&written==sizeof(header);
  if(ok&&header.units)ok=WriteFile(file,before.root.data(),header.units*sizeof(wchar_t),&written,nullptr)&&written==header.units*sizeof(wchar_t);
- if(ok)ok=FlushFileBuffers(file)!=FALSE;const DWORD code=GetLastError();CloseHandle(file);return ok||Failure(error,HRESULT_FROM_WIN32(code?code:ERROR_WRITE_FAULT));
+ if(ok)ok=FlushFileBuffers(file)!=FALSE;const DWORD code=GetLastError();CloseHandle(file);return ok||Failure(error,HRESULT_FROM_WIN32(code?code:ERROR_WRITE_FAULT),L"journal-write-flush");
 }
 bool DialogAdminTaskTransaction::Recover(std::wstring& error){
  if(!real_)return true;const auto path=root_+L"\\.pulse-setup\\admin-auto-task";
